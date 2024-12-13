@@ -321,7 +321,10 @@ func TestNewStreamCopy(t *testing.T) {
 
 		wgEven.Wait()
 		memo := copies[0].csr.parent.mem
-		assert.Equal(t, m/2, memo.closedNum)
+		memo.mu.Lock()
+		closedNum := memo.closedNum
+		memo.mu.Unlock()
+		assert.Equal(t, m/2, closedNum)
 
 		wg.Wait()
 		assert.Equal(t, m, memo.closedNum)
