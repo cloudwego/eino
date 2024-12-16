@@ -60,8 +60,16 @@ jobs:
       # Post coverage report as comment (in 3 steps)
       - name: Find PR ID
         run: |
+          echo "GITHUB_REF: $GITHUB_REF"
+          echo "GITHUB_HEAD_REF: $GITHUB_HEAD_REF"
+          echo "GITHUB_BASE_REF: $GITHUB_BASE_REF"
+          echo "GITHUB_REPOSITORY: $GITHUB_REPOSITORY"
+          echo "GITHUB_EVENT_NAME: $GITHUB_EVENT_NAME"
+          echo "github.repository_owner: ${{github.repository_owner}}"
+          echo "github.ref_name: ${{github.ref_name}}"
+          echo "github.head_ref: ${{github.head_ref}}"
           PR_DATA=$(curl -s -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
-          "https://api.github.com/repos/${{ github.repository }}/pulls?head=${{ github.repository_owner }}:${{ github.ref_name }}&state=open")
+          "https://api.github.com/repos/${{ github.repository }}/pulls?head=${{ github.repository_owner }}:${{ github.head_ref }}&state=open")
           echo "PR Data: ${PR_DATA}"
           PR_ID=$(echo "$PR_DATA" | jq -r '.[0].number')
           
