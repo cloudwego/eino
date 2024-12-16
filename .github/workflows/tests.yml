@@ -57,47 +57,26 @@ jobs:
           name: main.breakdown
           path: main.breakdown # as specified via `breakdown-file-name`
           if-no-files-found: error
-      # Post coverage report as comment (in 3 steps)
-      - name: Find PR ID
-        run: |
-          echo "GITHUB_REF: $GITHUB_REF"
-          echo "GITHUB_HEAD_REF: $GITHUB_HEAD_REF"
-          echo "GITHUB_BASE_REF: $GITHUB_BASE_REF"
-          echo "GITHUB_REPOSITORY: $GITHUB_REPOSITORY"
-          echo "GITHUB_EVENT_NAME: $GITHUB_EVENT_NAME"
-          echo "github.repository_owner: ${{github.repository_owner}}"
-          echo "github.ref_name: ${{github.ref_name}}"
-          echo "github.head_ref: ${{github.head_ref}}"
-          PR_DATA=$(curl -s -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
-          "https://api.github.com/repos/${{ github.repository }}/pulls?head=${{ github.repository_owner }}:${{ github.head_ref }}&state=open")
-          echo "PR Data: ${PR_DATA}"
-          PR_ID=$(echo "$PR_DATA" | jq -r '.[0].number')
-          
-          if [ "$PR_ID" != "null" ]; then
-          echo "pull_request_id=$PR_ID" >> $GITHUB_ENV
-          else
-          echo "No open pull request found for this branch."
-          fi
       - name: find if coverage report is already present
-        if: env.pull_request_id
+        if: ${{ github.event.pull_request.number != null }}
         uses: peter-evans/find-comment@v3
         id: fc
         with:
-          issue-number: ${{ env.pull_request_id }}
+          issue-number: ${{ github.event.pull_request.number }}
           comment-author: 'github-actions[bot]'
           body-includes: 'go-test-coverage report:'
       - name: post coverage report
-        if: env.pull_request_id
+        if: ${{ github.event.pull_request.number != null }}
         uses: peter-evans/create-or-update-comment@v4
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
-          issue-number: ${{ env.pull_request_id }}
-          comment-id: ${{ steps.fc.outputs.comment-id }}
+          issue-number: ${{ github.event.pull_request.number }}
+          comment-id: ${{ steps.fc.outputs.comment-id || '' }}
           edit-mode: replace
           body: |
             go-test-coverage report:
             ```
-            ${{ fromJSON(steps.coverage.outputs.report) }} ```
+            ${{ steps.coverage.outputs.report && fromJSON(steps.coverage.outputs.report) || 'No coverage report available' }} ```
 
       - name: "finally check coverage"
         if: steps.coverage.outcome == 'failure'
