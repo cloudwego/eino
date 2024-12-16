@@ -1,0 +1,27 @@
+# (mandatory)
+# Path to coverage profile file (output of `go test -coverprofile` command).
+#
+# For cases where there are many coverage profiles, such as when running
+# unit tests and integration tests separately, you can combine all those
+# profiles into one. In this case, the profile should have a comma-separated list
+# of profile files, e.g., 'cover_unit.out,cover_integration.out'.
+profile: cover.out
+
+# (optional; but recommended to set)
+# When specified reported file paths will not contain local prefix in the output.
+local-prefix: "github.com/cloudwego/eino"
+
+# Holds coverage thresholds percentages, values should be in range [0-100].
+threshold:
+  # (optional; default 0)
+  # Minimum overall project coverage percentage required.
+  total: 75
+
+# Holds regexp rules which will exclude matched files or packages
+# from coverage statistics.
+exclude:
+  # Exclude files or packages matching their paths
+  paths:
+    - "tests"
+    - "examples/"
+    - "mock/"
