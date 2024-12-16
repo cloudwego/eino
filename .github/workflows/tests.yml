@@ -31,6 +31,14 @@ jobs:
           workflow_conclusion: success
           name: main.breakdown
           if_no_artifact_found: warn
+      - name: Ensure default.breakdown exists if download fails
+        run: |
+          if [ ! -f main.breakdown ]; then
+            echo "main.breakdown not found. Creating an empty default.breakdown file."
+            touch default.breakdown
+          else
+            echo "main.breakdown found."
+          fi
       - name: "Test Coverage"
         uses: vladopajic/go-test-coverage@v2
         with:
@@ -41,7 +49,7 @@ jobs:
 
           # If this is not main branch we want to show report including
           # file coverage difference from main branch.
-          diff-base-breakdown-file-name: ${{ steps.download-main-breakdown.outputs.found_artifact && 'main.breakdown' || '' }}
+          diff-base-breakdown-file-name: ${{ steps.download-main-breakdown.outputs.found_artifact && 'main.breakdown' || 'default.breakdown' }}
       - name: Upload Artifact (main.breakdown)
         uses: actions/upload-artifact@v4
         if: github.ref_name == 'main'
