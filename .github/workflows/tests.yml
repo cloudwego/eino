@@ -62,6 +62,7 @@ jobs:
         run: |
           PR_DATA=$(curl -s -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
           "https://api.github.com/repos/${{ github.repository }}/pulls?head=${{ github.repository_owner }}:${{ github.ref_name }}&state=open")
+          echo "PR Data: ${PR_DATA}"
           PR_ID=$(echo "$PR_DATA" | jq -r '.[0].number')
           
           if [ "$PR_ID" != "null" ]; then
