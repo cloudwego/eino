@@ -167,7 +167,7 @@ func (tn *ToolsNode) genToolCallTasks(input *schema.Message) ([]toolCallTask, er
 }
 
 func runToolCallTaskByInvoke(ctx context.Context, task *toolCallTask, opts ...tool.Option) {
-	ctx = callbacks.InitCallbacksWithExistingHandlers(ctx, &callbacks.RunInfo{
+	ctx = callbacks.ReuseHandlers(ctx, &callbacks.RunInfo{
 		Name:      task.name,
 		Type:      task.meta.componentImplType,
 		Component: task.meta.component,
@@ -176,7 +176,7 @@ func runToolCallTaskByInvoke(ctx context.Context, task *toolCallTask, opts ...to
 }
 
 func runToolCallTaskByStream(ctx context.Context, task *toolCallTask, opts ...tool.Option) {
-	ctx = callbacks.InitCallbacksWithExistingHandlers(ctx, &callbacks.RunInfo{
+	ctx = callbacks.ReuseHandlers(ctx, &callbacks.RunInfo{
 		Name:      task.name,
 		Type:      task.meta.componentImplType,
 		Component: task.meta.component,

@@ -24,7 +24,6 @@ import (
 	"runtime/debug"
 	"sync"
 
-	"github.com/cloudwego/eino/callbacks"
 	"github.com/cloudwego/eino/schema"
 	"github.com/cloudwego/eino/utils/safe"
 )
@@ -495,34 +494,4 @@ func (r *runner) parserOrValidateTypeIfNeeded(cur, next string, isStream bool, v
 		return nil, fmt.Errorf("edge[%s]-[%s] runtime value check fail: %w", cur, next, err)
 	}
 	return value, nil
-}
-
-func initNodeCallbacks(ctx context.Context, key string, info *nodeInfo, meta *executorMeta, opts ...Option) context.Context {
-	ri := &callbacks.RunInfo{}
-	if meta != nil {
-		ri.Component = meta.component
-		ri.Type = meta.componentImplType
-	}
-
-	if info != nil {
-		ri.Name = info.name
-	}
-
-	var cbs []callbacks.Handler
-	for i := range opts {
-		if len(opts[i].handler) != 0 {
-			if len(opts[i].keys) == 0 {
-				cbs = append(cbs, opts[i].handler...)
-			} else {
-				for _, k := range opts[i].keys {
-					if k == key {
-						cbs = append(cbs, opts[i].handler...)
-						break
-					}
-				}
-			}
-		}
-	}
-
-	return callbacks.InitCallbacks(ctx, ri, cbs...)
 }

@@ -214,12 +214,40 @@ func initGraphCallbacks(ctx context.Context, info *nodeInfo, meta *executorMeta,
 
 	var cbs []callbacks.Handler
 	for i := range opts {
-		if len(opts[i].handler) != 0 && len(opts[i].keys) == 0 {
+		if len(opts[i].handler) != 0 && len(opts[i].paths) == 0 {
 			cbs = append(cbs, opts[i].handler...)
 		}
 	}
 
-	return callbacks.InitCallbacks(ctx, ri, cbs...)
+	return icb.AppendHandlers(ctx, ri, cbs...)
+}
+
+func initNodeCallbacks(ctx context.Context, key string, info *nodeInfo, meta *executorMeta, opts ...Option) context.Context {
+	ri := &callbacks.RunInfo{}
+	if meta != nil {
+		ri.Component = meta.component
+		ri.Type = meta.componentImplType
+	}
+
+	if info != nil {
+		ri.Name = info.name
+	}
+
+	var cbs []callbacks.Handler
+	for i := range opts {
+		if len(opts[i].handler) != 0 {
+			if len(opts[i].paths) != 0 {
+				for _, k := range opts[i].paths {
+					if len(k.path) == 1 && k.path[0] == key {
+						cbs = append(cbs, opts[i].handler...)
+						break
+					}
+				}
+			}
+		}
+	}
+
+	return icb.AppendHandlers(ctx, ri, cbs...)
 }
 
 func streamChunkConvertForCBOutput[O any](o O) (callbacks.CallbackOutput, error) {
@@ -271,34 +299,63 @@ func checkAssignable(input, arg reflect.Type) assignableType {
 func extractOption(nodes map[string]*chanCall, opts ...Option) (map[string][]any, error) {
 	optMap := map[string][]any{}
 	for _, opt := range opts {
-		if len(opt.options) == 0 {
-			continue
-		}
-		if len(opt.keys) == 0 {
-			// common option, check type
+		if len(opt.paths) == 0 {
+			// common, discard callback, filter option by type
+			if len(opt.options) == 0 {
+				continue
+			}
 			for name, c := range nodes {
-				if reflect.TypeOf(opt.options[0]) == c.action.optionType { // assume that types of options are the same
+				if c.action.optionType == nil {
+					// subgraph
+					optMap[name] = append(optMap[name], opt)
+				} else if reflect.TypeOf(opt.options[0]) == c.action.optionType { // assume that types of options are the same
 					optMap[name] = append(optMap[name], opt.options...)
 				}
 			}
 		}
-		for _, key := range opt.keys {
-			if _, ok := nodes[key]; !ok {
-				return nil, fmt.Errorf("option has designated an unknown node: %s", key)
+		for _, path := range opt.paths {
+			if len(path.path) == 0 {
+				return nil, fmt.Errorf("call option has designated an empty path")
 			}
-			if nodes[key].action.optionType != reflect.TypeOf(opt.options[0]) { // assume that types of options are the same
-				return nil, fmt.Errorf("option type[%s] is different from which the designated node[%s] expects[%s]",
-					reflect.TypeOf(opt.options[0]).String(), key, nodes[key].action.optionType.String())
+
+			var curNode *chanCall
+			var ok bool
+			if curNode, ok = nodes[path.path[0]]; !ok {
+				return nil, fmt.Errorf("option has designated an unknown node: %s", path)
 			}
-			optMap[key] = append(optMap[key], opt.options...)
+			curNodeKey := path.path[0]
+
+			if len(path.path) == 1 {
+				if len(opt.options) == 0 {
+					// sub graph common callbacks has been added to ctx in initNodeCallback and won't be passed to subgraph only pass options
+					// node callback also won't be passed
+					continue
+				}
+				if curNode.action.optionType == nil {
+					nOpt := opt.deepCopy()
+					nOpt.paths = []*NodePath{}
+					optMap[curNodeKey] = append(optMap[curNodeKey], nOpt)
+				} else {
+					// designate to component
+					if curNode.action.optionType != reflect.TypeOf(opt.options[0]) { // assume that types of options are the same
+						return nil, fmt.Errorf("option type[%s] is different from which the designated node[%s] expects[%s]",
+							reflect.TypeOf(opt.options[0]).String(), path, curNode.action.optionType.String())
+					}
+					optMap[curNodeKey] = append(optMap[curNodeKey], opt.options...)
+				}
+			} else {
+				if curNode.action.optionType != nil {
+					// component
+					return nil, fmt.Errorf("cannot designate sub path of a component, path:%s", path)
+				}
+				// designate to sub graph's nodes
+				nOpt := opt.deepCopy()
+				nOpt.paths = []*NodePath{NewNodePath(path.path[1:]...)}
+				optMap[curNodeKey] = append(optMap[curNodeKey], nOpt)
+			}
 		}
 	}
-	for k, v := range nodes {
-		if v.action.optionType == nil {
-			// sub graph
-			optMap[k] = toAnyList(opts)
-		}
-	}
+
 	return optMap, nil
 }
 

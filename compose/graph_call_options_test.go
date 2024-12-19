@@ -300,3 +300,197 @@ func TestCallOptionsOneByOne(t *testing.T) {
 		assert.Equal(t, int64(123), opt.uid)
 	})
 }
+
+func TestCallOptionInSubGraph(t *testing.T) {
+	ctx := context.Background()
+
+	type child1Option string
+	type child2Option string
+	type parentOption string
+	type grandparentOption string
+
+	child1 := NewGraph[string, string]()
+	err := child1.AddLambdaNode("1", InvokableLambdaWithOption(func(ctx context.Context, input string, opts ...child1Option) (output string, err error) {
+		if len(opts) != 1 || opts[0] != "child1-1" {
+			t.Fatal("child1-1 option error")
+		}
+		return input + " child1-1", nil
+	}), WithNodeName("child1-1"))
+	assert.NoError(t, err)
+	err = child1.AddEdge(START, "1")
+	assert.NoError(t, err)
+	err = child1.AddEdge("1", END)
+	assert.NoError(t, err)
+
+	child2 := NewGraph[string, string]()
+	err = child2.AddLambdaNode("1", InvokableLambdaWithOption(func(ctx context.Context, input string, opts ...child2Option) (output string, err error) {
+		if len(opts) != 1 || opts[0] != "child2-1" {
+			t.Fatal("child2-1 option error")
+		}
+		return input + " child2-1", nil
+	}), WithNodeName("child2-1"))
+	assert.NoError(t, err)
+	err = child2.AddEdge(START, "1")
+	assert.NoError(t, err)
+	err = child2.AddEdge("1", END)
+	assert.NoError(t, err)
+
+	parent := NewGraph[string, string]()
+	err = parent.AddLambdaNode("1", InvokableLambdaWithOption(func(ctx context.Context, input string, opts ...parentOption) (output string, err error) {
+		if len(opts) != 1 || opts[0] != "parent-1" {
+			t.Fatal("parent-1 option error")
+		}
+		return input + " parent-1", nil
+	}), WithNodeName("parent-1"))
+	assert.NoError(t, err)
+	err = parent.AddGraphNode("2", child1, WithNodeName("child1"))
+	assert.NoError(t, err)
+	err = parent.AddGraphNode("3", child2, WithNodeName("child2"))
+	assert.NoError(t, err)
+	err = parent.AddEdge(START, "1")
+	assert.NoError(t, err)
+	err = parent.AddEdge("1", "2")
+	assert.NoError(t, err)
+	err = parent.AddEdge("2", "3")
+	assert.NoError(t, err)
+	err = parent.AddEdge("3", END)
+	assert.NoError(t, err)
+
+	grandParent := NewGraph[string, string]()
+	err = grandParent.AddLambdaNode("1", InvokableLambdaWithOption(func(ctx context.Context, input string, opts ...grandparentOption) (output string, err error) {
+		if len(opts) != 1 || opts[0] != "grandparent-1" {
+			t.Fatal("grandparent-1 option error")
+		}
+		return input + " grandparent-1", nil
+	}), WithNodeName("grandparent-1"))
+	assert.NoError(t, err)
+	err = grandParent.AddGraphNode("2", parent, WithNodeName("parent"))
+	assert.NoError(t, err)
+	err = grandParent.AddEdge(START, "1")
+	assert.NoError(t, err)
+	err = grandParent.AddEdge("1", "2")
+	assert.NoError(t, err)
+	err = grandParent.AddEdge("2", END)
+	assert.NoError(t, err)
+
+	r, err := grandParent.Compile(ctx, WithGraphName("grandparent"))
+	assert.NoError(t, err)
+
+	grandCommonTimes := 0
+	grandCommonCB := callbacks.NewHandlerBuilder().OnStartFn(func(ctx context.Context, info *callbacks.RunInfo, input callbacks.CallbackInput) context.Context {
+		switch grandCommonTimes {
+		case 0:
+			if info.Name != "grandparent" || info.Component != ComponentOfGraph {
+				t.Fatal("grandparent common callback 0 error")
+			}
+		case 1:
+			if info.Name != "grandparent-1" {
+				t.Fatal("grandparent common callback 1 error")
+			}
+		case 2:
+			if info.Name != "parent" {
+				t.Fatal("grandparent common callback 2 error")
+			}
+		case 3:
+			if info.Name != "parent-1" {
+				t.Fatal("grandparent common callback 3 error")
+			}
+		case 4:
+			if info.Name != "child1" {
+				t.Fatal("grandparent common callback 4 error")
+			}
+		case 5:
+			if info.Name != "child1-1" {
+				t.Fatal("grandparent common callback 5 error")
+			}
+		case 6:
+			if info.Name != "child2" {
+				t.Fatal("grandparent common callback 6 error")
+			}
+		case 7:
+			if info.Name != "child2-1" {
+				t.Fatal("grandparent common callback 7 error")
+			}
+		default:
+			t.Fatal("grandparent common callback too many")
+		}
+		grandCommonTimes++
+		return ctx
+	}).Build()
+	grand1CB := callbacks.NewHandlerBuilder().OnStartFn(func(ctx context.Context, info *callbacks.RunInfo, input callbacks.CallbackInput) context.Context {
+		if info.Name != "grandparent-1" {
+			t.Fatal("grandparent common callback 0 error")
+		}
+		return ctx
+	}).Build()
+	parentCommonCBTimes := 0
+	parentCommonCB := callbacks.NewHandlerBuilder().OnStartFn(func(ctx context.Context, info *callbacks.RunInfo, input callbacks.CallbackInput) context.Context {
+		switch parentCommonCBTimes {
+		case 0:
+			if info.Name != "parent" {
+				t.Fatal("parent common callback 0 error")
+			}
+		case 1:
+			if info.Name != "parent-1" {
+				t.Fatal("parent common callback 1 error")
+			}
+		case 2:
+			if info.Name != "child1" {
+				t.Fatal("parent common callback 2 error")
+			}
+		case 3:
+			if info.Name != "child1-1" {
+				t.Fatal("parent common callback 3 error")
+			}
+		case 4:
+			if info.Name != "child2" {
+				t.Fatal("parent common callback 4 error")
+			}
+		case 5:
+			if info.Name != "child2-1" {
+				t.Fatal("parent common callback 5 error")
+			}
+		default:
+			t.Fatal("parent common callback too many")
+		}
+		parentCommonCBTimes++
+		return ctx
+	}).Build()
+	child1CommonCBTimes := 0
+	child1CommonCB := callbacks.NewHandlerBuilder().OnStartFn(func(ctx context.Context, info *callbacks.RunInfo, input callbacks.CallbackInput) context.Context {
+		switch child1CommonCBTimes {
+		case 0:
+			if info.Name != "child1" {
+				t.Fatal("child1 common callback 0 error")
+			}
+		case 1:
+			if info.Name != "child1-1" {
+				t.Fatal("child1 common callback 1 error")
+			}
+		default:
+			t.Fatal("child1 common callback too many")
+		}
+		child1CommonCBTimes++
+		return ctx
+	}).Build()
+	child2CB := callbacks.NewHandlerBuilder().OnStartFn(func(ctx context.Context, info *callbacks.RunInfo, input callbacks.CallbackInput) context.Context {
+		if info.Name != "child2-1" {
+			t.Fatal("child2-1 common callback 0 error")
+		}
+		return ctx
+	}).Build()
+
+	result, err := r.Invoke(ctx, "input",
+		WithCallbacks(grandCommonCB),
+		WithCallbacks(parentCommonCB).DesignateNodeWithPath(NewNodePath("2")),
+		WithCallbacks(grand1CB).DesignateNode("1"),
+		WithCallbacks(child1CommonCB).DesignateNodeWithPath(NewNodePath("2", "2")),
+		WithCallbacks(child2CB).DesignateNodeWithPath(NewNodePath("2", "3", "1")),
+		WithLambdaOption(grandparentOption("grandparent-1")).DesignateNodeWithPath(NewNodePath("1")),
+		WithLambdaOption(parentOption("parent-1")).DesignateNodeWithPath(NewNodePath("2", "1")),
+		WithLambdaOption(child1Option("child1-1")).DesignateNodeWithPath(NewNodePath("2", "2", "1")),
+		WithLambdaOption(child2Option("child2-1")).DesignateNodeWithPath(NewNodePath("2", "3", "1")),
+	)
+	assert.NoError(t, err)
+	assert.Equal(t, result, "input grandparent-1 parent-1 child1-1 child2-1")
+}

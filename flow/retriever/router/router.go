@@ -178,7 +178,7 @@ func ctxWithRouterRunInfo(ctx context.Context) context.Context {
 
 	runInfo.Name = runInfo.Type + string(runInfo.Component)
 
-	return callbacks.InitCallbacksWithExistingHandlers(ctx, runInfo)
+	return callbacks.ReuseHandlers(ctx, runInfo)
 }
 
 func ctxWithFusionRunInfo(ctx context.Context) context.Context {
@@ -189,5 +189,5 @@ func ctxWithFusionRunInfo(ctx context.Context) context.Context {
 
 	runInfo.Name = runInfo.Type + string(runInfo.Component)
 
-	return callbacks.InitCallbacksWithExistingHandlers(ctx, runInfo)
+	return callbacks.ReuseHandlers(ctx, runInfo)
 }

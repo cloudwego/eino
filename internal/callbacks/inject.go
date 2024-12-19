@@ -34,13 +34,21 @@ func InitCallbacks(ctx context.Context, info *RunInfo, handlers ...Handler) cont
 	return ctxWithManager(ctx, nil)
 }
 
-func InitCallbacksWithExistingHandlers(ctx context.Context, info *RunInfo) context.Context {
+func ReuseHandlers(ctx context.Context, info *RunInfo) context.Context {
 	cbm, ok := managerFromCtx(ctx)
 	if !ok {
 		return ctx
 	}
 
 	return ctxWithManager(ctx, cbm.withRunInfo(info))
+}
+
+func AppendHandlers(ctx context.Context, info *RunInfo, handlers ...Handler) context.Context {
+	cbm, ok := managerFromCtx(ctx)
+	if !ok {
+		return InitCallbacks(ctx, info, handlers...)
+	}
+	return InitCallbacks(ctx, info, append(cbm.handlers, handlers...)...)
 }
 
 type Handle[T any] func(context.Context, T, *RunInfo, []Handler) (context.Context, T)

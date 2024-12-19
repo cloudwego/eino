@@ -34,23 +34,54 @@ type Option struct {
 	options []any
 	handler []callbacks.Handler
 
-	keys []string
+	paths []*NodePath
 
 	maxRunSteps int
 }
 
-// DesignateNode set the key of the node which will be used to.
-// eg.
+func (o Option) deepCopy() Option {
+	nOptions := make([]any, len(o.options))
+	copy(nOptions, o.options)
+	nHandler := make([]callbacks.Handler, len(o.handler))
+	copy(nHandler, o.handler)
+	nPaths := make([]*NodePath, len(o.paths))
+	for i, path := range o.paths {
+		nPath := *path
+		nPaths[i] = &nPath
+	}
+	return Option{
+		options:     nOptions,
+		handler:     nHandler,
+		paths:       nPaths,
+		maxRunSteps: o.maxRunSteps,
+	}
+}
+
+// DesignateNode set the key of the node which will the option be applied to.
+// notice: only effective at the top graph.
+// e.g.
 //
 //	embeddingOption := compose.WithEmbeddingOption(embedding.WithModel("text-embedding-3-small"))
 //	runnable.Invoke(ctx, "input", embeddingOption.DesignateNode("my_embedding_node"))
 func (o Option) DesignateNode(key ...string) Option {
-	o.keys = append(o.keys, key...)
+	nKeys := make([]*NodePath, len(key))
+	for i, k := range key {
+		nKeys[i] = NewNodePath(k)
+	}
+	return o.DesignateNodeWithPath(nKeys...)
+}
+
+// DesignateNodeWithPath sets the path of the node(s) to which the option will be applied to.
+// You can make the option take effect in the subgraph by specifying the key of the subgraph.
+// e.g.
+// DesignateNodeWithPath({"sub graph node key", "node key within sub graph"})
+func (o Option) DesignateNodeWithPath(path ...*NodePath) Option {
+	o.paths = append(o.paths, path...)
 	return o
 }
 
 // WithEmbeddingOption is a functional option type for embedding component.
-// eg.
+// e.g.
 //
 //	embeddingOption := compose.WithEmbeddingOption(embedding.WithModel("text-embedding-3-small"))
 //	runnable.Invoke(ctx, "input", embeddingOption)
@@ -59,7 +90,7 @@ func WithEmbeddingOption(opts ...embedding.Option) Option {
 }
 
 // WithRetrieverOption is a functional option type for retriever component.
-// eg.
+// e.g.
 //
 //	retrieverOption := compose.WithRetrieverOption(retriever.WithIndex("my_index"))
 //	runnable.Invoke(ctx, "input", retrieverOption)
@@ -73,7 +104,7 @@ func WithLoaderSplitterOption(opts ...document.LoaderSplitterOption) Option {
 }
 
 // WithLoaderOption is a functional option type for loader component.
-// eg.
+// e.g.
 //
 //	loaderOption := compose.WithLoaderOption(document.WithCollection("my_collection"))
 //	runnable.Invoke(ctx, "input", loaderOption)
@@ -87,7 +118,7 @@ func WithDocumentTransformerOption(opts ...document.TransformerOption) Option {
 }
 
 // WithIndexerOption is a functional option type for indexer component.
-// eg.
+// e.g.
 //
 //	indexerOption := compose.WithIndexerOption(indexer.WithSubIndexes([]string{"my_sub_index"}))
 //	runnable.Invoke(ctx, "input", indexerOption)
@@ -96,7 +127,7 @@ func WithIndexerOption(opts ...indexer.Option) Option {
 }
 
 // WithChatModelOption is a functional option type for chat model component.
-// eg.
+// e.g.
 //
 //	chatModelOption := compose.WithChatModelOption(model.WithTemperature(0.7))
 //	runnable.Invoke(ctx, "input", chatModelOption)
@@ -118,12 +149,12 @@ func WithToolsNodeOption(opts ...ToolsNodeOption) Option {
 func WithLambdaOption(opts ...any) Option {
 	return Option{
 		options: opts,
-		keys:    make([]string, 0),
+		paths:   make([]*NodePath, 0),
 	}
 }
 
 // WithCallbacks set callback handlers for all components in a single call.
-// eg.
+// e.g.
 //
 //	runnable.Invoke(ctx, "input", compose.WithCallbacks(&myCallbacks{}))
 func WithCallbacks(cbs ...callbacks.Handler) Option {
@@ -154,7 +185,7 @@ func withComponentOption[TOption any](opts ...TOption) Option {
 	}
 	return Option{
 		options: o,
-		keys:    make([]string, 0),
+		paths:   make([]*NodePath, 0),
 	}
 }
 

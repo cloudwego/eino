@@ -992,3 +992,11 @@ func validateDAG(chanSubscribeTo map[string]*chanCall, invertedEdges map[string]
 	}
 	return nil
 }
+
+func NewNodePath(path ...string) *NodePath {
+	return &NodePath{path: path}
+}
+
+type NodePath struct {
+	path []string
+}

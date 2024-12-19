@@ -93,9 +93,9 @@ func OnError(ctx context.Context, err error) context.Context {
 	return ctx
 }
 
-// InitCallbacksWithExistingHandlers initializes a new context with the provided RunInfo, while using the same handlers already exist.
-func InitCallbacksWithExistingHandlers(ctx context.Context, info *RunInfo) context.Context {
-	return callbacks.InitCallbacksWithExistingHandlers(ctx, info)
+// ReuseHandlers initializes a new context with the provided RunInfo, while using the same handlers already exist.
+func ReuseHandlers(ctx context.Context, info *RunInfo) context.Context {
+	return callbacks.ReuseHandlers(ctx, info)
 }
 
 // InitCallbacks initializes a new context with the provided RunInfo and handlers.

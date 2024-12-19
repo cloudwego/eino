@@ -176,19 +176,19 @@ func TestNewComponentTemplate(t *testing.T) {
 		callbacks.OnStart[any](ctx, nil)
 		assert.Equal(t, 22, cnt)
 
-		ctx = callbacks.InitCallbacksWithExistingHandlers(ctx, &callbacks.RunInfo{Component: components.ComponentOfPrompt})
+		ctx = callbacks.ReuseHandlers(ctx, &callbacks.RunInfo{Component: components.ComponentOfPrompt})
 		callbacks.OnStart[any](ctx, nil)
 		assert.Equal(t, 23, cnt)
 
-		ctx = callbacks.InitCallbacksWithExistingHandlers(ctx, &callbacks.RunInfo{Component: components.ComponentOfIndexer})
+		ctx = callbacks.ReuseHandlers(ctx, &callbacks.RunInfo{Component: components.ComponentOfIndexer})
 		callbacks.OnEnd[any](ctx, nil)
 		assert.Equal(t, 23, cnt)
 
-		ctx = callbacks.InitCallbacksWithExistingHandlers(ctx, &callbacks.RunInfo{Component: components.ComponentOfEmbedding})
+		ctx = callbacks.ReuseHandlers(ctx, &callbacks.RunInfo{Component: components.ComponentOfEmbedding})
 		callbacks.OnError(ctx, nil)
 		assert.Equal(t, 24, cnt)
 
-		ctx = callbacks.InitCallbacksWithExistingHandlers(ctx, &callbacks.RunInfo{Component: components.ComponentOfLoader})
+		ctx = callbacks.ReuseHandlers(ctx, &callbacks.RunInfo{Component: components.ComponentOfLoader})
 		callbacks.OnStart[any](ctx, nil)
 		assert.Equal(t, 24, cnt)
 
@@ -239,11 +239,11 @@ func TestNewComponentTemplate(t *testing.T) {
 		callbacks.OnEnd[any](ctx, nil)
 		assert.Equal(t, 25, cnt)
 
-		ctx = callbacks.InitCallbacksWithExistingHandlers(ctx, &callbacks.RunInfo{Component: components.ComponentOfIndexer})
+		ctx = callbacks.ReuseHandlers(ctx, &callbacks.RunInfo{Component: components.ComponentOfIndexer})
 		callbacks.OnStart[any](ctx, nil)
 		assert.Equal(t, 26, cnt)
 
-		ctx = callbacks.InitCallbacksWithExistingHandlers(ctx, &callbacks.RunInfo{Component: components.ComponentOfLoader})
+		ctx = callbacks.ReuseHandlers(ctx, &callbacks.RunInfo{Component: components.ComponentOfLoader})
 		callbacks.OnEnd[any](ctx, nil)
 		assert.Equal(t, 27, cnt)
 	})
