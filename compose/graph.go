@@ -842,6 +842,7 @@ func (g *graph) toGraphInfo(opt *graphCompileOptions, key2SubGraphs map[string]*
 		}),
 		InputType:  g.expectedInputType,
 		OutputType: g.expectedOutputType,
+		Name:       opt.graphName,
 	}
 
 	for key := range g.nodes {

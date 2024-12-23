@@ -1038,7 +1038,7 @@ func TestGraphCompileCallback(t *testing.T) {
 	t.Run("graph compile callback", func(t *testing.T) {
 		type s struct{}
 
-		g := NewStateGraph[map[string]any, map[string]any, *s](func(ctx context.Context) *s { return &s{} })
+		g := NewGraph[map[string]any, map[string]any](WithGenLocalState(func(ctx context.Context) *s { return &s{} }))
 
 		lambda := InvokableLambda(func(ctx context.Context, input string) (output string, err error) {
 			return "node1", nil
@@ -1085,7 +1085,7 @@ func TestGraphCompileCallback(t *testing.T) {
 		err = subGraph.AddEdge("sub_sub_1", END)
 		assert.NoError(t, err)
 
-		subGraphCompileOpts := []GraphCompileOption{WithMaxRunSteps(2)}
+		subGraphCompileOpts := []GraphCompileOption{WithMaxRunSteps(2), WithGraphName("sub_graph")}
 		subGraphOpts := []GraphAddNodeOpt{WithGraphCompileOptions(subGraphCompileOpts...)}
 		err = g.AddGraphNode("sub_graph", subGraph, subGraphOpts...)
 		assert.NoError(t, err)
@@ -1119,7 +1119,7 @@ func TestGraphCompileCallback(t *testing.T) {
 		assert.NoError(t, err)
 
 		c := &cb{}
-		opt := []GraphCompileOption{WithGraphCompileCallbacks(c)}
+		opt := []GraphCompileOption{WithGraphCompileCallbacks(c), WithGraphName("top_level")}
 		_, err = g.Compile(context.Background(), opt...)
 		assert.NoError(t, err)
 		expected := &GraphInfo{
@@ -1192,6 +1192,7 @@ func TestGraphCompileCallback(t *testing.T) {
 						Branches:   map[string][]GraphBranch{},
 						InputType:  reflect.TypeOf(""),
 						OutputType: reflect.TypeOf(""),
+						Name:       "sub_graph",
 					},
 				},
 				"node3": {
@@ -1226,6 +1227,7 @@ func TestGraphCompileCallback(t *testing.T) {
 			},
 			InputType:  reflect.TypeOf(map[string]any{}),
 			OutputType: reflect.TypeOf(map[string]any{}),
+			Name:       "top_level",
 		}
 
 		stateFn := c.gInfo.GenStateFn

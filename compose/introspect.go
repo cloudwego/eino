@@ -43,6 +43,7 @@ type GraphInfo struct {
 	Edges                 map[string][]string      // edge start node key -> edge end node key
 	Branches              map[string][]GraphBranch // branch start node key -> branch
 	InputType, OutputType reflect.Type
+	Name                  string
 
 	GenStateFn func(context.Context) any
 }
