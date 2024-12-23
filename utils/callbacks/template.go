@@ -61,6 +61,7 @@ type HandlerHelper struct {
 	loaderHandler      *LoaderCallbackHandler
 	transformerHandler *TransformerCallbackHandler
 	toolHandler        *ToolCallbackHandler
+	toolsNodeHandler   *ToolsNodeCallbackHandlers
 	composeTemplates   map[components.Component]callbacks.Handler
 }
 
@@ -117,6 +118,12 @@ func (c *HandlerHelper) Tool(handler *ToolCallbackHandler) *HandlerHelper {
 	return c
 }
 
+// ToolsNode sets the tools node handler for the handler helper, which will be called when the tools node is executed.
+func (c *HandlerHelper) ToolsNode(handler *ToolsNodeCallbackHandlers) *HandlerHelper {
+	c.toolsNodeHandler = handler
+	return c
+}
+
 // Graph sets the graph handler for the handler helper, which will be called when the graph is executed.
 func (c *HandlerHelper) Graph(handler callbacks.Handler) *HandlerHelper {
 	c.composeTemplates[compose.ComponentOfGraph] = handler
@@ -126,12 +133,6 @@ func (c *HandlerHelper) Graph(handler callbacks.Handler) *HandlerHelper {
 // Chain sets the chain handler for the handler helper, which will be called when the chain is executed.
 func (c *HandlerHelper) Chain(handler callbacks.Handler) *HandlerHelper {
 	c.composeTemplates[compose.ComponentOfChain] = handler
-	return c
-}
-
-// ToolsNode sets the tools node handler for the handler helper, which will be called when the tools node is executed.
-func (c *HandlerHelper) ToolsNode(handler callbacks.Handler) *HandlerHelper {
-	c.composeTemplates[compose.ComponentOfToolsNode] = handler
 	return c
 }
 
@@ -148,251 +149,144 @@ type handlerTemplate struct {
 // OnStart is the callback function for the start event of a component.
 // implement the callbacks Handler interface.
 func (c *handlerTemplate) OnStart(ctx context.Context, info *callbacks.RunInfo, input callbacks.CallbackInput) context.Context {
-	if info == nil {
-		return ctx
-	}
-
 	switch info.Component {
 	case components.ComponentOfPrompt:
-		if c.promptHandler != nil && c.promptHandler.OnStart != nil {
-			ctx = c.promptHandler.OnStart(ctx, info, prompt.ConvCallbackInput(input))
-		}
+		return c.promptHandler.OnStart(ctx, info, prompt.ConvCallbackInput(input))
 	case components.ComponentOfChatModel:
-		if c.chatModelHandler != nil && c.chatModelHandler.OnStart != nil {
-			ctx = c.chatModelHandler.OnStart(ctx, info, model.ConvCallbackInput(input))
-		}
+		return c.chatModelHandler.OnStart(ctx, info, model.ConvCallbackInput(input))
 	case components.ComponentOfEmbedding:
-		if c.embeddingHandler != nil && c.embeddingHandler.OnStart != nil {
-			ctx = c.embeddingHandler.OnStart(ctx, info, embedding.ConvCallbackInput(input))
-		}
+		return c.embeddingHandler.OnStart(ctx, info, embedding.ConvCallbackInput(input))
 	case components.ComponentOfIndexer:
-		if c.indexerHandler != nil && c.indexerHandler.OnStart != nil {
-			ctx = c.indexerHandler.OnStart(ctx, info, indexer.ConvCallbackInput(input))
-		}
+		return c.indexerHandler.OnStart(ctx, info, indexer.ConvCallbackInput(input))
 	case components.ComponentOfRetriever:
-		if c.retrieverHandler != nil && c.retrieverHandler.OnStart != nil {
-			ctx = c.retrieverHandler.OnStart(ctx, info, retriever.ConvCallbackInput(input))
-		}
+		return c.retrieverHandler.OnStart(ctx, info, retriever.ConvCallbackInput(input))
 	case components.ComponentOfLoader:
-		if c.loaderHandler != nil && c.loaderHandler.OnStart != nil {
-			ctx = c.loaderHandler.OnStart(ctx, info, document.ConvLoaderCallbackInput(input))
-		}
+		return c.loaderHandler.OnStart(ctx, info, document.ConvLoaderCallbackInput(input))
 	case components.ComponentOfTransformer:
-		if c.transformerHandler != nil && c.transformerHandler.OnStart != nil {
-			ctx = c.transformerHandler.OnStart(ctx, info, document.ConvTransformerCallbackInput(input))
-		}
+		return c.transformerHandler.OnStart(ctx, info, document.ConvTransformerCallbackInput(input))
 	case components.ComponentOfTool:
-		if c.toolHandler != nil && c.toolHandler.OnStart != nil {
-			ctx = c.toolHandler.OnStart(ctx, info, tool.ConvCallbackInput(input))
-		}
+		return c.toolHandler.OnStart(ctx, info, tool.ConvCallbackInput(input))
+	case compose.ComponentOfToolsNode:
+		return c.toolsNodeHandler.OnStart(ctx, info, convToolsNodeCallbackInput(input))
 	case compose.ComponentOfGraph,
 		compose.ComponentOfChain,
-		compose.ComponentOfToolsNode,
 		compose.ComponentOfLambda:
-
-		if c.composeTemplates[info.Component] != nil {
-			ctx = c.composeTemplates[info.Component].OnStart(ctx, info, input)
-		}
+		return c.composeTemplates[info.Component].OnStart(ctx, info, input)
 	default:
 		return ctx
 	}
-
-	return ctx
 }
 
 // OnEnd is the callback function for the end event of a component.
 // implement the callbacks Handler interface.
 func (c *handlerTemplate) OnEnd(ctx context.Context, info *callbacks.RunInfo, output callbacks.CallbackOutput) context.Context {
-	if info == nil {
-		return ctx
-	}
-
 	switch info.Component {
 	case components.ComponentOfPrompt:
-		if c.promptHandler != nil && c.promptHandler.OnEnd != nil {
-			ctx = c.promptHandler.OnEnd(ctx, info, prompt.ConvCallbackOutput(output))
-		}
+		return c.promptHandler.OnEnd(ctx, info, prompt.ConvCallbackOutput(output))
 	case components.ComponentOfChatModel:
-		if c.chatModelHandler != nil && c.chatModelHandler.OnEnd != nil {
-			ctx = c.chatModelHandler.OnEnd(ctx, info, model.ConvCallbackOutput(output))
-		}
+		return c.chatModelHandler.OnEnd(ctx, info, model.ConvCallbackOutput(output))
 	case components.ComponentOfEmbedding:
-		if c.embeddingHandler != nil && c.embeddingHandler.OnEnd != nil {
-			ctx = c.embeddingHandler.OnEnd(ctx, info, embedding.ConvCallbackOutput(output))
-		}
+		return c.embeddingHandler.OnEnd(ctx, info, embedding.ConvCallbackOutput(output))
 	case components.ComponentOfIndexer:
-		if c.indexerHandler != nil && c.indexerHandler.OnEnd != nil {
-			ctx = c.indexerHandler.OnEnd(ctx, info, indexer.ConvCallbackOutput(output))
-		}
+		return c.indexerHandler.OnEnd(ctx, info, indexer.ConvCallbackOutput(output))
 	case components.ComponentOfRetriever:
-		if c.retrieverHandler != nil && c.retrieverHandler.OnEnd != nil {
-			ctx = c.retrieverHandler.OnEnd(ctx, info, retriever.ConvCallbackOutput(output))
-		}
+		return c.retrieverHandler.OnEnd(ctx, info, retriever.ConvCallbackOutput(output))
 	case components.ComponentOfLoader:
-		if c.loaderHandler != nil && c.loaderHandler.OnEnd != nil {
-			ctx = c.loaderHandler.OnEnd(ctx, info, document.ConvLoaderCallbackOutput(output))
-		}
+		return c.loaderHandler.OnEnd(ctx, info, document.ConvLoaderCallbackOutput(output))
 	case components.ComponentOfTransformer:
-		if c.transformerHandler != nil && c.transformerHandler.OnEnd != nil {
-			ctx = c.transformerHandler.OnEnd(ctx, info, document.ConvTransformerCallbackOutput(output))
-		}
+		return c.transformerHandler.OnEnd(ctx, info, document.ConvTransformerCallbackOutput(output))
 	case components.ComponentOfTool:
-		if c.toolHandler != nil && c.toolHandler.OnEnd != nil {
-			ctx = c.toolHandler.OnEnd(ctx, info, tool.ConvCallbackOutput(output))
-		}
+		return c.toolHandler.OnEnd(ctx, info, tool.ConvCallbackOutput(output))
+	case compose.ComponentOfToolsNode:
+		return c.toolsNodeHandler.OnEnd(ctx, info, convToolsNodeCallbackOutput(output))
 	case compose.ComponentOfGraph,
 		compose.ComponentOfChain,
-		compose.ComponentOfToolsNode,
 		compose.ComponentOfLambda:
-
-		if c.composeTemplates[info.Component] != nil {
-			ctx = c.composeTemplates[info.Component].OnEnd(ctx, info, output)
-		}
+		return c.composeTemplates[info.Component].OnEnd(ctx, info, output)
 	default:
 		return ctx
 	}
-
-	return ctx
 }
 
 // OnError is the callback function for the error event of a component.
 // implement the callbacks Handler interface.
 func (c *handlerTemplate) OnError(ctx context.Context, info *callbacks.RunInfo, err error) context.Context {
-	if info == nil {
-		return ctx
-	}
-
 	switch info.Component {
 	case components.ComponentOfPrompt:
-		if c.promptHandler != nil && c.promptHandler.OnError != nil {
-			ctx = c.promptHandler.OnError(ctx, info, err)
-		}
+		return c.promptHandler.OnError(ctx, info, err)
 	case components.ComponentOfChatModel:
-		if c.chatModelHandler != nil && c.chatModelHandler.OnError != nil {
-			ctx = c.chatModelHandler.OnError(ctx, info, err)
-		}
+		return c.chatModelHandler.OnError(ctx, info, err)
 	case components.ComponentOfEmbedding:
-		if c.embeddingHandler != nil && c.embeddingHandler.OnError != nil {
-			ctx = c.embeddingHandler.OnError(ctx, info, err)
-		}
+		return c.embeddingHandler.OnError(ctx, info, err)
 	case components.ComponentOfIndexer:
-		if c.indexerHandler != nil && c.indexerHandler.OnError != nil {
-			ctx = c.indexerHandler.OnError(ctx, info, err)
-		}
+		return c.indexerHandler.OnError(ctx, info, err)
 	case components.ComponentOfRetriever:
-		if c.retrieverHandler != nil && c.retrieverHandler.OnError != nil {
-			ctx = c.retrieverHandler.OnError(ctx, info, err)
-		}
+		return c.retrieverHandler.OnError(ctx, info, err)
 	case components.ComponentOfLoader:
-		if c.loaderHandler != nil && c.loaderHandler.OnError != nil {
-			ctx = c.loaderHandler.OnError(ctx, info, err)
-		}
+		return c.loaderHandler.OnError(ctx, info, err)
 	case components.ComponentOfTransformer:
-		if c.transformerHandler != nil && c.transformerHandler.OnError != nil {
-			ctx = c.transformerHandler.OnError(ctx, info, err)
-		}
+		return c.transformerHandler.OnError(ctx, info, err)
 	case components.ComponentOfTool:
-		if c.toolHandler != nil && c.toolHandler.OnError != nil {
-			ctx = c.toolHandler.OnError(ctx, info, err)
-		}
+		return c.toolHandler.OnError(ctx, info, err)
+	case compose.ComponentOfToolsNode:
+		return c.toolsNodeHandler.OnError(ctx, info, err)
 	case compose.ComponentOfGraph,
-		compose.ComponentOfStateGraph,
 		compose.ComponentOfChain,
-		compose.ComponentOfPassthrough,
-		compose.ComponentOfToolsNode,
 		compose.ComponentOfLambda:
-
-		if c.composeTemplates[info.Component] != nil {
-			ctx = c.composeTemplates[info.Component].OnError(ctx, info, err)
-		}
+		return c.composeTemplates[info.Component].OnError(ctx, info, err)
 	default:
 		return ctx
 	}
-
-	return ctx
 }
 
 // OnStartWithStreamInput is the callback function for the start event of a component with stream input.
 // implement the callbacks Handler interface.
 func (c *handlerTemplate) OnStartWithStreamInput(ctx context.Context, info *callbacks.RunInfo, input *schema.StreamReader[callbacks.CallbackInput]) context.Context {
-	match := false
-	defer func() {
-		if !match {
-			input.Close()
-		}
-	}()
-
-	if info == nil {
-		return ctx
-	}
-
 	switch info.Component {
 	// currently no components.Component receive stream as input
 	case compose.ComponentOfGraph,
 		compose.ComponentOfChain,
-		compose.ComponentOfToolsNode,
 		compose.ComponentOfLambda:
-		if c.composeTemplates[info.Component] != nil {
-			match = true
-			ctx = c.composeTemplates[info.Component].OnStartWithStreamInput(ctx, info, input)
-		}
+		return c.composeTemplates[info.Component].OnStartWithStreamInput(ctx, info, input)
 	default:
 		return ctx
 	}
-
-	return ctx
 }
 
 // OnEndWithStreamOutput is the callback function for the end event of a component with stream output.
 // implement the callbacks Handler interface.
 func (c *handlerTemplate) OnEndWithStreamOutput(ctx context.Context, info *callbacks.RunInfo, output *schema.StreamReader[callbacks.CallbackOutput]) context.Context {
-	match := false
-	defer func() {
-		if !match {
-			output.Close()
-		}
-	}()
-
-	if info == nil {
-		return ctx
-	}
-
 	switch info.Component {
 	case components.ComponentOfChatModel:
-		if c.chatModelHandler != nil && c.chatModelHandler.OnEndWithStreamOutput != nil {
-			match = true
-			ctx = c.chatModelHandler.OnEndWithStreamOutput(ctx, info,
-				schema.StreamReaderWithConvert(output, func(item callbacks.CallbackOutput) (*model.CallbackOutput, error) {
-					return model.ConvCallbackOutput(item), nil
-				}))
-		}
-
+		return c.chatModelHandler.OnEndWithStreamOutput(ctx, info,
+			schema.StreamReaderWithConvert(output, func(item callbacks.CallbackOutput) (*model.CallbackOutput, error) {
+				return model.ConvCallbackOutput(item), nil
+			}))
 	case components.ComponentOfTool:
-		if c.toolHandler != nil && c.toolHandler.OnEndWithStreamOutput != nil {
-			match = true
-			ctx = c.toolHandler.OnEndWithStreamOutput(ctx, info,
-				schema.StreamReaderWithConvert(output, func(item callbacks.CallbackOutput) (*tool.CallbackOutput, error) {
-					return tool.ConvCallbackOutput(item), nil
-				}))
-		}
+		return c.toolHandler.OnEndWithStreamOutput(ctx, info,
+			schema.StreamReaderWithConvert(output, func(item callbacks.CallbackOutput) (*tool.CallbackOutput, error) {
+				return tool.ConvCallbackOutput(item), nil
+			}))
+	case compose.ComponentOfToolsNode:
+		return c.toolsNodeHandler.OnEndWithStreamOutput(ctx, info,
+			schema.StreamReaderWithConvert(output, func(item callbacks.CallbackOutput) ([]*schema.Message, error) {
+				return convToolsNodeCallbackOutput(item), nil
+			}))
 	case compose.ComponentOfGraph,
 		compose.ComponentOfChain,
-		compose.ComponentOfToolsNode,
 		compose.ComponentOfLambda:
-		if c.composeTemplates[info.Component] != nil {
-			match = true
-			ctx = c.composeTemplates[info.Component].OnEndWithStreamOutput(ctx, info, output)
-		}
-
+		return c.composeTemplates[info.Component].OnEndWithStreamOutput(ctx, info, output)
 	default:
 		return ctx
 	}
-
-	return ctx
 }
 
 // Needed checks if the callback handler is needed for the given timing.
 func (c *handlerTemplate) Needed(ctx context.Context, info *callbacks.RunInfo, timing callbacks.CallbackTiming) bool {
+	if info == nil {
+		return false
+	}
+
 	switch info.Component {
 	case components.ComponentOfChatModel:
 		if c.chatModelHandler != nil && c.chatModelHandler.Needed(ctx, info, timing) {
@@ -426,9 +320,12 @@ func (c *handlerTemplate) Needed(ctx context.Context, info *callbacks.RunInfo, t
 		if c.transformerHandler != nil && c.transformerHandler.Needed(ctx, info, timing) {
 			return true
 		}
+	case compose.ComponentOfToolsNode:
+		if c.toolsNodeHandler != nil && c.toolsNodeHandler.Needed(ctx, info, timing) {
+			return true
+		}
 	case compose.ComponentOfGraph,
 		compose.ComponentOfChain,
-		compose.ComponentOfToolsNode,
 		compose.ComponentOfLambda:
 		handler := c.composeTemplates[info.Component]
 		if handler != nil {
@@ -603,7 +500,7 @@ func (ch *RetrieverCallbackHandler) Needed(ctx context.Context, runInfo *callbac
 // ToolCallbackHandler is the handler for the tool callback.
 type ToolCallbackHandler struct {
 	OnStart               func(ctx context.Context, info *callbacks.RunInfo, input *tool.CallbackInput) context.Context
-	OnEnd                 func(ctx context.Context, info *callbacks.RunInfo, input *tool.CallbackOutput) context.Context
+	OnEnd                 func(ctx context.Context, info *callbacks.RunInfo, output *tool.CallbackOutput) context.Context
 	OnEndWithStreamOutput func(ctx context.Context, info *callbacks.RunInfo, output *schema.StreamReader[*tool.CallbackOutput]) context.Context
 	OnError               func(ctx context.Context, info *callbacks.RunInfo, err error) context.Context
 }
@@ -621,5 +518,45 @@ func (ch *ToolCallbackHandler) Needed(ctx context.Context, runInfo *callbacks.Ru
 		return ch.OnError != nil
 	default:
 		return false
+	}
+}
+
+type ToolsNodeCallbackHandlers struct {
+	OnStart               func(ctx context.Context, info *callbacks.RunInfo, input *schema.Message) context.Context
+	OnEnd                 func(ctx context.Context, info *callbacks.RunInfo, input []*schema.Message) context.Context
+	OnEndWithStreamOutput func(ctx context.Context, info *callbacks.RunInfo, output *schema.StreamReader[[]*schema.Message]) context.Context
+	OnError               func(ctx context.Context, info *callbacks.RunInfo, err error) context.Context
+}
+
+func (ch *ToolsNodeCallbackHandlers) Needed(ctx context.Context, runInfo *callbacks.RunInfo, timing callbacks.CallbackTiming) bool {
+	switch timing {
+	case callbacks.TimingOnStart:
+		return ch.OnStart != nil
+	case callbacks.TimingOnEnd:
+		return ch.OnEnd != nil
+	case callbacks.TimingOnEndWithStreamOutput:
+		return ch.OnEndWithStreamOutput != nil
+	case callbacks.TimingOnError:
+		return ch.OnError != nil
+	default:
+		return false
+	}
+}
+
+func convToolsNodeCallbackInput(src callbacks.CallbackInput) *schema.Message {
+	switch t := src.(type) {
+	case *schema.Message:
+		return t
+	default:
+		return nil
+	}
+}
+
+func convToolsNodeCallbackOutput(src callbacks.CallbackInput) []*schema.Message {
+	switch t := src.(type) {
+	case []*schema.Message:
+		return t
+	default:
+		return nil
 	}
 }
