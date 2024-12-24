@@ -1038,7 +1038,7 @@ func TestGraphCompileCallback(t *testing.T) {
 	t.Run("graph compile callback", func(t *testing.T) {
 		type s struct{}
 
-		g := NewStateGraph[map[string]any, map[string]any, *s](func(ctx context.Context) *s { return &s{} })
+		g := NewGraph[map[string]any, map[string]any](WithGenLocalState(func(ctx context.Context) *s { return &s{} }))
 
 		lambda := InvokableLambda(func(ctx context.Context, input string) (output string, err error) {
 			return "node1", nil

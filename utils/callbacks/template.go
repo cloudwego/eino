@@ -296,7 +296,6 @@ func (c *handlerTemplate) OnError(ctx context.Context, info *callbacks.RunInfo, 
 			ctx = c.toolHandler.OnError(ctx, info, err)
 		}
 	case compose.ComponentOfGraph,
-		compose.ComponentOfStateGraph,
 		compose.ComponentOfChain,
 		compose.ComponentOfPassthrough,
 		compose.ComponentOfToolsNode,
