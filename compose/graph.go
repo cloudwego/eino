@@ -213,7 +213,7 @@ func (g *graph) component() component {
 }
 
 func isChain(cmp component) bool {
-	return cmp == ComponentOfChain || cmp == ComponentOfStateChain
+	return cmp == ComponentOfChain
 }
 
 // ErrGraphCompiled is returned when attempting to modify a graph after it has been compiled

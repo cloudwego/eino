@@ -27,9 +27,7 @@ type component = components.Component
 const (
 	ComponentOfUnknown     component = "Unknown"
 	ComponentOfGraph       component = "Graph"
-	ComponentOfStateGraph  component = "StateGraph"
 	ComponentOfChain       component = "Chain"
-	ComponentOfStateChain  component = "StateChain"
 	ComponentOfPassthrough component = "Passthrough"
 	ComponentOfToolsNode   component = "ToolsNode"
 	ComponentOfLambda      component = "Lambda"
