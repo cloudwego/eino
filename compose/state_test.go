@@ -48,7 +48,7 @@ func TestStateGraphWithEdge(t *testing.T) {
 		return &testState{}
 	}
 
-	sg := NewStateGraph[string, string, *testState](gen)
+	sg := NewGraph[string, string](WithGenLocalState(gen))
 
 	l1 := InvokableLambda(func(ctx context.Context, in string) (out midStr, err error) {
 		return midStr("InvokableLambda: " + in), nil
@@ -221,9 +221,9 @@ func TestStateChain(t *testing.T) {
 		Field1 string
 		Field2 string
 	}
-	sc := NewStateChain[string, string, *testState](func(ctx context.Context) (state *testState) {
+	sc := NewChain[string, string](WithGenLocalState(func(ctx context.Context) (state *testState) {
 		return &testState{}
-	})
+	}))
 
 	r, err := sc.AppendLambda(InvokableLambda(func(ctx context.Context, input string) (output string, err error) {
 		s, err := GetState[*testState](ctx)
@@ -259,7 +259,7 @@ func TestStreamState(t *testing.T) {
 	}
 	ctx := context.Background()
 	s := &testState{Field1: "1"}
-	g := NewStateGraph[string, string, *testState](func(ctx context.Context) (state *testState) { return s })
+	g := NewGraph[string, string](WithGenLocalState(func(ctx context.Context) (state *testState) { return s }))
 	err := g.AddLambdaNode("1", TransformableLambda(func(ctx context.Context, input *schema.StreamReader[string]) (output *schema.StreamReader[string], err error) {
 		return input, nil
 	}), WithStreamStatePreHandler(func(ctx context.Context, in *schema.StreamReader[string], state *testState) (*schema.StreamReader[string], error) {
