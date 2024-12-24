@@ -231,6 +231,25 @@ func TestNewComponentTemplate(t *testing.T) {
 				cnt++
 				return ctx
 			},
+		}).ToolsNode(&ToolsNodeCallbackHandlers{
+			OnStart: func(ctx context.Context, runInfo *callbacks.RunInfo, input *schema.Message) context.Context {
+				cnt++
+				return ctx
+			},
+			OnEndWithStreamOutput: func(ctx context.Context, runInfo *callbacks.RunInfo, output *schema.StreamReader[[]*schema.Message]) context.Context {
+				cnt++
+
+				if output == nil {
+					return ctx
+				}
+
+				for {
+					_, err := output.Recv()
+					if err != nil {
+						return ctx
+					}
+				}
+			},
 		})
 
 		handler = tpl.Handler()
@@ -246,5 +265,27 @@ func TestNewComponentTemplate(t *testing.T) {
 		ctx = callbacks.ReuseHandlers(ctx, &callbacks.RunInfo{Component: components.ComponentOfLoader})
 		callbacks.OnEnd[any](ctx, nil)
 		assert.Equal(t, 27, cnt)
+
+		ctx = callbacks.ReuseHandlers(ctx, &callbacks.RunInfo{Component: compose.ComponentOfToolsNode})
+		callbacks.OnStart[any](ctx, nil)
+		assert.Equal(t, 28, cnt)
+
+		sr, sw := schema.Pipe[any](0)
+		sw.Close()
+		callbacks.OnEndWithStreamOutput[any](ctx, sr)
+		assert.Equal(t, 29, cnt)
+
+		sr1, sw1 := schema.Pipe[[]*schema.Message](1)
+		sw1.Send([]*schema.Message{{}}, nil)
+		sw1.Close()
+		callbacks.OnEndWithStreamOutput[[]*schema.Message](ctx, sr1)
+		assert.Equal(t, 30, cnt)
+
+		callbacks.OnError(ctx, nil)
+		assert.Equal(t, 30, cnt)
+
+		ctx = callbacks.ReuseHandlers(ctx, nil)
+		callbacks.OnStart[any](ctx, nil)
+		assert.Equal(t, 30, cnt)
 	})
 }

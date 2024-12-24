@@ -74,9 +74,9 @@ type CallbackOutput struct {
 // ConvCallbackInput converts the callback input to the model callback input.
 func ConvCallbackInput(src callbacks.CallbackInput) *CallbackInput {
 	switch t := src.(type) {
-	case *CallbackInput:
+	case *CallbackInput: // when callback is triggered within component implementation, the input is usually already a typed *model.CallbackInput
 		return t
-	case []*schema.Message:
+	case []*schema.Message: // when callback is injected by graph node, not the component implementation itself, the input is the input of Chat Model interface, which is []*schema.Message
 		return &CallbackInput{
 			Messages: t,
 		}
@@ -88,9 +88,9 @@ func ConvCallbackInput(src callbacks.CallbackInput) *CallbackInput {
 // ConvCallbackOutput converts the callback output to the model callback output.
 func ConvCallbackOutput(src callbacks.CallbackOutput) *CallbackOutput {
 	switch t := src.(type) {
-	case *CallbackOutput:
+	case *CallbackOutput: // when callback is triggered within component implementation, the output is usually already a typed *model.CallbackOutput
 		return t
-	case *schema.Message:
+	case *schema.Message: // when callback is injected by graph node, not the component implementation itself, the output is the output of Chat Model interface, which is *schema.Message
 		return &CallbackOutput{
 			Message: t,
 		}
