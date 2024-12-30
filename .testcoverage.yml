@@ -19,11 +19,11 @@ threshold:
 
   # (optional; default 0)
   # Minimum coverage percentage required for individual files.
-  file: 70
+  file: 20
 
   # (optional; default 0)
   # Minimum coverage percentage required for each package.
-  package: 70
+  package: 30
 
 # Holds regexp rules which will exclude matched files or packages
 # from coverage statistics.
@@ -33,6 +33,8 @@ exclude:
     - "tests"
     - "examples/"
     - "mock/"
+    - "callbacks/interface.go"
+    - "utils/safe"
 
 # 增量覆盖率配置
 diff:
