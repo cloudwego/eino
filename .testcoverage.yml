@@ -17,6 +17,14 @@ threshold:
   # Minimum overall project coverage percentage required.
   total: 75
 
+  # (optional; default 0)
+  # Minimum coverage percentage required for individual files.
+  file: 70
+
+  # (optional; default 0)
+  # Minimum coverage percentage required for each package.
+  package: 70
+
 # Holds regexp rules which will exclude matched files or packages
 # from coverage statistics.
 exclude:
@@ -25,24 +33,6 @@ exclude:
     - "tests"
     - "examples/"
     - "mock/"
-
-# 设置总体覆盖率要求
-total:
-  statements: 75
-
-# 按包统计覆盖率
-by-package:
-  # 每个包的最低覆盖率要求
-  threshold: 60
-  # 展示所有包的覆盖率，而不是只展示未达标的包
-  show-all: true
-
-# 按文件统计覆盖率
-by-file:
-  # 每个文件的最低覆盖率要求
-  threshold: 50
-  # 展示所有文件的覆盖率
-  show-all: true
 
 # 增量覆盖率配置
 diff:

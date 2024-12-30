@@ -31,7 +31,7 @@ jobs:
           workflow_conclusion: success
           name: main.breakdown
           if_no_artifact_found: warn
-      - name: Ensure default.breakdown exists if download fails
+      - name: Create main.breakdown If Not Exist
         run: |
           if [ ! -f main.breakdown ]; then
             echo "main.breakdown not found. Creating an empty main.breakdown file."
@@ -45,7 +45,7 @@ jobs:
         with:
           config: ./.testcoverage.yml
           breakdown-file-name: ${{ github.ref_name == 'main' && 'main.breakdown' || '' }}
-          diff-base-breakdown-file-name: ${{ steps.download-main-breakdown.outputs.found_artifact && 'main.breakdown' || 'main.breakdown' }}
+          diff-base-breakdown-file-name: 'main.breakdown'
       - name: Upload Artifact (main.breakdown)
         uses: actions/upload-artifact@v4
         if: github.ref_name == 'main'
@@ -60,7 +60,7 @@ jobs:
         with:
           issue-number: ${{ github.event.pull_request.number }}
           comment-author: 'github-actions[bot]'
-          body-includes: 'go-test-coverage report:'
+          body-includes: '📊 Coverage Report'
       - name: Send Coverage Report
         if: ${{ github.event.pull_request.number != null }}
         uses: peter-evans/create-or-update-comment@v4
@@ -75,9 +75,7 @@ jobs:
             <details>
             <summary>Click to see detailed coverage report</summary>
             
-            ```
             ${{ steps.coverage.outputs.report }}
-            ```
             
             </details>
 
