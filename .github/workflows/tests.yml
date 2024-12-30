@@ -4,15 +4,15 @@ on: [ pull_request ]
 
 jobs:
   unit_test:
-    name: "eino unit test"
+    name: eino-unit-test
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: "Set up Go"
+      - name: Set up Go
         uses: actions/setup-go@v5
         with:
           go-version: "1.18"
-      - name: "GoTest"
+      - name: Exec Go Test
         run: |
           modules=`find . -name "go.mod" -exec dirname {} \;`
           echo $modules
@@ -39,16 +39,12 @@ jobs:
           else
             echo "main.breakdown found."
           fi
-      - name: "Test Coverage"
+      - name: Calculate Coverage
+        id: coverage
         uses: vladopajic/go-test-coverage@v2
         with:
           config: ./.testcoverage.yml
-          # Save current coverage breakdown if current branch is main. It will be
-          # uploaded as artifact in step below.
           breakdown-file-name: ${{ github.ref_name == 'main' && 'main.breakdown' || '' }}
-
-          # If this is not main branch we want to show report including
-          # file coverage difference from main branch.
           diff-base-breakdown-file-name: ${{ steps.download-main-breakdown.outputs.found_artifact && 'main.breakdown' || 'main.breakdown' }}
       - name: Upload Artifact (main.breakdown)
         uses: actions/upload-artifact@v4
@@ -57,7 +53,7 @@ jobs:
           name: main.breakdown
           path: main.breakdown # as specified via `breakdown-file-name`
           if-no-files-found: error
-      - name: find if coverage report is already present
+      - name: Find If coverage Report Exist
         if: ${{ github.event.pull_request.number != null }}
         uses: peter-evans/find-comment@v3
         id: fc
@@ -65,7 +61,7 @@ jobs:
           issue-number: ${{ github.event.pull_request.number }}
           comment-author: 'github-actions[bot]'
           body-includes: 'go-test-coverage report:'
-      - name: post coverage report
+      - name: Send Coverage Report
         if: ${{ github.event.pull_request.number != null }}
         uses: peter-evans/create-or-update-comment@v4
         with:
@@ -76,9 +72,10 @@ jobs:
           body: |
             go-test-coverage report:
             ```
-            ${{ steps.coverage.outputs.report && fromJSON(steps.coverage.outputs.report) || 'No coverage report available' }} ```
+            ${{ steps.coverage.outputs.report }}
+            ```
 
-      - name: "finally check coverage"
+      - name: Check Coverage
         if: steps.coverage.outcome == 'failure'
         shell: bash
         run: echo "coverage check failed" && exit 1
