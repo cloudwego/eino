@@ -25,14 +25,14 @@ jobs:
       # Download main (aka base) branch breakdown
       - name: Download Artifact (main.breakdown)
         id: download-main-breakdown
-        uses: dawidd6/action-download-artifact@v6
+        uses: actions/download-artifact@v4
         with:
-          branch: main
           workflow_conclusion: success
           name: main.breakdown
           if_no_artifact_found: warn
       - name: Create main.breakdown If Not Exist
         run: |
+          ls -R
           if [ ! -f main.breakdown ]; then
             echo "main.breakdown not found. Creating an empty main.breakdown file."
             touch main.breakdown
@@ -70,14 +70,11 @@ jobs:
           comment-id: ${{ steps.fc.outputs.comment-id || '' }}
           edit-mode: replace
           body: |
-            ## 📊 Coverage Report
+            ## 📊 Coverage Report:
             
-            <details>
-            <summary>Click to see detailed coverage report</summary>
-            
-            ${{ steps.coverage.outputs.report }}
-            
-            </details>
+            ```
+            ${{ steps.coverage.outputs.report && fromJSON(steps.coverage.outputs.report) || 'No coverage report available' }}
+            ```
 
       - name: Check Coverage
         if: steps.coverage.outcome == 'failure'
