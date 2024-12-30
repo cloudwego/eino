@@ -21,15 +21,16 @@ jobs:
           if [[ ! -f "go.work" ]];then go work init;fi
           for module in $modules; do go work use $module; list=$module"/... "$list; coverpkg=$module"/...,"$coverpkg; done
           go work sync
-          go test -race -coverprofile=coverage.out -gcflags="all=-l -N" -coverpkg=$coverpkg $list
-      # Download main (aka base) branch breakdown
+          go test -race -v -coverprofile=coverage.out -gcflags="all=-l -N" -coverpkg=$coverpkg $list
+      # Download main branch breakdown
       - name: Download Artifact (main.breakdown)
         id: download-main-breakdown
         uses: actions/download-artifact@v4
+        continue-on-error: true
         with:
-          workflow_conclusion: success
           name: main.breakdown
-          if_no_artifact_found: warn
+          fail-not-found: false
+          workflow_conclusion: success
       - name: Create main.breakdown If Not Exist
         run: |
           ls -R
@@ -51,7 +52,7 @@ jobs:
         if: github.ref_name == 'main'
         with:
           name: main.breakdown
-          path: main.breakdown # as specified via `breakdown-file-name`
+          path: main.breakdown
           if-no-files-found: error
       - name: Find If coverage Report Exist
         if: ${{ github.event.pull_request.number != null }}
