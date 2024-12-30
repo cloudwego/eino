@@ -6,10 +6,6 @@ Invokable = "Invokable"
 invokable = "invokable"
 InvokableLambda = "InvokableLambda"
 InvokableRun = "InvokableRun"
-outter = "outter"
-Opion = "Opion"
-TOpion = "TOpion"
-renderring = "renderring"
 
 [files]
 extend-exclude = ["go.mod", "go.sum", "check_branch_name.sh"]

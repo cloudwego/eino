@@ -63,9 +63,9 @@ func TestChainBranch(t *testing.T) {
 				return in + in + in, nil
 			})))
 
-		outter := NewChain[string, string]()
-		outter.AppendGraph(inner)
-		_, err := outter.Compile(context.Background())
+		outer := NewChain[string, string]()
+		outer.AppendGraph(inner)
+		_, err := outer.Compile(context.Background())
 		assert.Error(t, err)
 	})
 

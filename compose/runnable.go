@@ -314,8 +314,8 @@ func streamByInvoke[I, O, TOption any](i Invoke[I, O, TOption]) Stream[I, O, TOp
 	}
 }
 
-func streamByCollect[I, O, TOpion any](c Collect[I, O, TOpion]) Stream[I, O, TOpion] {
-	return func(ctx context.Context, input I, opts ...TOpion) (output *schema.StreamReader[O], err error) {
+func streamByCollect[I, O, TOption any](c Collect[I, O, TOption]) Stream[I, O, TOption] {
+	return func(ctx context.Context, input I, opts ...TOption) (output *schema.StreamReader[O], err error) {
 		action := actionStreamByCollect
 
 		srInput := schema.StreamReaderFromArray([]I{input})

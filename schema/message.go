@@ -340,7 +340,7 @@ func formatContent(content string, vs map[string]any, formatType FormatType) (st
 	}
 }
 
-// Format returns the messages after renderring by the given formatType.
+// Format returns the messages after rendering by the given formatType.
 // e.g.
 //
 //	msg := schema.UserMessage("hello world, {name}")
