@@ -2,21 +2,23 @@ name: EinoTests
 
 on: [ pull_request ]
 
+env:
+  DEFAULT_GO_VERSION: "1.18"
+
 jobs:
-  unit_test:
+  unit-test:
     name: eino-unit-test
     runs-on: ubuntu-latest
     env:
       COVERAGE_FILE: coverage.out
       BREAKDOWN_FILE: main.breakdown
-      GO_VERSION: "1.18"
       
     steps:
       - uses: actions/checkout@v4
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version: ${{ env.GO_VERSION }}
+          go-version: ${{ env.DEFAULT_GO_VERSION }}
           
       - name: Exec Go Test
         run: |
@@ -93,25 +95,22 @@ jobs:
         if: steps.coverage.outcome == 'failure'
         shell: bash
         run: echo "coverage check failed" && exit 1
-  unit-benchmark-test:
+  benchmark-test:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version: stable
+          go-version: ${{ env.DEFAULT_GO_VERSION }}
 
-      - name: Unit Test
-        run: go test -race -covermode=atomic -coverprofile=coverage.out ./...
-
-      - name: Benchmark
+      - name: Run Benchmark Tests
         run: go test -bench=. -benchmem -run=none ./...
 
   compatibility-test:
     strategy:
       matrix:
-        go: [ "1.18", "1.19", "1.20", "1.21", "1.22" ]
+        go: [ "1.19", "1.20", "1.21", "1.22" ]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -119,6 +118,9 @@ jobs:
         uses: actions/setup-go@v5
         with:
           go-version: ${{ matrix.go }}
-          cache: true # don't use cache for self-hosted runners
-      - name: Unit Test
-        run: go test -race -covermode=atomic ./...
+          cache: true
+
+      - name: Compatibility Test
+        run: |
+          # just basic unit test, no coverage report
+          go test -race ./...

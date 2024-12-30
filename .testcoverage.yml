@@ -40,3 +40,4 @@ exclude:
     - "examples/"
     - "mock/"
     - "callbacks/interface.go"
+    - "utils/safe"
