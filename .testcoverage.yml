@@ -25,3 +25,28 @@ exclude:
     - "tests"
     - "examples/"
     - "mock/"
+
+# 设置总体覆盖率要求
+total:
+  statements: 75
+
+# 按包统计覆盖率
+by-package:
+  # 每个包的最低覆盖率要求
+  threshold: 60
+  # 展示所有包的覆盖率，而不是只展示未达标的包
+  show-all: true
+
+# 按文件统计覆盖率
+by-file:
+  # 每个文件的最低覆盖率要求
+  threshold: 50
+  # 展示所有文件的覆盖率
+  show-all: true
+
+# 增量覆盖率配置
+diff:
+  # 新增代码的最低覆盖率要求
+  threshold: 80
+  # 展示所有变更文件的覆盖率
+  show-all: true

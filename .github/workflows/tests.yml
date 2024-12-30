@@ -70,10 +70,16 @@ jobs:
           comment-id: ${{ steps.fc.outputs.comment-id || '' }}
           edit-mode: replace
           body: |
-            go-test-coverage report:
+            ## 📊 Coverage Report
+            
+            <details>
+            <summary>Click to see detailed coverage report</summary>
+            
             ```
             ${{ steps.coverage.outputs.report }}
             ```
+            
+            </details>
 
       - name: Check Coverage
         if: steps.coverage.outcome == 'failure'
