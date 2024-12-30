@@ -1,5 +1,7 @@
 # Eino
 
+![coverage](https://raw.githubusercontent.com/cloudwego/eino/badges/.badges/main/coverage.svg)
+
 [English](README.md) | 中文
 
 
