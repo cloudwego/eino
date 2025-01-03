@@ -18,20 +18,266 @@ package compose
 
 import (
 	"context"
+	"errors"
+	"fmt"
+	"io"
 	"math/rand"
+	"strconv"
+	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/stretchr/testify/assert"
 	"go.uber.org/mock/gomock"
 
 	"github.com/cloudwego/eino/components/prompt"
-	"github.com/cloudwego/eino/internal/mock/components/document"
+	"github.com/cloudwego/eino/compose/internal"
 	"github.com/cloudwego/eino/internal/mock/components/embedding"
 	"github.com/cloudwego/eino/internal/mock/components/indexer"
-	"github.com/cloudwego/eino/internal/mock/components/model"
 	"github.com/cloudwego/eino/internal/mock/components/retriever"
 	"github.com/cloudwego/eino/schema"
 )
+
+func TestChainBranch(t *testing.T) {
+	cond := func(ctx context.Context, input string) (key string, err error) {
+		switch input {
+		case "one":
+			return "one_key", nil
+		case "two":
+			return "two_key", nil
+		case "three":
+			return "three_key", nil
+		default:
+			return "", fmt.Errorf("invalid input= %s", input)
+		}
+	}
+
+	t.Run("nested chain", func(t *testing.T) {
+		inner := NewChain[string, string]()
+		inner.AppendBranch(NewChainBranch(cond).
+			AddLambda("one_key", InvokableLambda(func(ctx context.Context, in string) (output string, err error) {
+				return in + in, nil
+			})).
+			AddLambda("two_key", InvokableLambda(func(ctx context.Context, in string) (output string, err error) {
+				return in + in + in, nil
+			})))
+		inner.AppendParallel(NewParallel().
+			AddLambda("one_key", InvokableLambda(func(ctx context.Context, in string) (output string, err error) {
+				return in + in, nil
+			})).
+			AddLambda("two_key", InvokableLambda(func(ctx context.Context, in string) (output string, err error) {
+				return in + in + in, nil
+			})))
+
+		outer := NewChain[string, string]()
+		outer.AppendGraph(inner)
+		_, err := outer.Compile(context.Background())
+		assert.Error(t, err)
+	})
+
+	t.Run("bad param", func(t *testing.T) {
+		c := NewChain[string, string]()
+		c.AppendBranch(nil)
+		assert.NotNil(t, c.Err)
+
+		c = NewChain[string, string]()
+		c.AppendBranch(NewChainBranch[string](nil))
+		assert.NotNil(t, c.Err)
+
+		c = NewChain[string, string]()
+		c.AppendBranch(NewChainBranch(cond).AddChatTemplate("template", prompt.FromMessages(schema.FString, schema.SystemMessage("hello"))))
+		assert.NotNil(t, c.Err)
+
+		c = NewChain[string, string]()
+		c.AppendBranch(NewChainBranch(cond).AddChatTemplate("1", prompt.FromMessages(schema.FString)).AddChatTemplate("1", prompt.FromMessages(schema.FString)))
+		assert.NotNil(t, c.Err)
+	})
+
+	t.Run("different Node types in branch", func(t *testing.T) {
+		c := NewChain[string, string]()
+		c.AppendBranch(NewChainBranch(cond).
+			AddChatTemplate("t", prompt.FromMessages(schema.FString)).
+			AddGraph("c", NewChain[string, string]()))
+		assert.NotNil(t, c.Err)
+	})
+
+	t.Run("type mismatch", func(t *testing.T) {
+		c := NewChain[int, string]()
+		c.AppendBranch(NewChainBranch(cond).
+			AddLambda("one_key", InvokableLambda(func(ctx context.Context, in int) (output string, err error) {
+				return strconv.Itoa(in), nil
+			})).
+			AddLambda("two_key", InvokableLambda(func(ctx context.Context, in int) (output string, err error) {
+				return strconv.Itoa(in), nil
+			})))
+		_, err := c.Compile(context.Background())
+		assert.NotNil(t, err)
+	})
+
+	t.Run("invoke", func(t *testing.T) {
+		c := NewChain[string, string]()
+		c.AppendBranch(NewChainBranch(cond).
+			AddLambda("one_key", InvokableLambda(func(ctx context.Context, in string) (output string, err error) {
+				return in + in, nil
+			})).
+			AddLambda("two_key", InvokableLambda(func(ctx context.Context, in string) (output string, err error) {
+				return in + in + in, nil
+			})))
+		c.AppendLambda(InvokableLambda(func(ctx context.Context, in string) (output string, err error) {
+			return in + in, nil
+		}))
+		assert.Nil(t, c.Err)
+		compiledChain, err := c.Compile(context.Background())
+		assert.Nil(t, err)
+
+		out, err := compiledChain.Invoke(context.Background(), "two")
+		assert.Nil(t, err)
+		assert.Equal(t, "twotwotwotwotwotwo", out)
+
+		_, err = compiledChain.Invoke(context.Background(), "three")
+		assert.NotNil(t, err)
+
+		_, err = compiledChain.Invoke(context.Background(), "four")
+		assert.NotNil(t, err)
+	})
+
+	t.Run("fake stream", func(t *testing.T) {
+		c := NewChain[string, string]()
+		c.AppendLambda(StreamableLambda(func(ctx context.Context, in string) (output *schema.StreamReader[string], err error) {
+			sr, sw := schema.Pipe[string](utf8.RuneCountInString(in))
+
+			go func() {
+				for _, field := range strings.Fields(in) {
+					sw.Send(field, nil)
+				}
+				sw.Close()
+			}()
+
+			return sr, nil
+		}))
+		c.AppendBranch(NewChainBranch[string](cond).AddLambda("one_key", CollectableLambda(func(ctx context.Context, in *schema.StreamReader[string]) (output string, err error) {
+			defer in.Close()
+			for {
+				v, err := in.Recv()
+				if errors.Is(err, io.EOF) {
+					break
+				}
+
+				if err != nil {
+					return "", err
+				}
+
+				output += v
+			}
+
+			return output + output, nil
+		})).
+			AddLambda("two_key", CollectableLambda(func(ctx context.Context, in *schema.StreamReader[string]) (output string, err error) {
+				defer in.Close()
+				for {
+					v, err := in.Recv()
+					if errors.Is(err, io.EOF) {
+						break
+					}
+
+					if err != nil {
+						return "", err
+					}
+
+					output += v
+				}
+
+				return output + output + output, nil
+			})))
+
+		assert.Nil(t, c.Err)
+		compiledChain, err := c.Compile(context.Background())
+		assert.Nil(t, err)
+
+		out, err := compiledChain.Invoke(context.Background(), "one")
+		assert.Nil(t, err)
+		assert.Equal(t, "oneone", out)
+	})
+
+	t.Run("real stream", func(t *testing.T) {
+		streamCon := func(ctx context.Context, sr *schema.StreamReader[string]) (key string, err error) {
+			msg, err := sr.Recv()
+			if err != nil {
+				return "", err
+			}
+			defer sr.Close()
+
+			switch msg {
+			case "one":
+				return "one_key", nil
+			case "two":
+				return "two_key", nil
+			case "three":
+				return "three_key", nil
+			default:
+				return "", fmt.Errorf("invalid input= %s", msg)
+			}
+		}
+
+		c := NewChain[string, string]()
+		c.AppendLambda(StreamableLambda(func(ctx context.Context, in string) (output *schema.StreamReader[string], err error) {
+			sr, sw := schema.Pipe[string](utf8.RuneCountInString(in))
+
+			go func() {
+				for _, field := range strings.Fields(in) {
+					sw.Send(field, nil)
+				}
+				sw.Close()
+			}()
+
+			return sr, nil
+		}))
+		c.AppendBranch(NewStreamChainBranch(streamCon).AddLambda("one_key", CollectableLambda(func(ctx context.Context, in *schema.StreamReader[string]) (output string, err error) {
+			defer in.Close()
+			for {
+				v, err := in.Recv()
+				if errors.Is(err, io.EOF) {
+					break
+				}
+
+				if err != nil {
+					return "", err
+				}
+
+				output += v
+			}
+
+			return output + output, nil
+		})).
+			AddLambda("two_key", CollectableLambda(func(ctx context.Context, in *schema.StreamReader[string]) (output string, err error) {
+				defer in.Close()
+				for {
+					v, err := in.Recv()
+					if errors.Is(err, io.EOF) {
+						break
+					}
+
+					if err != nil {
+						return "", err
+					}
+
+					output += v
+				}
+
+				return output + output + output, nil
+			})))
+
+		assert.Nil(t, c.Err)
+		compiledChain, err := c.Compile(context.Background())
+		assert.Nil(t, err)
+
+		out, err := compiledChain.Stream(context.Background(), "one size fit all")
+		assert.Nil(t, err)
+		concat, err := internal.ConcatStreamReader(out)
+		assert.Nil(t, err)
+		assert.Equal(t, "onesizefitallonesizefitall", concat)
+	})
+}
 
 func TestChain(t *testing.T) {
 
@@ -541,43 +787,4 @@ func TestChainMultiNodes(t *testing.T) {
 		})
 	})
 
-}
-
-func TestParallelMultiNodes(t *testing.T) {
-	ctx := context.Background()
-	p := NewParallel()
-	p.AddLambda("lambda", InvokableLambda(func(ctx context.Context, kvs map[string]any) (map[string]any, error) {
-		return kvs, nil
-	}))
-	p.AddGraph("graph", NewChain[map[string]any, map[string]any]())
-	p.AddIndexer("indexer", indexer.NewMockIndexer(gomock.NewController(t)))
-	p.AddLoader("loader", document.NewMockLoader(gomock.NewController(t)))
-	p.AddDocumentTransformer("document transformer", document.NewMockTransformer(gomock.NewController(t)))
-	p.AddRetriever("retriever", retriever.NewMockRetriever(gomock.NewController(t)))
-	p.AddChatModel("chatmodel", model.NewMockChatModel(gomock.NewController(t)))
-	p.AddChatTemplate("chatTemplate", prompt.FromMessages(schema.FString, schema.SystemMessage("hello")))
-	p.AddEmbedding("embedding", embedding.NewMockEmbedder(gomock.NewController(t)))
-	p.AddPassthrough("passthrough")
-	toolsNode, err := NewToolNode(ctx, &ToolsNodeConfig{})
-	assert.NoError(t, err)
-	p.AddToolsNode("tools", toolsNode)
-
-	assert.Greater(t, len(p.nodes), 6)
-
-	ctrl := gomock.NewController(t)
-	p = NewParallel()
-	p.AddIndexer("key", indexer.NewMockIndexer(ctrl))
-	p.AddLoader("key", document.NewMockLoader(ctrl))
-	p.AddRetriever("r", retriever.NewMockRetriever(ctrl))
-	assert.NotNil(t, p.err)
-
-	p = NewParallel()
-	p.addNode("k", nil, nil)
-	assert.NotNil(t, p.err)
-
-	p = &Parallel{
-		outputKeys: nil,
-	}
-	p.addNode("k", &graphNode{}, nil)
-	assert.NotNil(t, p.err)
 }

@@ -18,17 +18,12 @@ package compose
 
 import (
 	"context"
-	"fmt"
-	"reflect"
 
+	"github.com/cloudwego/eino/compose/internal"
 	"github.com/cloudwego/eino/schema"
-	"github.com/cloudwego/eino/utils/generic"
 )
 
-// GenLocalState is a function that generates the state.
 type GenLocalState[S any] func(ctx context.Context) (state S)
-
-type stateKey struct{}
 
 // StatePreHandler is a function that is called before the node is executed.
 // Notice: if user called Stream but with StatePreHandler, the StatePreHandler will read all stream chunks and merge them into a single object.
@@ -44,63 +39,11 @@ type StreamStatePreHandler[I, S any] func(ctx context.Context, in *schema.Stream
 // StreamStatePostHandler is a function that is called after the node is executed with stream input and output.
 type StreamStatePostHandler[O, S any] func(ctx context.Context, out *schema.StreamReader[O], state S) (*schema.StreamReader[O], error)
 
-func convertPreHandler[I, S any](handler StatePreHandler[I, S]) *composableRunnable {
-	rf := func(ctx context.Context, in I, opts ...any) (I, error) {
-		cState, err := GetState[S](ctx)
-		if err != nil {
-			return in, err
-		}
-
-		return handler(ctx, in, cState)
-	}
-
-	return runnableLambda[I, I](rf, nil, nil, nil, false)
-}
-
-func convertPostHandler[O, S any](handler StatePostHandler[O, S]) *composableRunnable {
-	rf := func(ctx context.Context, out O, opts ...any) (O, error) {
-		cState, err := GetState[S](ctx)
-		if err != nil {
-			return out, err
-		}
-
-		return handler(ctx, out, cState)
-	}
-
-	return runnableLambda[O, O](rf, nil, nil, nil, false)
-}
-
-func streamConvertPreHandler[I, S any](handler StreamStatePreHandler[I, S]) *composableRunnable {
-	rf := func(ctx context.Context, in *schema.StreamReader[I], opts ...any) (*schema.StreamReader[I], error) {
-		cState, err := GetState[S](ctx)
-		if err != nil {
-			return in, err
-		}
-
-		return handler(ctx, in, cState)
-	}
-
-	return runnableLambda[I, I](nil, nil, nil, rf, false)
-}
-
-func streamConvertPostHandler[O, S any](handler StreamStatePostHandler[O, S]) *composableRunnable {
-	rf := func(ctx context.Context, out *schema.StreamReader[O], opts ...any) (*schema.StreamReader[O], error) {
-		cState, err := GetState[S](ctx)
-		if err != nil {
-			return out, err
-		}
-
-		return handler(ctx, out, cState)
-	}
-
-	return runnableLambda[O, O](nil, nil, nil, rf, false)
-}
-
 // GetState gets the state from the context.
 // When using this method to read or write state in custom nodes, it may lead to data race because other nodes may concurrently access the state.
 // You need to be aware of and resolve this situation, typically by adding a mutex.
 // It's recommended to only READ the returned state. If you want to WRITE to state, consider using StatePreHandler / StatePostHandler because they are concurrency safe out of the box.
-// eg.
+// e.g.
 //
 //	lambdaFunc := func(ctx context.Context, in string, opts ...any) (string, error) {
 //		state, err := compose.GetState[*testState](ctx)
@@ -114,14 +57,5 @@ func streamConvertPostHandler[O, S any](handler StreamStatePostHandler[O, S]) *c
 //	stateGraph := compose.NewStateGraph[string, string, testState](genStateFunc)
 //	stateGraph.AddNode("node1", lambdaFunc)
 func GetState[S any](ctx context.Context) (S, error) {
-	state := ctx.Value(stateKey{})
-
-	cState, ok := state.(S)
-	if !ok {
-		var s S
-		return s, fmt.Errorf("unexpected state type. expected: %v, got: %v",
-			generic.TypeOf[S](), reflect.TypeOf(state))
-	}
-
-	return cState, nil
+	return internal.GetState[S](ctx)
 }

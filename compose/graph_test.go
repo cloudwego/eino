@@ -29,6 +29,7 @@ import (
 	"github.com/cloudwego/eino/callbacks"
 	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/components/prompt"
+	"github.com/cloudwego/eino/compose/internal"
 	"github.com/cloudwego/eino/schema"
 )
 
@@ -82,7 +83,7 @@ func TestSingleGraph(t *testing.T) {
 	s, err := r.Stream(ctx, in)
 	assert.NoError(t, err)
 
-	msg, err := concatStreamReader(s)
+	msg, err := internal.ConcatStreamReader(s)
 	assert.NoError(t, err)
 	t.Logf("stream result: %v", msg)
 
@@ -94,7 +95,7 @@ func TestSingleGraph(t *testing.T) {
 	s, err = r.Transform(ctx, sr)
 	assert.NoError(t, err)
 
-	msg, err = concatStreamReader(s)
+	msg, err = internal.ConcatStreamReader(s)
 	assert.NoError(t, err)
 	t.Logf("transform result: %v", msg)
 
@@ -336,15 +337,15 @@ type chatModel struct {
 	msgs []*schema.Message
 }
 
-func (c *chatModel) BindTools(tools []*schema.ToolInfo) error {
+func (c *chatModel) BindTools(_ []*schema.ToolInfo) error {
 	return nil
 }
 
-func (c *chatModel) Generate(ctx context.Context, input []*schema.Message, opts ...model.Option) (*schema.Message, error) {
+func (c *chatModel) Generate(_ context.Context, _ []*schema.Message, _ ...model.Option) (*schema.Message, error) {
 	return c.msgs[0], nil
 }
 
-func (c *chatModel) Stream(ctx context.Context, input []*schema.Message, opts ...model.Option) (*schema.StreamReader[*schema.Message], error) {
+func (c *chatModel) Stream(_ context.Context, _ []*schema.Message, _ ...model.Option) (*schema.StreamReader[*schema.Message], error) {
 	sr, sw := schema.Pipe[*schema.Message](len(c.msgs))
 	go func() {
 		for _, msg := range c.msgs {
@@ -570,7 +571,7 @@ func TestValidate(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ret, err = concatStreamReader(streamResult)
+	ret, err = internal.ConcatStreamReader(streamResult)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -701,7 +702,7 @@ func TestValidateMultiAnyValueBranch(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ret, err = concatStreamReader(streamResult)
+	ret, err = internal.ConcatStreamReader(streamResult)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -823,7 +824,7 @@ func TestAnyTypeWithKey(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ret, err := concatStreamReader(streamResult)
+	ret, err := internal.ConcatStreamReader(streamResult)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -922,66 +923,6 @@ func TestInputKey(t *testing.T) {
 	}
 }
 
-func TestTransferTask(t *testing.T) {
-	in := [][]string{
-		{
-			"1",
-			"2",
-		},
-		{
-			"3",
-			"4",
-			"5",
-			"6",
-		},
-		{
-			"5",
-			"6",
-			"7",
-		},
-		{
-			"7",
-			"8",
-		},
-		{
-			"8",
-		},
-	}
-	invertedEdges := map[string][]string{
-		"1": {"3", "4"},
-		"2": {"5", "6"},
-		"3": {"5"},
-		"4": {"6"},
-		"5": {"7"},
-		"7": {"8"},
-	}
-	in = transferTask(in, invertedEdges)
-
-	if !reflect.DeepEqual(
-		[][]string{
-			{
-				"1",
-			},
-			{
-				"3",
-				"2",
-			},
-			{
-				"5",
-			},
-			{
-				"7",
-				"4",
-			},
-			{
-				"8",
-				"6",
-			},
-		}, in) {
-		t.Fatal("not equal")
-	}
-}
-
 func TestPregelEnd(t *testing.T) {
 	g := NewGraph[string, string]()
 	err := g.AddLambdaNode("node1", InvokableLambda(func(ctx context.Context, input string) (output string, err error) {
@@ -1030,7 +971,7 @@ type cb struct {
 	gInfo *GraphInfo
 }
 
-func (c *cb) OnFinish(ctx context.Context, info *GraphInfo) {
+func (c *cb) OnFinish(_ context.Context, info *GraphInfo) {
 	c.gInfo = info
 }
 
@@ -1179,7 +1120,7 @@ func TestGraphCompileCallback(t *testing.T) {
 										START:  {"sub1"},
 										"sub1": {END},
 									},
-									Branches:   map[string][]GraphBranch{},
+									Branches:   map[string][]internal.GraphBranch{},
 									InputType:  reflect.TypeOf(""),
 									OutputType: reflect.TypeOf(""),
 								},
@@ -1189,7 +1130,7 @@ func TestGraphCompileCallback(t *testing.T) {
 							START:       {"sub_sub_1"},
 							"sub_sub_1": {END},
 						},
-						Branches:   map[string][]GraphBranch{},
+						Branches:   map[string][]internal.GraphBranch{},
 						InputType:  reflect.TypeOf(""),
 						OutputType: reflect.TypeOf(""),
 						Name:       "sub_graph",
@@ -1235,16 +1176,6 @@ func TestGraphCompileCallback(t *testing.T) {
 		assert.Equal(t, &s{}, stateFn(context.Background()))
 
 		c.gInfo.GenStateFn = nil
-
-		actualCompileOptions := newGraphCompileOptions(c.gInfo.CompileOptions...)
-		expectedCompileOptions := newGraphCompileOptions(expected.CompileOptions...)
-		assert.Equal(t, len(expectedCompileOptions.callbacks), len(actualCompileOptions.callbacks))
-		assert.Same(t, expectedCompileOptions.callbacks[0], actualCompileOptions.callbacks[0])
-		actualCompileOptions.callbacks = nil
-		actualCompileOptions.origOpts = nil
-		expectedCompileOptions.callbacks = nil
-		expectedCompileOptions.origOpts = nil
-		assert.Equal(t, expectedCompileOptions, actualCompileOptions)
 
 		c.gInfo.CompileOptions = nil
 		expected.CompileOptions = nil
@@ -1311,14 +1242,6 @@ func TestStartWithEnd(t *testing.T) {
 	}
 }
 
-func TestToString(t *testing.T) {
-	ps := runTypePregel.String()
-	assert.Equal(t, "Pregel", ps)
-
-	ds := runTypeDAG
-	assert.Equal(t, "DAG", ds.String())
-}
-
 func TestInputKeyError(t *testing.T) {
 	g := NewGraph[map[string]any, string]()
 	err := g.AddLambdaNode("node1", InvokableLambda(func(ctx context.Context, input string) (output string, err error) {
@@ -1382,5 +1305,209 @@ func TestContextCancel(t *testing.T) {
 	_, err = r.Invoke(ctx, "test")
 	if !strings.Contains(err.Error(), "context has been canceled") {
 		t.Fatal("graph have not returned canceled error")
+	}
+}
+
+func TestDAG(t *testing.T) {
+	var err error
+
+	g := NewGraph[string, string]()
+	err = g.AddLambdaNode("1", InvokableLambda(func(ctx context.Context, input string) (output string, err error) {
+		return input, nil
+	}), WithOutputKey("1"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	err = g.AddLambdaNode("2", InvokableLambda(func(ctx context.Context, input string) (output string, err error) {
+		return input, nil
+	}), WithOutputKey("2"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	err = g.AddLambdaNode("3", InvokableLambda(func(ctx context.Context, input map[string]any) (output string, err error) {
+		if _, ok := input["1"]; !ok {
+			return "", fmt.Errorf("node 1 output fail: %+v", input)
+		}
+		if _, ok := input["2"]; !ok {
+			return "", fmt.Errorf("node 2 output fail: %+v", input)
+		}
+		return input["1"].(string) + input["2"].(string), nil
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	err = g.AddLambdaNode("4", InvokableLambda(func(ctx context.Context, input string) (output string, err error) {
+		return input, nil
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	err = g.AddLambdaNode("5", InvokableLambda(func(ctx context.Context, input string) (output string, err error) {
+		return input, nil
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	err = g.AddLambdaNode("6", InvokableLambda(func(ctx context.Context, input string) (output string, err error) {
+		return input, nil
+	}), WithOutputKey("6"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	err = g.AddLambdaNode("7", InvokableLambda(func(ctx context.Context, input map[string]any) (output string, err error) {
+		if _, ok := input["1"]; !ok {
+			return "", fmt.Errorf("7:node 1 output fail: %+v", input)
+		}
+		if _, ok := input["6"]; !ok {
+			return "", fmt.Errorf("7:node 6 output fail: %+v", input)
+		}
+		return input["1"].(string) + input["6"].(string), nil
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	err = g.AddEdge("1", "3")
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = g.AddEdge("2", "3")
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = g.AddEdge("3", "4")
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = g.AddEdge("4", "5")
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = g.AddEdge("4", "6")
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = g.AddEdge("6", "7")
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = g.AddEdge("1", "7")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	err = g.AddEdge(START, "1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = g.AddEdge(START, "2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = g.AddEdge("7", END)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	r, err := g.Compile(context.Background(), WithNodeTriggerMode(AllPredecessor), WithMaxRunSteps(10))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// success
+	ctx := context.Background()
+	out, err := r.Invoke(ctx, "hello")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out != "hellohellohello" {
+		t.Fatalf("node7 fail")
+	}
+
+	// test Compile[I,O]
+	runner, err := g.Compile(context.Background(), WithMaxRunSteps(100), WithNodeTriggerMode(AllPredecessor))
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := runner.Invoke(ctx, "1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result != "111" {
+		t.Fatalf("runner invoke fail, output: %s", result)
+	}
+	streamResult, err := runner.Stream(ctx, "1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer streamResult.Close()
+	ret := ""
+	for {
+		chunk, err := streamResult.Recv()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		ret += chunk
+	}
+	if ret != "111" {
+		t.Fatalf("runner stream fail, output: %s", ret)
+	}
+
+	// loop
+	gg := NewGraph[string, map[string]any]()
+	err = gg.AddLambdaNode("1", InvokableLambda(func(ctx context.Context, input string) (output string, err error) {
+		return input, nil
+	}), WithOutputKey("1"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	err = gg.AddLambdaNode("2", InvokableLambda(func(ctx context.Context, input map[string]any) (output string, err error) {
+		return input["1"].(string), nil
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	err = gg.AddLambdaNode("3", InvokableLambda(func(ctx context.Context, input string) (output string, err error) {
+		return input, nil
+	}), WithOutputKey("3"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	err = gg.AddEdge("1", "2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = gg.AddEdge("2", "3")
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = gg.AddEdge("3", "2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = gg.AddEdge(START, "1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = gg.AddEdge("3", END)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = gg.Compile(ctx, WithNodeTriggerMode(AllPredecessor))
+	if err == nil {
+		t.Fatal("cannot validate loop")
 	}
 }

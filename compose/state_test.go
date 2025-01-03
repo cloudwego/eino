@@ -25,6 +25,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 
+	"github.com/cloudwego/eino/compose/internal"
 	"github.com/cloudwego/eino/schema"
 )
 
@@ -158,7 +159,7 @@ func TestStateGraphWithEdge(t *testing.T) {
 
 	stream, err := run.Stream(ctx, "how are you")
 	assert.NoError(t, err)
-	out, err = concatStreamReader(stream)
+	out, err = internal.ConcatStreamReader(stream)
 	assert.NoError(t, err)
 	t.Logf("stream result: %v", out)
 	assert.Equal(t, "TransformableLambda: StreamableLambda: InvokableLambda: how are you ", out)
@@ -169,7 +170,7 @@ func TestStateGraphWithEdge(t *testing.T) {
 
 	stream, err = run.Transform(ctx, sr)
 	assert.NoError(t, err)
-	out, err = concatStreamReader(stream)
+	out, err = internal.ConcatStreamReader(stream)
 	assert.NoError(t, err)
 	t.Logf("transform result: %v", out)
 	assert.Equal(t, "TransformableLambda: StreamableLambda: InvokableLambda: how are you ", out)
@@ -183,7 +184,7 @@ func TestStateGraphUtils(t *testing.T) {
 
 		ctx := context.Background()
 
-		ctx = context.WithValue(ctx, stateKey{}, &testStruct{UserID: 10})
+		ctx = context.WithValue(ctx, internal.StateKey{}, &testStruct{UserID: 10})
 
 		ts, err := GetState[*testStruct](ctx)
 		assert.NoError(t, err)
@@ -207,7 +208,7 @@ func TestStateGraphUtils(t *testing.T) {
 		}
 
 		ctx := context.Background()
-		ctx = context.WithValue(ctx, stateKey{}, &testStruct{UserID: 10})
+		ctx = context.WithValue(ctx, internal.StateKey{}, &testStruct{UserID: 10})
 
 		_, err := GetState[string](ctx)
 		assert.ErrorContains(t, err, "unexpected state type. expected: string, got: *compose.testStruct")

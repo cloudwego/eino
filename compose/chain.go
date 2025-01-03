@@ -19,8 +19,6 @@ package compose
 import (
 	"context"
 	"errors"
-	"fmt"
-	"reflect"
 
 	"github.com/cloudwego/eino/components/document"
 	"github.com/cloudwego/eino/components/embedding"
@@ -28,22 +26,8 @@ import (
 	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/components/prompt"
 	"github.com/cloudwego/eino/components/retriever"
-	"github.com/cloudwego/eino/internal/gmap"
-	"github.com/cloudwego/eino/internal/gslice"
-	"github.com/cloudwego/eino/schema"
-	"github.com/cloudwego/eino/utils/generic"
+	"github.com/cloudwego/eino/compose/internal"
 )
-
-// NewChain create a chain with input/output type.
-func NewChain[I, O any](opts ...NewGraphOption) *Chain[I, O] {
-	ch := &Chain[I, O]{
-		gg: NewGraph[I, O](opts...),
-	}
-
-	ch.gg.cmp = ComponentOfChain
-
-	return ch
-}
 
 // Chain is a chain of components.
 // Chain nodes can be parallel / branch / sequence components.
@@ -71,73 +55,15 @@ func NewChain[I, O any](opts ...NewGraphOption) *Chain[I, O] {
 // chain2 := NewChain[inputType, outputType]()
 // chain2.AppendGraph(chain1)
 type Chain[I, O any] struct {
-	err error
-
-	gg *Graph[I, O]
-
-	namePrefix string
-	nodeIdx    int
-
-	preNodeKeys []string
-
-	hasEnd bool
+	*internal.Chain[I, O]
 }
 
 // ErrChainCompiled is returned when attempting to modify a chain after it has been compiled
-var ErrChainCompiled = errors.New("chain has been compiled, cannot be modified")
+var ErrChainCompiled = internal.ErrChainCompiled
 
-// implements AnyGraph.
-func (c *Chain[I, O]) compile(ctx context.Context, option *graphCompileOptions) (*composableRunnable, error) {
-	if err := c.addEndIfNeeded(); err != nil {
-		return nil, err
-	}
-
-	return c.gg.compile(ctx, option)
-}
-
-// addEndIfNeeded add END edge of the chain/graph.
-// only run once when compiling.
-func (c *Chain[I, O]) addEndIfNeeded() error {
-	if c.hasEnd {
-		return nil
-	}
-
-	if c.err != nil {
-		return c.err
-	}
-
-	if len(c.preNodeKeys) == 0 {
-		return fmt.Errorf("pre node keys not set, number of nodes in chain= %d", len(c.gg.nodes))
-	}
-
-	for _, nodeKey := range c.preNodeKeys {
-		err := c.gg.AddEdge(nodeKey, END)
-		if err != nil {
-			return err
-		}
-	}
-
-	c.hasEnd = true
-
-	return nil
-}
-
-// inputType returns the input type of the chain.
-// implements AnyGraph.
-func (c *Chain[I, O]) inputType() reflect.Type {
-	return generic.TypeOf[I]()
-}
-
-// outputType returns the output type of the chain.
-// implements AnyGraph.
-func (c *Chain[I, O]) outputType() reflect.Type {
-	return generic.TypeOf[O]()
-}
-
-// compositeType returns the composite type of the chain.
-// implements AnyGraph.
-func (c *Chain[I, O]) component() component {
-	return c.gg.component()
+// NewChain create a chain with input/output type.
+func NewChain[I, O any](opts ...NewGraphOption) *Chain[I, O] {
+	return &Chain[I, O]{internal.NewChain[I, O](opts...)}
 }
 
 // Compile to a Runnable.
@@ -153,11 +79,12 @@ func (c *Chain[I, O]) component() component {
 //		r.Collect(ctx, inputReader) // stream in => pong
 //		r.Transform(ctx, inputReader) // stream in => stream out
 func (c *Chain[I, O]) Compile(ctx context.Context, opts ...GraphCompileOption) (Runnable[I, O], error) {
-	if err := c.addEndIfNeeded(); err != nil {
+	r, err := c.Chain.Compile(ctx, opts...)
+	if err != nil {
 		return nil, err
 	}
 
-	return c.gg.Compile(ctx, opts...)
+	return convertRunnable(r), nil
 }
 
 // AppendChatModel add a ChatModel node to the chain.
@@ -167,13 +94,13 @@ func (c *Chain[I, O]) Compile(ctx context.Context, opts ...GraphCompileOption) (
 //	if err != nil {...}
 //	chain.AppendChatModel(model)
 func (c *Chain[I, O]) AppendChatModel(node model.ChatModel, opts ...GraphAddNodeOpt) *Chain[I, O] {
-	gNode, options := toChatModelNode(node, opts...)
-	c.addNode(gNode, options)
+	gNode, options := internal.ToChatModelNode(node, opts...)
+	c.AddNode(gNode, options)
 	return c
 }
 
 // AppendChatTemplate add a ChatTemplate node to the chain.
-// eg.
+// e.g.
 //
 //	chatTemplate, err := prompt.FromMessages(schema.FString, &schema.Message{
 //		Role:    schema.System,
@@ -182,8 +109,8 @@ func (c *Chain[I, O]) AppendChatModel(node model.ChatModel, opts ...GraphAddNode
 //
 //	chain.AppendChatTemplate(chatTemplate)
 func (c *Chain[I, O]) AppendChatTemplate(node prompt.ChatTemplate, opts ...GraphAddNodeOpt) *Chain[I, O] {
-	gNode, options := toChatTemplateNode(node, opts...)
-	c.addNode(gNode, options)
+	gNode, options := internal.ToChatTemplateNode(node, opts...)
+	c.AddNode(gNode, options)
 	return c
 }
 
@@ -196,8 +123,8 @@ func (c *Chain[I, O]) AppendChatTemplate(node prompt.ChatTemplate, opts ...Graph
 //
 //	chain.AppendToolsNode(toolsNode)
 func (c *Chain[I, O]) AppendToolsNode(node *ToolsNode, opts ...GraphAddNodeOpt) *Chain[I, O] {
-	gNode, options := toToolsNode(node, opts...)
-	c.addNode(gNode, options)
+	gNode, options := internal.ToToolsNode(node.ToolsNode, opts...)
+	c.AddNode(gNode, options)
 	return c
 }
 
@@ -208,8 +135,8 @@ func (c *Chain[I, O]) AppendToolsNode(node *ToolsNode, opts ...GraphAddNodeOpt) 
 //
 //	chain.AppendDocumentTransformer(markdownSplitter)
 func (c *Chain[I, O]) AppendDocumentTransformer(node document.Transformer, opts ...GraphAddNodeOpt) *Chain[I, O] {
-	gNode, options := toDocumentTransformerNode(node, opts...)
-	c.addNode(gNode, options)
+	gNode, options := internal.ToDocumentTransformerNode(node, opts...)
+	c.AddNode(gNode, options)
 	return c
 }
 
@@ -224,8 +151,8 @@ func (c *Chain[I, O]) AppendDocumentTransformer(node document.Transformer, opts 
 // to create a Lambda node, you need to use `compose.AnyLambda` or `compose.InvokableLambda` or `compose.StreamableLambda` or `compose.TransformableLambda`.
 // if you want this node has real stream output, you need to use `compose.StreamableLambda` or `compose.TransformableLambda`, for example.
 func (c *Chain[I, O]) AppendLambda(node *Lambda, opts ...GraphAddNodeOpt) *Chain[I, O] {
-	gNode, options := toLambdaNode(node, opts...)
-	c.addNode(gNode, options)
+	gNode, options := internal.ToLambdaNode(node, opts...)
+	c.AddNode(gNode, options)
 	return c
 }
 
@@ -236,8 +163,8 @@ func (c *Chain[I, O]) AppendLambda(node *Lambda, opts ...GraphAddNodeOpt) *Chain
 //	if err != nil {...}
 //	chain.AppendEmbedding(embedder)
 func (c *Chain[I, O]) AppendEmbedding(node embedding.Embedder, opts ...GraphAddNodeOpt) *Chain[I, O] {
-	gNode, options := toEmbeddingNode(node, opts...)
-	c.addNode(gNode, options)
+	gNode, options := internal.ToEmbeddingNode(node, opts...)
+	c.AddNode(gNode, options)
 	return c
 }
 
@@ -255,16 +182,8 @@ func (c *Chain[I, O]) AppendEmbedding(node embedding.Embedder, opts ...GraphAddN
 //		if err != nil {...}
 //		chain.AppendRetriever(retriever)
 func (c *Chain[I, O]) AppendRetriever(node retriever.Retriever, opts ...GraphAddNodeOpt) *Chain[I, O] {
-	gNode, options := toRetrieverNode(node, opts...)
-	c.addNode(gNode, options)
-	return c
-}
-
-// AppendLoaderSplitter add a LoaderSplitter node to the chain.
-// Deprecated: use AppendLoader instead.
-func (c *Chain[I, O]) AppendLoaderSplitter(node document.LoaderSplitter, opts ...GraphAddNodeOpt) *Chain[I, O] {
-	gNode, options := toLoaderSplitterNode(node, opts...)
-	c.addNode(gNode, options)
+	gNode, options := internal.ToRetrieverNode(node, opts...)
+	c.AddNode(gNode, options)
 	return c
 }
 
@@ -275,8 +194,8 @@ func (c *Chain[I, O]) AppendLoaderSplitter(node document.LoaderSplitter, opts ..
 //	if err != nil {...}
 //	chain.AppendLoader(loader)
 func (c *Chain[I, O]) AppendLoader(node document.Loader, opts ...GraphAddNodeOpt) *Chain[I, O] {
-	gNode, options := toLoaderNode(node, opts...)
-	c.addNode(gNode, options)
+	gNode, options := internal.ToLoaderNode(node, opts...)
+	c.AddNode(gNode, options)
 	return c
 }
 
@@ -293,8 +212,8 @@ func (c *Chain[I, O]) AppendLoader(node document.Loader, opts ...GraphAddNodeOpt
 //
 //	chain.AppendIndexer(indexer)
 func (c *Chain[I, O]) AppendIndexer(node indexer.Indexer, opts ...GraphAddNodeOpt) *Chain[I, O] {
-	gNode, options := toIndexerNode(node, opts...)
-	c.addNode(gNode, options)
+	gNode, options := internal.ToIndexerNode(node, opts...)
+	c.AddNode(gNode, options)
 	return c
 }
 
@@ -307,127 +226,12 @@ func (c *Chain[I, O]) AppendIndexer(node indexer.Indexer, opts ...GraphAddNodeOp
 //	cb.AddChatTemplate("chat_template_key_01", chatTemplate)
 //	cb.AddChatTemplate("chat_template_key_02", chatTemplate2)
 //	chain.AppendBranch(cb)
-func (c *Chain[I, O]) AppendBranch(b *ChainBranch) *Chain[I, O] { // nolint: byted_s_too_many_lines_in_func
+func (c *Chain[I, O]) AppendBranch(b *ChainBranch) *Chain[I, O] {
 	if b == nil {
-		c.reportError(fmt.Errorf("append branch invalid, branch is nil"))
+		c.Err = errors.New("nil chain branch")
 		return c
 	}
-
-	if b.err != nil {
-		c.reportError(fmt.Errorf("append branch error: %w", b.err))
-		return c
-	}
-
-	if len(b.key2BranchNode) == 0 {
-		c.reportError(fmt.Errorf("append branch invalid, nodeList is empty"))
-		return c
-	}
-
-	if len(b.key2BranchNode) == 1 {
-		c.reportError(fmt.Errorf("append branch invalid, nodeList length = 1"))
-		return c
-	}
-
-	var startNode string
-	if len(c.preNodeKeys) == 0 { // branch appended directly to START
-		startNode = START
-	} else if len(c.preNodeKeys) == 1 {
-		startNode = c.preNodeKeys[0]
-	} else {
-		c.reportError(fmt.Errorf("append branch invalid, multiple previous nodes: %v ", c.preNodeKeys))
-		return c
-	}
-
-	pName := c.nextNodeKey("Branch")
-	key2NodeKey := make(map[string]string, len(b.key2BranchNode))
-
-	for key := range b.key2BranchNode {
-		node := b.key2BranchNode[key]
-		nodeKey := fmt.Sprintf("%s[%s]_%s", pName, key, genNodeKeySuffix(node.First))
-
-		if err := c.gg.addNode(nodeKey, node.First, node.Second); err != nil {
-			c.reportError(fmt.Errorf("add branch node[%s] to chain failed: %w", nodeKey, err))
-			return c
-		}
-
-		key2NodeKey[key] = nodeKey
-	}
-
-	condition := &composableRunnable{
-		i:                 b.condition.i,
-		t:                 b.condition.t,
-		inputType:         b.condition.inputType,
-		inputStreamFilter: b.condition.inputStreamFilter,
-		outputType:        b.condition.outputType,
-		optionType:        b.condition.optionType,
-		isPassthrough:     b.condition.isPassthrough,
-		meta:              b.condition.meta,
-		nodeInfo:          b.condition.nodeInfo,
-	}
-
-	invokeCon := func(ctx context.Context, in any, opts ...any) (endNode any, err error) {
-		endKey, err := b.condition.i(ctx, in, opts...)
-		if err != nil {
-			return "", err
-		}
-
-		endStr, ok := endKey.(string)
-		if !ok {
-			return "", fmt.Errorf("chain branch result not string, got: %T", endKey)
-		}
-
-		nodeKey, ok := key2NodeKey[endStr]
-		if !ok {
-			return "", fmt.Errorf("chain branch result not in added keys: %s", endStr)
-		}
-
-		return nodeKey, nil
-	}
-	condition.i = invokeCon
-
-	transformCon := func(ctx context.Context, sr streamReader, opts ...any) (streamReader, error) {
-		iEndStream, err := b.condition.t(ctx, sr, opts...)
-		if err != nil {
-			return nil, err
-		}
-
-		if iEndStream.getChunkType() != reflect.TypeOf("") {
-			return nil, fmt.Errorf("chain branch result not string, got: %v", iEndStream.getChunkType())
-		}
-
-		endStream, ok := unpackStreamReader[string](iEndStream)
-		if !ok {
-			return nil, fmt.Errorf("unpack stream reader not ok")
-		}
-
-		endStr, err := concatStreamReader(endStream)
-		if err != nil {
-			return nil, err
-		}
-
-		nodeKey, ok := key2NodeKey[endStr]
-		if !ok {
-			return nil, fmt.Errorf("chain branch result not in added keys: %s", endStr)
-		}
-
-		return packStreamReader(schema.StreamReaderFromArray([]string{nodeKey})), nil
-	}
-	condition.t = transformCon
-
-	gBranch := &GraphBranch{
-		condition: condition,
-		endNodes: gslice.ToMap(gmap.Values(key2NodeKey), func(k string) (string, bool) {
-			return k, true
-		}),
-	}
-
-	if err := c.gg.AddBranch(startNode, gBranch); err != nil {
-		c.reportError(fmt.Errorf("chain append branch failed: %w", err))
-		return c
-	}
-
-	c.preNodeKeys = gmap.Values(key2NodeKey)
-
+	c.Chain.AppendBranch(b.ChainBranch)
 	return c
 }
 
@@ -443,49 +247,10 @@ func (c *Chain[I, O]) AppendBranch(b *ChainBranch) *Chain[I, O] { // nolint: byt
 //	The next node in the chain is either an END, or a node which accepts a map[string]any, where keys are `openai` `maas` as specified above.
 func (c *Chain[I, O]) AppendParallel(p *Parallel) *Chain[I, O] {
 	if p == nil {
-		c.reportError(fmt.Errorf("append parallel invalid, parallel is nil"))
+		c.Err = errors.New("nil parallel")
 		return c
 	}
-
-	if p.err != nil {
-		c.reportError(fmt.Errorf("append parallel invalid, parallel error: %w", p.err))
-		return c
-	}
-
-	if len(p.nodes) <= 1 {
-		c.reportError(fmt.Errorf("append parallel invalid, not enough nodes, count = %d", len(p.nodes)))
-		return c
-	}
-
-	var startNode string
-	if len(c.preNodeKeys) == 0 { // parallel appended directly to START
-		startNode = START
-	} else if len(c.preNodeKeys) == 1 {
-		startNode = c.preNodeKeys[0]
-	} else {
-		c.reportError(fmt.Errorf("append parallel invalid, multiple previous nodes: %v ", c.preNodeKeys))
-		return c
-	}
-
-	pName := c.nextNodeKey("Parallel")
-	var nodeKeys []string
-
-	for i := range p.nodes {
-		node := p.nodes[i]
-		nodeKey := fmt.Sprintf("%s[%d]_%s", pName, i, genNodeKeySuffix(node.First))
-		if err := c.gg.addNode(nodeKey, node.First, node.Second); err != nil {
-			c.reportError(fmt.Errorf("add parallel node[%s] to chain failed: %w", nodeKey, err))
-			return c
-		}
-		if err := c.gg.AddEdge(startNode, nodeKey); err != nil {
-			c.reportError(fmt.Errorf("add parallel edge[%s]-[%s] to chain failed: %w", startNode, nodeKey, err))
-			return c
-		}
-		nodeKeys = append(nodeKeys, nodeKey)
-	}
-
-	c.preNodeKeys = nodeKeys
-
+	c.Chain.AppendParallel(p.Parallel)
 	return c
 }
 
@@ -496,8 +261,8 @@ func (c *Chain[I, O]) AppendParallel(p *Parallel) *Chain[I, O] {
 //	graph := compose.NewGraph[string, string]()
 //	chain.AppendGraph(graph)
 func (c *Chain[I, O]) AppendGraph(node AnyGraph, opts ...GraphAddNodeOpt) *Chain[I, O] {
-	gNode, options := toAnyGraphNode(node, opts...)
-	c.addNode(gNode, options)
+	gNode, options := internal.ToAnyGraphNode(node, opts...)
+	c.AddNode(gNode, options)
 	return c
 }
 
@@ -507,78 +272,378 @@ func (c *Chain[I, O]) AppendGraph(node AnyGraph, opts ...GraphAddNodeOpt) *Chain
 //
 //	chain.AppendPassthrough()
 func (c *Chain[I, O]) AppendPassthrough(opts ...GraphAddNodeOpt) *Chain[I, O] {
-	gNode, options := toPassthroughNode(opts...)
-	c.addNode(gNode, options)
+	gNode, options := internal.ToPassthroughNode(opts...)
+	c.AddNode(gNode, options)
 	return c
 }
 
-// nextNodeKey.
-// get the next node key for the chain.
-// e.g. "Chain[1]_ChatModel" => represent the second node of the chain, and is a ChatModel node.
-// e.g. "Chain[2]_NameByUser" => represent the third node of the chain, and the node name is set by user of `NameByUser`.
-func (c *Chain[I, O]) nextNodeKey(name string) string {
-	if c.namePrefix == "" {
-		c.namePrefix = string(ComponentOfChain)
-	}
-	fullKey := fmt.Sprintf("%s[%d]_%s", c.namePrefix, c.nodeIdx, name)
-	c.nodeIdx++
-	return fullKey
+// ChainBranch represents a conditional branch in a chain of operations.
+// It allows for dynamic routing of execution based on a condition.
+// All branches within ChainBranch are expected to either end the Chain, or converge to another node in the Chain.
+type ChainBranch struct {
+	*internal.ChainBranch
 }
 
-// reportError.
-// save the first error in the chain.
-func (c *Chain[I, O]) reportError(err error) {
-	if c.err == nil {
-		c.err = err
-	}
+// NewChainBranch creates a new ChainBranch instance based on a given condition.
+// It takes a generic type T and a GraphBranchCondition function for that type.
+// The returned ChainBranch will have an empty key2BranchNode map and a condition function
+// that wraps the provided cond to handle type assertions and error checking.
+// e.g.
+//
+//	condition := func(ctx context.Context, in string, opts ...any) (endNode string, err error) {
+//		// logic to determine the next node
+//		return "some_next_node_key", nil
+//	}
+//
+//	cb := NewChainBranch[string](condition)
+//	cb.AddPassthrough("next_node_key_01", xxx) // node in branch, represent one path of branch
+//	cb.AddPassthrough("next_node_key_02", xxx) // node in branch
+func NewChainBranch[T any](cond GraphBranchCondition[T]) *ChainBranch {
+	return &ChainBranch{internal.NewChainBranch[T](cond)}
 }
 
-// addNode.
-// add a node to the chain.
-func (c *Chain[I, O]) addNode(node *graphNode, options *graphAddNodeOpts) {
-	if c.err != nil {
-		return
-	}
-
-	if c.gg.compiled {
-		c.reportError(ErrChainCompiled)
-		return
-	}
-
-	if node == nil {
-		c.reportError(fmt.Errorf("chain add node invalid, node is nil"))
-		return
-	}
-
-	nodeKey := options.nodeOptions.nodeKey
-	if nodeKey == "" {
-		nodeKey = c.nextNodeKey(genNodeKeySuffix(node))
-	}
-
-	err := c.gg.addNode(nodeKey, node, options)
-	if err != nil {
-		c.reportError(err)
-		return
-	}
-
-	if len(c.preNodeKeys) == 0 {
-		c.preNodeKeys = append(c.preNodeKeys, START)
-	}
-
-	for _, preNodeKey := range c.preNodeKeys {
-		e := c.gg.AddEdge(preNodeKey, nodeKey)
-		if e != nil {
-			c.reportError(e)
-			return
-		}
-	}
-
-	c.preNodeKeys = []string{nodeKey}
+// NewStreamChainBranch creates a new ChainBranch instance based on a given stream condition.
+// It takes a generic type T and a StreamGraphBranchCondition function for that type.
+// The returned ChainBranch will have an empty key2BranchNode map and a condition function
+// that wraps the provided cond to handle type assertions and error checking.
+// e.g.
+//
+//	condition := func(ctx context.Context, in *schema.StreamReader[string], opts ...any) (endNode string, err error) {
+//		// logic to determine the next node, you can read the stream and make a decision.
+//		// to save time, usually read the first chunk of stream, then make a decision which path to go.
+//		return "some_next_node_key", nil
+//	}
+//
+//	cb := NewStreamChainBranch[string](condition)
+func NewStreamChainBranch[T any](cond StreamGraphBranchCondition[T]) *ChainBranch {
+	return &ChainBranch{internal.NewStreamChainBranch[T](cond)}
 }
 
-func genNodeKeySuffix(node *graphNode) string {
-	if len(node.nodeInfo.name) == 0 {
-		return node.executorMeta.componentImplType + string(node.executorMeta.component)
-	}
-	return node.nodeInfo.name
+// AddChatModel adds a ChatModel node to the branch.
+// e.g.
+//
+//	chatModel01, err := openai.NewChatModel(ctx, &openai.ChatModelConfig{
+//		Model: "gpt-4o",
+//	})
+//	chatModel02, err := openai.NewChatModel(ctx, &openai.ChatModelConfig{
+//		Model: "gpt-4o-mini",
+//	})
+//	cb.AddChatModel("chat_model_key_01", chatModel01)
+//	cb.AddChatModel("chat_model_key_02", chatModel02)
+func (cb *ChainBranch) AddChatModel(key string, node model.ChatModel, opts ...GraphAddNodeOpt) *ChainBranch {
+	gNode, options := internal.ToChatModelNode(node, opts...)
+	cb.ChainBranch.AddNode(key, gNode, options)
+	return cb
+}
+
+// AddChatTemplate adds a ChatTemplate node to the branch.
+// e.g.
+//
+//	chatTemplate, err := prompt.FromMessages(schema.FString, &schema.Message{
+//		Role:    schema.System,
+//		Content: "You are acting as a {role}.",
+//	})
+//
+//	cb.AddChatTemplate("chat_template_key_01", chatTemplate)
+//
+//	chatTemplate2, err := prompt.FromMessages(schema.FString, &schema.Message{
+//		Role:    schema.System,
+//		Content: "You are acting as a {role}, you are not allowed to chat in other topics.",
+//	})
+//
+//	cb.AddChatTemplate("chat_template_key_02", chatTemplate2)
+func (cb *ChainBranch) AddChatTemplate(key string, node prompt.ChatTemplate, opts ...GraphAddNodeOpt) *ChainBranch {
+	gNode, options := internal.ToChatTemplateNode(node, opts...)
+	cb.ChainBranch.AddNode(key, gNode, options)
+	return cb
+}
+
+// AddToolsNode adds a ToolsNode to the branch.
+// e.g.
+//
+//	toolsNode, err := tools.NewToolNode(ctx, &tools.ToolsNodeConfig{
+//		Tools: []tools.Tool{...},
+//	})
+//
+//	cb.AddToolsNode("tools_node_key", toolsNode)
+func (cb *ChainBranch) AddToolsNode(key string, node *ToolsNode, opts ...GraphAddNodeOpt) *ChainBranch {
+	gNode, options := internal.ToToolsNode(node.ToolsNode, opts...)
+	cb.ChainBranch.AddNode(key, gNode, options)
+	return cb
+}
+
+// AddLambda adds a Lambda node to the branch.
+// e.g.
+//
+//	lambdaFunc := func(ctx context.Context, in string, opts ...any) (out string, err error) {
+//		// logic to process the input
+//		return "processed_output", nil
+//	}
+//
+//	cb.AddLambda("lambda_node_key", compose.InvokeLambda(lambdaFunc))
+func (cb *ChainBranch) AddLambda(key string, node *Lambda, opts ...GraphAddNodeOpt) *ChainBranch {
+	gNode, options := internal.ToLambdaNode(node, opts...)
+	cb.ChainBranch.AddNode(key, gNode, options)
+	return cb
+}
+
+// AddEmbedding adds an Embedding node to the branch.
+// e.g.
+//
+//	embeddingNode, err := openai.NewEmbedder(ctx, &openai.EmbeddingConfig{
+//		Model: "text-embedding-3-small",
+//	})
+//
+//	cb.AddEmbedding("embedding_node_key", embeddingNode)
+func (cb *ChainBranch) AddEmbedding(key string, node embedding.Embedder, opts ...GraphAddNodeOpt) *ChainBranch {
+	gNode, options := internal.ToEmbeddingNode(node, opts...)
+	cb.ChainBranch.AddNode(key, gNode, options)
+	return cb
+}
+
+// AddRetriever adds a Retriever node to the branch.
+// e.g.
+//
+//	retriever, err := volc_vikingdb.NewRetriever(ctx, &volc_vikingdb.RetrieverConfig{
+//		Collection: "my_collection",
+//	})
+//
+//	cb.AddRetriever("retriever_node_key", retriever)
+func (cb *ChainBranch) AddRetriever(key string, node retriever.Retriever, opts ...GraphAddNodeOpt) *ChainBranch {
+	gNode, options := internal.ToRetrieverNode(node, opts...)
+	cb.ChainBranch.AddNode(key, gNode, options)
+	return cb
+}
+
+// AddLoader adds a Loader node to the branch.
+// e.g.
+//
+//	pdfParser, err := pdf.NewPDFParser()
+//	loader, err := file.NewFileLoader(ctx, &file.FileLoaderConfig{
+//		Parser: pdfParser,
+//	})
+//
+//	cb.AddLoader("loader_node_key", loader)
+func (cb *ChainBranch) AddLoader(key string, node document.Loader, opts ...GraphAddNodeOpt) *ChainBranch {
+	gNode, options := internal.ToLoaderNode(node, opts...)
+	cb.ChainBranch.AddNode(key, gNode, options)
+	return cb
+}
+
+// AddIndexer adds an Indexer node to the branch.
+// e.g.
+//
+//	indexer, err := volc_vikingdb.NewIndexer(ctx, &volc_vikingdb.IndexerConfig{
+//		Collection: "my_collection",
+//	})
+//
+//	cb.AddIndexer("indexer_node_key", indexer)
+func (cb *ChainBranch) AddIndexer(key string, node indexer.Indexer, opts ...GraphAddNodeOpt) *ChainBranch {
+	gNode, options := internal.ToIndexerNode(node, opts...)
+	cb.ChainBranch.AddNode(key, gNode, options)
+	return cb
+}
+
+// AddDocumentTransformer adds a Document Transformer node to the branch.
+// e.g.
+//
+//	markdownSplitter, err := markdown.NewHeaderSplitter(ctx, &markdown.HeaderSplitterConfig{})
+//
+//	cb.AddDocumentTransformer("document_transformer_node_key", markdownSplitter)
+func (cb *ChainBranch) AddDocumentTransformer(key string, node document.Transformer, opts ...GraphAddNodeOpt) *ChainBranch {
+	gNode, options := internal.ToDocumentTransformerNode(node, opts...)
+	cb.ChainBranch.AddNode(key, gNode, options)
+	return cb
+}
+
+// AddGraph adds a generic Graph node to the branch.
+// e.g.
+//
+//	graph, err := compose.NewGraph[string, string]()
+//
+//	cb.AddGraph("graph_node_key", graph)
+func (cb *ChainBranch) AddGraph(key string, node AnyGraph, opts ...GraphAddNodeOpt) *ChainBranch {
+	gNode, options := internal.ToAnyGraphNode(node, opts...)
+	cb.ChainBranch.AddNode(key, gNode, options)
+	return cb
+}
+
+// AddPassthrough adds a Passthrough node to the branch.
+// e.g.
+//
+//	cb.AddPassthrough("passthrough_node_key")
+func (cb *ChainBranch) AddPassthrough(key string, opts ...GraphAddNodeOpt) *ChainBranch {
+	gNode, options := internal.ToPassthroughNode(opts...)
+	cb.ChainBranch.AddNode(key, gNode, options)
+	return cb
+}
+
+// Parallel run multiple nodes in parallel
+//
+// use `NewParallel()` to create a new parallel type
+// Example:
+//
+//	parallel := NewParallel()
+//	parallel.AddChatModel("output_key01", chat01)
+//	parallel.AddChatModel("output_key01", chat02)
+//
+//	chain := NewChain[any,any]()
+//	chain.AppendParallel(parallel)
+type Parallel struct {
+	*internal.Parallel
+}
+
+// NewParallel creates a new parallel type.
+// it is useful when you want to run multiple nodes in parallel in a chain.
+func NewParallel() *Parallel {
+	return &Parallel{internal.NewParallel()}
+}
+
+// AddChatModel adds a chat model to the parallel.
+// e.g.
+//
+//	chatModel01, err := openai.NewChatModel(ctx, &openai.ChatModelConfig{
+//		Model: "gpt-4o",
+//	})
+//
+//	chatModel02, err := openai.NewChatModel(ctx, &openai.ChatModelConfig{
+//		Model: "gpt-4o",
+//	})
+//
+//	p.AddChatModel("output_key01", chatModel01)
+//	p.AddChatModel("output_key02", chatModel02)
+func (p *Parallel) AddChatModel(outputKey string, node model.ChatModel, opts ...GraphAddNodeOpt) *Parallel {
+	gNode, options := internal.ToChatModelNode(node, append(opts, WithOutputKey(outputKey))...)
+	p.Parallel.AddNode(outputKey, gNode, options)
+	return p
+}
+
+// AddChatTemplate adds a chat template to the parallel.
+// e.g.
+//
+//	chatTemplate01, err := prompt.FromMessages(schema.FString, &schema.Message{
+//		Role:    schema.System,
+//		Content: "You are acting as a {role}.",
+//	})
+//
+//	p.AddChatTemplate("output_key01", chatTemplate01)
+func (p *Parallel) AddChatTemplate(outputKey string, node prompt.ChatTemplate, opts ...GraphAddNodeOpt) *Parallel {
+	gNode, options := internal.ToChatTemplateNode(node, append(opts, WithOutputKey(outputKey))...)
+	p.Parallel.AddNode(outputKey, gNode, options)
+	return p
+}
+
+// AddToolsNode adds a tools node to the parallel.
+// e.g.
+//
+//	toolsNode, err := compose.NewToolNode(ctx, &compose.ToolsNodeConfig{
+//		Tools: []tool.BaseTool{...},
+//	})
+//
+//	p.AddToolsNode("output_key01", toolsNode)
+func (p *Parallel) AddToolsNode(outputKey string, node *ToolsNode, opts ...GraphAddNodeOpt) *Parallel {
+	gNode, options := internal.ToToolsNode(node.ToolsNode, append(opts, WithOutputKey(outputKey))...)
+	p.Parallel.AddNode(outputKey, gNode, options)
+	return p
+}
+
+// AddLambda adds a lambda node to the parallel.
+// e.g.
+//
+//	lambdaFunc := func(ctx context.Context, input *schema.Message) ([]*schema.Message, error) {
+//		return []*schema.Message{input}, nil
+//	}
+//
+//	p.AddLambda("output_key01", compose.InvokeLambda(lambdaFunc))
+func (p *Parallel) AddLambda(outputKey string, node *Lambda, opts ...GraphAddNodeOpt) *Parallel {
+	gNode, options := internal.ToLambdaNode(node, append(opts, WithOutputKey(outputKey))...)
+	p.Parallel.AddNode(outputKey, gNode, options)
+	return p
+}
+
+// AddEmbedding adds an embedding node to the parallel.
+// e.g.
+//
+//	embeddingNode, err := openai.NewEmbedder(ctx, &openai.EmbeddingConfig{
+//		Model: "text-embedding-3-small",
+//	})
+//
+//	p.AddEmbedding("output_key01", embeddingNode)
+func (p *Parallel) AddEmbedding(outputKey string, node embedding.Embedder, opts ...GraphAddNodeOpt) *Parallel {
+	gNode, options := internal.ToEmbeddingNode(node, append(opts, WithOutputKey(outputKey))...)
+	p.Parallel.AddNode(outputKey, gNode, options)
+	return p
+}
+
+// AddRetriever adds a retriever node to the parallel.
+// e.g.
+//
+// retriever, err := vikingdb.NewRetriever(ctx, &vikingdb.RetrieverConfig{})
+//
+//	p.AddRetriever("output_key01", retriever)
+func (p *Parallel) AddRetriever(outputKey string, node retriever.Retriever, opts ...GraphAddNodeOpt) *Parallel {
+	gNode, options := internal.ToRetrieverNode(node, append(opts, WithOutputKey(outputKey))...)
+	p.Parallel.AddNode(outputKey, gNode, options)
+	return p
+}
+
+// AddLoader adds a loader node to the parallel.
+// e.g.
+//
+//	loader, err := file.NewLoader(ctx, &file.LoaderConfig{})
+//
+//	p.AddLoader("output_key01", loader)
+func (p *Parallel) AddLoader(outputKey string, node document.Loader, opts ...GraphAddNodeOpt) *Parallel {
+	gNode, options := internal.ToLoaderNode(node, append(opts, WithOutputKey(outputKey))...)
+	p.Parallel.AddNode(outputKey, gNode, options)
+	return p
+}
+
+// AddIndexer adds an indexer node to the parallel.
+// e.g.
+//
+//	indexer, err := volc_vikingdb.NewIndexer(ctx, &volc_vikingdb.IndexerConfig{
+//		Collection: "my_collection",
+//	})
+//
+//	p.AddIndexer("output_key01", indexer)
+func (p *Parallel) AddIndexer(outputKey string, node indexer.Indexer, opts ...GraphAddNodeOpt) *Parallel {
+	gNode, options := internal.ToIndexerNode(node, append(opts, WithOutputKey(outputKey))...)
+	p.Parallel.AddNode(outputKey, gNode, options)
+	return p
+}
+
+// AddDocumentTransformer adds a Document Transformer node to the parallel.
+// e.g.
+//
+//	markdownSplitter, err := markdown.NewHeaderSplitter(ctx, &markdown.HeaderSplitterConfig{})
+//
+//	p.AddDocumentTransformer("output_key01", markdownSplitter)
+func (p *Parallel) AddDocumentTransformer(outputKey string, node document.Transformer, opts ...GraphAddNodeOpt) *Parallel {
+	gNode, options := internal.ToDocumentTransformerNode(node, append(opts, WithOutputKey(outputKey))...)
+	p.Parallel.AddNode(outputKey, gNode, options)
+	return p
+}
+
+// AddGraph adds a graph node to the parallel.
+// It is useful when you want to use a graph or a chain as a node in the parallel.
+// e.g.
+//
+//	graph, err := compose.NewChain[any,any]()
+//
+//	p.AddGraph("output_key01", graph)
+func (p *Parallel) AddGraph(outputKey string, node AnyGraph, opts ...GraphAddNodeOpt) *Parallel {
+	gNode, options := internal.ToAnyGraphNode(node, append(opts, WithOutputKey(outputKey))...)
+	p.Parallel.AddNode(outputKey, gNode, options)
+	return p
+}
+
+// AddPassthrough adds a passthrough node to the parallel.
+// e.g.
+//
+//	p.AddPassthrough("output_key01")
+func (p *Parallel) AddPassthrough(outputKey string, opts ...GraphAddNodeOpt) *Parallel {
+	gNode, options := internal.ToPassthroughNode(append(opts, WithOutputKey(outputKey))...)
+	p.Parallel.AddNode(outputKey, gNode, options)
+	return p
 }
