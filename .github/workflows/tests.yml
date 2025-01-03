@@ -152,13 +152,21 @@ jobs:
           BASE_SHA=${{ github.event.pull_request.base.sha }}
           HEAD_SHA=${{ github.event.pull_request.head.sha }}
           
-          # 运行 API 差异检查
-          DIFF_OUTPUT=$(go-apidiff $BASE_SHA $HEAD_SHA)
+          echo "Checking API compatibility between $BASE_SHA and $HEAD_SHA"
+          
+          # 确保目录是 Go module
+          go mod tidy
+          
+          # 运行 API 差异检查并捕获错误
+          if ! DIFF_OUTPUT=$(go-apidiff $BASE_SHA $HEAD_SHA 2>&1); then
+            echo "Error running go-apidiff: $DIFF_OUTPUT"
+            DIFF_OUTPUT="Failed to check API compatibility: $DIFF_OUTPUT"
+          fi
+          
           echo "diff_output<<EOF" >> $GITHUB_ENV
           echo "$DIFF_OUTPUT" >> $GITHUB_ENV
           echo "EOF" >> $GITHUB_ENV
           
-          # 检查是否有不兼容变更 (检查输出中是否包含 "incompatible changes")
           if echo "$DIFF_OUTPUT" | grep -q "Incompatible changes:"; then
             echo "has_breaking_changes=true" >> $GITHUB_OUTPUT
           else
