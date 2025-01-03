@@ -156,9 +156,10 @@ jobs:
           
           go mod tidy
           
-          DIFF_OUTPUT=$(go-apidiff --print-compatible $BASE_SHA $HEAD_SHA 2>&1)
-          echo "go-apidiff output: $DIFF_OUTPUT"
-          DIFF_OUTPUT="uncompatible api changes found: $DIFF_OUTPUT"
+          if ! DIFF_OUTPUT=$(go-apidiff --print-compatible $BASE_SHA $HEAD_SHA 2>&1); then
+            echo "go-apidiff output\n: $DIFF_OUTPUT"
+            DIFF_OUTPUT="uncompatible api changes found: $DIFF_OUTPUT"
+          fi
 
           echo "diff_output<<EOF" >> $GITHUB_ENV
           echo "$DIFF_OUTPUT" >> $GITHUB_ENV
