@@ -41,7 +41,6 @@ jobs:
         continue-on-error: true
         with:
           name: ${{ env.BREAKDOWN_FILE }}
-          fail-not-found: false
           
       - name: Create main.breakdown If Not Exist
         run: |
@@ -128,3 +127,77 @@ jobs:
         run: |
           # just basic unit test, no coverage report
           go test -race ./...
+
+  api-compatibility:
+    name: api-compatibility-check
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # 需要完整的 git history
+          
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.22"
+          
+      - name: Install go-apidiff
+        run: go install github.com/joelanford/go-apidiff@latest
+          
+      - name: Check API compatibility
+        id: apidiff
+        run: |
+          BASE_SHA=${{ github.event.pull_request.base.sha }}
+          HEAD_SHA=${{ github.event.pull_request.head.sha }}
+          
+          echo "Checking API compatibility between $BASE_SHA and $HEAD_SHA"
+          
+          go mod tidy
+          
+          if ! DIFF_OUTPUT=$(go-apidiff --print-compatible $BASE_SHA $HEAD_SHA 2>&1); then
+            echo "go-apidiff output\n: $DIFF_OUTPUT"
+            DIFF_OUTPUT="uncompatible api changes found: $DIFF_OUTPUT"
+          fi
+
+          echo "diff_output<<EOF" >> $GITHUB_ENV
+          echo "$DIFF_OUTPUT" >> $GITHUB_ENV
+          echo "EOF" >> $GITHUB_ENV
+          
+          if echo "$DIFF_OUTPUT" | grep -q "Incompatible changes:"; then
+            echo "has_breaking_changes=true" >> $GITHUB_OUTPUT
+          else
+            echo "has_breaking_changes=false" >> $GITHUB_OUTPUT
+          fi
+          
+      - name: Find Previous Comment
+        if: steps.apidiff.outputs.has_breaking_changes == 'true'
+        uses: peter-evans/find-comment@v3
+        id: fc
+        with:
+          issue-number: ${{ github.event.pull_request.number }}
+          comment-author: 'github-actions[bot]'
+          body-includes: '⚠️ Breaking API Changes Detected'
+          
+      - name: Comment PR
+        if: steps.apidiff.outputs.has_breaking_changes == 'true'
+        uses: peter-evans/create-or-update-comment@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          issue-number: ${{ github.event.pull_request.number }}
+          comment-id: ${{ steps.fc.outputs.comment-id || '' }}
+          edit-mode: replace
+          body: |
+            ## ⚠️ Breaking API Changes Detected
+            
+            This pull request contains breaking API changes that may affect compatibility:
+            
+            ```
+            ${{ env.diff_output }}
+            ```
+            
+            ### Required Actions:
+            1. Please review these changes carefully
+            2. Update the user documentation to reflect these API changes
+            3. Add a note in the changelog about these breaking changes
