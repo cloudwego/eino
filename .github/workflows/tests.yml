@@ -141,7 +141,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version: ${{ env.DEFAULT_GO_VERSION }}
+          go-version: "1.22"
           
       - name: Install go-apidiff
         run: go install github.com/joelanford/go-apidiff@latest
