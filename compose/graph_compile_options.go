@@ -46,4 +46,10 @@ func WithGraphCompileCallbacks(cbs ...GraphCompileCallback) GraphCompileOption {
 	}
 }
 
+// InitGraphCompileCallbacks set global graph compile callbacks,
+// which ONLY will be added to top level graph compile options
+func InitGraphCompileCallbacks(cbs []GraphCompileCallback) {
+	globalGraphCompileCallbacks = cbs
+}
+
 var globalGraphCompileCallbacks []GraphCompileCallback
