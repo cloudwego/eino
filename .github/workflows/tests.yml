@@ -154,15 +154,12 @@ jobs:
           
           echo "Checking API compatibility between $BASE_SHA and $HEAD_SHA"
           
-          # 确保目录是 Go module
           go mod tidy
           
-          # 运行 API 差异检查并捕获错误
-          if ! DIFF_OUTPUT=$(go-apidiff $BASE_SHA $HEAD_SHA 2>&1); then
-            echo "Error running go-apidiff: $DIFF_OUTPUT"
-            DIFF_OUTPUT="Failed to check API compatibility: $DIFF_OUTPUT"
-          fi
-          
+          DIFF_OUTPUT=$(go-apidiff --print-compatible $BASE_SHA $HEAD_SHA 2>&1)
+          echo "go-apidiff output: $DIFF_OUTPUT"
+          DIFF_OUTPUT="uncompatible api changes found: $DIFF_OUTPUT"
+
           echo "diff_output<<EOF" >> $GITHUB_ENV
           echo "$DIFF_OUTPUT" >> $GITHUB_ENV
           echo "EOF" >> $GITHUB_ENV
@@ -203,5 +200,17 @@ jobs:
             1. Please review these changes carefully
             2. Update the user documentation to reflect these API changes
             3. Add a note in the changelog about these breaking changes
-            
-            Please resolve this comment after completing the above actions.
+
+      - name: Create Review
+        if: steps.apidiff.outputs.has_breaking_changes == 'true'
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            await github.rest.pulls.createReview({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: context.issue.number,
+              body: '⚠️ Breaking API changes detected. Please complete the required actions listed in the comment above.',
+              event: 'REQUEST_CHANGES'
+            });
