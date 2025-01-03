@@ -201,22 +201,3 @@ jobs:
             1. Please review these changes carefully
             2. Update the user documentation to reflect these API changes
             3. Add a note in the changelog about these breaking changes
-
-      - name: Create Review
-        if: steps.apidiff.outputs.has_breaking_changes == 'true'
-        uses: actions/github-script@v7
-        with:
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-          script: |
-            await github.rest.pulls.createReview({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              pull_number: context.issue.number,
-              event: 'REQUEST_CHANGES',
-              comments: [{
-                path: 'README.md',
-                position: 1,
-                body: '⚠️ Breaking API changes detected. Please complete the required actions listed in the comment above.'
-              }],
-              body: '⚠️ Breaking API changes detected. Please complete the required actions listed in the comment above before merging.'
-            });
