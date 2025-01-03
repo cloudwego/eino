@@ -208,10 +208,20 @@ jobs:
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |
-            await github.rest.pulls.createReview({
+            const review = await github.rest.pulls.createReview({
               owner: context.repo.owner,
               repo: context.repo.repo,
               pull_number: context.issue.number,
-              body: '⚠️ Breaking API changes detected. Please complete the required actions listed in the comment above.',
-              event: 'REQUEST_CHANGES'
+              event: 'COMMENT',  // First create a pending review
+              body: '⚠️ Breaking API changes detected. Please complete the required actions listed in the comment above.'
+            });
+            
+            // Then submit the review as REQUEST_CHANGES
+            await github.rest.pulls.submitReview({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: context.issue.number,
+              review_id: review.data.id,
+              event: 'REQUEST_CHANGES',
+              body: '⚠️ Breaking API changes detected. Please complete the required actions listed in the comment above before merging.'
             });
