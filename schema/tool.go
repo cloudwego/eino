@@ -46,7 +46,7 @@ type ToolInfo struct {
 
 	// The parameters the functions accepts (different models may require different parameter types).
 	// can be described in two ways:
-	//  - use ParameterInfo: schema.NewParamsOneOfByParams(params)
+	//  - use params: schema.NewParamsOneOfByParams(params)
 	//  - use openAPIV3: schema.NewParamsOneOfByOpenAPIV3(openAPIV3)
 	// If is nil, signals that the tool does not need any input parameter
 	*ParamsOneOf
@@ -72,13 +72,13 @@ type ParameterInfo struct {
 // ParamsOneOf is a union of the different methods user can choose which describe a tool's request parameters.
 // User must specify one and ONLY one method to describe the parameters.
 //  1. use NewParamsOneOfByParams(): an intuitive way to describe the parameters that covers most of the use-cases.
-//  2. use NewParamsOneOfByOpenAPIV3(): a formal way to describe the parameters that strictly adheres to openAPIV3.0 specification.
+//  2. use NewParamsOneOfByOpenAPIV3(): a formal way to describe the parameters that strictly adheres to OpenAPIV3.0 specification.
 //     See https://github.com/getkin/kin-openapi/blob/master/openapi3/schema.go.
 type ParamsOneOf struct {
-	// use NewParamsOneOfByParams instead, params will no longer be exported in the future.
+	// use NewParamsOneOfByParams to set this field
 	params map[string]*ParameterInfo
 
-	// use NewParamsOneOfByOpenAPIV3 instead, openAPIV3 will no longer be exported in the future.
+	// use NewParamsOneOfByOpenAPIV3 to set this field
 	openAPIV3 *openapi3.Schema
 }
 
