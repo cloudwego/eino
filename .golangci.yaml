@@ -1,7 +1,3 @@
-# Options for analysis running.
-run:
-  # include `vendor` `third_party` `testdata` `examples` `Godeps` `builtin`
-  skip-dirs-use-default: true
 # output configuration options
 output:
   # Format: colored-line-number|line-number|json|tab|checkstyle|code-climate|junit-xml|github-actions
@@ -31,6 +27,7 @@ linters:
     - ineffassign
     - gofumpt
 issues:
+  # include `vendor` `third_party` `testdata` `examples` `Godeps` `builtin`
   exclude-use-default: true
   exclude-files:
     - ".*\\.mock\\.go$"
