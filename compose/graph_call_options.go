@@ -163,11 +163,6 @@ func WithCallbacks(cbs ...callbacks.Handler) Option {
 	}
 }
 
-// Deprecated: use WithRuntimeMaxSteps directly instead.
-func WithGraphRunOption(opt Option) Option {
-	return opt
-}
-
 // WithRuntimeMaxSteps sets the maximum number of steps for the graph runtime.
 // e.g.
 //

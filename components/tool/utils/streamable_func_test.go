@@ -22,6 +22,7 @@ import (
 	"io"
 	"testing"
 
+	"github.com/getkin/kin-openapi/openapi3"
 	"github.com/stretchr/testify/assert"
 
 	"github.com/cloudwego/eino/schema"
@@ -66,12 +67,22 @@ func TestNewStreamableTool(t *testing.T) {
 		info, err := tl.Info(ctx)
 		assert.NoError(t, err)
 		assert.Equal(t, "search_user", info.Name)
-		assert.Equal(t, map[string]*schema.ParameterInfo{
-			"name": {
-				Type: "string",
-				Desc: "user name",
+
+		js, err := info.ToOpenAPIV3()
+		assert.NoError(t, err)
+
+		assert.Equal(t, &openapi3.Schema{
+			Type: openapi3.TypeObject,
+			Properties: map[string]*openapi3.SchemaRef{
+				"name": &openapi3.SchemaRef{
+					Value: &openapi3.Schema{
+						Type:        openapi3.TypeString,
+						Description: "user name",
+					},
+				},
 			},
-		}, info.Params)
+			Required: make([]string, 0),
+		}, js)
 
 		sr, err := tl.StreamableRun(ctx, `{"name":"xxx"}`)
 		assert.NoError(t, err)

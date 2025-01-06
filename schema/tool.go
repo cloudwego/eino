@@ -47,7 +47,7 @@ type ToolInfo struct {
 	// The parameters the functions accepts (different models may require different parameter types).
 	// can be described in two ways:
 	//  - use ParameterInfo: schema.NewParamsOneOfByParams(params)
-	//  - use OpenAPIV3: schema.NewParamsOneOfByOpenAPIV3(openAPIV3)
+	//  - use openAPIV3: schema.NewParamsOneOfByOpenAPIV3(openAPIV3)
 	// If is nil, signals that the tool does not need any input parameter
 	*ParamsOneOf
 }
@@ -71,28 +71,28 @@ type ParameterInfo struct {
 
 // ParamsOneOf is a union of the different methods user can choose which describe a tool's request parameters.
 // User must specify one and ONLY one method to describe the parameters.
-//  1. use Params: an intuitive way to describe the parameters that covers most of the use-cases.
-//  2. use OpenAPIV3: a formal way to describe the parameters that strictly adheres to OpenAPIV3.0 specification.
+//  1. use NewParamsOneOfByParams(): an intuitive way to describe the parameters that covers most of the use-cases.
+//  2. use NewParamsOneOfByOpenAPIV3(): a formal way to describe the parameters that strictly adheres to openAPIV3.0 specification.
 //     See https://github.com/getkin/kin-openapi/blob/master/openapi3/schema.go.
 type ParamsOneOf struct {
-	// deprecated: use NewParamsOneOfByParams instead, Params will no longer be exported in the future.
-	Params map[string]*ParameterInfo
+	// use NewParamsOneOfByParams instead, params will no longer be exported in the future.
+	params map[string]*ParameterInfo
 
-	// deprecated: use NewParamsOneOfByOpenAPIV3 instead, OpenAPIV3 will no longer be exported in the future.
-	OpenAPIV3 *openapi3.Schema
+	// use NewParamsOneOfByOpenAPIV3 instead, openAPIV3 will no longer be exported in the future.
+	openAPIV3 *openapi3.Schema
 }
 
 // NewParamsOneOfByParams creates a ParamsOneOf with map[string]*ParameterInfo.
 func NewParamsOneOfByParams(params map[string]*ParameterInfo) *ParamsOneOf {
 	return &ParamsOneOf{
-		Params: params,
+		params: params,
 	}
 }
 
 // NewParamsOneOfByOpenAPIV3 creates a ParamsOneOf with *openapi3.Schema.
 func NewParamsOneOfByOpenAPIV3(openAPIV3 *openapi3.Schema) *ParamsOneOf {
 	return &ParamsOneOf{
-		OpenAPIV3: openAPIV3,
+		openAPIV3: openAPIV3,
 	}
 }
 
@@ -103,8 +103,8 @@ func (p *ParamsOneOf) ToOpenAPIV3() (*openapi3.Schema, error) {
 	}
 
 	var (
-		useParameterInfo = p.Params != nil
-		useOpenAPIV3     = p.OpenAPIV3 != nil
+		useParameterInfo = p.params != nil
+		useOpenAPIV3     = p.openAPIV3 != nil
 	)
 
 	if !useParameterInfo && !useOpenAPIV3 {
@@ -115,15 +115,15 @@ func (p *ParamsOneOf) ToOpenAPIV3() (*openapi3.Schema, error) {
 		return nil, fmt.Errorf("ParamsOneOf can only have one method to describe the parameters, but not multiple methods")
 	}
 
-	if p.Params != nil {
+	if p.params != nil {
 		sc := &openapi3.Schema{
-			Properties: make(map[string]*openapi3.SchemaRef, len(p.Params)),
+			Properties: make(map[string]*openapi3.SchemaRef, len(p.params)),
 			Type:       openapi3.TypeObject,
-			Required:   make([]string, 0, len(p.Params)),
+			Required:   make([]string, 0, len(p.params)),
 		}
 
-		for k := range p.Params {
-			v := p.Params[k]
+		for k := range p.params {
+			v := p.params[k]
 			sc.Properties[k] = paramInfoToJSONSchema(v)
 			if v.Required {
 				sc.Required = append(sc.Required, k)
@@ -133,7 +133,7 @@ func (p *ParamsOneOf) ToOpenAPIV3() (*openapi3.Schema, error) {
 		return sc, nil
 	}
 
-	return p.OpenAPIV3, nil
+	return p.openAPIV3, nil
 }
 
 func paramInfoToJSONSchema(paramInfo *ParameterInfo) *openapi3.SchemaRef {

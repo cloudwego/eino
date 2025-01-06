@@ -38,25 +38,25 @@ func TestParamsOneOfToJSONSchema(t *testing.T) {
 		})
 
 		convey.Convey("user provides multiple options in ParamsOneOf", func() {
-			oneOf.Params = make(map[string]*ParameterInfo)
-			oneOf.OpenAPIV3 = &openapi3.Schema{}
+			oneOf.params = make(map[string]*ParameterInfo)
+			oneOf.openAPIV3 = &openapi3.Schema{}
 			_, err = oneOf.ToOpenAPIV3()
 			convey.So(err, convey.ShouldNotBeNil)
 			convey.So(err.Error(), convey.ShouldContainSubstring, "ParamsOneOf can only have one method to describe the parameters, but not multiple methods")
 		})
 
 		convey.Convey("user provides openAPIV3.0 json schema directly, use what the user provides", func() {
-			oneOf.OpenAPIV3 = &openapi3.Schema{
+			oneOf.openAPIV3 = &openapi3.Schema{
 				Type:        openapi3.TypeString,
 				Description: "this is the only argument",
 			}
 			converted, err = oneOf.ToOpenAPIV3()
 			convey.So(err, convey.ShouldBeNil)
-			convey.So(converted, convey.ShouldResemble, oneOf.OpenAPIV3)
+			convey.So(converted, convey.ShouldResemble, oneOf.openAPIV3)
 		})
 
 		convey.Convey("user provides map[string]ParameterInfo, converts to json schema", func() {
-			oneOf.Params = map[string]*ParameterInfo{
+			oneOf.params = map[string]*ParameterInfo{
 				"arg1": {
 					Type:     String,
 					Desc:     "this is the first argument",
