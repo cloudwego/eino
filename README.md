@@ -20,7 +20,7 @@ Eino provides rich atomic components, integrated components, component orchestra
 
 Eino can standardize, simplify, and improve efficiency at different stages of the AI application development cycle:
 
-![](.github/static/img/eino/Me2dwcVGyhV2gnbXgcfc0EAJnIh.png)
+![](.github/static/img/eino/eino_framework.png)
 
 # Key Features
 
@@ -39,7 +39,7 @@ Eino can standardize, simplify, and improve efficiency at different stages of th
 - Use component instances as graph nodes, connect them with graph vertices and edges, execute nodes and transmit data flow according to edge directions, orchestrating and executing AI application logic through graphs.
 - Graph orchestration can greatly simplify the development of **parallel and streaming (asynchronous)** logic while optimizing its code structure
 
-> ![](.github/static/img/eino/S6Lsbn4ufoFpNbxGVOEcuva3ntf.png)
+> ![](.github/static/img/eino/graph.png)
 
 > Using "data processing factory" as a metaphor for application construction. Graph orchestration defines applications as: a network of independent "black boxes (nodes)" that communicate through data packets over predefined connections. These "black boxes" can be connected in different scenarios to form different applications without internal changes. Here, a "black box" represents a Component, thus Graph orchestration has Component-oriented characteristics.
 
@@ -69,7 +69,7 @@ From the perspective of graph orchestration, Eino provides mechanisms for inject
 
 # Eino Framework Structure
 
-![](.github/static/img/eino/FegYwtFkmhDf8jbcKdYcpig2nKb.png)
+![](.github/static/img/eino/eino_composite.png)
 
 The Eino framework consists of three parts:
 
@@ -192,7 +192,7 @@ type Runnable[**I, O any**] interface {
 
 - The actual streaming capability in the programming product depends on the following orchestration paradigm
 
-![](.github/static/img/eino/WBBnww1m2hbwhzbISC6c55cNnjb.png)
+![](.github/static/img/eino/stream.png)
 
 ## Stream
 
@@ -290,7 +290,7 @@ func (g *graph) AddEdge(startNode, endNode string) (err error) {}
 
 - Adds a directed data transmission link between two nodes to control data flow direction and node execution order
 
-![](.github/static/img/eino/EsVpwWzPChccs7bPYmuc5qWxnyd.png)
+![](.github/static/img/eino/graph_add_edge.png)
 
 ##### **AddBranch**
 
@@ -310,14 +310,14 @@ func (g *graph) AddBranch(startNode string, branch *GraphBranch) (err error) {}
 
 - Based on the provided custom selection function, at runtime it selects a matching Node to execute from multiple Nodes according to computed conditions
 
-![](.github/static/img/eino/OptnwYJdfhEnbxbwhmOcGAJDn89.png)
+![](.github/static/img/eino/graph_add_branch.png)
 
 ##### **Parallel**
 
 - Connect multiple Nodes in parallel to form concurrent execution of multiple nodes
 - No AddParallel method, parallel topology paths are created through AddEdge to form **Parallel**
 
-![](.github/static/img/eino/Lwi7wav0LhRdTgbOuSucOVPknDh.png)
+![](.github/static/img/eino/graph_parallel.png)
 
 #### Surface (Graph)
 
@@ -354,7 +354,7 @@ chain := NewChain[map[string]any, string]()
 
 - Connect multiple Nodes head-to-tail in the order they are added, with data passing and execution occurring sequentially through the connected Nodes
 
-![](.github/static/img/eino/OVT6wEM9hhDXERbZXI8c2G1RnHg.png)
+![](.github/static/img/eino/chain.png)
 
 #### **AppendParallel**
 
@@ -376,7 +376,7 @@ chain.AppendParallel(parallel)
 
 - Create a Parallel to contain multiple concurrently executing child nodes
 
-![](.github/static/img/eino/EJPTwVtTHh1jOebDmthcXplCnMb.png)
+![](.github/static/img/eino/chain_append_parallel.png)
 
 #### **AppendBranch**
 
@@ -402,7 +402,7 @@ chain := NewChain[string, string]()
 chain.AppendBranch(cb)
 ```
 
-![](.github/static/img/eino/XHD8ww4BLhqDK8b4XEwcKAKEn9g.png)
+![](.github/static/img/eino/chain_append_branch.png)
 
 ## Aspects (Callbacks)
 
@@ -424,6 +424,13 @@ If you discover a potential security issue in this project, or think you may
 have discovered a security issue, we ask that you notify Bytedance Security via our [security center](https://security.bytedance.com/src) or [vulnerability reporting email](sec@bytedance.com).
 
 Please do **not** create a public GitHub issue.
+
+## Contact US
+- How to become a member: [COMMUNITY MEMBERSHIP](https://github.com/cloudwego/community/blob/main/COMMUNITY_MEMBERSHIP.md)
+- Issues: [Issues](https://github.com/cloudwego/eino/issues)
+- Lark: Scan the QR code below with [Register Feishu](https://www.feishu.cn/en/) to join our CloudWeGo/kitex user group.
+
+  ![LarkGroup](.github/static/img/eino/lark_group_en.png)
 
 ## License
 
