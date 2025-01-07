@@ -39,7 +39,7 @@ Eino can standardize, simplify, and improve efficiency at different stages of th
 - Use component instances as graph nodes, connect them with graph vertices and edges, execute nodes and transmit data flow according to edge directions, orchestrating and executing AI application logic through graphs.
 - Graph orchestration can greatly simplify the development of **parallel and streaming (asynchronous)** logic while optimizing its code structure
 
-> ![](.github/static/img/eino/graph.png)
+> ![](.github/static/img/eino/graph.gif)
 
 > Using "data processing factory" as a metaphor for application construction. Graph orchestration defines applications as: a network of independent "black boxes (nodes)" that communicate through data packets over predefined connections. These "black boxes" can be connected in different scenarios to form different applications without internal changes. Here, a "black box" represents a Component, thus Graph orchestration has Component-oriented characteristics.
 
@@ -116,52 +116,53 @@ For specific responsibilities of each Component type, please check the correspon
 > The following is an example illustration, not complete, please refer to the [code repository](https://github.com/cloudwego/eino-ext/tree/main/components) for accuracy
 
 ```
-**eino/components **// components root directory
-├── **document**
-│   ├── **interface.go **
-│   └── option.go
-├── **embedding**
-│   ├── callback_extra.go
-│   ├── **interface.go ****// abstraction of a component**
-│   ├── **ark** **         ****// folder at same level as abstraction represents a specific implementation**
-│   ├── **openai**
-│   └── option.go
-├── **indexer**
-│   ├── callback_extra.go
-│   ├── **interface.go**
-│   ├── option.go
-│   └── **volc_vikingdb**
-├── **model**
-│   ├── callback_extra.go
-│   ├── **interface.go**
-│   ├── **ark**
-│   ├── **openai**
-│   └── option.go
-├── **prompt**
-│   ├── callback_extra.go
-│   ├── **chat_template.go**
-│   ├── chat_template_test.go
-│   └── **interface.go**
-├── **retriever**
-│   ├── callback_extra.go
-│   ├── **interface.go**
-│   ├── option.go
-│   └── **volc_vikingdb**
-├── **tool**
-│   ├── **duckduckgo**
-│   ├── **interface.go**
-│   └── option.go
+eino/components // 组件根目录
+├── document
+│   ├── interface.go 
+│   └── option.go
+├── embedding
+│   ├── callback_extra.go
+│   ├── interface.go // 一个组件的抽象
+│   ├── ark          // 与抽象同级的一个文件夹代表一种具体实现
+│   ├── openai
+│   └── option.go
+├── indexer
+│   ├── callback_extra.go
+│   ├── interface.go
+│   ├── option.go
+│   └── volc_vikingdb
+├── model
+│   ├── callback_extra.go
+│   ├── interface.go
+│   ├── ark
+│   ├── openai
+│   └── option.go
+├── prompt
+│   ├── callback_extra.go
+│   ├── chat_template.go
+│   ├── chat_template_test.go
+│   └── interface.go
+├── retriever
+│   ├── callback_extra.go
+│   ├── interface.go
+│   ├── option.go
+│   └── volc_vikingdb
+├── tool
+│   ├── duckduckgo
+│   ├── interface.go
+│   └── option.go
 ├── types.go
 ```
 
 ## Runnable
 
+
 ```go
-type Runnable[**I, O any**] interface {
-    Invoke(ctx context.Context, **input I**, opts ...Option) (**output O**, err error)
-    Stream(ctx context.Context, **input I**, opts ...Option) (**output *schema.StreamReader[O]**, err error)
-    Collect(ctx context.Context, **input *schema.StreamReader[I]**, opts ...Option) (**output O**, err error)
-    Transform(ctx context.Context, **input *schema.StreamReader[I]**, opts ...Option) (**output *schema.StreamReader[O]**, err error)
+type Runnable[I, O any] interface {
+    Invoke(ctx context.Context, input I, opts ...Option) (output O, err error)
+    Stream(ctx context.Context, input I, opts ...Option) (output *schema.StreamReader[O], err error)
+    Collect(ctx context.Context, input *schema.StreamReader[I], opts ...Option) (output O, err error)
+    Transform(ctx context.Context, input *schema.StreamReader[I], opts ...Option) (output *schema.StreamReader[O], err error)
 }
 ```
 

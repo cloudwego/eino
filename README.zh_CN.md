@@ -44,7 +44,7 @@ Eino 可在 AI 应用开发周期中的不同阶段，规范、简化和提效�
 - 将各组件实例，作为图的节点，以图的点边关系连接，以边的方向逐步执行节点并传输数据流，将 AI 应用的逻辑以图的方式进行编排和执行。
 - 图编排可极大简化 **并行、流式(异步)** 逻辑的开发，并优化其代码结构
 
-> ![](.github/static/img/eino/graph.png)
+> ![](.github/static/img/eino/graph.gif)
 
 > 使用“数据处理工厂”来比喻应用程序的构建。图编排将应用定义为：独立“黑箱(节点)
 > ”的网络，这些“黑箱”通过数据包在预定义的连接上进行通信。“黑箱”可以在不同场景被连接，形成不同的应用程序，而无需在内部进行更改。这里一个“黑箱”代表一种
@@ -130,52 +130,53 @@ Eino Core 中的六大概念：
 > 下文是示例性说明，不完整，以[代码仓库](https://github.com/cloudwego/eino-ext/tree/main/components)为准
 
 ```
-**eino/components **// 组件根目录
-├── **document**
-│   ├── **interface.go **
+eino/components // 组件根目录
+├── document
+│   ├── interface.go 
 │   └── option.go
-├── **embedding**
+├── embedding
 │   ├── callback_extra.go
-│   ├── **interface.go ****// 一个组件的抽象**
-│   ├── **ark** **         ****// 与抽象同级的一个文件夹代表一种具体实现**
-│   ├── **openai**
+│   ├── interface.go // 一个组件的抽象
+│   ├── ark          // 与抽象同级的一个文件夹代表一种具体实现
+│   ├── openai
 │   └── option.go
-├── **indexer**
+├── indexer
 │   ├── callback_extra.go
-│   ├── **interface.go**
+│   ├── interface.go
 │   ├── option.go
-│   └── **volc_vikingdb**
-├── **model**
+│   └── volc_vikingdb
+├── model
 │   ├── callback_extra.go
-│   ├── **interface.go**
-│   ├── **ark**
-│   ├── **openai**
+│   ├── interface.go
+│   ├── ark
+│   ├── openai
 │   └── option.go
-├── **prompt**
+├── prompt
 │   ├── callback_extra.go
-│   ├── **chat_template.go**
+│   ├── chat_template.go
 │   ├── chat_template_test.go
-│   └── **interface.go**
-├── **retriever**
+│   └── interface.go
+├── retriever
 │   ├── callback_extra.go
-│   ├── **interface.go**
+│   ├── interface.go
 │   ├── option.go
-│   └── **volc_vikingdb**
-├── **tool**
-│   ├── **duckduckgo**
-│   ├── **interface.go**
+│   └── volc_vikingdb
+├── tool
+│   ├── duckduckgo
+│   ├── interface.go
 │   └── option.go
 ├── types.go
 ```
 
+
 ## Runnable
 
 ```go
-type Runnable[**I, O any**] interface {
-Invoke(ctx context.Context, **input I**, opts ...Option) (**output O**, err error)
-Stream(ctx context.Context, **input I**, opts ...Option) (**output *schema.StreamReader[O]**, err error)
-Collect(ctx context.Context, **input *schema.StreamReader[I]**, opts ...Option) (**output O**, err error)
-Transform(ctx context.Context, **input *schema.StreamReader[I]**, opts ...Option) (**output *schema.StreamReader[O]**, err error)
+type Runnable[I, O any] interface {
+    Invoke(ctx context.Context, input I, opts ...Option) (output O, err error)
+    Stream(ctx context.Context, input I, opts ...Option) (output *schema.StreamReader[O], err error)
+    Collect(ctx context.Context, input *schema.StreamReader[I], opts ...Option) (output O, err error)
+    Transform(ctx context.Context, input *schema.StreamReader[I], opts ...Option) (output *schema.StreamReader[O], err error)
 }
 ```
 
