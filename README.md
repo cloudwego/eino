@@ -73,6 +73,10 @@ From the perspective of graph orchestration, Eino provides mechanisms for inject
 
 The Eino framework consists of three parts:
 
+- Eino(Eino Core): Contains Eino's component abstractions, orchestration capabilities like Graph and Chain, aspect mechanisms, etc.
+- EinoExt: Component implementations, common aspect implementations, component usage examples, and various Eino extension capabilities
+- Eino DevOps: Development, debugging, evaluation visualization and management capabilities for Eino
+
 Six core concepts in Eino Core:
 
 - Components Abstraction
@@ -86,7 +90,7 @@ Six core concepts in Eino Core:
 - Flow Integrated Components
     - Provides pre-orchestrated integrated component capabilities for common application scenarios based on the framework's Components and Graph
     - May provide capability to be orchestrated again
-    - Examples: Agent, MapReduce long text summarization, MultiAgent, etc.
+    - Examples: Agent, MultiAgent, Multi Retriever etc.
 
 - Runnable -- Low User Awareness
     - Orchestration objects and products in the orchestration framework
@@ -167,12 +171,10 @@ type Runnable[**I, O any**] interface {
 
     - Conversion between streaming and non-streaming:
       > Using StreamReader[T] and T to represent streaming and non-streaming respectively
-      >
-
-        - Concat
-            - Receive and merge T-Frames in StreamReader[T] into a complete T
-        - Streaming
-            - Convert T into a StreamReader[T] with only one T-Frame for streaming transmission
+      - Concat
+          - Receive and merge T-Frames in StreamReader[T] into a complete T
+      - Streaming
+          - Convert T into a StreamReader[T] with only one T-Frame for streaming transmission
 - Based on these two conversion relationships, Eino can encapsulate any interface with N(N<=4) interaction modes provided by users into a complete Runnable[I, O]
 
 <table>
@@ -347,6 +349,7 @@ chain := NewChain[map[string]any, string]()
 #### **AppendXXX**
 
 > XXX can be ChatModel, Prompt, Indexer, Retriever, Graph and other component types
+> 
 > Chain is a simplified Graph, so Chain and Graph can be nested through AppendGraph
 
 - Connect multiple Nodes head-to-tail in the order they are added, with data passing and execution occurring sequentially through the connected Nodes

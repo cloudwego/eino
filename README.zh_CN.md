@@ -75,6 +75,10 @@ Eino 像 LangChain 一样，提供了完善地回调系统，允许开发者在 
 
 Eino 框架整体由 三部分 构成：
 
+- Eino(Eino Core)：存放 Eino 的组件抽象，Graph、Chain 等编排能力，切面机制等
+- EinoExt：Eino 的组件实现、通用切面实现、组件使用示例等，可放置各种各样的Eino扩展能力
+- Eino Devops：Eino 相关的开发、调试、评测等可视化、管理能力。
+
 Eino Core 中的六大概念：
 
 - Components 抽象
@@ -89,7 +93,7 @@ Eino Core 中的六大概念：
 
     - 基于框架中的 Component、Graph ，针对常见的应用场景，提供开箱即用的预先编排好的集成组件能力。
     - 可能提供再次被编排的能力
-    - 例如：Agent、MapReduce 长文本总结、MultiAgent 等
+    - 例如：Agent、MultiAgent、Multi Retriever 等
 - Runnable -- 用户弱感知
 
     - 编排框架中的编排对象和编排产物。
@@ -170,12 +174,10 @@ type Runnable[**I, O any**] interface {
 
     - 流与非流间的转换：
       > 用 StreamReader[T] 和 T 分别指代 流 和 非流
-      >
-
-        - 合并(Concat)
-            - 将 StreamReader[T] 中的 T-Frame 接收完整，并合并成一个完整的 T
-        - 流化(Streaming)
-            - 将 T 转换成仅有一个 T-Frame 的 StreamReader[T]，进行流式传输
+      - 合并(Concat)
+          - 将 StreamReader[T] 中的 T-Frame 接收完整，并合并成一个完整的 T
+      - 流化(Streaming)
+          - 将 T 转换成仅有一个 T-Frame 的 StreamReader[T]，进行流式传输
 - 基于上述两种转换关系，Eino 便可根据用户提供的具有任意 N(N<=4) 种交互模式的接口，封装转换成一个完整的 Runnable[I, O]
 
 <table>
@@ -353,6 +355,7 @@ chain := NewChain[map[string]any, string]()
 #### **AppendXXX**
 
 > XXX 可是 ChatMode、Prompt、Indexer、Retriever、Graph 等多种组件类型
+> 
 > Chain 是简化的 Graph，因此可通过 AppendGraph 实现 Chain 和 Graph 的相互嵌套
 
 - 将多个 Node 按照传入顺序首尾串联，串联的 Node 依次进行数据传递和执行
