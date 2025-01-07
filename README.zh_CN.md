@@ -444,6 +444,11 @@ chain.AppendBranch(cb)
 
 // TODO：链接用户手册等文档
 
+## 相关项目
+
+- [EinoExt](https://github.com/cloudwego/eino-ext)：Eino 的组件实现、通用切面实现、组件使用示例等，可放置各种各样的Eino扩展能力。
+- [EinoExamples](https://github.com/cloudwego/eino-examples)：- Eino 相关的 编排能力的Demo、场景化AI应用的Demo等。
+
 ## 安全
 
 如果你在该项目中发现潜在的安全问题，或你认为可能发现了安全问题，请通过我们的[安全中心](https://security.bytedance.com/src)

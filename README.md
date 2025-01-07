@@ -419,6 +419,11 @@ chain.AppendBranch(cb)
 
 // TODO: Link to user manual and other documentation
 
+## Related Projects
+
+- [EinoExt](https://github.com/cloudwego/eino-ext): Component implementations, common aspect implementations, component usage examples, and various Eino extension capabilities.
+- [EinoExamples](https://github.com/cloudwego/eino-examples): Demos of orchestration capabilities and scenario-based AI applications using Eino.
+
 ## Security
 
 If you discover a potential security issue in this project, or think you may
