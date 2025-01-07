@@ -39,7 +39,7 @@ Eino can standardize, simplify, and improve efficiency at different stages of th
 - Use component instances as graph nodes, connect them with graph vertices and edges, execute nodes and transmit data flow according to edge directions, orchestrating and executing AI application logic through graphs.
 - Graph orchestration can greatly simplify the development of **parallel and streaming (asynchronous)** logic while optimizing its code structure
 
-> ![](.github/static/img/eino/graph.gif)
+![](.github/static/img/eino/graph.gif)
 
 > Using "data processing factory" as a metaphor for application construction. Graph orchestration defines applications as: a network of independent "black boxes (nodes)" that communicate through data packets over predefined connections. These "black boxes" can be connected in different scenarios to form different applications without internal changes. Here, a "black box" represents a Component, thus Graph orchestration has Component-oriented characteristics.
 
