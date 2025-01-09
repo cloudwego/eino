@@ -37,7 +37,6 @@ func TestStream(t *testing.T) {
 		defer wg.Done()
 		for i := 0; i < 10; i++ {
 			closed := s.send(i, nil)
-			t.Logf("send: %d, closed: %v", i, closed)
 			if closed {
 				break
 			}

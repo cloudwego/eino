@@ -30,6 +30,11 @@ type GenLocalState[S any] func(ctx context.Context) (state S)
 
 type stateKey struct{}
 
+type internalState struct {
+	state any
+	eager bool
+}
+
 // StatePreHandler is a function that is called before the node is executed.
 // Notice: if user called Stream but with StatePreHandler, the StatePreHandler will read all stream chunks and merge them into a single object.
 type StatePreHandler[I, S any] func(ctx context.Context, in I, state S) (I, error)
@@ -116,7 +121,25 @@ func streamConvertPostHandler[O, S any](handler StreamStatePostHandler[O, S]) *c
 func GetState[S any](ctx context.Context) (S, error) {
 	state := ctx.Value(stateKey{})
 
-	cState, ok := state.(S)
+	iState := state.(*internalState)
+	if iState.eager {
+		var s S
+		return s, fmt.Errorf("GetState in node is forbidden in eager mode")
+	}
+	cState, ok := iState.state.(S)
+	if !ok {
+		var s S
+		return s, fmt.Errorf("unexpected state type. expected: %v, got: %v",
+			generic.TypeOf[S](), reflect.TypeOf(iState.state))
+	}
+
+	return cState, nil
+}
+
+func getState[S any](ctx context.Context) (S, error) {
+	state := ctx.Value(stateKey{})
+
+	cState, ok := state.(*internalState).state.(S)
 	if !ok {
 		var s S
 		return s, fmt.Errorf("unexpected state type. expected: %v, got: %v",

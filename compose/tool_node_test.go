@@ -110,7 +110,6 @@ func TestToolsNode(t *testing.T) {
 
 		out, err := r.Invoke(ctx, []*schema.Message{})
 		assert.NoError(t, err)
-		t.Logf("tool message: %v", out)
 
 		assert.Equal(t, toolIDOfUserCompany, findMsgByToolCallID(out, toolIDOfUserCompany).ToolCallID)
 		assert.JSONEq(t, `{"user_id":"zhangsan-zhangsan@bytedance.com","gender":"male","company":"bytedance","position":"CEO"}`,
@@ -135,8 +134,6 @@ func TestToolsNode(t *testing.T) {
 			}
 
 			assert.NoError(t, err)
-
-			t.Logf("stream message[%v]: %v", loops, msgs)
 
 			assert.Len(t, msgs, 2)
 			if msg := findMsgByToolCallID(out, toolIDOfUserCompany); msg != nil {
@@ -198,8 +195,6 @@ func TestToolsNode(t *testing.T) {
 			}
 
 			assert.NoError(t, err)
-
-			t.Logf("stream message[%v]: %v", loops, msgs)
 
 			assert.Len(t, msgs, 2)
 			if msg := findMsgByToolCallID(out, toolIDOfUserCompany); msg != nil {

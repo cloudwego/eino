@@ -263,9 +263,85 @@ func concatSliceValue(val reflect.Value) (reflect.Value, error) {
 	}
 
 	f := getConcatFunc(elmType)
-	if f == nil {
-		return reflect.Value{}, fmt.Errorf("cannot concat value of type %s", elmType)
+	if f != nil {
+		return f(val)
 	}
 
-	return f(val)
+	var (
+		structType  reflect.Type
+		isStructPtr bool
+	)
+
+	if elmType.Kind() == reflect.Struct {
+		structType = elmType
+	} else if elmType.Kind() == reflect.Pointer && elmType.Elem().Kind() == reflect.Struct {
+		isStructPtr = true
+		structType = elmType.Elem()
+	}
+
+	if structType != nil {
+		maps := make([]map[string]any, 0, val.Len())
+		for i := 0; i < val.Len(); i++ {
+			sliceElem := val.Index(i)
+			m, err := structToMap(sliceElem)
+			if err != nil {
+				return reflect.Value{}, err
+			}
+
+			maps = append(maps, m)
+		}
+
+		result, err := concatMaps(reflect.ValueOf(maps))
+		if err != nil {
+			return reflect.Value{}, err
+		}
+
+		return mapToStruct(result.Interface().(map[string]any), structType, isStructPtr), nil
+	}
+
+	var filtered reflect.Value
+	for i := 0; i < val.Len(); i++ {
+		oneVal := val.Index(i)
+		if !oneVal.IsZero() {
+			if filtered.IsValid() {
+				return reflect.Value{}, fmt.Errorf("cannot concat multiple non-zero value of type %s", elmType)
+			}
+
+			filtered = oneVal
+		}
+	}
+
+	return filtered, nil
+}
+
+func structToMap(s reflect.Value) (map[string]any, error) {
+	if s.Kind() == reflect.Ptr {
+		s = s.Elem()
+	}
+
+	ret := make(map[string]any, s.NumField())
+	for i := 0; i < s.NumField(); i++ {
+		fieldType := s.Type().Field(i)
+		if !fieldType.IsExported() {
+			return nil, fmt.Errorf("structToMap: field %s is not exported", fieldType.Name)
+		}
+
+		ret[fieldType.Name] = s.Field(i).Interface()
+	}
+
+	return ret, nil
+}
+
+func mapToStruct(m map[string]any, t reflect.Type, toPtr bool) reflect.Value {
+	ret := reflect.New(t).Elem()
+	for k, v := range m {
+		field := ret.FieldByName(k)
+		field.Set(reflect.ValueOf(v))
+	}
+
+	if toPtr {
+		ret = ret.Addr()
+	}
+
+	return ret
 }

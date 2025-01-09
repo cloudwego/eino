@@ -183,13 +183,6 @@ func TestMapConcat(t *testing.T) {
 }
 
 func TestConcatError(t *testing.T) {
-
-	t.Run("not register type", func(t *testing.T) {
-		type y struct{}
-		_, err := concatItems([]y{{}, {}})
-		assert.NotNil(t, err)
-	})
-
 	t.Run("map type not equal", func(t *testing.T) {
 		a := map[string]any{
 			"str": "string_01",

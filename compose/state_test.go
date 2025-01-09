@@ -125,10 +125,6 @@ func TestStateGraphWithEdge(t *testing.T) {
 
 	l3StateToOutput := func(ctx context.Context, out string, state *testState) (string, error) {
 		state.ms = append(state.ms, out)
-		t.Logf("state result: ")
-		for idx, m := range state.ms {
-			t.Logf("    %vth: %v", idx, m)
-		}
 		assert.Len(t, state.ms, 4)
 		return out, nil
 	}
@@ -153,14 +149,12 @@ func TestStateGraphWithEdge(t *testing.T) {
 
 	out, err := run.Invoke(ctx, "how are you")
 	assert.NoError(t, err)
-	t.Logf("invoke result: %v", out)
 	assert.Equal(t, "TransformableLambda: StreamableLambda: InvokableLambda: how are you ", out)
 
 	stream, err := run.Stream(ctx, "how are you")
 	assert.NoError(t, err)
 	out, err = concatStreamReader(stream)
 	assert.NoError(t, err)
-	t.Logf("stream result: %v", out)
 	assert.Equal(t, "TransformableLambda: StreamableLambda: InvokableLambda: how are you ", out)
 
 	sr, sw := schema.Pipe[string](1)
@@ -171,7 +165,6 @@ func TestStateGraphWithEdge(t *testing.T) {
 	assert.NoError(t, err)
 	out, err = concatStreamReader(stream)
 	assert.NoError(t, err)
-	t.Logf("transform result: %v", out)
 	assert.Equal(t, "TransformableLambda: StreamableLambda: InvokableLambda: how are you ", out)
 }
 
@@ -183,7 +176,9 @@ func TestStateGraphUtils(t *testing.T) {
 
 		ctx := context.Background()
 
-		ctx = context.WithValue(ctx, stateKey{}, &testStruct{UserID: 10})
+		ctx = context.WithValue(ctx, stateKey{}, &internalState{
+			state: &testStruct{UserID: 10},
+		})
 
 		ts, err := GetState[*testStruct](ctx)
 		assert.NoError(t, err)
@@ -196,6 +191,7 @@ func TestStateGraphUtils(t *testing.T) {
 		}
 
 		ctx := context.Background()
+		ctx = context.WithValue(ctx, stateKey{}, &internalState{})
 
 		_, err := GetState[*testStruct](ctx)
 		assert.ErrorContains(t, err, "unexpected state type. expected: *compose.testStruct, got: <nil>")
@@ -207,7 +203,9 @@ func TestStateGraphUtils(t *testing.T) {
 		}
 
 		ctx := context.Background()
-		ctx = context.WithValue(ctx, stateKey{}, &testStruct{UserID: 10})
+		ctx = context.WithValue(ctx, stateKey{}, &internalState{
+			state: &testStruct{UserID: 10},
+		})
 
 		_, err := GetState[string](ctx)
 		assert.ErrorContains(t, err, "unexpected state type. expected: string, got: *compose.testStruct")

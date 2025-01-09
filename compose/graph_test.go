@@ -74,17 +74,15 @@ func TestSingleGraph(t *testing.T) {
 	assert.NoError(t, err)
 
 	in := map[string]any{"location": "beijing"}
-	ret, err := r.Invoke(ctx, in)
+	_, err = r.Invoke(ctx, in)
 	assert.NoError(t, err)
-	t.Logf("invoke result: %v", ret)
 
 	// stream
 	s, err := r.Stream(ctx, in)
 	assert.NoError(t, err)
 
-	msg, err := concatStreamReader(s)
+	_, err = concatStreamReader(s)
 	assert.NoError(t, err)
-	t.Logf("stream result: %v", msg)
 
 	sr, sw := schema.Pipe[map[string]any](1)
 	_ = sw.Send(in, nil)
@@ -94,19 +92,16 @@ func TestSingleGraph(t *testing.T) {
 	s, err = r.Transform(ctx, sr)
 	assert.NoError(t, err)
 
-	msg, err = concatStreamReader(s)
+	_, err = concatStreamReader(s)
 	assert.NoError(t, err)
-	t.Logf("transform result: %v", msg)
 
 	// error test
 	in = map[string]any{"wrong key": 1}
 	_, err = r.Invoke(ctx, in)
 	assert.Errorf(t, err, "could not find key: location")
-	t.Logf("invoke error: %v", err)
 
 	_, err = r.Stream(ctx, in)
 	assert.Errorf(t, err, "could not find key: location")
-	t.Logf("stream error: %v", err)
 
 	sr, sw = schema.Pipe[map[string]any](1)
 	_ = sw.Send(in, nil)
@@ -114,7 +109,6 @@ func TestSingleGraph(t *testing.T) {
 
 	_, err = r.Transform(ctx, sr)
 	assert.Errorf(t, err, "could not find key: location")
-	t.Logf("transform error: %v", err)
 }
 
 type person interface {
@@ -270,8 +264,6 @@ func TestNestedGraph(t *testing.T) {
 				v++
 			}
 
-			t.Logf("Name=%s, Component=%v, Type=%v, Depth=%d", info.Name, info.Component, info.Type, v)
-
 			return context.WithValue(ctx, ck, v)
 		}).
 		OnStartWithStreamInputFn(func(ctx context.Context, info *callbacks.RunInfo, input *schema.StreamReader[callbacks.CallbackInput]) context.Context {
@@ -282,27 +274,23 @@ func TestNestedGraph(t *testing.T) {
 				v++
 			}
 
-			t.Logf("Name=%s, Component=%v, Type=%v, Depth=%d", info.Name, info.Component, info.Type, v)
-
 			return context.WithValue(ctx, ck, v)
 		}).Build()
 
 	// invoke
-	ri, err := r.Invoke(ctx, "london", WithCallbacks(cb))
+	_, err = r.Invoke(ctx, "london", WithCallbacks(cb))
 	assert.NoError(t, err)
-	t.Log(ri)
 
 	// stream
 	rs, err := r.Stream(ctx, "london", WithCallbacks(cb))
 	assert.NoError(t, err)
 	for {
-		ri, err = rs.Recv()
+		_, err = rs.Recv()
 		if err == io.EOF {
 			break
 		}
 
 		assert.NoError(t, err)
-		t.Log(ri)
 	}
 
 	// collect
@@ -310,9 +298,8 @@ func TestNestedGraph(t *testing.T) {
 	_ = sw.Send("london", nil)
 	sw.Close()
 
-	rc, err := r.Collect(ctx, sr, WithCallbacks(cb))
+	_, err = r.Collect(ctx, sr, WithCallbacks(cb))
 	assert.NoError(t, err)
-	t.Log(rc)
 
 	// transform
 	sr, sw = schema.Pipe[string](5)
@@ -322,13 +309,12 @@ func TestNestedGraph(t *testing.T) {
 	rt, err := r.Transform(ctx, sr, WithCallbacks(cb))
 	assert.NoError(t, err)
 	for {
-		ri, err = rt.Recv()
+		_, err = rt.Recv()
 		if err == io.EOF {
 			break
 		}
 
 		assert.NoError(t, err)
-		t.Log(ri)
 	}
 }
 

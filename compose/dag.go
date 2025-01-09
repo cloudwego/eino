@@ -65,14 +65,11 @@ func (ch *dagChannel) get(ctx context.Context) (any, error) {
 	if ch.value == nil {
 		return nil, fmt.Errorf("dag channel not ready, value is nil")
 	}
-	return ch.value, nil
+	v := ch.value
+	ch.value = nil
+	return v, nil
 }
 
 func (ch *dagChannel) ready(ctx context.Context) bool {
 	return ch.value != nil
-}
-
-func (ch *dagChannel) clear(ctx context.Context) {
-	ch.values = make(map[string]any)
-	ch.values = nil
 }
