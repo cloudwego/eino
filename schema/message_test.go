@@ -486,7 +486,6 @@ func TestConcatToolCalls(t *testing.T) {
 		}
 
 		_, err := concatToolCalls(givenToolCalls)
-		t.Logf("concat tool call failed info: %v", err)
 		assert.ErrorContains(t, err, "cannot concat ToolCalls with different tool id")
 	})
 
@@ -512,7 +511,6 @@ func TestConcatToolCalls(t *testing.T) {
 		}
 
 		_, err := concatToolCalls(givenToolCalls)
-		t.Logf("concat tool call failed info: %v", err)
 		assert.ErrorContains(t, err, "cannot concat ToolCalls with different tool type")
 	})
 
@@ -538,7 +536,6 @@ func TestConcatToolCalls(t *testing.T) {
 		}
 
 		_, err := concatToolCalls(givenToolCalls)
-		t.Logf("concat tool call failed info: %v", err)
 		assert.ErrorContains(t, err, "cannot concat ToolCalls with different tool name")
 	})
 

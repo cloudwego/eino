@@ -18,8 +18,6 @@ package compose
 
 import (
 	"context"
-
-	"github.com/cloudwego/eino/utils/generic"
 )
 
 type newGraphOptions struct {
@@ -31,7 +29,7 @@ type NewGraphOption func(ngo *newGraphOptions)
 func WithGenLocalState[S any](gls GenLocalState[S]) NewGraphOption {
 	return func(ngo *newGraphOptions) {
 		ngo.withState = func(ctx context.Context) context.Context {
-			return context.WithValue(ctx, stateKey{}, gls(ctx))
+			return context.WithValue(ctx, stateKey{}, &internalState{state: gls(ctx)})
 		}
 	}
 }
@@ -69,14 +67,7 @@ func NewGraph[I, O any](opts ...NewGraphOption) *Graph[I, O] {
 	}
 
 	g := &Graph[I, O]{
-		newGraph(
-			generic.TypeOf[I](),
-			generic.TypeOf[O](),
-			defaultStreamMapFilter[I],
-			defaultValueChecker[I],
-			defaultValueChecker[O],
-			defaultStreamConverter[I],
-			defaultStreamConverter[O],
+		newGraphFromGeneric[I, O](
 			ComponentOfGraph,
 			options.withState,
 			options.withState != nil,
