@@ -59,8 +59,8 @@ func On[T any](ctx context.Context, inOut T, handle Handle[T], timing CallbackTi
 		return ctx, inOut
 	}
 
-	hs := make([]Handler, 0, len(mgr.handlers))
-	for _, handler := range mgr.handlers {
+	hs := make([]Handler, 0, len(mgr.handlers)+len(mgr.globalHandlers))
+	for _, handler := range append(mgr.handlers, mgr.globalHandlers...) {
 		timingChecker, ok_ := handler.(TimingChecker)
 		if !ok_ || timingChecker.Needed(ctx, mgr.runInfo, timing) {
 			hs = append(hs, handler)

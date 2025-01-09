@@ -25,6 +25,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 
+	"github.com/cloudwego/eino/internal/callbacks"
 	"github.com/cloudwego/eino/schema"
 )
 
@@ -180,4 +181,20 @@ func TestAspectInject(t *testing.T) {
 		nosr.Close()
 		assert.Equal(t, 186, cnt)
 	})
+}
+
+func TestGlobalCallbacksRepeated(t *testing.T) {
+	times := 0
+	testHandler := NewHandlerBuilder().OnStartFn(func(ctx context.Context, info *callbacks.RunInfo, input callbacks.CallbackInput) context.Context {
+		times++
+		return ctx
+	}).Build()
+	callbacks.GlobalHandlers = append(callbacks.GlobalHandlers, testHandler)
+
+	ctx := context.Background()
+	ctx = callbacks.AppendHandlers(ctx, &RunInfo{})
+	ctx = callbacks.AppendHandlers(ctx, &RunInfo{})
+
+	callbacks.On(ctx, "test", callbacks.OnStartHandle[string], TimingOnStart)
+	assert.Equal(t, times, 1)
 }

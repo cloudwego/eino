@@ -19,24 +19,25 @@ package callbacks
 import "context"
 
 type manager struct {
-	handlers []Handler
-	runInfo  *RunInfo
+	globalHandlers []Handler
+	handlers       []Handler
+	runInfo        *RunInfo
 }
 
 var GlobalHandlers []Handler
 
 func newManager(runInfo *RunInfo, handlers ...Handler) (*manager, bool) {
-	l := len(handlers) + len(GlobalHandlers)
-	if l == 0 {
+	if len(handlers)+len(GlobalHandlers) == 0 {
 		return nil, false
 	}
-	hs := make([]Handler, 0, l)
-	hs = append(hs, GlobalHandlers...)
-	hs = append(hs, handlers...)
+
+	hs := make([]Handler, len(GlobalHandlers))
+	copy(hs, GlobalHandlers)
 
 	return &manager{
-		handlers: hs,
-		runInfo:  runInfo,
+		globalHandlers: hs,
+		handlers:       handlers,
+		runInfo:        runInfo,
 	}, true
 }
 
@@ -50,8 +51,9 @@ func (m *manager) withRunInfo(runInfo *RunInfo) *manager {
 	}
 
 	return &manager{
-		handlers: m.handlers,
-		runInfo:  runInfo,
+		globalHandlers: m.globalHandlers,
+		handlers:       m.handlers,
+		runInfo:        runInfo,
 	}
 }
 
@@ -60,8 +62,9 @@ func managerFromCtx(ctx context.Context) (*manager, bool) {
 	m, ok := v.(*manager)
 	if ok && m != nil {
 		return &manager{
-			handlers: m.handlers,
-			runInfo:  m.runInfo,
+			globalHandlers: m.globalHandlers,
+			handlers:       m.handlers,
+			runInfo:        m.runInfo,
 		}, true
 	}
 
