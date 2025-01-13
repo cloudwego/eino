@@ -300,14 +300,35 @@ func TestReactStream(t *testing.T) {
 	t.Log(msg.Content)
 
 	// return directly tool call within parallel tool calls
-	_, err = a.Stream(ctx, []*schema.Message{
+	out, err = a.Stream(ctx, []*schema.Message{
 		{
 			Role:    schema.User,
 			Content: "使用 greet tool 持续打招呼，直到得到一个 bye 的回复，打招呼名字按照以下顺序: max、bob、alice、john、marry、joe、ken、lily, 请直接开始!请直接开始!请直接开始!",
 		},
 	}, agent.WithComposeOptions(compose.WithCallbacks(callbackForTest)))
-	assert.Error(t, err)
-	assert.Contains(t, err.Error(), "return directly tool call is not allowed when there are parallel tool calls")
+	assert.NoError(t, err)
+
+	defer out.Close()
+
+	msgs = make([]*schema.Message, 0)
+	for {
+		msg, err := out.Recv()
+		if err != nil {
+			if errors.Is(err, io.EOF) {
+				break
+			}
+			assert.NoError(t, err)
+		}
+
+		msgs = append(msgs, msg)
+	}
+
+	assert.Equal(t, 1, len(msgs))
+
+	msg, err = schema.ConcatMessages(msgs)
+	assert.NoError(t, err)
+
+	t.Log("parallel tool call with return directly: ", msg.Content)
 }
 
 func TestReactWithModifier(t *testing.T) {
