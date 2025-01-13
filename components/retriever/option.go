@@ -93,6 +93,8 @@ func WithDSLInfo(dsl map[string]any) Option {
 // Option is the call option for Retriever component.
 type Option struct {
 	apply func(opts *Options)
+
+	implSpecificOptFn any
 }
 
 // GetCommonOptions extract retriever Options from Option list, optionally providing a base Options with default values.
@@ -104,6 +106,32 @@ func GetCommonOptions(base *Options, opts ...Option) *Options {
 	for i := range opts {
 		if opts[i].apply != nil {
 			opts[i].apply(base)
+		}
+	}
+
+	return base
+}
+
+// GetImplSpecificOptions extract the implementation specific options from Option list, optionally providing a base options with default values.
+// e.g.
+//
+//	myOption := &MyOption{
+//		Field1: "default_value",
+//	}
+//
+//	myOption := model.GetImplSpecificOptions(myOption, opts...)
+func GetImplSpecificOptions[T any](base *T, opts ...Option) *T {
+	if base == nil {
+		base = new(T)
+	}
+
+	for i := range opts {
+		opt := opts[i]
+		if opt.implSpecificOptFn != nil {
+			optFn, ok := opt.implSpecificOptFn.(func(*T))
+			if ok {
+				optFn(base)
+			}
 		}
 	}
 

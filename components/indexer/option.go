@@ -47,10 +47,12 @@ func WithEmbedding(emb embedding.Embedder) Option {
 // Option is the call option for Indexer component.
 type Option struct {
 	apply func(opts *Options)
+
+	implSpecificOptFn any
 }
 
 // GetCommonOptions extract indexer Options from Option list, optionally providing a base Options with default values.
-// eg.
+// e.g.
 //
 //	indexerOption := &IndexerOption{
 //		SubIndexes: []string{"default_sub_index"}, // default value
@@ -66,6 +68,32 @@ func GetCommonOptions(base *Options, opts ...Option) *Options {
 		opt := opts[i]
 		if opt.apply != nil {
 			opt.apply(base)
+		}
+	}
+
+	return base
+}
+
+// GetImplSpecificOptions extract the implementation specific options from Option list, optionally providing a base options with default values.
+// e.g.
+//
+//	myOption := &MyOption{
+//		Field1: "default_value",
+//	}
+//
+//	myOption := model.GetImplSpecificOptions(myOption, opts...)
+func GetImplSpecificOptions[T any](base *T, opts ...Option) *T {
+	if base == nil {
+		base = new(T)
+	}
+
+	for i := range opts {
+		opt := opts[i]
+		if opt.implSpecificOptFn != nil {
+			optFn, ok := opt.implSpecificOptFn.(func(*T))
+			if ok {
+				optFn(base)
+			}
 		}
 	}
 

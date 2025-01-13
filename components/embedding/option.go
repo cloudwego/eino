@@ -25,6 +25,8 @@ type Options struct {
 // Option is the call option for Embedder component.
 type Option struct {
 	apply func(opts *Options)
+
+	implSpecificOptFn any
 }
 
 // WithModel is the option to set the model for the embedding.
@@ -53,6 +55,32 @@ func GetCommonOptions(base *Options, opts ...Option) *Options {
 		opt := opts[i]
 		if opt.apply != nil {
 			opt.apply(base)
+		}
+	}
+
+	return base
+}
+
+// GetImplSpecificOptions extract the implementation specific options from Option list, optionally providing a base options with default values.
+// e.g.
+//
+//	myOption := &MyOption{
+//		Field1: "default_value",
+//	}
+//
+//	myOption := model.GetImplSpecificOptions(myOption, opts...)
+func GetImplSpecificOptions[T any](base *T, opts ...Option) *T {
+	if base == nil {
+		base = new(T)
+	}
+
+	for i := range opts {
+		opt := opts[i]
+		if opt.implSpecificOptFn != nil {
+			optFn, ok := opt.implSpecificOptFn.(func(*T))
+			if ok {
+				optFn(base)
+			}
 		}
 	}
 

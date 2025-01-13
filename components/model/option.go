@@ -106,7 +106,7 @@ func GetCommonOptions(base *Options, opts ...Option) *Options {
 }
 
 // GetImplSpecificOptions extract the implementation specific options from Option list, optionally providing a base options with default values.
-// eg.
+// e.g.
 //
 //	myOption := &MyOption{
 //		Field1: "default_value",
