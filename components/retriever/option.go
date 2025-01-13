@@ -112,6 +112,13 @@ func GetCommonOptions(base *Options, opts ...Option) *Options {
 	return base
 }
 
+// WrapImplSpecificOptFn is the option to wrap the implementation specific option function.
+func WrapImplSpecificOptFn[T any](optFn func(*T)) Option {
+	return Option{
+		implSpecificOptFn: optFn,
+	}
+}
+
 // GetImplSpecificOptions extract the implementation specific options from Option list, optionally providing a base options with default values.
 // e.g.
 //
