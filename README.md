@@ -14,415 +14,269 @@ English | [中文](README.zh_CN.md)
 
 # Overview
 
-**Eino['aino]** (sounds like "i know", aspiring applications to achieve the vision of "i know") aims to provide an AI application development framework in Golang. Eino draws inspiration from many excellent AI application development frameworks in the open-source community, such as LangChain, LangGraph, LlamaIndex, etc., offering an AI application development framework that better aligns with Golang programming conventions.
+**Eino['aino]** (pronounced as "I know") aims to be the ultimate LLM application development framework in Golang. Drawing inspirations from many excellent LLM application development frameworks in the open-source community such as LangChain & LlamaIndex, etc., as well as learning from cutting-edge research and real world applications, Eino offers an LLM application development framework that emphasizes on simplicity, scalability, reliability and effectiveness that better aligns with Golang programming conventions.
 
-Eino provides rich atomic components, integrated components, component orchestration, and aspect extension capabilities to help developers build AI applications with clear architecture, easy maintenance, and high availability in a simpler and more efficient way.
+What Eino provides are:
+- a carefully curated list of **component** abstractions and implementations that can be easily reused and combined to build LLM applications
+- a powerful **composition** framework that does the heavy lifting of strong type checking, stream processing, concurrency management, aspect injection, option assignment, etc. for the user.
+- a set of meticulously designed **API** that obsesses on simplicity and clarity.
+- an ever-growing collection of best practices in the form of bundled **flows** and **examples**.
+- a useful set of tools that covers the entire development cycle, from visualized development and debugging to online tracing and evaluation.
 
-Eino can standardize, simplify, and improve efficiency at different stages of the AI application development cycle:
+With the above arsenal, Eino can standardize, simplify, and improve efficiency at different stages of the AI application development cycle:
+![](.github/static/img/eino/eino_concept.jpeg)
 
-![](.github/static/img/eino/eino_framework.png)
+# A quick walkthrough
+
+Use a component directly:
+```Go
+model, _ := openai.NewChatModel(ctx, config) // create an invokable LLM instance
+message, _ := model.Generate(ctx, []*Message{
+    SystemMessage("you are a helpful assistant."),
+    UserMessage("what does the future AI App look like?")}
+```
+
+Of course, you can do that, Eino provides lots of useful components to use out of the box. But you can do more by using orchestration, for three reasons:
+- orchestration encapsulates common patterns of LLM application.
+- orchestration solves the difficult problem of processing stream response by the LLM.
+- orchestration handles type safety, concurrency management, aspect injection and option assignment for you.
+
+Eino provides three set of APIs for orchestration
+
+| API      | Characteristics and usage                                       |
+| -------- | --------------------------------------------------------------- |
+| Chain    | Simple chained directed graph that can only go forward.         |
+| Graph    | Cyclic or Acyclic directed graph. Powerful and flexible.        |
+| Workflow | Acyclic graph that supports data mapping at struct field level. |
+
+Let's create a simple chain: a ChatTemplate followed by a ChatModel.
+
+![](.github/static/img/eino/simple_chain.png)
+
+```Go
+chain, _ := NewChain[map[string]any, *Message]().
+           AppendChatTemplate(prompt).
+           AppendChatModel(model).
+           Compile(ctx)
+chain.Invoke(ctx, map[string]any{"query": "what's your name?"})
+```
+
+Now let's create a graph that uses a ChatModel to generate tool calls, then uses a ToolsNode to execute those tools, then feed the tool response back to ChatModel.
+
+![](.github/static/img/eino/simple_graph.png)
+
+```Go
+graph := NewGraph[[]*Message, *Message]()
+graph.AddChatModelNode("node_model", model)
+graph.AddToolsNode("node_tools", toolsNode)
+graph.AddEdge(START, "node_model")
+graph.AddEdge("node_tools", "node_model")
+graph.AddBranch("node_model", branch)
+runnable, _ := graph.Compile(ctx)
+runnable.Stream(ctx, []*Message{UserMessage("help me plan my weekend")})
+```
+
+Now let's create a workflow that flexibly maps input & output at the field level:
+
+![](.github/static/img/eino/simple_workflow.png)
+
+```Go
+wf := NewWorkflow[[]*Message, O3]()
+wf.AddChatModelNode("model", model).AddInput(NewMapping(START))
+wf.AddLambdaNode("l1", lambda1).AddInput(NewMapping("model").From("Content").To("Input"))
+wf.AddLambdaNode("l2", lambda2).AddInput(NewMapping("model").From("Role").To("Role"))
+wf.AddLambdaNode("l3", lambda3).AddInput(
+    NewMapping("l1").From("Output").To("Query"),
+    NewMapping("l2").From("Output").To("MetaData"),
+)
+wf.AddEnd([]*Mapping{NewMapping("node_l3")}
+runnable, _ := wf.Compile(ctx)
+runnable.Invoke(ctx, []*Message{UserMessage("kick start this workflow!")})
+```
+
+Now let's create a 'ReAct' agent: A ChatModel binds to Tools. It receives input Messages and decides independently whether to call the Tool or output the final result. The execution result of the Tool will again become the input Message for the ChatModel and serve as the context for the next round of independent judgment.
+
+We write this in dozens lines of code:
+```Go
+// build a ReAct agent that accepts []*Message as input and outputs *Message as output
+func (r *Agent) build(ctx context.Context, config *AgentConfig) (
+    _ Runnable[[]*Message, *Message], err error) {
+    var (
+       // the LLM responsible for reasoning and generating output within the ReAct Agent
+       chatModel = config.Model
+       // the actual executor of tools
+       toolsNode *ToolsNode
+       // the meta info of tools
+       toolInfos []*schema.ToolInfo
+       // the graph consist of the ChatModel and ToolsNode
+       graph *Graph[[]*Message, *Message]
+       // read and write contextual messages before ChatModel execution
+       modelPreHandle StatePreHandler[[]*Message, *state]
+       // after ChatModel execution, routes to END if output does not contain tool call info, otherwise routes to ToolsNode
+       modelPostBranch *GraphBranch
+    )
+
+    if toolInfos, err = genToolInfos(ctx, config); err != nil {
+       return nil, err
+    }
+
+    if err = chatModel.BindTools(toolInfos); err != nil {
+       return nil, err
+    }
+
+    if toolsNode, err = NewToolNode(ctx, &config.ToolsConfig); err != nil {
+       return nil, err
+    }
+
+    // creates a graph with state that stores messages across multiple rounds of ReAct loop
+    graph = NewGraph[[]*Message, *Message](
+       WithGenLocalState(func(ctx context.Context) *state {
+          return &state{Messages: make([]*Message, 0, config.MaxStep+1)}
+       }))
+
+    modelPreHandle = func(ctx context.Context, input []*Message, state *state) (
+       []*Message, error) {
+       state.Messages = append(state.Messages, input...)
+
+       modifiedInput := make([]*Message, 0, len(state.Messages))
+       copy(modifiedInput, state.Messages)
+       return config.MessageModifier(ctx, modifiedInput), nil // add system prompt
+    }
+
+    err = graph.AddChatModelNode(nodeKeyModel, chatModel, WithStatePreHandler(modelPreHandle))
+    if err != nil {
+       return nil, err
+    }
+
+    if err = graph.AddEdge(START, nodeKeyModel); err != nil { // chatModel connects to START because it accepts initial input
+       return nil, err
+    }
+
+    if err = graph.AddToolsNode(nodeKeyTools, toolsNode); err != nil {
+       return nil, err
+    }
+
+    // chatModel's output can be a stream with multiple chunks of messages
+    // we use StreamGraphBranch here to make the routing decision based only on the first chunk 
+    modelPostBranch = NewStreamGraphBranch(
+       func(_ context.Context, sr *schema.StreamReader[*Message]) (endNode string, err error) {
+          defer sr.Close()
+
+          if msg, err := sr.Recv(); err != nil {
+             return "", err
+          } else if len(msg.ToolCalls) == 0 {
+             return END, nil
+          }
+
+          return nodeKeyTools, nil
+       }, map[string]bool{nodeKeyTools: true, END: true})
+    if err = graph.AddBranch(nodeKeyModel, modelPostBranch); err != nil {
+       return nil, err
+    }
+
+    if err = graph.AddEdge(nodeKeyTools, nodeKeyModel); err != nil { // toolsNode's output are fed back to chatModel
+       return nil, err
+    }
+
+    // compile Graph to Runnable：do type check、inject callback aspects、automatic stream boxing and unboxing、generate graph runner, etc.
+    return graph.Compile(ctx, WithMaxRunSteps(config.MaxStep))
+}
+```
+
+Eino automatically does important stuff behind the above code:
+- Type checking: it makes sure the two nodes' input and output types match at compile time.
+- Stream processing: concatenates message stream before passing to chatModel and toolsNode if needed, and copies the stream into callback handlers.
+- Concurrency management: the shared state can be safely read and written because the StatePreHandler is concurrency safe.
+- Aspect injection: injects callback aspects before and after the execution of ChatModel if the specified ChatModel implementation hasn't injected itself.
+- Option assignment: call options are assigned either globally, to specific component type or to specific node.
+
+For example, you could easily extend the compiled graph with callbacks:
+```Go
+handler := NewHandlerBuilder().
+  OnStartFn(
+    func(ctx context.Context, info *RunInfo, input CallbackInput) context.Context) {
+        log.Infof("onStart, runInfo: %v, input: %v", info, input)
+    }).
+  OnEndFn(
+    func(ctx context.Context, info *RunInfo, output CallbackOutput) context.Context) {
+        log.Infof("onEnd, runInfo: %v, out: %v", info, output)
+    }).
+  Build()
+  
+compiledGraph.Invoke(ctx, input, WithCallbacks(handler))
+```
+
+or you could easily assign options to different nodes:
+```Go
+// assign to All nodes
+compiledGraph.Invoke(ctx, input, WithCallbacks(handler))
+
+// assign only to ChatModel nodes
+compiledGraph.Invoke(ctx, input, WithChatModelOption(WithTemperature(0.5))
+
+// assign only to node_1
+compiledGraph.Invoke(ctx, input, WithCallbacks(handler).DesignateNode("node_1"))
+```
 
 # Key Features
 
 ## Rich Components
 
-- Abstract commonly used capabilities across multiple scenarios into independent, orchestratable components that are ready to use out of the box
-    - Such as atomic components like ChatModel, PromptTemplate, Retriever, Loader, etc.
-    - Each Component type has an interface abstraction and multiple corresponding implementations
-        - When orchestrating, the input and output of corresponding nodes remain consistent with the interface abstraction
+- Encapsulates common building blocks into **component abstractions**, each have multiple **component implementations** that are ready to be used out of the box.
+    - component abstractions such as ChatModel, Tool, PromptTemplate, Retriever, Document Loader, Lambda, etc.
+    - each component type has an interface of its own: defined Input & Output Type, defined Option type, and streaming paradigms that make sense.
+    - implementations are transparent. Abstractions are all you care about when orchestrating components together.
 
-- Components can be further divided into: atomic components with indivisible functionality and integrated components composed of one or more components in certain patterns
-    - Integrated components: React Agent, MultiQueryRetriver, Host MultiAgent, etc.
+- Implementations can be nested and captures complex business logic.
+    - React Agent, MultiQueryRetriever, Host MultiAgent, etc. They consist of multiple components and non-trivial business logic.
+    - They are still transparent from the outside. A MultiQueryRetriever can be used anywhere that accepts a Retriever.
 
-## Easy-to-use Graph Orchestration (Graph/Chain)
+## Powerful Orchestration (Graph/Chain/Workflow)
 
-- Use component instances as graph nodes, connect them with graph vertices and edges, execute nodes and transmit data flow according to edge directions, orchestrating and executing AI application logic through graphs.
-- Graph orchestration can greatly simplify the development of **parallel and streaming (asynchronous)** logic while optimizing its code structure
-
-![](.github/static/img/eino/graph.gif)
-
-> Using "data processing factory" as a metaphor for application construction. Graph orchestration defines applications as: a network of independent "black boxes (nodes)" that communicate through data packets over predefined connections. These "black boxes" can be connected in different scenarios to form different applications without internal changes. Here, a "black box" represents a Component, thus Graph orchestration has Component-oriented characteristics.
-
-**Graph orchestration** provides a concise "drawing" design semantic. By adding **nodes (computation logic)** and **edges (data flow)**, developers can "draw" basic components provided in Component into drafts through visualization, which can then be reused as needed or compiled into an LLM application. In short:
-
-> Nodes do the work, Edges tell what to do next.
-
-The elements and concepts involved in **graph orchestration** can be summarized in four words: nodes, edges, surfaces, and aspects.
-
-Graph orchestration in Eino is represented as: Graph, Chain
+- Data flows from Retriever / Document Loaders / Prompt Template to ChatModel, then flows to Tools and parsed as Final Answer. This directed, controlled flow of data through multiple components can be implemented through **graph orchestration**.
+- Component instances are graph nodes, and edges are data flow channels.
+- Graph orchestration is powerful and flexible enough to implement complex business logic:
+  - type checking, stream processing, concurrency management, aspect injection and option assignment are handled by the framework.
+  - branch out execution at runtime, read and write global state, or do field level data mapping using workflow.
 
 ## Complete Stream Processing
 
-In scenarios like LLM-built long-running applications, **stream processing** is crucial for making end users feel that the system is responding in real-time.
+- Stream processing is important because ChatModel outputs chunks of messages in real time as it generates them.
+- Eino automatically **concatenates** stream chunks for downstream nodes that only accepts non-stream input, such as ToolsNode.
+- Eino automatically **boxes** non stream into stream when stream is needed during graph execution.  
+- Eino automatically **merges** multiple streams as they converge into a single downward node.
+- Eino automatically **copies** stream as they fan out to different downward node, or is passed to callback handlers.
+- most importantly, Eino automatically fills in the missing streaming capabilities when a component is added to graph: you can provide a function that is only Invokable, Eino creates the other 3 paradigms.
 
-Based on whether **input and output are streaming**, there are 4 interaction modes. Different components can only provide one or more of these 4 interaction modes (most have Invoke capability, some have Stream capability, very few have Transform capability). How to connect components with different interaction modes through graph orchestration and transfer data flow is an unavoidable challenge for users.
-
-Graph orchestration can automatically convert between streaming and non-streaming based on whether the upstream and downstream nodes' input and output are streams, making it much easier for developers to provide stream processing capabilities for AI applications without concerning about matching stream processing relationships between upstream and downstream nodes.
+  | Streaming Paradigm | Explanation                                                                 |
+  | ------------------ | --------------------------------------------------------------------------- |
+  | Invoke             | Accepts non-stream type I and returns non-stream type O                     |
+  | Stream             | Accepts non-stream type I and returns stream type StreamReader[O]           |
+  | Collect            | Accepts stream type StreamReader[I] and returns non-stream type O           |
+  | Transform          | Accepts stream type StreamReader[I] and returns stream type StreamReader[O] |
+- Orchestration elements such as **branch** and **state handlers** are also stream aware.
 
 ## Highly Extensible Aspects (Callbacks)
 
-Like LangChain, Eino provides a complete callback system that allows developers to embed their own hooks at various stages of AI applications. This makes it convenient for developers to extend functionalities like logging, monitoring, and stream processing using these hooks.
-
-Developers can subscribe to events at various stages of AI application building and runtime by implementing hook objects like callbacks.Handler and compose.GraphCompileCallback.
-
-From the perspective of graph orchestration, Eino provides mechanisms for injecting and running aspects before and after the execution of graphs and nodes. Developers can flexibly design and inject their own aspect capabilities without interfering with the main process, such as Trace, instrumentation, logging, etc.
+- Aspects handle cross-cutting concerns such as logging, tracing, metrics, etc., as well as exposing internal details of component implementations.
+- Five aspects on supported: **OnStart, OnEnd, OnError, OnStartWithStreamInput, OnEndWithStreamOutput**.
+- Developers can easily create custom callback handlers, add them during graph run via options, and they will be invoked during graph run.
+- Graph can also inject aspects to those component implementations that do not support callbacks on their own.
 
 # Eino Framework Structure
 
-![](.github/static/img/eino/eino_composite.png)
+![](.github/static/img/eino/eino_framework.jpeg)
 
-The Eino framework consists of three parts:
+The Eino framework consists of two parts:
 
-- Eino(Eino Core): Contains Eino's component abstractions, orchestration capabilities like Graph and Chain, aspect mechanisms, etc.
-- EinoExt: Component implementations, common aspect implementations, component usage examples, and various Eino extension capabilities
-- Eino DevOps: Development, debugging, evaluation visualization and management capabilities for Eino
+- Eino(this repo): Contains Eino's type definitions, streaming mechanism, component abstractions, orchestration capabilities, aspect mechanisms, etc.
+- [EinoExt](https://github.com/cloudwego/eino-ext): Component implementations, callback handlers implementations, component usage examples, and various tools such as graphic design tool, visualized debugging, evaluators and prompt optimizers.
 
-Six core concepts in Eino Core:
-
-- Components Abstraction
-    - Each Component type has a corresponding interface abstraction and multiple implementations. Can be used directly or orchestrated
-        - When orchestrating, the input and output of corresponding nodes remain consistent with the interface abstraction
-    - Out-of-the-box atomic components like ChatModel, PromptTemplate, Retriever, Indexer, etc.
-    - The Component concept in Eino is relatively flexible - anything that satisfies one of the following responsibilities can be called a Component:
-        - Can be added to Graph Node as an orchestration object
-        - Serves as a dependency injection component for other orchestration objects
-
-- Flow Integrated Components
-    - Provides pre-orchestrated integrated component capabilities for common application scenarios based on the framework's Components and Graph
-    - May provide capability to be orchestrated again
-    - Examples: Agent, MultiAgent, Multi Retriever etc.
-
-- Runnable -- Low User Awareness
-    - Orchestration objects and products in the orchestration framework
-    - All Components need to be converted to Runnable objects when being orchestrated, generally invisible to users
-    - When a graph is compiled into an executable object, it is essentially a Runnable object
-
-- Compose Orchestration
-    - Connect various Component instances as Node nodes with graph vertices and edges relationships, transmit data flow according to directed edges, and execute at different nodes
-    - Supports multiple orchestration forms like Graph, Chain, Workflow, etc., all essentially expressing data flow transmission and node execution order through directed graphs
-
-- Aspect Capabilities
-    - Aspect capabilities provided before and after each node execution in Graph
-    - Examples: Trace, instrumentation, logging, etc.
-
-- Stream
-    - Component instances added to Node may have streaming or non-streaming input/output. Compose orchestration can connect these different forms of input/output, transmit data flow and execute nodes. This capability is called streaming orchestration capability
-    - Examples: ChatModel output, ASR input/output are streaming
-
-## Component
-
-For specific responsibilities of each Component type, please check the corresponding interface definitions
-
-> The following is an example illustration, not complete, please refer to the [code repository](https://github.com/cloudwego/eino-ext/tree/main/components) for accuracy
-
-```
-eino/components // 组件根目录
-├── document
-│   ├── interface.go 
-│   └── option.go
-├── embedding
-│   ├── callback_extra.go
-│   ├── interface.go // 一个组件的抽象
-│   ├── ark          // 与抽象同级的一个文件夹代表一种具体实现
-│   ├── openai
-│   └── option.go
-├── indexer
-│   ├── callback_extra.go
-│   ├── interface.go
-│   ├── option.go
-│   └── volc_vikingdb
-├── model
-│   ├── callback_extra.go
-│   ├── interface.go
-│   ├── ark
-│   ├── openai
-│   └── option.go
-├── prompt
-│   ├── callback_extra.go
-│   ├── chat_template.go
-│   ├── chat_template_test.go
-│   └── interface.go
-├── retriever
-│   ├── callback_extra.go
-│   ├── interface.go
-│   ├── option.go
-│   └── volc_vikingdb
-├── tool
-│   ├── duckduckgo
-│   ├── interface.go
-│   └── option.go
-├── types.go
-```
-
-## Runnable
-
-
-```go
-type Runnable[I, O any] interface {
-    Invoke(ctx context.Context, input I, opts ...Option) (output O, err error)
-    Stream(ctx context.Context, input I, opts ...Option) (output *schema.StreamReader[O], err error)
-    Collect(ctx context.Context, input *schema.StreamReader[I], opts ...Option) (output O, err error)
-    Transform(ctx context.Context, input *schema.StreamReader[I], opts ...Option) (output *schema.StreamReader[O], err error)
-}
-```
-
-- Runnable abstraction divides into 4 Lambda operators based on whether input/output is streaming
-- In Compose orchestration, component instances added to Node are uniformly converted to the above Runnable abstraction
-- When a Component is converted to Runnable, based on any Lambda operator it provides, combined with Streaming and Concat capabilities, the remaining unprovided Lambda operators are completed
-
-    - Conversion between streaming and non-streaming:
-      > Using StreamReader[T] and T to represent streaming and non-streaming respectively
-      - Concat
-          - Receive and merge T-Frames in StreamReader[T] into a complete T
-      - Streaming
-          - Convert T into a StreamReader[T] with only one T-Frame for streaming transmission
-- Based on these two conversion relationships, Eino can encapsulate any interface with N(N<=4) interaction modes provided by users into a complete Runnable[I, O]
-
-<table>
-<tr>
-<td>Source\Target<br/></td><td>Invoke[I, O any]()<br/></td><td>Stream[I, O any]()<br/></td><td>Collect[I, O any]()<br/></td><td>Transform[I, O any]()<br/></td></tr>
-<tr>
-<td>Invoke[I, O any]()<br/></td><td>-<br/></td><td>- Invoke input passes through<br/>- Invoke response converts to single frame stream<br/></td><td>- Invoke input converts to single frame stream<br/>- Invoke response passes through<br/></td><td>- Invoke input converts to single frame stream<br/>- Invoke response converts to single frame stream<br/></td></tr>
-<tr>
-<td>Stream[I, O any]()<br/></td><td>- Stream input passes through<br/>- Stream output Concat then passes through<br/></td><td>-<br/></td><td>- Stream input converts to single frame stream<br/>- Stream output Concat then passes through<br/></td><td>- Stream input converts to single frame stream<br/>- Stream output passes through<br/></td></tr>
-<tr>
-<td>Collect[I, O any]()<br/></td><td>- Collect input Concat then passes through<br/>- Collect output passes through<br/></td><td>- Collect input Concat then passes through<br/>- Collect output converts to single frame stream<br/></td><td>-<br/></td><td>- Collect input passes through<br/>- Collect output converts to single frame stream<br/><br/></td></tr>
-<tr>
-<td>Transform[I, O any]()<br/></td><td>- Transform input Concat then passes through<br/>- Transform output Concat then passes through<br/></td><td>- Transform input Concat then passes through<br/>- Transform output passes through<br/></td><td>- Transform input passes through<br/>- Transform output Concat then passes through<br/></td><td>-<br/></td></tr>
-</table>
-
-- The actual streaming capability in the programming product depends on the following orchestration paradigm
-
-![](.github/static/img/eino/stream.png)
-
-## Stream
-
-Notice: Stream processing logic is quite complex in scenarios like **production**, **consumption**, **copying**, **merging**, and **transformation**. Any oversight in implementation can lead to issues like producer/consumer deadlock, goroutine leaks or overflow, memory leaks or overflow, high CPU load, etc. To reduce stability issues, Eino strictly requires using Eino-provided Stream implementations, thus implementing Stream as a Struct rather than an interface.
-
-Complex stream operation scenarios:
-
-- Conversion between streaming and non-streaming interfaces
-    - When converting stream to non-stream, all data frames in the stream need to be Concat into a complete data structure
-    - When converting non-stream to stream, a data structure needs to be converted into a stream with only one data frame
-- The same data stream may need to be read and consumed multiple times, like by multiple aspects. Since a stream can only be read once completely, it needs to be Copied based on the number of consumers
-    - When copying streams, need to consider consumption coordination and Close coordination among multiple streams. Any stream not properly Closed may prevent resources from being properly released
-- Merging multiple streams into one
-
-To make Stream API interfaces clearer and easier to use, they are aligned with Golang's built-in io.Pipe() method definition.
-
-- API interface defined as: `schema.Pipe[T any](cap int) (*StreamReader[T], *StreamWriter[T])`
-    - cap indicates Stream buffer size - how many Chunks Sender can send without blocking when there's no consumption
-    - `StreamWriter` similar to PipeWriter in io.Pipe
-    - `StreamReader` similar to PipeReader in io.Pipe, but with an additional `Copy(n int) []*StreamReader[T]` method
-- **WARN**: Don't forget to Close() whenever you see `*StreamReader[T]` or `*StreamWriter[T]`, otherwise streams may not be properly released. Stream production and consumption are usually in separate goroutines, which could lead to goroutine leaks.
-
-For Stream API design, see source code link: [eino/schema/stream.go](https://github.com/cloudwego/eino/blob/main/schema/stream.go)
-
-## Compose Orchestration
-
-### Graph
-
-#### Nodes
-
-- Adding a Component instance to a Graph forms a Node
-- Components can be used independently or orchestrated in a Graph
-- Add{Component}Node() interface listing. Only a few interfaces are listed here, for a more detailed interface list, please check the latest Eino SDK
-
-    - For common component types, a standard behavioral semantic is abstracted and different implementations are provided
-    - Users can add any custom function as a node using AddLambdaNode
-
-```go
-// AddChatModelNode add node that implements model.ChatModel.
-func (g *graph) AddChatModelNode(key string, node model.ChatModel, opts ...GraphAddNodeOpt) error {
-    return g.addNode(key, toChatModelNode(key, node, opts...))
-}
-
-// AddChatTemplateNode add node that implements prompt.ChatTemplate.
-func (g *graph) AddChatTemplateNode(key string, node prompt.ChatTemplate, opts ...GraphAddNodeOpt) error {
-    return g.addNode(key, toChatTemplateNode(key, node, opts...))
-}
-
-func (g *graph) AddToolsNode(key string, node *ToolsNode, opts ...GraphAddNodeOpt) error {
-    return g.addNode(key, toToolsNode(key, node, opts...))
-}
-
-// AddLambdaNode add node that implements at least one of Invoke[I, O], Stream[I, O], Collect[I, O], Transform[I, O].
-// due to the lack of supporting method generics, we need to use function generics to generate Lambda run as Runnable[I, O].
-// for Invoke[I, O], use compose.InvokableLambda()
-// for Stream[I, O], use compose.StreamableLambda()
-// for Collect[I, O], use compose.CollectableLambda()
-// for Transform[I, O], use compose.TransformableLambda()
-// for arbitrary combinations of 4 kinds of lambda, use compose.AnyLambda()
-func (g *graph) AddLambdaNode(key string, node *Lambda, opts ...GraphAddNodeOpt) error {
-    return g.addNode(key, toLambdaNode(key, node, opts...))
-}
-
-// AddGraphNode add one kind of Graph[I, O]、Chain[I, O]、StateChain[I, O, S] as a node.
-// for Graph[I, O], comes from NewGraph[I, O]()
-// for Chain[I, O], comes from NewChain[I, O]()
-// for StateGraph[I, O, S], comes from NewStateGraph[I, O, S]()
-func (g *graph) AddGraphNode(key string, node AnyGraph, opts ...GraphAddNodeOpt) error {
-    return g.addNode(key, toAnyGraphNode(key, node, opts...))
-}
-
-func (g *graph) AddRetrieverNode(key string, node retriever.Retriever, opts ...GraphAddNodeOpt) error {
-    return g.addNode(key, toRetrieverNode(key, node, opts...))
-}
-```
-
-#### Edges
-
-Eino provides multiple ways to add edges
-
-##### Add**Edge**
-
-```go
-// AddEdge adds an edge to the graph, edge means a data flow from startNode to endNode.
-// the previous node's output type must be set to the next node's input type.
-// NOTE: startNode and endNode must have been added to the graph before adding edge.
-// e.g.
-//
-//  graph.AddNode("start_node_key", compose.NewPassthroughNode())
-//  graph.AddNode("end_node_key", compose.NewPassthroughNode())
-//
-//  err := graph.AddEdge("start_node_key", "end_node_key")
-func (g *graph) AddEdge(startNode, endNode string) (err error) {}
-```
-
-- Adds a directed data transmission link between two nodes to control data flow direction and node execution order
-
-![](.github/static/img/eino/graph_add_edge.png)
-
-##### **AddBranch**
-
-```go
-// AddBranch adds a branch to the graph.
-// e.g.
-//
-//  condition := func(ctx context.Context, in string) (string, error) {
-//     return "next_node_key", nil
-//  }
-//  endNodes := map[string]bool{"path01": true, "path02": true}
-//  branch := compose.NewGraphBranch(condition, endNodes)
-//
-//  graph.AddBranch("start_node_key", branch)
-func (g *graph) AddBranch(startNode string, branch *GraphBranch) (err error) {}
-```
-
-- Based on the provided custom selection function, at runtime it selects a matching Node to execute from multiple Nodes according to computed conditions
-
-![](.github/static/img/eino/graph_add_branch.png)
-
-##### **Parallel**
-
-- Connect multiple Nodes in parallel to form concurrent execution of multiple nodes
-- No AddParallel method, parallel topology paths are created through AddEdge to form **Parallel**
-
-![](.github/static/img/eino/graph_parallel.png)
-
-#### Surface (Graph)
-
-- Create graph instance through NewGraph, and draw nodes and edges through graph.AddXXXNode, graph.AddEdge, graph.AddBranch to form a compilable and executable graph
-
-```go
-// Stateless Graph orchestration
-g := NewGraph[map[string]any, *schema.Message]()
-
-type testState struct {
-    ms []string
-}
-
-genFn := func(ctx context.Context) *testState {
-    return &testState{}
-}
-
-// Stateful Graph orchestration
-sg := NewGraph[string, string](WithGenLocalState(genFn))
-
-// Chain based on simplified Graph orchestration
-chain := NewChain[map[string]any, string]()
-```
-
-### Chain
-
-> Chain - A simplified Graph that connects different types of Nodes in sequence to form head-to-tail data flow transmission and sequential execution.
-
-#### **AppendXXX**
-
-> XXX can be ChatModel, Prompt, Indexer, Retriever, Graph and other component types
-> 
-> Chain is a simplified Graph, so Chain and Graph can be nested through AppendGraph
-
-- Connect multiple Nodes head-to-tail in the order they are added, with data passing and execution occurring sequentially through the connected Nodes
-
-![](.github/static/img/eino/chain.png)
-
-#### **AppendParallel**
-
-> Add a node that has multiple concurrently executing child nodes
-
-```go
-// Parallel run multiple nodes in parallel
-//
-// use `NewParallel()` to create a new parallel type
-// Example:
-
-parallel := NewParallel()
-parallel.AddChatModel("output_key01", chat01)
-parallel.AddChatModel("output_key01", chat02)
-
-chain := NewChain[any,any]()
-chain.AppendParallel(parallel)
-```
-
-- Create a Parallel to contain multiple concurrently executing child nodes
-
-![](.github/static/img/eino/chain_append_parallel.png)
-
-#### **AppendBranch**
-
-> Add a node that selects one node to execute from multiple child nodes through a condition calculation method
-
-```go
-// NewChainBranch creates a new ChainBranch instance based on a given condition.
-// It takes a generic type T and a GraphBranchCondition function for that type.
-// The returned ChainBranch will have an empty key2BranchNode map and a condition function
-// that wraps the provided cond to handle type assertions and error checking.
-// eg.
-
-condition := func(ctx context.Context, in string, opts ...any) (endNode string, err error) {
-    // logic to determine the next node
-    return "some_next_node_key", nil
-}
-
-cb := NewChainBranch[string](condition)
-cb.AddPassthrough("next_node_key_01", xxx) // node in branch, represent one path of branch
-cb.AddPassthrough("next_node_key_02", xxx) // node in branch
-
-chain := NewChain[string, string]()
-chain.AppendBranch(cb)
-```
-
-![](.github/static/img/eino/chain_append_branch.png)
-
-## Aspects (Callbacks)
-
-- Component (including Lambda) and Graph orchestration together solve the problem of "defining business logic". For cross-cutting functionalities like logging, tracing, metrics, screen display, etc., there needs to be a mechanism to inject these functionalities into Components (including Lambda) and Graph.
-
-- Additionally, users may want to access intermediate information during the execution of specific Component implementations, such as VikingDBRetriever providing additional DB Name information, or ArkChatModel providing request temperature parameters. A mechanism is needed to expose these intermediate states.
-
-- Callbacks support both "**cross-cutting functionality injection**" and "**intermediate state exposure**" by having users provide and register "functions" (Callback Handlers) that Components and Graph call back at fixed "timings" (or aspects, points) to provide corresponding information.
-
-- In Eino, **entities** like Components and Graph call back user-provided **functions** (Callback Handlers) at fixed **timings** (Callback Timing), passing information about **who they are** (RunInfo) and **what happened** (Callback Input & Output).
+also, [EinoExamples](https://github.com/cloudwego/eino-examples) is the repo containing example applications and best practices for Eino.
 
 ## Detailed Documentation
 
 // TODO: Link to user manual and other documentation
-
-## Related Projects
-
-- [EinoExt](https://github.com/cloudwego/eino-ext): Component implementations, common aspect implementations, component usage examples, and various Eino extension capabilities.
-- [EinoExamples](https://github.com/cloudwego/eino-examples): Demos of orchestration capabilities and scenario-based AI applications using Eino.
 
 ## Security
 
@@ -434,7 +288,7 @@ Please do **not** create a public GitHub issue.
 ## Contact US
 - How to become a member: [COMMUNITY MEMBERSHIP](https://github.com/cloudwego/community/blob/main/COMMUNITY_MEMBERSHIP.md)
 - Issues: [Issues](https://github.com/cloudwego/eino/issues)
-- Lark: Scan the QR code below with [Register Feishu](https://www.feishu.cn/en/) to join our CloudWeGo/kitex user group.
+- Lark: Scan the QR code below with [Register Feishu](https://www.feishu.cn/en/) to join our CloudWeGo/eino user group.
 
   ![LarkGroup](.github/static/img/eino/lark_group_en.png)
 

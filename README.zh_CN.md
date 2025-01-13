@@ -23,7 +23,7 @@ AI 应用。
 
 Eino 可在 AI 应用开发周期中的不同阶段，规范、简化和提效：
 
-![](.github/static/img/eino/eino_framework.png)
+![](.github/static/img/eino/eino_concept.jpeg)
 
 # 主要特性
 
@@ -81,7 +81,7 @@ Trace、埋点、日志等
 
 # Eino 框架结构
 
-![](.github/static/img/eino/eino_composite.png)
+![](.github/static/img/eino/eino_framework.jpeg)
 
 Eino 框架整体由 三部分 构成：
 
