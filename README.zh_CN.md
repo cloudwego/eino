@@ -55,9 +55,9 @@ Component 中提供的各个基础组件编排为草稿（Draft），进而可�
 
 > Nodes do the work, Edges tell what to do next.
 
-**图编排**中所涉及的元素和概念可以用：点、线、面、切面 四个词进行概括。
+**图编排**中所涉及的元素和概念可以用：点(Node)、线(Edge)、面(Graph)、切面(Callback) 四个词进行概括。
 
-图编排在 Eino 中表现为：Graph、Chain
+图编排在 Eino 中表现为：Graph、Chain、Workflow
 
 ## 完善的流处理(Streaming)
 
@@ -180,7 +180,7 @@ type Runnable[I, O any] interface {
 }
 ```
 
-- Runnable 抽象根据输入、输出是否为流式，划分成 4 个 Lamba 算子
+- Runnable 抽象根据输入、输出是否为流式，划分成 4 个 Lambda 算子
 - Compose 编排中，添加到 Node 中的组件实例，会被统一转换成上述的 Runnable 抽象
 - 当一个 Component 转换为 Runnable 时，根据其提供的任意 Lambda 算子，结合着 流化(Streaming)、合并(Concat) 能力，补全剩余的未提供的
   Lambda 算子
@@ -442,11 +442,14 @@ chain.AppendBranch(cb)
 
 ## 详细文档
 
-// TODO：链接用户手册等文档
+针对 Eino 的学习和使用，我们提供了完善的 Eino用户手册，帮助大家快速理解 Eino 中的概念，掌握基于 Eino 开发设计 AI 应用的技能，赶快通过[Eino 用户手册](https://www.cloudwego.io/zh/docs/eino/)尝试使用吧~。
+
+若想快速上手，了解 通过 Eino 构建 AI 应用的过程，推荐先阅读[Eino: 快速开始](https://www.cloudwego.io/zh/docs/eino/quick_start/)
 
 ## 相关项目
 
 - [EinoExt](https://github.com/cloudwego/eino-ext)：Eino 的组件实现、通用切面实现、组件使用示例等，可放置各种各样的Eino扩展能力。
+- [Eino Devops](https://github.com/cloudwego/eino-ext/devops)：Eino 的可视化开发、调试、评测 等能力
 - [EinoExamples](https://github.com/cloudwego/eino-examples)：- Eino 相关的 编排能力的Demo、场景化AI应用的Demo等。
 
 ## 安全
@@ -461,7 +464,7 @@ chain.AppendBranch(cb)
 - 如何成为 member: [COMMUNITY MEMBERSHIP](https://github.com/cloudwego/community/blob/main/COMMUNITY_MEMBERSHIP.md)
 - Issues: [Issues](https://github.com/cloudwego/eino/issues)
 - 飞书用户群（[注册飞书](https://www.feishu.cn/)后扫码进群）
-![LarkGroup](.github/static/img/eino/lark_group_zh.png)
+<img src=".github/static/img/eino/lark_group_zh.png" alt="LarkGroup" width="200"/>
 
 ## 开源许可证
 

@@ -272,11 +272,15 @@ The Eino framework consists of two parts:
 - Eino(this repo): Contains Eino's type definitions, streaming mechanism, component abstractions, orchestration capabilities, aspect mechanisms, etc.
 - [EinoExt](https://github.com/cloudwego/eino-ext): Component implementations, callback handlers implementations, component usage examples, and various tools such as graphic design tool, visualized debugging, evaluators and prompt optimizers.
 
-also, [EinoExamples](https://github.com/cloudwego/eino-examples) is the repo containing example applications and best practices for Eino.
+- [Eino Devops](https://github.com/cloudwego/eino-ext/devops): Visual development, debugging, evaluation and other capabilities for Eino
+
+- [EinoExamples](https://github.com/cloudwego/eino-examples) is the repo containing example applications and best practices for Eino.
 
 ## Detailed Documentation
 
-// TODO: Link to user manual and other documentation
+For learning and using Eino, we provide a comprehensive Eino User Manual to help you quickly understand the concepts in Eino and master the skills of developing AI applications based on Eino. Start exploring through the [Eino User Manual](https://www.cloudwego.io/docs/eino/) now!
+
+For a quick introduction to building AI applications with Eino, we recommend starting with [Eino: Quick Start](https://www.cloudwego.io/docs/eino/quick_start/)
 
 ## Security
 
