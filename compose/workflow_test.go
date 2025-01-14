@@ -105,7 +105,7 @@ func TestWorkflow(t *testing.T) {
 		}),
 		WithInputKey("key"),
 		WithOutputKey("key1")).
-		AddInput("1") // map["key"][]any ->> map[""]map["key"][]any -> map["key"][]any -> []any -> map["key1"][]any
+		AddInput("1") // map["key"][]any -> []any -> map["key1"][]any
 	subWorkflow.AddLambdaNode(
 		"3",
 		InvokableLambda(func(_ context.Context, in struct2) (map[string]any, error) {
@@ -120,7 +120,7 @@ func TestWorkflow(t *testing.T) {
 		}),
 		WithInputKey("key1"),
 	).
-		AddInput("3") // map["key1"][]any -> map[""]map["key1"][]any -> map["key1"][]any -> []any
+		AddInput("3") // map["key1"][]any -> []any
 	subWorkflow.AddEnd("4")
 
 	w := NewWorkflow[*structA, *structEnd](WithGenLocalState(func(context.Context) *state { return &state{} }))

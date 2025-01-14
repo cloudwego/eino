@@ -53,7 +53,6 @@ func NewWorkflow[I, O any](opts ...NewGraphOption) *Workflow[I, O] {
 		g: newGraphFromGeneric[I, O](
 			ComponentOfWorkflow,
 			options.withState,
-			options.withState != nil,
 		),
 	}
 
