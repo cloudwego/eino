@@ -14,7 +14,7 @@ English | [中文](README.zh_CN.md)
 
 # Overview
 
-**Eino['aino]** (pronounced as "I know") aims to be the ultimate LLM application development framework in Golang. Drawing inspirations from many excellent LLM application development frameworks in the open-source community such as LangChain & LlamaIndex, etc., as well as learning from cutting-edge research and real world applications, Eino offers an LLM application development framework that emphasizes on simplicity, scalability, reliability and effectiveness that better aligns with Golang programming conventions.
+**Eino['aino]** (pronounced similarly to "I know") aims to be the ultimate LLM application development framework in Golang. Drawing inspirations from many excellent LLM application development frameworks in the open-source community such as LangChain & LlamaIndex, etc., as well as learning from cutting-edge research and real world applications, Eino offers an LLM application development framework that emphasizes on simplicity, scalability, reliability and effectiveness that better aligns with Golang programming conventions.
 
 What Eino provides are:
 - a carefully curated list of **component** abstractions and implementations that can be easily reused and combined to build LLM applications
@@ -81,7 +81,7 @@ Now let's create a workflow that flexibly maps input & output at the field level
 ![](.github/static/img/eino/simple_workflow.png)
 
 ```Go
-wf := NewWorkflow[[]*Message, O3]()
+wf := NewWorkflow[[]*Message, *Message]()
 wf.AddChatModelNode("model", model).AddInput(NewMapping(START))
 wf.AddLambdaNode("l1", lambda1).AddInput(NewMapping("model").From("Content").To("Input"))
 wf.AddLambdaNode("l2", lambda2).AddInput(NewMapping("model").From("Role").To("Role"))
@@ -259,7 +259,7 @@ compiledGraph.Invoke(ctx, input, WithCallbacks(handler).DesignateNode("node_1"))
 ## Highly Extensible Aspects (Callbacks)
 
 - Aspects handle cross-cutting concerns such as logging, tracing, metrics, etc., as well as exposing internal details of component implementations.
-- Five aspects on supported: **OnStart, OnEnd, OnError, OnStartWithStreamInput, OnEndWithStreamOutput**.
+- Five aspects are supported: **OnStart, OnEnd, OnError, OnStartWithStreamInput, OnEndWithStreamOutput**.
 - Developers can easily create custom callback handlers, add them during graph run via options, and they will be invoked during graph run.
 - Graph can also inject aspects to those component implementations that do not support callbacks on their own.
 
@@ -267,7 +267,7 @@ compiledGraph.Invoke(ctx, input, WithCallbacks(handler).DesignateNode("node_1"))
 
 ![](.github/static/img/eino/eino_framework.jpeg)
 
-The Eino framework consists of two parts:
+The Eino framework consists of several parts:
 
 - Eino(this repo): Contains Eino's type definitions, streaming mechanism, component abstractions, orchestration capabilities, aspect mechanisms, etc.
 
