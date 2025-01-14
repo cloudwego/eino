@@ -255,16 +255,16 @@ Stream 流 的 API 设计，源码链接：[eino/schema/stream.go](https://githu
 ```go
 // AddChatModelNode add node that implements model.ChatModel.
 func (g *graph) AddChatModelNode(key string, node model.ChatModel, opts ...GraphAddNodeOpt) error {
-return g.addNode(key, toChatModelNode(key, node, opts...))
+    return g.addNode(key, toChatModelNode(key, node, opts...))
 }
 
 // AddChatTemplateNode add node that implements prompt.ChatTemplate.
 func (g *graph) AddChatTemplateNode(key string, node prompt.ChatTemplate, opts ...GraphAddNodeOpt) error {
-return g.addNode(key, toChatTemplateNode(key, node, opts...))
+    return g.addNode(key, toChatTemplateNode(key, node, opts...))
 }
 
 func (g *graph) AddToolsNode(key string, node *ToolsNode, opts ...GraphAddNodeOpt) error {
-return g.addNode(key, toToolsNode(key, node, opts...))
+    return g.addNode(key, toToolsNode(key, node, opts...))
 }
 
 // AddLambdaNode add node that implements at least one of Invoke[I, O], Stream[I, O], Collect[I, O], Transform[I, O].
@@ -275,7 +275,7 @@ return g.addNode(key, toToolsNode(key, node, opts...))
 // for Transform[I, O], use compose.TransformableLambda()
 // for arbitrary combinations of 4 kinds of lambda, use compose.AnyLambda()
 func (g *graph) AddLambdaNode(key string, node *Lambda, opts ...GraphAddNodeOpt) error {
-return g.addNode(key, toLambdaNode(key, node, opts...))
+    return g.addNode(key, toLambdaNode(key, node, opts...))
 }
 
 // AddGraphNode add one kind of Graph[I, O]、Chain[I, O]、StateChain[I, O, S] as a node.
@@ -283,11 +283,11 @@ return g.addNode(key, toLambdaNode(key, node, opts...))
 // for Chain[I, O], comes from NewChain[I, O]()
 // for StateGraph[I, O, S], comes from NewStateGraph[I, O, S]()
 func (g *graph) AddGraphNode(key string, node AnyGraph, opts ...GraphAddNodeOpt) error {
-return g.addNode(key, toAnyGraphNode(key, node, opts...))
+    return g.addNode(key, toAnyGraphNode(key, node, opts...))
 }
 
 func (g *graph) AddRetrieverNode(key string, node retriever.Retriever, opts ...GraphAddNodeOpt) error {
-return g.addNode(key, toRetrieverNode(key, node, opts...))
+    return g.addNode(key, toRetrieverNode(key, node, opts...))
 }
 ```
 
@@ -350,11 +350,11 @@ func (g *graph) AddBranch(startNode string, branch *GraphBranch) (err error) {}
 g := NewGraph[map[string]any, *schema.Message]()
 
 type testState struct {
-ms []string
+    ms []string
 }
 
 genFn := func (ctx context.Context) *testState {
-return &testState{}
+    return &testState{}
 }
 
 // 有状态的 Graph 编排
@@ -409,11 +409,11 @@ chain.AppendParallel(parallel)
 // It takes a generic type T and a GraphBranchCondition function for that type.
 // The returned ChainBranch will have an empty key2BranchNode map and a condition function
 // that wraps the provided cond to handle type assertions and error checking.
-// eg.
+// e.g.
 
 condition := func (ctx context.Context, in string, opts ...any) (endNode string, err error) {
-// logic to determine the next node
-return "some_next_node_key", nil
+    // logic to determine the next node
+    return "some_next_node_key", nil
 }
 
 cb := NewChainBranch[string](condition)
