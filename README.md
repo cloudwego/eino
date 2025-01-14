@@ -284,6 +284,10 @@ For learning and using Eino, we provide a comprehensive Eino User Manual to help
 
 For a quick introduction to building AI applications with Eino, we recommend starting with [Eino: Quick Start](https://www.cloudwego.io/docs/eino/quick_start/)
 
+## Dependencies
+- Go 1.18 and above.
+- Eino relies on [kin-openapi](https://github.com/getkin/kin-openapi) 's OpenAPI JSONSchema implementation. In order to remain compatible with Go 1.18, we have fixed kin-openapi's version to be v0.118.0.
+
 ## Security
 
 If you discover a potential security issue in this project, or think you may

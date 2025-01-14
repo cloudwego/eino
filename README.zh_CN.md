@@ -18,10 +18,10 @@
 
 Eino 提供的价值如下：
 - 精心整理的一系列 **组件（component）** 抽象与实现，可轻松复用与组合，用于构建 LLM 应用。
-- 强大的 **编排（orchestration）** 框架，为用户承担繁重的强类型检查、流处理、并发管理、切面注入、选项赋值等工作。
+- 强大的 **编排（orchestration）** 框架，为用户承担繁重的类型检查、流式处理、并发管理、切面注入、选项赋值等工作。
 - 一套精心设计、注重简洁明了的 **API**。
 - 以集成 **流程（flow）** 和 **示例（example）** 形式不断扩充的最佳实践集合。
-- 一套实用 **工具（devops tools）**，涵盖从可视化开发与调试到在线追踪与评估的整个开发生命周期。
+- 一套实用 **工具（DevOps tools）**，涵盖从可视化开发与调试到在线追踪与评估的整个开发生命周期。
 
 借助上述能力和工具，Eino 能够在人工智能应用开发生命周期的不同阶段实现标准化、简化操作并提高效率：
 
@@ -240,14 +240,14 @@ compiledGraph.Invoke(ctx, input, WithCallbacks(handler).DesignateNode("node_1"))
     - **类型检查、流处理、并发管理、切面注入和选项分配**都由框架处理。
     - 在运行时进行**分支（Branch）**执行、读写全局**状态（State）**，或者使用工作流进行字段级别的数据映射。
 
-## 完整的流处理能力
+## 完整的流式处理能力
 
-- 流处理（Stream Processing）很重要，因为 ChatModel 在生成消息时会实时输出消息块。
-- 对于只接受非流输入的下游节点（如 ToolsNode），Eino 会自动将流块 **拼接（Concatenate）** 起来。
-- 在 Graph 执行过程中，当需要流时，Eino 会自动将非流**转换**为流。
+- 流式处理（Stream Processing）很重要，因为 ChatModel 在生成消息时会实时输出消息块。
+- 对于只接受非流式输入的下游节点（如 ToolsNode），Eino 会自动将流 **拼接（Concatenate）** 起来。
+- 在 Graph 执行过程中，当需要流时，Eino 会自动将非流式**转换**为流式。
 - 当多个流汇聚到一个下游节点时，Eino 会自动 **合并（Merge）** 这些流。
 - 当流分散到不同的下游节点或传递给回调处理器时，Eino 会自动 **复制（Copy）** 这些流。
-- 最重要的是，当将一个组件添加到图中时，Eino 会自动补充缺失的流处理能力：你可以提供一个仅可 Invoke 的函数，埃伊诺会创建其他三种范式。
+- 最重要的是，当将一个组件添加到图中时，Eino 会自动补充缺失的流处理能力：你可以提供一个仅可 Invoke 的函数，Eino 会创建其他三种范式。
 
 | 流处理范式     | 解释                                            |
   |-----------|-----------------------------------------------|
@@ -259,9 +259,9 @@ compiledGraph.Invoke(ctx, input, WithCallbacks(handler).DesignateNode("node_1"))
 
 ## 易扩展的切面（Callbacks）
 
-- 切面用于处理诸如日志记录、追踪、指标统计等横切关注点，同时也用于暴露组件实现的内部细节。
+- 切面用于处理诸如日志记录、追踪、指标统计等横切面关注点，同时也用于暴露组件实现的内部细节。
 - 支持五种切面：**OnStart、OnEnd、OnError、OnStartWithStreamInput、OnEndWithStreamOutput**。
-- 开发者可以轻松创建自定义回调处理程序，在图运行期间通过选项添加它们，这些处理程序会在图运行时被调用。
+- 开发者可以轻松创建自定义回调处理程序，在图运行期间通过 Option 添加它们，这些处理程序会在图运行时被调用。
 - 图还能将切面注入到那些自身不支持回调的组件实现中。
 
 # Eino 框架结构
@@ -279,6 +279,10 @@ Eino 框架由几个部分组成：
 针对 Eino 的学习和使用，我们提供了完善的 Eino用户手册，帮助大家快速理解 Eino 中的概念，掌握基于 Eino 开发设计 AI 应用的技能，赶快通过[Eino 用户手册](https://www.cloudwego.io/zh/docs/eino/)尝试使用吧~。
 
 若想快速上手，了解 通过 Eino 构建 AI 应用的过程，推荐先阅读[Eino: 快速开始](https://www.cloudwego.io/zh/docs/eino/quick_start/)
+
+## 依赖说明
+- Go 1.18 及以上版本
+- Eino 依赖了 [kin-openapi](https://github.com/getkin/kin-openapi) 的 OpenAPI JSONSchema 实现。为了能够兼容 Go 1.18 版本，我们将 kin-openapi 的版本固定在了 v0.118.0。
 
 ## 安全
 
