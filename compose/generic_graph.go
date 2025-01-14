@@ -21,15 +21,15 @@ import (
 )
 
 type newGraphOptions struct {
-	withState func(ctx context.Context) context.Context
+	withState func(ctx context.Context) any
 }
 
 type NewGraphOption func(ngo *newGraphOptions)
 
 func WithGenLocalState[S any](gls GenLocalState[S]) NewGraphOption {
 	return func(ngo *newGraphOptions) {
-		ngo.withState = func(ctx context.Context) context.Context {
-			return context.WithValue(ctx, stateKey{}, &internalState{state: gls(ctx)})
+		ngo.withState = func(ctx context.Context) any {
+			return gls(ctx)
 		}
 	}
 }
@@ -70,7 +70,6 @@ func NewGraph[I, O any](opts ...NewGraphOption) *Graph[I, O] {
 		newGraphFromGeneric[I, O](
 			ComponentOfGraph,
 			options.withState,
-			options.withState != nil,
 		),
 	}
 

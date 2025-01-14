@@ -156,7 +156,7 @@ type graph struct {
 		mappings []*FieldMapping
 	}
 
-	runCtx func(ctx context.Context) context.Context
+	stateGenerator func(ctx context.Context) any
 
 	expectedInputType, expectedOutputType reflect.Type
 	inputStreamFilter                     streamMapFilter
@@ -180,8 +180,6 @@ type graph struct {
 
 	cmp component
 
-	enableState bool
-
 	compiled bool
 }
 
@@ -193,14 +191,12 @@ type newGraphConfig struct {
 	inputFieldMappingConverter, outputFieldMappingConverter             fieldMappingConverter
 	inputStreamFieldMappingConverter, outputStreamFieldMappingConverter streamFieldMappingConverter
 	cmp                                                                 component
-	runCtx                                                              func(ctx context.Context) context.Context
-	enableState                                                         bool
+	stateGenerator                                                      func(ctx context.Context) any
 }
 
 func newGraphFromGeneric[I, O any](
 	cmp component,
-	runCtx func(ctx context.Context) context.Context,
-	enableState bool,
+	stateGenerator func(ctx context.Context) any,
 ) *graph {
 	return newGraph(&newGraphConfig{
 		inputType:                         generic.TypeOf[I](),
@@ -215,8 +211,7 @@ func newGraphFromGeneric[I, O any](
 		inputStreamFieldMappingConverter:  buildStreamFieldMappingConverter[I](),
 		outputStreamFieldMappingConverter: buildStreamFieldMappingConverter[O](),
 		cmp:                               cmp,
-		runCtx:                            runCtx,
-		enableState:                       enableState,
+		stateGenerator:                    stateGenerator,
 	})
 }
 
@@ -252,9 +247,7 @@ func newGraph(cfg *newGraphConfig) *graph {
 
 		cmp: cfg.cmp,
 
-		runCtx: cfg.runCtx,
-
-		enableState: cfg.enableState,
+		stateGenerator: cfg.stateGenerator,
 	}
 }
 
@@ -294,7 +287,7 @@ func (g *graph) addNode(key string, node *graphNode, options *graphAddNodeOpts) 
 
 	// check options
 	if options.needState {
-		if !g.enableState {
+		if g.stateGenerator == nil {
 			return fmt.Errorf("node '%s' needs state but graph state is not enabled", key)
 		}
 	}
@@ -829,7 +822,6 @@ func (g *graph) compile(ctx context.Context, opt *graphCompileOptions) (*composa
 		chanSubscribeTo: chanSubscribeTo,
 		inputChannels:   inputChannels,
 
-		runCtx:      g.runCtx,
 		chanBuilder: cb,
 
 		inputType:                         g.inputType(),
@@ -848,6 +840,15 @@ func (g *graph) compile(ctx context.Context, opt *graphCompileOptions) (*composa
 		runtimeCheckBranches: g.runtimeCheckBranches,
 
 		fieldMappingsOnEdge: g.fieldMappings,
+	}
+
+	if g.stateGenerator != nil {
+		r.runCtx = func(ctx context.Context) context.Context {
+			return context.WithValue(ctx, stateKey{}, &internalState{
+				state: g.stateGenerator(ctx),
+				eager: false,
+			})
+		}
 	}
 
 	if runType == runTypeDAG {
@@ -920,6 +921,7 @@ func (g *graph) toGraphInfo(opt *graphCompileOptions, key2SubGraphs map[string]*
 		InputType:  g.expectedInputType,
 		OutputType: g.expectedOutputType,
 		Name:       opt.graphName,
+		GenStateFn: g.stateGenerator,
 	}
 
 	for key := range g.nodes {
@@ -954,18 +956,6 @@ func (g *graph) toGraphInfo(opt *graphCompileOptions, key2SubGraphs map[string]*
 		}
 
 		gInfo.Nodes[key] = *gNodeInfo
-	}
-
-	if g.runCtx != nil {
-		gInfo.GenStateFn = func(ctx context.Context) any {
-			stateCtx := g.runCtx(ctx)
-			state, err := GetState[any](stateCtx)
-			if err != nil {
-				return nil
-			}
-
-			return state
-		}
 	}
 
 	return gInfo
