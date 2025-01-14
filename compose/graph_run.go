@@ -120,12 +120,14 @@ func runnableTransform(ctx context.Context, r *composableRunnable, input any, op
 }
 
 func (r *runner) run(ctx context.Context, isStream bool, input any, opts ...Option) (any, error) {
+	// Choose the appropriate wrapper function based on whether we're handling a stream or not.
 	var runWrapper runnableCallWrapper
 	runWrapper = runnableInvoke
 	if isStream {
 		runWrapper = runnableTransform
 	}
 
+	// Initialize channel and task managers.
 	cm := r.initChannelManager()
 	tm := r.initTaskManager(runWrapper, opts...)
 	maxSteps := r.options.maxRunSteps
@@ -133,77 +135,83 @@ func (r *runner) run(ctx context.Context, isStream bool, input any, opts ...Opti
 		ctx = r.runCtx(ctx)
 	}
 
+	// Update maxSteps if provided in options.
 	for i := range opts {
 		if opts[i].maxRunSteps > 0 {
 			maxSteps = opts[i].maxRunSteps
 		}
 	}
 	if maxSteps < 1 {
-		return nil, errors.New("recursion_limit must be at least 1")
+		return nil, errors.New("recursion limit must be at least 1")
 	}
 
+	// Extract and validate options for each node.
 	optMap, extractErr := extractOption(r.chanSubscribeTo, opts...)
 	if extractErr != nil {
 		return nil, fmt.Errorf("graph extract option fail: %w", extractErr)
 	}
 
+	// Initialize with START node task.
 	var completedTasks []*task
-	// init start task
 	completedTasks = append(completedTasks, &task{
 		nodeKey: START,
 		call:    r.inputChannels,
 		output:  input,
 	})
 
+	// Main execution loop.
 	for step := 0; ; step++ {
-		// check if runner should stop
+		// Check for context cancellation.
 		select {
 		case <-ctx.Done():
-			return nil, fmt.Errorf("context has been canceled, error: %w", ctx.Err())
+			return nil, fmt.Errorf("context has been canceled: %w", ctx.Err())
 		default:
 		}
 		if step == maxSteps {
 			return nil, ErrExceedMaxSteps
 		}
 
-		// 1. calculate active edge
-		// 2. handle field mapping if needed
-		// 3. parse data type if needed
-		wChValues, err := r.resolveEdges(ctx, completedTasks, isStream)
+		// Process completed tasks and prepare for next iteration:
+		// 1. Calculate active edges and resolve their values.
+		// 2. Handle field mappings if needed.
+		// 3. Validate and convert data types if necessary.
+		writeChannelValues, err := r.resolveEdges(ctx, completedTasks, isStream)
 		if err != nil {
 			return nil, err
 		}
 
-		nodeMap, err := cm.updateAndGet(ctx, wChValues)
+		// Update channels and get nodes ready for execution.
+		nodeMap, err := cm.updateAndGet(ctx, writeChannelValues)
 		if err != nil {
-			return nil, fmt.Errorf("update and get channel fail: %w", err)
+			return nil, fmt.Errorf("failed to update and get channels: %w", err)
 		}
 		if len(nodeMap) > 0 {
-			// conv field mapping to expected struct if needed
-			nodeMap, err = r.convFieldMappingIfNeeded(nodeMap, isStream)
+			// Convert field mappings to expected struct types if needed.
+			nodeMap, err = r.convertFieldMappingsIfNeeded(nodeMap, isStream)
 			if err != nil {
-				return nil, fmt.Errorf("conv field mapping to struct fail: %w", err)
+				return nil, fmt.Errorf("failed to convert field mappings to struct: %w", err)
 			}
 
+			// Check if we've reached the END node.
 			if v, ok := nodeMap[END]; ok {
-				// reach end
 				return v, nil
 			}
 
-			// build task from node map
-			nextTasks, convErr := r.convTasks(ctx, nodeMap, optMap)
+			// Create and submit next batch of tasks.
+			nextTasks, convErr := r.createTasks(ctx, nodeMap, optMap)
 			if convErr != nil {
-				return nil, convErr
+				return nil, fmt.Errorf("failed to create tasks: %w", convErr)
 			}
 			err = tm.submit(nextTasks)
 			if err != nil {
-				return nil, fmt.Errorf("submit tasks fail: %w", err)
+				return nil, fmt.Errorf("failed to submit tasks: %w", err)
 			}
 		}
 
+		// Wait for tasks to complete and prepare for next iteration.
 		completedTasks, err = tm.wait()
 		if err != nil {
-			return nil, fmt.Errorf("wait tasks fail: %w", err)
+			return nil, fmt.Errorf("failed to wait for tasks: %w", err)
 		}
 		if len(completedTasks) == 0 {
 			return nil, errors.New("no tasks to execute")
@@ -211,7 +219,7 @@ func (r *runner) run(ctx context.Context, isStream bool, input any, opts ...Opti
 	}
 }
 
-func (r *runner) convFieldMappingIfNeeded(nodeMap map[string]any, isStream bool) (map[string]any, error) {
+func (r *runner) convertFieldMappingsIfNeeded(nodeMap map[string]any, isStream bool) (map[string]any, error) {
 	for nodeKey, nodeInput := range nodeMap {
 		var conv func(any) (any, error)
 		var streamConv func(streamReader) (streamReader, error)
@@ -232,13 +240,13 @@ func (r *runner) convFieldMappingIfNeeded(nodeMap map[string]any, isStream bool)
 			if isStream {
 				nNodeInput, err := streamConv(nodeInput.(streamReader))
 				if err != nil {
-					return nil, fmt.Errorf("conv node[%s]'s input from FieldMapping fail: %w", nodeKey, err)
+					return nil, fmt.Errorf("failed to convert node [%s]'s input from field mapping: %w", nodeKey, err)
 				}
 				nodeMap[nodeKey] = nNodeInput
 			} else {
 				nNodeInput, err := conv(nodeInput)
 				if err != nil {
-					return nil, fmt.Errorf("conv node[%s]'s input from FieldMapping fail: %w", nodeKey, err)
+					return nil, fmt.Errorf("failed to convert node [%s]'s input from field mapping: %w", nodeKey, err)
 				}
 				nodeMap[nodeKey] = nNodeInput
 			}
@@ -247,7 +255,7 @@ func (r *runner) convFieldMappingIfNeeded(nodeMap map[string]any, isStream bool)
 	return nodeMap, nil
 }
 
-func (r *runner) convTasks(ctx context.Context, nodeMap map[string]any, optMap map[string][]any) ([]*task, error) {
+func (r *runner) createTasks(ctx context.Context, nodeMap map[string]any, optMap map[string][]any) ([]*task, error) {
 	var nextTasks []*task
 	for nodeKey, nodeInput := range nodeMap {
 		call, ok := r.chanSubscribeTo[nodeKey]
@@ -267,7 +275,7 @@ func (r *runner) convTasks(ctx context.Context, nodeMap map[string]any, optMap m
 }
 
 func (r *runner) resolveEdges(ctx context.Context, completedTasks []*task, isStream bool) (map[string]map[string]any, error) {
-	wChValues := make(map[string]map[string]any)
+	writeChannelValues := make(map[string]map[string]any)
 	for _, t := range completedTasks {
 		// update channel & new_next_tasks
 		vs := copyItem(t.output, len(t.call.writeTo)+len(t.call.writeToBranches)*2)
@@ -277,30 +285,30 @@ func (r *runner) resolveEdges(ctx context.Context, completedTasks []*task, isStr
 			return nil, fmt.Errorf("calculate next step fail, node: %s, error: %w", t.nodeKey, err)
 		}
 		for i, next := range nextNodeKeys {
-			if _, ok := wChValues[next]; !ok {
-				wChValues[next] = make(map[string]any)
+			if _, ok := writeChannelValues[next]; !ok {
+				writeChannelValues[next] = make(map[string]any)
 			}
 			// field mapping if needed
 			useFieldMapping := false
 			vs[i], useFieldMapping, err = r.fieldMappingsOnEdge.execute(t.nodeKey, next, vs[i], isStream)
 			if err != nil {
-				return nil, fmt.Errorf("field mapping fail, edge: [%s]-[%s], error: %w", t.nodeKey, next, err)
+				return nil, fmt.Errorf("failed to execute field mapping for edge [%s]-[%s]: %w", t.nodeKey, next, err)
 			}
 			if !useFieldMapping {
-				// check type if needed
+				// Validate and parse types if needed.
 				vs[i], err = r.validateTypeAndParseIfNeeded(t.nodeKey, next, isStream, vs[i])
 				if err != nil {
-					return nil, fmt.Errorf("validate type of edge[%s]-[%s] fail: %w", t.nodeKey, next, err)
+					return nil, fmt.Errorf("failed to validate type for edge [%s]-[%s]: %w", t.nodeKey, next, err)
 				}
 			}
 
-			wChValues[next][t.nodeKey] = vs[i]
+			writeChannelValues[next][t.nodeKey] = vs[i]
 		}
 	}
-	return wChValues, nil
+	return writeChannelValues, nil
 }
 
-func (r *runner) calculateNext(ctx context.Context, curNodeKey string, startChan *chanCall, input []any, isStream bool) ([]string, error) { // nolint: byted_s_args_length_limit
+func (r *runner) calculateNext(ctx context.Context, curNodeKey string, startChan *chanCall, input []any, isStream bool) ([]string, error) {
 	if len(input) < len(startChan.writeToBranches) {
 		// unreachable
 		return nil, errors.New("calculate next input length is shorter than branches")

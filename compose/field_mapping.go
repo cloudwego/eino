@@ -100,25 +100,20 @@ func (f *fieldMappingsOnEdge) execute(from, to string, output any, isStream bool
 	return output, false, nil
 }
 
-func newFieldMappingHandler() *fieldMappingHandler {
-	return &fieldMappingHandler{}
-}
-
 type fieldMappingHandler struct {
-	invoke      func(output any) (map[FieldMapping]any, error)
-	stream      func(output streamReader) *schema.StreamReader[map[FieldMapping]any]
-	preCheckers func(value any) (any, error)
-	checkers    map[FieldMapping]func(value any) (any, error)
+	invoke    func(output any) (map[FieldMapping]any, error)
+	transform func(output streamReader) *schema.StreamReader[map[FieldMapping]any]
+	checkers  map[FieldMapping]func(value any) (any, error)
 }
 
 func (f *fieldMappingHandler) handle(output any, isStream bool) (any, error) {
 	if isStream {
-		return packStreamReader(schema.StreamReaderWithConvert(f.stream(output.(streamReader)), func(t map[FieldMapping]any) (map[FieldMapping]any, error) {
+		return packStreamReader(schema.StreamReaderWithConvert(f.transform(output.(streamReader)), func(t map[FieldMapping]any) (map[FieldMapping]any, error) {
 			for k, v := range t {
 				if checker, ok := f.checkers[k]; ok {
 					nValue, checkErr := checker(v)
 					if checkErr != nil {
-						return nil, checkErr
+						return nil, fmt.Errorf("field mapping runtime check fail: %w", checkErr)
 					}
 					t[k] = nValue
 				}
@@ -247,6 +242,30 @@ func checkAndExtractFromField(fromField string, input reflect.Value) (reflect.Va
 	return f, nil
 }
 
+func checkAndExtractFieldType(field string, typ reflect.Type) (reflect.Type, error) {
+	if len(field) == 0 {
+		return typ, nil
+	}
+	for typ.Kind() == reflect.Ptr {
+		typ = typ.Elem()
+	}
+
+	if typ.Kind() != reflect.Struct {
+		return nil, fmt.Errorf("type[%v] is not a struct", typ)
+	}
+
+	f, ok := typ.FieldByName(field)
+	if !ok {
+		return nil, fmt.Errorf("type[%v] has no field[%s]", typ, field)
+	}
+
+	if !f.IsExported() {
+		return nil, fmt.Errorf("type[%v] has an unexported field[%s]", typ.String(), field)
+	}
+
+	return f.Type, nil
+}
+
 func checkAndExtractToField(toField string, output, toSet reflect.Value) (reflect.Value, error) {
 	for output.Kind() == reflect.Ptr {
 		output = output.Elem()
@@ -270,30 +289,6 @@ func checkAndExtractToField(toField string, output, toSet reflect.Value) (reflec
 	}
 
 	return field, nil
-}
-
-func checkAndExtractFieldType(field string, typ reflect.Type) (reflect.Type, error) {
-	if len(field) == 0 {
-		return typ, nil
-	}
-	for typ.Kind() == reflect.Ptr {
-		typ = typ.Elem()
-	}
-
-	if typ.Kind() != reflect.Struct {
-		return nil, fmt.Errorf("type[%v] is not a struct", typ)
-	}
-
-	f, ok := typ.FieldByName(field)
-	if !ok {
-		return nil, fmt.Errorf("type[%v] has no field[%s]", typ, field)
-	}
-
-	if !f.IsExported() {
-		return nil, fmt.Errorf("type[%v] has an unexported field[%s]", typ.String(), field)
-	}
-
-	return f.Type, nil
 }
 
 func fieldMap(mappings []*FieldMapping) func(any) (map[FieldMapping]any, error) {
@@ -333,35 +328,6 @@ func takeOne(input any, from string) (any, error) {
 	return f.Interface(), nil
 }
 
-func checkFieldTypes(t reflect.Type, fields []string) error {
-	for _, field := range fields {
-		if len(field) == 0 {
-			return nil
-		}
-		_, err := checkAndExtractFieldType(field, t)
-		if err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-func getFromFields(mappings []*FieldMapping) []string {
-	result := make([]string, len(mappings))
-	for i, mapping := range mappings {
-		result[i] = mapping.from
-	}
-	return result
-}
-
-func getToFields(mappings []*FieldMapping) []string {
-	result := make([]string, len(mappings))
-	for i, mapping := range mappings {
-		result[i] = mapping.to
-	}
-	return result
-}
-
 func isFromAll(mappings []*FieldMapping) bool {
 	for _, mapping := range mappings {
 		if len(mapping.from) == 0 {
@@ -387,38 +353,38 @@ func validateStruct(t reflect.Type) bool {
 	return t.Kind() != reflect.Struct
 }
 
-func validateFieldMapping(inType reflect.Type, outType reflect.Type, mappings []*FieldMapping) (map[FieldMapping]func(any) (any, error), error) {
+func validateFieldMapping(predecessorType reflect.Type, successorType reflect.Type, mappings []*FieldMapping) (map[FieldMapping]func(any) (any, error), error) {
 	var fieldCheckers = make(map[FieldMapping]func(any) (any, error))
 
-	// 检查 FromAll 到 ToAll 的情况
+	// check if mapping is legal
 	if isFromAll(mappings) && isToAll(mappings) {
 		return nil, fmt.Errorf("invalid field mappings: from all fields to all, use common edge instead")
-	} else if !isToAll(mappings) && validateStruct(outType) {
-		// 如果outType非struct要报错，因为不是toAll时，outType必须是struct，否则没办法构造
-		return nil, fmt.Errorf("static check fail: upstream input type should be struct, actual: %v", outType)
-	} else if !isFromAll(mappings) && validateStruct(inType) {
-		// TODO: 要阻止吗
-		return nil, fmt.Errorf("static check fail: downstream output type should be struct, actual: %v", inType)
+	} else if !isToAll(mappings) && validateStruct(successorType) {
+		// if user has not provided a specific struct type, graph cannot construct any struct in the runtime
+		return nil, fmt.Errorf("static check fail: upstream input type should be struct, actual: %v", successorType)
+	} else if !isFromAll(mappings) && validateStruct(predecessorType) {
+		// TODO: should forbid?
+		return nil, fmt.Errorf("static check fail: downstream output type should be struct, actual: %v", predecessorType)
 	}
 
 	for _, mapping := range mappings {
-		inField, err := checkAndExtractFieldType(mapping.from, inType)
+		predecessorFieldType, err := checkAndExtractFieldType(mapping.from, predecessorType)
 		if err != nil {
 			return nil, fmt.Errorf("static check failed for mapping %s: %w", mapping, err)
 		}
-		outField, err := checkAndExtractFieldType(mapping.to, outType)
+		successorFieldType, err := checkAndExtractFieldType(mapping.to, successorType)
 		if err != nil {
 			return nil, fmt.Errorf("static check failed for mapping %s: %w", mapping, err)
 		}
 
-		at := checkAssignable(inField, outField)
+		at := checkAssignable(predecessorFieldType, successorFieldType)
 		if at == assignableTypeMustNot {
-			return nil, fmt.Errorf("static check failed for mapping %s, field[%v]-[%v] must not be assignable", mapping, inField, outField)
+			return nil, fmt.Errorf("static check failed for mapping %s, field[%v]-[%v] must not be assignable", mapping, predecessorFieldType, successorFieldType)
 		} else if at == assignableTypeMay {
 			fieldCheckers[*mapping] = func(a any) (any, error) {
 				trueInType := reflect.TypeOf(a)
-				if !trueInType.AssignableTo(outType) {
-					return nil, fmt.Errorf("runtime check failed for mapping %s, field[%v]-[%v] must not be assignable", mapping, inField, outField)
+				if !trueInType.AssignableTo(successorFieldType) {
+					return nil, fmt.Errorf("runtime check failed for mapping %s, field[%v]-[%v] must not be assignable", mapping, trueInType, successorFieldType)
 				}
 				return a, nil
 			}

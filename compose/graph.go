@@ -173,7 +173,8 @@ type graph struct {
 	runtimeCheckEdges    map[string]map[string]bool
 	runtimeCheckBranches map[string][]bool
 
-	fieldMappings *fieldMappingsOnEdge
+	fieldMappings       *fieldMappingsOnEdge
+	fieldMappingRecords map[string][]*FieldMapping
 
 	buildError error
 
@@ -246,7 +247,8 @@ func newGraph(cfg *newGraphConfig) *graph {
 		runtimeCheckEdges:    make(map[string]map[string]bool),
 		runtimeCheckBranches: make(map[string][]bool),
 
-		fieldMappings: &fieldMappingsOnEdge{m: make(map[string]map[string]*fieldMappingHandler)},
+		fieldMappings:       &fieldMappingsOnEdge{m: make(map[string]map[string]*fieldMappingHandler)},
+		fieldMappingRecords: make(map[string][]*FieldMapping),
 
 		cmp: cfg.cmp,
 
@@ -621,10 +623,11 @@ func (g *graph) validateAndInferType(startNode, endNode string, mappings []*Fiel
 			return err
 		}
 		g.fieldMappings.set(startNode, endNode, &fieldMappingHandler{
-			invoke:   fieldMap(mappings),
-			stream:   streamFieldMap(mappings),
-			checkers: checkers,
+			invoke:    fieldMap(mappings),
+			transform: streamFieldMap(mappings),
+			checkers:  checkers,
 		})
+		g.fieldMappingRecords[endNode] = append(g.fieldMappingRecords[endNode], mappings...)
 	}
 
 	return nil
@@ -682,10 +685,11 @@ func (g *graph) updateToValidateMap() error {
 						return err
 					}
 					g.fieldMappings.set(startNode, endNode.endNode, &fieldMappingHandler{
-						invoke:   fieldMap(endNode.mappings),
-						stream:   streamFieldMap(endNode.mappings),
-						checkers: checkers,
+						invoke:    fieldMap(endNode.mappings),
+						transform: streamFieldMap(endNode.mappings),
+						checkers:  checkers,
 					})
+					g.fieldMappingRecords[endNode.endNode] = append(g.fieldMappingRecords[endNode.endNode], endNode.mappings...)
 				}
 			}
 		}
@@ -942,6 +946,7 @@ func (g *graph) toGraphInfo(opt *graphCompileOptions, key2SubGraphs map[string]*
 			Name:             gNode.nodeInfo.name,
 			InputKey:         gNode.cr.nodeInfo.inputKey,
 			OutputKey:        gNode.cr.nodeInfo.outputKey,
+			Mappings:         g.fieldMappingRecords[key],
 		}
 
 		if gi, ok := key2SubGraphs[key]; ok {

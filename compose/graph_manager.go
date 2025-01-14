@@ -38,7 +38,7 @@ func (c *channelManager) updateValues(ctx context.Context, values map[string]map
 	for target, v := range values {
 		toChannel, ok := (*c)[target]
 		if !ok {
-			return fmt.Errorf("target channel isn't existed: %s", target)
+			return fmt.Errorf("target channel doesn't existed: %s", target)
 		}
 		err := toChannel.update(ctx, v)
 		if err != nil {
@@ -48,7 +48,7 @@ func (c *channelManager) updateValues(ctx context.Context, values map[string]map
 	return nil
 }
 
-func (c *channelManager) getReady(ctx context.Context) (map[string]any, error) {
+func (c *channelManager) getFromReadyChannels(ctx context.Context) (map[string]any, error) {
 	result := make(map[string]any)
 	for target, ch := range *c {
 		if ch.ready(ctx) {
@@ -66,7 +66,7 @@ func (c *channelManager) updateAndGet(ctx context.Context, values map[string]map
 	if err != nil {
 		return nil, fmt.Errorf("update channel fail: %w", err)
 	}
-	return c.getReady(ctx)
+	return c.getFromReadyChannels(ctx)
 }
 
 type task struct {

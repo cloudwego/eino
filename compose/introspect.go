@@ -32,6 +32,7 @@ type GraphNodeInfo struct {
 	Name                  string
 	InputKey, OutputKey   string
 	GraphInfo             *GraphInfo
+	Mappings              []*FieldMapping
 }
 
 // GraphInfo the info which end users pass in when they are compiling a graph.

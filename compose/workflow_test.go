@@ -234,15 +234,6 @@ func TestWorkflowCompile(t *testing.T) {
 	ctx := context.Background()
 	ctrl := gomock.NewController(t)
 
-	//t.Run("a node has no input", func(t *testing.T) {
-	//	w := NewWorkflow[string, string]()
-	//	w.AddLambdaNode("1", InvokableLambda(func(ctx context.Context, input string) (output string, err error) { return "", nil })).AddInput(START)
-	//	w.AddLambdaNode("2", InvokableLambda(func(ctx context.Context, input string) (output string, err error) { return "", nil }))
-	//	w.AddEnd("2")
-	//	_, err := w.Compile(ctx)
-	//	assert.ErrorContains(t, err, "workflow node = 1 has no input")
-	//})
-
 	t.Run("compile without add end", func(t *testing.T) {
 		w := NewWorkflow[*schema.Message, []*schema.Message]()
 		w.AddToolsNode("1", &ToolsNode{}).AddInput(START)
@@ -309,36 +300,6 @@ func TestWorkflowCompile(t *testing.T) {
 		_, err := w.Compile(ctx)
 		assert.ErrorContains(t, err, "edge start node '2' needs to be added to graph first")
 	})
-
-	//t.Run("multiple mappings have an empty mapping", func(t *testing.T) {
-	//	w := NewWorkflow[*schema.Message, []*schema.Message]()
-	//	w.AddToolsNode("1", &ToolsNode{}).AddInput(START, NewMapping().From("Content").To("Content"))
-	//	w.AddEnd("1")
-	//	_, err := w.Compile(ctx)
-	//	assert.ErrorContains(t, err, "multiple mappings have an empty mapping")
-	//})
-	//
-	//t.Run("multiple mappings have mapping to entire output ", func(t *testing.T) {
-	//	w := NewWorkflow[*schema.Message, []*schema.Message]()
-	//	w.AddToolsNode("1", &ToolsNode{}).AddInput(START,
-	//		NewMapping().From("Role"),
-	//		NewMapping().From("Content"),
-	//	)
-	//	w.AddEnd("1")
-	//	_, err := w.Compile(ctx)
-	//	assert.ErrorContains(t, err, "multiple mappings have a mapping to entire output")
-	//})
-
-	//t.Run("multiple mappings have duplicate ToField", func(t *testing.T) {
-	//	w := NewWorkflow[*schema.Message, []*schema.Message]()
-	//	w.AddToolsNode("1", &ToolsNode{}).AddInput(START,
-	//		NewMapping().From("Content").To("Content"),
-	//		NewMapping().From("Role").To("Content"),
-	//	)
-	//	w.AddEnd("1")
-	//	_, err := w.Compile(ctx)
-	//	assert.ErrorContains(t, err, "multiple mappings have the same To")
-	//})
 }
 
 func TestFanInToSameDest(t *testing.T) {
@@ -359,23 +320,6 @@ func TestFanInToSameDest(t *testing.T) {
 		assert.NoError(t, err)
 		assert.Equal(t, []*schema.Message{{Role: schema.User, Content: "query_query"}}, out)
 	})
-
-	// 没有扇入的类型检测
-	//t.Run("multiple int fan-in to single int", func(t *testing.T) {
-	//	wf := NewWorkflow[int, int]()
-	//	wf.AddLambdaNode("1", InvokableLambda(func(ctx context.Context, in int) (output int, err error) {
-	//		return in, nil
-	//	})).AddInput(START)
-	//	wf.AddLambdaNode("2", InvokableLambda(func(ctx context.Context, in int) (output int, err error) {
-	//		return in, nil
-	//	})).AddInput(START)
-	//	wf.AddLambdaNode("3", InvokableLambda(func(ctx context.Context, in int) (output int, err error) {
-	//		return in, nil
-	//	})).AddInput("1").AddInput("2")
-	//	wf.AddEnd("3")
-	//	_, err := wf.Compile(context.Background())
-	//	assert.ErrorContains(t, err, "has non-map input type: int")
-	//})
 
 	t.Run("fan-in to a field of map", func(t *testing.T) {
 		type dest struct {
@@ -401,27 +345,27 @@ func TestFanInToSameDest(t *testing.T) {
 		assert.NoError(t, err)
 		assert.Equal(t, dest{F: map[string]any{"A": "a", "B": 1}}, out)
 	})
+}
 
-	// 同没有提前检查merge
-	//t.Run("fan-in to a field of non-map", func(t *testing.T) {
-	//	type dest struct {
-	//		F string
-	//	}
-	//
-	//	type in struct {
-	//		A string
-	//		B string
-	//	}
-	//
-	//	wf := NewWorkflow[in, dest]()
-	//	wf.AddLambdaNode("1", InvokableLambda(func(ctx context.Context, in string) (output string, err error) {
-	//		return in, nil
-	//	})).AddInput(START, NewMapping().From("A"))
-	//	wf.AddLambdaNode("2", InvokableLambda(func(ctx context.Context, in string) (output string, err error) {
-	//		return in, nil
-	//	})).AddInput(START, NewMapping().From("B"))
-	//	wf.AddEnd("1", NewMapping().To("F")).AddEnd("2", NewMapping().To("F"))
-	//	_, err := wf.Compile(context.Background())
-	//	assert.ErrorContains(t, err, "has non-map input type: string")
-	//})
+type goodInterface interface {
+	GOOD()
+}
+type goodStruct struct{}
+
+func (g *goodStruct) GOOD() {}
+
+func TestMayAssignableFieldMapping(t *testing.T) {
+	type in struct {
+		A goodInterface
+	}
+	wf := NewWorkflow[in, *goodStruct]()
+	wf.AddLambdaNode("1", InvokableLambda(func(ctx context.Context, input *goodStruct) (output goodInterface, err error) { return input, nil })).
+		AddInput(START, NewMapping().From("A"))
+	wf.AddEnd("1")
+	ctx := context.Background()
+	r, err := wf.Compile(ctx)
+	assert.NoError(t, err)
+	result, err := r.Invoke(ctx, in{A: &goodStruct{}})
+	assert.NoError(t, err)
+	result.GOOD()
 }
