@@ -116,7 +116,11 @@ func TestChainWithException(t *testing.T) {
 			// just pass through
 			t.Log("in view lambda: ", kvs)
 			return kvs, nil
-		}))
+		})).
+		AppendLambda(InvokableLambda(func(ctx context.Context, kvs map[string]any) (map[string]any, error) {
+			t.Log("in view lambda 02: ", kvs)
+			return kvs, nil
+		}), WithNodeKey("xlam"))
 
 	// items with parallels
 	parallel := NewParallel()

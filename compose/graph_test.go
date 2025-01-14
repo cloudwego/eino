@@ -423,7 +423,7 @@ func TestValidate(t *testing.T) {
 	p = NewParallel().AddLambda("1", lA).AddLambda("2", lAB)
 	c = NewChain[string, map[string]any]().AppendParallel(p)
 	_, err = c.Compile(context.Background())
-	assert.ErrorContains(t, err, "add parallel edge[start]-[Chain[0]_Parallel[0]_Lambda] to chain failed: graph edge[start]-[Chain[0]_Parallel[0]_Lambda]: start node's output type[string] and end node's input type[compose.A] mismatch")
+	assert.ErrorContains(t, err, "add parallel edge failed, from=start, to=node_0_parallel_0, err: graph edge[start]-[node_0_parallel_0]: start node's output type[string] and end node's input type[compose.A] mismatch")
 
 	// test graph output type check
 	gg := NewGraph[string, A]()
