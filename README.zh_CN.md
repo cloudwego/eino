@@ -464,7 +464,8 @@ chain.AppendBranch(cb)
 - 如何成为 member: [COMMUNITY MEMBERSHIP](https://github.com/cloudwego/community/blob/main/COMMUNITY_MEMBERSHIP.md)
 - Issues: [Issues](https://github.com/cloudwego/eino/issues)
 - 飞书用户群（[注册飞书](https://www.feishu.cn/)后扫码进群）
-<img src=".github/static/img/eino/lark_group_zh.png" alt="LarkGroup" width="200"/>
+
+&ensp;&ensp;&ensp; <img src=".github/static/img/eino/lark_group_zh.png" alt="LarkGroup" width="200"/>
 
 ## 开源许可证
 

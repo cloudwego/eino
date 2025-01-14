@@ -294,7 +294,7 @@ Please do **not** create a public GitHub issue.
 - Issues: [Issues](https://github.com/cloudwego/eino/issues)
 - Lark: Scan the QR code below with [Register Feishu](https://www.feishu.cn/en/) to join our CloudWeGo/eino user group.
 
-  ![LarkGroup](.github/static/img/eino/lark_group_en.png)
+&ensp;&ensp;&ensp; <img src=".github/static/img/eino/lark_group_zh.png" alt="LarkGroup" width="200"/>
 
 ## License
 
