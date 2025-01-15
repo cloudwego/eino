@@ -16,6 +16,8 @@
 
 package model
 
+import "github.com/cloudwego/eino/schema"
+
 // Options is the common options for the model.
 type Options struct {
 	// Temperature is the temperature for the model, which controls the randomness of the model.
@@ -28,6 +30,8 @@ type Options struct {
 	TopP *float32
 	// Stop is the stop words for the model, which controls the stopping condition of the model.
 	Stop []string
+	// ToolChoice controls which tool is called by the model.
+	ToolChoice *schema.ToolChoice
 }
 
 // Option is the call option for ChatModel component.
@@ -78,6 +82,15 @@ func WithStop(stop []string) Option {
 	return Option{
 		apply: func(opts *Options) {
 			opts.Stop = stop
+		},
+	}
+}
+
+// WithToolChoice is the option to set tool choice for the model.
+func WithToolChoice(toolChoice schema.ToolChoice) Option {
+	return Option{
+		apply: func(opts *Options) {
+			opts.ToolChoice = &toolChoice
 		},
 	}
 }

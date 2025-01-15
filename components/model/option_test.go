@@ -19,6 +19,7 @@ package model
 import (
 	"testing"
 
+	"github.com/cloudwego/eino/schema"
 	"github.com/smartystreets/goconvey/convey"
 )
 
@@ -33,6 +34,8 @@ func TestOptions(t *testing.T) {
 			defaultTemperature float32 = 1.0
 			defaultMaxTokens           = 1000
 			defaultTopP        float32 = 0.5
+
+			toolChoiceForbidden = schema.ToolChoiceForbidden
 		)
 
 		opts := GetCommonOptions(
@@ -47,6 +50,7 @@ func TestOptions(t *testing.T) {
 			WithMaxTokens(maxToken),
 			WithTopP(topP),
 			WithStop([]string{"hello", "bye"}),
+			WithToolChoice(schema.ToolChoiceForbidden),
 		)
 
 		convey.So(opts, convey.ShouldResemble, &Options{
@@ -55,6 +59,7 @@ func TestOptions(t *testing.T) {
 			MaxTokens:   &maxToken,
 			TopP:        &topP,
 			Stop:        []string{"hello", "bye"},
+			ToolChoice:  &toolChoiceForbidden,
 		})
 	})
 }
