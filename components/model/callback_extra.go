@@ -51,8 +51,6 @@ type CallbackInput struct {
 	Messages []*schema.Message
 	// Tools is the tools to be used in the model.
 	Tools []*schema.ToolInfo
-	// ToolChoice is the tool choice, which controls the tool to be used in the model.
-	ToolChoice any // string / *schema.ToolInfo
 	// Config is the config for the model.
 	Config *Config
 	// Extra is the extra information for the callback.
