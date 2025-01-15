@@ -29,49 +29,6 @@ import (
 	gomock "go.uber.org/mock/gomock"
 )
 
-// MockLoaderSplitter is a mock of LoaderSplitter interface.
-type MockLoaderSplitter struct {
-	ctrl     *gomock.Controller
-	recorder *MockLoaderSplitterMockRecorder
-}
-
-// MockLoaderSplitterMockRecorder is the mock recorder for MockLoaderSplitter.
-type MockLoaderSplitterMockRecorder struct {
-	mock *MockLoaderSplitter
-}
-
-// NewMockLoaderSplitter creates a new mock instance.
-func NewMockLoaderSplitter(ctrl *gomock.Controller) *MockLoaderSplitter {
-	mock := &MockLoaderSplitter{ctrl: ctrl}
-	mock.recorder = &MockLoaderSplitterMockRecorder{mock}
-	return mock
-}
-
-// EXPECT returns an object that allows the caller to indicate expected use.
-func (m *MockLoaderSplitter) EXPECT() *MockLoaderSplitterMockRecorder {
-	return m.recorder
-}
-
-// LoadAndSplit mocks base method.
-func (m *MockLoaderSplitter) LoadAndSplit(ctx context.Context, src document.Source, opts ...document.LoaderSplitterOption) ([]*schema.Document, error) {
-	m.ctrl.T.Helper()
-	varargs := []interface{}{ctx, src}
-	for _, a := range opts {
-		varargs = append(varargs, a)
-	}
-	ret := m.ctrl.Call(m, "LoadAndSplit", varargs...)
-	ret0, _ := ret[0].([]*schema.Document)
-	ret1, _ := ret[1].(error)
-	return ret0, ret1
-}
-
-// LoadAndSplit indicates an expected call of LoadAndSplit.
-func (mr *MockLoaderSplitterMockRecorder) LoadAndSplit(ctx, src interface{}, opts ...interface{}) *gomock.Call {
-	mr.mock.ctrl.T.Helper()
-	varargs := append([]interface{}{ctx, src}, opts...)
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "LoadAndSplit", reflect.TypeOf((*MockLoaderSplitter)(nil).LoadAndSplit), varargs...)
-}
-
 // MockLoader is a mock of Loader interface.
 type MockLoader struct {
 	ctrl     *gomock.Controller

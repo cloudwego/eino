@@ -145,7 +145,6 @@ func TestNewComponentTemplate(t *testing.T) {
 
 		types := []components.Component{
 			components.ComponentOfPrompt,
-			components.ComponentOfLoaderSplitter,
 			components.ComponentOfChatModel,
 			components.ComponentOfEmbedding,
 			components.ComponentOfRetriever,

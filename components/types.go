@@ -51,13 +51,12 @@ func IsCallbacksEnabled(i any) bool {
 type Component string
 
 const (
-	ComponentOfPrompt         Component = "ChatTemplate"
-	ComponentOfChatModel      Component = "ChatModel"
-	ComponentOfEmbedding      Component = "Embedding"
-	ComponentOfIndexer        Component = "Indexer"
-	ComponentOfRetriever      Component = "Retriever"
-	ComponentOfLoaderSplitter Component = "LoaderSplitter"
-	ComponentOfLoader         Component = "Loader"
-	ComponentOfTransformer    Component = "DocumentTransformer"
-	ComponentOfTool           Component = "Tool"
+	ComponentOfPrompt      Component = "ChatTemplate"
+	ComponentOfChatModel   Component = "ChatModel"
+	ComponentOfEmbedding   Component = "Embedding"
+	ComponentOfIndexer     Component = "Indexer"
+	ComponentOfRetriever   Component = "Retriever"
+	ComponentOfLoader      Component = "Loader"
+	ComponentOfTransformer Component = "DocumentTransformer"
+	ComponentOfTool        Component = "Tool"
 )

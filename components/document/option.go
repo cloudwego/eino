@@ -16,44 +16,11 @@
 
 package document
 
-// LoaderSplitterOption defines call option for LoaderSplitter component, which is part of the component interface signature.
-// Each LoaderSplitter implementation could define its own options struct and option funcs within its own package,
-// then wrap the impl specific option funcs into this type, before passing to LoadAndSplit.
-// Deprecated: use LoaderOption instead.
-type LoaderSplitterOption struct {
-	implSpecificOptFn any
-}
-
 // LoaderOption defines call option for Loader component, which is part of the component interface signature.
 // Each Loader implementation could define its own options struct and option funcs within its own package,
 // then wrap the impl specific option funcs into this type, before passing to Load.
 type LoaderOption struct {
 	implSpecificOptFn any
-}
-
-// WrapImplSpecificOptFn wraps the impl specific option functions into LoaderSplitterOption type.
-// T: the type of the impl specific options struct.
-// LoaderSplitter implementations are required to use this function to convert its own option functions into the unified LoaderSplitterOption type.
-// For example, if the LoaderSplitter impl defines its own options struct:
-//
-//	type customOptions struct {
-//	    conf string
-//	}
-//
-// Then the impl needs to provide an option function as such:
-//
-//	func WithConf(conf string) Option {
-//	    return WrapImplSpecificOptFn(func(o *customOptions) {
-//			o.conf = conf
-//		}
-//	}
-//
-// .
-// Deprecated: use WrapLoaderImplSpecificOptFn instead.
-func WrapImplSpecificOptFn[T any](optFn func(*T)) LoaderSplitterOption {
-	return LoaderSplitterOption{
-		implSpecificOptFn: optFn,
-	}
 }
 
 // WrapLoaderImplSpecificOptFn wraps the impl specific option functions into LoaderOption type.
@@ -76,29 +43,6 @@ func WrapLoaderImplSpecificOptFn[T any](optFn func(*T)) LoaderOption {
 	return LoaderOption{
 		implSpecificOptFn: optFn,
 	}
-}
-
-// GetImplSpecificOptions provides LoaderSplitter author the ability to extract their own custom options from the unified LoaderSplitterOption type.
-// T: the type of the impl specific options struct.
-// This function should be used within the LoaderSplitter implementation's LoadAndSplit function.
-// It is recommended to provide a base T as the first argument, within which the LoaderSplitter author can provide default values for the impl specific options.
-// Deprecated: use GetLoaderImplSpecificOptions instead.
-func GetImplSpecificOptions[T any](base *T, opts ...LoaderSplitterOption) *T {
-	if base == nil {
-		base = new(T)
-	}
-
-	for i := range opts {
-		opt := opts[i]
-		if opt.implSpecificOptFn != nil {
-			s, ok := opt.implSpecificOptFn.(func(*T))
-			if ok {
-				s(base)
-			}
-		}
-	}
-
-	return base
 }
 
 // GetLoaderImplSpecificOptions provides Loader author the ability to extract their own custom options from the unified LoaderOption type.

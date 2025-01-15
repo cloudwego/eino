@@ -134,13 +134,6 @@ func (p *Parallel) AddRetriever(outputKey string, node retriever.Retriever, opts
 	return p.addNode(outputKey, gNode, options)
 }
 
-// AddLoaderSplitter adds a loader splitter node to the parallel.
-// Deprecated: use AddLoader instead.
-func (p *Parallel) AddLoaderSplitter(outputKey string, node document.LoaderSplitter, opts ...GraphAddNodeOpt) *Parallel {
-	gNode, options := toLoaderSplitterNode(node, append(opts, WithOutputKey(outputKey))...)
-	return p.addNode(outputKey, gNode, options)
-}
-
 // AddLoader adds a loader node to the parallel.
 // eg.
 //

@@ -180,13 +180,6 @@ func (cb *ChainBranch) AddRetriever(key string, node retriever.Retriever, opts .
 	return cb.addNode(key, gNode, options)
 }
 
-// AddLoaderSplitter adds a LoaderSplitter node to the branch.
-// Deprecated: use AddLoader instead.
-func (cb *ChainBranch) AddLoaderSplitter(key string, node document.LoaderSplitter, opts ...GraphAddNodeOpt) *ChainBranch {
-	gNode, options := toLoaderSplitterNode(node, opts...)
-	return cb.addNode(key, gNode, options)
-}
-
 // AddLoader adds a Loader node to the branch.
 // eg.
 //

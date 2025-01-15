@@ -259,14 +259,6 @@ func (c *Chain[I, O]) AppendRetriever(node retriever.Retriever, opts ...GraphAdd
 	return c
 }
 
-// AppendLoaderSplitter add a LoaderSplitter node to the chain.
-// Deprecated: use AppendLoader instead.
-func (c *Chain[I, O]) AppendLoaderSplitter(node document.LoaderSplitter, opts ...GraphAddNodeOpt) *Chain[I, O] {
-	gNode, options := toLoaderSplitterNode(node, opts...)
-	c.addNode(gNode, options)
-	return c
-}
-
 // AppendLoader adds a Loader node to the chain.
 // e.g.
 //

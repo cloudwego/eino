@@ -31,12 +31,6 @@ type Source struct {
 
 //go:generate  mockgen -destination ../../internal/mock/components/document/document_mock.go --package document -source interface.go
 
-// LoaderSplitter is a document loader and splitter.
-// Deprecated: use Loader instead.
-type LoaderSplitter interface {
-	LoadAndSplit(ctx context.Context, src Source, opts ...LoaderSplitterOption) ([]*schema.Document, error)
-}
-
 // Loader is a document loader.
 type Loader interface {
 	Load(ctx context.Context, src Source, opts ...LoaderOption) ([]*schema.Document, error)

@@ -68,17 +68,6 @@ func toRetrieverNode(node retriever.Retriever, opts ...GraphAddNodeOpt) (*graphN
 		opts...)
 }
 
-func toLoaderSplitterNode(node document.LoaderSplitter, opts ...GraphAddNodeOpt) (*graphNode, *graphAddNodeOpts) {
-	return toComponentNode(
-		node,
-		components.ComponentOfLoaderSplitter,
-		node.LoadAndSplit,
-		nil,
-		nil,
-		nil,
-		opts...)
-}
-
 func toLoaderNode(node document.Loader, opts ...GraphAddNodeOpt) (*graphNode, *graphAddNodeOpts) {
 	return toComponentNode(
 		node,

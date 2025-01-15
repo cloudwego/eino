@@ -98,11 +98,6 @@ func WithRetrieverOption(opts ...retriever.Option) Option {
 	return withComponentOption(opts...)
 }
 
-// Deprecated: use WithLoaderOption instead.
-func WithLoaderSplitterOption(opts ...document.LoaderSplitterOption) Option {
-	return withComponentOption(opts...)
-}
-
 // WithLoaderOption is a functional option type for loader component.
 // e.g.
 //

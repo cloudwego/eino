@@ -354,12 +354,6 @@ func (g *graph) AddRetrieverNode(key string, node retriever.Retriever, opts ...G
 	return g.addNode(key, gNode, options)
 }
 
-// Deprecated: use AddLoaderNode instead.
-func (g *graph) AddLoaderSplitterNode(key string, node document.LoaderSplitter, opts ...GraphAddNodeOpt) error {
-	gNode, options := toLoaderSplitterNode(node, opts...)
-	return g.addNode(key, gNode, options)
-}
-
 // AddLoaderNode adds a node that implements document.Loader.
 // e.g.
 //
