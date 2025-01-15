@@ -56,6 +56,20 @@ type AgentConfig struct {
 
 	// Tools that will make agent return directly when the tool is called.
 	ToolReturnDirectly map[string]struct{}
+
+	// StreamOutputHandler is a function to determine whether the model's streaming output contains tool calls.
+	// Different models have different ways of outputting tool calls in streaming mode:
+	// - Some models (like OpenAI) output tool calls directly
+	// - Others (like Claude) output text first, then tool calls
+	// This handler allows custom logic to check for tool calls in the stream.
+	// It should return:
+	// - true if the output contains tool calls and agent should continue processing
+	// - false if no tool calls and agent should stop
+	// Note: This field only needs to be configured when using streaming mode
+	// Note: The handler MUST close the modelOutput stream before returning
+	// Optional. By default, it checks if the first chunk contains tool calls.
+	// Note: The default implementation does not work well with Claude, which typically outputs tool calls after text content.
+	StreamToolCallChecker func(ctx context.Context, modelOutput *schema.StreamReader[*schema.Message]) (bool, error)
 }
 
 // NewPersonaModifier add the system prompt as persona before the model is called.
@@ -81,12 +95,34 @@ func NewPersonaModifier(persona string) MessageModifier {
 	}
 }
 
+func firstChunkStreamToolCallChecker(_ context.Context, sr *schema.StreamReader[*schema.Message]) (bool, error) {
+	defer sr.Close()
+
+	msg, err := sr.Recv()
+	if err != nil {
+		return false, err
+	}
+
+	if len(msg.ToolCalls) == 0 {
+		return false, nil
+	}
+
+	return true, nil
+}
+
 // NewAgent creates a ReAct agent that feeds tool response into next round of Chat Model generation.
+//
+// IMPORTANT!! For models that don't output tool calls in the first streaming chunk (e.g. Claude)
+// the default StreamToolCallChecker may not work properly since it only checks the first chunk for tool calls.
+// In such cases, you need to implement a custom StreamToolCallChecker that can properly detect tool calls.
 func NewAgent(ctx context.Context, config *AgentConfig) (*Agent, error) {
 	if config.MessageModifier == nil {
 		config.MessageModifier = func(ctx context.Context, input []*schema.Message) []*schema.Message {
 			return input
 		}
+	}
+	if config.StreamToolCallChecker == nil {
+		config.StreamToolCallChecker = firstChunkStreamToolCallChecker
 	}
 
 	a := &Agent{}
@@ -180,18 +216,14 @@ func (r *Agent) build(ctx context.Context, config *AgentConfig) (compose.Runnabl
 	}
 
 	err = graph.AddBranch(nodeKeyChatModel, compose.NewStreamGraphBranch(func(ctx context.Context, sr *schema.StreamReader[*schema.Message]) (endNode string, err error) {
-		defer sr.Close()
-
-		msg, err := sr.Recv()
+		isToolCall, err := config.StreamToolCallChecker(ctx, sr)
 		if err != nil {
 			return "", err
 		}
-
-		if len(msg.ToolCalls) == 0 {
-			return compose.END, nil
+		if isToolCall {
+			return nodeKeyTools, nil
 		}
-
-		return nodeKeyTools, nil
+		return compose.END, nil
 	}, map[string]bool{nodeKeyTools: true, compose.END: true}))
 	if err != nil {
 		return nil, err
