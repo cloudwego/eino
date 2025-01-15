@@ -18,7 +18,6 @@ package compose
 
 import (
 	"context"
-	"errors"
 	"reflect"
 
 	"github.com/cloudwego/eino/components/document"
@@ -65,7 +64,7 @@ func (wf *Workflow[I, O]) Compile(ctx context.Context, opts ...GraphCompileOptio
 	}
 	option := newGraphCompileOptions(opts...)
 
-	cr, err := wf.compile(ctx, option)
+	cr, err := wf.g.compile(ctx, option)
 	if err != nil {
 		return nil, err
 	}
@@ -90,7 +89,6 @@ func (wf *Workflow[I, O]) Compile(ctx context.Context, opts ...GraphCompileOptio
 	}
 
 	return rp, nil
-
 }
 
 func (wf *Workflow[I, O]) AddChatModelNode(key string, chatModel model.ChatModel, opts ...GraphAddNodeOpt) *WorkflowNode {
@@ -144,9 +142,6 @@ func (wf *Workflow[I, O]) AddLambdaNode(key string, lambda *Lambda, opts ...Grap
 }
 
 func (n *WorkflowNode) AddInput(fromNodeKey string, inputs ...*FieldMapping) *WorkflowNode {
-	for _, input := range inputs {
-		input.fromNodeKey = fromNodeKey
-	}
 	_ = n.g.addEdgeWithMappings(fromNodeKey, n.key, inputs...)
 	return n
 }
@@ -160,15 +155,25 @@ func (wf *Workflow[I, O]) AddEnd(fromNodeKey string, inputs ...*FieldMapping) *W
 }
 
 func (wf *Workflow[I, O]) compile(ctx context.Context, options *graphCompileOptions) (*composableRunnable, error) {
-	if options.nodeTriggerMode == AnyPredecessor {
-		return nil, errors.New("workflow does not support NodeTriggerMode(AnyPredecessor)")
-	}
-	options.nodeTriggerMode = AllPredecessor
 	return wf.g.compile(ctx, options)
 }
 
 func (wf *Workflow[I, O]) initNode(key string) *WorkflowNode {
 	return &WorkflowNode{g: wf.g, key: key}
+}
+
+func (wf *Workflow[I, O]) inputConverter() handlerPair {
+	return handlerPair{
+		invoke:    defaultValueChecker[I],
+		transform: defaultStreamConverter[I],
+	}
+}
+
+func (wf *Workflow[I, O]) inputFieldMappingConverter() handlerPair {
+	return handlerPair{
+		invoke:    buildFieldMappingConverter[I](),
+		transform: buildStreamFieldMappingConverter[I](),
+	}
 }
 
 func (wf *Workflow[I, O]) inputType() reflect.Type {

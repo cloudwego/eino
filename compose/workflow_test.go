@@ -112,7 +112,7 @@ func TestWorkflow(t *testing.T) {
 			return in.F, nil
 		}),
 	).
-		AddInput("2", NewMapping().To("F")) // map["key1"][]any -> map["F"]map["key1"][]any -> struct2{F: map["key1"]any} -> map["key1"][]any
+		AddInput("2", To("F")) // map["key1"][]any -> map["F"]map["key1"][]any -> struct2{F: map["key1"]any} -> map["key1"][]any
 	subWorkflow.AddLambdaNode(
 		"4",
 		InvokableLambda(func(_ context.Context, in []any) ([]any, error) {
@@ -131,15 +131,15 @@ func TestWorkflow(t *testing.T) {
 				state.temp = out.Field1
 				return out, nil
 			})).
-		AddInput(START, NewMapping().From("Field1"))
+		AddInput(START, From("Field1"))
 
 	w.
 		AddGraphNode("C", subChain).
-		AddInput(START, NewMapping().From("Field2"))
+		AddInput(START, From("Field2"))
 
 	w.
 		AddGraphNode("D", subWorkflow).
-		AddInput(START, NewMapping().From("Field3"))
+		AddInput(START, From("Field3"))
 
 	w.
 		AddLambdaNode(
@@ -174,9 +174,9 @@ func TestWorkflow(t *testing.T) {
 					return v, nil
 				}), nil
 			})).
-		AddInput("B", NewMapping().From("Field1").To("Field1")).
-		AddInput("C", NewMapping().From("Field1").To("Field2")).
-		AddInput("D", NewMapping().To("Field3"))
+		AddInput("B", FromTo("Field1", "Field1")).
+		AddInput("C", FromTo("Field1", "Field2")).
+		AddInput("D", To("Field3"))
 
 	w.
 		AddLambdaNode(
@@ -189,14 +189,14 @@ func TestWorkflow(t *testing.T) {
 				return in, nil
 			}),
 		).
-		AddInput("B", NewMapping().From("Field2").To("B")).
+		AddInput("B", FromTo("Field2", "B")).
 		AddInput("E",
-			NewMapping().From("Field1").To("Field1"),
-			NewMapping().From("Field2").To("Field2"),
-			NewMapping().From("Field3").To("Field3"),
+			FromTo("Field1", "Field1"),
+			FromTo("Field2", "Field2"),
+			FromTo("Field3", "Field3"),
 		)
 
-	w.AddEnd("F", NewMapping().To("Field1"))
+	w.AddEnd("F", To("Field1"))
 
 	compiled, err := w.Compile(ctx)
 	assert.NoError(t, err)
@@ -252,7 +252,7 @@ func TestWorkflowCompile(t *testing.T) {
 	t.Run("upstream not struct/struct ptr, mapping has FromField", func(t *testing.T) {
 		w := NewWorkflow[[]*schema.Document, []string]()
 
-		w.AddIndexerNode("indexer", indexer.NewMockIndexer(ctrl)).AddInput(START, NewMapping().From("F1"))
+		w.AddIndexerNode("indexer", indexer.NewMockIndexer(ctrl)).AddInput(START, From("F1"))
 		w.AddEnd("indexer")
 		_, err := w.Compile(ctx)
 		assert.ErrorContains(t, err, "downstream output type should be struct")
@@ -260,7 +260,7 @@ func TestWorkflowCompile(t *testing.T) {
 
 	t.Run("downstream not struct/struct ptr, mapping has ToField", func(t *testing.T) {
 		w := NewWorkflow[[]string, [][]float64]()
-		w.AddEmbeddingNode("embedder", embedding.NewMockEmbedder(ctrl)).AddInput(START, NewMapping().To("F1"))
+		w.AddEmbeddingNode("embedder", embedding.NewMockEmbedder(ctrl)).AddInput(START, To("F1"))
 		w.AddEnd("embedder")
 		_, err := w.Compile(ctx)
 		assert.ErrorContains(t, err, "upstream input type should be struct")
@@ -268,7 +268,7 @@ func TestWorkflowCompile(t *testing.T) {
 
 	t.Run("map to non existing field in upstream", func(t *testing.T) {
 		w := NewWorkflow[*schema.Message, []*schema.Message]()
-		w.AddToolsNode("tools_node", &ToolsNode{}).AddInput(START, NewMapping().From("non_exist"))
+		w.AddToolsNode("tools_node", &ToolsNode{}).AddInput(START, From("non_exist"))
 		w.AddEnd("tools_node")
 		_, err := w.Compile(ctx)
 		assert.ErrorContains(t, err, "type[schema.Message] has no field[non_exist]")
@@ -279,7 +279,7 @@ func TestWorkflowCompile(t *testing.T) {
 		w.AddLambdaNode("1", InvokableLambda(func(ctx context.Context, input string) (output string, err error) {
 			return input, nil
 		})).AddInput(START)
-		w.AddEnd("1", NewMapping().To("to"))
+		w.AddEnd("1", To("to"))
 		_, err := w.Compile(ctx)
 		assert.ErrorContains(t, err, "type[compose.FieldMapping] has an unexported field[to]")
 	})
@@ -334,16 +334,13 @@ func TestFanInToSameDest(t *testing.T) {
 		wf := NewWorkflow[in, dest]()
 		wf.AddLambdaNode("1", InvokableLambda(func(ctx context.Context, in string) (output string, err error) {
 			return in, nil
-		}), WithOutputKey("A")).AddInput(START, NewMapping().From("A"))
+		}), WithOutputKey("A")).AddInput(START, From("A"))
 		wf.AddLambdaNode("2", InvokableLambda(func(ctx context.Context, in int) (output int, err error) {
 			return in, nil
-		}), WithOutputKey("B")).AddInput(START, NewMapping().From("B"))
-		wf.AddEnd("1", NewMapping().To("F")).AddEnd("2", NewMapping().To("F"))
-		c, err := wf.Compile(context.Background())
-		assert.NoError(t, err)
-		out, err := c.Invoke(context.Background(), in{A: "a", B: 1})
-		assert.NoError(t, err)
-		assert.Equal(t, dest{F: map[string]any{"A": "a", "B": 1}}, out)
+		}), WithOutputKey("B")).AddInput(START, From("B"))
+		wf.AddEnd("1", To("F")).AddEnd("2", To("F"))
+		_, err := wf.Compile(context.Background())
+		assert.ErrorContains(t, err, "duplicate mapping target field")
 	})
 }
 
@@ -360,7 +357,7 @@ func TestMayAssignableFieldMapping(t *testing.T) {
 	}
 	wf := NewWorkflow[in, *goodStruct]()
 	wf.AddLambdaNode("1", InvokableLambda(func(ctx context.Context, input *goodStruct) (output goodInterface, err error) { return input, nil })).
-		AddInput(START, NewMapping().From("A"))
+		AddInput(START, From("A"))
 	wf.AddEnd("1")
 	ctx := context.Background()
 	r, err := wf.Compile(ctx)

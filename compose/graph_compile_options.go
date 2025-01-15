@@ -19,12 +19,18 @@ package compose
 // GraphCompileOption options for compiling AnyGraph.
 type GraphCompileOption func(*graphCompileOptions)
 
+// WithMaxRunSteps sets the maximum number of steps that a graph can run.
+// This is useful to prevent infinite loops in graphs with cycles.
+// If the number of steps exceeds maxSteps, the graph execution will be terminated with an error.
 func WithMaxRunSteps(maxSteps int) GraphCompileOption {
 	return func(o *graphCompileOptions) {
 		o.maxRunSteps = maxSteps
 	}
 }
 
+// WithGraphName sets a name for the graph.
+// The name is used for debugging and logging purposes.
+// If not set, a default name will be used.
 func WithGraphName(graphName string) GraphCompileOption {
 	return func(o *graphCompileOptions) {
 		o.graphName = graphName
@@ -43,6 +49,17 @@ func WithNodeTriggerMode(triggerMode NodeTriggerMode) GraphCompileOption {
 func WithGraphCompileCallbacks(cbs ...GraphCompileCallback) GraphCompileOption {
 	return func(o *graphCompileOptions) {
 		o.callbacks = append(o.callbacks, cbs...)
+	}
+}
+
+// WithGetStateEnable enables/disables GetState in Workflow nodes.
+// note: Only use this in Workflow
+// Since WorkflowNodes execute concurrently without ordering guarantees relative to other nodes' state handlers.
+// GetState is disabled in WorkflowNodes to prevent race conditions by default.
+// When enabled, users must handle concurrent state access safety (e.g. using locks) themselves.
+func WithGetStateEnable(enabled bool) GraphCompileOption {
+	return func(o *graphCompileOptions) {
+		o.getStateEnabled = enabled
 	}
 }
 

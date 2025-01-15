@@ -70,6 +70,40 @@ type graphNode struct {
 	opts     []GraphAddNodeOpt
 }
 
+func (gn *graphNode) inputConverter() handlerPair {
+	if gn.nodeInfo != nil && len(gn.nodeInfo.inputKey) != 0 {
+		return handlerPair{
+			invoke:    defaultValueChecker[map[string]any],
+			transform: defaultStreamConverter[map[string]any],
+		}
+	}
+	// priority follow compile
+	if gn.g != nil {
+		return gn.g.inputConverter()
+	} else if gn.cr != nil {
+		return gn.cr.inputConverter
+	}
+
+	return handlerPair{}
+}
+
+func (gn *graphNode) inputFieldMappingConverter() handlerPair {
+	if gn.nodeInfo != nil && len(gn.nodeInfo.inputKey) != 0 {
+		return handlerPair{
+			invoke:    buildFieldMappingConverter[map[string]any](),
+			transform: buildStreamFieldMappingConverter[map[string]any](),
+		}
+	}
+	// priority follow compile
+	if gn.g != nil {
+		return gn.g.inputFieldMappingConverter()
+	} else if gn.cr != nil {
+		return gn.cr.inputFieldMappingConverter
+	}
+
+	return handlerPair{}
+}
+
 func (gn *graphNode) inputType() reflect.Type {
 	if gn.nodeInfo != nil && len(gn.nodeInfo.inputKey) != 0 {
 		return generic.TypeOf[map[string]any]()

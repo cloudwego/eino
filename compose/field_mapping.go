@@ -37,18 +37,6 @@ func (m *FieldMapping) empty() bool {
 	return len(m.from) == 0 && len(m.to) == 0
 }
 
-// From chooses a field value from fromNode's output struct or struct pointer with the specific field name, to serve as the source of the FieldMapping.
-func (m *FieldMapping) From(name string) *FieldMapping {
-	m.from = name
-	return m
-}
-
-// To chooses a field from currentNode's input struct or struct pointer with the specific field name, to serve as the destination of the FieldMapping.
-func (m *FieldMapping) To(name string) *FieldMapping {
-	m.to = name
-	return m
-}
-
 // String returns the string representation of the FieldMapping.
 func (m *FieldMapping) String() string {
 	var sb strings.Builder
@@ -69,9 +57,21 @@ func (m *FieldMapping) String() string {
 	return sb.String()
 }
 
-// NewMapping creates a new FieldMapping with the specified fromNodeKey.
-func NewMapping() *FieldMapping {
-	return &FieldMapping{}
+func From(from string) *FieldMapping {
+	return &FieldMapping{
+		from: from,
+	}
+}
+func To(to string) *FieldMapping {
+	return &FieldMapping{
+		to: to,
+	}
+}
+func FromTo(from, to string) *FieldMapping {
+	return &FieldMapping{
+		from: from,
+		to:   to,
+	}
 }
 
 type fieldMappingsOnEdge struct {
@@ -139,29 +139,29 @@ func (f *fieldMappingHandler) handle(output any, isStream bool) (any, error) {
 
 func buildFieldMappingConverter[I any]() func(input any) (any, error) {
 	return func(input any) (any, error) {
-		in, ok := input.(map[FieldMapping]any)
+		in, ok := input.(map[string]any)
 		if !ok {
-			panic(newUnexpectedInputTypeErr(reflect.TypeOf(map[FieldMapping]any{}), reflect.TypeOf(input)))
+			panic(newUnexpectedInputTypeErr(reflect.TypeOf(map[string]any{}), reflect.TypeOf(input)))
 		}
 
 		return convertTo[I](in)
 	}
 }
 
-func buildStreamFieldMappingConverter[I any]() func(input streamReader) (streamReader, error) {
-	return func(input streamReader) (streamReader, error) {
-		s, ok := unpackStreamReader[map[FieldMapping]any](input)
+func buildStreamFieldMappingConverter[I any]() func(input streamReader) streamReader {
+	return func(input streamReader) streamReader {
+		s, ok := unpackStreamReader[map[string]any](input)
 		if !ok {
 			panic("mappingStreamAssign incoming streamReader chunk type not map[string]any")
 		}
 
-		return packStreamReader(schema.StreamReaderWithConvert(s, func(v map[FieldMapping]any) (I, error) {
+		return packStreamReader(schema.StreamReaderWithConvert(s, func(v map[string]any) (I, error) {
 			return convertTo[I](v)
-		})), nil
+		}))
 	}
 }
 
-func convertTo[T any](mappings map[FieldMapping]any) (T, error) {
+func convertTo[T any](mappings map[string]any) (T, error) {
 	t := generic.NewInstance[T]()
 
 	var (
@@ -169,8 +169,8 @@ func convertTo[T any](mappings map[FieldMapping]any) (T, error) {
 		field2Values = make(map[string][]any)
 	)
 
-	for m, taken := range mappings {
-		field2Values[m.to] = append(field2Values[m.to], taken)
+	for to, taken := range mappings {
+		field2Values[to] = append(field2Values[to], taken)
 	}
 
 	for fieldName, values := range field2Values {
@@ -291,25 +291,25 @@ func checkAndExtractToField(toField string, output, toSet reflect.Value) (reflec
 	return field, nil
 }
 
-func fieldMap(mappings []*FieldMapping) func(any) (map[FieldMapping]any, error) {
-	return func(input any) (map[FieldMapping]any, error) {
-		result := make(map[FieldMapping]any, len(mappings))
+func fieldMap(mappings []*FieldMapping) func(any) (map[string]any, error) {
+	return func(input any) (map[string]any, error) {
+		result := make(map[string]any, len(mappings))
 		for _, mapping := range mappings {
 			taken, err := takeOne(input, mapping.from)
 			if err != nil {
 				panic(safe.NewPanicErr(err, debug.Stack()))
 			}
 
-			result[*mapping] = taken
+			result[mapping.to] = taken
 		}
 
 		return result, nil
 	}
 }
 
-func streamFieldMap(mappings []*FieldMapping) func(streamReader) *schema.StreamReader[map[FieldMapping]any] {
-	return func(input streamReader) *schema.StreamReader[map[FieldMapping]any] {
-		return schema.StreamReaderWithConvert(input.toAnyStreamReader(), fieldMap(mappings))
+func streamFieldMap(mappings []*FieldMapping) func(streamReader) streamReader {
+	return func(input streamReader) streamReader {
+		return packStreamReader(schema.StreamReaderWithConvert(input.toAnyStreamReader(), fieldMap(mappings)))
 	}
 }
 
@@ -353,8 +353,8 @@ func validateStruct(t reflect.Type) bool {
 	return t.Kind() != reflect.Struct
 }
 
-func validateFieldMapping(predecessorType reflect.Type, successorType reflect.Type, mappings []*FieldMapping) (map[FieldMapping]func(any) (any, error), error) {
-	var fieldCheckers = make(map[FieldMapping]func(any) (any, error))
+func validateFieldMapping(predecessorType reflect.Type, successorType reflect.Type, mappings []*FieldMapping) (*handlerPair, error) {
+	var fieldCheckers = make(map[string]handlerPair)
 
 	// check if mapping is legal
 	if isFromAll(mappings) && isToAll(mappings) {
@@ -381,15 +381,43 @@ func validateFieldMapping(predecessorType reflect.Type, successorType reflect.Ty
 		if at == assignableTypeMustNot {
 			return nil, fmt.Errorf("static check failed for mapping %s, field[%v]-[%v] must not be assignable", mapping, predecessorFieldType, successorFieldType)
 		} else if at == assignableTypeMay {
-			fieldCheckers[*mapping] = func(a any) (any, error) {
+			checker := func(a any) (any, error) {
 				trueInType := reflect.TypeOf(a)
 				if !trueInType.AssignableTo(successorFieldType) {
 					return nil, fmt.Errorf("runtime check failed for mapping %s, field[%v]-[%v] must not be assignable", mapping, trueInType, successorFieldType)
 				}
 				return a, nil
 			}
+			fieldCheckers[mapping.to] = handlerPair{
+				invoke: checker,
+				transform: func(input streamReader) streamReader {
+					return packStreamReader(schema.StreamReaderWithConvert(input.toAnyStreamReader(), checker))
+				},
+			}
 		}
 	}
 
-	return fieldCheckers, nil
+	if len(fieldCheckers) == 0 {
+		return nil, nil
+	}
+
+	checker := func(value any) (any, error) {
+		mValue := value.(map[string]any)
+		var err error
+		for k, v := range fieldCheckers {
+			if _, ok := mValue[k]; ok {
+				mValue[k], err = v.invoke(mValue[k])
+				if err != nil {
+					return nil, err
+				}
+			}
+		}
+		return mValue, nil
+	}
+	return &handlerPair{
+		invoke: checker,
+		transform: func(input streamReader) streamReader {
+			return packStreamReader(schema.StreamReaderWithConvert(input.toAnyStreamReader(), checker))
+		},
+	}, nil
 }

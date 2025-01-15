@@ -52,7 +52,7 @@ func WithGenLocalState[S any](gls GenLocalState[S]) NewGraphOption {
 //
 //	graph := compose.NewGraph[string, string](WithGenLocalState(genStateFunc))
 //
-//	// you can use WithPreHandler and WithPostHandler to do something with state
+//	// you can use WithStatePreHandler and WithStatePostHandler to do something with state
 //	graph.AddNode("node1", someNode, compose.WithPreHandler(func(ctx context.Context, in string, state *testState) (string, error) {
 //		// do something with state
 //		return in, nil
@@ -81,6 +81,19 @@ func NewGraph[I, O any](opts ...NewGraphOption) *Graph[I, O] {
 // O: the output type of graph compiled product
 type Graph[I, O any] struct {
 	*graph
+}
+
+// AddEdge adds an edge to the graph, edge means a data flow from startNode to endNode.
+// the previous node's output type must be set to the next node's input type.
+// NOTE: startNode and endNode must have been added to the graph before adding edge.
+// e.g.
+//
+//	graph.AddNode("start_node_key", compose.NewPassthroughNode())
+//	graph.AddNode("end_node_key", compose.NewPassthroughNode())
+//
+//	err := graph.AddEdge("start_node_key", "end_node_key")
+func (g *Graph[I, O]) AddEdge(startNode, endNode string) (err error) {
+	return g.graph.addEdgeWithMappings(startNode, endNode)
 }
 
 // Compile take the raw graph and compile it into a form ready to be run.

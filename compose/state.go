@@ -31,8 +31,8 @@ type GenLocalState[S any] func(ctx context.Context) (state S)
 type stateKey struct{}
 
 type internalState struct {
-	state any
-	eager bool
+	state     any
+	forbidden bool
 }
 
 // StatePreHandler is a function that is called before the node is executed.
@@ -51,7 +51,7 @@ type StreamStatePostHandler[O, S any] func(ctx context.Context, out *schema.Stre
 
 func convertPreHandler[I, S any](handler StatePreHandler[I, S]) *composableRunnable {
 	rf := func(ctx context.Context, in I, opts ...any) (I, error) {
-		cState, err := GetState[S](ctx)
+		cState, err := getState[S](ctx)
 		if err != nil {
 			return in, err
 		}
@@ -64,7 +64,7 @@ func convertPreHandler[I, S any](handler StatePreHandler[I, S]) *composableRunna
 
 func convertPostHandler[O, S any](handler StatePostHandler[O, S]) *composableRunnable {
 	rf := func(ctx context.Context, out O, opts ...any) (O, error) {
-		cState, err := GetState[S](ctx)
+		cState, err := getState[S](ctx)
 		if err != nil {
 			return out, err
 		}
@@ -77,7 +77,7 @@ func convertPostHandler[O, S any](handler StatePostHandler[O, S]) *composableRun
 
 func streamConvertPreHandler[I, S any](handler StreamStatePreHandler[I, S]) *composableRunnable {
 	rf := func(ctx context.Context, in *schema.StreamReader[I], opts ...any) (*schema.StreamReader[I], error) {
-		cState, err := GetState[S](ctx)
+		cState, err := getState[S](ctx)
 		if err != nil {
 			return in, err
 		}
@@ -90,7 +90,7 @@ func streamConvertPreHandler[I, S any](handler StreamStatePreHandler[I, S]) *com
 
 func streamConvertPostHandler[O, S any](handler StreamStatePostHandler[O, S]) *composableRunnable {
 	rf := func(ctx context.Context, out *schema.StreamReader[O], opts ...any) (*schema.StreamReader[O], error) {
-		cState, err := GetState[S](ctx)
+		cState, err := getState[S](ctx)
 		if err != nil {
 			return out, err
 		}
@@ -105,7 +105,8 @@ func streamConvertPostHandler[O, S any](handler StreamStatePostHandler[O, S]) *c
 // When using this method to read or write state in custom nodes, it may lead to data race because other nodes may concurrently access the state.
 // You need to be aware of and resolve this situation, typically by adding a mutex.
 // It's recommended to only READ the returned state. If you want to WRITE to state, consider using StatePreHandler / StatePostHandler because they are concurrency safe out of the box.
-// eg.
+// note: this method will report error
+// e.g.
 //
 //	lambdaFunc := func(ctx context.Context, in string, opts ...any) (string, error) {
 //		state, err := compose.GetState[*testState](ctx)
@@ -122,9 +123,9 @@ func GetState[S any](ctx context.Context) (S, error) {
 	state := ctx.Value(stateKey{})
 
 	iState := state.(*internalState)
-	if iState.eager {
+	if iState.forbidden {
 		var s S
-		return s, fmt.Errorf("GetState in node is forbidden in eager mode")
+		return s, fmt.Errorf("GetState in node is forbidden in Workflow because of the race of state, if you have handled concurrent state access safety, you can add WithGetStateEnable option at graph compile")
 	}
 	cState, ok := iState.state.(S)
 	if !ok {

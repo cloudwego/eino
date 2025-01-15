@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"io"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -370,6 +371,32 @@ func TestValidate(t *testing.T) {
 	err = g.AddEdge("2", "3")
 	assert.ErrorContains(t, err, "graph edge[2]-[3]: start node's output type[string] and end node's input type[int] mismatch")
 
+	// test may matched passthrough
+	g2 := NewGraph[any, string]()
+	err = g2.AddLambdaNode("1", InvokableLambda(func(ctx context.Context, input any) (output any, err error) { return input, nil }))
+	assert.NoError(t, err)
+	err = g2.AddPassthroughNode("2")
+	assert.NoError(t, err)
+	err = g2.AddLambdaNode("3", InvokableLambda(func(ctx context.Context, input int) (output string, err error) { return strconv.Itoa(input), nil }))
+	assert.NoError(t, err)
+	err = g2.AddEdge(START, "1")
+	assert.NoError(t, err)
+	err = g2.AddEdge("2", "3")
+	assert.NoError(t, err)
+	err = g2.AddEdge("1", "2")
+	assert.NoError(t, err)
+	err = g2.AddEdge("3", END)
+	assert.NoError(t, err)
+	ru, err := g2.Compile(context.Background())
+	assert.NoError(t, err)
+	// success
+	result, err := ru.Invoke(context.Background(), 1)
+	assert.NoError(t, err)
+	assert.Equal(t, result, "1")
+	// fail
+	_, err = ru.Invoke(context.Background(), "1")
+	assert.ErrorContains(t, err, "runtime type check")
+
 	// test unmatched graph type
 	g = NewGraph[string, string]()
 	err = g.AddLambdaNode("1", InvokableLambda(func(ctx context.Context, input int) (output string, err error) { return "", nil }))
@@ -452,7 +479,7 @@ func TestValidate(t *testing.T) {
 	r, err := anyG.Compile(context.Background())
 	assert.NoError(t, err)
 
-	result, err := r.Invoke(context.Background(), "start")
+	result, err = r.Invoke(context.Background(), "start")
 	assert.NoError(t, err)
 	assert.Equal(t, "startnode1node2", result)
 

@@ -26,5 +26,7 @@ type AnyGraph interface {
 	compile(ctx context.Context, options *graphCompileOptions) (*composableRunnable, error)
 	inputType() reflect.Type
 	outputType() reflect.Type
+	inputConverter() handlerPair
+	inputFieldMappingConverter() handlerPair
 	component() component
 }

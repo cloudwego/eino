@@ -32,15 +32,104 @@ type channel interface {
 	ready(context.Context) bool
 }
 
-type channelManager map[string]channel
+type edgeHandlerManager struct {
+	h map[string]map[string][]handlerPair
+}
 
-func (c *channelManager) updateValues(ctx context.Context, values map[string]map[string]any) error {
-	for target, v := range values {
-		toChannel, ok := (*c)[target]
+func (e *edgeHandlerManager) handle(from, to string, value any, isStream bool) (any, error) {
+	if _, ok := e.h[from]; !ok {
+		return value, nil
+	}
+	if _, ok := e.h[from][to]; !ok {
+		return value, nil
+	}
+	if isStream {
+		for _, v := range e.h[from][to] {
+			value = v.transform(value.(streamReader))
+		}
+	} else {
+		for _, v := range e.h[from][to] {
+			var err error
+			value, err = v.invoke(value)
+			if err != nil {
+				return nil, err
+			}
+		}
+	}
+	return value, nil
+}
+
+type preNodeHandlerManager struct {
+	h map[string][]handlerPair
+}
+
+func (p *preNodeHandlerManager) handle(nodeKey string, value any, isStream bool) (any, error) {
+	if _, ok := p.h[nodeKey]; !ok {
+		return value, nil
+	}
+	if isStream {
+		for _, v := range p.h[nodeKey] {
+			value = v.transform(value.(streamReader))
+		}
+	} else {
+		for _, v := range p.h[nodeKey] {
+			var err error
+			value, err = v.invoke(value)
+			if err != nil {
+				return nil, err
+			}
+		}
+	}
+	return value, nil
+}
+
+type preBranchHandlerManager struct {
+	h map[string][][]handlerPair
+}
+
+func (p *preBranchHandlerManager) handle(nodeKey string, idx int, value any, isStream bool) (any, error) {
+	if _, ok := p.h[nodeKey]; !ok {
+		return value, nil
+	}
+	if isStream {
+		for _, v := range p.h[nodeKey][idx] {
+			value = v.transform(value.(streamReader))
+		}
+	} else {
+		for _, v := range p.h[nodeKey][idx] {
+			var err error
+			value, err = v.invoke(value)
+			if err != nil {
+				return nil, err
+			}
+		}
+	}
+	return value, nil
+}
+
+type channelManager struct {
+	isStream bool
+	channels map[string]channel
+
+	edgeHandlerManager    *edgeHandlerManager
+	preNodeHandlerManager *preNodeHandlerManager
+}
+
+func (c *channelManager) updateValues(ctx context.Context, values map[string] /*to*/ map[string] /*from*/ any, isStream bool) error {
+	for target, fromMap := range values {
+		toChannel, ok := c.channels[target]
 		if !ok {
 			return fmt.Errorf("target channel doesn't existed: %s", target)
 		}
-		err := toChannel.update(ctx, v)
+		nFromMap := make(map[string]any, len(fromMap))
+		for from, value := range fromMap {
+			var err error
+			nFromMap[from], err = c.edgeHandlerManager.handle(from, target, value, isStream)
+			if err != nil {
+				return err
+			}
+		}
+		err := toChannel.update(ctx, nFromMap)
 		if err != nil {
 			return fmt.Errorf("update target channel[%s] fail: %w", target, err)
 		}
@@ -48,25 +137,30 @@ func (c *channelManager) updateValues(ctx context.Context, values map[string]map
 	return nil
 }
 
-func (c *channelManager) getFromReadyChannels(ctx context.Context) (map[string]any, error) {
+func (c *channelManager) getFromReadyChannels(ctx context.Context, isStream bool) (map[string]any, error) {
 	result := make(map[string]any)
-	for target, ch := range *c {
+	for target, ch := range c.channels {
 		if ch.ready(ctx) {
 			v, err := ch.get(ctx)
 			if err != nil {
 				return nil, fmt.Errorf("get value from ready channel[%s] fail: %w", target, err)
+			}
+			v, err = c.preNodeHandlerManager.handle(target, v, isStream)
+			if err != nil {
+				return nil, err
 			}
 			result[target] = v
 		}
 	}
 	return result, nil
 }
-func (c *channelManager) updateAndGet(ctx context.Context, values map[string]map[string]any) (map[string]any, error) {
-	err := c.updateValues(ctx, values)
+
+func (c *channelManager) updateAndGet(ctx context.Context, values map[string]map[string]any, isStream bool) (map[string]any, error) {
+	err := c.updateValues(ctx, values, isStream)
 	if err != nil {
 		return nil, fmt.Errorf("update channel fail: %w", err)
 	}
-	return c.getFromReadyChannels(ctx)
+	return c.getFromReadyChannels(ctx, isStream)
 }
 
 type task struct {
@@ -90,9 +184,28 @@ type taskManager struct {
 	num  uint32
 }
 
+func (t *taskManager) executor(currentTask *task) {
+	defer func() {
+		panicInfo := recover()
+		if panicInfo != nil {
+			currentTask.output = nil
+			currentTask.err = safe.NewPanicErr(panicInfo, debug.Stack())
+		}
+		t.mu.Lock()
+		t.l.PushBack(currentTask)
+		t.updateChan()
+		t.mu.Unlock()
+	}()
+
+	ctx := initNodeCallbacks(currentTask.ctx, currentTask.nodeKey, currentTask.call.action.nodeInfo, currentTask.call.action.meta, t.opts...)
+	currentTask.output, currentTask.err = t.runWrapper(ctx, currentTask.call.action, currentTask.input, currentTask.option...)
+}
+
 func (t *taskManager) submit(tasks []*task) error {
+	// synchronously execute one task, if there are no other tasks in the task pool and meet one of the following conditions：
+	// 1. the new task is the only one
+	// 2. the task manager mode is set to needAll
 	for _, currentTask := range tasks {
-		currentTask := currentTask
 		if currentTask.call.preProcessor != nil {
 			nInput, err := t.runWrapper(currentTask.ctx, currentTask.call.preProcessor, currentTask.input, currentTask.option...)
 			if err != nil {
@@ -100,23 +213,19 @@ func (t *taskManager) submit(tasks []*task) error {
 			}
 			currentTask.input = nInput
 		}
+	}
+	var syncTask *task
+	if t.num == 0 && (len(tasks) == 1 || t.needAll) {
+		syncTask = tasks[0]
+		tasks = tasks[1:]
+	}
+	for _, currentTask := range tasks {
 		t.num += 1
-		go func() { // TODO: control tasks & save thread
-			defer func() {
-				panicInfo := recover()
-				if panicInfo != nil {
-					currentTask.output = nil
-					currentTask.err = safe.NewPanicErr(panicInfo, debug.Stack())
-				}
-				t.mu.Lock()
-				t.l.PushBack(currentTask)
-				t.updateChan()
-				t.mu.Unlock()
-			}()
-
-			ctx := initNodeCallbacks(currentTask.ctx, currentTask.nodeKey, currentTask.call.action.nodeInfo, currentTask.call.action.meta, t.opts...)
-			currentTask.output, currentTask.err = t.runWrapper(ctx, currentTask.call.action, currentTask.input, currentTask.option...)
-		}()
+		go t.executor(currentTask)
+	}
+	if syncTask != nil {
+		t.num += 1
+		t.executor(syncTask)
 	}
 	return nil
 }

@@ -35,6 +35,8 @@ type graphCompileOptions struct {
 	callbacks []GraphCompileCallback
 
 	origOpts []GraphCompileOption
+
+	getStateEnabled bool
 }
 
 func newGraphCompileOptions(opts ...GraphCompileOption) *graphCompileOptions {
@@ -75,25 +77,18 @@ type runner struct {
 	outputType reflect.Type
 
 	// take effect as a sub-graph through toComposableRunnable
-	inputStreamFilter                streamMapFilter
-	inputValueChecker                valueChecker
-	inputStreamConverter             streamConverter
-	inputFieldMappingConverter       fieldMappingConverter
-	inputStreamFieldMappingConverter streamFieldMappingConverter
-	// used for convert runner's output
-	outputValueChecker                valueChecker
-	outputStreamConverter             streamConverter
-	outputFieldMappingConverter       fieldMappingConverter
-	outputStreamFieldMappingConverter streamFieldMappingConverter
+	inputStreamFilter streamMapFilter
+
+	inputConverter             handlerPair
+	inputFieldMappingConverter handlerPair
 
 	// checks need to do because cannot check at compile
 	runtimeCheckEdges    map[string]map[string]bool
 	runtimeCheckBranches map[string][]bool
 
-	// field mapping records, used to:
-	// 1. convert predecessor's output to map and filter key
-	// 2. convert input from map to struct that successor expect
-	fieldMappingsOnEdge *fieldMappingsOnEdge
+	edgeHandlerManager      *edgeHandlerManager
+	preNodeHandlerManager   *preNodeHandlerManager
+	preBranchHandlerManager *preBranchHandlerManager
 }
 
 func (r *runner) invoke(ctx context.Context, input any, opts ...Option) (any, error) {
@@ -128,7 +123,7 @@ func (r *runner) run(ctx context.Context, isStream bool, input any, opts ...Opti
 	}
 
 	// Initialize channel and task managers.
-	cm := r.initChannelManager()
+	cm := r.initChannelManager(isStream)
 	tm := r.initTaskManager(runWrapper, opts...)
 	maxSteps := r.options.maxRunSteps
 	if r.runCtx != nil {
@@ -171,27 +166,18 @@ func (r *runner) run(ctx context.Context, isStream bool, input any, opts ...Opti
 			return nil, ErrExceedMaxSteps
 		}
 
-		// Process completed tasks and prepare for next iteration:
 		// 1. Calculate active edges and resolve their values.
-		// 2. Handle field mappings if needed.
-		// 3. Validate and convert data types if necessary.
-		writeChannelValues, err := r.resolveEdges(ctx, completedTasks, isStream)
+		writeChannelValues, err := r.resolveCompletedTasks(ctx, completedTasks, isStream)
 		if err != nil {
 			return nil, err
 		}
 
 		// Update channels and get nodes ready for execution.
-		nodeMap, err := cm.updateAndGet(ctx, writeChannelValues)
+		nodeMap, err := cm.updateAndGet(ctx, writeChannelValues, isStream)
 		if err != nil {
 			return nil, fmt.Errorf("failed to update and get channels: %w", err)
 		}
 		if len(nodeMap) > 0 {
-			// Convert field mappings to expected struct types if needed.
-			nodeMap, err = r.convertFieldMappingsIfNeeded(nodeMap, isStream)
-			if err != nil {
-				return nil, fmt.Errorf("failed to convert field mappings to struct: %w", err)
-			}
-
 			// Check if we've reached the END node.
 			if v, ok := nodeMap[END]; ok {
 				return v, nil
@@ -219,42 +205,6 @@ func (r *runner) run(ctx context.Context, isStream bool, input any, opts ...Opti
 	}
 }
 
-func (r *runner) convertFieldMappingsIfNeeded(nodeMap map[string]any, isStream bool) (map[string]any, error) {
-	for nodeKey, nodeInput := range nodeMap {
-		var conv func(any) (any, error)
-		var streamConv func(streamReader) (streamReader, error)
-
-		if nodeKey == END {
-			conv = r.outputFieldMappingConverter
-			streamConv = r.outputStreamFieldMappingConverter
-		} else {
-			call, ok := r.chanSubscribeTo[nodeKey]
-			if !ok {
-				return nil, fmt.Errorf("node[%s] has not been registered", nodeKey)
-			}
-			conv = call.action.inputFieldMappingConverter
-			streamConv = call.action.inputStreamFieldMappingConverter
-		}
-
-		if r.fieldMappingsOnEdge.needConvMap2Struct(nodeKey) {
-			if isStream {
-				nNodeInput, err := streamConv(nodeInput.(streamReader))
-				if err != nil {
-					return nil, fmt.Errorf("failed to convert node [%s]'s input from field mapping: %w", nodeKey, err)
-				}
-				nodeMap[nodeKey] = nNodeInput
-			} else {
-				nNodeInput, err := conv(nodeInput)
-				if err != nil {
-					return nil, fmt.Errorf("failed to convert node [%s]'s input from field mapping: %w", nodeKey, err)
-				}
-				nodeMap[nodeKey] = nNodeInput
-			}
-		}
-	}
-	return nodeMap, nil
-}
-
 func (r *runner) createTasks(ctx context.Context, nodeMap map[string]any, optMap map[string][]any) ([]*task, error) {
 	var nextTasks []*task
 	for nodeKey, nodeInput := range nodeMap {
@@ -274,7 +224,7 @@ func (r *runner) createTasks(ctx context.Context, nodeMap map[string]any, optMap
 	return nextTasks, nil
 }
 
-func (r *runner) resolveEdges(ctx context.Context, completedTasks []*task, isStream bool) (map[string]map[string]any, error) {
+func (r *runner) resolveCompletedTasks(ctx context.Context, completedTasks []*task, isStream bool) (map[string]map[string]any, error) {
 	writeChannelValues := make(map[string]map[string]any)
 	for _, t := range completedTasks {
 		// update channel & new_next_tasks
@@ -288,20 +238,6 @@ func (r *runner) resolveEdges(ctx context.Context, completedTasks []*task, isStr
 			if _, ok := writeChannelValues[next]; !ok {
 				writeChannelValues[next] = make(map[string]any)
 			}
-			// field mapping if needed
-			useFieldMapping := false
-			vs[i], useFieldMapping, err = r.fieldMappingsOnEdge.execute(t.nodeKey, next, vs[i], isStream)
-			if err != nil {
-				return nil, fmt.Errorf("failed to execute field mapping for edge [%s]-[%s]: %w", t.nodeKey, next, err)
-			}
-			if !useFieldMapping {
-				// Validate and parse types if needed.
-				vs[i], err = r.validateTypeAndParseIfNeeded(t.nodeKey, next, isStream, vs[i])
-				if err != nil {
-					return nil, fmt.Errorf("failed to validate type for edge [%s]-[%s]: %w", t.nodeKey, next, err)
-				}
-			}
-
 			writeChannelValues[next][t.nodeKey] = vs[i]
 		}
 	}
@@ -323,19 +259,14 @@ func (r *runner) calculateNext(ctx context.Context, curNodeKey string, startChan
 
 	for i, branch := range startChan.writeToBranches {
 		// check branch input type if needed
-		if r.runtimeCheckBranches[curNodeKey][branch.idx] {
-			if isStream {
-				input[i] = branch.condition.inputStreamConverter(input[i].(streamReader))
-			} else {
-				err := branch.condition.inputValueChecker(input[i])
-				if err != nil {
-					return nil, fmt.Errorf("branch[%s]-[%d] runtime value check fail: %w", curNodeKey, branch.idx, err)
-				}
-			}
+		var err error
+		input[i], err = r.preBranchHandlerManager.handle(curNodeKey, i, input[i], isStream)
+		if err != nil {
+			return nil, fmt.Errorf("branch[%s]-[%d] pre handler fail: %w", curNodeKey, branch.idx, err)
 		}
 
 		wCh, e := runWrapper(ctx, branch.condition, input[i])
-		if e != nil { // nolint:byted_s_too_many_nests_in_func
+		if e != nil {
 			return nil, fmt.Errorf("branch run error: %w", e)
 		}
 
@@ -370,37 +301,6 @@ func (r *runner) calculateNext(ctx context.Context, curNodeKey string, startChan
 	return ret, nil
 }
 
-func (r *runner) validateTypeAndParseIfNeeded(cur, next string, isStream bool, value any) (any, error) {
-	if _, ok := r.runtimeCheckEdges[cur]; !ok {
-		return value, nil
-	}
-	if _, ok := r.runtimeCheckEdges[cur][next]; !ok {
-		return value, nil
-	}
-
-	if next == END {
-		if isStream {
-			value = r.outputStreamConverter(value.(streamReader))
-			return value, nil
-		}
-		err := r.outputValueChecker(value)
-		if err != nil {
-			return nil, fmt.Errorf("edge[%s]-[%s] runtime value check fail: %w", cur, next, err)
-		}
-		return value, nil
-
-	}
-	if isStream {
-		value = r.chanSubscribeTo[next].action.inputStreamConverter(value.(streamReader))
-		return value, nil
-	}
-	err := r.chanSubscribeTo[next].action.inputValueChecker(value)
-	if err != nil {
-		return nil, fmt.Errorf("edge[%s]-[%s] runtime value check fail: %w", cur, next, err)
-	}
-	return value, nil
-}
-
 func (r *runner) initTaskManager(runWrapper runnableCallWrapper, opts ...Option) *taskManager {
 	return &taskManager{
 		runWrapper: runWrapper,
@@ -412,7 +312,7 @@ func (r *runner) initTaskManager(runWrapper runnableCallWrapper, opts ...Option)
 	}
 }
 
-func (r *runner) initChannelManager() *channelManager {
+func (r *runner) initChannelManager(isStream bool) *channelManager {
 	builder := r.chanBuilder
 	if builder == nil {
 		builder = func(d []string) channel {
@@ -427,7 +327,13 @@ func (r *runner) initChannelManager() *channelManager {
 
 	chs[END] = builder(r.invertedEdges[END])
 
-	return (*channelManager)(&chs)
+	return &channelManager{
+		isStream: isStream,
+		channels: chs,
+
+		edgeHandlerManager:    r.edgeHandlerManager,
+		preNodeHandlerManager: r.preNodeHandlerManager,
+	}
 }
 
 func (r *runner) toComposableRunnable() *composableRunnable {
@@ -447,14 +353,12 @@ func (r *runner) toComposableRunnable() *composableRunnable {
 			return r.transform(ctx, input, tos...)
 		},
 
-		inputType:                        r.inputType,
-		outputType:                       r.outputType,
-		inputStreamFilter:                r.inputStreamFilter,
-		inputValueChecker:                r.inputValueChecker,
-		inputStreamConverter:             r.inputStreamConverter,
-		inputFieldMappingConverter:       r.inputFieldMappingConverter,
-		inputStreamFieldMappingConverter: r.inputStreamFieldMappingConverter,
-		optionType:                       nil, // if option type is nil, graph will transmit all options.
+		inputType:                  r.inputType,
+		outputType:                 r.outputType,
+		inputStreamFilter:          r.inputStreamFilter,
+		inputConverter:             r.inputConverter,
+		inputFieldMappingConverter: r.inputFieldMappingConverter,
+		optionType:                 nil, // if option type is nil, graph will transmit all options.
 
 		isPassthrough: false,
 	}

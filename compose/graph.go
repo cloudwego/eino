@@ -160,20 +160,12 @@ type graph struct {
 
 	expectedInputType, expectedOutputType reflect.Type
 	inputStreamFilter                     streamMapFilter
-	inputValueChecker                     valueChecker
-	inputStreamConverter                  streamConverter
-	inputFieldMappingConverter            fieldMappingConverter
-	inputStreamFieldMappingConverter      streamFieldMappingConverter
+	graphInputConverter                   handlerPair
+	graphInputFieldMappingConverter       handlerPair
 
-	outputValueChecker                valueChecker
-	outputStreamConverter             streamConverter
-	outputFieldMappingConverter       fieldMappingConverter
-	outputStreamFieldMappingConverter streamFieldMappingConverter
+	outputConverter             handlerPair
+	outputFieldMappingConverter handlerPair
 
-	runtimeCheckEdges    map[string]map[string]bool
-	runtimeCheckBranches map[string][]bool
-
-	fieldMappings       *fieldMappingsOnEdge
 	fieldMappingRecords map[string][]*FieldMapping
 
 	buildError error
@@ -181,15 +173,19 @@ type graph struct {
 	cmp component
 
 	compiled bool
+
+	handlerOnEdges   map[string]map[string][]handlerPair
+	handlerPreNode   map[string][]handlerPair
+	handlerPreBranch map[string][][]handlerPair
 }
 
 type newGraphConfig struct {
 	inputType, outputType                                               reflect.Type
 	filter                                                              streamMapFilter
-	inputChecker, outputChecker                                         valueChecker
-	inputConv, outputConv                                               streamConverter
-	inputFieldMappingConverter, outputFieldMappingConverter             fieldMappingConverter
-	inputStreamFieldMappingConverter, outputStreamFieldMappingConverter streamFieldMappingConverter
+	inputChecker, outputChecker                                         valueHandler
+	inputConv, outputConv                                               streamHandler
+	inputFieldMappingConverter, outputFieldMappingConverter             valueHandler
+	inputStreamFieldMappingConverter, outputStreamFieldMappingConverter streamHandler
 	cmp                                                                 component
 	stateGenerator                                                      func(ctx context.Context) any
 }
@@ -226,28 +222,35 @@ func newGraph(cfg *newGraphConfig) *graph {
 			mappings []*FieldMapping
 		}),
 
-		expectedInputType:                cfg.inputType,
-		expectedOutputType:               cfg.outputType,
-		inputStreamFilter:                cfg.filter,
-		inputValueChecker:                cfg.inputChecker,
-		inputStreamConverter:             cfg.inputConv,
-		inputFieldMappingConverter:       cfg.inputFieldMappingConverter,
-		inputStreamFieldMappingConverter: cfg.inputStreamFieldMappingConverter,
+		expectedInputType:  cfg.inputType,
+		expectedOutputType: cfg.outputType,
+		inputStreamFilter:  cfg.filter,
+		graphInputConverter: handlerPair{
+			invoke:    cfg.inputChecker,
+			transform: cfg.inputConv,
+		},
+		graphInputFieldMappingConverter: handlerPair{
+			invoke:    cfg.inputFieldMappingConverter,
+			transform: cfg.inputStreamFieldMappingConverter,
+		},
 
-		outputValueChecker:                cfg.outputChecker,
-		outputStreamConverter:             cfg.outputConv,
-		outputFieldMappingConverter:       cfg.outputFieldMappingConverter,
-		outputStreamFieldMappingConverter: cfg.outputStreamFieldMappingConverter,
+		outputConverter: handlerPair{
+			invoke:    cfg.outputChecker,
+			transform: cfg.outputConv,
+		},
+		outputFieldMappingConverter: handlerPair{
+			invoke:    cfg.outputFieldMappingConverter,
+			transform: cfg.outputStreamFieldMappingConverter,
+		},
 
-		runtimeCheckEdges:    make(map[string]map[string]bool),
-		runtimeCheckBranches: make(map[string][]bool),
-
-		fieldMappings:       &fieldMappingsOnEdge{m: make(map[string]map[string]*fieldMappingHandler)},
 		fieldMappingRecords: make(map[string][]*FieldMapping),
 
 		cmp: cfg.cmp,
 
-		stateGenerator: cfg.stateGenerator,
+		stateGenerator:   cfg.stateGenerator,
+		handlerOnEdges:   make(map[string]map[string][]handlerPair),
+		handlerPreNode:   make(map[string][]handlerPair),
+		handlerPreBranch: make(map[string][][]handlerPair),
 	}
 }
 
@@ -257,6 +260,10 @@ func (g *graph) component() component {
 
 func isChain(cmp component) bool {
 	return cmp == ComponentOfChain
+}
+
+func isWorkflow(cmp component) bool {
+	return cmp == ComponentOfWorkflow
 }
 
 // ErrGraphCompiled is returned when attempting to modify a graph after it has been compiled
@@ -304,19 +311,6 @@ func (g *graph) addNode(key string, node *graphNode, options *graphAddNodeOpts) 
 	return nil
 }
 
-// AddEdge adds an edge to the graph, edge means a data flow from startNode to endNode.
-// the previous node's output type must be set to the next node's input type.
-// NOTE: startNode and endNode must have been added to the graph before adding edge.
-// e.g.
-//
-//	graph.AddNode("start_node_key", compose.NewPassthroughNode())
-//	graph.AddNode("end_node_key", compose.NewPassthroughNode())
-//
-//	err := graph.AddEdge("start_node_key", "end_node_key")
-func (g *graph) AddEdge(startNode, endNode string) (err error) {
-	return g.addEdgeWithMappings(startNode, endNode)
-}
-
 func (g *graph) addEdgeWithMappings(startNode, endNode string, mappings ...*FieldMapping) (err error) {
 	if g.buildError != nil {
 		return g.buildError
@@ -347,7 +341,8 @@ func (g *graph) addEdgeWithMappings(startNode, endNode string, mappings ...*Fiel
 		return fmt.Errorf("edge end node '%s' needs to be added to graph first", endNode)
 	}
 
-	err = g.validateAndInferType(startNode, endNode, mappings)
+	g.addToValidateMap(startNode, endNode, mappings)
+	err = g.updateToValidateMap()
 	if err != nil {
 		return err
 	}
@@ -357,10 +352,6 @@ func (g *graph) addEdgeWithMappings(startNode, endNode string, mappings ...*Fiel
 	}
 	if endNode == END {
 		g.endNodes = append(g.endNodes, startNode)
-	}
-	err = g.updateToValidateMap()
-	if err != nil {
-		return err
 	}
 
 	return nil
@@ -528,19 +519,19 @@ func (g *graph) AddBranch(startNode string, branch *GraphBranch) (err error) {
 		return fmt.Errorf("number of branches is 1")
 	}
 
-	if _, ok := g.runtimeCheckBranches[startNode]; !ok {
-		g.runtimeCheckBranches[startNode] = []bool{}
+	if _, ok := g.handlerPreBranch[startNode]; !ok {
+		g.handlerPreBranch[startNode] = [][]handlerPair{}
 	}
-	branch.idx = len(g.runtimeCheckBranches[startNode])
+	branch.idx = len(g.handlerPreBranch[startNode])
 
 	// check branch condition type
 	result := checkAssignable(g.getNodeOutputType(startNode), branch.condition.inputType)
 	if result == assignableTypeMustNot {
 		return fmt.Errorf("condition input type[%s] and start node output type[%s] are mismatched", branch.condition.inputType.String(), g.getNodeOutputType(startNode).String())
 	} else if result == assignableTypeMay {
-		g.runtimeCheckBranches[startNode] = append(g.runtimeCheckBranches[startNode], true)
+		g.handlerPreBranch[startNode] = append(g.handlerPreBranch[startNode], []handlerPair{branch.condition.inputConverter})
 	} else {
-		g.runtimeCheckBranches[startNode] = append(g.runtimeCheckBranches[startNode], false)
+		g.handlerPreBranch[startNode] = append(g.handlerPreBranch[startNode], []handlerPair{})
 	}
 
 	for endNode := range branch.endNodes {
@@ -550,7 +541,8 @@ func (g *graph) AddBranch(startNode string, branch *GraphBranch) (err error) {
 			}
 		}
 
-		e := g.validateAndInferType(startNode, endNode, nil)
+		g.addToValidateMap(startNode, endNode, nil)
+		e := g.updateToValidateMap()
 		if e != nil {
 			return e
 		}
@@ -562,10 +554,6 @@ func (g *graph) AddBranch(startNode string, branch *GraphBranch) (err error) {
 			g.endNodes = append(g.endNodes, startNode)
 		}
 
-		e = g.updateToValidateMap()
-		if e != nil {
-			return e
-		}
 	}
 
 	g.branches[startNode] = append(g.branches[startNode], branch)
@@ -573,57 +561,11 @@ func (g *graph) AddBranch(startNode string, branch *GraphBranch) (err error) {
 	return nil
 }
 
-func (g *graph) validateAndInferType(startNode, endNode string, mappings []*FieldMapping) error {
-	startNodeOutputType := g.getNodeOutputType(startNode)
-	endNodeInputType := g.getNodeInputType(endNode)
-
-	// assume that START and END type isn't empty
-	// check and update current node. if cannot validate, save edge to toValidateMap
-	if startNodeOutputType == nil && endNodeInputType == nil {
-		// type of passthrough have not been inferred yet. defer checking to compile.
-		g.toValidateMap[startNode] = append(g.toValidateMap[startNode], struct {
-			endNode  string
-			mappings []*FieldMapping
-		}{endNode: endNode, mappings: mappings})
-	} else if startNodeOutputType != nil && endNodeInputType == nil {
-		// end node is passthrough, propagate start node output type to it
-		g.nodes[endNode].cr.inputType = startNodeOutputType
-		g.nodes[endNode].cr.outputType = g.nodes[endNode].cr.inputType
-	} else if startNodeOutputType == nil /* redundant condition && endNodeInputType != nil */ {
-		// start node is passthrough, propagate end node input type to it
-		g.nodes[startNode].cr.inputType = endNodeInputType
-		g.nodes[startNode].cr.outputType = g.nodes[startNode].cr.inputType
-	} else if len(mappings) == 0 {
-		// common node check
-		result := checkAssignable(startNodeOutputType, endNodeInputType)
-		if result == assignableTypeMustNot {
-			return fmt.Errorf("graph edge[%s]-[%s]: start node's output type[%s] and end node's input type[%s] mismatch",
-				startNode, endNode, startNodeOutputType.String(), endNodeInputType.String())
-		} else if result == assignableTypeMay {
-			// add runtime check edges
-			if _, ok := g.runtimeCheckEdges[startNode]; !ok {
-				g.runtimeCheckEdges[startNode] = make(map[string]bool)
-			}
-			g.runtimeCheckEdges[startNode][endNode] = true
-		}
-		return nil
-	}
-
-	if len(mappings) > 0 {
-		// field mapping check
-		checkers, err := validateFieldMapping(g.getNodeOutputType(startNode), g.getNodeInputType(endNode), mappings)
-		if err != nil {
-			return err
-		}
-		g.fieldMappings.set(startNode, endNode, &fieldMappingHandler{
-			invoke:    fieldMap(mappings),
-			transform: streamFieldMap(mappings),
-			checkers:  checkers,
-		})
-		g.fieldMappingRecords[endNode] = append(g.fieldMappingRecords[endNode], mappings...)
-	}
-
-	return nil
+func (g *graph) addToValidateMap(startNode, endNode string, mapping []*FieldMapping) {
+	g.toValidateMap[startNode] = append(g.toValidateMap[startNode], struct {
+		endNode  string
+		mappings []*FieldMapping
+	}{endNode: endNode, mappings: mapping})
 }
 
 // updateToValidateMap after update node, check validate map
@@ -652,37 +594,49 @@ func (g *graph) updateToValidateMap() error {
 				if startNodeOutputType != nil && endNodeInputType == nil {
 					g.nodes[endNode.endNode].cr.inputType = startNodeOutputType
 					g.nodes[endNode.endNode].cr.outputType = g.nodes[endNode.endNode].cr.inputType
+					g.nodes[endNode.endNode].cr.inputConverter = g.getNodeInputConverter(startNode)
+					g.nodes[endNode.endNode].cr.inputFieldMappingConverter = g.getNodeInputFieldMappingConverter(startNode)
 				} else if startNodeOutputType == nil /* redundant condition && endNodeInputType != nil */ {
 					g.nodes[startNode].cr.inputType = endNodeInputType
 					g.nodes[startNode].cr.outputType = g.nodes[startNode].cr.inputType
+					g.nodes[startNode].cr.inputConverter = g.getNodeInputConverter(endNode.endNode)
+					g.nodes[startNode].cr.inputFieldMappingConverter = g.getNodeInputFieldMappingConverter(endNode.endNode)
 				} else if len(endNode.mappings) == 0 {
 					// common node check
 					result := checkAssignable(startNodeOutputType, endNodeInputType)
 					if result == assignableTypeMustNot {
 						return fmt.Errorf("graph edge[%s]-[%s]: start node's output type[%s] and end node's input type[%s] mismatch",
-							startNode, endNode, startNodeOutputType.String(), endNodeInputType.String())
+							startNode, endNode.endNode, startNodeOutputType.String(), endNodeInputType.String())
 					} else if result == assignableTypeMay {
 						// add runtime check edges
-						if _, ok := g.runtimeCheckEdges[startNode]; !ok {
-							g.runtimeCheckEdges[startNode] = make(map[string]bool)
+						if _, ok := g.handlerOnEdges[startNode]; !ok {
+							g.handlerOnEdges[startNode] = make(map[string][]handlerPair)
 						}
-						g.runtimeCheckEdges[startNode][endNode.endNode] = true
+						g.handlerOnEdges[startNode][endNode.endNode] = append(g.handlerOnEdges[startNode][endNode.endNode], g.getNodeInputConverter(endNode.endNode))
 					}
 					continue
 				}
 
 				if len(endNode.mappings) > 0 {
+					if _, ok := g.handlerOnEdges[startNode]; !ok {
+						g.handlerOnEdges[startNode] = make(map[string][]handlerPair)
+					}
+					g.handlerOnEdges[startNode][endNode.endNode] = append(g.handlerOnEdges[startNode][endNode.endNode], handlerPair{
+						invoke: func(value any) (any, error) {
+							return fieldMap(endNode.mappings)(value)
+						},
+						transform: streamFieldMap(endNode.mappings),
+					})
+					g.fieldMappingRecords[endNode.endNode] = append(g.fieldMappingRecords[endNode.endNode], endNode.mappings...)
+
 					// field mapping check
-					checkers, err := validateFieldMapping(g.getNodeOutputType(startNode), g.getNodeInputType(endNode.endNode), endNode.mappings)
+					checker, err := validateFieldMapping(g.getNodeOutputType(startNode), g.getNodeInputType(endNode.endNode), endNode.mappings)
 					if err != nil {
 						return err
 					}
-					g.fieldMappings.set(startNode, endNode.endNode, &fieldMappingHandler{
-						invoke:    fieldMap(endNode.mappings),
-						transform: streamFieldMap(endNode.mappings),
-						checkers:  checkers,
-					})
-					g.fieldMappingRecords[endNode.endNode] = append(g.fieldMappingRecords[endNode.endNode], endNode.mappings...)
+					if checker != nil {
+						g.handlerOnEdges[startNode][endNode.endNode] = append(g.handlerOnEdges[startNode][endNode.endNode], *checker)
+					}
 				}
 			}
 		}
@@ -692,6 +646,24 @@ func (g *graph) updateToValidateMap() error {
 	}
 
 	return nil
+}
+
+func (g *graph) getNodeInputConverter(name string) handlerPair {
+	if name == START {
+		return g.graphInputConverter
+	} else if name == END {
+		return g.outputConverter
+	}
+	return g.nodes[name].inputConverter()
+}
+
+func (g *graph) getNodeInputFieldMappingConverter(name string) handlerPair {
+	if name == START {
+		return g.graphInputFieldMappingConverter
+	} else if name == END {
+		return g.outputFieldMappingConverter
+	}
+	return g.nodes[name].inputFieldMappingConverter()
 }
 
 func (g *graph) getNodeInputType(name string) reflect.Type {
@@ -720,24 +692,43 @@ func (g *graph) outputType() reflect.Type {
 	return g.expectedOutputType
 }
 
+func (g *graph) inputConverter() handlerPair {
+	return g.graphInputConverter
+}
+
+func (g *graph) inputFieldMappingConverter() handlerPair {
+	return g.graphInputFieldMappingConverter
+}
+
 func (g *graph) compile(ctx context.Context, opt *graphCompileOptions) (*composableRunnable, error) {
 	if g.buildError != nil {
 		return nil, g.buildError
 	}
 
+	// get run type
 	runType := runTypePregel
 	cb := pregelChannelBuilder
-	if opt != nil {
-		if opt.nodeTriggerMode != "" {
-			if isChain(g.cmp) {
-				return nil, errors.New("chain doesn't support node trigger mode option")
-			}
-
-			if opt.nodeTriggerMode == AllPredecessor {
-				runType = runTypeDAG
-				cb = dagChannelBuilder
-			}
+	if isChain(g.cmp) || isWorkflow(g.cmp) {
+		if opt != nil && opt.nodeTriggerMode != "" {
+			return nil, errors.New("chain doesn't support node trigger mode option")
 		}
+	}
+	if (opt != nil && opt.nodeTriggerMode == AllPredecessor) || isWorkflow(g.cmp) {
+		runType = runTypeDAG
+		cb = dagChannelBuilder
+	}
+
+	// get eager type
+	eager := false
+	if isWorkflow(g.cmp) {
+		eager = true
+	}
+	if !eager && opt != nil && opt.getStateEnabled {
+		return nil, fmt.Errorf("shouldn't set WithGetStateEnable outside of the Workflow")
+	}
+	forbidGetState := true
+	if !eager || (opt != nil && opt.getStateEnabled) {
+		forbidGetState = false
 	}
 
 	if len(g.startNodes) == 0 {
@@ -757,6 +748,20 @@ func (g *graph) compile(ctx context.Context, opt *graphCompileOptions) (*composa
 	// dag doesn't support branch
 	if runType == runTypeDAG && len(g.branches) > 0 {
 		return nil, fmt.Errorf("dag doesn't support branch for now")
+	}
+
+	for key := range g.fieldMappingRecords {
+		// not allowed to map multiple fields to the same field
+		toMap := make(map[string]bool)
+		for _, mapping := range g.fieldMappingRecords[key] {
+			if _, ok := toMap[mapping.to]; ok {
+				return nil, fmt.Errorf("duplicate mapping target field: %s of node[%s]", mapping.to, key)
+			}
+			toMap[mapping.to] = true
+		}
+
+		// add map to input converter
+		g.handlerPreNode[key] = append(g.handlerPreNode[key], g.getNodeInputFieldMappingConverter(key))
 	}
 
 	key2SubGraphs := g.beforeChildGraphsCompile(opt)
@@ -822,31 +827,26 @@ func (g *graph) compile(ctx context.Context, opt *graphCompileOptions) (*composa
 		chanSubscribeTo: chanSubscribeTo,
 		inputChannels:   inputChannels,
 
+		eager: eager,
+
 		chanBuilder: cb,
 
-		inputType:                         g.inputType(),
-		outputType:                        g.outputType(),
-		inputStreamFilter:                 g.inputStreamFilter,
-		inputValueChecker:                 g.inputValueChecker,
-		inputStreamConverter:              g.inputStreamConverter,
-		inputFieldMappingConverter:        g.inputFieldMappingConverter,
-		inputStreamFieldMappingConverter:  g.inputStreamFieldMappingConverter,
-		outputValueChecker:                g.outputValueChecker,
-		outputStreamConverter:             g.outputStreamConverter,
-		outputFieldMappingConverter:       g.outputFieldMappingConverter,
-		outputStreamFieldMappingConverter: g.outputStreamFieldMappingConverter,
+		inputType:                  g.inputType(),
+		outputType:                 g.outputType(),
+		inputStreamFilter:          g.inputStreamFilter,
+		inputConverter:             g.graphInputConverter,
+		inputFieldMappingConverter: g.graphInputFieldMappingConverter,
 
-		runtimeCheckEdges:    g.runtimeCheckEdges,
-		runtimeCheckBranches: g.runtimeCheckBranches,
-
-		fieldMappingsOnEdge: g.fieldMappings,
+		preBranchHandlerManager: &preBranchHandlerManager{h: g.handlerPreBranch},
+		preNodeHandlerManager:   &preNodeHandlerManager{h: g.handlerPreNode},
+		edgeHandlerManager:      &edgeHandlerManager{h: g.handlerOnEdges},
 	}
 
 	if g.stateGenerator != nil {
 		r.runCtx = func(ctx context.Context) context.Context {
 			return context.WithValue(ctx, stateKey{}, &internalState{
-				state: g.stateGenerator(ctx),
-				eager: false,
+				state:     g.stateGenerator(ctx),
+				forbidden: forbidGetState,
 			})
 		}
 	}
