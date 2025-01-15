@@ -280,9 +280,9 @@ The Eino framework consists of several parts:
 
 ## Detailed Documentation
 
-For learning and using Eino, we provide a comprehensive Eino User Manual to help you quickly understand the concepts in Eino and master the skills of developing AI applications based on Eino. Start exploring through the [Eino User Manual](https://www.cloudwego.io/docs/eino/) now!
+For learning and using Eino, we provide a comprehensive Eino User Manual to help you quickly understand the concepts in Eino and master the skills of developing AI applications based on Eino. Start exploring through the [Eino User Manual](https://www.cloudwego.io/zh/docs/eino/) now!
 
-For a quick introduction to building AI applications with Eino, we recommend starting with [Eino: Quick Start](https://www.cloudwego.io/docs/eino/quick_start/)
+For a quick introduction to building AI applications with Eino, we recommend starting with [Eino: Quick Start](https://www.cloudwego.io/zh/docs/eino/quick_start/)
 
 ## Dependencies
 - Go 1.18 and above.
