@@ -27,8 +27,22 @@ import (
 	"github.com/cloudwego/eino/utils/safe"
 )
 
-// ErrNoValue is the error returned when the value is not found.
-// used in convert function when has WithInputKey option.
+// ErrNoValue is used during StreamReaderWithConvert to skip a streamItem, excluding it from the converted stream.
+// e.g.
+//
+// outStream = schema.StreamReaderWithConvert(s,
+//
+//	func(src string) (string, error) {
+//		if len(src) == 0 {
+//			return nil, schema.ErrNoValue
+//		}
+//
+//		return src.Message, nil
+//	})
+//
+// outStream will filter out the empty string.
+//
+// DO NOT use it under other circumstances.
 var ErrNoValue = errors.New("no value")
 
 // Pipe creates a new stream with the given capacity that represented with StreamWriter and StreamReader.
