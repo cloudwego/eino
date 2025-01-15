@@ -43,6 +43,9 @@ type streamMapFilter func(key string, isr streamReader) (streamReader, bool)
 type streamConverter func(isr streamReader) streamReader
 type valueChecker func(value any) error
 
+type fieldMappingConverter func(any) (any, error)
+type streamFieldMappingConverter func(streamReader) (streamReader, error)
+
 // composableRunnable the wrapper for all executable object directly provided by the user.
 // one instance corresponds to one instance of the executable object.
 // all information comes from executable object without any other dimensions of information.
@@ -51,10 +54,14 @@ type composableRunnable struct {
 	i invoke
 	t transform
 
-	// used for passing generic type, is empty in passthrough
-	inputStreamFilter    streamMapFilter
-	inputStreamConverter streamConverter
+	// when set input key, use this method to convert input from map[string]any to T
+	inputStreamFilter streamMapFilter
+	// when predecessor's output is assignableTypeMay to current node's input, validate and convert(if needed) types using the following two methods
 	inputValueChecker    valueChecker
+	inputStreamConverter streamConverter
+	// when current node enable field mapping, convert map input to expected struct using the following two methods
+	inputFieldMappingConverter       fieldMappingConverter
+	inputStreamFieldMappingConverter streamFieldMappingConverter
 
 	inputType  reflect.Type
 	outputType reflect.Type
@@ -157,12 +164,14 @@ func (rp *runnablePacker[I, O, TOption]) toComposableRunnable() *composableRunna
 	outputType := generic.TypeOf[O]()
 	optionType := generic.TypeOf[TOption]()
 	c := &composableRunnable{
-		inputStreamFilter:    defaultStreamMapFilter[I],
-		inputStreamConverter: defaultStreamConverter[I],
-		inputValueChecker:    defaultValueChecker[I],
-		inputType:            inputType,
-		outputType:           outputType,
-		optionType:           optionType,
+		inputStreamFilter:                defaultStreamMapFilter[I],
+		inputStreamConverter:             defaultStreamConverter[I],
+		inputValueChecker:                defaultValueChecker[I],
+		inputFieldMappingConverter:       buildFieldMappingConverter[I](),
+		inputStreamFieldMappingConverter: buildStreamFieldMappingConverter[I](),
+		inputType:                        inputType,
+		outputType:                       outputType,
+		optionType:                       optionType,
 	}
 
 	i := func(ctx context.Context, input any, opts ...any) (output any, err error) {

@@ -60,13 +60,11 @@ func (ch *pregelChannel) get(_ context.Context) (any, error) {
 	if ch.value == nil {
 		return nil, fmt.Errorf("pregel channel not ready, value is nil")
 	}
-	return ch.value, nil
+	v := ch.value
+	ch.value = nil
+	return v, nil
 }
 
 func (ch *pregelChannel) ready(_ context.Context) bool {
 	return ch.value != nil
-}
-
-func (ch *pregelChannel) clear(_ context.Context) {
-	ch.value = nil
 }
