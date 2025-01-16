@@ -116,6 +116,7 @@ func (gn *graphNode) compileIfNeeded(ctx context.Context) (*composableRunnable, 
 
 	r.meta = gn.executorMeta
 	r.nodeInfo = gn.nodeInfo
+	r.preConverter = gn.cr.preConverter
 
 	if gn.nodeInfo.outputKey != "" {
 		r = outputKeyedComposableRunnable(gn.nodeInfo.outputKey, r)

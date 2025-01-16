@@ -186,8 +186,9 @@ func TestConcatError(t *testing.T) {
 
 	t.Run("not register type", func(t *testing.T) {
 		type y struct{}
-		_, err := concatItems([]y{{}, {}})
-		assert.NotNil(t, err)
+		out, err := concatItems([]y{{}, {}})
+		assert.NoError(t, err)
+		assert.Equal(t, y{}, out)
 	})
 
 	t.Run("map type not equal", func(t *testing.T) {

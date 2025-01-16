@@ -56,6 +56,7 @@ type chanCall struct {
 	writeToBranches []*GraphBranch
 
 	preProcessor, postProcessor *composableRunnable
+	preConverter                *composableRunnable
 }
 
 type channel interface {
@@ -87,8 +88,15 @@ type runner struct {
 	outputValueChecker    valueChecker
 	outputStreamConverter streamConverter
 
+	preConverter  *composableRunnable
+	postConverter *composableRunnable
+
 	runtimeCheckEdges    map[string]map[string]bool
 	runtimeCheckBranches map[string][]bool
+
+	edge2FieldMapFn       map[string]map[string]fieldMapFn
+	edge2StreamFieldMapFn map[string]map[string]streamFieldMapFn
+	node2Mappings         map[string][]*Mapping
 }
 
 func (r *runner) toComposableRunnable() *composableRunnable {
@@ -113,6 +121,7 @@ func (r *runner) toComposableRunnable() *composableRunnable {
 		inputStreamFilter:    r.inputStreamFilter,
 		inputValueChecker:    r.inputValueChecker,
 		inputStreamConverter: r.inputStreamConverter,
+		preConverter:         r.preConverter,
 		optionType:           nil, // if option type is nil, graph will transmit all options.
 
 		isPassthrough: false,
@@ -226,6 +235,16 @@ func (r *runner) run(ctx context.Context, isStream bool, input any, opts ...Opti
 		err     error
 	}
 
+	taskPreConverter := func(ctx context.Context, t *task) error {
+		if _, ok := r.node2Mappings[t.nodeKey]; !ok {
+			return nil
+		}
+
+		var e error
+		t.input, e = runWrapper(ctx, t.call.preConverter, t.input)
+		return e
+	}
+
 	taskPreProcessor := func(ctx context.Context, t *task) error {
 		if t.call.preProcessor == nil {
 			return nil
@@ -306,7 +325,7 @@ func (r *runner) run(ctx context.Context, isStream bool, input any, opts ...Opti
 					wChValues[next] = make(map[string]any)
 				}
 				// check type if needed
-				vs_[i], err = r.parserOrValidateTypeIfNeeded(t.nodeKey, next, isStream, vs_[i])
+				vs_[i], err = r.mapAndValidateEdge(t.nodeKey, next, isStream, vs_[i])
 				if err != nil {
 					return nil, err
 				}
@@ -321,6 +340,16 @@ func (r *runner) run(ctx context.Context, isStream bool, input any, opts ...Opti
 			if err != nil {
 				return nil, err
 			}
+
+			if _, ok := r.node2Mappings[END]; ok {
+				value, err := chs[END].get(ctx)
+				if err != nil {
+					return nil, err
+				}
+
+				return runWrapper(ctx, r.postConverter, value)
+			}
+
 			break
 		}
 
@@ -353,6 +382,13 @@ func (r *runner) run(ctx context.Context, isStream bool, input any, opts ...Opti
 
 		if len(nextTasks) == 0 {
 			return nil, errors.New("no tasks to execute")
+		}
+
+		for i := 0; i < len(nextTasks); i++ {
+			e := taskPreConverter(ctx, nextTasks[i])
+			if e != nil {
+				return nil, fmt.Errorf("pre-convert[%s] input error: %w", nextTasks[i].nodeKey, e)
+			}
 		}
 
 		for i := 0; i < len(nextTasks); i++ {
@@ -465,7 +501,16 @@ func (r *runner) calculateNext(ctx context.Context, curNodeKey string, startChan
 	return ret, nil
 }
 
-func (r *runner) parserOrValidateTypeIfNeeded(cur, next string, isStream bool, value any) (any, error) {
+func (r *runner) mapAndValidateEdge(cur, next string, isStream bool, value any) (any, error) {
+	mapped, done, err := r.doFieldMap(cur, next, isStream, value)
+	if err != nil {
+		return nil, err
+	}
+
+	if done {
+		return mapped, nil
+	}
+
 	if _, ok := r.runtimeCheckEdges[cur]; !ok {
 		return value, nil
 	}
@@ -489,9 +534,40 @@ func (r *runner) parserOrValidateTypeIfNeeded(cur, next string, isStream bool, v
 		value = r.chanSubscribeTo[next].action.inputStreamConverter(value.(streamReader))
 		return value, nil
 	}
-	err := r.chanSubscribeTo[next].action.inputValueChecker(value)
+	err = r.chanSubscribeTo[next].action.inputValueChecker(value)
 	if err != nil {
 		return nil, fmt.Errorf("edge[%s]-[%s] runtime value check fail: %w", cur, next, err)
 	}
 	return value, nil
+}
+
+func (r *runner) doFieldMap(cur, next string, isStream bool, value any) (any, bool, error) {
+	if isStream {
+		if _, ok := r.edge2StreamFieldMapFn[cur]; !ok {
+			return value, false, nil
+		}
+
+		f, ok := r.edge2StreamFieldMapFn[cur][next]
+		if !ok {
+			return value, false, nil
+		}
+
+		return f(value.(streamReader)), true, nil
+	}
+
+	if _, ok := r.edge2FieldMapFn[cur]; !ok {
+		return value, false, nil
+	}
+
+	f, ok := r.edge2FieldMapFn[cur][next]
+	if !ok {
+		return value, false, nil
+	}
+
+	mapped, err := f(value)
+	if err != nil {
+		return nil, false, err
+	}
+
+	return mapped, true, nil
 }

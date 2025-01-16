@@ -80,6 +80,8 @@ func NewGraph[I, O any](opts ...NewGraphOption) *Graph[I, O] {
 			ComponentOfGraph,
 			options.withState,
 			options.withState != nil,
+			buildConverter[I](),
+			buildConverter[O](),
 		),
 	}
 

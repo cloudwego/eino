@@ -56,6 +56,8 @@ type composableRunnable struct {
 	inputStreamConverter streamConverter
 	inputValueChecker    valueChecker
 
+	preConverter *composableRunnable
+
 	inputType  reflect.Type
 	outputType reflect.Type
 	optionType reflect.Type
@@ -160,6 +162,7 @@ func (rp *runnablePacker[I, O, TOption]) toComposableRunnable() *composableRunna
 		inputStreamFilter:    defaultStreamMapFilter[I],
 		inputStreamConverter: defaultStreamConverter[I],
 		inputValueChecker:    defaultValueChecker[I],
+		preConverter:         buildConverter[I](),
 		inputType:            inputType,
 		outputType:           outputType,
 		optionType:           optionType,
@@ -201,6 +204,50 @@ func (rp *runnablePacker[I, O, TOption]) toComposableRunnable() *composableRunna
 	c.t = t
 
 	return c
+}
+
+func buildConverter[I any]() *composableRunnable {
+	inputType := reflect.TypeOf(map[Mapping]any{})
+	outputType := generic.TypeOf[I]()
+	i := func(ctx context.Context, input any, opts ...any) (output any, err error) {
+		in, ok := input.(map[Mapping]any)
+		if !ok {
+			panic(newUnexpectedInputTypeErr(inputType, reflect.TypeOf(input)))
+		}
+
+		mustSucceed := opts[0].(bool)
+
+		return mappingAssign[I](in, mustSucceed)
+	}
+
+	t := func(ctx context.Context, input streamReader, opts ...any) (output streamReader, err error) {
+		return mappingStreamAssign[I](input, opts[0].(bool)), nil
+	}
+
+	return &composableRunnable{
+		i:          i,
+		t:          t,
+		inputType:  inputType,
+		outputType: outputType,
+	}
+}
+
+func converterWithMustSucceed(r *composableRunnable, mustSucceed bool) *composableRunnable {
+	if r == nil {
+		return r
+	}
+
+	wrapper := *r
+	i := r.i
+	wrapper.i = func(ctx context.Context, input any, opts ...any) (output any, err error) {
+		return i(ctx, input, mustSucceed)
+	}
+	t := r.t
+	wrapper.t = func(ctx context.Context, input streamReader, opts ...any) (output streamReader, err error) {
+		return t(ctx, input, mustSucceed)
+	}
+
+	return &wrapper
 }
 
 // Invoke works like `ping => pong`.
@@ -545,6 +592,7 @@ func inputKeyedComposableRunnable(key string, r *composableRunnable) *composable
 	wrapper := *r
 	wrapper.inputValueChecker = defaultValueChecker[map[string]any]
 	wrapper.inputStreamConverter = defaultStreamConverter[map[string]any]
+	wrapper.preConverter = buildConverter[map[string]any]()
 	i := r.i
 	wrapper.i = func(ctx context.Context, input any, opts ...any) (output any, err error) {
 		v, ok := input.(map[string]any)[key]

@@ -32,6 +32,8 @@ type GraphNodeInfo struct {
 	Name                  string
 	InputKey, OutputKey   string
 	GraphInfo             *GraphInfo
+
+	Mappings []*Mapping // for workflow input mapping
 }
 
 // GraphInfo the info which end users pass in when they are compiling a graph.
