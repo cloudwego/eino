@@ -195,7 +195,8 @@ func TestHostMultiAgent(t *testing.T) {
 
 	t.Run("stream hand off to chat model", func(t *testing.T) {
 		handOffMsg1 := &schema.Message{
-			Role: schema.Assistant,
+			Role:    schema.Assistant,
+			Content: "need to call function",
 		}
 
 		handOffMsg2 := &schema.Message{
@@ -255,6 +256,41 @@ func TestHostMultiAgent(t *testing.T) {
 			sw1.Send(specialistMsg2, nil)
 			sw1.Close()
 		}()
+
+		streamToolCallChecker := func(ctx context.Context, modelOutput *schema.StreamReader[*schema.Message]) (bool, error) {
+			defer modelOutput.Close()
+
+			for {
+				msg, err := modelOutput.Recv()
+				if err != nil {
+					if err == io.EOF {
+						return false, nil
+					}
+
+					return false, err
+				}
+
+				if len(msg.ToolCalls) == 0 {
+					continue
+				}
+
+				if len(msg.ToolCalls) > 0 {
+					return true, nil
+				}
+			}
+		}
+
+		hostMA, err = NewMultiAgent(ctx, &MultiAgentConfig{
+			Host: Host{
+				ChatModel: mockHostLLM,
+			},
+			Specialists: []*Specialist{
+				specialist1,
+				specialist2,
+			},
+			StreamToolCallChecker: streamToolCallChecker,
+		})
+		assert.NoError(t, err)
 
 		mockHostLLM.EXPECT().Stream(gomock.Any(), gomock.Any()).Return(sr, nil).Times(1)
 		mockSpecialistLLM1.EXPECT().Stream(gomock.Any(), gomock.Any()).Return(sr1, nil).Times(1)
