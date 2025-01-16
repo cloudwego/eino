@@ -62,10 +62,24 @@ type MultiAgentConfig struct {
 	Host        Host
 	Specialists []*Specialist
 
-	Name string // the name of the host multi agent
+	Name string // the name of the host multi-agent
+
+	// StreamOutputHandler is a function to determine whether the model's streaming output contains tool calls.
+	// Different models have different ways of outputting tool calls in streaming mode:
+	// - Some models (like OpenAI) output tool calls directly
+	// - Others (like Claude) output text first, then tool calls
+	// This handler allows custom logic to check for tool calls in the stream.
+	// It should return:
+	// - true if the output contains tool calls and agent should continue processing
+	// - false if no tool calls and agent should stop
+	// Note: This field only needs to be configured when using streaming mode
+	// Note: The handler MUST close the modelOutput stream before returning
+	// Optional. By default, it checks if the first chunk contains tool calls.
+	// Note: The default implementation does not work well with Claude, which typically outputs tool calls after text content.
+	StreamToolCallChecker func(ctx context.Context, modelOutput *schema.StreamReader[*schema.Message]) (bool, error)
 }
 
-func (conf *MultiAgentConfig) validate() error {
+func (conf *MultiAgentConfig) validateAndFillDefault() error {
 	if conf == nil {
 		return errors.New("host multi agent config is nil")
 	}
@@ -94,6 +108,10 @@ func (conf *MultiAgentConfig) validate() error {
 
 	if len(conf.Name) == 0 {
 		conf.Name = "host multi agent"
+	}
+
+	if conf.StreamToolCallChecker == nil {
+		conf.StreamToolCallChecker = firstChunkStreamToolCallChecker
 	}
 
 	return nil
@@ -138,4 +156,19 @@ type Specialist struct {
 
 	Invokable  compose.Invoke[[]*schema.Message, *schema.Message, agent.AgentOption]
 	Streamable compose.Stream[[]*schema.Message, *schema.Message, agent.AgentOption]
+}
+
+func firstChunkStreamToolCallChecker(_ context.Context, sr *schema.StreamReader[*schema.Message]) (bool, error) {
+	defer sr.Close()
+
+	msg, err := sr.Recv()
+	if err != nil {
+		return false, err
+	}
+
+	if len(msg.ToolCalls) == 0 {
+		return false, nil
+	}
+
+	return true, nil
 }

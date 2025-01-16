@@ -19,7 +19,6 @@ package host
 import (
 	"context"
 	"fmt"
-	"io"
 
 	"github.com/cloudwego/eino/compose"
 	"github.com/cloudwego/eino/schema"
@@ -35,8 +34,12 @@ type state struct {
 }
 
 // NewMultiAgent creates a new host multi-agent system.
+//
+// IMPORTANT!! For models that don't output tool calls in the first streaming chunk (e.g. Claude)
+// the default StreamToolCallChecker may not work properly since it only checks the first chunk for tool calls.
+// In such cases, you need to implement a custom StreamToolCallChecker that can properly detect tool calls.
 func NewMultiAgent(ctx context.Context, config *MultiAgentConfig) (*MultiAgent, error) {
-	if err := config.validate(); err != nil {
+	if err := config.validateAndFillDefault(); err != nil {
 		return nil, err
 	}
 
@@ -75,7 +78,7 @@ func NewMultiAgent(ctx context.Context, config *MultiAgentConfig) (*MultiAgent, 
 		return nil, err
 	}
 
-	if err := addDirectAnswerBranch(convertorName, g); err != nil {
+	if err := addDirectAnswerBranch(convertorName, g, config); err != nil {
 		return nil, err
 	}
 
@@ -146,45 +149,16 @@ func addHostAgent(config *MultiAgentConfig, agentTools []*schema.ToolInfo, g *co
 	return g.AddEdge(compose.START, hostName)
 }
 
-func addDirectAnswerBranch(convertorName string, g *compose.Graph[[]*schema.Message, *schema.Message]) error {
+func addDirectAnswerBranch(convertorName string, g *compose.Graph[[]*schema.Message, *schema.Message], config *MultiAgentConfig) error {
 	// handles the case where the host agent returns a direct answer, instead of handling off to any specialist
 	branch := compose.NewStreamGraphBranch(func(ctx context.Context, sr *schema.StreamReader[*schema.Message]) (endNode string, err error) {
-		defer sr.Close()
-
-		for {
-			msg, e := sr.Recv()
-			if e == io.EOF {
-				break
-			}
-
-			if e != nil {
-				return "", e
-			}
-
-			if msg.Role != schema.Assistant {
-				return "", fmt.Errorf("host agent should output assistant message, actual type= %s", msg.Role)
-			}
-
-			if len(msg.ToolCalls) == 0 {
-				continue
-			}
-
-			if len(msg.ToolCalls) > 1 {
-				handOffs := make([]string, 0, len(msg.ToolCalls))
-				for _, t := range msg.ToolCalls {
-					handOffs = append(handOffs, t.Function.Name)
-				}
-				return "", fmt.Errorf("host agent returns multiple handoff candidates: %v", handOffs)
-			}
-
-			function := msg.ToolCalls[0].Function
-			if len(function.Name) == 0 {
-				continue
-			}
-
+		isToolCall, err := config.StreamToolCallChecker(ctx, sr)
+		if err != nil {
+			return "", err
+		}
+		if isToolCall {
 			return convertorName, nil
 		}
-
 		return compose.END, nil
 	}, map[string]bool{convertorName: true, compose.END: true})
 
