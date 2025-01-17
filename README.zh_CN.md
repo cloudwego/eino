@@ -42,13 +42,12 @@ message, _ := model.Generate(ctx, []*Message{
 - 编排解决了处理大语言模型流式响应这一难题。
 - 编排为你处理类型安全、并发管理、切面注入以及选项赋值等问题。
 
-Eino 提供了三组用于编排的 API：
+Eino 提供了两组用于编排的 API：
 
-| API      | 特性和使用场景                                                         |
-| -------- |-----------------------------------------------------------------|
-| Chain    | 简单的链式有向图，只能向前推进。         |
-| Graph    | 循环或非循环有向图。功能强大且灵活。        |
-| Workflow | 非循环图，支持在结构体字段级别进行数据映射。 |
+| API      | 特性和使用场景                     |
+| -------- |-----------------------------|
+| Chain    | 简单的链式有向图，只能向前推进。            |
+| Graph    | 循环或非循环有向图。功能强大且灵活。          |
 
 我们来创建一个简单的 chain: 一个模版（ChatTemplate）接一个大模型（ChatModel）。
 
@@ -77,114 +76,14 @@ runnable, _ := graph.Compile(ctx)
 runnable.Stream(ctx, []*Message{UserMessage("help me plan my weekend")})
 ```
 
-现在，我们来创建一个 Workflow，它能在字段级别灵活映射输入与输出：
-
-![](.github/static/img/eino/simple_workflow.png)
-
-```Go
-wf := NewWorkflow[[]*Message, *Message]()
-wf.AddChatModelNode("model", model).AddInput(NewMapping(START))
-wf.AddLambdaNode("l1", lambda1).AddInput(NewMapping("model").From("Content").To("Input"))
-wf.AddLambdaNode("l2", lambda2).AddInput(NewMapping("model").From("Role").To("Role"))
-wf.AddLambdaNode("l3", lambda3).AddInput(
-    NewMapping("l1").From("Output").To("Query"),
-    NewMapping("l2").From("Output").To("MetaData"),
-)
-wf.AddEnd([]*Mapping{NewMapping("node_l3")}
-runnable, _ := wf.Compile(ctx)
-runnable.Invoke(ctx, []*Message{UserMessage("kick start this workflow!")})
-```
-
 现在，咱们来创建一个 “ReAct” 智能体：一个 ChatModel 绑定了一些 Tool。它接收输入的消息，自主判断是调用 Tool 还是输出最终结果。Tool 的执行结果会再次成为聊天模型的输入消息，并作为下一轮自主判断的上下文。
 
-我们用几十行代码就能实现这个：
-```Go
-// build a ReAct agent that accepts []*Message as input and outputs *Message as output
-func (r *Agent) build(ctx context.Context, config *AgentConfig) (
-    _ Runnable[[]*Message, *Message], err error) {
-    var (
-       // the LLM responsible for reasoning and generating output within the ReAct Agent
-       chatModel = config.Model
-       // the actual executor of tools
-       toolsNode *ToolsNode
-       // the meta info of tools
-       toolInfos []*schema.ToolInfo
-       // the graph consist of the ChatModel and ToolsNode
-       graph *Graph[[]*Message, *Message]
-       // read and write contextual messages before ChatModel execution
-       modelPreHandle StatePreHandler[[]*Message, *state]
-       // after ChatModel execution, routes to END if output does not contain tool call info, otherwise routes to ToolsNode
-       modelPostBranch *GraphBranch
-    )
+![](.github/static/img/eino/react.png)
 
-    if toolInfos, err = genToolInfos(ctx, config); err != nil {
-       return nil, err
-    }
+我们在 Eino 的 `flow` 包中提供了开箱即用的 ReAct 智能体的完整实现。代码参见： [flow/agent/react](https://github.com/cloudwego/eino/blob/main/flow/agent/react/react.go)
 
-    if err = chatModel.BindTools(toolInfos); err != nil {
-       return nil, err
-    }
+我们的 ReAct 智能体实现完全基于 Eino 的编排能力。通过使用 Eino 编排，我们可以自动获得如下能力:
 
-    if toolsNode, err = NewToolNode(ctx, &config.ToolsConfig); err != nil {
-       return nil, err
-    }
-
-    // creates a graph with state that stores messages across multiple rounds of ReAct loop
-    graph = NewGraph[[]*Message, *Message](
-       WithGenLocalState(func(ctx context.Context) *state {
-          return &state{Messages: make([]*Message, 0, config.MaxStep+1)}
-       }))
-
-    modelPreHandle = func(ctx context.Context, input []*Message, state *state) (
-       []*Message, error) {
-       state.Messages = append(state.Messages, input...)
-
-       modifiedInput := make([]*Message, 0, len(state.Messages))
-       copy(modifiedInput, state.Messages)
-       return config.MessageModifier(ctx, modifiedInput), nil // add system prompt
-    }
-
-    err = graph.AddChatModelNode(nodeKeyModel, chatModel, WithStatePreHandler(modelPreHandle))
-    if err != nil {
-       return nil, err
-    }
-
-    if err = graph.AddEdge(START, nodeKeyModel); err != nil { // chatModel connects to START because it accepts initial input
-       return nil, err
-    }
-
-    if err = graph.AddToolsNode(nodeKeyTools, toolsNode); err != nil {
-       return nil, err
-    }
-
-    // chatModel's output can be a stream with multiple chunks of messages
-    // we use StreamGraphBranch here to make the routing decision based only on the first chunk 
-    modelPostBranch = NewStreamGraphBranch(
-       func(_ context.Context, sr *schema.StreamReader[*Message]) (endNode string, err error) {
-          defer sr.Close()
-
-          if msg, err := sr.Recv(); err != nil {
-             return "", err
-          } else if len(msg.ToolCalls) == 0 {
-             return END, nil
-          }
-
-          return nodeKeyTools, nil
-       }, map[string]bool{nodeKeyTools: true, END: true})
-    if err = graph.AddBranch(nodeKeyModel, modelPostBranch); err != nil {
-       return nil, err
-    }
-
-    if err = graph.AddEdge(nodeKeyTools, nodeKeyModel); err != nil { // toolsNode's output are fed back to chatModel
-       return nil, err
-    }
-
-    // compile Graph to Runnable：do type check、inject callback aspects、automatic stream boxing and unboxing、generate graph runner, etc.
-    return graph.Compile(ctx, WithMaxRunSteps(config.MaxStep))
-}
-```
-
-Eino会在上述代码背后自动完成一些重要工作：
 - **类型检查**：在编译时确保两个节点的输入和输出类型匹配。
 - **流处理**：如有需要，在将消息流传递给 ChatModel 和 ToolsNode 节点之前进行拼接，以及将该流复制到callback handler 中。
 - **并发管理**：由于 StatePreHandler是线程安全的，共享的 state 可以被安全地读写。
@@ -225,11 +124,11 @@ compiledGraph.Invoke(ctx, input, WithCallbacks(handler).DesignateNode("node_1"))
 ## 丰富的组件
 
 - 将常见的构建模块封装为**组件抽象**，每个组件抽象都有多个可开箱即用的**组件实现**。
-    - 诸如聊天模型（ChatModel）、工具（Tool）、提示模板（PromptTemplate）、检索器（Retriever）、文档加载器（Document Loader）、Lambda 等组件抽象。
+    - 诸如 ChatModel、Tool、ChatTemplate、Retriever、Document Loader、Lambda 等组件抽象。
     - 每种组件类型都有其自身的接口：定义了输入和输出类型、定义了选项类型，以及合理的流处理范式。
     - 实现细节是透明的。在编排组件时，你只需关注抽象层面。
 - 实现可以嵌套，并包含复杂的业务逻辑。
-    - ReAct 智能体（React Agent）、多查询检索器（MultiQueryRetriever）、主机多智能体（Host MultiAgent）等。它们由多个组件和复杂的业务逻辑构成。
+    - ReAct Agent、MultiQueryRetriever、Host MultiAgent 等。它们由多个组件和复杂的业务逻辑构成。
     - 从外部看，它们的实现细节依然透明。例如在任何接受 Retriever 的地方，都可以使用 MultiQueryRetriever。
 
 ## 强大的编排 (Graph/Chain/Workflow)
@@ -242,12 +141,14 @@ compiledGraph.Invoke(ctx, input, WithCallbacks(handler).DesignateNode("node_1"))
 
 ## 完整的流式处理能力
 
-- 流式处理（Stream Processing）很重要，因为 ChatModel 在生成消息时会实时输出消息块。
+- 流式处理（Stream Processing）很重要，因为 ChatModel 在生成消息时会实时输出消息块。在编排场景下会尤为重要，因为更多的组件需要处理流式数据。
 - 对于只接受非流式输入的下游节点（如 ToolsNode），Eino 会自动将流 **拼接（Concatenate）** 起来。
-- 在 Graph 执行过程中，当需要流时，Eino 会自动将非流式**转换**为流式。
+- 在图执行过程中，当需要流时，Eino 会自动将非流式**转换**为流式。
 - 当多个流汇聚到一个下游节点时，Eino 会自动 **合并（Merge）** 这些流。
 - 当流分散到不同的下游节点或传递给回调处理器时，Eino 会自动 **复制（Copy）** 这些流。
-- 最重要的是，当将一个组件添加到图中时，Eino 会自动补充缺失的流处理能力：你可以提供一个仅可 Invoke 的函数，Eino 会创建其他三种范式。
+- 如 **分支（Branch）** 、或 **状态处理器（StateHandler）** 等编排元素，也能够感知和处理流。
+- 借助上述流式处理能力，组件本身的流式处理范式变的对用户透明。
+- 经过编译的 Graph 可以用 4 种不同的流式范式来运行：
 
 | 流处理范式     | 解释                                            |
   |-----------|-----------------------------------------------|
@@ -255,7 +156,6 @@ compiledGraph.Invoke(ctx, input, WithCallbacks(handler).DesignateNode("node_1"))
 | Stream    | 接收非流类型 I ， 返回流类型 StreamReader[O]              |
 | Collect   | 接收流类型 StreamReader[I] ， 返回非流类型 O              |
 | Transform | 接收流类型 StreamReader[I] ， 返回流类型 StreamReader[O] |
-- 如 **分支（Branch）** 、或 **状态处理器（StateHandler）** 等编排元素，也能够感知和处理流。
 
 ## 易扩展的切面（Callbacks）
 
