@@ -32,9 +32,10 @@ Eino 提供的价值如下：
 直接使用组件：
 ```Go
 model, _ := openai.NewChatModel(ctx, config) // create an invokable LLM instance
+
 message, _ := model.Generate(ctx, []*Message{
     SystemMessage("you are a helpful assistant."),
-    UserMessage("what does the future AI App look like?")}
+    UserMessage("what does the future AI App look like?")})
 ```
 
 当然，你可以这样用，Eino 提供了许多开箱即用的有用组件。但通过使用编排功能，你能实现更多，原因有三：
@@ -150,8 +151,8 @@ compiledGraph.Invoke(ctx, input, WithCallbacks(handler).DesignateNode("node_1"))
 - 借助上述流式处理能力，组件本身的流式处理范式变的对用户透明。
 - 经过编译的 Graph 可以用 4 种不同的流式范式来运行：
 
-| 流处理范式     | 解释                                            |
-  |-----------|-----------------------------------------------|
+| 流处理范式     | 解释                                               |
+|-----------|-----------------------------------------------|
 | Invoke    | 接收非流类型 I ，返回非流类型 O                            |
 | Stream    | 接收非流类型 I ， 返回流类型 StreamReader[O]              |
 | Collect   | 接收流类型 StreamReader[I] ， 返回非流类型 O              |

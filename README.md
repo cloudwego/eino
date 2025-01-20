@@ -33,7 +33,7 @@ Use a component directly:
 model, _ := openai.NewChatModel(ctx, config) // create an invokable LLM instance
 message, _ := model.Generate(ctx, []*Message{
     SystemMessage("you are a helpful assistant."),
-    UserMessage("what does the future AI App look like?")}
+    UserMessage("what does the future AI App look like?")})
 ```
 
 Of course, you can do that, Eino provides lots of useful components to use out of the box. But you can do more by using orchestration, for three reasons:
@@ -57,6 +57,7 @@ chain, _ := NewChain[map[string]any, *Message]().
            AppendChatTemplate(prompt).
            AppendChatModel(model).
            Compile(ctx)
+
 chain.Invoke(ctx, map[string]any{"query": "what's your name?"})
 ```
 
@@ -149,12 +150,12 @@ compiledGraph.Invoke(ctx, input, WithCallbacks(handler).DesignateNode("node_1"))
 - With these streaming processing abilities, the streaming paradigms of components themselves become transparent to the user. 
 - A compiled Graph can run with 4 different streaming paradigms:
 
-  | Streaming Paradigm | Explanation                                                                 |
-      | ------------------ | --------------------------------------------------------------------------- |
-  | Invoke             | Accepts non-stream type I and returns non-stream type O                     |
-  | Stream             | Accepts non-stream type I and returns stream type StreamReader[O]           |
-  | Collect            | Accepts stream type StreamReader[I] and returns non-stream type O           |
-  | Transform          | Accepts stream type StreamReader[I] and returns stream type StreamReader[O] |
+| Streaming Paradigm | Explanation                                                                 |
+| ------------------ | --------------------------------------------------------------------------- |
+| Invoke             | Accepts non-stream type I and returns non-stream type O                     |
+| Stream             | Accepts non-stream type I and returns stream type StreamReader[O]           |
+| Collect            | Accepts stream type StreamReader[I] and returns non-stream type O           |
+| Transform          | Accepts stream type StreamReader[I] and returns stream type StreamReader[O] |
 
 ## Highly Extensible Aspects (Callbacks)
 
