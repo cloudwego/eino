@@ -36,6 +36,23 @@ const (
 	Boolean DataType = "boolean"
 )
 
+// ToolChoice controls how the model calls tools (if any).
+type ToolChoice string
+
+const (
+	// ToolChoiceForbidden indicates that the model should not call any tools.
+	// Corresponds to "none" in OpenAI Chat Completion.
+	ToolChoiceForbidden ToolChoice = "forbidden"
+
+	// ToolChoiceAllowed indicates that the model can choose to generate a message or call one or more tools.
+	// Corresponds to "auto" in OpenAI Chat Completion.
+	ToolChoiceAllowed ToolChoice = "allowed"
+
+	// ToolChoiceForced indicates that the model must call one or more tools.
+	// Corresponds to "required" in OpenAI Chat Completion.
+	ToolChoiceForced ToolChoice = "forced"
+)
+
 // ToolInfo is the information of a tool.
 type ToolInfo struct {
 	// The unique name of the tool that clearly communicates its purpose.
