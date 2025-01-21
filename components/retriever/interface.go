@@ -26,11 +26,10 @@ import (
 
 // Retriever is the interface for retriever.
 // It is used to retrieve documents from a source.
-// there are `vectorstore` and `fornaxknowledge` can be used as retriever.
 //
 // e.g.
 //
-//		retriever, err := fornaxknowledge.NewRetriever(ctx, &RetrieverConfig{})
+//		retriever, err := redis.NewRetriever(ctx, &redis.RetrieverConfig{})
 //		if err != nil {...}
 //		docs, err := retriever.Retrieve(ctx, "query") // <= using directly
 //		docs, err := retriever.Retrieve(ctx, "query", retriever.WithTopK(3)) // <= using options
