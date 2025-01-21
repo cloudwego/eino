@@ -52,6 +52,7 @@ type CallbackInput struct {
 	// Tools is the tools to be used in the model.
 	Tools []*schema.ToolInfo
 	// ToolChoice is the tool choice, which controls the tool to be used in the model.
+	// Deprecated: ToolChoice is no longer supported and should not be set.
 	ToolChoice any // string / *schema.ToolInfo
 	// Config is the config for the model.
 	Config *Config
