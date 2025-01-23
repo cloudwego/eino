@@ -175,7 +175,7 @@ func AnyLambda[I, O, TOption any](i Invoke[I, O, TOption], s Stream[I, O, TOptio
 	c Collect[I, O, TOption], t Transform[I, O, TOption], opts ...LambdaOpt) (*Lambda, error) {
 
 	if i == nil && s == nil && c == nil && t == nil {
-		return nil, fmt.Errorf("needs to have at least one of four lambda types: invoke/stream/collect/tranform, got none")
+		return nil, fmt.Errorf("needs to have at least one of four lambda types: invoke/stream/collect/transform, got none")
 	}
 
 	return anyLambda(i, s, c, t, opts...), nil
