@@ -79,7 +79,7 @@ type MultiAgentConfig struct {
 	StreamToolCallChecker func(ctx context.Context, modelOutput *schema.StreamReader[*schema.Message]) (bool, error)
 }
 
-func (conf *MultiAgentConfig) validateAndFillDefault() error {
+func (conf *MultiAgentConfig) validate() error {
 	if conf == nil {
 		return errors.New("host multi agent config is nil")
 	}
@@ -92,10 +92,6 @@ func (conf *MultiAgentConfig) validateAndFillDefault() error {
 		return errors.New("host multi agent specialists are empty")
 	}
 
-	if len(conf.Host.SystemPrompt) == 0 {
-		conf.Host.SystemPrompt = defaultHostPrompt
-	}
-
 	for _, s := range conf.Specialists {
 		if s.ChatModel == nil && s.Invokable == nil && s.Streamable == nil {
 			return fmt.Errorf("specialist %s has no chat model or Invokable or Streamable", s.Name)
@@ -104,14 +100,6 @@ func (conf *MultiAgentConfig) validateAndFillDefault() error {
 		if err := s.AgentMeta.validate(); err != nil {
 			return err
 		}
-	}
-
-	if len(conf.Name) == 0 {
-		conf.Name = "host multi agent"
-	}
-
-	if conf.StreamToolCallChecker == nil {
-		conf.StreamToolCallChecker = firstChunkStreamToolCallChecker
 	}
 
 	return nil

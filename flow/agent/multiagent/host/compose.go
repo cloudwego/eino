@@ -20,6 +20,7 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/compose"
 	"github.com/cloudwego/eino/schema"
 )
@@ -39,8 +40,26 @@ type state struct {
 // the default StreamToolCallChecker may not work properly since it only checks the first chunk for tool calls.
 // In such cases, you need to implement a custom StreamToolCallChecker that can properly detect tool calls.
 func NewMultiAgent(ctx context.Context, config *MultiAgentConfig) (*MultiAgent, error) {
-	if err := config.validateAndFillDefault(); err != nil {
+	if err := config.validate(); err != nil {
 		return nil, err
+	}
+
+	var (
+		hostPrompt      = config.Host.SystemPrompt
+		name            = config.Name
+		toolCallChecker = config.StreamToolCallChecker
+	)
+
+	if len(hostPrompt) == 0 {
+		hostPrompt = defaultHostPrompt
+	}
+
+	if len(name) == 0 {
+		name = "host multi agent"
+	}
+
+	if toolCallChecker == nil {
+		toolCallChecker = firstChunkStreamToolCallChecker
 	}
 
 	g := compose.NewGraph[[]*schema.Message, *schema.Message](
@@ -69,7 +88,7 @@ func NewMultiAgent(ctx context.Context, config *MultiAgentConfig) (*MultiAgent, 
 		agentMap[specialist.Name] = true
 	}
 
-	if err := addHostAgent(config, agentTools, g); err != nil {
+	if err := addHostAgent(config.Host.ChatModel, hostPrompt, agentTools, g); err != nil {
 		return nil, err
 	}
 
@@ -78,7 +97,7 @@ func NewMultiAgent(ctx context.Context, config *MultiAgentConfig) (*MultiAgent, 
 		return nil, err
 	}
 
-	if err := addDirectAnswerBranch(convertorName, g, config); err != nil {
+	if err := addDirectAnswerBranch(convertorName, g, toolCallChecker); err != nil {
 		return nil, err
 	}
 
@@ -86,7 +105,7 @@ func NewMultiAgent(ctx context.Context, config *MultiAgentConfig) (*MultiAgent, 
 		return nil, err
 	}
 
-	r, err := g.Compile(ctx, compose.WithNodeTriggerMode(compose.AnyPredecessor), compose.WithGraphName(config.Name))
+	r, err := g.Compile(ctx, compose.WithNodeTriggerMode(compose.AnyPredecessor), compose.WithGraphName(name))
 	if err != nil {
 		return nil, err
 	}
@@ -127,32 +146,33 @@ func addSpecialistAgent(specialist *Specialist, g *compose.Graph[[]*schema.Messa
 	return g.AddEdge(specialist.Name, compose.END)
 }
 
-func addHostAgent(config *MultiAgentConfig, agentTools []*schema.ToolInfo, g *compose.Graph[[]*schema.Message, *schema.Message]) error {
-	if err := config.Host.ChatModel.BindTools(agentTools); err != nil {
+func addHostAgent(model model.ChatModel, prompt string, agentTools []*schema.ToolInfo, g *compose.Graph[[]*schema.Message, *schema.Message]) error {
+	if err := model.BindTools(agentTools); err != nil {
 		return err
 	}
 
 	preHandler := func(_ context.Context, input []*schema.Message, state *state) ([]*schema.Message, error) {
 		state.msgs = input
-		if len(config.Host.SystemPrompt) == 0 {
+		if len(prompt) == 0 {
 			return input, nil
 		}
 		return append([]*schema.Message{{
 			Role:    schema.System,
-			Content: config.Host.SystemPrompt,
+			Content: prompt,
 		}}, input...), nil
 	}
-	if err := g.AddChatModelNode(hostName, config.Host.ChatModel, compose.WithStatePreHandler(preHandler), compose.WithNodeName(hostName)); err != nil {
+	if err := g.AddChatModelNode(hostName, model, compose.WithStatePreHandler(preHandler), compose.WithNodeName(hostName)); err != nil {
 		return err
 	}
 
 	return g.AddEdge(compose.START, hostName)
 }
 
-func addDirectAnswerBranch(convertorName string, g *compose.Graph[[]*schema.Message, *schema.Message], config *MultiAgentConfig) error {
+func addDirectAnswerBranch(convertorName string, g *compose.Graph[[]*schema.Message, *schema.Message],
+	toolCallChecker func(ctx context.Context, modelOutput *schema.StreamReader[*schema.Message]) (bool, error)) error {
 	// handles the case where the host agent returns a direct answer, instead of handling off to any specialist
 	branch := compose.NewStreamGraphBranch(func(ctx context.Context, sr *schema.StreamReader[*schema.Message]) (endNode string, err error) {
-		isToolCall, err := config.StreamToolCallChecker(ctx, sr)
+		isToolCall, err := toolCallChecker(ctx, sr)
 		if err != nil {
 			return "", err
 		}
