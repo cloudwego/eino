@@ -61,19 +61,29 @@ chain, _ := NewChain[map[string]any, *Message]().
 chain.Invoke(ctx, map[string]any{"query": "what's your name?"})
 ```
 
-Now let's create a graph that uses a ChatModel to generate tool calls, then uses a ToolsNode to execute those tools, then feed the tool response back to ChatModel.
+Now let's create a graph that uses a ChatModel to generate answer or tool calls, then uses a ToolsNode to execute those tools if needed.
 
-![](.github/static/img/eino/simple_graph.png)
+![](.github/static/img/eino/tool_call_graph.png)
 
 ```Go
-graph := NewGraph[[]*Message, *Message]()
-graph.AddChatModelNode("node_model", model)
-graph.AddToolsNode("node_tools", toolsNode)
-graph.AddEdge(START, "node_model")
-graph.AddEdge("node_tools", "node_model")
-graph.AddBranch("node_model", branch)
-runnable, _ := graph.Compile(ctx)
-runnable.Stream(ctx, []*Message{UserMessage("help me plan my weekend")})
+graph := NewGraph[map[string]any, *schema.Message]()
+
+_ = graph.AddChatTemplateNode("node_template", chatTpl)
+_ = graph.AddChatModelNode("node_model", chatModel)
+_ = graph.AddToolsNode("node_tools", toolsNode)
+_ = graph.AddLambdaNode("node_converter", takeOne)
+
+_ = graph.AddEdge(START, "node_template")
+_ = graph.AddEdge("node_template", "node_model")
+_ = graph.AddBranch("node_model", branch)
+_ = graph.AddEdge("node_tools", "node_converter")
+_ = graph.AddEdge("node_converter", END)
+
+compiledGraph, err := graph.Compile(ctx)
+if err != nil {
+return err
+}
+out, err := r.Invoke(ctx, map[string]any{"query":"Beijing's weather this weekend"})
 ```
 
 Now let's create a 'ReAct' agent: A ChatModel binds to Tools. It receives input Messages and decides independently whether to call the Tool or output the final result. The execution result of the Tool will again become the input Message for the ChatModel and serve as the context for the next round of independent judgment.

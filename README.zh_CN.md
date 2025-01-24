@@ -62,19 +62,29 @@ chain, _ := NewChain[map[string]any, *Message]().
 chain.Invoke(ctx, map[string]any{"query": "what's your name?"})
 ```
 
-现在，我们来创建一个 Graph，先用一个 ChatModel 生成 Tool 调用指令，接着用一个 ToolsNode 执行这些Tool，然后将 Tool 的响应反馈给 ChatModel。
+现在，我们来创建一个 Graph，先用一个 ChatModel 生成回复或者 Tool 调用指令，如生成了 Tool 调用指令，就用一个 ToolsNode 执行这些 Tool。
 
-![](.github/static/img/eino/simple_graph.png)
+![](.github/static/img/eino/tool_call_graph.png)
 
 ```Go
-graph := NewGraph[[]*Message, *Message]()
-graph.AddChatModelNode("node_model", model)
-graph.AddToolsNode("node_tools", toolsNode)
-graph.AddEdge(START, "node_model")
-graph.AddEdge("node_tools", "node_model")
-graph.AddBranch("node_model", branch)
-runnable, _ := graph.Compile(ctx)
-runnable.Stream(ctx, []*Message{UserMessage("help me plan my weekend")})
+graph := NewGraph[map[string]any, *schema.Message]()
+
+_ = graph.AddChatTemplateNode("node_template", chatTpl)
+_ = graph.AddChatModelNode("node_model", chatModel)
+_ = graph.AddToolsNode("node_tools", toolsNode)
+_ = graph.AddLambdaNode("node_converter", takeOne)
+
+_ = graph.AddEdge(START, "node_template")
+_ = graph.AddEdge("node_template", "node_model")
+_ = graph.AddBranch("node_model", branch)
+_ = graph.AddEdge("node_tools", "node_converter")
+_ = graph.AddEdge("node_converter", END)
+
+compiledGraph, err := graph.Compile(ctx)
+if err != nil {
+return err
+}
+out, err := r.Invoke(ctx, map[string]any{"query":"Beijing's weather this weekend"})
 ```
 
 现在，咱们来创建一个 “ReAct” 智能体：一个 ChatModel 绑定了一些 Tool。它接收输入的消息，自主判断是调用 Tool 还是输出最终结果。Tool 的执行结果会再次成为聊天模型的输入消息，并作为下一轮自主判断的上下文。
