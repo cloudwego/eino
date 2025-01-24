@@ -184,7 +184,7 @@ The Eino framework consists of several parts:
 
 - [EinoExt](https://github.com/cloudwego/eino-ext): Component implementations, callback handlers implementations, component usage examples, and various tools such as evaluators, prompt optimizers.
 
-- [Eino Devops](https://github.com/cloudwego/eino-ext/devops): visualized developing, visualized debugging
+- [Eino Devops](https://github.com/cloudwego/eino-ext/tree/main/devops): visualized developing, visualized debugging
   etc.
 
 - [EinoExamples](https://github.com/cloudwego/eino-examples) is the repo containing example applications and best practices for Eino.
