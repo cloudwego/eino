@@ -21,13 +21,13 @@ import (
 	"fmt"
 
 	"github.com/cloudwego/eino/components/model"
-	. "github.com/cloudwego/eino/compose"
+	"github.com/cloudwego/eino/compose"
 	"github.com/cloudwego/eino/flow/agent"
 	"github.com/cloudwego/eino/schema"
 )
 
 type state struct {
-	Messages                 []*Message
+	Messages                 []*schema.Message
 	ReturnDirectlyToolCallID string
 }
 
@@ -37,14 +37,14 @@ const (
 )
 
 // MessageModifier modify the input messages before the model is called.
-type MessageModifier func(ctx context.Context, input []*Message) []*Message
+type MessageModifier func(ctx context.Context, input []*schema.Message) []*schema.Message
 
 // AgentConfig is the config for ReAct agent.
 type AgentConfig struct {
 	// Model is the chat model to be used for handling user messages.
 	Model model.ChatModel
 	// ToolsConfig is the config for tools node.
-	ToolsConfig ToolsNodeConfig
+	ToolsConfig compose.ToolsNodeConfig
 
 	// MessageModifier.
 	// modify the input messages before the model is called, it's useful when you want to add some system prompt or other messages.
@@ -82,12 +82,12 @@ type AgentConfig struct {
 //	}
 //	agent, err := NewAgent(ctx, config)
 //	if err != nil {return}
-//	msg, err := agent.Generate(ctx, []*Message{{Role: schema.User, Content: "how to build agent with eino"}})
+//	msg, err := agent.Generate(ctx, []*schema.Message{{Role: schema.User, Content: "how to build agent with eino"}})
 //	if err != nil {return}
 //	println(msg.Content)
 func NewPersonaModifier(persona string) MessageModifier {
-	return func(ctx context.Context, input []*Message) []*Message {
-		res := make([]*Message, 0, len(input)+1)
+	return func(ctx context.Context, input []*schema.Message) []*schema.Message {
+		res := make([]*schema.Message, 0, len(input)+1)
 
 		res = append(res, schema.SystemMessage(persona))
 		res = append(res, input...)
@@ -119,11 +119,11 @@ func firstChunkStreamToolCallChecker(_ context.Context, sr *schema.StreamReader[
 //
 //	agent, err := ReAct.NewAgent(ctx, &react.AgentConfig{})
 //	if err != nil {...}
-//	msg, err := agent.Generate(ctx, []*Message{{Role: schema.User, Content: "how to build agent with eino"}})
+//	msg, err := agent.Generate(ctx, []*schema.Message{{Role: schema.User, Content: "how to build agent with eino"}})
 //	if err != nil {...}
 //	println(msg.Content)
 type Agent struct {
-	runnable Runnable[[]*Message, *Message]
+	runnable compose.Runnable[[]*schema.Message, *schema.Message]
 }
 
 // NewAgent creates a ReAct agent that feeds tool response into next round of Chat Model generation.
@@ -134,14 +134,14 @@ type Agent struct {
 func NewAgent(ctx context.Context, config *AgentConfig) (_ *Agent, err error) {
 	var (
 		chatModel       = config.Model
-		toolsNode       *ToolsNode
+		toolsNode       *compose.ToolsNode
 		toolInfos       []*schema.ToolInfo
 		toolCallChecker = config.StreamToolCallChecker
 		messageModifier = config.MessageModifier
 	)
 
 	if messageModifier == nil {
-		messageModifier = func(ctx context.Context, input []*Message) []*Message {
+		messageModifier = func(ctx context.Context, input []*schema.Message) []*schema.Message {
 			return input
 		}
 	}
@@ -157,48 +157,48 @@ func NewAgent(ctx context.Context, config *AgentConfig) (_ *Agent, err error) {
 		return nil, err
 	}
 
-	if toolsNode, err = NewToolNode(ctx, &config.ToolsConfig); err != nil {
+	if toolsNode, err = compose.NewToolNode(ctx, &config.ToolsConfig); err != nil {
 		return nil, err
 	}
 
-	graph := NewGraph[[]*Message, *Message](WithGenLocalState(func(ctx context.Context) *state {
-		return &state{Messages: make([]*Message, 0, config.MaxStep+1)}
+	graph := compose.NewGraph[[]*schema.Message, *schema.Message](compose.WithGenLocalState(func(ctx context.Context) *state {
+		return &state{Messages: make([]*schema.Message, 0, config.MaxStep+1)}
 	}))
 
-	modelPreHandle := func(ctx context.Context, input []*Message, state *state) ([]*Message, error) {
+	modelPreHandle := func(ctx context.Context, input []*schema.Message, state *state) ([]*schema.Message, error) {
 		state.Messages = append(state.Messages, input...)
 
-		modifiedInput := make([]*Message, 0, len(state.Messages))
+		modifiedInput := make([]*schema.Message, 0, len(state.Messages))
 		copy(modifiedInput, state.Messages)
 		return messageModifier(ctx, modifiedInput), nil
 	}
-	if err = graph.AddChatModelNode(nodeKeyModel, chatModel, WithStatePreHandler(modelPreHandle)); err != nil {
+	if err = graph.AddChatModelNode(nodeKeyModel, chatModel, compose.WithStatePreHandler(modelPreHandle)); err != nil {
 		return nil, err
 	}
 
-	if err = graph.AddEdge(START, nodeKeyModel); err != nil {
+	if err = graph.AddEdge(compose.START, nodeKeyModel); err != nil {
 		return nil, err
 	}
 
-	toolsNodePreHandle := func(ctx context.Context, input *Message, state *state) (*Message, error) {
+	toolsNodePreHandle := func(ctx context.Context, input *schema.Message, state *state) (*schema.Message, error) {
 		state.Messages = append(state.Messages, input)
 		state.ReturnDirectlyToolCallID = getReturnDirectlyToolCallID(input, config.ToolReturnDirectly)
 		return input, nil
 	}
-	if err = graph.AddToolsNode(nodeKeyTools, toolsNode, WithStatePreHandler(toolsNodePreHandle)); err != nil {
+	if err = graph.AddToolsNode(nodeKeyTools, toolsNode, compose.WithStatePreHandler(toolsNodePreHandle)); err != nil {
 		return nil, err
 	}
 
-	modelPostBranchCondition := func(_ context.Context, sr *schema.StreamReader[*Message]) (endNode string, err error) {
+	modelPostBranchCondition := func(_ context.Context, sr *schema.StreamReader[*schema.Message]) (endNode string, err error) {
 		if isToolCall, err := toolCallChecker(ctx, sr); err != nil {
 			return "", err
 		} else if isToolCall {
 			return nodeKeyTools, nil
 		}
-		return END, nil
+		return compose.END, nil
 	}
 
-	if err = graph.AddBranch(nodeKeyModel, NewStreamGraphBranch(modelPostBranchCondition, map[string]bool{nodeKeyTools: true, END: true})); err != nil {
+	if err = graph.AddBranch(nodeKeyModel, compose.NewStreamGraphBranch(modelPostBranchCondition, map[string]bool{nodeKeyTools: true, compose.END: true})); err != nil {
 		return nil, err
 	}
 
@@ -210,7 +210,7 @@ func NewAgent(ctx context.Context, config *AgentConfig) (_ *Agent, err error) {
 		return nil, err
 	}
 
-	runnable, err := graph.Compile(ctx, WithMaxRunSteps(config.MaxStep))
+	runnable, err := graph.Compile(ctx, compose.WithMaxRunSteps(config.MaxStep))
 	if err != nil {
 		return nil, err
 	}
@@ -218,12 +218,10 @@ func NewAgent(ctx context.Context, config *AgentConfig) (_ *Agent, err error) {
 	return &Agent{runnable: runnable}, nil
 }
 
-type Message = schema.Message
-
-func buildReturnDirectly(graph *Graph[[]*Message, *Message]) (err error) {
-	directReturn := func(ctx context.Context, msgs *schema.StreamReader[[]*Message]) (*schema.StreamReader[*Message], error) {
-		return schema.StreamReaderWithConvert(msgs, func(msgs []*Message) (*Message, error) {
-			state, err := GetState[*state](ctx)
+func buildReturnDirectly(graph *compose.Graph[[]*schema.Message, *schema.Message]) (err error) {
+	directReturn := func(ctx context.Context, msgs *schema.StreamReader[[]*schema.Message]) (*schema.StreamReader[*schema.Message], error) {
+		return schema.StreamReaderWithConvert(msgs, func(msgs []*schema.Message) (*schema.Message, error) {
+			state, err := compose.GetState[*state](ctx)
 			if err != nil {
 				return nil, fmt.Errorf("get state failed: %w", err)
 			}
@@ -238,15 +236,15 @@ func buildReturnDirectly(graph *Graph[[]*Message, *Message]) (err error) {
 	}
 
 	nodeKeyDirectReturn := "direct_return"
-	if err = graph.AddLambdaNode(nodeKeyDirectReturn, TransformableLambda(directReturn)); err != nil {
+	if err = graph.AddLambdaNode(nodeKeyDirectReturn, compose.TransformableLambda(directReturn)); err != nil {
 		return err
 	}
 
 	// this branch checks if the tool called should return directly. It either leads to END or back to ChatModel
-	err = graph.AddBranch(nodeKeyTools, NewStreamGraphBranch(func(ctx context.Context, msgsStream *schema.StreamReader[[]*Message]) (endNode string, err error) {
+	err = graph.AddBranch(nodeKeyTools, compose.NewStreamGraphBranch(func(ctx context.Context, msgsStream *schema.StreamReader[[]*schema.Message]) (endNode string, err error) {
 		msgsStream.Close()
 
-		s, err := GetState[*state](ctx) // last msg stored in state should contain the tool call information
+		s, err := compose.GetState[*state](ctx) // last msg stored in state should contain the tool call information
 		if err != nil {
 			return "", fmt.Errorf("get state in branch failed: %w", err)
 		}
@@ -261,10 +259,10 @@ func buildReturnDirectly(graph *Graph[[]*Message, *Message]) (err error) {
 		return err
 	}
 
-	return graph.AddEdge(nodeKeyDirectReturn, END)
+	return graph.AddEdge(nodeKeyDirectReturn, compose.END)
 }
 
-func genToolInfos(ctx context.Context, config ToolsNodeConfig) ([]*schema.ToolInfo, error) {
+func genToolInfos(ctx context.Context, config compose.ToolsNodeConfig) ([]*schema.ToolInfo, error) {
 	toolInfos := make([]*schema.ToolInfo, 0, len(config.Tools))
 	for _, t := range config.Tools {
 		tl, err := t.Info(ctx)
@@ -278,7 +276,7 @@ func genToolInfos(ctx context.Context, config ToolsNodeConfig) ([]*schema.ToolIn
 	return toolInfos, nil
 }
 
-func getReturnDirectlyToolCallID(input *Message, toolReturnDirectly map[string]struct{}) string {
+func getReturnDirectlyToolCallID(input *schema.Message, toolReturnDirectly map[string]struct{}) string {
 	if len(toolReturnDirectly) == 0 {
 		return ""
 	}
@@ -293,7 +291,7 @@ func getReturnDirectlyToolCallID(input *Message, toolReturnDirectly map[string]s
 }
 
 // Generate generates a response from the agent.
-func (r *Agent) Generate(ctx context.Context, input []*Message, opts ...agent.AgentOption) (output *Message, err error) {
+func (r *Agent) Generate(ctx context.Context, input []*schema.Message, opts ...agent.AgentOption) (output *schema.Message, err error) {
 	output, err = r.runnable.Invoke(ctx, input, agent.GetComposeOptions(opts...)...)
 	if err != nil {
 		return nil, err
@@ -303,8 +301,8 @@ func (r *Agent) Generate(ctx context.Context, input []*Message, opts ...agent.Ag
 }
 
 // Stream calls the agent and returns a stream response.
-func (r *Agent) Stream(ctx context.Context, input []*Message, opts ...agent.AgentOption) (
-	output *schema.StreamReader[*Message], err error) {
+func (r *Agent) Stream(ctx context.Context, input []*schema.Message, opts ...agent.AgentOption) (
+	output *schema.StreamReader[*schema.Message], err error) {
 	res, err := r.runnable.Stream(ctx, input, agent.GetComposeOptions(opts...)...)
 	if err != nil {
 		return nil, err
