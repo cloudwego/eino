@@ -55,6 +55,7 @@ type AgentConfig struct {
 	MaxStep int `json:"max_step"`
 
 	// Tools that will make agent return directly when the tool is called.
+	// When multiple tools are called and more than one tool is in the return directly list, only the first one will be returned.
 	ToolReturnDirectly map[string]struct{}
 
 	// StreamOutputHandler is a function to determine whether the model's streaming output contains tool calls.
