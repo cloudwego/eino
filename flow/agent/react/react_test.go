@@ -82,7 +82,10 @@ func TestReact(t *testing.T) {
 		ToolsConfig: compose.ToolsNodeConfig{
 			Tools: []tool.BaseTool{fakeTool},
 		},
-
+		MessageModifier: func(ctx context.Context, input []*schema.Message) []*schema.Message {
+			assert.Equal(t, len(input), times*2+1)
+			return input
+		},
 		MaxStep: 40,
 	})
 	assert.Nil(t, err)
@@ -106,7 +109,10 @@ func TestReact(t *testing.T) {
 		ToolsConfig: compose.ToolsNodeConfig{
 			Tools: []tool.BaseTool{fakeTool},
 		},
-
+		MessageModifier: func(ctx context.Context, input []*schema.Message) []*schema.Message {
+			assert.Equal(t, len(input), times*2+1)
+			return input
+		},
 		MaxStep:            40,
 		ToolReturnDirectly: map[string]struct{}{info.Name: {}},
 	})
