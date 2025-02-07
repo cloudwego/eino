@@ -169,7 +169,7 @@ func NewAgent(ctx context.Context, config *AgentConfig) (_ *Agent, err error) {
 	modelPreHandle := func(ctx context.Context, input []*schema.Message, state *state) ([]*schema.Message, error) {
 		state.Messages = append(state.Messages, input...)
 
-		modifiedInput := make([]*schema.Message, 0, len(state.Messages))
+		modifiedInput := make([]*schema.Message, len(state.Messages))
 		copy(modifiedInput, state.Messages)
 		return messageModifier(ctx, modifiedInput), nil
 	}
