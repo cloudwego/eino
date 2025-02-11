@@ -31,8 +31,51 @@ import (
 	"github.com/nikolalohinski/gonja/parser"
 	"github.com/slongfield/pyfmt"
 
-	"github.com/cloudwego/eino/internal/gmap"
+	"github.com/cloudwego/eino/internal"
 )
+
+func init() {
+	internal.RegisterStreamChunkConcatFunc(ConcatMessages)
+	internal.RegisterStreamChunkConcatFunc(concatMessageArray)
+}
+
+func concatMessageArray(mas [][]*Message) ([]*Message, error) {
+	arrayLen := len(mas[0])
+
+	ret := make([]*Message, arrayLen)
+	slicesToConcat := make([][]*Message, arrayLen)
+
+	for _, ma := range mas {
+		if len(ma) != arrayLen {
+			return nil, fmt.Errorf("unexpected array length. "+
+				"Got %d, expected %d", len(ma), arrayLen)
+		}
+
+		for i := 0; i < arrayLen; i++ {
+			m := ma[i]
+			if m != nil {
+				slicesToConcat[i] = append(slicesToConcat[i], m)
+			}
+		}
+	}
+
+	for i, slice := range slicesToConcat {
+		if len(slice) == 0 {
+			ret[i] = nil
+		} else if len(slice) == 1 {
+			ret[i] = slice[0]
+		} else {
+			cm, err := ConcatMessages(slice)
+			if err != nil {
+				return nil, err
+			}
+
+			ret[i] = cm
+		}
+	}
+
+	return ret, nil
+}
 
 // FormatType used by MessageTemplate.Format
 type FormatType uint8
@@ -639,7 +682,10 @@ func ConcatMessages(msgs []*Message) (*Message, error) {
 		ret.ToolCalls = merged
 	}
 
-	extra := gmap.Concat(extraList...)
+	extra, err := internal.ConcatItems(extraList)
+	if err != nil {
+		return nil, fmt.Errorf("failed to concat message's extra: %w", err)
+	}
 	if len(extra) > 0 {
 		ret.Extra = extra
 	}
