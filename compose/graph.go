@@ -813,15 +813,6 @@ func (g *graph) compile(ctx context.Context, opt *graphCompileOptions) (*composa
 	}
 	copy(inputChannels.writeToBranches, g.branches[START])
 
-	// validate dag
-	if runType == runTypeDAG {
-		for _, node := range g.startNodes {
-			if len(invertedEdges[node]) != 1 {
-				return nil, fmt.Errorf("dag start node[%s] should not have predecessor other than 'start', but got: %v", node, invertedEdges[node])
-			}
-		}
-	}
-
 	r := &runner{
 		invertedEdges:   invertedEdges,
 		chanSubscribeTo: chanSubscribeTo,

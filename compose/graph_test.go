@@ -1397,3 +1397,28 @@ func TestContextCancel(t *testing.T) {
 		t.Fatal("graph have not returned canceled error")
 	}
 }
+
+func TestDAGStart(t *testing.T) {
+	g := NewGraph[map[string]any, map[string]any]()
+	err := g.AddLambdaNode("1", InvokableLambda(func(ctx context.Context, input map[string]any) (output map[string]any, err error) {
+		return map[string]any{"1": "1"}, nil
+	}))
+	assert.NoError(t, err)
+	err = g.AddLambdaNode("2", InvokableLambda(func(ctx context.Context, input map[string]any) (output map[string]any, err error) {
+		return input, nil
+	}))
+	assert.NoError(t, err)
+	err = g.AddEdge(START, "1")
+	assert.NoError(t, err)
+	err = g.AddEdge("1", "2")
+	assert.NoError(t, err)
+	err = g.AddEdge(START, "2")
+	assert.NoError(t, err)
+	err = g.AddEdge("2", END)
+	assert.NoError(t, err)
+	r, err := g.Compile(context.Background(), WithNodeTriggerMode(AllPredecessor))
+	assert.NoError(t, err)
+	result, err := r.Invoke(context.Background(), map[string]any{"start": "start"})
+	assert.NoError(t, err)
+	assert.Equal(t, map[string]any{"start": "start", "1": "1"}, result)
+}
