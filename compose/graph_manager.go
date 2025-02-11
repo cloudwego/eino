@@ -30,6 +30,7 @@ type channel interface {
 	update(context.Context, map[string]any) error
 	get(context.Context) (any, error)
 	ready(context.Context) bool
+	reportSkip([]string) (bool, error)
 }
 
 type edgeHandlerManager struct {
@@ -108,8 +109,9 @@ func (p *preBranchHandlerManager) handle(nodeKey string, idx int, value any, isS
 }
 
 type channelManager struct {
-	isStream bool
-	channels map[string]channel
+	isStream   bool
+	successors map[string][]string
+	channels   map[string]channel
 
 	edgeHandlerManager    *edgeHandlerManager
 	preNodeHandlerManager *preNodeHandlerManager
@@ -161,6 +163,37 @@ func (c *channelManager) updateAndGet(ctx context.Context, values map[string]map
 		return nil, fmt.Errorf("update channel fail: %w", err)
 	}
 	return c.getFromReadyChannels(ctx, isStream)
+}
+
+func (c *channelManager) reportBranch(from string, skippedNodes []string) error {
+	var nKeys []string
+	for _, node := range skippedNodes {
+		skipped, err := c.channels[node].reportSkip([]string{from})
+		if err != nil {
+			return err
+		}
+		if skipped {
+			nKeys = append(nKeys, node)
+		}
+	}
+
+	for i := 0; i < len(nKeys); i++ {
+		key := nKeys[i]
+		if _, ok := c.successors[key]; !ok {
+			return fmt.Errorf("unknown node: %s", key)
+		}
+		for _, successor := range c.successors[key] {
+			skipped, err := c.channels[successor].reportSkip([]string{key})
+			if err != nil {
+				return err
+			}
+			if skipped {
+				nKeys = append(nKeys, successor)
+			}
+			// todo: detect if end node has been skipped?
+		}
+	}
+	return nil
 }
 
 type task struct {

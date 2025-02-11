@@ -21,7 +21,7 @@ import (
 	"fmt"
 )
 
-func pregelChannelBuilder(dependencies []string) channel {
+func pregelChannelBuilder(_ []string) channel {
 	return &pregelChannel{}
 }
 
@@ -67,4 +67,8 @@ func (ch *pregelChannel) get(_ context.Context) (any, error) {
 
 func (ch *pregelChannel) ready(_ context.Context) bool {
 	return ch.value != nil
+}
+
+func (ch *pregelChannel) reportSkip(_ []string) (bool, error) {
+	return false, nil
 }

@@ -22,19 +22,33 @@ import (
 )
 
 func dagChannelBuilder(dependencies []string) channel {
+	waitList := make(map[string]bool, len(dependencies))
+	for _, dep := range dependencies {
+		waitList[dep] = false
+	}
 	return &dagChannel{
 		values:   make(map[string]any),
-		waitList: dependencies,
+		waitList: waitList,
 	}
+}
+
+type waitPred struct {
+	key     string
+	skipped bool
 }
 
 type dagChannel struct {
 	values   map[string]any
-	waitList []string
+	waitList map[string]bool
 	value    any
+	skipped  bool
 }
 
 func (ch *dagChannel) update(ctx context.Context, ins map[string]any) error {
+	if ch.skipped {
+		return nil
+	}
+
 	for k, v := range ins {
 		if _, ok := ch.values[k]; ok {
 			return fmt.Errorf("dag channel update, calculate node repeatedly: %s", k)
@@ -42,26 +56,13 @@ func (ch *dagChannel) update(ctx context.Context, ins map[string]any) error {
 		ch.values[k] = v
 	}
 
-	for i := range ch.waitList {
-		if _, ok := ch.values[ch.waitList[i]]; !ok {
-			return nil
-		}
-	}
-
-	if len(ch.waitList) == 1 {
-		ch.value = ch.values[ch.waitList[0]]
-		return nil
-	}
-	v, err := mergeValues(mapToList(ch.values))
-	if err != nil {
-		return fmt.Errorf("dag channel merge value fail: %w", err)
-	}
-	ch.value = v
-
-	return nil
+	return ch.tryUpdateValue()
 }
 
 func (ch *dagChannel) get(ctx context.Context) (any, error) {
+	if ch.skipped {
+		return nil, fmt.Errorf("dag channel has been skipped")
+	}
 	if ch.value == nil {
 		return nil, fmt.Errorf("dag channel not ready, value is nil")
 	}
@@ -71,5 +72,55 @@ func (ch *dagChannel) get(ctx context.Context) (any, error) {
 }
 
 func (ch *dagChannel) ready(ctx context.Context) bool {
+	if ch.skipped {
+		return false
+	}
 	return ch.value != nil
+}
+
+func (ch *dagChannel) reportSkip(keys []string) (bool, error) {
+	for _, k := range keys {
+		if _, ok := ch.waitList[k]; ok {
+			ch.waitList[k] = true
+		}
+	}
+
+	allSkipped := true
+	for _, skipped := range ch.waitList {
+		if !skipped {
+			allSkipped = false
+			break
+		}
+	}
+	ch.skipped = allSkipped
+
+	var err error
+	if !allSkipped {
+		err = ch.tryUpdateValue()
+	}
+
+	return allSkipped, err
+}
+
+func (ch *dagChannel) tryUpdateValue() error {
+	var validList []string
+	for key, skipped := range ch.waitList {
+		if _, ok := ch.values[key]; !ok && !skipped {
+			return nil
+		} else if !skipped {
+			validList = append(validList, key)
+		}
+	}
+
+	if len(validList) == 1 {
+		ch.value = ch.values[validList[0]]
+		return nil
+	}
+	v, err := mergeValues(mapToList(ch.values))
+	if err != nil {
+		return err
+	}
+	ch.value = v
+	return nil
+
 }

@@ -64,6 +64,7 @@ type chanBuilder func(d []string) channel
 type runner struct {
 	chanSubscribeTo map[string]*chanCall
 	invertedEdges   map[string][]string
+	successors      map[string][]string
 	inputChannels   *chanCall
 
 	chanBuilder chanBuilder // could be nil
@@ -176,7 +177,7 @@ func (r *runner) run(ctx context.Context, isStream bool, input any, opts ...Opti
 		}
 
 		// 1. Calculate active edges and resolve their values.
-		writeChannelValues, err := r.resolveCompletedTasks(ctx, completedTasks, isStream)
+		writeChannelValues, err := r.resolveCompletedTasks(ctx, completedTasks, isStream, cm)
 		if err != nil {
 			return nil, err
 		}
@@ -233,13 +234,13 @@ func (r *runner) createTasks(ctx context.Context, nodeMap map[string]any, optMap
 	return nextTasks, nil
 }
 
-func (r *runner) resolveCompletedTasks(ctx context.Context, completedTasks []*task, isStream bool) (map[string]map[string]any, error) {
+func (r *runner) resolveCompletedTasks(ctx context.Context, completedTasks []*task, isStream bool, cm *channelManager) (map[string]map[string]any, error) {
 	writeChannelValues := make(map[string]map[string]any)
 	for _, t := range completedTasks {
 		// update channel & new_next_tasks
 		vs := copyItem(t.output, len(t.call.writeTo)+len(t.call.writeToBranches)*2)
 		nextNodeKeys, err := r.calculateNext(ctx, t.nodeKey, t.call,
-			vs[len(t.call.writeTo)+len(t.call.writeToBranches):], isStream)
+			vs[len(t.call.writeTo)+len(t.call.writeToBranches):], isStream, cm)
 		if err != nil {
 			return nil, fmt.Errorf("calculate next step fail, node: %s, error: %w", t.nodeKey, err)
 		}
@@ -253,7 +254,7 @@ func (r *runner) resolveCompletedTasks(ctx context.Context, completedTasks []*ta
 	return writeChannelValues, nil
 }
 
-func (r *runner) calculateNext(ctx context.Context, curNodeKey string, startChan *chanCall, input []any, isStream bool) ([]string, error) {
+func (r *runner) calculateNext(ctx context.Context, curNodeKey string, startChan *chanCall, input []any, isStream bool, cm *channelManager) ([]string, error) {
 	if len(input) < len(startChan.writeToBranches) {
 		// unreachable
 		return nil, errors.New("calculate next input length is shorter than branches")
@@ -266,6 +267,7 @@ func (r *runner) calculateNext(ctx context.Context, curNodeKey string, startChan
 	ret := make([]string, 0, len(startChan.writeTo))
 	ret = append(ret, startChan.writeTo...)
 
+	skippedNodes := make(map[string]struct{})
 	for i, branch := range startChan.writeToBranches {
 		// check branch input type if needed
 		var err error
@@ -305,7 +307,32 @@ func (r *runner) calculateNext(ctx context.Context, curNodeKey string, startChan
 				return nil, errors.New("invoke branch result isn't string")
 			}
 		}
+
+		for node := range branch.endNodes {
+			if node != w {
+				skippedNodes[node] = struct{}{}
+			}
+		}
+
 		ret = append(ret, w)
+	}
+
+	// When a node has multiple branches,
+	// there may be a situation where a succeeding node is selected by some branches and discarded by the other branches,
+	// in which case the succeeding node should not be skipped.
+	var skippedNodeList []string
+	for _, selected := range ret {
+		if _, ok := skippedNodes[selected]; ok {
+			delete(skippedNodes, selected)
+		}
+	}
+	for skipped := range skippedNodes {
+		skippedNodeList = append(skippedNodeList, skipped)
+	}
+
+	err := cm.reportBranch(curNodeKey, skippedNodeList)
+	if err != nil {
+		return nil, err
 	}
 	return ret, nil
 }
@@ -337,8 +364,9 @@ func (r *runner) initChannelManager(isStream bool) *channelManager {
 	chs[END] = builder(r.invertedEdges[END])
 
 	return &channelManager{
-		isStream: isStream,
-		channels: chs,
+		isStream:   isStream,
+		channels:   chs,
+		successors: r.successors,
 
 		edgeHandlerManager:    r.edgeHandlerManager,
 		preNodeHandlerManager: r.preNodeHandlerManager,

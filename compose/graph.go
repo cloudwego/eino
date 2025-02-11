@@ -723,7 +723,7 @@ func (g *graph) compile(ctx context.Context, opt *graphCompileOptions) (*composa
 	if isWorkflow(g.cmp) {
 		eager = true
 	}
-	if !eager && opt != nil && opt.getStateEnabled {
+	if !isWorkflow(g.cmp) && opt != nil && opt.getStateEnabled {
 		return nil, fmt.Errorf("shouldn't set WithGetStateEnable outside of the Workflow")
 	}
 	forbidGetState := true
@@ -743,11 +743,6 @@ func (g *graph) compile(ctx context.Context, opt *graphCompileOptions) (*composa
 		if len(v) > 0 {
 			return nil, fmt.Errorf("some node's input or output types cannot be inferred: %v", g.toValidateMap)
 		}
-	}
-
-	// dag doesn't support branch
-	if runType == runTypeDAG && len(g.branches) > 0 {
-		return nil, fmt.Errorf("dag doesn't support branch for now")
 	}
 
 	for key := range g.fieldMappingRecords {
@@ -806,6 +801,17 @@ func (g *graph) compile(ctx context.Context, opt *graphCompileOptions) (*composa
 
 		}
 	}
+	for start, branches := range g.branches {
+		for _, branch := range branches {
+			for end := range branch.endNodes {
+				if _, ok := invertedEdges[end]; !ok {
+					invertedEdges[end] = []string{start}
+				} else {
+					invertedEdges[end] = append(invertedEdges[end], start)
+				}
+			}
+		}
+	}
 
 	inputChannels := &chanCall{
 		writeTo:         g.edges[START],
@@ -832,6 +838,12 @@ func (g *graph) compile(ctx context.Context, opt *graphCompileOptions) (*composa
 		preNodeHandlerManager:   &preNodeHandlerManager{h: g.handlerPreNode},
 		edgeHandlerManager:      &edgeHandlerManager{h: g.handlerOnEdges},
 	}
+
+	successors := make(map[string][]string)
+	for ch := range r.chanSubscribeTo {
+		successors[ch] = getSuccessors(r.chanSubscribeTo[ch])
+	}
+	r.successors = successors
 
 	if g.stateGenerator != nil {
 		r.runCtx = func(ctx context.Context) context.Context {
@@ -866,6 +878,17 @@ func (g *graph) compile(ctx context.Context, opt *graphCompileOptions) (*composa
 	g.onCompileFinish(ctx, opt, key2SubGraphs)
 
 	return r.toComposableRunnable(), nil
+}
+
+func getSuccessors(c *chanCall) []string {
+	ret := make([]string, len(c.writeTo))
+	copy(ret, c.writeTo)
+	for _, branch := range c.writeToBranches {
+		for node := range branch.endNodes {
+			ret = append(ret, node)
+		}
+	}
+	return ret
 }
 
 type subGraphCompileCallback struct {
@@ -1042,6 +1065,14 @@ func validateDAG(chanSubscribeTo map[string]*chanCall, invertedEdges map[string]
 						continue
 					}
 					m[subNode]--
+				}
+				for _, subBranch := range chanSubscribeTo[node].writeToBranches {
+					for subNode := range subBranch.endNodes {
+						if subNode == END {
+							continue
+						}
+						m[subNode]--
+					}
 				}
 				m[node] = -1
 			}
