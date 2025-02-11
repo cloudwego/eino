@@ -6,7 +6,7 @@ local-prefix: "github.com/cloudwego/eino"
 threshold:
   # (optional; default 0)
   # Minimum overall project coverage percentage required.
-  total: 75
+  total: 83
 
   package: 30
 

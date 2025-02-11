@@ -63,6 +63,17 @@ func TestWorkflow(t *testing.T) {
 		B         int
 		StateTemp string
 	}
+	RegisterStreamChunkConcatFunc(func(ts []*structF) (*structF, error) {
+		ret := &structF{}
+		for _, tt := range ts {
+			ret.Field1 += tt.Field1
+			ret.Field2 += tt.Field2
+			ret.Field3 = append(ret.Field3, tt.Field3...)
+			ret.B += tt.B
+			ret.StateTemp += tt.StateTemp
+		}
+		return ret, nil
+	})
 
 	type state struct {
 		temp string

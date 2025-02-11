@@ -28,6 +28,7 @@ import (
 	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/components/tool"
 	"github.com/cloudwego/eino/components/tool/utils"
+	"github.com/cloudwego/eino/internal"
 	"github.com/cloudwego/eino/schema"
 )
 
@@ -410,7 +411,7 @@ func TestToolsNodeOptions(t *testing.T) {
 		}
 		outStream.Close()
 
-		msgs, err := concatMessageArray(outMessages)
+		msgs, err := internal.ConcatItems(outMessages)
 		assert.NoError(t, err)
 
 		assert.Len(t, msgs, 1)

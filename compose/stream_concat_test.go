@@ -23,6 +23,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 
+	"github.com/cloudwego/eino/internal"
 	"github.com/cloudwego/eino/schema"
 )
 
@@ -112,7 +113,7 @@ func TestMessageConcat(t *testing.T) {
 	assert.Equal(t, "0123456789", lastVal.Content)
 	assert.Len(t, lastVal.Extra, 4)
 	assert.Equal(t, map[string]any{
-		"key_1": "8",
+		"key_1": "048",
 		"0":     "0",
 		"4":     "4",
 		"8":     "8",
@@ -193,14 +194,30 @@ func TestConcatError(t *testing.T) {
 			"str": "string_02",
 			"x":   123,
 		}
-		_, err := concatItems([]map[string]any{a, b})
+		_, err := internal.ConcatItems([]map[string]any{a, b})
 		assert.NotNil(t, err)
 	})
 
 	t.Run("merge error", func(t *testing.T) {
 		RegisterStreamChunkConcatFunc(concatTStreamError)
 
-		_, err := concatItems([]tConcatErrForTest{{}, {}})
+		_, err := internal.ConcatItems([]tConcatErrForTest{{}, {}})
 		assert.NotNil(t, err)
 	})
+}
+
+func TestConcatSliceValue(t *testing.T) {
+	type testStruct struct {
+		A string
+	}
+
+	s := []testStruct{{}, {A: "123"}, {}}
+	result, err := internal.ConcatItems(s)
+	assert.Nil(t, err)
+	assert.Equal(t, testStruct{A: "123"}, result)
+
+	s = []testStruct{{}, {}, {}}
+	result, err = internal.ConcatItems(s)
+	assert.Nil(t, err)
+	assert.Equal(t, testStruct{}, result)
 }
