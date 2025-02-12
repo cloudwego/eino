@@ -854,7 +854,9 @@ func (g *graph) compile(ctx context.Context, opt *graphCompileOptions) (*composa
 	}
 
 	// default options
-	if r.options.maxRunSteps == 0 {
+	if r.eager && r.options.maxRunSteps > 0 {
+		return nil, fmt.Errorf("cannot set max run steps in eager mode")
+	} else if !r.eager && r.options.maxRunSteps == 0 {
 		r.options.maxRunSteps = len(r.chanSubscribeTo) + 10
 	}
 

@@ -53,7 +53,7 @@ func TestReact(t *testing.T) {
 	times := 0
 	cm.EXPECT().Generate(gomock.Any(), gomock.Any(), gomock.Any()).
 		DoAndReturn(func(ctx context.Context, input []*schema.Message, opts ...model.Option) (*schema.Message, error) {
-			times += 1
+			times++
 			if times <= 2 {
 				info, _ := fakeTool.Info(ctx)
 
@@ -156,7 +156,7 @@ func TestReactStream(t *testing.T) {
 			info, _ := fakeTool.Info(ctx)
 			streamInfo, _ := fakeStreamTool.Info(ctx)
 
-			times += 1
+			times++
 			if times <= 2 {
 				sw.Send(schema.AssistantMessage("hello max",
 					[]schema.ToolCall{
@@ -347,7 +347,7 @@ func TestReactWithModifier(t *testing.T) {
 	times := 0
 	cm.EXPECT().Generate(gomock.Any(), gomock.Any(), gomock.Any()).
 		DoAndReturn(func(ctx context.Context, input []*schema.Message, opts ...model.Option) (*schema.Message, error) {
-			times += 1
+			times++
 			if times <= 2 {
 				info, _ := fakeTool.Info(ctx)
 
@@ -562,7 +562,7 @@ func (t *fakeStreamToolGreetForTest) StreamableRun(ctx context.Context, argument
 		s := schema.StreamReaderFromArray([]string{`{"say": "bye"}`})
 		return s, nil
 	}
-	t.curCount += 1
+	t.curCount++
 	s := schema.StreamReaderFromArray([]string{fmt.Sprintf(`{"say": "hello %v"}`, p.Name)})
 	return s, nil
 }
@@ -613,7 +613,7 @@ func (t *fakeToolGreetForTest) InvokableRun(ctx context.Context, argumentsInJSON
 		return `{"say": "bye"}`, nil
 	}
 
-	t.curCount += 1
+	t.curCount++
 	return fmt.Sprintf(`{"say": "hello %v"}`, p.Name), nil
 }
 

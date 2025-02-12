@@ -180,9 +180,13 @@ func TestStateGraphUtils(t *testing.T) {
 			state: &testStruct{UserID: 10},
 		})
 
-		ts, err := GetState[*testStruct](ctx)
+		var userID int64
+		err := ProcessState[*testStruct](ctx, func(_ context.Context, state *testStruct) error {
+			userID = state.UserID
+			return nil
+		})
 		assert.NoError(t, err)
-		assert.Equal(t, int64(10), ts.UserID)
+		assert.Equal(t, int64(10), userID)
 	})
 
 	t.Run("getState_nil", func(t *testing.T) {
@@ -193,7 +197,9 @@ func TestStateGraphUtils(t *testing.T) {
 		ctx := context.Background()
 		ctx = context.WithValue(ctx, stateKey{}, &internalState{})
 
-		_, err := GetState[*testStruct](ctx)
+		err := ProcessState[*testStruct](ctx, func(_ context.Context, state *testStruct) error {
+			return nil
+		})
 		assert.ErrorContains(t, err, "unexpected state type. expected: *compose.testStruct, got: <nil>")
 	})
 
@@ -207,7 +213,9 @@ func TestStateGraphUtils(t *testing.T) {
 			state: &testStruct{UserID: 10},
 		})
 
-		_, err := GetState[string](ctx)
+		err := ProcessState[string](ctx, func(_ context.Context, state string) error {
+			return nil
+		})
 		assert.ErrorContains(t, err, "unexpected state type. expected: string, got: *compose.testStruct")
 
 	})
@@ -224,11 +232,13 @@ func TestStateChain(t *testing.T) {
 	}))
 
 	r, err := sc.AppendLambda(InvokableLambda(func(ctx context.Context, input string) (output string, err error) {
-		s, err := GetState[*testState](ctx)
+		err = ProcessState[*testState](ctx, func(_ context.Context, state *testState) error {
+			state.Field1 = "node1"
+			return nil
+		})
 		if err != nil {
 			return "", err
 		}
-		s.Field1 = "node1"
 		return input, nil
 	}), WithStatePostHandler(func(ctx context.Context, out string, state *testState) (string, error) {
 		state.Field2 = "node2"

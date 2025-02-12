@@ -20,6 +20,7 @@ import (
 	"context"
 	"fmt"
 	"reflect"
+	"sync"
 
 	"github.com/cloudwego/eino/schema"
 	"github.com/cloudwego/eino/utils/generic"
@@ -33,6 +34,7 @@ type stateKey struct{}
 type internalState struct {
 	state     any
 	forbidden bool
+	mu        sync.Mutex
 }
 
 // StatePreHandler is a function that is called before the node is executed.
@@ -51,10 +53,12 @@ type StreamStatePostHandler[O, S any] func(ctx context.Context, out *schema.Stre
 
 func convertPreHandler[I, S any](handler StatePreHandler[I, S]) *composableRunnable {
 	rf := func(ctx context.Context, in I, opts ...any) (I, error) {
-		cState, err := getState[S](ctx)
+		cState, pMu, err := getState[S](ctx)
 		if err != nil {
 			return in, err
 		}
+		pMu.Lock()
+		defer pMu.Unlock()
 
 		return handler(ctx, in, cState)
 	}
@@ -64,10 +68,12 @@ func convertPreHandler[I, S any](handler StatePreHandler[I, S]) *composableRunna
 
 func convertPostHandler[O, S any](handler StatePostHandler[O, S]) *composableRunnable {
 	rf := func(ctx context.Context, out O, opts ...any) (O, error) {
-		cState, err := getState[S](ctx)
+		cState, pMu, err := getState[S](ctx)
 		if err != nil {
 			return out, err
 		}
+		pMu.Lock()
+		defer pMu.Unlock()
 
 		return handler(ctx, out, cState)
 	}
@@ -77,10 +83,12 @@ func convertPostHandler[O, S any](handler StatePostHandler[O, S]) *composableRun
 
 func streamConvertPreHandler[I, S any](handler StreamStatePreHandler[I, S]) *composableRunnable {
 	rf := func(ctx context.Context, in *schema.StreamReader[I], opts ...any) (*schema.StreamReader[I], error) {
-		cState, err := getState[S](ctx)
+		cState, pMu, err := getState[S](ctx)
 		if err != nil {
 			return in, err
 		}
+		pMu.Lock()
+		defer pMu.Unlock()
 
 		return handler(ctx, in, cState)
 	}
@@ -90,10 +98,12 @@ func streamConvertPreHandler[I, S any](handler StreamStatePreHandler[I, S]) *com
 
 func streamConvertPostHandler[O, S any](handler StreamStatePostHandler[O, S]) *composableRunnable {
 	rf := func(ctx context.Context, out *schema.StreamReader[O], opts ...any) (*schema.StreamReader[O], error) {
-		cState, err := getState[S](ctx)
+		cState, pMu, err := getState[S](ctx)
 		if err != nil {
 			return out, err
 		}
+		pMu.Lock()
+		defer pMu.Unlock()
 
 		return handler(ctx, out, cState)
 	}
@@ -101,24 +111,38 @@ func streamConvertPostHandler[O, S any](handler StreamStatePostHandler[O, S]) *c
 	return runnableLambda[O, O](nil, nil, nil, rf, false)
 }
 
-// GetState gets the state from the context.
-// When using this method to read or write state in custom nodes, it may lead to data race because other nodes may concurrently access the state.
-// You need to be aware of and resolve this situation, typically by adding a mutex.
-// It's recommended to only READ the returned state. If you want to WRITE to state, consider using StatePreHandler / StatePostHandler because they are concurrency safe out of the box.
-// note: this method will report error
+// ProcessState processes the state from the context in a concurrency-safe way.
+// This is the recommended way to access and modify state in custom nodes.
+// The provided function handler will be executed with exclusive access to the state (protected by mutex).
+// note: this method will report error if state type doesn't match or state is not found in context
 // e.g.
 //
 //	lambdaFunc := func(ctx context.Context, in string, opts ...any) (string, error) {
-//		state, err := compose.GetState[*testState](ctx)
+//		err := compose.ProcessState[*testState](ctx, func(state *testState) error {
+//			// do something with state in a concurrency-safe way
+//			state.Count++
+//			return nil
+//		})
 //		if err != nil {
 //			return "", err
 //		}
-//		// do something with state
 //		return in, nil
 //	}
 //
 //	stateGraph := compose.NewStateGraph[string, string, testState](genStateFunc)
 //	stateGraph.AddNode("node1", lambdaFunc)
+func ProcessState[S any](ctx context.Context, handler func(context.Context, S) error) error {
+	s, pMu, err := getState[S](ctx)
+	if err != nil {
+		return fmt.Errorf("get state from context fail: %w", err)
+	}
+	pMu.Lock()
+	defer pMu.Unlock()
+	return handler(ctx, s)
+}
+
+// GetState gets the state from the context.
+// Deprecated: use ProcessState instead.
 func GetState[S any](ctx context.Context) (S, error) {
 	state := ctx.Value(stateKey{})
 
@@ -137,15 +161,17 @@ func GetState[S any](ctx context.Context) (S, error) {
 	return cState, nil
 }
 
-func getState[S any](ctx context.Context) (S, error) {
+func getState[S any](ctx context.Context) (S, *sync.Mutex, error) {
 	state := ctx.Value(stateKey{})
 
-	cState, ok := state.(*internalState).state.(S)
+	interState := state.(*internalState)
+
+	cState, ok := interState.state.(S)
 	if !ok {
 		var s S
-		return s, fmt.Errorf("unexpected state type. expected: %v, got: %v",
-			generic.TypeOf[S](), reflect.TypeOf(state))
+		return s, nil, fmt.Errorf("unexpected state type. expected: %v, got: %v",
+			generic.TypeOf[S](), reflect.TypeOf(interState.state))
 	}
 
-	return cState, nil
+	return cState, &interState.mu, nil
 }

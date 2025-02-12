@@ -53,10 +53,7 @@ func WithGraphCompileCallbacks(cbs ...GraphCompileCallback) GraphCompileOption {
 }
 
 // WithGetStateEnable enables/disables GetState in Workflow nodes.
-// note: Only use this in Workflow
-// Since WorkflowNodes execute concurrently without ordering guarantees relative to other nodes' state handlers.
-// GetState is disabled in WorkflowNodes to prevent race conditions by default.
-// When enabled, users must handle concurrent state access safety (e.g. using locks) themselves.
+// Deprecated: use ProcessState instead of GetState, which is always concurrency-safe.
 func WithGetStateEnable(enabled bool) GraphCompileOption {
 	return func(o *graphCompileOptions) {
 		o.getStateEnabled = enabled
