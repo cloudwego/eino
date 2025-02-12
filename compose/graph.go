@@ -847,6 +847,7 @@ func (g *graph) compile(ctx context.Context, opt *graphCompileOptions) (*composa
 		if err != nil {
 			return nil, err
 		}
+		r.dag = true
 	}
 
 	if opt != nil {
@@ -854,9 +855,9 @@ func (g *graph) compile(ctx context.Context, opt *graphCompileOptions) (*composa
 	}
 
 	// default options
-	if r.eager && r.options.maxRunSteps > 0 {
-		return nil, fmt.Errorf("cannot set max run steps in eager mode")
-	} else if !r.eager && r.options.maxRunSteps == 0 {
+	if r.dag && r.options.maxRunSteps > 0 {
+		return nil, fmt.Errorf("cannot set max run steps in dag mode")
+	} else if !r.dag && r.options.maxRunSteps == 0 {
 		r.options.maxRunSteps = len(r.chanSubscribeTo) + 10
 	}
 

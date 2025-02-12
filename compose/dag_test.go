@@ -130,7 +130,7 @@ func TestDAG(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	r, err := g.compile(context.Background(), &graphCompileOptions{nodeTriggerMode: AllPredecessor, maxRunSteps: 10})
+	r, err := g.compile(context.Background(), &graphCompileOptions{nodeTriggerMode: AllPredecessor})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -146,7 +146,7 @@ func TestDAG(t *testing.T) {
 	}
 
 	// test Compile[I,O]
-	runner, err := g.Compile(context.Background(), WithMaxRunSteps(100), WithNodeTriggerMode(AllPredecessor))
+	runner, err := g.Compile(context.Background(), WithNodeTriggerMode(AllPredecessor))
 	if err != nil {
 		t.Fatal(err)
 	}
