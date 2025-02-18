@@ -17,12 +17,12 @@
 package schema
 
 import (
-	"container/list"
 	"errors"
 	"io"
 	"reflect"
 	"runtime/debug"
 	"sync"
+	"sync/atomic"
 
 	"github.com/cloudwego/eino/utils/safe"
 )
@@ -531,24 +531,27 @@ func (srw *streamReaderWithConvert[T]) toStream() *stream[T] {
 	return ret
 }
 
-type listElement[T any] struct {
-	item     streamItem[T]
-	refCount int
+type cpStreamElement[T any] struct {
+	once sync.Once
+	next *cpStreamElement[T]
+	item streamItem[T]
 }
 
 func copyStreamReaders[T any](sr *StreamReader[T], n int) []*StreamReader[T] {
-	cpsr := &parentStreamReader[T]{
-		sr:     sr,
-		recvMu: sync.Mutex{},
-		mem: &cpStreamMem[T]{
-			mu:            sync.Mutex{},
-			buf:           list.New(),
-			subStreamList: make([]*list.Element, n),
-			closedNum:     0,
-			closedList:    make([]bool, n),
-			hasFinished:   false,
-		},
+	mem := &cpStreamMem[T]{
+		sr:            sr,
+		subStreamList: make([]*cpStreamElement[T], n),
+		closedNum:     0,
+		closedList:    make([]bool, n),
 	}
+
+	elem := &cpStreamElement[T]{} // empty element
+
+	for i := range mem.subStreamList {
+		mem.subStreamList[i] = elem
+	}
+
+	cpsr := &parentStreamReader[T]{mem: mem}
 
 	ret := make([]*StreamReader[T], n)
 	for i := range ret {
@@ -565,129 +568,68 @@ func copyStreamReaders[T any](sr *StreamReader[T], n int) []*StreamReader[T] {
 }
 
 type parentStreamReader[T any] struct {
-	sr *StreamReader[T]
-
-	recvMu sync.Mutex
-
 	mem *cpStreamMem[T]
 }
 
 type cpStreamMem[T any] struct {
-	mu sync.Mutex
+	sr *StreamReader[T]
 
-	buf           *list.List
-	subStreamList []*list.Element
+	subStreamList []*cpStreamElement[T]
 
-	closedNum  int
+	closedNum  int64
 	closedList []bool
-
-	hasFinished bool
 }
 
 func (c *parentStreamReader[T]) peek(idx int) (T, error) {
-	if t, err, ok := c.mem.peek(idx); ok {
-		return t, err
-	}
-
-	c.recvMu.Lock()
-	defer c.recvMu.Unlock()
-
-	// retry read from buffer
-	if t, err, ok := c.mem.peek(idx); ok {
-		return t, err
-	}
-
-	// get value from StreamReader
-	nChunk, err := c.sr.Recv()
-
-	c.mem.set(idx, nChunk, err)
-
-	return nChunk, err
+	return c.mem.peek(idx)
 }
 
 func (c *parentStreamReader[T]) close(idx int) {
 	if allClosed := c.mem.close(idx); allClosed {
-		c.sr.Close()
+		c.mem.sr.Close()
 	}
 }
 
-func (m *cpStreamMem[T]) peek(idx int) (T, error, bool) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	if elem := m.subStreamList[idx]; elem != nil {
-		next := elem.Next()
-		cElem := elem.Value.(*listElement[T]) // nolint: byted_interface_check_golintx
-		cElem.refCount--
-		if cElem.refCount == 0 {
-			m.buf.Remove(elem)
-		}
-
-		m.subStreamList[idx] = next
-		return cElem.item.chunk, cElem.item.err, true
-	}
-
-	var t T
-
-	if m.hasFinished {
-		return t, io.EOF, true
-	}
-
-	return t, nil, false
-}
-
-func (m *cpStreamMem[T]) set(idx int, nChunk T, err error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	if err == io.EOF { // nolint: byted_s_error_binary
-		m.hasFinished = true
+// peek concurrent not safe for same idx, concurrent safe for different idx, so
+// make sure recv StreamReader using for loop in exactly single goroutine.
+func (m *cpStreamMem[T]) peek(idx int) (t T, err error) {
+	elem := m.subStreamList[idx]
+	if elem == nil {
 		return
 	}
 
-	nElem := &listElement[T]{
-		item:     streamItem[T]{chunk: nChunk, err: err},
-		refCount: len(m.subStreamList) - m.closedNum - 1, // except chan receiver
-	}
-
-	if nElem.refCount == 0 {
-		// no need to set buffer when there's no other receivers
-		return
-	}
-
-	elem := m.buf.PushBack(nElem)
-	for i := range m.subStreamList {
-		if m.subStreamList[i] == nil && i != idx && !m.closedList[i] {
-			m.subStreamList[i] = elem
+	elem.once.Do(func() {
+		// write
+		t, err = m.sr.Recv()
+		elem.item = streamItem[T]{chunk: t, err: err}
+		if err != io.EOF { // nolint: byted_s_error_binary
+			elem.next = &cpStreamElement[T]{}
+			m.subStreamList[idx] = elem.next
 		}
+	})
+
+	// read
+	t = elem.item.chunk
+	err = elem.item.err
+	if err != io.EOF {
+		m.subStreamList[idx] = elem.next
 	}
+
+	return t, err
 }
 
 func (m *cpStreamMem[T]) close(idx int) (allClosed bool) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
 	if m.closedList[idx] {
 		return false // avoid close multiple times
 	}
 
 	m.closedList[idx] = true
-	m.closedNum++
-	if m.closedNum == len(m.subStreamList) {
+	curClosedNum := atomic.AddInt64(&m.closedNum, 1)
+	if int(curClosedNum) == len(m.subStreamList) {
 		allClosed = true
 	}
 
-	p := m.subStreamList[idx]
-	for p != nil {
-		next := p.Next()
-		ptr := p.Value.(*listElement[T]) // nolint: byted_interface_check_golintx
-		ptr.refCount--
-		if ptr.refCount == 0 {
-			m.buf.Remove(p)
-		}
-
-		p = next
-	}
+	m.subStreamList[idx] = nil
 
 	return allClosed
 }
