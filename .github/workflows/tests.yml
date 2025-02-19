@@ -13,6 +13,10 @@ jobs:
   unit-test:
     name: eino-unit-test
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+      repository-projects: write
     env:
       COVERAGE_FILE: coverage.out
       BREAKDOWN_FILE: main.breakdown
@@ -100,6 +104,10 @@ jobs:
         run: echo "coverage check failed" && exit 1
   benchmark-test:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+      repository-projects: write
     steps:
       - uses: actions/checkout@v4
       - name: Set up Go
@@ -115,6 +123,10 @@ jobs:
       matrix:
         go: [ "1.19", "1.20", "1.21", "1.22" ]
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+      repository-projects: write
     steps:
       - uses: actions/checkout@v4
       - name: Set up Go
@@ -131,6 +143,10 @@ jobs:
   api-compatibility:
     name: api-compatibility-check
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+      repository-projects: write
     if: github.event_name == 'pull_request'
     
     steps:

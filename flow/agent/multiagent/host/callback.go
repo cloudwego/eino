@@ -28,7 +28,7 @@ import (
 )
 
 // MultiAgentCallback is the callback interface for host multi-agent.
-type MultiAgentCallback interface { // nolint: byted_s_interface_name
+type MultiAgentCallback interface {
 	OnHandOff(ctx context.Context, info *HandOffInfo) context.Context
 }
 
@@ -38,13 +38,8 @@ type HandOffInfo struct {
 	Argument    string
 }
 
-// convertCallbacks reads graph call options, extract host.MultiAgentCallback and convert it to callbacks.Handler.
-func convertCallbacks(opts ...agent.AgentOption) callbacks.Handler {
-	agentOptions := agent.GetImplSpecificOptions(&options{}, opts...)
-	if len(agentOptions.agentCallbacks) == 0 {
-		return nil
-	}
-
+// ConvertCallbackHandlers converts []host.MultiAgentCallback to callbacks.Handler.
+func ConvertCallbackHandlers(handlers ...MultiAgentCallback) callbacks.Handler {
 	onChatModelEnd := func(ctx context.Context, info *callbacks.RunInfo, output *model.CallbackOutput) context.Context {
 		if output == nil || info == nil {
 			return ctx
@@ -58,8 +53,7 @@ func convertCallbacks(opts ...agent.AgentOption) callbacks.Handler {
 		agentName := msg.ToolCalls[0].Function.Name
 		argument := msg.ToolCalls[0].Function.Arguments
 
-		for i := range agentOptions.agentCallbacks {
-			cb := agentOptions.agentCallbacks[i]
+		for _, cb := range handlers {
 			ctx = cb.OnHandOff(ctx, &HandOffInfo{
 				ToAgentName: agentName,
 				Argument:    argument,
@@ -103,8 +97,7 @@ func convertCallbacks(opts ...agent.AgentOption) callbacks.Handler {
 			return ctx
 		}
 
-		for i := range agentOptions.agentCallbacks {
-			cb := agentOptions.agentCallbacks[i]
+		for _, cb := range handlers {
 			ctx = cb.OnHandOff(ctx, &HandOffInfo{
 				ToAgentName: msg.ToolCalls[0].Function.Name,
 				Argument:    msg.ToolCalls[0].Function.Arguments,
@@ -118,4 +111,15 @@ func convertCallbacks(opts ...agent.AgentOption) callbacks.Handler {
 		OnEnd:                 onChatModelEnd,
 		OnEndWithStreamOutput: onChatModelEndWithStreamOutput,
 	}).Handler()
+}
+
+// convertCallbacks reads graph call options, extract host.MultiAgentCallback and convert it to callbacks.Handler.
+func convertCallbacks(opts ...agent.AgentOption) callbacks.Handler {
+	agentOptions := agent.GetImplSpecificOptions(&options{}, opts...)
+	if len(agentOptions.agentCallbacks) == 0 {
+		return nil
+	}
+
+	handlers := agentOptions.agentCallbacks
+	return ConvertCallbackHandlers(handlers...)
 }

@@ -32,7 +32,9 @@ import (
 // A host agent is responsible for deciding which specialist to 'hand off' the task to.
 // One or more specialist agents are responsible for completing the task.
 type MultiAgent struct {
-	runnable compose.Runnable[[]*schema.Message, *schema.Message]
+	runnable         compose.Runnable[[]*schema.Message, *schema.Message]
+	graph            *compose.Graph[[]*schema.Message, *schema.Message]
+	graphAddNodeOpts []compose.GraphAddNodeOpt
 }
 
 func (ma *MultiAgent) Generate(ctx context.Context, input []*schema.Message, opts ...agent.AgentOption) (*schema.Message, error) {
@@ -40,7 +42,7 @@ func (ma *MultiAgent) Generate(ctx context.Context, input []*schema.Message, opt
 
 	handler := convertCallbacks(opts...)
 	if handler != nil {
-		composeOptions = append(composeOptions, compose.WithCallbacks(handler).DesignateNode(hostName))
+		composeOptions = append(composeOptions, compose.WithCallbacks(handler).DesignateNode(ma.HostNodeKey()))
 	}
 
 	return ma.runnable.Invoke(ctx, input, composeOptions...)
@@ -51,10 +53,19 @@ func (ma *MultiAgent) Stream(ctx context.Context, input []*schema.Message, opts 
 
 	handler := convertCallbacks(opts...)
 	if handler != nil {
-		composeOptions = append(composeOptions, compose.WithCallbacks(handler).DesignateNode(hostName))
+		composeOptions = append(composeOptions, compose.WithCallbacks(handler).DesignateNode(ma.HostNodeKey()))
 	}
 
 	return ma.runnable.Stream(ctx, input, composeOptions...)
+}
+
+// ExportGraph exports the underlying graph from MultiAgent, along with the []compose.GraphAddNodeOpt to be used when adding this graph to another graph.
+func (ma *MultiAgent) ExportGraph() (compose.AnyGraph, []compose.GraphAddNodeOpt) {
+	return ma.graph, ma.graphAddNodeOpts
+}
+
+func (ma *MultiAgent) HostNodeKey() string {
+	return defaultHostNodeKey
 }
 
 // MultiAgentConfig is the config for host multi-agent system.
@@ -133,9 +144,9 @@ type Host struct {
 // Specialist is a specialist agent within a host multi-agent system.
 // It can be a model.ChatModel or any Invokable and/or Streamable, such as react.Agent.
 // ChatModel and (Invokable / Streamable) are mutually exclusive, only one should be provided.
-// If Invokable is provided but not Streamable, then the Specialist will be compose.InvokableLambda.
-// If Streamable is provided but not Invokable, then the Specialist will be compose.StreamableLambda.
-// if Both Invokable and Streamable is provided, then the Specialist will be compose.AnyLambda.
+// If Invokable is provided but not Streamable, then the Specialist will be 'compose.InvokableLambda'.
+// If Streamable is provided but not Invokable, then the Specialist will be 'compose.StreamableLambda'.
+// if Both Invokable and Streamable is provided, then the Specialist will be 'compose.AnyLambda'.
 type Specialist struct {
 	AgentMeta
 

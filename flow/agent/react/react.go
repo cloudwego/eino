@@ -123,7 +123,9 @@ func firstChunkStreamToolCallChecker(_ context.Context, sr *schema.StreamReader[
 //	if err != nil {...}
 //	println(msg.Content)
 type Agent struct {
-	runnable compose.Runnable[[]*schema.Message, *schema.Message]
+	runnable         compose.Runnable[[]*schema.Message, *schema.Message]
+	graph            *compose.Graph[[]*schema.Message, *schema.Message]
+	graphAddNodeOpts []compose.GraphAddNodeOpt
 }
 
 // NewAgent creates a ReAct agent that feeds tool response into next round of Chat Model generation.
@@ -210,12 +212,17 @@ func NewAgent(ctx context.Context, config *AgentConfig) (_ *Agent, err error) {
 		return nil, err
 	}
 
-	runnable, err := graph.Compile(ctx, compose.WithMaxRunSteps(config.MaxStep))
+	compileOpts := []compose.GraphCompileOption{compose.WithMaxRunSteps(config.MaxStep), compose.WithNodeTriggerMode(compose.AnyPredecessor)}
+	runnable, err := graph.Compile(ctx, compileOpts...)
 	if err != nil {
 		return nil, err
 	}
 
-	return &Agent{runnable: runnable}, nil
+	return &Agent{
+		runnable:         runnable,
+		graph:            graph,
+		graphAddNodeOpts: []compose.GraphAddNodeOpt{compose.WithGraphCompileOptions(compileOpts...)},
+	}, nil
 }
 
 func buildReturnDirectly(graph *compose.Graph[[]*schema.Message, *schema.Message]) (err error) {
@@ -317,4 +324,9 @@ func (r *Agent) Stream(ctx context.Context, input []*schema.Message, opts ...age
 	}
 
 	return res, nil
+}
+
+// ExportGraph exports the underlying graph from Agent, along with the []compose.GraphAddNodeOpt to be used when adding this graph to another graph.
+func (r *Agent) ExportGraph() (compose.AnyGraph, []compose.GraphAddNodeOpt) {
+	return r.graph, r.graphAddNodeOpts
 }

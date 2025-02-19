@@ -429,7 +429,7 @@ func TestAgentInGraph(t *testing.T) {
 			}).Times(3)
 		cm.EXPECT().BindTools(gomock.Any()).Return(nil).AnyTimes()
 
-		agent, err := NewAgent(ctx, &AgentConfig{
+		a, err := NewAgent(ctx, &AgentConfig{
 			Model: cm,
 			ToolsConfig: compose.ToolsNodeConfig{
 				Tools: []tool.BaseTool{fakeTool, &fakeStreamToolGreetForTest{}},
@@ -440,7 +440,7 @@ func TestAgentInGraph(t *testing.T) {
 		assert.Nil(t, err)
 
 		chain := compose.NewChain[[]*schema.Message, string]()
-		agentLambda, err := compose.AnyLambda(agent.Generate, agent.Stream, nil, nil)
+		agentLambda, err := compose.AnyLambda(a.Generate, a.Stream, nil, nil)
 		assert.Nil(t, err)
 
 		chain.
@@ -495,7 +495,7 @@ func TestAgentInGraph(t *testing.T) {
 			}).Times(3)
 		cm.EXPECT().BindTools(gomock.Any()).Return(nil).AnyTimes()
 
-		agent, err := NewAgent(ctx, &AgentConfig{
+		a, err := NewAgent(ctx, &AgentConfig{
 			Model: cm,
 			ToolsConfig: compose.ToolsNodeConfig{
 				Tools: []tool.BaseTool{&fakeToolGreetForTest{}, fakeStreamTool},
@@ -506,11 +506,11 @@ func TestAgentInGraph(t *testing.T) {
 		assert.Nil(t, err)
 
 		chain := compose.NewChain[[]*schema.Message, string]()
-		agentLambda, err := compose.AnyLambda(agent.Generate, agent.Stream, nil, nil)
+		agentGraph, opts := a.ExportGraph()
 		assert.Nil(t, err)
 
 		chain.
-			AppendLambda(agentLambda).
+			AppendGraph(agentGraph, opts...).
 			AppendLambda(compose.InvokableLambda(func(ctx context.Context, input *schema.Message) (string, error) {
 				t.Log("got agent response: ", input.Content)
 				return input.Content, nil
@@ -550,7 +550,7 @@ type fakeStreamToolGreetForTest struct {
 	curCount int
 }
 
-func (t *fakeStreamToolGreetForTest) StreamableRun(ctx context.Context, argumentsInJSON string, opts ...tool.Option) (
+func (t *fakeStreamToolGreetForTest) StreamableRun(_ context.Context, argumentsInJSON string, _ ...tool.Option) (
 	*schema.StreamReader[string], error) {
 	p := &fakeToolInput{}
 	err := sonic.UnmarshalString(argumentsInJSON, p)
@@ -572,7 +572,7 @@ type fakeToolGreetForTest struct {
 	curCount int
 }
 
-func (t *fakeToolGreetForTest) Info(ctx context.Context) (*schema.ToolInfo, error) {
+func (t *fakeToolGreetForTest) Info(_ context.Context) (*schema.ToolInfo, error) {
 	return &schema.ToolInfo{
 		Name: "greet",
 		Desc: "greet with name",
@@ -587,7 +587,7 @@ func (t *fakeToolGreetForTest) Info(ctx context.Context) (*schema.ToolInfo, erro
 	}, nil
 }
 
-func (t *fakeStreamToolGreetForTest) Info(ctx context.Context) (*schema.ToolInfo, error) {
+func (t *fakeStreamToolGreetForTest) Info(_ context.Context) (*schema.ToolInfo, error) {
 	return &schema.ToolInfo{
 		Name: "greet in stream",
 		Desc: "greet with name in stream",
@@ -602,7 +602,7 @@ func (t *fakeStreamToolGreetForTest) Info(ctx context.Context) (*schema.ToolInfo
 	}, nil
 }
 
-func (t *fakeToolGreetForTest) InvokableRun(ctx context.Context, argumentsInJSON string, opts ...tool.Option) (string, error) {
+func (t *fakeToolGreetForTest) InvokableRun(_ context.Context, argumentsInJSON string, _ ...tool.Option) (string, error) {
 	p := &fakeToolInput{}
 	err := sonic.UnmarshalString(argumentsInJSON, p)
 	if err != nil {
@@ -622,7 +622,7 @@ type fakeToolInput struct {
 }
 
 func randStr() string {
-	seeds := []rune("abcdefghijklmnopqrstuvwxyz")
+	seeds := []rune("this is a seed")
 	b := make([]rune, 8)
 	for i := range b {
 		b[i] = seeds[rand.Intn(len(seeds))]

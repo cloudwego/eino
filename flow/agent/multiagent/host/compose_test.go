@@ -24,6 +24,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"go.uber.org/mock/gomock"
 
+	"github.com/cloudwego/eino/components/prompt"
+	"github.com/cloudwego/eino/compose"
 	"github.com/cloudwego/eino/flow/agent"
 	"github.com/cloudwego/eino/internal/mock/components/model"
 	"github.com/cloudwego/eino/schema"
@@ -359,6 +361,61 @@ func TestHostMultiAgent(t *testing.T) {
 			{
 				ToAgentName: specialist2.Name,
 				Argument:    `{"reason": "specialist 2 is even better"}`,
+			},
+		}, mockCallback.infos)
+	})
+
+	t.Run("multi-agent within graph", func(t *testing.T) {
+		handOffMsg := &schema.Message{
+			Role: schema.Assistant,
+			ToolCalls: []schema.ToolCall{
+				{
+					Index: generic.PtrOf(0),
+					Function: schema.FunctionCall{
+						Name:      specialist1.Name,
+						Arguments: `{"reason": "specialist 1 is the best"}`,
+					},
+				},
+			},
+		}
+
+		specialistMsg := &schema.Message{
+			Role:    schema.Assistant,
+			Content: "Beijing",
+		}
+
+		mockHostLLM.EXPECT().Generate(gomock.Any(), gomock.Any()).Return(handOffMsg, nil).Times(1)
+		mockSpecialistLLM1.EXPECT().Generate(gomock.Any(), gomock.Any()).Return(specialistMsg, nil).Times(1)
+
+		mockCallback := &mockAgentCallback{}
+
+		hostMA, err := NewMultiAgent(ctx, &MultiAgentConfig{
+			Host: Host{
+				ChatModel: mockHostLLM,
+			},
+			Specialists: []*Specialist{
+				specialist1,
+				specialist2,
+			},
+		})
+
+		assert.NoError(t, err)
+
+		maGraph, opts := hostMA.ExportGraph()
+
+		fullGraph, err := compose.NewChain[map[string]any, *schema.Message]().
+			AppendChatTemplate(prompt.FromMessages(schema.FString, schema.UserMessage("what's the capital city of {country_name}"))).
+			AppendGraph(maGraph, append(opts, compose.WithNodeKey("host_ma_node"))...).
+			Compile(ctx)
+		assert.NoError(t, err)
+
+		out, err := fullGraph.Invoke(ctx, map[string]any{"country_name": "China"}, compose.WithCallbacks(ConvertCallbackHandlers(mockCallback)).DesignateNodeWithPath(compose.NewNodePath("host_ma_node", hostMA.HostNodeKey())))
+		assert.NoError(t, err)
+		assert.Equal(t, "Beijing", out.Content)
+		assert.Equal(t, []*HandOffInfo{
+			{
+				ToAgentName: specialist1.Name,
+				Argument:    `{"reason": "specialist 1 is the best"}`,
 			},
 		}, mockCallback.infos)
 	})

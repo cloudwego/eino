@@ -26,8 +26,8 @@ import (
 )
 
 const (
-	hostName          = "host"
-	defaultHostPrompt = "decide which tool is best for the task and call only the best tool."
+	defaultHostNodeKey = "host" // the key of the host node in the graph
+	defaultHostPrompt  = "decide which tool is best for the task and call only the best tool."
 )
 
 type state struct {
@@ -105,13 +105,16 @@ func NewMultiAgent(ctx context.Context, config *MultiAgentConfig) (*MultiAgent, 
 		return nil, err
 	}
 
-	r, err := g.Compile(ctx, compose.WithNodeTriggerMode(compose.AnyPredecessor), compose.WithGraphName(name))
+	compileOpts := []compose.GraphCompileOption{compose.WithNodeTriggerMode(compose.AnyPredecessor), compose.WithGraphName(name)}
+	r, err := g.Compile(ctx, compileOpts...)
 	if err != nil {
 		return nil, err
 	}
 
 	return &MultiAgent{
-		runnable: r,
+		runnable:         r,
+		graph:            g,
+		graphAddNodeOpts: []compose.GraphAddNodeOpt{compose.WithGraphCompileOptions(compileOpts...)},
 	}, nil
 }
 
@@ -161,11 +164,11 @@ func addHostAgent(model model.ChatModel, prompt string, agentTools []*schema.Too
 			Content: prompt,
 		}}, input...), nil
 	}
-	if err := g.AddChatModelNode(hostName, model, compose.WithStatePreHandler(preHandler), compose.WithNodeName(hostName)); err != nil {
+	if err := g.AddChatModelNode(defaultHostNodeKey, model, compose.WithStatePreHandler(preHandler), compose.WithNodeName(defaultHostNodeKey)); err != nil {
 		return err
 	}
 
-	return g.AddEdge(compose.START, hostName)
+	return g.AddEdge(compose.START, defaultHostNodeKey)
 }
 
 func addDirectAnswerBranch(convertorName string, g *compose.Graph[[]*schema.Message, *schema.Message],
@@ -182,7 +185,7 @@ func addDirectAnswerBranch(convertorName string, g *compose.Graph[[]*schema.Mess
 		return compose.END, nil
 	}, map[string]bool{convertorName: true, compose.END: true})
 
-	return g.AddBranch(hostName, branch)
+	return g.AddBranch(defaultHostNodeKey, branch)
 }
 
 func addSpecialistsBranch(convertorName string, agentMap map[string]bool, g *compose.Graph[[]*schema.Message, *schema.Message]) error {
