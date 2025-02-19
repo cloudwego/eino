@@ -45,6 +45,10 @@ import (
 // DO NOT use it under other circumstances.
 var ErrNoValue = errors.New("no value")
 
+// ErrRecvAfterClosed indicates that StreamReader.Recv was unexpectedly called after StreamReader.Close.
+// This error should not occur during normal use of StreamReader.Recv. If it does, please check your application code.
+var ErrRecvAfterClosed = errors.New("recv after stream closed")
+
 // Pipe creates a new stream with the given capacity that represented with StreamWriter and StreamReader.
 // The capacity is the maximum number of items that can be buffered in the stream.
 // e.g.
@@ -537,18 +541,19 @@ type cpStreamElement[T any] struct {
 	item streamItem[T]
 }
 
+// copyStreamReaders creates multiple independent StreamReaders from a single StreamReader.
+// Each child StreamReader can read from the original stream independently.
 func copyStreamReaders[T any](sr *StreamReader[T], n int) []*StreamReader[T] {
 	cpsr := &parentStreamReader[T]{
 		sr:            sr,
 		subStreamList: make([]*cpStreamElement[T], n),
 		closedNum:     0,
-		closedList:    make([]bool, n),
 	}
 
-	// init subStreamList with empty element, which acts like tail node, for
-	// nil element (used for dereference) represent child is closed, and
-	// it's hard to link prev and this element when you don't know length of original channel,
-	// prev pointer also provided difficulty to dereference element (which you might need record reference count).
+	// Initialize subStreamList with an empty element, which acts like a tail node.
+	// A nil element (used for dereference) represents that the child has been closed.
+	// It is challenging to link the previous and current elements when the length of the original channel is unknown.
+	// Additionally, using a previous pointer complicates dereferencing elements, possibly requiring reference counting.
 	elem := &cpStreamElement[T]{}
 
 	for i := range cpsr.subStreamList {
@@ -570,31 +575,30 @@ func copyStreamReaders[T any](sr *StreamReader[T], n int) []*StreamReader[T] {
 }
 
 type parentStreamReader[T any] struct {
-	// sr original StreamReader
+	// sr is the original StreamReader.
 	sr *StreamReader[T]
 
-	// subStreamList child index to latest read chunk of this child.
-	// Any value comes from a hidden linked list of cpStreamElement.
+	// subStreamList maps each child's index to its latest read chunk.
+	// Each value comes from a hidden linked list of cpStreamElement.
 	subStreamList []*cpStreamElement[T]
 
-	// closedNum count of closed child
+	// closedNum is the count of closed children.
 	closedNum uint32
-
-	// closedList index of closed child
-	closedList []bool
 }
 
-// peek concurrent not safe for same idx, concurrent safe for different idx, so
-// make sure recv StreamReader using for loop in exactly single goroutine.
+// peek is not safe for concurrent use with the same idx but is safe for different idx.
+// Ensure that each child StreamReader uses a for-loop in a single goroutine.
 func (p *parentStreamReader[T]) peek(idx int) (t T, err error) {
 	elem := p.subStreamList[idx]
 	if elem == nil {
-		return
+		// Unexpected call to receive after the child has been closed.
+		return t, ErrRecvAfterClosed
 	}
 
-	// once here is used to:
-	// 1. write content of this cpStreamElement.
-	// 2. fill next of this cpStreamElement with an empty cpStreamElement, like init in copyStreamReaders.
+	// The sync.Once here is used to:
+	// 1. Write the content of this cpStreamElement.
+	// 2. Initialize the 'next' field of this cpStreamElement with an empty cpStreamElement,
+	//    similar to the initialization in copyStreamReaders.
 	elem.once.Do(func() {
 		t, err = p.sr.Recv()
 		elem.item = streamItem[T]{chunk: t, err: err}
@@ -604,8 +608,8 @@ func (p *parentStreamReader[T]) peek(idx int) (t T, err error) {
 		}
 	})
 
-	// element has been set before, and won't be modified, so
-	// children could read this element content and next pointer concurrently.
+	// The element has been set and will not be modified again.
+	// Therefore, children can read this element's content and 'next' pointer concurrently.
 	t = elem.item.chunk
 	err = elem.item.err
 	if err != io.EOF {
@@ -616,11 +620,9 @@ func (p *parentStreamReader[T]) peek(idx int) (t T, err error) {
 }
 
 func (p *parentStreamReader[T]) close(idx int) {
-	if p.closedList[idx] {
+	if p.subStreamList[idx] == nil {
 		return // avoid close multiple times
 	}
-
-	p.closedList[idx] = true
 
 	p.subStreamList[idx] = nil
 
