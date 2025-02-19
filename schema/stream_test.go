@@ -21,9 +21,7 @@ import (
 	"fmt"
 	"io"
 	"math/rand"
-	"runtime"
 	"sync"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -321,15 +319,8 @@ func TestNewStreamCopy(t *testing.T) {
 		}
 
 		wgEven.Wait()
-		memo := copies[0].csr.parent.mem
-		// memo.mu.Lock()
-		// closedNum := memo.closedNum
-		// memo.mu.Unlock()
-		// assert.Equal(t, m/2, closedNum)
-
 		wg.Wait()
-		assert.Equal(t, m, int(memo.closedNum))
-		//assert.Equal(t, 0, memo.buf.Len())
+		assert.Equal(t, m, int(copies[0].csr.parent.closedNum))
 	})
 
 	t.Run("test reader do no close", func(t *testing.T) {
@@ -371,9 +362,7 @@ func TestNewStreamCopy(t *testing.T) {
 		}
 
 		wg.Wait()
-		memo := copies[0].csr.parent.mem
-		assert.Equal(t, 0, int(memo.closedNum)) // not closed
-		//assert.Equal(t, 0, memo.buf.Len()) // buff cleared
+		assert.Equal(t, 0, int(copies[0].csr.parent.closedNum)) // not closed
 	})
 
 }
@@ -583,181 +572,4 @@ func TestMultiStream(t *testing.T) {
 	if err != io.EOF {
 		t.Fatal("end stream haven't return EOF")
 	}
-}
-
-func TestStreamRecv(t *testing.T) {
-	n := 100
-	//m := 100
-
-	s := newStream[string](1)
-	scp := s.asReader().Copy(n)
-
-	go func() {
-
-		s.send("1", nil)
-
-		s.send("2", nil)
-
-		time.Sleep(time.Millisecond * 100)
-
-		// for i := 0; i < m; i++ {
-		//	s.send(fmt.Sprintf("%d", i), nil)
-		// time.Sleep(time.Millisecond * 10)
-		// }
-
-		s.closeSend()
-	}()
-
-	wg := sync.WaitGroup{}
-	wg.Add(n)
-
-	var (
-		appSlice []int
-		mu       = sync.Mutex{}
-	)
-
-	go func() {
-		defer func() {
-			scp[0].Close()
-			wg.Done()
-		}()
-
-		lastTime := time.Now()
-		for {
-			str, err := scp[0].Recv()
-			if err == io.EOF {
-				break
-			}
-
-			now := time.Now()
-			fmt.Printf("child[%d] duration %d ns: %s\n", 0, now.Sub(lastTime).Nanoseconds(), str)
-			lastTime = now
-			mu.Lock()
-			appSlice = append(appSlice, 0)
-			mu.Unlock()
-
-		}
-	}()
-
-	time.Sleep(time.Millisecond * 20)
-	for i := 1; i < n; i++ {
-		j := i
-		go func() {
-			defer func() {
-				scp[j].Close()
-				wg.Done()
-			}()
-
-			lastTime := time.Now()
-			for {
-				str, err := scp[j].Recv()
-				if err == io.EOF {
-					break
-				}
-
-				now := time.Now()
-				_, _ = now, lastTime
-				_ = str
-				//fmt.Printf("child[%d] after %d ms: %s\n", j, now.Sub(lastTime).Milliseconds(), str)
-				mu.Lock()
-				appSlice = append(appSlice, j)
-				mu.Unlock()
-			}
-		}()
-	}
-
-	wg.Wait()
-
-	fmt.Println(uniformityDegree(appSlice))
-	//fmt.Println(uniformityDegree([]int{0, 0, 0, 0, 0, 1, 1, 1, 1, 1}))
-	//fmt.Println(uniformityDegree([]int{0, 1, 0, 1}))
-}
-
-func uniformityDegree(nums []int) float64 {
-	if len(nums) == 0 {
-		return 0
-	}
-
-	runLengths := []float64{}
-	currentRunLength := 1
-
-	for i := 1; i < len(nums); i++ {
-		if nums[i] == nums[i-1] {
-			currentRunLength++
-		} else {
-			runLengths = append(runLengths, float64(currentRunLength))
-			currentRunLength = 1
-		}
-	}
-	runLengths = append(runLengths, float64(currentRunLength))
-
-	var sum float64
-	for _, length := range runLengths {
-		sum += length
-	}
-	mean := sum / float64(len(runLengths))
-
-	return mean
-}
-
-func TestStream1(t *testing.T) {
-	runtime.GOMAXPROCS(1)
-
-	sr, sw := Pipe[int](0)
-	go func() {
-		for i := 0; i < 100; i++ {
-			sw.Send(i, nil)
-			time.Sleep(3 * time.Millisecond)
-		}
-		sw.Close()
-	}()
-	copied := sr.Copy(2)
-	var (
-		now   = time.Now().UnixMilli()
-		ts    = []int64{now, now}
-		tsOld = []int64{now, now}
-	)
-	var count int32
-	wg := sync.WaitGroup{}
-	wg.Add(2)
-	go func() {
-		s := copied[0]
-		for {
-			n, e := s.Recv()
-			if e != nil {
-				if e == io.EOF {
-					break
-				}
-			}
-			tsOld[0] = ts[0]
-			ts[0] = time.Now().UnixMilli()
-			interval := ts[0] - tsOld[0]
-			if interval >= 6 {
-				atomic.AddInt32(&count, 1)
-			}
-			t.Logf("reader= 0, index= %d, interval= %v", n, interval)
-		}
-		wg.Done()
-	}()
-	go func() {
-		s := copied[1]
-		for {
-			n, e := s.Recv()
-			if e != nil {
-				if e == io.EOF {
-					break
-				}
-			}
-			tsOld[1] = ts[1]
-			ts[1] = time.Now().UnixMilli()
-			interval := ts[1] - tsOld[1]
-			if interval >= 6 {
-				atomic.AddInt32(&count, 1)
-			}
-			t.Logf("reader= 1, index= %d, interval= %v", n, interval)
-		}
-		wg.Done()
-	}()
-	wg.Wait()
-	t.Logf("count= %d", count)
 }

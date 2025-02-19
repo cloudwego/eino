@@ -538,20 +538,22 @@ type cpStreamElement[T any] struct {
 }
 
 func copyStreamReaders[T any](sr *StreamReader[T], n int) []*StreamReader[T] {
-	mem := &cpStreamMem[T]{
+	cpsr := &parentStreamReader[T]{
 		sr:            sr,
 		subStreamList: make([]*cpStreamElement[T], n),
 		closedNum:     0,
 		closedList:    make([]bool, n),
 	}
 
-	elem := &cpStreamElement[T]{} // empty element
+	// init subStreamList with empty element, which acts like tail node, for
+	// nil element (used for dereference) represent child is closed, and
+	// it's hard to link prev and this element when you don't know length of original channel,
+	// prev pointer also provided difficulty to dereference element (which you might need record reference count).
+	elem := &cpStreamElement[T]{}
 
-	for i := range mem.subStreamList {
-		mem.subStreamList[i] = elem
+	for i := range cpsr.subStreamList {
+		cpsr.subStreamList[i] = elem
 	}
-
-	cpsr := &parentStreamReader[T]{mem: mem}
 
 	ret := make([]*StreamReader[T], n)
 	for i := range ret {
@@ -568,70 +570,66 @@ func copyStreamReaders[T any](sr *StreamReader[T], n int) []*StreamReader[T] {
 }
 
 type parentStreamReader[T any] struct {
-	mem *cpStreamMem[T]
-}
-
-type cpStreamMem[T any] struct {
+	// sr original StreamReader
 	sr *StreamReader[T]
 
+	// subStreamList child index to latest read chunk of this child.
+	// Any value comes from a hidden linked list of cpStreamElement.
 	subStreamList []*cpStreamElement[T]
 
-	closedNum  int64
+	// closedNum count of closed child
+	closedNum uint32
+
+	// closedList index of closed child
 	closedList []bool
-}
-
-func (c *parentStreamReader[T]) peek(idx int) (T, error) {
-	return c.mem.peek(idx)
-}
-
-func (c *parentStreamReader[T]) close(idx int) {
-	if allClosed := c.mem.close(idx); allClosed {
-		c.mem.sr.Close()
-	}
 }
 
 // peek concurrent not safe for same idx, concurrent safe for different idx, so
 // make sure recv StreamReader using for loop in exactly single goroutine.
-func (m *cpStreamMem[T]) peek(idx int) (t T, err error) {
-	elem := m.subStreamList[idx]
+func (p *parentStreamReader[T]) peek(idx int) (t T, err error) {
+	elem := p.subStreamList[idx]
 	if elem == nil {
 		return
 	}
 
+	// once here is used to:
+	// 1. write content of this cpStreamElement.
+	// 2. fill next of this cpStreamElement with an empty cpStreamElement, like init in copyStreamReaders.
 	elem.once.Do(func() {
-		// write
-		t, err = m.sr.Recv()
+		t, err = p.sr.Recv()
 		elem.item = streamItem[T]{chunk: t, err: err}
-		if err != io.EOF { // nolint: byted_s_error_binary
+		if err != io.EOF {
 			elem.next = &cpStreamElement[T]{}
-			m.subStreamList[idx] = elem.next
+			p.subStreamList[idx] = elem.next
 		}
 	})
 
-	// read
+	// element has been set before, and won't be modified, so
+	// children could read this element content and next pointer concurrently.
 	t = elem.item.chunk
 	err = elem.item.err
 	if err != io.EOF {
-		m.subStreamList[idx] = elem.next
+		p.subStreamList[idx] = elem.next
 	}
 
 	return t, err
 }
 
-func (m *cpStreamMem[T]) close(idx int) (allClosed bool) {
-	if m.closedList[idx] {
-		return false // avoid close multiple times
+func (p *parentStreamReader[T]) close(idx int) {
+	if p.closedList[idx] {
+		return // avoid close multiple times
 	}
 
-	m.closedList[idx] = true
-	curClosedNum := atomic.AddInt64(&m.closedNum, 1)
-	if int(curClosedNum) == len(m.subStreamList) {
-		allClosed = true
+	p.closedList[idx] = true
+
+	p.subStreamList[idx] = nil
+
+	curClosedNum := atomic.AddUint32(&p.closedNum, 1)
+
+	allClosed := int(curClosedNum) == len(p.subStreamList)
+	if allClosed {
+		p.sr.Close()
 	}
-
-	m.subStreamList[idx] = nil
-
-	return allClosed
 }
 
 type childStreamReader[T any] struct {
