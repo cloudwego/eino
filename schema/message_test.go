@@ -24,7 +24,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 
-	"github.com/cloudwego/eino/utils/generic"
+	"github.com/cloudwego/eino/internal/generic"
 )
 
 func TestMessageTemplate(t *testing.T) {

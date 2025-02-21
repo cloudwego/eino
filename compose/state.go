@@ -22,8 +22,8 @@ import (
 	"reflect"
 	"sync"
 
+	"github.com/cloudwego/eino/internal/generic"
 	"github.com/cloudwego/eino/schema"
-	"github.com/cloudwego/eino/utils/generic"
 )
 
 // GenLocalState is a function that generates the state.

@@ -27,9 +27,9 @@ import (
 	"github.com/cloudwego/eino/components/prompt"
 	"github.com/cloudwego/eino/compose"
 	"github.com/cloudwego/eino/flow/agent"
+	"github.com/cloudwego/eino/internal/generic"
 	"github.com/cloudwego/eino/internal/mock/components/model"
 	"github.com/cloudwego/eino/schema"
-	"github.com/cloudwego/eino/utils/generic"
 )
 
 func TestHostMultiAgent(t *testing.T) {

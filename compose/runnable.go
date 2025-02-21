@@ -21,8 +21,8 @@ import (
 	"fmt"
 	"reflect"
 
+	"github.com/cloudwego/eino/internal/generic"
 	"github.com/cloudwego/eino/schema"
-	"github.com/cloudwego/eino/utils/generic"
 )
 
 // Runnable is the interface for an executable object. Graph, Chain can be compiled into Runnable.

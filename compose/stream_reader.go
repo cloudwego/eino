@@ -19,8 +19,8 @@ package compose
 import (
 	"reflect"
 
+	"github.com/cloudwego/eino/internal/generic"
 	"github.com/cloudwego/eino/schema"
-	"github.com/cloudwego/eino/utils/generic"
 )
 
 type streamReader interface {

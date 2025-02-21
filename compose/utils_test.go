@@ -22,8 +22,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 
+	"github.com/cloudwego/eino/internal/generic"
 	"github.com/cloudwego/eino/schema"
-	"github.com/cloudwego/eino/utils/generic"
 )
 
 func TestMergeValues(t *testing.T) {

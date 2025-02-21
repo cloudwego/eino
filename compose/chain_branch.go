@@ -26,8 +26,8 @@ import (
 	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/components/prompt"
 	"github.com/cloudwego/eino/components/retriever"
+	"github.com/cloudwego/eino/internal/generic"
 	"github.com/cloudwego/eino/schema"
-	"github.com/cloudwego/eino/utils/generic"
 )
 
 type nodeOptionsPair generic.Pair[*graphNode, *graphAddNodeOpts]

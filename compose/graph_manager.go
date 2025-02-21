@@ -23,7 +23,7 @@ import (
 	"runtime/debug"
 	"sync"
 
-	"github.com/cloudwego/eino/utils/safe"
+	"github.com/cloudwego/eino/internal/safe"
 )
 
 type channel interface {

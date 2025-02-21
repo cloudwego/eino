@@ -26,8 +26,8 @@ import (
 	"github.com/cloudwego/eino/callbacks"
 	"github.com/cloudwego/eino/components"
 	"github.com/cloudwego/eino/components/tool"
+	"github.com/cloudwego/eino/internal/safe"
 	"github.com/cloudwego/eino/schema"
-	"github.com/cloudwego/eino/utils/safe"
 )
 
 type toolsNodeOptions struct {

@@ -23,8 +23,8 @@ import (
 
 	"github.com/cloudwego/eino/callbacks"
 	icb "github.com/cloudwego/eino/internal/callbacks"
+	"github.com/cloudwego/eino/internal/generic"
 	"github.com/cloudwego/eino/schema"
-	"github.com/cloudwego/eino/utils/generic"
 )
 
 func mergeMap(vs []any) (any, error) {

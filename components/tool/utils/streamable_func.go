@@ -23,8 +23,8 @@ import (
 	"github.com/bytedance/sonic"
 
 	"github.com/cloudwego/eino/components/tool"
+	"github.com/cloudwego/eino/internal/generic"
 	"github.com/cloudwego/eino/schema"
-	"github.com/cloudwego/eino/utils/generic"
 )
 
 // StreamFunc is the function type for the streamable tool.

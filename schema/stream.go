@@ -24,7 +24,7 @@ import (
 	"sync"
 	"sync/atomic"
 
-	"github.com/cloudwego/eino/utils/safe"
+	"github.com/cloudwego/eino/internal/safe"
 )
 
 // ErrNoValue is used during StreamReaderWithConvert to skip a streamItem, excluding it from the converted stream.

@@ -25,8 +25,8 @@ import (
 	"github.com/getkin/kin-openapi/openapi3gen"
 
 	"github.com/cloudwego/eino/components/tool"
+	"github.com/cloudwego/eino/internal/generic"
 	"github.com/cloudwego/eino/schema"
-	"github.com/cloudwego/eino/utils/generic"
 )
 
 // InvokeFunc is the function type for the tool.

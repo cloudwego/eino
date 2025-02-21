@@ -22,9 +22,9 @@ import (
 	"runtime/debug"
 	"strings"
 
+	"github.com/cloudwego/eino/internal/generic"
+	"github.com/cloudwego/eino/internal/safe"
 	"github.com/cloudwego/eino/schema"
-	"github.com/cloudwego/eino/utils/generic"
-	"github.com/cloudwego/eino/utils/safe"
 )
 
 type FieldMapping struct {
