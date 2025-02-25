@@ -1591,3 +1591,99 @@ func TestNestedDAGBranch(t *testing.T) {
 	assert.NoError(t, err)
 	assert.Equal(t, "hellohello24", result)
 }
+
+func TestHandlerTypeValidate(t *testing.T) {
+	g := NewGraph[string, string](WithGenLocalState(func(ctx context.Context) (state string) {
+		return ""
+	}))
+	// passthrough pre fail
+	err := g.AddPassthroughNode("1", WithStatePreHandler(func(ctx context.Context, in string, state string) (string, error) {
+		return "", nil
+	}))
+	assert.ErrorContains(t, err, "passthrough node[1]'s pre handler type isn't any")
+	g.buildError = nil
+	// passthrough pre fail with input key
+	err = g.AddPassthroughNode("1", WithStatePreHandler(func(ctx context.Context, in string, state string) (string, error) {
+		return "", nil
+	}), WithInputKey("input"))
+	assert.ErrorContains(t, err, "passthrough node[1]'s pre handler type isn't any")
+	g.buildError = nil
+	// passthrough post fail
+	err = g.AddPassthroughNode("1", WithStatePostHandler(func(ctx context.Context, in string, state string) (string, error) {
+		return "", nil
+	}))
+	assert.ErrorContains(t, err, "passthrough node[1]'s post handler type isn't any")
+	g.buildError = nil
+	// passthrough post fail with input key
+	err = g.AddPassthroughNode("1", WithStatePostHandler(func(ctx context.Context, in string, state string) (string, error) {
+		return "", nil
+	}), WithInputKey("input"))
+	assert.ErrorContains(t, err, "passthrough node[1]'s post handler type isn't any")
+	g.buildError = nil
+	// passthrough pre success
+	err = g.AddPassthroughNode("1", WithStatePreHandler(func(ctx context.Context, in any, state string) (any, error) {
+		return "", nil
+	}))
+	assert.NoError(t, err)
+	// passthrough pre success with input key
+	err = g.AddPassthroughNode("2", WithStatePreHandler(func(ctx context.Context, in any, state string) (any, error) {
+		return "", nil
+	}), WithInputKey("input"))
+	assert.NoError(t, err)
+	// passthrough post success
+	err = g.AddPassthroughNode("3", WithStatePostHandler(func(ctx context.Context, in any, state string) (any, error) {
+		return "", nil
+	}))
+	assert.NoError(t, err)
+	// passthrough post success with input key
+	err = g.AddPassthroughNode("4", WithStatePostHandler(func(ctx context.Context, in any, state string) (any, error) {
+		return "", nil
+	}), WithInputKey("input"))
+	assert.NoError(t, err)
+	// common node pre fail
+	err = g.AddLambdaNode("5", InvokableLambda(func(ctx context.Context, input int) (output int, err error) {
+		return 0, nil
+	}), WithStatePreHandler(func(ctx context.Context, in string, state string) (string, error) {
+		return "", nil
+	}))
+	assert.ErrorContains(t, err, "node[5]'s pre handler type[string] is different from its input type[int]")
+	g.buildError = nil
+	// common node post fail
+	err = g.AddLambdaNode("5", InvokableLambda(func(ctx context.Context, input int) (output int, err error) {
+		return 0, nil
+	}), WithStatePostHandler(func(ctx context.Context, in string, state string) (string, error) {
+		return "", nil
+	}))
+	assert.ErrorContains(t, err, "node[5]'s post handler type[string] is different from its output type[int]")
+	g.buildError = nil
+	// common node pre success
+	err = g.AddLambdaNode("5", InvokableLambda(func(ctx context.Context, input string) (output string, err error) {
+		return "", nil
+	}), WithStatePreHandler(func(ctx context.Context, in string, state string) (string, error) {
+		return "", nil
+	}))
+	assert.NoError(t, err)
+	// common node post success
+	err = g.AddLambdaNode("6", InvokableLambda(func(ctx context.Context, input string) (output string, err error) {
+		return "", nil
+	}), WithStatePostHandler(func(ctx context.Context, in string, state string) (string, error) {
+		return "", nil
+	}))
+	assert.NoError(t, err)
+	// pre state fail
+	err = g.AddLambdaNode("7", InvokableLambda(func(ctx context.Context, input string) (output string, err error) {
+		return "", nil
+	}), WithStatePreHandler(func(ctx context.Context, in string, state int) (string, error) {
+		return "", nil
+	}))
+	assert.ErrorContains(t, err, "node[7]'s pre handler state type[int] is different from graph[string]")
+	g.buildError = nil
+	// post state fail
+	err = g.AddLambdaNode("7", InvokableLambda(func(ctx context.Context, input string) (output string, err error) {
+		return "", nil
+	}), WithStatePostHandler(func(ctx context.Context, in string, state int) (string, error) {
+		return "", nil
+	}))
+	assert.ErrorContains(t, err, "node[7]'s post handler state type[int] is different from graph[string]")
+	g.buildError = nil
+}

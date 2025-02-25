@@ -16,6 +16,12 @@
 
 package compose
 
+import (
+	"reflect"
+
+	"github.com/cloudwego/eino/internal/generic"
+)
+
 type graphAddNodeOpts struct {
 	nodeOptions *nodeOptions
 	processor   *processorOpts
@@ -90,6 +96,7 @@ func WithGraphCompileOptions(opts ...GraphCompileOption) GraphAddNodeOpt {
 func WithStatePreHandler[I, S any](pre StatePreHandler[I, S]) GraphAddNodeOpt {
 	return func(o *graphAddNodeOpts) {
 		o.processor.statePreHandler = convertPreHandler(pre)
+		o.processor.preStateType = generic.TypeOf[S]()
 		o.needState = true
 	}
 }
@@ -101,6 +108,7 @@ func WithStatePreHandler[I, S any](pre StatePreHandler[I, S]) GraphAddNodeOpt {
 func WithStatePostHandler[O, S any](post StatePostHandler[O, S]) GraphAddNodeOpt {
 	return func(o *graphAddNodeOpts) {
 		o.processor.statePostHandler = convertPostHandler(post)
+		o.processor.postStateType = generic.TypeOf[S]()
 		o.needState = true
 	}
 }
@@ -114,6 +122,7 @@ func WithStatePostHandler[O, S any](post StatePostHandler[O, S]) GraphAddNodeOpt
 func WithStreamStatePreHandler[I, S any](pre StreamStatePreHandler[I, S]) GraphAddNodeOpt {
 	return func(o *graphAddNodeOpts) {
 		o.processor.statePreHandler = streamConvertPreHandler(pre)
+		o.processor.preStateType = generic.TypeOf[S]()
 		o.needState = true
 	}
 }
@@ -127,13 +136,16 @@ func WithStreamStatePreHandler[I, S any](pre StreamStatePreHandler[I, S]) GraphA
 func WithStreamStatePostHandler[O, S any](post StreamStatePostHandler[O, S]) GraphAddNodeOpt {
 	return func(o *graphAddNodeOpts) {
 		o.processor.statePostHandler = streamConvertPostHandler(post)
+		o.processor.postStateType = generic.TypeOf[S]()
 		o.needState = true
 	}
 }
 
 type processorOpts struct {
 	statePreHandler  *composableRunnable
+	preStateType     reflect.Type // used for type validation
 	statePostHandler *composableRunnable
+	postStateType    reflect.Type // used for type validation
 }
 
 func getGraphAddNodeOpts(opts ...GraphAddNodeOpt) *graphAddNodeOpts {

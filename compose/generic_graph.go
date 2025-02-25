@@ -18,10 +18,14 @@ package compose
 
 import (
 	"context"
+	"reflect"
+
+	"github.com/cloudwego/eino/internal/generic"
 )
 
 type newGraphOptions struct {
 	withState func(ctx context.Context) any
+	stateType reflect.Type
 }
 
 type NewGraphOption func(ngo *newGraphOptions)
@@ -31,6 +35,7 @@ func WithGenLocalState[S any](gls GenLocalState[S]) NewGraphOption {
 		ngo.withState = func(ctx context.Context) any {
 			return gls(ctx)
 		}
+		ngo.stateType = generic.TypeOf[S]()
 	}
 }
 
@@ -70,6 +75,7 @@ func NewGraph[I, O any](opts ...NewGraphOption) *Graph[I, O] {
 		newGraphFromGeneric[I, O](
 			ComponentOfGraph,
 			options.withState,
+			options.stateType,
 		),
 	}
 

@@ -108,6 +108,10 @@ func (gn *graphNode) inputType() reflect.Type {
 	if gn.nodeInfo != nil && len(gn.nodeInfo.inputKey) != 0 {
 		return generic.TypeOf[map[string]any]()
 	}
+	return gn.internalInputType()
+}
+
+func (gn *graphNode) internalInputType() reflect.Type {
 	// priority follow compile
 	if gn.g != nil {
 		return gn.g.inputType()
@@ -122,6 +126,10 @@ func (gn *graphNode) outputType() reflect.Type {
 	if gn.nodeInfo != nil && len(gn.nodeInfo.outputKey) != 0 {
 		return generic.TypeOf[map[string]any]()
 	}
+	return gn.internalOutputType()
+}
+
+func (gn *graphNode) internalOutputType() reflect.Type {
 	// priority follow compile
 	if gn.g != nil {
 		return gn.g.outputType()

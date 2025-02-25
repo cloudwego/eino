@@ -156,6 +156,7 @@ type graph struct {
 		mappings []*FieldMapping
 	}
 
+	stateType      reflect.Type
 	stateGenerator func(ctx context.Context) any
 
 	expectedInputType, expectedOutputType reflect.Type
@@ -187,12 +188,14 @@ type newGraphConfig struct {
 	inputFieldMappingConverter, outputFieldMappingConverter             valueHandler
 	inputStreamFieldMappingConverter, outputStreamFieldMappingConverter streamHandler
 	cmp                                                                 component
+	stateType                                                           reflect.Type
 	stateGenerator                                                      func(ctx context.Context) any
 }
 
 func newGraphFromGeneric[I, O any](
 	cmp component,
 	stateGenerator func(ctx context.Context) any,
+	stateType reflect.Type,
 ) *graph {
 	return newGraph(&newGraphConfig{
 		inputType:                         generic.TypeOf[I](),
@@ -207,6 +210,7 @@ func newGraphFromGeneric[I, O any](
 		inputStreamFieldMappingConverter:  buildStreamFieldMappingConverter[I](),
 		outputStreamFieldMappingConverter: buildStreamFieldMappingConverter[O](),
 		cmp:                               cmp,
+		stateType:                         stateType,
 		stateGenerator:                    stateGenerator,
 	})
 }
@@ -247,6 +251,7 @@ func newGraph(cfg *newGraphConfig) *graph {
 
 		cmp: cfg.cmp,
 
+		stateType:        cfg.stateType,
 		stateGenerator:   cfg.stateGenerator,
 		handlerOnEdges:   make(map[string]map[string][]handlerPair),
 		handlerPreNode:   make(map[string][]handlerPair),
@@ -305,6 +310,34 @@ func (g *graph) addNode(key string, node *graphNode, options *graphAddNodeOpts) 
 		}
 	}
 	// end: check options
+
+	// check pre- / post-handler type
+	if options.processor != nil {
+		if options.processor.statePreHandler != nil {
+			// check state type
+			if g.stateType != options.processor.preStateType {
+				return fmt.Errorf("node[%s]'s pre handler state type[%v] is different from graph[%v]", key, options.processor.preStateType, g.stateType)
+			}
+			// check input type
+			if node.internalInputType() == nil && options.processor.statePreHandler.outputType != reflect.TypeOf((*any)(nil)).Elem() {
+				return fmt.Errorf("passthrough node[%s]'s pre handler type isn't any", key)
+			} else if node.internalInputType() != nil && node.internalInputType() != options.processor.statePreHandler.outputType {
+				return fmt.Errorf("node[%s]'s pre handler type[%v] is different from its input type[%v]", key, options.processor.statePreHandler.outputType, node.inputType())
+			}
+		}
+		if options.processor.statePostHandler != nil {
+			// check state type
+			if g.stateType != options.processor.postStateType {
+				return fmt.Errorf("node[%s]'s post handler state type[%v] is different from graph[%v]", key, options.processor.postStateType, g.stateType)
+			}
+			// check input type
+			if node.internalOutputType() == nil && options.processor.statePostHandler.inputType != reflect.TypeOf((*any)(nil)).Elem() {
+				return fmt.Errorf("passthrough node[%s]'s post handler type isn't any", key)
+			} else if node.internalOutputType() != nil && node.internalOutputType() != options.processor.statePostHandler.inputType {
+				return fmt.Errorf("node[%s]'s post handler type[%v] is different from its output type[%v]", key, options.processor.statePostHandler.inputType, node.outputType())
+			}
+		}
+	}
 
 	g.nodes[key] = node
 
