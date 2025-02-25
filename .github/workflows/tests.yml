@@ -152,7 +152,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 0  # 需要完整的 git history
+          fetch-depth: 0
           
       - name: Set up Go
         uses: actions/setup-go@v5
@@ -160,7 +160,7 @@ jobs:
           go-version: "1.22"
           
       - name: Install go-apidiff
-        run: go install github.com/joelanford/go-apidiff@latest
+        run: go install github.com/joelanford/go-apidiff@v0.8.2
           
       - name: Check API compatibility
         id: apidiff
@@ -172,9 +172,8 @@ jobs:
           
           go mod tidy
           
-          if ! DIFF_OUTPUT=$(go-apidiff --print-compatible $BASE_SHA $HEAD_SHA 2>&1); then
-            echo "go-apidiff output\n: $DIFF_OUTPUT"
-            DIFF_OUTPUT="uncompatible api changes found: $DIFF_OUTPUT"
+          if ! DIFF_OUTPUT=$(go-apidiff $BASE_SHA $HEAD_SHA 2>&1); then
+            echo "go-apidiff output: $DIFF_OUTPUT"
           fi
 
           echo "diff_output<<EOF" >> $GITHUB_ENV
@@ -186,34 +185,132 @@ jobs:
           else
             echo "has_breaking_changes=false" >> $GITHUB_OUTPUT
           fi
-          
-      - name: Find Previous Comment
+
+      - name: Create Review Thread
         if: steps.apidiff.outputs.has_breaking_changes == 'true'
-        uses: peter-evans/find-comment@v3
-        id: fc
+        continue-on-error: true
+        uses: actions/github-script@v7
         with:
-          issue-number: ${{ github.event.pull_request.number }}
-          comment-author: 'github-actions[bot]'
-          body-includes: '⚠️ Breaking API Changes Detected'
-          
-      - name: Comment PR
-        if: steps.apidiff.outputs.has_breaking_changes == 'true'
-        uses: peter-evans/create-or-update-comment@v4
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
-          issue-number: ${{ github.event.pull_request.number }}
-          comment-id: ${{ steps.fc.outputs.comment-id || '' }}
-          edit-mode: replace
-          body: |
-            ## ⚠️ Breaking API Changes Detected
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const reviewComments = await github.rest.pulls.listReviewComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: context.issue.number
+            });
+
+            const existingPackageComments = new Map();
             
-            This pull request contains breaking API changes that may affect compatibility:
+            for (const comment of reviewComments.data) {
+              if (comment.body.includes('Breaking API Changes Detected')) {
+                const packageMatch = comment.body.match(/Package: `([^`]+)`/);
+                if (packageMatch) {
+                  const pkg = packageMatch[1];
+                  if (!existingPackageComments.has(pkg)) {
+                    existingPackageComments.set(pkg, new Set());
+                  }
+                  existingPackageComments.get(pkg).add(comment.path);
+                }
+              }
+            }
             
-            ```
-            ${{ env.diff_output }}
-            ```
+            const files = await github.rest.pulls.listFiles({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: context.issue.number
+            });
             
-            ### Required Actions:
-            1. Please review these changes carefully
-            2. Update the user documentation to reflect these API changes
-            3. Add a note in the changelog about these breaking changes
+            const diffOutput = process.env.diff_output || '';
+            
+            const breakingChanges = new Map();
+            
+            let currentPackage = '';
+            let isInIncompatibleSection = false;
+            const lines = diffOutput.split('\n');
+            
+            for (let i = 0; i < lines.length; i++) {
+              const line = lines[i].trim();
+              
+              if (line.startsWith('github.com/')) {
+                currentPackage = line;
+                if (!breakingChanges.has(currentPackage)) {
+                  breakingChanges.set(currentPackage, []);
+                }
+                continue;
+              }
+              
+              if (line === 'Incompatible changes:') {
+                isInIncompatibleSection = true;
+                continue;
+              }
+              
+              if (line === '') {
+                isInIncompatibleSection = false;
+                continue;
+              }
+              
+              if (isInIncompatibleSection && line.startsWith('- ')) {
+                const change = line.substring(2);
+                if (currentPackage) {
+                  breakingChanges.get(currentPackage).push(change);
+                }
+              }
+            }
+            
+            const changedFiles = files.data;
+            
+            for (const [pkg, changes] of breakingChanges) {
+              if (changes.length === 0) continue; 
+              
+              const pkgPath = pkg.split('/').slice(3).join('/');
+              const matchingFile = changedFiles.find(file => 
+                file.filename.includes(pkgPath)
+              ) || changedFiles[0];
+              
+              const hasCommentForPackage = existingPackageComments.has(pkg) && 
+                existingPackageComments.get(pkg).has(matchingFile.filename);
+              
+              if (matchingFile && !hasCommentForPackage) {
+                const changesList = changes.map(change => {
+                  const [name, desc] = change.split(':').map(s => s.trim());
+                  return `- **${name}:** ${desc}`;
+                }).join('\n');
+                
+                const commentBody = [
+                  '🚨 **Breaking API Changes Detected**',
+                  '',
+                  `Package: \`${pkg}\``,
+                  '',
+                  'Incompatible changes:',
+                  changesList,
+                  '',
+                  '<details>',
+                  '<summary>Review Guidelines</summary>',
+                  '',
+                  'Please ensure that:',
+                  '- The changes are absolutely necessary',
+                  '- They are properly documented',
+                  '- Migration guides are provided if needed',
+                  '</details>',
+                  '',
+                  '⚠️ Please resolve this thread after reviewing the breaking changes.'
+                ].join('\n');
+                
+                await github.rest.pulls.createReview({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  pull_number: context.issue.number,
+                  event: 'COMMENT',
+                  comments: [{
+                    path: matchingFile.filename,
+                    position: matchingFile.patch ? matchingFile.patch.split('\n').findIndex(line => line.startsWith('+')) + 1 : 1,
+                    body: commentBody
+                  }]
+                });
+                
+                if (!existingPackageComments.has(pkg)) {
+                  existingPackageComments.set(pkg, new Set());
+                }
+                existingPackageComments.get(pkg).add(matchingFile.filename);
+              }
+            }
