@@ -17,8 +17,6 @@
 package schema
 
 import (
-	"fmt"
-
 	"github.com/getkin/kin-openapi/openapi3"
 )
 
@@ -117,19 +115,6 @@ func NewParamsOneOfByOpenAPIV3(openAPIV3 *openapi3.Schema) *ParamsOneOf {
 func (p *ParamsOneOf) ToOpenAPIV3() (*openapi3.Schema, error) {
 	if p == nil {
 		return nil, nil
-	}
-
-	var (
-		useParameterInfo = p.params != nil
-		useOpenAPIV3     = p.openAPIV3 != nil
-	)
-
-	if !useParameterInfo && !useOpenAPIV3 {
-		return nil, fmt.Errorf("ParamsOneOf needs to have at least one method to describe the parameters")
-	}
-
-	if useParameterInfo && useOpenAPIV3 {
-		return nil, fmt.Errorf("ParamsOneOf can only have one method to describe the parameters, but not multiple methods")
 	}
 
 	if p.params != nil {
