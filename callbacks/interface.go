@@ -56,6 +56,12 @@ func InitCallbackHandlers(handlers []Handler) {
 	callbacks.GlobalHandlers = handlers
 }
 
+// AddCallbackHandlers adds multiple callback handlers to the global handlers.
+// It's useful when you want to add callbacks to all nodes without replacing existing ones.
+func AddCallbackHandlers(handlers ...Handler) {
+	callbacks.GlobalHandlers = append(callbacks.GlobalHandlers, handlers...)
+}
+
 // CallbackTiming enumerates all the timing of callback aspects.
 type CallbackTiming = callbacks.CallbackTiming
 
