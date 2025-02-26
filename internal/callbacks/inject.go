@@ -95,7 +95,7 @@ func OnWithStreamHandle[S any](
 	inOut S,
 	handlers []Handler,
 	cpy func(int) []S,
-	handle func(Handler, S) context.Context) (context.Context, S) {
+	handle func(context.Context, Handler, S) context.Context) (context.Context, S) {
 
 	if len(handlers) == 0 {
 		return ctx, inOut
@@ -104,7 +104,7 @@ func OnWithStreamHandle[S any](
 	inOuts := cpy(len(handlers) + 1)
 
 	for i, handler := range handlers {
-		ctx = handle(handler, inOuts[i])
+		ctx = handle(ctx, handler, inOuts[i])
 	}
 
 	return ctx, inOuts[len(inOuts)-1]
@@ -117,7 +117,7 @@ func OnStartWithStreamInputHandle[T any](ctx context.Context, input *schema.Stre
 
 	cpy := input.Copy
 
-	handle := func(handler Handler, in *schema.StreamReader[T]) context.Context {
+	handle := func(ctx context.Context, handler Handler, in *schema.StreamReader[T]) context.Context {
 		in_ := schema.StreamReaderWithConvert(in, func(i T) (CallbackInput, error) {
 			return i, nil
 		})
@@ -132,7 +132,7 @@ func OnEndWithStreamOutputHandle[T any](ctx context.Context, output *schema.Stre
 
 	cpy := output.Copy
 
-	handle := func(handler Handler, out *schema.StreamReader[T]) context.Context {
+	handle := func(ctx context.Context, handler Handler, out *schema.StreamReader[T]) context.Context {
 		out_ := schema.StreamReaderWithConvert(out, func(i T) (CallbackOutput, error) {
 			return i, nil
 		})
