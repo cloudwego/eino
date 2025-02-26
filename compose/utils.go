@@ -112,7 +112,7 @@ func genericOnStartWithStreamInputHandle(ctx context.Context, input streamReader
 
 	cpy := input.copy
 
-	handle := func(handler icb.Handler, in streamReader) context.Context {
+	handle := func(ctx context.Context, handler icb.Handler, in streamReader) context.Context {
 		in_, ok := unpackStreamReader[icb.CallbackInput](in)
 		if !ok {
 			panic("impossible")
@@ -139,7 +139,7 @@ func genericOnEndWithStreamOutputHandle(ctx context.Context, output streamReader
 
 	cpy := output.copy
 
-	handle := func(handler icb.Handler, out streamReader) context.Context {
+	handle := func(ctx context.Context, handler icb.Handler, out streamReader) context.Context {
 		out_, ok := unpackStreamReader[icb.CallbackOutput](out)
 		if !ok {
 			panic("impossible")
