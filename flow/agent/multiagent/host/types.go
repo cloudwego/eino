@@ -87,6 +87,7 @@ type MultiAgentConfig struct {
 	// Note: The handler MUST close the modelOutput stream before returning
 	// Optional. By default, it checks if the first chunk contains tool calls.
 	// Note: The default implementation does not work well with Claude, which typically outputs tool calls after text content.
+	// Note: If your ChatModel doesn't output tool calls first, you can try adding prompts to constrain the model from generating extra text during the tool call.
 	StreamToolCallChecker func(ctx context.Context, modelOutput *schema.StreamReader[*schema.Message]) (bool, error)
 }
 

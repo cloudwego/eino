@@ -1606,7 +1606,7 @@ func TestHandlerTypeValidate(t *testing.T) {
 	err = g.AddPassthroughNode("1", WithStatePreHandler(func(ctx context.Context, in string, state string) (string, error) {
 		return "", nil
 	}), WithInputKey("input"))
-	assert.ErrorContains(t, err, "passthrough node[1]'s pre handler type isn't any")
+	assert.ErrorContains(t, err, "node[1]'s pre handler type[string] is different from its input type[map[string]interface {}]")
 	g.buildError = nil
 	// passthrough post fail
 	err = g.AddPassthroughNode("1", WithStatePostHandler(func(ctx context.Context, in string, state string) (string, error) {
@@ -1626,8 +1626,8 @@ func TestHandlerTypeValidate(t *testing.T) {
 	}))
 	assert.NoError(t, err)
 	// passthrough pre success with input key
-	err = g.AddPassthroughNode("2", WithStatePreHandler(func(ctx context.Context, in any, state string) (any, error) {
-		return "", nil
+	err = g.AddPassthroughNode("2", WithStatePreHandler(func(ctx context.Context, in map[string]any, state string) (map[string]any, error) {
+		return nil, nil
 	}), WithInputKey("input"))
 	assert.NoError(t, err)
 	// passthrough post success
@@ -1635,10 +1635,10 @@ func TestHandlerTypeValidate(t *testing.T) {
 		return "", nil
 	}))
 	assert.NoError(t, err)
-	// passthrough post success with input key
-	err = g.AddPassthroughNode("4", WithStatePostHandler(func(ctx context.Context, in any, state string) (any, error) {
-		return "", nil
-	}), WithInputKey("input"))
+	// passthrough post success with output key
+	err = g.AddPassthroughNode("4", WithStatePostHandler(func(ctx context.Context, in map[string]any, state string) (map[string]any, error) {
+		return nil, nil
+	}), WithOutputKey("output"))
 	assert.NoError(t, err)
 	// common node pre fail
 	err = g.AddLambdaNode("5", InvokableLambda(func(ctx context.Context, input int) (output int, err error) {
@@ -1686,4 +1686,18 @@ func TestHandlerTypeValidate(t *testing.T) {
 	}))
 	assert.ErrorContains(t, err, "node[7]'s post handler state type[int] is different from graph[string]")
 	g.buildError = nil
+	// common pre success with input key
+	err = g.AddLambdaNode("7", InvokableLambda(func(ctx context.Context, input string) (output string, err error) {
+		return "", nil
+	}), WithStatePreHandler(func(ctx context.Context, in map[string]any, state string) (map[string]any, error) {
+		return nil, nil
+	}), WithInputKey("input"))
+	assert.NoError(t, err)
+	// common post success with output key
+	err = g.AddLambdaNode("8", InvokableLambda(func(ctx context.Context, input string) (output string, err error) {
+		return "", nil
+	}), WithStatePostHandler(func(ctx context.Context, in map[string]any, state string) (map[string]any, error) {
+		return nil, nil
+	}), WithOutputKey("output"))
+	assert.NoError(t, err)
 }
