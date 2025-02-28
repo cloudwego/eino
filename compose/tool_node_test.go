@@ -417,6 +417,76 @@ func TestToolsNodeOptions(t *testing.T) {
 		assert.Len(t, msgs, 1)
 		assert.JSONEq(t, `{"echo":"jack: 10"}`, msgs[0].Content)
 	})
+	t.Run("tool_list", func(t *testing.T) {
+
+		g := NewGraph[*schema.Message, []*schema.Message]()
+
+		mt := &mockTool{}
+
+		tn, err := NewToolNode(ctx, &ToolsNodeConfig{
+			Tools: []tool.BaseTool{},
+		})
+		assert.NoError(t, err)
+
+		err = g.AddToolsNode("tools", tn)
+		assert.NoError(t, err)
+
+		err = g.AddEdge(START, "tools")
+		assert.NoError(t, err)
+		err = g.AddEdge("tools", END)
+		assert.NoError(t, err)
+
+		r, err := g.Compile(ctx)
+		assert.NoError(t, err)
+
+		out, err := r.Invoke(ctx, &schema.Message{
+			Role: schema.Assistant,
+			ToolCalls: []schema.ToolCall{
+				{
+					ID: toolIDOfUserCompany,
+					Function: schema.FunctionCall{
+						Name:      "mock_tool",
+						Arguments: `{"name": "jack"}`,
+					},
+				},
+			},
+		}, WithToolsNodeOption(WithToolList(mt), WithToolOption(WithAge(10))))
+		assert.NoError(t, err)
+		assert.Len(t, out, 1)
+		assert.JSONEq(t, `{"echo": "jack: 10"}`, out[0].Content)
+
+		outMessages := make([][]*schema.Message, 0)
+		outStream, err := r.Stream(ctx, &schema.Message{
+			Role: schema.Assistant,
+			ToolCalls: []schema.ToolCall{
+				{
+					ID: toolIDOfUserCompany,
+					Function: schema.FunctionCall{
+						Name:      "mock_tool",
+						Arguments: `{"name": "jack"}`,
+					},
+				},
+			},
+		}, WithToolsNodeOption(WithToolList(mt), WithToolOption(WithAge(10))))
+
+		assert.NoError(t, err)
+
+		for {
+			msgs, err := outStream.Recv()
+			if err == io.EOF {
+				break
+			}
+			assert.NoError(t, err)
+			outMessages = append(outMessages, msgs)
+		}
+		outStream.Close()
+
+		msgs, err := internal.ConcatItems(outMessages)
+		assert.NoError(t, err)
+
+		assert.Len(t, msgs, 1)
+		assert.JSONEq(t, `{"echo":"jack: 10"}`, msgs[0].Content)
+	})
 
 }
 
