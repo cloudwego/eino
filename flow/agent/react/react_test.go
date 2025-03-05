@@ -28,6 +28,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"go.uber.org/mock/gomock"
 
+	"github.com/cloudwego/eino/callbacks"
 	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/components/tool"
 	"github.com/cloudwego/eino/compose"
@@ -53,6 +54,11 @@ func TestReact(t *testing.T) {
 	times := 0
 	cm.EXPECT().Generate(gomock.Any(), gomock.Any(), gomock.Any()).
 		DoAndReturn(func(ctx context.Context, input []*schema.Message, opts ...model.Option) (*schema.Message, error) {
+			modelOpts := model.GetCommonOptions(&model.Options{}, opts...)
+			if modelOpts.Temperature == nil || *modelOpts.Temperature != 0.7 {
+				return nil, errors.New("temperature not match")
+			}
+
 			times++
 			if times <= 2 {
 				info, _ := fakeTool.Info(ctx)
@@ -95,12 +101,9 @@ func TestReact(t *testing.T) {
 			Role:    schema.User,
 			Content: "使用 greet tool 持续打招呼，直到得到一个 bye 的回复，打招呼名字按照以下顺序: max、bob、alice、john、marry、joe、ken、lily, 请直接开始!请直接开始!请直接开始!",
 		},
-	}, agent.WithComposeOptions(compose.WithCallbacks(callbackForTest)))
+	}, WithChatModelOptions(model.WithTemperature(0.7)),
+		WithToolOptions(withMockOutput("mock_output")))
 	assert.Nil(t, err)
-
-	if out != nil {
-		t.Log(out.Content)
-	}
 
 	// test return directly
 	times = 0
@@ -123,12 +126,37 @@ func TestReact(t *testing.T) {
 			Role:    schema.User,
 			Content: "使用 greet tool 持续打招呼，直到得到一个 bye 的回复，打招呼名字按照以下顺序: max、bob、alice、john、marry、joe、ken、lily, 请直接开始!请直接开始!请直接开始!",
 		},
-	}, agent.WithComposeOptions(compose.WithCallbacks(callbackForTest)))
+	}, WithChatModelOptions(model.WithTemperature(0.7)))
 	assert.Nil(t, err)
 
 	if out != nil {
 		t.Log(out.Content)
 	}
+
+	// test max steps
+	times = 0
+	out, err = a.Generate(ctx, []*schema.Message{
+		{
+			Role:    schema.User,
+			Content: "使用 greet tool 持续打招呼，直到得到一个 bye 的回复，打招呼名字按照以下顺序: max、bob、alice、john、marry、joe、ken、lily, 请直接开始!请直接开始!请直接开始!",
+		},
+	}, WithRuntimeMaxSteps(1),
+		WithChatModelOptions(model.WithTemperature(0.7)))
+	assert.ErrorContains(t, err, "max step")
+
+	// test change tools
+	times = 0
+	fakeStreamTool := &fakeStreamToolGreetForTest{
+		tarCount: 20,
+	}
+	out, err = a.Generate(ctx, []*schema.Message{
+		{
+			Role:    schema.User,
+			Content: "使用 greet tool 持续打招呼，直到得到一个 bye 的回复，打招呼名字按照以下顺序: max、bob、alice、john、marry、joe、ken、lily, 请直接开始!请直接开始!请直接开始!",
+		},
+	}, WithChatModelOptions(model.WithTemperature(0.7)),
+		WithToolList(fakeStreamTool))
+	assert.ErrorContains(t, err, "tool greet not found in toolsNode indexes")
 }
 
 func TestReactStream(t *testing.T) {
@@ -224,7 +252,7 @@ func TestReactStream(t *testing.T) {
 			Role:    schema.User,
 			Content: "使用 greet tool 持续打招呼，直到得到一个 bye 的回复，打招呼名字按照以下顺序: max、bob、alice、john、marry、joe、ken、lily, 请直接开始!请直接开始!请直接开始!",
 		},
-	}, agent.WithComposeOptions(compose.WithCallbacks(callbackForTest)))
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -275,7 +303,7 @@ func TestReactStream(t *testing.T) {
 			Role:    schema.User,
 			Content: "使用 greet tool 持续打招呼，直到得到一个 bye 的回复，打招呼名字按照以下顺序: max、bob、alice、john、marry、joe、ken、lily, 请直接开始!请直接开始!请直接开始!",
 		},
-	}, agent.WithComposeOptions(compose.WithCallbacks(callbackForTest)))
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -311,7 +339,7 @@ func TestReactStream(t *testing.T) {
 			Role:    schema.User,
 			Content: "使用 greet tool 持续打招呼，直到得到一个 bye 的回复，打招呼名字按照以下顺序: max、bob、alice、john、marry、joe、ken、lily, 请直接开始!请直接开始!请直接开始!",
 		},
-	}, agent.WithComposeOptions(compose.WithCallbacks(callbackForTest)))
+	})
 	assert.NoError(t, err)
 
 	defer out.Close()
@@ -385,7 +413,7 @@ func TestReactWithModifier(t *testing.T) {
 			Role:    schema.User,
 			Content: "hello",
 		},
-	}, agent.WithComposeOptions(compose.WithCallbacks(callbackForTest)))
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -452,8 +480,7 @@ func TestAgentInGraph(t *testing.T) {
 		r, err := chain.Compile(ctx)
 		assert.Nil(t, err)
 
-		res, err := r.Invoke(ctx, []*schema.Message{{Role: schema.User, Content: "hello"}},
-			compose.WithCallbacks(callbackForTest))
+		res, err := r.Invoke(ctx, []*schema.Message{{Role: schema.User, Content: "hello"}}, compose.WithCallbacks(callbackForTest))
 		assert.Nil(t, err)
 
 		t.Log(res)
@@ -510,7 +537,7 @@ func TestAgentInGraph(t *testing.T) {
 		assert.Nil(t, err)
 
 		chain.
-			AppendGraph(agentGraph, opts...).
+			AppendGraph(agentGraph, append(opts, compose.WithNodeKey("react_agent"))...).
 			AppendLambda(compose.InvokableLambda(func(ctx context.Context, input *schema.Message) (string, error) {
 				t.Log("got agent response: ", input.Content)
 				return input.Content, nil
@@ -518,8 +545,27 @@ func TestAgentInGraph(t *testing.T) {
 		r, err := chain.Compile(ctx)
 		assert.Nil(t, err)
 
-		outStream, err := r.Stream(ctx, []*schema.Message{{Role: schema.User, Content: "hello"}},
-			compose.WithCallbacks(callbackForTest))
+		var modelCallbackCnt, toolCallbackCnt int
+		modelCallback := template.NewHandlerHelper().ChatModel(&template.ModelCallbackHandler{
+			OnStart: func(ctx context.Context, runInfo *callbacks.RunInfo, input *model.CallbackInput) context.Context {
+				modelCallbackCnt++
+				return ctx
+			},
+		}).Handler()
+		toolCallback := template.NewHandlerHelper().Tool(&template.ToolCallbackHandler{
+			OnStart: func(ctx context.Context, runInfo *callbacks.RunInfo, input *tool.CallbackInput) context.Context {
+				toolCallbackCnt++
+				return ctx
+			},
+		}).Handler()
+
+		agentOptions := []agent.AgentOption{
+			WithChatModelOptions(model.WithTemperature(0.7)),
+			WithModelCallbacks(modelCallback),
+			WithToolCallbacks(toolCallback),
+		}
+		convertedOptions := ConvertOptions(compose.NewNodePath("react_agent"), agentOptions...)
+		outStream, err := r.Stream(ctx, []*schema.Message{{Role: schema.User, Content: "hello"}}, convertedOptions...)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -541,8 +587,10 @@ func TestAgentInGraph(t *testing.T) {
 		}
 
 		t.Log(msg)
-	})
 
+		assert.Equal(t, 3, modelCallbackCnt)
+		assert.Equal(t, 2, toolCallbackCnt)
+	})
 }
 
 type fakeStreamToolGreetForTest struct {
@@ -570,6 +618,16 @@ func (t *fakeStreamToolGreetForTest) StreamableRun(_ context.Context, argumentsI
 type fakeToolGreetForTest struct {
 	tarCount int
 	curCount int
+}
+
+type toolOption struct {
+	mockOutput *string
+}
+
+func withMockOutput(output string) tool.Option {
+	return tool.WrapImplSpecificOptFn(func(opt *toolOption) {
+		opt.mockOutput = &output
+	})
 }
 
 func (t *fakeToolGreetForTest) Info(_ context.Context) (*schema.ToolInfo, error) {
@@ -602,7 +660,12 @@ func (t *fakeStreamToolGreetForTest) Info(_ context.Context) (*schema.ToolInfo, 
 	}, nil
 }
 
-func (t *fakeToolGreetForTest) InvokableRun(_ context.Context, argumentsInJSON string, _ ...tool.Option) (string, error) {
+func (t *fakeToolGreetForTest) InvokableRun(_ context.Context, argumentsInJSON string, opts ...tool.Option) (string, error) {
+	toolOpts := tool.GetImplSpecificOptions(&toolOption{}, opts...)
+	if toolOpts.mockOutput != nil {
+		return *toolOpts.mockOutput, nil
+	}
+
 	p := &fakeToolInput{}
 	err := sonic.UnmarshalString(argumentsInJSON, p)
 	if err != nil {
