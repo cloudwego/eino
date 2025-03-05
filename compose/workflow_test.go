@@ -241,6 +241,29 @@ func TestWorkflow(t *testing.T) {
 	}
 }
 
+func TestWorkflowWithMap(t *testing.T) {
+	ctx := context.Background()
+
+	type structA struct {
+		F1 any
+	}
+
+	wf := NewWorkflow[map[string]any, map[string]any]()
+	wf.AddLambdaNode("lambda1", InvokableLambda(func(ctx context.Context, in map[string]any) (map[string]any, error) {
+		return in, nil
+	})).AddInput(START, MapFields("map_key", "lambda1_key"))
+	wf.AddLambdaNode("lambda2", InvokableLambda(func(ctx context.Context, in *structA) (*structA, error) {
+		return in, nil
+	})).AddInput(START, MapFields("map_key", "F1"))
+	wf.AddEnd("lambda1", MapFields("lambda1_key", "end_lambda1"))
+	wf.AddEnd("lambda2", MapFields("F1", "end_lambda2"))
+	r, err := wf.Compile(ctx)
+	assert.NoError(t, err)
+	out, err := r.Invoke(ctx, map[string]any{"map_key": "value"})
+	assert.NoError(t, err)
+	assert.Equal(t, map[string]any{"end_lambda1": "value", "end_lambda2": "value"}, out)
+}
+
 func TestWorkflowCompile(t *testing.T) {
 	ctx := context.Background()
 	ctrl := gomock.NewController(t)
@@ -260,24 +283,24 @@ func TestWorkflowCompile(t *testing.T) {
 		assert.ErrorContains(t, err, "mismatch")
 	})
 
-	t.Run("upstream not struct/struct ptr, mapping has FromField", func(t *testing.T) {
+	t.Run("predecessor's output not struct/struct ptr/map, mapping has FromField", func(t *testing.T) {
 		w := NewWorkflow[[]*schema.Document, []string]()
 
 		w.AddIndexerNode("indexer", indexer.NewMockIndexer(ctrl)).AddInput(START, FromField("F1"))
 		w.AddEnd("indexer")
 		_, err := w.Compile(ctx)
-		assert.ErrorContains(t, err, "downstream output type should be struct")
+		assert.ErrorContains(t, err, "predecessor output type should be struct")
 	})
 
-	t.Run("downstream not struct/struct ptr, mapping has ToField", func(t *testing.T) {
+	t.Run("successor's input not struct/struct ptr/map, mapping has ToField", func(t *testing.T) {
 		w := NewWorkflow[[]string, [][]float64]()
 		w.AddEmbeddingNode("embedder", embedding.NewMockEmbedder(ctrl)).AddInput(START, ToField("F1"))
 		w.AddEnd("embedder")
 		_, err := w.Compile(ctx)
-		assert.ErrorContains(t, err, "upstream input type should be struct")
+		assert.ErrorContains(t, err, "successor input type should be struct")
 	})
 
-	t.Run("map to non existing field in upstream", func(t *testing.T) {
+	t.Run("map to non existing field in predecessor", func(t *testing.T) {
 		w := NewWorkflow[*schema.Message, []*schema.Message]()
 		w.AddToolsNode("tools_node", &ToolsNode{}).AddInput(START, FromField("non_exist"))
 		w.AddEnd("tools_node")
@@ -285,7 +308,7 @@ func TestWorkflowCompile(t *testing.T) {
 		assert.ErrorContains(t, err, "type[schema.Message] has no field[non_exist]")
 	})
 
-	t.Run("map to not exported field in downstream", func(t *testing.T) {
+	t.Run("map to not exported field in successor", func(t *testing.T) {
 		w := NewWorkflow[string, *FieldMapping]()
 		w.AddLambdaNode("1", InvokableLambda(func(ctx context.Context, input string) (output string, err error) {
 			return input, nil

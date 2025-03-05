@@ -6,6 +6,7 @@ Invokable = "Invokable"
 invokable = "invokable"
 InvokableLambda = "InvokableLambda"
 InvokableRun = "InvokableRun"
+typ = "typ"
 
 [files]
 extend-exclude = ["go.mod", "go.sum", "check_branch_name.sh"]
