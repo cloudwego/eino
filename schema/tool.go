@@ -114,7 +114,7 @@ func NewParamsOneOfByOpenAPIV3(openAPIV3 *openapi3.Schema) *ParamsOneOf {
 // ToOpenAPIV3 parses ParamsOneOf, converts the parameter description that user actually provides, into the format ready to be passed to Model.
 func (p *ParamsOneOf) ToOpenAPIV3() (*openapi3.Schema, error) {
 	if p == nil {
-		return nil, nil
+		return &openapi3.Schema{}, nil
 	}
 
 	if p.params != nil {
