@@ -237,6 +237,44 @@ type ChatMessagePart struct {
 	FileURL *ChatMessageFileURL `json:"file_url,omitempty"`
 }
 
+// LogProbs is the top-level structure containing the log probability information.
+type LogProbs struct {
+	// Content is a list of message content tokens with log probability information.
+	Content []LogProb `json:"content"`
+}
+
+// LogProb represents the probability information for a token.
+type LogProb struct {
+	// Token is the token.
+	Token string `json:"token"`
+	// LogProb is the log probability of this token, if it is within the top 20 most likely
+	// tokens. Otherwise, the value `-9999.0` is used to signify that the token is very
+	// unlikely.
+	LogProb float64 `json:"logprob"`
+	// Bytes is a list of integers representing the UTF-8 bytes representation of the token.
+	// Useful in instances where characters are represented by multiple tokens and
+	// their byte representations must be combined to generate the correct text
+	// representation. Can be `null` if there is no bytes representation for the token.
+	Bytes []int64 `json:"bytes,omitempty"` // Omitting the field if it is null
+	// TopLogProbs is a list of the most likely tokens and their log probability, at this token position.
+	// In rare cases, there may be fewer than the number of requested top_logprobs returned.
+	TopLogProbs []TopLogProbs `json:"top_logprobs"`
+}
+
+type TopLogProbs struct {
+	// Token is the token.
+	Token string `json:"token"`
+	// LogProb is the log probability of this token, if it is within the top 20 most likely
+	// tokens. Otherwise, the value `-9999.0` is used to signify that the token is very
+	// unlikely.
+	LogProb float64 `json:"logprob"`
+	// Bytes is a list of integers representing the UTF-8 bytes representation of the token.
+	// Useful in instances where characters are represented by multiple tokens and
+	// their byte representations must be combined to generate the correct text
+	// representation. Can be `null` if there is no bytes representation for the token.
+	Bytes []int64 `json:"bytes,omitempty"`
+}
+
 // ResponseMeta collects meta information about a chat response.
 type ResponseMeta struct {
 	// FinishReason is the reason why the chat response is finished.
@@ -244,6 +282,8 @@ type ResponseMeta struct {
 	FinishReason string `json:"finish_reason,omitempty"`
 	// Usage is the token usage of the chat response, whether usage exists depends on whether the chat model implementation returns.
 	Usage *TokenUsage `json:"usage,omitempty"`
+	// LogProbs is Log probability information for the choice.
+	LogProbs *LogProbs `json:"logprobs,omitempty"`
 }
 
 type Message struct {
@@ -653,7 +693,14 @@ func ConcatMessages(msgs []*Message) (*Message, error) {
 				if msg.ResponseMeta.Usage.TotalTokens > ret.ResponseMeta.Usage.TotalTokens {
 					ret.ResponseMeta.Usage.TotalTokens = msg.ResponseMeta.Usage.TotalTokens
 				}
+			}
 
+			if msg.ResponseMeta.LogProbs != nil {
+				if ret.ResponseMeta.LogProbs == nil {
+					ret.ResponseMeta.LogProbs = &LogProbs{}
+				}
+
+				ret.ResponseMeta.LogProbs.Content = append(ret.ResponseMeta.LogProbs.Content, msg.ResponseMeta.LogProbs.Content...)
 			}
 
 		}
