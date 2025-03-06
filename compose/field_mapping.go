@@ -313,7 +313,7 @@ func checkAndExtractFromMapKey(fromMapKey string, input reflect.Value) (reflect.
 }
 
 func checkAndExtractFieldType(paths []string, typ reflect.Type) (extracted reflect.Type, intermediateInterface bool, err error) {
-	if len(paths) == 0 {
+	if len(paths) == 1 && len(paths[0]) == 0 {
 		return typ, false, nil
 	}
 
@@ -419,11 +419,12 @@ func fieldMap(mappings []*FieldMapping) func(any) (map[string]any, error) {
 		result = make(map[string]any, len(mappings))
 		var inputValue reflect.Value
 		for _, mapping := range mappings {
-			fromPath := strings.Split(mapping.from, pathSeparator)
-			if len(fromPath) == 0 {
+			if len(mapping.from) == 0 {
 				result[mapping.to] = input
 				continue
 			}
+
+			fromPath := strings.Split(mapping.from, pathSeparator)
 
 			if !inputValue.IsValid() {
 				inputValue = reflect.ValueOf(input)
