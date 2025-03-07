@@ -66,6 +66,7 @@ const pathSeparator = "."
 // This is an exclusive mapping - once set, no other field mappings can be added since the successor input
 // has already been fully mapped.
 // Field: either the field of a struct, or the key of a map.
+// For nested fields, use the path separator (.) to separate the field names.
 func FromField(from string) *FieldMapping {
 	return &FieldMapping{
 		from: from,
@@ -74,6 +75,7 @@ func FromField(from string) *FieldMapping {
 
 // ToField creates a FieldMapping that maps the entire predecessor output to a single successor field.
 // Field: either the field of a struct, or the key of a map.
+// For nested fields, use the path separator (.) to separate the field names.
 func ToField(to string) *FieldMapping {
 	return &FieldMapping{
 		to: to,
@@ -82,6 +84,7 @@ func ToField(to string) *FieldMapping {
 
 // MapFields creates a FieldMapping that maps a single predecessor field to a single successor field.
 // Field: either the field of a struct, or the key of a map.
+// For nested fields, use the path separator (.) to separate the field names.
 func MapFields(from, to string) *FieldMapping {
 	return &FieldMapping{
 		from: from,
