@@ -27,4 +27,3 @@ func (m *LitellmModel) GenerateText(prompt string) (string, error) {
 	return response.Choices[0].Text, nil
 }
 
-// Litellm is a widely used tool in the AI community that allows deploying a proxy and providing access via HTTP API. Additionally, the Litellm API is compatible with the OpenAI API protocol.
