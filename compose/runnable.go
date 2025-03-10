@@ -18,6 +18,7 @@ package compose
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"reflect"
 
@@ -49,6 +50,11 @@ type handlerPair struct {
 	transform streamHandler
 }
 
+type streamConvertPair struct {
+	concatStream  func(sr streamReader) (any, error)
+	restoreStream func(any) (streamReader, error)
+}
+
 // composableRunnable the wrapper for all executable object directly provided by the user.
 // one instance corresponds to one instance of the executable object.
 // all information comes from executable object without any other dimensions of information.
@@ -63,6 +69,8 @@ type composableRunnable struct {
 	inputConverter handlerPair
 	// when current node enable field mapping, convert map input to expected struct using the following two methods
 	inputFieldMappingConverter handlerPair
+	// can convert input/output from stream to non-stream or non-stream to stream, used for checkpoint
+	inputStreamConvertPair, outputStreamConvertPair streamConvertPair
 
 	inputType  reflect.Type
 	outputType reflect.Type
@@ -110,6 +118,36 @@ func (rp *runnablePacker[I, O, TOption]) wrapRunnableCtx(ctxWrapper func(ctx con
 	rp.t = func(ctx context.Context, input *schema.StreamReader[I], opts ...TOption) (output *schema.StreamReader[O], err error) {
 		ctx = ctxWrapper(ctx, opts...)
 		return t(ctx, input, opts...)
+	}
+}
+
+func defaultStreamConvertPair[T any]() streamConvertPair {
+	var t T
+	return streamConvertPair{
+		concatStream: func(sr streamReader) (any, error) {
+			tsr, ok := unpackStreamReader[T](sr)
+			if !ok {
+				return nil, fmt.Errorf("cannot convert sr to streamReader[%T]", t)
+			}
+			value, err := concatStreamReader(tsr)
+			if err != nil {
+				if errors.Is(err, emptyStreamConcatErr) {
+					return nil, nil
+				}
+				return nil, err
+			}
+			return value, nil
+		},
+		restoreStream: func(a any) (streamReader, error) {
+			if a == nil {
+				return packStreamReader(schema.StreamReaderFromArray([]T{})), nil
+			}
+			value, ok := a.(T)
+			if !ok {
+				return nil, fmt.Errorf("cannot convert value[%T] to streamReader[%T]", a, t)
+			}
+			return packStreamReader(schema.StreamReaderFromArray([]T{value})), nil
+		},
 	}
 }
 
@@ -174,9 +212,11 @@ func (rp *runnablePacker[I, O, TOption]) toComposableRunnable() *composableRunna
 			invoke:    buildFieldMappingConverter[I](),
 			transform: buildStreamFieldMappingConverter[I](),
 		},
-		inputType:  inputType,
-		outputType: outputType,
-		optionType: optionType,
+		inputStreamConvertPair:  defaultStreamConvertPair[I](),
+		outputStreamConvertPair: defaultStreamConvertPair[O](),
+		inputType:               inputType,
+		outputType:              outputType,
+		optionType:              optionType,
 	}
 
 	i := func(ctx context.Context, input any, opts ...any) (output any, err error) {
@@ -559,6 +599,7 @@ func inputKeyedComposableRunnable(key string, r *composableRunnable) *composable
 	wrapper := *r
 	wrapper.inputConverter.invoke = defaultValueChecker[map[string]any]
 	wrapper.inputConverter.transform = defaultStreamConverter[map[string]any]
+	wrapper.inputStreamConvertPair = defaultStreamConvertPair[map[string]any]()
 	i := r.i
 	wrapper.i = func(ctx context.Context, input any, opts ...any) (output any, err error) {
 		v, ok := input.(map[string]any)[key]
@@ -593,6 +634,7 @@ func inputKeyedComposableRunnable(key string, r *composableRunnable) *composable
 
 func outputKeyedComposableRunnable(key string, r *composableRunnable) *composableRunnable {
 	wrapper := *r
+	wrapper.outputStreamConvertPair = defaultStreamConvertPair[map[string]any]()
 	i := r.i
 	wrapper.i = func(ctx context.Context, input any, opts ...any) (output any, err error) {
 		out, err := i(ctx, input, opts...)

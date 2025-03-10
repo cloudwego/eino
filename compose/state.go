@@ -32,16 +32,15 @@ type GenLocalState[S any] func(ctx context.Context) (state S)
 type stateKey struct{}
 
 type internalState struct {
-	state     any
-	forbidden bool
-	mu        sync.Mutex
+	state any
+	mu    sync.Mutex
 }
 
-// StatePreHandler is a function that is called before the node is executed.
+// StatePreHandler is a function called before the node is executed.
 // Notice: if user called Stream but with StatePreHandler, the StatePreHandler will read all stream chunks and merge them into a single object.
 type StatePreHandler[I, S any] func(ctx context.Context, in I, state S) (I, error)
 
-// StatePostHandler is a function that is called after the node is executed.
+// StatePostHandler is a function called after the node is executed.
 // Notice: if user called Stream but with StatePostHandler, the StatePostHandler will read all stream chunks and merge them into a single object.
 type StatePostHandler[O, S any] func(ctx context.Context, out O, state S) (O, error)
 

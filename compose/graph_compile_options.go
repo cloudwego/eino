@@ -16,6 +16,34 @@
 
 package compose
 
+type graphCompileOptions struct {
+	maxRunSteps     int
+	graphName       string
+	nodeTriggerMode NodeTriggerMode // default to AnyPredecessor (pregel)
+
+	callbacks []GraphCompileCallback
+
+	origOpts []GraphCompileOption
+
+	getStateEnabled bool
+
+	checkPointStore      CheckPointStore
+	interruptBeforeNodes []string
+	interruptAfterNodes  []string
+}
+
+func newGraphCompileOptions(opts ...GraphCompileOption) *graphCompileOptions {
+	option := &graphCompileOptions{}
+
+	for _, o := range opts {
+		o(option)
+	}
+
+	option.origOpts = opts
+
+	return option
+}
+
 // GraphCompileOption options for compiling AnyGraph.
 type GraphCompileOption func(*graphCompileOptions)
 

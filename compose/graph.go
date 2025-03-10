@@ -167,6 +167,8 @@ type graph struct {
 	outputConverter             handlerPair
 	outputFieldMappingConverter handlerPair
 
+	inStreamConvertPair, outStreamConvertPair streamConvertPair
+
 	fieldMappingRecords map[string][]*FieldMapping
 
 	buildError error
@@ -187,6 +189,7 @@ type newGraphConfig struct {
 	inputConv, outputConv                                               streamHandler
 	inputFieldMappingConverter, outputFieldMappingConverter             valueHandler
 	inputStreamFieldMappingConverter, outputStreamFieldMappingConverter streamHandler
+	inputStreamConvertPair, outputStreamConvertPair                     streamConvertPair
 	cmp                                                                 component
 	stateType                                                           reflect.Type
 	stateGenerator                                                      func(ctx context.Context) any
@@ -209,6 +212,8 @@ func newGraphFromGeneric[I, O any](
 		outputFieldMappingConverter:       buildFieldMappingConverter[O](),
 		inputStreamFieldMappingConverter:  buildStreamFieldMappingConverter[I](),
 		outputStreamFieldMappingConverter: buildStreamFieldMappingConverter[O](),
+		inputStreamConvertPair:            defaultStreamConvertPair[I](),
+		outputStreamConvertPair:           defaultStreamConvertPair[O](),
 		cmp:                               cmp,
 		stateType:                         stateType,
 		stateGenerator:                    stateGenerator,
@@ -246,6 +251,8 @@ func newGraph(cfg *newGraphConfig) *graph {
 			invoke:    cfg.outputFieldMappingConverter,
 			transform: cfg.outputStreamFieldMappingConverter,
 		},
+		inStreamConvertPair:  cfg.inputStreamConvertPair,
+		outStreamConvertPair: cfg.outputStreamConvertPair,
 
 		fieldMappingRecords: make(map[string][]*FieldMapping),
 
@@ -629,11 +636,15 @@ func (g *graph) updateToValidateMap() error {
 					g.nodes[endNode.endNode].cr.outputType = g.nodes[endNode.endNode].cr.inputType
 					g.nodes[endNode.endNode].cr.inputConverter = g.getNodeInputConverter(startNode)
 					g.nodes[endNode.endNode].cr.inputFieldMappingConverter = g.getNodeInputFieldMappingConverter(startNode)
+					g.nodes[endNode.endNode].cr.inputStreamConvertPair = g.getNodeInputStreamConv(startNode)
+					g.nodes[endNode.endNode].cr.outputStreamConvertPair = g.getNodeOutputStreamConv(startNode)
 				} else if startNodeOutputType == nil /* redundant condition && endNodeInputType != nil */ {
 					g.nodes[startNode].cr.inputType = endNodeInputType
 					g.nodes[startNode].cr.outputType = g.nodes[startNode].cr.inputType
 					g.nodes[startNode].cr.inputConverter = g.getNodeInputConverter(endNode.endNode)
 					g.nodes[startNode].cr.inputFieldMappingConverter = g.getNodeInputFieldMappingConverter(endNode.endNode)
+					g.nodes[endNode.endNode].cr.inputStreamConvertPair = g.getNodeInputStreamConv(startNode)
+					g.nodes[startNode].cr.outputStreamConvertPair = g.getNodeOutputStreamConv(endNode.endNode)
 				} else if len(endNode.mappings) == 0 {
 					// common node check
 					result := checkAssignable(startNodeOutputType, endNodeInputType)
@@ -681,6 +692,24 @@ func (g *graph) updateToValidateMap() error {
 	return nil
 }
 
+func (g *graph) getNodeInputStreamConv(name string) streamConvertPair {
+	if name == START {
+		return g.inStreamConvertPair
+	} else if name == END {
+		return g.outStreamConvertPair
+	}
+	return g.nodes[name].inputStreamConvertPair()
+}
+
+func (g *graph) getNodeOutputStreamConv(name string) streamConvertPair {
+	if name == START {
+		return g.inStreamConvertPair
+	} else if name == END {
+		return g.outStreamConvertPair
+	}
+	return g.nodes[name].outputStreamConvertPair()
+}
+
 func (g *graph) getNodeInputConverter(name string) handlerPair {
 	if name == START {
 		return g.graphInputConverter
@@ -715,6 +744,14 @@ func (g *graph) getNodeOutputType(name string) reflect.Type {
 		return g.outputType()
 	}
 	return g.nodes[name].outputType()
+}
+
+func (g *graph) inputStreamConvertPair() streamConvertPair {
+	return g.inStreamConvertPair
+}
+
+func (g *graph) outputStreamConvertPair() streamConvertPair {
+	return g.outStreamConvertPair
 }
 
 func (g *graph) inputType() reflect.Type {
@@ -758,10 +795,6 @@ func (g *graph) compile(ctx context.Context, opt *graphCompileOptions) (*composa
 	}
 	if !isWorkflow(g.cmp) && opt != nil && opt.getStateEnabled {
 		return nil, fmt.Errorf("shouldn't set WithGetStateEnable outside of the Workflow")
-	}
-	forbidGetState := true
-	if !eager || (opt != nil && opt.getStateEnabled) {
-		forbidGetState = false
 	}
 
 	if len(g.startNodes) == 0 {
@@ -820,7 +853,6 @@ func (g *graph) compile(ctx context.Context, opt *graphCompileOptions) (*composa
 		}
 
 		chanSubscribeTo[name] = chCall
-
 	}
 
 	invertedEdges := make(map[string][]string)
@@ -866,6 +898,8 @@ func (g *graph) compile(ctx context.Context, opt *graphCompileOptions) (*composa
 		inputStreamFilter:          g.inputStreamFilter,
 		inputConverter:             g.graphInputConverter,
 		inputFieldMappingConverter: g.graphInputFieldMappingConverter,
+		inputConvertStreamPair:     g.inStreamConvertPair,
+		outputConvertStreamPair:    g.outStreamConvertPair,
 
 		preBranchHandlerManager: &preBranchHandlerManager{h: g.handlerPreBranch},
 		preNodeHandlerManager:   &preNodeHandlerManager{h: g.handlerPreNode},
@@ -881,8 +915,7 @@ func (g *graph) compile(ctx context.Context, opt *graphCompileOptions) (*composa
 	if g.stateGenerator != nil {
 		r.runCtx = func(ctx context.Context) context.Context {
 			return context.WithValue(ctx, stateKey{}, &internalState{
-				state:     g.stateGenerator(ctx),
-				forbidden: forbidGetState,
+				state: g.stateGenerator(ctx),
 			})
 		}
 	}
@@ -896,6 +929,18 @@ func (g *graph) compile(ctx context.Context, opt *graphCompileOptions) (*composa
 	}
 
 	if opt != nil {
+		inputPairs := make(map[string]streamConvertPair)
+		outputPairs := make(map[string]streamConvertPair)
+		for key, c := range r.chanSubscribeTo {
+			inputPairs[key] = c.action.inputStreamConvertPair
+			outputPairs[key] = c.action.outputStreamConvertPair
+		}
+		inputPairs[END] = r.outputConvertStreamPair
+		outputPairs[START] = r.inputConvertStreamPair
+		r.checkPointer = newCheckPointer(inputPairs, outputPairs, opt.checkPointStore)
+
+		r.interruptBeforeNodes = opt.interruptBeforeNodes
+		r.interruptAfterNodes = opt.interruptAfterNodes
 		r.options = *opt
 	}
 

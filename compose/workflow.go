@@ -163,6 +163,14 @@ func (wf *Workflow[I, O]) initNode(key string) *WorkflowNode {
 	return &WorkflowNode{g: wf.g, key: key}
 }
 
+func (wf *Workflow[I, O]) inputStreamConvertPair() streamConvertPair {
+	return defaultStreamConvertPair[I]()
+}
+
+func (wf *Workflow[I, O]) outputStreamConvertPair() streamConvertPair {
+	return defaultStreamConvertPair[O]()
+}
+
 func (wf *Workflow[I, O]) inputConverter() handlerPair {
 	return handlerPair{
 		invoke:    defaultValueChecker[I],
