@@ -1537,14 +1537,8 @@ func TestCrossDAGBranch(t *testing.T) {
 	assert.NoError(t, err)
 
 	ctx := context.Background()
-	r, err := g.Compile(ctx, WithNodeTriggerMode(AllPredecessor))
-	assert.NoError(t, err)
-	result, err := r.Invoke(ctx, map[string]string{"input": "hi"})
-	assert.NoError(t, err)
-	assert.Equal(t, map[string]string{
-		"1": "1",
-		"2": "2",
-	}, result)
+	_, err = g.Compile(ctx, WithNodeTriggerMode(AllPredecessor))
+	assert.ErrorContains(t, err, "as the successor node of a branch, node[2] shouldn't have other predecessors: [start]")
 }
 
 func TestNestedDAGBranch(t *testing.T) {

@@ -267,7 +267,7 @@ func (r *runner) calculateNext(ctx context.Context, curNodeKey string, startChan
 	ret := make([]string, 0, len(startChan.writeTo))
 	ret = append(ret, startChan.writeTo...)
 
-	skippedNodes := make(map[string]struct{})
+	var skippedNodes []string
 	for i, branch := range startChan.writeToBranches {
 		// check branch input type if needed
 		var err error
@@ -310,27 +310,17 @@ func (r *runner) calculateNext(ctx context.Context, curNodeKey string, startChan
 
 		for node := range branch.endNodes {
 			if node != w {
-				skippedNodes[node] = struct{}{}
+				skippedNodes = append(skippedNodes, node)
 			}
 		}
 
 		ret = append(ret, w)
 	}
 
-	// When a node has multiple branches,
-	// there may be a situation where a succeeding node is selected by some branches and discarded by the other branches,
-	// in which case the succeeding node should not be skipped.
-	var skippedNodeList []string
-	for _, selected := range ret {
-		if _, ok := skippedNodes[selected]; ok {
-			delete(skippedNodes, selected)
-		}
-	}
-	for skipped := range skippedNodes {
-		skippedNodeList = append(skippedNodeList, skipped)
-	}
+	// nodes that have multiple predecessors that include branches will report error on compilation,
+	// so skippedNodes won't have any conflict
 
-	err := cm.reportBranch(curNodeKey, skippedNodeList)
+	err := cm.reportBranch(curNodeKey, skippedNodes)
 	if err != nil {
 		return nil, err
 	}
