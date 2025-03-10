@@ -792,6 +792,34 @@ func (g *graph) compile(ctx context.Context, opt *graphCompileOptions) (*composa
 		g.handlerPreNode[key] = append(g.handlerPreNode[key], g.getNodeInputFieldMappingConverter(key))
 	}
 
+	invertedEdges := make(map[string][]string)
+	for start, ends := range g.edges {
+		for _, end := range ends {
+			if _, ok := invertedEdges[end]; !ok {
+				invertedEdges[end] = []string{start}
+			} else {
+				invertedEdges[end] = append(invertedEdges[end], start)
+			}
+
+		}
+	}
+	for start, branches := range g.branches {
+		for _, branch := range branches {
+			for end := range branch.endNodes {
+				if _, ok := invertedEdges[end]; !ok {
+					invertedEdges[end] = []string{start}
+				} else {
+					if runType == runTypeDAG {
+						// check if the successor node of a branch has other predecessors
+						return nil, fmt.Errorf("as the successor node of a branch, node[%s] shouldn't have other predecessors: %v", end, invertedEdges[end])
+					} else {
+						invertedEdges[end] = append(invertedEdges[end], start)
+					}
+				}
+			}
+		}
+	}
+
 	key2SubGraphs := g.beforeChildGraphsCompile(opt)
 	chanSubscribeTo := make(map[string]*chanCall)
 	for name, node := range g.nodes {
@@ -821,29 +849,6 @@ func (g *graph) compile(ctx context.Context, opt *graphCompileOptions) (*composa
 
 		chanSubscribeTo[name] = chCall
 
-	}
-
-	invertedEdges := make(map[string][]string)
-	for start, ends := range g.edges {
-		for _, end := range ends {
-			if _, ok := invertedEdges[end]; !ok {
-				invertedEdges[end] = []string{start}
-			} else {
-				invertedEdges[end] = append(invertedEdges[end], start)
-			}
-
-		}
-	}
-	for start, branches := range g.branches {
-		for _, branch := range branches {
-			for end := range branch.endNodes {
-				if _, ok := invertedEdges[end]; !ok {
-					invertedEdges[end] = []string{start}
-				} else {
-					invertedEdges[end] = append(invertedEdges[end], start)
-				}
-			}
-		}
 	}
 
 	inputChannels := &chanCall{
