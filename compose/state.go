@@ -141,26 +141,6 @@ func ProcessState[S any](ctx context.Context, handler func(context.Context, S) e
 	return handler(ctx, s)
 }
 
-// GetState gets the state from the context.
-// Deprecated: use ProcessState instead.
-func GetState[S any](ctx context.Context) (S, error) {
-	state := ctx.Value(stateKey{})
-
-	iState := state.(*internalState)
-	if iState.forbidden {
-		var s S
-		return s, fmt.Errorf("GetState in node is forbidden in Workflow because of the race of state, if you have handled concurrent state access safety, you can add WithGetStateEnable option at graph compile")
-	}
-	cState, ok := iState.state.(S)
-	if !ok {
-		var s S
-		return s, fmt.Errorf("unexpected state type. expected: %v, got: %v",
-			generic.TypeOf[S](), reflect.TypeOf(iState.state))
-	}
-
-	return cState, nil
-}
-
 func getState[S any](ctx context.Context) (S, *sync.Mutex, error) {
 	state := ctx.Value(stateKey{})
 
