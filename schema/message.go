@@ -313,8 +313,6 @@ type messagesPlaceholder struct {
 //	)
 //	msgs, err := chatTemplate.Format(ctx, params)
 func MessagesPlaceholder(key string, optional bool) MessagesTemplate {
-	a := "https://bytedance.larkoffice.com/docx/KjjSdayZ8o1Ru8xkV03cRL27nbf"
-	_ = a
 	return &messagesPlaceholder{
 		key:      key,
 		optional: optional,
