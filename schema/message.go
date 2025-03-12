@@ -671,8 +671,10 @@ func ConcatMessages(msgs []*Message) (*Message, error) {
 		}
 
 		if msg.ResponseMeta != nil && ret.ResponseMeta == nil {
-			ret.ResponseMeta = msg.ResponseMeta
-		} else if msg.ResponseMeta != nil && ret.ResponseMeta != nil {
+			ret.ResponseMeta = &ResponseMeta{}
+		}
+
+		if msg.ResponseMeta != nil && ret.ResponseMeta != nil {
 			// keep the last FinishReason with a valid value.
 			if msg.ResponseMeta.FinishReason != "" {
 				ret.ResponseMeta.FinishReason = msg.ResponseMeta.FinishReason

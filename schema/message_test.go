@@ -402,6 +402,37 @@ func TestConcatMessage(t *testing.T) {
 		assert.Equal(t, msgs[0].ResponseMeta.LogProbs.Content[1], msg.ResponseMeta.LogProbs.Content[1])
 		assert.Equal(t, msgs[1].ResponseMeta.LogProbs.Content[0], msg.ResponseMeta.LogProbs.Content[2])
 	})
+
+	t.Run("fix unexpected setting ResponseMeta of the first element in slice after ConcatMessages", func(t *testing.T) {
+		msgs := []*Message{
+			{
+				Role:    Assistant,
+				Content: "🚀",
+				//ResponseMeta: &ResponseMeta{},
+			},
+			{
+				Role:         "",
+				Content:      "❤️",
+				ResponseMeta: &ResponseMeta{},
+			},
+			{
+				Role: "",
+				ResponseMeta: &ResponseMeta{
+					FinishReason: "stop",
+					Usage: &TokenUsage{
+						PromptTokens:     7,
+						CompletionTokens: 3,
+						TotalTokens:      10,
+					},
+				},
+			},
+		}
+
+		msg, err := ConcatMessages(msgs)
+		assert.NoError(t, err)
+		assert.Equal(t, msgs[2].ResponseMeta, msg.ResponseMeta)
+		assert.Nil(t, msgs[0].ResponseMeta)
+	})
 }
 
 func TestConcatToolCalls(t *testing.T) {
