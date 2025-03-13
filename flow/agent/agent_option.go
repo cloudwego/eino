@@ -19,7 +19,6 @@ package agent
 import "github.com/cloudwego/eino/compose"
 
 // AgentOption is the common option type for various agent and multi-agent implementations.
-// For options intended to use with underlying graph or components, use WithComposeOptions to specify.
 // For options intended to use with particular agent/multi-agent implementations, use WrapImplSpecificOptFn to specify.
 type AgentOption struct {
 	implSpecificOptFn any
@@ -27,6 +26,7 @@ type AgentOption struct {
 }
 
 // GetComposeOptions returns all compose options from the given agent options.
+// Deprecated
 func GetComposeOptions(opts ...AgentOption) []compose.Option {
 	var result []compose.Option
 	for _, opt := range opts {
@@ -37,6 +37,7 @@ func GetComposeOptions(opts ...AgentOption) []compose.Option {
 }
 
 // WithComposeOptions returns an agent option that specifies compose options.
+// Deprecated: use option functions defined by each agent flow implementation instead.
 func WithComposeOptions(opts ...compose.Option) AgentOption {
 	return AgentOption{
 		composeOptions: opts,

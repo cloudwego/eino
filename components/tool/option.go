@@ -17,8 +17,8 @@
 package tool
 
 // Option defines call option for InvokableTool or StreamableTool component, which is part of component interface signature.
-// Each tool implementation could define its own options struct and option funcs within its own package,
-// then wrap the impl specific option funcs into this type, before passing to InvokableRun or StreamableRun.
+// Each tool implementation could define its own options struct and option functions within its own package,
+// then wrap the impl specific option functions into this type, before passing to InvokableRun or StreamableRun.
 type Option struct {
 	implSpecificOptFn any
 }

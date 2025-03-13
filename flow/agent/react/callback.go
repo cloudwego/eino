@@ -27,6 +27,8 @@ import (
 //	callback := BuildAgentCallback(modelHandler, toolHandler)
 //	agent, err := react.NewAgent(ctx, &AgentConfig{})
 //	agent.Generate(ctx, input, agent.WithComposeOptions(compose.WithCallbacks(callback)))
+//
+// Deprecated: use WithModelCallbacks and WithToolCallbacks instead.
 func BuildAgentCallback(modelHandler *template.ModelCallbackHandler, toolHandler *template.ToolCallbackHandler) callbacks.Handler {
 	return template.NewHandlerHelper().ChatModel(modelHandler).Tool(toolHandler).Handler()
 }
