@@ -61,7 +61,7 @@ func InitCallbackHandlers(handlers []Handler) {
 // This is the preferred way to add global callback handlers as it preserves existing handlers.
 // The global callback handlers will be executed for all nodes BEFORE user-specific handlers in CallOption.
 // Note: This function is not thread-safe and should only be called during process initialization.
-func AppendGlobalHandlers(handlers []Handler) {
+func AppendGlobalHandlers(handlers ...Handler) {
 	callbacks.GlobalHandlers = append(callbacks.GlobalHandlers, handlers...)
 }
 
