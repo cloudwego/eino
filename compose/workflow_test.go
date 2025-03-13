@@ -281,7 +281,7 @@ func TestWorkflowWithNestedFieldMappings(t *testing.T) {
 
 	t.Run("from struct.struct.field", func(t *testing.T) {
 		wf := NewWorkflow[*structB, string]()
-		wf.AddEnd(START, FromField("F1.F1"))
+		wf.AddEnd(START, FromFieldPath([]string{"F1", "F1"}))
 		r, err := wf.Compile(ctx)
 		assert.NoError(t, err)
 		out, err := r.Invoke(ctx, &structB{
@@ -293,14 +293,14 @@ func TestWorkflowWithNestedFieldMappings(t *testing.T) {
 		assert.Equal(t, "hello", out)
 
 		wf = NewWorkflow[*structB, string]()
-		wf.AddEnd(START, FromField("F1.F2"))
+		wf.AddEnd(START, FromFieldPath([]string{"F1", "F2"}))
 		_, err = wf.Compile(ctx)
 		assert.ErrorContains(t, err, "type[compose.structA] has no field[F2]")
 	})
 
 	t.Run("from map.map.field", func(t *testing.T) {
 		wf := NewWorkflow[map[string]map[string]string, string]()
-		wf.AddEnd(START, FromField("F1.F1"))
+		wf.AddEnd(START, FromFieldPath([]string{"F1", "F1"}))
 		r, err := wf.Compile(ctx)
 		assert.NoError(t, err)
 		out, err := r.Invoke(ctx, map[string]map[string]string{
@@ -322,7 +322,7 @@ func TestWorkflowWithNestedFieldMappings(t *testing.T) {
 
 	t.Run("from struct.map.field", func(t *testing.T) {
 		wf := NewWorkflow[*structB, string]()
-		wf.AddEnd(START, FromField("F2.F1"))
+		wf.AddEnd(START, FromFieldPath([]string{"F2", "F1"}))
 		r, err := wf.Compile(ctx)
 		assert.NoError(t, err)
 		out, err := r.Invoke(ctx, &structB{
@@ -344,7 +344,7 @@ func TestWorkflowWithNestedFieldMappings(t *testing.T) {
 
 	t.Run("from map.struct.field", func(t *testing.T) {
 		wf := NewWorkflow[map[string]*structA, string]()
-		wf.AddEnd(START, FromField("F1.F1"))
+		wf.AddEnd(START, FromFieldPath([]string{"F1", "F1"}))
 		r, err := wf.Compile(ctx)
 		assert.NoError(t, err)
 		out, err := r.Invoke(ctx, map[string]*structA{
@@ -356,14 +356,14 @@ func TestWorkflowWithNestedFieldMappings(t *testing.T) {
 		assert.Equal(t, "hello", out)
 
 		wf = NewWorkflow[map[string]*structA, string]()
-		wf.AddEnd(START, FromField("F1.F2"))
+		wf.AddEnd(START, FromFieldPath([]string{"F1", "F2"}))
 		_, err = wf.Compile(ctx)
 		assert.ErrorContains(t, err, "type[compose.structA] has no field[F2]")
 	})
 
 	t.Run("from map[string]any.field", func(t *testing.T) {
 		wf := NewWorkflow[map[string]any, string]()
-		wf.AddEnd(START, FromField("F1.F1"))
+		wf.AddEnd(START, FromFieldPath([]string{"F1", "F1"}))
 		r, err := wf.Compile(ctx)
 		assert.NoError(t, err)
 		out, err := r.Invoke(ctx, map[string]any{
@@ -391,7 +391,7 @@ func TestWorkflowWithNestedFieldMappings(t *testing.T) {
 
 	t.Run("to struct.struct.field", func(t *testing.T) {
 		wf := NewWorkflow[string, *structB]()
-		wf.AddEnd(START, ToField("F1.F1"))
+		wf.AddEnd(START, ToFieldPath([]string{"F1", "F1"}))
 		r, err := wf.Compile(ctx)
 		assert.NoError(t, err)
 		out, err := r.Invoke(ctx, "hello")
@@ -403,14 +403,14 @@ func TestWorkflowWithNestedFieldMappings(t *testing.T) {
 		}, out)
 
 		wf = NewWorkflow[string, *structB]()
-		wf.AddEnd(START, ToField("F1.F2"))
+		wf.AddEnd(START, ToFieldPath([]string{"F1", "F2"}))
 		_, err = wf.Compile(ctx)
 		assert.ErrorContains(t, err, "type[compose.structA] has no field[F2]")
 	})
 
 	t.Run("to map.map.field", func(t *testing.T) {
 		wf := NewWorkflow[string, map[string]map[string]string]()
-		wf.AddEnd(START, ToField("F1.F1"))
+		wf.AddEnd(START, ToFieldPath([]string{"F1", "F1"}))
 		r, err := wf.Compile(ctx)
 		assert.NoError(t, err)
 		out, err := r.Invoke(ctx, "hello")
@@ -422,14 +422,14 @@ func TestWorkflowWithNestedFieldMappings(t *testing.T) {
 		}, out)
 
 		wf1 := NewWorkflow[string, map[string]map[string]int]()
-		wf1.AddEnd(START, ToField("F1.F1"))
+		wf1.AddEnd(START, ToFieldPath([]string{"F1", "F1"}))
 		_, err = wf1.Compile(ctx)
 		assert.ErrorContains(t, err, "field[string]-[int] must not be assignable")
 	})
 
 	t.Run("to struct.map.field", func(t *testing.T) {
 		wf := NewWorkflow[string, *structB]()
-		wf.AddEnd(START, ToField("F2.F1"))
+		wf.AddEnd(START, ToFieldPath([]string{"F2", "F1"}))
 		r, err := wf.Compile(ctx)
 		assert.NoError(t, err)
 		out, err := r.Invoke(ctx, "hello")
@@ -443,7 +443,7 @@ func TestWorkflowWithNestedFieldMappings(t *testing.T) {
 
 	t.Run("to map.struct.struct.field", func(t *testing.T) {
 		wf := NewWorkflow[string, map[string]*structB]()
-		wf.AddEnd(START, ToField("F1.F1.F1"))
+		wf.AddEnd(START, ToFieldPath([]string{"F1", "F1", "F1"}))
 		r, err := wf.Compile(ctx)
 		assert.NoError(t, err)
 		out, err := r.Invoke(ctx, "hello")
@@ -459,16 +459,50 @@ func TestWorkflowWithNestedFieldMappings(t *testing.T) {
 
 	t.Run("to struct.int.field", func(t *testing.T) {
 		wf := NewWorkflow[string, *structB]()
-		wf.AddEnd(START, ToField("F3.F1.F1"))
+		wf.AddEnd(START, ToFieldPath([]string{"F3", "F1", "F1"}))
 		_, err := wf.Compile(ctx)
 		assert.ErrorContains(t, err, "type[int] is not valid")
 	})
 
 	t.Run("to struct.any.field", func(t *testing.T) {
 		wf := NewWorkflow[string, *structB]()
-		wf.AddEnd(START, ToField("F4.F1.F1"))
+		wf.AddEnd(START, ToFieldPath([]string{"F4", "F1", "F1"}))
 		_, err := wf.Compile(ctx)
 		assert.ErrorContains(t, err, "the successor has intermediate interface type interface {}")
+	})
+
+	t.Run("from nested to nested", func(t *testing.T) {
+		wf := NewWorkflow[map[string]any, *structB]()
+		wf.AddEnd(START, MapFieldPaths([]string{"key1", "key2"}, []string{"F1", "F1"}))
+		r, err := wf.Compile(ctx)
+		assert.NoError(t, err)
+		out, err := r.Invoke(ctx, map[string]any{
+			"key1": map[string]any{
+				"key2": "hello",
+			},
+		})
+		assert.NoError(t, err)
+		assert.Equal(t, &structB{
+			F1: &structA{
+				F1: "hello",
+			},
+		}, out)
+	})
+
+	t.Run("from nested to normal", func(t *testing.T) {
+		wf := NewWorkflow[map[string]any, *structA]()
+		wf.AddEnd(START, MapFieldPaths([]string{"key1", "key2"}, []string{"F1"}))
+		r, err := wf.Compile(ctx)
+		assert.NoError(t, err)
+		out, err := r.Invoke(ctx, map[string]any{
+			"key1": map[string]any{
+				"key2": "hello",
+			},
+		})
+		assert.NoError(t, err)
+		assert.Equal(t, &structA{
+			F1: "hello",
+		}, out)
 	})
 }
 

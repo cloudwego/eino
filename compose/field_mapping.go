@@ -60,13 +60,10 @@ func (m *FieldMapping) String() string {
 	return sb.String()
 }
 
-const pathSeparator = "."
-
 // FromField creates a FieldMapping that maps a single predecessor field to the entire successor input.
 // This is an exclusive mapping - once set, no other field mappings can be added since the successor input
 // has already been fully mapped.
 // Field: either the field of a struct, or the key of a map.
-// For nested fields, use the path separator (.) to separate the field names.
 func FromField(from string) *FieldMapping {
 	return &FieldMapping{
 		from: from,
@@ -75,7 +72,6 @@ func FromField(from string) *FieldMapping {
 
 // ToField creates a FieldMapping that maps the entire predecessor output to a single successor field.
 // Field: either the field of a struct, or the key of a map.
-// For nested fields, use the path separator (.) to separate the field names.
 func ToField(to string) *FieldMapping {
 	return &FieldMapping{
 		to: to,
@@ -84,11 +80,33 @@ func ToField(to string) *FieldMapping {
 
 // MapFields creates a FieldMapping that maps a single predecessor field to a single successor field.
 // Field: either the field of a struct, or the key of a map.
-// For nested fields, use the path separator (.) to separate the field names.
 func MapFields(from, to string) *FieldMapping {
 	return &FieldMapping{
 		from: from,
 		to:   to,
+	}
+}
+
+type FieldPath []string
+
+const pathSeparator = "\x1F"
+
+func FromFieldPath(fromFieldPath FieldPath) *FieldMapping {
+	return &FieldMapping{
+		from: strings.Join(fromFieldPath, pathSeparator),
+	}
+}
+
+func ToFieldPath(toFieldPath FieldPath) *FieldMapping {
+	return &FieldMapping{
+		to: strings.Join(toFieldPath, pathSeparator),
+	}
+}
+
+func MapFieldPaths(fromFieldPath, toFieldPath FieldPath) *FieldMapping {
+	return &FieldMapping{
+		from: strings.Join(fromFieldPath, pathSeparator),
+		to:   strings.Join(toFieldPath, pathSeparator),
 	}
 }
 
