@@ -52,7 +52,7 @@ type Handler = callbacks.Handler
 // InitCallbackHandlers sets the global callback handlers.
 // It should be called BEFORE any callback handler by user.
 // It's useful when you want to inject some basic callbacks to all nodes.
-// Deprecated: Use AppendGlobalHandlers instead. This function overwrites all existing global handlers.
+// Deprecated: Use AppendGlobalHandlers instead.
 func InitCallbackHandlers(handlers []Handler) {
 	callbacks.GlobalHandlers = handlers
 }
