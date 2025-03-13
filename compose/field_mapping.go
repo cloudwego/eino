@@ -17,6 +17,7 @@
 package compose
 
 import (
+	"errors"
 	"fmt"
 	"reflect"
 	"runtime/debug"
@@ -83,6 +84,69 @@ func MapFields(from, to string) *FieldMapping {
 	return &FieldMapping{
 		from: from,
 		to:   to,
+	}
+}
+
+// FieldPath represents a path to a nested field in a struct or map.
+// Each element in the path is either:
+// - a struct field name
+// - a map key
+//
+// Example paths:
+//   - []string{"user"}            // top-level field
+//   - []string{"user", "name"}    // nested struct field
+//   - []string{"users", "admin"}  // map key access
+type FieldPath []string
+
+// pathSeparator is a special character (Unit Separator) used internally to join path elements.
+// This character is chosen because it's extremely unlikely to appear in user-defined field names or map keys.
+const pathSeparator = "\x1F"
+
+// FromFieldPath creates a FieldMapping that maps a single predecessor field path to the entire successor input.
+// This is an exclusive mapping - once set, no other field mappings can be added since the successor input
+// has already been fully mapped.
+//
+// Example:
+//
+//	// Maps the 'name' field from nested 'user.profile' to the entire successor input
+//	FromFieldPath(FieldPath{"user", "profile", "name"})
+//
+// Note: The field path elements must not contain the internal path separator character ('\x1F').
+func FromFieldPath(fromFieldPath FieldPath) *FieldMapping {
+	return &FieldMapping{
+		from: strings.Join(fromFieldPath, pathSeparator),
+	}
+}
+
+// ToFieldPath creates a FieldMapping that maps the entire predecessor output to a single successor field path.
+//
+// Example:
+//
+//	// Maps the entire predecessor output to response.data.userName
+//	ToFieldPath(FieldPath{"response", "data", "userName"})
+//
+// Note: The field path elements must not contain the internal path separator character ('\x1F').
+func ToFieldPath(toFieldPath FieldPath) *FieldMapping {
+	return &FieldMapping{
+		to: strings.Join(toFieldPath, pathSeparator),
+	}
+}
+
+// MapFieldPaths creates a FieldMapping that maps a single predecessor field path to a single successor field path.
+//
+// Example:
+//
+//	// Maps user.profile.name to response.userName
+//	MapFieldPaths(
+//	    FieldPath{"user", "profile", "name"},
+//	    FieldPath{"response", "userName"},
+//	)
+//
+// Note: The field path elements must not contain the internal path separator character ('\x1F').
+func MapFieldPaths(fromFieldPath, toFieldPath FieldPath) *FieldMapping {
+	return &FieldMapping{
+		from: strings.Join(fromFieldPath, pathSeparator),
+		to:   strings.Join(toFieldPath, pathSeparator),
 	}
 }
 
@@ -163,26 +227,107 @@ func assignOne[T any](dest T, taken any, to string) (T, error) {
 		return destValue.Interface().(T), nil
 	}
 
-	toSet := reflect.ValueOf(taken)
+	var (
+		toPaths           = strings.Split(to, pathSeparator)
+		originalDestValue = destValue
+	)
 
-	if destValue.Kind() == reflect.Map {
-		key, err := checkAndExtractToMapKey(to, destValue, toSet)
-		if err != nil {
-			return dest, err
+	for {
+		path := toPaths[0]
+		toPaths = toPaths[1:]
+		if len(toPaths) == 0 {
+			toSet := reflect.ValueOf(taken)
+
+			if destValue.Kind() == reflect.Map {
+				key, err := checkAndExtractToMapKey(path, destValue, toSet)
+				if err != nil {
+					return dest, err
+				}
+
+				destValue.SetMapIndex(key, toSet)
+
+				return originalDestValue.Interface().(T), nil
+			}
+
+			field, err := checkAndExtractToField(path, destValue, toSet)
+			if err != nil {
+				return dest, err
+			}
+
+			field.Set(toSet)
+
+			return originalDestValue.Interface().(T), nil
 		}
 
-		destValue.SetMapIndex(key, toSet)
-		return destValue.Interface().(T), nil
+		if destValue.Kind() == reflect.Map {
+			if !reflect.TypeOf(path).AssignableTo(destValue.Type().Key()) {
+				return dest, fmt.Errorf("field mapping to a map key but output is not a map with string key, type=%v", destValue.Type())
+			}
+
+			keyValue := reflect.ValueOf(path)
+			valueValue := destValue.MapIndex(keyValue)
+			if !valueValue.IsValid() {
+				valueValue = newInstanceByType(destValue.Type().Elem())
+				destValue.SetMapIndex(keyValue, valueValue)
+			}
+
+			destValue = valueValue
+
+			continue
+		}
+
+		for destValue.Kind() == reflect.Ptr {
+			destValue = destValue.Elem()
+		}
+
+		if destValue.Kind() != reflect.Struct {
+			return dest, fmt.Errorf("field mapping to a struct field but output is not a struct, type=%v", destValue.Type())
+		}
+
+		field := destValue.FieldByName(path)
+		if !field.IsValid() {
+			return dest, fmt.Errorf("field mapping to a struct field, but field not found. field=%v, outputType=%v", path, destValue.Type())
+		}
+
+		if !field.CanSet() {
+			return dest, fmt.Errorf("field mapping to a struct field, but field not exported. field=%v, outputType=%v", path, destValue.Type())
+		}
+
+		instantiateIfNeeded(field)
+
+		destValue = field
 	}
+}
 
-	field, err := checkAndExtractToField(to, destValue, toSet)
-	if err != nil {
-		return dest, err
+func instantiateIfNeeded(field reflect.Value) {
+	if field.Kind() == reflect.Ptr {
+		if field.IsNil() {
+			field.Set(reflect.New(field.Type().Elem()))
+		}
 	}
+}
 
-	field.Set(toSet)
-	return destValue.Interface().(T), nil
+func newInstanceByType(typ reflect.Type) reflect.Value {
+	switch typ.Kind() {
+	case reflect.Map:
+		return reflect.MakeMap(typ)
+	case reflect.Slice, reflect.Array:
+		return reflect.MakeSlice(typ, 0, 0)
+	case reflect.Ptr:
+		typ = typ.Elem()
+		origin := reflect.New(typ)
+		inst := origin
 
+		for typ.Kind() == reflect.Ptr {
+			typ = typ.Elem()
+			inst = inst.Elem()
+			inst.Set(reflect.New(typ))
+		}
+
+		return origin
+	default:
+		return reflect.New(typ).Elem()
+	}
 }
 
 func checkAndExtractFromField(fromField string, input reflect.Value) (reflect.Value, error) {
@@ -198,6 +343,23 @@ func checkAndExtractFromField(fromField string, input reflect.Value) (reflect.Va
 	return f, nil
 }
 
+type errMapKeyNotFound struct {
+	mapKey string
+}
+
+func (e *errMapKeyNotFound) Error() string {
+	return fmt.Sprintf("key=%s", e.mapKey)
+}
+
+type errInterfaceNotValidForFieldMapping struct {
+	interfaceType reflect.Type
+	actualType    reflect.Type
+}
+
+func (e *errInterfaceNotValidForFieldMapping) Error() string {
+	return fmt.Sprintf("field mapping from an interface type, but actual type is not struct, struct ptr or map. InterfaceType= %v, ActualType= %v", e.interfaceType, e.actualType)
+}
+
 func checkAndExtractFromMapKey(fromMapKey string, input reflect.Value) (reflect.Value, error) {
 	if !reflect.TypeOf(fromMapKey).AssignableTo(input.Type().Key()) {
 		return reflect.Value{}, fmt.Errorf("field mapping from a map key, but input is not a map with string key, type=%v", input.Type())
@@ -205,57 +367,79 @@ func checkAndExtractFromMapKey(fromMapKey string, input reflect.Value) (reflect.
 
 	v := input.MapIndex(reflect.ValueOf(fromMapKey))
 	if !v.IsValid() {
-		return reflect.Value{}, fmt.Errorf("field mapping from a map key, but key not found in input. key=%s, inputType= %v", fromMapKey, input.Type())
+		return reflect.Value{}, fmt.Errorf("field mapping from a map key, but key not found in input. %w", &errMapKeyNotFound{mapKey: fromMapKey})
 	}
 
 	return v, nil
 }
 
-func checkAndExtractFieldType(field string, typ reflect.Type) (reflect.Type, error) {
-	if len(field) == 0 {
-		return typ, nil
+func checkAndExtractFieldType(paths []string, typ reflect.Type) (extracted reflect.Type, intermediateInterface bool, err error) {
+	if len(paths) == 1 && len(paths[0]) == 0 {
+		return typ, false, nil
 	}
 
-	if typ.Kind() == reflect.Map {
-		if typ.Key() != strType {
-			return nil, fmt.Errorf("type[%v] is not a map with string key", typ)
+	extracted = typ
+	for i, field := range paths {
+		if extracted.Kind() == reflect.Map {
+			if extracted.Key() != strType {
+				return nil, false, fmt.Errorf("type[%v] is not a map with string key", extracted)
+			}
+
+			extracted = extracted.Elem()
+			continue
 		}
 
-		return typ.Elem(), nil
+		for extracted.Kind() == reflect.Ptr {
+			extracted = extracted.Elem()
+		}
+
+		if extracted.Kind() == reflect.Struct {
+			f, ok := extracted.FieldByName(field)
+			if !ok {
+				return nil, false, fmt.Errorf("type[%v] has no field[%s]", extracted, field)
+			}
+
+			if !f.IsExported() {
+				return nil, false, fmt.Errorf("type[%v] has an unexported field[%s]", extracted.String(), field)
+			}
+
+			extracted = f.Type
+			continue
+		}
+
+		if i < len(paths)-1 {
+			if extracted.Kind() == reflect.Interface {
+				return extracted, true, nil
+			}
+
+			return nil, false, fmt.Errorf("intermediate type[%v] is not valid", extracted)
+		}
 	}
 
-	for typ.Kind() == reflect.Ptr {
-		typ = typ.Elem()
-	}
-
-	if typ.Kind() != reflect.Struct {
-		return nil, fmt.Errorf("type[%v] is not a struct", typ)
-	}
-
-	f, ok := typ.FieldByName(field)
-	if !ok {
-		return nil, fmt.Errorf("type[%v] has no field[%s]", typ, field)
-	}
-
-	if !f.IsExported() {
-		return nil, fmt.Errorf("type[%v] has an unexported field[%s]", typ.String(), field)
-	}
-
-	return f.Type, nil
+	return extracted, false, nil
 }
 
 var strType = reflect.TypeOf("")
 
-func checkAndExtractToField(toField string, output, toSet reflect.Value) (reflect.Value, error) {
-	for output.Kind() == reflect.Ptr {
+func checkAndExtractToField(toField string, output, toSet reflect.Value) (field reflect.Value, err error) {
+	originalOutput := output
+	if output.Kind() == reflect.Ptr {
+		if output.IsNil() {
+			originalOutput.Set(reflect.New(output.Type().Elem()))
+		}
+
 		output = output.Elem()
+	}
+
+	if output.Kind() == reflect.Ptr {
+		return reflect.Value{}, fmt.Errorf("field mapping to a struct field, but it's a nested pointer, type= %v", originalOutput.Type())
 	}
 
 	if output.Kind() != reflect.Struct {
 		return reflect.Value{}, fmt.Errorf("field mapping to a struct field but output is not a struct, type=%v", output.Type())
 	}
 
-	field := output.FieldByName(toField)
+	field = output.FieldByName(toField)
 	if !field.IsValid() {
 		return reflect.Value{}, fmt.Errorf("field mapping to a struct field, but field not found. field=%v, outputType=%v", toField, output.Type())
 	}
@@ -271,7 +455,7 @@ func checkAndExtractToField(toField string, output, toSet reflect.Value) (reflec
 	return field, nil
 }
 
-func checkAndExtractToMapKey(toMapKey string, output, toSet reflect.Value) (reflect.Value, error) {
+func checkAndExtractToMapKey(toMapKey string, output, toSet reflect.Value) (key reflect.Value, err error) {
 	if output.Kind() != reflect.Map {
 		return reflect.Value{}, fmt.Errorf("field mapping to a map key but output is not a map, type=%v", output.Type())
 	}
@@ -284,16 +468,56 @@ func checkAndExtractToMapKey(toMapKey string, output, toSet reflect.Value) (refl
 		return reflect.Value{}, fmt.Errorf("field mapping to a map key but map value has a mismatched type. key=%s, from=%v, to=%v", toMapKey, toSet.Type(), output.Type().Elem())
 	}
 
+	if output.IsNil() {
+		output.Set(reflect.MakeMap(output.Type()))
+	}
+
 	return reflect.ValueOf(toMapKey), nil
 }
 
 func fieldMap(mappings []*FieldMapping) func(any) (map[string]any, error) {
-	return func(input any) (map[string]any, error) {
-		result := make(map[string]any, len(mappings))
+	return func(input any) (result map[string]any, err error) {
+		result = make(map[string]any, len(mappings))
+		var inputValue reflect.Value
 		for _, mapping := range mappings {
-			taken, err := takeOne(input, mapping.from)
-			if err != nil {
-				panic(safe.NewPanicErr(err, debug.Stack()))
+			if len(mapping.from) == 0 {
+				result[mapping.to] = input
+				continue
+			}
+
+			fromPath := strings.Split(mapping.from, pathSeparator)
+
+			if !inputValue.IsValid() {
+				inputValue = reflect.ValueOf(input)
+			}
+
+			var (
+				pathInputValue = inputValue
+				pathInputType  = inputValue.Type()
+				taken          = input
+			)
+
+			for i, path := range fromPath {
+				taken, pathInputType, err = takeOne(pathInputValue, pathInputType, path)
+				if err != nil {
+					// we deferred check from Compile time to request time for interface types, so we won't panic here
+					var interfaceNotValidErr *errInterfaceNotValidForFieldMapping
+					if errors.As(err, &interfaceNotValidErr) {
+						return nil, err
+					}
+
+					// map key not found can only be a request time error, so we won't panic here
+					var mapKeyNotFoundErr *errMapKeyNotFound
+					if errors.As(err, &mapKeyNotFoundErr) {
+						return nil, err
+					}
+
+					panic(safe.NewPanicErr(err, debug.Stack()))
+				}
+
+				if i < len(fromPath)-1 {
+					pathInputValue = reflect.ValueOf(taken)
+				}
 			}
 
 			result[mapping.to] = taken
@@ -309,31 +533,36 @@ func streamFieldMap(mappings []*FieldMapping) func(streamReader) streamReader {
 	}
 }
 
-func takeOne(input any, from string) (taken any, err error) {
-	if len(from) == 0 {
-		return input, nil
-	}
-
-	inputValue := reflect.ValueOf(input)
-
+func takeOne(inputValue reflect.Value, inputType reflect.Type, from string) (taken any, takenType reflect.Type, err error) {
 	var f reflect.Value
 	switch inputValue.Kind() {
 	case reflect.Map:
 		f, err = checkAndExtractFromMapKey(from, inputValue)
-	case reflect.Ptr:
+		if err != nil {
+			return nil, nil, err
+		}
+
+		return f.Interface(), f.Type(), nil
+	case reflect.Ptr, reflect.Interface:
 		inputValue = inputValue.Elem()
 		fallthrough
 	case reflect.Struct:
 		f, err = checkAndExtractFromField(from, inputValue)
+		if err != nil {
+			return nil, nil, err
+		}
+
+		return f.Interface(), f.Type(), nil
 	default:
-		return reflect.Value{}, fmt.Errorf("field mapping from a field, but input is not struct, struct ptr or map, type= %v", inputValue.Type())
-	}
+		if inputType.Kind() == reflect.Interface {
+			return nil, nil, &errInterfaceNotValidForFieldMapping{
+				interfaceType: inputType,
+				actualType:    inputValue.Type(),
+			}
+		}
 
-	if err != nil {
-		return nil, err
+		return reflect.Value{}, nil, fmt.Errorf("field mapping from a field, but input is not struct, struct ptr or map, type= %v", inputValue.Type())
 	}
-
-	return f.Interface(), nil
 }
 
 func isFromAll(mappings []*FieldMapping) bool {
@@ -383,18 +612,41 @@ func validateFieldMapping(predecessorType reflect.Type, successorType reflect.Ty
 	}
 
 	var (
-		predecessorFieldType, successorFieldType reflect.Type
-		err                                      error
+		predecessorFieldType, successorFieldType                         reflect.Type
+		err                                                              error
+		predecessorIntermediateInterface, successorIntermediateInterface bool
 	)
 
 	for _, mapping := range mappings {
-		predecessorFieldType, err = checkAndExtractFieldType(mapping.from, predecessorType)
+		predecessorFieldType, predecessorIntermediateInterface, err = checkAndExtractFieldType(strings.Split(mapping.from, pathSeparator), predecessorType)
 		if err != nil {
 			return nil, fmt.Errorf("static check failed for mapping %s: %w", mapping, err)
 		}
-		successorFieldType, err = checkAndExtractFieldType(mapping.to, successorType)
+
+		successorFieldType, successorIntermediateInterface, err = checkAndExtractFieldType(strings.Split(mapping.to, pathSeparator), successorType)
 		if err != nil {
 			return nil, fmt.Errorf("static check failed for mapping %s: %w", mapping, err)
+		}
+
+		if successorIntermediateInterface {
+			return nil, fmt.Errorf("static check failed for mapping %s, the successor has intermediate interface type %v", mapping, successorFieldType)
+		}
+
+		if predecessorIntermediateInterface {
+			checker := func(a any) (any, error) {
+				trueInType := reflect.TypeOf(a)
+				if !trueInType.AssignableTo(successorFieldType) {
+					return nil, fmt.Errorf("runtime check failed for mapping %s, field[%v]-[%v] must not be assignable", mapping, trueInType, successorFieldType)
+				}
+				return a, nil
+			}
+			fieldCheckers[mapping.to] = handlerPair{
+				invoke: checker,
+				transform: func(input streamReader) streamReader {
+					return packStreamReader(schema.StreamReaderWithConvert(input.toAnyStreamReader(), checker))
+				},
+			}
+			continue
 		}
 
 		at := checkAssignable(predecessorFieldType, successorFieldType)
