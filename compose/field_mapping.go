@@ -87,22 +87,62 @@ func MapFields(from, to string) *FieldMapping {
 	}
 }
 
+// FieldPath represents a path to a nested field in a struct or map.
+// Each element in the path is either:
+// - a struct field name
+// - a map key
+//
+// Example paths:
+//   - []string{"user"}            // top-level field
+//   - []string{"user", "name"}    // nested struct field
+//   - []string{"users", "admin"}  // map key access
 type FieldPath []string
 
+// pathSeparator is a special character (Unit Separator) used internally to join path elements.
+// This character is chosen because it's extremely unlikely to appear in user-defined field names or map keys.
 const pathSeparator = "\x1F"
 
+// FromFieldPath creates a FieldMapping that maps a single predecessor field path to the entire successor input.
+// This is an exclusive mapping - once set, no other field mappings can be added since the successor input
+// has already been fully mapped.
+//
+// Example:
+//
+//	// Maps the 'name' field from nested 'user.profile' to the entire successor input
+//	FromFieldPath(FieldPath{"user", "profile", "name"})
+//
+// Note: The field path elements must not contain the internal path separator character ('\x1F').
 func FromFieldPath(fromFieldPath FieldPath) *FieldMapping {
 	return &FieldMapping{
 		from: strings.Join(fromFieldPath, pathSeparator),
 	}
 }
 
+// ToFieldPath creates a FieldMapping that maps the entire predecessor output to a single successor field path.
+//
+// Example:
+//
+//	// Maps the entire predecessor output to response.data.userName
+//	ToFieldPath(FieldPath{"response", "data", "userName"})
+//
+// Note: The field path elements must not contain the internal path separator character ('\x1F').
 func ToFieldPath(toFieldPath FieldPath) *FieldMapping {
 	return &FieldMapping{
 		to: strings.Join(toFieldPath, pathSeparator),
 	}
 }
 
+// MapFieldPaths creates a FieldMapping that maps a single predecessor field path to a single successor field path.
+//
+// Example:
+//
+//	// Maps user.profile.name to response.userName
+//	MapFieldPaths(
+//	    FieldPath{"user", "profile", "name"},
+//	    FieldPath{"response", "userName"},
+//	)
+//
+// Note: The field path elements must not contain the internal path separator character ('\x1F').
 func MapFieldPaths(fromFieldPath, toFieldPath FieldPath) *FieldMapping {
 	return &FieldMapping{
 		from: strings.Join(fromFieldPath, pathSeparator),

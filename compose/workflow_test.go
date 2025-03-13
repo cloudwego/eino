@@ -491,7 +491,7 @@ func TestWorkflowWithNestedFieldMappings(t *testing.T) {
 
 	t.Run("from nested to normal", func(t *testing.T) {
 		wf := NewWorkflow[map[string]any, *structA]()
-		wf.AddEnd(START, MapFieldPaths([]string{"key1", "key2"}, []string{"F1"}))
+		wf.AddEnd(START, MapFieldPaths(FieldPath{"key1", "key2"}, FieldPath{"F1"}))
 		r, err := wf.Compile(ctx)
 		assert.NoError(t, err)
 		out, err := r.Invoke(ctx, map[string]any{
