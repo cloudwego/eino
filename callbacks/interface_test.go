@@ -17,6 +17,7 @@
 package callbacks
 
 import (
+	"context"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -29,8 +30,14 @@ func TestAppendGlobalHandlers(t *testing.T) {
 	callbacks.GlobalHandlers = nil
 
 	// Create test handlers
-	handler1 := NewHandlerBuilder().Build()
-	handler2 := NewHandlerBuilder().Build()
+	handler1 := NewHandlerBuilder().
+		OnStartFn(func(ctx context.Context, info *RunInfo, input CallbackInput) context.Context {
+			return ctx
+		}).Build()
+	handler2 := NewHandlerBuilder().
+		OnEndFn(func(ctx context.Context, info *RunInfo, output CallbackOutput) context.Context {
+			return ctx
+		}).Build()
 
 	// Test appending first handler
 	AppendGlobalHandlers(handler1)
