@@ -191,7 +191,7 @@ func runToolCallTaskByInvoke(ctx context.Context, task *toolCallTask, opts ...to
 		Component: task.meta.component,
 	})
 
-	ctx = setToolCallID(ctx, task.callID)
+	ctx = setToolCallInfo(ctx, &toolCallInfo{toolCallID: task.callID})
 
 	task.output, task.err = task.r.Invoke(ctx, task.arg, opts...) // nolint: byted_returned_err_should_do_check
 }
@@ -203,7 +203,7 @@ func runToolCallTaskByStream(ctx context.Context, task *toolCallTask, opts ...to
 		Component: task.meta.component,
 	})
 
-	ctx = setToolCallID(ctx, task.callID)
+	ctx = setToolCallInfo(ctx, &toolCallInfo{toolCallID: task.callID})
 
 	task.sOutput, task.err = task.r.Stream(ctx, task.arg, opts...) // nolint: byted_returned_err_should_do_check
 }
@@ -329,18 +329,26 @@ func getToolsNodeOptions(opts ...ToolsNodeOption) *toolsNodeOptions {
 	return o
 }
 
-type toolCallIDKey struct{}
+type toolCallInfoKey struct{}
+type toolCallInfo struct {
+	toolCallID string
+}
 
-func setToolCallID(ctx context.Context, toolCallID string) context.Context {
-	return context.WithValue(ctx, toolCallIDKey{}, toolCallID)
+func setToolCallInfo(ctx context.Context, toolCallInfo *toolCallInfo) context.Context {
+	return context.WithValue(ctx, toolCallInfoKey{}, toolCallInfo)
 }
 
 // GetToolCallID gets the current tool call id from the context.
 func GetToolCallID(ctx context.Context) string {
-	v := ctx.Value(toolCallIDKey{})
+	v := ctx.Value(toolCallInfoKey{})
 	if v == nil {
 		return ""
 	}
 
-	return v.(string)
+	info, ok := v.(*toolCallInfo)
+	if !ok {
+		return ""
+	}
+
+	return info.toolCallID
 }
