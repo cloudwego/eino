@@ -242,6 +242,11 @@ type userCompanyResponse struct {
 }
 
 func queryUserCompany(ctx context.Context, req *userCompanyRequest) (resp *userCompanyResponse, err error) {
+	callID := GetToolCallID(ctx)
+	if callID != toolIDOfUserCompany {
+		return nil, fmt.Errorf("invalid tool call id= %s", callID)
+	}
+
 	return &userCompanyResponse{
 		UserID:   fmt.Sprintf("%v-%v", req.Name, req.Email),
 		Gender:   "male",
@@ -261,6 +266,11 @@ type userSalaryResponse struct {
 }
 
 func queryUserSalary(ctx context.Context, req *userSalaryRequest) (resp *schema.StreamReader[*userSalaryResponse], err error) {
+	callID := GetToolCallID(ctx)
+	if callID != toolIDOfUserSalary {
+		return nil, fmt.Errorf("invalid tool call id= %s", callID)
+	}
+
 	sr, sw := schema.Pipe[*userSalaryResponse](10)
 	sw.Send(&userSalaryResponse{
 		UserID: fmt.Sprintf("%v-%v", req.Name, req.Email),
