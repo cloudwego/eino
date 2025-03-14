@@ -67,7 +67,7 @@ type ToolsNodeConfig struct {
 }
 
 // NewToolNode creates a new ToolsNode.
-// eg.
+// e.g.
 //
 //	conf := &ToolsNodeConfig{
 //		Tools: []tool.BaseTool{invokableTool1, streamableTool2},
@@ -190,6 +190,9 @@ func runToolCallTaskByInvoke(ctx context.Context, task *toolCallTask, opts ...to
 		Type:      task.meta.componentImplType,
 		Component: task.meta.component,
 	})
+
+	ctx = setToolCallID(ctx, task.callID)
+
 	task.output, task.err = task.r.Invoke(ctx, task.arg, opts...) // nolint: byted_returned_err_should_do_check
 }
 
@@ -199,6 +202,9 @@ func runToolCallTaskByStream(ctx context.Context, task *toolCallTask, opts ...to
 		Type:      task.meta.componentImplType,
 		Component: task.meta.component,
 	})
+
+	ctx = setToolCallID(ctx, task.callID)
+
 	task.sOutput, task.err = task.r.Stream(ctx, task.arg, opts...) // nolint: byted_returned_err_should_do_check
 }
 
@@ -321,4 +327,20 @@ func getToolsNodeOptions(opts ...ToolsNodeOption) *toolsNodeOptions {
 		opt(o)
 	}
 	return o
+}
+
+type toolCallIDKey struct{}
+
+func setToolCallID(ctx context.Context, toolCallID string) context.Context {
+	return context.WithValue(ctx, toolCallIDKey{}, toolCallID)
+}
+
+// GetToolCallID gets the current tool call id from the context.
+func GetToolCallID(ctx context.Context) string {
+	v := ctx.Value(toolCallIDKey{})
+	if v == nil {
+		return ""
+	}
+
+	return v.(string)
 }
