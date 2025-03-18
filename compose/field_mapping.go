@@ -230,6 +230,8 @@ func assignOne[T any](dest T, taken any, to string) (T, error) {
 	var (
 		toPaths           = strings.Split(to, pathSeparator)
 		originalDestValue = destValue
+		parentMap         reflect.Value
+		parentKey         string
 	)
 
 	for {
@@ -246,6 +248,10 @@ func assignOne[T any](dest T, taken any, to string) (T, error) {
 
 				destValue.SetMapIndex(key, toSet)
 
+				if parentMap.IsValid() {
+					parentMap.SetMapIndex(reflect.ValueOf(parentKey), destValue)
+				}
+
 				return originalDestValue.Interface().(T), nil
 			}
 
@@ -255,6 +261,10 @@ func assignOne[T any](dest T, taken any, to string) (T, error) {
 			}
 
 			field.Set(toSet)
+
+			if parentMap.IsValid() {
+				parentMap.SetMapIndex(reflect.ValueOf(parentKey), destValue)
+			}
 
 			return originalDestValue.Interface().(T), nil
 		}
@@ -271,11 +281,18 @@ func assignOne[T any](dest T, taken any, to string) (T, error) {
 				destValue.SetMapIndex(keyValue, valueValue)
 			}
 
+			if parentMap.IsValid() {
+				parentMap.SetMapIndex(reflect.ValueOf(parentKey), destValue)
+			}
+
+			parentMap = destValue
+			parentKey = path
 			destValue = valueValue
 
 			continue
 		}
 
+		ptrValue := destValue
 		for destValue.Kind() == reflect.Ptr {
 			destValue = destValue.Elem()
 		}
@@ -295,6 +312,13 @@ func assignOne[T any](dest T, taken any, to string) (T, error) {
 
 		instantiateIfNeeded(field)
 
+		if parentMap.IsValid() {
+			parentMap.SetMapIndex(reflect.ValueOf(parentKey), ptrValue)
+		}
+
+		parentMap = reflect.Value{}
+		parentKey = ""
+
 		destValue = field
 	}
 }
@@ -303,6 +327,10 @@ func instantiateIfNeeded(field reflect.Value) {
 	if field.Kind() == reflect.Ptr {
 		if field.IsNil() {
 			field.Set(reflect.New(field.Type().Elem()))
+		}
+	} else if field.Kind() == reflect.Map {
+		if field.IsNil() {
+			field.Set(reflect.MakeMap(field.Type()))
 		}
 	}
 }

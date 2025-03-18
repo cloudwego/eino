@@ -277,6 +277,8 @@ func TestWorkflowWithNestedFieldMappings(t *testing.T) {
 		F2 map[string]any
 		F3 int
 		F4 any
+		F5 map[string]structA
+		F6 structA
 	}
 
 	t.Run("from struct.struct.field", func(t *testing.T) {
@@ -296,6 +298,34 @@ func TestWorkflowWithNestedFieldMappings(t *testing.T) {
 		wf.AddEnd(START, FromFieldPath([]string{"F1", "F2"}))
 		_, err = wf.Compile(ctx)
 		assert.ErrorContains(t, err, "type[compose.structA] has no field[F2]")
+	})
+
+	t.Run("to struct.(non-ptr)struct.field", func(t *testing.T) {
+		wf := NewWorkflow[string, *structB]()
+		wf.AddEnd(START, ToFieldPath([]string{"F6", "F1"}))
+		r, err := wf.Compile(ctx)
+		assert.NoError(t, err)
+		out, err := r.Invoke(ctx, "hello")
+		assert.NoError(t, err)
+		assert.Equal(t, &structB{
+			F6: structA{
+				F1: "hello",
+			},
+		}, out)
+	})
+
+	t.Run("to map.(non-ptr)struct.field", func(t *testing.T) {
+		wf := NewWorkflow[string, map[string]structA]()
+		wf.AddEnd(START, ToFieldPath([]string{"key", "F1"}))
+		r, err := wf.Compile(ctx)
+		assert.NoError(t, err)
+		out, err := r.Invoke(ctx, "hello")
+		assert.NoError(t, err)
+		assert.Equal(t, map[string]structA{
+			"key": {
+				F1: "hello",
+			},
+		}, out)
 	})
 
 	t.Run("from map.map.field", func(t *testing.T) {
@@ -451,6 +481,38 @@ func TestWorkflowWithNestedFieldMappings(t *testing.T) {
 		assert.Equal(t, map[string]*structB{
 			"F1": {
 				F1: &structA{
+					F1: "hello",
+				},
+			},
+		}, out)
+	})
+
+	t.Run("to struct.map.struct.field", func(t *testing.T) {
+		wf := NewWorkflow[string, *structB]()
+		wf.AddEnd(START, ToFieldPath([]string{"F5", "key", "F1"}))
+		r, err := wf.Compile(ctx)
+		assert.NoError(t, err)
+		out, err := r.Invoke(ctx, "hello")
+		assert.NoError(t, err)
+		assert.Equal(t, &structB{
+			F5: map[string]structA{
+				"key": {
+					F1: "hello",
+				},
+			},
+		}, out)
+	})
+
+	t.Run("to map.map.struct(non-ptr).field", func(t *testing.T) {
+		wf := NewWorkflow[string, map[string]map[string]structA]()
+		wf.AddEnd(START, ToFieldPath([]string{"key1", "key2", "F1"}))
+		r, err := wf.Compile(ctx)
+		assert.NoError(t, err)
+		out, err := r.Invoke(ctx, "hello")
+		assert.NoError(t, err)
+		assert.Equal(t, map[string]map[string]structA{
+			"key1": {
+				"key2": {
 					F1: "hello",
 				},
 			},
