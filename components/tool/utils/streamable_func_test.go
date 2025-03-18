@@ -25,6 +25,7 @@ import (
 	"github.com/getkin/kin-openapi/openapi3"
 	"github.com/stretchr/testify/assert"
 
+	"github.com/cloudwego/eino/components/tool"
 	"github.com/cloudwego/eino/schema"
 )
 
@@ -107,4 +108,58 @@ func TestNewStreamableTool(t *testing.T) {
 
 		assert.Equal(t, 2, idx)
 	})
+}
+
+type FakeStreamOption struct {
+	Field string
+}
+
+type FakeStreamInferToolInput struct {
+	Field string `json:"field"`
+}
+
+type FakeStreamInferToolOutput struct {
+	Field string `json:"field"`
+}
+
+func FakeWithToolOption(s string) tool.Option {
+	return tool.WrapImplSpecificOptFn(func(t *FakeStreamOption) {
+		t.Field = s
+	})
+}
+
+func fakeStreamFunc(ctx context.Context, input FakeStreamInferToolInput, opts ...tool.Option) (output *schema.StreamReader[*FakeStreamInferToolOutput], err error) {
+	baseOpt := &FakeStreamOption{
+		Field: "default_field_value",
+	}
+	option := tool.GetImplSpecificOptions(baseOpt, opts...)
+
+	return schema.StreamReaderFromArray([]*FakeStreamInferToolOutput{
+		{
+			Field: option.Field,
+		},
+	}), nil
+}
+
+func TestInferStreamTool(t *testing.T) {
+	st, err := InferStreamToolWithOption("infer_stream_with_option", "test infer stream tool with option", fakeStreamFunc)
+	assert.Nil(t, err)
+
+	sr, err := st.StreamableRun(context.Background(), `{"field": "value"}`, FakeWithToolOption("hello world"))
+	assert.Nil(t, err)
+
+	defer sr.Close()
+
+	idx := 0
+	for {
+		m, err := sr.Recv()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		assert.NoError(t, err)
+
+		if idx == 0 {
+			assert.JSONEq(t, `{"field":"hello world"}`, m)
+		}
+	}
 }

@@ -24,6 +24,7 @@ import (
 	"github.com/getkin/kin-openapi/openapi3"
 	"github.com/stretchr/testify/assert"
 
+	"github.com/cloudwego/eino/components/tool"
 	"github.com/cloudwego/eino/schema"
 )
 
@@ -179,6 +180,28 @@ func updateUserInfo(ctx context.Context, input *User) (output *UserResult, err e
 	}, nil
 }
 
+type UserInfoOption struct {
+	Field1 string
+}
+
+func WithUserInfoOption(s string) tool.Option {
+	return tool.WrapImplSpecificOptFn(func(t *UserInfoOption) {
+		t.Field1 = s
+	})
+}
+
+func updateUserInfoWithOption(_ context.Context, input *User, opts ...tool.Option) (output *UserResult, err error) {
+	baseOption := &UserInfoOption{
+		Field1: "test_origin",
+	}
+
+	option := tool.GetImplSpecificOptions(baseOption, opts...)
+	return &UserResult{
+		Code: 200,
+		Msg:  option.Field1,
+	}, nil
+}
+
 func TestInferTool(t *testing.T) {
 	t.Run("invoke_infer_tool", func(t *testing.T) {
 		ctx := context.Background()
@@ -195,6 +218,20 @@ func TestInferTool(t *testing.T) {
 		assert.JSONEq(t, `{"code":200,"msg":"update bruce lee success"}`, content)
 	})
 
+}
+
+func TestInferToolWithOption(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("invoke_infer_tool_with_option", func(t *testing.T) {
+
+		tl, err := InferToolWithOption("invoke_infer_tool_with_option", "full update user info", updateUserInfoWithOption)
+		assert.NoError(t, err)
+
+		content, err := tl.InvokableRun(ctx, `{"name": "bruce lee"}`, WithUserInfoOption("hello world"))
+		assert.NoError(t, err)
+		assert.JSONEq(t, `{"code":200,"msg":"hello world"}`, content)
+	})
 }
 
 func TestNewTool(t *testing.T) {

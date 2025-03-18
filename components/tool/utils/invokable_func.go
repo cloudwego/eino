@@ -32,6 +32,9 @@ import (
 // InvokeFunc is the function type for the tool.
 type InvokeFunc[T, D any] func(ctx context.Context, input T) (output D, err error)
 
+// InvokeFuncWithOption is the function type for the tool with tool option.
+type InvokeFuncWithOption[T, D any] func(ctx context.Context, input T, opts ...tool.Option) (output D, err error)
+
 // InferTool creates an InvokableTool from a given function by inferring the ToolInfo from the function's request parameters.
 // End-user can pass a SchemaCustomizerFn in opts to customize the go struct tag parsing process, overriding default behavior.
 func InferTool[T, D any](toolName, toolDesc string, i InvokeFunc[T, D], opts ...Option) (tool.InvokableTool, error) {
@@ -41,6 +44,16 @@ func InferTool[T, D any](toolName, toolDesc string, i InvokeFunc[T, D], opts ...
 	}
 
 	return NewTool(ti, i, opts...), nil
+}
+
+// InferToolWithOption creates an InvokableTool from a given function by inferring the ToolInfo from the function's request parameters, with tool option.
+func InferToolWithOption[T, D any](toolName, toolDesc string, i InvokeFuncWithOption[T, D], opts ...Option) (tool.InvokableTool, error) {
+	ti, err := goStruct2ToolInfo[T](toolName, toolDesc, opts...)
+	if err != nil {
+		return nil, err
+	}
+
+	return newToolWithOption(ti, i, opts...), nil
 }
 
 // GoStruct2ParamsOneOf converts a go struct to a ParamsOneOf.
@@ -87,6 +100,13 @@ func goStruct2ParamsOneOf[T any](opts ...Option) (*schema.ParamsOneOf, error) {
 
 // NewTool Create a tool, where the input and output are both in JSON format.
 func NewTool[T, D any](desc *schema.ToolInfo, i InvokeFunc[T, D], opts ...Option) tool.InvokableTool {
+	return newToolWithOption(desc, func(ctx context.Context, input T, _ ...tool.Option) (D, error) {
+		return i(ctx, input)
+	}, opts...)
+}
+
+// NewTool Create a tool, where the input and output are both in JSON format.
+func newToolWithOption[T, D any](desc *schema.ToolInfo, i InvokeFuncWithOption[T, D], opts ...Option) tool.InvokableTool {
 	to := getToolOptions(opts...)
 
 	return &invokableTool[T, D]{
@@ -103,7 +123,7 @@ type invokableTool[T, D any] struct {
 	um UnmarshalArguments
 	m  MarshalOutput
 
-	Fn InvokeFunc[T, D]
+	Fn InvokeFuncWithOption[T, D]
 }
 
 func (i *invokableTool[T, D]) Info(ctx context.Context) (*schema.ToolInfo, error) {
@@ -134,7 +154,7 @@ func (i *invokableTool[T, D]) InvokableRun(ctx context.Context, arguments string
 		}
 	}
 
-	resp, err := i.Fn(ctx, inst)
+	resp, err := i.Fn(ctx, inst, opts...)
 	if err != nil {
 		return "", fmt.Errorf("[LocalFunc] failed to invoke tool: %w", err)
 	}
