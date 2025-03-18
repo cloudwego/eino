@@ -73,6 +73,9 @@ type AgentConfig struct {
 	StreamToolCallChecker func(ctx context.Context, modelOutput *schema.StreamReader[*schema.Message]) (bool, error)
 }
 
+// Deprecated: This approach of adding persona involves unnecessary slice copying overhead.
+// Instead, directly include the persona message in the input messages when calling Generate or Stream.
+//
 // NewPersonaModifier add the system prompt as persona before the model is called.
 // example:
 //
@@ -149,11 +152,6 @@ func NewAgent(ctx context.Context, config *AgentConfig) (_ *Agent, err error) {
 		messageModifier = config.MessageModifier
 	)
 
-	if messageModifier == nil {
-		messageModifier = func(ctx context.Context, input []*schema.Message) []*schema.Message {
-			return input
-		}
-	}
 	if toolCallChecker == nil {
 		toolCallChecker = firstChunkStreamToolCallChecker
 	}
@@ -177,10 +175,15 @@ func NewAgent(ctx context.Context, config *AgentConfig) (_ *Agent, err error) {
 	modelPreHandle := func(ctx context.Context, input []*schema.Message, state *state) ([]*schema.Message, error) {
 		state.Messages = append(state.Messages, input...)
 
+		if messageModifier == nil {
+			return state.Messages, nil
+		}
+
 		modifiedInput := make([]*schema.Message, len(state.Messages))
 		copy(modifiedInput, state.Messages)
 		return messageModifier(ctx, modifiedInput), nil
 	}
+
 	if err = graph.AddChatModelNode(nodeKeyModel, chatModel, compose.WithStatePreHandler(modelPreHandle)); err != nil {
 		return nil, err
 	}
