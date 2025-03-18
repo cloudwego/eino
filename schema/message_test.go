@@ -344,6 +344,95 @@ func TestConcatMessage(t *testing.T) {
 
 		wg.Wait()
 	})
+
+	t.Run("concat logprobs", func(t *testing.T) {
+		msgs := []*Message{
+			{
+				Role:    Assistant,
+				Content: "🚀",
+				ResponseMeta: &ResponseMeta{
+					LogProbs: &LogProbs{
+						Content: []LogProb{
+							{
+								Token:   "\\xf0\\x9f\\x9a",
+								LogProb: -0.0000073458323,
+								Bytes:   []int64{240, 159, 154},
+							},
+							{
+								Token:   "\\x80",
+								LogProb: 0,
+								Bytes:   []int64{128},
+							},
+						},
+					},
+				},
+			},
+			{
+				Role:    "",
+				Content: "❤️",
+				ResponseMeta: &ResponseMeta{
+					LogProbs: &LogProbs{
+						Content: []LogProb{
+							{
+								Token:   "❤️",
+								LogProb: -0.0011431955,
+								Bytes:   []int64{226, 157, 164, 239, 184, 143},
+							},
+						},
+					},
+				},
+			},
+			{
+				Role: "",
+				ResponseMeta: &ResponseMeta{
+					FinishReason: "stop",
+					Usage: &TokenUsage{
+						PromptTokens:     7,
+						CompletionTokens: 3,
+						TotalTokens:      10,
+					},
+				},
+			},
+		}
+
+		msg, err := ConcatMessages(msgs)
+		assert.NoError(t, err)
+		assert.Equal(t, 3, len(msg.ResponseMeta.LogProbs.Content))
+		assert.Equal(t, msgs[0].ResponseMeta.LogProbs.Content[0], msg.ResponseMeta.LogProbs.Content[0])
+		assert.Equal(t, msgs[0].ResponseMeta.LogProbs.Content[1], msg.ResponseMeta.LogProbs.Content[1])
+		assert.Equal(t, msgs[1].ResponseMeta.LogProbs.Content[0], msg.ResponseMeta.LogProbs.Content[2])
+	})
+
+	t.Run("fix unexpected setting ResponseMeta of the first element in slice after ConcatMessages", func(t *testing.T) {
+		msgs := []*Message{
+			{
+				Role:    Assistant,
+				Content: "🚀",
+				//ResponseMeta: &ResponseMeta{},
+			},
+			{
+				Role:         "",
+				Content:      "❤️",
+				ResponseMeta: &ResponseMeta{},
+			},
+			{
+				Role: "",
+				ResponseMeta: &ResponseMeta{
+					FinishReason: "stop",
+					Usage: &TokenUsage{
+						PromptTokens:     7,
+						CompletionTokens: 3,
+						TotalTokens:      10,
+					},
+				},
+			},
+		}
+
+		msg, err := ConcatMessages(msgs)
+		assert.NoError(t, err)
+		assert.Equal(t, msgs[2].ResponseMeta, msg.ResponseMeta)
+		assert.Nil(t, msgs[0].ResponseMeta)
+	})
 }
 
 func TestConcatToolCalls(t *testing.T) {

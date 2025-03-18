@@ -52,8 +52,17 @@ type Handler = callbacks.Handler
 // InitCallbackHandlers sets the global callback handlers.
 // It should be called BEFORE any callback handler by user.
 // It's useful when you want to inject some basic callbacks to all nodes.
+// Deprecated: Use AppendGlobalHandlers instead.
 func InitCallbackHandlers(handlers []Handler) {
 	callbacks.GlobalHandlers = handlers
+}
+
+// AppendGlobalHandlers appends the given handlers to the global callback handlers.
+// This is the preferred way to add global callback handlers as it preserves existing handlers.
+// The global callback handlers will be executed for all nodes BEFORE user-specific handlers in CallOption.
+// Note: This function is not thread-safe and should only be called during process initialization.
+func AppendGlobalHandlers(handlers ...Handler) {
+	callbacks.GlobalHandlers = append(callbacks.GlobalHandlers, handlers...)
 }
 
 // CallbackTiming enumerates all the timing of callback aspects.

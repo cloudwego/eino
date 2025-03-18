@@ -52,14 +52,6 @@ func WithGraphCompileCallbacks(cbs ...GraphCompileCallback) GraphCompileOption {
 	}
 }
 
-// WithGetStateEnable enables/disables GetState in Workflow nodes.
-// Deprecated: use ProcessState instead of GetState, which is always concurrency-safe.
-func WithGetStateEnable(enabled bool) GraphCompileOption {
-	return func(o *graphCompileOptions) {
-		o.getStateEnabled = enabled
-	}
-}
-
 // InitGraphCompileCallbacks set global graph compile callbacks,
 // which ONLY will be added to top level graph compile options
 func InitGraphCompileCallbacks(cbs []GraphCompileCallback) {

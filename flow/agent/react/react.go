@@ -99,16 +99,22 @@ func NewPersonaModifier(persona string) MessageModifier {
 func firstChunkStreamToolCallChecker(_ context.Context, sr *schema.StreamReader[*schema.Message]) (bool, error) {
 	defer sr.Close()
 
-	msg, err := sr.Recv()
-	if err != nil {
-		return false, err
-	}
+	for {
+		msg, err := sr.Recv()
+		if err != nil {
+			return false, err
+		}
 
-	if len(msg.ToolCalls) == 0 {
+		if len(msg.ToolCalls) > 0 {
+			return true, nil
+		}
+
+		if len(msg.Content) == 0 { // skip empty chunks at the front
+			continue
+		}
+
 		return false, nil
 	}
-
-	return true, nil
 }
 
 // Agent is the ReAct agent.
