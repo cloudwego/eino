@@ -18,6 +18,7 @@ package react
 
 import (
 	"context"
+	"io"
 
 	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/compose"
@@ -104,6 +105,9 @@ func firstChunkStreamToolCallChecker(_ context.Context, sr *schema.StreamReader[
 
 	for {
 		msg, err := sr.Recv()
+		if err == io.EOF {
+			return false, nil
+		}
 		if err != nil {
 			return false, err
 		}
