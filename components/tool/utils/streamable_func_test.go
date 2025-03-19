@@ -142,7 +142,7 @@ func fakeStreamFunc(ctx context.Context, input FakeStreamInferToolInput, opts ..
 }
 
 func TestInferStreamTool(t *testing.T) {
-	st, err := InferStreamToolWithOption("infer_stream_with_option", "test infer stream tool with option", fakeStreamFunc)
+	st, err := InferOptionableStreamTool("infer_optionable_stream_tool", "test infer stream tool with option", fakeStreamFunc)
 	assert.Nil(t, err)
 
 	sr, err := st.StreamableRun(context.Background(), `{"field": "value"}`, FakeWithToolOption("hello world"))

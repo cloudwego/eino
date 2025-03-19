@@ -220,12 +220,12 @@ func TestInferTool(t *testing.T) {
 
 }
 
-func TestInferToolWithOption(t *testing.T) {
+func TestInferOptionableTool(t *testing.T) {
 	ctx := context.Background()
 
-	t.Run("invoke_infer_tool_with_option", func(t *testing.T) {
+	t.Run("invoke_infer_optionable_tool", func(t *testing.T) {
 
-		tl, err := InferToolWithOption("invoke_infer_tool_with_option", "full update user info", updateUserInfoWithOption)
+		tl, err := InferOptionableTool("invoke_infer_optionable_tool", "full update user info", updateUserInfoWithOption)
 		assert.NoError(t, err)
 
 		content, err := tl.InvokableRun(ctx, `{"name": "bruce lee"}`, WithUserInfoOption("hello world"))

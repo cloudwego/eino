@@ -30,8 +30,8 @@ import (
 // StreamFunc is the function type for the streamable tool.
 type StreamFunc[T, D any] func(ctx context.Context, input T) (output *schema.StreamReader[D], err error)
 
-// StreamFuncWithOption is the function type for the streamable tool with tool option.
-type StreamFuncWithOption[T, D any] func(ctx context.Context, input T, opts ...tool.Option) (output *schema.StreamReader[D], err error)
+// OptionableStreamFunc is the function type for the streamable tool with tool option.
+type OptionableStreamFunc[T, D any] func(ctx context.Context, input T, opts ...tool.Option) (output *schema.StreamReader[D], err error)
 
 // InferStreamTool creates an StreamableTool from a given function by inferring the ToolInfo from the function's request parameters
 // End-user can pass a SchemaCustomizerFn in opts to customize the go struct tag parsing process, overriding default behavior.
@@ -45,26 +45,26 @@ func InferStreamTool[T, D any](toolName, toolDesc string, s StreamFunc[T, D], op
 }
 
 // InferStreamTool creates an StreamableTool from a given function by inferring the ToolInfo from the function's request parameters, with tool option.
-func InferStreamToolWithOption[T, D any](toolName, toolDesc string, s StreamFuncWithOption[T, D], opts ...Option) (tool.StreamableTool, error) {
+func InferOptionableStreamTool[T, D any](toolName, toolDesc string, s OptionableStreamFunc[T, D], opts ...Option) (tool.StreamableTool, error) {
 	ti, err := goStruct2ToolInfo[T](toolName, toolDesc, opts...)
 	if err != nil {
 		return nil, err
 	}
 
-	return newStreamToolWithOption(ti, s, opts...), nil
+	return newOptionableStreamTool(ti, s, opts...), nil
 }
 
 // NewStreamTool Create a streaming tool, where the input and output are both in JSON format.
 // convert: convert the stream frame to string that could be concatenated to a string.
 func NewStreamTool[T, D any](desc *schema.ToolInfo, s StreamFunc[T, D], opts ...Option) tool.StreamableTool {
-	return newStreamToolWithOption(desc,
+	return newOptionableStreamTool(desc,
 		func(ctx context.Context, input T, _ ...tool.Option) (output *schema.StreamReader[D], err error) {
 			return s(ctx, input)
 		},
 		opts...)
 }
 
-func newStreamToolWithOption[T, D any](desc *schema.ToolInfo, s StreamFuncWithOption[T, D], opts ...Option) tool.StreamableTool {
+func newOptionableStreamTool[T, D any](desc *schema.ToolInfo, s OptionableStreamFunc[T, D], opts ...Option) tool.StreamableTool {
 
 	to := getToolOptions(opts...)
 
@@ -83,7 +83,7 @@ type streamableTool[T, D any] struct {
 	um UnmarshalArguments
 	m  MarshalOutput
 
-	Fn StreamFuncWithOption[T, D]
+	Fn OptionableStreamFunc[T, D]
 }
 
 // Info returns the tool info, implement the BaseTool interface.
