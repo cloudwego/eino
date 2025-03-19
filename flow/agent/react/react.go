@@ -124,6 +124,12 @@ func firstChunkStreamToolCallChecker(_ context.Context, sr *schema.StreamReader[
 	}
 }
 
+const (
+	GraphName     = "ReActAgent"
+	ModelNodeName = "ChatModel"
+	ToolsNodeName = "Tools"
+)
+
 // Agent is the ReAct agent.
 // ReAct agent is a simple agent that handles user messages with a chat model and tools.
 // ReAct will call the chat model, if the message contains tool calls, it will call the tools.
@@ -188,7 +194,7 @@ func NewAgent(ctx context.Context, config *AgentConfig) (_ *Agent, err error) {
 		return messageModifier(ctx, modifiedInput), nil
 	}
 
-	if err = graph.AddChatModelNode(nodeKeyModel, chatModel, compose.WithStatePreHandler(modelPreHandle)); err != nil {
+	if err = graph.AddChatModelNode(nodeKeyModel, chatModel, compose.WithStatePreHandler(modelPreHandle), compose.WithNodeName(ModelNodeName)); err != nil {
 		return nil, err
 	}
 
@@ -201,7 +207,7 @@ func NewAgent(ctx context.Context, config *AgentConfig) (_ *Agent, err error) {
 		state.ReturnDirectlyToolCallID = getReturnDirectlyToolCallID(input, config.ToolReturnDirectly)
 		return input, nil
 	}
-	if err = graph.AddToolsNode(nodeKeyTools, toolsNode, compose.WithStatePreHandler(toolsNodePreHandle)); err != nil {
+	if err = graph.AddToolsNode(nodeKeyTools, toolsNode, compose.WithStatePreHandler(toolsNodePreHandle), compose.WithNodeName(ToolsNodeName)); err != nil {
 		return nil, err
 	}
 
@@ -226,7 +232,7 @@ func NewAgent(ctx context.Context, config *AgentConfig) (_ *Agent, err error) {
 		return nil, err
 	}
 
-	compileOpts := []compose.GraphCompileOption{compose.WithMaxRunSteps(config.MaxStep), compose.WithNodeTriggerMode(compose.AnyPredecessor)}
+	compileOpts := []compose.GraphCompileOption{compose.WithMaxRunSteps(config.MaxStep), compose.WithNodeTriggerMode(compose.AnyPredecessor), compose.WithGraphName(GraphName)}
 	runnable, err := graph.Compile(ctx, compileOpts...)
 	if err != nil {
 		return nil, err
