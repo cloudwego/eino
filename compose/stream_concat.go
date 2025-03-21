@@ -66,8 +66,12 @@ func concatStreamReader[T any](sr *schema.StreamReader[T]) (T, error) {
 	}
 
 	if len(items) == 0 {
-		var t T
-		return t, fmt.Errorf("stream reader is empty, concat fail")
+		t, ok := convertNilToT[T]()
+		if !ok {
+			return t, fmt.Errorf("stream reader is empty, concat fail")
+		}
+
+		return t, nil
 	}
 
 	if len(items) == 1 {

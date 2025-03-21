@@ -99,7 +99,7 @@ type Graph[I, O any] struct {
 //
 //	err := graph.AddEdge("start_node_key", "end_node_key")
 func (g *Graph[I, O]) AddEdge(startNode, endNode string) (err error) {
-	return g.graph.addEdgeWithMappings(startNode, endNode)
+	return g.graph.addEdgeWithMappings(startNode, endNode, false, false)
 }
 
 // Compile take the raw graph and compile it into a form ready to be run.
@@ -116,18 +116,22 @@ func (g *Graph[I, O]) AddEdge(startNode, endNode string) (err error) {
 //	runnable.Collect(ctx, inputReader) // collect
 //	runnable.Transform(ctx, inputReader) // transform
 func (g *Graph[I, O]) Compile(ctx context.Context, opts ...GraphCompileOption) (Runnable[I, O], error) {
+	return compileAnyGraph[I, O](ctx, g.graph, opts...)
+}
+
+func compileAnyGraph[I, O any](ctx context.Context, g AnyGraph, opts ...GraphCompileOption) (Runnable[I, O], error) {
 	if len(globalGraphCompileCallbacks) > 0 {
 		opts = append([]GraphCompileOption{WithGraphCompileCallbacks(globalGraphCompileCallbacks...)}, opts...)
 	}
 	option := newGraphCompileOptions(opts...)
 
-	cr, err := g.graph.compile(ctx, option)
+	cr, err := g.compile(ctx, option)
 	if err != nil {
 		return nil, err
 	}
 
 	cr.meta = &executorMeta{
-		component:                  g.cmp,
+		component:                  g.component(),
 		isComponentCallbackEnabled: true,
 		componentImplType:          "",
 	}
