@@ -22,9 +22,9 @@ import (
 )
 
 func dagChannelBuilder(dependencies []string) channel {
-	waitList := make(map[string]bool, len(dependencies))
+	waitList := make(map[string]dagChannelState, len(dependencies))
 	for _, dep := range dependencies {
-		waitList[dep] = false
+		waitList[dep] = unready
 	}
 	return &dagChannel{
 		values:   make(map[string]any),
@@ -32,19 +32,23 @@ func dagChannelBuilder(dependencies []string) channel {
 	}
 }
 
-type waitPred struct {
-	key     string
-	skipped bool
-}
+type dagChannelState int
+
+const (
+	unready dagChannelState = iota
+	done
+	skipped
+)
 
 type dagChannel struct {
 	values   map[string]any
-	waitList map[string]bool
+	waitList map[string]dagChannelState
 	value    any
 	skipped  bool
+	isReady  bool
 }
 
-func (ch *dagChannel) update(ctx context.Context, ins map[string]any) error {
+func (ch *dagChannel) update(_ context.Context, ins map[string]any) error {
 	if ch.skipped {
 		return nil
 	}
@@ -56,38 +60,40 @@ func (ch *dagChannel) update(ctx context.Context, ins map[string]any) error {
 		ch.values[k] = v
 	}
 
-	return ch.tryUpdateValue()
+	return nil
 }
 
-func (ch *dagChannel) get(ctx context.Context) (any, error) {
+func (ch *dagChannel) get(_ context.Context) (any, error) {
 	if ch.skipped {
 		return nil, fmt.Errorf("dag channel has been skipped")
 	}
-	if ch.value == nil {
+	if !ch.isReady {
 		return nil, fmt.Errorf("dag channel not ready, value is nil")
 	}
 	v := ch.value
 	ch.value = nil
+	ch.isReady = false
+
 	return v, nil
 }
 
-func (ch *dagChannel) ready(ctx context.Context) bool {
+func (ch *dagChannel) ready(_ context.Context) bool {
 	if ch.skipped {
 		return false
 	}
-	return ch.value != nil
+	return ch.isReady
 }
 
 func (ch *dagChannel) reportSkip(keys []string) (bool, error) {
 	for _, k := range keys {
 		if _, ok := ch.waitList[k]; ok {
-			ch.waitList[k] = true
+			ch.waitList[k] = skipped
 		}
 	}
 
 	allSkipped := true
-	for _, skipped := range ch.waitList {
-		if !skipped {
+	for _, state := range ch.waitList {
+		if state != skipped {
 			allSkipped = false
 			break
 		}
@@ -102,25 +108,36 @@ func (ch *dagChannel) reportSkip(keys []string) (bool, error) {
 	return allSkipped, err
 }
 
+func (ch *dagChannel) reportDone(key string) error {
+	if _, ok := ch.waitList[key]; ok {
+		ch.waitList[key] = done
+	}
+
+	return ch.tryUpdateValue()
+}
+
 func (ch *dagChannel) tryUpdateValue() error {
-	var validList []string
-	for key, skipped := range ch.waitList {
-		if _, ok := ch.values[key]; !ok && !skipped {
+	for _, state := range ch.waitList {
+		if state == unready {
 			return nil
-		} else if !skipped {
-			validList = append(validList, key)
 		}
 	}
 
-	if len(validList) == 1 {
-		ch.value = ch.values[validList[0]]
+	values := mapToList(ch.values)
+	if len(values) == 1 {
+		ch.value = values[0]
+		ch.isReady = true
 		return nil
 	}
-	v, err := mergeValues(mapToList(ch.values))
-	if err != nil {
-		return err
+	if len(values) > 1 {
+		v, err := mergeValues(values)
+		if err != nil {
+			return err
+		}
+		ch.value = v
 	}
-	ch.value = v
-	return nil
 
+	ch.isReady = true
+
+	return nil
 }

@@ -31,6 +31,7 @@ type channel interface {
 	get(context.Context) (any, error)
 	ready(context.Context) bool
 	reportSkip([]string) (bool, error)
+	reportDone(string) error
 }
 
 type edgeHandlerManager struct {
@@ -69,8 +70,14 @@ func (p *preNodeHandlerManager) handle(nodeKey string, value any, isStream bool)
 		return value, nil
 	}
 	if isStream {
+		var newValue streamReader
+		if value == nil {
+			newValue = (streamReader)(nil)
+		} else {
+			newValue = value.(streamReader)
+		}
 		for _, v := range p.h[nodeKey] {
-			value = v.transform(value.(streamReader))
+			value = v.transform(newValue)
 		}
 	} else {
 		for _, v := range p.h[nodeKey] {
@@ -157,14 +164,6 @@ func (c *channelManager) getFromReadyChannels(ctx context.Context, isStream bool
 	return result, nil
 }
 
-func (c *channelManager) updateAndGet(ctx context.Context, values map[string]map[string]any, isStream bool) (map[string]any, error) {
-	err := c.updateValues(ctx, values, isStream)
-	if err != nil {
-		return nil, fmt.Errorf("update channel fail: %w", err)
-	}
-	return c.getFromReadyChannels(ctx, isStream)
-}
-
 func (c *channelManager) reportBranch(from string, skippedNodes []string) error {
 	var nKeys []string
 	for _, node := range skippedNodes {
@@ -193,6 +192,16 @@ func (c *channelManager) reportBranch(from string, skippedNodes []string) error 
 			// todo: detect if end node has been skipped?
 		}
 	}
+	return nil
+}
+
+func (c *channelManager) reportControl(from string, to []string) error {
+	for _, node := range to {
+		if err := c.channels[node].reportDone(from); err != nil {
+			return err
+		}
+	}
+
 	return nil
 }
 

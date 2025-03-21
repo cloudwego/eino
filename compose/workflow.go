@@ -18,6 +18,7 @@ package compose
 
 import (
 	"context"
+	"fmt"
 	"reflect"
 
 	"github.com/cloudwego/eino/components/document"
@@ -26,20 +27,35 @@ import (
 	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/components/prompt"
 	"github.com/cloudwego/eino/components/retriever"
-	"github.com/cloudwego/eino/internal/generic"
+	"github.com/cloudwego/eino/schema"
 )
 
 // WorkflowNode is the node of the Workflow.
 type WorkflowNode struct {
-	g   *graph
-	key string
+	g                *graph
+	key              string
+	addInputs        []func() error
+	staticValues     map[string]any
+	dependencySetter func(fromNodeKey string, typ dependencyType)
+	mappedFieldPath  map[string]struct{}
 }
 
-// Workflow is wrapper of Graph, replacing AddEdge with declaring FieldMapping between one node's output and current node's input.
-// Under the hood it uses NodeTriggerMode(AllPredecessor), so does not support branches or cycles.
+// Workflow is wrapper of graph, replacing AddEdge with declaring dependencies and field mappings between nodes.
+// Under the hood it uses NodeTriggerMode(AllPredecessor), so does not support cycles.
 type Workflow[I, O any] struct {
-	g *graph
+	g                *graph
+	workflowNodes    map[string]*WorkflowNode
+	workflowBranches map[string]*WorkflowBranch
+	dependencies     map[string]map[string]dependencyType
 }
+
+type dependencyType int
+
+const (
+	normalDependency dependencyType = iota
+	noDirectDependency
+	branchDependency
+)
 
 // NewWorkflow creates a new Workflow.
 func NewWorkflow[I, O any](opts ...NewGraphOption) *Workflow[I, O] {
@@ -54,42 +70,16 @@ func NewWorkflow[I, O any](opts ...NewGraphOption) *Workflow[I, O] {
 			options.withState,
 			options.stateType,
 		),
+		workflowNodes:    make(map[string]*WorkflowNode),
+		workflowBranches: make(map[string]*WorkflowBranch),
+		dependencies:     make(map[string]map[string]dependencyType),
 	}
 
 	return wf
 }
 
 func (wf *Workflow[I, O]) Compile(ctx context.Context, opts ...GraphCompileOption) (Runnable[I, O], error) {
-	if len(globalGraphCompileCallbacks) > 0 {
-		opts = append([]GraphCompileOption{WithGraphCompileCallbacks(globalGraphCompileCallbacks...)}, opts...)
-	}
-	option := newGraphCompileOptions(opts...)
-
-	cr, err := wf.g.compile(ctx, option)
-	if err != nil {
-		return nil, err
-	}
-
-	cr.meta = &executorMeta{
-		component:                  wf.g.cmp,
-		isComponentCallbackEnabled: true,
-		componentImplType:          "",
-	}
-
-	cr.nodeInfo = &nodeInfo{
-		name: option.graphName,
-	}
-
-	ctxWrapper := func(ctx context.Context, opts ...Option) context.Context {
-		return initGraphCallbacks(ctx, cr.nodeInfo, cr.meta, opts...)
-	}
-
-	rp, err := toGenericRunnable[I, O](cr, ctxWrapper)
-	if err != nil {
-		return nil, err
-	}
-
-	return rp, nil
+	return compileAnyGraph[I, O](ctx, wf, opts...)
 }
 
 func (wf *Workflow[I, O]) AddChatModelNode(key string, chatModel model.ChatModel, opts ...GraphAddNodeOpt) *WorkflowNode {
@@ -142,47 +132,411 @@ func (wf *Workflow[I, O]) AddLambdaNode(key string, lambda *Lambda, opts ...Grap
 	return wf.initNode(key)
 }
 
+// End returns the WorkflowNode representing END node.
+func (wf *Workflow[I, O]) End() *WorkflowNode {
+	if node, ok := wf.workflowNodes[END]; ok {
+		return node
+	}
+	return wf.initNode(END)
+}
+
+func (wf *Workflow[I, O]) addPassthroughNode(key string, opts ...GraphAddNodeOpt) *WorkflowNode {
+	_ = wf.g.AddPassthroughNode(key, opts...)
+	return wf.initNode(key)
+}
+
+// AddInput creates both data and execution dependencies between nodes.
+// It configures how data flows from the predecessor node (fromNodeKey) to the current node,
+// and ensures the current node only executes after the predecessor completes.
+//
+// Parameters:
+//   - fromNodeKey: the key of the predecessor node
+//   - inputs: field mappings that specify how data should flow from the predecessor
+//     to the current node. If no mappings are provided, the entire output of the
+//     predecessor will be used as input.
+//
+// Example:
+//
+//	// Map between specific field
+//	node.AddInput("userNode", MapFields("user.name", "displayName"))
+//
+//	// Use entire output
+//	node.AddInput("dataNode")
+//
+// Returns the current node for method chaining.
 func (n *WorkflowNode) AddInput(fromNodeKey string, inputs ...*FieldMapping) *WorkflowNode {
-	_ = n.g.addEdgeWithMappings(fromNodeKey, n.key, inputs...)
+	return n.addDependencyRelation(fromNodeKey, inputs, &workflowAddInputOpts{})
+}
+
+type workflowAddInputOpts struct {
+	// noDirectDependency indicates whether to create a data mapping without establishing
+	// a direct execution dependency. When true, the current node can access data from
+	// the predecessor node but its execution is not directly blocked by it.
+	noDirectDependency bool
+	// dependencyWithoutInput indicates whether to create an execution dependency
+	// without any data mapping. When true, the current node will wait for the
+	// predecessor node to complete but won't receive any data from it.
+	dependencyWithoutInput bool
+}
+
+type WorkflowAddInputOpt func(*workflowAddInputOpts)
+
+func getAddInputOpts(opts []WorkflowAddInputOpt) *workflowAddInputOpts {
+	opt := &workflowAddInputOpts{}
+	for _, o := range opts {
+		o(opt)
+	}
+	return opt
+}
+
+// WithNoDirectDependency creates a data mapping without establishing a direct execution dependency.
+// The predecessor node will still complete before the current node executes, but through indirect
+// execution paths rather than a direct dependency.
+//
+// In a workflow graph, node dependencies typically serve two purposes:
+// 1. Execution order: determining when nodes should run
+// 2. Data flow: specifying how data passes between nodes
+//
+// This option separates these concerns by:
+//   - Creating data mapping from the predecessor to the current node
+//   - Relying on the predecessor's path to reach the current node through other nodes
+//     that have direct execution dependencies
+//
+// Example:
+//
+//	node.AddInputWithOptions("dataNode", mappings, WithNoDirectDependency())
+//
+// Important:
+//
+//  1. Branch scenarios: When connecting nodes on different sides of a branch,
+//     WithNoDirectDependency MUST be used to let the branch itself handle the
+//     execution order, preventing incorrect dependencies that could bypass the branch.
+//
+//  2. Execution guarantee: The predecessor will still complete before the current
+//     node executes because the predecessor must have a path (through other nodes)
+//     that eventually reaches the current node.
+//
+//  3. Graph validity: There MUST be a path from the predecessor that eventually
+//     reaches the current node through other nodes with direct dependencies.
+//     This ensures the execution order while avoiding redundant direct dependencies.
+//
+// Common use cases:
+// - Cross-branch data access where the branch handles execution order
+// - Avoiding redundant dependencies when a path already exists
+func WithNoDirectDependency() WorkflowAddInputOpt {
+	return func(opt *workflowAddInputOpts) {
+		opt.noDirectDependency = true
+	}
+}
+
+// AddInputWithOptions creates a dependency between nodes with custom configuration options.
+// It allows fine-grained control over both data flow and execution dependencies.
+//
+// Parameters:
+//   - fromNodeKey: the key of the predecessor node
+//   - inputs: field mappings that specify how data flows from the predecessor to the current node.
+//     If no mappings are provided, the entire output of the predecessor will be used as input.
+//   - opts: configuration options that control how the dependency is established
+//
+// Example:
+//
+//	// Create data mapping without direct execution dependency
+//	node.AddInputWithOptions("dataNode", mappings, WithNoDirectDependency())
+//
+// Returns the current node for method chaining.
+func (n *WorkflowNode) AddInputWithOptions(fromNodeKey string, inputs []*FieldMapping, opts ...WorkflowAddInputOpt) *WorkflowNode {
+	return n.addDependencyRelation(fromNodeKey, inputs, getAddInputOpts(opts))
+}
+
+// AddDependency creates an execution-only dependency between nodes.
+// The current node will wait for the predecessor node to complete before executing,
+// but no data will be passed between them.
+//
+// Parameters:
+//   - fromNodeKey: the key of the predecessor node that must complete before this node starts
+//
+// Example:
+//
+//	// Wait for "setupNode" to complete before executing
+//	node.AddDependency("setupNode")
+//
+// This is useful when:
+// - You need to ensure execution order without data transfer
+// - The predecessor performs setup or initialization that must complete first
+// - You want to explicitly separate execution dependencies from data flow
+//
+// Returns the current node for method chaining.
+func (n *WorkflowNode) AddDependency(fromNodeKey string) *WorkflowNode {
+	return n.addDependencyRelation(fromNodeKey, nil, &workflowAddInputOpts{dependencyWithoutInput: true})
+}
+
+// SetStaticValue sets a static value for a field path that will be available
+// during workflow execution. These values are determined at compile time and
+// remain constant throughout the workflow's lifecycle.
+//
+// Example:
+//
+//	node.SetStaticValue(FieldPath{"query"}, "static query")
+func (n *WorkflowNode) SetStaticValue(path FieldPath, value any) *WorkflowNode {
+	n.staticValues[path.join()] = value
 	return n
 }
 
+func (n *WorkflowNode) addDependencyRelation(fromNodeKey string, inputs []*FieldMapping, options *workflowAddInputOpts) *WorkflowNode {
+	for _, input := range inputs {
+		input.fromNodeKey = fromNodeKey
+	}
+
+	if options.noDirectDependency {
+		n.addInputs = append(n.addInputs, func() error {
+			for _, input := range inputs {
+				if _, ok := n.mappedFieldPath[input.to]; ok {
+					return fmt.Errorf("field path %s already mapped for node: %s", input.to, n.key)
+				}
+				n.mappedFieldPath[input.to] = struct{}{}
+			}
+
+			if len(inputs) == 0 {
+				n.mappedFieldPath[""] = struct{}{}
+			}
+
+			if err := n.g.addEdgeWithMappings(fromNodeKey, n.key, true, false, inputs...); err != nil {
+				return err
+			}
+			n.dependencySetter(fromNodeKey, noDirectDependency)
+			return nil
+		})
+	} else if options.dependencyWithoutInput {
+		n.addInputs = append(n.addInputs, func() error {
+			if len(inputs) > 0 {
+				return fmt.Errorf("dependency without input should not have inputs. node: %s, fromNode: %s, inputs: %v", n.key, fromNodeKey, inputs)
+			}
+			if err := n.g.addEdgeWithMappings(fromNodeKey, n.key, false, true); err != nil {
+				return err
+			}
+			n.dependencySetter(fromNodeKey, normalDependency)
+			return nil
+		})
+	} else {
+		n.addInputs = append(n.addInputs, func() error {
+			for _, input := range inputs {
+				if _, ok := n.mappedFieldPath[input.to]; ok {
+					return fmt.Errorf("field path %s already mapped for node: %s", input.to, n.key)
+				}
+				n.mappedFieldPath[input.to] = struct{}{}
+			}
+
+			if len(inputs) == 0 {
+				n.mappedFieldPath[""] = struct{}{}
+			}
+
+			if err := n.g.addEdgeWithMappings(fromNodeKey, n.key, false, false, inputs...); err != nil {
+				return err
+			}
+			n.dependencySetter(fromNodeKey, normalDependency)
+			return nil
+		})
+	}
+
+	return n
+}
+
+type WorkflowBranch struct {
+	branchKey string
+	*GraphBranch
+	node *WorkflowNode
+}
+
+// AddBranch adds a branch to the workflow.
+//
+// Branch Key Uniqueness:
+// The 'branchKey' parameter must be globally unique within the workflow.
+// This uniqueness constraint applies to both other branch keys and all node keys in the workflow.
+//
+// End Nodes Field Mappings:
+// End nodes of the branch are required to define their own field mappings.
+// This is a key distinction between Graph's Branch and Workflow's Branch:
+// - Graph's Branch: Automatically passes its input to the selected node.
+// - Workflow's Branch: Does not pass its input to the selected node.
+func (wf *Workflow[I, O]) AddBranch(branchKey string, branch *GraphBranch) *WorkflowBranch {
+	wb := &WorkflowBranch{
+		branchKey:   branchKey,
+		GraphBranch: branch,
+	}
+	wf.workflowBranches[branchKey] = wb
+
+	passthrough := wf.addPassthroughNode(wb.branchKey)
+	wf.g.nodes[wb.branchKey].cr.inputType = wb.condition.inputType
+	wf.g.nodes[wb.branchKey].cr.outputType = wf.g.nodes[wb.branchKey].cr.inputType
+	wf.g.nodes[wb.branchKey].cr.inputConverter = wb.condition.inputConverter
+	wf.g.nodes[wb.branchKey].cr.inputFieldMappingConverter = wb.condition.inputFieldMappingConverter
+	wb.node = passthrough
+
+	_ = wf.g.addBranch(passthrough.key, wb.GraphBranch, true)
+
+	return wb
+}
+
+func (wb *WorkflowBranch) AddInput(fromNodeKey string, inputs ...*FieldMapping) *WorkflowBranch {
+	wb.node.AddInput(fromNodeKey, inputs...)
+	return wb
+}
+
+func (wb *WorkflowBranch) AddInputWithOptions(fromNodeKey string, inputs []*FieldMapping, opts ...WorkflowAddInputOpt) *WorkflowBranch {
+	wb.node.AddInputWithOptions(fromNodeKey, inputs, opts...)
+	return wb
+}
+
+func (wb *WorkflowBranch) AddDependency(fromNodeKey string) *WorkflowBranch {
+	wb.node.AddDependency(fromNodeKey)
+	return wb
+}
+
+// Deprecated: use *Workflow[I,O].End() to obtain a WorkflowNode instance for END, then work with it just like a normal WorkflowNode.
 func (wf *Workflow[I, O]) AddEnd(fromNodeKey string, inputs ...*FieldMapping) *Workflow[I, O] {
 	for _, input := range inputs {
 		input.fromNodeKey = fromNodeKey
 	}
-	_ = wf.g.addEdgeWithMappings(fromNodeKey, END, inputs...)
+	_ = wf.g.addEdgeWithMappings(fromNodeKey, END, false, false, inputs...)
 	return wf
 }
 
 func (wf *Workflow[I, O]) compile(ctx context.Context, options *graphCompileOptions) (*composableRunnable, error) {
+	if wf.g.buildError != nil {
+		return nil, wf.g.buildError
+	}
+
+	for _, n := range wf.workflowNodes {
+		for _, addInput := range n.addInputs {
+			if err := addInput(); err != nil {
+				return nil, err
+			}
+		}
+		n.addInputs = nil
+	}
+
+	for _, wb := range wf.workflowBranches {
+		for endNode := range wb.endNodes {
+			if endNode == END {
+				if _, ok := wf.dependencies[END]; !ok {
+					wf.dependencies[END] = make(map[string]dependencyType)
+				}
+				wf.dependencies[END][wb.branchKey] = branchDependency
+			} else {
+				n := wf.workflowNodes[endNode]
+				n.dependencySetter(wb.branchKey, branchDependency)
+			}
+		}
+	}
+
+	for _, n := range wf.workflowNodes {
+		if len(n.staticValues) > 0 {
+			value := make(map[string]any, len(n.staticValues))
+			for path, v := range n.staticValues {
+				value[path] = v
+			}
+
+			if _, ok := n.mappedFieldPath[n.key]; ok {
+				return nil, fmt.Errorf("field path %s already mapped for node: %s", n.key, n.key)
+			}
+
+			n.mappedFieldPath[n.key] = struct{}{}
+
+			pair := handlerPair{
+				invoke: func(in any) (any, error) {
+					values := []any{in, value}
+					return mergeValues(values)
+				},
+				transform: func(in streamReader) streamReader {
+					s, ok := unpackStreamReader[map[string]any](in)
+					if !ok {
+						panic("static value setter incoming streamReader chunk type not map[string]any")
+					}
+
+					sr, sw := schema.Pipe[map[string]any](1)
+					sw.Send(value, nil)
+					sw.Close()
+
+					newS := schema.MergeStreamReaders([]*schema.StreamReader[map[string]any]{s, sr})
+
+					return packStreamReader(newS)
+				},
+			}
+
+			if _, ok := wf.g.handlerPreNode[n.key]; !ok {
+				wf.g.handlerPreNode[n.key] = []handlerPair{pair}
+			} else {
+				wf.g.handlerPreNode[n.key] = append([]handlerPair{pair}, wf.g.handlerPreNode[n.key]...)
+			}
+		}
+
+		if len(n.mappedFieldPath) == 0 { // absolutely no input data
+			inputType := n.g.nodes[n.key].inputType()
+			if inputType != reflect.TypeOf(map[string]any{}) { // only support such case when input is map[string]any{}
+				return nil, fmt.Errorf("node %s has no input data, but its input type is not map[string]any", n.key)
+			}
+
+			pair := handlerPair{
+				invoke: func(in any) (any, error) {
+					if in == nil {
+						return map[string]any{}, nil
+					}
+					return in, nil
+				},
+				transform: func(in streamReader) streamReader {
+					if in == nil {
+						sr, sw := schema.Pipe[map[string]any](1)
+						sw.Send(map[string]any{}, nil)
+						sw.Close()
+						return packStreamReader(sr)
+					}
+					return in
+				},
+			}
+			if _, ok := wf.g.handlerPreNode[n.key]; !ok {
+				wf.g.handlerPreNode[n.key] = []handlerPair{pair}
+			} else {
+				wf.g.handlerPreNode[n.key] = append([]handlerPair{pair}, wf.g.handlerPreNode[n.key]...)
+			}
+		}
+	}
+
+	// TODO: check indirect edges are legal
+
 	return wf.g.compile(ctx, options)
 }
 
 func (wf *Workflow[I, O]) initNode(key string) *WorkflowNode {
-	return &WorkflowNode{g: wf.g, key: key}
+	n := &WorkflowNode{
+		g:            wf.g,
+		key:          key,
+		staticValues: make(map[string]any),
+		dependencySetter: func(fromNodeKey string, typ dependencyType) {
+			if _, ok := wf.dependencies[key]; !ok {
+				wf.dependencies[key] = make(map[string]dependencyType)
+			}
+			wf.dependencies[key][fromNodeKey] = typ
+		},
+		mappedFieldPath: make(map[string]struct{}),
+	}
+	wf.workflowNodes[key] = n
+	return n
 }
 
 func (wf *Workflow[I, O]) inputConverter() handlerPair {
-	return handlerPair{
-		invoke:    defaultValueChecker[I],
-		transform: defaultStreamConverter[I],
-	}
+	return wf.g.inputConverter()
 }
 
 func (wf *Workflow[I, O]) inputFieldMappingConverter() handlerPair {
-	return handlerPair{
-		invoke:    buildFieldMappingConverter[I](),
-		transform: buildStreamFieldMappingConverter[I](),
-	}
+	return wf.g.inputFieldMappingConverter()
 }
 
 func (wf *Workflow[I, O]) inputType() reflect.Type {
-	return generic.TypeOf[I]()
+	return wf.g.inputType()
 }
 
 func (wf *Workflow[I, O]) outputType() reflect.Type {
-	return generic.TypeOf[O]()
+	return wf.g.outputType()
 }
 
 func (wf *Workflow[I, O]) component() component {

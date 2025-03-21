@@ -72,3 +72,5 @@ func (ch *pregelChannel) ready(_ context.Context) bool {
 func (ch *pregelChannel) reportSkip(_ []string) (bool, error) {
 	return false, nil
 }
+
+func (ch *pregelChannel) reportDone(_ string) error { return nil }

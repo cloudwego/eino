@@ -133,7 +133,7 @@ func TestWorkflow(t *testing.T) {
 		WithInputKey("key1"),
 	).
 		AddInput("3") // map["key1"][]any -> []any
-	subWorkflow.AddEnd("4")
+	subWorkflow.End().AddInput("4")
 
 	w := NewWorkflow[*structA, *structEnd](WithGenLocalState(func(context.Context) *state { return &state{} }))
 
@@ -208,7 +208,7 @@ func TestWorkflow(t *testing.T) {
 			MapFields("Field3", "Field3"),
 		)
 
-	w.AddEnd("F", ToField("Field1"))
+	w.End().AddInput("F", ToField("Field1"))
 
 	compiled, err := w.Compile(ctx)
 	assert.NoError(t, err)
@@ -256,8 +256,8 @@ func TestWorkflowWithMap(t *testing.T) {
 	wf.AddLambdaNode("lambda2", InvokableLambda(func(ctx context.Context, in *structA) (*structA, error) {
 		return in, nil
 	})).AddInput(START, MapFields("map_key", "F1"))
-	wf.AddEnd("lambda1", MapFields("lambda1_key", "end_lambda1"))
-	wf.AddEnd("lambda2", MapFields("F1", "end_lambda2"))
+	wf.End().AddInput("lambda1", MapFields("lambda1_key", "end_lambda1"))
+	wf.End().AddInput("lambda2", MapFields("F1", "end_lambda2"))
 	r, err := wf.Compile(ctx)
 	assert.NoError(t, err)
 	out, err := r.Invoke(ctx, map[string]any{"map_key": "value"})
@@ -283,7 +283,7 @@ func TestWorkflowWithNestedFieldMappings(t *testing.T) {
 
 	t.Run("from struct.struct.field", func(t *testing.T) {
 		wf := NewWorkflow[*structB, string]()
-		wf.AddEnd(START, FromFieldPath([]string{"F1", "F1"}))
+		wf.End().AddInput(START, FromFieldPath([]string{"F1", "F1"}))
 		r, err := wf.Compile(ctx)
 		assert.NoError(t, err)
 		out, err := r.Invoke(ctx, &structB{
@@ -295,14 +295,14 @@ func TestWorkflowWithNestedFieldMappings(t *testing.T) {
 		assert.Equal(t, "hello", out)
 
 		wf = NewWorkflow[*structB, string]()
-		wf.AddEnd(START, FromFieldPath([]string{"F1", "F2"}))
+		wf.End().AddInput(START, FromFieldPath([]string{"F1", "F2"}))
 		_, err = wf.Compile(ctx)
-		assert.ErrorContains(t, err, "type[compose.structA] has no field[F2]")
+		assert.ErrorContains(t, err, "has no field[F2]")
 	})
 
 	t.Run("to struct.(non-ptr)struct.field", func(t *testing.T) {
 		wf := NewWorkflow[string, *structB]()
-		wf.AddEnd(START, ToFieldPath([]string{"F6", "F1"}))
+		wf.End().AddInput(START, ToFieldPath([]string{"F6", "F1"}))
 		r, err := wf.Compile(ctx)
 		assert.NoError(t, err)
 		out, err := r.Invoke(ctx, "hello")
@@ -316,7 +316,7 @@ func TestWorkflowWithNestedFieldMappings(t *testing.T) {
 
 	t.Run("to map.(non-ptr)struct.field", func(t *testing.T) {
 		wf := NewWorkflow[string, map[string]structA]()
-		wf.AddEnd(START, ToFieldPath([]string{"key", "F1"}))
+		wf.End().AddInput(START, ToFieldPath([]string{"key", "F1"}))
 		r, err := wf.Compile(ctx)
 		assert.NoError(t, err)
 		out, err := r.Invoke(ctx, "hello")
@@ -330,7 +330,7 @@ func TestWorkflowWithNestedFieldMappings(t *testing.T) {
 
 	t.Run("from map.map.field", func(t *testing.T) {
 		wf := NewWorkflow[map[string]map[string]string, string]()
-		wf.AddEnd(START, FromFieldPath([]string{"F1", "F1"}))
+		wf.End().AddInput(START, FromFieldPath([]string{"F1", "F1"}))
 		r, err := wf.Compile(ctx)
 		assert.NoError(t, err)
 		out, err := r.Invoke(ctx, map[string]map[string]string{
@@ -352,7 +352,7 @@ func TestWorkflowWithNestedFieldMappings(t *testing.T) {
 
 	t.Run("from struct.map.field", func(t *testing.T) {
 		wf := NewWorkflow[*structB, string]()
-		wf.AddEnd(START, FromFieldPath([]string{"F2", "F1"}))
+		wf.End().AddInput(START, FromFieldPath([]string{"F2", "F1"}))
 		r, err := wf.Compile(ctx)
 		assert.NoError(t, err)
 		out, err := r.Invoke(ctx, &structB{
@@ -374,7 +374,7 @@ func TestWorkflowWithNestedFieldMappings(t *testing.T) {
 
 	t.Run("from map.struct.field", func(t *testing.T) {
 		wf := NewWorkflow[map[string]*structA, string]()
-		wf.AddEnd(START, FromFieldPath([]string{"F1", "F1"}))
+		wf.End().AddInput(START, FromFieldPath([]string{"F1", "F1"}))
 		r, err := wf.Compile(ctx)
 		assert.NoError(t, err)
 		out, err := r.Invoke(ctx, map[string]*structA{
@@ -386,14 +386,14 @@ func TestWorkflowWithNestedFieldMappings(t *testing.T) {
 		assert.Equal(t, "hello", out)
 
 		wf = NewWorkflow[map[string]*structA, string]()
-		wf.AddEnd(START, FromFieldPath([]string{"F1", "F2"}))
+		wf.End().AddInput(START, FromFieldPath([]string{"F1", "F2"}))
 		_, err = wf.Compile(ctx)
-		assert.ErrorContains(t, err, "type[compose.structA] has no field[F2]")
+		assert.ErrorContains(t, err, "has no field[F2]")
 	})
 
 	t.Run("from map[string]any.field", func(t *testing.T) {
 		wf := NewWorkflow[map[string]any, string]()
-		wf.AddEnd(START, FromFieldPath([]string{"F1", "F1"}))
+		wf.End().AddInput(START, FromFieldPath([]string{"F1", "F1"}))
 		r, err := wf.Compile(ctx)
 		assert.NoError(t, err)
 		out, err := r.Invoke(ctx, map[string]any{
@@ -421,7 +421,7 @@ func TestWorkflowWithNestedFieldMappings(t *testing.T) {
 
 	t.Run("to struct.struct.field", func(t *testing.T) {
 		wf := NewWorkflow[string, *structB]()
-		wf.AddEnd(START, ToFieldPath([]string{"F1", "F1"}))
+		wf.End().AddInput(START, ToFieldPath([]string{"F1", "F1"}))
 		r, err := wf.Compile(ctx)
 		assert.NoError(t, err)
 		out, err := r.Invoke(ctx, "hello")
@@ -433,14 +433,14 @@ func TestWorkflowWithNestedFieldMappings(t *testing.T) {
 		}, out)
 
 		wf = NewWorkflow[string, *structB]()
-		wf.AddEnd(START, ToFieldPath([]string{"F1", "F2"}))
+		wf.End().AddInput(START, ToFieldPath([]string{"F1", "F2"}))
 		_, err = wf.Compile(ctx)
-		assert.ErrorContains(t, err, "type[compose.structA] has no field[F2]")
+		assert.ErrorContains(t, err, "has no field[F2]")
 	})
 
 	t.Run("to map.map.field", func(t *testing.T) {
 		wf := NewWorkflow[string, map[string]map[string]string]()
-		wf.AddEnd(START, ToFieldPath([]string{"F1", "F1"}))
+		wf.End().AddInput(START, ToFieldPath([]string{"F1", "F1"}))
 		r, err := wf.Compile(ctx)
 		assert.NoError(t, err)
 		out, err := r.Invoke(ctx, "hello")
@@ -452,14 +452,14 @@ func TestWorkflowWithNestedFieldMappings(t *testing.T) {
 		}, out)
 
 		wf1 := NewWorkflow[string, map[string]map[string]int]()
-		wf1.AddEnd(START, ToFieldPath([]string{"F1", "F1"}))
+		wf1.End().AddInput(START, ToFieldPath([]string{"F1", "F1"}))
 		_, err = wf1.Compile(ctx)
-		assert.ErrorContains(t, err, "field[string]-[int] must not be assignable")
+		assert.ErrorContains(t, err, "field[string]-[int] is absolutely not assignable")
 	})
 
 	t.Run("to struct.map.field", func(t *testing.T) {
 		wf := NewWorkflow[string, *structB]()
-		wf.AddEnd(START, ToFieldPath([]string{"F2", "F1"}))
+		wf.End().AddInput(START, ToFieldPath([]string{"F2", "F1"}))
 		r, err := wf.Compile(ctx)
 		assert.NoError(t, err)
 		out, err := r.Invoke(ctx, "hello")
@@ -473,7 +473,7 @@ func TestWorkflowWithNestedFieldMappings(t *testing.T) {
 
 	t.Run("to map.struct.struct.field", func(t *testing.T) {
 		wf := NewWorkflow[string, map[string]*structB]()
-		wf.AddEnd(START, ToFieldPath([]string{"F1", "F1", "F1"}))
+		wf.End().AddInput(START, ToFieldPath([]string{"F1", "F1", "F1"}))
 		r, err := wf.Compile(ctx)
 		assert.NoError(t, err)
 		out, err := r.Invoke(ctx, "hello")
@@ -489,7 +489,7 @@ func TestWorkflowWithNestedFieldMappings(t *testing.T) {
 
 	t.Run("to struct.map.struct.field", func(t *testing.T) {
 		wf := NewWorkflow[string, *structB]()
-		wf.AddEnd(START, ToFieldPath([]string{"F5", "key", "F1"}))
+		wf.End().AddInput(START, ToFieldPath([]string{"F5", "key", "F1"}))
 		r, err := wf.Compile(ctx)
 		assert.NoError(t, err)
 		out, err := r.Invoke(ctx, "hello")
@@ -505,7 +505,7 @@ func TestWorkflowWithNestedFieldMappings(t *testing.T) {
 
 	t.Run("to map.map.struct(non-ptr).field", func(t *testing.T) {
 		wf := NewWorkflow[string, map[string]map[string]structA]()
-		wf.AddEnd(START, ToFieldPath([]string{"key1", "key2", "F1"}))
+		wf.End().AddInput(START, ToFieldPath([]string{"key1", "key2", "F1"}))
 		r, err := wf.Compile(ctx)
 		assert.NoError(t, err)
 		out, err := r.Invoke(ctx, "hello")
@@ -521,21 +521,21 @@ func TestWorkflowWithNestedFieldMappings(t *testing.T) {
 
 	t.Run("to struct.int.field", func(t *testing.T) {
 		wf := NewWorkflow[string, *structB]()
-		wf.AddEnd(START, ToFieldPath([]string{"F3", "F1", "F1"}))
+		wf.End().AddInput(START, ToFieldPath([]string{"F3", "F1", "F1"}))
 		_, err := wf.Compile(ctx)
 		assert.ErrorContains(t, err, "type[int] is not valid")
 	})
 
 	t.Run("to struct.any.field", func(t *testing.T) {
 		wf := NewWorkflow[string, *structB]()
-		wf.AddEnd(START, ToFieldPath([]string{"F4", "F1", "F1"}))
+		wf.End().AddInput(START, ToFieldPath([]string{"F4", "F1", "F1"}))
 		_, err := wf.Compile(ctx)
 		assert.ErrorContains(t, err, "the successor has intermediate interface type interface {}")
 	})
 
 	t.Run("from nested to nested", func(t *testing.T) {
 		wf := NewWorkflow[map[string]any, *structB]()
-		wf.AddEnd(START, MapFieldPaths([]string{"key1", "key2"}, []string{"F1", "F1"}))
+		wf.End().AddInput(START, MapFieldPaths([]string{"key1", "key2"}, []string{"F1", "F1"}))
 		r, err := wf.Compile(ctx)
 		assert.NoError(t, err)
 		out, err := r.Invoke(ctx, map[string]any{
@@ -553,7 +553,7 @@ func TestWorkflowWithNestedFieldMappings(t *testing.T) {
 
 	t.Run("from nested to normal", func(t *testing.T) {
 		wf := NewWorkflow[map[string]any, *structA]()
-		wf.AddEnd(START, MapFieldPaths(FieldPath{"key1", "key2"}, FieldPath{"F1"}))
+		wf.End().AddInput(START, MapFieldPaths(FieldPath{"key1", "key2"}, FieldPath{"F1"}))
 		r, err := wf.Compile(ctx)
 		assert.NoError(t, err)
 		out, err := r.Invoke(ctx, map[string]any{
@@ -582,16 +582,16 @@ func TestWorkflowCompile(t *testing.T) {
 	t.Run("type mismatch", func(t *testing.T) {
 		w := NewWorkflow[string, string]()
 		w.AddToolsNode("1", &ToolsNode{}).AddInput(START)
-		w.AddEnd("1")
+		w.End().AddInput("1")
 		_, err := w.Compile(ctx)
-		assert.ErrorContains(t, err, "mismatch")
+		assert.ErrorContains(t, err, " mismatch")
 	})
 
 	t.Run("predecessor's output not struct/struct ptr/map, mapping has FromField", func(t *testing.T) {
 		w := NewWorkflow[[]*schema.Document, []string]()
 
 		w.AddIndexerNode("indexer", indexer.NewMockIndexer(ctrl)).AddInput(START, FromField("F1"))
-		w.AddEnd("indexer")
+		w.End().AddInput("indexer")
 		_, err := w.Compile(ctx)
 		assert.ErrorContains(t, err, "predecessor output type should be struct")
 	})
@@ -599,7 +599,7 @@ func TestWorkflowCompile(t *testing.T) {
 	t.Run("successor's input not struct/struct ptr/map, mapping has ToField", func(t *testing.T) {
 		w := NewWorkflow[[]string, [][]float64]()
 		w.AddEmbeddingNode("embedder", embedding.NewMockEmbedder(ctrl)).AddInput(START, ToField("F1"))
-		w.AddEnd("embedder")
+		w.End().AddInput("embedder")
 		_, err := w.Compile(ctx)
 		assert.ErrorContains(t, err, "successor input type should be struct")
 	})
@@ -607,7 +607,7 @@ func TestWorkflowCompile(t *testing.T) {
 	t.Run("map to non existing field in predecessor", func(t *testing.T) {
 		w := NewWorkflow[*schema.Message, []*schema.Message]()
 		w.AddToolsNode("tools_node", &ToolsNode{}).AddInput(START, FromField("non_exist"))
-		w.AddEnd("tools_node")
+		w.End().AddInput("tools_node")
 		_, err := w.Compile(ctx)
 		assert.ErrorContains(t, err, "type[schema.Message] has no field[non_exist]")
 	})
@@ -617,16 +617,16 @@ func TestWorkflowCompile(t *testing.T) {
 		w.AddLambdaNode("1", InvokableLambda(func(ctx context.Context, input string) (output string, err error) {
 			return input, nil
 		})).AddInput(START)
-		w.AddEnd("1", ToField("to"))
+		w.End().AddInput("1", ToField("to"))
 		_, err := w.Compile(ctx)
-		assert.ErrorContains(t, err, "type[compose.FieldMapping] has an unexported field[to]")
+		assert.ErrorContains(t, err, "has an unexported field[to]")
 	})
 
 	t.Run("duplicate node key", func(t *testing.T) {
 		w := NewWorkflow[[]*schema.Message, []*schema.Message]()
 		w.AddChatModelNode("1", model.NewMockChatModel(ctrl)).AddInput(START)
 		w.AddToolsNode("1", &ToolsNode{}).AddInput("1")
-		w.AddEnd("1")
+		w.End().AddInput("1")
 		_, err := w.Compile(ctx)
 		assert.ErrorContains(t, err, "node '1' already present")
 	})
@@ -634,7 +634,7 @@ func TestWorkflowCompile(t *testing.T) {
 	t.Run("from non-existing node", func(t *testing.T) {
 		w := NewWorkflow[*schema.Message, []*schema.Message]()
 		w.AddToolsNode("1", &ToolsNode{}).AddInput(START)
-		w.AddEnd("2")
+		w.End().AddInput("2")
 		_, err := w.Compile(ctx)
 		assert.ErrorContains(t, err, "edge start node '2' needs to be added to graph first")
 	})
@@ -650,8 +650,9 @@ func TestFanInToSameDest(t *testing.T) {
 			return in, nil
 		}), WithOutputKey("q2")).AddInput(START)
 		wf.AddChatTemplateNode("prompt", prompt.FromMessages(schema.Jinja2, schema.UserMessage("{{q1}}_{{q2}}"))).
-			AddInput("1").AddInput("2")
-		wf.AddEnd("prompt")
+			AddInput("1", MapFields("q1", "q1")).
+			AddInput("2", MapFields("q2", "q2"))
+		wf.End().AddInput("prompt")
 		c, err := wf.Compile(context.Background())
 		assert.NoError(t, err)
 		out, err := c.Invoke(context.Background(), "query")
@@ -676,9 +677,173 @@ func TestFanInToSameDest(t *testing.T) {
 		wf.AddLambdaNode("2", InvokableLambda(func(ctx context.Context, in int) (output int, err error) {
 			return in, nil
 		}), WithOutputKey("B")).AddInput(START, FromField("B"))
-		wf.AddEnd("1", ToField("F")).AddEnd("2", ToField("F"))
+		wf.End().AddInput("1", ToField("F")).AddInput("2", ToField("F"))
 		_, err := wf.Compile(context.Background())
-		assert.ErrorContains(t, err, "duplicate mapping target field")
+		assert.ErrorContains(t, err, "field path F already mapped for node: end")
+	})
+}
+
+func TestIndirectEdge(t *testing.T) {
+	wf := NewWorkflow[string, map[string]any]()
+
+	wf.AddLambdaNode("1", InvokableLambda(func(ctx context.Context, in string) (output string, err error) {
+		return in + "_" + in, nil
+	})).AddInput(START)
+
+	wf.AddLambdaNode("2", InvokableLambda(func(ctx context.Context, in map[string]string) (output string, err error) {
+		return in["1"] + "_" + in[START], nil
+	})).AddInput("1", ToField("1")).
+		AddInputWithOptions(START, []*FieldMapping{ToField(START)}, WithNoDirectDependency())
+
+	wf.End().AddInput("2", ToField("2")).
+		AddInputWithOptions("1", []*FieldMapping{ToField("1")}, WithNoDirectDependency())
+
+	r, err := wf.Compile(context.Background())
+	assert.NoError(t, err)
+	out, err := r.Invoke(context.Background(), "query")
+	assert.NoError(t, err)
+	assert.Equal(t, map[string]any{"1": "query_query", "2": "query_query_query"}, out)
+}
+
+func TestDependencyWithNoInput(t *testing.T) {
+	t.Run("simple case", func(t *testing.T) {
+		wf := NewWorkflow[string, string]()
+		wf.AddLambdaNode("0", InvokableLambda(func(ctx context.Context, in string) (output string, err error) {
+			return "useless", nil
+		})).AddInput(START)
+		wf.AddLambdaNode("1", InvokableLambda(func(ctx context.Context, in string) (output string, err error) {
+			return in + "_done", nil
+		})).AddDependency("0").AddInputWithOptions(START, nil, WithNoDirectDependency())
+		wf.End().AddInput("1")
+		r, err := wf.Compile(context.Background())
+		assert.NoError(t, err)
+		out, err := r.Invoke(context.Background(), "hello")
+		assert.NoError(t, err)
+		assert.Equal(t, "hello_done", out)
+	})
+
+	t.Run("simple control flow: [Start] --> [Node '0'] --> [End]", func(t *testing.T) {
+		// [Start] --> [Node "0"] --> [End]
+		wf := NewWorkflow[map[string]any, map[string]any]()
+		wf.AddLambdaNode("0", InvokableLambda(func(ctx context.Context, in map[string]any) (output map[string]any, err error) {
+			return map[string]any{
+				"result": "result from node 0",
+			}, nil
+		})).AddDependency(START)
+		wf.End().AddInput("0", ToField("final_result")).
+			AddInputWithOptions(START, []*FieldMapping{ToField("final_from_start")}, WithNoDirectDependency())
+		r, err := wf.Compile(context.Background())
+		assert.NoError(t, err)
+		ret, err := r.Invoke(context.Background(), map[string]any{
+			"input": "hello",
+		})
+		assert.NoError(t, err)
+		assert.Equal(t, map[string]any{
+			"final_result": map[string]any{
+				"result": "result from node 0",
+			},
+			"final_from_start": map[string]any{
+				"input": "hello",
+			},
+		}, ret)
+
+		sRet, err := r.Stream(context.Background(), map[string]any{
+			"input": "hello",
+		})
+		assert.NoError(t, err)
+		ret, err = concatStreamReader(sRet)
+		assert.NoError(t, err)
+		assert.Equal(t, map[string]any{
+			"final_result": map[string]any{
+				"result": "result from node 0",
+			},
+			"final_from_start": map[string]any{
+				"input": "hello",
+			},
+		}, ret)
+	})
+}
+
+func TestPrefilledValue(t *testing.T) {
+	t.Run("prefill map", func(t *testing.T) {
+		wf := NewWorkflow[string, map[string]any]()
+		wf.AddLambdaNode("0", InvokableLambda(func(ctx context.Context, in map[string]any) (output map[string]any, err error) {
+			return in, nil
+		})).
+			AddInput(START, ToField(START)).
+			SetStaticValue(FieldPath{"prefilled"}, "yo-ho")
+		wf.End().AddInput("0")
+		r, err := wf.Compile(context.Background())
+		assert.NoError(t, err)
+		out, err := r.Invoke(context.Background(), "hello")
+		assert.NoError(t, err)
+		assert.Equal(t, map[string]any{"prefilled": "yo-ho", START: "hello"}, out)
+	})
+}
+
+func TestBranch(t *testing.T) {
+	ctx := context.Background()
+	t.Run("simple branch: one predecessor, two successor, one of them is END", func(t *testing.T) {
+		wf := NewWorkflow[string, map[string]any]()
+		wf.AddLambdaNode("1", InvokableLambda(func(ctx context.Context, in string) (output string, err error) {
+			return in + "_" + in, nil
+		})).AddInputWithOptions(START, nil, WithNoDirectDependency())
+
+		branch := NewGraphBranch(func(ctx context.Context, in map[string]any) (string, error) {
+			if in[START] == "hello" {
+				return "1", nil
+			}
+			return END, nil
+		}, map[string]bool{
+			"1": true,
+			END: true,
+		})
+		wf.AddBranch("branch_1", branch).AddInput(START, ToField(START))
+		wf.End().AddInput("1", ToField("1")).AddInputWithOptions(START, []*FieldMapping{ToField(START)}, WithNoDirectDependency())
+		r, err := wf.Compile(ctx)
+		assert.NoError(t, err)
+		out, err := r.Invoke(ctx, "hello")
+		assert.NoError(t, err)
+		assert.Equal(t, map[string]any{
+			"1":   "hello_hello",
+			START: "hello",
+		}, out)
+		out, err = r.Invoke(ctx, "world")
+		assert.NoError(t, err)
+		assert.Equal(t, map[string]any{
+			START: "world",
+		}, out)
+	})
+
+	t.Run("multiple predecessors", func(t *testing.T) {
+		wf := NewWorkflow[string, map[string]any]()
+		wf.AddLambdaNode("1", InvokableLambda(func(ctx context.Context, in string) (output string, err error) {
+			return in + "_" + in, nil
+		})).AddInput(START)
+		wf.AddLambdaNode("2", InvokableLambda(func(ctx context.Context, in string) (output string, err error) {
+			return in + "_" + in, nil
+		})).AddInputWithOptions("1", nil, WithNoDirectDependency())
+		wf.AddLambdaNode("0", InvokableLambda(func(ctx context.Context, in string) (output string, err error) {
+			return in + "_" + in, nil
+		})).AddInput(START)
+		wf.AddBranch("branch_1", NewGraphBranch(func(ctx context.Context, in map[string]any) (string, error) {
+			if in[START].(string) == "hello" {
+				return "2", nil
+			}
+			return END, nil
+		}, map[string]bool{
+			"2": true,
+			END: true,
+		})).AddInput(START, ToField(START)).AddInput("1", ToField("1")).AddDependency("0")
+		wf.End().AddInput("2", ToField("2")).AddInputWithOptions(START, []*FieldMapping{ToField(START)}, WithNoDirectDependency())
+		r, err := wf.Compile(ctx)
+		assert.NoError(t, err)
+		out, err := r.Invoke(ctx, "hello")
+		assert.NoError(t, err)
+		assert.Equal(t, map[string]any{"2": "hello_hello_hello_hello", START: "hello"}, out)
+		out, err = r.Invoke(ctx, "world")
+		assert.NoError(t, err)
+		assert.Equal(t, map[string]any{START: "world"}, out)
 	})
 }
 
@@ -696,7 +861,7 @@ func TestMayAssignableFieldMapping(t *testing.T) {
 	wf := NewWorkflow[in, *goodStruct]()
 	wf.AddLambdaNode("1", InvokableLambda(func(ctx context.Context, input *goodStruct) (output goodInterface, err error) { return input, nil })).
 		AddInput(START, FromField("A"))
-	wf.AddEnd("1")
+	wf.End().AddInput("1")
 	ctx := context.Background()
 	r, err := wf.Compile(ctx)
 	assert.NoError(t, err)
