@@ -48,9 +48,10 @@ type StreamGraphBranchCondition[T any] func(ctx context.Context, in *schema.Stre
 // GraphBranch is the branch type for the graph.
 // It is used to determine the next node based on the condition.
 type GraphBranch struct {
-	condition *composableRunnable
-	endNodes  map[string]bool
-	idx       int // used to distinguish branches in parallel
+	condition  *composableRunnable
+	endNodes   map[string]bool
+	idx        int // used to distinguish branches in parallel
+	noDataFlow bool
 }
 
 // GetEndNode returns the all end nodes of the branch.
@@ -144,9 +145,14 @@ func (g graphRunType) String() string {
 	return string(g)
 }
 
+type edgeInfo struct {
+	startNode, endNode        string
+	noControlFlow, noDataFlow bool
+}
+
 type graph struct {
 	nodes      map[string]*graphNode
-	edges      map[string][]string
+	edges      map[string][]*edgeInfo
 	branches   map[string][]*GraphBranch
 	startNodes []string
 	endNodes   []string
@@ -218,7 +224,7 @@ func newGraphFromGeneric[I, O any](
 func newGraph(cfg *newGraphConfig) *graph {
 	return &graph{
 		nodes:    make(map[string]*graphNode),
-		edges:    make(map[string][]string),
+		edges:    make(map[string][]*edgeInfo),
 		branches: make(map[string][]*GraphBranch),
 
 		toValidateMap: make(map[string][]struct {
@@ -344,13 +350,18 @@ func (g *graph) addNode(key string, node *graphNode, options *graphAddNodeOpts) 
 	return nil
 }
 
-func (g *graph) addEdgeWithMappings(startNode, endNode string, mappings ...*FieldMapping) (err error) {
+func (g *graph) addEdgeWithMappings(startNode, endNode string, noControlFlow bool, noDataFlow bool, mappings ...*FieldMapping) (err error) {
 	if g.buildError != nil {
 		return g.buildError
 	}
 	if g.compiled {
 		return ErrGraphCompiled
 	}
+
+	if noControlFlow && noDataFlow {
+		return fmt.Errorf("edge[%s]-[%s] cannot be both noDirectDependency and noDataFlow", startNode, endNode)
+	}
+
 	defer func() {
 		if err != nil {
 			g.buildError = err
@@ -362,11 +373,13 @@ func (g *graph) addEdgeWithMappings(startNode, endNode string, mappings ...*Fiel
 	if endNode == START {
 		return errors.New("START cannot be an end node")
 	}
+
 	for i := range g.edges[startNode] {
-		if g.edges[startNode][i] == endNode {
+		if g.edges[startNode][i].endNode == endNode {
 			return fmt.Errorf("edge[%s]-[%s] have been added yet", startNode, endNode)
 		}
 	}
+
 	if _, ok := g.nodes[startNode]; !ok && startNode != START {
 		return fmt.Errorf("edge start node '%s' needs to be added to graph first", startNode)
 	}
@@ -374,17 +387,28 @@ func (g *graph) addEdgeWithMappings(startNode, endNode string, mappings ...*Fiel
 		return fmt.Errorf("edge end node '%s' needs to be added to graph first", endNode)
 	}
 
-	g.addToValidateMap(startNode, endNode, mappings)
-	err = g.updateToValidateMap()
-	if err != nil {
-		return err
+	if !noDataFlow {
+		g.addToValidateMap(startNode, endNode, mappings)
+		err = g.updateToValidateMap()
+		if err != nil {
+			return err
+		}
 	}
-	g.edges[startNode] = append(g.edges[startNode], endNode)
-	if startNode == START {
-		g.startNodes = append(g.startNodes, endNode)
-	}
-	if endNode == END {
-		g.endNodes = append(g.endNodes, startNode)
+
+	g.edges[startNode] = append(g.edges[startNode], &edgeInfo{
+		startNode:     startNode,
+		endNode:       endNode,
+		noControlFlow: noControlFlow,
+		noDataFlow:    noDataFlow,
+	})
+
+	if !noControlFlow {
+		if startNode == START {
+			g.startNodes = append(g.startNodes, endNode)
+		}
+		if endNode == END {
+			g.endNodes = append(g.endNodes, startNode)
+		}
 	}
 
 	return nil
@@ -526,6 +550,10 @@ func (g *graph) AddPassthroughNode(key string, opts ...GraphAddNodeOpt) error {
 //
 //	graph.AddBranch("start_node_key", branch)
 func (g *graph) AddBranch(startNode string, branch *GraphBranch) (err error) {
+	return g.addBranch(startNode, branch, false)
+}
+
+func (g *graph) addBranch(startNode string, branch *GraphBranch, skipData bool) (err error) {
 	if g.buildError != nil {
 		return g.buildError
 	}
@@ -567,26 +595,29 @@ func (g *graph) AddBranch(startNode string, branch *GraphBranch) (err error) {
 		g.handlerPreBranch[startNode] = append(g.handlerPreBranch[startNode], []handlerPair{})
 	}
 
-	for endNode := range branch.endNodes {
-		if _, ok := g.nodes[endNode]; !ok {
-			if endNode != END {
-				return fmt.Errorf("branch end node '%s' needs to be added to graph first", endNode)
+	if !skipData {
+		for endNode := range branch.endNodes {
+			if _, ok := g.nodes[endNode]; !ok {
+				if endNode != END {
+					return fmt.Errorf("branch end node '%s' needs to be added to graph first", endNode)
+				}
+			}
+
+			g.addToValidateMap(startNode, endNode, nil)
+			e := g.updateToValidateMap()
+			if e != nil {
+				return e
+			}
+
+			if startNode == START {
+				g.startNodes = append(g.startNodes, endNode)
+			}
+			if endNode == END {
+				g.endNodes = append(g.endNodes, startNode)
 			}
 		}
-
-		g.addToValidateMap(startNode, endNode, nil)
-		e := g.updateToValidateMap()
-		if e != nil {
-			return e
-		}
-
-		if startNode == START {
-			g.startNodes = append(g.startNodes, endNode)
-		}
-		if endNode == END {
-			g.endNodes = append(g.endNodes, startNode)
-		}
-
+	} else {
+		branch.noDataFlow = true
 	}
 
 	g.branches[startNode] = append(g.branches[startNode], branch)
@@ -779,15 +810,6 @@ func (g *graph) compile(ctx context.Context, opt *graphCompileOptions) (*composa
 	}
 
 	for key := range g.fieldMappingRecords {
-		// not allowed to map multiple fields to the same field
-		toMap := make(map[string]bool)
-		for _, mapping := range g.fieldMappingRecords[key] {
-			if _, ok := toMap[mapping.to]; ok {
-				return nil, fmt.Errorf("duplicate mapping target field: %s of node[%s]", mapping.to, key)
-			}
-			toMap[mapping.to] = true
-		}
-
 		// add map to input converter
 		g.handlerPreNode[key] = append(g.handlerPreNode[key], g.getNodeInputFieldMappingConverter(key))
 	}
@@ -802,36 +824,30 @@ func (g *graph) compile(ctx context.Context, opt *graphCompileOptions) (*composa
 			return nil, err
 		}
 
-		writeTo := g.edges[name]
 		chCall := &chanCall{
-			action:  r,
-			writeTo: writeTo,
+			action:          r,
+			writeTo:         g.edges[name],
+			writeToBranches: g.branches[name],
 
 			preProcessor:  node.nodeInfo.preProcessor,
 			postProcessor: node.nodeInfo.postProcessor,
 		}
 
-		branches := g.branches[name]
-		if len(branches) > 0 {
-			branchRuns := make([]*GraphBranch, 0, len(branches))
-			branchRuns = append(branchRuns, branches...)
-
-			chCall.writeToBranches = branchRuns
-		}
-
 		chanSubscribeTo[name] = chCall
-
 	}
 
 	invertedEdges := make(map[string][]string)
 	for start, ends := range g.edges {
 		for _, end := range ends {
-			if _, ok := invertedEdges[end]; !ok {
-				invertedEdges[end] = []string{start}
-			} else {
-				invertedEdges[end] = append(invertedEdges[end], start)
+			if end.noControlFlow {
+				continue
 			}
 
+			if _, ok := invertedEdges[end.endNode]; !ok {
+				invertedEdges[end.endNode] = []string{start}
+			} else {
+				invertedEdges[end.endNode] = append(invertedEdges[end.endNode], start)
+			}
 		}
 	}
 	for start, branches := range g.branches {
@@ -848,9 +864,8 @@ func (g *graph) compile(ctx context.Context, opt *graphCompileOptions) (*composa
 
 	inputChannels := &chanCall{
 		writeTo:         g.edges[START],
-		writeToBranches: make([]*GraphBranch, len(g.branches[START])),
+		writeToBranches: g.branches[START],
 	}
-	copy(inputChannels.writeToBranches, g.branches[START])
 
 	r := &runner{
 		invertedEdges:   invertedEdges,
@@ -914,8 +929,13 @@ func (g *graph) compile(ctx context.Context, opt *graphCompileOptions) (*composa
 }
 
 func getSuccessors(c *chanCall) []string {
-	ret := make([]string, len(c.writeTo))
-	copy(ret, c.writeTo)
+	ret := make([]string, 0, len(c.writeTo))
+	for _, e := range c.writeTo {
+		if !e.noControlFlow {
+			ret = append(ret, e.endNode)
+		}
+	}
+
 	for _, branch := range c.writeToBranches {
 		for node := range branch.endNodes {
 			ret = append(ret, node)
@@ -954,10 +974,18 @@ func (gn *graphNode) beforeChildGraphCompile(nodeKey string, key2SubGraphs map[s
 }
 
 func (g *graph) toGraphInfo(opt *graphCompileOptions, key2SubGraphs map[string]*GraphInfo) *GraphInfo {
+	edges := make(map[string][]string, len(g.edges))
+	for k, v := range g.edges {
+		edges[k] = make([]string, len(v))
+		for i, e := range v {
+			edges[k][i] = e.endNode
+		}
+	}
+
 	gInfo := &GraphInfo{
 		CompileOptions: opt.origOpts,
 		Nodes:          make(map[string]GraphNodeInfo, len(g.nodes)),
-		Edges:          gmap.Clone(g.edges),
+		Edges:          edges,
 		Branches: gmap.Map(g.branches, func(startNode string, branches []*GraphBranch) (string, []GraphBranch) {
 			branchInfo := make([]GraphBranch, 0, len(branches))
 			for _, b := range branches {
@@ -1093,11 +1121,13 @@ func validateDAG(chanSubscribeTo map[string]*chanCall, invertedEdges map[string]
 		for node := range m {
 			if m[node] == 0 {
 				hasChanged = true
-				for _, subNode := range chanSubscribeTo[node].writeTo {
-					if subNode == END {
-						continue
+				for _, edge := range chanSubscribeTo[node].writeTo {
+					if !edge.noControlFlow {
+						if edge.endNode == END {
+							continue
+						}
+						m[edge.endNode]--
 					}
-					m[subNode]--
 				}
 				for _, subBranch := range chanSubscribeTo[node].writeToBranches {
 					for subNode := range subBranch.endNodes {

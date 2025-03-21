@@ -98,6 +98,14 @@ func MapFields(from, to string) *FieldMapping {
 //   - []string{"users", "admin"}  // map key access
 type FieldPath []string
 
+func (fp *FieldPath) join() string {
+	return strings.Join(*fp, pathSeparator)
+}
+
+func splitFieldPath(path string) FieldPath {
+	return strings.Split(path, pathSeparator)
+}
+
 // pathSeparator is a special character (Unit Separator) used internally to join path elements.
 // This character is chosen because it's extremely unlikely to appear in user-defined field names or map keys.
 const pathSeparator = "\x1F"
@@ -114,7 +122,7 @@ const pathSeparator = "\x1F"
 // Note: The field path elements must not contain the internal path separator character ('\x1F').
 func FromFieldPath(fromFieldPath FieldPath) *FieldMapping {
 	return &FieldMapping{
-		from: strings.Join(fromFieldPath, pathSeparator),
+		from: fromFieldPath.join(),
 	}
 }
 
@@ -128,7 +136,7 @@ func FromFieldPath(fromFieldPath FieldPath) *FieldMapping {
 // Note: The field path elements must not contain the internal path separator character ('\x1F').
 func ToFieldPath(toFieldPath FieldPath) *FieldMapping {
 	return &FieldMapping{
-		to: strings.Join(toFieldPath, pathSeparator),
+		to: toFieldPath.join(),
 	}
 }
 
@@ -145,8 +153,8 @@ func ToFieldPath(toFieldPath FieldPath) *FieldMapping {
 // Note: The field path elements must not contain the internal path separator character ('\x1F').
 func MapFieldPaths(fromFieldPath, toFieldPath FieldPath) *FieldMapping {
 	return &FieldMapping{
-		from: strings.Join(fromFieldPath, pathSeparator),
-		to:   strings.Join(toFieldPath, pathSeparator),
+		from: fromFieldPath.join(),
+		to:   toFieldPath.join(),
 	}
 }
 
@@ -157,7 +165,17 @@ func buildFieldMappingConverter[I any]() func(input any) (any, error) {
 			panic(newUnexpectedInputTypeErr(reflect.TypeOf(map[string]any{}), reflect.TypeOf(input)))
 		}
 
-		return convertTo[I](in)
+		return convertTo(in, generic.TypeOf[I]())
+	}
+}
+
+func buildFieldMappingConverterWithReflect(typ reflect.Type) func(input any) (any, error) {
+	return func(input any) (any, error) {
+		in, ok := input.(map[string]any)
+		if !ok {
+			panic(newUnexpectedInputTypeErr(reflect.TypeOf(map[string]any{}), reflect.TypeOf(input)))
+		}
+		return convertTo(in, typ)
 	}
 }
 
@@ -169,26 +187,42 @@ func buildStreamFieldMappingConverter[I any]() func(input streamReader) streamRe
 		}
 
 		return packStreamReader(schema.StreamReaderWithConvert(s, func(v map[string]any) (I, error) {
-			return convertTo[I](v)
+			t, err := convertTo(v, generic.TypeOf[I]())
+			if err != nil {
+				var i I
+				return i, err
+			}
+			return t.(I), nil
 		}))
 	}
 }
 
-func convertTo[T any](mappings map[string]any) (T, error) {
-	if _, ok := mappings[""]; ok {
-		// to the entire successor input
-		return mappings[""].(T), nil
-	}
+func buildStreamFieldMappingConverterWithReflect(typ reflect.Type) func(input streamReader) streamReader {
+	return func(input streamReader) streamReader {
+		s, ok := unpackStreamReader[map[string]any](input)
+		if !ok {
+			panic("mappingStreamAssign incoming streamReader chunk type not map[string]any")
+		}
 
-	t := generic.NewInstance[T]()
+		return packStreamReader(schema.StreamReaderWithConvert(s, func(v map[string]any) (any, error) {
+			return convertTo(v, typ)
+		}))
+	}
+}
+
+func convertTo(mappings map[string]any, typ reflect.Type) (any, error) {
+	tValue := newInstanceByType(typ)
+	if !tValue.CanAddr() {
+		tValue = newInstanceByType(reflect.PointerTo(typ)).Elem()
+	}
 
 	var (
 		err          error
 		field2Values = make(map[string][]any)
 	)
 
-	for to, taken := range mappings {
-		field2Values[to] = append(field2Values[to], taken)
+	for mapping, taken := range mappings {
+		field2Values[mapping] = append(field2Values[mapping], taken)
 	}
 
 	for fieldName, values := range field2Values {
@@ -196,39 +230,33 @@ func convertTo[T any](mappings map[string]any) (T, error) {
 		if len(values) > 1 {
 			taken, err = mergeValues(values)
 			if err != nil {
-				return t, fmt.Errorf("convertTo %T failed when merge multiple values for field %s, %w", t, fieldName, err)
+				return nil, fmt.Errorf("convertTo %v failed when merge multiple values for field %s, %w", tValue.Type(), fieldName, err)
 			}
 		}
 
-		t, err = assignOne(t, taken, fieldName)
+		tValue, err = assignOne(tValue, taken, fieldName)
 		if err != nil {
 			panic(fmt.Errorf("convertTo failed when must succeed, %w", err))
 		}
 	}
 
-	return t, nil
+	return tValue.Interface(), nil
 }
 
-func assignOne[T any](dest T, taken any, to string) (T, error) {
-	destValue := reflect.ValueOf(dest)
-
-	if !destValue.CanAddr() {
-		destValue = reflect.ValueOf(&dest).Elem()
-	}
-
+func assignOne(destValue reflect.Value, taken any, to string) (reflect.Value, error) {
 	if len(to) == 0 { // assign to output directly
 		toSet := reflect.ValueOf(taken)
 		if !toSet.Type().AssignableTo(destValue.Type()) {
-			return dest, fmt.Errorf("mapping entire value has a mismatched type. from=%v, to=%v", toSet.Type(), destValue.Type())
+			return destValue, fmt.Errorf("mapping entire value has a mismatched type. from=%v, to=%v", toSet.Type(), destValue.Type())
 		}
 
 		destValue.Set(toSet)
 
-		return destValue.Interface().(T), nil
+		return destValue, nil
 	}
 
 	var (
-		toPaths           = strings.Split(to, pathSeparator)
+		toPaths           = splitFieldPath(to)
 		originalDestValue = destValue
 		parentMap         reflect.Value
 		parentKey         string
@@ -243,7 +271,7 @@ func assignOne[T any](dest T, taken any, to string) (T, error) {
 			if destValue.Kind() == reflect.Map {
 				key, err := checkAndExtractToMapKey(path, destValue, toSet)
 				if err != nil {
-					return dest, err
+					return destValue, err
 				}
 
 				destValue.SetMapIndex(key, toSet)
@@ -252,12 +280,12 @@ func assignOne[T any](dest T, taken any, to string) (T, error) {
 					parentMap.SetMapIndex(reflect.ValueOf(parentKey), destValue)
 				}
 
-				return originalDestValue.Interface().(T), nil
+				return originalDestValue, nil
 			}
 
 			field, err := checkAndExtractToField(path, destValue, toSet)
 			if err != nil {
-				return dest, err
+				return destValue, err
 			}
 
 			field.Set(toSet)
@@ -266,12 +294,12 @@ func assignOne[T any](dest T, taken any, to string) (T, error) {
 				parentMap.SetMapIndex(reflect.ValueOf(parentKey), destValue)
 			}
 
-			return originalDestValue.Interface().(T), nil
+			return originalDestValue, nil
 		}
 
 		if destValue.Kind() == reflect.Map {
 			if !reflect.TypeOf(path).AssignableTo(destValue.Type().Key()) {
-				return dest, fmt.Errorf("field mapping to a map key but output is not a map with string key, type=%v", destValue.Type())
+				return destValue, fmt.Errorf("field mapping to a map key but output is not a map with string key, type=%v", destValue.Type())
 			}
 
 			keyValue := reflect.ValueOf(path)
@@ -298,16 +326,16 @@ func assignOne[T any](dest T, taken any, to string) (T, error) {
 		}
 
 		if destValue.Kind() != reflect.Struct {
-			return dest, fmt.Errorf("field mapping to a struct field but output is not a struct, type=%v", destValue.Type())
+			return destValue, fmt.Errorf("field mapping to a struct field but output is not a struct, type=%v", destValue.Type())
 		}
 
 		field := destValue.FieldByName(path)
 		if !field.IsValid() {
-			return dest, fmt.Errorf("field mapping to a struct field, but field not found. field=%v, outputType=%v", path, destValue.Type())
+			return destValue, fmt.Errorf("field mapping to a struct field, but field not found. field=%v, outputType=%v", path, destValue.Type())
 		}
 
 		if !field.CanSet() {
-			return dest, fmt.Errorf("field mapping to a struct field, but field not exported. field=%v, outputType=%v", path, destValue.Type())
+			return destValue, fmt.Errorf("field mapping to a struct field, but field not exported. field=%v, outputType=%v", path, destValue.Type())
 		}
 
 		instantiateIfNeeded(field)
@@ -332,6 +360,10 @@ func instantiateIfNeeded(field reflect.Value) {
 		if field.IsNil() {
 			field.Set(reflect.MakeMap(field.Type()))
 		}
+	} else if field.Kind() == reflect.Slice {
+		if field.IsNil() {
+			field.Set(reflect.MakeSlice(field.Type(), 0, 0))
+		}
 	}
 }
 
@@ -340,17 +372,16 @@ func newInstanceByType(typ reflect.Type) reflect.Value {
 	case reflect.Map:
 		return reflect.MakeMap(typ)
 	case reflect.Slice, reflect.Array:
-		return reflect.MakeSlice(typ, 0, 0)
+		elemType := typ.Elem()
+		sliceType := reflect.SliceOf(elemType)
+		slice := reflect.New(sliceType).Elem()
+		slice.Set(reflect.MakeSlice(sliceType, 0, 0))
+		return slice
 	case reflect.Ptr:
 		typ = typ.Elem()
 		origin := reflect.New(typ)
-		inst := origin
-
-		for typ.Kind() == reflect.Ptr {
-			typ = typ.Elem()
-			inst = inst.Elem()
-			inst.Set(reflect.New(typ))
-		}
+		nested := newInstanceByType(typ)
+		origin.Elem().Set(nested)
 
 		return origin
 	default:
@@ -513,7 +544,7 @@ func fieldMap(mappings []*FieldMapping) func(any) (map[string]any, error) {
 				continue
 			}
 
-			fromPath := strings.Split(mapping.from, pathSeparator)
+			fromPath := splitFieldPath(mapping.from)
 
 			if !inputValue.IsValid() {
 				inputValue = reflect.ValueOf(input)
@@ -646,12 +677,12 @@ func validateFieldMapping(predecessorType reflect.Type, successorType reflect.Ty
 	)
 
 	for _, mapping := range mappings {
-		predecessorFieldType, predecessorIntermediateInterface, err = checkAndExtractFieldType(strings.Split(mapping.from, pathSeparator), predecessorType)
+		predecessorFieldType, predecessorIntermediateInterface, err = checkAndExtractFieldType(splitFieldPath(mapping.from), predecessorType)
 		if err != nil {
 			return nil, fmt.Errorf("static check failed for mapping %s: %w", mapping, err)
 		}
 
-		successorFieldType, successorIntermediateInterface, err = checkAndExtractFieldType(strings.Split(mapping.to, pathSeparator), successorType)
+		successorFieldType, successorIntermediateInterface, err = checkAndExtractFieldType(splitFieldPath(mapping.to), successorType)
 		if err != nil {
 			return nil, fmt.Errorf("static check failed for mapping %s: %w", mapping, err)
 		}
@@ -664,7 +695,7 @@ func validateFieldMapping(predecessorType reflect.Type, successorType reflect.Ty
 			checker := func(a any) (any, error) {
 				trueInType := reflect.TypeOf(a)
 				if !trueInType.AssignableTo(successorFieldType) {
-					return nil, fmt.Errorf("runtime check failed for mapping %s, field[%v]-[%v] must not be assignable", mapping, trueInType, successorFieldType)
+					return nil, fmt.Errorf("runtime check failed for mapping %s, field[%v]-[%v] is absolutely not assignable", mapping, trueInType, successorFieldType)
 				}
 				return a, nil
 			}
@@ -679,12 +710,12 @@ func validateFieldMapping(predecessorType reflect.Type, successorType reflect.Ty
 
 		at := checkAssignable(predecessorFieldType, successorFieldType)
 		if at == assignableTypeMustNot {
-			return nil, fmt.Errorf("static check failed for mapping %s, field[%v]-[%v] must not be assignable", mapping, predecessorFieldType, successorFieldType)
+			return nil, fmt.Errorf("static check failed for mapping %s, field[%v]-[%v] is absolutely not assignable", mapping, predecessorFieldType, successorFieldType)
 		} else if at == assignableTypeMay {
 			checker := func(a any) (any, error) {
 				trueInType := reflect.TypeOf(a)
 				if !trueInType.AssignableTo(successorFieldType) {
-					return nil, fmt.Errorf("runtime check failed for mapping %s, field[%v]-[%v] must not be assignable", mapping, trueInType, successorFieldType)
+					return nil, fmt.Errorf("runtime check failed for mapping %s, field[%v]-[%v] is absolutely not assignable", mapping, trueInType, successorFieldType)
 				}
 				return a, nil
 			}
@@ -705,10 +736,12 @@ func validateFieldMapping(predecessorType reflect.Type, successorType reflect.Ty
 		mValue := value.(map[string]any)
 		var err error
 		for k, v := range fieldCheckers {
-			if _, ok := mValue[k]; ok {
-				mValue[k], err = v.invoke(mValue[k])
-				if err != nil {
-					return nil, err
+			for mapping := range mValue {
+				if mapping == k {
+					mValue[mapping], err = v.invoke(mValue[mapping])
+					if err != nil {
+						return nil, err
+					}
 				}
 			}
 		}

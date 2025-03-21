@@ -114,11 +114,14 @@ func concatMaps(ms reflect.Value) (reflect.Value, error) {
 	typ := ms.Type().Elem()
 
 	rms := reflect.MakeMap(reflect.MapOf(typ.Key(), generic.TypeOf[[]any]()))
-	ret := reflect.MakeMap(typ)
+	ret := reflect.Zero(typ)
 
 	n := ms.Len()
 	for i := 0; i < n; i++ {
 		m := ms.Index(i)
+		if !m.IsNil() && ret.IsNil() {
+			ret = reflect.MakeMap(typ)
+		}
 
 		for _, key := range m.MapKeys() {
 			vals := rms.MapIndex(key)
@@ -143,6 +146,12 @@ func concatMaps(ms reflect.Value) (reflect.Value, error) {
 		}
 
 		var cv reflect.Value
+
+		anyKey := key.Interface()
+		_ = anyKey
+
+		anyV := v.Interface()
+		_ = anyV
 
 		if v.Type().Elem().Kind() == reflect.Map {
 			cv, err = concatMaps(v)

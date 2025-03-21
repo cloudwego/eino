@@ -180,7 +180,17 @@ func (rp *runnablePacker[I, O, TOption]) toComposableRunnable() *composableRunna
 	}
 
 	i := func(ctx context.Context, input any, opts ...any) (output any, err error) {
-		in, ok := input.(I)
+		var (
+			in I
+			ok bool
+		)
+
+		if input == nil {
+			in, ok = convertNilToT[I]()
+		} else {
+			in, ok = input.(I)
+		}
+
 		if !ok {
 			panic(newUnexpectedInputTypeErr(inputType, reflect.TypeOf(input)))
 		}
@@ -193,9 +203,21 @@ func (rp *runnablePacker[I, O, TOption]) toComposableRunnable() *composableRunna
 	}
 
 	t := func(ctx context.Context, input streamReader, opts ...any) (output streamReader, err error) {
-		in, ok := unpackStreamReader[I](input)
-		if !ok {
-			panic(newUnexpectedInputTypeErr(reflect.TypeOf(in), input.getType()))
+		var (
+			in *schema.StreamReader[I]
+			ok bool
+		)
+
+		if input == nil {
+			sr, sw := schema.Pipe[I](0)
+			sw.Close()
+			in = sr
+			ok = true
+		} else {
+			in, ok = unpackStreamReader[I](input)
+			if !ok {
+				panic(newUnexpectedInputTypeErr(reflect.TypeOf(in), input.getType()))
+			}
 		}
 
 		tos, err := convertOption[TOption](opts...)
@@ -215,6 +237,23 @@ func (rp *runnablePacker[I, O, TOption]) toComposableRunnable() *composableRunna
 	c.t = t
 
 	return c
+}
+
+func convertNilToT[T any]() (T, bool) {
+	// Get the reflect.Type of T
+	t := generic.TypeOf[T]()
+	switch t.Kind() {
+	case reflect.Ptr, reflect.Interface, reflect.Map, reflect.Slice, reflect.Chan, reflect.Array, reflect.Func, reflect.UnsafePointer:
+	default:
+		var t T
+		return t, false
+	}
+
+	// Create a zero value of type T
+	zeroValue := reflect.Zero(t)
+
+	// Convert the reflect.Value back to type T
+	return zeroValue.Interface().(T), true
 }
 
 // Invoke works like `ping => pong`.
