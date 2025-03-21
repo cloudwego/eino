@@ -31,7 +31,6 @@ import (
 	"github.com/cloudwego/eino/internal/generic"
 	"github.com/cloudwego/eino/internal/gmap"
 	"github.com/cloudwego/eino/internal/gslice"
-	"github.com/cloudwego/eino/schema"
 )
 
 // NewChain create a chain with input/output type.
@@ -358,75 +357,51 @@ func (c *Chain[I, O]) AppendBranch(b *ChainBranch) *Chain[I, O] { // nolint: byt
 		key2NodeKey[key] = nodeKey
 	}
 
-	condition := &composableRunnable{
-		i:                 b.condition.i,
-		t:                 b.condition.t,
-		inputType:         b.condition.inputType,
-		inputStreamFilter: b.condition.inputStreamFilter,
-		outputType:        b.condition.outputType,
-		optionType:        b.condition.optionType,
-		isPassthrough:     b.condition.isPassthrough,
-		meta:              b.condition.meta,
-		nodeInfo:          b.condition.nodeInfo,
-	}
+	gBranch := *b.internalBranch
 
-	invokeCon := func(ctx context.Context, in any, opts ...any) (endNode any, err error) {
-		endKey, err := b.condition.i(ctx, in, opts...)
-		if err != nil {
-			return "", err
-		}
-
-		endStr, ok := endKey.(string)
-		if !ok {
-			return "", fmt.Errorf("chain branch result not string, got: %T", endKey)
-		}
-
-		nodeKey, ok := key2NodeKey[endStr]
-		if !ok {
-			return "", fmt.Errorf("chain branch result not in added keys: %s", endStr)
-		}
-
-		return nodeKey, nil
-	}
-	condition.i = invokeCon
-
-	transformCon := func(ctx context.Context, sr streamReader, opts ...any) (streamReader, error) {
-		iEndStream, err := b.condition.t(ctx, sr, opts...)
+	invokeCon := func(ctx context.Context, in any) (endNode []string, err error) {
+		ends, err := b.internalBranch.invoke(ctx, in)
 		if err != nil {
 			return nil, err
 		}
 
-		if iEndStream.getChunkType() != reflect.TypeOf("") {
-			return nil, fmt.Errorf("chain branch result not string, got: %v", iEndStream.getChunkType())
+		nodeKeyEnds := make([]string, 0, len(ends))
+		for _, end := range ends {
+			if nodeKey, ok := key2NodeKey[end]; !ok {
+				return nil, fmt.Errorf("branch invocation returns unintended end node: %s", end)
+			} else {
+				nodeKeyEnds = append(nodeKeyEnds, nodeKey)
+			}
 		}
 
-		endStream, ok := unpackStreamReader[string](iEndStream)
-		if !ok {
-			return nil, fmt.Errorf("unpack stream reader not ok")
-		}
+		return nodeKeyEnds, nil
+	}
+	gBranch.invoke = invokeCon
 
-		endStr, err := concatStreamReader(endStream)
+	collectCon := func(ctx context.Context, sr streamReader) ([]string, error) {
+		ends, err := b.internalBranch.collect(ctx, sr)
 		if err != nil {
 			return nil, err
 		}
 
-		nodeKey, ok := key2NodeKey[endStr]
-		if !ok {
-			return nil, fmt.Errorf("chain branch result not in added keys: %s", endStr)
+		nodeKeyEnds := make([]string, 0, len(ends))
+		for _, end := range ends {
+			if nodeKey, ok := key2NodeKey[end]; !ok {
+				return nil, fmt.Errorf("branch invocation returns unintended end node: %s", end)
+			} else {
+				nodeKeyEnds = append(nodeKeyEnds, nodeKey)
+			}
 		}
 
-		return packStreamReader(schema.StreamReaderFromArray([]string{nodeKey})), nil
+		return nodeKeyEnds, nil
 	}
-	condition.t = transformCon
+	gBranch.collect = collectCon
 
-	gBranch := &GraphBranch{
-		condition: condition,
-		endNodes: gslice.ToMap(gmap.Values(key2NodeKey), func(k string) (string, bool) {
-			return k, true
-		}),
-	}
+	gBranch.endNodes = gslice.ToMap(gmap.Values(key2NodeKey), func(k string) (string, bool) {
+		return k, true
+	})
 
-	if err := c.gg.AddBranch(startNode, gBranch); err != nil {
+	if err := c.gg.AddBranch(startNode, &gBranch); err != nil {
 		c.reportError(fmt.Errorf("chain append branch failed: %w", err))
 		return c
 	}

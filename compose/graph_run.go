@@ -23,8 +23,6 @@ import (
 	"fmt"
 	"reflect"
 	"sync"
-
-	"github.com/cloudwego/eino/schema"
 )
 
 type graphCompileOptions struct {
@@ -244,11 +242,19 @@ func (r *runner) resolveCompletedTasks(ctx context.Context, completedTasks []*ta
 		if err != nil {
 			return nil, fmt.Errorf("calculate next step fail, node: %s, error: %w", t.nodeKey, err)
 		}
-		for i, next := range nextNodeKeys {
-			if _, ok := writeChannelValues[next]; !ok {
-				writeChannelValues[next] = make(map[string]any)
+
+		// If branches generates more than one successor, the inputs need to be copied accordingly.
+		if len(nextNodeKeys) > 0 {
+			toCopyNum := len(nextNodeKeys) - len(t.call.writeTo) - len(t.call.writeToBranches)
+			nVs := copyItem(vs[len(t.call.writeTo)+len(t.call.writeToBranches)-1], toCopyNum+1)
+			vs = append(vs[:len(t.call.writeTo)+len(t.call.writeToBranches)-1], nVs...)
+
+			for i, next := range nextNodeKeys {
+				if _, ok := writeChannelValues[next]; !ok {
+					writeChannelValues[next] = make(map[string]any)
+				}
+				writeChannelValues[next][t.nodeKey] = vs[i]
 			}
-			writeChannelValues[next][t.nodeKey] = vs[i]
 		}
 	}
 	return writeChannelValues, nil
@@ -258,10 +264,6 @@ func (r *runner) calculateNext(ctx context.Context, curNodeKey string, startChan
 	if len(input) < len(startChan.writeToBranches) {
 		// unreachable
 		return nil, errors.New("calculate next input length is shorter than branches")
-	}
-	runWrapper := runnableInvoke
-	if isStream {
-		runWrapper = runnableTransform
 	}
 
 	ret := make([]string, 0, len(startChan.writeTo))
@@ -276,45 +278,34 @@ func (r *runner) calculateNext(ctx context.Context, curNodeKey string, startChan
 			return nil, fmt.Errorf("branch[%s]-[%d] pre handler fail: %w", curNodeKey, branch.idx, err)
 		}
 
-		wCh, e := runWrapper(ctx, branch.condition, input[i])
-		if e != nil {
-			return nil, fmt.Errorf("branch run error: %w", e)
-		}
-
 		// process branch output
-		var w string
-		var ok bool
-		if isStream { // nolint:byted_s_too_many_nests_in_func
-			var sr streamReader
-			var csr *schema.StreamReader[string]
-			sr, ok = wCh.(streamReader)
-			if !ok {
-				return nil, errors.New("stream branch return isn't IStreamReader")
+		var ws []string
+		if isStream {
+			ws, err = branch.collect(ctx, input[i].(streamReader))
+			if err != nil {
+				return nil, fmt.Errorf("branch collect run error: %w", err)
 			}
-			csr, ok = unpackStreamReader[string](sr)
-			if !ok {
-				return nil, errors.New("unpack branch result fail")
-			}
-
-			var se error
-			w, se = concatStreamReader(csr)
-			if se != nil {
-				return nil, fmt.Errorf("concat branch result error: %w", se)
-			}
-		} else { // nolint:byted_s_too_many_nests_in_func
-			w, ok = wCh.(string)
-			if !ok {
-				return nil, errors.New("invoke branch result isn't string")
+		} else {
+			ws, err = branch.invoke(ctx, input[i])
+			if err != nil {
+				return nil, fmt.Errorf("branch invoke run error: %w", err)
 			}
 		}
 
 		for node := range branch.endNodes {
-			if node != w {
+			skipped := true
+			for _, w := range ws {
+				if node == w {
+					skipped = false
+					break
+				}
+			}
+			if skipped {
 				skippedNodes[node] = struct{}{}
 			}
 		}
 
-		ret = append(ret, w)
+		ret = append(ret, ws...)
 	}
 
 	// When a node has multiple branches,

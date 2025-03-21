@@ -272,3 +272,77 @@ func TestChainBranch(t *testing.T) {
 		assert.Equal(t, "onesizefitallonesizefitall", concat)
 	})
 }
+
+func TestChainMultiBranch(t *testing.T) {
+	emptyLambda := InvokableLambda(func(ctx context.Context, input string) (output string, err error) { return input, nil })
+
+	ctx := context.Background()
+	r, err := NewChain[string, map[string]any]().
+		AppendBranch(NewChainMultiBranch(func(ctx context.Context, in string) (endNode map[string]bool, err error) {
+			return map[string]bool{"1": true, "2": true}, nil
+		}).AddLambda("1", emptyLambda, WithOutputKey("1")).AddLambda("2", emptyLambda, WithOutputKey("2")).AddLambda("3", emptyLambda, WithOutputKey("3"))).
+		Compile(ctx)
+	assert.Nil(t, err)
+
+	result, err := r.Invoke(ctx, "start")
+	assert.NoError(t, err)
+	assert.Equal(t, map[string]any{
+		"1": "start",
+		"2": "start",
+	}, result)
+
+	streamResult, err := r.Stream(ctx, "start")
+	assert.NoError(t, err)
+	result = map[string]any{}
+	for {
+		chunk, err := streamResult.Recv()
+		if err == io.EOF {
+			break
+		}
+		assert.NoError(t, err)
+		for k, v := range chunk {
+			result[k] = v
+		}
+	}
+	assert.Equal(t, map[string]any{
+		"1": "start",
+		"2": "start",
+	}, result)
+}
+
+func TestStreamChainMultiBranch(t *testing.T) {
+	emptyLambda := InvokableLambda(func(ctx context.Context, input string) (output string, err error) { return input, nil })
+
+	ctx := context.Background()
+	r, err := NewChain[string, map[string]any]().
+		AppendBranch(NewStreamChainMultiBranch(func(ctx context.Context, in *schema.StreamReader[string]) (endNode map[string]bool, err error) {
+			return map[string]bool{"1": true, "2": true}, nil
+		}).AddLambda("1", emptyLambda, WithOutputKey("1")).AddLambda("2", emptyLambda, WithOutputKey("2")).AddLambda("3", emptyLambda, WithOutputKey("3"))).
+		Compile(ctx)
+	assert.Nil(t, err)
+
+	result, err := r.Invoke(ctx, "start")
+	assert.NoError(t, err)
+	assert.Equal(t, map[string]any{
+		"1": "start",
+		"2": "start",
+	}, result)
+
+	streamResult, err := r.Stream(ctx, "start")
+	assert.NoError(t, err)
+	result = map[string]any{}
+	for {
+		chunk, err := streamResult.Recv()
+		if err == io.EOF {
+			break
+		}
+		assert.NoError(t, err)
+		for k, v := range chunk {
+			result[k] = v
+		}
+	}
+	assert.Equal(t, map[string]any{
+		"1": "start",
+		"2": "start",
+	}, result)
+}

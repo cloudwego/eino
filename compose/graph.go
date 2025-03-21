@@ -30,7 +30,6 @@ import (
 	"github.com/cloudwego/eino/components/retriever"
 	"github.com/cloudwego/eino/internal/generic"
 	"github.com/cloudwego/eino/internal/gmap"
-	"github.com/cloudwego/eino/schema"
 )
 
 // START is the start node of the graph. You can add your first edge with START.
@@ -38,96 +37,6 @@ const START = "start"
 
 // END is the end node of the graph. You can add your last edge with END.
 const END = "end"
-
-// GraphBranchCondition is the condition type for the branch.
-type GraphBranchCondition[T any] func(ctx context.Context, in T) (endNode string, err error)
-
-// StreamGraphBranchCondition is the condition type for the stream branch.
-type StreamGraphBranchCondition[T any] func(ctx context.Context, in *schema.StreamReader[T]) (endNode string, err error)
-
-// GraphBranch is the branch type for the graph.
-// It is used to determine the next node based on the condition.
-type GraphBranch struct {
-	condition *composableRunnable
-	endNodes  map[string]bool
-	idx       int // used to distinguish branches in parallel
-}
-
-// GetEndNode returns the all end nodes of the branch.
-func (gb *GraphBranch) GetEndNode() map[string]bool {
-	return gb.endNodes
-}
-
-// NewGraphBranch creates a new graph branch.
-// It is used to determine the next node based on the condition.
-// e.g.
-//
-//	condition := func(ctx context.Context, in string) (string, error) {
-//		// logic to determine the next node
-//		return "next_node_key", nil
-//	}
-//	endNodes := map[string]bool{"path01": true, "path02": true}
-//	branch := compose.NewGraphBranch(condition, endNodes)
-//
-//	graph.AddBranch("key_of_node_before_branch", branch)
-func NewGraphBranch[T any](condition GraphBranchCondition[T], endNodes map[string]bool) *GraphBranch {
-	condRun := func(ctx context.Context, in T, opts ...any) (string, error) {
-		endNode, err := condition(ctx, in)
-		if err != nil {
-			return "", err
-		}
-
-		if !endNodes[endNode] {
-			return "", fmt.Errorf("branch invocation returns unintended end node: %s", endNode)
-		}
-
-		return endNode, nil
-	}
-
-	r := runnableLambda(condRun, nil, nil, nil, false)
-
-	return &GraphBranch{
-		condition: r,
-		endNodes:  endNodes,
-	}
-}
-
-// NewStreamGraphBranch creates a new stream graph branch.
-// It is used to determine the next node based on the condition of stream input.
-// e.g.
-//
-//	condition := func(ctx context.Context, in *schema.StreamReader[T]) (string, error) {
-//		// logic to determine the next node.
-//		// to use the feature of stream, you can use the first chunk to determine the next node.
-//		return "next_node_key", nil
-//	}
-//	endNodes := map[string]bool{"path01": true, "path02": true}
-//	branch := compose.NewStreamGraphBranch(condition, endNodes)
-//
-//	graph.AddBranch("key_of_node_before_branch", branch)
-func NewStreamGraphBranch[T any](condition StreamGraphBranchCondition[T],
-	endNodes map[string]bool) *GraphBranch {
-
-	condRun := func(ctx context.Context, in *schema.StreamReader[T], opts ...any) (string, error) {
-		endNode, err := condition(ctx, in)
-		if err != nil {
-			return "", err
-		}
-
-		if !endNodes[endNode] {
-			return "", fmt.Errorf("stream branch invocation returns unintended end node: %s", endNode)
-		}
-
-		return endNode, nil
-	}
-
-	r := runnableLambda(nil, nil, condRun, nil, false)
-
-	return &GraphBranch{
-		condition: r,
-		endNodes:  endNodes,
-	}
-}
 
 // graphRunType is a custom type used to control the running mode of the graph.
 type graphRunType string
@@ -558,11 +467,11 @@ func (g *graph) AddBranch(startNode string, branch *GraphBranch) (err error) {
 	branch.idx = len(g.handlerPreBranch[startNode])
 
 	// check branch condition type
-	result := checkAssignable(g.getNodeOutputType(startNode), branch.condition.inputType)
+	result := checkAssignable(g.getNodeOutputType(startNode), branch.inputType)
 	if result == assignableTypeMustNot {
-		return fmt.Errorf("condition input type[%s] and start node output type[%s] are mismatched", branch.condition.inputType.String(), g.getNodeOutputType(startNode).String())
+		return fmt.Errorf("condition input type[%s] and start node output type[%s] are mismatched", branch.inputType.String(), g.getNodeOutputType(startNode).String())
 	} else if result == assignableTypeMay {
-		g.handlerPreBranch[startNode] = append(g.handlerPreBranch[startNode], []handlerPair{branch.condition.inputConverter})
+		g.handlerPreBranch[startNode] = append(g.handlerPreBranch[startNode], []handlerPair{branch.inputConverter})
 	} else {
 		g.handlerPreBranch[startNode] = append(g.handlerPreBranch[startNode], []handlerPair{})
 	}
@@ -962,8 +871,11 @@ func (g *graph) toGraphInfo(opt *graphCompileOptions, key2SubGraphs map[string]*
 			branchInfo := make([]GraphBranch, 0, len(branches))
 			for _, b := range branches {
 				branchInfo = append(branchInfo, GraphBranch{
-					condition: b.condition,
-					endNodes:  gmap.Clone(b.endNodes),
+					invoke:         b.invoke,
+					collect:        b.collect,
+					inputType:      b.inputType,
+					inputConverter: b.inputConverter,
+					endNodes:       gmap.Clone(b.endNodes),
 				})
 			}
 			return startNode, branchInfo

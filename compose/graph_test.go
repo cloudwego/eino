@@ -1261,6 +1261,11 @@ func TestGraphCompileCallback(t *testing.T) {
 
 		c.gInfo.CompileOptions = nil
 		expected.CompileOptions = nil
+		assert.Equal(t, expected.Branches["node1"][0].endNodes, c.gInfo.Branches["node1"][0].endNodes)
+		assert.Equal(t, expected.Branches["node1"][0].inputType, c.gInfo.Branches["node1"][0].inputType)
+
+		expected.Branches["node1"] = []GraphBranch{}
+		c.gInfo.Branches["node1"] = []GraphBranch{}
 		assert.Equal(t, expected, c.gInfo)
 	})
 }

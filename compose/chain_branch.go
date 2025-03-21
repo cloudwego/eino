@@ -36,9 +36,47 @@ type nodeOptionsPair generic.Pair[*graphNode, *graphAddNodeOpts]
 // It allows for dynamic routing of execution based on a condition.
 // All branches within ChainBranch are expected to either end the Chain, or converge to another node in the Chain.
 type ChainBranch struct {
+	internalBranch *GraphBranch
 	key2BranchNode map[string]nodeOptionsPair
-	condition      *composableRunnable
 	err            error
+}
+
+func NewChainMultiBranch[T any](cond GraphMultiBranchCondition[T]) *ChainBranch {
+	invokeCond := func(ctx context.Context, in T, opts ...any) (endNodes []string, err error) {
+		ends, err := cond(ctx, in)
+		if err != nil {
+			return nil, err
+		}
+		endNodes = make([]string, 0, len(ends))
+		for end := range ends {
+			endNodes = append(endNodes, end)
+		}
+		return endNodes, nil
+	}
+
+	return &ChainBranch{
+		key2BranchNode: make(map[string]nodeOptionsPair),
+		internalBranch: newGraphBranch(newRunnablePacker(invokeCond, nil, nil, nil, false), nil),
+	}
+}
+
+func NewStreamChainMultiBranch[T any](cond StreamGraphMultiBranchCondition[T]) *ChainBranch {
+	collectCon := func(ctx context.Context, in *schema.StreamReader[T], opts ...any) (endNodes []string, err error) {
+		ends, err := cond(ctx, in)
+		if err != nil {
+			return nil, err
+		}
+		endNodes = make([]string, 0, len(ends))
+		for end := range ends {
+			endNodes = append(endNodes, end)
+		}
+		return endNodes, nil
+	}
+
+	return &ChainBranch{
+		key2BranchNode: make(map[string]nodeOptionsPair),
+		internalBranch: newGraphBranch(newRunnablePacker(nil, nil, collectCon, nil, false), nil),
+	}
 }
 
 // NewChainBranch creates a new ChainBranch instance based on a given condition.
@@ -56,14 +94,13 @@ type ChainBranch struct {
 //	cb.AddPassthrough("next_node_key_01", xxx) // node in branch, represent one path of branch
 //	cb.AddPassthrough("next_node_key_02", xxx) // node in branch
 func NewChainBranch[T any](cond GraphBranchCondition[T]) *ChainBranch {
-	invokeCond := func(ctx context.Context, in T, opts ...any) (endNode string, err error) {
-		return cond(ctx, in)
-	}
-
-	return &ChainBranch{
-		key2BranchNode: make(map[string]nodeOptionsPair),
-		condition:      runnableLambda(invokeCond, nil, nil, nil, false),
-	}
+	return NewChainMultiBranch(func(ctx context.Context, in T) (endNode map[string]bool, err error) {
+		ret, err := cond(ctx, in)
+		if err != nil {
+			return nil, err
+		}
+		return map[string]bool{ret: true}, nil
+	})
 }
 
 // NewStreamChainBranch creates a new ChainBranch instance based on a given stream condition.
@@ -80,14 +117,13 @@ func NewChainBranch[T any](cond GraphBranchCondition[T]) *ChainBranch {
 //
 //	cb := NewStreamChainBranch[string](condition)
 func NewStreamChainBranch[T any](cond StreamGraphBranchCondition[T]) *ChainBranch {
-	collectCon := func(ctx context.Context, in *schema.StreamReader[T], opts ...any) (endNode string, err error) {
-		return cond(ctx, in)
-	}
-
-	return &ChainBranch{
-		key2BranchNode: make(map[string]nodeOptionsPair),
-		condition:      runnableLambda(nil, nil, collectCon, nil, false),
-	}
+	return NewStreamChainMultiBranch(func(ctx context.Context, in *schema.StreamReader[T]) (endNodes map[string]bool, err error) {
+		ret, err := cond(ctx, in)
+		if err != nil {
+			return nil, err
+		}
+		return map[string]bool{ret: true}, nil
+	})
 }
 
 // AddChatModel adds a ChatModel node to the branch.
