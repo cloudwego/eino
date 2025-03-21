@@ -80,6 +80,24 @@ func (o Option) DesignateNodeWithPath(path ...*NodePath) Option {
 	return o
 }
 
+// DesignateNodePrependPath prepends the prefix to the path of the node(s) to which the option will be applied to.
+// Useful when you already have an Option designated to a graph's node, and now you want to add this graph as a subgraph.
+// e.g.
+// Your subgraph has a Node with key "A", and your subgraph's NodeKey is "sub_graph", you can specify option to A using:
+//
+// option := WithCallbacks(...).DesignateNode("A").DesignateNodePrependPath("sub_graph")
+// Note: as an End User, you probably don't need to use this method, as DesignateNodeWithPath will be sufficient in most use cases.
+// Note: as a Flow author, if you define your own Option type, and at the same time your flow can be exported to graph and added as GraphNode,
+// you can use this method to prepend your Option's designated path with the GraphNode's path.
+func (o Option) DesignateNodePrependPath(prefix *NodePath) Option {
+	for i := range o.paths {
+		p := o.paths[i]
+		p.path = append(prefix.path, p.path...)
+	}
+
+	return o
+}
+
 // WithEmbeddingOption is a functional option type for embedding component.
 // e.g.
 //

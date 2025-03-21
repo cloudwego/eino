@@ -39,6 +39,7 @@ type HandOffInfo struct {
 }
 
 // ConvertCallbackHandlers converts []host.MultiAgentCallback to callbacks.Handler.
+// Deprecated: use ConvertOptions to convert agent.AgentOption to compose.Option when adding MultiAgent's Graph to another Graph.
 func ConvertCallbackHandlers(handlers ...MultiAgentCallback) callbacks.Handler {
 	onChatModelEnd := func(ctx context.Context, info *callbacks.RunInfo, output *model.CallbackOutput) context.Context {
 		if output == nil || info == nil {
@@ -121,5 +122,76 @@ func convertCallbacks(opts ...agent.AgentOption) callbacks.Handler {
 	}
 
 	handlers := agentOptions.agentCallbacks
-	return ConvertCallbackHandlers(handlers...)
+
+	onChatModelEnd := func(ctx context.Context, info *callbacks.RunInfo, output *model.CallbackOutput) context.Context {
+		if output == nil || info == nil {
+			return ctx
+		}
+
+		msg := output.Message
+		if msg == nil || msg.Role != schema.Assistant || len(msg.ToolCalls) == 0 {
+			return ctx
+		}
+
+		agentName := msg.ToolCalls[0].Function.Name
+		argument := msg.ToolCalls[0].Function.Arguments
+
+		for _, cb := range handlers {
+			ctx = cb.OnHandOff(ctx, &HandOffInfo{
+				ToAgentName: agentName,
+				Argument:    argument,
+			})
+		}
+
+		return ctx
+	}
+
+	onChatModelEndWithStreamOutput := func(ctx context.Context, info *callbacks.RunInfo, output *schema.StreamReader[*model.CallbackOutput]) context.Context {
+		if output == nil || info == nil {
+			return ctx
+		}
+
+		defer output.Close()
+
+		var msgs []*schema.Message
+		for {
+			oneOutput, err := output.Recv()
+			if err == io.EOF {
+				break
+			}
+			if err != nil {
+				return ctx
+			}
+
+			msg := oneOutput.Message
+			if msg == nil {
+				continue
+			}
+
+			msgs = append(msgs, msg)
+		}
+
+		msg, err := schema.ConcatMessages(msgs)
+		if err != nil {
+			return ctx
+		}
+
+		if msg.Role != schema.Assistant || len(msg.ToolCalls) == 0 {
+			return ctx
+		}
+
+		for _, cb := range handlers {
+			ctx = cb.OnHandOff(ctx, &HandOffInfo{
+				ToAgentName: msg.ToolCalls[0].Function.Name,
+				Argument:    msg.ToolCalls[0].Function.Arguments,
+			})
+		}
+
+		return ctx
+	}
+
+	return template.NewHandlerHelper().ChatModel(&template.ModelCallbackHandler{
+		OnEnd:                 onChatModelEnd,
+		OnEndWithStreamOutput: onChatModelEndWithStreamOutput,
+	}).Handler()
 }
