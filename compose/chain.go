@@ -120,6 +120,13 @@ func (c *Chain[I, O]) addEndIfNeeded() error {
 	return nil
 }
 
+func (c *Chain[I, O]) inputStreamConvertPair() streamConvertPair {
+	return defaultStreamConvertPair[I]()
+}
+func (c *Chain[I, O]) outputStreamConvertPair() streamConvertPair {
+	return defaultStreamConvertPair[O]()
+}
+
 func (c *Chain[I, O]) inputConverter() handlerPair {
 	return handlerPair{
 		invoke:    defaultValueChecker[I],

@@ -19,6 +19,8 @@ package compose
 import (
 	"context"
 	"fmt"
+
+	"github.com/cloudwego/eino/internal/serialization"
 )
 
 func dagChannelBuilder(dependencies []string) channel {
@@ -27,100 +29,85 @@ func dagChannelBuilder(dependencies []string) channel {
 		waitList[dep] = false
 	}
 	return &dagChannel{
-		values:   make(map[string]any),
-		waitList: waitList,
+		Values:   make(map[string]any),
+		WaitList: waitList,
 	}
 }
 
-type waitPred struct {
-	key     string
-	skipped bool
-}
-
 type dagChannel struct {
-	values   map[string]any
-	waitList map[string]bool
-	value    any
-	skipped  bool
+	Values   map[string]any
+	WaitList map[string]bool
+	Skipped  bool
 }
 
-func (ch *dagChannel) update(ctx context.Context, ins map[string]any) error {
-	if ch.skipped {
+func (ch *dagChannel) add(_ context.Context, ins map[string]any) error {
+	if ch.Skipped {
 		return nil
 	}
 
 	for k, v := range ins {
-		if _, ok := ch.values[k]; ok {
+		if _, ok := ch.Values[k]; ok {
 			return fmt.Errorf("dag channel update, calculate node repeatedly: %s", k)
 		}
-		ch.values[k] = v
+		ch.Values[k] = v
 	}
-
-	return ch.tryUpdateValue()
+	return nil
 }
 
-func (ch *dagChannel) get(ctx context.Context) (any, error) {
-	if ch.skipped {
-		return nil, fmt.Errorf("dag channel has been skipped")
-	}
-	if ch.value == nil {
-		return nil, fmt.Errorf("dag channel not ready, value is nil")
-	}
-	v := ch.value
-	ch.value = nil
-	return v, nil
-}
-
-func (ch *dagChannel) ready(ctx context.Context) bool {
-	if ch.skipped {
-		return false
-	}
-	return ch.value != nil
-}
-
-func (ch *dagChannel) reportSkip(keys []string) (bool, error) {
-	for _, k := range keys {
-		if _, ok := ch.waitList[k]; ok {
-			ch.waitList[k] = true
-		}
+func (ch *dagChannel) get(_ context.Context) (any, bool, error) {
+	if ch.Skipped {
+		return nil, false, nil
 	}
 
-	allSkipped := true
-	for _, skipped := range ch.waitList {
-		if !skipped {
-			allSkipped = false
-			break
-		}
-	}
-	ch.skipped = allSkipped
-
-	var err error
-	if !allSkipped {
-		err = ch.tryUpdateValue()
-	}
-
-	return allSkipped, err
-}
-
-func (ch *dagChannel) tryUpdateValue() error {
 	var validList []string
-	for key, skipped := range ch.waitList {
-		if _, ok := ch.values[key]; !ok && !skipped {
-			return nil
+	for key, skipped := range ch.WaitList {
+		if _, ok := ch.Values[key]; !ok && !skipped {
+			return nil, false, nil
 		} else if !skipped {
 			validList = append(validList, key)
 		}
 	}
 
-	if len(validList) == 1 {
-		ch.value = ch.values[validList[0]]
-		return nil
-	}
-	v, err := mergeValues(mapToList(ch.values))
-	if err != nil {
-		return err
-	}
-	ch.value = v
-	return nil
+	defer func() {
+		ch.Values = make(map[string]any)
+	}()
 
+	if len(validList) == 1 {
+		return ch.Values[validList[0]], true, nil
+	}
+	v, err := mergeValues(mapToList(ch.Values))
+	if err != nil {
+		return nil, false, err
+	}
+	return v, true, nil
+}
+
+func (ch *dagChannel) reportSkip(keys []string) (bool, error) {
+	for _, k := range keys {
+		if _, ok := ch.WaitList[k]; ok {
+			ch.WaitList[k] = true
+		}
+	}
+
+	allSkipped := true
+	for _, skipped := range ch.WaitList {
+		if !skipped {
+			allSkipped = false
+			break
+		}
+	}
+	ch.Skipped = allSkipped
+
+	return allSkipped, nil
+}
+
+func (ch *dagChannel) convertValues(fn func(map[string]any) error) error {
+	return fn(ch.Values)
+}
+
+func init() {
+	serialization.GenericRegister[channel]("_eino_channel")
+	serialization.Register("_eino_checkpoint", &checkpoint{})
+	serialization.Register("_eino_dag_channel", &dagChannel{})
+	serialization.Register("_eino_pregel_channel", &pregelChannel{})
 }

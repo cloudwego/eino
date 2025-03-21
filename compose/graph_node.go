@@ -70,6 +70,34 @@ type graphNode struct {
 	opts     []GraphAddNodeOpt
 }
 
+func (gn *graphNode) inputStreamConvertPair() streamConvertPair {
+	if gn.nodeInfo != nil && len(gn.nodeInfo.inputKey) != 0 {
+		return defaultStreamConvertPair[map[string]any]()
+	}
+	// priority follow compile
+	if gn.g != nil {
+		return gn.g.inputStreamConvertPair()
+	} else if gn.cr != nil {
+		return gn.cr.inputStreamConvertPair
+	}
+
+	return streamConvertPair{}
+}
+
+func (gn *graphNode) outputStreamConvertPair() streamConvertPair {
+	if gn.nodeInfo != nil && len(gn.nodeInfo.outputKey) != 0 {
+		return defaultStreamConvertPair[map[string]any]()
+	}
+	// priority follow compile
+	if gn.g != nil {
+		return gn.g.outputStreamConvertPair()
+	} else if gn.cr != nil {
+		return gn.cr.outputStreamConvertPair
+	}
+
+	return streamConvertPair{}
+}
+
 func (gn *graphNode) inputConverter() handlerPair {
 	if gn.nodeInfo != nil && len(gn.nodeInfo.inputKey) != 0 {
 		return handlerPair{

@@ -28,5 +28,7 @@ type AnyGraph interface {
 	outputType() reflect.Type
 	inputConverter() handlerPair
 	inputFieldMappingConverter() handlerPair
+	inputStreamConvertPair() streamConvertPair
+	outputStreamConvertPair() streamConvertPair
 	component() component
 }

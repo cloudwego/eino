@@ -25,30 +25,6 @@ import (
 	"sync"
 )
 
-type graphCompileOptions struct {
-	maxRunSteps     int
-	graphName       string
-	nodeTriggerMode NodeTriggerMode // default to AnyPredecessor (pregel)
-
-	callbacks []GraphCompileCallback
-
-	origOpts []GraphCompileOption
-
-	getStateEnabled bool
-}
-
-func newGraphCompileOptions(opts ...GraphCompileOption) *graphCompileOptions {
-	option := &graphCompileOptions{}
-
-	for _, o := range opts {
-		o(option)
-	}
-
-	option.origOpts = opts
-
-	return option
-}
-
 type chanCall struct {
 	action          *composableRunnable
 	writeTo         []string
@@ -89,6 +65,12 @@ type runner struct {
 	edgeHandlerManager      *edgeHandlerManager
 	preNodeHandlerManager   *preNodeHandlerManager
 	preBranchHandlerManager *preBranchHandlerManager
+
+	checkPointer         *checkPointer
+	interruptBeforeNodes []string
+	interruptAfterNodes  []string
+
+	inputConvertStreamPair, outputConvertStreamPair streamConvertPair
 }
 
 func (r *runner) invoke(ctx context.Context, input any, opts ...Option) (any, error) {
@@ -115,6 +97,7 @@ func runnableTransform(ctx context.Context, r *composableRunnable, input any, op
 }
 
 func (r *runner) run(ctx context.Context, isStream bool, input any, opts ...Option) (any, error) {
+	var err error
 	// Choose the appropriate wrapper function based on whether we're handling a stream or not.
 	var runWrapper runnableCallWrapper
 	runWrapper = runnableInvoke
@@ -126,9 +109,6 @@ func (r *runner) run(ctx context.Context, isStream bool, input any, opts ...Opti
 	cm := r.initChannelManager(isStream)
 	tm := r.initTaskManager(runWrapper, opts...)
 	maxSteps := r.options.maxRunSteps
-	if r.runCtx != nil {
-		ctx = r.runCtx(ctx)
-	}
 
 	if r.dag {
 		for i := range opts {
@@ -154,13 +134,97 @@ func (r *runner) run(ctx context.Context, isStream bool, input any, opts ...Opti
 		return nil, fmt.Errorf("graph extract option fail: %w", extractErr)
 	}
 
-	// Initialize with START node task.
-	var completedTasks []*task
-	completedTasks = append(completedTasks, &task{
-		nodeKey: START,
-		call:    r.inputChannels,
-		output:  input,
-	})
+	// Extract CheckPointID
+	checkPointID, stateModifier := getCheckPointInfo(opts...)
+	if checkPointID != nil && r.checkPointer.store == nil {
+		return nil, fmt.Errorf("receive checkpoint id but have not set checkpoint store")
+	}
+
+	// Extract subgraph
+	keys, isSubGraph := getNodeKey(ctx)
+
+	// load checkpoint from ctx/store or init graph
+	initialized := false
+	var nextTasks []*task
+	if isSubGraph {
+		// in subgraph, try to load checkpoint from ctx
+		if cp := getCheckPointFromCtx(ctx); cp != nil {
+			// load checkpoint from ctx
+			initialized = true // don't init again
+
+			err = r.checkPointer.restoreCheckPoint(cp, isStream)
+			if err != nil {
+				return nil, fmt.Errorf("restore checkpoint fail: %w", err)
+			}
+
+			cm.channels = cp.Channels
+			if sm := getStateModifier(ctx); sm != nil && cp.State != nil {
+				err = sm(ctx, keys, cp.State)
+				if err != nil {
+					return nil, fmt.Errorf("state modifier fail: %w", err)
+				}
+			}
+			if cp.State != nil {
+				ctx = context.WithValue(ctx, stateKey{}, &internalState{state: cp.State})
+			}
+
+			nextTasks, err = r.restoreTasks(ctx, cp.Inputs, cp.SkipPreHandler, optMap) // should restore after set state to context
+			if err != nil {
+				return nil, fmt.Errorf("assemble tasks fail: %w", err)
+			}
+		}
+	} else if checkPointID != nil {
+		cp, err := getCheckPointFromStore(ctx, *checkPointID, r.checkPointer, isStream)
+		if err != nil {
+			return nil, fmt.Errorf("load checkpoint fail: %w", err)
+		}
+		if cp != nil {
+			// load checkpoint from store
+			initialized = true
+
+			err = r.checkPointer.restoreCheckPoint(cp, isStream)
+			if err != nil {
+				return nil, fmt.Errorf("restore checkpoint fail: %w", err)
+			}
+
+			cm.channels = cp.Channels
+			ctx = setStateModifier(ctx, stateModifier)
+			ctx = setCheckPointToCtx(ctx, cp)
+			if stateModifier != nil && cp.State != nil {
+				err = stateModifier(ctx, []string{}, cp.State)
+				if err != nil {
+					return nil, fmt.Errorf("state modifier fail: %w", err)
+				}
+			}
+			if cp.State != nil {
+				ctx = context.WithValue(ctx, stateKey{}, &internalState{state: cp.State})
+			}
+
+			// resume graph
+			nextTasks, err = r.restoreTasks(ctx, cp.Inputs, cp.SkipPreHandler, optMap)
+			if err != nil {
+				return nil, fmt.Errorf("assemble tasks fail: %w", err)
+			}
+		}
+	}
+	if !initialized {
+		// have not init from checkpoint
+		if r.runCtx != nil {
+			ctx = r.runCtx(ctx)
+		}
+		var result any
+		nextTasks, result, err = r.calculateNextTasks(ctx, []*task{{
+			nodeKey: START,
+			call:    r.inputChannels,
+			output:  input,
+		}}, isStream, cm, optMap)
+		if err != nil {
+			return nil, fmt.Errorf("calculate next tasks fail: %w", err)
+		}
+		if result != nil {
+			return result, nil
+		}
+	}
 
 	// Main execution loop.
 	for step := 0; ; step++ {
@@ -174,43 +238,218 @@ func (r *runner) run(ctx context.Context, isStream bool, input any, opts ...Opti
 			return nil, ErrExceedMaxSteps
 		}
 
-		// 1. Calculate active edges and resolve their values.
-		writeChannelValues, err := r.resolveCompletedTasks(ctx, completedTasks, isStream, cm)
+		// 1. submit next tasks
+		// 2. get completed tasks
+		// 3. calculate next tasks
+
+		err = tm.submit(nextTasks)
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("failed to submit tasks: %w", err)
 		}
-
-		// Update channels and get nodes ready for execution.
-		nodeMap, err := cm.updateAndGet(ctx, writeChannelValues, isStream)
-		if err != nil {
-			return nil, fmt.Errorf("failed to update and get channels: %w", err)
-		}
-		if len(nodeMap) > 0 {
-			// Check if we've reached the END node.
-			if v, ok := nodeMap[END]; ok {
-				return v, nil
-			}
-
-			// Create and submit next batch of tasks.
-			nextTasks, convErr := r.createTasks(ctx, nodeMap, optMap)
-			if convErr != nil {
-				return nil, fmt.Errorf("failed to create tasks: %w", convErr)
-			}
-			err = tm.submit(nextTasks)
-			if err != nil {
-				return nil, fmt.Errorf("failed to submit tasks: %w", err)
-			}
-		}
-
-		// Wait for tasks to complete and prepare for next iteration.
+		var completedTasks []*task
 		completedTasks, err = tm.wait()
 		if err != nil {
 			return nil, fmt.Errorf("failed to wait for tasks: %w", err)
 		}
+
+		subGraphInterrupts := map[string]*subGraphInterruptError{}
+		var interruptBeforeNodes []string
+		var interruptAfterNodes []string
+
+		for i := 0; i < len(completedTasks); i++ {
+			if completedTasks[i].err != nil {
+				if info := isSubGraphInterrupt(completedTasks[i].err); info != nil {
+					subGraphInterrupts[completedTasks[i].nodeKey] = info
+					continue
+				} else {
+					return nil, fmt.Errorf("execute node[%s] fail: %w", completedTasks[i].nodeKey, completedTasks[i].err)
+				}
+			}
+			for _, key := range r.interruptAfterNodes {
+				if key == completedTasks[i].nodeKey {
+					interruptAfterNodes = append(interruptAfterNodes, key)
+					break
+				}
+			}
+		}
+
+		if len(subGraphInterrupts) > 0 {
+			// subgraph has interrupted
+			// save other completed tasks to channel
+			// save interrupted subgraph as next task with SkipPreHandler
+			// report current graph interrupt info
+			return nil, r.handleInterruptWithSubGraph(
+				ctx,
+				subGraphInterrupts,
+				interruptAfterNodes,
+				completedTasks,
+				checkPointID,
+				isSubGraph,
+				cm,
+				isStream,
+			)
+		}
+
 		if len(completedTasks) == 0 {
 			return nil, errors.New("no tasks to execute")
 		}
+
+		var result any
+		nextTasks, result, err = r.calculateNextTasks(ctx, completedTasks, isStream, cm, optMap)
+		if err != nil {
+			return nil, fmt.Errorf("failed to calculate next tasks: %w", err)
+		}
+		if result != nil {
+			return result, nil
+		}
+
+		for i := range nextTasks {
+			for _, key := range r.interruptBeforeNodes {
+				if key == nextTasks[i].nodeKey {
+					interruptBeforeNodes = append(interruptBeforeNodes, key)
+					break
+				}
+			}
+		}
+		if len(interruptBeforeNodes) > 0 || len(interruptAfterNodes) > 0 {
+			// simple interrupt
+			return nil, r.handleInterrupt(ctx, interruptBeforeNodes, interruptAfterNodes, nextTasks, cm.channels, isStream, isSubGraph, checkPointID)
+		}
 	}
+}
+
+func (r *runner) handleInterrupt(
+	ctx context.Context,
+	interruptBeforeNodes []string,
+	interruptAfterNodes []string,
+	nextTasks []*task,
+	channels map[string]channel,
+	isStream bool,
+	isSubGraph bool,
+	checkPointID *string,
+) error {
+	cp := &checkpoint{
+		Channels:       channels,
+		Inputs:         make(map[string]any),
+		SkipPreHandler: false,
+	}
+	if state, ok := ctx.Value(stateKey{}).(*internalState); ok {
+		cp.State = state.state
+	}
+	intInfo := &InterruptInfo{
+		State:       cp.State,
+		AfterNodes:  interruptAfterNodes,
+		BeforeNodes: interruptBeforeNodes,
+	}
+	for _, t := range nextTasks {
+		cp.Inputs[t.nodeKey] = t.input
+	}
+	err := r.checkPointer.convertCheckPoint(cp, isStream)
+	if err != nil {
+		return fmt.Errorf("failed to convert checkpoint: %w", err)
+	}
+	if isSubGraph {
+		return &subGraphInterruptError{
+			Info:       intInfo,
+			CheckPoint: cp,
+		}
+	} else if checkPointID != nil {
+		err := r.checkPointer.set(ctx, *checkPointID, cp)
+		if err != nil {
+			return fmt.Errorf("failed to set checkpoint: %w, checkPointID: %s", err, *checkPointID)
+		}
+	}
+	return &interruptError{Info: intInfo}
+}
+
+func (r *runner) handleInterruptWithSubGraph(
+	ctx context.Context,
+	subGraphInterrupts map[string]*subGraphInterruptError,
+	interruptAfterNodes []string,
+	completeTasks []*task,
+	checkPointID *string,
+	isSubGraph bool,
+	cm *channelManager,
+	isStream bool,
+) error {
+	var interruptedTasks, otherTasks []*task
+	for _, t := range completeTasks {
+		if _, ok := subGraphInterrupts[t.nodeKey]; !ok {
+			otherTasks = append(otherTasks, t)
+		} else {
+			interruptedTasks = append(interruptedTasks, t)
+		}
+	}
+
+	toValue, err := r.resolveCompletedTasks(ctx, otherTasks, isStream, cm)
+	if err != nil {
+		return fmt.Errorf("failed to resolve completed tasks in interrupt: %w", err)
+	}
+	err = cm.updateValues(ctx, toValue)
+	if err != nil {
+		return fmt.Errorf("failed to update values in interrupt: %w", err)
+	}
+
+	cp := &checkpoint{
+		Channels:       cm.channels,
+		Inputs:         make(map[string]any),
+		SkipPreHandler: true,
+		SubGraphs:      make(map[string]*checkpoint),
+	}
+	if state, ok := ctx.Value(stateKey{}).(*internalState); ok {
+		cp.State = state.state
+	}
+	intInfo := &InterruptInfo{
+		State:      cp.State,
+		AfterNodes: interruptAfterNodes,
+		SubGraphs:  make(map[string]*InterruptInfo),
+	}
+	for _, t := range interruptedTasks {
+		cp.Inputs[t.nodeKey] = t.input // t.input is empty, need checkpointer to handle
+		cp.SubGraphs[t.nodeKey] = subGraphInterrupts[t.nodeKey].CheckPoint
+		intInfo.SubGraphs[t.nodeKey] = subGraphInterrupts[t.nodeKey].Info
+	}
+	err = r.checkPointer.convertCheckPoint(cp, isStream)
+	if err != nil {
+		return fmt.Errorf("failed to convert checkpoint: %w", err)
+	}
+	if isSubGraph {
+		return &subGraphInterruptError{
+			Info:       intInfo,
+			CheckPoint: cp,
+		}
+	} else if checkPointID != nil {
+		err = r.checkPointer.set(ctx, *checkPointID, cp)
+		if err != nil {
+			return fmt.Errorf("failed to set checkpoint: %w, checkPointID: %s", err, *checkPointID)
+		}
+	}
+	return &interruptError{Info: intInfo}
+}
+
+func (r *runner) calculateNextTasks(ctx context.Context, completedTasks []*task, isStream bool, cm *channelManager, optMap map[string][]any) ([]*task, any, error) {
+	writeChannelValues, err := r.resolveCompletedTasks(ctx, completedTasks, isStream, cm)
+	if err != nil {
+		return nil, nil, err
+	}
+	nodeMap, err := cm.updateAndGet(ctx, writeChannelValues)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to update and get channels: %w", err)
+	}
+	var nextTasks []*task
+	if len(nodeMap) > 0 {
+		// Check if we've reached the END node.
+		if v, ok := nodeMap[END]; ok {
+			return nil, v, nil
+		}
+
+		// Create and submit the next batch of tasks.
+		nextTasks, err = r.createTasks(ctx, nodeMap, optMap)
+		if err != nil {
+			return nil, nil, fmt.Errorf("failed to create tasks: %w", err)
+		}
+	}
+	return nextTasks, nil, nil
 }
 
 func (r *runner) createTasks(ctx context.Context, nodeMap map[string]any, optMap map[string][]any) ([]*task, error) {
@@ -222,7 +461,7 @@ func (r *runner) createTasks(ctx context.Context, nodeMap map[string]any, optMap
 		}
 
 		nextTasks = append(nextTasks, &task{
-			ctx:     ctx,
+			ctx:     forwardCheckPoint(setNodeKey(ctx, nodeKey), nodeKey),
 			nodeKey: nodeKey,
 			call:    call,
 			input:   nodeInput,
@@ -230,6 +469,44 @@ func (r *runner) createTasks(ctx context.Context, nodeMap map[string]any, optMap
 		})
 	}
 	return nextTasks, nil
+}
+
+func getCheckPointInfo(opts ...Option) (checkPointID *string, stateModifier StateModifier) {
+	for _, opt := range opts {
+		if opt.checkPointID != nil {
+			checkPointID = opt.checkPointID
+		}
+		if opt.stateModifier != nil {
+			stateModifier = opt.stateModifier
+		}
+	}
+	return checkPointID, stateModifier
+}
+
+func (r *runner) restoreTasks(ctx context.Context, inputs map[string]any, skipPreHandler bool, optMap map[string][]any) ([]*task, error) {
+	ret := make([]*task, 0, len(inputs))
+	for key, input := range inputs {
+		newTask := &task{
+			ctx:            forwardCheckPoint(setNodeKey(ctx, key), key),
+			nodeKey:        key,
+			call:           nil,
+			input:          input,
+			option:         nil,
+			skipPreHandler: skipPreHandler,
+		}
+		if opt, ok := optMap[key]; ok {
+			newTask.option = opt
+		}
+
+		call, ok := r.chanSubscribeTo[key]
+		if !ok {
+			return nil, fmt.Errorf("channel[%s] from checkpoint is not registered", key)
+		}
+		newTask.call = call
+
+		ret = append(ret, newTask)
+	}
+	return ret, nil
 }
 
 func (r *runner) resolveCompletedTasks(ctx context.Context, completedTasks []*task, isStream bool, cm *channelManager) (map[string]map[string]any, error) {
@@ -342,9 +619,7 @@ func (r *runner) initTaskManager(runWrapper runnableCallWrapper, opts ...Option)
 func (r *runner) initChannelManager(isStream bool) *channelManager {
 	builder := r.chanBuilder
 	if builder == nil {
-		builder = func(d []string) channel {
-			return &pregelChannel{}
-		}
+		builder = pregelChannelBuilder
 	}
 
 	chs := make(map[string]channel)
@@ -386,6 +661,8 @@ func (r *runner) toComposableRunnable() *composableRunnable {
 		inputStreamFilter:          r.inputStreamFilter,
 		inputConverter:             r.inputConverter,
 		inputFieldMappingConverter: r.inputFieldMappingConverter,
+		inputStreamConvertPair:     r.inputConvertStreamPair,
+		outputStreamConvertPair:    r.outputConvertStreamPair,
 		optionType:                 nil, // if option type is nil, graph will transmit all options.
 
 		isPassthrough: false,
