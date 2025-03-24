@@ -216,25 +216,10 @@ func convertTo(mappings map[string]any, typ reflect.Type) (any, error) {
 		tValue = newInstanceByType(reflect.PointerTo(typ)).Elem()
 	}
 
-	var (
-		err          error
-		field2Values = make(map[string][]any)
-	)
+	var err error
 
 	for mapping, taken := range mappings {
-		field2Values[mapping] = append(field2Values[mapping], taken)
-	}
-
-	for fieldName, values := range field2Values {
-		taken := values[0]
-		if len(values) > 1 {
-			taken, err = mergeValues(values)
-			if err != nil {
-				return nil, fmt.Errorf("convertTo %v failed when merge multiple values for field %s, %w", tValue.Type(), fieldName, err)
-			}
-		}
-
-		tValue, err = assignOne(tValue, taken, fieldName)
+		tValue, err = assignOne(tValue, taken, mapping)
 		if err != nil {
 			panic(fmt.Errorf("convertTo failed when must succeed, %w", err))
 		}
@@ -359,10 +344,6 @@ func instantiateIfNeeded(field reflect.Value) {
 	} else if field.Kind() == reflect.Map {
 		if field.IsNil() {
 			field.Set(reflect.MakeMap(field.Type()))
-		}
-	} else if field.Kind() == reflect.Slice {
-		if field.IsNil() {
-			field.Set(reflect.MakeSlice(field.Type(), 0, 0))
 		}
 	}
 }
