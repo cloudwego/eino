@@ -493,6 +493,16 @@ func (g *graph) addBranch(startNode string, branch *GraphBranch, skipData bool) 
 	}
 	branch.idx = len(g.handlerPreBranch[startNode])
 
+	if startNode != START && g.nodes[startNode].executorMeta.component == ComponentOfPassthrough {
+		g.nodes[startNode].cr.inputType = branch.inputType
+		g.nodes[startNode].cr.outputType = branch.inputType
+		g.nodes[startNode].cr.inputConverter = branch.inputConverter
+		g.nodes[startNode].cr.inputFieldMappingConverter = handlerPair{
+			invoke:    buildFieldMappingConverterWithReflect(branch.inputType),
+			transform: buildStreamFieldMappingConverterWithReflect(branch.inputType),
+		}
+	}
+
 	// check branch condition type
 	result := checkAssignable(g.getNodeOutputType(startNode), branch.inputType)
 	if result == assignableTypeMustNot {

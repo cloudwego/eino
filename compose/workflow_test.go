@@ -789,6 +789,8 @@ func TestBranch(t *testing.T) {
 			return in + "_" + in, nil
 		})).AddInputWithOptions(START, nil, WithNoDirectDependency())
 
+		wf.AddPassthroughNode("branch_1").AddInput(START, ToField(START))
+
 		branch := NewGraphBranch(func(ctx context.Context, in map[string]any) (string, error) {
 			if in[START] == "hello" {
 				return "1", nil
@@ -798,7 +800,7 @@ func TestBranch(t *testing.T) {
 			"1": true,
 			END: true,
 		})
-		wf.AddBranch("branch_1", branch).AddInput(START, ToField(START))
+		wf.AddBranch("branch_1", branch)
 		wf.End().AddInput("1", ToField("1")).AddInputWithOptions(START, []*FieldMapping{ToField(START)}, WithNoDirectDependency())
 		r, err := wf.Compile(ctx)
 		assert.NoError(t, err)
@@ -826,6 +828,8 @@ func TestBranch(t *testing.T) {
 		wf.AddLambdaNode("0", InvokableLambda(func(ctx context.Context, in string) (output string, err error) {
 			return in + "_" + in, nil
 		})).AddInput(START)
+
+		wf.AddPassthroughNode("branch_1").AddInput(START, ToField(START)).AddInput("1", ToField("1")).AddDependency("0")
 		wf.AddBranch("branch_1", NewGraphBranch(func(ctx context.Context, in map[string]any) (string, error) {
 			if in[START].(string) == "hello" {
 				return "2", nil
@@ -834,7 +838,7 @@ func TestBranch(t *testing.T) {
 		}, map[string]bool{
 			"2": true,
 			END: true,
-		})).AddInput(START, ToField(START)).AddInput("1", ToField("1")).AddDependency("0")
+		}))
 		wf.End().AddInput("2", ToField("2")).AddInputWithOptions(START, []*FieldMapping{ToField(START)}, WithNoDirectDependency())
 		r, err := wf.Compile(ctx)
 		assert.NoError(t, err)

@@ -45,7 +45,7 @@ type WorkflowNode struct {
 type Workflow[I, O any] struct {
 	g                *graph
 	workflowNodes    map[string]*WorkflowNode
-	workflowBranches map[string]*WorkflowBranch
+	workflowBranches []*WorkflowBranch
 	dependencies     map[string]map[string]dependencyType
 }
 
@@ -70,9 +70,8 @@ func NewWorkflow[I, O any](opts ...NewGraphOption) *Workflow[I, O] {
 			options.withState,
 			options.stateType,
 		),
-		workflowNodes:    make(map[string]*WorkflowNode),
-		workflowBranches: make(map[string]*WorkflowBranch),
-		dependencies:     make(map[string]map[string]dependencyType),
+		workflowNodes: make(map[string]*WorkflowNode),
+		dependencies:  make(map[string]map[string]dependencyType),
 	}
 
 	return wf
@@ -140,7 +139,7 @@ func (wf *Workflow[I, O]) End() *WorkflowNode {
 	return wf.initNode(END)
 }
 
-func (wf *Workflow[I, O]) addPassthroughNode(key string, opts ...GraphAddNodeOpt) *WorkflowNode {
+func (wf *Workflow[I, O]) AddPassthroughNode(key string, opts ...GraphAddNodeOpt) *WorkflowNode {
 	_ = wf.g.AddPassthroughNode(key, opts...)
 	return wf.initNode(key)
 }
@@ -342,56 +341,24 @@ func (n *WorkflowNode) addDependencyRelation(fromNodeKey string, inputs []*Field
 }
 
 type WorkflowBranch struct {
-	branchKey string
+	fromNodeKey string
 	*GraphBranch
-	node *WorkflowNode
 }
 
 // AddBranch adds a branch to the workflow.
-//
-// Branch Key Uniqueness:
-// The 'branchKey' parameter must be globally unique within the workflow.
-// This uniqueness constraint applies to both other branch keys and all node keys in the workflow.
 //
 // End Nodes Field Mappings:
 // End nodes of the branch are required to define their own field mappings.
 // This is a key distinction between Graph's Branch and Workflow's Branch:
 // - Graph's Branch: Automatically passes its input to the selected node.
 // - Workflow's Branch: Does not pass its input to the selected node.
-func (wf *Workflow[I, O]) AddBranch(branchKey string, branch *GraphBranch) *WorkflowBranch {
+func (wf *Workflow[I, O]) AddBranch(fromNodeKey string, branch *GraphBranch) *WorkflowBranch {
 	wb := &WorkflowBranch{
-		branchKey:   branchKey,
+		fromNodeKey: fromNodeKey,
 		GraphBranch: branch,
 	}
-	wf.workflowBranches[branchKey] = wb
 
-	passthrough := wf.addPassthroughNode(wb.branchKey)
-	wf.g.nodes[wb.branchKey].cr.inputType = wb.inputType
-	wf.g.nodes[wb.branchKey].cr.outputType = wf.g.nodes[wb.branchKey].cr.inputType
-	wf.g.nodes[wb.branchKey].cr.inputConverter = wb.inputConverter
-	wf.g.nodes[wb.branchKey].cr.inputFieldMappingConverter = handlerPair{
-		invoke:    buildFieldMappingConverterWithReflect(wb.inputType),
-		transform: buildStreamFieldMappingConverterWithReflect(wb.inputType),
-	}
-	wb.node = passthrough
-
-	_ = wf.g.addBranch(passthrough.key, wb.GraphBranch, true)
-
-	return wb
-}
-
-func (wb *WorkflowBranch) AddInput(fromNodeKey string, inputs ...*FieldMapping) *WorkflowBranch {
-	wb.node.AddInput(fromNodeKey, inputs...)
-	return wb
-}
-
-func (wb *WorkflowBranch) AddInputWithOptions(fromNodeKey string, inputs []*FieldMapping, opts ...WorkflowAddInputOpt) *WorkflowBranch {
-	wb.node.AddInputWithOptions(fromNodeKey, inputs, opts...)
-	return wb
-}
-
-func (wb *WorkflowBranch) AddDependency(fromNodeKey string) *WorkflowBranch {
-	wb.node.AddDependency(fromNodeKey)
+	wf.workflowBranches = append(wf.workflowBranches, wb)
 	return wb
 }
 
@@ -409,6 +376,21 @@ func (wf *Workflow[I, O]) compile(ctx context.Context, options *graphCompileOpti
 		return nil, wf.g.buildError
 	}
 
+	for _, wb := range wf.workflowBranches {
+		for endNode := range wb.endNodes {
+			if endNode == END {
+				if _, ok := wf.dependencies[END]; !ok {
+					wf.dependencies[END] = make(map[string]dependencyType)
+				}
+				wf.dependencies[END][wb.fromNodeKey] = branchDependency
+			} else {
+				n := wf.workflowNodes[endNode]
+				n.dependencySetter(wb.fromNodeKey, branchDependency)
+			}
+		}
+		_ = wf.g.addBranch(wb.fromNodeKey, wb.GraphBranch, true)
+	}
+
 	for _, n := range wf.workflowNodes {
 		for _, addInput := range n.addInputs {
 			if err := addInput(); err != nil {
@@ -416,20 +398,6 @@ func (wf *Workflow[I, O]) compile(ctx context.Context, options *graphCompileOpti
 			}
 		}
 		n.addInputs = nil
-	}
-
-	for _, wb := range wf.workflowBranches {
-		for endNode := range wb.endNodes {
-			if endNode == END {
-				if _, ok := wf.dependencies[END]; !ok {
-					wf.dependencies[END] = make(map[string]dependencyType)
-				}
-				wf.dependencies[END][wb.branchKey] = branchDependency
-			} else {
-				n := wf.workflowNodes[endNode]
-				n.dependencySetter(wb.branchKey, branchDependency)
-			}
-		}
 	}
 
 	for _, n := range wf.workflowNodes {
