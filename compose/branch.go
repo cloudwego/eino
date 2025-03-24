@@ -46,6 +46,7 @@ type GraphBranch struct {
 	inputConverter handlerPair
 	endNodes       map[string]bool
 	idx            int // used to distinguish branches in parallel
+	noDataFlow     bool
 }
 
 // GetEndNode returns the all end nodes of the branch.

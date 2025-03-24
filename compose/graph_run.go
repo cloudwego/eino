@@ -111,9 +111,6 @@ func runnableInvoke(ctx context.Context, r *composableRunnable, input any, opts 
 }
 
 func runnableTransform(ctx context.Context, r *composableRunnable, input any, opts ...any) (any, error) {
-	if input == nil {
-		return r.t(ctx, (streamReader)(nil), opts...)
-	}
 	return r.t(ctx, input.(streamReader), opts...)
 }
 
@@ -208,6 +205,12 @@ func (r *runner) run(ctx context.Context, isStream bool, input any, opts ...Opti
 
 			toPassControlMap[t.nodeKey] = append(toPassControlMap[t.nodeKey], selected...)
 
+			if len(vForDataBranch) < len(toUpdate) {
+				toCopyNum := len(toUpdate) - len(vForDataBranch) + 1
+				copied := copyItem(vForDataBranch[len(vForDataBranch)-1], toCopyNum)
+				vForDataBranch = append(vForDataBranch[:len(vForDataBranch)-1], copied...)
+			}
+
 			for i, w := range toUpdate {
 				if _, ok := toUpdateMap[w]; !ok {
 					toUpdateMap[w] = make(map[string]any)
@@ -296,12 +299,7 @@ func (r *runner) resolveEdges(t *task) (next []string, toUpdate []string) {
 }
 
 func (r *runner) resolveBranches(ctx context.Context, t *task, isStream bool, vs []any) (selected []string, skipped []string, toUpdate []string, err error) {
-	var runWrapper runnableCallWrapper
-	runWrapper = runnableInvoke
-	if isStream {
-		runWrapper = runnableTransform
-	}
-
+	skippedNodes := make(map[string]struct{})
 	for i, branch := range t.call.writeToBranches {
 		// check branch input type if needed
 		var err error
@@ -310,49 +308,42 @@ func (r *runner) resolveBranches(ctx context.Context, t *task, isStream bool, vs
 			return nil, nil, nil, fmt.Errorf("branch[%s]-[%d] pre handler fail: %w", t.nodeKey, branch.idx, err)
 		}
 
-		wCh, e := runWrapper(ctx, branch.condition, vs[i])
-		if e != nil {
-			return nil, nil, nil, fmt.Errorf("branch run error: %w", e)
-		}
-
 		// process branch output
-		var w string
-		var ok bool
+		var ws []string
 		if isStream {
-			var sr streamReader
-			var csr *schema.StreamReader[string]
-			sr, ok = wCh.(streamReader)
-			if !ok {
-				return nil, nil, nil, errors.New("stream branch return isn't IStreamReader")
-			}
-			csr, ok = unpackStreamReader[string](sr)
-			if !ok {
-				return nil, nil, nil, errors.New("unpack branch result fail")
-			}
-
-			var se error
-			w, se = concatStreamReader(csr)
-			if se != nil {
-				return nil, nil, nil, fmt.Errorf("concat branch result error: %w", se)
+			ws, err = branch.collect(ctx, vs[i].(streamReader))
+			if err != nil {
+				return nil, nil, nil, fmt.Errorf("branch collect run error: %w", err)
 			}
 		} else {
-			w, ok = wCh.(string)
-			if !ok {
-				return nil, nil, nil, errors.New("invoke branch result isn't string")
+			ws, err = branch.invoke(ctx, vs[i])
+			if err != nil {
+				return nil, nil, nil, fmt.Errorf("branch invoke run error: %w", err)
 			}
 		}
 
 		for node := range branch.endNodes {
-			if node != w {
-				skipped = append(skipped, node)
-			} else {
-				selected = append(selected, node)
+			skip := true
+			for _, w := range ws {
+				if node == w {
+					skip = false
+					break
+				}
+			}
+			if skip {
+				skippedNodes[node] = struct{}{}
 			}
 		}
 
 		if !branch.noDataFlow {
-			toUpdate = append(toUpdate, w)
+			toUpdate = append(toUpdate, ws...)
 		}
+
+		selected = append(selected, ws...)
+	}
+
+	for skip := range skippedNodes {
+		skipped = append(skipped, skip)
 	}
 
 	return selected, skipped, toUpdate, nil

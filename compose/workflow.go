@@ -366,10 +366,13 @@ func (wf *Workflow[I, O]) AddBranch(branchKey string, branch *GraphBranch) *Work
 	wf.workflowBranches[branchKey] = wb
 
 	passthrough := wf.addPassthroughNode(wb.branchKey)
-	wf.g.nodes[wb.branchKey].cr.inputType = wb.condition.inputType
+	wf.g.nodes[wb.branchKey].cr.inputType = wb.inputType
 	wf.g.nodes[wb.branchKey].cr.outputType = wf.g.nodes[wb.branchKey].cr.inputType
-	wf.g.nodes[wb.branchKey].cr.inputConverter = wb.condition.inputConverter
-	wf.g.nodes[wb.branchKey].cr.inputFieldMappingConverter = wb.condition.inputFieldMappingConverter
+	wf.g.nodes[wb.branchKey].cr.inputConverter = wb.inputConverter
+	wf.g.nodes[wb.branchKey].cr.inputFieldMappingConverter = handlerPair{
+		invoke:    buildFieldMappingConverterWithReflect(wb.inputType),
+		transform: buildStreamFieldMappingConverterWithReflect(wb.inputType),
+	}
 	wb.node = passthrough
 
 	_ = wf.g.addBranch(passthrough.key, wb.GraphBranch, true)
