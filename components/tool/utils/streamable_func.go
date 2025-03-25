@@ -100,12 +100,12 @@ func (s *streamableTool[T, D]) StreamableRun(ctx context.Context, argumentsInJSO
 		var val interface{}
 		val, err = s.um(ctx, argumentsInJSON)
 		if err != nil {
-			return nil, fmt.Errorf("[LocalStreamFunc] %s, failed to unmarshal arguments: %w", s.info.Name, err)
+			return nil, fmt.Errorf("[LocalStreamFunc] failed to unmarshal arguments, toolName=%s, err=%w", s.info.Name, err)
 		}
 
 		gt, ok := val.(T)
 		if !ok {
-			return nil, fmt.Errorf("[LocalStreamFunc] %s, expected %T, but given %T", s.info.Name, inst, val)
+			return nil, fmt.Errorf("[LocalStreamFunc] type err, toolName=%s, expected=%T, given=%T", s.info.Name, inst, val)
 		}
 		inst = gt
 	} else {
@@ -114,7 +114,7 @@ func (s *streamableTool[T, D]) StreamableRun(ctx context.Context, argumentsInJSO
 
 		err = sonic.UnmarshalString(argumentsInJSON, &inst)
 		if err != nil {
-			return nil, fmt.Errorf("[LocalStreamFunc] %s, failed to unmarshal arguments in json: %w", s.info.Name, err)
+			return nil, fmt.Errorf("[LocalStreamFunc] failed to unmarshal arguments in json, toolName=%s, err=%w", s.info.Name, err)
 		}
 	}
 
@@ -129,12 +129,12 @@ func (s *streamableTool[T, D]) StreamableRun(ctx context.Context, argumentsInJSO
 		if s.m != nil {
 			out, e = s.m(ctx, d)
 			if e != nil {
-				return "", fmt.Errorf("[LocalStreamFunc] %s, failed to marshal output: %w", s.info.Name, e)
+				return "", fmt.Errorf("[LocalStreamFunc] failed to marshal output, toolName=%s, err=%w", s.info.Name, e)
 			}
 		} else {
 			out, e = sonic.MarshalString(d)
 			if e != nil {
-				return "", fmt.Errorf("[LocalStreamFunc] %s, failed to marshal output in json: %w", s.info.Name, e)
+				return "", fmt.Errorf("[LocalStreamFunc] failed to marshal output in json, toolName=%s, err=%w", s.info.Name, e)
 			}
 		}
 
