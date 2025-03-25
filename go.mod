@@ -3,7 +3,7 @@ module github.com/cloudwego/eino
 go 1.18
 
 require (
-	github.com/bytedance/sonic v1.12.2
+	github.com/bytedance/sonic v1.13.2
 	github.com/getkin/kin-openapi v0.118.0
 	github.com/nikolalohinski/gonja v1.5.3
 	github.com/slongfield/pyfmt v0.0.0-20220222012616-ea85ff4c361f
@@ -13,9 +13,8 @@ require (
 )
 
 require (
-	github.com/bytedance/sonic/loader v0.2.0 // indirect
-	github.com/cloudwego/base64x v0.1.4 // indirect
-	github.com/cloudwego/iasm v0.2.0 // indirect
+	github.com/bytedance/sonic/loader v0.2.4 // indirect
+	github.com/cloudwego/base64x v0.1.5 // indirect
 	github.com/davecgh/go-spew v1.1.1 // indirect
 	github.com/dustin/go-humanize v1.0.1 // indirect
 	github.com/go-openapi/jsonpointer v0.19.5 // indirect
