@@ -120,18 +120,8 @@ func (c *Chain[I, O]) addEndIfNeeded() error {
 	return nil
 }
 
-func (c *Chain[I, O]) inputConverter() handlerPair {
-	return handlerPair{
-		invoke:    defaultValueChecker[I],
-		transform: defaultStreamConverter[I],
-	}
-}
-
-func (c *Chain[I, O]) inputFieldMappingConverter() handlerPair {
-	return handlerPair{
-		invoke:    buildFieldMappingConverter[I](),
-		transform: buildStreamFieldMappingConverter[I](),
-	}
+func (c *Chain[I, O]) getGenericHelper() *genericHelper {
+	return newGenericHelper[I, O]()
 }
 
 // inputType returns the input type of the chain.

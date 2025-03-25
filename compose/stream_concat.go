@@ -17,7 +17,7 @@
 package compose
 
 import (
-	"fmt"
+	"errors"
 	"io"
 
 	"github.com/cloudwego/eino/internal"
@@ -46,6 +46,8 @@ func RegisterStreamChunkConcatFunc[T any](fn func([]T) (T, error)) {
 	internal.RegisterStreamChunkConcatFunc(fn)
 }
 
+var emptyStreamConcatErr = errors.New("stream reader is empty, concat fail")
+
 func concatStreamReader[T any](sr *schema.StreamReader[T]) (T, error) {
 	defer sr.Close()
 
@@ -67,7 +69,7 @@ func concatStreamReader[T any](sr *schema.StreamReader[T]) (T, error) {
 
 	if len(items) == 0 {
 		var t T
-		return t, fmt.Errorf("stream reader is empty, concat fail")
+		return t, emptyStreamConcatErr
 	}
 
 	if len(items) == 1 {

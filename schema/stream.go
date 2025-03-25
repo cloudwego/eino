@@ -269,8 +269,7 @@ type iStreamReader interface {
 type stream[T any] struct {
 	items chan streamItem[T]
 
-	closed   chan struct{}
-	isClosed uint32
+	closed chan struct{}
 }
 
 type streamItem[T any] struct {

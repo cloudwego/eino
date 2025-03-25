@@ -849,6 +849,28 @@ func TestBranch(t *testing.T) {
 		assert.NoError(t, err)
 		assert.Equal(t, map[string]any{START: "world"}, out)
 	})
+	t.Run("empty input for node after branch", func(t *testing.T) {
+		wf := NewWorkflow[map[string]any, map[string]any]()
+		wf.AddLambdaNode("start_1", InvokableLambda(func(ctx context.Context, input map[string]any) (map[string]any, error) {
+			return map[string]any{}, nil
+		})).AddInput("start")
+		wf.AddLambdaNode("branch_1", InvokableLambda(func(ctx context.Context, input map[string]any) (map[string]any, error) {
+			return map[string]any{}, nil
+		}))
+		wf.AddPassthroughNode("my_branch").AddInput("start_1")
+		wf.AddBranch("my_branch", NewGraphBranch(func(ctx context.Context, input map[string]any) (string, error) {
+			return END, nil
+		}, map[string]bool{
+			"branch_1": true,
+			END:        true,
+		}))
+		wf.End().AddInput("branch_1")
+		runner, err := wf.Compile(context.Background())
+		assert.NoError(t, err)
+		resp, err := runner.Invoke(context.Background(), map[string]any{})
+		assert.NoError(t, err)
+		assert.Equal(t, resp, (map[string]any)(nil))
+	})
 }
 
 type goodInterface interface {

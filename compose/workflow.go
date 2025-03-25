@@ -440,36 +440,6 @@ func (wf *Workflow[I, O]) compile(ctx context.Context, options *graphCompileOpti
 				wf.g.handlerPreNode[n.key] = append([]handlerPair{pair}, wf.g.handlerPreNode[n.key]...)
 			}
 		}
-
-		if len(n.mappedFieldPath) == 0 { // absolutely no input data
-			inputType := n.g.nodes[n.key].inputType()
-			if inputType != reflect.TypeOf(map[string]any{}) { // only support such case when input is map[string]any{}
-				return nil, fmt.Errorf("node %s has no input data, but its input type is not map[string]any", n.key)
-			}
-
-			pair := handlerPair{
-				invoke: func(in any) (any, error) {
-					if in == nil {
-						return map[string]any{}, nil
-					}
-					return in, nil
-				},
-				transform: func(in streamReader) streamReader {
-					if in == nil {
-						sr, sw := schema.Pipe[map[string]any](1)
-						sw.Send(map[string]any{}, nil)
-						sw.Close()
-						return packStreamReader(sr)
-					}
-					return in
-				},
-			}
-			if _, ok := wf.g.handlerPreNode[n.key]; !ok {
-				wf.g.handlerPreNode[n.key] = []handlerPair{pair}
-			} else {
-				wf.g.handlerPreNode[n.key] = append([]handlerPair{pair}, wf.g.handlerPreNode[n.key]...)
-			}
-		}
 	}
 
 	// TODO: check indirect edges are legal
@@ -494,12 +464,8 @@ func (wf *Workflow[I, O]) initNode(key string) *WorkflowNode {
 	return n
 }
 
-func (wf *Workflow[I, O]) inputConverter() handlerPair {
-	return wf.g.inputConverter()
-}
-
-func (wf *Workflow[I, O]) inputFieldMappingConverter() handlerPair {
-	return wf.g.inputFieldMappingConverter()
+func (wf *Workflow[I, O]) getGenericHelper() *genericHelper {
+	return wf.g.getGenericHelper()
 }
 
 func (wf *Workflow[I, O]) inputType() reflect.Type {

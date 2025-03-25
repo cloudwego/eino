@@ -1192,6 +1192,10 @@ func TestGraphCompileCallback(t *testing.T) {
 										START:  {"sub1"},
 										"sub1": {END},
 									},
+									DataEdges: map[string][]string{
+										START:  {"sub1"},
+										"sub1": {END},
+									},
 									Branches:   map[string][]GraphBranch{},
 									InputType:  reflect.TypeOf(""),
 									OutputType: reflect.TypeOf(""),
@@ -1199,6 +1203,10 @@ func TestGraphCompileCallback(t *testing.T) {
 							},
 						},
 						Edges: map[string][]string{
+							START:       {"sub_sub_1"},
+							"sub_sub_1": {END},
+						},
+						DataEdges: map[string][]string{
 							START:       {"sub_sub_1"},
 							"sub_sub_1": {END},
 						},
@@ -1228,6 +1236,14 @@ func TestGraphCompileCallback(t *testing.T) {
 				},
 			},
 			Edges: map[string][]string{
+				START:       {"node1"},
+				"pass1":     {"sub_graph"},
+				"pass2":     {"sub_graph"},
+				"sub_graph": {"node3", "node4"},
+				"node3":     {END},
+				"node4":     {END},
+			},
+			DataEdges: map[string][]string{
 				START:       {"node1"},
 				"pass1":     {"sub_graph"},
 				"pass2":     {"sub_graph"},
