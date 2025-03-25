@@ -138,11 +138,11 @@ func (i *invokableTool[T, D]) InvokableRun(ctx context.Context, arguments string
 		var val interface{}
 		val, err = i.um(ctx, arguments)
 		if err != nil {
-			return "", fmt.Errorf("[LocalFunc] failed to unmarshal arguments: %w", err)
+			return "", fmt.Errorf("[LocalFunc] %s, failed to unmarshal arguments: %w", i.info.Name, err)
 		}
 		gt, ok := val.(T)
 		if !ok {
-			return "", fmt.Errorf("[LocalFunc] expected %T, but given %T", inst, val)
+			return "", fmt.Errorf("[LocalFunc] %s, expected %T, but given %T", i.info.Name, inst, val)
 		}
 		inst = gt
 	} else {
@@ -150,24 +150,24 @@ func (i *invokableTool[T, D]) InvokableRun(ctx context.Context, arguments string
 
 		err = sonic.UnmarshalString(arguments, &inst)
 		if err != nil {
-			return "", fmt.Errorf("[LocalFunc] failed to unmarshal arguments in json: %w", err)
+			return "", fmt.Errorf("[LocalFunc] %s, failed to unmarshal arguments in json: %w", i.info.Name, err)
 		}
 	}
 
 	resp, err := i.Fn(ctx, inst, opts...)
 	if err != nil {
-		return "", fmt.Errorf("[LocalFunc] failed to invoke tool: %w", err)
+		return "", fmt.Errorf("[LocalFunc] %s, failed to invoke tool: %w", i.info.Name, err)
 	}
 
 	if i.m != nil {
 		output, err = i.m(ctx, resp)
 		if err != nil {
-			return "", fmt.Errorf("[LocalFunc] failed to marshal output: %w", err)
+			return "", fmt.Errorf("[LocalFunc] %s, failed to marshal output: %w", i.info.Name, err)
 		}
 	} else {
 		output, err = sonic.MarshalString(resp)
 		if err != nil {
-			return "", fmt.Errorf("[LocalFunc] failed to marshal output in json: %w", err)
+			return "", fmt.Errorf("[LocalFunc] %s, failed to marshal output in json: %w", i.info.Name, err)
 		}
 	}
 
