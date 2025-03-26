@@ -138,11 +138,11 @@ func (i *invokableTool[T, D]) InvokableRun(ctx context.Context, arguments string
 		var val interface{}
 		val, err = i.um(ctx, arguments)
 		if err != nil {
-			return "", fmt.Errorf("[LocalFunc] failed to unmarshal arguments, toolName=%s, err=%w", getToolName(i.info), err)
+			return "", fmt.Errorf("[LocalFunc] failed to unmarshal arguments, toolName=%s, err=%w", i.getToolName(), err)
 		}
 		gt, ok := val.(T)
 		if !ok {
-			return "", fmt.Errorf("[LocalFunc] invalid type, toolName=%s, expected=%T, given=%T", getToolName(i.info), inst, val)
+			return "", fmt.Errorf("[LocalFunc] invalid type, toolName=%s, expected=%T, given=%T", i.getToolName(), inst, val)
 		}
 		inst = gt
 	} else {
@@ -150,24 +150,24 @@ func (i *invokableTool[T, D]) InvokableRun(ctx context.Context, arguments string
 
 		err = sonic.UnmarshalString(arguments, &inst)
 		if err != nil {
-			return "", fmt.Errorf("[LocalFunc] failed to unmarshal arguments in json, toolName=%s, err=%w", getToolName(i.info), err)
+			return "", fmt.Errorf("[LocalFunc] failed to unmarshal arguments in json, toolName=%s, err=%w", i.getToolName(), err)
 		}
 	}
 
 	resp, err := i.Fn(ctx, inst, opts...)
 	if err != nil {
-		return "", fmt.Errorf("[LocalFunc] failed to invoke tool, toolName=%s, err=%w", getToolName(i.info), err)
+		return "", fmt.Errorf("[LocalFunc] failed to invoke tool, toolName=%s, err=%w", i.getToolName(), err)
 	}
 
 	if i.m != nil {
 		output, err = i.m(ctx, resp)
 		if err != nil {
-			return "", fmt.Errorf("[LocalFunc] failed to marshal output, toolName=%s, err=%w", getToolName(i.info), err)
+			return "", fmt.Errorf("[LocalFunc] failed to marshal output, toolName=%s, err=%w", i.getToolName(), err)
 		}
 	} else {
 		output, err = sonic.MarshalString(resp)
 		if err != nil {
-			return "", fmt.Errorf("[LocalFunc] failed to marshal output in json, toolName=%s, err=%w", getToolName(i.info), err)
+			return "", fmt.Errorf("[LocalFunc] failed to marshal output in json, toolName=%s, err=%w", i.getToolName(), err)
 		}
 	}
 
@@ -175,7 +175,15 @@ func (i *invokableTool[T, D]) InvokableRun(ctx context.Context, arguments string
 }
 
 func (i *invokableTool[T, D]) GetType() string {
-	return snakeToCamel(i.info.Name)
+	return snakeToCamel(i.getToolName())
+}
+
+func (i *invokableTool[T, D]) getToolName() string {
+	if i.info == nil {
+		return ""
+	}
+
+	return i.info.Name
 }
 
 // snakeToCamel converts a snake_case string to CamelCase.
@@ -193,12 +201,4 @@ func snakeToCamel(s string) string {
 	}
 
 	return strings.Join(parts, "")
-}
-
-func getToolName(info *schema.ToolInfo) string {
-	if info == nil {
-		return ""
-	}
-
-	return info.Name
 }
