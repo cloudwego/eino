@@ -53,17 +53,13 @@ func (g graphRunType) String() string {
 	return string(g)
 }
 
-type edgeInfo struct {
-	startNode, endNode        string
-	noControlFlow, noDataFlow bool
-}
-
 type graph struct {
-	nodes      map[string]*graphNode
-	edges      map[string][]*edgeInfo
-	branches   map[string][]*GraphBranch
-	startNodes []string
-	endNodes   []string
+	nodes        map[string]*graphNode
+	controlEdges map[string][]string
+	dataEdges    map[string][]string
+	branches     map[string][]*GraphBranch
+	startNodes   []string
+	endNodes     []string
 
 	toValidateMap map[string][]struct {
 		endNode  string
@@ -74,12 +70,8 @@ type graph struct {
 	stateGenerator func(ctx context.Context) any
 
 	expectedInputType, expectedOutputType reflect.Type
-	inputStreamFilter                     streamMapFilter
-	graphInputConverter                   handlerPair
-	graphInputFieldMappingConverter       handlerPair
 
-	outputConverter             handlerPair
-	outputFieldMappingConverter handlerPair
+	*genericHelper
 
 	fieldMappingRecords map[string][]*FieldMapping
 
@@ -95,15 +87,11 @@ type graph struct {
 }
 
 type newGraphConfig struct {
-	inputType, outputType                                               reflect.Type
-	filter                                                              streamMapFilter
-	inputChecker, outputChecker                                         valueHandler
-	inputConv, outputConv                                               streamHandler
-	inputFieldMappingConverter, outputFieldMappingConverter             valueHandler
-	inputStreamFieldMappingConverter, outputStreamFieldMappingConverter streamHandler
-	cmp                                                                 component
-	stateType                                                           reflect.Type
-	stateGenerator                                                      func(ctx context.Context) any
+	inputType, outputType reflect.Type
+	gh                    *genericHelper
+	cmp                   component
+	stateType             reflect.Type
+	stateGenerator        func(ctx context.Context) any
 }
 
 func newGraphFromGeneric[I, O any](
@@ -112,28 +100,21 @@ func newGraphFromGeneric[I, O any](
 	stateType reflect.Type,
 ) *graph {
 	return newGraph(&newGraphConfig{
-		inputType:                         generic.TypeOf[I](),
-		outputType:                        generic.TypeOf[O](),
-		filter:                            defaultStreamMapFilter[I],
-		inputChecker:                      defaultValueChecker[I],
-		outputChecker:                     defaultValueChecker[O],
-		inputConv:                         defaultStreamConverter[I],
-		outputConv:                        defaultStreamConverter[O],
-		inputFieldMappingConverter:        buildFieldMappingConverter[I](),
-		outputFieldMappingConverter:       buildFieldMappingConverter[O](),
-		inputStreamFieldMappingConverter:  buildStreamFieldMappingConverter[I](),
-		outputStreamFieldMappingConverter: buildStreamFieldMappingConverter[O](),
-		cmp:                               cmp,
-		stateType:                         stateType,
-		stateGenerator:                    stateGenerator,
+		inputType:      generic.TypeOf[I](),
+		outputType:     generic.TypeOf[O](),
+		gh:             newGenericHelper[I, O](),
+		cmp:            cmp,
+		stateType:      stateType,
+		stateGenerator: stateGenerator,
 	})
 }
 
 func newGraph(cfg *newGraphConfig) *graph {
 	return &graph{
-		nodes:    make(map[string]*graphNode),
-		edges:    make(map[string][]*edgeInfo),
-		branches: make(map[string][]*GraphBranch),
+		nodes:        make(map[string]*graphNode),
+		dataEdges:    make(map[string][]string),
+		controlEdges: make(map[string][]string),
+		branches:     make(map[string][]*GraphBranch),
 
 		toValidateMap: make(map[string][]struct {
 			endNode  string
@@ -142,24 +123,7 @@ func newGraph(cfg *newGraphConfig) *graph {
 
 		expectedInputType:  cfg.inputType,
 		expectedOutputType: cfg.outputType,
-		inputStreamFilter:  cfg.filter,
-		graphInputConverter: handlerPair{
-			invoke:    cfg.inputChecker,
-			transform: cfg.inputConv,
-		},
-		graphInputFieldMappingConverter: handlerPair{
-			invoke:    cfg.inputFieldMappingConverter,
-			transform: cfg.inputStreamFieldMappingConverter,
-		},
-
-		outputConverter: handlerPair{
-			invoke:    cfg.outputChecker,
-			transform: cfg.outputConv,
-		},
-		outputFieldMappingConverter: handlerPair{
-			invoke:    cfg.outputFieldMappingConverter,
-			transform: cfg.outputStreamFieldMappingConverter,
-		},
+		genericHelper:      cfg.gh,
 
 		fieldMappingRecords: make(map[string][]*FieldMapping),
 
@@ -258,7 +222,7 @@ func (g *graph) addNode(key string, node *graphNode, options *graphAddNodeOpts) 
 	return nil
 }
 
-func (g *graph) addEdgeWithMappings(startNode, endNode string, noControlFlow bool, noDataFlow bool, mappings ...*FieldMapping) (err error) {
+func (g *graph) addEdgeWithMappings(startNode, endNode string, noControl bool, noData bool, mappings ...*FieldMapping) (err error) {
 	if g.buildError != nil {
 		return g.buildError
 	}
@@ -266,7 +230,7 @@ func (g *graph) addEdgeWithMappings(startNode, endNode string, noControlFlow boo
 		return ErrGraphCompiled
 	}
 
-	if noControlFlow && noDataFlow {
+	if noControl && noData {
 		return fmt.Errorf("edge[%s]-[%s] cannot be both noDirectDependency and noDataFlow", startNode, endNode)
 	}
 
@@ -282,12 +246,6 @@ func (g *graph) addEdgeWithMappings(startNode, endNode string, noControlFlow boo
 		return errors.New("START cannot be an end node")
 	}
 
-	for i := range g.edges[startNode] {
-		if g.edges[startNode][i].endNode == endNode {
-			return fmt.Errorf("edge[%s]-[%s] have been added yet", startNode, endNode)
-		}
-	}
-
 	if _, ok := g.nodes[startNode]; !ok && startNode != START {
 		return fmt.Errorf("edge start node '%s' needs to be added to graph first", startNode)
 	}
@@ -295,28 +253,34 @@ func (g *graph) addEdgeWithMappings(startNode, endNode string, noControlFlow boo
 		return fmt.Errorf("edge end node '%s' needs to be added to graph first", endNode)
 	}
 
-	if !noDataFlow {
-		g.addToValidateMap(startNode, endNode, mappings)
-		err = g.updateToValidateMap()
-		if err != nil {
-			return err
+	if !noControl {
+		for i := range g.controlEdges[startNode] {
+			if g.controlEdges[startNode][i] == endNode {
+				return fmt.Errorf("control edge[%s]-[%s] have been added yet", startNode, endNode)
+			}
 		}
-	}
 
-	g.edges[startNode] = append(g.edges[startNode], &edgeInfo{
-		startNode:     startNode,
-		endNode:       endNode,
-		noControlFlow: noControlFlow,
-		noDataFlow:    noDataFlow,
-	})
-
-	if !noControlFlow {
+		g.controlEdges[startNode] = append(g.controlEdges[startNode], endNode)
 		if startNode == START {
 			g.startNodes = append(g.startNodes, endNode)
 		}
 		if endNode == END {
 			g.endNodes = append(g.endNodes, startNode)
 		}
+	}
+	if !noData {
+		for i := range g.dataEdges[startNode] {
+			if g.dataEdges[startNode][i] == endNode {
+				return fmt.Errorf("data edge[%s]-[%s] have been added yet", startNode, endNode)
+			}
+		}
+
+		g.addToValidateMap(startNode, endNode, mappings)
+		err = g.updateToValidateMap()
+		if err != nil {
+			return err
+		}
+		g.dataEdges[startNode] = append(g.dataEdges[startNode], endNode)
 	}
 
 	return nil
@@ -496,10 +460,12 @@ func (g *graph) addBranch(startNode string, branch *GraphBranch, skipData bool) 
 	if startNode != START && g.nodes[startNode].executorMeta.component == ComponentOfPassthrough {
 		g.nodes[startNode].cr.inputType = branch.inputType
 		g.nodes[startNode].cr.outputType = branch.inputType
-		g.nodes[startNode].cr.inputConverter = branch.inputConverter
-		g.nodes[startNode].cr.inputFieldMappingConverter = handlerPair{
-			invoke:    buildFieldMappingConverterWithReflect(branch.inputType),
-			transform: buildStreamFieldMappingConverterWithReflect(branch.inputType),
+		g.nodes[startNode].cr.genericHelper = &genericHelper{
+			inputStreamFilter:          branch.inputStreamFilter,
+			inputConverter:             branch.inputConverter,
+			inputFieldMappingConverter: branch.inputFieldMappingConverter,
+			inputStreamConvertPair:     branch.inputStreamConvertPair,
+			outputStreamConvertPair:    branch.inputStreamConvertPair,
 		}
 	}
 
@@ -576,13 +542,11 @@ func (g *graph) updateToValidateMap() error {
 				if startNodeOutputType != nil && endNodeInputType == nil {
 					g.nodes[endNode.endNode].cr.inputType = startNodeOutputType
 					g.nodes[endNode.endNode].cr.outputType = g.nodes[endNode.endNode].cr.inputType
-					g.nodes[endNode.endNode].cr.inputConverter = g.getNodeInputConverter(startNode)
-					g.nodes[endNode.endNode].cr.inputFieldMappingConverter = g.getNodeInputFieldMappingConverter(startNode)
+					g.nodes[endNode.endNode].cr.genericHelper = g.getNodeGenericHelper(startNode).forSuccessorPassthrough()
 				} else if startNodeOutputType == nil /* redundant condition && endNodeInputType != nil */ {
 					g.nodes[startNode].cr.inputType = endNodeInputType
 					g.nodes[startNode].cr.outputType = g.nodes[startNode].cr.inputType
-					g.nodes[startNode].cr.inputConverter = g.getNodeInputConverter(endNode.endNode)
-					g.nodes[startNode].cr.inputFieldMappingConverter = g.getNodeInputFieldMappingConverter(endNode.endNode)
+					g.nodes[startNode].cr.genericHelper = g.getNodeGenericHelper(endNode.endNode).forPredecessorPassthrough()
 				} else if len(endNode.mappings) == 0 {
 					// common node check
 					result := checkAssignable(startNodeOutputType, endNodeInputType)
@@ -594,7 +558,7 @@ func (g *graph) updateToValidateMap() error {
 						if _, ok := g.handlerOnEdges[startNode]; !ok {
 							g.handlerOnEdges[startNode] = make(map[string][]handlerPair)
 						}
-						g.handlerOnEdges[startNode][endNode.endNode] = append(g.handlerOnEdges[startNode][endNode.endNode], g.getNodeInputConverter(endNode.endNode))
+						g.handlerOnEdges[startNode][endNode.endNode] = append(g.handlerOnEdges[startNode][endNode.endNode], g.getNodeGenericHelper(endNode.endNode).inputConverter)
 					}
 					continue
 				}
@@ -630,22 +594,13 @@ func (g *graph) updateToValidateMap() error {
 	return nil
 }
 
-func (g *graph) getNodeInputConverter(name string) handlerPair {
+func (g *graph) getNodeGenericHelper(name string) *genericHelper {
 	if name == START {
-		return g.graphInputConverter
+		return g.genericHelper.forPredecessorPassthrough()
 	} else if name == END {
-		return g.outputConverter
+		return g.genericHelper.forSuccessorPassthrough()
 	}
-	return g.nodes[name].inputConverter()
-}
-
-func (g *graph) getNodeInputFieldMappingConverter(name string) handlerPair {
-	if name == START {
-		return g.graphInputFieldMappingConverter
-	} else if name == END {
-		return g.outputFieldMappingConverter
-	}
-	return g.nodes[name].inputFieldMappingConverter()
+	return g.nodes[name].getGenericHelper()
 }
 
 func (g *graph) getNodeInputType(name string) reflect.Type {
@@ -674,14 +629,6 @@ func (g *graph) outputType() reflect.Type {
 	return g.expectedOutputType
 }
 
-func (g *graph) inputConverter() handlerPair {
-	return g.graphInputConverter
-}
-
-func (g *graph) inputFieldMappingConverter() handlerPair {
-	return g.graphInputFieldMappingConverter
-}
-
 func (g *graph) compile(ctx context.Context, opt *graphCompileOptions) (*composableRunnable, error) {
 	if g.buildError != nil {
 		return nil, g.buildError
@@ -708,10 +655,6 @@ func (g *graph) compile(ctx context.Context, opt *graphCompileOptions) (*composa
 	if !isWorkflow(g.cmp) && opt != nil && opt.getStateEnabled {
 		return nil, fmt.Errorf("shouldn't set WithGetStateEnable outside of the Workflow")
 	}
-	forbidGetState := true
-	if !eager || (opt != nil && opt.getStateEnabled) {
-		forbidGetState = false
-	}
 
 	if len(g.startNodes) == 0 {
 		return nil, errors.New("start node not set")
@@ -728,8 +671,17 @@ func (g *graph) compile(ctx context.Context, opt *graphCompileOptions) (*composa
 	}
 
 	for key := range g.fieldMappingRecords {
+		// not allowed to map multiple fields to the same field
+		toMap := make(map[string]bool)
+		for _, mapping := range g.fieldMappingRecords[key] {
+			if _, ok := toMap[mapping.to]; ok {
+				return nil, fmt.Errorf("duplicate mapping target field: %s of node[%s]", mapping.to, key)
+			}
+			toMap[mapping.to] = true
+		}
+
 		// add map to input converter
-		g.handlerPreNode[key] = append(g.handlerPreNode[key], g.getNodeInputFieldMappingConverter(key))
+		g.handlerPreNode[key] = append(g.handlerPreNode[key], g.getNodeGenericHelper(key).inputFieldMappingConverter)
 	}
 
 	key2SubGraphs := g.beforeChildGraphsCompile(opt)
@@ -743,62 +695,86 @@ func (g *graph) compile(ctx context.Context, opt *graphCompileOptions) (*composa
 		}
 
 		chCall := &chanCall{
-			action:          r,
-			writeTo:         g.edges[name],
-			writeToBranches: g.branches[name],
+			action:   r,
+			writeTo:  g.dataEdges[name],
+			controls: g.controlEdges[name],
 
 			preProcessor:  node.nodeInfo.preProcessor,
 			postProcessor: node.nodeInfo.postProcessor,
 		}
 
+		branches := g.branches[name]
+		if len(branches) > 0 {
+			branchRuns := make([]*GraphBranch, 0, len(branches))
+			branchRuns = append(branchRuns, branches...)
+
+			chCall.writeToBranches = branchRuns
+		}
+
 		chanSubscribeTo[name] = chCall
 	}
 
-	invertedEdges := make(map[string][]string)
-	for start, ends := range g.edges {
+	dataPredecessors := make(map[string][]string)
+	controlPredecessors := make(map[string][]string)
+	for start, ends := range g.controlEdges {
 		for _, end := range ends {
-			if end.noControlFlow {
-				continue
-			}
-
-			if _, ok := invertedEdges[end.endNode]; !ok {
-				invertedEdges[end.endNode] = []string{start}
+			if _, ok := controlPredecessors[end]; !ok {
+				controlPredecessors[end] = []string{start}
 			} else {
-				invertedEdges[end.endNode] = append(invertedEdges[end.endNode], start)
+				controlPredecessors[end] = append(controlPredecessors[end], start)
+			}
+		}
+	}
+	for start, ends := range g.dataEdges {
+		for _, end := range ends {
+			if _, ok := dataPredecessors[end]; !ok {
+				dataPredecessors[end] = []string{start}
+			} else {
+				dataPredecessors[end] = append(dataPredecessors[end], start)
 			}
 		}
 	}
 	for start, branches := range g.branches {
 		for _, branch := range branches {
 			for end := range branch.endNodes {
-				if _, ok := invertedEdges[end]; !ok {
-					invertedEdges[end] = []string{start}
+				if _, ok := controlPredecessors[end]; !ok {
+					controlPredecessors[end] = []string{start}
 				} else {
-					invertedEdges[end] = append(invertedEdges[end], start)
+					controlPredecessors[end] = append(controlPredecessors[end], start)
+				}
+
+				if !branch.noDataFlow {
+					if _, ok := dataPredecessors[end]; !ok {
+						dataPredecessors[end] = []string{start}
+					} else {
+						dataPredecessors[end] = append(dataPredecessors[end], start)
+					}
 				}
 			}
 		}
 	}
 
 	inputChannels := &chanCall{
-		writeTo:         g.edges[START],
-		writeToBranches: g.branches[START],
+		writeTo:         g.dataEdges[START],
+		controls:        g.controlEdges[START],
+		writeToBranches: make([]*GraphBranch, len(g.branches[START])),
 	}
+	copy(inputChannels.writeToBranches, g.branches[START])
 
 	r := &runner{
-		invertedEdges:   invertedEdges,
-		chanSubscribeTo: chanSubscribeTo,
-		inputChannels:   inputChannels,
+		chanSubscribeTo:     chanSubscribeTo,
+		controlPredecessors: controlPredecessors,
+		dataPredecessors:    dataPredecessors,
+
+		inputChannels: inputChannels,
 
 		eager: eager,
 
 		chanBuilder: cb,
 
-		inputType:                  g.inputType(),
-		outputType:                 g.outputType(),
-		inputStreamFilter:          g.inputStreamFilter,
-		inputConverter:             g.graphInputConverter,
-		inputFieldMappingConverter: g.graphInputFieldMappingConverter,
+		inputType:     g.inputType(),
+		outputType:    g.outputType(),
+		genericHelper: g.genericHelper,
 
 		preBranchHandlerManager: &preBranchHandlerManager{h: g.handlerPreBranch},
 		preNodeHandlerManager:   &preNodeHandlerManager{h: g.handlerPreNode},
@@ -814,14 +790,13 @@ func (g *graph) compile(ctx context.Context, opt *graphCompileOptions) (*composa
 	if g.stateGenerator != nil {
 		r.runCtx = func(ctx context.Context) context.Context {
 			return context.WithValue(ctx, stateKey{}, &internalState{
-				state:     g.stateGenerator(ctx),
-				forbidden: forbidGetState,
+				state: g.stateGenerator(ctx),
 			})
 		}
 	}
 
 	if runType == runTypeDAG {
-		err := validateDAG(r.chanSubscribeTo, r.invertedEdges)
+		err := validateDAG(r.chanSubscribeTo, controlPredecessors)
 		if err != nil {
 			return nil, err
 		}
@@ -829,6 +804,18 @@ func (g *graph) compile(ctx context.Context, opt *graphCompileOptions) (*composa
 	}
 
 	if opt != nil {
+		inputPairs := make(map[string]streamConvertPair)
+		outputPairs := make(map[string]streamConvertPair)
+		for key, c := range r.chanSubscribeTo {
+			inputPairs[key] = c.action.inputStreamConvertPair
+			outputPairs[key] = c.action.outputStreamConvertPair
+		}
+		inputPairs[END] = r.outputConvertStreamPair
+		outputPairs[START] = r.inputConvertStreamPair
+		r.checkPointer = newCheckPointer(inputPairs, outputPairs, opt.checkPointStore)
+
+		r.interruptBeforeNodes = opt.interruptBeforeNodes
+		r.interruptAfterNodes = opt.interruptAfterNodes
 		r.options = *opt
 	}
 
@@ -847,13 +834,8 @@ func (g *graph) compile(ctx context.Context, opt *graphCompileOptions) (*composa
 }
 
 func getSuccessors(c *chanCall) []string {
-	ret := make([]string, 0, len(c.writeTo))
-	for _, e := range c.writeTo {
-		if !e.noControlFlow {
-			ret = append(ret, e.endNode)
-		}
-	}
-
+	ret := make([]string, len(c.writeTo))
+	copy(ret, c.writeTo)
 	for _, branch := range c.writeToBranches {
 		for node := range branch.endNodes {
 			ret = append(ret, node)
@@ -892,27 +874,20 @@ func (gn *graphNode) beforeChildGraphCompile(nodeKey string, key2SubGraphs map[s
 }
 
 func (g *graph) toGraphInfo(opt *graphCompileOptions, key2SubGraphs map[string]*GraphInfo) *GraphInfo {
-	edges := make(map[string][]string, len(g.edges))
-	for k, v := range g.edges {
-		edges[k] = make([]string, len(v))
-		for i, e := range v {
-			edges[k][i] = e.endNode
-		}
-	}
-
 	gInfo := &GraphInfo{
 		CompileOptions: opt.origOpts,
 		Nodes:          make(map[string]GraphNodeInfo, len(g.nodes)),
-		Edges:          edges,
+		Edges:          gmap.Clone(g.controlEdges),
+		DataEdges:      gmap.Clone(g.dataEdges),
 		Branches: gmap.Map(g.branches, func(startNode string, branches []*GraphBranch) (string, []GraphBranch) {
 			branchInfo := make([]GraphBranch, 0, len(branches))
 			for _, b := range branches {
 				branchInfo = append(branchInfo, GraphBranch{
-					invoke:         b.invoke,
-					collect:        b.collect,
-					inputType:      b.inputType,
-					inputConverter: b.inputConverter,
-					endNodes:       gmap.Clone(b.endNodes),
+					invoke:        b.invoke,
+					collect:       b.collect,
+					inputType:     b.inputType,
+					genericHelper: b.genericHelper,
+					endNodes:      gmap.Clone(b.endNodes),
 				})
 			}
 			return startNode, branchInfo
@@ -976,6 +951,10 @@ func (g *graph) onCompileFinish(ctx context.Context, opt *graphCompileOptions, k
 	}
 }
 
+func (g *graph) getGenericHelper() *genericHelper {
+	return g.genericHelper
+}
+
 func (g *graph) GetType() string {
 	return ""
 }
@@ -1022,10 +1001,10 @@ func transferTask(script [][]string, invertedEdges map[string][]string) [][]stri
 	return script
 }
 
-func validateDAG(chanSubscribeTo map[string]*chanCall, invertedEdges map[string][]string) error {
+func validateDAG(chanSubscribeTo map[string]*chanCall, controlPredecessors map[string][]string) error {
 	m := map[string]int{}
 	for node := range chanSubscribeTo {
-		if edges, ok := invertedEdges[node]; ok {
+		if edges, ok := controlPredecessors[node]; ok {
 			m[node] = len(edges)
 			for _, pre := range edges {
 				if pre == START {
@@ -1042,13 +1021,11 @@ func validateDAG(chanSubscribeTo map[string]*chanCall, invertedEdges map[string]
 		for node := range m {
 			if m[node] == 0 {
 				hasChanged = true
-				for _, edge := range chanSubscribeTo[node].writeTo {
-					if !edge.noControlFlow {
-						if edge.endNode == END {
-							continue
-						}
-						m[edge.endNode]--
+				for _, subNode := range chanSubscribeTo[node].controls {
+					if subNode == END {
+						continue
 					}
+					m[subNode]--
 				}
 				for _, subBranch := range chanSubscribeTo[node].writeToBranches {
 					for subNode := range subBranch.endNodes {

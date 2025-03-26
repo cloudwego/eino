@@ -41,7 +41,8 @@ type GraphNodeInfo struct {
 type GraphInfo struct {
 	CompileOptions        []GraphCompileOption
 	Nodes                 map[string]GraphNodeInfo // node key -> node info
-	Edges                 map[string][]string      // edge start node key -> edge end node key
+	Edges                 map[string][]string      // edge start node key -> edge end node key, control edges
+	DataEdges             map[string][]string
 	Branches              map[string][]GraphBranch // branch start node key -> branch
 	InputType, OutputType reflect.Type
 	Name                  string

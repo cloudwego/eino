@@ -40,13 +40,13 @@ type StreamGraphMultiBranchCondition[T any] func(ctx context.Context, in *schema
 // GraphBranch is the branch type for the graph.
 // It is used to determine the next node based on the condition.
 type GraphBranch struct {
-	invoke         func(ctx context.Context, input any) (output []string, err error)
-	collect        func(ctx context.Context, input streamReader) (output []string, err error)
-	inputType      reflect.Type
-	inputConverter handlerPair
-	endNodes       map[string]bool
-	idx            int // used to distinguish branches in parallel
-	noDataFlow     bool
+	invoke    func(ctx context.Context, input any) (output []string, err error)
+	collect   func(ctx context.Context, input streamReader) (output []string, err error)
+	inputType reflect.Type
+	*genericHelper
+	endNodes   map[string]bool
+	idx        int // used to distinguish branches in parallel
+	noDataFlow bool
 }
 
 // GetEndNode returns the all end nodes of the branch.
@@ -70,12 +70,9 @@ func newGraphBranch[T any](r *runnablePacker[T, []string, any], endNodes map[str
 			}
 			return r.Collect(ctx, in)
 		},
-		inputType: generic.TypeOf[T](),
-		inputConverter: handlerPair{
-			invoke:    defaultValueChecker[T],
-			transform: defaultStreamConverter[T],
-		},
-		endNodes: endNodes,
+		inputType:     generic.TypeOf[T](),
+		genericHelper: newGenericHelper[T, T](),
+		endNodes:      endNodes,
 	}
 }
 

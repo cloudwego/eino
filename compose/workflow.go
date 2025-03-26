@@ -494,12 +494,8 @@ func (wf *Workflow[I, O]) initNode(key string) *WorkflowNode {
 	return n
 }
 
-func (wf *Workflow[I, O]) inputConverter() handlerPair {
-	return wf.g.inputConverter()
-}
-
-func (wf *Workflow[I, O]) inputFieldMappingConverter() handlerPair {
-	return wf.g.inputFieldMappingConverter()
+func (wf *Workflow[I, O]) getGenericHelper() *genericHelper {
+	return wf.g.getGenericHelper()
 }
 
 func (wf *Workflow[I, O]) inputType() reflect.Type {

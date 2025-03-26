@@ -23,10 +23,9 @@ import (
 
 // AnyGraph the identifiers for composable and compilable Graph[I, O]、Chain[I, O] in Eino.
 type AnyGraph interface {
+	getGenericHelper() *genericHelper
 	compile(ctx context.Context, options *graphCompileOptions) (*composableRunnable, error)
 	inputType() reflect.Type
 	outputType() reflect.Type
-	inputConverter() handlerPair
-	inputFieldMappingConverter() handlerPair
 	component() component
 }

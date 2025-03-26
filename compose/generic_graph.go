@@ -116,7 +116,7 @@ func (g *Graph[I, O]) AddEdge(startNode, endNode string) (err error) {
 //	runnable.Collect(ctx, inputReader) // collect
 //	runnable.Transform(ctx, inputReader) // transform
 func (g *Graph[I, O]) Compile(ctx context.Context, opts ...GraphCompileOption) (Runnable[I, O], error) {
-	return compileAnyGraph[I, O](ctx, g.graph, opts...)
+	return compileAnyGraph[I, O](ctx, g, opts...)
 }
 
 func compileAnyGraph[I, O any](ctx context.Context, g AnyGraph, opts ...GraphCompileOption) (Runnable[I, O], error) {

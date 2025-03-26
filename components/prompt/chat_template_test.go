@@ -113,12 +113,3 @@ func TestDocumentFormat(t *testing.T) {
 	assert.Nil(t, err)
 	t.Log(msgs)
 }
-
-func TestFString(t *testing.T) {
-	template := FromMessages(schema.FString,
-		schema.SystemMessage("{{all:{all_docs}"),
-	)
-	r, err := template.Format(context.Background(), map[string]any{"all_docs": "123"})
-	assert.Nil(t, err)
-	println(r[0].Content)
-}
