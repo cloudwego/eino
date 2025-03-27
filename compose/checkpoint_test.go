@@ -709,3 +709,60 @@ func TestDAGInterrupt(t *testing.T) {
 	assert.NoError(t, err)
 	assert.Equal(t, map[string]any{"1": "input", "2": "input"}, result)
 }
+
+func TestRerunNodeInterrupt(t *testing.T) {
+	RegisterSerializableType[testStruct]("test struct")
+
+	g := NewGraph[string, string](WithGenLocalState(func(ctx context.Context) (state *testStruct) {
+		return &testStruct{}
+	}))
+
+	times := 0
+	err := g.AddLambdaNode("1", InvokableLambda(func(ctx context.Context, input string) (output string, err error) {
+		defer func() { times++ }()
+		if times%2 == 0 {
+			return "", InterruptAndRerun
+		}
+		return input, nil
+	}), WithStatePreHandler(func(ctx context.Context, in string, state *testStruct) (string, error) {
+		return state.A, nil
+	}))
+	assert.NoError(t, err)
+
+	err = g.AddEdge(START, "1")
+	assert.NoError(t, err)
+	err = g.AddEdge("1", END)
+	assert.NoError(t, err)
+
+	ctx := context.Background()
+	r, err := g.Compile(ctx, WithCheckPointStore(newInMemoryStore()))
+	assert.NoError(t, err)
+
+	_, err = r.Invoke(ctx, "input", WithCheckPointID("1"))
+	info, existed := ExtractInterruptInfo(err)
+	assert.True(t, existed)
+	assert.Equal(t, []string{"1"}, info.RerunNodes)
+
+	result, err := r.Invoke(ctx, "", WithCheckPointID("1"), WithStateModifier(func(ctx context.Context, path NodePath, state any) error {
+		state.(*testStruct).A = "state"
+		return nil
+	}))
+	assert.NoError(t, err)
+	assert.Equal(t, "state", result)
+
+	_, err = r.Stream(ctx, "input", WithCheckPointID("2"))
+	info, existed = ExtractInterruptInfo(err)
+	assert.True(t, existed)
+	assert.Equal(t, []string{"1"}, info.RerunNodes)
+
+	streamResult, err := r.Stream(ctx, "", WithCheckPointID("2"), WithStateModifier(func(ctx context.Context, path NodePath, state any) error {
+		state.(*testStruct).A = "state"
+		return nil
+	}))
+	assert.NoError(t, err)
+	chunk, err := streamResult.Recv()
+	assert.NoError(t, err)
+	assert.Equal(t, "state", chunk)
+	_, err = streamResult.Recv()
+	assert.Equal(t, io.EOF, err)
+}

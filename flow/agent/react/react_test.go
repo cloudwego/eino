@@ -373,7 +373,13 @@ func TestReactWithModifier(t *testing.T) {
 		ToolsConfig: compose.ToolsNodeConfig{
 			Tools: []tool.BaseTool{fakeTool},
 		},
-		MessageModifier: NewPersonaModifier("you are a helpful assistant"),
+		MessageModifier: func(ctx context.Context, input []*schema.Message) []*schema.Message {
+			res := make([]*schema.Message, 0, len(input)+1)
+
+			res = append(res, schema.SystemMessage("you are a helpful assistant"))
+			res = append(res, input...)
+			return res
+		},
 
 		MaxStep: 40,
 	})
