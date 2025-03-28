@@ -1257,6 +1257,7 @@ func TestGraphCompileCallback(t *testing.T) {
 			InputType:  reflect.TypeOf(map[string]any{}),
 			OutputType: reflect.TypeOf(map[string]any{}),
 			Name:       "top_level",
+			StateType:  reflect.TypeOf(&s{}),
 		}
 
 		stateFn := c.gInfo.GenStateFn

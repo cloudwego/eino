@@ -47,6 +47,7 @@ type GraphInfo struct {
 	InputType, OutputType reflect.Type
 	Name                  string
 
+	StateType  reflect.Type
 	GenStateFn func(context.Context) any
 }
 

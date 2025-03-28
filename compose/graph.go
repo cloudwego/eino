@@ -890,6 +890,7 @@ func (g *graph) toGraphInfo(opt *graphCompileOptions, key2SubGraphs map[string]*
 		InputType:  g.expectedInputType,
 		OutputType: g.expectedOutputType,
 		Name:       opt.graphName,
+		StateType:  g.stateType,
 		GenStateFn: g.stateGenerator,
 	}
 
