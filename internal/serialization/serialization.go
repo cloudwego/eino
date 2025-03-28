@@ -51,6 +51,13 @@ func init() {
 
 	_ = GenericRegister[schema.Message]("_eino_message")
 	_ = GenericRegister[schema.Document]("_eino_document")
+	_ = GenericRegister[schema.RoleType]("_eino_role_type")
+	_ = GenericRegister[schema.ChatMessagePart]("_eino_chat_message_type")
+	_ = GenericRegister[schema.ToolCall]("_eino_tool_call")
+	_ = GenericRegister[schema.FunctionCall]("_eino_function_call")
+	_ = GenericRegister[schema.ResponseMeta]("_eino_response_meta")
+	_ = GenericRegister[schema.TokenUsage]("_eino_token_usage")
+	_ = GenericRegister[schema.LogProbs]("_eino_log_probs")
 }
 
 func GenericRegister[T any](key string) error {
