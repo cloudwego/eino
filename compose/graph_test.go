@@ -1257,12 +1257,14 @@ func TestGraphCompileCallback(t *testing.T) {
 			InputType:  reflect.TypeOf(map[string]any{}),
 			OutputType: reflect.TypeOf(map[string]any{}),
 			Name:       "top_level",
-			StateType:  reflect.TypeOf(&s{}),
 		}
 
 		stateFn := c.gInfo.GenStateFn
 		assert.NotNil(t, stateFn)
 		assert.Equal(t, &s{}, stateFn(context.Background()))
+
+		assert.Equal(t, 1, len(c.gInfo.NewGraphOptions))
+		c.gInfo.NewGraphOptions = nil
 
 		c.gInfo.GenStateFn = nil
 

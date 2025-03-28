@@ -76,6 +76,7 @@ func NewGraph[I, O any](opts ...NewGraphOption) *Graph[I, O] {
 			ComponentOfGraph,
 			options.withState,
 			options.stateType,
+			opts,
 		),
 	}
 

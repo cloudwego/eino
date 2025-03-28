@@ -47,8 +47,8 @@ type GraphInfo struct {
 	InputType, OutputType reflect.Type
 	Name                  string
 
-	StateType  reflect.Type
-	GenStateFn func(context.Context) any
+	NewGraphOptions []NewGraphOption
+	GenStateFn      func(context.Context) any
 }
 
 // GraphCompileCallback is the callback which will be called when graph compilation finishes.

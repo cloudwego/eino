@@ -68,6 +68,7 @@ type graph struct {
 
 	stateType      reflect.Type
 	stateGenerator func(ctx context.Context) any
+	newOpts        []NewGraphOption
 
 	expectedInputType, expectedOutputType reflect.Type
 
@@ -92,12 +93,14 @@ type newGraphConfig struct {
 	cmp                   component
 	stateType             reflect.Type
 	stateGenerator        func(ctx context.Context) any
+	newOpts               []NewGraphOption
 }
 
 func newGraphFromGeneric[I, O any](
 	cmp component,
 	stateGenerator func(ctx context.Context) any,
 	stateType reflect.Type,
+	opts []NewGraphOption,
 ) *graph {
 	return newGraph(&newGraphConfig{
 		inputType:      generic.TypeOf[I](),
@@ -106,6 +109,7 @@ func newGraphFromGeneric[I, O any](
 		cmp:            cmp,
 		stateType:      stateType,
 		stateGenerator: stateGenerator,
+		newOpts:        opts,
 	})
 }
 
@@ -129,8 +133,10 @@ func newGraph(cfg *newGraphConfig) *graph {
 
 		cmp: cfg.cmp,
 
-		stateType:        cfg.stateType,
-		stateGenerator:   cfg.stateGenerator,
+		stateType:      cfg.stateType,
+		stateGenerator: cfg.stateGenerator,
+		newOpts:        cfg.newOpts,
+
 		handlerOnEdges:   make(map[string]map[string][]handlerPair),
 		handlerPreNode:   make(map[string][]handlerPair),
 		handlerPreBranch: make(map[string][][]handlerPair),
@@ -887,11 +893,11 @@ func (g *graph) toGraphInfo(opt *graphCompileOptions, key2SubGraphs map[string]*
 			}
 			return startNode, branchInfo
 		}),
-		InputType:  g.expectedInputType,
-		OutputType: g.expectedOutputType,
-		Name:       opt.graphName,
-		StateType:  g.stateType,
-		GenStateFn: g.stateGenerator,
+		InputType:       g.expectedInputType,
+		OutputType:      g.expectedOutputType,
+		Name:            opt.graphName,
+		GenStateFn:      g.stateGenerator,
+		NewGraphOptions: g.newOpts,
 	}
 
 	for key := range g.nodes {

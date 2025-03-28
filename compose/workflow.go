@@ -69,6 +69,7 @@ func NewWorkflow[I, O any](opts ...NewGraphOption) *Workflow[I, O] {
 			ComponentOfWorkflow,
 			options.withState,
 			options.stateType,
+			opts,
 		),
 		workflowNodes: make(map[string]*WorkflowNode),
 		dependencies:  make(map[string]map[string]dependencyType),
