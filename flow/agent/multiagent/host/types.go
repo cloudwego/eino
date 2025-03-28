@@ -39,25 +39,11 @@ type MultiAgent struct {
 }
 
 func (ma *MultiAgent) Generate(ctx context.Context, input []*schema.Message, opts ...agent.AgentOption) (*schema.Message, error) {
-	composeOptions := agent.GetComposeOptions(opts...)
-
-	handler := convertCallbacks(opts...)
-	if handler != nil {
-		composeOptions = append(composeOptions, compose.WithCallbacks(handler).DesignateNode(ma.HostNodeKey()))
-	}
-
-	return ma.runnable.Invoke(ctx, input, composeOptions...)
+	return ma.runnable.Invoke(ctx, input, ConvertOptions(nil, opts...)...)
 }
 
 func (ma *MultiAgent) Stream(ctx context.Context, input []*schema.Message, opts ...agent.AgentOption) (*schema.StreamReader[*schema.Message], error) {
-	composeOptions := agent.GetComposeOptions(opts...)
-
-	handler := convertCallbacks(opts...)
-	if handler != nil {
-		composeOptions = append(composeOptions, compose.WithCallbacks(handler).DesignateNode(ma.HostNodeKey()))
-	}
-
-	return ma.runnable.Stream(ctx, input, composeOptions...)
+	return ma.runnable.Stream(ctx, input, ConvertOptions(nil, opts...)...)
 }
 
 // ExportGraph exports the underlying graph from MultiAgent, along with the []compose.GraphAddNodeOpt to be used when adding this graph to another graph.

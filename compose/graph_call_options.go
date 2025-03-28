@@ -82,6 +82,10 @@ func (o Option) DesignateNodeWithPath(path ...*NodePath) Option {
 	return o
 }
 
+func (o Option) Paths() []*NodePath {
+	return o.paths
+}
+
 // WithEmbeddingOption is a functional option type for embedding component.
 // e.g.
 //

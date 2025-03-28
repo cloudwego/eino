@@ -327,7 +327,7 @@ func getReturnDirectlyToolCallID(input *schema.Message, toolReturnDirectly map[s
 
 // Generate generates a response from the agent.
 func (r *Agent) Generate(ctx context.Context, input []*schema.Message, opts ...agent.AgentOption) (output *schema.Message, err error) {
-	output, err = r.runnable.Invoke(ctx, input, agent.GetComposeOptions(opts...)...)
+	output, err = r.runnable.Invoke(ctx, input, ConvertOptions(nil, opts...)...)
 	if err != nil {
 		return nil, err
 	}
@@ -338,7 +338,7 @@ func (r *Agent) Generate(ctx context.Context, input []*schema.Message, opts ...a
 // Stream calls the agent and returns a stream response.
 func (r *Agent) Stream(ctx context.Context, input []*schema.Message, opts ...agent.AgentOption) (
 	output *schema.StreamReader[*schema.Message], err error) {
-	res, err := r.runnable.Stream(ctx, input, agent.GetComposeOptions(opts...)...)
+	res, err := r.runnable.Stream(ctx, input, ConvertOptions(nil, opts...)...)
 	if err != nil {
 		return nil, err
 	}

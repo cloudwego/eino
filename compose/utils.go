@@ -238,7 +238,7 @@ func initNodeCallbacks(ctx context.Context, key string, info *nodeInfo, meta *ex
 		if len(opts[i].handler) != 0 {
 			if len(opts[i].paths) != 0 {
 				for _, k := range opts[i].paths {
-					if len(k.path) == 1 && k.path[0] == key {
+					if len(k.Path()) == 1 && k.Path()[0] == key {
 						cbs = append(cbs, opts[i].handler...)
 						break
 					}
@@ -314,18 +314,18 @@ func extractOption(nodes map[string]*chanCall, opts ...Option) (map[string][]any
 			}
 		}
 		for _, path := range opt.paths {
-			if len(path.path) == 0 {
+			if len(path.Path()) == 0 {
 				return nil, fmt.Errorf("call option has designated an empty path")
 			}
 
 			var curNode *chanCall
 			var ok bool
-			if curNode, ok = nodes[path.path[0]]; !ok {
+			if curNode, ok = nodes[path.Path()[0]]; !ok {
 				return nil, fmt.Errorf("option has designated an unknown node: %s", path)
 			}
-			curNodeKey := path.path[0]
+			curNodeKey := path.Path()[0]
 
-			if len(path.path) == 1 {
+			if len(path.Path()) == 1 {
 				if len(opt.options) == 0 {
 					// sub graph common callbacks has been added to ctx in initNodeCallback and won't be passed to subgraph only pass options
 					// node callback also won't be passed
@@ -350,7 +350,7 @@ func extractOption(nodes map[string]*chanCall, opts ...Option) (map[string][]any
 				}
 				// designate to sub graph's nodes
 				nOpt := opt.deepCopy()
-				nOpt.paths = []*NodePath{NewNodePath(path.path[1:]...)}
+				nOpt.paths = []*NodePath{NewNodePath(path.Path()[1:]...)}
 				optMap[curNodeKey] = append(optMap[curNodeKey], nOpt)
 			}
 		}
