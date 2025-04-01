@@ -326,24 +326,13 @@ func getReturnDirectlyToolCallID(input *schema.Message, toolReturnDirectly map[s
 }
 
 // Generate generates a response from the agent.
-func (r *Agent) Generate(ctx context.Context, input []*schema.Message, opts ...agent.AgentOption) (output *schema.Message, err error) {
-	output, err = r.runnable.Invoke(ctx, input, agent.GetComposeOptions(opts...)...)
-	if err != nil {
-		return nil, err
-	}
-
-	return output, nil
+func (r *Agent) Generate(ctx context.Context, input []*schema.Message, opts ...agent.AgentOption) (*schema.Message, error) {
+	return r.runnable.Invoke(ctx, input, agent.GetComposeOptions(opts...)...)
 }
 
 // Stream calls the agent and returns a stream response.
-func (r *Agent) Stream(ctx context.Context, input []*schema.Message, opts ...agent.AgentOption) (
-	output *schema.StreamReader[*schema.Message], err error) {
-	res, err := r.runnable.Stream(ctx, input, agent.GetComposeOptions(opts...)...)
-	if err != nil {
-		return nil, err
-	}
-
-	return res, nil
+func (r *Agent) Stream(ctx context.Context, input []*schema.Message, opts ...agent.AgentOption) (output *schema.StreamReader[*schema.Message], err error) {
+	return r.runnable.Stream(ctx, input, agent.GetComposeOptions(opts...)...)
 }
 
 // ExportGraph exports the underlying graph from Agent, along with the []compose.GraphAddNodeOpt to be used when adding this graph to another graph.
