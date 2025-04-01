@@ -529,8 +529,62 @@ func TestWorkflowWithNestedFieldMappings(t *testing.T) {
 	t.Run("to struct.any.field", func(t *testing.T) {
 		wf := NewWorkflow[string, *structB]()
 		wf.End().AddInput(START, ToFieldPath([]string{"F4", "F1", "F1"}))
+		r, err := wf.Compile(ctx)
+		assert.NoError(t, err)
+		out, err := r.Invoke(ctx, "hello")
+		assert.NoError(t, err)
+		assert.Equal(t, &structB{
+			F4: map[string]any{
+				"F1": map[string]any{
+					"F1": "hello",
+				},
+			},
+		}, out)
+	})
+
+	t.Run("to map.any.any.field", func(t *testing.T) {
+		wf := NewWorkflow[string, map[string]any]()
+		wf.End().AddInput(START, ToFieldPath([]string{"Key1", "Key2", "Key3"}))
+		r, err := wf.Compile(ctx)
+		assert.NoError(t, err)
+		out, err := r.Invoke(ctx, "hello")
+		assert.NoError(t, err)
+		assert.Equal(t, map[string]any{
+			"Key1": map[string]any{
+				"Key2": map[string]any{
+					"Key3": "hello",
+				},
+			},
+		}, out)
+	})
+
+	t.Run("to any", func(t *testing.T) {
+		wf := NewWorkflow[string, any]()
+		wf.End().AddInput(START)
+		r, err := wf.Compile(ctx)
+		assert.NoError(t, err)
+		out, err := r.Invoke(ctx, "hello")
+		assert.NoError(t, err)
+		assert.Equal(t, "hello", out)
+	})
+
+	t.Run("to any.field", func(t *testing.T) {
+		wf := NewWorkflow[string, any]()
+		wf.End().AddInput(START, ToFieldPath([]string{"Key1"}))
+		r, err := wf.Compile(ctx)
+		assert.NoError(t, err)
+		out, err := r.Invoke(ctx, "hello")
+		assert.NoError(t, err)
+		assert.Equal(t, map[string]any{
+			"Key1": "hello",
+		}, out)
+	})
+
+	t.Run("both to map.any, and to map.any.field", func(t *testing.T) {
+		wf := NewWorkflow[string, map[string]any]()
+		wf.End().AddInput(START, ToFieldPath([]string{"Key1"}), ToFieldPath([]string{"Key1", "Key2"}))
 		_, err := wf.Compile(ctx)
-		assert.ErrorContains(t, err, "the successor has intermediate interface type interface {}")
+		assert.ErrorContains(t, err, "two terminal field paths conflict")
 	})
 
 	t.Run("from nested to nested", func(t *testing.T) {
@@ -679,7 +733,7 @@ func TestFanInToSameDest(t *testing.T) {
 		}), WithOutputKey("B")).AddInput(START, FromField("B"))
 		wf.End().AddInput("1", ToField("F")).AddInput("2", ToField("F"))
 		_, err := wf.Compile(context.Background())
-		assert.ErrorContains(t, err, "field path F already mapped for node: end")
+		assert.ErrorContains(t, err, "two terminal field paths conflict for node end: [F], [F]")
 	})
 }
 
@@ -764,7 +818,7 @@ func TestDependencyWithNoInput(t *testing.T) {
 	})
 }
 
-func TestPrefilledValue(t *testing.T) {
+func TestStaticValue(t *testing.T) {
 	t.Run("prefill map", func(t *testing.T) {
 		wf := NewWorkflow[string, map[string]any]()
 		wf.AddLambdaNode("0", InvokableLambda(func(ctx context.Context, in map[string]any) (output map[string]any, err error) {
@@ -778,6 +832,33 @@ func TestPrefilledValue(t *testing.T) {
 		out, err := r.Invoke(context.Background(), "hello")
 		assert.NoError(t, err)
 		assert.Equal(t, map[string]any{"prefilled": "yo-ho", START: "hello"}, out)
+	})
+
+	t.Run("static value and to-all mapping conflict", func(t *testing.T) {
+		wf := NewWorkflow[map[string]any, map[string]any]()
+		wf.AddLambdaNode("0", InvokableLambda(func(ctx context.Context, in map[string]any) (output map[string]any, err error) {
+			return in, nil
+		})).
+			AddInput(START).
+			SetStaticValue(
+				FieldPath{"prefilled"},
+				"yo-ho",
+			)
+		wf.End().AddInput("0")
+		_, err := wf.Compile(context.Background())
+		assert.ErrorContains(t, err, "entire output has already been mapped for node: 0")
+	})
+
+	t.Run("static value and dynamic mapping conflict", func(t *testing.T) {
+		wf := NewWorkflow[string, map[string]any]()
+		wf.AddLambdaNode("0", InvokableLambda(func(ctx context.Context, in map[string]any) (output map[string]any, err error) {
+			return in, nil
+		})).
+			AddInput(START, ToField("prefilled")).
+			SetStaticValue(FieldPath{"prefilled"}, "yo-ho")
+		wf.End().AddInput("0")
+		_, err := wf.Compile(context.Background())
+		assert.ErrorContains(t, err, "two terminal field paths conflict for node 0: [prefilled], [prefilled]")
 	})
 }
 

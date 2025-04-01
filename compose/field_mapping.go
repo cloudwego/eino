@@ -34,10 +34,6 @@ type FieldMapping struct {
 	to          string
 }
 
-func (m *FieldMapping) empty() bool {
-	return len(m.from) == 0 && len(m.to) == 0
-}
-
 // String returns the string representation of the FieldMapping.
 func (m *FieldMapping) String() string {
 	var sb strings.Builder
@@ -103,7 +99,12 @@ func (fp *FieldPath) join() string {
 }
 
 func splitFieldPath(path string) FieldPath {
-	return strings.Split(path, pathSeparator)
+	p := strings.Split(path, pathSeparator)
+	if len(p) == 1 && p[0] == "" {
+		return FieldPath{}
+	}
+
+	return p
 }
 
 // pathSeparator is a special character (Unit Separator) used internally to join path elements.
@@ -158,6 +159,10 @@ func MapFieldPaths(fromFieldPath, toFieldPath FieldPath) *FieldMapping {
 	}
 }
 
+func (m *FieldMapping) targetPath() FieldPath {
+	return splitFieldPath(m.to)
+}
+
 func buildFieldMappingConverter[I any]() func(input any) (any, error) {
 	return func(input any) (any, error) {
 		in, ok := input.(map[string]any)
@@ -166,16 +171,6 @@ func buildFieldMappingConverter[I any]() func(input any) (any, error) {
 		}
 
 		return convertTo(in, generic.TypeOf[I]())
-	}
-}
-
-func buildFieldMappingConverterWithReflect(typ reflect.Type) func(input any) (any, error) {
-	return func(input any) (any, error) {
-		in, ok := input.(map[string]any)
-		if !ok {
-			panic(newUnexpectedInputTypeErr(reflect.TypeOf(map[string]any{}), reflect.TypeOf(input)))
-		}
-		return convertTo(in, typ)
 	}
 }
 
@@ -193,19 +188,6 @@ func buildStreamFieldMappingConverter[I any]() func(input streamReader) streamRe
 				return i, err
 			}
 			return t.(I), nil
-		}))
-	}
-}
-
-func buildStreamFieldMappingConverterWithReflect(typ reflect.Type) func(input streamReader) streamReader {
-	return func(input streamReader) streamReader {
-		s, ok := unpackStreamReader[map[string]any](input)
-		if !ok {
-			panic("mappingStreamAssign incoming streamReader chunk type not map[string]any")
-		}
-
-		return packStreamReader(schema.StreamReaderWithConvert(s, func(v map[string]any) (any, error) {
-			return convertTo(v, typ)
 		}))
 	}
 }
@@ -253,6 +235,12 @@ func assignOne(destValue reflect.Value, taken any, to string) (reflect.Value, er
 		if len(toPaths) == 0 {
 			toSet := reflect.ValueOf(taken)
 
+			if destValue.Type() == reflect.TypeOf((*any)(nil)).Elem() {
+				mapValue := reflect.MakeMap(reflect.TypeOf(map[string]any{}))
+				destValue.Set(mapValue)
+				destValue = mapValue
+			}
+
 			if destValue.Kind() == reflect.Map {
 				key, err := checkAndExtractToMapKey(path, destValue, toSet)
 				if err != nil {
@@ -280,6 +268,12 @@ func assignOne(destValue reflect.Value, taken any, to string) (reflect.Value, er
 			}
 
 			return originalDestValue, nil
+		}
+
+		if destValue.Type() == reflect.TypeOf((*any)(nil)).Elem() {
+			mapValue := reflect.MakeMap(reflect.TypeOf(map[string]any{}))
+			destValue.Set(mapValue)
+			destValue = mapValue
 		}
 
 		if destValue.Kind() == reflect.Map {
@@ -327,10 +321,9 @@ func assignOne(destValue reflect.Value, taken any, to string) (reflect.Value, er
 
 		if parentMap.IsValid() {
 			parentMap.SetMapIndex(reflect.ValueOf(parentKey), ptrValue)
+			parentMap = reflect.Value{}
+			parentKey = ""
 		}
-
-		parentMap = reflect.Value{}
-		parentKey = ""
 
 		destValue = field
 	}
@@ -641,7 +634,7 @@ func validateFieldMapping(predecessorType reflect.Type, successorType reflect.Ty
 	// check if mapping is legal
 	if isFromAll(mappings) && isToAll(mappings) {
 		return nil, fmt.Errorf("invalid field mappings: from all fields to all, use common edge instead")
-	} else if !isToAll(mappings) && !validateStructOrMap(successorType) {
+	} else if !isToAll(mappings) && (!validateStructOrMap(successorType) && successorType != reflect.TypeOf((*any)(nil)).Elem()) {
 		// if user has not provided a specific struct type, graph cannot construct any struct in the runtime
 		return nil, fmt.Errorf("static check fail: successor input type should be struct or map, actual: %v", successorType)
 	} else if !isFromAll(mappings) && !validateStructOrMap(predecessorType) {
@@ -667,6 +660,9 @@ func validateFieldMapping(predecessorType reflect.Type, successorType reflect.Ty
 		}
 
 		if successorIntermediateInterface {
+			if successorFieldType == reflect.TypeOf((*any)(nil)).Elem() {
+				continue // at request time expand this 'any' to 'map[string]any'
+			}
 			return nil, fmt.Errorf("static check failed for mapping %s, the successor has intermediate interface type %v", mapping, successorFieldType)
 		}
 

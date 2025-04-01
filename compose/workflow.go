@@ -37,7 +37,7 @@ type WorkflowNode struct {
 	addInputs        []func() error
 	staticValues     map[string]any
 	dependencySetter func(fromNodeKey string, typ dependencyType)
-	mappedFieldPath  map[string]struct{}
+	mappedFieldPath  map[string]any
 }
 
 // Workflow is wrapper of graph, replacing AddEdge with declaring dependencies and field mappings between nodes.
@@ -289,15 +289,12 @@ func (n *WorkflowNode) addDependencyRelation(fromNodeKey string, inputs []*Field
 
 	if options.noDirectDependency {
 		n.addInputs = append(n.addInputs, func() error {
+			var paths []FieldPath
 			for _, input := range inputs {
-				if _, ok := n.mappedFieldPath[input.to]; ok {
-					return fmt.Errorf("field path %s already mapped for node: %s", input.to, n.key)
-				}
-				n.mappedFieldPath[input.to] = struct{}{}
+				paths = append(paths, input.targetPath())
 			}
-
-			if len(inputs) == 0 {
-				n.mappedFieldPath[""] = struct{}{}
+			if err := n.checkAndAddMappedPath(paths); err != nil {
+				return err
 			}
 
 			if err := n.g.addEdgeWithMappings(fromNodeKey, n.key, true, false, inputs...); err != nil {
@@ -319,15 +316,12 @@ func (n *WorkflowNode) addDependencyRelation(fromNodeKey string, inputs []*Field
 		})
 	} else {
 		n.addInputs = append(n.addInputs, func() error {
+			var paths []FieldPath
 			for _, input := range inputs {
-				if _, ok := n.mappedFieldPath[input.to]; ok {
-					return fmt.Errorf("field path %s already mapped for node: %s", input.to, n.key)
-				}
-				n.mappedFieldPath[input.to] = struct{}{}
+				paths = append(paths, input.targetPath())
 			}
-
-			if len(inputs) == 0 {
-				n.mappedFieldPath[""] = struct{}{}
+			if err := n.checkAndAddMappedPath(paths); err != nil {
+				return err
 			}
 
 			if err := n.g.addEdgeWithMappings(fromNodeKey, n.key, false, false, inputs...); err != nil {
@@ -339,6 +333,43 @@ func (n *WorkflowNode) addDependencyRelation(fromNodeKey string, inputs []*Field
 	}
 
 	return n
+}
+
+func (n *WorkflowNode) checkAndAddMappedPath(paths []FieldPath) error {
+	if v, ok := n.mappedFieldPath[""]; ok {
+		if _, ok = v.(struct{}); ok {
+			return fmt.Errorf("entire output has already been mapped for node: %s", n.key)
+		}
+	} else {
+		if len(paths) == 0 {
+			n.mappedFieldPath[""] = struct{}{}
+			return nil
+		} else {
+			n.mappedFieldPath[""] = map[string]any{}
+		}
+	}
+
+	for _, targetPath := range paths {
+		m := n.mappedFieldPath[""].(map[string]any)
+		var traversed FieldPath
+		for i, path := range targetPath {
+			traversed = append(traversed, path)
+			if v, ok := m[path]; ok {
+				if _, ok = v.(struct{}); ok {
+					return fmt.Errorf("two terminal field paths conflict for node %s: %v, %v", n.key, traversed, targetPath)
+				}
+			}
+
+			if i < len(targetPath)-1 {
+				m[path] = make(map[string]any)
+				m = m[path].(map[string]any)
+			} else {
+				m[path] = struct{}{}
+			}
+		}
+	}
+
+	return nil
 }
 
 type WorkflowBranch struct {
@@ -404,15 +435,15 @@ func (wf *Workflow[I, O]) compile(ctx context.Context, options *graphCompileOpti
 	for _, n := range wf.workflowNodes {
 		if len(n.staticValues) > 0 {
 			value := make(map[string]any, len(n.staticValues))
+			var paths []FieldPath
 			for path, v := range n.staticValues {
 				value[path] = v
+				paths = append(paths, splitFieldPath(path))
 			}
 
-			if _, ok := n.mappedFieldPath[n.key]; ok {
-				return nil, fmt.Errorf("field path %s already mapped for node: %s", n.key, n.key)
+			if err := n.checkAndAddMappedPath(paths); err != nil {
+				return nil, err
 			}
-
-			n.mappedFieldPath[n.key] = struct{}{}
 
 			pair := handlerPair{
 				invoke: func(in any) (any, error) {
@@ -459,7 +490,7 @@ func (wf *Workflow[I, O]) initNode(key string) *WorkflowNode {
 			}
 			wf.dependencies[key][fromNodeKey] = typ
 		},
-		mappedFieldPath: make(map[string]struct{}),
+		mappedFieldPath: make(map[string]any),
 	}
 	wf.workflowNodes[key] = n
 	return n
