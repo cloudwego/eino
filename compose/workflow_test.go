@@ -587,6 +587,23 @@ func TestWorkflowWithNestedFieldMappings(t *testing.T) {
 		assert.ErrorContains(t, err, "two terminal field paths conflict")
 	})
 
+	t.Run("to map.any.any.field1, and to map.any.any.field2", func(t *testing.T) {
+		wf := NewWorkflow[string, map[string]any]()
+		wf.End().AddInput(START, ToFieldPath([]string{"Key1", "Key2", "key3"}), ToFieldPath([]string{"Key1", "Key2", "key4"}))
+		r, err := wf.Compile(ctx)
+		assert.NoError(t, err)
+		out, err := r.Invoke(ctx, "hello")
+		assert.NoError(t, err)
+		assert.Equal(t, map[string]any{
+			"Key1": map[string]any{
+				"Key2": map[string]any{
+					"key3": "hello",
+					"key4": "hello",
+				},
+			},
+		}, out)
+	})
+
 	t.Run("from nested to nested", func(t *testing.T) {
 		wf := NewWorkflow[map[string]any, *structB]()
 		wf.End().AddInput(START, MapFieldPaths([]string{"key1", "key2"}, []string{"F1", "F1"}))

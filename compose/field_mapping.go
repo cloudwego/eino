@@ -236,9 +236,14 @@ func assignOne(destValue reflect.Value, taken any, to string) (reflect.Value, er
 			toSet := reflect.ValueOf(taken)
 
 			if destValue.Type() == reflect.TypeOf((*any)(nil)).Elem() {
-				mapValue := reflect.MakeMap(reflect.TypeOf(map[string]any{}))
-				destValue.Set(mapValue)
-				destValue = mapValue
+				existingMap, ok := destValue.Interface().(map[string]any)
+				if ok {
+					destValue = reflect.ValueOf(existingMap)
+				} else {
+					mapValue := reflect.MakeMap(reflect.TypeOf(map[string]any{}))
+					destValue.Set(mapValue)
+					destValue = mapValue
+				}
 			}
 
 			if destValue.Kind() == reflect.Map {
@@ -271,9 +276,14 @@ func assignOne(destValue reflect.Value, taken any, to string) (reflect.Value, er
 		}
 
 		if destValue.Type() == reflect.TypeOf((*any)(nil)).Elem() {
-			mapValue := reflect.MakeMap(reflect.TypeOf(map[string]any{}))
-			destValue.Set(mapValue)
-			destValue = mapValue
+			existingMap, ok := destValue.Interface().(map[string]any)
+			if ok {
+				destValue = reflect.ValueOf(existingMap)
+			} else {
+				mapValue := reflect.MakeMap(reflect.TypeOf(map[string]any{}))
+				destValue.Set(mapValue)
+				destValue = mapValue
+			}
 		}
 
 		if destValue.Kind() == reflect.Map {
