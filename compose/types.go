@@ -38,9 +38,8 @@ const (
 type NodeTriggerMode string
 
 const (
-	// AnyPredecessor means that the current node will be triggered as long as any of its predecessor nodes has finished running.
-	// Note that actual implementation organizes node execution in batches.
-	// In this context, 'any predecessor finishes' would means the other nodes of the same batch need to be finished too.
+	// AnyPredecessor means that the node will be triggered when any of its predecessors is included in the previous completed super step.
+	// Ref:https://www.cloudwego.io/docs/eino/core_modules/chain_and_graph_orchestration/orchestration_design_principles/#runtime-engine
 	AnyPredecessor NodeTriggerMode = "any_predecessor"
 	// AllPredecessor means that the current node will only be triggered when all of its predecessor nodes have finished running.
 	AllPredecessor NodeTriggerMode = "all_predecessor"

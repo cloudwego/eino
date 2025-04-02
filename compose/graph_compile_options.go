@@ -65,8 +65,9 @@ func WithGraphName(graphName string) GraphCompileOption {
 	}
 }
 
-// WithNodeTriggerMode sets node trigger mode for the graph.
-// Different node trigger mode will affect graph execution order and result for specific graphs, such as those with parallel branches having different length of nodes.
+// WithNodeTriggerMode sets the trigger mode for nodes in the graph.
+// The trigger mode determines when a node is triggered during graph execution, ref: https://www.cloudwego.io/docs/eino/core_modules/chain_and_graph_orchestration/orchestration_design_principles/#internal-mechanism
+// AnyPredecessor by default.
 func WithNodeTriggerMode(triggerMode NodeTriggerMode) GraphCompileOption {
 	return func(o *graphCompileOptions) {
 		o.nodeTriggerMode = triggerMode
