@@ -451,18 +451,19 @@ func (wf *Workflow[I, O]) compile(ctx context.Context, options *graphCompileOpti
 					return mergeValues(values)
 				},
 				transform: func(in streamReader) streamReader {
-					s, ok := unpackStreamReader[map[string]any](in)
-					if !ok {
-						panic("static value setter incoming streamReader chunk type not map[string]any")
-					}
-
 					sr, sw := schema.Pipe[map[string]any](1)
 					sw.Send(value, nil)
 					sw.Close()
 
-					newS := schema.MergeStreamReaders([]*schema.StreamReader[map[string]any]{s, sr})
+					newS, err := mergeValues([]any{in, packStreamReader(sr)})
+					if err != nil {
+						errSR, errSW := schema.Pipe[map[string]any](1)
+						errSW.Send(nil, err)
+						errSW.Close()
+						return packStreamReader(errSR)
+					}
 
-					return packStreamReader(newS)
+					return newS.(streamReader)
 				},
 			}
 

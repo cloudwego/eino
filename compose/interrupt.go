@@ -37,6 +37,7 @@ type InterruptInfo struct {
 	State       any
 	BeforeNodes []string
 	AfterNodes  []string
+	RerunNodes  []string
 	SubGraphs   map[string]*InterruptInfo
 }
 

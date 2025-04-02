@@ -849,6 +849,20 @@ func TestStaticValue(t *testing.T) {
 		out, err := r.Invoke(context.Background(), "hello")
 		assert.NoError(t, err)
 		assert.Equal(t, map[string]any{"prefilled": "yo-ho", START: "hello"}, out)
+		streamOut, err := r.Stream(context.Background(), "hello")
+		assert.NoError(t, err)
+		out = map[string]any{}
+		for {
+			chunk, err := streamOut.Recv()
+			if err == io.EOF {
+				break
+			}
+			assert.NoError(t, err)
+			for k, v := range chunk {
+				out[k] = v
+			}
+		}
+		assert.Equal(t, map[string]any{"prefilled": "yo-ho", START: "hello"}, out)
 	})
 
 	t.Run("static value and to-all mapping conflict", func(t *testing.T) {
