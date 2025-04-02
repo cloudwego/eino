@@ -88,6 +88,27 @@ func NewMultiAgent(ctx context.Context, config *MultiAgentConfig) (*MultiAgent, 
 		agentMap[specialist.Name] = true
 	}
 
+	for i := range config.SwarmAgents {
+		swarmAgent := config.SwarmAgents[i]
+
+		agentTools = append(agentTools, &schema.ToolInfo{
+			Name: swarmAgent.Name,
+			Desc: swarmAgent.IntendedUse,
+			ParamsOneOf: schema.NewParamsOneOfByParams(map[string]*schema.ParameterInfo{
+				"reason": {
+					Type: schema.String,
+					Desc: "the reason to call this tool",
+				},
+			}),
+		})
+
+		if err := addSwarmAgent(swarmAgent, g); err != nil {
+			return nil, err
+		}
+
+		agentMap[swarmAgent.Name] = true
+	}
+
 	if err := addHostAgent(config.Host.ChatModel, hostPrompt, agentTools, g); err != nil {
 		return nil, err
 	}
@@ -149,6 +170,17 @@ func addSpecialistAgent(specialist *Specialist, g *compose.Graph[[]*schema.Messa
 	return g.AddEdge(specialist.Name, compose.END)
 }
 
+func addSwarmAgent(swarmAgent *SwarmAgent, g *compose.Graph[[]*schema.Message, *schema.Message]) error {
+	preHandler := func(_ context.Context, input []*schema.Message, state *state) ([]*schema.Message, error) {
+		return state.msgs, nil // replace the tool call message with input msgs stored in state
+	}
+	if err := g.AddLambdaNode(swarmAgent.Name, swarmAgent, compose.WithStatePreHandler(preHandler), compose.WithNodeName(swarmAgent.Name)); err != nil {
+		return err
+	}
+
+	return g.AddEdge(swarmAgent.Name, compose.END)
+}
+
 func addHostAgent(model model.ChatModel, prompt string, agentTools []*schema.ToolInfo, g *compose.Graph[[]*schema.Message, *schema.Message]) error {
 	if err := model.BindTools(agentTools); err != nil {
 		return err
@@ -168,7 +200,29 @@ func addHostAgent(model model.ChatModel, prompt string, agentTools []*schema.Too
 		return err
 	}
 
-	return g.AddEdge(compose.START, defaultHostNodeKey)
+	if err := g.AddEdge(compose.START, defaultHostNodeKey); err != nil {
+		return err
+	}
+
+	// Add branch to handle swarm agents
+	branch := compose.NewGraphBranch(func(ctx context.Context, input []*schema.Message) (string, error) {
+		if len(input) != 1 {
+			return "", fmt.Errorf("host agent output %d messages, but expected 1", len(input))
+		}
+
+		if len(input[0].ToolCalls) != 1 {
+			return "", fmt.Errorf("host agent output %d tool calls, but expected 1", len(input[0].ToolCalls))
+		}
+
+		toolName := input[0].ToolCalls[0].Function.Name
+		if _, ok := agentMap[toolName]; ok {
+			return toolName, nil
+		}
+
+		return "", fmt.Errorf("unknown tool name: %s", toolName)
+	}, agentMap)
+
+	return g.AddBranch(defaultHostNodeKey, branch)
 }
 
 func addDirectAnswerBranch(convertorName string, g *compose.Graph[[]*schema.Message, *schema.Message],
