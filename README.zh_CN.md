@@ -212,4 +212,4 @@ Eino 框架由几个部分组成：
 
 ## 开源许可证
 
-本项目依据 [Apache-2.0 许可证](LICENSE.txt) 授权。
+本项目依据 [Apache-2.0 许可证](LICENSE-APACHE) 授权。

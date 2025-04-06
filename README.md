@@ -215,4 +215,4 @@ Please do **not** create a public GitHub issue.
 
 ## License
 
-This project is licensed under the [Apache-2.0 License](LICENSE.txt).
+This project is licensed under the [Apache-2.0 License](LICENSE-APACHE).
