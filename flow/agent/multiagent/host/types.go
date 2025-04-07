@@ -73,6 +73,7 @@ func (ma *MultiAgent) HostNodeKey() string {
 type MultiAgentConfig struct {
 	Host        Host
 	Specialists []*Specialist
+	SwarmAgents []*SwarmAgent
 
 	Name string // the name of the host multi-agent
 
@@ -101,8 +102,8 @@ func (conf *MultiAgentConfig) validate() error {
 		return errors.New("host multi agent host ChatModel is nil")
 	}
 
-	if len(conf.Specialists) == 0 {
-		return errors.New("host multi agent specialists are empty")
+	if len(conf.Specialists) == 0 && len(conf.SwarmAgents) == 0 {
+		return errors.New("host multi agent specialists and swarm agents are empty")
 	}
 
 	for _, s := range conf.Specialists {
@@ -110,6 +111,12 @@ func (conf *MultiAgentConfig) validate() error {
 			return fmt.Errorf("specialist %s has no chat model or Invokable or Streamable", s.Name)
 		}
 
+		if err := s.AgentMeta.validate(); err != nil {
+			return err
+		}
+	}
+
+	for _, s := range conf.SwarmAgents {
 		if err := s.AgentMeta.validate(); err != nil {
 			return err
 		}
@@ -157,6 +164,28 @@ type Specialist struct {
 
 	Invokable  compose.Invoke[[]*schema.Message, *schema.Message, agent.AgentOption]
 	Streamable compose.Stream[[]*schema.Message, *schema.Message, agent.AgentOption]
+}
+
+// SwarmAgent is a swarm agent within a host multi-agent system.
+type SwarmAgent struct {
+	AgentMeta
+
+	Invokable  compose.Invoke[[]*schema.Message, *schema.Message, agent.AgentOption]
+	Streamable compose.Stream[[]*schema.Message, *schema.Message, agent.AgentOption]
+}
+
+func (sa *SwarmAgent) Invoke(ctx context.Context, input []*schema.Message, opts ...agent.AgentOption) (*schema.Message, error) {
+	if sa.Invokable != nil {
+		return sa.Invokable(ctx, input, opts...)
+	}
+	return nil, errors.New("swarm agent does not support invocation")
+}
+
+func (sa *SwarmAgent) Stream(ctx context.Context, input []*schema.Message, opts ...agent.AgentOption) (*schema.StreamReader[*schema.Message], error) {
+	if sa.Streamable != nil {
+		return sa.Streamable(ctx, input, opts...)
+	}
+	return nil, errors.New("swarm agent does not support streaming")
 }
 
 func firstChunkStreamToolCallChecker(_ context.Context, sr *schema.StreamReader[*schema.Message]) (bool, error) {

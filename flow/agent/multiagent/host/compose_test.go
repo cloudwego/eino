@@ -70,6 +70,30 @@ func TestHostMultiAgent(t *testing.T) {
 		},
 	}
 
+	swarmAgent := &SwarmAgent{
+		AgentMeta: AgentMeta{
+			Name:        "swarm agent",
+			IntendedUse: "do swarm stuff",
+		},
+		Invokable: func(ctx context.Context, input []*schema.Message, opts ...agent.AgentOption) (*schema.Message, error) {
+			return &schema.Message{
+				Role:    schema.Assistant,
+				Content: "swarm agent invoke answer",
+			}, nil
+		},
+		Streamable: func(ctx context.Context, input []*schema.Message, opts ...agent.AgentOption) (*schema.StreamReader[*schema.Message], error) {
+			sr, sw := schema.Pipe[*schema.Message](0)
+			go func() {
+				sw.Send(&schema.Message{
+					Role:    schema.Assistant,
+					Content: "swarm agent stream answer",
+				}, nil)
+				sw.Close()
+			}()
+			return sr, nil
+		},
+	}
+
 	ctx := context.Background()
 
 	mockHostLLM.EXPECT().BindTools(gomock.Any()).Return(nil).AnyTimes()
@@ -81,6 +105,9 @@ func TestHostMultiAgent(t *testing.T) {
 		Specialists: []*Specialist{
 			specialist1,
 			specialist2,
+		},
+		SwarmAgents: []*SwarmAgent{
+			swarmAgent,
 		},
 	})
 
@@ -290,6 +317,9 @@ func TestHostMultiAgent(t *testing.T) {
 				specialist1,
 				specialist2,
 			},
+				SwarmAgents: []*SwarmAgent{
+				swarmAgent,
+			},
 			StreamToolCallChecker: streamToolCallChecker,
 		})
 		assert.NoError(t, err)
@@ -396,6 +426,9 @@ func TestHostMultiAgent(t *testing.T) {
 			Specialists: []*Specialist{
 				specialist1,
 				specialist2,
+			},
+			SwarmAgents: []*SwarmAgent{
+				swarmAgent,
 			},
 		})
 

@@ -174,6 +174,12 @@ compiledGraph.Invoke(ctx, input, WithCallbacks(handler).DesignateNode("node_1"))
 - Developers can easily create custom callback handlers, add them during graph run via options, and they will be invoked during graph run.
 - Graph can also inject aspects to those component implementations that do not support callbacks on their own.
 
+## Swarm Agent Feature
+
+- The Swarm Agent feature allows for the addition of swarm agents to the multi-agent system.
+- Swarm agents can be configured and added to the graph, enabling more complex and distributed agent interactions.
+- Swarm agents can generate and stream responses, similar to other agents in the system.
+
 # Eino Framework Structure
 
 ![](.github/static/img/eino/eino_framework.jpeg)
