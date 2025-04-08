@@ -1007,3 +1007,55 @@ func TestMayAssignableFieldMapping(t *testing.T) {
 	assert.NoError(t, err)
 	result.GOOD()
 }
+
+func TestNilValue(t *testing.T) {
+	t.Run("from map key with a nil value to map key", func(t *testing.T) {
+		wf := NewWorkflow[map[string]any, map[string]any]()
+		wf.End().AddInput(START, MapFields("a", "a"))
+		r, err := wf.Compile(context.Background())
+		assert.NoError(t, err)
+
+		result, err := r.Invoke(context.Background(), map[string]any{"a": nil})
+		assert.NoError(t, err)
+		assert.Equal(t, map[string]any{"a": nil}, result)
+	})
+
+	t.Run("from nil struct field to map key", func(t *testing.T) {
+		type in struct {
+			A *string
+		}
+		wf := NewWorkflow[in, map[string]any]()
+		wf.End().AddInput(START, MapFields("A", "A"))
+		r, err := wf.Compile(context.Background())
+		assert.NoError(t, err)
+		result, err := r.Invoke(context.Background(), in{A: nil})
+		assert.NoError(t, err)
+		assert.Equal(t, map[string]any{"A": (*string)(nil)}, result)
+	})
+
+	t.Run("from map key with a nil value to struct field", func(t *testing.T) {
+		type out struct {
+			A *string
+		}
+		wf := NewWorkflow[map[string]any, out]()
+		wf.End().AddInput(START, MapFields("A", "A"))
+		r, err := wf.Compile(context.Background())
+		assert.NoError(t, err)
+		result, err := r.Invoke(context.Background(), map[string]any{"A": nil})
+		assert.NoError(t, err)
+		assert.Equal(t, out{A: (*string)(nil)}, result)
+	})
+
+	t.Run("from nil struct field to struct field", func(t *testing.T) {
+		type inOut struct {
+			A *string
+		}
+		wf := NewWorkflow[inOut, inOut]()
+		wf.End().AddInput(START, MapFields("A", "A"))
+		r, err := wf.Compile(context.Background())
+		assert.NoError(t, err)
+		result, err := r.Invoke(context.Background(), inOut{A: nil})
+		assert.NoError(t, err)
+		assert.Equal(t, inOut{A: (*string)(nil)}, result)
+	})
+}

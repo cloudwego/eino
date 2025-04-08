@@ -252,7 +252,11 @@ func assignOne(destValue reflect.Value, taken any, to string) (reflect.Value, er
 					return destValue, err
 				}
 
-				destValue.SetMapIndex(key, toSet)
+				if !toSet.IsValid() {
+					destValue.Interface().(map[string]any)[path] = nil
+				} else {
+					destValue.SetMapIndex(key, toSet)
+				}
 
 				if parentMap.IsValid() {
 					parentMap.SetMapIndex(reflect.ValueOf(parentKey), destValue)
@@ -266,7 +270,11 @@ func assignOne(destValue reflect.Value, taken any, to string) (reflect.Value, er
 				return destValue, err
 			}
 
-			field.Set(toSet)
+			if !toSet.IsValid() {
+				// just skip it, because this 'nil' is the zero value of the corresponding struct field
+			} else {
+				field.Set(toSet)
+			}
 
 			if parentMap.IsValid() {
 				parentMap.SetMapIndex(reflect.ValueOf(parentKey), destValue)
@@ -489,6 +497,15 @@ func checkAndExtractToField(toField string, output, toSet reflect.Value) (field 
 		return reflect.Value{}, fmt.Errorf("field mapping to a struct field, but field not exported. field=%v, outputType=%v", toField, output.Type())
 	}
 
+	if !toSet.IsValid() {
+		switch field.Type().Kind() {
+		case reflect.Map, reflect.Slice, reflect.Ptr, reflect.Interface:
+			return field, nil
+		default:
+			return reflect.Value{}, fmt.Errorf("field mapping from a zero reflect.Value to type=%v, which cannot be nil", field.Type())
+		}
+	}
+
 	if !toSet.Type().AssignableTo(field.Type()) {
 		return reflect.Value{}, fmt.Errorf("field mapping to a struct field, but field has a mismatched type. field=%s, from=%v, to=%v", toField, toSet.Type(), field.Type())
 	}
@@ -503,6 +520,19 @@ func checkAndExtractToMapKey(toMapKey string, output, toSet reflect.Value) (key 
 
 	if !reflect.TypeOf(toMapKey).AssignableTo(output.Type().Key()) {
 		return reflect.Value{}, fmt.Errorf("field mapping to a map key but output is not a map with string key, type=%v", output.Type())
+	}
+
+	if !toSet.IsValid() {
+		if output.Type() != reflect.TypeOf(map[string]any{}) {
+			return reflect.Value{}, fmt.Errorf("field mapping from a zero reflect.Value to map field whose map type is not map[string]any: %v", output.Type())
+		}
+
+		switch output.Type().Elem().Kind() {
+		case reflect.Map, reflect.Slice, reflect.Ptr, reflect.Interface:
+			return reflect.ValueOf(toMapKey), nil
+		default:
+			return reflect.Value{}, fmt.Errorf("field mapping from a zero reflect.Value to type=%v, which cannot be nil", output.Type().Elem())
+		}
 	}
 
 	if !toSet.Type().AssignableTo(output.Type().Elem()) {
@@ -699,9 +729,18 @@ func validateFieldMapping(predecessorType reflect.Type, successorType reflect.Ty
 		} else if at == assignableTypeMay {
 			checker := func(a any) (any, error) {
 				trueInType := reflect.TypeOf(a)
-				if !trueInType.AssignableTo(successorFieldType) {
-					return nil, fmt.Errorf("runtime check failed for mapping %s, field[%v]-[%v] is absolutely not assignable", mapping, trueInType, successorFieldType)
+				if trueInType == nil {
+					switch successorFieldType.Kind() {
+					case reflect.Map, reflect.Slice, reflect.Ptr, reflect.Interface:
+					default:
+						return nil, fmt.Errorf("runtime check failed for mapping %s, field[%v]-[%v] is absolutely not assignable", mapping, trueInType, successorFieldType)
+					}
+				} else {
+					if !trueInType.AssignableTo(successorFieldType) {
+						return nil, fmt.Errorf("runtime check failed for mapping %s, field[%v]-[%v] is absolutely not assignable", mapping, trueInType, successorFieldType)
+					}
 				}
+
 				return a, nil
 			}
 			fieldCheckers[mapping.to] = handlerPair{
