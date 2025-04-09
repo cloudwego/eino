@@ -178,7 +178,7 @@ func defaultImplConcatStreamReader[T any](
 	c, err := concatStreamReader(sr)
 	if err != nil {
 		var t T
-		return t, newDefaultImplErr(action, streamConcat, err)
+		return t, newStreamWrapperError(action, fmt.Errorf("concat stream reader fail: %w", err))
 	}
 
 	return c, nil
@@ -190,7 +190,7 @@ func invokeByStream[I, O, TOption any](s Stream[I, O, TOption]) Invoke[I, O, TOp
 
 		sr, err := s(ctx, input, opts...)
 		if err != nil {
-			return output, newDefaultImplErr(action, internalCall, err)
+			return output, wrapStreamWrapperError(action, err)
 		}
 
 		return defaultImplConcatStreamReader(sr, action)
@@ -205,7 +205,7 @@ func invokeByCollect[I, O, TOption any](c Collect[I, O, TOption]) Invoke[I, O, T
 
 		output, err = c(ctx, sr, opts...)
 		if err != nil {
-			err = newDefaultImplErr(action, internalCall, err)
+			err = wrapStreamWrapperError(action, err)
 		}
 
 		return output, err
@@ -220,8 +220,7 @@ func invokeByTransform[I, O, TOption any](t Transform[I, O, TOption]) Invoke[I, 
 
 		srOutput, err := t(ctx, srInput, opts...)
 		if err != nil {
-			err = newDefaultImplErr(action, internalCall, err)
-			return output, err
+			return output, wrapStreamWrapperError(action, err)
 		}
 
 		return defaultImplConcatStreamReader(srOutput, action)
@@ -236,7 +235,7 @@ func streamByTransform[I, O, TOption any](t Transform[I, O, TOption]) Stream[I, 
 
 		output, err = t(ctx, srInput, opts...)
 		if err != nil {
-			err = newDefaultImplErr(action, internalCall, err)
+			err = wrapStreamWrapperError(action, err)
 		}
 
 		return output, err
@@ -249,9 +248,7 @@ func streamByInvoke[I, O, TOption any](i Invoke[I, O, TOption]) Stream[I, O, TOp
 
 		out, err := i(ctx, input, opts...)
 		if err != nil {
-			err = newDefaultImplErr(action, internalCall, err)
-
-			return nil, err
+			return nil, wrapStreamWrapperError(action, err)
 		}
 
 		return schema.StreamReaderFromArray([]O{out}), nil
@@ -265,9 +262,7 @@ func streamByCollect[I, O, TOption any](c Collect[I, O, TOption]) Stream[I, O, T
 		srInput := schema.StreamReaderFromArray([]I{input})
 		out, err := c(ctx, srInput, opts...)
 		if err != nil {
-			err = newDefaultImplErr(action, internalCall, err)
-
-			return nil, err
+			return nil, wrapStreamWrapperError(action, err)
 		}
 
 		return schema.StreamReaderFromArray([]O{out}), nil
@@ -280,9 +275,7 @@ func collectByTransform[I, O, TOption any](t Transform[I, O, TOption]) Collect[I
 
 		srOutput, err := t(ctx, input, opts...)
 		if err != nil {
-			err = newDefaultImplErr(action, internalCall, err)
-
-			return output, err
+			return output, wrapStreamWrapperError(action, err)
 		}
 
 		return defaultImplConcatStreamReader(srOutput, action)
@@ -300,7 +293,7 @@ func collectByInvoke[I, O, TOption any](i Invoke[I, O, TOption]) Collect[I, O, T
 
 		output, err = i(ctx, in, opts...)
 		if err != nil {
-			err = newDefaultImplErr(action, internalCall, err)
+			err = wrapStreamWrapperError(action, err)
 		}
 
 		return output, err
@@ -318,9 +311,7 @@ func collectByStream[I, O, TOption any](s Stream[I, O, TOption]) Collect[I, O, T
 
 		srOutput, err := s(ctx, in, opts...)
 		if err != nil {
-			err = newDefaultImplErr(action, internalCall, err)
-
-			return output, err
+			return output, wrapStreamWrapperError(action, err)
 		}
 
 		return defaultImplConcatStreamReader(srOutput, action)
@@ -341,7 +332,7 @@ func transformByStream[I, O, TOption any](s Stream[I, O, TOption]) Transform[I, 
 		output, err = s(ctx, in, opts...)
 
 		if err != nil {
-			err = newDefaultImplErr(action, internalCall, err)
+			err = wrapStreamWrapperError(action, err)
 		}
 
 		return output, err
@@ -356,8 +347,7 @@ func transformByCollect[I, O, TOption any](c Collect[I, O, TOption]) Transform[I
 
 		out, err := c(ctx, input, opts...)
 		if err != nil {
-			err = newDefaultImplErr(action, internalCall, err)
-			return output, err
+			return output, wrapStreamWrapperError(action, err)
 		}
 
 		return schema.StreamReaderFromArray([]O{out}), nil
@@ -377,8 +367,7 @@ func transformByInvoke[I, O, TOption any](i Invoke[I, O, TOption]) Transform[I, 
 
 		out, err := i(ctx, in, opts...)
 		if err != nil {
-			err = newDefaultImplErr(action, internalCall, err)
-			return output, err
+			return output, wrapStreamWrapperError(action, err)
 		}
 
 		return schema.StreamReaderFromArray([]O{out}), nil

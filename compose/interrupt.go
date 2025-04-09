@@ -79,3 +79,16 @@ type subGraphInterruptError struct {
 func (e *subGraphInterruptError) Error() string {
 	return fmt.Sprintf("interrupt happened, info: %+v", e.Info)
 }
+
+func isInterruptError(err error) bool {
+	if _, ok := ExtractInterruptInfo(err); ok {
+		return true
+	}
+	if info := isSubGraphInterrupt(err); info != nil {
+		return true
+	}
+	if errors.Is(err, InterruptAndRerun) {
+		return true
+	}
+	return false
+}

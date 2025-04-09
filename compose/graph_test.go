@@ -159,11 +159,11 @@ func TestGraphWithImplementableType(t *testing.T) {
 
 	_, err = r.Invoke(ctx, "how are you", WithRuntimeMaxSteps(1))
 	assert.Error(t, err)
-	assert.Equal(t, ErrExceedMaxSteps, err)
+	assert.ErrorContains(t, err, "exceeds max steps")
 
 	_, err = r.Invoke(ctx, "how are you", WithRuntimeMaxSteps(1))
 	assert.Error(t, err)
-	assert.Equal(t, ErrExceedMaxSteps, err)
+	assert.ErrorContains(t, err, "exceeds max steps")
 
 	out, err := r.Invoke(ctx, "how are you")
 	assert.NoError(t, err)

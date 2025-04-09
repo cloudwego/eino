@@ -20,6 +20,7 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"strings"
 )
 
 // ErrExceedMaxSteps graph will throw this error when the number of steps exceeds the maximum number of steps.
@@ -29,13 +30,8 @@ func newUnexpectedInputTypeErr(expected reflect.Type, got reflect.Type) error {
 	return fmt.Errorf("unexpected input type. expected: %v, got: %v", expected, got)
 }
 
-type defaultImplErrCausedType string
 type defaultImplAction string
 
-const (
-	streamConcat defaultImplErrCausedType = "concat stream items"
-	internalCall defaultImplErrCausedType = "call internal action"
-)
 const (
 	actionInvokeByStream     defaultImplAction = "InvokeByStream"
 	actionInvokeByCollect    defaultImplAction = "InvokeByCollect"
@@ -51,11 +47,88 @@ const (
 	actionTransformByInvoke  defaultImplAction = "TransformByInvoke"
 )
 
-func newDefaultImplErr(action defaultImplAction, causedType defaultImplErrCausedType, causedErr error) error {
-	return fmt.Errorf(
-		"default implementation: '%s' got error, when try to %s, err: \n%w", action, causedType, causedErr)
-}
-
 func newStreamReadError(err error) error {
 	return fmt.Errorf("failed to read from stream. error: %w", err)
+}
+
+func newGraphRunError(err error) error {
+	return &internalError{
+		typ:               internalErrorTypeGraphRun,
+		streamWrapperPath: nil,
+		nodePath:          NodePath{},
+		origError:         err,
+	}
+}
+
+func wrapGraphNodeError(nodeKey string, err error) error {
+	if ok := isInterruptError(err); ok {
+		return err
+	}
+	var ie *internalError
+	ok := errors.As(err, &ie)
+	if !ok {
+		return &internalError{
+			typ:       internalErrorTypeNodeRun,
+			nodePath:  NodePath{path: []string{nodeKey}},
+			origError: err,
+		}
+	}
+	ie.nodePath.path = append([]string{nodeKey}, ie.nodePath.path...)
+	return ie
+}
+
+func newStreamWrapperError(streamWrapperType defaultImplAction, err error) error {
+	return &internalError{
+		typ:               internalErrorTypeGraphRun,
+		streamWrapperPath: []defaultImplAction{streamWrapperType},
+		origError:         err,
+	}
+}
+
+func wrapStreamWrapperError(streamWrapperType defaultImplAction, err error) error {
+	if ok := isInterruptError(err); ok {
+		return err
+	}
+	var ie *internalError
+	ok := errors.As(err, &ie)
+	if !ok {
+		return &internalError{
+			typ:               internalErrorTypeNodeRun,
+			streamWrapperPath: []defaultImplAction{streamWrapperType},
+			origError:         err,
+		}
+	}
+	ie.streamWrapperPath = append([]defaultImplAction{streamWrapperType}, ie.streamWrapperPath...)
+	return ie
+}
+
+type internalErrorType string
+
+const (
+	internalErrorTypeNodeRun  = "NodeRunError"
+	internalErrorTypeGraphRun = "GraphRunError"
+)
+
+type internalError struct {
+	typ               internalErrorType
+	streamWrapperPath []defaultImplAction
+	nodePath          NodePath
+	origError         error
+}
+
+func (i *internalError) Error() string {
+	sb := strings.Builder{}
+	sb.WriteString(string("[" + i.typ + "]\n"))
+	sb.WriteString(i.origError.Error())
+	if len(i.nodePath.path) > 0 {
+		sb.WriteString("\n------------------------\n")
+		sb.WriteString("node path: [")
+		for j := 0; j < len(i.nodePath.path)-1; j++ {
+			sb.WriteString(i.nodePath.path[j] + ", ")
+		}
+		sb.WriteString(i.nodePath.path[len(i.nodePath.path)-1])
+		sb.WriteString("]")
+	}
+	sb.WriteString("")
+	return sb.String()
 }
