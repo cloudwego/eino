@@ -1,5 +1,5 @@
 /*
- * Copyright 2024 CloudWeGo Authors
+ * Copyright 2025 CloudWeGo Authors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -34,10 +34,75 @@ import (
 	gomock "go.uber.org/mock/gomock"
 )
 
+// MockBaseChatModel is a mock of BaseChatModel interface.
+type MockBaseChatModel struct {
+	ctrl     *gomock.Controller
+	recorder *MockBaseChatModelMockRecorder
+	isgomock struct{}
+}
+
+// MockBaseChatModelMockRecorder is the mock recorder for MockBaseChatModel.
+type MockBaseChatModelMockRecorder struct {
+	mock *MockBaseChatModel
+}
+
+// NewMockBaseChatModel creates a new mock instance.
+func NewMockBaseChatModel(ctrl *gomock.Controller) *MockBaseChatModel {
+	mock := &MockBaseChatModel{ctrl: ctrl}
+	mock.recorder = &MockBaseChatModelMockRecorder{mock}
+	return mock
+}
+
+// EXPECT returns an object that allows the caller to indicate expected use.
+func (m *MockBaseChatModel) EXPECT() *MockBaseChatModelMockRecorder {
+	return m.recorder
+}
+
+// Generate mocks base method.
+func (m *MockBaseChatModel) Generate(ctx context.Context, input []*schema.Message, opts ...model.Option) (*schema.Message, error) {
+	m.ctrl.T.Helper()
+	varargs := []any{ctx, input}
+	for _, a := range opts {
+		varargs = append(varargs, a)
+	}
+	ret := m.ctrl.Call(m, "Generate", varargs...)
+	ret0, _ := ret[0].(*schema.Message)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
+}
+
+// Generate indicates an expected call of Generate.
+func (mr *MockBaseChatModelMockRecorder) Generate(ctx, input any, opts ...any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	varargs := append([]any{ctx, input}, opts...)
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Generate", reflect.TypeOf((*MockBaseChatModel)(nil).Generate), varargs...)
+}
+
+// Stream mocks base method.
+func (m *MockBaseChatModel) Stream(ctx context.Context, input []*schema.Message, opts ...model.Option) (*schema.StreamReader[*schema.Message], error) {
+	m.ctrl.T.Helper()
+	varargs := []any{ctx, input}
+	for _, a := range opts {
+		varargs = append(varargs, a)
+	}
+	ret := m.ctrl.Call(m, "Stream", varargs...)
+	ret0, _ := ret[0].(*schema.StreamReader[*schema.Message])
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
+}
+
+// Stream indicates an expected call of Stream.
+func (mr *MockBaseChatModelMockRecorder) Stream(ctx, input any, opts ...any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	varargs := append([]any{ctx, input}, opts...)
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Stream", reflect.TypeOf((*MockBaseChatModel)(nil).Stream), varargs...)
+}
+
 // MockChatModel is a mock of ChatModel interface.
 type MockChatModel struct {
 	ctrl     *gomock.Controller
 	recorder *MockChatModelMockRecorder
+	isgomock struct{}
 }
 
 // MockChatModelMockRecorder is the mock recorder for MockChatModel.
@@ -109,4 +174,83 @@ func (mr *MockChatModelMockRecorder) Stream(ctx, input any, opts ...any) *gomock
 	mr.mock.ctrl.T.Helper()
 	varargs := append([]any{ctx, input}, opts...)
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Stream", reflect.TypeOf((*MockChatModel)(nil).Stream), varargs...)
+}
+
+// MockToolCallingChatModel is a mock of ToolCallingChatModel interface.
+type MockToolCallingChatModel struct {
+	ctrl     *gomock.Controller
+	recorder *MockToolCallingChatModelMockRecorder
+	isgomock struct{}
+}
+
+// MockToolCallingChatModelMockRecorder is the mock recorder for MockToolCallingChatModel.
+type MockToolCallingChatModelMockRecorder struct {
+	mock *MockToolCallingChatModel
+}
+
+// NewMockToolCallingChatModel creates a new mock instance.
+func NewMockToolCallingChatModel(ctrl *gomock.Controller) *MockToolCallingChatModel {
+	mock := &MockToolCallingChatModel{ctrl: ctrl}
+	mock.recorder = &MockToolCallingChatModelMockRecorder{mock}
+	return mock
+}
+
+// EXPECT returns an object that allows the caller to indicate expected use.
+func (m *MockToolCallingChatModel) EXPECT() *MockToolCallingChatModelMockRecorder {
+	return m.recorder
+}
+
+// Generate mocks base method.
+func (m *MockToolCallingChatModel) Generate(ctx context.Context, input []*schema.Message, opts ...model.Option) (*schema.Message, error) {
+	m.ctrl.T.Helper()
+	varargs := []any{ctx, input}
+	for _, a := range opts {
+		varargs = append(varargs, a)
+	}
+	ret := m.ctrl.Call(m, "Generate", varargs...)
+	ret0, _ := ret[0].(*schema.Message)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
+}
+
+// Generate indicates an expected call of Generate.
+func (mr *MockToolCallingChatModelMockRecorder) Generate(ctx, input any, opts ...any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	varargs := append([]any{ctx, input}, opts...)
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Generate", reflect.TypeOf((*MockToolCallingChatModel)(nil).Generate), varargs...)
+}
+
+// Stream mocks base method.
+func (m *MockToolCallingChatModel) Stream(ctx context.Context, input []*schema.Message, opts ...model.Option) (*schema.StreamReader[*schema.Message], error) {
+	m.ctrl.T.Helper()
+	varargs := []any{ctx, input}
+	for _, a := range opts {
+		varargs = append(varargs, a)
+	}
+	ret := m.ctrl.Call(m, "Stream", varargs...)
+	ret0, _ := ret[0].(*schema.StreamReader[*schema.Message])
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
+}
+
+// Stream indicates an expected call of Stream.
+func (mr *MockToolCallingChatModelMockRecorder) Stream(ctx, input any, opts ...any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	varargs := append([]any{ctx, input}, opts...)
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Stream", reflect.TypeOf((*MockToolCallingChatModel)(nil).Stream), varargs...)
+}
+
+// WithTools mocks base method.
+func (m *MockToolCallingChatModel) WithTools(tools []*schema.ToolInfo) (model.ToolCallingChatModel, error) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "WithTools", tools)
+	ret0, _ := ret[0].(model.ToolCallingChatModel)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
+}
+
+// WithTools indicates an expected call of WithTools.
+func (mr *MockToolCallingChatModelMockRecorder) WithTools(tools any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "WithTools", reflect.TypeOf((*MockToolCallingChatModel)(nil).WithTools), tools)
 }

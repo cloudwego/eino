@@ -168,7 +168,7 @@ func (c *Chain[I, O]) Compile(ctx context.Context, opts ...GraphCompileOption) (
 //	model, err := openai.NewChatModel(ctx, config)
 //	if err != nil {...}
 //	chain.AppendChatModel(model)
-func (c *Chain[I, O]) AppendChatModel(node model.ChatModel, opts ...GraphAddNodeOpt) *Chain[I, O] {
+func (c *Chain[I, O]) AppendChatModel(node model.BaseChatModel, opts ...GraphAddNodeOpt) *Chain[I, O] {
 	gNode, options := toChatModelNode(node, opts...)
 	c.addNode(gNode, options)
 	return c

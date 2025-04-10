@@ -22,6 +22,7 @@ import (
 
 	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/compose"
+	"github.com/cloudwego/eino/flow/agent"
 	"github.com/cloudwego/eino/schema"
 )
 
@@ -88,20 +89,25 @@ func NewMultiAgent(ctx context.Context, config *MultiAgentConfig) (*MultiAgent, 
 		agentMap[specialist.Name] = true
 	}
 
-	if err := addHostAgent(config.Host.ChatModel, hostPrompt, agentTools, g); err != nil {
+	chatModel, err := agent.ChatModelWithTools(config.Host.ChatModel, config.Host.ToolCallingModel, agentTools)
+	if err != nil {
+		return nil, err
+	}
+
+	if err = addHostAgent(chatModel, hostPrompt, g); err != nil {
 		return nil, err
 	}
 
 	const convertorName = "msg2MsgList"
-	if err := g.AddLambdaNode(convertorName, compose.ToList[*schema.Message](), compose.WithNodeName("converter")); err != nil {
+	if err = g.AddLambdaNode(convertorName, compose.ToList[*schema.Message](), compose.WithNodeName("converter")); err != nil {
 		return nil, err
 	}
 
-	if err := addDirectAnswerBranch(convertorName, g, toolCallChecker); err != nil {
+	if err = addDirectAnswerBranch(convertorName, g, toolCallChecker); err != nil {
 		return nil, err
 	}
 
-	if err := addSpecialistsBranch(convertorName, agentMap, g); err != nil {
+	if err = addSpecialistsBranch(convertorName, agentMap, g); err != nil {
 		return nil, err
 	}
 
@@ -149,11 +155,7 @@ func addSpecialistAgent(specialist *Specialist, g *compose.Graph[[]*schema.Messa
 	return g.AddEdge(specialist.Name, compose.END)
 }
 
-func addHostAgent(model model.ChatModel, prompt string, agentTools []*schema.ToolInfo, g *compose.Graph[[]*schema.Message, *schema.Message]) error {
-	if err := model.BindTools(agentTools); err != nil {
-		return err
-	}
-
+func addHostAgent(model model.BaseChatModel, prompt string, g *compose.Graph[[]*schema.Message, *schema.Message]) error {
 	preHandler := func(_ context.Context, input []*schema.Message, state *state) ([]*schema.Message, error) {
 		state.msgs = input
 		if len(prompt) == 0 {
