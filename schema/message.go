@@ -18,7 +18,9 @@ package schema
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io"
 	"reflect"
 	"sort"
 	"strings"
@@ -609,13 +611,6 @@ func concatToolCalls(chunks []ToolCall) ([]ToolCall, error) {
 //
 // concatedMsg, err := ConcatMessages(msgs) // concatedMsg.Content will be full content of all messages
 func ConcatMessages(msgs []*Message) (*Message, error) {
-
-	for idx, m := range msgs {
-		if m == nil {
-			return nil, fmt.Errorf("unexpected nil chunk in message stream, index: %d", idx)
-		}
-	}
-
 	var (
 		contents   []string
 		contentLen int
@@ -624,7 +619,11 @@ func ConcatMessages(msgs []*Message) (*Message, error) {
 		extraList  = make([]map[string]any, 0, len(msgs))
 	)
 
-	for _, msg := range msgs {
+	for idx, msg := range msgs {
+		if msg == nil {
+			return nil, fmt.Errorf("unexpected nil chunk in message stream, index: %d", idx)
+		}
+
 		if msg.Role != "" {
 			if ret.Role == "" {
 				ret.Role = msg.Role
@@ -740,6 +739,32 @@ func ConcatMessages(msgs []*Message) (*Message, error) {
 	}
 
 	return &ret, nil
+}
+
+func ConcatMessageStream(s *StreamReader[*Message]) (*Message, error) {
+	var msgs []*Message
+	for {
+		msg, err := s.Recv()
+		if err != nil {
+			if err == io.EOF {
+				break
+			}
+
+			return nil, err
+		}
+
+		msgs = append(msgs, msg)
+	}
+
+	if len(msgs) == 0 {
+		return nil, errors.New("no messages in stream")
+	}
+
+	if len(msgs) == 1 {
+		return msgs[0], nil
+	}
+
+	return ConcatMessages(msgs)
 }
 
 // custom jinja env

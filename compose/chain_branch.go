@@ -137,7 +137,7 @@ func NewStreamChainBranch[T any](cond StreamGraphBranchCondition[T]) *ChainBranc
 //	})
 //	cb.AddChatModel("chat_model_key_01", chatModel01)
 //	cb.AddChatModel("chat_model_key_02", chatModel02)
-func (cb *ChainBranch) AddChatModel(key string, node model.ChatModel, opts ...GraphAddNodeOpt) *ChainBranch {
+func (cb *ChainBranch) AddChatModel(key string, node model.BaseChatModel, opts ...GraphAddNodeOpt) *ChainBranch {
 	gNode, options := toChatModelNode(node, opts...)
 	return cb.addNode(key, gNode, options)
 }

@@ -65,7 +65,7 @@ type Parallel struct {
 //
 //	p.AddChatModel("output_key01", chatModel01)
 //	p.AddChatModel("output_key02", chatModel02)
-func (p *Parallel) AddChatModel(outputKey string, node model.ChatModel, opts ...GraphAddNodeOpt) *Parallel {
+func (p *Parallel) AddChatModel(outputKey string, node model.BaseChatModel, opts ...GraphAddNodeOpt) *Parallel {
 	gNode, options := toChatModelNode(node, append(opts, WithOutputKey(outputKey))...)
 	return p.addNode(outputKey, gNode, options)
 }

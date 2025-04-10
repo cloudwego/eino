@@ -41,8 +41,13 @@ type MessageModifier func(ctx context.Context, input []*schema.Message) []*schem
 
 // AgentConfig is the config for ReAct agent.
 type AgentConfig struct {
-	// Model is the chat model to be used for handling user messages.
+	// ToolCallingModel is the chat model to be used for handling user messages with tool calling capability.
+	// This is the recommended model field to use.
+	ToolCallingModel model.ToolCallingChatModel
+
+	// Deprecated: Use ToolCallingModel instead.
 	Model model.ChatModel
+
 	// ToolsConfig is the config for tools node.
 	ToolsConfig compose.ToolsNodeConfig
 
@@ -155,7 +160,7 @@ type Agent struct {
 // In such cases, you need to implement a custom StreamToolCallChecker that can properly detect tool calls.
 func NewAgent(ctx context.Context, config *AgentConfig) (_ *Agent, err error) {
 	var (
-		chatModel       = config.Model
+		chatModel       model.BaseChatModel
 		toolsNode       *compose.ToolsNode
 		toolInfos       []*schema.ToolInfo
 		toolCallChecker = config.StreamToolCallChecker
@@ -170,7 +175,7 @@ func NewAgent(ctx context.Context, config *AgentConfig) (_ *Agent, err error) {
 		return nil, err
 	}
 
-	if err = chatModel.BindTools(toolInfos); err != nil {
+	if chatModel, err = agent.ChatModelWithTools(config.Model, config.ToolCallingModel, toolInfos); err != nil {
 		return nil, err
 	}
 
