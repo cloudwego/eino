@@ -118,7 +118,7 @@ func (r *runner) run(ctx context.Context, isStream bool, input any, opts ...Opti
 	if r.dag {
 		for i := range opts {
 			if opts[i].maxRunSteps > 0 {
-				return nil, fmt.Errorf("cannot set max run steps in dag")
+				return nil, newGraphRunError(fmt.Errorf("cannot set max run steps in dag"))
 			}
 		}
 	} else {
@@ -129,20 +129,20 @@ func (r *runner) run(ctx context.Context, isStream bool, input any, opts ...Opti
 			}
 		}
 		if maxSteps < 1 {
-			return nil, errors.New("max run steps limit must be at least 1")
+			return nil, newGraphRunError(errors.New("max run steps limit must be at least 1"))
 		}
 	}
 
 	// Extract and validate options for each node.
 	optMap, extractErr := extractOption(r.chanSubscribeTo, opts...)
 	if extractErr != nil {
-		return nil, fmt.Errorf("graph extract option fail: %w", extractErr)
+		return nil, newGraphRunError(fmt.Errorf("graph extract option fail: %w", extractErr))
 	}
 
 	// Extract CheckPointID
 	checkPointID, stateModifier := getCheckPointInfo(opts...)
 	if checkPointID != nil && r.checkPointer.store == nil {
-		return nil, fmt.Errorf("receive checkpoint id but have not set checkpoint store")
+		return nil, newGraphRunError(fmt.Errorf("receive checkpoint id but have not set checkpoint store"))
 	}
 
 	// Extract subgraph
@@ -159,17 +159,17 @@ func (r *runner) run(ctx context.Context, isStream bool, input any, opts ...Opti
 
 			err = r.checkPointer.restoreCheckPoint(cp, isStream)
 			if err != nil {
-				return nil, fmt.Errorf("restore checkpoint fail: %w", err)
+				return nil, newGraphRunError(fmt.Errorf("restore checkpoint fail: %w", err))
 			}
 
 			err = cm.loadChannels(cp.Channels)
 			if err != nil {
-				return nil, err
+				return nil, newGraphRunError(err)
 			}
 			if sm := getStateModifier(ctx); sm != nil && cp.State != nil {
 				err = sm(ctx, *path, cp.State)
 				if err != nil {
-					return nil, fmt.Errorf("state modifier fail: %w", err)
+					return nil, newGraphRunError(fmt.Errorf("state modifier fail: %w", err))
 				}
 			}
 			if cp.State != nil {
@@ -178,13 +178,13 @@ func (r *runner) run(ctx context.Context, isStream bool, input any, opts ...Opti
 
 			nextTasks, err = r.restoreTasks(ctx, cp.Inputs, cp.SkipPreHandler, optMap) // should restore after set state to context
 			if err != nil {
-				return nil, fmt.Errorf("assemble tasks fail: %w", err)
+				return nil, newGraphRunError(fmt.Errorf("restore tasks fail: %w", err))
 			}
 		}
 	} else if checkPointID != nil {
 		cp, err := getCheckPointFromStore(ctx, *checkPointID, r.checkPointer)
 		if err != nil {
-			return nil, fmt.Errorf("load checkpoint fail: %w", err)
+			return nil, newGraphRunError(fmt.Errorf("load checkpoint from store fail: %w", err))
 		}
 		if cp != nil {
 			// load checkpoint from store
@@ -192,19 +192,19 @@ func (r *runner) run(ctx context.Context, isStream bool, input any, opts ...Opti
 
 			err = r.checkPointer.restoreCheckPoint(cp, isStream)
 			if err != nil {
-				return nil, fmt.Errorf("restore checkpoint fail: %w", err)
+				return nil, newGraphRunError(fmt.Errorf("restore checkpoint fail: %w", err))
 			}
 
 			err = cm.loadChannels(cp.Channels)
 			if err != nil {
-				return nil, err
+				return nil, newGraphRunError(err)
 			}
 			ctx = setStateModifier(ctx, stateModifier)
 			ctx = setCheckPointToCtx(ctx, cp)
 			if stateModifier != nil && cp.State != nil {
 				err = stateModifier(ctx, *NewNodePath(), cp.State)
 				if err != nil {
-					return nil, fmt.Errorf("state modifier fail: %w", err)
+					return nil, newGraphRunError(fmt.Errorf("state modifier fail: %w", err))
 				}
 			}
 			if cp.State != nil {
@@ -214,12 +214,12 @@ func (r *runner) run(ctx context.Context, isStream bool, input any, opts ...Opti
 			// resume graph
 			nextTasks, err = r.restoreTasks(ctx, cp.Inputs, cp.SkipPreHandler, optMap)
 			if err != nil {
-				return nil, fmt.Errorf("assemble tasks fail: %w", err)
+				return nil, newGraphRunError(fmt.Errorf("restore tasks fail: %w", err))
 			}
 		}
 	}
 	if !initialized {
-		// have not init from checkpoint
+		// have not inited from checkpoint
 		if r.runCtx != nil {
 			ctx = r.runCtx(ctx)
 		}
@@ -230,7 +230,7 @@ func (r *runner) run(ctx context.Context, isStream bool, input any, opts ...Opti
 			output:  input,
 		}}, isStream, cm, optMap)
 		if err != nil {
-			return nil, fmt.Errorf("calculate next tasks fail: %w", err)
+			return nil, newGraphRunError(fmt.Errorf("calculate next tasks fail: %w", err))
 		}
 		if result != nil {
 			return result, nil
@@ -242,11 +242,11 @@ func (r *runner) run(ctx context.Context, isStream bool, input any, opts ...Opti
 		// Check for context cancellation.
 		select {
 		case <-ctx.Done():
-			return nil, fmt.Errorf("context has been canceled: %w", ctx.Err())
+			return nil, newGraphRunError(fmt.Errorf("context has been canceled: %w", ctx.Err()))
 		default:
 		}
 		if !r.dag && step >= maxSteps {
-			return nil, ErrExceedMaxSteps
+			return nil, newGraphRunError(ErrExceedMaxSteps)
 		}
 
 		// 1. submit next tasks
@@ -255,7 +255,7 @@ func (r *runner) run(ctx context.Context, isStream bool, input any, opts ...Opti
 
 		err = tm.submit(nextTasks)
 		if err != nil {
-			return nil, fmt.Errorf("failed to submit tasks: %w", err)
+			return nil, newGraphRunError(fmt.Errorf("failed to submit tasks: %w", err))
 		}
 		var completedTasks []*task
 		completedTasks, err = tm.wait()
@@ -268,31 +268,21 @@ func (r *runner) run(ctx context.Context, isStream bool, input any, opts ...Opti
 		var interruptBeforeNodes []string
 		var interruptAfterNodes []string
 
-		for i := 0; i < len(completedTasks); i++ {
-			if completedTasks[i].err != nil {
-				if info := isSubGraphInterrupt(completedTasks[i].err); info != nil {
-					subGraphInterrupts[completedTasks[i].nodeKey] = info
-					continue
-				} else if errors.Is(completedTasks[i].err, InterruptAndRerun) {
-					interruptRerunNodes = append(interruptRerunNodes, completedTasks[i].nodeKey)
-				} else {
-					return nil, fmt.Errorf("execute node[%s] fail: %w", completedTasks[i].nodeKey, completedTasks[i].err)
-				}
-			}
-			for _, key := range r.interruptAfterNodes {
-				if key == completedTasks[i].nodeKey {
-					interruptAfterNodes = append(interruptAfterNodes, key)
-					break
-				}
-			}
+		err = r.resolveInterruptCompletedTasks(subGraphInterrupts, &interruptRerunNodes, &interruptAfterNodes, completedTasks)
+		if err != nil {
+			return nil, err // err has been wrapped
 		}
 
 		if len(subGraphInterrupts)+len(interruptRerunNodes) > 0 {
 			cpt, err := tm.waitAll()
 			if err != nil {
-				return nil, fmt.Errorf("failed to wait all tasks: %w", err)
+				return nil, newGraphRunError(fmt.Errorf("failed to wait all tasks: %w", err))
 			}
-			interruptAfterNodes = append(interruptAfterNodes, getHitKey(cpt, r.interruptAfterNodes)...)
+			err = r.resolveInterruptCompletedTasks(subGraphInterrupts, &interruptRerunNodes, &interruptAfterNodes, cpt)
+			if err != nil {
+				return nil, err // err has been wrapped
+			}
+
 			// subgraph has interrupted
 			// save other completed tasks to channel
 			// save interrupted subgraph as next task with SkipPreHandler
@@ -312,36 +302,47 @@ func (r *runner) run(ctx context.Context, isStream bool, input any, opts ...Opti
 
 		beforeTasks := make([]string, 0, len(nextTasks))
 		if len(completedTasks) == 0 {
-			return nil, fmt.Errorf("no tasks to execute, before tasks: %v", beforeTasks)
+			return nil, newGraphRunError(fmt.Errorf("no tasks to execute, before tasks: %v", beforeTasks))
 		}
 
 		var result any
 		nextTasks, result, err = r.calculateNextTasks(ctx, completedTasks, isStream, cm, optMap)
 		if err != nil {
-			return nil, fmt.Errorf("failed to calculate next tasks: %w", err)
+			return nil, newGraphRunError(fmt.Errorf("failed to calculate next tasks: %w", err))
 		}
 		if result != nil {
 			return result, nil
 		}
 
-		for i := range nextTasks {
-			for _, key := range r.interruptBeforeNodes {
-				if key == nextTasks[i].nodeKey {
-					interruptBeforeNodes = append(interruptBeforeNodes, key)
-					break
-				}
-			}
-		}
+		interruptBeforeNodes = getHitKey(nextTasks, r.interruptBeforeNodes)
+
 		if len(interruptBeforeNodes) > 0 || len(interruptAfterNodes) > 0 {
 			newCompletedTasks, err := tm.waitAll()
 			if err != nil {
 				return nil, fmt.Errorf("failed to wait all tasks: %w", err)
 			}
-			interruptAfterNodes = append(interruptAfterNodes, getHitKey(newCompletedTasks, r.interruptAfterNodes)...)
+			err = r.resolveInterruptCompletedTasks(subGraphInterrupts, &interruptRerunNodes, &interruptAfterNodes, newCompletedTasks)
+			if err != nil {
+				return nil, err // err has been wrapped
+			}
+
+			if len(subGraphInterrupts)+len(interruptRerunNodes) > 0 {
+				return nil, r.handleInterruptWithSubGraphAndRerunNodes(
+					ctx,
+					interruptRerunNodes,
+					subGraphInterrupts,
+					interruptAfterNodes,
+					append(completedTasks, newCompletedTasks...),
+					checkPointID,
+					isSubGraph,
+					cm,
+					isStream,
+				)
+			}
 
 			newNextTasks, result, err := r.calculateNextTasks(ctx, newCompletedTasks, isStream, cm, optMap)
 			if err != nil {
-				return nil, fmt.Errorf("failed to calculate next tasks: %w", err)
+				return nil, newGraphRunError(fmt.Errorf("failed to calculate next tasks: %w", err))
 			}
 
 			if result != nil {
@@ -354,6 +355,29 @@ func (r *runner) run(ctx context.Context, isStream bool, input any, opts ...Opti
 			return nil, r.handleInterrupt(ctx, interruptBeforeNodes, interruptAfterNodes, append(nextTasks, newNextTasks...), cm.channels, isStream, isSubGraph, checkPointID)
 		}
 	}
+}
+
+func (r *runner) resolveInterruptCompletedTasks(subGraphInterrupts map[string]*subGraphInterruptError, interruptRerunNodes, interruptAfterNodes *[]string, completedTasks []*task) (err error) {
+	for i := 0; i < len(completedTasks); i++ {
+		if completedTasks[i].err != nil {
+			if info := isSubGraphInterrupt(completedTasks[i].err); info != nil {
+				subGraphInterrupts[completedTasks[i].nodeKey] = info
+				continue
+			} else if errors.Is(completedTasks[i].err, InterruptAndRerun) {
+				*interruptRerunNodes = append(*interruptRerunNodes, completedTasks[i].nodeKey)
+				continue
+			} else {
+				return wrapGraphNodeError(completedTasks[i].nodeKey, completedTasks[i].err)
+			}
+		}
+		for _, key := range r.interruptAfterNodes {
+			if key == completedTasks[i].nodeKey {
+				*interruptAfterNodes = append(*interruptAfterNodes, key)
+				break
+			}
+		}
+	}
+	return nil
 }
 
 func getHitKey(tasks []*task, keys []string) []string {

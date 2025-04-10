@@ -346,8 +346,11 @@ func TestWorkflowWithNestedFieldMappings(t *testing.T) {
 				"F2": "hello",
 			},
 		})
+
+		var ie *internalError
+		assert.True(t, errors.As(err, &ie))
 		var myErr *errMapKeyNotFound
-		assert.True(t, errors.As(err, &myErr))
+		assert.True(t, errors.As(ie.origError, &myErr))
 	})
 
 	t.Run("from struct.map.field", func(t *testing.T) {
@@ -368,8 +371,10 @@ func TestWorkflowWithNestedFieldMappings(t *testing.T) {
 				"F2": "hello",
 			},
 		})
+		var ie *internalError
+		assert.True(t, errors.As(err, &ie))
 		var myErr *errMapKeyNotFound
-		assert.True(t, errors.As(err, &myErr))
+		assert.True(t, errors.As(ie.origError, &myErr))
 	})
 
 	t.Run("from map.struct.field", func(t *testing.T) {
@@ -415,8 +420,11 @@ func TestWorkflowWithNestedFieldMappings(t *testing.T) {
 		_, err = r.Invoke(ctx, map[string]any{
 			"F1": 1,
 		})
+
+		var ie *internalError
+		assert.True(t, errors.As(err, &ie))
 		var myErr *errInterfaceNotValidForFieldMapping
-		assert.True(t, errors.As(err, &myErr))
+		assert.True(t, errors.As(ie.origError, &myErr))
 	})
 
 	t.Run("to struct.struct.field", func(t *testing.T) {
