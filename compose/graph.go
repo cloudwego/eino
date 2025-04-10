@@ -1057,3 +1057,7 @@ func NewNodePath(path ...string) *NodePath {
 type NodePath struct {
 	path []string
 }
+
+func (p *NodePath) GetPath() []string {
+	return p.path
+}
