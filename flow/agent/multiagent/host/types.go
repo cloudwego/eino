@@ -139,6 +139,9 @@ func (am AgentMeta) validate() error {
 // Host is the host agent within a multi-agent system.
 // Currently, it can only be a model.ChatModel.
 type Host struct {
+	ToolCallingModel model.ToolCallingChatModel
+	// Deprecated: ChatModel is deprecated, please use ToolCallingModel instead.
+	// This field will be removed in a future release.
 	ChatModel    model.ChatModel
 	SystemPrompt string
 }

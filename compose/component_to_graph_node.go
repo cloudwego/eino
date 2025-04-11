@@ -90,7 +90,7 @@ func toIndexerNode(node indexer.Indexer, opts ...GraphAddNodeOpt) (*graphNode, *
 		opts...)
 }
 
-func toChatModelNode(node model.ChatModel, opts ...GraphAddNodeOpt) (*graphNode, *graphAddNodeOpts) {
+func toChatModelNode(node model.BaseChatModel, opts ...GraphAddNodeOpt) (*graphNode, *graphAddNodeOpts) {
 	return toComponentNode(
 		node,
 		components.ComponentOfChatModel,

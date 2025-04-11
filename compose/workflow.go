@@ -82,7 +82,7 @@ func (wf *Workflow[I, O]) Compile(ctx context.Context, opts ...GraphCompileOptio
 	return compileAnyGraph[I, O](ctx, wf, opts...)
 }
 
-func (wf *Workflow[I, O]) AddChatModelNode(key string, chatModel model.ChatModel, opts ...GraphAddNodeOpt) *WorkflowNode {
+func (wf *Workflow[I, O]) AddChatModelNode(key string, chatModel model.BaseChatModel, opts ...GraphAddNodeOpt) *WorkflowNode {
 	_ = wf.g.AddChatModelNode(key, chatModel, opts...)
 	return wf.initNode(key)
 }

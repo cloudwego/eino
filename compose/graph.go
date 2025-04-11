@@ -338,7 +338,7 @@ func (g *graph) AddIndexerNode(key string, node indexer.Indexer, opts ...GraphAd
 	return g.addNode(key, gNode, options)
 }
 
-// AddChatModelNode add node that implements model.ChatModel.
+// AddChatModelNode add node that implements model.BaseChatModel.
 // e.g.
 //
 //	chatModel, err := openai.NewChatModel(ctx, &openai.ChatModelConfig{
@@ -346,7 +346,7 @@ func (g *graph) AddIndexerNode(key string, node indexer.Indexer, opts ...GraphAd
 //	})
 //
 //	graph.AddChatModelNode("chat_model_node_key", chatModel)
-func (g *graph) AddChatModelNode(key string, node model.ChatModel, opts ...GraphAddNodeOpt) error {
+func (g *graph) AddChatModelNode(key string, node model.BaseChatModel, opts ...GraphAddNodeOpt) error {
 	gNode, options := toChatModelNode(node, opts...)
 	return g.addNode(key, gNode, options)
 }
