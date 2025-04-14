@@ -592,3 +592,68 @@ func (m *mockTool) StreamableRun(ctx context.Context, argumentsInJSON string, op
 
 	return sr, nil
 }
+
+func TestUnknownTool(t *testing.T) {
+	ctx := context.Background()
+	tn, err := NewToolNode(ctx, &ToolsNodeConfig{
+		Tools: nil,
+		UnknownToolsHandler: func(ctx context.Context, name, input string) (string, error) {
+			return "unknown", nil
+		},
+	})
+	assert.NoError(t, err)
+
+	input := &schema.Message{
+		Role: schema.Assistant,
+		ToolCalls: []schema.ToolCall{
+			{
+				ID: "1",
+				Function: schema.FunctionCall{
+					Name:      "unknown1",
+					Arguments: `arg1`,
+				},
+			},
+			{
+				ID: "2",
+				Function: schema.FunctionCall{
+					Name:      "unknown2",
+					Arguments: `arg2`,
+				},
+			},
+		},
+	}
+
+	expected := []*schema.Message{
+		{
+			Role:       schema.Tool,
+			Content:    "unknown",
+			ToolCallID: "1",
+		},
+		{
+			Role:       schema.Tool,
+			Content:    "unknown",
+			ToolCallID: "2",
+		},
+	}
+
+	result, err := tn.Invoke(ctx, input)
+	assert.NoError(t, err)
+	assert.Equal(t, expected, result)
+
+	streamResult, err := tn.Stream(ctx, input)
+	assert.NoError(t, err)
+	result = make([]*schema.Message, 2)
+	for {
+		chunk, err := streamResult.Recv()
+		if err == io.EOF {
+			break
+		}
+		assert.NoError(t, err)
+		for i := range chunk {
+			if chunk[i] != nil {
+				result[i] = chunk[i]
+			}
+		}
+	}
+	assert.Equal(t, expected, result)
+}
