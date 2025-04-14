@@ -310,3 +310,15 @@ func TestSnakeToCamel(t *testing.T) {
 		assert.Equal(t, "", snakeToCamel("_"))
 	})
 }
+
+type testEnumStruct struct {
+	Field1 string `json:"field1" jsonschema:"enum=a,enum=b"`
+}
+
+func TestEnumTag(t *testing.T) {
+	info, err := goStruct2ParamsOneOf[testEnumStruct]()
+	assert.NoError(t, err)
+	s, err := info.ToOpenAPIV3()
+	assert.NoError(t, err)
+	assert.Equal(t, []interface{}{"a", "b"}, s.Properties["field1"].Value.Enum)
+}

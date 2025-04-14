@@ -103,7 +103,7 @@ func defaultSchemaCustomizer(name string, t reflect.Type, tag reflect.StructTag,
 					schema.Description = kv[1]
 				}
 				if kv[0] == "enum" {
-					schema.WithEnum(kv[1])
+					schema.Enum = append(schema.Enum, kv[1])
 				}
 			} else if len(kv) == 1 {
 				if kv[0] == "required" {
