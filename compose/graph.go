@@ -569,7 +569,7 @@ func (g *graph) updateToValidateMap() error {
 					}
 					g.handlerOnEdges[startNode][endNode.endNode] = append(g.handlerOnEdges[startNode][endNode.endNode], handlerPair{
 						invoke: func(value any) (any, error) {
-							return fieldMap(endNode.mappings)(value)
+							return fieldMap(endNode.mappings, false)(value)
 						},
 						transform: streamFieldMap(endNode.mappings),
 					})

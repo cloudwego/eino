@@ -1067,3 +1067,22 @@ func TestNilValue(t *testing.T) {
 		assert.Equal(t, inOut{A: (*string)(nil)}, result)
 	})
 }
+
+func TestStreamFieldMap(t *testing.T) {
+	t.Run("multiple incomplete chunks in source stream", func(t *testing.T) {
+		wf := NewWorkflow[map[string]any, map[string]any]()
+		wf.End().AddInput(START, MapFields("a", "a"), MapFields("b", "b"))
+		r, err := wf.Compile(context.Background())
+		assert.NoError(t, err)
+
+		sr, sw := schema.Pipe[map[string]any](2)
+		sw.Send(map[string]any{"a": 1}, nil)
+		sw.Send(map[string]any{"b": 2}, nil)
+		sw.Close()
+		outputS, err := r.Transform(context.Background(), sr)
+		assert.NoError(t, err)
+		result, err := concatStreamReader(outputS)
+		assert.NoError(t, err)
+		assert.Equal(t, map[string]any{"a": 1, "b": 2}, result)
+	})
+}

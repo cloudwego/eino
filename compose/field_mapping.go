@@ -546,10 +546,11 @@ func checkAndExtractToMapKey(toMapKey string, output, toSet reflect.Value) (key 
 	return reflect.ValueOf(toMapKey), nil
 }
 
-func fieldMap(mappings []*FieldMapping) func(any) (map[string]any, error) {
+func fieldMap(mappings []*FieldMapping, allowMapKeyNotFound bool) func(any) (map[string]any, error) {
 	return func(input any) (result map[string]any, err error) {
 		result = make(map[string]any, len(mappings))
 		var inputValue reflect.Value
+	loop:
 		for _, mapping := range mappings {
 			if len(mapping.from) == 0 {
 				result[mapping.to] = input
@@ -580,6 +581,9 @@ func fieldMap(mappings []*FieldMapping) func(any) (map[string]any, error) {
 					// map key not found can only be a request time error, so we won't panic here
 					var mapKeyNotFoundErr *errMapKeyNotFound
 					if errors.As(err, &mapKeyNotFoundErr) {
+						if allowMapKeyNotFound {
+							continue loop
+						}
 						return nil, err
 					}
 
@@ -600,7 +604,7 @@ func fieldMap(mappings []*FieldMapping) func(any) (map[string]any, error) {
 
 func streamFieldMap(mappings []*FieldMapping) func(streamReader) streamReader {
 	return func(input streamReader) streamReader {
-		return packStreamReader(schema.StreamReaderWithConvert(input.toAnyStreamReader(), fieldMap(mappings)))
+		return packStreamReader(schema.StreamReaderWithConvert(input.toAnyStreamReader(), fieldMap(mappings, true)))
 	}
 }
 
