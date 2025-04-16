@@ -52,12 +52,18 @@ func init() {
 	_ = GenericRegister[schema.Message]("_eino_message")
 	_ = GenericRegister[schema.Document]("_eino_document")
 	_ = GenericRegister[schema.RoleType]("_eino_role_type")
-	_ = GenericRegister[schema.ChatMessagePart]("_eino_chat_message_type")
 	_ = GenericRegister[schema.ToolCall]("_eino_tool_call")
 	_ = GenericRegister[schema.FunctionCall]("_eino_function_call")
 	_ = GenericRegister[schema.ResponseMeta]("_eino_response_meta")
 	_ = GenericRegister[schema.TokenUsage]("_eino_token_usage")
 	_ = GenericRegister[schema.LogProbs]("_eino_log_probs")
+	_ = GenericRegister[schema.ChatMessagePart]("_eino_chat_message_part")
+	_ = GenericRegister[schema.ChatMessagePartType]("_eino_chat_message_type")
+	_ = GenericRegister[schema.ChatMessageImageURL]("_eino_chat_message_image_url")
+	_ = GenericRegister[schema.ChatMessageAudioURL]("_eino_chat_message_audio_url")
+	_ = GenericRegister[schema.ChatMessageVideoURL]("_eino_chat_message_video_url")
+	_ = GenericRegister[schema.ChatMessageFileURL]("_eino_chat_message_file_url")
+	_ = GenericRegister[schema.ImageURLDetail]("_eino_image_url_detail")
 }
 
 func GenericRegister[T any](key string) error {
@@ -94,29 +100,97 @@ func Unmarshal(data []byte) (any, error) {
 }
 
 type internalStruct struct {
-	PointerNum uint32 `json:",omitempty"`
+	Type *valueType `json:",omitempty"`
 
-	// based type
-	Type      string          `json:",omitempty"`
 	JSONValue json.RawMessage `json:",omitempty"`
 
-	// struct type
-	StructType string `json:",omitempty"`
-	// map key type
-	MapKeyPointerNum uint32 `json:",omitempty"`
-	MapKeyType       string `json:",omitempty"`
-	// map value type
-	MapValuePointerNum uint32 `json:",omitempty"`
-	MapValueType       string `json:",omitempty"`
 	// map or struct
 	// in map, the key is the serialized map key anyway todo: if key is string, don't serialize
 	// in struct, the key is the original field name
 	MapValues map[string]*internalStruct `json:",omitempty"`
 
-	// slice value type
-	SliceValuePointerNum uint32            `json:",omitempty"`
-	SliceValueType       string            `json:",omitempty"`
-	SliceValues          []*internalStruct `json:",omitempty"`
+	// slice
+	SliceValues []*internalStruct `json:",omitempty"`
+}
+
+type valueType struct {
+	PointerNum uint32 `json:",omitempty"`
+
+	SimpleType string `json:",omitempty"`
+
+	StructType string `json:",omitempty"`
+
+	MapKeyType   *valueType `json:",omitempty"`
+	MapValueType *valueType `json:",omitempty"`
+
+	SliceValueType *valueType `json:",omitempty"`
+}
+
+func extractType(t reflect.Type) (*valueType, error) {
+	ret := &valueType{}
+	for t.Kind() == reflect.Ptr {
+		ret.PointerNum += 1
+		t = t.Elem()
+	}
+	var err error
+	if t.Kind() == reflect.Map {
+		ret.MapKeyType, err = extractType(t.Key())
+		if err != nil {
+			return nil, err
+		}
+		ret.MapValueType, err = extractType(t.Elem())
+		if err != nil {
+			return nil, err
+		}
+	} else if t.Kind() == reflect.Slice || t.Kind() == reflect.Array {
+		ret.SliceValueType, err = extractType(t.Elem())
+		if err != nil {
+			return nil, err
+		}
+	} else {
+		key, ok := rm[t]
+		if !ok {
+			return ret, fmt.Errorf("unknown type: %s", t.String())
+		}
+		ret.SimpleType = key
+	}
+	return ret, nil
+}
+
+func restoreType(vt *valueType) (reflect.Type, error) {
+	if vt.SimpleType != "" {
+		rt, ok := m[vt.SimpleType]
+		if !ok {
+			return nil, fmt.Errorf("unknown type: %s", vt.SimpleType)
+		}
+		return resolvePointerNum(vt.PointerNum, rt), nil
+	}
+	if vt.StructType != "" {
+		rt, ok := m[vt.StructType]
+		if !ok {
+			return nil, fmt.Errorf("unknown type: %s", vt.StructType)
+		}
+		return resolvePointerNum(vt.PointerNum, rt), nil
+	}
+	if vt.MapKeyType != nil {
+		rkt, err := restoreType(vt.MapKeyType)
+		if err != nil {
+			return nil, err
+		}
+		rvt, err := restoreType(vt.MapValueType)
+		if err != nil {
+			return nil, err
+		}
+		return resolvePointerNum(vt.PointerNum, reflect.MapOf(rkt, rvt)), nil
+	}
+	if vt.SliceValueType != nil {
+		rt, err := restoreType(vt.SliceValueType)
+		if err != nil {
+			return nil, err
+		}
+		return resolvePointerNum(vt.PointerNum, reflect.SliceOf(rt)), nil
+	}
+	return nil, fmt.Errorf("empty value")
 }
 
 func internalMarshal(v any) (*internalStruct, error) {
@@ -124,13 +198,13 @@ func internalMarshal(v any) (*internalStruct, error) {
 		return nil, nil // 这里表示没有值，空指针不等于没有值
 	}
 
-	ret := &internalStruct{}
+	ret := &internalStruct{Type: &valueType{}}
 	rv := reflect.ValueOf(v)
 	rt := rv.Type()
 
 	// 计算指针层数
 	for rt.Kind() == reflect.Ptr {
-		ret.PointerNum++
+		ret.Type.PointerNum++
 		if rv.IsNil() {
 			for rt.Kind() == reflect.Ptr {
 				rt = rt.Elem()
@@ -139,7 +213,7 @@ func internalMarshal(v any) (*internalStruct, error) {
 			if !ok {
 				return nil, fmt.Errorf("unknown type: %v", rt)
 			}
-			ret.Type = key
+			ret.Type.SimpleType = key
 			ret.JSONValue = json.RawMessage("null")
 			return ret, nil
 		}
@@ -154,7 +228,7 @@ func internalMarshal(v any) (*internalStruct, error) {
 		if !ok {
 			return nil, fmt.Errorf("unknown type: %v", rt)
 		}
-		ret.StructType = key
+		ret.Type.StructType = key
 
 		ret.MapValues = make(map[string]*internalStruct)
 
@@ -178,27 +252,17 @@ func internalMarshal(v any) (*internalStruct, error) {
 	case reflect.Map:
 		// 处理Map类型
 		// map key类型
-		rkt := rt.Key()
-		for rkt.Kind() == reflect.Ptr {
-			ret.MapKeyPointerNum++
-			rkt = rkt.Elem()
+		var err error
+		ret.Type.MapKeyType, err = extractType(rt.Key())
+		if err != nil {
+			return nil, err
 		}
-		key, ok := rm[rkt]
-		if !ok {
-			return nil, fmt.Errorf("unknown type: %v", rkt)
-		}
-		ret.MapKeyType = key
+
 		// map value类型
-		rvt := rt.Elem()
-		for rvt.Kind() == reflect.Ptr {
-			ret.MapValuePointerNum++
-			rvt = rvt.Elem()
+		ret.Type.MapValueType, err = extractType(rt.Elem())
+		if err != nil {
+			return nil, err
 		}
-		key, ok = rm[rvt]
-		if !ok {
-			return nil, fmt.Errorf("unknown type: %v", rvt)
-		}
-		ret.MapValueType = key
 
 		ret.MapValues = make(map[string]*internalStruct)
 
@@ -222,16 +286,11 @@ func internalMarshal(v any) (*internalStruct, error) {
 		return ret, nil
 	case reflect.Slice, reflect.Array:
 		// 处理切片和数组类型
-		rvt := rt.Elem()
-		for rvt.Kind() == reflect.Ptr {
-			ret.SliceValuePointerNum++
-			rvt = rvt.Elem()
+		var err error
+		ret.Type.SliceValueType, err = extractType(rt.Elem())
+		if err != nil {
+			return nil, err
 		}
-		key, ok := rm[rvt]
-		if !ok {
-			return nil, fmt.Errorf("unknown type: %v", rvt)
-		}
-		ret.SliceValueType = key
 
 		length := rv.Len()
 		ret.SliceValues = make([]*internalStruct, length)
@@ -252,7 +311,7 @@ func internalMarshal(v any) (*internalStruct, error) {
 		if !ok {
 			return nil, fmt.Errorf("unknown type: %v", rt)
 		}
-		ret.Type = key
+		ret.Type.SimpleType = key
 
 		jsonBytes, err := json.Marshal(rv.Interface())
 		if err != nil {
@@ -268,27 +327,27 @@ func internalUnmarshal(v *internalStruct) (any, error) {
 		return nil, nil
 	}
 
-	if len(v.Type) != 0 {
+	if len(v.Type.SimpleType) != 0 {
 		// based type
-		t, ok := m[v.Type]
+		t, ok := m[v.Type.SimpleType]
 		if !ok {
 			return nil, fmt.Errorf("unknown type key: %v", v.Type)
 		}
-		pResult := reflect.New(resolvePointerNum(v.PointerNum, t))
+		pResult := reflect.New(resolvePointerNum(v.Type.PointerNum, t))
 		err := sonic.Unmarshal(v.JSONValue, pResult.Interface())
 		if err != nil {
-			return nil, fmt.Errorf("unmarshal type[%s] fail: %v, data: %s", v.Type, err, string(v.JSONValue))
+			return nil, fmt.Errorf("unmarshal type[%s] fail: %v, data: %s", t.String(), err, string(v.JSONValue))
 		}
 		return pResult.Elem().Interface(), nil
 	}
 
-	if len(v.StructType) > 0 {
+	if len(v.Type.StructType) > 0 {
 		// struct
-		rt, ok := m[v.StructType]
+		rt, ok := m[v.Type.StructType]
 		if !ok {
-			return nil, fmt.Errorf("unknown type key: %v", v.StructType)
+			return nil, fmt.Errorf("unknown type key: %v", v.Type.StructType)
 		}
-		result, dResult := createValueFromType(resolvePointerNum(v.PointerNum, rt))
+		result, dResult := createValueFromType(resolvePointerNum(v.Type.PointerNum, rt))
 
 		// todo: if all fields are based, can use unmarshal instead of internalUnmarshal
 		for k, internalValue := range v.MapValues {
@@ -314,18 +373,16 @@ func internalUnmarshal(v *internalStruct) (any, error) {
 		return result.Interface(), nil
 	}
 
-	if len(v.MapKeyType) > 0 {
+	if v.Type.MapKeyType != nil {
 		// map
-		rkt, ok := m[v.MapKeyType]
-		if !ok {
-			return nil, fmt.Errorf("unknown type: %v", v.MapKeyType)
+		rkt, err := restoreType(v.Type.MapKeyType)
+		if err != nil {
+			return nil, err
 		}
-		rkt = resolvePointerNum(v.MapKeyPointerNum, rkt)
-		rvt, ok := m[v.MapValueType]
-		if !ok {
-			return nil, fmt.Errorf("unknown type: %v", v.MapValueType)
+		rvt, err := restoreType(v.Type.MapValueType)
+		if err != nil {
+			return nil, err
 		}
-		rvt = resolvePointerNum(v.MapValuePointerNum, rvt)
 
 		// todo: if all values are based, can use unmarshal instead of internalUnmarshal
 		result, dResult := createValueFromType(reflect.MapOf(rkt, rvt))
@@ -333,7 +390,7 @@ func internalUnmarshal(v *internalStruct) (any, error) {
 			prkv := reflect.New(rkt)
 			err := sonic.UnmarshalString(marshaledMapKey, prkv.Interface())
 			if err != nil {
-				return nil, fmt.Errorf("unmarshal map key[%v] to type[%s] fail: %v", marshaledMapKey, v.MapKeyType, err)
+				return nil, fmt.Errorf("unmarshal map key[%v] to type[%s] fail: %v", marshaledMapKey, rkt, err)
 			}
 
 			value, err := internalUnmarshal(internalValue)
@@ -350,18 +407,17 @@ func internalUnmarshal(v *internalStruct) (any, error) {
 	}
 
 	// slice
-	rvt, ok := m[v.SliceValueType]
-	if !ok {
-		return nil, fmt.Errorf("unknown type: %v", v.SliceValueType)
+	rvt, err := restoreType(v.Type.SliceValueType)
+	if err != nil {
+		return nil, err
 	}
-	rvt = resolvePointerNum(v.SliceValuePointerNum, rvt)
 
 	// todo: if all slice values are based, can use unmarshal instead of internalUnmarshal
 	result, dResult := createValueFromType(reflect.SliceOf(rvt))
 	for _, internalValue := range v.SliceValues {
 		value, err := internalUnmarshal(internalValue)
 		if err != nil {
-			return nil, fmt.Errorf("unmarshal slice[%s] fail: %v", v.SliceValueType, err)
+			return nil, fmt.Errorf("unmarshal slice[%s] fail: %v", rvt.String(), err)
 		}
 		if value == nil {
 			// empty value
