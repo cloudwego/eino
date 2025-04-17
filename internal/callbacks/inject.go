@@ -40,6 +40,7 @@ func ReuseHandlers(ctx context.Context, info *RunInfo) context.Context {
 		return ctx
 	}
 
+	cbm.activeRecords = 0
 	return ctxWithManager(ctx, cbm.withRunInfo(info))
 }
 
@@ -53,10 +54,26 @@ func AppendHandlers(ctx context.Context, info *RunInfo, handlers ...Handler) con
 
 type Handle[T any] func(context.Context, T, *RunInfo, []Handler) (context.Context, T)
 
-func On[T any](ctx context.Context, inOut T, handle Handle[T], timing CallbackTiming) (context.Context, T) {
+func On[T any](ctx context.Context, inOut T, handle Handle[T], timing CallbackTiming, start bool) (context.Context, T) {
 	mgr, ok := managerFromCtx(ctx)
 	if !ok {
 		return ctx, inOut
+	}
+
+	if start {
+		mgr.activeRecords++
+		if mgr.activeRecords > 1 {
+			// records > 1 means the manager has been triggered, and will not be triggered again
+			return ctxWithManager(ctx, mgr), inOut
+		}
+	} else {
+		if mgr.activeRecords > 0 {
+			mgr.activeRecords--
+		}
+		if mgr.activeRecords > 0 {
+			// records > 0 means the manager has been triggered, and will not be triggered again
+			return ctxWithManager(ctx, mgr), inOut
+		}
 	}
 
 	hs := make([]Handler, 0, len(mgr.handlers)+len(mgr.globalHandlers))
@@ -67,7 +84,9 @@ func On[T any](ctx context.Context, inOut T, handle Handle[T], timing CallbackTi
 		}
 	}
 
-	return handle(ctx, inOut, mgr.runInfo, hs)
+	var out T
+	ctx, out = handle(ctx, inOut, mgr.runInfo, hs)
+	return ctxWithManager(ctx, mgr), out
 }
 
 func OnStartHandle[T any](ctx context.Context, input T,
