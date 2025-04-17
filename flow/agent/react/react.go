@@ -59,9 +59,9 @@ type AgentConfig struct {
 	// modify the input messages before the model is called, it's useful when you want to add some system prompt or other messages.
 	MessageModifier MessageModifier
 
-	// ToolsModifier.
+	// ToolModifier.
 	// modify the input messages before the tool is called, it's useful when you want to change your tool arguments.
-	ToolsModifier ToolModifier
+	ToolModifier ToolModifier
 
 	// MaxStep.
 	// default 12 of steps in pregel (node num + 10).
@@ -173,7 +173,7 @@ func NewAgent(ctx context.Context, config *AgentConfig) (_ *Agent, err error) {
 		toolInfos       []*schema.ToolInfo
 		toolCallChecker = config.StreamToolCallChecker
 		messageModifier = config.MessageModifier
-		toolsModifier   = config.ToolsModifier
+		toolModifier    = config.ToolModifier
 	)
 
 	if toolCallChecker == nil {
@@ -220,12 +220,12 @@ func NewAgent(ctx context.Context, config *AgentConfig) (_ *Agent, err error) {
 		state.Messages = append(state.Messages, input)
 		state.ReturnDirectlyToolCallID = getReturnDirectlyToolCallID(input, config.ToolReturnDirectly)
 
-		if toolsModifier == nil {
+		if toolModifier == nil {
 			return input, nil
 		}
 		modifiedInput := deepcopy.Copy(input).(*schema.Message)
 
-		return toolsModifier(ctx, modifiedInput), nil
+		return toolModifier(ctx, modifiedInput), nil
 	}
 
 	if err = graph.AddToolsNode(nodeKeyTools, toolsNode, compose.WithStatePreHandler(toolsNodePreHandle), compose.WithNodeName(ToolsNodeName)); err != nil {
