@@ -18,6 +18,7 @@ package compose
 
 import (
 	"context"
+	"fmt"
 	"math/rand"
 	"testing"
 
@@ -584,4 +585,289 @@ func TestParallelMultiNodes(t *testing.T) {
 	}
 	p.addNode("k", &graphNode{}, nil)
 	assert.NotNil(t, p.err)
+}
+
+type FakeLambdaOptions struct {
+	Info string
+}
+
+type FakeLambdaOption func(opt *FakeLambdaOptions)
+
+func FakeWithLambdaInfo(info string) FakeLambdaOption {
+	return func(opt *FakeLambdaOptions) {
+		opt.Info = info
+	}
+}
+
+func TestChainWithNodeKey(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("test normal chain with node key option", func(t *testing.T) {
+
+		chain := NewChain[map[string]any, map[string]any]()
+		chain.AppendLambda(InvokableLambda(func(ctx context.Context, kvs map[string]any) (map[string]any, error) {
+			return kvs, nil
+		}), WithNodeKey("lambda_01"))
+
+		b := NewChainBranch(func(ctx context.Context, input map[string]any) (string, error) {
+			return "lambda_02", nil
+		})
+
+		b.AddLambda("lambda_02", InvokableLambdaWithOption(func(ctx context.Context, kvs map[string]any, opts ...FakeLambdaOption) (map[string]any, error) {
+			opt := &FakeLambdaOptions{}
+			for _, optFn := range opts {
+				optFn(opt)
+			}
+			kvs["lambda_02"] = opt.Info
+			return kvs, nil
+		}), WithNodeKey("lambda_02"))
+
+		b.AddLambda("lambda_03", InvokableLambdaWithOption(func(ctx context.Context, kvs map[string]any, opts ...FakeLambdaOption) (map[string]any, error) {
+			opt := &FakeLambdaOptions{}
+			for _, optFn := range opts {
+				optFn(opt)
+			}
+			kvs["lambda_03"] = opt.Info
+			return kvs, nil
+		}), WithNodeKey("lambda_03"))
+
+		chain.AppendBranch(b)
+
+		chain.AppendPassthrough()
+
+		p := NewParallel()
+		p.AddLambda("lambda_02", InvokableLambda(func(ctx context.Context, kvs map[string]any) (string, error) {
+			return kvs["lambda_02"].(string), nil
+		}))
+		p.AddLambda("lambda_04", InvokableLambdaWithOption(func(ctx context.Context, kvs map[string]any, opts ...FakeLambdaOption) (string, error) {
+			opt := &FakeLambdaOptions{}
+			for _, optFn := range opts {
+				optFn(opt)
+			}
+			return opt.Info, nil
+		}), WithNodeKey("lambda_04"))
+
+		p.AddLambda("lambda_05", InvokableLambdaWithOption(func(ctx context.Context, kvs map[string]any, opts ...FakeLambdaOption) (string, error) {
+			opt := &FakeLambdaOptions{}
+			for _, optFn := range opts {
+				optFn(opt)
+			}
+			return opt.Info, nil
+		}), WithNodeKey("lambda_05"))
+		chain.AppendParallel(p)
+
+		chain.AppendLambda(InvokableLambdaWithOption(func(ctx context.Context, kvs map[string]any, opts ...FakeLambdaOption) (map[string]any, error) {
+			opt := &FakeLambdaOptions{}
+			for _, optFn := range opts {
+				optFn(opt)
+			}
+			kvs["lambda_06"] = opt.Info
+			return kvs, nil
+		}), WithNodeKey("lambda_06"))
+
+		r, err := chain.Compile(ctx)
+		assert.Nil(t, err)
+
+		res, err := r.Invoke(ctx, map[string]any{},
+			WithLambdaOption(FakeWithLambdaInfo("normal")),
+			WithLambdaOption(FakeWithLambdaInfo("info_lambda_02")).DesignateNode("lambda_02"), // branch
+			WithLambdaOption(FakeWithLambdaInfo("info_lambda_03")).DesignateNode("lambda_03"), // branch (wont run)
+			WithLambdaOption(FakeWithLambdaInfo("info_lambda_05")).DesignateNode("lambda_05"), // parallel
+		)
+		assert.Nil(t, err)
+
+		assert.Equal(t, "info_lambda_02", res["lambda_02"]) // transmit option with DesigateNode
+		assert.Equal(t, "info_lambda_05", res["lambda_05"]) // transmit option with DesigateNode
+		assert.Equal(t, "normal", res["lambda_06"])         // without DesigateNode, using default option
+	})
+
+	t.Run("test chain with node key option and error with correct error info", func(t *testing.T) {
+
+		t.Run("compile error of chain", func(t *testing.T) {
+			chain := NewChain[map[string]any, map[string]any]()
+			chain.AppendLambda(InvokableLambda(func(ctx context.Context, kvs map[string]any) (string, error) {
+				return "123", nil
+			}), WithNodeKey("lambda_01"))
+
+			c, err := chain.Compile(ctx)
+			assert.Nil(t, c)
+			fmt.Printf("%+v\n", err)
+
+			assert.Contains(t, err.Error(), "edge[lambda_01]")
+		})
+
+		t.Run("compile error of branch", func(t *testing.T) {
+			t.Run("without node key", func(t *testing.T) {
+				chain := NewChain[map[string]any, map[string]any]()
+				chain.AppendLambda(InvokableLambda(func(ctx context.Context, kvs map[string]any) (map[string]any, error) {
+					return kvs, nil
+				}), WithNodeKey("lambda_01"))
+				b := NewChainBranch(func(ctx context.Context, input map[string]any) (string, error) {
+					return "lambda_02", nil
+				})
+				b.AddLambda("lambda_02", InvokableLambda(func(ctx context.Context, kvs map[string]any) (map[string]any, error) {
+					return kvs, nil
+				}))
+				b.AddLambda("lambda_03", InvokableLambda(func(ctx context.Context, kvs map[string]any) (string, error) {
+					return "", nil
+				}))
+				chain.AppendBranch(b)
+				c, err := chain.Compile(ctx)
+				assert.Nil(t, c)
+				fmt.Printf("%+v\n", err)
+				assert.Contains(t, err.Error(), "edge[node_1_branch_lambda_03]") // with no node key option, will use default node key
+			})
+
+			t.Run("with node key", func(t *testing.T) {
+				chain := NewChain[map[string]any, map[string]any]()
+				chain.AppendLambda(InvokableLambda(func(ctx context.Context, kvs map[string]any) (map[string]any, error) {
+					return kvs, nil
+				}), WithNodeKey("lambda_01"))
+
+				b := NewChainBranch(func(ctx context.Context, input map[string]any) (string, error) {
+					return "lambda_02", nil
+				})
+				b.AddLambda("lambda_02", InvokableLambda(func(ctx context.Context, kvs map[string]any) (map[string]any, error) {
+					return kvs, nil
+				}), WithNodeKey("lambda_02"))
+
+				b.AddLambda("lambda_03", InvokableLambda(func(ctx context.Context, kvs map[string]any) (string, error) {
+					return "123", nil
+				}), WithNodeKey("key_of_lambda_03"))
+
+				chain.AppendBranch(b)
+				c, err := chain.Compile(ctx)
+				assert.Nil(t, c)
+				fmt.Printf("%+v\n", err)
+				assert.Contains(t, err.Error(), "edge[key_of_lambda_03]")
+			})
+		})
+
+		t.Run("compile error of parallel", func(t *testing.T) {
+			t.Run("without node key", func(t *testing.T) {
+				chain := NewChain[map[string]any, map[string]any]()
+				chain.AppendLambda(InvokableLambda(func(ctx context.Context, kvs map[string]any) (map[string]any, error) {
+					return kvs, nil
+				}), WithNodeKey("lambda_01"))
+				p := NewParallel()
+				p.AddLambda("lambda_02", InvokableLambda(func(ctx context.Context, kvs map[string]any) (map[string]any, error) {
+					return kvs, nil
+				}))
+				p.AddLambda("lambda_03", InvokableLambda(func(ctx context.Context, v string) (string, error) {
+					return "", nil
+				}))
+
+				chain.AppendParallel(p)
+
+				c, err := chain.Compile(ctx)
+				assert.Nil(t, c)
+				fmt.Printf("%+v\n", err)
+				assert.Contains(t, err.Error(), "to=node_1_parallel_1") // with no node key option, will use default node key
+			})
+
+			t.Run("with node key", func(t *testing.T) {
+				chain := NewChain[map[string]any, map[string]any]()
+				chain.AppendLambda(InvokableLambda(func(ctx context.Context, kvs map[string]any) (map[string]any, error) {
+					return kvs, nil
+				}), WithNodeKey("lambda_01"))
+				p := NewParallel()
+				p.AddLambda("lambda_02", InvokableLambda(func(ctx context.Context, kvs map[string]any) (map[string]any, error) {
+					return kvs, nil
+				}), WithNodeKey("lambda_02"))
+				p.AddLambda("lambda_03", InvokableLambda(func(ctx context.Context, v string) (string, error) {
+					return "", nil
+				}), WithNodeKey("key_of_lambda_03"))
+				chain.AppendParallel(p)
+				c, err := chain.Compile(ctx)
+				assert.Nil(t, c)
+				fmt.Printf("%+v\n", err)
+				assert.Contains(t, err.Error(), "to=key_of_lambda_03")
+			})
+		})
+
+		t.Run("invoke error", func(t *testing.T) {
+			t.Run("branch with out node key", func(t *testing.T) {
+				chain := NewChain[map[string]any, map[string]any]()
+
+				b := NewChainBranch(func(ctx context.Context, input map[string]any) (string, error) {
+					return "lambda_01", nil
+				})
+
+				b.AddLambda("lambda_01", InvokableLambda(func(ctx context.Context, kvs map[string]any) (map[string]any, error) {
+					return nil, fmt.Errorf("fake error")
+				}))
+				b.AddLambda("lambda_02", InvokableLambda(func(ctx context.Context, kvs map[string]any) (map[string]any, error) {
+					return nil, nil
+				}))
+
+				chain.AppendBranch(b)
+				c, err := chain.Compile(ctx)
+				assert.Nil(t, err)
+
+				_, err = c.Invoke(ctx, map[string]any{})
+				fmt.Printf("%+v\n", err)
+				assert.Error(t, err)
+				assert.Contains(t, err.Error(), "node_0_branch_lambda_01") // with no node key option, will use default node key
+			})
+
+			t.Run("branch with node key", func(t *testing.T) {
+				chain := NewChain[map[string]any, map[string]any]()
+				b := NewChainBranch(func(ctx context.Context, input map[string]any) (string, error) {
+					return "lambda_01", nil
+				})
+				b.AddLambda("lambda_01", InvokableLambda(func(ctx context.Context, kvs map[string]any) (map[string]any, error) {
+					return nil, fmt.Errorf("fake error")
+				}), WithNodeKey("key_of_lambda_01"))
+				b.AddLambda("lambda_02", InvokableLambda(func(ctx context.Context, kvs map[string]any) (map[string]any, error) {
+					return nil, nil
+				}))
+
+				chain.AppendBranch(b)
+				c, err := chain.Compile(ctx)
+				assert.Nil(t, err)
+				_, err = c.Invoke(ctx, map[string]any{})
+				fmt.Printf("%+v\n", err)
+				assert.Error(t, err)
+				assert.Contains(t, err.Error(), "key_of_lambda_01")
+			})
+
+			t.Run("parallel with out node key", func(t *testing.T) {
+				chain := NewChain[map[string]any, map[string]any]()
+				p := NewParallel()
+				p.AddLambda("lambda_01", InvokableLambda(func(ctx context.Context, kvs map[string]any) (map[string]any, error) {
+					return nil, fmt.Errorf("fake error")
+				}))
+				p.AddLambda("lambda_02", InvokableLambda(func(ctx context.Context, kvs map[string]any) (map[string]any, error) {
+					return nil, nil
+				}))
+				chain.AppendParallel(p)
+				c, err := chain.Compile(ctx)
+				assert.Nil(t, err)
+				_, err = c.Invoke(ctx, map[string]any{})
+				fmt.Printf("%+v\n", err)
+				assert.Error(t, err)
+				assert.Contains(t, err.Error(), "node_0_parallel_0") // with no node key option, will use default node key
+			})
+
+			t.Run("parallel with node key", func(t *testing.T) {
+				chain := NewChain[map[string]any, map[string]any]()
+				p := NewParallel()
+				p.AddLambda("lambda_01", InvokableLambda(func(ctx context.Context, kvs map[string]any) (map[string]any, error) {
+					return nil, fmt.Errorf("fake error")
+				}), WithNodeKey("key_of_lambda_01"))
+				p.AddLambda("lambda_02", InvokableLambda(func(ctx context.Context, kvs map[string]any) (map[string]any, error) {
+					return nil, nil
+				}))
+				chain.AppendParallel(p)
+				c, err := chain.Compile(ctx)
+				assert.Nil(t, err)
+				_, err = c.Invoke(ctx, map[string]any{})
+				fmt.Printf("%+v\n", err)
+				assert.Error(t, err)
+				assert.Contains(t, err.Error(), "key_of_lambda_01")
+			})
+		})
+
+	})
+
 }
