@@ -454,7 +454,6 @@ func (c *Chain[I, O]) AppendParallel(p *Parallel) *Chain[I, O] {
 		if node.Second != nil && node.Second.nodeOptions != nil && node.Second.nodeOptions.nodeKey != "" {
 			nodeKey = node.Second.nodeOptions.nodeKey
 		} else {
-			// nodeKey = fmt.Sprintf("%s_branch_%s", prefix, key)
 			nodeKey = fmt.Sprintf("%s_parallel_%d", prefix, i)
 		}
 
