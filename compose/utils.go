@@ -181,8 +181,22 @@ func invokeWithCallbacks[I, O, TOption any](i Invoke[I, O, TOption]) Invoke[I, O
 	return runWithCallbacks(i, onStart[I], onEnd[O], onError)
 }
 
-func genericInvokeWithCallbacks(i invoke) invoke {
-	return runWithCallbacks(i, onStart[any], onEnd[any], onError)
+func onGraphStart(ctx context.Context, input any, isStream bool) (context.Context, any) {
+	if isStream {
+		return genericOnStartWithStreamInput(ctx, input.(streamReader))
+	}
+	return onStart(ctx, input)
+}
+
+func onGraphEnd(ctx context.Context, output any, isStream bool) (context.Context, any) {
+	if isStream {
+		return genericOnEndWithStreamOutput(ctx, output.(streamReader))
+	}
+	return onEnd(ctx, output)
+}
+
+func onGraphError(ctx context.Context, err error) (context.Context, error) {
+	return onError(ctx, err)
 }
 
 func streamWithCallbacks[I, O, TOption any](s Stream[I, O, TOption]) Stream[I, O, TOption] {
@@ -195,10 +209,6 @@ func collectWithCallbacks[I, O, TOption any](c Collect[I, O, TOption]) Collect[I
 
 func transformWithCallbacks[I, O, TOption any](t Transform[I, O, TOption]) Transform[I, O, TOption] {
 	return runWithCallbacks(t, onStartWithStreamInput[I], onEndWithStreamOutput[O], onError)
-}
-
-func genericTransformWithCallbacks(t transform) transform {
-	return runWithCallbacks(t, genericOnStartWithStreamInput, genericOnEndWithStreamOutput, onError)
 }
 
 func initGraphCallbacks(ctx context.Context, info *nodeInfo, meta *executorMeta, opts ...Option) context.Context {

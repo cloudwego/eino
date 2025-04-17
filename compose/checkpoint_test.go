@@ -23,6 +23,9 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/assert"
+
+	"github.com/cloudwego/eino/internal/callbacks"
+	"github.com/cloudwego/eino/schema"
 )
 
 type inMemoryStore struct {
@@ -297,6 +300,51 @@ func TestSubGraph(t *testing.T) {
 	assert.Equal(t, "start11state23", result)
 }
 
+type testGraphCallback struct {
+	onStartTimes       int
+	onEndTimes         int
+	onStreamStartTimes int
+	onStreamEndTimes   int
+	onErrorTimes       int
+}
+
+func (t *testGraphCallback) OnStart(ctx context.Context, info *callbacks.RunInfo, input callbacks.CallbackInput) context.Context {
+	if info.Component == ComponentOfGraph {
+		t.onStartTimes++
+	}
+	return ctx
+}
+
+func (t *testGraphCallback) OnEnd(ctx context.Context, info *callbacks.RunInfo, output callbacks.CallbackOutput) context.Context {
+	if info.Component == ComponentOfGraph {
+		t.onEndTimes++
+	}
+	return ctx
+}
+
+func (t *testGraphCallback) OnError(ctx context.Context, info *callbacks.RunInfo, err error) context.Context {
+	if info.Component == ComponentOfGraph {
+		t.onErrorTimes++
+	}
+	return ctx
+}
+
+func (t *testGraphCallback) OnStartWithStreamInput(ctx context.Context, info *callbacks.RunInfo, input *schema.StreamReader[callbacks.CallbackInput]) context.Context {
+	input.Close()
+	if info.Component == ComponentOfGraph {
+		t.onStreamStartTimes++
+	}
+	return ctx
+}
+
+func (t *testGraphCallback) OnEndWithStreamOutput(ctx context.Context, info *callbacks.RunInfo, output *schema.StreamReader[callbacks.CallbackOutput]) context.Context {
+	output.Close()
+	if info.Component == ComponentOfGraph {
+		t.onStreamEndTimes++
+	}
+	return ctx
+}
+
 func TestNestedSubGraph(t *testing.T) {
 	RegisterSerializableType[testStruct]("test_struct")
 	ssubG := NewGraph[string, string](WithGenLocalState(func(ctx context.Context) (state *testStruct) {
@@ -379,7 +427,8 @@ func TestNestedSubGraph(t *testing.T) {
 	r, err := g.Compile(ctx, WithCheckPointStore(newInMemoryStore()))
 	assert.NoError(t, err)
 
-	_, err = r.Invoke(ctx, "start", WithCheckPointID("1"))
+	tgcb := &testGraphCallback{}
+	_, err = r.Invoke(ctx, "start", WithCheckPointID("1"), WithCallbacks(tgcb))
 	assert.NotNil(t, err)
 	info, ok := ExtractInterruptInfo(err)
 	assert.True(t, ok)
@@ -396,7 +445,7 @@ func TestNestedSubGraph(t *testing.T) {
 		assert.Equal(t, 1, len(path.path))
 		state.(*testStruct).A = "state"
 		return nil
-	}))
+	}), WithCallbacks(tgcb))
 	assert.NotNil(t, err)
 	info, ok = ExtractInterruptInfo(err)
 	assert.True(t, ok)
@@ -423,7 +472,7 @@ func TestNestedSubGraph(t *testing.T) {
 		}
 		times++
 		return nil
-	}))
+	}), WithCallbacks(tgcb))
 	assert.NotNil(t, err)
 	info, ok = ExtractInterruptInfo(err)
 	assert.True(t, ok)
@@ -439,14 +488,14 @@ func TestNestedSubGraph(t *testing.T) {
 		assert.Equal(t, 1, len(path.path))
 		state.(*testStruct).A = "state2"
 		return nil
-	}))
+	}), WithCallbacks(tgcb))
 	assert.NoError(t, err)
 	assert.Equal(t, `start11state1state24
 start1134
 state24
 3`, result)
 
-	_, err = r.Stream(ctx, "start", WithCheckPointID("2"))
+	_, err = r.Stream(ctx, "start", WithCheckPointID("2"), WithCallbacks(tgcb))
 	assert.NotNil(t, err)
 	info, ok = ExtractInterruptInfo(err)
 	assert.True(t, ok)
@@ -463,7 +512,7 @@ state24
 		assert.Equal(t, 1, len(path.path))
 		state.(*testStruct).A = "state"
 		return nil
-	}))
+	}), WithCallbacks(tgcb))
 	assert.NotNil(t, err)
 	info, ok = ExtractInterruptInfo(err)
 	assert.True(t, ok)
@@ -490,7 +539,7 @@ state24
 		}
 		times++
 		return nil
-	}))
+	}), WithCallbacks(tgcb))
 	assert.NotNil(t, err)
 	info, ok = ExtractInterruptInfo(err)
 	assert.True(t, ok)
@@ -506,7 +555,7 @@ state24
 		assert.Equal(t, 1, len(path.path))
 		state.(*testStruct).A = "state2"
 		return nil
-	}))
+	}), WithCallbacks(tgcb))
 	assert.NoError(t, err)
 	result = ""
 	for {
@@ -521,6 +570,12 @@ state24
 start1134
 state24
 3`, result)
+
+	assert.Equal(t, 10, tgcb.onStartTimes)       // 3+ssubG*1*3+subG*2*2+g*0
+	assert.Equal(t, 3, tgcb.onEndTimes)          // success*3
+	assert.Equal(t, 10, tgcb.onStreamStartTimes) // 3+ssubG*1*3+subG*2*2+g*0
+	assert.Equal(t, 3, tgcb.onStreamEndTimes)    // success*3
+	assert.Equal(t, 14, tgcb.onErrorTimes)       // 2*(ssubG*1*3+subG*2*2+g*0)
 
 	// dag
 	r, err = g.Compile(ctx, WithCheckPointStore(newInMemoryStore()), WithNodeTriggerMode(AllPredecessor))
@@ -765,4 +820,22 @@ func TestRerunNodeInterrupt(t *testing.T) {
 	assert.Equal(t, "state", chunk)
 	_, err = streamResult.Recv()
 	assert.Equal(t, io.EOF, err)
+}
+
+func TestEarlyFailCallback(t *testing.T) {
+	g := NewGraph[string, string]()
+	assert.NoError(t, g.AddLambdaNode("1", InvokableLambda(func(ctx context.Context, input string) (output string, err error) {
+		return input, nil
+	})))
+	assert.NoError(t, g.AddEdge(START, "1"))
+	assert.NoError(t, g.AddEdge("1", END))
+
+	ctx := context.Background()
+	r, err := g.Compile(ctx, WithNodeTriggerMode(AllPredecessor))
+	assert.NoError(t, err)
+	tgcb := &testGraphCallback{}
+	_, _ = r.Invoke(ctx, "", WithCallbacks(tgcb), WithRuntimeMaxSteps(1))
+	assert.Equal(t, 1, tgcb.onStartTimes)
+	assert.Equal(t, 1, tgcb.onErrorTimes)
+	assert.Equal(t, 0, tgcb.onEndTimes)
 }

@@ -101,9 +101,19 @@ func runnableTransform(ctx context.Context, r *composableRunnable, input any, op
 	return r.t(ctx, input.(streamReader), opts...)
 }
 
-func (r *runner) run(ctx context.Context, isStream bool, input any, opts ...Option) (any, error) {
-	var err error
+func (r *runner) run(ctx context.Context, isStream bool, input any, opts ...Option) (result any, err error) {
 	// Choose the appropriate wrapper function based on whether we're handling a stream or not.
+	haveOnStart := false
+	defer func() {
+		if !haveOnStart {
+			ctx, input = onGraphStart(ctx, input, isStream)
+		}
+		if err != nil {
+			ctx, err = onGraphError(ctx, err)
+		} else {
+			ctx, result = onGraphEnd(ctx, result, isStream)
+		}
+	}()
 	var runWrapper runnableCallWrapper
 	runWrapper = runnableInvoke
 	if isStream {
@@ -223,7 +233,10 @@ func (r *runner) run(ctx context.Context, isStream bool, input any, opts ...Opti
 		if r.runCtx != nil {
 			ctx = r.runCtx(ctx)
 		}
-		var result any
+
+		ctx, input = onGraphStart(ctx, input, isStream)
+		haveOnStart = true
+
 		nextTasks, result, err = r.calculateNextTasks(ctx, []*task{{
 			nodeKey: START,
 			call:    r.inputChannels,
@@ -235,6 +248,9 @@ func (r *runner) run(ctx context.Context, isStream bool, input any, opts ...Opti
 		if result != nil {
 			return result, nil
 		}
+	} else {
+		ctx, input = onGraphStart(ctx, input, isStream)
+		haveOnStart = true
 	}
 
 	// Main execution loop.
@@ -790,9 +806,6 @@ func (r *runner) toComposableRunnable() *composableRunnable {
 		genericHelper: r.genericHelper,
 		optionType:    nil, // if option type is nil, graph will transmit all options.
 	}
-
-	cr.i = genericInvokeWithCallbacks(cr.i)
-	cr.t = genericTransformWithCallbacks(cr.t)
 
 	return cr
 }

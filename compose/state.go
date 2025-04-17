@@ -162,6 +162,11 @@ func ProcessState[S any](ctx context.Context, handler func(context.Context, S) e
 func getState[S any](ctx context.Context) (S, *sync.Mutex, error) {
 	state := ctx.Value(stateKey{})
 
+	if state == nil {
+		var s S
+		return s, nil, fmt.Errorf("have not set state")
+	}
+
 	interState := state.(*internalState)
 
 	cState, ok := interState.state.(S)
