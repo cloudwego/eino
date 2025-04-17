@@ -24,6 +24,7 @@ import (
 	"github.com/cloudwego/eino/compose"
 	"github.com/cloudwego/eino/flow/agent"
 	"github.com/cloudwego/eino/schema"
+	"github.com/mohae/deepcopy"
 )
 
 type state struct {
@@ -38,6 +39,9 @@ const (
 
 // MessageModifier modify the input messages before the model is called.
 type MessageModifier func(ctx context.Context, input []*schema.Message) []*schema.Message
+
+// ToolModifier modify the input messages before the tool is called.
+type ToolModifier func(ctx context.Context, input *schema.Message) *schema.Message
 
 // AgentConfig is the config for ReAct agent.
 type AgentConfig struct {
@@ -54,6 +58,10 @@ type AgentConfig struct {
 	// MessageModifier.
 	// modify the input messages before the model is called, it's useful when you want to add some system prompt or other messages.
 	MessageModifier MessageModifier
+
+	// ToolsModifier.
+	// modify the input messages before the tool is called, it's useful when you want to change your tool arguments.
+	ToolsModifier ToolModifier
 
 	// MaxStep.
 	// default 12 of steps in pregel (node num + 10).
@@ -165,6 +173,7 @@ func NewAgent(ctx context.Context, config *AgentConfig) (_ *Agent, err error) {
 		toolInfos       []*schema.ToolInfo
 		toolCallChecker = config.StreamToolCallChecker
 		messageModifier = config.MessageModifier
+		toolsModifier   = config.ToolsModifier
 	)
 
 	if toolCallChecker == nil {
@@ -210,8 +219,15 @@ func NewAgent(ctx context.Context, config *AgentConfig) (_ *Agent, err error) {
 	toolsNodePreHandle := func(ctx context.Context, input *schema.Message, state *state) (*schema.Message, error) {
 		state.Messages = append(state.Messages, input)
 		state.ReturnDirectlyToolCallID = getReturnDirectlyToolCallID(input, config.ToolReturnDirectly)
-		return input, nil
+
+		if toolsModifier == nil {
+			return input, nil
+		}
+		modifiedInput := deepcopy.Copy(input).(*schema.Message)
+
+		return toolsModifier(ctx, modifiedInput), nil
 	}
+
 	if err = graph.AddToolsNode(nodeKeyTools, toolsNode, compose.WithStatePreHandler(toolsNodePreHandle), compose.WithNodeName(ToolsNodeName)); err != nil {
 		return nil, err
 	}
