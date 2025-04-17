@@ -40,11 +40,11 @@ func EnsureRunInfo(ctx context.Context, typ string, comp components.Component) c
 	if !ok {
 		return ctx
 	}
-	if cbm.runInfo != nil && (cbm.runInfo.Type != typ || cbm.runInfo.Component != comp) {
-		return ctxWithManager(ctx, cbm.withRunInfo(&RunInfo{
+	if cbm.invalidStart {
+		return ReuseHandlers(ctx, &RunInfo{
 			Type:      typ,
 			Component: comp,
-		}))
+		})
 	}
 	return ctx
 }
@@ -54,7 +54,8 @@ func ReuseHandlers(ctx context.Context, info *RunInfo) context.Context {
 	if !ok {
 		return ctx
 	}
-
+	cbm.invalidStart = false
+	// won't modify validEnd
 	return ctxWithManager(ctx, cbm.withRunInfo(info))
 }
 
@@ -68,21 +69,37 @@ func AppendHandlers(ctx context.Context, info *RunInfo, handlers ...Handler) con
 
 type Handle[T any] func(context.Context, T, *RunInfo, []Handler) (context.Context, T)
 
-func On[T any](ctx context.Context, inOut T, handle Handle[T], timing CallbackTiming) (context.Context, T) {
+func On[T any](ctx context.Context, inOut T, handle Handle[T], timing CallbackTiming, start bool) (context.Context, T) {
 	mgr, ok := managerFromCtx(ctx)
 	if !ok {
 		return ctx, inOut
 	}
+	nMgr := *mgr
 
-	hs := make([]Handler, 0, len(mgr.handlers)+len(mgr.globalHandlers))
-	for _, handler := range append(mgr.handlers, mgr.globalHandlers...) {
+	if start {
+		if nMgr.invalidStart {
+			nMgr.validEnd = false
+			return ctxWithManager(ctx, &nMgr), inOut
+		}
+		nMgr.invalidStart = true
+		nMgr.validEnd = true
+	} else {
+		if !nMgr.validEnd {
+			return ctx, inOut
+		}
+	}
+
+	hs := make([]Handler, 0, len(nMgr.handlers)+len(nMgr.globalHandlers))
+	for _, handler := range append(nMgr.handlers, nMgr.globalHandlers...) {
 		timingChecker, ok_ := handler.(TimingChecker)
-		if !ok_ || timingChecker.Needed(ctx, mgr.runInfo, timing) {
+		if !ok_ || timingChecker.Needed(ctx, nMgr.runInfo, timing) {
 			hs = append(hs, handler)
 		}
 	}
 
-	return handle(ctx, inOut, mgr.runInfo, hs)
+	var out T
+	ctx, out = handle(ctx, inOut, nMgr.runInfo, hs)
+	return ctxWithManager(ctx, &nMgr), out
 }
 
 func OnStartHandle[T any](ctx context.Context, input T,

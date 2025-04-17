@@ -30,17 +30,17 @@ import (
 type on[T any] func(context.Context, T) (context.Context, T)
 
 func onStart[T any](ctx context.Context, input T) (context.Context, T) {
-	return icb.On(ctx, input, icb.OnStartHandle[T], callbacks.TimingOnStart)
+	return icb.On(ctx, input, icb.OnStartHandle[T], callbacks.TimingOnStart, true)
 }
 
 func onEnd[T any](ctx context.Context, output T) (context.Context, T) {
-	return icb.On(ctx, output, icb.OnEndHandle[T], callbacks.TimingOnEnd)
+	return icb.On(ctx, output, icb.OnEndHandle[T], callbacks.TimingOnEnd, false)
 }
 
 func onStartWithStreamInput[T any](ctx context.Context, input *schema.StreamReader[T]) (
 	context.Context, *schema.StreamReader[T]) {
 
-	return icb.On(ctx, input, icb.OnStartWithStreamInputHandle[T], callbacks.TimingOnStartWithStreamInput)
+	return icb.On(ctx, input, icb.OnStartWithStreamInputHandle[T], callbacks.TimingOnStartWithStreamInput, true)
 }
 
 func genericOnStartWithStreamInputHandle(ctx context.Context, input streamReader,
@@ -63,13 +63,13 @@ func genericOnStartWithStreamInputHandle(ctx context.Context, input streamReader
 }
 
 func genericOnStartWithStreamInput(ctx context.Context, input streamReader) (context.Context, streamReader) {
-	return icb.On(ctx, input, genericOnStartWithStreamInputHandle, callbacks.TimingOnStartWithStreamInput)
+	return icb.On(ctx, input, genericOnStartWithStreamInputHandle, callbacks.TimingOnStartWithStreamInput, true)
 }
 
 func onEndWithStreamOutput[T any](ctx context.Context, output *schema.StreamReader[T]) (
 	context.Context, *schema.StreamReader[T]) {
 
-	return icb.On(ctx, output, icb.OnEndWithStreamOutputHandle[T], callbacks.TimingOnEndWithStreamOutput)
+	return icb.On(ctx, output, icb.OnEndWithStreamOutputHandle[T], callbacks.TimingOnEndWithStreamOutput, false)
 }
 
 func genericOnEndWithStreamOutputHandle(ctx context.Context, output streamReader,
@@ -90,11 +90,11 @@ func genericOnEndWithStreamOutputHandle(ctx context.Context, output streamReader
 }
 
 func genericOnEndWithStreamOutput(ctx context.Context, output streamReader) (context.Context, streamReader) {
-	return icb.On(ctx, output, genericOnEndWithStreamOutputHandle, callbacks.TimingOnEndWithStreamOutput)
+	return icb.On(ctx, output, genericOnEndWithStreamOutputHandle, callbacks.TimingOnEndWithStreamOutput, false)
 }
 
 func onError(ctx context.Context, err error) (context.Context, error) {
-	return icb.On(ctx, err, icb.OnErrorHandle, callbacks.TimingOnError)
+	return icb.On(ctx, err, icb.OnErrorHandle, callbacks.TimingOnError, false)
 }
 
 func runWithCallbacks[I, O, TOption any](r func(context.Context, I, ...TOption) (O, error),

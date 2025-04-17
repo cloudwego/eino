@@ -54,7 +54,7 @@ import (
 // OnStart invokes the OnStart logic for the particular context, ensuring that all registered
 // handlers are executed in reverse order (compared to add order) when a process begins.
 func OnStart[T any](ctx context.Context, input T) context.Context {
-	ctx, _ = callbacks.On(ctx, input, callbacks.OnStartHandle[T], TimingOnStart)
+	ctx, _ = callbacks.On(ctx, input, callbacks.OnStartHandle[T], TimingOnStart, true)
 
 	return ctx
 }
@@ -63,7 +63,7 @@ func OnStart[T any](ctx context.Context, input T) context.Context {
 // and finalization when a process ends.
 // handlers are executed in normal order (compared to add order).
 func OnEnd[T any](ctx context.Context, output T) context.Context {
-	ctx, _ = callbacks.On(ctx, output, callbacks.OnEndHandle[T], TimingOnEnd)
+	ctx, _ = callbacks.On(ctx, output, callbacks.OnEndHandle[T], TimingOnEnd, false)
 
 	return ctx
 }
@@ -74,7 +74,7 @@ func OnEnd[T any](ctx context.Context, output T) context.Context {
 func OnStartWithStreamInput[T any](ctx context.Context, input *schema.StreamReader[T]) (
 	nextCtx context.Context, newStreamReader *schema.StreamReader[T]) {
 
-	return callbacks.On(ctx, input, callbacks.OnStartWithStreamInputHandle[T], TimingOnStartWithStreamInput)
+	return callbacks.On(ctx, input, callbacks.OnStartWithStreamInputHandle[T], TimingOnStartWithStreamInput, true)
 }
 
 // OnEndWithStreamOutput invokes the OnEndWithStreamOutput logic of the particular, ensuring that
@@ -83,13 +83,13 @@ func OnStartWithStreamInput[T any](ctx context.Context, input *schema.StreamRead
 func OnEndWithStreamOutput[T any](ctx context.Context, output *schema.StreamReader[T]) (
 	nextCtx context.Context, newStreamReader *schema.StreamReader[T]) {
 
-	return callbacks.On(ctx, output, callbacks.OnEndWithStreamOutputHandle[T], TimingOnEndWithStreamOutput)
+	return callbacks.On(ctx, output, callbacks.OnEndWithStreamOutputHandle[T], TimingOnEndWithStreamOutput, false)
 }
 
 // OnError invokes the OnError logic of the particular, notice that error in stream will not represent here.
 // handlers are executed in normal order (compared to add order).
 func OnError(ctx context.Context, err error) context.Context {
-	ctx, _ = callbacks.On(ctx, err, callbacks.OnErrorHandle, TimingOnError)
+	ctx, _ = callbacks.On(ctx, err, callbacks.OnErrorHandle, TimingOnError, false)
 
 	return ctx
 }

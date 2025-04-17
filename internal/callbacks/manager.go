@@ -22,6 +22,8 @@ type manager struct {
 	globalHandlers []Handler
 	handlers       []Handler
 	runInfo        *RunInfo
+	invalidStart   bool
+	validEnd       bool
 }
 
 var GlobalHandlers []Handler
@@ -50,22 +52,17 @@ func (m *manager) withRunInfo(runInfo *RunInfo) *manager {
 		return nil
 	}
 
-	return &manager{
-		globalHandlers: m.globalHandlers,
-		handlers:       m.handlers,
-		runInfo:        runInfo,
-	}
+	n := *m
+	n.runInfo = runInfo
+	return &n
 }
 
 func managerFromCtx(ctx context.Context) (*manager, bool) {
 	v := ctx.Value(CtxManagerKey{})
 	m, ok := v.(*manager)
 	if ok && m != nil {
-		return &manager{
-			globalHandlers: m.globalHandlers,
-			handlers:       m.handlers,
-			runInfo:        m.runInfo,
-		}, true
+		n := *m
+		return &n, true
 	}
 
 	return nil, false
