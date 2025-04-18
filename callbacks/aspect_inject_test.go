@@ -195,6 +195,69 @@ func TestGlobalCallbacksRepeated(t *testing.T) {
 	ctx = callbacks.AppendHandlers(ctx, &RunInfo{})
 	ctx = callbacks.AppendHandlers(ctx, &RunInfo{})
 
-	callbacks.On(ctx, "test", callbacks.OnStartHandle[string], TimingOnStart)
+	callbacks.On(ctx, "test", callbacks.OnStartHandle[string], TimingOnStart, true)
 	assert.Equal(t, times, 1)
+}
+
+func TestNesting(t *testing.T) {
+	ctx := context.Background()
+	cb := &myCallback{t: t}
+	ctx = InitCallbacks(ctx, &RunInfo{
+		Name: "test",
+	}, cb)
+
+	// jumped
+	ctx1 := OnStart(ctx, 0)
+	ctx2 := OnStart(ctx1, 1)
+	OnEnd(ctx2, 1)
+	OnEnd(ctx1, 0)
+	assert.Equal(t, 2, cb.times)
+
+	// reused
+	cb.times = 0
+	ctx1 = OnStart(ctx, 0)
+	ctx2 = ReuseHandlers(ctx1, &RunInfo{Name: "test2"})
+	ctx3 := OnStart(ctx2, 1)
+	OnEnd(ctx3, 1)
+	OnEnd(ctx1, 0)
+	assert.Equal(t, 4, cb.times)
+
+}
+
+type myCallback struct {
+	t     *testing.T
+	times int
+}
+
+func (m *myCallback) OnStart(ctx context.Context, info *RunInfo, input CallbackInput) context.Context {
+	m.times++
+	if info.Name == "test" {
+		assert.Equal(m.t, 0, input)
+	} else {
+		assert.Equal(m.t, 1, input)
+	}
+
+	return ctx
+}
+
+func (m *myCallback) OnEnd(ctx context.Context, info *RunInfo, output CallbackOutput) context.Context {
+	m.times++
+	if info.Name == "test" {
+		assert.Equal(m.t, 0, output)
+	} else {
+		assert.Equal(m.t, 1, output)
+	}
+	return ctx
+}
+
+func (m *myCallback) OnError(ctx context.Context, info *RunInfo, err error) context.Context {
+	panic("implement me")
+}
+
+func (m *myCallback) OnStartWithStreamInput(ctx context.Context, info *RunInfo, input *schema.StreamReader[CallbackInput]) context.Context {
+	panic("implement me")
+}
+
+func (m *myCallback) OnEndWithStreamOutput(ctx context.Context, info *RunInfo, output *schema.StreamReader[CallbackOutput]) context.Context {
+	panic("implement me")
 }
