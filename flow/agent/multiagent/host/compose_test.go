@@ -34,7 +34,7 @@ import (
 
 func TestHostMultiAgent(t *testing.T) {
 	ctrl := gomock.NewController(t)
-	mockHostLLM := model.NewMockChatModel(ctrl)
+	mockHostLLM := model.NewMockToolCallingChatModel(ctrl)
 	mockSpecialistLLM1 := model.NewMockChatModel(ctrl)
 
 	specialist1 := &Specialist{
@@ -72,11 +72,11 @@ func TestHostMultiAgent(t *testing.T) {
 
 	ctx := context.Background()
 
-	mockHostLLM.EXPECT().BindTools(gomock.Any()).Return(nil).AnyTimes()
+	mockHostLLM.EXPECT().WithTools(gomock.Any()).Return(mockHostLLM, nil).AnyTimes()
 
 	hostMA, err := NewMultiAgent(ctx, &MultiAgentConfig{
 		Host: Host{
-			ChatModel: mockHostLLM,
+			ToolCallingModel: mockHostLLM,
 		},
 		Specialists: []*Specialist{
 			specialist1,
@@ -284,7 +284,7 @@ func TestHostMultiAgent(t *testing.T) {
 
 		hostMA, err = NewMultiAgent(ctx, &MultiAgentConfig{
 			Host: Host{
-				ChatModel: mockHostLLM,
+				ToolCallingModel: mockHostLLM,
 			},
 			Specialists: []*Specialist{
 				specialist1,
@@ -391,7 +391,7 @@ func TestHostMultiAgent(t *testing.T) {
 
 		hostMA, err := NewMultiAgent(ctx, &MultiAgentConfig{
 			Host: Host{
-				ChatModel: mockHostLLM,
+				ToolCallingModel: mockHostLLM,
 			},
 			Specialists: []*Specialist{
 				specialist1,
