@@ -839,3 +839,33 @@ func TestEarlyFailCallback(t *testing.T) {
 	assert.Equal(t, 1, tgcb.onErrorTimes)
 	assert.Equal(t, 0, tgcb.onEndTimes)
 }
+
+func TestGraphStartInterrupt(t *testing.T) {
+	subG := NewGraph[string, string]()
+	_ = subG.AddLambdaNode("1", InvokableLambda(func(ctx context.Context, input string) (output string, err error) {
+		return input + "sub1", nil
+	}))
+	_ = subG.AddEdge(START, "1")
+	_ = subG.AddEdge("1", END)
+
+	g := NewGraph[string, string]()
+	_ = g.AddLambdaNode("1", InvokableLambda(func(ctx context.Context, input string) (output string, err error) {
+		return input + "1", nil
+	}))
+	_ = g.AddGraphNode("2", subG, WithGraphCompileOptions(WithInterruptBeforeNodes([]string{"1"})))
+	_ = g.AddEdge(START, "1")
+	_ = g.AddEdge("1", "2")
+	_ = g.AddEdge("2", END)
+
+	ctx := context.Background()
+	r, err := g.Compile(ctx, WithCheckPointStore(newInMemoryStore()))
+	assert.NoError(t, err)
+
+	_, err = r.Invoke(ctx, "input", WithCheckPointID("1"))
+	info, existed := ExtractInterruptInfo(err)
+	assert.True(t, existed)
+	assert.Equal(t, []string{"1"}, info.SubGraphs["2"].BeforeNodes)
+	result, err := r.Invoke(ctx, "", WithCheckPointID("1"))
+	assert.NoError(t, err)
+	assert.Equal(t, "input1sub1", result)
+}

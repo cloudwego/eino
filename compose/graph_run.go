@@ -248,6 +248,18 @@ func (r *runner) run(ctx context.Context, isStream bool, input any, opts ...Opti
 		if result != nil {
 			return result, nil
 		}
+
+		if keys := getHitKey(nextTasks, r.interruptBeforeNodes); len(keys) > 0 {
+			return nil, r.handleInterrupt(ctx,
+				keys,
+				nil,
+				nextTasks,
+				cm.channels,
+				isStream,
+				isSubGraph,
+				checkPointID,
+			)
+		}
 	} else {
 		ctx, input = onGraphStart(ctx, input, isStream)
 		haveOnStart = true
