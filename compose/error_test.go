@@ -20,6 +20,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 
@@ -76,4 +77,61 @@ func TestSubGraphNodeError(t *testing.T) {
 	assert.True(t, errors.As(err, &ie))
 	assert.Equal(t, "my error", ie.origError.Error())
 	assert.Equal(t, []string{"a", "1"}, ie.nodePath.path)
+}
+
+func TestContextCancelDuringRun(t *testing.T) {
+	// Create a graph with a long-running node to test context cancellation
+	g := NewGraph[string, string]()
+
+	// Add a node that waits for some time (long enough to be cancelled)
+	assert.NoError(t, g.AddLambdaNode("slow_node", InvokableLambda(func(ctx context.Context, input string) (output string, err error) {
+		select {
+		case <-ctx.Done():
+			// Return context's error when cancelled
+			return "", ctx.Err()
+		case <-time.After(200 * time.Millisecond):
+			return input + "_processed", nil
+		}
+	})))
+
+	assert.NoError(t, g.AddEdge(START, "slow_node"))
+	assert.NoError(t, g.AddEdge("slow_node", END))
+
+	// Create a context that we can cancel
+	ctx, cancel := context.WithCancel(context.Background())
+
+	// Compile the graph
+	r, err := g.Compile(ctx)
+	assert.NoError(t, err)
+
+	// Run the invoke in a goroutine
+	resultCh := make(chan error)
+	go func() {
+		_, err := r.Invoke(ctx, "input")
+		resultCh <- err
+	}()
+
+	// Cancel the context after a short delay
+	time.Sleep(50 * time.Millisecond)
+	cancel()
+
+	// Get the result
+	err = <-resultCh
+
+	// Verify the error is related to context cancellation
+	assert.Error(t, err)
+
+	// Check error type and content
+	var ie *internalError
+	assert.True(t, errors.As(err, &ie))
+
+	// Error path should contain the node
+	assert.Equal(t, []string{"slow_node"}, ie.nodePath.path)
+
+	// Original error should be context.Canceled
+	assert.ErrorIs(t, ie.origError, context.Canceled)
+
+	// Test unwrap capability
+	unwrappedErr := ie.Unwrap()
+	assert.ErrorIs(t, unwrappedErr, context.Canceled)
 }
