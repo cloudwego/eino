@@ -19,6 +19,7 @@ package callbacks
 import (
 	"context"
 
+	"github.com/cloudwego/eino/components"
 	"github.com/cloudwego/eino/internal/callbacks"
 	"github.com/cloudwego/eino/schema"
 )
@@ -91,6 +92,12 @@ func OnError(ctx context.Context, err error) context.Context {
 	ctx, _ = callbacks.On(ctx, err, callbacks.OnErrorHandle, TimingOnError)
 
 	return ctx
+}
+
+// EnsureRunInfo ensures the RunInfo in context matches the given type and component.
+// If the current callback manager doesn't match or doesn't exist, it creates a new one while preserving existing handlers.
+func EnsureRunInfo(ctx context.Context, typ string, comp components.Component) context.Context {
+	return callbacks.EnsureRunInfo(ctx, typ, comp)
 }
 
 // ReuseHandlers initializes a new context with the provided RunInfo, while using the same handlers already exist.

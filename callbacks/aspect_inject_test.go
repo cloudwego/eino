@@ -198,3 +198,26 @@ func TestGlobalCallbacksRepeated(t *testing.T) {
 	callbacks.On(ctx, "test", callbacks.OnStartHandle[string], TimingOnStart)
 	assert.Equal(t, times, 1)
 }
+
+func TestEnsureRunInfo(t *testing.T) {
+	ctx := context.Background()
+
+	var name, typ, comp string
+	ctx = InitCallbacks(ctx, &RunInfo{Name: "name", Type: "type", Component: "component"}, NewHandlerBuilder().OnStartFn(func(ctx context.Context, info *RunInfo, input CallbackInput) context.Context {
+		name = info.Name
+		typ = info.Type
+		comp = string(info.Component)
+		return ctx
+	}).Build())
+
+	ctx2 := EnsureRunInfo(ctx, "type2", "component2")
+
+	OnStart(ctx, "")
+	assert.Equal(t, "name", name)
+	assert.Equal(t, "type", typ)
+	assert.Equal(t, "component", comp)
+	OnStart(ctx2, "")
+	assert.Equal(t, "", name)
+	assert.Equal(t, "type2", typ)
+	assert.Equal(t, "component2", comp)
+}
