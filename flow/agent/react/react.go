@@ -60,7 +60,7 @@ type AgentConfig struct {
 	MessageModifier MessageModifier
 
 	// ToolModifier.
-	// modify the input messages before the tool is called, it's useful when you want to change your tool arguments.
+	// modify the input messages before the tool is called, it's useful when you want to  correct or supplement tools' name and argument output by llm.
 	ToolModifier ToolModifier
 
 	// MaxStep.
