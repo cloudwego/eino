@@ -19,6 +19,7 @@ package callbacks
 import (
 	"context"
 
+	"github.com/cloudwego/eino/components"
 	"github.com/cloudwego/eino/internal/generic"
 	"github.com/cloudwego/eino/schema"
 )
@@ -32,6 +33,20 @@ func InitCallbacks(ctx context.Context, info *RunInfo, handlers ...Handler) cont
 	}
 
 	return ctxWithManager(ctx, nil)
+}
+
+func EnsureRunInfo(ctx context.Context, typ string, comp components.Component) context.Context {
+	cbm, ok := managerFromCtx(ctx)
+	if !ok {
+		return ctx
+	}
+	if cbm.runInfo != nil && (cbm.runInfo.Type != typ || cbm.runInfo.Component != comp) {
+		return ctxWithManager(ctx, cbm.withRunInfo(&RunInfo{
+			Type:      typ,
+			Component: comp,
+		}))
+	}
+	return ctx
 }
 
 func ReuseHandlers(ctx context.Context, info *RunInfo) context.Context {

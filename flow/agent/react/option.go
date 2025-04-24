@@ -34,6 +34,11 @@ func WithToolOptions(opts ...tool.Option) agent.AgentOption {
 	return agent.WithComposeOptions(compose.WithToolsNodeOption(compose.WithToolOption(opts...)))
 }
 
+// WithToolList returns an agent option that specifies the list of tools can be called which are BaseTool but must implement InvokableTool or StreamableTool.
+func WithToolList(tools ...tool.BaseTool) agent.AgentOption {
+	return agent.WithComposeOptions(compose.WithToolsNodeOption(compose.WithToolList(tools...)))
+}
+
 type Iterator[T any] struct {
 	ch *internal.UnboundedChan[item[T]]
 }

@@ -97,7 +97,7 @@ func (conf *MultiAgentConfig) validate() error {
 		return errors.New("host multi agent config is nil")
 	}
 
-	if conf.Host.ChatModel == nil {
+	if conf.Host.ChatModel == nil && conf.Host.ToolCallingModel == nil {
 		return errors.New("host multi agent host ChatModel is nil")
 	}
 
@@ -155,7 +155,7 @@ type Host struct {
 type Specialist struct {
 	AgentMeta
 
-	ChatModel    model.ChatModel
+	ChatModel    model.BaseChatModel
 	SystemPrompt string
 
 	Invokable  compose.Invoke[[]*schema.Message, *schema.Message, agent.AgentOption]

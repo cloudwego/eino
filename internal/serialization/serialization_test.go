@@ -96,6 +96,16 @@ func TestSerialization(t *testing.T) {
 			E: []any{1, "2", 3},
 			f: "",
 		},
+		map[string]map[string][]map[string][][]string{
+			"1": {
+				"a": []map[string][][]string{
+					{"b": {
+						{"c"},
+						{"d"},
+					}},
+				},
+			},
+		},
 	}
 
 	for _, value := range values {

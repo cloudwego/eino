@@ -337,7 +337,14 @@ func (c *Chain[I, O]) AppendBranch(b *ChainBranch) *Chain[I, O] { // nolint: byt
 
 	for key := range b.key2BranchNode {
 		node := b.key2BranchNode[key]
-		nodeKey := fmt.Sprintf("%s_branch_%s", prefix, key)
+
+		var nodeKey string
+
+		if node.Second != nil && node.Second.nodeOptions != nil && node.Second.nodeOptions.nodeKey != "" {
+			nodeKey = node.Second.nodeOptions.nodeKey
+		} else {
+			nodeKey = fmt.Sprintf("%s_branch_%s", prefix, key)
+		}
 
 		if err := c.gg.addNode(nodeKey, node.First, node.Second); err != nil {
 			c.reportError(fmt.Errorf("add branch node[%s] to chain failed: %w", nodeKey, err))
@@ -442,15 +449,24 @@ func (c *Chain[I, O]) AppendParallel(p *Parallel) *Chain[I, O] {
 
 	for i := range p.nodes {
 		node := p.nodes[i]
-		nodeKey := fmt.Sprintf("%s_parallel_%d", prefix, i)
+
+		var nodeKey string
+		if node.Second != nil && node.Second.nodeOptions != nil && node.Second.nodeOptions.nodeKey != "" {
+			nodeKey = node.Second.nodeOptions.nodeKey
+		} else {
+			nodeKey = fmt.Sprintf("%s_parallel_%d", prefix, i)
+		}
+
 		if err := c.gg.addNode(nodeKey, node.First, node.Second); err != nil {
 			c.reportError(fmt.Errorf("add parallel node to chain failed, key=%s, err: %w", nodeKey, err))
 			return c
 		}
+
 		if err := c.gg.AddEdge(startNode, nodeKey); err != nil {
 			c.reportError(fmt.Errorf("add parallel edge failed, from=%s, to=%s, err: %w", startNode, nodeKey, err))
 			return c
 		}
+
 		nodeKeys = append(nodeKeys, nodeKey)
 	}
 

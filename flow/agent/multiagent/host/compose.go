@@ -147,6 +147,7 @@ func addSpecialistAgent(specialist *Specialist, g *compose.Graph[[]*schema.Messa
 
 			return state.msgs, nil // replace the tool call message with input msgs stored in state
 		}
+
 		if err := g.AddChatModelNode(specialist.Name, specialist.ChatModel, compose.WithStatePreHandler(preHandler), compose.WithNodeName(specialist.Name)); err != nil {
 			return err
 		}

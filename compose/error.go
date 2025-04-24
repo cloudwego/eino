@@ -132,3 +132,7 @@ func (i *internalError) Error() string {
 	sb.WriteString("")
 	return sb.String()
 }
+
+func (i *internalError) Unwrap() error {
+	return i.origError
+}
