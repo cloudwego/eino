@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"io"
 	"reflect"
+	"sort"
 	"strconv"
 	"strings"
 	"testing"
@@ -1800,4 +1801,167 @@ func TestSetFanInMergeConfig_RealStreamNode(t *testing.T) {
 			assert.True(t, sourceNames["s2"], "should receive SourceEOF from s2")
 		})
 	}
+}
+
+func TestFindLoops(t *testing.T) {
+	tests := []struct {
+		name       string
+		startNodes []string
+		chanCalls  map[string]*chanCall
+		expected   [][]string
+	}{
+		{
+			name:       "Graph without cycles",
+			startNodes: []string{"A"},
+			chanCalls: map[string]*chanCall{
+				"A": {
+					controls: []string{"B", "C"},
+				},
+				"B": {
+					controls: []string{"D"},
+				},
+				"C": {
+					controls: []string{"E"},
+				},
+				"D": {
+					controls: []string{},
+				},
+				"E": {
+					controls: []string{},
+				},
+			},
+			expected: [][]string{},
+		},
+		{
+			name:       "Graph with self-loop",
+			startNodes: []string{"A"},
+			chanCalls: map[string]*chanCall{
+				"A": {
+					controls: []string{"A", "B"},
+				},
+				"B": {
+					controls: []string{},
+				},
+			},
+			expected: [][]string{{"A", "A"}},
+		},
+		{
+			name:       "Graph with simple cycle",
+			startNodes: []string{"A", "B", "C"},
+			chanCalls: map[string]*chanCall{
+				"A": {
+					controls: []string{"B"},
+				},
+				"B": {
+					controls: []string{"C"},
+				},
+				"C": {
+					controls: []string{"A"},
+				},
+			},
+			expected: [][]string{{"A", "B", "C", "A"}},
+		},
+		{
+			name:       "Graph with multiple cycles",
+			startNodes: []string{"A", "B", "C", "D", "E", "F"},
+			chanCalls: map[string]*chanCall{
+				"A": {
+					controls: []string{"B", "D"},
+				},
+				"B": {
+					controls: []string{"C"},
+				},
+				"C": {
+					controls: []string{"B"},
+				},
+				"D": {
+					controls: []string{"E"},
+				},
+				"E": {
+					controls: []string{"F"},
+				},
+				"F": {
+					controls: []string{"D"},
+				},
+			},
+			expected: [][]string{{"B", "C", "B"}, {"D", "E", "F", "D"}},
+		},
+		{
+			name:       "Graph with branch cycle",
+			startNodes: []string{"A", "C"},
+			chanCalls: map[string]*chanCall{
+				"A": {
+					controls: []string{"B"},
+					writeToBranches: []*GraphBranch{
+						{
+							endNodes: map[string]bool{
+								"C": true,
+							},
+						},
+					},
+				},
+				"B": {
+					controls: []string{},
+				},
+				"C": {
+					controls: []string{"A"},
+				},
+			},
+			expected: [][]string{{"A", "C", "A"}},
+		},
+		{
+			name:       "Empty graph",
+			startNodes: []string{},
+			chanCalls:  map[string]*chanCall{},
+			expected:   [][]string{},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			loops := findLoops(tt.startNodes, tt.chanCalls)
+
+			assert.Equal(t, len(tt.expected), len(loops))
+
+			if len(tt.expected) > 0 {
+				normalizedExpected := normalizeLoops(tt.expected)
+				normalizedActual := normalizeLoops(loops)
+				assert.Equal(t, normalizedExpected, normalizedActual)
+			}
+		})
+	}
+}
+func normalizeLoops(loops [][]string) []string {
+	result := make([]string, 0, len(loops))
+
+	for _, loop := range loops {
+		if len(loop) == 0 {
+			continue
+		}
+
+		normalizedLoop := make([]string, len(loop))
+		copy(normalizedLoop, loop)
+		if normalizedLoop[0] != normalizedLoop[len(normalizedLoop)-1] {
+			normalizedLoop = append(normalizedLoop, normalizedLoop[0])
+		}
+
+		minIdx := 0
+		for i := 1; i < len(normalizedLoop)-1; i++ {
+			if normalizedLoop[i] < normalizedLoop[minIdx] {
+				minIdx = i
+			}
+		}
+
+		canonicalLoop := ""
+		for i := 0; i < len(normalizedLoop)-1; i++ {
+			idx := (minIdx + i) % (len(normalizedLoop) - 1)
+			canonicalLoop += normalizedLoop[idx] + ","
+		}
+		canonicalLoop += normalizedLoop[minIdx]
+
+		result = append(result, canonicalLoop)
+	}
+
+	sort.Strings(result)
+	return result
 }

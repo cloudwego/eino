@@ -21,6 +21,7 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"strings"
 
 	"github.com/cloudwego/eino/components/document"
 	"github.com/cloudwego/eino/components/embedding"
@@ -1061,12 +1062,88 @@ func validateDAG(chanSubscribeTo map[string]*chanCall, controlPredecessors map[s
 		}
 	}
 
+	var loopStarts []string
 	for k, v := range m {
 		if v > 0 {
-			return fmt.Errorf("DAG invalid, node[%s] has loop", k)
+			loopStarts = append(loopStarts, k)
 		}
 	}
+	if len(loopStarts) > 0 {
+		return fmt.Errorf("%w: %s", DAGInvalidLoopErr, formatLoops(findLoops(loopStarts, chanSubscribeTo)))
+	}
 	return nil
+}
+
+var DAGInvalidLoopErr = errors.New("DAG is invalid, has loop")
+
+func findLoops(startNodes []string, chanCalls map[string]*chanCall) [][]string {
+	controlSuccessors := map[string][]string{}
+	for node, ch := range chanCalls {
+		controlSuccessors[node] = append(controlSuccessors[node], ch.controls...)
+		for _, b := range ch.writeToBranches {
+			for end := range b.endNodes {
+				controlSuccessors[node] = append(controlSuccessors[node], end)
+			}
+		}
+	}
+
+	visited := map[string]bool{}
+	var dfs func(path []string) [][]string
+	dfs = func(path []string) [][]string {
+		var ret [][]string
+		pathEnd := path[len(path)-1]
+		successors, ok := controlSuccessors[pathEnd]
+		if !ok {
+			return nil
+		}
+		for _, successor := range successors {
+			visited[successor] = true
+
+			if successor == END {
+				continue
+			}
+
+			var looped bool
+			for i, node := range path {
+				if node == successor {
+					ret = append(ret, append(path[i:], successor))
+					looped = true
+					break
+				}
+			}
+			if looped {
+				continue
+			}
+
+			ret = append(ret, dfs(append(path, successor))...)
+		}
+		return ret
+	}
+
+	var ret [][]string
+	for _, node := range startNodes {
+		if !visited[node] {
+			ret = append(ret, dfs([]string{node})...)
+		}
+	}
+	return ret
+}
+
+func formatLoops(loops [][]string) string {
+	sb := strings.Builder{}
+	for _, loop := range loops {
+		if len(loop) == 0 {
+			continue
+		}
+		sb.WriteString("[")
+		sb.WriteString(loop[0])
+		for i := 1; i < len(loop); i++ {
+			sb.WriteString("->")
+			sb.WriteString(loop[i])
+		}
+		sb.WriteString("]")
+	}
+	return sb.String()
 }
 
 func NewNodePath(path ...string) *NodePath {
