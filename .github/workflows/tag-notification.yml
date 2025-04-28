@@ -1,0 +1,120 @@
+name: Tag Notification
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  notify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Fetch tag info
+        run: |
+          git fetch --tags -f
+          
+      - name: Get tag info and send notification
+        run: |
+          # Get the tag name
+          TAG_NAME="${{ github.ref_name }}"
+          echo "Processing tag: $TAG_NAME"
+          
+          # Get tag message
+          echo "Getting tag message..."
+          TAG_MESSAGE=$(git tag -l --format='%(contents)' "$TAG_NAME")
+          echo "Tag message:"
+          echo "$TAG_MESSAGE"
+          echo "---"
+          
+          # Create base content parts
+          HEADER="### 🏷️ Eino New Tag Created: \`$TAG_NAME\`"
+          VERSION_INFO="📦 Version: \`$TAG_NAME\`"
+          
+          # Prepare the message parts for jq
+          if [ ! -z "$TAG_MESSAGE" ]; then
+            # Pass all parts to jq and let it handle the formatting
+            jq -n \
+              --arg header "$HEADER" \
+              --arg version "$VERSION_INFO" \
+              --arg notes "$TAG_MESSAGE" \
+              --arg repo_url "https://github.com/${{ github.repository }}/releases/tag/$TAG_NAME" \
+              '{
+                "msg_type": "interactive",
+                "card": {
+                  "elements": [
+                    {
+                      "tag": "markdown",
+                      "content": ($header + "\n\n" + $version + "\n\n### 📝 Release Notes:\n" + $notes)
+                    },
+                    {
+                      "tag": "action",
+                      "actions": [
+                        {
+                          "tag": "button",
+                          "text": {
+                            "tag": "plain_text",
+                            "content": "🔗 View Tag"
+                          },
+                          "url": $repo_url,
+                          "type": "default"
+                        }
+                      ]
+                    }
+                  ],
+                  "header": {
+                    "title": {
+                      "tag": "plain_text",
+                      "content": "🏷️ Eino New Tag Created"
+                    }
+                  }
+                }
+              }' > webhook_payload.json
+          else
+            # Without release notes
+            jq -n \
+              --arg header "$HEADER" \
+              --arg version "$VERSION_INFO" \
+              --arg repo_url "https://github.com/${{ github.repository }}/releases/tag/$TAG_NAME" \
+              '{
+                "msg_type": "interactive",
+                "card": {
+                  "elements": [
+                    {
+                      "tag": "markdown",
+                      "content": ($header + "\n\n" + $version)
+                    },
+                    {
+                      "tag": "action",
+                      "actions": [
+                        {
+                          "tag": "button",
+                          "text": {
+                            "tag": "plain_text",
+                            "content": "🔗 View Tag"
+                          },
+                          "url": $repo_url,
+                          "type": "default"
+                        }
+                      ]
+                    }
+                  ],
+                  "header": {
+                    "title": {
+                      "tag": "plain_text",
+                      "content": "🏷️ Eino New Tag Created"
+                    }
+                  }
+                }
+              }' > webhook_payload.json
+          fi
+          
+          # Send webhook
+          curl -X POST \
+               -H "Content-Type: application/json" \
+               -d @webhook_payload.json \
+               "${{ secrets.FEISHU_WEBHOOK_URL }}" 
