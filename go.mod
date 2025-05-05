@@ -1,9 +1,10 @@
-module github.com/cloudwego/eino
+module github.com/Canva/eino
 
-go 1.18
+go 1.24
 
 require (
 	github.com/bytedance/sonic v1.13.2
+	github.com/cloudwego/eino v0.3.27
 	github.com/getkin/kin-openapi v0.118.0
 	github.com/nikolalohinski/gonja v1.5.3
 	github.com/slongfield/pyfmt v0.0.0-20220222012616-ea85ff4c361f
