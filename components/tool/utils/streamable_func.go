@@ -44,7 +44,7 @@ func InferStreamTool[T, D any](toolName, toolDesc string, s StreamFunc[T, D], op
 	return NewStreamTool(ti, s, opts...), nil
 }
 
-// InferStreamTool creates an StreamableTool from a given function by inferring the ToolInfo from the function's request parameters, with tool option.
+// InferOptionableStreamTool creates an StreamableTool from a given function by inferring the ToolInfo from the function's request parameters, with tool option.
 func InferOptionableStreamTool[T, D any](toolName, toolDesc string, s OptionableStreamFunc[T, D], opts ...Option) (tool.StreamableTool, error) {
 	ti, err := goStruct2ToolInfo[T](toolName, toolDesc, opts...)
 	if err != nil {
