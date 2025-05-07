@@ -52,7 +52,6 @@ func TestCommonError(t *testing.T) {
 	assert.True(t, errors.As(err, &ie))
 	assert.ErrorContains(t, ie.origError, "stream reader is empty, concat fail")
 	assert.Equal(t, []string{"1"}, ie.nodePath.path)
-	assert.Equal(t, []defaultImplAction{actionTransformByInvoke}, ie.streamWrapperPath)
 	println(err.Error())
 }
 

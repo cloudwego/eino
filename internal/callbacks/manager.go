@@ -23,7 +23,7 @@ type manager struct {
 	handlers       []Handler
 	runInfo        *RunInfo
 	invalidStart   bool
-	validEnd       bool
+	invalidEnd     bool
 }
 
 var GlobalHandlers []Handler

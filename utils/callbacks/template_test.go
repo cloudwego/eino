@@ -176,7 +176,7 @@ func TestNewComponentTemplate(t *testing.T) {
 		assert.Equal(t, 22, cnt)
 
 		ctx = callbacks.ReuseHandlers(ctx, &callbacks.RunInfo{Component: components.ComponentOfPrompt})
-		callbacks.OnStart[any](ctx, nil)
+		ctx = callbacks.OnStart[any](ctx, nil)
 		assert.Equal(t, 23, cnt)
 
 		ctx = callbacks.ReuseHandlers(ctx, &callbacks.RunInfo{Component: components.ComponentOfIndexer})
@@ -254,11 +254,11 @@ func TestNewComponentTemplate(t *testing.T) {
 		handler = tpl.Handler()
 		ctx = context.Background()
 		ctx = callbacks.InitCallbacks(ctx, &callbacks.RunInfo{Component: components.ComponentOfTransformer}, handler)
-		callbacks.OnEnd[any](ctx, nil)
+
+		ctx = callbacks.OnStart[any](ctx, nil)
 		assert.Equal(t, 25, cnt)
 
-		ctx = callbacks.ReuseHandlers(ctx, &callbacks.RunInfo{Component: components.ComponentOfIndexer})
-		callbacks.OnStart[any](ctx, nil)
+		callbacks.OnEnd[any](ctx, nil)
 		assert.Equal(t, 26, cnt)
 
 		ctx = callbacks.ReuseHandlers(ctx, &callbacks.RunInfo{Component: components.ComponentOfLoader})

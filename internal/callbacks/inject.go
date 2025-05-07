@@ -55,7 +55,8 @@ func ReuseHandlers(ctx context.Context, info *RunInfo) context.Context {
 		return ctx
 	}
 	cbm.invalidStart = false
-	// won't modify validEnd
+	cbm.invalidEnd = false
+	// won't modify invalidEnd
 	return ctxWithManager(ctx, cbm.withRunInfo(info))
 }
 
@@ -78,13 +79,13 @@ func On[T any](ctx context.Context, inOut T, handle Handle[T], timing CallbackTi
 
 	if start {
 		if nMgr.invalidStart {
-			nMgr.validEnd = false
+			nMgr.invalidEnd = true
 			return ctxWithManager(ctx, &nMgr), inOut
 		}
 		nMgr.invalidStart = true
-		nMgr.validEnd = true
+		nMgr.invalidEnd = false
 	} else {
-		if !nMgr.validEnd {
+		if nMgr.invalidEnd {
 			return ctx, inOut
 		}
 	}

@@ -53,10 +53,9 @@ func newStreamReadError(err error) error {
 
 func newGraphRunError(err error) error {
 	return &internalError{
-		typ:               internalErrorTypeGraphRun,
-		streamWrapperPath: nil,
-		nodePath:          NodePath{},
-		origError:         err,
+		typ:       internalErrorTypeGraphRun,
+		nodePath:  NodePath{},
+		origError: err,
 	}
 }
 
@@ -79,9 +78,8 @@ func wrapGraphNodeError(nodeKey string, err error) error {
 
 func newStreamWrapperError(streamWrapperType defaultImplAction, err error) error {
 	return &internalError{
-		typ:               internalErrorTypeGraphRun,
-		streamWrapperPath: []defaultImplAction{streamWrapperType},
-		origError:         err,
+		typ:       internalErrorTypeGraphRun,
+		origError: err,
 	}
 }
 
@@ -93,12 +91,10 @@ func wrapStreamWrapperError(streamWrapperType defaultImplAction, err error) erro
 	ok := errors.As(err, &ie)
 	if !ok {
 		return &internalError{
-			typ:               internalErrorTypeNodeRun,
-			streamWrapperPath: []defaultImplAction{streamWrapperType},
-			origError:         err,
+			typ:       internalErrorTypeNodeRun,
+			origError: err,
 		}
 	}
-	ie.streamWrapperPath = append([]defaultImplAction{streamWrapperType}, ie.streamWrapperPath...)
 	return ie
 }
 
@@ -110,10 +106,9 @@ const (
 )
 
 type internalError struct {
-	typ               internalErrorType
-	streamWrapperPath []defaultImplAction
-	nodePath          NodePath
-	origError         error
+	typ       internalErrorType
+	nodePath  NodePath
+	origError error
 }
 
 func (i *internalError) Error() string {
