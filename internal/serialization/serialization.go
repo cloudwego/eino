@@ -228,6 +228,18 @@ func internalMarshal(v any) (*internalStruct, error) {
 		if !ok {
 			return nil, fmt.Errorf("unknown type: %v", rt)
 		}
+
+		if checkMarshaler(rt) {
+			ret.Type.SimpleType = key
+
+			jsonBytes, err := json.Marshal(rv.Interface())
+			if err != nil {
+				return nil, err
+			}
+			ret.JSONValue = jsonBytes
+			return ret, nil
+		}
+
 		ret.Type.StructType = key
 
 		ret.MapValues = make(map[string]*internalStruct)
@@ -456,4 +468,19 @@ func createValueFromType(t reflect.Type) (value reflect.Value, derefValue reflec
 	}
 
 	return value, derefValue
+}
+
+var marshalerType = reflect.TypeOf((*json.Marshaler)(nil)).Elem()
+var unmarshalerType = reflect.TypeOf((*json.Unmarshaler)(nil)).Elem()
+
+func checkMarshaler(t reflect.Type) bool {
+	for t.Kind() == reflect.Ptr {
+		t = t.Elem()
+	}
+
+	if (t.Implements(marshalerType) || reflect.PointerTo(t).Implements(marshalerType)) &&
+		(t.Implements(unmarshalerType) || reflect.PointerTo(t).Implements(unmarshalerType)) {
+		return true
+	}
+	return false
 }

@@ -116,3 +116,37 @@ func TestSerialization(t *testing.T) {
 		assert.Equal(t, value, nValue)
 	}
 }
+
+type myStruct3 struct {
+	FieldA string
+}
+
+func (m *myStruct3) UnmarshalJSON(bytes []byte) error {
+	m.FieldA = "FieldA"
+	return nil
+}
+
+func (m myStruct3) MarshalJSON() ([]byte, error) {
+	return []byte("1"), nil
+}
+
+func TestMarshalStruct(t *testing.T) {
+	assert.NoError(t, GenericRegister[myStruct3]("myStruct3"))
+	s := myStruct3{FieldA: "1"}
+	data, err := Marshal(s)
+	assert.NoError(t, err)
+	result, err := Unmarshal(data)
+	assert.NoError(t, err)
+	assert.Equal(t, myStruct3{FieldA: "FieldA"}, result)
+
+	ma := map[string]any{
+		"1": s,
+	}
+	data, err = Marshal(ma)
+	assert.NoError(t, err)
+	result, err = Unmarshal(data)
+	assert.NoError(t, err)
+	assert.Equal(t, map[string]any{
+		"1": myStruct3{FieldA: "FieldA"},
+	}, result)
+}
