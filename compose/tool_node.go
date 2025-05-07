@@ -258,7 +258,7 @@ func parallelRunToolCall(ctx context.Context,
 			defer func() {
 				panicErr := recover()
 				if panicErr != nil {
-					t.err = safe.NewPanicErr(panicErr, debug.Stack()) // nolint: byted_returned_err_should_do_check
+					t.err = safe.NewPanicErr(panicErr, debug.Stack())
 				}
 			}()
 			run(ctx_, t, opts...)
@@ -295,7 +295,7 @@ func (tn *ToolsNode) Invoke(ctx context.Context, input *schema.Message,
 	output := make([]*schema.Message, n)
 	for i := 0; i < n; i++ {
 		if tasks[i].err != nil {
-			return nil, fmt.Errorf("failed to invoke tool call %s: %w", tasks[i].callID, tasks[i].err)
+			return nil, fmt.Errorf("failed to invoke tool[name:%s id:%s]: %w", tasks[i].name, tasks[i].callID, tasks[i].err)
 		}
 
 		output[i] = schema.ToolMessage(tasks[i].output, tasks[i].callID)

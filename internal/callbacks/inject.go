@@ -24,8 +24,6 @@ import (
 	"github.com/cloudwego/eino/schema"
 )
 
-type CtxManagerKey struct{}
-
 func InitCallbacks(ctx context.Context, info *RunInfo, handlers ...Handler) context.Context {
 	mgr, ok := newManager(info, handlers...)
 	if ok {
@@ -40,7 +38,7 @@ func EnsureRunInfo(ctx context.Context, typ string, comp components.Component) c
 	if !ok {
 		return ctx
 	}
-	if cbm.invalidStart {
+	if cbm.runInfo == nil {
 		return ReuseHandlers(ctx, &RunInfo{
 			Type:      typ,
 			Component: comp,
@@ -54,9 +52,6 @@ func ReuseHandlers(ctx context.Context, info *RunInfo) context.Context {
 	if !ok {
 		return ctx
 	}
-	cbm.invalidStart = false
-	cbm.invalidEnd = false
-	// won't modify invalidEnd
 	return ctxWithManager(ctx, cbm.withRunInfo(info))
 }
 
@@ -77,29 +72,29 @@ func On[T any](ctx context.Context, inOut T, handle Handle[T], timing CallbackTi
 	}
 	nMgr := *mgr
 
+	var info *RunInfo
 	if start {
-		if nMgr.invalidStart {
-			nMgr.invalidEnd = true
-			return ctxWithManager(ctx, &nMgr), inOut
-		}
-		nMgr.invalidStart = true
-		nMgr.invalidEnd = false
+		info = nMgr.runInfo
+		nMgr.runInfo = nil
+		ctx = context.WithValue(ctx, CtxRunInfoKey{}, info)
 	} else {
-		if nMgr.invalidEnd {
-			return ctx, inOut
+		if nMgr.runInfo != nil {
+			info = nMgr.runInfo
+		} else {
+			info, _ = ctx.Value(CtxRunInfoKey{}).(*RunInfo)
 		}
 	}
 
 	hs := make([]Handler, 0, len(nMgr.handlers)+len(nMgr.globalHandlers))
 	for _, handler := range append(nMgr.handlers, nMgr.globalHandlers...) {
 		timingChecker, ok_ := handler.(TimingChecker)
-		if !ok_ || timingChecker.Needed(ctx, nMgr.runInfo, timing) {
+		if !ok_ || timingChecker.Needed(ctx, info, timing) {
 			hs = append(hs, handler)
 		}
 	}
 
 	var out T
-	ctx, out = handle(ctx, inOut, nMgr.runInfo, hs)
+	ctx, out = handle(ctx, inOut, info, hs)
 	return ctxWithManager(ctx, &nMgr), out
 }
 

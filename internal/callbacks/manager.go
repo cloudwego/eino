@@ -18,12 +18,13 @@ package callbacks
 
 import "context"
 
+type CtxManagerKey struct{}
+type CtxRunInfoKey struct{}
+
 type manager struct {
 	globalHandlers []Handler
 	handlers       []Handler
 	runInfo        *RunInfo
-	invalidStart   bool
-	invalidEnd     bool
 }
 
 var GlobalHandlers []Handler

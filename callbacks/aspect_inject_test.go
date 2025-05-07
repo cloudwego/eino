@@ -234,7 +234,7 @@ func TestNesting(t *testing.T) {
 	ctx2 := OnStart(ctx1, 1)
 	OnEnd(ctx2, 1)
 	OnEnd(ctx1, 0)
-	assert.Equal(t, 2, cb.times)
+	assert.Equal(t, 4, cb.times)
 
 	// reused
 	cb.times = 0
@@ -254,6 +254,10 @@ type myCallback struct {
 
 func (m *myCallback) OnStart(ctx context.Context, info *RunInfo, input CallbackInput) context.Context {
 	m.times++
+	if info == nil {
+		assert.Equal(m.t, 2, m.times)
+		return ctx
+	}
 	if info.Name == "test" {
 		assert.Equal(m.t, 0, input)
 	} else {
@@ -265,6 +269,10 @@ func (m *myCallback) OnStart(ctx context.Context, info *RunInfo, input CallbackI
 
 func (m *myCallback) OnEnd(ctx context.Context, info *RunInfo, output CallbackOutput) context.Context {
 	m.times++
+	if info == nil {
+		assert.Equal(m.t, 3, m.times)
+		return ctx
+	}
 	if info.Name == "test" {
 		assert.Equal(m.t, 0, output)
 	} else {
