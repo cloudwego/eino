@@ -49,6 +49,10 @@ func ExtractInterruptInfo(err error) (info *InterruptInfo, existed bool) {
 	if errors.As(err, &iE) {
 		return iE.Info, true
 	}
+	var sIE *subGraphInterruptError
+	if errors.As(err, &sIE) {
+		return sIE.Info, true
+	}
 	return nil, false
 }
 
