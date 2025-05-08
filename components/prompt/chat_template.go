@@ -20,6 +20,7 @@ import (
 	"context"
 
 	"github.com/cloudwego/eino/callbacks"
+	"github.com/cloudwego/eino/components"
 	"github.com/cloudwego/eino/schema"
 )
 
@@ -48,17 +49,16 @@ func FromMessages(formatType schema.FormatType, templates ...schema.MessagesTemp
 // Format formats the chat template with the given context and variables.
 func (t *DefaultChatTemplate) Format(ctx context.Context,
 	vs map[string]any, _ ...Option) (result []*schema.Message, err error) {
-
+	ctx = callbacks.EnsureRunInfo(ctx, t.GetType(), components.ComponentOfPrompt)
+	ctx = callbacks.OnStart(ctx, &CallbackInput{
+		Variables: vs,
+		Templates: t.templates,
+	})
 	defer func() {
 		if err != nil {
 			_ = callbacks.OnError(ctx, err)
 		}
 	}()
-
-	ctx = callbacks.OnStart(ctx, &CallbackInput{
-		Variables: vs,
-		Templates: t.templates,
-	})
 
 	result = make([]*schema.Message, 0, len(t.templates))
 	for _, template := range t.templates {
