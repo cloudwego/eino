@@ -186,6 +186,8 @@ func (r *runner) run(ctx context.Context, isStream bool, input any, opts ...Opti
 				ctx = context.WithValue(ctx, stateKey{}, &internalState{state: cp.State})
 			}
 
+			ctx, input = onGraphStart(ctx, input, isStream)
+			haveOnStart = true
 			nextTasks, err = r.restoreTasks(ctx, cp.Inputs, cp.SkipPreHandler, optMap) // should restore after set state to context
 			if err != nil {
 				return nil, newGraphRunError(fmt.Errorf("restore tasks fail: %w", err))
@@ -221,6 +223,8 @@ func (r *runner) run(ctx context.Context, isStream bool, input any, opts ...Opti
 				ctx = context.WithValue(ctx, stateKey{}, &internalState{state: cp.State})
 			}
 
+			ctx, input = onGraphStart(ctx, input, isStream)
+			haveOnStart = true
 			// resume graph
 			nextTasks, err = r.restoreTasks(ctx, cp.Inputs, cp.SkipPreHandler, optMap)
 			if err != nil {
@@ -260,9 +264,6 @@ func (r *runner) run(ctx context.Context, isStream bool, input any, opts ...Opti
 				checkPointID,
 			)
 		}
-	} else {
-		ctx, input = onGraphStart(ctx, input, isStream)
-		haveOnStart = true
 	}
 
 	// Main execution loop.
