@@ -57,8 +57,9 @@ func WithToolList(tool ...tool.BaseTool) ToolsNodeOption {
 //	Invoke(ctx context.Context, input *schema.Message, opts ...ToolsNodeOption) ([]*schema.Message, error)
 //	Stream(ctx context.Context, input *schema.Message, opts ...ToolsNodeOption) (*schema.StreamReader[[]*schema.Message], error)
 type ToolsNode struct {
-	tuple              *toolsTuple
-	unknownToolHandler func(ctx context.Context, name, input string) (string, error)
+	tuple               *toolsTuple
+	unknownToolHandler  func(ctx context.Context, name, input string) (string, error)
+	executeSequentially bool
 }
 
 // ToolsNodeConfig is the config for ToolsNode.
@@ -78,6 +79,11 @@ type ToolsNodeConfig struct {
 	//   - string: The response to be returned as if the tool was executed
 	//   - error: Any error that occurred during handling
 	UnknownToolsHandler func(ctx context.Context, name, input string) (string, error)
+
+	// ExecuteSequentially determines whether tool calls should be executed sequentially (in order) or in parallel.
+	// When set to true, tool calls will be executed one after another in the order they appear in the input message.
+	// When set to false (default), tool calls will be executed in parallel.
+	ExecuteSequentially bool
 }
 
 // NewToolNode creates a new ToolsNode.
@@ -94,8 +100,9 @@ func NewToolNode(ctx context.Context, conf *ToolsNodeConfig) (*ToolsNode, error)
 	}
 
 	return &ToolsNode{
-		tuple:              tuple,
-		unknownToolHandler: conf.UnknownToolsHandler,
+		tuple:               tuple,
+		unknownToolHandler:  conf.UnknownToolsHandler,
+		executeSequentially: conf.ExecuteSequentially,
 	}, nil
 }
 
@@ -242,6 +249,12 @@ func runToolCallTaskByStream(ctx context.Context, task *toolCallTask, opts ...to
 	task.sOutput, task.err = task.r.Stream(ctx, task.arg, opts...) // nolint: byted_returned_err_should_do_check
 }
 
+func sequentialRunToolCall(ctx context.Context, run func(ctx2 context.Context, callTask *toolCallTask, opts ...tool.Option), tasks []toolCallTask, opts ...tool.Option) {
+	for i := 0; i < len(tasks); i++ {
+		run(ctx, &tasks[i], opts...)
+	}
+}
+
 func parallelRunToolCall(ctx context.Context,
 	run func(ctx2 context.Context, callTask *toolCallTask, opts ...tool.Option), tasks []toolCallTask, opts ...tool.Option) {
 
@@ -289,7 +302,11 @@ func (tn *ToolsNode) Invoke(ctx context.Context, input *schema.Message,
 		return nil, err
 	}
 
-	parallelRunToolCall(ctx, runToolCallTaskByInvoke, tasks, opt.ToolOptions...)
+	if tn.executeSequentially {
+		sequentialRunToolCall(ctx, runToolCallTaskByInvoke, tasks, opt.ToolOptions...)
+	} else {
+		parallelRunToolCall(ctx, runToolCallTaskByInvoke, tasks, opt.ToolOptions...)
+	}
 
 	n := len(tasks)
 	output := make([]*schema.Message, n)
@@ -324,7 +341,11 @@ func (tn *ToolsNode) Stream(ctx context.Context, input *schema.Message,
 		return nil, err
 	}
 
-	parallelRunToolCall(ctx, runToolCallTaskByStream, tasks, opt.ToolOptions...)
+	if tn.executeSequentially {
+		sequentialRunToolCall(ctx, runToolCallTaskByStream, tasks, opt.ToolOptions...)
+	} else {
+		parallelRunToolCall(ctx, runToolCallTaskByStream, tasks, opt.ToolOptions...)
+	}
 
 	n := len(tasks)
 	sOutput := make([]*schema.StreamReader[[]*schema.Message], n)
