@@ -142,7 +142,7 @@ func compileAnyGraph[I, O any](ctx context.Context, g AnyGraph, opts ...GraphCom
 	}
 
 	ctxWrapper := func(ctx context.Context, opts ...Option) context.Context {
-		return initGraphCallbacks(ctx, cr.nodeInfo, cr.meta, opts...)
+		return initGraphCallbacks(clearNodeKey(ctx), cr.nodeInfo, cr.meta, opts...)
 	}
 
 	rp, err := toGenericRunnable[I, O](cr, ctxWrapper)
