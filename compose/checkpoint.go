@@ -93,6 +93,10 @@ func setNodeKey(ctx context.Context, key string) context.Context {
 	return context.WithValue(ctx, nodePathKey{}, NewNodePath(append(path.path, key)...))
 }
 
+func clearNodeKey(ctx context.Context) context.Context {
+	return context.WithValue(ctx, nodePathKey{}, nil)
+}
+
 func getStateModifier(ctx context.Context) StateModifier {
 	if sm, ok := ctx.Value(stateModifierKey{}).(StateModifier); ok {
 		return sm

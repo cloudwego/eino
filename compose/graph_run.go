@@ -161,37 +161,35 @@ func (r *runner) run(ctx context.Context, isStream bool, input any, opts ...Opti
 	// load checkpoint from ctx/store or init graph
 	initialized := false
 	var nextTasks []*task
-	if isSubGraph {
+	if cp := getCheckPointFromCtx(ctx); cp != nil {
 		// in subgraph, try to load checkpoint from ctx
-		if cp := getCheckPointFromCtx(ctx); cp != nil {
-			// load checkpoint from ctx
-			initialized = true // don't init again
+		// load checkpoint from ctx
+		initialized = true // don't init again
 
-			err = r.checkPointer.restoreCheckPoint(cp, isStream)
-			if err != nil {
-				return nil, newGraphRunError(fmt.Errorf("restore checkpoint fail: %w", err))
-			}
+		err = r.checkPointer.restoreCheckPoint(cp, isStream)
+		if err != nil {
+			return nil, newGraphRunError(fmt.Errorf("restore checkpoint fail: %w", err))
+		}
 
-			err = cm.loadChannels(cp.Channels)
+		err = cm.loadChannels(cp.Channels)
+		if err != nil {
+			return nil, newGraphRunError(err)
+		}
+		if sm := getStateModifier(ctx); sm != nil && cp.State != nil {
+			err = sm(ctx, *path, cp.State)
 			if err != nil {
-				return nil, newGraphRunError(err)
+				return nil, newGraphRunError(fmt.Errorf("state modifier fail: %w", err))
 			}
-			if sm := getStateModifier(ctx); sm != nil && cp.State != nil {
-				err = sm(ctx, *path, cp.State)
-				if err != nil {
-					return nil, newGraphRunError(fmt.Errorf("state modifier fail: %w", err))
-				}
-			}
-			if cp.State != nil {
-				ctx = context.WithValue(ctx, stateKey{}, &internalState{state: cp.State})
-			}
+		}
+		if cp.State != nil {
+			ctx = context.WithValue(ctx, stateKey{}, &internalState{state: cp.State})
+		}
 
-			ctx, input = onGraphStart(ctx, input, isStream)
-			haveOnStart = true
-			nextTasks, err = r.restoreTasks(ctx, cp.Inputs, cp.SkipPreHandler, optMap) // should restore after set state to context
-			if err != nil {
-				return nil, newGraphRunError(fmt.Errorf("restore tasks fail: %w", err))
-			}
+		ctx, input = onGraphStart(ctx, input, isStream)
+		haveOnStart = true
+		nextTasks, err = r.restoreTasks(ctx, cp.Inputs, cp.SkipPreHandler, optMap) // should restore after set state to context
+		if err != nil {
+			return nil, newGraphRunError(fmt.Errorf("restore tasks fail: %w", err))
 		}
 	} else if checkPointID != nil {
 		cp, err := getCheckPointFromStore(ctx, *checkPointID, r.checkPointer)
@@ -592,8 +590,12 @@ func (r *runner) createTasks(ctx context.Context, nodeMap map[string]any, optMap
 			return nil, fmt.Errorf("node[%s] has not been registered", nodeKey)
 		}
 
+		if call.action.nodeInfo != nil && call.action.nodeInfo.compileOption != nil {
+			ctx = forwardCheckPoint(ctx, nodeKey)
+		}
+
 		nextTasks = append(nextTasks, &task{
-			ctx:     forwardCheckPoint(setNodeKey(ctx, nodeKey), nodeKey),
+			ctx:     setNodeKey(ctx, nodeKey),
 			nodeKey: nodeKey,
 			call:    call,
 			input:   nodeInput,
@@ -618,10 +620,19 @@ func getCheckPointInfo(opts ...Option) (checkPointID *string, stateModifier Stat
 func (r *runner) restoreTasks(ctx context.Context, inputs map[string]any, skipPreHandler map[string]bool, optMap map[string][]any) ([]*task, error) {
 	ret := make([]*task, 0, len(inputs))
 	for key, input := range inputs {
+		call, ok := r.chanSubscribeTo[key]
+		if !ok {
+			return nil, fmt.Errorf("channel[%s] from checkpoint is not registered", key)
+		}
+
+		if call.action.nodeInfo != nil && call.action.nodeInfo.compileOption != nil {
+			ctx = forwardCheckPoint(ctx, key)
+		}
+
 		newTask := &task{
-			ctx:            forwardCheckPoint(setNodeKey(ctx, key), key),
+			ctx:            setNodeKey(ctx, key),
 			nodeKey:        key,
-			call:           nil,
+			call:           call,
 			input:          input,
 			option:         nil,
 			skipPreHandler: skipPreHandler[key],
@@ -629,12 +640,6 @@ func (r *runner) restoreTasks(ctx context.Context, inputs map[string]any, skipPr
 		if opt, ok := optMap[key]; ok {
 			newTask.option = opt
 		}
-
-		call, ok := r.chanSubscribeTo[key]
-		if !ok {
-			return nil, fmt.Errorf("channel[%s] from checkpoint is not registered", key)
-		}
-		newTask.call = call
 
 		ret = append(ret, newTask)
 	}
