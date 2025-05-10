@@ -1086,3 +1086,37 @@ func TestStreamFieldMap(t *testing.T) {
 		assert.Equal(t, map[string]any{"a": 1, "b": 2}, result)
 	})
 }
+
+func TestRuntimeTypeCheck(t *testing.T) {
+	g := NewWorkflow[map[string]any, any]()
+
+	_ = g.
+		AddLambdaNode("A", InvokableLambda(func(ctx context.Context, input string) (output string, err error) {
+			return input, nil
+		})).
+		AddInput(START, FromField("A"))
+
+	_ = g.AddLambdaNode("B", InvokableLambda(func(ctx context.Context, input string) (output string, err error) {
+		return input, nil
+	})).
+		AddInput(START, FromField("B"))
+
+	_ = g.AddLambdaNode("MergeA", InvokableLambda(func(ctx context.Context, input map[string]any) (output map[string]any, err error) {
+		return input, nil
+	})).
+		AddInput("A", ToField("a")).
+		AddInput("B", ToField("b"))
+
+	g.End().AddInput("MergeA")
+
+	ctx := context.Background()
+	r, err := g.Compile(ctx)
+	assert.NoError(t, err)
+	result, err := r.Stream(ctx, map[string]any{"A": "1", "B": "2"})
+	assert.NoError(t, err)
+	chunk, err := result.Recv()
+	assert.NoError(t, err)
+	assert.Equal(t, map[string]any{"a": "1", "b": "2"}, chunk)
+	chunk, err = result.Recv()
+	assert.True(t, errors.Is(err, io.EOF))
+}
