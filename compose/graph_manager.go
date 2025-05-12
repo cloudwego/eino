@@ -17,12 +17,11 @@
 package compose
 
 import (
-	"container/list"
 	"context"
 	"fmt"
 	"runtime/debug"
-	"sync"
 
+	"github.com/cloudwego/eino/internal"
 	"github.com/cloudwego/eino/internal/safe"
 )
 
@@ -260,23 +259,19 @@ type taskManager struct {
 	opts       []Option
 	needAll    bool
 
-	mu   sync.Mutex
-	l    *list.List
-	done chan *task
 	num  uint32
+	done *internal.UnboundedChan[*task]
 }
 
-func (t *taskManager) executor(currentTask *task) {
+func (t *taskManager) execute(currentTask *task) {
 	defer func() {
 		panicInfo := recover()
 		if panicInfo != nil {
 			currentTask.output = nil
 			currentTask.err = safe.NewPanicErr(panicInfo, debug.Stack())
 		}
-		t.mu.Lock()
-		t.l.PushBack(currentTask)
-		t.updateChan()
-		t.mu.Unlock()
+
+		t.done.Send(currentTask)
 	}()
 
 	ctx := initNodeCallbacks(currentTask.ctx, currentTask.nodeKey, currentTask.call.action.nodeInfo, currentTask.call.action.meta, t.opts...)
@@ -306,11 +301,11 @@ func (t *taskManager) submit(tasks []*task) error {
 	}
 	for _, currentTask := range tasks {
 		t.num += 1
-		go t.executor(currentTask)
+		go t.execute(currentTask)
 	}
 	if syncTask != nil {
 		t.num += 1
-		t.executor(syncTask)
+		t.execute(syncTask)
 	}
 	return nil
 }
@@ -330,11 +325,9 @@ func (t *taskManager) waitOne() (*task, bool) {
 	if t.num == 0 {
 		return nil, false
 	}
+
+	ta, _ := t.done.Receive()
 	t.num--
-	ta := <-t.done
-	t.mu.Lock()
-	t.updateChan()
-	t.mu.Unlock()
 
 	if ta.err != nil {
 		return ta, true
@@ -357,16 +350,5 @@ func (t *taskManager) waitAll() ([]*task, error) {
 			return result, nil
 		}
 		result = append(result, ta)
-	}
-}
-
-func (t *taskManager) updateChan() {
-	for t.l.Len() > 0 {
-		select {
-		case t.done <- t.l.Front().Value.(*task):
-			t.l.Remove(t.l.Front())
-		default:
-			return
-		}
 	}
 }
