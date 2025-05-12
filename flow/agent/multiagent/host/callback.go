@@ -50,14 +50,13 @@ func ConvertCallbackHandlers(handlers ...MultiAgentCallback) callbacks.Handler {
 			return ctx
 		}
 
-		agentName := msg.ToolCalls[0].Function.Name
-		argument := msg.ToolCalls[0].Function.Arguments
-
 		for _, cb := range handlers {
-			ctx = cb.OnHandOff(ctx, &HandOffInfo{
-				ToAgentName: agentName,
-				Argument:    argument,
-			})
+			for _, toolCall := range msg.ToolCalls {
+				ctx = cb.OnHandOff(ctx, &HandOffInfo{
+					ToAgentName: toolCall.Function.Name,
+					Argument:    toolCall.Function.Arguments,
+				})
+			}
 		}
 
 		return ctx
@@ -98,10 +97,12 @@ func ConvertCallbackHandlers(handlers ...MultiAgentCallback) callbacks.Handler {
 		}
 
 		for _, cb := range handlers {
-			ctx = cb.OnHandOff(ctx, &HandOffInfo{
-				ToAgentName: msg.ToolCalls[0].Function.Name,
-				Argument:    msg.ToolCalls[0].Function.Arguments,
-			})
+			for _, toolCall := range msg.ToolCalls {
+				ctx = cb.OnHandOff(ctx, &HandOffInfo{
+					ToAgentName: toolCall.Function.Name,
+					Argument:    toolCall.Function.Arguments,
+				})
+			}
 		}
 
 		return ctx

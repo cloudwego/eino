@@ -419,6 +419,149 @@ func TestHostMultiAgent(t *testing.T) {
 			},
 		}, mockCallback.infos)
 	})
+
+	t.Run("multiple intents", func(t *testing.T) {
+		handOffMsg1 := &schema.Message{
+			Role:    schema.Assistant,
+			Content: "need to call function",
+		}
+
+		handOffMsg2 := &schema.Message{
+			Role: schema.Assistant,
+			ToolCalls: []schema.ToolCall{
+				{
+					Index: generic.PtrOf(0),
+				},
+			},
+		}
+
+		handOffMsg3 := &schema.Message{
+			Role: schema.Assistant,
+			ToolCalls: []schema.ToolCall{
+				{
+					Index:    generic.PtrOf(0),
+					Function: schema.FunctionCall{},
+				},
+			},
+		}
+
+		handOffMsg4 := &schema.Message{
+			Role: schema.Assistant,
+			ToolCalls: []schema.ToolCall{
+				{
+					Index: generic.PtrOf(0),
+					Function: schema.FunctionCall{
+						Name:      specialist1.Name,
+						Arguments: `{"reason": "specialist 1 is good"}`,
+					},
+				}, {
+					Index: generic.PtrOf(1),
+					Function: schema.FunctionCall{
+						Name:      specialist2.Name,
+						Arguments: `{"reason": "specialist 2 is also good"}`,
+					},
+				},
+			},
+		}
+
+		sr, sw := schema.Pipe[*schema.Message](0)
+		go func() {
+			sw.Send(handOffMsg1, nil)
+			sw.Send(handOffMsg2, nil)
+			sw.Send(handOffMsg3, nil)
+			sw.Send(handOffMsg4, nil)
+			sw.Close()
+		}()
+
+		specialist1Msg1 := &schema.Message{
+			Role:    schema.Assistant,
+			Content: "specialist ",
+		}
+
+		specialist1Msg2 := &schema.Message{
+			Role:    schema.Assistant,
+			Content: "1 answer",
+		}
+
+		sr1, sw1 := schema.Pipe[*schema.Message](0)
+		go func() {
+			sw1.Send(specialist1Msg1, nil)
+			sw1.Send(specialist1Msg2, nil)
+			sw1.Close()
+		}()
+
+		streamToolCallChecker := func(ctx context.Context, modelOutput *schema.StreamReader[*schema.Message]) (bool, error) {
+			defer modelOutput.Close()
+
+			for {
+				msg, err := modelOutput.Recv()
+				if err != nil {
+					if err == io.EOF {
+						return false, nil
+					}
+
+					return false, err
+				}
+
+				if len(msg.ToolCalls) == 0 {
+					continue
+				}
+
+				if len(msg.ToolCalls) > 0 {
+					return true, nil
+				}
+			}
+		}
+
+		hostMA, err = NewMultiAgent(ctx, &MultiAgentConfig{
+			Host: Host{
+				ToolCallingModel: mockHostLLM,
+			},
+			Specialists: []*Specialist{
+				specialist1,
+				specialist2,
+			},
+			StreamToolCallChecker: streamToolCallChecker,
+		})
+		assert.NoError(t, err)
+
+		mockHostLLM.EXPECT().Stream(gomock.Any(), gomock.Any()).Return(sr, nil).Times(1)
+		mockSpecialistLLM1.EXPECT().Stream(gomock.Any(), gomock.Any()).Return(sr1, nil).Times(1)
+
+		mockCallback := &mockAgentCallback{}
+		outStream, err := hostMA.Stream(ctx, nil, WithAgentCallbacks(mockCallback))
+		assert.NoError(t, err)
+
+		var msgs []*schema.Message
+		for {
+			msg, err := outStream.Recv()
+			if err == io.EOF {
+				break
+			}
+			assert.NoError(t, err)
+			msgs = append(msgs, msg)
+		}
+
+		outStream.Close()
+
+		msg, err := schema.ConcatMessages(msgs)
+		assert.NoError(t, err)
+		if msg.Content != "specialist2 stream answer\nspecialist 1 answer\n" &&
+			msg.Content != "specialist 1 answer\nspecialist2 stream answer\n" {
+			t.Errorf("Unexpected message content: %s", msg.Content)
+		}
+
+		assert.Equal(t, []*HandOffInfo{
+			{
+				ToAgentName: specialist1.Name,
+				Argument:    `{"reason": "specialist 1 is good"}`,
+			},
+			{
+				ToAgentName: specialist2.Name,
+				Argument:    `{"reason": "specialist 2 is also good"}`,
+			},
+		}, mockCallback.infos)
+	})
 }
 
 type mockAgentCallback struct {

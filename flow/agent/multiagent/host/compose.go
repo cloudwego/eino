@@ -27,12 +27,18 @@ import (
 )
 
 const (
-	defaultHostNodeKey = "host" // the key of the host node in the graph
-	defaultHostPrompt  = "decide which tool is best for the task and call only the best tool."
+	defaultHostNodeKey                 = "host" // the key of the host node in the graph
+	defaultHostPrompt                  = "decide which tool is best for the task and call only the best tool."
+	specialistsAnswersCollectorNodeKey = "specialist_answers_collect"
+	singleIntentAnswerNodeKey          = "single_intent_answer"
+	multiIntentSummarizeNodeKey        = "multi_intents_summarize"
+	defaultSummarizerPrompt            = "summarize the answers from the specialists into a single answer."
+	map2ListConverterNodeKey           = "map_to_list"
 )
 
 type state struct {
-	msgs []*schema.Message
+	msgs              []*schema.Message
+	isMultipleIntents bool
 }
 
 // NewMultiAgent creates a new host multi-agent system.
@@ -65,6 +71,10 @@ func NewMultiAgent(ctx context.Context, config *MultiAgentConfig) (*MultiAgent, 
 
 	g := compose.NewGraph[[]*schema.Message, *schema.Message](
 		compose.WithGenLocalState(func(context.Context) *state { return &state{} }))
+
+	if err := g.AddPassthroughNode(specialistsAnswersCollectorNodeKey); err != nil {
+		return nil, err
+	}
 
 	agentTools := make([]*schema.ToolInfo, 0, len(config.Specialists))
 	agentMap := make(map[string]bool, len(config.Specialists)+1)
@@ -107,7 +117,19 @@ func NewMultiAgent(ctx context.Context, config *MultiAgentConfig) (*MultiAgent, 
 		return nil, err
 	}
 
-	if err = addSpecialistsBranch(convertorName, agentMap, g); err != nil {
+	if err = addMultiSpecialistsBranch(convertorName, agentMap, g); err != nil {
+		return nil, err
+	}
+
+	if err = addSingleIntentAnswerNode(g); err != nil {
+		return nil, err
+	}
+
+	if err = addMultiIntentsSummarizeNode(config.Summarizer, g); err != nil {
+		return nil, err
+	}
+
+	if err = addAfterSpecialistsBranch(g); err != nil {
 		return nil, err
 	}
 
@@ -133,7 +155,8 @@ func addSpecialistAgent(specialist *Specialist, g *compose.Graph[[]*schema.Messa
 		preHandler := func(_ context.Context, input []*schema.Message, state *state) ([]*schema.Message, error) {
 			return state.msgs, nil // replace the tool call message with input msgs stored in state
 		}
-		if err := g.AddLambdaNode(specialist.Name, lambda, compose.WithStatePreHandler(preHandler), compose.WithNodeName(specialist.Name)); err != nil {
+		if err := g.AddLambdaNode(specialist.Name, lambda, compose.WithStatePreHandler(preHandler),
+			compose.WithNodeName(specialist.Name), compose.WithOutputKey(specialist.Name)); err != nil {
 			return err
 		}
 	} else if specialist.ChatModel != nil {
@@ -148,12 +171,12 @@ func addSpecialistAgent(specialist *Specialist, g *compose.Graph[[]*schema.Messa
 			return state.msgs, nil // replace the tool call message with input msgs stored in state
 		}
 
-		if err := g.AddChatModelNode(specialist.Name, specialist.ChatModel, compose.WithStatePreHandler(preHandler), compose.WithNodeName(specialist.Name)); err != nil {
+		if err := g.AddChatModelNode(specialist.Name, specialist.ChatModel, compose.WithStatePreHandler(preHandler), compose.WithNodeName(specialist.Name), compose.WithOutputKey(specialist.Name)); err != nil {
 			return err
 		}
 	}
 
-	return g.AddEdge(specialist.Name, compose.END)
+	return g.AddEdge(specialist.Name, specialistsAnswersCollectorNodeKey)
 }
 
 func addHostAgent(model model.BaseChatModel, prompt string, g *compose.Graph[[]*schema.Message, *schema.Message]) error {
@@ -191,18 +214,117 @@ func addDirectAnswerBranch(convertorName string, g *compose.Graph[[]*schema.Mess
 	return g.AddBranch(defaultHostNodeKey, branch)
 }
 
-func addSpecialistsBranch(convertorName string, agentMap map[string]bool, g *compose.Graph[[]*schema.Message, *schema.Message]) error {
-	branch := compose.NewGraphBranch(func(ctx context.Context, input []*schema.Message) (string, error) {
+func addMultiSpecialistsBranch(convertorName string, agentMap map[string]bool, g *compose.Graph[[]*schema.Message, *schema.Message]) error {
+	branch := compose.NewGraphMultiBranch(func(ctx context.Context, input []*schema.Message) (map[string]bool, error) {
 		if len(input) != 1 {
-			return "", fmt.Errorf("host agent output %d messages, but expected 1", len(input))
+			return nil, fmt.Errorf("host agent output %d messages, but expected 1", len(input))
 		}
 
-		if len(input[0].ToolCalls) != 1 {
-			return "", fmt.Errorf("host agent output %d tool calls, but expected 1", len(input[0].ToolCalls))
+		results := map[string]bool{}
+		for _, toolCall := range input[0].ToolCalls {
+			results[toolCall.Function.Name] = true
 		}
 
-		return input[0].ToolCalls[0].Function.Name, nil
+		if len(results) > 1 {
+			_ = compose.ProcessState(ctx, func(_ context.Context, state *state) error {
+				state.isMultipleIntents = true
+				return nil
+			})
+		}
+
+		return results, nil
 	}, agentMap)
 
 	return g.AddBranch(convertorName, branch)
+}
+
+func addSingleIntentAnswerNode(g *compose.Graph[[]*schema.Message, *schema.Message]) error {
+	rc := func(ctx context.Context, input *schema.StreamReader[map[string]any]) (*schema.StreamReader[*schema.Message], error) {
+		return schema.StreamReaderWithConvert(input, func(msgs map[string]any) (*schema.Message, error) {
+			if len(msgs) != 1 {
+				return nil, fmt.Errorf("host agent output %d messages, but expected 1", len(msgs))
+			}
+			for _, msg := range msgs {
+				return msg.(*schema.Message), nil
+			}
+			return nil, schema.ErrNoValue
+		}), nil
+	}
+
+	_ = g.AddLambdaNode(singleIntentAnswerNodeKey, compose.TransformableLambda(rc))
+	return g.AddEdge(singleIntentAnswerNodeKey, compose.END)
+}
+
+func addAfterSpecialistsBranch(g *compose.Graph[[]*schema.Message, *schema.Message]) error {
+	ab := func(ctx context.Context, _ *schema.StreamReader[map[string]any]) (string, error) {
+		var isMultipleIntents bool
+		_ = compose.ProcessState(ctx, func(_ context.Context, state *state) error {
+			isMultipleIntents = state.isMultipleIntents
+			return nil
+		})
+
+		if !isMultipleIntents {
+			return singleIntentAnswerNodeKey, nil
+		}
+
+		return map2ListConverterNodeKey, nil
+	}
+
+	b := compose.NewStreamGraphBranch(ab, map[string]bool{
+		singleIntentAnswerNodeKey: true,
+		map2ListConverterNodeKey:  true,
+	})
+
+	return g.AddBranch(specialistsAnswersCollectorNodeKey, b)
+}
+
+func addMultiIntentsSummarizeNode(summarizer *Summarizer, g *compose.Graph[[]*schema.Message, *schema.Message]) error {
+	map2list := func(ctx context.Context, input map[string]any) ([]*schema.Message, error) {
+		var output []*schema.Message
+		for k := range input {
+			output = append(output, input[k].(*schema.Message))
+		}
+		return output, nil
+	}
+
+	_ = g.AddLambdaNode(map2ListConverterNodeKey, compose.InvokableLambda(map2list))
+
+	if summarizer != nil {
+		_ = g.AddChatModelNode(multiIntentSummarizeNodeKey, summarizer.ChatModel,
+			compose.WithStatePreHandler(func(ctx context.Context, in []*schema.Message, state *state) ([]*schema.Message, error) {
+				var (
+					out          []*schema.Message
+					systemPrompt = defaultSummarizerPrompt
+				)
+				if summarizer.SystemPrompt != "" {
+					systemPrompt = summarizer.SystemPrompt
+					out = append(out, &schema.Message{
+						Role:    schema.System,
+						Content: systemPrompt,
+					})
+				}
+
+				out = append(out, state.msgs...)
+				out = append(out, in...)
+				return out, nil
+			}))
+		_ = g.AddEdge(map2ListConverterNodeKey, multiIntentSummarizeNodeKey)
+		return g.AddEdge(multiIntentSummarizeNodeKey, compose.END)
+	}
+
+	s := func(ctx context.Context, input []*schema.Message) (*schema.Message, error) {
+		output := &schema.Message{
+			Role: schema.Assistant,
+		}
+
+		for _, msg := range input {
+			output.Content += msg.Content + "\n"
+		}
+
+		return output, nil
+	}
+
+	_ = g.AddLambdaNode(multiIntentSummarizeNodeKey, compose.InvokableLambda(s))
+	_ = g.AddEdge(map2ListConverterNodeKey, multiIntentSummarizeNodeKey)
+	return g.AddEdge(multiIntentSummarizeNodeKey, compose.END)
 }

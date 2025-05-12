@@ -90,6 +90,11 @@ type MultiAgentConfig struct {
 	// Note: The default implementation does not work well with Claude, which typically outputs tool calls after text content.
 	// Note: If your ChatModel doesn't output tool calls first, you can try adding prompts to constrain the model from generating extra text during the tool call.
 	StreamToolCallChecker func(ctx context.Context, modelOutput *schema.StreamReader[*schema.Message]) (bool, error)
+
+	// Summarizer is the summarizer agent that will summarize the outputs of all the chosen specialist agents.
+	// Only when the Host agent picks multiple Specialist will this be called.
+	// If you do not provide a summarizer, a default summarizer that simply concatenates all the output messages into one message will be used.
+	Summarizer *Summarizer
 }
 
 func (conf *MultiAgentConfig) validate() error {
@@ -160,6 +165,11 @@ type Specialist struct {
 
 	Invokable  compose.Invoke[[]*schema.Message, *schema.Message, agent.AgentOption]
 	Streamable compose.Stream[[]*schema.Message, *schema.Message, agent.AgentOption]
+}
+
+type Summarizer struct {
+	ChatModel    model.BaseChatModel
+	SystemPrompt string
 }
 
 func firstChunkStreamToolCallChecker(_ context.Context, sr *schema.StreamReader[*schema.Message]) (bool, error) {
