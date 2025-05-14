@@ -17,12 +17,12 @@
 package compose
 
 import (
-	"container/list"
 	"context"
 	"errors"
 	"fmt"
 	"reflect"
-	"sync"
+
+	"github.com/cloudwego/eino/internal"
 )
 
 type chanCall struct {
@@ -751,9 +751,7 @@ func (r *runner) initTaskManager(runWrapper runnableCallWrapper, opts ...Option)
 		runWrapper: runWrapper,
 		opts:       opts,
 		needAll:    !r.eager,
-		mu:         sync.Mutex{},
-		l:          list.New(),
-		done:       make(chan *task, 1),
+		done:       internal.NewUnboundedChan[*task](),
 	}
 }
 
