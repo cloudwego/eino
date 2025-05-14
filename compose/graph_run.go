@@ -269,6 +269,7 @@ func (r *runner) run(ctx context.Context, isStream bool, input any, opts ...Opti
 		// Check for context cancellation.
 		select {
 		case <-ctx.Done():
+			_ = tm.waitAll()
 			return nil, newGraphRunError(fmt.Errorf("context has been canceled: %w", ctx.Err()))
 		default:
 		}
@@ -285,10 +286,7 @@ func (r *runner) run(ctx context.Context, isStream bool, input any, opts ...Opti
 			return nil, newGraphRunError(fmt.Errorf("failed to submit tasks: %w", err))
 		}
 		var completedTasks []*task
-		completedTasks, err = tm.wait()
-		if err != nil {
-			return nil, fmt.Errorf("failed to wait for tasks: %w", err)
-		}
+		completedTasks = tm.wait()
 
 		var interruptRerunNodes []string
 		subGraphInterrupts := map[string]*subGraphInterruptError{}
@@ -301,10 +299,7 @@ func (r *runner) run(ctx context.Context, isStream bool, input any, opts ...Opti
 		}
 
 		if len(subGraphInterrupts)+len(interruptRerunNodes) > 0 {
-			cpt, err := tm.waitAll()
-			if err != nil {
-				return nil, newGraphRunError(fmt.Errorf("failed to wait all tasks: %w", err))
-			}
+			cpt := tm.waitAll()
 			err = r.resolveInterruptCompletedTasks(subGraphInterrupts, &interruptRerunNodes, &interruptAfterNodes, cpt)
 			if err != nil {
 				return nil, err // err has been wrapped
@@ -344,10 +339,8 @@ func (r *runner) run(ctx context.Context, isStream bool, input any, opts ...Opti
 		interruptBeforeNodes = getHitKey(nextTasks, r.interruptBeforeNodes)
 
 		if len(interruptBeforeNodes) > 0 || len(interruptAfterNodes) > 0 {
-			newCompletedTasks, err := tm.waitAll()
-			if err != nil {
-				return nil, fmt.Errorf("failed to wait all tasks: %w", err)
-			}
+			newCompletedTasks := tm.waitAll()
+
 			err = r.resolveInterruptCompletedTasks(subGraphInterrupts, &interruptRerunNodes, &interruptAfterNodes, newCompletedTasks)
 			if err != nil {
 				return nil, err // err has been wrapped

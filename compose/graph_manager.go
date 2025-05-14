@@ -310,15 +310,17 @@ func (t *taskManager) submit(tasks []*task) error {
 	return nil
 }
 
-func (t *taskManager) wait() ([]*task, error) {
+func (t *taskManager) wait() []*task {
 	if t.needAll {
 		return t.waitAll()
 	}
+
 	ta, success := t.waitOne()
 	if !success {
-		return []*task{}, nil
+		return []*task{}
 	}
-	return []*task{ta}, nil
+
+	return []*task{ta}
 }
 
 func (t *taskManager) waitOne() (*task, bool) {
@@ -342,12 +344,12 @@ func (t *taskManager) waitOne() (*task, bool) {
 	return ta, true
 }
 
-func (t *taskManager) waitAll() ([]*task, error) {
+func (t *taskManager) waitAll() []*task {
 	result := make([]*task, 0, t.num)
 	for {
 		ta, success := t.waitOne()
 		if !success {
-			return result, nil
+			return result
 		}
 		result = append(result, ta)
 	}
