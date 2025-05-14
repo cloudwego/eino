@@ -25,11 +25,11 @@ type graphCompileOptions struct {
 
 	origOpts []GraphCompileOption
 
-	getStateEnabled bool
-
 	checkPointStore      CheckPointStore
 	interruptBeforeNodes []string
 	interruptAfterNodes  []string
+
+	eager bool
 }
 
 func newGraphCompileOptions(opts ...GraphCompileOption) *graphCompileOptions {
@@ -65,8 +65,19 @@ func WithGraphName(graphName string) GraphCompileOption {
 	}
 }
 
+// WithEagerExecution enables the eager execution mode for the graph.
+// In eager mode, nodes will be executed immediately once they are ready to run,
+// without waiting for the completion of a super step, ref: https://www.cloudwego.io/docs/eino/core_modules/chain_and_graph_orchestration/orchestration_design_principles/#runtime-engine
+// Note: Eager mode is not allowed when the graph's trigger mode is set to AnyPredecessor.
+// Workflow uses eager mode by default.
+func WithEagerExecution() GraphCompileOption {
+	return func(o *graphCompileOptions) {
+		o.eager = true
+	}
+}
+
 // WithNodeTriggerMode sets the trigger mode for nodes in the graph.
-// The trigger mode determines when a node is triggered during graph execution, ref: https://www.cloudwego.io/docs/eino/core_modules/chain_and_graph_orchestration/orchestration_design_principles/#internal-mechanism
+// The trigger mode determines when a node is triggered during graph execution, ref: https://www.cloudwego.io/docs/eino/core_modules/chain_and_graph_orchestration/orchestration_design_principles/#runtime-engine
 // AnyPredecessor by default.
 func WithNodeTriggerMode(triggerMode NodeTriggerMode) GraphCompileOption {
 	return func(o *graphCompileOptions) {
