@@ -451,10 +451,7 @@ func (wf *Workflow[I, O]) compile(ctx context.Context, options *graphCompileOpti
 					return mergeValues(values)
 				},
 				transform: func(in streamReader) streamReader {
-					sr, sw := schema.Pipe[map[string]any](1)
-					sw.Send(value, nil)
-					sw.Close()
-
+					sr := schema.StreamReaderFromArray([]map[string]any{value})
 					newS, err := mergeValues([]any{in, packStreamReader(sr)})
 					if err != nil {
 						errSR, errSW := schema.Pipe[map[string]any](1)
@@ -467,11 +464,11 @@ func (wf *Workflow[I, O]) compile(ctx context.Context, options *graphCompileOpti
 				},
 			}
 
-			if _, ok := wf.g.handlerPreNode[n.key]; !ok {
-				wf.g.handlerPreNode[n.key] = []handlerPair{pair}
-			} else {
-				wf.g.handlerPreNode[n.key] = append([]handlerPair{pair}, wf.g.handlerPreNode[n.key]...)
+			for i := range paths {
+				wf.g.fieldMappingRecords[n.key] = append(wf.g.fieldMappingRecords[n.key], ToFieldPath(paths[i]))
 			}
+
+			wf.g.handlerPreNode[n.key] = []handlerPair{pair}
 		}
 	}
 

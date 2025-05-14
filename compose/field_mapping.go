@@ -686,19 +686,14 @@ func validateFieldMapping(predecessorType reflect.Type, successorType reflect.Ty
 		return nil, fmt.Errorf("static check fail: predecessor output type should be struct or map, actual: %v", predecessorType)
 	}
 
-	var (
-		predecessorFieldType, successorFieldType                         reflect.Type
-		err                                                              error
-		predecessorIntermediateInterface, successorIntermediateInterface bool
-	)
-
-	for _, mapping := range mappings {
-		predecessorFieldType, predecessorIntermediateInterface, err = checkAndExtractFieldType(splitFieldPath(mapping.from), predecessorType)
+	for i := range mappings {
+		mapping := mappings[i]
+		predecessorFieldType, predecessorIntermediateInterface, err := checkAndExtractFieldType(splitFieldPath(mapping.from), predecessorType)
 		if err != nil {
 			return nil, fmt.Errorf("static check failed for mapping %s: %w", mapping, err)
 		}
 
-		successorFieldType, successorIntermediateInterface, err = checkAndExtractFieldType(splitFieldPath(mapping.to), successorType)
+		successorFieldType, successorIntermediateInterface, err := checkAndExtractFieldType(splitFieldPath(mapping.to), successorType)
 		if err != nil {
 			return nil, fmt.Errorf("static check failed for mapping %s: %w", mapping, err)
 		}

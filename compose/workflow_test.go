@@ -899,6 +899,68 @@ func TestStaticValue(t *testing.T) {
 		_, err := wf.Compile(context.Background())
 		assert.ErrorContains(t, err, "two terminal field paths conflict for node 0: [prefilled], [prefilled]")
 	})
+
+	t.Run("all inputs are static values", func(t *testing.T) {
+		wf := NewWorkflow[string, map[string]any]()
+		wf.AddLambdaNode("0", InvokableLambda(func(ctx context.Context, in map[string]any) (output map[string]any, err error) {
+			return in, nil
+		})).
+			AddDependency(START).
+			SetStaticValue(FieldPath{"a", "b"}, "a_b").
+			SetStaticValue(FieldPath{"c", "d"}, "c_d").
+			SetStaticValue(FieldPath{"a", "d"}, "a_d")
+		wf.End().AddInput("0")
+		r, err := wf.Compile(context.Background())
+		assert.NoError(t, err)
+		out, err := r.Invoke(context.Background(), "hello")
+		assert.NoError(t, err)
+		assert.Equal(t, map[string]any{
+			"a": map[string]any{
+				"b": "a_b",
+				"d": "a_d",
+			},
+			"c": map[string]any{
+				"d": "c_d",
+			},
+		}, out)
+
+		type a struct {
+			B string
+			D string
+		}
+
+		type s struct {
+			A a
+			C map[string]any
+		}
+
+		wf1 := NewWorkflow[string, *s]()
+		wf1.AddLambdaNode("0", InvokableLambda(func(ctx context.Context, in map[string]any) (output map[string]any, err error) {
+			return in, nil
+		})).
+			AddDependency(START).
+			SetStaticValue(FieldPath{"A", "B"}, "a_b").
+			SetStaticValue(FieldPath{"C", "D"}, "c_d").
+			SetStaticValue(FieldPath{"A", "D"}, "a_d")
+		wf1.End().AddInput("0", MapFieldPaths(FieldPath{"A", "B"}, FieldPath{"A", "B"}),
+			MapFieldPaths(FieldPath{"A", "D"}, FieldPath{"A", "D"}),
+			MapFields("C", "C"))
+		r1, err := wf1.Compile(context.Background())
+		assert.NoError(t, err)
+		out1, err := r1.Stream(context.Background(), "hello")
+		assert.NoError(t, err)
+		outChunk, err := out1.Recv()
+		out1.Close()
+		assert.Equal(t, &s{
+			A: a{
+				B: "a_b",
+				D: "a_d",
+			},
+			C: map[string]any{
+				"D": "c_d",
+			},
+		}, outChunk)
+	})
 }
 
 func TestBranch(t *testing.T) {
