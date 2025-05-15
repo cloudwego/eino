@@ -51,6 +51,10 @@ func NewMultiAgent(ctx context.Context, config *MultiAgentConfig) (*MultiAgent, 
 		return nil, err
 	}
 
+	if config.HostNodeKey == "" {
+		config.HostNodeKey = defaultHostNodeKey
+	}
+
 	var (
 		hostPrompt      = config.Host.SystemPrompt
 		name            = config.Name
@@ -104,7 +108,7 @@ func NewMultiAgent(ctx context.Context, config *MultiAgentConfig) (*MultiAgent, 
 		return nil, err
 	}
 
-	if err = addHostAgent(chatModel, hostPrompt, g); err != nil {
+	if err = addHostAgent(chatModel, hostPrompt, g, config.HostNodeKey); err != nil {
 		return nil, err
 	}
 
@@ -179,7 +183,7 @@ func addSpecialistAgent(specialist *Specialist, g *compose.Graph[[]*schema.Messa
 	return g.AddEdge(specialist.Name, specialistsAnswersCollectorNodeKey)
 }
 
-func addHostAgent(model model.BaseChatModel, prompt string, g *compose.Graph[[]*schema.Message, *schema.Message]) error {
+func addHostAgent(model model.BaseChatModel, prompt string, g *compose.Graph[[]*schema.Message, *schema.Message], hostNodeName string) error {
 	preHandler := func(_ context.Context, input []*schema.Message, state *state) ([]*schema.Message, error) {
 		state.msgs = input
 		if len(prompt) == 0 {
@@ -190,7 +194,7 @@ func addHostAgent(model model.BaseChatModel, prompt string, g *compose.Graph[[]*
 			Content: prompt,
 		}}, input...), nil
 	}
-	if err := g.AddChatModelNode(defaultHostNodeKey, model, compose.WithStatePreHandler(preHandler), compose.WithNodeName(defaultHostNodeKey)); err != nil {
+	if err := g.AddChatModelNode(defaultHostNodeKey, model, compose.WithStatePreHandler(preHandler), compose.WithNodeName(hostNodeName)); err != nil {
 		return err
 	}
 
