@@ -573,3 +573,280 @@ func TestMultiStream(t *testing.T) {
 		t.Fatal("end stream haven't return EOF")
 	}
 }
+
+// TestMergeNamedStreamReaders tests the functionality of MergeNamedStreamReaders
+// with a focus on SourceEOF error handling.
+func TestMergeNamedStreamReaders(t *testing.T) {
+	t.Run("BasicSourceEOF", func(t *testing.T) {
+		// Create two named streams
+		sr1, sw1 := Pipe[string](2)
+		sr2, sw2 := Pipe[string](2)
+
+		// Merge the streams with names
+		namedStreams := map[string]*StreamReader[string]{
+			"stream1": sr1,
+			"stream2": sr2,
+		}
+		mergedSR := MergeNamedStreamReaders(namedStreams)
+		defer mergedSR.Close()
+
+		// Send data to the first stream and close it immediately
+		go func() {
+			defer sw1.Close()
+			sw1.Send("data1-1", nil)
+			sw1.Send("data1-2", nil)
+			// First stream ends
+		}()
+
+		// Send data to the second stream with a delay before closing
+		go func() {
+			defer sw2.Close()
+			sw2.Send("data2-1", nil)
+			sw2.Send("data2-2", nil)
+			sw2.Send("data2-3", nil)
+			// Second stream ends
+		}()
+
+		// Track received data and EOF sources
+		receivedData := make(map[string][]string)
+		eofSources := make([]string, 0, 2)
+
+		for {
+			chunk, err := mergedSR.Recv()
+			if err != nil {
+				// Check if it's a SourceEOF error
+				if sourceName, ok := GetSourceName(err); ok {
+					eofSources = append(eofSources, sourceName)
+					t.Logf("Received EOF from source: %s", sourceName)
+					continue // Continue receiving from other streams
+				}
+
+				// If it's a regular EOF, all streams have ended
+				if errors.Is(err, io.EOF) {
+					break
+				}
+
+				// Handle other errors
+				t.Errorf("Error receiving data: %v", err)
+				break
+			}
+
+			// Categorize data by prefix
+			if len(chunk) >= 5 {
+				prefix := chunk[:5]
+				if prefix == "data1" {
+					receivedData["stream1"] = append(receivedData["stream1"], chunk)
+				} else if prefix == "data2" {
+					receivedData["stream2"] = append(receivedData["stream2"], chunk)
+				}
+			}
+		}
+
+		// Verify we received both SourceEOF errors
+		if len(eofSources) != 2 {
+			t.Errorf("Expected 2 SourceEOF errors, got %d", len(eofSources))
+		}
+
+		// Verify the source names are correct
+		expectedSources := map[string]bool{"stream1": false, "stream2": false}
+		for _, source := range eofSources {
+			if _, exists := expectedSources[source]; !exists {
+				t.Errorf("Unexpected source name: %s", source)
+			} else {
+				expectedSources[source] = true
+			}
+		}
+
+		// Verify all expected sources were seen
+		for source, seen := range expectedSources {
+			if !seen {
+				t.Errorf("Did not receive SourceEOF for %s", source)
+			}
+		}
+
+		// Verify we received all expected data
+		if len(receivedData["stream1"]) != 2 {
+			t.Errorf("Expected 2 items from stream1, got %d", len(receivedData["stream1"]))
+		}
+
+		if len(receivedData["stream2"]) != 3 {
+			t.Errorf("Expected 3 items from stream2, got %d", len(receivedData["stream2"]))
+		}
+	})
+
+	t.Run("EmptyStream", func(t *testing.T) {
+		// Create two streams, one will be empty
+		sr1, sw1 := Pipe[string](2)
+		sr2, sw2 := Pipe[string](2)
+
+		// Close the first stream immediately to make it empty
+		sw1.Close()
+
+		// Merge the streams with names
+		namedStreams := map[string]*StreamReader[string]{
+			"empty": sr1,
+			"data":  sr2,
+		}
+		mergedSR := MergeNamedStreamReaders(namedStreams)
+		defer mergedSR.Close()
+
+		// Send data to the second stream
+		go func() {
+			defer sw2.Close()
+			sw2.Send("test-data", nil)
+		}()
+
+		// Track received EOFs and data
+		eofSources := make([]string, 0, 2)
+		receivedData := make([]string, 0, 1)
+
+		for {
+			chunk, err := mergedSR.Recv()
+			if err != nil {
+				if sourceName, ok := GetSourceName(err); ok {
+					eofSources = append(eofSources, sourceName)
+					continue
+				}
+
+				if errors.Is(err, io.EOF) {
+					break
+				}
+
+				t.Errorf("Error receiving data: %v", err)
+				break
+			}
+
+			receivedData = append(receivedData, chunk)
+		}
+
+		// Verify we received EOF from the empty stream
+		if len(eofSources) != 2 {
+			t.Errorf("Expected 2 SourceEOF errors, got %d", len(eofSources))
+		}
+
+		// Verify the first EOF is from the empty stream
+		if len(eofSources) > 0 && eofSources[0] != "empty" {
+			t.Errorf("Expected first EOF from 'empty' stream, got '%s'", eofSources[0])
+		}
+
+		// Verify we received the data from the non-empty stream
+		if len(receivedData) != 1 || receivedData[0] != "test-data" {
+			t.Errorf("Expected to receive 'test-data', got %v", receivedData)
+		}
+	})
+
+	t.Run("ArraySource", func(t *testing.T) {
+		// Create three named streams
+		sr1, sw1 := Pipe[string](2)
+		sr2, sw2 := Pipe[string](2)
+		sr3 := StreamReaderFromArray([]string{"data3-1", "data3-2", "data3-3"})
+
+		// Merge the streams with names
+		namedStreams := map[string]*StreamReader[string]{
+			"stream1": sr1,
+			"stream2": sr2,
+			"stream3": sr3,
+		}
+		mergedSR := MergeNamedStreamReaders(namedStreams)
+		defer mergedSR.Close()
+
+		// Send data and close streams in sequence
+		go func() {
+			// First stream sends one item then closes
+			sw1.Send("data1", nil)
+			sw1.Close()
+
+			// Second stream sends two items then closes
+			sw2.Send("data2-1", nil)
+			sw2.Send("data2-2", nil)
+			sw2.Close()
+		}()
+
+		// Track EOF order and data count
+		eofOrder := make([]string, 0, 3)
+		dataCount := 0
+
+		for {
+			_, err := mergedSR.Recv()
+			if err != nil {
+				if sourceName, ok := GetSourceName(err); ok {
+					eofOrder = append(eofOrder, sourceName)
+					continue
+				}
+
+				if errors.Is(err, io.EOF) {
+					break
+				}
+
+				t.Errorf("Error receiving data: %v", err)
+				break
+			}
+
+			dataCount++
+		}
+
+		// Verify EOF count
+		if len(eofOrder) != 3 {
+			t.Errorf("Expected 3 SourceEOF errors, got %d", len(eofOrder))
+		}
+
+		// Verify data count
+		if dataCount != 6 {
+			t.Errorf("Expected 6 data items, got %d", dataCount)
+		}
+	})
+
+	t.Run("ErrorPropagation", func(t *testing.T) {
+		// Create two streams
+		sr1, sw1 := Pipe[string](2)
+		sr2, sw2 := Pipe[string](2)
+
+		// Merge the streams with names
+		namedStreams := map[string]*StreamReader[string]{
+			"normal": sr1,
+			"error":  sr2,
+		}
+		mergedSR := MergeNamedStreamReaders(namedStreams)
+		defer mergedSR.Close()
+
+		testError := errors.New("test error")
+
+		// Send normal data to first stream
+		go func() {
+			defer sw1.Close()
+			sw1.Send("normal-data", nil)
+		}()
+
+		// Send error to second stream
+		go func() {
+			defer sw2.Close()
+			sw2.Send("", testError)
+		}()
+
+		// Track received errors
+		var receivedError error
+
+		for {
+			_, err := mergedSR.Recv()
+			if err != nil {
+				// Skip SourceEOF errors
+				if _, ok := GetSourceName(err); ok {
+					continue
+				}
+
+				if errors.Is(err, io.EOF) {
+					break
+				}
+
+				// Store the first non-EOF error
+				receivedError = err
+				break
+			}
+		}
+
+		// Verify we received the test error
+		if receivedError == nil || receivedError.Error() != testError.Error() {
+			t.Errorf("Expected error '%v', got '%v'", testError, receivedError)
+		}
+	})
+}

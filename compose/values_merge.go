@@ -39,6 +39,7 @@ func mergeValues(vs []any) (any, error) {
 		return fn(vs)
 	}
 
+	// merge StreamReaders
 	if s, ok := vs[0].(streamReader); ok {
 		t := s.getChunkType()
 		if internal.GetMergeFunc(t) == nil {

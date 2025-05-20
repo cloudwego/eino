@@ -18,6 +18,7 @@ package schema
 
 import (
 	"errors"
+	"fmt"
 	"io"
 	"reflect"
 	"runtime/debug"
@@ -48,6 +49,29 @@ var ErrNoValue = errors.New("no value")
 // ErrRecvAfterClosed indicates that StreamReader.Recv was unexpectedly called after StreamReader.Close.
 // This error should not occur during normal use of StreamReader.Recv. If it does, please check your application code.
 var ErrRecvAfterClosed = errors.New("recv after stream closed")
+
+// SourceEOF represents an EOF error from a specific source stream.
+// It is only returned by the method Recv() of StreamReader created
+// with MergeNamedStreamReaders when one of its source streams reaches EOF.
+type SourceEOF struct {
+	sourceName string
+}
+
+func (e *SourceEOF) Error() string {
+	return fmt.Sprintf("EOF from source stream: %s", e.sourceName)
+}
+
+// GetSourceName extracts the source stream name from a SourceEOF error.
+// It returns the source name and a boolean indicating whether the error was a SourceEOF.
+// If the error is not a SourceEOF, it returns an empty string and false.
+func GetSourceName(err error) (string, bool) {
+	var sErr *SourceEOF
+	if errors.As(err, &sErr) {
+		return sErr.sourceName, true
+	}
+
+	return "", false
+}
 
 // Pipe creates a new stream with the given capacity that represented with StreamWriter and StreamReader.
 // The capacity is the maximum number of items that can be buffered in the stream.
@@ -89,7 +113,7 @@ type StreamWriter[T any] struct {
 }
 
 // Send sends a value to the stream.
-// eg.
+// e.g.
 //
 //	closed := sw.Send(i, nil)
 //	if closed {
@@ -247,6 +271,33 @@ func (sr *StreamReader[T]) copyAny(n int) []iStreamReader {
 	return ret
 }
 
+func arrToStream[T any](arr []T) *stream[T] {
+	s := newStream[T](len(arr))
+	for i := range arr {
+		s.send(arr[i], nil)
+	}
+	s.closeSend()
+
+	return s
+}
+
+func (sr *StreamReader[T]) toStream() *stream[T] {
+	switch sr.typ {
+	case readerTypeStream:
+		return sr.st
+	case readerTypeArray:
+		return sr.ar.toStream()
+	case readerTypeMultiStream:
+		return sr.msr.toStream()
+	case readerTypeWithConvert:
+		return sr.srw.toStream()
+	case readerTypeChild:
+		return sr.csr.toStream()
+	default:
+		panic("impossible") // nolint: byted_s_panic_detect
+	}
+}
+
 type readerType int
 
 const (
@@ -369,12 +420,23 @@ func (ar *arrayReader[T]) copy(n int) []*arrayReader[T] {
 	return ret
 }
 
+func (ar *arrayReader[T]) toStream() *stream[T] {
+	return arrToStream(ar.arr[ar.index:])
+}
+
+type multiArrayReader[T any] struct {
+	ars   []*arrayReader[T]
+	index int
+}
+
 type multiStreamReader[T any] struct {
 	sts []*stream[T]
 
 	itemsCases []reflect.SelectCase
 
-	chosenList []int
+	nonClosed []int
+
+	sourceReaderNames []string
 }
 
 func newMultiStreamReader[T any](sts []*stream[T]) *multiStreamReader[T] {
@@ -389,23 +451,23 @@ func newMultiStreamReader[T any](sts []*stream[T]) *multiStreamReader[T] {
 		}
 	}
 
-	chosenList := make([]int, len(sts))
+	nonClosed := make([]int, len(sts))
 	for i := range sts {
-		chosenList[i] = i
+		nonClosed[i] = i
 	}
 
 	return &multiStreamReader[T]{
 		sts:        sts,
 		itemsCases: itemsCases,
-		chosenList: chosenList,
+		nonClosed:  nonClosed,
 	}
 }
 
 func (msr *multiStreamReader[T]) recv() (T, error) {
-	for len(msr.chosenList) > 0 {
+	for len(msr.nonClosed) > 0 {
 		var chosen int
 		var ok bool
-		if len(msr.chosenList) > maxSelectNum {
+		if len(msr.nonClosed) > maxSelectNum {
 			var recv reflect.Value
 			chosen, recv, ok = reflect.Select(msr.itemsCases)
 			if ok {
@@ -415,17 +477,23 @@ func (msr *multiStreamReader[T]) recv() (T, error) {
 			msr.itemsCases[chosen].Chan = reflect.Value{}
 		} else {
 			var item *streamItem[T]
-			chosen, item, ok = receiveN(msr.chosenList, msr.sts)
+			chosen, item, ok = receiveN(msr.nonClosed, msr.sts)
 			if ok {
 				return item.chunk, item.err
 			}
 		}
 
-		for i := range msr.chosenList {
-			if msr.chosenList[i] == chosen {
-				msr.chosenList = append(msr.chosenList[:i], msr.chosenList[i+1:]...)
+		// delete the closed stream
+		for i := range msr.nonClosed {
+			if msr.nonClosed[i] == chosen {
+				msr.nonClosed = append(msr.nonClosed[:i], msr.nonClosed[i+1:]...)
 				break
 			}
+		}
+
+		if len(msr.sourceReaderNames) > 0 {
+			var t T
+			return t, &SourceEOF{msr.sourceReaderNames[chosen]}
 		}
 	}
 
@@ -433,10 +501,24 @@ func (msr *multiStreamReader[T]) recv() (T, error) {
 	return t, io.EOF
 }
 
+func (msr *multiStreamReader[T]) nonClosedStreams() []*stream[T] {
+	ret := make([]*stream[T], len(msr.nonClosed))
+
+	for i, idx := range msr.nonClosed {
+		ret[i] = msr.sts[idx]
+	}
+
+	return ret
+}
+
 func (msr *multiStreamReader[T]) close() {
 	for _, s := range msr.sts {
 		s.closeRecv()
 	}
+}
+
+func (msr *multiStreamReader[T]) toStream() *stream[T] {
+	return toStream[T, *multiStreamReader[T]](msr)
 }
 
 type streamReaderWithConvert[T any] struct {
@@ -501,7 +583,12 @@ func (srw *streamReaderWithConvert[T]) close() {
 	srw.sr.Close()
 }
 
-func (srw *streamReaderWithConvert[T]) toStream() *stream[T] {
+type reader[T any] interface {
+	recv() (T, error)
+	close()
+}
+
+func toStream[T any, Reader reader[T]](r Reader) *stream[T] {
 	ret := newStream[T](5)
 
 	go func() {
@@ -515,11 +602,11 @@ func (srw *streamReaderWithConvert[T]) toStream() *stream[T] {
 			}
 
 			ret.closeSend()
-			srw.close()
+			r.close()
 		}()
 
 		for {
-			out, err := srw.recv()
+			out, err := r.recv()
 			if err == io.EOF {
 				break
 			}
@@ -532,6 +619,10 @@ func (srw *streamReaderWithConvert[T]) toStream() *stream[T] {
 	}()
 
 	return ret
+}
+
+func (srw *streamReaderWithConvert[T]) toStream() *stream[T] {
+	return toStream[T, *streamReaderWithConvert[T]](srw)
 }
 
 type cpStreamElement[T any] struct {
@@ -643,36 +734,7 @@ func (csr *childStreamReader[T]) recv() (T, error) {
 }
 
 func (csr *childStreamReader[T]) toStream() *stream[T] {
-	ret := newStream[T](5)
-
-	go func() {
-		defer func() {
-			panicErr := recover()
-			if panicErr != nil {
-				e := safe.NewPanicErr(panicErr, debug.Stack()) // nolint: byted_returned_err_should_do_check
-
-				var chunk T
-				_ = ret.send(chunk, e)
-			}
-
-			ret.closeSend()
-			csr.close()
-		}()
-
-		for {
-			out, err := csr.recv()
-			if err == io.EOF {
-				break
-			}
-
-			closed := ret.send(out, err)
-			if closed {
-				break
-			}
-		}
-	}()
-
-	return ret
+	return toStream[T, *childStreamReader[T]](csr)
 }
 
 func (csr *childStreamReader[T]) close() {
@@ -681,7 +743,7 @@ func (csr *childStreamReader[T]) close() {
 
 // MergeStreamReaders merge multiple StreamReader into one.
 // it's useful when you want to merge multiple streams into one.
-// eg.
+// e.g.
 //
 //	sr1, sr2 := schema.Pipe[string](2)
 //	defer sr1.Close()
@@ -712,7 +774,7 @@ func MergeStreamReaders[T any](srs []*StreamReader[T]) *StreamReader[T] {
 		case readerTypeArray:
 			arr = append(arr, sr.ar.arr[sr.ar.index:]...)
 		case readerTypeMultiStream:
-			ss = append(ss, sr.msr.sts...)
+			ss = append(ss, sr.msr.nonClosedStreams()...)
 		case readerTypeWithConvert:
 			ss = append(ss, sr.srw.toStream())
 		case readerTypeChild:
@@ -722,7 +784,7 @@ func MergeStreamReaders[T any](srs []*StreamReader[T]) *StreamReader[T] {
 		}
 	}
 
-	if len(ss) == 0 && len(arr) != 0 {
+	if len(ss) == 0 {
 		return &StreamReader[T]{
 			typ: readerTypeArray,
 			ar: &arrayReader[T]{
@@ -730,17 +792,70 @@ func MergeStreamReaders[T any](srs []*StreamReader[T]) *StreamReader[T] {
 				index: 0,
 			},
 		}
-	} else if len(arr) != 0 {
-		s := newStream[T](len(arr))
-		for i := range arr {
-			s.send(arr[i], nil)
-		}
-		s.closeSend()
+	}
+
+	if len(arr) != 0 {
+		s := arrToStream(arr)
 		ss = append(ss, s)
 	}
 
 	return &StreamReader[T]{
 		typ: readerTypeMultiStream,
 		msr: newMultiStreamReader(ss),
+	}
+}
+
+// MergeNamedStreamReaders merges multiple StreamReaders into one, preserving their names.
+// When a source stream reaches EOF, the merged stream will return a SourceEOF error
+// containing the name of the source stream that ended.
+// This is useful when you need to track which source stream has completed.
+// e.g.
+//
+//	sr1, sw1 := schema.Pipe[string](2)
+//	sr2, sw2 := schema.Pipe[string](2)
+//
+//	namedStreams := map[string]*StreamReader[string]{
+//		"stream1": sr1,
+//		"stream2": sr2,
+//	}
+//
+//	mergedSR := schema.MergeNamedStreamReaders(namedStreams)
+//	defer mergedSR.Close()
+//
+//	for {
+//		chunk, err := mergedSR.Recv()
+//		if err != nil {
+//			if sourceName, ok := schema.GetSourceName(err); ok {
+//				fmt.Printf("Stream %s ended\n", sourceName)
+//				continue
+//			}
+//			if errors.Is(err, io.EOF) {
+//				break // All streams have ended
+//			}
+//			// Handle other errors
+//		}
+//		fmt.Println(chunk)
+//	}
+func MergeNamedStreamReaders[T any](srs map[string]*StreamReader[T]) *StreamReader[T] {
+	if len(srs) < 1 {
+		return nil
+	}
+
+	ss := make([]*stream[T], len(srs))
+	names := make([]string, len(srs))
+
+	i := 0
+	for name, sr := range srs {
+		ss[i] = sr.toStream()
+		names[i] = name
+		i++
+	}
+
+	msr := newMultiStreamReader(ss)
+	msr.sourceReaderNames = names
+
+	return &StreamReader[T]{
+		typ: readerTypeMultiStream,
+		msr: msr,
 	}
 }

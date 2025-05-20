@@ -41,9 +41,9 @@ type myStruct2 struct {
 }
 
 func TestSerialization(t *testing.T) {
-	GenericRegister[myStruct]("myStruct")
-	GenericRegister[myStruct2]("myStruct2")
-	GenericRegister[myInterface]("myInterface")
+	_ = GenericRegister[myStruct]("myStruct")
+	_ = GenericRegister[myStruct2]("myStruct2")
+	_ = GenericRegister[myInterface]("myInterface")
 	ms := myStruct{A: "test"}
 	pms := &ms
 	pointerOfPointerOfMyStruct := &pms

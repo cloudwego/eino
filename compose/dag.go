@@ -172,9 +172,9 @@ func (ch *dagChannel) convertValues(fn func(map[string]any) error) error {
 }
 
 func init() {
-	serialization.GenericRegister[channel]("_eino_channel")
-	serialization.GenericRegister[checkpoint]("_eino_checkpoint")
-	serialization.GenericRegister[dagChannel]("_eino_dag_channel")
-	serialization.GenericRegister[pregelChannel]("_eino_pregel_channel")
-	serialization.GenericRegister[dependencyState]("_eino_dependency_state")
+	_ = serialization.GenericRegister[channel]("_eino_channel")
+	_ = serialization.GenericRegister[checkpoint]("_eino_checkpoint")
+	_ = serialization.GenericRegister[dagChannel]("_eino_dag_channel")
+	_ = serialization.GenericRegister[pregelChannel]("_eino_pregel_channel")
+	_ = serialization.GenericRegister[dependencyState]("_eino_dependency_state")
 }
