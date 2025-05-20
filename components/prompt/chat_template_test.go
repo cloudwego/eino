@@ -113,3 +113,75 @@ func TestDocumentFormat(t *testing.T) {
 	assert.Nil(t, err)
 	t.Log(msgs)
 }
+
+func TestMultiContentFormat(t *testing.T) {
+	mtpl := []schema.MessagesTemplate{
+		&schema.Message{
+			Content: "{a}",
+			MultiContent: []schema.ChatMessagePart{
+				{
+					Text: "{b}",
+					ImageURL: &schema.ChatMessageImageURL{
+						URL: "{c}",
+						URI: "{d}",
+					},
+					AudioURL: &schema.ChatMessageAudioURL{
+						URL: "{e}",
+						URI: "{f}",
+					},
+					VideoURL: &schema.ChatMessageVideoURL{
+						URL: "{g}",
+						URI: "{h}",
+					},
+					FileURL: &schema.ChatMessageFileURL{
+						URL: "{i}",
+						URI: "{j}",
+					},
+				},
+			},
+		},
+	}
+	input := map[string]any{
+		"a": "content",
+		"b": "text",
+		"c": "image url",
+		"d": "image uri",
+		"e": "audio url",
+		"f": "audio uri",
+		"g": "video url",
+		"h": "video uri",
+		"i": "file url",
+		"j": "json url",
+	}
+	expected := []*schema.Message{
+		{
+			Content: "content",
+			MultiContent: []schema.ChatMessagePart{
+				{
+					Text: "text",
+					ImageURL: &schema.ChatMessageImageURL{
+						URL: "{c}",
+						URI: "{d}",
+					},
+					AudioURL: &schema.ChatMessageAudioURL{
+						URL: "{e}",
+						URI: "{f}",
+					},
+					VideoURL: &schema.ChatMessageVideoURL{
+						URL: "{g}",
+						URI: "{h}",
+					},
+					FileURL: &schema.ChatMessageFileURL{
+						URL: "{i}",
+						URI: "{j}",
+					},
+				},
+			},
+		},
+	}
+
+	tpl := FromMessages(schema.FString, mtpl...)
+	result, err := tpl.Format(context.Background(), input)
+	assert.Nil(t, err)
+	assert.Equal(t, expected, result)
+}

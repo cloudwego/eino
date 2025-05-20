@@ -436,9 +436,18 @@ func (m *Message) Format(_ context.Context, vs map[string]any, formatType Format
 	if err != nil {
 		return nil, err
 	}
-
 	copied := *m
 	copied.Content = c
+
+	for i, mc := range copied.MultiContent {
+		if len(mc.Text) > 0 {
+			nmc, err := formatContent(mc.Text, vs, formatType)
+			if err != nil {
+				return nil, err
+			}
+			copied.MultiContent[i].Text = nmc
+		}
+	}
 	return []*Message{&copied}, nil
 }
 
