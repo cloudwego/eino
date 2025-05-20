@@ -311,8 +311,32 @@ func TestSnakeToCamel(t *testing.T) {
 	})
 }
 
+type stringAlias string
+type integerAlias uint32
+type floatAlias float64
+type boolAlias bool
+
 type testEnumStruct struct {
-	Field1 string `json:"field1" jsonschema:"enum=a,enum=b"`
+	Field1 string       `json:"field1" jsonschema:"enum=a,enum=b"`
+	Field2 int          `json:"field2" jsonschema:"enum=1,enum=2"`
+	Field3 float32      `json:"field3" jsonschema:"enum=1.1,enum=2.2"`
+	Field4 bool         `json:"field4" jsonschema:"enum=true"`
+	Field5 stringAlias  `json:"field5" jsonschema:"enum=a,enum=c"`
+	Field6 integerAlias `json:"field6" jsonschema:"enum=3,enum=4"`
+	Field7 floatAlias   `json:"field7" jsonschema:"enum=3.3,enum=4.4"`
+	Field8 boolAlias    `json:"field8" jsonschema:"enum=false"`
+}
+
+type testEnumStruct2 struct {
+	Field1 int8 `json:"field1" jsonschema:"enum=1.1"`
+}
+
+type testEnumStruct3 struct {
+	Field1 float64 `json:"field1" jsonschema:"enum=a"`
+}
+
+type testEnumStruct4 struct {
+	Field1 bool `json:"field1" jsonschema:"enum=2"`
 }
 
 func TestEnumTag(t *testing.T) {
@@ -320,5 +344,21 @@ func TestEnumTag(t *testing.T) {
 	assert.NoError(t, err)
 	s, err := info.ToOpenAPIV3()
 	assert.NoError(t, err)
-	assert.Equal(t, []interface{}{"a", "b"}, s.Properties["field1"].Value.Enum)
+	assert.Equal(t, []any{"a", "b"}, s.Properties["field1"].Value.Enum)
+	assert.Equal(t, []any{int64(1), int64(2)}, s.Properties["field2"].Value.Enum)
+	assert.Equal(t, []any{1.1, 2.2}, s.Properties["field3"].Value.Enum)
+	assert.Equal(t, []any{true}, s.Properties["field4"].Value.Enum)
+	assert.Equal(t, []any{"a", "c"}, s.Properties["field5"].Value.Enum)
+	assert.Equal(t, []any{int64(3), int64(4)}, s.Properties["field6"].Value.Enum)
+	assert.Equal(t, []any{3.3, 4.4}, s.Properties["field7"].Value.Enum)
+	assert.Equal(t, []any{false}, s.Properties["field8"].Value.Enum)
+
+	_, err = goStruct2ParamsOneOf[testEnumStruct2]()
+	assert.ErrorContains(t, err, "parse enum value 1.1 to int64 failed")
+
+	_, err = goStruct2ParamsOneOf[testEnumStruct3]()
+	assert.ErrorContains(t, err, "parse enum value a to float64 failed")
+
+	_, err = goStruct2ParamsOneOf[testEnumStruct4]()
+	assert.ErrorContains(t, err, "parse enum value 2 to bool failed")
 }

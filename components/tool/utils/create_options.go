@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"reflect"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/getkin/kin-openapi/openapi3"
@@ -88,7 +89,9 @@ func getToolOptions(opt ...Option) *toolOptions {
 // defaultSchemaCustomizer is the default schema customizer when using reflect to infer tool parameter from tagged go struct.
 // Supported struct tags:
 // 1. jsonschema: "description=xxx"
-// 2. jsonschema: "enum=xxx,enum=yyy,enum=zzz"
+// 2. jsonschema: "enum=xxx,enum=yyy", or "enum=1,enum=2", or "enum=3.14,enum=3.15", etc.
+// NOTE: will convert actual enum value such as "1" or "3.14" to actual field type defined in struct.
+// NOTE: enum only supports string, int, int8, int16, int32, int64, uint, uint8, uint16, uint32, uint64, float32, float64, bool.
 // 3. jsonschema: "required"
 // 4. can also use json: "xxx,omitempty" to mark the field as not required, which means an absence of 'omitempty' in json tag means the field is required.
 // If this defaultSchemaCustomizer is not sufficient or suitable to your specific need, define your own SchemaCustomizerFn and pass it to WithSchemaCustomizer during InferTool or InferStreamTool.
@@ -96,14 +99,39 @@ func defaultSchemaCustomizer(name string, t reflect.Type, tag reflect.StructTag,
 	jsonS := tag.Get("jsonschema")
 	if len(jsonS) > 0 {
 		tags := strings.Split(jsonS, ",")
-		for _, t := range tags {
-			kv := strings.Split(t, "=")
+		for _, tag := range tags {
+			kv := strings.Split(tag, "=")
 			if len(kv) == 2 {
 				if kv[0] == "description" {
 					schema.Description = kv[1]
 				}
 				if kv[0] == "enum" {
-					schema.Enum = append(schema.Enum, kv[1])
+					rawV := kv[1]
+					switch t.Kind() {
+					case reflect.String:
+						schema.Enum = append(schema.Enum, rawV)
+					case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64,
+						reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
+						v, err := strconv.ParseInt(rawV, 10, 64)
+						if err != nil {
+							return fmt.Errorf("parse enum value %v to int64 failed: %w", rawV, err)
+						}
+						schema.Enum = append(schema.Enum, v)
+					case reflect.Float32, reflect.Float64:
+						v, err := strconv.ParseFloat(rawV, 64)
+						if err != nil {
+							return fmt.Errorf("parse enum value %v to float64 failed: %w", rawV, err)
+						}
+						schema.Enum = append(schema.Enum, v)
+					case reflect.Bool:
+						v, err := strconv.ParseBool(rawV)
+						if err != nil {
+							return fmt.Errorf("parse enum value %v to bool failed: %w", rawV, err)
+						}
+						schema.Enum = append(schema.Enum, v)
+					default:
+						return fmt.Errorf("enum tag unsupported for field type: %v", t)
+					}
 				}
 			} else if len(kv) == 1 {
 				if kv[0] == "required" {
