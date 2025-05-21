@@ -19,6 +19,7 @@ package host
 import (
 	"context"
 	"io"
+	"sync"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -46,6 +47,15 @@ func TestHostMultiAgent(t *testing.T) {
 		},
 	}
 
+	specialist2Msg1 := &schema.Message{
+		Role:    schema.Assistant,
+		Content: "specialist2",
+	}
+	specialist2Msg2 := &schema.Message{
+		Role:    schema.Assistant,
+		Content: " stream answer",
+	}
+
 	specialist2 := &Specialist{
 		Invokable: func(ctx context.Context, input []*schema.Message, opts ...agent.AgentOption) (*schema.Message, error) {
 			return &schema.Message{
@@ -54,15 +64,7 @@ func TestHostMultiAgent(t *testing.T) {
 			}, nil
 		},
 		Streamable: func(ctx context.Context, input []*schema.Message, opts ...agent.AgentOption) (*schema.StreamReader[*schema.Message], error) {
-			sr, sw := schema.Pipe[*schema.Message](0)
-			go func() {
-				sw.Send(&schema.Message{
-					Role:    schema.Assistant,
-					Content: "specialist2 stream answer",
-				}, nil)
-				sw.Close()
-			}()
-			return sr, nil
+			return schema.StreamReaderFromArray([]*schema.Message{specialist2Msg1, specialist2Msg2}), nil
 		},
 		AgentMeta: AgentMeta{
 			Name:        "specialist 2",
@@ -94,7 +96,7 @@ func TestHostMultiAgent(t *testing.T) {
 
 		mockHostLLM.EXPECT().Generate(gomock.Any(), gomock.Any()).Return(directAnswerMsg, nil).Times(1)
 
-		mockCallback := &mockAgentCallback{}
+		mockCallback := newMockAgentCallback(0)
 
 		out, err := hostMA.Generate(ctx, nil, WithAgentCallbacks(mockCallback))
 		assert.NoError(t, err)
@@ -122,7 +124,7 @@ func TestHostMultiAgent(t *testing.T) {
 
 		mockHostLLM.EXPECT().Stream(gomock.Any(), gomock.Any()).Return(sr, nil).Times(1)
 
-		mockCallback := &mockAgentCallback{}
+		mockCallback := newMockAgentCallback(0)
 		outStream, err := hostMA.Stream(ctx, nil, WithAgentCallbacks(mockCallback))
 		assert.NoError(t, err)
 		assert.Empty(t, mockCallback.infos)
@@ -139,9 +141,8 @@ func TestHostMultiAgent(t *testing.T) {
 
 		outStream.Close()
 
-		msg, err := schema.ConcatMessages(msgs)
-		assert.NoError(t, err)
-		assert.Equal(t, "direct answer", msg.Content)
+		assert.Equal(t, directAnswerMsg1, msgs[0])
+		assert.Equal(t, directAnswerMsg2, msgs[1])
 	})
 
 	t.Run("generate hand off", func(t *testing.T) {
@@ -166,11 +167,12 @@ func TestHostMultiAgent(t *testing.T) {
 		mockHostLLM.EXPECT().Generate(gomock.Any(), gomock.Any()).Return(handOffMsg, nil).Times(1)
 		mockSpecialistLLM1.EXPECT().Generate(gomock.Any(), gomock.Any()).Return(specialistMsg, nil).Times(1)
 
-		mockCallback := &mockAgentCallback{}
+		mockCallback := newMockAgentCallback(1)
 
 		out, err := hostMA.Generate(ctx, nil, WithAgentCallbacks(mockCallback))
 		assert.NoError(t, err)
 		assert.Equal(t, "specialist 1 answer", out.Content)
+		mockCallback.wg.Wait()
 		assert.Equal(t, []*HandOffInfo{
 			{
 				ToAgentName: specialist1.Name,
@@ -182,11 +184,12 @@ func TestHostMultiAgent(t *testing.T) {
 		handOffMsg.ToolCalls[0].Function.Arguments = `{"reason": "specialist 2 is even better"}`
 		mockHostLLM.EXPECT().Generate(gomock.Any(), gomock.Any()).Return(handOffMsg, nil).Times(1)
 
-		mockCallback = &mockAgentCallback{}
+		mockCallback = newMockAgentCallback(1)
 
 		out, err = hostMA.Generate(ctx, nil, WithAgentCallbacks(mockCallback))
 		assert.NoError(t, err)
 		assert.Equal(t, "specialist2 invoke answer", out.Content)
+		mockCallback.wg.Wait()
 		assert.Equal(t, []*HandOffInfo{
 			{
 				ToAgentName: specialist2.Name,
@@ -297,7 +300,7 @@ func TestHostMultiAgent(t *testing.T) {
 		mockHostLLM.EXPECT().Stream(gomock.Any(), gomock.Any()).Return(sr, nil).Times(1)
 		mockSpecialistLLM1.EXPECT().Stream(gomock.Any(), gomock.Any()).Return(sr1, nil).Times(1)
 
-		mockCallback := &mockAgentCallback{}
+		mockCallback := newMockAgentCallback(1)
 		outStream, err := hostMA.Stream(ctx, nil, WithAgentCallbacks(mockCallback))
 		assert.NoError(t, err)
 
@@ -313,9 +316,10 @@ func TestHostMultiAgent(t *testing.T) {
 
 		outStream.Close()
 
-		msg, err := schema.ConcatMessages(msgs)
-		assert.NoError(t, err)
-		assert.Equal(t, "specialist 1 answer", msg.Content)
+		assert.Equal(t, specialistMsg1, msgs[0])
+		assert.Equal(t, specialistMsg2, msgs[1])
+
+		mockCallback.wg.Wait()
 
 		assert.Equal(t, []*HandOffInfo{
 			{
@@ -337,7 +341,7 @@ func TestHostMultiAgent(t *testing.T) {
 
 		mockHostLLM.EXPECT().Stream(gomock.Any(), gomock.Any()).Return(sr, nil).Times(1)
 
-		mockCallback = &mockAgentCallback{}
+		mockCallback = newMockAgentCallback(1)
 		outStream, err = hostMA.Stream(ctx, nil, WithAgentCallbacks(mockCallback))
 		assert.NoError(t, err)
 
@@ -353,9 +357,10 @@ func TestHostMultiAgent(t *testing.T) {
 
 		outStream.Close()
 
-		msg, err = schema.ConcatMessages(msgs)
-		assert.NoError(t, err)
-		assert.Equal(t, "specialist2 stream answer", msg.Content)
+		assert.Equal(t, specialist2Msg1, msgs[0])
+		assert.Equal(t, specialist2Msg2, msgs[1])
+
+		mockCallback.wg.Wait()
 
 		assert.Equal(t, []*HandOffInfo{
 			{
@@ -387,7 +392,7 @@ func TestHostMultiAgent(t *testing.T) {
 		mockHostLLM.EXPECT().Generate(gomock.Any(), gomock.Any()).Return(handOffMsg, nil).Times(1)
 		mockSpecialistLLM1.EXPECT().Generate(gomock.Any(), gomock.Any()).Return(specialistMsg, nil).Times(1)
 
-		mockCallback := &mockAgentCallback{}
+		mockCallback := newMockAgentCallback(1)
 
 		hostMA, err := NewMultiAgent(ctx, &MultiAgentConfig{
 			Host: Host{
@@ -412,6 +417,8 @@ func TestHostMultiAgent(t *testing.T) {
 		out, err := fullGraph.Invoke(ctx, map[string]any{"country_name": "China"}, compose.WithCallbacks(ConvertCallbackHandlers(mockCallback)).DesignateNodeWithPath(compose.NewNodePath("host_ma_node", hostMA.HostNodeKey())))
 		assert.NoError(t, err)
 		assert.Equal(t, "Beijing", out.Content)
+
+		mockCallback.wg.Wait()
 		assert.Equal(t, []*HandOffInfo{
 			{
 				ToAgentName: specialist1.Name,
@@ -458,20 +465,32 @@ func TestHostMultiAgent(t *testing.T) {
 					Index: generic.PtrOf(1),
 					Function: schema.FunctionCall{
 						Name:      specialist2.Name,
-						Arguments: `{"reason": "specialist 2 is also good"}`,
+						Arguments: `{"reason": "specialist 2`,
 					},
 				},
 			},
 		}
 
-		sr, sw := schema.Pipe[*schema.Message](0)
-		go func() {
-			sw.Send(handOffMsg1, nil)
-			sw.Send(handOffMsg2, nil)
-			sw.Send(handOffMsg3, nil)
-			sw.Send(handOffMsg4, nil)
-			sw.Close()
-		}()
+		handOffMsg5 := &schema.Message{
+			Role: schema.Assistant,
+			ToolCalls: []schema.ToolCall{
+				{
+					Index: generic.PtrOf(1),
+					Function: schema.FunctionCall{
+						Name:      specialist2.Name,
+						Arguments: ` is also good"}`,
+					},
+				},
+			},
+		}
+
+		sr := schema.StreamReaderFromArray([]*schema.Message{
+			handOffMsg1,
+			handOffMsg2,
+			handOffMsg3,
+			handOffMsg4,
+			handOffMsg5,
+		})
 
 		specialist1Msg1 := &schema.Message{
 			Role:    schema.Assistant,
@@ -483,12 +502,10 @@ func TestHostMultiAgent(t *testing.T) {
 			Content: "1 answer",
 		}
 
-		sr1, sw1 := schema.Pipe[*schema.Message](0)
-		go func() {
-			sw1.Send(specialist1Msg1, nil)
-			sw1.Send(specialist1Msg2, nil)
-			sw1.Close()
-		}()
+		sr1 := schema.StreamReaderFromArray([]*schema.Message{
+			specialist1Msg1,
+			specialist1Msg2,
+		})
 
 		streamToolCallChecker := func(ctx context.Context, modelOutput *schema.StreamReader[*schema.Message]) (bool, error) {
 			defer modelOutput.Close()
@@ -528,7 +545,7 @@ func TestHostMultiAgent(t *testing.T) {
 		mockHostLLM.EXPECT().Stream(gomock.Any(), gomock.Any()).Return(sr, nil).Times(1)
 		mockSpecialistLLM1.EXPECT().Stream(gomock.Any(), gomock.Any()).Return(sr1, nil).Times(1)
 
-		mockCallback := &mockAgentCallback{}
+		mockCallback := newMockAgentCallback(2)
 		outStream, err := hostMA.Stream(ctx, nil, WithAgentCallbacks(mockCallback))
 		assert.NoError(t, err)
 
@@ -551,6 +568,7 @@ func TestHostMultiAgent(t *testing.T) {
 			t.Errorf("Unexpected message content: %s", msg.Content)
 		}
 
+		mockCallback.wg.Wait()
 		assert.Equal(t, []*HandOffInfo{
 			{
 				ToAgentName: specialist1.Name,
@@ -566,9 +584,21 @@ func TestHostMultiAgent(t *testing.T) {
 
 type mockAgentCallback struct {
 	infos []*HandOffInfo
+	wg    sync.WaitGroup
 }
 
 func (m *mockAgentCallback) OnHandOff(ctx context.Context, info *HandOffInfo) context.Context {
 	m.infos = append(m.infos, info)
+	m.wg.Done()
 	return ctx
+}
+
+func newMockAgentCallback(expects int) *mockAgentCallback {
+	m := &mockAgentCallback{
+		infos: make([]*HandOffInfo, 0),
+		wg:    sync.WaitGroup{},
+	}
+
+	m.wg.Add(expects)
+	return m
 }

@@ -94,6 +94,7 @@ type MultiAgentConfig struct {
 	// Summarizer is the summarizer agent that will summarize the outputs of all the chosen specialist agents.
 	// Only when the Host agent picks multiple Specialist will this be called.
 	// If you do not provide a summarizer, a default summarizer that simply concatenates all the output messages into one message will be used.
+	// Note: the default summarizer do not support streaming.
 	Summarizer *Summarizer
 }
 

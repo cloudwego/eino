@@ -18,11 +18,14 @@ package host
 
 import (
 	"context"
+	"fmt"
 	"io"
+	"runtime/debug"
 
 	"github.com/cloudwego/eino/callbacks"
 	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/flow/agent"
+	"github.com/cloudwego/eino/internal/safe"
 	"github.com/cloudwego/eino/schema"
 	template "github.com/cloudwego/eino/utils/callbacks"
 )
@@ -41,10 +44,6 @@ type HandOffInfo struct {
 // ConvertCallbackHandlers converts []host.MultiAgentCallback to callbacks.Handler.
 func ConvertCallbackHandlers(handlers ...MultiAgentCallback) callbacks.Handler {
 	onChatModelEnd := func(ctx context.Context, info *callbacks.RunInfo, output *model.CallbackOutput) context.Context {
-		if output == nil || info == nil {
-			return ctx
-		}
-
 		msg := output.Message
 		if msg == nil || msg.Role != schema.Assistant || len(msg.ToolCalls) == 0 {
 			return ctx
@@ -63,47 +62,48 @@ func ConvertCallbackHandlers(handlers ...MultiAgentCallback) callbacks.Handler {
 	}
 
 	onChatModelEndWithStreamOutput := func(ctx context.Context, info *callbacks.RunInfo, output *schema.StreamReader[*model.CallbackOutput]) context.Context {
-		if output == nil || info == nil {
-			return ctx
-		}
+		go func() {
+			defer func() {
+				panicInfo := recover()
+				if panicInfo != nil {
+					fmt.Println(safe.NewPanicErr(panicInfo, debug.Stack()))
+				}
+				output.Close()
+			}()
 
-		defer output.Close()
+			handOffs := make(map[string]string)
+			var handOffOrder []string
+			for {
+				oneOutput, err := output.Recv()
+				if err != nil {
+					if err == io.EOF {
+						break
+					}
+					return
+				}
 
-		var msgs []*schema.Message
-		for {
-			oneOutput, err := output.Recv()
-			if err == io.EOF {
-				break
+				for _, toolCall := range oneOutput.Message.ToolCalls {
+					if len(toolCall.Function.Name) > 0 {
+						if existing, ok := handOffs[toolCall.Function.Name]; !ok {
+							handOffOrder = append(handOffOrder, toolCall.Function.Name)
+							handOffs[toolCall.Function.Name] = toolCall.Function.Arguments
+						} else {
+							handOffs[toolCall.Function.Name] = existing + toolCall.Function.Arguments
+						}
+					}
+				}
 			}
-			if err != nil {
-				return ctx
+
+			for _, cb := range handlers {
+				for _, name := range handOffOrder {
+					args := handOffs[name]
+					_ = cb.OnHandOff(ctx, &HandOffInfo{
+						ToAgentName: name,
+						Argument:    args,
+					})
+				}
 			}
-
-			msg := oneOutput.Message
-			if msg == nil {
-				continue
-			}
-
-			msgs = append(msgs, msg)
-		}
-
-		msg, err := schema.ConcatMessages(msgs)
-		if err != nil {
-			return ctx
-		}
-
-		if msg.Role != schema.Assistant || len(msg.ToolCalls) == 0 {
-			return ctx
-		}
-
-		for _, cb := range handlers {
-			for _, toolCall := range msg.ToolCalls {
-				ctx = cb.OnHandOff(ctx, &HandOffInfo{
-					ToAgentName: toolCall.Function.Name,
-					Argument:    toolCall.Function.Arguments,
-				})
-			}
-		}
+		}()
 
 		return ctx
 	}
