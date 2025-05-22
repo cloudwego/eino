@@ -439,6 +439,11 @@ func (m *Message) Format(_ context.Context, vs map[string]any, formatType Format
 	copied := *m
 	copied.Content = c
 
+	if len(m.MultiContent) != 0 {
+		copied.MultiContent = make([]ChatMessagePart, len(m.MultiContent))
+		copy(copied.MultiContent, m.MultiContent)
+	}
+
 	for i, mc := range copied.MultiContent {
 		if len(mc.Text) > 0 {
 			nmc, err := formatContent(mc.Text, vs, formatType)
