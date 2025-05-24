@@ -20,6 +20,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"strings"
 	"testing"
 
 	"github.com/bytedance/sonic"
@@ -656,4 +657,146 @@ func TestUnknownTool(t *testing.T) {
 		}
 	}
 	assert.Equal(t, expected, result)
+}
+
+func TestToolRerun(t *testing.T) {
+	type myToolRerunState struct {
+		In *schema.Message
+	}
+	assert.NoError(t, RegisterSerializableType[myToolRerunState]("_my_rerun_state"))
+
+	tc := []schema.ToolCall{
+		{
+			ID: "1",
+			Function: schema.FunctionCall{
+				Name:      "tool1",
+				Arguments: "input",
+			},
+		},
+		{
+			ID: "2",
+			Function: schema.FunctionCall{
+				Name:      "tool2",
+				Arguments: "input",
+			},
+		},
+		{
+			ID: "3",
+			Function: schema.FunctionCall{
+				Name:      "tool3",
+				Arguments: "input",
+			},
+		},
+		{
+			ID: "4",
+			Function: schema.FunctionCall{
+				Name:      "tool4",
+				Arguments: "input",
+			},
+		},
+	}
+	g := NewGraph[*schema.Message, string](WithGenLocalState(func(ctx context.Context) (state *myToolRerunState) {
+		return &myToolRerunState{In: &schema.Message{Role: schema.Assistant, ToolCalls: tc}}
+	}))
+	ctx := context.Background()
+	tn, err := NewToolNode(ctx, &ToolsNodeConfig{
+		Tools: []tool.BaseTool{&myTool1{}, &myTool2{}, &myTool3{t: t}, &myTool4{t: t}},
+	})
+	assert.NoError(t, err)
+	assert.NoError(t, g.AddToolsNode("tool node", tn, WithStatePreHandler(func(ctx context.Context, in *schema.Message, state *myToolRerunState) (*schema.Message, error) {
+		return state.In, nil
+	})))
+	assert.NoError(t, g.AddLambdaNode("lambda", InvokableLambda(func(ctx context.Context, input []*schema.Message) (output string, err error) {
+		sb := strings.Builder{}
+		for _, m := range input {
+			sb.WriteString(m.Content)
+		}
+		return sb.String(), nil
+	})))
+	assert.NoError(t, g.AddEdge(START, "tool node"))
+	assert.NoError(t, g.AddEdge("tool node", "lambda"))
+	assert.NoError(t, g.AddEdge("lambda", END))
+
+	r, err := g.Compile(ctx, WithCheckPointStore(&inMemoryStore{m: map[string][]byte{}}))
+	assert.NoError(t, err)
+
+	_, err = r.Invoke(ctx, &schema.Message{Role: schema.Assistant, ToolCalls: tc}, WithCheckPointID("1"))
+	info, ok := ExtractInterruptInfo(err)
+	assert.True(t, ok)
+	assert.Equal(t, []string{"tool node"}, info.RerunNodes)
+	assert.Equal(t, &ToolsInterruptAndRerunExtra{
+		ToolCalls:     tc,
+		RerunTools:    []string{"1", "2"},
+		RerunExtraMap: map[string]any{"1": "tool1 rerun extra", "2": "tool2 rerun extra"},
+		ExecutedTools: map[string]string{
+			"3": "tool3 input: input",
+			"4": "tool4 input: input",
+		},
+	}, info.RerunNodesExtra["tool node"])
+
+	result, err := r.Invoke(ctx, nil, WithCheckPointID("1"))
+	assert.NoError(t, err)
+	assert.Equal(t, "tool1 input: inputtool2 input: inputtool3 input: inputtool4 input: input", result)
+}
+
+type myTool1 struct {
+	times uint
+}
+
+func (m *myTool1) Info(ctx context.Context) (*schema.ToolInfo, error) {
+	return &schema.ToolInfo{Name: "tool1"}, nil
+}
+
+func (m *myTool1) InvokableRun(ctx context.Context, argumentsInJSON string, opts ...tool.Option) (string, error) {
+	if m.times == 0 {
+		m.times++
+		return "", NewInterruptAndRerunErr("tool1 rerun extra")
+	}
+	return "tool1 input: " + argumentsInJSON, nil
+}
+
+type myTool2 struct {
+	times uint
+}
+
+func (m *myTool2) Info(ctx context.Context) (*schema.ToolInfo, error) {
+	return &schema.ToolInfo{Name: "tool2"}, nil
+}
+
+func (m *myTool2) StreamableRun(ctx context.Context, argumentsInJSON string, opts ...tool.Option) (*schema.StreamReader[string], error) {
+	if m.times == 0 {
+		m.times++
+		return nil, NewInterruptAndRerunErr("tool2 rerun extra")
+	}
+	return schema.StreamReaderFromArray([]string{"tool2 input: ", argumentsInJSON}), nil
+}
+
+type myTool3 struct {
+	t     *testing.T
+	times int
+}
+
+func (m *myTool3) Info(ctx context.Context) (*schema.ToolInfo, error) {
+	return &schema.ToolInfo{Name: "tool3"}, nil
+}
+
+func (m *myTool3) InvokableRun(ctx context.Context, argumentsInJSON string, opts ...tool.Option) (string, error) {
+	assert.Equal(m.t, m.times, 0)
+	m.times++
+	return "tool3 input: " + argumentsInJSON, nil
+}
+
+type myTool4 struct {
+	t     *testing.T
+	times int
+}
+
+func (m *myTool4) Info(ctx context.Context) (*schema.ToolInfo, error) {
+	return &schema.ToolInfo{Name: "tool4"}, nil
+}
+
+func (m *myTool4) StreamableRun(ctx context.Context, argumentsInJSON string, opts ...tool.Option) (*schema.StreamReader[string], error) {
+	assert.Equal(m.t, m.times, 0)
+	m.times++
+	return schema.StreamReaderFromArray([]string{"tool4 input: ", argumentsInJSON}), nil
 }

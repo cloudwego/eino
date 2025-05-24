@@ -42,6 +42,7 @@ func TestCommonError(t *testing.T) {
 	// node error
 	_, err = r.Invoke(ctx, "input")
 	var ie *internalError
+
 	assert.True(t, errors.As(err, &ie))
 	assert.Equal(t, "my error", ie.origError.Error())
 
