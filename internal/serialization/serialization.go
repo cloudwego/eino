@@ -87,6 +87,7 @@ func Marshal(v interface{}) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
+
 	return sonic.Marshal(is)
 }
 
