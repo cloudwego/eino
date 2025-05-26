@@ -19,6 +19,7 @@ package react
 import (
 	"context"
 	"io"
+	"sync"
 
 	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/compose"
@@ -153,6 +154,8 @@ type Agent struct {
 	graphAddNodeOpts []compose.GraphAddNodeOpt
 }
 
+var registerStateOnce sync.Once
+
 // NewAgent creates a ReAct agent that feeds tool response into next round of Chat Model generation.
 //
 // IMPORTANT!! For models that don't output tool calls in the first streaming chunk (e.g. Claude)
@@ -166,6 +169,13 @@ func NewAgent(ctx context.Context, config *AgentConfig) (_ *Agent, err error) {
 		toolCallChecker = config.StreamToolCallChecker
 		messageModifier = config.MessageModifier
 	)
+
+	registerStateOnce.Do(func() {
+		err = compose.RegisterSerializableType[state]("_eino_react_state")
+	})
+	if err != nil {
+		return
+	}
 
 	if toolCallChecker == nil {
 		toolCallChecker = firstChunkStreamToolCallChecker
@@ -208,6 +218,9 @@ func NewAgent(ctx context.Context, config *AgentConfig) (_ *Agent, err error) {
 	}
 
 	toolsNodePreHandle := func(ctx context.Context, input *schema.Message, state *state) (*schema.Message, error) {
+		if input == nil {
+			return state.Messages[len(state.Messages)-1], nil // used for rerun interrupt resume
+		}
 		state.Messages = append(state.Messages, input)
 		state.ReturnDirectlyToolCallID = getReturnDirectlyToolCallID(input, config.ToolReturnDirectly)
 		return input, nil
