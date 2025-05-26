@@ -472,7 +472,7 @@ func (g *graph) addBranch(startNode string, branch *GraphBranch, skipData bool) 
 	// check branch condition type
 	result := checkAssignable(g.getNodeOutputType(startNode), branch.inputType)
 	if result == assignableTypeMustNot {
-		return fmt.Errorf("condition input type[%s] and start node output type[%s] are mismatched", branch.inputType.String(), g.getNodeOutputType(startNode).String())
+		return fmt.Errorf("condition's input type[%s] and start node[%s]'s output type[%s] are mismatched", branch.inputType.String(), startNode, g.getNodeOutputType(startNode).String())
 	} else if result == assignableTypeMay {
 		g.handlerPreBranch[startNode] = append(g.handlerPreBranch[startNode], []handlerPair{branch.inputConverter})
 	} else {
