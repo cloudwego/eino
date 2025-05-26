@@ -77,6 +77,10 @@ type AgentConfig struct {
 	// Note: The default implementation does not work well with Claude, which typically outputs tool calls after text content.
 	// Note: If your ChatModel doesn't output tool calls first, you can try adding prompts to constrain the model from generating extra text during the tool call.
 	StreamToolCallChecker func(ctx context.Context, modelOutput *schema.StreamReader[*schema.Message]) (bool, error)
+
+	GraphName     string
+	ModelNodeName string
+	ToolsNodeName string
 }
 
 // Deprecated: This approach of adding persona involves unnecessary slice copying overhead.
@@ -167,6 +171,18 @@ func NewAgent(ctx context.Context, config *AgentConfig) (_ *Agent, err error) {
 		messageModifier = config.MessageModifier
 	)
 
+	if config.GraphName == "" {
+		config.GraphName = GraphName
+	}
+
+	if config.ModelNodeName == "" {
+		config.ModelNodeName = ModelNodeName
+	}
+
+	if config.ToolsNodeName == "" {
+		config.ToolsNodeName = ToolsNodeName
+	}
+
 	if toolCallChecker == nil {
 		toolCallChecker = firstChunkStreamToolCallChecker
 	}
@@ -199,7 +215,7 @@ func NewAgent(ctx context.Context, config *AgentConfig) (_ *Agent, err error) {
 		return messageModifier(ctx, modifiedInput), nil
 	}
 
-	if err = graph.AddChatModelNode(nodeKeyModel, chatModel, compose.WithStatePreHandler(modelPreHandle), compose.WithNodeName(ModelNodeName)); err != nil {
+	if err = graph.AddChatModelNode(nodeKeyModel, chatModel, compose.WithStatePreHandler(modelPreHandle), compose.WithNodeName(config.ModelNodeName)); err != nil {
 		return nil, err
 	}
 
@@ -212,7 +228,7 @@ func NewAgent(ctx context.Context, config *AgentConfig) (_ *Agent, err error) {
 		state.ReturnDirectlyToolCallID = getReturnDirectlyToolCallID(input, config.ToolReturnDirectly)
 		return input, nil
 	}
-	if err = graph.AddToolsNode(nodeKeyTools, toolsNode, compose.WithStatePreHandler(toolsNodePreHandle), compose.WithNodeName(ToolsNodeName)); err != nil {
+	if err = graph.AddToolsNode(nodeKeyTools, toolsNode, compose.WithStatePreHandler(toolsNodePreHandle), compose.WithNodeName(config.ToolsNodeName)); err != nil {
 		return nil, err
 	}
 
@@ -237,7 +253,7 @@ func NewAgent(ctx context.Context, config *AgentConfig) (_ *Agent, err error) {
 		return nil, err
 	}
 
-	compileOpts := []compose.GraphCompileOption{compose.WithMaxRunSteps(config.MaxStep), compose.WithNodeTriggerMode(compose.AnyPredecessor), compose.WithGraphName(GraphName)}
+	compileOpts := []compose.GraphCompileOption{compose.WithMaxRunSteps(config.MaxStep), compose.WithNodeTriggerMode(compose.AnyPredecessor), compose.WithGraphName(config.GraphName)}
 	runnable, err := graph.Compile(ctx, compileOpts...)
 	if err != nil {
 		return nil, err
