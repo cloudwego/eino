@@ -720,7 +720,7 @@ func TestToolRerun(t *testing.T) {
 	r, err := g.Compile(ctx, WithCheckPointStore(&inMemoryStore{m: map[string][]byte{}}))
 	assert.NoError(t, err)
 
-	_, err = r.Invoke(ctx, &schema.Message{Role: schema.Assistant, ToolCalls: tc}, WithCheckPointID("1"))
+	_, err = r.Stream(ctx, &schema.Message{Role: schema.Assistant, ToolCalls: tc}, WithCheckPointID("1"))
 	info, ok := ExtractInterruptInfo(err)
 	assert.True(t, ok)
 	assert.Equal(t, []string{"tool node"}, info.RerunNodes)

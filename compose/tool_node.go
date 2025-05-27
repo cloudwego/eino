@@ -258,8 +258,10 @@ func runToolCallTaskByInvoke(ctx context.Context, task *toolCallTask, opts ...to
 	})
 
 	ctx = setToolCallInfo(ctx, &toolCallInfo{toolCallID: task.callID})
-	task.executed = true
 	task.output, task.err = task.r.Invoke(ctx, task.arg, opts...)
+	if task.err == nil {
+		task.executed = true
+	}
 }
 
 func runToolCallTaskByStream(ctx context.Context, task *toolCallTask, opts ...tool.Option) {
@@ -270,8 +272,10 @@ func runToolCallTaskByStream(ctx context.Context, task *toolCallTask, opts ...to
 	})
 
 	ctx = setToolCallInfo(ctx, &toolCallInfo{toolCallID: task.callID})
-	task.executed = true
 	task.sOutput, task.err = task.r.Stream(ctx, task.arg, opts...)
+	if task.err == nil {
+		task.executed = true
+	}
 }
 
 func sequentialRunToolCall(ctx context.Context, run func(ctx2 context.Context, callTask *toolCallTask, opts ...tool.Option), tasks []toolCallTask, opts ...tool.Option) {
