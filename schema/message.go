@@ -221,9 +221,21 @@ type ChatMessageFileURL struct {
 	Extra map[string]any `json:"extra,omitempty"`
 }
 
+// ChatMessageVideo is used to represent a video part with multiple frames in a chat message.
+// This supports the custom video format with an array of base64-encoded frames.
+type ChatMessageVideo struct {
+	// Video is an array of base64-encoded video frames, typically in data URI format.
+	Video []string `json:"video,omitempty"`
+
+	// MIMEType is the mime type of the video frames, eg. "image/jpeg", "image/png".
+	MIMEType string `json:"mime_type,omitempty"`
+	// Extra is used to store extra information for the video.
+	Extra map[string]any `json:"extra,omitempty"`
+}
+
 // ChatMessagePart is the part in a chat message.
 type ChatMessagePart struct {
-	// Type is the type of the part, eg. "text", "image_url", "audio_url", "video_url", "file_url".
+	// Type is the type of the part, eg. "text", "image_url", "audio_url", "video_url", "file_url", "video".
 	Type ChatMessagePartType `json:"type,omitempty"`
 
 	// Text is the text of the part, it's used when Type is "text".
@@ -237,6 +249,8 @@ type ChatMessagePart struct {
 	VideoURL *ChatMessageVideoURL `json:"video_url,omitempty"`
 	// FileURL is the file url of the part, it's used when Type is "file_url".
 	FileURL *ChatMessageFileURL `json:"file_url,omitempty"`
+	// Video is the video frames of the part, it's used when Type is "video".
+	Video *ChatMessageVideo `json:"video,omitempty"`
 }
 
 // LogProbs is the top-level structure containing the log probability information.
