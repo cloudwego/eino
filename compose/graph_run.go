@@ -395,7 +395,7 @@ func (r *runner) resolveInterruptCompletedTasks(tempInfo *interruptTempInfo, com
 				tempInfo.subGraphInterrupts[completedTasks[i].nodeKey] = info
 				continue
 			}
-			extra, ok := isInterruptRerunError(completedTasks[i].err)
+			extra, ok := IsInterruptRerunError(completedTasks[i].err)
 			if ok {
 				tempInfo.interruptRerunNodes = append(tempInfo.interruptRerunNodes, completedTasks[i].nodeKey)
 				if extra != nil {

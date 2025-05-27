@@ -343,7 +343,7 @@ func (tn *ToolsNode) Invoke(ctx context.Context, input *schema.Message,
 	rerun := false
 	for i := 0; i < n; i++ {
 		if tasks[i].err != nil {
-			extra, ok := isInterruptRerunError(tasks[i].err)
+			extra, ok := IsInterruptRerunError(tasks[i].err)
 			if !ok {
 				return nil, fmt.Errorf("failed to invoke tool[name:%s id:%s]: %w", tasks[i].name, tasks[i].callID, tasks[i].err)
 			}
@@ -404,7 +404,7 @@ func (tn *ToolsNode) Stream(ctx context.Context, input *schema.Message,
 	// check rerun
 	for i := 0; i < n; i++ {
 		if tasks[i].err != nil {
-			extra, ok := isInterruptRerunError(tasks[i].err)
+			extra, ok := IsInterruptRerunError(tasks[i].err)
 			if !ok {
 				return nil, fmt.Errorf("failed to stream tool call %s: %w", tasks[i].callID, tasks[i].err)
 			}

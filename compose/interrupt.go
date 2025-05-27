@@ -47,7 +47,7 @@ func (i *interruptAndRerun) Error() string {
 	return fmt.Sprintf("interrupt and rerun: %v", i.Extra)
 }
 
-func isInterruptRerunError(err error) (any, bool) {
+func IsInterruptRerunError(err error) (any, bool) {
 	if errors.Is(err, InterruptAndRerun) {
 		return nil, true
 	}
@@ -117,7 +117,7 @@ func isInterruptError(err error) bool {
 	if info := isSubGraphInterrupt(err); info != nil {
 		return true
 	}
-	if _, ok := isInterruptRerunError(err); ok {
+	if _, ok := IsInterruptRerunError(err); ok {
 		return true
 	}
 
