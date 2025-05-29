@@ -734,7 +734,9 @@ func TestToolRerun(t *testing.T) {
 		},
 	}, info.RerunNodesExtra["tool node"])
 
-	result, err := r.Invoke(ctx, nil, WithCheckPointID("1"))
+	sr, err := r.Stream(ctx, nil, WithCheckPointID("1"))
+	assert.NoError(t, err)
+	result, err := concatStreamReader(sr)
 	assert.NoError(t, err)
 	assert.Equal(t, "tool1 input: inputtool2 input: inputtool3 input: inputtool4 input: input", result)
 }
