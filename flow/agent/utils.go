@@ -27,10 +27,16 @@ func ChatModelWithTools(model_ model.ChatModel, toolCallingModel model.ToolCalli
 	toolInfos []*schema.ToolInfo) (model.BaseChatModel, error) {
 
 	if toolCallingModel != nil {
+		if len(toolInfos) == 0 {
+			return toolCallingModel, nil
+		}
 		return toolCallingModel.WithTools(toolInfos)
 	}
 
 	if model_ != nil {
+		if len(toolInfos) == 0 {
+			return model_, nil
+		}
 		err := model_.BindTools(toolInfos)
 		if err != nil {
 			return nil, err
