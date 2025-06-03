@@ -531,9 +531,13 @@ func (r *runner) handleInterruptWithSubGraphAndRerunNodes(
 		ToolsNodeExecutedTools: tempInfo.interruptExecutedTools,
 		SubGraphs:              make(map[string]*checkpoint),
 	}
-	if state, ok := ctx.Value(stateKey{}).(*internalState); ok {
-		cp.State = state.state
+	if r.runCtx != nil {
+		// current graph has enable state
+		if state, ok := ctx.Value(stateKey{}).(*internalState); ok {
+			cp.State = state.state
+		}
 	}
+
 	intInfo := &InterruptInfo{
 		State:           cp.State,
 		BeforeNodes:     tempInfo.interruptBeforeNodes,
