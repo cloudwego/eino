@@ -136,6 +136,7 @@ func forwardCheckPoint(ctx context.Context, nodeKey string) context.Context {
 		return ctx
 	}
 	if subCP, ok := cp.SubGraphs[nodeKey]; ok {
+		delete(cp.SubGraphs, nodeKey) // only forward once
 		return context.WithValue(ctx, checkPointKey{}, subCP)
 	}
 	return context.WithValue(ctx, checkPointKey{}, (*checkpoint)(nil))
