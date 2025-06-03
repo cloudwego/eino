@@ -454,10 +454,6 @@ func (g *graph) addBranch(startNode string, branch *GraphBranch, skipData bool) 
 		return fmt.Errorf("branch start node '%s' needs to be added to graph first", startNode)
 	}
 
-	if len(branch.endNodes) == 1 {
-		return fmt.Errorf("number of branches is 1")
-	}
-
 	if _, ok := g.handlerPreBranch[startNode]; !ok {
 		g.handlerPreBranch[startNode] = [][]handlerPair{}
 	}

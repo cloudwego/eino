@@ -72,8 +72,8 @@ func RegisterStreamChunkConcatFunc[T any](fn func([]T) (T, error)) {
 	concatFuncs[generic.TypeOf[T]()] = fn
 }
 
-func GetConcatFunc(tpe reflect.Type) func(reflect.Value) (reflect.Value, error) {
-	if fn, ok := concatFuncs[tpe]; ok {
+func GetConcatFunc(typ reflect.Type) func(reflect.Value) (reflect.Value, error) {
+	if fn, ok := concatFuncs[typ]; ok {
 		return func(a reflect.Value) (reflect.Value, error) {
 			rvs := reflect.ValueOf(fn).Call([]reflect.Value{a})
 			var err error
