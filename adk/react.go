@@ -1,0 +1,223 @@
+/*
+ * Copyright 2025 CloudWeGo Authors
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package adk
+
+import (
+	"context"
+	"io"
+
+	"github.com/cloudwego/eino/components/model"
+	"github.com/cloudwego/eino/compose"
+	"github.com/cloudwego/eino/schema"
+)
+
+type State struct {
+	Messages []Message
+
+	ReturnDirectlyToolCallID string
+
+	ToolGenActions map[string]*AgentAction
+
+	AgentName string
+}
+
+func SendToolGenAction(ctx context.Context, toolName string, action *AgentAction) error {
+	return compose.ProcessState(ctx, func(ctx context.Context, st *State) error {
+		st.ToolGenActions[toolName] = action
+
+		return nil
+	})
+}
+
+func popToolGenAction(ctx context.Context, toolName string) *AgentAction {
+	var action *AgentAction
+	err := compose.ProcessState(ctx, func(ctx context.Context, st *State) error {
+		action = st.ToolGenActions[toolName]
+		if action != nil {
+			delete(st.ToolGenActions, toolName)
+		}
+
+		return nil
+	})
+
+	if err != nil {
+		panic("impossible")
+	}
+
+	return action
+}
+
+type reactConfig struct {
+	model model.ToolCallingChatModel
+
+	toolsConfig *compose.ToolsNodeConfig
+
+	toolsReturnDirectly map[string]bool
+
+	agentName string
+}
+
+func genToolInfos(ctx context.Context, config *compose.ToolsNodeConfig) ([]*schema.ToolInfo, error) {
+	toolInfos := make([]*schema.ToolInfo, 0, len(config.Tools))
+	for _, t := range config.Tools {
+		tl, err := t.Info(ctx)
+		if err != nil {
+			return nil, err
+		}
+
+		toolInfos = append(toolInfos, tl)
+	}
+
+	return toolInfos, nil
+}
+
+type reactGraph = *compose.Graph[[]Message, Message]
+type sToolNodeOutput = *schema.StreamReader[[]Message]
+type sGraphOutput = MessageStream
+
+func getReturnDirectlyToolCallID(ctx context.Context) string {
+	var toolCallID string
+	handler := func(_ context.Context, st *State) error {
+		toolCallID = st.ReturnDirectlyToolCallID
+		return nil
+	}
+
+	_ = compose.ProcessState(ctx, handler)
+
+	return toolCallID
+}
+
+func newReact(ctx context.Context, config *reactConfig) (reactGraph, error) {
+	genState := func(ctx context.Context) *State {
+		return &State{ToolGenActions: map[string]*AgentAction{}, AgentName: config.agentName}
+	}
+
+	const (
+		chatModel_ = "ChatModel"
+		toolNode_  = "ToolNode"
+	)
+
+	g := compose.NewGraph[[]Message, Message](compose.WithGenLocalState(genState))
+
+	toolsInfo, err := genToolInfos(ctx, config.toolsConfig)
+	if err != nil {
+		return nil, err
+	}
+
+	chatModel, err := config.model.WithTools(toolsInfo)
+	if err != nil {
+		return nil, err
+	}
+
+	toolsNode, err := compose.NewToolNode(ctx, config.toolsConfig)
+	if err != nil {
+		return nil, err
+	}
+
+	modelPreHandle := func(ctx context.Context, input []Message, st *State) ([]Message, error) {
+		st.Messages = append(st.Messages, input...)
+		return st.Messages, nil
+	}
+	_ = g.AddChatModelNode(chatModel_, chatModel,
+		compose.WithStatePreHandler(modelPreHandle), compose.WithNodeName(chatModel_))
+
+	toolPreHandle := func(ctx context.Context, input Message, st *State) (Message, error) {
+		st.Messages = append(st.Messages, input)
+
+		if len(config.toolsReturnDirectly) > 0 {
+			for i := range input.ToolCalls {
+				toolName := input.ToolCalls[i].Function.Name
+				if config.toolsReturnDirectly[toolName] {
+					st.ReturnDirectlyToolCallID = input.ToolCalls[i].ID
+				}
+			}
+		}
+
+		return input, nil
+	}
+
+	_ = g.AddToolsNode(toolNode_, toolsNode,
+		compose.WithStatePreHandler(toolPreHandle), compose.WithNodeName(toolNode_))
+
+	_ = g.AddEdge(compose.START, chatModel_)
+
+	toolCallCheck := func(ctx context.Context, sMsg MessageStream) (string, error) {
+		defer sMsg.Close()
+		for {
+			chunk, err_ := sMsg.Recv()
+			if err_ != nil {
+				if err_ == io.EOF {
+					return compose.END, nil
+				}
+
+				return "", err_
+			}
+
+			if len(chunk.ToolCalls) > 0 {
+				return toolNode_, nil
+			}
+		}
+	}
+	branch := compose.NewStreamGraphBranch(toolCallCheck, map[string]bool{compose.END: true, toolNode_: true})
+	_ = g.AddBranch(chatModel_, branch)
+
+	if len(config.toolsReturnDirectly) == 0 {
+		_ = g.AddEdge(toolNode_, chatModel_)
+	} else {
+		const (
+			toolNodeToEndConverter = "ToolNodeToEndConverter"
+		)
+
+		cvt := func(ctx context.Context, sToolCallMessages sToolNodeOutput) (sGraphOutput, error) {
+			id := getReturnDirectlyToolCallID(ctx)
+
+			return schema.StreamReaderWithConvert(sToolCallMessages,
+				func(in []Message) (Message, error) {
+
+					for _, chunk := range in {
+						if chunk.ToolCallID == id {
+							return chunk, nil
+						}
+					}
+
+					return nil, schema.ErrNoValue
+				}), nil
+		}
+
+		_ = g.AddLambdaNode(toolNodeToEndConverter, compose.TransformableLambda(cvt),
+			compose.WithNodeName(toolNodeToEndConverter))
+		_ = g.AddEdge(toolNodeToEndConverter, compose.END)
+
+		checkReturnDirect := func(ctx context.Context,
+			sToolCallMessages sToolNodeOutput) (string, error) {
+
+			id := getReturnDirectlyToolCallID(ctx)
+
+			if len(id) != 0 {
+				return toolNodeToEndConverter, nil
+			}
+
+			return chatModel_, nil
+		}
+
+		branch = compose.NewStreamGraphBranch(checkReturnDirect,
+			map[string]bool{toolNodeToEndConverter: true, chatModel_: true})
+		_ = g.AddBranch(toolNode_, branch)
+	}
+
+	return g, nil
+}

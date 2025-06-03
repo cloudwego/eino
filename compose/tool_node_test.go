@@ -47,32 +47,32 @@ func TestToolsNode(t *testing.T) {
 
 	userCompanyToolInfo := &schema.ToolInfo{
 		Name: toolNameOfUserCompany,
-		Desc: "根据用户的姓名和邮箱，查询用户的公司和职位信息",
+		Desc: "Query user's company and position information based on user's name and email",
 		ParamsOneOf: schema.NewParamsOneOfByParams(
 			map[string]*schema.ParameterInfo{
 				"name": {
 					Type: "string",
-					Desc: "用户的姓名",
+					Desc: "User's name",
 				},
 				"email": {
 					Type: "string",
-					Desc: "用户的邮箱",
+					Desc: "User's email",
 				},
 			}),
 	}
 
 	userSalaryToolInfo := &schema.ToolInfo{
 		Name: toolNameOfUserSalary,
-		Desc: "根据用户的姓名和邮箱，查询用户的薪酬信息",
+		Desc: "Query user's salary information based on user's name and email",
 		ParamsOneOf: schema.NewParamsOneOfByParams(
 			map[string]*schema.ParameterInfo{
 				"name": {
 					Type: "string",
-					Desc: "用户的姓名",
+					Desc: "User's name",
 				},
 				"email": {
 					Type: "string",
-					Desc: "用户的邮箱",
+					Desc: "User's email",
 				},
 			}),
 	}
@@ -113,12 +113,14 @@ func TestToolsNode(t *testing.T) {
 		out, err := r.Invoke(ctx, []*schema.Message{})
 		assert.NoError(t, err)
 
-		assert.Equal(t, toolIDOfUserCompany, findMsgByToolCallID(out, toolIDOfUserCompany).ToolCallID)
+		msg := findMsgByToolCallID(out, toolIDOfUserCompany)
+		assert.Equal(t, toolIDOfUserCompany, msg.ToolCallID)
 		assert.JSONEq(t, `{"user_id":"zhangsan-zhangsan@bytedance.com","gender":"male","company":"bytedance","position":"CEO"}`,
-			findMsgByToolCallID(out, toolIDOfUserCompany).Content)
+			msg.Content)
 
-		assert.Equal(t, toolIDOfUserSalary, findMsgByToolCallID(out, toolIDOfUserSalary).ToolCallID)
-		assert.Contains(t, findMsgByToolCallID(out, toolIDOfUserSalary).Content,
+		msg = findMsgByToolCallID(out, toolIDOfUserSalary)
+		assert.Equal(t, toolIDOfUserSalary, msg.ToolCallID)
+		assert.Contains(t, msg.Content,
 			`{"user_id":"zhangsan-zhangsan@bytedance.com","salary":5000}{"user_id":"zhangsan-zhangsan@bytedance.com","salary":3000}{"user_id":"zhangsan-zhangsan@bytedance.com","salary":2000}`)
 
 		// 测试流式调用
@@ -129,11 +131,14 @@ func TestToolsNode(t *testing.T) {
 
 		defer reader.Close()
 
+		var arrMsgs [][]*schema.Message
 		for ; loops < 10; loops++ {
 			msgs, err := reader.Recv()
 			if err == io.EOF {
 				break
 			}
+
+			arrMsgs = append(arrMsgs, msgs)
 
 			assert.NoError(t, err)
 
@@ -166,6 +171,11 @@ func TestToolsNode(t *testing.T) {
 		}
 
 		assert.Equal(t, 4, loops)
+
+		msgs, err_ := schema.ConcatMessageArray(arrMsgs)
+		assert.NoError(t, err_)
+		msg = findMsgByToolCallID(msgs, toolIDOfUserCompany)
+		msg = findMsgByToolCallID(msgs, toolIDOfUserSalary)
 
 		sr, sw := schema.Pipe[[]*schema.Message](2)
 		sw.Send([]*schema.Message{
@@ -227,6 +237,80 @@ func TestToolsNode(t *testing.T) {
 		}
 
 		assert.Equal(t, 4, loops)
+	})
+
+	t.Run("order_consistency", func(t *testing.T) {
+		// Create a ToolsNode with multiple tools
+		ui := utils.NewTool(userCompanyToolInfo, queryUserCompany)
+		us := utils.NewTool(userSalaryToolInfo, queryUserSalary)
+
+		toolsNode, err_ := NewToolNode(context.Background(), &ToolsNodeConfig{
+			Tools: []tool.BaseTool{ui, us},
+		})
+		assert.NoError(t, err_)
+
+		// Create an input message with multiple tool calls in a specific order
+		input := &schema.Message{
+			Role: schema.Assistant,
+			ToolCalls: []schema.ToolCall{
+				{
+					ID: toolIDOfUserSalary,
+					Function: schema.FunctionCall{
+						Name:      toolNameOfUserSalary,
+						Arguments: `{"name": "zhangsan", "email": "zhangsan@bytedance.com"}`,
+					},
+				},
+				{
+					ID: toolIDOfUserCompany,
+					Function: schema.FunctionCall{
+						Name:      toolNameOfUserCompany,
+						Arguments: `{"name": "zhangsan", "email": "zhangsan@bytedance.com"}`,
+					},
+				},
+			},
+		}
+
+		// Invoke the ToolsNode
+		output, err_ := toolsNode.Invoke(context.Background(), input)
+		assert.NoError(t, err_)
+
+		// Verify the order of output messages matches the order of input tool calls
+		assert.Equal(t, 2, len(output))
+		assert.Equal(t, toolIDOfUserSalary, output[0].ToolCallID)
+		assert.Equal(t, toolIDOfUserCompany, output[1].ToolCallID)
+
+		// Test with Stream method as well
+		streamer, err_ := toolsNode.Stream(context.Background(), input)
+		assert.NoError(t, err_)
+		defer streamer.Close()
+
+		// Collect all stream outputs
+		var streamOutputs [][]*schema.Message
+		for {
+			chunk, err__ := streamer.Recv()
+			if err__ == io.EOF {
+				break
+			}
+			assert.NoError(t, err__)
+			streamOutputs = append(streamOutputs, chunk)
+		}
+
+		// Verify each chunk maintains the correct order
+		for _, chunk := range streamOutputs {
+			if chunk[0] != nil {
+				assert.Equal(t, toolIDOfUserSalary, chunk[0].ToolCallID)
+			}
+			if chunk[1] != nil {
+				assert.Equal(t, toolIDOfUserCompany, chunk[1].ToolCallID)
+			}
+		}
+
+		// Concatenate all stream outputs and verify final result
+		concatenated, err_ := schema.ConcatMessageArray(streamOutputs)
+		assert.NoError(t, err_)
+		assert.Equal(t, 2, len(concatenated))
+		assert.Equal(t, toolIDOfUserSalary, concatenated[0].ToolCallID)
+		assert.Equal(t, toolIDOfUserCompany, concatenated[1].ToolCallID)
 	})
 }
 
