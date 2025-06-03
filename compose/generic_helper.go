@@ -201,7 +201,7 @@ func defaultStreamMapFilter[T any](key string, isr streamReader) (streamReader, 
 		return nil, false
 	}
 
-	convert := func(m map[string]any) (T, error) {
+	cvt := func(m map[string]any) (T, error) {
 		var t T
 		v, ok_ := m[key]
 		if !ok_ {
@@ -217,7 +217,7 @@ func defaultStreamMapFilter[T any](key string, isr streamReader) (streamReader, 
 		return vv, nil
 	}
 
-	ret := schema.StreamReaderWithConvert[map[string]any, T](sr, convert)
+	ret := schema.StreamReaderWithConvert[map[string]any, T](sr, cvt)
 
 	return packStreamReader(ret), true
 }
