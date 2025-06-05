@@ -126,6 +126,10 @@ func (ch *dagChannel) get(isStream bool) (any, bool, error) {
 		return nil, false, nil
 	}
 
+	if len(ch.ControlPredecessors)+len(ch.DataPredecessors) == 0 {
+		return nil, false, nil
+	}
+
 	for _, state := range ch.ControlPredecessors {
 		if state == dependencyStateWaiting {
 			return nil, false, nil
