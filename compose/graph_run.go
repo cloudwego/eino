@@ -21,6 +21,7 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"strings"
 
 	"github.com/cloudwego/eino/internal"
 )
@@ -253,6 +254,9 @@ func (r *runner) run(ctx context.Context, isStream bool, input any, opts ...Opti
 		if isEnd {
 			return result, nil
 		}
+		if len(nextTasks) == 0 {
+			return nil, newGraphRunError(fmt.Errorf("no tasks to execute after graph start"))
+		}
 
 		if keys := getHitKey(nextTasks, r.interruptBeforeNodes); len(keys) > 0 {
 			tempInfo := newInterruptTempInfo()
@@ -268,6 +272,7 @@ func (r *runner) run(ctx context.Context, isStream bool, input any, opts ...Opti
 		}
 	}
 
+	var lastCompletedTask []*task
 	// Main execution loop.
 	for step := 0; ; step++ {
 		// Check for context cancellation.
@@ -321,10 +326,10 @@ func (r *runner) run(ctx context.Context, isStream bool, input any, opts ...Opti
 			)
 		}
 
-		beforeTasks := make([]string, 0, len(nextTasks))
 		if len(completedTasks) == 0 {
-			return nil, newGraphRunError(fmt.Errorf("no tasks to execute, before tasks: %v", beforeTasks))
+			return nil, newGraphRunError(fmt.Errorf("no tasks to execute, last completed nodes: %v", printTask(lastCompletedTask)))
 		}
+		lastCompletedTask = completedTasks
 
 		var isEnd bool
 		nextTasks, result, isEnd, err = r.calculateNextTasks(ctx, completedTasks, isStream, cm, optMap)
@@ -903,4 +908,19 @@ func copyItem(item any, n int) []any {
 	}
 
 	return ret
+}
+
+func printTask(ts []*task) string {
+	if len(ts) == 0 {
+		return "[]"
+	}
+	sb := strings.Builder{}
+	sb.WriteString("[")
+	for i := 0; i < len(ts)-1; i++ {
+		sb.WriteString(ts[i].nodeKey)
+		sb.WriteString(", ")
+	}
+	sb.WriteString(ts[len(ts)-1].nodeKey)
+	sb.WriteString("]")
+	return sb.String()
 }

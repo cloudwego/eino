@@ -1965,3 +1965,12 @@ func normalizeLoops(loops [][]string) []string {
 	sort.Strings(result)
 	return result
 }
+
+func TestPrintTasks(t *testing.T) {
+	var ts []*task
+	assert.Equal(t, "[]", printTask(ts))
+	ts = []*task{{nodeKey: "1"}}
+	assert.Equal(t, "[1]", printTask(ts))
+	ts = []*task{{nodeKey: "1"}, {nodeKey: "2"}, {nodeKey: "3"}}
+	assert.Equal(t, "[1, 2, 3]", printTask(ts))
+}
