@@ -391,7 +391,7 @@ func (tn *ToolsNode) Invoke(ctx context.Context, input *schema.Message,
 			rerunExtra.ExecutedTools[tasks[i].callID] = tasks[i].output
 		}
 		if !rerun {
-			output[i] = schema.ToolMessage(tasks[i].output, tasks[i].callID)
+			output[i] = schema.ToolMessage(tasks[i].output, tasks[i].callID, schema.WithToolName(tasks[i].name))
 		}
 	}
 	if rerun {
@@ -469,9 +469,10 @@ func (tn *ToolsNode) Stream(ctx context.Context, input *schema.Message,
 	for i := 0; i < n; i++ {
 		index := i
 		callID := tasks[i].callID
+		callName := tasks[i].name
 		convert := func(s string) ([]*schema.Message, error) {
 			ret := make([]*schema.Message, n)
-			ret[index] = schema.ToolMessage(s, callID)
+			ret[index] = schema.ToolMessage(s, callID, schema.WithToolName(callName))
 
 			return ret, nil
 		}

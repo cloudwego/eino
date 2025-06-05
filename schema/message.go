@@ -303,6 +303,8 @@ type Message struct {
 
 	// only for ToolMessage
 	ToolCallID string `json:"tool_call_id,omitempty"`
+	// only for ToolMessage
+	ToolName string `json:"tool_name,omitempty"`
 
 	ResponseMeta *ResponseMeta `json:"response_meta,omitempty"`
 
@@ -479,6 +481,9 @@ func (m *Message) String() string {
 	if m.ToolCallID != "" {
 		s += fmt.Sprintf("\ntool_call_id: %s", m.ToolCallID)
 	}
+	if m.ToolName != "" {
+		s += fmt.Sprintf("\ntool_call_name: %s", m.ToolName)
+	}
 	if m.ResponseMeta != nil {
 		s += fmt.Sprintf("\nfinish_reason: %s", m.ResponseMeta.FinishReason)
 		if m.ResponseMeta.Usage != nil {
@@ -514,12 +519,31 @@ func UserMessage(content string) *Message {
 	}
 }
 
+type toolMessageOptions struct {
+	toolName string
+}
+
+// ToolMessageOption defines a option for ToolMessage
+type ToolMessageOption func(*toolMessageOptions)
+
+// WithToolName returns a ToolMessageOption that sets the tool call name.
+func WithToolName(name string) ToolMessageOption {
+	return func(o *toolMessageOptions) {
+		o.toolName = name
+	}
+}
+
 // ToolMessage represents a message with Role "tool".
-func ToolMessage(content string, toolCallID string) *Message {
+func ToolMessage(content string, toolCallID string, opts ...ToolMessageOption) *Message {
+	o := &toolMessageOptions{}
+	for _, opt := range opts {
+		opt(o)
+	}
 	return &Message{
 		Role:       Tool,
 		Content:    content,
 		ToolCallID: toolCallID,
+		ToolName:   o.toolName,
 	}
 }
 
@@ -662,6 +686,14 @@ func ConcatMessages(msgs []*Message) (*Message, error) {
 			} else if ret.ToolCallID != msg.ToolCallID {
 				return nil, fmt.Errorf("cannot concat messages with"+
 					" different toolCallIDs: '%s' '%s'", ret.ToolCallID, msg.ToolCallID)
+			}
+		}
+		if msg.ToolName != "" {
+			if ret.ToolName == "" {
+				ret.ToolName = msg.ToolName
+			} else if ret.ToolName != msg.ToolName {
+				return nil, fmt.Errorf("cannot concat messages with"+
+					" different toolNames: '%s' '%s'", ret.ToolCallID, msg.ToolCallID)
 			}
 		}
 

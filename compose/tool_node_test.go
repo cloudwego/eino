@@ -629,11 +629,13 @@ func TestUnknownTool(t *testing.T) {
 			Role:       schema.Tool,
 			Content:    "unknown",
 			ToolCallID: "1",
+			ToolName:   "unknown1",
 		},
 		{
 			Role:       schema.Tool,
 			Content:    "unknown",
 			ToolCallID: "2",
+			ToolName:   "unknown2",
 		},
 	}
 
