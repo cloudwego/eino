@@ -588,6 +588,14 @@ func TestWorkflowWithNestedFieldMappings(t *testing.T) {
 		}, out)
 	})
 
+	t.Run("to interface.field", func(t *testing.T) {
+		wf := NewWorkflow[string, map[string]fmt.Stringer]()
+		wf.End().AddInput(START, ToFieldPath([]string{"Key1", "A"}))
+		_, err := wf.Compile(ctx)
+		assert.ErrorContains(t, err, "static check failed for mapping [from start to Key1\u001FA(field)], "+
+			"the successor has intermediate interface type fmt.Stringer")
+	})
+
 	t.Run("both to map.any, and to map.any.field", func(t *testing.T) {
 		wf := NewWorkflow[string, map[string]any]()
 		wf.End().AddInput(START, ToFieldPath([]string{"Key1"}), ToFieldPath([]string{"Key1", "Key2"}))
@@ -701,6 +709,13 @@ func TestWorkflowCompile(t *testing.T) {
 		assert.ErrorContains(t, err, "has an unexported field[to]")
 	})
 
+	t.Run("map from not exported field in predecessor", func(t *testing.T) {
+		w := NewWorkflow[*FieldMapping, string]()
+		w.End().AddInput(START, FromField("from"))
+		_, err := w.Compile(ctx)
+		assert.ErrorContains(t, err, "has an unexported field[from]")
+	})
+
 	t.Run("duplicate node key", func(t *testing.T) {
 		w := NewWorkflow[[]*schema.Message, []*schema.Message]()
 		w.AddChatModelNode("1", model.NewMockChatModel(ctrl)).AddInput(START)
@@ -716,6 +731,41 @@ func TestWorkflowCompile(t *testing.T) {
 		w.End().AddInput("2")
 		_, err := w.Compile(ctx)
 		assert.ErrorContains(t, err, "edge start node '2' needs to be added to graph first")
+	})
+
+	t.Run("to map with non-string key type", func(t *testing.T) {
+		w := NewWorkflow[string, map[int]any]()
+		w.End().AddInput(START, ToField("1"))
+		_, err := w.Compile(ctx)
+		assert.ErrorContains(t, err, "type[map[int]interface {}] is not a map with string or string alias key")
+
+		type stringAlias string
+		w1 := NewWorkflow[string, map[stringAlias]any]()
+		w1.End().AddInput(START, ToField("1"))
+		r, err := w1.Compile(ctx)
+		assert.NoError(t, err)
+		out, err := r.Invoke(ctx, "hello")
+		assert.NoError(t, err)
+		assert.Equal(t, map[stringAlias]any{
+			"1": "hello",
+		}, out)
+	})
+
+	t.Run("from map with non-string key type", func(t *testing.T) {
+		w := NewWorkflow[map[int]any, string]()
+		w.End().AddInput(START, FromField("1"))
+		_, err := w.Compile(ctx)
+		assert.ErrorContains(t, err, "type[map[int]interface {}] is not a map with string or string alias key")
+		type stringAlias string
+		w1 := NewWorkflow[map[stringAlias]any, string]()
+		w1.End().AddInput(START, FromField("1"))
+		r, err := w1.Compile(ctx)
+		assert.NoError(t, err)
+		out, err := r.Invoke(ctx, map[stringAlias]any{
+			"1": "hello",
+		})
+		assert.NoError(t, err)
+		assert.Equal(t, "hello", out)
 	})
 }
 
@@ -1128,6 +1178,26 @@ func TestNilValue(t *testing.T) {
 		assert.NoError(t, err)
 		assert.Equal(t, inOut{A: (*string)(nil)}, result)
 	})
+
+	t.Run("from nil to a type that can't be nil", func(t *testing.T) {
+		wf := NewWorkflow[map[string]any, int]()
+		wf.End().AddInput(START, FromField("a"))
+		r, err := wf.Compile(context.Background())
+		assert.NoError(t, err)
+		_, err = r.Invoke(context.Background(), map[string]any{"a": nil})
+		assert.ErrorContains(t, err, "runtime check failed for mapping [from a(field) of start], field[<nil>]-[int] is absolutely not assignable")
+	})
+
+	t.Run("from nil to a map other than map[string]any", func(t *testing.T) {
+		wf := NewWorkflow[map[string]any, map[string]fmt.Stringer]()
+		wf.End().AddInput(START, MapFields("a", "a"))
+		r, err := wf.Compile(context.Background())
+		assert.NoError(t, err)
+		out, err := r.Invoke(context.Background(), map[string]any{"a": nil})
+		assert.Equal(t, map[string]fmt.Stringer{
+			"a": nil,
+		}, out)
+	})
 }
 
 func TestStreamFieldMap(t *testing.T) {
@@ -1181,4 +1251,156 @@ func TestRuntimeTypeCheck(t *testing.T) {
 	assert.Equal(t, map[string]any{"a": "1", "b": "2"}, chunk)
 	chunk, err = result.Recv()
 	assert.True(t, errors.Is(err, io.EOF))
+}
+
+func TestIntermediateMappingSource(t *testing.T) {
+	t.Run("intermediate any source is nil", func(t *testing.T) {
+		wf := NewWorkflow[map[string]any, any]()
+		wf.End().AddInput(START, FromFieldPath(FieldPath{"a", "b"}))
+		r, err := wf.Compile(context.Background())
+		assert.NoError(t, err)
+		_, err = r.Invoke(context.Background(), map[string]any{
+			"a": nil,
+		})
+		assert.ErrorContains(t, err, "intermediate source value on path=[a b] is nil for type [interface {}]")
+		outStream, err := r.Transform(context.Background(), schema.StreamReaderFromArray([]map[string]any{
+			{
+				"a": nil,
+			},
+			{
+				"b": "ok",
+			},
+		}))
+		assert.NoError(t, err)
+		_, err = outStream.Recv()
+		assert.ErrorContains(t, err, "intermediate source value on path=[a b] is nil for type [interface {}]")
+		outStream.Close()
+	})
+
+	t.Run("intermediate map source is nil", func(t *testing.T) {
+		wf := NewWorkflow[map[string]any, any]()
+		wf.End().AddInput(START, FromFieldPath(FieldPath{"a"}))
+		r, err := wf.Compile(context.Background())
+		assert.NoError(t, err)
+		_, err = r.Invoke(context.Background(), nil)
+		assert.ErrorContains(t, err, "intermediate source value on path=[a] is nil for map type [map[string]interface {}]")
+		outStream, err := r.Stream(context.Background(), nil)
+		assert.NoError(t, err)
+		_, err = outStream.Recv()
+		assert.ErrorContains(t, err, "intermediate source value on path=[a] is nil for map type [map[string]interface {}]")
+		outStream.Close()
+	})
+
+	t.Run("intermediate map ptr source is nil", func(t *testing.T) {
+		wf := NewWorkflow[*map[string]any, any]()
+		wf.End().AddInput(START, FromFieldPath(FieldPath{"a"}))
+		r, err := wf.Compile(context.Background())
+		assert.NoError(t, err)
+		_, err = r.Invoke(context.Background(), nil)
+		assert.ErrorContains(t, err, "intermediate source value on path=[a] is nil for type [*map[string]interface {}]")
+		outStream, err := r.Stream(context.Background(), nil)
+		assert.NoError(t, err)
+		_, err = outStream.Recv()
+		assert.ErrorContains(t, err, "intermediate source value on path=[a] is nil for type [*map[string]interface {}]")
+		outStream.Close()
+	})
+
+	t.Run("intermediate struct ptr source is nil", func(t *testing.T) {
+		type inner struct {
+			A string
+		}
+
+		wf := NewWorkflow[map[string]*inner, string]()
+		wf.End().AddInput(START, FromFieldPath(FieldPath{"I", "A"}))
+		r, err := wf.Compile(context.Background())
+		assert.NoError(t, err)
+		_, err = r.Invoke(context.Background(), map[string]*inner{"I": nil})
+		assert.ErrorContains(t, err, "intermediate source value on path=[I A] is nil")
+		outStream, err := r.Stream(context.Background(), map[string]*inner{"I": nil})
+		assert.NoError(t, err)
+		_, err = outStream.Recv()
+		assert.ErrorContains(t, err, "intermediate source value on path=[I A] is nil")
+		outStream.Close()
+	})
+
+	t.Run("intermediate interface source is nil", func(t *testing.T) {
+		wf := NewWorkflow[map[string]fmt.Stringer, string]()
+		wf.End().AddInput(START, FromFieldPath(FieldPath{"a", "b"}))
+		r, err := wf.Compile(context.Background())
+		assert.NoError(t, err)
+		_, err = r.Invoke(context.Background(), map[string]fmt.Stringer{"a": nil})
+		assert.ErrorContains(t, err, "intermediate source value on path=[a b] is nil for type [fmt.Stringer]")
+		outStream, err := r.Stream(context.Background(), map[string]fmt.Stringer{"a": nil})
+		assert.NoError(t, err)
+		_, err = outStream.Recv()
+		assert.ErrorContains(t, err, "intermediate source value on path=[a b] is nil for type [fmt.Stringer]")
+		outStream.Close()
+	})
+
+	t.Run("intermediate interface source valid", func(t *testing.T) {
+		wf := NewWorkflow[map[string]fmt.Stringer, string]()
+		wf.End().AddInput(START, FromFieldPath(FieldPath{"a", "A"}))
+		r, err := wf.Compile(context.Background())
+		assert.NoError(t, err)
+		out, err := r.Invoke(context.Background(), map[string]fmt.Stringer{"a": &goodStruct2{A: "hello"}})
+		assert.NoError(t, err)
+		assert.Equal(t, "hello", out)
+		outStream, err := r.Stream(context.Background(), map[string]fmt.Stringer{"a": &goodStruct2{A: "hello"}})
+		assert.NoError(t, err)
+		out, err = outStream.Recv()
+		assert.NoError(t, err)
+		assert.Equal(t, "hello", out)
+		outStream.Close()
+	})
+
+	t.Run("intermediate interface source, source field not found at request time", func(t *testing.T) {
+		wf := NewWorkflow[map[string]fmt.Stringer, string]()
+		wf.End().AddInput(START, FromFieldPath(FieldPath{"a", "B"}))
+		r, err := wf.Compile(context.Background())
+		assert.NoError(t, err)
+		_, err = r.Invoke(context.Background(), map[string]fmt.Stringer{"a": &goodStruct2{A: "hello"}})
+		assert.ErrorContains(t, err, "field mapping from a struct field, but field not found. field=B")
+		outStream, err := r.Stream(context.Background(), map[string]fmt.Stringer{"a": &goodStruct2{A: "hello"}})
+		assert.NoError(t, err)
+		_, err = outStream.Recv()
+		assert.ErrorContains(t, err, "field mapping from a struct field, but field not found. field=B")
+		outStream.Close()
+	})
+
+	t.Run("intermediate interface source, source field not exported at request time", func(t *testing.T) {
+		wf := NewWorkflow[map[string]fmt.Stringer, string]()
+		wf.End().AddInput(START, FromFieldPath(FieldPath{"a", "c"}))
+		r, err := wf.Compile(context.Background())
+		assert.NoError(t, err)
+		_, err = r.Invoke(context.Background(), map[string]fmt.Stringer{"a": &goodStruct2{A: "hello", c: "c"}})
+		assert.ErrorContains(t, err, "field mapping from a struct field, but field not exported.")
+		outStream, err := r.Stream(context.Background(), map[string]fmt.Stringer{"a": &goodStruct2{A: "hello", c: "c"}})
+		assert.NoError(t, err)
+		_, err = outStream.Recv()
+		assert.ErrorContains(t, err, "field mapping from a struct field, but field not exported.")
+		outStream.Close()
+	})
+
+	t.Run("intermediate interface source, type mismatch at request time", func(t *testing.T) {
+		wf := NewWorkflow[map[string]fmt.Stringer, int]()
+		wf.End().AddInput(START, FromFieldPath(FieldPath{"a", "A"}))
+		r, err := wf.Compile(context.Background())
+		assert.NoError(t, err)
+		_, err = r.Invoke(context.Background(), map[string]fmt.Stringer{"a": &goodStruct2{A: "hello"}})
+		assert.ErrorContains(t, err, "runtime check failed for mapping [from a\x1fA(field) of start], field[string]-[int] is absolutely not assignable")
+		outStream, err := r.Stream(context.Background(), map[string]fmt.Stringer{"a": &goodStruct2{A: "hello"}})
+		assert.NoError(t, err)
+		_, err = outStream.Recv()
+		assert.ErrorContains(t, err, "runtime check failed for mapping [from a\u001FA(field) of start], field[string]-[int] is absolutely not assignable")
+		outStream.Close()
+	})
+}
+
+type goodStruct2 struct {
+	A string
+	c string
+}
+
+func (g *goodStruct2) String() string {
+	return g.A
 }

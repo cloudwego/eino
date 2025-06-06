@@ -563,19 +563,21 @@ func (g *graph) updateToValidateMap() error {
 					if _, ok := g.handlerOnEdges[startNode]; !ok {
 						g.handlerOnEdges[startNode] = make(map[string][]handlerPair)
 					}
-					g.handlerOnEdges[startNode][endNode.endNode] = append(g.handlerOnEdges[startNode][endNode.endNode], handlerPair{
-						invoke: func(value any) (any, error) {
-							return fieldMap(endNode.mappings, false)(value)
-						},
-						transform: streamFieldMap(endNode.mappings),
-					})
 					g.fieldMappingRecords[endNode.endNode] = append(g.fieldMappingRecords[endNode.endNode], endNode.mappings...)
 
 					// field mapping check
-					checker, err := validateFieldMapping(g.getNodeOutputType(startNode), g.getNodeInputType(endNode.endNode), endNode.mappings)
+					checker, uncheckedSourcePaths, err := validateFieldMapping(g.getNodeOutputType(startNode), g.getNodeInputType(endNode.endNode), endNode.mappings)
 					if err != nil {
 						return err
 					}
+
+					g.handlerOnEdges[startNode][endNode.endNode] = append(g.handlerOnEdges[startNode][endNode.endNode], handlerPair{
+						invoke: func(value any) (any, error) {
+							return fieldMap(endNode.mappings, false, uncheckedSourcePaths)(value)
+						},
+						transform: streamFieldMap(endNode.mappings, uncheckedSourcePaths),
+					})
+
 					if checker != nil {
 						g.handlerOnEdges[startNode][endNode.endNode] = append(g.handlerOnEdges[startNode][endNode.endNode], *checker)
 					}

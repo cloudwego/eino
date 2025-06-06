@@ -140,7 +140,7 @@ func concatMaps(ms reflect.Value) (reflect.Value, error) {
 		if len(anyVals) == 1 {
 			ele := anyVals[0]
 			if ele == nil { // we cannot SetMapIndex with nil because it will delete the key
-				ret.SetMapIndex(key, reflect.Zero(typ))
+				ret.SetMapIndex(key, reflect.Zero(typ.Elem()))
 				continue
 			}
 
