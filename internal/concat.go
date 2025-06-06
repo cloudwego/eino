@@ -137,6 +137,17 @@ func concatMaps(ms reflect.Value) (reflect.Value, error) {
 		vals := rms.MapIndex(key)
 
 		anyVals := vals.Interface().([]any)
+		if len(anyVals) == 1 {
+			ele := anyVals[0]
+			if ele == nil { // we cannot SetMapIndex with nil because it will delete the key
+				ret.SetMapIndex(key, reflect.Zero(typ))
+				continue
+			}
+
+			ret.SetMapIndex(key, reflect.ValueOf(ele))
+			continue
+		}
+
 		v, err := toSliceValue(anyVals)
 		if err != nil {
 			return reflect.Value{}, err
@@ -191,38 +202,6 @@ func concatSliceValue(val reflect.Value) (reflect.Value, error) {
 	}
 
 	return filtered, nil
-}
-
-func structToMap(s reflect.Value) (map[string]any, error) {
-	if s.Kind() == reflect.Ptr {
-		s = s.Elem()
-	}
-
-	ret := make(map[string]any, s.NumField())
-	for i := 0; i < s.NumField(); i++ {
-		fieldType := s.Type().Field(i)
-		if !fieldType.IsExported() {
-			return nil, fmt.Errorf("structToMap: field %s is not exported", fieldType.Name)
-		}
-
-		ret[fieldType.Name] = s.Field(i).Interface()
-	}
-
-	return ret, nil
-}
-
-func mapToStruct(m map[string]any, t reflect.Type, toPtr bool) reflect.Value {
-	ret := reflect.New(t).Elem()
-	for k, v := range m {
-		field := ret.FieldByName(k)
-		field.Set(reflect.ValueOf(v))
-	}
-
-	if toPtr {
-		ret = ret.Addr()
-	}
-
-	return ret
 }
 
 func toSliceValue(vs []any) (reflect.Value, error) {
