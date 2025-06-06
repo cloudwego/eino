@@ -708,6 +708,14 @@ func validateFieldMapping(predecessorType reflect.Type, successorType reflect.Ty
 		if predecessorIntermediateInterface {
 			checker := func(a any) (any, error) {
 				trueInType := reflect.TypeOf(a)
+				if trueInType == nil {
+					switch successorFieldType.Kind() {
+					case reflect.Map, reflect.Slice, reflect.Ptr, reflect.Interface:
+						return a, nil
+					default:
+						return nil, fmt.Errorf("runtime check failed for mapping %s, field[%v]-[%v] is absolutely not assignable", mapping, trueInType, successorFieldType)
+					}
+				}
 				if !trueInType.AssignableTo(successorFieldType) {
 					return nil, fmt.Errorf("runtime check failed for mapping %s, field[%v]-[%v] is absolutely not assignable", mapping, trueInType, successorFieldType)
 				}
