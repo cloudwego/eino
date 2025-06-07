@@ -389,31 +389,32 @@ type interruptTempInfo struct {
 }
 
 func (r *runner) resolveInterruptCompletedTasks(tempInfo *interruptTempInfo, completedTasks []*task) (err error) {
-	for i := 0; i < len(completedTasks); i++ {
-		if completedTasks[i].err != nil {
-			if info := isSubGraphInterrupt(completedTasks[i].err); info != nil {
-				tempInfo.subGraphInterrupts[completedTasks[i].nodeKey] = info
+	for _, completedTask := range completedTasks {
+		if completedTask.err != nil {
+			if info := isSubGraphInterrupt(completedTask.err); info != nil {
+				tempInfo.subGraphInterrupts[completedTask.nodeKey] = info
 				continue
 			}
-			extra, ok := IsInterruptRerunError(completedTasks[i].err)
+			extra, ok := IsInterruptRerunError(completedTask.err)
 			if ok {
-				tempInfo.interruptRerunNodes = append(tempInfo.interruptRerunNodes, completedTasks[i].nodeKey)
+				tempInfo.interruptRerunNodes = append(tempInfo.interruptRerunNodes, completedTask.nodeKey)
 				if extra != nil {
-					tempInfo.interruptRerunExtra[completedTasks[i].nodeKey] = extra
+					tempInfo.interruptRerunExtra[completedTask.nodeKey] = extra
 
 					// save tool node info
-					if completedTasks[i].call.action.meta.component == ComponentOfToolsNode {
+					if completedTask.call.action.meta.component == ComponentOfToolsNode {
 						if e, ok := extra.(*ToolsInterruptAndRerunExtra); ok {
-							tempInfo.interruptExecutedTools[completedTasks[i].nodeKey] = e.ExecutedTools
+							tempInfo.interruptExecutedTools[completedTask.nodeKey] = e.ExecutedTools
 						}
 					}
 				}
 				continue
 			}
-			return wrapGraphNodeError(completedTasks[i].nodeKey, completedTasks[i].err)
+			return wrapGraphNodeError(completedTask.nodeKey, completedTask.err)
 		}
+
 		for _, key := range r.interruptAfterNodes {
-			if key == completedTasks[i].nodeKey {
+			if key == completedTask.nodeKey {
 				tempInfo.interruptAfterNodes = append(tempInfo.interruptAfterNodes, key)
 				break
 			}
