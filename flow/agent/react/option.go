@@ -140,10 +140,14 @@ func (h *cbHandler) onChatModelEndWithStreamOutput(ctx context.Context,
 }
 
 func (h *cbHandler) onToolEnd(ctx context.Context,
-	_ *callbacks.RunInfo, input *tool.CallbackOutput) context.Context {
+	info *callbacks.RunInfo, input *tool.CallbackOutput) context.Context {
 
 	toolCallID := compose.GetToolCallID(ctx)
-	msg := schema.ToolMessage(input.Response, toolCallID)
+	toolName := ""
+	if info != nil {
+		toolName = info.Name
+	}
+	msg := schema.ToolMessage(input.Response, toolCallID, schema.WithToolName(toolName))
 
 	h.sendMessage(msg)
 
@@ -151,11 +155,15 @@ func (h *cbHandler) onToolEnd(ctx context.Context,
 }
 
 func (h *cbHandler) onToolEndWithStreamOutput(ctx context.Context,
-	_ *callbacks.RunInfo, input *schema.StreamReader[*tool.CallbackOutput]) context.Context {
+	info *callbacks.RunInfo, input *schema.StreamReader[*tool.CallbackOutput]) context.Context {
 
 	toolCallID := compose.GetToolCallID(ctx)
+	toolName := ""
+	if info != nil {
+		toolName = info.Name
+	}
 	c := func(output *tool.CallbackOutput) (*schema.Message, error) {
-		return schema.ToolMessage(output.Response, toolCallID), nil
+		return schema.ToolMessage(output.Response, toolCallID, schema.WithToolName(toolName)), nil
 	}
 	s := schema.StreamReaderWithConvert(input, c)
 
