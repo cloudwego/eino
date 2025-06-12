@@ -165,7 +165,7 @@ func (i *invokableTool[T, D]) InvokableRun(ctx context.Context, arguments string
 			return "", fmt.Errorf("[LocalFunc] failed to marshal output, toolName=%s, err=%w", i.getToolName(), err)
 		}
 	} else {
-		output, err = sonic.MarshalString(resp)
+		output, err = defaultMarshalOutput(resp)
 		if err != nil {
 			return "", fmt.Errorf("[LocalFunc] failed to marshal output in json, toolName=%s, err=%w", i.getToolName(), err)
 		}
@@ -184,6 +184,17 @@ func (i *invokableTool[T, D]) getToolName() string {
 	}
 
 	return i.info.Name
+}
+
+func defaultMarshalOutput(output any) (string, error) {
+	switch v := output.(type) {
+	case string:
+		return v, nil
+	case int64, uint64, int32, uint32, int16, uint16, int8, uint8, int, uint, float64, float32, bool:
+		return fmt.Sprint(v), nil
+	default:
+		return sonic.MarshalString(output)
+	}
 }
 
 // snakeToCamel converts a snake_case string to CamelCase.
