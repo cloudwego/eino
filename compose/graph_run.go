@@ -250,6 +250,9 @@ func (r *runner) run(ctx context.Context, isStream bool, input any, opts ...Opti
 		if result != nil {
 			return result, nil
 		}
+		if len(nextTasks) == 0 {
+			return nil, newGraphRunError(fmt.Errorf("no tasks to execute, after graph start"))
+		}
 
 		if keys := getHitKey(nextTasks, r.interruptBeforeNodes); len(keys) > 0 {
 			tempInfo := newInterruptTempInfo()
@@ -318,9 +321,8 @@ func (r *runner) run(ctx context.Context, isStream bool, input any, opts ...Opti
 			)
 		}
 
-		beforeTasks := make([]string, 0, len(nextTasks))
 		if len(completedTasks) == 0 {
-			return nil, newGraphRunError(fmt.Errorf("no tasks to execute, before tasks: %v", beforeTasks))
+			return nil, newGraphRunError(fmt.Errorf("no tasks to execute, before tasks: %v", nextTasks))
 		}
 
 		var result any
