@@ -112,7 +112,15 @@ func (rp *runnablePacker[I, O, TOption]) toComposableRunnable() *composableRunna
 	i := func(ctx context.Context, input any, opts ...any) (output any, err error) {
 		in, ok := input.(I)
 		if !ok {
-			panic(newUnexpectedInputTypeErr(inputType, reflect.TypeOf(input)))
+			// When a nil is passed as an 'any' type, its original type information is lost,
+			// becoming an untyped nil. This would cause type assertions to fail.
+			// So if the input is nil and the target type I is an interface, we need to explicitly create a nil of type I.
+			if input == nil && reflect.TypeOf((*I)(nil)).Elem().Kind() == reflect.Interface {
+				var i I
+				in = i
+			} else {
+				panic(newUnexpectedInputTypeErr(inputType, reflect.TypeOf(input)))
+			}
 		}
 
 		tos, err := convertOption[TOption](opts...)

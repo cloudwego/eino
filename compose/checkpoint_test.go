@@ -877,6 +877,36 @@ func TestRerunNodeInterrupt(t *testing.T) {
 	assert.Equal(t, io.EOF, err)
 }
 
+type myInterface interface {
+	A()
+}
+
+func TestInterfaceResume(t *testing.T) {
+	g := NewGraph[myInterface, string]()
+	times := 0
+	assert.NoError(t, g.AddLambdaNode("1", InvokableLambda(func(ctx context.Context, input myInterface) (output string, err error) {
+		if times == 0 {
+			times++
+			return "", NewInterruptAndRerunErr("test extra")
+		}
+		return "success", nil
+	})))
+	assert.NoError(t, g.AddEdge(START, "1"))
+	assert.NoError(t, g.AddEdge("1", END))
+
+	ctx := context.Background()
+	r, err := g.Compile(ctx, WithCheckPointStore(newInMemoryStore()))
+	assert.NoError(t, err)
+
+	_, err = r.Invoke(ctx, nil, WithCheckPointID("1"))
+	info, existed := ExtractInterruptInfo(err)
+	assert.True(t, existed)
+	assert.Equal(t, []string{"1"}, info.RerunNodes)
+	result, err := r.Invoke(ctx, nil, WithCheckPointID("1"))
+	assert.NoError(t, err)
+	assert.Equal(t, "success", result)
+}
+
 func TestEarlyFailCallback(t *testing.T) {
 	g := NewGraph[string, string]()
 	assert.NoError(t, g.AddLambdaNode("1", InvokableLambda(func(ctx context.Context, input string) (output string, err error) {
