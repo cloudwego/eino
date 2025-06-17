@@ -342,8 +342,8 @@ func genToolInfos(ctx context.Context, config compose.ToolsNodeConfig) ([]*schem
 	return toolInfos, nil
 }
 
-func getReturnDirectlyToolCallID(input []*schema.Message, toolReturnDirectly map[string]bool, msgChecker func(msg *schema.Message) bool) string {
-	if len(toolReturnDirectly) == 0 {
+func getReturnDirectlyToolCallID(input []*schema.Message, returnDirectlyToolCallID map[string]bool, msgChecker func(msg *schema.Message) bool) string {
+	if len(returnDirectlyToolCallID) == 0 {
 		return ""
 	}
 	if msgChecker == nil {
@@ -354,7 +354,7 @@ func getReturnDirectlyToolCallID(input []*schema.Message, toolReturnDirectly map
 
 	for _, msg := range input {
 		if msg.Role == schema.Tool {
-			if toolReturnDirectly[msg.ToolCallID] && msgChecker(msg) {
+			if returnDirectlyToolCallID[msg.ToolCallID] && msgChecker(msg) {
 				return msg.ToolCallID
 			}
 		}
