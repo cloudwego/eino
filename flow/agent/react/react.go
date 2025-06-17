@@ -62,6 +62,7 @@ type AgentConfig struct {
 
 	// Tools that will make agent return directly when the tool is called.
 	// When multiple tools are called and more than one tool is in the return directly list, only the first one will be returned.
+	// When ToolMsgValidityChecker is not nil, only the first valid tool message will be returned.
 	ToolReturnDirectly     map[string]struct{}
 	ToolMsgValidityChecker func(msg *schema.Message) bool
 
@@ -218,7 +219,7 @@ func NewAgent(ctx context.Context, config *AgentConfig) (_ *Agent, err error) {
 		return nil, err
 	}
 
-	returnDirectlyToolCallID := make(map[string]bool)
+	returnDirectlyToolCallID := make(map[string]bool) // tool call ids of tools that should return directly
 	toolsNodePreHandle := func(ctx context.Context, input *schema.Message, state *state) (*schema.Message, error) {
 		if input == nil {
 			return state.Messages[len(state.Messages)-1], nil // used for rerun interrupt resume
