@@ -62,7 +62,8 @@ type AgentConfig struct {
 
 	// Tools that will make agent return directly when the tool is called.
 	// When multiple tools are called and more than one tool is in the return directly list, only the first one will be returned.
-	ToolReturnDirectly map[string]struct{}
+	ToolReturnDirectly     map[string]struct{}
+	ToolMsgValidityChecker func(msg *schema.Message) bool
 
 	// StreamOutputHandler is a function to determine whether the model's streaming output contains tool calls.
 	// Different models have different ways of outputting tool calls in streaming mode:
@@ -217,15 +218,26 @@ func NewAgent(ctx context.Context, config *AgentConfig) (_ *Agent, err error) {
 		return nil, err
 	}
 
+	returnDirectlyToolCallID := make(map[string]bool)
 	toolsNodePreHandle := func(ctx context.Context, input *schema.Message, state *state) (*schema.Message, error) {
 		if input == nil {
 			return state.Messages[len(state.Messages)-1], nil // used for rerun interrupt resume
 		}
+
+		for _, toolCall := range input.ToolCalls {
+			if _, ok := config.ToolReturnDirectly[toolCall.Function.Name]; ok {
+				returnDirectlyToolCallID[toolCall.ID] = true
+			}
+		}
+
 		state.Messages = append(state.Messages, input)
-		state.ReturnDirectlyToolCallID = getReturnDirectlyToolCallID(input, config.ToolReturnDirectly)
 		return input, nil
 	}
-	if err = graph.AddToolsNode(nodeKeyTools, toolsNode, compose.WithStatePreHandler(toolsNodePreHandle), compose.WithNodeName(ToolsNodeName)); err != nil {
+	toolsNodePostHandle := func(ctx context.Context, input []*schema.Message, state *state) ([]*schema.Message, error) {
+		state.ReturnDirectlyToolCallID = getReturnDirectlyToolCallID(input, returnDirectlyToolCallID, config.ToolMsgValidityChecker)
+		return input, nil
+	}
+	if err = graph.AddToolsNode(nodeKeyTools, toolsNode, compose.WithStatePreHandler(toolsNodePreHandle), compose.WithStatePostHandler(toolsNodePostHandle), compose.WithNodeName(ToolsNodeName)); err != nil {
 		return nil, err
 	}
 
@@ -329,14 +341,22 @@ func genToolInfos(ctx context.Context, config compose.ToolsNodeConfig) ([]*schem
 	return toolInfos, nil
 }
 
-func getReturnDirectlyToolCallID(input *schema.Message, toolReturnDirectly map[string]struct{}) string {
+func getReturnDirectlyToolCallID(input []*schema.Message, toolReturnDirectly map[string]bool, msgVilidityChecker func(msg *schema.Message) bool) string {
 	if len(toolReturnDirectly) == 0 {
 		return ""
 	}
+	if msgVilidityChecker == nil {
+		msgVilidityChecker = func(msg *schema.Message) bool {
+			return true
+		}
+	}
 
-	for _, toolCall := range input.ToolCalls {
-		if _, ok := toolReturnDirectly[toolCall.Function.Name]; ok {
-			return toolCall.ID
+	for _, msg := range input {
+		if msg.Role == schema.Tool {
+			_, has := toolReturnDirectly[msg.ToolCallID]
+			if has && msgVilidityChecker(msg) {
+				return msg.ToolCallID
+			}
 		}
 	}
 
