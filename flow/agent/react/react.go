@@ -219,7 +219,7 @@ func NewAgent(ctx context.Context, config *AgentConfig) (_ *Agent, err error) {
 		return nil, err
 	}
 
-	returnDirectlyToolCallID := make(map[string]bool) // tool call ids of tools that are set in ToolReturnDirectly
+	toolReturnDirectlyToolCallID := make(map[string]bool) // tool call ids of tools that are set in ToolReturnDirectly
 	toolsNodePreHandle := func(ctx context.Context, input *schema.Message, state *state) (*schema.Message, error) {
 		if input == nil {
 			return state.Messages[len(state.Messages)-1], nil // used for rerun interrupt resume
@@ -227,7 +227,7 @@ func NewAgent(ctx context.Context, config *AgentConfig) (_ *Agent, err error) {
 
 		for _, toolCall := range input.ToolCalls {
 			if _, ok := config.ToolReturnDirectly[toolCall.Function.Name]; ok {
-				returnDirectlyToolCallID[toolCall.ID] = true
+				toolReturnDirectlyToolCallID[toolCall.ID] = true
 			}
 		}
 
@@ -235,7 +235,7 @@ func NewAgent(ctx context.Context, config *AgentConfig) (_ *Agent, err error) {
 		return input, nil
 	}
 	toolsNodePostHandle := func(ctx context.Context, input []*schema.Message, state *state) ([]*schema.Message, error) {
-		state.ReturnDirectlyToolCallID = getReturnDirectlyToolCallID(input, returnDirectlyToolCallID, config.ToolReturnDirectlyMsgChecker)
+		state.ReturnDirectlyToolCallID = getReturnDirectlyToolCallID(input, toolReturnDirectlyToolCallID, config.ToolReturnDirectlyMsgChecker)
 		return input, nil
 	}
 	if err = graph.AddToolsNode(nodeKeyTools, toolsNode, compose.WithStatePreHandler(toolsNodePreHandle), compose.WithStatePostHandler(toolsNodePostHandle), compose.WithNodeName(ToolsNodeName)); err != nil {
@@ -342,8 +342,8 @@ func genToolInfos(ctx context.Context, config compose.ToolsNodeConfig) ([]*schem
 	return toolInfos, nil
 }
 
-func getReturnDirectlyToolCallID(input []*schema.Message, returnDirectlyToolCallID map[string]bool, msgChecker func(msg *schema.Message) bool) string {
-	if len(returnDirectlyToolCallID) == 0 {
+func getReturnDirectlyToolCallID(input []*schema.Message, toolReturnDirectlyToolCallID map[string]bool, msgChecker func(msg *schema.Message) bool) string {
+	if len(toolReturnDirectlyToolCallID) == 0 {
 		return ""
 	}
 	if msgChecker == nil {
@@ -354,7 +354,7 @@ func getReturnDirectlyToolCallID(input []*schema.Message, returnDirectlyToolCall
 
 	for _, msg := range input {
 		if msg.Role == schema.Tool {
-			if returnDirectlyToolCallID[msg.ToolCallID] && msgChecker(msg) {
+			if toolReturnDirectlyToolCallID[msg.ToolCallID] && msgChecker(msg) {
 				return msg.ToolCallID
 			}
 		}
