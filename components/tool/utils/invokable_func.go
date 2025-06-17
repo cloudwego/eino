@@ -165,13 +165,9 @@ func (i *invokableTool[T, D]) InvokableRun(ctx context.Context, arguments string
 			return "", fmt.Errorf("[LocalFunc] failed to marshal output, toolName=%s, err=%w", i.getToolName(), err)
 		}
 	} else {
-		if rs, ok := any(resp).(string); ok {
-			output = rs
-		} else {
-			output, err = sonic.MarshalString(resp)
-			if err != nil {
-				return "", fmt.Errorf("[LocalFunc] failed to marshal output in json, toolName=%s, err=%w", i.getToolName(), err)
-			}
+		output, err = marshalString(resp)
+		if err != nil {
+			return "", fmt.Errorf("[LocalFunc] failed to marshal output, toolName=%s, err=%w", i.getToolName(), err)
 		}
 	}
 

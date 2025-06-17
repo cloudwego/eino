@@ -132,7 +132,7 @@ func (s *streamableTool[T, D]) StreamableRun(ctx context.Context, argumentsInJSO
 				return "", fmt.Errorf("[LocalStreamFunc] failed to marshal output, toolName=%s, err=%w", s.getToolName(), e)
 			}
 		} else {
-			out, e = sonic.MarshalString(d)
+			out, e = marshalString(d)
 			if e != nil {
 				return "", fmt.Errorf("[LocalStreamFunc] failed to marshal output in json, toolName=%s, err=%w", s.getToolName(), e)
 			}
