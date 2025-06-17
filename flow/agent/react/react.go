@@ -354,8 +354,7 @@ func getReturnDirectlyToolCallID(input []*schema.Message, toolReturnDirectly map
 
 	for _, msg := range input {
 		if msg.Role == schema.Tool {
-			_, has := toolReturnDirectly[msg.ToolCallID]
-			if has && msgVilidityChecker(msg) {
+			if toolReturnDirectly[msg.ToolCallID] && msgVilidityChecker(msg) {
 				return msg.ToolCallID
 			}
 		}
