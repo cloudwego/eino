@@ -219,7 +219,7 @@ func NewAgent(ctx context.Context, config *AgentConfig) (_ *Agent, err error) {
 		return nil, err
 	}
 
-	returnDirectlyToolCallID := make(map[string]bool) // tool call ids of tools that should return directly
+	returnDirectlyToolCallID := make(map[string]bool) // tool call ids of tools that are set in ToolReturnDirectly
 	toolsNodePreHandle := func(ctx context.Context, input *schema.Message, state *state) (*schema.Message, error) {
 		if input == nil {
 			return state.Messages[len(state.Messages)-1], nil // used for rerun interrupt resume
