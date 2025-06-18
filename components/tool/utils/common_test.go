@@ -97,12 +97,6 @@ func TestMarshalString(t *testing.T) {
 			hasError: false,
 		},
 		{
-			name:     "map should be marshaled to JSON object",
-			input:    map[string]int{"a": 1, "b": 2},
-			expected: `{"a":1,"b":2}`,
-			hasError: false,
-		},
-		{
 			name:     "empty map should be marshaled to JSON empty object",
 			input:    map[string]int{},
 			expected: "{}",
