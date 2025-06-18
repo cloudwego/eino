@@ -167,7 +167,7 @@ func (i *invokableTool[T, D]) InvokableRun(ctx context.Context, arguments string
 	} else {
 		output, err = marshalString(resp)
 		if err != nil {
-			return "", fmt.Errorf("[LocalFunc] failed to marshal output, toolName=%s, err=%w", i.getToolName(), err)
+			return "", fmt.Errorf("[LocalFunc] failed to marshal output in json, toolName=%s, err=%w", i.getToolName(), err)
 		}
 	}
 
