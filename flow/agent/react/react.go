@@ -79,11 +79,11 @@ type AgentConfig struct {
 	// Note: If your ChatModel doesn't output tool calls first, you can try adding prompts to constrain the model from generating extra text during the tool call.
 	StreamToolCallChecker func(ctx context.Context, modelOutput *schema.StreamReader[*schema.Message]) (bool, error)
 
-	// user defined name of the graph. If empty, will be filled with default value "ReActAgent".
+	//the node name of the graph. If empty, will be filled with default value "ReActAgent".
 	GraphName string
-	// user defined name of the model node in the graph. If empty, will be filled with default value "ChatModel".
+	// the node name of the model node in the graph. If empty, will be filled with default value "ChatModel".
 	ModelNodeName string
-	// user defined the name of the tools node in the graph. If empty, will be filled with default value "Tools".
+	// the node name of the tools node in the graph. If empty, will be filled with default value "Tools".
 	ToolsNodeName string
 }
 
@@ -184,17 +184,17 @@ func NewAgent(ctx context.Context, config *AgentConfig) (_ *Agent, err error) {
 		return
 	}
 
-	graphName := config.GraphName
+	graphName := GraphName
 	if config.GraphName != "" {
 		graphName = config.GraphName
 	}
 
-	modelNodeName := config.ModelNodeName
+	modelNodeName := ModelNodeName
 	if config.ModelNodeName != "" {
 		modelNodeName = config.ModelNodeName
 	}
 
-	toolsNodeName := config.ToolsNodeName
+	toolsNodeName := ToolsNodeName
 	if config.ToolsNodeName != "" {
 		toolsNodeName = config.ToolsNodeName
 	}
