@@ -57,6 +57,12 @@ type dagChannel struct {
 	Values              map[string]any
 	DataPredecessors    map[string]bool // if all dependencies have been skipped, indirect dependencies won't effect.
 	Skipped             bool
+
+	mergeConfig FanInMergeConfig
+}
+
+func (ch *dagChannel) setMergeConfig(cfg FanInMergeConfig) {
+	ch.mergeConfig.StreamMergeWithSourceEOF = cfg.StreamMergeWithSourceEOF
 }
 
 func (ch *dagChannel) load(c channel) error {
@@ -151,10 +157,15 @@ func (ch *dagChannel) get(isStream bool) (any, bool, error) {
 		}
 	}()
 
-	valueList := make([]any, 0, len(ch.Values))
-	for _, value := range ch.Values {
-		valueList = append(valueList, value)
+	valueList := make([]any, len(ch.Values))
+	names := make([]string, len(ch.Values))
+	i := 0
+	for k, value := range ch.Values {
+		valueList[i] = value
+		names[i] = k
+		i++
 	}
+
 	if len(valueList) == 0 {
 		if isStream {
 			return ch.emptyStream(), true, nil
@@ -164,7 +175,12 @@ func (ch *dagChannel) get(isStream bool) (any, bool, error) {
 	if len(valueList) == 1 {
 		return valueList[0], true, nil
 	}
-	v, err := mergeValues(valueList)
+
+	mergeOpts := &mergeOptions{
+		streamMergeWithSourceEOF: ch.mergeConfig.StreamMergeWithSourceEOF,
+		names:                    names,
+	}
+	v, err := mergeValues(valueList, mergeOpts)
 	if err != nil {
 		return nil, false, err
 	}

@@ -841,14 +841,24 @@ func MergeNamedStreamReaders[T any](srs map[string]*StreamReader[T]) *StreamRead
 		return nil
 	}
 
-	ss := make([]*stream[T], len(srs))
+	ss := make([]*StreamReader[T], len(srs))
 	names := make([]string, len(srs))
 
 	i := 0
 	for name, sr := range srs {
-		ss[i] = sr.toStream()
+		ss[i] = sr
 		names[i] = name
 		i++
+	}
+
+	return InternalMergeNamedStreamReaders(ss, names)
+}
+
+func InternalMergeNamedStreamReaders[T any](srs []*StreamReader[T], names []string) *StreamReader[T] {
+	ss := make([]*stream[T], len(srs))
+
+	for i, sr := range srs {
+		ss[i] = sr.toStream()
 	}
 
 	msr := newMultiStreamReader(ss)

@@ -448,11 +448,11 @@ func (wf *Workflow[I, O]) compile(ctx context.Context, options *graphCompileOpti
 			pair := handlerPair{
 				invoke: func(in any) (any, error) {
 					values := []any{in, value}
-					return mergeValues(values)
+					return mergeValues(values, nil)
 				},
 				transform: func(in streamReader) streamReader {
 					sr := schema.StreamReaderFromArray([]map[string]any{value})
-					newS, err := mergeValues([]any{in, packStreamReader(sr)})
+					newS, err := mergeValues([]any{in, packStreamReader(sr)}, nil)
 					if err != nil {
 						errSR, errSW := schema.Pipe[map[string]any](1)
 						errSW.Send(nil, err)

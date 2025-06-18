@@ -32,6 +32,8 @@ type channel interface {
 	get(bool) (any, bool, error)
 	convertValues(fn func(map[string]any) error) error
 	load(channel) error
+
+	setMergeConfig(FanInMergeConfig)
 }
 
 type edgeHandlerManager struct {

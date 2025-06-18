@@ -30,6 +30,8 @@ type graphCompileOptions struct {
 	interruptAfterNodes  []string
 
 	eager bool
+
+	mergeConfigs map[string]FanInMergeConfig
 }
 
 func newGraphCompileOptions(opts ...GraphCompileOption) *graphCompileOptions {
@@ -89,6 +91,23 @@ func WithNodeTriggerMode(triggerMode NodeTriggerMode) GraphCompileOption {
 func WithGraphCompileCallbacks(cbs ...GraphCompileCallback) GraphCompileOption {
 	return func(o *graphCompileOptions) {
 		o.callbacks = append(o.callbacks, cbs...)
+	}
+}
+
+// FanInMergeConfig defines the configuration for fan-in merge operations.
+// It allows specifying how multiple inputs are merged into a single input.
+// StreamMergeWithSourceEOF indicates whether to emit a SourceEOF error for each stream
+// when it ends, before the final merged output is produced. This is useful for
+// tracking the completion of individual input streams in a named stream merge.
+type FanInMergeConfig struct {
+	StreamMergeWithSourceEOF bool //indicates whether to emit a SourceEOF error for each stream
+}
+
+// WithFanInMergeConfig sets the fan-in merge configurations
+// for the graph nodes that receive inputs from multiple sources.
+func WithFanInMergeConfig(confs map[string]FanInMergeConfig) GraphCompileOption {
+	return func(o *graphCompileOptions) {
+		o.mergeConfigs = confs
 	}
 }
 

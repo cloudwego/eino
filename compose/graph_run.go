@@ -76,6 +76,8 @@ type runner struct {
 	checkPointer         *checkPointer
 	interruptBeforeNodes []string
 	interruptAfterNodes  []string
+
+	mergeConfigs map[string]FanInMergeConfig
 }
 
 func (r *runner) invoke(ctx context.Context, input any, opts ...Option) (any, error) {
@@ -811,6 +813,12 @@ func (r *runner) initChannelManager(isStream bool) *channelManager {
 		controlPredecessors[k] = make(map[string]struct{})
 		for _, v := range vs {
 			controlPredecessors[k][v] = struct{}{}
+		}
+	}
+
+	for k, v := range chs {
+		if cfg, ok := r.mergeConfigs[k]; ok {
+			v.setMergeConfig(cfg)
 		}
 	}
 
