@@ -22,41 +22,35 @@ import (
 	"github.com/cloudwego/eino/schema"
 )
 
-type Runner struct{}
-
-type RunnerConfig struct{}
-
-func NewRunner(_ context.Context, _ *RunnerConfig) *Runner {
-	return &Runner{}
-}
-
-type RunOptions struct {
+type Runner struct {
 	enableStreaming bool
 }
 
-type RunOption func(*RunOptions)
-
-func WithEnableStreaming() RunOption {
-	return func(opts *RunOptions) {
-		opts.enableStreaming = true
-	}
+type RunnerConfig struct {
+	EnableStreaming bool
 }
-func (r *Runner) Run(ctx context.Context, agent Agent, msgs []Message, opts ...RunOption) *AsyncIterator[*AgentEvent] {
-	fa := toFlowAgent(agent)
 
-	options := &RunOptions{}
-	for _, opt := range opts {
-		opt(options)
-	}
+func NewRunner(_ context.Context, conf RunnerConfig) *Runner {
+	return &Runner{enableStreaming: conf.EnableStreaming}
+}
+
+func (r *Runner) Run(ctx context.Context, agent Agent, msgs []Message,
+	opts ...AgentRunOption) *AsyncIterator[*AgentEvent] {
+
+	fa := toFlowAgent(agent)
 
 	input := &AgentInput{
 		Msgs:            msgs,
-		EnableStreaming: options.enableStreaming,
+		EnableStreaming: r.enableStreaming,
 	}
 
-	return fa.Run(ctx, input)
+	ctx = ctxWithNewRunCtx(ctx)
+
+	return fa.Run(ctx, input, opts...)
 }
 
-func (r *Runner) Query(ctx context.Context, agent Agent, query string, opts ...RunOption) *AsyncIterator[*AgentEvent] {
+func (r *Runner) Query(ctx context.Context, agent Agent,
+	query string, opts ...AgentRunOption) *AsyncIterator[*AgentEvent] {
+
 	return r.Run(ctx, agent, []Message{schema.UserMessage(query)}, opts...)
 }
