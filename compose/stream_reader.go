@@ -31,6 +31,7 @@ type streamReader interface {
 	withKey(string) streamReader
 	close()
 	toAnyStreamReader() *schema.StreamReader[any]
+	mergeWithNames([]streamReader, []string) streamReader
 }
 
 type streamReaderPacker[T any] struct {
@@ -60,29 +61,43 @@ func (srp streamReaderPacker[T]) getChunkType() reflect.Type {
 	return generic.TypeOf[T]()
 }
 
-func (srp streamReaderPacker[T]) merge(isrs []streamReader) streamReader {
-	srs := make([]*schema.StreamReader[T], len(isrs)+1)
-	srs[0] = srp.sr
-	for i := 1; i < len(srs); i++ {
-		sr, ok := unpackStreamReader[T](isrs[i-1])
+func (srp streamReaderPacker[T]) toStreamReaders(srs []streamReader) []*schema.StreamReader[T] {
+	ret := make([]*schema.StreamReader[T], len(srs)+1)
+	ret[0] = srp.sr
+	for i := 1; i < len(ret); i++ {
+		sr, ok := unpackStreamReader[T](srs[i-1])
 		if !ok {
 			return nil
 		}
 
-		srs[i] = sr
+		ret[i] = sr
 	}
+
+	return ret
+}
+
+func (srp streamReaderPacker[T]) merge(isrs []streamReader) streamReader {
+	srs := srp.toStreamReaders(isrs)
 
 	sr := schema.MergeStreamReaders(srs)
 
 	return packStreamReader(sr)
 }
 
+func (srp streamReaderPacker[T]) mergeWithNames(isrs []streamReader, names []string) streamReader {
+	srs := srp.toStreamReaders(isrs)
+
+	sr := schema.InternalMergeNamedStreamReaders(srs, names)
+
+	return packStreamReader(sr)
+}
+
 func (srp streamReaderPacker[T]) withKey(key string) streamReader {
-	convert := func(v T) (map[string]any, error) {
+	cvt := func(v T) (map[string]any, error) {
 		return map[string]any{key: v}, nil
 	}
 
-	ret := schema.StreamReaderWithConvert[T, map[string]any](srp.sr, convert)
+	ret := schema.StreamReaderWithConvert[T, map[string]any](srp.sr, cvt)
 
 	return packStreamReader(ret)
 }

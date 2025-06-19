@@ -1404,3 +1404,62 @@ type goodStruct2 struct {
 func (g *goodStruct2) String() string {
 	return g.A
 }
+
+func TestSetFanInMergeConfig_RealStreamNode_Workflow(t *testing.T) {
+	wf := NewWorkflow[int, map[string]int]()
+
+	wf.AddLambdaNode("s1", StreamableLambda(func(ctx context.Context, input int) (*schema.StreamReader[int], error) {
+		sr, sw := schema.Pipe[int](2)
+		sw.Send(input+1, nil)
+		sw.Send(input+2, nil)
+		sw.Close()
+		return sr, nil
+	})).AddInput(START)
+
+	wf.AddLambdaNode("s2", StreamableLambda(func(ctx context.Context, input int) (*schema.StreamReader[int], error) {
+		sr, sw := schema.Pipe[int](2)
+		sw.Send(input+10, nil)
+		sw.Send(input+20, nil)
+		sw.Close()
+		return sr, nil
+	})).AddInput(START)
+
+	wf.End().AddInput("s1", ToField("s1")).AddInput("s2", ToField("s2"))
+
+	r, err := wf.Compile(context.Background(),
+		WithFanInMergeConfig(map[string]FanInMergeConfig{END: {StreamMergeWithSourceEOF: true}}))
+	assert.NoError(t, err)
+
+	sr, err := r.Stream(context.Background(), 1)
+	assert.NoError(t, err)
+
+	merged := make(map[string]map[int]bool)
+	var sourceEOFCount int
+	sourceNames := make(map[string]bool)
+	for {
+		m, e := sr.Recv()
+		if e != nil {
+			if name, ok := schema.GetSourceName(e); ok {
+				sourceEOFCount++
+				sourceNames[name] = true
+				continue
+			}
+			if e == io.EOF {
+				break
+			}
+			assert.NoError(t, e)
+		}
+
+		for k, v := range m {
+			if merged[k] == nil {
+				merged[k] = make(map[int]bool)
+			}
+			merged[k][v] = true
+		}
+	}
+
+	assert.Equal(t, map[string]map[int]bool{"s1": {2: true, 3: true}, "s2": {11: true, 21: true}}, merged)
+	assert.Equal(t, 2, sourceEOFCount, "should receive SourceEOF for each input stream when StreamMergeWithSourceEOF is true")
+	assert.True(t, sourceNames["s1"], "should receive SourceEOF from s1")
+	assert.True(t, sourceNames["s2"], "should receive SourceEOF from s2")
+}

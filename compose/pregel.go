@@ -24,6 +24,12 @@ func pregelChannelBuilder(_ []string, _ []string, _ func() any, _ func() streamR
 
 type pregelChannel struct {
 	Values map[string]any
+
+	mergeConfig FanInMergeConfig
+}
+
+func (ch *pregelChannel) setMergeConfig(cfg FanInMergeConfig) {
+	ch.mergeConfig.StreamMergeWithSourceEOF = cfg.StreamMergeWithSourceEOF
 }
 
 func (ch *pregelChannel) load(c channel) error {
@@ -51,9 +57,13 @@ func (ch *pregelChannel) get(_ bool) (any, bool, error) {
 		return nil, false, nil
 	}
 	defer func() { ch.Values = map[string]any{} }()
-	values := make([]any, 0, len(ch.Values))
-	for _, v := range ch.Values {
-		values = append(values, v)
+	values := make([]any, len(ch.Values))
+	names := make([]string, len(ch.Values))
+	i := 0
+	for k, v := range ch.Values {
+		values[i] = v
+		names[i] = k
+		i++
 	}
 
 	if len(values) == 1 {
@@ -61,7 +71,11 @@ func (ch *pregelChannel) get(_ bool) (any, bool, error) {
 	}
 
 	// merge
-	v, err := mergeValues(values)
+	mergeOpts := &mergeOptions{
+		streamMergeWithSourceEOF: ch.mergeConfig.StreamMergeWithSourceEOF,
+		names:                    names,
+	}
+	v, err := mergeValues(values, mergeOpts)
 	if err != nil {
 		return nil, false, err
 	}

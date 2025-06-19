@@ -697,14 +697,14 @@ func TestMergeNamedStreamReaders(t *testing.T) {
 		}()
 
 		// Track received EOFs and data
-		eofSources := make([]string, 0, 2)
+		eofSources := make(map[string]bool, 2)
 		receivedData := make([]string, 0, 1)
 
 		for {
 			chunk, err := mergedSR.Recv()
 			if err != nil {
 				if sourceName, ok := GetSourceName(err); ok {
-					eofSources = append(eofSources, sourceName)
+					eofSources[sourceName] = true
 					continue
 				}
 
@@ -724,9 +724,11 @@ func TestMergeNamedStreamReaders(t *testing.T) {
 			t.Errorf("Expected 2 SourceEOF errors, got %d", len(eofSources))
 		}
 
-		// Verify the first EOF is from the empty stream
-		if len(eofSources) > 0 && eofSources[0] != "empty" {
-			t.Errorf("Expected first EOF from 'empty' stream, got '%s'", eofSources[0])
+		if _, exist := eofSources["empty"]; !exist {
+			t.Errorf("Expected EOF from 'empty' stream, got '%v'", eofSources)
+		}
+		if _, exist := eofSources["data"]; !exist {
+			t.Errorf("Expected EOF from 'data' stream, got '%v'", eofSources)
 		}
 
 		// Verify we received the data from the non-empty stream

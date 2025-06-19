@@ -30,8 +30,13 @@ func RegisterValuesMergeFunc[T any](fn func([]T) (T, error)) {
 	internal.RegisterValuesMergeFunc(fn)
 }
 
+type mergeOptions struct {
+	streamMergeWithSourceEOF bool
+	names                    []string
+}
+
 // the caller should ensure len(vs) > 1
-func mergeValues(vs []any) (any, error) {
+func mergeValues(vs []any, opts *mergeOptions) (any, error) {
 	v0 := reflect.ValueOf(vs[0])
 	t0 := v0.Type()
 
@@ -61,6 +66,11 @@ func mergeValues(vs []any) (any, error) {
 			}
 
 			ss[i] = s_
+		}
+
+		if opts != nil && opts.streamMergeWithSourceEOF {
+			ms := s.mergeWithNames(ss, opts.names)
+			return ms, nil
 		}
 
 		ms := s.merge(ss)

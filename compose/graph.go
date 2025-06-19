@@ -637,7 +637,7 @@ func (g *graph) compile(ctx context.Context, opt *graphCompileOptions) (*composa
 	cb := pregelChannelBuilder
 	if isChain(g.cmp) || isWorkflow(g.cmp) {
 		if opt != nil && opt.nodeTriggerMode != "" {
-			return nil, errors.New("chain doesn't support node trigger mode option")
+			return nil, errors.New(fmt.Sprintf("%s doesn't support node trigger mode option", g.cmp))
 		}
 	}
 	if (opt != nil && opt.nodeTriggerMode == AllPredecessor) || isWorkflow(g.cmp) {
@@ -762,6 +762,14 @@ func (g *graph) compile(ctx context.Context, opt *graphCompileOptions) (*composa
 	}
 	copy(inputChannels.writeToBranches, g.branches[START])
 
+	var mergeConfigs map[string]FanInMergeConfig
+	if opt != nil {
+		mergeConfigs = opt.mergeConfigs
+	}
+	if mergeConfigs == nil {
+		mergeConfigs = make(map[string]FanInMergeConfig)
+	}
+
 	r := &runner{
 		chanSubscribeTo:     chanSubscribeTo,
 		controlPredecessors: controlPredecessors,
@@ -780,6 +788,8 @@ func (g *graph) compile(ctx context.Context, opt *graphCompileOptions) (*composa
 		preBranchHandlerManager: &preBranchHandlerManager{h: g.handlerPreBranch},
 		preNodeHandlerManager:   &preNodeHandlerManager{h: g.handlerPreNode},
 		edgeHandlerManager:      &edgeHandlerManager{h: g.handlerOnEdges},
+
+		mergeConfigs: mergeConfigs,
 	}
 
 	successors := make(map[string][]string)
