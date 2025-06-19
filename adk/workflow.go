@@ -53,7 +53,7 @@ func (a *workflowAgent) Description(_ context.Context) string {
 	return a.description
 }
 
-func (a *workflowAgent) Run(ctx context.Context, input *AgentInput, _ ...AgentRunOption) *AsyncIterator[*AgentEvent] {
+func (a *workflowAgent) Run(ctx context.Context, input *AgentInput, opts ...AgentRunOption) *AsyncIterator[*AgentEvent] {
 	iterator, generator := NewAsyncIteratorPair[*AgentEvent]()
 
 	go func() {
@@ -74,11 +74,11 @@ func (a *workflowAgent) Run(ctx context.Context, input *AgentInput, _ ...AgentRu
 		// Different workflow execution based on mode
 		switch a.mode {
 		case workflowAgentModeSequential:
-			a.runSequential(ctx, input, generator)
+			a.runSequential(ctx, input, generator, opts...)
 		case workflowAgentModeLoop:
-			a.runLoop(ctx, input, generator)
+			a.runLoop(ctx, input, generator, opts...)
 		case workflowAgentModeParallel:
-			a.runParallel(ctx, input, generator)
+			a.runParallel(ctx, input, generator, opts...)
 		default:
 			err = errors.New(fmt.Sprintf("unsupported workflow agent mode: %d", a.mode))
 		}
@@ -88,10 +88,10 @@ func (a *workflowAgent) Run(ctx context.Context, input *AgentInput, _ ...AgentRu
 }
 
 func (a *workflowAgent) runSequential(ctx context.Context, input *AgentInput,
-	generator *AsyncGenerator[*AgentEvent]) (exit bool) {
+	generator *AsyncGenerator[*AgentEvent], opts ...AgentRunOption) (exit bool) {
 
 	for _, subAgent := range a.subAgents {
-		subIterator := subAgent.Run(ctx, input)
+		subIterator := subAgent.Run(ctx, input, opts...)
 		for {
 			event, ok := subIterator.Next()
 			if !ok {
@@ -116,7 +116,9 @@ func (a *workflowAgent) runSequential(ctx context.Context, input *AgentInput,
 	return false
 }
 
-func (a *workflowAgent) runLoop(ctx context.Context, input *AgentInput, generator *AsyncGenerator[*AgentEvent]) {
+func (a *workflowAgent) runLoop(ctx context.Context, input *AgentInput,
+	generator *AsyncGenerator[*AgentEvent], opts ...AgentRunOption) {
+
 	if len(a.subAgents) == 0 {
 		return
 	}
@@ -124,14 +126,16 @@ func (a *workflowAgent) runLoop(ctx context.Context, input *AgentInput, generato
 	var iterations int
 	for iterations < a.maxIterations || a.maxIterations == 0 {
 		iterations++
-		exit := a.runSequential(ctx, input, generator)
+		exit := a.runSequential(ctx, input, generator, opts...)
 		if exit {
 			return
 		}
 	}
 }
 
-func (a *workflowAgent) runParallel(ctx context.Context, input *AgentInput, generator *AsyncGenerator[*AgentEvent]) {
+func (a *workflowAgent) runParallel(ctx context.Context, input *AgentInput,
+	generator *AsyncGenerator[*AgentEvent], opts ...AgentRunOption) {
+
 	if len(a.subAgents) == 0 {
 		return
 	}
@@ -150,7 +154,7 @@ func (a *workflowAgent) runParallel(ctx context.Context, input *AgentInput, gene
 					wg.Done()
 				}()
 
-				iterator := agent.Run(ctx, input)
+				iterator := agent.Run(ctx, input, opts...)
 				for {
 					event, ok := iterator.Next()
 					if !ok {
