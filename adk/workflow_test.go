@@ -80,7 +80,7 @@ func TestSequentialAgent(t *testing.T) {
 				ModelResponse: &ModelOutput{
 					Response: &MessageVariant{
 						IsStreaming: false,
-						Msg:         schema.AssistantMessage("Response from Agent1", nil),
+						Message:     schema.AssistantMessage("Response from Agent1", nil),
 					},
 				},
 			},
@@ -94,7 +94,7 @@ func TestSequentialAgent(t *testing.T) {
 				ModelResponse: &ModelOutput{
 					Response: &MessageVariant{
 						IsStreaming: false,
-						Msg:         schema.AssistantMessage("Response from Agent2", nil),
+						Message:     schema.AssistantMessage("Response from Agent2", nil),
 					},
 				},
 			},
@@ -114,7 +114,7 @@ func TestSequentialAgent(t *testing.T) {
 
 	// Run the sequential agent
 	input := &AgentInput{
-		Msgs: []Message{
+		Messages: []Message{
 			schema.UserMessage("Test input"),
 		},
 	}
@@ -165,7 +165,7 @@ func TestSequentialAgentWithExit(t *testing.T) {
 				ModelResponse: &ModelOutput{
 					Response: &MessageVariant{
 						IsStreaming: false,
-						Msg:         schema.AssistantMessage("Response from Agent1", nil),
+						Message:     schema.AssistantMessage("Response from Agent1", nil),
 					},
 				},
 			},
@@ -182,7 +182,7 @@ func TestSequentialAgentWithExit(t *testing.T) {
 				ModelResponse: &ModelOutput{
 					Response: &MessageVariant{
 						IsStreaming: false,
-						Msg:         schema.AssistantMessage("Response from Agent2", nil),
+						Message:     schema.AssistantMessage("Response from Agent2", nil),
 					},
 				},
 			},
@@ -202,7 +202,7 @@ func TestSequentialAgentWithExit(t *testing.T) {
 
 	// Run the sequential agent
 	input := &AgentInput{
-		Msgs: []Message{
+		Messages: []Message{
 			schema.UserMessage("Test input"),
 		},
 	}
@@ -237,7 +237,7 @@ func TestParallelAgent(t *testing.T) {
 				ModelResponse: &ModelOutput{
 					Response: &MessageVariant{
 						IsStreaming: false,
-						Msg:         schema.AssistantMessage("Response from Agent1", nil),
+						Message:     schema.AssistantMessage("Response from Agent1", nil),
 					},
 				},
 			},
@@ -251,7 +251,7 @@ func TestParallelAgent(t *testing.T) {
 				ModelResponse: &ModelOutput{
 					Response: &MessageVariant{
 						IsStreaming: false,
-						Msg:         schema.AssistantMessage("Response from Agent2", nil),
+						Message:     schema.AssistantMessage("Response from Agent2", nil),
 					},
 				},
 			},
@@ -272,7 +272,7 @@ func TestParallelAgent(t *testing.T) {
 
 	// Run the parallel agent
 	input := AgentInput{
-		Msgs: []Message{
+		Messages: []Message{
 			schema.UserMessage("Test input"),
 		},
 	}
@@ -325,7 +325,7 @@ func TestLoopAgent(t *testing.T) {
 				ModelResponse: &ModelOutput{
 					Response: &MessageVariant{
 						IsStreaming: false,
-						Msg:         schema.AssistantMessage("Loop iteration", nil),
+						Message:     schema.AssistantMessage("Loop iteration", nil),
 					},
 				},
 			},
@@ -347,7 +347,7 @@ func TestLoopAgent(t *testing.T) {
 
 	// Run the loop agent
 	input := &AgentInput{
-		Msgs: []Message{
+		Messages: []Message{
 			schema.UserMessage("Test input"),
 		},
 	}
@@ -392,7 +392,7 @@ func TestLoopAgentWithExit(t *testing.T) {
 				ModelResponse: &ModelOutput{
 					Response: &MessageVariant{
 						IsStreaming: false,
-						Msg:         schema.AssistantMessage("Loop iteration with exit", nil),
+						Message:     schema.AssistantMessage("Loop iteration with exit", nil),
 					},
 				},
 			},
@@ -416,7 +416,7 @@ func TestLoopAgentWithExit(t *testing.T) {
 
 	// Run the loop agent
 	input := &AgentInput{
-		Msgs: []Message{
+		Messages: []Message{
 			schema.UserMessage("Test input"),
 		},
 	}

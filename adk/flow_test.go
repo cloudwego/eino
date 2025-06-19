@@ -94,7 +94,7 @@ func TestTransferToAgent(t *testing.T) {
 
 	// Run the parent agent
 	input := &AgentInput{
-		Msgs: []Message{
+		Messages: []Message{
 			schema.UserMessage("Please transfer this to the child agent"),
 		},
 	}
