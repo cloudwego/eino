@@ -78,7 +78,7 @@ func newMockRunnerAgent(name, description string, responses []*AgentEvent) *mock
 
 func TestNewRunner(t *testing.T) {
 	ctx := context.Background()
-	config := &RunnerConfig{}
+	config := RunnerConfig{}
 
 	runner := NewRunner(ctx, config)
 
@@ -105,7 +105,7 @@ func TestRunner_Run(t *testing.T) {
 	})
 
 	// Create a runner
-	runner := NewRunner(ctx, &RunnerConfig{})
+	runner := NewRunner(ctx, RunnerConfig{})
 
 	// Create test messages
 	msgs := []Message{
@@ -154,7 +154,7 @@ func TestRunner_Run_WithStreaming(t *testing.T) {
 	})
 
 	// Create a runner
-	runner := NewRunner(ctx, &RunnerConfig{})
+	runner := NewRunner(ctx, RunnerConfig{EnableStreaming: true})
 
 	// Create test messages
 	msgs := []Message{
@@ -162,7 +162,7 @@ func TestRunner_Run_WithStreaming(t *testing.T) {
 	}
 
 	// Test Run method with streaming enabled
-	iterator := runner.Run(ctx, mockAgent_, msgs, WithEnableStreaming())
+	iterator := runner.Run(ctx, mockAgent_, msgs)
 
 	// Verify that the agent's Run method was called with the correct parameters
 	assert.Equal(t, 1, mockAgent_.callCount)
@@ -202,7 +202,7 @@ func TestRunner_Query(t *testing.T) {
 	})
 
 	// Create a runner
-	runner := NewRunner(ctx, &RunnerConfig{})
+	runner := NewRunner(ctx, RunnerConfig{})
 
 	// Test Query method
 	iterator := runner.Query(ctx, mockAgent_, "Test query")
@@ -247,10 +247,10 @@ func TestRunner_Query_WithStreaming(t *testing.T) {
 	})
 
 	// Create a runner
-	runner := NewRunner(ctx, &RunnerConfig{})
+	runner := NewRunner(ctx, RunnerConfig{EnableStreaming: true})
 
 	// Test Query method with streaming enabled
-	iterator := runner.Query(ctx, mockAgent_, "Test query", WithEnableStreaming())
+	iterator := runner.Query(ctx, mockAgent_, "Test query")
 
 	// Verify that the agent's Run method was called with the correct parameters
 	assert.Equal(t, 1, mockAgent_.callCount)

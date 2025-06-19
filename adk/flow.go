@@ -319,6 +319,10 @@ func initRunCtx(ctx context.Context, agentName string, input *AgentInput) (conte
 	return context.WithValue(ctx, runCtxKey{}, runCtx), runCtx
 }
 
+func ctxWithNewRunCtx(ctx context.Context) context.Context {
+	return context.WithValue(ctx, runCtxKey{}, &runContext{session: newRunSession()})
+}
+
 func getSession(ctx context.Context) *runSession {
 	v := ctx.Value(runCtxKey{})
 
@@ -369,7 +373,7 @@ func genAgentInput(runCtx *runContext, agentName string) (*AgentInput, error) {
 	return input, nil
 }
 
-func (a *flowAgent) Run(ctx context.Context, input *AgentInput, _ ...AgentRunOption) *AsyncIterator[*AgentEvent] {
+func (a *flowAgent) Run(ctx context.Context, input *AgentInput, opts ...AgentRunOption) *AsyncIterator[*AgentEvent] {
 	agentName := a.Name(ctx)
 
 	ctx, runCtx := initRunCtx(ctx, agentName, input)
@@ -384,10 +388,10 @@ func (a *flowAgent) Run(ctx context.Context, input *AgentInput, _ ...AgentRunOpt
 	}
 
 	if wf, ok := a.Agent.(*workflowAgent); ok {
-		return wf.Run(ctx, input)
+		return wf.Run(ctx, input, opts...)
 	}
 
-	aIter := a.Agent.Run(ctx, input)
+	aIter := a.Agent.Run(ctx, input, opts...)
 
 	iterator, generator := NewAsyncIteratorPair[*AgentEvent]()
 
@@ -434,7 +438,7 @@ func (a *flowAgent) Run(ctx context.Context, input *AgentInput, _ ...AgentRunOpt
 				return
 			}
 
-			subAIter := agentToRun.Run(ctx, input)
+			subAIter := agentToRun.Run(ctx, input, opts...)
 			for {
 				subEvent, ok_ := subAIter.Next()
 				if !ok_ {
