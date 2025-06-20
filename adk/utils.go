@@ -55,15 +55,15 @@ func copyMap[K comparable, V any](m map[K]V) map[K]V {
 	return res
 }
 
-func NewModelOutputEvent(agentName string, msg Message, msgStream MessageStream) *AgentEvent {
+func NewModelOutputEvent(agentName string, message Message, messageStream MessageStream) *AgentEvent {
 	return &AgentEvent{
 		AgentName: agentName,
 		Output: &AgentOutput{
 			ModelResponse: &ModelOutput{
 				Response: &MessageVariant{
-					IsStreaming: msg == nil,
-					Msg:         msg,
-					MsgStream:   msgStream,
+					IsStreaming:   message == nil,
+					Message:       message,
+					MessageStream: messageStream,
 				},
 			},
 		},
@@ -71,7 +71,7 @@ func NewModelOutputEvent(agentName string, msg Message, msgStream MessageStream)
 }
 
 func NewToolOutputEvent(agentName string, toolName string,
-	toolCallID string, msg Message, msgStream MessageStream) *AgentEvent {
+	toolCallID string, message Message, messageStream MessageStream) *AgentEvent {
 
 	return &AgentEvent{
 		AgentName: agentName,
@@ -80,9 +80,9 @@ func NewToolOutputEvent(agentName string, toolName string,
 				Name:       toolName,
 				ToolCallID: toolCallID,
 				Response: &MessageVariant{
-					IsStreaming: msg == nil,
-					Msg:         msg,
-					MsgStream:   msgStream,
+					IsStreaming:   message == nil,
+					Message:       message,
+					MessageStream: messageStream,
 				},
 			},
 		},
