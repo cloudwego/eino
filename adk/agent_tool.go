@@ -56,15 +56,15 @@ func (at *agentTool) Info(ctx context.Context) (*schema.ToolInfo, error) {
 	}, nil
 }
 
-func genTransferMsgs(agentName string) []Message {
+func genTransferMessages(agentName string) []Message {
 	tooCall := schema.ToolCall{Function: schema.FunctionCall{Name: TransferToAgentToolName, Arguments: agentName}}
 
-	assistantMsg := schema.AssistantMessage("", []schema.ToolCall{tooCall})
-	toolMsg := schema.ToolMessage(transferToAgentToolOutput(agentName), "", schema.WithToolName(TransferToAgentToolName))
+	assistantMessage := schema.AssistantMessage("", []schema.ToolCall{tooCall})
+	toolMessage := schema.ToolMessage(transferToAgentToolOutput(agentName), "", schema.WithToolName(TransferToAgentToolName))
 
 	return []Message{
-		rewriteMsg(assistantMsg, agentName),
-		rewriteMsg(toolMsg, agentName),
+		rewriteMessage(assistantMessage, agentName),
+		rewriteMessage(toolMessage, agentName),
 	}
 }
 
@@ -93,10 +93,7 @@ func (at *agentTool) InvokableRun(ctx context.Context, argumentsInJSON string, _
 		}
 	}
 
-	events := at.agent.Run(ctx, &AgentInput{
-		Msgs: input,
-	})
-
+	events := NewRunner(ctx, RunnerConfig{EnableStreaming: false}).Run(ctx, at.agent, input)
 	var lastEvent *AgentEvent
 	for {
 		event, ok := events.Next()
@@ -166,13 +163,13 @@ func getReactChatHistory(ctx context.Context) ([]Message, error) {
 		}
 
 		if msg.Role == schema.Assistant || msg.Role == schema.Tool {
-			msg = rewriteMsg(msg, agentName)
+			msg = rewriteMessage(msg, agentName)
 		}
 
 		history = append(history, msg)
 	}
 
-	history = append(history, genTransferMsgs(agentName)...)
+	history = append(history, genTransferMessages(agentName)...)
 
 	return history, err
 }
