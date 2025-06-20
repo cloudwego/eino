@@ -108,7 +108,7 @@ func TestAgentTool_InvokableRun(t *testing.T) {
 						ModelResponse: &ModelOutput{
 							Response: &MessageVariant{
 								IsStreaming: false,
-								Msg:         schema.AssistantMessage("Test response", nil),
+								Message:     schema.AssistantMessage("Test response", nil),
 							},
 						},
 					},
@@ -129,7 +129,7 @@ func TestAgentTool_InvokableRun(t *testing.T) {
 							ToolCallID: "test-id",
 							Response: &MessageVariant{
 								IsStreaming: false,
-								Msg:         schema.ToolMessage("Tool response", "test-id"),
+								Message:     schema.ToolMessage("Tool response", "test-id"),
 							},
 						},
 					},

@@ -57,7 +57,7 @@ func TestChatModelAgentRun(t *testing.T) {
 
 		// Run the agent
 		input := &AgentInput{
-			Msgs: []Message{
+			Messages: []Message{
 				schema.UserMessage("Hello, who are you?"),
 			},
 		}
@@ -114,7 +114,7 @@ func TestChatModelAgentRun(t *testing.T) {
 
 		// Run the agent with streaming enabled
 		input := &AgentInput{
-			Msgs:            []Message{schema.UserMessage("Hello, who are you?")},
+			Messages:        []Message{schema.UserMessage("Hello, who are you?")},
 			EnableStreaming: true,
 		}
 		iterator := agent.Run(ctx, input)
@@ -159,7 +159,7 @@ func TestChatModelAgentRun(t *testing.T) {
 
 		// Run the agent
 		input := &AgentInput{
-			Msgs: []Message{schema.UserMessage("Hello, who are you?")},
+			Messages: []Message{schema.UserMessage("Hello, who are you?")},
 		}
 		iterator := agent.Run(ctx, input)
 		assert.NotNil(t, iterator)
@@ -227,7 +227,7 @@ func TestChatModelAgentRun(t *testing.T) {
 
 		// Run the agent
 		input := &AgentInput{
-			Msgs: []Message{schema.UserMessage("Use the test tool")},
+			Messages: []Message{schema.UserMessage("Use the test tool")},
 		}
 		iterator := agent.Run(ctx, input)
 		assert.NotNil(t, iterator)
@@ -304,7 +304,7 @@ func TestExitTool(t *testing.T) {
 
 	// Run the agent
 	input := &AgentInput{
-		Msgs: []Message{
+		Messages: []Message{
 			schema.UserMessage("Please exit with a final result"),
 		},
 	}
@@ -332,7 +332,7 @@ func TestExitTool(t *testing.T) {
 	assert.True(t, event2.Action.Exit)
 
 	// Verify the final result
-	assert.Equal(t, "This is the final result", event2.Output.ToolCallResponse.Response.Msg.Content)
+	assert.Equal(t, "This is the final result", event2.Output.ToolCallResponse.Response.Message.Content)
 
 	// No more events
 	_, ok = iterator.Next()

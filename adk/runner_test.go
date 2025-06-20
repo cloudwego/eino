@@ -97,7 +97,7 @@ func TestRunner_Run(t *testing.T) {
 				ModelResponse: &ModelOutput{
 					Response: &MessageVariant{
 						IsStreaming: false,
-						Msg:         schema.AssistantMessage("Response from test agent", nil),
+						Message:     schema.AssistantMessage("Response from test agent", nil),
 					},
 				},
 			},
@@ -117,7 +117,7 @@ func TestRunner_Run(t *testing.T) {
 
 	// Verify that the agent's Run method was called with the correct parameters
 	assert.Equal(t, 1, mockAgent_.callCount)
-	assert.Equal(t, msgs, mockAgent_.lastInput.Msgs)
+	assert.Equal(t, msgs, mockAgent_.lastInput.Messages)
 	assert.False(t, mockAgent_.enableStreaming)
 
 	// Verify that we can get the expected response from the iterator
@@ -127,7 +127,7 @@ func TestRunner_Run(t *testing.T) {
 	assert.NotNil(t, event.Output)
 	assert.NotNil(t, event.Output.ModelResponse)
 	assert.NotNil(t, event.Output.ModelResponse.Response)
-	assert.Equal(t, "Response from test agent", event.Output.ModelResponse.Response.Msg.Content)
+	assert.Equal(t, "Response from test agent", event.Output.ModelResponse.Response.Message.Content)
 
 	// Verify that the iterator is now closed
 	_, ok = iterator.Next()
@@ -144,9 +144,9 @@ func TestRunner_Run_WithStreaming(t *testing.T) {
 			Output: &AgentOutput{
 				ModelResponse: &ModelOutput{
 					Response: &MessageVariant{
-						IsStreaming: true,
-						Msg:         nil,
-						MsgStream:   schema.StreamReaderFromArray([]*schema.Message{schema.AssistantMessage("Streaming response", nil)}),
+						IsStreaming:   true,
+						Message:       nil,
+						MessageStream: schema.StreamReaderFromArray([]*schema.Message{schema.AssistantMessage("Streaming response", nil)}),
 					},
 				},
 			},
@@ -166,7 +166,7 @@ func TestRunner_Run_WithStreaming(t *testing.T) {
 
 	// Verify that the agent's Run method was called with the correct parameters
 	assert.Equal(t, 1, mockAgent_.callCount)
-	assert.Equal(t, msgs, mockAgent_.lastInput.Msgs)
+	assert.Equal(t, msgs, mockAgent_.lastInput.Messages)
 	assert.True(t, mockAgent_.enableStreaming)
 
 	// Verify that we can get the expected response from the iterator
@@ -194,7 +194,7 @@ func TestRunner_Query(t *testing.T) {
 				ModelResponse: &ModelOutput{
 					Response: &MessageVariant{
 						IsStreaming: false,
-						Msg:         schema.AssistantMessage("Response to query", nil),
+						Message:     schema.AssistantMessage("Response to query", nil),
 					},
 				},
 			},
@@ -209,8 +209,8 @@ func TestRunner_Query(t *testing.T) {
 
 	// Verify that the agent's Run method was called with the correct parameters
 	assert.Equal(t, 1, mockAgent_.callCount)
-	assert.Equal(t, 1, len(mockAgent_.lastInput.Msgs))
-	assert.Equal(t, "Test query", mockAgent_.lastInput.Msgs[0].Content)
+	assert.Equal(t, 1, len(mockAgent_.lastInput.Messages))
+	assert.Equal(t, "Test query", mockAgent_.lastInput.Messages[0].Content)
 	assert.False(t, mockAgent_.enableStreaming)
 
 	// Verify that we can get the expected response from the iterator
@@ -220,7 +220,7 @@ func TestRunner_Query(t *testing.T) {
 	assert.NotNil(t, event.Output)
 	assert.NotNil(t, event.Output.ModelResponse)
 	assert.NotNil(t, event.Output.ModelResponse.Response)
-	assert.Equal(t, "Response to query", event.Output.ModelResponse.Response.Msg.Content)
+	assert.Equal(t, "Response to query", event.Output.ModelResponse.Response.Message.Content)
 
 	// Verify that the iterator is now closed
 	_, ok = iterator.Next()
@@ -237,9 +237,9 @@ func TestRunner_Query_WithStreaming(t *testing.T) {
 			Output: &AgentOutput{
 				ModelResponse: &ModelOutput{
 					Response: &MessageVariant{
-						IsStreaming: true,
-						Msg:         nil,
-						MsgStream:   schema.StreamReaderFromArray([]*schema.Message{schema.AssistantMessage("Streaming query response", nil)}),
+						IsStreaming:   true,
+						Message:       nil,
+						MessageStream: schema.StreamReaderFromArray([]*schema.Message{schema.AssistantMessage("Streaming query response", nil)}),
 					},
 				},
 			},
@@ -254,8 +254,8 @@ func TestRunner_Query_WithStreaming(t *testing.T) {
 
 	// Verify that the agent's Run method was called with the correct parameters
 	assert.Equal(t, 1, mockAgent_.callCount)
-	assert.Equal(t, 1, len(mockAgent_.lastInput.Msgs))
-	assert.Equal(t, "Test query", mockAgent_.lastInput.Msgs[0].Content)
+	assert.Equal(t, 1, len(mockAgent_.lastInput.Messages))
+	assert.Equal(t, "Test query", mockAgent_.lastInput.Messages[0].Content)
 	assert.True(t, mockAgent_.enableStreaming)
 
 	// Verify that we can get the expected response from the iterator

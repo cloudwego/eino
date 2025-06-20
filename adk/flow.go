@@ -22,13 +22,17 @@ import (
 	"fmt"
 	"runtime/debug"
 	"strings"
-	"sync"
 
 	"github.com/cloudwego/eino/internal/safe"
 	"github.com/cloudwego/eino/schema"
 )
 
-type runCtxKey struct{}
+type HistoryEntry struct {
+	AgentName string
+	Message   Message
+}
+
+type HistoryRewriter func(ctx context.Context, entries []*HistoryEntry) ([]Message, error)
 
 type flowAgent struct {
 	Agent
@@ -37,151 +41,50 @@ type flowAgent struct {
 	parentAgent *flowAgent
 
 	disallowTransferToParent bool
-}
-
-func toFlowAgent(agent Agent) *flowAgent {
-	if fa, ok := agent.(*flowAgent); ok {
-		return fa
-	}
-	return &flowAgent{Agent: agent}
+	historyRewriter          HistoryRewriter
 }
 
 func SetSubAgents(ctx context.Context, agent Agent, subAgents []Agent) (Agent, error) {
 	return setSubAgents(ctx, agent, subAgents)
 }
 
-type AgentOptions struct {
-	disallowTransferToParent bool
-}
-
-type AgentOption func(options *AgentOptions)
+type AgentOption func(options *flowAgent)
 
 func WithDisallowTransferToParent() AgentOption {
-	return func(options *AgentOptions) {
-		options.disallowTransferToParent = true
+	return func(fa *flowAgent) {
+		fa.disallowTransferToParent = true
 	}
 }
 
-func agentWithOptions(_ context.Context, agent Agent, opts ...AgentOption) *flowAgent {
-	fa := toFlowAgent(agent)
-	var options AgentOptions
+func WithHistoryRewriter(h HistoryRewriter) AgentOption {
+	return func(fa *flowAgent) {
+		fa.historyRewriter = h
+	}
+}
+
+func toFlowAgent(ctx context.Context, agent Agent, opts ...AgentOption) *flowAgent {
+	var fa *flowAgent
+	var ok bool
+	if fa, ok = agent.(*flowAgent); !ok {
+		fa = &flowAgent{Agent: agent}
+	}
 	for _, opt := range opts {
-		opt(&options)
+		opt(fa)
 	}
 
-	fa.disallowTransferToParent = options.disallowTransferToParent
+	if fa.historyRewriter == nil {
+		fa.historyRewriter = buildDefaultHistoryRewriter(agent.Name(ctx))
+	}
 
 	return fa
 }
 
 func AgentWithOptions(ctx context.Context, agent Agent, opts ...AgentOption) Agent {
-	return agentWithOptions(ctx, agent, opts...)
-}
-
-type runSession struct {
-	events []*AgentEvent
-	values map[string]any
-
-	mtx sync.Mutex
-}
-
-func newRunSession() *runSession {
-	return &runSession{
-		values: make(map[string]any),
-	}
-}
-
-func GetSessionValues(ctx context.Context) map[string]any {
-	session := getSession(ctx)
-	if session == nil {
-		return map[string]any{}
-	}
-
-	return session.getValues()
-}
-
-func SetSessionValue(ctx context.Context, key string, value any) {
-	session := getSession(ctx)
-	if session == nil {
-		return
-	}
-
-	session.setValue(key, value)
-}
-
-func GetSessionValue(ctx context.Context, key string) (any, bool) {
-	session := getSession(ctx)
-	if session == nil {
-		return nil, false
-	}
-
-	return session.getValue(key)
-}
-
-func (rs *runSession) addEvent(event *AgentEvent) {
-	rs.mtx.Lock()
-	rs.events = append(rs.events, event)
-	rs.mtx.Unlock()
-}
-
-func (rs *runSession) getEvents() []*AgentEvent {
-	rs.mtx.Lock()
-	events := rs.events
-	rs.mtx.Unlock()
-
-	return events
-}
-
-func (rs *runSession) getValues() map[string]any {
-	rs.mtx.Lock()
-	values := make(map[string]any, len(rs.values))
-	for k, v := range rs.values {
-		values[k] = v
-	}
-	rs.mtx.Unlock()
-
-	return values
-}
-
-func (rs *runSession) setValue(key string, value any) {
-	rs.mtx.Lock()
-	rs.values[key] = value
-	rs.mtx.Unlock()
-}
-
-func (rs *runSession) getValue(key string) (any, bool) {
-	rs.mtx.Lock()
-	value, ok := rs.values[key]
-	rs.mtx.Unlock()
-
-	return value, ok
-}
-
-type runContext struct {
-	rootInput *AgentInput
-	runPath   []string
-
-	session *runSession
-}
-
-func (rc *runContext) isRoot() bool {
-	return len(rc.runPath) == 1
-}
-
-func (rc *runContext) deepCopy() *runContext {
-	copied := &runContext{
-		rootInput: rc.rootInput,
-		runPath:   make([]string, len(rc.runPath)),
-		session:   rc.session,
-	}
-
-	copy(copied.runPath, rc.runPath)
-
-	return copied
+	return toFlowAgent(ctx, agent, opts...)
 }
 
 func setSubAgents(ctx context.Context, agent Agent, subAgents []Agent) (*flowAgent, error) {
-	fa := toFlowAgent(agent)
+	fa := toFlowAgent(ctx, agent)
 
 	if len(fa.subAgents) > 0 {
 		return nil, errors.New("agent's sub-agents has already been set")
@@ -195,7 +98,7 @@ func setSubAgents(ctx context.Context, agent Agent, subAgents []Agent) (*flowAge
 	}
 
 	for _, s := range subAgents {
-		fsa := toFlowAgent(s)
+		fsa := toFlowAgent(ctx, s)
 
 		if fsa.parentAgent != nil {
 			return nil, errors.New("agent has already been set as a sub-agent of another agent")
@@ -250,7 +153,7 @@ func belongToRunPath(eventRunPath []string, runPath []string) bool {
 	return true
 }
 
-func rewriteMsg(msg Message, agentName string) Message {
+func rewriteMessage(msg Message, agentName string) Message {
 	var sb strings.Builder
 	sb.WriteString("For context:")
 	if msg.Role == schema.Assistant {
@@ -272,80 +175,27 @@ func rewriteMsg(msg Message, agentName string) Message {
 	return schema.UserMessage(sb.String())
 }
 
-func genMsg(event *AgentEvent, agentName string) (Message, error) {
-	var msg Message
-	var err error
-	if modelOutput := event.GetModelOutput(); modelOutput != nil {
-		msg, err = modelOutput.Response.GetMessage()
-		if err != nil {
-			return nil, err
-		}
-	}
-
-	if toolCallOutput := event.GetToolCallOutput(); toolCallOutput != nil {
-		msg, err = toolCallOutput.Response.GetMessage()
-		if err != nil {
-			return nil, err
-		}
-	}
-
-	if msg == nil {
-		return nil, nil
-	}
-
-	if event.AgentName != agentName {
-		msg = rewriteMsg(msg, event.AgentName)
+func genMsg(entry *HistoryEntry, agentName string) (Message, error) {
+	msg := entry.Message
+	if entry.AgentName != agentName {
+		msg = rewriteMessage(msg, entry.AgentName)
 	}
 
 	return msg, nil
 }
 
-func initRunCtx(ctx context.Context, agentName string, input *AgentInput) (context.Context, *runContext) {
-	v := ctx.Value(runCtxKey{})
-	var runCtx *runContext
-	if v != nil {
-		runCtx = v.(*runContext).deepCopy()
-	}
-
-	if runCtx == nil {
-		runCtx = &runContext{session: newRunSession()}
-	}
-
-	runCtx.runPath = append(runCtx.runPath, agentName)
-	if runCtx.isRoot() {
-		runCtx.rootInput = input
-	}
-
-	return context.WithValue(ctx, runCtxKey{}, runCtx), runCtx
-}
-
-func ctxWithNewRunCtx(ctx context.Context) context.Context {
-	return context.WithValue(ctx, runCtxKey{}, &runContext{session: newRunSession()})
-}
-
-func getSession(ctx context.Context) *runSession {
-	v := ctx.Value(runCtxKey{})
-
-	if v != nil {
-		runCtx := v.(*runContext)
-		return runCtx.session
-	}
-
-	return nil
-}
-
 func (ai *AgentInput) deepCopy() *AgentInput {
 	copied := &AgentInput{
-		Msgs:            make([]Message, len(ai.Msgs)),
+		Messages:        make([]Message, len(ai.Messages)),
 		EnableStreaming: ai.EnableStreaming,
 	}
 
-	copy(copied.Msgs, ai.Msgs)
+	copy(copied.Messages, ai.Messages)
 
 	return copied
 }
 
-func genAgentInput(runCtx *runContext, agentName string) (*AgentInput, error) {
+func (a *flowAgent) genAgentInput(ctx context.Context, runCtx *runContext) (*AgentInput, error) {
 	if runCtx.isRoot() {
 		return runCtx.rootInput, nil
 	}
@@ -354,23 +204,64 @@ func genAgentInput(runCtx *runContext, agentName string) (*AgentInput, error) {
 	runPath := runCtx.runPath
 
 	events := runCtx.session.getEvents()
+	historyEntries := make([]*HistoryEntry, 0)
 
 	for _, event := range events {
 		if !belongToRunPath(event.RunPath, runPath) {
 			continue
 		}
 
-		msg, err := genMsg(event, agentName)
-		if err != nil {
-			return nil, fmt.Errorf("gen agent input failed: %w", err)
+		var msg Message
+		var err error
+		if modelOutput := event.GetModelOutput(); modelOutput != nil {
+			msg, err = modelOutput.Response.GetMessage()
+			if err != nil {
+				return nil, err
+			}
 		}
 
-		if msg != nil {
-			input.Msgs = append(input.Msgs, msg)
+		if toolCallOutput := event.GetToolCallOutput(); toolCallOutput != nil {
+			msg, err = toolCallOutput.Response.GetMessage()
+			if err != nil {
+				return nil, err
+			}
 		}
+
+		if msg == nil {
+			continue
+		}
+
+		historyEntries = append(historyEntries, &HistoryEntry{
+			AgentName: event.AgentName,
+			Message:   msg,
+		})
 	}
 
+	messages, err := a.historyRewriter(ctx, historyEntries)
+	if err != nil {
+		return nil, err
+	}
+	input.Messages = append(input.Messages, messages...)
+
 	return input, nil
+}
+
+func buildDefaultHistoryRewriter(agentName string) HistoryRewriter {
+	return func(ctx context.Context, entries []*HistoryEntry) ([]Message, error) {
+		messages := make([]Message, 0, len(entries))
+		for _, entry := range entries {
+			msg, err := genMsg(entry, agentName)
+			if err != nil {
+				return nil, fmt.Errorf("gen agent input failed: %w", err)
+			}
+
+			if msg != nil {
+				messages = append(messages, msg)
+			}
+		}
+
+		return messages, nil
+	}
 }
 
 func (a *flowAgent) Run(ctx context.Context, input *AgentInput, opts ...AgentRunOption) *AsyncIterator[*AgentEvent] {
@@ -378,7 +269,7 @@ func (a *flowAgent) Run(ctx context.Context, input *AgentInput, opts ...AgentRun
 
 	ctx, runCtx := initRunCtx(ctx, agentName, input)
 
-	input, err := genAgentInput(runCtx, agentName)
+	input, err := a.genAgentInput(ctx, runCtx)
 	if err != nil {
 		iterator, generator := NewAsyncIteratorPair[*AgentEvent]()
 		generator.Send(&AgentEvent{Err: err})
