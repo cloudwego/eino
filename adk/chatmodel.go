@@ -335,7 +335,11 @@ func (h *cbHandler) onToolEndWithStreamOutput(ctx context.Context,
 func (h *cbHandler) onGraphError(ctx context.Context,
 	_ *callbacks.RunInfo, err error) context.Context {
 
-	h.Send(&AgentEvent{Err: err})
+	info, ok := compose.ExtractInterruptInfo(err)
+	if !ok {
+		h.Send(&AgentEvent{Err: err})
+		return ctx
+	}
 
 	return ctx
 }
@@ -521,4 +525,18 @@ func (a *ChatModelAgent) Run(ctx context.Context, input *AgentInput, _ ...AgentR
 	}()
 
 	return iterator
+}
+
+// mockStore is used by the ADK to retrieve serialized data of the graph state during interruptions and provides it to the graph during recovery.
+type mockStore struct {
+	Data []byte
+}
+
+func (m *mockStore) Get(ctx context.Context, checkPointID string) ([]byte, bool, error) {
+	return m.Data, true, nil
+}
+
+func (m *mockStore) Set(ctx context.Context, checkPointID string, checkPoint []byte) error {
+	m.Data = checkPoint
+	return nil
 }

@@ -79,9 +79,11 @@ func NewExitAction() *AgentAction {
 }
 
 type AgentAction struct {
-	TransferToAgent *TransferToAgentAction
-
 	Exit bool
+
+	Interrupted *InterruptInfo
+
+	TransferToAgent *TransferToAgentAction
 
 	CustomizedAction any
 }
@@ -133,4 +135,10 @@ type OnSubAgents interface {
 	OnSetAsSubAgent(ctx context.Context, parent Agent) error
 
 	OnDisallowTransferToParent(ctx context.Context) error
+}
+
+type ResumableAgent interface {
+	Agent
+
+	Resume(ctx context.Context, info *InterruptInfo, opts ...AgentRunOption) *AsyncIterator[*AgentEvent]
 }
