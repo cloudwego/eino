@@ -24,6 +24,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"go.uber.org/mock/gomock"
 
+	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/components/tool"
 	"github.com/cloudwego/eino/compose"
 	mockModel "github.com/cloudwego/eino/internal/mock/components/model"
@@ -366,4 +367,120 @@ func TestWithMessageFuture(t *testing.T) {
 
 		wg.Wait()
 	})
+}
+
+func TestWithToolOptions(t *testing.T) {
+	type dummyOpt struct{ val string }
+	opt := tool.WrapImplSpecificOptFn(func(o *dummyOpt) { o.val = "mock" })
+	agentOpt := WithToolOptions(opt)
+	assert.NotNil(t, agentOpt)
+	// The returned value should be an agent.AgentOption (function)
+	assert.IsType(t, agentOpt, agentOpt)
+}
+
+func TestWithChatModelOptions(t *testing.T) {
+	opt := model.WithModel("mock-model")
+	agentOpt := WithChatModelOptions(opt)
+	assert.NotNil(t, agentOpt)
+	assert.IsType(t, agentOpt, agentOpt)
+}
+
+func TestWithToolList(t *testing.T) {
+	dummyTool := &dummyBaseTool{}
+	agentOpt := WithToolList(dummyTool)
+	assert.NotNil(t, agentOpt)
+	assert.IsType(t, agentOpt, agentOpt)
+}
+
+// dummyBaseTool is a minimal implementation of tool.BaseTool for testing.
+type dummyBaseTool struct{}
+
+func (d *dummyBaseTool) Info(ctx context.Context) (*schema.ToolInfo, error) {
+	return &schema.ToolInfo{Name: "dummy"}, nil
+}
+
+func (d *dummyBaseTool) InvokableRun(ctx context.Context, _ string, _ ...tool.Option) (string, error) {
+	return "dummy-response", nil
+}
+
+type assertTool struct {
+	toolOptVal      string
+	receivedToolOpt bool
+}
+type toolOpt struct{ val string }
+
+func (a *assertTool) Info(ctx context.Context) (*schema.ToolInfo, error) {
+	return &schema.ToolInfo{Name: "assert_tool"}, nil
+}
+func (a *assertTool) InvokableRun(ctx context.Context, argumentsInJSON string, opts ...tool.Option) (string, error) {
+	opt := tool.GetImplSpecificOptions(&toolOpt{}, opts...)
+	if opt.val == a.toolOptVal {
+		a.receivedToolOpt = true
+	}
+	return "tool-response", nil
+}
+
+func TestAgentWithAllOptions(t *testing.T) {
+	ctx := context.Background()
+	ctrl := gomock.NewController(t)
+
+	// Prepare a tool that asserts it receives the tool option
+	toolOptVal := "tool-opt-value"
+	to := tool.WrapImplSpecificOptFn(func(o *toolOpt) { o.val = toolOptVal })
+	at := &assertTool{toolOptVal: toolOptVal}
+
+	// Prepare a mock chat model that asserts it receives the model option
+	cm := mockModel.NewMockToolCallingChatModel(ctrl)
+	modelOpt := model.WithModel("test-model")
+	modelOptReceived := false
+	times := 0
+	cm.EXPECT().Generate(gomock.Any(), gomock.Any(), gomock.Any()).DoAndReturn(
+		func(_ context.Context, _ []*schema.Message, opts ...model.Option) (*schema.Message, error) {
+			times++
+			if times == 1 {
+				for _, o := range opts {
+					opt := model.GetCommonOptions(&model.Options{}, o)
+					if opt.Model != nil && *opt.Model == "test-model" {
+						modelOptReceived = true
+					}
+				}
+
+				info, _ := at.Info(ctx)
+				return schema.AssistantMessage("hello max",
+						[]schema.ToolCall{
+							{
+								ID: randStr(),
+								Function: schema.FunctionCall{
+									Name:      info.Name,
+									Arguments: "",
+								},
+							},
+						}),
+					nil
+			}
+
+			return schema.AssistantMessage("ok", nil), nil
+		},
+	).AnyTimes()
+	cm.EXPECT().WithTools(gomock.Any()).Return(cm, nil).AnyTimes()
+
+	agentOpt := WithToolOptions(to)
+	agentOpt2 := WithChatModelOptions(modelOpt)
+	agentOpt3 := WithToolList(at)
+
+	a, err := NewAgent(ctx, &AgentConfig{
+		ToolCallingModel: cm,
+		ToolsConfig: compose.ToolsNodeConfig{
+			Tools: []tool.BaseTool{&dummyBaseTool{}},
+		},
+		MaxStep: 20,
+	})
+	assert.NoError(t, err)
+
+	_, err = a.Generate(ctx, []*schema.Message{
+		schema.UserMessage("call the tool"),
+	}, agentOpt, agentOpt2, agentOpt3)
+	assert.NoError(t, err)
+	assert.True(t, modelOptReceived, "model option should be received by chat model")
+	assert.True(t, at.receivedToolOpt, "tool option should be received by tool")
 }
