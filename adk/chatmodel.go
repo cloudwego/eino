@@ -47,7 +47,7 @@ type ToolsConfig struct {
 type GenModelInput func(ctx context.Context, instruction string, input *AgentInput) ([]Message, error)
 
 func defaultGenModelInput(ctx context.Context, instruction string, input *AgentInput) ([]Message, error) {
-	msgs := make([]Message, 0, len(input.Msgs)+1)
+	msgs := make([]Message, 0, len(input.Messages)+1)
 
 	if instruction != "" {
 		sp := schema.SystemMessage(instruction)
@@ -66,7 +66,7 @@ func defaultGenModelInput(ctx context.Context, instruction string, input *AgentI
 		msgs = append(msgs, sp)
 	}
 
-	msgs = append(msgs, input.Msgs...)
+	msgs = append(msgs, input.Messages...)
 
 	return msgs, nil
 }
@@ -361,7 +361,7 @@ func genReactCallbacks(agentName string,
 }
 
 func setOutputToSession(ctx context.Context, msg Message, msgStream MessageStream, outputKey string) error {
-	msgVariant := &MessageVariant{IsStreaming: msgStream != nil, Msg: msg, MsgStream: msgStream}
+	msgVariant := &MessageVariant{IsStreaming: msgStream != nil, Message: msg, MessageStream: msgStream}
 
 	msg, err := msgVariant.GetMessage()
 	if err != nil {

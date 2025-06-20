@@ -222,7 +222,7 @@ func newWorkflowAgent(ctx context.Context, name, desc string,
 
 	fas := make([]Agent, len(subAgents))
 	for i, subAgent := range subAgents {
-		fas[i] = agentWithOptions(ctx, subAgent, WithDisallowTransferToParent())
+		fas[i] = toFlowAgent(ctx, subAgent, WithDisallowTransferToParent())
 	}
 
 	fa, err := setSubAgents(ctx, wa, fas)
