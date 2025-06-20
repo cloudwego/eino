@@ -34,6 +34,11 @@ func WithToolOptions(opts ...tool.Option) agent.AgentOption {
 	return agent.WithComposeOptions(compose.WithToolsNodeOption(compose.WithToolOption(opts...)))
 }
 
+// WithChatModelOptions returns an agent option that specifies model.Option for the chat model in agent.
+func WithChatModelOptions(opts ...model.Option) agent.AgentOption {
+	return agent.WithComposeOptions(compose.WithChatModelOption(opts...))
+}
+
 // WithToolList returns an agent option that specifies the list of tools can be called which are BaseTool but must implement InvokableTool or StreamableTool.
 func WithToolList(tools ...tool.BaseTool) agent.AgentOption {
 	return agent.WithComposeOptions(compose.WithToolsNodeOption(compose.WithToolList(tools...)))
