@@ -34,13 +34,13 @@ func NewRunner(_ context.Context, conf RunnerConfig) *Runner {
 	return &Runner{enableStreaming: conf.EnableStreaming}
 }
 
-func (r *Runner) Run(ctx context.Context, agent Agent, msgs []Message,
+func (r *Runner) Run(ctx context.Context, agent Agent, messages []Message,
 	opts ...AgentRunOption) *AsyncIterator[*AgentEvent] {
 
-	fa := toFlowAgent(agent)
+	fa := toFlowAgent(ctx, agent)
 
 	input := &AgentInput{
-		Msgs:            msgs,
+		Messages:        messages,
 		EnableStreaming: r.enableStreaming,
 	}
 
