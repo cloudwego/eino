@@ -28,23 +28,23 @@ type MessageStream = *schema.StreamReader[Message]
 type MessageVariant struct {
 	IsStreaming bool
 
-	Msg       Message
-	MsgStream MessageStream
+	Message       Message
+	MessageStream MessageStream
 }
 
 func (mv *MessageVariant) GetMessage() (Message, error) {
-	var msg Message
+	var message Message
 	if mv.IsStreaming {
 		var err error
-		msg, err = schema.ConcatMessageStream(mv.MsgStream)
+		message, err = schema.ConcatMessageStream(mv.MessageStream)
 		if err != nil {
 			return nil, err
 		}
 	} else {
-		msg = mv.Msg
+		message = mv.Message
 	}
 
-	return msg, nil
+	return message, nil
 }
 
 type ToolCallOutput struct {
@@ -115,7 +115,7 @@ func (event *AgentEvent) GetToolCallOutput() *ToolCallOutput {
 }
 
 type AgentInput struct {
-	Msgs            []Message
+	Messages        []Message
 	EnableStreaming bool
 }
 
