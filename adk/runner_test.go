@@ -94,18 +94,16 @@ func TestRunner_Run(t *testing.T) {
 		{
 			AgentName: "TestAgent",
 			Output: &AgentOutput{
-				ModelResponse: &ModelOutput{
-					Response: &MessageVariant{
-						IsStreaming: false,
-						Message:     schema.AssistantMessage("Response from test agent", nil),
-					},
+				ModelResponse: &MessageVariant{
+					IsStreaming: false,
+					Message:     schema.AssistantMessage("Response from test agent", nil),
 				},
 			},
 		},
 	})
 
 	// Create a runner
-	runner := NewRunner(ctx, RunnerConfig{})
+	runner := NewRunner(ctx, RunnerConfig{Agent: mockAgent_})
 
 	// Create test messages
 	msgs := []Message{
@@ -113,7 +111,7 @@ func TestRunner_Run(t *testing.T) {
 	}
 
 	// Test Run method without streaming
-	iterator := runner.Run(ctx, mockAgent_, msgs)
+	iterator := runner.Run(ctx, msgs)
 
 	// Verify that the agent's Run method was called with the correct parameters
 	assert.Equal(t, 1, mockAgent_.callCount)
@@ -126,8 +124,7 @@ func TestRunner_Run(t *testing.T) {
 	assert.Equal(t, "TestAgent", event.AgentName)
 	assert.NotNil(t, event.Output)
 	assert.NotNil(t, event.Output.ModelResponse)
-	assert.NotNil(t, event.Output.ModelResponse.Response)
-	assert.Equal(t, "Response from test agent", event.Output.ModelResponse.Response.Message.Content)
+	assert.Equal(t, "Response from test agent", event.Output.ModelResponse.Message.Content)
 
 	// Verify that the iterator is now closed
 	_, ok = iterator.Next()
@@ -142,19 +139,17 @@ func TestRunner_Run_WithStreaming(t *testing.T) {
 		{
 			AgentName: "TestAgent",
 			Output: &AgentOutput{
-				ModelResponse: &ModelOutput{
-					Response: &MessageVariant{
-						IsStreaming:   true,
-						Message:       nil,
-						MessageStream: schema.StreamReaderFromArray([]*schema.Message{schema.AssistantMessage("Streaming response", nil)}),
-					},
+				ModelResponse: &MessageVariant{
+					IsStreaming:   true,
+					Message:       nil,
+					MessageStream: schema.StreamReaderFromArray([]*schema.Message{schema.AssistantMessage("Streaming response", nil)}),
 				},
 			},
 		},
 	})
 
 	// Create a runner
-	runner := NewRunner(ctx, RunnerConfig{EnableStreaming: true})
+	runner := NewRunner(ctx, RunnerConfig{EnableStreaming: true, Agent: mockAgent_})
 
 	// Create test messages
 	msgs := []Message{
@@ -162,7 +157,7 @@ func TestRunner_Run_WithStreaming(t *testing.T) {
 	}
 
 	// Test Run method with streaming enabled
-	iterator := runner.Run(ctx, mockAgent_, msgs)
+	iterator := runner.Run(ctx, msgs)
 
 	// Verify that the agent's Run method was called with the correct parameters
 	assert.Equal(t, 1, mockAgent_.callCount)
@@ -175,8 +170,7 @@ func TestRunner_Run_WithStreaming(t *testing.T) {
 	assert.Equal(t, "TestAgent", event.AgentName)
 	assert.NotNil(t, event.Output)
 	assert.NotNil(t, event.Output.ModelResponse)
-	assert.NotNil(t, event.Output.ModelResponse.Response)
-	assert.True(t, event.Output.ModelResponse.Response.IsStreaming)
+	assert.True(t, event.Output.ModelResponse.IsStreaming)
 
 	// Verify that the iterator is now closed
 	_, ok = iterator.Next()
@@ -191,21 +185,19 @@ func TestRunner_Query(t *testing.T) {
 		{
 			AgentName: "TestAgent",
 			Output: &AgentOutput{
-				ModelResponse: &ModelOutput{
-					Response: &MessageVariant{
-						IsStreaming: false,
-						Message:     schema.AssistantMessage("Response to query", nil),
-					},
+				ModelResponse: &MessageVariant{
+					IsStreaming: false,
+					Message:     schema.AssistantMessage("Response to query", nil),
 				},
 			},
 		},
 	})
 
 	// Create a runner
-	runner := NewRunner(ctx, RunnerConfig{})
+	runner := NewRunner(ctx, RunnerConfig{Agent: mockAgent_})
 
 	// Test Query method
-	iterator := runner.Query(ctx, mockAgent_, "Test query")
+	iterator := runner.Query(ctx, "Test query")
 
 	// Verify that the agent's Run method was called with the correct parameters
 	assert.Equal(t, 1, mockAgent_.callCount)
@@ -219,8 +211,7 @@ func TestRunner_Query(t *testing.T) {
 	assert.Equal(t, "TestAgent", event.AgentName)
 	assert.NotNil(t, event.Output)
 	assert.NotNil(t, event.Output.ModelResponse)
-	assert.NotNil(t, event.Output.ModelResponse.Response)
-	assert.Equal(t, "Response to query", event.Output.ModelResponse.Response.Message.Content)
+	assert.Equal(t, "Response to query", event.Output.ModelResponse.Message.Content)
 
 	// Verify that the iterator is now closed
 	_, ok = iterator.Next()
@@ -235,22 +226,20 @@ func TestRunner_Query_WithStreaming(t *testing.T) {
 		{
 			AgentName: "TestAgent",
 			Output: &AgentOutput{
-				ModelResponse: &ModelOutput{
-					Response: &MessageVariant{
-						IsStreaming:   true,
-						Message:       nil,
-						MessageStream: schema.StreamReaderFromArray([]*schema.Message{schema.AssistantMessage("Streaming query response", nil)}),
-					},
+				ModelResponse: &MessageVariant{
+					IsStreaming:   true,
+					Message:       nil,
+					MessageStream: schema.StreamReaderFromArray([]*schema.Message{schema.AssistantMessage("Streaming query response", nil)}),
 				},
 			},
 		},
 	})
 
 	// Create a runner
-	runner := NewRunner(ctx, RunnerConfig{EnableStreaming: true})
+	runner := NewRunner(ctx, RunnerConfig{EnableStreaming: true, Agent: mockAgent_})
 
 	// Test Query method with streaming enabled
-	iterator := runner.Query(ctx, mockAgent_, "Test query")
+	iterator := runner.Query(ctx, "Test query")
 
 	// Verify that the agent's Run method was called with the correct parameters
 	assert.Equal(t, 1, mockAgent_.callCount)
@@ -264,8 +253,7 @@ func TestRunner_Query_WithStreaming(t *testing.T) {
 	assert.Equal(t, "TestAgent", event.AgentName)
 	assert.NotNil(t, event.Output)
 	assert.NotNil(t, event.Output.ModelResponse)
-	assert.NotNil(t, event.Output.ModelResponse.Response)
-	assert.True(t, event.Output.ModelResponse.Response.IsStreaming)
+	assert.True(t, event.Output.ModelResponse.IsStreaming)
 
 	// Verify that the iterator is now closed
 	_, ok = iterator.Next()

@@ -19,6 +19,7 @@ package adk
 import (
 	"context"
 	"errors"
+	"fmt"
 
 	"github.com/bytedance/sonic"
 
@@ -36,6 +37,29 @@ var (
 		},
 	})
 )
+
+type agentToolOptions struct {
+	agentName string
+	opts      []AgentRunOption
+}
+
+func withAgentToolOptions(agentName string, opts []AgentRunOption) tool.Option {
+	return tool.WrapImplSpecificOptFn(func(opt *agentToolOptions) {
+		opt.agentName = agentName
+		opt.opts = opts
+	})
+}
+
+func getOptionsByAgentName(agentName string, opts []tool.Option) []AgentRunOption {
+	var ret []AgentRunOption
+	for _, opt := range opts {
+		o := tool.GetImplSpecificOptions[agentToolOptions](nil, opt)
+		if o != nil && o.agentName == agentName {
+			ret = append(ret, o.opts...)
+		}
+	}
+	return ret
+}
 
 type agentTool struct {
 	agent Agent
@@ -68,35 +92,70 @@ func genTransferMessages(agentName string) []Message {
 	}
 }
 
-func (at *agentTool) InvokableRun(ctx context.Context, argumentsInJSON string, _ ...tool.Option) (string, error) {
-	var input []Message
-	if at.fullChatHistoryAsInput {
-		history, err := getReactChatHistory(ctx)
-		if err != nil {
-			return "", err
-		}
+func newInvokableAgentToolRunner(agent Agent, store CheckPointStore) *Runner {
+	return &Runner{
+		a:               agent,
+		enableStreaming: false,
+		store:           store,
+	}
+}
 
-		input = history
-	} else {
-		type request struct {
-			Request string `json:"request"`
+func (at *agentTool) InvokableRun(ctx context.Context, argumentsInJSON string, opts ...tool.Option) (string, error) {
+	var intData *agentToolInterruptInfo
+	var bResume bool
+	err := compose.ProcessState(ctx, func(ctx context.Context, s *State) error {
+		toolCallID := compose.GetToolCallID(ctx)
+		intData, bResume = s.AgentToolInterruptData[toolCallID]
+		if bResume {
+			delete(s.AgentToolInterruptData, toolCallID)
 		}
-
-		req := &request{}
-		err := sonic.UnmarshalString(argumentsInJSON, req)
-		if err != nil {
-			return "", err
-		}
-
-		input = []Message{
-			schema.UserMessage(req.Request),
-		}
+		return nil
+	})
+	if err != nil {
+		return "", fmt.Errorf("failed to access state: %w", err)
 	}
 
-	events := NewRunner(ctx, RunnerConfig{EnableStreaming: false}).Run(ctx, at.agent, input)
+	var ms *mockStore
+	var iter *AsyncIterator[*AgentEvent]
+	if bResume {
+		ms = newResumeStore(intData.Data)
+
+		iter, err = newInvokableAgentToolRunner(at.agent, ms).Resume(ctx, mockCheckPointID, getOptionsByAgentName(at.agent.Name(ctx), opts)...)
+		if err != nil {
+			return "", err
+		}
+	} else {
+		ms = newEmptyStore()
+		var input []Message
+		if at.fullChatHistoryAsInput {
+			history, err := getReactChatHistory(ctx)
+			if err != nil {
+				return "", err
+			}
+
+			input = history
+		} else {
+			type request struct {
+				Request string `json:"request"`
+			}
+
+			req := &request{}
+			err := sonic.UnmarshalString(argumentsInJSON, req)
+			if err != nil {
+				return "", err
+			}
+			input = []Message{
+				schema.UserMessage(req.Request),
+			}
+		}
+
+		iter = newInvokableAgentToolRunner(at.agent, ms).Run(ctx, input, append(getOptionsByAgentName(at.agent.Name(ctx), opts), WithCheckPointID(mockCheckPointID))...)
+	}
+
+	interrupted := false
 	var lastEvent *AgentEvent
 	for {
-		event, ok := events.Next()
+		event, ok := iter.Next()
 		if !ok {
 			break
 		}
@@ -105,7 +164,32 @@ func (at *agentTool) InvokableRun(ctx context.Context, argumentsInJSON string, _
 			return "", event.Err
 		}
 
-		lastEvent = event
+		if event.Action != nil && event.Action.Interrupted != nil {
+			interrupted = true
+		} else {
+			lastEvent = event
+		}
+	}
+
+	if interrupted {
+		data, existed, err_ := ms.Get(ctx, mockCheckPointID)
+		if err_ != nil {
+			return "", fmt.Errorf("failed to get interrupt info: %w", err)
+		}
+		if !existed {
+			return "", fmt.Errorf("interrupt has happened, but cannot find interrupt info")
+		}
+		err = compose.ProcessState(ctx, func(ctx context.Context, st *State) error {
+			st.AgentToolInterruptData[compose.GetToolCallID(ctx)] = &agentToolInterruptInfo{
+				LastEvent: lastEvent,
+				Data:      data,
+			}
+			return nil
+		})
+		if err != nil {
+			return "", fmt.Errorf("failed to save agent tool checkpoint to state: %w", err)
+		}
+		return "", compose.InterruptAndRerun
 	}
 
 	if lastEvent == nil {
@@ -114,7 +198,7 @@ func (at *agentTool) InvokableRun(ctx context.Context, argumentsInJSON string, _
 
 	var ret string
 	if output := lastEvent.GetModelOutput(); output != nil {
-		msg, e := output.Response.GetMessage()
+		msg, e := output.GetMessage()
 		if e != nil {
 			return "", e
 		}

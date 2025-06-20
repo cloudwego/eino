@@ -17,7 +17,11 @@
 package adk
 
 import (
+	"bytes"
 	"context"
+	"encoding/gob"
+	"fmt"
+	"io"
 
 	"github.com/cloudwego/eino/schema"
 )
@@ -30,6 +34,53 @@ type MessageVariant struct {
 
 	Message       Message
 	MessageStream MessageStream
+}
+
+type messageVariantSerialization struct {
+	IsStreaming   bool
+	Message       Message
+	MessageStream []Message
+}
+
+func (mv *MessageVariant) GobEncode() ([]byte, error) {
+	s := &messageVariantSerialization{
+		IsStreaming: mv.IsStreaming,
+		Message:     mv.Message,
+	}
+	if mv.IsStreaming {
+		var messages []Message
+		for {
+			frame, err := mv.MessageStream.Recv()
+			if err == io.EOF {
+				break
+			}
+			if err != nil {
+				return nil, fmt.Errorf("error receiving message stream: %w", err)
+			}
+			messages = append(messages, frame)
+		}
+		s.MessageStream = messages
+	}
+	buf := &bytes.Buffer{}
+	err := gob.NewEncoder(buf).Encode(s)
+	if err != nil {
+		return nil, fmt.Errorf("failed to gob encode message variant: %w", err)
+	}
+	return buf.Bytes(), nil
+}
+
+func (mv *MessageVariant) GobDecode(b []byte) error {
+	s := &messageVariantSerialization{}
+	err := gob.NewDecoder(bytes.NewReader(b)).Decode(s)
+	if err != nil {
+		return fmt.Errorf("failed to decoding message variant: %w", err)
+	}
+	mv.IsStreaming = s.IsStreaming
+	mv.Message = s.Message
+	if len(s.MessageStream) > 0 {
+		mv.MessageStream = schema.StreamReaderFromArray(s.MessageStream)
+	}
+	return nil
 }
 
 func (mv *MessageVariant) GetMessage() (Message, error) {
@@ -63,7 +114,7 @@ type TransferToAgentAction struct {
 }
 
 type AgentOutput struct {
-	ModelResponse *ModelOutput
+	ModelResponse *MessageVariant
 
 	ToolCallResponse *ToolCallOutput
 
@@ -79,9 +130,11 @@ func NewExitAction() *AgentAction {
 }
 
 type AgentAction struct {
-	TransferToAgent *TransferToAgentAction
-
 	Exit bool
+
+	Interrupted *InterruptInfo
+
+	TransferToAgent *TransferToAgentAction
 
 	CustomizedAction any
 }
@@ -98,7 +151,7 @@ type AgentEvent struct {
 	Err error
 }
 
-func (event *AgentEvent) GetModelOutput() *ModelOutput {
+func (event *AgentEvent) GetModelOutput() *MessageVariant {
 	if event.Output == nil {
 		return nil
 	}
@@ -131,4 +184,10 @@ type OnSubAgents interface {
 	OnSetAsSubAgent(ctx context.Context, parent Agent) error
 
 	OnDisallowTransferToParent(ctx context.Context) error
+}
+
+type ResumableAgent interface {
+	Agent
+
+	Resume(ctx context.Context, info *InterruptInfo, opts ...AgentRunOption) *AsyncIterator[*AgentEvent]
 }
