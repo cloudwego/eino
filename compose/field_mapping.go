@@ -32,6 +32,8 @@ type FieldMapping struct {
 	fromNodeKey string
 	from        string
 	to          string
+
+	customExtractor func(input any) (any, error)
 }
 
 // String returns the string representation of the FieldMapping.
@@ -68,10 +70,14 @@ func FromField(from string) *FieldMapping {
 
 // ToField creates a FieldMapping that maps the entire predecessor output to a single successor field.
 // Field: either the field of a struct, or the key of a map.
-func ToField(to string) *FieldMapping {
-	return &FieldMapping{
+func ToField(to string, opts ...FieldMappingOption) *FieldMapping {
+	fm := &FieldMapping{
 		to: to,
 	}
+	for _, opt := range opts {
+		opt(fm)
+	}
+	return fm
 }
 
 // MapFields creates a FieldMapping that maps a single predecessor field to a single successor field.
@@ -81,6 +87,30 @@ func MapFields(from, to string) *FieldMapping {
 		from: from,
 		to:   to,
 	}
+}
+
+func (m *FieldMapping) FromNodeKey() string {
+	return m.fromNodeKey
+}
+
+func (m *FieldMapping) FromPath() FieldPath {
+	return splitFieldPath(m.from)
+}
+
+func (m *FieldMapping) ToPath() FieldPath {
+	return splitFieldPath(m.to)
+}
+
+func (m *FieldMapping) Equals(o *FieldMapping) bool {
+	if m == nil {
+		return o == nil
+	}
+
+	if o == nil || m.customExtractor != nil || o.customExtractor != nil {
+		return false
+	}
+
+	return m.from == o.from && m.to == o.to && m.fromNodeKey == o.fromNodeKey
 }
 
 // FieldPath represents a path to a nested field in a struct or map.
@@ -135,10 +165,14 @@ func FromFieldPath(fromFieldPath FieldPath) *FieldMapping {
 //	ToFieldPath(FieldPath{"response", "data", "userName"})
 //
 // Note: The field path elements must not contain the internal path separator character ('\x1F').
-func ToFieldPath(toFieldPath FieldPath) *FieldMapping {
-	return &FieldMapping{
+func ToFieldPath(toFieldPath FieldPath, opts ...FieldMappingOption) *FieldMapping {
+	fm := &FieldMapping{
 		to: toFieldPath.join(),
 	}
+	for _, opt := range opts {
+		opt(fm)
+	}
+	return fm
 }
 
 // MapFieldPaths creates a FieldMapping that maps a single predecessor field path to a single successor field path.
@@ -156,6 +190,18 @@ func MapFieldPaths(fromFieldPath, toFieldPath FieldPath) *FieldMapping {
 	return &FieldMapping{
 		from: fromFieldPath.join(),
 		to:   toFieldPath.join(),
+	}
+}
+
+// FieldMappingOption is a functional option for configuring a FieldMapping.
+type FieldMappingOption func(*FieldMapping)
+
+// WithCustomExtractor sets a custom extractor function for the FieldMapping.
+// The extractor function is used to extract a value from the 'source' of the FieldMapping.
+// NOTE: if specified in this way, Eino can only check the validity of the field mapping at request time..
+func WithCustomExtractor(extractor func(input any) (any, error)) FieldMappingOption {
+	return func(m *FieldMapping) {
+		m.customExtractor = extractor
 	}
 }
 
@@ -441,6 +487,14 @@ func fieldMap(mappings []*FieldMapping, allowMapKeyNotFound bool, uncheckedSourc
 		var inputValue reflect.Value
 	loop:
 		for _, mapping := range mappings {
+			if mapping.customExtractor != nil {
+				result[mapping.to], err = mapping.customExtractor(input)
+				if err != nil {
+					return nil, err
+				}
+				continue
+			}
+
 			if len(mapping.from) == 0 {
 				result[mapping.to] = input
 				continue
@@ -548,11 +602,21 @@ func takeOne(inputValue reflect.Value, inputType reflect.Type, from string) (tak
 
 func isFromAll(mappings []*FieldMapping) bool {
 	for _, mapping := range mappings {
-		if len(mapping.from) == 0 {
+		if len(mapping.from) == 0 && mapping.customExtractor == nil {
 			return true
 		}
 	}
 	return false
+}
+
+func fromFields(mappings []*FieldMapping) bool {
+	for _, mapping := range mappings {
+		if len(mapping.from) == 0 || mapping.customExtractor != nil {
+			return false
+		}
+	}
+
+	return true
 }
 
 func isToAll(mappings []*FieldMapping) bool {
@@ -579,8 +643,10 @@ func validateStructOrMap(t reflect.Type) bool {
 }
 
 func validateFieldMapping(predecessorType reflect.Type, successorType reflect.Type, mappings []*FieldMapping) (
-	typeHandler *handlerPair, // type checkers that are deferred to request-time
-	uncheckedSourcePath map[string]FieldPath, // the remaining predecessor field paths that are not checked at compile time because of interface type found
+	// type checkers that are deferred to request-time
+	typeHandler *handlerPair,
+	// the remaining predecessor field paths that are not checked at compile time because of interface type found
+	uncheckedSourcePath map[string]FieldPath,
 	err error) {
 	// check if mapping is legal
 	if isFromAll(mappings) && isToAll(mappings) {
@@ -589,7 +655,7 @@ func validateFieldMapping(predecessorType reflect.Type, successorType reflect.Ty
 	} else if !isToAll(mappings) && (!validateStructOrMap(successorType) && successorType != reflect.TypeOf((*any)(nil)).Elem()) {
 		// if user has not provided a specific struct type, graph cannot construct any struct in the runtime
 		return nil, nil, fmt.Errorf("static check fail: successor input type should be struct or map, actual: %v", successorType)
-	} else if !isFromAll(mappings) && !validateStructOrMap(predecessorType) {
+	} else if fromFields(mappings) && !validateStructOrMap(predecessorType) {
 		return nil, nil, fmt.Errorf("static check fail: predecessor output type should be struct or map, actual: %v", predecessorType)
 	}
 
@@ -597,10 +663,6 @@ func validateFieldMapping(predecessorType reflect.Type, successorType reflect.Ty
 
 	for i := range mappings {
 		mapping := mappings[i]
-		predecessorFieldType, predecessorRemaining, err := checkAndExtractFieldType(splitFieldPath(mapping.from), predecessorType)
-		if err != nil {
-			return nil, nil, fmt.Errorf("static check failed for mapping %s: %w", mapping, err)
-		}
 
 		successorFieldType, successorRemaining, err := checkAndExtractFieldType(splitFieldPath(mapping.to), successorType)
 		if err != nil {
@@ -612,6 +674,15 @@ func validateFieldMapping(predecessorType reflect.Type, successorType reflect.Ty
 				continue // at request time expand this 'any' to 'map[string]any'
 			}
 			return nil, nil, fmt.Errorf("static check failed for mapping %s, the successor has intermediate interface type %v", mapping, successorFieldType)
+		}
+
+		if mapping.customExtractor != nil { // custom extractor applies to request-time data, so skip compile-time check
+			continue
+		}
+
+		predecessorFieldType, predecessorRemaining, err := checkAndExtractFieldType(splitFieldPath(mapping.from), predecessorType)
+		if err != nil {
+			return nil, nil, fmt.Errorf("static check failed for mapping %s: %w", mapping, err)
 		}
 
 		if len(predecessorRemaining) > 0 {

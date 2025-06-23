@@ -1463,3 +1463,36 @@ func TestSetFanInMergeConfig_RealStreamNode_Workflow(t *testing.T) {
 	assert.True(t, sourceNames["s1"], "should receive SourceEOF from s1")
 	assert.True(t, sourceNames["s2"], "should receive SourceEOF from s2")
 }
+
+func TestCustomExtractor(t *testing.T) {
+	t.Run("custom extract from array element", func(t *testing.T) {
+		wf := NewWorkflow[[]int, map[string]int]()
+		wf.End().AddInput(START, ToField("a", WithCustomExtractor(func(input any) (any, error) {
+			return input.([]int)[0], nil
+		})))
+		r, err := wf.Compile(context.Background())
+		assert.NoError(t, err)
+		result, err := r.Invoke(context.Background(), []int{1, 2})
+		assert.NoError(t, err)
+		assert.Equal(t, map[string]int{"a": 1}, result)
+	})
+
+	t.Run("mix custom extract with normal mapping", func(t *testing.T) {
+		wf := NewWorkflow[map[string]any, map[string]int]()
+		wf.End().AddInput(START, ToField("a", WithCustomExtractor(func(input any) (any, error) {
+			return input.(map[string]any)["a"].([]any)[0].(map[string]any)["c"], nil
+		})), MapFields("b", "b"))
+		r, err := wf.Compile(context.Background())
+		assert.NoError(t, err)
+		result, err := r.Invoke(context.Background(), map[string]any{
+			"a": []any{
+				map[string]any{
+					"c": 1,
+				},
+			},
+			"b": 2,
+		})
+		assert.NoError(t, err)
+		assert.Equal(t, map[string]int{"a": 1, "b": 2}, result)
+	})
+}
