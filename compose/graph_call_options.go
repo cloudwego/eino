@@ -38,6 +38,7 @@ type Option struct {
 
 	maxRunSteps   int
 	checkPointID  *string
+	forceNewRun   bool
 	stateModifier StateModifier
 }
 

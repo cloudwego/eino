@@ -152,7 +152,7 @@ func (r *runner) run(ctx context.Context, isStream bool, input any, opts ...Opti
 	}
 
 	// Extract CheckPointID
-	checkPointID, stateModifier := getCheckPointInfo(opts...)
+	checkPointID, stateModifier, forceNewRun := getCheckPointInfo(opts...)
 	if checkPointID != nil && r.checkPointer.store == nil {
 		return nil, newGraphRunError(fmt.Errorf("receive checkpoint id but have not set checkpoint store"))
 	}
@@ -193,7 +193,7 @@ func (r *runner) run(ctx context.Context, isStream bool, input any, opts ...Opti
 		if err != nil {
 			return nil, newGraphRunError(fmt.Errorf("restore tasks fail: %w", err))
 		}
-	} else if checkPointID != nil {
+	} else if checkPointID != nil && !forceNewRun {
 		cp, err := getCheckPointFromStore(ctx, *checkPointID, r.checkPointer)
 		if err != nil {
 			return nil, newGraphRunError(fmt.Errorf("load checkpoint from store fail: %w", err))
@@ -630,7 +630,7 @@ func (r *runner) createTasks(ctx context.Context, nodeMap map[string]any, optMap
 	return nextTasks, nil
 }
 
-func getCheckPointInfo(opts ...Option) (checkPointID *string, stateModifier StateModifier) {
+func getCheckPointInfo(opts ...Option) (checkPointID *string, stateModifier StateModifier, forceNewRun bool) {
 	for _, opt := range opts {
 		if opt.checkPointID != nil {
 			checkPointID = opt.checkPointID
@@ -638,8 +638,9 @@ func getCheckPointInfo(opts ...Option) (checkPointID *string, stateModifier Stat
 		if opt.stateModifier != nil {
 			stateModifier = opt.stateModifier
 		}
+		forceNewRun = opt.forceNewRun
 	}
-	return checkPointID, stateModifier
+	return
 }
 
 func (r *runner) restoreTasks(ctx context.Context, inputs map[string]any, skipPreHandler map[string]bool, toolNodeExecutedTools map[string]map[string]string, optMap map[string][]any) ([]*task, error) {

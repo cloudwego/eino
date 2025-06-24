@@ -18,6 +18,7 @@ package compose
 
 import (
 	"context"
+	"errors"
 	"io"
 	"testing"
 	"time"
@@ -953,4 +954,33 @@ func TestGraphStartInterrupt(t *testing.T) {
 	result, err := r.Invoke(ctx, "", WithCheckPointID("1"))
 	assert.NoError(t, err)
 	assert.Equal(t, "input1sub1", result)
+}
+
+func TestWithForceNewRun(t *testing.T) {
+	g := NewGraph[string, string]()
+	_ = g.AddLambdaNode("1", InvokableLambda(func(ctx context.Context, input string) (output string, err error) {
+		return input + "1", nil
+	}))
+	_ = g.AddEdge(START, "1")
+	_ = g.AddEdge("1", END)
+	ctx := context.Background()
+	r, err := g.Compile(ctx, WithCheckPointStore(&failStore{t: t}))
+	assert.NoError(t, err)
+	result, err := r.Invoke(ctx, "input", WithCheckPointID("1"), WithForceNewRun())
+	assert.NoError(t, err)
+	assert.Equal(t, "input1", result)
+}
+
+type failStore struct {
+	t *testing.T
+}
+
+func (f *failStore) Get(ctx context.Context, checkPointID string) ([]byte, bool, error) {
+	f.t.Fatalf("cannot call store")
+	return nil, false, errors.New("fail")
+}
+
+func (f *failStore) Set(ctx context.Context, checkPointID string, checkPoint []byte) error {
+	f.t.Fatalf("cannot call store")
+	return errors.New("fail")
 }

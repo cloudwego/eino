@@ -54,6 +54,13 @@ func WithCheckPointID(checkPointID string) Option {
 	}
 }
 
+// WithForceNewRun forces the graph to run from the beginning, ignoring any checkpoints.
+func WithForceNewRun() Option {
+	return Option{
+		forceNewRun: true,
+	}
+}
+
 type StateModifier func(ctx context.Context, path NodePath, state any) error
 
 func WithStateModifier(sm StateModifier) Option {
