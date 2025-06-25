@@ -60,44 +60,44 @@ var toolInfo = &schema.ToolInfo{
 	Desc: "full update user info",
 	ParamsOneOf: schema.NewParamsOneOfByOpenAPIV3(
 		&openapi3.Schema{
-			Type:     openapi3.TypeObject,
+			Type:     &openapi3.Types{openapi3.TypeObject},
 			Required: []string{"age", "incomes", "name"},
 			Properties: openapi3.Schemas{
 				"name": {
 					Value: &openapi3.Schema{
-						Type:        openapi3.TypeString,
+						Type:        &openapi3.Types{openapi3.TypeString},
 						Description: "the name of the user",
 					},
 				},
 				"age": {
 					Value: &openapi3.Schema{
-						Type:        openapi3.TypeInteger,
+						Type:        &openapi3.Types{openapi3.TypeInteger},
 						Description: "the age of the user",
 					},
 				},
 				"job": {
 					Value: &openapi3.Schema{
-						Type:        openapi3.TypeObject,
+						Type:        &openapi3.Types{openapi3.TypeObject},
 						Description: "the job of the user",
 						Required:    []string{"company"},
-						// Nullable:    true,
+						Nullable:    true,
 						Properties: openapi3.Schemas{
 							"company": {
 								Value: &openapi3.Schema{
-									Type:        openapi3.TypeString,
+									Type:        &openapi3.Types{openapi3.TypeString},
 									Description: "the company where the user works",
 								},
 							},
 							"service_length": {
 								Value: &openapi3.Schema{
-									Type:        openapi3.TypeNumber,
+									Type:        &openapi3.Types{openapi3.TypeNumber},
 									Description: "the year of user's service",
 									Format:      "float",
 								},
 							},
 							"position": {
 								Value: &openapi3.Schema{
-									Type:        openapi3.TypeString,
+									Type:        &openapi3.Types{openapi3.TypeString},
 									Description: "the position of the user's job",
 								},
 							},
@@ -106,56 +106,56 @@ var toolInfo = &schema.ToolInfo{
 				},
 				"incomes": {
 					Value: &openapi3.Schema{
-						Type:        openapi3.TypeArray,
+						Type:        &openapi3.Types{openapi3.TypeArray},
 						Description: "the incomes of the user",
 						Items: &openapi3.SchemaRef{
 							Value: &openapi3.Schema{
-								Type:        openapi3.TypeObject,
+								Type:        &openapi3.Types{openapi3.TypeObject},
 								Required:    []string{"amount", "has_pay_tax", "source"},
 								Description: "the incomes of the user",
-								// Nullable:    true,
+								Nullable:    true,
 								Properties: openapi3.Schemas{
 									"source": {
 										Value: &openapi3.Schema{
-											Type:        openapi3.TypeString,
+											Type:        &openapi3.Types{openapi3.TypeString},
 											Description: "the source of income",
 										},
 									},
 									"amount": {
 										Value: &openapi3.Schema{
-											Type:        openapi3.TypeInteger,
+											Type:        &openapi3.Types{openapi3.TypeInteger},
 											Description: "the amount of income",
 										},
 									},
 									"has_pay_tax": {
 										Value: &openapi3.Schema{
-											Type:        openapi3.TypeBoolean,
+											Type:        &openapi3.Types{openapi3.TypeBoolean},
 											Description: "whether the user has paid tax",
 										},
 									},
 									"job": {
 										Value: &openapi3.Schema{
-											Type:        openapi3.TypeObject,
+											Type:        &openapi3.Types{openapi3.TypeObject},
 											Description: "the job of the user when earning this income",
 											Required:    []string{"company"},
-											// Nullable:    true,
+											Nullable:    true,
 											Properties: openapi3.Schemas{
 												"company": {
 													Value: &openapi3.Schema{
-														Type:        openapi3.TypeString,
+														Type:        &openapi3.Types{openapi3.TypeString},
 														Description: "the company where the user works",
 													},
 												},
 												"service_length": {
 													Value: &openapi3.Schema{
-														Type:        openapi3.TypeNumber,
+														Type:        &openapi3.Types{openapi3.TypeNumber},
 														Description: "the year of user's service",
 														Format:      "float",
 													},
 												},
 												"position": {
 													Value: &openapi3.Schema{
-														Type:        openapi3.TypeString,
+														Type:        &openapi3.Types{openapi3.TypeString},
 														Description: "the position of the user's job",
 													},
 												},
