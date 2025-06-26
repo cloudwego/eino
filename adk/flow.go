@@ -329,7 +329,7 @@ func (a *flowAgent) Run(ctx context.Context, input *AgentInput, opts ...AgentRun
 				return
 			}
 
-			subAIter := agentToRun.Run(ctx, input, opts...)
+			subAIter := agentToRun.Run(ctx, nil /*subagents get input from runCtx*/, opts...)
 			for {
 				subEvent, ok_ := subAIter.Next()
 				if !ok_ {
