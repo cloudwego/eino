@@ -38,10 +38,10 @@ import (
 
 func init() {
 	internal.RegisterStreamChunkConcatFunc(ConcatMessages)
-	internal.RegisterStreamChunkConcatFunc(concatMessageArray)
+	internal.RegisterStreamChunkConcatFunc(ConcatMessageArray)
 }
 
-func concatMessageArray(mas [][]*Message) ([]*Message, error) {
+func ConcatMessageArray(mas [][]*Message) ([]*Message, error) {
 	arrayLen := len(mas[0])
 
 	ret := make([]*Message, arrayLen)
