@@ -60,11 +60,14 @@ type AgentConfig struct {
 	// default 12 of steps in pregel (node num + 10).
 	MaxStep int `json:"max_step"`
 
-	// Tools that will make agent return directly when the tool is called.
+	// ToolReturnDirectly specifies tools that will make agent return directly when the tool is called.
 	// When multiple tools are called and more than one tool is in the return directly list, only the first one will be returned.
 	ToolReturnDirectly map[string]struct{}
 
-	// StreamOutputHandler is a function to determine whether the model's streaming output contains tool calls.
+	// ToolReturnDirectlyChecker checks if a tool will make agent should return directly after a tool call dynamically.
+	ToolReturnDirectlyChecker func(ctx context.Context, name, result string) (returnDirectly bool)
+
+	// StreamToolCallChecker is a function to determine whether the model's streaming output contains tool calls.
 	// Different models have different ways of outputting tool calls in streaming mode:
 	// - Some models (like OpenAI) output tool calls directly
 	// - Others (like Claude) output text first, then tool calls
@@ -244,10 +247,18 @@ func NewAgent(ctx context.Context, config *AgentConfig) (_ *Agent, err error) {
 			return state.Messages[len(state.Messages)-1], nil // used for rerun interrupt resume
 		}
 		state.Messages = append(state.Messages, input)
-		state.ReturnDirectlyToolCallID = getReturnDirectlyToolCallID(input, config.ToolReturnDirectly)
 		return input, nil
 	}
-	if err = graph.AddToolsNode(nodeKeyTools, toolsNode, compose.WithStatePreHandler(toolsNodePreHandle), compose.WithNodeName(toolsNodeName)); err != nil {
+	toolsNodePostHandle := func(ctx context.Context, input []*schema.Message, state *state) ([]*schema.Message, error) {
+		for _, in := range input {
+			if checkReturnDirectly(ctx, in.Name, in.Content, config.ToolReturnDirectly, config.ToolReturnDirectlyChecker) {
+				state.ReturnDirectlyToolCallID = in.ToolCallID
+				return input, nil
+			}
+		}
+		return input, nil
+	}
+	if err = graph.AddToolsNode(nodeKeyTools, toolsNode, compose.WithStatePreHandler(toolsNodePreHandle), compose.WithStatePostHandler(toolsNodePostHandle), compose.WithNodeName(toolsNodeName)); err != nil {
 		return nil, err
 	}
 
@@ -351,18 +362,18 @@ func genToolInfos(ctx context.Context, config compose.ToolsNodeConfig) ([]*schem
 	return toolInfos, nil
 }
 
-func getReturnDirectlyToolCallID(input *schema.Message, toolReturnDirectly map[string]struct{}) string {
-	if len(toolReturnDirectly) == 0 {
-		return ""
-	}
-
-	for _, toolCall := range input.ToolCalls {
-		if _, ok := toolReturnDirectly[toolCall.Function.Name]; ok {
-			return toolCall.ID
+func checkReturnDirectly(ctx context.Context, name, result string, toolReturnDirectly map[string]struct{}, checker func(ctx context.Context, name, result string) bool) bool {
+	if checker != nil {
+		r := checker(ctx, name, result)
+		if r {
+			return r
 		}
 	}
 
-	return ""
+	if _, ok := toolReturnDirectly[name]; ok {
+		return true
+	}
+	return false
 }
 
 // Generate generates a response from the agent.
