@@ -143,6 +143,18 @@ const (
 	ToolsNodeName = "Tools"
 )
 
+// SetReturnDirectly is a helper function that can be called within a tool's execution.
+// It signals the ReAct agent to stop further processing and return the result of the current tool call directly.
+// This is useful when the tool's output is the final answer and no more steps are needed.
+// Note: If multiple tools call this function in the same step, only the last call will take effect.
+// This setting has a higher priority than the AgentConfig.ToolReturnDirectly.
+func SetReturnDirectly(ctx context.Context) error {
+	return compose.ProcessState(ctx, func(ctx context.Context, s *state) error {
+		s.ReturnDirectlyToolCallID = compose.GetToolCallID(ctx)
+		return nil
+	})
+}
+
 // Agent is the ReAct agent.
 // ReAct agent is a simple agent that handles user messages with a chat model and tools.
 // ReAct will call the chat model, if the message contains tool calls, it will call the tools.
@@ -264,11 +276,7 @@ func NewAgent(ctx context.Context, config *AgentConfig) (_ *Agent, err error) {
 		return nil, err
 	}
 
-	if len(config.ToolReturnDirectly) > 0 {
-		if err = buildReturnDirectly(graph); err != nil {
-			return nil, err
-		}
-	} else if err = graph.AddEdge(nodeKeyTools, nodeKeyModel); err != nil {
+	if err = buildReturnDirectly(graph); err != nil {
 		return nil, err
 	}
 
