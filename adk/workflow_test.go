@@ -40,7 +40,7 @@ func (a *mockAgent) Description(_ context.Context) string {
 	return a.description
 }
 
-func (a *mockAgent) Run(_ context.Context, _ *AgentInput, _ ...AgentRunOption) *AsyncIterator[*AgentEvent] {
+func (a *mockAgent) Run(_ context.Context, _ *AgentInput, _ ...Option) *AsyncIterator[*AgentEvent] {
 	iterator, generator := NewAsyncIteratorPair[*AgentEvent]()
 
 	go func() {

@@ -53,7 +53,7 @@ func (a *workflowAgent) Description(_ context.Context) string {
 	return a.description
 }
 
-func (a *workflowAgent) Run(ctx context.Context, input *AgentInput, opts ...AgentRunOption) *AsyncIterator[*AgentEvent] {
+func (a *workflowAgent) Run(ctx context.Context, input *AgentInput, opts ...Option) *AsyncIterator[*AgentEvent] {
 	iterator, generator := NewAsyncIteratorPair[*AgentEvent]()
 
 	go func() {
@@ -88,7 +88,7 @@ func (a *workflowAgent) Run(ctx context.Context, input *AgentInput, opts ...Agen
 }
 
 func (a *workflowAgent) runSequential(ctx context.Context, input *AgentInput,
-	generator *AsyncGenerator[*AgentEvent], opts ...AgentRunOption) (exit bool) {
+	generator *AsyncGenerator[*AgentEvent], opts ...Option) (exit bool) {
 
 	for _, subAgent := range a.subAgents {
 		subIterator := subAgent.Run(ctx, input, opts...)
@@ -117,7 +117,7 @@ func (a *workflowAgent) runSequential(ctx context.Context, input *AgentInput,
 }
 
 func (a *workflowAgent) runLoop(ctx context.Context, input *AgentInput,
-	generator *AsyncGenerator[*AgentEvent], opts ...AgentRunOption) {
+	generator *AsyncGenerator[*AgentEvent], opts ...Option) {
 
 	if len(a.subAgents) == 0 {
 		return
@@ -134,7 +134,7 @@ func (a *workflowAgent) runLoop(ctx context.Context, input *AgentInput,
 }
 
 func (a *workflowAgent) runParallel(ctx context.Context, input *AgentInput,
-	generator *AsyncGenerator[*AgentEvent], opts ...AgentRunOption) {
+	generator *AsyncGenerator[*AgentEvent], opts ...Option) {
 
 	if len(a.subAgents) == 0 {
 		return

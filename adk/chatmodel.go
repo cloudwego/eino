@@ -502,7 +502,7 @@ func (a *ChatModelAgent) buildRunFunc(ctx context.Context) runFunc {
 	return a.run
 }
 
-func (a *ChatModelAgent) Run(ctx context.Context, input *AgentInput, _ ...AgentRunOption) *AsyncIterator[*AgentEvent] {
+func (a *ChatModelAgent) Run(ctx context.Context, input *AgentInput, _ ...Option) *AsyncIterator[*AgentEvent] {
 	run := a.buildRunFunc(ctx)
 
 	iterator, generator := NewAsyncIteratorPair[*AgentEvent]()

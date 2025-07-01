@@ -44,7 +44,7 @@ func (a *mockRunnerAgent) Description(_ context.Context) string {
 	return a.description
 }
 
-func (a *mockRunnerAgent) Run(_ context.Context, input *AgentInput, _ ...AgentRunOption) *AsyncIterator[*AgentEvent] {
+func (a *mockRunnerAgent) Run(_ context.Context, input *AgentInput, _ ...Option) *AsyncIterator[*AgentEvent] {
 	// Record the call details for verification
 	a.callCount++
 	a.lastInput = input
