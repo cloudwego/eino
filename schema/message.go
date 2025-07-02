@@ -308,6 +308,9 @@ type Message struct {
 
 	ResponseMeta *ResponseMeta `json:"response_meta,omitempty"`
 
+	// ReasoningContent is the thinking process of the model, which will be included when the model returns reasoning content.
+	ReasoningContent string `json:"reasoning_content,omitempty"`
+
 	// customized information for model implementation
 	Extra map[string]any `json:"extra,omitempty"`
 }
@@ -650,11 +653,13 @@ func concatToolCalls(chunks []ToolCall) ([]ToolCall, error) {
 // concatedMsg, err := ConcatMessages(msgs) // concatedMsg.Content will be full content of all messages
 func ConcatMessages(msgs []*Message) (*Message, error) {
 	var (
-		contents   []string
-		contentLen int
-		toolCalls  []ToolCall
-		ret        = Message{}
-		extraList  = make([]map[string]any, 0, len(msgs))
+		contents            []string
+		contentLen          int
+		reasoningContents   []string
+		reasoningContentLen int
+		toolCalls           []ToolCall
+		ret                 = Message{}
+		extraList           = make([]map[string]any, 0, len(msgs))
 	)
 
 	for idx, msg := range msgs {
@@ -700,6 +705,10 @@ func ConcatMessages(msgs []*Message) (*Message, error) {
 		if msg.Content != "" {
 			contents = append(contents, msg.Content)
 			contentLen += len(msg.Content)
+		}
+		if msg.ReasoningContent != "" {
+			reasoningContents = append(reasoningContents, msg.ReasoningContent)
+			reasoningContentLen += len(msg.ReasoningContent)
 		}
 
 		if len(msg.ToolCalls) > 0 {
@@ -756,7 +765,6 @@ func ConcatMessages(msgs []*Message) (*Message, error) {
 	if len(contents) > 0 {
 		var sb strings.Builder
 		sb.Grow(contentLen)
-		sb.WriteString(ret.Content)
 		for _, content := range contents {
 			_, err := sb.WriteString(content)
 			if err != nil {
@@ -765,6 +773,18 @@ func ConcatMessages(msgs []*Message) (*Message, error) {
 		}
 
 		ret.Content = sb.String()
+	}
+	if len(reasoningContents) > 0 {
+		var sb strings.Builder
+		sb.Grow(reasoningContentLen)
+		for _, rc := range reasoningContents {
+			_, err := sb.WriteString(rc)
+			if err != nil {
+				return nil, err
+			}
+		}
+
+		ret.ReasoningContent = sb.String()
 	}
 
 	if len(toolCalls) > 0 {
