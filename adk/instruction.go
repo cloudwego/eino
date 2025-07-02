@@ -23,15 +23,21 @@ import (
 )
 
 const (
-	TransferToAgentInstruction = "You have a list of other agents to transfer to:\n%s\nIf you are the best to answer the question according to your description, you can answer it.\nIf another agent is better for answering the question according to its description, call `" + TransferToAgentToolName + "` function to transfer the question to that agent. When transferring, do not generate any text other than the function call."
+	TransferToAgentInstruction = `Available other agents: %s
+
+Decision rule:
+- If you're best suited for the question according to your description: ANSWER
+- If another agent is better according its description: CALL '%s' function with their agent name
+
+When transferring: OUTPUT ONLY THE FUNCTION CALL`
 )
 
 func genTransferToAgentInstruction(ctx context.Context, agents []Agent) string {
 	var sb strings.Builder
 	for _, agent := range agents {
-		sb.WriteString(fmt.Sprintf("\nAgent name: %s\n Agent description: %s\n",
+		sb.WriteString(fmt.Sprintf("\n- Agent name: %s\n  Agent description: %s",
 			agent.Name(ctx), agent.Description(ctx)))
 	}
 
-	return fmt.Sprintf(TransferToAgentInstruction, sb.String())
+	return fmt.Sprintf(TransferToAgentInstruction, sb.String(), TransferToAgentToolName)
 }

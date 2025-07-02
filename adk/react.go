@@ -18,6 +18,7 @@ package adk
 
 import (
 	"context"
+	"errors"
 	"io"
 
 	"github.com/cloudwego/eino/components/model"
@@ -160,7 +161,7 @@ func newReact(ctx context.Context, config *reactConfig) (reactGraph, error) {
 		for {
 			chunk, err_ := sMsg.Recv()
 			if err_ != nil {
-				if err_ == io.EOF {
+				if errors.Is(err_, io.EOF) {
 					return compose.END, nil
 				}
 
@@ -170,6 +171,12 @@ func newReact(ctx context.Context, config *reactConfig) (reactGraph, error) {
 			if len(chunk.ToolCalls) > 0 {
 				return toolNode_, nil
 			}
+
+			if len(chunk.Content) == 0 { // skip empty chunks at the front
+				continue
+			}
+
+			return compose.END, nil
 		}
 	}
 	branch := compose.NewStreamGraphBranch(toolCallCheck, map[string]bool{compose.END: true, toolNode_: true})
