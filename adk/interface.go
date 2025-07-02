@@ -119,8 +119,6 @@ type AgentInput struct {
 	EnableStreaming bool
 }
 
-type AgentRunOption struct{}
-
 type Agent interface {
 	Name(ctx context.Context) string
 	Description(ctx context.Context) string
