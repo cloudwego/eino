@@ -35,6 +35,11 @@ type Option struct {
 	agentNames []string
 }
 
+func (o Option) DesignateAgent(name ...string) Option {
+	o.agentNames = append(o.agentNames, name...)
+	return o
+}
+
 func getCommonOptions(base *options, opts ...Option) *options {
 	if base == nil {
 		base = &options{}
