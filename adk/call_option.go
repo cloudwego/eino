@@ -85,7 +85,7 @@ func GetImplSpecificOptions[T any](base *T, opts ...AgentRunOption) *T {
 	return base
 }
 
-func filterOptions(agentName string, opts ...AgentRunOption) []AgentRunOption {
+func filterOptions(agentName string, opts []AgentRunOption) []AgentRunOption {
 	if len(opts) == 0 {
 		return nil
 	}
