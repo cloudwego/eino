@@ -16,17 +16,31 @@
 
 package adk
 
-type Options struct {
+// WithXXX is the demo for setting option.
+func WithXXX(xx string) Option {
+	return WrapImplSpecificOptFn[options](func(o *options) {
+		o.XX = xx
+	})
+}
+
+type options struct {
+	XX string
 }
 
 // Option is the call option for adk Agent.
 type Option struct {
-	apply func(opts *Options)
-
 	implSpecificOptFn any
 
 	// specify which Agent can see this Option, if empty, all Agents can see this Option
 	agentNames []string
+}
+
+func getCommonOptions(base *options, opts ...Option) *options {
+	if base == nil {
+		base = &options{}
+	}
+
+	return GetImplSpecificOptions[options](base, opts...)
 }
 
 // WrapImplSpecificOptFn is the option to wrap the implementation specific option function.
@@ -36,22 +50,7 @@ func WrapImplSpecificOptFn[T any](optFn func(*T)) Option {
 	}
 }
 
-func GetCommonOptions(base *Options, opts ...Option) *Options {
-	if base == nil {
-		base = &Options{}
-	}
-
-	for i := range opts {
-		opt := opts[i]
-		if opt.apply != nil {
-			opt.apply(base)
-		}
-	}
-
-	return base
-}
-
-// GetImplSpecificOptions extract the implementation specific Options from Option list, optionally providing a base Options with default values.
+// GetImplSpecificOptions extract the implementation specific options from Option list, optionally providing a base options with default values.
 // e.g.
 //
 //	myOption := &MyOption{
