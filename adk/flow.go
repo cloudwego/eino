@@ -264,7 +264,7 @@ func buildDefaultHistoryRewriter(agentName string) HistoryRewriter {
 	}
 }
 
-func (a *flowAgent) Run(ctx context.Context, input *AgentInput, opts ...Option) *AsyncIterator[*AgentEvent] {
+func (a *flowAgent) Run(ctx context.Context, input *AgentInput, opts ...AgentRunOption) *AsyncIterator[*AgentEvent] {
 	agentName := a.Name(ctx)
 
 	ctx, runCtx := initRunCtx(ctx, agentName, input)

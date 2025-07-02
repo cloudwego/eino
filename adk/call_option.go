@@ -16,31 +16,35 @@
 
 package adk
 
-// WithXXX is the demo for setting option.
-func WithXXX(xx string) Option {
+import (
+	"github.com/cloudwego/eino/callbacks"
+)
+
+// WithCallbacks is the demo for setting option.
+func WithCallbacks(cbs ...callbacks.Handler) AgentRunOption {
 	return WrapImplSpecificOptFn[options](func(o *options) {
-		o.XX = xx
+		o.Callbacks = append(o.Callbacks, cbs...)
 	})
 }
 
 type options struct {
-	XX string
+	Callbacks []callbacks.Handler
 }
 
-// Option is the call option for adk Agent.
-type Option struct {
+// AgentRunOption is the call option for adk Agent.
+type AgentRunOption struct {
 	implSpecificOptFn any
 
-	// specify which Agent can see this Option, if empty, all Agents can see this Option
+	// specify which Agent can see this AgentRunOption, if empty, all Agents can see this AgentRunOption
 	agentNames []string
 }
 
-func (o Option) DesignateAgent(name ...string) Option {
+func (o AgentRunOption) DesignateAgent(name ...string) AgentRunOption {
 	o.agentNames = append(o.agentNames, name...)
 	return o
 }
 
-func getCommonOptions(base *options, opts ...Option) *options {
+func getCommonOptions(base *options, opts ...AgentRunOption) *options {
 	if base == nil {
 		base = &options{}
 	}
@@ -49,13 +53,13 @@ func getCommonOptions(base *options, opts ...Option) *options {
 }
 
 // WrapImplSpecificOptFn is the option to wrap the implementation specific option function.
-func WrapImplSpecificOptFn[T any](optFn func(*T)) Option {
-	return Option{
+func WrapImplSpecificOptFn[T any](optFn func(*T)) AgentRunOption {
+	return AgentRunOption{
 		implSpecificOptFn: optFn,
 	}
 }
 
-// GetImplSpecificOptions extract the implementation specific options from Option list, optionally providing a base options with default values.
+// GetImplSpecificOptions extract the implementation specific options from AgentRunOption list, optionally providing a base options with default values.
 // e.g.
 //
 //	myOption := &MyOption{
@@ -63,7 +67,7 @@ func WrapImplSpecificOptFn[T any](optFn func(*T)) Option {
 //	}
 //
 //	myOption := model.GetImplSpecificOptions(myOption, opts...)
-func GetImplSpecificOptions[T any](base *T, opts ...Option) *T {
+func GetImplSpecificOptions[T any](base *T, opts ...AgentRunOption) *T {
 	if base == nil {
 		base = new(T)
 	}
@@ -81,11 +85,11 @@ func GetImplSpecificOptions[T any](base *T, opts ...Option) *T {
 	return base
 }
 
-func filterOptions(agentName string, opts ...Option) []Option {
+func filterOptions(agentName string, opts ...AgentRunOption) []AgentRunOption {
 	if len(opts) == 0 {
 		return nil
 	}
-	var filteredOpts []Option
+	var filteredOpts []AgentRunOption
 	for i := range opts {
 		opt := opts[i]
 		if len(opt.agentNames) == 0 {

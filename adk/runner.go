@@ -35,7 +35,7 @@ func NewRunner(_ context.Context, conf RunnerConfig) *Runner {
 }
 
 func (r *Runner) Run(ctx context.Context, agent Agent, messages []Message,
-	opts ...Option) *AsyncIterator[*AgentEvent] {
+	opts ...AgentRunOption) *AsyncIterator[*AgentEvent] {
 
 	fa := toFlowAgent(ctx, agent)
 
@@ -50,7 +50,7 @@ func (r *Runner) Run(ctx context.Context, agent Agent, messages []Message,
 }
 
 func (r *Runner) Query(ctx context.Context, agent Agent,
-	query string, opts ...Option) *AsyncIterator[*AgentEvent] {
+	query string, opts ...AgentRunOption) *AsyncIterator[*AgentEvent] {
 
 	return r.Run(ctx, agent, []Message{schema.UserMessage(query)}, opts...)
 }

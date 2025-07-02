@@ -123,7 +123,7 @@ type Agent interface {
 	Name(ctx context.Context) string
 	Description(ctx context.Context) string
 
-	Run(ctx context.Context, input *AgentInput, options ...Option) *AsyncIterator[*AgentEvent]
+	Run(ctx context.Context, input *AgentInput, options ...AgentRunOption) *AsyncIterator[*AgentEvent]
 }
 
 type OnSubAgents interface {
