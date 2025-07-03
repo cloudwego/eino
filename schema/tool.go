@@ -120,7 +120,7 @@ func (p *ParamsOneOf) ToOpenAPIV3() (*openapi3.Schema, error) {
 	if p.params != nil {
 		sc := &openapi3.Schema{
 			Properties: make(map[string]*openapi3.SchemaRef, len(p.params)),
-			Type:       openapi3.TypeObject,
+			Type:       &openapi3.Types{openapi3.TypeObject},
 			Required:   make([]string, 0, len(p.params)),
 		}
 
@@ -159,7 +159,7 @@ func paramInfoToJSONSchema(paramInfo *ParameterInfo) *openapi3.SchemaRef {
 
 	js := &openapi3.SchemaRef{
 		Value: &openapi3.Schema{
-			Type:        types,
+			Type:        &openapi3.Types{types},
 			Description: paramInfo.Desc,
 		},
 	}
