@@ -77,11 +77,9 @@ func TestSequentialAgent(t *testing.T) {
 		{
 			AgentName: "Agent1",
 			Output: &AgentOutput{
-				ModelResponse: &ModelOutput{
-					Response: &MessageVariant{
-						IsStreaming: false,
-						Message:     schema.AssistantMessage("Response from Agent1", nil),
-					},
+				ModelResponse: &MessageVariant{
+					IsStreaming: false,
+					Message:     schema.AssistantMessage("Response from Agent1", nil),
 				},
 			},
 		},
@@ -91,11 +89,9 @@ func TestSequentialAgent(t *testing.T) {
 		{
 			AgentName: "Agent2",
 			Output: &AgentOutput{
-				ModelResponse: &ModelOutput{
-					Response: &MessageVariant{
-						IsStreaming: false,
-						Message:     schema.AssistantMessage("Response from Agent2", nil),
-					},
+				ModelResponse: &MessageVariant{
+					IsStreaming: false,
+					Message:     schema.AssistantMessage("Response from Agent2", nil),
 				},
 			},
 		},
@@ -131,7 +127,7 @@ func TestSequentialAgent(t *testing.T) {
 	assert.NotNil(t, event1.Output.ModelResponse)
 
 	// Get the message content from agent1
-	msg1, err := event1.Output.ModelResponse.Response.GetMessage()
+	msg1, err := event1.Output.ModelResponse.GetMessage()
 	assert.NoError(t, err)
 	assert.Equal(t, "Response from Agent1", msg1.Content)
 
@@ -144,7 +140,7 @@ func TestSequentialAgent(t *testing.T) {
 	assert.NotNil(t, event2.Output.ModelResponse)
 
 	// Get the message content from agent2
-	msg2, err := event2.Output.ModelResponse.Response.GetMessage()
+	msg2, err := event2.Output.ModelResponse.GetMessage()
 	assert.NoError(t, err)
 	assert.Equal(t, "Response from Agent2", msg2.Content)
 
@@ -162,11 +158,9 @@ func TestSequentialAgentWithExit(t *testing.T) {
 		{
 			AgentName: "Agent1",
 			Output: &AgentOutput{
-				ModelResponse: &ModelOutput{
-					Response: &MessageVariant{
-						IsStreaming: false,
-						Message:     schema.AssistantMessage("Response from Agent1", nil),
-					},
+				ModelResponse: &MessageVariant{
+					IsStreaming: false,
+					Message:     schema.AssistantMessage("Response from Agent1", nil),
 				},
 			},
 			Action: &AgentAction{
@@ -179,11 +173,9 @@ func TestSequentialAgentWithExit(t *testing.T) {
 		{
 			AgentName: "Agent2",
 			Output: &AgentOutput{
-				ModelResponse: &ModelOutput{
-					Response: &MessageVariant{
-						IsStreaming: false,
-						Message:     schema.AssistantMessage("Response from Agent2", nil),
-					},
+				ModelResponse: &MessageVariant{
+					IsStreaming: false,
+					Message:     schema.AssistantMessage("Response from Agent2", nil),
 				},
 			},
 		},
@@ -234,11 +226,9 @@ func TestParallelAgent(t *testing.T) {
 		{
 			AgentName: "Agent1",
 			Output: &AgentOutput{
-				ModelResponse: &ModelOutput{
-					Response: &MessageVariant{
-						IsStreaming: false,
-						Message:     schema.AssistantMessage("Response from Agent1", nil),
-					},
+				ModelResponse: &MessageVariant{
+					IsStreaming: false,
+					Message:     schema.AssistantMessage("Response from Agent1", nil),
 				},
 			},
 		},
@@ -248,11 +238,9 @@ func TestParallelAgent(t *testing.T) {
 		{
 			AgentName: "Agent2",
 			Output: &AgentOutput{
-				ModelResponse: &ModelOutput{
-					Response: &MessageVariant{
-						IsStreaming: false,
-						Message:     schema.AssistantMessage("Response from Agent2", nil),
-					},
+				ModelResponse: &MessageVariant{
+					IsStreaming: false,
+					Message:     schema.AssistantMessage("Response from Agent2", nil),
 				},
 			},
 		},
@@ -260,7 +248,6 @@ func TestParallelAgent(t *testing.T) {
 
 	// Create a parallel agent with the mock agents
 	config := &ParallelAgentConfig{
-
 		Name:        "ParallelTestAgent",
 		Description: "Test parallel agent",
 		SubAgents:   []Agent{agent1, agent2},
@@ -299,7 +286,7 @@ func TestParallelAgent(t *testing.T) {
 		assert.NotNil(t, event.Output)
 		assert.NotNil(t, event.Output.ModelResponse)
 
-		msg, err := event.Output.ModelResponse.Response.GetMessage()
+		msg, err := event.Output.ModelResponse.GetMessage()
 		assert.NoError(t, err)
 
 		// Check the source agent name and message content
@@ -322,11 +309,9 @@ func TestLoopAgent(t *testing.T) {
 		{
 			AgentName: "LoopAgent",
 			Output: &AgentOutput{
-				ModelResponse: &ModelOutput{
-					Response: &MessageVariant{
-						IsStreaming: false,
-						Message:     schema.AssistantMessage("Loop iteration", nil),
-					},
+				ModelResponse: &MessageVariant{
+					IsStreaming: false,
+					Message:     schema.AssistantMessage("Loop iteration", nil),
 				},
 			},
 		},
@@ -374,7 +359,7 @@ func TestLoopAgent(t *testing.T) {
 		assert.NotNil(t, event.Output)
 		assert.NotNil(t, event.Output.ModelResponse)
 
-		msg, err := event.Output.ModelResponse.Response.GetMessage()
+		msg, err := event.Output.ModelResponse.GetMessage()
 		assert.NoError(t, err)
 		assert.Equal(t, "Loop iteration", msg.Content)
 	}
@@ -389,11 +374,9 @@ func TestLoopAgentWithExit(t *testing.T) {
 		{
 			AgentName: "LoopAgent",
 			Output: &AgentOutput{
-				ModelResponse: &ModelOutput{
-					Response: &MessageVariant{
-						IsStreaming: false,
-						Message:     schema.AssistantMessage("Loop iteration with exit", nil),
-					},
+				ModelResponse: &MessageVariant{
+					IsStreaming: false,
+					Message:     schema.AssistantMessage("Loop iteration with exit", nil),
 				},
 			},
 			Action: &AgentAction{
@@ -445,7 +428,7 @@ func TestLoopAgentWithExit(t *testing.T) {
 	assert.NotNil(t, event.Action)
 	assert.True(t, event.Action.Exit)
 
-	msg, err := event.Output.ModelResponse.Response.GetMessage()
+	msg, err := event.Output.ModelResponse.GetMessage()
 	assert.NoError(t, err)
 	assert.Equal(t, "Loop iteration with exit", msg.Content)
 }

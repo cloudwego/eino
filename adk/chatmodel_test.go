@@ -73,7 +73,7 @@ func TestChatModelAgentRun(t *testing.T) {
 		assert.NotNil(t, event.Output.ModelResponse)
 
 		// Verify the message content
-		msg, err := event.Output.ModelResponse.Response.GetMessage()
+		msg, err := event.Output.ModelResponse.GetMessage()
 		assert.NoError(t, err)
 		assert.Equal(t, "Hello, I am an AI assistant.", msg.Content)
 
@@ -127,7 +127,7 @@ func TestChatModelAgentRun(t *testing.T) {
 		assert.Nil(t, event.Err)
 		assert.NotNil(t, event.Output)
 		assert.NotNil(t, event.Output.ModelResponse)
-		assert.True(t, event.Output.ModelResponse.Response.IsStreaming)
+		assert.True(t, event.Output.ModelResponse.IsStreaming)
 
 		// No more events
 		_, ok = iterator.Next()

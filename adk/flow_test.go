@@ -130,7 +130,7 @@ func TestTransferToAgent(t *testing.T) {
 	assert.NotNil(t, event3.Output.ModelResponse)
 
 	// Verify the message content from child agent
-	msg, err := event3.Output.ModelResponse.Response.GetMessage()
+	msg, err := event3.Output.ModelResponse.GetMessage()
 	assert.NoError(t, err)
 	assert.Equal(t, "Hello from child agent", msg.Content)
 

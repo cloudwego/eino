@@ -23,6 +23,7 @@ import (
 	"github.com/stretchr/testify/assert"
 
 	"github.com/cloudwego/eino/components/tool"
+	"github.com/cloudwego/eino/compose"
 	"github.com/cloudwego/eino/schema"
 )
 
@@ -105,11 +106,9 @@ func TestAgentTool_InvokableRun(t *testing.T) {
 				{
 					AgentName: "TestAgent",
 					Output: &AgentOutput{
-						ModelResponse: &ModelOutput{
-							Response: &MessageVariant{
-								IsStreaming: false,
-								Message:     schema.AssistantMessage("Test response", nil),
-							},
+						ModelResponse: &MessageVariant{
+							IsStreaming: false,
+							Message:     schema.AssistantMessage("Test response", nil),
 						},
 					},
 				},
@@ -176,8 +175,8 @@ func TestAgentTool_InvokableRun(t *testing.T) {
 			agentTool_ := NewAgentTool(ctx, mockAgent_)
 
 			// Call InvokableRun
-
-			output, err := agentTool_.(tool.InvokableTool).InvokableRun(ctx, tt.request)
+			runner := buildToolTestGraph(agentTool_.(tool.InvokableTool))
+			output, err := runner.Invoke(ctx, tt.request)
 
 			// Verify results
 			if tt.expectError {
@@ -188,4 +187,21 @@ func TestAgentTool_InvokableRun(t *testing.T) {
 			}
 		})
 	}
+}
+
+func buildToolTestGraph(it tool.InvokableTool) compose.Runnable[string, string] {
+	ctx := context.Background()
+	g := compose.NewGraph[string, string](compose.WithGenLocalState(func(ctx context.Context) (state *State) {
+		return &State{}
+	}))
+	_ = g.AddLambdaNode("tool node", compose.InvokableLambda(func(ctx context.Context, input string) (output string, err error) {
+		return it.InvokableRun(ctx, input)
+	}))
+	_ = g.AddEdge(compose.START, "tool node")
+	_ = g.AddEdge("tool node", compose.END)
+	r, err := g.Compile(ctx)
+	if err != nil {
+		panic(err)
+	}
+	return r
 }

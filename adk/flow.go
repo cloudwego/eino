@@ -42,6 +42,24 @@ type flowAgent struct {
 
 	disallowTransferToParent bool
 	historyRewriter          HistoryRewriter
+
+	checkPointStore CheckPointStore
+}
+
+func (a *flowAgent) deepCopy() *flowAgent {
+	ret := &flowAgent{
+		Agent:                    a.Agent,
+		subAgents:                make([]*flowAgent, 0, len(a.subAgents)),
+		parentAgent:              a.parentAgent,
+		disallowTransferToParent: a.disallowTransferToParent,
+		historyRewriter:          a.historyRewriter,
+		checkPointStore:          a.checkPointStore,
+	}
+
+	for _, sa := range a.subAgents {
+		ret.subAgents = append(ret.subAgents, sa.deepCopy())
+	}
+	return ret
 }
 
 func SetSubAgents(ctx context.Context, agent Agent, subAgents []Agent) (Agent, error) {
@@ -67,6 +85,8 @@ func toFlowAgent(ctx context.Context, agent Agent, opts ...AgentOption) *flowAge
 	var ok bool
 	if fa, ok = agent.(*flowAgent); !ok {
 		fa = &flowAgent{Agent: agent}
+	} else {
+		fa = fa.deepCopy()
 	}
 	for _, opt := range opts {
 		opt(fa)
@@ -197,13 +217,13 @@ func (ai *AgentInput) deepCopy() *AgentInput {
 
 func (a *flowAgent) genAgentInput(ctx context.Context, runCtx *runContext) (*AgentInput, error) {
 	if runCtx.isRoot() {
-		return runCtx.rootInput, nil
+		return runCtx.RootInput, nil
 	}
 
-	input := runCtx.rootInput.deepCopy()
-	runPath := runCtx.runPath
+	input := runCtx.RootInput.deepCopy()
+	runPath := runCtx.RunPath
 
-	events := runCtx.session.getEvents()
+	events := runCtx.Session.getEvents()
 	historyEntries := make([]*HistoryEntry, 0)
 
 	for _, event := range events {
@@ -214,7 +234,7 @@ func (a *flowAgent) genAgentInput(ctx context.Context, runCtx *runContext) (*Age
 		var msg Message
 		var err error
 		if modelOutput := event.GetModelOutput(); modelOutput != nil {
-			msg, err = modelOutput.Response.GetMessage()
+			msg, err = modelOutput.GetMessage()
 			if err != nil {
 				return nil, err
 			}
@@ -286,60 +306,139 @@ func (a *flowAgent) Run(ctx context.Context, input *AgentInput, opts ...AgentRun
 
 	iterator, generator := NewAsyncIteratorPair[*AgentEvent]()
 
-	go func() {
-		defer func() {
-			panicErr := recover()
-			if panicErr != nil {
-				e := safe.NewPanicErr(panicErr, debug.Stack())
-				generator.Send(&AgentEvent{Err: e})
-			}
+	go a.run(ctx, runCtx, aIter, generator, opts...)
 
+	return iterator
+}
+
+func (a *flowAgent) Resume(ctx context.Context, info *InterruptInfo, opts ...AgentRunOption) *AsyncIterator[*AgentEvent] {
+	runCtx := getRunCtx(ctx)
+	agentName := a.Name(ctx)
+	targetName := agentName
+	if len(runCtx.RunPath) > 0 {
+		targetName = runCtx.RunPath[len(runCtx.RunPath)-1]
+	}
+
+	if agentName != targetName {
+		// go to target flow agent
+		targetAgent := recursiveGetAgent(ctx, a, targetName)
+		if targetAgent == nil {
+			iterator, generator := NewAsyncIteratorPair[*AgentEvent]()
+			generator.Send(&AgentEvent{Err: fmt.Errorf("failed to resume agent: cannot find agent: %s", agentName)})
 			generator.Close()
-		}()
+			return iterator
+		}
+		return targetAgent.Resume(ctx, info, opts...)
+	}
+	if wf, ok := a.Agent.(*workflowAgent); ok {
+		return wf.Resume(ctx, info, opts...)
+	}
 
-		var destName string
-		for {
-			event, ok := aIter.Next()
-			if !ok {
-				break
-			}
+	// resume current agent
+	ra, ok := a.Agent.(ResumableAgent)
+	if !ok {
+		iterator, generator := NewAsyncIteratorPair[*AgentEvent]()
+		generator.Send(&AgentEvent{Err: fmt.Errorf("failed to resume agent: target agent[%s] isn't resumable", agentName)})
+		generator.Close()
 
-			event.RunPath = runCtx.runPath
-			runCtx.session.addEvent(event)
+		return iterator
+	}
+	iterator, generator := NewAsyncIteratorPair[*AgentEvent]()
+	aIter := ra.Resume(ctx, info, opts...)
 
-			generator.Send(event)
+	go a.run(ctx, runCtx, aIter, generator, opts...)
 
-			if event.Action != nil && event.Action.Exit {
+	return iterator
+}
+
+func (a *flowAgent) run(
+	ctx context.Context,
+	runCtx *runContext,
+	aIter *AsyncIterator[*AgentEvent],
+	generator *AsyncGenerator[*AgentEvent],
+	opts ...AgentRunOption) {
+	defer func() {
+		panicErr := recover()
+		if panicErr != nil {
+			e := safe.NewPanicErr(panicErr, debug.Stack())
+			generator.Send(&AgentEvent{Err: e})
+		}
+
+		generator.Close()
+	}()
+
+	var destName string
+	for {
+		event, ok := aIter.Next()
+		if !ok {
+			break
+		}
+
+		event.RunPath = runCtx.RunPath
+		runCtx.Session.addEvent(event)
+
+		if event.Action != nil && event.Action.Interrupted != nil {
+			appendInterruptRunCtx(ctx, runCtx)
+		}
+
+		generator.Send(event)
+
+		if event.Action != nil {
+			if event.Action.Exit || event.Action.Interrupted != nil {
 				return
 			}
 
-			if event.Action != nil && event.Action.TransferToAgent != nil {
+			if event.Action.TransferToAgent != nil {
 				destName = event.Action.TransferToAgent.DestAgentName
 			}
 		}
+	}
 
-		// handle transferring to another agent
-		if destName != "" {
-			agentToRun := a.getAgent(ctx, destName)
-			if agentToRun == nil {
-				e := errors.New(fmt.Sprintf(
-					"transfer failed: agent '%s' not found when transferring from '%s'",
-					destName, agentName))
-				generator.Send(&AgentEvent{Err: e})
-				return
-			}
-
-			subAIter := agentToRun.Run(ctx, nil /*subagents get input from runCtx*/, opts...)
-			for {
-				subEvent, ok_ := subAIter.Next()
-				if !ok_ {
-					break
-				}
-
-				generator.Send(subEvent)
-			}
+	// handle transferring to another agent
+	if destName != "" {
+		agentToRun := a.getAgent(ctx, destName)
+		if agentToRun == nil {
+			e := errors.New(fmt.Sprintf(
+				"transfer failed: agent '%s' not found when transferring from '%s'",
+				destName, a.Name(ctx)))
+			generator.Send(&AgentEvent{Err: e})
+			return
 		}
-	}()
 
-	return iterator
+		subAIter := agentToRun.Run(ctx, nil /*subagents get input from runCtx*/, opts...)
+		for {
+			subEvent, ok_ := subAIter.Next()
+			if !ok_ {
+				break
+			}
+
+			generator.Send(subEvent)
+		}
+	}
+}
+
+func recursiveGetAgent(ctx context.Context, agent *flowAgent, agentName string) *flowAgent {
+	if agent == nil {
+		return nil
+	}
+	if agent.Name(ctx) == agentName {
+		return agent
+	}
+	a := agent.getAgent(ctx, agentName)
+	if a != nil {
+		return a
+	}
+	for _, sa := range agent.subAgents {
+		a = recursiveGetAgent(ctx, sa, agentName)
+		if a != nil {
+			return a
+		}
+	}
+	if agent.parentAgent != nil {
+		a = recursiveGetAgent(ctx, agent.parentAgent, agentName)
+		if a != nil {
+			return a
+		}
+	}
+	return nil
 }

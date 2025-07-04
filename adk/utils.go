@@ -59,12 +59,10 @@ func NewModelOutputEvent(agentName string, message Message, messageStream Messag
 	return &AgentEvent{
 		AgentName: agentName,
 		Output: &AgentOutput{
-			ModelResponse: &ModelOutput{
-				Response: &MessageVariant{
-					IsStreaming:   message == nil,
-					Message:       message,
-					MessageStream: messageStream,
-				},
+			ModelResponse: &MessageVariant{
+				IsStreaming:   message == nil,
+				Message:       message,
+				MessageStream: messageStream,
 			},
 		},
 	}
