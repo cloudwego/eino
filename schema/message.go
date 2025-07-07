@@ -477,24 +477,31 @@ func (m *Message) Format(_ context.Context, vs map[string]any, formatType Format
 //		tool: {...}
 //		call_id: callxxxx
 func (m *Message) String() string {
-	s := fmt.Sprintf("%s: %s", m.Role, m.Content)
+	sb := &strings.Builder{}
+	sb.WriteString(fmt.Sprintf("%s: %s", m.Role, m.Content))
 	if len(m.ToolCalls) > 0 {
-		s += fmt.Sprintf("\ntool_calls: %v", m.ToolCalls)
+		sb.WriteString(fmt.Sprintf("\ntool_calls:\n"))
+		for _, tc := range m.ToolCalls {
+			if tc.Index != nil {
+				sb.WriteString(fmt.Sprintf("index[%d]:", *tc.Index))
+			}
+			sb.WriteString(fmt.Sprintf("%+v\n", tc))
+		}
 	}
 	if m.ToolCallID != "" {
-		s += fmt.Sprintf("\ntool_call_id: %s", m.ToolCallID)
+		sb.WriteString(fmt.Sprintf("\ntool_call_id: %s", m.ToolCallID))
 	}
 	if m.ToolName != "" {
-		s += fmt.Sprintf("\ntool_call_name: %s", m.ToolName)
+		sb.WriteString(fmt.Sprintf("\ntool_call_name: %s", m.ToolName))
 	}
 	if m.ResponseMeta != nil {
-		s += fmt.Sprintf("\nfinish_reason: %s", m.ResponseMeta.FinishReason)
+		sb.WriteString(fmt.Sprintf("\nfinish_reason: %s", m.ResponseMeta.FinishReason))
 		if m.ResponseMeta.Usage != nil {
-			s += fmt.Sprintf("\nusage: %v", m.ResponseMeta.Usage)
+			sb.WriteString(fmt.Sprintf("\nusage: %v", m.ResponseMeta.Usage))
 		}
 	}
 
-	return s
+	return sb.String()
 }
 
 // SystemMessage represents a message with Role "system".
