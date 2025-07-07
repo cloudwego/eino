@@ -17,6 +17,7 @@
 package serialization
 
 import (
+	"reflect"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -109,11 +110,12 @@ func TestSerialization(t *testing.T) {
 	}
 
 	for _, value := range values {
-		data, err := Marshal(value)
+		data, err := (&InternalSerializer{}).Marshal(value)
 		assert.NoError(t, err)
-		nValue, err := Unmarshal(data)
+		v := reflect.New(reflect.TypeOf(value)).Interface()
+		err = (&InternalSerializer{}).Unmarshal(data, v)
 		assert.NoError(t, err)
-		assert.Equal(t, value, nValue)
+		assert.Equal(t, value, reflect.ValueOf(v).Elem().Interface())
 	}
 }
 
@@ -133,20 +135,22 @@ func (m myStruct3) MarshalJSON() ([]byte, error) {
 func TestMarshalStruct(t *testing.T) {
 	assert.NoError(t, GenericRegister[myStruct3]("myStruct3"))
 	s := myStruct3{FieldA: "1"}
-	data, err := Marshal(s)
+	data, err := (&InternalSerializer{}).Marshal(s)
 	assert.NoError(t, err)
-	result, err := Unmarshal(data)
+	result := &myStruct3{}
+	err = (&InternalSerializer{}).Unmarshal(data, result)
 	assert.NoError(t, err)
-	assert.Equal(t, myStruct3{FieldA: "FieldA"}, result)
+	assert.Equal(t, myStruct3{FieldA: "FieldA"}, *result)
 
 	ma := map[string]any{
 		"1": s,
 	}
-	data, err = Marshal(ma)
+	data, err = (&InternalSerializer{}).Marshal(ma)
 	assert.NoError(t, err)
-	result, err = Unmarshal(data)
+	result2 := map[string]any{}
+	err = (&InternalSerializer{}).Unmarshal(data, &result2)
 	assert.NoError(t, err)
 	assert.Equal(t, map[string]any{
 		"1": myStruct3{FieldA: "FieldA"},
-	}, result)
+	}, result2)
 }

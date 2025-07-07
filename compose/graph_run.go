@@ -189,7 +189,7 @@ func (r *runner) run(ctx context.Context, isStream bool, input any, opts ...Opti
 
 		ctx, input = onGraphStart(ctx, input, isStream)
 		haveOnStart = true
-		nextTasks, err = r.restoreTasks(ctx, cp.Inputs, cp.SkipPreHandler, cp.ToolsNodeExecutedTools, optMap) // should restore after set state to context
+		nextTasks, err = r.restoreTasks(ctx, cp.Inputs, cp.SkipPreHandler, cp.ToolsNodeExecutedTools, cp.RerunNodes, isStream, optMap) // should restore after set state to context
 		if err != nil {
 			return nil, newGraphRunError(fmt.Errorf("restore tasks fail: %w", err))
 		}
@@ -226,7 +226,7 @@ func (r *runner) run(ctx context.Context, isStream bool, input any, opts ...Opti
 			ctx, input = onGraphStart(ctx, input, isStream)
 			haveOnStart = true
 			// resume graph
-			nextTasks, err = r.restoreTasks(ctx, cp.Inputs, cp.SkipPreHandler, cp.ToolsNodeExecutedTools, optMap)
+			nextTasks, err = r.restoreTasks(ctx, cp.Inputs, cp.SkipPreHandler, cp.ToolsNodeExecutedTools, cp.RerunNodes, isStream, optMap)
 			if err != nil {
 				return nil, newGraphRunError(fmt.Errorf("restore tasks fail: %w", err))
 			}
@@ -549,20 +549,12 @@ func (r *runner) handleInterruptWithSubGraphAndRerunNodes(
 		SubGraphs:       make(map[string]*InterruptInfo),
 	}
 	for _, t := range subgraphTasks {
-		if isStream {
-			cp.Inputs[t.nodeKey] = t.call.action.inputEmptyStream()
-		} else {
-			cp.Inputs[t.nodeKey] = t.call.action.inputZeroValue()
-		}
+		cp.RerunNodes = append(cp.RerunNodes, t.nodeKey)
 		cp.SubGraphs[t.nodeKey] = tempInfo.subGraphInterrupts[t.nodeKey].CheckPoint
 		intInfo.SubGraphs[t.nodeKey] = tempInfo.subGraphInterrupts[t.nodeKey].Info
 	}
 	for _, t := range rerunTasks {
-		if isStream {
-			cp.Inputs[t.nodeKey] = t.call.action.inputEmptyStream()
-		} else {
-			cp.Inputs[t.nodeKey] = t.call.action.inputZeroValue()
-		}
+		cp.RerunNodes = append(cp.RerunNodes, t.nodeKey)
 	}
 	err = r.checkPointer.convertCheckPoint(cp, isStream)
 	if err != nil {
@@ -643,8 +635,26 @@ func getCheckPointInfo(opts ...Option) (checkPointID *string, stateModifier Stat
 	return
 }
 
-func (r *runner) restoreTasks(ctx context.Context, inputs map[string]any, skipPreHandler map[string]bool, toolNodeExecutedTools map[string]map[string]string, optMap map[string][]any) ([]*task, error) {
+func (r *runner) restoreTasks(
+	ctx context.Context,
+	inputs map[string]any,
+	skipPreHandler map[string]bool,
+	toolNodeExecutedTools map[string]map[string]string,
+	rerunNodes []string,
+	isStream bool,
+	optMap map[string][]any) ([]*task, error) {
 	ret := make([]*task, 0, len(inputs))
+	for _, key := range rerunNodes {
+		call, ok := r.chanSubscribeTo[key]
+		if !ok {
+			return nil, fmt.Errorf("channel[%s] from checkpoint is not registered", key)
+		}
+		if isStream {
+			inputs[key] = call.action.inputEmptyStream()
+		} else {
+			inputs[key] = call.action.inputZeroValue()
+		}
+	}
 	for key, input := range inputs {
 		call, ok := r.chanSubscribeTo[key]
 		if !ok {
@@ -652,6 +662,7 @@ func (r *runner) restoreTasks(ctx context.Context, inputs map[string]any, skipPr
 		}
 
 		if call.action.nodeInfo != nil && call.action.nodeInfo.compileOption != nil {
+			// sub graph
 			ctx = forwardCheckPoint(ctx, key)
 		}
 

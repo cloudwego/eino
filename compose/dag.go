@@ -18,8 +18,6 @@ package compose
 
 import (
 	"fmt"
-
-	"github.com/cloudwego/eino/internal/serialization"
 )
 
 func dagChannelBuilder(controlDependencies []string, dataDependencies []string, zeroValue func() any, emptyStream func() streamReader) channel {
@@ -189,12 +187,4 @@ func (ch *dagChannel) get(isStream bool) (any, bool, error) {
 
 func (ch *dagChannel) convertValues(fn func(map[string]any) error) error {
 	return fn(ch.Values)
-}
-
-func init() {
-	_ = serialization.GenericRegister[channel]("_eino_channel")
-	_ = serialization.GenericRegister[checkpoint]("_eino_checkpoint")
-	_ = serialization.GenericRegister[dagChannel]("_eino_dag_channel")
-	_ = serialization.GenericRegister[pregelChannel]("_eino_pregel_channel")
-	_ = serialization.GenericRegister[dependencyState]("_eino_dependency_state")
 }

@@ -26,6 +26,7 @@ type graphCompileOptions struct {
 	origOpts []GraphCompileOption
 
 	checkPointStore      CheckPointStore
+	serializer           Serializer
 	interruptBeforeNodes []string
 	interruptAfterNodes  []string
 

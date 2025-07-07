@@ -82,7 +82,9 @@ func GenericRegister[T any](key string) error {
 	return nil
 }
 
-func Marshal(v interface{}) ([]byte, error) {
+type InternalSerializer struct{}
+
+func (i *InternalSerializer) Marshal(v interface{}) ([]byte, error) {
 	is, err := internalMarshal(v)
 	if err != nil {
 		return nil, err
@@ -91,7 +93,74 @@ func Marshal(v interface{}) ([]byte, error) {
 	return sonic.Marshal(is)
 }
 
-func Unmarshal(data []byte) (any, error) {
+func (i *InternalSerializer) Unmarshal(data []byte, v any) error {
+	val, err := unmarshal(data)
+	if err != nil {
+		return fmt.Errorf("failed to unmarshal: %w", err)
+	}
+
+	rv := reflect.ValueOf(v)
+	if rv.Kind() != reflect.Ptr || rv.IsNil() {
+		return fmt.Errorf("failed to unmarshal: value must be a non-nil pointer")
+	}
+
+	target := rv.Elem()
+	if !target.CanSet() {
+		return fmt.Errorf("failed to unmarshal: output value must be settable")
+	}
+
+	if val == nil {
+		target.Set(reflect.Zero(target.Type()))
+		return nil
+	}
+
+	source := reflect.ValueOf(val)
+
+	var set func(target, source reflect.Value) bool
+	set = func(target, source reflect.Value) bool {
+		if !source.IsValid() {
+			target.Set(reflect.Zero(target.Type()))
+			return true
+		}
+		if source.Type().AssignableTo(target.Type()) {
+			target.Set(source)
+			return true
+		}
+
+		if target.Kind() == reflect.Ptr {
+			if target.IsNil() {
+				if !target.CanSet() {
+					return false
+				}
+				target.Set(reflect.New(target.Type().Elem()))
+			}
+			return set(target.Elem(), source)
+		}
+
+		if source.Kind() == reflect.Ptr {
+			if source.IsNil() {
+				target.Set(reflect.Zero(target.Type()))
+				return true
+			}
+			return set(target, source.Elem())
+		}
+
+		if source.Type().ConvertibleTo(target.Type()) {
+			target.Set(source.Convert(target.Type()))
+			return true
+		}
+
+		return false
+	}
+
+	if set(target, source) {
+		return nil
+	}
+
+	return fmt.Errorf("failed to unmarshal: cannot assign %s to %s", reflect.TypeOf(val), target.Type())
+}
+
+func unmarshal(data []byte) (any, error) {
 	is := &internalStruct{}
 	err := sonic.Unmarshal(data, is)
 	if err != nil {

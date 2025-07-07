@@ -23,6 +23,14 @@ import (
 	"github.com/cloudwego/eino/internal/serialization"
 )
 
+func init() {
+	_ = serialization.GenericRegister[channel]("_eino_channel")
+	_ = serialization.GenericRegister[checkpoint]("_eino_checkpoint")
+	_ = serialization.GenericRegister[dagChannel]("_eino_dag_channel")
+	_ = serialization.GenericRegister[pregelChannel]("_eino_pregel_channel")
+	_ = serialization.GenericRegister[dependencyState]("_eino_dependency_state")
+}
+
 // RegisterSerializableType registers a custom type for eino serialization.
 // This allows eino to properly serialize and deserialize custom types.
 // Both custom interfaces and structs need to be registered using this function.
@@ -42,10 +50,37 @@ type CheckPointStore interface {
 	Set(ctx context.Context, checkPointID string, checkPoint []byte) error
 }
 
+type Serializer interface {
+	Marshal(v any) ([]byte, error)
+	Unmarshal(data []byte, v any) error
+}
+
 func WithCheckPointStore(store CheckPointStore) GraphCompileOption {
 	return func(o *graphCompileOptions) {
 		o.checkPointStore = store
 	}
+}
+
+func WithSerializer(serializer Serializer) GraphCompileOption {
+	return func(o *graphCompileOptions) {
+		o.serializer = serializer
+	}
+}
+
+func RegisterInternalType(f func(key string, value any) error) error {
+	err := f("_eino_checkpoint", &checkpoint{})
+	if err != nil {
+		return err
+	}
+	err = f("_eino_dag_channel", &dagChannel{})
+	if err != nil {
+		return err
+	}
+	err = f("_eino_pregel_channel", &pregelChannel{})
+	if err != nil {
+		return err
+	}
+	return f("_eino_dependency_state", dependencyState(0))
 }
 
 func WithCheckPointID(checkPointID string) Option {
@@ -74,6 +109,7 @@ type checkpoint struct {
 	Inputs         map[string] /*node key*/ any /*input*/
 	State          any
 	SkipPreHandler map[string]bool
+	RerunNodes     []string
 
 	ToolsNodeExecutedTools map[string] /*tool node key*/ map[string] /*tool call id*/ string
 
@@ -152,16 +188,22 @@ func forwardCheckPoint(ctx context.Context, nodeKey string) context.Context {
 func newCheckPointer(
 	inputPairs, outputPairs map[string]streamConvertPair,
 	store CheckPointStore,
+	serializer Serializer,
 ) *checkPointer {
+	if serializer == nil {
+		serializer = &serialization.InternalSerializer{}
+	}
 	return &checkPointer{
-		sc:    newStreamConverter(inputPairs, outputPairs),
-		store: store,
+		sc:         newStreamConverter(inputPairs, outputPairs),
+		store:      store,
+		serializer: serializer,
 	}
 }
 
 type checkPointer struct {
-	sc    *streamConverter
-	store CheckPointStore
+	sc         *streamConverter
+	store      CheckPointStore
+	serializer Serializer
 }
 
 func (c *checkPointer) get(ctx context.Context, id string) (*checkpoint, bool, error) {
@@ -171,17 +213,16 @@ func (c *checkPointer) get(ctx context.Context, id string) (*checkpoint, bool, e
 	}
 
 	cp := &checkpoint{}
-	value, err := serialization.Unmarshal(data)
+	err = c.serializer.Unmarshal(data, cp)
 	if err != nil {
 		return nil, false, err
 	}
-	cp = value.(*checkpoint)
 
 	return cp, true, nil
 }
 
 func (c *checkPointer) set(ctx context.Context, id string, cp *checkpoint) error {
-	data, err := serialization.Marshal(cp)
+	data, err := c.serializer.Marshal(cp)
 	if err != nil {
 		return err
 	}
