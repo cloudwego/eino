@@ -497,6 +497,14 @@ func (g *graph) addBranch(startNode string, branch *GraphBranch, skipData bool) 
 			}
 		}
 	} else {
+		for endNode := range branch.endNodes {
+			if startNode == START {
+				g.startNodes = append(g.startNodes, endNode)
+			}
+			if endNode == END {
+				g.endNodes = append(g.endNodes, startNode)
+			}
+		}
 		branch.noDataFlow = true
 	}
 
