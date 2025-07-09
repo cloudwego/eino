@@ -18,6 +18,7 @@ package adk
 
 import (
 	"context"
+	"sync"
 
 	"github.com/cloudwego/eino/schema"
 )
@@ -34,6 +35,8 @@ type MessageVariant struct {
 	Role schema.RoleType
 	// only used when Role is Tool
 	ToolName string
+
+	mu sync.Mutex
 }
 
 func EventFromMessage(msg Message, msgStream MessageStream,
@@ -54,8 +57,13 @@ func EventFromMessage(msg Message, msgStream MessageStream,
 func (mv *MessageVariant) GetMessage() (Message, error) {
 	var message Message
 	if mv.IsStreaming {
+		mv.mu.Lock()
+		sts := mv.MessageStream.Copy(2)
+		mv.MessageStream = sts[0]
+		mv.mu.Unlock()
+
 		var err error
-		message, err = schema.ConcatMessageStream(mv.MessageStream)
+		message, err = schema.ConcatMessageStream(sts[1])
 		if err != nil {
 			return nil, err
 		}
@@ -64,6 +72,18 @@ func (mv *MessageVariant) GetMessage() (Message, error) {
 	}
 
 	return message, nil
+}
+
+func (mv *MessageVariant) GetMessageStream() MessageStream {
+	if mv.IsStreaming {
+		mv.mu.Lock()
+		sts := mv.MessageStream.Copy(2)
+		mv.MessageStream = sts[0]
+		mv.mu.Unlock()
+		return sts[1]
+	}
+
+	return nil
 }
 
 type TransferToAgentAction struct {
