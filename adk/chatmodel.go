@@ -89,6 +89,8 @@ type ChatModelAgentConfig struct {
 
 	// optional
 	OutputKey string
+
+	MaxStep int
 }
 
 type ChatModelAgent struct {
@@ -102,6 +104,7 @@ type ChatModelAgent struct {
 	genModelInput GenModelInput
 
 	outputKey string
+	maxStep   int
 
 	subAgents   []Agent
 	parentAgent Agent
@@ -143,6 +146,7 @@ func NewChatModelAgent(_ context.Context, config *ChatModelAgentConfig) (*ChatMo
 		genModelInput: genInput,
 		exit:          config.Exit,
 		outputKey:     config.OutputKey,
+		maxStep:       config.MaxStep,
 	}, nil
 }
 
@@ -461,7 +465,13 @@ func (a *ChatModelAgent) buildRunFunc(ctx context.Context) runFunc {
 			return
 		}
 
-		runnable, err := g.Compile(ctx, compose.WithGraphName("React"))
+		var opts []compose.GraphCompileOption
+		opts = append(opts, compose.WithGraphName("React"))
+		if a.maxStep > 0 {
+			opts = append(opts, compose.WithMaxRunSteps(a.maxStep))
+		}
+
+		runnable, err := g.Compile(ctx, opts...)
 		if err != nil {
 			a.run = errFunc(err)
 			return
