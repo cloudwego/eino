@@ -60,10 +60,7 @@ func AppendHandlers(ctx context.Context, info *RunInfo, handlers ...Handler) con
 	if !ok {
 		return InitCallbacks(ctx, info, handlers...)
 	}
-	nh := make([]Handler, len(cbm.handlers)+len(handlers))
-	copy(nh[:len(cbm.handlers)], cbm.handlers)
-	copy(nh[len(cbm.handlers):], handlers)
-	return InitCallbacks(ctx, info, nh...)
+	return InitCallbacks(ctx, info, append(cbm.handlers, handlers...)...)
 }
 
 type Handle[T any] func(context.Context, T, *RunInfo, []Handler) (context.Context, T)
