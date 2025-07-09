@@ -33,7 +33,7 @@ func TestParamsOneOfToJSONSchema(t *testing.T) {
 
 		convey.Convey("user provides openAPIV3.0 json schema directly, use what the user provides", func() {
 			oneOf.openAPIV3 = &openapi3.Schema{
-				Type:        openapi3.TypeString,
+				Type:        &openapi3.Types{openapi3.TypeString},
 				Description: "this is the only argument",
 			}
 			converted, err = oneOf.ToOpenAPIV3()

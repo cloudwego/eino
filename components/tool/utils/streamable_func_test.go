@@ -73,11 +73,11 @@ func TestNewStreamableTool(t *testing.T) {
 		assert.NoError(t, err)
 
 		assert.Equal(t, &openapi3.Schema{
-			Type: openapi3.TypeObject,
+			Type: &openapi3.Types{openapi3.TypeObject},
 			Properties: map[string]*openapi3.SchemaRef{
 				"name": {
 					Value: &openapi3.Schema{
-						Type:        openapi3.TypeString,
+						Type:        &openapi3.Types{openapi3.TypeString},
 						Description: "user name",
 					},
 				},

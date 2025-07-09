@@ -162,11 +162,11 @@ func defaultSchemaCustomizer(name string, t reflect.Type, tag reflect.StructTag,
 }
 
 func setRequired(sc *openapi3.Schema) error { // check if properties are marked as required, set schema required to true accordingly
-	if sc.Type != openapi3.TypeObject && sc.Type != openapi3.TypeArray {
+	if sc.Type == nil || ((*sc.Type)[0] != openapi3.TypeObject && (*sc.Type)[0] != openapi3.TypeArray) {
 		return nil
 	}
 
-	if sc.Type == openapi3.TypeArray {
+	if (*sc.Type)[0] == openapi3.TypeArray {
 		if sc.Items.Value.Extensions != nil {
 			if _, ok := sc.Items.Value.Extensions["x_required"]; ok {
 				delete(sc.Items.Value.Extensions, "x_required")
