@@ -167,6 +167,10 @@ func initGraphCallbacks(ctx context.Context, info *nodeInfo, meta *executorMeta,
 		}
 	}
 
+	if len(cbs) == 0 {
+		return icb.ReuseHandlers(ctx, ri)
+	}
+
 	return icb.AppendHandlers(ctx, ri, cbs...)
 }
 
@@ -193,6 +197,10 @@ func initNodeCallbacks(ctx context.Context, key string, info *nodeInfo, meta *ex
 				}
 			}
 		}
+	}
+
+	if len(cbs) == 0 {
+		return icb.ReuseHandlers(ctx, ri)
 	}
 
 	return icb.AppendHandlers(ctx, ri, cbs...)

@@ -96,11 +96,13 @@ func OnError(ctx context.Context, err error) context.Context {
 
 // EnsureRunInfo ensures the RunInfo in context matches the given type and component.
 // If the current callback manager doesn't match or doesn't exist, it creates a new one while preserving existing handlers.
+// Will initialize Global callback handlers if none exist in the ctx before.
 func EnsureRunInfo(ctx context.Context, typ string, comp components.Component) context.Context {
 	return callbacks.EnsureRunInfo(ctx, typ, comp)
 }
 
 // ReuseHandlers initializes a new context with the provided RunInfo, while using the same handlers already exist.
+// Will initialize Global callback handlers if none exist in the ctx before.
 func ReuseHandlers(ctx context.Context, info *RunInfo) context.Context {
 	return callbacks.ReuseHandlers(ctx, info)
 }

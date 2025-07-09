@@ -220,6 +220,18 @@ func TestEnsureRunInfo(t *testing.T) {
 	assert.Equal(t, "", name)
 	assert.Equal(t, "type2", typ)
 	assert.Equal(t, "component2", comp)
+
+	// EnsureRunInfo on an empty Context
+	AppendGlobalHandlers(NewHandlerBuilder().OnStartFn(func(ctx context.Context, info *RunInfo, input CallbackInput) context.Context {
+		typ = info.Type
+		comp = string(info.Component)
+		return ctx
+	}).Build())
+	ctx3 := EnsureRunInfo(context.Background(), "type3", "component3")
+	OnStart(ctx3, 0)
+	assert.Equal(t, "type3", typ)
+	assert.Equal(t, "component3", comp)
+	callbacks.GlobalHandlers = []Handler{}
 }
 
 func TestNesting(t *testing.T) {
@@ -245,6 +257,30 @@ func TestNesting(t *testing.T) {
 	OnEnd(ctx1, 0)
 	assert.Equal(t, 4, cb.times)
 
+}
+
+func TestReuseHandlersOnEmptyCtx(t *testing.T) {
+	callbacks.GlobalHandlers = []Handler{}
+	cb := &myCallback{t: t}
+	AppendGlobalHandlers(cb)
+	ctx := ReuseHandlers(context.Background(), &RunInfo{Name: "test"})
+	OnStart(ctx, 0)
+	assert.Equal(t, 1, cb.times)
+}
+
+func TestAppendHandlersTwiceOnSameCtx(t *testing.T) {
+	callbacks.GlobalHandlers = []Handler{}
+	cb := &myCallback{t: t}
+	cb1 := &myCallback{t: t}
+	cb2 := &myCallback{t: t}
+	ctx := InitCallbacks(context.Background(), &RunInfo{Name: "test"}, cb)
+	ctx1 := callbacks.AppendHandlers(ctx, &RunInfo{Name: "test"}, cb1)
+	ctx2 := callbacks.AppendHandlers(ctx, &RunInfo{Name: "test"}, cb2)
+	OnStart(ctx1, 0)
+	OnStart(ctx2, 0)
+	assert.Equal(t, 2, cb.times)
+	assert.Equal(t, 1, cb1.times)
+	assert.Equal(t, 1, cb2.times)
 }
 
 type myCallback struct {

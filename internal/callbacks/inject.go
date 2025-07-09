@@ -36,7 +36,10 @@ func InitCallbacks(ctx context.Context, info *RunInfo, handlers ...Handler) cont
 func EnsureRunInfo(ctx context.Context, typ string, comp components.Component) context.Context {
 	cbm, ok := managerFromCtx(ctx)
 	if !ok {
-		return ctx
+		return InitCallbacks(ctx, &RunInfo{
+			Type:      typ,
+			Component: comp,
+		})
 	}
 	if cbm.runInfo == nil {
 		return ReuseHandlers(ctx, &RunInfo{
@@ -50,7 +53,7 @@ func EnsureRunInfo(ctx context.Context, typ string, comp components.Component) c
 func ReuseHandlers(ctx context.Context, info *RunInfo) context.Context {
 	cbm, ok := managerFromCtx(ctx)
 	if !ok {
-		return ctx
+		return InitCallbacks(ctx, info)
 	}
 	return ctxWithManager(ctx, cbm.withRunInfo(info))
 }
@@ -60,7 +63,10 @@ func AppendHandlers(ctx context.Context, info *RunInfo, handlers ...Handler) con
 	if !ok {
 		return InitCallbacks(ctx, info, handlers...)
 	}
-	return InitCallbacks(ctx, info, append(cbm.handlers, handlers...)...)
+	nh := make([]Handler, len(cbm.handlers)+len(handlers))
+	copy(nh[:len(cbm.handlers)], cbm.handlers)
+	copy(nh[len(cbm.handlers):], handlers)
+	return InitCallbacks(ctx, info, nh...)
 }
 
 type Handle[T any] func(context.Context, T, *RunInfo, []Handler) (context.Context, T)
