@@ -105,11 +105,10 @@ func TestAgentTool_InvokableRun(t *testing.T) {
 				{
 					AgentName: "TestAgent",
 					Output: &AgentOutput{
-						ModelResponse: &ModelOutput{
-							Response: &MessageVariant{
-								IsStreaming: false,
-								Message:     schema.AssistantMessage("Test response", nil),
-							},
+						MessageOutput: &MessageVariant{
+							IsStreaming: false,
+							Message:     schema.AssistantMessage("Test response", nil),
+							Role:        schema.Assistant,
 						},
 					},
 				},
@@ -124,13 +123,10 @@ func TestAgentTool_InvokableRun(t *testing.T) {
 				{
 					AgentName: "TestAgent",
 					Output: &AgentOutput{
-						ToolCallResponse: &ToolCallOutput{
-							Name:       "TestTool",
-							ToolCallID: "test-id",
-							Response: &MessageVariant{
-								IsStreaming: false,
-								Message:     schema.ToolMessage("Tool response", "test-id"),
-							},
+						MessageOutput: &MessageVariant{
+							IsStreaming: false,
+							Message:     schema.ToolMessage("Tool response", "test-id"),
+							Role:        schema.Tool,
 						},
 					},
 				},
@@ -176,7 +172,6 @@ func TestAgentTool_InvokableRun(t *testing.T) {
 			agentTool_ := NewAgentTool(ctx, mockAgent_)
 
 			// Call InvokableRun
-
 			output, err := agentTool_.(tool.InvokableTool).InvokableRun(ctx, tt.request)
 
 			// Verify results

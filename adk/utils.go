@@ -17,9 +17,11 @@
 package adk
 
 import (
+	"context"
 	"strings"
 
 	"github.com/cloudwego/eino/internal"
+	"github.com/cloudwego/eino/schema"
 )
 
 type AsyncIterator[T any] struct {
@@ -55,40 +57,6 @@ func copyMap[K comparable, V any](m map[K]V) map[K]V {
 	return res
 }
 
-func NewModelOutputEvent(agentName string, message Message, messageStream MessageStream) *AgentEvent {
-	return &AgentEvent{
-		AgentName: agentName,
-		Output: &AgentOutput{
-			ModelResponse: &ModelOutput{
-				Response: &MessageVariant{
-					IsStreaming:   message == nil,
-					Message:       message,
-					MessageStream: messageStream,
-				},
-			},
-		},
-	}
-}
-
-func NewToolOutputEvent(agentName string, toolName string,
-	toolCallID string, message Message, messageStream MessageStream) *AgentEvent {
-
-	return &AgentEvent{
-		AgentName: agentName,
-		Output: &AgentOutput{
-			ToolCallResponse: &ToolCallOutput{
-				Name:       toolName,
-				ToolCallID: toolCallID,
-				Response: &MessageVariant{
-					IsStreaming:   message == nil,
-					Message:       message,
-					MessageStream: messageStream,
-				},
-			},
-		},
-	}
-}
-
 func concatInstructions(instructions ...string) string {
 	var sb strings.Builder
 	sb.WriteString(instructions[0])
@@ -98,4 +66,11 @@ func concatInstructions(instructions ...string) string {
 	}
 
 	return sb.String()
+}
+
+func GenTransferMessages(_ context.Context, destAgentName string) (Message, Message) {
+	tooCall := schema.ToolCall{Function: schema.FunctionCall{Name: TransferToAgentToolName, Arguments: destAgentName}}
+	assistantMessage := schema.AssistantMessage("", []schema.ToolCall{tooCall})
+	toolMessage := schema.ToolMessage(transferToAgentToolOutput(destAgentName), "", schema.WithToolName(TransferToAgentToolName))
+	return assistantMessage, toolMessage
 }

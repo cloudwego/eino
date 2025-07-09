@@ -44,7 +44,7 @@ func (r *Runner) Run(ctx context.Context, agent Agent, messages []Message,
 		EnableStreaming: r.enableStreaming,
 	}
 
-	ctx = ctxWithNewRunCtx(ctx)
+	ctx = ClearRunCtx(ctx)
 
 	return fa.Run(ctx, input, opts...)
 }

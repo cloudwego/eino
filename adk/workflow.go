@@ -183,12 +183,6 @@ func (a *workflowAgent) runParallel(ctx context.Context, input *AgentInput,
 	}
 }
 
-type workflowAgentConfig struct {
-	Name        string
-	Description string
-	SubAgents   []Agent
-}
-
 type SequentialAgentConfig struct {
 	Name        string
 	Description string
