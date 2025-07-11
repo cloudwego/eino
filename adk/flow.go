@@ -111,7 +111,7 @@ func setSubAgents(ctx context.Context, agent Agent, subAgents []Agent) (*flowAge
 				return nil, err
 			}
 
-			if fa.disallowTransferToParent {
+			if fsa.disallowTransferToParent {
 				err = onAgent.OnDisallowTransferToParent(ctx)
 				if err != nil {
 					return nil, err
