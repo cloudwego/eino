@@ -56,22 +56,10 @@ func (at *agentTool) Info(ctx context.Context) (*schema.ToolInfo, error) {
 	}, nil
 }
 
-func genTransferMessages(agentName string) []Message {
-	tooCall := schema.ToolCall{Function: schema.FunctionCall{Name: TransferToAgentToolName, Arguments: agentName}}
-
-	assistantMessage := schema.AssistantMessage("", []schema.ToolCall{tooCall})
-	toolMessage := schema.ToolMessage(transferToAgentToolOutput(agentName), "", schema.WithToolName(TransferToAgentToolName))
-
-	return []Message{
-		rewriteMessage(assistantMessage, agentName),
-		rewriteMessage(toolMessage, agentName),
-	}
-}
-
 func (at *agentTool) InvokableRun(ctx context.Context, argumentsInJSON string, _ ...tool.Option) (string, error) {
 	var input []Message
 	if at.fullChatHistoryAsInput {
-		history, err := getReactChatHistory(ctx)
+		history, err := getReactChatHistory(ctx, at.agent.Name(ctx))
 		if err != nil {
 			return "", err
 		}
@@ -113,22 +101,15 @@ func (at *agentTool) InvokableRun(ctx context.Context, argumentsInJSON string, _
 	}
 
 	var ret string
-	if output := lastEvent.GetModelOutput(); output != nil {
-		msg, e := output.Response.GetMessage()
-		if e != nil {
-			return "", e
+	if lastEvent.Output != nil {
+		if output := lastEvent.Output.MessageOutput; output != nil {
+			msg, e := output.GetMessage()
+			if e != nil {
+				return "", e
+			}
+
+			ret = msg.Content
 		}
-
-		ret = msg.Content
-	}
-
-	if output := lastEvent.GetToolCallOutput(); output != nil {
-		msg, e := output.Response.GetMessage()
-		if e != nil {
-			return "", e
-		}
-
-		ret = msg.Content
 	}
 
 	return ret, nil
@@ -146,7 +127,7 @@ func WithFullChatHistoryAsInput() AgentToolOption {
 	}
 }
 
-func getReactChatHistory(ctx context.Context) ([]Message, error) {
+func getReactChatHistory(ctx context.Context, destAgentName string) ([]Message, error) {
 	var messages []Message
 	var agentName string
 	err := compose.ProcessState(ctx, func(ctx context.Context, st *State) error {
@@ -157,6 +138,9 @@ func getReactChatHistory(ctx context.Context) ([]Message, error) {
 
 	messages = messages[:len(messages)-1] // remove the last assistant message, which is the tool call message
 	history := make([]Message, 0, len(messages))
+	history = append(history, messages...)
+	a, t := GenTransferMessages(ctx, destAgentName)
+	history = append(history, a, t)
 	for _, msg := range messages {
 		if msg.Role == schema.System {
 			continue
@@ -168,8 +152,6 @@ func getReactChatHistory(ctx context.Context) ([]Message, error) {
 
 		history = append(history, msg)
 	}
-
-	history = append(history, genTransferMessages(agentName)...)
 
 	return history, err
 }

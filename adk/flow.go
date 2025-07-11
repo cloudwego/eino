@@ -213,15 +213,9 @@ func (a *flowAgent) genAgentInput(ctx context.Context, runCtx *runContext) (*Age
 
 		var msg Message
 		var err error
-		if modelOutput := event.GetModelOutput(); modelOutput != nil {
-			msg, err = modelOutput.Response.GetMessage()
-			if err != nil {
-				return nil, err
-			}
-		}
-
-		if toolCallOutput := event.GetToolCallOutput(); toolCallOutput != nil {
-			msg, err = toolCallOutput.Response.GetMessage()
+		if event.Output != nil && event.Output.MessageOutput != nil {
+			output := event.Output.MessageOutput
+			msg, err = output.GetMessage()
 			if err != nil {
 				return nil, err
 			}
@@ -297,24 +291,32 @@ func (a *flowAgent) Run(ctx context.Context, input *AgentInput, opts ...AgentRun
 			generator.Close()
 		}()
 
-		var destName string
+		var finalEvent *AgentEvent
 		for {
 			event, ok := aIter.Next()
 			if !ok {
 				break
 			}
 
+			event.AgentName = agentName
 			event.RunPath = runCtx.runPath
+
 			runCtx.session.addEvent(event)
 
 			generator.Send(event)
 
-			if event.Action != nil && event.Action.Exit {
+			finalEvent = event
+		}
+
+		var destName string
+		if finalEvent != nil && finalEvent.Action != nil {
+			action := finalEvent.Action
+			if action.Exit {
 				return
 			}
 
-			if event.Action != nil && event.Action.TransferToAgent != nil {
-				destName = event.Action.TransferToAgent.DestAgentName
+			if action.TransferToAgent != nil {
+				destName = action.TransferToAgent.DestAgentName
 			}
 		}
 
