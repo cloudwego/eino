@@ -285,7 +285,7 @@ type cbHandler struct {
 func (h *cbHandler) onChatModelEnd(ctx context.Context,
 	_ *callbacks.RunInfo, output *model.CallbackOutput) context.Context {
 
-	event := NewModelOutputEvent(h.agentName, output.Message, nil)
+	event := EventFromMessage(output.Message, nil, schema.Assistant, "")
 	h.Send(event)
 	return ctx
 }
@@ -297,7 +297,7 @@ func (h *cbHandler) onChatModelEndWithStreamOutput(ctx context.Context,
 		return in.Message, nil
 	}
 	out := schema.StreamReaderWithConvert(output, cvt)
-	event := NewModelOutputEvent(h.agentName, nil, out)
+	event := EventFromMessage(nil, out, schema.Assistant, "")
 	h.Send(event)
 
 	return ctx
@@ -308,7 +308,7 @@ func (h *cbHandler) onToolEnd(ctx context.Context,
 
 	toolCallID := compose.GetToolCallID(ctx)
 	msg := schema.ToolMessage(output.Response, toolCallID, schema.WithToolName(runInfo.Name))
-	event := NewToolOutputEvent(h.agentName, runInfo.Name, toolCallID, msg, nil)
+	event := EventFromMessage(msg, nil, schema.Tool, runInfo.Name)
 
 	action := popToolGenAction(ctx, runInfo.Name)
 	event.Action = action
@@ -326,7 +326,7 @@ func (h *cbHandler) onToolEndWithStreamOutput(ctx context.Context,
 		return schema.ToolMessage(in.Response, toolCallID), nil
 	}
 	out := schema.StreamReaderWithConvert(output, cvt)
-	event := NewToolOutputEvent(h.agentName, runInfo.Name, toolCallID, nil, out)
+	event := EventFromMessage(nil, out, schema.Tool, runInfo.Name)
 	h.Send(event)
 
 	return ctx
@@ -372,9 +372,9 @@ func setOutputToSession(ctx context.Context, msg Message, msgStream MessageStrea
 	return nil
 }
 
-func errFunc(agentName string, err error) runFunc {
+func errFunc(err error) runFunc {
 	return func(ctx context.Context, input *AgentInput, generator *AsyncGenerator[*AgentEvent]) {
-		generator.Send(&AgentEvent{AgentName: agentName, Err: err})
+		generator.Send(&AgentEvent{Err: err})
 	}
 }
 
@@ -401,7 +401,7 @@ func (a *ChatModelAgent) buildRunFunc(ctx context.Context) runFunc {
 			toolsNodeConf.Tools = append(toolsNodeConf.Tools, a.exit)
 			exitInfo, err := a.exit.Info(ctx)
 			if err != nil {
-				a.run = errFunc(a.name, err)
+				a.run = errFunc(err)
 				return
 			}
 			returnDirectly[exitInfo.Name] = true
@@ -413,7 +413,7 @@ func (a *ChatModelAgent) buildRunFunc(ctx context.Context) runFunc {
 				var msgs []Message
 				msgs, err = a.genModelInput(ctx, instruction, input)
 				if err != nil {
-					generator.Send(&AgentEvent{AgentName: a.name, Err: err})
+					generator.Send(&AgentEvent{Err: err})
 					return
 				}
 
@@ -427,15 +427,15 @@ func (a *ChatModelAgent) buildRunFunc(ctx context.Context) runFunc {
 
 				var event *AgentEvent
 				if err == nil {
-					event = NewModelOutputEvent(a.name, msg, msgStream)
+					event = EventFromMessage(msg, msgStream, schema.Assistant, "")
 					if a.outputKey != "" {
 						err = setOutputToSession(ctx, msg, msgStream, a.outputKey)
 						if err != nil {
-							generator.Send(&AgentEvent{AgentName: a.name, Err: err})
+							generator.Send(&AgentEvent{Err: err})
 						}
 					}
 				} else {
-					event = &AgentEvent{AgentName: a.name, Err: err}
+					event = &AgentEvent{Err: err}
 				}
 
 				generator.Send(event)
@@ -457,13 +457,13 @@ func (a *ChatModelAgent) buildRunFunc(ctx context.Context) runFunc {
 
 		g, err := newReact(ctx, conf)
 		if err != nil {
-			a.run = errFunc(a.name, err)
+			a.run = errFunc(err)
 			return
 		}
 
 		runnable, err := g.Compile(ctx, compose.WithGraphName("React"))
 		if err != nil {
-			a.run = errFunc(a.name, err)
+			a.run = errFunc(err)
 			return
 		}
 
@@ -472,7 +472,7 @@ func (a *ChatModelAgent) buildRunFunc(ctx context.Context) runFunc {
 			var msgs []Message
 			msgs, err_ = a.genModelInput(ctx, instruction, input)
 			if err_ != nil {
-				generator.Send(&AgentEvent{AgentName: a.name, Err: err_})
+				generator.Send(&AgentEvent{Err: err_})
 				return
 			}
 
@@ -490,7 +490,7 @@ func (a *ChatModelAgent) buildRunFunc(ctx context.Context) runFunc {
 				if a.outputKey != "" {
 					err_ = setOutputToSession(ctx, msg, msgStream, a.outputKey)
 					if err_ != nil {
-						generator.Send(&AgentEvent{AgentName: a.name, Err: err})
+						generator.Send(&AgentEvent{Err: err})
 					}
 				}
 			}
