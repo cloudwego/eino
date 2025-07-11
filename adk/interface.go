@@ -18,7 +18,6 @@ package adk
 
 import (
 	"context"
-	"sync"
 
 	"github.com/cloudwego/eino/schema"
 )
@@ -35,8 +34,6 @@ type MessageVariant struct {
 	Role schema.RoleType
 	// only used when Role is Tool
 	ToolName string
-
-	mu sync.Mutex
 }
 
 func EventFromMessage(msg Message, msgStream MessageStream,
@@ -52,38 +49,6 @@ func EventFromMessage(msg Message, msgStream MessageStream,
 			},
 		},
 	}
-}
-
-func (mv *MessageVariant) GetMessage() (Message, error) {
-	var message Message
-	if mv.IsStreaming {
-		mv.mu.Lock()
-		sts := mv.MessageStream.Copy(2)
-		mv.MessageStream = sts[0]
-		mv.mu.Unlock()
-
-		var err error
-		message, err = schema.ConcatMessageStream(sts[1])
-		if err != nil {
-			return nil, err
-		}
-	} else {
-		message = mv.Message
-	}
-
-	return message, nil
-}
-
-func (mv *MessageVariant) GetMessageStream() MessageStream {
-	if mv.IsStreaming {
-		mv.mu.Lock()
-		sts := mv.MessageStream.Copy(2)
-		mv.MessageStream = sts[0]
-		mv.mu.Unlock()
-		return sts[1]
-	}
-
-	return nil
 }
 
 type TransferToAgentAction struct {
@@ -134,6 +99,12 @@ type Agent interface {
 	Name(ctx context.Context) string
 	Description(ctx context.Context) string
 
+	// Run runs the agent.
+	// The returned AgentEvent within the AsyncIterator must be safe to modify.
+	// If the returned AgentEvent within the AsyncIterator contains MessageStream,
+	// the MessageStream MUST be exclusive and safe to be received directly.
+	// NOTE: it's recommended to use SetAutomaticClose() on the MessageStream of AgentEvents emitted by AsyncIterator,
+	// so that even the events are not processed, the MessageStream can still be closed.
 	Run(ctx context.Context, input *AgentInput, options ...AgentRunOption) *AsyncIterator[*AgentEvent]
 }
 

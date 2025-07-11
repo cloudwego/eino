@@ -129,8 +129,8 @@ func TestSequentialAgent(t *testing.T) {
 	assert.NotNil(t, event1.Output.MessageOutput)
 
 	// Get the message content from agent1
-	msg1, err := event1.Output.MessageOutput.GetMessage()
-	assert.NoError(t, err)
+	msg1 := event1.Output.MessageOutput.Message
+	assert.NotNil(t, msg1)
 	assert.Equal(t, "Response from Agent1", msg1.Content)
 
 	// Second event should be from agent2
@@ -142,8 +142,8 @@ func TestSequentialAgent(t *testing.T) {
 	assert.NotNil(t, event2.Output.MessageOutput)
 
 	// Get the message content from agent2
-	msg2, err := event2.Output.MessageOutput.GetMessage()
-	assert.NoError(t, err)
+	msg2 := event2.Output.MessageOutput.Message
+	assert.NotNil(t, msg2)
 	assert.Equal(t, "Response from Agent2", msg2.Content)
 
 	// No more events
@@ -293,7 +293,8 @@ func TestParallelAgent(t *testing.T) {
 		assert.NotNil(t, event.Output)
 		assert.NotNil(t, event.Output.MessageOutput)
 
-		msg, err := event.Output.MessageOutput.GetMessage()
+		msg := event.Output.MessageOutput.Message
+		assert.NotNil(t, msg)
 		assert.NoError(t, err)
 
 		// Check the source agent name and message content
@@ -367,8 +368,8 @@ func TestLoopAgent(t *testing.T) {
 		assert.NotNil(t, event.Output)
 		assert.NotNil(t, event.Output.MessageOutput)
 
-		msg, err := event.Output.MessageOutput.GetMessage()
-		assert.NoError(t, err)
+		msg := event.Output.MessageOutput.Message
+		assert.NotNil(t, msg)
 		assert.Equal(t, "Loop iteration", msg.Content)
 	}
 }
@@ -437,7 +438,7 @@ func TestLoopAgentWithExit(t *testing.T) {
 	assert.NotNil(t, event.Action)
 	assert.True(t, event.Action.Exit)
 
-	msg, err := event.Output.MessageOutput.GetMessage()
-	assert.NoError(t, err)
+	msg := event.Output.MessageOutput.Message
+	assert.NotNil(t, msg)
 	assert.Equal(t, "Loop iteration with exit", msg.Content)
 }
