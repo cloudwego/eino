@@ -30,6 +30,25 @@ type MessageVariant struct {
 
 	Message       Message
 	MessageStream MessageStream
+	// message role: Assistant or Tool
+	Role schema.RoleType
+	// only used when Role is Tool
+	ToolName string
+}
+
+func EventFromMessage(msg Message, msgStream MessageStream,
+	role schema.RoleType, toolName string) *AgentEvent {
+	return &AgentEvent{
+		Output: &AgentOutput{
+			MessageOutput: &MessageVariant{
+				IsStreaming:   msgStream != nil,
+				Message:       msg,
+				MessageStream: msgStream,
+				Role:          role,
+				ToolName:      toolName,
+			},
+		},
+	}
 }
 
 func (mv *MessageVariant) GetMessage() (Message, error) {
@@ -47,25 +66,12 @@ func (mv *MessageVariant) GetMessage() (Message, error) {
 	return message, nil
 }
 
-type ToolCallOutput struct {
-	Name       string
-	ToolCallID string
-
-	Response *MessageVariant
-}
-
-type ModelOutput struct {
-	Response *MessageVariant
-}
-
 type TransferToAgentAction struct {
 	DestAgentName string
 }
 
 type AgentOutput struct {
-	ModelResponse *ModelOutput
-
-	ToolCallResponse *ToolCallOutput
+	MessageOutput *MessageVariant
 
 	CustomizedOutput any
 }
@@ -98,27 +104,12 @@ type AgentEvent struct {
 	Err error
 }
 
-func (event *AgentEvent) GetModelOutput() *ModelOutput {
-	if event.Output == nil {
-		return nil
-	}
-
-	return event.Output.ModelResponse
-}
-
-func (event *AgentEvent) GetToolCallOutput() *ToolCallOutput {
-	if event.Output == nil {
-		return nil
-	}
-
-	return event.Output.ToolCallResponse
-}
-
 type AgentInput struct {
 	Messages        []Message
 	EnableStreaming bool
 }
 
+//go:generate  mockgen -destination ../internal/mock/adk/Agent_mock.go --package adk -source interface.go
 type Agent interface {
 	Name(ctx context.Context) string
 	Description(ctx context.Context) string

@@ -107,7 +107,8 @@ func TestTransferToAgent(t *testing.T) {
 	assert.NotNil(t, event1)
 	assert.Nil(t, event1.Err)
 	assert.NotNil(t, event1.Output)
-	assert.NotNil(t, event1.Output.ModelResponse)
+	assert.NotNil(t, event1.Output.MessageOutput)
+	assert.Equal(t, schema.Assistant, event1.Output.MessageOutput.Role)
 
 	// Second event: tool output (TransferToAgent)
 	event2, ok := iterator.Next()
@@ -115,7 +116,9 @@ func TestTransferToAgent(t *testing.T) {
 	assert.NotNil(t, event2)
 	assert.Nil(t, event2.Err)
 	assert.NotNil(t, event2.Output)
-	assert.NotNil(t, event2.Output.ToolCallResponse)
+	assert.NotNil(t, event2.Output.MessageOutput)
+	assert.Equal(t, schema.Tool, event2.Output.MessageOutput.Role)
+
 	// Verify the action is TransferToAgent
 	assert.NotNil(t, event2.Action)
 	assert.NotNil(t, event2.Action.TransferToAgent)
@@ -127,10 +130,11 @@ func TestTransferToAgent(t *testing.T) {
 	assert.NotNil(t, event3)
 	assert.Nil(t, event3.Err)
 	assert.NotNil(t, event3.Output)
-	assert.NotNil(t, event3.Output.ModelResponse)
+	assert.NotNil(t, event3.Output.MessageOutput)
+	assert.Equal(t, schema.Assistant, event3.Output.MessageOutput.Role)
 
 	// Verify the message content from child agent
-	msg, err := event3.Output.ModelResponse.Response.GetMessage()
+	msg, err := event3.Output.MessageOutput.GetMessage()
 	assert.NoError(t, err)
 	assert.Equal(t, "Hello from child agent", msg.Content)
 
