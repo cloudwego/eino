@@ -70,10 +70,10 @@ func TestChatModelAgentRun(t *testing.T) {
 		assert.NotNil(t, event)
 		assert.Nil(t, event.Err)
 		assert.NotNil(t, event.Output)
-		assert.NotNil(t, event.Output.ModelResponse)
+		assert.NotNil(t, event.Output.MessageOutput)
 
 		// Verify the message content
-		msg, err := event.Output.ModelResponse.Response.GetMessage()
+		msg, err := event.Output.MessageOutput.GetMessage()
 		assert.NoError(t, err)
 		assert.Equal(t, "Hello, I am an AI assistant.", msg.Content)
 
@@ -126,8 +126,8 @@ func TestChatModelAgentRun(t *testing.T) {
 		assert.NotNil(t, event)
 		assert.Nil(t, event.Err)
 		assert.NotNil(t, event.Output)
-		assert.NotNil(t, event.Output.ModelResponse)
-		assert.True(t, event.Output.ModelResponse.Response.IsStreaming)
+		assert.NotNil(t, event.Output.MessageOutput)
+		assert.True(t, event.Output.MessageOutput.IsStreaming)
 
 		// No more events
 		_, ok = iterator.Next()
@@ -239,7 +239,8 @@ func TestChatModelAgentRun(t *testing.T) {
 		assert.NotNil(t, event1)
 		assert.Nil(t, event1.Err)
 		assert.NotNil(t, event1.Output)
-		assert.NotNil(t, event1.Output.ModelResponse)
+		assert.NotNil(t, event1.Output.MessageOutput)
+		assert.Equal(t, schema.Assistant, event1.Output.MessageOutput.Role)
 
 		// Second event should be the tool output
 		event2, ok := iterator.Next()
@@ -247,7 +248,8 @@ func TestChatModelAgentRun(t *testing.T) {
 		assert.NotNil(t, event2)
 		assert.Nil(t, event2.Err)
 		assert.NotNil(t, event2.Output)
-		assert.NotNil(t, event2.Output.ToolCallResponse)
+		assert.NotNil(t, event2.Output.MessageOutput)
+		assert.Equal(t, schema.Tool, event2.Output.MessageOutput.Role)
 
 		// Third event should be the final model output
 		event3, ok := iterator.Next()
@@ -255,7 +257,8 @@ func TestChatModelAgentRun(t *testing.T) {
 		assert.NotNil(t, event3)
 		assert.Nil(t, event3.Err)
 		assert.NotNil(t, event3.Output)
-		assert.NotNil(t, event3.Output.ModelResponse)
+		assert.NotNil(t, event3.Output.MessageOutput)
+		assert.Equal(t, schema.Assistant, event3.Output.MessageOutput.Role)
 
 		// No more events
 		_, ok = iterator.Next()
@@ -317,7 +320,8 @@ func TestExitTool(t *testing.T) {
 	assert.NotNil(t, event1)
 	assert.Nil(t, event1.Err)
 	assert.NotNil(t, event1.Output)
-	assert.NotNil(t, event1.Output.ModelResponse)
+	assert.NotNil(t, event1.Output.MessageOutput)
+	assert.Equal(t, schema.Assistant, event1.Output.MessageOutput.Role)
 
 	// Second event: tool output (Exit)
 	event2, ok := iterator.Next()
@@ -325,14 +329,15 @@ func TestExitTool(t *testing.T) {
 	assert.NotNil(t, event2)
 	assert.Nil(t, event2.Err)
 	assert.NotNil(t, event2.Output)
-	assert.NotNil(t, event2.Output.ToolCallResponse)
+	assert.NotNil(t, event2.Output.MessageOutput)
+	assert.Equal(t, schema.Tool, event2.Output.MessageOutput.Role)
 
 	// Verify the action is Exit
 	assert.NotNil(t, event2.Action)
 	assert.True(t, event2.Action.Exit)
 
 	// Verify the final result
-	assert.Equal(t, "This is the final result", event2.Output.ToolCallResponse.Response.Message.Content)
+	assert.Equal(t, "This is the final result", event2.Output.MessageOutput.Message.Content)
 
 	// No more events
 	_, ok = iterator.Next()

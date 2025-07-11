@@ -143,8 +143,9 @@ func initRunCtx(ctx context.Context, agentName string, input *AgentInput) (conte
 
 	return context.WithValue(ctx, runCtxKey{}, runCtx), runCtx
 }
-func ctxWithNewRunCtx(ctx context.Context) context.Context {
-	return context.WithValue(ctx, runCtxKey{}, &runContext{session: newRunSession()})
+
+func ClearRunCtx(ctx context.Context) context.Context {
+	return context.WithValue(ctx, runCtxKey{}, nil)
 }
 
 func getSession(ctx context.Context) *runSession {

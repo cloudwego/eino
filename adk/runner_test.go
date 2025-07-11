@@ -94,11 +94,10 @@ func TestRunner_Run(t *testing.T) {
 		{
 			AgentName: "TestAgent",
 			Output: &AgentOutput{
-				ModelResponse: &ModelOutput{
-					Response: &MessageVariant{
-						IsStreaming: false,
-						Message:     schema.AssistantMessage("Response from test agent", nil),
-					},
+				MessageOutput: &MessageVariant{
+					IsStreaming: false,
+					Message:     schema.AssistantMessage("Response from test agent", nil),
+					Role:        schema.Assistant,
 				},
 			},
 		},
@@ -125,9 +124,9 @@ func TestRunner_Run(t *testing.T) {
 	assert.True(t, ok)
 	assert.Equal(t, "TestAgent", event.AgentName)
 	assert.NotNil(t, event.Output)
-	assert.NotNil(t, event.Output.ModelResponse)
-	assert.NotNil(t, event.Output.ModelResponse.Response)
-	assert.Equal(t, "Response from test agent", event.Output.ModelResponse.Response.Message.Content)
+	assert.NotNil(t, event.Output.MessageOutput)
+	assert.NotNil(t, event.Output.MessageOutput.Message)
+	assert.Equal(t, "Response from test agent", event.Output.MessageOutput.Message.Content)
 
 	// Verify that the iterator is now closed
 	_, ok = iterator.Next()
@@ -142,12 +141,11 @@ func TestRunner_Run_WithStreaming(t *testing.T) {
 		{
 			AgentName: "TestAgent",
 			Output: &AgentOutput{
-				ModelResponse: &ModelOutput{
-					Response: &MessageVariant{
-						IsStreaming:   true,
-						Message:       nil,
-						MessageStream: schema.StreamReaderFromArray([]*schema.Message{schema.AssistantMessage("Streaming response", nil)}),
-					},
+				MessageOutput: &MessageVariant{
+					IsStreaming:   true,
+					Message:       nil,
+					MessageStream: schema.StreamReaderFromArray([]*schema.Message{schema.AssistantMessage("Streaming response", nil)}),
+					Role:          schema.Assistant,
 				},
 			},
 		},
@@ -174,9 +172,8 @@ func TestRunner_Run_WithStreaming(t *testing.T) {
 	assert.True(t, ok)
 	assert.Equal(t, "TestAgent", event.AgentName)
 	assert.NotNil(t, event.Output)
-	assert.NotNil(t, event.Output.ModelResponse)
-	assert.NotNil(t, event.Output.ModelResponse.Response)
-	assert.True(t, event.Output.ModelResponse.Response.IsStreaming)
+	assert.NotNil(t, event.Output.MessageOutput)
+	assert.True(t, event.Output.MessageOutput.IsStreaming)
 
 	// Verify that the iterator is now closed
 	_, ok = iterator.Next()
@@ -191,11 +188,10 @@ func TestRunner_Query(t *testing.T) {
 		{
 			AgentName: "TestAgent",
 			Output: &AgentOutput{
-				ModelResponse: &ModelOutput{
-					Response: &MessageVariant{
-						IsStreaming: false,
-						Message:     schema.AssistantMessage("Response to query", nil),
-					},
+				MessageOutput: &MessageVariant{
+					IsStreaming: false,
+					Message:     schema.AssistantMessage("Response to query", nil),
+					Role:        schema.Assistant,
 				},
 			},
 		},
@@ -218,9 +214,9 @@ func TestRunner_Query(t *testing.T) {
 	assert.True(t, ok)
 	assert.Equal(t, "TestAgent", event.AgentName)
 	assert.NotNil(t, event.Output)
-	assert.NotNil(t, event.Output.ModelResponse)
-	assert.NotNil(t, event.Output.ModelResponse.Response)
-	assert.Equal(t, "Response to query", event.Output.ModelResponse.Response.Message.Content)
+	assert.NotNil(t, event.Output.MessageOutput)
+	assert.NotNil(t, event.Output.MessageOutput.Message)
+	assert.Equal(t, "Response to query", event.Output.MessageOutput.Message.Content)
 
 	// Verify that the iterator is now closed
 	_, ok = iterator.Next()
@@ -235,12 +231,11 @@ func TestRunner_Query_WithStreaming(t *testing.T) {
 		{
 			AgentName: "TestAgent",
 			Output: &AgentOutput{
-				ModelResponse: &ModelOutput{
-					Response: &MessageVariant{
-						IsStreaming:   true,
-						Message:       nil,
-						MessageStream: schema.StreamReaderFromArray([]*schema.Message{schema.AssistantMessage("Streaming query response", nil)}),
-					},
+				MessageOutput: &MessageVariant{
+					IsStreaming:   true,
+					Message:       nil,
+					MessageStream: schema.StreamReaderFromArray([]*schema.Message{schema.AssistantMessage("Streaming query response", nil)}),
+					Role:          schema.Assistant,
 				},
 			},
 		},
@@ -263,9 +258,8 @@ func TestRunner_Query_WithStreaming(t *testing.T) {
 	assert.True(t, ok)
 	assert.Equal(t, "TestAgent", event.AgentName)
 	assert.NotNil(t, event.Output)
-	assert.NotNil(t, event.Output.ModelResponse)
-	assert.NotNil(t, event.Output.ModelResponse.Response)
-	assert.True(t, event.Output.ModelResponse.Response.IsStreaming)
+	assert.NotNil(t, event.Output.MessageOutput)
+	assert.True(t, event.Output.MessageOutput.IsStreaming)
 
 	// Verify that the iterator is now closed
 	_, ok = iterator.Next()
