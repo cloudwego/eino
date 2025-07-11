@@ -298,9 +298,7 @@ func (a *flowAgent) Run(ctx context.Context, input *AgentInput, opts ...AgentRun
 				break
 			}
 
-			event.AgentName = agentName
-			event.RunPath = runCtx.runPath
-
+			event = event.wrap(agentName, runCtx.runPath)
 			runCtx.session.addEvent(event)
 
 			generator.Send(event)

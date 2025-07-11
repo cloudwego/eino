@@ -124,6 +124,48 @@ type AgentEvent struct {
 	Err error
 }
 
+func (ae *AgentEvent) wrap(agentName string, runPath []string) *AgentEvent {
+	if len(ae.AgentName) == 0 && len(ae.RunPath) == 0 {
+		return &AgentEvent{
+			AgentName: agentName,
+			RunPath:   runPath,
+			Action:    ae.Action,
+			Err:       ae.Err,
+			Output:    ae.Output,
+		}
+	}
+
+	wrapped := &AgentEvent{
+		AgentName: agentName,
+		RunPath:   runPath,
+		Action:    ae.Action,
+		Err:       ae.Err,
+	}
+
+	if ae.Output != nil {
+		wrapped.Output = &AgentOutput{
+			CustomizedOutput: ae.Output.CustomizedOutput,
+		}
+
+		if ae.Output.MessageOutput != nil {
+			wrapped.Output.MessageOutput = &MessageVariant{
+				IsStreaming: ae.Output.MessageOutput.IsStreaming,
+				Message:     ae.Output.MessageOutput.Message,
+				Role:        ae.Output.MessageOutput.Role,
+				ToolName:    ae.Output.MessageOutput.ToolName,
+			}
+
+			if ae.Output.MessageOutput.IsStreaming {
+				sts := ae.Output.MessageOutput.MessageStream.Copy(2)
+				ae.Output.MessageOutput.MessageStream = sts[0]
+				wrapped.Output.MessageOutput.MessageStream = sts[1]
+			}
+		}
+	}
+
+	return wrapped
+}
+
 type AgentInput struct {
 	Messages        []Message
 	EnableStreaming bool
