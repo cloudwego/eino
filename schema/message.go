@@ -815,6 +815,8 @@ func ConcatMessages(msgs []*Message) (*Message, error) {
 }
 
 func ConcatMessageStream(s *StreamReader[*Message]) (*Message, error) {
+	defer s.Close()
+
 	var msgs []*Message
 	for {
 		msg, err := s.Recv()
