@@ -551,6 +551,53 @@ func TestAgentInGraph(t *testing.T) {
 
 }
 
+func TestReActAgentWithNoTools(t *testing.T) {
+	// create the react agent with no tools, assert no error
+	// then invoke the agent with two options: WithToolList, WithChatModelOptions(model.WithTools),
+	// to dynamically add tools to the agent, assert the tool is successfully called.
+	fakeTool := &fakeToolGreetForTest{}
+	ctrl := gomock.NewController(t)
+	cm := mockModel.NewMockToolCallingChatModel(ctrl)
+
+	times := 0
+	cm.EXPECT().Generate(gomock.Any(), gomock.Any(), gomock.Any()).
+		DoAndReturn(func(ctx context.Context, input []*schema.Message, opts ...model.Option) (*schema.Message, error) {
+
+			times += 1
+			if times <= 2 {
+				info, _ := fakeTool.Info(ctx)
+
+				return schema.AssistantMessage("hello max",
+						[]schema.ToolCall{
+							{
+								ID: randStr(),
+								Function: schema.FunctionCall{
+									Name:      info.Name,
+									Arguments: fmt.Sprintf(`{"name": "%s", "hh": "123"}`, randStr()),
+								},
+							},
+						}),
+					nil
+			}
+
+			return schema.AssistantMessage("bye", nil), nil
+
+		}).Times(3)
+
+	ra, err := NewAgent(context.Background(), &AgentConfig{
+		ToolCallingModel: cm,
+		MaxStep:          10,
+	})
+	assert.NoError(t, err)
+
+	info, _ := fakeTool.Info(context.Background())
+	msg, err := ra.Generate(context.Background(), []*schema.Message{
+		schema.UserMessage("hello"),
+	}, WithToolList(fakeTool), WithChatModelOptions(model.WithTools([]*schema.ToolInfo{info})))
+	assert.NoError(t, err)
+	assert.Equal(t, "bye", msg.Content)
+}
+
 type fakeStreamToolGreetForTest struct {
 	tarCount int
 	curCount int
