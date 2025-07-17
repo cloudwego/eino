@@ -211,14 +211,9 @@ func (a *flowAgent) genAgentInput(ctx context.Context, runCtx *runContext) (*Age
 			continue
 		}
 
-		var msg Message
-		var err error
-		if event.Output != nil && event.Output.MessageOutput != nil {
-			output := event.Output.MessageOutput
-			msg, err = output.GetMessage()
-			if err != nil {
-				return nil, err
-			}
+		msg, err := getMessageFromWrappedEvent(event)
+		if err != nil {
+			return nil, err
 		}
 
 		if msg == nil {
@@ -300,10 +295,12 @@ func (a *flowAgent) Run(ctx context.Context, input *AgentInput, opts ...AgentRun
 
 			event.AgentName = agentName
 			event.RunPath = runCtx.runPath
-
+			// copy the event so that the copied event's stream is exclusive for any potential consumer
+			// copy before adding to session because once added to session it's stream could be consumed by genAgentInput at any time
+			copied := copyAgentEvent(event)
 			runCtx.session.addEvent(event)
-
-			generator.Send(event)
+			setAutomaticClose(copied)
+			generator.Send(copied)
 
 			finalEvent = event
 		}
@@ -338,6 +335,7 @@ func (a *flowAgent) Run(ctx context.Context, input *AgentInput, opts ...AgentRun
 					break
 				}
 
+				setAutomaticClose(subEvent)
 				generator.Send(subEvent)
 			}
 		}

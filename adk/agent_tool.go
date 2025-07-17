@@ -103,12 +103,15 @@ func (at *agentTool) InvokableRun(ctx context.Context, argumentsInJSON string, _
 	var ret string
 	if lastEvent.Output != nil {
 		if output := lastEvent.Output.MessageOutput; output != nil {
-			msg, e := output.GetMessage()
-			if e != nil {
-				return "", e
+			if !output.IsStreaming {
+				ret = output.Message.Content
+			} else {
+				msg, err := schema.ConcatMessageStream(output.MessageStream)
+				if err != nil {
+					return "", err
+				}
+				ret = msg.Content
 			}
-
-			ret = msg.Content
 		}
 	}
 
