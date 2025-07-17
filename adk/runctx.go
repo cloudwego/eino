@@ -22,10 +22,16 @@ import (
 )
 
 type runSession struct {
-	events []*AgentEvent
+	events []*agentEventWrapper
 	values map[string]any
 
 	mtx sync.Mutex
+}
+
+type agentEventWrapper struct {
+	*AgentEvent
+	mu                  sync.Mutex
+	concatenatedMessage Message
 }
 
 func newRunSession() *runSession {
@@ -63,11 +69,13 @@ func GetSessionValue(ctx context.Context, key string) (any, bool) {
 
 func (rs *runSession) addEvent(event *AgentEvent) {
 	rs.mtx.Lock()
-	rs.events = append(rs.events, event)
+	rs.events = append(rs.events, &agentEventWrapper{
+		AgentEvent: event,
+	})
 	rs.mtx.Unlock()
 }
 
-func (rs *runSession) getEvents() []*AgentEvent {
+func (rs *runSession) getEvents() []*agentEventWrapper {
 	rs.mtx.Lock()
 	events := rs.events
 	rs.mtx.Unlock()

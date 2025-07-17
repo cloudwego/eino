@@ -134,8 +134,8 @@ func TestTransferToAgent(t *testing.T) {
 	assert.Equal(t, schema.Assistant, event3.Output.MessageOutput.Role)
 
 	// Verify the message content from child agent
-	msg, err := event3.Output.MessageOutput.GetMessage()
-	assert.NoError(t, err)
+	msg := event3.Output.MessageOutput.Message
+	assert.NotNil(t, msg)
 	assert.Equal(t, "Hello from child agent", msg.Content)
 
 	// No more events
