@@ -73,8 +73,8 @@ func TestChatModelAgentRun(t *testing.T) {
 		assert.NotNil(t, event.Output.MessageOutput)
 
 		// Verify the message content
-		msg, err := event.Output.MessageOutput.GetMessage()
-		assert.NoError(t, err)
+		msg := event.Output.MessageOutput.Message
+		assert.NotNil(t, msg)
 		assert.Equal(t, "Hello, I am an AI assistant.", msg.Content)
 
 		// No more events
