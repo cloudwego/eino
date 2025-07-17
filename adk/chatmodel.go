@@ -89,6 +89,8 @@ type ChatModelAgentConfig struct {
 
 	// optional
 	OutputKey string
+
+	MaxStep int
 }
 
 type ChatModelAgent struct {
@@ -102,6 +104,7 @@ type ChatModelAgent struct {
 	genModelInput GenModelInput
 
 	outputKey string
+	maxStep   int
 
 	subAgents   []Agent
 	parentAgent Agent
@@ -143,6 +146,7 @@ func NewChatModelAgent(_ context.Context, config *ChatModelAgentConfig) (*ChatMo
 		genModelInput: genInput,
 		exit:          config.Exit,
 		outputKey:     config.OutputKey,
+		maxStep:       config.MaxStep,
 	}, nil
 }
 
@@ -298,6 +302,7 @@ func (h *cbHandler) onChatModelEndWithStreamOutput(ctx context.Context,
 	}
 	out := schema.StreamReaderWithConvert(output, cvt)
 	event := EventFromMessage(nil, out, schema.Assistant, "")
+	setAutomaticClose(event)
 	h.Send(event)
 
 	return ctx
@@ -327,6 +332,7 @@ func (h *cbHandler) onToolEndWithStreamOutput(ctx context.Context,
 	}
 	out := schema.StreamReaderWithConvert(output, cvt)
 	event := EventFromMessage(nil, out, schema.Tool, runInfo.Name)
+	setAutomaticClose(event)
 	h.Send(event)
 
 	return ctx
@@ -361,14 +367,17 @@ func genReactCallbacks(agentName string,
 }
 
 func setOutputToSession(ctx context.Context, msg Message, msgStream MessageStream, outputKey string) error {
-	msgVariant := &MessageVariant{IsStreaming: msgStream != nil, Message: msg, MessageStream: msgStream}
+	if msg != nil {
+		SetSessionValue(ctx, outputKey, msg.Content)
+		return nil
+	}
 
-	msg, err := msgVariant.GetMessage()
+	concatenated, err := schema.ConcatMessageStream(msgStream)
 	if err != nil {
 		return err
 	}
 
-	SetSessionValue(ctx, outputKey, msg.Content)
+	SetSessionValue(ctx, outputKey, concatenated.Content)
 	return nil
 }
 
@@ -427,21 +436,32 @@ func (a *ChatModelAgent) buildRunFunc(ctx context.Context) runFunc {
 
 				var event *AgentEvent
 				if err == nil {
-					event = EventFromMessage(msg, msgStream, schema.Assistant, "")
 					if a.outputKey != "" {
+						if msgStream != nil {
+							// copy the stream first because when setting output to session, the stream will be consumed
+							ss := msgStream.Copy(2)
+							event = EventFromMessage(msg, ss[1], schema.Assistant, "")
+							setAutomaticClose(event)
+							msgStream = ss[0]
+						} else {
+							event = EventFromMessage(msg, nil, schema.Assistant, "")
+						}
+						// send event asap, because setting output to session will block until stream fully consumed
+						generator.Send(event)
 						err = setOutputToSession(ctx, msg, msgStream, a.outputKey)
 						if err != nil {
 							generator.Send(&AgentEvent{Err: err})
 						}
+					} else {
+						event = EventFromMessage(msg, msgStream, schema.Assistant, "")
+						generator.Send(event)
 					}
 				} else {
 					event = &AgentEvent{Err: err}
+					generator.Send(event)
 				}
 
-				generator.Send(event)
-
 				generator.Close()
-
 			}
 
 			return
@@ -461,7 +481,13 @@ func (a *ChatModelAgent) buildRunFunc(ctx context.Context) runFunc {
 			return
 		}
 
-		runnable, err := g.Compile(ctx, compose.WithGraphName("React"))
+		var opts []compose.GraphCompileOption
+		opts = append(opts, compose.WithGraphName("React"))
+		if a.maxStep > 0 {
+			opts = append(opts, compose.WithMaxRunSteps(a.maxStep))
+		}
+
+		runnable, err := g.Compile(ctx, opts...)
 		if err != nil {
 			a.run = errFunc(err)
 			return
@@ -490,10 +516,14 @@ func (a *ChatModelAgent) buildRunFunc(ctx context.Context) runFunc {
 				if a.outputKey != "" {
 					err_ = setOutputToSession(ctx, msg, msgStream, a.outputKey)
 					if err_ != nil {
-						generator.Send(&AgentEvent{Err: err})
+						generator.Send(&AgentEvent{Err: err_})
 					}
+				} else if msgStream != nil {
+					msgStream.Close()
 				}
 			}
+
+			generator.Close()
 		}
 	})
 
