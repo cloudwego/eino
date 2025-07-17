@@ -18,6 +18,8 @@ package adk
 
 import (
 	"context"
+	"errors"
+	"io"
 	"strings"
 
 	"github.com/cloudwego/eino/internal"
@@ -73,4 +75,118 @@ func GenTransferMessages(_ context.Context, destAgentName string) (Message, Mess
 	assistantMessage := schema.AssistantMessage("", []schema.ToolCall{tooCall})
 	toolMessage := schema.ToolMessage(transferToAgentToolOutput(destAgentName), "", schema.WithToolName(TransferToAgentToolName))
 	return assistantMessage, toolMessage
+}
+
+// set automatic close for event's message stream
+func setAutomaticClose(e *AgentEvent) {
+	if e.Output == nil || e.Output.MessageOutput == nil || !e.Output.MessageOutput.IsStreaming {
+		return
+	}
+
+	e.Output.MessageOutput.MessageStream.SetAutomaticClose()
+}
+
+func getMessageFromWrappedEvent(e *agentEventWrapper) (Message, error) {
+	if e.AgentEvent.Output == nil || e.AgentEvent.Output.MessageOutput == nil {
+		return nil, nil
+	}
+
+	if !e.AgentEvent.Output.MessageOutput.IsStreaming {
+		return e.AgentEvent.Output.MessageOutput.Message, nil
+	}
+
+	if e.concatenatedMessage != nil {
+		return e.concatenatedMessage, nil
+	}
+
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.concatenatedMessage != nil {
+		return e.concatenatedMessage, nil
+	}
+
+	var (
+		msgs []Message
+		s    = e.AgentEvent.Output.MessageOutput.MessageStream
+	)
+
+	defer s.Close()
+	for {
+		msg, err := s.Recv()
+		if err != nil {
+			if err == io.EOF {
+				break
+			}
+
+			return nil, err
+		}
+
+		msgs = append(msgs, msg)
+	}
+
+	if len(msgs) == 0 {
+		return nil, errors.New("no messages in MessageVariant.MessageStream")
+	}
+
+	if len(msgs) == 1 {
+		e.concatenatedMessage = msgs[0]
+	} else {
+		var err error
+		e.concatenatedMessage, err = schema.ConcatMessages(msgs)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	return e.concatenatedMessage, nil
+}
+
+// copyAgentEvent copies an AgentEvent.
+// If the MessageVariant is streaming, the MessageStream will be copied.
+// RunPath will be deep copied.
+// The result of Copy will be a new AgentEvent that is:
+// - safe to set fields of AgentEvent
+// - safe to extend RunPath
+// - safe to receive from MessageStream
+// NOTE: even if the AgentEvent is copied, it's still not recommended to modify
+// the Message itself or Chunks of the MessageStream, as they are not copied.
+// NOTE: if you have CustomizedOutput or CustomizedAction, they are NOT copied.
+func copyAgentEvent(ae *AgentEvent) *AgentEvent {
+	rp := make([]string, len(ae.RunPath))
+	copy(rp, ae.RunPath)
+
+	copied := &AgentEvent{
+		AgentName: ae.AgentName,
+		RunPath:   rp,
+		Action:    ae.Action,
+		Err:       ae.Err,
+	}
+
+	if ae.Output == nil {
+		return copied
+	}
+
+	copied.Output = &AgentOutput{
+		CustomizedOutput: ae.Output.CustomizedOutput,
+	}
+
+	mv := ae.Output.MessageOutput
+	if mv == nil {
+		return copied
+	}
+
+	copied.Output.MessageOutput = &MessageVariant{
+		IsStreaming: mv.IsStreaming,
+		Role:        mv.Role,
+		ToolName:    mv.ToolName,
+	}
+	if mv.IsStreaming {
+		sts := ae.Output.MessageOutput.MessageStream.Copy(2)
+		mv.MessageStream = sts[0]
+		copied.Output.MessageOutput.MessageStream = sts[1]
+	} else {
+		copied.Output.MessageOutput.Message = mv.Message
+	}
+
+	return copied
 }
