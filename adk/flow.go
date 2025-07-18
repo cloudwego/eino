@@ -298,6 +298,7 @@ func (a *flowAgent) Run(ctx context.Context, input *AgentInput, opts ...AgentRun
 			// copy the event so that the copied event's stream is exclusive for any potential consumer
 			// copy before adding to session because once added to session it's stream could be consumed by genAgentInput at any time
 			copied := copyAgentEvent(event)
+			setAutomaticClose(event)
 			runCtx.session.addEvent(event)
 			setAutomaticClose(copied)
 			generator.Send(copied)
