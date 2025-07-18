@@ -89,6 +89,16 @@ func WithCheckPointID(checkPointID string) Option {
 	}
 }
 
+// WithWriteToCheckPointID specifies a different checkpoint ID to write to.
+// If not provided, the checkpoint ID from WithCheckPointID will be used for writing.
+// This is useful for scenarios where you want to load from an existed checkpoint
+// but save the progress to a new, separate checkpoint.
+func WithWriteToCheckPointID(checkPointID string) Option {
+	return Option{
+		writeToCheckPointID: &checkPointID,
+	}
+}
+
 // WithForceNewRun forces the graph to run from the beginning, ignoring any checkpoints.
 func WithForceNewRun() Option {
 	return Option{
