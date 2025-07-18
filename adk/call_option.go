@@ -16,19 +16,8 @@
 
 package adk
 
-import (
-	"github.com/cloudwego/eino/callbacks"
-)
-
-// WithCallbacks is the demo for setting option.
-func WithCallbacks(cbs ...callbacks.Handler) AgentRunOption {
-	return WrapImplSpecificOptFn[options](func(o *options) {
-		o.Callbacks = append(o.Callbacks, cbs...)
-	})
-}
-
 type options struct {
-	Callbacks []callbacks.Handler
+	checkPointID *string
 }
 
 // AgentRunOption is the call option for adk Agent.
