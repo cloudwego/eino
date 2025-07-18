@@ -152,7 +152,7 @@ func (r *runner) run(ctx context.Context, isStream bool, input any, opts ...Opti
 	}
 
 	// Extract CheckPointID
-	checkPointID, stateModifier, forceNewRun := getCheckPointInfo(opts...)
+	checkPointID, writeToCheckPointID, stateModifier, forceNewRun := getCheckPointInfo(opts...)
 	if checkPointID != nil && r.checkPointer.store == nil {
 		return nil, newGraphRunError(fmt.Errorf("receive checkpoint id but have not set checkpoint store"))
 	}
@@ -262,7 +262,7 @@ func (r *runner) run(ctx context.Context, isStream bool, input any, opts ...Opti
 				cm.channels,
 				isStream,
 				isSubGraph,
-				checkPointID,
+				writeToCheckPointID,
 			)
 		}
 	}
@@ -313,7 +313,7 @@ func (r *runner) run(ctx context.Context, isStream bool, input any, opts ...Opti
 				ctx,
 				tempInfo,
 				append(completedTasks, cpt...),
-				checkPointID,
+				writeToCheckPointID,
 				isSubGraph,
 				cm,
 				isStream,
@@ -349,7 +349,7 @@ func (r *runner) run(ctx context.Context, isStream bool, input any, opts ...Opti
 					ctx,
 					tempInfo,
 					append(completedTasks, newCompletedTasks...),
-					checkPointID,
+					writeToCheckPointID,
 					isSubGraph,
 					cm,
 					isStream,
@@ -368,7 +368,7 @@ func (r *runner) run(ctx context.Context, isStream bool, input any, opts ...Opti
 			tempInfo.interruptBeforeNodes = append(tempInfo.interruptBeforeNodes, getHitKey(newNextTasks, r.interruptBeforeNodes)...)
 
 			// simple interrupt
-			return nil, r.handleInterrupt(ctx, tempInfo, append(nextTasks, newNextTasks...), cm.channels, isStream, isSubGraph, checkPointID)
+			return nil, r.handleInterrupt(ctx, tempInfo, append(nextTasks, newNextTasks...), cm.channels, isStream, isSubGraph, writeToCheckPointID)
 		}
 	}
 }
@@ -622,15 +622,21 @@ func (r *runner) createTasks(ctx context.Context, nodeMap map[string]any, optMap
 	return nextTasks, nil
 }
 
-func getCheckPointInfo(opts ...Option) (checkPointID *string, stateModifier StateModifier, forceNewRun bool) {
+func getCheckPointInfo(opts ...Option) (checkPointID *string, writeToCheckPointID *string, stateModifier StateModifier, forceNewRun bool) {
 	for _, opt := range opts {
 		if opt.checkPointID != nil {
 			checkPointID = opt.checkPointID
+		}
+		if opt.writeToCheckPointID != nil {
+			writeToCheckPointID = opt.writeToCheckPointID
 		}
 		if opt.stateModifier != nil {
 			stateModifier = opt.stateModifier
 		}
 		forceNewRun = opt.forceNewRun
+	}
+	if writeToCheckPointID == nil {
+		writeToCheckPointID = checkPointID
 	}
 	return
 }
