@@ -302,7 +302,6 @@ func (h *cbHandler) onChatModelEndWithStreamOutput(ctx context.Context,
 	}
 	out := schema.StreamReaderWithConvert(output, cvt)
 	event := EventFromMessage(nil, out, schema.Assistant, "")
-	setAutomaticClose(event)
 	h.Send(event)
 
 	return ctx
@@ -332,7 +331,6 @@ func (h *cbHandler) onToolEndWithStreamOutput(ctx context.Context,
 	}
 	out := schema.StreamReaderWithConvert(output, cvt)
 	event := EventFromMessage(nil, out, schema.Tool, runInfo.Name)
-	setAutomaticClose(event)
 	h.Send(event)
 
 	return ctx
@@ -441,7 +439,6 @@ func (a *ChatModelAgent) buildRunFunc(ctx context.Context) runFunc {
 							// copy the stream first because when setting output to session, the stream will be consumed
 							ss := msgStream.Copy(2)
 							event = EventFromMessage(msg, ss[1], schema.Assistant, "")
-							setAutomaticClose(event)
 							msgStream = ss[0]
 						} else {
 							event = EventFromMessage(msg, nil, schema.Assistant, "")
