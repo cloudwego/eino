@@ -99,12 +99,11 @@ func TestRunner_Run(t *testing.T) {
 					Message:     schema.AssistantMessage("Response from test agent", nil),
 					Role:        schema.Assistant,
 				},
-			},
-		},
+			}},
 	})
 
 	// Create a runner
-	runner := NewRunner(ctx, RunnerConfig{})
+	runner := NewRunner(ctx, RunnerConfig{Agent: mockAgent_})
 
 	// Create test messages
 	msgs := []Message{
@@ -112,7 +111,7 @@ func TestRunner_Run(t *testing.T) {
 	}
 
 	// Test Run method without streaming
-	iterator := runner.Run(ctx, mockAgent_, msgs)
+	iterator := runner.Run(ctx, msgs)
 
 	// Verify that the agent's Run method was called with the correct parameters
 	assert.Equal(t, 1, mockAgent_.callCount)
@@ -147,12 +146,11 @@ func TestRunner_Run_WithStreaming(t *testing.T) {
 					MessageStream: schema.StreamReaderFromArray([]*schema.Message{schema.AssistantMessage("Streaming response", nil)}),
 					Role:          schema.Assistant,
 				},
-			},
-		},
+			}},
 	})
 
 	// Create a runner
-	runner := NewRunner(ctx, RunnerConfig{EnableStreaming: true})
+	runner := NewRunner(ctx, RunnerConfig{EnableStreaming: true, Agent: mockAgent_})
 
 	// Create test messages
 	msgs := []Message{
@@ -160,7 +158,7 @@ func TestRunner_Run_WithStreaming(t *testing.T) {
 	}
 
 	// Test Run method with streaming enabled
-	iterator := runner.Run(ctx, mockAgent_, msgs)
+	iterator := runner.Run(ctx, msgs)
 
 	// Verify that the agent's Run method was called with the correct parameters
 	assert.Equal(t, 1, mockAgent_.callCount)
@@ -193,15 +191,14 @@ func TestRunner_Query(t *testing.T) {
 					Message:     schema.AssistantMessage("Response to query", nil),
 					Role:        schema.Assistant,
 				},
-			},
-		},
+			}},
 	})
 
 	// Create a runner
-	runner := NewRunner(ctx, RunnerConfig{})
+	runner := NewRunner(ctx, RunnerConfig{Agent: mockAgent_})
 
 	// Test Query method
-	iterator := runner.Query(ctx, mockAgent_, "Test query")
+	iterator := runner.Query(ctx, "Test query")
 
 	// Verify that the agent's Run method was called with the correct parameters
 	assert.Equal(t, 1, mockAgent_.callCount)
@@ -237,15 +234,14 @@ func TestRunner_Query_WithStreaming(t *testing.T) {
 					MessageStream: schema.StreamReaderFromArray([]*schema.Message{schema.AssistantMessage("Streaming query response", nil)}),
 					Role:          schema.Assistant,
 				},
-			},
-		},
+			}},
 	})
 
 	// Create a runner
-	runner := NewRunner(ctx, RunnerConfig{EnableStreaming: true})
+	runner := NewRunner(ctx, RunnerConfig{EnableStreaming: true, Agent: mockAgent_})
 
 	// Test Query method with streaming enabled
-	iterator := runner.Query(ctx, mockAgent_, "Test query")
+	iterator := runner.Query(ctx, "Test query")
 
 	// Verify that the agent's Run method was called with the correct parameters
 	assert.Equal(t, 1, mockAgent_.callCount)

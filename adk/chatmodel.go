@@ -17,7 +17,9 @@
 package adk
 
 import (
+	"bytes"
 	"context"
+	"encoding/gob"
 	"errors"
 	"fmt"
 	"runtime/debug"
@@ -35,6 +37,40 @@ import (
 	"github.com/cloudwego/eino/schema"
 	ub "github.com/cloudwego/eino/utils/callbacks"
 )
+
+type chatModelAgentRunOptions struct {
+	// run
+	chatModelOptions []model.Option
+	toolOptions      []tool.Option
+	agentToolOptions map[ /*tool name*/ string][]AgentRunOption // todo: map or list?
+
+	// resume
+	historyModifier func(context.Context, []Message) []Message
+}
+
+func WithChatModelOptions(opts []model.Option) AgentRunOption {
+	return WrapImplSpecificOptFn(func(t *chatModelAgentRunOptions) {
+		t.chatModelOptions = opts
+	})
+}
+
+func WithToolOptions(opts []tool.Option) AgentRunOption {
+	return WrapImplSpecificOptFn(func(t *chatModelAgentRunOptions) {
+		t.toolOptions = opts
+	})
+}
+
+func WithAgentToolRunOptions(opts map[string] /*tool name*/ []AgentRunOption) AgentRunOption {
+	return WrapImplSpecificOptFn(func(t *chatModelAgentRunOptions) {
+		t.agentToolOptions = opts
+	})
+}
+
+func WithHistoryModifier(f func(context.Context, []Message) []Message) AgentRunOption {
+	return WrapImplSpecificOptFn(func(t *chatModelAgentRunOptions) {
+		t.historyModifier = f
+	})
+}
 
 type ToolsConfig struct {
 	compose.ToolsNodeConfig
@@ -119,7 +155,9 @@ type ChatModelAgent struct {
 	frozen uint32
 }
 
-type runFunc func(ctx context.Context, input *AgentInput, generator *AsyncGenerator[*AgentEvent])
+type runFunc func(ctx context.Context, input *AgentInput, generator *AsyncGenerator[*AgentEvent], store *mockStore, opts ...compose.Option)
+
+var registerInternalTypeOnce sync.Once
 
 func NewChatModelAgent(_ context.Context, config *ChatModelAgentConfig) (*ChatModelAgent, error) {
 	if config.Name == "" {
@@ -130,6 +168,29 @@ func NewChatModelAgent(_ context.Context, config *ChatModelAgentConfig) (*ChatMo
 	}
 	if config.Model == nil {
 		return nil, errors.New("agent 'Model' is required")
+	}
+
+	var err error
+	registerInternalTypeOnce.Do(func() {
+		err = compose.RegisterInternalType(func(key string, value any) error {
+			gob.RegisterName(key, value)
+			return nil
+		})
+		gob.RegisterName("_eino_message", &schema.Message{})
+		gob.RegisterName("_eino_document", &schema.Document{})
+		gob.RegisterName("_eino_tool_call", schema.ToolCall{})
+		gob.RegisterName("_eino_function_call", schema.FunctionCall{})
+		gob.RegisterName("_eino_response_meta", &schema.ResponseMeta{})
+		gob.RegisterName("_eino_token_usage", &schema.TokenUsage{})
+		gob.RegisterName("_eino_log_probs", &schema.LogProbs{})
+		gob.RegisterName("_eino_chat_message_part", schema.ChatMessagePart{})
+		gob.RegisterName("_eino_chat_message_image_url", &schema.ChatMessageImageURL{})
+		gob.RegisterName("_eino_chat_message_audio_url", &schema.ChatMessageAudioURL{})
+		gob.RegisterName("_eino_chat_message_video_url", &schema.ChatMessageVideoURL{})
+		gob.RegisterName("_eino_chat_message_file_url", &schema.ChatMessageFileURL{})
+	})
+	if err != nil {
+		return nil, err
 	}
 
 	genInput := defaultGenModelInput
@@ -284,6 +345,9 @@ func (a *ChatModelAgent) OnDisallowTransferToParent(_ context.Context) error {
 type cbHandler struct {
 	*AsyncGenerator[*AgentEvent]
 	agentName string
+
+	enableStreaming bool
+	store           *mockStore
 }
 
 func (h *cbHandler) onChatModelEnd(ctx context.Context,
@@ -336,18 +400,44 @@ func (h *cbHandler) onToolEndWithStreamOutput(ctx context.Context,
 	return ctx
 }
 
+type tempInterruptInfo struct { // replace temp info by info when save the data
+	info *compose.InterruptInfo
+	data []byte
+}
+
 func (h *cbHandler) onGraphError(ctx context.Context,
 	_ *callbacks.RunInfo, err error) context.Context {
 
-	h.Send(&AgentEvent{Err: err})
+	info, ok := compose.ExtractInterruptInfo(err)
+	if !ok {
+		h.Send(&AgentEvent{Err: err})
+		return ctx
+	}
+
+	data, existed, err := h.store.Get(ctx, mockCheckPointID)
+	if err != nil {
+		h.Send(&AgentEvent{AgentName: h.agentName, Err: fmt.Errorf("failed to get interrupt info: %w", err)})
+		return ctx
+	}
+	if !existed {
+		h.Send(&AgentEvent{AgentName: h.agentName, Err: fmt.Errorf("interrupt has happened, but cannot find interrupt info")})
+		return ctx
+	}
+	h.Send(&AgentEvent{AgentName: h.agentName, Action: &AgentAction{
+		Interrupted: &InterruptInfo{
+			Data: &tempInterruptInfo{data: data, info: info},
+		},
+	}})
 
 	return ctx
 }
 
 func genReactCallbacks(agentName string,
-	generator *AsyncGenerator[*AgentEvent]) compose.Option {
+	generator *AsyncGenerator[*AgentEvent],
+	enableStreaming bool,
+	store *mockStore) compose.Option {
 
-	h := &cbHandler{generator, agentName}
+	h := &cbHandler{AsyncGenerator: generator, agentName: agentName, store: store, enableStreaming: enableStreaming}
 
 	cmHandler := &ub.ModelCallbackHandler{
 		OnEnd:                 h.onChatModelEnd,
@@ -380,7 +470,7 @@ func setOutputToSession(ctx context.Context, msg Message, msgStream MessageStrea
 }
 
 func errFunc(err error) runFunc {
-	return func(ctx context.Context, input *AgentInput, generator *AsyncGenerator[*AgentEvent]) {
+	return func(ctx context.Context, input *AgentInput, generator *AsyncGenerator[*AgentEvent], store *mockStore, _ ...compose.Option) {
 		generator.Send(&AgentEvent{Err: err})
 	}
 }
@@ -415,7 +505,7 @@ func (a *ChatModelAgent) buildRunFunc(ctx context.Context) runFunc {
 		}
 
 		if len(toolsNodeConf.Tools) == 0 {
-			a.run = func(ctx context.Context, input *AgentInput, generator *AsyncGenerator[*AgentEvent]) {
+			a.run = func(ctx context.Context, input *AgentInput, generator *AsyncGenerator[*AgentEvent], store *mockStore, opts ...compose.Option) {
 				var err error
 				var msgs []Message
 				msgs, err = a.genModelInput(ctx, instruction, input)
@@ -427,7 +517,7 @@ func (a *ChatModelAgent) buildRunFunc(ctx context.Context) runFunc {
 				var msg Message
 				var msgStream MessageStream
 				if input.EnableStreaming {
-					msgStream, err = a.model.Stream(ctx, msgs)
+					msgStream, err = a.model.Stream(ctx, msgs) // todo: chat model option
 				} else {
 					msg, err = a.model.Generate(ctx, msgs)
 				}
@@ -478,20 +568,18 @@ func (a *ChatModelAgent) buildRunFunc(ctx context.Context) runFunc {
 			return
 		}
 
-		var opts []compose.GraphCompileOption
-		opts = append(opts, compose.WithGraphName("React"))
-		if a.maxStep > 0 {
-			opts = append(opts, compose.WithMaxRunSteps(a.maxStep))
-		}
+		a.run = func(ctx context.Context, input *AgentInput, generator *AsyncGenerator[*AgentEvent], store *mockStore, opts ...compose.Option) {
+			var compileOptions []compose.GraphCompileOption
+			compileOptions = append(compileOptions, compose.WithGraphName("React"), compose.WithCheckPointStore(store), compose.WithSerializer(&gobSerializer{}))
+			if a.maxStep > 0 {
+				compileOptions = append(compileOptions, compose.WithMaxRunSteps(a.maxStep))
+			}
+			runnable, err_ := g.Compile(ctx, compileOptions...)
+			if err != nil {
+				generator.Send(&AgentEvent{AgentName: a.name, Err: err})
+				return
+			}
 
-		runnable, err := g.Compile(ctx, opts...)
-		if err != nil {
-			a.run = errFunc(err)
-			return
-		}
-
-		a.run = func(ctx context.Context, input *AgentInput, generator *AsyncGenerator[*AgentEvent]) {
-			var err_ error
 			var msgs []Message
 			msgs, err_ = a.genModelInput(ctx, instruction, input)
 			if err_ != nil {
@@ -499,14 +587,14 @@ func (a *ChatModelAgent) buildRunFunc(ctx context.Context) runFunc {
 				return
 			}
 
-			callOpt := genReactCallbacks(a.name, generator)
+			callOpt := genReactCallbacks(a.name, generator, input.EnableStreaming, store)
 
 			var msg Message
 			var msgStream MessageStream
 			if input.EnableStreaming {
-				msgStream, err_ = runnable.Stream(ctx, msgs, callOpt)
+				msgStream, err_ = runnable.Stream(ctx, msgs, append(opts, callOpt)...)
 			} else {
-				msg, err_ = runnable.Invoke(ctx, msgs, callOpt)
+				msg, err_ = runnable.Invoke(ctx, msgs, append(opts, callOpt)...)
 			}
 
 			if err_ == nil {
@@ -529,8 +617,11 @@ func (a *ChatModelAgent) buildRunFunc(ctx context.Context) runFunc {
 	return a.run
 }
 
-func (a *ChatModelAgent) Run(ctx context.Context, input *AgentInput, _ ...AgentRunOption) *AsyncIterator[*AgentEvent] {
+func (a *ChatModelAgent) Run(ctx context.Context, input *AgentInput, opts ...AgentRunOption) *AsyncIterator[*AgentEvent] {
 	run := a.buildRunFunc(ctx)
+
+	co := getComposeOptions(opts)
+	co = append(co, compose.WithCheckPointID(mockCheckPointID))
 
 	iterator, generator := NewAsyncIteratorPair[*AgentEvent]()
 	go func() {
@@ -544,8 +635,77 @@ func (a *ChatModelAgent) Run(ctx context.Context, input *AgentInput, _ ...AgentR
 			generator.Close()
 		}()
 
-		run(ctx, input, generator)
+		run(ctx, input, generator, newEmptyStore(), co...)
 	}()
 
 	return iterator
+}
+
+func (a *ChatModelAgent) Resume(ctx context.Context, info *ResumeInfo, opts ...AgentRunOption) *AsyncIterator[*AgentEvent] {
+	run := a.buildRunFunc(ctx)
+
+	co := getComposeOptions(opts)
+	co = append(co, compose.WithCheckPointID(mockCheckPointID))
+
+	iterator, generator := NewAsyncIteratorPair[*AgentEvent]()
+	go func() {
+		defer func() {
+			panicErr := recover()
+			if panicErr != nil {
+				e := safe.NewPanicErr(panicErr, debug.Stack())
+				generator.Send(&AgentEvent{Err: e})
+			}
+
+			generator.Close()
+		}()
+
+		run(ctx, &AgentInput{EnableStreaming: info.EnableStreaming}, generator, newResumeStore(info.Data.([]byte)), co...)
+	}()
+
+	return iterator
+}
+
+func getComposeOptions(opts []AgentRunOption) []compose.Option {
+	o := GetImplSpecificOptions[chatModelAgentRunOptions](nil, opts...)
+	var co []compose.Option
+	if len(o.chatModelOptions) > 0 {
+		co = append(co, compose.WithChatModelOption(o.chatModelOptions...))
+	}
+	var to []tool.Option
+	if len(o.toolOptions) > 0 {
+		to = append(to, o.toolOptions...)
+	}
+	for toolName, atos := range o.agentToolOptions {
+		to = append(to, withAgentToolOptions(toolName, atos))
+	}
+	if len(to) > 0 {
+		co = append(co, compose.WithToolsNodeOption(compose.WithToolOption(to...)))
+	}
+	if o.historyModifier != nil {
+		co = append(co, compose.WithStateModifier(func(ctx context.Context, path compose.NodePath, state any) error {
+			s, ok := state.(*State)
+			if !ok {
+				return fmt.Errorf("unexpected state type: %T, expected: %T", state, &State{})
+			}
+			s.Messages = o.historyModifier(ctx, s.Messages)
+			return nil
+		}))
+	}
+	return co
+}
+
+type gobSerializer struct{}
+
+func (g *gobSerializer) Marshal(v any) ([]byte, error) {
+	buf := new(bytes.Buffer)
+	err := gob.NewEncoder(buf).Encode(v)
+	if err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
+}
+
+func (g *gobSerializer) Unmarshal(data []byte, v any) error {
+	buf := bytes.NewBuffer(data)
+	return gob.NewDecoder(buf).Decode(v)
 }

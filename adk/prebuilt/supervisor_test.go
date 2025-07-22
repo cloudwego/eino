@@ -92,8 +92,8 @@ func TestNewSupervisor(t *testing.T) {
 	assert.NotNil(t, multiAgent)
 	assert.Equal(t, "SupervisorAgent", multiAgent.Name(ctx))
 
-	runner := adk.NewRunner(ctx, adk.RunnerConfig{})
-	aIter := runner.Run(ctx, multiAgent, []adk.Message{schema.UserMessage("test")})
+	runner := adk.NewRunner(ctx, adk.RunnerConfig{Agent: multiAgent})
+	aIter := runner.Run(ctx, []adk.Message{schema.UserMessage("test")})
 
 	// transfer to agent1
 	event, ok := aIter.Next()
