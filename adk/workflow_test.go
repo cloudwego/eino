@@ -95,8 +95,7 @@ func TestSequentialAgent(t *testing.T) {
 					Message:     schema.AssistantMessage("Response from Agent2", nil),
 					Role:        schema.Assistant,
 				},
-			},
-		},
+			}},
 	})
 
 	// Create a sequential agent with the mock agents
@@ -254,7 +253,6 @@ func TestParallelAgent(t *testing.T) {
 
 	// Create a parallel agent with the mock agents
 	config := &ParallelAgentConfig{
-
 		Name:        "ParallelTestAgent",
 		Description: "Test parallel agent",
 		SubAgents:   []Agent{agent1, agent2},
