@@ -72,7 +72,7 @@ func (r *Runner) Run(ctx context.Context, messages []Message,
 }
 
 func getInterruptRunCtx(ctx context.Context) *runContext {
-	cs := getInterruptRunCtxs(ctx)
+	cs := getInterruptRunContexts(ctx)
 	if len(cs) == 0 {
 		return nil
 	}

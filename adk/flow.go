@@ -160,14 +160,48 @@ func (a *flowAgent) getAgent(ctx context.Context, name string) *flowAgent {
 	return nil
 }
 
-func belongToRunPath(eventRunPath []string, runPath []string) bool {
+// belongToRunPath tests whether eventRunPath is a sub-run-path of runPath.
+func belongToRunPath(eventRunPath []ExecutionStep, runPath []ExecutionStep) bool {
 	if len(runPath) < len(eventRunPath) {
 		return false
 	}
 
-	for i, name := range eventRunPath {
-		if runPath[i] != name {
-			return false
+	for i, eventStep := range eventRunPath {
+		runStep := runPath[i]
+		if eventStep.Single != nil {
+			if runStep.Single != nil {
+				if *runStep.Single != *eventStep.Single {
+					return false
+				}
+			} else {
+				var hit bool
+				for _, concurrent := range runStep.Concurrent {
+					if concurrent == *eventStep.Single {
+						hit = true
+						break
+					}
+				}
+				if !hit {
+					return false
+				}
+			}
+		} else {
+			if runStep.Single != nil {
+				return false
+			} else {
+				for _, es := range eventStep.Concurrent {
+					var hit bool
+					for _, concurrent := range runStep.Concurrent {
+						if concurrent == es {
+							hit = true
+							break
+						}
+					}
+					if !hit {
+						return false
+					}
+				}
+			}
 		}
 	}
 
@@ -306,7 +340,14 @@ func (a *flowAgent) Resume(ctx context.Context, info *ResumeInfo, opts ...AgentR
 	agentName := a.Name(ctx)
 	targetName := agentName
 	if len(runCtx.RunPath) > 0 {
-		targetName = runCtx.RunPath[len(runCtx.RunPath)-1]
+		lastStep := runCtx.RunPath[len(runCtx.RunPath)-1]
+		if lastStep.Single == nil {
+			iterator, generator := NewAsyncIteratorPair[*AgentEvent]()
+			generator.Send(&AgentEvent{Err: fmt.Errorf("last step is concurrent, cannot resume: %v", lastStep.Concurrent)})
+			generator.Close()
+			return iterator
+		}
+		targetName = *lastStep.Single
 	}
 
 	if agentName != targetName {

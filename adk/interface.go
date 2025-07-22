@@ -145,10 +145,15 @@ type AgentAction struct {
 	CustomizedAction any
 }
 
+type ExecutionStep struct {
+	Single     *string
+	Concurrent []string
+}
+
 type AgentEvent struct {
 	AgentName string
 
-	RunPath []string
+	RunPath []ExecutionStep
 
 	Output *AgentOutput
 

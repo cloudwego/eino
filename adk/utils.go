@@ -152,8 +152,18 @@ func getMessageFromWrappedEvent(e *agentEventWrapper) (Message, error) {
 // the Message itself or Chunks of the MessageStream, as they are not copied.
 // NOTE: if you have CustomizedOutput or CustomizedAction, they are NOT copied.
 func copyAgentEvent(ae *AgentEvent) *AgentEvent {
-	rp := make([]string, len(ae.RunPath))
-	copy(rp, ae.RunPath)
+	rp := make([]ExecutionStep, len(ae.RunPath))
+	for i, es := range ae.RunPath {
+		rp[i] = ExecutionStep{
+			Single: es.Single,
+		}
+
+		if len(es.Concurrent) > 0 {
+			copiedConcurrent := make([]string, len(es.Concurrent))
+			copy(copiedConcurrent, es.Concurrent)
+			rp[i].Concurrent = copiedConcurrent
+		}
+	}
 
 	copied := &AgentEvent{
 		AgentName: ae.AgentName,
