@@ -17,7 +17,11 @@
 package adk
 
 import (
+	"bytes"
 	"context"
+	"encoding/gob"
+	"fmt"
+	"io"
 
 	"github.com/cloudwego/eino/schema"
 )
@@ -51,6 +55,68 @@ func EventFromMessage(msg Message, msgStream MessageStream,
 	}
 }
 
+type messageVariantSerialization struct {
+	IsStreaming   bool
+	Message       Message
+	MessageStream []Message
+}
+
+func (mv *MessageVariant) GobEncode() ([]byte, error) {
+	s := &messageVariantSerialization{
+		IsStreaming: mv.IsStreaming,
+		Message:     mv.Message,
+	}
+	if mv.IsStreaming {
+		var messages []Message
+		for {
+			frame, err := mv.MessageStream.Recv()
+			if err == io.EOF {
+				break
+			}
+			if err != nil {
+				return nil, fmt.Errorf("error receiving message stream: %w", err)
+			}
+			messages = append(messages, frame)
+		}
+		s.MessageStream = messages
+	}
+	buf := &bytes.Buffer{}
+	err := gob.NewEncoder(buf).Encode(s)
+	if err != nil {
+		return nil, fmt.Errorf("failed to gob encode message variant: %w", err)
+	}
+	return buf.Bytes(), nil
+}
+
+func (mv *MessageVariant) GobDecode(b []byte) error {
+	s := &messageVariantSerialization{}
+	err := gob.NewDecoder(bytes.NewReader(b)).Decode(s)
+	if err != nil {
+		return fmt.Errorf("failed to decoding message variant: %w", err)
+	}
+	mv.IsStreaming = s.IsStreaming
+	mv.Message = s.Message
+	if len(s.MessageStream) > 0 {
+		mv.MessageStream = schema.StreamReaderFromArray(s.MessageStream)
+	}
+	return nil
+}
+
+func (mv *MessageVariant) GetMessage() (Message, error) {
+	var message Message
+	if mv.IsStreaming {
+		var err error
+		message, err = schema.ConcatMessageStream(mv.MessageStream)
+		if err != nil {
+			return nil, err
+		}
+	} else {
+		message = mv.Message
+	}
+
+	return message, nil
+}
+
 type TransferToAgentAction struct {
 	DestAgentName string
 }
@@ -70,9 +136,11 @@ func NewExitAction() *AgentAction {
 }
 
 type AgentAction struct {
-	TransferToAgent *TransferToAgentAction
-
 	Exit bool
+
+	Interrupted *InterruptInfo
+
+	TransferToAgent *TransferToAgentAction
 
 	CustomizedAction any
 }
@@ -113,4 +181,10 @@ type OnSubAgents interface {
 	OnSetAsSubAgent(ctx context.Context, parent Agent) error
 
 	OnDisallowTransferToParent(ctx context.Context) error
+}
+
+type ResumableAgent interface {
+	Agent
+
+	Resume(ctx context.Context, info *ResumeInfo, opts ...AgentRunOption) *AsyncIterator[*AgentEvent]
 }

@@ -22,8 +22,10 @@ import (
 )
 
 type runSession struct {
-	events []*agentEventWrapper
-	values map[string]any
+	Events []*agentEventWrapper
+	Values map[string]any
+
+	interruptRunCtxs []*runContext // won't consider concurrency now
 
 	mtx sync.Mutex
 }
@@ -36,8 +38,32 @@ type agentEventWrapper struct {
 
 func newRunSession() *runSession {
 	return &runSession{
-		values: make(map[string]any),
+		Values: make(map[string]any),
 	}
+}
+
+func getInterruptRunCtxs(ctx context.Context) []*runContext {
+	session := getSession(ctx)
+	if session == nil {
+		return nil
+	}
+	return session.getInterruptRunCtxs()
+}
+
+func appendInterruptRunCtx(ctx context.Context, interruptRunCtx *runContext) {
+	session := getSession(ctx)
+	if session == nil {
+		return
+	}
+	session.appendInterruptRunCtx(interruptRunCtx)
+}
+
+func replaceInterruptRunCtx(ctx context.Context, interruptRunCtx *runContext) {
+	session := getSession(ctx)
+	if session == nil {
+		return
+	}
+	session.replaceInterruptRunCtx(interruptRunCtx)
 }
 
 func GetSessionValues(ctx context.Context) map[string]any {
@@ -69,7 +95,7 @@ func GetSessionValue(ctx context.Context, key string) (any, bool) {
 
 func (rs *runSession) addEvent(event *AgentEvent) {
 	rs.mtx.Lock()
-	rs.events = append(rs.events, &agentEventWrapper{
+	rs.Events = append(rs.Events, &agentEventWrapper{
 		AgentEvent: event,
 	})
 	rs.mtx.Unlock()
@@ -77,16 +103,42 @@ func (rs *runSession) addEvent(event *AgentEvent) {
 
 func (rs *runSession) getEvents() []*agentEventWrapper {
 	rs.mtx.Lock()
-	events := rs.events
+	events := rs.Events
 	rs.mtx.Unlock()
 
 	return events
 }
 
+func (rs *runSession) getInterruptRunCtxs() []*runContext {
+	rs.mtx.Lock()
+	defer rs.mtx.Unlock()
+	return rs.interruptRunCtxs
+}
+
+func (rs *runSession) appendInterruptRunCtx(runCtx *runContext) {
+	rs.mtx.Lock()
+	rs.interruptRunCtxs = append(rs.interruptRunCtxs, runCtx)
+	rs.mtx.Unlock()
+}
+
+func (rs *runSession) replaceInterruptRunCtx(interruptRunCtx *runContext) {
+	// remove runctx whose path is belong to the new run ctx, and append the new run ctx
+	rs.mtx.Lock()
+	for i := 0; i < len(rs.interruptRunCtxs); i++ {
+		rc := rs.interruptRunCtxs[i]
+		if belongToRunPath(interruptRunCtx.RunPath, rc.RunPath) {
+			rs.interruptRunCtxs = append(rs.interruptRunCtxs[:i], rs.interruptRunCtxs[i+1:]...)
+			i--
+		}
+	}
+	rs.interruptRunCtxs = append(rs.interruptRunCtxs, interruptRunCtx)
+	rs.mtx.Unlock()
+}
+
 func (rs *runSession) getValues() map[string]any {
 	rs.mtx.Lock()
-	values := make(map[string]any, len(rs.values))
-	for k, v := range rs.values {
+	values := make(map[string]any, len(rs.Values))
+	for k, v := range rs.Values {
 		values[k] = v
 	}
 	rs.mtx.Unlock()
@@ -96,72 +148,83 @@ func (rs *runSession) getValues() map[string]any {
 
 func (rs *runSession) setValue(key string, value any) {
 	rs.mtx.Lock()
-	rs.values[key] = value
+	rs.Values[key] = value
 	rs.mtx.Unlock()
 }
 
 func (rs *runSession) getValue(key string) (any, bool) {
 	rs.mtx.Lock()
-	value, ok := rs.values[key]
+	value, ok := rs.Values[key]
 	rs.mtx.Unlock()
 
 	return value, ok
 }
 
 type runContext struct {
-	rootInput *AgentInput
-	runPath   []string
+	RootInput *AgentInput
+	RunPath   []string
 
-	session *runSession
+	Session *runSession
 }
 
 func (rc *runContext) isRoot() bool {
-	return len(rc.runPath) == 1
+	return len(rc.RunPath) == 1
 }
 
 func (rc *runContext) deepCopy() *runContext {
 	copied := &runContext{
-		rootInput: rc.rootInput,
-		runPath:   make([]string, len(rc.runPath)),
-		session:   rc.session,
+		RootInput: rc.RootInput,
+		RunPath:   make([]string, len(rc.RunPath)),
+		Session:   rc.Session,
 	}
 
-	copy(copied.runPath, rc.runPath)
+	copy(copied.RunPath, rc.RunPath)
 
 	return copied
 }
 
 type runCtxKey struct{}
 
+func getRunCtx(ctx context.Context) *runContext {
+	runCtx, ok := ctx.Value(runCtxKey{}).(*runContext)
+	if !ok {
+		return nil
+	}
+	return runCtx
+}
+
+func setRunCtx(ctx context.Context, runCtx *runContext) context.Context {
+	return context.WithValue(ctx, runCtxKey{}, runCtx)
+}
+
 func initRunCtx(ctx context.Context, agentName string, input *AgentInput) (context.Context, *runContext) {
-	v := ctx.Value(runCtxKey{})
-	var runCtx *runContext
-	if v != nil {
-		runCtx = v.(*runContext).deepCopy()
+	runCtx := getRunCtx(ctx)
+	if runCtx != nil {
+		runCtx = runCtx.deepCopy()
+	} else {
+		runCtx = &runContext{Session: newRunSession()}
 	}
 
-	if runCtx == nil {
-		runCtx = &runContext{session: newRunSession()}
-	}
-
-	runCtx.runPath = append(runCtx.runPath, agentName)
+	runCtx.RunPath = append(runCtx.RunPath, agentName)
 	if runCtx.isRoot() {
-		runCtx.rootInput = input
+		runCtx.RootInput = input
 	}
 
-	return context.WithValue(ctx, runCtxKey{}, runCtx), runCtx
+	return setRunCtx(ctx, runCtx), runCtx
 }
 
 func ClearRunCtx(ctx context.Context) context.Context {
 	return context.WithValue(ctx, runCtxKey{}, nil)
 }
 
-func getSession(ctx context.Context) *runSession {
-	v := ctx.Value(runCtxKey{})
+func ctxWithNewRunCtx(ctx context.Context) context.Context {
+	return setRunCtx(ctx, &runContext{Session: newRunSession()})
+}
 
-	if v != nil {
-		runCtx := v.(*runContext)
-		return runCtx.session
+func getSession(ctx context.Context) *runSession {
+	runCtx := getRunCtx(ctx)
+	if runCtx != nil {
+		return runCtx.Session
 	}
 
 	return nil
