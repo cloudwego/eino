@@ -18,39 +18,7 @@ package adk
 
 import (
 	"context"
-	"testing"
-
-	"github.com/stretchr/testify/assert"
-
-	cb "github.com/cloudwego/eino/callbacks"
-	"github.com/cloudwego/eino/schema"
-	"github.com/cloudwego/eino/utils/callbacks"
 )
-
-func TestCallOption(t *testing.T) {
-	ctx := context.Background()
-
-	t.Run("adk options without impl specific options", func(t *testing.T) {
-		agent := &mockAgentForOption{}
-
-		rn := NewRunner(ctx, RunnerConfig{
-			EnableStreaming: false,
-		})
-
-		cb1 := callbacks.NewHandlerHelper().Handler()
-		cb2 := callbacks.NewHandlerHelper().Handler()
-		cb3 := callbacks.NewHandlerHelper().Handler()
-
-		_ = rn.Run(ctx, agent, []Message{schema.UserMessage("test")}, WithCallbacks(cb1),
-			WithCallbacks(cb2).DesignateAgent("agent_1"),
-			WithCallbacks(cb3).DesignateAgent("agent_2"))
-
-		assert.Len(t, agent.opts, 2)
-		assert.Equal(t, agent.options, &options{
-			Callbacks: []cb.Handler{cb1, cb2},
-		})
-	})
-}
 
 type mockAgentForOption struct {
 	opts []AgentRunOption

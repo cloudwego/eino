@@ -33,6 +33,13 @@ type State struct {
 	ToolGenActions map[string]*AgentAction
 
 	AgentName string
+
+	AgentToolInterruptData map[string] /*tool call id*/ *agentToolInterruptInfo
+}
+
+type agentToolInterruptInfo struct {
+	LastEvent *AgentEvent
+	Data      []byte
 }
 
 func SendToolGenAction(ctx context.Context, toolName string, action *AgentAction) error {
@@ -103,7 +110,7 @@ func getReturnDirectlyToolCallID(ctx context.Context) string {
 
 func newReact(ctx context.Context, config *reactConfig) (reactGraph, error) {
 	genState := func(ctx context.Context) *State {
-		return &State{ToolGenActions: map[string]*AgentAction{}, AgentName: config.agentName}
+		return &State{ToolGenActions: map[string]*AgentAction{}, AgentName: config.agentName, AgentToolInterruptData: make(map[string]*agentToolInterruptInfo)}
 	}
 
 	const (
@@ -136,7 +143,10 @@ func newReact(ctx context.Context, config *reactConfig) (reactGraph, error) {
 		compose.WithStatePreHandler(modelPreHandle), compose.WithNodeName(chatModel_))
 
 	toolPreHandle := func(ctx context.Context, input Message, st *State) (Message, error) {
-		st.Messages = append(st.Messages, input)
+		if input != nil {
+			// isn't resume
+			st.Messages = append(st.Messages, input)
+		}
 
 		if len(config.toolsReturnDirectly) > 0 {
 			for i := range input.ToolCalls {
@@ -147,7 +157,7 @@ func newReact(ctx context.Context, config *reactConfig) (reactGraph, error) {
 			}
 		}
 
-		return input, nil
+		return st.Messages[len(st.Messages)-1], nil
 	}
 
 	_ = g.AddToolsNode(toolNode_, toolsNode,
