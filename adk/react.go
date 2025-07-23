@@ -192,10 +192,10 @@ func newReact(ctx context.Context, config *reactConfig) (reactGraph, error) {
 			toolNodeToEndConverter = "ToolNodeToEndConverter"
 		)
 
-		cvt := func(ctx context.Context, sToolCallMessages sToolNodeOutput) (sGraphOutput, error) {
+		cvt := func(ctx context.Context, sToolMessages sToolNodeOutput) (sGraphOutput, error) {
 			id := getReturnDirectlyToolCallID(ctx)
 
-			return schema.StreamReaderWithConvert(sToolCallMessages,
+			return schema.StreamReaderWithConvert(sToolMessages,
 				func(in []Message) (Message, error) {
 
 					for _, chunk := range in {

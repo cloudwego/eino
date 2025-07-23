@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"runtime/debug"
 	"strings"
+	"sync"
 
 	"github.com/cloudwego/eino/compose"
 	"github.com/cloudwego/eino/internal/safe"
@@ -398,8 +399,12 @@ func (a *flowAgent) run(
 		generator.Close()
 	}()
 
-	var lastEvent *AgentEvent
-	var hasEvent bool
+	var (
+		lastEvent *AgentEvent
+		hasEvent  bool
+		destNames []string
+	)
+
 	for {
 		event, ok := aIter.Next()
 		if !ok {
@@ -419,9 +424,12 @@ func (a *flowAgent) run(
 		setAutomaticClose(event)
 		runCtx.Session.addEvent(copied)
 		lastEvent = event
+
+		if event.Action != nil && event.Action.TransferToAgent != nil {
+			destNames = append(destNames, event.Action.TransferToAgent.DestAgentName)
+		}
 	}
 
-	var destName string
 	if lastEvent != nil && lastEvent.Action != nil {
 		action := lastEvent.Action
 		if action.Interrupted != nil {
@@ -433,17 +441,43 @@ func (a *flowAgent) run(
 			generator.Send(lastEvent)
 			return
 		}
-
-		if action.TransferToAgent != nil {
-			destName = action.TransferToAgent.DestAgentName
-		}
 	}
 	if hasEvent {
 		generator.Send(lastEvent)
 	}
 
+	var wg sync.WaitGroup
+	if len(destNames) > 1 {
+		for i := 1; i < len(destNames); i++ {
+			destName := destNames[i]
+			agentToRun := a.getAgent(ctx, destName)
+			if agentToRun == nil {
+				e := errors.New(fmt.Sprintf(
+					"transfer failed: agent '%s' not found when transferring from '%s'",
+					destName, a.Name(ctx)))
+				generator.Send(&AgentEvent{Err: e})
+				return
+			}
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				subAIter := agentToRun.Run(ctx, nil /*subagents get input from runCtx*/, opts...)
+				for {
+					subEvent, ok_ := subAIter.Next()
+					if !ok_ {
+						break
+					}
+
+					setAutomaticClose(subEvent)
+					generator.Send(subEvent)
+				}
+			}()
+		}
+	}
+
 	// handle transferring to another agent
-	if destName != "" {
+	if len(destNames) > 0 {
+		destName := destNames[0]
 		agentToRun := a.getAgent(ctx, destName)
 		if agentToRun == nil {
 			e := errors.New(fmt.Sprintf(
@@ -463,6 +497,10 @@ func (a *flowAgent) run(
 			setAutomaticClose(subEvent)
 			generator.Send(subEvent)
 		}
+	}
+
+	if len(destNames) > 1 {
+		wg.Wait()
 	}
 }
 

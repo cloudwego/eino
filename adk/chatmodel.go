@@ -599,6 +599,8 @@ func (a *ChatModelAgent) buildRunFunc(ctx context.Context) runFunc {
 
 			if err_ == nil {
 				if a.outputKey != "" {
+					// TODO: if the react agent returns directly because of a transfer,
+					// this msg/msgStream probably is not what the user wants to set in session
 					err_ = setOutputToSession(ctx, msg, msgStream, a.outputKey)
 					if err_ != nil {
 						generator.Send(&AgentEvent{Err: err_})

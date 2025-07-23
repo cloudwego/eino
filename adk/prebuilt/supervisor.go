@@ -18,6 +18,7 @@ package prebuilt
 
 import (
 	"context"
+	"fmt"
 	"runtime/debug"
 
 	"github.com/cloudwego/eino/adk"
@@ -54,10 +55,22 @@ func (a *BackToParentWrapper) Run(ctx context.Context, input *adk.AgentInput,
 			generator.Close()
 		}()
 
+		var transferredBack bool
 		for {
 			event, ok := aIter.Next()
 			if !ok {
 				break
+			}
+
+			if event.Action != nil && event.Action.TransferToAgent != nil {
+				if event.Action.TransferToAgent.DestAgentName == a.parentAgentName {
+					transferredBack = true
+				} else {
+					generator.Send(&adk.AgentEvent{
+						Err: fmt.Errorf("can only transfer back to parent, actual: %s", event.Action.TransferToAgent.DestAgentName),
+					})
+					return
+				}
 			}
 
 			generator.Send(event)
@@ -67,16 +80,18 @@ func (a *BackToParentWrapper) Run(ctx context.Context, input *adk.AgentInput,
 			}
 		}
 
-		aMsg, tMsg := adk.GenTransferMessages(ctx, a.parentAgentName)
-		aEvent := adk.EventFromMessage(aMsg, nil, schema.Assistant, "")
-		generator.Send(aEvent)
-		tEvent := adk.EventFromMessage(tMsg, nil, schema.Tool, tMsg.ToolName)
-		tEvent.Action = &adk.AgentAction{
-			TransferToAgent: &adk.TransferToAgentAction{
-				DestAgentName: a.parentAgentName,
-			},
+		if !transferredBack {
+			aMsg, tMsg := adk.GenTransferMessages(ctx, a.parentAgentName)
+			aEvent := adk.EventFromMessage(aMsg, nil, schema.Assistant, "")
+			generator.Send(aEvent)
+			tEvent := adk.EventFromMessage(tMsg, nil, schema.Tool, tMsg.ToolName)
+			tEvent.Action = &adk.AgentAction{
+				TransferToAgent: &adk.TransferToAgentAction{
+					DestAgentName: a.parentAgentName,
+				},
+			}
+			generator.Send(tEvent)
 		}
-		generator.Send(tEvent)
 	}()
 
 	return iterator
