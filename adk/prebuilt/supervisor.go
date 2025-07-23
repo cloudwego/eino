@@ -18,6 +18,7 @@ package prebuilt
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"runtime/debug"
 
@@ -62,14 +63,26 @@ func (a *BackToParentWrapper) Run(ctx context.Context, input *adk.AgentInput,
 				break
 			}
 
-			if event.Action != nil && event.Action.TransferToAgent != nil {
-				if event.Action.TransferToAgent.DestAgentName == a.parentAgentName {
-					transferredBack = true
-				} else {
+			if event.Action != nil {
+				if event.Action.Exit {
 					generator.Send(&adk.AgentEvent{
-						Err: fmt.Errorf("can only transfer back to parent, actual: %s", event.Action.TransferToAgent.DestAgentName),
+						Err: errors.New("can only transfer back to parent. got EXIT"),
 					})
 					return
+				}
+				if event.Action.Interrupted != nil { // interrupted, just emit the event as the final event
+					generator.Send(event)
+					return
+				}
+				if event.Action.TransferToAgent != nil {
+					if event.Action.TransferToAgent.DestAgentName == a.parentAgentName {
+						transferredBack = true
+					} else {
+						generator.Send(&adk.AgentEvent{
+							Err: fmt.Errorf("can only transfer back to parent, actual: %s", event.Action.TransferToAgent.DestAgentName),
+						})
+						return
+					}
 				}
 			}
 
@@ -80,7 +93,7 @@ func (a *BackToParentWrapper) Run(ctx context.Context, input *adk.AgentInput,
 			}
 		}
 
-		if !transferredBack {
+		if !transferredBack { // only transfer back to parent manually if haven't done it already
 			aMsg, tMsg := adk.GenTransferMessages(ctx, a.parentAgentName)
 			aEvent := adk.EventFromMessage(aMsg, nil, schema.Assistant, "")
 			generator.Send(aEvent)
