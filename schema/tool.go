@@ -58,6 +58,8 @@ type ToolInfo struct {
 	// Used to tell the model how/when/why to use the tool.
 	// You can provide few-shot examples as a part of the description.
 	Desc string
+	// Extra is the extra information for the tool.
+	Extra map[string]any
 
 	// The parameters the functions accepts (different models may require different parameter types).
 	// can be described in two ways:
