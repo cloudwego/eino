@@ -656,14 +656,11 @@ func (g *graph) compile(ctx context.Context, opt *graphCompileOptions) (*composa
 
 	// get eager type
 	eager := false
-	if opt != nil {
-		eager = opt.eager
-	}
-	if runType == runTypePregel && eager {
-		return nil, errors.New("eager mode is not allowed when trigger mode is AnyPredecessor")
-	}
-	if isWorkflow(g.cmp) {
+	if isWorkflow(g.cmp) || runType == runTypeDAG {
 		eager = true
+	}
+	if opt != nil && opt.eagerDisabled {
+		eager = false
 	}
 
 	if len(g.startNodes) == 0 {

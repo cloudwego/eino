@@ -30,7 +30,7 @@ type graphCompileOptions struct {
 	interruptBeforeNodes []string
 	interruptAfterNodes  []string
 
-	eager bool
+	eagerDisabled bool
 
 	mergeConfigs map[string]FanInMergeConfig
 }
@@ -73,9 +73,21 @@ func WithGraphName(graphName string) GraphCompileOption {
 // without waiting for the completion of a super step, ref: https://www.cloudwego.io/docs/eino/core_modules/chain_and_graph_orchestration/orchestration_design_principles/#runtime-engine
 // Note: Eager mode is not allowed when the graph's trigger mode is set to AnyPredecessor.
 // Workflow uses eager mode by default.
+// Deprecated: Eager execution is automatically enabled by default when a node's trigger mode is set to AllPredecessor.
+// If you were using this option previously, it can be safely removed without changing behavior.
 func WithEagerExecution() GraphCompileOption {
 	return func(o *graphCompileOptions) {
-		o.eager = true
+		return
+	}
+}
+
+// WithEagerExecutionDisabled disables the eager execution mode for the graph.
+// By default, eager execution is enabled for Workflow and Graph with the AllPredecessor trigger mode.
+// After using this option, nodes will wait for the completion of a super step instead of execute immediately once they are ready to run.
+// ref: https://www.cloudwego.io/docs/eino/core_modules/chain_and_graph_orchestration/orchestration_design_principles/#runtime-engine
+func WithEagerExecutionDisabled() GraphCompileOption {
+	return func(o *graphCompileOptions) {
+		o.eagerDisabled = true
 	}
 }
 
