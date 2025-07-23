@@ -49,18 +49,30 @@ func NewRunner(_ context.Context, conf RunnerConfig) *Runner {
 
 func (r *Runner) Run(ctx context.Context, messages []Message,
 	opts ...AgentRunOption) *AsyncIterator[*AgentEvent] {
-	o := getCommonOptions(nil, opts...)
+	opts = unwrapOptions(r.a.Name(ctx), opts...)
+
+	o := GetCommonOptions(&Options{
+		checkPointStore: r.store,
+		enableStreaming: &r.enableStreaming,
+	}, opts...)
+
+	// add CheckPointStore and EnableStreaming to options,
+	// so that nested Runner can use these options
+	newOpts := make([]AgentRunOption, len(opts)+2)
+	copy(newOpts, opts)
+	newOpts[len(opts)] = WithCheckPointStore(o.checkPointStore)
+	newOpts[len(opts)+1] = WithEnableStreaming(*o.enableStreaming)
 
 	fa := toFlowAgent(ctx, r.a)
 
 	input := &AgentInput{
 		Messages:        messages,
-		EnableStreaming: r.enableStreaming,
+		EnableStreaming: *o.enableStreaming,
 	}
 
 	ctx = ctxWithNewRunCtx(ctx)
 
-	iter := fa.Run(ctx, input, opts...)
+	iter := fa.Run(ctx, input, newOpts...)
 	if r.store == nil {
 		return iter
 	}
@@ -76,7 +88,7 @@ func getInterruptRunCtx(ctx context.Context) *runContext {
 	if len(cs) == 0 {
 		return nil
 	}
-	return cs[0] // assume that concurrency isn't existed, so only one run ctx is in ctx
+	return cs[0] // assume that concurrency doesn't exist, so only one run ctx is in ctx
 }
 
 func (r *Runner) Query(ctx context.Context,
@@ -86,11 +98,22 @@ func (r *Runner) Query(ctx context.Context,
 }
 
 func (r *Runner) Resume(ctx context.Context, checkPointID string, opts ...AgentRunOption) (*AsyncIterator[*AgentEvent], error) {
-	if r.store == nil {
+	opts = unwrapOptions(r.a.Name(ctx), opts...)
+	
+	o := GetCommonOptions(&Options{
+		checkPointStore: r.store,
+	}, opts...)
+
+	if o.checkPointStore == nil {
 		return nil, fmt.Errorf("failed to resume: store is nil")
 	}
 
-	runCtx, info, existed, err := getCheckPoint(ctx, r.store, checkPointID)
+	newOpts := make([]AgentRunOption, len(opts)+2)
+	copy(newOpts, opts)
+	newOpts[len(opts)] = WithCheckPointStore(o.checkPointStore)
+	newOpts[len(opts)+1] = WithCheckPointID(checkPointID)
+
+	runCtx, info, existed, err := getCheckPoint(ctx, o.checkPointStore, checkPointID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get checkpoint: %w", err)
 	}
@@ -99,7 +122,7 @@ func (r *Runner) Resume(ctx context.Context, checkPointID string, opts ...AgentR
 	}
 
 	ctx = setRunCtx(ctx, runCtx)
-	aIter := toFlowAgent(ctx, r.a).Resume(ctx, info, opts...)
+	aIter := toFlowAgent(ctx, r.a).Resume(ctx, info, newOpts...)
 	if r.store == nil {
 		return aIter, nil
 	}

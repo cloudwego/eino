@@ -324,7 +324,7 @@ func (a *flowAgent) Run(ctx context.Context, input *AgentInput, opts ...AgentRun
 	}
 
 	if wf, ok := a.Agent.(*workflowAgent); ok {
-		return wf.Run(ctx, input, opts...)
+		return wf.Run(ctx, input, filterOptions(agentName, opts)...)
 	}
 
 	aIter := a.Agent.Run(ctx, input, filterOptions(agentName, opts)...)
@@ -360,10 +360,10 @@ func (a *flowAgent) Resume(ctx context.Context, info *ResumeInfo, opts ...AgentR
 			generator.Close()
 			return iterator
 		}
-		return targetAgent.Resume(ctx, info, opts...)
+		return targetAgent.Resume(ctx, info, filterOptions(targetName, opts)...)
 	}
 	if wf, ok := a.Agent.(*workflowAgent); ok {
-		return wf.Resume(ctx, info, opts...)
+		return wf.Resume(ctx, info, filterOptions(agentName, opts)...)
 	}
 
 	// resume current agent
@@ -376,9 +376,12 @@ func (a *flowAgent) Resume(ctx context.Context, info *ResumeInfo, opts ...AgentR
 		return iterator
 	}
 	iterator, generator := NewAsyncIteratorPair[*AgentEvent]()
-	aIter := ra.Resume(ctx, info, opts...)
 
-	go a.run(ctx, runCtx, aIter, generator, opts...)
+	filteredOpts := filterOptions(agentName, opts)
+
+	aIter := ra.Resume(ctx, info, filteredOpts...)
+
+	go a.run(ctx, runCtx, aIter, generator, filteredOpts...)
 
 	return iterator
 }

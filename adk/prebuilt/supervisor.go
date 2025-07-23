@@ -41,9 +41,53 @@ type BackToParentWrapper struct {
 func (a *BackToParentWrapper) Run(ctx context.Context, input *adk.AgentInput,
 	opts ...adk.AgentRunOption) *adk.AsyncIterator[*adk.AgentEvent] {
 
-	ctx = adk.ClearRunCtx(ctx)
-	aIter := a.Agent.Run(ctx, input, opts...)
+	o := adk.GetCommonOptions(nil, opts...)
+	checkpointID, ok := o.CheckPointID()
+	if ok { // append checkpointID with current RunPath, but inherit checkpointStore
+		runPath := adk.JoinRunPath(adk.GetRunPath(ctx))
+		checkpointID = checkpointID + "_" + runPath
+		newOpts := make([]adk.AgentRunOption, len(opts)+1)
+		copy(newOpts, opts)
+		newOpts[len(newOpts)-1] = adk.WithCheckPointID(checkpointID)
+		opts = newOpts
+	}
 
+	runner := adk.NewRunner(ctx, adk.RunnerConfig{Agent: a.Agent})
+	aIter := runner.Run(ctx, input.Messages, opts...)
+
+	return a.handleEvents(ctx, aIter)
+}
+
+func (a *BackToParentWrapper) Resume(ctx context.Context, info *adk.ResumeInfo, opts ...adk.AgentRunOption) *adk.AsyncIterator[*adk.AgentEvent] {
+	o := adk.GetCommonOptions(nil, opts...)
+	checkpointID, ok := o.CheckPointID()
+	if !ok {
+		iterator, generator := adk.NewAsyncIteratorPair[*adk.AgentEvent]()
+		generator.Send(&adk.AgentEvent{
+			Err: errors.New("checkpointID is required when resuming"),
+		})
+		return iterator
+	}
+
+	runPath := adk.JoinRunPath(adk.GetRunPath(ctx))
+	checkpointID = checkpointID + "_" + runPath
+	newOpts := make([]adk.AgentRunOption, len(opts)+1)
+	copy(newOpts, opts)
+	newOpts[len(newOpts)-1] = adk.WithCheckPointID(checkpointID)
+	opts = newOpts
+
+	runner := adk.NewRunner(ctx, adk.RunnerConfig{Agent: a.Agent})
+	aIter, err := runner.Resume(ctx, checkpointID, opts...)
+	if err != nil {
+		iterator, generator := adk.NewAsyncIteratorPair[*adk.AgentEvent]()
+		generator.Send(&adk.AgentEvent{Err: err})
+		return iterator
+	}
+
+	return a.handleEvents(ctx, aIter)
+}
+
+func (a *BackToParentWrapper) handleEvents(ctx context.Context, aIter *adk.AsyncIterator[*adk.AgentEvent]) *adk.AsyncIterator[*adk.AgentEvent] {
 	iterator, generator := adk.NewAsyncIteratorPair[*adk.AgentEvent]()
 	go func() {
 		defer func() {

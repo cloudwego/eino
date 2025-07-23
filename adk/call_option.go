@@ -16,8 +16,19 @@
 
 package adk
 
-type options struct {
-	checkPointID *string
+import "github.com/cloudwego/eino/compose"
+
+type Options struct {
+	checkPointID    *string
+	checkPointStore compose.CheckPointStore
+	enableStreaming *bool
+}
+
+func (o *Options) CheckPointID() (string, bool) {
+	if o.checkPointID == nil {
+		return "", false
+	}
+	return *o.checkPointID, true
 }
 
 // AgentRunOption is the call option for adk Agent.
@@ -26,6 +37,8 @@ type AgentRunOption struct {
 
 	// specify which Agent can see this AgentRunOption, if empty, all Agents can see this AgentRunOption
 	agentNames []string
+
+	nestedOption *AgentRunOption
 }
 
 func (o AgentRunOption) DesignateAgent(name ...string) AgentRunOption {
@@ -33,12 +46,18 @@ func (o AgentRunOption) DesignateAgent(name ...string) AgentRunOption {
 	return o
 }
 
-func getCommonOptions(base *options, opts ...AgentRunOption) *options {
+func (o AgentRunOption) WrapIn(parent string) AgentRunOption {
+	return AgentRunOption{
+		nestedOption: &o,
+	}.DesignateAgent(parent)
+}
+
+func GetCommonOptions(base *Options, opts ...AgentRunOption) *Options {
 	if base == nil {
-		base = &options{}
+		base = &Options{}
 	}
 
-	return GetImplSpecificOptions[options](base, opts...)
+	return GetImplSpecificOptions[Options](base, opts...)
 }
 
 // WrapImplSpecificOptFn is the option to wrap the implementation specific option function.
@@ -93,4 +112,43 @@ func filterOptions(agentName string, opts []AgentRunOption) []AgentRunOption {
 		}
 	}
 	return filteredOpts
+}
+
+func WithEnableStreaming(enable bool) AgentRunOption {
+	return WrapImplSpecificOptFn(func(t *Options) {
+		t.enableStreaming = &enable
+	})
+}
+
+// unwrapOptions unwraps nested AgentRunOption if needed
+func unwrapOptions(agentName string, opts ...AgentRunOption) []AgentRunOption {
+	var unwrappedOpts []AgentRunOption
+	for i := range opts {
+		opt := opts[i]
+		if len(opt.agentNames) == 0 { // not set agentNames, definitely not a wrapped option
+			unwrappedOpts = append(unwrappedOpts, opt)
+			continue
+		}
+
+		if opt.nestedOption == nil { // no nestedOption, just append
+			unwrappedOpts = append(unwrappedOpts, opt)
+			continue
+		}
+
+		var isCurrent bool
+		for j := range opt.agentNames {
+			if opt.agentNames[j] == agentName {
+				isCurrent = true
+				break
+			}
+		}
+
+		if !isCurrent {
+			unwrappedOpts = append(unwrappedOpts, *opt.nestedOption)
+		} else {
+			unwrappedOpts = append(unwrappedOpts, opt)
+		}
+	}
+
+	return unwrappedOpts
 }

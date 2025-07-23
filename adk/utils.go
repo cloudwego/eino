@@ -200,3 +200,20 @@ func copyAgentEvent(ae *AgentEvent) *AgentEvent {
 
 	return copied
 }
+
+func JoinRunPath(runPath []ExecutionStep) string {
+	var sb strings.Builder
+	for _, es := range runPath {
+		if sb.Len() > 0 {
+			sb.WriteString("->")
+		}
+		if es.Single != nil {
+			sb.WriteString(*es.Single)
+		} else {
+			sb.WriteString("[")
+			sb.WriteString(strings.Join(es.Concurrent, ","))
+			sb.WriteString("]")
+		}
+	}
+	return sb.String()
+}

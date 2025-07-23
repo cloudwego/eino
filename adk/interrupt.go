@@ -35,8 +35,14 @@ type InterruptInfo struct {
 }
 
 func WithCheckPointID(id string) AgentRunOption {
-	return WrapImplSpecificOptFn(func(t *options) {
+	return WrapImplSpecificOptFn(func(t *Options) {
 		t.checkPointID = &id
+	})
+}
+
+func WithCheckPointStore(store compose.CheckPointStore) AgentRunOption {
+	return WrapImplSpecificOptFn(func(t *Options) {
+		t.checkPointStore = store
 	})
 }
 

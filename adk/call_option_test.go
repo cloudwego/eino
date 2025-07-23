@@ -23,7 +23,7 @@ import (
 type mockAgentForOption struct {
 	opts []AgentRunOption
 
-	options *options
+	options *Options
 }
 
 func (m *mockAgentForOption) Name(ctx context.Context) string {
@@ -36,7 +36,7 @@ func (m *mockAgentForOption) Description(ctx context.Context) string {
 
 func (m *mockAgentForOption) Run(ctx context.Context, input *AgentInput, opts ...AgentRunOption) *AsyncIterator[*AgentEvent] {
 	m.opts = opts
-	m.options = getCommonOptions(&options{}, opts...)
+	m.options = GetCommonOptions(&Options{}, opts...)
 
 	return nil
 }

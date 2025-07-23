@@ -239,3 +239,12 @@ func getSession(ctx context.Context) *runSession {
 
 	return nil
 }
+
+func GetRunPath(ctx context.Context) []ExecutionStep {
+	runCtx := getRunCtx(ctx)
+	if runCtx != nil {
+		return runCtx.RunPath
+	}
+
+	return nil
+}
