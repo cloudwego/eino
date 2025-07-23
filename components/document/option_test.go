@@ -68,11 +68,11 @@ func TestImplSpecificOpts(t *testing.T) {
 
 func TestCommonOptions(t *testing.T) {
 	convey.Convey("TestCommonOptions", t, func() {
-		o := &LoaderOptions{parserOptions: []parser.Option{{}}}
+		o := &LoaderOptions{ParserOptions: []parser.Option{{}}}
 		o1 := GetLoaderCommonOptions(o)
-		convey.So(len(o1.parserOptions), convey.ShouldEqual, 1)
+		convey.So(len(o1.ParserOptions), convey.ShouldEqual, 1)
 
 		o2 := GetLoaderCommonOptions(o, WithParserOptions(parser.Option{}, parser.Option{}))
-		convey.So(len(o2.parserOptions), convey.ShouldEqual, 2)
+		convey.So(len(o2.ParserOptions), convey.ShouldEqual, 2)
 	})
 }

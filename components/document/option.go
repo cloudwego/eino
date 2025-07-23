@@ -19,7 +19,7 @@ package document
 import "github.com/cloudwego/eino/components/document/parser"
 
 type LoaderOptions struct {
-	parserOptions []parser.Option
+	ParserOptions []parser.Option
 }
 
 // LoaderOption defines call option for Loader component, which is part of the component interface signature.
@@ -100,7 +100,7 @@ func GetLoaderCommonOptions(base *LoaderOptions, opts ...LoaderOption) *LoaderOp
 func WithParserOptions(opts ...parser.Option) LoaderOption {
 	return LoaderOption{
 		apply: func(o *LoaderOptions) {
-			o.parserOptions = opts
+			o.ParserOptions = opts
 		},
 	}
 }
