@@ -142,3 +142,107 @@ func TestTransferToAgent(t *testing.T) {
 	_, ok = iterator.Next()
 	assert.False(t, ok)
 }
+
+func TestConcurrentFlow(t *testing.T) {
+	ctx := context.Background()
+
+	// Create a mock controller
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	// Create mock models for parent and child agents
+	parentModel := mockModel.NewMockToolCallingChatModel(ctrl)
+	childModel1 := mockModel.NewMockToolCallingChatModel(ctrl)
+	childModel2 := mockModel.NewMockToolCallingChatModel(ctrl)
+
+	// Set up expectations for the parent model
+	// First call: parent model generates a message with TransferToAgent tool call
+	parentModel.EXPECT().Generate(gomock.Any(), gomock.Any(), gomock.Any()).
+		Return(schema.AssistantMessage("I'll transfer this to both the child agent 1 and child agent 2",
+			[]schema.ToolCall{
+				{
+					ID: "tool-call-1",
+					Function: schema.FunctionCall{
+						Name:      TransferToAgentToolName,
+						Arguments: `{"agent_name": "ChildAgent1"}`,
+					},
+				},
+				{
+					ID: "tool-call-2",
+					Function: schema.FunctionCall{
+						Name:      TransferToAgentToolName,
+						Arguments: `{"agent_name": "ChildAgent2"}`,
+					},
+				},
+			}), nil).
+		Times(1)
+
+	// Set up expectations for the child model
+	// Second call: child model generates a response
+	childModel1.EXPECT().Generate(gomock.Any(), gomock.Any(), gomock.Any()).
+		Return(schema.AssistantMessage("Hello from child agent 1", nil), nil).
+		Times(1)
+	childModel2.EXPECT().Generate(gomock.Any(), gomock.Any(), gomock.Any()).
+		Return(schema.AssistantMessage("Hello from child agent 2", nil), nil).
+		Times(1)
+
+	// All models should implement WithTools
+	parentModel.EXPECT().WithTools(gomock.Any()).Return(parentModel, nil).AnyTimes()
+	childModel1.EXPECT().WithTools(gomock.Any()).Return(childModel1, nil).AnyTimes()
+	childModel2.EXPECT().WithTools(gomock.Any()).Return(childModel2, nil).AnyTimes()
+
+	// Create parent agent
+	parentAgent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+		Name:        "ParentAgent",
+		Description: "Parent agent that will transfer to children",
+		Instruction: "You are a parent agent.",
+		Model:       parentModel,
+	})
+	assert.NoError(t, err)
+	assert.NotNil(t, parentAgent)
+
+	// Create child agents
+	childAgent1, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+		Name:        "ChildAgent1",
+		Description: "Child agent 1 that handles specific tasks",
+		Instruction: "You are child agent 1.",
+		Model:       childModel1,
+	})
+	assert.NoError(t, err)
+	assert.NotNil(t, childAgent1)
+
+	childAgent2, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+		Name:        "ChildAgent2",
+		Description: "Child agent 2 that handles specific tasks",
+		Instruction: "You are child agent 2.",
+		Model:       childModel2,
+	})
+	assert.NoError(t, err)
+	assert.NotNil(t, childAgent2)
+
+	// Set up parent-child relationship
+	flowAgent, err := SetSubAgents(ctx, parentAgent, []Agent{childAgent1, childAgent2})
+	assert.NoError(t, err)
+	assert.NotNil(t, flowAgent)
+
+	assert.NotNil(t, parentAgent.subAgents)
+	assert.NotNil(t, childAgent1.parentAgent)
+	assert.NotNil(t, childAgent2.parentAgent)
+
+	// Run the parent agent
+	input := &AgentInput{
+		Messages: []Message{
+			schema.UserMessage("Please transfer this to the child agents"),
+		},
+	}
+	iterator := flowAgent.Run(ctx, input)
+	assert.NotNil(t, iterator)
+
+	for {
+		event, ok := iterator.Next()
+		if !ok {
+			break
+		}
+		t.Log(event)
+	}
+}

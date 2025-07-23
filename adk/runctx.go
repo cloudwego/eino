@@ -223,6 +223,22 @@ func initRunCtx(ctx context.Context, agentName string, input *AgentInput) (conte
 	return setRunCtx(ctx, runCtx), runCtx
 }
 
+func initConcurrentRunCtx(ctx context.Context, agentNames []string, input *AgentInput) (context.Context, *runContext) {
+	runCtx := getRunCtx(ctx)
+	if runCtx != nil {
+		runCtx = runCtx.deepCopy()
+	} else {
+		runCtx = &runContext{Session: newRunSession()}
+	}
+
+	runCtx.RunPath = append(runCtx.RunPath, ExecutionStep{Concurrent: agentNames})
+	if runCtx.isRoot() {
+		runCtx.RootInput = input
+	}
+
+	return setRunCtx(ctx, runCtx), runCtx
+}
+
 func ClearRunCtx(ctx context.Context) context.Context {
 	return context.WithValue(ctx, runCtxKey{}, nil)
 }

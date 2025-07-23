@@ -22,7 +22,6 @@ import (
 	"fmt"
 	"runtime/debug"
 	"strings"
-	"sync"
 
 	"github.com/cloudwego/eino/compose"
 	"github.com/cloudwego/eino/internal/safe"
@@ -342,11 +341,8 @@ func (a *flowAgent) Resume(ctx context.Context, info *ResumeInfo, opts ...AgentR
 	targetName := agentName
 	if len(runCtx.RunPath) > 0 {
 		lastStep := runCtx.RunPath[len(runCtx.RunPath)-1]
-		if lastStep.Single == nil {
-			iterator, generator := NewAsyncIteratorPair[*AgentEvent]()
-			generator.Send(&AgentEvent{Err: fmt.Errorf("last step is concurrent, cannot resume: %v", lastStep.Concurrent)})
-			generator.Close()
-			return iterator
+		if lastStep.Single == nil && len(lastStep.Concurrent) > 0 { // interrupt happened at ConcurrentWrapper
+			lastStep = runCtx.RunPath[len(runCtx.RunPath)-2] // go back to last single step
 		}
 		targetName = *lastStep.Single
 	}
@@ -360,10 +356,10 @@ func (a *flowAgent) Resume(ctx context.Context, info *ResumeInfo, opts ...AgentR
 			generator.Close()
 			return iterator
 		}
-		return targetAgent.Resume(ctx, info, filterOptions(targetName, opts)...)
+		return targetAgent.Resume(ctx, info, opts...)
 	}
 	if wf, ok := a.Agent.(*workflowAgent); ok {
-		return wf.Resume(ctx, info, filterOptions(agentName, opts)...)
+		return wf.Resume(ctx, info, opts...)
 	}
 
 	// resume current agent
@@ -404,7 +400,6 @@ func (a *flowAgent) run(
 
 	var (
 		lastEvent *AgentEvent
-		hasEvent  bool
 		destNames []string
 	)
 
@@ -413,10 +408,12 @@ func (a *flowAgent) run(
 		if !ok {
 			break
 		}
-		if hasEvent {
+		if lastEvent != nil {
 			generator.Send(lastEvent)
+			if lastEvent.Err != nil {
+				break
+			}
 		}
-		hasEvent = true
 
 		event.AgentName = a.Name(ctx)
 		event.RunPath = runCtx.RunPath
@@ -433,53 +430,34 @@ func (a *flowAgent) run(
 		}
 	}
 
-	if lastEvent != nil && lastEvent.Action != nil {
-		action := lastEvent.Action
-		if action.Interrupted != nil {
-			appendInterruptRunCtx(ctx, runCtx)
-			generator.Send(lastEvent)
-			return
-		}
-		if action.Exit {
+	if lastEvent != nil {
+		if lastEvent.Action != nil {
+			action := lastEvent.Action
+			if action.Interrupted != nil {
+				appendInterruptRunCtx(ctx, runCtx)
+				generator.Send(lastEvent)
+				return
+			}
+			if action.Exit {
+				generator.Send(lastEvent)
+				return
+			}
+		} else if lastEvent.Err != nil {
 			generator.Send(lastEvent)
 			return
 		}
 	}
-	if hasEvent {
+
+	if lastEvent != nil {
 		generator.Send(lastEvent)
 	}
 
-	var wg sync.WaitGroup
-	if len(destNames) > 1 {
-		for i := 1; i < len(destNames); i++ {
-			destName := destNames[i]
-			agentToRun := a.getAgent(ctx, destName)
-			if agentToRun == nil {
-				e := errors.New(fmt.Sprintf(
-					"transfer failed: agent '%s' not found when transferring from '%s'",
-					destName, a.Name(ctx)))
-				generator.Send(&AgentEvent{Err: e})
-				return
-			}
-			wg.Add(1)
-			go func() {
-				defer wg.Done()
-				subAIter := agentToRun.Run(ctx, nil /*subagents get input from runCtx*/, opts...)
-				for {
-					subEvent, ok_ := subAIter.Next()
-					if !ok_ {
-						break
-					}
-
-					setAutomaticClose(subEvent)
-					generator.Send(subEvent)
-				}
-			}()
-		}
+	if len(destNames) == 0 {
+		return
 	}
 
 	// handle transferring to another agent
-	if len(destNames) > 0 {
+	if len(destNames) == 1 {
 		destName := destNames[0]
 		agentToRun := a.getAgent(ctx, destName)
 		if agentToRun == nil {
@@ -500,10 +478,36 @@ func (a *flowAgent) run(
 			setAutomaticClose(subEvent)
 			generator.Send(subEvent)
 		}
+
+		return
 	}
 
-	if len(destNames) > 1 {
-		wg.Wait()
+	subAgents := make([]Agent, len(destNames))
+	for i, name := range destNames {
+		subA := a.getAgent(ctx, name)
+		if subA == nil {
+			e := errors.New(fmt.Sprintf(
+				"transfer failed: agent '%s' not found when transferring from '%s'",
+				name, a.Name(ctx)))
+			generator.Send(&AgentEvent{Err: e})
+			return
+		}
+		subAgents[i] = subA
+	}
+
+	cw := &ConcurrentWrapper{
+		Agents: subAgents,
+	}
+
+	cwIter := cw.Run(ctx, nil, opts...)
+	for {
+		subEvent, ok_ := cwIter.Next()
+		if !ok_ {
+			break
+		}
+
+		setAutomaticClose(subEvent)
+		generator.Send(subEvent)
 	}
 }
 
