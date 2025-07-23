@@ -110,25 +110,6 @@ func streamConvertPostHandler[O, S any](handler StreamStatePostHandler[O, S]) *c
 	return runnableLambda[O, O](nil, nil, nil, rf, false)
 }
 
-// GetState gets the state from the context.
-// Notice: The returned state isn't concurrency-safe that may cause data race in graph execution.
-// Deprecated: use ProcessState instead.
-func GetState[S any](ctx context.Context) (S, error) {
-	state := ctx.Value(stateKey{})
-
-	iState := state.(*internalState)
-	iState.mu.Lock()
-	defer iState.mu.Unlock()
-	cState, ok := iState.state.(S)
-	if !ok {
-		var s S
-		return s, fmt.Errorf("unexpected state type. expected: %v, got: %v",
-			generic.TypeOf[S](), reflect.TypeOf(iState.state))
-	}
-
-	return cState, nil
-}
-
 // ProcessState processes the state from the context in a concurrency-safe way.
 // This is the recommended way to access and modify state in custom nodes.
 // The provided function handler will be executed with exclusive access to the state (protected by mutex).
