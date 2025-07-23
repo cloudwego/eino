@@ -20,6 +20,8 @@ import (
 	"testing"
 
 	"github.com/smartystreets/goconvey/convey"
+
+	"github.com/cloudwego/eino/components/document/parser"
 )
 
 func TestImplSpecificOpts(t *testing.T) {
@@ -61,5 +63,16 @@ func TestImplSpecificOpts(t *testing.T) {
 			conf:  "test_conf",
 			index: 1,
 		})
+	})
+}
+
+func TestCommonOptions(t *testing.T) {
+	convey.Convey("TestCommonOptions", t, func() {
+		o := &LoaderOptions{parserOptions: []parser.Option{{}}}
+		o1 := GetLoaderCommonOptions(o)
+		convey.So(len(o1.parserOptions), convey.ShouldEqual, 1)
+
+		o2 := GetLoaderCommonOptions(o, WithParserOptions(parser.Option{}, parser.Option{}))
+		convey.So(len(o2.parserOptions), convey.ShouldEqual, 2)
 	})
 }

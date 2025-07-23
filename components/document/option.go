@@ -16,10 +16,18 @@
 
 package document
 
+import "github.com/cloudwego/eino/components/document/parser"
+
+type LoaderOptions struct {
+	parserOptions []parser.Option
+}
+
 // LoaderOption defines call option for Loader component, which is part of the component interface signature.
 // Each Loader implementation could define its own options struct and option funcs within its own package,
 // then wrap the impl specific option funcs into this type, before passing to Load.
 type LoaderOption struct {
+	apply func(opts *LoaderOptions)
+
 	implSpecificOptFn any
 }
 
@@ -71,6 +79,30 @@ func GetLoaderImplSpecificOptions[T any](base *T, opts ...LoaderOption) *T {
 	}
 
 	return base
+}
+
+// GetLoaderCommonOptions extract loader Options from Option list, optionally providing a base Options with default values.
+func GetLoaderCommonOptions(base *LoaderOptions, opts ...LoaderOption) *LoaderOptions {
+	if base == nil {
+		base = &LoaderOptions{}
+	}
+
+	for i := range opts {
+		opt := opts[i]
+		if opt.apply != nil {
+			opt.apply(base)
+		}
+	}
+
+	return base
+}
+
+func WithParserOptions(opts ...parser.Option) LoaderOption {
+	return LoaderOption{
+		apply: func(o *LoaderOptions) {
+			o.parserOptions = opts
+		},
+	}
 }
 
 // TransformerOption defines call option for Transformer component, which is part of the component interface signature.
