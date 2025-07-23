@@ -73,13 +73,13 @@ func (r *Runner) Run(ctx context.Context, messages []Message,
 	ctx = ctxWithNewRunCtx(ctx)
 
 	iter := fa.Run(ctx, input, newOpts...)
-	if r.store == nil {
+	if o.checkPointStore == nil {
 		return iter
 	}
 
 	niter, gen := NewAsyncIteratorPair[*AgentEvent]()
 
-	go r.handleIter(ctx, iter, gen, o.checkPointID)
+	go r.handleIter(ctx, iter, gen, o.checkPointID, o.checkPointStore)
 	return niter
 }
 
@@ -99,7 +99,7 @@ func (r *Runner) Query(ctx context.Context,
 
 func (r *Runner) Resume(ctx context.Context, checkPointID string, opts ...AgentRunOption) (*AsyncIterator[*AgentEvent], error) {
 	opts = unwrapOptions(r.a.Name(ctx), opts...)
-	
+
 	o := GetCommonOptions(&Options{
 		checkPointStore: r.store,
 	}, opts...)
@@ -129,11 +129,11 @@ func (r *Runner) Resume(ctx context.Context, checkPointID string, opts ...AgentR
 
 	niter, gen := NewAsyncIteratorPair[*AgentEvent]()
 
-	go r.handleIter(ctx, aIter, gen, &checkPointID)
+	go r.handleIter(ctx, aIter, gen, &checkPointID, o.checkPointStore)
 	return niter, nil
 }
 
-func (r *Runner) handleIter(ctx context.Context, aIter *AsyncIterator[*AgentEvent], gen *AsyncGenerator[*AgentEvent], checkPointID *string) {
+func (r *Runner) handleIter(ctx context.Context, aIter *AsyncIterator[*AgentEvent], gen *AsyncGenerator[*AgentEvent], checkPointID *string, checkPointStore compose.CheckPointStore) {
 	defer func() {
 		panicErr := recover()
 		if panicErr != nil {
@@ -159,7 +159,7 @@ func (r *Runner) handleIter(ctx context.Context, aIter *AsyncIterator[*AgentEven
 				info.Data = ti.data
 			}
 			if checkPointID != nil {
-				err := saveCheckPoint(ctx, r.store, *checkPointID, getInterruptRunCtx(ctx), info)
+				err := saveCheckPoint(ctx, checkPointStore, *checkPointID, getInterruptRunCtx(ctx), info)
 				if err != nil {
 					gen.Send(&AgentEvent{Err: fmt.Errorf("failed to save checkpoint: %w", err)})
 				}

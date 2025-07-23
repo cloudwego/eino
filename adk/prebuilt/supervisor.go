@@ -66,6 +66,7 @@ func (a *BackToParentWrapper) Resume(ctx context.Context, info *adk.ResumeInfo, 
 		generator.Send(&adk.AgentEvent{
 			Err: errors.New("checkpointID is required when resuming"),
 		})
+		generator.Close()
 		return iterator
 	}
 
@@ -81,6 +82,7 @@ func (a *BackToParentWrapper) Resume(ctx context.Context, info *adk.ResumeInfo, 
 	if err != nil {
 		iterator, generator := adk.NewAsyncIteratorPair[*adk.AgentEvent]()
 		generator.Send(&adk.AgentEvent{Err: err})
+		generator.Close()
 		return iterator
 	}
 
