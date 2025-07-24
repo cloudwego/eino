@@ -50,6 +50,8 @@ func init() {
 	gob.RegisterName("_eino_adk_serialization", &serialization{})
 	gob.RegisterName("_eino_adk_workflow_interrupt_info", &workflowInterruptInfo{})
 	gob.RegisterName("_eino_adk_react_state", &State{})
+	gob.RegisterName("_eino_adk_concurrent_interrupt_info", &concurrentInterruptInfo{})
+	gob.RegisterName("_eino_adk_temp_interrupt_info", &tempInterruptInfo{})
 	gob.RegisterName("_eino_compose_interrupt_info", &compose.InterruptInfo{})
 	gob.RegisterName("_eino_compose_tools_interrupt_and_rerun_extra", &compose.ToolsInterruptAndRerunExtra{})
 }

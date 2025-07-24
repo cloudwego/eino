@@ -169,6 +169,7 @@ func (c *concurrentWrapper) genExecutors(ctx context.Context, generator *AsyncGe
 					EnableStreaming: enableStreaming,
 					InterruptInfo:   intInfo.InterruptInfos[fa.Name(ctx)],
 				}
+				ctx, _ := initRunCtx(ctx, fa.Name(ctx), nil)
 				aIter = fa.Resume(ctx, subResumeInfo, filterOptions(fa.Name(ctx), options)...)
 			}
 
@@ -259,7 +260,7 @@ func (c *concurrentWrapper) execute(ctx context.Context, executors []func(),
 	ctx, runCtx := appendConcurrentRunCtx(ctx, c.names)
 
 	if len(c.interruptInfos) > 0 {
-		replaceInterruptRunCtx(ctx, runCtx)
+		setConcurrentInterruptRunCtx(ctx, runCtx)
 		generator.Send(&AgentEvent{
 			AgentName: c.Name(ctx),
 			RunPath:   runCtx.RunPath,
@@ -341,4 +342,15 @@ func rewindConcurrentRunCtx(ctx context.Context) context.Context {
 	runCtx.RunPath = runCtx.RunPath[:len(runCtx.RunPath)-1]
 
 	return setRunCtx(ctx, runCtx)
+}
+
+func setConcurrentInterruptRunCtx(ctx context.Context, interruptRunCtx *runContext) {
+	rs := getSession(ctx)
+	if rs == nil {
+		return
+	}
+
+	rs.mtx.Lock()
+	rs.interruptRunContexts = []*runContext{interruptRunCtx}
+	rs.mtx.Unlock()
 }

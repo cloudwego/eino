@@ -508,7 +508,7 @@ func getResumeTargetAgent(ctx context.Context, current *flowAgent, target Execut
 	ResumableAgent, error) {
 	name := current.Name(ctx)
 
-	if name == target.AgentName {
+	if name == target.AgentName && len(runPath) == 0 {
 		return current, nil
 	}
 

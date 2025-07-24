@@ -393,8 +393,8 @@ func (h *cbHandler) onToolEndWithStreamOutput(ctx context.Context,
 }
 
 type tempInterruptInfo struct { // replace temp info by info when save the data
-	info *compose.InterruptInfo
-	data []byte
+	Info *compose.InterruptInfo
+	Data []byte
 }
 
 func (h *cbHandler) onGraphError(ctx context.Context,
@@ -417,7 +417,7 @@ func (h *cbHandler) onGraphError(ctx context.Context,
 	}
 	h.Send(&AgentEvent{AgentName: h.agentName, Action: &AgentAction{
 		Interrupted: &InterruptInfo{
-			Data: &tempInterruptInfo{data: data, info: info},
+			Data: &tempInterruptInfo{Data: data, Info: info},
 		},
 	}})
 

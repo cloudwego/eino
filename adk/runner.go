@@ -150,16 +150,10 @@ func (r *Runner) handleIter(ctx context.Context, aIter *AsyncIterator[*AgentEven
 		}
 
 		if event.Action != nil && event.Action.Interrupted != nil {
-			info := event.Action.Interrupted
-			if ti, ok := info.Data.(*tempInterruptInfo); ok {
-				// from ChatModelAgent, tempInfo.data for saving and tempInfo.info for user
-				event.Action.Interrupted = &InterruptInfo{
-					Data: ti.info,
-				}
-				info.Data = ti.data
-			}
+			forUser, forStore := unwrapInterruptInfo(event.Action.Interrupted)
+			event.Action.Interrupted = forUser
 			if checkPointID != nil {
-				err := saveCheckPoint(ctx, checkPointStore, *checkPointID, getInterruptRunCtx(ctx), info)
+				err := saveCheckPoint(ctx, checkPointStore, *checkPointID, getInterruptRunCtx(ctx), forStore)
 				if err != nil {
 					gen.Send(&AgentEvent{Err: fmt.Errorf("failed to save checkpoint: %w", err)})
 				}
@@ -168,4 +162,32 @@ func (r *Runner) handleIter(ctx context.Context, aIter *AsyncIterator[*AgentEven
 
 		gen.Send(event)
 	}
+}
+
+func unwrapInterruptInfo(info *InterruptInfo) (forUser *InterruptInfo, forStore *InterruptInfo) {
+	if info == nil {
+		return nil, nil
+	}
+	// from ChatModelAgent, tempInfo.data for saving and tempInfo.info for user
+	if ti, ok := info.Data.(*tempInterruptInfo); ok {
+		return &InterruptInfo{Data: ti.Info}, &InterruptInfo{Data: ti.Data}
+	}
+
+	// TODO: change this into an interface so developers can implement their own InterruptInfo containers
+	if m, ok := info.Data.(*concurrentInterruptInfo); ok {
+		forUserMap := map[string]*InterruptInfo{}
+		forStoreMap := map[string]*InterruptInfo{}
+		for k, v := range m.InterruptInfos {
+			forUser, forStore := unwrapInterruptInfo(v)
+			forUserMap[k] = forUser
+			forStoreMap[k] = forStore
+		}
+
+		return &InterruptInfo{Data: forUserMap}, &InterruptInfo{Data: &concurrentInterruptInfo{
+			InterruptInfos:  forStoreMap,
+			TransferTargets: m.TransferTargets,
+		}}
+	}
+
+	return info, info
 }
