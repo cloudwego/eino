@@ -205,3 +205,13 @@ func JoinRunPath(runPath []ExecutionStep) string {
 	}
 	return sb.String()
 }
+
+func buildSimpleRunPath(runPath ...string) []ExecutionStep {
+	simpleRunPath := make([]ExecutionStep, 0, len(runPath))
+	for _, an := range runPath {
+		simpleRunPath = append(simpleRunPath, ExecutionStep{
+			AgentName: an,
+		})
+	}
+	return simpleRunPath
+}
