@@ -35,7 +35,7 @@ func (o *Options) CheckPointID() (string, bool) {
 type AgentRunOption struct {
 	implSpecificOptFn any
 
-	// specify which Agent can see this AgentRunOption, if empty, all Agents can see this AgentRunOption
+	// specify which Agent can see this AgentRunOption, if empty, all agents can see this AgentRunOption
 	agentNames []string
 
 	nestedOption *AgentRunOption
@@ -97,6 +97,8 @@ func filterOptions(agentName string, opts []AgentRunOption) []AgentRunOption {
 	if len(opts) == 0 {
 		return nil
 	}
+
+	// TODO: concurrent wrapper needs to carry over options for all its concurrent agents
 	var filteredOpts []AgentRunOption
 	for i := range opts {
 		opt := opts[i]

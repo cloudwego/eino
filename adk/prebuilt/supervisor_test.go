@@ -18,6 +18,7 @@ package prebuilt
 
 import (
 	"context"
+	"fmt"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -251,7 +252,7 @@ func TestSupervisorInterruptResume(t *testing.T) {
 	assert.Equal(t, "from_sub_agent1", event.Output.MessageOutput.Message.Content)
 	event, ok = aIter1.Next()
 	assert.True(t, ok)
-	assert.Equal(t, "SupervisorAgent", event.Output.MessageOutput.Message.ToolCalls[0].Function.Arguments)
+	assert.Equal(t, fmt.Sprintf(adk.TransferToAgentToolName, "SupervisorAgent"), event.Output.MessageOutput.Message.ToolCalls[0].Function.Name)
 	event, ok = aIter1.Next()
 	assert.True(t, ok)
 	event, ok = aIter1.Next()

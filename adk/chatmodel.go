@@ -212,7 +212,7 @@ func NewChatModelAgent(_ context.Context, config *ChatModelAgentConfig) (*ChatMo
 }
 
 const (
-	TransferToAgentToolName = "transfer_to_agent"
+	TransferToAgentToolName = "transfer_to_agent_%s"
 	TransferToAgentToolDesc = "Transfer the question to another agent."
 )
 
@@ -220,14 +220,6 @@ var (
 	toolInfoTransferToAgent = &schema.ToolInfo{
 		Name: TransferToAgentToolName,
 		Desc: TransferToAgentToolDesc,
-
-		ParamsOneOf: schema.NewParamsOneOfByParams(map[string]*schema.ParameterInfo{
-			"agent_name": {
-				Desc:     "the name of the agent to transfer to",
-				Required: true,
-				Type:     schema.String,
-			},
-		}),
 	}
 
 	ToolInfoExit = &schema.ToolInfo{
@@ -269,33 +261,33 @@ func (et ExitTool) InvokableRun(ctx context.Context, argumentsInJSON string, _ .
 	return params.FinalResult, nil
 }
 
-type transferToAgent struct{}
+type transferToAgent struct {
+	agentName string
+}
 
 func (tta transferToAgent) Info(_ context.Context) (*schema.ToolInfo, error) {
-	return toolInfoTransferToAgent, nil
+	return &schema.ToolInfo{
+		Name: fmt.Sprintf(TransferToAgentToolName, tta.agentName),
+		Desc: TransferToAgentToolDesc,
+	}, nil
 }
 
 func transferToAgentToolOutput(destName string) string {
 	return fmt.Sprintf("successfully transferred to agent [%s]", destName)
 }
 
-func (tta transferToAgent) InvokableRun(ctx context.Context, argumentsInJSON string, _ ...tool.Option) (string, error) {
-	type transferParams struct {
-		AgentName string `json:"agent_name"`
-	}
-
-	params := &transferParams{}
-	err := sonic.UnmarshalString(argumentsInJSON, params)
+func (tta transferToAgent) InvokableRun(ctx context.Context, _ string, _ ...tool.Option) (string, error) {
+	info, err := tta.Info(ctx)
 	if err != nil {
 		return "", err
 	}
 
-	err = SendToolGenAction(ctx, TransferToAgentToolName, NewTransferToAgentAction(params.AgentName))
+	err = SendToolGenAction(ctx, info.Name, NewTransferToAgentAction(tta.agentName))
 	if err != nil {
 		return "", err
 	}
 
-	return transferToAgentToolOutput(params.AgentName), nil
+	return transferToAgentToolOutput(tta.agentName), nil
 }
 
 func (a *ChatModelAgent) Name(_ context.Context) string {
@@ -490,8 +482,17 @@ func (a *ChatModelAgent) buildRunFunc(ctx context.Context) runFunc {
 			transferInstruction := genTransferToAgentInstruction(ctx, transferToAgents)
 			instruction = concatInstructions(instruction, transferInstruction)
 
-			toolsNodeConf.Tools = append(toolsNodeConf.Tools, &transferToAgent{})
-			returnDirectly[TransferToAgentToolName] = true
+			for i := range transferToAgents {
+				aName := transferToAgents[i].Name(ctx)
+				t := &transferToAgent{agentName: aName}
+				info, err := t.Info(ctx)
+				if err != nil {
+					a.run = errFunc(err)
+					return
+				}
+				toolsNodeConf.Tools = append(toolsNodeConf.Tools, t)
+				returnDirectly[info.Name] = true
+			}
 		}
 
 		if a.exit != nil {

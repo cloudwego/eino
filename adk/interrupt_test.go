@@ -26,7 +26,6 @@ import (
 	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/components/tool"
 	"github.com/cloudwego/eino/compose"
-	"github.com/cloudwego/eino/internal/generic"
 	"github.com/cloudwego/eino/schema"
 )
 
@@ -269,7 +268,7 @@ func TestWorkflowInterrupt(t *testing.T) {
 	expectedEvents := []*AgentEvent{
 		{
 			AgentName: "sa1",
-			RunPath:   []ExecutionStep{{Single: generic.PtrOf("loop")}, {Single: generic.PtrOf("sa1")}},
+			RunPath:   []ExecutionStep{{AgentName: "loop"}, {AgentName: "sa1"}},
 			Action: &AgentAction{
 				Interrupted: &InterruptInfo{
 					Data: &workflowInterruptInfo{
@@ -287,7 +286,7 @@ func TestWorkflowInterrupt(t *testing.T) {
 		},
 		{
 			AgentName: "sa2",
-			RunPath:   []ExecutionStep{{Single: generic.PtrOf("loop")}, {Single: generic.PtrOf("sa2")}},
+			RunPath:   []ExecutionStep{{AgentName: "loop"}, {AgentName: "sa2"}},
 			Action: &AgentAction{
 				Interrupted: &InterruptInfo{
 					Data: &workflowInterruptInfo{
@@ -305,7 +304,7 @@ func TestWorkflowInterrupt(t *testing.T) {
 		},
 		{
 			AgentName: "sa3",
-			RunPath:   []ExecutionStep{{Single: generic.PtrOf("loop")}, {Single: generic.PtrOf("sa3")}},
+			RunPath:   []ExecutionStep{{AgentName: "loop"}, {AgentName: "sa3"}},
 			Output: &AgentOutput{
 				MessageOutput: &MessageVariant{
 					Message: schema.UserMessage("sa3 completed"),
@@ -314,7 +313,7 @@ func TestWorkflowInterrupt(t *testing.T) {
 		},
 		{
 			AgentName: "sa4",
-			RunPath:   []ExecutionStep{{Single: generic.PtrOf("loop")}, {Single: generic.PtrOf("sa4")}},
+			RunPath:   []ExecutionStep{{AgentName: "loop"}, {AgentName: "sa4"}},
 			Output: &AgentOutput{
 				MessageOutput: &MessageVariant{
 					Message: schema.UserMessage("sa4 completed"),
@@ -323,7 +322,7 @@ func TestWorkflowInterrupt(t *testing.T) {
 		},
 		{
 			AgentName: "sa1",
-			RunPath:   []ExecutionStep{{Single: generic.PtrOf("loop")}, {Single: generic.PtrOf("sa1")}},
+			RunPath:   []ExecutionStep{{AgentName: "loop"}, {AgentName: "sa1"}},
 			Action: &AgentAction{
 				Interrupted: &InterruptInfo{
 					Data: &workflowInterruptInfo{
@@ -341,7 +340,7 @@ func TestWorkflowInterrupt(t *testing.T) {
 		},
 		{
 			AgentName: "sa2",
-			RunPath:   []ExecutionStep{{Single: generic.PtrOf("loop")}, {Single: generic.PtrOf("sa2")}},
+			RunPath:   []ExecutionStep{{AgentName: "loop"}, {AgentName: "sa2"}},
 			Action: &AgentAction{
 				Interrupted: &InterruptInfo{
 					Data: &workflowInterruptInfo{
@@ -359,7 +358,7 @@ func TestWorkflowInterrupt(t *testing.T) {
 		},
 		{
 			AgentName: "sa3",
-			RunPath:   []ExecutionStep{{Single: generic.PtrOf("loop")}, {Single: generic.PtrOf("sa3")}},
+			RunPath:   []ExecutionStep{{AgentName: "loop"}, {AgentName: "sa3"}},
 			Output: &AgentOutput{
 				MessageOutput: &MessageVariant{
 					Message: schema.UserMessage("sa3 completed"),
@@ -368,7 +367,7 @@ func TestWorkflowInterrupt(t *testing.T) {
 		},
 		{
 			AgentName: "sa4",
-			RunPath:   []ExecutionStep{{Single: generic.PtrOf("loop")}, {Single: generic.PtrOf("sa4")}},
+			RunPath:   []ExecutionStep{{AgentName: "loop"}, {AgentName: "sa4"}},
 			Output: &AgentOutput{
 				MessageOutput: &MessageVariant{
 					Message: schema.UserMessage("sa4 completed"),

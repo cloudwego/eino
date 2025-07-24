@@ -5,27 +5,84 @@ import (
 	"errors"
 	"fmt"
 	"runtime/debug"
+	"sort"
 	"strings"
 	"sync"
 
-	"github.com/cloudwego/eino/internal/generic"
 	"github.com/cloudwego/eino/internal/safe"
-	"github.com/cloudwego/eino/schema"
 )
 
-type ConcurrentWrapper struct {
-	Agents []Agent // assumes more than one agents here
+type concurrentWrapper struct {
+	innerAgents     []*flowAgent // assumes more than one agents here
+	names           []string
+	name            string
+	wg              sync.WaitGroup
+	mu              sync.Mutex
+	hasExit         bool
+	lastErr         error
+	transferTargets map[string][]string
+	interruptInfos  map[string]*InterruptInfo
 }
 
-func (c *ConcurrentWrapper) Name(ctx context.Context) string {
-	names := make([]string, 0, len(c.Agents))
-	for _, agent := range c.Agents {
-		names = append(names, agent.Name(ctx))
+// NewConcurrentWrapper creates a concurrent wrapper for a batch of agents.
+// The NAME of the concurrent agent is a sorted list of the names of its agents, wrapped in '[]', separated by comma.
+// The inner agents will execute concurrently.
+// ALL events produced by the inner agents will be emitted / added to session as usual, with ACTUAL RunPath.
+//
+// Regarding transfer:
+// - inner agents can generate transfer events, but combined together, they cannot transfer to more than one agent.
+// - if there are transfer events, the concurrent wrapper will perform the transfer after all agent events are consumed.
+// - the inner agents only emits the transfer events, they won't actually perform the transfer.
+//
+// Regarding interrupt:
+// - any of the inner agent can interrupt itself. The other inner agents' executions are not affected by the interrupt.
+// - the concurrent wrapper will aggregate all interruptions from all inner agents before emitting an interrupt event.
+// - the interrupt event will have RunPath of the concurrent wrapper itself.
+//
+// Regarding resume:
+// - the concurrent wrapper is first resumed with its previous interruptions and emitted transfer targets.
+// - all the interrupted agents are resumed concurrently. The other inner agents are treated as finished, so won't be resumed.
+//
+// NOTE: an error or an intentional EXIT will stop the concurrent wrapper.
+// NOTE: it's ok if all inner agents stop naturally (without any transfer or EXIT), the concurrent wrapper will stop naturally too.
+// NOTE: concurrent wrapper will first handle interrupt. If interrupt does happen, transfers are not handled this Run.
+// NOTE: it's ok if only some of the inner agents transfer, while the other agents stop naturally.
+// NOTE: A concurrent wrapper can be used only once (A Run or a Resume both count as one use).
+// NOTE: A concurrent wrapper should not be the ROOT agent.
+func NewConcurrentWrapper(ctx context.Context, agents []Agent) ResumableAgent {
+	names := make([]string, len(agents))
+	flowAgents := make([]*flowAgent, len(agents))
+	for i, a := range agents {
+		names[i] = a.Name(ctx)
+		fa := toFlowAgent(ctx, a, withNoExecuteTransfer())
+		flowAgents[i] = fa
 	}
+	return &concurrentWrapper{
+		innerAgents: flowAgents,
+		names:       names,
+		name:        getConcurrentAgentsName(names),
+	}
+}
+
+func getConcurrentAgentsName(names []string) string {
+	// sort the names to get a stable agent name
+	sort.Strings(names)
 	return "[" + strings.Join(names, ",") + "]"
 }
 
-func (c *ConcurrentWrapper) Description(ctx context.Context) string {
+func trySplitConcurrentAgentsName(name string) ([]string, bool) {
+	if !strings.HasPrefix(name, "[") || !strings.HasSuffix(name, "]") {
+		return nil, false
+	}
+
+	return strings.Split(name[1:len(name)-1], ","), true
+}
+
+func (c *concurrentWrapper) Name(ctx context.Context) string {
+	return c.name
+}
+
+func (c *concurrentWrapper) Description(ctx context.Context) string {
 	return "wrapper for a batch of concurrently executing agents"
 }
 
@@ -34,156 +91,18 @@ type concurrentInterruptInfo struct {
 	TransferTargets map[string][]string
 }
 
-func (c *ConcurrentWrapper) Run(ctx context.Context, input *AgentInput, options ...AgentRunOption) *AsyncIterator[*AgentEvent] {
+func (c *concurrentWrapper) Run(ctx context.Context, input *AgentInput, options ...AgentRunOption) *AsyncIterator[*AgentEvent] {
 	iterator, generator := NewAsyncIteratorPair[*AgentEvent]()
 	defer generator.Close()
 
-	names := make([]string, len(c.Agents))
-	for i, a := range c.Agents {
-		names[i] = a.Name(ctx)
-	}
+	executors := c.genExecutors(ctx, generator, nil, false, options...)
 
-	ctx, runCtx := initConcurrentRunCtx(ctx, names, input)
-
-	var (
-		exit            bool
-		lastErr         error
-		wg              = sync.WaitGroup{}
-		transferTargets = map[string][]string{}
-		mu              = sync.Mutex{}
-		interruptInfos  map[string]*InterruptInfo
-	)
-
-	r := func(fa *flowAgent) {
-		defer func() {
-			panicErr := recover()
-			if panicErr != nil {
-				e := safe.NewPanicErr(panicErr, debug.Stack())
-				generator.Send(&AgentEvent{Err: e})
-				lastErr = e
-			}
-
-			wg.Done()
-		}()
-
-		aIter := fa.Run(ctx, input, filterOptions(fa.Name(ctx), options)...)
-
-		for {
-			event, ok := aIter.Next()
-			if !ok {
-				break
-			}
-
-			if event.Err != nil {
-				mu.Lock()
-				lastErr = event.Err
-				mu.Unlock()
-				generator.Send(event)
-				break
-			}
-
-			if event.Action != nil {
-				if event.Action.Exit {
-					exit = true
-					generator.Send(event)
-					break
-				}
-
-				if event.Action.Interrupted != nil {
-					mu.Lock()
-					if interruptInfos == nil {
-						interruptInfos = make(map[string]*InterruptInfo)
-					}
-					interruptInfos[fa.Name(ctx)] = event.Action.Interrupted
-					mu.Unlock()
-					break
-				}
-
-				if event.Action.TransferToAgent != nil {
-					mu.Lock()
-					if transferTargets == nil {
-						transferTargets = make(map[string][]string)
-					}
-					transferTargets[fa.Name(ctx)] = append(transferTargets[fa.Name(ctx)], event.Action.TransferToAgent.DestAgentName)
-					mu.Unlock()
-				}
-			} else {
-				generator.Send(event)
-			}
-		}
-	}
-
-	for i := 1; i < len(c.Agents); i++ {
-		a := c.Agents[i]
-		fa := toFlowAgent(ctx, a)
-		wg.Add(1)
-
-		go r(fa)
-	}
-
-	wg.Add(1)
-	fa := toFlowAgent(ctx, c.Agents[0])
-	r(fa)
-
-	wg.Wait()
-
-	if lastErr != nil || exit {
-		return iterator
-	}
-
-	var oneTarget string
-	for _, targets := range transferTargets {
-		if len(targets) > 0 {
-			generator.Send(&AgentEvent{
-				Err: fmt.Errorf("concurrent wrapper must transfer to only one agent, but found %v", targets)})
-			return iterator
-		}
-
-		if len(oneTarget) > 0 && oneTarget != targets[0] {
-			generator.Send(&AgentEvent{
-				Err: fmt.Errorf("concurrent wrapper must transfer to the same agent, but found %s and %s", oneTarget, targets[0])})
-			return iterator
-		}
-
-		oneTarget = targets[0]
-	}
-
-	if len(interruptInfos) > 0 {
-		replaceInterruptRunCtx(ctx, runCtx)
-		generator.Send(&AgentEvent{
-			AgentName: c.Name(ctx),
-			RunPath:   runCtx.RunPath,
-			Action: &AgentAction{
-				Interrupted: &InterruptInfo{
-					Data: &concurrentInterruptInfo{
-						InterruptInfos:  interruptInfos,
-						TransferTargets: transferTargets,
-					},
-				},
-			},
-		})
-		return iterator
-	}
-
-	if len(oneTarget) == 0 { // this concurrent wrapper just naturally stops
-		return iterator
-	}
-
-	aMsg, tMsg := GenTransferMessages(ctx, oneTarget)
-	aEvent := EventFromMessage(aMsg, nil, schema.Assistant, "")
-	generator.Send(aEvent)
-	tEvent := EventFromMessage(tMsg, nil, schema.Tool, tMsg.ToolName)
-	tEvent.Action = &AgentAction{
-		TransferToAgent: &TransferToAgentAction{
-			DestAgentName: oneTarget,
-		},
-	}
-	generator.Send(tEvent)
+	c.execute(ctx, executors, generator, options...)
 
 	return iterator
 }
 
-func (c *ConcurrentWrapper) Resume(ctx context.Context, info *ResumeInfo, opts ...AgentRunOption) *AsyncIterator[*AgentEvent] {
+func (c *concurrentWrapper) Resume(ctx context.Context, info *ResumeInfo, opts ...AgentRunOption) *AsyncIterator[*AgentEvent] {
 	iterator, generator := NewAsyncIteratorPair[*AgentEvent]()
 	defer generator.Close()
 
@@ -203,171 +122,223 @@ func (c *ConcurrentWrapper) Resume(ctx context.Context, info *ResumeInfo, opts .
 		return iterator
 	}
 
-	var (
-		exit, hasErr    bool
-		wg              = sync.WaitGroup{}
-		transferTargets = intInfo.TransferTargets
-		mu              = sync.Mutex{}
-		runCtx          = getRunCtx(ctx)
-		interruptInfos  map[string]*InterruptInfo
-	)
+	ctx = rewindConcurrentRunCtx(ctx) // remove this concurrentWrapper from RunPath, so that inner agents can have REAL RunPath
 
-	r := func(subRunCtx *runContext, fa *flowAgent) {
-		defer func() {
-			panicErr := recover()
-			if panicErr != nil {
-				e := safe.NewPanicErr(panicErr, debug.Stack())
-				generator.Send(&AgentEvent{Err: e})
+	c.transferTargets = intInfo.TransferTargets
+
+	executors := c.genExecutors(ctx, generator, intInfo, info.EnableStreaming, opts...)
+
+	c.execute(ctx, executors, generator, opts...)
+
+	return iterator
+}
+
+func (c *concurrentWrapper) genExecutors(ctx context.Context, generator *AsyncGenerator[*AgentEvent],
+	intInfo *concurrentInterruptInfo, enableStreaming bool, options ...AgentRunOption) (executors []func()) {
+	toRun := c.innerAgents
+	if intInfo != nil {
+		toRun = []*flowAgent{}
+		for _, a := range c.innerAgents { // only resume those agents that were interrupted
+			if intInfo.InterruptInfos[a.Name(ctx)] != nil {
+				toRun = append(toRun, a)
 			}
-
-			hasErr = true
-
-			wg.Done()
-		}()
-
-		subRunCtx.RunPath = append(subRunCtx.RunPath, ExecutionStep{
-			Single: generic.PtrOf(fa.Name(ctx)),
-		})
-		subCtx := setRunCtx(ctx, subRunCtx)
-		subResumeInfo := &ResumeInfo{
-			EnableStreaming: info.EnableStreaming,
-			InterruptInfo:   intInfo.InterruptInfos[fa.Name(ctx)],
 		}
+	}
 
-		aIter := fa.Resume(subCtx, subResumeInfo, filterOptions(fa.Name(ctx), opts)...)
+	executors = make([]func(), 0, len(toRun))
+	for _, a := range toRun {
+		fa := toFlowAgent(ctx, a, withNoExecuteTransfer())
 
-		for {
-			event, ok := aIter.Next()
-			if !ok {
-				break
+		r := func() {
+			defer func() {
+				panicErr := recover()
+				if panicErr != nil {
+					e := safe.NewPanicErr(panicErr, debug.Stack())
+					generator.Send(&AgentEvent{Err: e})
+					c.lastErr = e
+				}
+
+				c.wg.Done()
+			}()
+
+			var aIter *AsyncIterator[*AgentEvent]
+			if intInfo == nil {
+				aIter = fa.Run(ctx, nil, filterOptions(fa.Name(ctx), options)...)
+			} else {
+				subResumeInfo := &ResumeInfo{
+					EnableStreaming: enableStreaming,
+					InterruptInfo:   intInfo.InterruptInfos[fa.Name(ctx)],
+				}
+				aIter = fa.Resume(ctx, subResumeInfo, filterOptions(fa.Name(ctx), options)...)
 			}
 
-			if event.Err != nil {
-				hasErr = true
-				generator.Send(event)
-				break
-			}
+			for {
+				event, ok := aIter.Next()
+				if !ok {
+					break
+				}
 
-			if event.Action != nil {
-				if event.Action.Exit {
-					exit = true
+				if event.Err != nil {
+					c.mu.Lock()
+					c.lastErr = event.Err
+					c.mu.Unlock()
 					generator.Send(event)
 					break
 				}
 
-				if event.Action.Interrupted != nil {
-					mu.Lock()
-					if interruptInfos == nil {
-						interruptInfos = make(map[string]*InterruptInfo)
+				if event.Action != nil {
+					if event.Action.Exit {
+						c.hasExit = true
+						generator.Send(event)
+						break
 					}
-					interruptInfos[fa.Name(ctx)] = event.Action.Interrupted
-					mu.Unlock()
-					break
-				}
 
-				if event.Action.TransferToAgent != nil {
-					mu.Lock()
-					if transferTargets == nil {
-						transferTargets = make(map[string][]string)
+					if event.Action.Interrupted != nil {
+						c.mu.Lock()
+						if c.interruptInfos == nil {
+							c.interruptInfos = map[string]*InterruptInfo{}
+						}
+						c.interruptInfos[fa.Name(ctx)] = event.Action.Interrupted
+						c.mu.Unlock()
+						break
 					}
-					transferTargets[fa.Name(ctx)] = append(transferTargets[fa.Name(ctx)], event.Action.TransferToAgent.DestAgentName)
-					mu.Unlock()
+
+					if event.Action.TransferToAgent != nil {
+						c.mu.Lock()
+						if c.transferTargets == nil {
+							c.transferTargets = map[string][]string{}
+						}
+						c.transferTargets[fa.Name(ctx)] = append(c.transferTargets[fa.Name(ctx)], event.Action.TransferToAgent.DestAgentName)
+						generator.Send(event)
+						c.mu.Unlock()
+					}
+				} else {
+					generator.Send(event)
 				}
-			} else {
-				generator.Send(event)
 			}
 		}
+		executors = append(executors, r)
+	}
+	return executors
+}
+
+func (c *concurrentWrapper) execute(ctx context.Context, executors []func(),
+	generator *AsyncGenerator[*AgentEvent], options ...AgentRunOption) {
+	for i := 1; i < len(executors); i++ {
+		c.wg.Add(1)
+		go executors[i]()
 	}
 
-	var toResume []Agent
-	for _, a := range c.Agents {
-		name := a.Name(ctx)
-		if _, ok := intInfo.InterruptInfos[name]; ok {
-			toResume = append(toResume, a)
-		}
+	c.wg.Add(1)
+	executors[0]()
+
+	c.wg.Wait()
+
+	if c.lastErr != nil || c.hasExit {
+		return
 	}
 
-	for i := 1; i < len(toResume); i++ {
-		a := c.Agents[i]
-		fa := toFlowAgent(ctx, a)
-		subRunCtx := runCtx.deepCopy()
-		wg.Add(1)
-
-		go func() {
-			r(subRunCtx, fa)
-		}()
-	}
-
-	fa := toFlowAgent(ctx, toResume[0])
-	subRunCtx := runCtx.deepCopy()
-	r(subRunCtx, fa)
-
-	wg.Wait()
-
-	if hasErr || exit {
-		return iterator
-	}
-
-	var oneTarget string
-	for _, targets := range transferTargets {
-		if len(targets) > 0 {
+	var oneFrom, oneTarget string
+	for from, targets := range c.transferTargets {
+		if len(targets) > 1 {
 			generator.Send(&AgentEvent{
 				Err: fmt.Errorf("concurrent wrapper must transfer to only one agent, but found %v", targets)})
-			return iterator
+			return
 		}
 
 		if len(oneTarget) > 0 && oneTarget != targets[0] {
 			generator.Send(&AgentEvent{
 				Err: fmt.Errorf("concurrent wrapper must transfer to the same agent, but found %s and %s", oneTarget, targets[0])})
-			return iterator
+			return
 		}
 
 		oneTarget = targets[0]
+		oneFrom = from
 	}
 
-	if len(interruptInfos) > 0 {
-		concurrentCtx := runCtx.deepCopy()
-		names := make([]string, len(c.Agents))
-		for i, a := range c.Agents {
-			names[i] = a.Name(ctx)
-		}
-		concurrentCtx.RunPath = append(concurrentCtx.RunPath, ExecutionStep{
-			Concurrent: names,
-		})
-		replaceInterruptRunCtx(ctx, concurrentCtx)
+	ctx, runCtx := appendConcurrentRunCtx(ctx, c.names)
+
+	if len(c.interruptInfos) > 0 {
+		replaceInterruptRunCtx(ctx, runCtx)
 		generator.Send(&AgentEvent{
 			AgentName: c.Name(ctx),
-			RunPath:   concurrentCtx.RunPath,
+			RunPath:   runCtx.RunPath,
 			Action: &AgentAction{
 				Interrupted: &InterruptInfo{
 					Data: &concurrentInterruptInfo{
-						InterruptInfos:  interruptInfos,
-						TransferTargets: transferTargets,
+						InterruptInfos:  c.interruptInfos,
+						TransferTargets: c.transferTargets,
 					},
 				},
 			},
 		})
-		return iterator
+		return
 	}
 
-	if len(oneTarget) == 0 {
-		generator.Send(&AgentEvent{
-			Err: fmt.Errorf("concurrent wrapper must transfer to one agent if no interrupt, no exit and no error, " +
-				"but found none"),
-		})
-		return iterator
+	if len(oneTarget) == 0 { // this concurrent wrapper just naturally stops, without further transfer or direct exit/interrupt
+		return
 	}
 
-	aMsg, tMsg := GenTransferMessages(ctx, oneTarget)
-	aEvent := EventFromMessage(aMsg, nil, schema.Assistant, "")
-	generator.Send(aEvent)
-	tEvent := EventFromMessage(tMsg, nil, schema.Tool, tMsg.ToolName)
-	tEvent.Action = &AgentAction{
-		TransferToAgent: &TransferToAgentAction{
-			DestAgentName: oneTarget,
-		},
+	var fromAgent *flowAgent
+	for _, a := range c.innerAgents {
+		if a.Name(ctx) == oneFrom {
+			fromAgent = a
+			break
+		}
 	}
-	generator.Send(tEvent)
 
-	return iterator
+	if fromAgent == nil {
+		panic(fmt.Sprintf("a previous recorded transfer from %s within concurrent wrapper, but the agent not found", oneFrom))
+	}
+
+	agentToRun := fromAgent.getAgent(ctx, oneTarget)
+	if agentToRun == nil {
+		e := errors.New(fmt.Sprintf(
+			"transfer failed: agent '%s' not found when transferring from '%s'",
+			oneTarget, c.innerAgents[0].Name(ctx)))
+		generator.Send(&AgentEvent{Err: e})
+		return
+	}
+
+	subAIter := agentToRun.Run(ctx, nil /*subagents get input from runCtx*/, options...)
+	for {
+		subEvent, ok_ := subAIter.Next()
+		if !ok_ {
+			break
+		}
+
+		setAutomaticClose(subEvent)
+		generator.Send(subEvent)
+	}
+
+	return
+}
+
+func appendConcurrentRunCtx(ctx context.Context, agentNames []string) (context.Context, *runContext) {
+	runCtx := getRunCtx(ctx)
+	if runCtx != nil {
+		runCtx = runCtx.deepCopy()
+	} else {
+		panic("concurrent wrapper cannot be ROOT agent")
+	}
+
+	runCtx.RunPath = append(runCtx.RunPath, ExecutionStep{
+		AgentName:  getConcurrentAgentsName(agentNames),
+		Concurrent: agentNames,
+	})
+
+	return setRunCtx(ctx, runCtx), runCtx
+}
+
+func rewindConcurrentRunCtx(ctx context.Context) context.Context {
+	runCtx := getRunCtx(ctx)
+	if runCtx != nil {
+		runCtx = runCtx.deepCopy()
+	} else {
+		panic("concurrent wrapper cannot be ROOT agent")
+	}
+
+	runCtx.RunPath = runCtx.RunPath[:len(runCtx.RunPath)-1]
+
+	return setRunCtx(ctx, runCtx)
 }

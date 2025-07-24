@@ -18,11 +18,13 @@ package adk
 
 import (
 	"context"
+	"fmt"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"go.uber.org/mock/gomock"
 
+	"github.com/cloudwego/eino/components/model"
 	mockModel "github.com/cloudwego/eino/internal/mock/components/model"
 	"github.com/cloudwego/eino/schema"
 )
@@ -47,8 +49,7 @@ func TestTransferToAgent(t *testing.T) {
 				{
 					ID: "tool-call-1",
 					Function: schema.FunctionCall{
-						Name:      TransferToAgentToolName,
-						Arguments: `{"agent_name": "ChildAgent"}`,
+						Name: fmt.Sprintf(TransferToAgentToolName, "ChildAgent"),
 					},
 				},
 			}), nil).
@@ -157,33 +158,56 @@ func TestConcurrentFlow(t *testing.T) {
 
 	// Set up expectations for the parent model
 	// First call: parent model generates a message with TransferToAgent tool call
+	cnt := 0
 	parentModel.EXPECT().Generate(gomock.Any(), gomock.Any(), gomock.Any()).
-		Return(schema.AssistantMessage("I'll transfer this to both the child agent 1 and child agent 2",
-			[]schema.ToolCall{
-				{
-					ID: "tool-call-1",
-					Function: schema.FunctionCall{
-						Name:      TransferToAgentToolName,
-						Arguments: `{"agent_name": "ChildAgent1"}`,
-					},
-				},
-				{
-					ID: "tool-call-2",
-					Function: schema.FunctionCall{
-						Name:      TransferToAgentToolName,
-						Arguments: `{"agent_name": "ChildAgent2"}`,
-					},
-				},
-			}), nil).
-		Times(1)
+		DoAndReturn(func(ctx context.Context, input []*schema.Message, options ...model.Option) (*schema.Message, error) {
+			defer func() {
+				cnt++
+			}()
+			if cnt == 0 {
+				return schema.AssistantMessage("I'll transfer this to both the child agent 1 and child agent 2",
+					[]schema.ToolCall{
+						{
+							ID: "tool-call-1",
+							Function: schema.FunctionCall{
+								Name: fmt.Sprintf(TransferToAgentToolName, "ChildAgent1"),
+							},
+						},
+						{
+							ID: "tool-call-2",
+							Function: schema.FunctionCall{
+								Name: fmt.Sprintf(TransferToAgentToolName, "ChildAgent2"),
+							},
+						},
+					}), nil
+			}
+
+			return schema.AssistantMessage("this is the final response", nil), nil
+		}).AnyTimes()
 
 	// Set up expectations for the child model
 	// Second call: child model generates a response
 	childModel1.EXPECT().Generate(gomock.Any(), gomock.Any(), gomock.Any()).
-		Return(schema.AssistantMessage("Hello from child agent 1", nil), nil).
+		Return(schema.AssistantMessage("Hello from child agent 1",
+			[]schema.ToolCall{
+				{
+					ID: "child-tool-call-1",
+					Function: schema.FunctionCall{
+						Name: fmt.Sprintf(TransferToAgentToolName, "ParentAgent"),
+					},
+				},
+			}), nil).
 		Times(1)
 	childModel2.EXPECT().Generate(gomock.Any(), gomock.Any(), gomock.Any()).
-		Return(schema.AssistantMessage("Hello from child agent 2", nil), nil).
+		Return(schema.AssistantMessage("Hello from child agent 2",
+			[]schema.ToolCall{
+				{
+					ID: "child-tool-call-2",
+					Function: schema.FunctionCall{
+						Name: fmt.Sprintf(TransferToAgentToolName, "ParentAgent"),
+					},
+				},
+			}), nil).
 		Times(1)
 
 	// All models should implement WithTools
@@ -238,11 +262,98 @@ func TestConcurrentFlow(t *testing.T) {
 	iterator := flowAgent.Run(ctx, input)
 	assert.NotNil(t, iterator)
 
-	for {
-		event, ok := iterator.Next()
-		if !ok {
-			break
-		}
-		t.Log(event)
+	event, ok := iterator.Next()
+	assert.True(t, ok)
+	assert.Equal(t, "ParentAgent", event.AgentName)
+	assert.Equal(t, 1, len(event.RunPath))
+	assert.Equal(t, "ParentAgent", event.RunPath[0].AgentName)
+	assert.Equal(t, "I'll transfer this to both the child agent 1 and child agent 2", event.Output.MessageOutput.Message.Content)
+
+	// two concurrent transfers can happen at any order
+	transferEvent1, ok := iterator.Next()
+	assert.True(t, ok)
+	assert.Equal(t, "ParentAgent", transferEvent1.AgentName)
+	assert.Equal(t, 1, len(transferEvent1.RunPath))
+	assert.Equal(t, "ParentAgent", transferEvent1.RunPath[0].AgentName)
+
+	transferEvent2, ok := iterator.Next()
+	assert.True(t, ok)
+	assert.Equal(t, "ParentAgent", transferEvent2.AgentName)
+	assert.Equal(t, 1, len(transferEvent2.RunPath))
+	assert.Equal(t, "ParentAgent", transferEvent2.RunPath[0].AgentName)
+
+	assert.Contains(t, []string{
+		transferEvent1.Action.TransferToAgent.DestAgentName,
+		transferEvent2.Action.TransferToAgent.DestAgentName,
+	}, "ChildAgent1")
+	assert.Contains(t, []string{
+		transferEvent1.Action.TransferToAgent.DestAgentName,
+		transferEvent2.Action.TransferToAgent.DestAgentName,
+	}, "ChildAgent2")
+
+	// two concurrent contents and two concurrent transfer responses can happen at any order
+	e1, ok := iterator.Next()
+	assert.True(t, ok)
+	assert.Equal(t, 2, len(e1.RunPath))
+	assert.Equal(t, "ParentAgent", e1.RunPath[0].AgentName)
+	e2, ok := iterator.Next()
+	assert.True(t, ok)
+	assert.Equal(t, 2, len(e2.RunPath))
+	assert.Equal(t, "ParentAgent", e2.RunPath[0].AgentName)
+	e3, ok := iterator.Next()
+	assert.True(t, ok)
+	assert.Equal(t, 2, len(e3.RunPath))
+	assert.Equal(t, "ParentAgent", e3.RunPath[0].AgentName)
+	e4, ok := iterator.Next()
+	assert.True(t, ok)
+	assert.Equal(t, 2, len(e4.RunPath))
+	assert.Equal(t, "ParentAgent", e4.RunPath[0].AgentName)
+
+	var responseEvent1, responseEvent2, transferBack1, transferBack2 *AgentEvent
+	responseEvent1 = e1
+	if e2.Action == nil {
+		responseEvent2 = e2
+	} else {
+		transferBack1 = e2
 	}
+
+	if e3.Action == nil {
+		responseEvent2 = e3
+	} else {
+		if transferBack1 == nil {
+			transferBack1 = e3
+		} else {
+			transferBack2 = e3
+		}
+	}
+
+	transferBack2 = e4
+
+	assert.NotNil(t, transferBack1)
+	assert.NotNil(t, responseEvent2)
+
+	assert.Contains(t, []string{responseEvent1.AgentName, responseEvent2.AgentName}, "ChildAgent1")
+	assert.Contains(t, []string{responseEvent1.AgentName, responseEvent2.AgentName}, "ChildAgent2")
+
+	assert.Contains(t, []string{responseEvent1.RunPath[1].AgentName, responseEvent2.RunPath[1].AgentName}, "ChildAgent1")
+	assert.Contains(t, []string{responseEvent1.RunPath[1].AgentName, responseEvent2.RunPath[1].AgentName}, "ChildAgent2")
+
+	assert.Contains(t, []string{responseEvent1.Output.MessageOutput.Message.Content,
+		responseEvent2.Output.MessageOutput.Message.Content}, "Hello from child agent 1")
+	assert.Contains(t, []string{responseEvent1.Output.MessageOutput.Message.Content,
+		responseEvent2.Output.MessageOutput.Message.Content}, "Hello from child agent 2")
+
+	assert.Equal(t, "ParentAgent", transferBack1.Action.TransferToAgent.DestAgentName)
+	assert.Equal(t, "ParentAgent", transferBack2.Action.TransferToAgent.DestAgentName)
+
+	event, ok = iterator.Next()
+	assert.True(t, ok)
+	assert.Equal(t, "ParentAgent", event.AgentName)
+	assert.Equal(t, 3, len(event.RunPath))
+	assert.Equal(t, "ParentAgent", event.RunPath[0].AgentName)
+	assert.Equal(t, getConcurrentAgentsName([]string{"ChildAgent1", "ChildAgent2"}), event.RunPath[1].AgentName)
+	assert.Equal(t, "ParentAgent", event.RunPath[2].AgentName)
+
+	event, ok = iterator.Next()
+	assert.False(t, ok)
 }

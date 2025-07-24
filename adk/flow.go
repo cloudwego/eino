@@ -45,6 +45,8 @@ type flowAgent struct {
 	historyRewriter          HistoryRewriter
 
 	checkPointStore compose.CheckPointStore
+
+	noExecuteTransfer bool // if true, only emits transfer event, will not execute transfer
 }
 
 func (a *flowAgent) deepCopy() *flowAgent {
@@ -78,6 +80,12 @@ func WithDisallowTransferToParent() AgentOption {
 func WithHistoryRewriter(h HistoryRewriter) AgentOption {
 	return func(fa *flowAgent) {
 		fa.historyRewriter = h
+	}
+}
+
+func withNoExecuteTransfer() AgentOption {
+	return func(fa *flowAgent) {
+		fa.noExecuteTransfer = true
 	}
 }
 
@@ -160,7 +168,7 @@ func (a *flowAgent) getAgent(ctx context.Context, name string) *flowAgent {
 	return nil
 }
 
-// belongToRunPath tests whether eventRunPath is a sub-run-path of runPath.
+// belongToRunPath tests whether eventRunPath is a 'prefix' of runPath.
 func belongToRunPath(eventRunPath []ExecutionStep, runPath []ExecutionStep) bool {
 	if len(runPath) < len(eventRunPath) {
 		return false
@@ -168,39 +176,21 @@ func belongToRunPath(eventRunPath []ExecutionStep, runPath []ExecutionStep) bool
 
 	for i, eventStep := range eventRunPath {
 		runStep := runPath[i]
-		if eventStep.Single != nil {
-			if runStep.Single != nil {
-				if *runStep.Single != *eventStep.Single {
-					return false
-				}
-			} else {
-				var hit bool
-				for _, concurrent := range runStep.Concurrent {
-					if concurrent == *eventStep.Single {
-						hit = true
-						break
-					}
-				}
-				if !hit {
-					return false
+		if eventStep.AgentName != runStep.AgentName {
+			if len(runStep.Concurrent) == 0 {
+				return false
+			}
+
+			var partOfConcurrent bool
+			for _, concurrent := range runStep.Concurrent {
+				if concurrent == eventStep.AgentName {
+					partOfConcurrent = true
+					break
 				}
 			}
-		} else {
-			if runStep.Single != nil {
+
+			if !partOfConcurrent {
 				return false
-			} else {
-				for _, es := range eventStep.Concurrent {
-					var hit bool
-					for _, concurrent := range runStep.Concurrent {
-						if concurrent == es {
-							hit = true
-							break
-						}
-					}
-					if !hit {
-						return false
-					}
-				}
 			}
 		}
 	}
@@ -218,8 +208,10 @@ func rewriteMessage(msg Message, agentName string) Message {
 		if len(msg.ToolCalls) > 0 {
 			for i := range msg.ToolCalls {
 				f := msg.ToolCalls[i].Function
-				sb.WriteString(fmt.Sprintf(" [%s] called tool: `%s` with arguments: %s.",
-					agentName, f.Name, f.Arguments))
+				sb.WriteString(fmt.Sprintf(" [%s] called tool: `%s`", agentName, f.Name))
+				if f.Arguments != "" {
+					sb.WriteString(fmt.Sprintf(" with arguments: %s", f.Arguments))
+				}
 			}
 		}
 	} else if msg.Role == schema.Tool && msg.Content != "" {
@@ -337,22 +329,21 @@ func (a *flowAgent) Run(ctx context.Context, input *AgentInput, opts ...AgentRun
 
 func (a *flowAgent) Resume(ctx context.Context, info *ResumeInfo, opts ...AgentRunOption) *AsyncIterator[*AgentEvent] {
 	runCtx := getRunCtx(ctx)
-	agentName := a.Name(ctx)
-	targetName := agentName
-	if len(runCtx.RunPath) > 0 {
-		lastStep := runCtx.RunPath[len(runCtx.RunPath)-1]
-		if lastStep.Single == nil && len(lastStep.Concurrent) > 0 { // interrupt happened at ConcurrentWrapper
-			lastStep = runCtx.RunPath[len(runCtx.RunPath)-2] // go back to last single step
-		}
-		targetName = *lastStep.Single
+	if len(runCtx.RunPath) == 0 {
+		iterator, generator := NewAsyncIteratorPair[*AgentEvent]()
+		generator.Send(&AgentEvent{Err: errors.New("resume flowAgent, but RunPath empty")})
+		generator.Close()
+		return iterator
 	}
 
-	if agentName != targetName {
+	targetStep := runCtx.RunPath[len(runCtx.RunPath)-1]
+	agentName := a.Name(ctx)
+	if agentName != targetStep.AgentName {
 		// go to target flow agent
-		targetAgent := recursiveGetAgent(ctx, a, targetName)
-		if targetAgent == nil {
+		targetAgent, err := getResumeTargetAgent(ctx, a, targetStep, runCtx.RunPath)
+		if err != nil {
 			iterator, generator := NewAsyncIteratorPair[*AgentEvent]()
-			generator.Send(&AgentEvent{Err: fmt.Errorf("failed to resume agent: cannot find agent: %s", agentName)})
+			generator.Send(&AgentEvent{Err: err})
 			generator.Close()
 			return iterator
 		}
@@ -456,6 +447,10 @@ func (a *flowAgent) run(
 		return
 	}
 
+	if a.noExecuteTransfer {
+		return
+	}
+
 	// handle transferring to another agent
 	if len(destNames) == 1 {
 		destName := destNames[0]
@@ -495,9 +490,7 @@ func (a *flowAgent) run(
 		subAgents[i] = subA
 	}
 
-	cw := &ConcurrentWrapper{
-		Agents: subAgents,
-	}
+	cw := NewConcurrentWrapper(ctx, subAgents)
 
 	cwIter := cw.Run(ctx, nil, opts...)
 	for {
@@ -511,22 +504,84 @@ func (a *flowAgent) run(
 	}
 }
 
-func recursiveGetAgent(ctx context.Context, agent *flowAgent, agentName string) *flowAgent {
-	if agent == nil {
-		return nil
+func getResumeTargetAgent(ctx context.Context, current *flowAgent, target ExecutionStep, runPath []ExecutionStep) (
+	ResumableAgent, error) {
+	name := current.Name(ctx)
+
+	if name == target.AgentName {
+		return current, nil
 	}
-	if agent.Name(ctx) == agentName {
-		return agent
+
+	if len(runPath) == 0 {
+		return nil, fmt.Errorf("can't find resume target agent [%s] along RunPath", target.AgentName)
 	}
-	a := agent.getAgent(ctx, agentName)
-	if a != nil {
-		return a
+
+	first := runPath[0]
+	if len(first.Concurrent) == 0 {
+		if name == first.AgentName { // this can only happen if current is ROOT. Kick start the search process.
+			return getResumeTargetAgent(ctx, current, target, runPath[1:])
+		}
+
+		for _, sa := range current.subAgents {
+			subName := sa.Name(ctx)
+			if subName == first.AgentName {
+				return getResumeTargetAgent(ctx, sa, target, runPath[1:])
+			}
+		}
+
+		if current.parentAgent != nil {
+			pName := current.parentAgent.Name(ctx)
+			if pName == first.AgentName {
+				return getResumeTargetAgent(ctx, current.parentAgent, target, runPath[1:])
+			}
+		}
+
+		return nil, fmt.Errorf("can't find transfer target agent %s from %s", first.AgentName, name)
 	}
-	for _, sa := range agent.subAgents {
-		a = recursiveGetAgent(ctx, sa, agentName)
-		if a != nil {
-			return a
+
+	if len(runPath) == 1 {
+		// reached last step, attempt to assemble the concurrentWrapper
+		cAgents := make([]Agent, 0, len(first.Concurrent))
+	loop:
+		for _, subN := range first.Concurrent {
+			for _, sa := range current.subAgents {
+				if sa.Name(ctx) == subN {
+					cAgents = append(cAgents, sa)
+					continue loop
+				}
+			}
+
+			if current.parentAgent != nil {
+				pName := current.parentAgent.Name(ctx)
+				if pName == subN {
+					cAgents = append(cAgents, current.parentAgent)
+					continue loop
+				}
+			}
+
+			return nil, fmt.Errorf("can't find agent [%s] within concurrent wrapper [%v], from %s",
+				subN, first.Concurrent, name)
+		}
+
+		cw := NewConcurrentWrapper(ctx, cAgents)
+		return cw, nil
+	}
+
+	// intermediate concurrent step, pick any one of the concurrent agent, should all be able to reach target
+	one := first.Concurrent[0]
+	for _, sa := range current.subAgents {
+		subName := sa.Name(ctx)
+		if subName == one {
+			return getResumeTargetAgent(ctx, sa, target, runPath[1:])
 		}
 	}
-	return nil
+
+	if current.parentAgent != nil {
+		pName := current.parentAgent.Name(ctx)
+		if pName == one {
+			return getResumeTargetAgent(ctx, current.parentAgent, target, runPath[1:])
+		}
+	}
+
+	return nil, fmt.Errorf("can't find transfer target agent %s from %s", one, name)
 }

@@ -145,8 +145,9 @@ type AgentAction struct {
 	CustomizedAction any
 }
 
+// ExecutionStep represents one step in the execution path of the multi-agent system.
 type ExecutionStep struct {
-	Single     *string
+	AgentName  string // the name of the agent that executes this step. ALL agents should have unique name. Even the concurrentWrapper
 	Concurrent []string
 }
 

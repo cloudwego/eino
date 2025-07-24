@@ -174,21 +174,12 @@ func (rc *runContext) isRoot() bool {
 func (rc *runContext) deepCopy() *runContext {
 	copied := &runContext{
 		RootInput: rc.RootInput,
-		RunPath:   make([]ExecutionStep, len(rc.RunPath)),
 		Session:   rc.Session,
 	}
 
-	for i, es := range rc.RunPath {
-		copied.RunPath[i] = ExecutionStep{
-			Single: es.Single,
-		}
-
-		if len(es.Concurrent) > 0 {
-			copiedConcurrent := make([]string, len(es.Concurrent))
-			copy(copiedConcurrent, es.Concurrent)
-			copied.RunPath[i].Concurrent = copiedConcurrent
-		}
-	}
+	runPath := make([]ExecutionStep, len(rc.RunPath))
+	copy(runPath, rc.RunPath)
+	copied.RunPath = runPath
 
 	return copied
 }
@@ -215,23 +206,9 @@ func initRunCtx(ctx context.Context, agentName string, input *AgentInput) (conte
 		runCtx = &runContext{Session: newRunSession()}
 	}
 
-	runCtx.RunPath = append(runCtx.RunPath, ExecutionStep{Single: &agentName})
-	if runCtx.isRoot() {
-		runCtx.RootInput = input
-	}
+	concurrent, _ := trySplitConcurrentAgentsName(agentName)
 
-	return setRunCtx(ctx, runCtx), runCtx
-}
-
-func initConcurrentRunCtx(ctx context.Context, agentNames []string, input *AgentInput) (context.Context, *runContext) {
-	runCtx := getRunCtx(ctx)
-	if runCtx != nil {
-		runCtx = runCtx.deepCopy()
-	} else {
-		runCtx = &runContext{Session: newRunSession()}
-	}
-
-	runCtx.RunPath = append(runCtx.RunPath, ExecutionStep{Concurrent: agentNames})
+	runCtx.RunPath = append(runCtx.RunPath, ExecutionStep{AgentName: agentName, Concurrent: concurrent})
 	if runCtx.isRoot() {
 		runCtx.RootInput = input
 	}
