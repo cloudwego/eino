@@ -287,7 +287,9 @@ func TestNewStreamCopy(t *testing.T) {
 		wgEven := sync.WaitGroup{}
 		wgEven.Add(m / 2)
 
-		copies := s.asReader().Copy(m)
+		sr := s.asReader()
+		sr.SetAutomaticClose()
+		copies := sr.Copy(m)
 		for i := 0; i < m; i++ {
 			idx := i
 			go func() {
@@ -341,8 +343,9 @@ func TestNewStreamCopy(t *testing.T) {
 		copies := s.asReader().Copy(m)
 		for i := 0; i < m; i++ {
 			idx := i
+			cp := copies[idx]
+			cp.SetAutomaticClose()
 			go func() {
-				cp := copies[idx]
 				l := 0
 				defer func() {
 					wg.Done()
@@ -477,12 +480,11 @@ func TestStreamReaderWithConvert(t *testing.T) {
 	}
 
 	sta := StreamReaderWithConvert[int, int](s.asReader(), convA)
+	sta.SetAutomaticClose()
 
 	s.send(1, nil)
 	s.send(2, nil)
 	s.closeSend()
-
-	defer sta.Close()
 
 	for {
 		item, err := sta.Recv()
@@ -518,6 +520,7 @@ func TestArrayStreamCombined(t *testing.T) {
 	s.closeSend()
 
 	nSR := MergeStreamReaders([]*StreamReader[int]{asr, s.asReader()})
+	nSR.SetAutomaticClose()
 
 	record := make([]bool, 6)
 	for i := 0; i < 6; i++ {
@@ -588,7 +591,7 @@ func TestMergeNamedStreamReaders(t *testing.T) {
 			"stream2": sr2,
 		}
 		mergedSR := MergeNamedStreamReaders(namedStreams)
-		defer mergedSR.Close()
+		mergedSR.SetAutomaticClose()
 
 		// Send data to the first stream and close it immediately
 		go func() {
@@ -688,7 +691,7 @@ func TestMergeNamedStreamReaders(t *testing.T) {
 			"data":  sr2,
 		}
 		mergedSR := MergeNamedStreamReaders(namedStreams)
-		defer mergedSR.Close()
+		mergedSR.SetAutomaticClose()
 
 		// Send data to the second stream
 		go func() {
@@ -750,7 +753,7 @@ func TestMergeNamedStreamReaders(t *testing.T) {
 			"stream3": sr3,
 		}
 		mergedSR := MergeNamedStreamReaders(namedStreams)
-		defer mergedSR.Close()
+		mergedSR.SetAutomaticClose()
 
 		// Send data and close streams in sequence
 		go func() {

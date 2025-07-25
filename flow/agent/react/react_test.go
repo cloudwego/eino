@@ -93,7 +93,7 @@ func TestReact(t *testing.T) {
 	out, err := a.Generate(ctx, []*schema.Message{
 		{
 			Role:    schema.User,
-			Content: "使用 greet tool 持续打招呼，直到得到一个 bye 的回复，打招呼名字按照以下顺序: max、bob、alice、john、marry、joe、ken、lily, 请直接开始!请直接开始!请直接开始!",
+			Content: "Use greet tool to continuously say hello until you get a bye response, greet names in the following order: max, bob, alice, john, marry, joe, ken, lily, please start directly! please start directly! please start directly!",
 		},
 	}, agent.WithComposeOptions(compose.WithCallbacks(callbackForTest)))
 	assert.Nil(t, err)
@@ -121,7 +121,7 @@ func TestReact(t *testing.T) {
 	out, err = a.Generate(ctx, []*schema.Message{
 		{
 			Role:    schema.User,
-			Content: "使用 greet tool 持续打招呼，直到得到一个 bye 的回复，打招呼名字按照以下顺序: max、bob、alice、john、marry、joe、ken、lily, 请直接开始!请直接开始!请直接开始!",
+			Content: "Use greet tool to continuously say hello until you get a bye response, greet names in the following order: max, bob, alice, john, marry, joe, ken, lily, please start directly! please start directly! please start directly!",
 		},
 	}, agent.WithComposeOptions(compose.WithCallbacks(callbackForTest)))
 	assert.Nil(t, err)
@@ -222,7 +222,7 @@ func TestReactStream(t *testing.T) {
 	out, err := a.Stream(ctx, []*schema.Message{
 		{
 			Role:    schema.User,
-			Content: "使用 greet tool 持续打招呼，直到得到一个 bye 的回复，打招呼名字按照以下顺序: max、bob、alice、john、marry、joe、ken、lily, 请直接开始!请直接开始!请直接开始!",
+			Content: "Use greet tool to continuously say hello until you get a bye response, greet names in the following order: max, bob, alice, john, marry, joe, ken, lily, please start directly! please start directly! please start directly!",
 		},
 	}, agent.WithComposeOptions(compose.WithCallbacks(callbackForTest)))
 	if err != nil {
@@ -273,7 +273,7 @@ func TestReactStream(t *testing.T) {
 	out, err = a.Stream(ctx, []*schema.Message{
 		{
 			Role:    schema.User,
-			Content: "使用 greet tool 持续打招呼，直到得到一个 bye 的回复，打招呼名字按照以下顺序: max、bob、alice、john、marry、joe、ken、lily, 请直接开始!请直接开始!请直接开始!",
+			Content: "Use greet tool to continuously say hello until you get a bye response, greet names in the following order: max, bob, alice, john, marry, joe, ken, lily, please start directly! please start directly! please start directly!",
 		},
 	}, agent.WithComposeOptions(compose.WithCallbacks(callbackForTest)))
 	if err != nil {
@@ -309,7 +309,7 @@ func TestReactStream(t *testing.T) {
 	out, err = a.Stream(ctx, []*schema.Message{
 		{
 			Role:    schema.User,
-			Content: "使用 greet tool 持续打招呼，直到得到一个 bye 的回复，打招呼名字按照以下顺序: max、bob、alice、john、marry、joe、ken、lily, 请直接开始!请直接开始!请直接开始!",
+			Content: "Use greet tool to continuously say hello until you get a bye response, greet names in the following order: max, bob, alice, john, marry, joe, ken, lily, please start directly! please start directly! please start directly!",
 		},
 	}, agent.WithComposeOptions(compose.WithCallbacks(callbackForTest)))
 	assert.NoError(t, err)
