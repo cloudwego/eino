@@ -268,7 +268,7 @@ func TestWorkflowInterrupt(t *testing.T) {
 	expectedEvents := []*AgentEvent{
 		{
 			AgentName: "sa1",
-			RunPath:   []string{"loop", "sa1"},
+			RunPath:   buildSimpleRunPath("loop", "sa1"),
 			Action: &AgentAction{
 				Interrupted: &InterruptInfo{
 					Data: &workflowInterruptInfo{
@@ -286,7 +286,7 @@ func TestWorkflowInterrupt(t *testing.T) {
 		},
 		{
 			AgentName: "sa2",
-			RunPath:   []string{"loop", "sa2"},
+			RunPath:   buildSimpleRunPath("loop", "sa1", "sa2"),
 			Action: &AgentAction{
 				Interrupted: &InterruptInfo{
 					Data: &workflowInterruptInfo{
@@ -304,7 +304,7 @@ func TestWorkflowInterrupt(t *testing.T) {
 		},
 		{
 			AgentName: "sa3",
-			RunPath:   []string{"loop", "sa3"},
+			RunPath:   buildSimpleRunPath("loop", "sa1", "sa2", "sa3"),
 			Output: &AgentOutput{
 				MessageOutput: &MessageVariant{
 					Message: schema.UserMessage("sa3 completed"),
@@ -313,7 +313,7 @@ func TestWorkflowInterrupt(t *testing.T) {
 		},
 		{
 			AgentName: "sa4",
-			RunPath:   []string{"loop", "sa4"},
+			RunPath:   buildSimpleRunPath("loop", "sa1", "sa2", "sa3", "sa4"),
 			Output: &AgentOutput{
 				MessageOutput: &MessageVariant{
 					Message: schema.UserMessage("sa4 completed"),
@@ -322,7 +322,7 @@ func TestWorkflowInterrupt(t *testing.T) {
 		},
 		{
 			AgentName: "sa1",
-			RunPath:   []string{"loop", "sa1"},
+			RunPath:   buildSimpleRunPath("loop", "sa1", "sa2", "sa3", "sa4", "sa1"),
 			Action: &AgentAction{
 				Interrupted: &InterruptInfo{
 					Data: &workflowInterruptInfo{
@@ -340,7 +340,7 @@ func TestWorkflowInterrupt(t *testing.T) {
 		},
 		{
 			AgentName: "sa2",
-			RunPath:   []string{"loop", "sa2"},
+			RunPath:   buildSimpleRunPath("loop", "sa1", "sa2", "sa3", "sa4", "sa1", "sa2"),
 			Action: &AgentAction{
 				Interrupted: &InterruptInfo{
 					Data: &workflowInterruptInfo{
@@ -358,7 +358,7 @@ func TestWorkflowInterrupt(t *testing.T) {
 		},
 		{
 			AgentName: "sa3",
-			RunPath:   []string{"loop", "sa3"},
+			RunPath:   buildSimpleRunPath("loop", "sa1", "sa2", "sa3", "sa4", "sa1", "sa2", "sa3"),
 			Output: &AgentOutput{
 				MessageOutput: &MessageVariant{
 					Message: schema.UserMessage("sa3 completed"),
@@ -367,7 +367,7 @@ func TestWorkflowInterrupt(t *testing.T) {
 		},
 		{
 			AgentName: "sa4",
-			RunPath:   []string{"loop", "sa4"},
+			RunPath:   buildSimpleRunPath("loop", "sa1", "sa2", "sa3", "sa4", "sa1", "sa2", "sa3", "sa4"),
 			Output: &AgentOutput{
 				MessageOutput: &MessageVariant{
 					Message: schema.UserMessage("sa4 completed"),

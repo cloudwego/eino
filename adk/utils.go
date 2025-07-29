@@ -19,6 +19,7 @@ package adk
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"strings"
 
@@ -71,9 +72,12 @@ func concatInstructions(instructions ...string) string {
 }
 
 func GenTransferMessages(_ context.Context, destAgentName string) (Message, Message) {
-	tooCall := schema.ToolCall{Function: schema.FunctionCall{Name: TransferToAgentToolName, Arguments: destAgentName}}
+	toolName := fmt.Sprintf(TransferToAgentToolName, destAgentName)
+	tooCall := schema.ToolCall{Function: schema.FunctionCall{
+		Name: toolName,
+	}}
 	assistantMessage := schema.AssistantMessage("", []schema.ToolCall{tooCall})
-	toolMessage := schema.ToolMessage(transferToAgentToolOutput(destAgentName), "", schema.WithToolName(TransferToAgentToolName))
+	toolMessage := schema.ToolMessage(transferToAgentToolOutput(destAgentName), "", schema.WithToolName(toolName))
 	return assistantMessage, toolMessage
 }
 
@@ -152,7 +156,7 @@ func getMessageFromWrappedEvent(e *agentEventWrapper) (Message, error) {
 // the Message itself or Chunks of the MessageStream, as they are not copied.
 // NOTE: if you have CustomizedOutput or CustomizedAction, they are NOT copied.
 func copyAgentEvent(ae *AgentEvent) *AgentEvent {
-	rp := make([]string, len(ae.RunPath))
+	rp := make([]ExecutionStep, len(ae.RunPath))
 	copy(rp, ae.RunPath)
 
 	copied := &AgentEvent{
@@ -189,4 +193,25 @@ func copyAgentEvent(ae *AgentEvent) *AgentEvent {
 	}
 
 	return copied
+}
+
+func JoinRunPath(runPath []ExecutionStep) string {
+	var sb strings.Builder
+	for _, es := range runPath {
+		if sb.Len() > 0 {
+			sb.WriteString("->")
+		}
+		sb.WriteString(es.AgentName)
+	}
+	return sb.String()
+}
+
+func buildSimpleRunPath(runPath ...string) []ExecutionStep {
+	simpleRunPath := make([]ExecutionStep, 0, len(runPath))
+	for _, an := range runPath {
+		simpleRunPath = append(simpleRunPath, ExecutionStep{
+			AgentName: an,
+		})
+	}
+	return simpleRunPath
 }
