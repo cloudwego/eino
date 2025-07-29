@@ -553,7 +553,12 @@ func newStreamReaderWithConvert[T any](origin iStreamReader, convert func(any) (
 //	fmt.Println(s) // Output: val_1
 func StreamReaderWithConvert[T, D any](sr *StreamReader[T], convert func(T) (D, error)) *StreamReader[D] {
 	c := func(a any) (D, error) {
-		return convert(a.(T)) // nolint: byted_interface_check_golintx
+		v, ok := a.(T)
+		if !ok {
+			var d D
+			return d, fmt.Errorf("failed to convert type %T to %T", a, d)
+		}
+		return convert(v)
 	}
 
 	return newStreamReaderWithConvert(sr, c)
