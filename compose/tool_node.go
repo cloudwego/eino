@@ -59,10 +59,14 @@ func withExecutedTools(executedTools map[string]string) ToolsNodeOption {
 	}
 }
 
-// ToolsNode a node that can run tools in a graph. the interface in Graph Node as below:
+// ToolsNode represents a node capable of executing tools within a graph.
+// The Graph Node interface is defined as follows:
 //
 //	Invoke(ctx context.Context, input *schema.Message, opts ...ToolsNodeOption) ([]*schema.Message, error)
 //	Stream(ctx context.Context, input *schema.Message, opts ...ToolsNodeOption) (*schema.StreamReader[[]*schema.Message], error)
+//
+// Input: An AssistantMessage containing ToolCalls
+// Output: An array of ToolMessage where the order of elements corresponds to the order of ToolCalls in the input
 type ToolsNode struct {
 	tuple                *toolsTuple
 	unknownToolHandler   func(ctx context.Context, name, input string) (string, error)
@@ -204,7 +208,9 @@ type toolCallTask struct {
 	err      error
 }
 
-func (tn *ToolsNode) genToolCallTasks(ctx context.Context, tuple *toolsTuple, input *schema.Message, executedTools map[string]string, isStream bool) ([]toolCallTask, error) {
+func (tn *ToolsNode) genToolCallTasks(ctx context.Context, tuple *toolsTuple,
+	input *schema.Message, executedTools map[string]string, isStream bool) ([]toolCallTask, error) {
+
 	if input.Role != schema.Assistant {
 		return nil, fmt.Errorf("expected message role is Assistant, got %s", input.Role)
 	}
@@ -303,8 +309,11 @@ func runToolCallTaskByStream(ctx context.Context, task *toolCallTask, opts ...to
 	}
 }
 
-func sequentialRunToolCall(ctx context.Context, run func(ctx2 context.Context, callTask *toolCallTask, opts ...tool.Option), tasks []toolCallTask, opts ...tool.Option) {
-	for i := 0; i < len(tasks); i++ {
+func sequentialRunToolCall(ctx context.Context,
+	run func(ctx2 context.Context, callTask *toolCallTask, opts ...tool.Option),
+	tasks []toolCallTask, opts ...tool.Option) {
+
+	for i := range tasks {
 		if tasks[i].executed {
 			continue
 		}
@@ -313,7 +322,8 @@ func sequentialRunToolCall(ctx context.Context, run func(ctx2 context.Context, c
 }
 
 func parallelRunToolCall(ctx context.Context,
-	run func(ctx2 context.Context, callTask *toolCallTask, opts ...tool.Option), tasks []toolCallTask, opts ...tool.Option) {
+	run func(ctx2 context.Context, callTask *toolCallTask, opts ...tool.Option),
+	tasks []toolCallTask, opts ...tool.Option) {
 
 	if len(tasks) == 1 {
 		run(ctx, &tasks[0], opts...)
@@ -370,6 +380,7 @@ func (tn *ToolsNode) Invoke(ctx context.Context, input *schema.Message,
 
 	n := len(tasks)
 	output := make([]*schema.Message, n)
+
 	rerunExtra := &ToolsInterruptAndRerunExtra{
 		ToolCalls:     input.ToolCalls,
 		ExecutedTools: make(map[string]string),
@@ -454,9 +465,9 @@ func (tn *ToolsNode) Stream(ctx context.Context, input *schema.Message,
 		// concat and save tool output
 		for _, t := range tasks {
 			if t.executed {
-				o, err := concatStreamReader(t.sOutput)
-				if err != nil {
-					return nil, fmt.Errorf("failed to concat tool[name:%s id:%s]'s stream output: %w", t.name, t.callID, err)
+				o, err_ := concatStreamReader(t.sOutput)
+				if err_ != nil {
+					return nil, fmt.Errorf("failed to concat tool[name:%s id:%s]'s stream output: %w", t.name, t.callID, err_)
 				}
 				rerunExtra.ExecutedTools[t.callID] = o
 			}
@@ -470,14 +481,14 @@ func (tn *ToolsNode) Stream(ctx context.Context, input *schema.Message,
 		index := i
 		callID := tasks[i].callID
 		callName := tasks[i].name
-		convert := func(s string) ([]*schema.Message, error) {
+		cvt := func(s string) ([]*schema.Message, error) {
 			ret := make([]*schema.Message, n)
 			ret[index] = schema.ToolMessage(s, callID, schema.WithToolName(callName))
 
 			return ret, nil
 		}
 
-		sOutput[i] = schema.StreamReaderWithConvert(tasks[i].sOutput, convert)
+		sOutput[i] = schema.StreamReaderWithConvert(tasks[i].sOutput, cvt)
 	}
 	return schema.MergeStreamReaders(sOutput), nil
 }
