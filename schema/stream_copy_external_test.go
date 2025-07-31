@@ -25,6 +25,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/assert"
 )
 
 func TestStream1(t *testing.T) {
@@ -48,6 +50,7 @@ func TestStream1(t *testing.T) {
 	wg := sync.WaitGroup{}
 	wg.Add(2)
 	go func() {
+		i := 0
 		s := copied[0]
 		for {
 			n, e := s.Recv()
@@ -62,11 +65,13 @@ func TestStream1(t *testing.T) {
 			if interval >= 6 {
 				atomic.AddInt32(&count, 1)
 			}
-			t.Logf("reader= 0, index= %d, interval= %v", n, interval)
+			assert.Equal(t, i, n)
+			i++
 		}
 		wg.Done()
 	}()
 	go func() {
+		i := 0
 		s := copied[1]
 		for {
 			n, e := s.Recv()
@@ -81,7 +86,8 @@ func TestStream1(t *testing.T) {
 			if interval >= 6 {
 				atomic.AddInt32(&count, 1)
 			}
-			t.Logf("reader= 1, index= %d, interval= %v", n, interval)
+			assert.Equal(t, i, n)
+			i++
 		}
 		wg.Done()
 	}()

@@ -64,7 +64,6 @@ func TestConcatRegistry(t *testing.T) {
 		for i := 0; i < 10; i++ {
 			sw.Send(tStreamConcatItemForTest{s: strconv.Itoa(i)}, nil)
 		}
-		t.Log("send finish")
 		sw.Close()
 	}()
 
@@ -82,7 +81,6 @@ func TestStringConcat(t *testing.T) {
 		}
 
 		sw.Close()
-		t.Log("send finish")
 	}()
 
 	lastVal, err := concatStreamReader(sr)
@@ -105,7 +103,6 @@ func TestMessageConcat(t *testing.T) {
 			sw.Send(content, nil)
 		}
 		sw.Close()
-		t.Log("send finish")
 	}()
 
 	lastVal, err := concatStreamReader(sr)
@@ -137,7 +134,6 @@ func TestMapConcat(t *testing.T) {
 				}, nil)
 			}
 			sw.Close()
-			t.Log("send finish")
 		}()
 
 		lastVal, err := concatStreamReader(sr)
@@ -169,7 +165,6 @@ func TestMapConcat(t *testing.T) {
 				}, nil)
 			}
 			sw.Close()
-			t.Log("send finish")
 		}()
 
 		lastVal, err := concatStreamReader(sr)
