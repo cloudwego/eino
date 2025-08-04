@@ -23,12 +23,19 @@ import (
 
 // TokenUsage is the token usage for the model.
 type TokenUsage struct {
-	// PromptTokens is the number of prompt tokens.
+	// PromptTokens is the number of prompt tokens, including all the input tokens of this request.
 	PromptTokens int
+	// PromptTokenDetails is a breakdown of the prompt tokens.
+	PromptTokenDetails PromptTokenDetails
 	// CompletionTokens is the number of completion tokens.
 	CompletionTokens int
 	// TotalTokens is the total number of tokens.
 	TotalTokens int
+}
+
+type PromptTokenDetails struct {
+	// Cached tokens present in the prompt.
+	CachedTokens int
 }
 
 // Config is the config for the model.
