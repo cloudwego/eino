@@ -357,17 +357,15 @@ func (a *flowAgent) run(
 		generator.Close()
 	}()
 
-	var lastEvent *AgentEvent
-	var hasEvent bool
+	var lastActionEvent *AgentEvent
 	for {
 		event, ok := aIter.Next()
 		if !ok {
 			break
 		}
-		if hasEvent {
-			generator.Send(lastEvent)
+		if lastActionEvent != nil {
+			generator.Send(lastActionEvent)
 		}
-		hasEvent = true
 
 		event.AgentName = a.Name(ctx)
 		event.RunPath = runCtx.RunPath
@@ -377,28 +375,35 @@ func (a *flowAgent) run(
 		setAutomaticClose(copied)
 		setAutomaticClose(event)
 		runCtx.Session.addEvent(copied)
-		lastEvent = event
+		if event.Action == nil {
+			// if events don't have action, send it directly
+			// events with action will be sent if:
+			// 1. it isn't the last event
+			// 2. it's the last event, and have read info from it
+			generator.Send(event)
+		} else {
+			lastActionEvent = event
+		}
 	}
 
 	var destName string
-	if lastEvent != nil && lastEvent.Action != nil {
-		action := lastEvent.Action
+	if lastActionEvent != nil {
+		action := lastActionEvent.Action
 		if action.Interrupted != nil {
 			appendInterruptRunCtx(ctx, runCtx)
-			generator.Send(lastEvent)
+			generator.Send(lastActionEvent)
 			return
 		}
 		if action.Exit {
-			generator.Send(lastEvent)
+			generator.Send(lastActionEvent)
 			return
 		}
 
 		if action.TransferToAgent != nil {
 			destName = action.TransferToAgent.DestAgentName
 		}
-	}
-	if hasEvent {
-		generator.Send(lastEvent)
+
+		generator.Send(lastActionEvent)
 	}
 
 	// handle transferring to another agent
