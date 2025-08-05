@@ -120,6 +120,7 @@ func (r *Runner) handleIter(ctx context.Context, aIter *AsyncIterator[*AgentEven
 
 		gen.Close()
 	}()
+	var interruptedInfo *InterruptInfo
 	for {
 		event, ok := aIter.Next()
 		if !ok {
@@ -127,22 +128,16 @@ func (r *Runner) handleIter(ctx context.Context, aIter *AsyncIterator[*AgentEven
 		}
 
 		if event.Action != nil && event.Action.Interrupted != nil {
-			info := event.Action.Interrupted
-			if ti, ok := info.Data.(*tempInterruptInfo); ok {
-				// from ChatModelAgent, tempInfo.data for saving and tempInfo.info for user
-				event.Action.Interrupted = &InterruptInfo{
-					Data: ti.info,
-				}
-				info.Data = ti.data
-			}
-			if checkPointID != nil {
-				err := saveCheckPoint(ctx, r.store, *checkPointID, getInterruptRunCtx(ctx), info)
-				if err != nil {
-					gen.Send(&AgentEvent{Err: fmt.Errorf("failed to save checkpoint: %w", err)})
-				}
-			}
+			interruptedInfo = event.Action.Interrupted
 		}
 
 		gen.Send(event)
+	}
+
+	if interruptedInfo != nil && checkPointID != nil {
+		err := saveCheckPoint(ctx, r.store, *checkPointID, getInterruptRunCtx(ctx), interruptedInfo)
+		if err != nil {
+			gen.Send(&AgentEvent{Err: fmt.Errorf("failed to save checkpoint: %w", err)})
+		}
 	}
 }
