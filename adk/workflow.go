@@ -89,11 +89,11 @@ func (a *workflowAgent) Run(ctx context.Context, input *AgentInput, opts ...Agen
 }
 
 func (a *workflowAgent) Resume(ctx context.Context, info *ResumeInfo, opts ...AgentRunOption) *AsyncIterator[*AgentEvent] {
-	wi, ok := info.Data.(*workflowInterruptInfo)
+	wi, ok := info.Data.(*WorkflowInterruptInfo)
 	if !ok {
 		// unreachable
 		iterator, generator := NewAsyncIteratorPair[*AgentEvent]()
-		generator.Send(&AgentEvent{Err: fmt.Errorf("type of InterruptInfo.Data is expected to %s, actual: %T", reflect.TypeOf((*workflowInterruptInfo)(nil)).String(), info.Data)})
+		generator.Send(&AgentEvent{Err: fmt.Errorf("type of InterruptInfo.Data is expected to %s, actual: %T", reflect.TypeOf((*WorkflowInterruptInfo)(nil)).String(), info.Data)})
 		generator.Close()
 
 		return iterator
@@ -131,7 +131,7 @@ func (a *workflowAgent) Resume(ctx context.Context, info *ResumeInfo, opts ...Ag
 	return iterator
 }
 
-type workflowInterruptInfo struct {
+type WorkflowInterruptInfo struct {
 	OrigInput *AgentInput
 
 	SequentialInterruptIndex int
@@ -143,7 +143,7 @@ type workflowInterruptInfo struct {
 }
 
 func (a *workflowAgent) runSequential(ctx context.Context, input *AgentInput,
-	generator *AsyncGenerator[*AgentEvent], intInfo *workflowInterruptInfo, iterations int /*passed by loop agent*/, opts ...AgentRunOption) (exit, interrupted bool) {
+	generator *AsyncGenerator[*AgentEvent], intInfo *WorkflowInterruptInfo, iterations int /*passed by loop agent*/, opts ...AgentRunOption) (exit, interrupted bool) {
 	i := 0
 	if intInfo != nil {
 		i = intInfo.SequentialInterruptIndex
@@ -174,13 +174,24 @@ func (a *workflowAgent) runSequential(ctx context.Context, input *AgentInput,
 			}
 
 			if event.Action != nil && event.Action.Interrupted != nil {
-				event.Action.Interrupted = &InterruptInfo{
-					Data: &workflowInterruptInfo{
-						OrigInput:                input,
-						SequentialInterruptIndex: i,
-						SequentialInterruptInfo:  event.Action.Interrupted,
-						LoopIterations:           iterations,
+				// shallow copy
+				newEvent := &AgentEvent{
+					AgentName: event.AgentName,
+					RunPath:   event.RunPath,
+					Output:    event.Output,
+					Action: &AgentAction{
+						Exit:             event.Action.Exit,
+						Interrupted:      &InterruptInfo{Data: event.Action.Interrupted.Data},
+						TransferToAgent:  event.Action.TransferToAgent,
+						CustomizedAction: event.Action.CustomizedAction,
 					},
+					Err: event.Err,
+				}
+				newEvent.Action.Interrupted.Data = &WorkflowInterruptInfo{
+					OrigInput:                input,
+					SequentialInterruptIndex: i,
+					SequentialInterruptInfo:  event.Action.Interrupted,
+					LoopIterations:           iterations,
 				}
 
 				// Reset run ctx,
@@ -188,7 +199,7 @@ func (a *workflowAgent) runSequential(ctx context.Context, input *AgentInput,
 				replaceInterruptRunCtx(ctx, getRunCtx(ctx))
 
 				// Forward the event
-				generator.Send(event)
+				generator.Send(newEvent)
 				return true, true
 			}
 
@@ -211,7 +222,7 @@ func (a *workflowAgent) runSequential(ctx context.Context, input *AgentInput,
 }
 
 func (a *workflowAgent) runLoop(ctx context.Context, input *AgentInput,
-	generator *AsyncGenerator[*AgentEvent], intInfo *workflowInterruptInfo, opts ...AgentRunOption) {
+	generator *AsyncGenerator[*AgentEvent], intInfo *WorkflowInterruptInfo, opts ...AgentRunOption) {
 
 	if len(a.subAgents) == 0 {
 		return
@@ -234,7 +245,7 @@ func (a *workflowAgent) runLoop(ctx context.Context, input *AgentInput,
 }
 
 func (a *workflowAgent) runParallel(ctx context.Context, input *AgentInput,
-	generator *AsyncGenerator[*AgentEvent], intInfo *workflowInterruptInfo, opts ...AgentRunOption) {
+	generator *AsyncGenerator[*AgentEvent], intInfo *WorkflowInterruptInfo, opts ...AgentRunOption) {
 
 	if len(a.subAgents) == 0 {
 		return
@@ -304,7 +315,7 @@ func (a *workflowAgent) runParallel(ctx context.Context, input *AgentInput,
 			RunPath:   getRunCtx(ctx).RunPath,
 			Action: &AgentAction{
 				Interrupted: &InterruptInfo{
-					Data: &workflowInterruptInfo{
+					Data: &WorkflowInterruptInfo{
 						OrigInput:             input,
 						ParallelInterruptInfo: interruptMap,
 					},
@@ -314,7 +325,7 @@ func (a *workflowAgent) runParallel(ctx context.Context, input *AgentInput,
 	}
 }
 
-func getRunners(subAgents []*flowAgent, input *AgentInput, intInfo *workflowInterruptInfo, opts ...AgentRunOption) []func(ctx context.Context) *AsyncIterator[*AgentEvent] {
+func getRunners(subAgents []*flowAgent, input *AgentInput, intInfo *WorkflowInterruptInfo, opts ...AgentRunOption) []func(ctx context.Context) *AsyncIterator[*AgentEvent] {
 	ret := make([]func(ctx context.Context) *AsyncIterator[*AgentEvent], 0, len(subAgents))
 	if intInfo == nil {
 		// init run
