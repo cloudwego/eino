@@ -271,7 +271,7 @@ func TestWorkflowInterrupt(t *testing.T) {
 			RunPath:   []string{"loop", "sa1"},
 			Action: &AgentAction{
 				Interrupted: &InterruptInfo{
-					Data: &workflowInterruptInfo{
+					Data: &WorkflowInterruptInfo{
 						OrigInput: &AgentInput{
 							Messages: []Message{schema.UserMessage("hello world")},
 						},
@@ -289,7 +289,7 @@ func TestWorkflowInterrupt(t *testing.T) {
 			RunPath:   []string{"loop", "sa2"},
 			Action: &AgentAction{
 				Interrupted: &InterruptInfo{
-					Data: &workflowInterruptInfo{
+					Data: &WorkflowInterruptInfo{
 						OrigInput: &AgentInput{
 							Messages: []Message{schema.UserMessage("hello world")},
 						},
@@ -325,7 +325,7 @@ func TestWorkflowInterrupt(t *testing.T) {
 			RunPath:   []string{"loop", "sa1"},
 			Action: &AgentAction{
 				Interrupted: &InterruptInfo{
-					Data: &workflowInterruptInfo{
+					Data: &WorkflowInterruptInfo{
 						OrigInput: &AgentInput{
 							Messages: []Message{schema.UserMessage("hello world")},
 						},
@@ -343,7 +343,7 @@ func TestWorkflowInterrupt(t *testing.T) {
 			RunPath:   []string{"loop", "sa2"},
 			Action: &AgentAction{
 				Interrupted: &InterruptInfo{
-					Data: &workflowInterruptInfo{
+					Data: &WorkflowInterruptInfo{
 						OrigInput: &AgentInput{
 							Messages: []Message{schema.UserMessage("hello world")},
 						},

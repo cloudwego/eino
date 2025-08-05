@@ -188,6 +188,7 @@ func NewChatModelAgent(_ context.Context, config *ChatModelAgentConfig) (*ChatMo
 		gob.RegisterName("_eino_chat_message_audio_url", &schema.ChatMessageAudioURL{})
 		gob.RegisterName("_eino_chat_message_video_url", &schema.ChatMessageVideoURL{})
 		gob.RegisterName("_eino_chat_message_file_url", &schema.ChatMessageFileURL{})
+		gob.RegisterName("_eino_adk_chat_model_agent_interrupt_info", &ChatModelAgentInterruptInfo{})
 	})
 	if err != nil {
 		return nil, err
@@ -400,9 +401,9 @@ func (h *cbHandler) onToolEndWithStreamOutput(ctx context.Context,
 	return ctx
 }
 
-type tempInterruptInfo struct { // replace temp info by info when save the data
-	info *compose.InterruptInfo
-	data []byte
+type ChatModelAgentInterruptInfo struct { // replace temp info by info when save the data
+	Info *compose.InterruptInfo
+	Data []byte
 }
 
 func (h *cbHandler) onGraphError(ctx context.Context,
@@ -425,7 +426,7 @@ func (h *cbHandler) onGraphError(ctx context.Context,
 	}
 	h.Send(&AgentEvent{AgentName: h.agentName, Action: &AgentAction{
 		Interrupted: &InterruptInfo{
-			Data: &tempInterruptInfo{data: data, info: info},
+			Data: &ChatModelAgentInterruptInfo{Data: data, Info: info},
 		},
 	}})
 
@@ -659,7 +660,7 @@ func (a *ChatModelAgent) Resume(ctx context.Context, info *ResumeInfo, opts ...A
 			generator.Close()
 		}()
 
-		run(ctx, &AgentInput{EnableStreaming: info.EnableStreaming}, generator, newResumeStore(info.Data.([]byte)), co...)
+		run(ctx, &AgentInput{EnableStreaming: info.EnableStreaming}, generator, newResumeStore(info.Data.(*ChatModelAgentInterruptInfo).Data), co...)
 	}()
 
 	return iterator
