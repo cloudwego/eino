@@ -52,6 +52,6 @@ type GraphInfo struct {
 }
 
 // GraphCompileCallback is the callback which will be called when graph compilation finishes.
-type GraphCompileCallback interface { // nolint: byted_s_interface_name
+type GraphCompileCallback interface {
 	OnFinish(ctx context.Context, info *GraphInfo)
 }

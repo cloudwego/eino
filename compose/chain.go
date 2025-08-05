@@ -301,7 +301,7 @@ func (c *Chain[I, O]) AppendIndexer(node indexer.Indexer, opts ...GraphAddNodeOp
 //	cb.AddChatTemplate("chat_template_key_01", chatTemplate)
 //	cb.AddChatTemplate("chat_template_key_02", chatTemplate2)
 //	chain.AppendBranch(cb)
-func (c *Chain[I, O]) AppendBranch(b *ChainBranch) *Chain[I, O] { // nolint: byted_s_too_many_lines_in_func
+func (c *Chain[I, O]) AppendBranch(b *ChainBranch) *Chain[I, O] {
 	if b == nil {
 		c.reportError(fmt.Errorf("append branch invalid, branch is nil"))
 		return c

@@ -26,7 +26,7 @@ import (
 	"github.com/cloudwego/eino/components/retriever"
 )
 
-func toComponentNode[I, O, TOption any]( // nolint: byted_s_args_length_limit
+func toComponentNode[I, O, TOption any](
 	node any,
 	componentType component,
 	invoke Invoke[I, O, TOption],
@@ -158,7 +158,7 @@ func toPassthroughNode(opts ...GraphAddNodeOpt) (*graphNode, *graphAddNodeOpts) 
 	return gn, options
 }
 
-func toNode(nodeInfo *nodeInfo, executor *composableRunnable, graph AnyGraph, // nolint: byted_s_args_length_limit
+func toNode(nodeInfo *nodeInfo, executor *composableRunnable, graph AnyGraph,
 	meta *executorMeta, instance any, opts ...GraphAddNodeOpt) *graphNode {
 
 	if meta == nil {

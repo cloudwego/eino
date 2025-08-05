@@ -62,7 +62,6 @@ type composableRunnable struct {
 	nodeInfo *nodeInfo
 }
 
-// nolint: byted_s_args_length_limit
 func runnableLambda[I, O, TOption any](i Invoke[I, O, TOption], s Stream[I, O, TOption], c Collect[I, O, TOption],
 	t Transform[I, O, TOption], enableCallback bool) *composableRunnable {
 	rp := newRunnablePacker(i, s, c, t, enableCallback)

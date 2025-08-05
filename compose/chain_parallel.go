@@ -216,6 +216,6 @@ func (p *Parallel) addNode(outputKey string, node *graphNode, options *graphAddN
 
 	node.nodeInfo.outputKey = outputKey
 	p.nodes = append(p.nodes, nodeOptionsPair{node, options})
-	p.outputKeys[outputKey] = true // nolint: byted_use_struct_without_nilcheck, byted_use_map_without_nilcheck
+	p.outputKeys[outputKey] = true
 	return p
 }

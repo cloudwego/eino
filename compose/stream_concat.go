@@ -29,7 +29,6 @@ import (
 // for example you call Invoke() but node only implements Stream().
 // call at process init
 // not thread safe
-// nolint: byted_global_write_slicemap
 // eg.
 //
 //	type testStruct struct {

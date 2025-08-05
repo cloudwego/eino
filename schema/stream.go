@@ -190,7 +190,7 @@ func (sr *StreamReader[T]) Recv() (T, error) {
 	case readerTypeChild:
 		return sr.csr.recv()
 	default:
-		panic("impossible") // nolint: byted_s_panic_detect
+		panic("impossible")
 	}
 }
 
@@ -220,7 +220,7 @@ func (sr *StreamReader[T]) Close() {
 	case readerTypeChild:
 		sr.csr.close()
 	default:
-		panic("impossible") // nolint: byted_s_panic_detect
+		panic("impossible")
 	}
 }
 
@@ -294,7 +294,7 @@ func (sr *StreamReader[T]) toStream() *stream[T] {
 	case readerTypeChild:
 		return sr.csr.toStream()
 	default:
-		panic("impossible") // nolint: byted_s_panic_detect
+		panic("impossible")
 	}
 }
 
@@ -412,7 +412,7 @@ func (ar *arrayReader[T]) copy(n int) []*arrayReader[T] {
 
 	for i := 0; i < n; i++ {
 		ret[i] = &arrayReader[T]{
-			arr:   ar.arr, // nolint: byted_use_uninitialized_object
+			arr:   ar.arr,
 			index: ar.index,
 		}
 	}
@@ -471,7 +471,7 @@ func (msr *multiStreamReader[T]) recv() (T, error) {
 			var recv reflect.Value
 			chosen, recv, ok = reflect.Select(msr.itemsCases)
 			if ok {
-				item := recv.Interface().(streamItem[T]) // nolint: byted_interface_check_golintx
+				item := recv.Interface().(streamItem[T])
 				return item.chunk, item.err
 			}
 			msr.itemsCases[chosen].Chan = reflect.Value{}
@@ -553,7 +553,7 @@ func newStreamReaderWithConvert[T any](origin iStreamReader, convert func(any) (
 //	fmt.Println(s) // Output: val_1
 func StreamReaderWithConvert[T, D any](sr *StreamReader[T], convert func(T) (D, error)) *StreamReader[D] {
 	c := func(a any) (D, error) {
-		return convert(a.(T)) // nolint: byted_interface_check_golintx
+		return convert(a.(T))
 	}
 
 	return newStreamReaderWithConvert(sr, c)
@@ -595,7 +595,7 @@ func toStream[T any, Reader reader[T]](r Reader) *stream[T] {
 		defer func() {
 			panicErr := recover()
 			if panicErr != nil {
-				e := safe.NewPanicErr(panicErr, debug.Stack()) // nolint: byted_returned_err_should_do_check
+				e := safe.NewPanicErr(panicErr, debug.Stack())
 
 				var chunk T
 				_ = ret.send(chunk, e)
@@ -780,7 +780,7 @@ func MergeStreamReaders[T any](srs []*StreamReader[T]) *StreamReader[T] {
 		case readerTypeChild:
 			ss = append(ss, sr.csr.toStream())
 		default:
-			panic("impossible") // nolint: byted_s_panic_detect
+			panic("impossible")
 		}
 	}
 

@@ -28,7 +28,6 @@ type BaseTool interface {
 }
 
 // InvokableTool the tool for ChatModel intent recognition and ToolsNode execution.
-// nolint: byted_s_interface_name
 type InvokableTool interface {
 	BaseTool
 
@@ -37,7 +36,6 @@ type InvokableTool interface {
 }
 
 // StreamableTool the stream tool for ChatModel intent recognition and ToolsNode execution.
-// nolint: byted_s_interface_name
 type StreamableTool interface {
 	BaseTool
 

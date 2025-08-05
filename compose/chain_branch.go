@@ -289,7 +289,7 @@ func (cb *ChainBranch) addNode(key string, node *graphNode, options *graphAddNod
 		return cb
 	}
 
-	cb.key2BranchNode[key] = nodeOptionsPair{node, options} // nolint: byted_use_map_without_nilcheck
+	cb.key2BranchNode[key] = nodeOptionsPair{node, options}
 
 	return cb
 }
