@@ -6,6 +6,7 @@ require (
 	github.com/bytedance/sonic v1.13.2
 	github.com/eino-contrib/jsonschema v1.0.0
 	github.com/getkin/kin-openapi v0.118.0
+	github.com/google/uuid v1.6.0
 	github.com/nikolalohinski/gonja v1.5.3
 	github.com/slongfield/pyfmt v0.0.0-20220222012616-ea85ff4c361f
 	github.com/smartystreets/goconvey v1.8.1
