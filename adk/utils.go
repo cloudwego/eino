@@ -24,6 +24,7 @@ import (
 
 	"github.com/cloudwego/eino/internal"
 	"github.com/cloudwego/eino/schema"
+	"github.com/google/uuid"
 )
 
 type AsyncIterator[T any] struct {
@@ -71,9 +72,10 @@ func concatInstructions(instructions ...string) string {
 }
 
 func GenTransferMessages(_ context.Context, destAgentName string) (Message, Message) {
-	tooCall := schema.ToolCall{Function: schema.FunctionCall{Name: TransferToAgentToolName, Arguments: destAgentName}}
+	toolCallID := uuid.NewString()
+	tooCall := schema.ToolCall{ID: toolCallID, Function: schema.FunctionCall{Name: TransferToAgentToolName, Arguments: destAgentName}}
 	assistantMessage := schema.AssistantMessage("", []schema.ToolCall{tooCall})
-	toolMessage := schema.ToolMessage(transferToAgentToolOutput(destAgentName), "", schema.WithToolName(TransferToAgentToolName))
+	toolMessage := schema.ToolMessage(transferToAgentToolOutput(destAgentName), toolCallID, schema.WithToolName(TransferToAgentToolName))
 	return assistantMessage, toolMessage
 }
 
