@@ -43,12 +43,13 @@ message, _ := model.Generate(ctx, []*Message{
 - 编排解决了处理大语言模型流式响应这一难题。
 - 编排为你处理类型安全、并发管理、切面注入以及选项赋值等问题。
 
-Eino 提供了两组用于编排的 API：
+Eino 提供了三组用于编排的 API：
 
 | API      | 特性和使用场景                     |
 | -------- |-----------------------------|
 | Chain    | 简单的链式有向图，只能向前推进。            |
 | Graph    | 循环或非循环有向图。功能强大且灵活。          |
+| Workflow | 非循环图，支持在结构体字段级别进行数据映射。 |
 
 我们来创建一个简单的 chain: 一个模版（ChatTemplate）接一个大模型（ChatModel）。
 
@@ -82,9 +83,61 @@ _ = graph.AddEdge("node_converter", END)
 
 compiledGraph, err := graph.Compile(ctx)
 if err != nil {
-return err
+    return err
 }
 out, err := r.Invoke(ctx, map[string]any{"query":"Beijing's weather this weekend"})
+```
+现在，我们来创建一个 Workflow，它能在字段级别灵活映射输入与输出：
+
+![](.github/static/img/eino/simple_workflow.png)
+
+```Go
+type Input1 struct {
+    Input string
+}
+
+type Output1 struct {
+    Output string
+}
+
+type Input2 struct {
+    Role schema.RoleType
+}
+
+type Output2 struct {
+    Output string
+}
+
+type Input3 struct {
+    Query string
+    MetaData string
+}
+
+var (
+    ctx context.Context
+    m model.BaseChatModel
+    lambda1 func(context.Context, Input1) (Output1, error)
+    lambda2 func(context.Context, Input2) (Output2, error)
+    lambda3 func(context.Context, Input3) (*schema.Message, error)
+)
+
+wf := NewWorkflow[[]*schema.Message, *schema.Message]()
+wf.AddChatModelNode("model", m).AddInput(START)
+wf.AddLambdaNode("lambda1", InvokableLambda(lambda1)).
+    AddInput("model", MapFields("Content", "Input"))
+wf.AddLambdaNode("lambda2", InvokableLambda(lambda2)).
+    AddInput("model", MapFields("Role", "Role"))
+wf.AddLambdaNode("lambda3", InvokableLambda(lambda3)).
+    AddInput("lambda1", MapFields("Output", "Query")).
+    AddInput("lambda2", MapFields("Output", "MetaData"))
+wf.End().AddInput("lambda3")
+runnable, err := wf.Compile(ctx)
+if err != nil {
+    return err
+}
+our, err := runnable.Invoke(ctx, []*schema.Message{
+    schema.UserMessage("kick start this workflow!"),
+})
 ```
 
 现在，咱们来创建一个 “ReAct” 智能体：一个 ChatModel 绑定了一些 Tool。它接收输入的消息，自主判断是调用 Tool 还是输出最终结果。Tool 的执行结果会再次成为聊天模型的输入消息，并作为下一轮自主判断的上下文。

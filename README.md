@@ -41,12 +41,13 @@ Of course, you can do that, Eino provides lots of useful components to use out o
 - orchestration solves the difficult problem of processing stream response by the LLM.
 - orchestration handles type safety, concurrency management, aspect injection and option assignment for you.
 
-Eino provides two set of APIs for orchestration
+Eino provides three set of APIs for orchestration
 
 | API      | Characteristics and usage                                             |
 | -------- |-----------------------------------------------------------------------|
 | Chain    | Simple chained directed graph that can only go forward.               |
 | Graph    | Cyclic or Acyclic directed graph. Powerful and flexible.              |
+| Workflow | Acyclic graph that supports data mapping at struct field level. |
 
 Let's create a simple chain: a ChatTemplate followed by a ChatModel.
 
@@ -84,6 +85,59 @@ if err != nil {
 return err
 }
 out, err := r.Invoke(ctx, map[string]any{"query":"Beijing's weather this weekend"})
+```
+
+Now let's create a workflow that flexibly maps input & output at the field level:
+
+![](.github/static/img/eino/simple_workflow.png)
+
+```Go
+type Input1 struct {
+    Input string
+}
+
+type Output1 struct {
+    Output string
+}
+
+type Input2 struct {
+    Role schema.RoleType
+}
+
+type Output2 struct {
+    Output string
+}
+
+type Input3 struct {
+    Query string
+    MetaData string
+}
+
+var (
+    ctx context.Context
+    m model.BaseChatModel
+    lambda1 func(context.Context, Input1) (Output1, error)
+    lambda2 func(context.Context, Input2) (Output2, error)
+    lambda3 func(context.Context, Input3) (*schema.Message, error)
+)
+
+wf := NewWorkflow[[]*schema.Message, *schema.Message]()
+wf.AddChatModelNode("model", m).AddInput(START)
+wf.AddLambdaNode("lambda1", InvokableLambda(lambda1)).
+    AddInput("model", MapFields("Content", "Input"))
+wf.AddLambdaNode("lambda2", InvokableLambda(lambda2)).
+    AddInput("model", MapFields("Role", "Role"))
+wf.AddLambdaNode("lambda3", InvokableLambda(lambda3)).
+    AddInput("lambda1", MapFields("Output", "Query")).
+    AddInput("lambda2", MapFields("Output", "MetaData"))
+wf.End().AddInput("lambda3")
+runnable, err := wf.Compile(ctx)
+if err != nil {
+    return err
+}
+our, err := runnable.Invoke(ctx, []*schema.Message{
+    schema.UserMessage("kick start this workflow!"),
+})
 ```
 
 Now let's create a 'ReAct' agent: A ChatModel binds to Tools. It receives input Messages and decides independently whether to call the Tool or output the final result. The execution result of the Tool will again become the input Message for the ChatModel and serve as the context for the next round of independent judgment.
