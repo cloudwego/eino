@@ -450,8 +450,11 @@ func (r *runner) handleInterrupt(
 		Inputs:         make(map[string]any),
 		SkipPreHandler: map[string]bool{},
 	}
-	if state, ok := ctx.Value(stateKey{}).(*internalState); ok {
-		cp.State = state.state
+	if r.runCtx != nil {
+		// current graph has enable state
+		if state, ok := ctx.Value(stateKey{}).(*internalState); ok {
+			cp.State = state.state
+		}
 	}
 	intInfo := &InterruptInfo{
 		State:           cp.State,
