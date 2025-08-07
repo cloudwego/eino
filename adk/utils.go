@@ -26,6 +26,7 @@ import (
 
 	"github.com/cloudwego/eino/internal"
 	"github.com/cloudwego/eino/schema"
+	"github.com/google/uuid"
 )
 
 type AsyncIterator[T any] struct {
