@@ -27,7 +27,7 @@ import (
 	"github.com/cloudwego/eino/schema"
 )
 
-type state struct {
+type State struct {
 	Messages                 []*schema.Message
 	ReturnDirectlyToolCallID string
 }
@@ -149,7 +149,7 @@ const (
 // Note: If multiple tools call this function in the same step, only the last call will take effect.
 // This setting has a higher priority than the AgentConfig.ToolReturnDirectly.
 func SetReturnDirectly(ctx context.Context) error {
-	return compose.ProcessState(ctx, func(ctx context.Context, s *state) error {
+	return compose.ProcessState(ctx, func(ctx context.Context, s *State) error {
 		s.ReturnDirectlyToolCallID = compose.GetToolCallID(ctx)
 		return nil
 	})
@@ -190,7 +190,7 @@ func NewAgent(ctx context.Context, config *AgentConfig) (_ *Agent, err error) {
 	)
 
 	registerStateOnce.Do(func() {
-		err = compose.RegisterSerializableType[state]("_eino_react_state")
+		err = compose.RegisterSerializableType[State]("_eino_react_state")
 	})
 	if err != nil {
 		return
@@ -227,11 +227,11 @@ func NewAgent(ctx context.Context, config *AgentConfig) (_ *Agent, err error) {
 		return nil, err
 	}
 
-	graph := compose.NewGraph[[]*schema.Message, *schema.Message](compose.WithGenLocalState(func(ctx context.Context) *state {
-		return &state{Messages: make([]*schema.Message, 0, config.MaxStep+1)}
+	graph := compose.NewGraph[[]*schema.Message, *schema.Message](compose.WithGenLocalState(func(ctx context.Context) *State {
+		return &State{Messages: make([]*schema.Message, 0, config.MaxStep+1)}
 	}))
 
-	modelPreHandle := func(ctx context.Context, input []*schema.Message, state *state) ([]*schema.Message, error) {
+	modelPreHandle := func(ctx context.Context, input []*schema.Message, state *State) ([]*schema.Message, error) {
 		state.Messages = append(state.Messages, input...)
 
 		if messageModifier == nil {
@@ -251,7 +251,7 @@ func NewAgent(ctx context.Context, config *AgentConfig) (_ *Agent, err error) {
 		return nil, err
 	}
 
-	toolsNodePreHandle := func(ctx context.Context, input *schema.Message, state *state) (*schema.Message, error) {
+	toolsNodePreHandle := func(ctx context.Context, input *schema.Message, state *State) (*schema.Message, error) {
 		if input == nil {
 			return state.Messages[len(state.Messages)-1], nil // used for rerun interrupt resume
 		}
@@ -297,7 +297,7 @@ func buildReturnDirectly(graph *compose.Graph[[]*schema.Message, *schema.Message
 	directReturn := func(ctx context.Context, msgs *schema.StreamReader[[]*schema.Message]) (*schema.StreamReader[*schema.Message], error) {
 		return schema.StreamReaderWithConvert(msgs, func(msgs []*schema.Message) (*schema.Message, error) {
 			var msg *schema.Message
-			err = compose.ProcessState[*state](ctx, func(_ context.Context, state *state) error {
+			err = compose.ProcessState[*State](ctx, func(_ context.Context, state *State) error {
 				for i := range msgs {
 					if msgs[i] != nil && msgs[i].ToolCallID == state.ReturnDirectlyToolCallID {
 						msg = msgs[i]
@@ -325,7 +325,7 @@ func buildReturnDirectly(graph *compose.Graph[[]*schema.Message, *schema.Message
 	err = graph.AddBranch(nodeKeyTools, compose.NewStreamGraphBranch(func(ctx context.Context, msgsStream *schema.StreamReader[[]*schema.Message]) (endNode string, err error) {
 		msgsStream.Close()
 
-		err = compose.ProcessState[*state](ctx, func(_ context.Context, state *state) error {
+		err = compose.ProcessState[*State](ctx, func(_ context.Context, state *State) error {
 			if len(state.ReturnDirectlyToolCallID) > 0 {
 				endNode = nodeKeyDirectReturn
 			} else {
