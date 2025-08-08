@@ -320,6 +320,7 @@ func (a *flowAgent) Resume(ctx context.Context, info *ResumeInfo, opts ...AgentR
 		}
 		return targetAgent.Resume(ctx, info, opts...)
 	}
+
 	if wf, ok := a.Agent.(*workflowAgent); ok {
 		return wf.Resume(ctx, info, opts...)
 	}
@@ -337,6 +338,75 @@ func (a *flowAgent) Resume(ctx context.Context, info *ResumeInfo, opts ...AgentR
 	aIter := ra.Resume(ctx, info, opts...)
 
 	go a.run(ctx, runCtx, aIter, generator, opts...)
+
+	return iterator
+}
+
+type DeterministicTransferConfig struct {
+	Agent        Agent
+	ToAgentNames []string
+}
+
+type agentWithDeterministicTransferTo struct {
+	agent        Agent
+	toAgentNames []string
+}
+
+func (a *agentWithDeterministicTransferTo) Description(ctx context.Context) string {
+	return a.agent.Description(ctx)
+}
+
+func (a *agentWithDeterministicTransferTo) Name(ctx context.Context) string {
+	return a.agent.Name(ctx)
+}
+
+func (a *agentWithDeterministicTransferTo) Run(ctx context.Context,
+	input *AgentInput, options ...AgentRunOption) *AsyncIterator[*AgentEvent] {
+
+	if _, ok := a.agent.(*flowAgent); ok {
+		ctx = ClearRunCtx(ctx)
+	}
+
+	aIter := a.agent.Run(ctx, input, options...)
+
+	iterator, generator := NewAsyncIteratorPair[*AgentEvent]()
+	go func() {
+		defer func() {
+			panicErr := recover()
+			if panicErr != nil {
+				e := safe.NewPanicErr(panicErr, debug.Stack())
+				generator.Send(&AgentEvent{Err: e})
+			}
+
+			generator.Close()
+		}()
+
+		for {
+			event, ok := aIter.Next()
+			if !ok {
+				break
+			}
+
+			generator.Send(event)
+
+			if event.Err != nil {
+				return
+			}
+		}
+
+		for _, toAgentName := range a.toAgentNames {
+			aMsg, tMsg := GenTransferMessages(ctx, toAgentName)
+			aEvent := EventFromMessage(aMsg, nil, schema.Assistant, "")
+			generator.Send(aEvent)
+			tEvent := EventFromMessage(tMsg, nil, schema.Tool, tMsg.ToolName)
+			tEvent.Action = &AgentAction{
+				TransferToAgent: &TransferToAgentAction{
+					DestAgentName: toAgentName,
+				},
+			}
+			generator.Send(tEvent)
+		}
+	}()
 
 	return iterator
 }
@@ -433,4 +503,11 @@ func recursiveGetAgent(ctx context.Context, agent *flowAgent, agentName string) 
 		}
 	}
 	return nil
+}
+
+func AgentWithDeterministicTransferTo(_ context.Context, config *DeterministicTransferConfig) Agent {
+	return &agentWithDeterministicTransferTo{
+		agent:        config.Agent,
+		toAgentNames: config.ToAgentNames,
+	}
 }
