@@ -18,7 +18,6 @@ package schema
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"io"
 	"reflect"
@@ -34,14 +33,15 @@ import (
 	"github.com/slongfield/pyfmt"
 
 	"github.com/cloudwego/eino/internal"
+	"github.com/cloudwego/eino/internal/generic"
 )
 
 func init() {
 	internal.RegisterStreamChunkConcatFunc(ConcatMessages)
-	internal.RegisterStreamChunkConcatFunc(concatMessageArray)
+	internal.RegisterStreamChunkConcatFunc(ConcatMessageArray)
 }
 
-func concatMessageArray(mas [][]*Message) ([]*Message, error) {
+func ConcatMessageArray(mas [][]*Message) ([]*Message, error) {
 	arrayLen := len(mas[0])
 
 	ret := make([]*Message, arrayLen)
@@ -487,7 +487,7 @@ func (m *Message) String() string {
 	sb := &strings.Builder{}
 	sb.WriteString(fmt.Sprintf("%s: %s", m.Role, m.Content))
 	if len(m.ToolCalls) > 0 {
-		sb.WriteString(fmt.Sprintf("\ntool_calls:\n"))
+		sb.WriteString("\ntool_calls:\n")
 		for _, tc := range m.ToolCalls {
 			if tc.Index != nil {
 				sb.WriteString(fmt.Sprintf("index[%d]:", *tc.Index))
@@ -646,6 +646,14 @@ func concatToolCalls(chunks []ToolCall) ([]ToolCall, error) {
 	}
 
 	return merged, nil
+}
+
+func concatExtra(extraList []map[string]any) (map[string]any, error) {
+	if len(extraList) == 1 {
+		return generic.CopyMap(extraList[0]), nil
+	}
+
+	return internal.ConcatItems(extraList)
 }
 
 // ConcatMessages concat messages with the same role and name.
@@ -814,12 +822,15 @@ func ConcatMessages(msgs []*Message) (*Message, error) {
 		ret.ToolCalls = merged
 	}
 
-	extra, err := internal.ConcatItems(extraList)
-	if err != nil {
-		return nil, fmt.Errorf("failed to concat message's extra: %w", err)
-	}
-	if len(extra) > 0 {
-		ret.Extra = extra
+	if len(extraList) > 0 {
+		extra, err := concatExtra(extraList)
+		if err != nil {
+			return nil, fmt.Errorf("failed to concat message's extra: %w", err)
+		}
+
+		if len(extra) > 0 {
+			ret.Extra = extra
+		}
 	}
 
 	return &ret, nil
@@ -840,14 +851,6 @@ func ConcatMessageStream(s *StreamReader[*Message]) (*Message, error) {
 		}
 
 		msgs = append(msgs, msg)
-	}
-
-	if len(msgs) == 0 {
-		return nil, errors.New("no messages in stream")
-	}
-
-	if len(msgs) == 1 {
-		return msgs[0], nil
 	}
 
 	return ConcatMessages(msgs)

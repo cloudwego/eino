@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"io"
 	"reflect"
+	"runtime"
 	"runtime/debug"
 	"sync"
 	"sync/atomic"
@@ -197,7 +198,7 @@ func (sr *StreamReader[T]) Recv() (T, error) {
 // Close safely closes the StreamReader.
 // It should be called only once, as multiple calls may not work as expected.
 // Notice: always remember to call Close() after using Recv().
-// eg.
+// e.g.
 //
 //	defer sr.Close()
 //
@@ -253,6 +254,41 @@ func (sr *StreamReader[T]) Copy(n int) []*StreamReader[T] {
 	}
 
 	return copyStreamReaders[T](sr, n)
+}
+
+// SetAutomaticClose sets the StreamReader to automatically close when it's no longer reachable and ready to be GCed.
+// NOT concurrency safe.
+func (sr *StreamReader[T]) SetAutomaticClose() {
+	switch sr.typ {
+	case readerTypeStream:
+		if !sr.st.automaticClose {
+			sr.st.automaticClose = true
+			var flag uint32
+			sr.st.closedFlag = &flag
+			runtime.SetFinalizer(sr, func(s *StreamReader[T]) {
+				s.Close()
+			})
+		}
+	case readerTypeMultiStream:
+		for _, s := range sr.msr.nonClosedStreams() {
+			if !s.automaticClose {
+				s.automaticClose = true
+				var flag uint32
+				s.closedFlag = &flag
+				runtime.SetFinalizer(s, func(st *stream[T]) {
+					st.closeRecv()
+				})
+			}
+		}
+	case readerTypeChild:
+		parent := sr.csr.parent.sr
+		parent.SetAutomaticClose()
+	case readerTypeWithConvert:
+		sr.srw.sr.SetAutomaticClose()
+	case readerTypeArray:
+		// no need to clean up
+	default:
+	}
 }
 
 func (sr *StreamReader[T]) recvAny() (any, error) {
@@ -312,6 +348,7 @@ type iStreamReader interface {
 	recvAny() (any, error)
 	copyAny(int) []iStreamReader
 	Close()
+	SetAutomaticClose()
 }
 
 // stream is a channel-based stream with 1 sender and 1 receiver.
@@ -321,6 +358,9 @@ type stream[T any] struct {
 	items chan streamItem[T]
 
 	closed chan struct{}
+
+	automaticClose bool
+	closedFlag     *uint32 // 0 = not closed, 1 = closed, only used when automaticClose is set
 }
 
 type streamItem[T any] struct {
@@ -372,6 +412,13 @@ func (s *stream[T]) closeSend() {
 }
 
 func (s *stream[T]) closeRecv() {
+	if s.automaticClose {
+		if atomic.CompareAndSwapUint32(s.closedFlag, 0, 1) {
+			close(s.closed)
+		}
+		return
+	}
+
 	close(s.closed)
 }
 

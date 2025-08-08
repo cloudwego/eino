@@ -22,10 +22,8 @@ func receiveN[T any](chosenList []int, ss []*stream[T]) (int, *streamItem[T], bo
 	return []func(chosenList []int, ss []*stream[T]) (index int, item *streamItem[T], ok bool){
 		nil,
 		func(chosenList []int, ss []*stream[T]) (int, *streamItem[T], bool) {
-			select {
-			case item, ok := <-ss[chosenList[0]].items:
-				return chosenList[0], &item, ok
-			}
+			item, ok := <-ss[chosenList[0]].items
+			return chosenList[0], &item, ok
 		},
 		func(chosenList []int, ss []*stream[T]) (int, *streamItem[T], bool) {
 			select {
