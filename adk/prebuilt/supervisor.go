@@ -18,11 +18,8 @@ package prebuilt
 
 import (
 	"context"
-	"runtime/debug"
 
 	"github.com/cloudwego/eino/adk"
-	"github.com/cloudwego/eino/internal/safe"
-	"github.com/cloudwego/eino/schema"
 )
 
 type SupervisorConfig struct {
@@ -30,66 +27,14 @@ type SupervisorConfig struct {
 	SubAgents  []adk.Agent
 }
 
-type BackToParentWrapper struct {
-	adk.Agent
-
-	parentAgentName string
-}
-
-func (a *BackToParentWrapper) Run(ctx context.Context, input *adk.AgentInput,
-	opts ...adk.AgentRunOption) *adk.AsyncIterator[*adk.AgentEvent] {
-
-	ctx = adk.ClearRunCtx(ctx)
-	aIter := a.Agent.Run(ctx, input, opts...)
-
-	iterator, generator := adk.NewAsyncIteratorPair[*adk.AgentEvent]()
-	go func() {
-		defer func() {
-			panicErr := recover()
-			if panicErr != nil {
-				e := safe.NewPanicErr(panicErr, debug.Stack())
-				generator.Send(&adk.AgentEvent{Err: e})
-			}
-
-			generator.Close()
-		}()
-
-		for {
-			event, ok := aIter.Next()
-			if !ok {
-				break
-			}
-
-			generator.Send(event)
-
-			if event.Err != nil {
-				return
-			}
-		}
-
-		aMsg, tMsg := adk.GenTransferMessages(ctx, a.parentAgentName)
-		aEvent := adk.EventFromMessage(aMsg, nil, schema.Assistant, "")
-		generator.Send(aEvent)
-		tEvent := adk.EventFromMessage(tMsg, nil, schema.Tool, tMsg.ToolName)
-		tEvent.Action = &adk.AgentAction{
-			TransferToAgent: &adk.TransferToAgentAction{
-				DestAgentName: a.parentAgentName,
-			},
-		}
-		generator.Send(tEvent)
-	}()
-
-	return iterator
-}
-
 func NewSupervisor(ctx context.Context, conf *SupervisorConfig) (adk.Agent, error) {
 	subAgents := make([]adk.Agent, 0, len(conf.SubAgents))
 	supervisorName := conf.Supervisor.Name(ctx)
 	for _, subAgent := range conf.SubAgents {
-		subAgents = append(subAgents, &BackToParentWrapper{
-			Agent:           subAgent,
-			parentAgentName: supervisorName,
-		})
+		subAgents = append(subAgents, adk.AgentWithDeterministicTransferTo(ctx, &adk.DeterministicTransferConfig{
+			Agent:        subAgent,
+			ToAgentNames: []string{supervisorName},
+		}))
 	}
 
 	return adk.SetSubAgents(ctx, conf.Supervisor, subAgents)
