@@ -192,3 +192,21 @@ func copyAgentEvent(ae *AgentEvent) *AgentEvent {
 
 	return copied
 }
+
+func GetMessage(e *AgentEvent) (Message, *AgentEvent, error) {
+	if e.Output == nil || e.Output.MessageOutput == nil {
+		return nil, e, nil
+	}
+
+	msgOutput := e.Output.MessageOutput
+	if msgOutput.IsStreaming {
+		ss := msgOutput.MessageStream.Copy(2)
+		e.Output.MessageOutput.MessageStream = ss[0]
+
+		msg, err := schema.ConcatMessageStream(ss[1])
+
+		return msg, e, err
+	}
+
+	return msgOutput.Message, e, nil
+}

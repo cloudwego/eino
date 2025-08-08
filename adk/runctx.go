@@ -84,6 +84,15 @@ func SetSessionValue(ctx context.Context, key string, value any) {
 	session.setValue(key, value)
 }
 
+func SetSessionValues(ctx context.Context, kvs map[string]any) {
+	session := getSession(ctx)
+	if session == nil {
+		return
+	}
+
+	session.setValues(kvs)
+}
+
 func GetSessionValue(ctx context.Context, key string) (any, bool) {
 	session := getSession(ctx)
 	if session == nil {
@@ -122,7 +131,7 @@ func (rs *runSession) appendInterruptRunCtx(runCtx *runContext) {
 }
 
 func (rs *runSession) replaceInterruptRunCtx(interruptRunCtx *runContext) {
-	// remove runctx whose path is belong to the new run ctx, and append the new run ctx
+	// remove runctx whose path belongs to the new run ctx, and append the new run ctx
 	rs.mtx.Lock()
 	for i := 0; i < len(rs.interruptRunCtxs); i++ {
 		rc := rs.interruptRunCtxs[i]
@@ -149,6 +158,14 @@ func (rs *runSession) getValues() map[string]any {
 func (rs *runSession) setValue(key string, value any) {
 	rs.mtx.Lock()
 	rs.Values[key] = value
+	rs.mtx.Unlock()
+}
+
+func (rs *runSession) setValues(kvs map[string]any) {
+	rs.mtx.Lock()
+	for k, v := range kvs {
+		rs.Values[k] = v
+	}
 	rs.mtx.Unlock()
 }
 
@@ -213,6 +230,10 @@ func initRunCtx(ctx context.Context, agentName string, input *AgentInput) (conte
 	return setRunCtx(ctx, runCtx), runCtx
 }
 
+// ClearRunCtx clears the run context of the multi-agents. This is particularly useful
+// when a customized agent with a multi-agents inside it is set as a subagent of another
+// multi-agents. In such cases, it's not expected to pass the outside run context to the
+// inside multi-agents, so this function helps isolate the contexts properly.
 func ClearRunCtx(ctx context.Context) context.Context {
 	return context.WithValue(ctx, runCtxKey{}, nil)
 }
