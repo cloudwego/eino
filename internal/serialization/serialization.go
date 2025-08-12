@@ -64,6 +64,7 @@ func init() {
 	_ = GenericRegister[schema.ChatMessageVideoURL]("_eino_chat_message_video_url")
 	_ = GenericRegister[schema.ChatMessageFileURL]("_eino_chat_message_file_url")
 	_ = GenericRegister[schema.ImageURLDetail]("_eino_image_url_detail")
+	_ = GenericRegister[schema.PromptTokenDetails]("_eino_prompt_token_details")
 }
 
 func GenericRegister[T any](key string) error {
