@@ -59,6 +59,10 @@ func concatStreamReader[T any](sr *schema.StreamReader[T]) (T, error) {
 				break
 			}
 
+			if _, ok := schema.GetSourceName(err); ok {
+				continue
+			}
+
 			var t T
 			return t, newStreamReadError(err)
 		}

@@ -144,9 +144,7 @@ func TestCopyDelay(t *testing.T) {
 	wg.Wait()
 	infos := make([]info, 0)
 	for _, infoL := range infoList {
-		for _, info := range infoL {
-			infos = append(infos, info)
-		}
+		infos = append(infos, infoL...)
 	}
 	sort.Slice(infos, func(i, j int) bool {
 		return infos[i].ts < infos[j].ts
