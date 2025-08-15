@@ -17,7 +17,8 @@
 package adk
 
 type options struct {
-	checkPointID *string
+	checkPointID         *string
+	skipTransferMessages bool
 }
 
 // AgentRunOption is the call option for adk Agent.
@@ -39,6 +40,12 @@ func getCommonOptions(base *options, opts ...AgentRunOption) *options {
 	}
 
 	return GetImplSpecificOptions[options](base, opts...)
+}
+
+func WithSkipTransferMessages() AgentRunOption {
+	return WrapImplSpecificOptFn(func(t *options) {
+		t.skipTransferMessages = true
+	})
 }
 
 // WrapImplSpecificOptFn is the option to wrap the implementation specific option function.

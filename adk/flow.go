@@ -216,7 +216,7 @@ func (ai *AgentInput) deepCopy() *AgentInput {
 	return copied
 }
 
-func (a *flowAgent) genAgentInput(ctx context.Context, runCtx *runContext) (*AgentInput, error) {
+func (a *flowAgent) genAgentInput(ctx context.Context, runCtx *runContext, skipTransferMessages bool) (*AgentInput, error) {
 	if runCtx.isRoot() {
 		return runCtx.RootInput, nil
 	}
@@ -229,6 +229,18 @@ func (a *flowAgent) genAgentInput(ctx context.Context, runCtx *runContext) (*Age
 
 	for _, event := range events {
 		if !belongToRunPath(event.RunPath, runPath) {
+			continue
+		}
+
+		if skipTransferMessages && event.Action != nil && event.Action.TransferToAgent != nil {
+			// If skipTransferMessages is true and the event contain transfer action, the message in this event won't be appended to history entries.
+			if event.Output != nil &&
+				event.Output.MessageOutput != nil &&
+				event.Output.MessageOutput.Role == schema.Tool &&
+				len(historyEntries) > 0 {
+				// If the skipped message's role is Tool, remove the previous history entry as it's also a transfer message(from ChatModelAgent and GenTransferMessages).
+				historyEntries = historyEntries[:len(historyEntries)-1]
+			}
 			continue
 		}
 
@@ -279,7 +291,9 @@ func (a *flowAgent) Run(ctx context.Context, input *AgentInput, opts ...AgentRun
 
 	ctx, runCtx := initRunCtx(ctx, agentName, input)
 
-	input, err := a.genAgentInput(ctx, runCtx)
+	o := getCommonOptions(nil, opts...)
+
+	input, err := a.genAgentInput(ctx, runCtx, o.skipTransferMessages)
 	if err != nil {
 		iterator, generator := NewAsyncIteratorPair[*AgentEvent]()
 		generator.Send(&AgentEvent{Err: err})
