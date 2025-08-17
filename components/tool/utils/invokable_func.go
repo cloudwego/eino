@@ -105,7 +105,6 @@ func NewTool[T, D any](desc *schema.ToolInfo, i InvokeFunc[T, D], opts ...Option
 	}, opts...)
 }
 
-// NewTool Create a tool, where the input and output are both in JSON format.
 func newOptionableTool[T, D any](desc *schema.ToolInfo, i OptionableInvokeFunc[T, D], opts ...Option) tool.InvokableTool {
 	to := getToolOptions(opts...)
 
