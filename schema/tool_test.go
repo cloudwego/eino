@@ -19,12 +19,14 @@ package schema
 import (
 	"testing"
 
+	"github.com/eino-contrib/jsonschema"
 	"github.com/getkin/kin-openapi/openapi3"
 	"github.com/smartystreets/goconvey/convey"
+	orderedmap "github.com/wk8/go-ordered-map/v2"
 )
 
-func TestParamsOneOfToJSONSchema(t *testing.T) {
-	convey.Convey("TestParamsOneOfToJSONSchema", t, func() {
+func TestParamsOneOfToOpenAPIV3(t *testing.T) {
+	convey.Convey("ParamsOneOfToOpenAPIV3", t, func() {
 		var (
 			oneOf     ParamsOneOf
 			converted any
@@ -81,5 +83,129 @@ func TestParamsOneOfToJSONSchema(t *testing.T) {
 			converted, err = oneOf.ToOpenAPIV3()
 			convey.So(err, convey.ShouldBeNil)
 		})
+	})
+}
+
+func TestParamsOneOfToJSONSchema(t *testing.T) {
+	convey.Convey("ParamsOneOfToJSONSchema", t, func() {
+		var (
+			oneOf     ParamsOneOf
+			converted any
+			err       error
+		)
+
+		convey.Convey("user provides JSON schema directly, use what the user provides", func() {
+			oneOf.jsonschema = &jsonschema.Schema{
+				Type:        "string",
+				Description: "this is the only argument",
+			}
+			converted, err = oneOf.ToJSONSchema()
+			convey.So(err, convey.ShouldBeNil)
+			convey.So(converted, convey.ShouldResemble, oneOf.jsonschema)
+		})
+
+		convey.Convey("user provides map[string]ParameterInfo, converts to json schema", func() {
+			oneOf.params = map[string]*ParameterInfo{
+				"arg1": {
+					Type:     String,
+					Desc:     "this is the first argument",
+					Required: true,
+					Enum:     []string{"1", "2"},
+				},
+				"arg2": {
+					Type: Object,
+					Desc: "this is the second argument",
+					SubParams: map[string]*ParameterInfo{
+						"sub_arg1": {
+							Type:     String,
+							Desc:     "this is the sub argument",
+							Required: true,
+							Enum:     []string{"1", "2"},
+						},
+						"sub_arg2": {
+							Type: String,
+							Desc: "this is the sub argument 2",
+						},
+					},
+					Required: true,
+				},
+				"arg3": {
+					Type: Array,
+					Desc: "this is the third argument",
+					ElemInfo: &ParameterInfo{
+						Type:     String,
+						Desc:     "this is the element of the third argument",
+						Required: true,
+						Enum:     []string{"1", "2"},
+					},
+					Required: true,
+				},
+			}
+			converted, err = oneOf.ToJSONSchema()
+			convey.So(err, convey.ShouldBeNil)
+		})
+	})
+}
+
+func TestJsonSchemaToOpenAPIV3(t *testing.T) {
+	convey.Convey("", t, func() {
+		js := &jsonschema.Schema{
+			Type:        "object",
+			Description: "this is the only argument",
+			Properties: orderedmap.New[string, *jsonschema.Schema](
+				orderedmap.WithInitialData(
+					orderedmap.Pair[string, *jsonschema.Schema]{
+						Key: "arg1",
+						Value: &jsonschema.Schema{
+							Type:        "string",
+							Description: "this is the first argument",
+						},
+					},
+					orderedmap.Pair[string, *jsonschema.Schema]{
+						Key: "arg2",
+						Value: &jsonschema.Schema{
+							Type:        "array",
+							Description: "this is the second argument",
+							Items: &jsonschema.Schema{
+								Type:        "string",
+								Description: "this is the element of the second argument",
+							},
+						},
+					},
+				),
+			),
+			Required: []string{"arg1"},
+		}
+
+		expect := &openapi3.SchemaRef{
+			Value: &openapi3.Schema{
+				Type:        openapi3.TypeObject,
+				Description: "this is the only argument",
+				Properties: map[string]*openapi3.SchemaRef{
+					"arg1": {
+						Value: &openapi3.Schema{
+							Type:        openapi3.TypeString,
+							Description: "this is the first argument",
+						},
+					},
+					"arg2": {
+						Value: &openapi3.Schema{
+							Type:        openapi3.TypeArray,
+							Description: "this is the second argument",
+							Items: &openapi3.SchemaRef{
+								Value: &openapi3.Schema{
+									Type:        openapi3.TypeString,
+									Description: "this is the element of the second argument",
+								},
+							},
+						},
+					},
+				},
+				Required: []string{"arg1"},
+			},
+		}
+
+		js_ := jsonSchemaToOpenAPIV3(js)
+		convey.So(js_, convey.ShouldEqual, expect)
 	})
 }

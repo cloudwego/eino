@@ -17,7 +17,9 @@
 package schema
 
 import (
+	"github.com/eino-contrib/jsonschema"
 	"github.com/getkin/kin-openapi/openapi3"
+	orderedmap "github.com/wk8/go-ordered-map/v2"
 )
 
 // DataType is the type of the parameter.
@@ -97,6 +99,8 @@ type ParamsOneOf struct {
 
 	// use NewParamsOneOfByOpenAPIV3 to set this field
 	openAPIV3 *openapi3.Schema
+
+	jsonschema *jsonschema.Schema
 }
 
 // NewParamsOneOfByParams creates a ParamsOneOf with map[string]*ParameterInfo.
@@ -106,6 +110,15 @@ func NewParamsOneOfByParams(params map[string]*ParameterInfo) *ParamsOneOf {
 	}
 }
 
+// NewParamsOneOfByJSONSchema creates a ParamsOneOf with *jsonschema.Schema.
+func NewParamsOneOfByJSONSchema(s *jsonschema.Schema) *ParamsOneOf {
+	return &ParamsOneOf{
+		jsonschema: s,
+	}
+}
+
+// Deprecated: use NewParamsOneOfByJSONSchema instead.
+// For more information, see https://github.com/cloudwego/eino/discussions/397.
 // NewParamsOneOfByOpenAPIV3 creates a ParamsOneOf with *openapi3.Schema.
 func NewParamsOneOfByOpenAPIV3(openAPIV3 *openapi3.Schema) *ParamsOneOf {
 	return &ParamsOneOf{
@@ -113,6 +126,8 @@ func NewParamsOneOfByOpenAPIV3(openAPIV3 *openapi3.Schema) *ParamsOneOf {
 	}
 }
 
+// Deprecated: use ToJSONSchema instead.
+// For more information, see https://github.com/cloudwego/eino/discussions/397.
 // ToOpenAPIV3 parses ParamsOneOf, converts the parameter description that user actually provides, into the format ready to be passed to Model.
 func (p *ParamsOneOf) ToOpenAPIV3() (*openapi3.Schema, error) {
 	if p == nil {
@@ -122,13 +137,13 @@ func (p *ParamsOneOf) ToOpenAPIV3() (*openapi3.Schema, error) {
 	if p.params != nil {
 		sc := &openapi3.Schema{
 			Properties: make(map[string]*openapi3.SchemaRef, len(p.params)),
-			Type:       openapi3.TypeObject,
+			Type:       string(Object),
 			Required:   make([]string, 0, len(p.params)),
 		}
 
 		for k := range p.params {
 			v := p.params[k]
-			sc.Properties[k] = paramInfoToJSONSchema(v)
+			sc.Properties[k] = paramInfoToOpenAPIV3(v)
 			if v.Required {
 				sc.Required = append(sc.Required, k)
 			}
@@ -137,31 +152,45 @@ func (p *ParamsOneOf) ToOpenAPIV3() (*openapi3.Schema, error) {
 		return sc, nil
 	}
 
+	if p.jsonschema != nil {
+		sc := jsonSchemaToOpenAPIV3(p.jsonschema)
+		return sc.Value, nil
+	}
+
 	return p.openAPIV3, nil
 }
 
-func paramInfoToJSONSchema(paramInfo *ParameterInfo) *openapi3.SchemaRef {
-	var types string
-	switch paramInfo.Type {
-	case Null:
-		types = "null"
-	case Boolean:
-		types = openapi3.TypeBoolean
-	case Integer:
-		types = openapi3.TypeInteger
-	case Number:
-		types = openapi3.TypeNumber
-	case String:
-		types = openapi3.TypeString
-	case Array:
-		types = openapi3.TypeArray
-	case Object:
-		types = openapi3.TypeObject
+// ToJSONSchema parses ParamsOneOf, converts the parameter description that user actually provides, into the format ready to be passed to Model.
+func (p *ParamsOneOf) ToJSONSchema() (*jsonschema.Schema, error) {
+	if p == nil {
+		return nil, nil
 	}
 
+	if p.params != nil {
+		sc := &jsonschema.Schema{
+			Properties: orderedmap.New[string, *jsonschema.Schema](),
+			Type:       string(Object),
+			Required:   make([]string, 0, len(p.params)),
+		}
+
+		for k := range p.params {
+			v := p.params[k]
+			sc.Properties.Set(k, paramInfoToJSONSchema(v))
+			if v.Required {
+				sc.Required = append(sc.Required, k)
+			}
+		}
+
+		return sc, nil
+	}
+
+	return p.jsonschema, nil
+}
+
+func paramInfoToOpenAPIV3(paramInfo *ParameterInfo) *openapi3.SchemaRef {
 	js := &openapi3.SchemaRef{
 		Value: &openapi3.Schema{
-			Type:        types,
+			Type:        string(paramInfo.Type),
 			Description: paramInfo.Desc,
 		},
 	}
@@ -174,14 +203,14 @@ func paramInfoToJSONSchema(paramInfo *ParameterInfo) *openapi3.SchemaRef {
 	}
 
 	if paramInfo.ElemInfo != nil {
-		js.Value.Items = paramInfoToJSONSchema(paramInfo.ElemInfo)
+		js.Value.Items = paramInfoToOpenAPIV3(paramInfo.ElemInfo)
 	}
 
 	if len(paramInfo.SubParams) > 0 {
 		required := make([]string, 0, len(paramInfo.SubParams))
 		js.Value.Properties = make(map[string]*openapi3.SchemaRef, len(paramInfo.SubParams))
 		for k, v := range paramInfo.SubParams {
-			item := paramInfoToJSONSchema(v)
+			item := paramInfoToOpenAPIV3(v)
 
 			js.Value.Properties[k] = item
 
@@ -194,4 +223,71 @@ func paramInfoToJSONSchema(paramInfo *ParameterInfo) *openapi3.SchemaRef {
 	}
 
 	return js
+}
+
+func paramInfoToJSONSchema(paramInfo *ParameterInfo) *jsonschema.Schema {
+	js := &jsonschema.Schema{
+		Type:        string(paramInfo.Type),
+		Description: paramInfo.Desc,
+	}
+
+	if len(paramInfo.Enum) > 0 {
+		js.Enum = make([]any, len(paramInfo.Enum))
+		for i, enum := range paramInfo.Enum {
+			js.Enum[i] = enum
+		}
+	}
+
+	if paramInfo.ElemInfo != nil {
+		js.Items = paramInfoToJSONSchema(paramInfo.ElemInfo)
+	}
+
+	if len(paramInfo.SubParams) > 0 {
+		required := make([]string, 0, len(paramInfo.SubParams))
+		js.Properties = orderedmap.New[string, *jsonschema.Schema]()
+		for k, v := range paramInfo.SubParams {
+			item := paramInfoToJSONSchema(v)
+			js.Properties.Set(k, item)
+			if v.Required {
+				required = append(required, k)
+			}
+		}
+
+		js.Required = required
+	}
+
+	return js
+}
+
+func jsonSchemaToOpenAPIV3(js *jsonschema.Schema) *openapi3.SchemaRef {
+	s := openapi3.NewSchema()
+	s.Type = js.Type
+	s.Description = js.Description
+
+	if js.Enum != nil {
+		s.Enum = make([]any, len(js.Enum))
+		for i, enum := range js.Enum {
+			s.Enum[i] = enum
+		}
+	}
+
+	if js.Items != nil {
+		s.Items = jsonSchemaToOpenAPIV3(js.Items)
+	}
+
+	if js.Properties != nil {
+		s.Properties = make(map[string]*openapi3.SchemaRef, js.Properties.Len())
+		for pair := js.Properties.Oldest(); pair != nil; pair = pair.Next() {
+			s.Properties[pair.Key] = jsonSchemaToOpenAPIV3(pair.Value)
+		}
+	}
+
+	if js.Required != nil {
+		s.Required = make([]string, len(js.Required))
+		for i, required := range js.Required {
+			s.Required[i] = required
+		}
+	}
+
+	return openapi3.NewSchemaRef("", s)
 }
