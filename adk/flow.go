@@ -29,8 +29,9 @@ import (
 )
 
 type HistoryEntry struct {
-	AgentName string
-	Message   Message
+	IsUserInput bool
+	AgentName   string
+	Message     Message
 }
 
 type HistoryRewriter func(ctx context.Context, entries []*HistoryEntry) ([]Message, error)
@@ -226,6 +227,13 @@ func (a *flowAgent) genAgentInput(ctx context.Context, runCtx *runContext, skipT
 
 	events := runCtx.Session.getEvents()
 	historyEntries := make([]*HistoryEntry, 0)
+
+	for _, m := range input.Messages {
+		historyEntries = append(historyEntries, &HistoryEntry{
+			IsUserInput: true,
+			Message:     m,
+		})
+	}
 
 	for _, event := range events {
 		if !belongToRunPath(event.RunPath, runPath) {
