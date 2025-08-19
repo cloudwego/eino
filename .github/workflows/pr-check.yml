@@ -27,7 +27,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version: stable
+          go-version: 1.18
           # for self-hosted, the cache path is shared across projects
           # and it works well without the cache of github actions
           # Enable it if we're going to use Github only

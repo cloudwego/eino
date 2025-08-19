@@ -57,11 +57,19 @@ func (gb *GraphBranch) GetEndNode() map[string]bool {
 func newGraphBranch[T any](r *runnablePacker[T, []string, any], endNodes map[string]bool) *GraphBranch {
 	return &GraphBranch{
 		invoke: func(ctx context.Context, input any) (output []string, err error) {
-			nInput, ok := input.(T)
+			in, ok := input.(T)
 			if !ok {
-				panic(newUnexpectedInputTypeErr(generic.TypeOf[T](), reflect.TypeOf(input)))
+				// When a nil is passed as an 'any' type, its original type information is lost,
+				// becoming an untyped nil. This would cause type assertions to fail.
+				// So if the input is nil and the target type T is an interface, we need to explicitly create a nil of type T.
+				if input == nil && generic.TypeOf[T]().Kind() == reflect.Interface {
+					var i T
+					in = i
+				} else {
+					panic(newUnexpectedInputTypeErr(generic.TypeOf[T](), reflect.TypeOf(input)))
+				}
 			}
-			return r.Invoke(ctx, nInput)
+			return r.Invoke(ctx, in)
 		},
 		collect: func(ctx context.Context, input streamReader) (output []string, err error) {
 			in, ok := unpackStreamReader[T](input)
