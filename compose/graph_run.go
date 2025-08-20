@@ -241,7 +241,8 @@ func (r *runner) run(ctx context.Context, isStream bool, input any, opts ...Opti
 		ctx, input = onGraphStart(ctx, input, isStream)
 		haveOnStart = true
 
-		nextTasks, result, err = r.calculateNextTasks(ctx, []*task{{
+		var isEnd bool
+		nextTasks, result, isEnd, err = r.calculateNextTasks(ctx, []*task{{
 			nodeKey: START,
 			call:    r.inputChannels,
 			output:  input,
@@ -249,7 +250,7 @@ func (r *runner) run(ctx context.Context, isStream bool, input any, opts ...Opti
 		if err != nil {
 			return nil, newGraphRunError(fmt.Errorf("calculate next tasks fail: %w", err))
 		}
-		if result != nil {
+		if isEnd {
 			return result, nil
 		}
 
@@ -325,12 +326,12 @@ func (r *runner) run(ctx context.Context, isStream bool, input any, opts ...Opti
 			return nil, newGraphRunError(fmt.Errorf("no tasks to execute, before tasks: %v", beforeTasks))
 		}
 
-		var result any
-		nextTasks, result, err = r.calculateNextTasks(ctx, completedTasks, isStream, cm, optMap)
+		var isEnd bool
+		nextTasks, result, isEnd, err = r.calculateNextTasks(ctx, completedTasks, isStream, cm, optMap)
 		if err != nil {
 			return nil, newGraphRunError(fmt.Errorf("failed to calculate next tasks: %w", err))
 		}
-		if result != nil {
+		if isEnd {
 			return result, nil
 		}
 
@@ -356,12 +357,13 @@ func (r *runner) run(ctx context.Context, isStream bool, input any, opts ...Opti
 				)
 			}
 
-			newNextTasks, result, err := r.calculateNextTasks(ctx, newCompletedTasks, isStream, cm, optMap)
+			var newNextTasks []*task
+			newNextTasks, result, isEnd, err = r.calculateNextTasks(ctx, newCompletedTasks, isStream, cm, optMap)
 			if err != nil {
 				return nil, newGraphRunError(fmt.Errorf("failed to calculate next tasks: %w", err))
 			}
 
-			if result != nil {
+			if isEnd {
 				return result, nil
 			}
 
@@ -577,29 +579,29 @@ func (r *runner) handleInterruptWithSubGraphAndRerunNodes(
 	return &interruptError{Info: intInfo}
 }
 
-func (r *runner) calculateNextTasks(ctx context.Context, completedTasks []*task, isStream bool, cm *channelManager, optMap map[string][]any) ([]*task, any, error) {
+func (r *runner) calculateNextTasks(ctx context.Context, completedTasks []*task, isStream bool, cm *channelManager, optMap map[string][]any) ([]*task, any, bool, error) {
 	writeChannelValues, controls, err := r.resolveCompletedTasks(ctx, completedTasks, isStream, cm)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, false, err
 	}
 	nodeMap, err := cm.updateAndGet(ctx, writeChannelValues, controls)
 	if err != nil {
-		return nil, nil, fmt.Errorf("failed to update and get channels: %w", err)
+		return nil, nil, false, fmt.Errorf("failed to update and get channels: %w", err)
 	}
 	var nextTasks []*task
 	if len(nodeMap) > 0 {
 		// Check if we've reached the END node.
 		if v, ok := nodeMap[END]; ok {
-			return nil, v, nil
+			return nil, v, true, nil
 		}
 
 		// Create and submit the next batch of tasks.
 		nextTasks, err = r.createTasks(ctx, nodeMap, optMap)
 		if err != nil {
-			return nil, nil, fmt.Errorf("failed to create tasks: %w", err)
+			return nil, nil, false, fmt.Errorf("failed to create tasks: %w", err)
 		}
 	}
-	return nextTasks, nil, nil
+	return nextTasks, nil, false, nil
 }
 
 func (r *runner) createTasks(ctx context.Context, nodeMap map[string]any, optMap map[string][]any) ([]*task, error) {

@@ -455,7 +455,19 @@ func toGenericRunnable[I, O any](cr *composableRunnable, ctxWrapper func(ctx con
 			return output, err
 		}
 
-		return out.(O), err
+		to, ok := out.(O)
+		if !ok {
+			// When a nil is passed as an 'any' type, its original type information is lost,
+			// becoming an untyped nil. This would cause type assertions to fail.
+			// So if the output is nil and the target type O is an interface, we need to explicitly create a nil of type O.
+			if out == nil && generic.TypeOf[O]().Kind() == reflect.Interface {
+				var o O
+				to = o
+			} else {
+				panic(newUnexpectedInputTypeErr(generic.TypeOf[O](), reflect.TypeOf(out)))
+			}
+		}
+		return to, nil
 	}
 
 	t := func(ctx context.Context, input *schema.StreamReader[I],

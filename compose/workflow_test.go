@@ -1496,3 +1496,21 @@ func TestCustomExtractor(t *testing.T) {
 		assert.Equal(t, map[string]int{"a": 1, "b": 2}, result)
 	})
 }
+
+func TestAddDependency(t *testing.T) {
+	ctx := context.Background()
+
+	wf := NewWorkflow[string, any]()
+
+	wf.AddLambdaNode("1", InvokableLambda(func(ctx context.Context, in string) (output string, err error) {
+		return in + "_" + in, nil
+	})).AddDependency(START)
+
+	wf.End().AddDependency("1")
+
+	r, err := wf.Compile(ctx)
+	assert.NoError(t, err)
+	out, err := r.Invoke(ctx, "input")
+	assert.NoError(t, err)
+	assert.Equal(t, nil, out)
+}
