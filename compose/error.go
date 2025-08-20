@@ -113,7 +113,7 @@ type internalError struct {
 
 func (i *internalError) Error() string {
 	sb := strings.Builder{}
-	sb.WriteString(string("[" + i.typ + "]\n"))
+	sb.WriteString(string("[" + i.typ + "] "))
 	sb.WriteString(i.origError.Error())
 	if len(i.nodePath.path) > 0 {
 		sb.WriteString("\n------------------------\n")
