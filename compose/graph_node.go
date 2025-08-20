@@ -46,7 +46,6 @@ type nodeInfo struct {
 
 	// the name of graph node for display purposes, not unique.
 	// passed from WithNodeName()
-	// if not set, it will be inferred from the component type and component name
 	name string
 
 	inputKey  string
