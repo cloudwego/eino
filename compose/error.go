@@ -76,28 +76,6 @@ func wrapGraphNodeError(nodeKey string, err error) error {
 	return ie
 }
 
-func newStreamWrapperError(streamWrapperType defaultImplAction, err error) error {
-	return &internalError{
-		typ:       internalErrorTypeGraphRun,
-		origError: err,
-	}
-}
-
-func wrapStreamWrapperError(streamWrapperType defaultImplAction, err error) error {
-	if ok := isInterruptError(err); ok {
-		return err
-	}
-	var ie *internalError
-	ok := errors.As(err, &ie)
-	if !ok {
-		return &internalError{
-			typ:       internalErrorTypeNodeRun,
-			origError: err,
-		}
-	}
-	return ie
-}
-
 type internalErrorType string
 
 const (

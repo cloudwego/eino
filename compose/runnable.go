@@ -180,12 +180,12 @@ func (rp *runnablePacker[I, O, TOption]) Transform(ctx context.Context,
 }
 
 func defaultImplConcatStreamReader[T any](
-	sr *schema.StreamReader[T], action defaultImplAction) (T, error) {
+	sr *schema.StreamReader[T]) (T, error) {
 
 	c, err := concatStreamReader(sr)
 	if err != nil {
 		var t T
-		return t, newStreamWrapperError(action, fmt.Errorf("concat stream reader fail: %w", err))
+		return t, fmt.Errorf("concat stream reader fail: %w", err)
 	}
 
 	return c, nil
@@ -193,69 +193,49 @@ func defaultImplConcatStreamReader[T any](
 
 func invokeByStream[I, O, TOption any](s Stream[I, O, TOption]) Invoke[I, O, TOption] {
 	return func(ctx context.Context, input I, opts ...TOption) (output O, err error) {
-		action := actionInvokeByStream
-
 		sr, err := s(ctx, input, opts...)
 		if err != nil {
-			return output, wrapStreamWrapperError(action, err)
+			return output, err
 		}
 
-		return defaultImplConcatStreamReader(sr, action)
+		return defaultImplConcatStreamReader(sr)
 	}
 }
 
 func invokeByCollect[I, O, TOption any](c Collect[I, O, TOption]) Invoke[I, O, TOption] {
 	return func(ctx context.Context, input I, opts ...TOption) (output O, err error) {
-		action := actionInvokeByCollect
-
 		sr := schema.StreamReaderFromArray([]I{input})
 
-		output, err = c(ctx, sr, opts...)
-		if err != nil {
-			err = wrapStreamWrapperError(action, err)
-		}
-
-		return output, err
+		return c(ctx, sr, opts...)
 	}
 }
 
 func invokeByTransform[I, O, TOption any](t Transform[I, O, TOption]) Invoke[I, O, TOption] {
 	return func(ctx context.Context, input I, opts ...TOption) (output O, err error) {
-		action := actionInvokeByTransform
-
 		srInput := schema.StreamReaderFromArray([]I{input})
 
 		srOutput, err := t(ctx, srInput, opts...)
 		if err != nil {
-			return output, wrapStreamWrapperError(action, err)
+			return output, err
 		}
 
-		return defaultImplConcatStreamReader(srOutput, action)
+		return defaultImplConcatStreamReader(srOutput)
 	}
 }
 
 func streamByTransform[I, O, TOption any](t Transform[I, O, TOption]) Stream[I, O, TOption] {
 	return func(ctx context.Context, input I, opts ...TOption) (output *schema.StreamReader[O], err error) {
-		action := actionStreamByTransform
-
 		srInput := schema.StreamReaderFromArray([]I{input})
 
-		output, err = t(ctx, srInput, opts...)
-		if err != nil {
-			err = wrapStreamWrapperError(action, err)
-		}
-
-		return output, err
+		return t(ctx, srInput, opts...)
 	}
 }
 
 func streamByInvoke[I, O, TOption any](i Invoke[I, O, TOption]) Stream[I, O, TOption] {
 	return func(ctx context.Context, input I, opts ...TOption) (output *schema.StreamReader[O], err error) {
-		action := actionStreamByInvoke
-
 		out, err := i(ctx, input, opts...)
 		if err != nil {
-			return nil, wrapStreamWrapperError(action, err)
+			return nil, err
 		}
 
 		return schema.StreamReaderFromArray([]O{out}), nil
@@ -264,12 +244,10 @@ func streamByInvoke[I, O, TOption any](i Invoke[I, O, TOption]) Stream[I, O, TOp
 
 func streamByCollect[I, O, TOption any](c Collect[I, O, TOption]) Stream[I, O, TOption] {
 	return func(ctx context.Context, input I, opts ...TOption) (output *schema.StreamReader[O], err error) {
-		action := actionStreamByCollect
-
 		srInput := schema.StreamReaderFromArray([]I{input})
 		out, err := c(ctx, srInput, opts...)
 		if err != nil {
-			return nil, wrapStreamWrapperError(action, err)
+			return nil, err
 		}
 
 		return schema.StreamReaderFromArray([]O{out}), nil
@@ -278,83 +256,60 @@ func streamByCollect[I, O, TOption any](c Collect[I, O, TOption]) Stream[I, O, T
 
 func collectByTransform[I, O, TOption any](t Transform[I, O, TOption]) Collect[I, O, TOption] {
 	return func(ctx context.Context, input *schema.StreamReader[I], opts ...TOption) (output O, err error) {
-		action := actionCollectByTransform
-
 		srOutput, err := t(ctx, input, opts...)
 		if err != nil {
-			return output, wrapStreamWrapperError(action, err)
+			return output, err
 		}
 
-		return defaultImplConcatStreamReader(srOutput, action)
+		return defaultImplConcatStreamReader(srOutput)
 	}
 }
 
 func collectByInvoke[I, O, TOption any](i Invoke[I, O, TOption]) Collect[I, O, TOption] {
 	return func(ctx context.Context, input *schema.StreamReader[I], opts ...TOption) (output O, err error) {
-		action := actionCollectByInvoke
-
-		in, err := defaultImplConcatStreamReader(input, action)
+		in, err := defaultImplConcatStreamReader(input)
 		if err != nil {
 			return output, err
 		}
 
-		output, err = i(ctx, in, opts...)
-		if err != nil {
-			err = wrapStreamWrapperError(action, err)
-		}
-
-		return output, err
+		return i(ctx, in, opts...)
 	}
 }
 
 func collectByStream[I, O, TOption any](s Stream[I, O, TOption]) Collect[I, O, TOption] {
 	return func(ctx context.Context, input *schema.StreamReader[I], opts ...TOption) (output O, err error) {
-		action := actionCollectByStream
-
-		in, err := defaultImplConcatStreamReader(input, action)
+		in, err := defaultImplConcatStreamReader(input)
 		if err != nil {
 			return output, err
 		}
 
 		srOutput, err := s(ctx, in, opts...)
 		if err != nil {
-			return output, wrapStreamWrapperError(action, err)
+			return output, err
 		}
 
-		return defaultImplConcatStreamReader(srOutput, action)
+		return defaultImplConcatStreamReader(srOutput)
 	}
 }
 
 func transformByStream[I, O, TOption any](s Stream[I, O, TOption]) Transform[I, O, TOption] {
 	return func(ctx context.Context, input *schema.StreamReader[I],
 		opts ...TOption) (output *schema.StreamReader[O], err error) {
-
-		action := actionTransformByStream
-
-		in, err := defaultImplConcatStreamReader(input, action)
+		in, err := defaultImplConcatStreamReader(input)
 		if err != nil {
 			return output, err
 		}
 
-		output, err = s(ctx, in, opts...)
-
-		if err != nil {
-			err = wrapStreamWrapperError(action, err)
-		}
-
-		return output, err
+		return s(ctx, in, opts...)
 	}
 }
 
 func transformByCollect[I, O, TOption any](c Collect[I, O, TOption]) Transform[I, O, TOption] {
 	return func(ctx context.Context, input *schema.StreamReader[I],
 		opts ...TOption) (output *schema.StreamReader[O], err error) {
-
-		action := actionTransformByCollect
-
 		out, err := c(ctx, input, opts...)
 		if err != nil {
-			return output, wrapStreamWrapperError(action, err)
+			return output, err
 		}
 
 		return schema.StreamReaderFromArray([]O{out}), nil
@@ -364,17 +319,14 @@ func transformByCollect[I, O, TOption any](c Collect[I, O, TOption]) Transform[I
 func transformByInvoke[I, O, TOption any](i Invoke[I, O, TOption]) Transform[I, O, TOption] {
 	return func(ctx context.Context, input *schema.StreamReader[I],
 		opts ...TOption) (output *schema.StreamReader[O], err error) {
-
-		action := actionTransformByInvoke
-
-		in, err := defaultImplConcatStreamReader(input, action)
+		in, err := defaultImplConcatStreamReader(input)
 		if err != nil {
 			return output, err
 		}
 
 		out, err := i(ctx, in, opts...)
 		if err != nil {
-			return output, wrapStreamWrapperError(action, err)
+			return output, err
 		}
 
 		return schema.StreamReaderFromArray([]O{out}), nil
