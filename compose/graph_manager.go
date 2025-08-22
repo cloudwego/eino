@@ -231,6 +231,10 @@ func (c *channelManager) reportBranch(from string, skippedNodes []string) error 
 
 	for i := 0; i < len(nKeys); i++ {
 		key := nKeys[i]
+
+		if key == END {
+			continue
+		}
 		if _, ok := c.successors[key]; !ok {
 			return fmt.Errorf("unknown node: %s", key)
 		}

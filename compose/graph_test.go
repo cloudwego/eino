@@ -1974,3 +1974,43 @@ func TestPrintTasks(t *testing.T) {
 	ts = []*task{{nodeKey: "1"}, {nodeKey: "2"}, {nodeKey: "3"}}
 	assert.Equal(t, "[1, 2, 3]", printTask(ts))
 }
+
+func TestSkipBranch(t *testing.T) {
+	g := NewGraph[string, string]()
+	_ = g.AddLambdaNode("1", InvokableLambda(func(ctx context.Context, input string) (output string, err error) {
+		return input, nil
+	}))
+	_ = g.AddLambdaNode("2", InvokableLambda(func(ctx context.Context, input string) (output string, err error) {
+		return input, nil
+	}))
+	_ = g.AddEdge(START, "1")
+	_ = g.AddBranch("1", NewGraphMultiBranch(func(ctx context.Context, in string) (endNode map[string]bool, err error) {
+		return map[string]bool{}, nil
+	}, map[string]bool{"2": true}))
+	_ = g.AddEdge("2", END)
+
+	ctx := context.Background()
+	r, err := g.Compile(ctx, WithNodeTriggerMode(AllPredecessor))
+	assert.NoError(t, err)
+	_, err = r.Invoke(ctx, "input")
+	assert.ErrorContains(t, err, "[GraphRunError] no tasks to execute, last completed nodes: [1]")
+
+	g = NewGraph[string, string]()
+	_ = g.AddLambdaNode("1", InvokableLambda(func(ctx context.Context, input string) (output string, err error) {
+		return input, nil
+	}))
+	_ = g.AddLambdaNode("2", InvokableLambda(func(ctx context.Context, input string) (output string, err error) {
+		return input, nil
+	}))
+	_ = g.AddEdge(START, "1")
+	_ = g.AddBranch("1", NewGraphMultiBranch(func(ctx context.Context, in string) (endNode map[string]bool, err error) {
+		return map[string]bool{}, nil
+	}, map[string]bool{"2": true}))
+	_ = g.AddEdge("2", END)
+	_ = g.AddEdge(START, "2")
+	r, err = g.Compile(ctx, WithNodeTriggerMode(AllPredecessor))
+	assert.NoError(t, err)
+	result, err := r.Invoke(ctx, "input")
+	assert.NoError(t, err)
+	assert.Equal(t, "input", result)
+}
