@@ -148,6 +148,7 @@ func newReact(ctx context.Context, config *reactConfig) (reactGraph, error) {
 			st.Messages = append(st.Messages, input)
 		}
 
+		input = st.Messages[len(st.Messages)-1]
 		if len(config.toolsReturnDirectly) > 0 {
 			for i := range input.ToolCalls {
 				toolName := input.ToolCalls[i].Function.Name
@@ -157,7 +158,7 @@ func newReact(ctx context.Context, config *reactConfig) (reactGraph, error) {
 			}
 		}
 
-		return st.Messages[len(st.Messages)-1], nil
+		return input, nil
 	}
 
 	_ = g.AddToolsNode(toolNode_, toolsNode,
