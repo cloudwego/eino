@@ -58,6 +58,7 @@ func WithMarshalOutput(m MarshalOutput) Option {
 	}
 }
 
+// Deprecated. For more information, see https://github.com/cloudwego/eino/discussions/397.
 // SchemaCustomizerFn is the schema customizer function for inferring tool parameter from tagged go struct.
 // Within this function, end-user can parse custom go struct tags into corresponding openapi schema field.
 // Parameters:
@@ -67,6 +68,7 @@ func WithMarshalOutput(m MarshalOutput) Option {
 // 4. schema: the current openapi schema object to be customized.
 type SchemaCustomizerFn func(name string, t reflect.Type, tag reflect.StructTag, schema *openapi3.Schema) error
 
+// Deprecated. For more information, see https://github.com/cloudwego/eino/discussions/397.
 // WithSchemaCustomizer sets a user-defined schema customizer for inferring tool parameter from tagged go struct.
 // If this option is not set, the defaultSchemaCustomizer will be used.
 func WithSchemaCustomizer(sc SchemaCustomizerFn) Option {
@@ -86,6 +88,7 @@ func getToolOptions(opt ...Option) *toolOptions {
 	return opts
 }
 
+// Deprecated. For more information, see https://github.com/cloudwego/eino/discussions/397.
 // defaultSchemaCustomizer is the default schema customizer when using reflect to infer tool parameter from tagged go struct.
 // Supported struct tags:
 // 1. jsonschema: "description=xxx"

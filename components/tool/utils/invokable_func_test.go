@@ -18,11 +18,14 @@ package utils
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"testing"
 
+	"github.com/eino-contrib/jsonschema"
 	"github.com/getkin/kin-openapi/openapi3"
 	"github.com/stretchr/testify/assert"
+	orderedmap "github.com/wk8/go-ordered-map/v2"
 
 	"github.com/cloudwego/eino/components/tool"
 	"github.com/cloudwego/eino/schema"
@@ -58,118 +61,132 @@ type UserResult struct {
 var toolInfo = &schema.ToolInfo{
 	Name: "update_user_info",
 	Desc: "full update user info",
-	ParamsOneOf: schema.NewParamsOneOfByOpenAPIV3(
-		&openapi3.Schema{
-			Type:     openapi3.TypeObject,
-			Required: []string{"age", "incomes", "name"},
-			Properties: openapi3.Schemas{
-				"name": {
-					Value: &openapi3.Schema{
-						Type:        openapi3.TypeString,
-						Description: "the name of the user",
-					},
-				},
-				"age": {
-					Value: &openapi3.Schema{
-						Type:        openapi3.TypeInteger,
-						Description: "the age of the user",
-					},
-				},
-				"job": {
-					Value: &openapi3.Schema{
-						Type:        openapi3.TypeObject,
-						Description: "the job of the user",
-						Required:    []string{"company"},
-						// Nullable:    true,
-						Properties: openapi3.Schemas{
-							"company": {
-								Value: &openapi3.Schema{
-									Type:        openapi3.TypeString,
-									Description: "the company where the user works",
-								},
-							},
-							"service_length": {
-								Value: &openapi3.Schema{
-									Type:        openapi3.TypeNumber,
-									Description: "the year of user's service",
-									Format:      "float",
-								},
-							},
-							"position": {
-								Value: &openapi3.Schema{
-									Type:        openapi3.TypeString,
-									Description: "the position of the user's job",
-								},
-							},
+	ParamsOneOf: schema.NewParamsOneOfByJSONSchema(
+		&jsonschema.Schema{
+			Type:                 openapi3.TypeObject,
+			Required:             []string{"name", "age", "incomes"},
+			AdditionalProperties: jsonschema.FalseSchema,
+			Properties: orderedmap.New[string, *jsonschema.Schema](
+				orderedmap.WithInitialData(
+					orderedmap.Pair[string, *jsonschema.Schema]{
+						Key: "name",
+						Value: &jsonschema.Schema{
+							Type:        "string",
+							Description: "the name of the user",
 						},
 					},
-				},
-				"incomes": {
-					Value: &openapi3.Schema{
-						Type:        openapi3.TypeArray,
-						Description: "the incomes of the user",
-						Items: &openapi3.SchemaRef{
-							Value: &openapi3.Schema{
-								Type:        openapi3.TypeObject,
-								Required:    []string{"amount", "has_pay_tax", "source"},
-								Description: "the incomes of the user",
-								// Nullable:    true,
-								Properties: openapi3.Schemas{
-									"source": {
-										Value: &openapi3.Schema{
-											Type:        openapi3.TypeString,
-											Description: "the source of income",
+					orderedmap.Pair[string, *jsonschema.Schema]{
+						Key: "age",
+						Value: &jsonschema.Schema{
+							Type:        "integer",
+							Description: "the age of the user",
+						},
+					},
+					orderedmap.Pair[string, *jsonschema.Schema]{
+						Key: "job",
+						Value: &jsonschema.Schema{
+							Type:                 "object",
+							Required:             []string{"company"},
+							AdditionalProperties: jsonschema.FalseSchema,
+							Properties: orderedmap.New[string, *jsonschema.Schema](
+								orderedmap.WithInitialData(
+									orderedmap.Pair[string, *jsonschema.Schema]{
+										Key: "company",
+										Value: &jsonschema.Schema{
+											Type:        "string",
+											Description: "the company where the user works",
 										},
 									},
-									"amount": {
-										Value: &openapi3.Schema{
-											Type:        openapi3.TypeInteger,
-											Description: "the amount of income",
+									orderedmap.Pair[string, *jsonschema.Schema]{
+										Key: "position",
+										Value: &jsonschema.Schema{
+											Type:        "string",
+											Description: "the position of the user's job",
 										},
 									},
-									"has_pay_tax": {
-										Value: &openapi3.Schema{
-											Type:        openapi3.TypeBoolean,
-											Description: "whether the user has paid tax",
+									orderedmap.Pair[string, *jsonschema.Schema]{
+										Key: "service_length",
+										Value: &jsonschema.Schema{
+											Type:        "number",
+											Description: "the year of user's service",
 										},
 									},
-									"job": {
-										Value: &openapi3.Schema{
-											Type:        openapi3.TypeObject,
-											Description: "the job of the user when earning this income",
-											Required:    []string{"company"},
-											// Nullable:    true,
-											Properties: openapi3.Schemas{
-												"company": {
-													Value: &openapi3.Schema{
-														Type:        openapi3.TypeString,
-														Description: "the company where the user works",
-													},
-												},
-												"service_length": {
-													Value: &openapi3.Schema{
-														Type:        openapi3.TypeNumber,
-														Description: "the year of user's service",
-														Format:      "float",
-													},
-												},
-												"position": {
-													Value: &openapi3.Schema{
-														Type:        openapi3.TypeString,
-														Description: "the position of the user's job",
-													},
-												},
+								),
+							),
+						},
+					},
+					orderedmap.Pair[string, *jsonschema.Schema]{
+						Key: "incomes",
+						Value: &jsonschema.Schema{
+							Type:        "array",
+							Description: "the incomes of the user",
+							Items: &jsonschema.Schema{
+								Type:                 "object",
+								AdditionalProperties: jsonschema.FalseSchema,
+								Required:             []string{"source", "amount", "has_pay_tax"},
+								Properties: orderedmap.New[string, *jsonschema.Schema](
+									orderedmap.WithInitialData(
+										orderedmap.Pair[string, *jsonschema.Schema]{
+											Key: "source",
+											Value: &jsonschema.Schema{
+												Type:        "string",
+												Description: "the source of income",
 											},
 										},
-									},
-								},
-								AdditionalProperties: openapi3.AdditionalProperties{},
+										orderedmap.Pair[string, *jsonschema.Schema]{
+											Key: "amount",
+											Value: &jsonschema.Schema{
+												Type:        "integer",
+												Description: "the amount of income",
+											},
+										},
+										orderedmap.Pair[string, *jsonschema.Schema]{
+											Key: "has_pay_tax",
+											Value: &jsonschema.Schema{
+												Type:        "boolean",
+												Description: "whether the user has paid tax",
+											},
+										},
+										orderedmap.Pair[string, *jsonschema.Schema]{
+											Key: "job",
+											Value: &jsonschema.Schema{
+												Type:                 "object",
+												AdditionalProperties: jsonschema.FalseSchema,
+												Required:             []string{"company"},
+												Properties: orderedmap.New[string, *jsonschema.Schema](
+													orderedmap.WithInitialData(
+														orderedmap.Pair[string, *jsonschema.Schema]{
+															Key: "company",
+															Value: &jsonschema.Schema{
+																Type:        "string",
+																Description: "the company where the user works",
+															},
+														},
+														orderedmap.Pair[string, *jsonschema.Schema]{
+															Key: "position",
+															Value: &jsonschema.Schema{
+																Type:        "string",
+																Description: "the position of the user's job",
+															},
+														},
+														orderedmap.Pair[string, *jsonschema.Schema]{
+															Key: "service_length",
+															Value: &jsonschema.Schema{
+																Type:        "number",
+																Description: "the year of user's service",
+															},
+														},
+													),
+												),
+											},
+										},
+									),
+								),
 							},
 						},
 					},
-				},
-			},
-			AdditionalProperties: openapi3.AdditionalProperties{},
+				),
+			),
 		}),
 }
 
@@ -211,13 +228,23 @@ func TestInferTool(t *testing.T) {
 
 		info, err := tl.Info(context.Background())
 		assert.NoError(t, err)
-		assert.Equal(t, toolInfo, info)
+
+		actual, err := info.ToJSONSchema()
+		assert.NoError(t, err)
+		actualStr, err := json.Marshal(actual)
+		assert.NoError(t, err)
+
+		expect, err := toolInfo.ToJSONSchema()
+		assert.NoError(t, err)
+		expectStr, err := json.Marshal(expect)
+		assert.NoError(t, err)
+
+		assert.Equal(t, string(expectStr), string(actualStr))
 
 		content, err := tl.InvokableRun(ctx, `{"name": "bruce lee"}`)
 		assert.NoError(t, err)
 		assert.JSONEq(t, `{"code":200,"msg":"update bruce lee success"}`, content)
 	})
-
 }
 
 func TestInferOptionableTool(t *testing.T) {
@@ -320,7 +347,7 @@ type testEnumStruct struct {
 	Field1 string       `json:"field1" jsonschema:"enum=a,enum=b"`
 	Field2 int          `json:"field2" jsonschema:"enum=1,enum=2"`
 	Field3 float32      `json:"field3" jsonschema:"enum=1.1,enum=2.2"`
-	Field4 bool         `json:"field4" jsonschema:"enum=true"`
+	Field4 bool         `json:"field4" jsonschema:"default=true"`
 	Field5 stringAlias  `json:"field5" jsonschema:"enum=a,enum=c"`
 	Field6 integerAlias `json:"field6" jsonschema:"enum=3,enum=4"`
 	Field7 floatAlias   `json:"field7" jsonschema:"enum=3.3,enum=4.4"`
@@ -335,30 +362,50 @@ type testEnumStruct3 struct {
 	Field1 float64 `json:"field1" jsonschema:"enum=a"`
 }
 
-type testEnumStruct4 struct {
-	Field1 bool `json:"field1" jsonschema:"enum=2"`
-}
-
 func TestEnumTag(t *testing.T) {
 	info, err := goStruct2ParamsOneOf[testEnumStruct]()
 	assert.NoError(t, err)
-	s, err := info.ToOpenAPIV3()
+	s, err := info.ToJSONSchema()
 	assert.NoError(t, err)
-	assert.Equal(t, []any{"a", "b"}, s.Properties["field1"].Value.Enum)
-	assert.Equal(t, []any{int64(1), int64(2)}, s.Properties["field2"].Value.Enum)
-	assert.Equal(t, []any{1.1, 2.2}, s.Properties["field3"].Value.Enum)
-	assert.Equal(t, []any{true}, s.Properties["field4"].Value.Enum)
-	assert.Equal(t, []any{"a", "c"}, s.Properties["field5"].Value.Enum)
-	assert.Equal(t, []any{int64(3), int64(4)}, s.Properties["field6"].Value.Enum)
-	assert.Equal(t, []any{3.3, 4.4}, s.Properties["field7"].Value.Enum)
-	assert.Equal(t, []any{false}, s.Properties["field8"].Value.Enum)
+
+	enum, ok := s.Properties.Get("field1")
+	assert.True(t, ok)
+	assert.Equal(t, []any{"a", "b"}, enum.Enum)
+
+	enum, ok = s.Properties.Get("field2")
+	assert.True(t, ok)
+	assert.Equal(t, []any{json.Number("1"), json.Number("2")}, enum.Enum)
+
+	enum, ok = s.Properties.Get("field3")
+	assert.True(t, ok)
+	assert.Equal(t, []any{json.Number("1.1"), json.Number("2.2")}, enum.Enum)
+
+	enum, ok = s.Properties.Get("field4")
+	assert.True(t, ok)
+	assert.Equal(t, true, enum.Default)
+
+	enum, ok = s.Properties.Get("field5")
+	assert.True(t, ok)
+	assert.Equal(t, []any{"a", "c"}, enum.Enum)
+
+	enum, ok = s.Properties.Get("field6")
+	assert.True(t, ok)
+	assert.Equal(t, []any{json.Number("3"), json.Number("4")}, enum.Enum)
+
+	enum, ok = s.Properties.Get("field7")
+	assert.True(t, ok)
+	assert.Equal(t, []any{json.Number("3.3"), json.Number("4.4")}, enum.Enum)
 
 	_, err = goStruct2ParamsOneOf[testEnumStruct2]()
-	assert.ErrorContains(t, err, "parse enum value 1.1 to int64 failed")
+	assert.NoError(t, err)
 
 	_, err = goStruct2ParamsOneOf[testEnumStruct3]()
-	assert.ErrorContains(t, err, "parse enum value a to float64 failed")
+	assert.NoError(t, err)
+}
 
-	_, err = goStruct2ParamsOneOf[testEnumStruct4]()
-	assert.ErrorContains(t, err, "parse enum value 2 to bool failed")
+func TestResolveRef(t *testing.T) {
+	s, err := toolInfo.ToJSONSchema()
+	assert.NoError(t, err)
+	s_ := resolveRef(s, nil)
+	assert.Equal(t, s, s_)
 }

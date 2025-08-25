@@ -4,15 +4,19 @@ go 1.18
 
 require (
 	github.com/bytedance/sonic v1.13.2
+	github.com/eino-contrib/jsonschema v1.0.0
 	github.com/getkin/kin-openapi v0.118.0
 	github.com/nikolalohinski/gonja v1.5.3
 	github.com/slongfield/pyfmt v0.0.0-20220222012616-ea85ff4c361f
 	github.com/smartystreets/goconvey v1.8.1
 	github.com/stretchr/testify v1.9.0
+	github.com/wk8/go-ordered-map/v2 v2.1.8
 	go.uber.org/mock v0.4.0
 )
 
 require (
+	github.com/bahlo/generic-list-go v0.2.0 // indirect
+	github.com/buger/jsonparser v1.1.1 // indirect
 	github.com/bytedance/sonic/loader v0.2.4 // indirect
 	github.com/cloudwego/base64x v0.1.5 // indirect
 	github.com/davecgh/go-spew v1.1.1 // indirect
