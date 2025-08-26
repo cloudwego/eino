@@ -17,8 +17,13 @@
 package adk
 
 import (
+	"bytes"
 	"context"
+	"encoding/gob"
+	"fmt"
 	"sync"
+
+	"github.com/cloudwego/eino/schema"
 )
 
 type runSession struct {
@@ -34,6 +39,25 @@ type agentEventWrapper struct {
 	*AgentEvent
 	mu                  sync.Mutex
 	concatenatedMessage Message
+}
+
+type otherAgentEventWrapperForEncode agentEventWrapper
+
+func (a *agentEventWrapper) GobEncode() ([]byte, error) {
+	if a.concatenatedMessage != nil && a.Output != nil && a.Output.MessageOutput != nil && a.Output.MessageOutput.IsStreaming {
+		a.Output.MessageOutput.MessageStream = schema.StreamReaderFromArray([]Message{a.concatenatedMessage})
+	}
+
+	buf := &bytes.Buffer{}
+	err := gob.NewEncoder(buf).Encode((*otherAgentEventWrapperForEncode)(a))
+	if err != nil {
+		return nil, fmt.Errorf("failed to gob encode agent event wrapper: %w", err)
+	}
+	return buf.Bytes(), nil
+}
+
+func (a *agentEventWrapper) GobDecode(b []byte) error {
+	return gob.NewDecoder(bytes.NewReader(b)).Decode((*otherAgentEventWrapperForEncode)(a))
 }
 
 func newRunSession() *runSession {
