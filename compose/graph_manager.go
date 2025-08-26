@@ -20,6 +20,7 @@ import (
 	"context"
 	"fmt"
 	"runtime/debug"
+	"time"
 
 	"github.com/cloudwego/eino/internal"
 	"github.com/cloudwego/eino/internal/safe"
@@ -260,8 +261,13 @@ type taskManager struct {
 	opts       []Option
 	needAll    bool
 
-	num  uint32
-	done *internal.UnboundedChan[*task]
+	num          uint32
+	done         *internal.UnboundedChan[*task]
+	runningTasks map[string]*task
+
+	cancelCh chan *time.Duration
+	canceled bool
+	deadline *time.Time
 }
 
 func (t *taskManager) execute(currentTask *task) {
@@ -298,6 +304,8 @@ func (t *taskManager) submit(tasks []*task) error {
 			t.num++
 			t.done.Send(currentTask)
 		}
+
+		t.runningTasks[currentTask.nodeKey] = currentTask
 	}
 	if len(tasks) == 0 {
 		// all tasks' pre-handler failed
@@ -305,7 +313,7 @@ func (t *taskManager) submit(tasks []*task) error {
 	}
 
 	var syncTask *task
-	if t.num == 0 && (len(tasks) == 1 || t.needAll) {
+	if t.num == 0 && (len(tasks) == 1 || t.needAll) && t.cancelCh == nil /*if graph can be interrupted by user, shouldn't sync run task*/ {
 		syncTask = tasks[0]
 		tasks = tasks[1:]
 	}
@@ -320,43 +328,167 @@ func (t *taskManager) submit(tasks []*task) error {
 	return nil
 }
 
-func (t *taskManager) wait() []*task {
+func (t *taskManager) wait() (tasks []*task, canceled bool, canceledTasks []*task) {
 	if t.needAll {
-		return t.waitAll()
+		tasks, canceledTasks = t.waitAll()
+		return tasks, t.canceled, canceledTasks
 	}
 
-	ta, success := t.waitOne()
+	ta, success, canceled := t.waitOne()
+	if canceled {
+		// has canceled and timeout, return canceled tasks
+		for _, rta := range t.runningTasks {
+			canceledTasks = append(canceledTasks, rta)
+		}
+		t.runningTasks = make(map[string]*task)
+		t.num = 0
+		return nil, true, canceledTasks
+	}
+	if t.canceled {
+		// has canceled, but not timeout, wait all
+		tasks, canceledTasks = t.waitAll()
+		return append(tasks, ta), true, canceledTasks
+	}
 	if !success {
-		return []*task{}
+		return []*task{}, t.canceled, nil
 	}
 
-	return []*task{ta}
+	return []*task{ta}, t.canceled, nil
 }
 
-func (t *taskManager) waitOne() (*task, bool) {
+func (t *taskManager) waitOne() (ta *task, success bool, canceled bool) {
 	if t.num == 0 {
-		return nil, false
+		return nil, false, false
 	}
 
-	ta, _ := t.done.Receive()
+	if t.cancelCh == nil {
+		ta, _ = t.done.Receive()
+	} else {
+		ta, _, canceled = t.receive(t.done.Receive)
+	}
+
 	t.num--
 
+	if canceled {
+		return nil, false, true
+	}
+
+	delete(t.runningTasks, ta.nodeKey)
 	if ta.err != nil {
-		return ta, true
+		// biz error, jump post processor
+		return ta, true, false
 	}
 	runPostHandler(ta, t.runWrapper)
-	return ta, true
+	return ta, true, false
 }
 
-func (t *taskManager) waitAll() []*task {
+func (t *taskManager) waitAll() (successTasks []*task, canceledTasks []*task) {
 	result := make([]*task, 0, t.num)
 	for {
-		ta, success := t.waitOne()
+		ta, success, canceled := t.waitOne()
+		if canceled {
+			for _, rt := range t.runningTasks {
+				canceledTasks = append(canceledTasks, rt)
+			}
+			t.runningTasks = make(map[string]*task)
+			t.num = 0
+			return result, canceledTasks
+		}
 		if !success {
-			return result
+			return result, nil
 		}
 		result = append(result, ta)
 	}
+}
+
+func (t *taskManager) receive(recv func() (*task, bool)) (ta *task, closed bool, canceled bool) {
+	if t.deadline != nil {
+		// have canceled, receive in a certain time
+		return receiveWithDeadline(recv, *t.deadline)
+	}
+	if t.canceled {
+		// canceled without timeout
+		ta, closed = recv()
+		return ta, closed, false
+	}
+	if t.cancelCh != nil {
+		// have not canceled, receive while listening
+		ta, closed, canceled, t.canceled, t.deadline = receiveWithListening(recv, t.cancelCh)
+		return ta, closed, canceled
+	}
+	// won't cancel
+	ta, closed = recv()
+	return ta, closed, false
+}
+
+func receiveWithDeadline(recv func() (*task, bool), deadline time.Time) (ta *task, closed bool, canceled bool) {
+	now := time.Now()
+	if deadline.Before(now) {
+		return nil, false, true
+	}
+
+	timeout := deadline.Sub(now)
+
+	resultCh := make(chan struct{}, 1)
+
+	go func() {
+		ta, closed = recv()
+		resultCh <- struct{}{}
+	}()
+
+	timeoutCh := time.After(timeout)
+
+	select {
+	case <-resultCh:
+		return ta, closed, false
+	case <-timeoutCh:
+		return nil, false, true
+	}
+}
+
+func receiveWithListening(recv func() (*task, bool), cancel chan *time.Duration) (*task, bool, bool, bool, *time.Time) {
+	type pair struct {
+		ta     *task
+		closed bool
+	}
+	resultCh := make(chan pair, 1)
+	var timeoutCh <-chan time.Time
+
+	var deadline *time.Time
+	canceled := false
+	go func() {
+		ta, closed := recv()
+		resultCh <- pair{ta, closed}
+	}()
+
+	select {
+	case p := <-resultCh:
+		return p.ta, p.closed, false, false, nil
+	case timeout, ok := <-cancel:
+		if !ok {
+			// unreachable
+			break
+		}
+		canceled = true
+		if timeout == nil {
+			// canceled without timeout
+			break
+		}
+		timeoutCh = time.After(*timeout)
+		dt := time.Now().Add(*timeout)
+		deadline = &dt
+	}
+
+	if timeoutCh != nil {
+		select {
+		case p := <-resultCh:
+			return p.ta, p.closed, false, canceled, deadline
+		case <-timeoutCh:
+			return nil, false, true, canceled, deadline
+		}
+	}
+	p := <-resultCh
+	return p.ta, p.closed, false, canceled, nil
 }
 
 func runPreHandler(ta *task, runWrapper runnableCallWrapper) (err error) {

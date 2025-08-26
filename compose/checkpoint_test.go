@@ -1015,3 +1015,184 @@ func TestPreHandlerInterrupt(t *testing.T) {
 	assert.NoError(t, err)
 	assert.Equal(t, "1", result)
 }
+
+func TestCancelInterrupt(t *testing.T) {
+	g := NewGraph[string, string]()
+	_ = g.AddLambdaNode("1", InvokableLambda(func(ctx context.Context, input string) (output string, err error) {
+		time.Sleep(3 * time.Second)
+		return input + "1", nil
+	}))
+	_ = g.AddLambdaNode("2", InvokableLambda(func(ctx context.Context, input string) (output string, err error) {
+		return input + "2", nil
+	}))
+	_ = g.AddEdge(START, "1")
+	_ = g.AddEdge("1", "2")
+	_ = g.AddEdge("2", END)
+	ctx := context.Background()
+
+	// pregel
+	r, err := g.Compile(ctx, WithCheckPointStore(newInMemoryStore()))
+	assert.NoError(t, err)
+	// interrupt after nodes
+	canceledCtx, cancel := WithGraphInterrupt(ctx)
+	go func() {
+		time.Sleep(500 * time.Millisecond)
+		cancel(WithGraphInterruptTimeout(time.Hour))
+	}()
+	_, err = r.Invoke(canceledCtx, "input", WithCheckPointID("1"))
+	assert.Error(t, err)
+	info, success := ExtractInterruptInfo(err)
+	assert.True(t, success)
+	assert.Equal(t, []string{"1"}, info.AfterNodes)
+	result, err := r.Invoke(ctx, "input", WithCheckPointID("1"))
+	assert.NoError(t, err)
+	assert.Equal(t, "input12", result)
+	// infinite timeout
+	canceledCtx, cancel = WithGraphInterrupt(ctx)
+	go func() {
+		time.Sleep(500 * time.Millisecond)
+		cancel()
+	}()
+	_, err = r.Invoke(canceledCtx, "input", WithCheckPointID("2"))
+	assert.Error(t, err)
+	info, success = ExtractInterruptInfo(err)
+	assert.True(t, success)
+	assert.Equal(t, []string{"1"}, info.AfterNodes)
+	result, err = r.Invoke(ctx, "input", WithCheckPointID("2"))
+	assert.NoError(t, err)
+	assert.Equal(t, "input12", result)
+
+	// interrupt rerun nodes
+	canceledCtx, cancel = WithGraphInterrupt(ctx)
+	go func() {
+		time.Sleep(500 * time.Millisecond)
+		cancel(WithGraphInterruptTimeout(0))
+	}()
+	_, err = r.Invoke(canceledCtx, "input", WithCheckPointID("3"))
+	assert.Error(t, err)
+	info, success = ExtractInterruptInfo(err)
+	assert.True(t, success)
+	assert.Equal(t, []string{"1"}, info.RerunNodes)
+	result, err = r.Invoke(ctx, "input", WithCheckPointID("3"))
+	assert.NoError(t, err)
+	assert.Equal(t, "12", result)
+
+	// dag
+	g = NewGraph[string, string]()
+	_ = g.AddLambdaNode("1", InvokableLambda(func(ctx context.Context, input string) (output string, err error) {
+		time.Sleep(3 * time.Second)
+		return input + "1", nil
+	}))
+	_ = g.AddLambdaNode("2", InvokableLambda(func(ctx context.Context, input string) (output string, err error) {
+		return input + "2", nil
+	}))
+	_ = g.AddEdge(START, "1")
+	_ = g.AddEdge("1", "2")
+	_ = g.AddEdge("2", END)
+	r, err = g.Compile(ctx, WithNodeTriggerMode(AllPredecessor), WithCheckPointStore(newInMemoryStore()))
+	assert.NoError(t, err)
+	// interrupt after nodes
+	canceledCtx, cancel = WithGraphInterrupt(ctx)
+	go func() {
+		time.Sleep(500 * time.Millisecond)
+		cancel(WithGraphInterruptTimeout(time.Hour))
+	}()
+	_, err = r.Invoke(canceledCtx, "input", WithCheckPointID("1"))
+	assert.Error(t, err)
+	info, success = ExtractInterruptInfo(err)
+	assert.True(t, success)
+	assert.Equal(t, []string{"1"}, info.AfterNodes)
+	result, err = r.Invoke(ctx, "input", WithCheckPointID("1"))
+	assert.NoError(t, err)
+	assert.Equal(t, "input12", result)
+	// infinite timeout
+	canceledCtx, cancel = WithGraphInterrupt(ctx)
+	go func() {
+		time.Sleep(500 * time.Millisecond)
+		cancel()
+	}()
+	_, err = r.Invoke(canceledCtx, "input", WithCheckPointID("2"))
+	assert.Error(t, err)
+	info, success = ExtractInterruptInfo(err)
+	assert.True(t, success)
+	assert.Equal(t, []string{"1"}, info.AfterNodes)
+	result, err = r.Invoke(ctx, "input", WithCheckPointID("2"))
+	assert.NoError(t, err)
+	assert.Equal(t, "input12", result)
+
+	// interrupt rerun nodes
+	canceledCtx, cancel = WithGraphInterrupt(ctx)
+	go func() {
+		time.Sleep(300 * time.Millisecond)
+		cancel(WithGraphInterruptTimeout(0))
+	}()
+	_, err = r.Invoke(canceledCtx, "input", WithCheckPointID("3"))
+	assert.Error(t, err)
+	info, success = ExtractInterruptInfo(err)
+	assert.True(t, success)
+	assert.Equal(t, []string{"1"}, info.RerunNodes)
+	result, err = r.Invoke(ctx, "input", WithCheckPointID("3"))
+	assert.NoError(t, err)
+	assert.Equal(t, "12", result)
+
+	// dag multi canceled nodes
+	gg := NewGraph[string, map[string]any]()
+	_ = gg.AddLambdaNode("1", InvokableLambda(func(ctx context.Context, input string) (output string, err error) {
+		return input + "1", nil
+	}))
+	_ = gg.AddLambdaNode("2", InvokableLambda(func(ctx context.Context, input string) (output string, err error) {
+		time.Sleep(3 * time.Second)
+		return input + "2", nil
+	}), WithOutputKey("2"))
+	_ = gg.AddLambdaNode("3", InvokableLambda(func(ctx context.Context, input string) (output string, err error) {
+		time.Sleep(3 * time.Second)
+		return input + "3", nil
+	}), WithOutputKey("3"))
+	_ = gg.AddLambdaNode("4", InvokableLambda(func(ctx context.Context, input map[string]any) (output map[string]any, err error) {
+		return input, nil
+	}))
+	_ = gg.AddEdge(START, "1")
+	_ = gg.AddEdge("1", "2")
+	_ = gg.AddEdge("1", "3")
+	_ = gg.AddEdge("2", "4")
+	_ = gg.AddEdge("3", "4")
+	_ = gg.AddEdge("4", END)
+	ctx = context.Background()
+	rr, err := gg.Compile(ctx, WithNodeTriggerMode(AllPredecessor), WithCheckPointStore(newInMemoryStore()))
+	assert.NoError(t, err)
+	// interrupt after nodes
+	canceledCtx, cancel = WithGraphInterrupt(ctx)
+	go func() {
+		time.Sleep(500 * time.Millisecond)
+		cancel(WithGraphInterruptTimeout(time.Hour))
+	}()
+	_, err = rr.Invoke(canceledCtx, "input", WithCheckPointID("1"))
+	assert.Error(t, err)
+	info, success = ExtractInterruptInfo(err)
+	assert.True(t, success)
+	assert.Equal(t, 2, len(info.AfterNodes))
+	result2, err := rr.Invoke(ctx, "input", WithCheckPointID("1"))
+	assert.NoError(t, err)
+	assert.Equal(t, map[string]any{
+		"2": "input12",
+		"3": "input13",
+	}, result2)
+
+	// interrupt rerun nodes
+	canceledCtx, cancel = WithGraphInterrupt(ctx)
+	go func() {
+		time.Sleep(500 * time.Millisecond)
+		cancel(WithGraphInterruptTimeout(0))
+	}()
+	_, err = rr.Invoke(canceledCtx, "input", WithCheckPointID("2"))
+	assert.Error(t, err)
+	info, success = ExtractInterruptInfo(err)
+	assert.True(t, success)
+	assert.Equal(t, 2, len(info.RerunNodes))
+	result2, err = rr.Invoke(ctx, "input", WithCheckPointID("2"))
+	assert.NoError(t, err)
+	assert.Equal(t, map[string]any{
+		"2": "2",
+		"3": "3",
+	}, result2)
+}
