@@ -81,7 +81,7 @@ func GetSourceName(err error) (string, bool) {
 //	go func() { // send data
 //		defer sw.Close()
 //		for i := 0; i < 10; i++ {
-//			sw.send(i, nil)
+//			sw.Send(i, nil)
 //		}
 //	}
 //
@@ -105,7 +105,7 @@ func Pipe[T any](cap int) (*StreamReader[T], *StreamWriter[T]) {
 //	go func() { // send data
 //		defer sw.Close()
 //		for i := 0; i < 10; i++ {
-//			sw.send(i, nil)
+//			sw.Send(i, nil)
 //		}
 //	}
 type StreamWriter[T any] struct {
