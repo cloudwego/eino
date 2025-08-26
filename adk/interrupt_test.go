@@ -17,8 +17,11 @@
 package adk
 
 import (
+	"bytes"
 	"context"
+	"encoding/gob"
 	"errors"
+	"sync"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -28,6 +31,33 @@ import (
 	"github.com/cloudwego/eino/compose"
 	"github.com/cloudwego/eino/schema"
 )
+
+func TestSaveAgentEventWrapper(t *testing.T) {
+	sr, sw := schema.Pipe[Message](1)
+	sw.Send(schema.UserMessage("test"), nil)
+	sw.Close()
+	sr = sr.Copy(2)[1]
+
+	w := &agentEventWrapper{
+		AgentEvent: &AgentEvent{
+			Output: &AgentOutput{
+				MessageOutput: &MessageVariant{
+					IsStreaming:   true,
+					MessageStream: sr,
+				},
+			},
+		},
+		mu:                  sync.Mutex{},
+		concatenatedMessage: nil,
+	}
+
+	_, err := getMessageFromWrappedEvent(w)
+	assert.NoError(t, err)
+
+	buf := &bytes.Buffer{}
+	err = gob.NewEncoder(buf).Encode(w)
+	assert.NoError(t, err)
+}
 
 func TestSimpleInterrupt(t *testing.T) {
 	data := "hello world"
