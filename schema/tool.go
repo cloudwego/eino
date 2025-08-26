@@ -17,6 +17,10 @@
 package schema
 
 import (
+	"encoding/json"
+	"fmt"
+	"strconv"
+
 	"github.com/eino-contrib/jsonschema"
 	"github.com/getkin/kin-openapi/openapi3"
 	orderedmap "github.com/wk8/go-ordered-map/v2"
@@ -153,7 +157,10 @@ func (p *ParamsOneOf) ToOpenAPIV3() (*openapi3.Schema, error) {
 	}
 
 	if p.jsonschema != nil {
-		sc := jsonSchemaToOpenAPIV3(p.jsonschema)
+		sc, err := jsonSchemaToOpenAPIV3(p.jsonschema)
+		if err != nil {
+			return nil, fmt.Errorf("convert JSONSchema to OpenAPIV3 failed: %w", err)
+		}
 		return sc.Value, nil
 	}
 
@@ -182,6 +189,14 @@ func (p *ParamsOneOf) ToJSONSchema() (*jsonschema.Schema, error) {
 		}
 
 		return sc, nil
+	}
+
+	if p.openAPIV3 != nil {
+		js, err := openapiV3ToJSONSchema(p.openAPIV3)
+		if err != nil {
+			return nil, fmt.Errorf("convert OpenAPIV3 to JSONSchema failed: %w", err)
+		}
+		return js, nil
 	}
 
 	return p.jsonschema, nil
@@ -259,35 +274,309 @@ func paramInfoToJSONSchema(paramInfo *ParameterInfo) *jsonschema.Schema {
 	return js
 }
 
-func jsonSchemaToOpenAPIV3(js *jsonschema.Schema) *openapi3.SchemaRef {
-	s := openapi3.NewSchema()
-	s.Type = js.Type
-	s.Description = js.Description
+func openapiV3ToJSONSchema(openAPIV3 *openapi3.Schema) (*jsonschema.Schema, error) {
+	if openAPIV3 == nil {
+		return nil, nil
+	}
+
+	js := &jsonschema.Schema{
+		Type:          openAPIV3.Type,
+		Title:         openAPIV3.Title,
+		Format:        openAPIV3.Format,
+		Description:   openAPIV3.Description,
+		Default:       openAPIV3.Default,
+		MaxLength:     openAPIV3.MaxLength,
+		UniqueItems:   openAPIV3.UniqueItems,
+		ReadOnly:      openAPIV3.ReadOnly,
+		WriteOnly:     openAPIV3.WriteOnly,
+		Deprecated:    openAPIV3.Deprecated,
+		Pattern:       openAPIV3.Pattern,
+		MaxItems:      openAPIV3.MaxItems,
+		MaxProperties: openAPIV3.MaxProps,
+	}
+
+	if openAPIV3.Example != nil {
+		js.Examples = []any{openAPIV3.Example}
+	}
+
+	if openAPIV3.MinLength > 0 {
+		js.MinLength = &openAPIV3.MinLength
+	}
+
+	if openAPIV3.MinItems > 0 {
+		js.MinItems = &openAPIV3.MinItems
+	}
+
+	if openAPIV3.MinProps > 0 {
+		js.MinProperties = &openAPIV3.MinProps
+	}
+
+	if openAPIV3.OneOf != nil {
+		js.OneOf = make([]*jsonschema.Schema, len(openAPIV3.OneOf))
+		for i, oneOf := range openAPIV3.OneOf {
+			v, err := openapiV3ToJSONSchema(oneOf.Value)
+			if err != nil {
+				return nil, err
+			}
+			js.OneOf[i] = v
+		}
+	}
+
+	if openAPIV3.AnyOf != nil {
+		js.AnyOf = make([]*jsonschema.Schema, len(openAPIV3.AnyOf))
+		for i, anyOf := range openAPIV3.AnyOf {
+			v, err := openapiV3ToJSONSchema(anyOf.Value)
+			if err != nil {
+				return nil, err
+			}
+			js.AnyOf[i] = v
+		}
+	}
+
+	if openAPIV3.AllOf != nil {
+		js.AllOf = make([]*jsonschema.Schema, len(openAPIV3.AllOf))
+		for i, allOf := range openAPIV3.AllOf {
+			v, err := openapiV3ToJSONSchema(allOf.Value)
+			if err != nil {
+				return nil, err
+			}
+			js.AllOf[i] = v
+		}
+	}
+
+	if openAPIV3.Not != nil {
+		v, err := openapiV3ToJSONSchema(openAPIV3.Not.Value)
+		if err != nil {
+			return nil, err
+		}
+		js.Not = v
+	}
+
+	if openAPIV3.Min != nil {
+		if openAPIV3.ExclusiveMin {
+			js.ExclusiveMinimum = json.Number(strconv.FormatFloat(*openAPIV3.Min, 'g', -1, 64))
+		} else {
+			js.Minimum = json.Number(strconv.FormatFloat(*openAPIV3.Min, 'g', -1, 64))
+		}
+	}
+
+	if openAPIV3.Max != nil {
+		if openAPIV3.ExclusiveMax {
+			js.ExclusiveMaximum = json.Number(strconv.FormatFloat(*openAPIV3.Max, 'g', -1, 64))
+		} else {
+			js.Maximum = json.Number(strconv.FormatFloat(*openAPIV3.Max, 'g', -1, 64))
+		}
+	}
+
+	if openAPIV3.MultipleOf != nil {
+		js.MultipleOf = json.Number(strconv.FormatFloat(*openAPIV3.MultipleOf, 'g', -1, 64))
+	}
+
+	if openAPIV3.Enum != nil {
+		js.Enum = make([]any, len(openAPIV3.Enum))
+		for i, enum := range openAPIV3.Enum {
+			js.Enum[i] = enum
+		}
+	}
+
+	if openAPIV3.Items != nil {
+		v, err := openapiV3ToJSONSchema(openAPIV3.Items.Value)
+		if err != nil {
+			return nil, err
+		}
+		js.Items = v
+	}
+
+	if openAPIV3.Properties != nil {
+		js.Properties = orderedmap.New[string, *jsonschema.Schema]()
+		for k, v := range openAPIV3.Properties {
+			if v == nil || v.Value == nil {
+				continue
+			}
+			v_, err := openapiV3ToJSONSchema(v.Value)
+			if err != nil {
+				return nil, err
+			}
+			js.Properties.Set(k, v_)
+		}
+	}
+
+	if openAPIV3.Required != nil {
+		js.Required = make([]string, len(openAPIV3.Required))
+		for i, required := range openAPIV3.Required {
+			js.Required[i] = required
+		}
+	}
+
+	if openAPIV3.AdditionalProperties.Schema != nil {
+		v, err := openapiV3ToJSONSchema(openAPIV3.AdditionalProperties.Schema.Value)
+		if err != nil {
+			return nil, err
+		}
+		js.AdditionalProperties = v
+	}
+
+	if openAPIV3.Extensions != nil {
+		for k, v := range openAPIV3.Extensions {
+			js.Extras[k] = v
+		}
+	}
+
+	return js, nil
+}
+
+func jsonSchemaToOpenAPIV3(js *jsonschema.Schema) (*openapi3.SchemaRef, error) {
+	if js == nil {
+		return nil, nil
+	}
+
+	openAPIV3 := &openapi3.Schema{
+		Type:        js.Type,
+		Title:       js.Title,
+		Format:      js.Format,
+		Description: js.Description,
+		Default:     js.Default,
+		MaxLength:   js.MaxLength,
+		UniqueItems: js.UniqueItems,
+		ReadOnly:    js.ReadOnly,
+		WriteOnly:   js.WriteOnly,
+		Deprecated:  js.Deprecated,
+		Pattern:     js.Pattern,
+		MaxItems:    js.MaxItems,
+		MaxProps:    js.MaxProperties,
+	}
+
+	if js.MinLength != nil {
+		openAPIV3.MinLength = *js.MinLength
+	}
+
+	if js.MinItems != nil {
+		openAPIV3.MinItems = *js.MinItems
+	}
+
+	if js.MinProperties != nil {
+		openAPIV3.MinProps = *js.MinProperties
+	}
+
+	if len(js.Examples) > 0 {
+		openAPIV3.Example = js.Examples[0]
+	}
+
+	if js.OneOf != nil {
+		openAPIV3.OneOf = make([]*openapi3.SchemaRef, len(js.OneOf))
+		for i, oneOf := range js.OneOf {
+			v, err := jsonSchemaToOpenAPIV3(oneOf)
+			if err != nil {
+				return nil, err
+			}
+			openAPIV3.OneOf[i] = v
+		}
+	}
+
+	if js.AnyOf != nil {
+		openAPIV3.AnyOf = make([]*openapi3.SchemaRef, len(js.AnyOf))
+		for i, anyOf := range js.AnyOf {
+			v, err := jsonSchemaToOpenAPIV3(anyOf)
+			if err != nil {
+				return nil, err
+			}
+			openAPIV3.AnyOf[i] = v
+		}
+	}
+
+	if js.AllOf != nil {
+		openAPIV3.AllOf = make([]*openapi3.SchemaRef, len(js.AllOf))
+		for i, allOf := range js.AllOf {
+			v, err := jsonSchemaToOpenAPIV3(allOf)
+			if err != nil {
+				return nil, err
+			}
+			openAPIV3.AllOf[i] = v
+		}
+	}
+
+	if js.Not != nil {
+		v, err := jsonSchemaToOpenAPIV3(js.Not)
+		if err != nil {
+			return nil, err
+		}
+		openAPIV3.Not = v
+	}
+
+	if js.ExclusiveMaximum != "" {
+		openAPIV3.ExclusiveMax = true
+		max, err := js.ExclusiveMaximum.Float64()
+		if err != nil {
+			return nil, fmt.Errorf("`ExclusiveMaximum` in JSONSchema must be a number: %w", err)
+		}
+		openAPIV3.Max = &max
+	}
+
+	if js.ExclusiveMinimum != "" {
+		openAPIV3.ExclusiveMin = true
+		min, err := js.ExclusiveMinimum.Float64()
+		if err != nil {
+			return nil, fmt.Errorf("`ExclusiveMinimum` in JSONSchema must be a number: %w", err)
+		}
+		openAPIV3.Min = &min
+	}
+
+	if js.MultipleOf != "" {
+		multipleOf, err := js.MultipleOf.Float64()
+		if err != nil {
+			return nil, fmt.Errorf("`MultipleOf` in JSONSchema must be a number: %w", err)
+		}
+		openAPIV3.MultipleOf = &multipleOf
+	}
 
 	if js.Enum != nil {
-		s.Enum = make([]any, len(js.Enum))
+		openAPIV3.Enum = make([]any, len(js.Enum))
 		for i, enum := range js.Enum {
-			s.Enum[i] = enum
+			openAPIV3.Enum[i] = enum
 		}
 	}
 
 	if js.Items != nil {
-		s.Items = jsonSchemaToOpenAPIV3(js.Items)
+		v, err := jsonSchemaToOpenAPIV3(js.Items)
+		if err != nil {
+			return nil, err
+		}
+		openAPIV3.Items = v
 	}
 
 	if js.Properties != nil {
-		s.Properties = make(map[string]*openapi3.SchemaRef, js.Properties.Len())
+		openAPIV3.Properties = make(map[string]*openapi3.SchemaRef, js.Properties.Len())
 		for pair := js.Properties.Oldest(); pair != nil; pair = pair.Next() {
-			s.Properties[pair.Key] = jsonSchemaToOpenAPIV3(pair.Value)
+			v, err := jsonSchemaToOpenAPIV3(pair.Value)
+			if err != nil {
+				return nil, err
+			}
+			openAPIV3.Properties[pair.Key] = v
 		}
 	}
 
 	if js.Required != nil {
-		s.Required = make([]string, len(js.Required))
+		openAPIV3.Required = make([]string, len(js.Required))
 		for i, required := range js.Required {
-			s.Required[i] = required
+			openAPIV3.Required[i] = required
 		}
 	}
 
-	return openapi3.NewSchemaRef("", s)
+	if js.AdditionalProperties != nil {
+		add, err := jsonSchemaToOpenAPIV3(js.AdditionalProperties)
+		if err != nil {
+			return nil, err
+		}
+		openAPIV3.AdditionalProperties = openapi3.AdditionalProperties{
+			Schema: add,
+		}
+	}
+
+	if js.Extras != nil {
+		for k, v := range js.Extras {
+			openAPIV3.Extensions[k] = v
+		}
+	}
+
+	return openapi3.NewSchemaRef("", openAPIV3), nil
 }
