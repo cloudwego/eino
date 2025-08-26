@@ -271,7 +271,7 @@ func (a *flowAgent) genAgentInput(ctx context.Context, runCtx *runContext, skipT
 	if err != nil {
 		return nil, err
 	}
-	input.Messages = append(input.Messages, messages...)
+	input.Messages = messages
 
 	return input, nil
 }
