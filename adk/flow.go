@@ -279,10 +279,14 @@ func (a *flowAgent) genAgentInput(ctx context.Context, runCtx *runContext, skipT
 func buildDefaultHistoryRewriter(agentName string) HistoryRewriter {
 	return func(ctx context.Context, entries []*HistoryEntry) ([]Message, error) {
 		messages := make([]Message, 0, len(entries))
+		var err error
 		for _, entry := range entries {
-			msg, err := genMsg(entry, agentName)
-			if err != nil {
-				return nil, fmt.Errorf("gen agent input failed: %w", err)
+			msg := entry.Message
+			if !entry.IsUserInput {
+				msg, err = genMsg(entry, agentName)
+				if err != nil {
+					return nil, fmt.Errorf("gen agent input failed: %w", err)
+				}
 			}
 
 			if msg != nil {
