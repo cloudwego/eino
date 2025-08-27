@@ -58,7 +58,7 @@ func EventFromMessage(msg Message, msgStream MessageStream,
 type messageVariantSerialization struct {
 	IsStreaming   bool
 	Message       Message
-	MessageStream []Message
+	MessageStream Message
 }
 
 func (mv *MessageVariant) GobEncode() ([]byte, error) {
@@ -78,7 +78,11 @@ func (mv *MessageVariant) GobEncode() ([]byte, error) {
 			}
 			messages = append(messages, frame)
 		}
-		s.MessageStream = messages
+		m, err := schema.ConcatMessages(messages)
+		if err != nil {
+			return nil, fmt.Errorf("failed to encode message: cannot concat message stream: %w", err)
+		}
+		s.MessageStream = m
 	}
 	buf := &bytes.Buffer{}
 	err := gob.NewEncoder(buf).Encode(s)
@@ -96,8 +100,8 @@ func (mv *MessageVariant) GobDecode(b []byte) error {
 	}
 	mv.IsStreaming = s.IsStreaming
 	mv.Message = s.Message
-	if len(s.MessageStream) > 0 {
-		mv.MessageStream = schema.StreamReaderFromArray(s.MessageStream)
+	if s.MessageStream != nil {
+		mv.MessageStream = schema.StreamReaderFromArray([]*schema.Message{s.MessageStream})
 	}
 	return nil
 }
