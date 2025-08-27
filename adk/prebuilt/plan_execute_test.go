@@ -128,13 +128,13 @@ func TestPlannerRunWithFormattedOutput(t *testing.T) {
 	event, ok = iterator.Next()
 	assert.False(t, ok)
 
-	var plan Plan
+	var plan plan
 	err = sonic.UnmarshalString(msg.Content, &plan)
 	assert.NoError(t, err)
-	assert.Equal(t, 3, len(plan.Steps))
-	assert.Equal(t, "Step 1", plan.Steps[0])
-	assert.Equal(t, "Step 2", plan.Steps[1])
-	assert.Equal(t, "Step 3", plan.Steps[2])
+	assert.Equal(t, 3, len(plan.StepList))
+	assert.Equal(t, "Step 1", plan.StepList[0])
+	assert.Equal(t, "Step 2", plan.StepList[1])
+	assert.Equal(t, "Step 3", plan.StepList[2])
 }
 
 // TestPlannerRunWithToolCalling tests the Run method of a planner created with ToolCallingChatModel
@@ -194,13 +194,13 @@ func TestPlannerRunWithToolCalling(t *testing.T) {
 	_, ok = iterator.Next()
 	assert.False(t, ok)
 
-	var plan Plan
+	var plan plan
 	err = sonic.UnmarshalString(msg.Content, &plan)
 	assert.NoError(t, err)
-	assert.Equal(t, 3, len(plan.Steps))
-	assert.Equal(t, "Step 1", plan.Steps[0])
-	assert.Equal(t, "Step 2", plan.Steps[1])
-	assert.Equal(t, "Step 3", plan.Steps[2])
+	assert.Equal(t, 3, len(plan.StepList))
+	assert.Equal(t, "Step 1", plan.StepList[0])
+	assert.Equal(t, "Step 2", plan.StepList[1])
+	assert.Equal(t, "Step 3", plan.StepList[2])
 }
 
 // TestNewExecutor tests the NewExecutor function
@@ -243,7 +243,7 @@ func TestExecutorRun(t *testing.T) {
 	mockToolCallingModel := mockModel.NewMockToolCallingChatModel(ctrl)
 
 	// Store a plan in the session
-	plan := &Plan{Steps: []string{"Step 1", "Step 2", "Step 3"}}
+	plan := &plan{Steps: []string{"Step 1", "Step 2", "Step 3"}}
 	adk.SetSessionValue(ctx, PlanSessionKey, plan)
 
 	// Set up expectations for the mock model
@@ -389,7 +389,7 @@ func TestReplannerRunWithPlan(t *testing.T) {
 	assert.NoError(t, err)
 
 	// Store necessary values in the session
-	plan := &Plan{Steps: []string{"Step 1", "Step 2", "Step 3"}}
+	plan := &plan{Steps: []string{"Step 1", "Step 2", "Step 3"}}
 	rp, err = AgentWithSessionKVs(ctx, rp, map[string]any{
 		PlanSessionKey:                 plan,
 		ExecuteResultSessionKey:        "Execution result",
@@ -417,19 +417,19 @@ func TestReplannerRunWithPlan(t *testing.T) {
 	// Verify the updated plan was stored in the session
 	planValue, ok := kvs[PlanSessionKey]
 	assert.True(t, ok)
-	updatedPlan, ok := planValue.(*Plan)
+	updatedPlan, ok := planValue.(*plan)
 	assert.True(t, ok)
-	assert.Equal(t, 2, len(updatedPlan.Steps))
-	assert.Equal(t, "Updated Step 1", updatedPlan.Steps[0])
-	assert.Equal(t, "Updated Step 2", updatedPlan.Steps[1])
+	assert.Equal(t, 2, len(updatedPlan.StepList))
+	assert.Equal(t, "Updated Step 1", updatedPlan.StepList[0])
+	assert.Equal(t, "Updated Step 2", updatedPlan.StepList[1])
 
 	// Verify the execute results were updated
 	executeResultsValue, ok := kvs[ExecuteResultsSessionKey]
 	assert.True(t, ok)
-	executeResults, ok := executeResultsValue.([]ExecuteResult)
+	executeResults, ok := executeResultsValue.([]ExecutedStep)
 	assert.True(t, ok)
 	assert.Equal(t, 1, len(executeResults))
-	assert.Equal(t, "Step 1", executeResults[0].Task)
+	assert.Equal(t, "Step 1", executeResults[0].Step)
 	assert.Equal(t, "Execution result", executeResults[0].Result)
 
 	_, ok = iterator.Next()
@@ -489,7 +489,7 @@ func TestReplannerRunWithRespond(t *testing.T) {
 	assert.NoError(t, err)
 
 	// Store necessary values in the session
-	plan := &Plan{Steps: []string{"Step 1", "Step 2", "Step 3"}}
+	plan := &plan{Steps: []string{"Step 1", "Step 2", "Step 3"}}
 	rp, err = AgentWithSessionKVs(ctx, rp, map[string]any{
 		PlanSessionKey:                 plan,
 		ExecuteResultSessionKey:        "Execution result",
@@ -578,9 +578,9 @@ func TestPlanExecuteAgentWithReplan(t *testing.T) {
 	mockReplanner.EXPECT().Description(gomock.Any()).Return("a replanner agent").AnyTimes()
 
 	// Create a plan
-	originalPlan := &Plan{Steps: []string{"Step 1", "Step 2", "Step 3"}}
+	originalPlan := &plan{Steps: []string{"Step 1", "Step 2", "Step 3"}}
 	// Create an updated plan with fewer steps (after replanning)
-	updatedPlan := &Plan{Steps: []string{"Updated Step 2", "Updated Step 3"}}
+	updatedPlan := &plan{Steps: []string{"Updated Step 2", "Updated Step 3"}}
 	// Create execute result
 	originalExecuteResult := "Execution result for Step 1"
 	updatedExecuteResult := "Execution result for Updated Step 2"
@@ -616,10 +616,10 @@ func TestPlanExecuteAgentWithReplan(t *testing.T) {
 			iterator, generator := adk.NewAsyncIteratorPair[*adk.AgentEvent]()
 
 			plan, _ := adk.GetSessionValue(ctx, PlanSessionKey)
-			currentPlan := plan.(*Plan)
+			currentPlan := plan.(*plan)
 			var msg adk.Message
 			// Check if this is the first replanning (original plan has 3 steps)
-			if len(currentPlan.Steps) == 3 {
+			if len(currentPlan.StepList) == 3 {
 				msg = schema.AssistantMessage(originalExecuteResult, nil)
 				adk.SetSessionValue(ctx, ExecuteResultSessionKey, originalExecuteResult)
 			} else {
@@ -642,10 +642,10 @@ func TestPlanExecuteAgentWithReplan(t *testing.T) {
 			// First call: Update the plan
 			// Get the current plan from the session
 			plan, _ := adk.GetSessionValue(ctx, PlanSessionKey)
-			currentPlan := plan.(*Plan)
+			currentPlan := plan.(*plan)
 
 			// Check if this is the first replanning (original plan has 3 steps)
-			if len(currentPlan.Steps) == 3 {
+			if len(currentPlan.StepList) == 3 {
 				// Send a message event with the updated plan
 				planJSON, _ := sonic.MarshalString(updatedPlan)
 				msg := schema.AssistantMessage(planJSON, nil)
@@ -654,8 +654,8 @@ func TestPlanExecuteAgentWithReplan(t *testing.T) {
 
 				// Set the updated plan & execute result in the session
 				adk.SetSessionValue(ctx, PlanSessionKey, updatedPlan)
-				adk.SetSessionValue(ctx, ExecuteResultsSessionKey, []ExecuteResult{{
-					Task:   currentPlan.Steps[0],
+				adk.SetSessionValue(ctx, ExecuteResultsSessionKey, []ExecutedStep{{
+					Step:   currentPlan.StepList[0],
 					Result: originalExecuteResult,
 				}})
 			} else {
