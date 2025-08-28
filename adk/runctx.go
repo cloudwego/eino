@@ -203,7 +203,7 @@ func (rs *runSession) getValue(key string) (any, bool) {
 
 type runContext struct {
 	RootInput *AgentInput
-	RunPath   []string
+	RunPath   []RunStep
 
 	Session *runSession
 }
@@ -215,7 +215,7 @@ func (rc *runContext) isRoot() bool {
 func (rc *runContext) deepCopy() *runContext {
 	copied := &runContext{
 		RootInput: rc.RootInput,
-		RunPath:   make([]string, len(rc.RunPath)),
+		RunPath:   make([]RunStep, len(rc.RunPath)),
 		Session:   rc.Session,
 	}
 
@@ -246,7 +246,7 @@ func initRunCtx(ctx context.Context, agentName string, input *AgentInput) (conte
 		runCtx = &runContext{Session: newRunSession()}
 	}
 
-	runCtx.RunPath = append(runCtx.RunPath, agentName)
+	runCtx.RunPath = append(runCtx.RunPath, RunStep{agentName})
 	if runCtx.isRoot() {
 		runCtx.RootInput = input
 	}
