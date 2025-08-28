@@ -132,12 +132,18 @@ Call '{plan_tool}' with a revised plan that:
 - Addresses any gaps or issues discovered
 - Maintains logical step sequence
 
+## PLANNING REQUIREMENTS
+Each step in your plan must be:
+- **Specific and actionable**: Clear instructions that can be executed without ambiguity
+- **Self-contained**: Include all necessary context, parameters, and requirements
+- **Independently executable**: Can be performed by an agent without dependencies on other steps
+- **Logically sequenced**: Arranged in optimal order for efficient execution
+- **Objective-focused**: Directly contribute to achieving the main goal
+
 ## PLANNING GUIDELINES
-- Each step must be specific and actionable
-- Include all necessary context and parameters
 - Eliminate redundant or unnecessary steps
 - Adapt strategy based on new information
-- Ensure steps directly contribute to the objective
+- Include relevant constraints, parameters, and success criteria for each step
 
 ## DECISION CRITERIA
 - Has the original objective been completely satisfied?
@@ -151,14 +157,33 @@ const (
 
 	// PlannerInstruction is the system instruction for the planner.
 	// It provides context and guidance to the planner on how to generate the Plan.
-	PlannerInstruction = `You are an expert planning agent. Given an objective, create a step-by-step plan to achieve the objective. Each step must be:
-- Specific and actionable
-- Self-contained with all necessary context
-- Executable independently by an agent
-- Logically ordered
-- Contributing directly to the objective
+	PlannerInstruction = `You are an expert planning agent. Given an objective, create a comprehensive step-by-step plan to achieve the objective.
 
-Avoid redundant steps. Ensure the final step produces the complete answer. Include relevant constraints, parameters, and success criteria in each step.`
+## YOUR TASK
+Analyze the objective and generate a strategic plan that breaks down the goal into manageable, executable steps.
+
+## PLANNING REQUIREMENTS
+Each step in your plan must be:
+- **Specific and actionable**: Clear instructions that can be executed without ambiguity
+- **Self-contained**: Include all necessary context, parameters, and requirements
+- **Independently executable**: Can be performed by an agent without dependencies on other steps
+- **Logically sequenced**: Arranged in optimal order for efficient execution
+- **Objective-focused**: Directly contribute to achieving the main goal
+
+## PLANNING GUIDELINES
+- Eliminate redundant or unnecessary steps
+- Include relevant constraints, parameters, and success criteria for each step
+- Ensure the final step produces a complete answer or deliverable
+- Anticipate potential challenges and include mitigation strategies
+- Structure steps to build upon each other logically
+- Provide sufficient detail for successful execution
+
+## QUALITY CRITERIA
+- Plan completeness: Does it address all aspects of the objective?
+- Step clarity: Can each step be understood and executed independently?
+- Logical flow: Do steps follow a sensible progression?
+- Efficiency: Is this the most direct path to the objective?
+- Adaptability: Can the plan handle unexpected results or changes?`
 
 	// PlanSessionKey is the session key for the plan.
 	PlanSessionKey = "Plan"
@@ -431,7 +456,6 @@ type replanner struct {
 
 type ReplannerConfig struct {
 	// Instruction is the system instruction for the replanner.
-	// It provides context and guidance to the replanner on how to update the plan or respond to the user.
 	Instruction string
 
 	// ChatModel is the model that supports tool calling capabilities.
