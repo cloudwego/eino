@@ -274,11 +274,11 @@ func TestWorkflowInterrupt(t *testing.T) {
 		},
 	} // won't interrupt
 
-	// loop
-	a, err := NewLoopAgent(ctx, &LoopAgentConfig{
-		Name:          "loop",
-		SubAgents:     []Agent{sa1, sa2, sa3, sa4},
-		MaxIterations: 2,
+	// sequential
+	a, err := NewSequentialAgent(ctx, &SequentialAgentConfig{
+		Name:        "sequential",
+		Description: "sequential agent",
+		SubAgents:   []Agent{sa1, sa2, sa3, sa4},
 	})
 	assert.NoError(t, err)
 	runner := NewRunner(ctx, RunnerConfig{
@@ -286,7 +286,108 @@ func TestWorkflowInterrupt(t *testing.T) {
 		CheckPointStore: newMyStore(),
 	})
 	var events []*AgentEvent
-	iter := runner.Query(ctx, "hello world", WithCheckPointID("1"))
+	iter := runner.Query(ctx, "hello world", WithCheckPointID("sequential-1"))
+	for {
+		event, ok := iter.Next()
+		if !ok {
+			break
+		}
+		events = append(events, event)
+	}
+	// Resume after sa1 interrupt
+	iter, err = runner.Resume(ctx, "sequential-1")
+	assert.NoError(t, err)
+	for {
+		event, ok := iter.Next()
+		if !ok {
+			break
+		}
+		events = append(events, event)
+	}
+	// Resume after sa2 interrupt
+	iter, err = runner.Resume(ctx, "sequential-1")
+	assert.NoError(t, err)
+	for {
+		event, ok := iter.Next()
+		if !ok {
+			break
+		}
+		events = append(events, event)
+	}
+
+	expectedSequentialEvents := []*AgentEvent{
+		{
+			AgentName: "sa1",
+			RunPath:   []RunStep{{"sequential"}, {"sa1"}},
+			Action: &AgentAction{
+				Interrupted: &InterruptInfo{
+					Data: &WorkflowInterruptInfo{
+						OrigInput: &AgentInput{
+							Messages: []Message{schema.UserMessage("hello world")},
+						},
+						SequentialInterruptIndex: 0,
+						SequentialInterruptInfo: &InterruptInfo{
+							Data: "sa1 interrupt data",
+						},
+						LoopIterations: 0,
+					},
+				},
+			},
+		},
+		{
+			AgentName: "sa2",
+			RunPath:   []RunStep{{"sequential"}, {"sa1"}, {"sa2"}},
+			Action: &AgentAction{
+				Interrupted: &InterruptInfo{
+					Data: &WorkflowInterruptInfo{
+						OrigInput: &AgentInput{
+							Messages: []Message{schema.UserMessage("hello world")},
+						},
+						SequentialInterruptIndex: 1,
+						SequentialInterruptInfo: &InterruptInfo{
+							Data: "sa2 interrupt data",
+						},
+						LoopIterations: 0,
+					},
+				},
+			},
+		},
+		{
+			AgentName: "sa3",
+			RunPath:   []RunStep{{"sequential"}, {"sa1"}, {"sa2"}, {"sa3"}},
+			Output: &AgentOutput{
+				MessageOutput: &MessageVariant{
+					Message: schema.UserMessage("sa3 completed"),
+				},
+			},
+		},
+		{
+			AgentName: "sa4",
+			RunPath:   []RunStep{{"sequential"}, {"sa1"}, {"sa2"}, {"sa3"}, {"sa4"}},
+			Output: &AgentOutput{
+				MessageOutput: &MessageVariant{
+					Message: schema.UserMessage("sa4 completed"),
+				},
+			},
+		},
+	}
+
+	assert.Equal(t, 4, len(events))
+	assert.Equal(t, expectedSequentialEvents, events)
+
+	// loop
+	a, err = NewLoopAgent(ctx, &LoopAgentConfig{
+		Name:          "loop",
+		SubAgents:     []Agent{sa1, sa2, sa3, sa4},
+		MaxIterations: 2,
+	})
+	assert.NoError(t, err)
+	runner = NewRunner(ctx, RunnerConfig{
+		Agent:           a,
+		CheckPointStore: newMyStore(),
+	})
+	events = []*AgentEvent{}
+	iter = runner.Query(ctx, "hello world", WithCheckPointID("1"))
 	for {
 		event, ok := iter.Next()
 		if !ok {
@@ -326,7 +427,7 @@ func TestWorkflowInterrupt(t *testing.T) {
 		},
 		{
 			AgentName: "sa2",
-			RunPath:   []RunStep{{"loop"}, {"sa2"}},
+			RunPath:   []RunStep{{"loop"}, {"sa1"}, {"sa2"}},
 			Action: &AgentAction{
 				Interrupted: &InterruptInfo{
 					Data: &WorkflowInterruptInfo{
@@ -344,7 +445,7 @@ func TestWorkflowInterrupt(t *testing.T) {
 		},
 		{
 			AgentName: "sa3",
-			RunPath:   []RunStep{{"loop"}, {"sa3"}},
+			RunPath:   []RunStep{{"loop"}, {"sa1"}, {"sa2"}, {"sa3"}},
 			Output: &AgentOutput{
 				MessageOutput: &MessageVariant{
 					Message: schema.UserMessage("sa3 completed"),
@@ -353,7 +454,7 @@ func TestWorkflowInterrupt(t *testing.T) {
 		},
 		{
 			AgentName: "sa4",
-			RunPath:   []RunStep{{"loop"}, {"sa4"}},
+			RunPath:   []RunStep{{"loop"}, {"sa1"}, {"sa2"}, {"sa3"}, {"sa4"}},
 			Output: &AgentOutput{
 				MessageOutput: &MessageVariant{
 					Message: schema.UserMessage("sa4 completed"),
@@ -362,7 +463,7 @@ func TestWorkflowInterrupt(t *testing.T) {
 		},
 		{
 			AgentName: "sa1",
-			RunPath:   []RunStep{{"loop"}, {"sa1"}},
+			RunPath:   []RunStep{{"loop"}, {"sa1"}, {"sa2"}, {"sa3"}, {"sa4"}, {"sa1"}},
 			Action: &AgentAction{
 				Interrupted: &InterruptInfo{
 					Data: &WorkflowInterruptInfo{
@@ -380,7 +481,7 @@ func TestWorkflowInterrupt(t *testing.T) {
 		},
 		{
 			AgentName: "sa2",
-			RunPath:   []RunStep{{"loop"}, {"sa2"}},
+			RunPath:   []RunStep{{"loop"}, {"sa1"}, {"sa2"}, {"sa3"}, {"sa4"}, {"sa1"}, {"sa2"}},
 			Action: &AgentAction{
 				Interrupted: &InterruptInfo{
 					Data: &WorkflowInterruptInfo{
@@ -398,7 +499,7 @@ func TestWorkflowInterrupt(t *testing.T) {
 		},
 		{
 			AgentName: "sa3",
-			RunPath:   []RunStep{{"loop"}, {"sa3"}},
+			RunPath:   []RunStep{{"loop"}, {"sa1"}, {"sa2"}, {"sa3"}, {"sa4"}, {"sa1"}, {"sa2"}, {"sa3"}},
 			Output: &AgentOutput{
 				MessageOutput: &MessageVariant{
 					Message: schema.UserMessage("sa3 completed"),
@@ -407,7 +508,7 @@ func TestWorkflowInterrupt(t *testing.T) {
 		},
 		{
 			AgentName: "sa4",
-			RunPath:   []RunStep{{"loop"}, {"sa4"}},
+			RunPath:   []RunStep{{"loop"}, {"sa1"}, {"sa2"}, {"sa3"}, {"sa4"}, {"sa1"}, {"sa2"}, {"sa3"}, {"sa4"}},
 			Output: &AgentOutput{
 				MessageOutput: &MessageVariant{
 					Message: schema.UserMessage("sa4 completed"),
@@ -707,4 +808,59 @@ func (m *myTool1) InvokableRun(ctx context.Context, argumentsInJSON string, opts
 		return "", compose.InterruptAndRerun
 	}
 	return "result", nil
+}
+
+// Add this test case after the existing TestWorkflowInterrupt function
+func TestWorkflowInterruptInvalidDataType(t *testing.T) {
+	ctx := context.Background()
+
+	// Create a simple workflow agent
+	sa1 := &myAgent{
+		name: "sa1",
+		runner: func(ctx context.Context, input *AgentInput, options ...AgentRunOption) *AsyncIterator[*AgentEvent] {
+			iter, generator := NewAsyncIteratorPair[*AgentEvent]()
+			generator.Send(&AgentEvent{
+				AgentName: "sa1",
+				Output: &AgentOutput{
+					MessageOutput: &MessageVariant{
+						Message: schema.UserMessage("completed"),
+					},
+				},
+			})
+			generator.Close()
+			return iter
+		},
+	}
+
+	a, err := NewSequentialAgent(ctx, &SequentialAgentConfig{
+		Name:        "sequential",
+		Description: "sequential agent",
+		SubAgents:   []Agent{sa1},
+	})
+	assert.NoError(t, err)
+
+	// Cast to workflowAgent to access Resume method directly
+	workflowAgent := a.(*flowAgent).Agent.(*workflowAgent)
+
+	// Create ResumeInfo with invalid Data type (not *WorkflowInterruptInfo)
+	resumeInfo := &ResumeInfo{
+		EnableStreaming: false,
+		InterruptInfo: &InterruptInfo{
+			Data: "invalid data type", // This should be *WorkflowInterruptInfo but we pass string
+		},
+	}
+
+	// Call Resume method directly to trigger the error path
+	iter := workflowAgent.Resume(ctx, resumeInfo)
+
+	// Verify that an error event is generated
+	event, ok := iter.Next()
+	assert.True(t, ok)
+	assert.NotNil(t, event.Err)
+	assert.Contains(t, event.Err.Error(), "type of InterruptInfo.Data is expected to")
+	assert.Contains(t, event.Err.Error(), "actual: string")
+
+	// Verify no more events
+	_, ok = iter.Next()
+	assert.False(t, ok)
 }
