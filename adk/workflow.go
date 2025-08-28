@@ -144,17 +144,40 @@ type WorkflowInterruptInfo struct {
 
 func (a *workflowAgent) runSequential(ctx context.Context, input *AgentInput,
 	generator *AsyncGenerator[*AgentEvent], intInfo *WorkflowInterruptInfo, iterations int /*passed by loop agent*/, opts ...AgentRunOption) (exit, interrupted bool) {
-	i := 0
-	if intInfo != nil {
-		i = intInfo.SequentialInterruptIndex
+	var runPath []RunStep // reconstruct RunPath each loop
+	if iterations > 0 {
+		runPath = make([]RunStep, 0, (iterations+1)*len(a.subAgents))
+		for iter := 0; iter < iterations; iter++ {
+			for j := 0; j < len(a.subAgents); j++ {
+				runPath = append(runPath, RunStep{
+					agentName: a.subAgents[j].Name(ctx),
+				})
+			}
+		}
 	}
+
+	i := 0
+	if intInfo != nil { // restore previous RunPath
+		i = intInfo.SequentialInterruptIndex
+
+		for j := 0; j < i; j++ {
+			runPath = append(runPath, RunStep{
+				agentName: a.subAgents[j].Name(ctx),
+			})
+		}
+	}
+
+	runCtx := getRunCtx(ctx)
+	nRunCtx := runCtx.deepCopy()
+	nRunCtx.RunPath = append(nRunCtx.RunPath, runPath...)
+	nCtx := setRunCtx(ctx, nRunCtx)
 
 	for ; i < len(a.subAgents); i++ {
 		subAgent := a.subAgents[i]
 
 		var subIterator *AsyncIterator[*AgentEvent]
 		if intInfo != nil && i == intInfo.SequentialInterruptIndex {
-			nCtx, runCtx := initRunCtx(ctx, subAgent.Name(ctx), input)
+			nCtx, nRunCtx = initRunCtx(nCtx, subAgent.Name(nCtx), nRunCtx.RootInput)
 			enableStreaming := false
 			if runCtx.RootInput != nil {
 				enableStreaming = runCtx.RootInput.EnableStreaming
@@ -164,7 +187,8 @@ func (a *workflowAgent) runSequential(ctx context.Context, input *AgentInput,
 				InterruptInfo:   intInfo.SequentialInterruptInfo,
 			}, opts...)
 		} else {
-			subIterator = subAgent.Run(ctx, input, opts...)
+			subIterator = subAgent.Run(nCtx, input, opts...)
+			nCtx, _ = initRunCtx(nCtx, subAgent.Name(nCtx), input)
 		}
 
 		for {
@@ -196,7 +220,7 @@ func (a *workflowAgent) runSequential(ctx context.Context, input *AgentInput,
 
 				// Reset run ctx,
 				// because the control should be transferred to the workflow agent, not the interrupted agent
-				replaceInterruptRunCtx(ctx, getRunCtx(ctx))
+				replaceInterruptRunCtx(nCtx, runCtx)
 
 				// Forward the event
 				generator.Send(newEvent)

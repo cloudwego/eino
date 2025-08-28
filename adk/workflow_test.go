@@ -109,6 +109,8 @@ func TestSequentialAgent(t *testing.T) {
 	assert.NoError(t, err)
 	assert.NotNil(t, sequentialAgent)
 
+	assert.Equal(t, "Test sequential agent", sequentialAgent.Description(ctx))
+
 	// Run the sequential agent
 	input := &AgentInput{
 		Messages: []Message{
