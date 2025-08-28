@@ -17,9 +17,12 @@
 package adk
 
 import (
+	"fmt"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/assert"
 )
 
 func TestAsyncIteratorPair_Basic(t *testing.T) {
@@ -152,4 +155,13 @@ func TestAsyncIteratorPair_Concurrency(t *testing.T) {
 	if len(receivedMap) != numSenders*messagesPerSender {
 		t.Error("duplicate or missing messages detected")
 	}
+}
+
+func TestGenErrorIter(t *testing.T) {
+	iter := genErrorIter(fmt.Errorf("test"))
+	e, ok := iter.Next()
+	assert.True(t, ok)
+	assert.Equal(t, "test", e.Err.Error())
+	_, ok = iter.Next()
+	assert.False(t, ok)
 }
