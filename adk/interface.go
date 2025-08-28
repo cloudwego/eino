@@ -149,10 +149,46 @@ type AgentAction struct {
 	CustomizedAction any
 }
 
+type RunStep struct {
+	agentName string
+}
+
+func (r *RunStep) String() string {
+	return r.agentName
+}
+
+func (r *RunStep) Equals(r1 RunStep) bool {
+	return r.agentName == r1.agentName
+}
+
+func (r *RunStep) GobEncode() ([]byte, error) {
+	s := &runStepSerialization{AgentName: r.agentName}
+	buf := &bytes.Buffer{}
+	err := gob.NewEncoder(buf).Encode(s)
+	if err != nil {
+		return nil, fmt.Errorf("failed to gob encode RunStep: %w", err)
+	}
+	return buf.Bytes(), nil
+}
+
+func (r *RunStep) GobDecode(b []byte) error {
+	s := &runStepSerialization{}
+	err := gob.NewDecoder(bytes.NewReader(b)).Decode(s)
+	if err != nil {
+		return fmt.Errorf("failed to gob decode RunStep: %w", err)
+	}
+	r.agentName = s.AgentName
+	return nil
+}
+
+type runStepSerialization struct {
+	AgentName string
+}
+
 type AgentEvent struct {
 	AgentName string
 
-	RunPath []string
+	RunPath []RunStep
 
 	Output *AgentOutput
 

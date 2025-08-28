@@ -17,9 +17,7 @@
 package adk
 
 import (
-	"bytes"
 	"context"
-	"encoding/gob"
 	"errors"
 	"sync"
 	"testing"
@@ -46,6 +44,14 @@ func TestSaveAgentEventWrapper(t *testing.T) {
 					MessageStream: sr,
 				},
 			},
+			RunPath: []RunStep{
+				{
+					"a1",
+				},
+				{
+					"a2",
+				},
+			},
 		},
 		mu:                  sync.Mutex{},
 		concatenatedMessage: nil,
@@ -54,8 +60,12 @@ func TestSaveAgentEventWrapper(t *testing.T) {
 	_, err := getMessageFromWrappedEvent(w)
 	assert.NoError(t, err)
 
-	buf := &bytes.Buffer{}
-	err = gob.NewEncoder(buf).Encode(w)
+	buf, err := w.GobEncode()
+	assert.NoError(t, err)
+	assert.NoError(t, err)
+
+	w1 := &agentEventWrapper{}
+	err = w1.GobDecode(buf)
 	assert.NoError(t, err)
 }
 
@@ -298,7 +308,7 @@ func TestWorkflowInterrupt(t *testing.T) {
 	expectedEvents := []*AgentEvent{
 		{
 			AgentName: "sa1",
-			RunPath:   []string{"loop", "sa1"},
+			RunPath:   []RunStep{{"loop"}, {"sa1"}},
 			Action: &AgentAction{
 				Interrupted: &InterruptInfo{
 					Data: &WorkflowInterruptInfo{
@@ -316,7 +326,7 @@ func TestWorkflowInterrupt(t *testing.T) {
 		},
 		{
 			AgentName: "sa2",
-			RunPath:   []string{"loop", "sa2"},
+			RunPath:   []RunStep{{"loop"}, {"sa2"}},
 			Action: &AgentAction{
 				Interrupted: &InterruptInfo{
 					Data: &WorkflowInterruptInfo{
@@ -334,7 +344,7 @@ func TestWorkflowInterrupt(t *testing.T) {
 		},
 		{
 			AgentName: "sa3",
-			RunPath:   []string{"loop", "sa3"},
+			RunPath:   []RunStep{{"loop"}, {"sa3"}},
 			Output: &AgentOutput{
 				MessageOutput: &MessageVariant{
 					Message: schema.UserMessage("sa3 completed"),
@@ -343,7 +353,7 @@ func TestWorkflowInterrupt(t *testing.T) {
 		},
 		{
 			AgentName: "sa4",
-			RunPath:   []string{"loop", "sa4"},
+			RunPath:   []RunStep{{"loop"}, {"sa4"}},
 			Output: &AgentOutput{
 				MessageOutput: &MessageVariant{
 					Message: schema.UserMessage("sa4 completed"),
@@ -352,7 +362,7 @@ func TestWorkflowInterrupt(t *testing.T) {
 		},
 		{
 			AgentName: "sa1",
-			RunPath:   []string{"loop", "sa1"},
+			RunPath:   []RunStep{{"loop"}, {"sa1"}},
 			Action: &AgentAction{
 				Interrupted: &InterruptInfo{
 					Data: &WorkflowInterruptInfo{
@@ -370,7 +380,7 @@ func TestWorkflowInterrupt(t *testing.T) {
 		},
 		{
 			AgentName: "sa2",
-			RunPath:   []string{"loop", "sa2"},
+			RunPath:   []RunStep{{"loop"}, {"sa2"}},
 			Action: &AgentAction{
 				Interrupted: &InterruptInfo{
 					Data: &WorkflowInterruptInfo{
@@ -388,7 +398,7 @@ func TestWorkflowInterrupt(t *testing.T) {
 		},
 		{
 			AgentName: "sa3",
-			RunPath:   []string{"loop", "sa3"},
+			RunPath:   []RunStep{{"loop"}, {"sa3"}},
 			Output: &AgentOutput{
 				MessageOutput: &MessageVariant{
 					Message: schema.UserMessage("sa3 completed"),
@@ -397,7 +407,7 @@ func TestWorkflowInterrupt(t *testing.T) {
 		},
 		{
 			AgentName: "sa4",
-			RunPath:   []string{"loop", "sa4"},
+			RunPath:   []RunStep{{"loop"}, {"sa4"}},
 			Output: &AgentOutput{
 				MessageOutput: &MessageVariant{
 					Message: schema.UserMessage("sa4 completed"),
