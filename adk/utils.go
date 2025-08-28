@@ -211,3 +211,10 @@ func GetMessage(e *AgentEvent) (Message, *AgentEvent, error) {
 
 	return msgOutput.Message, e, nil
 }
+
+func genErrorIter(err error) *AsyncIterator[*AgentEvent] {
+	iterator, generator := NewAsyncIteratorPair[*AgentEvent]()
+	generator.Send(&AgentEvent{Err: err})
+	generator.Close()
+	return iterator
+}
