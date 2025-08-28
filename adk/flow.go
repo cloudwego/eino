@@ -218,10 +218,6 @@ func (ai *AgentInput) deepCopy() *AgentInput {
 }
 
 func (a *flowAgent) genAgentInput(ctx context.Context, runCtx *runContext, skipTransferMessages bool) (*AgentInput, error) {
-	if runCtx.isRoot() {
-		return runCtx.RootInput, nil
-	}
-
 	input := runCtx.RootInput.deepCopy()
 	runPath := runCtx.RunPath
 
@@ -307,11 +303,7 @@ func (a *flowAgent) Run(ctx context.Context, input *AgentInput, opts ...AgentRun
 
 	input, err := a.genAgentInput(ctx, runCtx, o.skipTransferMessages)
 	if err != nil {
-		iterator, generator := NewAsyncIteratorPair[*AgentEvent]()
-		generator.Send(&AgentEvent{Err: err})
-		generator.Close()
-
-		return iterator
+		return genErrorIter(err)
 	}
 
 	if wf, ok := a.Agent.(*workflowAgent); ok {
@@ -329,6 +321,10 @@ func (a *flowAgent) Run(ctx context.Context, input *AgentInput, opts ...AgentRun
 
 func (a *flowAgent) Resume(ctx context.Context, info *ResumeInfo, opts ...AgentRunOption) *AsyncIterator[*AgentEvent] {
 	runCtx := getRunCtx(ctx)
+	if runCtx == nil {
+		return genErrorIter(fmt.Errorf("failed to resume agent: run context is empty"))
+	}
+
 	agentName := a.Name(ctx)
 	targetName := agentName
 	if len(runCtx.RunPath) > 0 {
@@ -339,10 +335,7 @@ func (a *flowAgent) Resume(ctx context.Context, info *ResumeInfo, opts ...AgentR
 		// go to target flow agent
 		targetAgent := recursiveGetAgent(ctx, a, targetName)
 		if targetAgent == nil {
-			iterator, generator := NewAsyncIteratorPair[*AgentEvent]()
-			generator.Send(&AgentEvent{Err: fmt.Errorf("failed to resume agent: cannot find agent: %s", agentName)})
-			generator.Close()
-			return iterator
+			return genErrorIter(fmt.Errorf("failed to resume agent: cannot find agent: %s", agentName))
 		}
 		return targetAgent.Resume(ctx, info, opts...)
 	}
@@ -354,11 +347,7 @@ func (a *flowAgent) Resume(ctx context.Context, info *ResumeInfo, opts ...AgentR
 	// resume current agent
 	ra, ok := a.Agent.(ResumableAgent)
 	if !ok {
-		iterator, generator := NewAsyncIteratorPair[*AgentEvent]()
-		generator.Send(&AgentEvent{Err: fmt.Errorf("failed to resume agent: target agent[%s] isn't resumable", agentName)})
-		generator.Close()
-
-		return iterator
+		return genErrorIter(fmt.Errorf("failed to resume agent: target agent[%s] isn't resumable", agentName))
 	}
 	iterator, generator := NewAsyncIteratorPair[*AgentEvent]()
 	aIter := ra.Resume(ctx, info, opts...)
