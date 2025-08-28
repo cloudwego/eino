@@ -161,13 +161,13 @@ func (a *flowAgent) getAgent(ctx context.Context, name string) *flowAgent {
 	return nil
 }
 
-func belongToRunPath(eventRunPath []string, runPath []string) bool {
+func belongToRunPath(eventRunPath []RunStep, runPath []RunStep) bool {
 	if len(runPath) < len(eventRunPath) {
 		return false
 	}
 
-	for i, name := range eventRunPath {
-		if runPath[i] != name {
+	for i, step := range eventRunPath {
+		if !runPath[i].Equals(step) {
 			return false
 		}
 	}
@@ -332,7 +332,7 @@ func (a *flowAgent) Resume(ctx context.Context, info *ResumeInfo, opts ...AgentR
 	agentName := a.Name(ctx)
 	targetName := agentName
 	if len(runCtx.RunPath) > 0 {
-		targetName = runCtx.RunPath[len(runCtx.RunPath)-1]
+		targetName = runCtx.RunPath[len(runCtx.RunPath)-1].agentName
 	}
 
 	if agentName != targetName {
