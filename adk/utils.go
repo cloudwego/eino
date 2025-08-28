@@ -22,9 +22,10 @@ import (
 	"io"
 	"strings"
 
+	"github.com/google/uuid"
+
 	"github.com/cloudwego/eino/internal"
 	"github.com/cloudwego/eino/schema"
-	"github.com/google/uuid"
 )
 
 type AsyncIterator[T any] struct {
@@ -154,7 +155,7 @@ func getMessageFromWrappedEvent(e *agentEventWrapper) (Message, error) {
 // the Message itself or Chunks of the MessageStream, as they are not copied.
 // NOTE: if you have CustomizedOutput or CustomizedAction, they are NOT copied.
 func copyAgentEvent(ae *AgentEvent) *AgentEvent {
-	rp := make([]string, len(ae.RunPath))
+	rp := make([]RunStep, len(ae.RunPath))
 	copy(rp, ae.RunPath)
 
 	copied := &AgentEvent{
