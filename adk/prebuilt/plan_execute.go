@@ -742,7 +742,7 @@ func (r *replanner) Run(ctx context.Context, input *adk.AgentInput, _ ...adk.Age
 			return
 		}
 
-		plan_, err_ := r.planParser(ctx, planMsg.ToolCalls[0].Function.Name)
+		plan_, err_ := r.planParser(ctx, planMsg.ToolCalls[0].Function.Arguments)
 		if err_ != nil {
 			err_ = fmt.Errorf("unmarshal plan error: %w", err_)
 			generator.Send(&adk.AgentEvent{Err: err_})
