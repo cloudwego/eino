@@ -131,6 +131,8 @@ func (r *Runner) handleIter(ctx context.Context, aIter *AsyncIterator[*AgentEven
 
 		if event.Action != nil && event.Action.Interrupted != nil {
 			interruptedInfo = event.Action.Interrupted
+		} else {
+			interruptedInfo = nil
 		}
 
 		gen.Send(event)
