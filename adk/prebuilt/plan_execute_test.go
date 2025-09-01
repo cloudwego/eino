@@ -127,7 +127,8 @@ func TestPlannerRunWithFormattedOutput(t *testing.T) {
 	event, ok = iterator.Next()
 	assert.False(t, ok)
 
-	plan, err := defaultNewPlan(ctx, msg.Content)
+	plan := defaultNewPlan(ctx)
+	err = plan.UnmarshalJSON([]byte(msg.Content))
 	assert.NoError(t, err)
 	plan_ := plan.(*executionPlan)
 	assert.Equal(t, 3, len(plan_.Steps_))
@@ -193,7 +194,8 @@ func TestPlannerRunWithToolCalling(t *testing.T) {
 	_, ok = iterator.Next()
 	assert.False(t, ok)
 
-	plan, err := defaultNewPlan(ctx, msg.Content)
+	plan := defaultNewPlan(ctx)
+	err = plan.UnmarshalJSON([]byte(msg.Content))
 	assert.NoError(t, err)
 	plan_ := plan.(*executionPlan)
 	assert.NoError(t, err)
