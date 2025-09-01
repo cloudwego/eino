@@ -38,7 +38,7 @@ import (
 type Plan interface {
 	// Description returns the complete textual description of the plan.
 	Description(ctx context.Context) string
-	// FirstStep returns the next step to be executed in the plan.
+	// FirstStep returns the first step to be executed in the plan.
 	FirstStep(ctx context.Context) string
 }
 
@@ -126,24 +126,57 @@ var (
 		),
 	}
 
-	ExecutorUserPrompt = prompt.FromMessages(schema.FString, schema.UserMessage(
-		`
+	// PlannerPrompt is the prompt template for the planner.
+	// It provides context and guidance to the planner on how to generate the Plan.
+	PlannerPrompt = prompt.FromMessages(schema.FString,
+		schema.SystemMessage(`You are an expert planning agent. Given an objective, create a comprehensive step-by-step plan to achieve the objective.
+
+## YOUR TASK
+Analyze the objective and generate a strategic plan that breaks down the goal into manageable, executable steps.
+
+## PLANNING REQUIREMENTS
+Each step in your plan must be:
+- **Specific and actionable**: Clear instructions that can be executed without ambiguity
+- **Self-contained**: Include all necessary context, parameters, and requirements
+- **Independently executable**: Can be performed by an agent without dependencies on other steps
+- **Logically sequenced**: Arranged in optimal order for efficient execution
+- **Objective-focused**: Directly contribute to achieving the main goal
+
+## PLANNING GUIDELINES
+- Eliminate redundant or unnecessary steps
+- Include relevant constraints, parameters, and success criteria for each step
+- Ensure the final step produces a complete answer or deliverable
+- Anticipate potential challenges and include mitigation strategies
+- Structure steps to build upon each other logically
+- Provide sufficient detail for successful execution
+
+## QUALITY CRITERIA
+- Plan completeness: Does it address all aspects of the objective?
+- Step clarity: Can each step be understood and executed independently?
+- Logical flow: Do steps follow a sensible progression?
+- Efficiency: Is this the most direct path to the objective?
+- Adaptability: Can the plan handle unexpected results or changes?`),
+		schema.MessagesPlaceholder("input", false),
+	)
+
+	// ExecutorPrompt is the prompt template for the executor.
+	// It provides context and guidance to the executor on how to execute the Task.
+	ExecutorPrompt = prompt.FromMessages(schema.FString,
+		schema.SystemMessage(`You are a diligent and meticulous executor agent. Follow the given plan and execute your tasks carefully and thoroughly.`),
+		schema.UserMessage(`## OBJECTIVE
+{input}
 ## Given the following plan:
 {plan}
+## COMPLETED STEPS & RESULTS
+{executed_steps}
 ## Your task is to execute the first step, which is: 
 {step}`))
 
-	ReplannerUserPrompt = prompt.FromMessages(schema.FString, schema.UserMessage(
-		`You are going to review the progress toward an objective. Analyze the current state and determine the optimal next action.
-
-## OBJECTIVE
-{input}
-
-## ORIGINAL PLAN
-{plan}
-
-## COMPLETED STEPS & RESULTS
-{executed_steps}
+	// ReplannerPrompt is the prompt template for the replanner.
+	// It provides context and guidance to the replanner on how to regenerate the Plan.
+	ReplannerPrompt = prompt.FromMessages(schema.FString,
+		schema.SystemMessage(
+			`You are going to review the progress toward an objective. Analyze the current state and determine the optimal next action.
 
 ## YOUR TASK
 Based on the progress above, you MUST choose exactly ONE action:
@@ -178,7 +211,16 @@ Each step in your plan must be:
 - Has the original objective been completely satisfied?
 - Are there any remaining requirements or sub-goals?
 - Do the results suggest a need for strategy adjustment?
-- What specific actions are still required?`))
+- What specific actions are still required?`),
+		schema.UserMessage(`## OBJECTIVE
+{input}
+
+## ORIGINAL PLAN
+{plan}
+
+## COMPLETED STEPS & RESULTS
+{executed_steps}`),
+	)
 )
 
 const (
@@ -264,9 +306,12 @@ func defaultPlanParserFn(ctx context.Context, arguments string) (Plan, error) {
 }
 
 func defaultGenPlannerInputFn(ctx context.Context, in *PlannerInput) ([]adk.Message, error) {
-	msgs := make([]adk.Message, 0, 1+len(in.Input))
-	msgs = append(msgs, schema.SystemMessage(PlannerInstruction))
-	msgs = append(msgs, in.Input...)
+	msgs, err := PlannerPrompt.Format(ctx, map[string]any{
+		"input": in.Input,
+	})
+	if err != nil {
+		return nil, err
+	}
 	return msgs, nil
 }
 
@@ -517,10 +562,11 @@ func NewExecutor(ctx context.Context, cfg *ExecutorConfig) (adk.Agent, error) {
 
 func defaultGenExecutorInputFn(ctx context.Context, in *PlanExecuteInput) ([]adk.Message, error) {
 
-	userMsgs, err := ExecutorUserPrompt.Format(ctx, map[string]any{
-		"input": formatInput(in.Input),
-		"plan":  in.Plan.Description(ctx),
-		"step":  in.Plan.FirstStep(ctx),
+	userMsgs, err := ExecutorPrompt.Format(ctx, map[string]any{
+		"input":          formatInput(in.Input),
+		"plan":           in.Plan.Description(ctx),
+		"executed_steps": formatExecutedSteps(in.ExecutedSteps),
+		"step":           in.Plan.FirstStep(ctx),
 	})
 	if err != nil {
 		return nil, err
@@ -757,7 +803,7 @@ func (r *replanner) Run(ctx context.Context, input *adk.AgentInput, _ ...adk.Age
 
 func buildDefaultReplannerInputFn(in *PlanExecuteInput, planToolName, respondToolName string) GenPlanExecuteInputFn {
 	return func(ctx context.Context, in *PlanExecuteInput) ([]adk.Message, error) {
-		msgs, err := ReplannerUserPrompt.Format(ctx, map[string]any{
+		msgs, err := ReplannerPrompt.Format(ctx, map[string]any{
 			"plan":           in.Plan.Description(ctx),
 			"input":          formatInput(in.Input),
 			"executed_steps": formatExecutedSteps(in.ExecutedSteps),
