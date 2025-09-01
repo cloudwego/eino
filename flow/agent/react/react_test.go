@@ -74,9 +74,6 @@ func TestReact(t *testing.T) {
 		}).AnyTimes()
 	cm.EXPECT().BindTools(gomock.Any()).Return(nil).AnyTimes()
 
-	err = cm.BindTools([]*schema.ToolInfo{info})
-	assert.NoError(t, err)
-
 	a, err := NewAgent(ctx, &AgentConfig{
 		Model: cm,
 		ToolsConfig: compose.ToolsNodeConfig{
@@ -551,51 +548,128 @@ func TestAgentInGraph(t *testing.T) {
 
 }
 
-func TestReActAgentWithNoTools(t *testing.T) {
-	// create the react agent with no tools, assert no error
-	// then invoke the agent with two options: WithToolList, WithChatModelOptions(model.WithTools),
-	// to dynamically add tools to the agent, assert the tool is successfully called.
-	fakeTool := &fakeToolGreetForTest{}
+func TestWithTools(t *testing.T) {
+	ctx := context.Background()
+
+	fakeTool := &fakeToolGreetForTest{
+		tarCount: 2,
+	}
+	fakeStreamTool := &fakeStreamToolGreetForTest{
+		tarCount: 2,
+	}
+
 	ctrl := gomock.NewController(t)
 	cm := mockModel.NewMockToolCallingChatModel(ctrl)
 
 	times := 0
 	cm.EXPECT().Generate(gomock.Any(), gomock.Any(), gomock.Any()).
 		DoAndReturn(func(ctx context.Context, input []*schema.Message, opts ...model.Option) (*schema.Message, error) {
-
-			times += 1
-			if times <= 2 {
+			times++
+			if times <= 1 {
 				info, _ := fakeTool.Info(ctx)
-
-				return schema.AssistantMessage("hello max",
+				return schema.AssistantMessage("calling tool",
 						[]schema.ToolCall{
 							{
 								ID: randStr(),
 								Function: schema.FunctionCall{
 									Name:      info.Name,
-									Arguments: fmt.Sprintf(`{"name": "%s", "hh": "123"}`, randStr()),
+									Arguments: `{"name": "test"}`,
 								},
 							},
 						}),
 					nil
 			}
+			return schema.AssistantMessage("done", nil), nil
+		}).AnyTimes()
 
-			return schema.AssistantMessage("bye", nil), nil
+	cm.EXPECT().Stream(gomock.Any(), gomock.Any(), gomock.Any()).
+		DoAndReturn(func(ctx context.Context, input []*schema.Message, opts ...model.Option) (
+			*schema.StreamReader[*schema.Message], error) {
+			sr, sw := schema.Pipe[*schema.Message](1)
+			defer sw.Close()
 
-		}).Times(3)
+			times++
+			if times <= 2 {
+				info, _ := fakeStreamTool.Info(ctx)
+				sw.Send(schema.AssistantMessage("calling stream tool",
+					[]schema.ToolCall{
+						{
+							ID: randStr(),
+							Function: schema.FunctionCall{
+								Name:      info.Name,
+								Arguments: `{"name": "test"}`,
+							},
+						},
+					}),
+					nil)
+				return sr, nil
+			}
 
-	ra, err := NewAgent(context.Background(), &AgentConfig{
+			sw.Send(schema.AssistantMessage("stream done", nil), nil)
+			return sr, nil
+		}).AnyTimes()
+
+	// Test WithTools function
+	toolOptions, err := WithTools(ctx, fakeTool, fakeStreamTool)
+	assert.NoError(t, err)
+	assert.Len(t, toolOptions, 2, "WithTools should return exactly 2 options")
+
+	// Create agent without tools in config
+	a, err := NewAgent(ctx, &AgentConfig{
 		ToolCallingModel: cm,
 		MaxStep:          10,
 	})
 	assert.NoError(t, err)
 
-	info, _ := fakeTool.Info(context.Background())
-	msg, err := ra.Generate(context.Background(), []*schema.Message{
-		schema.UserMessage("hello"),
-	}, WithToolList(fakeTool), WithChatModelOptions(model.WithTools([]*schema.ToolInfo{info})))
+	// Test Generate with WithTools options
+	times = 0
+	msg, err := a.Generate(ctx, []*schema.Message{
+		schema.UserMessage("test generate with tools"),
+	}, toolOptions...)
 	assert.NoError(t, err)
-	assert.Equal(t, "bye", msg.Content)
+	assert.Equal(t, "done", msg.Content)
+
+	// Test Stream with WithTools options
+	times = 0
+	stream, err := a.Stream(ctx, []*schema.Message{
+		schema.UserMessage("test stream with tools"),
+	}, toolOptions...)
+	assert.NoError(t, err)
+
+	defer stream.Close()
+	msgs := make([]*schema.Message, 0)
+	for {
+		msg, err := stream.Recv()
+		if err != nil {
+			if errors.Is(err, io.EOF) {
+				break
+			}
+			assert.NoError(t, err)
+		}
+		msgs = append(msgs, msg)
+	}
+
+	assert.Len(t, msgs, 1)
+	concatMsg, err := schema.ConcatMessages(msgs)
+	assert.NoError(t, err)
+	assert.Equal(t, "stream done", concatMsg.Content)
+
+	// Test error case - tool Info() returns error
+	errorTool := &errorToolForTest{}
+	_, err = WithTools(ctx, errorTool)
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "info error")
+}
+
+// Helper tool for testing error cases
+type errorToolForTest struct{}
+
+func (t *errorToolForTest) Info(_ context.Context) (*schema.ToolInfo, error) {
+	return nil, errors.New("info error")
+}
+
+func (t *errorToolForTest) InvokableRun(_ context.Context, _ string, _ ...tool.Option) (string, error) {
+	return "", nil
 }
 
 type fakeStreamToolGreetForTest struct {

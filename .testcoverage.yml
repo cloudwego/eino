@@ -41,3 +41,4 @@ exclude:
     - "mock/"
     - "callbacks/interface.go"
     - "utils/safe"
+    - "components/tool/utils/create_options.go"

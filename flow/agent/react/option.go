@@ -39,9 +39,71 @@ func WithChatModelOptions(opts ...model.Option) agent.AgentOption {
 	return agent.WithComposeOptions(compose.WithChatModelOption(opts...))
 }
 
+// Deprecated: this option changes tool list for ToolsNode ONLY,
+// if your need to pass new ToolInfo list to chat model as well, use the new WithTools function instead.
 // WithToolList returns an agent option that specifies the list of tools can be called which are BaseTool but must implement InvokableTool or StreamableTool.
 func WithToolList(tools ...tool.BaseTool) agent.AgentOption {
 	return agent.WithComposeOptions(compose.WithToolsNodeOption(compose.WithToolList(tools...)))
+}
+
+// WithTools is a convenience function that configures a React agent with a list of tools.
+// It performs two essential operations:
+//  1. Extracts tool information for the chat model to understand available tools
+//  2. Registers the actual tool implementations for execution
+//
+// Parameters:
+//   - ctx: The context for the operation, used when calling Info() on each tool
+//   - tools: A variadic list of tools that must implement either InvokableTool or StreamableTool interfaces
+//
+// Returns:
+//   - []agent.AgentOption: A slice containing exactly 2 agent options:
+//   - Option 1: Configures the chat model with tool schemas via model.WithTools(toolInfos)
+//   - Option 2: Registers the tool implementations via compose.WithToolList(tools...)
+//   - error: Returns an error if any tool's Info() method fails
+//
+// Usage Example:
+//
+//	ctx := context.Background()
+//	agentOptions, err := WithTools(ctx, myTool1, myTool2, myTool3)
+//	if err != nil {
+//	    return fmt.Errorf("failed to configure tools: %w", err)
+//	}
+//
+//	agent, err := react.NewAgent(ctx, &react.AgentConfig{
+//	    ToolCallingModel: myModel,
+//	    // other config...
+//	})
+//	if err != nil {
+//	    return fmt.Errorf("failed to create agent: %w", err)
+//	}
+//
+//	// Use the tool options with Generate or Stream methods
+//	msg, err := agent.Generate(ctx, messages, agentOptions...)
+//	// or
+//	stream, err := agent.Stream(ctx, messages, agentOptions...)
+//
+// Comparison with Related Functions:
+//   - WithToolList: Only registers tool implementations, doesn't configure the chat model
+//   - WithTools: Comprehensive setup that handles both chat model configuration and tool registration
+//
+// Notes:
+//   - The function always returns exactly 2 options when successful
+//   - Both returned options should be applied to the agent for proper tool functionality
+func WithTools(ctx context.Context, tools ...tool.BaseTool) ([]agent.AgentOption, error) {
+	toolInfos := make([]*schema.ToolInfo, 0, len(tools))
+	for _, tl := range tools {
+		info, err := tl.Info(ctx)
+		if err != nil {
+			return nil, err
+		}
+
+		toolInfos = append(toolInfos, info)
+	}
+
+	opts := make([]agent.AgentOption, 2)
+	opts[0] = agent.WithComposeOptions(compose.WithChatModelOption(model.WithTools(toolInfos)))
+	opts[1] = agent.WithComposeOptions(compose.WithToolsNodeOption(compose.WithToolList(tools...)))
+	return opts, nil
 }
 
 type Iterator[T any] struct {

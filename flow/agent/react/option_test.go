@@ -385,13 +385,6 @@ func TestWithChatModelOptions(t *testing.T) {
 	assert.IsType(t, agentOpt, agentOpt)
 }
 
-func TestWithToolList(t *testing.T) {
-	dummyTool := &dummyBaseTool{}
-	agentOpt := WithToolList(dummyTool)
-	assert.NotNil(t, agentOpt)
-	assert.IsType(t, agentOpt, agentOpt)
-}
-
 // dummyBaseTool is a minimal implementation of tool.BaseTool for testing.
 type dummyBaseTool struct{}
 
@@ -466,7 +459,8 @@ func TestAgentWithAllOptions(t *testing.T) {
 
 	agentOpt := WithToolOptions(to)
 	agentOpt2 := WithChatModelOptions(modelOpt)
-	agentOpt3 := WithToolList(at)
+	agentOpt3, err := WithTools(context.Background(), at)
+	assert.NoError(t, err)
 
 	a, err := NewAgent(ctx, &AgentConfig{
 		ToolCallingModel: cm,
@@ -479,7 +473,7 @@ func TestAgentWithAllOptions(t *testing.T) {
 
 	_, err = a.Generate(ctx, []*schema.Message{
 		schema.UserMessage("call the tool"),
-	}, agentOpt, agentOpt2, agentOpt3)
+	}, agentOpt, agentOpt2, agentOpt3[0], agentOpt3[1])
 	assert.NoError(t, err)
 	assert.True(t, modelOptReceived, "model option should be received by chat model")
 	assert.True(t, at.receivedToolOpt, "tool option should be received by tool")

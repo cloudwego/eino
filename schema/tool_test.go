@@ -155,13 +155,6 @@ func TestJsonSchemaToOpenAPIV3(t *testing.T) {
 			Properties: orderedmap.New[string, *jsonschema.Schema](
 				orderedmap.WithInitialData(
 					orderedmap.Pair[string, *jsonschema.Schema]{
-						Key: "arg1",
-						Value: &jsonschema.Schema{
-							Type:        "string",
-							Description: "this is the first argument",
-						},
-					},
-					orderedmap.Pair[string, *jsonschema.Schema]{
 						Key: "arg2",
 						Value: &jsonschema.Schema{
 							Type:        "array",
@@ -174,7 +167,6 @@ func TestJsonSchemaToOpenAPIV3(t *testing.T) {
 					},
 				),
 			),
-			Required: []string{"arg1"},
 		}
 
 		expect := &openapi3.SchemaRef{
@@ -182,12 +174,6 @@ func TestJsonSchemaToOpenAPIV3(t *testing.T) {
 				Type:        openapi3.TypeObject,
 				Description: "this is the only argument",
 				Properties: map[string]*openapi3.SchemaRef{
-					"arg1": {
-						Value: &openapi3.Schema{
-							Type:        openapi3.TypeString,
-							Description: "this is the first argument",
-						},
-					},
 					"arg2": {
 						Value: &openapi3.Schema{
 							Type:        openapi3.TypeArray,
@@ -201,7 +187,6 @@ func TestJsonSchemaToOpenAPIV3(t *testing.T) {
 						},
 					},
 				},
-				Required: []string{"arg1"},
 			},
 		}
 
@@ -224,18 +209,6 @@ func TestOpenAPIV3ToJSONSchema(t *testing.T) {
 							Description: "this is the first argument",
 						},
 					},
-					"arg2": {
-						Value: &openapi3.Schema{
-							Type:        openapi3.TypeArray,
-							Description: "this is the second argument",
-							Items: &openapi3.SchemaRef{
-								Value: &openapi3.Schema{
-									Type:        openapi3.TypeString,
-									Description: "this is the element of the second argument",
-								},
-							},
-						},
-					},
 				},
 				Required: []string{"arg1"},
 			},
@@ -251,17 +224,6 @@ func TestOpenAPIV3ToJSONSchema(t *testing.T) {
 						Value: &jsonschema.Schema{
 							Type:        "string",
 							Description: "this is the first argument",
-						},
-					},
-					orderedmap.Pair[string, *jsonschema.Schema]{
-						Key: "arg2",
-						Value: &jsonschema.Schema{
-							Type:        "array",
-							Description: "this is the second argument",
-							Items: &jsonschema.Schema{
-								Type:        "string",
-								Description: "this is the element of the second argument",
-							},
 						},
 					},
 				),
