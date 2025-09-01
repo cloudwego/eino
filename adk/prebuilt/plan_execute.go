@@ -49,7 +49,7 @@ type Plan interface {
 // NewPlan creates a new Plan instance.
 type NewPlan func(ctx context.Context) Plan
 
-// executionPlan the default implementation of Plan.
+// defaultPlan the default implementation of Plan.
 //
 // JSON Schema:
 //
@@ -66,26 +66,26 @@ type NewPlan func(ctx context.Context) Plan
 //	  },
 //	  "required": ["steps"]
 //	}
-type executionPlan struct {
+type defaultPlan struct {
 	// Steps contains the ordered list of actions to be taken.
 	// Each step should be clear, actionable, and arranged in a logical sequence.
-	Steps_ []string `json:"steps"`
+	Steps []string `json:"steps"`
 }
 
-func (p *executionPlan) FirstStep() string {
-	if len(p.Steps_) == 0 {
+func (p *defaultPlan) FirstStep() string {
+	if len(p.Steps) == 0 {
 		return ""
 	}
-	return p.Steps_[0]
+	return p.Steps[0]
 }
 
-func (p *executionPlan) MarshalJSON() ([]byte, error) {
-	type planTyp executionPlan
+func (p *defaultPlan) MarshalJSON() ([]byte, error) {
+	type planTyp defaultPlan
 	return sonic.Marshal((*planTyp)(p))
 }
 
-func (p *executionPlan) UnmarshalJSON(bytes []byte) error {
-	type planTyp executionPlan
+func (p *defaultPlan) UnmarshalJSON(bytes []byte) error {
+	type planTyp defaultPlan
 	return sonic.Unmarshal(bytes, (*planTyp)(p))
 }
 
@@ -281,7 +281,7 @@ type PlannerInput struct {
 type GenPlannerInputFn func(ctx context.Context, in *PlannerInput) ([]adk.Message, error)
 
 func defaultNewPlan(ctx context.Context) Plan {
-	return &executionPlan{}
+	return &defaultPlan{}
 }
 
 func defaultGenPlannerInputFn(ctx context.Context, in *PlannerInput) ([]adk.Message, error) {
