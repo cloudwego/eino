@@ -35,12 +35,14 @@ import (
 )
 
 // Plan represents an execution plan with a sequence of actionable steps.
-// It provides methods to access the plan's description and retrieve the first step to execute.
+// It supports JSON serialization and provides access to the first step.
 type Plan interface {
 	// FirstStep returns the first step to be executed in the plan.
 	FirstStep() string
 
+	// MarshalJSON marshals the Plan into JSON.
 	json.Marshaler
+	// UnmarshalJSON unmarshals the JSON into the Plan.
 	json.Unmarshaler
 }
 
