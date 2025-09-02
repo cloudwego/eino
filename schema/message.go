@@ -486,6 +486,10 @@ func (m *Message) Format(_ context.Context, vs map[string]any, formatType Format
 func (m *Message) String() string {
 	sb := &strings.Builder{}
 	sb.WriteString(fmt.Sprintf("%s: %s", m.Role, m.Content))
+	if len(m.ReasoningContent) > 0 {
+		sb.WriteString("\nreasoning content:\n")
+		sb.WriteString(m.ReasoningContent)
+	}
 	if len(m.ToolCalls) > 0 {
 		sb.WriteString(fmt.Sprintf("\ntool_calls:\n"))
 		for _, tc := range m.ToolCalls {
