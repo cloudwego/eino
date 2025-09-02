@@ -125,7 +125,8 @@ func (ch *dagChannel) reportSkip(keys []string) bool {
 	return allSkipped
 }
 
-func (ch *dagChannel) get(isStream bool) (any, bool, error) {
+func (ch *dagChannel) get(isStream bool, name string, edgeHandler *edgeHandlerManager) (
+	any, bool, error) {
 	if ch.Skipped {
 		return nil, false, nil
 	}
@@ -159,7 +160,11 @@ func (ch *dagChannel) get(isStream bool) (any, bool, error) {
 	names := make([]string, len(ch.Values))
 	i := 0
 	for k, value := range ch.Values {
-		valueList[i] = value
+		resolvedV, err := edgeHandler.handle(k, name, value, isStream)
+		if err != nil {
+			return nil, false, err
+		}
+		valueList[i] = resolvedV
 		names[i] = k
 		i++
 	}

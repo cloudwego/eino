@@ -1514,3 +1514,90 @@ func TestAddDependency(t *testing.T) {
 	assert.NoError(t, err)
 	assert.Equal(t, nil, out)
 }
+
+func TestIndirectDependencyWithBranch(t *testing.T) {
+	t.Run("data only mapping across branch", func(t *testing.T) {
+		wf := NewWorkflow[[]int, map[string]any]()
+
+		wf.AddLambdaNode("1", InvokableLambda(func(ctx context.Context, input int) (output int, err error) {
+			return input + 1, nil
+		})).
+			AddInputWithOptions(START, []*FieldMapping{ToField("", WithCustomExtractor(func(input any) (any, error) {
+				inputList := input.([]int)
+				if len(inputList) == 0 {
+					return nil, fmt.Errorf("input list is empty")
+				}
+				return input.([]int)[0], nil
+			}))}, WithNoDirectDependency())
+
+		wf.AddBranch(START, NewGraphBranch(func(ctx context.Context, in []int) (endNode string, err error) {
+			if len(in) > 0 {
+				return "1", nil
+			}
+
+			return END, nil
+		}, map[string]bool{"1": true, END: true}))
+
+		wf.End().
+			AddInput("1", ToField("output")).
+			SetStaticValue(FieldPath{"static"}, 2)
+
+		r, err := wf.Compile(context.Background())
+		assert.NoError(t, err)
+
+		// skip lambda node "1"
+		out, err := r.Invoke(context.Background(), nil)
+		assert.NoError(t, err)
+		assert.Equal(t, out, map[string]any{"static": 2})
+
+		// choose lambda node "1"
+		out, err = r.Invoke(context.Background(), []int{1})
+		assert.NoError(t, err)
+		assert.Equal(t, out, map[string]any{"output": 2, "static": 2})
+	})
+
+	t.Run("data only mapping across branch, with interrupt after branch", func(t *testing.T) {
+		wf := NewWorkflow[[]int, map[string]any]()
+
+		wf.AddLambdaNode("1", InvokableLambda(func(ctx context.Context, input int) (output int, err error) {
+			return input + 1, nil
+		})).
+			AddInputWithOptions(START, []*FieldMapping{ToField("", WithCustomExtractor(func(input any) (any, error) {
+				inputList := input.([]int)
+				if len(inputList) == 0 {
+					return nil, fmt.Errorf("input list is empty")
+				}
+				return input.([]int)[0], nil
+			}))}, WithNoDirectDependency())
+
+		wf.AddBranch(START, NewGraphBranch(func(ctx context.Context, in []int) (endNode string, err error) {
+			if len(in) > 0 {
+				return "1", nil
+			}
+
+			return END, nil
+		}, map[string]bool{"1": true, END: true}))
+
+		wf.End().
+			AddInput("1", ToField("output")).
+			SetStaticValue(FieldPath{"static"}, 2)
+
+		r, err := wf.Compile(context.Background(), WithCheckPointStore(newInMemoryStore()),
+			WithInterruptBeforeNodes([]string{"1"}))
+		assert.NoError(t, err)
+
+		// skip lambda node "1"
+		out, err := r.Invoke(context.Background(), nil)
+		assert.NoError(t, err)
+		assert.Equal(t, out, map[string]any{"static": 2})
+
+		// choose lambda node "1"
+		_, err = r.Invoke(context.Background(), []int{1}, WithCheckPointID("123"))
+		_, ok := ExtractInterruptInfo(err)
+		assert.True(t, ok)
+
+		out, err = r.Invoke(context.Background(), nil, WithCheckPointID("123"))
+		assert.NoError(t, err)
+		assert.Equal(t, out, map[string]any{"output": 2, "static": 2})
+	})
+}

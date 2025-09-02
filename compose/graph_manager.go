@@ -29,7 +29,7 @@ type channel interface {
 	reportValues(map[string]any) error
 	reportDependencies([]string)
 	reportSkip([]string) bool
-	get(bool) (any, bool, error)
+	get(bool, string, *edgeHandlerManager) (any, bool, error)
 	convertValues(fn func(map[string]any) error) error
 	load(channel) error
 
@@ -146,13 +146,8 @@ func (c *channelManager) updateValues(_ context.Context, values map[string] /*to
 		}
 		nFromMap := make(map[string]any, len(fromMap))
 		for from, value := range fromMap {
-			var err error
-
 			if _, ok = dps[from]; ok {
-				nFromMap[from], err = c.edgeHandlerManager.handle(from, target, value, c.isStream)
-				if err != nil {
-					return fmt.Errorf("edge handler fail: %w", err)
-				}
+				nFromMap[from] = fromMap[from]
 			} else {
 				if sr, okk := value.(streamReader); okk {
 					sr.close()
@@ -193,7 +188,7 @@ func (c *channelManager) updateDependencies(_ context.Context, dependenciesMap m
 func (c *channelManager) getFromReadyChannels(_ context.Context) (map[string]any, error) {
 	result := make(map[string]any)
 	for target, ch := range c.channels {
-		v, ready, err := ch.get(c.isStream)
+		v, ready, err := ch.get(c.isStream, target, c.edgeHandlerManager)
 		if err != nil {
 			return nil, fmt.Errorf("get value from ready channel[%s] fail: %w", target, err)
 		}

@@ -52,7 +52,8 @@ func (ch *pregelChannel) reportValues(ins map[string]any) error {
 	return nil
 }
 
-func (ch *pregelChannel) get(_ bool) (any, bool, error) {
+func (ch *pregelChannel) get(isStream bool, name string, edgeHandler *edgeHandlerManager) (
+	any, bool, error) {
 	if len(ch.Values) == 0 {
 		return nil, false, nil
 	}
@@ -61,7 +62,11 @@ func (ch *pregelChannel) get(_ bool) (any, bool, error) {
 	names := make([]string, len(ch.Values))
 	i := 0
 	for k, v := range ch.Values {
-		values[i] = v
+		resolvedV, err := edgeHandler.handle(k, name, v, isStream)
+		if err != nil {
+			return nil, false, err
+		}
+		values[i] = resolvedV
 		names[i] = k
 		i++
 	}
