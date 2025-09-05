@@ -84,7 +84,7 @@ compiledGraph, err := graph.Compile(ctx)
 if err != nil {
 return err
 }
-out, err := r.Invoke(ctx, map[string]any{"query":"Beijing's weather this weekend"})
+out, err := compiledGraph.Invoke(ctx, map[string]any{"query":"Beijing's weather this weekend"})
 ```
 
 Now let's create a workflow that flexibly maps input & output at the field level:
