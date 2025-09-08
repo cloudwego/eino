@@ -60,7 +60,7 @@ func (r *Runner) Run(ctx context.Context, messages []Message,
 
 	ctx = ctxWithNewRunCtx(ctx)
 
-	SetSessionValues(ctx, o.sessionValues)
+	AddSessionValues(ctx, o.sessionValues)
 
 	iter := fa.Run(ctx, input, opts...)
 	if r.store == nil {

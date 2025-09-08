@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-package prebuilt
+package supervisor
 
 import (
 	"context"
@@ -22,12 +22,12 @@ import (
 	"github.com/cloudwego/eino/adk"
 )
 
-type SupervisorConfig struct {
+type Config struct {
 	Supervisor adk.Agent
 	SubAgents  []adk.Agent
 }
 
-func NewSupervisor(ctx context.Context, conf *SupervisorConfig) (adk.Agent, error) {
+func New(ctx context.Context, conf *Config) (adk.Agent, error) {
 	subAgents := make([]adk.Agent, 0, len(conf.SubAgents))
 	supervisorName := conf.Supervisor.Name(ctx)
 	for _, subAgent := range conf.SubAgents {

@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-package prebuilt
+package planexecute
 
 import (
 	"context"
@@ -245,7 +245,7 @@ func TestExecutorRun(t *testing.T) {
 
 	// Store a plan in the session
 	plan := &defaultPlan{Steps: []string{"Step 1", "Step 2", "Step 3"}}
-	adk.SetSessionValue(ctx, PlanSessionKey, plan)
+	adk.AddSessionValue(ctx, PlanSessionKey, plan)
 
 	// Set up expectations for the mock model
 	// The model should return the last user message as its response
@@ -271,15 +271,15 @@ func TestExecutorRun(t *testing.T) {
 	// Create the executor
 	executor, err := NewExecutor(ctx, conf)
 	assert.NoError(t, err)
-	executor, err = AgentWithSessionKVs(ctx, executor, map[string]any{
-		PlanSessionKey:                 plan,
-		PlanExecuteUserInputSessionKey: []adk.Message{schema.UserMessage("no input")},
-	})
-	assert.NoError(t, err)
 
 	// Run the executor
 	runner := adk.NewRunner(ctx, adk.RunnerConfig{Agent: executor})
-	iterator := runner.Run(ctx, []adk.Message{schema.UserMessage("no input")})
+	iterator := runner.Run(ctx, []adk.Message{schema.UserMessage("no input")},
+		adk.WithSessionValues(map[string]any{
+			PlanSessionKey:      plan,
+			UserInputSessionKey: []adk.Message{schema.UserMessage("no input")},
+		}),
+	)
 
 	// Get the event from the iterator
 	event, ok := iterator.Next()
@@ -389,19 +389,19 @@ func TestReplannerRunWithPlan(t *testing.T) {
 
 	// Store necessary values in the session
 	plan := &defaultPlan{Steps: []string{"Step 1", "Step 2", "Step 3"}}
-	rp, err = AgentWithSessionKVs(ctx, rp, map[string]any{
-		PlanSessionKey:                 plan,
-		ExecutedStepSessionKey:         "Execution result",
-		PlanExecuteUserInputSessionKey: []adk.Message{schema.UserMessage("User input")},
-	})
-	assert.NoError(t, err)
 
-	rp, err = AgentOutputSessionKVs(ctx, rp)
+	rp, err = agentOutputSessionKVs(ctx, rp)
 	assert.NoError(t, err)
 
 	// Run the replanner
 	runner := adk.NewRunner(ctx, adk.RunnerConfig{Agent: rp})
-	iterator := runner.Run(ctx, []adk.Message{schema.UserMessage("no input")})
+	iterator := runner.Run(ctx, []adk.Message{schema.UserMessage("no input")},
+		adk.WithSessionValues(map[string]any{
+			PlanSessionKey:         plan,
+			ExecutedStepSessionKey: "Execution result",
+			UserInputSessionKey:    []adk.Message{schema.UserMessage("User input")},
+		}),
+	)
 
 	// Get the event from the iterator
 	event, ok := iterator.Next()
@@ -488,16 +488,16 @@ func TestReplannerRunWithRespond(t *testing.T) {
 
 	// Store necessary values in the session
 	plan := &defaultPlan{Steps: []string{"Step 1", "Step 2", "Step 3"}}
-	rp, err = AgentWithSessionKVs(ctx, rp, map[string]any{
-		PlanSessionKey:                 plan,
-		ExecutedStepSessionKey:         "Execution result",
-		PlanExecuteUserInputSessionKey: []adk.Message{schema.UserMessage("User input")},
-	})
-	assert.NoError(t, err)
 
 	// Run the replanner
 	runner := adk.NewRunner(ctx, adk.RunnerConfig{Agent: rp})
-	iterator := runner.Run(ctx, []adk.Message{schema.UserMessage("no input")})
+	iterator := runner.Run(ctx, []adk.Message{schema.UserMessage("no input")},
+		adk.WithSessionValues(map[string]any{
+			PlanSessionKey:         plan,
+			ExecutedStepSessionKey: "Execution result",
+			UserInputSessionKey:    []adk.Message{schema.UserMessage("User input")},
+		}),
+	)
 
 	// Get the event from the iterator
 	event, ok := iterator.Next()
@@ -517,7 +517,7 @@ func TestReplannerRunWithRespond(t *testing.T) {
 	assert.False(t, ok)
 }
 
-// TestNewPlanExecuteAgent tests the NewPlanExecuteAgent function
+// TestNewPlanExecuteAgent tests the New function
 func TestNewPlanExecuteAgent(t *testing.T) {
 	ctx := context.Background()
 
@@ -540,15 +540,14 @@ func TestNewPlanExecuteAgent(t *testing.T) {
 	mockReplanner.EXPECT().Name(gomock.Any()).Return("Replanner").AnyTimes()
 	mockReplanner.EXPECT().Description(gomock.Any()).Return("a replanner agent").AnyTimes()
 
-	// Create the PlanExecuteConfig
-	conf := &PlanExecuteConfig{
+	conf := &Config{
 		Planner:   mockPlanner,
 		Executor:  mockExecutor,
 		Replanner: mockReplanner,
 	}
 
 	// Create the plan execute agent
-	agent, err := NewPlanExecuteAgent(ctx, conf)
+	agent, err := New(ctx, conf)
 	assert.NoError(t, err)
 	assert.NotNil(t, agent)
 }
@@ -594,8 +593,8 @@ func TestPlanExecuteAgentWithReplan(t *testing.T) {
 			iterator, generator := adk.NewAsyncIteratorPair[*adk.AgentEvent]()
 
 			// Set the plan in the session
-			adk.SetSessionValue(ctx, PlanSessionKey, originalPlan)
-			adk.SetSessionValue(ctx, PlanExecuteUserInputSessionKey, userInput)
+			adk.AddSessionValue(ctx, PlanSessionKey, originalPlan)
+			adk.AddSessionValue(ctx, UserInputSessionKey, userInput)
 
 			// Send a message event
 			planJSON, _ := sonic.MarshalString(originalPlan)
@@ -619,10 +618,10 @@ func TestPlanExecuteAgentWithReplan(t *testing.T) {
 			// Check if this is the first replanning (original plan has 3 steps)
 			if len(currentPlan.Steps) == 3 {
 				msg = schema.AssistantMessage(originalExecuteResult, nil)
-				adk.SetSessionValue(ctx, ExecutedStepSessionKey, originalExecuteResult)
+				adk.AddSessionValue(ctx, ExecutedStepSessionKey, originalExecuteResult)
 			} else {
 				msg = schema.AssistantMessage(updatedExecuteResult, nil)
-				adk.SetSessionValue(ctx, ExecutedStepSessionKey, updatedExecuteResult)
+				adk.AddSessionValue(ctx, ExecutedStepSessionKey, updatedExecuteResult)
 			}
 			event := adk.EventFromMessage(msg, nil, schema.Assistant, "")
 			generator.Send(event)
@@ -651,8 +650,8 @@ func TestPlanExecuteAgentWithReplan(t *testing.T) {
 				generator.Send(event)
 
 				// Set the updated plan & execute result in the session
-				adk.SetSessionValue(ctx, PlanSessionKey, updatedPlan)
-				adk.SetSessionValue(ctx, ExecutedStepsSessionKey, []ExecutedStep{{
+				adk.AddSessionValue(ctx, PlanSessionKey, updatedPlan)
+				adk.AddSessionValue(ctx, ExecutedStepsSessionKey, []ExecutedStep{{
 					Step:   currentPlan.Steps[0],
 					Result: originalExecuteResult,
 				}})
@@ -674,15 +673,14 @@ func TestPlanExecuteAgentWithReplan(t *testing.T) {
 		},
 	).Times(2)
 
-	// Create the PlanExecuteConfig
-	conf := &PlanExecuteConfig{
+	conf := &Config{
 		Planner:   mockPlanner,
 		Executor:  mockExecutor,
 		Replanner: mockReplanner,
 	}
 
 	// Create the plan execute agent
-	agent, err := NewPlanExecuteAgent(ctx, conf)
+	agent, err := New(ctx, conf)
 	assert.NoError(t, err)
 	assert.NotNil(t, agent)
 

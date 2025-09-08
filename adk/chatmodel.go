@@ -457,7 +457,7 @@ func genReactCallbacks(agentName string,
 
 func setOutputToSession(ctx context.Context, msg Message, msgStream MessageStream, outputKey string) error {
 	if msg != nil {
-		SetSessionValue(ctx, outputKey, msg.Content)
+		AddSessionValue(ctx, outputKey, msg.Content)
 		return nil
 	}
 
@@ -466,7 +466,7 @@ func setOutputToSession(ctx context.Context, msg Message, msgStream MessageStrea
 		return err
 	}
 
-	SetSessionValue(ctx, outputKey, concatenated.Content)
+	AddSessionValue(ctx, outputKey, concatenated.Content)
 	return nil
 }
 

@@ -99,7 +99,7 @@ func GetSessionValues(ctx context.Context) map[string]any {
 	return session.getValues()
 }
 
-func SetSessionValue(ctx context.Context, key string, value any) {
+func AddSessionValue(ctx context.Context, key string, value any) {
 	session := getSession(ctx)
 	if session == nil {
 		return
@@ -108,7 +108,7 @@ func SetSessionValue(ctx context.Context, key string, value any) {
 	session.setValue(key, value)
 }
 
-func SetSessionValues(ctx context.Context, kvs map[string]any) {
+func AddSessionValues(ctx context.Context, kvs map[string]any) {
 	session := getSession(ctx)
 	if session == nil {
 		return

@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-package prebuilt
+package supervisor
 
 import (
 	"context"
@@ -28,7 +28,7 @@ import (
 	"github.com/cloudwego/eino/schema"
 )
 
-// TestNewSupervisor tests the NewSupervisor function
+// TestNewSupervisor tests the New function
 func TestNewSupervisor(t *testing.T) {
 	ctx := context.Background()
 
@@ -81,13 +81,12 @@ func TestNewSupervisor(t *testing.T) {
 	g.Close()
 	supervisorAgent.EXPECT().Run(gomock.Any(), gomock.Any(), gomock.Any()).Return(i).Times(1)
 
-	// Create the SupervisorConfig
-	conf := &SupervisorConfig{
+	conf := &Config{
 		Supervisor: supervisorAgent,
 		SubAgents:  []adk.Agent{subAgent1, subAgent2},
 	}
 
-	multiAgent, err := NewSupervisor(ctx, conf)
+	multiAgent, err := New(ctx, conf)
 	assert.NoError(t, err)
 	assert.NotNil(t, multiAgent)
 	assert.Equal(t, "SupervisorAgent", multiAgent.Name(ctx))
