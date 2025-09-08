@@ -77,6 +77,7 @@ type ToolsConfig struct {
 
 	// ReturnDirectly specifies tools that cause the agent to return immediately when called.
 	// If multiple listed tools are called simultaneously, only the first one triggers the return.
+	// The map keys are tool names indicate whether the tool should trigger immediate return.
 	ReturnDirectly map[string]bool
 }
 
@@ -126,9 +127,9 @@ type ChatModelAgentConfig struct {
 	// Optional. Defaults to defaultGenModelInput which combines instruction and messages.
 	GenModelInput GenModelInput
 
-	// Exit tool for terminating the agent process.
-	// Optional. When nil, a default Exit Action will be generated.
-	// Default implementation is 'ExitTool'.
+	// Exit defines the tool used to terminate the agent process.
+	// Optional. If nil, no Exit Action will be generated.
+	// You can use the provided 'ExitTool' implementation directly.
 	Exit tool.BaseTool
 
 	// OutputKey stores the agent's response in the session.
