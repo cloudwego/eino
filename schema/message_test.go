@@ -751,3 +751,8 @@ func TestConcatToolCalls(t *testing.T) {
 		assert.EqualValues(t, expectedToolCall, tc)
 	})
 }
+
+func TestConcatMessageArrayEmpty(t *testing.T) {
+	_, err := concatMessageArray([][]*Message{})
+	assert.Error(t, err)
+}

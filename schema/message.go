@@ -42,6 +42,10 @@ func init() {
 }
 
 func concatMessageArray(mas [][]*Message) ([]*Message, error) {
+	if len(mas) == 0 {
+		return nil, fmt.Errorf("empty message array")
+	}
+
 	arrayLen := len(mas[0])
 
 	ret := make([]*Message, arrayLen)
