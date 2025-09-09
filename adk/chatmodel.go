@@ -118,7 +118,7 @@ type ChatModelAgentConfig struct {
 	Description string
 	// Instruction used as the system prompt for this agent.
 	// Optional. If empty, no system prompt will be used.
-	// Supports f-string placeholders for session values, for example:
+	// Supports f-string placeholders for session values in default GenModelInput, for example:
 	// "You are a helpful assistant. The current time is {Time}. The current user is {User}."
 	// These placeholders will be replaced with session values for "Time" and "User".
 	Instruction string
