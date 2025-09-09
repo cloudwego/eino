@@ -23,10 +23,19 @@ import (
 )
 
 type Config struct {
+	// Supervisor specifies the agent that will act as the supervisor, coordinating and managing the sub-agents.
 	Supervisor adk.Agent
-	SubAgents  []adk.Agent
+
+	// SubAgents specifies the list of agents that will be supervised and coordinated by the supervisor agent.
+	SubAgents []adk.Agent
 }
 
+// New creates a supervisor-based multi-agent system with the given configuration.
+//
+// In the supervisor pattern, a designated supervisor agent coordinates multiple sub-agents.
+// The supervisor can delegate tasks to sub-agents and receive their responses, while
+// sub-agents can only communicate with the supervisor (not with each other directly).
+// This hierarchical structure enables complex problem-solving through coordinated agent interactions.
 func New(ctx context.Context, conf *Config) (adk.Agent, error) {
 	subAgents := make([]adk.Agent, 0, len(conf.SubAgents))
 	supervisorName := conf.Supervisor.Name(ctx)

@@ -247,30 +247,30 @@ const (
 
 // PlannerConfig provides configuration options for creating a planner agent.
 // There are two ways to configure the planner to generate structured Plan output:
-//  1. Use ChatModelWithFormattedOutput: A model already configured to output in the Plan format
-//  2. Use ToolCallingChatModel + ToolInfo: A model that will be configured to use tool calling
-//     to generate the Plan structure
+//  1. Use ChatModelWithFormattedOutput: A model pre-configured to output in the Plan format
+//  2. Use ToolCallingChatModel + ToolInfo: A model that uses tool calling to generate
+//     the Plan structure
 type PlannerConfig struct {
 	// ChatModelWithFormattedOutput is a model pre-configured to output in the Plan format.
-	// This can be created by configuring a model to output structured data directly.
-	// Can refer to https://github.com/cloudwego/eino-ext/blob/main/components/model/openai/examples/structured/structured.go.
+	// Create this by configuring a model to output structured data directly.
+	// See example: https://github.com/cloudwego/eino-ext/blob/main/components/model/openai/examples/structured/structured.go
 	ChatModelWithFormattedOutput model.BaseChatModel
 
 	// ToolCallingChatModel is a model that supports tool calling capabilities.
-	// When provided along with ToolInfo, the model will be configured to use tool calling
-	// to generate the Plan structure.
+	// When provided with ToolInfo, it will use tool calling to generate the Plan structure.
 	ToolCallingChatModel model.ToolCallingChatModel
+
 	// ToolInfo defines the schema for the Plan structure when using tool calling.
-	// If not provided, PlanToolInfo will be used as the default.
+	// Optional. If not provided, PlanToolInfo will be used as the default.
 	ToolInfo *schema.ToolInfo
 
 	// GenInputFn is a function that generates the input messages for the planner.
-	// Optional. if not provided, defaultGenPlannerInputFn will be used as the default.
+	// Optional. If not provided, defaultGenPlannerInputFn will be used.
 	GenInputFn GenPlannerInputFn
 
 	// NewPlan creates a new Plan instance for JSON.
 	// The returned Plan will be used to unmarshal the model-generated JSON output.
-	// If not provided, defaultNewPlan will be used as the default.
+	// Optional. If not provided, defaultNewPlan will be used.
 	NewPlan NewPlan
 }
 
@@ -472,22 +472,22 @@ type Input struct {
 	ExecutedSteps []ExecutedStep
 }
 
-// GenInputFn is a function that generates the input messages for the executor.
+// GenInputFn is a function that generates the input messages for the executor and the planner.
 type GenInputFn func(ctx context.Context, in *Input) ([]adk.Message, error)
 
-// ExecutorConfig provides configuration options for creating a executor agent.
+// ExecutorConfig provides configuration options for creating an executor agent.
 type ExecutorConfig struct {
 	// Model is the chat model used by the executor.
 	Model model.ToolCallingChatModel
 
-	// ToolsConfig is the tools configuration used by the executor.
+	// ToolsConfig specifies the tools available to the executor.
 	ToolsConfig adk.ToolsConfig
 
-	// MaxStep is the maximum number of steps allowed for the executor.
+	// MaxStep defines the maximum number of steps allowed for the executor.
 	MaxStep int
 
-	// GenInputFn is the function that generates the input messages for the Executor.
-	// Optional. if not provided, genExecutorInputFn will be used as the default.
+	// GenInputFn generates the input messages for the Executor.
+	// Optional. If not provided, genExecutorInputFn will be used.
 	GenInputFn GenInputFn
 }
 
@@ -583,26 +583,25 @@ type replanner struct {
 }
 
 type ReplannerConfig struct {
-
 	// ChatModel is the model that supports tool calling capabilities.
 	// It will be configured with PlanTool and RespondTool to generate updated plans or responses.
 	ChatModel model.ToolCallingChatModel
 
 	// PlanTool defines the schema for the Plan tool that can be used with ToolCallingChatModel.
-	// If not provided, the default PlanToolInfo will be used.
+	// Optional. If not provided, the default PlanToolInfo will be used.
 	PlanTool *schema.ToolInfo
 
 	// RespondTool defines the schema for the response tool that can be used with ToolCallingChatModel.
-	// If not provided, the default RespondToolInfo will be used.
+	// Optional. If not provided, the default RespondToolInfo will be used.
 	RespondTool *schema.ToolInfo
 
-	// GenInputFn is the function that generates the input messages for the Replanner.
-	// Optional. if not provided, buildGenReplannerInputFn will be used.
+	// GenInputFn generates the input messages for the Replanner.
+	// Optional. If not provided, buildGenReplannerInputFn will be used.
 	GenInputFn GenInputFn
 
 	// NewPlan creates a new Plan instance.
 	// The returned Plan will be used to unmarshal the model-generated JSON output from PlanTool.
-	// If not provided, defaultNewPlan will be used as the default.
+	// Optional. If not provided, defaultNewPlan will be used.
 	NewPlan NewPlan
 }
 
@@ -859,13 +858,29 @@ func NewReplanner(_ context.Context, cfg *ReplannerConfig) (adk.Agent, error) {
 
 // Config provides configuration options for creating a plan execute agent.
 type Config struct {
-	Planner       adk.Agent
-	Executor      adk.Agent
-	Replanner     adk.Agent
+	// Planner specifies the agent that generates the plan.
+	// You can use provided NewPlanner to create a planner agent.
+	Planner adk.Agent
+
+	// Executor specifies the agent that executes the plan generated by planner or replanner.
+	// You can use provided NewExecutor to create an executor agent.
+	Executor adk.Agent
+
+	// Replanner specifies the agent that replans the plan.
+	// You can use provided NewReplanner to create a replanner agent.
+	Replanner adk.Agent
+
+	// MaxIterations defines the maximum number of loops for 'execute-replan'.
+	// Optional. If not provided, 10 will be used as the default.
 	MaxIterations int
 }
 
-// New creates a new plan execute agent with the given configuration.
+// New creates a new plan-execute-replan agent with the given configuration.
+// The plan-execute-replan pattern works in three phases:
+// 1. Planning: Generate a structured plan with clear, actionable steps
+// 2. Execution: Execute the first step of the plan
+// 3. Replanning: Evaluate progress and either complete the task or revise the plan
+// This approach enables complex problem-solving through iterative refinement.
 func New(ctx context.Context, cfg *Config) (adk.Agent, error) {
 	maxIterations := cfg.MaxIterations
 	if maxIterations <= 0 {
