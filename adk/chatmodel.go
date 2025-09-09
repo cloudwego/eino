@@ -22,6 +22,7 @@ import (
 	"encoding/gob"
 	"errors"
 	"fmt"
+	"math"
 	"runtime/debug"
 	"sync"
 	"sync/atomic"
@@ -139,8 +140,9 @@ type ChatModelAgentConfig struct {
 	// Optional. When set, stores output via AddSessionValue(ctx, outputKey, msg.Content).
 	OutputKey string
 
-	// Maximum number of steps the agent can take before terminating.
-	MaxStep int
+	// MaxIterations limits the number of iterations the agent can perform.
+	// Optional. Defaults to 10.
+	MaxIterations int
 }
 
 type ChatModelAgent struct {
@@ -153,8 +155,8 @@ type ChatModelAgent struct {
 
 	genModelInput GenModelInput
 
-	outputKey string
-	maxStep   int
+	outputKey     string
+	maxIterations int
 
 	subAgents   []Agent
 	parentAgent Agent
@@ -213,6 +215,11 @@ func NewChatModelAgent(_ context.Context, config *ChatModelAgentConfig) (*ChatMo
 		genInput = config.GenModelInput
 	}
 
+	maxIterations := config.MaxIterations
+	if maxIterations <= 0 {
+		maxIterations = 10
+	}
+
 	return &ChatModelAgent{
 		name:          config.Name,
 		description:   config.Description,
@@ -222,7 +229,7 @@ func NewChatModelAgent(_ context.Context, config *ChatModelAgentConfig) (*ChatMo
 		genModelInput: genInput,
 		exit:          config.Exit,
 		outputKey:     config.OutputKey,
-		maxStep:       config.MaxStep,
+		maxIterations: maxIterations,
 	}, nil
 }
 
@@ -575,6 +582,7 @@ func (a *ChatModelAgent) buildRunFunc(ctx context.Context) runFunc {
 			toolsConfig:         &toolsNodeConf,
 			toolsReturnDirectly: returnDirectly,
 			agentName:           a.name,
+			maxIterations:       a.maxIterations,
 		}
 
 		g, err := newReact(ctx, conf)
@@ -585,10 +593,13 @@ func (a *ChatModelAgent) buildRunFunc(ctx context.Context) runFunc {
 
 		a.run = func(ctx context.Context, input *AgentInput, generator *AsyncGenerator[*AgentEvent], store *mockStore, opts ...compose.Option) {
 			var compileOptions []compose.GraphCompileOption
-			compileOptions = append(compileOptions, compose.WithGraphName("React"), compose.WithCheckPointStore(store), compose.WithSerializer(&gobSerializer{}))
-			if a.maxStep > 0 {
-				compileOptions = append(compileOptions, compose.WithMaxRunSteps(a.maxStep))
-			}
+			compileOptions = append(compileOptions,
+				compose.WithGraphName("React"),
+				compose.WithCheckPointStore(store),
+				compose.WithSerializer(&gobSerializer{}),
+				// ensure the graph won't exceed max steps due to max iterations
+				compose.WithMaxRunSteps(math.MaxInt))
+
 			runnable, err_ := g.Compile(ctx, compileOptions...)
 			if err != nil {
 				generator.Send(&AgentEvent{AgentName: a.name, Err: err})

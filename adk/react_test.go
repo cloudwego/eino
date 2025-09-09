@@ -394,6 +394,106 @@ func TestReact(t *testing.T) {
 
 		assert.NotEmpty(t, msgs)
 	})
+
+	t.Run("MaxIterations", func(t *testing.T) {
+		ctx := context.Background()
+
+		// Create a fake tool for testing
+		fakeTool := &fakeToolForTest{
+			tarCount: 3,
+		}
+
+		info, err := fakeTool.Info(ctx)
+		assert.NoError(t, err)
+
+		// Create a mock chat model
+		ctrl := gomock.NewController(t)
+		cm := mockModel.NewMockToolCallingChatModel(ctrl)
+
+		// Set up expectations for the mock model
+		times := 0
+		cm.EXPECT().Generate(gomock.Any(), gomock.Any(), gomock.Any()).
+			DoAndReturn(func(ctx context.Context, input []Message, opts ...model.Option) (Message, error) {
+				times++
+				if times <= 5 {
+					return schema.AssistantMessage("hello test",
+							[]schema.ToolCall{
+								{
+									ID: randStrForTest(),
+									Function: schema.FunctionCall{
+										Name:      info.Name,
+										Arguments: fmt.Sprintf(`{"name": "%s", "hh": "123"}`, randStrForTest()),
+									},
+								},
+							}),
+						nil
+				}
+
+				return schema.AssistantMessage("bye", nil), nil
+			}).AnyTimes()
+		cm.EXPECT().WithTools(gomock.Any()).Return(cm, nil).AnyTimes()
+
+		// don't exceed max iterations
+		config := &reactConfig{
+			model: cm,
+			toolsConfig: &compose.ToolsNodeConfig{
+				Tools: []tool.BaseTool{fakeTool},
+			},
+			toolsReturnDirectly: map[string]bool{},
+			maxIterations:       6,
+		}
+
+		graph, err := newReact(ctx, config)
+		assert.NoError(t, err)
+		assert.NotNil(t, graph)
+
+		compiled, err := graph.Compile(ctx)
+		assert.NoError(t, err)
+		assert.NotNil(t, compiled)
+
+		// Test with a user message
+		result, err := compiled.Invoke(ctx, []Message{
+			{
+				Role:    schema.User,
+				Content: "Use the test tool to say hello",
+			},
+		})
+		assert.NoError(t, err)
+		assert.Equal(t, result.Content, "bye")
+
+		// reset chat model times counter
+		times = 0
+		// exceed max iterations
+		config = &reactConfig{
+			model: cm,
+			toolsConfig: &compose.ToolsNodeConfig{
+				Tools: []tool.BaseTool{fakeTool},
+			},
+			toolsReturnDirectly: map[string]bool{},
+			maxIterations:       5,
+		}
+
+		graph, err = newReact(ctx, config)
+		assert.NoError(t, err)
+		assert.NotNil(t, graph)
+
+		compiled, err = graph.Compile(ctx)
+		assert.NoError(t, err)
+		assert.NotNil(t, compiled)
+
+		// Test with a user message
+		result, err = compiled.Invoke(ctx, []Message{
+			{
+				Role:    schema.User,
+				Content: "Use the test tool to say hello",
+			},
+		})
+		assert.Error(t, err)
+		t.Logf("actual error: %v", err.Error())
+		assert.ErrorIs(t, err, ErrExceedMaxIterations)
+
+		assert.Contains(t, err.Error(), ErrExceedMaxIterations.Error())
+	})
 }
 
 // Helper types and functions for testing

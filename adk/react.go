@@ -18,12 +18,15 @@ package adk
 
 import (
 	"context"
+	"errors"
 	"io"
 
 	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/compose"
 	"github.com/cloudwego/eino/schema"
 )
+
+var ErrExceedMaxIterations = errors.New("exceeds max iterations")
 
 type State struct {
 	Messages []Message
@@ -35,6 +38,8 @@ type State struct {
 	AgentName string
 
 	AgentToolInterruptData map[string] /*tool call id*/ *agentToolInterruptInfo
+
+	RemainingIterations int
 }
 
 type agentToolInterruptInfo struct {
@@ -76,6 +81,8 @@ type reactConfig struct {
 	toolsReturnDirectly map[string]bool
 
 	agentName string
+
+	maxIterations int
 }
 
 func genToolInfos(ctx context.Context, config *compose.ToolsNodeConfig) ([]*schema.ToolInfo, error) {
@@ -110,7 +117,12 @@ func getReturnDirectlyToolCallID(ctx context.Context) string {
 
 func newReact(ctx context.Context, config *reactConfig) (reactGraph, error) {
 	genState := func(ctx context.Context) *State {
-		return &State{ToolGenActions: map[string]*AgentAction{}, AgentName: config.agentName, AgentToolInterruptData: make(map[string]*agentToolInterruptInfo)}
+		return &State{
+			ToolGenActions:         map[string]*AgentAction{},
+			AgentName:              config.agentName,
+			AgentToolInterruptData: make(map[string]*agentToolInterruptInfo),
+			RemainingIterations:    config.maxIterations,
+		}
 	}
 
 	const (
@@ -136,6 +148,11 @@ func newReact(ctx context.Context, config *reactConfig) (reactGraph, error) {
 	}
 
 	modelPreHandle := func(ctx context.Context, input []Message, st *State) ([]Message, error) {
+		if st.RemainingIterations <= 0 {
+			return nil, ErrExceedMaxIterations
+		}
+		st.RemainingIterations--
+
 		st.Messages = append(st.Messages, input...)
 		return st.Messages, nil
 	}
