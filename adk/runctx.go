@@ -99,22 +99,22 @@ func GetSessionValues(ctx context.Context) map[string]any {
 	return session.getValues()
 }
 
-func SetSessionValue(ctx context.Context, key string, value any) {
+func AddSessionValue(ctx context.Context, key string, value any) {
 	session := getSession(ctx)
 	if session == nil {
 		return
 	}
 
-	session.setValue(key, value)
+	session.addValue(key, value)
 }
 
-func SetSessionValues(ctx context.Context, kvs map[string]any) {
+func AddSessionValues(ctx context.Context, kvs map[string]any) {
 	session := getSession(ctx)
 	if session == nil {
 		return
 	}
 
-	session.setValues(kvs)
+	session.addValues(kvs)
 }
 
 func GetSessionValue(ctx context.Context, key string) (any, bool) {
@@ -179,13 +179,13 @@ func (rs *runSession) getValues() map[string]any {
 	return values
 }
 
-func (rs *runSession) setValue(key string, value any) {
+func (rs *runSession) addValue(key string, value any) {
 	rs.mtx.Lock()
 	rs.Values[key] = value
 	rs.mtx.Unlock()
 }
 
-func (rs *runSession) setValues(kvs map[string]any) {
+func (rs *runSession) addValues(kvs map[string]any) {
 	rs.mtx.Lock()
 	for k, v := range kvs {
 		rs.Values[k] = v

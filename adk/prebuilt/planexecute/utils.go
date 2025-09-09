@@ -14,35 +14,13 @@
  * limitations under the License.
  */
 
-package prebuilt
+package planexecute
 
 import (
 	"context"
 
 	"github.com/cloudwego/eino/adk"
 )
-
-type setSessionKVsAgent struct {
-	kvs map[string]any
-}
-
-func (s *setSessionKVsAgent) Name(_ context.Context) string {
-	return "set_session_kvs"
-}
-
-func (s *setSessionKVsAgent) Description(_ context.Context) string {
-	return "set session kvs"
-}
-
-func (s *setSessionKVsAgent) Run(ctx context.Context, _ *adk.AgentInput,
-	_ ...adk.AgentRunOption) *adk.AsyncIterator[*adk.AgentEvent] {
-
-	adk.SetSessionValues(ctx, s.kvs)
-	iterator, generator := adk.NewAsyncIteratorPair[*adk.AgentEvent]()
-	generator.Close()
-
-	return iterator
-}
 
 type outputSessionKVsAgent struct {
 	adk.Agent
@@ -75,18 +53,6 @@ func (o *outputSessionKVsAgent) Run(ctx context.Context, input *adk.AgentInput,
 	return iterator
 }
 
-func AgentWithSessionKVs(ctx context.Context, agent adk.Agent,
-	sessionKVs map[string]any) (adk.Agent, error) {
-
-	s := &setSessionKVsAgent{
-		kvs: sessionKVs,
-	}
-
-	return adk.NewSequentialAgent(ctx, &adk.SequentialAgentConfig{
-		SubAgents: []adk.Agent{s, agent},
-	})
-}
-
-func AgentOutputSessionKVs(ctx context.Context, agent adk.Agent) (adk.Agent, error) {
+func agentOutputSessionKVs(ctx context.Context, agent adk.Agent) (adk.Agent, error) {
 	return &outputSessionKVsAgent{Agent: agent}, nil
 }

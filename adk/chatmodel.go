@@ -75,11 +75,13 @@ func WithHistoryModifier(f func(context.Context, []Message) []Message) AgentRunO
 type ToolsConfig struct {
 	compose.ToolsNodeConfig
 
-	// Names of the tools that will make agent return directly when the tool is called.
-	// When multiple tools are called and more than one tool is in the return directly list, only the first one will be returned.
+	// ReturnDirectly specifies tools that cause the agent to return immediately when called.
+	// If multiple listed tools are called simultaneously, only the first one triggers the return.
+	// The map keys are tool names indicate whether the tool should trigger immediate return.
 	ReturnDirectly map[string]bool
 }
 
+// GenModelInput transforms agent instructions and input into a format suitable for the model.
 type GenModelInput func(ctx context.Context, instruction string, input *AgentInput) ([]Message, error)
 
 func defaultGenModelInput(ctx context.Context, instruction string, input *AgentInput) ([]Message, error) {
@@ -108,24 +110,36 @@ func defaultGenModelInput(ctx context.Context, instruction string, input *AgentI
 }
 
 type ChatModelAgentConfig struct {
-	Name        string
+	// Name of the agent. Better be unique across all agents.
+	Name string
+	// Description of the agent's capabilities.
+	// Helps other agents determine whether to transfer tasks to this agent.
 	Description string
+	// Instruction used as the system prompt for this agent.
+	// Optional. If empty, no system prompt will be used.
+	// Supports f-string placeholders for session values in default GenModelInput, for example:
+	// "You are a helpful assistant. The current time is {Time}. The current user is {User}."
+	// These placeholders will be replaced with session values for "Time" and "User".
 	Instruction string
 
 	Model model.ToolCallingChatModel
 
 	ToolsConfig ToolsConfig
 
-	// optional
+	// GenModelInput transforms instructions and input messages into the model's input format.
+	// Optional. Defaults to defaultGenModelInput which combines instruction and messages.
 	GenModelInput GenModelInput
 
-	// Exit tool. Optional, defaults to nil, which will generate an Exit Action.
-	// The built-in implementation is 'ExitTool'
+	// Exit defines the tool used to terminate the agent process.
+	// Optional. If nil, no Exit Action will be generated.
+	// You can use the provided 'ExitTool' implementation directly.
 	Exit tool.BaseTool
 
-	// optional
+	// OutputKey stores the agent's response in the session.
+	// Optional. When set, stores output via AddSessionValue(ctx, outputKey, msg.Content).
 	OutputKey string
 
+	// Maximum number of steps the agent can take before terminating.
 	MaxStep int
 }
 
@@ -457,7 +471,7 @@ func genReactCallbacks(agentName string,
 
 func setOutputToSession(ctx context.Context, msg Message, msgStream MessageStream, outputKey string) error {
 	if msg != nil {
-		SetSessionValue(ctx, outputKey, msg.Content)
+		AddSessionValue(ctx, outputKey, msg.Content)
 		return nil
 	}
 
@@ -466,7 +480,7 @@ func setOutputToSession(ctx context.Context, msg Message, msgStream MessageStrea
 		return err
 	}
 
-	SetSessionValue(ctx, outputKey, concatenated.Content)
+	AddSessionValue(ctx, outputKey, concatenated.Content)
 	return nil
 }
 

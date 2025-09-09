@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-package prebuilt
+package planexecute
 
 import (
 	"context"
@@ -35,21 +35,23 @@ import (
 )
 
 // Plan represents an execution plan with a sequence of actionable steps.
-// It supports JSON serialization and provides access to the first step.
+// It supports JSON serialization and deserialization while providing access to the first step.
 type Plan interface {
 	// FirstStep returns the first step to be executed in the plan.
 	FirstStep() string
 
-	// MarshalJSON marshals the Plan into JSON.
+	// Marshaler serializes the Plan into JSON.
+	// The resulting JSON can be used in prompt templates.
 	json.Marshaler
-	// UnmarshalJSON unmarshals the JSON into the Plan.
+	// Unmarshaler deserializes JSON content into the Plan.
+	// This processes output from structured chat models or tool calls into the Plan structure.
 	json.Unmarshaler
 }
 
-// NewPlan creates a new Plan instance.
+// NewPlan is a function type that creates a new Plan instance.
 type NewPlan func(ctx context.Context) Plan
 
-// defaultPlan the default implementation of Plan.
+// defaultPlan is the default implementation of the Plan interface.
 //
 // JSON Schema:
 //
@@ -72,6 +74,7 @@ type defaultPlan struct {
 	Steps []string `json:"steps"`
 }
 
+// FirstStep returns the first step in the plan or an empty string if no steps exist.
 func (p *defaultPlan) FirstStep() string {
 	if len(p.Steps) == 0 {
 		return ""
@@ -230,8 +233,8 @@ Each step in your plan must be:
 )
 
 const (
-	// PlanExecuteUserInputSessionKey is the session key for the user input.
-	PlanExecuteUserInputSessionKey = "UserInput"
+	// UserInputSessionKey is the session key for the user input.
+	UserInputSessionKey = "UserInput"
 
 	// PlanSessionKey is the session key for the plan.
 	PlanSessionKey = "Plan"
@@ -245,48 +248,43 @@ const (
 
 // PlannerConfig provides configuration options for creating a planner agent.
 // There are two ways to configure the planner to generate structured Plan output:
-//  1. Use ChatModelWithFormattedOutput: A model already configured to output in the Plan format
-//  2. Use ToolCallingChatModel + ToolInfo: A model that will be configured to use tool calling
-//     to generate the Plan structure
+//  1. Use ChatModelWithFormattedOutput: A model pre-configured to output in the Plan format
+//  2. Use ToolCallingChatModel + ToolInfo: A model that uses tool calling to generate
+//     the Plan structure
 type PlannerConfig struct {
 	// ChatModelWithFormattedOutput is a model pre-configured to output in the Plan format.
-	// This can be created by configuring a model to output structured data directly.
-	// Can refer to https://github.com/cloudwego/eino-ext/blob/main/components/model/openai/examples/structured/structured.go.
+	// Create this by configuring a model to output structured data directly.
+	// See example: https://github.com/cloudwego/eino-ext/blob/main/components/model/openai/examples/structured/structured.go
 	ChatModelWithFormattedOutput model.BaseChatModel
 
 	// ToolCallingChatModel is a model that supports tool calling capabilities.
-	// When provided along with ToolInfo, the model will be configured to use tool calling
-	// to generate the Plan structure.
+	// When provided with ToolInfo, it will use tool calling to generate the Plan structure.
 	ToolCallingChatModel model.ToolCallingChatModel
+
 	// ToolInfo defines the schema for the Plan structure when using tool calling.
-	// If not provided, PlanToolInfo will be used as the default.
+	// Optional. If not provided, PlanToolInfo will be used as the default.
 	ToolInfo *schema.ToolInfo
 
 	// GenInputFn is a function that generates the input messages for the planner.
-	// If not provided, defaultGenPlannerInputFn will be used as the default.
-	GenInputFn GenPlannerInputFn
+	// Optional. If not provided, defaultGenPlannerInputFn will be used.
+	GenInputFn GenPlannerModelInputFn
 
 	// NewPlan creates a new Plan instance for JSON.
 	// The returned Plan will be used to unmarshal the model-generated JSON output.
-	// If not provided, defaultNewPlan will be used as the default.
+	// Optional. If not provided, defaultNewPlan will be used.
 	NewPlan NewPlan
 }
 
-// PlannerInput is the input information for the planner.
-type PlannerInput struct {
-	Input []adk.Message
-}
-
-// GenPlannerInputFn is a function that generates the input messages for the planner.
-type GenPlannerInputFn func(ctx context.Context, in *PlannerInput) ([]adk.Message, error)
+// GenPlannerModelInputFn is a function type that generates input messages for the planner.
+type GenPlannerModelInputFn func(ctx context.Context, userInput []adk.Message) ([]adk.Message, error)
 
 func defaultNewPlan(ctx context.Context) Plan {
 	return &defaultPlan{}
 }
 
-func defaultGenPlannerInputFn(ctx context.Context, in *PlannerInput) ([]adk.Message, error) {
+func defaultGenPlannerInputFn(ctx context.Context, userInput []adk.Message) ([]adk.Message, error) {
 	msgs, err := PlannerPrompt.Format(ctx, map[string]any{
-		"input": in.Input,
+		"input": userInput,
 	})
 	if err != nil {
 		return nil, err
@@ -297,7 +295,7 @@ func defaultGenPlannerInputFn(ctx context.Context, in *PlannerInput) ([]adk.Mess
 type planner struct {
 	toolCall   bool
 	chatModel  model.BaseChatModel
-	genInputFn GenPlannerInputFn
+	genInputFn GenPlannerModelInputFn
 	newPlan    NewPlan
 }
 
@@ -322,7 +320,7 @@ func (p *planner) Run(ctx context.Context, input *adk.AgentInput,
 
 	iterator, generator := adk.NewAsyncIteratorPair[*adk.AgentEvent]()
 
-	adk.SetSessionValue(ctx, PlanExecuteUserInputSessionKey, input.Messages)
+	adk.AddSessionValue(ctx, UserInputSessionKey, input.Messages)
 
 	go func() {
 		defer func() {
@@ -335,9 +333,7 @@ func (p *planner) Run(ctx context.Context, input *adk.AgentInput,
 			generator.Close()
 		}()
 
-		msgs, err := p.genInputFn(ctx, &PlannerInput{
-			Input: input.Messages,
-		})
+		msgs, err := p.genInputFn(ctx, input.Messages)
 		if err != nil {
 			generator.Send(&adk.AgentEvent{Err: err})
 			return
@@ -413,7 +409,7 @@ func (p *planner) Run(ctx context.Context, input *adk.AgentInput,
 			return
 		}
 
-		adk.SetSessionValue(ctx, PlanSessionKey, plan)
+		adk.AddSessionValue(ctx, PlanSessionKey, plan)
 	}()
 
 	return iterator
@@ -463,29 +459,30 @@ func NewPlanner(_ context.Context, cfg *PlannerConfig) (adk.Agent, error) {
 	}, nil
 }
 
-// PlanExecuteInput is the input information for the executor and the planner.
-type PlanExecuteInput struct {
-	Input         []adk.Message
+// ExecutionContext is the input information for the executor and the planner.
+type ExecutionContext struct {
+	UserInput     []adk.Message
 	Plan          Plan
 	ExecutedSteps []ExecutedStep
 }
 
-// GenPlanExecuteInputFn is a function that generates the input messages for the executor.
-type GenPlanExecuteInputFn func(ctx context.Context, in *PlanExecuteInput) ([]adk.Message, error)
+// GenModelInputFn is a function that generates the input messages for the executor and the planner.
+type GenModelInputFn func(ctx context.Context, in *ExecutionContext) ([]adk.Message, error)
 
-// ExecutorConfig provides configuration options for creating a executor agent.
+// ExecutorConfig provides configuration options for creating an executor agent.
 type ExecutorConfig struct {
 	// Model is the chat model used by the executor.
 	Model model.ToolCallingChatModel
 
-	// ToolsConfig is the tools configuration used by the executor.
+	// ToolsConfig specifies the tools available to the executor.
 	ToolsConfig adk.ToolsConfig
 
-	// MaxStep is the maximum number of steps allowed for the executor.
+	// MaxStep defines the maximum number of steps allowed for the executor.
 	MaxStep int
 
-	// GenInputFn is the function that generates the input messages for the Executor.
-	GenInputFn GenPlanExecuteInputFn
+	// GenInputFn generates the input messages for the Executor.
+	// Optional. If not provided, defaultGenExecutorInputFn will be used.
+	GenInputFn GenModelInputFn
 }
 
 type ExecutedStep struct {
@@ -508,7 +505,7 @@ func NewExecutor(ctx context.Context, cfg *ExecutorConfig) (adk.Agent, error) {
 		}
 		plan_ := plan.(Plan)
 
-		userInput, ok := adk.GetSessionValue(ctx, PlanExecuteUserInputSessionKey)
+		userInput, ok := adk.GetSessionValue(ctx, UserInputSessionKey)
 		if !ok {
 			panic("impossible: user input not found")
 		}
@@ -520,8 +517,8 @@ func NewExecutor(ctx context.Context, cfg *ExecutorConfig) (adk.Agent, error) {
 			executedSteps_ = executedStep.([]ExecutedStep)
 		}
 
-		in := &PlanExecuteInput{
-			Input:         userInput_,
+		in := &ExecutionContext{
+			UserInput:     userInput_,
 			Plan:          plan_,
 			ExecutedSteps: executedSteps_,
 		}
@@ -550,7 +547,7 @@ func NewExecutor(ctx context.Context, cfg *ExecutorConfig) (adk.Agent, error) {
 	return agent, nil
 }
 
-func defaultGenExecutorInputFn(ctx context.Context, in *PlanExecuteInput) ([]adk.Message, error) {
+func defaultGenExecutorInputFn(ctx context.Context, in *ExecutionContext) ([]adk.Message, error) {
 
 	planContent, err := in.Plan.MarshalJSON()
 	if err != nil {
@@ -558,7 +555,7 @@ func defaultGenExecutorInputFn(ctx context.Context, in *PlanExecuteInput) ([]adk
 	}
 
 	userMsgs, err := ExecutorPrompt.Format(ctx, map[string]any{
-		"input":          formatInput(in.Input),
+		"input":          formatInput(in.UserInput),
 		"plan":           string(planContent),
 		"executed_steps": formatExecutedSteps(in.ExecutedSteps),
 		"step":           in.Plan.FirstStep(),
@@ -575,31 +572,30 @@ type replanner struct {
 	planTool    *schema.ToolInfo
 	respondTool *schema.ToolInfo
 
-	genInputFn GenPlanExecuteInputFn
+	genInputFn GenModelInputFn
 	newPlan    NewPlan
 }
 
 type ReplannerConfig struct {
-
 	// ChatModel is the model that supports tool calling capabilities.
 	// It will be configured with PlanTool and RespondTool to generate updated plans or responses.
 	ChatModel model.ToolCallingChatModel
 
 	// PlanTool defines the schema for the Plan tool that can be used with ToolCallingChatModel.
-	// If not provided, the default PlanToolInfo will be used.
+	// Optional. If not provided, the default PlanToolInfo will be used.
 	PlanTool *schema.ToolInfo
 
 	// RespondTool defines the schema for the response tool that can be used with ToolCallingChatModel.
-	// If not provided, the default RespondToolInfo will be used.
+	// Optional. If not provided, the default RespondToolInfo will be used.
 	RespondTool *schema.ToolInfo
 
-	// GenInputFn is the function that generates the input messages for the Replanner.
-	// if not provided, buildDefaultReplannerInputFn will be used.
-	GenInputFn GenPlanExecuteInputFn
+	// GenInputFn generates the input messages for the Replanner.
+	// Optional. If not provided, buildGenReplannerInputFn will be used.
+	GenInputFn GenModelInputFn
 
 	// NewPlan creates a new Plan instance.
 	// The returned Plan will be used to unmarshal the model-generated JSON output from PlanTool.
-	// If not provided, defaultNewPlan will be used as the default.
+	// Optional. If not provided, defaultNewPlan will be used.
 	NewPlan NewPlan
 }
 
@@ -656,22 +652,22 @@ func (r *replanner) genInput(ctx context.Context) ([]adk.Message, error) {
 		Step:   step,
 		Result: executedStep_,
 	})
-	adk.SetSessionValue(ctx, ExecutedStepsSessionKey, executedSteps_)
+	adk.AddSessionValue(ctx, ExecutedStepsSessionKey, executedSteps_)
 
-	userInput, ok := adk.GetSessionValue(ctx, PlanExecuteUserInputSessionKey)
+	userInput, ok := adk.GetSessionValue(ctx, UserInputSessionKey)
 	if !ok {
 		panic("impossible: user input not found")
 	}
 	userInput_ := userInput.([]adk.Message)
 
-	in := &PlanExecuteInput{
-		Input:         userInput_,
+	in := &ExecutionContext{
+		UserInput:     userInput_,
 		Plan:          plan_,
 		ExecutedSteps: executedSteps_,
 	}
 	genInputFn := r.genInputFn
 	if genInputFn == nil {
-		genInputFn = buildDefaultReplannerInputFn(in, r.planTool.Name, r.respondTool.Name)
+		genInputFn = buildGenReplannerInputFn(r.planTool.Name, r.respondTool.Name)
 	}
 	msgs, err := genInputFn(ctx, in)
 	if err != nil {
@@ -797,21 +793,21 @@ func (r *replanner) Run(ctx context.Context, input *adk.AgentInput, _ ...adk.Age
 			return
 		}
 
-		adk.SetSessionValue(ctx, PlanSessionKey, plan_)
+		adk.AddSessionValue(ctx, PlanSessionKey, plan_)
 	}()
 
 	return iterator
 }
 
-func buildDefaultReplannerInputFn(in *PlanExecuteInput, planToolName, respondToolName string) GenPlanExecuteInputFn {
-	return func(ctx context.Context, in *PlanExecuteInput) ([]adk.Message, error) {
+func buildGenReplannerInputFn(planToolName, respondToolName string) GenModelInputFn {
+	return func(ctx context.Context, in *ExecutionContext) ([]adk.Message, error) {
 		planContent, err := in.Plan.MarshalJSON()
 		if err != nil {
 			return nil, err
 		}
 		msgs, err := ReplannerPrompt.Format(ctx, map[string]any{
 			"plan":           string(planContent),
-			"input":          formatInput(in.Input),
+			"input":          formatInput(in.UserInput),
 			"executed_steps": formatExecutedSteps(in.ExecutedSteps),
 			"plan_tool":      planToolName,
 			"respond_tool":   respondToolName,
@@ -854,16 +850,32 @@ func NewReplanner(_ context.Context, cfg *ReplannerConfig) (adk.Agent, error) {
 	}, nil
 }
 
-// PlanExecuteConfig provides configuration options for creating a plan execute agent.
-type PlanExecuteConfig struct {
-	Planner       adk.Agent
-	Executor      adk.Agent
-	Replanner     adk.Agent
+// Config provides configuration options for creating a plan-execute-replan agent.
+type Config struct {
+	// Planner specifies the agent that generates the plan.
+	// You can use provided NewPlanner to create a planner agent.
+	Planner adk.Agent
+
+	// Executor specifies the agent that executes the plan generated by planner or replanner.
+	// You can use provided NewExecutor to create an executor agent.
+	Executor adk.Agent
+
+	// Replanner specifies the agent that replans the plan.
+	// You can use provided NewReplanner to create a replanner agent.
+	Replanner adk.Agent
+
+	// MaxIterations defines the maximum number of loops for 'execute-replan'.
+	// Optional. If not provided, 10 will be used as the default.
 	MaxIterations int
 }
 
-// NewPlanExecuteAgent creates a new plan execute agent with the given configuration.
-func NewPlanExecuteAgent(ctx context.Context, cfg *PlanExecuteConfig) (adk.Agent, error) {
+// New creates a new plan-execute-replan agent with the given configuration.
+// The plan-execute-replan pattern works in three phases:
+// 1. Planning: Generate a structured plan with clear, actionable steps
+// 2. Execution: Execute the first step of the plan
+// 3. Replanning: Evaluate progress and either complete the task or revise the plan
+// This approach enables complex problem-solving through iterative refinement.
+func New(ctx context.Context, cfg *Config) (adk.Agent, error) {
 	maxIterations := cfg.MaxIterations
 	if maxIterations <= 0 {
 		maxIterations = 10
