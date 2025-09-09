@@ -287,12 +287,9 @@ func (t *taskManager) submit(tasks []*task) error {
 	// 1. the new task is the only one
 	// 2. the task manager mode is set to needAll
 	for _, currentTask := range tasks {
-		if currentTask.call.preProcessor != nil && !currentTask.skipPreHandler {
-			nInput, err := t.runWrapper(currentTask.ctx, currentTask.call.preProcessor, currentTask.input, currentTask.option...)
-			if err != nil {
-				return fmt.Errorf("run node[%s] pre processor fail: %w", currentTask.nodeKey, err)
-			}
-			currentTask.input = nInput
+		err := runPreHandler(currentTask, t.runWrapper)
+		if err != nil {
+			return err
 		}
 	}
 	var syncTask *task
@@ -335,13 +332,7 @@ func (t *taskManager) waitOne() (*task, bool) {
 	if ta.err != nil {
 		return ta, true
 	}
-	if ta.call.postProcessor != nil {
-		nOutput, err := t.runWrapper(ta.ctx, ta.call.postProcessor, ta.output, ta.option...)
-		if err != nil {
-			ta.err = fmt.Errorf("run node[%s] post processor fail: %w", ta.nodeKey, err)
-		}
-		ta.output = nOutput
-	}
+	runPostHandler(ta, t.runWrapper)
 	return ta, true
 }
 
@@ -353,5 +344,36 @@ func (t *taskManager) waitAll() []*task {
 			return result
 		}
 		result = append(result, ta)
+	}
+}
+
+func runPreHandler(ta *task, runWrapper runnableCallWrapper) (err error) {
+	defer func() {
+		if e := recover(); e != nil {
+			err = safe.NewPanicErr(fmt.Errorf("panic in pre handler: %v", e), debug.Stack())
+		}
+	}()
+	if ta.call.preProcessor != nil && !ta.skipPreHandler {
+		nInput, err := runWrapper(ta.ctx, ta.call.preProcessor, ta.input, ta.option...)
+		if err != nil {
+			return fmt.Errorf("run node[%s] pre processor fail: %w", ta.nodeKey, err)
+		}
+		ta.input = nInput
+	}
+	return nil
+}
+
+func runPostHandler(ta *task, runWrapper runnableCallWrapper) {
+	defer func() {
+		if e := recover(); e != nil {
+			ta.err = safe.NewPanicErr(fmt.Errorf("panic in post handler: %v", e), debug.Stack())
+		}
+	}()
+	if ta.call.postProcessor != nil {
+		nOutput, err := runWrapper(ta.ctx, ta.call.postProcessor, ta.output, ta.option...)
+		if err != nil {
+			ta.err = fmt.Errorf("run node[%s] post processor fail: %w", ta.nodeKey, err)
+		}
+		ta.output = nOutput
 	}
 }
