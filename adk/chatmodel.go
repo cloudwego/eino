@@ -140,8 +140,8 @@ type ChatModelAgentConfig struct {
 	// Optional. When set, stores output via AddSessionValue(ctx, outputKey, msg.Content).
 	OutputKey string
 
-	// MaxIterations limits the number of iterations the agent can perform.
-	// Optional. Defaults to 10.
+	// MaxIterations limits the number of iterations of ReAct cycles between the ChatModel and tools.
+	// Optional. Defaults to 10 if not specified.
 	MaxIterations int
 }
 
