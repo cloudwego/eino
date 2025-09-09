@@ -35,23 +35,23 @@ import (
 )
 
 // Plan represents an execution plan with a sequence of actionable steps.
-// It supports JSON serialization and provides access to the first step.
+// It supports JSON serialization and deserialization while providing access to the first step.
 type Plan interface {
 	// FirstStep returns the first step to be executed in the plan.
 	FirstStep() string
 
-	// Marshaler marshal the Plan into JSON.
-	// the JSON output could be rendered into prompt template.
+	// Marshaler serializes the Plan into JSON.
+	// The resulting JSON can be used in prompt templates.
 	json.Marshaler
-	// Unmarshaler unmarshal the JSON content into the Plan.
-	//
+	// Unmarshaler deserializes JSON content into the Plan.
+	// This processes output from structured chat models or tool calls into the Plan structure.
 	json.Unmarshaler
 }
 
-// NewPlan creates a new Plan instance.
+// NewPlan is a function type that creates a new Plan instance.
 type NewPlan func(ctx context.Context) Plan
 
-// defaultPlan the default implementation of Plan.
+// defaultPlan is the default implementation of the Plan interface.
 //
 // JSON Schema:
 //
@@ -74,6 +74,7 @@ type defaultPlan struct {
 	Steps []string `json:"steps"`
 }
 
+// FirstStep returns the first step in the plan or an empty string if no steps exist.
 func (p *defaultPlan) FirstStep() string {
 	if len(p.Steps) == 0 {
 		return ""
@@ -266,7 +267,7 @@ type PlannerConfig struct {
 
 	// GenInputFn is a function that generates the input messages for the planner.
 	// Optional. If not provided, defaultGenPlannerInputFn will be used.
-	GenInputFn GenPlannerInputFn
+	GenInputFn GenPlannerModelInputFn
 
 	// NewPlan creates a new Plan instance for JSON.
 	// The returned Plan will be used to unmarshal the model-generated JSON output.
@@ -274,21 +275,16 @@ type PlannerConfig struct {
 	NewPlan NewPlan
 }
 
-// PlannerInput is the input information for the planner.
-type PlannerInput struct {
-	UserInput []adk.Message
-}
-
-// GenPlannerInputFn is a function that generates the input messages for the planner.
-type GenPlannerInputFn func(ctx context.Context, in *PlannerInput) ([]adk.Message, error)
+// GenPlannerModelInputFn is a function type that generates input messages for the planner.
+type GenPlannerModelInputFn func(ctx context.Context, userInput []adk.Message) ([]adk.Message, error)
 
 func defaultNewPlan(ctx context.Context) Plan {
 	return &defaultPlan{}
 }
 
-func defaultGenPlannerInputFn(ctx context.Context, in *PlannerInput) ([]adk.Message, error) {
+func defaultGenPlannerInputFn(ctx context.Context, userInput []adk.Message) ([]adk.Message, error) {
 	msgs, err := PlannerPrompt.Format(ctx, map[string]any{
-		"input": in.UserInput,
+		"input": userInput,
 	})
 	if err != nil {
 		return nil, err
@@ -299,7 +295,7 @@ func defaultGenPlannerInputFn(ctx context.Context, in *PlannerInput) ([]adk.Mess
 type planner struct {
 	toolCall   bool
 	chatModel  model.BaseChatModel
-	genInputFn GenPlannerInputFn
+	genInputFn GenPlannerModelInputFn
 	newPlan    NewPlan
 }
 
@@ -337,9 +333,7 @@ func (p *planner) Run(ctx context.Context, input *adk.AgentInput,
 			generator.Close()
 		}()
 
-		msgs, err := p.genInputFn(ctx, &PlannerInput{
-			UserInput: input.Messages,
-		})
+		msgs, err := p.genInputFn(ctx, input.Messages)
 		if err != nil {
 			generator.Send(&adk.AgentEvent{Err: err})
 			return
@@ -465,15 +459,15 @@ func NewPlanner(_ context.Context, cfg *PlannerConfig) (adk.Agent, error) {
 	}, nil
 }
 
-// Input is the input information for the executor and the planner.
-type Input struct {
+// ExecutionContext is the input information for the executor and the planner.
+type ExecutionContext struct {
 	UserInput     []adk.Message
 	Plan          Plan
 	ExecutedSteps []ExecutedStep
 }
 
-// GenInputFn is a function that generates the input messages for the executor and the planner.
-type GenInputFn func(ctx context.Context, in *Input) ([]adk.Message, error)
+// GenModelInputFn is a function that generates the input messages for the executor and the planner.
+type GenModelInputFn func(ctx context.Context, in *ExecutionContext) ([]adk.Message, error)
 
 // ExecutorConfig provides configuration options for creating an executor agent.
 type ExecutorConfig struct {
@@ -487,8 +481,8 @@ type ExecutorConfig struct {
 	MaxStep int
 
 	// GenInputFn generates the input messages for the Executor.
-	// Optional. If not provided, genExecutorInputFn will be used.
-	GenInputFn GenInputFn
+	// Optional. If not provided, defaultGenExecutorInputFn will be used.
+	GenInputFn GenModelInputFn
 }
 
 type ExecutedStep struct {
@@ -501,7 +495,7 @@ func NewExecutor(ctx context.Context, cfg *ExecutorConfig) (adk.Agent, error) {
 
 	genInputFn := cfg.GenInputFn
 	if genInputFn == nil {
-		genInputFn = genExecutorInputFn
+		genInputFn = defaultGenExecutorInputFn
 	}
 	genInput := func(ctx context.Context, instruction string, _ *adk.AgentInput) ([]adk.Message, error) {
 
@@ -523,7 +517,7 @@ func NewExecutor(ctx context.Context, cfg *ExecutorConfig) (adk.Agent, error) {
 			executedSteps_ = executedStep.([]ExecutedStep)
 		}
 
-		in := &Input{
+		in := &ExecutionContext{
 			UserInput:     userInput_,
 			Plan:          plan_,
 			ExecutedSteps: executedSteps_,
@@ -553,7 +547,7 @@ func NewExecutor(ctx context.Context, cfg *ExecutorConfig) (adk.Agent, error) {
 	return agent, nil
 }
 
-func genExecutorInputFn(ctx context.Context, in *Input) ([]adk.Message, error) {
+func defaultGenExecutorInputFn(ctx context.Context, in *ExecutionContext) ([]adk.Message, error) {
 
 	planContent, err := in.Plan.MarshalJSON()
 	if err != nil {
@@ -578,7 +572,7 @@ type replanner struct {
 	planTool    *schema.ToolInfo
 	respondTool *schema.ToolInfo
 
-	genInputFn GenInputFn
+	genInputFn GenModelInputFn
 	newPlan    NewPlan
 }
 
@@ -597,7 +591,7 @@ type ReplannerConfig struct {
 
 	// GenInputFn generates the input messages for the Replanner.
 	// Optional. If not provided, buildGenReplannerInputFn will be used.
-	GenInputFn GenInputFn
+	GenInputFn GenModelInputFn
 
 	// NewPlan creates a new Plan instance.
 	// The returned Plan will be used to unmarshal the model-generated JSON output from PlanTool.
@@ -666,7 +660,7 @@ func (r *replanner) genInput(ctx context.Context) ([]adk.Message, error) {
 	}
 	userInput_ := userInput.([]adk.Message)
 
-	in := &Input{
+	in := &ExecutionContext{
 		UserInput:     userInput_,
 		Plan:          plan_,
 		ExecutedSteps: executedSteps_,
@@ -805,8 +799,8 @@ func (r *replanner) Run(ctx context.Context, input *adk.AgentInput, _ ...adk.Age
 	return iterator
 }
 
-func buildGenReplannerInputFn(planToolName, respondToolName string) GenInputFn {
-	return func(ctx context.Context, in *Input) ([]adk.Message, error) {
+func buildGenReplannerInputFn(planToolName, respondToolName string) GenModelInputFn {
+	return func(ctx context.Context, in *ExecutionContext) ([]adk.Message, error) {
 		planContent, err := in.Plan.MarshalJSON()
 		if err != nil {
 			return nil, err
@@ -856,7 +850,7 @@ func NewReplanner(_ context.Context, cfg *ReplannerConfig) (adk.Agent, error) {
 	}, nil
 }
 
-// Config provides configuration options for creating a plan execute agent.
+// Config provides configuration options for creating a plan-execute-replan agent.
 type Config struct {
 	// Planner specifies the agent that generates the plan.
 	// You can use provided NewPlanner to create a planner agent.

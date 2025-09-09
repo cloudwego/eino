@@ -82,7 +82,6 @@ type ToolsConfig struct {
 }
 
 // GenModelInput transforms agent instructions and input into a format suitable for the model.
-// It combines system instructions with user messages to create the complete prompt.
 type GenModelInput func(ctx context.Context, instruction string, input *AgentInput) ([]Message, error)
 
 func defaultGenModelInput(ctx context.Context, instruction string, input *AgentInput) ([]Message, error) {
