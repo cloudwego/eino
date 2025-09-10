@@ -216,11 +216,6 @@ func NewChatModelAgent(_ context.Context, config *ChatModelAgentConfig) (*ChatMo
 		genInput = config.GenModelInput
 	}
 
-	maxIterations := config.MaxIterations
-	if maxIterations <= 0 {
-		maxIterations = 20
-	}
-
 	return &ChatModelAgent{
 		name:          config.Name,
 		description:   config.Description,
@@ -230,7 +225,7 @@ func NewChatModelAgent(_ context.Context, config *ChatModelAgentConfig) (*ChatMo
 		genModelInput: genInput,
 		exit:          config.Exit,
 		outputKey:     config.OutputKey,
-		maxIterations: maxIterations,
+		maxIterations: config.MaxIterations,
 	}, nil
 }
 

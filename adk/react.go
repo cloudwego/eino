@@ -121,7 +121,12 @@ func newReact(ctx context.Context, config *reactConfig) (reactGraph, error) {
 			ToolGenActions:         map[string]*AgentAction{},
 			AgentName:              config.agentName,
 			AgentToolInterruptData: make(map[string]*agentToolInterruptInfo),
-			RemainingIterations:    config.maxIterations,
+			RemainingIterations: func() int {
+				if config.maxIterations <= 0 {
+					return 20
+				}
+				return config.maxIterations
+			}(),
 		}
 	}
 
