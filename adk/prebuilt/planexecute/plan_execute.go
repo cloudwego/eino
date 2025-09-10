@@ -477,8 +477,10 @@ type ExecutorConfig struct {
 	// ToolsConfig specifies the tools available to the executor.
 	ToolsConfig adk.ToolsConfig
 
-	// MaxStep defines the maximum number of steps allowed for the executor.
-	MaxStep int
+	// MaxIterations defines the upper limit of ChatModel generation cycles.
+	// The agent will terminate with an error if this limit is exceeded.
+	// Optional. Defaults to 20.
+	MaxIterations int
 
 	// GenInputFn generates the input messages for the Executor.
 	// Optional. If not provided, defaultGenExecutorInputFn will be used.
@@ -537,7 +539,7 @@ func NewExecutor(ctx context.Context, cfg *ExecutorConfig) (adk.Agent, error) {
 		Model:         cfg.Model,
 		ToolsConfig:   cfg.ToolsConfig,
 		GenModelInput: genInput,
-		MaxStep:       cfg.MaxStep,
+		MaxIterations: cfg.MaxIterations,
 		OutputKey:     ExecutedStepSessionKey,
 	})
 	if err != nil {

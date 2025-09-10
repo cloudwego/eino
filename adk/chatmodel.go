@@ -140,8 +140,9 @@ type ChatModelAgentConfig struct {
 	// Optional. When set, stores output via AddSessionValue(ctx, outputKey, msg.Content).
 	OutputKey string
 
-	// MaxIterations limits the number of iterations of ReAct cycles between the ChatModel and tools.
-	// Optional. Defaults to 10 if not specified.
+	// MaxIterations defines the upper limit of ChatModel generation cycles.
+	// The agent will terminate with an error if this limit is exceeded.
+	// Optional. Defaults to 20.
 	MaxIterations int
 }
 
@@ -217,7 +218,7 @@ func NewChatModelAgent(_ context.Context, config *ChatModelAgentConfig) (*ChatMo
 
 	maxIterations := config.MaxIterations
 	if maxIterations <= 0 {
-		maxIterations = 10
+		maxIterations = 20
 	}
 
 	return &ChatModelAgent{
