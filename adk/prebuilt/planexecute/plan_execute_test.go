@@ -218,8 +218,8 @@ func TestNewExecutor(t *testing.T) {
 
 	// Create the ExecutorConfig
 	conf := &ExecutorConfig{
-		Model:   mockToolCallingModel,
-		MaxStep: 5,
+		Model:         mockToolCallingModel,
+		MaxIterations: 3,
 	}
 
 	// Create the executor
@@ -264,8 +264,8 @@ func TestExecutorRun(t *testing.T) {
 
 	// Create the ExecutorConfig
 	conf := &ExecutorConfig{
-		Model:   mockToolCallingModel,
-		MaxStep: 5,
+		Model:         mockToolCallingModel,
+		MaxIterations: 3,
 	}
 
 	// Create the executor
