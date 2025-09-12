@@ -39,6 +39,30 @@ type myStruct2 struct {
 	D map[myStruct]any
 	E []any
 	f string
+	G myStruct3
+	H *myStruct4
+	I []*myStruct3
+	J map[string]myStruct3
+	K myStruct4
+	L []*myStruct4
+	M map[string]myStruct4
+}
+
+type myStruct3 struct {
+	FieldA string
+}
+
+type myStruct4 struct {
+	FieldA string
+}
+
+func (m *myStruct4) UnmarshalJSON(bytes []byte) error {
+	m.FieldA = string(bytes)
+	return nil
+}
+
+func (m myStruct4) MarshalJSON() ([]byte, error) {
+	return []byte(m.FieldA), nil
 }
 
 func TestSerialization(t *testing.T) {
@@ -96,6 +120,27 @@ func TestSerialization(t *testing.T) {
 			D: map[myStruct]any{{"a"}: 1},
 			E: []any{1, "2", 3},
 			f: "",
+			G: myStruct3{
+				FieldA: "1",
+			},
+			H: nil,
+			I: []*myStruct3{
+				{FieldA: "2"}, {FieldA: "3"},
+			},
+			J: map[string]myStruct3{
+				"1": {FieldA: "4"},
+				"2": {FieldA: "5"},
+			},
+			K: myStruct4{
+				FieldA: "1",
+			},
+			L: []*myStruct4{
+				{FieldA: "2"}, {FieldA: "3"},
+			},
+			M: map[string]myStruct4{
+				"1": {FieldA: "4"},
+				"2": {FieldA: "5"},
+			},
 		},
 		map[string]map[string][]map[string][][]string{
 			"1": {
@@ -119,28 +164,28 @@ func TestSerialization(t *testing.T) {
 	}
 }
 
-type myStruct3 struct {
+type myStruct5 struct {
 	FieldA string
 }
 
-func (m *myStruct3) UnmarshalJSON(bytes []byte) error {
+func (m *myStruct5) UnmarshalJSON(bytes []byte) error {
 	m.FieldA = "FieldA"
 	return nil
 }
 
-func (m myStruct3) MarshalJSON() ([]byte, error) {
+func (m myStruct5) MarshalJSON() ([]byte, error) {
 	return []byte("1"), nil
 }
 
 func TestMarshalStruct(t *testing.T) {
-	assert.NoError(t, GenericRegister[myStruct3]("myStruct3"))
-	s := myStruct3{FieldA: "1"}
+	assert.NoError(t, GenericRegister[myStruct5]("myStruct5"))
+	s := myStruct5{FieldA: "1"}
 	data, err := (&InternalSerializer{}).Marshal(s)
 	assert.NoError(t, err)
-	result := &myStruct3{}
+	result := &myStruct5{}
 	err = (&InternalSerializer{}).Unmarshal(data, result)
 	assert.NoError(t, err)
-	assert.Equal(t, myStruct3{FieldA: "FieldA"}, *result)
+	assert.Equal(t, myStruct5{FieldA: "FieldA"}, *result)
 
 	ma := map[string]any{
 		"1": s,
@@ -151,6 +196,6 @@ func TestMarshalStruct(t *testing.T) {
 	err = (&InternalSerializer{}).Unmarshal(data, &result2)
 	assert.NoError(t, err)
 	assert.Equal(t, map[string]any{
-		"1": myStruct3{FieldA: "FieldA"},
+		"1": myStruct5{FieldA: "FieldA"},
 	}, result2)
 }

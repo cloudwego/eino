@@ -86,7 +86,7 @@ func GenericRegister[T any](key string) error {
 type InternalSerializer struct{}
 
 func (i *InternalSerializer) Marshal(v interface{}) ([]byte, error) {
-	is, err := internalMarshal(v)
+	is, err := internalMarshal(v, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -167,7 +167,11 @@ func unmarshal(data []byte) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	return internalUnmarshal(is)
+	t, err := restoreType(is.Type)
+	if err != nil {
+		return nil, err
+	}
+	return internalUnmarshal(is, t)
 }
 
 type internalStruct struct {
@@ -264,45 +268,65 @@ func restoreType(vt *valueType) (reflect.Type, error) {
 	return nil, fmt.Errorf("empty value")
 }
 
-func internalMarshal(v any) (*internalStruct, error) {
+func internalMarshal(v any, fieldType reflect.Type) (*internalStruct, error) {
 	if v == nil {
-		return nil, nil // 这里表示没有值，空指针不等于没有值
+		return nil, nil
 	}
 
-	ret := &internalStruct{Type: &valueType{}}
+	ret := &internalStruct{}
 	rv := reflect.ValueOf(v)
 	rt := rv.Type()
+	typeUnspecific := fieldType == nil || fieldType.Kind() == reflect.Interface
 
-	// 计算指针层数
+	var pointerNum uint32
 	for rt.Kind() == reflect.Ptr {
-		ret.Type.PointerNum++
-		if rv.IsNil() {
-			for rt.Kind() == reflect.Ptr {
-				rt = rt.Elem()
-			}
+		pointerNum++
+		if !rv.IsNil() {
+			rv = rv.Elem()
+			rt = rt.Elem()
+			continue
+		}
+		for rt.Kind() == reflect.Ptr {
+			rt = rt.Elem()
+		}
+		if typeUnspecific {
+			// need type registered
 			key, ok := rm[rt]
 			if !ok {
 				return nil, fmt.Errorf("unknown type: %v", rt)
 			}
-			ret.Type.SimpleType = key
-			ret.JSONValue = json.RawMessage("null")
-			return ret, nil
+			ret.Type = &valueType{
+				PointerNum: pointerNum,
+				SimpleType: key,
+			}
 		}
-		rv = rv.Elem()
-		rt = rt.Elem()
+		ret.JSONValue = json.RawMessage("null")
+		return ret, nil
 	}
 
 	switch rt.Kind() {
 	case reflect.Struct:
-		// 处理struct，复用map部分处理
-		key, ok := rm[rt]
-		if !ok {
-			return nil, fmt.Errorf("unknown type: %v", rt)
+		if typeUnspecific {
+			// need type registered
+			key, ok := rm[rt]
+			if !ok {
+				return nil, fmt.Errorf("unknown type: %v", rt)
+			}
+
+			if checkMarshaler(rt) {
+				ret.Type = &valueType{
+					PointerNum: pointerNum,
+					SimpleType: key,
+				}
+			} else {
+				ret.Type = &valueType{
+					PointerNum: pointerNum,
+					StructType: key,
+				}
+			}
 		}
 
 		if checkMarshaler(rt) {
-			ret.Type.SimpleType = key
-
 			jsonBytes, err := json.Marshal(rv.Interface())
 			if err != nil {
 				return nil, err
@@ -311,18 +335,16 @@ func internalMarshal(v any) (*internalStruct, error) {
 			return ret, nil
 		}
 
-		ret.Type.StructType = key
-
 		ret.MapValues = make(map[string]*internalStruct)
 
 		for i := 0; i < rt.NumField(); i++ {
 			field := rt.Field(i)
-			// 只处理可导出的字段
+			// only handle exported fields
 			if field.PkgPath == "" {
 				k := field.Name
-				v := rv.Field(i) // 使用Field(i)而不是FieldByName，更高效
+				v := rv.Field(i)
 
-				internalValue, err := internalMarshal(v.Interface())
+				internalValue, err := internalMarshal(v.Interface(), field.Type)
 				if err != nil {
 					return nil, err
 				}
@@ -333,18 +355,22 @@ func internalMarshal(v any) (*internalStruct, error) {
 
 		return ret, nil
 	case reflect.Map:
-		// 处理Map类型
-		// map key类型
-		var err error
-		ret.Type.MapKeyType, err = extractType(rt.Key())
-		if err != nil {
-			return nil, err
-		}
+		if typeUnspecific {
+			var err error
+			ret.Type = &valueType{
+				PointerNum: pointerNum,
+			}
+			// map key type
+			ret.Type.MapKeyType, err = extractType(rt.Key())
+			if err != nil {
+				return nil, err
+			}
 
-		// map value类型
-		ret.Type.MapValueType, err = extractType(rt.Elem())
-		if err != nil {
-			return nil, err
+			// map value type
+			ret.Type.MapValueType, err = extractType(rt.Elem())
+			if err != nil {
+				return nil, err
+			}
 		}
 
 		ret.MapValues = make(map[string]*internalStruct)
@@ -354,7 +380,7 @@ func internalMarshal(v any) (*internalStruct, error) {
 			k := iter.Key()
 			v := iter.Value()
 
-			internalValue, err := internalMarshal(v.Interface())
+			internalValue, err := internalMarshal(v.Interface(), rt.Elem())
 			if err != nil {
 				return nil, err
 			}
@@ -368,18 +394,20 @@ func internalMarshal(v any) (*internalStruct, error) {
 
 		return ret, nil
 	case reflect.Slice, reflect.Array:
-		// 处理切片和数组类型
-		var err error
-		ret.Type.SliceValueType, err = extractType(rt.Elem())
-		if err != nil {
-			return nil, err
+		if typeUnspecific {
+			var err error
+			ret.Type = &valueType{PointerNum: pointerNum}
+			ret.Type.SliceValueType, err = extractType(rt.Elem())
+			if err != nil {
+				return nil, err
+			}
 		}
 
 		length := rv.Len()
 		ret.SliceValues = make([]*internalStruct, length)
 
 		for i := 0; i < length; i++ {
-			internalValue, err := internalMarshal(rv.Index(i).Interface())
+			internalValue, err := internalMarshal(rv.Index(i).Interface(), rt.Elem())
 			if err != nil {
 				return nil, err
 			}
@@ -389,12 +417,16 @@ func internalMarshal(v any) (*internalStruct, error) {
 		return ret, nil
 
 	default:
-		// 处理基本类型
-		key, ok := rm[rv.Type()]
-		if !ok {
-			return nil, fmt.Errorf("unknown type: %v", rt)
+		if typeUnspecific {
+			key, ok := rm[rv.Type()]
+			if !ok {
+				return nil, fmt.Errorf("unknown type: %v", rt)
+			}
+			ret.Type = &valueType{
+				PointerNum: pointerNum,
+				SimpleType: key,
+			}
 		}
-		ret.Type.SimpleType = key
 
 		jsonBytes, err := json.Marshal(rv.Interface())
 		if err != nil {
@@ -405,9 +437,22 @@ func internalMarshal(v any) (*internalStruct, error) {
 	}
 }
 
-func internalUnmarshal(v *internalStruct) (any, error) {
+func internalUnmarshal(v *internalStruct, typ reflect.Type) (any, error) {
 	if v == nil {
 		return nil, nil
+	}
+
+	if v.Type == nil {
+		// specific type
+		if checkMarshaler(typ) {
+			pv := reflect.New(typ)
+			err := json.Unmarshal(v.JSONValue, pv.Interface())
+			if err != nil {
+				return nil, err
+			}
+			return pv.Elem().Interface(), nil
+		}
+		return internalSpecificTypeUnmarshal(v, typ)
 	}
 
 	if len(v.Type.SimpleType) != 0 {
@@ -432,25 +477,9 @@ func internalUnmarshal(v *internalStruct) (any, error) {
 		}
 		result, dResult := createValueFromType(resolvePointerNum(v.Type.PointerNum, rt))
 
-		// todo: if all fields are based, can use unmarshal instead of internalUnmarshal
-		for k, internalValue := range v.MapValues {
-			value, err := internalUnmarshal(internalValue)
-			if err != nil {
-				return nil, fmt.Errorf("unmarshal map field[%v] fail: %v", k, err)
-			}
-			field := dResult.FieldByName(k)
-			if !field.CanSet() {
-				return nil, fmt.Errorf("unmarshal map fail, can not set field %v", k)
-			}
-			if value == nil {
-				rft, ok := rt.FieldByName(k)
-				if !ok {
-					return nil, fmt.Errorf("unmarshal map fail, cannot find field: %v", k)
-				}
-				field.Set(reflect.New(rft.Type).Elem())
-			} else {
-				field.Set(reflect.ValueOf(value))
-			}
+		err := setStructFields(dResult, v.MapValues)
+		if err != nil {
+			return nil, err
 		}
 
 		return result.Interface(), nil
@@ -467,24 +496,10 @@ func internalUnmarshal(v *internalStruct) (any, error) {
 			return nil, err
 		}
 
-		// todo: if all values are based, can use unmarshal instead of internalUnmarshal
 		result, dResult := createValueFromType(reflect.MapOf(rkt, rvt))
-		for marshaledMapKey, internalValue := range v.MapValues {
-			prkv := reflect.New(rkt)
-			err := sonic.UnmarshalString(marshaledMapKey, prkv.Interface())
-			if err != nil {
-				return nil, fmt.Errorf("unmarshal map key[%v] to type[%s] fail: %v", marshaledMapKey, rkt, err)
-			}
-
-			value, err := internalUnmarshal(internalValue)
-			if err != nil {
-				return nil, fmt.Errorf("unmarshal map value fail: %v", err)
-			}
-			if value == nil {
-				dResult.SetMapIndex(prkv.Elem(), reflect.New(rvt).Elem())
-			} else {
-				dResult.SetMapIndex(prkv.Elem(), reflect.ValueOf(value))
-			}
+		err = setMapKVs(dResult, v.MapValues)
+		if err != nil {
+			return nil, err
 		}
 		return result.Interface(), nil
 	}
@@ -495,21 +510,119 @@ func internalUnmarshal(v *internalStruct) (any, error) {
 		return nil, err
 	}
 
-	// todo: if all slice values are based, can use unmarshal instead of internalUnmarshal
 	result, dResult := createValueFromType(reflect.SliceOf(rvt))
-	for _, internalValue := range v.SliceValues {
-		value, err := internalUnmarshal(internalValue)
+	err = setSliceElems(dResult, v.SliceValues)
+	if err != nil {
+		return nil, err
+	}
+	return result.Interface(), nil
+}
+
+func internalSpecificTypeUnmarshal(is *internalStruct, typ reflect.Type) (any, error) {
+	_, dtyp := derefPointerNum(typ)
+	result, dResult := createValueFromType(typ)
+
+	if dtyp.Kind() == reflect.Struct {
+		err := setStructFields(dResult, is.MapValues)
 		if err != nil {
-			return nil, fmt.Errorf("unmarshal slice[%s] fail: %v", rvt.String(), err)
+			return nil, err
+		}
+		return result.Interface(), nil
+	} else if dtyp.Kind() == reflect.Map {
+		err := setMapKVs(dResult, is.MapValues)
+		if err != nil {
+			return nil, err
+		}
+		return result.Interface(), nil
+	} else if dtyp.Kind() == reflect.Array || dtyp.Kind() == reflect.Slice {
+		err := setSliceElems(dResult, is.SliceValues)
+		if err != nil {
+			return nil, err
+		}
+		return result.Interface(), nil
+	}
+	// simple type
+	v := reflect.New(typ)
+	err := sonic.Unmarshal(is.JSONValue, v.Interface())
+	if err != nil {
+		return nil, fmt.Errorf("unmarshal type[%s] fail: %v", typ.String(), err)
+	}
+	return v.Elem().Interface(), nil
+}
+
+func setSliceElems(dResult reflect.Value, values []*internalStruct) error {
+	t := dResult.Type()
+	for _, internalValue := range values {
+		value, err := internalUnmarshal(internalValue, t.Elem())
+		if err != nil {
+			return fmt.Errorf("unmarshal slice[%s] fail: %v", t.Elem(), err)
 		}
 		if value == nil {
 			// empty value
-			dResult.Set(reflect.Append(dResult, reflect.New(rvt).Elem()))
+			dResult.Set(reflect.Append(dResult, reflect.New(t.Elem()).Elem()))
 		} else {
 			dResult.Set(reflect.Append(dResult, reflect.ValueOf(value)))
 		}
 	}
-	return result.Interface(), nil
+	return nil
+}
+
+func setMapKVs(dResult reflect.Value, values map[string]*internalStruct) error {
+	t := dResult.Type()
+	for marshaledMapKey, internalValue := range values {
+		prkv := reflect.New(t.Key())
+		err := sonic.UnmarshalString(marshaledMapKey, prkv.Interface())
+		if err != nil {
+			return fmt.Errorf("unmarshal map key[%v] to type[%s] fail: %v", marshaledMapKey, t.Key(), err)
+		}
+
+		value, err := internalUnmarshal(internalValue, t.Elem())
+		if err != nil {
+			return fmt.Errorf("unmarshal map value fail: %v", err)
+		}
+		if value == nil {
+			dResult.SetMapIndex(prkv.Elem(), reflect.New(t.Elem()).Elem())
+		} else {
+			dResult.SetMapIndex(prkv.Elem(), reflect.ValueOf(value))
+		}
+	}
+	return nil
+}
+
+func setStructFields(dResult reflect.Value, values map[string]*internalStruct) error {
+	t := dResult.Type()
+	for k, internalValue := range values {
+		sf, ok := t.FieldByName(k)
+		if !ok {
+			continue
+		}
+		value, err := internalUnmarshal(internalValue, sf.Type)
+		if err != nil {
+			return fmt.Errorf("unmarshal map field[%v] fail: %v", k, err)
+		}
+		err = setStructField(t, dResult, k, value)
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func setStructField(t reflect.Type, s reflect.Value, fieldName string, val any) error {
+	field := s.FieldByName(fieldName)
+	if !field.CanSet() {
+		return fmt.Errorf("unmarshal map fail, can not set field %v", fieldName)
+	}
+	if val == nil {
+		rft, ok := t.FieldByName(fieldName)
+		if !ok {
+			return fmt.Errorf("unmarshal map fail, cannot find field: %v", fieldName)
+		}
+		field.Set(reflect.New(rft.Type).Elem())
+	} else {
+		field.Set(reflect.ValueOf(val))
+	}
+	return nil
 }
 
 func resolvePointerNum(pointerNum uint32, t reflect.Type) reflect.Type {
@@ -519,21 +632,28 @@ func resolvePointerNum(pointerNum uint32, t reflect.Type) reflect.Type {
 	return t
 }
 
+func derefPointerNum(t reflect.Type) (uint32, reflect.Type) {
+	var ptrCount uint32 = 0
+
+	for t != nil && t.Kind() == reflect.Ptr {
+		t = t.Elem()
+		ptrCount++
+	}
+
+	return ptrCount, t
+}
+
 func createValueFromType(t reflect.Type) (value reflect.Value, derefValue reflect.Value) {
-	// 创建新值
 	value = reflect.New(t).Elem()
 
-	// 获取解引用后的值
 	derefValue = value
 	for derefValue.Kind() == reflect.Ptr {
-		// 如果是nil指针，需要先初始化
 		if derefValue.IsNil() {
 			derefValue.Set(reflect.New(derefValue.Type().Elem()))
 		}
 		derefValue = derefValue.Elem()
 	}
 
-	// 如果是map类型，需要初始化
 	if derefValue.Kind() == reflect.Map && derefValue.IsNil() {
 		derefValue.Set(reflect.MakeMap(derefValue.Type()))
 	}
