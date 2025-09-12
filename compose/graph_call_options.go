@@ -17,8 +17,10 @@
 package compose
 
 import (
+	"context"
 	"fmt"
 	"reflect"
+	"time"
 
 	"github.com/cloudwego/eino/callbacks"
 	"github.com/cloudwego/eino/components/document"
@@ -28,6 +30,35 @@ import (
 	"github.com/cloudwego/eino/components/prompt"
 	"github.com/cloudwego/eino/components/retriever"
 )
+
+type graphCancelChanKey struct{}
+type graphCancelChanVal struct {
+	ch chan *time.Duration
+}
+
+// WithGraphInterrupt creates a context with graph cancellation support.
+// When the returned context is used to invoke a graph or workflow, calling the interrupt function will trigger an interrupt.
+// The graph will wait for current tasks to complete (up to maxWaitTime) before generating an interrupt.
+// After maxWaitTime, the graph will force an interrupt. Any unfinished tasks will be re-run when the graph is resumed.
+// If maxWaitTime is nil, the graph will wait for all tasks to complete before interrupting.
+func WithGraphInterrupt(parent context.Context) (ctx context.Context, interrupt func(maxWaitTime *time.Duration)) {
+	ch := make(chan *time.Duration, 1)
+	ctx = context.WithValue(parent, graphCancelChanKey{}, &graphCancelChanVal{
+		ch: ch,
+	})
+	return ctx, func(maxWaitTime *time.Duration) {
+		ch <- maxWaitTime
+		close(ch)
+	}
+}
+
+func getGraphCancel(ctx context.Context) *graphCancelChanVal {
+	val, ok := ctx.Value(graphCancelChanKey{}).(*graphCancelChanVal)
+	if !ok {
+		return nil
+	}
+	return val
+}
 
 // Option is a functional option type for calling a graph.
 type Option struct {
