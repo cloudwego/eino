@@ -26,6 +26,7 @@ import (
 	"github.com/stretchr/testify/assert"
 
 	"github.com/cloudwego/eino/internal/callbacks"
+	"github.com/cloudwego/eino/internal/serialization"
 	"github.com/cloudwego/eino/schema"
 )
 
@@ -983,4 +984,34 @@ func (f *failStore) Get(ctx context.Context, checkPointID string) ([]byte, bool,
 func (f *failStore) Set(ctx context.Context, checkPointID string, checkPoint []byte) error {
 	f.t.Fatalf("cannot call store")
 	return errors.New("fail")
+}
+
+func TestPreHandlerInterrupt(t *testing.T) {
+	type state struct{}
+	assert.NoError(t, serialization.GenericRegister[state]("_eino_TestPreHandlerInterrupt_state"))
+	g := NewGraph[string, string](WithGenLocalState(func(ctx context.Context) state {
+		return state{}
+	}))
+	times := 0
+	_ = g.AddLambdaNode("1", InvokableLambda(func(ctx context.Context, input string) (output string, err error) {
+		return input + "1", nil
+	}), WithStatePreHandler(func(ctx context.Context, in string, state state) (string, error) {
+		if times == 0 {
+			times++
+			return "", NewInterruptAndRerunErr("")
+		}
+		return in, nil
+	}))
+	_ = g.AddEdge(START, "1")
+	_ = g.AddEdge("1", END)
+	ctx := context.Background()
+	r, err := g.Compile(ctx, WithCheckPointStore(newInMemoryStore()))
+	assert.NoError(t, err)
+	_, err = r.Invoke(ctx, "input", WithCheckPointID("1"))
+	info, existed := ExtractInterruptInfo(err)
+	assert.True(t, existed)
+	assert.Equal(t, []string{"1"}, info.RerunNodes)
+	result, err := r.Invoke(ctx, "", WithCheckPointID("1"))
+	assert.NoError(t, err)
+	assert.Equal(t, "1", result)
 }

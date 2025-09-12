@@ -283,15 +283,27 @@ func (t *taskManager) submit(tasks []*task) error {
 	if len(tasks) == 0 {
 		return nil
 	}
+
 	// synchronously execute one task, if there are no other tasks in the task pool and meet one of the following conditions：
 	// 1. the new task is the only one
 	// 2. the task manager mode is set to needAll
-	for _, currentTask := range tasks {
+	for i := 0; i < len(tasks); i++ {
+		currentTask := tasks[i]
 		err := runPreHandler(currentTask, t.runWrapper)
 		if err != nil {
-			return err
+			// pre-handler error, regarded as a failure of the task itself
+			currentTask.err = err
+			tasks = append(tasks[:i], tasks[i+1:]...)
+			i--
+			t.num++
+			t.done.Send(currentTask)
 		}
 	}
+	if len(tasks) == 0 {
+		// all tasks' pre-handler failed
+		return nil
+	}
+
 	var syncTask *task
 	if t.num == 0 && (len(tasks) == 1 || t.needAll) {
 		syncTask = tasks[0]
