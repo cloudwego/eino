@@ -477,7 +477,6 @@ func TestHostMultiAgent(t *testing.T) {
 				{
 					Index: generic.PtrOf(1),
 					Function: schema.FunctionCall{
-						Name:      specialist2.Name,
 						Arguments: ` is also good"}`,
 					},
 				},

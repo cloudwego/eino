@@ -19,13 +19,10 @@ package host
 import (
 	"context"
 	"fmt"
-	"io"
-	"runtime/debug"
 
 	"github.com/cloudwego/eino/callbacks"
 	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/flow/agent"
-	"github.com/cloudwego/eino/internal/safe"
 	"github.com/cloudwego/eino/schema"
 	template "github.com/cloudwego/eino/utils/callbacks"
 )
@@ -63,43 +60,20 @@ func ConvertCallbackHandlers(handlers ...MultiAgentCallback) callbacks.Handler {
 
 	onChatModelEndWithStreamOutput := func(ctx context.Context, info *callbacks.RunInfo, output *schema.StreamReader[*model.CallbackOutput]) context.Context {
 		go func() {
-			defer func() {
-				panicInfo := recover()
-				if panicInfo != nil {
-					fmt.Println(safe.NewPanicErr(panicInfo, debug.Stack()))
-				}
-				output.Close()
-			}()
-
-			handOffs := make(map[string]string)
-			var handOffOrder []string
-			for {
-				oneOutput, err := output.Recv()
-				if err != nil {
-					if err == io.EOF {
-						break
-					}
-					return
-				}
-
-				for _, toolCall := range oneOutput.Message.ToolCalls {
-					if len(toolCall.Function.Name) > 0 {
-						if existing, ok := handOffs[toolCall.Function.Name]; !ok {
-							handOffOrder = append(handOffOrder, toolCall.Function.Name)
-							handOffs[toolCall.Function.Name] = toolCall.Function.Arguments
-						} else {
-							handOffs[toolCall.Function.Name] = existing + toolCall.Function.Arguments
-						}
-					}
-				}
+			msg, err := schema.ConcatMessageStream(schema.StreamReaderWithConvert(output,
+				func(m *model.CallbackOutput) (*schema.Message, error) {
+					return m.Message, nil
+				}))
+			if err != nil {
+				fmt.Printf("concat message stream for host multi-agent failed: %v", err)
+				return
 			}
 
 			for _, cb := range handlers {
-				for _, name := range handOffOrder {
-					args := handOffs[name]
+				for _, tc := range msg.ToolCalls {
 					_ = cb.OnHandOff(ctx, &HandOffInfo{
-						ToAgentName: name,
-						Argument:    args,
+						ToAgentName: tc.Function.Name,
+						Argument:    tc.Function.Arguments,
 					})
 				}
 			}
