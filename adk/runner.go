@@ -101,6 +101,10 @@ func (r *Runner) Resume(ctx context.Context, checkPointID string, opts ...AgentR
 	}
 
 	ctx = setRunCtx(ctx, runCtx)
+
+	o := getCommonOptions(nil, opts...)
+	AddSessionValues(ctx, o.sessionValues)
+
 	aIter := toFlowAgent(ctx, r.a).Resume(ctx, info, opts...)
 	if r.store == nil {
 		return aIter, nil
