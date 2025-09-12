@@ -167,6 +167,9 @@ func TestJsonSchemaToOpenAPIV3(t *testing.T) {
 					},
 				),
 			),
+			Extras: map[string]any{
+				"key": "val",
+			},
 		}
 
 		expect := &openapi3.SchemaRef{
@@ -186,6 +189,9 @@ func TestJsonSchemaToOpenAPIV3(t *testing.T) {
 							},
 						},
 					},
+				},
+				Extensions: map[string]any{
+					"key": "val",
 				},
 			},
 		}
@@ -211,6 +217,9 @@ func TestOpenAPIV3ToJSONSchema(t *testing.T) {
 					},
 				},
 				Required: []string{"arg1"},
+				Extensions: map[string]any{
+					"key": "val",
+				},
 			},
 		}
 
@@ -229,6 +238,9 @@ func TestOpenAPIV3ToJSONSchema(t *testing.T) {
 				),
 			),
 			Required: []string{"arg1"},
+			Extras: map[string]any{
+				"key": "val",
+			},
 		}
 
 		js, err := openapiV3ToJSONSchema(openAPIV3.Value)

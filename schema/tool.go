@@ -417,6 +417,10 @@ func openapiV3ToJSONSchema(openAPIV3 *openapi3.Schema) (*jsonschema.Schema, erro
 	}
 
 	if openAPIV3.Extensions != nil {
+		if js.Extras == nil {
+			js.Extras = make(map[string]any, len(openAPIV3.Extensions))
+		}
+
 		for k, v := range openAPIV3.Extensions {
 			js.Extras[k] = v
 		}
@@ -573,6 +577,10 @@ func jsonSchemaToOpenAPIV3(js *jsonschema.Schema) (*openapi3.SchemaRef, error) {
 	}
 
 	if js.Extras != nil {
+		if openAPIV3.Extensions == nil {
+			openAPIV3.Extensions = make(map[string]any, len(js.Extras))
+		}
+
 		for k, v := range js.Extras {
 			openAPIV3.Extensions[k] = v
 		}
