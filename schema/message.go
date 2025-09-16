@@ -781,6 +781,12 @@ func ConcatMessages(msgs []*Message) (*Message, error) {
 				if msg.ResponseMeta.Usage.PromptTokenDetails.CachedTokens > ret.ResponseMeta.Usage.PromptTokenDetails.CachedTokens {
 					ret.ResponseMeta.Usage.PromptTokenDetails.CachedTokens = msg.ResponseMeta.Usage.PromptTokenDetails.CachedTokens
 				}
+				if msg.ResponseMeta.Usage.PromptTokenDetails.CacheCreationInputTokens > ret.ResponseMeta.Usage.PromptTokenDetails.CacheCreationInputTokens {
+					ret.ResponseMeta.Usage.PromptTokenDetails.CacheCreationInputTokens = msg.ResponseMeta.Usage.PromptTokenDetails.CacheCreationInputTokens
+				}
+				if msg.ResponseMeta.Usage.PromptTokenDetails.CacheReadInputTokens > ret.ResponseMeta.Usage.PromptTokenDetails.CacheReadInputTokens {
+					ret.ResponseMeta.Usage.PromptTokenDetails.CacheReadInputTokens = msg.ResponseMeta.Usage.PromptTokenDetails.CacheReadInputTokens
+				}
 			}
 
 			if msg.ResponseMeta.LogProbs != nil {
