@@ -329,7 +329,9 @@ type TokenUsage struct {
 
 type PromptTokenDetails struct {
 	// Cached tokens present in the prompt.
-	CachedTokens int `json:"cached_tokens"`
+	CachedTokens             int `json:"cached_tokens"`
+	CacheCreationInputTokens int `json:"cache_creation_input_tokens"`
+	CacheReadInputTokens     int `json:"cache_read_input_tokens"`
 }
 
 var _ MessagesTemplate = &Message{}
