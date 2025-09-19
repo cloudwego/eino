@@ -41,8 +41,22 @@ func NewInterruptAndRerunErr(extra any) error {
 	return &interruptAndRerun{Extra: extra}
 }
 
+func NewInterruptAndRerunErrWithState(info any, state any) error {
+	return &interruptAndRerun{Extra: info, State: state}
+}
+
 type interruptAndRerun struct {
-	Extra any
+	Extra any // for end-user, probably for human too
+	State any // for persistence, when resuming, use GetRunCtx to fetch it at the interrupt location
+}
+
+type CompositeInterruptState interface {
+	GetSubStateForPath(p Path) (any, bool)
+	IsPathInterrupted(p Path) bool
+}
+
+type CompositeInterruptInfo interface {
+	GetSubInterruptContexts() []*InterruptCtx
 }
 
 func (i *interruptAndRerun) Error() string {
@@ -50,14 +64,19 @@ func (i *interruptAndRerun) Error() string {
 }
 
 func IsInterruptRerunError(err error) (any, bool) {
+	info, _, ok := isInterruptRerunError(err)
+	return info, ok
+}
+
+func isInterruptRerunError(err error) (info any, state any, ok bool) {
 	if errors.Is(err, InterruptAndRerun) {
-		return nil, true
+		return nil, nil, true
 	}
 	ire := &interruptAndRerun{}
 	if errors.As(err, &ire) {
-		return ire.Extra, true
+		return ire.Extra, ire.State, true
 	}
-	return nil, false
+	return nil, nil, false
 }
 
 type InterruptInfo struct {
@@ -71,6 +90,76 @@ type InterruptInfo struct {
 
 func init() {
 	schema.RegisterName[*InterruptInfo]("_eino_compose_interrupt_info") // TODO: check if this is really needed when refactoring adk resume
+}
+
+func (ii *InterruptInfo) GetInterruptContexts() []*InterruptCtx {
+	var ctxs []*InterruptCtx
+	for subKey, subInfo := range ii.SubGraphs {
+		subInterruptCtxs := subInfo.GetInterruptContexts()
+		for i := range subInterruptCtxs {
+			c := subInterruptCtxs[i]
+			c.Paths = append([]Path{Path{Type: PathTypeNode, ID: subKey}}, c.Paths...)
+			c.ID = Paths(c.Paths).String()
+			ctxs = append(ctxs, c)
+		}
+	}
+
+	for _, n := range ii.RerunNodes {
+		if _, ok := ii.SubGraphs[n]; ok {
+			continue
+		}
+
+		extra, ok := ii.RerunNodesExtra[n]
+		if !ok {
+			ctxs = append(ctxs, &InterruptCtx{
+				Paths: []Path{},
+			})
+			continue
+		}
+
+		composite, ok := extra.(CompositeInterruptInfo)
+		if ok {
+			subContexts := composite.GetSubInterruptContexts()
+			for i := range subContexts {
+				c := subContexts[i]
+				c.Paths = append([]Path{Path{Type: PathTypeNode, ID: n}}, c.Paths...)
+				c.ID = Paths(c.Paths).String()
+				ctxs = append(ctxs, c)
+			}
+			continue
+		}
+
+		paths := []Path{
+			{
+				Type: PathTypeNode,
+				ID:   n,
+			},
+		}
+		ctxs = append(ctxs, &InterruptCtx{
+			ID:    Paths(paths).String(),
+			Paths: paths,
+			Info:  extra,
+		})
+	}
+	return ctxs
+}
+
+type PathType string
+
+const (
+	PathTypeNode PathType = "node"
+	PathTypeTool PathType = "tool"
+)
+
+type Path struct {
+	Type PathType
+	ID   string
+}
+
+type InterruptCtx struct {
+	ID    string
+	Paths []Path
+	Info  any
 }
 
 func ExtractInterruptInfo(err error) (info *InterruptInfo, existed bool) {
