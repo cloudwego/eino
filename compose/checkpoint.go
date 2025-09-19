@@ -19,6 +19,7 @@ package compose
 import (
 	"context"
 	"fmt"
+	"sync"
 
 	"github.com/cloudwego/eino/internal/serialization"
 	"github.com/cloudwego/eino/schema"
@@ -82,6 +83,10 @@ func RegisterInternalType(f func(key string, value any) error) error {
 	if err != nil {
 		return err
 	}
+	err = f("_eino_tools_interrupt_and_rerun_state", &toolsInterruptAndRerunState{})
+	if err != nil {
+		return err
+	}
 	return f("_eino_dependency_state", dependencyState(0))
 }
 
@@ -125,30 +130,137 @@ type checkpoint struct {
 
 	ToolsNodeExecutedTools map[string] /*tool node key*/ map[string] /*tool call id*/ string
 
-	SubGraphs map[string]*checkpoint
+	SubGraphs         map[string]*checkpoint
+	subGraphForwarded map[string]bool
+
+	NodeKey2InterruptState  map[string]any
+	NodeKey2InterruptUsed   map[string]bool
+	OtherPath2InterruptUsed map[Path]bool
+	mu                      sync.Mutex
 }
 
-type nodePathKey struct{}
+func (cp *checkpoint) buildInterruptStateForNode(nodeKey string, isLast bool) (*interruptState, bool) {
+	cp.mu.Lock()
+	used := cp.NodeKey2InterruptUsed[nodeKey]
+	if used && isLast { // only use the interrupt state once
+		cp.mu.Unlock()
+		return nil, false
+	}
+	if isLast {
+		cp.NodeKey2InterruptUsed[nodeKey] = true
+	}
+	cp.mu.Unlock()
+
+	var is *interruptState
+
+	for _, rn := range cp.RerunNodes {
+		if rn == nodeKey {
+			is = &interruptState{
+				Interrupted: true,
+			}
+			break
+		}
+	}
+
+	if is != nil {
+		state, hasState := cp.NodeKey2InterruptState[nodeKey]
+		if hasState {
+			is.State = state
+		}
+	}
+
+	return is, true
+}
+
+func (cp *checkpoint) buildInterruptStateForOtherPath(nodeState any, path Path) (*interruptState, bool) {
+	cp.mu.Lock()
+	used := cp.OtherPath2InterruptUsed[path]
+	if used { // only use the interrupt state once
+		cp.mu.Unlock()
+		return nil, false
+	}
+
+	cp.OtherPath2InterruptUsed[path] = true
+	cp.mu.Unlock()
+
+	compositeState, ok := nodeState.(CompositeInterruptState)
+	if !ok {
+		return nil, false
+	}
+
+	interrupted := compositeState.IsPathInterrupted(path)
+	if !interrupted {
+		return nil, false
+	}
+
+	is := &interruptState{
+		Interrupted: true,
+	}
+
+	subState, hasSubState := compositeState.GetSubStateForPath(path)
+	if hasSubState {
+		is.State = subState
+	}
+
+	return is, true
+}
+
+func (cp *checkpoint) getSubGraphCheckPoint(subGraphID string) (*checkpoint, bool) {
+	if cp.SubGraphs == nil {
+		return nil, false
+	}
+	subCP, existed := cp.SubGraphs[subGraphID]
+	return subCP, existed
+}
+
+func (cp *checkpoint) buildInterruptStateForPaths(paths Paths) (*interruptState, bool) {
+	if len(paths) == 0 {
+		return nil, false
+	}
+
+	var (
+		is *interruptState
+		ok bool
+	)
+
+	for i := 0; i < len(paths); i++ {
+		p := paths[i]
+		switch p.Type {
+		case PathTypeNode:
+			if subCP, existed := cp.getSubGraphCheckPoint(p.ID); existed {
+				return subCP.buildInterruptStateForPaths(paths[i+1:])
+			}
+
+			if is != nil {
+				return nil, false
+			}
+
+			is, ok = cp.buildInterruptStateForNode(p.ID, i == len(paths)-1)
+		default:
+			if is == nil {
+				return nil, false
+			}
+
+			if i != len(paths)-1 {
+				return nil, false
+			}
+
+			is, ok = cp.buildInterruptStateForOtherPath(is.State, p)
+		}
+		if !ok {
+			return nil, false
+		}
+	}
+
+	return is, ok
+}
+
 type stateModifierKey struct{}
 type checkPointKey struct{} // *checkpoint
 
-func getNodeKey(ctx context.Context) (*NodePath, bool) {
-	if key, ok := ctx.Value(nodePathKey{}).(*NodePath); ok {
-		return key, true
-	}
-	return nil, false
-}
-
-func setNodeKey(ctx context.Context, key string) context.Context {
-	path, existed := getNodeKey(ctx)
-	if !existed || len(path.path) == 0 {
-		return context.WithValue(ctx, nodePathKey{}, NewNodePath(key))
-	}
-	return context.WithValue(ctx, nodePathKey{}, NewNodePath(append(path.path, key)...))
-}
-
-func clearNodeKey(ctx context.Context) context.Context {
-	return context.WithValue(ctx, nodePathKey{}, nil)
+type InterruptState struct {
+	Path
+	State any
 }
 
 func getStateModifier(ctx context.Context) StateModifier {
@@ -175,6 +287,11 @@ func getCheckPointFromStore(ctx context.Context, id string, cpr *checkPointer) (
 }
 
 func setCheckPointToCtx(ctx context.Context, cp *checkpoint) context.Context {
+	rInfo, ok := ctx.Value(interruptCtxKey{}).(*ResumeInfo)
+	if ok {
+		rInfo.cp = cp
+	}
+
 	return context.WithValue(ctx, checkPointKey{}, cp)
 }
 
@@ -190,8 +307,15 @@ func forwardCheckPoint(ctx context.Context, nodeKey string) context.Context {
 	if cp == nil {
 		return ctx
 	}
+
 	if subCP, ok := cp.SubGraphs[nodeKey]; ok {
-		delete(cp.SubGraphs, nodeKey) // only forward once
+		if cp.subGraphForwarded == nil {
+			cp.subGraphForwarded = make(map[string]bool)
+		}
+		if cp.subGraphForwarded[nodeKey] {
+			return context.WithValue(ctx, checkPointKey{}, (*checkpoint)(nil))
+		}
+		cp.subGraphForwarded[nodeKey] = true
 		return context.WithValue(ctx, checkPointKey{}, subCP)
 	}
 	return context.WithValue(ctx, checkPointKey{}, (*checkpoint)(nil))
