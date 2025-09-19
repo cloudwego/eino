@@ -242,11 +242,10 @@ type ChatMessagePart struct {
 // ChatOutputMessageImage represents an image.
 // Exactly one of URL or DataOfBase64 must be set (mutually exclusive).
 type ChatOutputMessageImage struct {
-	//  currently, image id only exists when the OpenAPI protocol returns multimodal information,
+	//  currently, image id only exists when the OpenAI protocol returns multimodal information,
 	//  please refer to the documentation for details: https://platform.openai.com/docs/api-reference/responses/object
 	ID *string `json:"id,omitempty"`
 
-	URL          *string `json:"url,omitempty"`
 	DataOfBase64 *string `json:"data_of_base64,omitempty"`
 	MIMEType     string  `json:"mime_type,omitempty"` // image/jpeg; image/png; image/webp; image/gif etc.
 }
@@ -254,14 +253,13 @@ type ChatOutputMessageImage struct {
 // ChatOutputMessageAudio represents an audio.
 // Exactly one of URL or DataOfBase64 must be set (mutually exclusive).
 type ChatOutputMessageAudio struct {
-	//  currently, audio id only exists when the OpenAPI protocol returns multimodal information,
+	//  currently, audio id only exists when the OpenAI protocol returns multimodal information,
 	//  please refer to the documentation for details: https://platform.openai.com/docs/api-reference/chat/object
 	ID *string `json:"id,omitempty"`
 
 	// Currently, in the OpenAPI protocol, if the output is streamed and the audio mode is audio,
 	// this field represents the conversion text of the audio
 	Transcript   *string `json:"transcript,omitempty"`
-	URL          *string `json:"url,omitempty"`
 	DataOfBase64 *string `json:"data_of_base64,omitempty"`
 
 	MIMEType string `json:"mime_type,omitempty"` // audio/wav; audio/mpeg; audio/aac; audio/mp4 etc.
@@ -270,20 +268,9 @@ type ChatOutputMessageAudio struct {
 // ChatOutputMessageVideo represents a video.
 // Exactly one of URL or DataOfBase64 must be set (mutually exclusive).
 type ChatOutputMessageVideo struct {
-	URL          *string `json:"url,omitempty"`
 	DataOfBase64 *string `json:"data_of_base64,omitempty"`
 
 	MIMEType string `json:"mime_type,omitempty"` // video/mp4; video/webm; video/ogg; video/quicktime etc.
-}
-
-// ChatOutputMessageFile represents a file.
-// Exactly one of URL or DataOfBase64 must be set (mutually exclusive).
-type ChatOutputMessageFile struct {
-	URL          *string `json:"url,omitempty"`
-	DataOfBase64 *string `json:"data_of_base64,omitempty"`
-
-	// MIMEType is the mime type of the file, eg. text/plain; text/markdown; application/pdf; application/vnd.ms-excel etc.
-	MIMEType string `json:"mime_type,omitempty"`
 }
 
 // ChatOutputMessagePart represents a single multimodal segment returned by the model.
@@ -297,7 +284,6 @@ type ChatOutputMessagePart struct {
 	Image *ChatOutputMessageImage `json:"image,omitempty"`
 	Audio *ChatOutputMessageAudio `json:"audio,omitempty"`
 	Video *ChatOutputMessageVideo `json:"video,omitempty"`
-	File  *ChatOutputMessageFile  `json:"file,omitempty"`
 }
 
 // LogProbs is the top-level structure containing the log probability information.
@@ -357,7 +343,7 @@ type Message struct {
 	// if MultiContent is empty, use Content
 	MultiContent []ChatMessagePart `json:"multi_content,omitempty"`
 
-	MultiOutputContent []ChatOutputMessagePart
+	MultiOutputContent []ChatOutputMessagePart `json:"multi_output_content,omitempty"`
 
 	Name string `json:"name,omitempty"`
 
