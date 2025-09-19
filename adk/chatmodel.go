@@ -35,6 +35,7 @@ import (
 	"github.com/cloudwego/eino/components/prompt"
 	"github.com/cloudwego/eino/components/tool"
 	"github.com/cloudwego/eino/compose"
+	"github.com/cloudwego/eino/internal/core"
 	"github.com/cloudwego/eino/internal/safe"
 	"github.com/cloudwego/eino/schema"
 	ub "github.com/cloudwego/eino/utils/callbacks"
@@ -68,6 +69,7 @@ func WithAgentToolRunOptions(opts map[string] /*tool name*/ []AgentRunOption) Ag
 	})
 }
 
+// Deprecated: use ResumeWithData and ChatModelAgentResumeData instead.
 func WithHistoryModifier(f func(context.Context, []Message) []Message) AgentRunOption {
 	return WrapImplSpecificOptFn(func(t *chatModelAgentRunOptions) {
 		t.historyModifier = f
@@ -397,10 +399,16 @@ type cbHandler struct {
 	enableStreaming         bool
 	store                   *mockStore
 	returnDirectlyToolEvent atomic.Value
+	ctx                     context.Context
+	addr                    Address
 }
 
 func (h *cbHandler) onChatModelEnd(ctx context.Context,
 	_ *callbacks.RunInfo, output *model.CallbackOutput) context.Context {
+	addr := core.GetCurrentAddress(ctx)
+	if len(addr) != len(h.addr)+3 || !addr[:len(h.addr)].Equals(h.addr) {
+		return ctx
+	}
 
 	event := EventFromMessage(output.Message, nil, schema.Assistant, "")
 	h.Send(event)
@@ -409,6 +417,10 @@ func (h *cbHandler) onChatModelEnd(ctx context.Context,
 
 func (h *cbHandler) onChatModelEndWithStreamOutput(ctx context.Context,
 	_ *callbacks.RunInfo, output *schema.StreamReader[*model.CallbackOutput]) context.Context {
+	addr := core.GetCurrentAddress(ctx)
+	if len(addr) != len(h.addr)+3 || !addr[:len(h.addr)].Equals(h.addr) {
+		return ctx
+	}
 
 	cvt := func(in *model.CallbackOutput) (Message, error) {
 		return in.Message, nil
@@ -422,6 +434,10 @@ func (h *cbHandler) onChatModelEndWithStreamOutput(ctx context.Context,
 
 func (h *cbHandler) onToolEnd(ctx context.Context,
 	runInfo *callbacks.RunInfo, output *tool.CallbackOutput) context.Context {
+	addr := core.GetCurrentAddress(ctx)
+	if len(addr) != len(h.addr)+4 || !addr[:len(h.addr)].Equals(h.addr) {
+		return ctx
+	}
 
 	toolCallID := compose.GetToolCallID(ctx)
 	msg := schema.ToolMessage(output.Response, toolCallID, schema.WithToolName(runInfo.Name))
@@ -442,6 +458,10 @@ func (h *cbHandler) onToolEnd(ctx context.Context,
 
 func (h *cbHandler) onToolEndWithStreamOutput(ctx context.Context,
 	runInfo *callbacks.RunInfo, output *schema.StreamReader[*tool.CallbackOutput]) context.Context {
+	addr := core.GetCurrentAddress(ctx)
+	if len(addr) != len(h.addr)+4 || !addr[:len(h.addr)].Equals(h.addr) {
+		return ctx
+	}
 
 	toolCallID := compose.GetToolCallID(ctx)
 	cvt := func(in *tool.CallbackOutput) (Message, error) {
@@ -468,11 +488,19 @@ func (h *cbHandler) sendReturnDirectlyToolEvent() {
 }
 
 func (h *cbHandler) onToolsNodeEnd(ctx context.Context, _ *callbacks.RunInfo, _ []*schema.Message) context.Context {
+	addr := core.GetCurrentAddress(ctx)
+	if len(addr) != len(h.addr)+3 || !addr[:len(h.addr)].Equals(h.addr) {
+		return ctx
+	}
 	h.sendReturnDirectlyToolEvent()
 	return ctx
 }
 
 func (h *cbHandler) onToolsNodeEndWithStreamOutput(ctx context.Context, _ *callbacks.RunInfo, _ *schema.StreamReader[[]*schema.Message]) context.Context {
+	addr := core.GetCurrentAddress(ctx)
+	if len(addr) != len(h.addr)+3 || !addr[:len(h.addr)].Equals(h.addr) {
+		return ctx
+	}
 	h.sendReturnDirectlyToolEvent()
 	return ctx
 }
@@ -488,6 +516,10 @@ func init() {
 
 func (h *cbHandler) onGraphError(ctx context.Context,
 	_ *callbacks.RunInfo, err error) context.Context {
+	addr := core.GetCurrentAddress(ctx)
+	if len(addr) != len(h.addr)+1 || !addr[:len(h.addr)].Equals(h.addr) {
+		return ctx
+	}
 
 	info, ok := compose.ExtractInterruptInfo(err)
 	if !ok {
@@ -504,21 +536,29 @@ func (h *cbHandler) onGraphError(ctx context.Context,
 		h.Send(&AgentEvent{AgentName: h.agentName, Err: fmt.Errorf("interrupt has happened, but cannot find interrupt info")})
 		return ctx
 	}
-	h.Send(&AgentEvent{AgentName: h.agentName, Action: &AgentAction{
-		Interrupted: &InterruptInfo{
-			Data: &ChatModelAgentInterruptInfo{Data: data, Info: info},
-		},
-	}})
+
+	is := FromInterruptContexts(info.InterruptContexts)
+
+	event := CompositeInterrupt(h.ctx, info, data, is)
+	event.Action.Interrupted.Data = &ChatModelAgentInterruptInfo{ // for backward-compatibility with older checkpoints
+		Info: info,
+		Data: data,
+	}
+	event.AgentName = h.agentName
+	h.Send(event)
 
 	return ctx
 }
 
-func genReactCallbacks(agentName string,
+func genReactCallbacks(ctx context.Context, agentName string,
 	generator *AsyncGenerator[*AgentEvent],
 	enableStreaming bool,
 	store *mockStore) compose.Option {
 
-	h := &cbHandler{AsyncGenerator: generator, agentName: agentName, store: store, enableStreaming: enableStreaming}
+	h := &cbHandler{
+		ctx:            ctx,
+		addr:           core.GetCurrentAddress(ctx),
+		AsyncGenerator: generator, agentName: agentName, store: store, enableStreaming: enableStreaming}
 
 	cmHandler := &ub.ModelCallbackHandler{
 		OnEnd:                 h.onChatModelEnd,
@@ -560,6 +600,14 @@ func errFunc(err error) runFunc {
 	}
 }
 
+// ChatModelAgentResumeData holds data that can be provided to a ChatModelAgent during a resume operation
+// to modify its behavior. It is provided via the adk.ResumeWithData function.
+type ChatModelAgentResumeData struct {
+	// HistoryModifier is a function that can transform the agent's message history before it is sent to the model.
+	// This allows for adding new information or context upon resumption.
+	HistoryModifier func(ctx context.Context, history []Message) []Message
+}
+
 func (a *ChatModelAgent) buildRunFunc(ctx context.Context) runFunc {
 	a.once.Do(func() {
 		instruction := a.instruction
@@ -590,7 +638,8 @@ func (a *ChatModelAgent) buildRunFunc(ctx context.Context) runFunc {
 		}
 
 		if len(toolsNodeConf.Tools) == 0 {
-			a.run = func(ctx context.Context, input *AgentInput, generator *AsyncGenerator[*AgentEvent], store *mockStore, opts ...compose.Option) {
+			a.run = func(ctx context.Context, input *AgentInput, generator *AsyncGenerator[*AgentEvent],
+				store *mockStore, opts ...compose.Option) {
 				r, err := compose.NewChain[*AgentInput, Message]().
 					AppendLambda(compose.InvokableLambda(func(ctx context.Context, input *AgentInput) ([]Message, error) {
 						return a.genModelInput(ctx, instruction, input)
@@ -661,7 +710,8 @@ func (a *ChatModelAgent) buildRunFunc(ctx context.Context) runFunc {
 			return
 		}
 
-		a.run = func(ctx context.Context, input *AgentInput, generator *AsyncGenerator[*AgentEvent], store *mockStore, opts ...compose.Option) {
+		a.run = func(ctx context.Context, input *AgentInput, generator *AsyncGenerator[*AgentEvent], store *mockStore,
+			opts ...compose.Option) {
 			var compileOptions []compose.GraphCompileOption
 			compileOptions = append(compileOptions,
 				compose.WithGraphName(a.name),
@@ -683,7 +733,7 @@ func (a *ChatModelAgent) buildRunFunc(ctx context.Context) runFunc {
 				return
 			}
 
-			callOpt := genReactCallbacks(a.name, generator, input.EnableStreaming, store)
+			callOpt := genReactCallbacks(ctx, a.name, generator, input.EnableStreaming, store)
 
 			var msg Message
 			var msgStream MessageStream
@@ -743,6 +793,35 @@ func (a *ChatModelAgent) Resume(ctx context.Context, info *ResumeInfo, opts ...A
 	co := getComposeOptions(opts)
 	co = append(co, compose.WithCheckPointID(mockCheckPointID))
 
+	if info.InterruptState == nil {
+		panic(fmt.Sprintf("ChatModelAgent.Resume: agent '%s' was asked to resume but has no state", a.Name(ctx)))
+	}
+
+	stateByte, ok := info.InterruptState.([]byte)
+	if !ok {
+		panic(fmt.Sprintf("ChatModelAgent.Resume: agent '%s' was asked to resume but has invalid interrupt state type: %T",
+			a.Name(ctx), info.InterruptState))
+	}
+
+	if info.ResumeData != nil {
+		resumeData, ok := info.ResumeData.(*ChatModelAgentResumeData)
+		if !ok {
+			panic(fmt.Sprintf("ChatModelAgent.Resume: agent '%s' was asked to resume but has invalid resume data type: %T",
+				a.Name(ctx), info.ResumeData))
+		}
+
+		if resumeData.HistoryModifier != nil {
+			co = append(co, compose.WithStateModifier(func(ctx context.Context, path compose.NodePath, state any) error {
+				s, ok := state.(*State)
+				if !ok {
+					return fmt.Errorf("unexpected state type: %T, expected: %T", state, &State{})
+				}
+				s.Messages = resumeData.HistoryModifier(ctx, s.Messages)
+				return nil
+			}))
+		}
+	}
+
 	iterator, generator := NewAsyncIteratorPair[*AgentEvent]()
 	go func() {
 		defer func() {
@@ -755,7 +834,8 @@ func (a *ChatModelAgent) Resume(ctx context.Context, info *ResumeInfo, opts ...A
 			generator.Close()
 		}()
 
-		run(ctx, &AgentInput{EnableStreaming: info.EnableStreaming}, generator, newResumeStore(info.Data.(*ChatModelAgentInterruptInfo).Data), co...)
+		run(ctx, &AgentInput{EnableStreaming: info.EnableStreaming}, generator,
+			newResumeStore(stateByte), co...)
 	}()
 
 	return iterator

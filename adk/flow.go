@@ -161,20 +161,6 @@ func (a *flowAgent) getAgent(ctx context.Context, name string) *flowAgent {
 	return nil
 }
 
-func belongToRunPath(eventRunPath []RunStep, runPath []RunStep) bool {
-	if len(runPath) < len(eventRunPath) {
-		return false
-	}
-
-	for i, step := range eventRunPath {
-		if !runPath[i].Equals(step) {
-			return false
-		}
-	}
-
-	return true
-}
-
 func rewriteMessage(msg Message, agentName string) Message {
 	var sb strings.Builder
 	sb.WriteString("For context:")
@@ -219,7 +205,6 @@ func (ai *AgentInput) deepCopy() *AgentInput {
 
 func (a *flowAgent) genAgentInput(ctx context.Context, runCtx *runContext, skipTransferMessages bool) (*AgentInput, error) {
 	input := runCtx.RootInput.deepCopy()
-	runPath := runCtx.RunPath
 
 	events := runCtx.Session.getEvents()
 	historyEntries := make([]*HistoryEntry, 0)
@@ -232,10 +217,6 @@ func (a *flowAgent) genAgentInput(ctx context.Context, runCtx *runContext, skipT
 	}
 
 	for _, event := range events {
-		if !belongToRunPath(event.RunPath, runPath) {
-			continue
-		}
-
 		if skipTransferMessages && event.Action != nil && event.Action.TransferToAgent != nil {
 			// If skipTransferMessages is true and the event contain transfer action, the message in this event won't be appended to history entries.
 			if event.Output != nil &&
@@ -297,7 +278,9 @@ func buildDefaultHistoryRewriter(agentName string) HistoryRewriter {
 func (a *flowAgent) Run(ctx context.Context, input *AgentInput, opts ...AgentRunOption) *AsyncIterator[*AgentEvent] {
 	agentName := a.Name(ctx)
 
-	ctx, runCtx := initRunCtx(ctx, agentName, input)
+	var runCtx *runContext
+	ctx, runCtx = initRunCtx(ctx, agentName, input)
+	ctx = AppendAddressSegment(ctx, AddressSegmentAgent, agentName)
 
 	o := getCommonOptions(nil, opts...)
 
@@ -320,41 +303,35 @@ func (a *flowAgent) Run(ctx context.Context, input *AgentInput, opts ...AgentRun
 }
 
 func (a *flowAgent) Resume(ctx context.Context, info *ResumeInfo, opts ...AgentRunOption) *AsyncIterator[*AgentEvent] {
-	runCtx := getRunCtx(ctx)
-	if runCtx == nil {
-		return genErrorIter(fmt.Errorf("failed to resume agent: run context is empty"))
-	}
+	ctx, info = buildResumeInfo(ctx, a.Name(ctx), info)
 
-	agentName := a.Name(ctx)
-	targetName := agentName
-	if len(runCtx.RunPath) > 0 {
-		targetName = runCtx.RunPath[len(runCtx.RunPath)-1].agentName
-	}
-
-	if agentName != targetName {
-		// go to target flow agent
-		targetAgent := recursiveGetAgent(ctx, a, targetName)
-		if targetAgent == nil {
-			return genErrorIter(fmt.Errorf("failed to resume agent: cannot find agent: %s", agentName))
+	if info.WasInterrupted {
+		ra, ok := a.Agent.(ResumableAgent)
+		if !ok {
+			return genErrorIter(fmt.Errorf("failed to resume agent: agent '%s' is an interrupt point "+
+				"but is not a ResumableAgent", a.Name(ctx)))
 		}
-		return targetAgent.Resume(ctx, info, opts...)
+		iterator, generator := NewAsyncIteratorPair[*AgentEvent]()
+
+		aIter := ra.Resume(ctx, info, opts...)
+		if _, ok := ra.(*workflowAgent); ok {
+			return aIter
+		}
+		go a.run(ctx, getRunCtx(ctx), aIter, generator, opts...)
+		return iterator
 	}
 
-	if wf, ok := a.Agent.(*workflowAgent); ok {
-		return wf.Resume(ctx, info, opts...)
+	nextAgentName, err := getNextResumeAgent(ctx, info)
+	if err != nil {
+		return genErrorIter(err)
 	}
 
-	// resume current agent
-	ra, ok := a.Agent.(ResumableAgent)
-	if !ok {
-		return genErrorIter(fmt.Errorf("failed to resume agent: target agent[%s] isn't resumable", agentName))
+	subAgent := a.getAgent(ctx, nextAgentName)
+	if subAgent == nil {
+		return genErrorIter(fmt.Errorf("failed to resume agent: agent '%s' not found", nextAgentName))
 	}
-	iterator, generator := NewAsyncIteratorPair[*AgentEvent]()
-	aIter := ra.Resume(ctx, info, opts...)
 
-	go a.run(ctx, runCtx, aIter, generator, opts...)
-
-	return iterator
+	return subAgent.Resume(ctx, info, opts...)
 }
 
 type DeterministicTransferConfig struct {
@@ -404,7 +381,6 @@ func (a *flowAgent) run(
 	var destName string
 	if lastAction != nil {
 		if lastAction.Interrupted != nil {
-			appendInterruptRunCtx(ctx, runCtx)
 			return
 		}
 		if lastAction.Exit {
@@ -420,9 +396,8 @@ func (a *flowAgent) run(
 	if destName != "" {
 		agentToRun := a.getAgent(ctx, destName)
 		if agentToRun == nil {
-			e := errors.New(fmt.Sprintf(
-				"transfer failed: agent '%s' not found when transferring from '%s'",
-				destName, a.Name(ctx)))
+			e := fmt.Errorf("transfer failed: agent '%s' not found when transferring from '%s'",
+				destName, a.Name(ctx))
 			generator.Send(&AgentEvent{Err: e})
 			return
 		}
@@ -438,24 +413,4 @@ func (a *flowAgent) run(
 			generator.Send(subEvent)
 		}
 	}
-}
-
-func recursiveGetAgent(ctx context.Context, agent *flowAgent, agentName string) *flowAgent {
-	if agent == nil {
-		return nil
-	}
-	if agent.Name(ctx) == agentName {
-		return agent
-	}
-	a := agent.getAgent(ctx, agentName)
-	if a != nil {
-		return a
-	}
-	for _, sa := range agent.subAgents {
-		a = recursiveGetAgent(ctx, sa, agentName)
-		if a != nil {
-			return a
-		}
-	}
-	return nil
 }

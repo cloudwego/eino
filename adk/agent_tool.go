@@ -91,40 +91,19 @@ func (at *agentTool) Info(ctx context.Context) (*schema.ToolInfo, error) {
 }
 
 func (at *agentTool) InvokableRun(ctx context.Context, argumentsInJSON string, opts ...tool.Option) (string, error) {
-	var intData *agentToolInterruptInfo
-	var bResume bool
-	err := compose.ProcessState(ctx, func(ctx context.Context, s *State) error {
-		toolCallID := compose.GetToolCallID(ctx)
-		intData, bResume = s.AgentToolInterruptData[toolCallID]
-		if bResume {
-			delete(s.AgentToolInterruptData, toolCallID)
-		}
-		return nil
-	})
-	if err != nil {
-		// cannot resume
-		bResume = false
-	}
-
 	var ms *mockStore
 	var iter *AsyncIterator[*AgentEvent]
-	if bResume {
-		ms = newResumeStore(intData.Data)
+	var err error
 
-		iter, err = newInvokableAgentToolRunner(at.agent, ms).Resume(ctx, mockCheckPointID, getOptionsByAgentName(at.agent.Name(ctx), opts)...)
-		if err != nil {
-			return "", err
-		}
-	} else {
+	wasInterrupted, hasState, state := compose.GetInterruptState[[]byte](ctx)
+	if !wasInterrupted {
 		ms = newEmptyStore()
 		var input []Message
 		if at.fullChatHistoryAsInput {
-			history, err := getReactChatHistory(ctx, at.agent.Name(ctx))
+			input, err = getReactChatHistory(ctx, at.agent.Name(ctx))
 			if err != nil {
 				return "", err
 			}
-
-			input = history
 		} else {
 			if at.inputSchema == nil {
 				// default input schema
@@ -144,7 +123,20 @@ func (at *agentTool) InvokableRun(ctx context.Context, argumentsInJSON string, o
 			}
 		}
 
-		iter = newInvokableAgentToolRunner(at.agent, ms).Run(ctx, input, append(getOptionsByAgentName(at.agent.Name(ctx), opts), WithCheckPointID(mockCheckPointID))...)
+		iter = newInvokableAgentToolRunner(at.agent, ms).Run(ctx, input,
+			append(getOptionsByAgentName(at.agent.Name(ctx), opts), WithCheckPointID(mockCheckPointID))...)
+	} else {
+		if !hasState {
+			return "", fmt.Errorf("agent tool '%s' interrupt has happened, but cannot find interrupt state", at.agent.Name(ctx))
+		}
+
+		ms = newResumeStore(state)
+
+		iter, err = newInvokableAgentToolRunner(at.agent, ms).
+			Resume(ctx, mockCheckPointID, getOptionsByAgentName(at.agent.Name(ctx), opts)...)
+		if err != nil {
+			return "", err
+		}
 	}
 
 	var lastEvent *AgentEvent
@@ -169,17 +161,9 @@ func (at *agentTool) InvokableRun(ctx context.Context, argumentsInJSON string, o
 		if !existed {
 			return "", fmt.Errorf("interrupt has happened, but cannot find interrupt info")
 		}
-		err = compose.ProcessState(ctx, func(ctx context.Context, st *State) error {
-			st.AgentToolInterruptData[compose.GetToolCallID(ctx)] = &agentToolInterruptInfo{
-				LastEvent: lastEvent,
-				Data:      data,
-			}
-			return nil
-		})
-		if err != nil {
-			return "", fmt.Errorf("failed to save agent tool checkpoint to state: %w", err)
-		}
-		return "", compose.InterruptAndRerun
+
+		return "", compose.CompositeInterrupt(ctx, "agent tool interrupt", data,
+			lastEvent.Action.internalInterrupted)
 	}
 
 	if lastEvent == nil {
