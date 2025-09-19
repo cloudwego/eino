@@ -141,6 +141,70 @@ func init() {
 	schema.RegisterName[*ToolsInterruptAndRerunExtra]("_eino_compose_tools_interrupt_and_rerun_extra") // TODO: check if this is really needed when refactoring adk resume
 }
 
+type toolsInterruptAndRerunState struct {
+	Input          *schema.Message
+	ExecutedTools  map[string]string
+	RerunTools     []string
+	RerunToolState map[string]any
+}
+
+func (t *toolsInterruptAndRerunState) GetSubStateForPath(p Path) (any, bool) {
+	if p.Type != PathTypeTool {
+		return nil, false
+	}
+
+	for k, s := range t.RerunToolState {
+		if k == p.ID {
+			return s, true
+		}
+	}
+
+	return nil, false
+}
+
+func (t *toolsInterruptAndRerunState) IsPathInterrupted(p Path) bool {
+	if p.Type == PathTypeTool {
+		for _, rt := range t.RerunTools {
+			if rt == p.ID {
+				return true
+			}
+		}
+	}
+
+	return false
+}
+
+func (t *ToolsInterruptAndRerunExtra) GetSubInterruptContexts() []*InterruptCtx {
+	var ctxs []*InterruptCtx
+	for _, rt := range t.RerunTools {
+		extra, ok := t.RerunExtraMap[rt]
+		if !ok {
+			ctxs = append(ctxs, &InterruptCtx{
+				Paths: []Path{
+					{
+						Type: PathTypeTool,
+						ID:   rt,
+					},
+				},
+			})
+
+			continue
+		}
+
+		ctxs = append(ctxs, &InterruptCtx{
+			Paths: []Path{
+				{
+					Type: PathTypeTool,
+					ID:   rt,
+				},
+			},
+			Info: extra,
+		})
+	}
+
+	return ctxs
+}
+
 type toolsTuple struct {
 	indexes map[string]int
 	meta    []*executorMeta
@@ -293,6 +357,7 @@ func runToolCallTaskByInvoke(ctx context.Context, task *toolCallTask, opts ...to
 	})
 
 	ctx = setToolCallInfo(ctx, &toolCallInfo{toolCallID: task.callID})
+	ctx = setRunCtx(ctx, PathTypeTool, task.callID)
 	task.output, task.err = task.r.Invoke(ctx, task.arg, opts...)
 	if task.err == nil {
 		task.executed = true
@@ -307,6 +372,7 @@ func runToolCallTaskByStream(ctx context.Context, task *toolCallTask, opts ...to
 	})
 
 	ctx = setToolCallInfo(ctx, &toolCallInfo{toolCallID: task.callID})
+	ctx = setRunCtx(ctx, PathTypeTool, task.callID)
 	task.sOutput, task.err = task.r.Stream(ctx, task.arg, opts...)
 	if task.err == nil {
 		task.executed = true
@@ -374,6 +440,16 @@ func (tn *ToolsNode) Invoke(ctx context.Context, input *schema.Message,
 		}
 	}
 
+	if input == nil {
+		rCtx, exist := GetRunCtx(ctx)
+		if exist {
+			tnState, ok := rCtx.InterruptData.State.(*toolsInterruptAndRerunState)
+			if ok {
+				input = tnState.Input
+			}
+		}
+	}
+
 	tasks, err := tn.genToolCallTasks(ctx, tuple, input, opt.executedTools, false)
 	if err != nil {
 		return nil, err
@@ -393,27 +469,39 @@ func (tn *ToolsNode) Invoke(ctx context.Context, input *schema.Message,
 		ExecutedTools: make(map[string]string),
 		RerunExtraMap: make(map[string]any),
 	}
+	rerunState := &toolsInterruptAndRerunState{
+		Input:          input,
+		ExecutedTools:  make(map[string]string),
+		RerunToolState: make(map[string]any),
+	}
 	rerun := false
 	for i := 0; i < n; i++ {
 		if tasks[i].err != nil {
-			extra, ok := IsInterruptRerunError(tasks[i].err)
+			info, state, ok := isInterruptRerunError(tasks[i].err)
 			if !ok {
 				return nil, fmt.Errorf("failed to invoke tool[name:%s id:%s]: %w", tasks[i].name, tasks[i].callID, tasks[i].err)
 			}
 			rerun = true
 			rerunExtra.RerunTools = append(rerunExtra.RerunTools, tasks[i].callID)
-			rerunExtra.RerunExtraMap[tasks[i].callID] = extra
+			rerunState.RerunTools = append(rerunState.RerunTools, tasks[i].callID)
+			if info != nil {
+				rerunExtra.RerunExtraMap[tasks[i].callID] = info
+			}
+			if state != nil {
+				rerunState.RerunToolState[tasks[i].callID] = state
+			}
 			continue
 		}
 		if tasks[i].executed {
 			rerunExtra.ExecutedTools[tasks[i].callID] = tasks[i].output
+			rerunState.ExecutedTools[tasks[i].callID] = tasks[i].output
 		}
 		if !rerun {
 			output[i] = schema.ToolMessage(tasks[i].output, tasks[i].callID, schema.WithToolName(tasks[i].name))
 		}
 	}
 	if rerun {
-		return nil, NewInterruptAndRerunErr(rerunExtra)
+		return nil, NewInterruptAndRerunErrWithState(rerunExtra, rerunState)
 	}
 
 	return output, nil
@@ -434,6 +522,16 @@ func (tn *ToolsNode) Stream(ctx context.Context, input *schema.Message,
 		}
 	}
 
+	if input == nil {
+		rCtx, exist := GetRunCtx(ctx)
+		if exist {
+			tnState, ok := rCtx.InterruptData.State.(*toolsInterruptAndRerunState)
+			if ok {
+				input = tnState.Input
+			}
+		}
+	}
+
 	tasks, err := tn.genToolCallTasks(ctx, tuple, input, opt.executedTools, true)
 	if err != nil {
 		return nil, err
@@ -450,20 +548,30 @@ func (tn *ToolsNode) Stream(ctx context.Context, input *schema.Message,
 	rerun := false
 	rerunExtra := &ToolsInterruptAndRerunExtra{
 		ToolCalls:     input.ToolCalls,
-		RerunExtraMap: make(map[string]any),
 		ExecutedTools: make(map[string]string),
+		RerunExtraMap: make(map[string]any),
 	}
-
+	rerunState := &toolsInterruptAndRerunState{
+		Input:          input,
+		ExecutedTools:  make(map[string]string),
+		RerunToolState: make(map[string]any),
+	}
 	// check rerun
 	for i := 0; i < n; i++ {
 		if tasks[i].err != nil {
-			extra, ok := IsInterruptRerunError(tasks[i].err)
+			info, state, ok := isInterruptRerunError(tasks[i].err)
 			if !ok {
 				return nil, fmt.Errorf("failed to stream tool call %s: %w", tasks[i].callID, tasks[i].err)
 			}
 			rerun = true
 			rerunExtra.RerunTools = append(rerunExtra.RerunTools, tasks[i].callID)
-			rerunExtra.RerunExtraMap[tasks[i].callID] = extra
+			rerunState.RerunTools = append(rerunState.RerunTools, tasks[i].callID)
+			if info != nil {
+				rerunExtra.RerunExtraMap[tasks[i].callID] = info
+			}
+			if state != nil {
+				rerunState.RerunToolState[tasks[i].callID] = state
+			}
 			continue
 		}
 	}
@@ -477,9 +585,10 @@ func (tn *ToolsNode) Stream(ctx context.Context, input *schema.Message,
 					return nil, fmt.Errorf("failed to concat tool[name:%s id:%s]'s stream output: %w", t.name, t.callID, err_)
 				}
 				rerunExtra.ExecutedTools[t.callID] = o
+				rerunState.ExecutedTools[t.callID] = o
 			}
 		}
-		return nil, NewInterruptAndRerunErr(rerunExtra)
+		return nil, NewInterruptAndRerunErrWithState(rerunExtra, rerunState)
 	}
 
 	// common return
