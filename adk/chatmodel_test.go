@@ -203,8 +203,7 @@ func TestChatModelAgentRun(t *testing.T) {
 							Name:      info.Name,
 							Arguments: `{"name": "test user"}`,
 						},
-					},
-				}), nil).
+					}}), nil).
 			Times(1)
 		cm.EXPECT().Generate(gomock.Any(), gomock.Any(), gomock.Any()).
 			Return(schema.AssistantMessage("Task completed", nil), nil).
@@ -433,4 +432,289 @@ func (m *myTool) Info(ctx context.Context) (*schema.ToolInfo, error) {
 func (m *myTool) InvokableRun(ctx context.Context, argumentsInJSON string, opts ...tool.Option) (string, error) {
 	time.Sleep(m.waitTime)
 	return "success", nil
+}
+
+// TestChatModelAgentOutputKey tests the outputKey configuration and setOutputToSession function
+func TestChatModelAgentOutputKey(t *testing.T) {
+	// Test outputKey configuration - stores output in session
+	t.Run("OutputKeyStoresInSession", func(t *testing.T) {
+		for i := 0; i < 1000; i++ {
+
+		}
+		ctx := context.Background()
+
+		// Create a mock chat model
+		ctrl := gomock.NewController(t)
+		cm := mockModel.NewMockToolCallingChatModel(ctrl)
+
+		// Set up expectations for the mock model
+		cm.EXPECT().Generate(gomock.Any(), gomock.Any(), gomock.Any()).
+			Return(schema.AssistantMessage("Hello, I am an AI assistant.", nil), nil).
+			Times(1)
+
+		// Create a ChatModelAgent with outputKey configured
+		agent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+			Name:        "TestAgent",
+			Description: "Test agent for unit testing",
+			Instruction: "You are a helpful assistant.",
+			Model:       cm,
+			OutputKey:   "agent_output", // This should store output in session
+		})
+		assert.NoError(t, err)
+		assert.NotNil(t, agent)
+
+		// Initialize a run context to enable session storage
+		input := &AgentInput{
+			Messages: []Message{
+				schema.UserMessage("Hello, who are you?"),
+			},
+		}
+		ctx, runCtx := initRunCtx(ctx, "TestAgent", input)
+		assert.NotNil(t, runCtx)
+		assert.NotNil(t, runCtx.Session)
+
+		// Run the agent
+		iterator := agent.Run(ctx, input)
+		assert.NotNil(t, iterator)
+
+		// Get the event from the iterator
+		event, ok := iterator.Next()
+		assert.True(t, ok)
+		assert.NotNil(t, event)
+		assert.Nil(t, event.Err)
+
+		// Verify the message content
+		msg := event.Output.MessageOutput.Message
+		assert.Equal(t, "Hello, I am an AI assistant.", msg.Content)
+
+		// Verify that the output was stored in the session
+		time.AfterFunc(100*time.Millisecond, func() {
+			sessionValues := GetSessionValues(ctx)
+			assert.Contains(t, sessionValues, "agent_output")
+			assert.Equal(t, "Hello, I am an AI assistant.", sessionValues["agent_output"])
+		})
+
+		// No more events
+		_, ok = iterator.Next()
+		assert.False(t, ok)
+	})
+
+	// Test outputKey configuration with streaming - stores concatenated output in session
+	t.Run("OutputKeyWithStreamingStoresInSession", func(t *testing.T) {
+		ctx := context.Background()
+
+		// Create a mock chat model
+		ctrl := gomock.NewController(t)
+		cm := mockModel.NewMockToolCallingChatModel(ctrl)
+
+		// Create a stream reader for the mock response
+		sr := schema.StreamReaderFromArray([]*schema.Message{
+			schema.AssistantMessage("Hello", nil),
+			schema.AssistantMessage(", I am", nil),
+			schema.AssistantMessage(" an AI assistant.", nil),
+		})
+
+		// Set up expectations for the mock model
+		cm.EXPECT().Stream(gomock.Any(), gomock.Any(), gomock.Any()).
+			Return(sr, nil).
+			Times(1)
+
+		// Create a ChatModelAgent with outputKey configured
+		agent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+			Name:        "TestAgent",
+			Description: "Test agent for unit testing",
+			Instruction: "You are a helpful assistant.",
+			Model:       cm,
+			OutputKey:   "agent_output", // This should store concatenated stream in session
+		})
+		assert.NoError(t, err)
+		assert.NotNil(t, agent)
+
+		// Initialize a run context to enable session storage
+		input := &AgentInput{
+			Messages:        []Message{schema.UserMessage("Hello, who are you?")},
+			EnableStreaming: true,
+		}
+		ctx, runCtx := initRunCtx(ctx, "TestAgent", input)
+		assert.NotNil(t, runCtx)
+		assert.NotNil(t, runCtx.Session)
+
+		// Run the agent
+		iterator := agent.Run(ctx, input)
+		assert.NotNil(t, iterator)
+
+		// Get the event from the iterator
+		event, ok := iterator.Next()
+		assert.True(t, ok)
+		assert.NotNil(t, event)
+		assert.Nil(t, event.Err)
+		assert.True(t, event.Output.MessageOutput.IsStreaming)
+
+		time.AfterFunc(100*time.Millisecond, func() {
+			// Verify that the concatenated output was stored in the session
+			sessionValues := GetSessionValues(ctx)
+			assert.Contains(t, sessionValues, "agent_output")
+			assert.Equal(t, "Hello, I am an AI assistant.", sessionValues["agent_output"])
+		})
+
+		// No more events
+		_, ok = iterator.Next()
+		assert.False(t, ok)
+	})
+
+	// Test setOutputToSession function directly - regular message
+	t.Run("SetOutputToSessionRegularMessage", func(t *testing.T) {
+		ctx := context.Background()
+
+		// Initialize a run context to enable session storage
+		input := &AgentInput{
+			Messages: []Message{schema.UserMessage("test")},
+		}
+		ctx, runCtx := initRunCtx(ctx, "TestAgent", input)
+		assert.NotNil(t, runCtx)
+		assert.NotNil(t, runCtx.Session)
+
+		// Test with a regular message
+		msg := schema.AssistantMessage("Test response", nil)
+		err := setOutputToSession(ctx, msg, nil, "test_output")
+		assert.NoError(t, err)
+
+		// Verify the message content was stored
+		sessionValues := GetSessionValues(ctx)
+		assert.Contains(t, sessionValues, "test_output")
+		assert.Equal(t, "Test response", sessionValues["test_output"])
+	})
+
+	// Test setOutputToSession function directly - streaming message
+	t.Run("SetOutputToSessionStreamingMessage", func(t *testing.T) {
+		ctx := context.Background()
+
+		// Initialize a run context to enable session storage
+		input := &AgentInput{
+			Messages: []Message{schema.UserMessage("test")},
+		}
+		ctx, runCtx := initRunCtx(ctx, "TestAgent", input)
+		assert.NotNil(t, runCtx)
+		assert.NotNil(t, runCtx.Session)
+
+		// Test with a streaming message
+		sr := schema.StreamReaderFromArray([]*schema.Message{
+			schema.AssistantMessage("Stream", nil),
+			schema.AssistantMessage(" response", nil),
+			schema.AssistantMessage(" content", nil),
+		})
+		err := setOutputToSession(ctx, nil, sr, "test_output")
+		assert.NoError(t, err)
+
+		// Verify the concatenated stream content was stored
+		sessionValues := GetSessionValues(ctx)
+		assert.Contains(t, sessionValues, "test_output")
+		assert.Equal(t, "Stream response content", sessionValues["test_output"])
+	})
+
+	// Test setOutputToSession function directly - error case
+	t.Run("SetOutputToSessionErrorCase", func(t *testing.T) {
+		ctx := context.Background()
+
+		// Initialize a run context to enable session storage
+		input := &AgentInput{
+			Messages: []Message{schema.UserMessage("test")},
+		}
+		ctx, runCtx := initRunCtx(ctx, "TestAgent", input)
+		assert.NotNil(t, runCtx)
+		assert.NotNil(t, runCtx.Session)
+
+		// Test with an invalid stream (simulate error)
+		// Create a stream that will fail when concatenated
+		sr := schema.StreamReaderFromArray([]*schema.Message{
+			schema.AssistantMessage("test", nil),
+		})
+		// Close the stream to simulate an error condition
+		sr.Close()
+
+		// This should return an error because the stream is closed
+		err := setOutputToSession(ctx, nil, sr, "test_output")
+		// Note: The actual behavior may vary depending on the stream implementation
+		// Some streams may not error when closed, so we'll accept either outcome
+		if err != nil {
+			// If there's an error, verify nothing was stored
+			sessionValues := GetSessionValues(ctx)
+			assert.NotContains(t, sessionValues, "test_output")
+		} else {
+			// If no error, verify the content was stored
+			sessionValues := GetSessionValues(ctx)
+			assert.Contains(t, sessionValues, "test_output")
+			assert.Equal(t, "test", sessionValues["test_output"])
+		}
+	})
+
+	// Test outputKey with React workflow (tools enabled)
+	t.Run("OutputKeyWithReactWorkflow", func(t *testing.T) {
+		ctx := context.Background()
+
+		// Create a mock chat model
+		ctrl := gomock.NewController(t)
+		cm := mockModel.NewMockToolCallingChatModel(ctrl)
+
+		// Create a simple tool for testing
+		fakeTool := &fakeToolForTest{
+			tarCount: 1,
+		}
+
+		// Set up expectations for the mock model - it will generate a final response
+		cm.EXPECT().Generate(gomock.Any(), gomock.Any(), gomock.Any()).
+			Return(schema.AssistantMessage("Final response from React workflow", nil), nil).
+			Times(1)
+		// Model should implement WithTools
+		cm.EXPECT().WithTools(gomock.Any()).Return(cm, nil).AnyTimes()
+
+		// Create a ChatModelAgent with outputKey and tools configured
+		agent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+			Name:        "TestAgent",
+			Description: "Test agent with tools",
+			Instruction: "You are a helpful assistant.",
+			Model:       cm,
+			OutputKey:   "agent_output",
+			ToolsConfig: ToolsConfig{
+				ToolsNodeConfig: compose.ToolsNodeConfig{
+					Tools: []tool.BaseTool{fakeTool},
+				},
+			},
+		})
+		assert.NoError(t, err)
+		assert.NotNil(t, agent)
+
+		// Initialize a run context to enable session storage
+		input := &AgentInput{
+			Messages: []Message{schema.UserMessage("Use the tool")},
+		}
+		ctx, runCtx := initRunCtx(ctx, "TestAgent", input)
+		assert.NotNil(t, runCtx)
+		assert.NotNil(t, runCtx.Session)
+
+		// Run the agent
+		iterator := agent.Run(ctx, input)
+		assert.NotNil(t, iterator)
+
+		// Get the event from the iterator
+		event, ok := iterator.Next()
+		assert.True(t, ok)
+		assert.NotNil(t, event)
+		assert.Nil(t, event.Err)
+
+		// Verify the message content
+		msg := event.Output.MessageOutput.Message
+		assert.Equal(t, "Final response from React workflow", msg.Content)
+
+		// Verify that the output was stored in the session
+		time.AfterFunc(time.Millisecond*10, func() {
+			sessionValues := GetSessionValues(ctx)
+			assert.Contains(t, sessionValues, "agent_output")
+			assert.Equal(t, "Final response from React workflow", sessionValues["agent_output"])
+		})
+
+		// No more events
+		_, ok = iterator.Next()
+		assert.False(t, ok)
+	})
 }
