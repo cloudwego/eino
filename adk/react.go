@@ -84,6 +84,8 @@ type reactConfig struct {
 	agentName string
 
 	maxIterations int
+
+	messageModifier func(ctx context.Context, input []Message) []Message
 }
 
 func genToolInfos(ctx context.Context, config *compose.ToolsNodeConfig) ([]*schema.ToolInfo, error) {
@@ -162,7 +164,13 @@ func newReact(ctx context.Context, config *reactConfig) (reactGraph, error) {
 		st.RemainingIterations--
 
 		st.Messages = append(st.Messages, input...)
-		return st.Messages, nil
+		if config.messageModifier == nil {
+			return st.Messages, nil
+		}
+
+		modifiedInput := make([]Message, len(st.Messages))
+		copy(modifiedInput, st.Messages)
+		return config.messageModifier(ctx, modifiedInput), nil
 	}
 	_ = g.AddChatModelNode(chatModel_, chatModel,
 		compose.WithStatePreHandler(modelPreHandle), compose.WithNodeName(chatModel_))

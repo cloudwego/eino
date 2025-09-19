@@ -25,6 +25,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"go.uber.org/mock/gomock"
 
+	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/components/tool"
 	"github.com/cloudwego/eino/compose"
 	mockModel "github.com/cloudwego/eino/internal/mock/components/model"
@@ -83,13 +84,89 @@ func TestChatModelAgentRun(t *testing.T) {
 		assert.False(t, ok)
 	})
 
-	// Test with streaming output
+	// Test with PreInvokeMessageTransformer
+	t.Run("WithPreInvokeMessageTransformer", func(t *testing.T) {
+		ctx := context.Background()
+
+		// Create a mock chat model
+		ctrl := gomock.NewController(t)
+		cm := mockModel.NewMockToolCallingChatModel(ctrl)
+
+		// Track transformer calls
+		transformerCalled := false
+		var receivedMessages []Message
+
+		// Set up expectations for the mock model
+		cm.EXPECT().Generate(gomock.Any(), gomock.Any(), gomock.Any()).
+			DoAndReturn(func(ctx context.Context, input []Message, opts ...model.Option) (Message, error) {
+				// Store received messages for verification
+				receivedMessages = input
+				// Verify transformer was applied
+				if len(input) > 0 {
+					assert.Contains(t, input[0].Content, "[TRANSFORMED]")
+				}
+				return schema.AssistantMessage("Response after transformation", nil), nil
+			}).
+			Times(1)
+
+		// Create a ChatModelAgent with PreInvokeMessageTransformer
+		agent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+			Name:        "TestAgent",
+			Description: "Test agent for unit testing",
+			Instruction: "You are a helpful assistant.",
+			Model:       cm,
+			MessageModifier: func(ctx context.Context, input []Message) []Message {
+				transformerCalled = true
+				// Transform messages by adding a prefix
+				transformed := make([]Message, len(input))
+				copy(transformed, input)
+				for i := range transformed {
+					transformed[i].Content = "[TRANSFORMED] " + transformed[i].Content
+				}
+				return transformed
+			},
+		})
+		assert.NoError(t, err)
+		assert.NotNil(t, agent)
+
+		// Run the agent
+		input := &AgentInput{
+			Messages: []Message{
+				schema.UserMessage("Hello, test message"),
+			},
+		}
+		iterator := agent.Run(ctx, input)
+		assert.NotNil(t, iterator)
+
+		// Get the event from the iterator
+		event, ok := iterator.Next()
+		assert.True(t, ok)
+		assert.NotNil(t, event)
+		assert.Nil(t, event.Err)
+
+		// Verify transformer was called and messages were transformed
+		assert.True(t, transformerCalled, "PreInvokeMessageTransformer should have been called")
+		assert.NotEmpty(t, receivedMessages, "Model should have received transformed messages")
+		if len(receivedMessages) > 0 {
+			assert.Contains(t, receivedMessages[0].Content, "[TRANSFORMED] You are a helpful assistant")
+		}
+
+		// No more events
+		_, ok = iterator.Next()
+		assert.False(t, ok)
+	})
+
+	// Test with streaming output and PreInvokeMessageTransformer
 	t.Run("StreamOutput", func(t *testing.T) {
 		ctx := context.Background()
 
 		// Create a mock chat model
 		ctrl := gomock.NewController(t)
 		cm := mockModel.NewMockToolCallingChatModel(ctrl)
+
+		// Track transformer calls for streaming
+		streamTransformerCalled := false
+		var streamReceivedMessages []Message
 
 		// Create a stream reader for the mock response
 		sr := schema.StreamReaderFromArray([]*schema.Message{
@@ -100,15 +177,33 @@ func TestChatModelAgentRun(t *testing.T) {
 
 		// Set up expectations for the mock model
 		cm.EXPECT().Stream(gomock.Any(), gomock.Any(), gomock.Any()).
-			Return(sr, nil).
+			DoAndReturn(func(ctx context.Context, input []Message, opts ...model.Option) (MessageStream, error) {
+				// Store received messages for verification
+				streamReceivedMessages = input
+				// Verify transformer was applied in streaming
+				if len(input) > 0 {
+					assert.Contains(t, input[0].Content, "[STREAM_TRANSFORMED]")
+				}
+				return sr, nil
+			}).
 			Times(1)
 
-		// Create a ChatModelAgent
+		// Create a ChatModelAgent with PreInvokeMessageTransformer for streaming
 		agent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
 			Name:        "TestAgent",
 			Description: "Test agent for unit testing",
 			Instruction: "You are a helpful assistant.",
 			Model:       cm,
+			MessageModifier: func(ctx context.Context, input []Message) []Message {
+				streamTransformerCalled = true
+				// Transform messages for streaming test
+				transformed := make([]Message, len(input))
+				copy(transformed, input)
+				for i := range transformed {
+					transformed[i].Content = "[STREAM_TRANSFORMED] " + transformed[i].Content
+				}
+				return transformed
+			},
 		})
 		assert.NoError(t, err)
 		assert.NotNil(t, agent)
@@ -130,12 +225,19 @@ func TestChatModelAgentRun(t *testing.T) {
 		assert.NotNil(t, event.Output.MessageOutput)
 		assert.True(t, event.Output.MessageOutput.IsStreaming)
 
+		// Verify transformer was called during streaming
+		assert.True(t, streamTransformerCalled, "PreInvokeMessageTransformer should have been called during streaming")
+		assert.NotEmpty(t, streamReceivedMessages, "Model should have received transformed messages")
+		if len(streamReceivedMessages) > 0 {
+			assert.Contains(t, streamReceivedMessages[0].Content, "[STREAM_TRANSFORMED] You are a helpful assistant")
+		}
+
 		// No more events
 		_, ok = iterator.Next()
 		assert.False(t, ok)
 	})
 
-	// Test error handling
+	// Test error handling (verify nil transformer doesn't cause issues)
 	t.Run("ErrorHandling", func(t *testing.T) {
 		ctx := context.Background()
 
@@ -145,15 +247,23 @@ func TestChatModelAgentRun(t *testing.T) {
 
 		// Set up expectations for the mock model to return an error
 		cm.EXPECT().Generate(gomock.Any(), gomock.Any(), gomock.Any()).
-			Return(nil, errors.New("model error")).
+			DoAndReturn(func(ctx context.Context, input []Message, opts ...model.Option) (Message, error) {
+				// Verify no transformation occurred (nil transformer)
+				if len(input) > 0 {
+					assert.NotContains(t, input[0].Content, "[TRANSFORMED]")
+					assert.Equal(t, "You are a helpful assistant.", input[0].Content)
+				}
+				return nil, errors.New("model error")
+			}).
 			Times(1)
 
-		// Create a ChatModelAgent
+		// Create a ChatModelAgent without PreInvokeMessageTransformer (nil)
 		agent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
-			Name:        "TestAgent",
-			Description: "Test agent for unit testing",
-			Instruction: "You are a helpful assistant.",
-			Model:       cm,
+			Name:            "TestAgent",
+			Description:     "Test agent for unit testing",
+			Instruction:     "You are a helpful assistant.",
+			Model:           cm,
+			MessageModifier: nil, // Explicitly test nil case
 		})
 		assert.NoError(t, err)
 		assert.NotNil(t, agent)

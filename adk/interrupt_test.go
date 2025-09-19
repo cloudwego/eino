@@ -864,3 +864,4 @@ func TestWorkflowInterruptInvalidDataType(t *testing.T) {
 	_, ok = iter.Next()
 	assert.False(t, ok)
 }
+

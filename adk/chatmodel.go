@@ -144,6 +144,26 @@ type ChatModelAgentConfig struct {
 	// The agent will terminate with an error if this limit is exceeded.
 	// Optional. Defaults to 20.
 	MaxIterations int
+
+	// MessageModifier applies ephemeral transformations to messages immediately before each ChatModel invocation.
+	// This function is called right before every model.Generate() or model.Stream() call,
+	// allowing for request-specific message modifications that don't affect the persistent conversation history or session state.
+	//
+	// Unlike GenModelInput which is only called once at the start of the agent to prepare the initial message set,
+	// MessageModifier is invoked before EACH model call throughout the entire agent run.
+	// This makes it ideal for dynamic, per-iteration transformations based on the current conversation state.
+	//
+	// Use cases include:
+	// - Adding iteration-specific context or instructions
+	// - Filtering or modifying messages based on current conversation state
+	// - Injecting dynamic content that should only apply to the current model call
+	// - Applying transformations that depend on the accumulated conversation history
+	//
+	// The input []Message contains the full conversation history up to the current iteration,
+	// including system messages, user messages, assistant responses, and tool call results.
+	//
+	// Optional. If nil, messages are passed to the model without additional transformation.
+	MessageModifier func(ctx context.Context, input []Message) []Message
 }
 
 type ChatModelAgent struct {
@@ -158,6 +178,8 @@ type ChatModelAgent struct {
 
 	outputKey     string
 	maxIterations int
+
+	messageModifier func(ctx context.Context, input []Message) []Message
 
 	subAgents   []Agent
 	parentAgent Agent
@@ -191,15 +213,16 @@ func NewChatModelAgent(_ context.Context, config *ChatModelAgentConfig) (*ChatMo
 	}
 
 	return &ChatModelAgent{
-		name:          config.Name,
-		description:   config.Description,
-		instruction:   config.Instruction,
-		model:         config.Model,
-		toolsConfig:   config.ToolsConfig,
-		genModelInput: genInput,
-		exit:          config.Exit,
-		outputKey:     config.OutputKey,
-		maxIterations: config.MaxIterations,
+		name:            config.Name,
+		description:     config.Description,
+		instruction:     config.Instruction,
+		model:           config.Model,
+		toolsConfig:     config.ToolsConfig,
+		genModelInput:   genInput,
+		exit:            config.Exit,
+		outputKey:       config.OutputKey,
+		maxIterations:   config.MaxIterations,
+		messageModifier: config.MessageModifier,
 	}, nil
 }
 
@@ -543,6 +566,10 @@ func (a *ChatModelAgent) buildRunFunc(ctx context.Context) runFunc {
 					return
 				}
 
+				if a.messageModifier != nil {
+					msgs = a.messageModifier(ctx, msgs)
+				}
+
 				var msg Message
 				var msgStream MessageStream
 				if input.EnableStreaming {
@@ -590,6 +617,7 @@ func (a *ChatModelAgent) buildRunFunc(ctx context.Context) runFunc {
 			toolsReturnDirectly: returnDirectly,
 			agentName:           a.name,
 			maxIterations:       a.maxIterations,
+			messageModifier:     a.messageModifier,
 		}
 
 		g, err := newReact(ctx, conf)
@@ -608,8 +636,8 @@ func (a *ChatModelAgent) buildRunFunc(ctx context.Context) runFunc {
 				compose.WithMaxRunSteps(math.MaxInt))
 
 			runnable, err_ := g.Compile(ctx, compileOptions...)
-			if err != nil {
-				generator.Send(&AgentEvent{AgentName: a.name, Err: err})
+			if err_ != nil {
+				generator.Send(&AgentEvent{AgentName: a.name, Err: err_})
 				return
 			}
 

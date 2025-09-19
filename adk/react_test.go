@@ -53,10 +53,23 @@ func TestReact(t *testing.T) {
 		ctrl := gomock.NewController(t)
 		cm := mockModel.NewMockToolCallingChatModel(ctrl)
 
+		// Track transformer calls
+		transformerCalled := false
+		transformedMessages := make([][]Message, 0)
+
 		// Set up expectations for the mock model
 		times := 0
 		cm.EXPECT().Generate(gomock.Any(), gomock.Any(), gomock.Any()).
 			DoAndReturn(func(ctx context.Context, input []Message, opts ...model.Option) (Message, error) {
+				// Verify that transformer was applied
+				if transformerCalled {
+					// Check that input contains the transformed prefix
+					assert.True(t, len(input) > 0)
+					if len(input) > 0 {
+						assert.Contains(t, input[0].Content, "[TRANSFORMED]")
+					}
+				}
+
 				times++
 				if times <= 2 {
 					return schema.AssistantMessage("hello test",
@@ -76,13 +89,105 @@ func TestReact(t *testing.T) {
 			}).AnyTimes()
 		cm.EXPECT().WithTools(gomock.Any()).Return(cm, nil).AnyTimes()
 
-		// Create a reactConfig
+		// Create a reactConfig with PreInvokeMessageTransformer
 		config := &reactConfig{
 			model: cm,
 			toolsConfig: &compose.ToolsNodeConfig{
 				Tools: []tool.BaseTool{fakeTool},
 			},
 			toolsReturnDirectly: map[string]bool{},
+			messageModifier: func(ctx context.Context, input []Message) []Message {
+				transformerCalled = true
+				// Store the input for verification
+				copiedInput := make([]Message, len(input))
+				copy(copiedInput, input)
+				transformedMessages = append(transformedMessages, copiedInput)
+
+				// Transform messages by adding a prefix
+				transformed := make([]Message, len(input))
+				copy(transformed, input)
+				for i := range transformed {
+					transformed[i].Content = "[TRANSFORMED] " + transformed[i].Content
+				}
+				return transformed
+			},
+		}
+
+		graph, err := newReact(ctx, config)
+		assert.NoError(t, err)
+		assert.NotNil(t, graph)
+
+		compiled, err := graph.Compile(ctx)
+		assert.NoError(t, err)
+		assert.NotNil(t, compiled)
+
+		// Test with a user message
+		result, err := compiled.Invoke(ctx, []Message{
+			{
+				Role:    schema.User,
+				Content: "Use the test tool to say hello",
+			},
+		})
+		assert.NoError(t, err)
+		assert.NotNil(t, result)
+
+		// Verify transformer was called
+		assert.True(t, transformerCalled, "PreInvokeMessageTransformer should have been called")
+		assert.NotEmpty(t, transformedMessages, "Transformer should have processed messages")
+	})
+
+	// Test with nil PreInvokeMessageTransformer
+	t.Run("InvokeWithoutTransformer", func(t *testing.T) {
+		ctx := context.Background()
+
+		// Create a fake tool for testing
+		fakeTool := &fakeToolForTest{
+			tarCount: 3,
+		}
+
+		info, err := fakeTool.Info(ctx)
+		assert.NoError(t, err)
+
+		// Create a mock chat model
+		ctrl := gomock.NewController(t)
+		cm := mockModel.NewMockToolCallingChatModel(ctrl)
+
+		// Set up expectations for the mock model
+		times := 0
+		cm.EXPECT().Generate(gomock.Any(), gomock.Any(), gomock.Any()).
+			DoAndReturn(func(ctx context.Context, input []Message, opts ...model.Option) (Message, error) {
+				// Verify that no transformation occurred
+				if len(input) > 0 {
+					assert.NotContains(t, input[0].Content, "[TRANSFORMED]")
+				}
+
+				times++
+				if times <= 2 {
+					return schema.AssistantMessage("hello test",
+							[]schema.ToolCall{
+								{
+									ID: randStrForTest(),
+									Function: schema.FunctionCall{
+										Name:      info.Name,
+										Arguments: fmt.Sprintf(`{"name": "%s", "hh": "123"}`, randStrForTest()),
+									},
+								},
+							}),
+						nil
+				}
+
+				return schema.AssistantMessage("bye", nil), nil
+			}).AnyTimes()
+		cm.EXPECT().WithTools(gomock.Any()).Return(cm, nil).AnyTimes()
+
+		// Create a reactConfig without PreInvokeMessageTransformer (nil)
+		config := &reactConfig{
+			model: cm,
+			toolsConfig: &compose.ToolsNodeConfig{
+				Tools: []tool.BaseTool{fakeTool},
+			},
+			toolsReturnDirectly: map[string]bool{},
+			messageModifier:     nil, // Explicitly set to nil
 		}
 
 		graph, err := newReact(ctx, config)
@@ -190,11 +295,19 @@ func TestReact(t *testing.T) {
 		ctrl := gomock.NewController(t)
 		cm := mockModel.NewMockToolCallingChatModel(ctrl)
 
+		// Track transformer calls for streaming
+		streamTransformerCalled := false
+
 		// Set up expectations for the mock model
 		times := 0
 		cm.EXPECT().Stream(gomock.Any(), gomock.Any(), gomock.Any()).
 			DoAndReturn(func(ctx context.Context, input []Message, opts ...model.Option) (
 				MessageStream, error) {
+				// Verify that transformer was applied in streaming
+				if streamTransformerCalled && len(input) > 0 {
+					assert.Contains(t, input[0].Content, "[STREAM_TRANSFORMED]")
+				}
+
 				sr, sw := schema.Pipe[Message](1)
 				defer sw.Close()
 
@@ -235,13 +348,23 @@ func TestReact(t *testing.T) {
 			}).AnyTimes()
 		cm.EXPECT().WithTools(gomock.Any()).Return(cm, nil).AnyTimes()
 
-		// Create a reactConfig
+		// Create a reactConfig with PreInvokeMessageTransformer for streaming
 		config := &reactConfig{
 			model: cm,
 			toolsConfig: &compose.ToolsNodeConfig{
 				Tools: []tool.BaseTool{fakeTool, fakeStreamTool},
 			},
 			toolsReturnDirectly: map[string]bool{},
+			messageModifier: func(ctx context.Context, input []Message) []Message {
+				streamTransformerCalled = true
+				// Transform messages for streaming test
+				transformed := make([]Message, len(input))
+				copy(transformed, input)
+				for i := range transformed {
+					transformed[i].Content = "[STREAM_TRANSFORMED] " + transformed[i].Content
+				}
+				return transformed
+			},
 		}
 
 		graph, err := newReact(ctx, config)
@@ -278,6 +401,8 @@ func TestReact(t *testing.T) {
 		}
 
 		assert.NotEmpty(t, msgs)
+		// Verify transformer was called during streaming
+		assert.True(t, streamTransformerCalled, "PreInvokeMessageTransformer should have been called during streaming")
 	})
 
 	// Test streaming with toolsReturnDirectly
