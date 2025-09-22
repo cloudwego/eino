@@ -191,32 +191,28 @@ func (a *workflowAgent) runSequential(ctx context.Context, input *AgentInput,
 			nCtx, _ = initRunCtx(nCtx, subAgent.Name(nCtx), input)
 		}
 
+		var lastActionEvent *AgentEvent
 		for {
 			event, ok := subIterator.Next()
 			if !ok {
 				break
 			}
 
-			if event.Action != nil && event.Action.Interrupted != nil {
-				// shallow copy
-				newEvent := &AgentEvent{
-					AgentName: event.AgentName,
-					RunPath:   event.RunPath,
-					Output:    event.Output,
-					Action: &AgentAction{
-						Exit:             event.Action.Exit,
-						Interrupted:      &InterruptInfo{Data: event.Action.Interrupted.Data},
-						TransferToAgent:  event.Action.TransferToAgent,
-						CustomizedAction: event.Action.CustomizedAction,
-					},
-					Err: event.Err,
-				}
-				newEvent.Action.Interrupted.Data = &WorkflowInterruptInfo{
-					OrigInput:                input,
-					SequentialInterruptIndex: i,
-					SequentialInterruptInfo:  event.Action.Interrupted,
-					LoopIterations:           iterations,
-				}
+			if lastActionEvent != nil {
+				generator.Send(lastActionEvent)
+				lastActionEvent = nil
+			}
+
+			if event.Action != nil {
+				lastActionEvent = event
+				continue
+			}
+			generator.Send(event)
+		}
+
+		if lastActionEvent != nil {
+			if lastActionEvent.Action.Interrupted != nil {
+				newEvent := wrapWorkflowInterrupt(lastActionEvent, input, i, iterations)
 
 				// Reset run ctx,
 				// because the control should be transferred to the workflow agent, not the interrupted agent
@@ -227,22 +223,37 @@ func (a *workflowAgent) runSequential(ctx context.Context, input *AgentInput,
 				return true, true
 			}
 
-			// Forward the event
-			generator.Send(event)
-
-			if event.Err != nil {
+			if lastActionEvent.Action.Exit {
+				// Forward the event
+				generator.Send(lastActionEvent)
 				return true, false
-			}
-
-			if event.Action != nil {
-				if event.Action.Exit {
-					return true, false
-				}
 			}
 		}
 	}
 
 	return false, false
+}
+
+func wrapWorkflowInterrupt(e *AgentEvent, origInput *AgentInput, seqIdx int, iterations int) *AgentEvent {
+	newEvent := &AgentEvent{
+		AgentName: e.AgentName,
+		RunPath:   e.RunPath,
+		Output:    e.Output,
+		Action: &AgentAction{
+			Exit:             e.Action.Exit,
+			Interrupted:      &InterruptInfo{Data: e.Action.Interrupted.Data},
+			TransferToAgent:  e.Action.TransferToAgent,
+			CustomizedAction: e.Action.CustomizedAction,
+		},
+		Err: e.Err,
+	}
+	newEvent.Action.Interrupted.Data = &WorkflowInterruptInfo{
+		OrigInput:                origInput,
+		SequentialInterruptIndex: seqIdx,
+		SequentialInterruptInfo:  e.Action.Interrupted,
+		LoopIterations:           iterations,
+	}
+	return newEvent
 }
 
 func (a *workflowAgent) runLoop(ctx context.Context, input *AgentInput,
