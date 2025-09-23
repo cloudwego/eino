@@ -464,6 +464,159 @@ func TestMultipleInterruptsAndResumes(t *testing.T) {
 	assert.Equal(t, "process p2 done", finalOutput["p2"])
 }
 
+// mockReentryTool is a helper for the reentry test
+type mockReentryTool struct {
+	t *testing.T
+}
+
+func (t *mockReentryTool) Info(_ context.Context) (*schema.ToolInfo, error) {
+	return &schema.ToolInfo{
+		Name:        "reentry_tool",
+		Desc:        "A tool that can be re-entered in a resumed graph.",
+		ParamsOneOf: schema.NewParamsOneOfByParams(map[string]*schema.ParameterInfo{"input": {Type: schema.String}}),
+	}, nil
+}
+
+func (t *mockReentryTool) InvokableRun(ctx context.Context, _ string, _ ...tool.Option) (string, error) {
+	_, hasState, wasInterrupted := GetInterruptState[any](ctx)
+	data, hasData, isResume := GetResumeContext[*myResumeData](ctx)
+
+	callID := GetToolCallID(ctx)
+
+	// Special handling for the re-entrant call to make assertions explicit.
+	if callID == "call_3" {
+		if !isResume {
+			// This is the first run of the re-entrant call. Its context must be clean.
+			// This is the core assertion for this test.
+			assert.False(t.t, wasInterrupted, "re-entrant call 'call_3' should not have been interrupted on its first run")
+			assert.False(t.t, hasState, "re-entrant call 'call_3' should not have state on its first run")
+			// Now, interrupt it as part of the test flow.
+			return "", NewStatefulInterruptAndRerunErr(nil, "some state for "+callID)
+		}
+		// This is the resumed run of the re-entrant call.
+		assert.True(t.t, wasInterrupted, "resumed call 'call_3' must have been interrupted")
+		assert.True(t.t, hasData, "resumed call 'call_3' should have data")
+		return "Resumed " + data.Message, nil
+	}
+
+	// Standard logic for the initial calls (call_1, call_2)
+	if !wasInterrupted {
+		// First run for call_1 and call_2, should interrupt.
+		return "", NewStatefulInterruptAndRerunErr(nil, "some state for "+callID)
+	}
+
+	// From here, wasInterrupted is true for call_1 and call_2.
+	if isResume {
+		// The user is explicitly resuming this call.
+		assert.True(t.t, hasData, "call %s should have resume data", callID)
+		return "Resumed " + data.Message, nil
+	}
+
+	// The tool was interrupted before, but is not being resumed now. Re-interrupt.
+	return "", NewStatefulInterruptAndRerunErr(nil, "some state for "+callID)
+}
+
+func TestReentryForResumedTools(t *testing.T) {
+	// create a 'ReAct' style graph with a ChatModel node and a ToolsNode.
+	// within the ToolsNode there is an interruptible tool that will emit interrupt on first run.
+	// During the first invocation of the graph, there should be two tool calls (of the same tool) that interrupt.
+	// The user chooses to resume one of the interrupted tool call in second invocation,
+	// and this time, the resumed tool call should be successful, while the other should interrupt immediately again.
+	// The user then chooses to resume the other interrupted tool call in third invocation,
+	// and this time, the ChatModel decides to call the tool again,
+	// and this time the tool's runCtx should think it was not interrupted nor resumed.
+	ctrl := gomock.NewController(t)
+
+	// 1. Define the interrupting tool
+	reentryTool := &mockReentryTool{t: t}
+
+	// 2. Define the graph
+	g := NewGraph[[]*schema.Message, *schema.Message]()
+
+	// Mock Chat Model that drives the ReAct loop
+	mockChatModel := mockModel.NewMockToolCallingChatModel(ctrl)
+	toolsNode, err := NewToolNode(context.Background(), &ToolsNodeConfig{Tools: []tool.BaseTool{reentryTool}})
+	assert.NoError(t, err)
+
+	// Expectation for the 1st invocation: model returns two tool calls
+	mockChatModel.EXPECT().Generate(gomock.Any(), gomock.Any(), gomock.Any()).Return(&schema.Message{
+		Role: schema.Assistant,
+		ToolCalls: []schema.ToolCall{
+			{ID: "call_1", Function: schema.FunctionCall{Name: "reentry_tool", Arguments: `{"input": "a"}`}},
+			{ID: "call_2", Function: schema.FunctionCall{Name: "reentry_tool", Arguments: `{"input": "b"}`}},
+		},
+	}, nil).Times(1)
+
+	// Expectation for the 2nd invocation (after resuming call_1): model does nothing, graph continues
+	// Expectation for the 3rd invocation (after resuming call_2): model calls the tool again
+	mockChatModel.EXPECT().Generate(gomock.Any(), gomock.Any(), gomock.Any()).Return(&schema.Message{
+		Role: schema.Assistant,
+		ToolCalls: []schema.ToolCall{
+			{ID: "call_3", Function: schema.FunctionCall{Name: "reentry_tool", Arguments: `{"input": "c"}`}},
+		},
+	}, nil).Times(1)
+
+	// Expectation for the final invocation: model returns final answer
+	mockChatModel.EXPECT().Generate(gomock.Any(), gomock.Any(), gomock.Any()).Return(&schema.Message{
+		Role:    schema.Assistant,
+		Content: "all done",
+	}, nil).Times(1)
+
+	_ = g.AddChatModelNode("model", mockChatModel)
+	_ = g.AddToolsNode("tools", toolsNode)
+	_ = g.AddEdge(START, "model")
+
+	// Add the crucial branch to decide whether to call tools or end.
+	modelBranch := func(ctx context.Context, msg *schema.Message) (string, error) {
+		if len(msg.ToolCalls) > 0 {
+			return "tools", nil
+		}
+		return END, nil
+	}
+	err = g.AddBranch("model", NewGraphBranch(modelBranch, map[string]bool{"tools": true, END: true}))
+	assert.NoError(t, err)
+
+	_ = g.AddEdge("tools", "model") // Loop back for ReAct style
+
+	// 3. Compile and run
+	graph, err := g.Compile(context.Background(), WithCheckPointStore(newInMemoryStore()))
+	assert.NoError(t, err)
+	checkPointID := "reentry-test"
+
+	// --- 1. First invocation: call_1 and call_2 should interrupt ---
+	_, err = graph.Invoke(context.Background(), []*schema.Message{schema.UserMessage("start")}, WithCheckPointID(checkPointID))
+	assert.Error(t, err)
+	interruptInfo1, _ := ExtractInterruptInfo(err)
+	interrupts1 := interruptInfo1.GetInterruptContexts()
+	assert.Len(t, interrupts1, 2)
+	assert.Contains(t, []string{interrupts1[0].ID, interrupts1[1].ID}, "node:tools;tool:call_1")
+	assert.Contains(t, []string{interrupts1[0].ID, interrupts1[1].ID}, "node:tools;tool:call_2")
+
+	// --- 2. Second invocation: resume call_1, expect call_2 to interrupt again ---
+	resumeCtx2 := ResumeWithData(context.Background(), "node:tools;tool:call_1", &myResumeData{Message: "resume call 1"})
+	_, err = graph.Invoke(resumeCtx2, []*schema.Message{schema.UserMessage("start")}, WithCheckPointID(checkPointID))
+	assert.Error(t, err)
+	interruptInfo2, _ := ExtractInterruptInfo(err)
+	interrupts2 := interruptInfo2.GetInterruptContexts()
+	assert.Len(t, interrupts2, 1)
+	assert.Equal(t, "node:tools;tool:call_2", interrupts2[0].ID)
+
+	// --- 3. Third invocation: resume call_2, model makes a new call (call_3) which should interrupt ---
+	resumeCtx3 := ResumeWithData(context.Background(), "node:tools;tool:call_2", &myResumeData{Message: "resume call 2"})
+	_, err = graph.Invoke(resumeCtx3, []*schema.Message{schema.UserMessage("start")}, WithCheckPointID(checkPointID))
+	assert.Error(t, err)
+	interruptInfo3, _ := ExtractInterruptInfo(err)
+	interrupts3 := interruptInfo3.GetInterruptContexts()
+	assert.Len(t, interrupts3, 1)
+	assert.Equal(t, "node:tools;tool:call_3", interrupts3[0].ID) // Note: this is the new call_3
+
+	// --- 4. Final invocation: resume call_3, expect final answer ---
+	resumeCtx4 := ResumeWithData(context.Background(), "node:tools;tool:call_3", &myResumeData{Message: "resume call 3"})
+	output, err := graph.Invoke(resumeCtx4, []*schema.Message{schema.UserMessage("start")}, WithCheckPointID(checkPointID))
+	assert.NoError(t, err)
+	assert.Equal(t, "all done", output.Content)
+}
+
 // mockInterruptingTool is a helper for the nested tool interrupt test
 type mockInterruptingTool struct {
 	tt *testing.T
