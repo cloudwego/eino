@@ -22,8 +22,6 @@ import (
 	"reflect"
 
 	"github.com/bytedance/sonic"
-
-	"github.com/cloudwego/eino/schema"
 )
 
 var m = map[string]reflect.Type{}
@@ -48,23 +46,6 @@ func init() {
 	_ = GenericRegister[bool]("_eino_bool")
 	_ = GenericRegister[string]("_eino_string")
 	_ = GenericRegister[any]("_eino_any")
-
-	_ = GenericRegister[schema.Message]("_eino_message")
-	_ = GenericRegister[schema.Document]("_eino_document")
-	_ = GenericRegister[schema.RoleType]("_eino_role_type")
-	_ = GenericRegister[schema.ToolCall]("_eino_tool_call")
-	_ = GenericRegister[schema.FunctionCall]("_eino_function_call")
-	_ = GenericRegister[schema.ResponseMeta]("_eino_response_meta")
-	_ = GenericRegister[schema.TokenUsage]("_eino_token_usage")
-	_ = GenericRegister[schema.LogProbs]("_eino_log_probs")
-	_ = GenericRegister[schema.ChatMessagePart]("_eino_chat_message_part")
-	_ = GenericRegister[schema.ChatMessagePartType]("_eino_chat_message_type")
-	_ = GenericRegister[schema.ChatMessageImageURL]("_eino_chat_message_image_url")
-	_ = GenericRegister[schema.ChatMessageAudioURL]("_eino_chat_message_audio_url")
-	_ = GenericRegister[schema.ChatMessageVideoURL]("_eino_chat_message_video_url")
-	_ = GenericRegister[schema.ChatMessageFileURL]("_eino_chat_message_file_url")
-	_ = GenericRegister[schema.ImageURLDetail]("_eino_image_url_detail")
-	_ = GenericRegister[schema.PromptTokenDetails]("_eino_prompt_token_details")
 }
 
 func GenericRegister[T any](key string) error {
