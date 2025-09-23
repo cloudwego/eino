@@ -73,35 +73,25 @@ func TestInterruptStateAndResumeForRootGraph(t *testing.T) {
 	g := NewGraph[string, string]()
 
 	lambda := InvokableLambda(func(ctx context.Context, input string) (string, error) {
-		rCtx, ok := GetRunCtx(ctx)
-		assert.True(t, ok)
-
-		if rCtx.InterruptData == nil || !rCtx.InterruptData.Interrupted {
+		state, hasState, wasInterrupted := GetInterruptState[*myInterruptState](ctx)
+		if !wasInterrupted {
 			// First run: interrupt with state
-			assert.Nil(t, rCtx.ResumeData)
-
-			// The "info" is for the end-user, the "state" is for resumption.
 			return "", NewInterruptAndRerunErrWithState(
 				map[string]any{"reason": "scheduled maintenance"},
 				&myInterruptState{OriginalInput: input},
 			)
 		}
 
-		// Second (resumed) run
-		assert.NotNil(t, rCtx.InterruptData)
-		assert.True(t, rCtx.InterruptData.Interrupted)
+		// This is a resumed run.
+		assert.True(t, hasState)
+		assert.Equal(t, "initial input", state.OriginalInput)
 
-		// Verify the state from the first run
-		persistedState, ok := rCtx.InterruptData.State.(*myInterruptState)
-		assert.True(t, ok)
-		assert.Equal(t, "initial input", persistedState.OriginalInput)
+		data, hasData, isResume := GetResumeContext[*myResumeData](ctx)
+		assert.True(t, isResume)
+		assert.True(t, hasData)
+		assert.Equal(t, "let's continue", data.Message)
 
-		// Verify the resume data passed in the Resume() call
-		resumeData, ok := rCtx.ResumeData.(*myResumeData)
-		assert.True(t, ok)
-		assert.Equal(t, "let's continue", resumeData.Message)
-
-		return "Resumed successfully with input: " + persistedState.OriginalInput, nil
+		return "Resumed successfully with input: " + state.OriginalInput, nil
 	})
 
 	_ = g.AddLambdaNode("lambda", lambda)
@@ -127,7 +117,7 @@ func TestInterruptStateAndResumeForRootGraph(t *testing.T) {
 	assert.Equal(t, map[string]any{"reason": "scheduled maintenance"}, interruptContexts[0].Info)
 
 	// Prepare resume data
-	ctx := SetResumeInfo(context.Background(), interruptContexts[0].ID,
+	ctx := ResumeWithData(context.Background(), interruptContexts[0].ID,
 		&myResumeData{Message: "let's continue"})
 
 	// Resume execution
@@ -148,12 +138,9 @@ func TestInterruptStateAndResumeForSubGraph(t *testing.T) {
 	subGraph := NewGraph[string, string]()
 
 	lambda := InvokableLambda(func(ctx context.Context, input string) (string, error) {
-		rCtx, ok := GetRunCtx(ctx)
-		assert.True(t, ok)
-
-		if rCtx.InterruptData == nil || !rCtx.InterruptData.Interrupted {
+		state, hasState, wasInterrupted := GetInterruptState[*myInterruptState](ctx)
+		if !wasInterrupted {
 			// First run: interrupt with state
-			assert.Nil(t, rCtx.ResumeData)
 			return "", NewInterruptAndRerunErrWithState(
 				map[string]any{"reason": "sub-graph maintenance"},
 				&myInterruptState{OriginalInput: input},
@@ -161,18 +148,13 @@ func TestInterruptStateAndResumeForSubGraph(t *testing.T) {
 		}
 
 		// Second (resumed) run
-		assert.NotNil(t, rCtx.InterruptData)
-		assert.True(t, rCtx.InterruptData.Interrupted)
+		assert.True(t, hasState)
+		assert.Equal(t, "main input", state.OriginalInput)
 
-		// Verify the state from the first run
-		persistedState, ok := rCtx.InterruptData.State.(*myInterruptState)
-		assert.True(t, ok)
-		assert.Equal(t, "main input", persistedState.OriginalInput)
-
-		// Verify the resume data passed in the Resume() call
-		resumeData, ok := rCtx.ResumeData.(*myResumeData)
-		assert.True(t, ok)
-		assert.Equal(t, "let's continue sub-graph", resumeData.Message)
+		data, hasData, isResume := GetResumeContext[*myResumeData](ctx)
+		assert.True(t, isResume)
+		assert.True(t, hasData)
+		assert.Equal(t, "let's continue sub-graph", data.Message)
 
 		return "Sub-graph resumed successfully", nil
 	})
@@ -207,7 +189,7 @@ func TestInterruptStateAndResumeForSubGraph(t *testing.T) {
 	assert.Equal(t, map[string]any{"reason": "sub-graph maintenance"}, interruptContexts[0].Info)
 
 	// Prepare resume data
-	ctx := SetResumeInfo(context.Background(), interruptContexts[0].ID,
+	ctx := ResumeWithData(context.Background(), interruptContexts[0].ID,
 		&myResumeData{Message: "let's continue sub-graph"})
 
 	// Resume execution
@@ -233,7 +215,7 @@ func TestInterruptStateAndResumeForToolInNestedSubGraph(t *testing.T) {
 	ctrl := gomock.NewController(t)
 
 	// 1. Define the interrupting tool
-	mockTool := &mockInterruptingTool{}
+	mockTool := &mockInterruptingTool{tt: t}
 
 	// 2. Define the sub-sub-graph (B)
 	subSubGraphB := NewGraph[[]*schema.Message, []*schema.Message]()
@@ -292,7 +274,7 @@ func TestInterruptStateAndResumeForToolInNestedSubGraph(t *testing.T) {
 	assert.Equal(t, map[string]any{"reason": "tool maintenance"}, interruptContexts[0].Info)
 
 	// 7. Resume execution
-	ctx := SetResumeInfo(context.Background(), expectedPath, &myResumeData{Message: "let's continue tool"})
+	ctx := ResumeWithData(context.Background(), expectedPath, &myResumeData{Message: "let's continue tool"})
 	output, err := compiledRootGraph.Invoke(ctx, initialInput, WithCheckPointID(checkPointID))
 
 	// 8. Verify final result
@@ -303,7 +285,9 @@ func TestInterruptStateAndResumeForToolInNestedSubGraph(t *testing.T) {
 }
 
 // mockInterruptingTool is a helper for the nested tool interrupt test
-type mockInterruptingTool struct{}
+type mockInterruptingTool struct {
+	tt *testing.T
+}
 
 func (t *mockInterruptingTool) Info(_ context.Context) (*schema.ToolInfo, error) {
 	return &schema.ToolInfo{
@@ -315,16 +299,12 @@ func (t *mockInterruptingTool) Info(_ context.Context) (*schema.ToolInfo, error)
 	}, nil
 }
 
-func (t *mockInterruptingTool) InvokableRun(ctx context.Context, argumentsInJSON string, opts ...tool.Option) (string, error) {
-	rCtx, ok := GetRunCtx(ctx)
-	if !ok {
-		return "", assert.AnError
-	}
-
+func (t *mockInterruptingTool) InvokableRun(ctx context.Context, argumentsInJSON string, _ ...tool.Option) (string, error) {
 	var args map[string]string
 	_ = json.Unmarshal([]byte(argumentsInJSON), &args)
 
-	if rCtx.InterruptData == nil || !rCtx.InterruptData.Interrupted {
+	state, hasState, wasInterrupted := GetInterruptState[*myInterruptState](ctx)
+	if !wasInterrupted {
 		// First run: interrupt
 		return "", NewInterruptAndRerunErrWithState(
 			map[string]any{"reason": "tool maintenance"},
@@ -333,21 +313,13 @@ func (t *mockInterruptingTool) InvokableRun(ctx context.Context, argumentsInJSON
 	}
 
 	// Second (resumed) run
-	persistedState, ok := rCtx.InterruptData.State.(*myInterruptState)
-	if !ok {
-		return "", assert.AnError
-	}
-	if persistedState.OriginalInput != "test" {
-		return "", assert.AnError
-	}
+	assert.True(t.tt, hasState)
+	assert.Equal(t.tt, "test", state.OriginalInput)
 
-	resumeData, ok := rCtx.ResumeData.(*myResumeData)
-	if !ok {
-		return "", assert.AnError
-	}
-	if resumeData.Message != "let's continue tool" {
-		return "", assert.AnError
-	}
+	data, hasData, isResume := GetResumeContext[*myResumeData](ctx)
+	assert.True(t.tt, isResume)
+	assert.True(t.tt, hasData)
+	assert.Equal(t.tt, "let's continue tool", data.Message)
 
 	return "Tool resumed successfully", nil
 }

@@ -477,12 +477,10 @@ func (r *runner) handleInterrupt(
 	checkPointID *string,
 ) error {
 	cp := &checkpoint{
-		Channels:                channels,
-		Inputs:                  make(map[string]any),
-		SkipPreHandler:          map[string]bool{},
-		NodeKey2InterruptState:  make(map[string]any),
-		NodeKey2InterruptUsed:   make(map[string]bool),
-		OtherPath2InterruptUsed: make(map[Path]bool),
+		Channels:               channels,
+		Inputs:                 make(map[string]any),
+		SkipPreHandler:         map[string]bool{},
+		NodeKey2InterruptState: make(map[string]any),
 	}
 	if r.runCtx != nil {
 		// current graph has enable state
@@ -564,14 +562,12 @@ func (r *runner) handleInterruptWithSubGraphAndRerunNodes(
 	}
 
 	cp := &checkpoint{
-		Channels:                cm.channels,
-		Inputs:                  make(map[string]any),
-		SkipPreHandler:          skipPreHandler,
-		ToolsNodeExecutedTools:  tempInfo.interruptExecutedTools,
-		SubGraphs:               make(map[string]*checkpoint),
-		NodeKey2InterruptState:  make(map[string]any),
-		NodeKey2InterruptUsed:   make(map[string]bool),
-		OtherPath2InterruptUsed: make(map[Path]bool),
+		Channels:               cm.channels,
+		Inputs:                 make(map[string]any),
+		SkipPreHandler:         skipPreHandler,
+		ToolsNodeExecutedTools: tempInfo.interruptExecutedTools,
+		SubGraphs:              make(map[string]*checkpoint),
+		NodeKey2InterruptState: make(map[string]any),
 	}
 	if r.runCtx != nil {
 		// current graph has enable state
