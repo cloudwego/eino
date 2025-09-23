@@ -437,14 +437,9 @@ func (tn *ToolsNode) Invoke(ctx context.Context, input *schema.Message,
 		}
 	}
 
-	if input == nil {
-		rCtx, exist := GetRunCtx(ctx)
-		if exist {
-			tnState, ok := rCtx.InterruptData.State.(*toolsInterruptAndRerunState)
-			if ok {
-				input = tnState.Input
-			}
-		}
+	tnState, hasState, interrupted := GetInterruptState[*toolsInterruptAndRerunState](ctx)
+	if interrupted && hasState {
+		input = tnState.Input
 	}
 
 	tasks, err := tn.genToolCallTasks(ctx, tuple, input, opt.executedTools, false)
@@ -519,14 +514,9 @@ func (tn *ToolsNode) Stream(ctx context.Context, input *schema.Message,
 		}
 	}
 
-	if input == nil {
-		rCtx, exist := GetRunCtx(ctx)
-		if exist {
-			tnState, ok := rCtx.InterruptData.State.(*toolsInterruptAndRerunState)
-			if ok {
-				input = tnState.Input
-			}
-		}
+	tnState, hasState, interrupted := GetInterruptState[*toolsInterruptAndRerunState](ctx)
+	if interrupted && hasState {
+		input = tnState.Input
 	}
 
 	tasks, err := tn.genToolCallTasks(ctx, tuple, input, opt.executedTools, true)
