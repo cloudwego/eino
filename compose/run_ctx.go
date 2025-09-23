@@ -159,7 +159,17 @@ func getNodePath(ctx context.Context) (*NodePath, bool) {
 	return NewNodePath(nodePaths...), true
 }
 
-func setRunCtx(ctx context.Context, pathType PathSegmentType, pathID string) context.Context {
+// SetRunCtx creates a new execution context for a sub-component within a custom composite node.
+// This is an advanced feature for developers building custom nodes that contain their own interruptible
+// sub-processes (e.g., a node that runs multiple sub-tasks in parallel).
+//
+// It extends the current context's path with a new segment and populates the new context with the
+// appropriate interrupt state and resume data for that specific sub-path.
+//
+//   - ctx: The parent context, typically the one passed into the composite node's Invoke/Stream method.
+//   - pathType: The type of the new path segment (e.g., "process", "tool").
+//   - pathID: The unique ID for the new path segment.
+func SetRunCtx(ctx context.Context, pathType PathSegmentType, pathID string) context.Context {
 	// get current path
 	currentPaths, existed := GetCurrentPaths(ctx)
 	if !existed {
