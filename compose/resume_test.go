@@ -258,7 +258,7 @@ func TestInterruptStateAndResumeForToolInNestedSubGraph(t *testing.T) {
 	assert.Equal(t, "Tool resumed successfully", output[0].Content)
 }
 
-const PathSegmentTypeProcess PathSegmentType = "process"
+const PathSegmentTypeProcess PathStepType = "process"
 
 // processState is the state for a single sub-process in the batch test.
 type processState struct {
@@ -271,7 +271,7 @@ type batchState struct {
 	Results       map[string]string
 }
 
-func (b *batchState) GetSubStateForPath(p PathSegment) (any, bool) {
+func (b *batchState) GetSubStateForPath(p PathStep) (any, bool) {
 	if p.Type != PathSegmentTypeProcess {
 		return nil, false
 	}
@@ -279,7 +279,7 @@ func (b *batchState) GetSubStateForPath(p PathSegment) (any, bool) {
 	return s, ok
 }
 
-func (b *batchState) IsPathInterrupted(p PathSegment) bool {
+func (b *batchState) IsPathInterrupted(p PathStep) bool {
 	if p.Type != PathSegmentTypeProcess {
 		return false
 	}
@@ -296,7 +296,7 @@ func (b *batchInfo) GetSubInterruptContexts() []*InterruptCtx {
 	var ctxs []*InterruptCtx
 	for id, info := range b.ProcessInfos {
 		ctxs = append(ctxs, &InterruptCtx{
-			Path: []PathSegment{{Type: PathSegmentTypeProcess, ID: id}},
+			Path: []PathStep{{Type: PathSegmentTypeProcess, ID: id}},
 			Info: info,
 		})
 	}
@@ -317,7 +317,7 @@ func TestMultipleInterruptsAndResumes(t *testing.T) {
 	// define a new lambda node that act as a 'batch' node
 	// it kick starts 3 parallel processes, each will interrupt on first run, while preserving their own state.
 	// each of the process should have their own user-facing interrupt info.
-	// define a new PathSegmentType for these sub processes.
+	// define a new PathStepType for these sub processes.
 	// the lambda should use NewStatefulInterruptAndRerunErr to interrupt and preserve the state,
 	// which is a specific struct type that implements the CompositeInterruptState interface.
 	// there should also be a specific struct that that implements the CompositeInterruptInfo interface,
@@ -389,7 +389,7 @@ func TestMultipleInterruptsAndResumes(t *testing.T) {
 			}
 
 			// Create a sub-context for each process
-			subCtx := SetRunCtx(ctx, PathSegmentTypeProcess, id)
+			subCtx := AppendPathStep(ctx, PathSegmentTypeProcess, id)
 			res, err := runProcess(subCtx, id)
 
 			if err != nil {
