@@ -128,15 +128,13 @@ type checkpoint struct {
 	SkipPreHandler map[string]bool
 	RerunNodes     []string
 
-	ToolsNodeExecutedTools map[string] /*tool node key*/ map[string] /*tool call id*/ string
-
 	SubGraphs map[string]*checkpoint
 
-	NodeKey2InterruptState map[string]any // the local state emitted by NewInterruptAndRerunErrWithState within node
+	NodeKey2InterruptState map[string]any // the local state emitted by NewStatefulInterruptAndRerunErr within node
 
 	subGraphForwarded       map[string]bool
 	nodeKey2InterruptUsed   map[string]bool
-	otherPath2InterruptUsed map[Path]bool
+	otherPath2InterruptUsed map[PathSegment]bool
 	mu                      sync.Mutex
 }
 
@@ -176,18 +174,18 @@ func (cp *checkpoint) buildInterruptStateForNode(nodeKey string, isLast bool) (*
 	return is, true
 }
 
-func (cp *checkpoint) buildInterruptStateForOtherPath(nodeState any, path Path) (*interruptState, bool) {
+func (cp *checkpoint) buildInterruptStateForOtherPathSegment(nodeState any, pathSegment PathSegment) (*interruptState, bool) {
 	cp.mu.Lock()
 	if cp.otherPath2InterruptUsed == nil {
-		cp.otherPath2InterruptUsed = make(map[Path]bool)
+		cp.otherPath2InterruptUsed = make(map[PathSegment]bool)
 	}
-	used := cp.otherPath2InterruptUsed[path]
+	used := cp.otherPath2InterruptUsed[pathSegment]
 	if used { // only use the interrupt state once
 		cp.mu.Unlock()
 		return nil, false
 	}
 
-	cp.otherPath2InterruptUsed[path] = true
+	cp.otherPath2InterruptUsed[pathSegment] = true
 	cp.mu.Unlock()
 
 	compositeState, ok := nodeState.(CompositeInterruptState)
@@ -195,7 +193,7 @@ func (cp *checkpoint) buildInterruptStateForOtherPath(nodeState any, path Path) 
 		return nil, false
 	}
 
-	interrupted := compositeState.IsPathInterrupted(path)
+	interrupted := compositeState.IsPathInterrupted(pathSegment)
 	if !interrupted {
 		return nil, false
 	}
@@ -204,7 +202,7 @@ func (cp *checkpoint) buildInterruptStateForOtherPath(nodeState any, path Path) 
 		Interrupted: true,
 	}
 
-	subState, hasSubState := compositeState.GetSubStateForPath(path)
+	subState, hasSubState := compositeState.GetSubStateForPath(pathSegment)
 	if hasSubState {
 		is.State = subState
 	}
@@ -220,39 +218,39 @@ func (cp *checkpoint) getSubGraphCheckPoint(subGraphID string) (*checkpoint, boo
 	return subCP, existed
 }
 
-func (cp *checkpoint) buildInterruptStateForPaths(paths Paths) (*interruptState, bool) {
-	if len(paths) == 0 {
+func (cp *checkpoint) buildInterruptStateForPath(ps Path) (*interruptState, bool) {
+	if len(ps) == 0 {
 		return nil, false
 	}
-
+	// simple node
 	var (
 		is *interruptState
 		ok bool
 	)
 
-	for i := 0; i < len(paths); i++ {
-		p := paths[i]
+	for i := 0; i < len(ps); i++ {
+		p := ps[i]
 		switch p.Type {
-		case PathTypeNode:
+		case PathSegmentNode:
 			if subCP, existed := cp.getSubGraphCheckPoint(p.ID); existed {
-				return subCP.buildInterruptStateForPaths(paths[i+1:])
+				return subCP.buildInterruptStateForPath(ps[i+1:])
 			}
 
 			if is != nil {
 				return nil, false
 			}
 
-			is, ok = cp.buildInterruptStateForNode(p.ID, i == len(paths)-1)
+			is, ok = cp.buildInterruptStateForNode(p.ID, i == len(ps)-1)
 		default:
 			if is == nil {
 				return nil, false
 			}
 
-			if i != len(paths)-1 {
+			if i != len(ps)-1 {
 				return nil, false
 			}
 
-			is, ok = cp.buildInterruptStateForOtherPath(is.State, p)
+			is, ok = cp.buildInterruptStateForOtherPathSegment(is.State, p)
 		}
 		if !ok {
 			return nil, false
@@ -292,6 +290,11 @@ func setCheckPointToCtx(ctx context.Context, cp *checkpoint) context.Context {
 	rInfo, ok := ctx.Value(interruptCtxKey{}).(*resumeInfo)
 	if ok {
 		rInfo.cp = cp
+	} else {
+		rInfo = &resumeInfo{
+			cp: cp,
+		}
+		ctx = context.WithValue(ctx, interruptCtxKey{}, rInfo)
 	}
 
 	return context.WithValue(ctx, checkPointKey{}, cp)
