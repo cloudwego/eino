@@ -31,9 +31,8 @@ import (
 )
 
 type toolsNodeOptions struct {
-	ToolOptions   []tool.Option
-	ToolList      []tool.BaseTool
-	executedTools map[string]string
+	ToolOptions []tool.Option
+	ToolList    []tool.BaseTool
 }
 
 // ToolsNodeOption is the option func type for ToolsNode.
@@ -50,12 +49,6 @@ func WithToolOption(opts ...tool.Option) ToolsNodeOption {
 func WithToolList(tool ...tool.BaseTool) ToolsNodeOption {
 	return func(o *toolsNodeOptions) {
 		o.ToolList = tool
-	}
-}
-
-func withExecutedTools(executedTools map[string]string) ToolsNodeOption {
-	return func(o *toolsNodeOptions) {
-		o.executedTools = executedTools
 	}
 }
 
@@ -148,29 +141,22 @@ type toolsInterruptAndRerunState struct {
 	RerunToolState map[string]any
 }
 
-func (t *toolsInterruptAndRerunState) GetSubStateForPath(p Path) (any, bool) {
-	if p.Type != PathTypeTool {
+func (t *toolsInterruptAndRerunState) GetSubStateForPath(p PathSegment) (any, bool) {
+	if p.Type != PathSegmentTool {
 		return nil, false
 	}
-
-	for k, s := range t.RerunToolState {
-		if k == p.ID {
-			return s, true
-		}
-	}
-
-	return nil, false
+	s, ok := t.RerunToolState[p.ID]
+	return s, ok
 }
 
-func (t *toolsInterruptAndRerunState) IsPathInterrupted(p Path) bool {
-	if p.Type == PathTypeTool {
+func (t *toolsInterruptAndRerunState) IsPathInterrupted(p PathSegment) bool {
+	if p.Type == PathSegmentTool {
 		for _, rt := range t.RerunTools {
 			if rt == p.ID {
 				return true
 			}
 		}
 	}
-
 	return false
 }
 
@@ -180,9 +166,9 @@ func (t *ToolsInterruptAndRerunExtra) GetSubInterruptContexts() []*InterruptCtx 
 		extra, ok := t.RerunExtraMap[rt]
 		if !ok {
 			ctxs = append(ctxs, &InterruptCtx{
-				Paths: []Path{
+				Path: []PathSegment{
 					{
-						Type: PathTypeTool,
+						Type: PathSegmentTool,
 						ID:   rt,
 					},
 				},
@@ -192,9 +178,9 @@ func (t *ToolsInterruptAndRerunExtra) GetSubInterruptContexts() []*InterruptCtx 
 		}
 
 		ctxs = append(ctxs, &InterruptCtx{
-			Paths: []Path{
+			Path: []PathSegment{
 				{
-					Type: PathTypeTool,
+					Type: PathSegmentTool,
 					ID:   rt,
 				},
 			},
@@ -357,7 +343,7 @@ func runToolCallTaskByInvoke(ctx context.Context, task *toolCallTask, opts ...to
 	})
 
 	ctx = setToolCallInfo(ctx, &toolCallInfo{toolCallID: task.callID})
-	ctx = setRunCtx(ctx, PathTypeTool, task.callID)
+	ctx = setRunCtx(ctx, PathSegmentTool, task.callID)
 	task.output, task.err = task.r.Invoke(ctx, task.arg, opts...)
 	if task.err == nil {
 		task.executed = true
@@ -372,7 +358,7 @@ func runToolCallTaskByStream(ctx context.Context, task *toolCallTask, opts ...to
 	})
 
 	ctx = setToolCallInfo(ctx, &toolCallInfo{toolCallID: task.callID})
-	ctx = setRunCtx(ctx, PathTypeTool, task.callID)
+	ctx = setRunCtx(ctx, PathSegmentTool, task.callID)
 	task.sOutput, task.err = task.r.Stream(ctx, task.arg, opts...)
 	if task.err == nil {
 		task.executed = true
@@ -440,12 +426,15 @@ func (tn *ToolsNode) Invoke(ctx context.Context, input *schema.Message,
 		}
 	}
 
-	tnState, hasState, interrupted := GetInterruptState[*toolsInterruptAndRerunState](ctx)
-	if interrupted && hasState {
+	var executedTools map[string]string
+	if tnState, hasState, wasInterrupted := GetInterruptState[*toolsInterruptAndRerunState](ctx); wasInterrupted && hasState {
 		input = tnState.Input
+		if tnState.ExecutedTools != nil {
+			executedTools = tnState.ExecutedTools
+		}
 	}
 
-	tasks, err := tn.genToolCallTasks(ctx, tuple, input, opt.executedTools, false)
+	tasks, err := tn.genToolCallTasks(ctx, tuple, input, executedTools, false)
 	if err != nil {
 		return nil, err
 	}
@@ -496,7 +485,7 @@ func (tn *ToolsNode) Invoke(ctx context.Context, input *schema.Message,
 		}
 	}
 	if rerun {
-		return nil, NewInterruptAndRerunErrWithState(rerunExtra, rerunState)
+		return nil, NewStatefulInterruptAndRerunErr(rerunExtra, rerunState)
 	}
 
 	return output, nil
@@ -517,12 +506,15 @@ func (tn *ToolsNode) Stream(ctx context.Context, input *schema.Message,
 		}
 	}
 
-	tnState, hasState, interrupted := GetInterruptState[*toolsInterruptAndRerunState](ctx)
-	if interrupted && hasState {
+	var executedTools map[string]string
+	if tnState, hasState, wasInterrupted := GetInterruptState[*toolsInterruptAndRerunState](ctx); wasInterrupted && hasState {
 		input = tnState.Input
+		if tnState.ExecutedTools != nil {
+			executedTools = tnState.ExecutedTools
+		}
 	}
 
-	tasks, err := tn.genToolCallTasks(ctx, tuple, input, opt.executedTools, true)
+	tasks, err := tn.genToolCallTasks(ctx, tuple, input, executedTools, true)
 	if err != nil {
 		return nil, err
 	}
@@ -578,7 +570,7 @@ func (tn *ToolsNode) Stream(ctx context.Context, input *schema.Message,
 				rerunState.ExecutedTools[t.callID] = o
 			}
 		}
-		return nil, NewInterruptAndRerunErrWithState(rerunExtra, rerunState)
+		return nil, NewStatefulInterruptAndRerunErr(rerunExtra, rerunState)
 	}
 
 	// common return
