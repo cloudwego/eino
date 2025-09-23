@@ -842,7 +842,7 @@ func TestWorkflowInterruptInvalidDataType(t *testing.T) {
 	// Cast to workflowAgent to access Resume method directly
 	workflowAgent := a.(*flowAgent).Agent.(*workflowAgent)
 
-	// Create resumeInfo with invalid Data type (not *WorkflowInterruptInfo)
+	// Create ResumeInfo with invalid Data type (not *WorkflowInterruptInfo)
 	resumeInfo := &ResumeInfo{
 		EnableStreaming: false,
 		InterruptInfo: &InterruptInfo{
