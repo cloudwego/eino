@@ -43,6 +43,11 @@ func init() {
 	Register[PromptTokenDetails]()
 }
 
+// RegisterName registers the given type `T` with a specific name for both the generic
+// serialization system and the gob serialization system. This is useful for maintaining
+// backward compatibility with older data by explicitly mapping a type to a previously
+// used name.
+// It panics if the registration fails.
 func RegisterName[T any](name string) {
 	err := serialization.GenericRegister[T](name)
 	if err != nil {
@@ -52,6 +57,11 @@ func RegisterName[T any](name string) {
 	gob.RegisterName(name, generic.NewInstance[T]())
 }
 
+// Register registers the given type `T` with the gob serialization system and the
+// generic serialization system. It automatically determines the type name based on
+// its reflection data, including the package path for named types. This function
+// should be used for new types where a custom name is not required.
+// It panics if the registration fails.
 func Register[T any]() {
 	value := generic.NewInstance[T]()
 
