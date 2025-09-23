@@ -69,8 +69,8 @@ type interruptAndRerun struct {
 // Its methods are used by the graph's internal resume mechanism to query the state of a specific internal sub-path.
 // This object is persisted in a checkpoint and passed back to the component upon resumption.
 type CompositeInterruptState interface {
-	GetSubStateForPath(p PathSegment) (any, bool)
-	IsPathInterrupted(p PathSegment) bool
+	GetSubStateForPath(p PathStep) (any, bool)
+	IsPathInterrupted(p PathStep) bool
 }
 
 // CompositeInterruptInfo is an interface for info objects that can provide structured details about
@@ -133,7 +133,7 @@ func (ii *InterruptInfo) GetInterruptContexts() []*InterruptCtx {
 		subInterruptCtxs := subInfo.GetInterruptContexts()
 		for i := range subInterruptCtxs {
 			c := subInterruptCtxs[i]
-			c.Path = append([]PathSegment{{Type: PathSegmentNode, ID: subKey}}, c.Path...)
+			c.Path = append([]PathStep{{Type: PathStepNode, ID: subKey}}, c.Path...)
 			c.ID = c.Path.String()
 			ctxs = append(ctxs, c)
 		}
@@ -147,7 +147,7 @@ func (ii *InterruptInfo) GetInterruptContexts() []*InterruptCtx {
 		extra, ok := ii.RerunNodesExtra[n]
 		if !ok {
 			ctxs = append(ctxs, &InterruptCtx{
-				Path: []PathSegment{},
+				Path: []PathStep{},
 			})
 			continue
 		}
@@ -157,7 +157,7 @@ func (ii *InterruptInfo) GetInterruptContexts() []*InterruptCtx {
 			subContexts := c.GetSubInterruptContexts()
 			for i := range subContexts {
 				c := subContexts[i]
-				c.Path = append([]PathSegment{{Type: PathSegmentNode, ID: n}}, c.Path...)
+				c.Path = append([]PathStep{{Type: PathStepNode, ID: n}}, c.Path...)
 				c.ID = c.Path.String()
 				ctxs = append(ctxs, c)
 			}
@@ -167,7 +167,7 @@ func (ii *InterruptInfo) GetInterruptContexts() []*InterruptCtx {
 		// simple node
 		ps := Path{
 			{
-				Type: PathSegmentNode,
+				Type: PathStepNode,
 				ID:   n,
 			},
 		}
@@ -180,18 +180,18 @@ func (ii *InterruptInfo) GetInterruptContexts() []*InterruptCtx {
 	return ctxs
 }
 
-// PathSegmentType defines the type of a segment in an interrupt path.
-type PathSegmentType string
+// PathStepType defines the type of a segment in an interrupt path.
+type PathStepType string
 
 const (
-	// PathSegmentNode represents a segment of a path that corresponds to a graph node.
-	PathSegmentNode PathSegmentType = "node"
-	// PathSegmentTool represents a segment of a path that corresponds to a specific tool call within a ToolsNode.
-	PathSegmentTool PathSegmentType = "tool"
+	// PathStepNode represents a segment of a path that corresponds to a graph node.
+	PathStepNode PathStepType = "node"
+	// PathStepTool represents a segment of a path that corresponds to a specific tool call within a ToolsNode.
+	PathStepTool PathStepType = "tool"
 )
 
 // Path represents a full, hierarchical path to an interrupt point.
-type Path []PathSegment
+type Path []PathStep
 
 // String converts a Path into its unique string representation.
 func (p Path) String() string {
@@ -207,11 +207,11 @@ func (p Path) String() string {
 	return sb.String()
 }
 
-// PathSegment represents a single segment in the hierarchical path to an interrupt point.
+// PathStep represents a single segment in the hierarchical path to an interrupt point.
 // A sequence of PathSegments uniquely identifies a location within a potentially nested graph structure.
-type PathSegment struct {
+type PathStep struct {
 	// Type indicates whether this path segment is a graph node or a tool call.
-	Type PathSegmentType
+	Type PathStepType
 	// ID is the unique identifier for this segment, e.g., the node's key or the tool call's ID.
 	ID string
 }
@@ -222,7 +222,7 @@ type InterruptCtx struct {
 	// It is constructed by joining the individual Path segments, e.g., "node:graph_a;node:tools;tool:tool_call_123".
 	// This ID should be used when providing resume data via ResumeWithData.
 	ID string
-	// Path is the structured sequence of PathSegment segments that leads to the interrupt point.
+	// Path is the structured sequence of PathStep segments that leads to the interrupt point.
 	Path Path
 	// Info is the user-facing information associated with the interrupt, provided by the component that triggered it.
 	Info any

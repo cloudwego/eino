@@ -141,7 +141,7 @@ type checkpoint struct {
 
 	subGraphForwarded       map[string]bool
 	nodeKey2InterruptUsed   map[string]bool
-	otherPath2InterruptUsed map[PathSegment]bool
+	otherPath2InterruptUsed map[PathStep]bool
 	mu                      sync.Mutex
 }
 
@@ -181,10 +181,10 @@ func (cp *checkpoint) buildInterruptStateForNode(nodeKey string, isLast bool) (*
 	return is, true
 }
 
-func (cp *checkpoint) buildInterruptStateForOtherPathSegment(nodeState any, pathSegment PathSegment) (*interruptState, bool) {
+func (cp *checkpoint) buildInterruptStateForOtherPathSegment(nodeState any, pathSegment PathStep) (*interruptState, bool) {
 	cp.mu.Lock()
 	if cp.otherPath2InterruptUsed == nil {
-		cp.otherPath2InterruptUsed = make(map[PathSegment]bool)
+		cp.otherPath2InterruptUsed = make(map[PathStep]bool)
 	}
 	used := cp.otherPath2InterruptUsed[pathSegment]
 	if used { // only use the interrupt state once
@@ -238,7 +238,7 @@ func (cp *checkpoint) buildInterruptStateForPath(ps Path) (*interruptState, bool
 	for i := 0; i < len(ps); i++ {
 		p := ps[i]
 		switch p.Type {
-		case PathSegmentNode:
+		case PathStepNode:
 			if subCP, existed := cp.getSubGraphCheckPoint(p.ID); existed {
 				return subCP.buildInterruptStateForPath(ps[i+1:])
 			}
