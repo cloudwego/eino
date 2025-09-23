@@ -258,6 +258,212 @@ func TestInterruptStateAndResumeForToolInNestedSubGraph(t *testing.T) {
 	assert.Equal(t, "Tool resumed successfully", output[0].Content)
 }
 
+const PathSegmentTypeProcess PathSegmentType = "process"
+
+// processState is the state for a single sub-process in the batch test.
+type processState struct {
+	Step int
+}
+
+// batchState is the composite state for the whole batch lambda.
+type batchState struct {
+	ProcessStates map[string]*processState
+	Results       map[string]string
+}
+
+func (b *batchState) GetSubStateForPath(p PathSegment) (any, bool) {
+	if p.Type != PathSegmentTypeProcess {
+		return nil, false
+	}
+	s, ok := b.ProcessStates[p.ID]
+	return s, ok
+}
+
+func (b *batchState) IsPathInterrupted(p PathSegment) bool {
+	if p.Type != PathSegmentTypeProcess {
+		return false
+	}
+	_, ok := b.ProcessStates[p.ID]
+	return ok
+}
+
+// batchInfo is the composite info for the whole batch lambda.
+type batchInfo struct {
+	ProcessInfos map[string]any
+}
+
+func (b *batchInfo) GetSubInterruptContexts() []*InterruptCtx {
+	var ctxs []*InterruptCtx
+	for id, info := range b.ProcessInfos {
+		ctxs = append(ctxs, &InterruptCtx{
+			Path: []PathSegment{{Type: PathSegmentTypeProcess, ID: id}},
+			Info: info,
+		})
+	}
+	return ctxs
+}
+
+type processResumeData struct {
+	Instruction string
+}
+
+func init() {
+	_ = RegisterSerializableType[*myInterruptState]("my_interrupt_state")
+	_ = RegisterSerializableType[*batchState]("batch_state")
+	_ = RegisterSerializableType[*processState]("process_state")
+}
+
+func TestMultipleInterruptsAndResumes(t *testing.T) {
+	// define a new lambda node that act as a 'batch' node
+	// it kick starts 3 parallel processes, each will interrupt on first run, while preserving their own state.
+	// each of the process should have their own user-facing interrupt info.
+	// define a new PathSegmentType for these sub processes.
+	// the lambda should use NewStatefulInterruptAndRerunErr to interrupt and preserve the state,
+	// which is a specific struct type that implements the CompositeInterruptState interface.
+	// there should also be a specific struct that that implements the CompositeInterruptInfo interface,
+	// which helps the end-user to fetch the nested interrupt info.
+	// put this lambda node within a graph and invoke the graph.
+	// simulate the user getting the flat list of 3 interrupt points using GetInterruptContexts
+	// the user then decides to resume two of the three interrupt points
+	// the first resume has resume data, while the second resume does not.(ResumeWithData vs. Resume)
+	// verify the resume data and state for the resumed interrupt points.
+	processIDs := []string{"p0", "p1", "p2"}
+
+	// This is the logic for a single "process"
+	runProcess := func(ctx context.Context, id string) (string, error) {
+		// Check if this specific process was interrupted before
+		pState, hasState, wasInterrupted := GetInterruptState[*processState](ctx)
+		if !wasInterrupted {
+			// First run for this process, interrupt it.
+			return "", NewStatefulInterruptAndRerunErr(
+				map[string]any{"reason": "process " + id + " needs input"},
+				&processState{Step: 1},
+			)
+		}
+
+		assert.True(t, hasState)
+		assert.Equal(t, 1, pState.Step)
+
+		// Check if we are being resumed
+		pData, hasData, isResume := GetResumeContext[*processResumeData](ctx)
+		if !isResume {
+			// Not being resumed, so interrupt again.
+			return "", NewStatefulInterruptAndRerunErr(
+				map[string]any{"reason": "process " + id + " still needs input"},
+				pState,
+			)
+		}
+
+		// We are being resumed.
+		if hasData {
+			// Resumed with data
+			return "process " + id + " done with instruction: " + pData.Instruction, nil
+		}
+		// Resumed without data
+		return "process " + id + " done", nil
+	}
+
+	// This is the main "batch" lambda that orchestrates the processes
+	batchLambda := InvokableLambda(func(ctx context.Context, _ string) (map[string]string, error) {
+		// Restore the state of the batch node itself
+		persistedBatchState, _, _ := GetInterruptState[*batchState](ctx)
+		if persistedBatchState == nil {
+			persistedBatchState = &batchState{
+				ProcessStates: make(map[string]*processState),
+				Results:       make(map[string]string),
+			}
+		}
+
+		// This run's state
+		childInterruptInfo := &batchInfo{ProcessInfos: make(map[string]any)}
+		childInterruptState := &batchState{
+			ProcessStates: make(map[string]*processState),
+			Results:       persistedBatchState.Results, // Carry over completed results
+		}
+		anyInterrupted := false
+
+		for _, id := range processIDs {
+			// If this process already completed in a previous run, skip it.
+			if _, done := childInterruptState.Results[id]; done {
+				continue
+			}
+
+			// Create a sub-context for each process
+			subCtx := SetRunCtx(ctx, PathSegmentTypeProcess, id)
+			res, err := runProcess(subCtx, id)
+
+			if err != nil {
+				info, state, ok := isInterruptRerunError(err)
+				assert.True(t, ok)
+				anyInterrupted = true
+				childInterruptInfo.ProcessInfos[id] = info
+				childInterruptState.ProcessStates[id] = state.(*processState)
+			} else {
+				// Process completed, save its result to the state for the next run.
+				childInterruptState.Results[id] = res
+			}
+		}
+
+		if anyInterrupted {
+			return nil, NewStatefulInterruptAndRerunErr(childInterruptInfo, childInterruptState)
+		}
+
+		return childInterruptState.Results, nil
+	})
+
+	g := NewGraph[string, map[string]string]()
+	_ = g.AddLambdaNode("batch", batchLambda)
+	_ = g.AddEdge(START, "batch")
+	_ = g.AddEdge("batch", END)
+
+	graph, err := g.Compile(context.Background(), WithCheckPointStore(newInMemoryStore()))
+	assert.NoError(t, err)
+
+	// --- 1. First invocation, all 3 processes should interrupt ---
+	checkPointID := "multi-interrupt-test"
+	_, err = graph.Invoke(context.Background(), "", WithCheckPointID(checkPointID))
+
+	assert.Error(t, err)
+	interruptInfo, isInterrupt := ExtractInterruptInfo(err)
+	assert.True(t, isInterrupt)
+	interruptContexts := interruptInfo.GetInterruptContexts()
+	assert.Len(t, interruptContexts, 3)
+
+	// Verify all 3 interrupt points are exposed
+	found := make(map[string]bool)
+	for _, iCtx := range interruptContexts {
+		found[iCtx.ID] = true
+		assert.Equal(t, map[string]any{"reason": "process " + iCtx.Path[1].ID + " needs input"}, iCtx.Info)
+	}
+	assert.True(t, found["node:batch;process:p0"])
+	assert.True(t, found["node:batch;process:p1"])
+	assert.True(t, found["node:batch;process:p2"])
+
+	// --- 2. Second invocation, resume 2 of 3 processes ---
+	// Resume p0 with data, and p2 without data. p1 remains interrupted.
+	resumeCtx := ResumeWithData(context.Background(), "node:batch;process:p0", &processResumeData{Instruction: "do it"})
+	resumeCtx = Resume(resumeCtx, "node:batch;process:p2")
+
+	_, err = graph.Invoke(resumeCtx, "", WithCheckPointID(checkPointID))
+
+	// Expect an interrupt again, but only for p1
+	assert.Error(t, err)
+	interruptInfo2, isInterrupt2 := ExtractInterruptInfo(err)
+	assert.True(t, isInterrupt2)
+	interruptContexts2 := interruptInfo2.GetInterruptContexts()
+	assert.Len(t, interruptContexts2, 1)
+	assert.Equal(t, "node:batch;process:p1", interruptContexts2[0].ID)
+
+	// --- 3. Third invocation, resume the last process ---
+	finalResumeCtx := Resume(context.Background(), "node:batch;process:p1")
+	finalOutput, err := graph.Invoke(finalResumeCtx, "", WithCheckPointID(checkPointID))
+
+	assert.NoError(t, err)
+	assert.Equal(t, "process p0 done with instruction: do it", finalOutput["p0"])
+	assert.Equal(t, "process p1 done", finalOutput["p1"])
+	assert.Equal(t, "process p2 done", finalOutput["p2"])
+}
+
 // mockInterruptingTool is a helper for the nested tool interrupt test
 type mockInterruptingTool struct {
 	tt *testing.T
