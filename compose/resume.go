@@ -149,7 +149,7 @@ func getNodePath(ctx context.Context) (*NodePath, bool) {
 
 	nodePaths := make([]string, 0, len(currentPaths))
 	for _, p := range currentPaths {
-		if p.Type != PathSegmentNode {
+		if p.Type != PathStepNode {
 			break
 		}
 
@@ -159,7 +159,7 @@ func getNodePath(ctx context.Context) (*NodePath, bool) {
 	return NewNodePath(nodePaths...), true
 }
 
-// SetRunCtx creates a new execution context for a sub-component within a custom composite node.
+// AppendPathStep creates a new execution context for a sub-component within a custom composite node.
 // This is an advanced feature for developers building custom nodes that contain their own interruptible
 // sub-processes (e.g., a node that runs multiple sub-tasks in parallel).
 //
@@ -169,21 +169,21 @@ func getNodePath(ctx context.Context) (*NodePath, bool) {
 //   - ctx: The parent context, typically the one passed into the composite node's Invoke/Stream method.
 //   - pathType: The type of the new path segment (e.g., "process", "tool").
 //   - pathID: The unique ID for the new path segment.
-func SetRunCtx(ctx context.Context, pathType PathSegmentType, pathID string) context.Context {
+func AppendPathStep(ctx context.Context, stepType PathStepType, pathID string) context.Context {
 	// get current path
 	currentPaths, existed := GetCurrentPaths(ctx)
 	if !existed {
-		currentPaths = []PathSegment{
+		currentPaths = []PathStep{
 			{
-				Type: pathType,
+				Type: stepType,
 				ID:   pathID,
 			},
 		}
 	} else {
-		newPaths := make([]PathSegment, len(currentPaths)+1)
+		newPaths := make([]PathStep, len(currentPaths)+1)
 		copy(newPaths, currentPaths)
-		newPaths[len(newPaths)-1] = PathSegment{
-			Type: pathType,
+		newPaths[len(newPaths)-1] = PathStep{
+			Type: stepType,
 			ID:   pathID,
 		}
 		currentPaths = newPaths

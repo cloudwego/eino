@@ -642,7 +642,7 @@ func (r *runner) createTasks(ctx context.Context, nodeMap map[string]any, optMap
 		}
 
 		nextTasks = append(nextTasks, &task{
-			ctx:     SetRunCtx(ctx, PathSegmentNode, nodeKey),
+			ctx:     AppendPathStep(ctx, PathStepNode, nodeKey),
 			nodeKey: nodeKey,
 			call:    call,
 			input:   nodeInput,
@@ -702,7 +702,7 @@ func (r *runner) restoreTasks(
 		}
 
 		newTask := &task{
-			ctx:            SetRunCtx(ctx, PathSegmentNode, key),
+			ctx:            AppendPathStep(ctx, PathStepNode, key),
 			nodeKey:        key,
 			call:           call,
 			input:          input,
