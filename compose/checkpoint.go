@@ -130,24 +130,28 @@ type checkpoint struct {
 
 	ToolsNodeExecutedTools map[string] /*tool node key*/ map[string] /*tool call id*/ string
 
-	SubGraphs         map[string]*checkpoint
-	subGraphForwarded map[string]bool
+	SubGraphs map[string]*checkpoint
 
-	NodeKey2InterruptState  map[string]any
-	NodeKey2InterruptUsed   map[string]bool
-	OtherPath2InterruptUsed map[Path]bool
+	NodeKey2InterruptState map[string]any // the local state emitted by NewInterruptAndRerunErrWithState within node
+
+	subGraphForwarded       map[string]bool
+	nodeKey2InterruptUsed   map[string]bool
+	otherPath2InterruptUsed map[Path]bool
 	mu                      sync.Mutex
 }
 
 func (cp *checkpoint) buildInterruptStateForNode(nodeKey string, isLast bool) (*interruptState, bool) {
 	cp.mu.Lock()
-	used := cp.NodeKey2InterruptUsed[nodeKey]
+	if cp.nodeKey2InterruptUsed == nil {
+		cp.nodeKey2InterruptUsed = make(map[string]bool)
+	}
+	used := cp.nodeKey2InterruptUsed[nodeKey]
 	if used && isLast { // only use the interrupt state once
 		cp.mu.Unlock()
 		return nil, false
 	}
 	if isLast {
-		cp.NodeKey2InterruptUsed[nodeKey] = true
+		cp.nodeKey2InterruptUsed[nodeKey] = true
 	}
 	cp.mu.Unlock()
 
@@ -174,13 +178,16 @@ func (cp *checkpoint) buildInterruptStateForNode(nodeKey string, isLast bool) (*
 
 func (cp *checkpoint) buildInterruptStateForOtherPath(nodeState any, path Path) (*interruptState, bool) {
 	cp.mu.Lock()
-	used := cp.OtherPath2InterruptUsed[path]
+	if cp.otherPath2InterruptUsed == nil {
+		cp.otherPath2InterruptUsed = make(map[Path]bool)
+	}
+	used := cp.otherPath2InterruptUsed[path]
 	if used { // only use the interrupt state once
 		cp.mu.Unlock()
 		return nil, false
 	}
 
-	cp.OtherPath2InterruptUsed[path] = true
+	cp.otherPath2InterruptUsed[path] = true
 	cp.mu.Unlock()
 
 	compositeState, ok := nodeState.(CompositeInterruptState)
@@ -258,11 +265,6 @@ func (cp *checkpoint) buildInterruptStateForPaths(paths Paths) (*interruptState,
 type stateModifierKey struct{}
 type checkPointKey struct{} // *checkpoint
 
-type InterruptState struct {
-	Path
-	State any
-}
-
 func getStateModifier(ctx context.Context) StateModifier {
 	if sm, ok := ctx.Value(stateModifierKey{}).(StateModifier); ok {
 		return sm
@@ -287,7 +289,7 @@ func getCheckPointFromStore(ctx context.Context, id string, cpr *checkPointer) (
 }
 
 func setCheckPointToCtx(ctx context.Context, cp *checkpoint) context.Context {
-	rInfo, ok := ctx.Value(interruptCtxKey{}).(*ResumeInfo)
+	rInfo, ok := ctx.Value(interruptCtxKey{}).(*resumeInfo)
 	if ok {
 		rInfo.cp = cp
 	}
