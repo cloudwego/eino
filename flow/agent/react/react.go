@@ -32,7 +32,7 @@ type state struct {
 }
 
 func init() {
-	schema.Register[state]()
+	schema.RegisterName[*state]("_eino_react_state")
 }
 
 const (

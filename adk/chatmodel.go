@@ -398,7 +398,7 @@ type ChatModelAgentInterruptInfo struct { // replace temp info by info when save
 }
 
 func init() {
-	schema.Register[*ChatModelAgentInterruptInfo]()
+	schema.RegisterName[*ChatModelAgentInterruptInfo]("_eino_adk_chat_model_agent_interrupt_info")
 }
 
 func (h *cbHandler) onGraphError(ctx context.Context,

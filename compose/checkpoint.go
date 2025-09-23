@@ -25,10 +25,10 @@ import (
 )
 
 func init() {
-	schema.Register[*checkpoint]()
-	schema.Register[*dagChannel]()
-	schema.Register[*pregelChannel]()
-	schema.Register[dependencyState]()
+	schema.RegisterName[*checkpoint]("_eino_checkpoint")
+	schema.RegisterName[*dagChannel]("_eino_dag_channel")
+	schema.RegisterName[*pregelChannel]("_eino_pregel_channel")
+	schema.RegisterName[dependencyState]("_eino_dependency_state")
 }
 
 // RegisterSerializableType registers a custom type for eino serialization.

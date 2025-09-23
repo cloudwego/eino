@@ -42,11 +42,11 @@ func WithCheckPointID(id string) AgentRunOption {
 }
 
 func init() {
-	schema.Register[*serialization]()
-	schema.Register[*WorkflowInterruptInfo]()
-	schema.Register[*State]()
-	schema.Register[*compose.InterruptInfo]()               // TODO: check if this is really needed when refactoring adk resume
-	schema.Register[*compose.ToolsInterruptAndRerunExtra]() // TODO: check if this is really needed when refactoring adk resume
+	schema.RegisterName[*serialization]("_eino_adk_serialization")
+	schema.RegisterName[*WorkflowInterruptInfo]("_eino_adk_workflow_interrupt_info")
+	schema.RegisterName[*State]("_eino_adk_react_state")
+	schema.RegisterName[*compose.InterruptInfo]("_eino_compose_interrupt_info")                                // TODO: check if this is really needed when refactoring adk resume
+	schema.RegisterName[*compose.ToolsInterruptAndRerunExtra]("_eino_compose_tools_interrupt_and_rerun_extra") // TODO: check if this is really needed when refactoring adk resume
 }
 
 type serialization struct {
