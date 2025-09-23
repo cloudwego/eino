@@ -1143,8 +1143,14 @@ func formatLoops(loops [][]string) string {
 	return sb.String()
 }
 
-func NewNodePath(path ...string) *NodePath {
-	return &NodePath{path: path}
+// NewNodePath specifies a path to a node in the graph, which is composed of node keys.
+// Starting from the top graph,
+// following this set of node keys can lead to a specific node in the top graph or a subgraph.
+//
+// e.g.
+// NewNodePath("sub_graph_node_key", "node_key_within_sub_graph")
+func NewNodePath(nodeKeyPath ...string) *NodePath {
+	return &NodePath{path: nodeKeyPath}
 }
 
 type NodePath struct {
