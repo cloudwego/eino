@@ -137,16 +137,16 @@ type toolsInterruptAndRerunState struct {
 	RerunToolState map[string]any
 }
 
-func (t *toolsInterruptAndRerunState) GetSubStateForPath(p PathSegment) (any, bool) {
-	if p.Type != PathSegmentTool {
+func (t *toolsInterruptAndRerunState) GetSubStateForPath(p PathStep) (any, bool) {
+	if p.Type != PathStepTool {
 		return nil, false
 	}
 	s, ok := t.RerunToolState[p.ID]
 	return s, ok
 }
 
-func (t *toolsInterruptAndRerunState) IsPathInterrupted(p PathSegment) bool {
-	if p.Type == PathSegmentTool {
+func (t *toolsInterruptAndRerunState) IsPathInterrupted(p PathStep) bool {
+	if p.Type == PathStepTool {
 		for _, rt := range t.RerunTools {
 			if rt == p.ID {
 				return true
@@ -162,9 +162,9 @@ func (t *ToolsInterruptAndRerunExtra) GetSubInterruptContexts() []*InterruptCtx 
 		extra, ok := t.RerunExtraMap[rt]
 		if !ok {
 			ctxs = append(ctxs, &InterruptCtx{
-				Path: []PathSegment{
+				Path: []PathStep{
 					{
-						Type: PathSegmentTool,
+						Type: PathStepTool,
 						ID:   rt,
 					},
 				},
@@ -174,9 +174,9 @@ func (t *ToolsInterruptAndRerunExtra) GetSubInterruptContexts() []*InterruptCtx 
 		}
 
 		ctxs = append(ctxs, &InterruptCtx{
-			Path: []PathSegment{
+			Path: []PathStep{
 				{
-					Type: PathSegmentTool,
+					Type: PathStepTool,
 					ID:   rt,
 				},
 			},
@@ -339,7 +339,7 @@ func runToolCallTaskByInvoke(ctx context.Context, task *toolCallTask, opts ...to
 	})
 
 	ctx = setToolCallInfo(ctx, &toolCallInfo{toolCallID: task.callID})
-	ctx = SetRunCtx(ctx, PathSegmentTool, task.callID)
+	ctx = AppendPathStep(ctx, PathStepTool, task.callID)
 	task.output, task.err = task.r.Invoke(ctx, task.arg, opts...)
 	if task.err == nil {
 		task.executed = true
@@ -354,7 +354,7 @@ func runToolCallTaskByStream(ctx context.Context, task *toolCallTask, opts ...to
 	})
 
 	ctx = setToolCallInfo(ctx, &toolCallInfo{toolCallID: task.callID})
-	ctx = SetRunCtx(ctx, PathSegmentTool, task.callID)
+	ctx = AppendPathStep(ctx, PathStepTool, task.callID)
 	task.sOutput, task.err = task.r.Stream(ctx, task.arg, opts...)
 	if task.err == nil {
 		task.executed = true
