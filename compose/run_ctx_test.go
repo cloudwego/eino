@@ -19,7 +19,6 @@ package compose
 import (
 	"context"
 	"encoding/json"
-	"sync"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -29,28 +28,6 @@ import (
 	mockModel "github.com/cloudwego/eino/internal/mock/components/model"
 	"github.com/cloudwego/eino/schema"
 )
-
-type memoryCheckPointStore struct {
-	data map[string][]byte
-	mu   sync.Mutex
-}
-
-func (s *memoryCheckPointStore) Get(_ context.Context, checkPointID string) ([]byte, bool, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	d, ok := s.data[checkPointID]
-	return d, ok, nil
-}
-
-func (s *memoryCheckPointStore) Set(_ context.Context, checkPointID string, checkPoint []byte) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.data == nil {
-		s.data = make(map[string][]byte)
-	}
-	s.data[checkPointID] = checkPoint
-	return nil
-}
 
 type myInterruptState struct {
 	OriginalInput string
@@ -69,14 +46,14 @@ func TestInterruptStateAndResumeForRootGraph(t *testing.T) {
 	// this lambda node will interrupt with a typed state and an info for end-user
 	// verify the info thrown by the lambda node
 	// resume with a structured resume data
-	// within the lambda node, GetRunCtx and verify the state and resume data
+	// within the lambda node, getRunCtx and verify the state and resume data
 	g := NewGraph[string, string]()
 
 	lambda := InvokableLambda(func(ctx context.Context, input string) (string, error) {
 		state, hasState, wasInterrupted := GetInterruptState[*myInterruptState](ctx)
 		if !wasInterrupted {
 			// First run: interrupt with state
-			return "", NewInterruptAndRerunErrWithState(
+			return "", NewStatefulInterruptAndRerunErr(
 				map[string]any{"reason": "scheduled maintenance"},
 				&myInterruptState{OriginalInput: input},
 			)
@@ -98,8 +75,7 @@ func TestInterruptStateAndResumeForRootGraph(t *testing.T) {
 	_ = g.AddEdge(START, "lambda")
 	_ = g.AddEdge("lambda", END)
 
-	store := &memoryCheckPointStore{}
-	graph, err := g.Compile(context.Background(), WithCheckPointStore(store))
+	graph, err := g.Compile(context.Background(), WithCheckPointStore(newInMemoryStore()))
 	assert.NoError(t, err)
 
 	// First invocation, which should be interrupted
@@ -134,14 +110,14 @@ func TestInterruptStateAndResumeForSubGraph(t *testing.T) {
 	// this lambda node will interrupt with a typed state and an info for end-user
 	// verify the info thrown by the lambda node
 	// resume with a structured resume data
-	// within the lambda node, GetRunCtx and verify the state and resume data
+	// within the lambda node, getRunCtx and verify the state and resume data
 	subGraph := NewGraph[string, string]()
 
 	lambda := InvokableLambda(func(ctx context.Context, input string) (string, error) {
 		state, hasState, wasInterrupted := GetInterruptState[*myInterruptState](ctx)
 		if !wasInterrupted {
 			// First run: interrupt with state
-			return "", NewInterruptAndRerunErrWithState(
+			return "", NewStatefulInterruptAndRerunErr(
 				map[string]any{"reason": "sub-graph maintenance"},
 				&myInterruptState{OriginalInput: input},
 			)
@@ -169,8 +145,7 @@ func TestInterruptStateAndResumeForSubGraph(t *testing.T) {
 	_ = mainGraph.AddEdge(START, "sub_graph_node")
 	_ = mainGraph.AddEdge("sub_graph_node", END)
 
-	store := &memoryCheckPointStore{}
-	compiledMainGraph, err := mainGraph.Compile(context.Background(), WithCheckPointStore(store))
+	compiledMainGraph, err := mainGraph.Compile(context.Background(), WithCheckPointStore(newInMemoryStore()))
 	assert.NoError(t, err)
 
 	// First invocation, which should be interrupted
@@ -211,7 +186,7 @@ func TestInterruptStateAndResumeForToolInNestedSubGraph(t *testing.T) {
 	// this tool will interrupt with a typed state and an info for end-user
 	// verify the info thrown by the tool.
 	// resume with a structured resume data.
-	// within the Tool, GetRunCtx and verify the state and resume data
+	// within the Tool, getRunCtx and verify the state and resume data
 	ctrl := gomock.NewController(t)
 
 	// 1. Define the interrupting tool
@@ -252,8 +227,7 @@ func TestInterruptStateAndResumeForToolInNestedSubGraph(t *testing.T) {
 	_ = rootGraph.AddEdge("sub_graph_a", END)
 
 	// 5. Compile and run
-	store := &memoryCheckPointStore{}
-	compiledRootGraph, err := rootGraph.Compile(context.Background(), WithCheckPointStore(store))
+	compiledRootGraph, err := rootGraph.Compile(context.Background(), WithCheckPointStore(newInMemoryStore()))
 	assert.NoError(t, err)
 
 	// First invocation - should interrupt
@@ -306,7 +280,7 @@ func (t *mockInterruptingTool) InvokableRun(ctx context.Context, argumentsInJSON
 	state, hasState, wasInterrupted := GetInterruptState[*myInterruptState](ctx)
 	if !wasInterrupted {
 		// First run: interrupt
-		return "", NewInterruptAndRerunErrWithState(
+		return "", NewStatefulInterruptAndRerunErr(
 			map[string]any{"reason": "tool maintenance"},
 			&myInterruptState{OriginalInput: args["input"]},
 		)
