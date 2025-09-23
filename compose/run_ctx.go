@@ -29,7 +29,7 @@ type interruptState struct {
 	State       any
 }
 
-type ResumeInfo struct {
+type resumeInfo struct {
 	mu               sync.Mutex
 	interruptID2Info map[string]any
 	interruptID2Used map[string]bool
@@ -132,29 +132,43 @@ func clearRunCtx(ctx context.Context) context.Context {
 	return context.WithValue(ctx, runCtxKey{}, nil)
 }
 
-func SetFullResumeInfo(ctx context.Context, info *ResumeInfo) context.Context {
-	return context.WithValue(ctx, interruptCtxKey{}, info)
+// Resume marks a specific interrupt point for resumption without passing any data.
+// When the graph is resumed, the component that was interrupted at the given `id` will be re-executed,
+// but its `RunCtx.ResumeData` field will be nil.
+//
+// - ctx: The parent context.
+// - id: The unique ID of the interrupt point, obtained from `InterruptCtx.ID`.
+func Resume(ctx context.Context, id string) context.Context {
+	return ResumeWithData(ctx, id, nil)
 }
 
-func SetResumeInfo(ctx context.Context, id string, info any) context.Context {
-	rInfo, ok := ctx.Value(interruptCtxKey{}).(*ResumeInfo)
+// ResumeWithData attaches data to a specific interrupt point for resumption.
+// When the graph is resumed, the component that was interrupted at the given `id` will receive this data.
+// The component should then use the generic `GetResumeData[T]` function to retrieve this data in a type-safe manner.
+//
+//   - ctx: The parent context.
+//   - id: The unique ID of the interrupt point, obtained from `InterruptCtx.ID`.
+//   - data: The data to be passed to the interrupted component. The type of this data must match what the
+//     target component expects to receive via `GetResumeData[T]`.
+func ResumeWithData(ctx context.Context, id string, data any) context.Context {
+	rInfo, ok := ctx.Value(interruptCtxKey{}).(*resumeInfo)
 	if !ok {
-		return context.WithValue(ctx, interruptCtxKey{}, &ResumeInfo{
+		return context.WithValue(ctx, interruptCtxKey{}, &resumeInfo{
 			interruptID2Info: map[string]any{
-				id: info,
+				id: data,
 			},
 			interruptID2Used: make(map[string]bool),
 		})
 	}
 
 	rInfo.mu.Lock()
-	rInfo.interruptID2Info[id] = info
+	rInfo.interruptID2Info[id] = data
 	rInfo.mu.Unlock()
 	return ctx
 }
 
 func getResumeInfoForID(ctx context.Context, id string) (any, bool) {
-	info, ok := ctx.Value(interruptCtxKey{}).(*ResumeInfo)
+	info, ok := ctx.Value(interruptCtxKey{}).(*resumeInfo)
 	if !ok {
 		return nil, false
 	}
@@ -174,7 +188,7 @@ func getResumeInfoForID(ctx context.Context, id string) (any, bool) {
 }
 
 func getCheckpointFromResumeInfo(ctx context.Context) *checkpoint {
-	rInfo, ok := ctx.Value(interruptCtxKey{}).(*ResumeInfo)
+	rInfo, ok := ctx.Value(interruptCtxKey{}).(*resumeInfo)
 	if !ok {
 		return nil
 	}
@@ -185,4 +199,65 @@ func getCheckpointFromResumeInfo(ctx context.Context) *checkpoint {
 func GetRunCtx(ctx context.Context) (*RunCtx, bool) {
 	rCtx, ok := ctx.Value(runCtxKey{}).(*RunCtx)
 	return rCtx, ok
+}
+
+// GetInterruptState provides a type-safe way to check for and retrieve the persisted state from a previous interruption.
+// It is the primary function a component should use to understand its past state.
+//
+// It returns three values:
+//   - state (T): The typed state object, if it was provided and matches type `T`.
+//   - hasState (bool): True if state was provided during the original interrupt and successfully cast to type `T`.
+//   - wasInterrupted (bool): True if the node was part of a previous interruption, regardless of whether state was provided.
+func GetInterruptState[T any](ctx context.Context) (state T, hasState bool, wasInterrupted bool) {
+	rCtx, ok := GetRunCtx(ctx)
+	if !ok || rCtx.InterruptData == nil || !rCtx.InterruptData.Interrupted {
+		return
+	}
+
+	wasInterrupted = true
+	if rCtx.InterruptData.State == nil {
+		return
+	}
+
+	state, hasState = rCtx.InterruptData.State.(T)
+	return
+}
+
+// GetResumeContext checks if the current node is being resumed and retrieves any associated resume data in a type-safe way.
+// This is the primary function a component should use to understand the user's intent for the current run.
+//
+// It returns three values:
+//   - data (T): The typed resume data. This is only valid if `hasData` is true.
+//   - hasData (bool): True if resume data was provided via `ResumeWithData` and successfully cast to type `T`.
+//     It is important to check this flag rather than checking `data == nil`, as the provided data could itself be nil
+//     or a non-nil zero value (like 0 or "").
+//   - isResumeFlow (bool): True if the current node was the specific target of a `Resume` or `ResumeWithData` call.
+func GetResumeContext[T any](ctx context.Context) (data T, hasData bool, isResumeFlow bool) {
+	rCtx, ok := GetRunCtx(ctx)
+	if !ok {
+		return
+	}
+
+	// Check if this is a resume flow for the current node
+	resumeInfo, ok := ctx.Value(interruptCtxKey{}).(*resumeInfo)
+	if !ok || resumeInfo == nil {
+		return
+	}
+
+	currentID := Paths(rCtx.Paths).String()
+	resumeInfo.mu.Lock()
+	defer resumeInfo.mu.Unlock()
+
+	resumeVal, isResumeFlow := resumeInfo.interruptID2Info[currentID]
+	if !isResumeFlow {
+		return
+	}
+
+	// It is a resume flow, now check for data
+	if resumeVal == nil {
+		return // hasData is false
+	}
+
+	data, hasData = resumeVal.(T)
+	return
 }
