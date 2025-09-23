@@ -19,6 +19,7 @@ package compose
 import (
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/cloudwego/eino/schema"
 )
@@ -41,7 +42,7 @@ func NewInterruptAndRerunErr(extra any) error {
 	return &interruptAndRerun{Extra: extra}
 }
 
-// NewInterruptAndRerunErrWithState creates a special error that signals the graph execution engine
+// NewStatefulInterruptAndRerunErr creates a special error that signals the graph execution engine
 // to interrupt the current run and save a checkpoint. It allows a component to provide both user-facing
 // context and internal, persistable state.
 //
@@ -51,16 +52,16 @@ func NewInterruptAndRerunErr(extra any) error {
 //     detailed contexts for multiple sub-interrupts.
 //
 //   - state: The internal state that the interrupting component needs to persist to be able to resume its work later.
-//     This state is saved in the checkpoint and will be provided back to the component upon resumption via RunCtx.InterruptData.State.
+//     This state is saved in the checkpoint and will be provided back to the component upon resumption via runCtx.interruptData.State.
 //     If the state object implements the CompositeInterruptState interface, the graph's resume mechanism can
 //     query the state of specific internal sub-paths.
-func NewInterruptAndRerunErrWithState(info any, state any) error {
+func NewStatefulInterruptAndRerunErr(info any, state any) error {
 	return &interruptAndRerun{Extra: info, State: state}
 }
 
 type interruptAndRerun struct {
-	Extra any // for end-user, probably for human too
-	State any // for persistence, when resuming, use GetRunCtx to fetch it at the interrupt location
+	Extra any // for end-user, probably the human-being
+	State any // for persistence, when resuming, use GetInterruptState to fetch it at the interrupt location
 }
 
 // CompositeInterruptState is an interface for state objects that represent a collection of multiple,
@@ -68,8 +69,8 @@ type interruptAndRerun struct {
 // Its methods are used by the graph's internal resume mechanism to query the state of a specific internal sub-path.
 // This object is persisted in a checkpoint and passed back to the component upon resumption.
 type CompositeInterruptState interface {
-	GetSubStateForPath(p Path) (any, bool)
-	IsPathInterrupted(p Path) bool
+	GetSubStateForPath(p PathSegment) (any, bool)
+	IsPathInterrupted(p PathSegment) bool
 }
 
 // CompositeInterruptInfo is an interface for info objects that can provide structured details about
@@ -118,22 +119,22 @@ func init() {
 // that can be used to provide targeted resume data.
 //
 // This method handles three types of interrupts:
-// 1. Sub-graph interrupts: It recursively calls GetInterruptContexts on any sub-graphs and prepends the
-//    sub-graph's node key to the path of each context, ensuring a unique, fully-qualified path.
-// 2. Simple node interrupts: For a standard node that has been interrupted, it creates a simple context
-//    containing just that node's path and its associated user-facing info.
-// 3. Composite node interrupts: If a node's "extra" data implements the CompositeInterruptInfo interface
-//    (e.g., a ToolsNode), it calls GetSubInterruptContexts on that object to get the list of internal
-//    interrupts (e.g., individual tools). It then prepends the composite node's key to each of those
-//    paths to create the final, fully-qualified paths.
+//  1. Sub-graph interrupts: It recursively calls GetInterruptContexts on any sub-graphs and prepends the
+//     sub-graph's node key to the path of each context, ensuring a unique, fully-qualified path.
+//  2. Simple node interrupts: For a standard node that has been interrupted, it creates a simple context
+//     containing just that node's path and its associated user-facing info.
+//  3. Composite node interrupts: If a node's "extra" data implements the CompositeInterruptInfo interface
+//     (e.g., a ToolsNode), it calls GetSubInterruptContexts on that object to get the list of internal
+//     interrupts (e.g., individual tools). It then prepends the composite node's key to each of those
+//     paths to create the final, fully-qualified paths.
 func (ii *InterruptInfo) GetInterruptContexts() []*InterruptCtx {
 	var ctxs []*InterruptCtx
 	for subKey, subInfo := range ii.SubGraphs {
 		subInterruptCtxs := subInfo.GetInterruptContexts()
 		for i := range subInterruptCtxs {
 			c := subInterruptCtxs[i]
-			c.Paths = append([]Path{Path{Type: PathTypeNode, ID: subKey}}, c.Paths...)
-			c.ID = Paths(c.Paths).String()
+			c.Path = append([]PathSegment{{Type: PathSegmentNode, ID: subKey}}, c.Path...)
+			c.ID = c.Path.String()
 			ctxs = append(ctxs, c)
 		}
 	}
@@ -146,53 +147,71 @@ func (ii *InterruptInfo) GetInterruptContexts() []*InterruptCtx {
 		extra, ok := ii.RerunNodesExtra[n]
 		if !ok {
 			ctxs = append(ctxs, &InterruptCtx{
-				Paths: []Path{},
+				Path: []PathSegment{},
 			})
 			continue
 		}
 
-		composite, ok := extra.(CompositeInterruptInfo)
-		if ok {
-			subContexts := composite.GetSubInterruptContexts()
+		// composite node
+		if c, ok := extra.(CompositeInterruptInfo); ok {
+			subContexts := c.GetSubInterruptContexts()
 			for i := range subContexts {
 				c := subContexts[i]
-				c.Paths = append([]Path{Path{Type: PathTypeNode, ID: n}}, c.Paths...)
-				c.ID = Paths(c.Paths).String()
+				c.Path = append([]PathSegment{{Type: PathSegmentNode, ID: n}}, c.Path...)
+				c.ID = c.Path.String()
 				ctxs = append(ctxs, c)
 			}
 			continue
 		}
 
-		paths := []Path{
+		// simple node
+		ps := Path{
 			{
-				Type: PathTypeNode,
+				Type: PathSegmentNode,
 				ID:   n,
 			},
 		}
 		ctxs = append(ctxs, &InterruptCtx{
-			ID:    Paths(paths).String(),
-			Paths: paths,
-			Info:  extra,
+			ID:   ps.String(),
+			Path: ps,
+			Info: extra,
 		})
 	}
 	return ctxs
 }
 
-// PathType defines the type of a segment in an interrupt path.
-type PathType string
+// PathSegmentType defines the type of a segment in an interrupt path.
+type PathSegmentType string
 
 const (
-	// PathTypeNode represents a segment of a path that corresponds to a graph node.
-	PathTypeNode PathType = "node"
-	// PathTypeTool represents a segment of a path that corresponds to a specific tool call within a ToolsNode.
-	PathTypeTool PathType = "tool"
+	// PathSegmentNode represents a segment of a path that corresponds to a graph node.
+	PathSegmentNode PathSegmentType = "node"
+	// PathSegmentTool represents a segment of a path that corresponds to a specific tool call within a ToolsNode.
+	PathSegmentTool PathSegmentType = "tool"
 )
 
-// Path represents a single segment in the hierarchical path to an interrupt point.
-// A sequence of Paths uniquely identifies a location within a potentially nested graph structure.
-type Path struct {
+// Path represents a full, hierarchical path to an interrupt point.
+type Path []PathSegment
+
+// String converts a Path into its unique string representation.
+func (p Path) String() string {
+	var sb strings.Builder
+	for i, s := range p {
+		sb.WriteString(string(s.Type))
+		sb.WriteString(":")
+		sb.WriteString(s.ID)
+		if i != len(p)-1 {
+			sb.WriteString(";")
+		}
+	}
+	return sb.String()
+}
+
+// PathSegment represents a single segment in the hierarchical path to an interrupt point.
+// A sequence of PathSegments uniquely identifies a location within a potentially nested graph structure.
+type PathSegment struct {
 	// Type indicates whether this path segment is a graph node or a tool call.
-	Type PathType
+	Type PathSegmentType
 	// ID is the unique identifier for this segment, e.g., the node's key or the tool call's ID.
 	ID string
 }
@@ -201,10 +220,10 @@ type Path struct {
 type InterruptCtx struct {
 	// ID is the unique, fully-qualified path to the interrupt point.
 	// It is constructed by joining the individual Path segments, e.g., "node:graph_a;node:tools;tool:tool_call_123".
-	// This ID should be used when providing resume data via SetResumeInfo.
+	// This ID should be used when providing resume data via ResumeWithData.
 	ID string
-	// Paths is the structured sequence of Path segments that leads to the interrupt point.
-	Paths []Path
+	// Path is the structured sequence of PathSegment segments that leads to the interrupt point.
+	Path Path
 	// Info is the user-facing information associated with the interrupt, provided by the component that triggered it.
 	Info any
 }
