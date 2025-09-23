@@ -343,7 +343,7 @@ func runToolCallTaskByInvoke(ctx context.Context, task *toolCallTask, opts ...to
 	})
 
 	ctx = setToolCallInfo(ctx, &toolCallInfo{toolCallID: task.callID})
-	ctx = setRunCtx(ctx, PathSegmentTool, task.callID)
+	ctx = SetRunCtx(ctx, PathSegmentTool, task.callID)
 	task.output, task.err = task.r.Invoke(ctx, task.arg, opts...)
 	if task.err == nil {
 		task.executed = true
@@ -358,7 +358,7 @@ func runToolCallTaskByStream(ctx context.Context, task *toolCallTask, opts ...to
 	})
 
 	ctx = setToolCallInfo(ctx, &toolCallInfo{toolCallID: task.callID})
-	ctx = setRunCtx(ctx, PathSegmentTool, task.callID)
+	ctx = SetRunCtx(ctx, PathSegmentTool, task.callID)
 	task.sOutput, task.err = task.r.Stream(ctx, task.arg, opts...)
 	if task.err == nil {
 		task.executed = true
