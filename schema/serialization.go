@@ -49,12 +49,34 @@ func init() {
 // used name.
 // It panics if the registration fails.
 func RegisterName[T any](name string) {
+	gob.RegisterName(name, generic.NewInstance[T]())
+
 	err := serialization.GenericRegister[T](name)
 	if err != nil {
 		panic(err)
 	}
+}
 
-	gob.RegisterName(name, generic.NewInstance[T]())
+func getTypeName(rt reflect.Type) string {
+	name := rt.String()
+
+	// But for named types (or pointers to them), qualify with import path.
+	// Dereference one pointer looking for a named type.
+	star := ""
+	if rt.Name() == "" {
+		if pt := rt; pt.Kind() == reflect.Pointer {
+			star = "*"
+			rt = pt.Elem()
+		}
+	}
+	if rt.Name() != "" {
+		if rt.PkgPath() == "" {
+			name = star + rt.Name()
+		} else {
+			name = star + rt.PkgPath() + "." + rt.Name()
+		}
+	}
+	return name
 }
 
 // Register registers the given type `T` with the gob serialization system and the
@@ -67,42 +89,7 @@ func Register[T any]() {
 
 	gob.Register(value)
 
-	// Default to printed representation for unnamed types
-	rt := reflect.TypeOf(value)
-	name := rt.String()
-
-	// But for named types (or pointers to them), qualify with import path (but see inner comment).
-	// Dereference one pointer looking for a named type.
-	star := ""
-	if rt.Name() == "" {
-		if pt := rt; pt.Kind() == reflect.Pointer {
-			star = "*"
-			// NOTE: The following line should be rt = pt.Elem() to implement
-			// what the comment above claims, but fixing it would break compatibility
-			// with existing gobs.
-			//
-			// Given package p imported as "full/p" with these definitions:
-			//     package p
-			//     type T1 struct { ... }
-			// this table shows the intended and actual strings used by gob to
-			// name the types:
-			//
-			// Type      Correct string     Actual string
-			//
-			// T1        full/p.T1          full/p.T1
-			// *T1       *full/p.T1         *p.T1
-			//
-			// The missing full path cannot be fixed without breaking existing gob decoders.
-			rt = pt
-		}
-	}
-	if rt.Name() != "" {
-		if rt.PkgPath() == "" {
-			name = star + rt.Name()
-		} else {
-			name = star + rt.PkgPath() + "." + rt.Name()
-		}
-	}
+	name := getTypeName(reflect.TypeOf(value))
 
 	err := serialization.GenericRegister[T](name)
 	if err != nil {
