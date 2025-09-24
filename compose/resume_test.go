@@ -53,7 +53,7 @@ func TestInterruptStateAndResumeForRootGraph(t *testing.T) {
 		state, hasState, wasInterrupted := GetInterruptState[*myInterruptState](ctx)
 		if !wasInterrupted {
 			// First run: interrupt with state
-			return "", NewStatefulInterruptAndRerunErr(
+			return "", StatefulInterrupt(ctx,
 				map[string]any{"reason": "scheduled maintenance"},
 				&myInterruptState{OriginalInput: input},
 			)
@@ -117,7 +117,7 @@ func TestInterruptStateAndResumeForSubGraph(t *testing.T) {
 		state, hasState, wasInterrupted := GetInterruptState[*myInterruptState](ctx)
 		if !wasInterrupted {
 			// First run: interrupt with state
-			return "", NewStatefulInterruptAndRerunErr(
+			return "", StatefulInterrupt(ctx,
 				map[string]any{"reason": "sub-graph maintenance"},
 				&myInterruptState{OriginalInput: input},
 			)
@@ -271,38 +271,6 @@ type batchState struct {
 	Results       map[string]string
 }
 
-func (b *batchState) GetSubStateForPath(p PathStep) (any, bool) {
-	if p.Type != PathSegmentTypeProcess {
-		return nil, false
-	}
-	s, ok := b.ProcessStates[p.ID]
-	return s, ok
-}
-
-func (b *batchState) IsPathInterrupted(p PathStep) bool {
-	if p.Type != PathSegmentTypeProcess {
-		return false
-	}
-	_, ok := b.ProcessStates[p.ID]
-	return ok
-}
-
-// batchInfo is the composite info for the whole batch lambda.
-type batchInfo struct {
-	ProcessInfos map[string]any
-}
-
-func (b *batchInfo) GetSubInterruptContexts() []*InterruptCtx {
-	var ctxs []*InterruptCtx
-	for id, info := range b.ProcessInfos {
-		ctxs = append(ctxs, &InterruptCtx{
-			Path: []PathStep{{Type: PathSegmentTypeProcess, ID: id}},
-			Info: info,
-		})
-	}
-	return ctxs
-}
-
 type processResumeData struct {
 	Instruction string
 }
@@ -318,7 +286,7 @@ func TestMultipleInterruptsAndResumes(t *testing.T) {
 	// it kick starts 3 parallel processes, each will interrupt on first run, while preserving their own state.
 	// each of the process should have their own user-facing interrupt info.
 	// define a new PathStepType for these sub processes.
-	// the lambda should use NewStatefulInterruptAndRerunErr to interrupt and preserve the state,
+	// the lambda should use StatefulInterrupt to interrupt and preserve the state,
 	// which is a specific struct type that implements the CompositeInterruptState interface.
 	// there should also be a specific struct that that implements the CompositeInterruptInfo interface,
 	// which helps the end-user to fetch the nested interrupt info.
@@ -335,7 +303,7 @@ func TestMultipleInterruptsAndResumes(t *testing.T) {
 		pState, hasState, wasInterrupted := GetInterruptState[*processState](ctx)
 		if !wasInterrupted {
 			// First run for this process, interrupt it.
-			return "", NewStatefulInterruptAndRerunErr(
+			return "", StatefulInterrupt(ctx,
 				map[string]any{"reason": "process " + id + " needs input"},
 				&processState{Step: 1},
 			)
@@ -348,7 +316,7 @@ func TestMultipleInterruptsAndResumes(t *testing.T) {
 		pData, hasData, isResume := GetResumeContext[*processResumeData](ctx)
 		if !isResume {
 			// Not being resumed, so interrupt again.
-			return "", NewStatefulInterruptAndRerunErr(
+			return "", StatefulInterrupt(ctx,
 				map[string]any{"reason": "process " + id + " still needs input"},
 				pState,
 			)
@@ -369,22 +337,15 @@ func TestMultipleInterruptsAndResumes(t *testing.T) {
 		persistedBatchState, _, _ := GetInterruptState[*batchState](ctx)
 		if persistedBatchState == nil {
 			persistedBatchState = &batchState{
-				ProcessStates: make(map[string]*processState),
-				Results:       make(map[string]string),
+				Results: make(map[string]string),
 			}
 		}
 
-		// This run's state
-		childInterruptInfo := &batchInfo{ProcessInfos: make(map[string]any)}
-		childInterruptState := &batchState{
-			ProcessStates: make(map[string]*processState),
-			Results:       persistedBatchState.Results, // Carry over completed results
-		}
-		anyInterrupted := false
+		step2InterruptErr := make(map[PathStep]error)
 
 		for _, id := range processIDs {
 			// If this process already completed in a previous run, skip it.
-			if _, done := childInterruptState.Results[id]; done {
+			if _, done := persistedBatchState.Results[id]; done {
 				continue
 			}
 
@@ -393,22 +354,20 @@ func TestMultipleInterruptsAndResumes(t *testing.T) {
 			res, err := runProcess(subCtx, id)
 
 			if err != nil {
-				info, state, ok := isInterruptRerunError(err)
+				_, ok := IsInterruptRerunError(err)
 				assert.True(t, ok)
-				anyInterrupted = true
-				childInterruptInfo.ProcessInfos[id] = info
-				childInterruptState.ProcessStates[id] = state.(*processState)
+				step2InterruptErr[PathStep{Type: PathSegmentTypeProcess, ID: id}] = err
 			} else {
 				// Process completed, save its result to the state for the next run.
-				childInterruptState.Results[id] = res
+				persistedBatchState.Results[id] = res
 			}
 		}
 
-		if anyInterrupted {
-			return nil, NewStatefulInterruptAndRerunErr(childInterruptInfo, childInterruptState)
+		if len(step2InterruptErr) > 0 {
+			return nil, CompositeInterrupt(ctx, nil, persistedBatchState, step2InterruptErr)
 		}
 
-		return childInterruptState.Results, nil
+		return persistedBatchState.Results, nil
 	})
 
 	g := NewGraph[string, map[string]string]()
@@ -491,7 +450,7 @@ func (t *mockReentryTool) InvokableRun(ctx context.Context, _ string, _ ...tool.
 			assert.False(t.t, wasInterrupted, "re-entrant call 'call_3' should not have been interrupted on its first run")
 			assert.False(t.t, hasState, "re-entrant call 'call_3' should not have state on its first run")
 			// Now, interrupt it as part of the test flow.
-			return "", NewStatefulInterruptAndRerunErr(nil, "some state for "+callID)
+			return "", StatefulInterrupt(ctx, nil, "some state for "+callID)
 		}
 		// This is the resumed run of the re-entrant call.
 		assert.True(t.t, wasInterrupted, "resumed call 'call_3' must have been interrupted")
@@ -502,7 +461,7 @@ func (t *mockReentryTool) InvokableRun(ctx context.Context, _ string, _ ...tool.
 	// Standard logic for the initial calls (call_1, call_2)
 	if !wasInterrupted {
 		// First run for call_1 and call_2, should interrupt.
-		return "", NewStatefulInterruptAndRerunErr(nil, "some state for "+callID)
+		return "", StatefulInterrupt(ctx, nil, "some state for "+callID)
 	}
 
 	// From here, wasInterrupted is true for call_1 and call_2.
@@ -513,7 +472,7 @@ func (t *mockReentryTool) InvokableRun(ctx context.Context, _ string, _ ...tool.
 	}
 
 	// The tool was interrupted before, but is not being resumed now. Re-interrupt.
-	return "", NewStatefulInterruptAndRerunErr(nil, "some state for "+callID)
+	return "", StatefulInterrupt(ctx, nil, "some state for "+callID)
 }
 
 func TestReentryForResumedTools(t *testing.T) {
@@ -639,7 +598,7 @@ func (t *mockInterruptingTool) InvokableRun(ctx context.Context, argumentsInJSON
 	state, hasState, wasInterrupted := GetInterruptState[*myInterruptState](ctx)
 	if !wasInterrupted {
 		// First run: interrupt
-		return "", NewStatefulInterruptAndRerunErr(
+		return "", StatefulInterrupt(ctx,
 			map[string]any{"reason": "tool maintenance"},
 			&myInterruptState{OriginalInput: args["input"]},
 		)

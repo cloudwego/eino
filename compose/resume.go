@@ -72,10 +72,10 @@ func GetResumeContext[T any](ctx context.Context) (data T, hasData bool, isResum
 	return
 }
 
-// GetCurrentPaths returns the hierarchical path of the currently executing component.
+// GetCurrentPath returns the hierarchical path of the currently executing component.
 // The path is a sequence of segments, each identifying a node or a tool call.
 // This can be useful for logging or
-func GetCurrentPaths(ctx context.Context) (Path, bool) {
+func GetCurrentPath(ctx context.Context) (Path, bool) {
 	if p, ok := ctx.Value(runCtxKey{}).(*runCtx); ok {
 		return p.ps, true
 	}
@@ -105,15 +105,15 @@ func ResumeWithData(ctx context.Context, id string, data any) context.Context {
 	rInfo, ok := ctx.Value(interruptCtxKey{}).(*resumeInfo)
 	if !ok {
 		return context.WithValue(ctx, interruptCtxKey{}, &resumeInfo{
-			interruptID2Info: map[string]any{
+			interruptID2ResumeData: map[string]any{
 				id: data,
 			},
-			interruptID2Used: make(map[string]bool),
+			interruptID2ResumeDataUsed: make(map[string]bool),
 		})
 	}
 
 	rInfo.mu.Lock()
-	rInfo.interruptID2Info[id] = data
+	rInfo.interruptID2ResumeData[id] = data
 	rInfo.mu.Unlock()
 	return ctx
 }
@@ -125,11 +125,17 @@ type interruptState struct {
 	State       any
 }
 
+type interruptStateForPath struct {
+	P    Path
+	S    *interruptState
+	Used bool
+}
+
 type resumeInfo struct {
-	mu               sync.Mutex
-	interruptID2Info map[string]any
-	interruptID2Used map[string]bool
-	cp               *checkpoint
+	mu                         sync.Mutex
+	interruptID2ResumeData     map[string]any
+	interruptID2ResumeDataUsed map[string]bool
+	interruptPoints            []*interruptStateForPath
 }
 
 type interruptCtxKey struct{}
@@ -142,7 +148,7 @@ type runCtx struct {
 }
 
 func getNodePath(ctx context.Context) (*NodePath, bool) {
-	currentPaths, existed := GetCurrentPaths(ctx)
+	currentPaths, existed := GetCurrentPath(ctx)
 	if !existed {
 		return nil, false
 	}
@@ -171,7 +177,7 @@ func getNodePath(ctx context.Context) (*NodePath, bool) {
 //   - pathID: The unique ID for the new path segment.
 func AppendPathStep(ctx context.Context, stepType PathStepType, pathID string) context.Context {
 	// get current path
-	currentPaths, existed := GetCurrentPaths(ctx)
+	currentPaths, existed := GetCurrentPath(ctx)
 	if !existed {
 		currentPaths = []PathStep{
 			{
@@ -193,20 +199,33 @@ func AppendPathStep(ctx context.Context, stepType PathStepType, pathID string) c
 		ps: currentPaths,
 	}
 
-	// take from checkpoint the state for the new path if there is any
-	cp := getCheckpointFromResumeInfo(ctx)
-	if cp != nil {
-		is, hasIs := cp.buildInterruptStateForPath(currentPaths)
-		if hasIs {
-			runCtx.interruptData = is
+	rInfo, hasRInfo := getResumeInfo(ctx)
+	if !hasRInfo {
+		return context.WithValue(ctx, runCtxKey{}, runCtx)
+	}
+
+	for _, ip := range rInfo.interruptPoints {
+		if ip.P.Equals(currentPaths) {
+			if !ip.Used {
+				runCtx.interruptData = ip.S
+				ip.Used = true
+				break
+			}
 		}
 	}
 
 	// take from resumeInfo the data for the new path if there is any
 	id := currentPaths.String()
-	if info, existed := getResumeInfoForID(ctx, id); existed {
-		runCtx.resumeData = info
-		runCtx.isResumeFlow = true
+	rInfo.mu.Lock()
+	defer rInfo.mu.Unlock()
+	used := rInfo.interruptID2ResumeDataUsed[id]
+	if !used {
+		rData, existed := rInfo.interruptID2ResumeData[id]
+		if existed {
+			rInfo.interruptID2ResumeDataUsed[id] = true
+			runCtx.resumeData = rData
+			runCtx.isResumeFlow = true
+		}
 	}
 
 	return context.WithValue(ctx, runCtxKey{}, runCtx)
@@ -216,33 +235,9 @@ func clearRunCtx(ctx context.Context) context.Context {
 	return context.WithValue(ctx, runCtxKey{}, nil)
 }
 
-func getResumeInfoForID(ctx context.Context, id string) (any, bool) {
+func getResumeInfo(ctx context.Context) (*resumeInfo, bool) {
 	info, ok := ctx.Value(interruptCtxKey{}).(*resumeInfo)
-	if !ok {
-		return nil, false
-	}
-
-	info.mu.Lock()
-	defer info.mu.Unlock()
-	used := info.interruptID2Used[id]
-	if used {
-		return nil, false
-	}
-
-	rInfo, existed := info.interruptID2Info[id]
-	if existed {
-		info.interruptID2Used[id] = true
-	}
-	return rInfo, existed
-}
-
-func getCheckpointFromResumeInfo(ctx context.Context) *checkpoint {
-	rInfo, ok := ctx.Value(interruptCtxKey{}).(*resumeInfo)
-	if !ok {
-		return nil
-	}
-
-	return rInfo.cp
+	return info, ok
 }
 
 func getRunCtx(ctx context.Context) (*runCtx, bool) {
