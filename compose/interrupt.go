@@ -17,11 +17,14 @@
 package compose
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"strings"
 
 	"github.com/cloudwego/eino/schema"
+
+	"github.com/google/uuid"
 )
 
 func WithInterruptBeforeNodes(nodes []string) GraphCompileOption {
@@ -39,50 +42,85 @@ func WithInterruptAfterNodes(nodes []string) GraphCompileOption {
 var InterruptAndRerun = errors.New("interrupt and rerun")
 
 func NewInterruptAndRerunErr(extra any) error {
-	return &interruptAndRerun{Extra: extra}
+	return &interruptAndRerun{info: extra}
 }
 
-// NewStatefulInterruptAndRerunErr creates a special error that signals the graph execution engine
-// to interrupt the current run and save a checkpoint. It allows a component to provide both user-facing
-// context and internal, persistable state.
+// StatefulInterrupt creates a special error that signals the graph execution engine to interrupt
+// the current run at the component's specific path and save a checkpoint.
 //
-//   - info: User-facing information about the interrupt. This is not persisted in the checkpoint for resumption
-//     but is exposed to the calling application via the InterruptCtx to provide context (e.g., a reason for the pause).
-//     If the info object implements the CompositeInterruptInfo interface, the graph will use it to generate
-//     detailed contexts for multiple sub-interrupts.
+// This is the standard way for a single, non-composite component to signal a resumable interruption.
 //
-//   - state: The internal state that the interrupting component needs to persist to be able to resume its work later.
-//     This state is saved in the checkpoint and will be provided back to the component upon resumption via runCtx.interruptData.State.
-//     If the state object implements the CompositeInterruptState interface, the graph's resume mechanism can
-//     query the state of specific internal sub-paths.
-func NewStatefulInterruptAndRerunErr(info any, state any) error {
-	return &interruptAndRerun{Extra: info, State: state}
+//   - ctx: The context of the running component, used to retrieve the current execution path.
+//   - info: User-facing information about the interrupt. This is not persisted but is exposed to the
+//     calling application via the InterruptCtx to provide context (e.g., a reason for the pause).
+//   - state: The internal state that the interrupting component needs to persist to be able to resume
+//     its work later. This state is saved in the checkpoint and will be provided back to the component
+//     upon resumption via GetInterruptState.
+func StatefulInterrupt(ctx context.Context, info any, state any) error {
+	var interruptID string
+	path, pathExist := GetCurrentPath(ctx)
+	if pathExist {
+		interruptID = path.String()
+	} else {
+		interruptID = uuid.NewString()
+	}
+
+	return &interruptAndRerun{info: info, state: state, interruptID: &interruptID, path: path}
 }
 
 type interruptAndRerun struct {
-	Extra any // for end-user, probably the human-being
-	State any // for persistence, when resuming, use GetInterruptState to fetch it at the interrupt location
+	info        any // for end-user, probably the human-being
+	state       any // for persistence, when resuming, use GetInterruptState to fetch it at the interrupt location
+	interruptID *string
+	path        Path
+	errs        []*interruptAndRerun
 }
 
-// CompositeInterruptState is an interface for state objects that represent a collection of multiple,
-// independent interrupt points within a single component (e.g., a `ToolsNode` where several tools can be interrupted).
-// Its methods are used by the graph's internal resume mechanism to query the state of a specific internal sub-path.
-// This object is persisted in a checkpoint and passed back to the component upon resumption.
-type CompositeInterruptState interface {
-	GetSubStateForPath(p PathStep) (any, bool)
-	IsPathInterrupted(p PathStep) bool
-}
+// CompositeInterrupt creates a special error that signals a composite interruption.
+// It is designed for "composite" nodes (like ToolsNode) that manage multiple, independent,
+// interruptible sub-processes. It bundles multiple sub-interrupt errors into a single error
+// that the graph engine can deconstruct into a flat list of resumable points.
+//
+//   - ctx: The context of the running composite node.
+//   - info: User-facing information for the composite node itself. Can be nil.
+//   - state: The state for the composite node itself. Can be nil.
+//   - errs: A map where the key is the PathStep of the sub-process and the value is the
+//     interrupt error returned by that sub-process. This function will process these errors,
+//     fully qualifying their paths and IDs before bundling them.
+func CompositeInterrupt(ctx context.Context, info any, state any, errs map[PathStep]error) error {
+	path, _ := GetCurrentPath(ctx)
+	var cErrs []*interruptAndRerun
+	for p, err := range errs {
+		if errors.Is(err, InterruptAndRerun) {
+			subP := append(append([]PathStep{}, path...), p)
+			subID := Path(subP).String()
+			cErrs = append(cErrs, &interruptAndRerun{
+				path:        subP,
+				interruptID: &subID,
+			})
+			continue
+		}
 
-// CompositeInterruptInfo is an interface for info objects that can provide structured details about
-// multiple internal interrupt points. Its primary role is to allow a complex component (like a `ToolsNode`)
-// to generate a detailed list of `InterruptCtx` objects. This list is then presented to the end-user to
-// allow for targeted resumption of a specific sub-operation. This object is exposed to the user, not persisted.
-type CompositeInterruptInfo interface {
-	GetSubInterruptContexts() []*InterruptCtx
+		ire := &interruptAndRerun{}
+		if errors.As(err, &ire) {
+			if ire.path == nil {
+				ire.path = append(append([]PathStep{}, path...), p)
+			}
+			if ire.interruptID == nil && len(ire.errs) == 0 {
+				subID := ire.path.String()
+				ire.interruptID = &subID
+			}
+			cErrs = append(cErrs, ire)
+			continue
+		}
+
+		return fmt.Errorf("composite interrupt but one of the sub error is not interrupt and rerun error: %w", err)
+	}
+	return &interruptAndRerun{errs: cErrs, path: path, state: state, info: info}
 }
 
 func (i *interruptAndRerun) Error() string {
-	return fmt.Sprintf("interrupt and rerun: %v", i.Extra)
+	return fmt.Sprintf("interrupt and rerun: %v for path: %s", i.info, i.path.String())
 }
 
 func IsInterruptRerunError(err error) (any, bool) {
@@ -96,7 +134,7 @@ func isInterruptRerunError(err error) (info any, state any, ok bool) {
 	}
 	ire := &interruptAndRerun{}
 	if errors.As(err, &ire) {
-		return ire.Extra, ire.State, true
+		return ire.info, ire.state, true
 	}
 	return nil, nil, false
 }
@@ -108,76 +146,19 @@ type InterruptInfo struct {
 	RerunNodes      []string
 	RerunNodesExtra map[string]any
 	SubGraphs       map[string]*InterruptInfo
+
+	interruptContexts []*InterruptCtx
 }
 
 func init() {
 	schema.RegisterName[*InterruptInfo]("_eino_compose_interrupt_info") // TODO: check if this is really needed when refactoring adk resume
 }
 
-// GetInterruptContexts recursively traverses the InterruptInfo structure to generate a flat list of all
-// distinct, resumable interrupt points. Each returned InterruptCtx contains a unique, stable path ID
-// that can be used to provide targeted resume data.
-//
-// This method handles three types of interrupts:
-//  1. Sub-graph interrupts: It recursively calls GetInterruptContexts on any sub-graphs and prepends the
-//     sub-graph's node key to the path of each context, ensuring a unique, fully-qualified path.
-//  2. Simple node interrupts: For a standard node that has been interrupted, it creates a simple context
-//     containing just that node's path and its associated user-facing info.
-//  3. Composite node interrupts: If a node's "extra" data implements the CompositeInterruptInfo interface
-//     (e.g., a ToolsNode), it calls GetSubInterruptContexts on that object to get the list of internal
-//     interrupts (e.g., individual tools). It then prepends the composite node's key to each of those
-//     paths to create the final, fully-qualified paths.
+// GetInterruptContexts returns a flat list of all distinct, resumable interrupt points.
+// Each returned InterruptCtx contains a unique, stable path ID that can be used to
+// provide targeted resume data via the Resume or ResumeWithData functions.
 func (ii *InterruptInfo) GetInterruptContexts() []*InterruptCtx {
-	var ctxs []*InterruptCtx
-	for subKey, subInfo := range ii.SubGraphs {
-		subInterruptCtxs := subInfo.GetInterruptContexts()
-		for i := range subInterruptCtxs {
-			c := subInterruptCtxs[i]
-			c.Path = append([]PathStep{{Type: PathStepNode, ID: subKey}}, c.Path...)
-			c.ID = c.Path.String()
-			ctxs = append(ctxs, c)
-		}
-	}
-
-	for _, n := range ii.RerunNodes {
-		if _, ok := ii.SubGraphs[n]; ok {
-			continue
-		}
-
-		extra, ok := ii.RerunNodesExtra[n]
-		if !ok {
-			ctxs = append(ctxs, &InterruptCtx{
-				Path: []PathStep{},
-			})
-			continue
-		}
-
-		// composite node
-		if c, ok := extra.(CompositeInterruptInfo); ok {
-			subContexts := c.GetSubInterruptContexts()
-			for i := range subContexts {
-				c := subContexts[i]
-				c.Path = append([]PathStep{{Type: PathStepNode, ID: n}}, c.Path...)
-				c.ID = c.Path.String()
-				ctxs = append(ctxs, c)
-			}
-			continue
-		}
-
-		// simple node
-		ps := Path{
-			{
-				Type: PathStepNode,
-				ID:   n,
-			},
-		}
-		ctxs = append(ctxs, &InterruptCtx{
-			ID:   ps.String(),
-			Path: ps,
-			Info: extra,
-		})
-	}
-	return ctxs
+	return ii.interruptContexts
 }
 
 // PathStepType defines the type of a segment in an interrupt path.
@@ -205,6 +186,18 @@ func (p Path) String() string {
 		}
 	}
 	return sb.String()
+}
+
+func (p Path) Equals(other Path) bool {
+	if len(p) != len(other) {
+		return false
+	}
+	for i := range p {
+		if p[i].Type != other[i].Type || p[i].ID != other[i].ID {
+			return false
+		}
+	}
+	return true
 }
 
 // PathStep represents a single segment in the hierarchical path to an interrupt point.
@@ -265,6 +258,9 @@ func isSubGraphInterrupt(err error) *subGraphInterruptError {
 type subGraphInterruptError struct {
 	Info       *InterruptInfo
 	CheckPoint *checkpoint
+
+	InterruptPoints   []*interruptStateForPath
+	InterruptContexts []*InterruptCtx
 }
 
 func (e *subGraphInterruptError) Error() string {

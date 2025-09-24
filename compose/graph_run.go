@@ -402,7 +402,6 @@ func newInterruptTempInfo() *interruptTempInfo {
 	return &interruptTempInfo{
 		subGraphInterrupts:  map[string]*subGraphInterruptError{},
 		interruptRerunExtra: map[string]any{},
-		interruptRerunState: map[string]any{},
 	}
 }
 
@@ -412,7 +411,31 @@ type interruptTempInfo struct {
 	interruptBeforeNodes []string
 	interruptAfterNodes  []string
 	interruptRerunExtra  map[string]any
-	interruptRerunState  map[string]any
+
+	interruptPoints   []*interruptStateForPath
+	interruptContexts []*InterruptCtx
+}
+
+func (it *interruptTempInfo) processInterruptErr(ire *interruptAndRerun) {
+	it.interruptPoints = append(it.interruptPoints, &interruptStateForPath{
+		P: ire.path,
+		S: &interruptState{
+			Interrupted: true,
+			State:       ire.state,
+		},
+	})
+
+	if ire.interruptID != nil {
+		it.interruptContexts = append(it.interruptContexts, &InterruptCtx{
+			ID:   *ire.interruptID,
+			Path: ire.path,
+			Info: ire.info,
+		})
+	}
+
+	for _, subE := range ire.errs {
+		it.processInterruptErr(subE)
+	}
 }
 
 func (r *runner) resolveInterruptCompletedTasks(tempInfo *interruptTempInfo, completedTasks []*task) (err error) {
@@ -420,19 +443,22 @@ func (r *runner) resolveInterruptCompletedTasks(tempInfo *interruptTempInfo, com
 		if completedTask.err != nil {
 			if info := isSubGraphInterrupt(completedTask.err); info != nil {
 				tempInfo.subGraphInterrupts[completedTask.nodeKey] = info
+				tempInfo.interruptPoints = append(tempInfo.interruptPoints, info.InterruptPoints...)
+				tempInfo.interruptContexts = append(tempInfo.interruptContexts, info.InterruptContexts...)
 				continue
 			}
-			extra, state, ok := isInterruptRerunError(completedTask.err)
-			if ok {
+
+			ire := &interruptAndRerun{}
+			if errors.As(completedTask.err, &ire) {
 				tempInfo.interruptRerunNodes = append(tempInfo.interruptRerunNodes, completedTask.nodeKey)
-				if extra != nil {
-					tempInfo.interruptRerunExtra[completedTask.nodeKey] = extra
+				if ire.info != nil {
+					tempInfo.interruptRerunExtra[completedTask.nodeKey] = ire.info
 				}
-				if state != nil {
-					tempInfo.interruptRerunState[completedTask.nodeKey] = state
-				}
+
+				tempInfo.processInterruptErr(ire)
 				continue
 			}
+
 			return wrapGraphNodeError(completedTask.nodeKey, completedTask.err)
 		}
 
@@ -468,10 +494,9 @@ func (r *runner) handleInterrupt(
 	checkPointID *string,
 ) error {
 	cp := &checkpoint{
-		Channels:               channels,
-		Inputs:                 make(map[string]any),
-		SkipPreHandler:         map[string]bool{},
-		NodeKey2InterruptState: make(map[string]any),
+		Channels:       channels,
+		Inputs:         make(map[string]any),
+		SkipPreHandler: map[string]bool{},
 	}
 	if r.runCtx != nil {
 		// current graph has enable state
@@ -553,11 +578,11 @@ func (r *runner) handleInterruptWithSubGraphAndRerunNodes(
 	}
 
 	cp := &checkpoint{
-		Channels:               cm.channels,
-		Inputs:                 make(map[string]any),
-		SkipPreHandler:         skipPreHandler,
-		SubGraphs:              make(map[string]*checkpoint),
-		NodeKey2InterruptState: make(map[string]any),
+		Channels:        cm.channels,
+		Inputs:          make(map[string]any),
+		SkipPreHandler:  skipPreHandler,
+		SubGraphs:       make(map[string]*checkpoint),
+		InterruptPoints: tempInfo.interruptPoints,
 	}
 	if r.runCtx != nil {
 		// current graph has enable state
@@ -567,12 +592,13 @@ func (r *runner) handleInterruptWithSubGraphAndRerunNodes(
 	}
 
 	intInfo := &InterruptInfo{
-		State:           cp.State,
-		BeforeNodes:     tempInfo.interruptBeforeNodes,
-		AfterNodes:      tempInfo.interruptAfterNodes,
-		RerunNodes:      tempInfo.interruptRerunNodes,
-		RerunNodesExtra: tempInfo.interruptRerunExtra,
-		SubGraphs:       make(map[string]*InterruptInfo),
+		State:             cp.State,
+		BeforeNodes:       tempInfo.interruptBeforeNodes,
+		AfterNodes:        tempInfo.interruptAfterNodes,
+		RerunNodes:        tempInfo.interruptRerunNodes,
+		RerunNodesExtra:   tempInfo.interruptRerunExtra,
+		SubGraphs:         make(map[string]*InterruptInfo),
+		interruptContexts: tempInfo.interruptContexts,
 	}
 	for _, t := range subgraphTasks {
 		cp.RerunNodes = append(cp.RerunNodes, t.nodeKey)
@@ -581,10 +607,6 @@ func (r *runner) handleInterruptWithSubGraphAndRerunNodes(
 	}
 	for _, t := range rerunTasks {
 		cp.RerunNodes = append(cp.RerunNodes, t.nodeKey)
-		state, ok := tempInfo.interruptRerunState[t.nodeKey]
-		if ok {
-			cp.NodeKey2InterruptState[t.nodeKey] = state
-		}
 	}
 	err = r.checkPointer.convertCheckPoint(cp, isStream)
 	if err != nil {
@@ -592,8 +614,10 @@ func (r *runner) handleInterruptWithSubGraphAndRerunNodes(
 	}
 	if isSubGraph {
 		return &subGraphInterruptError{
-			Info:       intInfo,
-			CheckPoint: cp,
+			Info:              intInfo,
+			CheckPoint:        cp,
+			InterruptPoints:   tempInfo.interruptPoints,
+			InterruptContexts: tempInfo.interruptContexts,
 		}
 	} else if checkPointID != nil {
 		err = r.checkPointer.set(ctx, *checkPointID, cp)
