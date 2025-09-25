@@ -805,7 +805,7 @@ func (m *myTool1) Info(ctx context.Context) (*schema.ToolInfo, error) {
 func (m *myTool1) InvokableRun(ctx context.Context, argumentsInJSON string, opts ...tool.Option) (string, error) {
 	if m.times == 0 {
 		m.times = 1
-		return "", compose.InterruptAndRerun
+		return "", compose.Interrupt(ctx, nil)
 	}
 	return "result", nil
 }
