@@ -87,7 +87,7 @@ func TestInterruptStateAndResumeForRootGraph(t *testing.T) {
 	interruptInfo, isInterrupt := ExtractInterruptInfo(err)
 	assert.True(t, isInterrupt)
 	assert.NotNil(t, interruptInfo)
-	interruptContexts := interruptInfo.GetInterruptContexts()
+	interruptContexts := interruptInfo.InterruptContexts
 	assert.Equal(t, 1, len(interruptContexts))
 	assert.Equal(t, "runnable:root;node:lambda", interruptContexts[0].ID)
 	assert.Equal(t, map[string]any{"reason": "scheduled maintenance"}, interruptContexts[0].Info)
@@ -158,7 +158,7 @@ func TestInterruptStateAndResumeForSubGraph(t *testing.T) {
 	assert.True(t, isInterrupt)
 	assert.NotNil(t, interruptInfo)
 
-	interruptContexts := interruptInfo.GetInterruptContexts()
+	interruptContexts := interruptInfo.InterruptContexts
 	assert.Equal(t, 1, len(interruptContexts))
 	assert.Equal(t, "runnable:;node:sub_graph_node;node:inner_lambda", interruptContexts[0].ID)
 	assert.Equal(t, map[string]any{"reason": "sub-graph maintenance"}, interruptContexts[0].Info)
@@ -242,7 +242,7 @@ func TestInterruptStateAndResumeForToolInNestedSubGraph(t *testing.T) {
 	assert.True(t, isInterrupt)
 	assert.NotNil(t, interruptInfo)
 
-	interruptContexts := interruptInfo.GetInterruptContexts()
+	interruptContexts := interruptInfo.InterruptContexts
 	assert.Equal(t, 1, len(interruptContexts))
 	expectedPath := "runnable:root;node:sub_graph_a;node:sub_graph_b;node:tools;tool:tool_call_123"
 	assert.Equal(t, expectedPath, interruptContexts[0].ID)
@@ -387,7 +387,7 @@ func TestMultipleInterruptsAndResumes(t *testing.T) {
 	assert.Error(t, err)
 	interruptInfo, isInterrupt := ExtractInterruptInfo(err)
 	assert.True(t, isInterrupt)
-	interruptContexts := interruptInfo.GetInterruptContexts()
+	interruptContexts := interruptInfo.InterruptContexts
 	assert.Len(t, interruptContexts, 3)
 
 	// Verify all 3 interrupt points are exposed
@@ -411,7 +411,7 @@ func TestMultipleInterruptsAndResumes(t *testing.T) {
 	assert.Error(t, err)
 	interruptInfo2, isInterrupt2 := ExtractInterruptInfo(err)
 	assert.True(t, isInterrupt2)
-	interruptContexts2 := interruptInfo2.GetInterruptContexts()
+	interruptContexts2 := interruptInfo2.InterruptContexts
 	assert.Len(t, interruptContexts2, 1)
 	assert.Equal(t, "runnable:root;node:batch;process:p1", interruptContexts2[0].ID)
 
@@ -549,7 +549,7 @@ func TestReentryForResumedTools(t *testing.T) {
 	_, err = graph.Invoke(context.Background(), []*schema.Message{schema.UserMessage("start")}, WithCheckPointID(checkPointID))
 	assert.Error(t, err)
 	interruptInfo1, _ := ExtractInterruptInfo(err)
-	interrupts1 := interruptInfo1.GetInterruptContexts()
+	interrupts1 := interruptInfo1.InterruptContexts
 	assert.Len(t, interrupts1, 2)
 	assert.Contains(t, []string{interrupts1[0].ID, interrupts1[1].ID}, "runnable:root;node:tools;tool:call_1")
 	assert.Contains(t, []string{interrupts1[0].ID, interrupts1[1].ID}, "runnable:root;node:tools;tool:call_2")
@@ -560,7 +560,7 @@ func TestReentryForResumedTools(t *testing.T) {
 	_, err = graph.Invoke(resumeCtx2, []*schema.Message{schema.UserMessage("start")}, WithCheckPointID(checkPointID))
 	assert.Error(t, err)
 	interruptInfo2, _ := ExtractInterruptInfo(err)
-	interrupts2 := interruptInfo2.GetInterruptContexts()
+	interrupts2 := interruptInfo2.InterruptContexts
 	assert.Len(t, interrupts2, 1)
 	assert.Equal(t, "runnable:root;node:tools;tool:call_2", interrupts2[0].ID)
 
@@ -569,7 +569,7 @@ func TestReentryForResumedTools(t *testing.T) {
 	_, err = graph.Invoke(resumeCtx3, []*schema.Message{schema.UserMessage("start")}, WithCheckPointID(checkPointID))
 	assert.Error(t, err)
 	interruptInfo3, _ := ExtractInterruptInfo(err)
-	interrupts3 := interruptInfo3.GetInterruptContexts()
+	interrupts3 := interruptInfo3.InterruptContexts
 	assert.Len(t, interrupts3, 1)
 	assert.Equal(t, "runnable:root;node:tools;tool:call_3", interrupts3[0].ID) // Note: this is the new call_3
 
@@ -700,7 +700,7 @@ func TestGraphInterruptWithinLambda(t *testing.T) {
 	assert.Error(t, err)
 	interruptInfo, isInterrupt := ExtractInterruptInfo(err)
 	assert.True(t, isInterrupt)
-	interruptContexts := interruptInfo.GetInterruptContexts()
+	interruptContexts := interruptInfo.InterruptContexts
 	assert.Len(t, interruptContexts, 1)
 
 	// The path is now fully qualified, including the runnable steps from both graphs.
@@ -820,11 +820,10 @@ func TestLegacyInterrupt(t *testing.T) {
 	assert.Error(t, err)
 	info, isInterrupt := ExtractInterruptInfo(err)
 	assert.True(t, isInterrupt)
-	interrupts := info.GetInterruptContexts()
-	assert.Len(t, interrupts, 3)
+	assert.Len(t, info.InterruptContexts, 3)
 
 	found := make(map[string]any)
-	for _, iCtx := range interrupts {
+	for _, iCtx := range info.InterruptContexts {
 		found[iCtx.ID] = iCtx.Info
 	}
 	expectedID1 := "runnable:root;node:legacy_composite;custom:1"
@@ -842,7 +841,7 @@ func TestLegacyInterrupt(t *testing.T) {
 	assert.Error(t, err)
 	info2, isInterrupt2 := ExtractInterruptInfo(err)
 	assert.True(t, isInterrupt2)
-	assert.Equal(t, info.GetInterruptContexts(), info2.GetInterruptContexts(), "Interrupt contexts should be identical on re-run")
+	assert.Equal(t, info.InterruptContexts, info2.InterruptContexts, "Interrupt contexts should be identical on re-run")
 
 	// 7. Third invocation - Resume all three interrupt points with specific data
 	resumeData := map[string]any{
