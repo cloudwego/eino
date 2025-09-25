@@ -598,7 +598,7 @@ func (r *runner) handleInterruptWithSubGraphAndRerunNodes(
 		RerunNodes:        tempInfo.interruptRerunNodes,
 		RerunNodesExtra:   tempInfo.interruptRerunExtra,
 		SubGraphs:         make(map[string]*InterruptInfo),
-		interruptContexts: tempInfo.interruptContexts,
+		InterruptContexts: tempInfo.interruptContexts,
 	}
 	for _, t := range subgraphTasks {
 		cp.RerunNodes = append(cp.RerunNodes, t.nodeKey)
