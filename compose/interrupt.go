@@ -217,7 +217,7 @@ func CompositeInterrupt(ctx context.Context, info any, state any, errs ...error)
 
 		ie := &interruptError{}
 		if errors.As(err, &ie) {
-			for _, subInterruptCtx := range ie.Info.interruptContexts {
+			for _, subInterruptCtx := range ie.Info.InterruptContexts {
 				subIRE := &interruptAndRerun{
 					info:        subInterruptCtx.Info,
 					interruptID: &subInterruptCtx.ID,
@@ -254,25 +254,17 @@ func isInterruptRerunError(err error) (info any, state any, ok bool) {
 }
 
 type InterruptInfo struct {
-	State           any
-	BeforeNodes     []string
-	AfterNodes      []string
-	RerunNodes      []string
-	RerunNodesExtra map[string]any
-	SubGraphs       map[string]*InterruptInfo
-
-	interruptContexts []*InterruptCtx
+	State             any
+	BeforeNodes       []string
+	AfterNodes        []string
+	RerunNodes        []string
+	RerunNodesExtra   map[string]any
+	SubGraphs         map[string]*InterruptInfo
+	InterruptContexts []*InterruptCtx
 }
 
 func init() {
 	schema.RegisterName[*InterruptInfo]("_eino_compose_interrupt_info") // TODO: check if this is really needed when refactoring adk resume
-}
-
-// GetInterruptContexts returns a flat list of all distinct, resumable interrupt points.
-// Each returned InterruptCtx contains a unique, stable path ID that can be used to
-// provide targeted resume data via the Resume or ResumeWithData functions.
-func (ii *InterruptInfo) GetInterruptContexts() []*InterruptCtx {
-	return ii.interruptContexts
 }
 
 // PathStepType defines the type of a segment in an interrupt path.
