@@ -847,7 +847,7 @@ func (m *myTool1) Info(ctx context.Context) (*schema.ToolInfo, error) {
 func (m *myTool1) InvokableRun(ctx context.Context, argumentsInJSON string, opts ...tool.Option) (string, error) {
 	if m.times == 0 {
 		m.times++
-		return "", NewInterruptAndRerunErr("tool1 rerun extra")
+		return "", Interrupt(ctx, "tool1 rerun extra")
 	}
 	return "tool1 input: " + argumentsInJSON, nil
 }
@@ -863,7 +863,7 @@ func (m *myTool2) Info(ctx context.Context) (*schema.ToolInfo, error) {
 func (m *myTool2) StreamableRun(ctx context.Context, argumentsInJSON string, opts ...tool.Option) (*schema.StreamReader[string], error) {
 	if m.times == 0 {
 		m.times++
-		return nil, NewInterruptAndRerunErr("tool2 rerun extra")
+		return nil, Interrupt(ctx, "tool2 rerun extra")
 	}
 	return schema.StreamReaderFromArray([]string{"tool2 input: ", argumentsInJSON}), nil
 }

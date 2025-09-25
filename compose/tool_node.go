@@ -406,33 +406,35 @@ func (tn *ToolsNode) Invoke(ctx context.Context, input *schema.Message,
 		Input:         input,
 		ExecutedTools: make(map[string]string),
 	}
-	rerun := false
-	step2InterruptErr := make(map[PathStep]error)
+
+	var errs []error
 	for i := 0; i < n; i++ {
 		if tasks[i].err != nil {
 			info, ok := IsInterruptRerunError(tasks[i].err)
 			if !ok {
 				return nil, fmt.Errorf("failed to invoke tool[name:%s id:%s]: %w", tasks[i].name, tasks[i].callID, tasks[i].err)
 			}
-			rerun = true
+
 			rerunExtra.RerunTools = append(rerunExtra.RerunTools, tasks[i].callID)
 			rerunState.RerunTools = append(rerunState.RerunTools, tasks[i].callID)
 			if info != nil {
 				rerunExtra.RerunExtraMap[tasks[i].callID] = info
 			}
-			step2InterruptErr[PathStep{Type: PathStepTool, ID: tasks[i].callID}] = tasks[i].err
+
+			iErr := WrapInterruptAndRerunIfNeeded(ctx, PathStep{PathStepTool, tasks[i].callID}, tasks[i].err)
+			errs = append(errs, iErr)
 			continue
 		}
 		if tasks[i].executed {
 			rerunExtra.ExecutedTools[tasks[i].callID] = tasks[i].output
 			rerunState.ExecutedTools[tasks[i].callID] = tasks[i].output
 		}
-		if !rerun {
+		if len(errs) == 0 {
 			output[i] = schema.ToolMessage(tasks[i].output, tasks[i].callID, schema.WithToolName(tasks[i].name))
 		}
 	}
-	if rerun {
-		return nil, CompositeInterrupt(ctx, rerunExtra, rerunState, step2InterruptErr)
+	if len(errs) > 0 {
+		return nil, CompositeInterrupt(ctx, rerunExtra, rerunState, errs...)
 	}
 
 	return output, nil
@@ -474,7 +476,6 @@ func (tn *ToolsNode) Stream(ctx context.Context, input *schema.Message,
 
 	n := len(tasks)
 
-	rerun := false
 	rerunExtra := &ToolsInterruptAndRerunExtra{
 		ToolCalls:     input.ToolCalls,
 		ExecutedTools: make(map[string]string),
@@ -484,7 +485,7 @@ func (tn *ToolsNode) Stream(ctx context.Context, input *schema.Message,
 		Input:         input,
 		ExecutedTools: make(map[string]string),
 	}
-	step2InterruptErr := make(map[PathStep]error)
+	var errs []error
 	// check rerun
 	for i := 0; i < n; i++ {
 		if tasks[i].err != nil {
@@ -492,18 +493,19 @@ func (tn *ToolsNode) Stream(ctx context.Context, input *schema.Message,
 			if !ok {
 				return nil, fmt.Errorf("failed to stream tool call %s: %w", tasks[i].callID, tasks[i].err)
 			}
-			rerun = true
+
 			rerunExtra.RerunTools = append(rerunExtra.RerunTools, tasks[i].callID)
 			rerunState.RerunTools = append(rerunState.RerunTools, tasks[i].callID)
 			if info != nil {
 				rerunExtra.RerunExtraMap[tasks[i].callID] = info
 			}
-			step2InterruptErr[PathStep{Type: PathStepTool, ID: tasks[i].callID}] = tasks[i].err
+			iErr := WrapInterruptAndRerunIfNeeded(ctx, PathStep{PathStepTool, tasks[i].callID}, tasks[i].err)
+			errs = append(errs, iErr)
 			continue
 		}
 	}
 
-	if rerun {
+	if len(errs) > 0 {
 		// concat and save tool output
 		for _, t := range tasks {
 			if t.executed {
@@ -515,7 +517,7 @@ func (tn *ToolsNode) Stream(ctx context.Context, input *schema.Message,
 				rerunState.ExecutedTools[t.callID] = o
 			}
 		}
-		return nil, CompositeInterrupt(ctx, rerunExtra, rerunState, step2InterruptErr)
+		return nil, CompositeInterrupt(ctx, rerunExtra, rerunState, errs...)
 	}
 
 	// common return
