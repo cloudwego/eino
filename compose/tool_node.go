@@ -373,7 +373,7 @@ func (tn *ToolsNode) Invoke(ctx context.Context, input *schema.Message,
 	}
 
 	var executedTools map[string]string
-	if tnState, hasState, wasInterrupted := GetInterruptState[*toolsInterruptAndRerunState](ctx); wasInterrupted && hasState {
+	if wasInterrupted, hasState, tnState := GetInterruptState[*toolsInterruptAndRerunState](ctx); wasInterrupted && hasState {
 		input = tnState.Input
 		if tnState.ExecutedTools != nil {
 			executedTools = tnState.ExecutedTools
@@ -453,7 +453,7 @@ func (tn *ToolsNode) Stream(ctx context.Context, input *schema.Message,
 	}
 
 	var executedTools map[string]string
-	if tnState, hasState, wasInterrupted := GetInterruptState[*toolsInterruptAndRerunState](ctx); wasInterrupted && hasState {
+	if wasInterrupted, hasState, tnState := GetInterruptState[*toolsInterruptAndRerunState](ctx); wasInterrupted && hasState {
 		input = tnState.Input
 		if tnState.ExecutedTools != nil {
 			executedTools = tnState.ExecutedTools
