@@ -342,7 +342,7 @@ func TestMultipleInterruptsAndResumes(t *testing.T) {
 			}
 		}
 
-		step2InterruptErr := make(map[PathStep]error)
+		var errs []error
 
 		for _, id := range processIDs {
 			// If this process already completed in a previous run, skip it.
@@ -357,15 +357,15 @@ func TestMultipleInterruptsAndResumes(t *testing.T) {
 			if err != nil {
 				_, ok := IsInterruptRerunError(err)
 				assert.True(t, ok)
-				step2InterruptErr[PathStep{Type: PathSegmentTypeProcess, ID: id}] = err
+				errs = append(errs, err)
 			} else {
 				// Process completed, save its result to the state for the next run.
 				persistedBatchState.Results[id] = res
 			}
 		}
 
-		if len(step2InterruptErr) > 0 {
-			return nil, CompositeInterrupt(ctx, nil, persistedBatchState, step2InterruptErr)
+		if len(errs) > 0 {
+			return nil, CompositeInterrupt(ctx, nil, persistedBatchState, errs...)
 		}
 
 		return persistedBatchState.Results, nil
@@ -675,20 +675,10 @@ func TestGraphInterruptWithinLambda(t *testing.T) {
 				return "", err // Not an interrupt, just fail
 			}
 
-			// This is the key part: act as a composite node.
-			// We know we called the "inner" graph, so we can construct the path step for it.
-			innerGraphStep := PathStep{Type: PathStepRunnable, ID: "inner"}
-
-			// The error from the inner graph contains all the necessary interrupt info.
-			// We just need to wrap it in a map for CompositeInterrupt.
-			subErrs := map[PathStep]error{
-				innerGraphStep: err,
-			}
-
 			// The composite interrupt itself can be stateless, as it's just a wrapper.
 			// It signals to the framework to look inside the subErrs and correctly
 			// prepend the current path to the paths of the inner interrupts.
-			return "", CompositeInterrupt(ctx, "composite interrupt from lambda", nil, subErrs)
+			return "", CompositeInterrupt(ctx, "composite interrupt from lambda", nil, err)
 		}
 		return output, nil
 	})
