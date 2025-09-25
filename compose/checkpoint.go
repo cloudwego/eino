@@ -19,7 +19,6 @@ package compose
 import (
 	"context"
 	"fmt"
-	"sync"
 
 	"github.com/cloudwego/eino/internal/serialization"
 	"github.com/cloudwego/eino/schema"
@@ -130,9 +129,6 @@ type checkpoint struct {
 
 	SubGraphs map[string]*checkpoint
 
-	subGraphForwarded map[string]bool
-	mu                sync.Mutex
-
 	InterruptPoints []*interruptStateForPath
 }
 
@@ -190,13 +186,7 @@ func forwardCheckPoint(ctx context.Context, nodeKey string) context.Context {
 	}
 
 	if subCP, ok := cp.SubGraphs[nodeKey]; ok {
-		if cp.subGraphForwarded == nil {
-			cp.subGraphForwarded = make(map[string]bool)
-		}
-		if cp.subGraphForwarded[nodeKey] {
-			return context.WithValue(ctx, checkPointKey{}, (*checkpoint)(nil))
-		}
-		cp.subGraphForwarded[nodeKey] = true
+		delete(cp.SubGraphs, nodeKey) // only forward once
 		return context.WithValue(ctx, checkPointKey{}, subCP)
 	}
 	return context.WithValue(ctx, checkPointKey{}, (*checkpoint)(nil))
