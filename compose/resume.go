@@ -88,33 +88,53 @@ func GetCurrentPath(ctx context.Context) (Path, bool) {
 // but its `runCtx.resumeData` field will be nil.
 //
 // - ctx: The parent context.
-// - id: The unique ID of the interrupt point, obtained from `InterruptCtx.ID`.
-func Resume(ctx context.Context, id string) context.Context {
-	return ResumeWithData(ctx, id, nil)
+//   - ids: A variadic list of unique interrupt point IDs, obtained from `InterruptCtx.ID`.
+func Resume(ctx context.Context, ids ...string) context.Context {
+	resumeData := make(map[string]any, len(ids))
+	for _, id := range ids {
+		resumeData[id] = nil
+	}
+	// An empty map signals a "resume all" to the framework.
+	return BatchResumeWithData(ctx, resumeData)
 }
 
-// ResumeWithData attaches data to a specific interrupt point for resumption.
-// When the graph is resumed, the component that was interrupted at the given `id` will receive this data.
-// The component should then use the generic `GetResumeData[T]` function to retrieve this data in a type-safe manner.
+// ResumeWithData provides a convenient way to resume a single interrupt point with data.
 //
 //   - ctx: The parent context.
 //   - id: The unique ID of the interrupt point, obtained from `InterruptCtx.ID`.
-//   - data: The data to be passed to the interrupted component. The type of this data must match what the
-//     target component expects to receive via `GetResumeData[T]`.
+//   - data: The data to be passed to the interrupted component.
 func ResumeWithData(ctx context.Context, id string, data any) context.Context {
+	return BatchResumeWithData(ctx, map[string]any{id: data})
+}
+
+// BatchResumeWithData attaches data to one or more interrupt points for resumption in a single batch operation.
+// This is the underlying function used by `Resume` and `ResumeWithData`.
+//
+//   - ctx: The parent context.
+//   - resumeData: A map where keys are the unique interrupt point IDs and values are the data
+//     to be passed to the corresponding component.
+func BatchResumeWithData(ctx context.Context, resumeData map[string]any) context.Context {
 	rInfo, ok := ctx.Value(interruptCtxKey{}).(*resumeInfo)
 	if !ok {
+		// Create a new resumeInfo and copy the map to prevent external mutation.
+		newMap := make(map[string]any, len(resumeData))
+		for k, v := range resumeData {
+			newMap[k] = v
+		}
 		return context.WithValue(ctx, interruptCtxKey{}, &resumeInfo{
-			interruptID2ResumeData: map[string]any{
-				id: data,
-			},
+			interruptID2ResumeData:     newMap,
 			interruptID2ResumeDataUsed: make(map[string]bool),
 		})
 	}
 
 	rInfo.mu.Lock()
-	rInfo.interruptID2ResumeData[id] = data
-	rInfo.mu.Unlock()
+	defer rInfo.mu.Unlock()
+	if rInfo.interruptID2ResumeData == nil {
+		rInfo.interruptID2ResumeData = make(map[string]any)
+	}
+	for id, data := range resumeData {
+		rInfo.interruptID2ResumeData[id] = data
+	}
 	return ctx
 }
 
