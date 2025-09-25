@@ -29,6 +29,7 @@ func init() {
 	_ = serialization.GenericRegister[dagChannel]("_eino_dag_channel")
 	_ = serialization.GenericRegister[pregelChannel]("_eino_pregel_channel")
 	_ = serialization.GenericRegister[dependencyState]("_eino_dependency_state")
+	_ = serialization.GenericRegister[toolsInterruptAndRerunState]("_eino_tools_interrupt_and_rerun_state")
 }
 
 // RegisterSerializableType registers a custom type for eino serialization.
@@ -80,6 +81,10 @@ func RegisterInternalType(f func(key string, value any) error) error {
 	if err != nil {
 		return err
 	}
+	err = f("_eino_tools_interrupt_and_rerun_state", &toolsInterruptAndRerunState{})
+	if err != nil {
+		return err
+	}
 	return f("_eino_dependency_state", dependencyState(0))
 }
 
@@ -121,33 +126,13 @@ type checkpoint struct {
 	SkipPreHandler map[string]bool
 	RerunNodes     []string
 
-	ToolsNodeExecutedTools map[string] /*tool node key*/ map[string] /*tool call id*/ string
-
 	SubGraphs map[string]*checkpoint
+
+	InterruptPoints []*interruptStateForPath
 }
 
-type nodePathKey struct{}
 type stateModifierKey struct{}
 type checkPointKey struct{} // *checkpoint
-
-func getNodeKey(ctx context.Context) (*NodePath, bool) {
-	if key, ok := ctx.Value(nodePathKey{}).(*NodePath); ok {
-		return key, true
-	}
-	return nil, false
-}
-
-func setNodeKey(ctx context.Context, key string) context.Context {
-	path, existed := getNodeKey(ctx)
-	if !existed || len(path.path) == 0 {
-		return context.WithValue(ctx, nodePathKey{}, NewNodePath(key))
-	}
-	return context.WithValue(ctx, nodePathKey{}, NewNodePath(append(path.path, key)...))
-}
-
-func clearNodeKey(ctx context.Context) context.Context {
-	return context.WithValue(ctx, nodePathKey{}, nil)
-}
 
 func getStateModifier(ctx context.Context) StateModifier {
 	if sm, ok := ctx.Value(stateModifierKey{}).(StateModifier); ok {
@@ -173,6 +158,16 @@ func getCheckPointFromStore(ctx context.Context, id string, cpr *checkPointer) (
 }
 
 func setCheckPointToCtx(ctx context.Context, cp *checkpoint) context.Context {
+	rInfo, ok := ctx.Value(interruptCtxKey{}).(*resumeInfo)
+	if ok {
+		rInfo.interruptPoints = cp.InterruptPoints
+	} else {
+		rInfo = &resumeInfo{
+			interruptPoints: cp.InterruptPoints,
+		}
+		ctx = context.WithValue(ctx, interruptCtxKey{}, rInfo)
+	}
+
 	return context.WithValue(ctx, checkPointKey{}, cp)
 }
 
@@ -188,6 +183,7 @@ func forwardCheckPoint(ctx context.Context, nodeKey string) context.Context {
 	if cp == nil {
 		return ctx
 	}
+
 	if subCP, ok := cp.SubGraphs[nodeKey]; ok {
 		delete(cp.SubGraphs, nodeKey) // only forward once
 		return context.WithValue(ctx, checkPointKey{}, subCP)

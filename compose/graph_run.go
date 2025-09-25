@@ -156,7 +156,7 @@ func (r *runner) run(ctx context.Context, isStream bool, input any, opts ...Opti
 	}
 
 	// Extract subgraph
-	path, isSubGraph := getNodeKey(ctx)
+	path, isSubGraph := getNodePath(ctx)
 
 	// load checkpoint from ctx/store or init graph
 	initialized := false
@@ -381,7 +381,7 @@ func (r *runner) restoreFromCheckPoint(
 		ctx = context.WithValue(ctx, stateKey{}, &internalState{state: cp.State})
 	}
 
-	nextTasks, err := r.restoreTasks(ctx, cp.Inputs, cp.SkipPreHandler, cp.ToolsNodeExecutedTools, cp.RerunNodes, isStream, optMap) // should restore after set state to context
+	nextTasks, err := r.restoreTasks(ctx, cp.Inputs, cp.SkipPreHandler, cp.RerunNodes, isStream, optMap) // should restore after set state to context
 	if err != nil {
 		return ctx, nil, newGraphRunError(fmt.Errorf("restore tasks fail: %w", err))
 	}
@@ -390,19 +390,42 @@ func (r *runner) restoreFromCheckPoint(
 
 func newInterruptTempInfo() *interruptTempInfo {
 	return &interruptTempInfo{
-		subGraphInterrupts:     map[string]*subGraphInterruptError{},
-		interruptRerunExtra:    map[string]any{},
-		interruptExecutedTools: make(map[string]map[string]string),
+		subGraphInterrupts:  map[string]*subGraphInterruptError{},
+		interruptRerunExtra: map[string]any{},
 	}
 }
 
 type interruptTempInfo struct {
-	subGraphInterrupts     map[string]*subGraphInterruptError
-	interruptRerunNodes    []string
-	interruptBeforeNodes   []string
-	interruptAfterNodes    []string
-	interruptRerunExtra    map[string]any
-	interruptExecutedTools map[string]map[string]string
+	subGraphInterrupts   map[string]*subGraphInterruptError
+	interruptRerunNodes  []string
+	interruptBeforeNodes []string
+	interruptAfterNodes  []string
+	interruptRerunExtra  map[string]any
+
+	interruptPoints   []*interruptStateForPath
+	interruptContexts []*InterruptCtx
+}
+
+func (it *interruptTempInfo) processInterruptErr(ire *interruptAndRerun) {
+	it.interruptPoints = append(it.interruptPoints, &interruptStateForPath{
+		P: ire.path,
+		S: &interruptState{
+			Interrupted: true,
+			State:       ire.state,
+		},
+	})
+
+	if ire.interruptID != nil {
+		it.interruptContexts = append(it.interruptContexts, &InterruptCtx{
+			ID:   *ire.interruptID,
+			Path: ire.path,
+			Info: ire.info,
+		})
+	}
+
+	for _, subE := range ire.errs {
+		it.processInterruptErr(subE)
+	}
 }
 
 func (r *runner) resolveInterruptCompletedTasks(tempInfo *interruptTempInfo, completedTasks []*task) (err error) {
@@ -410,23 +433,22 @@ func (r *runner) resolveInterruptCompletedTasks(tempInfo *interruptTempInfo, com
 		if completedTask.err != nil {
 			if info := isSubGraphInterrupt(completedTask.err); info != nil {
 				tempInfo.subGraphInterrupts[completedTask.nodeKey] = info
+				tempInfo.interruptPoints = append(tempInfo.interruptPoints, info.InterruptPoints...)
+				tempInfo.interruptContexts = append(tempInfo.interruptContexts, info.InterruptContexts...)
 				continue
 			}
-			extra, ok := IsInterruptRerunError(completedTask.err)
-			if ok {
-				tempInfo.interruptRerunNodes = append(tempInfo.interruptRerunNodes, completedTask.nodeKey)
-				if extra != nil {
-					tempInfo.interruptRerunExtra[completedTask.nodeKey] = extra
 
-					// save tool node info
-					if completedTask.call.action.meta.component == ComponentOfToolsNode {
-						if e, ok := extra.(*ToolsInterruptAndRerunExtra); ok {
-							tempInfo.interruptExecutedTools[completedTask.nodeKey] = e.ExecutedTools
-						}
-					}
+			ire := &interruptAndRerun{}
+			if errors.As(completedTask.err, &ire) {
+				tempInfo.interruptRerunNodes = append(tempInfo.interruptRerunNodes, completedTask.nodeKey)
+				if ire.info != nil {
+					tempInfo.interruptRerunExtra[completedTask.nodeKey] = ire.info
 				}
+
+				tempInfo.processInterruptErr(ire)
 				continue
 			}
+
 			return wrapGraphNodeError(completedTask.nodeKey, completedTask.err)
 		}
 
@@ -546,11 +568,11 @@ func (r *runner) handleInterruptWithSubGraphAndRerunNodes(
 	}
 
 	cp := &checkpoint{
-		Channels:               cm.channels,
-		Inputs:                 make(map[string]any),
-		SkipPreHandler:         skipPreHandler,
-		ToolsNodeExecutedTools: tempInfo.interruptExecutedTools,
-		SubGraphs:              make(map[string]*checkpoint),
+		Channels:        cm.channels,
+		Inputs:          make(map[string]any),
+		SkipPreHandler:  skipPreHandler,
+		SubGraphs:       make(map[string]*checkpoint),
+		InterruptPoints: tempInfo.interruptPoints,
 	}
 	if r.runCtx != nil {
 		// current graph has enable state
@@ -560,12 +582,13 @@ func (r *runner) handleInterruptWithSubGraphAndRerunNodes(
 	}
 
 	intInfo := &InterruptInfo{
-		State:           cp.State,
-		BeforeNodes:     tempInfo.interruptBeforeNodes,
-		AfterNodes:      tempInfo.interruptAfterNodes,
-		RerunNodes:      tempInfo.interruptRerunNodes,
-		RerunNodesExtra: tempInfo.interruptRerunExtra,
-		SubGraphs:       make(map[string]*InterruptInfo),
+		State:             cp.State,
+		BeforeNodes:       tempInfo.interruptBeforeNodes,
+		AfterNodes:        tempInfo.interruptAfterNodes,
+		RerunNodes:        tempInfo.interruptRerunNodes,
+		RerunNodesExtra:   tempInfo.interruptRerunExtra,
+		SubGraphs:         make(map[string]*InterruptInfo),
+		InterruptContexts: tempInfo.interruptContexts,
 	}
 	for _, t := range subgraphTasks {
 		cp.RerunNodes = append(cp.RerunNodes, t.nodeKey)
@@ -581,8 +604,10 @@ func (r *runner) handleInterruptWithSubGraphAndRerunNodes(
 	}
 	if isSubGraph {
 		return &subGraphInterruptError{
-			Info:       intInfo,
-			CheckPoint: cp,
+			Info:              intInfo,
+			CheckPoint:        cp,
+			InterruptPoints:   tempInfo.interruptPoints,
+			InterruptContexts: tempInfo.interruptContexts,
 		}
 	} else if checkPointID != nil {
 		err = r.checkPointer.set(ctx, *checkPointID, cp)
@@ -631,7 +656,7 @@ func (r *runner) createTasks(ctx context.Context, nodeMap map[string]any, optMap
 		}
 
 		nextTasks = append(nextTasks, &task{
-			ctx:     setNodeKey(ctx, nodeKey),
+			ctx:     AppendPathStep(ctx, PathStepNode, nodeKey),
 			nodeKey: nodeKey,
 			call:    call,
 			input:   nodeInput,
@@ -664,7 +689,6 @@ func (r *runner) restoreTasks(
 	ctx context.Context,
 	inputs map[string]any,
 	skipPreHandler map[string]bool,
-	toolNodeExecutedTools map[string]map[string]string,
 	rerunNodes []string,
 	isStream bool,
 	optMap map[string][]any) ([]*task, error) {
@@ -692,7 +716,7 @@ func (r *runner) restoreTasks(
 		}
 
 		newTask := &task{
-			ctx:            setNodeKey(ctx, key),
+			ctx:            AppendPathStep(ctx, PathStepNode, key),
 			nodeKey:        key,
 			call:           call,
 			input:          input,
@@ -701,9 +725,6 @@ func (r *runner) restoreTasks(
 		}
 		if opt, ok := optMap[key]; ok {
 			newTask.option = opt
-		}
-		if executedTools, ok := toolNodeExecutedTools[key]; ok {
-			newTask.option = append(newTask.option, withExecutedTools(executedTools))
 		}
 
 		ret = append(ret, newTask)
