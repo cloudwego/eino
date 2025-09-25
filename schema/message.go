@@ -457,12 +457,49 @@ func (m *Message) Format(_ context.Context, vs map[string]any, formatType Format
 	}
 
 	for i, mc := range copied.MultiContent {
-		if len(mc.Text) > 0 {
+		switch mc.Type {
+		case ChatMessagePartTypeText:
 			nmc, err := formatContent(mc.Text, vs, formatType)
 			if err != nil {
 				return nil, err
 			}
 			copied.MultiContent[i].Text = nmc
+		case ChatMessagePartTypeImageURL:
+			if mc.ImageURL == nil {
+				continue
+			}
+			url, err := formatContent(mc.ImageURL.URL, vs, formatType)
+			if err != nil {
+				return nil, err
+			}
+			copied.MultiContent[i].ImageURL.URL = url
+		case ChatMessagePartTypeAudioURL:
+			if mc.AudioURL == nil {
+				continue
+			}
+			url, err := formatContent(mc.AudioURL.URL, vs, formatType)
+			if err != nil {
+				return nil, err
+			}
+			copied.MultiContent[i].AudioURL.URL = url
+		case ChatMessagePartTypeVideoURL:
+			if mc.VideoURL == nil {
+				continue
+			}
+			url, err := formatContent(mc.VideoURL.URL, vs, formatType)
+			if err != nil {
+				return nil, err
+			}
+			copied.MultiContent[i].VideoURL.URL = url
+		case ChatMessagePartTypeFileURL:
+			if mc.FileURL == nil {
+				continue
+			}
+			url, err := formatContent(mc.FileURL.URL, vs, formatType)
+			if err != nil {
+				return nil, err
+			}
+			copied.MultiContent[i].FileURL.URL = url
 		}
 	}
 	return []*Message{&copied}, nil
