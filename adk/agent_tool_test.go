@@ -186,19 +186,34 @@ func TestAgentTool_InvokableRun(t *testing.T) {
 	}
 }
 
-func buildToolTestGraph(it tool.InvokableTool) compose.Runnable[string, string] {
+func TestGetReactHistory(t *testing.T) {
+	g := compose.NewGraph[string, []Message](compose.WithGenLocalState(func(ctx context.Context) (state *State) {
+		return &State{
+			Messages: []Message{
+				schema.UserMessage("user query"),
+				schema.AssistantMessage("", []schema.ToolCall{{ID: "tool call id 1", Function: schema.FunctionCall{Name: "tool1", Arguments: "arguments1"}}}),
+				schema.ToolMessage("tool result 1", "tool call id 1", schema.WithToolName("tool1")),
+				schema.AssistantMessage("", []schema.ToolCall{{ID: "tool call id 2", Function: schema.FunctionCall{Name: "tool2", Arguments: "arguments2"}}}),
+			},
+			AgentName: "MyAgent",
+		}
+	}))
+	assert.NoError(t, g.AddLambdaNode("1", compose.InvokableLambda(func(ctx context.Context, input string) (output []Message, err error) {
+		return getReactChatHistory(ctx, "DestAgentName")
+	})))
+	assert.NoError(t, g.AddEdge(compose.START, "1"))
+	assert.NoError(t, g.AddEdge("1", compose.END))
+
 	ctx := context.Background()
-	g := compose.NewGraph[string, string](compose.WithGenLocalState(func(ctx context.Context) (state *State) {
-		return &State{}
-	}))
-	_ = g.AddLambdaNode("tool node", compose.InvokableLambda(func(ctx context.Context, input string) (output string, err error) {
-		return it.InvokableRun(ctx, input)
-	}))
-	_ = g.AddEdge(compose.START, "tool node")
-	_ = g.AddEdge("tool node", compose.END)
-	r, err := g.Compile(ctx)
-	if err != nil {
-		panic(err)
-	}
-	return r
+	runner, err := g.Compile(ctx)
+	assert.NoError(t, err)
+	result, err := runner.Invoke(ctx, "")
+	assert.NoError(t, err)
+	assert.Equal(t, []Message{
+		schema.UserMessage("user query"),
+		schema.UserMessage("For context: [MyAgent] called tool: `tool1` with arguments: arguments1."),
+		schema.UserMessage("For context: [MyAgent] `tool1` tool returned result: tool result 1."),
+		schema.UserMessage("For context: [MyAgent] called tool: `transfer_to_agent` with arguments: DestAgentName."),
+		schema.UserMessage("For context: [MyAgent] `transfer_to_agent` tool returned result: successfully transferred to agent [DestAgentName]."),
+	}, result)
 }

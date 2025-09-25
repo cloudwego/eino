@@ -233,16 +233,15 @@ func getReactChatHistory(ctx context.Context, destAgentName string) ([]Message, 
 	var messages []Message
 	var agentName string
 	err := compose.ProcessState(ctx, func(ctx context.Context, st *State) error {
-		messages = st.Messages
+		messages = make([]Message, len(st.Messages)-1)
+		copy(messages, st.Messages[:len(st.Messages)-1]) // remove the last assistant message, which is the tool call message
 		agentName = st.AgentName
 		return nil
 	})
 
-	messages = messages[:len(messages)-1] // remove the last assistant message, which is the tool call message
-	history := make([]Message, 0, len(messages))
-	history = append(history, messages...)
 	a, t := GenTransferMessages(ctx, destAgentName)
-	history = append(history, a, t)
+	messages = append(messages, a, t)
+	history := make([]Message, 0, len(messages))
 	for _, msg := range messages {
 		if msg.Role == schema.System {
 			continue
