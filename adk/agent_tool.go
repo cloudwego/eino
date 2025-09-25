@@ -57,7 +57,7 @@ func WithAgentInputSchema(schema *schema.ParamsOneOf) AgentToolOption {
 	}
 }
 
-func NewAgentTool(_ context.Context, agent Agent, options ...AgentToolOption) tool.BaseTool {
+func NewAgentTool(_ context.Context, agent Agent, options ...AgentToolOption) tool.InvokableTool {
 	opts := &AgentToolOptions{}
 	for _, opt := range options {
 		opt(opts)

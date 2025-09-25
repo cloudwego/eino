@@ -18,6 +18,12 @@ package planexecute
 
 import (
 	"context"
+	"encoding/gob"
+	"encoding/json"
+	"fmt"
+	"io"
+	"log"
+	"strings"
 	"testing"
 
 	"github.com/bytedance/sonic"
@@ -26,6 +32,9 @@ import (
 
 	"github.com/cloudwego/eino/adk"
 	"github.com/cloudwego/eino/components/model"
+	"github.com/cloudwego/eino/components/tool"
+	"github.com/cloudwego/eino/components/tool/utils"
+	"github.com/cloudwego/eino/compose"
 	mockAdk "github.com/cloudwego/eino/internal/mock/adk"
 	mockModel "github.com/cloudwego/eino/internal/mock/components/model"
 	"github.com/cloudwego/eino/schema"
@@ -719,4 +728,242 @@ func TestPlanExecuteAgentWithReplan(t *testing.T) {
 		assert.NoError(t, e)
 		t.Logf("event %d:\n%s", i, eventJSON)
 	}
+}
+
+func TestTTT(t *testing.T) {
+	gob.Register([]ExecutedStep{})
+	gob.Register([]*schema.Message{})
+	gob.Register(&defaultPlan{})
+	ctx := context.Background()
+
+	p, err := NewPlanner(ctx, &PlannerConfig{
+		ToolCallingChatModel: &mockPlanModel{},
+	})
+	assert.NoError(t, err)
+
+	e, err := NewExecutor(ctx, &ExecutorConfig{
+		Model: &mockExecutorModel{},
+		ToolsConfig: adk.ToolsConfig{
+			ToolsNodeConfig: compose.ToolsNodeConfig{Tools: []tool.BaseTool{NewAskForClarificationTool()}},
+			ReturnDirectly:  nil,
+		},
+	})
+	assert.NoError(t, err)
+
+	r, err := NewReplanner(ctx, &ReplannerConfig{
+		ChatModel: &mockPlanModel{},
+	})
+	assert.NoError(t, err)
+
+	a, err := New(ctx, &Config{
+		Planner:       p,
+		Executor:      e,
+		Replanner:     r,
+		MaxIterations: 100,
+	})
+	assert.NoError(t, err)
+
+	runner := adk.NewRunner(ctx, adk.RunnerConfig{
+		Agent:           a,
+		CheckPointStore: &inMemoryStore{},
+	})
+	iter := runner.Query(ctx, "input", adk.WithCheckPointID("1"))
+	for {
+		e, ok := iter.Next()
+		if !ok {
+			break
+		}
+		Event(e)
+	}
+}
+
+type mockPlanModel struct{}
+
+func (m *mockPlanModel) Generate(ctx context.Context, input []*schema.Message, opts ...model.Option) (*schema.Message, error) {
+	return schema.AssistantMessage("", []schema.ToolCall{{
+		ID: "123",
+		Function: schema.FunctionCall{
+			Name:      "Plan",
+			Arguments: `{"step":["step1", "step2"]}`,
+		},
+	}}), nil
+}
+
+func (m *mockPlanModel) Stream(ctx context.Context, input []*schema.Message, opts ...model.Option) (*schema.StreamReader[*schema.Message], error) {
+	//TODO implement me
+	panic("implement me")
+}
+
+func (m *mockPlanModel) WithTools(tools []*schema.ToolInfo) (model.ToolCallingChatModel, error) {
+	return m, nil
+}
+
+type mockExecutorModel struct {
+	times int
+}
+
+func (m *mockExecutorModel) Generate(ctx context.Context, input []*schema.Message, opts ...model.Option) (*schema.Message, error) {
+	if m.times < 2 {
+		m.times += 1
+		return schema.AssistantMessage("123", nil), nil
+	}
+	return schema.AssistantMessage("", []schema.ToolCall{
+		{
+			ID: "123",
+			Function: schema.FunctionCall{
+				Name:      "ask_for_clarification",
+				Arguments: `{"question":"question"}`,
+			},
+		},
+	}), nil
+}
+
+func (m *mockExecutorModel) Stream(ctx context.Context, input []*schema.Message, opts ...model.Option) (*schema.StreamReader[*schema.Message], error) {
+	//TODO implement me
+	panic("implement me")
+}
+
+func (m *mockExecutorModel) WithTools(tools []*schema.ToolInfo) (model.ToolCallingChatModel, error) {
+	return m, nil
+}
+
+type AskForClarificationInput struct {
+	Question string `json:"question" jsonschema:"description=The specific question you want to ask the user to get the missing information"`
+}
+
+func NewAskForClarificationTool() tool.InvokableTool {
+	t, err := utils.InferOptionableTool(
+		"ask_for_clarification",
+		"Call this tool when the user's request is ambiguous or lacks the necessary information to proceed. Use it to ask a follow-up question to get the details you need, such as the book's genre, before you can use other tools effectively.",
+		func(ctx context.Context, input *AskForClarificationInput, opts ...tool.Option) (output string, err error) {
+			return "", compose.InterruptAndRerun
+		})
+	if err != nil {
+		log.Fatal(err)
+	}
+	return t
+}
+
+type inMemoryStore struct {
+	m map[string][]byte
+}
+
+func (i *inMemoryStore) Get(ctx context.Context, checkPointID string) ([]byte, bool, error) {
+	b, ok := i.m[checkPointID]
+	return b, ok, nil
+}
+
+func (i *inMemoryStore) Set(ctx context.Context, checkPointID string, checkPoint []byte) error {
+	println("xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx")
+	if i.m == nil {
+		i.m = make(map[string][]byte)
+	}
+	i.m[checkPointID] = checkPoint
+	return nil
+}
+
+func Event(event *adk.AgentEvent) {
+	fmt.Printf("name: %s\npath: %s", event.AgentName, event.RunPath)
+	if event.Output != nil && event.Output.MessageOutput != nil {
+		if m := event.Output.MessageOutput.Message; m != nil {
+			if len(m.Content) > 0 {
+				if m.Role == schema.Tool {
+					fmt.Printf("\ntool response: %s", m.Content)
+				} else {
+					fmt.Printf("\nanswer: %s", m.Content)
+				}
+			}
+			if len(m.ToolCalls) > 0 {
+				for _, tc := range m.ToolCalls {
+					fmt.Printf("\ntool name: %s", tc.Function.Name)
+					fmt.Printf("\narguments: %s", tc.Function.Arguments)
+				}
+			}
+		} else if s := event.Output.MessageOutput.MessageStream; s != nil {
+			toolMap := map[int][]*schema.Message{}
+			var contentStart bool
+			charNumOfOneRow := 0
+			maxCharNumOfOneRow := 120
+			for {
+				chunk, err := s.Recv()
+				if err != nil {
+					if err == io.EOF {
+						break
+					}
+					fmt.Printf("error: %v", err)
+					return
+				}
+				if chunk.Content != "" {
+					if !contentStart {
+						contentStart = true
+						if chunk.Role == schema.Tool {
+							fmt.Printf("\ntool response: ")
+						} else {
+							fmt.Printf("\nanswer: ")
+						}
+					}
+
+					charNumOfOneRow += len(chunk.Content)
+					if strings.Contains(chunk.Content, "\n") {
+						charNumOfOneRow = 0
+					} else if charNumOfOneRow >= maxCharNumOfOneRow {
+						fmt.Printf("\n")
+						charNumOfOneRow = 0
+					}
+					fmt.Printf("%v", chunk.Content)
+				}
+
+				if len(chunk.ToolCalls) > 0 {
+					for _, tc := range chunk.ToolCalls {
+						index := tc.Index
+						if index == nil {
+							log.Fatalf("index is nil")
+						}
+						toolMap[*index] = append(toolMap[*index], &schema.Message{
+							Role: chunk.Role,
+							ToolCalls: []schema.ToolCall{
+								{
+									ID:    tc.ID,
+									Type:  tc.Type,
+									Index: tc.Index,
+									Function: schema.FunctionCall{
+										Name:      tc.Function.Name,
+										Arguments: tc.Function.Arguments,
+									},
+								},
+							},
+						})
+					}
+				}
+			}
+
+			for _, msgs := range toolMap {
+				m, err := schema.ConcatMessages(msgs)
+				if err != nil {
+					log.Fatalf("ConcatMessage failed: %v", err)
+					return
+				}
+				fmt.Printf("\ntool name: %s", m.ToolCalls[0].Function.Name)
+				fmt.Printf("\narguments: %s", m.ToolCalls[0].Function.Arguments)
+			}
+		}
+	}
+	if event.Action != nil {
+		if event.Action.TransferToAgent != nil {
+			fmt.Printf("\naction: transfer to %v", event.Action.TransferToAgent.DestAgentName)
+		}
+		if event.Action.Interrupted != nil {
+			ii, _ := json.MarshalIndent(event.Action.Interrupted.Data, "  ", "  ")
+			fmt.Printf("\naction: interrupted")
+			fmt.Printf("\ninterrupt snapshot: %v", string(ii))
+		}
+		if event.Action.Exit {
+			fmt.Printf("\naction: exit")
+		}
+	}
+	if event.Err != nil {
+		fmt.Printf("\nerror: %v", event.Err)
+	}
+	fmt.Println()
+	fmt.Println()
 }
