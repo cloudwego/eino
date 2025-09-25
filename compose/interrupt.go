@@ -23,8 +23,6 @@ import (
 	"strings"
 
 	"github.com/cloudwego/eino/schema"
-
-	"github.com/google/uuid"
 )
 
 func WithInterruptBeforeNodes(nodes []string) GraphCompileOption {
@@ -39,10 +37,83 @@ func WithInterruptAfterNodes(nodes []string) GraphCompileOption {
 	}
 }
 
+// InterruptAndRerun throws a simple stateless and info-less interrupt error.
+// Deprecated: use Interrupt(ctx context.Context, info any) error instead.
+// If you really needs to use this error as a sub-error for a CompositeInterrupt call,
+// wrap it using WrapInterruptAndRerunIfNeeded first.
 var InterruptAndRerun = errors.New("interrupt and rerun")
 
+// NewInterruptAndRerunErr creates a stateless interrupt error with info.
+// Deprecated: use Interrupt(ctx context.Context, info any) error instead.
+// If you really needs to use this error as a sub-error for a CompositeInterrupt call,
+// wrap it using WrapInterruptAndRerunIfNeeded first.
 func NewInterruptAndRerunErr(extra any) error {
 	return &interruptAndRerun{info: extra}
+}
+
+type wrappedInterruptAndRerun struct {
+	ps    Path
+	inner error
+}
+
+func (w *wrappedInterruptAndRerun) Error() string {
+	return fmt.Sprintf("interrupt and rerun at path %s: %s", w.ps.String(), w.inner.Error())
+}
+
+func (w *wrappedInterruptAndRerun) Unwrap() error {
+	return w.inner
+}
+
+// WrapInterruptAndRerunIfNeeded wraps the InterruptAndRerun error, or the error returned by
+// NewInterruptAndRerunErr, with the current path.
+// If the error is returned by either Interrupt, StatefulInterrupt or CompositeInterrupt,
+// it will be returned as-is without wrapping
+func WrapInterruptAndRerunIfNeeded(ctx context.Context, step PathStep, err error) error {
+	path, _ := GetCurrentPath(ctx)
+	newPath := append(append([]PathStep{}, path...), step)
+	id := Path(newPath).String()
+	if errors.Is(err, InterruptAndRerun) {
+		return &interruptAndRerun{
+			path:        newPath,
+			interruptID: &id,
+		}
+	}
+
+	ire := &interruptAndRerun{}
+	if errors.As(err, &ire) {
+		if ire.path == nil {
+			return &wrappedInterruptAndRerun{
+				ps:    ire.path,
+				inner: err,
+			}
+		}
+		return ire
+	}
+
+	ie := &interruptError{}
+	if errors.As(err, &ie) {
+		return ie
+	}
+
+	return fmt.Errorf("failed to wrap error as pathed InterruptAndRerun: %w", err)
+}
+
+// Interrupt creates a special error that signals the graph execution engine to interrupt
+// the current run at the component's specific path and save a checkpoint.
+//
+// This is the standard way for a single, non-composite component to signal a resumable interruption.
+//
+//   - ctx: The context of the running component, used to retrieve the current execution path.
+//   - info: User-facing information about the interrupt. This is not persisted but is exposed to the
+//     calling application via the InterruptCtx to provide context (e.g., a reason for the pause).
+func Interrupt(ctx context.Context, info any) error {
+	var interruptID string
+	path, pathExist := GetCurrentPath(ctx)
+	if pathExist {
+		interruptID = path.String()
+	}
+
+	return &interruptAndRerun{info: info, interruptID: &interruptID, path: path}
 }
 
 // StatefulInterrupt creates a special error that signals the graph execution engine to interrupt
@@ -61,8 +132,6 @@ func StatefulInterrupt(ctx context.Context, info any, state any) error {
 	path, pathExist := GetCurrentPath(ctx)
 	if pathExist {
 		interruptID = path.String()
-	} else {
-		interruptID = uuid.NewString()
 	}
 
 	return &interruptAndRerun{info: info, state: state, interruptID: &interruptID, path: path}
@@ -81,35 +150,68 @@ type interruptAndRerun struct {
 // interruptible sub-processes. It bundles multiple sub-interrupt errors into a single error
 // that the graph engine can deconstruct into a flat list of resumable points.
 //
+// This function is robust and can handle several types of errors from sub-processes:
+//
+//   - A `Interrupt` or `StatefulInterrupt` error from a simple component.
+//
+//   - A nested `CompositeInterrupt` error from another composite component.
+//
+//   - An error containing `InterruptInfo` returned by a `Runnable` (e.g., a Graph within a lambda node).
+//
+//   - An error returned by 'WrapInterruptAndRerunIfNeeded' for the legacy InterruptAndRerun error,
+//     and for the error returned by the deprecated NewInterruptAndRerunErr.
+//
+// Parameters:
+//
 //   - ctx: The context of the running composite node.
+//
 //   - info: User-facing information for the composite node itself. Can be nil.
+//     This info will be attached to InterruptInfo.RerunNodeExtra.
+//     Provided mainly for compatibility purpose as the composite node itself
+//     is not an interrupt point with interrupt ID,
+//     which means it lacks enough reason to give a user-facing info.
+//
 //   - state: The state for the composite node itself. Can be nil.
-//   - errs: A map where the key is the PathStep of the sub-process and the value is the
-//     interrupt error returned by that sub-process. This function will process these errors,
-//     fully qualifying their paths and IDs before bundling them.
-func CompositeInterrupt(ctx context.Context, info any, state any, errs map[PathStep]error) error {
+//     This could be useful when the composite node needs to restore state,
+//     such as its input (e.g. ToolsNode).
+//
+//   - errs: a list of errors emitted by sub-processes.
+//
+// NOTE: if the error you passed in is the deprecated InterruptAndRerun, or an error returned by
+// the deprecated NewInterruptAndRerunErr function, you must wrap it using WrapInterruptAndRerunIfNeeded first
+// before passing them into this function.
+func CompositeInterrupt(ctx context.Context, info any, state any, errs ...error) error {
 	path, _ := GetCurrentPath(ctx)
 	var cErrs []*interruptAndRerun
-	for p, err := range errs {
-		if errors.Is(err, InterruptAndRerun) {
-			subP := append(append([]PathStep{}, path...), p)
-			subID := Path(subP).String()
-			cErrs = append(cErrs, &interruptAndRerun{
-				path:        subP,
-				interruptID: &subID,
-			})
+	for _, err := range errs {
+		wrapped := &wrappedInterruptAndRerun{}
+		if errors.As(err, &wrapped) {
+			inner := wrapped.Unwrap()
+			if errors.Is(inner, InterruptAndRerun) {
+				id := wrapped.ps.String()
+				cErrs = append(cErrs, &interruptAndRerun{
+					path:        wrapped.ps,
+					interruptID: &id,
+				})
+				continue
+			}
+
+			ire := &interruptAndRerun{}
+			if errors.As(err, &ire) {
+				id := wrapped.ps.String()
+				cErrs = append(cErrs, &interruptAndRerun{
+					path:        wrapped.ps,
+					interruptID: &id,
+					info:        ire.info,
+					state:       ire.state,
+				})
+			}
+
 			continue
 		}
 
 		ire := &interruptAndRerun{}
 		if errors.As(err, &ire) {
-			if ire.path == nil {
-				ire.path = append(append([]PathStep{}, path...), p)
-			}
-			if ire.interruptID == nil && len(ire.errs) == 0 {
-				subID := ire.path.String()
-				ire.interruptID = &subID
-			}
 			cErrs = append(cErrs, ire)
 			continue
 		}
@@ -148,6 +250,18 @@ func isInterruptRerunError(err error) (info any, state any, ok bool) {
 	ire := &interruptAndRerun{}
 	if errors.As(err, &ire) {
 		return ire.info, ire.state, true
+	}
+	wrapped := &wrappedInterruptAndRerun{}
+	if errors.As(err, &wrapped) {
+		inner := wrapped.Unwrap()
+		if errors.Is(inner, InterruptAndRerun) {
+			return nil, nil, true
+		}
+
+		ire := &interruptAndRerun{}
+		if errors.As(inner, &ire) {
+			return ire.info, ire.state, true
+		}
 	}
 	return nil, nil, false
 }

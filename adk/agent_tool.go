@@ -179,7 +179,7 @@ func (at *agentTool) InvokableRun(ctx context.Context, argumentsInJSON string, o
 		if err != nil {
 			return "", fmt.Errorf("failed to save agent tool checkpoint to state: %w", err)
 		}
-		return "", compose.InterruptAndRerun
+		return "", compose.Interrupt(ctx, nil)
 	}
 
 	if lastEvent == nil {

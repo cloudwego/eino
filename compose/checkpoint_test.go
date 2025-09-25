@@ -829,7 +829,7 @@ func TestRerunNodeInterrupt(t *testing.T) {
 	err := g.AddLambdaNode("1", InvokableLambda(func(ctx context.Context, input string) (output string, err error) {
 		defer func() { times++ }()
 		if times%2 == 0 {
-			return "", NewInterruptAndRerunErr("test extra")
+			return "", Interrupt(ctx, "test extra")
 		}
 		return input, nil
 	}), WithStatePreHandler(func(ctx context.Context, in string, state *testStruct) (string, error) {
@@ -886,7 +886,7 @@ func TestInterfaceResume(t *testing.T) {
 	assert.NoError(t, g.AddLambdaNode("1", InvokableLambda(func(ctx context.Context, input myInterface) (output string, err error) {
 		if times == 0 {
 			times++
-			return "", NewInterruptAndRerunErr("test extra")
+			return "", Interrupt(ctx, "test extra")
 		}
 		return "success", nil
 	})))
@@ -995,7 +995,7 @@ func TestPreHandlerInterrupt(t *testing.T) {
 	}), WithStatePreHandler(func(ctx context.Context, in string, state state) (string, error) {
 		if times == 0 {
 			times++
-			return "", NewInterruptAndRerunErr("")
+			return "", Interrupt(ctx, "")
 		}
 		return in, nil
 	}))
