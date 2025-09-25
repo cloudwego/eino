@@ -153,16 +153,17 @@ func getNodePath(ctx context.Context) (*NodePath, bool) {
 		return nil, false
 	}
 
-	nodePaths := make([]string, 0, len(currentPaths))
+	nodePath := make([]string, 0, len(currentPaths))
 	for _, p := range currentPaths {
-		if p.Type != PathStepNode {
-			break
+		if p.Type == PathStepRunnable {
+			nodePath = []string{}
+			continue
 		}
 
-		nodePaths = append(nodePaths, p.ID)
+		nodePath = append(nodePath, p.ID)
 	}
 
-	return NewNodePath(nodePaths...), true
+	return NewNodePath(nodePath...), len(nodePath) > 0
 }
 
 // AppendPathStep creates a new execution context for a sub-component within a custom composite node.
@@ -229,10 +230,6 @@ func AppendPathStep(ctx context.Context, stepType PathStepType, pathID string) c
 	}
 
 	return context.WithValue(ctx, runCtxKey{}, runCtx)
-}
-
-func clearRunCtx(ctx context.Context) context.Context {
-	return context.WithValue(ctx, runCtxKey{}, nil)
 }
 
 func getResumeInfo(ctx context.Context) (*resumeInfo, bool) {
