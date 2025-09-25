@@ -95,7 +95,7 @@ func (i *InternalSerializer) Marshal(v interface{}) ([]byte, error) {
 }
 
 func (i *InternalSerializer) Unmarshal(data []byte, v any) error {
-	val, err := unmarshal(data)
+	val, err := unmarshal(data, reflect.TypeOf(v))
 	if err != nil {
 		return fmt.Errorf("failed to unmarshal: %w", err)
 	}
@@ -161,13 +161,9 @@ func (i *InternalSerializer) Unmarshal(data []byte, v any) error {
 	return fmt.Errorf("failed to unmarshal: cannot assign %s to %s", reflect.TypeOf(val), target.Type())
 }
 
-func unmarshal(data []byte) (any, error) {
+func unmarshal(data []byte, t reflect.Type) (any, error) {
 	is := &internalStruct{}
 	err := sonic.Unmarshal(data, is)
-	if err != nil {
-		return nil, err
-	}
-	t, err := restoreType(is.Type)
 	if err != nil {
 		return nil, err
 	}
@@ -269,7 +265,8 @@ func restoreType(vt *valueType) (reflect.Type, error) {
 }
 
 func internalMarshal(v any, fieldType reflect.Type) (*internalStruct, error) {
-	if v == nil {
+	if v == nil ||
+		(reflect.ValueOf(v).IsZero() && fieldType != nil && fieldType.Kind() != reflect.Interface) {
 		return nil, nil
 	}
 
@@ -656,6 +653,10 @@ func createValueFromType(t reflect.Type) (value reflect.Value, derefValue reflec
 
 	if derefValue.Kind() == reflect.Map && derefValue.IsNil() {
 		derefValue.Set(reflect.MakeMap(derefValue.Type()))
+	}
+
+	if (derefValue.Kind() == reflect.Slice || derefValue.Kind() == reflect.Array) && derefValue.IsNil() {
+		derefValue.Set(reflect.MakeSlice(derefValue.Type(), 0, 0))
 	}
 
 	return value, derefValue
