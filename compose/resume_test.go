@@ -50,7 +50,7 @@ func TestInterruptStateAndResumeForRootGraph(t *testing.T) {
 	g := NewGraph[string, string]()
 
 	lambda := InvokableLambda(func(ctx context.Context, input string) (string, error) {
-		state, hasState, wasInterrupted := GetInterruptState[*myInterruptState](ctx)
+		wasInterrupted, hasState, state := GetInterruptState[*myInterruptState](ctx)
 		if !wasInterrupted {
 			// First run: interrupt with state
 			return "", StatefulInterrupt(ctx,
@@ -63,7 +63,7 @@ func TestInterruptStateAndResumeForRootGraph(t *testing.T) {
 		assert.True(t, hasState)
 		assert.Equal(t, "initial input", state.OriginalInput)
 
-		data, hasData, isResume := GetResumeContext[*myResumeData](ctx)
+		isResume, hasData, data := GetResumeContext[*myResumeData](ctx)
 		assert.True(t, isResume)
 		assert.True(t, hasData)
 		assert.Equal(t, "let's continue", data.Message)
@@ -114,7 +114,7 @@ func TestInterruptStateAndResumeForSubGraph(t *testing.T) {
 	subGraph := NewGraph[string, string]()
 
 	lambda := InvokableLambda(func(ctx context.Context, input string) (string, error) {
-		state, hasState, wasInterrupted := GetInterruptState[*myInterruptState](ctx)
+		wasInterrupted, hasState, state := GetInterruptState[*myInterruptState](ctx)
 		if !wasInterrupted {
 			// First run: interrupt with state
 			return "", StatefulInterrupt(ctx,
@@ -127,7 +127,7 @@ func TestInterruptStateAndResumeForSubGraph(t *testing.T) {
 		assert.True(t, hasState)
 		assert.Equal(t, "main input", state.OriginalInput)
 
-		data, hasData, isResume := GetResumeContext[*myResumeData](ctx)
+		isResume, hasData, data := GetResumeContext[*myResumeData](ctx)
 		assert.True(t, isResume)
 		assert.True(t, hasData)
 		assert.Equal(t, "let's continue sub-graph", data.Message)
@@ -301,7 +301,7 @@ func TestMultipleInterruptsAndResumes(t *testing.T) {
 	// This is the logic for a single "process"
 	runProcess := func(ctx context.Context, id string) (string, error) {
 		// Check if this specific process was interrupted before
-		pState, hasState, wasInterrupted := GetInterruptState[*processState](ctx)
+		wasInterrupted, hasState, pState := GetInterruptState[*processState](ctx)
 		if !wasInterrupted {
 			// First run for this process, interrupt it.
 			return "", StatefulInterrupt(ctx,
@@ -314,7 +314,7 @@ func TestMultipleInterruptsAndResumes(t *testing.T) {
 		assert.Equal(t, 1, pState.Step)
 
 		// Check if we are being resumed
-		pData, hasData, isResume := GetResumeContext[*processResumeData](ctx)
+		isResume, hasData, pData := GetResumeContext[*processResumeData](ctx)
 		if !isResume {
 			// Not being resumed, so interrupt again.
 			return "", StatefulInterrupt(ctx,
@@ -335,7 +335,7 @@ func TestMultipleInterruptsAndResumes(t *testing.T) {
 	// This is the main "batch" lambda that orchestrates the processes
 	batchLambda := InvokableLambda(func(ctx context.Context, _ string) (map[string]string, error) {
 		// Restore the state of the batch node itself
-		persistedBatchState, _, _ := GetInterruptState[*batchState](ctx)
+		_, _, persistedBatchState := GetInterruptState[*batchState](ctx)
 		if persistedBatchState == nil {
 			persistedBatchState = &batchState{
 				Results: make(map[string]string),
@@ -439,8 +439,8 @@ func (t *mockReentryTool) Info(_ context.Context) (*schema.ToolInfo, error) {
 }
 
 func (t *mockReentryTool) InvokableRun(ctx context.Context, _ string, _ ...tool.Option) (string, error) {
-	_, hasState, wasInterrupted := GetInterruptState[any](ctx)
-	data, hasData, isResume := GetResumeContext[*myResumeData](ctx)
+	wasInterrupted, hasState, _ := GetInterruptState[any](ctx)
+	isResume, hasData, data := GetResumeContext[*myResumeData](ctx)
 
 	callID := GetToolCallID(ctx)
 
@@ -600,7 +600,7 @@ func (t *mockInterruptingTool) InvokableRun(ctx context.Context, argumentsInJSON
 	var args map[string]string
 	_ = json.Unmarshal([]byte(argumentsInJSON), &args)
 
-	state, hasState, wasInterrupted := GetInterruptState[*myInterruptState](ctx)
+	wasInterrupted, hasState, state := GetInterruptState[*myInterruptState](ctx)
 	if !wasInterrupted {
 		// First run: interrupt
 		return "", StatefulInterrupt(ctx,
@@ -613,7 +613,7 @@ func (t *mockInterruptingTool) InvokableRun(ctx context.Context, argumentsInJSON
 	assert.True(t.tt, hasState)
 	assert.Equal(t.tt, "test", state.OriginalInput)
 
-	data, hasData, isResume := GetResumeContext[*myResumeData](ctx)
+	isResume, hasData, data := GetResumeContext[*myResumeData](ctx)
 	assert.True(t.tt, isResume)
 	assert.True(t.tt, hasData)
 	assert.Equal(t.tt, "let's continue tool", data.Message)
@@ -639,7 +639,7 @@ func TestGraphInterruptWithinLambda(t *testing.T) {
 
 	// 1. Define the innermost lambda that actually interrupts
 	interruptingLambda := InvokableLambda(func(ctx context.Context, input string) (string, error) {
-		state, hasState, wasInterrupted := GetInterruptState[*myInterruptState](ctx)
+		wasInterrupted, hasState, state := GetInterruptState[*myInterruptState](ctx)
 		if !wasInterrupted {
 			return "", StatefulInterrupt(ctx, "inner interrupt", &myInterruptState{OriginalInput: input})
 		}
@@ -647,7 +647,7 @@ func TestGraphInterruptWithinLambda(t *testing.T) {
 		assert.True(t, hasState)
 		assert.Equal(t, "top level input", state.OriginalInput)
 
-		data, hasData, isResume := GetResumeContext[*myResumeData](ctx)
+		isResume, hasData, data := GetResumeContext[*myResumeData](ctx)
 		assert.True(t, isResume)
 		assert.True(t, hasData)
 		assert.Equal(t, "resume inner", data.Message)
