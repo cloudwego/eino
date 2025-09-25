@@ -25,10 +25,10 @@ import (
 // It is the primary function a component should use to understand its past state.
 //
 // It returns three values:
+//   - wasInterrupted (bool): True if the node was part of a previous interruption, regardless of whether state was provided.
 //   - state (T): The typed state object, if it was provided and matches type `T`.
 //   - hasState (bool): True if state was provided during the original interrupt and successfully cast to type `T`.
-//   - wasInterrupted (bool): True if the node was part of a previous interruption, regardless of whether state was provided.
-func GetInterruptState[T any](ctx context.Context) (state T, hasState bool, wasInterrupted bool) {
+func GetInterruptState[T any](ctx context.Context) (wasInterrupted bool, hasState bool, state T) {
 	rCtx, ok := getRunCtx(ctx)
 	if !ok || rCtx.interruptData == nil || !rCtx.interruptData.Interrupted {
 		return
@@ -47,12 +47,12 @@ func GetInterruptState[T any](ctx context.Context) (state T, hasState bool, wasI
 // This is the primary function a component should use to understand the user's intent for the current run.
 //
 // It returns three values:
+//   - isResumeFlow (bool): True if the current node was the specific target of a `Resume` or `ResumeWithData` call.
 //   - data (T): The typed resume data. This is only valid if `hasData` is true.
 //   - hasData (bool): True if resume data was provided via `ResumeWithData` and successfully cast to type `T`.
 //     It is important to check this flag rather than checking `data == nil`, as the provided data could itself be nil
 //     or a non-nil zero value (like 0 or "").
-//   - isResumeFlow (bool): True if the current node was the specific target of a `Resume` or `ResumeWithData` call.
-func GetResumeContext[T any](ctx context.Context) (data T, hasData bool, isResumeFlow bool) {
+func GetResumeContext[T any](ctx context.Context) (isResumeFlow bool, hasData bool, data T) {
 	rCtx, ok := getRunCtx(ctx)
 	if !ok {
 		return
