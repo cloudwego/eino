@@ -114,6 +114,19 @@ func CompositeInterrupt(ctx context.Context, info any, state any, errs map[PathS
 			continue
 		}
 
+		ie := &interruptError{}
+		if errors.As(err, &ie) {
+			for _, subInterruptCtx := range ie.Info.interruptContexts {
+				subIRE := &interruptAndRerun{
+					info:        subInterruptCtx.Info,
+					interruptID: &subInterruptCtx.ID,
+					path:        subInterruptCtx.Path,
+				}
+				cErrs = append(cErrs, subIRE)
+			}
+			continue
+		}
+
 		return fmt.Errorf("composite interrupt but one of the sub error is not interrupt and rerun error: %w", err)
 	}
 	return &interruptAndRerun{errs: cErrs, path: path, state: state, info: info}
@@ -169,6 +182,12 @@ const (
 	PathStepNode PathStepType = "node"
 	// PathStepTool represents a segment of a path that corresponds to a specific tool call within a ToolsNode.
 	PathStepTool PathStepType = "tool"
+	// PathStepRunnable represents a segment of a path that corresponds to an instance of the Runnable interface.
+	// Currently the possible Runnable types are: Graph, Workflow and Chain.
+	// Note that for sub-graphs added through AddGraphNode to another graph is not a Runnable.
+	// So a PathStepRunnable indicates a standalone Root level Graph,
+	// or a Root level Graph inside a node such as Lambda node.
+	PathStepRunnable PathStepType = "runnable"
 )
 
 // Path represents a full, hierarchical path to an interrupt point.

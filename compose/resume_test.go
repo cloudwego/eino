@@ -75,7 +75,7 @@ func TestInterruptStateAndResumeForRootGraph(t *testing.T) {
 	_ = g.AddEdge(START, "lambda")
 	_ = g.AddEdge("lambda", END)
 
-	graph, err := g.Compile(context.Background(), WithCheckPointStore(newInMemoryStore()))
+	graph, err := g.Compile(context.Background(), WithCheckPointStore(newInMemoryStore()), WithGraphName("root"))
 	assert.NoError(t, err)
 
 	// First invocation, which should be interrupted
@@ -89,7 +89,7 @@ func TestInterruptStateAndResumeForRootGraph(t *testing.T) {
 	assert.NotNil(t, interruptInfo)
 	interruptContexts := interruptInfo.GetInterruptContexts()
 	assert.Equal(t, 1, len(interruptContexts))
-	assert.Equal(t, "node:lambda", interruptContexts[0].ID)
+	assert.Equal(t, "runnable:root;node:lambda", interruptContexts[0].ID)
 	assert.Equal(t, map[string]any{"reason": "scheduled maintenance"}, interruptContexts[0].Info)
 
 	// Prepare resume data
@@ -160,7 +160,7 @@ func TestInterruptStateAndResumeForSubGraph(t *testing.T) {
 
 	interruptContexts := interruptInfo.GetInterruptContexts()
 	assert.Equal(t, 1, len(interruptContexts))
-	assert.Equal(t, "node:sub_graph_node;node:inner_lambda", interruptContexts[0].ID)
+	assert.Equal(t, "runnable:;node:sub_graph_node;node:inner_lambda", interruptContexts[0].ID)
 	assert.Equal(t, map[string]any{"reason": "sub-graph maintenance"}, interruptContexts[0].Info)
 
 	// Prepare resume data
@@ -227,7 +227,8 @@ func TestInterruptStateAndResumeForToolInNestedSubGraph(t *testing.T) {
 	_ = rootGraph.AddEdge("sub_graph_a", END)
 
 	// 5. Compile and run
-	compiledRootGraph, err := rootGraph.Compile(context.Background(), WithCheckPointStore(newInMemoryStore()))
+	compiledRootGraph, err := rootGraph.Compile(context.Background(), WithCheckPointStore(newInMemoryStore()),
+		WithGraphName("root"))
 	assert.NoError(t, err)
 
 	// First invocation - should interrupt
@@ -243,7 +244,7 @@ func TestInterruptStateAndResumeForToolInNestedSubGraph(t *testing.T) {
 
 	interruptContexts := interruptInfo.GetInterruptContexts()
 	assert.Equal(t, 1, len(interruptContexts))
-	expectedPath := "node:sub_graph_a;node:sub_graph_b;node:tools;tool:tool_call_123"
+	expectedPath := "runnable:root;node:sub_graph_a;node:sub_graph_b;node:tools;tool:tool_call_123"
 	assert.Equal(t, expectedPath, interruptContexts[0].ID)
 	assert.Equal(t, map[string]any{"reason": "tool maintenance"}, interruptContexts[0].Info)
 
@@ -375,7 +376,8 @@ func TestMultipleInterruptsAndResumes(t *testing.T) {
 	_ = g.AddEdge(START, "batch")
 	_ = g.AddEdge("batch", END)
 
-	graph, err := g.Compile(context.Background(), WithCheckPointStore(newInMemoryStore()))
+	graph, err := g.Compile(context.Background(), WithCheckPointStore(newInMemoryStore()),
+		WithGraphName("root"))
 	assert.NoError(t, err)
 
 	// --- 1. First invocation, all 3 processes should interrupt ---
@@ -392,16 +394,16 @@ func TestMultipleInterruptsAndResumes(t *testing.T) {
 	found := make(map[string]bool)
 	for _, iCtx := range interruptContexts {
 		found[iCtx.ID] = true
-		assert.Equal(t, map[string]any{"reason": "process " + iCtx.Path[1].ID + " needs input"}, iCtx.Info)
+		assert.Equal(t, map[string]any{"reason": "process " + iCtx.Path[2].ID + " needs input"}, iCtx.Info)
 	}
-	assert.True(t, found["node:batch;process:p0"])
-	assert.True(t, found["node:batch;process:p1"])
-	assert.True(t, found["node:batch;process:p2"])
+	assert.True(t, found["runnable:root;node:batch;process:p0"])
+	assert.True(t, found["runnable:root;node:batch;process:p1"])
+	assert.True(t, found["runnable:root;node:batch;process:p2"])
 
 	// --- 2. Second invocation, resume 2 of 3 processes ---
 	// Resume p0 with data, and p2 without data. p1 remains interrupted.
-	resumeCtx := ResumeWithData(context.Background(), "node:batch;process:p0", &processResumeData{Instruction: "do it"})
-	resumeCtx = Resume(resumeCtx, "node:batch;process:p2")
+	resumeCtx := ResumeWithData(context.Background(), "runnable:root;node:batch;process:p0", &processResumeData{Instruction: "do it"})
+	resumeCtx = Resume(resumeCtx, "runnable:root;node:batch;process:p2")
 
 	_, err = graph.Invoke(resumeCtx, "", WithCheckPointID(checkPointID))
 
@@ -411,10 +413,10 @@ func TestMultipleInterruptsAndResumes(t *testing.T) {
 	assert.True(t, isInterrupt2)
 	interruptContexts2 := interruptInfo2.GetInterruptContexts()
 	assert.Len(t, interruptContexts2, 1)
-	assert.Equal(t, "node:batch;process:p1", interruptContexts2[0].ID)
+	assert.Equal(t, "runnable:root;node:batch;process:p1", interruptContexts2[0].ID)
 
 	// --- 3. Third invocation, resume the last process ---
-	finalResumeCtx := Resume(context.Background(), "node:batch;process:p1")
+	finalResumeCtx := Resume(context.Background(), "runnable:root;node:batch;process:p1")
 	finalOutput, err := graph.Invoke(finalResumeCtx, "", WithCheckPointID(checkPointID))
 
 	assert.NoError(t, err)
@@ -538,7 +540,8 @@ func TestReentryForResumedTools(t *testing.T) {
 	_ = g.AddEdge("tools", "model") // Loop back for ReAct style
 
 	// 3. Compile and run
-	graph, err := g.Compile(context.Background(), WithCheckPointStore(newInMemoryStore()))
+	graph, err := g.Compile(context.Background(), WithCheckPointStore(newInMemoryStore()),
+		WithGraphName("root"))
 	assert.NoError(t, err)
 	checkPointID := "reentry-test"
 
@@ -548,29 +551,31 @@ func TestReentryForResumedTools(t *testing.T) {
 	interruptInfo1, _ := ExtractInterruptInfo(err)
 	interrupts1 := interruptInfo1.GetInterruptContexts()
 	assert.Len(t, interrupts1, 2)
-	assert.Contains(t, []string{interrupts1[0].ID, interrupts1[1].ID}, "node:tools;tool:call_1")
-	assert.Contains(t, []string{interrupts1[0].ID, interrupts1[1].ID}, "node:tools;tool:call_2")
+	assert.Contains(t, []string{interrupts1[0].ID, interrupts1[1].ID}, "runnable:root;node:tools;tool:call_1")
+	assert.Contains(t, []string{interrupts1[0].ID, interrupts1[1].ID}, "runnable:root;node:tools;tool:call_2")
 
 	// --- 2. Second invocation: resume call_1, expect call_2 to interrupt again ---
-	resumeCtx2 := ResumeWithData(context.Background(), "node:tools;tool:call_1", &myResumeData{Message: "resume call 1"})
+	resumeCtx2 := ResumeWithData(context.Background(), "runnable:root;node:tools;tool:call_1",
+		&myResumeData{Message: "resume call 1"})
 	_, err = graph.Invoke(resumeCtx2, []*schema.Message{schema.UserMessage("start")}, WithCheckPointID(checkPointID))
 	assert.Error(t, err)
 	interruptInfo2, _ := ExtractInterruptInfo(err)
 	interrupts2 := interruptInfo2.GetInterruptContexts()
 	assert.Len(t, interrupts2, 1)
-	assert.Equal(t, "node:tools;tool:call_2", interrupts2[0].ID)
+	assert.Equal(t, "runnable:root;node:tools;tool:call_2", interrupts2[0].ID)
 
 	// --- 3. Third invocation: resume call_2, model makes a new call (call_3) which should interrupt ---
-	resumeCtx3 := ResumeWithData(context.Background(), "node:tools;tool:call_2", &myResumeData{Message: "resume call 2"})
+	resumeCtx3 := ResumeWithData(context.Background(), "runnable:root;node:tools;tool:call_2", &myResumeData{Message: "resume call 2"})
 	_, err = graph.Invoke(resumeCtx3, []*schema.Message{schema.UserMessage("start")}, WithCheckPointID(checkPointID))
 	assert.Error(t, err)
 	interruptInfo3, _ := ExtractInterruptInfo(err)
 	interrupts3 := interruptInfo3.GetInterruptContexts()
 	assert.Len(t, interrupts3, 1)
-	assert.Equal(t, "node:tools;tool:call_3", interrupts3[0].ID) // Note: this is the new call_3
+	assert.Equal(t, "runnable:root;node:tools;tool:call_3", interrupts3[0].ID) // Note: this is the new call_3
 
 	// --- 4. Final invocation: resume call_3, expect final answer ---
-	resumeCtx4 := ResumeWithData(context.Background(), "node:tools;tool:call_3", &myResumeData{Message: "resume call 3"})
+	resumeCtx4 := ResumeWithData(context.Background(), "runnable:root;node:tools;tool:call_3",
+		&myResumeData{Message: "resume call 3"})
 	output, err := graph.Invoke(resumeCtx4, []*schema.Message{schema.UserMessage("start")}, WithCheckPointID(checkPointID))
 	assert.NoError(t, err)
 	assert.Equal(t, "all done", output.Content)
@@ -614,4 +619,110 @@ func (t *mockInterruptingTool) InvokableRun(ctx context.Context, argumentsInJSON
 	assert.Equal(t.tt, "let's continue tool", data.Message)
 
 	return "Tool resumed successfully", nil
+}
+
+func TestGraphInterruptWithinLambda(t *testing.T) {
+	// this test case aims to verify behaviors when a standalone graph is within a lambda,
+	// which in turn is within the root graph.
+	// the expected behavior is:
+	// - internal graph will naturally append to the Path
+	// - internal graph interrupts, where the Path includes steps for both the root graph and the internal graph
+	// - lambda extracts InterruptInfo, then GetInterruptContexts
+	// - lambda then acts as a composite node, uses CompositeInterrupt to pass up the
+	//   internal interrupt points
+	// - the root graph interrupts
+	// - end-user extracts the interrupt ID and related info
+	// - end-user uses ResumeWithData to resume the ID
+	// - lambda node resumes, invokes the inner graph as usual
+	// - the internal graph resumes the interrupted node
+	// To implement this test, within the internal graph you can define another lambda node that can interrupt resume.
+
+	// 1. Define the innermost lambda that actually interrupts
+	interruptingLambda := InvokableLambda(func(ctx context.Context, input string) (string, error) {
+		state, hasState, wasInterrupted := GetInterruptState[*myInterruptState](ctx)
+		if !wasInterrupted {
+			return "", StatefulInterrupt(ctx, "inner interrupt", &myInterruptState{OriginalInput: input})
+		}
+
+		assert.True(t, hasState)
+		assert.Equal(t, "top level input", state.OriginalInput)
+
+		data, hasData, isResume := GetResumeContext[*myResumeData](ctx)
+		assert.True(t, isResume)
+		assert.True(t, hasData)
+		assert.Equal(t, "resume inner", data.Message)
+
+		return "inner lambda resumed successfully", nil
+	})
+
+	// 2. Define the internal graph that contains the interrupting lambda
+	innerGraph := NewGraph[string, string]()
+	_ = innerGraph.AddLambdaNode("inner_lambda", interruptingLambda)
+	_ = innerGraph.AddEdge(START, "inner_lambda")
+	_ = innerGraph.AddEdge("inner_lambda", END)
+	// Give the inner graph a name so it can create its "runnable" path step.
+	compiledInnerGraph, err := innerGraph.Compile(context.Background(), WithGraphName("inner"), WithCheckPointStore(newInMemoryStore()))
+	assert.NoError(t, err)
+
+	// 3. Define the outer lambda that acts as a composite node
+	compositeLambda := InvokableLambda(func(ctx context.Context, input string) (string, error) {
+		// The lambda invokes the inner graph. If the inner graph interrupts, this lambda
+		// must act as a proper composite node and wrap the error.
+		output, err := compiledInnerGraph.Invoke(ctx, input, WithCheckPointID("inner-cp"))
+		if err != nil {
+			_, isInterrupt := ExtractInterruptInfo(err)
+			if !isInterrupt {
+				return "", err // Not an interrupt, just fail
+			}
+
+			// This is the key part: act as a composite node.
+			// We know we called the "inner" graph, so we can construct the path step for it.
+			innerGraphStep := PathStep{Type: PathStepRunnable, ID: "inner"}
+
+			// The error from the inner graph contains all the necessary interrupt info.
+			// We just need to wrap it in a map for CompositeInterrupt.
+			subErrs := map[PathStep]error{
+				innerGraphStep: err,
+			}
+
+			// The composite interrupt itself can be stateless, as it's just a wrapper.
+			// It signals to the framework to look inside the subErrs and correctly
+			// prepend the current path to the paths of the inner interrupts.
+			return "", CompositeInterrupt(ctx, "composite interrupt from lambda", nil, subErrs)
+		}
+		return output, nil
+	})
+
+	// 4. Define the root graph
+	rootGraph := NewGraph[string, string]()
+	_ = rootGraph.AddLambdaNode("composite_lambda", compositeLambda)
+	_ = rootGraph.AddEdge(START, "composite_lambda")
+	_ = rootGraph.AddEdge("composite_lambda", END)
+	// Give the root graph a name for its "runnable" path step.
+	compiledRootGraph, err := rootGraph.Compile(context.Background(), WithGraphName("root"), WithCheckPointStore(newInMemoryStore()))
+	assert.NoError(t, err)
+
+	// 5. First invocation - should interrupt
+	checkPointID := "graph-in-lambda-test"
+	_, err = compiledRootGraph.Invoke(context.Background(), "top level input", WithCheckPointID(checkPointID))
+
+	// 6. Verify the interrupt
+	assert.Error(t, err)
+	interruptInfo, isInterrupt := ExtractInterruptInfo(err)
+	assert.True(t, isInterrupt)
+	interruptContexts := interruptInfo.GetInterruptContexts()
+	assert.Len(t, interruptContexts, 1)
+
+	// The path is now fully qualified, including the runnable steps from both graphs.
+	expectedPath := "runnable:root;node:composite_lambda;runnable:inner;node:inner_lambda"
+	assert.Equal(t, expectedPath, interruptContexts[0].ID)
+	assert.Equal(t, "inner interrupt", interruptContexts[0].Info)
+
+	// 7. Resume execution using the complete, fully-qualified ID
+	resumeCtx := ResumeWithData(context.Background(), expectedPath, &myResumeData{Message: "resume inner"})
+	finalOutput, err := compiledRootGraph.Invoke(resumeCtx, "top level input", WithCheckPointID(checkPointID))
+
+	// 8. Verify final result
+	assert.NoError(t, err)
+	assert.Equal(t, "inner lambda resumed successfully", finalOutput)
 }
