@@ -716,3 +716,145 @@ func TestGraphInterruptWithinLambda(t *testing.T) {
 	assert.NoError(t, err)
 	assert.Equal(t, "inner lambda resumed successfully", finalOutput)
 }
+
+func TestLegacyInterrupt(t *testing.T) {
+	// this test case aims to test the behavior of the deprecated InterruptAndRerun,
+	// NewInterruptAndRerunErr within CompositeInterrupt.
+	// Define two sub-processes(functions), one interrupts with InterruptAndRerun,
+	// the other interrupts with NewInterruptAndRerunErr.
+	// create a lambda as a composite node, within the lambda invokes the two sub-processes.
+	// create the graph, add lambda node and invoke it.
+	// after verifying the interrupt points, just invokes again without explicit resume.
+	// verify the same interrupt IDs again.
+	// then finally Resume() the graph.
+
+	// 1. Define the sub-processes that use legacy and modern interrupts
+	subProcess1 := func(ctx context.Context) (string, error) {
+		isResume, _, data := GetResumeContext[string](ctx)
+		if isResume {
+			return data, nil
+		}
+		return "", InterruptAndRerun
+	}
+	subProcess2 := func(ctx context.Context) (string, error) {
+		isResume, _, data := GetResumeContext[string](ctx)
+		if isResume {
+			return data, nil
+		}
+		return "", NewInterruptAndRerunErr("legacy info")
+	}
+	subProcess3 := func(ctx context.Context) (string, error) {
+		isResume, _, data := GetResumeContext[string](ctx)
+		if isResume {
+			return data, nil
+		}
+		// Use the modern, path-aware interrupt function
+		return "", Interrupt(ctx, "modern info")
+	}
+
+	// 2. Define the composite lambda
+	compositeLambda := InvokableLambda(func(ctx context.Context, input string) (string, error) {
+		// If the lambda itself is being resumed, it means the whole process is done.
+		isResume, _, _ := GetResumeContext[any](ctx)
+		if isResume {
+			return "lambda resumed successfully", nil
+		}
+
+		// Run sub-processes and collect their errors
+		var (
+			errs   []error
+			outStr string
+		)
+
+		const PathStepCustom PathStepType = "custom"
+		subCtx1 := AppendPathStep(ctx, PathStepCustom, "1")
+		out1, err1 := subProcess1(subCtx1)
+		if err1 != nil {
+			// Wrap the legacy error to give it a path
+			wrappedErr := WrapInterruptAndRerunIfNeeded(ctx, PathStep{Type: PathStepCustom, ID: "1"}, err1)
+			errs = append(errs, wrappedErr)
+		} else {
+			outStr += out1
+		}
+		subCtx2 := AppendPathStep(ctx, PathStepCustom, "2")
+		out2, err2 := subProcess2(subCtx2)
+		if err2 != nil {
+			// Wrap the legacy error to give it a path
+			wrappedErr := WrapInterruptAndRerunIfNeeded(ctx, PathStep{Type: PathStepCustom, ID: "2"}, err2)
+			errs = append(errs, wrappedErr)
+		} else {
+			outStr += out2
+		}
+		subCtx3 := AppendPathStep(ctx, PathStepCustom, "3")
+		out3, err3 := subProcess3(subCtx3)
+		if err3 != nil {
+			// The error from Interrupt() is already path-aware. WrapInterruptAndRerunIfNeeded
+			// should handle this gracefully and return the error as-is.
+			wrappedErr := WrapInterruptAndRerunIfNeeded(ctx, PathStep{Type: PathStepCustom, ID: "3"}, err3)
+			errs = append(errs, wrappedErr)
+		} else {
+			outStr += out3
+		}
+
+		if len(errs) > 0 {
+			// Return a composite interrupt containing the wrapped legacy errors
+			return "", CompositeInterrupt(ctx, "legacy composite", nil, errs...)
+		}
+
+		return outStr, nil
+	})
+
+	// 3. Create and compile the graph
+	rootGraph := NewGraph[string, string]()
+	_ = rootGraph.AddLambdaNode("legacy_composite", compositeLambda)
+	_ = rootGraph.AddEdge(START, "legacy_composite")
+	_ = rootGraph.AddEdge("legacy_composite", END)
+	compiledGraph, err := rootGraph.Compile(context.Background(), WithGraphName("root"), WithCheckPointStore(newInMemoryStore()))
+	assert.NoError(t, err)
+
+	// 4. First invocation - should interrupt
+	checkPointID := "legacy-interrupt-test"
+	_, err = compiledGraph.Invoke(context.Background(), "input", WithCheckPointID(checkPointID))
+
+	// 5. Verify the three interrupt points
+	assert.Error(t, err)
+	info, isInterrupt := ExtractInterruptInfo(err)
+	assert.True(t, isInterrupt)
+	interrupts := info.GetInterruptContexts()
+	assert.Len(t, interrupts, 3)
+
+	found := make(map[string]any)
+	for _, iCtx := range interrupts {
+		found[iCtx.ID] = iCtx.Info
+	}
+	expectedID1 := "runnable:root;node:legacy_composite;custom:1"
+	expectedID2 := "runnable:root;node:legacy_composite;custom:2"
+	expectedID3 := "runnable:root;node:legacy_composite;custom:3"
+	assert.Contains(t, found, expectedID1)
+	assert.Nil(t, found[expectedID1]) // From InterruptAndRerun
+	assert.Contains(t, found, expectedID2)
+	assert.Equal(t, "legacy info", found[expectedID2]) // From NewInterruptAndRerunErr
+	assert.Contains(t, found, expectedID3)
+	assert.Equal(t, "modern info", found[expectedID3]) // From Interrupt
+
+	// 6. Second invocation (re-run without resume) - should yield the same interrupts
+	_, err = compiledGraph.Invoke(context.Background(), "input", WithCheckPointID(checkPointID))
+	assert.Error(t, err)
+	info2, isInterrupt2 := ExtractInterruptInfo(err)
+	assert.True(t, isInterrupt2)
+	assert.Equal(t, info.GetInterruptContexts(), info2.GetInterruptContexts(), "Interrupt contexts should be identical on re-run")
+
+	// 7. Third invocation - Resume all three interrupt points with specific data
+	resumeData := map[string]any{
+		expectedID1: "output1",
+		expectedID2: "output2",
+		expectedID3: "output3",
+	}
+	resumeCtx := BatchResumeWithData(context.Background(), resumeData)
+	output, err := compiledGraph.Invoke(resumeCtx, "input", WithCheckPointID(checkPointID))
+
+	// 8. Verify final result
+	assert.NoError(t, err)
+	// The final output should be the concatenation of the data passed to the resumed sub-processes.
+	assert.Equal(t, "output1output2output3", output)
+}

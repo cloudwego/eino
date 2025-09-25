@@ -71,11 +71,10 @@ func (w *wrappedInterruptAndRerun) Unwrap() error {
 func WrapInterruptAndRerunIfNeeded(ctx context.Context, step PathStep, err error) error {
 	path, _ := GetCurrentPath(ctx)
 	newPath := append(append([]PathStep{}, path...), step)
-	id := Path(newPath).String()
 	if errors.Is(err, InterruptAndRerun) {
-		return &interruptAndRerun{
-			path:        newPath,
-			interruptID: &id,
+		return &wrappedInterruptAndRerun{
+			ps:    newPath,
+			inner: err,
 		}
 	}
 
@@ -83,7 +82,7 @@ func WrapInterruptAndRerunIfNeeded(ctx context.Context, step PathStep, err error
 	if errors.As(err, &ire) {
 		if ire.path == nil {
 			return &wrappedInterruptAndRerun{
-				ps:    ire.path,
+				ps:    newPath,
 				inner: err,
 			}
 		}
@@ -250,18 +249,6 @@ func isInterruptRerunError(err error) (info any, state any, ok bool) {
 	ire := &interruptAndRerun{}
 	if errors.As(err, &ire) {
 		return ire.info, ire.state, true
-	}
-	wrapped := &wrappedInterruptAndRerun{}
-	if errors.As(err, &wrapped) {
-		inner := wrapped.Unwrap()
-		if errors.Is(inner, InterruptAndRerun) {
-			return nil, nil, true
-		}
-
-		ire := &interruptAndRerun{}
-		if errors.As(inner, &ire) {
-			return ire.info, ire.state, true
-		}
 	}
 	return nil, nil, false
 }
