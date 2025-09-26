@@ -21,8 +21,6 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
-
-	"github.com/cloudwego/eino/schema"
 )
 
 type myInterface interface {
@@ -153,9 +151,6 @@ func TestSerialization(t *testing.T) {
 					}},
 				},
 			},
-		},
-		myStruct2{
-			A: &schema.Message{}, // test empty fields
 		},
 		[]*myStruct{},
 		&myStruct{},

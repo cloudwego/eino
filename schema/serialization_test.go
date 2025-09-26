@@ -18,8 +18,14 @@ package schema
 
 import (
 	"bytes"
+	"encoding/gob"
+	"fmt"
 	"reflect"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
+
+	"github.com/cloudwego/eino/internal/serialization"
 )
 
 type testStruct struct{}
@@ -92,4 +98,64 @@ func TestGetTypeName(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestRegister(t *testing.T) {
+	type testStruct1 struct {
+		A any
+		B any
+		C any
+		D any
+		E any
+		F any
+	}
+
+	type testStruct2 struct{}
+
+	Register[*testStruct1]()
+	Register[*testStruct2]()
+
+	t1 := testStruct1{A: []*Message{{}}, B: []Message{{}}, C: []*testStruct2{{}}, D: []testStruct2{{}},
+		E: &testStruct1{}, F: []int{1}}
+
+	in := &serialization.InternalSerializer{}
+	mar, err := in.Marshal(t1)
+	if err != nil {
+		panic(err)
+	}
+	var t2 testStruct1
+	err = in.Unmarshal(mar, &t2)
+	if err != nil {
+		panic(err)
+	}
+	assert.Equal(t, t1, t2)
+
+	buf := new(bytes.Buffer)
+	err = gob.NewEncoder(buf).Encode(t1)
+	if err != nil {
+		panic(err)
+	}
+	err = gob.NewDecoder(buf).Decode(&t2)
+	if err != nil {
+		panic(err)
+	}
+	assert.Equal(t, t1, t2)
+
+	f := func() (err error) {
+		defer func() {
+			if r := recover(); r != nil {
+				err = fmt.Errorf("panic: %v", r)
+			}
+		}()
+
+		Register[[]int]()
+		Register[map[string]any]()
+		Register[[]*testStruct1]()
+		Register[[]testStruct1]()
+
+		return nil
+	}
+
+	err = f()
+	assert.NoError(t, err)
 }

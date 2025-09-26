@@ -43,13 +43,35 @@ func init() {
 	RegisterName[PromptTokenDetails]("_eino_prompt_token_details")
 }
 
-// RegisterName registers the given type `T` with a specific name for both the generic
-// serialization system and the gob serialization system. This is useful for maintaining
-// backward compatibility with older data by explicitly mapping a type to a previously
-// used name.
-// It panics if the registration fails.
+// RegisterName registers a type with a specific name for serialization. This is
+// required for any type you intend to persist in a graph or ADK checkpoint.
+// Use this function to maintain backward compatibility by mapping a type to a
+// previously used name. For new types, `Register` is preferred.
+//
+// It is recommended to call this in an `init()` function in the file where the
+// type is declared.
+//
+// What to Register:
+//   - Top-level types used as state (e.g., structs).
+//   - Concrete types that are assigned to interface fields.
+//
+// What NOT to Register:
+//   - Struct fields with concrete types (e.g., `string`, `int`, other structs).
+//     These are inferred via reflection.
+//
+// Serialization Rules:
+//
+// The serialization behavior is based on Go's standard `encoding/gob` package.
+// See https://pkg.go.dev/encoding/gob for detailed rules.
+//   - Only exported struct fields are serialized.
+//   - Functions and channels are not supported and will be ignored.
+//
+// This function panics if registration fails. It also automatically registers
+// corresponding slice types (e.g., `[]T`, `[]*T`) to simplify usage.
 func RegisterName[T any](name string) {
 	gob.RegisterName(name, generic.NewInstance[T]())
+
+	gobRegisterSliceTypesFor[T]()
 
 	err := serialization.GenericRegister[T](name)
 	if err != nil {
@@ -79,20 +101,57 @@ func getTypeName(rt reflect.Type) string {
 	return name
 }
 
-// Register registers the given type `T` with the gob serialization system and the
-// generic serialization system. It automatically determines the type name based on
-// its reflection data, including the package path for named types. This function
-// should be used for new types where a custom name is not required.
-// It panics if the registration fails.
+// Register registers a type for serialization. This is required for any type
+// you intend to persist in a graph or ADK checkpoint. It automatically determines
+// the type name and is the recommended method for registering new types.
+//
+// It is recommended to call this in an `init()` function in the file where the
+// type is declared.
+//
+// What to Register:
+//   - Top-level types used as state (e.g., structs).
+//   - Concrete types that are assigned to interface fields.
+//
+// What NOT to Register:
+//   - Struct fields with concrete types (e.g., `string`, `int`, other structs).
+//     These are inferred via reflection.
+//
+// Serialization Rules:
+//
+// The serialization behavior is based on Go's standard `encoding/gob` package.
+// See https://pkg.go.dev/encoding/gob for detailed rules.
+//   - Only exported struct fields are serialized.
+//   - Functions and channels are not supported and will be ignored.
+//
+// This function panics if registration fails. It also automatically registers
+// corresponding slice types (e.g., `[]T`, `[]*T`) to simplify usage.
 func Register[T any]() {
 	value := generic.NewInstance[T]()
 
 	gob.Register(value)
+	gobRegisterSliceTypesFor[T]()
 
 	name := getTypeName(reflect.TypeOf(value))
 
 	err := serialization.GenericRegister[T](name)
 	if err != nil {
 		panic(err)
+	}
+}
+
+func gobRegisterSliceTypesFor[T any]() {
+	rt := reflect.TypeOf((*T)(nil)).Elem()
+
+	// always register []T
+	gob.Register(reflect.MakeSlice(reflect.SliceOf(rt), 0, 0).Interface())
+
+	if rt.Kind() == reflect.Pointer {
+		// if T is pointer, register [](T.Elem) for gob
+		elemType := rt.Elem()
+		gob.Register(reflect.MakeSlice(reflect.SliceOf(elemType), 0, 0).Interface())
+	} else {
+		// if T is not pointer, register []*T for gob
+		ptrType := reflect.PointerTo(rt)
+		gob.Register(reflect.MakeSlice(reflect.SliceOf(ptrType), 0, 0).Interface())
 	}
 }
