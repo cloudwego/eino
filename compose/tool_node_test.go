@@ -749,7 +749,8 @@ func TestToolRerun(t *testing.T) {
 	type myToolRerunState struct {
 		In *schema.Message
 	}
-	assert.NoError(t, RegisterSerializableType[myToolRerunState]("_my_rerun_state"))
+
+	schema.Register[myToolRerunState]()
 
 	tc := []schema.ToolCall{
 		{

@@ -54,9 +54,11 @@ type testStruct struct {
 	A string
 }
 
-func TestSimpleCheckPoint(t *testing.T) {
-	RegisterSerializableType[testStruct]("test_struct")
+func init() {
+	schema.Register[testStruct]()
+}
 
+func TestSimpleCheckPoint(t *testing.T) {
 	store := newInMemoryStore()
 
 	g := NewGraph[string, string](WithGenLocalState(func(ctx context.Context) (state *testStruct) {
@@ -135,7 +137,6 @@ func TestSimpleCheckPoint(t *testing.T) {
 }
 
 func TestCustomStructInAny(t *testing.T) {
-	_ = RegisterSerializableType[testStruct]("test_struct")
 	store := newInMemoryStore()
 	g := NewGraph[string, string](WithGenLocalState(func(ctx context.Context) (state *testStruct) {
 		return &testStruct{A: ""}
@@ -212,7 +213,6 @@ func TestCustomStructInAny(t *testing.T) {
 }
 
 func TestSubGraph(t *testing.T) {
-	RegisterSerializableType[testStruct]("test_struct")
 	subG := NewGraph[string, string](WithGenLocalState(func(ctx context.Context) (state *testStruct) {
 		return &testStruct{A: ""}
 	}))
@@ -362,7 +362,6 @@ func (t *testGraphCallback) OnEndWithStreamOutput(ctx context.Context, info *cal
 }
 
 func TestNestedSubGraph(t *testing.T) {
-	RegisterSerializableType[testStruct]("test_struct")
 	ssubG := NewGraph[string, string](WithGenLocalState(func(ctx context.Context) (state *testStruct) {
 		return &testStruct{A: ""}
 	}))
@@ -822,8 +821,6 @@ func TestDAGInterrupt(t *testing.T) {
 }
 
 func TestRerunNodeInterrupt(t *testing.T) {
-	RegisterSerializableType[testStruct]("test struct")
-
 	g := NewGraph[string, string](WithGenLocalState(func(ctx context.Context) (state *testStruct) {
 		return &testStruct{}
 	}))

@@ -21,14 +21,14 @@ import (
 	"fmt"
 
 	"github.com/cloudwego/eino/internal/serialization"
+	"github.com/cloudwego/eino/schema"
 )
 
 func init() {
-	_ = serialization.GenericRegister[channel]("_eino_channel")
-	_ = serialization.GenericRegister[checkpoint]("_eino_checkpoint")
-	_ = serialization.GenericRegister[dagChannel]("_eino_dag_channel")
-	_ = serialization.GenericRegister[pregelChannel]("_eino_pregel_channel")
-	_ = serialization.GenericRegister[dependencyState]("_eino_dependency_state")
+	schema.RegisterName[*checkpoint]("_eino_checkpoint")
+	schema.RegisterName[*dagChannel]("_eino_dag_channel")
+	schema.RegisterName[*pregelChannel]("_eino_pregel_channel")
+	schema.RegisterName[dependencyState]("_eino_dependency_state")
 }
 
 // RegisterSerializableType registers a custom type for eino serialization.
@@ -41,8 +41,16 @@ func init() {
 // - T: The generic type parameter representing the type to register
 // Returns:
 // - error: An error if registration fails (e.g., if the type is already registered)
-func RegisterSerializableType[T any](name string) error {
-	return serialization.GenericRegister[T](name)
+// Deprecated: RegisterSerializableType is deprecated. Use schema.RegisterName[T](name) instead.
+func RegisterSerializableType[T any](name string) (err error) {
+	// catch panic
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("RegisterSerializableType panicked: %v", r)
+		}
+	}()
+	schema.RegisterName[T](name)
+	return
 }
 
 type CheckPointStore interface {
@@ -67,6 +75,7 @@ func WithSerializer(serializer Serializer) GraphCompileOption {
 	}
 }
 
+// Deprecated: you won't need to call RegisterInternalType anymore.
 func RegisterInternalType(f func(key string, value any) error) error {
 	err := f("_eino_checkpoint", &checkpoint{})
 	if err != nil {
