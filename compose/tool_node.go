@@ -292,7 +292,7 @@ func runToolCallTaskByInvoke(ctx context.Context, task *toolCallTask, opts ...to
 	})
 
 	ctx = setToolCallInfo(ctx, &toolCallInfo{toolCallID: task.callID})
-	ctx = AppendPathStep(ctx, PathStepTool, task.callID)
+	ctx = AppendAddressSegment(ctx, AddressSegmentTool, task.callID)
 	task.output, task.err = task.r.Invoke(ctx, task.arg, opts...)
 	if task.err == nil {
 		task.executed = true
@@ -307,7 +307,7 @@ func runToolCallTaskByStream(ctx context.Context, task *toolCallTask, opts ...to
 	})
 
 	ctx = setToolCallInfo(ctx, &toolCallInfo{toolCallID: task.callID})
-	ctx = AppendPathStep(ctx, PathStepTool, task.callID)
+	ctx = AppendAddressSegment(ctx, AddressSegmentTool, task.callID)
 	task.sOutput, task.err = task.r.Stream(ctx, task.arg, opts...)
 	if task.err == nil {
 		task.executed = true
@@ -421,7 +421,7 @@ func (tn *ToolsNode) Invoke(ctx context.Context, input *schema.Message,
 				rerunExtra.RerunExtraMap[tasks[i].callID] = info
 			}
 
-			iErr := WrapInterruptAndRerunIfNeeded(ctx, PathStep{PathStepTool, tasks[i].callID}, tasks[i].err)
+			iErr := WrapInterruptAndRerunIfNeeded(ctx, AddressSegment{AddressSegmentTool, tasks[i].callID}, tasks[i].err)
 			errs = append(errs, iErr)
 			continue
 		}
@@ -499,7 +499,7 @@ func (tn *ToolsNode) Stream(ctx context.Context, input *schema.Message,
 			if info != nil {
 				rerunExtra.RerunExtraMap[tasks[i].callID] = info
 			}
-			iErr := WrapInterruptAndRerunIfNeeded(ctx, PathStep{PathStepTool, tasks[i].callID}, tasks[i].err)
+			iErr := WrapInterruptAndRerunIfNeeded(ctx, AddressSegment{AddressSegmentTool, tasks[i].callID}, tasks[i].err)
 			errs = append(errs, iErr)
 			continue
 		}

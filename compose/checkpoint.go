@@ -129,7 +129,7 @@ type checkpoint struct {
 
 	SubGraphs map[string]*checkpoint
 
-	InterruptPoints []*interruptStateForPath
+	InterruptPoints []*interruptStateForAddress
 }
 
 type stateModifierKey struct{}
