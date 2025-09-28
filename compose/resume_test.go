@@ -259,7 +259,7 @@ func TestInterruptStateAndResumeForToolInNestedSubGraph(t *testing.T) {
 	assert.Equal(t, "Tool resumed successfully", output[0].Content)
 }
 
-const PathSegmentTypeProcess PathStepType = "process"
+const PathSegmentTypeProcess AddressSegmentType = "process"
 
 // processState is the state for a single sub-process in the batch test.
 type processState struct {
@@ -286,7 +286,7 @@ func TestMultipleInterruptsAndResumes(t *testing.T) {
 	// define a new lambda node that act as a 'batch' node
 	// it kick starts 3 parallel processes, each will interrupt on first run, while preserving their own state.
 	// each of the process should have their own user-facing interrupt info.
-	// define a new PathStepType for these sub processes.
+	// define a new AddressSegmentType for these sub processes.
 	// the lambda should use StatefulInterrupt to interrupt and preserve the state,
 	// which is a specific struct type that implements the CompositeInterruptState interface.
 	// there should also be a specific struct that that implements the CompositeInterruptInfo interface,
@@ -351,7 +351,7 @@ func TestMultipleInterruptsAndResumes(t *testing.T) {
 			}
 
 			// Create a sub-context for each process
-			subCtx := AppendPathStep(ctx, PathSegmentTypeProcess, id)
+			subCtx := AppendAddressSegment(ctx, PathSegmentTypeProcess, id)
 			res, err := runProcess(subCtx, id)
 
 			if err != nil {
@@ -625,8 +625,8 @@ func TestGraphInterruptWithinLambda(t *testing.T) {
 	// this test case aims to verify behaviors when a standalone graph is within a lambda,
 	// which in turn is within the root graph.
 	// the expected behavior is:
-	// - internal graph will naturally append to the Path
-	// - internal graph interrupts, where the Path includes steps for both the root graph and the internal graph
+	// - internal graph will naturally append to the Address
+	// - internal graph interrupts, where the Address includes steps for both the root graph and the internal graph
 	// - lambda extracts InterruptInfo, then GetInterruptContexts
 	// - lambda then acts as a composite node, uses CompositeInterrupt to pass up the
 	//   internal interrupt points
@@ -766,31 +766,31 @@ func TestLegacyInterrupt(t *testing.T) {
 			outStr string
 		)
 
-		const PathStepCustom PathStepType = "custom"
-		subCtx1 := AppendPathStep(ctx, PathStepCustom, "1")
+		const PathStepCustom AddressSegmentType = "custom"
+		subCtx1 := AppendAddressSegment(ctx, PathStepCustom, "1")
 		out1, err1 := subProcess1(subCtx1)
 		if err1 != nil {
 			// Wrap the legacy error to give it a path
-			wrappedErr := WrapInterruptAndRerunIfNeeded(ctx, PathStep{Type: PathStepCustom, ID: "1"}, err1)
+			wrappedErr := WrapInterruptAndRerunIfNeeded(ctx, AddressSegment{Type: PathStepCustom, ID: "1"}, err1)
 			errs = append(errs, wrappedErr)
 		} else {
 			outStr += out1
 		}
-		subCtx2 := AppendPathStep(ctx, PathStepCustom, "2")
+		subCtx2 := AppendAddressSegment(ctx, PathStepCustom, "2")
 		out2, err2 := subProcess2(subCtx2)
 		if err2 != nil {
 			// Wrap the legacy error to give it a path
-			wrappedErr := WrapInterruptAndRerunIfNeeded(ctx, PathStep{Type: PathStepCustom, ID: "2"}, err2)
+			wrappedErr := WrapInterruptAndRerunIfNeeded(ctx, AddressSegment{Type: PathStepCustom, ID: "2"}, err2)
 			errs = append(errs, wrappedErr)
 		} else {
 			outStr += out2
 		}
-		subCtx3 := AppendPathStep(ctx, PathStepCustom, "3")
+		subCtx3 := AppendAddressSegment(ctx, PathStepCustom, "3")
 		out3, err3 := subProcess3(subCtx3)
 		if err3 != nil {
 			// The error from Interrupt() is already path-aware. WrapInterruptAndRerunIfNeeded
 			// should handle this gracefully and return the error as-is.
-			wrappedErr := WrapInterruptAndRerunIfNeeded(ctx, PathStep{Type: PathStepCustom, ID: "3"}, err3)
+			wrappedErr := WrapInterruptAndRerunIfNeeded(ctx, AddressSegment{Type: PathStepCustom, ID: "3"}, err3)
 			errs = append(errs, wrappedErr)
 		} else {
 			outStr += out3
