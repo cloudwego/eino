@@ -35,6 +35,16 @@ type InterruptInfo struct {
 	Data any
 }
 
+type Address = compose.Address
+type AddressSegment = compose.AddressSegment
+type AddressSegmentType = compose.AddressSegmentType
+
+const (
+	AddressSegmentAgent AddressSegmentType = "agent"
+)
+
+type InterruptCtx = compose.InterruptCtx
+
 func WithCheckPointID(id string) AgentRunOption {
 	return WrapImplSpecificOptFn(func(t *options) {
 		t.checkPointID = &id
