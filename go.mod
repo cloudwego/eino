@@ -4,7 +4,7 @@ go 1.18
 
 require (
 	github.com/bytedance/sonic v1.14.1
-	github.com/eino-contrib/jsonschema v1.0.0
+	github.com/eino-contrib/jsonschema v1.0.1
 	github.com/getkin/kin-openapi v0.118.0
 	github.com/google/uuid v1.6.0
 	github.com/nikolalohinski/gonja v1.5.3

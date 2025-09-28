@@ -23,6 +23,7 @@ import (
 
 	"github.com/bytedance/sonic"
 	"github.com/eino-contrib/jsonschema"
+	"github.com/getkin/kin-openapi/openapi3gen"
 
 	"github.com/cloudwego/eino/components/tool"
 	"github.com/cloudwego/eino/internal/generic"
@@ -80,68 +81,38 @@ func goStruct2ToolInfo[T any](toolName, toolDesc string, opts ...Option) (*schem
 	}, nil
 }
 
-func goStruct2ParamsOneOf[T any](_ ...Option) (*schema.ParamsOneOf, error) {
-	s := jsonschema.Reflect(generic.NewInstance[T]())
+func goStruct2ParamsOneOf[T any](opts ...Option) (*schema.ParamsOneOf, error) {
+	options := getToolOptions(opts...)
 
-	rootName := strings.TrimPrefix(s.Ref, "#/$defs/")
-	rootSchema := s.Definitions[rootName]
-	if rootSchema == nil {
-		return nil, fmt.Errorf("jsonschema '%s' not found", rootName)
+	if options.sc != nil && options.scModifier != nil {
+		return nil, fmt.Errorf("'SchemaCustomizerFn' and 'SchemaModifierFn' cannot be set at the same time")
 	}
 
-	rootSchema = resolveRef(rootSchema, s.Definitions)
-	paramsOneOf := schema.NewParamsOneOfByJSONSchema(rootSchema)
+	// To be compatible with the current logic, if 'SchemaCustomizerFn' is defined, OpenAPIV3 Schema is still used.
+	if options.sc != nil {
+		sc, err := openapi3gen.NewSchemaRefForValue(generic.NewInstance[T](), nil,
+			openapi3gen.SchemaCustomizer(openapi3gen.SchemaCustomizerFn(options.sc)))
+		if err != nil {
+			return nil, fmt.Errorf("new SchemaRef from T failed: %w", err)
+		}
+
+		paramsOneOf := schema.NewParamsOneOfByOpenAPIV3(sc.Value)
+
+		return paramsOneOf, nil
+	}
+
+	r := &jsonschema.Reflector{
+		Anonymous:      true,
+		DoNotReference: true,
+		SchemaModifier: jsonschema.SchemaModifierFn(options.scModifier),
+	}
+
+	js := r.Reflect(generic.NewInstance[T]())
+	js.Version = ""
+
+	paramsOneOf := schema.NewParamsOneOfByJSONSchema(js)
 
 	return paramsOneOf, nil
-}
-
-func resolveRef(s *jsonschema.Schema, defs jsonschema.Definitions) *jsonschema.Schema {
-	if s == nil {
-		return nil
-	}
-
-	if s.Ref != "" {
-		if def, ok := defs[s.Ref[len("#/$defs/"):]]; ok {
-			s.Ref = "" // Clear the ref after resolution
-			return resolveRef(def, defs)
-		}
-	}
-
-	for i, s_ := range s.AllOf {
-		s.AllOf[i] = resolveRef(s_, defs)
-	}
-	for i, s_ := range s.AnyOf {
-		s.AnyOf[i] = resolveRef(s_, defs)
-	}
-	for i, s_ := range s.OneOf {
-		s.OneOf[i] = resolveRef(s_, defs)
-	}
-	for i, s_ := range s.DependentSchemas {
-		s.DependentSchemas[i] = resolveRef(s_, defs)
-	}
-	for i, s_ := range s.PrefixItems {
-		s.PrefixItems[i] = resolveRef(s_, defs)
-	}
-	for i, s_ := range s.PatternProperties {
-		s.PatternProperties[i] = resolveRef(s_, defs)
-	}
-	if s.Properties != nil {
-		for pair := s.Properties.Oldest(); pair != nil; pair = pair.Next() {
-			s.Properties.Set(pair.Key, resolveRef(pair.Value, defs))
-		}
-	}
-
-	s.Not = resolveRef(s.Not, defs)
-	s.If = resolveRef(s.If, defs)
-	s.Then = resolveRef(s.Then, defs)
-	s.Else = resolveRef(s.Else, defs)
-	s.Items = resolveRef(s.Items, defs)
-	s.Contains = resolveRef(s.Contains, defs)
-	s.AdditionalProperties = resolveRef(s.AdditionalProperties, defs)
-	s.PropertyNames = resolveRef(s.PropertyNames, defs)
-	s.ContentSchema = resolveRef(s.ContentSchema, defs)
-
-	return s
 }
 
 // NewTool Create a tool, where the input and output are both in JSON format.

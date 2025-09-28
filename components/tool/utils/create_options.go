@@ -24,6 +24,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/eino-contrib/jsonschema"
 	"github.com/getkin/kin-openapi/openapi3"
 )
 
@@ -34,9 +35,10 @@ type UnmarshalArguments func(ctx context.Context, arguments string) (interface{}
 type MarshalOutput func(ctx context.Context, output interface{}) (string, error)
 
 type toolOptions struct {
-	um UnmarshalArguments
-	m  MarshalOutput
-	sc SchemaCustomizerFn
+	um         UnmarshalArguments
+	m          MarshalOutput
+	sc         SchemaCustomizerFn
+	scModifier SchemaModifierFn
 }
 
 // Option is the option func for the tool.
@@ -58,7 +60,7 @@ func WithMarshalOutput(m MarshalOutput) Option {
 	}
 }
 
-// Deprecated. For more information, see https://github.com/cloudwego/eino/discussions/397.
+// Deprecated, use SchemaModifierFn instead. For more information, see https://github.com/cloudwego/eino/discussions/397.
 // SchemaCustomizerFn is the schema customizer function for inferring tool parameter from tagged go struct.
 // Within this function, end-user can parse custom go struct tags into corresponding openapi schema field.
 // Parameters:
@@ -68,12 +70,28 @@ func WithMarshalOutput(m MarshalOutput) Option {
 // 4. schema: the current openapi schema object to be customized.
 type SchemaCustomizerFn func(name string, t reflect.Type, tag reflect.StructTag, schema *openapi3.Schema) error
 
-// Deprecated. For more information, see https://github.com/cloudwego/eino/discussions/397.
+// SchemaModifierFn is the schema modifier function for inferring tool parameter from tagged go struct.
+// Within this function, end-user can parse custom go struct tags into corresponding openapi schema field.
+// Parameters:
+// 1. jsonTagName: the name defined in the json tag. Specifically, the last 'jsonTagName' visited is fixed to be '_root', which represents the entire go struct. Also, for array field, both the field itself and the element within the array will trigger this function.
+// 2. t: the type of current schema, usually the field type of the go struct.
+// 3. tag: the struct tag of current schema, usually the field tag of the go struct. Note that the element within an array field will use the same go struct tag as the array field itself.
+// 4. schema: the current json schema object to be modified.
+type SchemaModifierFn func(jsonTagName string, t reflect.Type, tag reflect.StructTag, schema *jsonschema.Schema)
+
+// Deprecated, use WithSchemaModifier instead. For more information, see https://github.com/cloudwego/eino/discussions/397.
 // WithSchemaCustomizer sets a user-defined schema customizer for inferring tool parameter from tagged go struct.
 // If this option is not set, the defaultSchemaCustomizer will be used.
 func WithSchemaCustomizer(sc SchemaCustomizerFn) Option {
 	return func(o *toolOptions) {
 		o.sc = sc
+	}
+}
+
+// WithSchemaModifier sets a user-defined schema modifier for inferring tool parameter from tagged go struct.
+func WithSchemaModifier(modifier SchemaModifierFn) Option {
+	return func(o *toolOptions) {
+		o.scModifier = modifier
 	}
 }
 
