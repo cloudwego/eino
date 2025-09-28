@@ -52,12 +52,12 @@ func NewInterruptAndRerunErr(extra any) error {
 }
 
 type wrappedInterruptAndRerun struct {
-	ps    Path
+	ps    Address
 	inner error
 }
 
 func (w *wrappedInterruptAndRerun) Error() string {
-	return fmt.Sprintf("interrupt and rerun at path %s: %s", w.ps.String(), w.inner.Error())
+	return fmt.Sprintf("interrupt and rerun at address %s: %s", w.ps.String(), w.inner.Error())
 }
 
 func (w *wrappedInterruptAndRerun) Unwrap() error {
@@ -65,15 +65,15 @@ func (w *wrappedInterruptAndRerun) Unwrap() error {
 }
 
 // WrapInterruptAndRerunIfNeeded wraps the InterruptAndRerun error, or the error returned by
-// NewInterruptAndRerunErr, with the current path.
+// NewInterruptAndRerunErr, with the current execution address.
 // If the error is returned by either Interrupt, StatefulInterrupt or CompositeInterrupt,
 // it will be returned as-is without wrapping
-func WrapInterruptAndRerunIfNeeded(ctx context.Context, step PathStep, err error) error {
-	path, _ := GetCurrentPath(ctx)
-	newPath := append(append([]PathStep{}, path...), step)
+func WrapInterruptAndRerunIfNeeded(ctx context.Context, step AddressSegment, err error) error {
+	addr, _ := GetCurrentAddress(ctx)
+	newAddr := append(append([]AddressSegment{}, addr...), step)
 	if errors.Is(err, InterruptAndRerun) {
 		return &wrappedInterruptAndRerun{
-			ps:    newPath,
+			ps:    newAddr,
 			inner: err,
 		}
 	}
@@ -82,7 +82,7 @@ func WrapInterruptAndRerunIfNeeded(ctx context.Context, step PathStep, err error
 	if errors.As(err, &ire) {
 		if ire.path == nil {
 			return &wrappedInterruptAndRerun{
-				ps:    newPath,
+				ps:    newAddr,
 				inner: err,
 			}
 		}
@@ -94,33 +94,33 @@ func WrapInterruptAndRerunIfNeeded(ctx context.Context, step PathStep, err error
 		return ie
 	}
 
-	return fmt.Errorf("failed to wrap error as pathed InterruptAndRerun: %w", err)
+	return fmt.Errorf("failed to wrap error as addressed InterruptAndRerun: %w", err)
 }
 
-// Interrupt creates a special error that signals the graph execution engine to interrupt
-// the current run at the component's specific path and save a checkpoint.
+// Interrupt creates a special error that signals the execution engine to interrupt
+// the current run at the component's specific address and save a checkpoint.
 //
 // This is the standard way for a single, non-composite component to signal a resumable interruption.
 //
-//   - ctx: The context of the running component, used to retrieve the current execution path.
+//   - ctx: The context of the running component, used to retrieve the current execution address.
 //   - info: User-facing information about the interrupt. This is not persisted but is exposed to the
 //     calling application via the InterruptCtx to provide context (e.g., a reason for the pause).
 func Interrupt(ctx context.Context, info any) error {
 	var interruptID string
-	path, pathExist := GetCurrentPath(ctx)
-	if pathExist {
-		interruptID = path.String()
+	addr, addrExist := GetCurrentAddress(ctx)
+	if addrExist {
+		interruptID = addr.String()
 	}
 
-	return &interruptAndRerun{info: info, interruptID: &interruptID, path: path}
+	return &interruptAndRerun{info: info, interruptID: &interruptID, path: addr}
 }
 
-// StatefulInterrupt creates a special error that signals the graph execution engine to interrupt
-// the current run at the component's specific path and save a checkpoint.
+// StatefulInterrupt creates a special error that signals the execution engine to interrupt
+// the current run at the component's specific address and save a checkpoint.
 //
 // This is the standard way for a single, non-composite component to signal a resumable interruption.
 //
-//   - ctx: The context of the running component, used to retrieve the current execution path.
+//   - ctx: The context of the running component, used to retrieve the current execution address.
 //   - info: User-facing information about the interrupt. This is not persisted but is exposed to the
 //     calling application via the InterruptCtx to provide context (e.g., a reason for the pause).
 //   - state: The internal state that the interrupting component needs to persist to be able to resume
@@ -128,26 +128,26 @@ func Interrupt(ctx context.Context, info any) error {
 //     upon resumption via GetInterruptState.
 func StatefulInterrupt(ctx context.Context, info any, state any) error {
 	var interruptID string
-	path, pathExist := GetCurrentPath(ctx)
-	if pathExist {
-		interruptID = path.String()
+	addr, addrExist := GetCurrentAddress(ctx)
+	if addrExist {
+		interruptID = addr.String()
 	}
 
-	return &interruptAndRerun{info: info, state: state, interruptID: &interruptID, path: path}
+	return &interruptAndRerun{info: info, state: state, interruptID: &interruptID, path: addr}
 }
 
 type interruptAndRerun struct {
 	info        any // for end-user, probably the human-being
 	state       any // for persistence, when resuming, use GetInterruptState to fetch it at the interrupt location
 	interruptID *string
-	path        Path
+	path        Address
 	errs        []*interruptAndRerun
 }
 
 // CompositeInterrupt creates a special error that signals a composite interruption.
 // It is designed for "composite" nodes (like ToolsNode) that manage multiple, independent,
 // interruptible sub-processes. It bundles multiple sub-interrupt errors into a single error
-// that the graph engine can deconstruct into a flat list of resumable points.
+// that the engine can deconstruct into a flat list of resumable points.
 //
 // This function is robust and can handle several types of errors from sub-processes:
 //
@@ -157,7 +157,7 @@ type interruptAndRerun struct {
 //
 //   - An error containing `InterruptInfo` returned by a `Runnable` (e.g., a Graph within a lambda node).
 //
-//   - An error returned by 'WrapInterruptAndRerunIfNeeded' for the legacy InterruptAndRerun error,
+//   - An error returned by \'WrapInterruptAndRerunIfNeeded\' for the legacy InterruptAndRerun error,
 //     and for the error returned by the deprecated NewInterruptAndRerunErr.
 //
 // Parameters:
@@ -180,7 +180,7 @@ type interruptAndRerun struct {
 // the deprecated NewInterruptAndRerunErr function, you must wrap it using WrapInterruptAndRerunIfNeeded first
 // before passing them into this function.
 func CompositeInterrupt(ctx context.Context, info any, state any, errs ...error) error {
-	path, _ := GetCurrentPath(ctx)
+	addr, _ := GetCurrentAddress(ctx)
 	var cErrs []*interruptAndRerun
 	for _, err := range errs {
 		wrapped := &wrappedInterruptAndRerun{}
@@ -230,11 +230,11 @@ func CompositeInterrupt(ctx context.Context, info any, state any, errs ...error)
 
 		return fmt.Errorf("composite interrupt but one of the sub error is not interrupt and rerun error: %w", err)
 	}
-	return &interruptAndRerun{errs: cErrs, path: path, state: state, info: info}
+	return &interruptAndRerun{errs: cErrs, path: addr, state: state, info: info}
 }
 
 func (i *interruptAndRerun) Error() string {
-	return fmt.Sprintf("interrupt and rerun: %v for path: %s", i.info, i.path.String())
+	return fmt.Sprintf("interrupt and rerun: %v for address: %s", i.info, i.path.String())
 }
 
 func IsInterruptRerunError(err error) (any, bool) {
@@ -267,27 +267,27 @@ func init() {
 	schema.RegisterName[*InterruptInfo]("_eino_compose_interrupt_info") // TODO: check if this is really needed when refactoring adk resume
 }
 
-// PathStepType defines the type of a segment in an interrupt path.
-type PathStepType string
+// AddressSegmentType defines the type of a segment in an execution address.
+type AddressSegmentType string
 
 const (
-	// PathStepNode represents a segment of a path that corresponds to a graph node.
-	PathStepNode PathStepType = "node"
-	// PathStepTool represents a segment of a path that corresponds to a specific tool call within a ToolsNode.
-	PathStepTool PathStepType = "tool"
-	// PathStepRunnable represents a segment of a path that corresponds to an instance of the Runnable interface.
+	// AddressSegmentNode represents a segment of an address that corresponds to a graph node.
+	AddressSegmentNode AddressSegmentType = "node"
+	// AddressSegmentTool represents a segment of an address that corresponds to a specific tool call within a ToolsNode.
+	AddressSegmentTool AddressSegmentType = "tool"
+	// AddressSegmentRunnable represents a segment of an address that corresponds to an instance of the Runnable interface.
 	// Currently the possible Runnable types are: Graph, Workflow and Chain.
 	// Note that for sub-graphs added through AddGraphNode to another graph is not a Runnable.
-	// So a PathStepRunnable indicates a standalone Root level Graph,
+	// So a AddressSegmentRunnable indicates a standalone Root level Graph,
 	// or a Root level Graph inside a node such as Lambda node.
-	PathStepRunnable PathStepType = "runnable"
+	AddressSegmentRunnable AddressSegmentType = "runnable"
 )
 
-// Path represents a full, hierarchical path to an interrupt point.
-type Path []PathStep
+// Address represents a full, hierarchical address to a point in the execution structure.
+type Address []AddressSegment
 
-// String converts a Path into its unique string representation.
-func (p Path) String() string {
+// String converts an Address into its unique string representation.
+func (p Address) String() string {
 	var sb strings.Builder
 	for i, s := range p {
 		sb.WriteString(string(s.Type))
@@ -300,7 +300,7 @@ func (p Path) String() string {
 	return sb.String()
 }
 
-func (p Path) Equals(other Path) bool {
+func (p Address) Equals(other Address) bool {
 	if len(p) != len(other) {
 		return false
 	}
@@ -312,23 +312,32 @@ func (p Path) Equals(other Path) bool {
 	return true
 }
 
-// PathStep represents a single segment in the hierarchical path to an interrupt point.
-// A sequence of PathSegments uniquely identifies a location within a potentially nested graph structure.
-type PathStep struct {
-	// Type indicates whether this path segment is a graph node or a tool call.
-	Type PathStepType
+func (p Address) DeepCopy() Address {
+	if p == nil {
+		return nil
+	}
+	cpy := make(Address, len(p))
+	copy(cpy, p)
+	return cpy
+}
+
+// AddressSegment represents a single segment in the hierarchical address of an execution point.
+// A sequence of AddressSegments uniquely identifies a location within a potentially nested structure.
+type AddressSegment struct {
+	// Type indicates whether this address segment is a graph node, a tool call, an agent, etc.
+	Type AddressSegmentType
 	// ID is the unique identifier for this segment, e.g., the node's key or the tool call's ID.
 	ID string
 }
 
 // InterruptCtx provides a complete, user-facing context for a single, resumable interrupt point.
 type InterruptCtx struct {
-	// ID is the unique, fully-qualified path to the interrupt point.
-	// It is constructed by joining the individual Path segments, e.g., "node:graph_a;node:tools;tool:tool_call_123".
+	// ID is the unique, fully-qualified address of the interrupt point.
+	// It is constructed by joining the individual Address segments, e.g., "agent:A;node:graph_a;tool:tool_call_123".
 	// This ID should be used when providing resume data via ResumeWithData.
 	ID string
-	// Path is the structured sequence of PathStep segments that leads to the interrupt point.
-	Path Path
+	// Path is the structured sequence of AddressSegment segments that leads to the interrupt point.
+	Path Address
 	// Info is the user-facing information associated with the interrupt, provided by the component that triggered it.
 	Info any
 }
@@ -371,7 +380,7 @@ type subGraphInterruptError struct {
 	Info       *InterruptInfo
 	CheckPoint *checkpoint
 
-	InterruptPoints   []*interruptStateForPath
+	InterruptPoints   []*interruptStateForAddress
 	InterruptContexts []*InterruptCtx
 }
 
