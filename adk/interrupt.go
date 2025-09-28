@@ -32,7 +32,27 @@ type ResumeInfo struct {
 }
 
 type InterruptInfo struct {
-	Data any
+	Data        any
+	InterruptID *string
+	Addr        Address
+	Info        any
+
+	state  any
+	runCtx *runContext
+}
+
+func Interrupt(ctx context.Context, info any) *AgentAction {
+	runCtx := getRunCtx(ctx)
+	addr := runCtx.Addr
+	interruptID := addr.String()
+	return &AgentAction{
+		Interrupted: &InterruptInfo{
+			InterruptID: &interruptID,
+			Addr:        addr.DeepCopy(),
+			Info:        info,
+			runCtx:      runCtx.deepCopy(),
+		},
+	}
 }
 
 type Address = compose.Address

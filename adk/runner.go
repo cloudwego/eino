@@ -30,6 +30,7 @@ type Runner struct {
 	a               Agent
 	enableStreaming bool
 	store           compose.CheckPointStore
+	inheritAddress  bool
 }
 
 type RunnerConfig struct {
@@ -58,7 +59,7 @@ func (r *Runner) Run(ctx context.Context, messages []Message,
 		EnableStreaming: r.enableStreaming,
 	}
 
-	ctx = ctxWithNewRunCtx(ctx)
+	ctx = ctxWithNewRunCtx(ctx, r.inheritAddress)
 
 	AddSessionValues(ctx, o.sessionValues)
 

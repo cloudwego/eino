@@ -143,13 +143,20 @@ type WorkflowInterruptInfo struct {
 
 func (a *workflowAgent) runSequential(ctx context.Context, input *AgentInput,
 	generator *AsyncGenerator[*AgentEvent], intInfo *WorkflowInterruptInfo, iterations int /*passed by loop agent*/, opts ...AgentRunOption) (exit, interrupted bool) {
-	var runPath []RunStep // reconstruct RunPath each loop
+	var (
+		runPath []RunStep // reconstruct RunPath each loop
+		addr    Address
+	)
 	if iterations > 0 {
 		runPath = make([]RunStep, 0, (iterations+1)*len(a.subAgents))
 		for iter := 0; iter < iterations; iter++ {
 			for j := 0; j < len(a.subAgents); j++ {
 				runPath = append(runPath, RunStep{
 					agentName: a.subAgents[j].Name(ctx),
+				})
+				addr = append(addr, AddressSegment{
+					Type: AddressSegmentAgent,
+					ID:   a.subAgents[j].Name(ctx),
 				})
 			}
 		}
@@ -163,12 +170,17 @@ func (a *workflowAgent) runSequential(ctx context.Context, input *AgentInput,
 			runPath = append(runPath, RunStep{
 				agentName: a.subAgents[j].Name(ctx),
 			})
+			addr = append(addr, AddressSegment{
+				Type: AddressSegmentAgent,
+				ID:   a.subAgents[j].Name(ctx),
+			})
 		}
 	}
 
 	runCtx := getRunCtx(ctx)
 	nRunCtx := runCtx.deepCopy()
 	nRunCtx.RunPath = append(nRunCtx.RunPath, runPath...)
+	nRunCtx.Addr = append(nRunCtx.Addr, addr...)
 	nCtx := setRunCtx(ctx, nRunCtx)
 
 	for ; i < len(a.subAgents); i++ {

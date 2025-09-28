@@ -53,10 +53,6 @@ func (a *agentWithDeterministicTransferTo) Name(ctx context.Context) string {
 func (a *agentWithDeterministicTransferTo) Run(ctx context.Context,
 	input *AgentInput, options ...AgentRunOption) *AsyncIterator[*AgentEvent] {
 
-	if _, ok := a.agent.(*flowAgent); ok {
-		ctx = ClearRunCtx(ctx)
-	}
-
 	aIter := a.agent.Run(ctx, input, options...)
 
 	iterator, generator := NewAsyncIteratorPair[*AgentEvent]()
@@ -80,10 +76,6 @@ func (a *resumableAgentWithDeterministicTransferTo) Name(ctx context.Context) st
 
 func (a *resumableAgentWithDeterministicTransferTo) Run(ctx context.Context,
 	input *AgentInput, options ...AgentRunOption) *AsyncIterator[*AgentEvent] {
-
-	if _, ok := a.agent.(*flowAgent); ok {
-		ctx = ClearRunCtx(ctx)
-	}
 
 	aIter := a.agent.Run(ctx, input, options...)
 
