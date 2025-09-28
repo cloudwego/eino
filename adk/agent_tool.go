@@ -262,5 +262,6 @@ func newInvokableAgentToolRunner(agent Agent, store compose.CheckPointStore) *Ru
 		a:               agent,
 		enableStreaming: false,
 		store:           store,
+		inheritAddress:  true,
 	}
 }

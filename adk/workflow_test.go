@@ -568,7 +568,7 @@ func TestWorkflowAgentResumePanicRecovery(t *testing.T) {
 	assert.NoError(t, err)
 
 	// Initialize context with run context - this is the key fix
-	ctx = ctxWithNewRunCtx(ctx)
+	ctx = ctxWithNewRunCtx(ctx, false)
 
 	// Create valid resume info
 	resumeInfo := &ResumeInfo{
