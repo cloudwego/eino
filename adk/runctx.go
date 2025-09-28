@@ -204,6 +204,7 @@ func (rs *runSession) getValue(key string) (any, bool) {
 type runContext struct {
 	RootInput *AgentInput
 	RunPath   []RunStep
+	Addr      Address
 
 	Session *runSession
 }
@@ -216,10 +217,12 @@ func (rc *runContext) deepCopy() *runContext {
 	copied := &runContext{
 		RootInput: rc.RootInput,
 		RunPath:   make([]RunStep, len(rc.RunPath)),
+		Addr:      make(Address, 0),
 		Session:   rc.Session,
 	}
 
 	copy(copied.RunPath, rc.RunPath)
+	copy(copied.Addr, rc.Addr)
 
 	return copied
 }
@@ -247,6 +250,10 @@ func initRunCtx(ctx context.Context, agentName string, input *AgentInput) (conte
 	}
 
 	runCtx.RunPath = append(runCtx.RunPath, RunStep{agentName})
+	runCtx.Addr = append(runCtx.Addr, AddressSegment{
+		Type: AddressSegmentAgent,
+		ID:   agentName,
+	})
 	if runCtx.isRoot() {
 		runCtx.RootInput = input
 	}
@@ -262,14 +269,27 @@ func ClearRunCtx(ctx context.Context) context.Context {
 	return context.WithValue(ctx, runCtxKey{}, nil)
 }
 
-func ctxWithNewRunCtx(ctx context.Context) context.Context {
-	return setRunCtx(ctx, &runContext{Session: newRunSession()})
+func ctxWithNewRunCtx(ctx context.Context, inheritAddr bool) context.Context {
+	var addr Address
+	if inheritAddr {
+		addr = GetCurrentAddress(ctx)
+	}
+	return setRunCtx(ctx, &runContext{Session: newRunSession(), Addr: addr})
 }
 
 func getSession(ctx context.Context) *runSession {
 	runCtx := getRunCtx(ctx)
 	if runCtx != nil {
 		return runCtx.Session
+	}
+
+	return nil
+}
+
+func GetCurrentAddress(ctx context.Context) Address {
+	runCtx := getRunCtx(ctx)
+	if runCtx != nil {
+		return runCtx.Addr
 	}
 
 	return nil
