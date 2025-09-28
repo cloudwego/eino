@@ -72,27 +72,27 @@ func GetResumeContext[T any](ctx context.Context) (isResumeFlow bool, hasData bo
 	return
 }
 
-// GetCurrentPath returns the hierarchical path of the currently executing component.
-// The path is a sequence of segments, each identifying a node or a tool call.
-// This can be useful for logging or
-func GetCurrentPath(ctx context.Context) (Path, bool) {
+// GetCurrentAddress returns the hierarchical address of the currently executing component.
+// The address is a sequence of segments, each identifying a structural part of the execution
+// like an agent, a graph node, or a tool call. This can be useful for logging or debugging.
+func GetCurrentAddress(ctx context.Context) (Address, bool) {
 	if p, ok := ctx.Value(runCtxKey{}).(*runCtx); ok {
-		return p.ps, true
+		return p.addr, true
 	}
 
 	return nil, false
 }
 
 // Resume marks a specific interrupt point for resumption without passing any data.
-// When the graph is resumed, the component that was interrupted at the given `id` will be re-executed,
+// When the graph is resumed, the component that was interrupted at the given `address` will be re-executed,
 // but its `runCtx.resumeData` field will be nil.
 //
 // - ctx: The parent context.
-//   - ids: A variadic list of unique interrupt point IDs, obtained from `InterruptCtx.ID`.
-func Resume(ctx context.Context, ids ...string) context.Context {
-	resumeData := make(map[string]any, len(ids))
-	for _, id := range ids {
-		resumeData[id] = nil
+//   - addresses: A variadic list of unique interrupt point addresses, obtained from `InterruptCtx.ID`.
+func Resume(ctx context.Context, addresses ...string) context.Context {
+	resumeData := make(map[string]any, len(addresses))
+	for _, addr := range addresses {
+		resumeData[addr] = nil
 	}
 	// An empty map signals a "resume all" to the framework.
 	return BatchResumeWithData(ctx, resumeData)
@@ -101,17 +101,17 @@ func Resume(ctx context.Context, ids ...string) context.Context {
 // ResumeWithData provides a convenient way to resume a single interrupt point with data.
 //
 //   - ctx: The parent context.
-//   - id: The unique ID of the interrupt point, obtained from `InterruptCtx.ID`.
+//   - address: The unique address of the interrupt point, obtained from `InterruptCtx.ID`.
 //   - data: The data to be passed to the interrupted component.
-func ResumeWithData(ctx context.Context, id string, data any) context.Context {
-	return BatchResumeWithData(ctx, map[string]any{id: data})
+func ResumeWithData(ctx context.Context, address string, data any) context.Context {
+	return BatchResumeWithData(ctx, map[string]any{address: data})
 }
 
 // BatchResumeWithData attaches data to one or more interrupt points for resumption in a single batch operation.
 // This is the underlying function used by `Resume` and `ResumeWithData`.
 //
 //   - ctx: The parent context.
-//   - resumeData: A map where keys are the unique interrupt point IDs and values are the data
+//   - resumeData: A map where keys are the unique interrupt point addresses and values are the data
 //     to be passed to the corresponding component.
 func BatchResumeWithData(ctx context.Context, resumeData map[string]any) context.Context {
 	rInfo, ok := ctx.Value(interruptCtxKey{}).(*resumeInfo)
@@ -145,8 +145,8 @@ type interruptState struct {
 	State       any
 }
 
-type interruptStateForPath struct {
-	P    Path
+type interruptStateForAddress struct {
+	Addr Address
 	S    *interruptState
 	Used bool
 }
@@ -155,27 +155,27 @@ type resumeInfo struct {
 	mu                         sync.Mutex
 	interruptID2ResumeData     map[string]any
 	interruptID2ResumeDataUsed map[string]bool
-	interruptPoints            []*interruptStateForPath
+	interruptPoints            []*interruptStateForAddress
 }
 
 type interruptCtxKey struct{}
 
 type runCtx struct {
-	ps            Path
+	addr          Address
 	interruptData *interruptState
 	resumeData    any
 	isResumeFlow  bool
 }
 
 func getNodePath(ctx context.Context) (*NodePath, bool) {
-	currentPaths, existed := GetCurrentPath(ctx)
+	currentAddress, existed := GetCurrentAddress(ctx)
 	if !existed {
 		return nil, false
 	}
 
-	nodePath := make([]string, 0, len(currentPaths))
-	for _, p := range currentPaths {
-		if p.Type == PathStepRunnable {
+	nodePath := make([]string, 0, len(currentAddress))
+	for _, p := range currentAddress {
+		if p.Type == AddressSegmentRunnable {
 			nodePath = []string{}
 			continue
 		}
@@ -186,38 +186,36 @@ func getNodePath(ctx context.Context) (*NodePath, bool) {
 	return NewNodePath(nodePath...), len(nodePath) > 0
 }
 
-// AppendPathStep creates a new execution context for a sub-component within a custom composite node.
-// This is an advanced feature for developers building custom nodes that contain their own interruptible
-// sub-processes (e.g., a node that runs multiple sub-tasks in parallel).
+// AppendAddressSegment creates a new execution context for a sub-component (e.g., a graph node or a tool call).
 //
-// It extends the current context's path with a new segment and populates the new context with the
-// appropriate interrupt state and resume data for that specific sub-path.
+// It extends the current context's address with a new segment and populates the new context with the
+// appropriate interrupt state and resume data for that specific sub-address.
 //
-//   - ctx: The parent context, typically the one passed into the composite node's Invoke/Stream method.
-//   - pathType: The type of the new path segment (e.g., "process", "tool").
-//   - pathID: The unique ID for the new path segment.
-func AppendPathStep(ctx context.Context, stepType PathStepType, pathID string) context.Context {
-	// get current path
-	currentPaths, existed := GetCurrentPath(ctx)
+//   - ctx: The parent context, typically the one passed into the component's Invoke/Stream method.
+//   - segType: The type of the new address segment (e.g., "node", "tool").
+//   - segID: The unique ID for the new address segment.
+func AppendAddressSegment(ctx context.Context, segType AddressSegmentType, segID string) context.Context {
+	// get current address
+	currentAddress, existed := GetCurrentAddress(ctx)
 	if !existed {
-		currentPaths = []PathStep{
+		currentAddress = []AddressSegment{
 			{
-				Type: stepType,
-				ID:   pathID,
+				Type: segType,
+				ID:   segID,
 			},
 		}
 	} else {
-		newPaths := make([]PathStep, len(currentPaths)+1)
-		copy(newPaths, currentPaths)
-		newPaths[len(newPaths)-1] = PathStep{
-			Type: stepType,
-			ID:   pathID,
+		newAddress := make([]AddressSegment, len(currentAddress)+1)
+		copy(newAddress, currentAddress)
+		newAddress[len(newAddress)-1] = AddressSegment{
+			Type: segType,
+			ID:   segID,
 		}
-		currentPaths = newPaths
+		currentAddress = newAddress
 	}
 
 	runCtx := &runCtx{
-		ps: currentPaths,
+		addr: currentAddress,
 	}
 
 	rInfo, hasRInfo := getResumeInfo(ctx)
@@ -226,7 +224,7 @@ func AppendPathStep(ctx context.Context, stepType PathStepType, pathID string) c
 	}
 
 	for _, ip := range rInfo.interruptPoints {
-		if ip.P.Equals(currentPaths) {
+		if ip.Addr.Equals(currentAddress) {
 			if !ip.Used {
 				runCtx.interruptData = ip.S
 				ip.Used = true
@@ -235,8 +233,8 @@ func AppendPathStep(ctx context.Context, stepType PathStepType, pathID string) c
 		}
 	}
 
-	// take from resumeInfo the data for the new path if there is any
-	id := currentPaths.String()
+	// take from resumeInfo the data for the new address if there is any
+	id := currentAddress.String()
 	rInfo.mu.Lock()
 	defer rInfo.mu.Unlock()
 	used := rInfo.interruptID2ResumeDataUsed[id]

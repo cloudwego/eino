@@ -402,13 +402,13 @@ type interruptTempInfo struct {
 	interruptAfterNodes  []string
 	interruptRerunExtra  map[string]any
 
-	interruptPoints   []*interruptStateForPath
+	interruptPoints   []*interruptStateForAddress
 	interruptContexts []*InterruptCtx
 }
 
 func (it *interruptTempInfo) processInterruptErr(ire *interruptAndRerun) {
-	it.interruptPoints = append(it.interruptPoints, &interruptStateForPath{
-		P: ire.path,
+	it.interruptPoints = append(it.interruptPoints, &interruptStateForAddress{
+		Addr: ire.path,
 		S: &interruptState{
 			Interrupted: true,
 			State:       ire.state,
@@ -656,7 +656,7 @@ func (r *runner) createTasks(ctx context.Context, nodeMap map[string]any, optMap
 		}
 
 		nextTasks = append(nextTasks, &task{
-			ctx:     AppendPathStep(ctx, PathStepNode, nodeKey),
+			ctx:     AppendAddressSegment(ctx, AddressSegmentNode, nodeKey),
 			nodeKey: nodeKey,
 			call:    call,
 			input:   nodeInput,
@@ -716,7 +716,7 @@ func (r *runner) restoreTasks(
 		}
 
 		newTask := &task{
-			ctx:            AppendPathStep(ctx, PathStepNode, key),
+			ctx:            AppendAddressSegment(ctx, AddressSegmentNode, key),
 			nodeKey:        key,
 			call:           call,
 			input:          input,
