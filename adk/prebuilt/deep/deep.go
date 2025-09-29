@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/cloudwego/eino-ext/components/tool/commandline"
 	"github.com/slongfield/pyfmt"
 
 	"github.com/cloudwego/eino/adk"
@@ -23,16 +24,29 @@ type Config struct {
 	SubAgents      []adk.Agent
 	Tools          []tool.BaseTool
 	MainAgentTools []tool.BaseTool
+	Op             commandline.Operator
 }
 
 func New(ctx context.Context, cfg *Config) (adk.Agent, error) {
+	builtinTools, err := newBuiltinTools(cfg.Op)
+	if err != nil {
+		return nil, err
+	}
+	tt, err := newTaskTool(ctx, cfg.ChatModel, append(cfg.Tools, builtinTools...), cfg.SubAgents)
+	if err != nil {
+		return nil, fmt.Errorf("new task tool: %w", err)
+	}
 
 	return adk.NewChatModelAgent(ctx, &adk.ChatModelAgentConfig{
-		Name:          cfg.Name,
-		Description:   cfg.Description,
-		Instruction:   cfg.Instruction,
-		Model:         cfg.ChatModel,
-		ToolsConfig:   adk.ToolsConfig{},
+		Name:        cfg.Name,
+		Description: cfg.Description,
+		Instruction: cfg.Instruction,
+		Model:       cfg.ChatModel,
+		ToolsConfig: adk.ToolsConfig{
+			ToolsNodeConfig: compose.ToolsNodeConfig{
+				Tools: append(append(cfg.MainAgentTools, tt), builtinTools...),
+			},
+		},
 		GenModelInput: nil,
 		Exit:          nil,
 		OutputKey:     "",
@@ -46,17 +60,17 @@ func newTaskTool(
 	ts []tool.BaseTool,
 	subAgents []adk.Agent,
 ) (tool.BaseTool, error) {
-	generalAgent, err := newGeneralAgent(ctx, cm, append(ts, builtinTools...))
+	generalAgent, err := newGeneralAgent(ctx, cm, ts)
 	if err != nil {
 		return nil, fmt.Errorf("failed to new general agent: %w", err)
 	}
 
-	t := &taskTool{subAgents: map[string]adk.Agent{generalAgent.Name(ctx): generalAgent}}
+	t := &taskTool{subAgents: map[string]tool.InvokableTool{generalAgent.Name(ctx): adk.NewAgentTool(ctx, generalAgent)}}
 	subAgentsDescBuilder := strings.Builder{}
 	for _, a := range subAgents {
 		name := a.Name(ctx)
 		desc := a.Description(ctx)
-		t.subAgents[name] = a
+		t.subAgents[name] = adk.NewAgentTool(ctx, a)
 		subAgentsDescBuilder.WriteString(fmt.Sprintf("- %s: %s", name, desc))
 	}
 
@@ -71,7 +85,7 @@ func newTaskTool(
 }
 
 type taskTool struct {
-	subAgents map[string]adk.Agent
+	subAgents map[string]tool.InvokableTool
 }
 
 type taskToolArgument struct {
@@ -85,7 +99,7 @@ func (t *taskTool) exec(ctx context.Context, input taskToolArgument) (output str
 		return "", fmt.Errorf("subagent type %s not found", input.SubagentType)
 	}
 
-	return "", nil
+	return a.InvokableRun(ctx, input.Description)
 }
 
 func newGeneralAgent(
