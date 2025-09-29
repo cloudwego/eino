@@ -112,8 +112,10 @@ func WithForceNewRun() Option {
 	}
 }
 
+// Deprecated: use ResumeWithData to provide new state instance for specific graph/sub-graph by interruptID.
 type StateModifier func(ctx context.Context, path NodePath, state any) error
 
+// Deprecated: use ResumeWithData to provide new state instance for specific graph/sub-graph by interruptID.
 func WithStateModifier(sm StateModifier) Option {
 	return Option{
 		stateModifier: sm,
