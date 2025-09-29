@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/cloudwego/eino-ext/components/tool/commandline"
 	"github.com/slongfield/pyfmt"
 
 	"github.com/cloudwego/eino/adk"
@@ -24,17 +23,20 @@ type Config struct {
 	SubAgents      []adk.Agent
 	Tools          []tool.BaseTool
 	MainAgentTools []tool.BaseTool
-	Op             commandline.Operator
 }
 
 func New(ctx context.Context, cfg *Config) (adk.Agent, error) {
-	builtinTools, err := newBuiltinTools(cfg.Op)
+	builtinTools, err := newBuiltinTools()
 	if err != nil {
 		return nil, err
 	}
 	tt, err := newTaskTool(ctx, cfg.ChatModel, append(cfg.Tools, builtinTools...), cfg.SubAgents)
 	if err != nil {
 		return nil, fmt.Errorf("new task tool: %w", err)
+	}
+	submitResult, err := newSubmitResultTool()
+	if err != nil {
+		return nil, fmt.Errorf("new submit result tool: %w", err)
 	}
 
 	return adk.NewChatModelAgent(ctx, &adk.ChatModelAgentConfig{
@@ -44,7 +46,10 @@ func New(ctx context.Context, cfg *Config) (adk.Agent, error) {
 		Model:       cfg.ChatModel,
 		ToolsConfig: adk.ToolsConfig{
 			ToolsNodeConfig: compose.ToolsNodeConfig{
-				Tools: append(append(cfg.MainAgentTools, tt), builtinTools...),
+				Tools: append(append(append(cfg.MainAgentTools, tt), builtinTools...), submitResult),
+			},
+			ReturnDirectly: map[string]bool{
+				"submit_result": true,
 			},
 		},
 		GenModelInput: nil,
