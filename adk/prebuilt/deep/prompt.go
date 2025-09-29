@@ -52,6 +52,12 @@ You have access to a local, private filesystem which you can interact with using
 - Whenever possible, parallelize the work that you do. This is true for both tool_calls, and for tasks. Whenever you have independent steps to complete - make tool_calls, or kick off tasks (subagents) in parallel to accomplish them faster. This saves time for the user, which is incredibly important.
 - Remember to use the 'task' tool to silo independent tasks within a multi-part objective.
 - You should use the 'task' tool whenever you have a complex task that will take multiple steps, and is independent from other tasks that the agent needs to complete. These agents are highly competent and efficient.
+
+# Finalization Rule
+When you determine that the task is complete, you must call the tool 'submit_result'.
+- The 'result' field should contain a clear summary or detailed description of the final task outcome.
+- The 'files' field should be a list of file paths that are directly related to the final result. Do not include temporary or intermediate files.
+- Do not provide the final answer in plain text. Always use the 'submit_result' tool call to submit the result.
 `
 	taskToolDescription = `
 Launch an ephemeral subagent to handle complex, multi-step independent tasks with isolated context windows. 
