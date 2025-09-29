@@ -20,23 +20,23 @@ func newBuiltinTools() ([]tool.BaseTool, error) {
 	}
 	ts = append(ts, t)
 
-	t, err = newWriteFileTool()
-	if err != nil {
-		return nil, err
-	}
-	ts = append(ts, t)
-
-	t, err = newReadFileTool()
-	if err != nil {
-		return nil, err
-	}
-	ts = append(ts, t)
-
-	t, err = newLSTool()
-	if err != nil {
-		return nil, err
-	}
-	ts = append(ts, t)
+	//t, err = newWriteFileTool()
+	//if err != nil {
+	//	return nil, err
+	//}
+	//ts = append(ts, t)
+	//
+	//t, err = newReadFileTool()
+	//if err != nil {
+	//	return nil, err
+	//}
+	//ts = append(ts, t)
+	//
+	//t, err = newLSTool()
+	//if err != nil {
+	//	return nil, err
+	//}
+	//ts = append(ts, t)
 
 	return ts, nil
 }
