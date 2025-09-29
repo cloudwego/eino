@@ -48,7 +48,7 @@ var InterruptAndRerun = errors.New("interrupt and rerun")
 // If you really needs to use this error as a sub-error for a CompositeInterrupt call,
 // wrap it using WrapInterruptAndRerunIfNeeded first.
 func NewInterruptAndRerunErr(extra any) error {
-	return &interruptAndRerun{info: extra}
+	return &interruptAndRerun{info: extra, isCause: true}
 }
 
 type wrappedInterruptAndRerun struct {
@@ -112,7 +112,7 @@ func Interrupt(ctx context.Context, info any) error {
 		interruptID = addr.String()
 	}
 
-	return &interruptAndRerun{info: info, interruptID: &interruptID, path: addr}
+	return &interruptAndRerun{info: info, interruptID: &interruptID, path: addr, isCause: true}
 }
 
 // StatefulInterrupt creates a special error that signals the execution engine to interrupt
@@ -133,7 +133,7 @@ func StatefulInterrupt(ctx context.Context, info any, state any) error {
 		interruptID = addr.String()
 	}
 
-	return &interruptAndRerun{info: info, state: state, interruptID: &interruptID, path: addr}
+	return &interruptAndRerun{info: info, state: state, interruptID: &interruptID, path: addr, isCause: true}
 }
 
 type interruptAndRerun struct {
@@ -141,6 +141,7 @@ type interruptAndRerun struct {
 	state       any // for persistence, when resuming, use GetInterruptState to fetch it at the interrupt location
 	interruptID *string
 	path        Address
+	isCause     bool
 	errs        []*interruptAndRerun
 }
 
@@ -181,6 +182,7 @@ type interruptAndRerun struct {
 // before passing them into this function.
 func CompositeInterrupt(ctx context.Context, info any, state any, errs ...error) error {
 	addr, _ := GetCurrentAddress(ctx)
+	id := addr.String()
 	var cErrs []*interruptAndRerun
 	for _, err := range errs {
 		wrapped := &wrappedInterruptAndRerun{}
@@ -191,6 +193,7 @@ func CompositeInterrupt(ctx context.Context, info any, state any, errs ...error)
 				cErrs = append(cErrs, &interruptAndRerun{
 					path:        wrapped.ps,
 					interruptID: &id,
+					isCause:     true,
 				})
 				continue
 			}
@@ -203,6 +206,7 @@ func CompositeInterrupt(ctx context.Context, info any, state any, errs ...error)
 					interruptID: &id,
 					info:        ire.info,
 					state:       ire.state,
+					isCause:     ire.isCause,
 				})
 			}
 
@@ -221,7 +225,7 @@ func CompositeInterrupt(ctx context.Context, info any, state any, errs ...error)
 				subIRE := &interruptAndRerun{
 					info:        subInterruptCtx.Info,
 					interruptID: &subInterruptCtx.ID,
-					path:        subInterruptCtx.Path,
+					path:        subInterruptCtx.Address,
 				}
 				cErrs = append(cErrs, subIRE)
 			}
@@ -230,7 +234,7 @@ func CompositeInterrupt(ctx context.Context, info any, state any, errs ...error)
 
 		return fmt.Errorf("composite interrupt but one of the sub error is not interrupt and rerun error: %w", err)
 	}
-	return &interruptAndRerun{errs: cErrs, path: addr, state: state, info: info}
+	return &interruptAndRerun{errs: cErrs, interruptID: &id, path: addr, state: state, info: info}
 }
 
 func (i *interruptAndRerun) Error() string {
@@ -336,10 +340,12 @@ type InterruptCtx struct {
 	// It is constructed by joining the individual Address segments, e.g., "agent:A;node:graph_a;tool:tool_call_123".
 	// This ID should be used when providing resume data via ResumeWithData.
 	ID string
-	// Path is the structured sequence of AddressSegment segments that leads to the interrupt point.
-	Path Address
+	// Address is the structured sequence of AddressSegment segments that leads to the interrupt point.
+	Address Address
 	// Info is the user-facing information associated with the interrupt, provided by the component that triggered it.
 	Info any
+	// IsCause indicates whether the interrupt point is the exact root cause for an interruption.
+	IsCause bool
 }
 
 func ExtractInterruptInfo(err error) (info *InterruptInfo, existed bool) {
