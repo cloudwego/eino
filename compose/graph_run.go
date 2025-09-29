@@ -24,6 +24,7 @@ import (
 	"strings"
 
 	"github.com/cloudwego/eino/internal"
+	"github.com/cloudwego/eino/internal/serialization"
 )
 
 type chanCall struct {
@@ -156,7 +157,7 @@ func (r *runner) run(ctx context.Context, isStream bool, input any, opts ...Opti
 	}
 
 	// Extract subgraph
-	path, isSubGraph := getNodeKey(ctx)
+	path, isSubGraph := getNodePath(ctx)
 
 	// load checkpoint from ctx/store or init graph
 	initialized := false
@@ -378,10 +379,18 @@ func (r *runner) restoreFromCheckPoint(
 		}
 	}
 	if cp.State != nil {
+		rCtx, ok := getRunCtx(ctx)
+		if ok {
+			isResumeFlow := rCtx.isResumeFlow
+			if isResumeFlow && rCtx.resumeData != nil {
+				cp.State = rCtx.resumeData
+			}
+		}
+
 		ctx = context.WithValue(ctx, stateKey{}, &internalState{state: cp.State})
 	}
 
-	nextTasks, err := r.restoreTasks(ctx, cp.Inputs, cp.SkipPreHandler, cp.ToolsNodeExecutedTools, cp.RerunNodes, isStream, optMap) // should restore after set state to context
+	nextTasks, err := r.restoreTasks(ctx, cp.Inputs, cp.SkipPreHandler, cp.RerunNodes, isStream, optMap) // should restore after set state to context
 	if err != nil {
 		return ctx, nil, newGraphRunError(fmt.Errorf("restore tasks fail: %w", err))
 	}
@@ -390,19 +399,43 @@ func (r *runner) restoreFromCheckPoint(
 
 func newInterruptTempInfo() *interruptTempInfo {
 	return &interruptTempInfo{
-		subGraphInterrupts:     map[string]*subGraphInterruptError{},
-		interruptRerunExtra:    map[string]any{},
-		interruptExecutedTools: make(map[string]map[string]string),
+		subGraphInterrupts:  map[string]*subGraphInterruptError{},
+		interruptRerunExtra: map[string]any{},
 	}
 }
 
 type interruptTempInfo struct {
-	subGraphInterrupts     map[string]*subGraphInterruptError
-	interruptRerunNodes    []string
-	interruptBeforeNodes   []string
-	interruptAfterNodes    []string
-	interruptRerunExtra    map[string]any
-	interruptExecutedTools map[string]map[string]string
+	subGraphInterrupts   map[string]*subGraphInterruptError
+	interruptRerunNodes  []string
+	interruptBeforeNodes []string
+	interruptAfterNodes  []string
+	interruptRerunExtra  map[string]any
+
+	interruptPoints   []*interruptStateForAddress
+	interruptContexts []*InterruptCtx
+}
+
+func (it *interruptTempInfo) processInterruptErr(ire *interruptAndRerun) {
+	it.interruptPoints = append(it.interruptPoints, &interruptStateForAddress{
+		Addr: ire.addr,
+		S: &interruptState{
+			Interrupted: true,
+			State:       ire.state,
+		},
+	})
+
+	if ire.interruptID != nil {
+		it.interruptContexts = append(it.interruptContexts, &InterruptCtx{
+			ID:      *ire.interruptID,
+			Address: ire.addr,
+			Info:    ire.info,
+			IsCause: ire.isCause,
+		})
+	}
+
+	for _, subE := range ire.errs {
+		it.processInterruptErr(subE)
+	}
 }
 
 func (r *runner) resolveInterruptCompletedTasks(tempInfo *interruptTempInfo, completedTasks []*task) (err error) {
@@ -410,23 +443,22 @@ func (r *runner) resolveInterruptCompletedTasks(tempInfo *interruptTempInfo, com
 		if completedTask.err != nil {
 			if info := isSubGraphInterrupt(completedTask.err); info != nil {
 				tempInfo.subGraphInterrupts[completedTask.nodeKey] = info
+				tempInfo.interruptPoints = append(tempInfo.interruptPoints, info.InterruptPoints...)
+				tempInfo.interruptContexts = append(tempInfo.interruptContexts, info.InterruptContexts...)
 				continue
 			}
-			extra, ok := IsInterruptRerunError(completedTask.err)
-			if ok {
-				tempInfo.interruptRerunNodes = append(tempInfo.interruptRerunNodes, completedTask.nodeKey)
-				if extra != nil {
-					tempInfo.interruptRerunExtra[completedTask.nodeKey] = extra
 
-					// save tool node info
-					if completedTask.call.action.meta.component == ComponentOfToolsNode {
-						if e, ok := extra.(*ToolsInterruptAndRerunExtra); ok {
-							tempInfo.interruptExecutedTools[completedTask.nodeKey] = e.ExecutedTools
-						}
-					}
+			ire := &interruptAndRerun{}
+			if errors.As(completedTask.err, &ire) {
+				tempInfo.interruptRerunNodes = append(tempInfo.interruptRerunNodes, completedTask.nodeKey)
+				if ire.info != nil {
+					tempInfo.interruptRerunExtra[completedTask.nodeKey] = ire.info
 				}
+
+				tempInfo.processInterruptErr(ire)
 				continue
 			}
+
 			return wrapGraphNodeError(completedTask.nodeKey, completedTask.err)
 		}
 
@@ -472,6 +504,7 @@ func (r *runner) handleInterrupt(
 			cp.State = state.state
 		}
 	}
+
 	intInfo := &InterruptInfo{
 		State:           cp.State,
 		AfterNodes:      tempInfo.interruptAfterNodes,
@@ -480,6 +513,30 @@ func (r *runner) handleInterrupt(
 		RerunNodesExtra: tempInfo.interruptRerunExtra,
 		SubGraphs:       make(map[string]*InterruptInfo),
 	}
+
+	// Add graph-level interrupt context with deep-copied state
+	if cp.State != nil {
+		// Get current graph addr from context
+		currentAddr, exist := GetCurrentAddress(ctx)
+		if exist {
+			// Generate unique interrupt ID from addr
+			interruptID := currentAddr.String()
+
+			// Deep copy the state for the interrupt context
+			copiedState, err := deepCopyState(cp.State)
+			if err != nil {
+				return fmt.Errorf("failed to copy state: %w", err)
+			}
+
+			// Add graph-level InterruptCtx
+			tempInfo.interruptContexts = append(tempInfo.interruptContexts, &InterruptCtx{
+				ID:      interruptID,
+				Address: currentAddr,
+				Info:    copiedState,
+			})
+		}
+	}
+
 	for _, t := range nextTasks {
 		cp.Inputs[t.nodeKey] = t.input
 	}
@@ -491,6 +548,8 @@ func (r *runner) handleInterrupt(
 		return &subGraphInterruptError{
 			Info:       intInfo,
 			CheckPoint: cp,
+
+			InterruptContexts: tempInfo.interruptContexts,
 		}
 	} else if checkPointID != nil {
 		err := r.checkPointer.set(ctx, *checkPointID, cp)
@@ -498,7 +557,32 @@ func (r *runner) handleInterrupt(
 			return fmt.Errorf("failed to set checkpoint: %w, checkPointID: %s", err, *checkPointID)
 		}
 	}
+	intInfo.InterruptContexts = tempInfo.interruptContexts
 	return &interruptError{Info: intInfo}
+}
+
+// deepCopyState creates a deep copy of the state using serialization
+func deepCopyState(state any) (any, error) {
+	if state == nil {
+		return nil, nil
+	}
+	serializer := &serialization.InternalSerializer{}
+	data, err := serializer.Marshal(state)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal state: %w", err)
+	}
+
+	// Create new instance of the same type
+	stateType := reflect.TypeOf(state)
+	if stateType.Kind() == reflect.Ptr {
+		stateType = stateType.Elem()
+	}
+	newState := reflect.New(stateType).Interface()
+
+	if err := serializer.Unmarshal(data, newState); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal state: %w", err)
+	}
+	return newState, nil
 }
 
 func (r *runner) handleInterruptWithSubGraphAndRerunNodes(
@@ -546,11 +630,11 @@ func (r *runner) handleInterruptWithSubGraphAndRerunNodes(
 	}
 
 	cp := &checkpoint{
-		Channels:               cm.channels,
-		Inputs:                 make(map[string]any),
-		SkipPreHandler:         skipPreHandler,
-		ToolsNodeExecutedTools: tempInfo.interruptExecutedTools,
-		SubGraphs:              make(map[string]*checkpoint),
+		Channels:        cm.channels,
+		Inputs:          make(map[string]any),
+		SkipPreHandler:  skipPreHandler,
+		SubGraphs:       make(map[string]*checkpoint),
+		InterruptPoints: tempInfo.interruptPoints,
 	}
 	if r.runCtx != nil {
 		// current graph has enable state
@@ -567,6 +651,30 @@ func (r *runner) handleInterruptWithSubGraphAndRerunNodes(
 		RerunNodesExtra: tempInfo.interruptRerunExtra,
 		SubGraphs:       make(map[string]*InterruptInfo),
 	}
+
+	// Add graph-level interrupt context with deep-copied state
+	if cp.State != nil {
+		// Get current graph addr from context
+		currentAddr, exist := GetCurrentAddress(ctx)
+		if exist {
+			// Generate unique interrupt ID from addr
+			interruptID := currentAddr.String()
+
+			// Deep copy the state for the interrupt context
+			copiedState, err := deepCopyState(cp.State)
+			if err != nil {
+				return fmt.Errorf("failed to copy state: %w", err)
+			}
+
+			// Add graph-level InterruptCtx
+			tempInfo.interruptContexts = append(tempInfo.interruptContexts, &InterruptCtx{
+				ID:      interruptID,
+				Address: currentAddr,
+				Info:    copiedState,
+			})
+		}
+	}
+
 	for _, t := range subgraphTasks {
 		cp.RerunNodes = append(cp.RerunNodes, t.nodeKey)
 		cp.SubGraphs[t.nodeKey] = tempInfo.subGraphInterrupts[t.nodeKey].CheckPoint
@@ -581,8 +689,10 @@ func (r *runner) handleInterruptWithSubGraphAndRerunNodes(
 	}
 	if isSubGraph {
 		return &subGraphInterruptError{
-			Info:       intInfo,
-			CheckPoint: cp,
+			Info:              intInfo,
+			CheckPoint:        cp,
+			InterruptPoints:   tempInfo.interruptPoints,
+			InterruptContexts: tempInfo.interruptContexts,
 		}
 	} else if checkPointID != nil {
 		err = r.checkPointer.set(ctx, *checkPointID, cp)
@@ -590,6 +700,7 @@ func (r *runner) handleInterruptWithSubGraphAndRerunNodes(
 			return fmt.Errorf("failed to set checkpoint: %w, checkPointID: %s", err, *checkPointID)
 		}
 	}
+	intInfo.InterruptContexts = tempInfo.interruptContexts
 	return &interruptError{Info: intInfo}
 }
 
@@ -631,7 +742,7 @@ func (r *runner) createTasks(ctx context.Context, nodeMap map[string]any, optMap
 		}
 
 		nextTasks = append(nextTasks, &task{
-			ctx:     setNodeKey(ctx, nodeKey),
+			ctx:     AppendAddressSegment(ctx, AddressSegmentNode, nodeKey),
 			nodeKey: nodeKey,
 			call:    call,
 			input:   nodeInput,
@@ -664,7 +775,6 @@ func (r *runner) restoreTasks(
 	ctx context.Context,
 	inputs map[string]any,
 	skipPreHandler map[string]bool,
-	toolNodeExecutedTools map[string]map[string]string,
 	rerunNodes []string,
 	isStream bool,
 	optMap map[string][]any) ([]*task, error) {
@@ -692,7 +802,7 @@ func (r *runner) restoreTasks(
 		}
 
 		newTask := &task{
-			ctx:            setNodeKey(ctx, key),
+			ctx:            AppendAddressSegment(ctx, AddressSegmentNode, key),
 			nodeKey:        key,
 			call:           call,
 			input:          input,
@@ -701,9 +811,6 @@ func (r *runner) restoreTasks(
 		}
 		if opt, ok := optMap[key]; ok {
 			newTask.option = opt
-		}
-		if executedTools, ok := toolNodeExecutedTools[key]; ok {
-			newTask.option = append(newTask.option, withExecutedTools(executedTools))
 		}
 
 		ret = append(ret, newTask)
