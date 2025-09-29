@@ -24,6 +24,7 @@ import (
 	"strings"
 
 	"github.com/cloudwego/eino/internal"
+	"github.com/cloudwego/eino/internal/serialization"
 )
 
 type chanCall struct {
@@ -388,6 +389,14 @@ func (r *runner) restoreFromCheckPoint(
 		}
 	}
 	if cp.State != nil {
+		rCtx, ok := getRunCtx(ctx)
+		if ok {
+			isResumeFlow := rCtx.isResumeFlow
+			if isResumeFlow && rCtx.resumeData != nil {
+				cp.State = rCtx.resumeData
+			}
+		}
+
 		ctx = context.WithValue(ctx, stateKey{}, &internalState{state: cp.State})
 	}
 
@@ -504,6 +513,7 @@ func (r *runner) handleInterrupt(
 			cp.State = state.state
 		}
 	}
+
 	intInfo := &InterruptInfo{
 		State:           cp.State,
 		AfterNodes:      tempInfo.interruptAfterNodes,
@@ -512,6 +522,30 @@ func (r *runner) handleInterrupt(
 		RerunNodesExtra: tempInfo.interruptRerunExtra,
 		SubGraphs:       make(map[string]*InterruptInfo),
 	}
+
+	// Add graph-level interrupt context with deep-copied state
+	if cp.State != nil {
+		// Get current graph path from context
+		currentAddr, exist := GetCurrentAddress(ctx)
+		if exist {
+			// Generate unique interrupt ID from path
+			interruptID := currentAddr.String()
+
+			// Deep copy the state for the interrupt context
+			copiedState, err := deepCopyState(cp.State)
+			if err != nil {
+				return fmt.Errorf("failed to copy state: %w", err)
+			}
+
+			// Add graph-level InterruptCtx
+			tempInfo.interruptContexts = append(tempInfo.interruptContexts, &InterruptCtx{
+				ID:   interruptID,
+				Path: currentAddr,
+				Info: copiedState,
+			})
+		}
+	}
+
 	for _, t := range nextTasks {
 		cp.Inputs[t.nodeKey] = t.input
 	}
@@ -523,6 +557,8 @@ func (r *runner) handleInterrupt(
 		return &subGraphInterruptError{
 			Info:       intInfo,
 			CheckPoint: cp,
+
+			InterruptContexts: tempInfo.interruptContexts,
 		}
 	} else if checkPointID != nil {
 		err := r.checkPointer.set(ctx, *checkPointID, cp)
@@ -530,7 +566,32 @@ func (r *runner) handleInterrupt(
 			return fmt.Errorf("failed to set checkpoint: %w, checkPointID: %s", err, *checkPointID)
 		}
 	}
+	intInfo.InterruptContexts = tempInfo.interruptContexts
 	return &interruptError{Info: intInfo}
+}
+
+// deepCopyState creates a deep copy of the state using serialization
+func deepCopyState(state any) (any, error) {
+	if state == nil {
+		return nil, nil
+	}
+	serializer := &serialization.InternalSerializer{}
+	data, err := serializer.Marshal(state)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal state: %w", err)
+	}
+
+	// Create new instance of the same type
+	stateType := reflect.TypeOf(state)
+	if stateType.Kind() == reflect.Ptr {
+		stateType = stateType.Elem()
+	}
+	newState := reflect.New(stateType).Interface()
+
+	if err := serializer.Unmarshal(data, newState); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal state: %w", err)
+	}
+	return newState, nil
 }
 
 func (r *runner) handleInterruptWithSubGraphAndRerunNodes(
@@ -592,14 +653,37 @@ func (r *runner) handleInterruptWithSubGraphAndRerunNodes(
 	}
 
 	intInfo := &InterruptInfo{
-		State:             cp.State,
-		BeforeNodes:       tempInfo.interruptBeforeNodes,
-		AfterNodes:        tempInfo.interruptAfterNodes,
-		RerunNodes:        tempInfo.interruptRerunNodes,
-		RerunNodesExtra:   tempInfo.interruptRerunExtra,
-		SubGraphs:         make(map[string]*InterruptInfo),
-		InterruptContexts: tempInfo.interruptContexts,
+		State:           cp.State,
+		BeforeNodes:     tempInfo.interruptBeforeNodes,
+		AfterNodes:      tempInfo.interruptAfterNodes,
+		RerunNodes:      tempInfo.interruptRerunNodes,
+		RerunNodesExtra: tempInfo.interruptRerunExtra,
+		SubGraphs:       make(map[string]*InterruptInfo),
 	}
+
+	// Add graph-level interrupt context with deep-copied state
+	if cp.State != nil {
+		// Get current graph path from context
+		currentAddr, exist := GetCurrentAddress(ctx)
+		if exist {
+			// Generate unique interrupt ID from path
+			interruptID := currentAddr.String()
+
+			// Deep copy the state for the interrupt context
+			copiedState, err := deepCopyState(cp.State)
+			if err != nil {
+				return fmt.Errorf("failed to copy state: %w", err)
+			}
+
+			// Add graph-level InterruptCtx
+			tempInfo.interruptContexts = append(tempInfo.interruptContexts, &InterruptCtx{
+				ID:   interruptID,
+				Path: currentAddr,
+				Info: copiedState,
+			})
+		}
+	}
+
 	for _, t := range subgraphTasks {
 		cp.RerunNodes = append(cp.RerunNodes, t.nodeKey)
 		cp.SubGraphs[t.nodeKey] = tempInfo.subGraphInterrupts[t.nodeKey].CheckPoint
@@ -625,6 +709,7 @@ func (r *runner) handleInterruptWithSubGraphAndRerunNodes(
 			return fmt.Errorf("failed to set checkpoint: %w, checkPointID: %s", err, *checkPointID)
 		}
 	}
+	intInfo.InterruptContexts = tempInfo.interruptContexts
 	return &interruptError{Info: intInfo}
 }
 
