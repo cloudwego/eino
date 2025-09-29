@@ -43,7 +43,7 @@ func New(ctx context.Context, cfg *Config) (adk.Agent, error) {
 	return adk.NewChatModelAgent(ctx, &adk.ChatModelAgentConfig{
 		Name:        cfg.Name,
 		Description: cfg.Description,
-		Instruction: cfg.Instruction,
+		Instruction: cfg.Instruction + "\n" + baseAgentPrompt,
 		Model:       cfg.ChatModel,
 		ToolsConfig: adk.ToolsConfig{
 			ToolsNodeConfig: compose.ToolsNodeConfig{
@@ -53,9 +53,7 @@ func New(ctx context.Context, cfg *Config) (adk.Agent, error) {
 				"submit_result": true,
 			},
 		},
-		GenModelInput: func(ctx context.Context, instruction string, input *adk.AgentInput) ([]adk.Message, error) {
-
-		},
+		GenModelInput: nil,
 		Exit:          nil,
 		OutputKey:     "",
 		MaxIterations: 0,
