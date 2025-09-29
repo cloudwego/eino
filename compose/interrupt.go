@@ -80,7 +80,7 @@ func WrapInterruptAndRerunIfNeeded(ctx context.Context, step AddressSegment, err
 
 	ire := &interruptAndRerun{}
 	if errors.As(err, &ire) {
-		if ire.path == nil {
+		if ire.addr == nil {
 			return &wrappedInterruptAndRerun{
 				ps:    newAddr,
 				inner: err,
@@ -112,7 +112,7 @@ func Interrupt(ctx context.Context, info any) error {
 		interruptID = addr.String()
 	}
 
-	return &interruptAndRerun{info: info, interruptID: &interruptID, path: addr, isCause: true}
+	return &interruptAndRerun{info: info, interruptID: &interruptID, addr: addr, isCause: true}
 }
 
 // StatefulInterrupt creates a special error that signals the execution engine to interrupt
@@ -133,14 +133,14 @@ func StatefulInterrupt(ctx context.Context, info any, state any) error {
 		interruptID = addr.String()
 	}
 
-	return &interruptAndRerun{info: info, state: state, interruptID: &interruptID, path: addr, isCause: true}
+	return &interruptAndRerun{info: info, state: state, interruptID: &interruptID, addr: addr, isCause: true}
 }
 
 type interruptAndRerun struct {
 	info        any // for end-user, probably the human-being
 	state       any // for persistence, when resuming, use GetInterruptState to fetch it at the interrupt location
 	interruptID *string
-	path        Address
+	addr        Address
 	isCause     bool
 	errs        []*interruptAndRerun
 }
@@ -191,7 +191,7 @@ func CompositeInterrupt(ctx context.Context, info any, state any, errs ...error)
 			if errors.Is(inner, InterruptAndRerun) {
 				id := wrapped.ps.String()
 				cErrs = append(cErrs, &interruptAndRerun{
-					path:        wrapped.ps,
+					addr:        wrapped.ps,
 					interruptID: &id,
 					isCause:     true,
 				})
@@ -202,7 +202,7 @@ func CompositeInterrupt(ctx context.Context, info any, state any, errs ...error)
 			if errors.As(err, &ire) {
 				id := wrapped.ps.String()
 				cErrs = append(cErrs, &interruptAndRerun{
-					path:        wrapped.ps,
+					addr:        wrapped.ps,
 					interruptID: &id,
 					info:        ire.info,
 					state:       ire.state,
@@ -225,7 +225,7 @@ func CompositeInterrupt(ctx context.Context, info any, state any, errs ...error)
 				subIRE := &interruptAndRerun{
 					info:        subInterruptCtx.Info,
 					interruptID: &subInterruptCtx.ID,
-					path:        subInterruptCtx.Address,
+					addr:        subInterruptCtx.Address,
 				}
 				cErrs = append(cErrs, subIRE)
 			}
@@ -234,11 +234,11 @@ func CompositeInterrupt(ctx context.Context, info any, state any, errs ...error)
 
 		return fmt.Errorf("composite interrupt but one of the sub error is not interrupt and rerun error: %w", err)
 	}
-	return &interruptAndRerun{errs: cErrs, interruptID: &id, path: addr, state: state, info: info}
+	return &interruptAndRerun{errs: cErrs, interruptID: &id, addr: addr, state: state, info: info}
 }
 
 func (i *interruptAndRerun) Error() string {
-	return fmt.Sprintf("interrupt and rerun: %v for address: %s", i.info, i.path.String())
+	return fmt.Sprintf("interrupt and rerun: %v for address: %s", i.info, i.addr.String())
 }
 
 func IsInterruptRerunError(err error) (any, bool) {
