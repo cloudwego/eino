@@ -53,7 +53,9 @@ func New(ctx context.Context, cfg *Config) (adk.Agent, error) {
 				"submit_result": true,
 			},
 		},
-		GenModelInput: nil,
+		GenModelInput: func(ctx context.Context, instruction string, input *adk.AgentInput) ([]adk.Message, error) {
+
+		},
 		Exit:          nil,
 		OutputKey:     "",
 		MaxIterations: 0,
@@ -77,7 +79,7 @@ func newTaskTool(
 		name := a.Name(ctx)
 		desc := a.Description(ctx)
 		t.subAgents[name] = adk.NewAgentTool(ctx, a)
-		subAgentsDescBuilder.WriteString(fmt.Sprintf("- %s: %s", name, desc))
+		subAgentsDescBuilder.WriteString(fmt.Sprintf("- %s: %s\n", name, desc))
 	}
 
 	desc, err := pyfmt.Fmt(taskToolDescription, map[string]any{
