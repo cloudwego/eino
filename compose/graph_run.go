@@ -427,7 +427,7 @@ type interruptTempInfo struct {
 
 func (it *interruptTempInfo) processInterruptErr(ire *interruptAndRerun) {
 	it.interruptPoints = append(it.interruptPoints, &interruptStateForAddress{
-		Addr: ire.path,
+		Addr: ire.addr,
 		S: &interruptState{
 			Interrupted: true,
 			State:       ire.state,
@@ -437,7 +437,7 @@ func (it *interruptTempInfo) processInterruptErr(ire *interruptAndRerun) {
 	if ire.interruptID != nil {
 		it.interruptContexts = append(it.interruptContexts, &InterruptCtx{
 			ID:      *ire.interruptID,
-			Address: ire.path,
+			Address: ire.addr,
 			Info:    ire.info,
 			IsCause: ire.isCause,
 		})
@@ -526,10 +526,10 @@ func (r *runner) handleInterrupt(
 
 	// Add graph-level interrupt context with deep-copied state
 	if cp.State != nil {
-		// Get current graph path from context
+		// Get current graph addr from context
 		currentAddr, exist := GetCurrentAddress(ctx)
 		if exist {
-			// Generate unique interrupt ID from path
+			// Generate unique interrupt ID from addr
 			interruptID := currentAddr.String()
 
 			// Deep copy the state for the interrupt context
@@ -664,10 +664,10 @@ func (r *runner) handleInterruptWithSubGraphAndRerunNodes(
 
 	// Add graph-level interrupt context with deep-copied state
 	if cp.State != nil {
-		// Get current graph path from context
+		// Get current graph addr from context
 		currentAddr, exist := GetCurrentAddress(ctx)
 		if exist {
-			// Generate unique interrupt ID from path
+			// Generate unique interrupt ID from addr
 			interruptID := currentAddr.String()
 
 			// Deep copy the state for the interrupt context

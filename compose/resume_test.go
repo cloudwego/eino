@@ -670,7 +670,7 @@ func TestGraphInterruptWithinLambda(t *testing.T) {
 	_ = innerGraph.AddLambdaNode("inner_lambda", interruptingLambda)
 	_ = innerGraph.AddEdge(START, "inner_lambda")
 	_ = innerGraph.AddEdge("inner_lambda", END)
-	// Give the inner graph a name so it can create its "runnable" path step.
+	// Give the inner graph a name so it can create its "runnable" addr step.
 	compiledInnerGraph, err := innerGraph.Compile(context.Background(), WithGraphName("inner"), WithCheckPointStore(newInMemoryStore()))
 	assert.NoError(t, err)
 
@@ -687,7 +687,7 @@ func TestGraphInterruptWithinLambda(t *testing.T) {
 
 			// The composite interrupt itself can be stateless, as it's just a wrapper.
 			// It signals to the framework to look inside the subErrs and correctly
-			// prepend the current path to the paths of the inner interrupts.
+			// prepend the current addr to the paths of the inner interrupts.
 			return "", CompositeInterrupt(ctx, "composite interrupt from lambda", nil, err)
 		}
 		return output, nil
@@ -698,7 +698,7 @@ func TestGraphInterruptWithinLambda(t *testing.T) {
 	_ = rootGraph.AddLambdaNode("composite_lambda", compositeLambda)
 	_ = rootGraph.AddEdge(START, "composite_lambda")
 	_ = rootGraph.AddEdge("composite_lambda", END)
-	// Give the root graph a name for its "runnable" path step.
+	// Give the root graph a name for its "runnable" addr step.
 	compiledRootGraph, err := rootGraph.Compile(context.Background(), WithGraphName("root"), WithCheckPointStore(newInMemoryStore()))
 	assert.NoError(t, err)
 
@@ -713,7 +713,7 @@ func TestGraphInterruptWithinLambda(t *testing.T) {
 	interruptContexts := interruptInfo.InterruptContexts
 	assert.Len(t, interruptContexts, 2)
 
-	// The path is now fully qualified, including the runnable steps from both graphs.
+	// The addr is now fully qualified, including the runnable steps from both graphs.
 	expectedPath := "runnable:root;node:composite_lambda;runnable:inner;node:inner_lambda"
 	assert.Equal(t, expectedPath, interruptContexts[1].ID)
 	assert.Equal(t, "inner interrupt", interruptContexts[1].Info)
@@ -759,7 +759,7 @@ func TestLegacyInterrupt(t *testing.T) {
 		if isResume {
 			return data, nil
 		}
-		// Use the modern, path-aware interrupt function
+		// Use the modern, addr-aware interrupt function
 		return "", Interrupt(ctx, "modern info")
 	}
 
@@ -778,7 +778,7 @@ func TestLegacyInterrupt(t *testing.T) {
 		subCtx1 := AppendAddressSegment(ctx, PathStepCustom, "1")
 		out1, err1 := subProcess1(subCtx1)
 		if err1 != nil {
-			// Wrap the legacy error to give it a path
+			// Wrap the legacy error to give it a addr
 			wrappedErr := WrapInterruptAndRerunIfNeeded(ctx, AddressSegment{Type: PathStepCustom, ID: "1"}, err1)
 			errs = append(errs, wrappedErr)
 		} else {
@@ -787,7 +787,7 @@ func TestLegacyInterrupt(t *testing.T) {
 		subCtx2 := AppendAddressSegment(ctx, PathStepCustom, "2")
 		out2, err2 := subProcess2(subCtx2)
 		if err2 != nil {
-			// Wrap the legacy error to give it a path
+			// Wrap the legacy error to give it a addr
 			wrappedErr := WrapInterruptAndRerunIfNeeded(ctx, AddressSegment{Type: PathStepCustom, ID: "2"}, err2)
 			errs = append(errs, wrappedErr)
 		} else {
@@ -796,7 +796,7 @@ func TestLegacyInterrupt(t *testing.T) {
 		subCtx3 := AppendAddressSegment(ctx, PathStepCustom, "3")
 		out3, err3 := subProcess3(subCtx3)
 		if err3 != nil {
-			// The error from Interrupt() is already path-aware. WrapInterruptAndRerunIfNeeded
+			// The error from Interrupt() is already addr-aware. WrapInterruptAndRerunIfNeeded
 			// should handle this gracefully and return the error as-is.
 			wrappedErr := WrapInterruptAndRerunIfNeeded(ctx, AddressSegment{Type: PathStepCustom, ID: "3"}, err3)
 			errs = append(errs, wrappedErr)
