@@ -448,6 +448,7 @@ func (h *cbHandler) onGraphError(ctx context.Context,
 		h.Send(&AgentEvent{AgentName: h.agentName, Err: fmt.Errorf("interrupt has happened, but cannot find interrupt info")})
 		return ctx
 	}
+
 	h.Send(&AgentEvent{AgentName: h.agentName, Action: &AgentAction{
 		Interrupted: &InterruptInfo{
 			Data: &ChatModelAgentInterruptInfo{Data: data, Info: info},

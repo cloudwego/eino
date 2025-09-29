@@ -32,25 +32,62 @@ type ResumeInfo struct {
 }
 
 type InterruptInfo struct {
-	Data        any
-	InterruptID *string
-	Addr        Address
-	Info        any
+	// Deprecated: use Info for user-facing info, and state for internal state persistence
+	Data any
 
+	InterruptContexts []*InterruptCtx
+
+	interruptStates []*interruptState
+}
+
+type interruptState struct {
 	state  any
 	runCtx *runContext
 }
 
-func Interrupt(ctx context.Context, info any) *AgentAction {
+func StatefulInterrupt(ctx context.Context, info any, state any) *AgentAction {
 	runCtx := getRunCtx(ctx)
 	addr := runCtx.Addr
 	interruptID := addr.String()
 	return &AgentAction{
 		Interrupted: &InterruptInfo{
-			InterruptID: &interruptID,
-			Addr:        addr.DeepCopy(),
-			Info:        info,
-			runCtx:      runCtx.deepCopy(),
+			InterruptContexts: []*InterruptCtx{
+				{
+					ID:      interruptID,
+					Info:    info,
+					Address: addr.DeepCopy(),
+				},
+			},
+			interruptStates: []*interruptState{
+				{
+					state:  state,
+					runCtx: runCtx.deepCopy(),
+				},
+			},
+		},
+	}
+}
+
+func CompositeInterrupt(ctx context.Context, state any, subInterruptInfos ...*InterruptInfo) *AgentAction {
+	runCtx := getRunCtx(ctx)
+
+	var interruptContexts []*InterruptCtx
+	for _, subInfo := range subInterruptInfos {
+		interruptContexts = append(interruptContexts, subInfo.InterruptContexts...)
+	}
+
+	var interruptStates []*interruptState
+	for _, subInfo := range subInterruptInfos {
+		interruptStates = append(interruptStates, subInfo.interruptStates...)
+	}
+
+	return &AgentAction{
+		Interrupted: &InterruptInfo{
+			InterruptContexts: interruptContexts,
+			interruptStates: append(interruptStates, &interruptState{
+				state:  state,
+				runCtx: runCtx.deepCopy(),
+			}),
 		},
 	}
 }
