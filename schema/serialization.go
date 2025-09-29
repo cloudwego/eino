@@ -66,12 +66,9 @@ func init() {
 //   - Only exported struct fields are serialized.
 //   - Functions and channels are not supported and will be ignored.
 //
-// This function panics if registration fails. It also automatically registers
-// corresponding slice types (e.g., `[]T`, `[]*T`) to simplify usage.
+// This function panics if registration fails.
 func RegisterName[T any](name string) {
 	gob.RegisterName(name, generic.NewInstance[T]())
-
-	gobRegisterSliceTypesFor[T]()
 
 	err := serialization.GenericRegister[T](name)
 	if err != nil {
@@ -123,35 +120,16 @@ func getTypeName(rt reflect.Type) string {
 //   - Only exported struct fields are serialized.
 //   - Functions and channels are not supported and will be ignored.
 //
-// This function panics if registration fails. It also automatically registers
-// corresponding slice types (e.g., `[]T`, `[]*T`) to simplify usage.
+// This function panics if registration fails.
 func Register[T any]() {
 	value := generic.NewInstance[T]()
 
 	gob.Register(value)
-	gobRegisterSliceTypesFor[T]()
 
 	name := getTypeName(reflect.TypeOf(value))
 
 	err := serialization.GenericRegister[T](name)
 	if err != nil {
 		panic(err)
-	}
-}
-
-func gobRegisterSliceTypesFor[T any]() {
-	rt := reflect.TypeOf((*T)(nil)).Elem()
-
-	// always register []T
-	gob.Register(reflect.MakeSlice(reflect.SliceOf(rt), 0, 0).Interface())
-
-	if rt.Kind() == reflect.Pointer {
-		// if T is pointer, register [](T.Elem) for gob
-		elemType := rt.Elem()
-		gob.Register(reflect.MakeSlice(reflect.SliceOf(elemType), 0, 0).Interface())
-	} else {
-		// if T is not pointer, register []*T for gob
-		ptrType := reflect.PointerTo(rt)
-		gob.Register(reflect.MakeSlice(reflect.SliceOf(ptrType), 0, 0).Interface())
 	}
 }

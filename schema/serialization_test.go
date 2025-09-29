@@ -114,6 +114,10 @@ func TestRegister(t *testing.T) {
 
 	Register[*testStruct1]()
 	Register[*testStruct2]()
+	Register[[]*Message]()
+	Register[[]Message]()
+	Register[[]*testStruct2]()
+	Register[[]testStruct2]()
 
 	t1 := testStruct1{A: []*Message{{}}, B: []Message{{}}, C: []*testStruct2{{}}, D: []testStruct2{{}},
 		E: &testStruct1{}, F: []int{1}}

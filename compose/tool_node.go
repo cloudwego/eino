@@ -137,6 +137,10 @@ type ToolsInterruptAndRerunExtra struct {
 	RerunExtraMap map[string]any
 }
 
+func init() {
+	schema.RegisterName[*ToolsInterruptAndRerunExtra]("_eino_compose_tools_interrupt_and_rerun_extra") // TODO: check if this is really needed when refactoring adk resume
+}
+
 type toolsTuple struct {
 	indexes map[string]int
 	meta    []*executorMeta
