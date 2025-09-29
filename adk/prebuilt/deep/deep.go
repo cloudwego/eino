@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/bytedance/sonic"
 	"github.com/slongfield/pyfmt"
 
 	"github.com/cloudwego/eino/adk"
@@ -104,7 +105,14 @@ func (t *taskTool) exec(ctx context.Context, input taskToolArgument) (output str
 		return "", fmt.Errorf("subagent type %s not found", input.SubagentType)
 	}
 
-	return a.InvokableRun(ctx, input.Description)
+	params, err := sonic.MarshalString(map[string]string{
+		"request": input.Description,
+	})
+	if err != nil {
+		return "", err
+	}
+
+	return a.InvokableRun(ctx, params)
 }
 
 func newGeneralAgent(
