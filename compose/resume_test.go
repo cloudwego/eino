@@ -243,10 +243,13 @@ func TestInterruptStateAndResumeForToolInNestedSubGraph(t *testing.T) {
 	assert.NotNil(t, interruptInfo)
 
 	interruptContexts := interruptInfo.InterruptContexts
-	assert.Equal(t, 1, len(interruptContexts))
+	assert.Equal(t, 2, len(interruptContexts))
 	expectedPath := "runnable:root;node:sub_graph_a;node:sub_graph_b;node:tools;tool:tool_call_123"
-	assert.Equal(t, expectedPath, interruptContexts[0].ID)
-	assert.Equal(t, map[string]any{"reason": "tool maintenance"}, interruptContexts[0].Info)
+	assert.Equal(t, expectedPath, interruptContexts[1].ID)
+	assert.True(t, interruptContexts[1].IsCause)
+	assert.Equal(t, map[string]any{"reason": "tool maintenance"}, interruptContexts[1].Info)
+	assert.Equal(t, "runnable:root;node:sub_graph_a;node:sub_graph_b;node:tools", interruptContexts[0].ID)
+	assert.False(t, interruptContexts[0].IsCause)
 
 	// 7. Resume execution
 	ctx := ResumeWithData(context.Background(), expectedPath, &myResumeData{Message: "let's continue tool"})
@@ -388,17 +391,20 @@ func TestMultipleInterruptsAndResumes(t *testing.T) {
 	interruptInfo, isInterrupt := ExtractInterruptInfo(err)
 	assert.True(t, isInterrupt)
 	interruptContexts := interruptInfo.InterruptContexts
-	assert.Len(t, interruptContexts, 3)
+	assert.Len(t, interruptContexts, 4)
 
 	// Verify all 3 interrupt points are exposed
 	found := make(map[string]bool)
 	for _, iCtx := range interruptContexts {
 		found[iCtx.ID] = true
-		assert.Equal(t, map[string]any{"reason": "process " + iCtx.Path[2].ID + " needs input"}, iCtx.Info)
+		if iCtx.ID != "runnable:root;node:batch" {
+			assert.Equal(t, map[string]any{"reason": "process " + iCtx.Address[2].ID + " needs input"}, iCtx.Info)
+		}
 	}
 	assert.True(t, found["runnable:root;node:batch;process:p0"])
 	assert.True(t, found["runnable:root;node:batch;process:p1"])
 	assert.True(t, found["runnable:root;node:batch;process:p2"])
+	assert.True(t, found["runnable:root;node:batch"])
 
 	// --- 2. Second invocation, resume 2 of 3 processes ---
 	// Resume p0 with data, and p2 without data. p1 remains interrupted.
@@ -412,8 +418,9 @@ func TestMultipleInterruptsAndResumes(t *testing.T) {
 	interruptInfo2, isInterrupt2 := ExtractInterruptInfo(err)
 	assert.True(t, isInterrupt2)
 	interruptContexts2 := interruptInfo2.InterruptContexts
-	assert.Len(t, interruptContexts2, 1)
-	assert.Equal(t, "runnable:root;node:batch;process:p1", interruptContexts2[0].ID)
+	assert.Len(t, interruptContexts2, 2)
+	assert.Equal(t, "runnable:root;node:batch;process:p1", interruptContexts2[1].ID)
+	assert.Equal(t, "runnable:root;node:batch", interruptContexts2[0].ID)
 
 	// --- 3. Third invocation, resume the last process ---
 	finalResumeCtx := Resume(context.Background(), "runnable:root;node:batch;process:p1")
@@ -550,9 +557,10 @@ func TestReentryForResumedTools(t *testing.T) {
 	assert.Error(t, err)
 	interruptInfo1, _ := ExtractInterruptInfo(err)
 	interrupts1 := interruptInfo1.InterruptContexts
-	assert.Len(t, interrupts1, 2)
-	assert.Contains(t, []string{interrupts1[0].ID, interrupts1[1].ID}, "runnable:root;node:tools;tool:call_1")
-	assert.Contains(t, []string{interrupts1[0].ID, interrupts1[1].ID}, "runnable:root;node:tools;tool:call_2")
+	assert.Len(t, interrupts1, 3)
+	assert.Contains(t, []string{interrupts1[1].ID, interrupts1[2].ID}, "runnable:root;node:tools;tool:call_1")
+	assert.Contains(t, []string{interrupts1[1].ID, interrupts1[2].ID}, "runnable:root;node:tools;tool:call_2")
+	assert.Equal(t, "runnable:root;node:tools", interrupts1[0].ID)
 
 	// --- 2. Second invocation: resume call_1, expect call_2 to interrupt again ---
 	resumeCtx2 := ResumeWithData(context.Background(), "runnable:root;node:tools;tool:call_1",
@@ -561,8 +569,9 @@ func TestReentryForResumedTools(t *testing.T) {
 	assert.Error(t, err)
 	interruptInfo2, _ := ExtractInterruptInfo(err)
 	interrupts2 := interruptInfo2.InterruptContexts
-	assert.Len(t, interrupts2, 1)
-	assert.Equal(t, "runnable:root;node:tools;tool:call_2", interrupts2[0].ID)
+	assert.Len(t, interrupts2, 2)
+	assert.Equal(t, "runnable:root;node:tools;tool:call_2", interrupts2[1].ID)
+	assert.Equal(t, "runnable:root;node:tools", interrupts2[0].ID)
 
 	// --- 3. Third invocation: resume call_2, model makes a new call (call_3) which should interrupt ---
 	resumeCtx3 := ResumeWithData(context.Background(), "runnable:root;node:tools;tool:call_2", &myResumeData{Message: "resume call 2"})
@@ -570,8 +579,9 @@ func TestReentryForResumedTools(t *testing.T) {
 	assert.Error(t, err)
 	interruptInfo3, _ := ExtractInterruptInfo(err)
 	interrupts3 := interruptInfo3.InterruptContexts
-	assert.Len(t, interrupts3, 1)
-	assert.Equal(t, "runnable:root;node:tools;tool:call_3", interrupts3[0].ID) // Note: this is the new call_3
+	assert.Len(t, interrupts3, 2)
+	assert.Equal(t, "runnable:root;node:tools;tool:call_3", interrupts3[1].ID) // Note: this is the new call_3
+	assert.Equal(t, "runnable:root;node:tools", interrupts3[0].ID)
 
 	// --- 4. Final invocation: resume call_3, expect final answer ---
 	resumeCtx4 := ResumeWithData(context.Background(), "runnable:root;node:tools;tool:call_3",
@@ -701,12 +711,13 @@ func TestGraphInterruptWithinLambda(t *testing.T) {
 	interruptInfo, isInterrupt := ExtractInterruptInfo(err)
 	assert.True(t, isInterrupt)
 	interruptContexts := interruptInfo.InterruptContexts
-	assert.Len(t, interruptContexts, 1)
+	assert.Len(t, interruptContexts, 2)
 
 	// The path is now fully qualified, including the runnable steps from both graphs.
 	expectedPath := "runnable:root;node:composite_lambda;runnable:inner;node:inner_lambda"
-	assert.Equal(t, expectedPath, interruptContexts[0].ID)
-	assert.Equal(t, "inner interrupt", interruptContexts[0].Info)
+	assert.Equal(t, expectedPath, interruptContexts[1].ID)
+	assert.Equal(t, "inner interrupt", interruptContexts[1].Info)
+	assert.Equal(t, "composite interrupt from lambda", interruptContexts[0].Info)
 
 	// 7. Resume execution using the complete, fully-qualified ID
 	resumeCtx := ResumeWithData(context.Background(), expectedPath, &myResumeData{Message: "resume inner"})
@@ -755,10 +766,7 @@ func TestLegacyInterrupt(t *testing.T) {
 	// 2. Define the composite lambda
 	compositeLambda := InvokableLambda(func(ctx context.Context, input string) (string, error) {
 		// If the lambda itself is being resumed, it means the whole process is done.
-		isResume, _, _ := GetResumeContext[any](ctx)
-		if isResume {
-			return "lambda resumed successfully", nil
-		}
+		isResume, _, data := GetResumeContext[string](ctx)
 
 		// Run sub-processes and collect their errors
 		var (
@@ -801,6 +809,10 @@ func TestLegacyInterrupt(t *testing.T) {
 			return "", CompositeInterrupt(ctx, "legacy composite", nil, errs...)
 		}
 
+		if isResume {
+			outStr = outStr + " " + data
+		}
+
 		return outStr, nil
 	})
 
@@ -820,7 +832,7 @@ func TestLegacyInterrupt(t *testing.T) {
 	assert.Error(t, err)
 	info, isInterrupt := ExtractInterruptInfo(err)
 	assert.True(t, isInterrupt)
-	assert.Len(t, info.InterruptContexts, 3)
+	assert.Len(t, info.InterruptContexts, 4)
 
 	found := make(map[string]any)
 	for _, iCtx := range info.InterruptContexts {
@@ -829,12 +841,15 @@ func TestLegacyInterrupt(t *testing.T) {
 	expectedID1 := "runnable:root;node:legacy_composite;custom:1"
 	expectedID2 := "runnable:root;node:legacy_composite;custom:2"
 	expectedID3 := "runnable:root;node:legacy_composite;custom:3"
+	expectedID4 := "runnable:root;node:legacy_composite"
 	assert.Contains(t, found, expectedID1)
 	assert.Nil(t, found[expectedID1]) // From InterruptAndRerun
 	assert.Contains(t, found, expectedID2)
 	assert.Equal(t, "legacy info", found[expectedID2]) // From NewInterruptAndRerunErr
 	assert.Contains(t, found, expectedID3)
 	assert.Equal(t, "modern info", found[expectedID3]) // From Interrupt
+	assert.Contains(t, found, expectedID4)
+	assert.Equal(t, "legacy composite", found[expectedID4]) // From CompositeInterrupt
 
 	// 6. Second invocation (re-run without resume) - should yield the same interrupts
 	_, err = compiledGraph.Invoke(context.Background(), "input", WithCheckPointID(checkPointID))
@@ -848,6 +863,7 @@ func TestLegacyInterrupt(t *testing.T) {
 		expectedID1: "output1",
 		expectedID2: "output2",
 		expectedID3: "output3",
+		expectedID4: "all done",
 	}
 	resumeCtx := BatchResumeWithData(context.Background(), resumeData)
 	output, err := compiledGraph.Invoke(resumeCtx, "input", WithCheckPointID(checkPointID))
@@ -855,5 +871,5 @@ func TestLegacyInterrupt(t *testing.T) {
 	// 8. Verify final result
 	assert.NoError(t, err)
 	// The final output should be the concatenation of the data passed to the resumed sub-processes.
-	assert.Equal(t, "output1output2output3", output)
+	assert.Equal(t, "output1output2output3 all done", output)
 }

@@ -98,7 +98,7 @@ func TestSimpleCheckPoint(t *testing.T) {
 		InterruptContexts: []*InterruptCtx{
 			{
 				ID: "runnable:root",
-				Path: Address{
+				Address: Address{
 					{
 						Type: AddressSegmentRunnable,
 						ID:   "root",
@@ -129,7 +129,7 @@ func TestSimpleCheckPoint(t *testing.T) {
 		InterruptContexts: []*InterruptCtx{
 			{
 				ID: "runnable:root",
-				Path: Address{
+				Address: Address{
 					{
 						Type: AddressSegmentRunnable,
 						ID:   "root",
@@ -199,7 +199,7 @@ func TestCustomStructInAn2y(t *testing.T) {
 		InterruptContexts: []*InterruptCtx{
 			{
 				ID: "runnable:root",
-				Path: Address{
+				Address: Address{
 					{
 						Type: AddressSegmentRunnable,
 						ID:   "root",
@@ -228,7 +228,7 @@ func TestCustomStructInAn2y(t *testing.T) {
 		InterruptContexts: []*InterruptCtx{
 			{
 				ID: "runnable:root",
-				Path: Address{
+				Address: Address{
 					{
 						Type: AddressSegmentRunnable,
 						ID:   "root",
@@ -320,7 +320,7 @@ func TestSubGraph(t *testing.T) {
 		InterruptContexts: []*InterruptCtx{
 			{
 				ID: "runnable:root;node:2",
-				Path: Address{
+				Address: Address{
 					{
 						Type: AddressSegmentRunnable,
 						ID:   "root",
@@ -359,7 +359,7 @@ func TestSubGraph(t *testing.T) {
 		InterruptContexts: []*InterruptCtx{
 			{
 				ID: "runnable:root;node:2",
-				Path: Address{
+				Address: Address{
 					{
 						Type: AddressSegmentRunnable,
 						ID:   "root",
@@ -536,7 +536,7 @@ func TestNestedSubGraph(t *testing.T) {
 		InterruptContexts: []*InterruptCtx{
 			{
 				ID: "runnable:root;node:2",
-				Path: Address{
+				Address: Address{
 					{
 						Type: AddressSegmentRunnable,
 						ID:   "root",
@@ -578,7 +578,7 @@ func TestNestedSubGraph(t *testing.T) {
 		InterruptContexts: []*InterruptCtx{
 			{
 				ID: "runnable:root;node:2;node:2",
-				Path: Address{
+				Address: Address{
 					{
 						Type: AddressSegmentRunnable,
 						ID:   "root",
@@ -598,7 +598,7 @@ func TestNestedSubGraph(t *testing.T) {
 			},
 			{
 				ID: "runnable:root;node:2",
-				Path: Address{
+				Address: Address{
 					{
 						Type: AddressSegmentRunnable,
 						ID:   "root",
@@ -632,7 +632,7 @@ func TestNestedSubGraph(t *testing.T) {
 		InterruptContexts: []*InterruptCtx{
 			{
 				ID: "runnable:root;node:2",
-				Path: Address{
+				Address: Address{
 					{
 						Type: AddressSegmentRunnable,
 						ID:   "root",
@@ -673,7 +673,7 @@ state24
 		InterruptContexts: []*InterruptCtx{
 			{
 				ID: "runnable:root;node:2",
-				Path: Address{
+				Address: Address{
 					{
 						Type: AddressSegmentRunnable,
 						ID:   "root",
@@ -714,7 +714,7 @@ state24
 		InterruptContexts: []*InterruptCtx{
 			{
 				ID: "runnable:root;node:2;node:2",
-				Path: Address{
+				Address: Address{
 					{
 						Type: AddressSegmentRunnable,
 						ID:   "root",
@@ -734,7 +734,7 @@ state24
 			},
 			{
 				ID: "runnable:root;node:2",
-				Path: Address{
+				Address: Address{
 					{
 						Type: AddressSegmentRunnable,
 						ID:   "root",
@@ -768,7 +768,7 @@ state24
 		InterruptContexts: []*InterruptCtx{
 			{
 				ID: "runnable:root;node:2",
-				Path: Address{
+				Address: Address{
 					{
 						Type: AddressSegmentRunnable,
 						ID:   "root",
@@ -829,7 +829,7 @@ state24
 		InterruptContexts: []*InterruptCtx{
 			{
 				ID: "runnable:root;node:2",
-				Path: Address{
+				Address: Address{
 					{
 						Type: AddressSegmentRunnable,
 						ID:   "root",
@@ -870,7 +870,7 @@ state24
 		InterruptContexts: []*InterruptCtx{
 			{
 				ID: "runnable:root;node:2;node:2",
-				Path: Address{
+				Address: Address{
 					{
 						Type: AddressSegmentRunnable,
 						ID:   "root",
@@ -890,7 +890,7 @@ state24
 			},
 			{
 				ID: "runnable:root;node:2",
-				Path: Address{
+				Address: Address{
 					{
 						Type: AddressSegmentRunnable,
 						ID:   "root",
@@ -924,7 +924,7 @@ state24
 		InterruptContexts: []*InterruptCtx{
 			{
 				ID: "runnable:root;node:2",
-				Path: Address{
+				Address: Address{
 					{
 						Type: AddressSegmentRunnable,
 						ID:   "root",
@@ -965,7 +965,7 @@ state24
 		InterruptContexts: []*InterruptCtx{
 			{
 				ID: "runnable:root;node:2",
-				Path: Address{
+				Address: Address{
 					{
 						Type: AddressSegmentRunnable,
 						ID:   "root",
@@ -1006,7 +1006,7 @@ state24
 		InterruptContexts: []*InterruptCtx{
 			{
 				ID: "runnable:root;node:2;node:2",
-				Path: Address{
+				Address: Address{
 					{
 						Type: AddressSegmentRunnable,
 						ID:   "root",
@@ -1026,7 +1026,7 @@ state24
 			},
 			{
 				ID: "runnable:root;node:2",
-				Path: Address{
+				Address: Address{
 					{
 						Type: AddressSegmentRunnable,
 						ID:   "root",
@@ -1060,7 +1060,7 @@ state24
 		InterruptContexts: []*InterruptCtx{
 			{
 				ID: "runnable:root;node:2",
-				Path: Address{
+				Address: Address{
 					{
 						Type: AddressSegmentRunnable,
 						ID:   "root",

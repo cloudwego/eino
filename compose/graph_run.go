@@ -436,9 +436,10 @@ func (it *interruptTempInfo) processInterruptErr(ire *interruptAndRerun) {
 
 	if ire.interruptID != nil {
 		it.interruptContexts = append(it.interruptContexts, &InterruptCtx{
-			ID:   *ire.interruptID,
-			Path: ire.path,
-			Info: ire.info,
+			ID:      *ire.interruptID,
+			Address: ire.path,
+			Info:    ire.info,
+			IsCause: ire.isCause,
 		})
 	}
 
@@ -539,9 +540,9 @@ func (r *runner) handleInterrupt(
 
 			// Add graph-level InterruptCtx
 			tempInfo.interruptContexts = append(tempInfo.interruptContexts, &InterruptCtx{
-				ID:   interruptID,
-				Path: currentAddr,
-				Info: copiedState,
+				ID:      interruptID,
+				Address: currentAddr,
+				Info:    copiedState,
 			})
 		}
 	}
@@ -677,9 +678,9 @@ func (r *runner) handleInterruptWithSubGraphAndRerunNodes(
 
 			// Add graph-level InterruptCtx
 			tempInfo.interruptContexts = append(tempInfo.interruptContexts, &InterruptCtx{
-				ID:   interruptID,
-				Path: currentAddr,
-				Info: copiedState,
+				ID:      interruptID,
+				Address: currentAddr,
+				Info:    copiedState,
 			})
 		}
 	}
