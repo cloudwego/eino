@@ -32,7 +32,8 @@ type ResumeInfo struct {
 }
 
 type InterruptInfo struct {
-	// Deprecated: use Info for user-facing info, and state for internal state persistence
+	// Deprecated: use InterruptContexts for user-facing info, 
+	// and interruptStates for internal state persistence
 	Data any
 
 	InterruptContexts []*InterruptCtx
@@ -56,6 +57,7 @@ func StatefulInterrupt(ctx context.Context, info any, state any) *AgentAction {
 					ID:      interruptID,
 					Info:    info,
 					Address: addr.DeepCopy(),
+					IsCause: true,
 				},
 			},
 			interruptStates: []*interruptState{
@@ -68,10 +70,18 @@ func StatefulInterrupt(ctx context.Context, info any, state any) *AgentAction {
 	}
 }
 
-func CompositeInterrupt(ctx context.Context, state any, subInterruptInfos ...*InterruptInfo) *AgentAction {
+func CompositeInterrupt(ctx context.Context, info any, state any, subInterruptInfos ...*InterruptInfo) *AgentAction {
 	runCtx := getRunCtx(ctx)
+	addr := runCtx.Addr
+	interruptID := addr.String()
 
-	var interruptContexts []*InterruptCtx
+	interruptContexts := []*InterruptCtx{
+		{
+			ID:      interruptID,
+			Info:    info,
+			Address: addr.DeepCopy(),
+		},
+	}
 	for _, subInfo := range subInterruptInfos {
 		interruptContexts = append(interruptContexts, subInfo.InterruptContexts...)
 	}
