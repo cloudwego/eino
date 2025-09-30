@@ -449,11 +449,17 @@ func (h *cbHandler) onGraphError(ctx context.Context,
 		return ctx
 	}
 
-	h.Send(&AgentEvent{AgentName: h.agentName, Action: &AgentAction{
-		Interrupted: &InterruptInfo{
-			Data: &ChatModelAgentInterruptInfo{Data: data, Info: info},
-		},
-	}})
+	intInfo := &InterruptInfo{
+		InterruptContexts: info.InterruptContexts,
+	}
+
+	action := CompositeInterrupt(ctx, info, data, intInfo)
+	action.Interrupted.Data = &ChatModelAgentInterruptInfo{ // for backward-compatibility purpose
+		Info: info,
+		Data: data,
+	}
+
+	h.Send(&AgentEvent{AgentName: h.agentName, Action: action})
 
 	return ctx
 }
