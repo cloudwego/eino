@@ -24,6 +24,7 @@ import (
 	"github.com/cloudwego/eino/components/indexer"
 	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/components/prompt"
+	"github.com/cloudwego/eino/components/reranker"
 	"github.com/cloudwego/eino/components/retriever"
 )
 
@@ -131,6 +132,17 @@ func (p *Parallel) AddEmbedding(outputKey string, node embedding.Embedder, opts 
 //	p.AddRetriever("output_key01", retriever)
 func (p *Parallel) AddRetriever(outputKey string, node retriever.Retriever, opts ...GraphAddNodeOpt) *Parallel {
 	gNode, options := toRetrieverNode(node, append(opts, WithOutputKey(outputKey))...)
+	return p.addNode(outputKey, gNode, options)
+}
+
+// AddReranker adds a reranker node to the parallel.
+// eg.
+//
+//	reranker, err := somepkg.NewReranker(ctx, config)
+//
+//	p.AddReranker("output_key01", reranker)
+func (p *Parallel) AddReranker(outputKey string, node reranker.Reranker, opts ...GraphAddNodeOpt) *Parallel {
+	gNode, options := toRerankerNode(node, append(opts, WithOutputKey(outputKey))...)
 	return p.addNode(outputKey, gNode, options)
 }
 

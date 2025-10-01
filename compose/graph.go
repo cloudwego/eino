@@ -28,6 +28,7 @@ import (
 	"github.com/cloudwego/eino/components/indexer"
 	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/components/prompt"
+	"github.com/cloudwego/eino/components/reranker"
 	"github.com/cloudwego/eino/components/retriever"
 	"github.com/cloudwego/eino/internal/generic"
 	"github.com/cloudwego/eino/internal/gmap"
@@ -385,6 +386,16 @@ func (g *graph) AddToolsNode(key string, node *ToolsNode, opts ...GraphAddNodeOp
 //	graph.AddDocumentTransformerNode("document_transformer_node_key", markdownSplitter)
 func (g *graph) AddDocumentTransformerNode(key string, node document.Transformer, opts ...GraphAddNodeOpt) error {
 	gNode, options := toDocumentTransformerNode(node, opts...)
+	return g.addNode(key, gNode, options)
+}
+
+// AddRerankerNode adds a node that implements reranker.Reranker.
+// e.g.
+//
+//	reranker, err := mypkg.NewReranker(ctx, &mypkg.RerankerConfig{})
+//	graph.AddRerankerNode("reranker_node_key", reranker)
+func (g *graph) AddRerankerNode(key string, node reranker.Reranker, opts ...GraphAddNodeOpt) error {
+	gNode, options := toRerankerNode(node, opts...)
 	return g.addNode(key, gNode, options)
 }
 

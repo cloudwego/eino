@@ -27,6 +27,7 @@ import (
 	"github.com/cloudwego/eino/components/indexer"
 	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/components/prompt"
+	"github.com/cloudwego/eino/components/reranker"
 	"github.com/cloudwego/eino/components/retriever"
 	"github.com/cloudwego/eino/internal/generic"
 	"github.com/cloudwego/eino/internal/gmap"
@@ -258,6 +259,18 @@ func (c *Chain[I, O]) AppendEmbedding(node embedding.Embedder, opts ...GraphAddN
 //		chain.AppendRetriever(retriever)
 func (c *Chain[I, O]) AppendRetriever(node retriever.Retriever, opts ...GraphAddNodeOpt) *Chain[I, O] {
 	gNode, options := toRetrieverNode(node, opts...)
+	c.addNode(gNode, options)
+	return c
+}
+
+// AppendReranker add a Reranker node to the chain.
+// e.g.
+//
+//	parent, err := reranker.NewReranker(ctx, config)
+//	if err != nil {...}
+//	chain.AppendReranker(parent)
+func (c *Chain[I, O]) AppendReranker(node reranker.Reranker, opts ...GraphAddNodeOpt) *Chain[I, O] {
+	gNode, options := toRerankerNode(node, opts...)
 	c.addNode(gNode, options)
 	return c
 }

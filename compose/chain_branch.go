@@ -25,6 +25,7 @@ import (
 	"github.com/cloudwego/eino/components/indexer"
 	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/components/prompt"
+	"github.com/cloudwego/eino/components/reranker"
 	"github.com/cloudwego/eino/components/retriever"
 	"github.com/cloudwego/eino/internal/generic"
 	"github.com/cloudwego/eino/schema"
@@ -213,6 +214,17 @@ func (cb *ChainBranch) AddEmbedding(key string, node embedding.Embedder, opts ..
 //	cb.AddRetriever("retriever_node_key", retriever)
 func (cb *ChainBranch) AddRetriever(key string, node retriever.Retriever, opts ...GraphAddNodeOpt) *ChainBranch {
 	gNode, options := toRetrieverNode(node, opts...)
+	return cb.addNode(key, gNode, options)
+}
+
+// AddReranker adds a Reranker node to the branch.
+// eg.
+//
+//	rerankerNode, err := mypkg.NewReranker(ctx, config)
+//
+//	cb.AddReranker("reranker_node_key", rerankerNode)
+func (cb *ChainBranch) AddReranker(key string, node reranker.Reranker, opts ...GraphAddNodeOpt) *ChainBranch {
+	gNode, options := toRerankerNode(node, opts...)
 	return cb.addNode(key, gNode, options)
 }
 

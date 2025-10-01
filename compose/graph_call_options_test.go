@@ -27,9 +27,11 @@ import (
 	"github.com/cloudwego/eino/components/document"
 	"github.com/cloudwego/eino/components/embedding"
 	"github.com/cloudwego/eino/components/model"
+	"github.com/cloudwego/eino/components/reranker"
 	"github.com/cloudwego/eino/components/retriever"
 	mockDocument "github.com/cloudwego/eino/internal/mock/components/document"
 	mockEmbedding "github.com/cloudwego/eino/internal/mock/components/embedding"
+	mockReranker "github.com/cloudwego/eino/internal/mock/components/reranker"
 	mockRetriever "github.com/cloudwego/eino/internal/mock/components/retriever"
 	"github.com/cloudwego/eino/schema"
 )
@@ -261,6 +263,35 @@ func TestCallOptionsOneByOne(t *testing.T) {
 
 		assert.NotNil(t, opt.Index)
 		assert.Equal(t, "123", *opt.Index)
+	})
+
+	t.Run("reranker_option", func(t *testing.T) {
+		ctrl := gomock.NewController(t)
+		inst := mockReranker.NewMockReranker(ctrl)
+		docs := []*schema.Document{{ID: "doc"}}
+		var opt *reranker.Options
+		inst.EXPECT().Rerank(gomock.Any(), "hi", gomock.Any(), gomock.Any()).
+			DoAndReturn(func(ctx context.Context, query string, inDocs []*schema.Document, opts ...reranker.Option) ([]*schema.Document, error) {
+				assert.Equal(t, "hi", query)
+				assert.Equal(t, docs, inDocs)
+				opt = reranker.GetCommonOptions(&reranker.Options{}, opts...)
+				return docs, nil
+			}).
+			Times(1)
+
+		ch := NewChain[*reranker.Request, []*schema.Document]()
+		ch.AppendReranker(inst)
+		r, err := ch.Compile(ctx)
+		assert.NoError(t, err)
+		outs, err := r.Invoke(ctx,
+			&reranker.Request{Query: "hi", Docs: docs},
+			WithRerankerOption(reranker.WithTopK(3)),
+		)
+		assert.NoError(t, err)
+		assert.Equal(t, docs, outs)
+
+		assert.NotNil(t, opt.TopK)
+		assert.Equal(t, 3, *opt.TopK)
 	})
 
 	t.Run("loader_option", func(t *testing.T) {

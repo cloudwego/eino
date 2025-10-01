@@ -27,10 +27,13 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"go.uber.org/mock/gomock"
 
 	"github.com/cloudwego/eino/callbacks"
 	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/components/prompt"
+	"github.com/cloudwego/eino/components/reranker"
+	mockReranker "github.com/cloudwego/eino/internal/mock/components/reranker"
 	"github.com/cloudwego/eino/schema"
 )
 
@@ -111,6 +114,37 @@ func TestSingleGraph(t *testing.T) {
 
 	_, err = r.Transform(ctx, sr)
 	assert.Errorf(t, err, "could not find key: location")
+}
+
+func TestGraphRerankerNode(t *testing.T) {
+	ctx := context.Background()
+	ctrl := gomock.NewController(t)
+	inst := mockReranker.NewMockReranker(ctrl)
+	docs := []*schema.Document{{ID: "1"}}
+	var opt *reranker.Options
+	inst.EXPECT().Rerank(gomock.Any(), "query", gomock.Any(), gomock.Any()).
+		DoAndReturn(func(ctx context.Context, query string, inDocs []*schema.Document, opts ...reranker.Option) ([]*schema.Document, error) {
+			assert.Equal(t, "query", query)
+			assert.Equal(t, docs, inDocs)
+			opt = reranker.GetCommonOptions(&reranker.Options{}, opts...)
+			return docs, nil
+		}).
+		Times(1)
+
+	g := NewGraph[*reranker.Request, []*schema.Document]()
+	assert.NoError(t, g.AddRerankerNode("reranker", inst))
+	assert.NoError(t, g.AddEdge(START, "reranker"))
+	assert.NoError(t, g.AddEdge("reranker", END))
+
+	r, err := g.Compile(ctx)
+	assert.NoError(t, err)
+
+	out, err := r.Invoke(ctx, &reranker.Request{Query: "query", Docs: docs}, WithRerankerOption(reranker.WithTopK(5)))
+	assert.NoError(t, err)
+	assert.Equal(t, docs, out)
+	assert.NotNil(t, opt)
+	assert.NotNil(t, opt.TopK)
+	assert.Equal(t, 5, *opt.TopK)
 }
 
 type person interface {

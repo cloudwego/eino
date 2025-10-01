@@ -17,14 +17,46 @@
 package compose
 
 import (
+	"context"
+	"fmt"
+
 	"github.com/cloudwego/eino/components"
 	"github.com/cloudwego/eino/components/document"
 	"github.com/cloudwego/eino/components/embedding"
 	"github.com/cloudwego/eino/components/indexer"
 	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/components/prompt"
+	"github.com/cloudwego/eino/components/reranker"
 	"github.com/cloudwego/eino/components/retriever"
+	"github.com/cloudwego/eino/schema"
 )
+
+// RerankerInvoke 适配 graph/chain 的 Invoke 类型
+func toRerankerNode(node reranker.Reranker, opts ...GraphAddNodeOpt) (*graphNode, *graphAddNodeOpts) {
+	invoke := func(ctx context.Context, input any, opts ...reranker.Option) ([]*schema.Document, error) {
+		var query string
+		var docs []*schema.Document
+
+		switch in := input.(type) {
+		case *reranker.Request:
+			if in != nil {
+				query = in.Query
+				docs = in.Docs
+			}
+		default:
+			return nil, fmt.Errorf("reranker input type mismatch, expect *reranker.Request")
+		}
+		return node.Rerank(ctx, query, docs, opts...)
+	}
+	return toComponentNode(
+		node,
+		components.ComponentOfReranker,
+		invoke,
+		nil,
+		nil,
+		nil,
+		opts...)
+}
 
 func toComponentNode[I, O, TOption any](
 	node any,
