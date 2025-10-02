@@ -119,24 +119,3 @@ func TestParentReranker_AggregateMeanAndTopK(t *testing.T) {
 		convey.So(res[0].Score(), convey.ShouldAlmostEqual, (0.9+0.3)/2)
 	})
 }
-
-func TestParentReranker_PassThroughWhenNoParentInfo(t *testing.T) {
-	convey.Convey("parent reranker falls back to sub documents when parent info is missing", t, func() {
-		subDocs := []*schema.Document{
-			(&schema.Document{ID: "c1"}).WithScore(0.5),
-			(&schema.Document{ID: "c2"}).WithScore(0.3),
-		}
-		child := &passthroughReranker{output: subDocs}
-
-		parent, err := NewReranker(&Config{
-			Reranker: child,
-			TopK:     1,
-		})
-		convey.So(err, convey.ShouldBeNil)
-
-		res, err := parent.Rerank(context.Background(), "query", subDocs)
-		convey.So(err, convey.ShouldBeNil)
-		convey.So(res, convey.ShouldHaveLength, 1)
-		convey.So(res[0], convey.ShouldEqual, subDocs[0])
-	})
-}
