@@ -18,7 +18,6 @@ package adk
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"reflect"
 	"runtime/debug"
@@ -81,7 +80,7 @@ func (a *workflowAgent) Run(ctx context.Context, input *AgentInput, opts ...Agen
 		case workflowAgentModeParallel:
 			a.runParallel(ctx, input, generator, nil, opts...)
 		default:
-			err = errors.New(fmt.Sprintf("unsupported workflow agent mode: %d", a.mode))
+			err = fmt.Errorf("unsupported workflow agent mode: %d", a.mode)
 		}
 	}()
 
@@ -125,7 +124,7 @@ func (a *workflowAgent) Resume(ctx context.Context, info *ResumeInfo, opts ...Ag
 		case workflowAgentModeParallel:
 			a.runParallel(ctx, wi.OrigInput, generator, wi, opts...)
 		default:
-			err = errors.New(fmt.Sprintf("unsupported workflow agent mode: %d", a.mode))
+			err = fmt.Errorf("unsupported workflow agent mode: %d", a.mode)
 		}
 	}()
 	return iterator
