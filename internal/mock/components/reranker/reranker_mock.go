@@ -1,5 +1,5 @@
 /*
- * Copyright 2024 CloudWeGo Authors
+ * Copyright 2025 CloudWeGo Authors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -59,9 +59,9 @@ func (m *MockReranker) EXPECT() *MockRerankerMockRecorder {
 }
 
 // Rerank mocks base method.
-func (m *MockReranker) Rerank(ctx context.Context, query string, docs []*schema.Document, opts ...reranker.Option) ([]*schema.Document, error) {
+func (m *MockReranker) Rerank(ctx context.Context, request *reranker.Request, opts ...reranker.Option) ([]*schema.Document, error) {
 	m.ctrl.T.Helper()
-	varargs := []any{ctx, query, docs}
+	varargs := []any{ctx, request}
 	for _, a := range opts {
 		varargs = append(varargs, a)
 	}
@@ -72,8 +72,8 @@ func (m *MockReranker) Rerank(ctx context.Context, query string, docs []*schema.
 }
 
 // Rerank indicates an expected call of Rerank.
-func (mr *MockRerankerMockRecorder) Rerank(ctx, query, docs any, opts ...any) *gomock.Call {
+func (mr *MockRerankerMockRecorder) Rerank(ctx, request any, opts ...any) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
-	varargs := append([]any{ctx, query, docs}, opts...)
+	varargs := append([]any{ctx, request}, opts...)
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Rerank", reflect.TypeOf((*MockReranker)(nil).Rerank), varargs...)
 }

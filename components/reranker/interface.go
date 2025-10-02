@@ -38,5 +38,5 @@ import (
 //	graph := compose.NewGraph[*reranker.Request, []*schema.Document](compose.RunTypeDAG)
 //	graph.AddRerankerNode("reranker_node_key", reranker) // <= using in graph
 type Reranker interface {
-	Rerank(ctx context.Context, query string, docs []*schema.Document, opts ...Option) ([]*schema.Document, error)
+	Rerank(ctx context.Context, request *Request, opts ...Option) ([]*schema.Document, error)
 }

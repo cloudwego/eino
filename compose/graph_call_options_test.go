@@ -270,10 +270,10 @@ func TestCallOptionsOneByOne(t *testing.T) {
 		inst := mockReranker.NewMockReranker(ctrl)
 		docs := []*schema.Document{{ID: "doc"}}
 		var opt *reranker.Options
-		inst.EXPECT().Rerank(gomock.Any(), "hi", gomock.Any(), gomock.Any()).
-			DoAndReturn(func(ctx context.Context, query string, inDocs []*schema.Document, opts ...reranker.Option) ([]*schema.Document, error) {
-				assert.Equal(t, "hi", query)
-				assert.Equal(t, docs, inDocs)
+		inst.EXPECT().Rerank(gomock.Any(), gomock.Any(), gomock.Any()).
+			DoAndReturn(func(ctx context.Context, req *reranker.Request, opts ...reranker.Option) ([]*schema.Document, error) {
+				assert.Equal(t, "hi", req.Query)
+				assert.Equal(t, docs, req.Docs)
 				opt = reranker.GetCommonOptions(&reranker.Options{}, opts...)
 				return docs, nil
 			}).

@@ -250,10 +250,10 @@ func TestWorkflowRerankerNode(t *testing.T) {
 	inst := mockReranker.NewMockReranker(ctrl)
 	docs := []*schema.Document{{ID: "1"}}
 	var opt *reranker.Options
-	inst.EXPECT().Rerank(gomock.Any(), "query", gomock.Any(), gomock.Any()).
-		DoAndReturn(func(ctx context.Context, query string, inDocs []*schema.Document, opts ...reranker.Option) ([]*schema.Document, error) {
-			assert.Equal(t, "query", query)
-			assert.Equal(t, docs, inDocs)
+	inst.EXPECT().Rerank(gomock.Any(), gomock.Any(), gomock.Any()).
+		DoAndReturn(func(ctx context.Context, req *reranker.Request, opts ...reranker.Option) ([]*schema.Document, error) {
+			assert.Equal(t, "query", req.Query)
+			assert.Equal(t, docs, req.Docs)
 			opt = reranker.GetCommonOptions(&reranker.Options{}, opts...)
 			return docs, nil
 		}).

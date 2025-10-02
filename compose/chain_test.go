@@ -26,7 +26,8 @@ import (
 	"go.uber.org/mock/gomock"
 
 	"github.com/cloudwego/eino/components/prompt"
-	"github.com/cloudwego/eino/components/reranker"
+	reranker "github.com/cloudwego/eino/components/reranker"
+
 	"github.com/cloudwego/eino/internal/mock/components/document"
 	"github.com/cloudwego/eino/internal/mock/components/embedding"
 	"github.com/cloudwego/eino/internal/mock/components/indexer"

@@ -114,8 +114,8 @@ func (p *parentAgg) score(policy AggregatePolicy) float64 {
 
 // Rerank delegates to the child reranker to score chunk-level documents and then
 // aggregates them back to parent documents according to the configured policy.
-func (p *parentReranker) Rerank(ctx context.Context, query string, docs []*schema.Document, opts ...reranker.Option) ([]*schema.Document, error) {
-	subDocs, err := p.reranker.Rerank(ctx, query, docs, opts...)
+func (p *parentReranker) Rerank(ctx context.Context, request *reranker.Request, opts ...reranker.Option) ([]*schema.Document, error) {
+	subDocs, err := p.reranker.Rerank(ctx, request, opts...)
 	if err != nil {
 		return nil, err
 	}

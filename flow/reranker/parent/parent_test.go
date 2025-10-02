@@ -29,11 +29,11 @@ type passthroughReranker struct {
 	output []*schema.Document
 }
 
-func (m *passthroughReranker) Rerank(ctx context.Context, query string, docs []*schema.Document, opts ...reranker.Option) ([]*schema.Document, error) {
+func (m *passthroughReranker) Rerank(ctx context.Context, req *reranker.Request, opts ...reranker.Option) ([]*schema.Document, error) {
 	if m.output != nil {
 		return m.output, nil
 	}
-	return docs, nil
+	return req.Docs, nil
 }
 
 func TestParentReranker_Defaults(t *testing.T) {
@@ -67,7 +67,10 @@ func TestParentReranker_Defaults(t *testing.T) {
 		})
 		convey.So(err, convey.ShouldBeNil)
 
-		res, err := parent.Rerank(context.Background(), "query", subDocs)
+		res, err := parent.Rerank(context.Background(), &reranker.Request{
+			Query: "query",
+			Docs:  subDocs,
+		})
 		convey.So(err, convey.ShouldBeNil)
 		convey.So(len(res), convey.ShouldEqual, 3)
 
@@ -112,7 +115,10 @@ func TestParentReranker_AggregateMeanAndTopK(t *testing.T) {
 
 		convey.So(err, convey.ShouldBeNil)
 
-		res, err := parent.Rerank(context.Background(), "query", subDocs)
+		res, err := parent.Rerank(context.Background(), &reranker.Request{
+			Query: "query",
+			Docs:  subDocs,
+		})
 		convey.So(err, convey.ShouldBeNil)
 		convey.So(len(res), convey.ShouldEqual, 1)
 		convey.So(res[0].ID, convey.ShouldEqual, "p2")
