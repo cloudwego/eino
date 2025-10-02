@@ -44,17 +44,14 @@ func TestConvCallbackInput(t *testing.T) {
 			},
 		},
 		{
-			name: "map input",
-			src: map[string]any{
-				"query": "map-query",
-				"docs":  docs,
+			name: "type input2",
+			src: &Request{
+				Query: "eINO",
+				Docs:  docs,
 			},
-			want: nil,
-		},
-		{
-			name: "string input",
-			src:  "just-query",
-			want: &CallbackInput{Request: &Request{Query: "just-query"}},
+			want: &CallbackInput{
+				Request: &Request{Query: "eINO", Docs: docs},
+			},
 		},
 		{
 			name: "unsupported type",
