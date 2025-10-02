@@ -27,18 +27,6 @@ import (
 	"github.com/cloudwego/eino/components/retriever"
 )
 
-// RerankerInvoke need to
-func toRerankerNode(node reranker.Reranker, opts ...GraphAddNodeOpt) (*graphNode, *graphAddNodeOpts) {
-	return toComponentNode(
-		node,
-		components.ComponentOfReranker,
-		node.Rerank,
-		nil,
-		nil,
-		nil,
-		opts...)
-}
-
 func toComponentNode[I, O, TOption any](
 	node any,
 	componentType component,
@@ -64,6 +52,17 @@ func toEmbeddingNode(node embedding.Embedder, opts ...GraphAddNodeOpt) (*graphNo
 		node,
 		components.ComponentOfEmbedding,
 		node.EmbedStrings,
+		nil,
+		nil,
+		nil,
+		opts...)
+}
+
+func toRerankerNode(node reranker.Reranker, opts ...GraphAddNodeOpt) (*graphNode, *graphAddNodeOpts) {
+	return toComponentNode(
+		node,
+		components.ComponentOfReranker,
+		node.Rerank,
 		nil,
 		nil,
 		nil,
