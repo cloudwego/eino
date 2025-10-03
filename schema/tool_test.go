@@ -35,7 +35,7 @@ func TestParamsOneOfToOpenAPIV3(t *testing.T) {
 
 		convey.Convey("user provides openAPIV3.0 json schema directly, use what the user provides", func() {
 			oneOf.openAPIV3 = &openapi3.Schema{
-				Type:        openapi3.TypeString,
+				Type:        stringToTypes(openapi3.TypeString),
 				Description: "this is the only argument",
 			}
 			converted, err = oneOf.ToOpenAPIV3()
@@ -174,16 +174,16 @@ func TestJsonSchemaToOpenAPIV3(t *testing.T) {
 
 		expect := &openapi3.SchemaRef{
 			Value: &openapi3.Schema{
-				Type:        openapi3.TypeObject,
+				Type:        stringToTypes(openapi3.TypeObject),
 				Description: "this is the only argument",
 				Properties: map[string]*openapi3.SchemaRef{
 					"arg2": {
 						Value: &openapi3.Schema{
-							Type:        openapi3.TypeArray,
+							Type:        stringToTypes(openapi3.TypeArray),
 							Description: "this is the second argument",
 							Items: &openapi3.SchemaRef{
 								Value: &openapi3.Schema{
-									Type:        openapi3.TypeString,
+									Type:        stringToTypes(openapi3.TypeString),
 									Description: "this is the element of the second argument",
 								},
 							},
@@ -206,12 +206,12 @@ func TestOpenAPIV3ToJSONSchema(t *testing.T) {
 	convey.Convey("", t, func() {
 		openAPIV3 := &openapi3.SchemaRef{
 			Value: &openapi3.Schema{
-				Type:        openapi3.TypeObject,
+				Type:        stringToTypes(openapi3.TypeObject),
 				Description: "this is the only argument",
 				Properties: map[string]*openapi3.SchemaRef{
 					"arg1": {
 						Value: &openapi3.Schema{
-							Type:        openapi3.TypeString,
+							Type:        stringToTypes(openapi3.TypeString),
 							Description: "this is the first argument",
 						},
 					},

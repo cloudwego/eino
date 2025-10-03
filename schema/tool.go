@@ -141,7 +141,7 @@ func (p *ParamsOneOf) ToOpenAPIV3() (*openapi3.Schema, error) {
 	if p.params != nil {
 		sc := &openapi3.Schema{
 			Properties: make(map[string]*openapi3.SchemaRef, len(p.params)),
-			Type:       string(Object),
+			Type:       &openapi3.Types{"object"},
 			Required:   make([]string, 0, len(p.params)),
 		}
 
@@ -205,7 +205,7 @@ func (p *ParamsOneOf) ToJSONSchema() (*jsonschema.Schema, error) {
 func paramInfoToOpenAPIV3(paramInfo *ParameterInfo) *openapi3.SchemaRef {
 	js := &openapi3.SchemaRef{
 		Value: &openapi3.Schema{
-			Type:        string(paramInfo.Type),
+			Type:        &openapi3.Types{string(paramInfo.Type)},
 			Description: paramInfo.Desc,
 		},
 	}
@@ -280,7 +280,7 @@ func openapiV3ToJSONSchema(openAPIV3 *openapi3.Schema) (*jsonschema.Schema, erro
 	}
 
 	js := &jsonschema.Schema{
-		Type:          openAPIV3.Type,
+		Type:          typesToString(openAPIV3.Type),
 		Title:         openAPIV3.Title,
 		Format:        openAPIV3.Format,
 		Description:   openAPIV3.Description,
@@ -435,7 +435,7 @@ func jsonSchemaToOpenAPIV3(js *jsonschema.Schema) (*openapi3.SchemaRef, error) {
 	}
 
 	openAPIV3 := &openapi3.Schema{
-		Type:        js.Type,
+		Type:        stringToTypes(js.Type),
 		Title:       js.Title,
 		Format:      js.Format,
 		Description: js.Description,
@@ -587,4 +587,19 @@ func jsonSchemaToOpenAPIV3(js *jsonschema.Schema) (*openapi3.SchemaRef, error) {
 	}
 
 	return openapi3.NewSchemaRef("", openAPIV3), nil
+}
+
+// helpers for kin-openapi v0.133 Types <-> string
+func stringToTypes(t string) *openapi3.Types {
+	if t == "" {
+		return nil
+	}
+	return &openapi3.Types{t}
+}
+
+func typesToString(types *openapi3.Types) string {
+	if types == nil || len(*types) == 0 {
+		return ""
+	}
+	return (*types)[0]
 }
