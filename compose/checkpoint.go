@@ -43,14 +43,7 @@ func init() {
 // - error: An error if registration fails (e.g., if the type is already registered)
 // Deprecated: RegisterSerializableType is deprecated. Use schema.RegisterName[T](name) instead.
 func RegisterSerializableType[T any](name string) (err error) {
-	// catch panic
-	defer func() {
-		if r := recover(); r != nil {
-			err = fmt.Errorf("RegisterSerializableType panicked: %v", r)
-		}
-	}()
-	schema.RegisterName[T](name)
-	return
+	return serialization.GenericRegister[T](name)
 }
 
 type CheckPointStore interface {
