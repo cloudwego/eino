@@ -316,6 +316,19 @@ func (p Address) Equals(other Address) bool {
 	return true
 }
 
+// HasPrefix checks if the address begins with the given prefix.
+func (p Address) HasPrefix(prefix Address) bool {
+	if len(p) < len(prefix) {
+		return false
+	}
+	for i := range prefix {
+		if p[i] != prefix[i] {
+			return false
+		}
+	}
+	return true
+}
+
 func (p Address) DeepCopy() Address {
 	if p == nil {
 		return nil

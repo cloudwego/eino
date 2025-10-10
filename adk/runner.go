@@ -74,14 +74,6 @@ func (r *Runner) Run(ctx context.Context, messages []Message,
 	return niter
 }
 
-func getInterruptRunCtx(ctx context.Context) *runContext {
-	cs := getInterruptRunCtxs(ctx)
-	if len(cs) == 0 {
-		return nil
-	}
-	return cs[0] // assume that concurrency isn't existed, so only one run ctx is in ctx
-}
-
 func (r *Runner) Query(ctx context.Context,
 	query string, opts ...AgentRunOption) *AsyncIterator[*AgentEvent] {
 
@@ -98,7 +90,7 @@ func (r *Runner) Resume(ctx context.Context, checkPointID string, opts ...AgentR
 		return nil, fmt.Errorf("failed to get checkpoint: %w", err)
 	}
 	if !existed {
-		return nil, fmt.Errorf("checkpoint[%s] is not existed", checkPointID)
+		return nil, fmt.Errorf("checkpoint[%s] not exist", checkPointID)
 	}
 
 	ctx = setRunCtx(ctx, runCtx)
@@ -135,6 +127,12 @@ func (r *Runner) handleIter(ctx context.Context, aIter *AsyncIterator[*AgentEven
 		}
 
 		if event.Action != nil && event.Action.Interrupted != nil {
+			if interruptedInfo != nil {
+				// even if multiple interrupt happens, they should be merged into one
+				// action by CompositeInterrupt, so here in Runner we must assume at most
+				// one interrupt action happens
+				panic("multiple interrupt actions should not happen in Runner")
+			}
 			interruptedInfo = event.Action.Interrupted
 		} else {
 			interruptedInfo = nil
@@ -144,7 +142,7 @@ func (r *Runner) handleIter(ctx context.Context, aIter *AsyncIterator[*AgentEven
 	}
 
 	if interruptedInfo != nil && checkPointID != nil {
-		err := saveCheckPoint(ctx, r.store, *checkPointID, getInterruptRunCtx(ctx), interruptedInfo)
+		err := saveCheckPoint(ctx, r.store, *checkPointID, getRunCtx(ctx), interruptedInfo)
 		if err != nil {
 			gen.Send(&AgentEvent{Err: fmt.Errorf("failed to save checkpoint: %w", err)})
 		}

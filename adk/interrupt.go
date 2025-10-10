@@ -29,10 +29,82 @@ import (
 type ResumeInfo struct {
 	EnableStreaming bool
 	*InterruptInfo
+
+	interruptStates map[string]*interruptState
+}
+
+// newResumeInfo creates a new ResumeInfo object.
+// This is intended for internal framework use.
+func newResumeInfo(states []*interruptState, enableStreaming bool) *ResumeInfo {
+	stateMap := make(map[string]*interruptState, len(states))
+	for _, is := range states {
+		if is.runCtx != nil {
+			stateMap[is.runCtx.Addr.String()] = is
+		}
+	}
+	return &ResumeInfo{
+		EnableStreaming: enableStreaming,
+		interruptStates: stateMap,
+	}
+}
+
+// GetInterruptState checks if the given address is a direct interrupt point and returns its state.
+func GetInterruptState[T any](info *ResumeInfo, addr Address) (wasInterrupted bool, hasState bool, state T) {
+	if info == nil {
+		return false, false, *new(T)
+	}
+	is, ok := info.interruptStates[addr.String()]
+	if !ok {
+		return false, false, *new(T)
+	}
+	wasInterrupted = true
+	if is.state != nil {
+		s, ok := is.state.(T)
+		if ok {
+			hasState = true
+			state = s
+		}
+	}
+	return
+}
+
+// getNextResumptionPoints finds all descendant interrupt points and groups them by the ID of the next segment in the address.
+// It returns a map of new, scoped ResumeInfo objects for each child component that needs to be resumed.
+// It is the unexported implementation detail.
+func (ri *ResumeInfo) getNextResumptionPoints(parentAddr Address) map[string]*ResumeInfo {
+	nextPoints := make(map[string][]*interruptState)
+	parentAddrLen := len(parentAddr)
+
+	for _, is := range ri.interruptStates {
+		addr := is.runCtx.Addr
+		// Check if the interrupt state's address is a descendant of the parent
+		if len(addr) > parentAddrLen && addr.HasPrefix(parentAddr) {
+			// The next segment in the path determines which child component is responsible.
+			nextSegment := addr[parentAddrLen]
+			childID := nextSegment.ID
+			if nextSegment.Type != AddressSegmentAgent {
+				panic(fmt.Sprintf("getNextResumptionPoint for parentAddr %s returns childID %s, "+
+					"which is not an agent", parentAddr, childID))
+			}
+			nextPoints[childID] = append(nextPoints[childID], is)
+		}
+	}
+
+	if len(nextPoints) == 0 {
+		return nil
+	}
+
+	result := make(map[string]*ResumeInfo, len(nextPoints))
+	for childID, states := range nextPoints {
+		// Create a new, scoped ResumeInfo for the child.
+		// The resumeData is passed down unmodified, as the child will perform its own address-based lookups.
+		result[childID] = newResumeInfo(states, ri.EnableStreaming)
+	}
+	return result
 }
 
 type InterruptInfo struct {
-	// Deprecated: use InterruptContexts for user-facing info, 
+	// Deprecated: use InterruptContexts for user-facing info,
 	// and interruptStates for internal state persistence
 	Data any
 
@@ -122,13 +194,18 @@ func init() {
 	schema.RegisterName[*serialization]("_eino_adk_serialization")
 	schema.RegisterName[*WorkflowInterruptInfo]("_eino_adk_workflow_interrupt_info")
 	schema.RegisterName[*State]("_eino_adk_react_state")
+
+	schema.Register[*interruptState]()
 }
 
 type serialization struct {
-	RunCtx *runContext
-	Info   *InterruptInfo
+	RunCtx          *runContext
+	Info            *InterruptInfo
+	InterruptStates []*interruptState
 }
 
+// getCheckPoint get checkpoint from store.
+// What we want to retrieve is the full *ResumeInfo, as well as the runCtx from the previous Runner.Run.
 func getCheckPoint(
 	ctx context.Context,
 	store compose.CheckPointStore,
@@ -150,9 +227,14 @@ func getCheckPoint(
 	if s.RunCtx.RootInput != nil {
 		enableStreaming = s.RunCtx.RootInput.EnableStreaming
 	}
+	id2State := make(map[string]*interruptState, len(s.InterruptStates))
+	for _, state := range s.InterruptStates {
+		id2State[state.runCtx.Addr.String()] = state
+	}
 	return s.RunCtx, &ResumeInfo{
 		EnableStreaming: enableStreaming,
 		InterruptInfo:   s.Info,
+		interruptStates: id2State,
 	}, true, nil
 }
 
@@ -165,8 +247,9 @@ func saveCheckPoint(
 ) error {
 	buf := &bytes.Buffer{}
 	err := gob.NewEncoder(buf).Encode(&serialization{
-		RunCtx: runCtx,
-		Info:   info,
+		RunCtx:          runCtx,
+		Info:            info,
+		InterruptStates: info.interruptStates,
 	})
 	if err != nil {
 		return fmt.Errorf("failed to encode checkpoint: %w", err)
