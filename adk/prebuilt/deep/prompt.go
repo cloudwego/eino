@@ -2,7 +2,7 @@ package deep
 
 const (
 	baseAgentPrompt = `
-In order to complete the objective that the user asks ofyou, you have access to a number of standard tools.
+In order to complete the objective that the user asks of you, you have access to a number of standard tools.
 
 ## 'write_todos'
 
