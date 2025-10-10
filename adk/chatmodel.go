@@ -508,7 +508,8 @@ func (a *ChatModelAgent) buildRunFunc(ctx context.Context) runFunc {
 		}
 
 		if len(toolsNodeConf.Tools) == 0 {
-			a.run = func(ctx context.Context, input *AgentInput, generator *AsyncGenerator[*AgentEvent], store *mockStore, opts ...compose.Option) {
+			a.run = func(ctx context.Context, input *AgentInput, generator *AsyncGenerator[*AgentEvent],
+				store *mockStore, opts ...compose.Option) {
 				var err error
 				var msgs []Message
 				msgs, err = a.genModelInput(ctx, instruction, input)
@@ -572,7 +573,8 @@ func (a *ChatModelAgent) buildRunFunc(ctx context.Context) runFunc {
 			return
 		}
 
-		a.run = func(ctx context.Context, input *AgentInput, generator *AsyncGenerator[*AgentEvent], store *mockStore, opts ...compose.Option) {
+		a.run = func(ctx context.Context, input *AgentInput, generator *AsyncGenerator[*AgentEvent], store *mockStore,
+			opts ...compose.Option) {
 			var compileOptions []compose.GraphCompileOption
 			compileOptions = append(compileOptions,
 				compose.WithGraphName("React"),
@@ -582,8 +584,8 @@ func (a *ChatModelAgent) buildRunFunc(ctx context.Context) runFunc {
 				compose.WithMaxRunSteps(math.MaxInt))
 
 			runnable, err_ := g.Compile(ctx, compileOptions...)
-			if err != nil {
-				generator.Send(&AgentEvent{AgentName: a.name, Err: err})
+			if err_ != nil {
+				generator.Send(&AgentEvent{AgentName: a.name, Err: err_})
 				return
 			}
 
@@ -666,7 +668,18 @@ func (a *ChatModelAgent) Resume(ctx context.Context, info *ResumeInfo, opts ...A
 			generator.Close()
 		}()
 
-		run(ctx, &AgentInput{EnableStreaming: info.EnableStreaming}, generator, newResumeStore(info.Data.(*ChatModelAgentInterruptInfo).Data), co...)
+		// The state is the checkpoint data saved by the underlying graph.
+		// We don't need to check `wasInterrupted` because the calling flowAgent guarantees it.
+		// We only need to check if the state exists and is of the correct type.
+		_, hasState, state := GetInterruptState[[]byte](info, GetCurrentAddress(ctx))
+		if !hasState {
+			// This is a violation of the architectural contract. It should be impossible.
+			panic(fmt.Sprintf("ChatModelAgent.Resume: agent '%s' was asked to resume but no valid state was found",
+				a.Name(ctx)))
+		}
+
+		run(ctx, &AgentInput{EnableStreaming: info.EnableStreaming}, generator,
+			newResumeStore(state), co...)
 	}()
 
 	return iterator
