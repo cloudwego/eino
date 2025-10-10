@@ -261,6 +261,23 @@ func initRunCtx(ctx context.Context, agentName string, input *AgentInput) (conte
 	return setRunCtx(ctx, runCtx), runCtx
 }
 
+// updateRunPathOnly creates a new context with an updated RunPath, but does NOT modify the Address.
+// This is used by sequential workflows to accumulate execution history for LLM context,
+// without incorrectly chaining the static addresses of peer agents.
+func updateRunPathOnly(ctx context.Context, agentName string) context.Context {
+	runCtx := getRunCtx(ctx)
+	if runCtx == nil {
+		// This should not happen in a sequential workflow context, but handle defensively.
+		runCtx = &runContext{Session: newRunSession()}
+	} else {
+		runCtx = runCtx.deepCopy()
+	}
+
+	runCtx.RunPath = append(runCtx.RunPath, RunStep{agentName})
+
+	return setRunCtx(ctx, runCtx)
+}
+
 // ClearRunCtx clears the run context of the multi-agents. This is particularly useful
 // when a customized agent with a multi-agents inside it is set as a subagent of another
 // multi-agents. In such cases, it's not expected to pass the outside run context to the

@@ -111,7 +111,8 @@ func (at *agentTool) InvokableRun(ctx context.Context, argumentsInJSON string, o
 	if bResume {
 		ms = newResumeStore(intData.Data)
 
-		iter, err = newInvokableAgentToolRunner(at.agent, ms).Resume(ctx, mockCheckPointID, getOptionsByAgentName(at.agent.Name(ctx), opts)...)
+		iter, err = newInvokableAgentToolRunner(at.agent, ms).
+			Resume(ctx, mockCheckPointID, getOptionsByAgentName(at.agent.Name(ctx), opts)...)
 		if err != nil {
 			return "", err
 		}
@@ -144,7 +145,8 @@ func (at *agentTool) InvokableRun(ctx context.Context, argumentsInJSON string, o
 			}
 		}
 
-		iter = newInvokableAgentToolRunner(at.agent, ms).Run(ctx, input, append(getOptionsByAgentName(at.agent.Name(ctx), opts), WithCheckPointID(mockCheckPointID))...)
+		iter = newInvokableAgentToolRunner(at.agent, ms).Run(ctx, input,
+			append(getOptionsByAgentName(at.agent.Name(ctx), opts), WithCheckPointID(mockCheckPointID))...)
 	}
 
 	var lastEvent *AgentEvent
