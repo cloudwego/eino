@@ -541,7 +541,8 @@ func (a *ChatModelAgent) buildRunFunc(ctx context.Context) runFunc {
 		}
 
 		if len(toolsNodeConf.Tools) == 0 {
-			a.run = func(ctx context.Context, input *AgentInput, generator *AsyncGenerator[*AgentEvent], store *mockStore, opts ...compose.Option) {
+			a.run = func(ctx context.Context, input *AgentInput, generator *AsyncGenerator[*AgentEvent],
+				store *mockStore, opts ...compose.Option) {
 				r, err := compose.NewChain[*AgentInput, Message]().
 					AppendLambda(compose.InvokableLambda(func(ctx context.Context, input *AgentInput) ([]Message, error) {
 						return a.genModelInput(ctx, instruction, input)
@@ -608,7 +609,8 @@ func (a *ChatModelAgent) buildRunFunc(ctx context.Context) runFunc {
 			return
 		}
 
-		a.run = func(ctx context.Context, input *AgentInput, generator *AsyncGenerator[*AgentEvent], store *mockStore, opts ...compose.Option) {
+		a.run = func(ctx context.Context, input *AgentInput, generator *AsyncGenerator[*AgentEvent], store *mockStore,
+			opts ...compose.Option) {
 			var compileOptions []compose.GraphCompileOption
 			compileOptions = append(compileOptions,
 				compose.WithGraphName(a.name),
@@ -702,7 +704,18 @@ func (a *ChatModelAgent) Resume(ctx context.Context, info *ResumeInfo, opts ...A
 			generator.Close()
 		}()
 
-		run(ctx, &AgentInput{EnableStreaming: info.EnableStreaming}, generator, newResumeStore(info.Data.(*ChatModelAgentInterruptInfo).Data), co...)
+		// The state is the checkpoint data saved by the underlying graph.
+		// We don't need to check `wasInterrupted` because the calling flowAgent guarantees it.
+		// We only need to check if the state exists and is of the correct type.
+		_, hasState, state := GetInterruptState[[]byte](info, GetCurrentAddress(ctx))
+		if !hasState {
+			// This is a violation of the architectural contract. It should be impossible.
+			panic(fmt.Sprintf("ChatModelAgent.Resume: agent '%s' was asked to resume but no valid state was found",
+				a.Name(ctx)))
+		}
+
+		run(ctx, &AgentInput{EnableStreaming: info.EnableStreaming}, generator,
+			newResumeStore(state), co...)
 	}()
 
 	return iterator
