@@ -797,6 +797,81 @@ func concatToolCalls(chunks []ToolCall) ([]ToolCall, error) {
 	return merged, nil
 }
 
+func isBase64AudioPart(part MessageOutputPart) bool {
+	return part.Type == ChatMessagePartTypeAudioURL &&
+		part.Audio != nil &&
+		part.Audio.Base64Data != nil &&
+		part.Audio.URL == nil
+}
+
+func concatAssistantMultiContent(parts []MessageOutputPart) ([]MessageOutputPart, error) {
+	if len(parts) == 0 {
+		return nil, nil
+	}
+
+	merged := make([]MessageOutputPart, 0)
+
+	for _, part := range parts {
+		if len(merged) == 0 {
+			merged = append(merged, part)
+			continue
+		}
+
+		last := &merged[len(merged)-1]
+
+		// Text merging
+		if last.Type == ChatMessagePartTypeText && part.Type == ChatMessagePartTypeText {
+			last.Text += part.Text
+			continue
+		}
+
+		// Audio merging (base64)
+		if isBase64AudioPart(*last) && isBase64AudioPart(part) {
+			// Create a new string for the concatenated data.
+			newBase64Data := *last.Audio.Base64Data + *part.Audio.Base64Data
+
+			// Merge 'Extra' fields.
+			extraList := make([]map[string]any, 0, 2)
+			if len(last.Audio.Extra) > 0 {
+				extraList = append(extraList, last.Audio.Extra)
+			}
+			if len(part.Audio.Extra) > 0 {
+				extraList = append(extraList, part.Audio.Extra)
+			}
+			var mergedExtra map[string]any
+			var err error
+			if len(extraList) > 0 {
+				mergedExtra, err = concatExtra(extraList)
+				if err != nil {
+					return nil, fmt.Errorf("failed to concat audio extra: %w", err)
+				}
+			}
+
+			// Determine MIMEType.
+			newMIMEType := last.Audio.MIMEType
+			if newMIMEType == "" {
+				newMIMEType = part.Audio.MIMEType
+			}
+
+			// Create a new audio part to avoid modifying the original input data.
+			newAudio := &MessageOutputAudio{
+				MessagePartCommon: MessagePartCommon{
+					Base64Data: &newBase64Data,
+					MIMEType:   newMIMEType,
+					Extra:      mergedExtra,
+				},
+			}
+			last.Audio = newAudio
+			continue
+		}
+
+		// For other cases (Image, URL-based content), just append.
+		merged = append(merged, part)
+	}
+
+	return merged, nil
+}
+
 func concatExtra(extraList []map[string]any) (map[string]any, error) {
 	if len(extraList) == 1 {
 		return generic.CopyMap(extraList[0]), nil
@@ -824,13 +899,15 @@ func concatExtra(extraList []map[string]any) (map[string]any, error) {
 // concatedMsg, err := ConcatMessages(msgs) // concatedMsg.Content will be full content of all messages
 func ConcatMessages(msgs []*Message) (*Message, error) {
 	var (
-		contents            []string
-		contentLen          int
-		reasoningContents   []string
-		reasoningContentLen int
-		toolCalls           []ToolCall
-		ret                 = Message{}
-		extraList           = make([]map[string]any, 0, len(msgs))
+		contents                      []string
+		contentLen                    int
+		reasoningContents             []string
+		reasoningContentLen           int
+		toolCalls                     []ToolCall
+		multiContentParts             []ChatMessagePart
+		assistantGenMultiContentParts []MessageOutputPart
+		ret                           = Message{}
+		extraList                     = make([]map[string]any, 0, len(msgs))
 	)
 
 	for idx, msg := range msgs {
@@ -890,9 +967,14 @@ func ConcatMessages(msgs []*Message) (*Message, error) {
 			extraList = append(extraList, msg.Extra)
 		}
 
-		// There's no scenario that requires to concat messages with MultiContent currently
+		// The 'MultiContent' field is deprecated but is kept for backward compatibility,
+		// as the seedream4.0 model uses it to stream generated images.
 		if len(msg.MultiContent) > 0 {
-			ret.MultiContent = msg.MultiContent
+			multiContentParts = append(multiContentParts, msg.MultiContent...)
+		}
+
+		if len(msg.AssistantGenMultiContent) > 0 {
+			assistantGenMultiContentParts = append(assistantGenMultiContentParts, msg.AssistantGenMultiContent...)
 		}
 
 		if msg.ResponseMeta != nil && ret.ResponseMeta == nil {
@@ -980,6 +1062,18 @@ func ConcatMessages(msgs []*Message) (*Message, error) {
 		if len(extra) > 0 {
 			ret.Extra = extra
 		}
+	}
+
+	if len(multiContentParts) > 0 {
+		ret.MultiContent = multiContentParts
+	}
+
+	if len(assistantGenMultiContentParts) > 0 {
+		merged, err := concatAssistantMultiContent(assistantGenMultiContentParts)
+		if err != nil {
+			return nil, fmt.Errorf("failed to concat message's assistant multi content: %w", err)
+		}
+		ret.AssistantGenMultiContent = merged
 	}
 
 	return &ret, nil
