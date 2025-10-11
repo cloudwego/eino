@@ -442,6 +442,152 @@ func TestConcatMessage(t *testing.T) {
 		assert.Equal(t, msgs[2].ResponseMeta, msg.ResponseMeta)
 		assert.Nil(t, msgs[0].ResponseMeta)
 	})
+
+	t.Run("concat assistant multi content", func(t *testing.T) {
+		base64Audio1 := "dGVzdF9hdWRpb18x"
+		base64Audio2 := "dGVzdF9hdWRpb18y"
+		imageURL1 := "https://example.com/image1.png"
+		imageURL2 := "https://example.com/image2.png"
+
+		msgs := []*Message{
+			{
+				Role: Assistant,
+				AssistantGenMultiContent: []MessageOutputPart{
+					{Type: ChatMessagePartTypeText, Text: "Hello, "},
+				},
+			},
+			{
+				Role: Assistant,
+				AssistantGenMultiContent: []MessageOutputPart{
+					{Type: ChatMessagePartTypeText, Text: "world!"},
+				},
+			},
+			{
+				Role: Assistant,
+				AssistantGenMultiContent: []MessageOutputPart{
+					{Type: ChatMessagePartTypeAudioURL, Audio: &MessageOutputAudio{MessagePartCommon: MessagePartCommon{Base64Data: &base64Audio1}}},
+				},
+			},
+			{
+				Role: Assistant,
+				AssistantGenMultiContent: []MessageOutputPart{
+					{Type: ChatMessagePartTypeAudioURL, Audio: &MessageOutputAudio{MessagePartCommon: MessagePartCommon{Base64Data: &base64Audio2, MIMEType: "audio/wav"}}},
+				},
+			},
+			{
+				Role: Assistant,
+				AssistantGenMultiContent: []MessageOutputPart{
+					{Type: ChatMessagePartTypeImageURL, Image: &MessageOutputImage{MessagePartCommon: MessagePartCommon{URL: &imageURL1}}},
+				},
+			},
+			{
+				Role: Assistant,
+				AssistantGenMultiContent: []MessageOutputPart{
+					{Type: ChatMessagePartTypeImageURL, Image: &MessageOutputImage{MessagePartCommon: MessagePartCommon{URL: &imageURL2}}},
+				},
+			},
+		}
+
+		mergedMsg, err := ConcatMessages(msgs)
+		assert.NoError(t, err)
+
+		mergedBase64Audio := base64Audio1 + base64Audio2
+		expectedContent := []MessageOutputPart{
+			{Type: ChatMessagePartTypeText, Text: "Hello, world!"},
+			{Type: ChatMessagePartTypeAudioURL, Audio: &MessageOutputAudio{MessagePartCommon: MessagePartCommon{Base64Data: &mergedBase64Audio, MIMEType: "audio/wav"}}},
+			{Type: ChatMessagePartTypeImageURL, Image: &MessageOutputImage{MessagePartCommon: MessagePartCommon{URL: &imageURL1}}},
+			{Type: ChatMessagePartTypeImageURL, Image: &MessageOutputImage{MessagePartCommon: MessagePartCommon{URL: &imageURL2}}},
+		}
+
+		assert.Equal(t, expectedContent, mergedMsg.AssistantGenMultiContent)
+	})
+
+	t.Run("concat assistant multi content with extra", func(t *testing.T) {
+		base64Audio1 := "dGVzdF9hdWRpb18x"
+		base64Audio2 := "dGVzdF9hdWRpb18y"
+
+		msgs := []*Message{
+			{
+				Role: Assistant,
+				AssistantGenMultiContent: []MessageOutputPart{
+					{Type: ChatMessagePartTypeAudioURL, Audio: &MessageOutputAudio{MessagePartCommon: MessagePartCommon{Base64Data: &base64Audio1, Extra: map[string]any{"key1": "val1"}}}},
+				},
+			},
+			{
+				Role: Assistant,
+				AssistantGenMultiContent: []MessageOutputPart{
+					{Type: ChatMessagePartTypeAudioURL, Audio: &MessageOutputAudio{MessagePartCommon: MessagePartCommon{Base64Data: &base64Audio2, Extra: map[string]any{"key2": "val2"}}}},
+				},
+			},
+		}
+
+		mergedMsg, err := ConcatMessages(msgs)
+		assert.NoError(t, err)
+
+		mergedBase64Audio := base64Audio1 + base64Audio2
+		expectedContent := []MessageOutputPart{
+			{Type: ChatMessagePartTypeAudioURL, Audio: &MessageOutputAudio{MessagePartCommon: MessagePartCommon{Base64Data: &mergedBase64Audio, Extra: map[string]any{"key1": "val1", "key2": "val2"}}}},
+		}
+
+		assert.Equal(t, expectedContent, mergedMsg.AssistantGenMultiContent)
+	})
+
+	t.Run("concat assistant multi content with single extra", func(t *testing.T) {
+		base64Audio1 := "dGVzdF9hdWRpb18x"
+		base64Audio2 := "dGVzdF9hdWRpb18y"
+
+		msgs := []*Message{
+			{
+				Role: Assistant,
+				AssistantGenMultiContent: []MessageOutputPart{
+					{Type: ChatMessagePartTypeAudioURL, Audio: &MessageOutputAudio{MessagePartCommon: MessagePartCommon{Base64Data: &base64Audio1, Extra: map[string]any{"key1": "val1"}}}},
+				},
+			},
+			{
+				Role: Assistant,
+				AssistantGenMultiContent: []MessageOutputPart{
+					{Type: ChatMessagePartTypeAudioURL, Audio: &MessageOutputAudio{MessagePartCommon: MessagePartCommon{Base64Data: &base64Audio2}}},
+				},
+			},
+		}
+
+		mergedMsg, err := ConcatMessages(msgs)
+		assert.NoError(t, err)
+
+		mergedBase64Audio := base64Audio1 + base64Audio2
+		expectedContent := []MessageOutputPart{
+			{Type: ChatMessagePartTypeAudioURL, Audio: &MessageOutputAudio{MessagePartCommon: MessagePartCommon{Base64Data: &mergedBase64Audio, Extra: map[string]any{"key1": "val1"}}}},
+		}
+
+		assert.Equal(t, expectedContent, mergedMsg.AssistantGenMultiContent)
+	})
+
+	t.Run("concat multi content (deprecated)", func(t *testing.T) {
+		msgs := []*Message{
+			{
+				Role: Assistant,
+				MultiContent: []ChatMessagePart{
+					{Type: ChatMessagePartTypeImageURL, ImageURL: &ChatMessageImageURL{URL: "image1.jpg"}},
+				},
+			},
+			{
+				Role: Assistant,
+				MultiContent: []ChatMessagePart{
+					{Type: ChatMessagePartTypeImageURL, ImageURL: &ChatMessageImageURL{URL: "image2.jpg"}},
+				},
+			},
+		}
+
+		mergedMsg, err := ConcatMessages(msgs)
+		assert.NoError(t, err)
+
+		expectedMultiContent := []ChatMessagePart{
+			{Type: ChatMessagePartTypeImageURL, ImageURL: &ChatMessageImageURL{URL: "image1.jpg"}},
+			{Type: ChatMessagePartTypeImageURL, ImageURL: &ChatMessageImageURL{URL: "image2.jpg"}},
+		}
+
+		assert.Equal(t, expectedMultiContent, mergedMsg.MultiContent)
+	})
 }
 
 func TestConcatToolCalls(t *testing.T) {
