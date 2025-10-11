@@ -197,6 +197,12 @@ func (a *workflowAgent) runSequential(ctx context.Context, input *AgentInput,
 				break
 			}
 
+			if event.Err != nil {
+				// exit if report error
+				generator.Send(event)
+				return true, false
+			}
+
 			if lastActionEvent != nil {
 				generator.Send(lastActionEvent)
 				lastActionEvent = nil
