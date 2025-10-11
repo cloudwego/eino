@@ -7,5 +7,12 @@ const (
 
 const (
 	SessionKeyTodos = "deep_agent_session_key_todos"
-	SessionKeyFiles = "deep_agent_session_key_files"
 )
+
+func convSliceType[T, S any](slice []T, conv func(t T) S) []S {
+	ret := make([]S, 0, len(slice))
+	for _, t := range slice {
+		ret = append(ret, conv(t))
+	}
+	return ret
+}

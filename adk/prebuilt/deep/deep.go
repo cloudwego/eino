@@ -22,8 +22,8 @@ type Config struct {
 	ChatModel      model.ToolCallingChatModel
 	Instruction    string
 	SubAgents      []adk.Agent
-	Tools          []tool.BaseTool
-	MainAgentTools []tool.BaseTool
+	Tools          []tool.InvokableTool
+	MainAgentTools []tool.InvokableTool
 }
 
 func New(ctx context.Context, cfg *Config) (adk.Agent, error) {
@@ -43,11 +43,13 @@ func New(ctx context.Context, cfg *Config) (adk.Agent, error) {
 	return adk.NewChatModelAgent(ctx, &adk.ChatModelAgentConfig{
 		Name:        cfg.Name,
 		Description: cfg.Description,
-		Instruction: cfg.Instruction + "\n" + baseAgentPrompt,
+		Instruction: cfg.Instruction + "\n" + baseAgentPrompt + "\n" + writeTodosPrompt + "\n" + taskPrompt,
 		Model:       cfg.ChatModel,
 		ToolsConfig: adk.ToolsConfig{
 			ToolsNodeConfig: compose.ToolsNodeConfig{
-				Tools: append(append(append(cfg.MainAgentTools, tt), builtinTools...), submitResult),
+				Tools: convSliceType(append(append(append(cfg.MainAgentTools, tt), builtinTools...), submitResult), func(f tool.InvokableTool) tool.BaseTool {
+					return f
+				}),
 			},
 			ReturnDirectly: map[string]bool{
 				"submit_result": true,
@@ -56,16 +58,16 @@ func New(ctx context.Context, cfg *Config) (adk.Agent, error) {
 		GenModelInput: nil,
 		Exit:          nil,
 		OutputKey:     "",
-		MaxIterations: 0,
+		MaxIterations: 300,
 	})
 }
 
 func newTaskTool(
 	ctx context.Context,
 	cm model.ToolCallingChatModel,
-	ts []tool.BaseTool,
+	ts []tool.InvokableTool,
 	subAgents []adk.Agent,
-) (tool.BaseTool, error) {
+) (tool.InvokableTool, error) {
 	generalAgent, err := newGeneralAgent(ctx, cm, ts)
 	if err != nil {
 		return nil, fmt.Errorf("failed to new general agent: %w", err)
@@ -87,7 +89,11 @@ func newTaskTool(
 		return nil, fmt.Errorf("failed to format task tool description: %w", err)
 	}
 
-	return utils.InferTool("task", desc, t.exec)
+	it, err := utils.InferTool("task", desc, t.exec)
+	if err != nil {
+		return nil, fmt.Errorf("failed to infer task tool: %w", err)
+	}
+	return it, nil
 }
 
 type taskTool struct {
@@ -118,13 +124,13 @@ func (t *taskTool) exec(ctx context.Context, input taskToolArgument) (output str
 func newGeneralAgent(
 	ctx context.Context,
 	cm model.ToolCallingChatModel,
-	ts []tool.BaseTool,
+	ts []tool.InvokableTool,
 ) (adk.Agent, error) {
 	return adk.NewChatModelAgent(ctx, &adk.ChatModelAgentConfig{
 		Name:        generalAgentName,
 		Description: "general agent",
-		Instruction: baseAgentPrompt,
+		Instruction: baseAgentPrompt + "\n" + writeTodosPrompt + "\n",
 		Model:       cm,
-		ToolsConfig: adk.ToolsConfig{ToolsNodeConfig: compose.ToolsNodeConfig{Tools: ts}},
+		ToolsConfig: adk.ToolsConfig{ToolsNodeConfig: compose.ToolsNodeConfig{Tools: convSliceType(ts, func(f tool.InvokableTool) tool.BaseTool { return f })}},
 	})
 }

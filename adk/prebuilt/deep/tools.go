@@ -3,7 +3,6 @@ package deep
 import (
 	"context"
 	"fmt"
-	"strings"
 
 	"github.com/bytedance/sonic"
 
@@ -12,31 +11,13 @@ import (
 	"github.com/cloudwego/eino/components/tool/utils"
 )
 
-func newBuiltinTools() ([]tool.BaseTool, error) {
-	var ts []tool.BaseTool
+func newBuiltinTools() ([]tool.InvokableTool, error) {
+	var ts []tool.InvokableTool
 	t, err := newWriteTodosTool()
 	if err != nil {
 		return nil, err
 	}
 	ts = append(ts, t)
-
-	//t, err = newWriteFileTool()
-	//if err != nil {
-	//	return nil, err
-	//}
-	//ts = append(ts, t)
-	//
-	//t, err = newReadFileTool()
-	//if err != nil {
-	//	return nil, err
-	//}
-	//ts = append(ts, t)
-	//
-	//t, err = newLSTool()
-	//if err != nil {
-	//	return nil, err
-	//}
-	//ts = append(ts, t)
 
 	return ts, nil
 }
@@ -47,28 +28,25 @@ type submitResultArguments struct {
 }
 
 type Result struct {
-	Result string            `json:"result"`
-	Files  map[string]string `json:"files"`
+	Result string   `json:"result"`
+	Files  []string `json:"files"`
 }
 
-func newSubmitResultTool() (tool.BaseTool, error) {
-	return utils.InferTool(
+func newSubmitResultTool() (tool.InvokableTool, error) {
+	t, err := utils.InferTool(
 		"submit_result",
 		"Submit the final result of a completed task, including any files directly related to the final outcome.",
 		func(ctx context.Context, input submitResultArguments) (output string, err error) {
-			allFiles := getFiles(ctx)
-			files := make(map[string]string)
-			for _, name := range input.Files {
-				if f, ok := allFiles[name]; ok {
-					files[name] = f
-				}
-			}
 			result := &Result{
 				Result: input.Result,
-				Files:  files,
+				Files:  input.Files,
 			}
 			return sonic.MarshalString(result)
 		})
+	if err != nil {
+		return nil, err
+	}
+	return t, nil
 }
 
 type TODO struct {
@@ -89,70 +67,4 @@ func newWriteTodosTool() (tool.InvokableTool, error) {
 		}
 		return fmt.Sprintf("Updated todo list to %s", todos), nil
 	})
-}
-
-type writeFileArguments struct {
-	FilePath string `json:"filePath"`
-	Content  string `json:"content"`
-}
-
-func newWriteFileTool() (tool.InvokableTool, error) {
-	return utils.InferTool("write_file", writeFileToolDescription, func(ctx context.Context, input writeFileArguments) (string, error) {
-		files := getFiles(ctx)
-		files[input.FilePath] = input.Content
-		adk.AddSessionValue(ctx, SessionKeyFiles, files)
-		return fmt.Sprintf("Updated file %s", input.FilePath), nil
-	})
-}
-
-type readFileArguments struct {
-	FilePath string `json:"filePath"`
-	Offset   int    `json:"offset"`
-	Limit    int    `json:"limit"`
-}
-
-func newReadFileTool() (tool.InvokableTool, error) {
-	return utils.InferTool("read_file", readFileToolDescription, func(ctx context.Context, input readFileArguments) (output string, err error) {
-		files := getFiles(ctx)
-		content, ok := files[input.FilePath]
-		if !ok {
-			return "", fmt.Errorf("file not found: %s", input.FilePath)
-		}
-		lines := strings.Split(strings.TrimSpace(content), "\n")
-		if input.Offset >= len(lines) {
-			return "", fmt.Errorf("error: Line offset %d exceeds file length (%d lines)", input.Offset, len(lines))
-		}
-		endIdx := input.Offset + input.Limit
-		if endIdx > len(lines) {
-			endIdx = len(lines)
-		}
-		lines = lines[input.Offset:endIdx]
-		return strings.Join(lines, "\n"), nil
-	})
-}
-
-type lsArguments struct{}
-
-func newLSTool() (tool.InvokableTool, error) {
-	return utils.InferTool("ls", listFileToolDescription, func(ctx context.Context, input lsArguments) (string, error) {
-		files := getFiles(ctx)
-		sb := &strings.Builder{}
-		sb.WriteString("[")
-		for name, _ := range files {
-			sb.WriteString(name)
-			sb.WriteString(",")
-		}
-		sb.WriteString("]")
-		return sb.String(), nil
-	})
-}
-
-// todo EditFile
-
-func getFiles(ctx context.Context) map[string]string {
-	f, ok := adk.GetSessionValue(ctx, SessionKeyFiles)
-	if ok {
-		return f.(map[string]string)
-	}
-	return make(map[string]string)
 }
