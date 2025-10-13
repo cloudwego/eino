@@ -634,12 +634,15 @@ func (a *ChatModelAgent) buildRunFunc(ctx context.Context) runFunc {
 
 			callOpt := genReactCallbacks(a.name, generator, input.EnableStreaming, store)
 
+			// Bridge the ADK and Compose contexts by setting the parent address.
+			graphCtx := compose.WithParentAddress(ctx, GetCurrentAddress(ctx))
+
 			var msg Message
 			var msgStream MessageStream
 			if input.EnableStreaming {
-				msgStream, err_ = runnable.Stream(ctx, input, append(opts, callOpt)...)
+				msgStream, err_ = runnable.Stream(graphCtx, input, append(opts, callOpt)...)
 			} else {
-				msg, err_ = runnable.Invoke(ctx, input, append(opts, callOpt)...)
+				msg, err_ = runnable.Invoke(graphCtx, input, append(opts, callOpt)...)
 			}
 
 			if err_ == nil {

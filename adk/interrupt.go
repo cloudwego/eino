@@ -28,6 +28,7 @@ import (
 
 type ResumeInfo struct {
 	EnableStreaming bool
+	// Deprecated: use GetInterruptState[T] to fetch state for agent
 	*InterruptInfo
 
 	interruptStates map[string]*interruptState
@@ -38,10 +39,9 @@ type ResumeInfo struct {
 func newResumeInfo(states []*interruptState, enableStreaming bool) *ResumeInfo {
 	stateMap := make(map[string]*interruptState, len(states))
 	for _, is := range states {
-		if is.runCtx != nil {
-			stateMap[is.runCtx.Addr.String()] = is
-		}
+		stateMap[is.Addr.String()] = is
 	}
+
 	return &ResumeInfo{
 		EnableStreaming: enableStreaming,
 		interruptStates: stateMap,
@@ -58,8 +58,8 @@ func GetInterruptState[T any](info *ResumeInfo, addr Address) (wasInterrupted bo
 		return false, false, *new(T)
 	}
 	wasInterrupted = true
-	if is.state != nil {
-		s, ok := is.state.(T)
+	if is.State != nil {
+		s, ok := is.State.(T)
 		if ok {
 			hasState = true
 			state = s
@@ -76,7 +76,7 @@ func (ri *ResumeInfo) getNextResumptionPoints(parentAddr Address) map[string]*Re
 	parentAddrLen := len(parentAddr)
 
 	for _, is := range ri.interruptStates {
-		addr := is.runCtx.Addr
+		addr := is.Addr
 		// Check if the interrupt state's address is a descendant of the parent
 		if len(addr) > parentAddrLen && addr.HasPrefix(parentAddr) {
 			// The next segment in the path determines which child component is responsible.
@@ -114,13 +114,13 @@ type InterruptInfo struct {
 }
 
 type interruptState struct {
-	state  any
-	runCtx *runContext
+	Addr  Address
+	State any
 }
 
-func StatefulInterrupt(ctx context.Context, info any, state any) *AgentAction {
+func Interrupt(ctx context.Context, info any) *AgentAction {
 	runCtx := getRunCtx(ctx)
-	addr := runCtx.Addr
+	addr := runCtx.Addr.DeepCopy()
 	interruptID := addr.String()
 	return &AgentAction{
 		Interrupted: &InterruptInfo{
@@ -128,14 +128,37 @@ func StatefulInterrupt(ctx context.Context, info any, state any) *AgentAction {
 				{
 					ID:      interruptID,
 					Info:    info,
-					Address: addr.DeepCopy(),
+					Address: addr,
 					IsCause: true,
 				},
 			},
 			interruptStates: []*interruptState{
 				{
-					state:  state,
-					runCtx: runCtx.deepCopy(),
+					Addr: addr,
+				},
+			},
+		},
+	}
+}
+
+func StatefulInterrupt(ctx context.Context, info any, state any) *AgentAction {
+	runCtx := getRunCtx(ctx)
+	addr := runCtx.Addr.DeepCopy()
+	interruptID := addr.String()
+	return &AgentAction{
+		Interrupted: &InterruptInfo{
+			InterruptContexts: []*InterruptCtx{
+				{
+					ID:      interruptID,
+					Info:    info,
+					Address: addr,
+					IsCause: true,
+				},
+			},
+			interruptStates: []*interruptState{
+				{
+					Addr:  addr,
+					State: state,
 				},
 			},
 		},
@@ -144,14 +167,14 @@ func StatefulInterrupt(ctx context.Context, info any, state any) *AgentAction {
 
 func CompositeInterrupt(ctx context.Context, info any, state any, subInterruptInfos ...*InterruptInfo) *AgentAction {
 	runCtx := getRunCtx(ctx)
-	addr := runCtx.Addr
+	addr := runCtx.Addr.DeepCopy()
 	interruptID := addr.String()
 
 	interruptContexts := []*InterruptCtx{
 		{
 			ID:      interruptID,
 			Info:    info,
-			Address: addr.DeepCopy(),
+			Address: addr,
 		},
 	}
 	for _, subInfo := range subInterruptInfos {
@@ -167,8 +190,8 @@ func CompositeInterrupt(ctx context.Context, info any, state any, subInterruptIn
 		Interrupted: &InterruptInfo{
 			InterruptContexts: interruptContexts,
 			interruptStates: append(interruptStates, &interruptState{
-				state:  state,
-				runCtx: runCtx.deepCopy(),
+				Addr:  addr,
+				State: state,
 			}),
 		},
 	}
@@ -199,9 +222,11 @@ func init() {
 }
 
 type serialization struct {
-	RunCtx          *runContext
+	RunCtx *runContext
+	// deprecated: still keep it here for backward compatibility
 	Info            *InterruptInfo
 	InterruptStates []*interruptState
+	EnableStreaming bool
 }
 
 // getCheckPoint get checkpoint from store.
@@ -223,33 +248,38 @@ func getCheckPoint(
 	if err != nil {
 		return nil, nil, false, fmt.Errorf("failed to decode checkpoint: %w", err)
 	}
-	enableStreaming := false
-	if s.RunCtx.RootInput != nil {
-		enableStreaming = s.RunCtx.RootInput.EnableStreaming
-	}
+
 	id2State := make(map[string]*interruptState, len(s.InterruptStates))
 	for _, state := range s.InterruptStates {
-		id2State[state.runCtx.Addr.String()] = state
+		id2State[state.Addr.String()] = state
 	}
+
 	return s.RunCtx, &ResumeInfo{
-		EnableStreaming: enableStreaming,
+		EnableStreaming: s.EnableStreaming,
 		InterruptInfo:   s.Info,
 		interruptStates: id2State,
 	}, true, nil
 }
 
-func saveCheckPoint(
+func (r *Runner) saveCheckPoint(
 	ctx context.Context,
 	store compose.CheckPointStore,
 	key string,
-	runCtx *runContext,
 	info *InterruptInfo,
+	rootInput *AgentInput,
+	session *runSession,
+	parentAddr Address,
 ) error {
 	buf := &bytes.Buffer{}
 	err := gob.NewEncoder(buf).Encode(&serialization{
-		RunCtx:          runCtx,
+		RunCtx: &runContext{
+			RootInput: rootInput,
+			Addr:      parentAddr,
+			Session:   session,
+		},
 		Info:            info,
 		InterruptStates: info.interruptStates,
+		EnableStreaming: r.enableStreaming,
 	})
 	if err != nil {
 		return fmt.Errorf("failed to encode checkpoint: %w", err)
