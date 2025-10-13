@@ -339,6 +339,9 @@ func (a *flowAgent) Resume(ctx context.Context, info *ResumeInfo, opts ...AgentR
 		iterator, generator := NewAsyncIteratorPair[*AgentEvent]()
 		// The inner agent will call GetInterruptState itself to get its specific state.
 		aIter := ra.Resume(ctx, info, opts...)
+		if _, ok := ra.(*workflowAgent); ok {
+			return aIter
+		}
 		go a.run(ctx, runCtx, aIter, generator, opts...)
 		return iterator
 	}
@@ -365,6 +368,7 @@ func (a *flowAgent) Resume(ctx context.Context, info *ResumeInfo, opts ...AgentR
 		nextAgentID = id
 		nextResumeInfo = point
 	}
+	nextResumeInfo.InterruptInfo = info.InterruptInfo // for backward compatibility
 
 	subAgent := a.getAgent(ctx, nextAgentID)
 	if subAgent == nil {

@@ -217,12 +217,11 @@ func (rc *runContext) deepCopy() *runContext {
 	copied := &runContext{
 		RootInput: rc.RootInput,
 		RunPath:   make([]RunStep, len(rc.RunPath)),
-		Addr:      make(Address, 0),
+		Addr:      rc.Addr.DeepCopy(),
 		Session:   rc.Session,
 	}
 
 	copy(copied.RunPath, rc.RunPath)
-	copy(copied.Addr, rc.Addr)
 
 	return copied
 }
@@ -254,7 +253,7 @@ func initRunCtx(ctx context.Context, agentName string, input *AgentInput) (conte
 		Type: AddressSegmentAgent,
 		ID:   agentName,
 	})
-	if runCtx.isRoot() {
+	if runCtx.isRoot() && input != nil {
 		runCtx.RootInput = input
 	}
 

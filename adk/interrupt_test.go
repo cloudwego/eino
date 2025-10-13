@@ -86,15 +86,18 @@ func TestSimpleInterrupt(t *testing.T) {
 					},
 				},
 			})
+			intAct := Interrupt(ctx, data)
+			intAct.Interrupted.Data = data
 			generator.Send(&AgentEvent{
-				Action: &AgentAction{Interrupted: &InterruptInfo{
-					Data: data,
-				}},
+				Action: intAct,
 			})
 			generator.Close()
 			return iter
 		},
 		resumer: func(ctx context.Context, info *ResumeInfo, opts ...AgentRunOption) *AsyncIterator[*AgentEvent] {
+			wasInterrupted, hasState, _ := GetInterruptState[string](info, GetCurrentAddress(ctx))
+			assert.True(t, wasInterrupted)
+			assert.False(t, hasState)
 			assert.NotNil(t, info)
 			assert.True(t, info.EnableStreaming)
 			assert.Equal(t, data, info.Data)
@@ -116,7 +119,12 @@ func TestSimpleInterrupt(t *testing.T) {
 	event, ok = iter.Next()
 	assert.True(t, ok)
 	assert.Equal(t, data, event.Action.Interrupted.Data)
-	_, ok = iter.Next()
+	assert.Equal(t, "agent:myAgent", event.Action.Interrupted.InterruptContexts[0].ID)
+	assert.True(t, event.Action.Interrupted.InterruptContexts[0].IsCause)
+	assert.Equal(t, data, event.Action.Interrupted.InterruptContexts[0].Info)
+	assert.Equal(t, Address{{Type: AddressSegmentAgent, ID: "myAgent"}},
+		event.Action.Interrupted.InterruptContexts[0].Address)
+	event, ok = iter.Next()
 	assert.False(t, ok)
 
 	_, err := runner.Resume(ctx, "1")
@@ -145,13 +153,11 @@ func TestMultiAgentInterrupt(t *testing.T) {
 		name: "sa2",
 		runner: func(ctx context.Context, input *AgentInput, options ...AgentRunOption) *AsyncIterator[*AgentEvent] {
 			iter, generator := NewAsyncIteratorPair[*AgentEvent]()
+			intAct := Interrupt(ctx, "hello world")
+			intAct.Interrupted.Data = "hello world"
 			generator.Send(&AgentEvent{
 				AgentName: "sa2",
-				Action: &AgentAction{
-					Interrupted: &InterruptInfo{
-						Data: "hello world",
-					},
-				},
+				Action:    intAct,
 			})
 			generator.Close()
 			return iter
@@ -159,6 +165,10 @@ func TestMultiAgentInterrupt(t *testing.T) {
 		resumer: func(ctx context.Context, info *ResumeInfo, opts ...AgentRunOption) *AsyncIterator[*AgentEvent] {
 			assert.NotNil(t, info)
 			assert.Equal(t, info.Data, "hello world")
+
+			wasInterrupted, _, _ := GetInterruptState[any](info, GetCurrentAddress(ctx))
+			assert.True(t, wasInterrupted)
+
 			iter, generator := NewAsyncIteratorPair[*AgentEvent]()
 			generator.Send(&AgentEvent{
 				AgentName: "sa2",
@@ -184,6 +194,15 @@ func TestMultiAgentInterrupt(t *testing.T) {
 	event, ok = iter.Next()
 	assert.True(t, ok)
 	assert.NotNil(t, event.Action.Interrupted)
+	assert.Equal(t, 1, len(event.Action.Interrupted.InterruptContexts))
+	assert.Equal(t, "hello world", event.Action.Interrupted.InterruptContexts[0].Info)
+	assert.True(t, event.Action.Interrupted.InterruptContexts[0].IsCause)
+	assert.Equal(t, Address{
+		{Type: AddressSegmentAgent, ID: "sa1"},
+		{Type: AddressSegmentAgent, ID: "sa2"},
+	}, event.Action.Interrupted.InterruptContexts[0].Address)
+	assert.Equal(t, "agent:sa1;agent:sa2", event.Action.Interrupted.InterruptContexts[0].ID)
+
 	_, ok = iter.Next()
 	assert.False(t, ok)
 	iter, err = runner.Resume(ctx, "1")
@@ -201,19 +220,20 @@ func TestWorkflowInterrupt(t *testing.T) {
 		name: "sa1",
 		runner: func(ctx context.Context, input *AgentInput, options ...AgentRunOption) *AsyncIterator[*AgentEvent] {
 			iter, generator := NewAsyncIteratorPair[*AgentEvent]()
+
+			intAct := Interrupt(ctx, "sa1 interrupt data")
+			intAct.Interrupted.Data = "sa1 interrupt data"
 			generator.Send(&AgentEvent{
 				AgentName: "sa1",
-				Action: &AgentAction{
-					Interrupted: &InterruptInfo{
-						Data: "sa1 interrupt data",
-					},
-				},
+				Action:    intAct,
 			})
 			generator.Close()
 			return iter
 		},
 		resumer: func(ctx context.Context, info *ResumeInfo, opts ...AgentRunOption) *AsyncIterator[*AgentEvent] {
 			assert.Equal(t, info.Data, "sa1 interrupt data")
+			wasInterrupted, _, _ := GetInterruptState[any](info, GetCurrentAddress(ctx))
+			assert.True(t, wasInterrupted)
 			iter, generator := NewAsyncIteratorPair[*AgentEvent]()
 			generator.Close()
 			return iter
@@ -223,19 +243,20 @@ func TestWorkflowInterrupt(t *testing.T) {
 		name: "sa2",
 		runner: func(ctx context.Context, input *AgentInput, options ...AgentRunOption) *AsyncIterator[*AgentEvent] {
 			iter, generator := NewAsyncIteratorPair[*AgentEvent]()
+
+			intAct := Interrupt(ctx, "sa2 interrupt data")
+			intAct.Interrupted.Data = "sa2 interrupt data"
 			generator.Send(&AgentEvent{
 				AgentName: "sa2",
-				Action: &AgentAction{
-					Interrupted: &InterruptInfo{
-						Data: "sa2 interrupt data",
-					},
-				},
+				Action:    intAct,
 			})
 			generator.Close()
 			return iter
 		},
 		resumer: func(ctx context.Context, info *ResumeInfo, opts ...AgentRunOption) *AsyncIterator[*AgentEvent] {
 			assert.Equal(t, info.Data, "sa2 interrupt data")
+			wasInterrupted, _, _ := GetInterruptState[any](info, GetCurrentAddress(ctx))
+			assert.True(t, wasInterrupted)
 			iter, generator := NewAsyncIteratorPair[*AgentEvent]()
 			generator.Close()
 			return iter
@@ -274,84 +295,209 @@ func TestWorkflowInterrupt(t *testing.T) {
 		},
 	} // won't interrupt
 
-	// sequential
-	a, err := NewSequentialAgent(ctx, &SequentialAgentConfig{
-		Name:        "sequential",
-		Description: "sequential agent",
-		SubAgents:   []Agent{sa1, sa2, sa3, sa4},
-	})
-	assert.NoError(t, err)
-	runner := NewRunner(ctx, RunnerConfig{
-		Agent:           a,
-		CheckPointStore: newMyStore(),
-	})
-	var events []*AgentEvent
-	iter := runner.Query(ctx, "hello world", WithCheckPointID("sequential-1"))
-	for {
-		event, ok := iter.Next()
-		if !ok {
-			break
-		}
-		events = append(events, event)
-	}
-	// Resume after sa1 interrupt
-	iter, err = runner.Resume(ctx, "sequential-1")
-	assert.NoError(t, err)
-	for {
-		event, ok := iter.Next()
-		if !ok {
-			break
-		}
-		events = append(events, event)
-	}
-	// Resume after sa2 interrupt
-	iter, err = runner.Resume(ctx, "sequential-1")
-	assert.NoError(t, err)
-	for {
-		event, ok := iter.Next()
-		if !ok {
-			break
-		}
-		events = append(events, event)
-	}
-
-	expectedSequentialEvents := []*AgentEvent{
-		{
-			AgentName: "sa1",
-			RunPath:   []RunStep{{"sequential"}, {"sa1"}},
-			Action: &AgentAction{
-				Interrupted: &InterruptInfo{
-					Data: &WorkflowInterruptInfo{
-						OrigInput: &AgentInput{
-							Messages: []Message{schema.UserMessage("hello world")},
+	firstInterruptEvent := &AgentEvent{
+		AgentName: "sa1",
+		RunPath:   []RunStep{{"sequential"}, {"sa1"}},
+		Action: &AgentAction{
+			Interrupted: &InterruptInfo{
+				Data: &WorkflowInterruptInfo{
+					OrigInput: &AgentInput{
+						Messages: []Message{schema.UserMessage("hello world")},
+					},
+					SequentialInterruptIndex: 0,
+					SequentialInterruptInfo: &InterruptInfo{
+						Data: "sa1 interrupt data",
+						InterruptContexts: []*InterruptCtx{
+							{
+								ID:   "agent:sequential;agent:sa1",
+								Info: "sa1 interrupt data",
+								Address: Address{
+									{
+										ID:   "sequential",
+										Type: AddressSegmentAgent,
+									},
+									{
+										ID:   "sa1",
+										Type: AddressSegmentAgent,
+									},
+								},
+								IsCause: true,
+							},
 						},
-						SequentialInterruptIndex: 0,
-						SequentialInterruptInfo: &InterruptInfo{
-							Data: "sa1 interrupt data",
+						interruptStates: []*interruptState{
+							{
+								Addr: Address{
+									{
+										ID:   "sequential",
+										Type: AddressSegmentAgent,
+									},
+									{
+										ID:   "sa1",
+										Type: AddressSegmentAgent,
+									},
+								},
+							},
 						},
-						LoopIterations: 0,
+					},
+					LoopIterations: 0,
+				},
+				InterruptContexts: []*InterruptCtx{
+					{
+						ID:   "agent:sequential",
+						Info: "Sequential workflow interrupted",
+						Address: Address{
+							{
+								ID:   "sequential",
+								Type: AddressSegmentAgent,
+							},
+						},
+					},
+					{
+						ID:   "agent:sequential;agent:sa1",
+						Info: "sa1 interrupt data",
+						Address: Address{
+							{
+								ID:   "sequential",
+								Type: AddressSegmentAgent,
+							},
+							{
+								ID:   "sa1",
+								Type: AddressSegmentAgent,
+							},
+						},
+						IsCause: true,
+					},
+				},
+				interruptStates: []*interruptState{
+					{
+						Addr: Address{
+							{
+								ID:   "sequential",
+								Type: AddressSegmentAgent,
+							},
+							{
+								ID:   "sa1",
+								Type: AddressSegmentAgent,
+							},
+						},
+					},
+					{
+						Addr: Address{
+							{
+								ID:   "sequential",
+								Type: AddressSegmentAgent,
+							},
+						},
+						State: &sequentialWorkflowState{
+							InterruptIndex: 0,
+						},
 					},
 				},
 			},
 		},
-		{
-			AgentName: "sa2",
-			RunPath:   []RunStep{{"sequential"}, {"sa1"}, {"sa2"}},
-			Action: &AgentAction{
-				Interrupted: &InterruptInfo{
-					Data: &WorkflowInterruptInfo{
-						OrigInput: &AgentInput{
-							Messages: []Message{schema.UserMessage("hello world")},
+	}
+	secondInterruptEvent := &AgentEvent{
+		AgentName: "sa2",
+		RunPath:   []RunStep{{"sequential"}, {"sa1"}, {"sa2"}},
+		Action: &AgentAction{
+			Interrupted: &InterruptInfo{
+				Data: &WorkflowInterruptInfo{
+					OrigInput: &AgentInput{
+						Messages: []Message{schema.UserMessage("hello world")},
+					},
+					SequentialInterruptIndex: 1,
+					SequentialInterruptInfo: &InterruptInfo{
+						Data: "sa2 interrupt data",
+						InterruptContexts: []*InterruptCtx{
+							{
+								ID:   "agent:sequential;agent:sa2",
+								Info: "sa2 interrupt data",
+								Address: Address{
+									{
+										ID:   "sequential",
+										Type: AddressSegmentAgent,
+									},
+									{
+										ID:   "sa2",
+										Type: AddressSegmentAgent,
+									},
+								},
+								IsCause: true,
+							},
 						},
-						SequentialInterruptIndex: 1,
-						SequentialInterruptInfo: &InterruptInfo{
-							Data: "sa2 interrupt data",
+						interruptStates: []*interruptState{
+							{
+								Addr: Address{
+									{
+										ID:   "sequential",
+										Type: AddressSegmentAgent,
+									},
+									{
+										ID:   "sa2",
+										Type: AddressSegmentAgent,
+									},
+								},
+							},
 						},
-						LoopIterations: 0,
+					},
+					LoopIterations: 0,
+				},
+				InterruptContexts: []*InterruptCtx{
+					{
+						ID:   "agent:sequential",
+						Info: "Sequential workflow interrupted",
+						Address: Address{
+							{
+								ID:   "sequential",
+								Type: AddressSegmentAgent,
+							},
+						},
+					},
+					{
+						ID:   "agent:sequential;agent:sa2",
+						Info: "sa2 interrupt data",
+						Address: Address{
+							{
+								ID:   "sequential",
+								Type: AddressSegmentAgent,
+							},
+							{
+								ID:   "sa2",
+								Type: AddressSegmentAgent,
+							},
+						},
+						IsCause: true,
+					},
+				},
+				interruptStates: []*interruptState{
+					{
+						Addr: Address{
+							{
+								ID:   "sequential",
+								Type: AddressSegmentAgent,
+							},
+							{
+								ID:   "sa2",
+								Type: AddressSegmentAgent,
+							},
+						},
+					},
+					{
+						Addr: Address{
+							{
+								ID:   "sequential",
+								Type: AddressSegmentAgent,
+							},
+						},
+						State: &sequentialWorkflowState{
+							InterruptIndex: 1,
+						},
 					},
 				},
 			},
 		},
+	}
+	messageEvents := []*AgentEvent{
 		{
 			AgentName: "sa3",
 			RunPath:   []RunStep{{"sequential"}, {"sa1"}, {"sa2"}, {"sa3"}},
@@ -372,31 +518,35 @@ func TestWorkflowInterrupt(t *testing.T) {
 		},
 	}
 
-	assert.Equal(t, 4, len(events))
-	assert.Equal(t, expectedSequentialEvents, events)
+	t.Run("test sequential workflow agent", func(t *testing.T) {
 
-	// loop
-	a, err = NewLoopAgent(ctx, &LoopAgentConfig{
-		Name:          "loop",
-		SubAgents:     []Agent{sa1, sa2, sa3, sa4},
-		MaxIterations: 2,
-	})
-	assert.NoError(t, err)
-	runner = NewRunner(ctx, RunnerConfig{
-		Agent:           a,
-		CheckPointStore: newMyStore(),
-	})
-	events = []*AgentEvent{}
-	iter = runner.Query(ctx, "hello world", WithCheckPointID("1"))
-	for {
-		event, ok := iter.Next()
-		if !ok {
-			break
+		// sequential
+		a, err := NewSequentialAgent(ctx, &SequentialAgentConfig{
+			Name:        "sequential",
+			Description: "sequential agent",
+			SubAgents:   []Agent{sa1, sa2, sa3, sa4},
+		})
+		assert.NoError(t, err)
+		runner := NewRunner(ctx, RunnerConfig{
+			Agent:           a,
+			CheckPointStore: newMyStore(),
+		})
+		var events []*AgentEvent
+		iter := runner.Query(ctx, "hello world", WithCheckPointID("sequential-1"))
+		for {
+			event, ok := iter.Next()
+			if !ok {
+				break
+			}
+			events = append(events, event)
 		}
-		events = append(events, event)
-	}
-	for i := 0; i < 4; i++ {
-		iter, err = runner.Resume(ctx, "1")
+
+		assert.Equal(t, 1, len(events))
+		assert.Equal(t, firstInterruptEvent, events[0])
+		events = []*AgentEvent{}
+
+		// Resume after sa1 interrupt
+		iter, err = runner.Resume(ctx, "sequential-1")
 		assert.NoError(t, err)
 		for {
 			event, ok := iter.Next()
@@ -405,147 +555,281 @@ func TestWorkflowInterrupt(t *testing.T) {
 			}
 			events = append(events, event)
 		}
-	}
-	expectedEvents := []*AgentEvent{
-		{
-			AgentName: "sa1",
-			RunPath:   []RunStep{{"loop"}, {"sa1"}},
-			Action: &AgentAction{
-				Interrupted: &InterruptInfo{
-					Data: &WorkflowInterruptInfo{
-						OrigInput: &AgentInput{
-							Messages: []Message{schema.UserMessage("hello world")},
-						},
-						SequentialInterruptIndex: 0,
-						SequentialInterruptInfo: &InterruptInfo{
-							Data: "sa1 interrupt data",
-						},
-						LoopIterations: 0,
-					},
-				},
-			},
-		},
-		{
-			AgentName: "sa2",
-			RunPath:   []RunStep{{"loop"}, {"sa1"}, {"sa2"}},
-			Action: &AgentAction{
-				Interrupted: &InterruptInfo{
-					Data: &WorkflowInterruptInfo{
-						OrigInput: &AgentInput{
-							Messages: []Message{schema.UserMessage("hello world")},
-						},
-						SequentialInterruptIndex: 1,
-						SequentialInterruptInfo: &InterruptInfo{
-							Data: "sa2 interrupt data",
-						},
-						LoopIterations: 0,
-					},
-				},
-			},
-		},
-		{
-			AgentName: "sa3",
-			RunPath:   []RunStep{{"loop"}, {"sa1"}, {"sa2"}, {"sa3"}},
-			Output: &AgentOutput{
-				MessageOutput: &MessageVariant{
-					Message: schema.UserMessage("sa3 completed"),
-				},
-			},
-		},
-		{
-			AgentName: "sa4",
-			RunPath:   []RunStep{{"loop"}, {"sa1"}, {"sa2"}, {"sa3"}, {"sa4"}},
-			Output: &AgentOutput{
-				MessageOutput: &MessageVariant{
-					Message: schema.UserMessage("sa4 completed"),
-				},
-			},
-		},
-		{
-			AgentName: "sa1",
-			RunPath:   []RunStep{{"loop"}, {"sa1"}, {"sa2"}, {"sa3"}, {"sa4"}, {"sa1"}},
-			Action: &AgentAction{
-				Interrupted: &InterruptInfo{
-					Data: &WorkflowInterruptInfo{
-						OrigInput: &AgentInput{
-							Messages: []Message{schema.UserMessage("hello world")},
-						},
-						SequentialInterruptIndex: 0,
-						SequentialInterruptInfo: &InterruptInfo{
-							Data: "sa1 interrupt data",
-						},
-						LoopIterations: 1,
-					},
-				},
-			},
-		},
-		{
-			AgentName: "sa2",
-			RunPath:   []RunStep{{"loop"}, {"sa1"}, {"sa2"}, {"sa3"}, {"sa4"}, {"sa1"}, {"sa2"}},
-			Action: &AgentAction{
-				Interrupted: &InterruptInfo{
-					Data: &WorkflowInterruptInfo{
-						OrigInput: &AgentInput{
-							Messages: []Message{schema.UserMessage("hello world")},
-						},
-						SequentialInterruptIndex: 1,
-						SequentialInterruptInfo: &InterruptInfo{
-							Data: "sa2 interrupt data",
-						},
-						LoopIterations: 1,
-					},
-				},
-			},
-		},
-		{
-			AgentName: "sa3",
-			RunPath:   []RunStep{{"loop"}, {"sa1"}, {"sa2"}, {"sa3"}, {"sa4"}, {"sa1"}, {"sa2"}, {"sa3"}},
-			Output: &AgentOutput{
-				MessageOutput: &MessageVariant{
-					Message: schema.UserMessage("sa3 completed"),
-				},
-			},
-		},
-		{
-			AgentName: "sa4",
-			RunPath:   []RunStep{{"loop"}, {"sa1"}, {"sa2"}, {"sa3"}, {"sa4"}, {"sa1"}, {"sa2"}, {"sa3"}, {"sa4"}},
-			Output: &AgentOutput{
-				MessageOutput: &MessageVariant{
-					Message: schema.UserMessage("sa4 completed"),
-				},
-			},
-		},
-	}
 
-	assert.Equal(t, 8, len(events))
-	assert.Equal(t, expectedEvents, events)
+		assert.Equal(t, 1, len(events))
+		assert.Equal(t, secondInterruptEvent, events[0])
+		events = []*AgentEvent{}
 
-	// parallel
-	a, err = NewParallelAgent(ctx, &ParallelAgentConfig{
-		Name:      "parallel agent",
-		SubAgents: []Agent{sa1, sa2, sa3, sa4},
-	})
-	assert.NoError(t, err)
-	runner = NewRunner(ctx, RunnerConfig{
-		Agent:           a,
-		CheckPointStore: newMyStore(),
-	})
-	iter = runner.Query(ctx, "hello world", WithCheckPointID("1"))
-	events = []*AgentEvent{}
-
-	for {
-		event, ok := iter.Next()
-		if !ok {
-			break
+		// Resume after sa2 interrupt
+		iter, err = runner.Resume(ctx, "sequential-1")
+		assert.NoError(t, err)
+		for {
+			event, ok := iter.Next()
+			if !ok {
+				break
+			}
+			events = append(events, event)
 		}
-		events = append(events, event)
-	}
-	assert.Equal(t, 3, len(events))
 
-	iter, err = runner.Resume(ctx, "1")
-	assert.NoError(t, err)
-	_, ok := iter.Next()
-	assert.False(t, ok)
+		assert.Equal(t, 2, len(events))
+		assert.Equal(t, messageEvents, events)
+	})
+
+	t.Run("test loop workflow agent", func(t *testing.T) {
+		// loop
+		a, err := NewLoopAgent(ctx, &LoopAgentConfig{
+			Name:          "loop",
+			SubAgents:     []Agent{sa1, sa2, sa3, sa4},
+			MaxIterations: 2,
+		})
+		assert.NoError(t, err)
+		runner := NewRunner(ctx, RunnerConfig{
+			Agent:           a,
+			CheckPointStore: newMyStore(),
+		})
+		var events []*AgentEvent
+		iter := runner.Query(ctx, "hello world", WithCheckPointID("loop-1"))
+		for {
+			event, ok := iter.Next()
+			if !ok {
+				break
+			}
+			events = append(events, event)
+		}
+
+		loopFirstInterruptEvent := copyAgentEvent(firstInterruptEvent)
+		loopFirstInterruptEvent.AgentName = "sa1"
+		loopFirstInterruptEvent.RunPath = []RunStep{{"loop"}, {"sa1"}}
+		loopFirstInterruptEvent.Action.Interrupted.Data.(*WorkflowInterruptInfo).LoopIterations = 0
+		loopFirstInterruptEvent.Action.Interrupted.Data.(*WorkflowInterruptInfo).SequentialInterruptInfo.InterruptContexts[0].ID = "agent:loop;agent:sa1"
+		loopFirstInterruptEvent.Action.Interrupted.Data.(*WorkflowInterruptInfo).SequentialInterruptInfo.InterruptContexts[0].Address = Address{{ID: "loop", Type: AddressSegmentAgent}, {ID: "sa1", Type: AddressSegmentAgent}}
+		loopFirstInterruptEvent.Action.Interrupted.Data.(*WorkflowInterruptInfo).SequentialInterruptInfo.interruptStates[0].Addr = Address{{ID: "loop", Type: AddressSegmentAgent}, {ID: "sa1", Type: AddressSegmentAgent}}
+		loopFirstInterruptEvent.Action.Interrupted.InterruptContexts[0].ID = "agent:loop"
+		loopFirstInterruptEvent.Action.Interrupted.InterruptContexts[0].Address = Address{{ID: "loop", Type: AddressSegmentAgent}}
+		loopFirstInterruptEvent.Action.Interrupted.InterruptContexts[0].Info = "Loop workflow interrupted"
+		loopFirstInterruptEvent.Action.Interrupted.InterruptContexts[1].ID = "agent:loop;agent:sa1"
+		loopFirstInterruptEvent.Action.Interrupted.InterruptContexts[1].Address = Address{{ID: "loop", Type: AddressSegmentAgent}, {ID: "sa1", Type: AddressSegmentAgent}}
+		loopFirstInterruptEvent.Action.Interrupted.interruptStates[0].Addr = Address{{ID: "loop", Type: AddressSegmentAgent}, {ID: "sa1", Type: AddressSegmentAgent}}
+		loopFirstInterruptEvent.Action.Interrupted.interruptStates[1].Addr = Address{{ID: "loop", Type: AddressSegmentAgent}}
+		loopFirstInterruptEvent.Action.Interrupted.interruptStates[1].State = &loopWorkflowState{LoopIterations: 0, SubAgentIndex: 0}
+		assert.Equal(t, 1, len(events))
+		assert.Equal(t, loopFirstInterruptEvent, events[0])
+		events = []*AgentEvent{}
+
+		// Resume after sa1 interrupt
+		iter, err = runner.Resume(ctx, "loop-1")
+		assert.NoError(t, err)
+		for {
+			event, ok := iter.Next()
+			if !ok {
+				break
+			}
+			events = append(events, event)
+		}
+
+		loopSecondInterruptEvent := copyAgentEvent(secondInterruptEvent)
+		loopSecondInterruptEvent.AgentName = "sa2"
+		loopSecondInterruptEvent.RunPath = []RunStep{{"loop"}, {"sa1"}, {"sa2"}}
+		loopSecondInterruptEvent.Action.Interrupted.Data.(*WorkflowInterruptInfo).LoopIterations = 0
+		loopSecondInterruptEvent.Action.Interrupted.Data.(*WorkflowInterruptInfo).SequentialInterruptInfo.InterruptContexts[0].ID = "agent:loop;agent:sa2"
+		loopSecondInterruptEvent.Action.Interrupted.Data.(*WorkflowInterruptInfo).SequentialInterruptInfo.InterruptContexts[0].Address = Address{{ID: "loop", Type: AddressSegmentAgent}, {ID: "sa2", Type: AddressSegmentAgent}}
+		loopSecondInterruptEvent.Action.Interrupted.Data.(*WorkflowInterruptInfo).SequentialInterruptInfo.interruptStates[0].Addr = Address{{ID: "loop", Type: AddressSegmentAgent}, {ID: "sa2", Type: AddressSegmentAgent}}
+		loopSecondInterruptEvent.Action.Interrupted.InterruptContexts[0].ID = "agent:loop"
+		loopSecondInterruptEvent.Action.Interrupted.InterruptContexts[0].Address = Address{{ID: "loop", Type: AddressSegmentAgent}}
+		loopSecondInterruptEvent.Action.Interrupted.InterruptContexts[0].Info = "Loop workflow interrupted"
+		loopSecondInterruptEvent.Action.Interrupted.InterruptContexts[1].ID = "agent:loop;agent:sa2"
+		loopSecondInterruptEvent.Action.Interrupted.InterruptContexts[1].Address = Address{{ID: "loop", Type: AddressSegmentAgent}, {ID: "sa2", Type: AddressSegmentAgent}}
+		loopSecondInterruptEvent.Action.Interrupted.interruptStates[0].Addr = Address{{ID: "loop", Type: AddressSegmentAgent}, {ID: "sa2", Type: AddressSegmentAgent}}
+		loopSecondInterruptEvent.Action.Interrupted.interruptStates[1].Addr = Address{{ID: "loop", Type: AddressSegmentAgent}}
+		loopSecondInterruptEvent.Action.Interrupted.interruptStates[1].State = &loopWorkflowState{LoopIterations: 0, SubAgentIndex: 1}
+		assert.Equal(t, 1, len(events))
+		assert.Equal(t, loopSecondInterruptEvent, events[0])
+		events = []*AgentEvent{}
+
+		// Resume after sa2 interrupt
+		iter, err = runner.Resume(ctx, "loop-1")
+		assert.NoError(t, err)
+		for {
+			event, ok := iter.Next()
+			if !ok {
+				break
+			}
+			events = append(events, event)
+		}
+
+		loopThirdInterruptEvent := copyAgentEvent(firstInterruptEvent)
+		loopThirdInterruptEvent.AgentName = "sa1"
+		loopThirdInterruptEvent.RunPath = []RunStep{{"loop"}, {"sa1"}, {"sa2"}, {"sa3"}, {"sa4"}, {"sa1"}}
+		loopThirdInterruptEvent.Action.Interrupted.Data.(*WorkflowInterruptInfo).LoopIterations = 1
+		loopThirdInterruptEvent.Action.Interrupted.Data.(*WorkflowInterruptInfo).SequentialInterruptInfo.InterruptContexts[0].ID = "agent:loop;agent:sa1"
+		loopThirdInterruptEvent.Action.Interrupted.Data.(*WorkflowInterruptInfo).SequentialInterruptInfo.InterruptContexts[0].Address = Address{{ID: "loop", Type: AddressSegmentAgent}, {ID: "sa1", Type: AddressSegmentAgent}}
+		loopThirdInterruptEvent.Action.Interrupted.Data.(*WorkflowInterruptInfo).SequentialInterruptInfo.interruptStates[0].Addr = Address{{ID: "loop", Type: AddressSegmentAgent}, {ID: "sa1", Type: AddressSegmentAgent}}
+		loopThirdInterruptEvent.Action.Interrupted.InterruptContexts[0].ID = "agent:loop"
+		loopThirdInterruptEvent.Action.Interrupted.InterruptContexts[0].Address = Address{{ID: "loop", Type: AddressSegmentAgent}}
+		loopThirdInterruptEvent.Action.Interrupted.InterruptContexts[0].Info = "Loop workflow interrupted"
+		loopThirdInterruptEvent.Action.Interrupted.InterruptContexts[1].ID = "agent:loop;agent:sa1"
+		loopThirdInterruptEvent.Action.Interrupted.InterruptContexts[1].Address = Address{{ID: "loop", Type: AddressSegmentAgent}, {ID: "sa1", Type: AddressSegmentAgent}}
+		loopThirdInterruptEvent.Action.Interrupted.interruptStates[0].Addr = Address{{ID: "loop", Type: AddressSegmentAgent}, {ID: "sa1", Type: AddressSegmentAgent}}
+		loopThirdInterruptEvent.Action.Interrupted.interruptStates[1].Addr = Address{{ID: "loop", Type: AddressSegmentAgent}}
+		loopThirdInterruptEvent.Action.Interrupted.interruptStates[1].State = &loopWorkflowState{LoopIterations: 1, SubAgentIndex: 0}
+
+		loopFourthInterruptEvent := copyAgentEvent(secondInterruptEvent)
+		loopFourthInterruptEvent.AgentName = "sa2"
+		loopFourthInterruptEvent.RunPath = []RunStep{{"loop"}, {"sa1"}, {"sa2"}, {"sa3"}, {"sa4"}, {"sa1"}, {"sa2"}}
+		loopFourthInterruptEvent.Action.Interrupted.Data.(*WorkflowInterruptInfo).LoopIterations = 1
+		loopFourthInterruptEvent.Action.Interrupted.Data.(*WorkflowInterruptInfo).SequentialInterruptInfo.InterruptContexts[0].ID = "agent:loop;agent:sa2"
+		loopFourthInterruptEvent.Action.Interrupted.Data.(*WorkflowInterruptInfo).SequentialInterruptInfo.InterruptContexts[0].Address = Address{{ID: "loop", Type: AddressSegmentAgent}, {ID: "sa2", Type: AddressSegmentAgent}}
+		loopFourthInterruptEvent.Action.Interrupted.Data.(*WorkflowInterruptInfo).SequentialInterruptInfo.interruptStates[0].Addr = Address{{ID: "loop", Type: AddressSegmentAgent}, {ID: "sa2", Type: AddressSegmentAgent}}
+		loopFourthInterruptEvent.Action.Interrupted.InterruptContexts[0].ID = "agent:loop"
+		loopFourthInterruptEvent.Action.Interrupted.InterruptContexts[0].Address = Address{{ID: "loop", Type: AddressSegmentAgent}}
+		loopFourthInterruptEvent.Action.Interrupted.InterruptContexts[0].Info = "Loop workflow interrupted"
+		loopFourthInterruptEvent.Action.Interrupted.InterruptContexts[1].ID = "agent:loop;agent:sa2"
+		loopFourthInterruptEvent.Action.Interrupted.InterruptContexts[1].Address = Address{{ID: "loop", Type: AddressSegmentAgent}, {ID: "sa2", Type: AddressSegmentAgent}}
+		loopFourthInterruptEvent.Action.Interrupted.interruptStates[0].Addr = Address{{ID: "loop", Type: AddressSegmentAgent}, {ID: "sa2", Type: AddressSegmentAgent}}
+		loopFourthInterruptEvent.Action.Interrupted.interruptStates[1].Addr = Address{{ID: "loop", Type: AddressSegmentAgent}}
+		loopFourthInterruptEvent.Action.Interrupted.interruptStates[1].State = &loopWorkflowState{LoopIterations: 1, SubAgentIndex: 1}
+
+		loopMessageEvents := []*AgentEvent{
+			{
+				AgentName: "sa3",
+				RunPath:   []RunStep{{"loop"}, {"sa1"}, {"sa2"}, {"sa3"}},
+				Output: &AgentOutput{
+					MessageOutput: &MessageVariant{
+						Message: schema.UserMessage("sa3 completed"),
+					},
+				},
+			},
+			{
+				AgentName: "sa4",
+				RunPath:   []RunStep{{"loop"}, {"sa1"}, {"sa2"}, {"sa3"}, {"sa4"}},
+				Output: &AgentOutput{
+					MessageOutput: &MessageVariant{
+						Message: schema.UserMessage("sa4 completed"),
+					},
+				},
+			},
+			loopThirdInterruptEvent,
+		}
+		assert.Equal(t, 3, len(events))
+		assert.Equal(t, loopMessageEvents, events)
+		events = []*AgentEvent{}
+
+		// Resume after third interrupt
+		iter, err = runner.Resume(ctx, "loop-1")
+		assert.NoError(t, err)
+		for {
+			event, ok := iter.Next()
+			if !ok {
+				break
+			}
+			events = append(events, event)
+		}
+		assert.Equal(t, 1, len(events))
+		assert.Equal(t, loopFourthInterruptEvent, events[0])
+		events = []*AgentEvent{}
+
+		// Resume after fourth interrupt
+		iter, err = runner.Resume(ctx, "loop-1")
+		assert.NoError(t, err)
+		for {
+			event, ok := iter.Next()
+			if !ok {
+				break
+			}
+			events = append(events, event)
+		}
+		loopFinalMessageEvents := []*AgentEvent{
+			{
+				AgentName: "sa3",
+				RunPath:   []RunStep{{"loop"}, {"sa1"}, {"sa2"}, {"sa3"}, {"sa4"}, {"sa1"}, {"sa2"}, {"sa3"}},
+				Output: &AgentOutput{
+					MessageOutput: &MessageVariant{
+						Message: schema.UserMessage("sa3 completed"),
+					},
+				},
+			},
+			{
+				AgentName: "sa4",
+				RunPath:   []RunStep{{"loop"}, {"sa1"}, {"sa2"}, {"sa3"}, {"sa4"}, {"sa1"}, {"sa2"}, {"sa3"}, {"sa4"}},
+				Output: &AgentOutput{
+					MessageOutput: &MessageVariant{
+						Message: schema.UserMessage("sa4 completed"),
+					},
+				},
+			},
+		}
+		assert.Equal(t, 2, len(events))
+		assert.Equal(t, loopFinalMessageEvents, events)
+	})
+
+	t.Run("test parallel workflow agent", func(t *testing.T) {
+		// parallel
+		a, err := NewParallelAgent(ctx, &ParallelAgentConfig{
+			Name:      "parallel agent",
+			SubAgents: []Agent{sa1, sa2, sa3, sa4},
+		})
+		assert.NoError(t, err)
+		runner := NewRunner(ctx, RunnerConfig{
+			Agent:           a,
+			CheckPointStore: newMyStore(),
+		})
+		iter := runner.Query(ctx, "hello world", WithCheckPointID("1"))
+		var (
+			events         []*AgentEvent
+			interruptEvent *AgentEvent
+		)
+
+		for {
+			event, ok := iter.Next()
+			if !ok {
+				break
+			}
+			if event.Action != nil && event.Action.Interrupted != nil {
+				interruptEvent = event
+				continue
+			}
+			events = append(events, event)
+		}
+		assert.Equal(t, 2, len(events))
+
+		normalEvents := make([]*AgentEvent, 0, len(messageEvents))
+		for _, event := range messageEvents {
+			copied := copyAgentEvent(event)
+			copied.RunPath = []RunStep{{"parallel agent"}, {copied.AgentName}}
+			normalEvents = append(normalEvents, copied)
+		}
+
+		assert.Contains(t, events, normalEvents[0])
+		assert.Contains(t, events, normalEvents[1])
+
+		assert.NotNil(t, interruptEvent)
+		assert.Equal(t, "parallel agent", interruptEvent.AgentName)
+		assert.Equal(t, []RunStep{{"parallel agent"}}, interruptEvent.RunPath)
+		assert.NotNil(t, interruptEvent.Action.Interrupted)
+		wii, ok := interruptEvent.Action.Interrupted.Data.(*WorkflowInterruptInfo)
+		assert.True(t, ok)
+		assert.Equal(t, 2, len(wii.ParallelInterruptInfo))
+
+		var sa1Found, sa2Found bool
+		for _, info := range wii.ParallelInterruptInfo {
+			if info.InterruptContexts[0].Info == "sa1 interrupt data" {
+				sa1Found = true
+			} else if info.InterruptContexts[0].Info == "sa2 interrupt data" {
+				sa2Found = true
+			}
+		}
+		assert.True(t, sa1Found)
+		assert.True(t, sa2Found)
+
+		assert.Equal(t, 3, len(interruptEvent.Action.Interrupted.InterruptContexts))
+		assert.Equal(t, "Parallel workflow interrupted", interruptEvent.Action.Interrupted.InterruptContexts[0].Info)
+		assert.Equal(t, 3, len(interruptEvent.Action.Interrupted.interruptStates))
+
+		iter, err = runner.Resume(ctx, "1")
+		assert.NoError(t, err)
+		_, ok = iter.Next()
+		assert.False(t, ok)
+	})
 }
 
 func TestChatModelInterrupt(t *testing.T) {
@@ -592,6 +876,21 @@ func TestChatModelInterrupt(t *testing.T) {
 	assert.True(t, ok)
 	assert.NoError(t, event.Err)
 	assert.NotNil(t, event.Action.Interrupted)
+	assert.Equal(t, 4, len(event.Action.Interrupted.InterruptContexts))
+
+	var hasRootCause bool
+	for _, ctx := range event.Action.Interrupted.InterruptContexts {
+		if ctx.IsCause {
+			hasRootCause = true
+			assert.Equal(t, Address{
+				{Type: AddressSegmentAgent, ID: "name"},
+				{Type: compose.AddressSegmentRunnable, ID: "React"},
+				{Type: compose.AddressSegmentNode, ID: "ToolNode"},
+				{Type: compose.AddressSegmentTool, ID: "1"},
+			}, ctx.Address)
+		}
+	}
+	assert.True(t, hasRootCause)
 	event, ok = iter.Next()
 	assert.False(t, ok)
 
@@ -791,9 +1090,7 @@ func (m *myModel) WithTools(tools []*schema.ToolInfo) (model.ToolCallingChatMode
 	return m, nil
 }
 
-type myTool1 struct {
-	times int
-}
+type myTool1 struct{}
 
 func (m *myTool1) Info(ctx context.Context) (*schema.ToolInfo, error) {
 	return &schema.ToolInfo{
@@ -803,10 +1100,10 @@ func (m *myTool1) Info(ctx context.Context) (*schema.ToolInfo, error) {
 }
 
 func (m *myTool1) InvokableRun(ctx context.Context, argumentsInJSON string, opts ...tool.Option) (string, error) {
-	if m.times == 0 {
-		m.times = 1
+	if wasInterrupted, _, _ := compose.GetInterruptState[any](ctx); !wasInterrupted {
 		return "", compose.Interrupt(ctx, nil)
 	}
+
 	return "result", nil
 }
 
