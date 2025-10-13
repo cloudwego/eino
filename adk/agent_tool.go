@@ -91,38 +91,24 @@ func (at *agentTool) Info(ctx context.Context) (*schema.ToolInfo, error) {
 }
 
 func (at *agentTool) InvokableRun(ctx context.Context, argumentsInJSON string, opts ...tool.Option) (string, error) {
-	var intData *agentToolInterruptInfo
-	var bResume bool
-	err := compose.ProcessState(ctx, func(ctx context.Context, s *State) error {
-		toolCallID := compose.GetToolCallID(ctx)
-		intData, bResume = s.AgentToolInterruptData[toolCallID]
-		if bResume {
-			delete(s.AgentToolInterruptData, toolCallID)
-		}
-		return nil
-	})
-	if err != nil {
-		// cannot resume
-		bResume = false
+	var addrPtr *Address
+	addr, existed := compose.GetCurrentAddress(ctx)
+	if existed {
+		addrPtr = &addr
 	}
 
 	var ms *mockStore
 	var iter *AsyncIterator[*AgentEvent]
-	if bResume {
-		ms = newResumeStore(intData.Data)
+	var err error
 
-		iter, err = newInvokableAgentToolRunner(at.agent, ms).
-			Resume(ctx, mockCheckPointID, getOptionsByAgentName(at.agent.Name(ctx), opts)...)
-		if err != nil {
-			return "", err
-		}
-	} else {
+	wasInterrupted, hasState, state := compose.GetInterruptState[[]byte](ctx)
+	if !wasInterrupted {
 		ms = newEmptyStore()
 		var input []Message
 		if at.fullChatHistoryAsInput {
-			history, err := getReactChatHistory(ctx, at.agent.Name(ctx))
-			if err != nil {
-				return "", err
+			history, err1 := getReactChatHistory(ctx, at.agent.Name(ctx))
+			if err1 != nil {
+				return "", err1
 			}
 
 			input = history
@@ -145,8 +131,21 @@ func (at *agentTool) InvokableRun(ctx context.Context, argumentsInJSON string, o
 			}
 		}
 
-		iter = newInvokableAgentToolRunner(at.agent, ms).Run(ctx, input,
+		iter = newInvokableAgentToolRunner(at.agent, ms, addrPtr).Run(ctx, input,
 			append(getOptionsByAgentName(at.agent.Name(ctx), opts), WithCheckPointID(mockCheckPointID))...)
+	} else {
+		// TODO: handle the resume flow
+		if !hasState {
+			return "", fmt.Errorf("agent tool interrupt has happened, but cannot find interrupt state")
+		}
+
+		ms = newResumeStore(state)
+
+		iter, err = newInvokableAgentToolRunner(at.agent, ms, addrPtr).
+			Resume(ctx, mockCheckPointID, getOptionsByAgentName(at.agent.Name(ctx), opts)...)
+		if err != nil {
+			return "", err
+		}
 	}
 
 	var lastEvent *AgentEvent
@@ -171,17 +170,13 @@ func (at *agentTool) InvokableRun(ctx context.Context, argumentsInJSON string, o
 		if !existed {
 			return "", fmt.Errorf("interrupt has happened, but cannot find interrupt info")
 		}
-		err = compose.ProcessState(ctx, func(ctx context.Context, st *State) error {
-			st.AgentToolInterruptData[compose.GetToolCallID(ctx)] = &agentToolInterruptInfo{
-				LastEvent: lastEvent,
-				Data:      data,
-			}
-			return nil
-		})
-		if err != nil {
-			return "", fmt.Errorf("failed to save agent tool checkpoint to state: %w", err)
+
+		var errs []error
+		for _, intCtx := range lastEvent.Action.Interrupted.InterruptContexts {
+			errs = append(errs, intCtx.AsError())
 		}
-		return "", compose.Interrupt(ctx, nil)
+
+		return "", compose.CompositeInterrupt(ctx, "agent tool interrupt", data, errs...)
 	}
 
 	if lastEvent == nil {
@@ -259,11 +254,11 @@ func getReactChatHistory(ctx context.Context, destAgentName string) ([]Message, 
 	return history, err
 }
 
-func newInvokableAgentToolRunner(agent Agent, store compose.CheckPointStore) *Runner {
+func newInvokableAgentToolRunner(agent Agent, store compose.CheckPointStore, parentAddr *Address) *Runner {
 	return &Runner{
 		a:               agent,
 		enableStreaming: false,
 		store:           store,
-		inheritAddress:  true,
+		parentAddr:      parentAddr,
 	}
 }
