@@ -24,6 +24,7 @@ import (
 	"strings"
 
 	"github.com/bytedance/sonic"
+
 	"github.com/cloudwego/eino/compose"
 
 	"github.com/cloudwego/eino/adk"
