@@ -287,10 +287,10 @@ func ClearRunCtx(ctx context.Context) context.Context {
 	return context.WithValue(ctx, runCtxKey{}, nil)
 }
 
-func ctxWithNewRunCtx(ctx context.Context, inheritAddr bool) context.Context {
+func ctxWithNewRunCtx(ctx context.Context, parentAddr *Address) context.Context {
 	var addr Address
-	if inheritAddr {
-		addr = GetCurrentAddress(ctx)
+	if parentAddr != nil {
+		addr = *parentAddr
 	}
 	return setRunCtx(ctx, &runContext{Session: newRunSession(), Addr: addr})
 }
