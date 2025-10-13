@@ -32,6 +32,57 @@ type ResumeInfo struct {
 	*InterruptInfo
 
 	interruptStates map[string]*interruptState
+	ResumeData      map[string]any
+}
+
+type resumeDataKey struct{}
+
+// BatchResumeWithData provides targeted data to specific agents during a resume operation.
+// The map keys are the full string addresses of the target agents.
+func BatchResumeWithData(ctx context.Context, resumeData map[string]any) context.Context {
+	existingData, _ := ctx.Value(resumeDataKey{}).(map[string]any)
+	if existingData == nil {
+		existingData = make(map[string]any)
+	}
+	for k, v := range resumeData {
+		existingData[k] = v
+	}
+	return context.WithValue(ctx, resumeDataKey{}, existingData)
+}
+
+// ResumeWithData provides targeted data to a single agent during a resume operation.
+func ResumeWithData(ctx context.Context, address string, data any) context.Context {
+	return BatchResumeWithData(ctx, map[string]any{address: data})
+}
+
+// Resume signals that one or more agents should be resumed, optionally without providing specific data.
+func Resume(ctx context.Context, addresses ...string) context.Context {
+	resumeData := make(map[string]any, len(addresses))
+	for _, addr := range addresses {
+		resumeData[addr] = nil
+	}
+	return BatchResumeWithData(ctx, resumeData)
+}
+
+// GetResumeData retrieves targeted data for the current agent during a resume operation.
+// It returns the data and a boolean indicating if data was provided for the agent's address.
+func GetResumeData[T any](info *ResumeInfo, addr Address) (data T, provided bool, ok bool) {
+	if info == nil || info.ResumeData == nil {
+		return *new(T), false, false
+	}
+
+	val, exists := info.ResumeData[addr.String()]
+	if !exists {
+		return *new(T), false, false
+	}
+
+	provided = true
+	if val == nil {
+		return *new(T), true, true
+	}
+
+	data, ok = val.(T)
+	return
 }
 
 // newResumeInfo creates a new ResumeInfo object.
@@ -98,7 +149,9 @@ func (ri *ResumeInfo) getNextResumptionPoints(parentAddr Address) map[string]*Re
 	for childID, states := range nextPoints {
 		// Create a new, scoped ResumeInfo for the child.
 		// The resumeData is passed down unmodified, as the child will perform its own address-based lookups.
-		result[childID] = newResumeInfo(states, ri.EnableStreaming)
+		childRI := newResumeInfo(states, ri.EnableStreaming)
+		childRI.ResumeData = ri.ResumeData
+		result[childID] = childRI
 	}
 	return result
 }
