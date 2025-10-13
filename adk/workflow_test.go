@@ -495,19 +495,9 @@ type panicMockAgent struct {
 	mockAgent
 }
 
-func (a *panicMockAgent) Run(ctx context.Context, input *AgentInput, opts ...AgentRunOption) *AsyncIterator[*AgentEvent] {
+func (a *panicMockAgent) Run(_ context.Context, _ *AgentInput, _ ...AgentRunOption) *AsyncIterator[*AgentEvent] {
 	panic("test panic in agent")
 }
-
-type panicResumableMockAgent struct {
-	mockAgent
-}
-
-func (a *panicResumableMockAgent) Resume(ctx context.Context, info *ResumeInfo, opts ...AgentRunOption) *AsyncIterator[*AgentEvent] {
-	panic("test panic in resume")
-}
-
-// Remove the old mockResumableAgent type and replace it with panicResumableMockAgent
 
 // TestWorkflowAgentUnsupportedMode tests unsupported workflow mode error (lines 65-71)
 func TestWorkflowAgentUnsupportedMode(t *testing.T) {
@@ -541,13 +531,4 @@ func TestWorkflowAgentUnsupportedMode(t *testing.T) {
 	// No more events
 	_, ok = iterator.Next()
 	assert.False(t, ok)
-}
-
-// mockResumableAgent extends mockAgent to implement ResumableAgent interface
-type mockResumableAgent struct {
-	mockAgent
-}
-
-func (a *mockResumableAgent) Resume(ctx context.Context, info *ResumeInfo, opts ...AgentRunOption) *AsyncIterator[*AgentEvent] {
-	panic("test panic in resume")
 }

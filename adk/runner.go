@@ -97,6 +97,10 @@ func (r *Runner) Resume(ctx context.Context, checkPointID string, opts ...AgentR
 
 	ctx = setRunCtx(ctx, runCtx)
 
+	if resumeData, ok := ctx.Value(resumeDataKey{}).(map[string]any); ok {
+		info.ResumeData = resumeData
+	}
+
 	o := getCommonOptions(nil, opts...)
 	AddSessionValues(ctx, o.sessionValues)
 

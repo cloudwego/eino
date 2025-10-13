@@ -599,7 +599,7 @@ func (a *ChatModelAgent) buildRunFunc(ctx context.Context) runFunc {
 			callOpt := genReactCallbacks(a.name, generator, input.EnableStreaming, store)
 
 			// Bridge the ADK and Compose contexts by setting the parent address.
-			graphCtx := compose.WithParentAddress(ctx, GetCurrentAddress(ctx))
+			graphCtx := compose.SetParentAddress(ctx, GetCurrentAddress(ctx))
 
 			var msg Message
 			var msgStream MessageStream
