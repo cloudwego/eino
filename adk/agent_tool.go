@@ -38,38 +38,48 @@ var (
 	})
 )
 
-type agentToolOptions struct {
-	agentName string
-	opts      []AgentRunOption
+type AgentToolOptions struct {
+	fullChatHistoryAsInput bool
+	agentInputSchema       *schema.ParamsOneOf
 }
 
-func withAgentToolOptions(agentName string, opts []AgentRunOption) tool.Option {
-	return tool.WrapImplSpecificOptFn(func(opt *agentToolOptions) {
-		opt.agentName = agentName
-		opt.opts = opts
-	})
-}
+type AgentToolOption func(*AgentToolOptions)
 
-func getOptionsByAgentName(agentName string, opts []tool.Option) []AgentRunOption {
-	var ret []AgentRunOption
-	for _, opt := range opts {
-		o := tool.GetImplSpecificOptions[agentToolOptions](nil, opt)
-		if o != nil && o.agentName == agentName {
-			ret = append(ret, o.opts...)
-		}
+func WithFullChatHistoryAsInput() AgentToolOption {
+	return func(options *AgentToolOptions) {
+		options.fullChatHistoryAsInput = true
 	}
-	return ret
+}
+
+func WithAgentInputSchema(schema *schema.ParamsOneOf) AgentToolOption {
+	return func(options *AgentToolOptions) {
+		options.agentInputSchema = schema
+	}
+}
+
+func NewAgentTool(_ context.Context, agent Agent, options ...AgentToolOption) tool.BaseTool {
+	opts := &AgentToolOptions{}
+	for _, opt := range options {
+		opt(opts)
+	}
+
+	return &agentTool{
+		agent:                  agent,
+		fullChatHistoryAsInput: opts.fullChatHistoryAsInput,
+		inputSchema:            opts.agentInputSchema,
+	}
 }
 
 type agentTool struct {
 	agent Agent
 
 	fullChatHistoryAsInput bool
+	inputSchema            *schema.ParamsOneOf
 }
 
 func (at *agentTool) Info(ctx context.Context) (*schema.ToolInfo, error) {
-	var param *schema.ParamsOneOf
-	if !at.fullChatHistoryAsInput {
+	param := at.inputSchema
+	if param == nil {
 		param = defaultAgentToolParam
 	}
 
@@ -116,17 +126,21 @@ func (at *agentTool) InvokableRun(ctx context.Context, argumentsInJSON string, o
 
 			input = history
 		} else {
-			type request struct {
-				Request string `json:"request"`
-			}
+			if at.inputSchema == nil {
+				// default input schema
+				type request struct {
+					Request string `json:"request"`
+				}
 
-			req := &request{}
-			err := sonic.UnmarshalString(argumentsInJSON, req)
-			if err != nil {
-				return "", err
+				req := &request{}
+				err = sonic.UnmarshalString(argumentsInJSON, req)
+				if err != nil {
+					return "", err
+				}
+				argumentsInJSON = req.Request
 			}
 			input = []Message{
-				schema.UserMessage(req.Request),
+				schema.UserMessage(argumentsInJSON),
 			}
 		}
 
@@ -190,32 +204,44 @@ func (at *agentTool) InvokableRun(ctx context.Context, argumentsInJSON string, o
 	return ret, nil
 }
 
-type AgentToolOptions struct {
-	fullChatHistoryAsInput bool
+// agentToolOptions is a wrapper structure used to convert AgentRunOption slices to tool.Option.
+// It stores the agent name and corresponding run options for tool-specific processing.
+type agentToolOptions struct {
+	agentName string
+	opts      []AgentRunOption
 }
 
-type AgentToolOption func(*AgentToolOptions)
+func withAgentToolOptions(agentName string, opts []AgentRunOption) tool.Option {
+	return tool.WrapImplSpecificOptFn(func(opt *agentToolOptions) {
+		opt.agentName = agentName
+		opt.opts = opts
+	})
+}
 
-func WithFullChatHistoryAsInput() AgentToolOption {
-	return func(options *AgentToolOptions) {
-		options.fullChatHistoryAsInput = true
+func getOptionsByAgentName(agentName string, opts []tool.Option) []AgentRunOption {
+	var ret []AgentRunOption
+	for _, opt := range opts {
+		o := tool.GetImplSpecificOptions[agentToolOptions](nil, opt)
+		if o != nil && o.agentName == agentName {
+			ret = append(ret, o.opts...)
+		}
 	}
+	return ret
 }
 
 func getReactChatHistory(ctx context.Context, destAgentName string) ([]Message, error) {
 	var messages []Message
 	var agentName string
 	err := compose.ProcessState(ctx, func(ctx context.Context, st *State) error {
-		messages = st.Messages
+		messages = make([]Message, len(st.Messages)-1)
+		copy(messages, st.Messages[:len(st.Messages)-1]) // remove the last assistant message, which is the tool call message
 		agentName = st.AgentName
 		return nil
 	})
 
-	messages = messages[:len(messages)-1] // remove the last assistant message, which is the tool call message
-	history := make([]Message, 0, len(messages))
-	history = append(history, messages...)
 	a, t := GenTransferMessages(ctx, destAgentName)
-	history = append(history, a, t)
+	messages = append(messages, a, t)
+	history := make([]Message, 0, len(messages))
 	for _, msg := range messages {
 		if msg.Role == schema.System {
 			continue
@@ -229,15 +255,6 @@ func getReactChatHistory(ctx context.Context, destAgentName string) ([]Message, 
 	}
 
 	return history, err
-}
-
-func NewAgentTool(_ context.Context, agent Agent, options ...AgentToolOption) tool.BaseTool {
-	opts := &AgentToolOptions{}
-	for _, opt := range options {
-		opt(opts)
-	}
-
-	return &agentTool{agent: agent, fullChatHistoryAsInput: opts.fullChatHistoryAsInput}
 }
 
 func newInvokableAgentToolRunner(agent Agent, store compose.CheckPointStore) *Runner {

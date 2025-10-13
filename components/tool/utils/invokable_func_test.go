@@ -88,6 +88,7 @@ var toolInfo = &schema.ToolInfo{
 							Type:                 "object",
 							Required:             []string{"company"},
 							AdditionalProperties: jsonschema.FalseSchema,
+							Description:          "the job of the user",
 							Properties: orderedmap.New[string, *jsonschema.Schema](
 								orderedmap.WithInitialData(
 									orderedmap.Pair[string, *jsonschema.Schema]{
@@ -153,6 +154,7 @@ var toolInfo = &schema.ToolInfo{
 												Type:                 "object",
 												AdditionalProperties: jsonschema.FalseSchema,
 												Required:             []string{"company"},
+												Description:          "the job of the user when earning this income",
 												Properties: orderedmap.New[string, *jsonschema.Schema](
 													orderedmap.WithInitialData(
 														orderedmap.Pair[string, *jsonschema.Schema]{
@@ -401,11 +403,4 @@ func TestEnumTag(t *testing.T) {
 
 	_, err = goStruct2ParamsOneOf[testEnumStruct3]()
 	assert.NoError(t, err)
-}
-
-func TestResolveRef(t *testing.T) {
-	s, err := toolInfo.ToJSONSchema()
-	assert.NoError(t, err)
-	s_ := resolveRef(s, nil)
-	assert.Equal(t, s, s_)
 }

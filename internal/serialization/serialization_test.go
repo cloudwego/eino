@@ -21,6 +21,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 type myInterface interface {
@@ -152,6 +153,8 @@ func TestSerialization(t *testing.T) {
 				},
 			},
 		},
+		[]*myStruct{},
+		&myStruct{},
 	}
 
 	for _, value := range values {
@@ -198,4 +201,151 @@ func TestMarshalStruct(t *testing.T) {
 	assert.Equal(t, map[string]any{
 		"1": myStruct5{FieldA: "FieldA"},
 	}, result2)
+}
+
+type unmarshalTestStruct struct {
+	Foo string
+	Bar int
+}
+
+func init() {
+	// Register types for the serializer to work.
+	// This is necessary for the serializer to know how to handle custom struct types.
+	err := GenericRegister[unmarshalTestStruct]("unmarshalTestStruct")
+	if err != nil {
+		panic(err)
+	}
+}
+
+func TestInternalSerializer_Unmarshal(t *testing.T) {
+	s := InternalSerializer{}
+
+	t.Run("success cases", func(t *testing.T) {
+		// Helper to create a pointer to a value, needed for the expected value in one test case.
+		ptr := func(i int) *int { return &i }
+
+		testCases := []struct {
+			name        string
+			inputValue  any
+			outputPtr   any
+			expectedVal any
+		}{
+			{
+				name:        "simple type",
+				inputValue:  123,
+				outputPtr:   new(int),
+				expectedVal: 123,
+			},
+			{
+				name:        "struct type",
+				inputValue:  unmarshalTestStruct{Foo: "hello", Bar: 42},
+				outputPtr:   new(unmarshalTestStruct),
+				expectedVal: unmarshalTestStruct{Foo: "hello", Bar: 42},
+			},
+			{
+				name:        "pointer to struct",
+				inputValue:  &unmarshalTestStruct{Foo: "world", Bar: 99},
+				outputPtr:   new(*unmarshalTestStruct),
+				expectedVal: &unmarshalTestStruct{Foo: "world", Bar: 99},
+			},
+			{
+				name:        "unmarshal pointer to value",
+				inputValue:  &unmarshalTestStruct{Foo: "p2v", Bar: 1},
+				outputPtr:   new(unmarshalTestStruct),
+				expectedVal: unmarshalTestStruct{Foo: "p2v", Bar: 1},
+			},
+			{
+				name:        "unmarshal value to pointer",
+				inputValue:  unmarshalTestStruct{Foo: "v2p", Bar: 2},
+				outputPtr:   new(*unmarshalTestStruct),
+				expectedVal: &unmarshalTestStruct{Foo: "v2p", Bar: 2},
+			},
+			{
+				name:        "unmarshal nil pointer",
+				inputValue:  (*unmarshalTestStruct)(nil),
+				outputPtr:   &struct{ v *unmarshalTestStruct }{v: &unmarshalTestStruct{}}, // placeholder to be replaced
+				expectedVal: (*unmarshalTestStruct)(nil),
+			},
+			{
+				name:        "convertible types",
+				inputValue:  int32(42),
+				outputPtr:   new(int64),
+				expectedVal: int64(42),
+			},
+			{
+				name:        "pointer to pointer destination",
+				inputValue:  12345,
+				outputPtr:   new(*int),
+				expectedVal: ptr(12345),
+			},
+			{
+				name:        "unmarshal to any",
+				inputValue:  unmarshalTestStruct{Foo: "any", Bar: 101},
+				outputPtr:   new(any),
+				expectedVal: unmarshalTestStruct{Foo: "any", Bar: 101},
+			},
+		}
+
+		for _, tc := range testCases {
+			t.Run(tc.name, func(t *testing.T) {
+				data, err := s.Marshal(tc.inputValue)
+				require.NoError(t, err)
+
+				// Special handling for the nil test case to correctly pass the pointer.
+				if tc.name == "unmarshal nil pointer" {
+					target := tc.outputPtr.(*struct{ v *unmarshalTestStruct })
+					err = s.Unmarshal(data, &target.v)
+					require.NoError(t, err)
+					assert.Nil(t, target.v)
+					return
+				}
+
+				err = s.Unmarshal(data, tc.outputPtr)
+				require.NoError(t, err)
+
+				// Dereference the pointer to get the actual value for comparison.
+				actualVal := reflect.ValueOf(tc.outputPtr).Elem().Interface()
+				assert.Equal(t, tc.expectedVal, actualVal)
+			})
+		}
+	})
+
+	t.Run("error cases", func(t *testing.T) {
+		data, err := s.Marshal(123)
+		require.NoError(t, err)
+
+		t.Run("destination not a pointer", func(t *testing.T) {
+			var output int
+			err := s.Unmarshal(data, output)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "value must be a non-nil pointer")
+		})
+
+		t.Run("destination is a nil pointer", func(t *testing.T) {
+			var output *int // nil
+			err := s.Unmarshal(data, output)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "value must be a non-nil pointer")
+		})
+
+		t.Run("type mismatch", func(t *testing.T) {
+			strData, mErr := s.Marshal("i am a string")
+			require.NoError(t, mErr)
+
+			var output int
+			err := s.Unmarshal(strData, &output)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "cannot assign")
+		})
+
+		t.Run("unconvertible types", func(t *testing.T) {
+			intData, mErr := s.Marshal(123)
+			require.NoError(t, mErr)
+
+			var output bool
+			err := s.Unmarshal(intData, &output)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "cannot assign")
+		})
+	})
 }

@@ -17,8 +17,10 @@
 package compose
 
 import (
+	"context"
 	"fmt"
 	"reflect"
+	"time"
 
 	"github.com/cloudwego/eino/callbacks"
 	"github.com/cloudwego/eino/components/document"
@@ -28,6 +30,51 @@ import (
 	"github.com/cloudwego/eino/components/prompt"
 	"github.com/cloudwego/eino/components/retriever"
 )
+
+type graphCancelChanKey struct{}
+type graphCancelChanVal struct {
+	ch chan *time.Duration
+}
+
+type graphInterruptOptions struct {
+	timeout *time.Duration
+}
+
+type GraphInterruptOption func(o *graphInterruptOptions)
+
+// WithGraphInterruptTimeout specifies the max waiting time before generating an interrupt.
+// After the max waiting time, the graph will force an interrupt. Any unfinished tasks will be re-run when the graph is resumed.
+func WithGraphInterruptTimeout(timeout time.Duration) GraphInterruptOption {
+	return func(o *graphInterruptOptions) {
+		o.timeout = &timeout
+	}
+}
+
+// WithGraphInterrupt creates a context with graph cancellation support.
+// When the returned context is used to invoke a graph or workflow, calling the interrupt function will trigger an interrupt.
+// The graph will wait for current tasks to complete by default.
+func WithGraphInterrupt(parent context.Context) (ctx context.Context, interrupt func(opts ...GraphInterruptOption)) {
+	ch := make(chan *time.Duration, 1)
+	ctx = context.WithValue(parent, graphCancelChanKey{}, &graphCancelChanVal{
+		ch: ch,
+	})
+	return ctx, func(opts ...GraphInterruptOption) {
+		o := &graphInterruptOptions{}
+		for _, opt := range opts {
+			opt(o)
+		}
+		ch <- o.timeout
+		close(ch)
+	}
+}
+
+func getGraphCancel(ctx context.Context) *graphCancelChanVal {
+	val, ok := ctx.Value(graphCancelChanKey{}).(*graphCancelChanVal)
+	if !ok {
+		return nil
+	}
+	return val
+}
 
 // Option is a functional option type for calling a graph.
 type Option struct {
@@ -61,24 +108,26 @@ func (o Option) deepCopy() Option {
 	}
 }
 
-// DesignateNode set the key of the node which will the option be applied to.
+// DesignateNode sets the key of the node to which the option will be applied.
 // notice: only effective at the top graph.
 // e.g.
 //
-//	embeddingOption := compose.WithEmbeddingOption(embedding.WithModel("text-embedding-3-small"))
-//	runnable.Invoke(ctx, "input", embeddingOption.DesignateNode("my_embedding_node"))
-func (o Option) DesignateNode(key ...string) Option {
-	nKeys := make([]*NodePath, len(key))
-	for i, k := range key {
+// embeddingOption := compose.WithEmbeddingOption(embedding.WithModel("text-embedding-3-small"))
+// runnable.Invoke(ctx, "input", embeddingOption.DesignateNode("embedding_node_key"))
+func (o Option) DesignateNode(nodeKey ...string) Option {
+	nKeys := make([]*NodePath, len(nodeKey))
+	for i, k := range nodeKey {
 		nKeys[i] = NewNodePath(k)
 	}
 	return o.DesignateNodeWithPath(nKeys...)
 }
 
-// DesignateNodeWithPath sets the path of the node(s) to which the option will be applied to.
-// You can make the option take effect in the subgraph by specifying the key of the subgraph.
+// DesignateNodeWithPath sets the path of the node(s) to which the option will be applied.
+// You can specify a node in the subgraph through `NodePath` to make the option only take effect at this node.
+//
 // e.g.
-// DesignateNodeWithPath({"sub graph node key", "node key within sub graph"})
+// nodePath := NewNodePath("sub_graph_node_key", "node_key_within_sub_graph")
+// DesignateNodeWithPath(nodePath)
 func (o Option) DesignateNodeWithPath(path ...*NodePath) Option {
 	o.paths = append(o.paths, path...)
 	return o

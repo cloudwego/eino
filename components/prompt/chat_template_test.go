@@ -120,22 +120,31 @@ func TestMultiContentFormat(t *testing.T) {
 			Content: "{a}",
 			MultiContent: []schema.ChatMessagePart{
 				{
+					Type: schema.ChatMessagePartTypeText,
 					Text: "{b}",
+				},
+				{
+					Type: schema.ChatMessagePartTypeImageURL,
 					ImageURL: &schema.ChatMessageImageURL{
 						URL: "{c}",
-						URI: "{d}",
 					},
+				},
+				{
+					Type: schema.ChatMessagePartTypeAudioURL,
 					AudioURL: &schema.ChatMessageAudioURL{
-						URL: "{e}",
-						URI: "{f}",
+						URL: "{d}",
 					},
+				},
+				{
+					Type: schema.ChatMessagePartTypeVideoURL,
 					VideoURL: &schema.ChatMessageVideoURL{
-						URL: "{g}",
-						URI: "{h}",
+						URL: "{e}",
 					},
+				},
+				{
+					Type: schema.ChatMessagePartTypeFileURL,
 					FileURL: &schema.ChatMessageFileURL{
-						URL: "{i}",
-						URI: "{j}",
+						URL: "{f}",
 					},
 				},
 			},
@@ -145,35 +154,40 @@ func TestMultiContentFormat(t *testing.T) {
 		"a": "content",
 		"b": "text",
 		"c": "image url",
-		"d": "image uri",
-		"e": "audio url",
-		"f": "audio uri",
-		"g": "video url",
-		"h": "video uri",
-		"i": "file url",
-		"j": "json url",
+		"d": "audio url",
+		"e": "video url",
+		"f": "file url",
 	}
 	expected := []*schema.Message{
 		{
 			Content: "content",
 			MultiContent: []schema.ChatMessagePart{
 				{
+					Type: schema.ChatMessagePartTypeText,
 					Text: "text",
+				},
+				{
+					Type: schema.ChatMessagePartTypeImageURL,
 					ImageURL: &schema.ChatMessageImageURL{
-						URL: "{c}",
-						URI: "{d}",
+						URL: "image url",
 					},
+				},
+				{
+					Type: schema.ChatMessagePartTypeAudioURL,
 					AudioURL: &schema.ChatMessageAudioURL{
-						URL: "{e}",
-						URI: "{f}",
+						URL: "audio url",
 					},
+				},
+				{
+					Type: schema.ChatMessagePartTypeVideoURL,
 					VideoURL: &schema.ChatMessageVideoURL{
-						URL: "{g}",
-						URI: "{h}",
+						URL: "video url",
 					},
+				},
+				{
+					Type: schema.ChatMessagePartTypeFileURL,
 					FileURL: &schema.ChatMessageFileURL{
-						URL: "{i}",
-						URI: "{j}",
+						URL: "file url",
 					},
 				},
 			},

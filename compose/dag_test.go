@@ -130,26 +130,21 @@ func TestDAG(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	r, err := g.compile(context.Background(), &graphCompileOptions{nodeTriggerMode: AllPredecessor})
+	runner, err := g.Compile(context.Background(), WithNodeTriggerMode(AllPredecessor))
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	// success
 	ctx := context.Background()
-	out, err := r.i(ctx, "hello")
+	out, err := runner.Invoke(ctx, "hello")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if out.(string) != "hellohellohello" {
+	if out != "hellohellohello" {
 		t.Fatalf("node7 fail")
 	}
 
-	// test Compile[I,O]
-	runner, err := g.Compile(context.Background(), WithNodeTriggerMode(AllPredecessor))
-	if err != nil {
-		t.Fatal(err)
-	}
 	result, err := runner.Invoke(ctx, "1")
 	if err != nil {
 		t.Fatal(err)

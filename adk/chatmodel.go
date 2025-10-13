@@ -174,8 +174,6 @@ type ChatModelAgent struct {
 
 type runFunc func(ctx context.Context, input *AgentInput, generator *AsyncGenerator[*AgentEvent], store *mockStore, opts ...compose.Option)
 
-var registerInternalTypeOnce sync.Once
-
 func NewChatModelAgent(_ context.Context, config *ChatModelAgentConfig) (*ChatModelAgent, error) {
 	if config.Name == "" {
 		return nil, errors.New("agent 'Name' is required")
@@ -185,30 +183,6 @@ func NewChatModelAgent(_ context.Context, config *ChatModelAgentConfig) (*ChatMo
 	}
 	if config.Model == nil {
 		return nil, errors.New("agent 'Model' is required")
-	}
-
-	var err error
-	registerInternalTypeOnce.Do(func() {
-		err = compose.RegisterInternalType(func(key string, value any) error {
-			gob.RegisterName(key, value)
-			return nil
-		})
-		gob.RegisterName("_eino_message", &schema.Message{})
-		gob.RegisterName("_eino_document", &schema.Document{})
-		gob.RegisterName("_eino_tool_call", schema.ToolCall{})
-		gob.RegisterName("_eino_function_call", schema.FunctionCall{})
-		gob.RegisterName("_eino_response_meta", &schema.ResponseMeta{})
-		gob.RegisterName("_eino_token_usage", &schema.TokenUsage{})
-		gob.RegisterName("_eino_log_probs", &schema.LogProbs{})
-		gob.RegisterName("_eino_chat_message_part", schema.ChatMessagePart{})
-		gob.RegisterName("_eino_chat_message_image_url", &schema.ChatMessageImageURL{})
-		gob.RegisterName("_eino_chat_message_audio_url", &schema.ChatMessageAudioURL{})
-		gob.RegisterName("_eino_chat_message_video_url", &schema.ChatMessageVideoURL{})
-		gob.RegisterName("_eino_chat_message_file_url", &schema.ChatMessageFileURL{})
-		gob.RegisterName("_eino_adk_chat_model_agent_interrupt_info", &ChatModelAgentInterruptInfo{})
-	})
-	if err != nil {
-		return nil, err
 	}
 
 	genInput := defaultGenModelInput
@@ -421,6 +395,10 @@ func (h *cbHandler) onToolEndWithStreamOutput(ctx context.Context,
 type ChatModelAgentInterruptInfo struct { // replace temp info by info when save the data
 	Info *compose.InterruptInfo
 	Data []byte
+}
+
+func init() {
+	schema.RegisterName[*ChatModelAgentInterruptInfo]("_eino_adk_chat_model_agent_interrupt_info")
 }
 
 func (h *cbHandler) onGraphError(ctx context.Context,

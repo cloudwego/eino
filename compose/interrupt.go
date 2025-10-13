@@ -19,6 +19,8 @@ package compose
 import (
 	"errors"
 	"fmt"
+
+	"github.com/cloudwego/eino/schema"
 )
 
 func WithInterruptBeforeNodes(nodes []string) GraphCompileOption {
@@ -65,6 +67,10 @@ type InterruptInfo struct {
 	RerunNodes      []string
 	RerunNodesExtra map[string]any
 	SubGraphs       map[string]*InterruptInfo
+}
+
+func init() {
+	schema.RegisterName[*InterruptInfo]("_eino_compose_interrupt_info") // TODO: check if this is really needed when refactoring adk resume
 }
 
 func ExtractInterruptInfo(err error) (info *InterruptInfo, existed bool) {

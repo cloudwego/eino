@@ -23,6 +23,7 @@ import (
 	"fmt"
 
 	"github.com/cloudwego/eino/compose"
+	"github.com/cloudwego/eino/schema"
 )
 
 type ResumeInfo struct {
@@ -41,11 +42,9 @@ func WithCheckPointID(id string) AgentRunOption {
 }
 
 func init() {
-	gob.RegisterName("_eino_adk_serialization", &serialization{})
-	gob.RegisterName("_eino_adk_workflow_interrupt_info", &WorkflowInterruptInfo{})
-	gob.RegisterName("_eino_adk_react_state", &State{})
-	gob.RegisterName("_eino_compose_interrupt_info", &compose.InterruptInfo{})
-	gob.RegisterName("_eino_compose_tools_interrupt_and_rerun_extra", &compose.ToolsInterruptAndRerunExtra{})
+	schema.RegisterName[*serialization]("_eino_adk_serialization")
+	schema.RegisterName[*WorkflowInterruptInfo]("_eino_adk_workflow_interrupt_info")
+	schema.RegisterName[*State]("_eino_adk_react_state")
 }
 
 type serialization struct {

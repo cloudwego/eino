@@ -222,7 +222,7 @@ func newReact(ctx context.Context, config *reactConfig) (reactGraph, error) {
 				func(in []Message) (Message, error) {
 
 					for _, chunk := range in {
-						if chunk.ToolCallID == id {
+						if chunk != nil && chunk.ToolCallID == id {
 							return chunk, nil
 						}
 					}
