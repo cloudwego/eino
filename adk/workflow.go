@@ -187,9 +187,11 @@ func (a *workflowAgent) runSequential(ctx context.Context,
 
 		// Rebuild the seqCtx to have the correct RunPath up to the point of resumption.
 		// This is necessary so the resumed agent gets the correct full RunPath.
+		var steps []string
 		for i := 0; i < startIdx; i++ {
-			seqCtx = updateRunPathOnly(seqCtx, a.subAgents[i].Name(seqCtx))
+			steps = append(steps, a.subAgents[i].Name(seqCtx))
 		}
+		seqCtx = updateRunPathOnly(seqCtx, steps...)
 	}
 
 	for i := startIdx; i < len(a.subAgents); i++ {
@@ -305,14 +307,16 @@ func (a *workflowAgent) runLoop(ctx context.Context, generator *AsyncGenerator[*
 		}
 
 		// Rebuild the loopCtx to have the correct RunPath up to the point of resumption.
+		var steps []string
 		for i := 0; i < startIter; i++ {
 			for _, subAgent := range a.subAgents {
-				loopCtx = updateRunPathOnly(loopCtx, subAgent.Name(loopCtx))
+				steps = append(steps, subAgent.Name(loopCtx))
 			}
 		}
 		for i := 0; i < startIdx; i++ {
-			loopCtx = updateRunPathOnly(loopCtx, a.subAgents[i].Name(loopCtx))
+			steps = append(steps, a.subAgents[i].Name(loopCtx))
 		}
+		loopCtx = updateRunPathOnly(loopCtx, steps...)
 	}
 
 	for i := startIter; i < a.maxIterations || a.maxIterations == 0; i++ {
