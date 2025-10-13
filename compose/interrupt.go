@@ -361,6 +361,15 @@ type InterruptCtx struct {
 	IsCause bool
 }
 
+func (ic *InterruptCtx) AsError() error {
+	return &interruptAndRerun{
+		info:        ic.Info,
+		interruptID: &ic.ID,
+		addr:        ic.Address,
+		isCause:     ic.IsCause,
+	}
+}
+
 func ExtractInterruptInfo(err error) (info *InterruptInfo, existed bool) {
 	if err == nil {
 		return nil, false
