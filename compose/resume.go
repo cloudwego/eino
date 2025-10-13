@@ -250,6 +250,23 @@ func AppendAddressSegment(ctx context.Context, segType AddressSegmentType, segID
 	return context.WithValue(ctx, runCtxKey{}, runCtx)
 }
 
+// WithParentAddress returns a new context that contains the given parent address.
+// This is used to bridge the address hierarchy between different execution layers,
+// such as between a parent package (such as adk package) and the compose package.
+// It's important to note that this function will overwrite any previous address
+// that may exist in the context.
+func WithParentAddress(ctx context.Context, addr Address) context.Context {
+	if addr == nil {
+		return ctx
+	}
+
+	runCtx := &runCtx{
+		addr: addr.DeepCopy(),
+	}
+
+	return context.WithValue(ctx, runCtxKey{}, runCtx)
+}
+
 func getResumeInfo(ctx context.Context) (*resumeInfo, bool) {
 	info, ok := ctx.Value(interruptCtxKey{}).(*resumeInfo)
 	return info, ok
