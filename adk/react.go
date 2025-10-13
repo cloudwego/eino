@@ -37,14 +37,7 @@ type State struct {
 
 	AgentName string
 
-	AgentToolInterruptData map[string] /*tool call id*/ *agentToolInterruptInfo
-
 	RemainingIterations int
-}
-
-type agentToolInterruptInfo struct {
-	LastEvent *AgentEvent
-	Data      []byte
 }
 
 func SendToolGenAction(ctx context.Context, toolName string, action *AgentAction) error {
@@ -118,9 +111,8 @@ func getReturnDirectlyToolCallID(ctx context.Context) string {
 func newReact(ctx context.Context, config *reactConfig) (reactGraph, error) {
 	genState := func(ctx context.Context) *State {
 		return &State{
-			ToolGenActions:         map[string]*AgentAction{},
-			AgentName:              config.agentName,
-			AgentToolInterruptData: make(map[string]*agentToolInterruptInfo),
+			ToolGenActions: map[string]*AgentAction{},
+			AgentName:      config.agentName,
 			RemainingIterations: func() int {
 				if config.maxIterations <= 0 {
 					return 20
