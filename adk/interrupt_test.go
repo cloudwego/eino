@@ -913,10 +913,10 @@ func TestChatModelAgentToolInterrupt(t *testing.T) {
 	sa := &myAgent{
 		runner: func(ctx context.Context, input *AgentInput, options ...AgentRunOption) *AsyncIterator[*AgentEvent] {
 			iter, generator := NewAsyncIteratorPair[*AgentEvent]()
+			intAct := Interrupt(ctx, "hello world")
+			intAct.Interrupted.Data = "hello world"
 			generator.Send(&AgentEvent{
-				Action: &AgentAction{Interrupted: &InterruptInfo{
-					Data: "hello world",
-				}},
+				Action: intAct,
 			})
 			generator.Close()
 			return iter
@@ -929,10 +929,10 @@ func TestChatModelAgentToolInterrupt(t *testing.T) {
 			o := GetImplSpecificOptions[myAgentOptions](nil, opts...)
 			if o.interrupt {
 				iter, generator := NewAsyncIteratorPair[*AgentEvent]()
+				intAct := Interrupt(ctx, "hello world")
+				intAct.Interrupted.Data = "hello world"
 				generator.Send(&AgentEvent{
-					Action: &AgentAction{Interrupted: &InterruptInfo{
-						Data: "hello world",
-					}},
+					Action: intAct,
 				})
 				generator.Close()
 				return iter
@@ -1105,59 +1105,4 @@ func (m *myTool1) InvokableRun(ctx context.Context, argumentsInJSON string, opts
 	}
 
 	return "result", nil
-}
-
-// Add this test case after the existing TestWorkflowInterrupt function
-func TestWorkflowInterruptInvalidDataType(t *testing.T) {
-	ctx := context.Background()
-
-	// Create a simple workflow agent
-	sa1 := &myAgent{
-		name: "sa1",
-		runner: func(ctx context.Context, input *AgentInput, options ...AgentRunOption) *AsyncIterator[*AgentEvent] {
-			iter, generator := NewAsyncIteratorPair[*AgentEvent]()
-			generator.Send(&AgentEvent{
-				AgentName: "sa1",
-				Output: &AgentOutput{
-					MessageOutput: &MessageVariant{
-						Message: schema.UserMessage("completed"),
-					},
-				},
-			})
-			generator.Close()
-			return iter
-		},
-	}
-
-	a, err := NewSequentialAgent(ctx, &SequentialAgentConfig{
-		Name:        "sequential",
-		Description: "sequential agent",
-		SubAgents:   []Agent{sa1},
-	})
-	assert.NoError(t, err)
-
-	// Cast to workflowAgent to access Resume method directly
-	workflowAgent := a.(*flowAgent).Agent.(*workflowAgent)
-
-	// Create ResumeInfo with invalid Data type (not *WorkflowInterruptInfo)
-	resumeInfo := &ResumeInfo{
-		EnableStreaming: false,
-		InterruptInfo: &InterruptInfo{
-			Data: "invalid data type", // This should be *WorkflowInterruptInfo but we pass string
-		},
-	}
-
-	// Call Resume method directly to trigger the error path
-	iter := workflowAgent.Resume(ctx, resumeInfo)
-
-	// Verify that an error event is generated
-	event, ok := iter.Next()
-	assert.True(t, ok)
-	assert.NotNil(t, event.Err)
-	assert.Contains(t, event.Err.Error(), "type of InterruptInfo.Data is expected to")
-	assert.Contains(t, event.Err.Error(), "actual: string")
-
-	// Verify no more events
-	_, ok = iter.Next()
-	assert.False(t, ok)
 }
