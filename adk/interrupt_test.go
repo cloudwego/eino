@@ -124,15 +124,16 @@ func TestSimpleInterrupt(t *testing.T) {
 	assert.True(t, ok)
 	assert.Equal(t, data, event.Action.Interrupted.Data)
 	assert.Equal(t, "agent:myAgent", event.Action.Interrupted.InterruptContexts[0].ID)
-	assert.True(t, event.Action.Interrupted.InterruptContexts[0].IsCause)
+	assert.True(t, event.Action.Interrupted.InterruptContexts[0].IsRootCause)
 	assert.Equal(t, data, event.Action.Interrupted.InterruptContexts[0].Info)
 	assert.Equal(t, Address{{Type: AddressSegmentAgent, ID: "myAgent"}},
 		event.Action.Interrupted.InterruptContexts[0].Address)
 	event, ok = iter.Next()
 	assert.False(t, ok)
 
-	ctx = Resume(ctx, "agent:myAgent")
-	_, err := runner.Resume(ctx, "1")
+	_, err := runner.TargetedResume(ctx, "1", map[string]any{
+		"agent:myAgent": nil,
+	})
 	assert.NoError(t, err)
 }
 
@@ -208,7 +209,7 @@ func TestMultiAgentInterrupt(t *testing.T) {
 	assert.NotNil(t, event.Action.Interrupted)
 	assert.Equal(t, 1, len(event.Action.Interrupted.InterruptContexts))
 	assert.Equal(t, "hello world", event.Action.Interrupted.InterruptContexts[0].Info)
-	assert.True(t, event.Action.Interrupted.InterruptContexts[0].IsCause)
+	assert.True(t, event.Action.Interrupted.InterruptContexts[0].IsRootCause)
 	assert.Equal(t, Address{
 		{Type: AddressSegmentAgent, ID: "sa1"},
 		{Type: AddressSegmentAgent, ID: "sa2"},
@@ -218,8 +219,9 @@ func TestMultiAgentInterrupt(t *testing.T) {
 	_, ok = iter.Next()
 	assert.False(t, ok)
 
-	ctx = ResumeWithData(ctx, "agent:sa1;agent:sa2", "resume data")
-	iter, err = runner.Resume(ctx, "1")
+	iter, err = runner.TargetedResume(ctx, "1", map[string]any{
+		"agent:sa1;agent:sa2": "resume data",
+	})
 	assert.NoError(t, err)
 	event, ok = iter.Next()
 	assert.True(t, ok)
@@ -349,7 +351,7 @@ func TestWorkflowInterrupt(t *testing.T) {
 										Type: AddressSegmentAgent,
 									},
 								},
-								IsCause: true,
+								IsRootCause: true,
 							},
 						},
 						interruptStates: []*interruptState{
@@ -393,7 +395,7 @@ func TestWorkflowInterrupt(t *testing.T) {
 								Type: AddressSegmentAgent,
 							},
 						},
-						IsCause: true,
+						IsRootCause: true,
 					},
 				},
 				interruptStates: []*interruptState{
@@ -450,7 +452,7 @@ func TestWorkflowInterrupt(t *testing.T) {
 										Type: AddressSegmentAgent,
 									},
 								},
-								IsCause: true,
+								IsRootCause: true,
 							},
 						},
 						interruptStates: []*interruptState{
@@ -495,7 +497,7 @@ func TestWorkflowInterrupt(t *testing.T) {
 								Type: AddressSegmentAgent,
 							},
 						},
-						IsCause: true,
+						IsRootCause: true,
 					},
 				},
 				interruptStates: []*interruptState{
@@ -576,8 +578,9 @@ func TestWorkflowInterrupt(t *testing.T) {
 		events = []*AgentEvent{}
 
 		// Resume after sa1 interrupt
-		ctx = ResumeWithData(ctx, "agent:sequential;agent:sa1", "resume sa1")
-		iter, err = runner.Resume(ctx, "sequential-1")
+		iter, err = runner.TargetedResume(ctx, "sequential-1", map[string]any{
+			"agent:sequential;agent:sa1": "resume sa1",
+		})
 		assert.NoError(t, err)
 		for {
 			event, ok := iter.Next()
@@ -592,8 +595,9 @@ func TestWorkflowInterrupt(t *testing.T) {
 		events = []*AgentEvent{}
 
 		// Resume after sa2 interrupt
-		ctx = ResumeWithData(ctx, "agent:sequential;agent:sa2", "resume sa2")
-		iter, err = runner.Resume(ctx, "sequential-1")
+		iter, err = runner.TargetedResume(ctx, "sequential-1", map[string]any{
+			"agent:sequential;agent:sa2": "resume sa2",
+		})
 		assert.NoError(t, err)
 		for {
 			event, ok := iter.Next()
@@ -649,8 +653,9 @@ func TestWorkflowInterrupt(t *testing.T) {
 		events = []*AgentEvent{}
 
 		// Resume after sa1 interrupt
-		ctx = ResumeWithData(ctx, "agent:loop;agent:sa1", "resume sa1")
-		iter, err = runner.Resume(ctx, "loop-1")
+		iter, err = runner.TargetedResume(ctx, "loop-1", map[string]any{
+			"agent:loop;agent:sa1": "resume sa1",
+		})
 		assert.NoError(t, err)
 		for {
 			event, ok := iter.Next()
@@ -680,8 +685,9 @@ func TestWorkflowInterrupt(t *testing.T) {
 		events = []*AgentEvent{}
 
 		// Resume after sa2 interrupt
-		ctx = ResumeWithData(ctx, "agent:loop;agent:sa2", "resume sa2")
-		iter, err = runner.Resume(ctx, "loop-1")
+		iter, err = runner.TargetedResume(ctx, "loop-1", map[string]any{
+			"agent:loop;agent:sa2": "resume sa2",
+		})
 		assert.NoError(t, err)
 		for {
 			event, ok := iter.Next()
@@ -749,8 +755,9 @@ func TestWorkflowInterrupt(t *testing.T) {
 		events = []*AgentEvent{}
 
 		// Resume after third interrupt
-		ctx = ResumeWithData(ctx, "agent:loop;agent:sa1", "resume sa1")
-		iter, err = runner.Resume(ctx, "loop-1")
+		iter, err = runner.TargetedResume(ctx, "loop-1", map[string]any{
+			"agent:loop;agent:sa1": "resume sa1",
+		})
 		assert.NoError(t, err)
 		for {
 			event, ok := iter.Next()
@@ -764,8 +771,9 @@ func TestWorkflowInterrupt(t *testing.T) {
 		events = []*AgentEvent{}
 
 		// Resume after fourth interrupt
-		ctx = ResumeWithData(ctx, "agent:loop;agent:sa2", "resume sa2")
-		iter, err = runner.Resume(ctx, "loop-1")
+		iter, err = runner.TargetedResume(ctx, "loop-1", map[string]any{
+			"agent:loop;agent:sa2": "resume sa2",
+		})
 		assert.NoError(t, err)
 		for {
 			event, ok := iter.Next()
@@ -848,9 +856,10 @@ func TestWorkflowInterrupt(t *testing.T) {
 
 		var sa1Found, sa2Found bool
 		for _, info := range wii.ParallelInterruptInfo {
-			if info.InterruptContexts[0].Info == "sa1 interrupt data" {
+			switch info.InterruptContexts[0].Info {
+			case "sa1 interrupt data":
 				sa1Found = true
-			} else if info.InterruptContexts[0].Info == "sa2 interrupt data" {
+			case "sa2 interrupt data":
 				sa2Found = true
 			}
 		}
@@ -861,11 +870,10 @@ func TestWorkflowInterrupt(t *testing.T) {
 		assert.Equal(t, "Parallel workflow interrupted", interruptEvent.Action.Interrupted.InterruptContexts[0].Info)
 		assert.Equal(t, 3, len(interruptEvent.Action.Interrupted.interruptStates))
 
-		ctx = BatchResumeWithData(ctx, map[string]any{
+		iter, err = runner.TargetedResume(ctx, "1", map[string]any{
 			"agent:parallel agent;agent:sa1": "resume sa1",
 			"agent:parallel agent;agent:sa2": "resume sa2",
 		})
-		iter, err = runner.Resume(ctx, "1")
 		assert.NoError(t, err)
 		_, ok = iter.Next()
 		assert.False(t, ok)
@@ -924,7 +932,7 @@ func TestChatModelInterrupt(t *testing.T) {
 		toolID           string
 	)
 	for _, ctx := range event.Action.Interrupted.InterruptContexts {
-		if ctx.IsCause {
+		if ctx.IsRootCause {
 			hasRootCause = true
 			toolID = ctx.ID
 			assert.Equal(t, Address{
@@ -941,7 +949,7 @@ func TestChatModelInterrupt(t *testing.T) {
 	event, ok = iter.Next()
 	assert.False(t, ok)
 
-	ctx = BatchResumeWithData(ctx, map[string]any{
+	iter, err = runner.TargetedResume(ctx, "1", map[string]any{
 		chatModelAgentID: &ChatModelAgentResumeData{
 			HistoryModifier: func(ctx context.Context, history []Message) []Message {
 				history[2].Content = "new user message"
@@ -950,7 +958,6 @@ func TestChatModelInterrupt(t *testing.T) {
 		},
 		toolID: "tool resume result",
 	})
-	iter, err = runner.Resume(ctx, "1")
 	assert.NoError(t, err)
 	event, ok = iter.Next()
 	assert.True(t, ok)
@@ -1048,7 +1055,7 @@ func TestChatModelAgentToolInterrupt(t *testing.T) {
 	assert.NotNil(t, event.Action.Interrupted)
 	assert.Equal(t, 5, len(event.Action.Interrupted.InterruptContexts))
 	for _, ctx := range event.Action.Interrupted.InterruptContexts {
-		if ctx.IsCause {
+		if ctx.IsRootCause {
 			assert.Equal(t, Address{
 				{Type: AddressSegmentAgent, ID: "name"},
 				{Type: compose.AddressSegmentRunnable, ID: "React"},
@@ -1062,8 +1069,9 @@ func TestChatModelAgentToolInterrupt(t *testing.T) {
 	event, ok = iter.Next()
 	assert.False(t, ok)
 
-	ctx = ResumeWithData(ctx, "agent:name;runnable:React;node:ToolNode;tool:1;agent:myAgent", "resume sa")
-	iter, err = runner.Resume(ctx, "1")
+	iter, err = runner.TargetedResume(ctx, "1", map[string]any{
+		"agent:name;runnable:React;node:ToolNode;tool:1;agent:myAgent": "resume sa",
+	})
 	assert.NoError(t, err)
 	event, ok = iter.Next()
 	assert.True(t, ok)
