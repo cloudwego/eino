@@ -436,10 +436,10 @@ func (it *interruptTempInfo) processInterruptErr(ire *interruptAndRerun) {
 
 	if ire.interruptID != nil {
 		it.interruptContexts = append(it.interruptContexts, &InterruptCtx{
-			ID:      *ire.interruptID,
-			Address: ire.addr,
-			Info:    ire.info,
-			IsCause: ire.isCause,
+			ID:          *ire.interruptID,
+			Address:     ire.addr,
+			Info:        ire.info,
+			IsRootCause: ire.isRootCause,
 		})
 	}
 
