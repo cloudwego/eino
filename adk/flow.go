@@ -351,7 +351,7 @@ func (a *flowAgent) Resume(ctx context.Context, info *ResumeInfo, opts ...AgentR
 
 	// 7. If there are no next points, it's an unexpected state.
 	if len(nextPoints) == 0 {
-		panic(fmt.Sprintf("flowAgent.Resume: agent '%s' is not an interrupt point, "+
+		return genErrorIter(fmt.Errorf("flowAgent.Resume: agent '%s' is not an interrupt point, "+
 			"but no child resumption points were found", a.Name(ctx)))
 	}
 

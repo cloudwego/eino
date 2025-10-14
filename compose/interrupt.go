@@ -48,7 +48,7 @@ var InterruptAndRerun = errors.New("interrupt and rerun")
 // If you really needs to use this error as a sub-error for a CompositeInterrupt call,
 // wrap it using WrapInterruptAndRerunIfNeeded first.
 func NewInterruptAndRerunErr(extra any) error {
-	return &interruptAndRerun{info: extra, isCause: true}
+	return &interruptAndRerun{info: extra, isRootCause: true}
 }
 
 type wrappedInterruptAndRerun struct {
@@ -112,7 +112,7 @@ func Interrupt(ctx context.Context, info any) error {
 		interruptID = addr.String()
 	}
 
-	return &interruptAndRerun{info: info, interruptID: &interruptID, addr: addr, isCause: true}
+	return &interruptAndRerun{info: info, interruptID: &interruptID, addr: addr, isRootCause: true}
 }
 
 // StatefulInterrupt creates a special error that signals the execution engine to interrupt
@@ -133,7 +133,7 @@ func StatefulInterrupt(ctx context.Context, info any, state any) error {
 		interruptID = addr.String()
 	}
 
-	return &interruptAndRerun{info: info, state: state, interruptID: &interruptID, addr: addr, isCause: true}
+	return &interruptAndRerun{info: info, state: state, interruptID: &interruptID, addr: addr, isRootCause: true}
 }
 
 type interruptAndRerun struct {
@@ -141,7 +141,7 @@ type interruptAndRerun struct {
 	state       any // for persistence, when resuming, use GetInterruptState to fetch it at the interrupt location
 	interruptID *string
 	addr        Address
-	isCause     bool
+	isRootCause bool
 	errs        []*interruptAndRerun
 }
 
@@ -193,7 +193,7 @@ func CompositeInterrupt(ctx context.Context, info any, state any, errs ...error)
 				cErrs = append(cErrs, &interruptAndRerun{
 					addr:        wrapped.ps,
 					interruptID: &id,
-					isCause:     true,
+					isRootCause: true,
 				})
 				continue
 			}
@@ -206,7 +206,7 @@ func CompositeInterrupt(ctx context.Context, info any, state any, errs ...error)
 					interruptID: &id,
 					info:        ire.info,
 					state:       ire.state,
-					isCause:     ire.isCause,
+					isRootCause: ire.isRootCause,
 				})
 			}
 
@@ -357,16 +357,25 @@ type InterruptCtx struct {
 	Address Address
 	// Info is the user-facing information associated with the interrupt, provided by the component that triggered it.
 	Info any
-	// IsCause indicates whether the interrupt point is the exact root cause for an interruption.
-	IsCause bool
+	// IsRootCause indicates whether the interrupt point is the exact root cause for an interruption.
+	IsRootCause bool
 }
 
-func (ic *InterruptCtx) AsError() error {
+// AsInterruptSignal wraps the public-facing InterruptCtx in an internal error type.
+// This error is not meant to be seen by end-users, but rather acts as a control signal
+// that is caught by the graph runner to initiate the interrupt and checkpointing process.
+//
+// This method is primarily used by components that bridge different execution environments.
+// For example, an `adk.AgentTool` might catch an `adk.InterruptInfo`, extract the
+// `adk.InterruptCtx` objects from it, and then call this method on each one. The resulting
+// error signals are then typically aggregated into a single error using `compose.CompositeInterrupt`
+// to be returned from the tool's `InvokableRun` method.
+func (ic *InterruptCtx) AsInterruptSignal() error {
 	return &interruptAndRerun{
 		info:        ic.Info,
 		interruptID: &ic.ID,
 		addr:        ic.Address,
-		isCause:     ic.IsCause,
+		isRootCause: ic.IsRootCause,
 	}
 }
 
