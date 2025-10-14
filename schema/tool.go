@@ -88,6 +88,7 @@ type ParameterInfo struct {
 	SubParams map[string]*ParameterInfo
 	// The description of the parameter.
 	Desc string
+	
 	// The enum values of the parameter, only for string.
 	Enum []string
 	// Whether the parameter is required.
