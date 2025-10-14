@@ -26,11 +26,19 @@ import (
 	"github.com/cloudwego/eino/schema"
 )
 
+// Runner is the primary entry point for executing an Agent.
+// It manages the agent's lifecycle, including starting, resuming, and checkpointing.
 type Runner struct {
-	a               Agent
+	// a is the agent to be executed.
+	a Agent
+	// enableStreaming dictates whether the execution should be in streaming mode.
 	enableStreaming bool
-	store           compose.CheckPointStore
-	parentAddr      *Address
+	// store is the checkpoint store used to persist agent state upon interruption.
+	// If nil, checkpointing is disabled.
+	store compose.CheckPointStore
+	// parentAddr is the address of the parent component, used for creating a nested address hierarchy.
+	// This is for internal framework use.
+	parentAddr *Address
 }
 
 type RunnerConfig struct {
@@ -48,6 +56,10 @@ func NewRunner(_ context.Context, conf RunnerConfig) *Runner {
 	}
 }
 
+// Run starts a new execution of the agent with a given set of messages.
+// It returns an iterator that yields agent events as they occur.
+// If the Runner was configured with a CheckPointStore, it will automatically save the agent's state
+// upon interruption.
 func (r *Runner) Run(ctx context.Context, messages []Message,
 	opts ...AgentRunOption) *AsyncIterator[*AgentEvent] {
 	o := getCommonOptions(nil, opts...)
@@ -76,12 +88,17 @@ func (r *Runner) Run(ctx context.Context, messages []Message,
 	return niter
 }
 
+// Query is a convenience method that starts a new execution with a single user query string.
 func (r *Runner) Query(ctx context.Context,
 	query string, opts ...AgentRunOption) *AsyncIterator[*AgentEvent] {
 
 	return r.Run(ctx, []Message{schema.UserMessage(query)}, opts...)
 }
 
+// Resume continues an interrupted agent execution from a saved checkpoint.
+// The checkPointID is used to retrieve the saved state from the CheckPointStore.
+// The context can be used to provide targeted resume data via functions like adk.ResumeWithData.
+// It returns an iterator for the continued execution, or an error if resumption fails.
 func (r *Runner) Resume(ctx context.Context, checkPointID string, opts ...AgentRunOption) (*AsyncIterator[*AgentEvent], error) {
 	if r.store == nil {
 		return nil, fmt.Errorf("failed to resume: store is nil")

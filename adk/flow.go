@@ -327,7 +327,7 @@ func (a *flowAgent) Resume(ctx context.Context, info *ResumeInfo, opts ...AgentR
 	myAddr := runCtx.Addr
 
 	// 3. Check if this agent is a direct interrupt point.
-	wasInterrupted, _, _ := GetInterruptState[any](info, myAddr)
+	wasInterrupted, _, _ := GetInterruptState[any](ctx, info)
 
 	// 4. If this agent was the one that interrupted, resume its inner agent.
 	if wasInterrupted {
@@ -456,24 +456,4 @@ func (a *flowAgent) run(
 			generator.Send(subEvent)
 		}
 	}
-}
-
-func recursiveGetAgent(ctx context.Context, agent *flowAgent, agentName string) *flowAgent {
-	if agent == nil {
-		return nil
-	}
-	if agent.Name(ctx) == agentName {
-		return agent
-	}
-	a := agent.getAgent(ctx, agentName)
-	if a != nil {
-		return a
-	}
-	for _, sa := range agent.subAgents {
-		a = recursiveGetAgent(ctx, sa, agentName)
-		if a != nil {
-			return a
-		}
-	}
-	return nil
 }

@@ -21,24 +21,33 @@ import (
 	"context"
 	"encoding/gob"
 	"fmt"
+	"strings"
 
 	"github.com/cloudwego/eino/compose"
 	"github.com/cloudwego/eino/schema"
 )
 
+// ResumeInfo holds all the information necessary to resume an interrupted agent execution.
+// It is created by the framework and passed to an agent's Resume method.
 type ResumeInfo struct {
+	// EnableStreaming indicates whether the original execution was in streaming mode.
 	EnableStreaming bool
-	// Deprecated: use GetInterruptState[T] to fetch state for agent
+
+	// Deprecated: use InterruptContexts from the embedded InterruptInfo for user-facing details,
+	// and GetInterruptState for internal state retrieval.
 	*InterruptInfo
 
+	// interruptStates is an internal map of address strings to their corresponding saved states.
 	interruptStates map[string]*interruptState
-	ResumeData      map[string]any
+	// ResumeData holds data provided by the user for targeted resumption of specific agents.
+	// The map keys are the string addresses of the target agents.
+	ResumeData map[string]any
 }
 
 type resumeDataKey struct{}
 
-// BatchResumeWithData provides targeted data to specific agents during a resume operation.
-// The map keys are the full string addresses of the target agents.
+// BatchResumeWithData provides targeted data to specific agents or other interrupt points during a resume operation.
+// The map keys are the interrupt IDs of the target interrupt points.
 func BatchResumeWithData(ctx context.Context, resumeData map[string]any) context.Context {
 	existingData, _ := ctx.Value(resumeDataKey{}).(map[string]any)
 	if existingData == nil {
@@ -51,37 +60,39 @@ func BatchResumeWithData(ctx context.Context, resumeData map[string]any) context
 }
 
 // ResumeWithData provides targeted data to a single agent during a resume operation.
-func ResumeWithData(ctx context.Context, address string, data any) context.Context {
-	return BatchResumeWithData(ctx, map[string]any{address: data})
+func ResumeWithData(ctx context.Context, id string, data any) context.Context {
+	return BatchResumeWithData(ctx, map[string]any{id: data})
 }
 
-// Resume signals that one or more agents should be resumed, optionally without providing specific data.
-func Resume(ctx context.Context, addresses ...string) context.Context {
-	resumeData := make(map[string]any, len(addresses))
-	for _, addr := range addresses {
+// Resume signals that one or more interrupt points should be resumed, without providing specific data.
+func Resume(ctx context.Context, id ...string) context.Context {
+	resumeData := make(map[string]any, len(id))
+	for _, addr := range id {
 		resumeData[addr] = nil
 	}
 	return BatchResumeWithData(ctx, resumeData)
 }
 
-// GetResumeData retrieves targeted data for the current agent during a resume operation.
+// GetResumeContext retrieves targeted data for the current agent during a resume operation.
 // It returns the data and a boolean indicating if data was provided for the agent's address.
-func GetResumeData[T any](info *ResumeInfo, addr Address) (data T, provided bool, ok bool) {
+func GetResumeContext[T any](ctx context.Context, info *ResumeInfo) (isResumeFlow bool, hasData bool, data T) {
+	var t T
 	if info == nil || info.ResumeData == nil {
-		return *new(T), false, false
+		return false, false, t
 	}
 
+	addr := GetCurrentAddress(ctx)
 	val, exists := info.ResumeData[addr.String()]
 	if !exists {
-		return *new(T), false, false
+		return false, false, t
 	}
 
-	provided = true
+	isResumeFlow = true
 	if val == nil {
-		return *new(T), true, true
+		return true, false, t
 	}
 
-	data, ok = val.(T)
+	data, hasData = val.(T)
 	return
 }
 
@@ -99,11 +110,12 @@ func newResumeInfo(states []*interruptState, enableStreaming bool) *ResumeInfo {
 	}
 }
 
-// GetInterruptState checks if the given address is a direct interrupt point and returns its state.
-func GetInterruptState[T any](info *ResumeInfo, addr Address) (wasInterrupted bool, hasState bool, state T) {
+// GetInterruptState checks if the current agent was a direct interrupt point and returns its state.
+func GetInterruptState[T any](ctx context.Context, info *ResumeInfo) (wasInterrupted bool, hasState bool, state T) {
 	if info == nil {
 		return false, false, *new(T)
 	}
+	addr := GetCurrentAddress(ctx)
 	is, ok := info.interruptStates[addr.String()]
 	if !ok {
 		return false, false, *new(T)
@@ -119,7 +131,8 @@ func GetInterruptState[T any](info *ResumeInfo, addr Address) (wasInterrupted bo
 	return
 }
 
-// getNextResumptionPoints finds all descendant interrupt points and groups them by the ID of the next segment in the address.
+// getNextResumptionPoints finds all descendant interrupt points
+// and groups them by the ID of the next segment in the address.
 // It returns a map of new, scoped ResumeInfo objects for each child component that needs to be resumed.
 // It is the unexported implementation detail.
 func (ri *ResumeInfo) getNextResumptionPoints(parentAddr Address) map[string]*ResumeInfo {
@@ -148,21 +161,42 @@ func (ri *ResumeInfo) getNextResumptionPoints(parentAddr Address) map[string]*Re
 	result := make(map[string]*ResumeInfo, len(nextPoints))
 	for childID, states := range nextPoints {
 		// Create a new, scoped ResumeInfo for the child.
-		// The resumeData is passed down unmodified, as the child will perform its own address-based lookups.
 		childRI := newResumeInfo(states, ri.EnableStreaming)
-		childRI.ResumeData = ri.ResumeData
+
+		// Filter the ResumeData map to only include entries relevant to the child's address space.
+		if ri.ResumeData != nil {
+			childAddrPrefix := append(parentAddr.DeepCopy(),
+				AddressSegment{Type: AddressSegmentAgent, ID: childID}).String()
+			childResumeData := make(map[string]any)
+			for addr, data := range ri.ResumeData {
+				if strings.HasPrefix(addr, childAddrPrefix) {
+					childResumeData[addr] = data
+				}
+			}
+			if len(childResumeData) > 0 {
+				childRI.ResumeData = childResumeData
+			}
+		}
+
 		result[childID] = childRI
 	}
 	return result
 }
 
+// InterruptInfo contains all the information about an interruption event.
+// It is created by the framework when an agent returns an interrupt action.
 type InterruptInfo struct {
 	// Deprecated: use InterruptContexts for user-facing info,
-	// and interruptStates for internal state persistence
+	// and interruptStates for internal state persistence.
+	// This field is kept for backward compatibility.
 	Data any
 
+	// InterruptContexts provides a structured, user-facing view of the interrupt chain.
+	// Each context represents a step in the agent hierarchy that was interrupted.
 	InterruptContexts []*InterruptCtx
 
+	// interruptStates is an internal list of states saved by agents during the interruption.
+	// This data is used by the framework to restore agent state upon resumption.
 	interruptStates []*interruptState
 }
 
@@ -171,6 +205,10 @@ type interruptState struct {
 	State any
 }
 
+// Interrupt creates a basic interrupt action.
+// This is used when an agent needs to pause its execution to request external input or intervention,
+// but does not need to save any internal state to be restored upon resumption.
+// The `info` parameter is user-facing data that describes the reason for the interrupt.
 func Interrupt(ctx context.Context, info any) *AgentAction {
 	runCtx := getRunCtx(ctx)
 	addr := runCtx.Addr.DeepCopy()
@@ -194,6 +232,10 @@ func Interrupt(ctx context.Context, info any) *AgentAction {
 	}
 }
 
+// StatefulInterrupt creates an interrupt action that also saves the agent's internal state.
+// This is used when an agent has internal state that must be restored for it to continue correctly.
+// The `info` parameter is user-facing data describing the interrupt.
+// The `state` parameter is the agent's internal state object, which will be serialized and stored.
 func StatefulInterrupt(ctx context.Context, info any, state any) *AgentAction {
 	runCtx := getRunCtx(ctx)
 	addr := runCtx.Addr.DeepCopy()
@@ -218,6 +260,12 @@ func StatefulInterrupt(ctx context.Context, info any, state any) *AgentAction {
 	}
 }
 
+// CompositeInterrupt creates an interrupt action for a workflow agent.
+// It combines the interrupts from one or more of its sub-agents into a single, cohesive interrupt.
+// This is used by workflow agents (like Sequential, Parallel, or Loop) to propagate interrupts from their children.
+// The `info` parameter is user-facing data describing the workflow's own reason for interrupting.
+// The `state` parameter is the workflow agent's own state (e.g., the index of the sub-agent that was interrupted).
+// The `subInterruptInfos` is a variadic list of the InterruptInfo objects from the interrupted sub-agents.
 func CompositeInterrupt(ctx context.Context, info any, state any, subInterruptInfos ...*InterruptInfo) *AgentAction {
 	runCtx := getRunCtx(ctx)
 	addr := runCtx.Addr.DeepCopy()
@@ -250,6 +298,9 @@ func CompositeInterrupt(ctx context.Context, info any, state any, subInterruptIn
 	}
 }
 
+// Address represents the unique, hierarchical address of a component within an execution.
+// It is a slice of AddressSegments, where each segment represents one level of nesting.
+// This is a type alias for compose.Address. See the compose package for more details.
 type Address = compose.Address
 type AddressSegment = compose.AddressSegment
 type AddressSegmentType = compose.AddressSegmentType
@@ -258,6 +309,9 @@ const (
 	AddressSegmentAgent AddressSegmentType = "agent"
 )
 
+// InterruptCtx provides a structured, user-facing view of a single point of interruption.
+// It contains the ID and Address of the interrupted component, as well as user-defined info.
+// This is a type alias for compose.InterruptCtx. See the compose package for more details.
 type InterruptCtx = compose.InterruptCtx
 
 func WithCheckPointID(id string) AgentRunOption {
@@ -358,14 +412,14 @@ type mockStore struct {
 	Valid bool
 }
 
-func (m *mockStore) Get(ctx context.Context, checkPointID string) ([]byte, bool, error) {
+func (m *mockStore) Get(_ context.Context, _ string) ([]byte, bool, error) {
 	if m.Valid {
 		return m.Data, true, nil
 	}
 	return nil, false, nil
 }
 
-func (m *mockStore) Set(ctx context.Context, checkPointID string, checkPoint []byte) error {
+func (m *mockStore) Set(_ context.Context, _ string, checkPoint []byte) error {
 	m.Data = checkPoint
 	m.Valid = true
 	return nil

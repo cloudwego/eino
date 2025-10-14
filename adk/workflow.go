@@ -123,7 +123,7 @@ func (a *workflowAgent) Resume(ctx context.Context, info *ResumeInfo, opts ...Ag
 
 		// The flowAgent has already guaranteed we were interrupted.
 		// We just need to get our state to know how to proceed.
-		_, hasState, state := GetInterruptState[any](info, GetCurrentAddress(ctx))
+		_, hasState, state := GetInterruptState[any](ctx, info)
 		if !hasState {
 			panic(fmt.Sprintf("workflowAgent.Resume: agent '%s' was asked to resume but has no state", a.Name(ctx)))
 		}

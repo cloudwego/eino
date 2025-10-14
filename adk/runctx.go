@@ -66,28 +66,12 @@ func newRunSession() *runSession {
 	}
 }
 
-func getInterruptRunCtxs(ctx context.Context) []*runContext {
-	session := getSession(ctx)
-	if session == nil {
-		return nil
-	}
-	return session.getInterruptRunCtxs()
-}
-
 func appendInterruptRunCtx(ctx context.Context, interruptRunCtx *runContext) {
 	session := getSession(ctx)
 	if session == nil {
 		return
 	}
 	session.appendInterruptRunCtx(interruptRunCtx)
-}
-
-func replaceInterruptRunCtx(ctx context.Context, interruptRunCtx *runContext) {
-	session := getSession(ctx)
-	if session == nil {
-		return
-	}
-	session.replaceInterruptRunCtx(interruptRunCtx)
 }
 
 func GetSessionValues(ctx context.Context) map[string]any {
@@ -142,29 +126,9 @@ func (rs *runSession) getEvents() []*agentEventWrapper {
 	return events
 }
 
-func (rs *runSession) getInterruptRunCtxs() []*runContext {
-	rs.mtx.Lock()
-	defer rs.mtx.Unlock()
-	return rs.interruptRunCtxs
-}
-
 func (rs *runSession) appendInterruptRunCtx(runCtx *runContext) {
 	rs.mtx.Lock()
 	rs.interruptRunCtxs = append(rs.interruptRunCtxs, runCtx)
-	rs.mtx.Unlock()
-}
-
-func (rs *runSession) replaceInterruptRunCtx(interruptRunCtx *runContext) {
-	// remove runctx whose path belongs to the new run ctx, and append the new run ctx
-	rs.mtx.Lock()
-	for i := 0; i < len(rs.interruptRunCtxs); i++ {
-		rc := rs.interruptRunCtxs[i]
-		if belongToRunPath(interruptRunCtx.RunPath, rc.RunPath) {
-			rs.interruptRunCtxs = append(rs.interruptRunCtxs[:i], rs.interruptRunCtxs[i+1:]...)
-			i--
-		}
-	}
-	rs.interruptRunCtxs = append(rs.interruptRunCtxs, interruptRunCtx)
 	rs.mtx.Unlock()
 }
 
