@@ -455,7 +455,7 @@ func (h *cbHandler) onGraphError(ctx context.Context,
 	}
 
 	action := CompositeInterrupt(ctx, info, data, intInfo)
-	action.Interrupted.Data = &ChatModelAgentInterruptInfo{ // for backward-compatibility purpose
+	action.Interrupted.Data = &ChatModelAgentInterruptInfo{ // for backward-compatibility with older checkpoints
 		Info: info,
 		Data: data,
 	}
@@ -714,6 +714,21 @@ func (a *ChatModelAgent) Resume(ctx context.Context, info *ResumeInfo, opts ...A
 	co := getComposeOptions(opts)
 	co = append(co, compose.WithCheckPointID(mockCheckPointID))
 
+	_, hasResumeData, resumeData := GetResumeContext[*ChatModelAgentResumeData](ctx, info)
+	if hasResumeData {
+		if resumeData.HistoryModifier != nil {
+			co = append(co, compose.WithStateModifier(func(ctx context.Context, path compose.NodePath, state any) error {
+				s, ok := state.(*State)
+				if !ok {
+					return fmt.Errorf("unexpected state type: %T, expected: %T", state, &State{})
+				}
+				s.Messages = resumeData.HistoryModifier(ctx, s.Messages)
+				return nil
+			}))
+		}
+	}
+	ctx = compose.BatchResumeWithData(ctx, info.ResumeData)
+
 	iterator, generator := NewAsyncIteratorPair[*AgentEvent]()
 	go func() {
 		defer func() {
@@ -725,21 +740,6 @@ func (a *ChatModelAgent) Resume(ctx context.Context, info *ResumeInfo, opts ...A
 
 			generator.Close()
 		}()
-
-		_, hasResumeData, resumeData := GetResumeContext[*ChatModelAgentResumeData](ctx, info)
-		if hasResumeData {
-			if resumeData.HistoryModifier != nil {
-				co = append(co, compose.WithStateModifier(func(ctx context.Context, path compose.NodePath, state any) error {
-					s, ok := state.(*State)
-					if !ok {
-						return fmt.Errorf("unexpected state type: %T, expected: %T", state, &State{})
-					}
-					s.Messages = resumeData.HistoryModifier(ctx, s.Messages)
-					return nil
-				}))
-			}
-		}
-		ctx = compose.BatchResumeWithData(ctx, info.ResumeData)
 
 		run(ctx, &AgentInput{EnableStreaming: info.EnableStreaming}, generator,
 			newResumeStore(state), co...)

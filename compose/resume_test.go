@@ -246,10 +246,10 @@ func TestInterruptStateAndResumeForToolInNestedSubGraph(t *testing.T) {
 	assert.Equal(t, 2, len(interruptContexts))
 	expectedPath := "runnable:root;node:sub_graph_a;node:sub_graph_b;node:tools;tool:tool_call_123"
 	assert.Equal(t, expectedPath, interruptContexts[1].ID)
-	assert.True(t, interruptContexts[1].IsCause)
+	assert.True(t, interruptContexts[1].IsRootCause)
 	assert.Equal(t, map[string]any{"reason": "tool maintenance"}, interruptContexts[1].Info)
 	assert.Equal(t, "runnable:root;node:sub_graph_a;node:sub_graph_b;node:tools", interruptContexts[0].ID)
-	assert.False(t, interruptContexts[0].IsCause)
+	assert.False(t, interruptContexts[0].IsRootCause)
 
 	// 7. Resume execution
 	ctx := ResumeWithData(context.Background(), expectedPath, &myResumeData{Message: "let's continue tool"})

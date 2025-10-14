@@ -73,9 +73,17 @@ func GetResumeContext[T any](ctx context.Context) (isResumeFlow bool, hasData bo
 }
 
 // GetAllResumeData retrieves all resume data from the context that has not yet been claimed and used
-// by a resumed component. This is useful for components that contain nested, independent execution
-// environments (like the adk.ChatModelAgent containing a compose.Graph) and need to pass the resume
-// data across that boundary.
+// by a resumed component.
+//
+// This function is primarily intended for advanced use cases involving "bridge" components that
+// contain nested, independent execution environments (e.g., an adk.AgentTool running an
+// adk.Agent which in turn contains a compose.Graph).
+//
+// The typical pattern for such a bridge component during a resume operation is:
+// 1. Call GetAllResumeData to get the complete map of unused data.
+// 2. Identify and consume the data intended for the bridge component itself, often by deleting it from the map.
+// 3. Pass the remaining data down to the nested environment using its own BatchResumeWithData function.
+// This ensures that resume data is correctly routed across different framework layers.
 func GetAllResumeData(ctx context.Context) map[string]any {
 	rInfo, ok := ctx.Value(interruptCtxKey{}).(*resumeInfo)
 	if !ok || rInfo == nil {
@@ -83,6 +91,11 @@ func GetAllResumeData(ctx context.Context) map[string]any {
 	}
 
 	result := make(map[string]any, len(rInfo.interruptID2ResumeData))
+	// Copy all resume data to the result map
+	for id, data := range rInfo.interruptID2ResumeData {
+		result[id] = data
+	}
+
 	for id := range rInfo.interruptID2ResumeDataUsed {
 		delete(result, id)
 	}
