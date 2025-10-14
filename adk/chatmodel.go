@@ -67,6 +67,7 @@ func WithAgentToolRunOptions(opts map[string] /*tool name*/ []AgentRunOption) Ag
 	})
 }
 
+// Deprecated: use ResumeWithData and ChatModelAgentResumeData instead.
 func WithHistoryModifier(f func(context.Context, []Message) []Message) AgentRunOption {
 	return WrapImplSpecificOptFn(func(t *chatModelAgentRunOptions) {
 		t.historyModifier = f
@@ -511,6 +512,14 @@ func errFunc(err error) runFunc {
 	}
 }
 
+// ChatModelAgentResumeData holds data that can be provided to a ChatModelAgent during a resume operation
+// to modify its behavior. It is provided via the adk.ResumeWithData function.
+type ChatModelAgentResumeData struct {
+	// HistoryModifier is a function that can transform the agent's message history before it is sent to the model.
+	// This allows for adding new information or context upon resumption.
+	HistoryModifier func(ctx context.Context, history []Message) []Message
+}
+
 func (a *ChatModelAgent) buildRunFunc(ctx context.Context) runFunc {
 	a.once.Do(func() {
 		instruction := a.instruction
@@ -692,6 +701,16 @@ func (a *ChatModelAgent) Run(ctx context.Context, input *AgentInput, opts ...Age
 func (a *ChatModelAgent) Resume(ctx context.Context, info *ResumeInfo, opts ...AgentRunOption) *AsyncIterator[*AgentEvent] {
 	run := a.buildRunFunc(ctx)
 
+	// The state is the checkpoint data saved by the underlying graph.
+	// We don't need to check `wasInterrupted` because the calling flowAgent guarantees it.
+	// We only need to check if the state exists and is of the correct type.
+	_, hasState, state := GetInterruptState[[]byte](ctx, info)
+	if !hasState {
+		// This is a violation of the architectural contract. It should be impossible.
+		panic(fmt.Sprintf("ChatModelAgent.Resume: agent '%s' was asked to resume but no valid state was found",
+			a.Name(ctx)))
+	}
+
 	co := getComposeOptions(opts)
 	co = append(co, compose.WithCheckPointID(mockCheckPointID))
 
@@ -707,15 +726,20 @@ func (a *ChatModelAgent) Resume(ctx context.Context, info *ResumeInfo, opts ...A
 			generator.Close()
 		}()
 
-		// The state is the checkpoint data saved by the underlying graph.
-		// We don't need to check `wasInterrupted` because the calling flowAgent guarantees it.
-		// We only need to check if the state exists and is of the correct type.
-		_, hasState, state := GetInterruptState[[]byte](info, GetCurrentAddress(ctx))
-		if !hasState {
-			// This is a violation of the architectural contract. It should be impossible.
-			panic(fmt.Sprintf("ChatModelAgent.Resume: agent '%s' was asked to resume but no valid state was found",
-				a.Name(ctx)))
+		_, hasResumeData, resumeData := GetResumeContext[*ChatModelAgentResumeData](ctx, info)
+		if hasResumeData {
+			if resumeData.HistoryModifier != nil {
+				co = append(co, compose.WithStateModifier(func(ctx context.Context, path compose.NodePath, state any) error {
+					s, ok := state.(*State)
+					if !ok {
+						return fmt.Errorf("unexpected state type: %T, expected: %T", state, &State{})
+					}
+					s.Messages = resumeData.HistoryModifier(ctx, s.Messages)
+					return nil
+				}))
+			}
 		}
+		ctx = compose.BatchResumeWithData(ctx, info.ResumeData)
 
 		run(ctx, &AgentInput{EnableStreaming: info.EnableStreaming}, generator,
 			newResumeStore(state), co...)

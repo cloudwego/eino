@@ -72,6 +72,24 @@ func GetResumeContext[T any](ctx context.Context) (isResumeFlow bool, hasData bo
 	return
 }
 
+// GetAllResumeData retrieves all resume data from the context that has not yet been claimed and used
+// by a resumed component. This is useful for components that contain nested, independent execution
+// environments (like the adk.ChatModelAgent containing a compose.Graph) and need to pass the resume
+// data across that boundary.
+func GetAllResumeData(ctx context.Context) map[string]any {
+	rInfo, ok := ctx.Value(interruptCtxKey{}).(*resumeInfo)
+	if !ok || rInfo == nil {
+		return nil
+	}
+
+	result := make(map[string]any, len(rInfo.interruptID2ResumeData))
+	for id := range rInfo.interruptID2ResumeDataUsed {
+		delete(result, id)
+	}
+
+	return result
+}
+
 // GetCurrentAddress returns the hierarchical address of the currently executing component.
 // The address is a sequence of segments, each identifying a structural part of the execution
 // like an agent, a graph node, or a tool call. This can be useful for logging or debugging.

@@ -134,10 +134,13 @@ func (at *agentTool) InvokableRun(ctx context.Context, argumentsInJSON string, o
 		iter = newInvokableAgentToolRunner(at.agent, ms, addrPtr).Run(ctx, input,
 			append(getOptionsByAgentName(at.agent.Name(ctx), opts), WithCheckPointID(mockCheckPointID))...)
 	} else {
-		// TODO: handle the resume flow
 		if !hasState {
 			return "", fmt.Errorf("agent tool interrupt has happened, but cannot find interrupt state")
 		}
+
+		allResumeData := compose.GetAllResumeData(ctx)
+		delete(allResumeData, addr.String())
+		ctx = BatchResumeWithData(ctx, allResumeData)
 
 		ms = newResumeStore(state)
 
