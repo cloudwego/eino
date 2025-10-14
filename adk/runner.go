@@ -96,10 +96,24 @@ func (r *Runner) Query(ctx context.Context,
 }
 
 // Resume continues an interrupted agent execution from a saved checkpoint.
-// The checkPointID is used to retrieve the saved state from the CheckPointStore.
-// The context can be used to provide targeted resume data via functions like adk.ResumeWithData.
+// It performs a non-targeted resumption of the entire execution.
+// To provide targeted data to specific agents/components, use the TargetedResume method instead.
 // It returns an iterator for the continued execution, or an error if resumption fails.
 func (r *Runner) Resume(ctx context.Context, checkPointID string, opts ...AgentRunOption) (*AsyncIterator[*AgentEvent], error) {
+	return r.resume(ctx, checkPointID, nil, opts...)
+}
+
+// TargetedResume continues an interrupted agent execution from a saved checkpoint,
+// providing targeted data to specific agents/components within the execution.
+// The targets map uses the ID obtained from previous InterruptInfo.InterruptContexts as the key.
+// A nil value for a key indicates that the agent/component should be resumed without providing any new data.
+// It returns an iterator for the continued execution, or an error if resumption fails.
+func (r *Runner) TargetedResume(ctx context.Context, checkPointID string, targets map[string]any, opts ...AgentRunOption) (*AsyncIterator[*AgentEvent], error) {
+	return r.resume(ctx, checkPointID, targets, opts...)
+}
+
+// resume is the internal implementation for both Resume and TargetedResume.
+func (r *Runner) resume(ctx context.Context, checkPointID string, resumeData map[string]any, opts ...AgentRunOption) (*AsyncIterator[*AgentEvent], error) {
 	if r.store == nil {
 		return nil, fmt.Errorf("failed to resume: store is nil")
 	}
@@ -114,12 +128,10 @@ func (r *Runner) Resume(ctx context.Context, checkPointID string, opts ...AgentR
 
 	ctx = setRunCtx(ctx, runCtx)
 
-	if resumeData, ok := ctx.Value(resumeDataKey{}).(map[string]any); ok {
-		info.ResumeData = resumeData
-	}
-
 	o := getCommonOptions(nil, opts...)
 	AddSessionValues(ctx, o.sessionValues)
+
+	info.ResumeData = resumeData
 
 	aIter := toFlowAgent(ctx, r.a).Resume(ctx, info, opts...)
 	if r.store == nil {
