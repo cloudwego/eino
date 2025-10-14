@@ -19,6 +19,7 @@ package adk
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"testing"
 
@@ -95,12 +96,15 @@ func TestSimpleInterrupt(t *testing.T) {
 			return iter
 		},
 		resumer: func(ctx context.Context, info *ResumeInfo, opts ...AgentRunOption) *AsyncIterator[*AgentEvent] {
-			wasInterrupted, hasState, _ := GetInterruptState[string](info, GetCurrentAddress(ctx))
+			wasInterrupted, hasState, _ := GetInterruptState[string](ctx, info)
 			assert.True(t, wasInterrupted)
 			assert.False(t, hasState)
 			assert.NotNil(t, info)
 			assert.True(t, info.EnableStreaming)
 			assert.Equal(t, data, info.Data)
+
+			isResumeFlow, _, _ := GetResumeContext[any](ctx, info)
+			assert.True(t, isResumeFlow)
 			iter, generator := NewAsyncIteratorPair[*AgentEvent]()
 			generator.Close()
 			return iter
@@ -127,6 +131,7 @@ func TestSimpleInterrupt(t *testing.T) {
 	event, ok = iter.Next()
 	assert.False(t, ok)
 
+	ctx = Resume(ctx, "agent:myAgent")
 	_, err := runner.Resume(ctx, "1")
 	assert.NoError(t, err)
 }
@@ -153,7 +158,7 @@ func TestMultiAgentInterrupt(t *testing.T) {
 		name: "sa2",
 		runner: func(ctx context.Context, input *AgentInput, options ...AgentRunOption) *AsyncIterator[*AgentEvent] {
 			iter, generator := NewAsyncIteratorPair[*AgentEvent]()
-			intAct := Interrupt(ctx, "hello world")
+			intAct := StatefulInterrupt(ctx, "hello world", "temp state")
 			intAct.Interrupted.Data = "hello world"
 			generator.Send(&AgentEvent{
 				AgentName: "sa2",
@@ -166,14 +171,21 @@ func TestMultiAgentInterrupt(t *testing.T) {
 			assert.NotNil(t, info)
 			assert.Equal(t, info.Data, "hello world")
 
-			wasInterrupted, _, _ := GetInterruptState[any](info, GetCurrentAddress(ctx))
+			wasInterrupted, hasState, state := GetInterruptState[string](ctx, info)
 			assert.True(t, wasInterrupted)
+			assert.True(t, hasState)
+			assert.Equal(t, "temp state", state)
+
+			isResumeFlow, hasData, data := GetResumeContext[string](ctx, info)
+			assert.True(t, isResumeFlow)
+			assert.True(t, hasData)
+			assert.Equal(t, "resume data", data)
 
 			iter, generator := NewAsyncIteratorPair[*AgentEvent]()
 			generator.Send(&AgentEvent{
 				AgentName: "sa2",
 				Output: &AgentOutput{
-					MessageOutput: &MessageVariant{Message: schema.UserMessage("completed")},
+					MessageOutput: &MessageVariant{Message: schema.UserMessage(data)},
 				},
 			})
 			generator.Close()
@@ -205,11 +217,13 @@ func TestMultiAgentInterrupt(t *testing.T) {
 
 	_, ok = iter.Next()
 	assert.False(t, ok)
+
+	ctx = ResumeWithData(ctx, "agent:sa1;agent:sa2", "resume data")
 	iter, err = runner.Resume(ctx, "1")
 	assert.NoError(t, err)
 	event, ok = iter.Next()
 	assert.True(t, ok)
-	assert.Equal(t, event.Output.MessageOutput.Message.Content, "completed")
+	assert.Equal(t, event.Output.MessageOutput.Message.Content, "resume data")
 	_, ok = iter.Next()
 	assert.False(t, ok)
 }
@@ -232,8 +246,14 @@ func TestWorkflowInterrupt(t *testing.T) {
 		},
 		resumer: func(ctx context.Context, info *ResumeInfo, opts ...AgentRunOption) *AsyncIterator[*AgentEvent] {
 			assert.Equal(t, info.Data, "sa1 interrupt data")
-			wasInterrupted, _, _ := GetInterruptState[any](info, GetCurrentAddress(ctx))
+			wasInterrupted, _, _ := GetInterruptState[any](ctx, info)
 			assert.True(t, wasInterrupted)
+
+			isResumeFlow, hasData, data := GetResumeContext[string](ctx, info)
+			assert.True(t, isResumeFlow)
+			assert.True(t, hasData)
+			assert.Equal(t, "resume sa1", data)
+
 			iter, generator := NewAsyncIteratorPair[*AgentEvent]()
 			generator.Close()
 			return iter
@@ -244,7 +264,7 @@ func TestWorkflowInterrupt(t *testing.T) {
 		runner: func(ctx context.Context, input *AgentInput, options ...AgentRunOption) *AsyncIterator[*AgentEvent] {
 			iter, generator := NewAsyncIteratorPair[*AgentEvent]()
 
-			intAct := Interrupt(ctx, "sa2 interrupt data")
+			intAct := StatefulInterrupt(ctx, "sa2 interrupt data", "sa2 interrupt")
 			intAct.Interrupted.Data = "sa2 interrupt data"
 			generator.Send(&AgentEvent{
 				AgentName: "sa2",
@@ -255,8 +275,16 @@ func TestWorkflowInterrupt(t *testing.T) {
 		},
 		resumer: func(ctx context.Context, info *ResumeInfo, opts ...AgentRunOption) *AsyncIterator[*AgentEvent] {
 			assert.Equal(t, info.Data, "sa2 interrupt data")
-			wasInterrupted, _, _ := GetInterruptState[any](info, GetCurrentAddress(ctx))
+			wasInterrupted, hasState, state := GetInterruptState[string](ctx, info)
 			assert.True(t, wasInterrupted)
+			assert.True(t, hasState)
+			assert.Equal(t, "sa2 interrupt", state)
+
+			isResumeFlow, hasData, data := GetResumeContext[string](ctx, info)
+			assert.True(t, isResumeFlow)
+			assert.True(t, hasData)
+			assert.Equal(t, "resume sa2", data)
+
 			iter, generator := NewAsyncIteratorPair[*AgentEvent]()
 			generator.Close()
 			return iter
@@ -437,6 +465,7 @@ func TestWorkflowInterrupt(t *testing.T) {
 										Type: AddressSegmentAgent,
 									},
 								},
+								State: "sa2 interrupt",
 							},
 						},
 					},
@@ -481,6 +510,7 @@ func TestWorkflowInterrupt(t *testing.T) {
 								Type: AddressSegmentAgent,
 							},
 						},
+						State: "sa2 interrupt",
 					},
 					{
 						Addr: Address{
@@ -546,6 +576,7 @@ func TestWorkflowInterrupt(t *testing.T) {
 		events = []*AgentEvent{}
 
 		// Resume after sa1 interrupt
+		ctx = ResumeWithData(ctx, "agent:sequential;agent:sa1", "resume sa1")
 		iter, err = runner.Resume(ctx, "sequential-1")
 		assert.NoError(t, err)
 		for {
@@ -561,6 +592,7 @@ func TestWorkflowInterrupt(t *testing.T) {
 		events = []*AgentEvent{}
 
 		// Resume after sa2 interrupt
+		ctx = ResumeWithData(ctx, "agent:sequential;agent:sa2", "resume sa2")
 		iter, err = runner.Resume(ctx, "sequential-1")
 		assert.NoError(t, err)
 		for {
@@ -617,6 +649,7 @@ func TestWorkflowInterrupt(t *testing.T) {
 		events = []*AgentEvent{}
 
 		// Resume after sa1 interrupt
+		ctx = ResumeWithData(ctx, "agent:loop;agent:sa1", "resume sa1")
 		iter, err = runner.Resume(ctx, "loop-1")
 		assert.NoError(t, err)
 		for {
@@ -647,6 +680,7 @@ func TestWorkflowInterrupt(t *testing.T) {
 		events = []*AgentEvent{}
 
 		// Resume after sa2 interrupt
+		ctx = ResumeWithData(ctx, "agent:loop;agent:sa2", "resume sa2")
 		iter, err = runner.Resume(ctx, "loop-1")
 		assert.NoError(t, err)
 		for {
@@ -715,6 +749,7 @@ func TestWorkflowInterrupt(t *testing.T) {
 		events = []*AgentEvent{}
 
 		// Resume after third interrupt
+		ctx = ResumeWithData(ctx, "agent:loop;agent:sa1", "resume sa1")
 		iter, err = runner.Resume(ctx, "loop-1")
 		assert.NoError(t, err)
 		for {
@@ -729,6 +764,7 @@ func TestWorkflowInterrupt(t *testing.T) {
 		events = []*AgentEvent{}
 
 		// Resume after fourth interrupt
+		ctx = ResumeWithData(ctx, "agent:loop;agent:sa2", "resume sa2")
 		iter, err = runner.Resume(ctx, "loop-1")
 		assert.NoError(t, err)
 		for {
@@ -825,6 +861,10 @@ func TestWorkflowInterrupt(t *testing.T) {
 		assert.Equal(t, "Parallel workflow interrupted", interruptEvent.Action.Interrupted.InterruptContexts[0].Info)
 		assert.Equal(t, 3, len(interruptEvent.Action.Interrupted.interruptStates))
 
+		ctx = BatchResumeWithData(ctx, map[string]any{
+			"agent:parallel agent;agent:sa1": "resume sa1",
+			"agent:parallel agent;agent:sa2": "resume sa2",
+		})
 		iter, err = runner.Resume(ctx, "1")
 		assert.NoError(t, err)
 		_, ok = iter.Next()
@@ -878,31 +918,44 @@ func TestChatModelInterrupt(t *testing.T) {
 	assert.NotNil(t, event.Action.Interrupted)
 	assert.Equal(t, 4, len(event.Action.Interrupted.InterruptContexts))
 
-	var hasRootCause bool
+	var (
+		hasRootCause     bool
+		chatModelAgentID string
+		toolID           string
+	)
 	for _, ctx := range event.Action.Interrupted.InterruptContexts {
 		if ctx.IsCause {
 			hasRootCause = true
+			toolID = ctx.ID
 			assert.Equal(t, Address{
 				{Type: AddressSegmentAgent, ID: "name"},
 				{Type: compose.AddressSegmentRunnable, ID: "React"},
 				{Type: compose.AddressSegmentNode, ID: "ToolNode"},
 				{Type: compose.AddressSegmentTool, ID: "1"},
 			}, ctx.Address)
+		} else if len(ctx.Address) == 1 {
+			chatModelAgentID = ctx.ID
 		}
 	}
 	assert.True(t, hasRootCause)
 	event, ok = iter.Next()
 	assert.False(t, ok)
 
-	iter, err = runner.Resume(ctx, "1", WithHistoryModifier(func(ctx context.Context, messages []Message) []Message {
-		messages[2].Content = "new user message"
-		return messages
-	}))
+	ctx = BatchResumeWithData(ctx, map[string]any{
+		chatModelAgentID: &ChatModelAgentResumeData{
+			HistoryModifier: func(ctx context.Context, history []Message) []Message {
+				history[2].Content = "new user message"
+				return history
+			},
+		},
+		toolID: "tool resume result",
+	})
+	iter, err = runner.Resume(ctx, "1")
 	assert.NoError(t, err)
 	event, ok = iter.Next()
 	assert.True(t, ok)
 	assert.NoError(t, event.Err)
-	assert.Equal(t, event.Output.MessageOutput.Message.Content, "result")
+	assert.Equal(t, event.Output.MessageOutput.Message.Content, "tool resume result")
 	event, ok = iter.Next()
 	assert.True(t, ok)
 	assert.NoError(t, event.Err)
@@ -924,13 +977,12 @@ func TestChatModelAgentToolInterrupt(t *testing.T) {
 		resumer: func(ctx context.Context, info *ResumeInfo, opts ...AgentRunOption) *AsyncIterator[*AgentEvent] {
 			assert.NotNil(t, info)
 			assert.False(t, info.EnableStreaming)
-			assert.Equal(t, "hello world", info.Data)
 
-			o := GetImplSpecificOptions[myAgentOptions](nil, opts...)
-			if o.interrupt {
+			isResumeFlow, hasData, data := GetResumeContext[string](ctx, info)
+			if !isResumeFlow {
 				iter, generator := NewAsyncIteratorPair[*AgentEvent]()
-				intAct := Interrupt(ctx, "hello world")
-				intAct.Interrupted.Data = "hello world"
+				intAct := Interrupt(ctx, "interrupt again")
+				intAct.Interrupted.Data = "interrupt again"
 				generator.Send(&AgentEvent{
 					Action: intAct,
 				})
@@ -938,8 +990,11 @@ func TestChatModelAgentToolInterrupt(t *testing.T) {
 				return iter
 			}
 
+			assert.True(t, hasData)
+			assert.Equal(t, "resume sa", data)
+
 			iter, generator := NewAsyncIteratorPair[*AgentEvent]()
-			generator.Send(&AgentEvent{Output: &AgentOutput{MessageOutput: &MessageVariant{Message: schema.UserMessage("my agent completed")}}})
+			generator.Send(&AgentEvent{Output: &AgentOutput{MessageOutput: &MessageVariant{Message: schema.UserMessage(fmt.Sprintf("my agent completed with data %s", data))}}})
 			generator.Close()
 			return iter
 		},
@@ -985,22 +1040,35 @@ func TestChatModelAgentToolInterrupt(t *testing.T) {
 	event, ok = iter.Next()
 	assert.False(t, ok)
 
-	iter, err = runner.Resume(ctx, "1", WithAgentToolRunOptions(map[string][]AgentRunOption{
-		"myAgent": {withResume()},
-	}))
-	assert.NoError(t, err)
-	event, ok = iter.Next()
-	assert.True(t, ok)
-	assert.NoError(t, event.Err)
-	assert.NotNil(t, event.Action.Interrupted)
-	event, ok = iter.Next()
-	assert.False(t, ok)
 	iter, err = runner.Resume(ctx, "1")
 	assert.NoError(t, err)
 	event, ok = iter.Next()
 	assert.True(t, ok)
 	assert.NoError(t, event.Err)
-	assert.Equal(t, event.Output.MessageOutput.Message.Content, "my agent completed")
+	assert.NotNil(t, event.Action.Interrupted)
+	assert.Equal(t, 5, len(event.Action.Interrupted.InterruptContexts))
+	for _, ctx := range event.Action.Interrupted.InterruptContexts {
+		if ctx.IsCause {
+			assert.Equal(t, Address{
+				{Type: AddressSegmentAgent, ID: "name"},
+				{Type: compose.AddressSegmentRunnable, ID: "React"},
+				{Type: compose.AddressSegmentNode, ID: "ToolNode"},
+				{Type: compose.AddressSegmentTool, ID: "1"},
+				{Type: AddressSegmentAgent, ID: "myAgent"},
+			}, ctx.Address)
+			assert.Equal(t, "interrupt again", ctx.Info)
+		}
+	}
+	event, ok = iter.Next()
+	assert.False(t, ok)
+
+	ctx = ResumeWithData(ctx, "agent:name;runnable:React;node:ToolNode;tool:1;agent:myAgent", "resume sa")
+	iter, err = runner.Resume(ctx, "1")
+	assert.NoError(t, err)
+	event, ok = iter.Next()
+	assert.True(t, ok)
+	assert.NoError(t, event.Err)
+	assert.Equal(t, event.Output.MessageOutput.Message.Content, "my agent completed with data resume sa")
 	event, ok = iter.Next()
 	assert.True(t, ok)
 	assert.NoError(t, event.Err)
@@ -1019,24 +1087,14 @@ type myStore struct {
 	m map[string][]byte
 }
 
-func (m *myStore) Set(ctx context.Context, key string, value []byte) error {
+func (m *myStore) Set(_ context.Context, key string, value []byte) error {
 	m.m[key] = value
 	return nil
 }
 
-func (m *myStore) Get(ctx context.Context, key string) ([]byte, bool, error) {
+func (m *myStore) Get(_ context.Context, key string) ([]byte, bool, error) {
 	v, ok := m.m[key]
 	return v, ok, nil
-}
-
-type myAgentOptions struct {
-	interrupt bool
-}
-
-func withResume() AgentRunOption {
-	return WrapImplSpecificOptFn(func(t *myAgentOptions) {
-		t.interrupt = true
-	})
 }
 
 type myAgent struct {
@@ -1045,14 +1103,14 @@ type myAgent struct {
 	resumer func(ctx context.Context, info *ResumeInfo, opts ...AgentRunOption) *AsyncIterator[*AgentEvent]
 }
 
-func (m *myAgent) Name(ctx context.Context) string {
+func (m *myAgent) Name(_ context.Context) string {
 	if len(m.name) > 0 {
 		return m.name
 	}
 	return "myAgent"
 }
 
-func (m *myAgent) Description(ctx context.Context) string {
+func (m *myAgent) Description(_ context.Context) string {
 	return "myAgent description"
 }
 
@@ -1070,7 +1128,7 @@ type myModel struct {
 	validator func(int, []*schema.Message) bool
 }
 
-func (m *myModel) Generate(ctx context.Context, input []*schema.Message, opts ...model.Option) (*schema.Message, error) {
+func (m *myModel) Generate(_ context.Context, input []*schema.Message, _ ...model.Option) (*schema.Message, error) {
 	if m.validator != nil && !m.validator(m.times, input) {
 		return nil, errors.New("invalid input")
 	}
@@ -1082,26 +1140,32 @@ func (m *myModel) Generate(ctx context.Context, input []*schema.Message, opts ..
 	return m.messages[t], nil
 }
 
-func (m *myModel) Stream(ctx context.Context, input []*schema.Message, opts ...model.Option) (*schema.StreamReader[*schema.Message], error) {
+func (m *myModel) Stream(_ context.Context, _ []*schema.Message, _ ...model.Option) (*schema.StreamReader[*schema.Message], error) {
 	panic("implement me")
 }
 
-func (m *myModel) WithTools(tools []*schema.ToolInfo) (model.ToolCallingChatModel, error) {
+func (m *myModel) WithTools(_ []*schema.ToolInfo) (model.ToolCallingChatModel, error) {
 	return m, nil
 }
 
 type myTool1 struct{}
 
-func (m *myTool1) Info(ctx context.Context) (*schema.ToolInfo, error) {
+func (m *myTool1) Info(_ context.Context) (*schema.ToolInfo, error) {
 	return &schema.ToolInfo{
 		Name: "tool1",
 		Desc: "desc",
 	}, nil
 }
 
-func (m *myTool1) InvokableRun(ctx context.Context, argumentsInJSON string, opts ...tool.Option) (string, error) {
+func (m *myTool1) InvokableRun(ctx context.Context, _ string, _ ...tool.Option) (string, error) {
 	if wasInterrupted, _, _ := compose.GetInterruptState[any](ctx); !wasInterrupted {
 		return "", compose.Interrupt(ctx, nil)
+	}
+
+	if isResumeFlow, hasResumeData, data := compose.GetResumeContext[string](ctx); !isResumeFlow {
+		return "", compose.Interrupt(ctx, nil)
+	} else if hasResumeData {
+		return data, nil
 	}
 
 	return "result", nil
