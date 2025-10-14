@@ -131,8 +131,8 @@ type ToolsInterruptAndRerunExtra struct {
 }
 
 func init() {
-	schema.RegisterName[*ToolsInterruptAndRerunExtra]("_eino_compose_tools_interrupt_and_rerun_extra") // TODO: check if this is really needed when refactoring adk resume
-	schema.Register[*toolsInterruptAndRerunState]()
+	schema.RegisterName[*ToolsInterruptAndRerunExtra]("_eino_compose_tools_interrupt_and_rerun_extra")
+	schema.RegisterName[*toolsInterruptAndRerunState]("_eino_compose_tools_interrupt_and_rerun_state")
 }
 
 type toolsInterruptAndRerunState struct {

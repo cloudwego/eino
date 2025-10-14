@@ -135,17 +135,16 @@ func (at *agentTool) InvokableRun(ctx context.Context, argumentsInJSON string, o
 			append(getOptionsByAgentName(at.agent.Name(ctx), opts), WithCheckPointID(mockCheckPointID))...)
 	} else {
 		if !hasState {
-			return "", fmt.Errorf("agent tool interrupt has happened, but cannot find interrupt state")
+			return "", fmt.Errorf("agent tool '%s' interrupt has happened, but cannot find interrupt state", at.agent.Name(ctx))
 		}
 
 		allResumeData := compose.GetAllResumeData(ctx)
 		delete(allResumeData, addr.String())
-		ctx = BatchResumeWithData(ctx, allResumeData)
 
 		ms = newResumeStore(state)
 
 		iter, err = newInvokableAgentToolRunner(at.agent, ms, addrPtr).
-			Resume(ctx, mockCheckPointID, getOptionsByAgentName(at.agent.Name(ctx), opts)...)
+			TargetedResume(ctx, mockCheckPointID, allResumeData, getOptionsByAgentName(at.agent.Name(ctx), opts)...)
 		if err != nil {
 			return "", err
 		}
@@ -176,7 +175,7 @@ func (at *agentTool) InvokableRun(ctx context.Context, argumentsInJSON string, o
 
 		var errs []error
 		for _, intCtx := range lastEvent.Action.Interrupted.InterruptContexts {
-			errs = append(errs, intCtx.AsError())
+			errs = append(errs, intCtx.AsInterruptSignal())
 		}
 
 		return "", compose.CompositeInterrupt(ctx, "agent tool interrupt", data, errs...)

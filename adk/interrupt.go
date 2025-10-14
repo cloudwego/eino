@@ -37,40 +37,10 @@ type ResumeInfo struct {
 	// and GetInterruptState for internal state retrieval.
 	*InterruptInfo
 
-	// interruptStates is an internal map of address strings to their corresponding saved states.
 	interruptStates map[string]*interruptState
 	// ResumeData holds data provided by the user for targeted resumption of specific agents.
 	// The map keys are the string addresses of the target agents.
 	ResumeData map[string]any
-}
-
-type resumeDataKey struct{}
-
-// BatchResumeWithData provides targeted data to specific agents or other interrupt points during a resume operation.
-// The map keys are the interrupt IDs of the target interrupt points.
-func BatchResumeWithData(ctx context.Context, resumeData map[string]any) context.Context {
-	existingData, _ := ctx.Value(resumeDataKey{}).(map[string]any)
-	if existingData == nil {
-		existingData = make(map[string]any)
-	}
-	for k, v := range resumeData {
-		existingData[k] = v
-	}
-	return context.WithValue(ctx, resumeDataKey{}, existingData)
-}
-
-// ResumeWithData provides targeted data to a single agent during a resume operation.
-func ResumeWithData(ctx context.Context, id string, data any) context.Context {
-	return BatchResumeWithData(ctx, map[string]any{id: data})
-}
-
-// Resume signals that one or more interrupt points should be resumed, without providing specific data.
-func Resume(ctx context.Context, id ...string) context.Context {
-	resumeData := make(map[string]any, len(id))
-	for _, addr := range id {
-		resumeData[addr] = nil
-	}
-	return BatchResumeWithData(ctx, resumeData)
 }
 
 // GetResumeContext retrieves targeted data for the current agent during a resume operation.
@@ -217,10 +187,10 @@ func Interrupt(ctx context.Context, info any) *AgentAction {
 		Interrupted: &InterruptInfo{
 			InterruptContexts: []*InterruptCtx{
 				{
-					ID:      interruptID,
-					Info:    info,
-					Address: addr,
-					IsCause: true,
+					ID:          interruptID,
+					Info:        info,
+					Address:     addr,
+					IsRootCause: true,
 				},
 			},
 			interruptStates: []*interruptState{
@@ -244,10 +214,10 @@ func StatefulInterrupt(ctx context.Context, info any, state any) *AgentAction {
 		Interrupted: &InterruptInfo{
 			InterruptContexts: []*InterruptCtx{
 				{
-					ID:      interruptID,
-					Info:    info,
-					Address: addr,
-					IsCause: true,
+					ID:          interruptID,
+					Info:        info,
+					Address:     addr,
+					IsRootCause: true,
 				},
 			},
 			interruptStates: []*interruptState{

@@ -68,27 +68,6 @@ func WithSerializer(serializer Serializer) GraphCompileOption {
 	}
 }
 
-// Deprecated: you won't need to call RegisterInternalType anymore.
-func RegisterInternalType(f func(key string, value any) error) error {
-	err := f("_eino_checkpoint", &checkpoint{})
-	if err != nil {
-		return err
-	}
-	err = f("_eino_dag_channel", &dagChannel{})
-	if err != nil {
-		return err
-	}
-	err = f("_eino_pregel_channel", &pregelChannel{})
-	if err != nil {
-		return err
-	}
-	err = f("_eino_tools_interrupt_and_rerun_state", &toolsInterruptAndRerunState{})
-	if err != nil {
-		return err
-	}
-	return f("_eino_dependency_state", dependencyState(0))
-}
-
 func WithCheckPointID(checkPointID string) Option {
 	return Option{
 		checkPointID: &checkPointID,
@@ -112,10 +91,8 @@ func WithForceNewRun() Option {
 	}
 }
 
-// Deprecated: use ResumeWithData to provide new state instance for specific graph/sub-graph by interruptID.
 type StateModifier func(ctx context.Context, path NodePath, state any) error
 
-// Deprecated: use ResumeWithData to provide new state instance for specific graph/sub-graph by interruptID.
 func WithStateModifier(sm StateModifier) Option {
 	return Option{
 		stateModifier: sm,
