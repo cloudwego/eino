@@ -119,19 +119,19 @@ func (r *Runner) Resume(ctx context.Context, checkPointID string, opts ...AgentR
 //   - Components whose addresses are in the `targets` map will receive `isResumeFlow = true` when they
 //     call `GetResumeContext`.
 //   - Interrupted components whose addresses are NOT in the `targets` map must decide how to proceed:
-//     - "Leaf" components (the actual root causes of the original interrupt) MUST re-interrupt themselves
-//       to preserve their state.
-//     - "Composite" agents (like SequentialAgent or ChatModelAgent) should generally proceed with their
-//       execution. They act as conduits, allowing the resume signal to flow to their children. They will
-//       naturally re-interrupt if one of their interrupted children re-interrupts, as they receive the
-//       new `CompositeInterrupt` signal from them.
-func (r *Runner) TargetedResume(ctx context.Context, checkPointID string, targets map[string]any, 
+//     -- "Leaf" components (the actual root causes of the original interrupt) MUST re-interrupt themselves
+//     to preserve their state.
+//     -- "Composite" agents (like SequentialAgent or ChatModelAgent) should generally proceed with their
+//     execution. They act as conduits, allowing the resume signal to flow to their children. They will
+//     naturally re-interrupt if one of their interrupted children re-interrupts, as they receive the
+//     new `CompositeInterrupt` signal from them.
+func (r *Runner) TargetedResume(ctx context.Context, checkPointID string, targets map[string]any,
 	opts ...AgentRunOption) (*AsyncIterator[*AgentEvent], error) {
 	return r.resume(ctx, checkPointID, targets, opts...)
 }
 
 // resume is the internal implementation for both Resume and TargetedResume.
-func (r *Runner) resume(ctx context.Context, checkPointID string, resumeData map[string]any, 
+func (r *Runner) resume(ctx context.Context, checkPointID string, resumeData map[string]any,
 	opts ...AgentRunOption) (*AsyncIterator[*AgentEvent], error) {
 	if r.store == nil {
 		return nil, fmt.Errorf("failed to resume: store is nil")
@@ -165,7 +165,7 @@ func (r *Runner) resume(ctx context.Context, checkPointID string, resumeData map
 	return niter, nil
 }
 
-func (r *Runner) handleIter(ctx context.Context, aIter *AsyncIterator[*AgentEvent], gen *AsyncGenerator[*AgentEvent], 
+func (r *Runner) handleIter(ctx context.Context, aIter *AsyncIterator[*AgentEvent], gen *AsyncGenerator[*AgentEvent],
 	rootInput *AgentInput, addr Address, session *runSession, checkPointID *string) {
 	defer func() {
 		panicErr := recover()
@@ -199,7 +199,7 @@ func (r *Runner) handleIter(ctx context.Context, aIter *AsyncIterator[*AgentEven
 	}
 
 	if interruptedInfo != nil && checkPointID != nil {
-		err := r.saveCheckPoint(ctx, r.store, *checkPointID, interruptedInfo, rootInput, 
+		err := r.saveCheckPoint(ctx, r.store, *checkPointID, interruptedInfo, rootInput,
 			session, addr)
 		if err != nil {
 			gen.Send(&AgentEvent{Err: fmt.Errorf("failed to save checkpoint: %w", err)})
