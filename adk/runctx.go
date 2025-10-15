@@ -213,13 +213,24 @@ func initRunCtx(ctx context.Context, agentName string, input *AgentInput) (conte
 	}
 
 	runCtx.RunPath = append(runCtx.RunPath, RunStep{agentName})
-	runCtx.Addr = append(runCtx.Addr, AddressSegment{
-		Type: AddressSegmentAgent,
-		ID:   agentName,
-	})
 	if runCtx.isRoot() && input != nil {
 		runCtx.RootInput = input
 	}
+
+	return setRunCtx(ctx, runCtx), runCtx
+}
+
+func restoreRunPath(ctx context.Context, info *ResumeInfo) (context.Context, *runContext) {
+	runCtx := getRunCtx(ctx)
+	addr := runCtx.Addr
+	state, ok := info.interruptStates[addr.String()]
+	if !ok {
+		return ctx, runCtx
+	}
+
+	runPath := state.RunPath
+	runCtx = runCtx.deepCopy()
+	runCtx.RunPath = runPath
 
 	return setRunCtx(ctx, runCtx), runCtx
 }
