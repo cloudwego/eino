@@ -175,8 +175,7 @@ func (a *workflowAgent) runSequential(ctx context.Context,
 		if len(nextPoints) > 1 {
 			panic("runSequential received multiple resumption points, which is not possible in sequential execution")
 		}
-		// It's possible there are no next points if the sequential agent itself was the leaf interrupt.
-		// In that case, we just restart the sub-agent from the saved index.
+
 		if len(nextPoints) == 1 {
 			for _, point := range nextPoints {
 				nextResumeInfo = point
@@ -199,8 +198,6 @@ func (a *workflowAgent) runSequential(ctx context.Context,
 
 		var subIterator *AsyncIterator[*AgentEvent]
 		if nextResumeInfo != nil {
-			// This is the agent we need to resume. `subAgent.Resume` will call initRunCtx internally.
-			// It's critical that it receives the seqCtx with the accumulated RunPath.
 			subIterator = subAgent.Resume(seqCtx, nextResumeInfo, opts...)
 			nextResumeInfo = nil // Only resume the first time.
 		} else {
