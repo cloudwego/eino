@@ -67,6 +67,7 @@ func WithAgentToolRunOptions(opts map[string] /*tool name*/ []AgentRunOption) Ag
 	})
 }
 
+// Deprecated: use ResumeWithData and ChatModelAgentResumeData instead.
 func WithHistoryModifier(f func(context.Context, []Message) []Message) AgentRunOption {
 	return WrapImplSpecificOptFn(func(t *chatModelAgentRunOptions) {
 		t.historyModifier = f
@@ -419,11 +420,18 @@ func (h *cbHandler) onGraphError(ctx context.Context,
 		h.Send(&AgentEvent{AgentName: h.agentName, Err: fmt.Errorf("interrupt has happened, but cannot find interrupt info")})
 		return ctx
 	}
-	h.Send(&AgentEvent{AgentName: h.agentName, Action: &AgentAction{
-		Interrupted: &InterruptInfo{
-			Data: &ChatModelAgentInterruptInfo{Data: data, Info: info},
-		},
-	}})
+
+	intInfo := &InterruptInfo{
+		InterruptContexts: info.InterruptContexts,
+	}
+
+	action := CompositeInterrupt(ctx, info, data, intInfo)
+	action.Interrupted.Data = &ChatModelAgentInterruptInfo{ // for backward-compatibility with older checkpoints
+		Info: info,
+		Data: data,
+	}
+
+	h.Send(&AgentEvent{AgentName: h.agentName, Action: action})
 
 	return ctx
 }
@@ -471,6 +479,14 @@ func errFunc(err error) runFunc {
 	}
 }
 
+// ChatModelAgentResumeData holds data that can be provided to a ChatModelAgent during a resume operation
+// to modify its behavior. It is provided via the adk.ResumeWithData function.
+type ChatModelAgentResumeData struct {
+	// HistoryModifier is a function that can transform the agent's message history before it is sent to the model.
+	// This allows for adding new information or context upon resumption.
+	HistoryModifier func(ctx context.Context, history []Message) []Message
+}
+
 func (a *ChatModelAgent) buildRunFunc(ctx context.Context) runFunc {
 	a.once.Do(func() {
 		instruction := a.instruction
@@ -501,7 +517,8 @@ func (a *ChatModelAgent) buildRunFunc(ctx context.Context) runFunc {
 		}
 
 		if len(toolsNodeConf.Tools) == 0 {
-			a.run = func(ctx context.Context, input *AgentInput, generator *AsyncGenerator[*AgentEvent], store *mockStore, opts ...compose.Option) {
+			a.run = func(ctx context.Context, input *AgentInput, generator *AsyncGenerator[*AgentEvent],
+				store *mockStore, opts ...compose.Option) {
 				var err error
 				var msgs []Message
 				msgs, err = a.genModelInput(ctx, instruction, input)
@@ -565,7 +582,8 @@ func (a *ChatModelAgent) buildRunFunc(ctx context.Context) runFunc {
 			return
 		}
 
-		a.run = func(ctx context.Context, input *AgentInput, generator *AsyncGenerator[*AgentEvent], store *mockStore, opts ...compose.Option) {
+		a.run = func(ctx context.Context, input *AgentInput, generator *AsyncGenerator[*AgentEvent], store *mockStore,
+			opts ...compose.Option) {
 			var compileOptions []compose.GraphCompileOption
 			compileOptions = append(compileOptions,
 				compose.WithGraphName("React"),
@@ -575,8 +593,8 @@ func (a *ChatModelAgent) buildRunFunc(ctx context.Context) runFunc {
 				compose.WithMaxRunSteps(math.MaxInt))
 
 			runnable, err_ := g.Compile(ctx, compileOptions...)
-			if err != nil {
-				generator.Send(&AgentEvent{AgentName: a.name, Err: err})
+			if err_ != nil {
+				generator.Send(&AgentEvent{AgentName: a.name, Err: err_})
 				return
 			}
 
@@ -589,12 +607,15 @@ func (a *ChatModelAgent) buildRunFunc(ctx context.Context) runFunc {
 
 			callOpt := genReactCallbacks(a.name, generator, input.EnableStreaming, store)
 
+			// Bridge the ADK and Compose contexts by setting the parent address.
+			graphCtx := compose.SetParentAddress(ctx, GetCurrentAddress(ctx))
+
 			var msg Message
 			var msgStream MessageStream
 			if input.EnableStreaming {
-				msgStream, err_ = runnable.Stream(ctx, msgs, append(opts, callOpt)...)
+				msgStream, err_ = runnable.Stream(graphCtx, msgs, append(opts, callOpt)...)
 			} else {
-				msg, err_ = runnable.Invoke(ctx, msgs, append(opts, callOpt)...)
+				msg, err_ = runnable.Invoke(graphCtx, msgs, append(opts, callOpt)...)
 			}
 
 			if err_ == nil {
@@ -644,8 +665,33 @@ func (a *ChatModelAgent) Run(ctx context.Context, input *AgentInput, opts ...Age
 func (a *ChatModelAgent) Resume(ctx context.Context, info *ResumeInfo, opts ...AgentRunOption) *AsyncIterator[*AgentEvent] {
 	run := a.buildRunFunc(ctx)
 
+	// The state is the checkpoint data saved by the underlying graph.
+	// We don't need to check `wasInterrupted` because the calling flowAgent guarantees it.
+	// We only need to check if the state exists and is of the correct type.
+	_, hasState, state := GetInterruptState[[]byte](ctx, info)
+	if !hasState {
+		// This is a violation of the architectural contract. It should be impossible.
+		panic(fmt.Sprintf("ChatModelAgent.Resume: agent '%s' was asked to resume but no valid state was found",
+			a.Name(ctx)))
+	}
+
 	co := getComposeOptions(opts)
 	co = append(co, compose.WithCheckPointID(mockCheckPointID))
+
+	_, hasResumeData, resumeData := GetResumeContext[*ChatModelAgentResumeData](ctx, info)
+	if hasResumeData {
+		if resumeData.HistoryModifier != nil {
+			co = append(co, compose.WithStateModifier(func(ctx context.Context, path compose.NodePath, state any) error {
+				s, ok := state.(*State)
+				if !ok {
+					return fmt.Errorf("unexpected state type: %T, expected: %T", state, &State{})
+				}
+				s.Messages = resumeData.HistoryModifier(ctx, s.Messages)
+				return nil
+			}))
+		}
+	}
+	ctx = compose.BatchResumeWithData(ctx, info.ResumeData)
 
 	iterator, generator := NewAsyncIteratorPair[*AgentEvent]()
 	go func() {
@@ -659,7 +705,8 @@ func (a *ChatModelAgent) Resume(ctx context.Context, info *ResumeInfo, opts ...A
 			generator.Close()
 		}()
 
-		run(ctx, &AgentInput{EnableStreaming: info.EnableStreaming}, generator, newResumeStore(info.Data.(*ChatModelAgentInterruptInfo).Data), co...)
+		run(ctx, &AgentInput{EnableStreaming: info.EnableStreaming}, generator,
+			newResumeStore(state), co...)
 	}()
 
 	return iterator

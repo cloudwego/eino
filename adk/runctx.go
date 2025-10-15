@@ -66,28 +66,12 @@ func newRunSession() *runSession {
 	}
 }
 
-func getInterruptRunCtxs(ctx context.Context) []*runContext {
-	session := getSession(ctx)
-	if session == nil {
-		return nil
-	}
-	return session.getInterruptRunCtxs()
-}
-
 func appendInterruptRunCtx(ctx context.Context, interruptRunCtx *runContext) {
 	session := getSession(ctx)
 	if session == nil {
 		return
 	}
 	session.appendInterruptRunCtx(interruptRunCtx)
-}
-
-func replaceInterruptRunCtx(ctx context.Context, interruptRunCtx *runContext) {
-	session := getSession(ctx)
-	if session == nil {
-		return
-	}
-	session.replaceInterruptRunCtx(interruptRunCtx)
 }
 
 func GetSessionValues(ctx context.Context) map[string]any {
@@ -142,29 +126,9 @@ func (rs *runSession) getEvents() []*agentEventWrapper {
 	return events
 }
 
-func (rs *runSession) getInterruptRunCtxs() []*runContext {
-	rs.mtx.Lock()
-	defer rs.mtx.Unlock()
-	return rs.interruptRunCtxs
-}
-
 func (rs *runSession) appendInterruptRunCtx(runCtx *runContext) {
 	rs.mtx.Lock()
 	rs.interruptRunCtxs = append(rs.interruptRunCtxs, runCtx)
-	rs.mtx.Unlock()
-}
-
-func (rs *runSession) replaceInterruptRunCtx(interruptRunCtx *runContext) {
-	// remove runctx whose path belongs to the new run ctx, and append the new run ctx
-	rs.mtx.Lock()
-	for i := 0; i < len(rs.interruptRunCtxs); i++ {
-		rc := rs.interruptRunCtxs[i]
-		if belongToRunPath(interruptRunCtx.RunPath, rc.RunPath) {
-			rs.interruptRunCtxs = append(rs.interruptRunCtxs[:i], rs.interruptRunCtxs[i+1:]...)
-			i--
-		}
-	}
-	rs.interruptRunCtxs = append(rs.interruptRunCtxs, interruptRunCtx)
 	rs.mtx.Unlock()
 }
 
@@ -204,6 +168,7 @@ func (rs *runSession) getValue(key string) (any, bool) {
 type runContext struct {
 	RootInput *AgentInput
 	RunPath   []RunStep
+	Addr      Address
 
 	Session *runSession
 }
@@ -216,6 +181,7 @@ func (rc *runContext) deepCopy() *runContext {
 	copied := &runContext{
 		RootInput: rc.RootInput,
 		RunPath:   make([]RunStep, len(rc.RunPath)),
+		Addr:      rc.Addr.DeepCopy(),
 		Session:   rc.Session,
 	}
 
@@ -247,11 +213,45 @@ func initRunCtx(ctx context.Context, agentName string, input *AgentInput) (conte
 	}
 
 	runCtx.RunPath = append(runCtx.RunPath, RunStep{agentName})
-	if runCtx.isRoot() {
+	if runCtx.isRoot() && input != nil {
 		runCtx.RootInput = input
 	}
 
 	return setRunCtx(ctx, runCtx), runCtx
+}
+
+func restoreRunPath(ctx context.Context, info *ResumeInfo) (context.Context, *runContext) {
+	runCtx := getRunCtx(ctx)
+	addr := runCtx.Addr
+	state, ok := info.interruptStates[addr.String()]
+	if !ok {
+		return ctx, runCtx
+	}
+
+	runPath := state.RunPath
+	runCtx = runCtx.deepCopy()
+	runCtx.RunPath = runPath
+
+	return setRunCtx(ctx, runCtx), runCtx
+}
+
+// updateRunPathOnly creates a new context with an updated RunPath, but does NOT modify the Address.
+// This is used by sequential workflows to accumulate execution history for LLM context,
+// without incorrectly chaining the static addresses of peer agents.
+func updateRunPathOnly(ctx context.Context, agentNames ...string) context.Context {
+	runCtx := getRunCtx(ctx)
+	if runCtx == nil {
+		// This should not happen in a sequential workflow context, but handle defensively.
+		runCtx = &runContext{Session: newRunSession()}
+	} else {
+		runCtx = runCtx.deepCopy()
+	}
+
+	for _, agentName := range agentNames {
+		runCtx.RunPath = append(runCtx.RunPath, RunStep{agentName})
+	}
+
+	return setRunCtx(ctx, runCtx)
 }
 
 // ClearRunCtx clears the run context of the multi-agents. This is particularly useful
@@ -262,14 +262,27 @@ func ClearRunCtx(ctx context.Context) context.Context {
 	return context.WithValue(ctx, runCtxKey{}, nil)
 }
 
-func ctxWithNewRunCtx(ctx context.Context) context.Context {
-	return setRunCtx(ctx, &runContext{Session: newRunSession()})
+func ctxWithNewRunCtx(ctx context.Context, parentAddr *Address) context.Context {
+	var addr Address
+	if parentAddr != nil {
+		addr = *parentAddr
+	}
+	return setRunCtx(ctx, &runContext{Session: newRunSession(), Addr: addr})
 }
 
 func getSession(ctx context.Context) *runSession {
 	runCtx := getRunCtx(ctx)
 	if runCtx != nil {
 		return runCtx.Session
+	}
+
+	return nil
+}
+
+func GetCurrentAddress(ctx context.Context) Address {
+	runCtx := getRunCtx(ctx)
+	if runCtx != nil {
+		return runCtx.Addr
 	}
 
 	return nil
