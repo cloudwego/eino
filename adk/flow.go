@@ -298,6 +298,7 @@ func (a *flowAgent) Run(ctx context.Context, input *AgentInput, opts ...AgentRun
 	agentName := a.Name(ctx)
 
 	ctx, runCtx := initRunCtx(ctx, agentName, input)
+	runCtx.Addr = a.handleAddress(ctx, runCtx.Addr)
 
 	o := getCommonOptions(nil, opts...)
 
@@ -320,16 +321,14 @@ func (a *flowAgent) Run(ctx context.Context, input *AgentInput, opts ...AgentRun
 }
 
 func (a *flowAgent) Resume(ctx context.Context, info *ResumeInfo, opts ...AgentRunOption) *AsyncIterator[*AgentEvent] {
-	// 1. Initialize the run context for the current agent.
-	ctx, runCtx := initRunCtx(ctx, a.Name(ctx), nil) // Input is nil as it's restored from state.
+	// initialize the run context for the current agent.
+	var myAddr Address
+	ctx, myAddr = a.restoreAddress(ctx)
 
-	// 2. Get the current address.
-	myAddr := runCtx.Addr
-
-	// 3. Check if this agent is a direct interrupt point.
+	// check if this agent is a direct interrupt point.
 	wasInterrupted, _, _ := GetInterruptState[any](ctx, info)
 
-	// 4. If this agent was the one that interrupted, resume its inner agent.
+	// if this agent was the one that interrupted, resume its inner agent.
 	if wasInterrupted {
 		ra, ok := a.Agent.(ResumableAgent)
 		if !ok {
@@ -337,6 +336,9 @@ func (a *flowAgent) Resume(ctx context.Context, info *ResumeInfo, opts ...AgentR
 				"but is not a ResumableAgent", a.Name(ctx)))
 		}
 		iterator, generator := NewAsyncIteratorPair[*AgentEvent]()
+
+		ctx, runCtx := restoreRunPath(ctx, info)
+
 		// The inner agent will call GetInterruptState itself to get its specific state.
 		aIter := ra.Resume(ctx, info, opts...)
 		if _, ok := ra.(*workflowAgent); ok {
@@ -346,22 +348,22 @@ func (a *flowAgent) Resume(ctx context.Context, info *ResumeInfo, opts ...AgentR
 		return iterator
 	}
 
-	// 5. Otherwise, find the next agent(s) to delegate to.
+	// otherwise, find the next agent(s) to delegate to.
 	nextPoints := info.getNextResumptionPoints(myAddr)
 
-	// 7. If there are no next points, it's an unexpected state.
+	// if there are no next points, it's an unexpected state.
 	if len(nextPoints) == 0 {
 		return genErrorIter(fmt.Errorf("flowAgent.Resume: agent '%s' is not an interrupt point, "+
 			"but no child resumption points were found", a.Name(ctx)))
 	}
 
-	// 6. For now, we don't support parallel transfers in a generic flowAgent.
+	// for now, we don't support parallel transfers in a generic flowAgent.
 	if len(nextPoints) > 1 {
 		panic(fmt.Sprintf("flowAgent.Resume: agent '%s' has multiple resumption points, "+
 			"but concurrent transfer is not supported", a.Name(ctx)))
 	}
 
-	// 8. Get the single next agent to delegate to.
+	// get the single next agent to delegate to.
 	var nextAgentID string
 	var nextResumeInfo *ResumeInfo
 	for id, point := range nextPoints {
@@ -376,7 +378,7 @@ func (a *flowAgent) Resume(ctx context.Context, info *ResumeInfo, opts ...AgentR
 			"sub-agent with name '%s' to resume", nextAgentID))
 	}
 
-	// 9. Call the sub-agent's Resume method with the scoped ResumeInfo.
+	// call the sub-agent's Resume method with the scoped ResumeInfo.
 	return subAgent.Resume(ctx, nextResumeInfo, opts...)
 }
 
@@ -456,4 +458,40 @@ func (a *flowAgent) run(
 			generator.Send(subEvent)
 		}
 	}
+}
+
+func (a *flowAgent) handleAddress(ctx context.Context, addr Address) Address {
+	if len(addr) == 0 {
+		return Address{{Type: AddressSegmentAgent, ID: a.Agent.Name(ctx)}}
+	}
+
+	lastSeg := addr[len(addr)-1]
+	if lastSeg.Type != AddressSegmentAgent { // e.g. for agent tool, the last segment is the tool
+		return append(addr, AddressSegment{Type: AddressSegmentAgent, ID: a.Agent.Name(ctx)})
+	}
+
+	if a.parentAgent != nil {
+		parentName := a.parentAgent.Name(ctx)
+		if parentName == lastSeg.ID { // we are the child of last agent, append address
+			return append(addr, AddressSegment{Type: AddressSegmentAgent, ID: a.Agent.Name(ctx)})
+		}
+	}
+
+	for _, subA := range a.subAgents {
+		if subA.Name(ctx) == lastSeg.ID { // we are the parent of last agent, pop address
+			return addr[:len(addr)-1]
+		}
+	}
+
+	// neither parent or child of last agent, just append
+	return append(addr, AddressSegment{Type: AddressSegmentAgent, ID: a.Agent.Name(ctx)})
+}
+
+func (a *flowAgent) restoreAddress(ctx context.Context) (context.Context, Address) {
+	runCtx := getRunCtx(ctx)
+	addr := runCtx.Addr
+	newAddr := a.handleAddress(ctx, addr)
+	runCtx = runCtx.deepCopy()
+	runCtx.Addr = newAddr
+	return setRunCtx(ctx, runCtx), newAddr
 }

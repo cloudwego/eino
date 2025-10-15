@@ -49,10 +49,10 @@ type ResumeInfo struct {
 // resumed state by calling GetInterruptState.
 //
 // It returns three values:
-//  - isResumeFlow: A boolean that is true if the current agent's address was explicitly targeted
-//    by the `TargetedResume` method.
-//  - hasData: A boolean that is true if data was provided for this agent (i.e., not nil).
-//  - data: The typed data provided by the user.
+//   - isResumeFlow: A boolean that is true if the current agent's address was explicitly targeted
+//     by the `TargetedResume` method.
+//   - hasData: A boolean that is true if data was provided for this agent (i.e., not nil).
+//   - data: The typed data provided by the user.
 //
 // ### How to Use This Function: A Decision Framework
 //
@@ -209,8 +209,9 @@ type InterruptInfo struct {
 }
 
 type interruptState struct {
-	Addr  Address
-	State any
+	Addr    Address
+	State   any
+	RunPath []RunStep
 }
 
 // Interrupt creates a basic interrupt action.
@@ -233,7 +234,8 @@ func Interrupt(ctx context.Context, info any) *AgentAction {
 			},
 			interruptStates: []*interruptState{
 				{
-					Addr: addr,
+					Addr:    addr,
+					RunPath: runCtx.RunPath,
 				},
 			},
 		},
@@ -260,8 +262,9 @@ func StatefulInterrupt(ctx context.Context, info any, state any) *AgentAction {
 			},
 			interruptStates: []*interruptState{
 				{
-					Addr:  addr,
-					State: state,
+					Addr:    addr,
+					State:   state,
+					RunPath: runCtx.RunPath,
 				},
 			},
 		},
@@ -299,8 +302,9 @@ func CompositeInterrupt(ctx context.Context, info any, state any, subInterruptIn
 		Interrupted: &InterruptInfo{
 			InterruptContexts: interruptContexts,
 			interruptStates: append(interruptStates, &interruptState{
-				Addr:  addr,
-				State: state,
+				Addr:    addr,
+				State:   state,
+				RunPath: runCtx.RunPath,
 			}),
 		},
 	}
