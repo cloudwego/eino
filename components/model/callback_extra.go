@@ -38,6 +38,14 @@ type PromptTokenDetails struct {
 	CachedTokens int
 }
 
+type Thinking struct {
+	Type                 *string
+	Enable               *bool
+	BudgetTokens         *int
+	IncludeThoughts      *bool
+	ReasoningEffortLevel *string
+}
+
 // Config is the config for the model.
 type Config struct {
 	// Model is the model name.
@@ -50,6 +58,8 @@ type Config struct {
 	TopP float32
 	// Stop is the stop words, which controls the stopping condition of the model.
 	Stop []string
+	// Thinking configures the model's thinking/reasoning capabilities.
+	Thinking *Thinking
 }
 
 // CallbackInput is the input for the model callback.
