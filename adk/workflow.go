@@ -266,12 +266,6 @@ func (a *workflowAgent) runSequential(ctx context.Context,
 				return true, false
 			}
 
-			if a.doBreakLoopIfNeeded(lastActionEvent.Action, iterations) {
-				lastActionEvent.Action.BreakLoop.CurrentIterations = iterations
-				generator.Send(lastActionEvent)
-				return true, false
-			}
-
 			generator.Send(lastActionEvent)
 		}
 	}
@@ -428,6 +422,11 @@ func (a *workflowAgent) runLoop(ctx context.Context, generator *AsyncGenerator[*
 
 				if lastActionEvent.Action.Exit {
 					// Forward the event and exit the entire loop.
+					generator.Send(lastActionEvent)
+					return
+				}
+
+				if a.doBreakLoopIfNeeded(lastActionEvent.Action, i) {
 					generator.Send(lastActionEvent)
 					return
 				}
