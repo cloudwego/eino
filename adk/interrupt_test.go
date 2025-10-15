@@ -1350,3 +1350,153 @@ func TestCyclicalAgentInterrupt(t *testing.T) {
 	assert.Equal(t, 1, len(events))
 	assert.Equal(t, "C completed", events[0].Output.MessageOutput.Message.Content)
 }
+
+// myStatefulTool is a tool that can interrupt and has internal state to track invocations.
+
+type myStatefulTool struct {
+	name string
+	t    *testing.T
+}
+
+func (m *myStatefulTool) Info(_ context.Context) (*schema.ToolInfo, error) {
+	return &schema.ToolInfo{
+		Name: m.name,
+		Desc: "desc",
+	}, nil
+}
+
+type myStatefulToolState struct {
+	InterruptCount int
+}
+
+func init() {
+	schema.Register[myStatefulToolState]()
+}
+
+func (m *myStatefulTool) InvokableRun(ctx context.Context, _ string, _ ...tool.Option) (string, error) {
+	wasInterrupted, hasState, state := compose.GetInterruptState[myStatefulToolState](ctx)
+	if !wasInterrupted {
+		return "", compose.StatefulInterrupt(ctx, fmt.Sprintf("interrupt from %s", m.name), myStatefulToolState{InterruptCount: 1})
+	}
+
+	isResumeFlow, hasResumeData, data := compose.GetResumeContext[string](ctx)
+	if !isResumeFlow {
+		assert.True(m.t, hasState, "tool %s should have interrupt state on resume", m.name)
+		return "", compose.StatefulInterrupt(ctx, fmt.Sprintf("interrupt from %s", m.name), myStatefulToolState{InterruptCount: state.InterruptCount + 1})
+	}
+
+	assert.True(m.t, hasResumeData, "tool %s should have resume data on resume", m.name)
+	return data, nil
+}
+
+func TestChatModelParallelToolInterruptAndResume(t *testing.T) {
+	ctx := context.Background()
+
+	toolA := &myStatefulTool{name: "toolA", t: t}
+	toolB := &myStatefulTool{name: "toolB", t: t}
+
+	chatModel, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+		Name:        "ParallelToolAgent",
+		Description: "An agent that uses parallel tools",
+		Model: &myModel{
+			messages: []*schema.Message{
+				// 1. First model response: call toolA and toolB in parallel
+				schema.AssistantMessage("", []schema.ToolCall{
+					{ID: "1", Function: schema.FunctionCall{Name: "toolA", Arguments: "{}"}},
+					{ID: "2", Function: schema.FunctionCall{Name: "toolB", Arguments: "{}"}},
+				}),
+				// 2. Second model response (after tools are resumed): call them again to check state
+				schema.AssistantMessage("", []schema.ToolCall{
+					{ID: "3", Function: schema.FunctionCall{Name: "toolA", Arguments: "{}"}},
+					{ID: "4", Function: schema.FunctionCall{Name: "toolB", Arguments: "{}"}},
+				}),
+				// 3. Final completion
+				schema.AssistantMessage("all done", nil),
+			},
+		},
+		ToolsConfig: ToolsConfig{
+			ToolsNodeConfig: compose.ToolsNodeConfig{
+				Tools: []tool.BaseTool{toolA, toolB},
+			},
+		},
+	})
+	assert.NoError(t, err)
+
+	runner := NewRunner(ctx, RunnerConfig{
+		Agent:           chatModel,
+		CheckPointStore: newMyStore(),
+	})
+
+	// 1. Initial query -> parallel interrupt from toolA and toolB
+	iter := runner.Query(ctx, "start", WithCheckPointID("parallel-tool-test-1"))
+	normalEvents, interruptEvent := consumeUntilInterrupt(iter)
+
+	assert.Equal(t, 1, len(normalEvents))
+	assert.NotNil(t, interruptEvent)
+	assert.Equal(t, 5, len(interruptEvent.Action.Interrupted.InterruptContexts),
+		"should have 5 interrupts")
+
+	var toolAInterruptID, toolBInterruptID string
+	for _, info := range interruptEvent.Action.Interrupted.InterruptContexts {
+		if info.Info == "interrupt from toolA" {
+			toolAInterruptID = info.ID
+			assert.True(t, info.IsRootCause)
+		} else if info.Info == "interrupt from toolB" {
+			toolBInterruptID = info.ID
+			assert.True(t, info.IsRootCause)
+		}
+	}
+	assert.NotEmpty(t, toolAInterruptID)
+	assert.NotEmpty(t, toolBInterruptID)
+
+	// 2. Resume, targeting only toolA. toolB should re-interrupt.
+	iter, err = runner.TargetedResume(ctx, "parallel-tool-test-1", map[string]any{
+		toolAInterruptID: "toolA resumed",
+	})
+	assert.NoError(t, err)
+	_, interruptEvent = consumeUntilInterrupt(iter)
+
+	assert.NotNil(t, interruptEvent, "expected a re-interrupt from toolB")
+	assert.Equal(t, 4, len(interruptEvent.Action.Interrupted.InterruptContexts),
+		"should have 4 remaining interrupts")
+
+	var rootCause *InterruptCtx
+	for _, info := range interruptEvent.Action.Interrupted.InterruptContexts {
+		if info.IsRootCause {
+			rootCause = info
+			break
+		}
+	}
+
+	assert.NotNil(t, rootCause)
+	assert.Equal(t, "interrupt from toolB", rootCause.Info)
+	toolBReInterruptID := rootCause.ID
+
+	// 3. Resume the re-interrupted toolB. The agent should then call the tools again.
+	iter, err = runner.TargetedResume(ctx, "parallel-tool-test-1", map[string]any{
+		toolBReInterruptID: "toolB resumed",
+	})
+	assert.NoError(t, err)
+
+	// 4. Consume all final events. The internal assertions in the tools will check the wasInterrupted flag.
+	// We expect to see the results of the second tool calls, and then the final agent completion.
+	finalEvents, interruptEvent := consumeUntilInterrupt(iter)
+	assert.Equal(t, 2, len(finalEvents))
+	assert.NotNil(t, interruptEvent)
+}
+
+// consumeUntilInterrupt consumes events from the iterator until an interrupt is found or it's exhausted.
+func consumeUntilInterrupt(iter *AsyncIterator[*AgentEvent]) (normalEvents []*AgentEvent, interruptEvent *AgentEvent) {
+	for {
+		event, ok := iter.Next()
+		if !ok {
+			break
+		}
+		if event.Action != nil && event.Action.Interrupted != nil {
+			interruptEvent = event
+			continue
+		}
+		normalEvents = append(normalEvents, event)
+	}
+	return
+}
