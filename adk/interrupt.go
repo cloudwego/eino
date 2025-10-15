@@ -44,7 +44,45 @@ type ResumeInfo struct {
 }
 
 // GetResumeContext retrieves targeted data for the current agent during a resume operation.
-// It returns the data and a boolean indicating if data was provided for the agent's address.
+//
+// This function is typically called *after* an agent has already determined it is in a
+// resumed state by calling GetInterruptState.
+//
+// It returns three values:
+//  - isResumeFlow: A boolean that is true if the current agent's address was explicitly targeted
+//    by the `TargetedResume` method.
+//  - hasData: A boolean that is true if data was provided for this agent (i.e., not nil).
+//  - data: The typed data provided by the user.
+//
+// ### How to Use This Function: A Decision Framework
+//
+// The correct usage pattern depends on the application's desired resume strategy.
+//
+// #### Strategy 1: Implicit "Resume All"
+// In some use cases, any resume operation implies that *all* interrupted agents should proceed.
+// For example, if an application's UI only provides a single "Continue" button. In this model,
+// an agent can often just use `GetInterruptState` to see if `wasInterrupted` is true and then
+// proceed with its logic, as it can assume it is an intended target. It may still call
+// `GetResumeContext` to check for optional data, but the `isResumeFlow` flag is less critical.
+//
+// #### Strategy 2: Explicit "Targeted Resume" (Most Common)
+// For applications with multiple, distinct interrupt points that must be resumed independently, it is
+// crucial to differentiate which point is being resumed. This is the primary use case for the `isResumeFlow` flag.
+//   - If `isResumeFlow` is `true`: Your agent is the explicit target. You should consume
+//     the `data` (if any) and complete your work.
+//   - If `isResumeFlow` is `false`: Another agent is the target. You MUST re-interrupt
+//     (e.g., by returning `StatefulInterrupt(...)`) to preserve your state and allow the
+//     resume signal to propagate.
+//
+// ### Guidance for Composite Agents
+//
+// Composite agents (like `SequentialAgent` or `ChatModelAgent`) have a dual role:
+//  1. Check for Self-Targeting: A composite agent can itself be the target of a resume
+//     operation, for instance, to modify its internal state (e.g., providing a new history
+//     to a `ChatModelAgent`). It may call `GetResumeContext` to check for data targeted at its own address.
+//  2. Act as a Conduit: After checking for itself, its primary role is to re-execute its children,
+//     allowing the `ResumeInfo` to flow down to them. It must not consume a resume signal
+//     intended for one of its descendants.
 func GetResumeContext[T any](ctx context.Context, info *ResumeInfo) (isResumeFlow bool, hasData bool, data T) {
 	var t T
 	if info == nil || info.ResumeData == nil {

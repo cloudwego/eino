@@ -95,25 +95,44 @@ func (r *Runner) Query(ctx context.Context,
 	return r.Run(ctx, []Message{schema.UserMessage(query)}, opts...)
 }
 
-// Resume continues an interrupted agent execution from a saved checkpoint.
-// It performs a non-targeted resumption of the entire execution.
-// To provide targeted data to specific agents/components, use the TargetedResume method instead.
-// It returns an iterator for the continued execution, or an error if resumption fails.
-func (r *Runner) Resume(ctx context.Context, checkPointID string, opts ...AgentRunOption) (*AsyncIterator[*AgentEvent], error) {
+// Resume continues an interrupted execution from a checkpoint, using an "Implicit Resume All" strategy.
+// This method is best for simpler use cases where the act of resuming implies that all previously
+// interrupted points should proceed without specific data.
+//
+// When using this method, all interrupted agents will receive `isResumeFlow = false` when they
+// call `GetResumeContext`, as no specific agent was targeted. This is suitable for the "Simple Confirmation"
+// pattern where an agent only needs to know `wasInterrupted` is true to continue.
+func (r *Runner) Resume(ctx context.Context, checkPointID string, opts ...AgentRunOption) (
+	*AsyncIterator[*AgentEvent], error) {
 	return r.resume(ctx, checkPointID, nil, opts...)
 }
 
-// TargetedResume continues an interrupted agent execution from a saved checkpoint,
-// providing targeted data to specific agents/components within the execution.
-// The targets map uses the ID obtained from previous InterruptInfo.InterruptContexts as the key.
-// A nil value for a key indicates that the agent/component should be resumed without providing any new data.
-// It returns an iterator for the continued execution, or an error if resumption fails.
-func (r *Runner) TargetedResume(ctx context.Context, checkPointID string, targets map[string]any, opts ...AgentRunOption) (*AsyncIterator[*AgentEvent], error) {
+// TargetedResume continues an interrupted execution from a checkpoint, using an "Explicit Targeted Resume" strategy.
+// This is the most common and powerful way to resume, allowing you to target specific interrupt points
+// (identified by their address/ID) and provide them with data.
+//
+// The `targets` map should contain the addresses of the components to be resumed as keys. These addresses
+// can point to any interruptible component in the entire execution graph, including ADK agents, compose
+// graph nodes, or tools. The value can be the resume data for that component, or `nil` if no data is needed.
+//
+// When using this method:
+//   - Components whose addresses are in the `targets` map will receive `isResumeFlow = true` when they
+//     call `GetResumeContext`.
+//   - Interrupted components whose addresses are NOT in the `targets` map must decide how to proceed:
+//     - "Leaf" components (the actual root causes of the original interrupt) MUST re-interrupt themselves
+//       to preserve their state.
+//     - "Composite" agents (like SequentialAgent or ChatModelAgent) should generally proceed with their
+//       execution. They act as conduits, allowing the resume signal to flow to their children. They will
+//       naturally re-interrupt if one of their interrupted children re-interrupts, as they receive the
+//       new `CompositeInterrupt` signal from them.
+func (r *Runner) TargetedResume(ctx context.Context, checkPointID string, targets map[string]any, 
+	opts ...AgentRunOption) (*AsyncIterator[*AgentEvent], error) {
 	return r.resume(ctx, checkPointID, targets, opts...)
 }
 
 // resume is the internal implementation for both Resume and TargetedResume.
-func (r *Runner) resume(ctx context.Context, checkPointID string, resumeData map[string]any, opts ...AgentRunOption) (*AsyncIterator[*AgentEvent], error) {
+func (r *Runner) resume(ctx context.Context, checkPointID string, resumeData map[string]any, 
+	opts ...AgentRunOption) (*AsyncIterator[*AgentEvent], error) {
 	if r.store == nil {
 		return nil, fmt.Errorf("failed to resume: store is nil")
 	}
@@ -146,7 +165,8 @@ func (r *Runner) resume(ctx context.Context, checkPointID string, resumeData map
 	return niter, nil
 }
 
-func (r *Runner) handleIter(ctx context.Context, aIter *AsyncIterator[*AgentEvent], gen *AsyncGenerator[*AgentEvent], rootInput *AgentInput, addr Address, session *runSession, checkPointID *string) {
+func (r *Runner) handleIter(ctx context.Context, aIter *AsyncIterator[*AgentEvent], gen *AsyncGenerator[*AgentEvent], 
+	rootInput *AgentInput, addr Address, session *runSession, checkPointID *string) {
 	defer func() {
 		panicErr := recover()
 		if panicErr != nil {
@@ -179,7 +199,8 @@ func (r *Runner) handleIter(ctx context.Context, aIter *AsyncIterator[*AgentEven
 	}
 
 	if interruptedInfo != nil && checkPointID != nil {
-		err := r.saveCheckPoint(ctx, r.store, *checkPointID, interruptedInfo, rootInput, session, addr)
+		err := r.saveCheckPoint(ctx, r.store, *checkPointID, interruptedInfo, rootInput, 
+			session, addr)
 		if err != nil {
 			gen.Send(&AgentEvent{Err: fmt.Errorf("failed to save checkpoint: %w", err)})
 		}

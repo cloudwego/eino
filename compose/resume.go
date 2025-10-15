@@ -43,15 +43,47 @@ func GetInterruptState[T any](ctx context.Context) (wasInterrupted bool, hasStat
 	return
 }
 
-// GetResumeContext checks if the current node is being resumed and retrieves any associated resume data in a type-safe way.
-// This is the primary function a component should use to understand the user's intent for the current run.
+// GetResumeContext checks if the current component is the target of a resume operation
+// and retrieves any data provided by the user for that resumption.
+//
+// This function is typically called *after* a component has already determined it is in a
+// resumed state by calling GetInterruptState.
 //
 // It returns three values:
-//   - isResumeFlow (bool): True if the current node was the specific target of a `Resume` or `ResumeWithData` call.
-//   - data (T): The typed resume data. This is only valid if `hasData` is true.
-//   - hasData (bool): True if resume data was provided via `ResumeWithData` and successfully cast to type `T`.
-//     It is important to check this flag rather than checking `data == nil`, as the provided data could itself be nil
-//     or a non-nil zero value (like 0 or "").
+//   - isResumeFlow: A boolean that is true if the current component's address was explicitly targeted
+//     by a call to Resume() or ResumeWithData().
+//   - hasData: A boolean that is true if data was provided for this component (i.e., not nil).
+//   - data: The typed data provided by the user.
+//
+// ### How to Use This Function: A Decision Framework
+//
+// The correct usage pattern depends on the application's desired resume strategy.
+//
+// #### Strategy 1: Implicit "Resume All"
+// In some use cases, any resume operation implies that *all* interrupted points should proceed.
+// For example, if an application's UI only provides a single "Continue" button for a set of
+// interruptions. In this model, a component can often just use `GetInterruptState` to see if
+// `wasInterrupted` is true and then proceed with its logic, as it can assume it is an intended target.
+// It may still call `GetResumeContext` to check for optional data, but the `isResumeFlow` flag is less critical.
+//
+// #### Strategy 2: Explicit "Targeted Resume" (Most Common)
+// For applications with multiple, distinct interrupt points that must be resumed independently, it is
+// crucial to differentiate which point is being resumed. This is the primary use case for the `isResumeFlow` flag.
+//   - If `isResumeFlow` is `true`: Your component is the explicit target. You should consume
+//     the `data` (if any) and complete your work.
+//   - If `isResumeFlow` is `false`: Another component is the target. You MUST re-interrupt
+//     (e.g., by returning `StatefulInterrupt(...)`) to preserve your state and allow the
+//     resume signal to propagate.
+//
+// ### Guidance for Composite Components
+//
+// Composite components (like `Graph` or other `Runnable`s that contain sub-processes) have a dual role:
+//  1. Check for Self-Targeting: A composite component can itself be the target of a resume
+//     operation, for instance, to modify its internal state. It may call `GetResumeContext`
+//     to check for data targeted at its own address.
+//  2. Act as a Conduit: After checking for itself, its primary role is to re-execute its children,
+//     allowing the resume context to flow down to them. It must not consume a resume signal
+//     intended for one of its descendants.
 func GetResumeContext[T any](ctx context.Context) (isResumeFlow bool, hasData bool, data T) {
 	rCtx, ok := getRunCtx(ctx)
 	if !ok {
@@ -114,36 +146,37 @@ func GetCurrentAddress(ctx context.Context) (Address, bool) {
 	return nil, false
 }
 
-// Resume marks a specific interrupt point for resumption without passing any data.
-// When the graph is resumed, the component that was interrupted at the given `address` will be re-executed,
-// but its `runCtx.resumeData` field will be nil.
+// Resume prepares a context for an "Explicit Targeted Resume" operation by targeting one or more
+// components without providing data. It is a convenience wrapper around BatchResumeWithData.
 //
-// - ctx: The parent context.
-//   - addresses: A variadic list of unique interrupt point addresses, obtained from `InterruptCtx.ID`.
-func Resume(ctx context.Context, addresses ...string) context.Context {
-	resumeData := make(map[string]any, len(addresses))
-	for _, addr := range addresses {
+// This is useful when the act of resuming is itself the signal, and no extra data is needed.
+// The components at the provided addresses (interrupt IDs) will receive `isResumeFlow = true`
+// when they call `GetResumeContext`.
+func Resume(ctx context.Context, interruptIDs ...string) context.Context {
+	resumeData := make(map[string]any, len(interruptIDs))
+	for _, addr := range interruptIDs {
 		resumeData[addr] = nil
 	}
-	// An empty map signals a "resume all" to the framework.
 	return BatchResumeWithData(ctx, resumeData)
 }
 
-// ResumeWithData provides a convenient way to resume a single interrupt point with data.
-//
-//   - ctx: The parent context.
-//   - address: The unique address of the interrupt point, obtained from `InterruptCtx.ID`.
-//   - data: The data to be passed to the interrupted component.
-func ResumeWithData(ctx context.Context, address string, data any) context.Context {
-	return BatchResumeWithData(ctx, map[string]any{address: data})
+// ResumeWithData prepares a context to resume a single, specific component with data.
+// It is the primary function for the "Explicit Targeted Resume" strategy when data is required.
+// It is a convenience wrapper around BatchResumeWithData.
+// The `interruptID` parameter is the unique interrupt ID of the target component.
+func ResumeWithData(ctx context.Context, interruptID string, data any) context.Context {
+	return BatchResumeWithData(ctx, map[string]any{interruptID: data})
 }
 
-// BatchResumeWithData attaches data to one or more interrupt points for resumption in a single batch operation.
-// This is the underlying function used by `Resume` and `ResumeWithData`.
+// BatchResumeWithData is the core function for preparing a resume context. It injects a map
+// of resume targets and their corresponding data into the context.
 //
-//   - ctx: The parent context.
-//   - resumeData: A map where keys are the unique interrupt point addresses and values are the data
-//     to be passed to the corresponding component.
+// The `resumeData` map should contain the interrupt IDs (which are the string form of addresses) of the
+// components to be resumed as keys. The value can be the resume data for that component, or `nil`
+// if no data is needed (equivalent to using `Resume`).
+//
+// This function is the foundation for the "Explicit Targeted Resume" strategy. Components whose interrupt IDs
+// are present as keys in the map will receive `isResumeFlow = true` when they call `GetResumeContext`.
 func BatchResumeWithData(ctx context.Context, resumeData map[string]any) context.Context {
 	rInfo, ok := ctx.Value(interruptCtxKey{}).(*resumeInfo)
 	if !ok {
