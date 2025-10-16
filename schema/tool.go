@@ -67,6 +67,8 @@ type ToolInfo struct {
 	// Extra is the extra information for the tool.
 	Extra map[string]any
 
+	Type string
+
 	// The parameters the functions accepts (different models may require different parameter types).
 	// can be described in two ways:
 	//  - use params: schema.NewParamsOneOfByParams(params)
@@ -86,6 +88,7 @@ type ParameterInfo struct {
 	SubParams map[string]*ParameterInfo
 	// The description of the parameter.
 	Desc string
+	
 	// The enum values of the parameter, only for string.
 	Enum []string
 	// Whether the parameter is required.
