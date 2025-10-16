@@ -58,6 +58,7 @@ const (
 	ComponentOfPrompt Component = "ChatTemplate"
 	// ComponentOfChatModel identifies chat model components.
 	ComponentOfChatModel Component = "ChatModel"
+	ComponentOfAgenticModel Component = "AgenticModel"
 	// ComponentOfEmbedding identifies embedding components.
 	ComponentOfEmbedding Component = "Embedding"
 	// ComponentOfIndexer identifies indexer components.
