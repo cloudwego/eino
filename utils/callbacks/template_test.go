@@ -30,6 +30,7 @@ import (
 	"github.com/cloudwego/eino/components/indexer"
 	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/components/prompt"
+	"github.com/cloudwego/eino/components/reranker"
 	"github.com/cloudwego/eino/components/retriever"
 	"github.com/cloudwego/eino/components/tool"
 	"github.com/cloudwego/eino/compose"
@@ -100,6 +101,20 @@ func TestNewComponentTemplate(t *testing.T) {
 					return ctx
 				},
 			}).
+			Reranker(&RerankerCallbackHandler{
+				OnStart: func(ctx context.Context, runInfo *callbacks.RunInfo, input *reranker.CallbackInput) context.Context {
+					cnt++
+					return ctx
+				},
+				OnEnd: func(ctx context.Context, runInfo *callbacks.RunInfo, output *reranker.CallbackOutput) context.Context {
+					cnt++
+					return ctx
+				},
+				OnError: func(ctx context.Context, info *callbacks.RunInfo, err error) context.Context {
+					cnt++
+					return ctx
+				},
+			}).
 			Tool(&ToolCallbackHandler{
 				OnStart: func(ctx context.Context, runInfo *callbacks.RunInfo, input *tool.CallbackInput) context.Context {
 					cnt++
@@ -148,6 +163,7 @@ func TestNewComponentTemplate(t *testing.T) {
 			components.ComponentOfChatModel,
 			components.ComponentOfEmbedding,
 			components.ComponentOfRetriever,
+			components.ComponentOfReranker,
 			components.ComponentOfTool,
 			compose.ComponentOfLambda,
 		}
@@ -168,28 +184,28 @@ func TestNewComponentTemplate(t *testing.T) {
 			handler.OnEndWithStreamOutput(ctx, &callbacks.RunInfo{Component: typ}, sor)
 		}
 
-		assert.Equal(t, 22, cnt)
+		assert.Equal(t, 25, cnt)
 
 		ctx = context.Background()
 		ctx = callbacks.InitCallbacks(ctx, &callbacks.RunInfo{Component: components.ComponentOfTransformer}, handler)
 		callbacks.OnStart[any](ctx, nil)
-		assert.Equal(t, 22, cnt)
+		assert.Equal(t, 25, cnt)
 
 		ctx = callbacks.ReuseHandlers(ctx, &callbacks.RunInfo{Component: components.ComponentOfPrompt})
 		ctx = callbacks.OnStart[any](ctx, nil)
-		assert.Equal(t, 23, cnt)
+		assert.Equal(t, 26, cnt)
 
 		ctx = callbacks.ReuseHandlers(ctx, &callbacks.RunInfo{Component: components.ComponentOfIndexer})
 		callbacks.OnEnd[any](ctx, nil)
-		assert.Equal(t, 23, cnt)
+		assert.Equal(t, 26, cnt)
 
 		ctx = callbacks.ReuseHandlers(ctx, &callbacks.RunInfo{Component: components.ComponentOfEmbedding})
 		callbacks.OnError(ctx, nil)
-		assert.Equal(t, 24, cnt)
+		assert.Equal(t, 27, cnt)
 
 		ctx = callbacks.ReuseHandlers(ctx, &callbacks.RunInfo{Component: components.ComponentOfLoader})
 		callbacks.OnStart[any](ctx, nil)
-		assert.Equal(t, 24, cnt)
+		assert.Equal(t, 27, cnt)
 
 		tpl.Transformer(&TransformerCallbackHandler{
 			OnStart: func(ctx context.Context, runInfo *callbacks.RunInfo, input *document.TransformerCallbackInput) context.Context {
@@ -256,35 +272,35 @@ func TestNewComponentTemplate(t *testing.T) {
 		ctx = callbacks.InitCallbacks(ctx, &callbacks.RunInfo{Component: components.ComponentOfTransformer}, handler)
 
 		ctx = callbacks.OnStart[any](ctx, nil)
-		assert.Equal(t, 25, cnt)
+		assert.Equal(t, 28, cnt)
 
 		callbacks.OnEnd[any](ctx, nil)
-		assert.Equal(t, 26, cnt)
+		assert.Equal(t, 29, cnt)
 
 		ctx = callbacks.ReuseHandlers(ctx, &callbacks.RunInfo{Component: components.ComponentOfLoader})
 		callbacks.OnEnd[any](ctx, nil)
-		assert.Equal(t, 27, cnt)
+		assert.Equal(t, 30, cnt)
 
 		ctx = callbacks.ReuseHandlers(ctx, &callbacks.RunInfo{Component: compose.ComponentOfToolsNode})
 		callbacks.OnStart[any](ctx, nil)
-		assert.Equal(t, 28, cnt)
+		assert.Equal(t, 31, cnt)
 
 		sr, sw := schema.Pipe[any](0)
 		sw.Close()
 		callbacks.OnEndWithStreamOutput[any](ctx, sr)
-		assert.Equal(t, 29, cnt)
+		assert.Equal(t, 32, cnt)
 
 		sr1, sw1 := schema.Pipe[[]*schema.Message](1)
 		sw1.Send([]*schema.Message{{}}, nil)
 		sw1.Close()
 		callbacks.OnEndWithStreamOutput[[]*schema.Message](ctx, sr1)
-		assert.Equal(t, 30, cnt)
+		assert.Equal(t, 33, cnt)
 
 		callbacks.OnError(ctx, nil)
-		assert.Equal(t, 30, cnt)
+		assert.Equal(t, 33, cnt)
 
 		ctx = callbacks.ReuseHandlers(ctx, nil)
 		callbacks.OnStart[any](ctx, nil)
-		assert.Equal(t, 30, cnt)
+		assert.Equal(t, 33, cnt)
 	})
 }

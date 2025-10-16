@@ -28,6 +28,7 @@ import (
 	"github.com/cloudwego/eino/components/indexer"
 	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/components/prompt"
+	"github.com/cloudwego/eino/components/reranker"
 	"github.com/cloudwego/eino/components/retriever"
 )
 
@@ -148,6 +149,15 @@ func WithEmbeddingOption(opts ...embedding.Option) Option {
 //	retrieverOption := compose.WithRetrieverOption(retriever.WithIndex("my_index"))
 //	runnable.Invoke(ctx, "input", retrieverOption)
 func WithRetrieverOption(opts ...retriever.Option) Option {
+	return withComponentOption(opts...)
+}
+
+// WithRerankerOption is a functional option type for reranker component.
+// e.g.
+//
+//	rerankerOption := compose.WithRerankerOption(reranker.WithTopK(10))
+//	runnable.Invoke(ctx, mapInput, rerankerOption)
+func WithRerankerOption(opts ...reranker.Option) Option {
 	return withComponentOption(opts...)
 }
 
