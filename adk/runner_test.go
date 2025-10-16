@@ -59,7 +59,7 @@ func (a *mockRunnerAgent) Run(_ context.Context, input *AgentInput, _ ...AgentRu
 			generator.Send(event)
 
 			// If the event has an Exit action, stop sending events
-			if event.Action != nil && event.Action.Exit {
+			if event.Action != nil && event.Action.NeedExit() {
 				break
 			}
 		}

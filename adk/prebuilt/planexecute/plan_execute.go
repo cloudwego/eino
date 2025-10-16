@@ -883,9 +883,10 @@ func New(ctx context.Context, cfg *Config) (adk.Agent, error) {
 		maxIterations = 10
 	}
 	loop, err := adk.NewLoopAgent(ctx, &adk.LoopAgentConfig{
-		Name:          "execute_replan",
-		SubAgents:     []adk.Agent{cfg.Executor, cfg.Replanner},
-		MaxIterations: maxIterations,
+		Name:                 "execute_replan",
+		SubAgents:            []adk.Agent{cfg.Executor, cfg.Replanner},
+		MaxIterations:        maxIterations,
+		ConsumeSubAgentExits: true,
 	})
 	if err != nil {
 		return nil, err

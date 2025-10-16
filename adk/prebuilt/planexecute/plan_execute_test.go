@@ -511,7 +511,7 @@ func TestReplannerRunWithRespond(t *testing.T) {
 	event, ok = iterator.Next()
 	assert.True(t, ok)
 	assert.NotNil(t, event.Action)
-	assert.True(t, event.Action.Exit)
+	assert.True(t, event.Action.NeedExit())
 
 	_, ok = iterator.Next()
 	assert.False(t, ok)

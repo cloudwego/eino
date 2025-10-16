@@ -135,18 +135,48 @@ func NewTransferToAgentAction(destAgentName string) *AgentAction {
 	return &AgentAction{TransferToAgent: &TransferToAgentAction{DestAgentName: destAgentName}}
 }
 
+// ExitAction represents a request to terminate the agent's execution.
+// It contains state about the exit, such as whether it has been consumed.
+type ExitAction struct {
+	Consumed bool
+}
+
+// NewExitAction creates a new agent action that signals a request to exit.
 func NewExitAction() *AgentAction {
-	return &AgentAction{Exit: true}
+	return &AgentAction{Exit: true, ExitAction: &ExitAction{Consumed: false}}
 }
 
 type AgentAction struct {
+	// deprecated: use ExitAction instead.
 	Exit bool
+
+	ExitAction *ExitAction
 
 	Interrupted *InterruptInfo
 
 	TransferToAgent *TransferToAgentAction
 
 	CustomizedAction any
+}
+
+// NeedExit checks if the action represents a terminating exit.
+// It returns true if the action is an exit and has not been consumed.
+// This is the primary method that agent runners and workflows should use to decide whether to halt execution.
+func (aa *AgentAction) NeedExit() bool {
+	if aa.ExitAction != nil && aa.ExitAction.Consumed {
+		return false
+	}
+
+	return aa.Exit || aa.ExitAction != nil
+}
+
+// ConsumeExit marks the exit action as consumed.
+// A consumed exit action will no longer be considered a terminating event by NeedExit(),
+// allowing parent workflows to continue execution.
+func (aa *AgentAction) ConsumeExit() {
+	if aa.ExitAction != nil {
+		aa.ExitAction.Consumed = true
+	}
 }
 
 type RunStep struct {

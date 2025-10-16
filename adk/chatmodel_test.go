@@ -334,7 +334,7 @@ func TestExitTool(t *testing.T) {
 
 	// Verify the action is Exit
 	assert.NotNil(t, event2.Action)
-	assert.True(t, event2.Action.Exit)
+	assert.True(t, event2.Action.NeedExit())
 
 	// Verify the final result
 	assert.Equal(t, "This is the final result", event2.Output.MessageOutput.Message.Content)

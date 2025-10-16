@@ -52,7 +52,7 @@ func (a *mockAgentForTool) Run(_ context.Context, _ *AgentInput, _ ...AgentRunOp
 			generator.Send(event)
 
 			// If the event has an Exit action, stop sending events
-			if event.Action != nil && event.Action.Exit {
+			if event.Action != nil && event.Action.NeedExit() {
 				break
 			}
 		}

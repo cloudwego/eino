@@ -195,6 +195,10 @@ func (r *Runner) handleIter(ctx context.Context, aIter *AsyncIterator[*AgentEven
 			interruptedInfo = nil
 		}
 
+		if event.Action != nil && event.Action.NeedExit() {
+			event.Action.ConsumeExit() // consume the exit action, keep the exit signal within our own scope
+		}
+
 		gen.Send(event)
 	}
 

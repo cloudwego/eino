@@ -43,6 +43,8 @@ type workflowAgent struct {
 	mode workflowAgentMode
 
 	maxIterations int
+
+	consumeSubAgentExits bool
 }
 
 func (a *workflowAgent) Name(_ context.Context) string {
@@ -157,7 +159,7 @@ type WorkflowInterruptInfo struct {
 
 func (a *workflowAgent) runSequential(ctx context.Context,
 	generator *AsyncGenerator[*AgentEvent], seqState *sequentialWorkflowState, info *ResumeInfo,
-	iterations int /*passed by loop agent*/, opts ...AgentRunOption) (exit, interrupted bool) {
+	iterations int /*passed by loop agent*/, opts ...AgentRunOption) {
 
 	startIdx := 0
 	var nextResumeInfo *ResumeInfo
@@ -214,7 +216,7 @@ func (a *workflowAgent) runSequential(ctx context.Context,
 			if event.Err != nil {
 				// exit if report error
 				generator.Send(event)
-				return true, false
+				return
 			}
 
 			if lastActionEvent != nil {
@@ -257,18 +259,21 @@ func (a *workflowAgent) runSequential(ctx context.Context,
 					RunPath:   lastActionEvent.RunPath,
 					Action:    action,
 				})
-				return true, true
+				return
 			}
 
-			if lastActionEvent.Action.Exit {
-				// Forward the event
+			if lastActionEvent.Action.NeedExit() {
+				if a.consumeSubAgentExits {
+					lastActionEvent.Action.ConsumeExit()
+				}
 				generator.Send(lastActionEvent)
-				return true, false
+				return
 			}
+			generator.Send(lastActionEvent)
 		}
 	}
 
-	return false, false
+	return
 }
 
 func (a *workflowAgent) runLoop(ctx context.Context, generator *AsyncGenerator[*AgentEvent],
@@ -379,11 +384,15 @@ func (a *workflowAgent) runLoop(ctx context.Context, generator *AsyncGenerator[*
 					return // Exit the whole loop.
 				}
 
-				if lastActionEvent.Action.Exit {
-					// Forward the event and exit the entire loop.
+				if lastActionEvent.Action.NeedExit() {
+					if a.consumeSubAgentExits {
+						lastActionEvent.Action.ConsumeExit()
+					}
 					generator.Send(lastActionEvent)
 					return
 				}
+
+				generator.Send(lastActionEvent)
 			}
 		}
 
@@ -452,13 +461,22 @@ func (a *workflowAgent) runParallel(ctx context.Context, generator *AsyncGenerat
 				if !ok {
 					break
 				}
-				if event.Action != nil && event.Action.Interrupted != nil {
-					mu.Lock()
-					// We only need to store the raw interrupt info to pass to the parent.
-					// The index is not part of the state.
-					interruptMap[idx] = event.Action.Interrupted
-					mu.Unlock()
-					break // Stop processing this branch after an interrupt.
+				if event.Action != nil {
+					if event.Action.Interrupted != nil {
+						mu.Lock()
+						// We only need to store the raw interrupt info to pass to the parent.
+						// The index is not part of the state.
+						interruptMap[idx] = event.Action.Interrupted
+						mu.Unlock()
+						break // Stop processing this branch after an interrupt.
+					}
+					if event.Action.NeedExit() {
+						if a.consumeSubAgentExits {
+							event.Action.ConsumeExit()
+						}
+						generator.Send(event)
+						break
+					}
 				}
 				// Forward the event
 				generator.Send(event)
@@ -496,12 +514,29 @@ type SequentialAgentConfig struct {
 	Name        string
 	Description string
 	SubAgents   []Agent
+
+	// ConsumeSubAgentExits determines the behavior when a sub-agent emits an ExitAction.
+	// If set to true, the sequential workflow will "consume" the exit. This means
+	// it will stop executing any subsequent agents in the sequence, but the
+	// workflow itself will not propagate a terminating exit. The parent of this
+	// sequential agent will continue its execution.
+	// If false (the default), the ExitAction is propagated upwards, terminating
+	// this workflow and potentially its parents.
+	ConsumeSubAgentExits bool
 }
 
 type ParallelAgentConfig struct {
 	Name        string
 	Description string
 	SubAgents   []Agent
+
+	// ConsumeSubAgentExits determines the behavior when a sub-agent emits an ExitAction.
+	// If set to true, the parallel workflow will "consume" the exit from a branch.
+	// This means other parallel branches will continue to run to completion, and
+	// the workflow itself will not propagate a terminating exit.
+	// If false (the default), the ExitAction is propagated upwards immediately,
+	// which will typically lead to the termination of the entire parallel execution.
+	ConsumeSubAgentExits bool
 }
 
 type LoopAgentConfig struct {
@@ -510,17 +545,26 @@ type LoopAgentConfig struct {
 	SubAgents   []Agent
 
 	MaxIterations int
+
+	// ConsumeSubAgentExits determines the behavior when a sub-agent emits an ExitAction.
+	// If set to true, the loop workflow will "consume" the exit. This means
+	// the current iteration will stop, and the loop will terminate (it will not
+	// proceed to the next iteration), but the workflow itself will not propagate a
+	// terminating exit. The parent of this loop agent will continue its execution.
+	// If false (the default), the ExitAction is propagated upwards, terminating
+	// this workflow and potentially its parents.
+	ConsumeSubAgentExits bool
 }
 
 func newWorkflowAgent(ctx context.Context, name, desc string,
-	subAgents []Agent, mode workflowAgentMode, maxIterations int) (*flowAgent, error) {
+	subAgents []Agent, mode workflowAgentMode, maxIterations int, consumeSubAgentExits bool) (*flowAgent, error) {
 
 	wa := &workflowAgent{
-		name:        name,
-		description: desc,
-		mode:        mode,
-
-		maxIterations: maxIterations,
+		name:                 name,
+		description:          desc,
+		mode:                 mode,
+		maxIterations:        maxIterations,
+		consumeSubAgentExits: consumeSubAgentExits,
 	}
 
 	fas := make([]Agent, len(subAgents))
@@ -539,13 +583,13 @@ func newWorkflowAgent(ctx context.Context, name, desc string,
 }
 
 func NewSequentialAgent(ctx context.Context, config *SequentialAgentConfig) (Agent, error) {
-	return newWorkflowAgent(ctx, config.Name, config.Description, config.SubAgents, workflowAgentModeSequential, 0)
+	return newWorkflowAgent(ctx, config.Name, config.Description, config.SubAgents, workflowAgentModeSequential, 0, config.ConsumeSubAgentExits)
 }
 
 func NewParallelAgent(ctx context.Context, config *ParallelAgentConfig) (Agent, error) {
-	return newWorkflowAgent(ctx, config.Name, config.Description, config.SubAgents, workflowAgentModeParallel, 0)
+	return newWorkflowAgent(ctx, config.Name, config.Description, config.SubAgents, workflowAgentModeParallel, 0, config.ConsumeSubAgentExits)
 }
 
 func NewLoopAgent(ctx context.Context, config *LoopAgentConfig) (Agent, error) {
-	return newWorkflowAgent(ctx, config.Name, config.Description, config.SubAgents, workflowAgentModeLoop, config.MaxIterations)
+	return newWorkflowAgent(ctx, config.Name, config.Description, config.SubAgents, workflowAgentModeLoop, config.MaxIterations, config.ConsumeSubAgentExits)
 }

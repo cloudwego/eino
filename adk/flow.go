@@ -428,7 +428,7 @@ func (a *flowAgent) run(
 			appendInterruptRunCtx(ctx, runCtx)
 			return
 		}
-		if lastAction.Exit {
+		if lastAction.NeedExit() { // do not consume the exit action, let the parent do it
 			return
 		}
 

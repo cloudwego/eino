@@ -50,7 +50,7 @@ func (a *mockAgent) Run(_ context.Context, _ *AgentInput, _ ...AgentRunOption) *
 			generator.Send(event)
 
 			// If the event has an Exit action, stop sending events
-			if event.Action != nil && event.Action.Exit {
+			if event.Action != nil && event.Action.NeedExit() {
 				break
 			}
 		}
@@ -167,9 +167,7 @@ func TestSequentialAgentWithExit(t *testing.T) {
 					Role:        schema.Assistant,
 				},
 			},
-			Action: &AgentAction{
-				Exit: true,
-			},
+			Action: NewExitAction(),
 		},
 	})
 
@@ -215,11 +213,49 @@ func TestSequentialAgentWithExit(t *testing.T) {
 	assert.NotNil(t, event1.Output)
 	assert.NotNil(t, event1.Output.MessageOutput)
 	assert.NotNil(t, event1.Action)
-	assert.True(t, event1.Action.Exit)
+	assert.True(t, event1.Action.NeedExit())
 
 	// No more events due to exit action
 	_, ok = iterator.Next()
 	assert.False(t, ok)
+
+	t.Run("sequential agent that consumes exits", func(t *testing.T) {
+		// Create a sequential agent with the mock agents
+		config := &SequentialAgentConfig{
+			Name:                 "SequentialTestAgent",
+			Description:          "Test sequential agent",
+			SubAgents:            []Agent{agent1, agent2},
+			ConsumeSubAgentExits: true,
+		}
+
+		sequentialAgent, err := NewSequentialAgent(ctx, config)
+		assert.NoError(t, err)
+		assert.NotNil(t, sequentialAgent)
+
+		// Run the sequential agent
+		input := &AgentInput{
+			Messages: []Message{
+				schema.UserMessage("Test input"),
+			},
+		}
+
+		iterator := sequentialAgent.Run(ctx, input)
+		assert.NotNil(t, iterator)
+
+		// First event should be from agent1 with exit action
+		event1, ok := iterator.Next()
+		assert.True(t, ok)
+		assert.NotNil(t, event1)
+		assert.Nil(t, event1.Err)
+		assert.NotNil(t, event1.Output)
+		assert.NotNil(t, event1.Output.MessageOutput)
+		assert.NotNil(t, event1.Action)
+		assert.False(t, event1.Action.NeedExit())
+
+		// No more events due to exit action
+		_, ok = iterator.Next()
+		assert.False(t, ok)
+	})
 }
 
 // TestParallelAgent tests the parallel workflow agent
@@ -389,9 +425,7 @@ func TestLoopAgentWithExit(t *testing.T) {
 					Role:        schema.Assistant,
 				},
 			},
-			Action: &AgentAction{
-				Exit: true,
-			},
+			Action: NewExitAction(),
 		},
 	})
 
@@ -436,14 +470,65 @@ func TestLoopAgentWithExit(t *testing.T) {
 	assert.NotNil(t, event.Output)
 	assert.NotNil(t, event.Output.MessageOutput)
 	assert.NotNil(t, event.Action)
-	assert.True(t, event.Action.Exit)
+	assert.True(t, event.Action.NeedExit())
 
 	msg := event.Output.MessageOutput.Message
 	assert.NotNil(t, msg)
 	assert.Equal(t, "Loop iteration with exit", msg.Content)
-}
 
-// Add these test functions to the existing workflow_test.go file
+	t.Run("loop agent that consumes exit", func(t *testing.T) {
+		// create a loop agent that consumes exit action
+		loopConfig := &LoopAgentConfig{
+			Name:                 "LoopTestAgent",
+			Description:          "Test loop agent",
+			SubAgents:            []Agent{agent},
+			MaxIterations:        3,
+			ConsumeSubAgentExits: true,
+		}
+		loopAgent, err := NewLoopAgent(ctx, loopConfig)
+		assert.NoError(t, err)
+
+		// then put the loop agent inside a sequential agent
+		nextAgent := newMockAgent("NextAgent", "Next agent", []*AgentEvent{
+			{
+				AgentName: "NextAgent",
+				Output: &AgentOutput{
+					MessageOutput: &MessageVariant{
+						IsStreaming: false,
+						Message:     schema.AssistantMessage("next agent executed", nil),
+						Role:        schema.Assistant,
+					},
+				},
+			},
+		})
+		seqConfig := &SequentialAgentConfig{
+			Name:        "SequentialTestAgent",
+			Description: "Test sequential agent",
+			SubAgents:   []Agent{loopAgent, nextAgent},
+		}
+		seqAgent, err := NewSequentialAgent(ctx, seqConfig)
+		assert.NoError(t, err)
+
+		// make the loop agent's inner agent emits exit action
+		iterator := seqAgent.Run(ctx, input)
+		assert.NotNil(t, iterator)
+
+		// verify two main things: 1. the exit action finally returned to end-user is consumed
+		// 2. the top level sequential agent gets fully executed, not terminated by the exit action of loop agent
+		events := make([]*AgentEvent, 0)
+		for {
+			event, ok := iterator.Next()
+			if !ok {
+				break
+			}
+			events = append(events, event)
+		}
+
+		assert.Equal(t, 2, len(events))
+		assert.False(t, events[0].Action.NeedExit())
+		assert.Equal(t, "next agent executed", events[1].Output.MessageOutput.Message.Content)
+	})
+}
 
 // Replace the existing TestWorkflowAgentPanicRecovery function
 func TestWorkflowAgentPanicRecovery(t *testing.T) {
