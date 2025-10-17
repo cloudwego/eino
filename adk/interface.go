@@ -146,6 +146,8 @@ type AgentAction struct {
 
 	TransferToAgent *TransferToAgentAction
 
+	BreakLoop *BreakLoopAction
+
 	CustomizedAction any
 }
 
