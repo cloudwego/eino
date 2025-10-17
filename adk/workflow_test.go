@@ -374,24 +374,22 @@ func TestLoopAgent(t *testing.T) {
 	}
 }
 
-// TestLoopAgentWithExit tests the loop workflow agent with an exit action
-func TestLoopAgentWithExit(t *testing.T) {
+// TestLoopAgentWithBreakLoop tests the loop workflow agent with an break loop action
+func TestLoopAgentWithBreakLoop(t *testing.T) {
 	ctx := context.Background()
 
-	// Create a mock agent that will exit after the first iteration
+	// Create a mock agent that will break the loop after the first iteration
 	agent := newMockAgent("LoopAgent", "Loop agent", []*AgentEvent{
 		{
 			AgentName: "LoopAgent",
 			Output: &AgentOutput{
 				MessageOutput: &MessageVariant{
 					IsStreaming: false,
-					Message:     schema.AssistantMessage("Loop iteration with exit", nil),
+					Message:     schema.AssistantMessage("Loop iteration with break loop", nil),
 					Role:        schema.Assistant,
 				},
 			},
-			Action: &AgentAction{
-				Exit: true,
-			},
+			Action: NewBreakLoopAction("LoopAgent"),
 		},
 	})
 
@@ -427,7 +425,7 @@ func TestLoopAgentWithExit(t *testing.T) {
 		events = append(events, event)
 	}
 
-	// Should have only 1 event due to exit action
+	// Should have only 1 event due to break loop action
 	assert.Equal(t, 1, len(events))
 
 	// Verify the event
@@ -436,11 +434,14 @@ func TestLoopAgentWithExit(t *testing.T) {
 	assert.NotNil(t, event.Output)
 	assert.NotNil(t, event.Output.MessageOutput)
 	assert.NotNil(t, event.Action)
-	assert.True(t, event.Action.Exit)
+	assert.NotNil(t, event.Action.BreakLoop)
+	assert.True(t, event.Action.BreakLoop.Done)
+	assert.Equal(t, "LoopAgent", event.Action.BreakLoop.From)
+	assert.Equal(t, 0, event.Action.BreakLoop.CurrentIterations)
 
 	msg := event.Output.MessageOutput.Message
 	assert.NotNil(t, msg)
-	assert.Equal(t, "Loop iteration with exit", msg.Content)
+	assert.Equal(t, "Loop iteration with break loop", msg.Content)
 }
 
 // Add these test functions to the existing workflow_test.go file

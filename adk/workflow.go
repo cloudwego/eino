@@ -233,6 +233,14 @@ func (a *workflowAgent) runSequential(ctx context.Context, input *AgentInput,
 				generator.Send(lastActionEvent)
 				return true, false
 			}
+
+			if a.doBreakLoopIfNeeded(lastActionEvent.Action, iterations) {
+				lastActionEvent.Action.BreakLoop.CurrentIterations = iterations
+				generator.Send(lastActionEvent)
+				return true, false
+			}
+
+			generator.Send(lastActionEvent)
 		}
 	}
 
@@ -259,6 +267,45 @@ func wrapWorkflowInterrupt(e *AgentEvent, origInput *AgentInput, seqIdx int, ite
 		LoopIterations:           iterations,
 	}
 	return newEvent
+}
+
+// BreakLoopAction is a programmatic-only agent action used to prematurely
+// terminate the execution of a loop workflow agent.
+// When a loop workflow agent receives this action from a sub-agent, it will stop its
+// current iteration and will not proceed to the next one.
+// It will mark the BreakLoopAction as Done, signalling to any 'upper level' loop agent
+// that this action has been processed and should be ignored further up.
+// This action is not intended to be used by LLMs.
+type BreakLoopAction struct {
+	// From records the name of the agent that initiated the break loop action.
+	From string
+	// Done is a state flag that can be used by the framework to mark when the
+	// action has been handled.
+	Done bool
+	// CurrentIterations is populated by the framework to record at which
+	// iteration the loop was broken.
+	CurrentIterations int
+}
+
+// NewBreakLoopAction creates a new BreakLoopAction, signaling a request
+// to terminate the current loop.
+func NewBreakLoopAction(agentName string) *AgentAction {
+	return &AgentAction{BreakLoop: &BreakLoopAction{
+		From: agentName,
+	}}
+}
+
+func (a *workflowAgent) doBreakLoopIfNeeded(aa *AgentAction, iterations int) bool {
+	if a.mode != workflowAgentModeLoop {
+		return false
+	}
+
+	if aa != nil && aa.BreakLoop != nil && !aa.BreakLoop.Done {
+		aa.BreakLoop.Done = true
+		aa.BreakLoop.CurrentIterations = iterations
+		return true
+	}
+	return false
 }
 
 func (a *workflowAgent) runLoop(ctx context.Context, input *AgentInput,

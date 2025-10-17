@@ -739,7 +739,7 @@ func (r *replanner) Run(ctx context.Context, input *adk.AgentInput, _ ...adk.Age
 			s.Close()
 
 			if isResponse {
-				action := adk.NewExitAction()
+				action := adk.NewBreakLoopAction(r.Name(ctx))
 				generator.Send(&adk.AgentEvent{Action: action})
 				return
 			}
