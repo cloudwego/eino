@@ -1,3 +1,19 @@
+/*
+ * Copyright 2025 CloudWeGo Authors
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 package deep
 
 import (
@@ -14,6 +30,7 @@ import (
 	"github.com/cloudwego/eino/components/tool/utils"
 	"github.com/cloudwego/eino/compose"
 )
+
 // Config defines the configuration for creating a DeepAgent.
 type Config struct {
 	// Name is the identifier for the Deep agent.
@@ -72,12 +89,24 @@ func newTaskTool(
 		return nil, fmt.Errorf("failed to new general agent: %w", err)
 	}
 
-	t := &taskTool{subAgents: map[string]tool.InvokableTool{generalAgent.Name(ctx): adk.NewAgentTool(ctx, generalAgent)}}
+	it, err := assertAgentTool(adk.NewAgentTool(ctx, generalAgent))
+	if err != nil {
+		return nil, err
+	}
+	t := &taskTool{
+		subAgents: map[string]tool.InvokableTool{
+			generalAgent.Name(ctx): it,
+		},
+	}
 	subAgentsDescBuilder := strings.Builder{}
 	for _, a := range subAgents {
 		name := a.Name(ctx)
 		desc := a.Description(ctx)
-		t.subAgents[name] = adk.NewAgentTool(ctx, a)
+		it, err = assertAgentTool(adk.NewAgentTool(ctx, a))
+		if err != nil {
+			return nil, err
+		}
+		t.subAgents[name] = it
 		subAgentsDescBuilder.WriteString(fmt.Sprintf("- %s: %s\n", name, desc))
 	}
 
@@ -88,9 +117,17 @@ func newTaskTool(
 		return nil, fmt.Errorf("failed to format task tool description: %w", err)
 	}
 
-	it, err := utils.InferTool("task", desc, t.exec)
+	it, err = utils.InferTool(taskToolName, desc, t.exec)
 	if err != nil {
 		return nil, fmt.Errorf("failed to infer task tool: %w", err)
+	}
+	return it, nil
+}
+
+func assertAgentTool(t tool.BaseTool) (tool.InvokableTool, error) {
+	it, ok := t.(tool.InvokableTool)
+	if !ok {
+		return nil, fmt.Errorf("failed to assert agent tool type: %T", t)
 	}
 	return it, nil
 }
