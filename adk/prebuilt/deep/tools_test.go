@@ -16,11 +16,32 @@
 
 package deep
 
-const (
-	generalAgentName = "general-purpose"
-	taskToolName     = "task"
+import (
+	"context"
+	"testing"
+
+	"github.com/stretchr/testify/assert"
 )
 
-const (
-	SessionKeyTodos = "deep_agent_session_key_todos"
-)
+func TestWriteTodosTool(t *testing.T) {
+	wtt, err := newWriteTodosTool()
+	assert.NoError(t, err)
+
+	_, err = wtt.InvokableRun(context.Background(), `{
+	"todos": [
+		{
+			"content": "1",
+			"status": "completed"
+		},
+		{
+			"content": "2",
+			"status": "in_progress"
+		},
+		{
+			"content": "3",
+			"status": "pending"
+		}
+	]
+}`)
+	assert.NoError(t, err)
+}
