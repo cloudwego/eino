@@ -1,8 +1,24 @@
+/*
+ * Copyright 2025 CloudWeGo Authors
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 package deep
 
 // This file contains prompt templates and tool descriptions adapted from the DeepAgents project.
 // Original source: https://github.com/langchain-ai/deepagents
-// 
+//
 // These prompts are used under the terms of the original project's open source license.
 // When using this code in your own open source project, ensure compliance with the original license requirements.
 
@@ -168,7 +184,7 @@ assistant: "I'm going to use the Task tool to launch with the greeting-responder
 `
 	writeTodosToolDescription = `Use this tool to create and manage a structured task list for your current work session. This helps you track progress, organize complex tasks, and demonstrate thoroughness to the user.
 It also helps the user understand the progress of the task and overall progress of their requests.
-Only use this tool if you think it will be helpful in staying organized. If the user's request is trivial and takes less than 3 steps, it is better to NOT use this tool and just do the taks directly.
+Only use this tool if you think it will be helpful in staying organized. If the user's request is trivial and takes less than 3 steps, it is better to NOT use this tool and just do the task directly.
 
 ## When to Use This Tool
 Use this tool in these scenarios:
