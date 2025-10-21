@@ -16,6 +16,12 @@
 
 package deep
 
+import (
+	"fmt"
+
+	"github.com/cloudwego/eino/components/tool"
+)
+
 const (
 	generalAgentName = "general-purpose"
 	taskToolName     = "task"
@@ -24,3 +30,11 @@ const (
 const (
 	SessionKeyTodos = "deep_agent_session_key_todos"
 )
+
+func assertAgentTool(t tool.BaseTool) (tool.InvokableTool, error) {
+	it, ok := t.(tool.InvokableTool)
+	if !ok {
+		return nil, fmt.Errorf("failed to assert agent tool type: %T", t)
+	}
+	return it, nil
+}

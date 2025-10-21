@@ -33,9 +33,12 @@ func TestTaskTool(t *testing.T) {
 	ctx := context.Background()
 	tt, err := newTaskTool(
 		ctx,
-		&myChatModel{},
 		nil,
+		&myChatModel{},
 		[]adk.Agent{a1, a2},
+		false,
+		adk.ToolsConfig{},
+		nil,
 	)
 	assert.NoError(t, err)
 	result, err := tt.InvokableRun(ctx, `{"subagent_type":"1"}`)
