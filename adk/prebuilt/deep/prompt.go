@@ -70,11 +70,11 @@ When NOT to use the task tool:
 	baseAgentPrompt = `
 In order to complete the objective that the user asks of you, you have access to a number of standard tools.
 `
-	taskToolDescription = `
+	generalAgentDescription = `General-purpose agent for researching complex questions, searching for files and content, and executing multi-step tasks. When you are searching for a keyword or file and are not confident that you will find the right match in the first few tries use this agent to perform the search for you. This agent has access to all tools as the main agent.`
+	taskToolDescription     = `
 Launch an ephemeral subagent to handle complex, multi-step independent tasks with isolated context windows. 
 
 Available agent types and the tools they have access to:
-- general-purpose: General-purpose agent for researching complex questions, searching for files and content, and executing multi-step tasks. When you are searching for a keyword or file and are not confident that you will find the right match in the first few tries use this agent to perform the search for you. This agent has access to all tools as the main agent.
 {other_agents}
 
 When using the Task tool, you must specify a subagent_type parameter to select which agent type to use.
