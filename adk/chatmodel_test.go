@@ -20,6 +20,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"go.uber.org/mock/gomock"
@@ -342,4 +343,94 @@ func TestExitTool(t *testing.T) {
 	// No more events
 	_, ok = iterator.Next()
 	assert.False(t, ok)
+}
+
+func TestParallelReturnDirectlyToolCall(t *testing.T) {
+	ctx := context.Background()
+	// Create a mock controller
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	// Create a mock chat model
+	cm := mockModel.NewMockToolCallingChatModel(ctrl)
+
+	// Set up expectations for the mock model
+	// First call: model generates a message with Exit tool call
+	cm.EXPECT().Generate(gomock.Any(), gomock.Any(), gomock.Any()).
+		Return(schema.AssistantMessage("I'll exit with a final result",
+			[]schema.ToolCall{
+				{
+					ID:       "tool-call-1",
+					Function: schema.FunctionCall{Name: "tool1"},
+				},
+				{
+					ID:       "tool-call-2",
+					Function: schema.FunctionCall{Name: "tool2"},
+				},
+				{
+					ID:       "tool-call-3",
+					Function: schema.FunctionCall{Name: "tool3"},
+				},
+			}), nil).
+		Times(1)
+
+	// Model should implement WithTools
+	cm.EXPECT().WithTools(gomock.Any()).Return(cm, nil).AnyTimes()
+
+	// Create an agent with the Exit tool
+	agent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+		Name:        "TestAgent",
+		Description: "Test agent with Exit tool",
+		Instruction: "You are a helpful assistant.",
+		Model:       cm,
+		ToolsConfig: ToolsConfig{
+			ToolsNodeConfig: compose.ToolsNodeConfig{
+				Tools: []tool.BaseTool{
+					&myTool{name: "tool1", desc: "tool1", waitTime: time.Millisecond},
+					&myTool{name: "tool2", desc: "tool2", waitTime: 10 * time.Millisecond},
+					&myTool{name: "tool3", desc: "tool3", waitTime: 100 * time.Millisecond},
+				},
+			},
+			ReturnDirectly: map[string]bool{
+				"tool1": true,
+			},
+		},
+	})
+	assert.NoError(t, err)
+	assert.NotNil(t, agent)
+
+	r := NewRunner(ctx, RunnerConfig{
+		Agent: agent,
+	})
+	iter := r.Query(ctx, "")
+	times := 0
+	for {
+		e, ok := iter.Next()
+		if !ok {
+			assert.Equal(t, 4, times)
+			break
+		}
+		if times == 3 {
+			assert.Equal(t, "tool1", e.Output.MessageOutput.Message.ToolName)
+		}
+		times++
+	}
+}
+
+type myTool struct {
+	name     string
+	desc     string
+	waitTime time.Duration
+}
+
+func (m *myTool) Info(ctx context.Context) (*schema.ToolInfo, error) {
+	return &schema.ToolInfo{
+		Name: m.name,
+		Desc: m.desc,
+	}, nil
+}
+
+func (m *myTool) InvokableRun(ctx context.Context, argumentsInJSON string, opts ...tool.Option) (string, error) {
+	time.Sleep(m.waitTime)
+	return "success", nil
 }

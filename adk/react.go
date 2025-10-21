@@ -31,6 +31,7 @@ var ErrExceedMaxIterations = errors.New("exceeds max iterations")
 type State struct {
 	Messages []Message
 
+	HasReturnDirectly        bool
 	ReturnDirectlyToolCallID string
 
 	ToolGenActions map[string]*AgentAction
@@ -103,16 +104,18 @@ type reactGraph = *compose.Graph[[]Message, Message]
 type sToolNodeOutput = *schema.StreamReader[[]Message]
 type sGraphOutput = MessageStream
 
-func getReturnDirectlyToolCallID(ctx context.Context) string {
+func getReturnDirectlyToolCallID(ctx context.Context) (string, bool) {
 	var toolCallID string
+	var hasReturnDirectly bool
 	handler := func(_ context.Context, st *State) error {
 		toolCallID = st.ReturnDirectlyToolCallID
+		hasReturnDirectly = st.HasReturnDirectly
 		return nil
 	}
 
 	_ = compose.ProcessState(ctx, handler)
 
-	return toolCallID
+	return toolCallID, hasReturnDirectly
 }
 
 func newReact(ctx context.Context, config *reactConfig) (reactGraph, error) {
@@ -176,6 +179,7 @@ func newReact(ctx context.Context, config *reactConfig) (reactGraph, error) {
 				toolName := input.ToolCalls[i].Function.Name
 				if config.toolsReturnDirectly[toolName] {
 					st.ReturnDirectlyToolCallID = input.ToolCalls[i].ID
+					st.HasReturnDirectly = true
 				}
 			}
 		}
@@ -216,7 +220,7 @@ func newReact(ctx context.Context, config *reactConfig) (reactGraph, error) {
 		)
 
 		cvt := func(ctx context.Context, sToolCallMessages sToolNodeOutput) (sGraphOutput, error) {
-			id := getReturnDirectlyToolCallID(ctx)
+			id, _ := getReturnDirectlyToolCallID(ctx)
 
 			return schema.StreamReaderWithConvert(sToolCallMessages,
 				func(in []Message) (Message, error) {
@@ -238,9 +242,9 @@ func newReact(ctx context.Context, config *reactConfig) (reactGraph, error) {
 		checkReturnDirect := func(ctx context.Context,
 			sToolCallMessages sToolNodeOutput) (string, error) {
 
-			id := getReturnDirectlyToolCallID(ctx)
+			_, ok := getReturnDirectlyToolCallID(ctx)
 
-			if len(id) != 0 {
+			if ok {
 				return toolNodeToEndConverter, nil
 			}
 

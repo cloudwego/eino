@@ -338,8 +338,9 @@ type cbHandler struct {
 	*AsyncGenerator[*AgentEvent]
 	agentName string
 
-	enableStreaming bool
-	store           *mockStore
+	enableStreaming         bool
+	store                   *mockStore
+	returnDirectlyToolEvent atomic.Value
 }
 
 func (h *cbHandler) onChatModelEnd(ctx context.Context,
@@ -373,8 +374,13 @@ func (h *cbHandler) onToolEnd(ctx context.Context,
 	action := popToolGenAction(ctx, runInfo.Name)
 	event.Action = action
 
-	h.Send(event)
-
+	returnDirectlyID, hasReturnDirectly := getReturnDirectlyToolCallID(ctx)
+	if hasReturnDirectly && returnDirectlyID == toolCallID {
+		// return-directly tool event will be sent on the end of tools node to ensure this event must be the last tool event.
+		h.returnDirectlyToolEvent.Store(event)
+	} else {
+		h.Send(event)
+	}
 	return ctx
 }
 
@@ -387,8 +393,31 @@ func (h *cbHandler) onToolEndWithStreamOutput(ctx context.Context,
 	}
 	out := schema.StreamReaderWithConvert(output, cvt)
 	event := EventFromMessage(nil, out, schema.Tool, runInfo.Name)
-	h.Send(event)
 
+	returnDirectlyID, hasReturnDirectly := getReturnDirectlyToolCallID(ctx)
+	if hasReturnDirectly && returnDirectlyID == toolCallID {
+		// return-directly tool event will be sent on the end of tools node to ensure this event must be the last tool event.
+		h.returnDirectlyToolEvent.Store(event)
+	} else {
+		h.Send(event)
+	}
+
+	return ctx
+}
+
+func (h *cbHandler) sendReturnDirectlyToolEvent() {
+	if e, ok := h.returnDirectlyToolEvent.Load().(*AgentEvent); ok && e != nil {
+		h.Send(e)
+	}
+}
+
+func (h *cbHandler) onToolsNodeEnd(ctx context.Context, _ *callbacks.RunInfo, _ []*schema.Message) context.Context {
+	h.sendReturnDirectlyToolEvent()
+	return ctx
+}
+
+func (h *cbHandler) onToolsNodeEndWithStreamOutput(ctx context.Context, _ *callbacks.RunInfo, _ *schema.StreamReader[[]*schema.Message]) context.Context {
+	h.sendReturnDirectlyToolEvent()
 	return ctx
 }
 
@@ -443,9 +472,13 @@ func genReactCallbacks(agentName string,
 		OnEnd:                 h.onToolEnd,
 		OnEndWithStreamOutput: h.onToolEndWithStreamOutput,
 	}
+	toolsNodeHandler := &ub.ToolsNodeCallbackHandlers{
+		OnEnd:                 h.onToolsNodeEnd,
+		OnEndWithStreamOutput: h.onToolsNodeEndWithStreamOutput,
+	}
 	graphHandler := callbacks.NewHandlerBuilder().OnErrorFn(h.onGraphError).Build()
 
-	cb := ub.NewHandlerHelper().ChatModel(cmHandler).Tool(toolHandler).Graph(graphHandler).Handler()
+	cb := ub.NewHandlerHelper().ChatModel(cmHandler).Tool(toolHandler).ToolsNode(toolsNodeHandler).Graph(graphHandler).Handler()
 
 	return compose.WithCallbacks(cb)
 }
