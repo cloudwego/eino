@@ -27,13 +27,15 @@ import (
 	"github.com/cloudwego/eino/components/tool/utils"
 )
 
-func newBuiltinTools() ([]tool.BaseTool, error) {
+func newBuiltinTools(withoutWriteTodos bool) ([]tool.BaseTool, error) {
 	var ts []tool.BaseTool
-	t, err := newWriteTodosTool()
-	if err != nil {
-		return nil, err
+	if !withoutWriteTodos {
+		t, err := newWriteTodosTool()
+		if err != nil {
+			return nil, err
+		}
+		ts = append(ts, t)
 	}
-	ts = append(ts, t)
 
 	return ts, nil
 }
