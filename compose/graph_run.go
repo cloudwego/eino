@@ -23,6 +23,7 @@ import (
 	"reflect"
 	"strings"
 
+	"github.com/cloudwego/eino/core"
 	"github.com/cloudwego/eino/internal"
 	"github.com/cloudwego/eino/internal/serialization"
 )
@@ -379,12 +380,9 @@ func (r *runner) restoreFromCheckPoint(
 		}
 	}
 	if cp.State != nil {
-		rCtx, ok := getRunCtx(ctx)
-		if ok {
-			isResumeFlow := rCtx.isResumeFlow
-			if isResumeFlow && rCtx.resumeData != nil {
-				cp.State = rCtx.resumeData
-			}
+		isResumeTarget, hasData, data := GetResumeContext[any](ctx)
+		if isResumeTarget && hasData {
+			cp.State = data
 		}
 
 		ctx = context.WithValue(ctx, stateKey{}, &internalState{state: cp.State})
@@ -411,31 +409,7 @@ type interruptTempInfo struct {
 	interruptAfterNodes  []string
 	interruptRerunExtra  map[string]any
 
-	interruptPoints   []*interruptStateForAddress
-	interruptContexts []*InterruptCtx
-}
-
-func (it *interruptTempInfo) processInterruptErr(ire *interruptAndRerun) {
-	it.interruptPoints = append(it.interruptPoints, &interruptStateForAddress{
-		Addr: ire.addr,
-		S: &interruptState{
-			Interrupted: true,
-			State:       ire.state,
-		},
-	})
-
-	if ire.interruptID != nil {
-		it.interruptContexts = append(it.interruptContexts, &InterruptCtx{
-			ID:          *ire.interruptID,
-			Address:     ire.addr,
-			Info:        ire.info,
-			IsRootCause: ire.isRootCause,
-		})
-	}
-
-	for _, subE := range ire.errs {
-		it.processInterruptErr(subE)
-	}
+	signals []*core.InterruptSignal
 }
 
 func (r *runner) resolveInterruptCompletedTasks(tempInfo *interruptTempInfo, completedTasks []*task) (err error) {
@@ -443,19 +417,18 @@ func (r *runner) resolveInterruptCompletedTasks(tempInfo *interruptTempInfo, com
 		if completedTask.err != nil {
 			if info := isSubGraphInterrupt(completedTask.err); info != nil {
 				tempInfo.subGraphInterrupts[completedTask.nodeKey] = info
-				tempInfo.interruptPoints = append(tempInfo.interruptPoints, info.InterruptPoints...)
-				tempInfo.interruptContexts = append(tempInfo.interruptContexts, info.InterruptContexts...)
+				tempInfo.signals = append(tempInfo.signals, info.signal)
 				continue
 			}
 
-			ire := &interruptAndRerun{}
+			ire := &core.InterruptSignal{}
 			if errors.As(completedTask.err, &ire) {
 				tempInfo.interruptRerunNodes = append(tempInfo.interruptRerunNodes, completedTask.nodeKey)
-				if ire.info != nil {
-					tempInfo.interruptRerunExtra[completedTask.nodeKey] = ire.info
+				if ire.Info != nil {
+					tempInfo.interruptRerunExtra[completedTask.nodeKey] = ire.InterruptInfo.Info
 				}
 
-				tempInfo.processInterruptErr(ire)
+				tempInfo.signals = append(tempInfo.signals, ire)
 				continue
 			}
 
@@ -514,33 +487,24 @@ func (r *runner) handleInterrupt(
 		SubGraphs:       make(map[string]*InterruptInfo),
 	}
 
-	// Add graph-level interrupt context with deep-copied state
+	var info any
 	if cp.State != nil {
-		// Get current graph addr from context
-		currentAddr, exist := GetCurrentAddress(ctx)
-		if exist {
-			// Generate unique interrupt ID from addr
-			interruptID := currentAddr.String()
-
-			// Deep copy the state for the interrupt context
-			copiedState, err := deepCopyState(cp.State)
-			if err != nil {
-				return fmt.Errorf("failed to copy state: %w", err)
-			}
-
-			// Add graph-level InterruptCtx
-			tempInfo.interruptContexts = append(tempInfo.interruptContexts, &InterruptCtx{
-				ID:      interruptID,
-				Address: currentAddr,
-				Info:    copiedState,
-			})
+		copiedState, err := deepCopyState(cp.State)
+		if err != nil {
+			return fmt.Errorf("failed to copy state: %w", err)
 		}
+		info = copiedState
+	}
+
+	is, err := core.Interrupt(ctx, info, nil, tempInfo.signals)
+	if err != nil {
+		return fmt.Errorf("failed to interrupt: %w", err)
 	}
 
 	for _, t := range nextTasks {
 		cp.Inputs[t.nodeKey] = t.input
 	}
-	err := r.checkPointer.convertCheckPoint(cp, isStream)
+	err = r.checkPointer.convertCheckPoint(cp, isStream)
 	if err != nil {
 		return fmt.Errorf("failed to convert checkpoint: %w", err)
 	}
@@ -548,8 +512,7 @@ func (r *runner) handleInterrupt(
 		return &subGraphInterruptError{
 			Info:       intInfo,
 			CheckPoint: cp,
-
-			InterruptContexts: tempInfo.interruptContexts,
+			signal:     is,
 		}
 	} else if checkPointID != nil {
 		err := r.checkPointer.set(ctx, *checkPointID, cp)
@@ -557,7 +520,8 @@ func (r *runner) handleInterrupt(
 			return fmt.Errorf("failed to set checkpoint: %w, checkPointID: %s", err, *checkPointID)
 		}
 	}
-	intInfo.InterruptContexts = tempInfo.interruptContexts
+
+	intInfo.InterruptContexts = core.ToInterruptContexts(is)
 	return &interruptError{Info: intInfo}
 }
 
@@ -630,11 +594,10 @@ func (r *runner) handleInterruptWithSubGraphAndRerunNodes(
 	}
 
 	cp := &checkpoint{
-		Channels:        cm.channels,
-		Inputs:          make(map[string]any),
-		SkipPreHandler:  skipPreHandler,
-		SubGraphs:       make(map[string]*checkpoint),
-		InterruptPoints: tempInfo.interruptPoints,
+		Channels:       cm.channels,
+		Inputs:         make(map[string]any),
+		SkipPreHandler: skipPreHandler,
+		SubGraphs:      make(map[string]*checkpoint),
 	}
 	if r.runCtx != nil {
 		// current graph has enable state
@@ -652,28 +615,21 @@ func (r *runner) handleInterruptWithSubGraphAndRerunNodes(
 		SubGraphs:       make(map[string]*InterruptInfo),
 	}
 
-	// Add graph-level interrupt context with deep-copied state
+	var info any
 	if cp.State != nil {
-		// Get current graph addr from context
-		currentAddr, exist := GetCurrentAddress(ctx)
-		if exist {
-			// Generate unique interrupt ID from addr
-			interruptID := currentAddr.String()
-
-			// Deep copy the state for the interrupt context
-			copiedState, err := deepCopyState(cp.State)
-			if err != nil {
-				return fmt.Errorf("failed to copy state: %w", err)
-			}
-
-			// Add graph-level InterruptCtx
-			tempInfo.interruptContexts = append(tempInfo.interruptContexts, &InterruptCtx{
-				ID:      interruptID,
-				Address: currentAddr,
-				Info:    copiedState,
-			})
+		copiedState, err := deepCopyState(cp.State)
+		if err != nil {
+			return fmt.Errorf("failed to copy state: %w", err)
 		}
+		info = copiedState
 	}
+
+	is, err := core.Interrupt(ctx, info, nil, tempInfo.signals)
+	if err != nil {
+		return fmt.Errorf("failed to interrupt: %w", err)
+	}
+
+	cp.InterruptID2Addr, cp.InterruptID2State = core.SignalToPersistenceMaps(is)
 
 	for _, t := range subgraphTasks {
 		cp.RerunNodes = append(cp.RerunNodes, t.nodeKey)
@@ -689,10 +645,9 @@ func (r *runner) handleInterruptWithSubGraphAndRerunNodes(
 	}
 	if isSubGraph {
 		return &subGraphInterruptError{
-			Info:              intInfo,
-			CheckPoint:        cp,
-			InterruptPoints:   tempInfo.interruptPoints,
-			InterruptContexts: tempInfo.interruptContexts,
+			Info:       intInfo,
+			CheckPoint: cp,
+			signal:     is,
 		}
 	} else if checkPointID != nil {
 		err = r.checkPointer.set(ctx, *checkPointID, cp)
@@ -700,7 +655,7 @@ func (r *runner) handleInterruptWithSubGraphAndRerunNodes(
 			return fmt.Errorf("failed to set checkpoint: %w, checkPointID: %s", err, *checkPointID)
 		}
 	}
-	intInfo.InterruptContexts = tempInfo.interruptContexts
+	intInfo.InterruptContexts = core.ToInterruptContexts(is)
 	return &interruptError{Info: intInfo}
 }
 

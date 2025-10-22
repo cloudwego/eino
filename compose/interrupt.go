@@ -20,8 +20,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"strings"
 
+	"github.com/cloudwego/eino/core"
 	"github.com/cloudwego/eino/schema"
 )
 
@@ -37,18 +37,23 @@ func WithInterruptAfterNodes(nodes []string) GraphCompileOption {
 	}
 }
 
-// InterruptAndRerun throws a simple stateless and info-less interrupt error.
 // Deprecated: use Interrupt(ctx context.Context, info any) error instead.
 // If you really needs to use this error as a sub-error for a CompositeInterrupt call,
 // wrap it using WrapInterruptAndRerunIfNeeded first.
-var InterruptAndRerun = errors.New("interrupt and rerun")
+var InterruptAndRerun = deprecatedInterruptAndRerun
+var deprecatedInterruptAndRerun = errors.New("interrupt and rerun")
 
-// NewInterruptAndRerunErr creates a stateless interrupt error with info.
 // Deprecated: use Interrupt(ctx context.Context, info any) error instead.
 // If you really needs to use this error as a sub-error for a CompositeInterrupt call,
 // wrap it using WrapInterruptAndRerunIfNeeded first.
 func NewInterruptAndRerunErr(extra any) error {
-	return &interruptAndRerun{info: extra, isRootCause: true}
+	return deprecatedInterruptAndRerunErr(extra)
+}
+func deprecatedInterruptAndRerunErr(extra any) error {
+	return &core.InterruptSignal{InterruptInfo: core.InterruptInfo{
+		Info:        extra,
+		IsRootCause: true,
+	}}
 }
 
 type wrappedInterruptAndRerun struct {
@@ -64,23 +69,22 @@ func (w *wrappedInterruptAndRerun) Unwrap() error {
 	return w.inner
 }
 
-// WrapInterruptAndRerunIfNeeded wraps the InterruptAndRerun error, or the error returned by
-// NewInterruptAndRerunErr, with the current execution address.
+// WrapInterruptAndRerunIfNeeded wraps the deprecated old interrupt errors, with the current execution address.
 // If the error is returned by either Interrupt, StatefulInterrupt or CompositeInterrupt,
 // it will be returned as-is without wrapping
 func WrapInterruptAndRerunIfNeeded(ctx context.Context, step AddressSegment, err error) error {
 	addr, _ := GetCurrentAddress(ctx)
 	newAddr := append(append([]AddressSegment{}, addr...), step)
-	if errors.Is(err, InterruptAndRerun) {
+	if errors.Is(err, deprecatedInterruptAndRerun) {
 		return &wrappedInterruptAndRerun{
 			ps:    newAddr,
 			inner: err,
 		}
 	}
 
-	ire := &interruptAndRerun{}
+	ire := &core.InterruptSignal{}
 	if errors.As(err, &ire) {
-		if ire.addr == nil {
+		if ire.Address == nil {
 			return &wrappedInterruptAndRerun{
 				ps:    newAddr,
 				inner: err,
@@ -106,13 +110,12 @@ func WrapInterruptAndRerunIfNeeded(ctx context.Context, step AddressSegment, err
 //   - info: User-facing information about the interrupt. This is not persisted but is exposed to the
 //     calling application via the InterruptCtx to provide context (e.g., a reason for the pause).
 func Interrupt(ctx context.Context, info any) error {
-	var interruptID string
-	addr, addrExist := GetCurrentAddress(ctx)
-	if addrExist {
-		interruptID = addr.String()
+	is, err := core.Interrupt(ctx, info, nil, nil)
+	if err != nil {
+		return err
 	}
 
-	return &interruptAndRerun{info: info, interruptID: &interruptID, addr: addr, isRootCause: true}
+	return is
 }
 
 // StatefulInterrupt creates a special error that signals the execution engine to interrupt
@@ -127,22 +130,12 @@ func Interrupt(ctx context.Context, info any) error {
 //     its work later. This state is saved in the checkpoint and will be provided back to the component
 //     upon resumption via GetInterruptState.
 func StatefulInterrupt(ctx context.Context, info any, state any) error {
-	var interruptID string
-	addr, addrExist := GetCurrentAddress(ctx)
-	if addrExist {
-		interruptID = addr.String()
+	is, err := core.Interrupt(ctx, info, state, nil)
+	if err != nil {
+		return err
 	}
 
-	return &interruptAndRerun{info: info, state: state, interruptID: &interruptID, addr: addr, isRootCause: true}
-}
-
-type interruptAndRerun struct {
-	info        any // for end-user, probably the human-being
-	state       any // for persistence, when resuming, use GetInterruptState to fetch it at the interrupt location
-	interruptID *string
-	addr        Address
-	isRootCause bool
-	errs        []*interruptAndRerun
+	return is
 }
 
 // CompositeInterrupt creates a special error that signals a composite interruption.
@@ -158,8 +151,8 @@ type interruptAndRerun struct {
 //
 //   - An error containing `InterruptInfo` returned by a `Runnable` (e.g., a Graph within a lambda node).
 //
-//   - An error returned by \'WrapInterruptAndRerunIfNeeded\' for the legacy InterruptAndRerun error,
-//     and for the error returned by the deprecated NewInterruptAndRerunErr.
+//   - An error returned by \'WrapInterruptAndRerunIfNeeded\' for the legacy old interrupt and rerun error,
+//     and for the error returned by the deprecated old interrupt errors.
 //
 // Parameters:
 //
@@ -177,43 +170,52 @@ type interruptAndRerun struct {
 //
 //   - errs: a list of errors emitted by sub-processes.
 //
-// NOTE: if the error you passed in is the deprecated InterruptAndRerun, or an error returned by
-// the deprecated NewInterruptAndRerunErr function, you must wrap it using WrapInterruptAndRerunIfNeeded first
+// NOTE: if the error you passed in is the deprecated old interrupt and rerun err, or an error returned by
+// the deprecated old interrupt function, you must wrap it using WrapInterruptAndRerunIfNeeded first
 // before passing them into this function.
 func CompositeInterrupt(ctx context.Context, info any, state any, errs ...error) error {
-	addr, _ := GetCurrentAddress(ctx)
-	id := addr.String()
-	var cErrs []*interruptAndRerun
+	if len(errs) == 0 {
+		return StatefulInterrupt(ctx, info, state)
+	}
+
+	var cErrs []*core.InterruptSignal
 	for _, err := range errs {
 		wrapped := &wrappedInterruptAndRerun{}
 		if errors.As(err, &wrapped) {
 			inner := wrapped.Unwrap()
-			if errors.Is(inner, InterruptAndRerun) {
+			if errors.Is(inner, deprecatedInterruptAndRerun) {
 				id := wrapped.ps.String()
-				cErrs = append(cErrs, &interruptAndRerun{
-					addr:        wrapped.ps,
-					interruptID: &id,
-					isRootCause: true,
+				cErrs = append(cErrs, &core.InterruptSignal{
+					ID:      id,
+					Address: wrapped.ps,
+					InterruptInfo: core.InterruptInfo{
+						Info:        nil,
+						IsRootCause: true,
+					},
 				})
 				continue
 			}
 
-			ire := &interruptAndRerun{}
+			ire := &core.InterruptSignal{}
 			if errors.As(err, &ire) {
 				id := wrapped.ps.String()
-				cErrs = append(cErrs, &interruptAndRerun{
-					addr:        wrapped.ps,
-					interruptID: &id,
-					info:        ire.info,
-					state:       ire.state,
-					isRootCause: ire.isRootCause,
+				cErrs = append(cErrs, &core.InterruptSignal{
+					ID:      id,
+					Address: wrapped.ps,
+					InterruptInfo: core.InterruptInfo{
+						Info:        ire.InterruptInfo.Info,
+						IsRootCause: ire.InterruptInfo.IsRootCause,
+					},
+					InterruptState: core.InterruptState{
+						State: ire.InterruptState.State,
+					},
 				})
 			}
 
 			continue
 		}
 
-		ire := &interruptAndRerun{}
+		ire := &core.InterruptSignal{}
 		if errors.As(err, &ire) {
 			cErrs = append(cErrs, ire)
 			continue
@@ -221,24 +223,19 @@ func CompositeInterrupt(ctx context.Context, info any, state any, errs ...error)
 
 		ie := &interruptError{}
 		if errors.As(err, &ie) {
-			for _, subInterruptCtx := range ie.Info.InterruptContexts {
-				subIRE := &interruptAndRerun{
-					info:        subInterruptCtx.Info,
-					interruptID: &subInterruptCtx.ID,
-					addr:        subInterruptCtx.Address,
-				}
-				cErrs = append(cErrs, subIRE)
-			}
+			is := core.FromInterruptContexts(ie.Info.InterruptContexts)
+			cErrs = append(cErrs, is)
 			continue
 		}
 
 		return fmt.Errorf("composite interrupt but one of the sub error is not interrupt and rerun error: %w", err)
 	}
-	return &interruptAndRerun{errs: cErrs, interruptID: &id, addr: addr, state: state, info: info}
-}
 
-func (i *interruptAndRerun) Error() string {
-	return fmt.Sprintf("interrupt and rerun: %v for address: %s", i.info, i.addr.String())
+	is, err := core.Interrupt(ctx, info, state, cErrs)
+	if err != nil {
+		return err
+	}
+	return is
 }
 
 func IsInterruptRerunError(err error) (any, bool) {
@@ -247,12 +244,12 @@ func IsInterruptRerunError(err error) (any, bool) {
 }
 
 func isInterruptRerunError(err error) (info any, state any, ok bool) {
-	if errors.Is(err, InterruptAndRerun) {
+	if errors.Is(err, deprecatedInterruptAndRerun) {
 		return nil, nil, true
 	}
-	ire := &interruptAndRerun{}
+	ire := &core.InterruptSignal{}
 	if errors.As(err, &ire) {
-		return ire.info, ire.state, true
+		return ire.Info, ire.State, true
 	}
 	return nil, nil, false
 }
@@ -272,7 +269,7 @@ func init() {
 }
 
 // AddressSegmentType defines the type of a segment in an execution address.
-type AddressSegmentType string
+type AddressSegmentType = core.AddressSegmentType
 
 const (
 	// AddressSegmentNode represents a segment of an address that corresponds to a graph node.
@@ -288,96 +285,14 @@ const (
 )
 
 // Address represents a full, hierarchical address to a point in the execution structure.
-type Address []AddressSegment
-
-// String converts an Address into its unique string representation.
-func (p Address) String() string {
-	var sb strings.Builder
-	for i, s := range p {
-		sb.WriteString(string(s.Type))
-		sb.WriteString(":")
-		sb.WriteString(s.ID)
-		if i != len(p)-1 {
-			sb.WriteString(";")
-		}
-	}
-	return sb.String()
-}
-
-func (p Address) Equals(other Address) bool {
-	if len(p) != len(other) {
-		return false
-	}
-	for i := range p {
-		if p[i].Type != other[i].Type || p[i].ID != other[i].ID {
-			return false
-		}
-	}
-	return true
-}
-
-// HasPrefix checks if the address begins with the given prefix.
-func (p Address) HasPrefix(prefix Address) bool {
-	if len(p) < len(prefix) {
-		return false
-	}
-	for i := range prefix {
-		if p[i] != prefix[i] {
-			return false
-		}
-	}
-	return true
-}
-
-func (p Address) DeepCopy() Address {
-	if p == nil {
-		return nil
-	}
-	cpy := make(Address, len(p))
-	copy(cpy, p)
-	return cpy
-}
+type Address = core.Address
 
 // AddressSegment represents a single segment in the hierarchical address of an execution point.
 // A sequence of AddressSegments uniquely identifies a location within a potentially nested structure.
-type AddressSegment struct {
-	// Type indicates whether this address segment is a graph node, a tool call, an agent, etc.
-	Type AddressSegmentType
-	// ID is the unique identifier for this segment, e.g., the node's key or the tool call's ID.
-	ID string
-}
+type AddressSegment = core.AddressSegment
 
 // InterruptCtx provides a complete, user-facing context for a single, resumable interrupt point.
-type InterruptCtx struct {
-	// ID is the unique, fully-qualified address of the interrupt point.
-	// It is constructed by joining the individual Address segments, e.g., "agent:A;node:graph_a;tool:tool_call_123".
-	// This ID should be used when providing resume data via ResumeWithData.
-	ID string
-	// Address is the structured sequence of AddressSegment segments that leads to the interrupt point.
-	Address Address
-	// Info is the user-facing information associated with the interrupt, provided by the component that triggered it.
-	Info any
-	// IsRootCause indicates whether the interrupt point is the exact root cause for an interruption.
-	IsRootCause bool
-}
-
-// AsInterruptSignal wraps the public-facing InterruptCtx in an internal error type.
-// This error is not meant to be seen by end-users, but rather acts as a control signal
-// that is caught by the graph runner to initiate the interrupt and checkpointing process.
-//
-// This method is primarily used by components that bridge different execution environments.
-// For example, an `adk.AgentTool` might catch an `adk.InterruptInfo`, extract the
-// `adk.InterruptCtx` objects from it, and then call this method on each one. The resulting
-// error signals are then typically aggregated into a single error using `compose.CompositeInterrupt`
-// to be returned from the tool's `InvokableRun` method.
-func (ic *InterruptCtx) AsInterruptSignal() error {
-	return &interruptAndRerun{
-		info:        ic.Info,
-		interruptID: &ic.ID,
-		addr:        ic.Address,
-		isRootCause: ic.IsRootCause,
-	}
-}
+type InterruptCtx = core.InterruptCtx
 
 func ExtractInterruptInfo(err error) (info *InterruptInfo, existed bool) {
 	if err == nil {
@@ -417,8 +332,7 @@ type subGraphInterruptError struct {
 	Info       *InterruptInfo
 	CheckPoint *checkpoint
 
-	InterruptPoints   []*interruptStateForAddress
-	InterruptContexts []*InterruptCtx
+	signal *core.InterruptSignal
 }
 
 func (e *subGraphInterruptError) Error() string {

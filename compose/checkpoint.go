@@ -20,6 +20,7 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/cloudwego/eino/core"
 	"github.com/cloudwego/eino/internal/serialization"
 	"github.com/cloudwego/eino/schema"
 )
@@ -46,10 +47,7 @@ func RegisterSerializableType[T any](name string) (err error) {
 	return serialization.GenericRegister[T](name)
 }
 
-type CheckPointStore interface {
-	Get(ctx context.Context, checkPointID string) ([]byte, bool, error)
-	Set(ctx context.Context, checkPointID string, checkPoint []byte) error
-}
+type CheckPointStore = core.CheckPointStore
 
 type Serializer interface {
 	Marshal(v any) ([]byte, error)
@@ -108,7 +106,8 @@ type checkpoint struct {
 
 	SubGraphs map[string]*checkpoint
 
-	InterruptPoints []*interruptStateForAddress
+	InterruptID2Addr  map[string]Address
+	InterruptID2State map[string]core.InterruptState
 }
 
 type stateModifierKey struct{}
@@ -138,16 +137,7 @@ func getCheckPointFromStore(ctx context.Context, id string, cpr *checkPointer) (
 }
 
 func setCheckPointToCtx(ctx context.Context, cp *checkpoint) context.Context {
-	rInfo, ok := ctx.Value(interruptCtxKey{}).(*resumeInfo)
-	if ok {
-		rInfo.interruptPoints = cp.InterruptPoints
-	} else {
-		rInfo = &resumeInfo{
-			interruptPoints: cp.InterruptPoints,
-		}
-		ctx = context.WithValue(ctx, interruptCtxKey{}, rInfo)
-	}
-
+	ctx = core.PopulateInterruptState(ctx, cp.InterruptID2Addr, cp.InterruptID2State)
 	return context.WithValue(ctx, checkPointKey{}, cp)
 }
 

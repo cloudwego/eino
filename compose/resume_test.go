@@ -24,6 +24,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"go.uber.org/mock/gomock"
 
+	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/components/tool"
 	mockModel "github.com/cloudwego/eino/internal/mock/components/model"
 	"github.com/cloudwego/eino/schema"
@@ -35,10 +36,6 @@ type myInterruptState struct {
 
 type myResumeData struct {
 	Message string
-}
-
-func init() {
-	_ = RegisterSerializableType[*myInterruptState]("my_interrupt_state")
 }
 
 func TestInterruptStateAndResumeForRootGraph(t *testing.T) {
@@ -243,13 +240,19 @@ func TestInterruptStateAndResumeForToolInNestedSubGraph(t *testing.T) {
 	assert.NotNil(t, interruptInfo)
 
 	interruptContexts := interruptInfo.InterruptContexts
-	assert.Equal(t, 2, len(interruptContexts))
+	assert.Len(t, interruptContexts, 1) // Only the root cause is returned
+
+	// Verify the root cause context
+	rootCause := interruptContexts[0]
 	expectedPath := "runnable:root;node:sub_graph_a;node:sub_graph_b;node:tools;tool:tool_call_123"
-	assert.Equal(t, expectedPath, interruptContexts[1].ID)
-	assert.True(t, interruptContexts[1].IsRootCause)
-	assert.Equal(t, map[string]any{"reason": "tool maintenance"}, interruptContexts[1].Info)
-	assert.Equal(t, "runnable:root;node:sub_graph_a;node:sub_graph_b;node:tools", interruptContexts[0].ID)
-	assert.False(t, interruptContexts[0].IsRootCause)
+	assert.Equal(t, expectedPath, rootCause.ID)
+	assert.True(t, rootCause.IsRootCause)
+	assert.Equal(t, map[string]any{"reason": "tool maintenance"}, rootCause.Info)
+
+	// Verify the parent via the Parent field
+	assert.NotNil(t, rootCause.Parent)
+	assert.Equal(t, "runnable:root;node:sub_graph_a;node:sub_graph_b;node:tools", rootCause.Parent.ID)
+	assert.False(t, rootCause.Parent.IsRootCause)
 
 	// 7. Resume execution
 	ctx := ResumeWithData(context.Background(), expectedPath, &myResumeData{Message: "let's continue tool"})
@@ -280,9 +283,9 @@ type processResumeData struct {
 }
 
 func init() {
-	_ = RegisterSerializableType[*myInterruptState]("my_interrupt_state")
-	_ = RegisterSerializableType[*batchState]("batch_state")
-	_ = RegisterSerializableType[*processState]("process_state")
+	schema.RegisterName[*myInterruptState]("my_interrupt_state")
+	schema.RegisterName[*batchState]("batch_state")
+	schema.RegisterName[*processState]("process_state")
 }
 
 func TestMultipleInterruptsAndResumes(t *testing.T) {
@@ -391,20 +394,28 @@ func TestMultipleInterruptsAndResumes(t *testing.T) {
 	interruptInfo, isInterrupt := ExtractInterruptInfo(err)
 	assert.True(t, isInterrupt)
 	interruptContexts := interruptInfo.InterruptContexts
-	assert.Len(t, interruptContexts, 4)
+	assert.Len(t, interruptContexts, 3) // Only the 3 root causes
 
 	// Verify all 3 interrupt points are exposed
 	found := make(map[string]bool)
+	var parentCtx *InterruptCtx
 	for _, iCtx := range interruptContexts {
 		found[iCtx.ID] = true
-		if iCtx.ID != "runnable:root;node:batch" {
-			assert.Equal(t, map[string]any{"reason": "process " + iCtx.Address[2].ID + " needs input"}, iCtx.Info)
+		assert.True(t, iCtx.IsRootCause)
+		assert.Equal(t, map[string]any{"reason": "process " + iCtx.Address[2].ID + " needs input"}, iCtx.Info)
+		// Check that all share the same parent
+		assert.NotNil(t, iCtx.Parent)
+		if parentCtx == nil {
+			parentCtx = iCtx.Parent
+			assert.Equal(t, "runnable:root;node:batch", parentCtx.ID)
+			assert.False(t, parentCtx.IsRootCause)
+		} else {
+			assert.Same(t, parentCtx, iCtx.Parent)
 		}
 	}
 	assert.True(t, found["runnable:root;node:batch;process:p0"])
 	assert.True(t, found["runnable:root;node:batch;process:p1"])
 	assert.True(t, found["runnable:root;node:batch;process:p2"])
-	assert.True(t, found["runnable:root;node:batch"])
 
 	// --- 2. Second invocation, resume 2 of 3 processes ---
 	// Resume p0 with data, and p2 without data. p1 remains interrupted.
@@ -418,9 +429,11 @@ func TestMultipleInterruptsAndResumes(t *testing.T) {
 	interruptInfo2, isInterrupt2 := ExtractInterruptInfo(err)
 	assert.True(t, isInterrupt2)
 	interruptContexts2 := interruptInfo2.InterruptContexts
-	assert.Len(t, interruptContexts2, 2)
-	assert.Equal(t, "runnable:root;node:batch;process:p1", interruptContexts2[1].ID)
-	assert.Equal(t, "runnable:root;node:batch", interruptContexts2[0].ID)
+	assert.Len(t, interruptContexts2, 1) // Only p1 is left
+	rootCause2 := interruptContexts2[0]
+	assert.Equal(t, "runnable:root;node:batch;process:p1", rootCause2.ID)
+	assert.NotNil(t, rootCause2.Parent)
+	assert.Equal(t, "runnable:root;node:batch", rootCause2.Parent.ID)
 
 	// --- 3. Third invocation, resume the last process ---
 	finalResumeCtx := Resume(context.Background(), "runnable:root;node:batch;process:p1")
@@ -517,12 +530,14 @@ func TestReentryForResumedTools(t *testing.T) {
 
 	// Expectation for the 2nd invocation (after resuming call_1): model does nothing, graph continues
 	// Expectation for the 3rd invocation (after resuming call_2): model calls the tool again
-	mockChatModel.EXPECT().Generate(gomock.Any(), gomock.Any(), gomock.Any()).Return(&schema.Message{
-		Role: schema.Assistant,
-		ToolCalls: []schema.ToolCall{
-			{ID: "call_3", Function: schema.FunctionCall{Name: "reentry_tool", Arguments: `{"input": "c"}`}},
-		},
-	}, nil).Times(1)
+	mockChatModel.EXPECT().Generate(gomock.Any(), gomock.Any(), gomock.Any()).DoAndReturn(func(ctx context.Context, msgs []*schema.Message, opts ...model.Option) (*schema.Message, error) {
+		return &schema.Message{
+			Role: schema.Assistant,
+			ToolCalls: []schema.ToolCall{
+				{ID: "call_3", Function: schema.FunctionCall{Name: "reentry_tool", Arguments: `{"input": "c"}`}},
+			},
+		}, nil
+	}).Times(1)
 
 	// Expectation for the final invocation: model returns final answer
 	mockChatModel.EXPECT().Generate(gomock.Any(), gomock.Any(), gomock.Any()).Return(&schema.Message{
@@ -557,10 +572,16 @@ func TestReentryForResumedTools(t *testing.T) {
 	assert.Error(t, err)
 	interruptInfo1, _ := ExtractInterruptInfo(err)
 	interrupts1 := interruptInfo1.InterruptContexts
-	assert.Len(t, interrupts1, 3)
-	assert.Contains(t, []string{interrupts1[1].ID, interrupts1[2].ID}, "runnable:root;node:tools;tool:call_1")
-	assert.Contains(t, []string{interrupts1[1].ID, interrupts1[2].ID}, "runnable:root;node:tools;tool:call_2")
-	assert.Equal(t, "runnable:root;node:tools", interrupts1[0].ID)
+	assert.Len(t, interrupts1, 2) // Only the two tool calls
+	found1 := make(map[string]bool)
+	for _, iCtx := range interrupts1 {
+		found1[iCtx.ID] = true
+		assert.True(t, iCtx.IsRootCause)
+		assert.NotNil(t, iCtx.Parent)
+		assert.Equal(t, "runnable:root;node:tools", iCtx.Parent.ID)
+	}
+	assert.True(t, found1["runnable:root;node:tools;tool:call_1"])
+	assert.True(t, found1["runnable:root;node:tools;tool:call_2"])
 
 	// --- 2. Second invocation: resume call_1, expect call_2 to interrupt again ---
 	resumeCtx2 := ResumeWithData(context.Background(), "runnable:root;node:tools;tool:call_1",
@@ -569,9 +590,11 @@ func TestReentryForResumedTools(t *testing.T) {
 	assert.Error(t, err)
 	interruptInfo2, _ := ExtractInterruptInfo(err)
 	interrupts2 := interruptInfo2.InterruptContexts
-	assert.Len(t, interrupts2, 2)
-	assert.Equal(t, "runnable:root;node:tools;tool:call_2", interrupts2[1].ID)
-	assert.Equal(t, "runnable:root;node:tools", interrupts2[0].ID)
+	assert.Len(t, interrupts2, 1) // Only call_2
+	rootCause2 := interrupts2[0]
+	assert.Equal(t, "runnable:root;node:tools;tool:call_2", rootCause2.ID)
+	assert.NotNil(t, rootCause2.Parent)
+	assert.Equal(t, "runnable:root;node:tools", rootCause2.Parent.ID)
 
 	// --- 3. Third invocation: resume call_2, model makes a new call (call_3) which should interrupt ---
 	resumeCtx3 := ResumeWithData(context.Background(), "runnable:root;node:tools;tool:call_2", &myResumeData{Message: "resume call 2"})
@@ -579,9 +602,11 @@ func TestReentryForResumedTools(t *testing.T) {
 	assert.Error(t, err)
 	interruptInfo3, _ := ExtractInterruptInfo(err)
 	interrupts3 := interruptInfo3.InterruptContexts
-	assert.Len(t, interrupts3, 2)
-	assert.Equal(t, "runnable:root;node:tools;tool:call_3", interrupts3[1].ID) // Note: this is the new call_3
-	assert.Equal(t, "runnable:root;node:tools", interrupts3[0].ID)
+	assert.Len(t, interrupts3, 1) // Only call_3
+	rootCause3 := interrupts3[0]
+	assert.Equal(t, "runnable:root;node:tools;tool:call_3", rootCause3.ID) // Note: this is the new call_3
+	assert.NotNil(t, rootCause3.Parent)
+	assert.Equal(t, "runnable:root;node:tools", rootCause3.Parent.ID)
 
 	// --- 4. Final invocation: resume call_3, expect final answer ---
 	resumeCtx4 := ResumeWithData(context.Background(), "runnable:root;node:tools;tool:call_3",
@@ -711,13 +736,26 @@ func TestGraphInterruptWithinLambda(t *testing.T) {
 	interruptInfo, isInterrupt := ExtractInterruptInfo(err)
 	assert.True(t, isInterrupt)
 	interruptContexts := interruptInfo.InterruptContexts
-	assert.Len(t, interruptContexts, 2)
+	assert.Len(t, interruptContexts, 1) // Only the root cause is returned
 
 	// The addr is now fully qualified, including the runnable steps from both graphs.
+	rootCause := interruptContexts[0]
 	expectedPath := "runnable:root;node:composite_lambda;runnable:inner;node:inner_lambda"
-	assert.Equal(t, expectedPath, interruptContexts[1].ID)
-	assert.Equal(t, "inner interrupt", interruptContexts[1].Info)
-	assert.Equal(t, "composite interrupt from lambda", interruptContexts[0].Info)
+	assert.Equal(t, expectedPath, rootCause.ID)
+	assert.Equal(t, "inner interrupt", rootCause.Info)
+	assert.True(t, rootCause.IsRootCause)
+
+	// Check parent hierarchy
+	assert.NotNil(t, rootCause.Parent)
+	assert.Equal(t, "runnable:root;node:composite_lambda;runnable:inner", rootCause.Parent.ID)
+	assert.Nil(t, rootCause.Parent.Info) // The inner runnable doesn't have its own info
+	assert.False(t, rootCause.Parent.IsRootCause)
+	
+	// Check grandparent
+	assert.NotNil(t, rootCause.Parent.Parent)
+	assert.Equal(t, "runnable:root;node:composite_lambda", rootCause.Parent.Parent.ID)
+	assert.Equal(t, "composite interrupt from lambda", rootCause.Parent.Parent.Info)
+	assert.False(t, rootCause.Parent.Parent.IsRootCause)
 
 	// 7. Resume execution using the complete, fully-qualified ID
 	resumeCtx := ResumeWithData(context.Background(), expectedPath, &myResumeData{Message: "resume inner"})
@@ -745,14 +783,14 @@ func TestLegacyInterrupt(t *testing.T) {
 		if isResume {
 			return data, nil
 		}
-		return "", InterruptAndRerun
+		return "", deprecatedInterruptAndRerun
 	}
 	subProcess2 := func(ctx context.Context) (string, error) {
 		isResume, _, data := GetResumeContext[string](ctx)
 		if isResume {
 			return data, nil
 		}
-		return "", NewInterruptAndRerunErr("legacy info")
+		return "", deprecatedInterruptAndRerunErr("legacy info")
 	}
 	subProcess3 := func(ctx context.Context) (string, error) {
 		isResume, _, data := GetResumeContext[string](ctx)
@@ -832,24 +870,33 @@ func TestLegacyInterrupt(t *testing.T) {
 	assert.Error(t, err)
 	info, isInterrupt := ExtractInterruptInfo(err)
 	assert.True(t, isInterrupt)
-	assert.Len(t, info.InterruptContexts, 4)
+	assert.Len(t, info.InterruptContexts, 3) // Only the 3 root causes
 
 	found := make(map[string]any)
+	var parentCtx *InterruptCtx
 	for _, iCtx := range info.InterruptContexts {
 		found[iCtx.ID] = iCtx.Info
+		assert.True(t, iCtx.IsRootCause)
+		// Check parent
+		assert.NotNil(t, iCtx.Parent)
+		if parentCtx == nil {
+			parentCtx = iCtx.Parent
+			assert.Equal(t, "runnable:root;node:legacy_composite", parentCtx.ID)
+			assert.Equal(t, "legacy composite", parentCtx.Info)
+			assert.False(t, parentCtx.IsRootCause)
+		} else {
+			assert.Same(t, parentCtx, iCtx.Parent)
+		}
 	}
 	expectedID1 := "runnable:root;node:legacy_composite;custom:1"
 	expectedID2 := "runnable:root;node:legacy_composite;custom:2"
 	expectedID3 := "runnable:root;node:legacy_composite;custom:3"
-	expectedID4 := "runnable:root;node:legacy_composite"
 	assert.Contains(t, found, expectedID1)
 	assert.Nil(t, found[expectedID1]) // From InterruptAndRerun
 	assert.Contains(t, found, expectedID2)
 	assert.Equal(t, "legacy info", found[expectedID2]) // From NewInterruptAndRerunErr
 	assert.Contains(t, found, expectedID3)
 	assert.Equal(t, "modern info", found[expectedID3]) // From Interrupt
-	assert.Contains(t, found, expectedID4)
-	assert.Equal(t, "legacy composite", found[expectedID4]) // From CompositeInterrupt
 
 	// 6. Second invocation (re-run without resume) - should yield the same interrupts
 	_, err = compiledGraph.Invoke(context.Background(), "input", WithCheckPointID(checkPointID))
@@ -863,7 +910,6 @@ func TestLegacyInterrupt(t *testing.T) {
 		expectedID1: "output1",
 		expectedID2: "output2",
 		expectedID3: "output3",
-		expectedID4: "all done",
 	}
 	resumeCtx := BatchResumeWithData(context.Background(), resumeData)
 	output, err := compiledGraph.Invoke(resumeCtx, "input", WithCheckPointID(checkPointID))
@@ -871,5 +917,5 @@ func TestLegacyInterrupt(t *testing.T) {
 	// 8. Verify final result
 	assert.NoError(t, err)
 	// The final output should be the concatenation of the data passed to the resumed sub-processes.
-	assert.Equal(t, "output1output2output3 all done", output)
+	assert.Equal(t, "output1output2output3", output)
 }

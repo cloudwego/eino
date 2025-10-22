@@ -488,8 +488,6 @@ func (a *workflowAgent) runParallel(ctx context.Context, generator *AsyncGenerat
 				// This means it finished successfully, so we don't run it.
 				return
 			} else {
-				// This is a fresh run, so run all branches.
-				// The input parameter is ignored as the sub-agent will generate its own input from the context.
 				iterator = agent.Run(ctx, nil, opts...)
 			}
 
@@ -500,13 +498,10 @@ func (a *workflowAgent) runParallel(ctx context.Context, generator *AsyncGenerat
 				}
 				if event.Action != nil && event.Action.Interrupted != nil {
 					mu.Lock()
-					// We only need to store the raw interrupt info to pass to the parent.
-					// The index is not part of the state.
 					interruptMap[idx] = event.Action.Interrupted
 					mu.Unlock()
-					break // Stop processing this branch after an interrupt.
+					break
 				}
-				// Forward the event
 				generator.Send(event)
 			}
 		}(i, a.subAgents[i])
@@ -515,9 +510,7 @@ func (a *workflowAgent) runParallel(ctx context.Context, generator *AsyncGenerat
 	wg.Wait()
 
 	if len(interruptMap) > 0 {
-		// One or more parallel branches interrupted. Create a composite interrupt.
 		state := &parallelWorkflowState{}
-		// We need to collect all the raw sub-interrupts to pass to CompositeInterrupt
 		var allSubInterrupts []*InterruptInfo
 		for _, subInterrupt := range interruptMap {
 			allSubInterrupts = append(allSubInterrupts, subInterrupt)

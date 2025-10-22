@@ -22,6 +22,7 @@ import (
 	"runtime/debug"
 
 	"github.com/cloudwego/eino/compose"
+	"github.com/cloudwego/eino/core"
 	"github.com/cloudwego/eino/internal/safe"
 	"github.com/cloudwego/eino/schema"
 )
@@ -151,6 +152,8 @@ func (r *Runner) resume(ctx context.Context, checkPointID string, resumeData map
 	AddSessionValues(ctx, o.sessionValues)
 
 	info.ResumeData = resumeData
+
+	ctx = core.BatchResumeWithData(ctx, resumeData)
 
 	aIter := toFlowAgent(ctx, r.a).Resume(ctx, info, opts...)
 	if r.store == nil {
