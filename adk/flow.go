@@ -429,7 +429,6 @@ func (a *flowAgent) run(
 	var destName string
 	if lastAction != nil {
 		if lastAction.Interrupted != nil {
-			appendInterruptRunCtx(ctx, runCtx)
 			return
 		}
 		if lastAction.Exit {
