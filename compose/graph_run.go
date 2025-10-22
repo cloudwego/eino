@@ -105,8 +105,11 @@ func runnableTransform(ctx context.Context, r *composableRunnable, input any, op
 }
 
 func (r *runner) run(ctx context.Context, isStream bool, input any, opts ...Option) (result any, err error) {
-	ctx, input = onGraphStart(ctx, input, isStream)
+	haveOnStart := false // delay triggering onGraphStart until state initialization is complete, so that the state can be accessed within onGraphStart.
 	defer func() {
+		if !haveOnStart {
+			ctx, input = onGraphStart(ctx, input, isStream)
+		}
 		if err != nil {
 			ctx, err = onGraphError(ctx, err)
 		} else {
@@ -165,6 +168,8 @@ func (r *runner) run(ctx context.Context, isStream bool, input any, opts ...Opti
 		// in subgraph, try to load checkpoint from ctx
 		initialized = true
 		ctx, nextTasks, err = r.restoreFromCheckPoint(ctx, *path, getStateModifier(ctx), cp, isStream, cm, optMap)
+		ctx, input = onGraphStart(ctx, input, isStream)
+		haveOnStart = true
 	} else if checkPointID != nil && !forceNewRun {
 		cp, err = getCheckPointFromStore(ctx, *checkPointID, r.checkPointer)
 		if err != nil {
@@ -178,6 +183,8 @@ func (r *runner) run(ctx context.Context, isStream bool, input any, opts ...Opti
 			ctx = setCheckPointToCtx(ctx, cp)
 
 			ctx, nextTasks, err = r.restoreFromCheckPoint(ctx, *NewNodePath(), stateModifier, cp, isStream, cm, optMap)
+			ctx, input = onGraphStart(ctx, input, isStream)
+			haveOnStart = true
 		}
 	}
 	if !initialized {
@@ -185,6 +192,9 @@ func (r *runner) run(ctx context.Context, isStream bool, input any, opts ...Opti
 		if r.runCtx != nil {
 			ctx = r.runCtx(ctx)
 		}
+
+		ctx, input = onGraphStart(ctx, input, isStream)
+		haveOnStart = true
 
 		var isEnd bool
 		nextTasks, result, isEnd, err = r.calculateNextTasks(ctx, []*task{{
