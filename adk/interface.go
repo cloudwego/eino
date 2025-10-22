@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"io"
 
+	"github.com/cloudwego/eino/core"
 	"github.com/cloudwego/eino/schema"
 )
 
@@ -149,6 +150,8 @@ type AgentAction struct {
 	BreakLoop *BreakLoopAction
 
 	CustomizedAction any
+
+	internalInterrupted *core.InterruptSignal
 }
 
 type RunStep struct {

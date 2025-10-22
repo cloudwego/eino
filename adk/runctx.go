@@ -30,8 +30,6 @@ type runSession struct {
 	Events []*agentEventWrapper
 	Values map[string]any
 
-	interruptRunCtxs []*runContext // won't consider concurrency now
-
 	mtx sync.Mutex
 }
 
@@ -64,14 +62,6 @@ func newRunSession() *runSession {
 	return &runSession{
 		Values: make(map[string]any),
 	}
-}
-
-func appendInterruptRunCtx(ctx context.Context, interruptRunCtx *runContext) {
-	session := getSession(ctx)
-	if session == nil {
-		return
-	}
-	session.appendInterruptRunCtx(interruptRunCtx)
 }
 
 func GetSessionValues(ctx context.Context) map[string]any {
@@ -126,12 +116,6 @@ func (rs *runSession) getEvents() []*agentEventWrapper {
 	return events
 }
 
-func (rs *runSession) appendInterruptRunCtx(runCtx *runContext) {
-	rs.mtx.Lock()
-	rs.interruptRunCtxs = append(rs.interruptRunCtxs, runCtx)
-	rs.mtx.Unlock()
-}
-
 func (rs *runSession) getValues() map[string]any {
 	rs.mtx.Lock()
 	values := make(map[string]any, len(rs.Values))
@@ -168,7 +152,6 @@ func (rs *runSession) getValue(key string) (any, bool) {
 type runContext struct {
 	RootInput *AgentInput
 	RunPath   []RunStep
-	Addr      Address
 
 	Session *runSession
 }
