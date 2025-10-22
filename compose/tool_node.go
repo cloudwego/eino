@@ -422,7 +422,8 @@ func (tn *ToolsNode) Invoke(ctx context.Context, input *schema.Message,
 				rerunExtra.RerunExtraMap[tasks[i].callID] = info
 			}
 
-			iErr := WrapInterruptAndRerunIfNeeded(ctx, AddressSegment{AddressSegmentTool, tasks[i].callID}, tasks[i].err)
+			iErr := WrapInterruptAndRerunIfNeeded(ctx,
+				AddressSegment{ID: tasks[i].callID, Type: AddressSegmentTool}, tasks[i].err)
 			errs = append(errs, iErr)
 			continue
 		}
@@ -500,7 +501,8 @@ func (tn *ToolsNode) Stream(ctx context.Context, input *schema.Message,
 			if info != nil {
 				rerunExtra.RerunExtraMap[tasks[i].callID] = info
 			}
-			iErr := WrapInterruptAndRerunIfNeeded(ctx, AddressSegment{AddressSegmentTool, tasks[i].callID}, tasks[i].err)
+			iErr := WrapInterruptAndRerunIfNeeded(ctx,
+				AddressSegment{ID: tasks[i].callID, Type: AddressSegmentTool}, tasks[i].err)
 			errs = append(errs, iErr)
 			continue
 		}

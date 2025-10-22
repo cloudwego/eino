@@ -24,6 +24,7 @@ import (
 	"strings"
 
 	"github.com/cloudwego/eino/compose"
+	"github.com/cloudwego/eino/core"
 	"github.com/cloudwego/eino/schema"
 )
 
@@ -194,18 +195,11 @@ func (ri *ResumeInfo) getNextResumptionPoints(parentAddr Address) map[string]*Re
 // InterruptInfo contains all the information about an interruption event.
 // It is created by the framework when an agent returns an interrupt action.
 type InterruptInfo struct {
-	// Deprecated: use InterruptContexts for user-facing info,
-	// and interruptStates for internal state persistence.
-	// This field is kept for backward compatibility.
 	Data any
 
 	// InterruptContexts provides a structured, user-facing view of the interrupt chain.
 	// Each context represents a step in the agent hierarchy that was interrupted.
 	InterruptContexts []*InterruptCtx
-
-	// interruptStates is an internal list of states saved by agents during the interruption.
-	// This data is used by the framework to restore agent state upon resumption.
-	interruptStates []*interruptState
 }
 
 type interruptState struct {
@@ -218,26 +212,17 @@ type interruptState struct {
 // This is used when an agent needs to pause its execution to request external input or intervention,
 // but does not need to save any internal state to be restored upon resumption.
 // The `info` parameter is user-facing data that describes the reason for the interrupt.
-func Interrupt(ctx context.Context, info any) *AgentAction {
-	runCtx := getRunCtx(ctx)
-	addr := runCtx.Addr.DeepCopy()
-	interruptID := addr.String()
-	return &AgentAction{
-		Interrupted: &InterruptInfo{
-			InterruptContexts: []*InterruptCtx{
-				{
-					ID:          interruptID,
-					Info:        info,
-					Address:     addr,
-					IsRootCause: true,
-				},
-			},
-			interruptStates: []*interruptState{
-				{
-					Addr:    addr,
-					RunPath: runCtx.RunPath,
-				},
-			},
+func Interrupt(ctx context.Context, info any) *AgentEvent {
+	is, err := core.Interrupt(ctx, info, nil, nil,
+		core.WithLayerPayload(getRunCtx(ctx).RunPath))
+	if err != nil {
+		return &AgentEvent{Err: err}
+	}
+
+	return &AgentEvent{
+		Action: &AgentAction{
+			Interrupted:         &InterruptInfo{},
+			internalInterrupted: is,
 		},
 	}
 }
@@ -246,27 +231,17 @@ func Interrupt(ctx context.Context, info any) *AgentAction {
 // This is used when an agent has internal state that must be restored for it to continue correctly.
 // The `info` parameter is user-facing data describing the interrupt.
 // The `state` parameter is the agent's internal state object, which will be serialized and stored.
-func StatefulInterrupt(ctx context.Context, info any, state any) *AgentAction {
-	runCtx := getRunCtx(ctx)
-	addr := runCtx.Addr.DeepCopy()
-	interruptID := addr.String()
-	return &AgentAction{
-		Interrupted: &InterruptInfo{
-			InterruptContexts: []*InterruptCtx{
-				{
-					ID:          interruptID,
-					Info:        info,
-					Address:     addr,
-					IsRootCause: true,
-				},
-			},
-			interruptStates: []*interruptState{
-				{
-					Addr:    addr,
-					State:   state,
-					RunPath: runCtx.RunPath,
-				},
-			},
+func StatefulInterrupt(ctx context.Context, info any, state any) *AgentEvent {
+	is, err := core.Interrupt(ctx, info, state, nil,
+		core.WithLayerPayload(getRunCtx(ctx).RunPath))
+	if err != nil {
+		return &AgentEvent{Err: err}
+	}
+
+	return &AgentEvent{
+		Action: &AgentAction{
+			Interrupted:         &InterruptInfo{},
+			internalInterrupted: is,
 		},
 	}
 }
@@ -276,46 +251,29 @@ func StatefulInterrupt(ctx context.Context, info any, state any) *AgentAction {
 // This is used by workflow agents (like Sequential, Parallel, or Loop) to propagate interrupts from their children.
 // The `info` parameter is user-facing data describing the workflow's own reason for interrupting.
 // The `state` parameter is the workflow agent's own state (e.g., the index of the sub-agent that was interrupted).
-// The `subInterruptInfos` is a variadic list of the InterruptInfo objects from the interrupted sub-agents.
-func CompositeInterrupt(ctx context.Context, info any, state any, subInterruptInfos ...*InterruptInfo) *AgentAction {
-	runCtx := getRunCtx(ctx)
-	addr := runCtx.Addr.DeepCopy()
-	interruptID := addr.String()
-
-	interruptContexts := []*InterruptCtx{
-		{
-			ID:      interruptID,
-			Info:    info,
-			Address: addr,
-		},
-	}
-	for _, subInfo := range subInterruptInfos {
-		interruptContexts = append(interruptContexts, subInfo.InterruptContexts...)
+// The `subInterruptSignals` is a variadic list of the InterruptSignal objects from the interrupted sub-agents.
+func CompositeInterrupt(ctx context.Context, info any, state any,
+	subInterruptSignals ...*core.InterruptSignal) *AgentEvent {
+	is, err := core.Interrupt(ctx, info, state, subInterruptSignals,
+		core.WithLayerPayload(getRunCtx(ctx).RunPath))
+	if err != nil {
+		return &AgentEvent{Err: err}
 	}
 
-	var interruptStates []*interruptState
-	for _, subInfo := range subInterruptInfos {
-		interruptStates = append(interruptStates, subInfo.interruptStates...)
-	}
-
-	return &AgentAction{
-		Interrupted: &InterruptInfo{
-			InterruptContexts: interruptContexts,
-			interruptStates: append(interruptStates, &interruptState{
-				Addr:    addr,
-				State:   state,
-				RunPath: runCtx.RunPath,
-			}),
+	return &AgentEvent{
+		Action: &AgentAction{
+			Interrupted:         &InterruptInfo{},
+			internalInterrupted: is,
 		},
 	}
 }
 
 // Address represents the unique, hierarchical address of a component within an execution.
 // It is a slice of AddressSegments, where each segment represents one level of nesting.
-// This is a type alias for compose.Address. See the compose package for more details.
-type Address = compose.Address
-type AddressSegment = compose.AddressSegment
-type AddressSegmentType = compose.AddressSegmentType
+// This is a type alias for core.Address. See the core package for more details.
+type Address = core.Address
+type AddressSegment = core.AddressSegment
+type AddressSegmentType = core.AddressSegmentType
 
 const (
 	AddressSegmentAgent AddressSegmentType = "agent"
@@ -323,8 +281,8 @@ const (
 
 // InterruptCtx provides a structured, user-facing view of a single point of interruption.
 // It contains the ID and Address of the interrupted component, as well as user-defined info.
-// This is a type alias for compose.InterruptCtx. See the compose package for more details.
-type InterruptCtx = compose.InterruptCtx
+// This is a type alias for core.InterruptCtx. See the core package for more details.
+type InterruptCtx = core.InterruptCtx
 
 func WithCheckPointID(id string) AgentRunOption {
 	return WrapImplSpecificOptFn(func(t *options) {
