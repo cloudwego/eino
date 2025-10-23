@@ -59,8 +59,10 @@ type AgentConfig struct {
 	// modify the input messages before the model is called, it's useful when you want to add some system prompt or other messages.
 	MessageModifier MessageModifier
 
-	// MessageRewriter modifies message in the state.
-	// Useful for compressing message history to fit the model context window.
+	// MessageRewriter modifies message in the state, before the ChatModel is called.
+	// It takes the messages stored accumulated in state, modify them, and put the modified version back into state.
+	// Useful for compressing message history to fit the model context window,
+	// or if you want to make changes to messages that take effect across multiple model calls.
 	// NOTE: if both MessageModifier and MessageRewriter are set, MessageRewriter will be called before MessageModifier.
 	MessageRewriter MessageModifier
 
