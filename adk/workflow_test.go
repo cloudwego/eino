@@ -496,19 +496,9 @@ type panicMockAgent struct {
 	mockAgent
 }
 
-func (a *panicMockAgent) Run(ctx context.Context, input *AgentInput, opts ...AgentRunOption) *AsyncIterator[*AgentEvent] {
+func (a *panicMockAgent) Run(_ context.Context, _ *AgentInput, _ ...AgentRunOption) *AsyncIterator[*AgentEvent] {
 	panic("test panic in agent")
 }
-
-type panicResumableMockAgent struct {
-	mockAgent
-}
-
-func (a *panicResumableMockAgent) Resume(ctx context.Context, info *ResumeInfo, opts ...AgentRunOption) *AsyncIterator[*AgentEvent] {
-	panic("test panic in resume")
-}
-
-// Remove the old mockResumableAgent type and replace it with panicResumableMockAgent
 
 // TestWorkflowAgentUnsupportedMode tests unsupported workflow mode error (lines 65-71)
 func TestWorkflowAgentUnsupportedMode(t *testing.T) {
@@ -538,111 +528,6 @@ func TestWorkflowAgentUnsupportedMode(t *testing.T) {
 	assert.NotNil(t, event)
 	assert.NotNil(t, event.Err)
 	assert.Contains(t, event.Err.Error(), "unsupported workflow agent mode")
-
-	// No more events
-	_, ok = iterator.Next()
-	assert.False(t, ok)
-}
-
-// TestWorkflowAgentResumePanicRecovery tests panic recovery in Resume method (lines 108-115)
-func TestWorkflowAgentResumePanicRecovery(t *testing.T) {
-	ctx := context.Background()
-
-	// Create a mock resumable agent that panics on Resume
-	panicAgent := &mockResumableAgent{
-		mockAgent: mockAgent{
-			name:        "PanicResumeAgent",
-			description: "Agent that panics on resume",
-			responses:   []*AgentEvent{},
-		},
-	}
-
-	// Create a sequential agent with the panic agent
-	config := &SequentialAgentConfig{
-		Name:        "ResumeTestAgent",
-		Description: "Test agent for resume panic",
-		SubAgents:   []Agent{panicAgent},
-	}
-
-	sequentialAgent, err := NewSequentialAgent(ctx, config)
-	assert.NoError(t, err)
-
-	// Initialize context with run context - this is the key fix
-	ctx = ctxWithNewRunCtx(ctx)
-
-	// Create valid resume info
-	resumeInfo := &ResumeInfo{
-		EnableStreaming: false,
-		InterruptInfo: &InterruptInfo{
-			Data: &WorkflowInterruptInfo{
-				OrigInput: &AgentInput{
-					Messages: []Message{schema.UserMessage("test")},
-				},
-				SequentialInterruptIndex: 0,
-				SequentialInterruptInfo: &InterruptInfo{
-					Data: "some interrupt data",
-				},
-				LoopIterations: 0,
-			},
-		},
-	}
-
-	// Call Resume and expect panic recovery
-	iterator := sequentialAgent.(ResumableAgent).Resume(ctx, resumeInfo)
-	assert.NotNil(t, iterator)
-
-	// Should receive an error event due to panic recovery
-	event, ok := iterator.Next()
-	assert.True(t, ok)
-	assert.NotNil(t, event)
-	assert.NotNil(t, event.Err)
-	assert.Contains(t, event.Err.Error(), "panic")
-
-	// No more events
-	_, ok = iterator.Next()
-	assert.False(t, ok)
-}
-
-// mockResumableAgent extends mockAgent to implement ResumableAgent interface
-type mockResumableAgent struct {
-	mockAgent
-}
-
-func (a *mockResumableAgent) Resume(ctx context.Context, info *ResumeInfo, opts ...AgentRunOption) *AsyncIterator[*AgentEvent] {
-	panic("test panic in resume")
-}
-
-// TestWorkflowAgentResumeInvalidDataType tests invalid data type in Resume method
-func TestWorkflowAgentResumeInvalidDataType(t *testing.T) {
-	ctx := context.Background()
-
-	// Create a workflow agent
-	agent := &workflowAgent{
-		name:        "InvalidDataTestAgent",
-		description: "Agent for invalid data test",
-		subAgents:   []*flowAgent{},
-		mode:        workflowAgentModeSequential,
-	}
-
-	// Create resume info with invalid data type
-	resumeInfo := &ResumeInfo{
-		EnableStreaming: false,
-		InterruptInfo: &InterruptInfo{
-			Data: "invalid data type", // Should be *WorkflowInterruptInfo
-		},
-	}
-
-	// Call Resume and expect type assertion error
-	iterator := agent.Resume(ctx, resumeInfo)
-	assert.NotNil(t, iterator)
-
-	// Should receive an error event due to type assertion failure
-	event, ok := iterator.Next()
-	assert.True(t, ok)
-	assert.NotNil(t, event)
-	assert.NotNil(t, event.Err)
-	assert.Contains(t, event.Err.Error(), "type of InterruptInfo.Data is expected to")
-	assert.Contains(t, event.Err.Error(), "actual: string")
 
 	// No more events
 	_, ok = iterator.Next()

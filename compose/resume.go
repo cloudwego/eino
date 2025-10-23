@@ -1,0 +1,342 @@
+/*
+ * Copyright 2025 CloudWeGo Authors
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package compose
+
+import (
+	"context"
+	"sync"
+)
+
+// GetInterruptState provides a type-safe way to check for and retrieve the persisted state from a previous interruption.
+// It is the primary function a component should use to understand its past state.
+//
+// It returns three values:
+//   - wasInterrupted (bool): True if the node was part of a previous interruption, regardless of whether state was provided.
+//   - state (T): The typed state object, if it was provided and matches type `T`.
+//   - hasState (bool): True if state was provided during the original interrupt and successfully cast to type `T`.
+func GetInterruptState[T any](ctx context.Context) (wasInterrupted bool, hasState bool, state T) {
+	rCtx, ok := getRunCtx(ctx)
+	if !ok || rCtx.interruptData == nil || !rCtx.interruptData.Interrupted {
+		return
+	}
+
+	wasInterrupted = true
+	if rCtx.interruptData.State == nil {
+		return
+	}
+
+	state, hasState = rCtx.interruptData.State.(T)
+	return
+}
+
+// GetResumeContext checks if the current component is the target of a resume operation
+// and retrieves any data provided by the user for that resumption.
+//
+// This function is typically called *after* a component has already determined it is in a
+// resumed state by calling GetInterruptState.
+//
+// It returns three values:
+//   - isResumeFlow: A boolean that is true if the current component's address was explicitly targeted
+//     by a call to Resume() or ResumeWithData().
+//   - hasData: A boolean that is true if data was provided for this component (i.e., not nil).
+//   - data: The typed data provided by the user.
+//
+// ### How to Use This Function: A Decision Framework
+//
+// The correct usage pattern depends on the application's desired resume strategy.
+//
+// #### Strategy 1: Implicit "Resume All"
+// In some use cases, any resume operation implies that *all* interrupted points should proceed.
+// For example, if an application's UI only provides a single "Continue" button for a set of
+// interruptions. In this model, a component can often just use `GetInterruptState` to see if
+// `wasInterrupted` is true and then proceed with its logic, as it can assume it is an intended target.
+// It may still call `GetResumeContext` to check for optional data, but the `isResumeFlow` flag is less critical.
+//
+// #### Strategy 2: Explicit "Targeted Resume" (Most Common)
+// For applications with multiple, distinct interrupt points that must be resumed independently, it is
+// crucial to differentiate which point is being resumed. This is the primary use case for the `isResumeFlow` flag.
+//   - If `isResumeFlow` is `true`: Your component is the explicit target. You should consume
+//     the `data` (if any) and complete your work.
+//   - If `isResumeFlow` is `false`: Another component is the target. You MUST re-interrupt
+//     (e.g., by returning `StatefulInterrupt(...)`) to preserve your state and allow the
+//     resume signal to propagate.
+//
+// ### Guidance for Composite Components
+//
+// Composite components (like `Graph` or other `Runnable`s that contain sub-processes) have a dual role:
+//  1. Check for Self-Targeting: A composite component can itself be the target of a resume
+//     operation, for instance, to modify its internal state. It may call `GetResumeContext`
+//     to check for data targeted at its own address.
+//  2. Act as a Conduit: After checking for itself, its primary role is to re-execute its children,
+//     allowing the resume context to flow down to them. It must not consume a resume signal
+//     intended for one of its descendants.
+func GetResumeContext[T any](ctx context.Context) (isResumeFlow bool, hasData bool, data T) {
+	rCtx, ok := getRunCtx(ctx)
+	if !ok {
+		return
+	}
+
+	isResumeFlow = rCtx.isResumeFlow
+	if !isResumeFlow {
+		return
+	}
+
+	// It is a resume flow, now check for data
+	if rCtx.resumeData == nil {
+		return // hasData is false
+	}
+
+	data, hasData = rCtx.resumeData.(T)
+	return
+}
+
+// GetAllResumeData retrieves all resume data from the context that has not yet been claimed and used
+// by a resumed component.
+//
+// This function is primarily intended for advanced use cases involving "bridge" components that
+// contain nested, independent execution environments (e.g., an adk.AgentTool running an
+// adk.Agent which in turn contains a compose.Graph).
+//
+// The typical pattern for such a bridge component during a resume operation is:
+// 1. Call GetAllResumeData to get the complete map of unused data.
+// 2. Identify and consume the data intended for the bridge component itself, often by deleting it from the map.
+// 3. Pass the remaining data down to the nested environment using its own BatchResumeWithData function.
+// This ensures that resume data is correctly routed across different framework layers.
+func GetAllResumeData(ctx context.Context) map[string]any {
+	rInfo, ok := ctx.Value(interruptCtxKey{}).(*resumeInfo)
+	if !ok || rInfo == nil {
+		return nil
+	}
+
+	result := make(map[string]any, len(rInfo.interruptID2ResumeData))
+	// Copy all resume data to the result map
+	for id, data := range rInfo.interruptID2ResumeData {
+		result[id] = data
+	}
+
+	for id := range rInfo.interruptID2ResumeDataUsed {
+		delete(result, id)
+	}
+
+	return result
+}
+
+// GetCurrentAddress returns the hierarchical address of the currently executing component.
+// The address is a sequence of segments, each identifying a structural part of the execution
+// like an agent, a graph node, or a tool call. This can be useful for logging or debugging.
+func GetCurrentAddress(ctx context.Context) (Address, bool) {
+	if p, ok := ctx.Value(runCtxKey{}).(*runCtx); ok {
+		return p.addr, true
+	}
+
+	return nil, false
+}
+
+// Resume prepares a context for an "Explicit Targeted Resume" operation by targeting one or more
+// components without providing data. It is a convenience wrapper around BatchResumeWithData.
+//
+// This is useful when the act of resuming is itself the signal, and no extra data is needed.
+// The components at the provided addresses (interrupt IDs) will receive `isResumeFlow = true`
+// when they call `GetResumeContext`.
+func Resume(ctx context.Context, interruptIDs ...string) context.Context {
+	resumeData := make(map[string]any, len(interruptIDs))
+	for _, addr := range interruptIDs {
+		resumeData[addr] = nil
+	}
+	return BatchResumeWithData(ctx, resumeData)
+}
+
+// ResumeWithData prepares a context to resume a single, specific component with data.
+// It is the primary function for the "Explicit Targeted Resume" strategy when data is required.
+// It is a convenience wrapper around BatchResumeWithData.
+// The `interruptID` parameter is the unique interrupt ID of the target component.
+func ResumeWithData(ctx context.Context, interruptID string, data any) context.Context {
+	return BatchResumeWithData(ctx, map[string]any{interruptID: data})
+}
+
+// BatchResumeWithData is the core function for preparing a resume context. It injects a map
+// of resume targets and their corresponding data into the context.
+//
+// The `resumeData` map should contain the interrupt IDs (which are the string form of addresses) of the
+// components to be resumed as keys. The value can be the resume data for that component, or `nil`
+// if no data is needed (equivalent to using `Resume`).
+//
+// This function is the foundation for the "Explicit Targeted Resume" strategy. Components whose interrupt IDs
+// are present as keys in the map will receive `isResumeFlow = true` when they call `GetResumeContext`.
+func BatchResumeWithData(ctx context.Context, resumeData map[string]any) context.Context {
+	rInfo, ok := ctx.Value(interruptCtxKey{}).(*resumeInfo)
+	if !ok {
+		// Create a new resumeInfo and copy the map to prevent external mutation.
+		newMap := make(map[string]any, len(resumeData))
+		for k, v := range resumeData {
+			newMap[k] = v
+		}
+		return context.WithValue(ctx, interruptCtxKey{}, &resumeInfo{
+			interruptID2ResumeData:     newMap,
+			interruptID2ResumeDataUsed: make(map[string]bool),
+		})
+	}
+
+	rInfo.mu.Lock()
+	defer rInfo.mu.Unlock()
+	if rInfo.interruptID2ResumeData == nil {
+		rInfo.interruptID2ResumeData = make(map[string]any)
+	}
+	for id, data := range resumeData {
+		rInfo.interruptID2ResumeData[id] = data
+	}
+	return ctx
+}
+
+type runCtxKey struct{}
+
+type interruptState struct {
+	Interrupted bool
+	State       any
+}
+
+type interruptStateForAddress struct {
+	Addr Address
+	S    *interruptState
+	Used bool
+}
+
+type resumeInfo struct {
+	mu                         sync.Mutex
+	interruptID2ResumeData     map[string]any
+	interruptID2ResumeDataUsed map[string]bool
+	interruptPoints            []*interruptStateForAddress
+}
+
+type interruptCtxKey struct{}
+
+type runCtx struct {
+	addr          Address
+	interruptData *interruptState
+	resumeData    any
+	isResumeFlow  bool
+}
+
+func getNodePath(ctx context.Context) (*NodePath, bool) {
+	currentAddress, existed := GetCurrentAddress(ctx)
+	if !existed {
+		return nil, false
+	}
+
+	nodePath := make([]string, 0, len(currentAddress))
+	for _, p := range currentAddress {
+		if p.Type == AddressSegmentRunnable {
+			nodePath = []string{}
+			continue
+		}
+
+		nodePath = append(nodePath, p.ID)
+	}
+
+	return NewNodePath(nodePath...), len(nodePath) > 0
+}
+
+// AppendAddressSegment creates a new execution context for a sub-component (e.g., a graph node or a tool call).
+//
+// It extends the current context's address with a new segment and populates the new context with the
+// appropriate interrupt state and resume data for that specific sub-address.
+//
+//   - ctx: The parent context, typically the one passed into the component's Invoke/Stream method.
+//   - segType: The type of the new address segment (e.g., "node", "tool").
+//   - segID: The unique ID for the new address segment.
+func AppendAddressSegment(ctx context.Context, segType AddressSegmentType, segID string) context.Context {
+	// get current address
+	currentAddress, existed := GetCurrentAddress(ctx)
+	if !existed {
+		currentAddress = []AddressSegment{
+			{
+				Type: segType,
+				ID:   segID,
+			},
+		}
+	} else {
+		newAddress := make([]AddressSegment, len(currentAddress)+1)
+		copy(newAddress, currentAddress)
+		newAddress[len(newAddress)-1] = AddressSegment{
+			Type: segType,
+			ID:   segID,
+		}
+		currentAddress = newAddress
+	}
+
+	runCtx := &runCtx{
+		addr: currentAddress,
+	}
+
+	rInfo, hasRInfo := getResumeInfo(ctx)
+	if !hasRInfo {
+		return context.WithValue(ctx, runCtxKey{}, runCtx)
+	}
+
+	for _, ip := range rInfo.interruptPoints {
+		if ip.Addr.Equals(currentAddress) {
+			if !ip.Used {
+				runCtx.interruptData = ip.S
+				ip.Used = true
+				break
+			}
+		}
+	}
+
+	// take from resumeInfo the data for the new address if there is any
+	id := currentAddress.String()
+	rInfo.mu.Lock()
+	defer rInfo.mu.Unlock()
+	used := rInfo.interruptID2ResumeDataUsed[id]
+	if !used {
+		rData, existed := rInfo.interruptID2ResumeData[id]
+		if existed {
+			rInfo.interruptID2ResumeDataUsed[id] = true
+			runCtx.resumeData = rData
+			runCtx.isResumeFlow = true
+		}
+	}
+
+	return context.WithValue(ctx, runCtxKey{}, runCtx)
+}
+
+// SetParentAddress returns a new context that contains the given parent address.
+// This is used to bridge the address hierarchy between different execution layers,
+// such as between a parent package (such as adk package) and the compose package.
+// It's important to note that this function will overwrite any previous address
+// that may exist in the context.
+func SetParentAddress(ctx context.Context, addr Address) context.Context {
+	if addr == nil {
+		return ctx
+	}
+
+	runCtx := &runCtx{
+		addr: addr.DeepCopy(),
+	}
+
+	return context.WithValue(ctx, runCtxKey{}, runCtx)
+}
+
+func getResumeInfo(ctx context.Context) (*resumeInfo, bool) {
+	info, ok := ctx.Value(interruptCtxKey{}).(*resumeInfo)
+	return info, ok
+}
+
+func getRunCtx(ctx context.Context) (*runCtx, bool) {
+	rCtx, ok := ctx.Value(runCtxKey{}).(*runCtx)
+	return rCtx, ok
+}
