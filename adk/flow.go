@@ -387,12 +387,16 @@ func (a *flowAgent) run(
 
 		event.AgentName = a.Name(ctx)
 		event.RunPath = runCtx.RunPath
-		// copy the event so that the copied event's stream is exclusive for any potential consumer
-		// copy before adding to session because once added to session it's stream could be consumed by genAgentInput at any time
-		copied := copyAgentEvent(event)
-		setAutomaticClose(copied)
-		setAutomaticClose(event)
-		runCtx.Session.addEvent(copied)
+		if event.Action == nil || event.Action.Interrupted == nil {
+			// copy the event so that the copied event's stream is exclusive for any potential consumer
+			// copy before adding to session because once added to session it's stream could be consumed by genAgentInput at any time
+			// interrupt action are not added to session, because ALL information contained in it
+			// is either presented to end-user, or made available to agents through other means
+			copied := copyAgentEvent(event)
+			setAutomaticClose(copied)
+			setAutomaticClose(event)
+			runCtx.Session.addEvent(copied)
+		}
 		lastAction = event.Action
 		generator.Send(event)
 	}
