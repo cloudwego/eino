@@ -23,8 +23,8 @@ import (
 	"reflect"
 	"strings"
 
-	"github.com/cloudwego/eino/core"
 	"github.com/cloudwego/eino/internal"
+	"github.com/cloudwego/eino/internal/core"
 	"github.com/cloudwego/eino/internal/serialization"
 )
 

@@ -25,7 +25,7 @@ import (
 
 	"github.com/cloudwego/eino/components/tool"
 	"github.com/cloudwego/eino/compose"
-	"github.com/cloudwego/eino/core"
+	"github.com/cloudwego/eino/internal/core"
 	"github.com/cloudwego/eino/schema"
 )
 
@@ -92,12 +92,6 @@ func (at *agentTool) Info(ctx context.Context) (*schema.ToolInfo, error) {
 }
 
 func (at *agentTool) InvokableRun(ctx context.Context, argumentsInJSON string, opts ...tool.Option) (string, error) {
-	var addrPtr *Address
-	addr := compose.GetCurrentAddress(ctx)
-	if len(addr) > 0 {
-		addrPtr = &addr
-	}
-
 	var ms *mockStore
 	var iter *AsyncIterator[*AgentEvent]
 	var err error
@@ -132,7 +126,7 @@ func (at *agentTool) InvokableRun(ctx context.Context, argumentsInJSON string, o
 			}
 		}
 
-		iter = newInvokableAgentToolRunner(at.agent, ms, addrPtr).Run(ctx, input,
+		iter = newInvokableAgentToolRunner(at.agent, ms).Run(ctx, input,
 			append(getOptionsByAgentName(at.agent.Name(ctx), opts), WithCheckPointID(mockCheckPointID))...)
 	} else {
 		if !hasState {
@@ -141,7 +135,7 @@ func (at *agentTool) InvokableRun(ctx context.Context, argumentsInJSON string, o
 
 		ms = newResumeStore(state)
 
-		iter, err = newInvokableAgentToolRunner(at.agent, ms, addrPtr).
+		iter, err = newInvokableAgentToolRunner(at.agent, ms).
 			Resume(ctx, mockCheckPointID, getOptionsByAgentName(at.agent.Name(ctx), opts)...)
 		if err != nil {
 			return "", err
@@ -250,11 +244,10 @@ func getReactChatHistory(ctx context.Context, destAgentName string) ([]Message, 
 	return history, err
 }
 
-func newInvokableAgentToolRunner(agent Agent, store compose.CheckPointStore, parentAddr *Address) *Runner {
+func newInvokableAgentToolRunner(agent Agent, store compose.CheckPointStore) *Runner {
 	return &Runner{
 		a:               agent,
 		enableStreaming: false,
 		store:           store,
-		parentAddr:      parentAddr,
 	}
 }

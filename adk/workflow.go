@@ -22,7 +22,7 @@ import (
 	"runtime/debug"
 	"sync"
 
-	"github.com/cloudwego/eino/core"
+	"github.com/cloudwego/eino/internal/core"
 	"github.com/cloudwego/eino/internal/safe"
 	"github.com/cloudwego/eino/schema"
 )

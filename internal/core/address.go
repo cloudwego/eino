@@ -44,28 +44,6 @@ func (p Address) Equals(other Address) bool {
 	return true
 }
 
-// HasPrefix checks if the address begins with the given prefix.
-func (p Address) HasPrefix(prefix Address) bool {
-	if len(p) < len(prefix) {
-		return false
-	}
-	for i := range prefix {
-		if p[i] != prefix[i] {
-			return false
-		}
-	}
-	return true
-}
-
-func (p Address) DeepCopy() Address {
-	if p == nil {
-		return nil
-	}
-	cpy := make(Address, len(p))
-	copy(cpy, p)
-	return cpy
-}
-
 // AddressSegment represents a single segment in the hierarchical address of an execution point.
 // A sequence of AddressSegments uniquely identifies a location within a potentially nested structure.
 type AddressSegment struct {
@@ -170,19 +148,6 @@ func AppendAddressSegment(ctx context.Context, segType AddressSegmentType, segID
 	return context.WithValue(ctx, addrCtxKey{}, runCtx)
 }
 
-// Equal checks if two Addresses are identical.
-func (p Address) Equal(other Address) bool {
-	if len(p) != len(other) {
-		return false
-	}
-	for i := range p {
-		if p[i] != other[i] {
-			return false
-		}
-	}
-	return true
-}
-
 // GetNextResumptionPoints finds the immediate child resumption points for a given parent address.
 func GetNextResumptionPoints(ctx context.Context) (map[string]bool, error) {
 	parentAddr := GetCurrentAddress(ctx)
@@ -206,7 +171,7 @@ func GetNextResumptionPoints(ctx context.Context) (map[string]bool, error) {
 		if parentAddrLen == 0 {
 			isPrefix = true
 		} else {
-			isPrefix = addr[:parentAddrLen].Equal(parentAddr)
+			isPrefix = addr[:parentAddrLen].Equals(parentAddr)
 		}
 
 		if !isPrefix {
@@ -225,23 +190,6 @@ func GetNextResumptionPoints(ctx context.Context) (map[string]bool, error) {
 	}
 
 	return nextPoints, nil
-}
-
-// SetParentAddress returns a new context that contains the given parent address.
-// This is used to bridge the address hierarchy between different execution layers,
-// such as between a parent package (such as adk package) and the compose package.
-// It's important to note that this function will overwrite any previous address
-// that may exist in the context.
-func SetParentAddress(ctx context.Context, addr Address) context.Context {
-	if addr == nil {
-		return ctx
-	}
-
-	runCtx := &addrCtx{
-		addr: addr.DeepCopy(),
-	}
-
-	return context.WithValue(ctx, addrCtxKey{}, runCtx)
 }
 
 // BatchResumeWithData is the core function for preparing a resume context. It injects a map

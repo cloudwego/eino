@@ -22,7 +22,7 @@ import (
 	"runtime/debug"
 
 	"github.com/cloudwego/eino/compose"
-	"github.com/cloudwego/eino/core"
+	"github.com/cloudwego/eino/internal/core"
 	"github.com/cloudwego/eino/internal/safe"
 	"github.com/cloudwego/eino/schema"
 )
@@ -37,9 +37,6 @@ type Runner struct {
 	// store is the checkpoint store used to persist agent state upon interruption.
 	// If nil, checkpointing is disabled.
 	store compose.CheckPointStore
-	// parentAddr is the address of the parent component, used for creating a nested address hierarchy.
-	// This is for internal framework use.
-	parentAddr *Address
 }
 
 type RunnerConfig struct {
@@ -73,9 +70,6 @@ func (r *Runner) Run(ctx context.Context, messages []Message,
 	}
 
 	ctx, _ = initRunCtx(ctx, fa.Name(ctx), input)
-	if r.parentAddr != nil {
-		ctx = core.SetParentAddress(ctx, *r.parentAddr)
-	}
 	ctx = core.AppendAddressSegment(ctx, AddressSegmentAgent, fa.Name(ctx))
 
 	AddSessionValues(ctx, o.sessionValues)

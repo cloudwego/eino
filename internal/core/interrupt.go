@@ -10,35 +10,6 @@ type CheckPointStore interface {
 	Set(ctx context.Context, checkPointID string, checkPoint []byte) error
 }
 
-type inMemoryStore struct {
-	Data  []byte
-	Valid bool
-}
-
-func (m *inMemoryStore) Get(_ context.Context, _ string) ([]byte, bool, error) {
-	if m.Valid {
-		return m.Data, true, nil
-	}
-	return nil, false, nil
-}
-
-func (m *inMemoryStore) Set(_ context.Context, _ string, checkPoint []byte) error {
-	m.Data = checkPoint
-	m.Valid = true
-	return nil
-}
-
-func newEmptyStore() CheckPointStore {
-	return &inMemoryStore{}
-}
-
-func newResumeStore(data []byte) CheckPointStore {
-	return &inMemoryStore{
-		Data:  data,
-		Valid: true,
-	}
-}
-
 type InterruptSignal struct {
 	ID string
 	Address
