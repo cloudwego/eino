@@ -24,7 +24,7 @@ import (
 	"fmt"
 
 	"github.com/cloudwego/eino/compose"
-	"github.com/cloudwego/eino/core"
+	"github.com/cloudwego/eino/internal/core"
 	"github.com/cloudwego/eino/schema"
 )
 
@@ -52,12 +52,6 @@ type InterruptInfo struct {
 	// InterruptContexts provides a structured, user-facing view of the interrupt chain.
 	// Each context represents a step in the agent hierarchy that was interrupted.
 	InterruptContexts []*InterruptCtx
-}
-
-type interruptState struct {
-	Addr    Address
-	State   any
-	RunPath []RunStep
 }
 
 // Interrupt creates a basic interrupt action.
@@ -146,8 +140,6 @@ func init() {
 	schema.RegisterName[*serialization]("_eino_adk_serialization")
 	schema.RegisterName[*WorkflowInterruptInfo]("_eino_adk_workflow_interrupt_info")
 	schema.RegisterName[*State]("_eino_adk_react_state")
-
-	schema.Register[*interruptState]()
 }
 
 type serialization struct {
@@ -155,7 +147,6 @@ type serialization struct {
 	// deprecated: still keep it here for backward compatibility
 	Info                *InterruptInfo
 	EnableStreaming     bool
-	Addr                Address
 	InterruptID2Address map[string]Address
 	InterruptID2State   map[string]core.InterruptState
 }
@@ -177,9 +168,6 @@ func loadCheckPoint(ctx context.Context, store compose.CheckPointStore, checkpoi
 	}
 	ctx = core.PopulateInterruptState(ctx, s.InterruptID2Address, s.InterruptID2State)
 	ctx = setRunCtx(ctx, s.RunCtx)
-	if len(s.Addr) > 0 {
-		ctx = core.SetParentAddress(ctx, s.Addr)
-	}
 
 	return ctx, &ResumeInfo{
 		EnableStreaming: s.EnableStreaming,
@@ -198,16 +186,10 @@ func (r *Runner) saveCheckPoint(
 
 	id2Addr, id2State := core.SignalToPersistenceMaps(is)
 
-	var addr Address
-	if r.parentAddr != nil {
-		addr = *r.parentAddr
-	}
-
 	buf := &bytes.Buffer{}
 	err := gob.NewEncoder(buf).Encode(&serialization{
 		RunCtx:              runCtx,
 		Info:                info,
-		Addr:                addr,
 		InterruptID2Address: id2Addr,
 		InterruptID2State:   id2State,
 		EnableStreaming:     r.enableStreaming,
