@@ -24,6 +24,7 @@ import (
 	"strings"
 
 	"github.com/cloudwego/eino/compose"
+	"github.com/cloudwego/eino/core"
 	"github.com/cloudwego/eino/internal/safe"
 	"github.com/cloudwego/eino/schema"
 )
@@ -296,9 +297,7 @@ func buildDefaultHistoryRewriter(agentName string) HistoryRewriter {
 
 func (a *flowAgent) Run(ctx context.Context, input *AgentInput, opts ...AgentRunOption) *AsyncIterator[*AgentEvent] {
 	agentName := a.Name(ctx)
-
-	ctx, runCtx := initRunCtx(ctx, agentName, input)
-	runCtx.Addr = a.handleAddress(ctx, runCtx.Addr)
+	runCtx := getRunCtx(ctx)
 
 	o := getCommonOptions(nil, opts...)
 
@@ -321,15 +320,7 @@ func (a *flowAgent) Run(ctx context.Context, input *AgentInput, opts ...AgentRun
 }
 
 func (a *flowAgent) Resume(ctx context.Context, info *ResumeInfo, opts ...AgentRunOption) *AsyncIterator[*AgentEvent] {
-	// initialize the run context for the current agent.
-	var myAddr Address
-	ctx, myAddr = a.restoreAddress(ctx)
-
-	// check if this agent is a direct interrupt point.
-	wasInterrupted, _, _ := GetInterruptState[any](ctx, info)
-
-	// if this agent was the one that interrupted, resume its inner agent.
-	if wasInterrupted {
+	if info.WasInterrupted {
 		ra, ok := a.Agent.(ResumableAgent)
 		if !ok {
 			return genErrorIter(fmt.Errorf("failed to resume agent: agent '%s' is an interrupt point "+
@@ -337,48 +328,24 @@ func (a *flowAgent) Resume(ctx context.Context, info *ResumeInfo, opts ...AgentR
 		}
 		iterator, generator := NewAsyncIteratorPair[*AgentEvent]()
 
-		ctx, runCtx := restoreRunPath(ctx, info)
-
-		// The inner agent will call GetInterruptState itself to get its specific state.
 		aIter := ra.Resume(ctx, info, opts...)
 		if _, ok := ra.(*workflowAgent); ok {
 			return aIter
 		}
-		go a.run(ctx, runCtx, aIter, generator, opts...)
+		go a.run(ctx, getRunCtx(ctx), aIter, generator, opts...)
 		return iterator
 	}
 
-	// otherwise, find the next agent(s) to delegate to.
-	nextPoints := info.getNextResumptionPoints(myAddr)
-
-	// if there are no next points, it's an unexpected state.
-	if len(nextPoints) == 0 {
-		return genErrorIter(fmt.Errorf("flowAgent.Resume: agent '%s' is not an interrupt point, "+
-			"but no child resumption points were found", a.Name(ctx)))
+	ctx, nextAgentName, nextResumeInfo, err := getNextResumeAgent(ctx, info)
+	if err != nil {
+		return genErrorIter(err)
 	}
 
-	// for now, we don't support parallel transfers in a generic flowAgent.
-	if len(nextPoints) > 1 {
-		panic(fmt.Sprintf("flowAgent.Resume: agent '%s' has multiple resumption points, "+
-			"but concurrent transfer is not supported", a.Name(ctx)))
-	}
-
-	// get the single next agent to delegate to.
-	var nextAgentID string
-	var nextResumeInfo *ResumeInfo
-	for id, point := range nextPoints {
-		nextAgentID = id
-		nextResumeInfo = point
-	}
-	nextResumeInfo.InterruptInfo = info.InterruptInfo // for backward compatibility
-
-	subAgent := a.getAgent(ctx, nextAgentID)
+	subAgent := a.getAgent(ctx, nextAgentName)
 	if subAgent == nil {
-		return genErrorIter(fmt.Errorf("flowAgent.Resume: failed to find "+
-			"sub-agent with name '%s' to resume", nextAgentID))
+		return genErrorIter(fmt.Errorf("failed to resume agent: agent '%s' not found", nextAgentName))
 	}
 
-	// call the sub-agent's Resume method with the scoped ResumeInfo.
 	return subAgent.Resume(ctx, nextResumeInfo, opts...)
 }
 
@@ -450,6 +417,9 @@ func (a *flowAgent) run(
 			return
 		}
 
+		ctx, _ = initRunCtx(ctx, destName, nil)
+		ctx = core.AppendAddressSegment(ctx, AddressSegmentAgent, destName)
+
 		subAIter := agentToRun.Run(ctx, nil /*subagents get input from runCtx*/, opts...)
 		for {
 			subEvent, ok_ := subAIter.Next()
@@ -461,40 +431,4 @@ func (a *flowAgent) run(
 			generator.Send(subEvent)
 		}
 	}
-}
-
-func (a *flowAgent) handleAddress(ctx context.Context, addr Address) Address {
-	if len(addr) == 0 {
-		return Address{{Type: AddressSegmentAgent, ID: a.Agent.Name(ctx)}}
-	}
-
-	lastSeg := addr[len(addr)-1]
-	if lastSeg.Type != AddressSegmentAgent { // e.g. for agent tool, the last segment is the tool
-		return append(addr, AddressSegment{Type: AddressSegmentAgent, ID: a.Agent.Name(ctx)})
-	}
-
-	if a.parentAgent != nil {
-		parentName := a.parentAgent.Name(ctx)
-		if parentName == lastSeg.ID { // we are the child of last agent, append address
-			return append(addr, AddressSegment{Type: AddressSegmentAgent, ID: a.Agent.Name(ctx)})
-		}
-	}
-
-	for _, subA := range a.subAgents {
-		if subA.Name(ctx) == lastSeg.ID { // we are the parent of last agent, pop address
-			return addr[:len(addr)-1]
-		}
-	}
-
-	// neither parent or child of last agent, just append
-	return append(addr, AddressSegment{Type: AddressSegmentAgent, ID: a.Agent.Name(ctx)})
-}
-
-func (a *flowAgent) restoreAddress(ctx context.Context) (context.Context, Address) {
-	runCtx := getRunCtx(ctx)
-	addr := runCtx.Addr
-	newAddr := a.handleAddress(ctx, addr)
-	runCtx = runCtx.deepCopy()
-	runCtx.Addr = newAddr
-	return setRunCtx(ctx, runCtx), newAddr
 }
