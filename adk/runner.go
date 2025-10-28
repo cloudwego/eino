@@ -70,7 +70,7 @@ func (r *Runner) Run(ctx context.Context, messages []Message,
 	}
 
 	ctx, _ = initRunCtx(ctx, fa.Name(ctx), input)
-	ctx = core.AppendAddressSegment(ctx, AddressSegmentAgent, fa.Name(ctx))
+	ctx = core.AppendExecutionPathSegment(ctx, PathSegmentAgent, fa.Name(ctx))
 
 	AddSessionValues(ctx, o.sessionValues)
 
@@ -96,7 +96,7 @@ func (r *Runner) Query(ctx context.Context,
 // This method is best for simpler use cases where the act of resuming implies that all previously
 // interrupted points should proceed without specific data.
 //
-// When using this method, all interrupted agents will receive `isResumeFlow = false` when they
+// When using this method, all interrupted agents will receive `isResumeTarget = false` when they
 // call `GetResumeContext`, as no specific agent was targeted. This is suitable for the "Simple Confirmation"
 // pattern where an agent only needs to know `wasInterrupted` is true to continue.
 func (r *Runner) Resume(ctx context.Context, checkPointID string, opts ...AgentRunOption) (
@@ -106,16 +106,16 @@ func (r *Runner) Resume(ctx context.Context, checkPointID string, opts ...AgentR
 
 // TargetedResume continues an interrupted execution from a checkpoint, using an "Explicit Targeted Resume" strategy.
 // This is the most common and powerful way to resume, allowing you to target specific interrupt points
-// (identified by their address/ID) and provide them with data.
+// (identified by their interrupt ID) and provide them with data.
 //
-// The `targets` map should contain the addresses of the components to be resumed as keys. These addresses
+// The `targets` map should contain the interrupt IDs of the components to be resumed as keys. These interrupt IDs
 // can point to any interruptible component in the entire execution graph, including ADK agents, compose
 // graph nodes, or tools. The value can be the resume data for that component, or `nil` if no data is needed.
 //
 // When using this method:
-//   - Components whose addresses are in the `targets` map will receive `isResumeFlow = true` when they
+//   - Components whose interrupt IDs are in the `targets` map will receive `isResumeTarget = true` when they
 //     call `GetResumeContext`.
-//   - Interrupted components whose addresses are NOT in the `targets` map must decide how to proceed:
+//   - Interrupted components whose interrupt IDs are NOT in the `targets` map must decide how to proceed:
 //     -- "Leaf" components (the actual root causes of the original interrupt) MUST re-interrupt themselves
 //     to preserve their state.
 //     -- "Composite" agents (like SequentialAgent or ChatModelAgent) should generally proceed with their

@@ -189,7 +189,7 @@ func (a *workflowAgent) runSequential(ctx context.Context,
 			nextResumeInfo = nil // Only resume the first time.
 		} else {
 			seqCtx = updateRunPathOnly(seqCtx, subAgent.Name(seqCtx))
-			seqCtx = core.AppendAddressSegment(seqCtx, AddressSegmentAgent, subAgent.Name(seqCtx))
+			seqCtx = core.AppendExecutionPathSegment(seqCtx, PathSegmentAgent, subAgent.Name(seqCtx))
 			subIterator = subAgent.Run(seqCtx, nil, opts...)
 		}
 
@@ -346,7 +346,7 @@ func (a *workflowAgent) runLoop(ctx context.Context, generator *AsyncGenerator[*
 				nextResumeInfo = nil // Only resume the first time.
 			} else {
 				loopCtx = updateRunPathOnly(loopCtx, subAgent.Name(loopCtx))
-				loopCtx = core.AppendAddressSegment(loopCtx, AddressSegmentAgent, subAgent.Name(loopCtx))
+				loopCtx = core.AppendExecutionPathSegment(loopCtx, PathSegmentAgent, subAgent.Name(loopCtx))
 				subIterator = subAgent.Run(loopCtx, nil, opts...)
 			}
 
@@ -474,7 +474,7 @@ func (a *workflowAgent) runParallel(ctx context.Context, generator *AsyncGenerat
 				// This means it finished successfully, so we don't run it.
 				return
 			} else {
-				subCtx := core.AppendAddressSegment(ctx, AddressSegmentAgent, agent.Name(ctx))
+				subCtx := core.AppendExecutionPathSegment(ctx, PathSegmentAgent, agent.Name(ctx))
 				subCtx = updateRunPathOnly(subCtx, agent.Name(ctx))
 				iterator = agent.Run(subCtx, nil, opts...)
 			}

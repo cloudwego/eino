@@ -57,36 +57,36 @@ func deprecatedInterruptAndRerunErr(extra any) error {
 }
 
 type wrappedInterruptAndRerun struct {
-	ps    Address
+	ps    ExecutionPath
 	inner error
 }
 
 func (w *wrappedInterruptAndRerun) Error() string {
-	return fmt.Sprintf("interrupt and rerun at address %s: %s", w.ps.String(), w.inner.Error())
+	return fmt.Sprintf("interrupt and rerun at execution path %s: %s", w.ps.String(), w.inner.Error())
 }
 
 func (w *wrappedInterruptAndRerun) Unwrap() error {
 	return w.inner
 }
 
-// WrapInterruptAndRerunIfNeeded wraps the deprecated old interrupt errors, with the current execution address.
+// WrapInterruptAndRerunIfNeeded wraps the deprecated old interrupt errors, with the current execution path.
 // If the error is returned by either Interrupt, StatefulInterrupt or CompositeInterrupt,
 // it will be returned as-is without wrapping
-func WrapInterruptAndRerunIfNeeded(ctx context.Context, step AddressSegment, err error) error {
-	addr := GetCurrentAddress(ctx)
-	newAddr := append(append([]AddressSegment{}, addr...), step)
+func WrapInterruptAndRerunIfNeeded(ctx context.Context, step PathSegment, err error) error {
+	path := GetCurrentExecutionPath(ctx)
+	newPath := append(append([]PathSegment{}, path...), step)
 	if errors.Is(err, deprecatedInterruptAndRerun) {
 		return &wrappedInterruptAndRerun{
-			ps:    newAddr,
+			ps:    newPath,
 			inner: err,
 		}
 	}
 
 	ire := &core.InterruptSignal{}
 	if errors.As(err, &ire) {
-		if ire.Address == nil {
+		if ire.ExecutionPath == nil {
 			return &wrappedInterruptAndRerun{
-				ps:    newAddr,
+				ps:    newPath,
 				inner: err,
 			}
 		}
@@ -98,15 +98,15 @@ func WrapInterruptAndRerunIfNeeded(ctx context.Context, step AddressSegment, err
 		return ie
 	}
 
-	return fmt.Errorf("failed to wrap error as addressed InterruptAndRerun: %w", err)
+	return fmt.Errorf("failed to wrap error as pathed InterruptAndRerun: %w", err)
 }
 
 // Interrupt creates a special error that signals the execution engine to interrupt
-// the current run at the component's specific address and save a checkpoint.
+// the current run at the component's specific execution path and save a checkpoint.
 //
 // This is the standard way for a single, non-composite component to signal a resumable interruption.
 //
-//   - ctx: The context of the running component, used to retrieve the current execution address.
+//   - ctx: The context of the running component, used to retrieve the current execution path.
 //   - info: User-facing information about the interrupt. This is not persisted but is exposed to the
 //     calling application via the InterruptCtx to provide context (e.g., a reason for the pause).
 func Interrupt(ctx context.Context, info any) error {
@@ -119,11 +119,11 @@ func Interrupt(ctx context.Context, info any) error {
 }
 
 // StatefulInterrupt creates a special error that signals the execution engine to interrupt
-// the current run at the component's specific address and save a checkpoint.
+// the current run at the component's specific execution path and save a checkpoint.
 //
 // This is the standard way for a single, non-composite component to signal a resumable interruption.
 //
-//   - ctx: The context of the running component, used to retrieve the current execution address.
+//   - ctx: The context of the running component, used to retrieve the current execution path.
 //   - info: User-facing information about the interrupt. This is not persisted but is exposed to the
 //     calling application via the InterruptCtx to provide context (e.g., a reason for the pause).
 //   - state: The internal state that the interrupting component needs to persist to be able to resume
@@ -186,8 +186,8 @@ func CompositeInterrupt(ctx context.Context, info any, state any, errs ...error)
 			if errors.Is(inner, deprecatedInterruptAndRerun) {
 				id := wrapped.ps.String()
 				cErrs = append(cErrs, &core.InterruptSignal{
-					ID:      id,
-					Address: wrapped.ps,
+					ID:            id,
+					ExecutionPath: wrapped.ps,
 					InterruptInfo: core.InterruptInfo{
 						Info:        nil,
 						IsRootCause: true,
@@ -200,8 +200,8 @@ func CompositeInterrupt(ctx context.Context, info any, state any, errs ...error)
 			if errors.As(err, &ire) {
 				id := wrapped.ps.String()
 				cErrs = append(cErrs, &core.InterruptSignal{
-					ID:      id,
-					Address: wrapped.ps,
+					ID:            id,
+					ExecutionPath: wrapped.ps,
 					InterruptInfo: core.InterruptInfo{
 						Info:        ire.InterruptInfo.Info,
 						IsRootCause: ire.InterruptInfo.IsRootCause,
@@ -268,28 +268,28 @@ func init() {
 	schema.RegisterName[*InterruptInfo]("_eino_compose_interrupt_info") // TODO: check if this is really needed when refactoring adk resume
 }
 
-// AddressSegmentType defines the type of a segment in an execution address.
-type AddressSegmentType = core.AddressSegmentType
+// PathSegmentType defines the type of a segment in an execution path.
+type PathSegmentType = core.PathSegmentType
 
 const (
-	// AddressSegmentNode represents a segment of an address that corresponds to a graph node.
-	AddressSegmentNode AddressSegmentType = "node"
-	// AddressSegmentTool represents a segment of an address that corresponds to a specific tool call within a ToolsNode.
-	AddressSegmentTool AddressSegmentType = "tool"
-	// AddressSegmentRunnable represents a segment of an address that corresponds to an instance of the Runnable interface.
+	// PathSegmentNode represents a segment of an execution path that corresponds to a graph node.
+	PathSegmentNode PathSegmentType = "node"
+	// PathSegmentTool represents a segment of an execution path that corresponds to a specific tool call within a ToolsNode.
+	PathSegmentTool PathSegmentType = "tool"
+	// PathSegmentRunnable represents a segment of an execution path that corresponds to an instance of the Runnable interface.
 	// Currently the possible Runnable types are: Graph, Workflow and Chain.
 	// Note that for sub-graphs added through AddGraphNode to another graph is not a Runnable.
-	// So a AddressSegmentRunnable indicates a standalone Root level Graph,
+	// So a PathSegmentRunnable indicates a standalone Root level Graph,
 	// or a Root level Graph inside a node such as Lambda node.
-	AddressSegmentRunnable AddressSegmentType = "runnable"
+	PathSegmentRunnable PathSegmentType = "runnable"
 )
 
-// Address represents a full, hierarchical address to a point in the execution structure.
-type Address = core.Address
+// ExecutionPath represents a full, hierarchical execution path to a point in the execution structure.
+type ExecutionPath = core.ExecutionPath
 
-// AddressSegment represents a single segment in the hierarchical address of an execution point.
-// A sequence of AddressSegments uniquely identifies a location within a potentially nested structure.
-type AddressSegment = core.AddressSegment
+// PathSegment represents a single segment in the hierarchical execution path of an execution point.
+// A sequence of PathSegments uniquely identifies a location within a potentially nested structure.
+type PathSegment = core.PathSegment
 
 // InterruptCtx provides a complete, user-facing context for a single, resumable interrupt point.
 type InterruptCtx = core.InterruptCtx

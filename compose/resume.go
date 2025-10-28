@@ -40,7 +40,7 @@ func GetInterruptState[T any](ctx context.Context) (wasInterrupted bool, hasStat
 // resumed state by calling GetInterruptState.
 //
 // It returns three values:
-//   - isResumeFlow: A boolean that is true if the current component's address was explicitly targeted
+//   - isResumeTarget: A boolean that is true if the current component's execution path was explicitly targeted
 //     by a call to Resume() or ResumeWithData().
 //   - hasData: A boolean that is true if data was provided for this component (i.e., not nil).
 //   - data: The typed data provided by the user.
@@ -54,14 +54,14 @@ func GetInterruptState[T any](ctx context.Context) (wasInterrupted bool, hasStat
 // For example, if an application's UI only provides a single "Continue" button for a set of
 // interruptions. In this model, a component can often just use `GetInterruptState` to see if
 // `wasInterrupted` is true and then proceed with its logic, as it can assume it is an intended target.
-// It may still call `GetResumeContext` to check for optional data, but the `isResumeFlow` flag is less critical.
+// It may still call `GetResumeContext` to check for optional data, but the `isResumeTarget` flag is less critical.
 //
 // #### Strategy 2: Explicit "Targeted Resume" (Most Common)
 // For applications with multiple, distinct interrupt points that must be resumed independently, it is
-// crucial to differentiate which point is being resumed. This is the primary use case for the `isResumeFlow` flag.
-//   - If `isResumeFlow` is `true`: Your component is the explicit target. You should consume
+// crucial to differentiate which point is being resumed. This is the primary use case for the `isResumeTarget` flag.
+//   - If `isResumeTarget` is `true`: Your component is the explicit target. You should consume
 //     the `data` (if any) and complete your work.
-//   - If `isResumeFlow` is `false`: Another component is the target. You MUST re-interrupt
+//   - If `isResumeTarget` is `false`: Another component is the target. You MUST re-interrupt
 //     (e.g., by returning `StatefulInterrupt(...)`) to preserve your state and allow the
 //     resume signal to propagate.
 //
@@ -70,31 +70,31 @@ func GetInterruptState[T any](ctx context.Context) (wasInterrupted bool, hasStat
 // Composite components (like `Graph` or other `Runnable`s that contain sub-processes) have a dual role:
 //  1. Check for Self-Targeting: A composite component can itself be the target of a resume
 //     operation, for instance, to modify its internal state. It may call `GetResumeContext`
-//     to check for data targeted at its own address.
+//     to check for data targeted at its own execution path.
 //  2. Act as a Conduit: After checking for itself, its primary role is to re-execute its children,
 //     allowing the resume context to flow down to them. It must not consume a resume signal
 //     intended for one of its descendants.
-func GetResumeContext[T any](ctx context.Context) (isResumeFlow bool, hasData bool, data T) {
+func GetResumeContext[T any](ctx context.Context) (isResumeTarget bool, hasData bool, data T) {
 	return core.GetResumeContext[T](ctx)
 }
 
-// GetCurrentAddress returns the hierarchical address of the currently executing component.
-// The address is a sequence of segments, each identifying a structural part of the execution
+// GetCurrentExecutionPath returns the hierarchical execution path of the currently executing component.
+// The execution path is a sequence of segments, each identifying a structural part of the execution
 // like an agent, a graph node, or a tool call. This can be useful for logging or debugging.
-func GetCurrentAddress(ctx context.Context) Address {
-	return core.GetCurrentAddress(ctx)
+func GetCurrentExecutionPath(ctx context.Context) ExecutionPath {
+	return core.GetCurrentExecutionPath(ctx)
 }
 
 // Resume prepares a context for an "Explicit Targeted Resume" operation by targeting one or more
 // components without providing data. It is a convenience wrapper around BatchResumeWithData.
 //
 // This is useful when the act of resuming is itself the signal, and no extra data is needed.
-// The components at the provided addresses (interrupt IDs) will receive `isResumeFlow = true`
+// The components at the provided execution paths (interrupt IDs) will receive `isResumeTarget = true`
 // when they call `GetResumeContext`.
 func Resume(ctx context.Context, interruptIDs ...string) context.Context {
 	resumeData := make(map[string]any, len(interruptIDs))
-	for _, addr := range interruptIDs {
-		resumeData[addr] = nil
+	for _, path := range interruptIDs {
+		resumeData[path] = nil
 	}
 	return BatchResumeWithData(ctx, resumeData)
 }
@@ -110,25 +110,25 @@ func ResumeWithData(ctx context.Context, interruptID string, data any) context.C
 // BatchResumeWithData is the core function for preparing a resume context. It injects a map
 // of resume targets and their corresponding data into the context.
 //
-// The `resumeData` map should contain the interrupt IDs (which are the string form of addresses) of the
+// The `resumeData` map should contain the interrupt IDs (which are the string form of execution paths) of the
 // components to be resumed as keys. The value can be the resume data for that component, or `nil`
 // if no data is needed (equivalent to using `Resume`).
 //
 // This function is the foundation for the "Explicit Targeted Resume" strategy. Components whose interrupt IDs
-// are present as keys in the map will receive `isResumeFlow = true` when they call `GetResumeContext`.
+// are present as keys in the map will receive `isResumeTarget = true` when they call `GetResumeContext`.
 func BatchResumeWithData(ctx context.Context, resumeData map[string]any) context.Context {
 	return core.BatchResumeWithData(ctx, resumeData)
 }
 
 func getNodePath(ctx context.Context) (*NodePath, bool) {
-	currentAddress := GetCurrentAddress(ctx)
-	if len(currentAddress) == 0 {
+	currentPath := GetCurrentExecutionPath(ctx)
+	if len(currentPath) == 0 {
 		return nil, false
 	}
 
-	nodePath := make([]string, 0, len(currentAddress))
-	for _, p := range currentAddress {
-		if p.Type == AddressSegmentRunnable {
+	nodePath := make([]string, 0, len(currentPath))
+	for _, p := range currentPath {
+		if p.Type == PathSegmentRunnable {
 			nodePath = []string{}
 			continue
 		}
@@ -139,14 +139,14 @@ func getNodePath(ctx context.Context) (*NodePath, bool) {
 	return NewNodePath(nodePath...), len(nodePath) > 0
 }
 
-// AppendAddressSegment creates a new execution context for a sub-component (e.g., a graph node or a tool call).
+// AppendExecutionPathSegment creates a new execution context for a sub-component (e.g., a graph node or a tool call).
 //
-// It extends the current context's address with a new segment and populates the new context with the
-// appropriate interrupt state and resume data for that specific sub-address.
+// It extends the current context's execution path with a new segment and populates the new context with the
+// appropriate interrupt state and resume data for that specific sub-execution path.
 //
 //   - ctx: The parent context, typically the one passed into the component's Invoke/Stream method.
-//   - segType: The type of the new address segment (e.g., "node", "tool").
-//   - segID: The unique ID for the new address segment.
-func AppendAddressSegment(ctx context.Context, segType AddressSegmentType, segID string) context.Context {
-	return core.AppendAddressSegment(ctx, segType, segID)
+//   - segType: The type of the new execution path segment (e.g., "node", "tool").
+//   - segID: The unique ID for the new execution path segment.
+func AppendExecutionPathSegment(ctx context.Context, segType PathSegmentType, segID string) context.Context {
+	return core.AppendExecutionPathSegment(ctx, segType, segID)
 }

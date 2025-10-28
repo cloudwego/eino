@@ -31,7 +31,7 @@ func GetInterruptState[T any](ctx context.Context) (wasInterrupted bool, hasStat
 // resumed state by calling GetInterruptState.
 //
 // It returns three values:
-//   - isResumeFlow: A boolean that is true if the current component's address was explicitly targeted
+//   - isResumeTarget: A boolean that is true if the current component's execution path was explicitly targeted
 //     by a call to Resume() or ResumeWithData().
 //   - hasData: A boolean that is true if data was provided for this component (i.e., not nil).
 //   - data: The typed data provided by the user.
@@ -45,14 +45,14 @@ func GetInterruptState[T any](ctx context.Context) (wasInterrupted bool, hasStat
 // For example, if an application's UI only provides a single "Continue" button for a set of
 // interruptions. In this model, a component can often just use `GetInterruptState` to see if
 // `wasInterrupted` is true and then proceed with its logic, as it can assume it is an intended target.
-// It may still call `GetResumeContext` to check for optional data, but the `isResumeFlow` flag is less critical.
+// It may still call `GetResumeContext` to check for optional data, but the `isResumeTarget` flag is less critical.
 //
 // #### Strategy 2: Explicit "Targeted Resume" (Most Common)
 // For applications with multiple, distinct interrupt points that must be resumed independently, it is
-// crucial to differentiate which point is being resumed. This is the primary use case for the `isResumeFlow` flag.
-//   - If `isResumeFlow` is `true`: Your component is the explicit target. You should consume
+// crucial to differentiate which point is being resumed. This is the primary use case for the `isResumeTarget` flag.
+//   - If `isResumeTarget` is `true`: Your component is the explicit target. You should consume
 //     the `data` (if any) and complete your work.
-//   - If `isResumeFlow` is `false`: Another component is the target. You MUST re-interrupt
+//   - If `isResumeTarget` is `false`: Another component is the target. You MUST re-interrupt
 //     (e.g., by returning `StatefulInterrupt(...)`) to preserve your state and allow the
 //     resume signal to propagate.
 //
@@ -61,7 +61,7 @@ func GetInterruptState[T any](ctx context.Context) (wasInterrupted bool, hasStat
 // Composite components (like `Graph` or other `Runnable`s that contain sub-processes) have a dual role:
 //  1. Check for Self-Targeting: A composite component can itself be the target of a resume
 //     operation, for instance, to modify its internal state. It may call `GetResumeContext`
-//     to check for data targeted at its own address.
+//     to check for data targeted at its own execution path.
 //  2. Act as a Conduit: After checking for itself, its primary role is to re-execute its children,
 //     allowing the resume context to flow down to them. It must not consume a resume signal
 //     intended for one of its descendants.
@@ -85,7 +85,7 @@ func GetResumeContext[T any](ctx context.Context) (isResumeTarget bool, hasData 
 	return
 }
 
-func getRunCtx(ctx context.Context) (*addrCtx, bool) {
-	rCtx, ok := ctx.Value(addrCtxKey{}).(*addrCtx)
+func getRunCtx(ctx context.Context) (*pathCtx, bool) {
+	rCtx, ok := ctx.Value(pathCtxKey{}).(*pathCtx)
 	return rCtx, ok
 }

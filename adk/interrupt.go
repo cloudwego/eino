@@ -114,19 +114,18 @@ func CompositeInterrupt(ctx context.Context, info any, state any,
 	}
 }
 
-// Address represents the unique, hierarchical address of a component within an execution.
-// It is a slice of AddressSegments, where each segment represents one level of nesting.
-// This is a type alias for core.Address. See the core package for more details.
-type Address = core.Address
-type AddressSegment = core.AddressSegment
-type AddressSegmentType = core.AddressSegmentType
+// ExecutionPath represents the unique, hierarchical execution path of a component within an execution.
+// It is a slice of PathSegments, where each segment represents one level of nesting.
+// This is a type alias for core.ExecutionPath. See the core package for more details.
+type ExecutionPath = core.ExecutionPath
+type PathSegmentType = core.PathSegmentType
 
 const (
-	AddressSegmentAgent AddressSegmentType = "agent"
+	PathSegmentAgent PathSegmentType = "agent"
 )
 
 // InterruptCtx provides a structured, user-facing view of a single point of interruption.
-// It contains the ID and Address of the interrupted component, as well as user-defined info.
+// It contains the ID and ExecutionPath of the interrupted component, as well as user-defined info.
 // This is a type alias for core.InterruptCtx. See the core package for more details.
 type InterruptCtx = core.InterruptCtx
 
@@ -145,10 +144,10 @@ func init() {
 type serialization struct {
 	RunCtx *runContext
 	// deprecated: still keep it here for backward compatibility
-	Info                *InterruptInfo
-	EnableStreaming     bool
-	InterruptID2Address map[string]Address
-	InterruptID2State   map[string]core.InterruptState
+	Info                      *InterruptInfo
+	EnableStreaming           bool
+	InterruptID2ExecutionPath map[string]ExecutionPath
+	InterruptID2State         map[string]core.InterruptState
 }
 
 func loadCheckPoint(ctx context.Context, store compose.CheckPointStore, checkpointID string) (
@@ -166,7 +165,7 @@ func loadCheckPoint(ctx context.Context, store compose.CheckPointStore, checkpoi
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to decode checkpoint: %w", err)
 	}
-	ctx = core.PopulateInterruptState(ctx, s.InterruptID2Address, s.InterruptID2State)
+	ctx = core.PopulateInterruptState(ctx, s.InterruptID2ExecutionPath, s.InterruptID2State)
 	ctx = setRunCtx(ctx, s.RunCtx)
 
 	return ctx, &ResumeInfo{
@@ -184,15 +183,15 @@ func (r *Runner) saveCheckPoint(
 ) error {
 	runCtx := getRunCtx(ctx)
 
-	id2Addr, id2State := core.SignalToPersistenceMaps(is)
+	id2Path, id2State := core.SignalToPersistenceMaps(is)
 
 	buf := &bytes.Buffer{}
 	err := gob.NewEncoder(buf).Encode(&serialization{
-		RunCtx:              runCtx,
-		Info:                info,
-		InterruptID2Address: id2Addr,
-		InterruptID2State:   id2State,
-		EnableStreaming:     r.enableStreaming,
+		RunCtx:                    runCtx,
+		Info:                      info,
+		InterruptID2ExecutionPath: id2Path,
+		InterruptID2State:         id2State,
+		EnableStreaming:           r.enableStreaming,
 	})
 	if err != nil {
 		return fmt.Errorf("failed to encode checkpoint: %w", err)
@@ -284,7 +283,7 @@ func getNextResumeAgents(ctx context.Context, info *ResumeInfo) (map[string]cont
 
 func buildResumeInfo(ctx context.Context, nextAgentID string, info *ResumeInfo) (
 	context.Context, *ResumeInfo) {
-	ctx = core.AppendAddressSegment(ctx, AddressSegmentAgent, nextAgentID)
+	ctx = core.AppendExecutionPathSegment(ctx, PathSegmentAgent, nextAgentID)
 	nextResumeInfo := &ResumeInfo{
 		EnableStreaming: info.EnableStreaming,
 		InterruptInfo:   info.InterruptInfo,

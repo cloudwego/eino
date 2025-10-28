@@ -629,7 +629,7 @@ func (r *runner) handleInterruptWithSubGraphAndRerunNodes(
 		return fmt.Errorf("failed to interrupt: %w", err)
 	}
 
-	cp.InterruptID2Addr, cp.InterruptID2State = core.SignalToPersistenceMaps(is)
+	cp.InterruptID2Path, cp.InterruptID2State = core.SignalToPersistenceMaps(is)
 
 	for _, t := range subgraphTasks {
 		cp.RerunNodes = append(cp.RerunNodes, t.nodeKey)
@@ -697,7 +697,7 @@ func (r *runner) createTasks(ctx context.Context, nodeMap map[string]any, optMap
 		}
 
 		nextTasks = append(nextTasks, &task{
-			ctx:     AppendAddressSegment(ctx, AddressSegmentNode, nodeKey),
+			ctx:     AppendExecutionPathSegment(ctx, PathSegmentNode, nodeKey),
 			nodeKey: nodeKey,
 			call:    call,
 			input:   nodeInput,
@@ -757,7 +757,7 @@ func (r *runner) restoreTasks(
 		}
 
 		newTask := &task{
-			ctx:            AppendAddressSegment(ctx, AddressSegmentNode, key),
+			ctx:            AppendExecutionPathSegment(ctx, PathSegmentNode, key),
 			nodeKey:        key,
 			call:           call,
 			input:          input,

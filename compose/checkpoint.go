@@ -106,7 +106,7 @@ type checkpoint struct {
 
 	SubGraphs map[string]*checkpoint
 
-	InterruptID2Addr  map[string]Address
+	InterruptID2Path  map[string]ExecutionPath
 	InterruptID2State map[string]core.InterruptState
 }
 
@@ -137,7 +137,7 @@ func getCheckPointFromStore(ctx context.Context, id string, cpr *checkPointer) (
 }
 
 func setCheckPointToCtx(ctx context.Context, cp *checkpoint) context.Context {
-	ctx = core.PopulateInterruptState(ctx, cp.InterruptID2Addr, cp.InterruptID2State)
+	ctx = core.PopulateInterruptState(ctx, cp.InterruptID2Path, cp.InterruptID2State)
 	return context.WithValue(ctx, checkPointKey{}, cp)
 }
 

@@ -23,7 +23,6 @@ import (
 	"runtime/debug"
 	"strings"
 
-	"github.com/cloudwego/eino/compose"
 	"github.com/cloudwego/eino/internal/core"
 	"github.com/cloudwego/eino/internal/safe"
 	"github.com/cloudwego/eino/schema"
@@ -45,8 +44,6 @@ type flowAgent struct {
 
 	disallowTransferToParent bool
 	historyRewriter          HistoryRewriter
-
-	checkPointStore compose.CheckPointStore
 }
 
 func (a *flowAgent) deepCopy() *flowAgent {
@@ -56,7 +53,6 @@ func (a *flowAgent) deepCopy() *flowAgent {
 		parentAgent:              a.parentAgent,
 		disallowTransferToParent: a.disallowTransferToParent,
 		historyRewriter:          a.historyRewriter,
-		checkPointStore:          a.checkPointStore,
 	}
 
 	for _, sa := range a.subAgents {
@@ -414,7 +410,7 @@ func (a *flowAgent) run(
 		}
 
 		ctx, _ = initRunCtx(ctx, destName, nil)
-		ctx = core.AppendAddressSegment(ctx, AddressSegmentAgent, destName)
+		ctx = core.AppendExecutionPathSegment(ctx, PathSegmentAgent, destName)
 
 		subAIter := agentToRun.Run(ctx, nil /*subagents get input from runCtx*/, opts...)
 		for {

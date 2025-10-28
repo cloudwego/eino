@@ -12,15 +12,15 @@ type CheckPointStore interface {
 
 type InterruptSignal struct {
 	ID string
-	Address
+	ExecutionPath
 	InterruptInfo
 	InterruptState
 	Subs []*InterruptSignal
 }
 
 func (is *InterruptSignal) Error() string {
-	return fmt.Sprintf("interrupt signal: ID=%s, Addr=%s, Info=%s, State=%s, SubsLen=%d",
-		is.ID, is.Address.String(), is.InterruptInfo.String(), is.InterruptState.String(), len(is.Subs))
+	return fmt.Sprintf("interrupt signal: ID=%s, Path=%s, Info=%s, State=%s, SubsLen=%d",
+		is.ID, is.ExecutionPath.String(), is.InterruptInfo.String(), is.InterruptState.String(), len(is.Subs))
 }
 
 type InterruptState struct {
@@ -53,7 +53,7 @@ func WithLayerPayload(payload any) InterruptOption {
 
 func Interrupt(ctx context.Context, info any, state any, subContexts []*InterruptSignal, opts ...InterruptOption) (
 	*InterruptSignal, error) {
-	addr := GetCurrentAddress(ctx)
+	path := GetCurrentExecutionPath(ctx)
 
 	// Apply options to get config
 	config := &InterruptConfig{}
@@ -68,8 +68,8 @@ func Interrupt(ctx context.Context, info any, state any, subContexts []*Interrup
 	if len(subContexts) == 0 {
 		myPoint.IsRootCause = true
 		return &InterruptSignal{
-			ID:            addr.String(),
-			Address:       addr,
+			ID:            path.String(),
+			ExecutionPath: path,
 			InterruptInfo: myPoint,
 			InterruptState: InterruptState{
 				State:                state,
@@ -79,8 +79,8 @@ func Interrupt(ctx context.Context, info any, state any, subContexts []*Interrup
 	}
 
 	return &InterruptSignal{
-		ID:            addr.String(),
-		Address:       addr,
+		ID:            path.String(),
+		ExecutionPath: path,
 		InterruptInfo: myPoint,
 		InterruptState: InterruptState{
 			State:                state,
@@ -92,12 +92,12 @@ func Interrupt(ctx context.Context, info any, state any, subContexts []*Interrup
 
 // InterruptCtx provides a complete, user-facing context for a single, resumable interrupt point.
 type InterruptCtx struct {
-	// ID is the unique, fully-qualified address of the interrupt point.
-	// It is constructed by joining the individual Address segments, e.g., "agent:A;node:graph_a;tool:tool_call_123".
+	// ID is the unique, fully-qualified execution path of the interrupt point.
+	// It is constructed by joining the individual path segments, e.g., "agent:A;node:graph_a;tool:tool_call_123".
 	// This ID should be used when providing resume data via ResumeWithData.
 	ID string
-	// Address is the structured sequence of AddressSegment segments that leads to the interrupt point.
-	Address Address
+	// ExecutionPath is the structured sequence of PathSegment segments that leads to the interrupt point.
+	ExecutionPath ExecutionPath
 	// Info is the user-facing information associated with the interrupt, provided by the component that triggered it.
 	Info any
 	// IsRootCause indicates whether the interrupt point is the exact root cause for an interruption.
@@ -139,8 +139,8 @@ func FromInterruptContexts(contexts []*InterruptCtx) *InterruptSignal {
 
 		// Create the signal for the current context.
 		newSignal := &InterruptSignal{
-			ID:      ctx.ID,
-			Address: ctx.Address,
+			ID:            ctx.ID,
+			ExecutionPath: ctx.ExecutionPath,
 			InterruptInfo: InterruptInfo{
 				Info:        ctx.Info,
 				IsRootCause: ctx.IsRootCause,
@@ -180,11 +180,11 @@ func ToInterruptContexts(is *InterruptSignal) []*InterruptCtx {
 	var buildContexts func(*InterruptSignal, *InterruptCtx)
 	buildContexts = func(signal *InterruptSignal, parentCtx *InterruptCtx) {
 		currentCtx := &InterruptCtx{
-			ID:          signal.ID,
-			Address:     signal.Address,
-			Info:        signal.InterruptInfo.Info,
-			IsRootCause: signal.InterruptInfo.IsRootCause,
-			Parent:      parentCtx,
+			ID:            signal.ID,
+			ExecutionPath: signal.ExecutionPath,
+			Info:          signal.InterruptInfo.Info,
+			IsRootCause:   signal.InterruptInfo.IsRootCause,
+			Parent:        parentCtx,
 		}
 
 		// Only add the context to the final list if it's a root cause.
@@ -203,18 +203,18 @@ func ToInterruptContexts(is *InterruptSignal) []*InterruptCtx {
 }
 
 // SignalToPersistenceMaps flattens an InterruptSignal tree into two maps suitable for persistence in a checkpoint.
-func SignalToPersistenceMaps(is *InterruptSignal) (map[string]Address, map[string]InterruptState) {
-	id2addr := make(map[string]Address)
+func SignalToPersistenceMaps(is *InterruptSignal) (map[string]ExecutionPath, map[string]InterruptState) {
+	id2path := make(map[string]ExecutionPath)
 	id2state := make(map[string]InterruptState)
 
 	if is == nil {
-		return id2addr, id2state
+		return id2path, id2state
 	}
 
 	var traverse func(*InterruptSignal)
 	traverse = func(signal *InterruptSignal) {
 		// Add current signal's data to the maps.
-		id2addr[signal.ID] = signal.Address
+		id2path[signal.ID] = signal.ExecutionPath
 		id2state[signal.ID] = signal.InterruptState // The embedded struct
 
 		// Recurse into children.
@@ -224,5 +224,5 @@ func SignalToPersistenceMaps(is *InterruptSignal) (map[string]Address, map[strin
 	}
 
 	traverse(is)
-	return id2addr, id2state
+	return id2path, id2state
 }

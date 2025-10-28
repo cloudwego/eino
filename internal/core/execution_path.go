@@ -9,14 +9,14 @@ import (
 	"github.com/cloudwego/eino/internal/generic"
 )
 
-// AddressSegmentType defines the type of a segment in an execution address.
-type AddressSegmentType string
+// PathSegmentType defines the type of a segment in an execution path.
+type PathSegmentType string
 
-// Address represents a full, hierarchical address to a point in the execution structure.
-type Address []AddressSegment
+// ExecutionPath represents a full, hierarchical path to a point in the execution structure.
+type ExecutionPath []PathSegment
 
-// String converts an Address into its unique string representation.
-func (p Address) String() string {
+// String converts an ExecutionPath into its unique string representation.
+func (p ExecutionPath) String() string {
 	if p == nil {
 		return ""
 	}
@@ -32,7 +32,7 @@ func (p Address) String() string {
 	return sb.String()
 }
 
-func (p Address) Equals(other Address) bool {
+func (p ExecutionPath) Equals(other ExecutionPath) bool {
 	if len(p) != len(other) {
 		return false
 	}
@@ -44,19 +44,19 @@ func (p Address) Equals(other Address) bool {
 	return true
 }
 
-// AddressSegment represents a single segment in the hierarchical address of an execution point.
-// A sequence of AddressSegments uniquely identifies a location within a potentially nested structure.
-type AddressSegment struct {
+// PathSegment represents a single segment in the hierarchical path of an execution point.
+// A sequence of PathSegments uniquely identifies a location within a potentially nested structure.
+type PathSegment struct {
 	// ID is the unique identifier for this segment, e.g., the node's key or the tool call's ID.
 	ID string
-	// Type indicates whether this address segment is a graph node, a tool call, an agent, etc.
-	Type AddressSegmentType
+	// Type indicates whether this execution path segment is a graph node, a tool call, an agent, etc.
+	Type PathSegmentType
 }
 
-type addrCtxKey struct{}
+type pathCtxKey struct{}
 
-type addrCtx struct {
-	addr           Address
+type pathCtx struct {
+	path           ExecutionPath
 	interruptState *InterruptState
 	isResumeTarget bool
 	resumeData     any
@@ -70,59 +70,59 @@ type globalResumeInfo struct {
 	id2ResumeDataUsed map[string]bool
 	id2State          map[string]InterruptState
 	id2StateUsed      map[string]bool
-	id2Addr           map[string]Address
+	id2Path           map[string]ExecutionPath
 }
 
-// GetCurrentAddress returns the hierarchical address of the currently executing component.
-// The address is a sequence of segments, each identifying a structural part of the execution
+// GetCurrentExecutionPath returns the hierarchical execution path of the currently executing component.
+// The execution path is a sequence of segments, each identifying a structural part of the execution
 // like an agent, a graph node, or a tool call. This can be useful for logging or debugging.
-func GetCurrentAddress(ctx context.Context) Address {
-	if p, ok := ctx.Value(addrCtxKey{}).(*addrCtx); ok {
-		return p.addr
+func GetCurrentExecutionPath(ctx context.Context) ExecutionPath {
+	if p, ok := ctx.Value(pathCtxKey{}).(*pathCtx); ok {
+		return p.path
 	}
 
 	return nil
 }
 
-// AppendAddressSegment creates a new execution context for a sub-component (e.g., a graph node or a tool call).
+// AppendExecutionPathSegment creates a new execution context for a sub-component (e.g., a graph node or a tool call).
 //
-// It extends the current context's address with a new segment and populates the new context with the
-// appropriate interrupt state and resume data for that specific sub-address.
+// It extends the current context's execution path with a new segment and populates the new context with the
+// appropriate interrupt state and resume data for that specific sub-execution path.
 //
 //   - ctx: The parent context, typically the one passed into the component's Invoke/Stream method.
-//   - segType: The type of the new address segment (e.g., "node", "tool").
-//   - segID: The unique ID for the new address segment.
-func AppendAddressSegment(ctx context.Context, segType AddressSegmentType, segID string) context.Context {
-	// get current address
-	currentAddress := GetCurrentAddress(ctx)
-	if len(currentAddress) == 0 {
-		currentAddress = []AddressSegment{
+//   - segType: The type of the new execution path segment (e.g., "node", "tool").
+//   - segID: The unique ID for the new execution path segment.
+func AppendExecutionPathSegment(ctx context.Context, segType PathSegmentType, segID string) context.Context {
+	// get current execution path
+	currentPath := GetCurrentExecutionPath(ctx)
+	if len(currentPath) == 0 {
+		currentPath = []PathSegment{
 			{
 				Type: segType,
 				ID:   segID,
 			},
 		}
 	} else {
-		newAddress := make([]AddressSegment, len(currentAddress)+1)
-		copy(newAddress, currentAddress)
-		newAddress[len(newAddress)-1] = AddressSegment{
+		newPath := make([]PathSegment, len(currentPath)+1)
+		copy(newPath, currentPath)
+		newPath[len(newPath)-1] = PathSegment{
 			Type: segType,
 			ID:   segID,
 		}
-		currentAddress = newAddress
+		currentPath = newPath
 	}
 
-	runCtx := &addrCtx{
-		addr: currentAddress,
+	runCtx := &pathCtx{
+		path: currentPath,
 	}
 
 	rInfo, hasRInfo := getResumeInfo(ctx)
 	if !hasRInfo {
-		return context.WithValue(ctx, addrCtxKey{}, runCtx)
+		return context.WithValue(ctx, pathCtxKey{}, runCtx)
 	}
 
-	for id, addr := range rInfo.id2Addr {
-		if addr.Equals(currentAddress) {
+	for id, addr := range rInfo.id2Path {
+		if addr.Equals(currentPath) {
 			if used, ok := rInfo.id2StateUsed[id]; !ok || !used {
 				runCtx.interruptState = generic.PtrOf(rInfo.id2State[id])
 				rInfo.id2StateUsed[id] = true
@@ -131,8 +131,8 @@ func AppendAddressSegment(ctx context.Context, segType AddressSegmentType, segID
 		}
 	}
 
-	// take from globalResumeInfo the data for the new address if there is any
-	id := currentAddress.String()
+	// take from globalResumeInfo the data for the new path if there is any
+	id := currentPath.String()
 	rInfo.mu.Lock()
 	defer rInfo.mu.Unlock()
 	used := rInfo.id2ResumeDataUsed[id]
@@ -145,12 +145,12 @@ func AppendAddressSegment(ctx context.Context, segType AddressSegmentType, segID
 		}
 	}
 
-	return context.WithValue(ctx, addrCtxKey{}, runCtx)
+	return context.WithValue(ctx, pathCtxKey{}, runCtx)
 }
 
-// GetNextResumptionPoints finds the immediate child resumption points for a given parent address.
+// GetNextResumptionPoints finds the immediate child resumption points for a given parent execution path.
 func GetNextResumptionPoints(ctx context.Context) (map[string]bool, error) {
-	parentAddr := GetCurrentAddress(ctx)
+	parentPath := GetCurrentExecutionPath(ctx)
 
 	rInfo, exists := getResumeInfo(ctx)
 	if !exists {
@@ -158,20 +158,20 @@ func GetNextResumptionPoints(ctx context.Context) (map[string]bool, error) {
 	}
 
 	nextPoints := make(map[string]bool)
-	parentAddrLen := len(parentAddr)
+	parentPathLen := len(parentPath)
 
-	for _, addr := range rInfo.id2Addr {
-		// Check if addr is a potential child (must be longer than parent)
-		if len(addr) <= parentAddrLen {
+	for _, addr := range rInfo.id2Path {
+		// Check if path is a potential child (must be longer than parent)
+		if len(addr) <= parentPathLen {
 			continue
 		}
 
-		// Check if it has the parent address as a prefix
+		// Check if it has the parent execution path as a prefix
 		var isPrefix bool
-		if parentAddrLen == 0 {
+		if parentPathLen == 0 {
 			isPrefix = true
 		} else {
-			isPrefix = addr[:parentAddrLen].Equals(parentAddr)
+			isPrefix = addr[:parentPathLen].Equals(parentPath)
 		}
 
 		if !isPrefix {
@@ -179,9 +179,9 @@ func GetNextResumptionPoints(ctx context.Context) (map[string]bool, error) {
 		}
 
 		// We are looking for immediate children.
-		// The address of an immediate child should be one segment longer.
-		childAddr := addr[parentAddrLen : parentAddrLen+1]
-		childID := childAddr[0].ID
+		// The execution path of an immediate child should be one segment longer.
+		childPath := addr[parentPathLen : parentPathLen+1]
+		childID := childPath[0].ID
 
 		// Avoid adding duplicates.
 		if _, ok := nextPoints[childID]; !ok {
@@ -195,12 +195,12 @@ func GetNextResumptionPoints(ctx context.Context) (map[string]bool, error) {
 // BatchResumeWithData is the core function for preparing a resume context. It injects a map
 // of resume targets and their corresponding data into the context.
 //
-// The `resumeData` map should contain the interrupt IDs (which are the string form of addresses) of the
+// The `resumeData` map should contain the interrupt IDs (which are the string form of execution paths) of the
 // components to be resumed as keys. The value can be the resume data for that component, or `nil`
 // if no data is needed (equivalent to using `Resume`).
 //
 // This function is the foundation for the "Explicit Targeted Resume" strategy. Components whose interrupt IDs
-// are present as keys in the map will receive `isResumeFlow = true` when they call `GetResumeContext`.
+// are present as keys in the map will receive `isResumeTarget = true` when they call `GetResumeContext`.
 func BatchResumeWithData(ctx context.Context, resumeData map[string]any) context.Context {
 	rInfo, ok := ctx.Value(globalResumeInfoKey{}).(*globalResumeInfo)
 	if !ok {
@@ -227,20 +227,20 @@ func BatchResumeWithData(ctx context.Context, resumeData map[string]any) context
 	return ctx
 }
 
-func PopulateInterruptState(ctx context.Context, id2Addr map[string]Address,
+func PopulateInterruptState(ctx context.Context, id2Path map[string]ExecutionPath,
 	id2State map[string]InterruptState) context.Context {
 	rInfo, ok := ctx.Value(globalResumeInfoKey{}).(*globalResumeInfo)
 	if ok {
-		if rInfo.id2Addr == nil {
-			rInfo.id2Addr = make(map[string]Address)
+		if rInfo.id2Path == nil {
+			rInfo.id2Path = make(map[string]ExecutionPath)
 		}
-		for id, addr := range id2Addr {
-			rInfo.id2Addr[id] = addr
+		for id, path := range id2Path {
+			rInfo.id2Path[id] = path
 		}
 		rInfo.id2State = id2State
 	} else {
 		rInfo = &globalResumeInfo{
-			id2Addr:           id2Addr,
+			id2Path:           id2Path,
 			id2State:          id2State,
 			id2StateUsed:      make(map[string]bool),
 			id2ResumeDataUsed: make(map[string]bool),

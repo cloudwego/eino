@@ -202,7 +202,7 @@ func initRunCtx(ctx context.Context, agentName string, input *AgentInput) (conte
 	return setRunCtx(ctx, runCtx), runCtx
 }
 
-// updateRunPathOnly creates a new context with an updated RunPath, but does NOT modify the Address.
+// updateRunPathOnly creates a new context with an updated RunPath, but does NOT modify the ExecutionPath.
 // This is used by sequential workflows to accumulate execution history for LLM context,
 // without incorrectly chaining the static addresses of peer agents.
 func updateRunPathOnly(ctx context.Context, agentNames ...string) context.Context {
