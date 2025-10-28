@@ -22,6 +22,7 @@ import (
 	"runtime/debug"
 	"sync"
 
+	"github.com/cloudwego/eino/core"
 	"github.com/cloudwego/eino/internal/safe"
 	"github.com/cloudwego/eino/schema"
 )
@@ -74,11 +75,11 @@ func (a *workflowAgent) Run(ctx context.Context, _ *AgentInput, opts ...AgentRun
 		// Different workflow execution based on mode
 		switch a.mode {
 		case workflowAgentModeSequential:
-			a.runSequential(ctx, generator, nil, nil, 0, opts...)
+			err = a.runSequential(ctx, generator, nil, nil, opts...)
 		case workflowAgentModeLoop:
-			a.runLoop(ctx, generator, nil, nil, opts...)
+			err = a.runLoop(ctx, generator, nil, nil, opts...)
 		case workflowAgentModeParallel:
-			a.runParallel(ctx, generator, nil, nil, opts...)
+			err = a.runParallel(ctx, generator, nil, nil, opts...)
 		default:
 			err = fmt.Errorf("unsupported workflow agent mode: %d", a.mode)
 		}
@@ -121,22 +122,19 @@ func (a *workflowAgent) Resume(ctx context.Context, info *ResumeInfo, opts ...Ag
 			generator.Close()
 		}()
 
-		// The flowAgent has already guaranteed we were interrupted.
-		// We just need to get our state to know how to proceed.
-		_, hasState, state := GetInterruptState[any](ctx, info)
-		if !hasState {
+		state := info.InterruptState
+		if state == nil {
 			panic(fmt.Sprintf("workflowAgent.Resume: agent '%s' was asked to resume but has no state", a.Name(ctx)))
 		}
 
 		// Different workflow execution based on the type of our restored state.
 		switch s := state.(type) {
 		case *sequentialWorkflowState:
-			// A standalone sequential workflow was interrupted. LoopIterations is 0.
-			a.runSequential(ctx, generator, s, info, 0, opts...)
+			err = a.runSequential(ctx, generator, s, info, opts...)
 		case *parallelWorkflowState:
-			a.runParallel(ctx, generator, s, info, opts...)
+			err = a.runParallel(ctx, generator, s, info, opts...)
 		case *loopWorkflowState:
-			a.runLoop(ctx, generator, s, info, opts...)
+			err = a.runLoop(ctx, generator, s, info, opts...)
 		default:
 			err = fmt.Errorf("unsupported workflow agent state type: %T", s)
 		}
@@ -157,7 +155,7 @@ type WorkflowInterruptInfo struct {
 
 func (a *workflowAgent) runSequential(ctx context.Context,
 	generator *AsyncGenerator[*AgentEvent], seqState *sequentialWorkflowState, info *ResumeInfo,
-	iterations int /*passed by loop agent*/, opts ...AgentRunOption) (exit, interrupted bool) {
+	opts ...AgentRunOption) (err error) {
 
 	startIdx := 0
 	var nextResumeInfo *ResumeInfo
@@ -169,27 +167,16 @@ func (a *workflowAgent) runSequential(ctx context.Context,
 	if seqState != nil {
 		startIdx = seqState.InterruptIndex
 
-		// Find the next point of resumption from the overall ResumeInfo.
-		// The address for the sequential agent is our own address.
-		nextPoints := info.getNextResumptionPoints(GetCurrentAddress(ctx))
-		if len(nextPoints) > 1 {
-			panic("runSequential received multiple resumption points, which is not possible in sequential execution")
-		}
-
-		if len(nextPoints) == 1 {
-			for _, point := range nextPoints {
-				nextResumeInfo = point
-				// For backward compatibility, populate the deprecated InterruptInfo field.
-				nextResumeInfo.InterruptInfo = info.Data.(*WorkflowInterruptInfo).SequentialInterruptInfo
+		var steps []string
+		for i := 0; i <= startIdx; i++ {
+			steps = append(steps, a.subAgents[i].Name(seqCtx))
+			seqCtx, _, nextResumeInfo, err = getNextResumeAgent(seqCtx, info)
+			if err != nil {
+				return err
 			}
 		}
 
-		// Rebuild the seqCtx to have the correct RunPath up to the point of resumption.
-		// This is necessary so the resumed agent gets the correct full RunPath.
-		var steps []string
-		for i := 0; i < startIdx; i++ {
-			steps = append(steps, a.subAgents[i].Name(seqCtx))
-		}
+		nextResumeInfo.InterruptInfo = info.Data.(*WorkflowInterruptInfo).SequentialInterruptInfo
 		seqCtx = updateRunPathOnly(seqCtx, steps...)
 	}
 
@@ -201,6 +188,8 @@ func (a *workflowAgent) runSequential(ctx context.Context,
 			subIterator = subAgent.Resume(seqCtx, nextResumeInfo, opts...)
 			nextResumeInfo = nil // Only resume the first time.
 		} else {
+			seqCtx = updateRunPathOnly(seqCtx, subAgent.Name(seqCtx))
+			seqCtx = core.AppendAddressSegment(seqCtx, AddressSegmentAgent, subAgent.Name(seqCtx))
 			subIterator = subAgent.Run(seqCtx, nil, opts...)
 		}
 
@@ -214,7 +203,7 @@ func (a *workflowAgent) runSequential(ctx context.Context,
 			if event.Err != nil {
 				// exit if report error
 				generator.Send(event)
-				return true, false
+				return nil
 			}
 
 			if lastActionEvent != nil {
@@ -229,48 +218,41 @@ func (a *workflowAgent) runSequential(ctx context.Context,
 			generator.Send(event)
 		}
 
-		// After the agent has finished, update the RunPath for the next iteration.
-		// The Address of seqCtx remains that of the parent workflow agent.
-		seqCtx = updateRunPathOnly(seqCtx, subAgent.Name(seqCtx))
-
 		if lastActionEvent != nil {
-			if lastActionEvent.Action.Interrupted != nil {
+			if lastActionEvent.Action.internalInterrupted != nil {
 				// A sub-agent interrupted. Wrap it with our own state, including the index.
 				state := &sequentialWorkflowState{
 					InterruptIndex: i,
 				}
 				// Use CompositeInterrupt to funnel the sub-interrupt and add our own state.
 				// The context for the composite interrupt must be the one from *before* the sub-agent ran.
-				action := CompositeInterrupt(ctx, "Sequential workflow interrupted", state,
-					lastActionEvent.Action.Interrupted)
+				event := CompositeInterrupt(ctx, "Sequential workflow interrupted", state,
+					lastActionEvent.Action.internalInterrupted)
 
 				// For backward compatibility, populate the deprecated Data field.
-				action.Interrupted.Data = &WorkflowInterruptInfo{
+				event.Action.Interrupted.Data = &WorkflowInterruptInfo{
 					OrigInput:                getRunCtx(ctx).RootInput,
 					SequentialInterruptIndex: i,
 					SequentialInterruptInfo:  lastActionEvent.Action.Interrupted,
-					LoopIterations:           iterations,
 				}
+				event.AgentName = lastActionEvent.AgentName
+				event.RunPath = lastActionEvent.RunPath
 
-				generator.Send(&AgentEvent{
-					AgentName: lastActionEvent.AgentName,
-					RunPath:   lastActionEvent.RunPath,
-					Action:    action,
-				})
-				return true, true
+				generator.Send(event)
+				return nil
 			}
 
 			if lastActionEvent.Action.Exit {
 				// Forward the event
 				generator.Send(lastActionEvent)
-				return true, false
+				return nil
 			}
 
 			generator.Send(lastActionEvent)
 		}
 	}
 
-	return false, false
+	return nil
 }
 
 // BreakLoopAction is a programmatic-only agent action used to prematurely
@@ -313,10 +295,10 @@ func (a *workflowAgent) doBreakLoopIfNeeded(aa *AgentAction, iterations int) boo
 }
 
 func (a *workflowAgent) runLoop(ctx context.Context, generator *AsyncGenerator[*AgentEvent],
-	loopState *loopWorkflowState, resumeInfo *ResumeInfo, opts ...AgentRunOption) {
+	loopState *loopWorkflowState, resumeInfo *ResumeInfo, opts ...AgentRunOption) (err error) {
 
 	if len(a.subAgents) == 0 {
-		return
+		return nil
 	}
 
 	startIter := 0
@@ -331,29 +313,25 @@ func (a *workflowAgent) runLoop(ctx context.Context, generator *AsyncGenerator[*
 		startIter = loopState.LoopIterations
 		startIdx = loopState.SubAgentIndex
 
-		// Find the next point of resumption from the overall ResumeInfo
-		nextPoints := resumeInfo.getNextResumptionPoints(GetCurrentAddress(ctx))
-		if len(nextPoints) > 1 {
-			panic("runLoop received multiple resumption points, which is not possible")
-		}
-		if len(nextPoints) == 1 {
-			for _, point := range nextPoints {
-				nextResumeInfo = point
-				// For backward compatibility, populate the deprecated InterruptInfo field.
-				nextResumeInfo.InterruptInfo = resumeInfo.Data.(*WorkflowInterruptInfo).SequentialInterruptInfo
-			}
-		}
-
 		// Rebuild the loopCtx to have the correct RunPath up to the point of resumption.
 		var steps []string
 		for i := 0; i < startIter; i++ {
 			for _, subAgent := range a.subAgents {
 				steps = append(steps, subAgent.Name(loopCtx))
+				loopCtx, _, nextResumeInfo, err = getNextResumeAgent(loopCtx, resumeInfo)
+				if err != nil {
+					return err
+				}
 			}
 		}
-		for i := 0; i < startIdx; i++ {
+		for i := 0; i <= startIdx; i++ {
 			steps = append(steps, a.subAgents[i].Name(loopCtx))
+			loopCtx, _, nextResumeInfo, err = getNextResumeAgent(loopCtx, resumeInfo)
+			if err != nil {
+				return err
+			}
 		}
+		nextResumeInfo.InterruptInfo = resumeInfo.Data.(*WorkflowInterruptInfo).SequentialInterruptInfo
 		loopCtx = updateRunPathOnly(loopCtx, steps...)
 	}
 
@@ -367,7 +345,8 @@ func (a *workflowAgent) runLoop(ctx context.Context, generator *AsyncGenerator[*
 				subIterator = subAgent.Resume(loopCtx, nextResumeInfo, opts...)
 				nextResumeInfo = nil // Only resume the first time.
 			} else {
-				// The input parameter is ignored as the sub-agent will generate its own input from the context.
+				loopCtx = updateRunPathOnly(loopCtx, subAgent.Name(loopCtx))
+				loopCtx = core.AppendAddressSegment(loopCtx, AddressSegmentAgent, subAgent.Name(loopCtx))
 				subIterator = subAgent.Run(loopCtx, nil, opts...)
 			}
 
@@ -390,38 +369,32 @@ func (a *workflowAgent) runLoop(ctx context.Context, generator *AsyncGenerator[*
 				generator.Send(event)
 			}
 
-			// After the agent has finished, update the RunPath for the next agent in the sequence.
-			loopCtx = updateRunPathOnly(loopCtx, subAgent.Name(loopCtx))
-
 			if lastActionEvent != nil {
-				if lastActionEvent.Action.Interrupted != nil {
+				if lastActionEvent.Action.internalInterrupted != nil {
 					// A sub-agent interrupted. Wrap it with our own loop state.
 					state := &loopWorkflowState{
 						LoopIterations: i,
 						SubAgentIndex:  j,
 					}
 					// Use CompositeInterrupt to funnel the sub-interrupt and add our own state.
-					action := CompositeInterrupt(ctx, "Loop workflow interrupted", state,
-						lastActionEvent.Action.Interrupted)
+					event := CompositeInterrupt(ctx, "Loop workflow interrupted", state,
+						lastActionEvent.Action.internalInterrupted)
 
 					// For backward compatibility, populate the deprecated Data field.
-					action.Interrupted.Data = &WorkflowInterruptInfo{
+					event.Action.Interrupted.Data = &WorkflowInterruptInfo{
 						OrigInput:                getRunCtx(ctx).RootInput,
 						LoopIterations:           i,
 						SequentialInterruptIndex: j,
 						SequentialInterruptInfo:  lastActionEvent.Action.Interrupted,
 					}
+					event.AgentName = lastActionEvent.AgentName
+					event.RunPath = lastActionEvent.RunPath
 
-					generator.Send(&AgentEvent{
-						AgentName: lastActionEvent.AgentName,
-						RunPath:   lastActionEvent.RunPath,
-						Action:    action,
-					})
-					return // Exit the whole loop.
+					generator.Send(event)
+					return
 				}
 
 				if lastActionEvent.Action.Exit {
-					// Forward the event and exit the entire loop.
 					generator.Send(lastActionEvent)
 					return
 				}
@@ -430,31 +403,43 @@ func (a *workflowAgent) runLoop(ctx context.Context, generator *AsyncGenerator[*
 					generator.Send(lastActionEvent)
 					return
 				}
+
+				generator.Send(lastActionEvent)
 			}
 		}
 
 		// Reset the sub-agent index for the next iteration of the outer loop.
 		startIdx = 0
 	}
+
+	return nil
 }
 
 func (a *workflowAgent) runParallel(ctx context.Context, generator *AsyncGenerator[*AgentEvent],
-	parState *parallelWorkflowState, resumeInfo *ResumeInfo, opts ...AgentRunOption) {
+	parState *parallelWorkflowState, resumeInfo *ResumeInfo, opts ...AgentRunOption) error {
 
 	if len(a.subAgents) == 0 {
-		return
+		return nil
 	}
 
-	var wg sync.WaitGroup
-	interruptMap := make(map[int]*InterruptInfo)
-	var mu sync.Mutex
+	var (
+		wg                   sync.WaitGroup
+		subInterruptSignals  []*core.InterruptSignal
+		dataMap              = make(map[int]*InterruptInfo)
+		mu                   sync.Mutex
+		agentName2ResumeInfo map[string]*ResumeInfo
+		agentName2Ctx        map[string]context.Context
+		err                  error
+	)
 
 	// If resuming, get the scoped ResumeInfo for each child that needs to be resumed.
-	nextPoints := make(map[string]*ResumeInfo)
 	if parState != nil {
-		nextPoints = resumeInfo.getNextResumptionPoints(GetCurrentAddress(ctx))
+		agentName2Ctx, agentName2ResumeInfo, err = getNextResumeAgents(ctx, resumeInfo)
+		if err != nil {
+			return err
+		}
 		// For backward compatibility, populate the deprecated InterruptInfo field.
-		for subA, p := range nextPoints {
+		for subA, p := range agentName2ResumeInfo {
 			var index int
 			for i, a := range a.subAgents {
 				if a.Name(ctx) == subA {
@@ -480,15 +465,18 @@ func (a *workflowAgent) runParallel(ctx context.Context, generator *AsyncGenerat
 
 			var iterator *AsyncIterator[*AgentEvent]
 
-			if nextInfo, ok := nextPoints[agent.Name(ctx)]; ok {
+			if nextInfo, ok := agentName2ResumeInfo[agent.Name(ctx)]; ok {
 				// This branch was interrupted and needs to be resumed.
-				iterator = agent.Resume(ctx, nextInfo, opts...)
+				subCtx := agentName2Ctx[agent.Name(ctx)]
+				iterator = agent.Resume(subCtx, nextInfo, opts...)
 			} else if parState != nil {
 				// We are resuming, but this child is not in the next points map.
 				// This means it finished successfully, so we don't run it.
 				return
 			} else {
-				iterator = agent.Run(ctx, nil, opts...)
+				subCtx := core.AppendAddressSegment(ctx, AddressSegmentAgent, agent.Name(ctx))
+				subCtx = updateRunPathOnly(subCtx, agent.Name(ctx))
+				iterator = agent.Run(subCtx, nil, opts...)
 			}
 
 			for {
@@ -496,9 +484,10 @@ func (a *workflowAgent) runParallel(ctx context.Context, generator *AsyncGenerat
 				if !ok {
 					break
 				}
-				if event.Action != nil && event.Action.Interrupted != nil {
+				if event.Action != nil && event.Action.internalInterrupted != nil {
 					mu.Lock()
-					interruptMap[idx] = event.Action.Interrupted
+					subInterruptSignals = append(subInterruptSignals, event.Action.internalInterrupted)
+					dataMap[idx] = event.Action.Interrupted
 					mu.Unlock()
 					break
 				}
@@ -509,26 +498,22 @@ func (a *workflowAgent) runParallel(ctx context.Context, generator *AsyncGenerat
 
 	wg.Wait()
 
-	if len(interruptMap) > 0 {
+	if len(subInterruptSignals) > 0 {
 		state := &parallelWorkflowState{}
-		var allSubInterrupts []*InterruptInfo
-		for _, subInterrupt := range interruptMap {
-			allSubInterrupts = append(allSubInterrupts, subInterrupt)
-		}
-		action := CompositeInterrupt(ctx, "Parallel workflow interrupted", state, allSubInterrupts...)
+		event := CompositeInterrupt(ctx, "Parallel workflow interrupted", state, subInterruptSignals...)
 
 		// For backward compatibility, populate the deprecated Data field.
-		action.Interrupted.Data = &WorkflowInterruptInfo{
+		event.Action.Interrupted.Data = &WorkflowInterruptInfo{
 			OrigInput:             getRunCtx(ctx).RootInput,
-			ParallelInterruptInfo: interruptMap,
+			ParallelInterruptInfo: dataMap,
 		}
+		event.AgentName = a.Name(ctx)
+		event.RunPath = getRunCtx(ctx).RunPath
 
-		generator.Send(&AgentEvent{
-			AgentName: a.Name(ctx),
-			RunPath:   getRunCtx(ctx).RunPath,
-			Action:    action,
-		})
+		generator.Send(event)
 	}
+
+	return nil
 }
 
 type SequentialAgentConfig struct {

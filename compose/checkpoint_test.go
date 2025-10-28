@@ -107,6 +107,7 @@ func TestSimpleCheckPoint(t *testing.T) {
 				Info: &testStruct{
 					A: "",
 				},
+				IsRootCause: true,
 			},
 		},
 	}, info)
@@ -138,6 +139,7 @@ func TestSimpleCheckPoint(t *testing.T) {
 				Info: &testStruct{
 					A: "",
 				},
+				IsRootCause: true,
 			},
 		},
 	}, info)
@@ -208,6 +210,7 @@ func TestCustomStructInAn2y(t *testing.T) {
 				Info: &testStruct{
 					A: "",
 				},
+				IsRootCause: true,
 			},
 		},
 	}, info)
@@ -237,6 +240,7 @@ func TestCustomStructInAn2y(t *testing.T) {
 				Info: &testStruct{
 					A: "",
 				},
+				IsRootCause: true,
 			},
 		},
 	}, info)
@@ -333,6 +337,16 @@ func TestSubGraph(t *testing.T) {
 				Info: &testStruct{
 					A: "",
 				},
+				IsRootCause: true,
+				Parent: &InterruptCtx{
+					ID: "runnable:root",
+					Address: Address{
+						{
+							Type: AddressSegmentRunnable,
+							ID:   "root",
+						},
+					},
+				},
 			},
 		},
 	}, info)
@@ -371,6 +385,16 @@ func TestSubGraph(t *testing.T) {
 				},
 				Info: &testStruct{
 					A: "",
+				},
+				IsRootCause: true,
+				Parent: &InterruptCtx{
+					ID: "runnable:root",
+					Address: Address{
+						{
+							Type: AddressSegmentRunnable,
+							ID:   "root",
+						},
+					},
 				},
 			},
 		},
@@ -549,6 +573,16 @@ func TestNestedSubGraph(t *testing.T) {
 				Info: &testStruct{
 					A: "",
 				},
+				IsRootCause: true,
+				Parent: &InterruptCtx{
+					ID: "runnable:root",
+					Address: Address{
+						{
+							Type: AddressSegmentRunnable,
+							ID:   "root",
+						},
+					},
+				},
 			},
 		},
 	}, info)
@@ -595,21 +629,31 @@ func TestNestedSubGraph(t *testing.T) {
 				Info: &testStruct{
 					A: "",
 				},
-			},
-			{
-				ID: "runnable:root;node:2",
-				Address: Address{
-					{
-						Type: AddressSegmentRunnable,
-						ID:   "root",
+				IsRootCause: true,
+				Parent: &InterruptCtx{
+					ID: "runnable:root;node:2",
+					Address: Address{
+						{
+							Type: AddressSegmentRunnable,
+							ID:   "root",
+						},
+						{
+							Type: AddressSegmentNode,
+							ID:   "2",
+						},
 					},
-					{
-						Type: AddressSegmentNode,
-						ID:   "2",
+					Info: &testStruct{
+						A: "state",
 					},
-				},
-				Info: &testStruct{
-					A: "state",
+					Parent: &InterruptCtx{
+						ID: "runnable:root",
+						Address: Address{
+							{
+								Type: AddressSegmentRunnable,
+								ID:   "root",
+							},
+						},
+					},
 				},
 			},
 		},
@@ -644,6 +688,16 @@ func TestNestedSubGraph(t *testing.T) {
 				},
 				Info: &testStruct{
 					A: "state",
+				},
+				IsRootCause: true,
+				Parent: &InterruptCtx{
+					ID: "runnable:root",
+					Address: Address{
+						{
+							Type: AddressSegmentRunnable,
+							ID:   "root",
+						},
+					},
 				},
 			},
 		},
@@ -685,6 +739,16 @@ state24
 				},
 				Info: &testStruct{
 					A: "",
+				},
+				IsRootCause: true,
+				Parent: &InterruptCtx{
+					ID: "runnable:root",
+					Address: Address{
+						{
+							Type: AddressSegmentRunnable,
+							ID:   "root",
+						},
+					},
 				},
 			},
 		},
@@ -731,21 +795,31 @@ state24
 				Info: &testStruct{
 					A: "",
 				},
-			},
-			{
-				ID: "runnable:root;node:2",
-				Address: Address{
-					{
-						Type: AddressSegmentRunnable,
-						ID:   "root",
+				IsRootCause: true,
+				Parent: &InterruptCtx{
+					ID: "runnable:root;node:2",
+					Address: Address{
+						{
+							Type: AddressSegmentRunnable,
+							ID:   "root",
+						},
+						{
+							Type: AddressSegmentNode,
+							ID:   "2",
+						},
 					},
-					{
-						Type: AddressSegmentNode,
-						ID:   "2",
+					Info: &testStruct{
+						A: "state",
 					},
-				},
-				Info: &testStruct{
-					A: "state",
+					Parent: &InterruptCtx{
+						ID: "runnable:root",
+						Address: Address{
+							{
+								Type: AddressSegmentRunnable,
+								ID:   "root",
+							},
+						},
+					},
 				},
 			},
 		},
@@ -780,6 +854,16 @@ state24
 				},
 				Info: &testStruct{
 					A: "state",
+				},
+				IsRootCause: true,
+				Parent: &InterruptCtx{
+					ID: "runnable:root",
+					Address: Address{
+						{
+							Type: AddressSegmentRunnable,
+							ID:   "root",
+						},
+					},
 				},
 			},
 		},
@@ -842,6 +926,16 @@ state24
 				Info: &testStruct{
 					A: "",
 				},
+				IsRootCause: true,
+				Parent: &InterruptCtx{
+					ID: "runnable:root",
+					Address: Address{
+						{
+							Type: AddressSegmentRunnable,
+							ID:   "root",
+						},
+					},
+				},
 			},
 		},
 	}, info)
@@ -887,21 +981,31 @@ state24
 				Info: &testStruct{
 					A: "",
 				},
-			},
-			{
-				ID: "runnable:root;node:2",
-				Address: Address{
-					{
-						Type: AddressSegmentRunnable,
-						ID:   "root",
+				IsRootCause: true,
+				Parent: &InterruptCtx{
+					ID: "runnable:root;node:2",
+					Address: Address{
+						{
+							Type: AddressSegmentRunnable,
+							ID:   "root",
+						},
+						{
+							Type: AddressSegmentNode,
+							ID:   "2",
+						},
 					},
-					{
-						Type: AddressSegmentNode,
-						ID:   "2",
+					Info: &testStruct{
+						A: "state",
 					},
-				},
-				Info: &testStruct{
-					A: "state",
+					Parent: &InterruptCtx{
+						ID: "runnable:root",
+						Address: Address{
+							{
+								Type: AddressSegmentRunnable,
+								ID:   "root",
+							},
+						},
+					},
 				},
 			},
 		},
@@ -936,6 +1040,16 @@ state24
 				},
 				Info: &testStruct{
 					A: "state",
+				},
+				IsRootCause: true,
+				Parent: &InterruptCtx{
+					ID: "runnable:root",
+					Address: Address{
+						{
+							Type: AddressSegmentRunnable,
+							ID:   "root",
+						},
+					},
 				},
 			},
 		},
@@ -978,6 +1092,16 @@ state24
 				Info: &testStruct{
 					A: "",
 				},
+				IsRootCause: true,
+				Parent: &InterruptCtx{
+					ID: "runnable:root",
+					Address: Address{
+						{
+							Type: AddressSegmentRunnable,
+							ID:   "root",
+						},
+					},
+				},
 			},
 		},
 	}, info)
@@ -1023,21 +1147,31 @@ state24
 				Info: &testStruct{
 					A: "",
 				},
-			},
-			{
-				ID: "runnable:root;node:2",
-				Address: Address{
-					{
-						Type: AddressSegmentRunnable,
-						ID:   "root",
+				IsRootCause: true,
+				Parent: &InterruptCtx{
+					ID: "runnable:root;node:2",
+					Address: Address{
+						{
+							Type: AddressSegmentRunnable,
+							ID:   "root",
+						},
+						{
+							Type: AddressSegmentNode,
+							ID:   "2",
+						},
 					},
-					{
-						Type: AddressSegmentNode,
-						ID:   "2",
+					Info: &testStruct{
+						A: "state",
 					},
-				},
-				Info: &testStruct{
-					A: "state",
+					Parent: &InterruptCtx{
+						ID: "runnable:root",
+						Address: Address{
+							{
+								Type: AddressSegmentRunnable,
+								ID:   "root",
+							},
+						},
+					},
 				},
 			},
 		},
@@ -1072,6 +1206,16 @@ state24
 				},
 				Info: &testStruct{
 					A: "state",
+				},
+				IsRootCause: true,
+				Parent: &InterruptCtx{
+					ID: "runnable:root",
+					Address: Address{
+						{
+							Type: AddressSegmentRunnable,
+							ID:   "root",
+						},
+					},
 				},
 			},
 		},
