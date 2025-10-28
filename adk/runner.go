@@ -72,7 +72,11 @@ func (r *Runner) Run(ctx context.Context, messages []Message,
 		EnableStreaming: r.enableStreaming,
 	}
 
-	ctx = ctxWithNewRunCtx(ctx, r.parentAddr)
+	ctx, _ = initRunCtx(ctx, fa.Name(ctx), input)
+	if r.parentAddr != nil {
+		ctx = core.SetParentAddress(ctx, *r.parentAddr)
+	}
+	ctx = core.AppendAddressSegment(ctx, AddressSegmentAgent, fa.Name(ctx))
 
 	AddSessionValues(ctx, o.sessionValues)
 
@@ -83,9 +87,7 @@ func (r *Runner) Run(ctx context.Context, messages []Message,
 
 	niter, gen := NewAsyncIteratorPair[*AgentEvent]()
 
-	addr := GetCurrentAddress(ctx)
-
-	go r.handleIter(ctx, iter, gen, input, addr, getSession(ctx), o.checkPointID)
+	go r.handleIter(ctx, iter, gen, o.checkPointID)
 	return niter
 }
 
@@ -138,38 +140,34 @@ func (r *Runner) resume(ctx context.Context, checkPointID string, resumeData map
 		return nil, fmt.Errorf("failed to resume: store is nil")
 	}
 
-	runCtx, info, existed, err := getCheckPoint(ctx, r.store, checkPointID)
+	ctx, resumeInfo, err := loadCheckPoint(ctx, r.store, checkPointID)
 	if err != nil {
-		return nil, fmt.Errorf("failed to get checkpoint: %w", err)
+		return nil, fmt.Errorf("failed to load from checkpoint: %w", err)
 	}
-	if !existed {
-		return nil, fmt.Errorf("checkpoint[%s] not exist", checkPointID)
-	}
-
-	ctx = setRunCtx(ctx, runCtx)
 
 	o := getCommonOptions(nil, opts...)
 	AddSessionValues(ctx, o.sessionValues)
 
-	info.ResumeData = resumeData
+	if len(resumeData) > 0 {
+		ctx = core.BatchResumeWithData(ctx, resumeData)
+	}
 
-	ctx = core.BatchResumeWithData(ctx, resumeData)
+	fa := toFlowAgent(ctx, r.a)
+	ctx, resumeInfo = buildResumeInfo(ctx, fa.Name(ctx), resumeInfo)
 
-	aIter := toFlowAgent(ctx, r.a).Resume(ctx, info, opts...)
+	aIter := fa.Resume(ctx, resumeInfo, opts...)
 	if r.store == nil {
 		return aIter, nil
 	}
 
 	niter, gen := NewAsyncIteratorPair[*AgentEvent]()
 
-	addr := GetCurrentAddress(ctx)
-
-	go r.handleIter(ctx, aIter, gen, runCtx.RootInput, addr, getSession(ctx), &checkPointID)
+	go r.handleIter(ctx, aIter, gen, &checkPointID)
 	return niter, nil
 }
 
-func (r *Runner) handleIter(ctx context.Context, aIter *AsyncIterator[*AgentEvent], gen *AsyncGenerator[*AgentEvent],
-	rootInput *AgentInput, addr Address, session *runSession, checkPointID *string) {
+func (r *Runner) handleIter(ctx context.Context, aIter *AsyncIterator[*AgentEvent],
+	gen *AsyncGenerator[*AgentEvent], checkPointID *string) {
 	defer func() {
 		panicErr := recover()
 		if panicErr != nil {
@@ -179,31 +177,46 @@ func (r *Runner) handleIter(ctx context.Context, aIter *AsyncIterator[*AgentEven
 
 		gen.Close()
 	}()
-	var interruptedInfo *InterruptInfo
+	var (
+		interruptSignal *core.InterruptSignal
+		legacyData      any
+	)
 	for {
 		event, ok := aIter.Next()
 		if !ok {
 			break
 		}
 
-		if event.Action != nil && event.Action.Interrupted != nil {
-			if interruptedInfo != nil {
+		if event.Action != nil && event.Action.internalInterrupted != nil {
+			if interruptSignal != nil {
 				// even if multiple interrupt happens, they should be merged into one
 				// action by CompositeInterrupt, so here in Runner we must assume at most
 				// one interrupt action happens
 				panic("multiple interrupt actions should not happen in Runner")
 			}
-			interruptedInfo = event.Action.Interrupted
-		} else {
-			interruptedInfo = nil
+			interruptSignal = event.Action.internalInterrupted
+			interruptContexts := core.ToInterruptContexts(interruptSignal)
+			event = &AgentEvent{
+				AgentName: event.AgentName,
+				RunPath:   event.RunPath,
+				Output:    event.Output,
+				Action: &AgentAction{
+					Interrupted: &InterruptInfo{
+						Data:              event.Action.Interrupted.Data,
+						InterruptContexts: interruptContexts,
+					},
+				},
+			}
+			legacyData = event.Action.Interrupted.Data
 		}
 
 		gen.Send(event)
 	}
 
-	if interruptedInfo != nil && checkPointID != nil {
-		err := r.saveCheckPoint(ctx, r.store, *checkPointID, interruptedInfo, rootInput,
-			session, addr)
+	if interruptSignal != nil && checkPointID != nil {
+		err := r.saveCheckPoint(ctx, r.store, *checkPointID, &InterruptInfo{
+			Data: legacyData,
+		}, interruptSignal)
 		if err != nil {
 			gen.Send(&AgentEvent{Err: fmt.Errorf("failed to save checkpoint: %w", err)})
 		}

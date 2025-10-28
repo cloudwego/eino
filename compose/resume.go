@@ -97,7 +97,7 @@ func GetAllResumeData(ctx context.Context) map[string]any {
 // GetCurrentAddress returns the hierarchical address of the currently executing component.
 // The address is a sequence of segments, each identifying a structural part of the execution
 // like an agent, a graph node, or a tool call. This can be useful for logging or debugging.
-func GetCurrentAddress(ctx context.Context) (Address, bool) {
+func GetCurrentAddress(ctx context.Context) Address {
 	return core.GetCurrentAddress(ctx)
 }
 
@@ -137,8 +137,8 @@ func BatchResumeWithData(ctx context.Context, resumeData map[string]any) context
 }
 
 func getNodePath(ctx context.Context) (*NodePath, bool) {
-	currentAddress, existed := GetCurrentAddress(ctx)
-	if !existed {
+	currentAddress := GetCurrentAddress(ctx)
+	if len(currentAddress) == 0 {
 		return nil, false
 	}
 

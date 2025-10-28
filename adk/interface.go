@@ -158,6 +158,10 @@ type RunStep struct {
 	agentName string
 }
 
+func init() {
+	schema.RegisterName[[]RunStep]("eino_run_step_list")
+}
+
 func (r *RunStep) String() string {
 	return r.agentName
 }

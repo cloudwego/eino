@@ -20,8 +20,8 @@ import (
 	"bytes"
 	"context"
 	"encoding/gob"
+	"errors"
 	"fmt"
-	"strings"
 
 	"github.com/cloudwego/eino/compose"
 	"github.com/cloudwego/eino/core"
@@ -38,158 +38,10 @@ type ResumeInfo struct {
 	// and GetInterruptState for internal state retrieval.
 	*InterruptInfo
 
-	interruptStates map[string]*interruptState
-	// ResumeData holds data provided by the user for targeted resumption of specific agents.
-	// The map keys are the string addresses of the target agents.
-	ResumeData map[string]any
-}
-
-// GetResumeContext retrieves targeted data for the current agent during a resume operation.
-//
-// This function is typically called *after* an agent has already determined it is in a
-// resumed state by calling GetInterruptState.
-//
-// It returns three values:
-//   - isResumeFlow: A boolean that is true if the current agent's address was explicitly targeted
-//     by the `TargetedResume` method.
-//   - hasData: A boolean that is true if data was provided for this agent (i.e., not nil).
-//   - data: The typed data provided by the user.
-//
-// ### How to Use This Function: A Decision Framework
-//
-// The correct usage pattern depends on the application's desired resume strategy.
-//
-// #### Strategy 1: Implicit "Resume All"
-// In some use cases, any resume operation implies that *all* interrupted agents should proceed.
-// For example, if an application's UI only provides a single "Continue" button. In this model,
-// an agent can often just use `GetInterruptState` to see if `wasInterrupted` is true and then
-// proceed with its logic, as it can assume it is an intended target. It may still call
-// `GetResumeContext` to check for optional data, but the `isResumeFlow` flag is less critical.
-//
-// #### Strategy 2: Explicit "Targeted Resume" (Most Common)
-// For applications with multiple, distinct interrupt points that must be resumed independently, it is
-// crucial to differentiate which point is being resumed. This is the primary use case for the `isResumeFlow` flag.
-//   - If `isResumeFlow` is `true`: Your agent is the explicit target. You should consume
-//     the `data` (if any) and complete your work.
-//   - If `isResumeFlow` is `false`: Another agent is the target. You MUST re-interrupt
-//     (e.g., by returning `StatefulInterrupt(...)`) to preserve your state and allow the
-//     resume signal to propagate.
-//
-// ### Guidance for Composite Agents
-//
-// Composite agents (like `SequentialAgent` or `ChatModelAgent`) have a dual role:
-//  1. Check for Self-Targeting: A composite agent can itself be the target of a resume
-//     operation, for instance, to modify its internal state (e.g., providing a new history
-//     to a `ChatModelAgent`). It may call `GetResumeContext` to check for data targeted at its own address.
-//  2. Act as a Conduit: After checking for itself, its primary role is to re-execute its children,
-//     allowing the `ResumeInfo` to flow down to them. It must not consume a resume signal
-//     intended for one of its descendants.
-func GetResumeContext[T any](ctx context.Context, info *ResumeInfo) (isResumeFlow bool, hasData bool, data T) {
-	var t T
-	if info == nil || info.ResumeData == nil {
-		return false, false, t
-	}
-
-	addr := GetCurrentAddress(ctx)
-	val, exists := info.ResumeData[addr.String()]
-	if !exists {
-		return false, false, t
-	}
-
-	isResumeFlow = true
-	if val == nil {
-		return true, false, t
-	}
-
-	data, hasData = val.(T)
-	return
-}
-
-// newResumeInfo creates a new ResumeInfo object.
-// This is intended for internal framework use.
-func newResumeInfo(states []*interruptState, enableStreaming bool) *ResumeInfo {
-	stateMap := make(map[string]*interruptState, len(states))
-	for _, is := range states {
-		stateMap[is.Addr.String()] = is
-	}
-
-	return &ResumeInfo{
-		EnableStreaming: enableStreaming,
-		interruptStates: stateMap,
-	}
-}
-
-// GetInterruptState checks if the current agent was a direct interrupt point and returns its state.
-func GetInterruptState[T any](ctx context.Context, info *ResumeInfo) (wasInterrupted bool, hasState bool, state T) {
-	if info == nil {
-		return false, false, *new(T)
-	}
-	addr := GetCurrentAddress(ctx)
-	is, ok := info.interruptStates[addr.String()]
-	if !ok {
-		return false, false, *new(T)
-	}
-	wasInterrupted = true
-	if is.State != nil {
-		s, ok := is.State.(T)
-		if ok {
-			hasState = true
-			state = s
-		}
-	}
-	return
-}
-
-// getNextResumptionPoints finds all descendant interrupt points
-// and groups them by the ID of the next segment in the address.
-// It returns a map of new, scoped ResumeInfo objects for each child component that needs to be resumed.
-// It is the unexported implementation detail.
-func (ri *ResumeInfo) getNextResumptionPoints(parentAddr Address) map[string]*ResumeInfo {
-	nextPoints := make(map[string][]*interruptState)
-	parentAddrLen := len(parentAddr)
-
-	for _, is := range ri.interruptStates {
-		addr := is.Addr
-		// Check if the interrupt state's address is a descendant of the parent
-		if len(addr) > parentAddrLen && addr.HasPrefix(parentAddr) {
-			// The next segment in the path determines which child component is responsible.
-			nextSegment := addr[parentAddrLen]
-			childID := nextSegment.ID
-			if nextSegment.Type != AddressSegmentAgent {
-				panic(fmt.Sprintf("getNextResumptionPoint for parentAddr %s returns childID %s, "+
-					"which is not an agent", parentAddr, childID))
-			}
-			nextPoints[childID] = append(nextPoints[childID], is)
-		}
-	}
-
-	if len(nextPoints) == 0 {
-		return nil
-	}
-
-	result := make(map[string]*ResumeInfo, len(nextPoints))
-	for childID, states := range nextPoints {
-		// Create a new, scoped ResumeInfo for the child.
-		childRI := newResumeInfo(states, ri.EnableStreaming)
-
-		// Filter the ResumeData map to only include entries relevant to the child's address space.
-		if ri.ResumeData != nil {
-			childAddrPrefix := append(parentAddr.DeepCopy(),
-				AddressSegment{Type: AddressSegmentAgent, ID: childID}).String()
-			childResumeData := make(map[string]any)
-			for addr, data := range ri.ResumeData {
-				if strings.HasPrefix(addr, childAddrPrefix) {
-					childResumeData[addr] = data
-				}
-			}
-			if len(childResumeData) > 0 {
-				childRI.ResumeData = childResumeData
-			}
-		}
-
-		result[childID] = childRI
-	}
-	return result
+	WasInterrupted bool
+	InterruptState any
+	IsResumeTarget bool
+	ResumeData     any
 }
 
 // InterruptInfo contains all the information about an interruption event.
@@ -301,41 +153,38 @@ func init() {
 type serialization struct {
 	RunCtx *runContext
 	// deprecated: still keep it here for backward compatibility
-	Info            *InterruptInfo
-	InterruptStates []*interruptState
-	EnableStreaming bool
+	Info                *InterruptInfo
+	EnableStreaming     bool
+	Addr                Address
+	InterruptID2Address map[string]Address
+	InterruptID2State   map[string]core.InterruptState
 }
 
-// getCheckPoint get checkpoint from store.
-// What we want to retrieve is the full *ResumeInfo, as well as the runCtx from the previous Runner.Run.
-func getCheckPoint(
-	ctx context.Context,
-	store compose.CheckPointStore,
-	key string,
-) (*runContext, *ResumeInfo, bool, error) {
-	data, existed, err := store.Get(ctx, key)
+func loadCheckPoint(ctx context.Context, store compose.CheckPointStore, checkpointID string) (
+	context.Context, *ResumeInfo, error) {
+	data, existed, err := store.Get(ctx, checkpointID)
 	if err != nil {
-		return nil, nil, false, fmt.Errorf("failed to get checkpoint from store: %w", err)
+		return nil, nil, fmt.Errorf("failed to get checkpoint from store: %w", err)
 	}
 	if !existed {
-		return nil, nil, false, nil
+		return nil, nil, fmt.Errorf("checkpoint[%s] not exist", checkpointID)
 	}
+
 	s := &serialization{}
 	err = gob.NewDecoder(bytes.NewReader(data)).Decode(s)
 	if err != nil {
-		return nil, nil, false, fmt.Errorf("failed to decode checkpoint: %w", err)
+		return nil, nil, fmt.Errorf("failed to decode checkpoint: %w", err)
+	}
+	ctx = core.PopulateInterruptState(ctx, s.InterruptID2Address, s.InterruptID2State)
+	ctx = setRunCtx(ctx, s.RunCtx)
+	if len(s.Addr) > 0 {
+		ctx = core.SetParentAddress(ctx, s.Addr)
 	}
 
-	id2State := make(map[string]*interruptState, len(s.InterruptStates))
-	for _, state := range s.InterruptStates {
-		id2State[state.Addr.String()] = state
-	}
-
-	return s.RunCtx, &ResumeInfo{
+	return ctx, &ResumeInfo{
 		EnableStreaming: s.EnableStreaming,
 		InterruptInfo:   s.Info,
-		interruptStates: id2State,
-	}, true, nil
+	}, nil
 }
 
 func (r *Runner) saveCheckPoint(
@@ -343,20 +192,25 @@ func (r *Runner) saveCheckPoint(
 	store compose.CheckPointStore,
 	key string,
 	info *InterruptInfo,
-	rootInput *AgentInput,
-	session *runSession,
-	parentAddr Address,
+	is *core.InterruptSignal,
 ) error {
+	runCtx := getRunCtx(ctx)
+
+	id2Addr, id2State := core.SignalToPersistenceMaps(is)
+
+	var addr Address
+	if r.parentAddr != nil {
+		addr = *r.parentAddr
+	}
+
 	buf := &bytes.Buffer{}
 	err := gob.NewEncoder(buf).Encode(&serialization{
-		RunCtx: &runContext{
-			RootInput: rootInput,
-			Addr:      parentAddr,
-			Session:   session,
-		},
-		Info:            info,
-		InterruptStates: info.interruptStates,
-		EnableStreaming: r.enableStreaming,
+		RunCtx:              runCtx,
+		Info:                info,
+		Addr:                addr,
+		InterruptID2Address: id2Addr,
+		InterruptID2State:   id2State,
+		EnableStreaming:     r.enableStreaming,
 	})
 	if err != nil {
 		return fmt.Errorf("failed to encode checkpoint: %w", err)
@@ -393,4 +247,80 @@ func (m *mockStore) Set(_ context.Context, _ string, checkPoint []byte) error {
 	m.Data = checkPoint
 	m.Valid = true
 	return nil
+}
+
+func getNextResumeAgent(ctx context.Context, info *ResumeInfo) (context.Context,
+	string, *ResumeInfo, error) {
+	nextAgents, err := core.GetNextResumptionPoints(ctx)
+	if err != nil {
+		return ctx, "", nil, fmt.Errorf("failed to get next agent leading to interruption: %w", err)
+	}
+
+	if len(nextAgents) == 0 {
+		return ctx, "", nil, errors.New("no child agents leading to interrupted agent were found")
+	}
+
+	if len(nextAgents) > 1 {
+		return ctx, "", nil, errors.New("agent has multiple child agents leading to interruption, " +
+			"but concurrent transfer is not supported")
+	}
+
+	// get the single next agent to delegate to.
+	var nextAgentID string
+	for id := range nextAgents {
+		nextAgentID = id
+		break
+	}
+
+	ctx, nextResumeInfo := buildResumeInfo(ctx, nextAgentID, info)
+
+	return ctx, nextAgentID, nextResumeInfo, nil
+}
+
+func getNextResumeAgents(ctx context.Context, info *ResumeInfo) (map[string]context.Context,
+	map[string]*ResumeInfo, error) {
+	nextAgents, err := core.GetNextResumptionPoints(ctx)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to get next agents leading to interruption: %w", err)
+	}
+
+	if len(nextAgents) == 0 {
+		return nil, nil, errors.New("no child agents leading to interrupted agent were found")
+	}
+
+	agentID2Ctx := make(map[string]context.Context)
+	agentID2ResumeInfo := make(map[string]*ResumeInfo)
+	for id := range nextAgents {
+		subCtx, subResumeInfo := buildResumeInfo(ctx, id, info)
+
+		agentID2Ctx[id] = subCtx
+		agentID2ResumeInfo[id] = subResumeInfo
+	}
+
+	return agentID2Ctx, agentID2ResumeInfo, nil
+}
+
+func buildResumeInfo(ctx context.Context, nextAgentID string, info *ResumeInfo) (
+	context.Context, *ResumeInfo) {
+	ctx = core.AppendAddressSegment(ctx, AddressSegmentAgent, nextAgentID)
+	nextResumeInfo := &ResumeInfo{
+		EnableStreaming: info.EnableStreaming,
+		InterruptInfo:   info.InterruptInfo,
+	}
+
+	wasInterrupted, hasState, state := core.GetInterruptState[any](ctx)
+	nextResumeInfo.WasInterrupted = wasInterrupted
+	if hasState {
+		nextResumeInfo.InterruptState = state
+	}
+
+	if wasInterrupted {
+		isResumeTarget, hasData, data := core.GetResumeContext[any](ctx)
+		nextResumeInfo.IsResumeTarget = isResumeTarget
+		if hasData {
+			nextResumeInfo.ResumeData = data
+		}
+	}
+
+	return ctx, nextResumeInfo
 }

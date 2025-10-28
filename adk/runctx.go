@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"sync"
 
+	"github.com/cloudwego/eino/core"
 	"github.com/cloudwego/eino/schema"
 )
 
@@ -164,7 +165,6 @@ func (rc *runContext) deepCopy() *runContext {
 	copied := &runContext{
 		RootInput: rc.RootInput,
 		RunPath:   make([]RunStep, len(rc.RunPath)),
-		Addr:      rc.Addr.DeepCopy(),
 		Session:   rc.Session,
 	}
 
@@ -203,21 +203,6 @@ func initRunCtx(ctx context.Context, agentName string, input *AgentInput) (conte
 	return setRunCtx(ctx, runCtx), runCtx
 }
 
-func restoreRunPath(ctx context.Context, info *ResumeInfo) (context.Context, *runContext) {
-	runCtx := getRunCtx(ctx)
-	addr := runCtx.Addr
-	state, ok := info.interruptStates[addr.String()]
-	if !ok {
-		return ctx, runCtx
-	}
-
-	runPath := state.RunPath
-	runCtx = runCtx.deepCopy()
-	runCtx.RunPath = runPath
-
-	return setRunCtx(ctx, runCtx), runCtx
-}
-
 // updateRunPathOnly creates a new context with an updated RunPath, but does NOT modify the Address.
 // This is used by sequential workflows to accumulate execution history for LLM context,
 // without incorrectly chaining the static addresses of peer agents.
@@ -245,12 +230,8 @@ func ClearRunCtx(ctx context.Context) context.Context {
 	return context.WithValue(ctx, runCtxKey{}, nil)
 }
 
-func ctxWithNewRunCtx(ctx context.Context, parentAddr *Address) context.Context {
-	var addr Address
-	if parentAddr != nil {
-		addr = *parentAddr
-	}
-	return setRunCtx(ctx, &runContext{Session: newRunSession(), Addr: addr})
+func ctxWithNewRunCtx(ctx context.Context) context.Context {
+	return setRunCtx(ctx, &runContext{Session: newRunSession()})
 }
 
 func getSession(ctx context.Context) *runSession {
@@ -263,10 +244,5 @@ func getSession(ctx context.Context) *runSession {
 }
 
 func GetCurrentAddress(ctx context.Context) Address {
-	runCtx := getRunCtx(ctx)
-	if runCtx != nil {
-		return runCtx.Addr
-	}
-
-	return nil
+	return core.GetCurrentAddress(ctx)
 }

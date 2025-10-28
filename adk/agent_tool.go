@@ -25,6 +25,7 @@ import (
 
 	"github.com/cloudwego/eino/components/tool"
 	"github.com/cloudwego/eino/compose"
+	"github.com/cloudwego/eino/core"
 	"github.com/cloudwego/eino/schema"
 )
 
@@ -92,8 +93,8 @@ func (at *agentTool) Info(ctx context.Context) (*schema.ToolInfo, error) {
 
 func (at *agentTool) InvokableRun(ctx context.Context, argumentsInJSON string, opts ...tool.Option) (string, error) {
 	var addrPtr *Address
-	addr, existed := compose.GetCurrentAddress(ctx)
-	if existed {
+	addr := compose.GetCurrentAddress(ctx)
+	if len(addr) > 0 {
 		addrPtr = &addr
 	}
 
@@ -138,13 +139,10 @@ func (at *agentTool) InvokableRun(ctx context.Context, argumentsInJSON string, o
 			return "", fmt.Errorf("agent tool '%s' interrupt has happened, but cannot find interrupt state", at.agent.Name(ctx))
 		}
 
-		allResumeData := compose.GetAllResumeData(ctx)
-		delete(allResumeData, addr.String())
-
 		ms = newResumeStore(state)
 
 		iter, err = newInvokableAgentToolRunner(at.agent, ms, addrPtr).
-			TargetedResume(ctx, mockCheckPointID, allResumeData, getOptionsByAgentName(at.agent.Name(ctx), opts)...)
+			Resume(ctx, mockCheckPointID, getOptionsByAgentName(at.agent.Name(ctx), opts)...)
 		if err != nil {
 			return "", err
 		}
@@ -173,12 +171,8 @@ func (at *agentTool) InvokableRun(ctx context.Context, argumentsInJSON string, o
 			return "", fmt.Errorf("interrupt has happened, but cannot find interrupt info")
 		}
 
-		var errs []error
-		for _, intCtx := range lastEvent.Action.Interrupted.InterruptContexts {
-			errs = append(errs, intCtx.AsInterruptSignal())
-		}
-
-		return "", compose.CompositeInterrupt(ctx, "agent tool interrupt", data, errs...)
+		is := core.FromInterruptContexts(lastEvent.Action.Interrupted.InterruptContexts)
+		return "", compose.CompositeInterrupt(ctx, "agent tool interrupt", data, is)
 	}
 
 	if lastEvent == nil {

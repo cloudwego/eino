@@ -98,6 +98,7 @@ func TestTransferToAgent(t *testing.T) {
 			schema.UserMessage("Please transfer this to the child agent"),
 		},
 	}
+	ctx, _ = initRunCtx(ctx, flowAgent.Name(ctx), input)
 	iterator := flowAgent.Run(ctx, input)
 	assert.NotNil(t, iterator)
 

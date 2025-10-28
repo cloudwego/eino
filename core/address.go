@@ -17,6 +17,9 @@ type Address []AddressSegment
 
 // String converts an Address into its unique string representation.
 func (p Address) String() string {
+	if p == nil {
+		return ""
+	}
 	var sb strings.Builder
 	for i, s := range p {
 		sb.WriteString(string(s.Type))
@@ -95,12 +98,12 @@ type globalResumeInfo struct {
 // GetCurrentAddress returns the hierarchical address of the currently executing component.
 // The address is a sequence of segments, each identifying a structural part of the execution
 // like an agent, a graph node, or a tool call. This can be useful for logging or debugging.
-func GetCurrentAddress(ctx context.Context) (Address, bool) {
+func GetCurrentAddress(ctx context.Context) Address {
 	if p, ok := ctx.Value(addrCtxKey{}).(*addrCtx); ok {
-		return p.addr, true
+		return p.addr
 	}
 
-	return nil, false
+	return nil
 }
 
 // AppendAddressSegment creates a new execution context for a sub-component (e.g., a graph node or a tool call).
@@ -113,8 +116,8 @@ func GetCurrentAddress(ctx context.Context) (Address, bool) {
 //   - segID: The unique ID for the new address segment.
 func AppendAddressSegment(ctx context.Context, segType AddressSegmentType, segID string) context.Context {
 	// get current address
-	currentAddress, existed := GetCurrentAddress(ctx)
-	if !existed {
+	currentAddress := GetCurrentAddress(ctx)
+	if len(currentAddress) == 0 {
 		currentAddress = []AddressSegment{
 			{
 				Type: segType,
@@ -165,6 +168,63 @@ func AppendAddressSegment(ctx context.Context, segType AddressSegmentType, segID
 	}
 
 	return context.WithValue(ctx, addrCtxKey{}, runCtx)
+}
+
+// Equal checks if two Addresses are identical.
+func (p Address) Equal(other Address) bool {
+	if len(p) != len(other) {
+		return false
+	}
+	for i := range p {
+		if p[i] != other[i] {
+			return false
+		}
+	}
+	return true
+}
+
+// GetNextResumptionPoints finds the immediate child resumption points for a given parent address.
+func GetNextResumptionPoints(ctx context.Context) (map[string]bool, error) {
+	parentAddr := GetCurrentAddress(ctx)
+
+	rInfo, exists := getResumeInfo(ctx)
+	if !exists {
+		return nil, fmt.Errorf("GetNextResumptionPoints: failed to get resume info from context")
+	}
+
+	nextPoints := make(map[string]bool)
+	parentAddrLen := len(parentAddr)
+
+	for _, addr := range rInfo.id2Addr {
+		// Check if addr is a potential child (must be longer than parent)
+		if len(addr) <= parentAddrLen {
+			continue
+		}
+
+		// Check if it has the parent address as a prefix
+		var isPrefix bool
+		if parentAddrLen == 0 {
+			isPrefix = true
+		} else {
+			isPrefix = addr[:parentAddrLen].Equal(parentAddr)
+		}
+
+		if !isPrefix {
+			continue
+		}
+
+		// We are looking for immediate children.
+		// The address of an immediate child should be one segment longer.
+		childAddr := addr[parentAddrLen : parentAddrLen+1]
+		childID := childAddr[0].ID
+
+		// Avoid adding duplicates.
+		if _, ok := nextPoints[childID]; !ok {
+			nextPoints[childID] = true
+		}
+	}
+
+	return nextPoints, nil
 }
 
 // SetParentAddress returns a new context that contains the given parent address.
@@ -232,9 +292,10 @@ func PopulateInterruptState(ctx context.Context, id2Addr map[string]Address,
 		rInfo.id2State = id2State
 	} else {
 		rInfo = &globalResumeInfo{
-			id2Addr:      id2Addr,
-			id2State:     id2State,
-			id2StateUsed: make(map[string]bool),
+			id2Addr:           id2Addr,
+			id2State:          id2State,
+			id2StateUsed:      make(map[string]bool),
+			id2ResumeDataUsed: make(map[string]bool),
 		}
 		ctx = context.WithValue(ctx, globalResumeInfoKey{}, rInfo)
 	}
