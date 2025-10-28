@@ -19,7 +19,7 @@ package compose
 import (
 	"context"
 
-	"github.com/cloudwego/eino/core"
+	"github.com/cloudwego/eino/internal/core"
 )
 
 // GetInterruptState provides a type-safe way to check for and retrieve the persisted state from a previous interruption.
@@ -76,22 +76,6 @@ func GetInterruptState[T any](ctx context.Context) (wasInterrupted bool, hasStat
 //     intended for one of its descendants.
 func GetResumeContext[T any](ctx context.Context) (isResumeFlow bool, hasData bool, data T) {
 	return core.GetResumeContext[T](ctx)
-}
-
-// GetAllResumeData retrieves all resume data from the context that has not yet been claimed and used
-// by a resumed component.
-//
-// This function is primarily intended for advanced use cases involving "bridge" components that
-// contain nested, independent execution environments (e.g., an adk.AgentTool running an
-// adk.Agent which in turn contains a compose.Graph).
-//
-// The typical pattern for such a bridge component during a resume operation is:
-// 1. Call GetAllResumeData to get the complete map of unused data.
-// 2. Identify and consume the data intended for the bridge component itself, often by deleting it from the map.
-// 3. Pass the remaining data down to the nested environment using its own BatchResumeWithData function.
-// This ensures that resume data is correctly routed across different framework layers.
-func GetAllResumeData(ctx context.Context) map[string]any {
-	return core.GetAllResumeData(ctx)
 }
 
 // GetCurrentAddress returns the hierarchical address of the currently executing component.
@@ -165,13 +149,4 @@ func getNodePath(ctx context.Context) (*NodePath, bool) {
 //   - segID: The unique ID for the new address segment.
 func AppendAddressSegment(ctx context.Context, segType AddressSegmentType, segID string) context.Context {
 	return core.AppendAddressSegment(ctx, segType, segID)
-}
-
-// SetParentAddress returns a new context that contains the given parent address.
-// This is used to bridge the address hierarchy between different execution layers,
-// such as between a parent package (such as adk package) and the compose package.
-// It's important to note that this function will overwrite any previous address
-// that may exist in the context.
-func SetParentAddress(ctx context.Context, addr Address) context.Context {
-	return core.SetParentAddress(ctx, addr)
 }
