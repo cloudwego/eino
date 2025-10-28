@@ -34,6 +34,7 @@ import (
 	"github.com/cloudwego/eino/components/prompt"
 	"github.com/cloudwego/eino/components/tool"
 	"github.com/cloudwego/eino/compose"
+	"github.com/cloudwego/eino/core"
 	"github.com/cloudwego/eino/internal/safe"
 	"github.com/cloudwego/eino/schema"
 	ub "github.com/cloudwego/eino/utils/callbacks"
@@ -342,6 +343,7 @@ type cbHandler struct {
 	enableStreaming         bool
 	store                   *mockStore
 	returnDirectlyToolEvent atomic.Value
+	ctx             context.Context
 }
 
 func (h *cbHandler) onChatModelEnd(ctx context.Context,
@@ -450,27 +452,27 @@ func (h *cbHandler) onGraphError(ctx context.Context,
 		return ctx
 	}
 
-	intInfo := &InterruptInfo{
-		InterruptContexts: info.InterruptContexts,
-	}
+	is := core.FromInterruptContexts(info.InterruptContexts)
 
-	action := CompositeInterrupt(ctx, info, data, intInfo)
-	action.Interrupted.Data = &ChatModelAgentInterruptInfo{ // for backward-compatibility with older checkpoints
+	event := CompositeInterrupt(h.ctx, info, data, is)
+	event.Action.Interrupted.Data = &ChatModelAgentInterruptInfo{ // for backward-compatibility with older checkpoints
 		Info: info,
 		Data: data,
 	}
-
-	h.Send(&AgentEvent{AgentName: h.agentName, Action: action})
+	event.AgentName = h.agentName
+	h.Send(event)
 
 	return ctx
 }
 
-func genReactCallbacks(agentName string,
+func genReactCallbacks(ctx context.Context, agentName string,
 	generator *AsyncGenerator[*AgentEvent],
 	enableStreaming bool,
 	store *mockStore) compose.Option {
 
-	h := &cbHandler{AsyncGenerator: generator, agentName: agentName, store: store, enableStreaming: enableStreaming}
+	h := &cbHandler{
+		ctx:            ctx,
+		AsyncGenerator: generator, agentName: agentName, store: store, enableStreaming: enableStreaming}
 
 	cmHandler := &ub.ModelCallbackHandler{
 		OnEnd:                 h.onChatModelEnd,
@@ -638,17 +640,14 @@ func (a *ChatModelAgent) buildRunFunc(ctx context.Context) runFunc {
 				return
 			}
 
-			callOpt := genReactCallbacks(a.name, generator, input.EnableStreaming, store)
-
-			// Bridge the ADK and Compose contexts by setting the parent address.
-			graphCtx := compose.SetParentAddress(ctx, GetCurrentAddress(ctx))
+			callOpt := genReactCallbacks(ctx, a.name, generator, input.EnableStreaming, store)
 
 			var msg Message
 			var msgStream MessageStream
 			if input.EnableStreaming {
-				msgStream, err_ = runnable.Stream(graphCtx, msgs, append(opts, callOpt)...)
+				msgStream, err_ = runnable.Stream(ctx, msgs, append(opts, callOpt)...)
 			} else {
-				msg, err_ = runnable.Invoke(graphCtx, msgs, append(opts, callOpt)...)
+				msg, err_ = runnable.Invoke(ctx, msgs, append(opts, callOpt)...)
 			}
 
 			if err_ == nil {
@@ -698,21 +697,26 @@ func (a *ChatModelAgent) Run(ctx context.Context, input *AgentInput, opts ...Age
 func (a *ChatModelAgent) Resume(ctx context.Context, info *ResumeInfo, opts ...AgentRunOption) *AsyncIterator[*AgentEvent] {
 	run := a.buildRunFunc(ctx)
 
-	// The state is the checkpoint data saved by the underlying graph.
-	// We don't need to check `wasInterrupted` because the calling flowAgent guarantees it.
-	// We only need to check if the state exists and is of the correct type.
-	_, hasState, state := GetInterruptState[[]byte](ctx, info)
-	if !hasState {
-		// This is a violation of the architectural contract. It should be impossible.
-		panic(fmt.Sprintf("ChatModelAgent.Resume: agent '%s' was asked to resume but no valid state was found",
-			a.Name(ctx)))
-	}
-
 	co := getComposeOptions(opts)
 	co = append(co, compose.WithCheckPointID(mockCheckPointID))
 
-	_, hasResumeData, resumeData := GetResumeContext[*ChatModelAgentResumeData](ctx, info)
-	if hasResumeData {
+	if info.InterruptState == nil {
+		panic(fmt.Sprintf("ChatModelAgent.Resume: agent '%s' was asked to resume but has no state", a.Name(ctx)))
+	}
+
+	stateByte, ok := info.InterruptState.([]byte)
+	if !ok {
+		panic(fmt.Sprintf("ChatModelAgent.Resume: agent '%s' was asked to resume but has invalid interrupt state type: %T",
+			a.Name(ctx), info.InterruptState))
+	}
+
+	if info.ResumeData != nil {
+		resumeData, ok := info.ResumeData.(*ChatModelAgentResumeData)
+		if !ok {
+			panic(fmt.Sprintf("ChatModelAgent.Resume: agent '%s' was asked to resume but has invalid resume data type: %T",
+				a.Name(ctx), info.ResumeData))
+		}
+
 		if resumeData.HistoryModifier != nil {
 			co = append(co, compose.WithStateModifier(func(ctx context.Context, path compose.NodePath, state any) error {
 				s, ok := state.(*State)
@@ -724,7 +728,6 @@ func (a *ChatModelAgent) Resume(ctx context.Context, info *ResumeInfo, opts ...A
 			}))
 		}
 	}
-	ctx = compose.BatchResumeWithData(ctx, info.ResumeData)
 
 	iterator, generator := NewAsyncIteratorPair[*AgentEvent]()
 	go func() {
@@ -739,7 +742,7 @@ func (a *ChatModelAgent) Resume(ctx context.Context, info *ResumeInfo, opts ...A
 		}()
 
 		run(ctx, &AgentInput{EnableStreaming: info.EnableStreaming}, generator,
-			newResumeStore(state), co...)
+			newResumeStore(stateByte), co...)
 	}()
 
 	return iterator

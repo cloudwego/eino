@@ -118,6 +118,9 @@ func TestSequentialAgent(t *testing.T) {
 		},
 	}
 
+	// Initialize the run context
+	ctx, _ = initRunCtx(ctx, sequentialAgent.Name(ctx), input)
+
 	iterator := sequentialAgent.Run(ctx, input)
 	assert.NotNil(t, iterator)
 
@@ -204,6 +207,8 @@ func TestSequentialAgentWithExit(t *testing.T) {
 		},
 	}
 
+	ctx, _ = initRunCtx(ctx, sequentialAgent.Name(ctx), input)
+
 	iterator := sequentialAgent.Run(ctx, input)
 	assert.NotNil(t, iterator)
 
@@ -265,13 +270,15 @@ func TestParallelAgent(t *testing.T) {
 	assert.NotNil(t, parallelAgent)
 
 	// Run the parallel agent
-	input := AgentInput{
+	input := &AgentInput{
 		Messages: []Message{
 			schema.UserMessage("Test input"),
 		},
 	}
 
-	iterator := parallelAgent.Run(ctx, &input)
+	ctx, _ = initRunCtx(ctx, parallelAgent.Name(ctx), input)
+
+	iterator := parallelAgent.Run(ctx, input)
 	assert.NotNil(t, iterator)
 
 	// Collect all events
@@ -346,6 +353,8 @@ func TestLoopAgent(t *testing.T) {
 		},
 	}
 
+	ctx, _ = initRunCtx(ctx, loopAgent.Name(ctx), input)
+
 	iterator := loopAgent.Run(ctx, input)
 	assert.NotNil(t, iterator)
 
@@ -411,6 +420,7 @@ func TestLoopAgentWithBreakLoop(t *testing.T) {
 			schema.UserMessage("Test input"),
 		},
 	}
+	ctx, _ = initRunCtx(ctx, loopAgent.Name(ctx), input)
 
 	iterator := loopAgent.Run(ctx, input)
 	assert.NotNil(t, iterator)
@@ -476,6 +486,7 @@ func TestWorkflowAgentPanicRecovery(t *testing.T) {
 		},
 	}
 
+	ctx, _ = initRunCtx(ctx, sequentialAgent.Name(ctx), input)
 	iterator := sequentialAgent.Run(ctx, input)
 	assert.NotNil(t, iterator)
 
@@ -519,6 +530,7 @@ func TestWorkflowAgentUnsupportedMode(t *testing.T) {
 		},
 	}
 
+	ctx, _ = initRunCtx(ctx, agent.Name(ctx), input)
 	iterator := agent.Run(ctx, input)
 	assert.NotNil(t, iterator)
 

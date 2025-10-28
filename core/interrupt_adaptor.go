@@ -2,7 +2,6 @@ package core
 
 import (
 	"context"
-	"errors"
 	"fmt"
 )
 
@@ -83,10 +82,7 @@ func WithLayerPayload(payload any) InterruptOption {
 
 func Interrupt(ctx context.Context, info any, state any, subContexts []*InterruptSignal, opts ...InterruptOption) (
 	*InterruptSignal, error) {
-	addr, exist := GetCurrentAddress(ctx)
-	if !exist {
-		return nil, errors.New("address not exist")
-	}
+	addr := GetCurrentAddress(ctx)
 
 	// Apply options to get config
 	config := &InterruptConfig{}

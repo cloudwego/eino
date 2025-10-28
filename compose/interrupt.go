@@ -73,7 +73,7 @@ func (w *wrappedInterruptAndRerun) Unwrap() error {
 // If the error is returned by either Interrupt, StatefulInterrupt or CompositeInterrupt,
 // it will be returned as-is without wrapping
 func WrapInterruptAndRerunIfNeeded(ctx context.Context, step AddressSegment, err error) error {
-	addr, _ := GetCurrentAddress(ctx)
+	addr := GetCurrentAddress(ctx)
 	newAddr := append(append([]AddressSegment{}, addr...), step)
 	if errors.Is(err, deprecatedInterruptAndRerun) {
 		return &wrappedInterruptAndRerun{
