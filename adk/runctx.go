@@ -23,7 +23,6 @@ import (
 	"fmt"
 	"sync"
 
-	"github.com/cloudwego/eino/core"
 	"github.com/cloudwego/eino/schema"
 )
 
@@ -241,8 +240,4 @@ func getSession(ctx context.Context) *runSession {
 	}
 
 	return nil
-}
-
-func GetCurrentAddress(ctx context.Context) Address {
-	return core.GetCurrentAddress(ctx)
 }
