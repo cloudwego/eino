@@ -390,6 +390,46 @@ type ResponseMeta struct {
 	LogProbs *LogProbs `json:"logprobs,omitempty"`
 }
 
+// Message denotes the data structure for model input and output, originating from either user input or model return.
+// It supports both text-only and multimodal content.
+//
+// For text-only input from a user, use the Content field:
+//
+//	&schema.Message{
+//		Role:    schema.User,
+//		Content: "What is the capital of France?",
+//	}
+//
+// For multimodal input from a user, use the UserInputMultiContent field.
+// This allows combining text with other media like images:
+//
+//	&schema.Message{
+//		Role: schema.User,
+//		UserInputMultiContent: []schema.MessageInputPart{
+//			{Type: schema.ChatMessagePartTypeText, Text: "What is in this image?"},
+//			{Type: schema.ChatMessagePartTypeImageURL, Image: &schema.MessageInputImage{
+//				MessagePartCommon: schema.MessagePartCommon{
+//					URL: toPtr("https://example.com/cat.jpg"),
+//				},
+//				Detail: schema.ImageURLDetailHigh,
+//			}},
+//		},
+//	}
+//
+// When the model returns multimodal content, it is available in the AssistantGenMultiContent field:
+//
+//	&schema.Message{
+//		Role: schema.Assistant,
+//		AssistantGenMultiContent: []schema.MessageOutputPart{
+//			{Type: schema.ChatMessagePartTypeText, Text: "Here is the generated image:"},
+//			{Type: schema.ChatMessagePartTypeImage, Image: &schema.MessageOutputImage{
+//				MessagePartCommon: schema.MessagePartCommon{
+//					Base64Data: toPtr("base64_image_binary"),
+//					MIMEType:   "image/png",
+//				},
+//			}},
+//		},
+//	}
 type Message struct {
 	Role RoleType `json:"role"`
 
