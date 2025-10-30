@@ -274,3 +274,12 @@ func getSession(ctx context.Context) *runSession {
 
 	return nil
 }
+
+// GetRunSteps retrieves the current run steps from the context.
+func GetRunSteps(ctx context.Context) ([]RunStep, bool) {
+	runCtx := getRunCtx(ctx)
+	if runCtx == nil {
+		return nil, false
+	}
+	return runCtx.RunPath, true
+}

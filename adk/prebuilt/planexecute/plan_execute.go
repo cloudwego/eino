@@ -28,6 +28,8 @@ import (
 	"github.com/bytedance/sonic"
 
 	"github.com/cloudwego/eino/adk"
+	"github.com/cloudwego/eino/callbacks"
+	"github.com/cloudwego/eino/components"
 	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/components/prompt"
 	"github.com/cloudwego/eino/internal/safe"
@@ -317,7 +319,6 @@ func argToContent(msg adk.Message) (adk.Message, error) {
 
 func (p *planner) Run(ctx context.Context, input *adk.AgentInput,
 	_ ...adk.AgentRunOption) *adk.AsyncIterator[*adk.AgentEvent] {
-
 	iterator, generator := adk.NewAsyncIteratorPair[*adk.AgentEvent]()
 
 	adk.AddSessionValue(ctx, UserInputSessionKey, input.Messages)
@@ -338,6 +339,10 @@ func (p *planner) Run(ctx context.Context, input *adk.AgentInput,
 			generator.Send(&adk.AgentEvent{Err: err})
 			return
 		}
+		ctx = callbacks.ReuseHandlers(ctx, &callbacks.RunInfo{
+			Name:      p.Name(ctx),
+			Component: components.ComponentOfChatModel,
+		})
 		var modelCallOptions []model.Option
 		if p.toolCall {
 			modelCallOptions = append(modelCallOptions, model.WithToolChoice(schema.ToolChoiceForced))
@@ -700,7 +705,10 @@ func (r *replanner) Run(ctx context.Context, input *adk.AgentInput, _ ...adk.Age
 		}()
 
 		callOpt := model.WithToolChoice(schema.ToolChoiceForced)
-
+		ctx = callbacks.ReuseHandlers(ctx, &callbacks.RunInfo{
+			Name:      r.Name(ctx),
+			Component: components.ComponentOfChatModel,
+		})
 		var planMsg adk.Message
 		if input.EnableStreaming {
 			var s adk.MessageStream
