@@ -391,16 +391,20 @@ type ResponseMeta struct {
 }
 
 type Message struct {
-	Role    RoleType `json:"role"`
-	Content string   `json:"content"`
+	Role RoleType `json:"role"`
+
+	// Content is for user text input and model text output.
+	Content string `json:"content"`
 
 	// if MultiContent is not empty, use this instead of Content
 	// if MultiContent is empty, use Content
-	// Deprecated: will no longer be maintained use UserInputMultiContent instead.
+	// Deprecated: Use UserInputMultiContent for user multimodal inputs and AssistantGenMultiContent for model multimodal outputs.
 	MultiContent []ChatMessagePart `json:"multi_content,omitempty"`
 
+	// UserInputMultiContent passes multimodal content provided by the user to the model.
 	UserInputMultiContent []MessageInputPart `json:"user_input_multi_content,omitempty"`
 
+	// AssistantGenMultiContent is for receiving multimodal output from the model.
 	AssistantGenMultiContent []MessageOutputPart `json:"assistant_output_multi_content,omitempty"`
 
 	Name string `json:"name,omitempty"`
