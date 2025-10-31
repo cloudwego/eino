@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"runtime/debug"
 
+	"github.com/cloudwego/eino/callbacks"
 	"github.com/cloudwego/eino/compose"
 	"github.com/cloudwego/eino/internal/safe"
 	"github.com/cloudwego/eino/schema"
@@ -51,6 +52,14 @@ func (r *Runner) Run(ctx context.Context, messages []Message,
 	opts ...AgentRunOption) *AsyncIterator[*AgentEvent] {
 	o := getCommonOptions(nil, opts...)
 
+	ctx = callbacks.InitCallbacks(ctx, &callbacks.RunInfo{
+		Name:      r.a.Name(ctx),
+		Type:      "Agent",
+		Component: "Agent",
+	})
+
+	ctx = callbacks.OnStart(ctx, messages)
+
 	fa := toFlowAgent(ctx, r.a)
 
 	input := &AgentInput{
@@ -63,13 +72,14 @@ func (r *Runner) Run(ctx context.Context, messages []Message,
 	AddSessionValues(ctx, o.sessionValues)
 
 	iter := fa.Run(ctx, input, opts...)
-	if r.store == nil {
-		return iter
-	}
-
 	niter, gen := NewAsyncIteratorPair[*AgentEvent]()
 
-	go r.handleIter(ctx, iter, gen, o.checkPointID)
+	if r.store == nil {
+		go r.bypassIter(ctx, iter, gen)
+	} else {
+		go r.handleIter(ctx, iter, gen, o.checkPointID)
+	}
+
 	return niter
 }
 
@@ -87,7 +97,21 @@ func (r *Runner) Query(ctx context.Context,
 	return r.Run(ctx, []Message{schema.UserMessage(query)}, opts...)
 }
 
-func (r *Runner) Resume(ctx context.Context, checkPointID string, opts ...AgentRunOption) (*AsyncIterator[*AgentEvent], error) {
+func (r *Runner) Resume(ctx context.Context, checkPointID string, opts ...AgentRunOption) (iter *AsyncIterator[*AgentEvent], err error) {
+	ctx = callbacks.InitCallbacks(ctx, &callbacks.RunInfo{
+		Name:      r.a.Name(ctx),
+		Type:      "Agent",
+		Component: "Agent",
+	})
+
+	ctx = callbacks.OnStart(ctx, []Message{})
+
+	defer func() {
+		if err != nil {
+			_ = callbacks.OnError(ctx, err)
+		}
+	}()
+
 	if r.store == nil {
 		return nil, fmt.Errorf("failed to resume: store is nil")
 	}
@@ -106,14 +130,57 @@ func (r *Runner) Resume(ctx context.Context, checkPointID string, opts ...AgentR
 	AddSessionValues(ctx, o.sessionValues)
 
 	aIter := toFlowAgent(ctx, r.a).Resume(ctx, info, opts...)
-	if r.store == nil {
-		return aIter, nil
-	}
-
 	niter, gen := NewAsyncIteratorPair[*AgentEvent]()
 
-	go r.handleIter(ctx, aIter, gen, &checkPointID)
+	if r.store == nil {
+		go r.bypassIter(ctx, aIter, gen)
+	} else {
+		go r.handleIter(ctx, aIter, gen, &checkPointID)
+	}
+
 	return niter, nil
+}
+
+func (r *Runner) bypassIter(ctx context.Context, aIter *AsyncIterator[*AgentEvent], gen *AsyncGenerator[*AgentEvent]) {
+	defer func() {
+		panicErr := recover()
+		if panicErr != nil {
+			e := safe.NewPanicErr(panicErr, debug.Stack())
+			_ = callbacks.OnError(ctx, e)
+			gen.Send(&AgentEvent{Err: e})
+		}
+
+		gen.Close()
+	}()
+
+	var (
+		foundError  bool
+		lastMessage MessageStream
+	)
+	for {
+		event, ok := aIter.Next()
+		if !ok {
+			break
+		}
+
+		if event.Err != nil && !foundError {
+			foundError = true
+			_ = callbacks.OnError(ctx, event.Err)
+		} else if event.Output != nil && event.Output.MessageOutput != nil {
+			lastMessage, event = getMessageStream(event)
+		}
+
+		gen.Send(event)
+	}
+
+	if !foundError {
+		if lastMessage != nil {
+			msg, _ := schema.ConcatMessageStream(lastMessage)
+			callbacks.OnEnd(ctx, msg)
+		} else {
+			callbacks.OnEnd(ctx, Message(nil))
+		}
+	}
 }
 
 func (r *Runner) handleIter(ctx context.Context, aIter *AsyncIterator[*AgentEvent], gen *AsyncGenerator[*AgentEvent], checkPointID *string) {
@@ -121,12 +188,18 @@ func (r *Runner) handleIter(ctx context.Context, aIter *AsyncIterator[*AgentEven
 		panicErr := recover()
 		if panicErr != nil {
 			e := safe.NewPanicErr(panicErr, debug.Stack())
+			_ = callbacks.OnError(ctx, e)
 			gen.Send(&AgentEvent{Err: e})
 		}
 
 		gen.Close()
 	}()
-	var interruptedInfo *InterruptInfo
+
+	var (
+		interruptedInfo *InterruptInfo
+		foundError      bool
+		lastMessage     MessageStream
+	)
 	for {
 		event, ok := aIter.Next()
 		if !ok {
@@ -139,6 +212,13 @@ func (r *Runner) handleIter(ctx context.Context, aIter *AsyncIterator[*AgentEven
 			interruptedInfo = nil
 		}
 
+		if event.Err != nil && !foundError {
+			foundError = true
+			_ = callbacks.OnError(ctx, event.Err)
+		} else if event.Output != nil && event.Output.MessageOutput != nil {
+			lastMessage, event = getMessageStream(event)
+		}
+
 		gen.Send(event)
 	}
 
@@ -146,6 +226,14 @@ func (r *Runner) handleIter(ctx context.Context, aIter *AsyncIterator[*AgentEven
 		err := saveCheckPoint(ctx, r.store, *checkPointID, getInterruptRunCtx(ctx), interruptedInfo)
 		if err != nil {
 			gen.Send(&AgentEvent{Err: fmt.Errorf("failed to save checkpoint: %w", err)})
+		}
+		callbacks.OnEnd(ctx, Message(nil))
+	} else if !foundError {
+		if lastMessage != nil {
+			msg, _ := schema.ConcatMessageStream(lastMessage)
+			callbacks.OnEnd(ctx, msg)
+		} else {
+			callbacks.OnEnd(ctx, Message(nil))
 		}
 	}
 }

@@ -212,6 +212,23 @@ func GetMessage(e *AgentEvent) (Message, *AgentEvent, error) {
 	return msgOutput.Message, e, nil
 }
 
+func getMessageStream(e *AgentEvent) (MessageStream, *AgentEvent) {
+	if e.Output == nil || e.Output.MessageOutput == nil {
+		return nil, e
+	}
+	msgOutput := e.Output.MessageOutput
+	if msgOutput.IsStreaming {
+		ss := msgOutput.MessageStream.Copy(2)
+		e.Output.MessageOutput.MessageStream = ss[0]
+		return ss[1], e
+	}
+
+	sr, sw := schema.Pipe[Message](1)
+	sw.Send(msgOutput.Message, nil)
+	sw.Close()
+	return sr, e
+}
+
 func genErrorIter(err error) *AsyncIterator[*AgentEvent] {
 	iterator, generator := NewAsyncIteratorPair[*AgentEvent]()
 	generator.Send(&AgentEvent{Err: err})
