@@ -440,7 +440,9 @@ type TokenUsage struct {
 
 type PromptTokenDetails struct {
 	// Cached tokens present in the prompt.
-	CachedTokens int `json:"cached_tokens"`
+	CachedTokens             int `json:"cached_tokens"`
+	CacheCreationInputTokens int `json:"cache_creation_input_tokens"`
+	CacheReadInputTokens     int `json:"cache_read_input_tokens"`
 }
 
 var _ MessagesTemplate = &Message{}
@@ -1038,6 +1040,12 @@ func ConcatMessages(msgs []*Message) (*Message, error) {
 
 				if msg.ResponseMeta.Usage.PromptTokenDetails.CachedTokens > ret.ResponseMeta.Usage.PromptTokenDetails.CachedTokens {
 					ret.ResponseMeta.Usage.PromptTokenDetails.CachedTokens = msg.ResponseMeta.Usage.PromptTokenDetails.CachedTokens
+				}
+				if msg.ResponseMeta.Usage.PromptTokenDetails.CacheCreationInputTokens > ret.ResponseMeta.Usage.PromptTokenDetails.CacheCreationInputTokens {
+					ret.ResponseMeta.Usage.PromptTokenDetails.CacheCreationInputTokens = msg.ResponseMeta.Usage.PromptTokenDetails.CacheCreationInputTokens
+				}
+				if msg.ResponseMeta.Usage.PromptTokenDetails.CacheReadInputTokens > ret.ResponseMeta.Usage.PromptTokenDetails.CacheReadInputTokens {
+					ret.ResponseMeta.Usage.PromptTokenDetails.CacheReadInputTokens = msg.ResponseMeta.Usage.PromptTokenDetails.CacheReadInputTokens
 				}
 			}
 
