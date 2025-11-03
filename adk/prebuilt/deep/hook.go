@@ -26,10 +26,10 @@ import (
 	"github.com/cloudwego/eino/components/tool/utils"
 )
 
-func buildBuiltinMiddlewares(withoutWriteTodos bool) ([]Middleware, error) {
-	var ms []Middleware
+func buildBuiltinSetupHooks(withoutWriteTodos bool) ([]SetupHook, error) {
+	var ms []SetupHook
 	if !withoutWriteTodos {
-		t, err := newWriteTodosMiddleware()
+		t, err := newWriteTodosSetupHook()
 		if err != nil {
 			return nil, err
 		}
@@ -48,7 +48,7 @@ type writeTodosArguments struct {
 	Todos []TODO `json:"todos"`
 }
 
-func newWriteTodosMiddleware() (Middleware, error) {
+func newWriteTodosSetupHook() (SetupHook, error) {
 	t, err := utils.InferTool("write_todos", writeTodosToolDescription, func(ctx context.Context, input writeTodosArguments) (output string, err error) {
 		adk.AddSessionValue(ctx, SessionKeyTodos, input.Todos)
 		todos, err := sonic.MarshalString(input.Todos)
@@ -61,7 +61,7 @@ func newWriteTodosMiddleware() (Middleware, error) {
 		return nil, err
 	}
 
-	return func(ac *AgentContext) {
+	return func(ac *AgentSetup) {
 		ac.ToolsConfig.Tools = append(ac.ToolsConfig.Tools, t)
 		ac.Instruction += writeTodosPrompt
 	}, nil

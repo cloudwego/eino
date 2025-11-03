@@ -24,14 +24,25 @@ import (
 	"github.com/cloudwego/eino/components/model"
 )
 
-type AgentContext struct {
-	Model        model.ToolCallingChatModel
-	Instruction  string
-	ToolsConfig  adk.ToolsConfig
+// AgentSetup contains the runtime configuration for a DeepAgent instance.
+type AgentSetup struct {
+	// Model is used by the agent for reasoning and generating responses.
+	Model model.ToolCallingChatModel
+	// Instruction contains the system prompt or initial instructions that guide
+	// the agent's behavior and decision-making process throughout its execution.
+	Instruction string
+	// ToolsConfig defines the available tools and their configurations that the agent
+	// can invoke during its reasoning process to accomplish tasks.
+	ToolsConfig adk.ToolsConfig
+	// MaxIteration specifies the maximum number of reasoning iterations the agent
+	// can perform before stopping, preventing infinite loops or excessive computation.
 	MaxIteration int
 }
 
-type Middleware func(*AgentContext)
+// SetupHook defines a function type that can modify the agent setup during initialization.
+// These hooks are executed in sequence to customize the agent's configuration before
+// the final agent is created, allowing for dynamic configuration based on runtime conditions.
+type SetupHook func(*AgentSetup)
 
 // Config defines the configuration for creating a DeepAgent.
 type Config struct {
@@ -51,7 +62,10 @@ type Config struct {
 	// MaxIteration limits the maximum number of reasoning iterations the agent can perform.
 	MaxIteration int
 
-	Middlewares []Middleware
+	// Hooks is a list of setup hooks that will be executed in sequence to customize
+	// the agent's configuration. These hooks can modify the agent setup by adding
+	// tools, updating instructions, or adjusting other runtime parameters.
+	Hooks []SetupHook
 
 	// WithoutWriteTodos disables the built-in write_todos tool when set to true.
 	WithoutWriteTodos bool
@@ -66,41 +80,41 @@ type Config struct {
 // This function initializes built-in tools, creates a task tool for subagent orchestration,
 // and returns a fully configured ChatModelAgent ready for execution.
 func New(ctx context.Context, cfg *Config) (adk.Agent, error) {
-	middlewares, err := buildBuiltinMiddlewares(cfg.WithoutWriteTodos)
+	hooks, err := buildBuiltinSetupHooks(cfg.WithoutWriteTodos)
 	if err != nil {
 		return nil, err
 	}
 
-	actx := AgentContext{
+	actx := AgentSetup{
 		Model:        cfg.ChatModel,
 		Instruction:  cfg.Instruction,
 		ToolsConfig:  cfg.ToolsConfig,
 		MaxIteration: cfg.MaxIteration,
 	}
 
-	tt, err := buildTaskToolMiddleware(
+	tt, err := buildTaskToolSetupHook(
 		ctx,
 		cfg.TaskToolDescriptionGenerator,
 		cfg.SubAgents,
 
 		cfg.WithoutGeneralSubAgent,
 		actx,
-		append(cfg.Middlewares, middlewares...),
+		append(cfg.Hooks, hooks...),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("new task tool: %w", err)
 	}
-	middlewares = append(middlewares, tt)
+	hooks = append(hooks, tt)
 
-	return newAgentWithMiddlewares(cfg.Name, cfg.Description, actx, append(cfg.Middlewares, middlewares...)), nil
+	return newAgentWithSetupHooks(cfg.Name, cfg.Description, actx, append(cfg.Hooks, hooks...)), nil
 }
 
-func newAgentWithMiddlewares(name, desc string, actx AgentContext, middlewares []Middleware) adk.Agent {
+func newAgentWithSetupHooks(name, desc string, actx AgentSetup, hooks []SetupHook) adk.Agent {
 	return &agent{
-		name:        name,
-		desc:        desc,
-		actx:        actx,
-		middlewares: middlewares,
+		name:  name,
+		desc:  desc,
+		actx:  actx,
+		hooks: hooks,
 	}
 }
 
@@ -108,8 +122,8 @@ type agent struct {
 	name string
 	desc string
 
-	actx        AgentContext
-	middlewares []Middleware
+	actx  AgentSetup
+	hooks []SetupHook
 }
 
 func (a *agent) Name(_ context.Context) string {
@@ -121,7 +135,7 @@ func (a *agent) Description(_ context.Context) string {
 }
 
 func (a *agent) Run(ctx context.Context, input *adk.AgentInput, options ...adk.AgentRunOption) *adk.AsyncIterator[*adk.AgentEvent] {
-	cma, err := loadAgentContext(ctx, a.actx, a.name, a.desc, a.middlewares)
+	cma, err := loadAgentSetup(ctx, a.actx, a.name, a.desc, a.hooks)
 	if err != nil {
 		iter, gen := adk.NewAsyncIteratorPair[*adk.AgentEvent]()
 		gen.Send(&adk.AgentEvent{Err: err})
@@ -132,7 +146,7 @@ func (a *agent) Run(ctx context.Context, input *adk.AgentInput, options ...adk.A
 }
 
 func (a *agent) Resume(ctx context.Context, info *adk.ResumeInfo, opts ...adk.AgentRunOption) *adk.AsyncIterator[*adk.AgentEvent] {
-	cma, err := loadAgentContext(ctx, a.actx, a.name, a.desc, a.middlewares)
+	cma, err := loadAgentSetup(ctx, a.actx, a.name, a.desc, a.hooks)
 	if err != nil {
 		iter, gen := adk.NewAsyncIteratorPair[*adk.AgentEvent]()
 		gen.Send(&adk.AgentEvent{Err: err})
@@ -142,9 +156,9 @@ func (a *agent) Resume(ctx context.Context, info *adk.ResumeInfo, opts ...adk.Ag
 	return cma.(adk.ResumableAgent).Resume(ctx, info, opts...)
 }
 
-func loadAgentContext(ctx context.Context, actx AgentContext, name, desc string, middlewares []Middleware) (adk.Agent, error) {
+func loadAgentSetup(ctx context.Context, actx AgentSetup, name, desc string, hooks []SetupHook) (adk.Agent, error) {
 	p := &actx
-	for _, m := range middlewares {
+	for _, m := range hooks {
 		m(p)
 	}
 	cma, err := adk.NewChatModelAgent(ctx, &adk.ChatModelAgentConfig{
