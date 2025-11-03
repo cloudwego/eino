@@ -18,30 +18,33 @@ package deep
 
 import (
 	"context"
+	"fmt"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+
+	"github.com/cloudwego/eino/adk"
+	"github.com/cloudwego/eino/components/tool"
 )
 
-func TestWriteTodosTool(t *testing.T) {
-	wtt, err := newWriteTodosTool()
+func TestWriteTodos(t *testing.T) {
+	m, err := newWriteTodosMiddleware()
 	assert.NoError(t, err)
 
-	_, err = wtt.InvokableRun(context.Background(), `{
-	"todos": [
-		{
-			"content": "1",
-			"status": "completed"
-		},
-		{
-			"content": "2",
-			"status": "in_progress"
-		},
-		{
-			"content": "3",
-			"status": "pending"
-		}
-	]
-}`)
+	actx := &AgentContext{
+		Instruction: "",
+		ToolsConfig: adk.ToolsConfig{},
+	}
+	m(actx)
+
+	assert.Equal(t, writeTodosPrompt, actx.Instruction)
+	assert.Equal(t, 1, len(actx.ToolsConfig.Tools))
+	wt := actx.ToolsConfig.Tools[0].(tool.InvokableTool)
+
+	todos := `[{"content":"content1","status":"pending"},{"content":"content2","status":"pending"}]`
+	args := fmt.Sprintf(`{"todos": %s}`, todos)
+
+	result, err := wt.InvokableRun(context.Background(), args)
 	assert.NoError(t, err)
+	assert.Equal(t, fmt.Sprintf("Updated todo list to %s", todos), result)
 }

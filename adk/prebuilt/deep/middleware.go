@@ -23,21 +23,20 @@ import (
 	"github.com/bytedance/sonic"
 
 	"github.com/cloudwego/eino/adk"
-	"github.com/cloudwego/eino/components/tool"
 	"github.com/cloudwego/eino/components/tool/utils"
 )
 
-func newBuiltinTools(withoutWriteTodos bool) ([]tool.BaseTool, error) {
-	var ts []tool.BaseTool
+func buildBuiltinMiddlewares(withoutWriteTodos bool) ([]Middleware, error) {
+	var ms []Middleware
 	if !withoutWriteTodos {
-		t, err := newWriteTodosTool()
+		t, err := newWriteTodosMiddleware()
 		if err != nil {
 			return nil, err
 		}
-		ts = append(ts, t)
+		ms = append(ms, t)
 	}
 
-	return ts, nil
+	return ms, nil
 }
 
 type TODO struct {
@@ -49,8 +48,8 @@ type writeTodosArguments struct {
 	Todos []TODO `json:"todos"`
 }
 
-func newWriteTodosTool() (tool.InvokableTool, error) {
-	return utils.InferTool("write_todos", writeTodosToolDescription, func(ctx context.Context, input writeTodosArguments) (output string, err error) {
+func newWriteTodosMiddleware() (Middleware, error) {
+	t, err := utils.InferTool("write_todos", writeTodosToolDescription, func(ctx context.Context, input writeTodosArguments) (output string, err error) {
 		adk.AddSessionValue(ctx, SessionKeyTodos, input.Todos)
 		todos, err := sonic.MarshalString(input.Todos)
 		if err != nil {
@@ -58,4 +57,12 @@ func newWriteTodosTool() (tool.InvokableTool, error) {
 		}
 		return fmt.Sprintf("Updated todo list to %s", todos), nil
 	})
+	if err != nil {
+		return nil, err
+	}
+
+	return func(ac *AgentContext) {
+		ac.ToolsConfig.Tools = append(ac.ToolsConfig.Tools, t)
+		ac.Instruction += writeTodosPrompt
+	}, nil
 }

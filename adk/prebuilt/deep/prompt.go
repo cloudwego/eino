@@ -39,6 +39,7 @@ Writing todos takes time and tokens, use it when it is helpful for managing comp
 - Don't be afraid to revise the To-Do list as you go. New information may reveal new tasks that need to be done, or old tasks that are irrelevant.
 `
 	taskPrompt = `
+
 ## 'task' (subagent spawner)
 
 You have access to a 'task' tool to launch short-lived subagents that handle isolated tasks. These agents are ephemeral — they live only for the duration of the task and return a single result.

@@ -24,6 +24,7 @@ import (
 
 	"github.com/cloudwego/eino/adk"
 	"github.com/cloudwego/eino/components/model"
+	"github.com/cloudwego/eino/components/tool/utils"
 	"github.com/cloudwego/eino/schema"
 )
 
@@ -34,10 +35,9 @@ func TestTaskTool(t *testing.T) {
 	tt, err := newTaskTool(
 		ctx,
 		nil,
-		&myChatModel{},
 		[]adk.Agent{a1, a2},
 		false,
-		adk.ToolsConfig{},
+		AgentContext{},
 		nil,
 	)
 	assert.NoError(t, err)
@@ -47,20 +47,6 @@ func TestTaskTool(t *testing.T) {
 	result, err = tt.InvokableRun(ctx, `{"subagent_type":"2"}`)
 	assert.NoError(t, err)
 	assert.Equal(t, "2", result)
-}
-
-type myChatModel struct{}
-
-func (m *myChatModel) Generate(ctx context.Context, input []*schema.Message, opts ...model.Option) (*schema.Message, error) {
-	panic("implement me")
-}
-
-func (m *myChatModel) Stream(ctx context.Context, input []*schema.Message, opts ...model.Option) (*schema.StreamReader[*schema.Message], error) {
-	panic("implement me")
-}
-
-func (m *myChatModel) WithTools(tools []*schema.ToolInfo) (model.ToolCallingChatModel, error) {
-	panic("implement me")
 }
 
 type myAgent struct {
@@ -80,4 +66,57 @@ func (m *myAgent) Run(ctx context.Context, input *adk.AgentInput, options ...adk
 	gen.Send(adk.EventFromMessage(schema.UserMessage(m.desc), nil, schema.User, ""))
 	gen.Close()
 	return iter
+}
+
+func TestAgentWithMiddleware(t *testing.T) {
+	ctx := context.Background()
+	cm := &mockToolCallingChatModel{}
+
+	testTool, err := utils.InferTool("test tool", "", func(ctx context.Context, input string) (output string, err error) {
+		return input, nil
+	})
+	assert.NoError(t, err)
+
+	a, err := loadAgentContext(
+		ctx,
+		AgentContext{
+			Model:        nil,
+			Instruction:  "",
+			ToolsConfig:  adk.ToolsConfig{},
+			MaxIteration: 0,
+		},
+		"test name",
+		"test desc",
+		[]Middleware{
+			func(agentContext *AgentContext) {
+				agentContext.Model = cm
+				agentContext.ToolsConfig.Tools = append(agentContext.ToolsConfig.Tools, testTool)
+			},
+		},
+	)
+	assert.NoError(t, err)
+	_ = a.Run(ctx, &adk.AgentInput{})
+
+	assert.Equal(t, 1, len(cm.tools))
+	assert.Equal(t, "test name", a.Name(ctx))
+	assert.Equal(t, "test desc", a.Description(ctx))
+}
+
+type mockToolCallingChatModel struct {
+	tools []*schema.ToolInfo
+}
+
+func (m *mockToolCallingChatModel) Generate(ctx context.Context, input []*schema.Message, opts ...model.Option) (*schema.Message, error) {
+	return schema.AssistantMessage("success", nil), nil
+}
+
+func (m *mockToolCallingChatModel) Stream(ctx context.Context, input []*schema.Message, opts ...model.Option) (*schema.StreamReader[*schema.Message], error) {
+	return schema.StreamReaderFromArray([]*schema.Message{schema.AssistantMessage("success", nil)}), nil
+}
+
+func (m *mockToolCallingChatModel) WithTools(tools []*schema.ToolInfo) (model.ToolCallingChatModel, error) {
+	cm := *m
+	m.tools = append(m.tools, tools...)
+	cm.tools = tools
+	return &cm, nil
 }
