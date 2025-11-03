@@ -37,7 +37,7 @@ func TestTaskTool(t *testing.T) {
 		nil,
 		[]adk.Agent{a1, a2},
 		false,
-		AgentContext{},
+		AgentSetup{},
 		nil,
 	)
 	assert.NoError(t, err)
@@ -68,7 +68,7 @@ func (m *myAgent) Run(ctx context.Context, input *adk.AgentInput, options ...adk
 	return iter
 }
 
-func TestAgentWithMiddleware(t *testing.T) {
+func TestLoadAgentSetup(t *testing.T) {
 	ctx := context.Background()
 	cm := &mockToolCallingChatModel{}
 
@@ -77,9 +77,9 @@ func TestAgentWithMiddleware(t *testing.T) {
 	})
 	assert.NoError(t, err)
 
-	a, err := loadAgentContext(
+	a, err := loadAgentSetup(
 		ctx,
-		AgentContext{
+		AgentSetup{
 			Model:        nil,
 			Instruction:  "",
 			ToolsConfig:  adk.ToolsConfig{},
@@ -87,10 +87,10 @@ func TestAgentWithMiddleware(t *testing.T) {
 		},
 		"test name",
 		"test desc",
-		[]Middleware{
-			func(agentContext *AgentContext) {
-				agentContext.Model = cm
-				agentContext.ToolsConfig.Tools = append(agentContext.ToolsConfig.Tools, testTool)
+		[]SetupHook{
+			func(setup *AgentSetup) {
+				setup.Model = cm
+				setup.ToolsConfig.Tools = append(setup.ToolsConfig.Tools, testTool)
 			},
 		},
 	)

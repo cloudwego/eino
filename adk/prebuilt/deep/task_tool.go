@@ -31,20 +31,20 @@ import (
 	"github.com/cloudwego/eino/schema"
 )
 
-func buildTaskToolMiddleware(
+func buildTaskToolSetupHook(
 	ctx context.Context,
 	taskToolDescriptionGenerator func(ctx context.Context, subAgents []adk.Agent) (string, error),
 	subAgents []adk.Agent,
 
 	withoutGeneralSubAgent bool,
-	generalAgentCtx AgentContext,
-	middlewares []Middleware,
-) (Middleware, error) {
-	t, err := newTaskTool(ctx, taskToolDescriptionGenerator, subAgents, withoutGeneralSubAgent, generalAgentCtx, middlewares)
+	generalAgentCtx AgentSetup,
+	hooks []SetupHook,
+) (SetupHook, error) {
+	t, err := newTaskTool(ctx, taskToolDescriptionGenerator, subAgents, withoutGeneralSubAgent, generalAgentCtx, hooks)
 	if err != nil {
 		return nil, err
 	}
-	return func(ac *AgentContext) {
+	return func(ac *AgentSetup) {
 		ac.Instruction += taskPrompt
 		ac.ToolsConfig.Tools = append(ac.ToolsConfig.Tools, t)
 	}, nil
@@ -56,8 +56,8 @@ func newTaskTool(
 	subAgents []adk.Agent,
 
 	withoutGeneralSubAgent bool,
-	generalAgentCtx AgentContext,
-	middlewares []Middleware,
+	generalAgentCtx AgentSetup,
+	hooks []SetupHook,
 ) (tool.InvokableTool, error) {
 	t := &taskTool{
 		subAgents:     map[string]tool.InvokableTool{},
@@ -70,11 +70,11 @@ func newTaskTool(
 	}
 
 	if !withoutGeneralSubAgent {
-		generalAgent := newAgentWithMiddlewares(
+		generalAgent := newAgentWithSetupHooks(
 			generalAgentName,
 			generalAgentDescription,
 			generalAgentCtx,
-			middlewares,
+			hooks,
 		)
 
 		it, err := assertAgentTool(adk.NewAgentTool(ctx, generalAgent))

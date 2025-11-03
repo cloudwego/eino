@@ -28,10 +28,10 @@ import (
 )
 
 func TestWriteTodos(t *testing.T) {
-	m, err := newWriteTodosMiddleware()
+	m, err := newWriteTodosSetupHook()
 	assert.NoError(t, err)
 
-	actx := &AgentContext{
+	actx := &AgentSetup{
 		Instruction: "",
 		ToolsConfig: adk.ToolsConfig{},
 	}
