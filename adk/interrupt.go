@@ -23,7 +23,6 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/cloudwego/eino/compose"
 	"github.com/cloudwego/eino/internal/core"
 	"github.com/cloudwego/eino/schema"
 )
@@ -99,7 +98,7 @@ func StatefulInterrupt(ctx context.Context, info any, state any) *AgentEvent {
 // The `state` parameter is the workflow agent's own state (e.g., the index of the sub-agent that was interrupted).
 // The `subInterruptSignals` is a variadic list of the InterruptSignal objects from the interrupted sub-agents.
 func CompositeInterrupt(ctx context.Context, info any, state any,
-	subInterruptSignals ...*core.InterruptSignal) *AgentEvent {
+	subInterruptSignals ...*InterruptSignal) *AgentEvent {
 	is, err := core.Interrupt(ctx, info, state, subInterruptSignals,
 		core.WithLayerPayload(getRunCtx(ctx).RunPath))
 	if err != nil {
@@ -144,6 +143,11 @@ func encapsulateAddress(addr Address) Address {
 // It contains the ID and Address of the interrupted component, as well as user-defined info.
 // This is a type alias for core.InterruptCtx. See the core package for more details.
 type InterruptCtx = core.InterruptCtx
+type InterruptSignal = core.InterruptSignal
+
+func FromInterruptContexts(contexts []*InterruptCtx) *InterruptSignal {
+	return core.FromInterruptContexts(contexts)
+}
 
 func WithCheckPointID(id string) AgentRunOption {
 	return WrapImplSpecificOptFn(func(t *options) {
@@ -166,9 +170,9 @@ type serialization struct {
 	InterruptID2State   map[string]core.InterruptState
 }
 
-func loadCheckPoint(ctx context.Context, store compose.CheckPointStore, checkpointID string) (
+func (r *Runner) loadCheckPoint(ctx context.Context, checkpointID string) (
 	context.Context, *ResumeInfo, error) {
-	data, existed, err := store.Get(ctx, checkpointID)
+	data, existed, err := r.store.Get(ctx, checkpointID)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to get checkpoint from store: %w", err)
 	}
@@ -192,7 +196,6 @@ func loadCheckPoint(ctx context.Context, store compose.CheckPointStore, checkpoi
 
 func (r *Runner) saveCheckPoint(
 	ctx context.Context,
-	store compose.CheckPointStore,
 	key string,
 	info *InterruptInfo,
 	is *core.InterruptSignal,
@@ -212,7 +215,7 @@ func (r *Runner) saveCheckPoint(
 	if err != nil {
 		return fmt.Errorf("failed to encode checkpoint: %w", err)
 	}
-	return store.Set(ctx, key, buf.Bytes())
+	return r.store.Set(ctx, key, buf.Bytes())
 }
 
 const mockCheckPointID = "adk_react_mock_key"
@@ -246,7 +249,7 @@ func (m *mockStore) Set(_ context.Context, _ string, checkPoint []byte) error {
 	return nil
 }
 
-func getNextResumeAgentOnly(ctx context.Context, info *ResumeInfo) (string, error) {
+func getNextResumeAgent(ctx context.Context, info *ResumeInfo) (string, error) {
 	nextAgents, err := core.GetNextResumptionPoints(ctx)
 	if err != nil {
 		return "", fmt.Errorf("failed to get next agent leading to interruption: %w", err)
@@ -271,35 +274,7 @@ func getNextResumeAgentOnly(ctx context.Context, info *ResumeInfo) (string, erro
 	return nextAgentID, nil
 }
 
-func getNextResumeAgent(ctx context.Context, info *ResumeInfo) (context.Context,
-	string, *ResumeInfo, error) {
-	nextAgents, err := core.GetNextResumptionPoints(ctx)
-	if err != nil {
-		return ctx, "", nil, fmt.Errorf("failed to get next agent leading to interruption: %w", err)
-	}
-
-	if len(nextAgents) == 0 {
-		return ctx, "", nil, errors.New("no child agents leading to interrupted agent were found")
-	}
-
-	if len(nextAgents) > 1 {
-		return ctx, "", nil, errors.New("agent has multiple child agents leading to interruption, " +
-			"but concurrent transfer is not supported")
-	}
-
-	// get the single next agent to delegate to.
-	var nextAgentID string
-	for id := range nextAgents {
-		nextAgentID = id
-		break
-	}
-
-	ctx, nextResumeInfo := buildResumeInfo(ctx, nextAgentID, info)
-
-	return ctx, nextAgentID, nextResumeInfo, nil
-}
-
-func getNextResumeAgentsOnly(ctx context.Context, info *ResumeInfo) (map[string]bool, error) {
+func getNextResumeAgents(ctx context.Context, info *ResumeInfo) (map[string]bool, error) {
 	nextAgents, err := core.GetNextResumptionPoints(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get next agents leading to interruption: %w", err)
@@ -310,29 +285,6 @@ func getNextResumeAgentsOnly(ctx context.Context, info *ResumeInfo) (map[string]
 	}
 
 	return nextAgents, nil
-}
-
-func getNextResumeAgents(ctx context.Context, info *ResumeInfo) (map[string]context.Context,
-	map[string]*ResumeInfo, error) {
-	nextAgents, err := core.GetNextResumptionPoints(ctx)
-	if err != nil {
-		return nil, nil, fmt.Errorf("failed to get next agents leading to interruption: %w", err)
-	}
-
-	if len(nextAgents) == 0 {
-		return nil, nil, errors.New("no child agents leading to interrupted agent were found")
-	}
-
-	agentID2Ctx := make(map[string]context.Context)
-	agentID2ResumeInfo := make(map[string]*ResumeInfo)
-	for id := range nextAgents {
-		subCtx, subResumeInfo := buildResumeInfo(ctx, id, info)
-
-		agentID2Ctx[id] = subCtx
-		agentID2ResumeInfo[id] = subResumeInfo
-	}
-
-	return agentID2Ctx, agentID2ResumeInfo, nil
 }
 
 func buildResumeInfo(ctx context.Context, nextAgentID string, info *ResumeInfo) (
