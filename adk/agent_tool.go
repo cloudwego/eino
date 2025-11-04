@@ -100,12 +100,10 @@ func (at *agentTool) InvokableRun(ctx context.Context, argumentsInJSON string, o
 		ms = newEmptyStore()
 		var input []Message
 		if at.fullChatHistoryAsInput {
-			history, err1 := getReactChatHistory(ctx, at.agent.Name(ctx))
-			if err1 != nil {
-				return "", err1
+			input, err = getReactChatHistory(ctx, at.agent.Name(ctx))
+			if err != nil {
+				return "", err
 			}
-
-			input = history
 		} else {
 			if at.inputSchema == nil {
 				// default input schema

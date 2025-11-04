@@ -95,11 +95,6 @@ func WrapInterruptAndRerunIfNeeded(ctx context.Context, step AddressSegment, err
 		return ire
 	}
 
-	ie := &interruptError{}
-	if errors.As(err, &ie) {
-		return ie
-	}
-
 	return fmt.Errorf("failed to wrap error as addressed InterruptAndRerun: %w", err)
 }
 
@@ -267,7 +262,7 @@ type InterruptInfo struct {
 }
 
 func init() {
-	schema.RegisterName[*InterruptInfo]("_eino_compose_interrupt_info") // TODO: check if this is really needed when refactoring adk resume
+	schema.RegisterName[*InterruptInfo]("_eino_compose_interrupt_info")
 }
 
 // AddressSegmentType defines the type of a segment in an execution address.
