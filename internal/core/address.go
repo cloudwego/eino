@@ -131,18 +131,19 @@ func AppendAddressSegment(ctx context.Context, segType AddressSegmentType, segID
 		return context.WithValue(ctx, addrCtxKey{}, runCtx)
 	}
 
-	for id, addr := range rInfo.id2Addr {
+	var id string
+	for id_, addr := range rInfo.id2Addr {
 		if addr.Equals(currentAddress) {
-			if used, ok := rInfo.id2StateUsed[id]; !ok || !used {
-				runCtx.interruptState = generic.PtrOf(rInfo.id2State[id])
-				rInfo.id2StateUsed[id] = true
+			if used, ok := rInfo.id2StateUsed[id_]; !ok || !used {
+				runCtx.interruptState = generic.PtrOf(rInfo.id2State[id_])
+				rInfo.id2StateUsed[id_] = true
+				id = id_
 				break
 			}
 		}
 	}
 
 	// take from globalResumeInfo the data for the new address if there is any
-	id := currentAddress.String()
 	rInfo.mu.Lock()
 	defer rInfo.mu.Unlock()
 	used := rInfo.id2ResumeDataUsed[id]
@@ -257,6 +258,31 @@ func PopulateInterruptState(ctx context.Context, id2Addr map[string]Address,
 		}
 		ctx = context.WithValue(ctx, globalResumeInfoKey{}, rInfo)
 	}
+
+	runCtx, ok := getRunCtx(ctx)
+	if ok {
+		for id_, addr := range id2Addr {
+			if addr.Equals(runCtx.addr) {
+				if used, ok := rInfo.id2StateUsed[id_]; !ok || !used {
+					runCtx.interruptState = generic.PtrOf(rInfo.id2State[id_])
+					rInfo.mu.Lock()
+					rInfo.id2StateUsed[id_] = true
+					rInfo.mu.Unlock()
+				}
+
+				if used, ok := rInfo.id2ResumeDataUsed[id_]; !ok || !used {
+					runCtx.isResumeTarget = true
+					runCtx.resumeData = rInfo.id2ResumeData[id_]
+					rInfo.mu.Lock()
+					rInfo.id2ResumeDataUsed[id_] = true
+					rInfo.mu.Unlock()
+				}
+
+				break
+			}
+		}
+	}
+
 	return ctx
 }
 
