@@ -148,5 +148,9 @@ func getNodePath(ctx context.Context) (*NodePath, bool) {
 //   - segType: The type of the new address segment (e.g., "node", "tool").
 //   - segID: The unique ID for the new address segment.
 func AppendAddressSegment(ctx context.Context, segType AddressSegmentType, segID string) context.Context {
-	return core.AppendAddressSegment(ctx, segType, segID)
+	return core.AppendAddressSegment(ctx, segType, segID, "")
+}
+
+func appendToolAddressSegment(ctx context.Context, segID string, subID string) context.Context {
+	return core.AppendAddressSegment(ctx, AddressSegmentTool, segID, subID)
 }

@@ -293,7 +293,7 @@ func runToolCallTaskByInvoke(ctx context.Context, task *toolCallTask, opts ...to
 	})
 
 	ctx = setToolCallInfo(ctx, &toolCallInfo{toolCallID: task.callID})
-	ctx = AppendAddressSegment(ctx, AddressSegmentTool, task.callID)
+	ctx = appendToolAddressSegment(ctx, task.name, task.callID)
 	task.output, task.err = task.r.Invoke(ctx, task.arg, opts...)
 	if task.err == nil {
 		task.executed = true
@@ -308,7 +308,7 @@ func runToolCallTaskByStream(ctx context.Context, task *toolCallTask, opts ...to
 	})
 
 	ctx = setToolCallInfo(ctx, &toolCallInfo{toolCallID: task.callID})
-	ctx = AppendAddressSegment(ctx, AddressSegmentTool, task.callID)
+	ctx = appendToolAddressSegment(ctx, task.name, task.callID)
 	task.sOutput, task.err = task.r.Stream(ctx, task.arg, opts...)
 	if task.err == nil {
 		task.executed = true
