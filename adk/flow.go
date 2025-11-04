@@ -296,7 +296,10 @@ func buildDefaultHistoryRewriter(agentName string) HistoryRewriter {
 
 func (a *flowAgent) Run(ctx context.Context, input *AgentInput, opts ...AgentRunOption) *AsyncIterator[*AgentEvent] {
 	agentName := a.Name(ctx)
-	runCtx := getRunCtx(ctx)
+
+	var runCtx *runContext
+	ctx, runCtx = initRunCtx(ctx, agentName, input)
+	ctx = AppendAddressSegment(ctx, AddressSegmentAgent, agentName)
 
 	o := getCommonOptions(nil, opts...)
 
@@ -319,6 +322,8 @@ func (a *flowAgent) Run(ctx context.Context, input *AgentInput, opts ...AgentRun
 }
 
 func (a *flowAgent) Resume(ctx context.Context, info *ResumeInfo, opts ...AgentRunOption) *AsyncIterator[*AgentEvent] {
+	ctx, info = buildResumeInfo(ctx, a.Name(ctx), info)
+
 	if info.WasInterrupted {
 		ra, ok := a.Agent.(ResumableAgent)
 		if !ok {
@@ -335,7 +340,7 @@ func (a *flowAgent) Resume(ctx context.Context, info *ResumeInfo, opts ...AgentR
 		return iterator
 	}
 
-	ctx, nextAgentName, nextResumeInfo, err := getNextResumeAgent(ctx, info)
+	nextAgentName, err := getNextResumeAgentOnly(ctx, info)
 	if err != nil {
 		return genErrorIter(err)
 	}
@@ -345,7 +350,7 @@ func (a *flowAgent) Resume(ctx context.Context, info *ResumeInfo, opts ...AgentR
 		return genErrorIter(fmt.Errorf("failed to resume agent: agent '%s' not found", nextAgentName))
 	}
 
-	return subAgent.Resume(ctx, nextResumeInfo, opts...)
+	return subAgent.Resume(ctx, info, opts...)
 }
 
 type DeterministicTransferConfig struct {
@@ -415,9 +420,6 @@ func (a *flowAgent) run(
 			generator.Send(&AgentEvent{Err: e})
 			return
 		}
-
-		ctx, _ = initRunCtx(ctx, destName, nil)
-		ctx = AppendAddressSegment(ctx, AddressSegmentAgent, destName)
 
 		subAIter := agentToRun.Run(ctx, nil /*subagents get input from runCtx*/, opts...)
 		for {

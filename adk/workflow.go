@@ -158,7 +158,6 @@ func (a *workflowAgent) runSequential(ctx context.Context,
 	opts ...AgentRunOption) (err error) {
 
 	startIdx := 0
-	var nextResumeInfo *ResumeInfo
 
 	// seqCtx tracks the accumulated RunPath across the sequence.
 	seqCtx := ctx
@@ -170,13 +169,8 @@ func (a *workflowAgent) runSequential(ctx context.Context,
 		var steps []string
 		for i := 0; i <= startIdx; i++ {
 			steps = append(steps, a.subAgents[i].Name(seqCtx))
-			seqCtx, _, nextResumeInfo, err = getNextResumeAgent(seqCtx, info)
-			if err != nil {
-				return err
-			}
 		}
 
-		nextResumeInfo.InterruptInfo = info.Data.(*WorkflowInterruptInfo).SequentialInterruptInfo
 		seqCtx = updateRunPathOnly(seqCtx, steps...)
 	}
 
@@ -184,13 +178,15 @@ func (a *workflowAgent) runSequential(ctx context.Context,
 		subAgent := a.subAgents[i]
 
 		var subIterator *AsyncIterator[*AgentEvent]
-		if nextResumeInfo != nil {
-			subIterator = subAgent.Resume(seqCtx, nextResumeInfo, opts...)
-			nextResumeInfo = nil // Only resume the first time.
+		if seqState != nil {
+			subIterator = subAgent.Resume(seqCtx, &ResumeInfo{
+				EnableStreaming: info.EnableStreaming,
+				InterruptInfo:   info.Data.(*WorkflowInterruptInfo).SequentialInterruptInfo,
+			}, opts...)
+			seqState = nil
 		} else {
-			seqCtx = updateRunPathOnly(seqCtx, subAgent.Name(seqCtx))
-			seqCtx = AppendAddressSegment(seqCtx, AddressSegmentAgent, subAgent.Name(seqCtx))
 			subIterator = subAgent.Run(seqCtx, nil, opts...)
+			seqCtx = updateRunPathOnly(seqCtx, subAgent.Name(seqCtx))
 		}
 
 		var lastActionEvent *AgentEvent
@@ -303,7 +299,6 @@ func (a *workflowAgent) runLoop(ctx context.Context, generator *AsyncGenerator[*
 
 	startIter := 0
 	startIdx := 0
-	var nextResumeInfo *ResumeInfo
 
 	// loopCtx tracks the accumulated RunPath across the full sequence within a single iteration.
 	loopCtx := ctx
@@ -318,20 +313,11 @@ func (a *workflowAgent) runLoop(ctx context.Context, generator *AsyncGenerator[*
 		for i := 0; i < startIter; i++ {
 			for _, subAgent := range a.subAgents {
 				steps = append(steps, subAgent.Name(loopCtx))
-				loopCtx, _, nextResumeInfo, err = getNextResumeAgent(loopCtx, resumeInfo)
-				if err != nil {
-					return err
-				}
 			}
 		}
 		for i := 0; i <= startIdx; i++ {
 			steps = append(steps, a.subAgents[i].Name(loopCtx))
-			loopCtx, _, nextResumeInfo, err = getNextResumeAgent(loopCtx, resumeInfo)
-			if err != nil {
-				return err
-			}
 		}
-		nextResumeInfo.InterruptInfo = resumeInfo.Data.(*WorkflowInterruptInfo).SequentialInterruptInfo
 		loopCtx = updateRunPathOnly(loopCtx, steps...)
 	}
 
@@ -340,14 +326,16 @@ func (a *workflowAgent) runLoop(ctx context.Context, generator *AsyncGenerator[*
 			subAgent := a.subAgents[j]
 
 			var subIterator *AsyncIterator[*AgentEvent]
-			if nextResumeInfo != nil {
+			if loopState != nil {
 				// This is the agent we need to resume.
-				subIterator = subAgent.Resume(loopCtx, nextResumeInfo, opts...)
-				nextResumeInfo = nil // Only resume the first time.
+				subIterator = subAgent.Resume(loopCtx, &ResumeInfo{
+					EnableStreaming: resumeInfo.EnableStreaming,
+					InterruptInfo:   resumeInfo.Data.(*WorkflowInterruptInfo).SequentialInterruptInfo,
+				}, opts...)
+				loopState = nil // Only resume the first time.
 			} else {
-				loopCtx = updateRunPathOnly(loopCtx, subAgent.Name(loopCtx))
-				loopCtx = AppendAddressSegment(loopCtx, AddressSegmentAgent, subAgent.Name(loopCtx))
 				subIterator = subAgent.Run(loopCtx, nil, opts...)
+				loopCtx = updateRunPathOnly(loopCtx, subAgent.Name(loopCtx))
 			}
 
 			var lastActionEvent *AgentEvent
@@ -423,31 +411,19 @@ func (a *workflowAgent) runParallel(ctx context.Context, generator *AsyncGenerat
 	}
 
 	var (
-		wg                   sync.WaitGroup
-		subInterruptSignals  []*core.InterruptSignal
-		dataMap              = make(map[int]*InterruptInfo)
-		mu                   sync.Mutex
-		agentName2ResumeInfo map[string]*ResumeInfo
-		agentName2Ctx        map[string]context.Context
-		err                  error
+		wg                  sync.WaitGroup
+		subInterruptSignals []*core.InterruptSignal
+		dataMap             = make(map[int]*InterruptInfo)
+		mu                  sync.Mutex
+		agentNames          map[string]bool
+		err                 error
 	)
 
 	// If resuming, get the scoped ResumeInfo for each child that needs to be resumed.
 	if parState != nil {
-		agentName2Ctx, agentName2ResumeInfo, err = getNextResumeAgents(ctx, resumeInfo)
+		agentNames, err = getNextResumeAgentsOnly(ctx, resumeInfo)
 		if err != nil {
 			return err
-		}
-		// For backward compatibility, populate the deprecated InterruptInfo field.
-		for subA, p := range agentName2ResumeInfo {
-			var index int
-			for i, a := range a.subAgents {
-				if a.Name(ctx) == subA {
-					index = i
-					break
-				}
-			}
-			p.InterruptInfo = resumeInfo.Data.(*WorkflowInterruptInfo).ParallelInterruptInfo[index]
 		}
 	}
 
@@ -465,18 +441,18 @@ func (a *workflowAgent) runParallel(ctx context.Context, generator *AsyncGenerat
 
 			var iterator *AsyncIterator[*AgentEvent]
 
-			if nextInfo, ok := agentName2ResumeInfo[agent.Name(ctx)]; ok {
+			if _, ok := agentNames[agent.Name(ctx)]; ok {
 				// This branch was interrupted and needs to be resumed.
-				subCtx := agentName2Ctx[agent.Name(ctx)]
-				iterator = agent.Resume(subCtx, nextInfo, opts...)
+				iterator = agent.Resume(ctx, &ResumeInfo{
+					EnableStreaming: resumeInfo.EnableStreaming,
+					InterruptInfo:   resumeInfo.Data.(*WorkflowInterruptInfo).ParallelInterruptInfo[idx],
+				}, opts...)
 			} else if parState != nil {
 				// We are resuming, but this child is not in the next points map.
 				// This means it finished successfully, so we don't run it.
 				return
 			} else {
-				subCtx := AppendAddressSegment(ctx, AddressSegmentAgent, agent.Name(ctx))
-				subCtx = updateRunPathOnly(subCtx, agent.Name(ctx))
-				iterator = agent.Run(subCtx, nil, opts...)
+				iterator = agent.Run(ctx, nil, opts...)
 			}
 
 			for {
