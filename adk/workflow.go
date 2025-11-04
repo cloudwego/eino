@@ -167,7 +167,7 @@ func (a *workflowAgent) runSequential(ctx context.Context,
 		startIdx = seqState.InterruptIndex
 
 		var steps []string
-		for i := 0; i <= startIdx; i++ {
+		for i := 0; i < startIdx; i++ {
 			steps = append(steps, a.subAgents[i].Name(seqCtx))
 		}
 
@@ -186,8 +186,9 @@ func (a *workflowAgent) runSequential(ctx context.Context,
 			seqState = nil
 		} else {
 			subIterator = subAgent.Run(seqCtx, nil, opts...)
-			seqCtx = updateRunPathOnly(seqCtx, subAgent.Name(seqCtx))
 		}
+
+		seqCtx = updateRunPathOnly(seqCtx, subAgent.Name(seqCtx))
 
 		var lastActionEvent *AgentEvent
 		for {
@@ -315,7 +316,7 @@ func (a *workflowAgent) runLoop(ctx context.Context, generator *AsyncGenerator[*
 				steps = append(steps, subAgent.Name(loopCtx))
 			}
 		}
-		for i := 0; i <= startIdx; i++ {
+		for i := 0; i < startIdx; i++ {
 			steps = append(steps, a.subAgents[i].Name(loopCtx))
 		}
 		loopCtx = updateRunPathOnly(loopCtx, steps...)
@@ -335,8 +336,9 @@ func (a *workflowAgent) runLoop(ctx context.Context, generator *AsyncGenerator[*
 				loopState = nil // Only resume the first time.
 			} else {
 				subIterator = subAgent.Run(loopCtx, nil, opts...)
-				loopCtx = updateRunPathOnly(loopCtx, subAgent.Name(loopCtx))
 			}
+
+			loopCtx = updateRunPathOnly(loopCtx, subAgent.Name(loopCtx))
 
 			var lastActionEvent *AgentEvent
 			for {
@@ -421,7 +423,7 @@ func (a *workflowAgent) runParallel(ctx context.Context, generator *AsyncGenerat
 
 	// If resuming, get the scoped ResumeInfo for each child that needs to be resumed.
 	if parState != nil {
-		agentNames, err = getNextResumeAgentsOnly(ctx, resumeInfo)
+		agentNames, err = getNextResumeAgents(ctx, resumeInfo)
 		if err != nil {
 			return err
 		}

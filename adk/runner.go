@@ -133,7 +133,7 @@ func (r *Runner) resume(ctx context.Context, checkPointID string, resumeData map
 		return nil, fmt.Errorf("failed to resume: store is nil")
 	}
 
-	ctx, resumeInfo, err := loadCheckPoint(ctx, r.store, checkPointID)
+	ctx, resumeInfo, err := r.loadCheckPoint(ctx, checkPointID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to load from checkpoint: %w", err)
 	}
@@ -206,7 +206,7 @@ func (r *Runner) handleIter(ctx context.Context, aIter *AsyncIterator[*AgentEven
 	}
 
 	if interruptSignal != nil && checkPointID != nil {
-		err := r.saveCheckPoint(ctx, r.store, *checkPointID, &InterruptInfo{
+		err := r.saveCheckPoint(ctx, *checkPointID, &InterruptInfo{
 			Data: legacyData,
 		}, interruptSignal)
 		if err != nil {

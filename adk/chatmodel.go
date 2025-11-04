@@ -34,7 +34,6 @@ import (
 	"github.com/cloudwego/eino/components/prompt"
 	"github.com/cloudwego/eino/components/tool"
 	"github.com/cloudwego/eino/compose"
-	"github.com/cloudwego/eino/internal/core"
 	"github.com/cloudwego/eino/internal/safe"
 	"github.com/cloudwego/eino/schema"
 	ub "github.com/cloudwego/eino/utils/callbacks"
@@ -452,7 +451,7 @@ func (h *cbHandler) onGraphError(ctx context.Context,
 		return ctx
 	}
 
-	is := core.FromInterruptContexts(info.InterruptContexts)
+	is := FromInterruptContexts(info.InterruptContexts)
 
 	event := CompositeInterrupt(h.ctx, info, data, is)
 	event.Action.Interrupted.Data = &ChatModelAgentInterruptInfo{ // for backward-compatibility with older checkpoints
