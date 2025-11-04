@@ -189,7 +189,7 @@ func (r *Runner) handleIter(ctx context.Context, aIter *AsyncIterator[*AgentEven
 				panic("multiple interrupt actions should not happen in Runner")
 			}
 			interruptSignal = event.Action.internalInterrupted
-			interruptContexts := core.ToInterruptContexts(interruptSignal)
+			interruptContexts := core.ToInterruptContexts(interruptSignal, encapsulateAddress)
 			event = &AgentEvent{
 				AgentName: event.AgentName,
 				RunPath:   event.RunPath,
@@ -199,6 +199,7 @@ func (r *Runner) handleIter(ctx context.Context, aIter *AsyncIterator[*AgentEven
 						Data:              event.Action.Interrupted.Data,
 						InterruptContexts: interruptContexts,
 					},
+					internalInterrupted: interruptSignal,
 				},
 			}
 			legacyData = event.Action.Interrupted.Data

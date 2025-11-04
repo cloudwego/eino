@@ -30,7 +30,7 @@ func TestInterruptConversion(t *testing.T) {
 		assert.True(t, signal.Subs[0].Subs[0].IsRootCause)
 
 		// Convert back from the signal tree to user-facing contexts
-		finalContexts := ToInterruptContexts(signal)
+		finalContexts := ToInterruptContexts(signal, nil)
 
 		// Assertions for the final list of contexts
 		assert.Len(t, finalContexts, 1)
@@ -67,7 +67,7 @@ func TestInterruptConversion(t *testing.T) {
 		assert.Contains(t, subIDs, "C")
 
 		// Convert back to user-facing contexts
-		finalContexts := ToInterruptContexts(signal)
+		finalContexts := ToInterruptContexts(signal, nil)
 
 		// Assertions for the final list of contexts
 		assert.Len(t, finalContexts, 2)
@@ -91,6 +91,6 @@ func TestInterruptConversion(t *testing.T) {
 	t.Run("NilAndEmpty", func(t *testing.T) {
 		assert.Nil(t, FromInterruptContexts(nil))
 		assert.Nil(t, FromInterruptContexts([]*InterruptCtx{}))
-		assert.Nil(t, ToInterruptContexts(nil))
+		assert.Nil(t, ToInterruptContexts(nil, nil))
 	})
 }
