@@ -343,7 +343,7 @@ type cbHandler struct {
 	enableStreaming         bool
 	store                   *mockStore
 	returnDirectlyToolEvent atomic.Value
-	ctx             context.Context
+	ctx                     context.Context
 }
 
 func (h *cbHandler) onChatModelEnd(ctx context.Context,
