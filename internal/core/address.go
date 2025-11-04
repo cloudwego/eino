@@ -25,6 +25,10 @@ func (p Address) String() string {
 		sb.WriteString(string(s.Type))
 		sb.WriteString(":")
 		sb.WriteString(s.ID)
+		if s.SubID != "" {
+			sb.WriteString(":")
+			sb.WriteString(s.SubID)
+		}
 		if i != len(p)-1 {
 			sb.WriteString(";")
 		}
@@ -37,7 +41,7 @@ func (p Address) Equals(other Address) bool {
 		return false
 	}
 	for i := range p {
-		if p[i].Type != other[i].Type || p[i].ID != other[i].ID {
+		if p[i].Type != other[i].Type || p[i].ID != other[i].ID || p[i].SubID != other[i].SubID {
 			return false
 		}
 	}
@@ -47,10 +51,13 @@ func (p Address) Equals(other Address) bool {
 // AddressSegment represents a single segment in the hierarchical address of an execution point.
 // A sequence of AddressSegments uniquely identifies a location within a potentially nested structure.
 type AddressSegment struct {
-	// ID is the unique identifier for this segment, e.g., the node's key or the tool call's ID.
+	// ID is the unique identifier for this segment, e.g., the node's key or the tool's name.
 	ID string
 	// Type indicates whether this address segment is a graph node, a tool call, an agent, etc.
 	Type AddressSegmentType
+	// In some cases, ID alone are not unique enough, we need this SubID to guarantee uniqueness.
+	// e.g. parallel tool calls with the same name but different tool call IDs.
+	SubID string
 }
 
 type addrCtxKey struct{}
@@ -92,22 +99,25 @@ func GetCurrentAddress(ctx context.Context) Address {
 //   - ctx: The parent context, typically the one passed into the component's Invoke/Stream method.
 //   - segType: The type of the new address segment (e.g., "node", "tool").
 //   - segID: The unique ID for the new address segment.
-func AppendAddressSegment(ctx context.Context, segType AddressSegmentType, segID string) context.Context {
+func AppendAddressSegment(ctx context.Context, segType AddressSegmentType, segID string,
+	subID string) context.Context {
 	// get current address
 	currentAddress := GetCurrentAddress(ctx)
 	if len(currentAddress) == 0 {
 		currentAddress = []AddressSegment{
 			{
-				Type: segType,
-				ID:   segID,
+				Type:  segType,
+				ID:    segID,
+				SubID: subID,
 			},
 		}
 	} else {
 		newAddress := make([]AddressSegment, len(currentAddress)+1)
 		copy(newAddress, currentAddress)
 		newAddress[len(newAddress)-1] = AddressSegment{
-			Type: segType,
-			ID:   segID,
+			Type:  segType,
+			ID:    segID,
+			SubID: subID,
 		}
 		currentAddress = newAddress
 	}

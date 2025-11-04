@@ -24,7 +24,6 @@ import (
 	"strings"
 
 	"github.com/cloudwego/eino/compose"
-	"github.com/cloudwego/eino/internal/core"
 	"github.com/cloudwego/eino/internal/safe"
 	"github.com/cloudwego/eino/schema"
 )
@@ -418,7 +417,7 @@ func (a *flowAgent) run(
 		}
 
 		ctx, _ = initRunCtx(ctx, destName, nil)
-		ctx = core.AppendAddressSegment(ctx, AddressSegmentAgent, destName)
+		ctx = AppendAddressSegment(ctx, AddressSegmentAgent, destName)
 
 		subAIter := agentToRun.Run(ctx, nil /*subagents get input from runCtx*/, opts...)
 		for {

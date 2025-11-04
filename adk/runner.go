@@ -70,7 +70,7 @@ func (r *Runner) Run(ctx context.Context, messages []Message,
 	}
 
 	ctx, _ = initRunCtx(ctx, fa.Name(ctx), input)
-	ctx = core.AppendAddressSegment(ctx, AddressSegmentAgent, fa.Name(ctx))
+	ctx = AppendAddressSegment(ctx, AddressSegmentAgent, fa.Name(ctx))
 
 	AddSessionValues(ctx, o.sessionValues)
 
