@@ -350,6 +350,7 @@ func TestWorkflowInterrupt(t *testing.T) {
 			},
 		},
 	}
+	_ = firstInterruptEvent
 	secondInterruptEvent := &AgentEvent{
 		AgentName: "sa2",
 		RunPath:   []RunStep{{"sequential"}, {"sa1"}, {"sa2"}},
@@ -374,10 +375,6 @@ func TestWorkflowInterrupt(t *testing.T) {
 								Type: AddressSegmentAgent,
 							},
 							{
-								ID:   "sa1",
-								Type: AddressSegmentAgent,
-							},
-							{
 								ID:   "sa2",
 								Type: AddressSegmentAgent,
 							},
@@ -398,6 +395,7 @@ func TestWorkflowInterrupt(t *testing.T) {
 			},
 		},
 	}
+	_ = secondInterruptEvent
 	messageEvents := []*AgentEvent{
 		{
 			AgentName: "sa3",
@@ -418,6 +416,7 @@ func TestWorkflowInterrupt(t *testing.T) {
 			},
 		},
 	}
+	_ = messageEvents
 
 	t.Run("test sequential workflow agent", func(t *testing.T) {
 
@@ -465,7 +464,8 @@ func TestWorkflowInterrupt(t *testing.T) {
 		assert.Equal(t, 1, len(events))
 		assert.Equal(t, secondInterruptEvent.AgentName, events[0].AgentName)
 		assert.Equal(t, secondInterruptEvent.RunPath, events[0].RunPath)
-		assert.True(t, events[0].Action.Interrupted.InterruptContexts[0].EqualsWithoutID(secondInterruptEvent.Action.Interrupted.InterruptContexts[0]))
+		assert.True(t, events[0].Action.Interrupted.InterruptContexts[0].
+			EqualsWithoutID(secondInterruptEvent.Action.Interrupted.InterruptContexts[0]))
 		interruptID2 := events[0].Action.Interrupted.InterruptContexts[0].ID
 		events = []*AgentEvent{}
 
@@ -598,10 +598,6 @@ func TestWorkflowInterrupt(t *testing.T) {
 									Type: AddressSegmentAgent,
 								},
 								{
-									ID:   "sa1",
-									Type: AddressSegmentAgent,
-								},
-								{
 									ID:   "sa2",
 									Type: AddressSegmentAgent,
 								},
@@ -670,22 +666,6 @@ func TestWorkflowInterrupt(t *testing.T) {
 									ID:   "sa1",
 									Type: AddressSegmentAgent,
 								},
-								{
-									ID:   "sa2",
-									Type: AddressSegmentAgent,
-								},
-								{
-									ID:   "sa3",
-									Type: AddressSegmentAgent,
-								},
-								{
-									ID:   "sa4",
-									Type: AddressSegmentAgent,
-								},
-								{
-									ID:   "sa1",
-									Type: AddressSegmentAgent,
-								},
 							},
 							IsRootCause: true,
 							Parent: &InterruptCtx{
@@ -726,26 +706,6 @@ func TestWorkflowInterrupt(t *testing.T) {
 							Address: Address{
 								{
 									ID:   "loop",
-									Type: AddressSegmentAgent,
-								},
-								{
-									ID:   "sa1",
-									Type: AddressSegmentAgent,
-								},
-								{
-									ID:   "sa2",
-									Type: AddressSegmentAgent,
-								},
-								{
-									ID:   "sa3",
-									Type: AddressSegmentAgent,
-								},
-								{
-									ID:   "sa4",
-									Type: AddressSegmentAgent,
-								},
-								{
-									ID:   "sa1",
 									Type: AddressSegmentAgent,
 								},
 								{
@@ -796,11 +756,11 @@ func TestWorkflowInterrupt(t *testing.T) {
 		assert.Equal(t, loopMessageEvents[0].AgentName, events[0].AgentName)
 		assert.Equal(t, loopMessageEvents[0].RunPath, events[0].RunPath)
 		assert.Equal(t, loopMessageEvents[0].Output.MessageOutput.Message.Content, events[0].Output.MessageOutput.Message.Content)
-		
+
 		assert.Equal(t, loopMessageEvents[1].AgentName, events[1].AgentName)
 		assert.Equal(t, loopMessageEvents[1].RunPath, events[1].RunPath)
 		assert.Equal(t, loopMessageEvents[1].Output.MessageOutput.Message.Content, events[1].Output.MessageOutput.Message.Content)
-		
+
 		// Check the third interrupt event using EqualsWithoutID
 		assert.Equal(t, loopMessageEvents[2].AgentName, events[2].AgentName)
 		assert.Equal(t, loopMessageEvents[2].RunPath, events[2].RunPath)
@@ -1024,9 +984,7 @@ func TestChatModelInterrupt(t *testing.T) {
 	assert.Equal(t, 1, len(event.Action.Interrupted.InterruptContexts))
 	assert.Equal(t, Address{
 		{Type: AddressSegmentAgent, ID: "name"},
-		/*		{Type: compose.AddressSegmentRunnable, ID: "React"},
-				{Type: compose.AddressSegmentNode, ID: "ToolNode"},*/
-		{Type: compose.AddressSegmentTool, ID: "tool1", SubID: "1"},
+		{Type: AddressSegmentTool, ID: "tool1", SubID: "1"},
 	}, event.Action.Interrupted.InterruptContexts[0].Address)
 
 	var (
@@ -1036,7 +994,7 @@ func TestChatModelInterrupt(t *testing.T) {
 
 	intCtx := event.Action.Interrupted.InterruptContexts[0]
 	for intCtx != nil {
-		if intCtx.Address[len(intCtx.Address)-1].Type == compose.AddressSegmentTool {
+		if intCtx.Address[len(intCtx.Address)-1].Type == AddressSegmentTool {
 			toolID = intCtx.ID
 		} else if intCtx.Address[len(intCtx.Address)-1].Type == AddressSegmentAgent {
 			chatModelAgentID = intCtx.ID
@@ -1151,15 +1109,13 @@ func TestChatModelAgentToolInterrupt(t *testing.T) {
 		if ctx.IsRootCause {
 			assert.Equal(t, Address{
 				{Type: AddressSegmentAgent, ID: "name"},
-				/*			{Type: compose.AddressSegmentRunnable, ID: "React"},
-							{Type: compose.AddressSegmentNode, ID: "ToolNode"},*/
-				{Type: compose.AddressSegmentTool, ID: "myAgent", SubID: "1"},
+				{Type: AddressSegmentTool, ID: "myAgent", SubID: "1"},
 				{Type: AddressSegmentAgent, ID: "myAgent"},
 			}, ctx.Address)
 			assert.Equal(t, "interrupt again", ctx.Info)
 		}
 	}
-	
+
 	var toolInterruptID string
 	for _, ctx := range event.Action.Interrupted.InterruptContexts {
 		if ctx.IsRootCause {
@@ -1400,10 +1356,6 @@ func TestCyclicalAgentInterrupt(t *testing.T) {
 	}
 	assert.Equal(t, expectedAddr, interruptCtx.Address)
 	assert.NotEmpty(t, interruptCtx.ID)
-
-	// Check the RunPath in the interrupt state
-	// Note: interruptStates is no longer available in the new API
-	// The RunPath information is now handled internally by the framework
 
 	// Resume the execution
 	iter, err = runner.TargetedResume(ctx, "cyclical-1", map[string]any{
