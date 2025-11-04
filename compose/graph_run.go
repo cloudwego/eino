@@ -531,7 +531,7 @@ func (r *runner) handleInterrupt(
 		}
 	}
 
-	intInfo.InterruptContexts = core.ToInterruptContexts(is)
+	intInfo.InterruptContexts = core.ToInterruptContexts(is, nil)
 	return &interruptError{Info: intInfo}
 }
 
@@ -665,7 +665,7 @@ func (r *runner) handleInterruptWithSubGraphAndRerunNodes(
 			return fmt.Errorf("failed to set checkpoint: %w, checkPointID: %s", err, *checkPointID)
 		}
 	}
-	intInfo.InterruptContexts = core.ToInterruptContexts(is)
+	intInfo.InterruptContexts = core.ToInterruptContexts(is, nil)
 	return &interruptError{Info: intInfo}
 }
 

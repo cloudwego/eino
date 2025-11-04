@@ -169,7 +169,7 @@ func FromInterruptContexts(contexts []*InterruptCtx) *InterruptSignal {
 // user-facing InterruptCtx objects for the root causes of the interruption.
 // Each returned context has its Parent field populated (if it has a parent),
 // allowing traversal up the interrupt chain.
-func ToInterruptContexts(is *InterruptSignal) []*InterruptCtx {
+func ToInterruptContexts(is *InterruptSignal, addrModifier func(Address) Address) []*InterruptCtx {
 	if is == nil {
 		return nil
 	}
@@ -185,6 +185,10 @@ func ToInterruptContexts(is *InterruptSignal) []*InterruptCtx {
 			Info:        signal.InterruptInfo.Info,
 			IsRootCause: signal.InterruptInfo.IsRootCause,
 			Parent:      parentCtx,
+		}
+
+		if addrModifier != nil {
+			currentCtx.Address = addrModifier(currentCtx.Address)
 		}
 
 		// Only add the context to the final list if it's a root cause.

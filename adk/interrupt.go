@@ -123,7 +123,18 @@ type AddressSegmentType = core.AddressSegmentType
 
 const (
 	AddressSegmentAgent AddressSegmentType = "agent"
+	AddressSegmentTool  AddressSegmentType = "tool"
 )
+
+func encapsulateAddress(addr Address) Address {
+	newAddr := make(Address, 0, len(addr))
+	for _, seg := range addr {
+		if seg.Type == AddressSegmentAgent || seg.Type == AddressSegmentTool {
+			newAddr = append(newAddr, seg)
+		}
+	}
+	return newAddr
+}
 
 // InterruptCtx provides a structured, user-facing view of a single point of interruption.
 // It contains the ID and Address of the interrupted component, as well as user-defined info.

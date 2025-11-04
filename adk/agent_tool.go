@@ -25,7 +25,6 @@ import (
 
 	"github.com/cloudwego/eino/components/tool"
 	"github.com/cloudwego/eino/compose"
-	"github.com/cloudwego/eino/internal/core"
 	"github.com/cloudwego/eino/schema"
 )
 
@@ -165,8 +164,8 @@ func (at *agentTool) InvokableRun(ctx context.Context, argumentsInJSON string, o
 			return "", fmt.Errorf("interrupt has happened, but cannot find interrupt info")
 		}
 
-		is := core.FromInterruptContexts(lastEvent.Action.Interrupted.InterruptContexts)
-		return "", compose.CompositeInterrupt(ctx, "agent tool interrupt", data, is)
+		return "", compose.CompositeInterrupt(ctx, "agent tool interrupt", data,
+			lastEvent.Action.internalInterrupted)
 	}
 
 	if lastEvent == nil {
