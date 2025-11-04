@@ -244,7 +244,7 @@ func TestInterruptStateAndResumeForToolInNestedSubGraph(t *testing.T) {
 
 	// Verify the root cause context
 	rootCause := interruptContexts[0]
-	expectedPath := "runnable:root;node:sub_graph_a;node:sub_graph_b;node:tools;tool:tool_call_123"
+	expectedPath := "runnable:root;node:sub_graph_a;node:sub_graph_b;node:tools;tool:interrupt_tool:tool_call_123"
 	assert.Equal(t, expectedPath, rootCause.ID)
 	assert.True(t, rootCause.IsRootCause)
 	assert.Equal(t, map[string]any{"reason": "tool maintenance"}, rootCause.Info)
@@ -580,11 +580,11 @@ func TestReentryForResumedTools(t *testing.T) {
 		assert.NotNil(t, iCtx.Parent)
 		assert.Equal(t, "runnable:root;node:tools", iCtx.Parent.ID)
 	}
-	assert.True(t, found1["runnable:root;node:tools;tool:call_1"])
-	assert.True(t, found1["runnable:root;node:tools;tool:call_2"])
+	assert.True(t, found1["runnable:root;node:tools;tool:reentry_tool:call_1"])
+	assert.True(t, found1["runnable:root;node:tools;tool:reentry_tool:call_2"])
 
 	// --- 2. Second invocation: resume call_1, expect call_2 to interrupt again ---
-	resumeCtx2 := ResumeWithData(context.Background(), "runnable:root;node:tools;tool:call_1",
+	resumeCtx2 := ResumeWithData(context.Background(), "runnable:root;node:tools;tool:reentry_tool:call_1",
 		&myResumeData{Message: "resume call 1"})
 	_, err = graph.Invoke(resumeCtx2, []*schema.Message{schema.UserMessage("start")}, WithCheckPointID(checkPointID))
 	assert.Error(t, err)
@@ -592,24 +592,24 @@ func TestReentryForResumedTools(t *testing.T) {
 	interrupts2 := interruptInfo2.InterruptContexts
 	assert.Len(t, interrupts2, 1) // Only call_2
 	rootCause2 := interrupts2[0]
-	assert.Equal(t, "runnable:root;node:tools;tool:call_2", rootCause2.ID)
+	assert.Equal(t, "runnable:root;node:tools;tool:reentry_tool:call_2", rootCause2.ID)
 	assert.NotNil(t, rootCause2.Parent)
 	assert.Equal(t, "runnable:root;node:tools", rootCause2.Parent.ID)
 
 	// --- 3. Third invocation: resume call_2, model makes a new call (call_3) which should interrupt ---
-	resumeCtx3 := ResumeWithData(context.Background(), "runnable:root;node:tools;tool:call_2", &myResumeData{Message: "resume call 2"})
+	resumeCtx3 := ResumeWithData(context.Background(), "runnable:root;node:tools;tool:reentry_tool:call_2", &myResumeData{Message: "resume call 2"})
 	_, err = graph.Invoke(resumeCtx3, []*schema.Message{schema.UserMessage("start")}, WithCheckPointID(checkPointID))
 	assert.Error(t, err)
 	interruptInfo3, _ := ExtractInterruptInfo(err)
 	interrupts3 := interruptInfo3.InterruptContexts
 	assert.Len(t, interrupts3, 1) // Only call_3
 	rootCause3 := interrupts3[0]
-	assert.Equal(t, "runnable:root;node:tools;tool:call_3", rootCause3.ID) // Note: this is the new call_3
+	assert.Equal(t, "runnable:root;node:tools;tool:reentry_tool:call_3", rootCause3.ID) // Note: this is the new call_3
 	assert.NotNil(t, rootCause3.Parent)
 	assert.Equal(t, "runnable:root;node:tools", rootCause3.Parent.ID)
 
 	// --- 4. Final invocation: resume call_3, expect final answer ---
-	resumeCtx4 := ResumeWithData(context.Background(), "runnable:root;node:tools;tool:call_3",
+	resumeCtx4 := ResumeWithData(context.Background(), "runnable:root;node:tools;tool:reentry_tool:call_3",
 		&myResumeData{Message: "resume call 3"})
 	output, err := graph.Invoke(resumeCtx4, []*schema.Message{schema.UserMessage("start")}, WithCheckPointID(checkPointID))
 	assert.NoError(t, err)
@@ -750,7 +750,7 @@ func TestGraphInterruptWithinLambda(t *testing.T) {
 	assert.Equal(t, "runnable:root;node:composite_lambda;runnable:inner", rootCause.Parent.ID)
 	assert.Nil(t, rootCause.Parent.Info) // The inner runnable doesn't have its own info
 	assert.False(t, rootCause.Parent.IsRootCause)
-	
+
 	// Check grandparent
 	assert.NotNil(t, rootCause.Parent.Parent)
 	assert.Equal(t, "runnable:root;node:composite_lambda", rootCause.Parent.Parent.ID)
