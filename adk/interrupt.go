@@ -246,6 +246,31 @@ func (m *mockStore) Set(_ context.Context, _ string, checkPoint []byte) error {
 	return nil
 }
 
+func getNextResumeAgentOnly(ctx context.Context, info *ResumeInfo) (string, error) {
+	nextAgents, err := core.GetNextResumptionPoints(ctx)
+	if err != nil {
+		return "", fmt.Errorf("failed to get next agent leading to interruption: %w", err)
+	}
+
+	if len(nextAgents) == 0 {
+		return "", errors.New("no child agents leading to interrupted agent were found")
+	}
+
+	if len(nextAgents) > 1 {
+		return "", errors.New("agent has multiple child agents leading to interruption, " +
+			"but concurrent transfer is not supported")
+	}
+
+	// get the single next agent to delegate to.
+	var nextAgentID string
+	for id := range nextAgents {
+		nextAgentID = id
+		break
+	}
+
+	return nextAgentID, nil
+}
+
 func getNextResumeAgent(ctx context.Context, info *ResumeInfo) (context.Context,
 	string, *ResumeInfo, error) {
 	nextAgents, err := core.GetNextResumptionPoints(ctx)
@@ -272,6 +297,19 @@ func getNextResumeAgent(ctx context.Context, info *ResumeInfo) (context.Context,
 	ctx, nextResumeInfo := buildResumeInfo(ctx, nextAgentID, info)
 
 	return ctx, nextAgentID, nextResumeInfo, nil
+}
+
+func getNextResumeAgentsOnly(ctx context.Context, info *ResumeInfo) (map[string]bool, error) {
+	nextAgents, err := core.GetNextResumptionPoints(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get next agents leading to interruption: %w", err)
+	}
+
+	if len(nextAgents) == 0 {
+		return nil, errors.New("no child agents leading to interrupted agent were found")
+	}
+
+	return nextAgents, nil
 }
 
 func getNextResumeAgents(ctx context.Context, info *ResumeInfo) (map[string]context.Context,
@@ -318,6 +356,8 @@ func buildResumeInfo(ctx context.Context, nextAgentID string, info *ResumeInfo) 
 			nextResumeInfo.ResumeData = data
 		}
 	}
+
+	ctx = updateRunPathOnly(ctx, nextAgentID)
 
 	return ctx, nextResumeInfo
 }
