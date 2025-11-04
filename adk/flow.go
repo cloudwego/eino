@@ -340,7 +340,7 @@ func (a *flowAgent) Resume(ctx context.Context, info *ResumeInfo, opts ...AgentR
 		return iterator
 	}
 
-	nextAgentName, err := getNextResumeAgentOnly(ctx, info)
+	nextAgentName, err := getNextResumeAgent(ctx, info)
 	if err != nil {
 		return genErrorIter(err)
 	}
