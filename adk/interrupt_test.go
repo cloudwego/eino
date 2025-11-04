@@ -986,7 +986,7 @@ func TestChatModelInterrupt(t *testing.T) {
 		{Type: AddressSegmentAgent, ID: "name"},
 		/*		{Type: compose.AddressSegmentRunnable, ID: "React"},
 				{Type: compose.AddressSegmentNode, ID: "ToolNode"},*/
-		{Type: compose.AddressSegmentTool, ID: "1"},
+		{Type: compose.AddressSegmentTool, ID: "tool1", SubID: "1"},
 	}, event.Action.Interrupted.InterruptContexts[0].Address)
 
 	var (
@@ -1113,7 +1113,7 @@ func TestChatModelAgentToolInterrupt(t *testing.T) {
 				{Type: AddressSegmentAgent, ID: "name"},
 				/*				{Type: compose.AddressSegmentRunnable, ID: "React"},
 								{Type: compose.AddressSegmentNode, ID: "ToolNode"},*/
-				{Type: compose.AddressSegmentTool, ID: "1"},
+				{Type: compose.AddressSegmentTool, ID: "myAgent", SubID: "1"},
 				{Type: AddressSegmentAgent, ID: "myAgent"},
 			}, ctx.Address)
 			assert.Equal(t, "interrupt again", ctx.Info)
@@ -1123,7 +1123,7 @@ func TestChatModelAgentToolInterrupt(t *testing.T) {
 	assert.False(t, ok)
 
 	iter, err = runner.TargetedResume(ctx, "1", map[string]any{
-		"agent:name;runnable:React;node:ToolNode;tool:1;agent:myAgent": "resume sa",
+		"agent:name;runnable:React;node:ToolNode;tool:myAgent:1;agent:myAgent": "resume sa",
 	})
 	assert.NoError(t, err)
 	event, ok = iter.Next()

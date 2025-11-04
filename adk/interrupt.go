@@ -126,6 +126,10 @@ const (
 	AddressSegmentTool  AddressSegmentType = "tool"
 )
 
+func AppendAddressSegment(ctx context.Context, segType AddressSegmentType, segID string) context.Context {
+	return core.AppendAddressSegment(ctx, segType, segID, "")
+}
+
 func encapsulateAddress(addr Address) Address {
 	newAddr := make(Address, 0, len(addr))
 	for _, seg := range addr {
@@ -295,7 +299,7 @@ func getNextResumeAgents(ctx context.Context, info *ResumeInfo) (map[string]cont
 
 func buildResumeInfo(ctx context.Context, nextAgentID string, info *ResumeInfo) (
 	context.Context, *ResumeInfo) {
-	ctx = core.AppendAddressSegment(ctx, AddressSegmentAgent, nextAgentID)
+	ctx = AppendAddressSegment(ctx, AddressSegmentAgent, nextAgentID)
 	nextResumeInfo := &ResumeInfo{
 		EnableStreaming: info.EnableStreaming,
 		InterruptInfo:   info.InterruptInfo,
