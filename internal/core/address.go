@@ -150,12 +150,15 @@ func AppendAddressSegment(ctx context.Context, segType AddressSegmentType, segID
 	var id string
 	for id_, addr := range rInfo.id2Addr {
 		if addr.Equals(currentAddress) {
+			rInfo.mu.Lock()
 			if used, ok := rInfo.id2StateUsed[id_]; !ok || !used {
 				runCtx.interruptState = generic.PtrOf(rInfo.id2State[id_])
 				rInfo.id2StateUsed[id_] = true
 				id = id_
+				rInfo.mu.Unlock()
 				break
 			}
+			rInfo.mu.Unlock()
 		}
 	}
 
