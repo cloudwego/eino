@@ -511,6 +511,8 @@ func (r *runner) handleInterrupt(
 		return fmt.Errorf("failed to interrupt: %w", err)
 	}
 
+	cp.InterruptID2Addr, cp.InterruptID2State = core.SignalToPersistenceMaps(is)
+
 	for _, t := range nextTasks {
 		cp.Inputs[t.nodeKey] = t.input
 	}

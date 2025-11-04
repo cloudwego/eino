@@ -113,21 +113,21 @@ func TestSimpleInterrupt(t *testing.T) {
 		CheckPointStore: store,
 	})
 	iter := runner.Query(ctx, "hello world", WithCheckPointID("1"))
-	event, ok := iter.Next()
+	_, ok := iter.Next()
 	assert.True(t, ok)
-	event, ok = iter.Next()
+	interruptEvent, ok := iter.Next()
 	assert.True(t, ok)
-	assert.Equal(t, data, event.Action.Interrupted.Data)
-	assert.Equal(t, "agent:myAgent", event.Action.Interrupted.InterruptContexts[0].ID)
-	assert.True(t, event.Action.Interrupted.InterruptContexts[0].IsRootCause)
-	assert.Equal(t, data, event.Action.Interrupted.InterruptContexts[0].Info)
+	assert.Equal(t, data, interruptEvent.Action.Interrupted.Data)
+	assert.NotEmpty(t, interruptEvent.Action.Interrupted.InterruptContexts[0].ID)
+	assert.True(t, interruptEvent.Action.Interrupted.InterruptContexts[0].IsRootCause)
+	assert.Equal(t, data, interruptEvent.Action.Interrupted.InterruptContexts[0].Info)
 	assert.Equal(t, Address{{Type: AddressSegmentAgent, ID: "myAgent"}},
-		event.Action.Interrupted.InterruptContexts[0].Address)
-	event, ok = iter.Next()
+		interruptEvent.Action.Interrupted.InterruptContexts[0].Address)
+	_, ok = iter.Next()
 	assert.False(t, ok)
 
 	_, err := runner.TargetedResume(ctx, "1", map[string]any{
-		"agent:myAgent": nil,
+		interruptEvent.Action.Interrupted.InterruptContexts[0].ID: nil,
 	})
 	assert.NoError(t, err)
 }
@@ -204,13 +204,14 @@ func TestMultiAgentInterrupt(t *testing.T) {
 		{Type: AddressSegmentAgent, ID: "sa1"},
 		{Type: AddressSegmentAgent, ID: "sa2"},
 	}, event.Action.Interrupted.InterruptContexts[0].Address)
-	assert.Equal(t, "agent:sa1;agent:sa2", event.Action.Interrupted.InterruptContexts[0].ID)
+	assert.NotEmpty(t, event.Action.Interrupted.InterruptContexts[0].ID)
 
+	interruptID := event.Action.Interrupted.InterruptContexts[0].ID
 	_, ok = iter.Next()
 	assert.False(t, ok)
 
 	iter, err = runner.TargetedResume(ctx, "1", map[string]any{
-		"agent:sa1;agent:sa2": "resume data",
+		interruptID: "resume data",
 	})
 	assert.NoError(t, err)
 	event, ok = iter.Next()
@@ -442,12 +443,15 @@ func TestWorkflowInterrupt(t *testing.T) {
 		}
 
 		assert.Equal(t, 1, len(events))
-		assert.EqualExportedValues(t, firstInterruptEvent, events[0])
+		assert.Equal(t, firstInterruptEvent.AgentName, events[0].AgentName)
+		assert.Equal(t, firstInterruptEvent.RunPath, events[0].RunPath)
+		assert.True(t, events[0].Action.Interrupted.InterruptContexts[0].EqualsWithoutID(firstInterruptEvent.Action.Interrupted.InterruptContexts[0]))
+		interruptID1 := events[0].Action.Interrupted.InterruptContexts[0].ID
 		events = []*AgentEvent{}
 
 		// Resume after sa1 interrupt
 		iter, err = runner.TargetedResume(ctx, "sequential-1", map[string]any{
-			"agent:sequential;agent:sa1": "resume sa1",
+			interruptID1: "resume sa1",
 		})
 		assert.NoError(t, err)
 		for {
@@ -459,12 +463,15 @@ func TestWorkflowInterrupt(t *testing.T) {
 		}
 
 		assert.Equal(t, 1, len(events))
-		assert.EqualExportedValues(t, secondInterruptEvent, events[0])
+		assert.Equal(t, secondInterruptEvent.AgentName, events[0].AgentName)
+		assert.Equal(t, secondInterruptEvent.RunPath, events[0].RunPath)
+		assert.True(t, events[0].Action.Interrupted.InterruptContexts[0].EqualsWithoutID(secondInterruptEvent.Action.Interrupted.InterruptContexts[0]))
+		interruptID2 := events[0].Action.Interrupted.InterruptContexts[0].ID
 		events = []*AgentEvent{}
 
 		// Resume after sa2 interrupt
 		iter, err = runner.TargetedResume(ctx, "sequential-1", map[string]any{
-			"agent:sequential;agent:sa1;agent:sa2": "resume sa2",
+			interruptID2: "resume sa2",
 		})
 		assert.NoError(t, err)
 		for {
@@ -547,12 +554,15 @@ func TestWorkflowInterrupt(t *testing.T) {
 			},
 		}
 		assert.Equal(t, 1, len(events))
-		assert.EqualExportedValues(t, loopFirstInterruptEvent, events[0])
+		assert.Equal(t, loopFirstInterruptEvent.AgentName, events[0].AgentName)
+		assert.Equal(t, loopFirstInterruptEvent.RunPath, events[0].RunPath)
+		assert.True(t, events[0].Action.Interrupted.InterruptContexts[0].EqualsWithoutID(loopFirstInterruptEvent.Action.Interrupted.InterruptContexts[0]))
+		loopInterruptID1 := events[0].Action.Interrupted.InterruptContexts[0].ID
 		events = []*AgentEvent{}
 
 		// Resume after sa1 interrupt
 		iter, err = runner.TargetedResume(ctx, "loop-1", map[string]any{
-			"agent:loop;agent:sa1": "resume sa1",
+			loopInterruptID1: "resume sa1",
 		})
 		assert.NoError(t, err)
 		for {
@@ -613,12 +623,15 @@ func TestWorkflowInterrupt(t *testing.T) {
 			},
 		}
 		assert.Equal(t, 1, len(events))
-		assert.EqualExportedValues(t, loopSecondInterruptEvent, events[0])
+		assert.Equal(t, loopSecondInterruptEvent.AgentName, events[0].AgentName)
+		assert.Equal(t, loopSecondInterruptEvent.RunPath, events[0].RunPath)
+		assert.True(t, events[0].Action.Interrupted.InterruptContexts[0].EqualsWithoutID(loopSecondInterruptEvent.Action.Interrupted.InterruptContexts[0]))
+		loopInterruptID2 := events[0].Action.Interrupted.InterruptContexts[0].ID
 		events = []*AgentEvent{}
 
 		// Resume after sa2 interrupt
 		iter, err = runner.TargetedResume(ctx, "loop-1", map[string]any{
-			"agent:loop;agent:sa1;agent:sa2": "resume sa2",
+			loopInterruptID2: "resume sa2",
 		})
 		assert.NoError(t, err)
 		for {
@@ -779,12 +792,25 @@ func TestWorkflowInterrupt(t *testing.T) {
 			loopThirdInterruptEvent,
 		}
 		assert.Equal(t, 3, len(events))
-		assert.EqualExportedValues(t, loopMessageEvents, events)
+		// Check the first two message events
+		assert.Equal(t, loopMessageEvents[0].AgentName, events[0].AgentName)
+		assert.Equal(t, loopMessageEvents[0].RunPath, events[0].RunPath)
+		assert.Equal(t, loopMessageEvents[0].Output.MessageOutput.Message.Content, events[0].Output.MessageOutput.Message.Content)
+		
+		assert.Equal(t, loopMessageEvents[1].AgentName, events[1].AgentName)
+		assert.Equal(t, loopMessageEvents[1].RunPath, events[1].RunPath)
+		assert.Equal(t, loopMessageEvents[1].Output.MessageOutput.Message.Content, events[1].Output.MessageOutput.Message.Content)
+		
+		// Check the third interrupt event using EqualsWithoutID
+		assert.Equal(t, loopMessageEvents[2].AgentName, events[2].AgentName)
+		assert.Equal(t, loopMessageEvents[2].RunPath, events[2].RunPath)
+		assert.True(t, events[2].Action.Interrupted.InterruptContexts[0].EqualsWithoutID(loopMessageEvents[2].Action.Interrupted.InterruptContexts[0]))
+		loopInterruptID3 := events[2].Action.Interrupted.InterruptContexts[0].ID
 		events = []*AgentEvent{}
 
 		// Resume after third interrupt
 		iter, err = runner.TargetedResume(ctx, "loop-1", map[string]any{
-			"agent:loop;agent:sa1;agent:sa2;agent:sa3;agent:sa4;agent:sa1": "resume sa1",
+			loopInterruptID3: "resume sa1",
 		})
 		assert.NoError(t, err)
 		for {
@@ -795,12 +821,15 @@ func TestWorkflowInterrupt(t *testing.T) {
 			events = append(events, event)
 		}
 		assert.Equal(t, 1, len(events))
-		assert.EqualExportedValues(t, loopFourthInterruptEvent, events[0])
+		assert.Equal(t, loopFourthInterruptEvent.AgentName, events[0].AgentName)
+		assert.Equal(t, loopFourthInterruptEvent.RunPath, events[0].RunPath)
+		assert.True(t, events[0].Action.Interrupted.InterruptContexts[0].EqualsWithoutID(loopFourthInterruptEvent.Action.Interrupted.InterruptContexts[0]))
+		loopInterruptID4 := events[0].Action.Interrupted.InterruptContexts[0].ID
 		events = []*AgentEvent{}
 
 		// Resume after fourth interrupt
 		iter, err = runner.TargetedResume(ctx, "loop-1", map[string]any{
-			"agent:loop;agent:sa1;agent:sa2;agent:sa3;agent:sa4;agent:sa1;agent:sa2": "resume sa2",
+			loopInterruptID4: "resume sa2",
 		})
 		assert.NoError(t, err)
 		for {
@@ -927,9 +956,20 @@ func TestWorkflowInterrupt(t *testing.T) {
 		assert.True(t, sa1InfoFound)
 		assert.True(t, sa2InfoFound)
 
+		var parallelInterruptID1, parallelInterruptID2 string
+		for _, ctx := range interruptEvent.Action.Interrupted.InterruptContexts {
+			if ctx.Info == "sa1 interrupt data" {
+				parallelInterruptID1 = ctx.ID
+			} else if ctx.Info == "sa2 interrupt data" {
+				parallelInterruptID2 = ctx.ID
+			}
+		}
+		assert.NotEmpty(t, parallelInterruptID1)
+		assert.NotEmpty(t, parallelInterruptID2)
+
 		iter, err = runner.TargetedResume(ctx, "1", map[string]any{
-			"agent:parallel agent;agent:sa1": "resume sa1",
-			"agent:parallel agent;agent:sa2": "resume sa2",
+			parallelInterruptID1: "resume sa1",
+			parallelInterruptID2: "resume sa2",
 		})
 		assert.NoError(t, err)
 		_, ok = iter.Next()
@@ -1111,19 +1151,29 @@ func TestChatModelAgentToolInterrupt(t *testing.T) {
 		if ctx.IsRootCause {
 			assert.Equal(t, Address{
 				{Type: AddressSegmentAgent, ID: "name"},
-				/*				{Type: compose.AddressSegmentRunnable, ID: "React"},
-								{Type: compose.AddressSegmentNode, ID: "ToolNode"},*/
+				/*			{Type: compose.AddressSegmentRunnable, ID: "React"},
+							{Type: compose.AddressSegmentNode, ID: "ToolNode"},*/
 				{Type: compose.AddressSegmentTool, ID: "myAgent", SubID: "1"},
 				{Type: AddressSegmentAgent, ID: "myAgent"},
 			}, ctx.Address)
 			assert.Equal(t, "interrupt again", ctx.Info)
 		}
 	}
+	
+	var toolInterruptID string
+	for _, ctx := range event.Action.Interrupted.InterruptContexts {
+		if ctx.IsRootCause {
+			toolInterruptID = ctx.ID
+			break
+		}
+	}
+	assert.NotEmpty(t, toolInterruptID)
+
 	event, ok = iter.Next()
 	assert.False(t, ok)
 
 	iter, err = runner.TargetedResume(ctx, "1", map[string]any{
-		"agent:name;runnable:React;node:ToolNode;tool:myAgent:1;agent:myAgent": "resume sa",
+		toolInterruptID: "resume sa",
 	})
 	assert.NoError(t, err)
 	event, ok = iter.Next()
@@ -1349,7 +1399,7 @@ func TestCyclicalAgentInterrupt(t *testing.T) {
 		{Type: AddressSegmentAgent, ID: "C"},
 	}
 	assert.Equal(t, expectedAddr, interruptCtx.Address)
-	assert.Equal(t, "agent:A;agent:B;agent:A;agent:C", interruptCtx.ID)
+	assert.NotEmpty(t, interruptCtx.ID)
 
 	// Check the RunPath in the interrupt state
 	// Note: interruptStates is no longer available in the new API
@@ -1357,7 +1407,7 @@ func TestCyclicalAgentInterrupt(t *testing.T) {
 
 	// Resume the execution
 	iter, err = runner.TargetedResume(ctx, "cyclical-1", map[string]any{
-		"agent:A;agent:B;agent:A;agent:C": "resume C",
+		interruptCtx.ID: "resume C",
 	})
 	assert.NoError(t, err)
 
