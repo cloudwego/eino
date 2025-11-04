@@ -478,7 +478,7 @@ func genReactCallbacks(agentName string,
 	}
 	graphHandler := callbacks.NewHandlerBuilder().OnErrorFn(h.onGraphError).Build()
 
-	cb := ub.NewHandlerHelper().ChatModel(cmHandler).Tool(toolHandler).ToolsNode(toolsNodeHandler).Graph(graphHandler).Handler()
+	cb := ub.NewHandlerHelper().ChatModel(cmHandler).Tool(toolHandler).ToolsNode(toolsNodeHandler).Chain(graphHandler).Handler()
 
 	return compose.WithCallbacks(cb)
 }
@@ -535,9 +535,12 @@ func (a *ChatModelAgent) buildRunFunc(ctx context.Context) runFunc {
 
 		if len(toolsNodeConf.Tools) == 0 {
 			a.run = func(ctx context.Context, input *AgentInput, generator *AsyncGenerator[*AgentEvent], store *mockStore, opts ...compose.Option) {
-				var err error
-				var msgs []Message
-				msgs, err = a.genModelInput(ctx, instruction, input)
+				r, err := compose.NewChain[*AgentInput, Message]().
+					AppendLambda(compose.InvokableLambda(func(ctx context.Context, input *AgentInput) ([]Message, error) {
+						return a.genModelInput(ctx, instruction, input)
+					})).
+					AppendChatModel(a.model).
+					Compile(ctx, compose.WithGraphName(a.name))
 				if err != nil {
 					generator.Send(&AgentEvent{Err: err})
 					return
@@ -546,9 +549,9 @@ func (a *ChatModelAgent) buildRunFunc(ctx context.Context) runFunc {
 				var msg Message
 				var msgStream MessageStream
 				if input.EnableStreaming {
-					msgStream, err = a.model.Stream(ctx, msgs) // todo: chat model option
+					msgStream, err = r.Stream(ctx, input) // todo: chat model option
 				} else {
-					msg, err = a.model.Generate(ctx, msgs)
+					msg, err = r.Invoke(ctx, input)
 				}
 
 				var event *AgentEvent
@@ -601,20 +604,20 @@ func (a *ChatModelAgent) buildRunFunc(ctx context.Context) runFunc {
 		a.run = func(ctx context.Context, input *AgentInput, generator *AsyncGenerator[*AgentEvent], store *mockStore, opts ...compose.Option) {
 			var compileOptions []compose.GraphCompileOption
 			compileOptions = append(compileOptions,
-				compose.WithGraphName("React"),
+				compose.WithGraphName(a.name),
 				compose.WithCheckPointStore(store),
 				compose.WithSerializer(&gobSerializer{}),
 				// ensure the graph won't exceed max steps due to max iterations
 				compose.WithMaxRunSteps(math.MaxInt))
 
-			runnable, err_ := g.Compile(ctx, compileOptions...)
-			if err != nil {
-				generator.Send(&AgentEvent{AgentName: a.name, Err: err})
-				return
-			}
-
-			var msgs []Message
-			msgs, err_ = a.genModelInput(ctx, instruction, input)
+			runnable, err_ := compose.NewChain[*AgentInput, Message]().
+				AppendLambda(
+					compose.InvokableLambda(func(ctx context.Context, input *AgentInput) ([]Message, error) {
+						return a.genModelInput(ctx, instruction, input)
+					}),
+				).
+				AppendGraph(g, compose.WithNodeName("ReAct")).
+				Compile(ctx, compileOptions...)
 			if err_ != nil {
 				generator.Send(&AgentEvent{Err: err_})
 				return
@@ -625,9 +628,9 @@ func (a *ChatModelAgent) buildRunFunc(ctx context.Context) runFunc {
 			var msg Message
 			var msgStream MessageStream
 			if input.EnableStreaming {
-				msgStream, err_ = runnable.Stream(ctx, msgs, append(opts, callOpt)...)
+				msgStream, err_ = runnable.Stream(ctx, input, append(opts, callOpt)...)
 			} else {
-				msg, err_ = runnable.Invoke(ctx, msgs, append(opts, callOpt)...)
+				msg, err_ = runnable.Invoke(ctx, input, append(opts, callOpt)...)
 			}
 
 			if err_ == nil {

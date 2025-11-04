@@ -99,9 +99,12 @@ func TestPlannerRunWithFormattedOutput(t *testing.T) {
 	// Create a plan response
 	planJSON := `{"steps":["Step 1", "Step 2", "Step 3"]}`
 	planMsg := schema.AssistantMessage(planJSON, nil)
+	sr, sw := schema.Pipe[*schema.Message](1)
+	sw.Send(planMsg, nil)
+	sw.Close()
 
 	// Mock the Generate method
-	mockChatModel.EXPECT().Generate(gomock.Any(), gomock.Any(), gomock.Any()).Return(planMsg, nil).Times(1)
+	mockChatModel.EXPECT().Stream(gomock.Any(), gomock.Any(), gomock.Any()).Return(sr, nil).Times(1)
 
 	// Create the PlannerConfig
 	conf := &PlannerConfig{
@@ -161,12 +164,15 @@ func TestPlannerRunWithToolCalling(t *testing.T) {
 
 	toolCallMsg := schema.AssistantMessage("", nil)
 	toolCallMsg.ToolCalls = []schema.ToolCall{toolCall}
+	sr, sw := schema.Pipe[*schema.Message](1)
+	sw.Send(toolCallMsg, nil)
+	sw.Close()
 
 	// Mock the WithTools method to return a model that will be used for Generate
 	mockToolCallingModel.EXPECT().WithTools(gomock.Any()).Return(mockToolCallingModel, nil).Times(1)
 
 	// Mock the Generate method to return the tool call message
-	mockToolCallingModel.EXPECT().Generate(gomock.Any(), gomock.Any(), gomock.Any()).Return(toolCallMsg, nil).Times(1)
+	mockToolCallingModel.EXPECT().Stream(gomock.Any(), gomock.Any(), gomock.Any()).Return(sr, nil).Times(1)
 
 	// Create the PlannerConfig with ToolCallingChatModel
 	conf := &PlannerConfig{
@@ -371,10 +377,13 @@ func TestReplannerRunWithPlan(t *testing.T) {
 
 	toolCallMsg := schema.AssistantMessage("", nil)
 	toolCallMsg.ToolCalls = []schema.ToolCall{toolCall}
+	sr, sw := schema.Pipe[*schema.Message](1)
+	sw.Send(toolCallMsg, nil)
+	sw.Close()
 
 	// Mock the Generate method
 	mockToolCallingModel.EXPECT().WithTools(gomock.Any()).Return(mockToolCallingModel, nil).Times(1)
-	mockToolCallingModel.EXPECT().Generate(gomock.Any(), gomock.Any(), gomock.Any()).Return(toolCallMsg, nil).Times(1)
+	mockToolCallingModel.EXPECT().Stream(gomock.Any(), gomock.Any(), gomock.Any()).Return(sr, nil).Times(1)
 
 	// Create the ReplannerConfig
 	conf := &ReplannerConfig{
@@ -470,10 +479,13 @@ func TestReplannerRunWithRespond(t *testing.T) {
 
 	toolCallMsg := schema.AssistantMessage("", nil)
 	toolCallMsg.ToolCalls = []schema.ToolCall{toolCall}
+	sr, sw := schema.Pipe[*schema.Message](1)
+	sw.Send(toolCallMsg, nil)
+	sw.Close()
 
 	// Mock the Generate method
 	mockToolCallingModel.EXPECT().WithTools(gomock.Any()).Return(mockToolCallingModel, nil).Times(1)
-	mockToolCallingModel.EXPECT().Generate(gomock.Any(), gomock.Any(), gomock.Any()).Return(toolCallMsg, nil).Times(1)
+	mockToolCallingModel.EXPECT().Stream(gomock.Any(), gomock.Any(), gomock.Any()).Return(sr, nil).Times(1)
 
 	// Create the ReplannerConfig
 	conf := &ReplannerConfig{
@@ -511,7 +523,8 @@ func TestReplannerRunWithRespond(t *testing.T) {
 	event, ok = iterator.Next()
 	assert.True(t, ok)
 	assert.NotNil(t, event.Action)
-	assert.True(t, event.Action.Exit)
+	assert.NotNil(t, event.Action.BreakLoop)
+	assert.False(t, event.Action.BreakLoop.Done)
 
 	_, ok = iterator.Next()
 	assert.False(t, ok)

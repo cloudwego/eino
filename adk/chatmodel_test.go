@@ -170,7 +170,7 @@ func TestChatModelAgentRun(t *testing.T) {
 		assert.True(t, ok)
 		assert.NotNil(t, event)
 		assert.NotNil(t, event.Err)
-		assert.Equal(t, "model error", event.Err.Error())
+		assert.Contains(t, event.Err.Error(), "model error")
 
 		// No more events
 		_, ok = iterator.Next()

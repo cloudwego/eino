@@ -19,13 +19,12 @@ package planexecute
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
-	"io"
 	"runtime/debug"
 	"strings"
 
 	"github.com/bytedance/sonic"
+	"github.com/cloudwego/eino/compose"
 
 	"github.com/cloudwego/eino/adk"
 	"github.com/cloudwego/eino/components/model"
@@ -333,83 +332,86 @@ func (p *planner) Run(ctx context.Context, input *adk.AgentInput,
 			generator.Close()
 		}()
 
-		msgs, err := p.genInputFn(ctx, input.Messages)
+		c := compose.NewChain[*adk.AgentInput, Plan]().
+			AppendLambda(
+				compose.InvokableLambda(func(ctx context.Context, input *adk.AgentInput) (output []adk.Message, err error) {
+					return p.genInputFn(ctx, input.Messages)
+				}),
+			).
+			AppendChatModel(p.chatModel).
+			AppendLambda(
+				compose.CollectableLambda(func(ctx context.Context, sr *schema.StreamReader[adk.Message]) (adk.Message, error) {
+					if input.EnableStreaming {
+						ss := sr.Copy(2)
+						var sOutput *schema.StreamReader[*schema.Message]
+						if p.toolCall {
+							sOutput = schema.StreamReaderWithConvert(ss[0], argToContent)
+						} else {
+							sOutput = ss[0]
+						}
+
+						generator.Send(adk.EventFromMessage(nil, sOutput, schema.Assistant, ""))
+
+						return schema.ConcatMessageStream(ss[1])
+					}
+
+					msg, err := schema.ConcatMessageStream(sr)
+					if err != nil {
+						return nil, err
+					}
+
+					var output adk.Message
+					if p.toolCall {
+						if len(msg.ToolCalls) == 0 {
+							return nil, fmt.Errorf("no tool call")
+						}
+						output = schema.AssistantMessage(msg.ToolCalls[0].Function.Arguments, nil)
+					} else {
+						output = msg
+					}
+
+					generator.Send(adk.EventFromMessage(output, nil, schema.Assistant, ""))
+
+					return msg, nil
+				}),
+			).
+			AppendLambda(
+				compose.InvokableLambda(func(ctx context.Context, msg adk.Message) (plan Plan, err error) {
+					var planJSON string
+					if p.toolCall {
+						planJSON = msg.ToolCalls[0].Function.Arguments
+					} else {
+						planJSON = msg.Content
+					}
+
+					plan = p.newPlan(ctx)
+					err = plan.UnmarshalJSON([]byte(planJSON))
+					if err != nil {
+						return nil, fmt.Errorf("unmarshal plan error: %w", err)
+					}
+
+					adk.AddSessionValue(ctx, PlanSessionKey, plan)
+
+					return plan, nil
+				}),
+			)
+
+		var opts []compose.Option
+		if p.toolCall {
+			opts = append(opts, compose.WithChatModelOption(model.WithToolChoice(schema.ToolChoiceForced)))
+		}
+
+		r, err := c.Compile(ctx, compose.WithGraphName(p.Name(ctx)))
+		if err != nil { // unexpected
+			generator.Send(&adk.AgentEvent{Err: err})
+			return
+		}
+
+		_, err = r.Stream(ctx, input, opts...)
 		if err != nil {
 			generator.Send(&adk.AgentEvent{Err: err})
 			return
 		}
-		var modelCallOptions []model.Option
-		if p.toolCall {
-			modelCallOptions = append(modelCallOptions, model.WithToolChoice(schema.ToolChoiceForced))
-		}
-
-		var msg adk.Message
-		if input.EnableStreaming {
-			s, err_ := p.chatModel.Stream(ctx, msgs, modelCallOptions...)
-			if err_ != nil {
-				generator.Send(&adk.AgentEvent{Err: err_})
-				return
-			}
-
-			ss := s.Copy(2)
-			var sOutput *schema.StreamReader[*schema.Message]
-			if p.toolCall {
-				sOutput = schema.StreamReaderWithConvert(ss[0], argToContent)
-			} else {
-				sOutput = ss[0]
-			}
-
-			event := adk.EventFromMessage(nil, sOutput, schema.Assistant, "")
-			generator.Send(event)
-
-			msg, err_ = schema.ConcatMessageStream(ss[1])
-			if err_ != nil {
-				generator.Send(&adk.AgentEvent{Err: err_})
-				return
-			}
-
-			if p.toolCall && len(msg.ToolCalls) == 0 {
-				generator.Send(&adk.AgentEvent{Err: errors.New("no tool call")})
-				return
-			}
-		} else {
-			var err_ error
-			msg, err_ = p.chatModel.Generate(ctx, msgs, modelCallOptions...)
-			if err_ != nil {
-				generator.Send(&adk.AgentEvent{Err: err_})
-				return
-			}
-
-			var output adk.Message
-			if p.toolCall {
-				if len(msg.ToolCalls) == 0 {
-					generator.Send(&adk.AgentEvent{Err: errors.New("no tool call")})
-					return
-				}
-				output = schema.AssistantMessage(msg.ToolCalls[0].Function.Arguments, nil)
-			} else {
-				output = msg
-			}
-
-			event := adk.EventFromMessage(output, nil, schema.Assistant, "")
-			generator.Send(event)
-		}
-
-		var planJSON string
-		if p.toolCall {
-			planJSON = msg.ToolCalls[0].Function.Arguments
-		} else {
-			planJSON = msg.Content
-		}
-		plan := p.newPlan(ctx)
-		err = plan.UnmarshalJSON([]byte(planJSON))
-		if err != nil {
-			err = fmt.Errorf("unmarshal plan error: %w", err)
-			generator.Send(&adk.AgentEvent{Err: err})
-			return
-		}
-
-		adk.AddSessionValue(ctx, PlanSessionKey, plan)
 	}()
 
 	return iterator
@@ -681,12 +683,6 @@ func (r *replanner) genInput(ctx context.Context) ([]adk.Message, error) {
 
 func (r *replanner) Run(ctx context.Context, input *adk.AgentInput, _ ...adk.AgentRunOption) *adk.AsyncIterator[*adk.AgentEvent] {
 	iterator, generator := adk.NewAsyncIteratorPair[*adk.AgentEvent]()
-	msgs, err := r.genInput(ctx)
-	if err != nil {
-		generator.Send(&adk.AgentEvent{Err: err})
-		generator.Close()
-		return iterator
-	}
 
 	go func() {
 		defer func() {
@@ -701,101 +697,73 @@ func (r *replanner) Run(ctx context.Context, input *adk.AgentInput, _ ...adk.Age
 
 		callOpt := model.WithToolChoice(schema.ToolChoiceForced)
 
-		var planMsg adk.Message
-		if input.EnableStreaming {
-			var s adk.MessageStream
-			s, err = r.chatModel.Stream(ctx, msgs, callOpt)
-			if err != nil {
-				generator.Send(&adk.AgentEvent{Err: err})
-				return
-			}
-
-			ss := s.Copy(2)
-			sOutput := schema.StreamReaderWithConvert(ss[0], argToContent)
-			event := adk.EventFromMessage(nil, sOutput, schema.Assistant, "")
-			generator.Send(event)
-
-			var chunks []adk.Message
-			s = ss[1]
-			var isResponse bool
-			for {
-				chunk, err_ := s.Recv()
-				if err_ != nil {
-					if err_ == io.EOF {
-						break
+		c := compose.NewChain[struct{}, any]().
+			AppendLambda(
+				compose.InvokableLambda(func(ctx context.Context, input struct{}) (output []adk.Message, err error) {
+					return r.genInput(ctx)
+				}),
+			).
+			AppendChatModel(r.chatModel).
+			AppendLambda(
+				compose.CollectableLambda(func(ctx context.Context, sr *schema.StreamReader[adk.Message]) (adk.Message, error) {
+					if input.EnableStreaming {
+						ss := sr.Copy(2)
+						sOutput := schema.StreamReaderWithConvert(ss[0], argToContent)
+						generator.Send(adk.EventFromMessage(nil, sOutput, schema.Assistant, ""))
+						return schema.ConcatMessageStream(ss[1])
 					}
 
-					generator.Send(&adk.AgentEvent{Err: err_})
-					return
-				}
+					msg, err := schema.ConcatMessageStream(sr)
+					if err != nil {
+						return nil, err
+					}
+					if len(msg.ToolCalls) > 0 {
+						output := schema.AssistantMessage(msg.ToolCalls[0].Function.Arguments, nil)
+						generator.Send(adk.EventFromMessage(output, nil, schema.Assistant, ""))
+					}
+					return msg, nil
+				}),
+			).
+			AppendLambda(
+				compose.InvokableLambda(func(ctx context.Context, msg adk.Message) (msgOrPlan any, err error) {
+					if len(msg.ToolCalls) == 0 {
+						return nil, fmt.Errorf("no tool call")
+					}
 
-				if len(chunk.ToolCalls) > 0 && chunk.ToolCalls[0].Function.Name == r.respondTool.Name {
-					isResponse = true
-					break
-				}
+					// exit
+					if msg.ToolCalls[0].Function.Name == r.respondTool.Name {
+						action := adk.NewBreakLoopAction(r.Name(ctx))
+						generator.Send(&adk.AgentEvent{Action: action})
+						return msg, nil
+					}
 
-				chunks = append(chunks, chunk)
-			}
-			s.Close()
+					// replan
+					if msg.ToolCalls[0].Function.Name != r.planTool.Name {
+						return nil, fmt.Errorf("unexpected tool call: %s", msg.ToolCalls[0].Function.Name)
+					}
 
-			if isResponse {
-				action := adk.NewBreakLoopAction(r.Name(ctx))
-				generator.Send(&adk.AgentEvent{Action: action})
-				return
-			}
+					plan := r.newPlan(ctx)
+					if err = plan.UnmarshalJSON([]byte(msg.ToolCalls[0].Function.Arguments)); err != nil {
+						return nil, fmt.Errorf("unmarshal plan error: %w", err)
+					}
 
-			planMsg, err = schema.ConcatMessages(chunks)
-			if err != nil {
-				generator.Send(&adk.AgentEvent{Err: err})
-				return
-			}
+					adk.AddSessionValue(ctx, PlanSessionKey, plan)
 
-			if len(planMsg.ToolCalls) == 0 {
-				generator.Send(&adk.AgentEvent{Err: errors.New("no tool call")})
-				return
-			}
-		} else {
-			var msg adk.Message
-			msg, err = r.chatModel.Generate(ctx, msgs, callOpt)
-			if err != nil {
-				generator.Send(&adk.AgentEvent{Err: err})
-				return
-			}
+					return plan, nil
+				}),
+			)
 
-			if len(msg.ToolCalls) > 0 {
-				output := schema.AssistantMessage(msg.ToolCalls[0].Function.Arguments, nil)
-				event := adk.EventFromMessage(output, nil, schema.Assistant, "")
-				generator.Send(event)
-
-				if len(msg.ToolCalls) > 0 && msg.ToolCalls[0].Function.Name == r.respondTool.Name {
-					action := adk.NewExitAction()
-					generator.Send(&adk.AgentEvent{Action: action})
-					return
-				}
-
-				planMsg = msg
-			} else {
-				generator.Send(&adk.AgentEvent{Err: errors.New("no tool call")})
-				return
-			}
-		}
-
-		// handle plan tool call
-		if planMsg.ToolCalls[0].Function.Name != r.planTool.Name {
-			errMsg := fmt.Sprintf("unexpected tool call: %s", planMsg.ToolCalls[0].Function.Name)
-			generator.Send(&adk.AgentEvent{Err: errors.New(errMsg)})
-			return
-		}
-
-		plan_ := r.newPlan(ctx)
-		err = plan_.UnmarshalJSON([]byte(planMsg.ToolCalls[0].Function.Arguments))
+		runnable, err := c.Compile(ctx, compose.WithGraphName(r.Name(ctx)))
 		if err != nil {
-			err = fmt.Errorf("unmarshal plan error: %w", err)
 			generator.Send(&adk.AgentEvent{Err: err})
 			return
 		}
 
-		adk.AddSessionValue(ctx, PlanSessionKey, plan_)
+		_, err = runnable.Stream(ctx, struct{}{}, compose.WithChatModelOption(callOpt))
+		if err != nil {
+			generator.Send(&adk.AgentEvent{Err: err})
+			return
+		}
 	}()
 
 	return iterator
