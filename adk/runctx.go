@@ -229,8 +229,8 @@ func ClearRunCtx(ctx context.Context) context.Context {
 	return context.WithValue(ctx, runCtxKey{}, nil)
 }
 
-func ctxWithNewRunCtx(ctx context.Context) context.Context {
-	return setRunCtx(ctx, &runContext{Session: newRunSession()})
+func ctxWithNewRunCtx(ctx context.Context, input *AgentInput) context.Context {
+	return setRunCtx(ctx, &runContext{Session: newRunSession(), RootInput: input})
 }
 
 func getSession(ctx context.Context) *runSession {

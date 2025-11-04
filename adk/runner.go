@@ -69,8 +69,7 @@ func (r *Runner) Run(ctx context.Context, messages []Message,
 		EnableStreaming: r.enableStreaming,
 	}
 
-	ctx, _ = initRunCtx(ctx, fa.Name(ctx), input)
-	ctx = AppendAddressSegment(ctx, AddressSegmentAgent, fa.Name(ctx))
+	ctx = ctxWithNewRunCtx(ctx, input)
 
 	AddSessionValues(ctx, o.sessionValues)
 
@@ -147,8 +146,6 @@ func (r *Runner) resume(ctx context.Context, checkPointID string, resumeData map
 	}
 
 	fa := toFlowAgent(ctx, r.a)
-	ctx, resumeInfo = buildResumeInfo(ctx, fa.Name(ctx), resumeInfo)
-
 	aIter := fa.Resume(ctx, resumeInfo, opts...)
 	if r.store == nil {
 		return aIter, nil
