@@ -3,6 +3,9 @@ package core
 import (
 	"context"
 	"fmt"
+	"reflect"
+
+	"github.com/google/uuid"
 )
 
 type CheckPointStore interface {
@@ -68,7 +71,7 @@ func Interrupt(ctx context.Context, info any, state any, subContexts []*Interrup
 	if len(subContexts) == 0 {
 		myPoint.IsRootCause = true
 		return &InterruptSignal{
-			ID:            addr.String(),
+			ID:            uuid.NewString(),
 			Address:       addr,
 			InterruptInfo: myPoint,
 			InterruptState: InterruptState{
@@ -79,7 +82,7 @@ func Interrupt(ctx context.Context, info any, state any, subContexts []*Interrup
 	}
 
 	return &InterruptSignal{
-		ID:            addr.String(),
+		ID:            uuid.NewString(),
 		Address:       addr,
 		InterruptInfo: myPoint,
 		InterruptState: InterruptState{
@@ -105,6 +108,46 @@ type InterruptCtx struct {
 	// Parent points to the context of the parent component in the interrupt chain.
 	// It is nil for the top-level interrupt.
 	Parent *InterruptCtx
+}
+
+func (ic *InterruptCtx) EqualsWithoutID(other *InterruptCtx) bool {
+	if ic == nil && other == nil {
+		return true
+	}
+
+	if ic == nil || other == nil {
+		return false
+	}
+
+	if !ic.Address.Equals(other.Address) {
+		return false
+	}
+
+	if ic.IsRootCause != other.IsRootCause {
+		return false
+	}
+
+	if ic.Info != nil || other.Info != nil {
+		if ic.Info == nil || other.Info == nil {
+			return false
+		}
+
+		if !reflect.DeepEqual(ic.Info, other.Info) {
+			return false
+		}
+	}
+
+	if ic.Parent != nil || other.Parent != nil {
+		if ic.Parent == nil || other.Parent == nil {
+			return false
+		}
+
+		if !ic.Parent.EqualsWithoutID(other.Parent) {
+			return false
+		}
+	}
+
+	return true
 }
 
 // FromInterruptContexts converts a list of user-facing InterruptCtx objects into an
