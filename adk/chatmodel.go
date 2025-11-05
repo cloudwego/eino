@@ -34,6 +34,7 @@ import (
 	"github.com/cloudwego/eino/components/prompt"
 	"github.com/cloudwego/eino/components/tool"
 	"github.com/cloudwego/eino/compose"
+	"github.com/cloudwego/eino/internal/core"
 	"github.com/cloudwego/eino/internal/safe"
 	"github.com/cloudwego/eino/schema"
 	ub "github.com/cloudwego/eino/utils/callbacks"
@@ -343,10 +344,15 @@ type cbHandler struct {
 	store                   *mockStore
 	returnDirectlyToolEvent atomic.Value
 	ctx                     context.Context
+	addr                    Address
 }
 
 func (h *cbHandler) onChatModelEnd(ctx context.Context,
 	_ *callbacks.RunInfo, output *model.CallbackOutput) context.Context {
+	addr := core.GetCurrentAddress(ctx)
+	if len(addr) != len(h.addr)+2 || !addr[:len(h.addr)].Equals(h.addr) {
+		return ctx
+	}
 
 	event := EventFromMessage(output.Message, nil, schema.Assistant, "")
 	h.Send(event)
@@ -355,6 +361,10 @@ func (h *cbHandler) onChatModelEnd(ctx context.Context,
 
 func (h *cbHandler) onChatModelEndWithStreamOutput(ctx context.Context,
 	_ *callbacks.RunInfo, output *schema.StreamReader[*model.CallbackOutput]) context.Context {
+	addr := core.GetCurrentAddress(ctx)
+	if len(addr) != len(h.addr)+2 || !addr[:len(h.addr)].Equals(h.addr) {
+		return ctx
+	}
 
 	cvt := func(in *model.CallbackOutput) (Message, error) {
 		return in.Message, nil
@@ -368,6 +378,10 @@ func (h *cbHandler) onChatModelEndWithStreamOutput(ctx context.Context,
 
 func (h *cbHandler) onToolEnd(ctx context.Context,
 	runInfo *callbacks.RunInfo, output *tool.CallbackOutput) context.Context {
+	addr := core.GetCurrentAddress(ctx)
+	if len(addr) != len(h.addr)+3 || !addr[:len(h.addr)].Equals(h.addr) {
+		return ctx
+	}
 
 	toolCallID := compose.GetToolCallID(ctx)
 	msg := schema.ToolMessage(output.Response, toolCallID, schema.WithToolName(runInfo.Name))
@@ -388,6 +402,10 @@ func (h *cbHandler) onToolEnd(ctx context.Context,
 
 func (h *cbHandler) onToolEndWithStreamOutput(ctx context.Context,
 	runInfo *callbacks.RunInfo, output *schema.StreamReader[*tool.CallbackOutput]) context.Context {
+	addr := core.GetCurrentAddress(ctx)
+	if len(addr) != len(h.addr)+3 || !addr[:len(h.addr)].Equals(h.addr) {
+		return ctx
+	}
 
 	toolCallID := compose.GetToolCallID(ctx)
 	cvt := func(in *tool.CallbackOutput) (Message, error) {
@@ -414,11 +432,19 @@ func (h *cbHandler) sendReturnDirectlyToolEvent() {
 }
 
 func (h *cbHandler) onToolsNodeEnd(ctx context.Context, _ *callbacks.RunInfo, _ []*schema.Message) context.Context {
+	addr := core.GetCurrentAddress(ctx)
+	if len(addr) != len(h.addr)+2 || !addr[:len(h.addr)].Equals(h.addr) {
+		return ctx
+	}
 	h.sendReturnDirectlyToolEvent()
 	return ctx
 }
 
 func (h *cbHandler) onToolsNodeEndWithStreamOutput(ctx context.Context, _ *callbacks.RunInfo, _ *schema.StreamReader[[]*schema.Message]) context.Context {
+	addr := core.GetCurrentAddress(ctx)
+	if len(addr) != len(h.addr)+2 || !addr[:len(h.addr)].Equals(h.addr) {
+		return ctx
+	}
 	h.sendReturnDirectlyToolEvent()
 	return ctx
 }
@@ -434,6 +460,10 @@ func init() {
 
 func (h *cbHandler) onGraphError(ctx context.Context,
 	_ *callbacks.RunInfo, err error) context.Context {
+	addr := core.GetCurrentAddress(ctx)
+	if len(addr) != len(h.addr)+1 || !addr[:len(h.addr)].Equals(h.addr) {
+		return ctx
+	}
 
 	info, ok := compose.ExtractInterruptInfo(err)
 	if !ok {
@@ -471,6 +501,7 @@ func genReactCallbacks(ctx context.Context, agentName string,
 
 	h := &cbHandler{
 		ctx:            ctx,
+		addr:           core.GetCurrentAddress(ctx),
 		AsyncGenerator: generator, agentName: agentName, store: store, enableStreaming: enableStreaming}
 
 	cmHandler := &ub.ModelCallbackHandler{
