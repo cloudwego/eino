@@ -897,3 +897,114 @@ func TestConcatToolCalls(t *testing.T) {
 		assert.EqualValues(t, expectedToolCall, tc)
 	})
 }
+
+func TestFormatMultiContent(t *testing.T) {
+	vs := map[string]any{
+		"name": "eino",
+		"url":  "https://example.com/img.png",
+		"id":   "42",
+	}
+
+	t.Run("empty input", func(t *testing.T) {
+		out, err := formatMultiContent(nil, vs, FString)
+		assert.NoError(t, err)
+		assert.Nil(t, out)
+	})
+
+	t.Run("render text and urls with FString", func(t *testing.T) {
+		in := []ChatMessagePart{
+			{Type: ChatMessagePartTypeText, Text: "hello {name}"},
+			{Type: ChatMessagePartTypeImageURL, ImageURL: &ChatMessageImageURL{URL: "{url}"}},
+			{Type: ChatMessagePartTypeAudioURL, AudioURL: &ChatMessageAudioURL{URL: "http://audio/{id}.wav"}},
+			{Type: ChatMessagePartTypeVideoURL, VideoURL: &ChatMessageVideoURL{URL: "http://video/{id}.mp4"}},
+			{Type: ChatMessagePartTypeFileURL, FileURL: &ChatMessageFileURL{URL: "http://file/{id}.txt"}},
+		}
+
+		out, err := formatMultiContent(in, vs, FString)
+		assert.NoError(t, err)
+		if assert.Len(t, out, len(in)) {
+			assert.Equal(t, "hello eino", out[0].Text)
+			assert.Equal(t, "https://example.com/img.png", out[1].ImageURL.URL)
+			assert.Equal(t, "http://audio/42.wav", out[2].AudioURL.URL)
+			assert.Equal(t, "http://video/42.mp4", out[3].VideoURL.URL)
+			assert.Equal(t, "http://file/42.txt", out[4].FileURL.URL)
+		}
+	})
+
+	t.Run("nil nested pointer should be skipped", func(t *testing.T) {
+		in := []ChatMessagePart{
+			{Type: ChatMessagePartTypeImageURL, ImageURL: nil},
+			{Type: ChatMessagePartTypeAudioURL, AudioURL: nil},
+			{Type: ChatMessagePartTypeVideoURL, VideoURL: nil},
+			{Type: ChatMessagePartTypeFileURL, FileURL: nil},
+		}
+		out, err := formatMultiContent(in, vs, FString)
+		assert.NoError(t, err)
+		assert.Equal(t, in, out)
+	})
+
+	t.Run("missing var should error in GoTemplate", func(t *testing.T) {
+		in := []ChatMessagePart{{Type: ChatMessagePartTypeText, Text: "hi {{.who}}"}}
+		_, err := formatMultiContent(in, map[string]any{"name": "x"}, GoTemplate)
+		assert.Error(t, err)
+	})
+
+}
+
+func TestFormatUserInputMultiContent(t *testing.T) {
+	makeStrPtr := func(s string) *string { return &s }
+
+	vs := map[string]any{
+		"x":    "world",
+		"img":  "https://example.com/i.png",
+		"b64":  "YmFzZTY0",
+		"aid":  "99",
+		"vid":  "77",
+		"file": "abc",
+	}
+
+	t.Run("empty input", func(t *testing.T) {
+		out, err := formatUserInputMultiContent(nil, vs, FString)
+		assert.NoError(t, err)
+		assert.Nil(t, out)
+	})
+
+	t.Run("render text and both URL/Base64 for each type", func(t *testing.T) {
+		in := []MessageInputPart{
+			{Type: ChatMessagePartTypeText, Text: "hello {x}"},
+			{Type: ChatMessagePartTypeImageURL, Image: &MessageInputImage{MessagePartCommon: MessagePartCommon{URL: makeStrPtr("{img}"), Base64Data: makeStrPtr("{b64}")}}},
+			{Type: ChatMessagePartTypeAudioURL, Audio: &MessageInputAudio{MessagePartCommon: MessagePartCommon{URL: makeStrPtr("http://a/{aid}.wav"), Base64Data: makeStrPtr("{b64}")}}},
+			{Type: ChatMessagePartTypeVideoURL, Video: &MessageInputVideo{MessagePartCommon: MessagePartCommon{URL: makeStrPtr("http://v/{vid}.mp4"), Base64Data: makeStrPtr("{b64}")}}},
+			{Type: ChatMessagePartTypeFileURL, File: &MessageInputFile{MessagePartCommon: MessagePartCommon{URL: makeStrPtr("/f/{file}.txt"), Base64Data: makeStrPtr("{b64}")}}},
+		}
+
+		out, err := formatUserInputMultiContent(in, vs, FString)
+		assert.NoError(t, err)
+		if assert.Len(t, out, len(in)) {
+			assert.Equal(t, "hello world", out[0].Text)
+			assert.Equal(t, "https://example.com/i.png", *out[1].Image.URL)
+			assert.Equal(t, "YmFzZTY0", *out[1].Image.Base64Data)
+			assert.Equal(t, "http://a/99.wav", *out[2].Audio.URL)
+			assert.Equal(t, "YmFzZTY0", *out[2].Audio.Base64Data)
+			assert.Equal(t, "http://v/77.mp4", *out[3].Video.URL)
+			assert.Equal(t, "YmFzZTY0", *out[3].Video.Base64Data)
+			assert.Equal(t, "/f/abc.txt", *out[4].File.URL)
+			assert.Equal(t, "YmFzZTY0", *out[4].File.Base64Data)
+		}
+	})
+
+	t.Run("empty string pointer should not be formatted", func(t *testing.T) {
+		empty := ""
+		in := []MessageInputPart{
+			{Type: ChatMessagePartTypeImageURL, Image: &MessageInputImage{MessagePartCommon: MessagePartCommon{URL: &empty, Base64Data: &empty}}},
+		}
+		out, err := formatUserInputMultiContent(in, vs, FString)
+		assert.NoError(t, err)
+		if assert.Len(t, out, 1) {
+			assert.NotNil(t, out[0].Image.URL)
+			assert.NotNil(t, out[0].Image.Base64Data)
+			assert.Equal(t, "", *out[0].Image.URL)
+			assert.Equal(t, "", *out[0].Image.Base64Data)
+		}
+	})
+}

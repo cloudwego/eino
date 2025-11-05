@@ -602,58 +602,169 @@ func (m *Message) Format(_ context.Context, vs map[string]any, formatType Format
 	copied := *m
 	copied.Content = c
 
-	if len(m.MultiContent) != 0 {
-		copied.MultiContent = make([]ChatMessagePart, len(m.MultiContent))
-		copy(copied.MultiContent, m.MultiContent)
+	copied.MultiContent, err = formatMultiContent(m.MultiContent, vs, formatType)
+	if err != nil {
+		return nil, err
 	}
 
-	for i, mc := range copied.MultiContent {
+	copied.UserInputMultiContent, err = formatUserInputMultiContent(m.UserInputMultiContent, vs, formatType)
+	if err != nil {
+		return nil, err
+	}
+
+	return []*Message{&copied}, nil
+}
+
+func formatMultiContent(multiContent []ChatMessagePart, vs map[string]any, formatType FormatType) ([]ChatMessagePart, error) {
+	if len(multiContent) == 0 {
+		return multiContent, nil
+	}
+
+	copiedMC := make([]ChatMessagePart, len(multiContent))
+	copy(copiedMC, multiContent)
+
+	for i, mc := range copiedMC {
 		switch mc.Type {
 		case ChatMessagePartTypeText:
 			nmc, err := formatContent(mc.Text, vs, formatType)
 			if err != nil {
-				return nil, err
+				return copiedMC, err
 			}
-			copied.MultiContent[i].Text = nmc
+			copiedMC[i].Text = nmc
 		case ChatMessagePartTypeImageURL:
 			if mc.ImageURL == nil {
 				continue
 			}
 			url, err := formatContent(mc.ImageURL.URL, vs, formatType)
 			if err != nil {
-				return nil, err
+				return copiedMC, err
 			}
-			copied.MultiContent[i].ImageURL.URL = url
+			copiedMC[i].ImageURL.URL = url
 		case ChatMessagePartTypeAudioURL:
 			if mc.AudioURL == nil {
 				continue
 			}
 			url, err := formatContent(mc.AudioURL.URL, vs, formatType)
 			if err != nil {
-				return nil, err
+				return copiedMC, err
 			}
-			copied.MultiContent[i].AudioURL.URL = url
+			copiedMC[i].AudioURL.URL = url
 		case ChatMessagePartTypeVideoURL:
 			if mc.VideoURL == nil {
 				continue
 			}
 			url, err := formatContent(mc.VideoURL.URL, vs, formatType)
 			if err != nil {
-				return nil, err
+				return copiedMC, err
 			}
-			copied.MultiContent[i].VideoURL.URL = url
+			copiedMC[i].VideoURL.URL = url
 		case ChatMessagePartTypeFileURL:
 			if mc.FileURL == nil {
 				continue
 			}
 			url, err := formatContent(mc.FileURL.URL, vs, formatType)
 			if err != nil {
-				return nil, err
+				return copiedMC, err
 			}
-			copied.MultiContent[i].FileURL.URL = url
+			copiedMC[i].FileURL.URL = url
 		}
 	}
-	return []*Message{&copied}, nil
+
+	return copiedMC, nil
+}
+
+func formatUserInputMultiContent(userInputMultiContent []MessageInputPart, vs map[string]any, formatType FormatType) ([]MessageInputPart, error) {
+	if len(userInputMultiContent) == 0 {
+		return userInputMultiContent, nil
+	}
+
+	copiedUIMC := make([]MessageInputPart, len(userInputMultiContent))
+	copy(copiedUIMC, userInputMultiContent)
+
+	for i, uimc := range copiedUIMC {
+		switch uimc.Type {
+		case ChatMessagePartTypeText:
+			text, err := formatContent(uimc.Text, vs, formatType)
+			if err != nil {
+				return copiedUIMC, err
+			}
+			copiedUIMC[i].Text = text
+		case ChatMessagePartTypeImageURL:
+			if uimc.Image == nil {
+				continue
+			}
+			if uimc.Image.URL != nil && *uimc.Image.URL != "" {
+				url, err := formatContent(*uimc.Image.URL, vs, formatType)
+				if err != nil {
+					return copiedUIMC, err
+				}
+				copiedUIMC[i].Image.URL = &url
+			}
+			if uimc.Image.Base64Data != nil && *uimc.Image.Base64Data != "" {
+				base64data, err := formatContent(*uimc.Image.Base64Data, vs, formatType)
+				if err != nil {
+					return copiedUIMC, err
+				}
+				copiedUIMC[i].Image.Base64Data = &base64data
+			}
+		case ChatMessagePartTypeAudioURL:
+			if uimc.Audio == nil {
+				continue
+			}
+			if uimc.Audio.URL != nil && *uimc.Audio.URL != "" {
+				url, err := formatContent(*uimc.Audio.URL, vs, formatType)
+				if err != nil {
+					return copiedUIMC, err
+				}
+				copiedUIMC[i].Audio.URL = &url
+			}
+			if uimc.Audio.Base64Data != nil && *uimc.Audio.Base64Data != "" {
+				base64data, err := formatContent(*uimc.Audio.Base64Data, vs, formatType)
+				if err != nil {
+					return copiedUIMC, err
+				}
+				copiedUIMC[i].Audio.Base64Data = &base64data
+			}
+		case ChatMessagePartTypeVideoURL:
+			if uimc.Video == nil {
+				continue
+			}
+			if uimc.Video.URL != nil && *uimc.Video.URL != "" {
+				url, err := formatContent(*uimc.Video.URL, vs, formatType)
+				if err != nil {
+					return copiedUIMC, err
+				}
+				copiedUIMC[i].Video.URL = &url
+			}
+			if uimc.Video.Base64Data != nil && *uimc.Video.Base64Data != "" {
+				base64data, err := formatContent(*uimc.Video.Base64Data, vs, formatType)
+				if err != nil {
+					return copiedUIMC, err
+				}
+				copiedUIMC[i].Video.Base64Data = &base64data
+			}
+		case ChatMessagePartTypeFileURL:
+			if uimc.File == nil {
+				continue
+			}
+			if uimc.File.URL != nil && *uimc.File.URL != "" {
+				url, err := formatContent(*uimc.File.URL, vs, formatType)
+				if err != nil {
+					return copiedUIMC, err
+				}
+				copiedUIMC[i].File.URL = &url
+			}
+			if uimc.File.Base64Data != nil && *uimc.File.Base64Data != "" {
+				base64data, err := formatContent(*uimc.File.Base64Data, vs, formatType)
+				if err != nil {
+					return copiedUIMC, err
+				}
+				copiedUIMC[i].File.Base64Data = &base64data
+			}
+		}
+	}
+
+	return copiedUIMC, nil
 }
 
 // String returns the string representation of the message.
