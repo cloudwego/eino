@@ -110,6 +110,28 @@ func defaultGenModelInput(ctx context.Context, instruction string, input *AgentI
 	return msgs, nil
 }
 
+type ChatModelAgentState struct {
+	History []Message
+}
+
+type ChatModelInput struct {
+	Instruction string
+	Inputs      []Message
+	Tools       *schema.ToolInfo
+}
+
+type ChatModelOutput struct {
+	Output Message
+}
+
+type ChatModelEndpoint func(context.Context, *ChatModelInput) *ChatModelOutput
+
+type AgentMiddleware struct {
+	Tools           []tool.BaseTool
+	BeforeChatModel func(*ChatModelAgentState)
+	WrapChatModel   func(ChatModelEndpoint) ChatModelEndpoint
+}
+
 type ChatModelAgentConfig struct {
 	// Name of the agent. Better be unique across all agents.
 	Name string
@@ -126,10 +148,6 @@ type ChatModelAgentConfig struct {
 	Model model.ToolCallingChatModel
 
 	ToolsConfig ToolsConfig
-
-	// GenModelInput transforms instructions and input messages into the model's input format.
-	// Optional. Defaults to defaultGenModelInput which combines instruction and messages.
-	GenModelInput GenModelInput
 
 	// Exit defines the tool used to terminate the agent process.
 	// Optional. If nil, no Exit Action will be generated.
