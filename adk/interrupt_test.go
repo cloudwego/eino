@@ -1512,6 +1512,162 @@ func TestChatModelParallelToolInterruptAndResume(t *testing.T) {
 	assert.NotNil(t, interruptEvent)
 }
 
+// TestNestedChatModelAgentWithAgentTool verifies that the shouldFire method correctly prevents
+// duplicate event firing in nested ChatModelAgent scenarios (ChatModelAgent -> AgentTool -> ChatModelAgent).
+// This ensures that only the inner agent's cbHandler fires, not the outer agent's.
+func TestNestedChatModelAgentWithAgentTool(t *testing.T) {
+	ctx := context.Background()
+
+	// Create an interruptible tool for the inner agent
+	innerTool := &myStatefulTool{name: "innerTool", t: t}
+
+	// Create the inner ChatModelAgent that will be wrapped by AgentTool
+	innerAgent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+		Name:        "InnerAgent",
+		Description: "Inner agent with interruptible tool",
+		Model: &myModel{
+			messages: []*schema.Message{
+				schema.AssistantMessage("", []schema.ToolCall{
+					{ID: "1", Function: schema.FunctionCall{Name: "innerTool", Arguments: "{}"}},
+				}),
+				schema.AssistantMessage("inner agent completed", nil),
+			},
+		},
+		ToolsConfig: ToolsConfig{
+			ToolsNodeConfig: compose.ToolsNodeConfig{
+				Tools: []tool.BaseTool{innerTool},
+			},
+		},
+	})
+	assert.NoError(t, err)
+
+	// Wrap the inner agent in an AgentTool
+	agentTool := NewAgentTool(ctx, innerAgent)
+
+	// Create the outer ChatModelAgent that uses the AgentTool
+	outerAgent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+		Name:        "OuterAgent",
+		Description: "Outer agent with AgentTool containing inner agent",
+		Model: &myModel{
+			messages: []*schema.Message{
+				schema.AssistantMessage("", []schema.ToolCall{
+					{ID: "1", Function: schema.FunctionCall{Name: "InnerAgent", Arguments: "{}"}},
+				}),
+				schema.AssistantMessage("outer agent completed", nil),
+			},
+		},
+		ToolsConfig: ToolsConfig{
+			ToolsNodeConfig: compose.ToolsNodeConfig{
+				Tools: []tool.BaseTool{agentTool},
+			},
+		},
+	})
+	assert.NoError(t, err)
+
+	runner := NewRunner(ctx, RunnerConfig{
+		Agent:           outerAgent,
+		CheckPointStore: newMyStore(),
+	})
+
+	// Run the query - this should trigger the nested agent structure
+	iter := runner.Query(ctx, "start", WithCheckPointID("nested-agent-test-1"))
+
+	// Collect all events to verify no duplicates
+	var allEvents []*AgentEvent
+	var interruptEvent *AgentEvent
+
+	for {
+		event, ok := iter.Next()
+		if !ok {
+			break
+		}
+
+		if event.Action != nil && event.Action.Interrupted != nil {
+			assert.Nil(t, interruptEvent)
+			interruptEvent = event
+		}
+
+		allEvents = append(allEvents, event)
+	}
+
+	if interruptEvent == nil {
+		t.Fatal("expected an interrupt event")
+	}
+
+	// Verify we got exactly one interrupt event (not duplicated)
+	assert.NotNil(t, interruptEvent, "should have an interrupt event")
+	assert.Equal(t, 1, len(interruptEvent.Action.Interrupted.InterruptContexts),
+		"should have exactly one interrupt context")
+
+	// Verify the interrupt comes from the inner tool, not duplicated
+	interruptCtx := interruptEvent.Action.Interrupted.InterruptContexts[0]
+	assert.True(t, interruptCtx.IsRootCause, "interrupt should be root cause")
+	assert.Equal(t, "interrupt from innerTool", interruptCtx.Info)
+
+	// Verify the address path shows the correct nested structure
+	expectedAddress := Address{
+		{Type: AddressSegmentAgent, ID: "OuterAgent"},
+		{Type: AddressSegmentTool, ID: "InnerAgent", SubID: "1"},
+		{Type: AddressSegmentAgent, ID: "InnerAgent"},
+		{Type: AddressSegmentTool, ID: "innerTool", SubID: "1"},
+	}
+	assert.Equal(t, expectedAddress, interruptCtx.Address,
+		"interrupt address should show correct nested structure")
+
+	// Verify no duplicate events by checking agent names in events
+	var agentNames []string
+	for _, event := range allEvents {
+		if event.AgentName != "" {
+			agentNames = append(agentNames, event.AgentName)
+		}
+	}
+
+	// Should only have events from the outer agent (the inner agent's events should be handled
+	// by the AgentTool and not duplicated by the outer agent's cbHandler)
+	for _, name := range agentNames {
+		assert.Equal(t, "OuterAgent", name,
+			"all events should come from OuterAgent, not duplicated from InnerAgent")
+	}
+
+	// Now resume the interrupt
+	interruptID := interruptCtx.ID
+	iter, err = runner.TargetedResume(ctx, "nested-agent-test-1", map[string]any{
+		interruptID: "resume inner tool",
+	})
+	assert.NoError(t, err)
+
+	// Collect final events after resume
+	var finalEvents []*AgentEvent
+	for {
+		event, ok := iter.Next()
+		if !ok {
+			break
+		}
+		finalEvents = append(finalEvents, event)
+	}
+
+	// Verify completion events
+	assert.Greater(t, len(finalEvents), 0, "should have completion events after resume")
+
+	// Check that we get the expected completion messages
+	var foundInnerCompletion, foundOuterCompletion bool
+	for _, event := range finalEvents {
+		if event.Output != nil && event.Output.MessageOutput != nil {
+			if event.Output.MessageOutput.Message != nil {
+				content := event.Output.MessageOutput.Message.Content
+				if content == "inner agent completed" {
+					foundInnerCompletion = true
+				} else if content == "outer agent completed" {
+					foundOuterCompletion = true
+				}
+			}
+		}
+	}
+
+	assert.True(t, foundInnerCompletion, "should have inner agent completion")
+	assert.True(t, foundOuterCompletion, "should have outer agent completion")
+}
+
 // consumeUntilInterrupt consumes events from the iterator until an interrupt is found or it's exhausted.
 func consumeUntilInterrupt(iter *AsyncIterator[*AgentEvent]) (normalEvents []*AgentEvent, interruptEvent *AgentEvent) {
 	for {
