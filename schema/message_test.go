@@ -908,7 +908,7 @@ func TestFormatMultiContent(t *testing.T) {
 	t.Run("empty input", func(t *testing.T) {
 		out, err := formatMultiContent(nil, vs, FString)
 		assert.NoError(t, err)
-		assert.Nil(t, out)
+		assert.Equal(t, []ChatMessagePart{}, out)
 	})
 
 	t.Run("render text and urls with FString", func(t *testing.T) {
@@ -966,7 +966,7 @@ func TestFormatUserInputMultiContent(t *testing.T) {
 	t.Run("empty input", func(t *testing.T) {
 		out, err := formatUserInputMultiContent(nil, vs, FString)
 		assert.NoError(t, err)
-		assert.Nil(t, out)
+		assert.Equal(t, []MessageInputPart{}, out)
 	})
 
 	t.Run("render text and both URL/Base64 for each type", func(t *testing.T) {
