@@ -252,6 +252,8 @@ type ChatMessageImageURL struct {
 	// Detail is the quality of the image url.
 	Detail ImageURLDetail `json:"detail,omitempty"`
 
+	Base64Data *string `json:"base64data,omitempty"`
+
 	// MIMEType is the mime type of the image, eg. "image/png".
 	MIMEType string `json:"mime_type,omitempty"`
 	// Extra is used to store extra information for the image url.
