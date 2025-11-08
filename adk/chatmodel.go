@@ -608,8 +608,8 @@ func (a *ChatModelAgent) buildRunFunc(ctx context.Context) runFunc {
 				compose.WithMaxRunSteps(math.MaxInt))
 
 			runnable, err_ := g.Compile(ctx, compileOptions...)
-			if err != nil {
-				generator.Send(&AgentEvent{AgentName: a.name, Err: err})
+			if err_ != nil {
+				generator.Send(&AgentEvent{AgentName: a.name, Err: err_})
 				return
 			}
 
