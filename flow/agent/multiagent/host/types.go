@@ -76,7 +76,7 @@ type MultiAgentConfig struct {
 
 	Name         string // the name of the host multi-agent
 	HostNodeName string // the name of the host node in the graph, default is "host"
-	// StreamOutputHandler is a function to determine whether the model's streaming output contains tool calls.
+	// StreamToolCallChecker is a function to determine whether the model's streaming output contains tool calls.
 	// Different models have different ways of outputting tool calls in streaming mode:
 	// - Some models (like OpenAI) output tool calls directly
 	// - Others (like Claude) output text first, then tool calls
