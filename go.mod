@@ -3,6 +3,7 @@ module github.com/cloudwego/eino
 go 1.18
 
 require (
+	github.com/bytedance/mockey v1.2.16
 	github.com/bytedance/sonic v1.14.1
 	github.com/eino-contrib/jsonschema v1.0.2
 	github.com/getkin/kin-openapi v0.118.0
