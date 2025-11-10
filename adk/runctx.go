@@ -186,6 +186,9 @@ func setRunCtx(ctx context.Context, runCtx *runContext) context.Context {
 	return context.WithValue(ctx, runCtxKey{}, runCtx)
 }
 
+// laneKey is a private context key used to pass parallel lane information down the call stack.
+type laneKey struct{}
+
 func initRunCtx(ctx context.Context, agentName string, input *AgentInput) (context.Context, *runContext) {
 	runCtx := getRunCtx(ctx)
 	if runCtx != nil {
@@ -194,7 +197,22 @@ func initRunCtx(ctx context.Context, agentName string, input *AgentInput) (conte
 		runCtx = &runContext{Session: newRunSession()}
 	}
 
-	runCtx.RunPath = append(runCtx.RunPath, RunStep{agentName})
+	step := RunStep{agentName: agentName}
+
+	// Check the context for explicit lanes passed down from a parallel orchestrator.
+	if lanes, ok := ctx.Value(laneKey{}).([]string); ok {
+		step.lanes = lanes
+	} else {
+		// If no explicit lanes are found, this is a sequential step.
+		// It should inherit the lanes from its predecessor.
+		if len(runCtx.RunPath) > 0 {
+			step.lanes = runCtx.RunPath[len(runCtx.RunPath)-1].lanes
+		}
+		// If it's the very first step (len(runCtx.RunPath) == 0), lanes will remain nil, which is correct.
+	}
+
+	runCtx.RunPath = append(runCtx.RunPath, step)
+
 	if runCtx.isRoot() && input != nil {
 		runCtx.RootInput = input
 	}
@@ -215,7 +233,12 @@ func updateRunPathOnly(ctx context.Context, agentNames ...string) context.Contex
 	}
 
 	for _, agentName := range agentNames {
-		runCtx.RunPath = append(runCtx.RunPath, RunStep{agentName})
+		step := RunStep{agentName: agentName}
+		// A sequential step inherits the lanes from its predecessor.
+		if len(runCtx.RunPath) > 0 {
+			step.lanes = runCtx.RunPath[len(runCtx.RunPath)-1].lanes
+		}
+		runCtx.RunPath = append(runCtx.RunPath, step)
 	}
 
 	return setRunCtx(ctx, runCtx)

@@ -161,13 +161,30 @@ func (a *flowAgent) getAgent(ctx context.Context, name string) *flowAgent {
 	return nil
 }
 
-func belongToRunPath(eventRunPath []RunStep, runPath []RunStep) bool {
-	if len(runPath) < len(eventRunPath) {
+func belongToRunPath(eventRunPath []RunStep, agentRunPath []RunStep) bool {
+	// This function implements the visibility rules based on the `lanes` field.
+	// An agent can see an event if the agent's `lanes` slice is a prefix
+	// of the event's `lanes` slice.
+
+	if len(agentRunPath) == 0 || len(eventRunPath) == 0 {
+		// Should not happen in practice, but an agent with no path can see nothing,
+		// and any agent can see an event with no path.
+		return len(eventRunPath) == 0
+	}
+
+	// The visibility is determined by the `lanes` of the *current* step.
+	agentLanes := agentRunPath[len(agentRunPath)-1].lanes
+	eventLanes := eventRunPath[len(eventRunPath)-1].lanes
+
+	// The agent can see the event if its lane is an ancestor of (or the same as) the event's lane.
+	// e.g. agentLanes=[] is a prefix of eventLanes=["B"], so a successor can see parallel events.
+	// e.g. agentLanes=["B"] is not a prefix of eventLanes=["C"], so they are isolated.
+	if len(agentLanes) > len(eventLanes) {
 		return false
 	}
 
-	for i, step := range eventRunPath {
-		if !runPath[i].Equals(step) {
+	for i := range agentLanes {
+		if agentLanes[i] != eventLanes[i] {
 			return false
 		}
 	}
