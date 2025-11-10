@@ -30,6 +30,8 @@ type mockAgent struct {
 	name        string
 	description string
 	responses   []*AgentEvent
+	// A custom run function for more complex test cases
+	runFunc func(ctx context.Context, input *AgentInput, options ...AgentRunOption) *AsyncIterator[*AgentEvent]
 }
 
 func (a *mockAgent) Name(_ context.Context) string {
@@ -40,7 +42,11 @@ func (a *mockAgent) Description(_ context.Context) string {
 	return a.description
 }
 
-func (a *mockAgent) Run(_ context.Context, _ *AgentInput, _ ...AgentRunOption) *AsyncIterator[*AgentEvent] {
+func (a *mockAgent) Run(ctx context.Context, input *AgentInput, options ...AgentRunOption) *AsyncIterator[*AgentEvent] {
+	if a.runFunc != nil {
+		return a.runFunc(ctx, input, options...)
+	}
+
 	iterator, generator := NewAsyncIteratorPair[*AgentEvent]()
 
 	go func() {
@@ -335,10 +341,9 @@ func TestLoopAgent(t *testing.T) {
 
 	// Create a loop agent with the mock agent and max iterations set to 3
 	config := &LoopAgentConfig{
-		Name:        "LoopTestAgent",
-		Description: "Test loop agent",
-		SubAgents:   []Agent{agent},
-
+		Name:          "LoopTestAgent",
+		Description:   "Test loop agent",
+		SubAgents:     []Agent{agent},
 		MaxIterations: 3,
 	}
 
@@ -544,4 +549,185 @@ func TestWorkflowAgentUnsupportedMode(t *testing.T) {
 	// No more events
 	_, ok = iterator.Next()
 	assert.False(t, ok)
+}
+
+// TestVisibility is a comprehensive test for the new visibility model.
+func TestVisibility(t *testing.T) {
+	ctx := context.Background()
+
+	// Define Agents
+	startAgent := newMockAgent("StartAgent", "", []*AgentEvent{{
+		AgentName: "StartAgent",
+		Output:    &AgentOutput{MessageOutput: &MessageVariant{Message: schema.AssistantMessage("Event from StartAgent", nil)}},
+	}})
+
+	// Lane A: Nested Parallel Agent
+	nestedB := &mockAgent{
+		name: "NestedB",
+		runFunc: func(ctx context.Context, input *AgentInput, options ...AgentRunOption) *AsyncIterator[*AgentEvent] {
+			iterator, generator := NewAsyncIteratorPair[*AgentEvent]()
+			go func() {
+				defer generator.Close()
+				t.Run("Nested Predecessor Visibility", func(t *testing.T) {
+					history := ""
+					for _, msg := range input.Messages {
+						history += msg.Content
+					}
+					assert.Contains(t, history, "StartAgent")
+				})
+				generator.Send(&AgentEvent{
+					AgentName: "NestedB",
+					Output:    &AgentOutput{MessageOutput: &MessageVariant{Message: schema.AssistantMessage("Output from NestedB", nil)}},
+				})
+			}()
+			return iterator
+		},
+	}
+	nestedC := newMockAgent("NestedC", "", []*AgentEvent{{
+		AgentName: "NestedC",
+		Output:    &AgentOutput{MessageOutput: &MessageVariant{Message: schema.AssistantMessage("Output from NestedC", nil)}},
+	}})
+	laneA, _ := NewParallelAgent(ctx, &ParallelAgentConfig{
+		Name:      "LaneA",
+		SubAgents: []Agent{nestedB, nestedC},
+	})
+
+	// Lane B: Simple Agent that checks visibility
+	laneB := &mockAgent{
+		name: "LaneB",
+		runFunc: func(ctx context.Context, input *AgentInput, options ...AgentRunOption) *AsyncIterator[*AgentEvent] {
+			iterator, generator := NewAsyncIteratorPair[*AgentEvent]()
+			go func() {
+				defer generator.Close()
+				t.Run("Isolation and Predecessor Visibility", func(t *testing.T) {
+					// This agent will check what it can see.
+					// It should see its predecessor (StartAgent) but NOT see anything from LaneA.
+					history := ""
+					for _, msg := range input.Messages {
+						history += msg.Content
+					}
+					assert.Contains(t, history, "Test input")
+					assert.Contains(t, history, "StartAgent")
+					assert.NotContains(t, history, "NestedB")
+					assert.NotContains(t, history, "NestedC")
+				})
+
+				generator.Send(&AgentEvent{
+					AgentName: "LaneB",
+					Output:    &AgentOutput{MessageOutput: &MessageVariant{Message: schema.AssistantMessage("Output from LaneB", nil)}},
+				})
+			}()
+			return iterator
+		},
+	}
+
+	// Successor Agent: Runs after the parallel block
+	successor := &mockAgent{
+		name: "Successor",
+		runFunc: func(ctx context.Context, input *AgentInput, options ...AgentRunOption) *AsyncIterator[*AgentEvent] {
+			iterator, generator := NewAsyncIteratorPair[*AgentEvent]()
+			go func() {
+				defer generator.Close()
+				t.Run("Successor Visibility", func(t *testing.T) {
+					// This agent should see everything from the parallel block and the start agent.
+					history := ""
+					for _, msg := range input.Messages {
+						history += msg.Content
+					}
+					assert.Contains(t, history, "Test input")
+					assert.Contains(t, history, "StartAgent")
+					assert.Contains(t, history, "NestedB")
+					assert.Contains(t, history, "NestedC")
+					assert.Contains(t, history, "LaneB")
+				})
+
+				generator.Send(&AgentEvent{AgentName: "Successor"})
+			}()
+			return iterator
+		},
+	}
+
+	// Main Test Agent: Seq(StartAgent, Par(LaneA, LaneB), Successor)
+	mainParallel, _ := NewParallelAgent(ctx, &ParallelAgentConfig{
+		Name:      "MainParallel",
+		SubAgents: []Agent{laneA, laneB},
+	})
+
+	mainSequential, _ := NewSequentialAgent(ctx, &SequentialAgentConfig{
+		Name:      "MainSequential",
+		SubAgents: []Agent{startAgent, mainParallel, successor},
+	})
+
+	// Run the test
+	input := &AgentInput{
+		Messages: []Message{
+			schema.UserMessage("Test input"),
+		},
+	}
+	iterator := mainSequential.Run(ctx, input)
+
+	// Collect events and check RunPaths
+	var events []*AgentEvent
+	for {
+		event, ok := iterator.Next()
+		if !ok {
+			break
+		}
+		events = append(events, event)
+	}
+
+	t.Run("Inheritance and Path", func(t *testing.T) {
+		// Verify RunPath and Lanes
+		var start, nestedB, nestedC, laneB, successor bool
+		for _, event := range events {
+			switch event.AgentName {
+			case "StartAgent":
+				start = true
+				assert.Equal(t, []RunStep{
+					{agentName: "MainSequential"},
+					{agentName: "StartAgent"},
+				}, event.RunPath)
+			case "NestedB":
+				nestedB = true
+				assert.Equal(t, []RunStep{
+					{agentName: "MainSequential"},
+					{agentName: "StartAgent"},
+					{agentName: "MainParallel"},
+					{agentName: "LaneA", lanes: []string{"LaneA"}},
+					{agentName: "NestedB", lanes: []string{"LaneA", "NestedB"}},
+				}, event.RunPath)
+			case "NestedC":
+				nestedC = true
+				assert.Equal(t, []RunStep{
+					{agentName: "MainSequential"},
+					{agentName: "StartAgent"},
+					{agentName: "MainParallel"},
+					{agentName: "LaneA", lanes: []string{"LaneA"}},
+					{agentName: "NestedC", lanes: []string{"LaneA", "NestedC"}},
+				}, event.RunPath)
+			case "LaneB":
+				laneB = true
+				assert.Equal(t, []RunStep{
+					{agentName: "MainSequential"},
+					{agentName: "StartAgent"},
+					{agentName: "MainParallel"},
+					{agentName: "LaneB", lanes: []string{"LaneB"}},
+				}, event.RunPath)
+			case "Successor":
+				successor = true
+				assert.Equal(t, []RunStep{
+					{agentName: "MainSequential"},
+					{agentName: "StartAgent"},
+					{agentName: "MainParallel"},
+					{agentName: "Successor"},
+				}, event.RunPath)
+			}
+		}
+		// Ensure all key agents ran
+		assert.True(t, start)
+		assert.True(t, nestedB)
+		assert.True(t, nestedC)
+		assert.True(t, laneB)
+		assert.True(t, successor)
+	})
 }

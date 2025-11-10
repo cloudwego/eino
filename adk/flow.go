@@ -161,17 +161,40 @@ func (a *flowAgent) getAgent(ctx context.Context, name string) *flowAgent {
 	return nil
 }
 
-func belongToRunPath(eventRunPath []RunStep, runPath []RunStep) bool {
-	if len(runPath) < len(eventRunPath) {
-		return false
+func belongToRunPath(eventRunPath []RunStep, agentRunPath []RunStep) bool {
+	// This function implements the visibility rules based on the `lanes` field.
+	// An agent can see an event if the lanes of one are a prefix of the lanes of the other.
+	// This symmetric check correctly handles all visibility scenarios:
+	// 1. Predecessor: isPrefix(event.lanes, agent.lanes) -> isPrefix([], ["B"]) -> true
+	// 2. Successor:   isPrefix(agent.lanes, event.lanes) -> isPrefix([], ["B"]) -> true
+	// 3. Isolation:   isPrefix(["B"], ["C"]) == false && isPrefix(["C"], ["B"]) == false -> false
+
+	if len(agentRunPath) == 0 || len(eventRunPath) == 0 {
+		return len(eventRunPath) == 0
 	}
 
-	for i, step := range eventRunPath {
-		if !runPath[i].Equals(step) {
+	// The visibility is determined by the `lanes` of the *current* step.
+	agentLanes := agentRunPath[len(agentRunPath)-1].lanes
+	eventLanes := eventRunPath[len(eventRunPath)-1].lanes
+
+	// Check for prefix in both directions.
+	if len(agentLanes) < len(eventLanes) {
+		return isPrefix(agentLanes, eventLanes)
+	} else {
+		return isPrefix(eventLanes, agentLanes)
+	}
+}
+
+// isPrefix checks if slice a is a prefix of slice b.
+func isPrefix(a, b []string) bool {
+	if len(a) > len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
 			return false
 		}
 	}
-
 	return true
 }
 

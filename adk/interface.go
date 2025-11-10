@@ -156,6 +156,29 @@ type AgentAction struct {
 
 type RunStep struct {
 	agentName string
+	// lanes tracks the parallel execution path hierarchy for visibility control.
+	//
+	// Each string in the slice represents a "lane" of parallel execution.
+	// The lane identifier is the unique name of the agent that starts the parallel path.
+	//
+	// Example flow: Seq(A, Par(B, C), D)
+	// - Agent A: lanes = []
+	// - Agent B: lanes = ["B"]
+	// - Agent C: lanes = ["C"]
+	// - Agent D: lanes = []
+	//
+	// Visibility Rule: An agent can see an event if the `lanes` of one is a prefix
+	// of the `lanes` of the other. This symmetric check enables three key behaviors:
+	//
+	// 1. Predecessor Visibility: An agent sees events from its sequential predecessors.
+	//    (e.g., B sees A because A's lanes `[]` is a prefix of B's lanes `["B"]`)
+	//
+	// 2. Successor Visibility: An agent sees events from parallel predecessors it follows.
+	//    (e.g., D sees B because D's lanes `[]` is a prefix of B's lanes `["B"]`)
+	//
+	// 3. Isolation: Agents in different parallel lanes are isolated from each other.
+	//    (e.g., B does not see C because `["B"]` is not a prefix of `["C"]`, and vice-versa)
+	lanes []string
 }
 
 func init() {
@@ -163,15 +186,30 @@ func init() {
 }
 
 func (r *RunStep) String() string {
-	return r.agentName
+	if len(r.lanes) == 0 {
+		return r.agentName
+	}
+	// The default format for a slice is `[elem1 elem2 ...]`, which is good enough for logging.
+	return fmt.Sprintf("%s%v", r.agentName, r.lanes)
 }
 
 func (r *RunStep) Equals(r1 RunStep) bool {
-	return r.agentName == r1.agentName
+	if r.agentName != r1.agentName {
+		return false
+	}
+	if len(r.lanes) != len(r1.lanes) {
+		return false
+	}
+	for i := range r.lanes {
+		if r.lanes[i] != r1.lanes[i] {
+			return false
+		}
+	}
+	return true
 }
 
 func (r *RunStep) GobEncode() ([]byte, error) {
-	s := &runStepSerialization{AgentName: r.agentName}
+	s := &runStepSerialization{AgentName: r.agentName, Lanes: r.lanes}
 	buf := &bytes.Buffer{}
 	err := gob.NewEncoder(buf).Encode(s)
 	if err != nil {
@@ -187,11 +225,13 @@ func (r *RunStep) GobDecode(b []byte) error {
 		return fmt.Errorf("failed to gob decode RunStep: %w", err)
 	}
 	r.agentName = s.AgentName
+	r.lanes = s.Lanes
 	return nil
 }
 
 type runStepSerialization struct {
 	AgentName string
+	Lanes     []string
 }
 
 type AgentEvent struct {

@@ -429,6 +429,12 @@ func (a *workflowAgent) runParallel(ctx context.Context, generator *AsyncGenerat
 		}
 	}
 
+	// Get the parent lanes once before the loop.
+	var parentLanes []string
+	if len(getRunCtx(ctx).RunPath) > 0 {
+		parentLanes = getRunCtx(ctx).RunPath[len(getRunCtx(ctx).RunPath)-1].lanes
+	}
+
 	for i := range a.subAgents {
 		wg.Add(1)
 		go func(idx int, agent *flowAgent) {
@@ -443,9 +449,15 @@ func (a *workflowAgent) runParallel(ctx context.Context, generator *AsyncGenerat
 
 			var iterator *AsyncIterator[*AgentEvent]
 
+			// Create the context for the child lane.
+			// A defensive copy of parentLanes (`append([]string{}, parentLanes...)`) is crucial
+			// to prevent data races, as each goroutine will be modifying its own copy of the slice.
+			childLanes := append(append([]string{}, parentLanes...), agent.Name(ctx))
+			childCtx := context.WithValue(ctx, laneKey{}, childLanes)
+
 			if _, ok := agentNames[agent.Name(ctx)]; ok {
 				// This branch was interrupted and needs to be resumed.
-				iterator = agent.Resume(ctx, &ResumeInfo{
+				iterator = agent.Resume(childCtx, &ResumeInfo{
 					EnableStreaming: resumeInfo.EnableStreaming,
 					InterruptInfo:   resumeInfo.Data.(*WorkflowInterruptInfo).ParallelInterruptInfo[idx],
 				}, opts...)
@@ -454,7 +466,7 @@ func (a *workflowAgent) runParallel(ctx context.Context, generator *AsyncGenerat
 				// This means it finished successfully, so we don't run it.
 				return
 			} else {
-				iterator = agent.Run(ctx, nil, opts...)
+				iterator = agent.Run(childCtx, nil, opts...)
 			}
 
 			for {
