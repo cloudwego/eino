@@ -68,11 +68,32 @@ func withExecutedTools(executedTools map[string]string) ToolsNodeOption {
 // Input: An AssistantMessage containing ToolCalls
 // Output: An array of ToolMessage where the order of elements corresponds to the order of ToolCalls in the input
 type ToolsNode struct {
-	tuple                *toolsTuple
-	unknownToolHandler   func(ctx context.Context, name, input string) (string, error)
-	executeSequentially  bool
-	toolArgumentsHandler func(ctx context.Context, name, input string) (string, error)
+	tuple                     *toolsTuple
+	unknownToolHandler        func(ctx context.Context, name, input string) (string, error)
+	executeSequentially       bool
+	toolArgumentsHandler      func(ctx context.Context, name, input string) (string, error)
+	toolCallMiddlewares       []ToolCallMiddleware
+	streamToolCallMiddlewares []StreamToolCallMiddleware
 }
+
+type ToolCallInput struct {
+	ToolCall    *schema.ToolCall
+	CallOptions []tool.Option
+}
+
+type ToolCallOutput struct {
+	Result *schema.Message
+}
+
+type StreamToolCallOutput struct {
+	Result *schema.StreamReader[*schema.Message]
+}
+
+type ToolCallEndpoint func(ctx context.Context, input *ToolCallInput) (*ToolCallOutput, error)
+type StreamToolCallEndpoint func(ctx context.Context, input *ToolCallInput) (*StreamToolCallOutput, error)
+
+type ToolCallMiddleware func(ToolCallEndpoint) ToolCallEndpoint
+type StreamToolCallMiddleware func(StreamToolCallEndpoint) StreamToolCallEndpoint
 
 // ToolsNodeConfig is the config for ToolsNode.
 type ToolsNodeConfig struct {
@@ -107,6 +128,9 @@ type ToolsNodeConfig struct {
 	//   - string: The processed arguments string to be used for tool execution
 	//   - error: Any error that occurred during preprocessing
 	ToolArgumentsHandler func(ctx context.Context, name, arguments string) (string, error)
+
+	ToolCallMiddlewares       []ToolCallMiddleware
+	StreamToolCallMiddlewares []StreamToolCallMiddleware
 }
 
 // NewToolNode creates a new ToolsNode.
@@ -123,10 +147,12 @@ func NewToolNode(ctx context.Context, conf *ToolsNodeConfig) (*ToolsNode, error)
 	}
 
 	return &ToolsNode{
-		tuple:                tuple,
-		unknownToolHandler:   conf.UnknownToolsHandler,
-		executeSequentially:  conf.ExecuteSequentially,
-		toolArgumentsHandler: conf.ToolArgumentsHandler,
+		tuple:                     tuple,
+		unknownToolHandler:        conf.UnknownToolsHandler,
+		executeSequentially:       conf.ExecuteSequentially,
+		toolArgumentsHandler:      conf.ToolArgumentsHandler,
+		toolCallMiddlewares:       conf.ToolCallMiddlewares,
+		streamToolCallMiddlewares: conf.StreamToolCallMiddlewares,
 	}, nil
 }
 
@@ -147,7 +173,7 @@ type toolsTuple struct {
 	rps     []*runnablePacker[string, string, tool.Option]
 }
 
-func convTools(ctx context.Context, tools []tool.BaseTool) (*toolsTuple, error) {
+func convTools(ctx context.Context, tools []tool.BaseTool, ms []ToolCallMiddleware, sms []StreamToolCallMiddleware) (*toolsTuple, error) {
 	ret := &toolsTuple{
 		indexes: make(map[string]int),
 		meta:    make([]*executorMeta, len(tools)),
@@ -171,11 +197,15 @@ func convTools(ctx context.Context, tools []tool.BaseTool) (*toolsTuple, error) 
 			meta *executorMeta
 		)
 
+		meta = parseExecutorInfoFromComponent(components.ComponentOfTool, bt)
+
 		if st, ok = bt.(tool.StreamableTool); ok {
+			st = wrapStreamToolCall(st, sms, !meta.isComponentCallbackEnabled)
 			streamable = st.StreamableRun
 		}
 
 		if it, ok = bt.(tool.InvokableTool); ok {
+			it = wrapToolCall(it, ms, !meta.isComponentCallbackEnabled)
 			invokable = it.InvokableRun
 		}
 
@@ -183,19 +213,36 @@ func convTools(ctx context.Context, tools []tool.BaseTool) (*toolsTuple, error) 
 			return nil, fmt.Errorf("tool %s is not invokable or streamable", toolName)
 		}
 
-		if st != nil {
-			meta = parseExecutorInfoFromComponent(components.ComponentOfTool, st)
-		} else {
-			meta = parseExecutorInfoFromComponent(components.ComponentOfTool, it)
-		}
-
 		ret.indexes[toolName] = idx
 		ret.meta[idx] = meta
 		ret.rps[idx] = newRunnablePacker(invokable, streamable,
-			nil, nil, !meta.isComponentCallbackEnabled)
+			nil, nil, false)
 	}
 	return ret, nil
 }
+
+func wrapToolCall(it tool.InvokableTool, middlewares []ToolCallMiddleware, needCallback bool) tool.InvokableTool {
+	middleware := func(next ToolCallEndpoint) ToolCallEndpoint {
+		for i := len(middlewares) - 1; i >= 0; i-- {
+			next = middlewares[i](next)
+		}
+		return next
+	}
+	endpoint := middleware(func(ctx context.Context, input *ToolCallInput) (*ToolCallOutput, error) {
+		result, err := it.InvokableRun(ctx, input.ToolCall.Function.Arguments, input.CallOptions...)
+		if err != nil {
+			return nil, err
+		}
+		return &ToolCallOutput{Result: schema.ToolMessage(result, input.ToolCall.ID, schema.WithToolName(input.ToolCall.Function.Name))}, nil
+	})
+	return nil
+}
+
+func wrapStreamToolCall(st tool.StreamableTool, middlewares []StreamToolCallMiddleware, needCallback bool) tool.StreamableTool {
+	return nil
+}
+
+func invokableToolWithCallback
 
 type toolCallTask struct {
 	// in

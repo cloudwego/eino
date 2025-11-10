@@ -24,6 +24,7 @@ import (
 	"fmt"
 	"math"
 	"runtime/debug"
+	"strings"
 	"sync"
 	"sync/atomic"
 
@@ -114,22 +115,11 @@ type ChatModelAgentState struct {
 	History []Message
 }
 
-type ChatModelInput struct {
-	Instruction string
-	Inputs      []Message
-	Tools       *schema.ToolInfo
-}
-
-type ChatModelOutput struct {
-	Output Message
-}
-
-type ChatModelEndpoint func(context.Context, *ChatModelInput) *ChatModelOutput
-
 type AgentMiddleware struct {
-	Tools           []tool.BaseTool
-	BeforeChatModel func(*ChatModelAgentState)
-	WrapChatModel   func(ChatModelEndpoint) ChatModelEndpoint
+	AppendInstruction string
+	AppendTools       []tool.BaseTool
+	BeforeChatModel   func(context.Context, *ChatModelAgentState)
+	WrapToolCall      ToolCallEndpoint
 }
 
 type ChatModelAgentConfig struct {
@@ -149,6 +139,10 @@ type ChatModelAgentConfig struct {
 
 	ToolsConfig ToolsConfig
 
+	// GenModelInput transforms instructions and input messages into the model's input format.
+	// Optional. Defaults to defaultGenModelInput which combines instruction and messages.
+	GenModelInput GenModelInput
+
 	// Exit defines the tool used to terminate the agent process.
 	// Optional. If nil, no Exit Action will be generated.
 	// You can use the provided 'ExitTool' implementation directly.
@@ -162,6 +156,8 @@ type ChatModelAgentConfig struct {
 	// The agent will terminate with an error if this limit is exceeded.
 	// Optional. Defaults to 20.
 	MaxIterations int
+
+	Middlewares []AgentMiddleware
 }
 
 type ChatModelAgent struct {
@@ -183,6 +179,8 @@ type ChatModelAgent struct {
 	disallowTransferToParent bool
 
 	exit tool.BaseTool
+
+	middlewares []AgentMiddleware
 
 	// runner
 	once   sync.Once
@@ -208,17 +206,34 @@ func NewChatModelAgent(_ context.Context, config *ChatModelAgentConfig) (*ChatMo
 		genInput = config.GenModelInput
 	}
 
+	sb := &strings.Builder{}
+	sb.WriteString(config.Instruction)
+	ts := config.ToolsConfig.Tools
+	for _, m := range config.Middlewares {
+		sb.WriteString(m.AppendInstruction)
+		ts = append(ts, m.AppendTools...)
+	}
+	config.ToolsConfig.Tools = ts
+
 	return &ChatModelAgent{
 		name:          config.Name,
 		description:   config.Description,
-		instruction:   config.Instruction,
+		instruction:   sb.String(),
 		model:         config.Model,
 		toolsConfig:   config.ToolsConfig,
 		genModelInput: genInput,
 		exit:          config.Exit,
 		outputKey:     config.OutputKey,
 		maxIterations: config.MaxIterations,
+		middlewares:   config.Middlewares,
 	}, nil
+}
+
+func wrapTools(t tool.BaseTool, middlewares []ToolCallMiddleware) tool.BaseTool {
+	execute := func(ctx context.Context, input *ToolCallInput) (*ToolCallOutput, error) {
+
+	}
+
 }
 
 const (
