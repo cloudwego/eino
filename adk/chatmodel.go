@@ -116,10 +116,11 @@ type ChatModelAgentState struct {
 }
 
 type AgentMiddleware struct {
-	AppendInstruction string
-	AppendTools       []tool.BaseTool
-	BeforeChatModel   func(context.Context, *ChatModelAgentState)
-	WrapToolCall      ToolCallEndpoint
+	AppendInstruction  string
+	AppendTools        []tool.BaseTool
+	BeforeChatModel    func(context.Context, *ChatModelAgentState)
+	WrapToolCall       compose.ToolCallMiddleware
+	StreamWrapToolCall compose.StreamToolCallMiddleware
 }
 
 type ChatModelAgentConfig struct {
@@ -180,7 +181,7 @@ type ChatModelAgent struct {
 
 	exit tool.BaseTool
 
-	middlewares []AgentMiddleware
+	beforeChatModels []func(context.Context, *ChatModelAgentState)
 
 	// runner
 	once   sync.Once
@@ -206,34 +207,38 @@ func NewChatModelAgent(_ context.Context, config *ChatModelAgentConfig) (*ChatMo
 		genInput = config.GenModelInput
 	}
 
+	beforeChatModels := make([]func(context.Context, *ChatModelAgentState), 0)
 	sb := &strings.Builder{}
 	sb.WriteString(config.Instruction)
 	ts := config.ToolsConfig.Tools
 	for _, m := range config.Middlewares {
 		sb.WriteString(m.AppendInstruction)
 		ts = append(ts, m.AppendTools...)
+
+		if m.WrapToolCall != nil {
+			config.ToolsConfig.ToolCallMiddlewares = append(config.ToolsConfig.ToolCallMiddlewares, m.WrapToolCall)
+		}
+		if m.StreamWrapToolCall != nil {
+			config.ToolsConfig.StreamToolCallMiddlewares = append(config.ToolsConfig.StreamToolCallMiddlewares, m.StreamWrapToolCall)
+		}
+		if m.BeforeChatModel != nil {
+			beforeChatModels = append(beforeChatModels, m.BeforeChatModel)
+		}
 	}
 	config.ToolsConfig.Tools = ts
 
 	return &ChatModelAgent{
-		name:          config.Name,
-		description:   config.Description,
-		instruction:   sb.String(),
-		model:         config.Model,
-		toolsConfig:   config.ToolsConfig,
-		genModelInput: genInput,
-		exit:          config.Exit,
-		outputKey:     config.OutputKey,
-		maxIterations: config.MaxIterations,
-		middlewares:   config.Middlewares,
+		name:             config.Name,
+		description:      config.Description,
+		instruction:      sb.String(),
+		model:            config.Model,
+		toolsConfig:      config.ToolsConfig,
+		genModelInput:    genInput,
+		exit:             config.Exit,
+		outputKey:        config.OutputKey,
+		maxIterations:    config.MaxIterations,
+		beforeChatModels: beforeChatModels,
 	}, nil
-}
-
-func wrapTools(t tool.BaseTool, middlewares []ToolCallMiddleware) tool.BaseTool {
-	execute := func(ctx context.Context, input *ToolCallInput) (*ToolCallOutput, error) {
-
-	}
-
 }
 
 const (

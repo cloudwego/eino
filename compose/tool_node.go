@@ -77,16 +77,18 @@ type ToolsNode struct {
 }
 
 type ToolCallInput struct {
-	ToolCall    *schema.ToolCall
+	Name        string
+	Arguments   string
+	CallID      string
 	CallOptions []tool.Option
 }
 
 type ToolCallOutput struct {
-	Result *schema.Message
+	Result string
 }
 
 type StreamToolCallOutput struct {
-	Result *schema.StreamReader[*schema.Message]
+	Result *schema.StreamReader[string]
 }
 
 type ToolCallEndpoint func(ctx context.Context, input *ToolCallInput) (*ToolCallOutput, error)
@@ -141,7 +143,7 @@ type ToolsNodeConfig struct {
 //	}
 //	toolsNode, err := NewToolNode(ctx, conf)
 func NewToolNode(ctx context.Context, conf *ToolsNodeConfig) (*ToolsNode, error) {
-	tuple, err := convTools(ctx, conf.Tools)
+	tuple, err := convTools(ctx, conf.Tools, conf.ToolCallMiddlewares, conf.StreamToolCallMiddlewares)
 	if err != nil {
 		return nil, err
 	}
@@ -168,16 +170,18 @@ func init() {
 }
 
 type toolsTuple struct {
-	indexes map[string]int
-	meta    []*executorMeta
-	rps     []*runnablePacker[string, string, tool.Option]
+	indexes         map[string]int
+	meta            []*executorMeta
+	endpoints       []ToolCallEndpoint
+	streamEndpoints []StreamToolCallEndpoint
 }
 
 func convTools(ctx context.Context, tools []tool.BaseTool, ms []ToolCallMiddleware, sms []StreamToolCallMiddleware) (*toolsTuple, error) {
 	ret := &toolsTuple{
-		indexes: make(map[string]int),
-		meta:    make([]*executorMeta, len(tools)),
-		rps:     make([]*runnablePacker[string, string, tool.Option], len(tools)),
+		indexes:         make(map[string]int),
+		meta:            make([]*executorMeta, len(tools)),
+		endpoints:       make([]ToolCallEndpoint, len(tools)),
+		streamEndpoints: make([]StreamToolCallEndpoint, len(tools)),
 	}
 	for idx, bt := range tools {
 		tl, err := bt.Info(ctx)
@@ -190,8 +194,8 @@ func convTools(ctx context.Context, tools []tool.BaseTool, ms []ToolCallMiddlewa
 			st tool.StreamableTool
 			it tool.InvokableTool
 
-			invokable  func(ctx context.Context, argumentsInJSON string, opts ...tool.Option) (string, error)
-			streamable func(ctx context.Context, argumentsInJSON string, opts ...tool.Option) (*schema.StreamReader[string], error)
+			invokable  ToolCallEndpoint
+			streamable StreamToolCallEndpoint
 
 			ok   bool
 			meta *executorMeta
@@ -200,57 +204,126 @@ func convTools(ctx context.Context, tools []tool.BaseTool, ms []ToolCallMiddlewa
 		meta = parseExecutorInfoFromComponent(components.ComponentOfTool, bt)
 
 		if st, ok = bt.(tool.StreamableTool); ok {
-			st = wrapStreamToolCall(st, sms, !meta.isComponentCallbackEnabled)
-			streamable = st.StreamableRun
+			streamable = wrapStreamToolCall(st, sms, !meta.isComponentCallbackEnabled)
 		}
 
 		if it, ok = bt.(tool.InvokableTool); ok {
-			it = wrapToolCall(it, ms, !meta.isComponentCallbackEnabled)
-			invokable = it.InvokableRun
+			invokable = wrapToolCall(it, ms, !meta.isComponentCallbackEnabled)
 		}
 
 		if st == nil && it == nil {
 			return nil, fmt.Errorf("tool %s is not invokable or streamable", toolName)
 		}
 
+		if streamable == nil {
+			streamable = invokable2Streamable(invokable)
+		}
+		if invokable == nil {
+			invokable = streamable2Invokable(streamable)
+		}
+
 		ret.indexes[toolName] = idx
 		ret.meta[idx] = meta
-		ret.rps[idx] = newRunnablePacker(invokable, streamable,
-			nil, nil, false)
+		ret.endpoints[idx] = invokable
+		ret.streamEndpoints[idx] = streamable
 	}
 	return ret, nil
 }
 
-func wrapToolCall(it tool.InvokableTool, middlewares []ToolCallMiddleware, needCallback bool) tool.InvokableTool {
+func wrapToolCall(it tool.InvokableTool, middlewares []ToolCallMiddleware, needCallback bool) ToolCallEndpoint {
 	middleware := func(next ToolCallEndpoint) ToolCallEndpoint {
 		for i := len(middlewares) - 1; i >= 0; i-- {
 			next = middlewares[i](next)
 		}
 		return next
 	}
-	endpoint := middleware(func(ctx context.Context, input *ToolCallInput) (*ToolCallOutput, error) {
-		result, err := it.InvokableRun(ctx, input.ToolCall.Function.Arguments, input.CallOptions...)
+	if needCallback {
+		it = &invokableToolWithCallback{it: it}
+	}
+	return middleware(func(ctx context.Context, input *ToolCallInput) (*ToolCallOutput, error) {
+		result, err := it.InvokableRun(ctx, input.Arguments, input.CallOptions...)
 		if err != nil {
 			return nil, err
 		}
-		return &ToolCallOutput{Result: schema.ToolMessage(result, input.ToolCall.ID, schema.WithToolName(input.ToolCall.Function.Name))}, nil
+		return &ToolCallOutput{Result: result}, nil
 	})
-	return nil
 }
 
-func wrapStreamToolCall(st tool.StreamableTool, middlewares []StreamToolCallMiddleware, needCallback bool) tool.StreamableTool {
-	return nil
+func wrapStreamToolCall(st tool.StreamableTool, middlewares []StreamToolCallMiddleware, needCallback bool) StreamToolCallEndpoint {
+	middleware := func(next StreamToolCallEndpoint) StreamToolCallEndpoint {
+		for i := len(middlewares) - 1; i >= 0; i-- {
+			next = middlewares[i](next)
+		}
+		return next
+	}
+	if needCallback {
+		st = &streamableToolWithCallback{st: st}
+	}
+	return middleware(func(ctx context.Context, input *ToolCallInput) (*StreamToolCallOutput, error) {
+		result, err := st.StreamableRun(ctx, input.Arguments, input.CallOptions...)
+		if err != nil {
+			return nil, err
+		}
+		return &StreamToolCallOutput{Result: result}, nil
+	})
 }
 
-func invokableToolWithCallback
+type invokableToolWithCallback struct {
+	it tool.InvokableTool
+}
+
+func (i *invokableToolWithCallback) Info(ctx context.Context) (*schema.ToolInfo, error) {
+	return i.it.Info(ctx)
+}
+
+func (i *invokableToolWithCallback) InvokableRun(ctx context.Context, argumentsInJSON string, opts ...tool.Option) (string, error) {
+	return invokeWithCallbacks(i.it.InvokableRun)(ctx, argumentsInJSON, opts...)
+}
+
+type streamableToolWithCallback struct {
+	st tool.StreamableTool
+}
+
+func (s *streamableToolWithCallback) Info(ctx context.Context) (*schema.ToolInfo, error) {
+	return s.st.Info(ctx)
+}
+
+func (s *streamableToolWithCallback) StreamableRun(ctx context.Context, argumentsInJSON string, opts ...tool.Option) (*schema.StreamReader[string], error) {
+	return streamWithCallbacks(s.st.StreamableRun)(ctx, argumentsInJSON, opts...)
+}
+
+func streamable2Invokable(e StreamToolCallEndpoint) ToolCallEndpoint {
+	return func(ctx context.Context, input *ToolCallInput) (*ToolCallOutput, error) {
+		so, err := e(ctx, input)
+		if err != nil {
+			return nil, err
+		}
+		o, err := concatStreamReader(so.Result)
+		if err != nil {
+			return nil, fmt.Errorf("failed to concat StreamableTool output message stream: %w", err)
+		}
+		return &ToolCallOutput{Result: o}, nil
+	}
+}
+
+func invokable2Streamable(e ToolCallEndpoint) StreamToolCallEndpoint {
+	return func(ctx context.Context, input *ToolCallInput) (*StreamToolCallOutput, error) {
+		o, err := e(ctx, input)
+		if err != nil {
+			return nil, err
+		}
+		return &StreamToolCallOutput{Result: schema.StreamReaderFromArray([]string{o.Result})}, nil
+	}
+}
 
 type toolCallTask struct {
 	// in
-	r      *runnablePacker[string, string, tool.Option]
-	meta   *executorMeta
-	name   string
-	arg    string
-	callID string
+	endpoint       ToolCallEndpoint
+	streamEndpoint StreamToolCallEndpoint
+	meta           *executorMeta
+	name           string
+	arg            string
+	callID         string
 
 	// out
 	executed bool
@@ -294,7 +367,8 @@ func (tn *ToolsNode) genToolCallTasks(ctx context.Context, tuple *toolsTuple,
 			}
 			toolCallTasks[i] = newUnknownToolTask(toolCall.Function.Name, toolCall.Function.Arguments, toolCall.ID, tn.unknownToolHandler)
 		} else {
-			toolCallTasks[i].r = tuple.rps[index]
+			toolCallTasks[i].endpoint = tuple.endpoints[index]
+			toolCallTasks[i].streamEndpoint = tuple.streamEndpoints[index]
 			toolCallTasks[i].meta = tuple.meta[index]
 			toolCallTasks[i].name = toolCall.Function.Name
 			toolCallTasks[i].callID = toolCall.ID
@@ -314,10 +388,18 @@ func (tn *ToolsNode) genToolCallTasks(ctx context.Context, tuple *toolsTuple,
 }
 
 func newUnknownToolTask(name, arg, callID string, unknownToolHandler func(ctx context.Context, name, input string) (string, error)) toolCallTask {
+	endpoint := func(ctx context.Context, input *ToolCallInput) (*ToolCallOutput, error) {
+		result, err := unknownToolHandler(ctx, input.Name, input.Arguments)
+		if err != nil {
+			return nil, err
+		}
+		return &ToolCallOutput{
+			Result: result,
+		}, nil
+	}
 	return toolCallTask{
-		r: newRunnablePacker(func(ctx context.Context, input string, opts ...tool.Option) (output string, err error) {
-			return unknownToolHandler(ctx, name, input)
-		}, nil, nil, nil, false),
+		endpoint:       endpoint,
+		streamEndpoint: invokable2Streamable(endpoint),
 		meta: &executorMeta{
 			component:                  components.ComponentOfTool,
 			isComponentCallbackEnabled: false,
@@ -340,8 +422,16 @@ func runToolCallTaskByInvoke(ctx context.Context, task *toolCallTask, opts ...to
 	})
 
 	ctx = setToolCallInfo(ctx, &toolCallInfo{toolCallID: task.callID})
-	task.output, task.err = task.r.Invoke(ctx, task.arg, opts...)
-	if task.err == nil {
+	output, err := task.endpoint(ctx, &ToolCallInput{
+		Name:        task.name,
+		Arguments:   task.arg,
+		CallID:      task.callID,
+		CallOptions: opts,
+	})
+	if err != nil {
+		task.err = err
+	} else {
+		task.output = output.Result
 		task.executed = true
 	}
 }
@@ -354,8 +444,16 @@ func runToolCallTaskByStream(ctx context.Context, task *toolCallTask, opts ...to
 	})
 
 	ctx = setToolCallInfo(ctx, &toolCallInfo{toolCallID: task.callID})
-	task.sOutput, task.err = task.r.Stream(ctx, task.arg, opts...)
-	if task.err == nil {
+	output, err := task.streamEndpoint(ctx, &ToolCallInput{
+		Name:        task.name,
+		Arguments:   task.arg,
+		CallID:      task.callID,
+		CallOptions: opts,
+	})
+	if err != nil {
+		task.err = err
+	} else {
+		task.sOutput = output.Result
 		task.executed = true
 	}
 }
@@ -412,7 +510,7 @@ func (tn *ToolsNode) Invoke(ctx context.Context, input *schema.Message,
 	tuple := tn.tuple
 	if opt.ToolList != nil {
 		var err error
-		tuple, err = convTools(ctx, opt.ToolList)
+		tuple, err = convTools(ctx, opt.ToolList, tn.toolCallMiddlewares, tn.streamToolCallMiddlewares)
 		if err != nil {
 			return nil, fmt.Errorf("failed to convert tool list from call option: %w", err)
 		}
@@ -472,7 +570,7 @@ func (tn *ToolsNode) Stream(ctx context.Context, input *schema.Message,
 	tuple := tn.tuple
 	if opt.ToolList != nil {
 		var err error
-		tuple, err = convTools(ctx, opt.ToolList)
+		tuple, err = convTools(ctx, opt.ToolList, tn.toolCallMiddlewares, tn.streamToolCallMiddlewares)
 		if err != nil {
 			return nil, fmt.Errorf("failed to convert tool list from call option: %w", err)
 		}
