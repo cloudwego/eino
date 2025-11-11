@@ -39,6 +39,10 @@ allowing the agent to continue reasoning seamlessly without re-accessing the raw
 {system_prompt}
 </system_prompt>
 
+<user_messages>
+{user_messages}
+</user_messages>
+
 <previous_summary>
 {previous_summary}
 </previous_summary>
