@@ -228,30 +228,29 @@ func NewChatModelAgent(_ context.Context, config *ChatModelAgentConfig) (*ChatMo
 	beforeChatModels := make([]func(context.Context, *ChatModelAgentState) error, 0)
 	sb := &strings.Builder{}
 	sb.WriteString(config.Instruction)
-	ts := config.ToolsConfig.Tools
+	tc := config.ToolsConfig
 	for _, m := range config.Middlewares {
 		sb.WriteString("\n")
 		sb.WriteString(m.AdditionalInstruction)
-		ts = append(ts, m.AdditionalTools...)
+		tc.Tools = append(tc.Tools, m.AdditionalTools...)
 
 		if m.WrapToolCall != nil {
-			config.ToolsConfig.ToolCallMiddlewares = append(config.ToolsConfig.ToolCallMiddlewares, m.WrapToolCall)
+			tc.ToolCallMiddlewares = append(tc.ToolCallMiddlewares, m.WrapToolCall)
 		}
 		if m.StreamWrapToolCall != nil {
-			config.ToolsConfig.StreamToolCallMiddlewares = append(config.ToolsConfig.StreamToolCallMiddlewares, m.StreamWrapToolCall)
+			tc.StreamToolCallMiddlewares = append(tc.StreamToolCallMiddlewares, m.StreamWrapToolCall)
 		}
 		if m.BeforeChatModel != nil {
 			beforeChatModels = append(beforeChatModels, m.BeforeChatModel)
 		}
 	}
-	config.ToolsConfig.Tools = ts
 
 	return &ChatModelAgent{
 		name:             config.Name,
 		description:      config.Description,
 		instruction:      sb.String(),
 		model:            config.Model,
-		toolsConfig:      config.ToolsConfig,
+		toolsConfig:      tc,
 		genModelInput:    genInput,
 		exit:             config.Exit,
 		outputKey:        config.OutputKey,
