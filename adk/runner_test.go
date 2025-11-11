@@ -261,3 +261,84 @@ func TestRunner_Query_WithStreaming(t *testing.T) {
 	_, ok = iterator.Next()
 	assert.False(t, ok)
 }
+
+func TestRunner_Middleware_Run(t *testing.T) {
+	mockAgent_ := newMockRunnerAgent("TestAgent", "Test agent for Runner", []*AgentEvent{
+		{
+			AgentName: "TestAgent",
+			Output: &AgentOutput{
+				MessageOutput: &MessageVariant{
+					IsStreaming: false,
+					Message:     schema.AssistantMessage("Response from test agent", nil),
+					Role:        schema.Assistant,
+				},
+			}},
+	})
+
+	var n *AsyncIterator[*AgentEvent] = nil
+
+	mw1 := func(re RunnerEndpoint) RunnerEndpoint {
+		return func(ctx context.Context, messages []Message, resp *AsyncIterator[*AgentEvent], opts ...AgentRunOption) *AsyncIterator[*AgentEvent] {
+			assert.Equal(t, n, resp)
+			ctx = context.WithValue(ctx, "mw1", "hello")
+			messages = []Message{schema.UserMessage("test")}
+
+			nextResp := re(ctx, messages, resp)
+			for {
+				event, ok := nextResp.Next()
+				if !ok {
+					break
+				}
+				assert.NotNil(t, event.Action.CustomizedAction)
+			}
+			i, g := NewAsyncIteratorPair[*AgentEvent]()
+			g.Send(&AgentEvent{
+				Action: NewExitAction(),
+			})
+			g.Close()
+			return i
+		}
+	}
+
+	mw2 := func(re RunnerEndpoint) RunnerEndpoint {
+		return func(ctx context.Context, messages []Message, resp *AsyncIterator[*AgentEvent], opts ...AgentRunOption) *AsyncIterator[*AgentEvent] {
+			assert.Equal(t, n, resp)
+			assert.Equal(t, []Message{schema.UserMessage("test")}, messages)
+			assert.Equal(t, "hello", ctx.Value("mw1"))
+
+			nextResp := re(ctx, messages, resp)
+			for {
+				event, ok := nextResp.Next()
+				if !ok {
+					break
+				}
+				assert.Equal(t, schema.AssistantMessage("Response from test agent", nil), event.Output.MessageOutput.Message)
+			}
+
+			i, g := NewAsyncIteratorPair[*AgentEvent]()
+			g.Send(&AgentEvent{
+				Action: &AgentAction{
+					CustomizedAction: "hello",
+				},
+			})
+			g.Close()
+			return i
+		}
+	}
+
+	runner := NewRunner(context.Background(), RunnerConfig{
+		Agent:           mockAgent_,
+		EnableStreaming: true,
+		CheckPointStore: nil,
+		Middlewares:     []RunnerMiddleware{mw1, mw2},
+	})
+
+	resp := runner.Run(context.Background(), []Message{schema.UserMessage("not_test")})
+	for {
+		event, ok := resp.Next()
+		if !ok {
+			break
+		}
+		assert.Equal(t, true, event.Action.Exit)
+	}
+}

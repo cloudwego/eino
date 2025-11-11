@@ -30,6 +30,7 @@ type Runner struct {
 	a               Agent
 	enableStreaming bool
 	store           compose.CheckPointStore
+	middlewares     []RunnerMiddleware
 }
 
 type RunnerConfig struct {
@@ -37,17 +38,46 @@ type RunnerConfig struct {
 	EnableStreaming bool
 
 	CheckPointStore compose.CheckPointStore
+	Middlewares     []RunnerMiddleware
 }
+
+// RunnerMiddleware defines the middleware type for Runner.
+// It takes a RunnerEndpoint as input and returns a new RunnerEndpoint.
+// This allows chaining multiple middlewares that wrap the final business logic,
+// forming an "onion model" where each middleware can process input/output and control flow.
+type RunnerMiddleware func(RunnerEndpoint) RunnerEndpoint
+
+// RunnerEndpoint represents the execution endpoint function type for Runner.
+// Parameters:
+// - ctx: the context for controlling cancellation and passing values.
+// - messages: the input message slice for the run operation，nil when using Resume.
+// - resp: the response AsyncIterator pointer, usually nil on initial call.
+// - opts: optional run parameters for flexible configuration.
+//
+// Returns:
+// - An AsyncIterator that yields AgentEvent asynchronously, representing the event stream of the run.
+//
+// This function signature allows middlewares to intercept and modify the input/output,
+type RunnerEndpoint func(ctx context.Context, messages []Message, resp *AsyncIterator[*AgentEvent], opts ...AgentRunOption) *AsyncIterator[*AgentEvent]
 
 func NewRunner(_ context.Context, conf RunnerConfig) *Runner {
 	return &Runner{
 		enableStreaming: conf.EnableStreaming,
 		a:               conf.Agent,
 		store:           conf.CheckPointStore,
+		middlewares:     conf.Middlewares,
 	}
 }
 
 func (r *Runner) Run(ctx context.Context, messages []Message,
+	opts ...AgentRunOption) *AsyncIterator[*AgentEvent] {
+
+	runChain := runnerChain(r.middlewares...)(r.runEndpoint)
+
+	return runChain(ctx, messages, nil, opts...)
+}
+
+func (r *Runner) runEndpoint(ctx context.Context, messages []Message, _ *AsyncIterator[*AgentEvent],
 	opts ...AgentRunOption) *AsyncIterator[*AgentEvent] {
 	o := getCommonOptions(nil, opts...)
 
@@ -100,20 +130,25 @@ func (r *Runner) Resume(ctx context.Context, checkPointID string, opts ...AgentR
 		return nil, fmt.Errorf("checkpoint[%s] is not existed", checkPointID)
 	}
 
-	ctx = setRunCtx(ctx, runCtx)
+	chain := runnerChain(r.middlewares...)(r.buildResumeEndpoint(checkPointID, runCtx, info))
 
-	o := getCommonOptions(nil, opts...)
-	AddSessionValues(ctx, o.sessionValues)
+	return chain(ctx, nil, nil, opts...), nil
+}
 
-	aIter := toFlowAgent(ctx, r.a).Resume(ctx, info, opts...)
-	if r.store == nil {
-		return aIter, nil
+func (r *Runner) buildResumeEndpoint(checkPointID string, runCtx *runContext, info *ResumeInfo) RunnerEndpoint {
+	return func(ctx context.Context, _ []Message, _ *AsyncIterator[*AgentEvent], opts ...AgentRunOption) *AsyncIterator[*AgentEvent] {
+		ctx = setRunCtx(ctx, runCtx)
+
+		o := getCommonOptions(nil, opts...)
+		AddSessionValues(ctx, o.sessionValues)
+
+		aIter := toFlowAgent(ctx, r.a).Resume(ctx, info, opts...)
+
+		niter, gen := NewAsyncIteratorPair[*AgentEvent]()
+
+		go r.handleIter(ctx, aIter, gen, &checkPointID)
+		return niter
 	}
-
-	niter, gen := NewAsyncIteratorPair[*AgentEvent]()
-
-	go r.handleIter(ctx, aIter, gen, &checkPointID)
-	return niter, nil
 }
 
 func (r *Runner) handleIter(ctx context.Context, aIter *AsyncIterator[*AgentEvent], gen *AsyncGenerator[*AgentEvent], checkPointID *string) {
@@ -147,5 +182,14 @@ func (r *Runner) handleIter(ctx context.Context, aIter *AsyncIterator[*AgentEven
 		if err != nil {
 			gen.Send(&AgentEvent{Err: fmt.Errorf("failed to save checkpoint: %w", err)})
 		}
+	}
+}
+
+func runnerChain(mws ...RunnerMiddleware) RunnerMiddleware {
+	return func(endpoint RunnerEndpoint) RunnerEndpoint {
+		for i := len(mws) - 1; i >= 0; i-- {
+			endpoint = mws[i](endpoint)
+		}
+		return endpoint
 	}
 }
