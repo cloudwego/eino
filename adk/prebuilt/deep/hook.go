@@ -23,13 +23,14 @@ import (
 	"github.com/bytedance/sonic"
 
 	"github.com/cloudwego/eino/adk"
+	"github.com/cloudwego/eino/components/tool"
 	"github.com/cloudwego/eino/components/tool/utils"
 )
 
-func buildBuiltinSetupHooks(withoutWriteTodos bool) ([]SetupHook, error) {
-	var ms []SetupHook
+func buildBuiltinAgentMiddlewares(withoutWriteTodos bool) ([]adk.AgentMiddleware, error) {
+	var ms []adk.AgentMiddleware
 	if !withoutWriteTodos {
-		t, err := newWriteTodosSetupHook()
+		t, err := newWriteTodos()
 		if err != nil {
 			return nil, err
 		}
@@ -48,7 +49,7 @@ type writeTodosArguments struct {
 	Todos []TODO `json:"todos"`
 }
 
-func newWriteTodosSetupHook() (SetupHook, error) {
+func newWriteTodos() (adk.AgentMiddleware, error) {
 	t, err := utils.InferTool("write_todos", writeTodosToolDescription, func(ctx context.Context, input writeTodosArguments) (output string, err error) {
 		adk.AddSessionValue(ctx, SessionKeyTodos, input.Todos)
 		todos, err := sonic.MarshalString(input.Todos)
@@ -58,11 +59,11 @@ func newWriteTodosSetupHook() (SetupHook, error) {
 		return fmt.Sprintf("Updated todo list to %s", todos), nil
 	})
 	if err != nil {
-		return nil, err
+		return adk.AgentMiddleware{}, err
 	}
 
-	return func(ac *AgentSetup) {
-		ac.ToolsConfig.Tools = append(ac.ToolsConfig.Tools, t)
-		ac.Instruction += writeTodosPrompt
+	return adk.AgentMiddleware{
+		AdditionalInstruction: writeTodosPrompt,
+		AdditionalTools:       []tool.BaseTool{t},
 	}, nil
 }
