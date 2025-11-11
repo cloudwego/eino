@@ -122,19 +122,19 @@ type AgentMiddleware struct {
 	// AdditionalInstruction adds supplementary text to the agent's system instruction.
 	// This instruction is concatenated with the base instruction before each chat model call.
 	AdditionalInstruction string
-	
+
 	// AdditionalTools adds supplementary tools to the agent's available toolset.
 	// These tools are combined with the tools configured for the agent.
 	AdditionalTools []tool.BaseTool
-	
+
 	// BeforeChatModel is called before each chat model invocation, allowing modification of the agent state.
 	BeforeChatModel func(context.Context, *ChatModelAgentState) error
-	
+
 	// WrapToolCall wraps individual tool calls with custom middleware logic.
 	// It allows intercepting and modifying tool execution behavior for non-streaming calls.
 	// Note: This middleware only applies to tools that implement the InvokableTool interface.
 	WrapToolCall compose.ToolCallMiddleware
-	
+
 	// StreamWrapToolCall wraps streaming tool calls with custom middleware logic.
 	// It provides the same functionality as WrapToolCall but for streaming tool executions.
 	// Note: This middleware only applies to tools that implement the StreamableTool interface.
