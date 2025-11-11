@@ -22,21 +22,29 @@ import (
 	"encoding/gob"
 	"fmt"
 	"sync"
+	"time"
 
 	"github.com/cloudwego/eino/schema"
 )
 
 type runSession struct {
-	Events []*agentEventWrapper
-	Values map[string]any
+	Events     []*agentEventWrapper
+	Values     map[string]any
+	LaneEvents *laneEvents
 
 	mtx sync.Mutex
+}
+
+type laneEvents struct {
+	Events []*agentEventWrapper
+	Parent *laneEvents
 }
 
 type agentEventWrapper struct {
 	*AgentEvent
 	mu                  sync.Mutex
 	concatenatedMessage Message
+	ts                  int64
 }
 
 type otherAgentEventWrapperForEncode agentEventWrapper
@@ -101,19 +109,54 @@ func GetSessionValue(ctx context.Context, key string) (any, bool) {
 }
 
 func (rs *runSession) addEvent(event *AgentEvent) {
+	wrapper := &agentEventWrapper{AgentEvent: event, ts: time.Now().UnixNano()}
+	// If LaneEvents is not nil, we are in a parallel lane.
+	// Append to the lane's local event slice (lock-free).
+	if rs.LaneEvents != nil {
+		rs.LaneEvents.Events = append(rs.LaneEvents.Events, wrapper)
+		return
+	}
+
+	// Otherwise, we are on the main path. Append to the shared Events slice (with lock).
 	rs.mtx.Lock()
-	rs.Events = append(rs.Events, &agentEventWrapper{
-		AgentEvent: event,
-	})
+	rs.Events = append(rs.Events, wrapper)
 	rs.mtx.Unlock()
 }
 
 func (rs *runSession) getEvents() []*agentEventWrapper {
+	// If there are no in-flight lane events, we can return the main slice directly.
+	if rs.LaneEvents == nil {
+		rs.mtx.Lock()
+		events := rs.Events
+		rs.mtx.Unlock()
+		return events
+	}
+
+	// If there are in-flight events, we must construct the full view.
+	// First, get the committed history from the main Events slice.
 	rs.mtx.Lock()
-	events := rs.Events
+	committedEvents := make([]*agentEventWrapper, len(rs.Events))
+	copy(committedEvents, rs.Events)
 	rs.mtx.Unlock()
 
-	return events
+	// Then, assemble the in-flight events by traversing the linked list.
+	var laneSlices [][]*agentEventWrapper
+	totalLaneSize := 0
+	for lane := rs.LaneEvents; lane != nil; lane = lane.Parent {
+		if len(lane.Events) > 0 {
+			laneSlices = append(laneSlices, lane.Events)
+			totalLaneSize += len(lane.Events)
+		}
+	}
+
+	// Combine committed and in-flight history.
+	finalEvents := make([]*agentEventWrapper, 0, len(committedEvents)+totalLaneSize)
+	finalEvents = append(finalEvents, committedEvents...)
+	for i := len(laneSlices) - 1; i >= 0; i-- {
+		finalEvents = append(finalEvents, laneSlices[i]...)
+	}
+
+	return finalEvents
 }
 
 func (rs *runSession) getValues() map[string]any {
