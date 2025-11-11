@@ -350,7 +350,7 @@ type cbHandler struct {
 func (h *cbHandler) onChatModelEnd(ctx context.Context,
 	_ *callbacks.RunInfo, output *model.CallbackOutput) context.Context {
 	addr := core.GetCurrentAddress(ctx)
-	if len(addr) != len(h.addr)+2 || !addr[:len(h.addr)].Equals(h.addr) {
+	if len(addr) != len(h.addr)+3 || !addr[:len(h.addr)].Equals(h.addr) {
 		return ctx
 	}
 
@@ -362,7 +362,7 @@ func (h *cbHandler) onChatModelEnd(ctx context.Context,
 func (h *cbHandler) onChatModelEndWithStreamOutput(ctx context.Context,
 	_ *callbacks.RunInfo, output *schema.StreamReader[*model.CallbackOutput]) context.Context {
 	addr := core.GetCurrentAddress(ctx)
-	if len(addr) != len(h.addr)+2 || !addr[:len(h.addr)].Equals(h.addr) {
+	if len(addr) != len(h.addr)+3 || !addr[:len(h.addr)].Equals(h.addr) {
 		return ctx
 	}
 
@@ -379,7 +379,7 @@ func (h *cbHandler) onChatModelEndWithStreamOutput(ctx context.Context,
 func (h *cbHandler) onToolEnd(ctx context.Context,
 	runInfo *callbacks.RunInfo, output *tool.CallbackOutput) context.Context {
 	addr := core.GetCurrentAddress(ctx)
-	if len(addr) != len(h.addr)+3 || !addr[:len(h.addr)].Equals(h.addr) {
+	if len(addr) != len(h.addr)+4 || !addr[:len(h.addr)].Equals(h.addr) {
 		return ctx
 	}
 
@@ -403,7 +403,7 @@ func (h *cbHandler) onToolEnd(ctx context.Context,
 func (h *cbHandler) onToolEndWithStreamOutput(ctx context.Context,
 	runInfo *callbacks.RunInfo, output *schema.StreamReader[*tool.CallbackOutput]) context.Context {
 	addr := core.GetCurrentAddress(ctx)
-	if len(addr) != len(h.addr)+3 || !addr[:len(h.addr)].Equals(h.addr) {
+	if len(addr) != len(h.addr)+4 || !addr[:len(h.addr)].Equals(h.addr) {
 		return ctx
 	}
 
@@ -433,7 +433,7 @@ func (h *cbHandler) sendReturnDirectlyToolEvent() {
 
 func (h *cbHandler) onToolsNodeEnd(ctx context.Context, _ *callbacks.RunInfo, _ []*schema.Message) context.Context {
 	addr := core.GetCurrentAddress(ctx)
-	if len(addr) != len(h.addr)+2 || !addr[:len(h.addr)].Equals(h.addr) {
+	if len(addr) != len(h.addr)+3 || !addr[:len(h.addr)].Equals(h.addr) {
 		return ctx
 	}
 	h.sendReturnDirectlyToolEvent()
@@ -442,7 +442,7 @@ func (h *cbHandler) onToolsNodeEnd(ctx context.Context, _ *callbacks.RunInfo, _ 
 
 func (h *cbHandler) onToolsNodeEndWithStreamOutput(ctx context.Context, _ *callbacks.RunInfo, _ *schema.StreamReader[[]*schema.Message]) context.Context {
 	addr := core.GetCurrentAddress(ctx)
-	if len(addr) != len(h.addr)+2 || !addr[:len(h.addr)].Equals(h.addr) {
+	if len(addr) != len(h.addr)+3 || !addr[:len(h.addr)].Equals(h.addr) {
 		return ctx
 	}
 	h.sendReturnDirectlyToolEvent()
