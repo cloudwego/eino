@@ -21,6 +21,7 @@ import (
 	"context"
 	"encoding/gob"
 	"fmt"
+	"sort"
 	"sync"
 	"time"
 
@@ -243,6 +244,92 @@ func initRunCtx(ctx context.Context, agentName string, input *AgentInput) (conte
 	}
 
 	return setRunCtx(ctx, runCtx), runCtx
+}
+
+func joinRunCtxs(parentCtx context.Context, childCtxs ...context.Context) {
+	switch len(childCtxs) {
+	case 0:
+		return
+	case 1:
+		// Optimization for the common case of a single branch.
+		newEvents := unwindLaneEvents(childCtxs...)
+		commitEvents(parentCtx, newEvents)
+		return
+	}
+
+	// 1. Collect all new events from the leaf nodes of each context's lane.
+	newEvents := unwindLaneEvents(childCtxs...)
+
+	// 2. Sort the collected events by their creation timestamp for chronological order.
+	sort.Slice(newEvents, func(i, j int) bool {
+		return newEvents[i].ts < newEvents[j].ts
+	})
+
+	// 3. Commit the sorted events to the parent.
+	commitEvents(parentCtx, newEvents)
+}
+
+// commitEvents appends a slice of new events to the correct parent lane or main event log.
+func commitEvents(ctx context.Context, newEvents []*agentEventWrapper) {
+	runCtx := getRunCtx(ctx)
+	if runCtx == nil || runCtx.Session == nil {
+		// Should not happen, but handle defensively.
+		return
+	}
+
+	// If the context we are committing to is itself a lane, append to its event slice.
+	if runCtx.Session.LaneEvents != nil {
+		runCtx.Session.LaneEvents.Events = append(runCtx.Session.LaneEvents.Events, newEvents...)
+	} else {
+		// Otherwise, commit to the main, shared Events slice with a lock.
+		runCtx.Session.mtx.Lock()
+		runCtx.Session.Events = append(runCtx.Session.Events, newEvents...)
+		runCtx.Session.mtx.Unlock()
+	}
+}
+
+// unwindLaneEvents traverses the LaneEvents of the given contexts and collects
+// all events from the leaf nodes.
+func unwindLaneEvents(ctxs ...context.Context) []*agentEventWrapper {
+	var allNewEvents []*agentEventWrapper
+	for _, ctx := range ctxs {
+		runCtx := getRunCtx(ctx)
+		if runCtx != nil && runCtx.Session != nil && runCtx.Session.LaneEvents != nil {
+			allNewEvents = append(allNewEvents, runCtx.Session.LaneEvents.Events...)
+		}
+	}
+	return allNewEvents
+}
+
+func forkRunCtx(ctx context.Context) context.Context {
+	parentRunCtx := getRunCtx(ctx)
+	if parentRunCtx == nil || parentRunCtx.Session == nil {
+		// Should not happen in a parallel workflow, but handle defensively.
+		return ctx
+	}
+
+	// Create a new session for the child lane by manually copying the parent's session fields.
+	// This is crucial to ensure a new mutex is created and that the LaneEvents pointer is unique.
+	childSession := &runSession{
+		Events: parentRunCtx.Session.Events, // Share the committed history
+		Values: parentRunCtx.Session.Values, // Share the values map
+	}
+
+	// Fork the lane events within the new session struct.
+	childSession.LaneEvents = &laneEvents{
+		Parent: parentRunCtx.Session.LaneEvents,
+		Events: make([]*agentEventWrapper, 0),
+	}
+
+	// Create a new runContext for the child lane, pointing to the new session.
+	childRunCtx := &runContext{
+		RootInput: parentRunCtx.RootInput,
+		RunPath:   make([]RunStep, len(parentRunCtx.RunPath)),
+		Session:   childSession,
+	}
+	copy(childRunCtx.RunPath, parentRunCtx.RunPath)
+
+	return setRunCtx(ctx, childRunCtx)
 }
 
 // updateRunPathOnly creates a new context with an updated RunPath, but does NOT modify the Address.
