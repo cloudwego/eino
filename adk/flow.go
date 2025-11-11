@@ -161,20 +161,6 @@ func (a *flowAgent) getAgent(ctx context.Context, name string) *flowAgent {
 	return nil
 }
 
-func belongToRunPath(eventRunPath []RunStep, runPath []RunStep) bool {
-	if len(runPath) < len(eventRunPath) {
-		return false
-	}
-
-	for i, step := range eventRunPath {
-		if !runPath[i].Equals(step) {
-			return false
-		}
-	}
-
-	return true
-}
-
 func rewriteMessage(msg Message, agentName string) Message {
 	var sb strings.Builder
 	sb.WriteString("For context:")
@@ -219,7 +205,6 @@ func (ai *AgentInput) deepCopy() *AgentInput {
 
 func (a *flowAgent) genAgentInput(ctx context.Context, runCtx *runContext, skipTransferMessages bool) (*AgentInput, error) {
 	input := runCtx.RootInput.deepCopy()
-	runPath := runCtx.RunPath
 
 	events := runCtx.Session.getEvents()
 	historyEntries := make([]*HistoryEntry, 0)
@@ -232,10 +217,6 @@ func (a *flowAgent) genAgentInput(ctx context.Context, runCtx *runContext, skipT
 	}
 
 	for _, event := range events {
-		if !belongToRunPath(event.RunPath, runPath) {
-			continue
-		}
-
 		if skipTransferMessages && event.Action != nil && event.Action.TransferToAgent != nil {
 			// If skipTransferMessages is true and the event contain transfer action, the message in this event won't be appended to history entries.
 			if event.Output != nil &&

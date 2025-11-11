@@ -92,7 +92,9 @@ type sequentialWorkflowState struct {
 	InterruptIndex int
 }
 
-type parallelWorkflowState struct{}
+type parallelWorkflowState struct {
+	SubAgentEvents map[int][]*agentEventWrapper
+}
 
 type loopWorkflowState struct {
 	LoopIterations int
@@ -419,6 +421,7 @@ func (a *workflowAgent) runParallel(ctx context.Context, generator *AsyncGenerat
 		mu                  sync.Mutex
 		agentNames          map[string]bool
 		err                 error
+		childContexts       = make([]context.Context, len(a.subAgents))
 	)
 
 	// If resuming, get the scoped ResumeInfo for each child that needs to be resumed.
@@ -426,6 +429,22 @@ func (a *workflowAgent) runParallel(ctx context.Context, generator *AsyncGenerat
 		agentNames, err = getNextResumeAgents(ctx, resumeInfo)
 		if err != nil {
 			return err
+		}
+	}
+
+	// Fork contexts for each sub-agent
+	for i := range a.subAgents {
+		childContexts[i] = forkRunCtx(ctx)
+
+		// If we're resuming and this agent has existing events, add them to the child context
+		if parState != nil && parState.SubAgentEvents != nil {
+			if existingEvents, ok := parState.SubAgentEvents[i]; ok {
+				// Add existing events to the child's lane events
+				childRunCtx := getRunCtx(childContexts[i])
+				if childRunCtx != nil && childRunCtx.Session != nil && childRunCtx.Session.LaneEvents != nil {
+					childRunCtx.Session.LaneEvents.Events = append(childRunCtx.Session.LaneEvents.Events, existingEvents...)
+				}
+			}
 		}
 	}
 
@@ -445,7 +464,7 @@ func (a *workflowAgent) runParallel(ctx context.Context, generator *AsyncGenerat
 
 			if _, ok := agentNames[agent.Name(ctx)]; ok {
 				// This branch was interrupted and needs to be resumed.
-				iterator = agent.Resume(ctx, &ResumeInfo{
+				iterator = agent.Resume(childContexts[idx], &ResumeInfo{
 					EnableStreaming: resumeInfo.EnableStreaming,
 					InterruptInfo:   resumeInfo.Data.(*WorkflowInterruptInfo).ParallelInterruptInfo[idx],
 				}, opts...)
@@ -454,7 +473,7 @@ func (a *workflowAgent) runParallel(ctx context.Context, generator *AsyncGenerat
 				// This means it finished successfully, so we don't run it.
 				return
 			} else {
-				iterator = agent.Run(ctx, nil, opts...)
+				iterator = agent.Run(childContexts[idx], nil, opts...)
 			}
 
 			for {
@@ -476,8 +495,25 @@ func (a *workflowAgent) runParallel(ctx context.Context, generator *AsyncGenerat
 
 	wg.Wait()
 
+	if len(subInterruptSignals) == 0 {
+		// Join all child contexts back to the parent
+		joinRunCtxs(ctx, childContexts...)
+		return nil
+	}
+
 	if len(subInterruptSignals) > 0 {
-		state := &parallelWorkflowState{}
+		// Before interrupting, collect the current events from each child context
+		subAgentEvents := make(map[int][]*agentEventWrapper)
+		for i, childCtx := range childContexts {
+			childRunCtx := getRunCtx(childCtx)
+			if childRunCtx != nil && childRunCtx.Session != nil && childRunCtx.Session.LaneEvents != nil {
+				subAgentEvents[i] = childRunCtx.Session.LaneEvents.Events
+			}
+		}
+
+		state := &parallelWorkflowState{
+			SubAgentEvents: subAgentEvents,
+		}
 		event := CompositeInterrupt(ctx, "Parallel workflow interrupted", state, subInterruptSignals...)
 
 		// For backward compatibility, populate the deprecated Data field.
