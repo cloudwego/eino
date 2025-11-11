@@ -111,15 +111,33 @@ func defaultGenModelInput(ctx context.Context, instruction string, input *AgentI
 	return msgs, nil
 }
 
+// ChatModelAgentState represents the state of a chat model agent during conversation.
 type ChatModelAgentState struct {
+	// History contains all messages in the current conversation session.
 	History []Message
 }
 
+// AgentMiddleware provides hooks to customize agent behavior at various stages of execution.
 type AgentMiddleware struct {
-	AppendInstruction  string
-	AppendTools        []tool.BaseTool
-	BeforeChatModel    func(context.Context, *ChatModelAgentState)
-	WrapToolCall       compose.ToolCallMiddleware
+	// AdditionalInstruction adds supplementary text to the agent's system instruction.
+	// This instruction is concatenated with the base instruction before each chat model call.
+	AdditionalInstruction string
+	
+	// AdditionalTools adds supplementary tools to the agent's available toolset.
+	// These tools are combined with the tools configured for the agent.
+	AdditionalTools []tool.BaseTool
+	
+	// BeforeChatModel is called before each chat model invocation, allowing modification of the agent state.
+	BeforeChatModel func(context.Context, *ChatModelAgentState) error
+	
+	// WrapToolCall wraps individual tool calls with custom middleware logic.
+	// It allows intercepting and modifying tool execution behavior for non-streaming calls.
+	// Note: This middleware only applies to tools that implement the InvokableTool interface.
+	WrapToolCall compose.ToolCallMiddleware
+	
+	// StreamWrapToolCall wraps streaming tool calls with custom middleware logic.
+	// It provides the same functionality as WrapToolCall but for streaming tool executions.
+	// Note: This middleware only applies to tools that implement the StreamableTool interface.
 	StreamWrapToolCall compose.StreamToolCallMiddleware
 }
 
@@ -181,7 +199,7 @@ type ChatModelAgent struct {
 
 	exit tool.BaseTool
 
-	beforeChatModels []func(context.Context, *ChatModelAgentState)
+	beforeChatModels []func(context.Context, *ChatModelAgentState) error
 
 	// runner
 	once   sync.Once
@@ -207,13 +225,13 @@ func NewChatModelAgent(_ context.Context, config *ChatModelAgentConfig) (*ChatMo
 		genInput = config.GenModelInput
 	}
 
-	beforeChatModels := make([]func(context.Context, *ChatModelAgentState), 0)
+	beforeChatModels := make([]func(context.Context, *ChatModelAgentState) error, 0)
 	sb := &strings.Builder{}
 	sb.WriteString(config.Instruction)
 	ts := config.ToolsConfig.Tools
 	for _, m := range config.Middlewares {
-		sb.WriteString(m.AppendInstruction)
-		ts = append(ts, m.AppendTools...)
+		sb.WriteString(m.AdditionalInstruction)
+		ts = append(ts, m.AdditionalTools...)
 
 		if m.WrapToolCall != nil {
 			config.ToolsConfig.ToolCallMiddlewares = append(config.ToolsConfig.ToolCallMiddlewares, m.WrapToolCall)
@@ -631,6 +649,7 @@ func (a *ChatModelAgent) buildRunFunc(ctx context.Context) runFunc {
 			toolsReturnDirectly: returnDirectly,
 			agentName:           a.name,
 			maxIterations:       a.maxIterations,
+			beforeChatModel:     a.beforeChatModels,
 		}
 
 		g, err := newReact(ctx, conf)

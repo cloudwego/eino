@@ -85,7 +85,7 @@ type reactConfig struct {
 
 	maxIterations int
 
-	beforeChatModel []func(context.Context, *ChatModelAgentState)
+	beforeChatModel []func(context.Context, *ChatModelAgentState) error
 }
 
 func genToolInfos(ctx context.Context, config *compose.ToolsNodeConfig) ([]*schema.ToolInfo, error) {
@@ -165,7 +165,10 @@ func newReact(ctx context.Context, config *reactConfig) (reactGraph, error) {
 
 		s := &ChatModelAgentState{History: append(st.Messages, input...)}
 		for _, b := range config.beforeChatModel {
-			b(ctx, s)
+			err = b(ctx, s)
+			if err != nil {
+				return nil, err
+			}
 		}
 		st.Messages = s.History
 

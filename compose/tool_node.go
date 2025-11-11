@@ -76,25 +76,40 @@ type ToolsNode struct {
 	streamToolCallMiddlewares []StreamToolCallMiddleware
 }
 
+// ToolCallInput represents the input parameters for a tool call execution.
 type ToolCallInput struct {
-	Name        string
-	Arguments   string
-	CallID      string
+	// Name is the name of the tool to be executed.
+	Name string
+	// Arguments contains the arguments for the tool call.
+	Arguments string
+	// CallID is the unique identifier for this tool call.
+	CallID string
+	// CallOptions contains tool options for the execution.
 	CallOptions []tool.Option
 }
 
+// ToolCallOutput represents the result of a non-streaming tool call execution.
 type ToolCallOutput struct {
+	// Result contains the string output from the tool execution.
 	Result string
 }
 
+// StreamToolCallOutput represents the result of a streaming tool call execution.
 type StreamToolCallOutput struct {
+	// Result is a stream reader that provides access to the tool's streaming output.
 	Result *schema.StreamReader[string]
 }
 
 type ToolCallEndpoint func(ctx context.Context, input *ToolCallInput) (*ToolCallOutput, error)
+
 type StreamToolCallEndpoint func(ctx context.Context, input *ToolCallInput) (*StreamToolCallOutput, error)
 
+// ToolCallMiddleware is a function that wraps ToolCallEndpoint to add custom processing logic.
+// It can be used to intercept, modify, or enhance tool call execution for non-streaming tools.
 type ToolCallMiddleware func(ToolCallEndpoint) ToolCallEndpoint
+
+// StreamToolCallMiddleware is a function that wraps StreamToolCallEndpoint to add custom processing logic.
+// It can be used to intercept, modify, or enhance tool call execution for streaming tools.
 type StreamToolCallMiddleware func(StreamToolCallEndpoint) StreamToolCallEndpoint
 
 // ToolsNodeConfig is the config for ToolsNode.
@@ -131,7 +146,12 @@ type ToolsNodeConfig struct {
 	//   - error: Any error that occurred during preprocessing
 	ToolArgumentsHandler func(ctx context.Context, name, arguments string) (string, error)
 
-	ToolCallMiddlewares       []ToolCallMiddleware
+	// ToolCallMiddlewares contains middleware functions for non-streaming tool calls.
+	// Note: These middlewares only apply to tools that implement the InvokableTool interface.
+	ToolCallMiddlewares []ToolCallMiddleware
+
+	// StreamToolCallMiddlewares contains middleware functions for streaming tool calls.
+	// Note: These middlewares only apply to tools that implement the StreamableTool interface.
 	StreamToolCallMiddlewares []StreamToolCallMiddleware
 }
 

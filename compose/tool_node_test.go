@@ -828,6 +828,67 @@ func TestToolRerun(t *testing.T) {
 	assert.Equal(t, "tool1 input: inputtool2 input: inputtool3 input: inputtool4 input: input", result)
 }
 
+func TestToolMiddleware(t *testing.T) {
+	ctx := context.Background()
+	t3 := &myTool3{t: t}
+	t4 := &myTool4{t: t}
+	tn, err := NewToolNode(ctx, &ToolsNodeConfig{
+		Tools: []tool.BaseTool{t3, t4},
+		ToolCallMiddlewares: []ToolCallMiddleware{
+			func(endpoint ToolCallEndpoint) ToolCallEndpoint {
+				return func(ctx context.Context, input *ToolCallInput) (*ToolCallOutput, error) {
+					_, err := endpoint(ctx, input)
+					if err != nil {
+						return nil, err
+					}
+					return &ToolCallOutput{Result: "middleware1"}, nil
+				}
+			},
+		},
+		StreamToolCallMiddlewares: []StreamToolCallMiddleware{
+			func(endpoint StreamToolCallEndpoint) StreamToolCallEndpoint {
+				return func(ctx context.Context, input *ToolCallInput) (*StreamToolCallOutput, error) {
+					_, err := endpoint(ctx, input)
+					if err != nil {
+						return nil, err
+					}
+					return &StreamToolCallOutput{Result: schema.StreamReaderFromArray([]string{"middleware2"})}, nil
+				}
+			},
+		},
+	})
+	assert.NoError(t, err)
+
+	messages, err := tn.Invoke(ctx, schema.AssistantMessage("", []schema.ToolCall{
+		{ID: "1", Function: schema.FunctionCall{Name: "tool3", Arguments: ""}},
+		{ID: "2", Function: schema.FunctionCall{Name: "tool4", Arguments: ""}},
+	}))
+	assert.NoError(t, err)
+	assert.Len(t, messages, 2)
+	assert.Equal(t, "middleware1", messages[0].Content)
+	assert.Equal(t, "middleware2", messages[1].Content)
+
+	t3.times, t4.times = 0, 0 // reset t3 t4
+	messageStreams, err := tn.Stream(ctx, schema.AssistantMessage("", []schema.ToolCall{
+		{ID: "1", Function: schema.FunctionCall{Name: "tool3", Arguments: ""}},
+		{ID: "2", Function: schema.FunctionCall{Name: "tool4", Arguments: ""}},
+	}))
+	assert.NoError(t, err)
+	var messageArray [][]*schema.Message
+	for {
+		chunk, err := messageStreams.Recv()
+		if err == io.EOF {
+			break
+		}
+		assert.NoError(t, err)
+		messageArray = append(messageArray, chunk)
+	}
+	messages, err = schema.ConcatMessageArray(messageArray)
+	assert.Len(t, messages, 2)
+	assert.Equal(t, "middleware1", messages[0].Content)
+	assert.Equal(t, "middleware2", messages[1].Content)
+}
+
 type myTool1 struct {
 	times uint
 }
