@@ -230,6 +230,7 @@ func NewChatModelAgent(_ context.Context, config *ChatModelAgentConfig) (*ChatMo
 	sb.WriteString(config.Instruction)
 	ts := config.ToolsConfig.Tools
 	for _, m := range config.Middlewares {
+		sb.WriteString("\n")
 		sb.WriteString(m.AdditionalInstruction)
 		ts = append(ts, m.AdditionalTools...)
 
