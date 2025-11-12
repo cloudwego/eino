@@ -141,6 +141,7 @@ func (rs *runSession) getEvents() []*agentEventWrapper {
 	rs.mtx.Unlock()
 
 	// Then, assemble the in-flight events by traversing the linked list.
+	// Reading the .Parent pointer is safe without a lock because the parent of a lane is immutable after creation.
 	var laneSlices [][]*agentEventWrapper
 	totalLaneSize := 0
 	for lane := rs.LaneEvents; lane != nil; lane = lane.Parent {

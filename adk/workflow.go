@@ -441,7 +441,10 @@ func (a *workflowAgent) runParallel(ctx context.Context, generator *AsyncGenerat
 			if existingEvents, ok := parState.SubAgentEvents[i]; ok {
 				// Add existing events to the child's lane events
 				childRunCtx := getRunCtx(childContexts[i])
-				if childRunCtx != nil && childRunCtx.Session != nil && childRunCtx.Session.LaneEvents != nil {
+				if childRunCtx != nil && childRunCtx.Session != nil {
+					if childRunCtx.Session.LaneEvents == nil {
+						childRunCtx.Session.LaneEvents = &laneEvents{}
+					}
 					childRunCtx.Session.LaneEvents.Events = append(childRunCtx.Session.LaneEvents.Events, existingEvents...)
 				}
 			}

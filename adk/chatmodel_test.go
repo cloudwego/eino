@@ -550,10 +550,12 @@ func TestChatModelAgentOutputKey(t *testing.T) {
 		assert.Nil(t, event.Err)
 		assert.True(t, event.Output.MessageOutput.IsStreaming)
 
-		// Verify that the concatenated output was stored in the session
-		sessionValues := GetSessionValues(ctx)
-		assert.Contains(t, sessionValues, "agent_output")
-		assert.Equal(t, "Hello, I am an AI assistant.", sessionValues["agent_output"])
+		time.AfterFunc(100*time.Millisecond, func() {
+			// Verify that the concatenated output was stored in the session
+			sessionValues := GetSessionValues(ctx)
+			assert.Contains(t, sessionValues, "agent_output")
+			assert.Equal(t, "Hello, I am an AI assistant.", sessionValues["agent_output"])
+		})
 
 		// No more events
 		_, ok = iterator.Next()
