@@ -233,7 +233,7 @@ func NewChatModelAgent(_ context.Context, config *ChatModelAgentConfig) (*ChatMo
 		sb.WriteString(m.AdditionalInstruction)
 		tc.Tools = append(tc.Tools, m.AdditionalTools...)
 
-		if m.WrapToolCall != nil {
+		if m.WrapToolCall.Invokable != nil || m.WrapToolCall.Streamable != nil {
 			tc.ToolCallMiddlewares = append(tc.ToolCallMiddlewares, m.WrapToolCall)
 		}
 		if m.BeforeChatModel != nil {
