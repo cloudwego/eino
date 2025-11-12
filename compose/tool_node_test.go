@@ -20,6 +20,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -754,20 +755,6 @@ func TestToolRerun(t *testing.T) {
 
 	tc := []schema.ToolCall{
 		{
-			ID: "1",
-			Function: schema.FunctionCall{
-				Name:      "tool1",
-				Arguments: "input",
-			},
-		},
-		{
-			ID: "2",
-			Function: schema.FunctionCall{
-				Name:      "tool2",
-				Arguments: "input",
-			},
-		},
-		{
 			ID: "3",
 			Function: schema.FunctionCall{
 				Name:      "tool3",
@@ -778,6 +765,20 @@ func TestToolRerun(t *testing.T) {
 			ID: "4",
 			Function: schema.FunctionCall{
 				Name:      "tool4",
+				Arguments: "input",
+			},
+		},
+		{
+			ID: "1",
+			Function: schema.FunctionCall{
+				Name:      "tool1",
+				Arguments: "input",
+			},
+		},
+		{
+			ID: "2",
+			Function: schema.FunctionCall{
+				Name:      "tool2",
 				Arguments: "input",
 			},
 		},
@@ -794,9 +795,18 @@ func TestToolRerun(t *testing.T) {
 		return state.In, nil
 	})))
 	assert.NoError(t, g.AddLambdaNode("lambda", InvokableLambda(func(ctx context.Context, input []*schema.Message) (output string, err error) {
-		sb := strings.Builder{}
+		contents := make([]string, len(input))
 		for _, m := range input {
-			sb.WriteString(m.Content)
+			callID := m.ToolCallID
+			callIDInt, err := strconv.Atoi(callID)
+			if err != nil {
+				return "", err
+			}
+			contents[callIDInt-1] = m.Content
+		}
+		sb := strings.Builder{}
+		for _, m := range contents {
+			sb.WriteString(m)
 		}
 		return sb.String(), nil
 	})))

@@ -352,7 +352,10 @@ func parallelRunToolCall(ctx context.Context,
 		}(ctx, &tasks[i], opts...)
 	}
 
-	run(ctx, &tasks[0], opts...)
+	if !tasks[0].executed {
+		run(ctx, &tasks[0], opts...)
+	}
+
 	wg.Wait()
 }
 
