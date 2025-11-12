@@ -20,8 +20,12 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/bytedance/sonic"
+
 	"github.com/cloudwego/eino/adk"
 	"github.com/cloudwego/eino/components/model"
+	"github.com/cloudwego/eino/components/tool"
+	"github.com/cloudwego/eino/components/tool/utils"
 )
 
 // AgentSetup contains the runtime configuration for a DeepAgent instance.
@@ -103,4 +107,45 @@ func New(ctx context.Context, cfg *Config) (adk.Agent, error) {
 		MaxIterations: cfg.MaxIteration,
 		Middlewares:   append(cfg.Middlewares, middlewares...),
 	})
+}
+
+func buildBuiltinAgentMiddlewares(withoutWriteTodos bool) ([]adk.AgentMiddleware, error) {
+	var ms []adk.AgentMiddleware
+	if !withoutWriteTodos {
+		t, err := newWriteTodos()
+		if err != nil {
+			return nil, err
+		}
+		ms = append(ms, t)
+	}
+
+	return ms, nil
+}
+
+type TODO struct {
+	Content string `json:"content"`
+	Status  string `json:"status" jsonschema:"enum=pending,enum=in_progress,enum=completed"`
+}
+
+type writeTodosArguments struct {
+	Todos []TODO `json:"todos"`
+}
+
+func newWriteTodos() (adk.AgentMiddleware, error) {
+	t, err := utils.InferTool("write_todos", writeTodosToolDescription, func(ctx context.Context, input writeTodosArguments) (output string, err error) {
+		adk.AddSessionValue(ctx, SessionKeyTodos, input.Todos)
+		todos, err := sonic.MarshalString(input.Todos)
+		if err != nil {
+			return "", err
+		}
+		return fmt.Sprintf("Updated todo list to %s", todos), nil
+	})
+	if err != nil {
+		return adk.AgentMiddleware{}, err
+	}
+
+	return adk.AgentMiddleware{
+		AdditionalInstruction: writeTodosPrompt,
+		AdditionalTools:       []tool.BaseTool{t},
+	}, nil
 }

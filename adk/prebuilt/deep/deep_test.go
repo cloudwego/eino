@@ -15,3 +15,27 @@
  */
 
 package deep
+
+import (
+	"context"
+	"fmt"
+	"testing"
+
+	"github.com/stretchr/testify/assert"
+
+	"github.com/cloudwego/eino/components/tool"
+)
+
+func TestWriteTodos(t *testing.T) {
+	m, err := buildBuiltinAgentMiddlewares(false)
+	assert.NoError(t, err)
+
+	wt := m[0].AdditionalTools[0].(tool.InvokableTool)
+
+	todos := `[{"content":"content1","status":"pending"},{"content":"content2","status":"pending"}]`
+	args := fmt.Sprintf(`{"todos": %s}`, todos)
+
+	result, err := wt.InvokableRun(context.Background(), args)
+	assert.NoError(t, err)
+	assert.Equal(t, fmt.Sprintf("Updated todo list to %s", todos), result)
+}
