@@ -1,6 +1,8 @@
 package summary
 
-const SummaryPrompt = `<role>
+const DefaultMaxTokensBeforeSummary = 128 * 1024
+const DefaultMaxTokensForRecentMessages = 25 * 1024 // 20% of DefaultMaxTokensBeforeSummary
+const PromptOfSummary = `<role>
 Conversation Summarization Assistant for Multi-turn LLM Agent
 </role>
 
@@ -18,8 +20,9 @@ allowing the agent to continue reasoning seamlessly without re-accessing the raw
 </contextual_goals>
 
 <instructions>
-1. You will receive four tagged sections:
+1. You will receive five tagged sections:
    - The **system_prompt tag** — provides the current System Prompt (for reference only, do not summarize).
+   - The **user_messages tag** — contains early or persistent user instructions, preferences, and goals. Use it to maintain alignment with the user's long-term intent(for reference only, do not summarize).
    - The **previous_summary tag** — contains the existing long-term summary, if available.
    - The **older_messages tag** — includes earlier conversation messages to be summarized.
    - The **recent_messages tag** — contains the most recent conversation window (for reference only, do not summarize).
@@ -27,6 +30,7 @@ allowing the agent to continue reasoning seamlessly without re-accessing the raw
 2. Your task:
    - Merge the content from the previous_summary tag and the older_messages tag into a new refined long-term summary.
    - When summarizing, integrate the key takeaways, decisions, lessons, and relevant state information.
+   - Use the user_messages tag to ensure the summary preserves the user's persistent intent and constraints (ignore transient chit-chat).
    - Use the recent_messages tag only to maintain temporal and contextual continuity across turns.
 
 3. Output requirements:
