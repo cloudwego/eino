@@ -83,7 +83,7 @@ func New(ctx context.Context, cfg *Config) (*adk.AgentMiddleware, error) {
 	if cfg.Counter != nil {
 		sm.counter = cfg.Counter
 	}
-	return &adk.AgentMiddleware{BeforeModel: sm.BeforeModel}, nil
+	return &adk.AgentMiddleware{BeforeChatModel: sm.BeforeModel}, nil
 }
 
 const summaryMessageFlag = "_agent_middleware_summary_message"
@@ -96,15 +96,12 @@ type summaryMiddleware struct {
 	summarizer compose.Runnable[map[string]any, *schema.Message]
 }
 
-func (s *summaryMiddleware) BeforeModel(ctx context.Context, origin *adk.ChatModelAgentState) (err error) {
-	if origin == nil || len(origin.History) == 0 {
+func (s *summaryMiddleware) BeforeModel(ctx context.Context, state *adk.ChatModelAgentState) (err error) {
+	if state == nil || len(state.Messages) == 0 {
 		return nil
 	}
 
-	messages := make([]*schema.Message, 0, len(origin.History)+1)
-	messages = append(messages, schema.SystemMessage(origin.SystemPrompt))
-	messages = append(messages, origin.History...)
-
+	messages := state.Messages
 	msgsToken, err := s.counter(ctx, messages)
 	if err != nil {
 		return fmt.Errorf("count token failed, err=%w", err)
@@ -131,6 +128,16 @@ func (s *summaryMiddleware) BeforeModel(ctx context.Context, origin *adk.ChatMod
 		tokens int64
 	}
 	idx := 0
+
+	systemBlock := block{}
+	if idx < len(messages) {
+		m := messages[idx]
+		if m != nil && m.Role == schema.System {
+			systemBlock.msgs = append(systemBlock.msgs, m)
+			systemBlock.tokens += msgsToken[idx]
+			idx++
+		}
+	}
 	userBlock := block{}
 	for idx < len(messages) {
 		m := messages[idx]
@@ -222,12 +229,11 @@ func (s *summaryMiddleware) BeforeModel(ctx context.Context, origin *adk.ChatMod
 		return sb.String()
 	}
 
-	systemPrompt := origin.SystemPrompt
 	olderText := joinBlocks(olderBlocks)
 	recentText := joinBlocks(recentBlocks)
 
 	msg, err := s.summarizer.Invoke(ctx, map[string]any{
-		"system_prompt":    systemPrompt,
+		"system_prompt":    joinBlocks([]block{systemBlock}),
 		"user_messages":    joinBlocks([]block{userBlock}),
 		"previous_summary": joinBlocks([]block{summaryBlock}),
 		"older_messages":   olderText,
@@ -244,13 +250,14 @@ func (s *summaryMiddleware) BeforeModel(ctx context.Context, origin *adk.ChatMod
 	msg.Name = "summary"
 	// Build new state: prepend summary message, keep recent messages
 	newMessages := make([]*schema.Message, 0, 1+len(recentBlocks))
+	newMessages = append(newMessages, systemBlock.msgs...)
 	newMessages = append(newMessages, userBlock.msgs...)
 	newMessages = append(newMessages, msg)
 	for _, b := range recentBlocks {
 		newMessages = append(newMessages, b.msgs...)
 	}
 
-	origin.History = newMessages
+	state.Messages = newMessages
 	return nil
 }
 
