@@ -94,5 +94,13 @@ func New(ctx context.Context, cfg *Config) (adk.Agent, error) {
 	}
 	middlewares = append(middlewares, tt)
 
-	return newAgentWithSetupHooks(cfg.Name, cfg.Description, actx, append(cfg.Middlewares, middlewares...)), nil
+	return adk.NewChatModelAgent(ctx, &adk.ChatModelAgentConfig{
+		Name:          cfg.Name,
+		Description:   cfg.Description,
+		Instruction:   cfg.Instruction,
+		Model:         cfg.ChatModel,
+		ToolsConfig:   cfg.ToolsConfig,
+		MaxIterations: cfg.MaxIteration,
+		Middlewares:   append(cfg.Middlewares, middlewares...),
+	})
 }
