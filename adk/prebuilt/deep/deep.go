@@ -46,8 +46,6 @@ type Config struct {
 	// MaxIteration limits the maximum number of reasoning iterations the agent can perform.
 	MaxIteration int
 
-	Middlewares []adk.AgentMiddleware
-
 	// WithoutWriteTodos disables the built-in write_todos tool when set to true.
 	WithoutWriteTodos bool
 	// WithoutGeneralSubAgent disables the general-purpose subagent when set to true.
@@ -76,7 +74,7 @@ func New(ctx context.Context, cfg *Config) (adk.Agent, error) {
 		cfg.Instruction,
 		cfg.ToolsConfig,
 		cfg.MaxIteration,
-		append(cfg.Middlewares, middlewares...),
+		middlewares, // append(cfg.Middlewares, middlewares...),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("failed to new task tool: %w", err)
@@ -90,7 +88,7 @@ func New(ctx context.Context, cfg *Config) (adk.Agent, error) {
 		Model:         cfg.ChatModel,
 		ToolsConfig:   cfg.ToolsConfig,
 		MaxIterations: cfg.MaxIteration,
-		Middlewares:   append(cfg.Middlewares, middlewares...),
+		Middlewares:   middlewares, //append(cfg.Middlewares, middlewares...),
 	})
 }
 
