@@ -834,26 +834,28 @@ func TestToolMiddleware(t *testing.T) {
 	t4 := &myTool4{t: t}
 	tn, err := NewToolNode(ctx, &ToolsNodeConfig{
 		Tools: []tool.BaseTool{t3, t4},
-		ToolCallMiddlewares: []InvokableToolMiddleware{
-			func(endpoint InvokableToolEndpoint) InvokableToolEndpoint {
-				return func(ctx context.Context, input *ToolInput) (*ToolOutput, error) {
-					_, err := endpoint(ctx, input)
-					if err != nil {
-						return nil, err
+		ToolCallMiddlewares: []ToolMiddleware{
+			{
+				Invokable: func(endpoint InvokableToolEndpoint) InvokableToolEndpoint {
+					return func(ctx context.Context, input *ToolInput) (*ToolOutput, error) {
+						_, err := endpoint(ctx, input)
+						if err != nil {
+							return nil, err
+						}
+						return &ToolOutput{Result: "middleware1"}, nil
 					}
-					return &ToolOutput{Result: "middleware1"}, nil
-				}
+				},
 			},
-		},
-		StreamToolCallMiddlewares: []StreamableToolMiddleware{
-			func(endpoint StreamableToolEndpoint) StreamableToolEndpoint {
-				return func(ctx context.Context, input *ToolInput) (*StreamToolOutput, error) {
-					_, err := endpoint(ctx, input)
-					if err != nil {
-						return nil, err
+			{
+				Streamable: func(endpoint StreamableToolEndpoint) StreamableToolEndpoint {
+					return func(ctx context.Context, input *ToolInput) (*StreamToolOutput, error) {
+						_, err := endpoint(ctx, input)
+						if err != nil {
+							return nil, err
+						}
+						return &StreamToolOutput{Result: schema.StreamReaderFromArray([]string{"middleware2"})}, nil
 					}
-					return &StreamToolOutput{Result: schema.StreamReaderFromArray([]string{"middleware2"})}, nil
-				}
+				},
 			},
 		},
 	})
