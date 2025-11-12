@@ -255,10 +255,10 @@ func convTools(ctx context.Context, tools []tool.BaseTool, ms []InvokableToolMid
 		}
 
 		if streamable == nil {
-			streamable = invokable2Streamable(invokable)
+			streamable = invokableToStreamable(invokable)
 		}
 		if invokable == nil {
-			invokable = streamable2Invokable(streamable)
+			invokable = streamableToInvokable(streamable)
 		}
 
 		ret.indexes[toolName] = idx
@@ -331,7 +331,7 @@ func (s *streamableToolWithCallback) StreamableRun(ctx context.Context, argument
 	return streamWithCallbacks(s.st.StreamableRun)(ctx, argumentsInJSON, opts...)
 }
 
-func streamable2Invokable(e StreamableToolEndpoint) InvokableToolEndpoint {
+func streamableToInvokable(e StreamableToolEndpoint) InvokableToolEndpoint {
 	return func(ctx context.Context, input *ToolInput) (*ToolOutput, error) {
 		so, err := e(ctx, input)
 		if err != nil {
@@ -345,7 +345,7 @@ func streamable2Invokable(e StreamableToolEndpoint) InvokableToolEndpoint {
 	}
 }
 
-func invokable2Streamable(e InvokableToolEndpoint) StreamableToolEndpoint {
+func invokableToStreamable(e InvokableToolEndpoint) StreamableToolEndpoint {
 	return func(ctx context.Context, input *ToolInput) (*StreamToolOutput, error) {
 		o, err := e(ctx, input)
 		if err != nil {
@@ -438,7 +438,7 @@ func newUnknownToolTask(name, arg, callID string, unknownToolHandler func(ctx co
 	}
 	return toolCallTask{
 		endpoint:       endpoint,
-		streamEndpoint: invokable2Streamable(endpoint),
+		streamEndpoint: invokableToStreamable(endpoint),
 		meta: &executorMeta{
 			component:                  components.ComponentOfTool,
 			isComponentCallbackEnabled: false,
