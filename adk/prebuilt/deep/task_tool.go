@@ -31,7 +31,7 @@ import (
 	"github.com/cloudwego/eino/schema"
 )
 
-func buildTaskToolSetupHook(
+func newTaskToolMiddleware(
 	ctx context.Context,
 	taskToolDescriptionGenerator func(ctx context.Context, subAgents []adk.Agent) (string, error),
 	subAgents []adk.Agent,

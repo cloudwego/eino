@@ -77,7 +77,7 @@ func New(ctx context.Context, cfg *Config) (adk.Agent, error) {
 		return nil, err
 	}
 
-	tt, err := buildTaskToolSetupHook(
+	tt, err := newTaskToolMiddleware(
 		ctx,
 		cfg.TaskToolDescriptionGenerator,
 		cfg.SubAgents,
