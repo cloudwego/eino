@@ -114,7 +114,7 @@ func defaultGenModelInput(ctx context.Context, instruction string, input *AgentI
 // ChatModelAgentState represents the state of a chat model agent during conversation.
 type ChatModelAgentState struct {
 	// History contains all messages in the current conversation session.
-	History []Message
+	Messages []Message
 }
 
 // AgentMiddleware provides hooks to customize agent behavior at various stages of execution.
@@ -127,8 +127,11 @@ type AgentMiddleware struct {
 	// These tools are combined with the tools configured for the agent.
 	AdditionalTools []tool.BaseTool
 
-	// BeforeChatModel is called before each chat model invocation, allowing modification of the agent state.
+	// BeforeChatModel is called before each ChatModel invocation, allowing modification of the agent state.
 	BeforeChatModel func(context.Context, *ChatModelAgentState) error
+
+	// AfterChatModel is called after each ChatModel invocation, allowing modification of the agent state.
+	AfterChatModel func(context.Context, *ChatModelAgentState) error
 
 	// WrapToolCall wraps individual tool calls with custom middleware logic.
 	// It allows intercepting and modifying tool execution behavior for non-streaming calls.
@@ -199,7 +202,7 @@ type ChatModelAgent struct {
 
 	exit tool.BaseTool
 
-	beforeChatModels []func(context.Context, *ChatModelAgentState) error
+	beforeChatModels, afterChatModels []func(context.Context, *ChatModelAgentState) error
 
 	// runner
 	once   sync.Once
@@ -226,6 +229,7 @@ func NewChatModelAgent(_ context.Context, config *ChatModelAgentConfig) (*ChatMo
 	}
 
 	beforeChatModels := make([]func(context.Context, *ChatModelAgentState) error, 0)
+	afterChatModels := make([]func(context.Context, *ChatModelAgentState) error, 0)
 	sb := &strings.Builder{}
 	sb.WriteString(config.Instruction)
 	tc := config.ToolsConfig
@@ -243,6 +247,9 @@ func NewChatModelAgent(_ context.Context, config *ChatModelAgentConfig) (*ChatMo
 		if m.BeforeChatModel != nil {
 			beforeChatModels = append(beforeChatModels, m.BeforeChatModel)
 		}
+		if m.AfterChatModel != nil {
+			afterChatModels = append(afterChatModels, m.AfterChatModel)
+		}
 	}
 
 	return &ChatModelAgent{
@@ -256,6 +263,7 @@ func NewChatModelAgent(_ context.Context, config *ChatModelAgentConfig) (*ChatMo
 		outputKey:        config.OutputKey,
 		maxIterations:    config.MaxIterations,
 		beforeChatModels: beforeChatModels,
+		afterChatModels:  afterChatModels,
 	}, nil
 }
 
@@ -650,6 +658,7 @@ func (a *ChatModelAgent) buildRunFunc(ctx context.Context) runFunc {
 			agentName:           a.name,
 			maxIterations:       a.maxIterations,
 			beforeChatModel:     a.beforeChatModels,
+			afterChatModel:      a.afterChatModels,
 		}
 
 		g, err := newReact(ctx, conf)
