@@ -64,6 +64,8 @@ func New(ctx context.Context, cfg *Config) (adk.Agent, error) {
 		return nil, err
 	}
 
+	middlewares = append([]adk.AgentMiddleware{{AdditionalInstruction: baseAgentPrompt}}, middlewares...)
+
 	tt, err := newTaskToolMiddleware(
 		ctx,
 		cfg.TaskToolDescriptionGenerator,
