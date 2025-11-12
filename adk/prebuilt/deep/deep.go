@@ -28,21 +28,6 @@ import (
 	"github.com/cloudwego/eino/components/tool/utils"
 )
 
-// AgentSetup contains the runtime configuration for a DeepAgent instance.
-type AgentSetup struct {
-	// Model is used by the agent for reasoning and generating responses.
-	Model model.ToolCallingChatModel
-	// Instruction contains the system prompt or initial instructions that guide
-	// the agent's behavior and decision-making process throughout its execution.
-	Instruction string
-	// ToolsConfig defines the available tools and their configurations that the agent
-	// can invoke during its reasoning process to accomplish tasks.
-	ToolsConfig adk.ToolsConfig
-	// MaxIteration specifies the maximum number of reasoning iterations the agent
-	// can perform before stopping, preventing infinite loops or excessive computation.
-	MaxIteration int
-}
-
 // Config defines the configuration for creating a DeepAgent.
 type Config struct {
 	// Name is the identifier for the Deep agent.
@@ -94,7 +79,7 @@ func New(ctx context.Context, cfg *Config) (adk.Agent, error) {
 		append(cfg.Middlewares, middlewares...),
 	)
 	if err != nil {
-		return nil, fmt.Errorf("new task tool: %w", err)
+		return nil, fmt.Errorf("failed to new task tool: %w", err)
 	}
 	middlewares = append(middlewares, tt)
 
