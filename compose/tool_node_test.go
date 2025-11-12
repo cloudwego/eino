@@ -834,25 +834,25 @@ func TestToolMiddleware(t *testing.T) {
 	t4 := &myTool4{t: t}
 	tn, err := NewToolNode(ctx, &ToolsNodeConfig{
 		Tools: []tool.BaseTool{t3, t4},
-		ToolCallMiddlewares: []ToolCallMiddleware{
-			func(endpoint ToolCallEndpoint) ToolCallEndpoint {
-				return func(ctx context.Context, input *ToolCallInput) (*ToolCallOutput, error) {
+		ToolCallMiddlewares: []InvokableToolMiddleware{
+			func(endpoint InvokableToolEndpoint) InvokableToolEndpoint {
+				return func(ctx context.Context, input *ToolInput) (*ToolOutput, error) {
 					_, err := endpoint(ctx, input)
 					if err != nil {
 						return nil, err
 					}
-					return &ToolCallOutput{Result: "middleware1"}, nil
+					return &ToolOutput{Result: "middleware1"}, nil
 				}
 			},
 		},
-		StreamToolCallMiddlewares: []StreamToolCallMiddleware{
-			func(endpoint StreamToolCallEndpoint) StreamToolCallEndpoint {
-				return func(ctx context.Context, input *ToolCallInput) (*StreamToolCallOutput, error) {
+		StreamToolCallMiddlewares: []StreamableToolMiddleware{
+			func(endpoint StreamableToolEndpoint) StreamableToolEndpoint {
+				return func(ctx context.Context, input *ToolInput) (*StreamToolOutput, error) {
 					_, err := endpoint(ctx, input)
 					if err != nil {
 						return nil, err
 					}
-					return &StreamToolCallOutput{Result: schema.StreamReaderFromArray([]string{"middleware2"})}, nil
+					return &StreamToolOutput{Result: schema.StreamReaderFromArray([]string{"middleware2"})}, nil
 				}
 			},
 		},

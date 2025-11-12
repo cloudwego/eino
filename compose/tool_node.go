@@ -72,12 +72,12 @@ type ToolsNode struct {
 	unknownToolHandler        func(ctx context.Context, name, input string) (string, error)
 	executeSequentially       bool
 	toolArgumentsHandler      func(ctx context.Context, name, input string) (string, error)
-	toolCallMiddlewares       []ToolCallMiddleware
-	streamToolCallMiddlewares []StreamToolCallMiddleware
+	toolCallMiddlewares       []InvokableToolMiddleware
+	streamToolCallMiddlewares []StreamableToolMiddleware
 }
 
-// ToolCallInput represents the input parameters for a tool call execution.
-type ToolCallInput struct {
+// ToolInput represents the input parameters for a tool call execution.
+type ToolInput struct {
 	// Name is the name of the tool to be executed.
 	Name string
 	// Arguments contains the arguments for the tool call.
@@ -88,29 +88,39 @@ type ToolCallInput struct {
 	CallOptions []tool.Option
 }
 
-// ToolCallOutput represents the result of a non-streaming tool call execution.
-type ToolCallOutput struct {
+// ToolOutput represents the result of a non-streaming tool call execution.
+type ToolOutput struct {
 	// Result contains the string output from the tool execution.
 	Result string
 }
 
-// StreamToolCallOutput represents the result of a streaming tool call execution.
-type StreamToolCallOutput struct {
+// StreamToolOutput represents the result of a streaming tool call execution.
+type StreamToolOutput struct {
 	// Result is a stream reader that provides access to the tool's streaming output.
 	Result *schema.StreamReader[string]
 }
 
-type ToolCallEndpoint func(ctx context.Context, input *ToolCallInput) (*ToolCallOutput, error)
+type InvokableToolEndpoint func(ctx context.Context, input *ToolInput) (*ToolOutput, error)
 
-type StreamToolCallEndpoint func(ctx context.Context, input *ToolCallInput) (*StreamToolCallOutput, error)
+type StreamableToolEndpoint func(ctx context.Context, input *ToolInput) (*StreamToolOutput, error)
 
-// ToolCallMiddleware is a function that wraps ToolCallEndpoint to add custom processing logic.
+// InvokableToolMiddleware is a function that wraps InvokableToolEndpoint to add custom processing logic.
 // It can be used to intercept, modify, or enhance tool call execution for non-streaming tools.
-type ToolCallMiddleware func(ToolCallEndpoint) ToolCallEndpoint
+type InvokableToolMiddleware func(InvokableToolEndpoint) InvokableToolEndpoint
 
-// StreamToolCallMiddleware is a function that wraps StreamToolCallEndpoint to add custom processing logic.
+// StreamableToolMiddleware is a function that wraps StreamableToolEndpoint to add custom processing logic.
 // It can be used to intercept, modify, or enhance tool call execution for streaming tools.
-type StreamToolCallMiddleware func(StreamToolCallEndpoint) StreamToolCallEndpoint
+type StreamableToolMiddleware func(StreamableToolEndpoint) StreamableToolEndpoint
+
+type ToolMiddleware struct {
+	// Invokable contains middleware function for non-streaming tool calls.
+	// Note: This middleware only applies to tools that implement the InvokableTool interface.
+	Invokable InvokableToolMiddleware
+
+	// Streamable contains middleware function for streaming tool calls.
+	// Note: This middleware only applies to tools that implement the StreamableTool interface.
+	Streamable StreamableToolMiddleware
+}
 
 // ToolsNodeConfig is the config for ToolsNode.
 type ToolsNodeConfig struct {
@@ -146,13 +156,11 @@ type ToolsNodeConfig struct {
 	//   - error: Any error that occurred during preprocessing
 	ToolArgumentsHandler func(ctx context.Context, name, arguments string) (string, error)
 
-	// ToolCallMiddlewares contains middleware functions for non-streaming tool calls.
-	// Note: These middlewares only apply to tools that implement the InvokableTool interface.
-	ToolCallMiddlewares []ToolCallMiddleware
-
-	// StreamToolCallMiddlewares contains middleware functions for streaming tool calls.
-	// Note: These middlewares only apply to tools that implement the StreamableTool interface.
-	StreamToolCallMiddlewares []StreamToolCallMiddleware
+	// ToolCallMiddlewares configures middleware for tool calls.
+	// Each element can contain Invokable and/or Streamable middleware.
+	// Invokable middleware only applies to tools implementing InvokableTool interface.
+	// Streamable middleware only applies to tools implementing StreamableTool interface.
+	ToolCallMiddlewares []ToolMiddleware
 }
 
 // NewToolNode creates a new ToolsNode.
@@ -163,7 +171,18 @@ type ToolsNodeConfig struct {
 //	}
 //	toolsNode, err := NewToolNode(ctx, conf)
 func NewToolNode(ctx context.Context, conf *ToolsNodeConfig) (*ToolsNode, error) {
-	tuple, err := convTools(ctx, conf.Tools, conf.ToolCallMiddlewares, conf.StreamToolCallMiddlewares)
+	var middlewares []InvokableToolMiddleware
+	var streamMiddlewares []StreamableToolMiddleware
+	for _, m := range conf.ToolCallMiddlewares {
+		if m.Invokable != nil {
+			middlewares = append(middlewares, m.Invokable)
+		}
+		if m.Streamable != nil {
+			streamMiddlewares = append(streamMiddlewares, m.Streamable)
+		}
+	}
+
+	tuple, err := convTools(ctx, conf.Tools, middlewares, streamMiddlewares)
 	if err != nil {
 		return nil, err
 	}
@@ -173,8 +192,8 @@ func NewToolNode(ctx context.Context, conf *ToolsNodeConfig) (*ToolsNode, error)
 		unknownToolHandler:        conf.UnknownToolsHandler,
 		executeSequentially:       conf.ExecuteSequentially,
 		toolArgumentsHandler:      conf.ToolArgumentsHandler,
-		toolCallMiddlewares:       conf.ToolCallMiddlewares,
-		streamToolCallMiddlewares: conf.StreamToolCallMiddlewares,
+		toolCallMiddlewares:       middlewares,
+		streamToolCallMiddlewares: streamMiddlewares,
 	}, nil
 }
 
@@ -192,16 +211,16 @@ func init() {
 type toolsTuple struct {
 	indexes         map[string]int
 	meta            []*executorMeta
-	endpoints       []ToolCallEndpoint
-	streamEndpoints []StreamToolCallEndpoint
+	endpoints       []InvokableToolEndpoint
+	streamEndpoints []StreamableToolEndpoint
 }
 
-func convTools(ctx context.Context, tools []tool.BaseTool, ms []ToolCallMiddleware, sms []StreamToolCallMiddleware) (*toolsTuple, error) {
+func convTools(ctx context.Context, tools []tool.BaseTool, ms []InvokableToolMiddleware, sms []StreamableToolMiddleware) (*toolsTuple, error) {
 	ret := &toolsTuple{
 		indexes:         make(map[string]int),
 		meta:            make([]*executorMeta, len(tools)),
-		endpoints:       make([]ToolCallEndpoint, len(tools)),
-		streamEndpoints: make([]StreamToolCallEndpoint, len(tools)),
+		endpoints:       make([]InvokableToolEndpoint, len(tools)),
+		streamEndpoints: make([]StreamableToolEndpoint, len(tools)),
 	}
 	for idx, bt := range tools {
 		tl, err := bt.Info(ctx)
@@ -214,8 +233,8 @@ func convTools(ctx context.Context, tools []tool.BaseTool, ms []ToolCallMiddlewa
 			st tool.StreamableTool
 			it tool.InvokableTool
 
-			invokable  ToolCallEndpoint
-			streamable StreamToolCallEndpoint
+			invokable  InvokableToolEndpoint
+			streamable StreamableToolEndpoint
 
 			ok   bool
 			meta *executorMeta
@@ -250,8 +269,8 @@ func convTools(ctx context.Context, tools []tool.BaseTool, ms []ToolCallMiddlewa
 	return ret, nil
 }
 
-func wrapToolCall(it tool.InvokableTool, middlewares []ToolCallMiddleware, needCallback bool) ToolCallEndpoint {
-	middleware := func(next ToolCallEndpoint) ToolCallEndpoint {
+func wrapToolCall(it tool.InvokableTool, middlewares []InvokableToolMiddleware, needCallback bool) InvokableToolEndpoint {
+	middleware := func(next InvokableToolEndpoint) InvokableToolEndpoint {
 		for i := len(middlewares) - 1; i >= 0; i-- {
 			next = middlewares[i](next)
 		}
@@ -260,17 +279,17 @@ func wrapToolCall(it tool.InvokableTool, middlewares []ToolCallMiddleware, needC
 	if needCallback {
 		it = &invokableToolWithCallback{it: it}
 	}
-	return middleware(func(ctx context.Context, input *ToolCallInput) (*ToolCallOutput, error) {
+	return middleware(func(ctx context.Context, input *ToolInput) (*ToolOutput, error) {
 		result, err := it.InvokableRun(ctx, input.Arguments, input.CallOptions...)
 		if err != nil {
 			return nil, err
 		}
-		return &ToolCallOutput{Result: result}, nil
+		return &ToolOutput{Result: result}, nil
 	})
 }
 
-func wrapStreamToolCall(st tool.StreamableTool, middlewares []StreamToolCallMiddleware, needCallback bool) StreamToolCallEndpoint {
-	middleware := func(next StreamToolCallEndpoint) StreamToolCallEndpoint {
+func wrapStreamToolCall(st tool.StreamableTool, middlewares []StreamableToolMiddleware, needCallback bool) StreamableToolEndpoint {
+	middleware := func(next StreamableToolEndpoint) StreamableToolEndpoint {
 		for i := len(middlewares) - 1; i >= 0; i-- {
 			next = middlewares[i](next)
 		}
@@ -279,12 +298,12 @@ func wrapStreamToolCall(st tool.StreamableTool, middlewares []StreamToolCallMidd
 	if needCallback {
 		st = &streamableToolWithCallback{st: st}
 	}
-	return middleware(func(ctx context.Context, input *ToolCallInput) (*StreamToolCallOutput, error) {
+	return middleware(func(ctx context.Context, input *ToolInput) (*StreamToolOutput, error) {
 		result, err := st.StreamableRun(ctx, input.Arguments, input.CallOptions...)
 		if err != nil {
 			return nil, err
 		}
-		return &StreamToolCallOutput{Result: result}, nil
+		return &StreamToolOutput{Result: result}, nil
 	})
 }
 
@@ -312,8 +331,8 @@ func (s *streamableToolWithCallback) StreamableRun(ctx context.Context, argument
 	return streamWithCallbacks(s.st.StreamableRun)(ctx, argumentsInJSON, opts...)
 }
 
-func streamable2Invokable(e StreamToolCallEndpoint) ToolCallEndpoint {
-	return func(ctx context.Context, input *ToolCallInput) (*ToolCallOutput, error) {
+func streamable2Invokable(e StreamableToolEndpoint) InvokableToolEndpoint {
+	return func(ctx context.Context, input *ToolInput) (*ToolOutput, error) {
 		so, err := e(ctx, input)
 		if err != nil {
 			return nil, err
@@ -322,24 +341,24 @@ func streamable2Invokable(e StreamToolCallEndpoint) ToolCallEndpoint {
 		if err != nil {
 			return nil, fmt.Errorf("failed to concat StreamableTool output message stream: %w", err)
 		}
-		return &ToolCallOutput{Result: o}, nil
+		return &ToolOutput{Result: o}, nil
 	}
 }
 
-func invokable2Streamable(e ToolCallEndpoint) StreamToolCallEndpoint {
-	return func(ctx context.Context, input *ToolCallInput) (*StreamToolCallOutput, error) {
+func invokable2Streamable(e InvokableToolEndpoint) StreamableToolEndpoint {
+	return func(ctx context.Context, input *ToolInput) (*StreamToolOutput, error) {
 		o, err := e(ctx, input)
 		if err != nil {
 			return nil, err
 		}
-		return &StreamToolCallOutput{Result: schema.StreamReaderFromArray([]string{o.Result})}, nil
+		return &StreamToolOutput{Result: schema.StreamReaderFromArray([]string{o.Result})}, nil
 	}
 }
 
 type toolCallTask struct {
 	// in
-	endpoint       ToolCallEndpoint
-	streamEndpoint StreamToolCallEndpoint
+	endpoint       InvokableToolEndpoint
+	streamEndpoint StreamableToolEndpoint
 	meta           *executorMeta
 	name           string
 	arg            string
@@ -408,12 +427,12 @@ func (tn *ToolsNode) genToolCallTasks(ctx context.Context, tuple *toolsTuple,
 }
 
 func newUnknownToolTask(name, arg, callID string, unknownToolHandler func(ctx context.Context, name, input string) (string, error)) toolCallTask {
-	endpoint := func(ctx context.Context, input *ToolCallInput) (*ToolCallOutput, error) {
+	endpoint := func(ctx context.Context, input *ToolInput) (*ToolOutput, error) {
 		result, err := unknownToolHandler(ctx, input.Name, input.Arguments)
 		if err != nil {
 			return nil, err
 		}
-		return &ToolCallOutput{
+		return &ToolOutput{
 			Result: result,
 		}, nil
 	}
@@ -442,7 +461,7 @@ func runToolCallTaskByInvoke(ctx context.Context, task *toolCallTask, opts ...to
 	})
 
 	ctx = setToolCallInfo(ctx, &toolCallInfo{toolCallID: task.callID})
-	output, err := task.endpoint(ctx, &ToolCallInput{
+	output, err := task.endpoint(ctx, &ToolInput{
 		Name:        task.name,
 		Arguments:   task.arg,
 		CallID:      task.callID,
@@ -464,7 +483,7 @@ func runToolCallTaskByStream(ctx context.Context, task *toolCallTask, opts ...to
 	})
 
 	ctx = setToolCallInfo(ctx, &toolCallInfo{toolCallID: task.callID})
-	output, err := task.streamEndpoint(ctx, &ToolCallInput{
+	output, err := task.streamEndpoint(ctx, &ToolInput{
 		Name:        task.name,
 		Arguments:   task.arg,
 		CallID:      task.callID,

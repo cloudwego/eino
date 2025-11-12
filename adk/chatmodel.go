@@ -113,7 +113,7 @@ func defaultGenModelInput(ctx context.Context, instruction string, input *AgentI
 
 // ChatModelAgentState represents the state of a chat model agent during conversation.
 type ChatModelAgentState struct {
-	// History contains all messages in the current conversation session.
+	// Messages contains all messages in the current conversation session.
 	Messages []Message
 }
 
@@ -133,15 +133,9 @@ type AgentMiddleware struct {
 	// AfterChatModel is called after each ChatModel invocation, allowing modification of the agent state.
 	AfterChatModel func(context.Context, *ChatModelAgentState) error
 
-	// WrapToolCall wraps individual tool calls with custom middleware logic.
-	// It allows intercepting and modifying tool execution behavior for non-streaming calls.
-	// Note: This middleware only applies to tools that implement the InvokableTool interface.
-	WrapToolCall compose.ToolCallMiddleware
-
-	// StreamWrapToolCall wraps streaming tool calls with custom middleware logic.
-	// It provides the same functionality as WrapToolCall but for streaming tool executions.
-	// Note: This middleware only applies to tools that implement the StreamableTool interface.
-	StreamWrapToolCall compose.StreamToolCallMiddleware
+	// WrapToolCall wraps tool calls with custom middleware logic.
+	// Each middleware contains Invokable and/or Streamable functions for tool calls.
+	WrapToolCall compose.ToolMiddleware
 }
 
 type ChatModelAgentConfig struct {
@@ -179,6 +173,7 @@ type ChatModelAgentConfig struct {
 	// Optional. Defaults to 20.
 	MaxIterations int
 
+	// Middlewares configures agent middleware for extending functionality.
 	Middlewares []AgentMiddleware
 }
 
@@ -240,9 +235,6 @@ func NewChatModelAgent(_ context.Context, config *ChatModelAgentConfig) (*ChatMo
 
 		if m.WrapToolCall != nil {
 			tc.ToolCallMiddlewares = append(tc.ToolCallMiddlewares, m.WrapToolCall)
-		}
-		if m.StreamWrapToolCall != nil {
-			tc.StreamToolCallMiddlewares = append(tc.StreamToolCallMiddlewares, m.StreamWrapToolCall)
 		}
 		if m.BeforeChatModel != nil {
 			beforeChatModels = append(beforeChatModels, m.BeforeChatModel)
