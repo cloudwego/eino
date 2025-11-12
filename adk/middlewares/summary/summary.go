@@ -1,3 +1,19 @@
+/*
+ * Copyright 2025 CloudWeGo Authors
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 package summary
 
 import (
@@ -45,9 +61,9 @@ type Config struct {
 // into a single summary message when the token threshold is exceeded.
 // The summarizer chain is: ChatTemplate(SystemPrompt) -> ChatModel(Model).
 // It applies defaults for token budgets and allows a custom Counter.
-func New(ctx context.Context, cfg *Config) (*adk.AgentMiddleware, error) {
+func New(ctx context.Context, cfg *Config) (adk.AgentMiddleware, error) {
 	if cfg == nil {
-		return nil, fmt.Errorf("config is nil")
+		return adk.AgentMiddleware{}, fmt.Errorf("config is nil")
 	}
 
 	systemPrompt := cfg.SystemPrompt
@@ -71,7 +87,7 @@ func New(ctx context.Context, cfg *Config) (*adk.AgentMiddleware, error) {
 		AppendChatModel(cfg.Model).
 		Compile(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("compile summarizer failed, err=%w", err)
+		return adk.AgentMiddleware{}, fmt.Errorf("compile summarizer failed, err=%w", err)
 	}
 
 	sm := &summaryMiddleware{
@@ -83,7 +99,7 @@ func New(ctx context.Context, cfg *Config) (*adk.AgentMiddleware, error) {
 	if cfg.Counter != nil {
 		sm.counter = cfg.Counter
 	}
-	return &adk.AgentMiddleware{BeforeChatModel: sm.BeforeModel}, nil
+	return adk.AgentMiddleware{BeforeChatModel: sm.BeforeModel}, nil
 }
 
 const summaryMessageFlag = "_agent_middleware_summary_message"
