@@ -37,16 +37,19 @@ func buildTaskToolSetupHook(
 	subAgents []adk.Agent,
 
 	withoutGeneralSubAgent bool,
-	generalAgentCtx AgentSetup,
-	hooks []SetupHook,
-) (SetupHook, error) {
-	t, err := newTaskTool(ctx, taskToolDescriptionGenerator, subAgents, withoutGeneralSubAgent, generalAgentCtx, hooks)
+	cm model.ToolCallingChatModel,
+	instruction string,
+	toolsConfig adk.ToolsConfig,
+	maxIteration int,
+	middlewares []adk.AgentMiddleware,
+) (adk.AgentMiddleware, error) {
+	t, err := newTaskTool(ctx, taskToolDescriptionGenerator, subAgents, withoutGeneralSubAgent, cm, instruction, toolsConfig, maxIteration, middlewares)
 	if err != nil {
-		return nil, err
+		return adk.AgentMiddleware{}, err
 	}
-	return func(ac *AgentSetup) {
-		ac.Instruction += taskPrompt
-		ac.ToolsConfig.Tools = append(ac.ToolsConfig.Tools, t)
+	return adk.AgentMiddleware{
+		AdditionalInstruction: taskPrompt,
+		AdditionalTools:       []tool.BaseTool{t},
 	}, nil
 }
 
@@ -56,8 +59,11 @@ func newTaskTool(
 	subAgents []adk.Agent,
 
 	withoutGeneralSubAgent bool,
-	generalAgentCtx AgentSetup,
-	hooks []SetupHook,
+	Model model.ToolCallingChatModel,
+	Instruction string,
+	ToolsConfig adk.ToolsConfig,
+	MaxIteration int,
+	middlewares []adk.AgentMiddleware,
 ) (tool.InvokableTool, error) {
 	t := &taskTool{
 		subAgents:     map[string]tool.InvokableTool{},
@@ -70,12 +76,18 @@ func newTaskTool(
 	}
 
 	if !withoutGeneralSubAgent {
-		generalAgent := newAgentWithSetupHooks(
-			generalAgentName,
-			generalAgentDescription,
-			generalAgentCtx,
-			hooks,
-		)
+		generalAgent, err := adk.NewChatModelAgent(ctx, &adk.ChatModelAgentConfig{
+			Name:          generalAgentName,
+			Description:   generalAgentDescription,
+			Instruction:   Instruction,
+			Model:         Model,
+			ToolsConfig:   ToolsConfig,
+			MaxIterations: MaxIteration,
+			Middlewares:   middlewares,
+		})
+		if err != nil {
+			return nil, err
+		}
 
 		it, err := assertAgentTool(adk.NewAgentTool(ctx, generalAgent))
 		if err != nil {

@@ -23,23 +23,14 @@ import (
 
 	"github.com/stretchr/testify/assert"
 
-	"github.com/cloudwego/eino/adk"
 	"github.com/cloudwego/eino/components/tool"
 )
 
 func TestWriteTodos(t *testing.T) {
-	m, err := newWriteTodosSetupHook()
+	m, err := newWriteTodos()
 	assert.NoError(t, err)
 
-	actx := &AgentSetup{
-		Instruction: "",
-		ToolsConfig: adk.ToolsConfig{},
-	}
-	m(actx)
-
-	assert.Equal(t, writeTodosPrompt, actx.Instruction)
-	assert.Equal(t, 1, len(actx.ToolsConfig.Tools))
-	wt := actx.ToolsConfig.Tools[0].(tool.InvokableTool)
+	wt := m.AdditionalTools[0].(tool.InvokableTool)
 
 	todos := `[{"content":"content1","status":"pending"},{"content":"content2","status":"pending"}]`
 	args := fmt.Sprintf(`{"todos": %s}`, todos)

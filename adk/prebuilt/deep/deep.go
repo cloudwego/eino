@@ -72,16 +72,9 @@ type Config struct {
 // This function initializes built-in tools, creates a task tool for subagent orchestration,
 // and returns a fully configured ChatModelAgent ready for execution.
 func New(ctx context.Context, cfg *Config) (adk.Agent, error) {
-	hooks, err := buildBuiltinAgentMiddlewares(cfg.WithoutWriteTodos)
+	middlewares, err := buildBuiltinAgentMiddlewares(cfg.WithoutWriteTodos)
 	if err != nil {
 		return nil, err
-	}
-
-	actx := AgentSetup{
-		Model:        cfg.ChatModel,
-		Instruction:  cfg.Instruction,
-		ToolsConfig:  cfg.ToolsConfig,
-		MaxIteration: cfg.MaxIteration,
 	}
 
 	tt, err := buildTaskToolSetupHook(
@@ -90,13 +83,16 @@ func New(ctx context.Context, cfg *Config) (adk.Agent, error) {
 		cfg.SubAgents,
 
 		cfg.WithoutGeneralSubAgent,
-		actx,
-		append(cfg.Hooks, hooks...),
+		cfg.ChatModel,
+		cfg.Instruction,
+		cfg.ToolsConfig,
+		cfg.MaxIteration,
+		append(cfg.Middlewares, middlewares...),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("new task tool: %w", err)
 	}
-	hooks = append(hooks, tt)
+	middlewares = append(middlewares, tt)
 
-	return newAgentWithSetupHooks(cfg.Name, cfg.Description, actx, append(cfg.Hooks, hooks...)), nil
+	return newAgentWithSetupHooks(cfg.Name, cfg.Description, actx, append(cfg.Middlewares, middlewares...)), nil
 }
