@@ -126,7 +126,6 @@ func (t *taskTool) Info(ctx context.Context) (*schema.ToolInfo, error) {
 		ParamsOneOf: schema.NewParamsOneOfByParams(map[string]*schema.ParameterInfo{
 			"subagent_type": {
 				Type: schema.String,
-				// todo: enum?
 			},
 			"description": {
 				Type: schema.String,
@@ -170,19 +169,5 @@ func defaultTaskToolDescription(ctx context.Context, subAgents []adk.Agent) (str
 	}
 	return pyfmt.Fmt(taskToolDescription, map[string]any{
 		"other_agents": subAgentsDescBuilder.String(),
-	})
-}
-
-func newGeneralAgent(
-	ctx context.Context,
-	cm model.ToolCallingChatModel,
-	config adk.ToolsConfig,
-) (adk.Agent, error) {
-	return adk.NewChatModelAgent(ctx, &adk.ChatModelAgentConfig{
-		Name:        generalAgentName,
-		Description: generalAgentDescription,
-		Instruction: baseAgentPrompt + "\n" + writeTodosPrompt + "\n",
-		Model:       cm,
-		ToolsConfig: config,
 	})
 }

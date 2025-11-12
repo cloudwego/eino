@@ -27,10 +27,10 @@ import (
 )
 
 func TestWriteTodos(t *testing.T) {
-	m, err := newWriteTodos()
+	m, err := buildBuiltinAgentMiddlewares(false)
 	assert.NoError(t, err)
 
-	wt := m.AdditionalTools[0].(tool.InvokableTool)
+	wt := m[0].AdditionalTools[0].(tool.InvokableTool)
 
 	todos := `[{"content":"content1","status":"pending"},{"content":"content2","status":"pending"}]`
 	args := fmt.Sprintf(`{"todos": %s}`, todos)
