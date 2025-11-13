@@ -40,9 +40,12 @@ type HistoryRewriter func(ctx context.Context, entries []*HistoryEntry) ([]Messa
 
 type dynamicParallelState struct {
 	// Maps the destination agent name to the events generated in its lane before interruption.
+	// This also serves as the source of truth for which lanes need to be resumed.
 	LaneEvents map[string][]*agentEventWrapper 
-	// We also need to store the original transfer actions to know which lanes to create on resume.
-	OriginalTransfers []*TransferToAgentAction
+}
+
+func init() {
+	schema.RegisterName[*dynamicParallelState]("eino_adk_dynamic_parallel_state")
 }
 
 type flowAgent struct {
@@ -330,6 +333,12 @@ func (a *flowAgent) Resume(ctx context.Context, info *ResumeInfo, opts ...AgentR
 		return iterator
 	}
 
+	// Check if we need to resume concurrent transfers
+	if info.InterruptState != nil {
+		// Delegate to resumeConcurrentLanes which will handle the type assertion
+		return a.resumeConcurrentLanes(ctx, info, opts...)
+	}
+
 	nextAgentName, err := getNextResumeAgent(ctx, info)
 	if err != nil {
 		return genErrorIter(err)
@@ -341,6 +350,160 @@ func (a *flowAgent) Resume(ctx context.Context, info *ResumeInfo, opts ...AgentR
 	}
 
 	return subAgent.Resume(ctx, info, opts...)
+}
+
+// resumeConcurrentLanes resumes execution after a concurrent transfer interruption
+func (a *flowAgent) resumeConcurrentLanes(
+	ctx context.Context,
+	info *ResumeInfo,
+	opts ...AgentRunOption) *AsyncIterator[*AgentEvent] {
+	
+	// Type assertion for dynamicParallelState
+	state, ok := info.InterruptState.(*dynamicParallelState)
+	if !ok {
+		return genErrorIter(fmt.Errorf("resumeConcurrentLanes: expected dynamicParallelState, got %T", info.InterruptState))
+	}
+	
+	iterator, generator := NewAsyncIteratorPair[*AgentEvent]()
+	
+	go func() {
+		defer func() {
+			panicErr := recover()
+			if panicErr != nil {
+				e := safe.NewPanicErr(panicErr, debug.Stack())
+				generator.Send(&AgentEvent{Err: e})
+			}
+			generator.Close()
+		}()
+		
+		runCtx := getRunCtx(ctx)
+		
+		// Get the next resume agents from the interrupt context (following parallel workflow pattern)
+		agentNames, err := getNextResumeAgents(ctx, info)
+		if err != nil {
+			generator.Send(&AgentEvent{Err: err})
+			return
+		}
+		
+		var (
+			wg sync.WaitGroup
+			mu sync.Mutex
+		)
+		
+		// Create child contexts for each lane (using LaneEvents as source of truth)
+		childContexts := make([]context.Context, len(state.LaneEvents))
+		subInterruptSignals := make([]*core.InterruptSignal, 0)
+		
+		// Fork contexts for each lane (following parallel workflow pattern)
+		i := 0
+		for destAgentName := range state.LaneEvents {
+			childContexts[i] = forkRunCtx(ctx)
+			
+			// Add existing events to the child context
+			if existingEvents, ok := state.LaneEvents[destAgentName]; ok {
+				childRunCtx := getRunCtx(childContexts[i])
+				if childRunCtx != nil && childRunCtx.Session != nil {
+					if childRunCtx.Session.LaneEvents == nil {
+						childRunCtx.Session.LaneEvents = &laneEvents{}
+					}
+					childRunCtx.Session.LaneEvents.Events = append(childRunCtx.Session.LaneEvents.Events, existingEvents...)
+				}
+			}
+			i++
+		}
+		
+		// Launch concurrent execution for each lane (following parallel workflow pattern)
+		i = 0
+		for destAgentName := range state.LaneEvents {
+			wg.Add(1)
+			go func(idx int, agentName string) {
+				defer wg.Done()
+				
+				agentToRun := a.getAgent(ctx, agentName)
+				if agentToRun == nil {
+					// Agent not found - send error and continue
+					e := fmt.Errorf("transfer failed: agent '%s' not found", agentName)
+					generator.Send(&AgentEvent{Err: e})
+					return
+				}
+				
+				var subAIter *AsyncIterator[*AgentEvent]
+				
+				// Check if this agent needs to be resumed (following parallel workflow pattern)
+				if _, ok := agentNames[agentToRun.Name(ctx)]; ok {
+					// This branch was interrupted and needs to be resumed
+					subAIter = agentToRun.Resume(childContexts[idx], &ResumeInfo{
+						EnableStreaming: info.EnableStreaming,
+						InterruptInfo:   info.InterruptInfo,
+					}, opts...)
+				} else if state != nil {
+					// We are resuming, but this child is not in the next points map.
+					// This means it finished successfully, so we don't run it.
+					return
+				} else {
+					// Not resuming - run normally
+					subAIter = agentToRun.Run(childContexts[idx], nil, opts...)
+				}
+				
+				// Collect events for this lane
+				var laneEventsForAgent []*agentEventWrapper
+				
+				for {
+					subEvent, ok := subAIter.Next()
+					if !ok {
+						break
+					}
+					
+					generator.Send(subEvent)
+					
+					// Check for interrupt action
+					if subEvent.Action != nil && subEvent.Action.internalInterrupted != nil {
+						mu.Lock()
+						subInterruptSignals = append(subInterruptSignals, subEvent.Action.internalInterrupted)
+						mu.Unlock()
+						
+						// Stop processing this lane when interrupted
+						return
+					}
+					
+					// Store event for potential resume
+					if subEvent.Action == nil || subEvent.Action.Interrupted == nil {
+						// COPY the event before storing (streams can only be consumed once)
+						copied := copyAgentEvent(subEvent)
+						setAutomaticClose(copied)
+						laneEventsForAgent = append(laneEventsForAgent, &agentEventWrapper{
+							AgentEvent: copied,
+						})
+					}
+				}
+			}(i, destAgentName)
+			i++
+		}
+		
+		wg.Wait()
+		
+		if len(subInterruptSignals) == 0 {
+			// Join all child contexts back to the parent
+			joinRunCtxs(ctx, childContexts...)
+			return
+		}
+		
+		if len(subInterruptSignals) > 0 {
+			// Create composite interrupt with the collected state
+			newState := &dynamicParallelState{
+				LaneEvents: state.LaneEvents, // Preserve existing events
+			}
+			
+			event := CompositeInterrupt(ctx, "Concurrent transfer interrupted", newState, subInterruptSignals...)
+			
+			// Set agent name and run path for proper identification
+			event.AgentName = a.Name(ctx)
+			event.RunPath = runCtx.RunPath
+			generator.Send(event)
+		}
+	}()
+	
+	return iterator
 }
 
 type DeterministicTransferConfig struct {
@@ -547,15 +710,16 @@ func (a *flowAgent) runConcurrentLanes(
 
 	// Check if any lane was interrupted
 	if len(subInterruptSignals) > 0 {
-		// Create composite interrupt with lane state
+		// Create composite interrupt with the collected state
 		state := &dynamicParallelState{
-			LaneEvents:        laneEvents,
-			OriginalTransfers: transferActions,
+			LaneEvents: laneEvents,
 		}
 		
 		event := CompositeInterrupt(ctx, "Concurrent transfer interrupted", state, subInterruptSignals...)
+		
+		// Set agent name and run path for proper identification
 		event.AgentName = a.Name(ctx)
-		event.RunPath = runCtx.RunPath
+		event.RunPath = getRunCtx(ctx).RunPath
 		generator.Send(event)
 		return
 	}
