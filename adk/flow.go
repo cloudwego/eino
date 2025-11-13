@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"runtime/debug"
 	"strings"
+	"sync"
 
 	"github.com/cloudwego/eino/compose"
 	"github.com/cloudwego/eino/internal/safe"
@@ -35,6 +36,13 @@ type HistoryEntry struct {
 }
 
 type HistoryRewriter func(ctx context.Context, entries []*HistoryEntry) ([]Message, error)
+
+type dynamicParallelState struct {
+	// Maps the destination agent name to the events generated in its lane before interruption.
+	LaneEvents map[string][]*agentEventWrapper 
+	// We also need to store the original transfer actions to know which lanes to create on resume.
+	OriginalTransfers []*TransferToAgentAction
+}
 
 type flowAgent struct {
 	Agent
@@ -443,26 +451,62 @@ func (a *flowAgent) run(
 			generator.Send(subEvent)
 		}
 	default:
-		// Multiple transfers - will be handled by concurrent transfer implementation
-		// For now, just transfer to the first one (maintains backward compatibility)
-		destName := transferActions[0].DestAgentName
-		agentToRun := a.getAgent(ctx, destName)
-		if agentToRun == nil {
-			e := fmt.Errorf("transfer failed: agent '%s' not found when transferring from '%s'",
-				destName, a.Name(ctx))
-			generator.Send(&AgentEvent{Err: e})
-			return
-		}
+		// Multiple transfers - execute concurrently using fork-join model
+		a.runConcurrentLanes(ctx, runCtx, transferActions, generator, opts...)
+	}
+}
 
-		subAIter := agentToRun.Run(ctx, nil /*subagents get input from runCtx*/, opts...)
-		for {
-			subEvent, ok_ := subAIter.Next()
-			if !ok_ {
-				break
+// runConcurrentLanes executes multiple transfers concurrently using a fork-join model
+func (a *flowAgent) runConcurrentLanes(
+	ctx context.Context,
+	runCtx *runContext,
+	transferActions []*TransferToAgentAction,
+	generator *AsyncGenerator[*AgentEvent],
+	opts ...AgentRunOption) {
+	
+	if len(transferActions) == 0 {
+		return
+	}
+
+	var wg sync.WaitGroup
+	childContexts := make([]context.Context, len(transferActions))
+
+	// Fork contexts for each transfer
+	for i := range transferActions {
+		childContexts[i] = forkRunCtx(ctx)
+	}
+
+	// Launch concurrent execution for each transfer
+	for i, transfer := range transferActions {
+		wg.Add(1)
+		go func(idx int, transferAction *TransferToAgentAction) {
+			defer wg.Done()
+
+			agentToRun := a.getAgent(ctx, transferAction.DestAgentName)
+			if agentToRun == nil {
+				// Agent not found - send error and continue
+				e := fmt.Errorf("transfer failed: agent '%s' not found", transferAction.DestAgentName)
+				generator.Send(&AgentEvent{Err: e})
+				return
 			}
 
-			setAutomaticClose(subEvent)
-			generator.Send(subEvent)
-		}
+			// Execute the agent in its own lane
+			subAIter := agentToRun.Run(childContexts[idx], nil, opts...)
+			for {
+				subEvent, ok := subAIter.Next()
+				if !ok {
+					break
+				}
+
+				setAutomaticClose(subEvent)
+				generator.Send(subEvent)
+			}
+		}(i, transfer)
 	}
+
+	// Wait for all concurrent lanes to complete
+	wg.Wait()
+
+	// Join all child contexts back to the parent
+	joinRunCtxs(ctx, childContexts...)
 }
