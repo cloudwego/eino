@@ -355,7 +355,11 @@ func (a *flowAgent) run(
 		generator.Close()
 	}()
 
-	var lastAction *AgentAction
+	// Collect all actions to apply precedence rules
+	var interruptAction *AgentEvent
+	var exitAction *AgentEvent
+	var transferActions []*TransferToAgentAction
+
 	for {
 		event, ok := aIter.Next()
 		if !ok {
@@ -364,6 +368,30 @@ func (a *flowAgent) run(
 
 		event.AgentName = a.Name(ctx)
 		event.RunPath = runCtx.RunPath
+		
+		// Apply Action Precedence: Interrupt > Exit > Transfer
+		if event.Action != nil {
+			if event.Action.Interrupted != nil {
+				// Interrupt has highest precedence - handle immediately
+				if interruptAction == nil {
+					interruptAction = event
+				}
+				// Continue to collect all actions for proper precedence handling
+			} else if event.Action.Exit {
+				// Exit has second precedence - only store if no interrupt found
+				if interruptAction == nil {
+					exitAction = event
+				}
+			} else if event.Action.TransferToAgent != nil {
+				// Transfer has lowest precedence - only store if no interrupt or exit found
+				if interruptAction == nil && exitAction == nil {
+					transferActions = append(transferActions, event.Action.TransferToAgent)
+				}
+			}
+		}
+
+		// Always send the event to the generator for immediate consumption
+		// but only add non-interrupt events to the session
 		if event.Action == nil || event.Action.Interrupted == nil {
 			// copy the event so that the copied event's stream is exclusive for any potential consumer
 			// copy before adding to session because once added to session it's stream could be consumed by genAgentInput at any time
@@ -374,26 +402,50 @@ func (a *flowAgent) run(
 			setAutomaticClose(event)
 			runCtx.Session.addEvent(copied)
 		}
-		lastAction = event.Action
 		generator.Send(event)
 	}
 
-	var destName string
-	if lastAction != nil {
-		if lastAction.Interrupted != nil {
-			return
-		}
-		if lastAction.Exit {
-			return
-		}
-
-		if lastAction.TransferToAgent != nil {
-			destName = lastAction.TransferToAgent.DestAgentName
-		}
+	// Apply Action Precedence decision
+	if interruptAction != nil {
+		// Interrupt has highest precedence - just return, the interrupt event was already sent
+		return
 	}
 
-	// handle transferring to another agent
-	if destName != "" {
+	if exitAction != nil {
+		// Exit has second precedence - just return, the exit event was already sent
+		return
+	}
+
+	// Handle transfers based on count
+	switch len(transferActions) {
+	case 0:
+		// No transfers - this branch is complete
+		return
+	case 1:
+		// Single transfer - handle sequentially
+		destName := transferActions[0].DestAgentName
+		agentToRun := a.getAgent(ctx, destName)
+		if agentToRun == nil {
+			e := fmt.Errorf("transfer failed: agent '%s' not found when transferring from '%s'",
+				destName, a.Name(ctx))
+			generator.Send(&AgentEvent{Err: e})
+			return
+		}
+
+		subAIter := agentToRun.Run(ctx, nil /*subagents get input from runCtx*/, opts...)
+		for {
+			subEvent, ok_ := subAIter.Next()
+			if !ok_ {
+				break
+			}
+
+			setAutomaticClose(subEvent)
+			generator.Send(subEvent)
+		}
+	default:
+		// Multiple transfers - will be handled by concurrent transfer implementation
+		// For now, just transfer to the first one (maintains backward compatibility)
+		destName := transferActions[0].DestAgentName
 		agentToRun := a.getAgent(ctx, destName)
 		if agentToRun == nil {
 			e := fmt.Errorf("transfer failed: agent '%s' not found when transferring from '%s'",
