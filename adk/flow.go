@@ -25,6 +25,7 @@ import (
 	"sync"
 
 	"github.com/cloudwego/eino/compose"
+	"github.com/cloudwego/eino/internal/core"
 	"github.com/cloudwego/eino/internal/safe"
 	"github.com/cloudwego/eino/schema"
 )
@@ -468,8 +469,14 @@ func (a *flowAgent) runConcurrentLanes(
 		return
 	}
 
-	var wg sync.WaitGroup
+	var (
+		wg sync.WaitGroup
+		mu sync.Mutex
+	)
+	
 	childContexts := make([]context.Context, len(transferActions))
+	subInterruptSignals := make([]*core.InterruptSignal, 0)
+	laneEvents := make(map[string][]*agentEventWrapper)
 
 	// Fork contexts for each transfer
 	for i := range transferActions {
@@ -492,20 +499,64 @@ func (a *flowAgent) runConcurrentLanes(
 
 			// Execute the agent in its own lane
 			subAIter := agentToRun.Run(childContexts[idx], nil, opts...)
+			
+			// Collect events for this lane
+			var laneEventsForAgent []*agentEventWrapper
+			
 			for {
 				subEvent, ok := subAIter.Next()
 				if !ok {
 					break
 				}
 
-				setAutomaticClose(subEvent)
 				generator.Send(subEvent)
+				
+				// Check for interrupt action
+				if subEvent.Action != nil && subEvent.Action.internalInterrupted != nil {
+					mu.Lock()
+					subInterruptSignals = append(subInterruptSignals, subEvent.Action.internalInterrupted)
+					
+					// Store events collected so far for this lane
+					laneEvents[transferAction.DestAgentName] = laneEventsForAgent
+					mu.Unlock()
+					
+					// Stop processing this lane when interrupted
+					return
+				}
+				
+				// Store event for potential resume
+				if subEvent.Action == nil || subEvent.Action.Interrupted == nil {
+					// Store the original event wrapper (no copying needed, consistent with runParallel)
+					laneEventsForAgent = append(laneEventsForAgent, &agentEventWrapper{
+						AgentEvent: subEvent,
+					})
+				}
 			}
+			
+			// Store completed lane events
+			mu.Lock()
+			laneEvents[transferAction.DestAgentName] = laneEventsForAgent
+			mu.Unlock()
 		}(i, transfer)
 	}
 
 	// Wait for all concurrent lanes to complete
 	wg.Wait()
+
+	// Check if any lane was interrupted
+	if len(subInterruptSignals) > 0 {
+		// Create composite interrupt with lane state
+		state := &dynamicParallelState{
+			LaneEvents:        laneEvents,
+			OriginalTransfers: transferActions,
+		}
+		
+		event := CompositeInterrupt(ctx, "Concurrent transfer interrupted", state, subInterruptSignals...)
+		event.AgentName = a.Name(ctx)
+		event.RunPath = runCtx.RunPath
+		generator.Send(event)
+		return
+	}
 
 	// Join all child contexts back to the parent
 	joinRunCtxs(ctx, childContexts...)
