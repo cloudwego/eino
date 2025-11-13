@@ -510,7 +510,15 @@ func (a *workflowAgent) runParallel(ctx context.Context, generator *AsyncGenerat
 		for i, childCtx := range childContexts {
 			childRunCtx := getRunCtx(childCtx)
 			if childRunCtx != nil && childRunCtx.Session != nil && childRunCtx.Session.LaneEvents != nil {
-				subAgentEvents[i] = childRunCtx.Session.LaneEvents.Events
+				// COPY events before storing (streams can only be consumed once)
+				subAgentEvents[i] = make([]*agentEventWrapper, len(childRunCtx.Session.LaneEvents.Events))
+				for j, event := range childRunCtx.Session.LaneEvents.Events {
+					copied := copyAgentEvent(event.AgentEvent)
+					setAutomaticClose(copied)
+					subAgentEvents[i][j] = &agentEventWrapper{
+						AgentEvent: copied,
+					}
+				}
 			}
 		}
 

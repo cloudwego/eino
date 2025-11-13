@@ -526,9 +526,11 @@ func (a *flowAgent) runConcurrentLanes(
 				
 				// Store event for potential resume
 				if subEvent.Action == nil || subEvent.Action.Interrupted == nil {
-					// Store the original event wrapper (no copying needed, consistent with runParallel)
+					// COPY the event before storing (streams can only be consumed once)
+					copied := copyAgentEvent(subEvent)
+					setAutomaticClose(copied)
 					laneEventsForAgent = append(laneEventsForAgent, &agentEventWrapper{
-						AgentEvent: subEvent,
+						AgentEvent: copied,
 					})
 				}
 			}
