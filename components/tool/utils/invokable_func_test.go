@@ -23,7 +23,6 @@ import (
 	"testing"
 
 	"github.com/eino-contrib/jsonschema"
-	"github.com/getkin/kin-openapi/openapi3"
 	"github.com/stretchr/testify/assert"
 	orderedmap "github.com/wk8/go-ordered-map/v2"
 
@@ -63,7 +62,7 @@ var toolInfo = &schema.ToolInfo{
 	Desc: "full update user info",
 	ParamsOneOf: schema.NewParamsOneOfByJSONSchema(
 		&jsonschema.Schema{
-			Type:                 openapi3.TypeObject,
+			Type:                 "object",
 			Required:             []string{"name", "age", "incomes"},
 			AdditionalProperties: jsonschema.FalseSchema,
 			Properties: orderedmap.New[string, *jsonschema.Schema](

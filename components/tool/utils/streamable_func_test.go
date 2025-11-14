@@ -22,8 +22,9 @@ import (
 	"io"
 	"testing"
 
-	"github.com/getkin/kin-openapi/openapi3"
+	"github.com/eino-contrib/jsonschema"
 	"github.com/stretchr/testify/assert"
+	orderedmap "github.com/wk8/go-ordered-map/v2"
 
 	"github.com/cloudwego/eino/components/tool"
 	"github.com/cloudwego/eino/schema"
@@ -69,19 +70,22 @@ func TestNewStreamableTool(t *testing.T) {
 		assert.NoError(t, err)
 		assert.Equal(t, "search_user", info.Name)
 
-		js, err := info.ToOpenAPIV3()
+		js, err := info.ToJSONSchema()
 		assert.NoError(t, err)
 
-		assert.Equal(t, &openapi3.Schema{
-			Type: openapi3.TypeObject,
-			Properties: map[string]*openapi3.SchemaRef{
-				"name": {
-					Value: &openapi3.Schema{
-						Type:        openapi3.TypeString,
-						Description: "user name",
+		assert.Equal(t, &jsonschema.Schema{
+			Type: "object",
+			Properties: orderedmap.New[string, *jsonschema.Schema](
+				orderedmap.WithInitialData[string, *jsonschema.Schema](
+					orderedmap.Pair[string, *jsonschema.Schema]{
+						Key: "name",
+						Value: &jsonschema.Schema{
+							Type:        "string",
+							Description: "user name",
+						},
 					},
-				},
-			},
+				),
+			),
 			Required: make([]string, 0),
 		}, js)
 
