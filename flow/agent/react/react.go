@@ -74,7 +74,7 @@ type AgentConfig struct {
 	// When multiple tools are called and more than one tool is in the return directly list, only the first one will be returned.
 	ToolReturnDirectly map[string]struct{}
 
-	// StreamOutputHandler is a function to determine whether the model's streaming output contains tool calls.
+	// StreamToolCallChecker is a function to determine whether the model's streaming output contains tool calls.
 	// Different models have different ways of outputting tool calls in streaming mode:
 	// - Some models (like OpenAI) output tool calls directly
 	// - Others (like Claude) output text first, then tool calls
