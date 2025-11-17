@@ -358,11 +358,21 @@ func (a *flowAgent) Resume(ctx context.Context, info *ResumeInfo, opts ...AgentR
 	ctx, info = buildResumeInfo(ctx, a.Name(ctx), info)
 
 	if info.WasInterrupted {
+		// Check if we need to resume concurrent transfers
+		if info.InterruptState != nil {
+			state, ok := info.InterruptState.(*dynamicParallelState)
+			if ok {
+				// Delegate to resumeConcurrentLanes which will handle the type assertion
+				return a.resumeConcurrentLanes(ctx, state, info, opts...)
+			}
+		}
+
 		ra, ok := a.Agent.(ResumableAgent)
 		if !ok {
 			return genErrorIter(fmt.Errorf("failed to resume agent: agent '%s' is an interrupt point "+
 				"but is not a ResumableAgent", a.Name(ctx)))
 		}
+
 		iterator, generator := NewAsyncIteratorPair[*AgentEvent]()
 
 		aIter := ra.Resume(ctx, info, opts...)
@@ -371,12 +381,6 @@ func (a *flowAgent) Resume(ctx context.Context, info *ResumeInfo, opts ...AgentR
 		}
 		go a.run(ctx, getRunCtx(ctx), aIter, generator, opts...)
 		return iterator
-	}
-
-	// Check if we need to resume concurrent transfers
-	if info.InterruptState != nil {
-		// Delegate to resumeConcurrentLanes which will handle the type assertion
-		return a.resumeConcurrentLanes(ctx, info, opts...)
 	}
 
 	nextAgentName, err := getNextResumeAgent(ctx, info)
@@ -524,14 +528,9 @@ func (a *flowAgent) runConcurrentLanes(
 // resumeConcurrentLanes resumes execution after a concurrent transfer interruption
 func (a *flowAgent) resumeConcurrentLanes(
 	ctx context.Context,
+	state *dynamicParallelState,
 	info *ResumeInfo,
 	opts ...AgentRunOption) *AsyncIterator[*AgentEvent] {
-
-	// Type assertion for dynamicParallelState
-	state, ok := info.InterruptState.(*dynamicParallelState)
-	if !ok {
-		return genErrorIter(fmt.Errorf("resumeConcurrentLanes: expected dynamicParallelState, got %T", info.InterruptState))
-	}
 
 	iterator, generator := NewAsyncIteratorPair[*AgentEvent]()
 
@@ -580,21 +579,20 @@ func (a *flowAgent) resumeConcurrentLanes(
 	agentExecutors := make([]func(context.Context) *AsyncIterator[*AgentEvent], len(agentNamesInOrder))
 
 	for i := range agentNamesInOrder {
+		name := agentNamesInOrder[i]
+		agentToRun := agents[i]
 		agentExecutors[i] = func(ctx2 context.Context) *AsyncIterator[*AgentEvent] {
 			// Check if this agent needs to be resumed (following parallel workflow pattern)
-			if _, ok := agentNames[agents[i].Name(ctx2)]; ok {
+			if _, ok := agentNames[name]; ok {
 				// This branch was interrupted and needs to be resumed
-				return agents[i].Resume(ctx2, &ResumeInfo{
+				return agentToRun.Resume(ctx2, &ResumeInfo{
 					EnableStreaming: info.EnableStreaming,
 					InterruptInfo:   info.InterruptInfo,
 				}, opts...)
-			} else if state != nil {
+			} else {
 				// We are resuming, but this child is not in the next points map.
 				// This means it finished successfully, so we don't run it.
-				return &AsyncIterator[*AgentEvent]{} // Return empty iterator
-			} else {
-				// Not resuming - run normally
-				return agents[i].Run(ctx2, nil, opts...)
+				return nil
 			}
 		}
 	}
@@ -630,6 +628,9 @@ func (a *flowAgent) concurrentLaneExecution(
 			defer wg.Done()
 
 			subAIter := exec(childRunCtx)
+			if subAIter == nil {
+				return
+			}
 
 			for {
 				subEvent, ok := subAIter.Next()
@@ -656,6 +657,7 @@ func (a *flowAgent) concurrentLaneExecution(
 	wg.Wait()
 
 	if len(subInterruptSignals) == 0 {
+		generator.Close()
 		joinRunCtxs(ctx, childContexts...)
 		return
 	}
@@ -669,4 +671,5 @@ func (a *flowAgent) concurrentLaneExecution(
 	// Create composite interrupt with the collected state
 	event := a.createCompositeInterrupt(ctx, laneEvents, subInterruptSignals)
 	generator.Send(event)
+	generator.Close()
 }
