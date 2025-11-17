@@ -674,7 +674,7 @@ func (a *ChatModelAgent) buildRunFunc(ctx context.Context) runFunc {
 						return a.genModelInput(ctx, instruction, input)
 					}),
 				).
-				AppendGraph(g, compose.WithNodeName("ReAct")).
+				AppendGraph(g, compose.WithNodeName("ReAct"), compose.WithGraphCompileOptions(compose.WithMaxRunSteps(math.MaxInt))).
 				Compile(ctx, compileOptions...)
 			if err_ != nil {
 				generator.Send(&AgentEvent{Err: err_})
