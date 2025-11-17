@@ -44,6 +44,46 @@ type dynamicParallelState struct {
 	LaneEvents map[string][]*agentEventWrapper
 }
 
+// collectLaneEvents collects events from child contexts following runParallel pattern
+func (a *flowAgent) collectLaneEvents(childContexts []context.Context, agentNames []string) map[string][]*agentEventWrapper {
+	laneEvents := make(map[string][]*agentEventWrapper)
+
+	for i, childCtx := range childContexts {
+		childRunCtx := getRunCtx(childCtx)
+		if childRunCtx != nil && childRunCtx.Session != nil && childRunCtx.Session.LaneEvents != nil {
+			// Use the provided agent names for reliable mapping
+			agentName := agentNames[i]
+
+			// COPY events before storing (streams can only be consumed once)
+			laneEvents[agentName] = make([]*agentEventWrapper, len(childRunCtx.Session.LaneEvents.Events))
+			for j, event := range childRunCtx.Session.LaneEvents.Events {
+				copied := copyAgentEvent(event.AgentEvent)
+				setAutomaticClose(copied)
+				laneEvents[agentName][j] = &agentEventWrapper{
+					AgentEvent: copied,
+				}
+			}
+		}
+	}
+
+	return laneEvents
+}
+
+// createCompositeInterrupt creates a composite interrupt event with the collected state
+func (a *flowAgent) createCompositeInterrupt(ctx context.Context, laneEvents map[string][]*agentEventWrapper, subInterruptSignals []*core.InterruptSignal) *AgentEvent {
+	state := &dynamicParallelState{
+		LaneEvents: laneEvents,
+	}
+
+	event := CompositeInterrupt(ctx, "Concurrent transfer interrupted", state, subInterruptSignals...)
+
+	// Set agent name and run path for proper identification
+	event.AgentName = a.Name(ctx)
+	event.RunPath = getRunCtx(ctx).RunPath
+
+	return event
+}
+
 func init() {
 	schema.RegisterName[*dynamicParallelState]("eino_adk_dynamic_parallel_state")
 }
@@ -352,178 +392,6 @@ func (a *flowAgent) Resume(ctx context.Context, info *ResumeInfo, opts ...AgentR
 	return subAgent.Resume(ctx, info, opts...)
 }
 
-// resumeConcurrentLanes resumes execution after a concurrent transfer interruption
-func (a *flowAgent) resumeConcurrentLanes(
-	ctx context.Context,
-	info *ResumeInfo,
-	opts ...AgentRunOption) *AsyncIterator[*AgentEvent] {
-
-	// Type assertion for dynamicParallelState
-	state, ok := info.InterruptState.(*dynamicParallelState)
-	if !ok {
-		return genErrorIter(fmt.Errorf("resumeConcurrentLanes: expected dynamicParallelState, got %T", info.InterruptState))
-	}
-
-	iterator, generator := NewAsyncIteratorPair[*AgentEvent]()
-
-	go func() {
-		defer func() {
-			panicErr := recover()
-			if panicErr != nil {
-				e := safe.NewPanicErr(panicErr, debug.Stack())
-				generator.Send(&AgentEvent{Err: e})
-			}
-			generator.Close()
-		}()
-
-		runCtx := getRunCtx(ctx)
-
-		// Get the next resume agents from the interrupt context (following parallel workflow pattern)
-		agentNames, err := getNextResumeAgents(ctx, info)
-		if err != nil {
-			generator.Send(&AgentEvent{Err: err})
-			return
-		}
-
-		var (
-			wg sync.WaitGroup
-			mu sync.Mutex
-		)
-
-		// Create child contexts for each lane (using LaneEvents as source of truth)
-		// We need to preserve the order, so we'll create a slice of agent names
-		agentNamesInOrder := make([]string, 0, len(state.LaneEvents))
-		for destAgentName := range state.LaneEvents {
-			agentNamesInOrder = append(agentNamesInOrder, destAgentName)
-		}
-
-		childContexts := make([]context.Context, len(agentNamesInOrder))
-		subInterruptSignals := make([]*core.InterruptSignal, 0)
-
-		// Fork contexts for each lane (following parallel workflow pattern)
-		for i, destAgentName := range agentNamesInOrder {
-			childContexts[i] = forkRunCtx(ctx)
-
-			// Add existing events to the child context
-			if existingEvents, ok := state.LaneEvents[destAgentName]; ok {
-				childRunCtx := getRunCtx(childContexts[i])
-				if childRunCtx != nil && childRunCtx.Session != nil {
-					if childRunCtx.Session.LaneEvents == nil {
-						childRunCtx.Session.LaneEvents = &laneEvents{}
-					}
-					childRunCtx.Session.LaneEvents.Events = append(childRunCtx.Session.LaneEvents.Events, existingEvents...)
-				}
-			}
-		}
-
-		// Launch concurrent execution for each lane (following parallel workflow pattern)
-		for i, destAgentName := range agentNamesInOrder {
-			wg.Add(1)
-			go func(idx int, agentName string) {
-				defer wg.Done()
-
-				agentToRun := a.getAgent(ctx, agentName)
-				if agentToRun == nil {
-					// Agent not found - send error and continue
-					e := fmt.Errorf("transfer failed: agent '%s' not found", agentName)
-					generator.Send(&AgentEvent{Err: e})
-					return
-				}
-
-				var subAIter *AsyncIterator[*AgentEvent]
-
-				// Check if this agent needs to be resumed (following parallel workflow pattern)
-				if _, ok := agentNames[agentToRun.Name(ctx)]; ok {
-					// This branch was interrupted and needs to be resumed
-					subAIter = agentToRun.Resume(childContexts[idx], &ResumeInfo{
-						EnableStreaming: info.EnableStreaming,
-						InterruptInfo:   info.InterruptInfo,
-					}, opts...)
-				} else if state != nil {
-					// We are resuming, but this child is not in the next points map.
-					// This means it finished successfully, so we don't run it.
-					return
-				} else {
-					// Not resuming - run normally
-					subAIter = agentToRun.Run(childContexts[idx], nil, opts...)
-				}
-
-				for {
-					subEvent, ok := subAIter.Next()
-					if !ok {
-						break
-					}
-
-					// Add event to child context's session (following normal agent execution pattern)
-					childRunCtx := getRunCtx(childContexts[idx])
-					if childRunCtx != nil && childRunCtx.Session != nil {
-						if subEvent.Action == nil || subEvent.Action.Interrupted == nil {
-							// copy the event so that the copied event's stream is exclusive for any potential consumer
-							copied := copyAgentEvent(subEvent)
-							setAutomaticClose(copied)
-							setAutomaticClose(subEvent)
-							childRunCtx.Session.addEvent(copied)
-						}
-					}
-
-					generator.Send(subEvent)
-
-					// Check for interrupt action
-					if subEvent.Action != nil && subEvent.Action.internalInterrupted != nil {
-						mu.Lock()
-						subInterruptSignals = append(subInterruptSignals, subEvent.Action.internalInterrupted)
-						mu.Unlock()
-
-						// Stop processing this lane when interrupted
-						return
-					}
-				}
-			}(i, destAgentName)
-		}
-
-		wg.Wait()
-
-		if len(subInterruptSignals) == 0 {
-			// Join all child contexts back to the parent
-			joinRunCtxs(ctx, childContexts...)
-			return
-		}
-
-		if len(subInterruptSignals) > 0 {
-			// Before interrupting, collect the current events from each child context (following runParallel pattern)
-			laneEvents := make(map[string][]*agentEventWrapper)
-			for i, childCtx := range childContexts {
-				childRunCtx := getRunCtx(childCtx)
-				if childRunCtx != nil && childRunCtx.Session != nil && childRunCtx.Session.LaneEvents != nil {
-					// COPY events before storing (streams can only be consumed once)
-					laneEvents[agentNamesInOrder[i]] = make([]*agentEventWrapper, len(childRunCtx.Session.LaneEvents.Events))
-					for j, event := range childRunCtx.Session.LaneEvents.Events {
-						copied := copyAgentEvent(event.AgentEvent)
-						setAutomaticClose(copied)
-						laneEvents[agentNamesInOrder[i]][j] = &agentEventWrapper{
-							AgentEvent: copied,
-						}
-					}
-				}
-			}
-
-			// Create composite interrupt with the collected state
-			newState := &dynamicParallelState{
-				LaneEvents: laneEvents,
-			}
-
-			event := CompositeInterrupt(ctx, "Concurrent transfer interrupted", newState, subInterruptSignals...)
-
-			// Set agent name and run path for proper identification
-			event.AgentName = a.Name(ctx)
-			event.RunPath = runCtx.RunPath
-			generator.Send(event)
-		}
-	}()
-
-	return iterator
-}
-
 type DeterministicTransferConfig struct {
 	Agent        Agent
 	ToAgentNames []string
@@ -562,18 +430,14 @@ func (a *flowAgent) run(
 		// Apply Action Precedence: Interrupt > Exit > Transfer
 		if event.Action != nil {
 			if event.Action.Interrupted != nil {
-				// Interrupt has highest precedence - handle immediately
 				if interruptAction == nil {
 					interruptAction = event
 				}
-				// Continue to collect all actions for proper precedence handling
 			} else if event.Action.Exit {
-				// Exit has second precedence - only store if no interrupt found
 				if interruptAction == nil {
 					exitAction = event
 				}
 			} else if event.Action.TransferToAgent != nil {
-				// Transfer has lowest precedence - only store if no interrupt or exit found
 				if interruptAction == nil && exitAction == nil {
 					transferActions = append(transferActions, event.Action.TransferToAgent)
 				}
@@ -595,110 +459,183 @@ func (a *flowAgent) run(
 		generator.Send(event)
 	}
 
-	// Apply Action Precedence decision
-	if interruptAction != nil {
-		// Interrupt has highest precedence - just return, the interrupt event was already sent
-		return
-	}
-
-	if exitAction != nil {
-		// Exit has second precedence - just return, the exit event was already sent
+	if interruptAction != nil || exitAction != nil || len(transferActions) == 0 {
 		return
 	}
 
 	// Handle transfers based on count
-	switch len(transferActions) {
-	case 0:
-		// No transfers - this branch is complete
-		return
-	case 1:
-		// Single transfer - handle sequentially
-		destName := transferActions[0].DestAgentName
-		agentToRun := a.getAgent(ctx, destName)
-		if agentToRun == nil {
-			e := fmt.Errorf("transfer failed: agent '%s' not found when transferring from '%s'",
-				destName, a.Name(ctx))
-			generator.Send(&AgentEvent{Err: e})
+	if len(transferActions) == 1 {
+		agentToRun, err := a.getAgentFromTransferAction(ctx, transferActions[0])
+		if err != nil {
+			generator.Send(&AgentEvent{Err: err})
 			return
 		}
 
 		subAIter := agentToRun.Run(ctx, nil /*subagents get input from runCtx*/, opts...)
-		for {
-			subEvent, ok_ := subAIter.Next()
-			if !ok_ {
-				break
-			}
-
-			setAutomaticClose(subEvent)
-			generator.Send(subEvent)
-		}
-	default:
-		// Multiple transfers - execute concurrently using fork-join model
-		a.runConcurrentLanes(ctx, runCtx, transferActions, generator, opts...)
+		generator.pipeAll(subAIter)
+		return
 	}
+
+	// Multiple transfers - execute concurrently
+	agents := make([]Agent, len(transferActions))
+	for i, action := range transferActions {
+		agentToRun, err := a.getAgentFromTransferAction(ctx, action)
+		if err != nil {
+			generator.Send(&AgentEvent{Err: err})
+			return
+		}
+		agents[i] = agentToRun
+	}
+	a.runConcurrentLanes(ctx, agents, generator, opts...)
 }
 
-// runConcurrentLanes executes multiple transfers concurrently using a fork-join model
+func (a *flowAgent) getAgentFromTransferAction(ctx context.Context, action *TransferToAgentAction) (*flowAgent, error) {
+	sub := a.getAgent(ctx, action.DestAgentName)
+	if sub == nil {
+		return nil, fmt.Errorf("transfer failed: agent '%s' not found when transferring from '%s'",
+			action.DestAgentName, a.Name(ctx))
+	}
+	return sub, nil
+}
+
+// runConcurrentLanes executes multiple agents concurrently using a fork-join model
 func (a *flowAgent) runConcurrentLanes(
 	ctx context.Context,
-	runCtx *runContext,
-	transferActions []*TransferToAgentAction,
+	agents []Agent,
 	generator *AsyncGenerator[*AgentEvent],
 	opts ...AgentRunOption) {
 
-	if len(transferActions) == 0 {
-		return
+	agentExecutors := make([]func(context.Context) *AsyncIterator[*AgentEvent], len(agents))
+	childContexts := make([]context.Context, len(agents))
+	agentNames := make([]string, len(agents))
+
+	for i := range agents {
+		subAgent := agents[i]
+		agentNames[i] = subAgent.Name(ctx)
+		childContexts[i] = forkRunCtx(ctx)
+		agentExecutors[i] = func(ctx2 context.Context) *AsyncIterator[*AgentEvent] {
+			return subAgent.Run(ctx2, nil, opts...)
+		}
 	}
+
+	a.concurrentLaneExecution(ctx, agentExecutors, agentNames, childContexts, generator)
+}
+
+// resumeConcurrentLanes resumes execution after a concurrent transfer interruption
+func (a *flowAgent) resumeConcurrentLanes(
+	ctx context.Context,
+	info *ResumeInfo,
+	opts ...AgentRunOption) *AsyncIterator[*AgentEvent] {
+
+	// Type assertion for dynamicParallelState
+	state, ok := info.InterruptState.(*dynamicParallelState)
+	if !ok {
+		return genErrorIter(fmt.Errorf("resumeConcurrentLanes: expected dynamicParallelState, got %T", info.InterruptState))
+	}
+
+	iterator, generator := NewAsyncIteratorPair[*AgentEvent]()
+
+	// Create child contexts for each lane (using LaneEvents as source of truth)
+	// We need to preserve the order, so we'll create a slice of agent names
+	agentNamesInOrder := make([]string, 0, len(state.LaneEvents))
+	for destAgentName := range state.LaneEvents {
+		agentNamesInOrder = append(agentNamesInOrder, destAgentName)
+	}
+
+	agents := make([]*flowAgent, len(agentNamesInOrder))
+	for i, agentName := range agentNamesInOrder {
+		agents[i] = a.getAgent(ctx, agentName)
+		if agents[i] == nil {
+			generator.Send(&AgentEvent{Err: fmt.Errorf("transfer failed: agent '%s' not found", agentNamesInOrder[i])})
+			return iterator
+		}
+	}
+
+	// Get the next resume agents from the interrupt context (following parallel workflow pattern)
+	agentNames, err := getNextResumeAgents(ctx, info)
+	if err != nil {
+		generator.Send(&AgentEvent{Err: err})
+		return iterator
+	}
+
+	childContexts := make([]context.Context, len(agentNamesInOrder))
+
+	// Fork contexts for each lane (following parallel workflow pattern)
+	for i, destAgentName := range agentNamesInOrder {
+		childContexts[i] = forkRunCtx(ctx)
+
+		// Add existing events to the child context
+		if existingEvents, ok := state.LaneEvents[destAgentName]; ok {
+			childRunCtx := getRunCtx(childContexts[i])
+			if childRunCtx != nil && childRunCtx.Session != nil {
+				if childRunCtx.Session.LaneEvents == nil {
+					childRunCtx.Session.LaneEvents = &laneEvents{}
+				}
+				childRunCtx.Session.LaneEvents.Events = append(childRunCtx.Session.LaneEvents.Events, existingEvents...)
+			}
+		}
+	}
+
+	// Prepare agent executors for concurrent execution
+	agentExecutors := make([]func(context.Context) *AsyncIterator[*AgentEvent], len(agentNamesInOrder))
+
+	for i := range agentNamesInOrder {
+		agentExecutors[i] = func(ctx2 context.Context) *AsyncIterator[*AgentEvent] {
+			// Check if this agent needs to be resumed (following parallel workflow pattern)
+			if _, ok := agentNames[agents[i].Name(ctx2)]; ok {
+				// This branch was interrupted and needs to be resumed
+				return agents[i].Resume(ctx2, &ResumeInfo{
+					EnableStreaming: info.EnableStreaming,
+					InterruptInfo:   info.InterruptInfo,
+				}, opts...)
+			} else if state != nil {
+				// We are resuming, but this child is not in the next points map.
+				// This means it finished successfully, so we don't run it.
+				return &AsyncIterator[*AgentEvent]{} // Return empty iterator
+			} else {
+				// Not resuming - run normally
+				return agents[i].Run(ctx2, nil, opts...)
+			}
+		}
+	}
+
+	// Execute all agents concurrently using shared logic, using pre-created child contexts
+	a.concurrentLaneExecution(ctx, agentExecutors, agentNamesInOrder, childContexts, generator)
+
+	return iterator
+}
+
+// concurrentLaneExecution handles the core logic for executing multiple agents concurrently
+// This is shared between runConcurrentLanes and resumeConcurrentLanes
+func (a *flowAgent) concurrentLaneExecution(
+	ctx context.Context,
+	agentExecutors []func(context.Context) *AsyncIterator[*AgentEvent],
+	agentNames []string,
+	childContexts []context.Context,
+	generator *AsyncGenerator[*AgentEvent]) {
 
 	var (
 		wg sync.WaitGroup
 		mu sync.Mutex
 	)
 
-	childContexts := make([]context.Context, len(transferActions))
 	subInterruptSignals := make([]*core.InterruptSignal, 0)
 
-	// Fork contexts for each transfer
-	for i := range transferActions {
-		childContexts[i] = forkRunCtx(ctx)
-	}
-
-	// Launch concurrent execution for each transfer
-	for i, transfer := range transferActions {
+	// Launch concurrent execution for each agent
+	for i := range agentExecutors {
+		exec := agentExecutors[i]
+		childRunCtx := childContexts[i]
 		wg.Add(1)
-		go func(idx int, transferAction *TransferToAgentAction) {
+		go func() {
 			defer wg.Done()
 
-			agentToRun := a.getAgent(ctx, transferAction.DestAgentName)
-			if agentToRun == nil {
-				// Agent not found - send error and continue
-				e := fmt.Errorf("transfer failed: agent '%s' not found", transferAction.DestAgentName)
-				generator.Send(&AgentEvent{Err: e})
-				return
-			}
-
-			// Execute the agent in its own lane
-			subAIter := agentToRun.Run(childContexts[idx], nil, opts...)
+			subAIter := exec(childRunCtx)
 
 			for {
 				subEvent, ok := subAIter.Next()
 				if !ok {
 					break
 				}
-
-				// Add event to child context's session (following normal agent execution pattern)
-				childRunCtx := getRunCtx(childContexts[idx])
-				if childRunCtx != nil && childRunCtx.Session != nil {
-					if subEvent.Action == nil || subEvent.Action.Interrupted == nil {
-						// copy the event so that the copied event's stream is exclusive for any potential consumer
-						copied := copyAgentEvent(subEvent)
-						setAutomaticClose(copied)
-						setAutomaticClose(subEvent)
-						childRunCtx.Session.addEvent(copied)
-					}
-				}
-
-				generator.Send(subEvent)
 
 				// Check for interrupt action
 				if subEvent.Action != nil && subEvent.Action.internalInterrupted != nil {
@@ -709,46 +646,27 @@ func (a *flowAgent) runConcurrentLanes(
 					// Stop processing this lane when interrupted
 					return
 				}
+
+				generator.Send(subEvent)
 			}
-		}(i, transfer)
+		}()
 	}
 
 	// Wait for all concurrent lanes to complete
 	wg.Wait()
 
-	// Check if any lane was interrupted
-	if len(subInterruptSignals) > 0 {
-		// Before interrupting, collect the current events from each child context (following runParallel pattern)
-		laneEvents := make(map[string][]*agentEventWrapper)
-		for i, childCtx := range childContexts {
-			childRunCtx := getRunCtx(childCtx)
-			if childRunCtx != nil && childRunCtx.Session != nil && childRunCtx.Session.LaneEvents != nil {
-				// COPY events before storing (streams can only be consumed once)
-				laneEvents[transferActions[i].DestAgentName] = make([]*agentEventWrapper, len(childRunCtx.Session.LaneEvents.Events))
-				for j, event := range childRunCtx.Session.LaneEvents.Events {
-					copied := copyAgentEvent(event.AgentEvent)
-					setAutomaticClose(copied)
-					laneEvents[transferActions[i].DestAgentName][j] = &agentEventWrapper{
-						AgentEvent: copied,
-					}
-				}
-			}
-		}
-
-		// Create composite interrupt with the collected state
-		state := &dynamicParallelState{
-			LaneEvents: laneEvents,
-		}
-
-		event := CompositeInterrupt(ctx, "Concurrent transfer interrupted", state, subInterruptSignals...)
-
-		// Set agent name and run path for proper identification
-		event.AgentName = a.Name(ctx)
-		event.RunPath = getRunCtx(ctx).RunPath
-		generator.Send(event)
+	if len(subInterruptSignals) == 0 {
+		joinRunCtxs(ctx, childContexts...)
 		return
 	}
 
-	// Join all child contexts back to the parent
-	joinRunCtxs(ctx, childContexts...)
+	// Collect events from child contexts if any lanes were interrupted
+	var laneEvents map[string][]*agentEventWrapper
+	if len(subInterruptSignals) > 0 {
+		laneEvents = a.collectLaneEvents(childContexts, agentNames)
+	}
+
+	// Create composite interrupt with the collected state
+	event := a.createCompositeInterrupt(ctx, laneEvents, subInterruptSignals)
+	generator.Send(event)
 }

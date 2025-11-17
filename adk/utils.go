@@ -48,6 +48,16 @@ func (ag *AsyncGenerator[T]) Close() {
 	ag.ch.Close()
 }
 
+func (ag *AsyncGenerator[T]) pipeAll(iter *AsyncIterator[T]) {
+	for {
+		v, ok := iter.Next()
+		if !ok {
+			break
+		}
+		ag.Send(v)
+	}
+}
+
 func NewAsyncIteratorPair[T any]() (*AsyncIterator[T], *AsyncGenerator[T]) {
 	ch := internal.NewUnboundedChan[T]()
 	return &AsyncIterator[T]{ch}, &AsyncGenerator[T]{ch}
