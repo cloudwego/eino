@@ -445,6 +445,13 @@ func (a *flowAgent) run(
 				if interruptAction == nil && exitAction == nil {
 					transferActions = append(transferActions, event.Action.TransferToAgent)
 				}
+			} else if event.Action.ConcurrentTransferToAgent != nil {
+				if interruptAction == nil && exitAction == nil {
+					// Convert concurrent transfer action to individual transfer actions
+					for _, destName := range event.Action.ConcurrentTransferToAgent.DestAgentNames {
+						transferActions = append(transferActions, &TransferToAgentAction{DestAgentName: destName})
+					}
+				}
 			}
 		}
 

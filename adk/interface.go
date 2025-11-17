@@ -126,6 +126,10 @@ type TransferToAgentAction struct {
 	DestAgentName string
 }
 
+type ConcurrentTransferToAgentAction struct {
+	DestAgentNames []string
+}
+
 type AgentOutput struct {
 	MessageOutput *MessageVariant
 
@@ -146,6 +150,8 @@ type AgentAction struct {
 	Interrupted *InterruptInfo
 
 	TransferToAgent *TransferToAgentAction
+
+	ConcurrentTransferToAgent *ConcurrentTransferToAgentAction
 
 	BreakLoop *BreakLoopAction
 

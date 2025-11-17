@@ -374,11 +374,22 @@ func (t *ConcurrentTransferTool) InvokableRun(ctx context.Context, argumentsInJS
 		return "", errors.New("either 'agent_name' or 'agent_names' is required")
 	}
 
-	for _, dest := range dests {
-		if err := SendToolGenAction(ctx, TransferToAgentToolName, NewTransferToAgentAction(dest)); err != nil {
-			// In a concurrent scenario, we might choose to continue, but for now, we fail fast.
-			return "", fmt.Errorf("failed to send transfer action for agent '%s': %w", dest, err)
+	// Create a single concurrent transfer action with all destination agents
+	var action *AgentAction
+	if len(dests) == 1 {
+		// For single agent, use the standard TransferToAgentAction for consistency
+		action = NewTransferToAgentAction(dests[0])
+	} else {
+		// For multiple agents, use the new ConcurrentTransferToAgentAction
+		action = &AgentAction{
+			ConcurrentTransferToAgent: &ConcurrentTransferToAgentAction{
+				DestAgentNames: dests,
+			},
 		}
+	}
+	
+	if err := SendToolGenAction(ctx, TransferToAgentToolName, action); err != nil {
+		return "", fmt.Errorf("failed to send transfer action: %w", err)
 	}
 
 	return fmt.Sprintf("successfully transferred to agents: [%s]", strings.Join(dests, ", ")), nil
