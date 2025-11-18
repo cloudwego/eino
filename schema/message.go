@@ -145,8 +145,9 @@ const (
 
 // MessagePartCommon represents the common abstract components for input and output of multi-modal types.
 type MessagePartCommon struct {
-	// URL can either be a traditional URL or a special URL conforming to RFC-2397 (https://www.rfc-editor.org/rfc/rfc2397).
-	// double check with model implementations for detailed instructions on how to use this.
+	// URL is primarily used for HTTP or HTTPS access links.
+	// For data in the format 'data:[<mediatype>][;base64],<data>' (the 'data' URL Schema of RFC-2397 (https://www.rfc-editor.org/rfc/rfc2397)),
+	// it is recommended to use Base64Data and MIMEType fields separately instead.
 	URL *string `json:"url,omitempty"`
 
 	// Base64Data represents the binary data in Base64 encoded string format.
@@ -240,6 +241,7 @@ type MessageOutputPart struct {
 }
 
 // Deprecated: This struct is deprecated as the MultiContent field is deprecated.
+// For the image input part of the model, use MessageInputImage, For the image output part of the model, use MessageOutputImage
 // ChatMessageImageURL is used to represent an image part in a chat message.
 // Choose either URL or URI.
 // If your model implementation supports it, URL could be used to embed inline image data as defined in RFC-2397.
@@ -275,6 +277,7 @@ const (
 )
 
 // Deprecated: This struct is deprecated as the MultiContent field is deprecated.
+// For the audio input part of the model, use MessageInputAudio, For the audio output part of the model, use MessageOutputAudio
 // ChatMessageAudioURL is used to represent an audio part in a chat message.
 // Choose either URL or URI.
 // If your model implementation supports it, URL could be used to embed inline audio data as defined in RFC-2397.
@@ -291,6 +294,7 @@ type ChatMessageAudioURL struct {
 }
 
 // Deprecated: This struct is deprecated as the MultiContent field is deprecated.
+// For the video input part of the model, use MessageInputVideo, For the video output part of the model, use MessageOutputVideo
 // ChatMessageVideoURL is used to represent an video part in a chat message.
 // Choose either URL or URI.
 // If your model implementation supports it, URL could be used to embed inline video data as defined in RFC-2397.
@@ -307,6 +311,7 @@ type ChatMessageVideoURL struct {
 }
 
 // Deprecated: This struct is deprecated as the MultiContent field is deprecated.
+// For the file input part of the model, use MessageInputFile
 // ChatMessageFileURL is used to represent an file part in a chat message.
 // Choose either URL or URI.
 type ChatMessageFileURL struct {
@@ -323,6 +328,7 @@ type ChatMessageFileURL struct {
 }
 
 // Deprecated: This struct is deprecated as the MultiContent field is deprecated.
+// For the input of the model, use MessageInputPart, For the output of the model, use MessageOutputPart
 // ChatMessagePart is the part in a chat message.
 type ChatMessagePart struct {
 	// Type is the type of the part, eg. "text", "image_url", "audio_url", "video_url", "file_url".
