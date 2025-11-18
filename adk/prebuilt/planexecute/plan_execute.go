@@ -24,6 +24,7 @@ import (
 	"strings"
 
 	"github.com/bytedance/sonic"
+
 	"github.com/cloudwego/eino/compose"
 
 	"github.com/cloudwego/eino/adk"
@@ -379,6 +380,9 @@ func (p *planner) Run(ctx context.Context, input *adk.AgentInput,
 				compose.InvokableLambda(func(ctx context.Context, msg adk.Message) (plan Plan, err error) {
 					var planJSON string
 					if p.toolCall {
+						if len(msg.ToolCalls) == 0 {
+							return nil, fmt.Errorf("no tool call")
+						}
 						planJSON = msg.ToolCalls[0].Function.Arguments
 					} else {
 						planJSON = msg.Content
