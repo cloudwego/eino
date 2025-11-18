@@ -117,13 +117,13 @@ func TestNewSupervisor(t *testing.T) {
 	// transfer back to supervisor
 	event, ok = aIter.Next()
 	assert.True(t, ok)
-	assert.Equal(t, "SubAgent1", event.AgentName)
+	assert.Equal(t, "SupervisorAgent", event.AgentName)
 	assert.Equal(t, schema.Assistant, event.Output.MessageOutput.Role)
 	assert.NotEqual(t, 0, len(event.Output.MessageOutput.Message.ToolCalls))
 
 	event, ok = aIter.Next()
 	assert.True(t, ok)
-	assert.Equal(t, "SubAgent1", event.AgentName)
+	assert.Equal(t, "SupervisorAgent", event.AgentName)
 	assert.Equal(t, schema.Tool, event.Output.MessageOutput.Role)
 	assert.Equal(t, "SupervisorAgent", event.Action.TransferToAgent.DestAgentName)
 
@@ -140,7 +140,7 @@ func TestNewSupervisor(t *testing.T) {
 	assert.Equal(t, schema.Tool, event.Output.MessageOutput.Role)
 	assert.Equal(t, "SubAgent2", event.Action.TransferToAgent.DestAgentName)
 
-	// agent1's output
+	// agent2's output
 	event, ok = aIter.Next()
 	assert.True(t, ok)
 	assert.Equal(t, "SubAgent2", event.AgentName)
@@ -150,13 +150,13 @@ func TestNewSupervisor(t *testing.T) {
 	// transfer back to supervisor
 	event, ok = aIter.Next()
 	assert.True(t, ok)
-	assert.Equal(t, "SubAgent2", event.AgentName)
+	assert.Equal(t, "SupervisorAgent", event.AgentName)
 	assert.Equal(t, schema.Assistant, event.Output.MessageOutput.Role)
 	assert.NotEqual(t, 0, len(event.Output.MessageOutput.Message.ToolCalls))
 
 	event, ok = aIter.Next()
 	assert.True(t, ok)
-	assert.Equal(t, "SubAgent2", event.AgentName)
+	assert.Equal(t, "SupervisorAgent", event.AgentName)
 	assert.Equal(t, schema.Tool, event.Output.MessageOutput.Role)
 	assert.Equal(t, "SupervisorAgent", event.Action.TransferToAgent.DestAgentName)
 

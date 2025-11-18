@@ -98,6 +98,8 @@ type flowAgent struct {
 	historyRewriter          HistoryRewriter
 
 	checkPointStore compose.CheckPointStore
+
+	selfReturnAfterTransfer bool
 }
 
 func (a *flowAgent) deepCopy() *flowAgent {
@@ -108,6 +110,7 @@ func (a *flowAgent) deepCopy() *flowAgent {
 		disallowTransferToParent: a.disallowTransferToParent,
 		historyRewriter:          a.historyRewriter,
 		checkPointStore:          a.checkPointStore,
+		selfReturnAfterTransfer:  a.selfReturnAfterTransfer,
 	}
 
 	for _, sa := range a.subAgents {
@@ -131,6 +134,12 @@ func WithDisallowTransferToParent() AgentOption {
 func WithHistoryRewriter(h HistoryRewriter) AgentOption {
 	return func(fa *flowAgent) {
 		fa.historyRewriter = h
+	}
+}
+
+func WithSelfReturnAfterTransfer() AgentOption {
+	return func(fa *flowAgent) {
+		fa.selfReturnAfterTransfer = true
 	}
 }
 
@@ -245,6 +254,9 @@ func genMsg(entry *HistoryEntry, agentName string) (Message, error) {
 }
 
 func (ai *AgentInput) deepCopy() *AgentInput {
+	if ai == nil {
+		return nil
+	}
 	copied := &AgentInput{
 		Messages:        make([]Message, len(ai.Messages)),
 		EnableStreaming: ai.EnableStreaming,
@@ -484,6 +496,11 @@ func (a *flowAgent) run(
 
 		subAIter := agentToRun.Run(ctx, nil /*subagents get input from runCtx*/, opts...)
 		generator.pipeAll(subAIter)
+
+		if a.selfReturnAfterTransfer {
+			a.doSelfReturnAfterTransfer(ctx, generator, opts...)
+		}
+
 		return
 	}
 
@@ -497,10 +514,11 @@ func (a *flowAgent) run(
 		}
 		agents[i] = agentToRun
 	}
-	a.runConcurrentLanes(ctx, agents, generator, opts...)
+	iterator := a.runConcurrentLanes(ctx, agents, opts...)
+	generator.pipeAll(iterator)
 }
 
-func (a *flowAgent) getAgentFromTransferAction(ctx context.Context, action *TransferToAgentAction) (*flowAgent, error) {
+func (a *flowAgent) getAgentFromTransferAction(ctx context.Context, action *TransferToAgentAction) (Agent, error) {
 	sub := a.getAgent(ctx, action.DestAgentName)
 	if sub == nil {
 		return nil, fmt.Errorf("transfer failed: agent '%s' not found when transferring from '%s'",
@@ -513,8 +531,9 @@ func (a *flowAgent) getAgentFromTransferAction(ctx context.Context, action *Tran
 func (a *flowAgent) runConcurrentLanes(
 	ctx context.Context,
 	agents []Agent,
-	generator *AsyncGenerator[*AgentEvent],
-	opts ...AgentRunOption) {
+	opts ...AgentRunOption) *AsyncIterator[*AgentEvent] {
+	iterator, generator := NewAsyncIteratorPair[*AgentEvent]()
+	defer generator.Close()
 
 	agentExecutors := make([]func(context.Context) *AsyncIterator[*AgentEvent], len(agents))
 	childContexts := make([]context.Context, len(agents))
@@ -529,7 +548,8 @@ func (a *flowAgent) runConcurrentLanes(
 		}
 	}
 
-	a.concurrentLaneExecution(ctx, agentExecutors, agentNames, childContexts, generator)
+	a.concurrentLaneExecution(ctx, agentExecutors, agentNames, childContexts, generator, opts...)
+	return iterator
 }
 
 // resumeConcurrentLanes resumes execution after a concurrent transfer interruption
@@ -540,6 +560,7 @@ func (a *flowAgent) resumeConcurrentLanes(
 	opts ...AgentRunOption) *AsyncIterator[*AgentEvent] {
 
 	iterator, generator := NewAsyncIteratorPair[*AgentEvent]()
+	defer generator.Close()
 
 	// Create child contexts for each lane (using LaneEvents as source of truth)
 	// We need to preserve the order, so we'll create a slice of agent names
@@ -605,7 +626,7 @@ func (a *flowAgent) resumeConcurrentLanes(
 	}
 
 	// Execute all agents concurrently using shared logic, using pre-created child contexts
-	a.concurrentLaneExecution(ctx, agentExecutors, agentNamesInOrder, childContexts, generator)
+	a.concurrentLaneExecution(ctx, agentExecutors, agentNamesInOrder, childContexts, generator, opts...)
 
 	return iterator
 }
@@ -617,7 +638,8 @@ func (a *flowAgent) concurrentLaneExecution(
 	agentExecutors []func(context.Context) *AsyncIterator[*AgentEvent],
 	agentNames []string,
 	childContexts []context.Context,
-	generator *AsyncGenerator[*AgentEvent]) {
+	generator *AsyncGenerator[*AgentEvent],
+	opts ...AgentRunOption) {
 
 	var (
 		wg sync.WaitGroup
@@ -664,8 +686,11 @@ func (a *flowAgent) concurrentLaneExecution(
 	wg.Wait()
 
 	if len(subInterruptSignals) == 0 {
-		generator.Close()
 		joinRunCtxs(ctx, childContexts...)
+
+		if a.selfReturnAfterTransfer {
+			a.doSelfReturnAfterTransfer(ctx, generator, opts...)
+		}
 		return
 	}
 
@@ -678,5 +703,26 @@ func (a *flowAgent) concurrentLaneExecution(
 	// Create composite interrupt with the collected state
 	event := a.createCompositeInterrupt(ctx, laneEvents, subInterruptSignals)
 	generator.Send(event)
-	generator.Close()
+}
+
+func (a *flowAgent) doSelfReturnAfterTransfer(ctx context.Context,
+	generator *AsyncGenerator[*AgentEvent], opts ...AgentRunOption) {
+	target := a.Name(ctx)
+	runCtx := getRunCtx(ctx)
+	aMsg, tMsg := GenTransferMessages(ctx, target)
+	aEvent := EventFromMessage(aMsg, nil, schema.Assistant, "")
+	aEvent.AgentName = a.Name(ctx)
+	aEvent.RunPath = runCtx.RunPath
+	generator.Send(aEvent)
+	tEvent := EventFromMessage(tMsg, nil, schema.Tool, tMsg.ToolName)
+	tEvent.Action = &AgentAction{
+		TransferToAgent: &TransferToAgentAction{
+			DestAgentName: target,
+		},
+	}
+	tEvent.AgentName = a.Name(ctx)
+	tEvent.RunPath = runCtx.RunPath
+	generator.Send(tEvent)
+	iter := a.Run(ctx, nil, opts...)
+	generator.pipeAll(iter)
 }

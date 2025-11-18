@@ -37,14 +37,7 @@ type Config struct {
 // sub-agents can only communicate with the supervisor (not with each other directly).
 // This hierarchical structure enables complex problem-solving through coordinated agent interactions.
 func New(ctx context.Context, conf *Config) (adk.Agent, error) {
-	subAgents := make([]adk.Agent, 0, len(conf.SubAgents))
-	supervisorName := conf.Supervisor.Name(ctx)
-	for _, subAgent := range conf.SubAgents {
-		subAgents = append(subAgents, adk.AgentWithDeterministicTransferTo(ctx, &adk.DeterministicTransferConfig{
-			Agent:        subAgent,
-			ToAgentNames: []string{supervisorName},
-		}))
-	}
+	supervisor := adk.AgentWithOptions(ctx, conf.Supervisor, adk.WithSelfReturnAfterTransfer())
 
-	return adk.SetSubAgents(ctx, conf.Supervisor, subAgents)
+	return adk.SetSubAgents(ctx, supervisor, conf.SubAgents)
 }
