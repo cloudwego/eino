@@ -596,7 +596,9 @@ func (a *ChatModelAgent) buildRunFunc(ctx context.Context) runFunc {
 						return a.genModelInput(ctx, instruction, input)
 					})).
 					AppendChatModel(a.model).
-					Compile(ctx, compose.WithGraphName(a.name))
+					Compile(ctx, compose.WithGraphName(a.name),
+						compose.WithCheckPointStore(store),
+						compose.WithSerializer(&gobSerializer{}))
 				if err != nil {
 					generator.Send(&AgentEvent{Err: err})
 					return
@@ -605,9 +607,9 @@ func (a *ChatModelAgent) buildRunFunc(ctx context.Context) runFunc {
 				var msg Message
 				var msgStream MessageStream
 				if input.EnableStreaming {
-					msgStream, err = r.Stream(ctx, input) // todo: chat model option
+					msgStream, err = r.Stream(ctx, input, opts...)
 				} else {
-					msg, err = r.Invoke(ctx, input)
+					msg, err = r.Invoke(ctx, input, opts...)
 				}
 
 				var event *AgentEvent

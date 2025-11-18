@@ -648,3 +648,41 @@ func TestWorkflowAgentResumeInvalidDataType(t *testing.T) {
 	_, ok = iterator.Next()
 	assert.False(t, ok)
 }
+
+func TestFilterOptions(t *testing.T) {
+	a1 := &myAgent{
+		name: "Agent1",
+		runner: func(ctx context.Context, input *AgentInput, opts ...AgentRunOption) *AsyncIterator[*AgentEvent] {
+			o := GetImplSpecificOptions[myAgentOptions](nil, opts...)
+			assert.Equal(t, "Agent1", o.value)
+			iter, gen := NewAsyncIteratorPair[*AgentEvent]()
+			gen.Close()
+			return iter
+		},
+	}
+	a2 := &myAgent{
+		name: "Agent1",
+		runner: func(ctx context.Context, input *AgentInput, opts ...AgentRunOption) *AsyncIterator[*AgentEvent] {
+			o := GetImplSpecificOptions[myAgentOptions](nil, opts...)
+			assert.Equal(t, "Agent2", o.value)
+			iter, gen := NewAsyncIteratorPair[*AgentEvent]()
+			gen.Close()
+			return iter
+		},
+	}
+	ctx := context.Background()
+	// sequential
+	seqAgent, err := NewSequentialAgent(ctx, &SequentialAgentConfig{
+		SubAgents: []Agent{a1, a2},
+	})
+	assert.NoError(t, err)
+	seqAgent.Run(ctx, &AgentInput{}, withValue("Agent1").DesignateAgent("Agent1"), withValue("Agent2").DesignateAgent("Agent2"))
+
+	// parallel
+	parAgent, err := NewParallelAgent(ctx, &ParallelAgentConfig{
+		SubAgents: []Agent{a1, a2},
+	})
+	assert.NoError(t, err)
+	parAgent.Run(ctx, &AgentInput{}, withValue("Agent1").DesignateAgent("Agent1"), withValue("Agent2").DesignateAgent("Agent2"))
+
+}

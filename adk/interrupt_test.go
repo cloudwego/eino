@@ -732,11 +732,19 @@ func (m *myStore) Get(ctx context.Context, key string) ([]byte, bool, error) {
 
 type myAgentOptions struct {
 	interrupt bool
+
+	value string
 }
 
 func withResume() AgentRunOption {
 	return WrapImplSpecificOptFn(func(t *myAgentOptions) {
 		t.interrupt = true
+	})
+}
+
+func withValue(value string) AgentRunOption {
+	return WrapImplSpecificOptFn(func(t *myAgentOptions) {
+		t.value = value
 	})
 }
 
