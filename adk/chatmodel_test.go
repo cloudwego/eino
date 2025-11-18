@@ -298,9 +298,9 @@ func TestConcurrentTransferTool(t *testing.T) {
 
 		// Create agent with ConcurrentTransferTool
 		agent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
-			Name:        "TestAgent",
-			Description: "Test agent",
-			Model:       cm,
+			Name:         "TestAgent",
+			Description:  "Test agent",
+			Model:        cm,
 			TransferTool: &ConcurrentTransferTool{},
 		})
 		assert.NoError(t, err)
@@ -329,7 +329,7 @@ func TestConcurrentTransferTool(t *testing.T) {
 
 		// Should have at least one event with concurrent transfer action
 		assert.Greater(t, len(events), 0)
-		
+
 		// Find the event with concurrent transfer action
 		var concurrentTransferEvent *AgentEvent
 		for _, event := range events {
@@ -338,10 +338,10 @@ func TestConcurrentTransferTool(t *testing.T) {
 				break
 			}
 		}
-		
+
 		// Should have found a concurrent transfer event
 		assert.NotNil(t, concurrentTransferEvent)
-		
+
 		// Verify the concurrent transfer action
 		concurrentAction := concurrentTransferEvent.Action.ConcurrentTransferToAgent
 		assert.NotNil(t, concurrentAction)
@@ -379,9 +379,9 @@ func TestConcurrentTransferTool(t *testing.T) {
 
 		// Create agent with ConcurrentTransferTool
 		agent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
-			Name:        "TestAgent",
-			Description: "Test agent",
-			Model:       cm,
+			Name:         "TestAgent",
+			Description:  "Test agent",
+			Model:        cm,
 			TransferTool: &ConcurrentTransferTool{},
 		})
 		assert.NoError(t, err)
@@ -410,7 +410,7 @@ func TestConcurrentTransferTool(t *testing.T) {
 
 		// Should have at least one event with concurrent transfer action
 		assert.Greater(t, len(events), 0)
-		
+
 		// Find the event with transfer action
 		var transferEvent *AgentEvent
 		for _, event := range events {
@@ -419,10 +419,10 @@ func TestConcurrentTransferTool(t *testing.T) {
 				break
 			}
 		}
-		
+
 		// Should have found a transfer event (not concurrent since it's a single agent)
 		assert.NotNil(t, transferEvent)
-		
+
 		// Verify it's a standard TransferToAgentAction, not ConcurrentTransferToAgentAction
 		assert.NotNil(t, transferEvent.Action.TransferToAgent)
 		assert.Nil(t, transferEvent.Action.ConcurrentTransferToAgent)

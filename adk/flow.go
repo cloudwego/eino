@@ -38,7 +38,7 @@ type HistoryEntry struct {
 
 type HistoryRewriter func(ctx context.Context, entries []*HistoryEntry) ([]Message, error)
 
-type dynamicParallelState struct {
+type flowInterruptState struct {
 	// Maps the destination agent name to the events generated in its lane before interruption.
 	// This also serves as the source of truth for which lanes need to be resumed.
 	LaneEvents map[string][]*agentEventWrapper
@@ -71,7 +71,7 @@ func (a *flowAgent) collectLaneEvents(childContexts []context.Context, agentName
 
 // createCompositeInterrupt creates a composite interrupt event with the collected state
 func (a *flowAgent) createCompositeInterrupt(ctx context.Context, laneEvents map[string][]*agentEventWrapper, subInterruptSignals []*core.InterruptSignal) *AgentEvent {
-	state := &dynamicParallelState{
+	state := &flowInterruptState{
 		LaneEvents: laneEvents,
 	}
 
@@ -85,7 +85,7 @@ func (a *flowAgent) createCompositeInterrupt(ctx context.Context, laneEvents map
 }
 
 func init() {
-	schema.RegisterName[*dynamicParallelState]("eino_adk_dynamic_parallel_state")
+	schema.RegisterName[*flowInterruptState]("eino_adk_dynamic_parallel_state")
 }
 
 type flowAgent struct {
@@ -137,6 +137,19 @@ func WithHistoryRewriter(h HistoryRewriter) AgentOption {
 	}
 }
 
+// WithSelfReturnAfterTransfer returns an AgentOption that enables self-return behavior
+// after a transfer operation completes. When this option is set, the agent will
+// automatically return control to itself after all sub-agents have finished executing.
+//
+// This is particularly useful for supervisor agents that need to process the results
+// of concurrent transfers or perform additional operations after sub-agent execution.
+//
+// Example usage:
+//
+//	agent := toFlowAgent(ctx, baseAgent, WithSelfReturnAfterTransfer())
+//
+// Without this option, the agent's execution ends after the transfer completes.
+// With this option, the agent resumes execution to handle the aggregated results.
 func WithSelfReturnAfterTransfer() AgentOption {
 	return func(fa *flowAgent) {
 		fa.selfReturnAfterTransfer = true
@@ -372,7 +385,7 @@ func (a *flowAgent) Resume(ctx context.Context, info *ResumeInfo, opts ...AgentR
 	if info.WasInterrupted {
 		// Check if we need to resume concurrent transfers
 		if info.InterruptState != nil {
-			state, ok := info.InterruptState.(*dynamicParallelState)
+			state, ok := info.InterruptState.(*flowInterruptState)
 			if ok {
 				// Delegate to resumeConcurrentLanes which will handle the type assertion
 				return a.resumeConcurrentLanes(ctx, state, info, opts...)
@@ -555,7 +568,7 @@ func (a *flowAgent) runConcurrentLanes(
 // resumeConcurrentLanes resumes execution after a concurrent transfer interruption
 func (a *flowAgent) resumeConcurrentLanes(
 	ctx context.Context,
-	state *dynamicParallelState,
+	state *flowInterruptState,
 	info *ResumeInfo,
 	opts ...AgentRunOption) *AsyncIterator[*AgentEvent] {
 

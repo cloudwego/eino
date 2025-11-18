@@ -1151,15 +1151,20 @@ func newMyStore() *myStore {
 }
 
 type myStore struct {
-	m map[string][]byte
+	m  map[string][]byte
+	mu sync.Mutex
 }
 
 func (m *myStore) Set(_ context.Context, key string, value []byte) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	m.m[key] = value
 	return nil
 }
 
 func (m *myStore) Get(_ context.Context, key string) ([]byte, bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	v, ok := m.m[key]
 	return v, ok, nil
 }

@@ -122,11 +122,28 @@ func (mv *MessageVariant) GetMessage() (Message, error) {
 	return message, nil
 }
 
+// TransferToAgentAction represents a transfer action to a single destination agent.
+// This action is used when an agent needs to transfer its execution to another
+// specific agent in the hierarchy.
 type TransferToAgentAction struct {
 	DestAgentName string
 }
 
+// ConcurrentTransferToAgentAction represents a concurrent transfer action to multiple destination agents.
+// This action enables an agent to transfer its execution to multiple sub-agents
+// simultaneously using a fork-join execution model. All destination agents will
+// execute concurrently, and their results will be aggregated.
+//
+// Example usage:
+//  action := &AgentAction{
+//      ConcurrentTransferToAgent: &ConcurrentTransferToAgentAction{
+//          DestAgentNames: []string{"AnalyticsAgent", "ValidationAgent", "EnrichmentAgent"},
+//      },
+//  }
 type ConcurrentTransferToAgentAction struct {
+	// DestAgentNames contains the names of all destination agents that should
+	// execute concurrently. The framework will handle parallel execution and
+	// result aggregation using a fork-join pattern.
 	DestAgentNames []string
 }
 
@@ -144,19 +161,31 @@ func NewExitAction() *AgentAction {
 	return &AgentAction{Exit: true}
 }
 
+// AgentAction represents an action that an agent can take during execution.
+// Actions determine the flow of execution and can include transfers, interrupts,
+// exits, and custom behaviors.
 type AgentAction struct {
+	// Exit indicates whether the agent should terminate execution.
 	Exit bool
 
+	// Interrupted contains interrupt information when the agent is interrupted.
 	Interrupted *InterruptInfo
 
+	// TransferToAgent represents a transfer to a single destination agent.
 	TransferToAgent *TransferToAgentAction
 
+	// ConcurrentTransferToAgent represents a concurrent transfer to multiple destination agents.
+	// When set, the framework will execute all destination agents simultaneously
+	// using a fork-join pattern. This enables parallel processing of complex tasks.
 	ConcurrentTransferToAgent *ConcurrentTransferToAgentAction
 
+	// BreakLoop represents a loop-breaking action.
 	BreakLoop *BreakLoopAction
 
+	// CustomizedAction allows for custom action implementations.
 	CustomizedAction any
 
+	// internalInterrupted is used internally for interrupt signal handling.
 	internalInterrupted *core.InterruptSignal
 }
 

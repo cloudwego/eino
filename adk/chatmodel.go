@@ -136,6 +136,18 @@ type ChatModelAgentConfig struct {
 
 	// TransferTool defines the tool used for transferring tasks to other agents.
 	// Optional. If nil, a default single-transfer tool will be used.
+	//
+	// This field enables configuration of the transfer behavior for the agent:
+	// - Use &transferToAgent{} for single-agent transfers (default)
+	// - Use &ConcurrentTransferTool{} for concurrent multi-agent transfers
+	// - Implement custom transfer tools for specialized transfer logic
+	//
+	// Example usage for concurrent transfers:
+	//  config := &ChatModelAgentConfig{
+	//      Name: "Orchestrator",
+	//      Model: chatModel,
+	//      TransferTool: &ConcurrentTransferTool{},
+	//  }
 	TransferTool tool.BaseTool
 
 	// Exit defines the tool used to terminate the agent process.
@@ -200,7 +212,7 @@ func NewChatModelAgent(_ context.Context, config *ChatModelAgentConfig) (*ChatMo
 
 	transferTool := config.TransferTool
 	if transferTool == nil {
-		transferTool = &SingleTransferTool{}
+		transferTool = &transferToAgent{}
 	}
 
 	return &ChatModelAgent{
@@ -304,34 +316,16 @@ func (tta transferToAgent) InvokableRun(ctx context.Context, argumentsInJSON str
 	return transferToAgentToolOutput(params.AgentName), nil
 }
 
-// SingleTransferTool is a wrapper around the existing transferToAgent implementation
-// that provides the same behavior but as a configurable tool.
-type SingleTransferTool struct{}
-
-func (t *SingleTransferTool) Info(_ context.Context) (*schema.ToolInfo, error) {
-	return toolInfoTransferToAgent, nil
-}
-
-func (t *SingleTransferTool) InvokableRun(ctx context.Context, argumentsInJSON string, _ ...tool.Option) (string, error) {
-	type transferParams struct {
-		AgentName string `json:"agent_name"`
-	}
-
-	params := &transferParams{}
-	err := sonic.UnmarshalString(argumentsInJSON, params)
-	if err != nil {
-		return "", err
-	}
-
-	err = SendToolGenAction(ctx, TransferToAgentToolName, NewTransferToAgentAction(params.AgentName))
-	if err != nil {
-		return "", err
-	}
-
-	return transferToAgentToolOutput(params.AgentName), nil
-}
-
 // ConcurrentTransferTool is a tool that supports both single and concurrent agent transfers.
+// This tool provides flexible transfer capabilities, allowing agents to transfer tasks
+// to either a single agent or multiple agents concurrently using a fork-join execution model.
+//
+// The tool accepts parameters in a "one-of" format:
+// - "agent_name": Transfer to a single agent
+// - "agent_names": Transfer to multiple agents concurrently
+//
+// When multiple agents are specified, the framework executes them simultaneously
+// and aggregates their results. This enables parallel processing of complex workflows.
 type ConcurrentTransferTool struct{}
 
 func (t *ConcurrentTransferTool) Info(_ context.Context) (*schema.ToolInfo, error) {
@@ -387,7 +381,7 @@ func (t *ConcurrentTransferTool) InvokableRun(ctx context.Context, argumentsInJS
 			},
 		}
 	}
-	
+
 	if err := SendToolGenAction(ctx, TransferToAgentToolName, action); err != nil {
 		return "", fmt.Errorf("failed to send transfer action: %w", err)
 	}
