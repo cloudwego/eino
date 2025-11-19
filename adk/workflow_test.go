@@ -652,7 +652,7 @@ func TestWorkflowAgentResumeInvalidDataType(t *testing.T) {
 func TestFilterOptions(t *testing.T) {
 	a1 := &myAgent{
 		name: "Agent1",
-		runner: func(ctx context.Context, input *AgentInput, opts ...AgentRunOption) *AsyncIterator[*AgentEvent] {
+		runFn: func(ctx context.Context, input *AgentInput, opts ...AgentRunOption) *AsyncIterator[*AgentEvent] {
 			o := GetImplSpecificOptions[myAgentOptions](nil, opts...)
 			assert.Equal(t, "Agent1", o.value)
 			iter, gen := NewAsyncIteratorPair[*AgentEvent]()
@@ -661,8 +661,8 @@ func TestFilterOptions(t *testing.T) {
 		},
 	}
 	a2 := &myAgent{
-		name: "Agent1",
-		runner: func(ctx context.Context, input *AgentInput, opts ...AgentRunOption) *AsyncIterator[*AgentEvent] {
+		name: "Agent2",
+		runFn: func(ctx context.Context, input *AgentInput, opts ...AgentRunOption) *AsyncIterator[*AgentEvent] {
 			o := GetImplSpecificOptions[myAgentOptions](nil, opts...)
 			assert.Equal(t, "Agent2", o.value)
 			iter, gen := NewAsyncIteratorPair[*AgentEvent]()
@@ -676,13 +676,16 @@ func TestFilterOptions(t *testing.T) {
 		SubAgents: []Agent{a1, a2},
 	})
 	assert.NoError(t, err)
-	seqAgent.Run(ctx, &AgentInput{}, withValue("Agent1").DesignateAgent("Agent1"), withValue("Agent2").DesignateAgent("Agent2"))
+	iter := seqAgent.Run(ctx, &AgentInput{}, withValue("Agent1").DesignateAgent("Agent1"), withValue("Agent2").DesignateAgent("Agent2"))
+	_, ok := iter.Next()
+	assert.False(t, ok)
 
 	// parallel
 	parAgent, err := NewParallelAgent(ctx, &ParallelAgentConfig{
 		SubAgents: []Agent{a1, a2},
 	})
 	assert.NoError(t, err)
-	parAgent.Run(ctx, &AgentInput{}, withValue("Agent1").DesignateAgent("Agent1"), withValue("Agent2").DesignateAgent("Agent2"))
-
+	iter = parAgent.Run(ctx, &AgentInput{}, withValue("Agent1").DesignateAgent("Agent1"), withValue("Agent2").DesignateAgent("Agent2"))
+	_, ok = iter.Next()
+	assert.False(t, ok)
 }

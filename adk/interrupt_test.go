@@ -72,7 +72,7 @@ func TestSaveAgentEventWrapper(t *testing.T) {
 func TestSimpleInterrupt(t *testing.T) {
 	data := "hello world"
 	agent := &myAgent{
-		runner: func(ctx context.Context, input *AgentInput, options ...AgentRunOption) *AsyncIterator[*AgentEvent] {
+		runFn: func(ctx context.Context, input *AgentInput, options ...AgentRunOption) *AsyncIterator[*AgentEvent] {
 			iter, generator := NewAsyncIteratorPair[*AgentEvent]()
 			generator.Send(&AgentEvent{
 				Output: &AgentOutput{
@@ -94,7 +94,7 @@ func TestSimpleInterrupt(t *testing.T) {
 			generator.Close()
 			return iter
 		},
-		resumer: func(ctx context.Context, info *ResumeInfo, opts ...AgentRunOption) *AsyncIterator[*AgentEvent] {
+		resumeFn: func(ctx context.Context, info *ResumeInfo, opts ...AgentRunOption) *AsyncIterator[*AgentEvent] {
 			assert.NotNil(t, info)
 			assert.True(t, info.EnableStreaming)
 			assert.Equal(t, data, info.Data)
@@ -119,15 +119,17 @@ func TestSimpleInterrupt(t *testing.T) {
 	_, ok = iter.Next()
 	assert.False(t, ok)
 
-	_, err := runner.Resume(ctx, "1")
+	iter, err := runner.Resume(ctx, "1")
 	assert.NoError(t, err)
+	_, ok = iter.Next()
+	assert.False(t, ok)
 }
 
 func TestMultiAgentInterrupt(t *testing.T) {
 	ctx := context.Background()
 	sa1 := &myAgent{
 		name: "sa1",
-		runner: func(ctx context.Context, input *AgentInput, options ...AgentRunOption) *AsyncIterator[*AgentEvent] {
+		runFn: func(ctx context.Context, input *AgentInput, options ...AgentRunOption) *AsyncIterator[*AgentEvent] {
 			iter, generator := NewAsyncIteratorPair[*AgentEvent]()
 			generator.Send(&AgentEvent{
 				AgentName: "sa1",
@@ -143,7 +145,7 @@ func TestMultiAgentInterrupt(t *testing.T) {
 	}
 	sa2 := &myAgent{
 		name: "sa2",
-		runner: func(ctx context.Context, input *AgentInput, options ...AgentRunOption) *AsyncIterator[*AgentEvent] {
+		runFn: func(ctx context.Context, input *AgentInput, options ...AgentRunOption) *AsyncIterator[*AgentEvent] {
 			iter, generator := NewAsyncIteratorPair[*AgentEvent]()
 			generator.Send(&AgentEvent{
 				AgentName: "sa2",
@@ -156,7 +158,7 @@ func TestMultiAgentInterrupt(t *testing.T) {
 			generator.Close()
 			return iter
 		},
-		resumer: func(ctx context.Context, info *ResumeInfo, opts ...AgentRunOption) *AsyncIterator[*AgentEvent] {
+		resumeFn: func(ctx context.Context, info *ResumeInfo, opts ...AgentRunOption) *AsyncIterator[*AgentEvent] {
 			assert.NotNil(t, info)
 			assert.Equal(t, info.Data, "hello world")
 			iter, generator := NewAsyncIteratorPair[*AgentEvent]()
@@ -199,7 +201,7 @@ func TestWorkflowInterrupt(t *testing.T) {
 	ctx := context.Background()
 	sa1 := &myAgent{
 		name: "sa1",
-		runner: func(ctx context.Context, input *AgentInput, options ...AgentRunOption) *AsyncIterator[*AgentEvent] {
+		runFn: func(ctx context.Context, input *AgentInput, options ...AgentRunOption) *AsyncIterator[*AgentEvent] {
 			iter, generator := NewAsyncIteratorPair[*AgentEvent]()
 			generator.Send(&AgentEvent{
 				AgentName: "sa1",
@@ -212,7 +214,7 @@ func TestWorkflowInterrupt(t *testing.T) {
 			generator.Close()
 			return iter
 		},
-		resumer: func(ctx context.Context, info *ResumeInfo, opts ...AgentRunOption) *AsyncIterator[*AgentEvent] {
+		resumeFn: func(ctx context.Context, info *ResumeInfo, opts ...AgentRunOption) *AsyncIterator[*AgentEvent] {
 			assert.Equal(t, info.Data, "sa1 interrupt data")
 			iter, generator := NewAsyncIteratorPair[*AgentEvent]()
 			generator.Close()
@@ -221,7 +223,7 @@ func TestWorkflowInterrupt(t *testing.T) {
 	} // interrupt once
 	sa2 := &myAgent{
 		name: "sa2",
-		runner: func(ctx context.Context, input *AgentInput, options ...AgentRunOption) *AsyncIterator[*AgentEvent] {
+		runFn: func(ctx context.Context, input *AgentInput, options ...AgentRunOption) *AsyncIterator[*AgentEvent] {
 			iter, generator := NewAsyncIteratorPair[*AgentEvent]()
 			generator.Send(&AgentEvent{
 				AgentName: "sa2",
@@ -234,7 +236,7 @@ func TestWorkflowInterrupt(t *testing.T) {
 			generator.Close()
 			return iter
 		},
-		resumer: func(ctx context.Context, info *ResumeInfo, opts ...AgentRunOption) *AsyncIterator[*AgentEvent] {
+		resumeFn: func(ctx context.Context, info *ResumeInfo, opts ...AgentRunOption) *AsyncIterator[*AgentEvent] {
 			assert.Equal(t, info.Data, "sa2 interrupt data")
 			iter, generator := NewAsyncIteratorPair[*AgentEvent]()
 			generator.Close()
@@ -243,7 +245,7 @@ func TestWorkflowInterrupt(t *testing.T) {
 	} // interrupt once
 	sa3 := &myAgent{
 		name: "sa3",
-		runner: func(ctx context.Context, input *AgentInput, options ...AgentRunOption) *AsyncIterator[*AgentEvent] {
+		runFn: func(ctx context.Context, input *AgentInput, options ...AgentRunOption) *AsyncIterator[*AgentEvent] {
 			iter, generator := NewAsyncIteratorPair[*AgentEvent]()
 			generator.Send(&AgentEvent{
 				AgentName: "sa3",
@@ -259,7 +261,7 @@ func TestWorkflowInterrupt(t *testing.T) {
 	} // won't interrupt
 	sa4 := &myAgent{
 		name: "sa4",
-		runner: func(ctx context.Context, input *AgentInput, options ...AgentRunOption) *AsyncIterator[*AgentEvent] {
+		runFn: func(ctx context.Context, input *AgentInput, options ...AgentRunOption) *AsyncIterator[*AgentEvent] {
 			iter, generator := NewAsyncIteratorPair[*AgentEvent]()
 			generator.Send(&AgentEvent{
 				AgentName: "sa4",
@@ -612,7 +614,7 @@ func TestChatModelInterrupt(t *testing.T) {
 
 func TestChatModelAgentToolInterrupt(t *testing.T) {
 	sa := &myAgent{
-		runner: func(ctx context.Context, input *AgentInput, options ...AgentRunOption) *AsyncIterator[*AgentEvent] {
+		runFn: func(ctx context.Context, input *AgentInput, options ...AgentRunOption) *AsyncIterator[*AgentEvent] {
 			iter, generator := NewAsyncIteratorPair[*AgentEvent]()
 			generator.Send(&AgentEvent{
 				Action: &AgentAction{Interrupted: &InterruptInfo{
@@ -622,7 +624,7 @@ func TestChatModelAgentToolInterrupt(t *testing.T) {
 			generator.Close()
 			return iter
 		},
-		resumer: func(ctx context.Context, info *ResumeInfo, opts ...AgentRunOption) *AsyncIterator[*AgentEvent] {
+		resumeFn: func(ctx context.Context, info *ResumeInfo, opts ...AgentRunOption) *AsyncIterator[*AgentEvent] {
 			assert.NotNil(t, info)
 			assert.False(t, info.EnableStreaming)
 			assert.Equal(t, "hello world", info.Data)
@@ -749,9 +751,9 @@ func withValue(value string) AgentRunOption {
 }
 
 type myAgent struct {
-	name    string
-	runner  func(ctx context.Context, input *AgentInput, options ...AgentRunOption) *AsyncIterator[*AgentEvent]
-	resumer func(ctx context.Context, info *ResumeInfo, opts ...AgentRunOption) *AsyncIterator[*AgentEvent]
+	name     string
+	runFn    func(ctx context.Context, input *AgentInput, options ...AgentRunOption) *AsyncIterator[*AgentEvent]
+	resumeFn func(ctx context.Context, info *ResumeInfo, opts ...AgentRunOption) *AsyncIterator[*AgentEvent]
 }
 
 func (m *myAgent) Name(ctx context.Context) string {
@@ -766,11 +768,11 @@ func (m *myAgent) Description(ctx context.Context) string {
 }
 
 func (m *myAgent) Run(ctx context.Context, input *AgentInput, options ...AgentRunOption) *AsyncIterator[*AgentEvent] {
-	return m.runner(ctx, input, options...)
+	return m.runFn(ctx, input, options...)
 }
 
 func (m *myAgent) Resume(ctx context.Context, info *ResumeInfo, opts ...AgentRunOption) *AsyncIterator[*AgentEvent] {
-	return m.resumer(ctx, info, opts...)
+	return m.resumeFn(ctx, info, opts...)
 }
 
 type myModel struct {
@@ -825,7 +827,7 @@ func TestWorkflowInterruptInvalidDataType(t *testing.T) {
 	// Create a simple workflow agent
 	sa1 := &myAgent{
 		name: "sa1",
-		runner: func(ctx context.Context, input *AgentInput, options ...AgentRunOption) *AsyncIterator[*AgentEvent] {
+		runFn: func(ctx context.Context, input *AgentInput, options ...AgentRunOption) *AsyncIterator[*AgentEvent] {
 			iter, generator := NewAsyncIteratorPair[*AgentEvent]()
 			generator.Send(&AgentEvent{
 				AgentName: "sa1",
