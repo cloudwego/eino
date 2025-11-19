@@ -66,22 +66,24 @@ func New(ctx context.Context, cfg *Config) (adk.Agent, error) {
 
 	middlewares = append([]adk.AgentMiddleware{{AdditionalInstruction: baseAgentPrompt}}, middlewares...)
 
-	tt, err := newTaskToolMiddleware(
-		ctx,
-		cfg.TaskToolDescriptionGenerator,
-		cfg.SubAgents,
+	if !cfg.WithoutGeneralSubAgent || len(cfg.SubAgents) > 0 {
+		tt, err := newTaskToolMiddleware(
+			ctx,
+			cfg.TaskToolDescriptionGenerator,
+			cfg.SubAgents,
 
-		cfg.WithoutGeneralSubAgent,
-		cfg.ChatModel,
-		cfg.Instruction,
-		cfg.ToolsConfig,
-		cfg.MaxIteration,
-		middlewares, // append(cfg.Middlewares, middlewares...),
-	)
-	if err != nil {
-		return nil, fmt.Errorf("failed to new task tool: %w", err)
+			cfg.WithoutGeneralSubAgent,
+			cfg.ChatModel,
+			cfg.Instruction,
+			cfg.ToolsConfig,
+			cfg.MaxIteration,
+			middlewares, // append(cfg.Middlewares, middlewares...),
+		)
+		if err != nil {
+			return nil, fmt.Errorf("failed to new task tool: %w", err)
+		}
+		middlewares = append(middlewares, tt)
 	}
-	middlewares = append(middlewares, tt)
 
 	return adk.NewChatModelAgent(ctx, &adk.ChatModelAgentConfig{
 		Name:          cfg.Name,
