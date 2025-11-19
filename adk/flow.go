@@ -22,8 +22,9 @@ import (
 	"fmt"
 	"runtime/debug"
 	"strings"
+	"sync"
 
-	"github.com/cloudwego/eino/compose"
+	"github.com/cloudwego/eino/internal/core"
 	"github.com/cloudwego/eino/internal/safe"
 	"github.com/cloudwego/eino/schema"
 )
@@ -36,6 +37,56 @@ type HistoryEntry struct {
 
 type HistoryRewriter func(ctx context.Context, entries []*HistoryEntry) ([]Message, error)
 
+type flowInterruptState struct {
+	// Maps the destination agent name to the events generated in its lane before interruption.
+	// This also serves as the source of truth for which lanes need to be resumed.
+	LaneEvents map[string][]*agentEventWrapper
+}
+
+// collectLaneEvents collects events from child contexts following runParallel pattern
+func (a *flowAgent) collectLaneEvents(childContexts []context.Context, agentNames []string) map[string][]*agentEventWrapper {
+	laneEvents := make(map[string][]*agentEventWrapper)
+
+	for i, childCtx := range childContexts {
+		childRunCtx := getRunCtx(childCtx)
+		if childRunCtx != nil && childRunCtx.Session != nil && childRunCtx.Session.LaneEvents != nil {
+			// Use the provided agent names for reliable mapping
+			agentName := agentNames[i]
+
+			// COPY events before storing (streams can only be consumed once)
+			laneEvents[agentName] = make([]*agentEventWrapper, len(childRunCtx.Session.LaneEvents.Events))
+			for j, event := range childRunCtx.Session.LaneEvents.Events {
+				copied := copyAgentEvent(event.AgentEvent)
+				setAutomaticClose(copied)
+				laneEvents[agentName][j] = &agentEventWrapper{
+					AgentEvent: copied,
+				}
+			}
+		}
+	}
+
+	return laneEvents
+}
+
+// createCompositeInterrupt creates a composite interrupt event with the collected state
+func (a *flowAgent) createCompositeInterrupt(ctx context.Context, laneEvents map[string][]*agentEventWrapper, subInterruptSignals []*core.InterruptSignal) *AgentEvent {
+	state := &flowInterruptState{
+		LaneEvents: laneEvents,
+	}
+
+	event := CompositeInterrupt(ctx, "Concurrent transfer interrupted", state, subInterruptSignals...)
+
+	// Set agent name and run path for proper identification
+	event.AgentName = a.Name(ctx)
+	event.RunPath = getRunCtx(ctx).RunPath
+
+	return event
+}
+
+func init() {
+	schema.RegisterName[*flowInterruptState]("eino_adk_dynamic_parallel_state")
+}
+
 type flowAgent struct {
 	Agent
 
@@ -45,7 +96,7 @@ type flowAgent struct {
 	disallowTransferToParent bool
 	historyRewriter          HistoryRewriter
 
-	checkPointStore compose.CheckPointStore
+	selfReturnAfterTransfer bool
 }
 
 func (a *flowAgent) deepCopy() *flowAgent {
@@ -55,7 +106,7 @@ func (a *flowAgent) deepCopy() *flowAgent {
 		parentAgent:              a.parentAgent,
 		disallowTransferToParent: a.disallowTransferToParent,
 		historyRewriter:          a.historyRewriter,
-		checkPointStore:          a.checkPointStore,
+		selfReturnAfterTransfer:  a.selfReturnAfterTransfer,
 	}
 
 	for _, sa := range a.subAgents {
@@ -79,6 +130,25 @@ func WithDisallowTransferToParent() AgentOption {
 func WithHistoryRewriter(h HistoryRewriter) AgentOption {
 	return func(fa *flowAgent) {
 		fa.historyRewriter = h
+	}
+}
+
+// WithSelfReturnAfterTransfer returns an AgentOption that enables self-return behavior
+// after a transfer operation completes. When this option is set, the agent will
+// automatically return control to itself after all sub-agents have finished executing.
+//
+// This is particularly useful for supervisor agents that need to process the results
+// of concurrent transfers or perform additional operations after sub-agent execution.
+//
+// Example usage:
+//
+//	agent := toFlowAgent(ctx, baseAgent, WithSelfReturnAfterTransfer())
+//
+// Without this option, the agent's execution ends after the transfer completes.
+// With this option, the agent resumes execution to handle the aggregated results.
+func WithSelfReturnAfterTransfer() AgentOption {
+	return func(fa *flowAgent) {
+		fa.selfReturnAfterTransfer = true
 	}
 }
 
@@ -193,6 +263,9 @@ func genMsg(entry *HistoryEntry, agentName string) (Message, error) {
 }
 
 func (ai *AgentInput) deepCopy() *AgentInput {
+	if ai == nil {
+		return nil
+	}
 	copied := &AgentInput{
 		Messages:        make([]Message, len(ai.Messages)),
 		EnableStreaming: ai.EnableStreaming,
@@ -306,11 +379,21 @@ func (a *flowAgent) Resume(ctx context.Context, info *ResumeInfo, opts ...AgentR
 	ctx, info = buildResumeInfo(ctx, a.Name(ctx), info)
 
 	if info.WasInterrupted {
+		// Check if we need to resume concurrent transfers
+		if info.InterruptState != nil {
+			state, ok := info.InterruptState.(*flowInterruptState)
+			if ok {
+				// Delegate to resumeConcurrentLanes which will handle the type assertion
+				return a.resumeConcurrentLanes(ctx, state, info, opts...)
+			}
+		}
+
 		ra, ok := a.Agent.(ResumableAgent)
 		if !ok {
 			return genErrorIter(fmt.Errorf("failed to resume agent: agent '%s' is an interrupt point "+
 				"but is not a ResumableAgent", a.Name(ctx)))
 		}
+
 		iterator, generator := NewAsyncIteratorPair[*AgentEvent]()
 
 		aIter := ra.Resume(ctx, info, opts...)
@@ -355,7 +438,11 @@ func (a *flowAgent) run(
 		generator.Close()
 	}()
 
-	var lastAction *AgentAction
+	// Collect all actions to apply precedence rules
+	var interruptAction *AgentEvent
+	var exitAction *AgentEvent
+	var transferActions []*TransferToAgentAction
+
 	for {
 		event, ok := aIter.Next()
 		if !ok {
@@ -364,6 +451,33 @@ func (a *flowAgent) run(
 
 		event.AgentName = a.Name(ctx)
 		event.RunPath = runCtx.RunPath
+
+		// Apply Action Precedence: Interrupt > Exit > Transfer
+		if event.Action != nil {
+			if event.Action.Interrupted != nil {
+				if interruptAction == nil {
+					interruptAction = event
+				}
+			} else if event.Action.Exit {
+				if interruptAction == nil {
+					exitAction = event
+				}
+			} else if event.Action.TransferToAgent != nil {
+				if interruptAction == nil && exitAction == nil {
+					transferActions = append(transferActions, event.Action.TransferToAgent)
+				}
+			} else if event.Action.ConcurrentTransferToAgent != nil {
+				if interruptAction == nil && exitAction == nil {
+					// Convert concurrent transfer action to individual transfer actions
+					for _, destName := range event.Action.ConcurrentTransferToAgent.DestAgentNames {
+						transferActions = append(transferActions, &TransferToAgentAction{DestAgentName: destName})
+					}
+				}
+			}
+		}
+
+		// Always send the event to the generator for immediate consumption
+		// but only add non-interrupt events to the session
 		if event.Action == nil || event.Action.Interrupted == nil {
 			// copy the event so that the copied event's stream is exclusive for any potential consumer
 			// copy before adding to session because once added to session it's stream could be consumed by genAgentInput at any time
@@ -374,43 +488,253 @@ func (a *flowAgent) run(
 			setAutomaticClose(event)
 			runCtx.Session.addEvent(copied)
 		}
-		lastAction = event.Action
 		generator.Send(event)
 	}
 
-	var destName string
-	if lastAction != nil {
-		if lastAction.Interrupted != nil {
-			return
-		}
-		if lastAction.Exit {
-			return
-		}
-
-		if lastAction.TransferToAgent != nil {
-			destName = lastAction.TransferToAgent.DestAgentName
-		}
+	if interruptAction != nil || exitAction != nil || len(transferActions) == 0 {
+		return
 	}
 
-	// handle transferring to another agent
-	if destName != "" {
-		agentToRun := a.getAgent(ctx, destName)
-		if agentToRun == nil {
-			e := fmt.Errorf("transfer failed: agent '%s' not found when transferring from '%s'",
-				destName, a.Name(ctx))
-			generator.Send(&AgentEvent{Err: e})
+	// Handle transfers based on count
+	if len(transferActions) == 1 {
+		agentToRun, err := a.getAgentFromTransferAction(ctx, transferActions[0])
+		if err != nil {
+			generator.Send(&AgentEvent{Err: err})
 			return
+		}
+
+		if a.selfReturnAfterTransfer {
+			agentToRun = AgentWithDeterministicTransferTo(ctx, &DeterministicTransferConfig{
+				Agent:        agentToRun,
+				ToAgentNames: []string{a.Name(ctx)},
+			}).(*flowAgent)
 		}
 
 		subAIter := agentToRun.Run(ctx, nil /*subagents get input from runCtx*/, opts...)
-		for {
-			subEvent, ok_ := subAIter.Next()
-			if !ok_ {
-				break
-			}
+		generator.pipeAll(subAIter)
 
-			setAutomaticClose(subEvent)
-			generator.Send(subEvent)
+		return
+	}
+
+	// Multiple transfers - execute concurrently
+	agents := make([]Agent, len(transferActions))
+	for i, action := range transferActions {
+		agentToRun, err := a.getAgentFromTransferAction(ctx, action)
+		if err != nil {
+			generator.Send(&AgentEvent{Err: err})
+			return
+		}
+		agents[i] = agentToRun
+	}
+	iterator := a.runConcurrentLanes(ctx, agents, opts...)
+	generator.pipeAll(iterator)
+}
+
+func (a *flowAgent) getAgentFromTransferAction(ctx context.Context, action *TransferToAgentAction) (*flowAgent, error) {
+	sub := a.getAgent(ctx, action.DestAgentName)
+	if sub == nil {
+		return nil, fmt.Errorf("transfer failed: agent '%s' not found when transferring from '%s'",
+			action.DestAgentName, a.Name(ctx))
+	}
+	return sub, nil
+}
+
+// runConcurrentLanes executes multiple agents concurrently using a fork-join model
+func (a *flowAgent) runConcurrentLanes(
+	ctx context.Context,
+	agents []Agent,
+	opts ...AgentRunOption) *AsyncIterator[*AgentEvent] {
+	iterator, generator := NewAsyncIteratorPair[*AgentEvent]()
+	defer generator.Close()
+
+	agentExecutors := make([]func(context.Context) *AsyncIterator[*AgentEvent], len(agents))
+	childContexts := make([]context.Context, len(agents))
+	agentNames := make([]string, len(agents))
+
+	for i := range agents {
+		subAgent := agents[i]
+		agentNames[i] = subAgent.Name(ctx)
+		childContexts[i] = forkRunCtx(ctx)
+		agentExecutors[i] = func(ctx2 context.Context) *AsyncIterator[*AgentEvent] {
+			return subAgent.Run(ctx2, nil, opts...)
 		}
 	}
+
+	a.concurrentLaneExecution(ctx, agentExecutors, agentNames, childContexts, generator, opts...)
+	return iterator
+}
+
+// resumeConcurrentLanes resumes execution after a concurrent transfer interruption
+func (a *flowAgent) resumeConcurrentLanes(
+	ctx context.Context,
+	state *flowInterruptState,
+	info *ResumeInfo,
+	opts ...AgentRunOption) *AsyncIterator[*AgentEvent] {
+
+	iterator, generator := NewAsyncIteratorPair[*AgentEvent]()
+	defer generator.Close()
+
+	// Create child contexts for each lane (using LaneEvents as source of truth)
+	// We need to preserve the order, so we'll create a slice of agent names
+	agentNamesInOrder := make([]string, 0, len(state.LaneEvents))
+	for destAgentName := range state.LaneEvents {
+		agentNamesInOrder = append(agentNamesInOrder, destAgentName)
+	}
+
+	agents := make([]*flowAgent, len(agentNamesInOrder))
+	for i, agentName := range agentNamesInOrder {
+		agents[i] = a.getAgent(ctx, agentName)
+		if agents[i] == nil {
+			generator.Send(&AgentEvent{Err: fmt.Errorf("transfer failed: agent '%s' not found", agentNamesInOrder[i])})
+			return iterator
+		}
+	}
+
+	// Get the next resume agents from the interrupt context (following parallel workflow pattern)
+	agentNames, err := getNextResumeAgents(ctx, info)
+	if err != nil {
+		generator.Send(&AgentEvent{Err: err})
+		return iterator
+	}
+
+	childContexts := make([]context.Context, len(agentNamesInOrder))
+
+	// Fork contexts for each lane (following parallel workflow pattern)
+	for i, destAgentName := range agentNamesInOrder {
+		childContexts[i] = forkRunCtx(ctx)
+
+		// Add existing events to the child context
+		if existingEvents, ok := state.LaneEvents[destAgentName]; ok {
+			childRunCtx := getRunCtx(childContexts[i])
+			if childRunCtx != nil && childRunCtx.Session != nil {
+				if childRunCtx.Session.LaneEvents == nil {
+					childRunCtx.Session.LaneEvents = &laneEvents{}
+				}
+				childRunCtx.Session.LaneEvents.Events = append(childRunCtx.Session.LaneEvents.Events, existingEvents...)
+			}
+		}
+	}
+
+	// Prepare agent executors for concurrent execution
+	agentExecutors := make([]func(context.Context) *AsyncIterator[*AgentEvent], len(agentNamesInOrder))
+
+	for i := range agentNamesInOrder {
+		name := agentNamesInOrder[i]
+		agentToRun := agents[i]
+		agentExecutors[i] = func(ctx2 context.Context) *AsyncIterator[*AgentEvent] {
+			// Check if this agent needs to be resumed (following parallel workflow pattern)
+			if _, ok := agentNames[name]; ok {
+				// This branch was interrupted and needs to be resumed
+				return agentToRun.Resume(ctx2, &ResumeInfo{
+					EnableStreaming: info.EnableStreaming,
+					InterruptInfo:   info.InterruptInfo,
+				}, opts...)
+			} else {
+				// We are resuming, but this child is not in the next points map.
+				// This means it finished successfully, so we don't run it.
+				return nil
+			}
+		}
+	}
+
+	// Execute all agents concurrently using shared logic, using pre-created child contexts
+	a.concurrentLaneExecution(ctx, agentExecutors, agentNamesInOrder, childContexts, generator, opts...)
+
+	return iterator
+}
+
+// concurrentLaneExecution handles the core logic for executing multiple agents concurrently
+// This is shared between runConcurrentLanes and resumeConcurrentLanes
+func (a *flowAgent) concurrentLaneExecution(
+	ctx context.Context,
+	agentExecutors []func(context.Context) *AsyncIterator[*AgentEvent],
+	agentNames []string,
+	childContexts []context.Context,
+	generator *AsyncGenerator[*AgentEvent],
+	opts ...AgentRunOption) {
+
+	var (
+		wg sync.WaitGroup
+		mu sync.Mutex
+	)
+
+	subInterruptSignals := make([]*core.InterruptSignal, 0)
+
+	// Launch concurrent execution for each agent
+	for i := range agentExecutors {
+		exec := agentExecutors[i]
+		childRunCtx := childContexts[i]
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+
+			subAIter := exec(childRunCtx)
+			if subAIter == nil {
+				return
+			}
+
+			for {
+				subEvent, ok := subAIter.Next()
+				if !ok {
+					break
+				}
+
+				// Check for interrupt action
+				if subEvent.Action != nil && subEvent.Action.internalInterrupted != nil {
+					mu.Lock()
+					subInterruptSignals = append(subInterruptSignals, subEvent.Action.internalInterrupted)
+					mu.Unlock()
+
+					// Stop processing this lane when interrupted
+					return
+				}
+
+				generator.Send(subEvent)
+			}
+		}()
+	}
+
+	// Wait for all concurrent lanes to complete
+	wg.Wait()
+
+	if len(subInterruptSignals) == 0 {
+		joinRunCtxs(ctx, childContexts...)
+
+		if a.selfReturnAfterTransfer {
+			a.doSelfReturnAfterTransfer(ctx, generator, opts...)
+		}
+		return
+	}
+
+	// Collect events from child contexts if any lanes were interrupted
+	var laneEvents map[string][]*agentEventWrapper
+	if len(subInterruptSignals) > 0 {
+		laneEvents = a.collectLaneEvents(childContexts, agentNames)
+	}
+
+	// Create composite interrupt with the collected state
+	event := a.createCompositeInterrupt(ctx, laneEvents, subInterruptSignals)
+	generator.Send(event)
+}
+
+func (a *flowAgent) doSelfReturnAfterTransfer(ctx context.Context,
+	generator *AsyncGenerator[*AgentEvent], opts ...AgentRunOption) {
+	target := a.Name(ctx)
+	runCtx := getRunCtx(ctx)
+	aMsg, tMsg := GenTransferMessages(ctx, target)
+	aEvent := EventFromMessage(aMsg, nil, schema.Assistant, "")
+	aEvent.AgentName = a.Name(ctx)
+	aEvent.RunPath = runCtx.RunPath
+	generator.Send(aEvent)
+	tEvent := EventFromMessage(tMsg, nil, schema.Tool, tMsg.ToolName)
+	tEvent.Action = &AgentAction{
+		TransferToAgent: &TransferToAgentAction{
+			DestAgentName: target,
+		},
+	}
+	tEvent.AgentName = a.Name(ctx)
+	tEvent.RunPath = runCtx.RunPath
+	generator.Send(tEvent)
+	iter := a.Run(ctx, nil, opts...)
+	generator.pipeAll(iter)
 }

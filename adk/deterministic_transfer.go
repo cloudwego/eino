@@ -24,7 +24,19 @@ import (
 	"github.com/cloudwego/eino/schema"
 )
 
-func AgentWithDeterministicTransferTo(_ context.Context, config *DeterministicTransferConfig) Agent {
+func AgentWithDeterministicTransferTo(ctx context.Context, config *DeterministicTransferConfig) Agent {
+	a := config.Agent
+
+	fa, ok := a.(*flowAgent)
+	if ok {
+		a = AgentWithDeterministicTransferTo(ctx, &DeterministicTransferConfig{
+			Agent:        fa.Agent,
+			ToAgentNames: config.ToAgentNames,
+		})
+		fa.Agent = a
+		return fa
+	}
+
 	if ra, ok := config.Agent.(ResumableAgent); ok {
 		return &resumableAgentWithDeterministicTransferTo{
 			agent:        ra,
@@ -53,10 +65,6 @@ func (a *agentWithDeterministicTransferTo) Name(ctx context.Context) string {
 func (a *agentWithDeterministicTransferTo) Run(ctx context.Context,
 	input *AgentInput, options ...AgentRunOption) *AsyncIterator[*AgentEvent] {
 
-	if _, ok := a.agent.(*flowAgent); ok {
-		ctx = ClearRunCtx(ctx)
-	}
-
 	aIter := a.agent.Run(ctx, input, options...)
 
 	iterator, generator := NewAsyncIteratorPair[*AgentEvent]()
@@ -80,11 +88,6 @@ func (a *resumableAgentWithDeterministicTransferTo) Name(ctx context.Context) st
 
 func (a *resumableAgentWithDeterministicTransferTo) Run(ctx context.Context,
 	input *AgentInput, options ...AgentRunOption) *AsyncIterator[*AgentEvent] {
-
-	if _, ok := a.agent.(*flowAgent); ok {
-		ctx = ClearRunCtx(ctx)
-	}
-
 	aIter := a.agent.Run(ctx, input, options...)
 
 	iterator, generator := NewAsyncIteratorPair[*AgentEvent]()

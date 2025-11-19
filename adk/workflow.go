@@ -510,7 +510,15 @@ func (a *workflowAgent) runParallel(ctx context.Context, generator *AsyncGenerat
 		for i, childCtx := range childContexts {
 			childRunCtx := getRunCtx(childCtx)
 			if childRunCtx != nil && childRunCtx.Session != nil && childRunCtx.Session.LaneEvents != nil {
-				subAgentEvents[i] = childRunCtx.Session.LaneEvents.Events
+				// COPY events before storing (streams can only be consumed once)
+				subAgentEvents[i] = make([]*agentEventWrapper, len(childRunCtx.Session.LaneEvents.Events))
+				for j, event := range childRunCtx.Session.LaneEvents.Events {
+					copied := copyAgentEvent(event.AgentEvent)
+					setAutomaticClose(copied)
+					subAgentEvents[i][j] = &agentEventWrapper{
+						AgentEvent: copied,
+					}
+				}
 			}
 		}
 
@@ -579,14 +587,14 @@ func newWorkflowAgent(ctx context.Context, name, desc string,
 	return fa, nil
 }
 
-func NewSequentialAgent(ctx context.Context, config *SequentialAgentConfig) (Agent, error) {
+func NewSequentialAgent(ctx context.Context, config *SequentialAgentConfig) (ResumableAgent, error) {
 	return newWorkflowAgent(ctx, config.Name, config.Description, config.SubAgents, workflowAgentModeSequential, 0)
 }
 
-func NewParallelAgent(ctx context.Context, config *ParallelAgentConfig) (Agent, error) {
+func NewParallelAgent(ctx context.Context, config *ParallelAgentConfig) (ResumableAgent, error) {
 	return newWorkflowAgent(ctx, config.Name, config.Description, config.SubAgents, workflowAgentModeParallel, 0)
 }
 
-func NewLoopAgent(ctx context.Context, config *LoopAgentConfig) (Agent, error) {
+func NewLoopAgent(ctx context.Context, config *LoopAgentConfig) (ResumableAgent, error) {
 	return newWorkflowAgent(ctx, config.Name, config.Description, config.SubAgents, workflowAgentModeLoop, config.MaxIterations)
 }

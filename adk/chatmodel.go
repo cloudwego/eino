@@ -24,6 +24,7 @@ import (
 	"fmt"
 	"math"
 	"runtime/debug"
+	"strings"
 	"sync"
 	"sync/atomic"
 
@@ -133,6 +134,22 @@ type ChatModelAgentConfig struct {
 	// Optional. Defaults to defaultGenModelInput which combines instruction and messages.
 	GenModelInput GenModelInput
 
+	// TransferTool defines the tool used for transferring tasks to other agents.
+	// Optional. If nil, a default single-transfer tool will be used.
+	//
+	// This field enables configuration of the transfer behavior for the agent:
+	// - Use &transferToAgent{} for single-agent transfers (default)
+	// - Use &ConcurrentTransferTool{} for concurrent multi-agent transfers
+	// - Implement custom transfer tools for specialized transfer logic
+	//
+	// Example usage for concurrent transfers:
+	//  config := &ChatModelAgentConfig{
+	//      Name: "Orchestrator",
+	//      Model: chatModel,
+	//      TransferTool: &ConcurrentTransferTool{},
+	//  }
+	TransferTool tool.BaseTool
+
 	// Exit defines the tool used to terminate the agent process.
 	// Optional. If nil, no Exit Action will be generated.
 	// You can use the provided 'ExitTool' implementation directly.
@@ -166,7 +183,8 @@ type ChatModelAgent struct {
 
 	disallowTransferToParent bool
 
-	exit tool.BaseTool
+	transferTool tool.BaseTool
+	exit         tool.BaseTool
 
 	// runner
 	once   sync.Once
@@ -192,6 +210,11 @@ func NewChatModelAgent(_ context.Context, config *ChatModelAgentConfig) (*ChatMo
 		genInput = config.GenModelInput
 	}
 
+	transferTool := config.TransferTool
+	if transferTool == nil {
+		transferTool = &transferToAgent{}
+	}
+
 	return &ChatModelAgent{
 		name:          config.Name,
 		description:   config.Description,
@@ -199,6 +222,7 @@ func NewChatModelAgent(_ context.Context, config *ChatModelAgentConfig) (*ChatMo
 		model:         config.Model,
 		toolsConfig:   config.ToolsConfig,
 		genModelInput: genInput,
+		transferTool:  transferTool,
 		exit:          config.Exit,
 		outputKey:     config.OutputKey,
 		maxIterations: config.MaxIterations,
@@ -290,6 +314,79 @@ func (tta transferToAgent) InvokableRun(ctx context.Context, argumentsInJSON str
 	}
 
 	return transferToAgentToolOutput(params.AgentName), nil
+}
+
+// ConcurrentTransferTool is a tool that supports both single and concurrent agent transfers.
+// This tool provides flexible transfer capabilities, allowing agents to transfer tasks
+// to either a single agent or multiple agents concurrently using a fork-join execution model.
+//
+// The tool accepts parameters in a "one-of" format:
+// - "agent_name": Transfer to a single agent
+// - "agent_names": Transfer to multiple agents concurrently
+//
+// When multiple agents are specified, the framework executes them simultaneously
+// and aggregates their results. This enables parallel processing of complex workflows.
+type ConcurrentTransferTool struct{}
+
+func (t *ConcurrentTransferTool) Info(_ context.Context) (*schema.ToolInfo, error) {
+	return &schema.ToolInfo{
+		Name: TransferToAgentToolName,
+		Desc: "Transfer the question to another agent or a group of agents.",
+		ParamsOneOf: schema.NewParamsOneOfByParams(map[string]*schema.ParameterInfo{
+			"agent_name": {
+				Desc:     "The name of the agent to transfer to.",
+				Required: false,
+				Type:     schema.String,
+			},
+			"agent_names": {
+				Desc:     "A list of agent names to transfer to concurrently.",
+				Required: false,
+				Type:     schema.Array,
+				ElemInfo: &schema.ParameterInfo{Type: schema.String},
+			},
+		}),
+	}, nil
+}
+
+func (t *ConcurrentTransferTool) InvokableRun(ctx context.Context, argumentsInJSON string, _ ...tool.Option) (string, error) {
+	type transferParams struct {
+		AgentName  string   `json:"agent_name"`
+		AgentNames []string `json:"agent_names"`
+	}
+
+	params := &transferParams{}
+	if err := sonic.UnmarshalString(argumentsInJSON, params); err != nil {
+		return "", err
+	}
+
+	var dests []string
+	if len(params.AgentNames) > 0 {
+		dests = params.AgentNames
+	} else if params.AgentName != "" {
+		dests = []string{params.AgentName}
+	} else {
+		return "", errors.New("either 'agent_name' or 'agent_names' is required")
+	}
+
+	// Create a single concurrent transfer action with all destination agents
+	var action *AgentAction
+	if len(dests) == 1 {
+		// For single agent, use the standard TransferToAgentAction for consistency
+		action = NewTransferToAgentAction(dests[0])
+	} else {
+		// For multiple agents, use the new ConcurrentTransferToAgentAction
+		action = &AgentAction{
+			ConcurrentTransferToAgent: &ConcurrentTransferToAgentAction{
+				DestAgentNames: dests,
+			},
+		}
+	}
+
+	if err := SendToolGenAction(ctx, TransferToAgentToolName, action); err != nil {
+		return "", fmt.Errorf("failed to send transfer action: %w", err)
+	}
+
+	return fmt.Sprintf("successfully transferred to agents: [%s]", strings.Join(dests, ", ")), nil
 }
 
 func (a *ChatModelAgent) Name(_ context.Context) string {
@@ -567,7 +664,7 @@ func (a *ChatModelAgent) buildRunFunc(ctx context.Context) runFunc {
 			transferInstruction := genTransferToAgentInstruction(ctx, transferToAgents)
 			instruction = concatInstructions(instruction, transferInstruction)
 
-			toolsNodeConf.Tools = append(toolsNodeConf.Tools, &transferToAgent{})
+			toolsNodeConf.Tools = append(toolsNodeConf.Tools, a.transferTool)
 			returnDirectly[TransferToAgentToolName] = true
 		}
 

@@ -266,7 +266,185 @@ func TestChatModelAgentRun(t *testing.T) {
 	})
 }
 
-// TestExitTool tests the Exit tool functionality
+// TestConcurrentTransferTool tests the concurrent transfer functionality
+func TestConcurrentTransferTool(t *testing.T) {
+	// Test 1: ConcurrentTransferTool with multiple agents
+	t.Run("MultipleAgents", func(t *testing.T) {
+		ctx := context.Background()
+
+		// Create a mock chat model that will generate a transfer tool call with multiple agents
+		ctrl := gomock.NewController(t)
+		cm := mockModel.NewMockToolCallingChatModel(ctrl)
+
+		// Set up expectations for the mock model to generate a transfer tool call
+		cm.EXPECT().Generate(gomock.Any(), gomock.Any(), gomock.Any()).
+			Return(schema.AssistantMessage("", []schema.ToolCall{
+				{
+					ID: "transfer-1",
+					Function: schema.FunctionCall{
+						Name:      TransferToAgentToolName,
+						Arguments: `{"agent_names": ["SubAgent1", "SubAgent2"]}`,
+					},
+				},
+			}), nil).
+			Times(1)
+
+		// Model should implement WithTools
+		cm.EXPECT().WithTools(gomock.Any()).Return(cm, nil).AnyTimes()
+
+		// Create sub-agents
+		subAgent1 := createMockAgentForTransferTest("SubAgent1", "First sub-agent")
+		subAgent2 := createMockAgentForTransferTest("SubAgent2", "Second sub-agent")
+
+		// Create agent with ConcurrentTransferTool
+		agent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+			Name:         "TestAgent",
+			Description:  "Test agent",
+			Model:        cm,
+			TransferTool: &ConcurrentTransferTool{},
+		})
+		assert.NoError(t, err)
+		assert.NotNil(t, agent)
+
+		// Set sub-agents
+		err = agent.OnSetSubAgents(ctx, []Agent{subAgent1, subAgent2})
+		assert.NoError(t, err)
+
+		// Run the agent
+		input := &AgentInput{
+			Messages: []Message{schema.UserMessage("Transfer this task to multiple agents")},
+		}
+		iterator := agent.Run(ctx, input)
+		assert.NotNil(t, iterator)
+
+		// Collect events
+		var events []*AgentEvent
+		for {
+			event, ok := iterator.Next()
+			if !ok {
+				break
+			}
+			events = append(events, event)
+		}
+
+		// Should have at least one event with concurrent transfer action
+		assert.Greater(t, len(events), 0)
+
+		// Find the event with concurrent transfer action
+		var concurrentTransferEvent *AgentEvent
+		for _, event := range events {
+			if event.Action != nil && event.Action.ConcurrentTransferToAgent != nil {
+				concurrentTransferEvent = event
+				break
+			}
+		}
+
+		// Should have found a concurrent transfer event
+		assert.NotNil(t, concurrentTransferEvent)
+
+		// Verify the concurrent transfer action
+		concurrentAction := concurrentTransferEvent.Action.ConcurrentTransferToAgent
+		assert.NotNil(t, concurrentAction)
+		assert.Len(t, concurrentAction.DestAgentNames, 2)
+		assert.Contains(t, concurrentAction.DestAgentNames, "SubAgent1")
+		assert.Contains(t, concurrentAction.DestAgentNames, "SubAgent2")
+	})
+
+	// Test 2: ConcurrentTransferTool with single agent (should still use concurrent action)
+	t.Run("SingleAgent", func(t *testing.T) {
+		ctx := context.Background()
+
+		// Create a mock chat model that will generate a transfer tool call with single agent
+		ctrl := gomock.NewController(t)
+		cm := mockModel.NewMockToolCallingChatModel(ctrl)
+
+		// Set up expectations for the mock model to generate a transfer tool call
+		cm.EXPECT().Generate(gomock.Any(), gomock.Any(), gomock.Any()).
+			Return(schema.AssistantMessage("", []schema.ToolCall{
+				{
+					ID: "transfer-1",
+					Function: schema.FunctionCall{
+						Name:      TransferToAgentToolName,
+						Arguments: `{"agent_name": "SubAgent"}`,
+					},
+				},
+			}), nil).
+			Times(1)
+
+		// Model should implement WithTools
+		cm.EXPECT().WithTools(gomock.Any()).Return(cm, nil).AnyTimes()
+
+		// Create sub-agent
+		subAgent := createMockAgentForTransferTest("SubAgent", "Test sub-agent")
+
+		// Create agent with ConcurrentTransferTool
+		agent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+			Name:         "TestAgent",
+			Description:  "Test agent",
+			Model:        cm,
+			TransferTool: &ConcurrentTransferTool{},
+		})
+		assert.NoError(t, err)
+		assert.NotNil(t, agent)
+
+		// Set sub-agent
+		err = agent.OnSetSubAgents(ctx, []Agent{subAgent})
+		assert.NoError(t, err)
+
+		// Run the agent
+		input := &AgentInput{
+			Messages: []Message{schema.UserMessage("Transfer this task to a single agent")},
+		}
+		iterator := agent.Run(ctx, input)
+		assert.NotNil(t, iterator)
+
+		// Collect events
+		var events []*AgentEvent
+		for {
+			event, ok := iterator.Next()
+			if !ok {
+				break
+			}
+			events = append(events, event)
+		}
+
+		// Should have at least one event with concurrent transfer action
+		assert.Greater(t, len(events), 0)
+
+		// Find the event with transfer action
+		var transferEvent *AgentEvent
+		for _, event := range events {
+			if event.Action != nil && event.Action.TransferToAgent != nil {
+				transferEvent = event
+				break
+			}
+		}
+
+		// Should have found a transfer event (not concurrent since it's a single agent)
+		assert.NotNil(t, transferEvent)
+
+		// Verify it's a standard TransferToAgentAction, not ConcurrentTransferToAgentAction
+		assert.NotNil(t, transferEvent.Action.TransferToAgent)
+		assert.Nil(t, transferEvent.Action.ConcurrentTransferToAgent)
+		assert.Equal(t, "SubAgent", transferEvent.Action.TransferToAgent.DestAgentName)
+	})
+}
+
+// Helper function to create mock agents for transfer testing
+func createMockAgentForTransferTest(name, description string) *mockAgentForTool {
+	return newMockAgentForTool(name, description, []*AgentEvent{
+		{
+			AgentName: name,
+			Output: &AgentOutput{
+				MessageOutput: &MessageVariant{
+					IsStreaming: false,
+					Message:     schema.AssistantMessage("Response from "+name, nil),
+					Role:        schema.Assistant,
+				},
+			},
+		},
+	})
+}
 func TestExitTool(t *testing.T) {
 	ctx := context.Background()
 
@@ -438,9 +616,6 @@ func (m *myTool) InvokableRun(ctx context.Context, argumentsInJSON string, opts 
 func TestChatModelAgentOutputKey(t *testing.T) {
 	// Test outputKey configuration - stores output in session
 	t.Run("OutputKeyStoresInSession", func(t *testing.T) {
-		for i := 0; i < 1000; i++ {
-
-		}
 		ctx := context.Background()
 
 		// Create a mock chat model
