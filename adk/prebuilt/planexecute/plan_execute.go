@@ -34,6 +34,10 @@ import (
 	"github.com/cloudwego/eino/schema"
 )
 
+func init() {
+	schema.RegisterName[*defaultPlan]("_eino_adk_plan_execute_default_plan")
+}
+
 // Plan represents an execution plan with a sequence of actionable steps.
 // It supports JSON serialization and deserialization while providing access to the first step.
 type Plan interface {
