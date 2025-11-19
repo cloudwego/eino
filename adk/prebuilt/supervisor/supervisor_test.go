@@ -119,13 +119,13 @@ func TestNewSupervisor(t *testing.T) {
 	// transfer back to supervisor
 	event, ok = aIter.Next()
 	assert.True(t, ok)
-	assert.Equal(t, "SupervisorAgent", event.AgentName)
+	assert.Equal(t, "SubAgent1", event.AgentName)
 	assert.Equal(t, schema.Assistant, event.Output.MessageOutput.Role)
 	assert.NotEqual(t, 0, len(event.Output.MessageOutput.Message.ToolCalls))
 
 	event, ok = aIter.Next()
 	assert.True(t, ok)
-	assert.Equal(t, "SupervisorAgent", event.AgentName)
+	assert.Equal(t, "SubAgent1", event.AgentName)
 	assert.Equal(t, schema.Tool, event.Output.MessageOutput.Role)
 	assert.Equal(t, "SupervisorAgent", event.Action.TransferToAgent.DestAgentName)
 
@@ -152,13 +152,13 @@ func TestNewSupervisor(t *testing.T) {
 	// transfer back to supervisor
 	event, ok = aIter.Next()
 	assert.True(t, ok)
-	assert.Equal(t, "SupervisorAgent", event.AgentName)
+	assert.Equal(t, "SubAgent2", event.AgentName)
 	assert.Equal(t, schema.Assistant, event.Output.MessageOutput.Role)
 	assert.NotEqual(t, 0, len(event.Output.MessageOutput.Message.ToolCalls))
 
 	event, ok = aIter.Next()
 	assert.True(t, ok)
-	assert.Equal(t, "SupervisorAgent", event.AgentName)
+	assert.Equal(t, "SubAgent2", event.AgentName)
 	assert.Equal(t, schema.Tool, event.Output.MessageOutput.Role)
 	assert.Equal(t, "SupervisorAgent", event.Action.TransferToAgent.DestAgentName)
 
@@ -208,7 +208,7 @@ func (a *mockSupervisor) Run(ctx context.Context, input *adk.AgentInput, opts ..
 	gen.Send(adk.EventFromMessage(assistantMsg, nil, schema.Assistant, ""))
 
 	// Create tool message for the transfer
-	toolMsg := schema.ToolMessage(fmt.Sprintf("Successfully transfered to agents %v", a.targets), toolCall.ID,
+	toolMsg := schema.ToolMessage(fmt.Sprintf("Successfully transferred to agents %v", a.targets), toolCall.ID,
 		schema.WithToolName(adk.TransferToAgentToolName))
 	transferEvent := adk.EventFromMessage(toolMsg, nil, schema.Tool, toolMsg.ToolName)
 	transferEvent.Action = &adk.AgentAction{

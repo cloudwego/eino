@@ -135,11 +135,12 @@ type TransferToAgentAction struct {
 // execute concurrently, and their results will be aggregated.
 //
 // Example usage:
-//  action := &AgentAction{
-//      ConcurrentTransferToAgent: &ConcurrentTransferToAgentAction{
-//          DestAgentNames: []string{"AnalyticsAgent", "ValidationAgent", "EnrichmentAgent"},
-//      },
-//  }
+//
+//	action := &AgentAction{
+//	    ConcurrentTransferToAgent: &ConcurrentTransferToAgentAction{
+//	        DestAgentNames: []string{"AnalyticsAgent", "ValidationAgent", "EnrichmentAgent"},
+//	    },
+//	}
 type ConcurrentTransferToAgentAction struct {
 	// DestAgentNames contains the names of all destination agents that should
 	// execute concurrently. The framework will handle parallel execution and

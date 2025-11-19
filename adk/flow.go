@@ -24,7 +24,6 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/cloudwego/eino/compose"
 	"github.com/cloudwego/eino/internal/core"
 	"github.com/cloudwego/eino/internal/safe"
 	"github.com/cloudwego/eino/schema"
@@ -97,8 +96,6 @@ type flowAgent struct {
 	disallowTransferToParent bool
 	historyRewriter          HistoryRewriter
 
-	checkPointStore compose.CheckPointStore
-
 	selfReturnAfterTransfer bool
 }
 
@@ -109,7 +106,6 @@ func (a *flowAgent) deepCopy() *flowAgent {
 		parentAgent:              a.parentAgent,
 		disallowTransferToParent: a.disallowTransferToParent,
 		historyRewriter:          a.historyRewriter,
-		checkPointStore:          a.checkPointStore,
 		selfReturnAfterTransfer:  a.selfReturnAfterTransfer,
 	}
 
@@ -507,12 +503,15 @@ func (a *flowAgent) run(
 			return
 		}
 
+		if a.selfReturnAfterTransfer {
+			agentToRun = AgentWithDeterministicTransferTo(ctx, &DeterministicTransferConfig{
+				Agent:        agentToRun,
+				ToAgentNames: []string{a.Name(ctx)},
+			}).(*flowAgent)
+		}
+
 		subAIter := agentToRun.Run(ctx, nil /*subagents get input from runCtx*/, opts...)
 		generator.pipeAll(subAIter)
-
-		if a.selfReturnAfterTransfer {
-			a.doSelfReturnAfterTransfer(ctx, generator, opts...)
-		}
 
 		return
 	}
@@ -531,7 +530,7 @@ func (a *flowAgent) run(
 	generator.pipeAll(iterator)
 }
 
-func (a *flowAgent) getAgentFromTransferAction(ctx context.Context, action *TransferToAgentAction) (Agent, error) {
+func (a *flowAgent) getAgentFromTransferAction(ctx context.Context, action *TransferToAgentAction) (*flowAgent, error) {
 	sub := a.getAgent(ctx, action.DestAgentName)
 	if sub == nil {
 		return nil, fmt.Errorf("transfer failed: agent '%s' not found when transferring from '%s'",
