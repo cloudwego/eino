@@ -480,8 +480,14 @@ type TokenUsage struct {
 	PromptTokenDetails PromptTokenDetails `json:"prompt_token_details"`
 	// CompletionTokens is the number of completion tokens.
 	CompletionTokens int `json:"completion_tokens"`
+	// CompletionTokenDetails is a breakdown of the completion tokens.
+	CompletionTokenDetails CompletionTokenDetails `json:"completion_token_details"`
 	// TotalTokens is the total number of tokens.
 	TotalTokens int `json:"total_tokens"`
+}
+
+type CompletionTokenDetails struct {
+	ReasoningTokens int `json:"reasoning_tokens"`
 }
 
 type PromptTokenDetails struct {
