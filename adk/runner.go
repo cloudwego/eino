@@ -50,8 +50,6 @@ type RunnerConfig struct {
 // This struct provides an extensible way to pass resume parameters without
 // requiring breaking changes to method signatures.
 type ResumeParams struct {
-	// CheckPointID is the identifier of the checkpoint to resume from
-	CheckPointID string
 	// Targets contains the addresses of components to be resumed as keys,
 	// with their corresponding resume data as values
 	Targets map[string]any
@@ -133,8 +131,8 @@ func (r *Runner) Resume(ctx context.Context, checkPointID string, opts ...AgentR
 //     execution. They act as conduits, allowing the resume signal to flow to their children. They will
 //     naturally re-interrupt if one of their interrupted children re-interrupts, as they receive the
 //     new `CompositeInterrupt` signal from them.
-func (r *Runner) ResumeWithParams(ctx context.Context, params ResumeParams, opts ...AgentRunOption) (*AsyncIterator[*AgentEvent], error) {
-	return r.resume(ctx, params.CheckPointID, params.Targets, opts...)
+func (r *Runner) ResumeWithParams(ctx context.Context, checkPointID string, params ResumeParams, opts ...AgentRunOption) (*AsyncIterator[*AgentEvent], error) {
+	return r.resume(ctx, checkPointID, params.Targets, opts...)
 }
 
 // resume is the internal implementation for both Resume and ResumeWithParams.
@@ -211,17 +209,19 @@ func (r *Runner) handleIter(ctx context.Context, aIter *AsyncIterator[*AgentEven
 				},
 			}
 			legacyData = event.Action.Interrupted.Data
+
+			if checkPointID != nil {
+				// save checkpoint first before sending interrupt event,
+				// so when end-user receives interrupt event, they can resume from this checkpoint
+				err := r.saveCheckPoint(ctx, *checkPointID, &InterruptInfo{
+					Data: legacyData,
+				}, interruptSignal)
+				if err != nil {
+					gen.Send(&AgentEvent{Err: fmt.Errorf("failed to save checkpoint: %w", err)})
+				}
+			}
 		}
 
 		gen.Send(event)
-	}
-
-	if interruptSignal != nil && checkPointID != nil {
-		err := r.saveCheckPoint(ctx, *checkPointID, &InterruptInfo{
-			Data: legacyData,
-		}, interruptSignal)
-		if err != nil {
-			gen.Send(&AgentEvent{Err: fmt.Errorf("failed to save checkpoint: %w", err)})
-		}
 	}
 }
