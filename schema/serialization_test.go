@@ -114,7 +114,6 @@ func TestRegister(t *testing.T) {
 
 	Register[*testStruct1]()
 	Register[*testStruct2]()
-	Register[[]*Message]()
 	Register[[]Message]()
 	Register[[]*testStruct2]()
 	Register[[]testStruct2]()
