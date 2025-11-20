@@ -35,6 +35,8 @@ output/*
 # Vscode files
 .vscode
 
+/CLAUDE.md
+
 /patches
 
 /vendor
