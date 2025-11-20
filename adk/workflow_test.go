@@ -715,9 +715,12 @@ func TestParallelWorkflowResumeWithEvents(t *testing.T) {
 		assert.NotEmpty(t, parallelInterruptID1)
 		assert.NotEmpty(t, parallelInterruptID2)
 
-		iter, err = runner.TargetedResume(ctx, "1", map[string]any{
-			parallelInterruptID1: "resume sa1",
-			parallelInterruptID2: "resume sa2",
+		iter, err = runner.ResumeWithParams(ctx, ResumeParams{
+			CheckPointID: "1",
+			Targets:      map[string]any{
+				parallelInterruptID1: "resume sa1",
+				parallelInterruptID2: "resume sa2",
+			},
 		})
 		assert.NoError(t, err)
 		_, ok := iter.Next()
@@ -988,9 +991,12 @@ func TestNestedParallelWorkflow(t *testing.T) {
 		}
 	}
 
-	iter, err = runner.TargetedResume(ctx, "nested-parallel-test", map[string]any{
-		innerInterruptID1: "resume inner1",
-		innerInterruptID2: "resume inner2",
+	iter, err = runner.ResumeWithParams(ctx, ResumeParams{
+		CheckPointID: "nested-parallel-test",
+		Targets:      map[string]any{
+			innerInterruptID1: "resume inner1",
+			innerInterruptID2: "resume inner2",
+		},
 	})
 	assert.NoError(t, err)
 

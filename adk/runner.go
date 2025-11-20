@@ -46,6 +46,18 @@ type RunnerConfig struct {
 	CheckPointStore compose.CheckPointStore
 }
 
+// ResumeParams contains all parameters needed to resume an execution.
+// This struct provides an extensible way to pass resume parameters without
+// requiring breaking changes to method signatures.
+type ResumeParams struct {
+	// CheckPointID is the identifier of the checkpoint to resume from
+	CheckPointID string
+	// Targets contains the addresses of components to be resumed as keys,
+	// with their corresponding resume data as values
+	Targets map[string]any
+	// Future extensible fields can be added here without breaking changes
+}
+
 func NewRunner(_ context.Context, conf RunnerConfig) *Runner {
 	return &Runner{
 		enableStreaming: conf.EnableStreaming,
@@ -103,30 +115,29 @@ func (r *Runner) Resume(ctx context.Context, checkPointID string, opts ...AgentR
 	return r.resume(ctx, checkPointID, nil, opts...)
 }
 
-// TargetedResume continues an interrupted execution from a checkpoint, using an "Explicit Targeted Resume" strategy.
+// ResumeWithParams continues an interrupted execution from a checkpoint with specific parameters.
 // This is the most common and powerful way to resume, allowing you to target specific interrupt points
 // (identified by their address/ID) and provide them with data.
 //
-// The `targets` map should contain the addresses of the components to be resumed as keys. These addresses
+// The params.Targets map should contain the addresses of the components to be resumed as keys. These addresses
 // can point to any interruptible component in the entire execution graph, including ADK agents, compose
 // graph nodes, or tools. The value can be the resume data for that component, or `nil` if no data is needed.
 //
 // When using this method:
-//   - Components whose addresses are in the `targets` map will receive `isResumeFlow = true` when they
+//   - Components whose addresses are in the params.Targets map will receive `isResumeFlow = true` when they
 //     call `GetResumeContext`.
-//   - Interrupted components whose addresses are NOT in the `targets` map must decide how to proceed:
+//   - Interrupted components whose addresses are NOT in the params.Targets map must decide how to proceed:
 //     -- "Leaf" components (the actual root causes of the original interrupt) MUST re-interrupt themselves
 //     to preserve their state.
 //     -- "Composite" agents (like SequentialAgent or ChatModelAgent) should generally proceed with their
 //     execution. They act as conduits, allowing the resume signal to flow to their children. They will
 //     naturally re-interrupt if one of their interrupted children re-interrupts, as they receive the
 //     new `CompositeInterrupt` signal from them.
-func (r *Runner) TargetedResume(ctx context.Context, checkPointID string, targets map[string]any,
-	opts ...AgentRunOption) (*AsyncIterator[*AgentEvent], error) {
-	return r.resume(ctx, checkPointID, targets, opts...)
+func (r *Runner) ResumeWithParams(ctx context.Context, params ResumeParams, opts ...AgentRunOption) (*AsyncIterator[*AgentEvent], error) {
+	return r.resume(ctx, params.CheckPointID, params.Targets, opts...)
 }
 
-// resume is the internal implementation for both Resume and TargetedResume.
+// resume is the internal implementation for both Resume and ResumeWithParams.
 func (r *Runner) resume(ctx context.Context, checkPointID string, resumeData map[string]any,
 	opts ...AgentRunOption) (*AsyncIterator[*AgentEvent], error) {
 	if r.store == nil {
