@@ -126,8 +126,11 @@ func TestSimpleInterrupt(t *testing.T) {
 	_, ok = iter.Next()
 	assert.False(t, ok)
 
-	iter, err := runner.TargetedResume(ctx, "1", map[string]any{
-		interruptEvent.Action.Interrupted.InterruptContexts[0].ID: nil,
+	iter, err := runner.ResumeWithParams(ctx, ResumeParams{
+		CheckPointID: "1",
+		Targets:      map[string]any{
+			interruptEvent.Action.Interrupted.InterruptContexts[0].ID: nil,
+		},
 	})
 	assert.NoError(t, err)
 	_, ok = iter.Next()
@@ -212,8 +215,11 @@ func TestMultiAgentInterrupt(t *testing.T) {
 	_, ok = iter.Next()
 	assert.False(t, ok)
 
-	iter, err = runner.TargetedResume(ctx, "1", map[string]any{
-		interruptID: "resume data",
+	iter, err = runner.ResumeWithParams(ctx, ResumeParams{
+		CheckPointID: "1",
+		Targets:      map[string]any{
+			interruptID: "resume data",
+		},
 	})
 	assert.NoError(t, err)
 	event, ok = iter.Next()
@@ -449,8 +455,11 @@ func TestWorkflowInterrupt(t *testing.T) {
 		events = []*AgentEvent{}
 
 		// Resume after sa1 interrupt
-		iter, err = runner.TargetedResume(ctx, "sequential-1", map[string]any{
-			interruptID1: "resume sa1",
+		iter, err = runner.ResumeWithParams(ctx, ResumeParams{
+			CheckPointID: "sequential-1",
+			Targets:      map[string]any{
+				interruptID1: "resume sa1",
+			},
 		})
 		assert.NoError(t, err)
 		for {
@@ -470,8 +479,11 @@ func TestWorkflowInterrupt(t *testing.T) {
 		events = []*AgentEvent{}
 
 		// Resume after sa2 interrupt
-		iter, err = runner.TargetedResume(ctx, "sequential-1", map[string]any{
-			interruptID2: "resume sa2",
+		iter, err = runner.ResumeWithParams(ctx, ResumeParams{
+			CheckPointID: "sequential-1",
+			Targets:      map[string]any{
+				interruptID2: "resume sa2",
+			},
 		})
 		assert.NoError(t, err)
 		for {
@@ -561,8 +573,11 @@ func TestWorkflowInterrupt(t *testing.T) {
 		events = []*AgentEvent{}
 
 		// Resume after sa1 interrupt
-		iter, err = runner.TargetedResume(ctx, "loop-1", map[string]any{
-			loopInterruptID1: "resume sa1",
+		iter, err = runner.ResumeWithParams(ctx, ResumeParams{
+			CheckPointID: "loop-1",
+			Targets:      map[string]any{
+				loopInterruptID1: "resume sa1",
+			},
 		})
 		assert.NoError(t, err)
 		for {
@@ -626,8 +641,11 @@ func TestWorkflowInterrupt(t *testing.T) {
 		events = []*AgentEvent{}
 
 		// Resume after sa2 interrupt
-		iter, err = runner.TargetedResume(ctx, "loop-1", map[string]any{
-			loopInterruptID2: "resume sa2",
+		iter, err = runner.ResumeWithParams(ctx, ResumeParams{
+			CheckPointID: "loop-1",
+			Targets:      map[string]any{
+				loopInterruptID2: "resume sa2",
+			},
 		})
 		assert.NoError(t, err)
 		for {
@@ -769,8 +787,11 @@ func TestWorkflowInterrupt(t *testing.T) {
 		events = []*AgentEvent{}
 
 		// Resume after third interrupt
-		iter, err = runner.TargetedResume(ctx, "loop-1", map[string]any{
-			loopInterruptID3: "resume sa1",
+		iter, err = runner.ResumeWithParams(ctx, ResumeParams{
+			CheckPointID: "loop-1",
+			Targets:      map[string]any{
+				loopInterruptID3: "resume sa1",
+			},
 		})
 		assert.NoError(t, err)
 		for {
@@ -788,8 +809,11 @@ func TestWorkflowInterrupt(t *testing.T) {
 		events = []*AgentEvent{}
 
 		// Resume after fourth interrupt
-		iter, err = runner.TargetedResume(ctx, "loop-1", map[string]any{
-			loopInterruptID4: "resume sa2",
+		iter, err = runner.ResumeWithParams(ctx, ResumeParams{
+			CheckPointID: "loop-1",
+			Targets:      map[string]any{
+				loopInterruptID4: "resume sa2",
+			},
 		})
 		assert.NoError(t, err)
 		for {
@@ -927,9 +951,12 @@ func TestWorkflowInterrupt(t *testing.T) {
 		assert.NotEmpty(t, parallelInterruptID1)
 		assert.NotEmpty(t, parallelInterruptID2)
 
-		iter, err = runner.TargetedResume(ctx, "1", map[string]any{
-			parallelInterruptID1: "resume sa1",
-			parallelInterruptID2: "resume sa2",
+		iter, err = runner.ResumeWithParams(ctx, ResumeParams{
+			CheckPointID: "1",
+			Targets:      map[string]any{
+				parallelInterruptID1: "resume sa1",
+				parallelInterruptID2: "resume sa2",
+			},
 		})
 		assert.NoError(t, err)
 		_, ok = iter.Next()
@@ -1005,14 +1032,17 @@ func TestChatModelInterrupt(t *testing.T) {
 	event, ok = iter.Next()
 	assert.False(t, ok)
 
-	iter, err = runner.TargetedResume(ctx, "1", map[string]any{
-		chatModelAgentID: &ChatModelAgentResumeData{
-			HistoryModifier: func(ctx context.Context, history []Message) []Message {
-				history[2].Content = "new user message"
-				return history
+	iter, err = runner.ResumeWithParams(ctx, ResumeParams{
+		CheckPointID: "1",
+		Targets:      map[string]any{
+			chatModelAgentID: &ChatModelAgentResumeData{
+				HistoryModifier: func(ctx context.Context, history []Message) []Message {
+					history[2].Content = "new user message"
+					return history
+				},
 			},
+			toolID: "tool resume result",
 		},
-		toolID: "tool resume result",
 	})
 	assert.NoError(t, err)
 	event, ok = iter.Next()
@@ -1128,8 +1158,11 @@ func TestChatModelAgentToolInterrupt(t *testing.T) {
 	event, ok = iter.Next()
 	assert.False(t, ok)
 
-	iter, err = runner.TargetedResume(ctx, "1", map[string]any{
-		toolInterruptID: "resume sa",
+	iter, err = runner.ResumeWithParams(ctx, ResumeParams{
+		CheckPointID: "1",
+		Targets:      map[string]any{
+			toolInterruptID: "resume sa",
+		},
 	})
 	assert.NoError(t, err)
 	event, ok = iter.Next()
@@ -1375,8 +1408,11 @@ func TestCyclicalAgentInterrupt(t *testing.T) {
 	assert.NotEmpty(t, interruptCtx.ID)
 
 	// Resume the execution
-	iter, err = runner.TargetedResume(ctx, "cyclical-1", map[string]any{
-		interruptCtx.ID: "resume C",
+	iter, err = runner.ResumeWithParams(ctx, ResumeParams{
+		CheckPointID: "cyclical-1",
+		Targets:      map[string]any{
+			interruptCtx.ID: "resume C",
+		},
 	})
 	assert.NoError(t, err)
 
@@ -1492,8 +1528,11 @@ func TestChatModelParallelToolInterruptAndResume(t *testing.T) {
 	assert.NotEmpty(t, toolBInterruptID)
 
 	// 2. Resume, targeting only toolA. toolB should re-interrupt.
-	iter, err = runner.TargetedResume(ctx, "parallel-tool-test-1", map[string]any{
-		toolAInterruptID: "toolA resumed",
+	iter, err = runner.ResumeWithParams(ctx, ResumeParams{
+		CheckPointID: "parallel-tool-test-1",
+		Targets:      map[string]any{
+			toolAInterruptID: "toolA resumed",
+		},
 	})
 	assert.NoError(t, err)
 	_, interruptEvent = consumeUntilInterrupt(iter)
@@ -1517,8 +1556,11 @@ func TestChatModelParallelToolInterruptAndResume(t *testing.T) {
 	toolBReInterruptID := rootCause.ID
 
 	// 3. Resume the re-interrupted toolB. The agent should then call the tools again.
-	iter, err = runner.TargetedResume(ctx, "parallel-tool-test-1", map[string]any{
-		toolBReInterruptID: "toolB resumed",
+	iter, err = runner.ResumeWithParams(ctx, ResumeParams{
+		CheckPointID: "parallel-tool-test-1",
+		Targets:      map[string]any{
+			toolBReInterruptID: "toolB resumed",
+		},
 	})
 	assert.NoError(t, err)
 
@@ -1648,8 +1690,11 @@ func TestNestedChatModelAgentWithAgentTool(t *testing.T) {
 
 	// Now resume the interrupt
 	interruptID := interruptCtx.ID
-	iter, err = runner.TargetedResume(ctx, "nested-agent-test-1", map[string]any{
-		interruptID: "resume inner tool",
+	iter, err = runner.ResumeWithParams(ctx, ResumeParams{
+		CheckPointID: "nested-agent-test-1",
+		Targets:      map[string]any{
+			interruptID: "resume inner tool",
+		},
 	})
 	assert.NoError(t, err)
 
