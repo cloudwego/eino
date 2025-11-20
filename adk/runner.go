@@ -131,7 +131,7 @@ func (r *Runner) Resume(ctx context.Context, checkPointID string, opts ...AgentR
 //     execution. They act as conduits, allowing the resume signal to flow to their children. They will
 //     naturally re-interrupt if one of their interrupted children re-interrupts, as they receive the
 //     new `CompositeInterrupt` signal from them.
-func (r *Runner) ResumeWithParams(ctx context.Context, checkPointID string, params ResumeParams, opts ...AgentRunOption) (*AsyncIterator[*AgentEvent], error) {
+func (r *Runner) ResumeWithParams(ctx context.Context, checkPointID string, params *ResumeParams, opts ...AgentRunOption) (*AsyncIterator[*AgentEvent], error) {
 	return r.resume(ctx, checkPointID, params.Targets, opts...)
 }
 
