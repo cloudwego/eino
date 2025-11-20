@@ -30,6 +30,7 @@ func init() {
 	schema.RegisterName[*dagChannel]("_eino_dag_channel")
 	schema.RegisterName[*pregelChannel]("_eino_pregel_channel")
 	schema.RegisterName[dependencyState]("_eino_dependency_state")
+	_ = serialization.GenericRegister[channel]("_eino_channel")
 }
 
 // RegisterSerializableType registers a custom type for eino serialization.
