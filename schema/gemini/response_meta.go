@@ -14,9 +14,11 @@
  * limitations under the License.
  */
 
-package google
+package gemini
 
-type CandidateMeta struct {
+type ResponseMeta struct {
+	ID            string             `json:"id"`
+	FinishReason  string             `json:"finish_reason"`
 	GroundingMeta *GroundingMetadata `json:"grounding_meta,omitempty"`
 }
 

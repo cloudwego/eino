@@ -14,13 +14,20 @@
  * limitations under the License.
  */
 
-package anthropic
+package openai
 
-type TextCitationType string
+type ResponseMeta struct {
+	ID                string             `json:"id"`
+	Status            string             `json:"status"`
+	Error             *ResponseError     `json:"error,omitempty"`
+	IncompleteDetails *IncompleteDetails `json:"incomplete_details,omitempty"`
+}
 
-const (
-	TextCitationTypeCharLocation            TextCitationType = "char_location"
-	TextCitationTypePageLocation            TextCitationType = "page_location"
-	TextCitationTypeContentBlockLocation    TextCitationType = "content_block_location"
-	TextCitationTypeWebSearchResultLocation TextCitationType = "web_search_result_location"
-)
+type ResponseError struct {
+	Code    string `json:"code"`
+	Message string `json:"message"`
+}
+
+type IncompleteDetails struct {
+	Reason string `json:"reason"`
+}
