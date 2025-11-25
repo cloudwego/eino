@@ -75,10 +75,8 @@ type AgenticResponseMeta struct {
 }
 
 type StreamMeta struct {
-	// Index is used for streaming to identify the chunk of the block for concatenation.
-	Index *int
-	// Streaming phase of the content block.
-	Phase StreamPhase
+	// Index is the index position of this block in the final response.
+	Index int
 }
 
 type ContentBlock struct {
@@ -119,14 +117,6 @@ type ContentBlock struct {
 
 	StreamMeta *StreamMeta
 }
-
-type StreamPhase string
-
-const (
-	StreamPhaseStart StreamPhase = "start"
-	StreamPhaseDelta StreamPhase = "delta"
-	StreamPhaseStop  StreamPhase = "stop"
-)
 
 type UserInputText struct {
 	Text string
