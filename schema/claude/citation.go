@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-package anthropic
+package claude
 
 type TextCitation struct {
 	Type TextCitationType `json:"type"`
