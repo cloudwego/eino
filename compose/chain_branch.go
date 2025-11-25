@@ -20,6 +20,7 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/cloudwego/eino/components/agentic"
 	"github.com/cloudwego/eino/components/document"
 	"github.com/cloudwego/eino/components/embedding"
 	"github.com/cloudwego/eino/components/indexer"
@@ -142,6 +143,22 @@ func (cb *ChainBranch) AddChatModel(key string, node model.BaseChatModel, opts .
 	return cb.addNode(key, gNode, options)
 }
 
+// AddAgenticModel adds a agentic.Model node to the branch.
+// eg.
+//
+//	model1, err := openai.NewAgenticModel(ctx, &openai.AgenticModelConfig{
+//		Model: "gpt-4o",
+//	})
+//	model2, err := openai.NewAgenticModel(ctx, &openai.AgenticModelConfig{
+//		Model: "gpt-4o-mini",
+//	})
+//	cb.AddAgenticModel("agentic_model_key_1", model1)
+//	cb.AddAgenticModel("agentic_model_key_2", model2)
+func (cb *ChainBranch) AddAgenticModel(key string, node agentic.Model, opts ...GraphAddNodeOpt) *ChainBranch {
+	gNode, options := toAgenticModelNode(node, opts...)
+	return cb.addNode(key, gNode, options)
+}
+
 // AddChatTemplate adds a ChatTemplate node to the branch.
 // eg.
 //
@@ -163,16 +180,44 @@ func (cb *ChainBranch) AddChatTemplate(key string, node prompt.ChatTemplate, opt
 	return cb.addNode(key, gNode, options)
 }
 
+// AddAgenticChatTemplate adds a prompt.AgenticChatTemplate node to the branch.
+// eg.
+//
+//	chatTemplate, err := prompt.FromAgenticMessages(schema.FString, &schema.AgenticMessage{})
+//
+//	cb.AddAgenticChatTemplate("chat_template_key_01", chatTemplate)
+//
+//	chatTemplate2, err := prompt.FromAgenticMessages(schema.FString, &schema.AgenticMessage{})
+//
+//	cb.AddAgenticChatTemplate("chat_template_key_02", chatTemplate2)
+func (cb *ChainBranch) AddAgenticChatTemplate(key string, node prompt.AgenticChatTemplate, opts ...GraphAddNodeOpt) *ChainBranch {
+	gNode, options := toAgenticChatTemplateNode(node, opts...)
+	return cb.addNode(key, gNode, options)
+}
+
 // AddToolsNode adds a ToolsNode to the branch.
 // eg.
 //
-//	toolsNode, err := tools.NewToolNode(ctx, &tools.ToolsNodeConfig{
-//		Tools: []tools.Tool{...},
+//	toolsNode, err := compose.NewToolNode(ctx, &compose.ToolsNodeConfig{
+//		Tools: []tools.BaseTool{...},
 //	})
 //
 //	cb.AddToolsNode("tools_node_key", toolsNode)
 func (cb *ChainBranch) AddToolsNode(key string, node *ToolsNode, opts ...GraphAddNodeOpt) *ChainBranch {
 	gNode, options := toToolsNode(node, opts...)
+	return cb.addNode(key, gNode, options)
+}
+
+// AddAgenticToolsNode adds a AgenticToolsNode to the branch.
+// eg.
+//
+//	toolsNode, err := compose.NewAgenticToolsNode(ctx, &compose.ToolsNodeConfig{
+//		Tools: []tools.BaseTool{...},
+//	})
+//
+//	cb.AddAgenticToolsNode("tools_node_key", toolsNode)
+func (cb *ChainBranch) AddAgenticToolsNode(key string, node *AgenticToolsNode, opts ...GraphAddNodeOpt) *ChainBranch {
+	gNode, options := toAgenticToolsNode(node, opts...)
 	return cb.addNode(key, gNode, options)
 }
 
