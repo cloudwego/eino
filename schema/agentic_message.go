@@ -17,9 +17,15 @@
 package schema
 
 import (
+	"fmt"
+	"reflect"
+
 	"github.com/cloudwego/eino/schema/claude"
 	"github.com/cloudwego/eino/schema/gemini"
+
+	"github.com/cloudwego/eino/internal"
 	"github.com/cloudwego/eino/schema/openai"
+
 	"github.com/eino-contrib/jsonschema"
 )
 
@@ -354,4 +360,776 @@ type MCPToolApprovalResponse struct {
 
 	// Extra stores additional information.
 	Extra map[string]any
+}
+
+func ConcatAgenticMessagesArray(mas [][]*AgenticMessage) ([]*AgenticMessage, error) {
+	return buildConcatGenericArray[AgenticMessage](ConcatAgenticMessages)(mas)
+}
+
+func ConcatAgenticMessages(msgs []*AgenticMessage) (*AgenticMessage, error) {
+	var (
+		role       AgenticRoleType
+		blocksList [][]*ContentBlock
+		blocks     []*ContentBlock
+		metas      []*AgenticResponseMeta
+	)
+
+	if len(msgs) == 1 {
+		return msgs[0], nil
+	}
+
+	for idx, msg := range msgs {
+		if msg == nil {
+			return nil, fmt.Errorf("message at index %d is nil", idx)
+		}
+
+		if msg.Role != "" {
+			if role == "" {
+				role = msg.Role
+			} else if role != msg.Role {
+				return nil, fmt.Errorf("cannot concat messages with different roles: got '%s' and '%s'", role, msg.Role)
+			}
+		}
+
+		for _, block := range msg.ContentBlocks {
+			if block.StreamMeta == nil {
+				// Non-streaming block
+				if len(blocksList) > 0 {
+					// Cannot mix streaming and non-streaming blocks
+					return nil, fmt.Errorf("found non-streaming block after streaming blocks")
+				}
+				// Collect non-streaming block
+				blocks = append(blocks, block)
+			} else {
+				// Streaming block
+				if len(blocks) > 0 {
+					// Cannot mix non-streaming and streaming blocks
+					return nil, fmt.Errorf("found streaming block after non-streaming blocks")
+				}
+				// Collect streaming block by index
+				blocksList = expandSlice(block.StreamMeta.Index, blocksList)
+				blocksList[block.StreamMeta.Index] = append(blocksList[block.StreamMeta.Index], block)
+			}
+		}
+
+		if msg.ResponseMeta != nil {
+			metas = append(metas, msg.ResponseMeta)
+		}
+	}
+
+	meta, err := concatAgenticResponseMeta(metas)
+	if err != nil {
+		return nil, fmt.Errorf("failed to concat agentic response meta: %w", err)
+	}
+
+	if len(blocksList) > 0 {
+		// All blocks are streaming, concat each group by index
+		blocks = make([]*ContentBlock, len(blocksList))
+		for i, bs := range blocksList {
+			if len(bs) == 0 {
+				continue
+			}
+			b, err := concatAgenticContentBlocks(bs)
+			if err != nil {
+				return nil, fmt.Errorf("failed to concat content blocks at index %d: %w", i, err)
+			}
+			blocks[i] = b
+		}
+	}
+
+	for i := 0; i < len(blocks); i++ {
+		if blocks[i] == nil {
+			blocks = append(blocks[:i], blocks[i+1:]...)
+		}
+	}
+
+	return &AgenticMessage{
+		ResponseMeta:  meta,
+		Role:          role,
+		ContentBlocks: blocks,
+	}, nil
+}
+
+func concatAgenticResponseMeta(metas []*AgenticResponseMeta) (*AgenticResponseMeta, error) {
+	ret := &AgenticResponseMeta{
+		TokenUsage:       &TokenUsage{},
+		OpenAIExtensions: nil,
+		ClaudeExtensions: nil,
+		GeminiExtensions: nil,
+		Extensions:       nil,
+	}
+	for _, meta := range metas {
+		ret.Extensions = meta.Extensions
+		ret.OpenAIExtensions = meta.OpenAIExtensions
+		ret.ClaudeExtensions = meta.ClaudeExtensions
+		ret.GeminiExtensions = meta.GeminiExtensions
+		if meta.TokenUsage != nil {
+			ret.TokenUsage.CompletionTokens += meta.TokenUsage.CompletionTokens
+			ret.TokenUsage.CompletionTokenDetails.ReasoningTokens += meta.TokenUsage.CompletionTokenDetails.ReasoningTokens
+			ret.TokenUsage.PromptTokens += meta.TokenUsage.PromptTokens
+			ret.TokenUsage.PromptTokenDetails.CachedTokens += meta.TokenUsage.PromptTokenDetails.CachedTokens
+			ret.TokenUsage.TotalTokens += meta.TokenUsage.TotalTokens
+		}
+	}
+	return ret, nil
+}
+
+func concatAgenticContentBlocks(blocks []*ContentBlock) (*ContentBlock, error) {
+	if len(blocks) == 0 {
+		return nil, fmt.Errorf("no content blocks to concat")
+	}
+	blockType := blocks[0].Type
+	switch blockType {
+	case ContentBlockTypeReasoning:
+		return concatContentBlockHelper(blocks, blockType, "reasoning",
+			func(b *ContentBlock) *Reasoning { return b.Reasoning },
+			concatReasoning,
+			func(r *Reasoning) *ContentBlock { return &ContentBlock{Type: blockType, Reasoning: r} })
+
+	case ContentBlockTypeUserInputText:
+		return concatContentBlockHelper(blocks, blockType, "user input text",
+			func(b *ContentBlock) *UserInputText { return b.UserInputText },
+			concatUserInputText,
+			func(t *UserInputText) *ContentBlock { return &ContentBlock{Type: blockType, UserInputText: t} })
+
+	case ContentBlockTypeUserInputImage:
+		return concatContentBlockHelper(blocks, blockType, "user input image",
+			func(b *ContentBlock) *UserInputImage { return b.UserInputImage },
+			concatUserInputImage,
+			func(i *UserInputImage) *ContentBlock { return &ContentBlock{Type: blockType, UserInputImage: i} })
+
+	case ContentBlockTypeUserInputAudio:
+		return concatContentBlockHelper(blocks, blockType, "user input audio",
+			func(b *ContentBlock) *UserInputAudio { return b.UserInputAudio },
+			concatUserInputAudio,
+			func(a *UserInputAudio) *ContentBlock { return &ContentBlock{Type: blockType, UserInputAudio: a} })
+
+	case ContentBlockTypeUserInputVideo:
+		return concatContentBlockHelper(blocks, blockType, "user input video",
+			func(b *ContentBlock) *UserInputVideo { return b.UserInputVideo },
+			concatUserInputVideo,
+			func(v *UserInputVideo) *ContentBlock { return &ContentBlock{Type: blockType, UserInputVideo: v} })
+
+	case ContentBlockTypeUserInputFile:
+		return concatContentBlockHelper(blocks, blockType, "user input file",
+			func(b *ContentBlock) *UserInputFile { return b.UserInputFile },
+			concatUserInputFile,
+			func(f *UserInputFile) *ContentBlock { return &ContentBlock{Type: blockType, UserInputFile: f} })
+
+	case ContentBlockTypeAssistantGenText:
+		return concatContentBlockHelper(blocks, blockType, "assistant gen text",
+			func(b *ContentBlock) *AssistantGenText { return b.AssistantGenText },
+			concatAssistantGenText,
+			func(t *AssistantGenText) *ContentBlock { return &ContentBlock{Type: blockType, AssistantGenText: t} })
+
+	case ContentBlockTypeAssistantGenImage:
+		return concatContentBlockHelper(blocks, blockType, "assistant gen image",
+			func(b *ContentBlock) *AssistantGenImage { return b.AssistantGenImage },
+			concatAssistantGenImage,
+			func(i *AssistantGenImage) *ContentBlock { return &ContentBlock{Type: blockType, AssistantGenImage: i} })
+
+	case ContentBlockTypeAssistantGenAudio:
+		return concatContentBlockHelper(blocks, blockType, "assistant gen audio",
+			func(b *ContentBlock) *AssistantGenAudio { return b.AssistantGenAudio },
+			concatAssistantGenAudio,
+			func(a *AssistantGenAudio) *ContentBlock { return &ContentBlock{Type: blockType, AssistantGenAudio: a} })
+
+	case ContentBlockTypeAssistantGenVideo:
+		return concatContentBlockHelper(blocks, blockType, "assistant gen video",
+			func(b *ContentBlock) *AssistantGenVideo { return b.AssistantGenVideo },
+			concatAssistantGenVideo,
+			func(v *AssistantGenVideo) *ContentBlock { return &ContentBlock{Type: blockType, AssistantGenVideo: v} })
+
+	case ContentBlockTypeFunctionToolCall:
+		return concatContentBlockHelper(blocks, blockType, "function tool call",
+			func(b *ContentBlock) *FunctionToolCall { return b.FunctionToolCall },
+			concatFunctionToolCall,
+			func(c *FunctionToolCall) *ContentBlock { return &ContentBlock{Type: blockType, FunctionToolCall: c} })
+
+	case ContentBlockTypeFunctionToolResult:
+		return concatContentBlockHelper(blocks, blockType, "function tool result",
+			func(b *ContentBlock) *FunctionToolResult { return b.FunctionToolResult },
+			concatFunctionToolResult,
+			func(r *FunctionToolResult) *ContentBlock {
+				return &ContentBlock{Type: blockType, FunctionToolResult: r}
+			})
+
+	case ContentBlockTypeServerToolCall:
+		return concatContentBlockHelper(blocks, blockType, "server tool call",
+			func(b *ContentBlock) *ServerToolCall { return b.ServerToolCall },
+			concatServerToolCall,
+			func(c *ServerToolCall) *ContentBlock { return &ContentBlock{Type: blockType, ServerToolCall: c} })
+
+	case ContentBlockTypeServerToolResult:
+		return concatContentBlockHelper(blocks, blockType, "server tool result",
+			func(b *ContentBlock) *ServerToolResult { return b.ServerToolResult },
+			concatServerToolResult,
+			func(r *ServerToolResult) *ContentBlock { return &ContentBlock{Type: blockType, ServerToolResult: r} })
+
+	case ContentBlockTypeMCPToolCall:
+		return concatContentBlockHelper(blocks, blockType, "MCP tool call",
+			func(b *ContentBlock) *MCPToolCall { return b.MCPToolCall },
+			concatMCPToolCall,
+			func(c *MCPToolCall) *ContentBlock { return &ContentBlock{Type: blockType, MCPToolCall: c} })
+
+	case ContentBlockTypeMCPToolResult:
+		return concatContentBlockHelper(blocks, blockType, "MCP tool result",
+			func(b *ContentBlock) *MCPToolResult { return b.MCPToolResult },
+			concatMCPToolResult,
+			func(r *MCPToolResult) *ContentBlock { return &ContentBlock{Type: blockType, MCPToolResult: r} })
+
+	case ContentBlockTypeMCPListTools:
+		return concatContentBlockHelper(blocks, blockType, "MCP list tools",
+			func(b *ContentBlock) *MCPListToolsResult { return b.MCPListToolsResult },
+			concatMCPListToolsResult,
+			func(r *MCPListToolsResult) *ContentBlock {
+				return &ContentBlock{Type: blockType, MCPListToolsResult: r}
+			})
+
+	case ContentBlockTypeMCPToolApprovalRequest:
+		return concatContentBlockHelper(blocks, blockType, "MCP tool approval request",
+			func(b *ContentBlock) *MCPToolApprovalRequest { return b.MCPToolApprovalRequest },
+			concatMCPToolApprovalRequest,
+			func(r *MCPToolApprovalRequest) *ContentBlock {
+				return &ContentBlock{Type: blockType, MCPToolApprovalRequest: r}
+			})
+
+	case ContentBlockTypeMCPToolApprovalResponse:
+		return concatContentBlockHelper(blocks, blockType, "MCP tool approval response",
+			func(b *ContentBlock) *MCPToolApprovalResponse { return b.MCPToolApprovalResponse },
+			concatMCPToolApprovalResponse,
+			func(r *MCPToolApprovalResponse) *ContentBlock {
+				return &ContentBlock{Type: blockType, MCPToolApprovalResponse: r}
+			})
+
+	default:
+		return nil, fmt.Errorf("unknown content block type: %s", blockType)
+	}
+}
+
+// concatContentBlockHelper is a generic helper function that reduces code duplication
+// for concatenating content blocks of a specific type.
+func concatContentBlockHelper[T any](
+	blocks []*ContentBlock,
+	expectedType ContentBlockType,
+	typeName string,
+	getter func(*ContentBlock) *T,
+	concatFunc func([]*T) (*T, error),
+	constructor func(*T) *ContentBlock,
+) (*ContentBlock, error) {
+	items, err := genericGetTFromContentBlocks(blocks, func(block *ContentBlock) (*T, error) {
+		if block.Type != expectedType {
+			return nil, fmt.Errorf("expected %s block, got %s", typeName, block.Type)
+		}
+		item := getter(block)
+		if item == nil {
+			return nil, fmt.Errorf("%s content is nil", typeName)
+		}
+		return item, nil
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	concatenated, err := concatFunc(items)
+	if err != nil {
+		return nil, err
+	}
+
+	return constructor(concatenated), nil
+}
+
+func genericGetTFromContentBlocks[T any](blocks []*ContentBlock, checkAndGetter func(block *ContentBlock) (T, error)) ([]T, error) {
+	ret := make([]T, 0, len(blocks))
+	for _, block := range blocks {
+		t, err := checkAndGetter(block)
+		if err != nil {
+			return nil, err
+		}
+		ret = append(ret, t)
+	}
+	return ret, nil
+}
+
+// Concatenation strategies for different content block types:
+//
+// String concatenation (incremental streaming):
+//   - Reasoning: Summary texts are concatenated, grouped by Index if present
+//   - UserInputText: Text fields are concatenated
+//   - AssistantGenText: Text fields are concatenated, annotations/citations are merged
+//   - FunctionToolCall: Arguments (JSON strings) are concatenated incrementally
+//   - FunctionToolResult: Result strings are concatenated
+//   - ServerToolCall: Arguments are merged (last non-nil value for any type)
+//   - ServerToolResult: Results are merged using internal.ConcatItems
+//   - MCPToolCall: Arguments (JSON strings) are concatenated incrementally
+//   - MCPToolResult: Result strings are concatenated
+//   - MCPListToolsResult: Tools arrays are merged
+//   - MCPToolApprovalRequest: Arguments are concatenated
+//
+// Take last block (non-streaming content):
+//   - UserInputImage, UserInputAudio, UserInputVideo, UserInputFile: Return last block
+//   - AssistantGenImage, AssistantGenAudio, AssistantGenVideo: Return last block
+//   - MCPToolApprovalResponse: Return last block
+//
+
+func concatReasoning(reasons []*Reasoning) (*Reasoning, error) {
+	if len(reasons) == 0 {
+		return nil, fmt.Errorf("no reasoning found")
+	}
+	if len(reasons) == 1 {
+		return reasons[0], nil
+	}
+
+	ret := &Reasoning{
+		Summary:          make([]*ReasoningSummary, 0),
+		EncryptedContent: "",
+		Extra:            make(map[string]any),
+	}
+
+	// Collect all summaries from all reasons
+	allSummaries := make([]*ReasoningSummary, 0)
+	for _, r := range reasons {
+		if r == nil {
+			continue
+		}
+		allSummaries = append(allSummaries, r.Summary...)
+		if r.EncryptedContent != "" {
+			ret.EncryptedContent += r.EncryptedContent
+		}
+		for k, v := range r.Extra {
+			ret.Extra[k] = v
+		}
+	}
+
+	// Group by Index and concatenate Text for same Index
+	// Use dynamic array that expands as needed
+	var summaryArray []*ReasoningSummary
+	for _, s := range allSummaries {
+		idx := s.Index
+		// Expand array if needed
+		summaryArray = expandSlice(idx, summaryArray)
+		if summaryArray[idx] == nil {
+			// Create new entry with a copy of Index
+			summaryArray[idx] = &ReasoningSummary{
+				Index: idx,
+				Text:  s.Text,
+			}
+		} else {
+			// Concatenate text for same index
+			summaryArray[idx].Text += s.Text
+		}
+	}
+
+	// Convert array to slice, filtering out nil entries
+	ret.Summary = make([]*ReasoningSummary, 0, len(summaryArray))
+	for _, summary := range summaryArray {
+		if summary != nil {
+			ret.Summary = append(ret.Summary, summary)
+		}
+	}
+
+	return ret, nil
+}
+
+func concatUserInputText(texts []*UserInputText) (*UserInputText, error) {
+	if len(texts) == 0 {
+		return nil, fmt.Errorf("no user input text found")
+	}
+	if len(texts) == 1 {
+		return texts[0], nil
+	}
+
+	ret := &UserInputText{
+		Text:  "",
+		Extra: make(map[string]any),
+	}
+
+	for _, t := range texts {
+		if t == nil {
+			continue
+		}
+		ret.Text += t.Text
+		for k, v := range t.Extra {
+			ret.Extra[k] = v
+		}
+	}
+
+	return ret, nil
+}
+
+func concatUserInputImage(images []*UserInputImage) (*UserInputImage, error) {
+	if len(images) == 0 {
+		return nil, fmt.Errorf("no user input image found")
+	}
+	return images[len(images)-1], nil
+}
+
+func concatUserInputAudio(audios []*UserInputAudio) (*UserInputAudio, error) {
+	if len(audios) == 0 {
+		return nil, fmt.Errorf("no user input audio found")
+	}
+	return audios[len(audios)-1], nil
+}
+
+func concatUserInputVideo(videos []*UserInputVideo) (*UserInputVideo, error) {
+	if len(videos) == 0 {
+		return nil, fmt.Errorf("no user input video found")
+	}
+	return videos[len(videos)-1], nil
+}
+
+func concatUserInputFile(files []*UserInputFile) (*UserInputFile, error) {
+	if len(files) == 0 {
+		return nil, fmt.Errorf("no user input file found")
+	}
+	return files[len(files)-1], nil
+}
+
+func concatAssistantGenText(texts []*AssistantGenText) (*AssistantGenText, error) {
+	if len(texts) == 0 {
+		return nil, fmt.Errorf("no assistant gen text found")
+	}
+	if len(texts) == 1 {
+		return texts[0], nil
+	}
+
+	ret := &AssistantGenText{
+		Text:              "",
+		OpenAIAnnotations: make([]*openai.TextAnnotation, 0),
+		ClaudeCitations:   make([]*claude.TextCitation, 0),
+		Extra:             make(map[string]any),
+	}
+
+	for _, t := range texts {
+		if t == nil {
+			continue
+		}
+		ret.Text += t.Text
+		ret.OpenAIAnnotations = append(ret.OpenAIAnnotations, t.OpenAIAnnotations...)
+		ret.ClaudeCitations = append(ret.ClaudeCitations, t.ClaudeCitations...)
+		for k, v := range t.Extra {
+			ret.Extra[k] = v
+		}
+	}
+
+	return ret, nil
+}
+
+func concatAssistantGenImage(images []*AssistantGenImage) (*AssistantGenImage, error) {
+	if len(images) == 0 {
+		return nil, fmt.Errorf("no assistant gen image found")
+	}
+	return images[len(images)-1], nil
+}
+
+func concatAssistantGenAudio(audios []*AssistantGenAudio) (*AssistantGenAudio, error) {
+	if len(audios) == 0 {
+		return nil, fmt.Errorf("no assistant gen audio found")
+	}
+	return audios[len(audios)-1], nil
+}
+
+func concatAssistantGenVideo(videos []*AssistantGenVideo) (*AssistantGenVideo, error) {
+	if len(videos) == 0 {
+		return nil, fmt.Errorf("no assistant gen video found")
+	}
+	return videos[len(videos)-1], nil
+}
+
+func concatFunctionToolCall(calls []*FunctionToolCall) (*FunctionToolCall, error) {
+	if len(calls) == 0 {
+		return nil, fmt.Errorf("no function tool call found")
+	}
+	if len(calls) == 1 {
+		return calls[0], nil
+	}
+
+	// For tool calls, arguments are typically built incrementally during streaming
+	ret := &FunctionToolCall{
+		Extra: make(map[string]any),
+	}
+
+	for _, c := range calls {
+		if c == nil {
+			continue
+		}
+		if ret.CallID == "" {
+			ret.CallID = c.CallID
+		}
+		if ret.Name == "" {
+			ret.Name = c.Name
+		}
+		ret.Arguments += c.Arguments
+		for k, v := range c.Extra {
+			ret.Extra[k] = v
+		}
+	}
+
+	return ret, nil
+}
+
+func concatFunctionToolResult(results []*FunctionToolResult) (*FunctionToolResult, error) {
+	if len(results) == 0 {
+		return nil, fmt.Errorf("no function tool result found")
+	}
+	if len(results) == 1 {
+		return results[0], nil
+	}
+
+	ret := &FunctionToolResult{
+		Extra: make(map[string]any),
+	}
+
+	for _, r := range results {
+		if r == nil {
+			continue
+		}
+		if ret.CallID == "" {
+			ret.CallID = r.CallID
+		}
+		if ret.Name == "" {
+			ret.Name = r.Name
+		}
+		ret.Result += r.Result
+		for k, v := range r.Extra {
+			ret.Extra[k] = v
+		}
+	}
+
+	return ret, nil
+}
+
+func concatServerToolCall(calls []*ServerToolCall) (*ServerToolCall, error) {
+	if len(calls) == 0 {
+		return nil, fmt.Errorf("no server tool call found")
+	}
+	if len(calls) == 1 {
+		return calls[0], nil
+	}
+
+	// ServerToolCall Arguments is of type any; merge strategy uses the last non-nil value
+	ret := &ServerToolCall{
+		Extra: make(map[string]any),
+	}
+
+	for _, c := range calls {
+		if c == nil {
+			continue
+		}
+		if ret.Name == "" {
+			ret.Name = c.Name
+		}
+		if ret.CallID == "" {
+			ret.CallID = c.CallID
+		}
+		if c.Arguments != nil {
+			ret.Arguments = c.Arguments
+		}
+		for k, v := range c.Extra {
+			ret.Extra[k] = v
+		}
+	}
+
+	return ret, nil
+}
+
+func concatServerToolResult(results []*ServerToolResult) (*ServerToolResult, error) {
+	if len(results) == 0 {
+		return nil, fmt.Errorf("no server tool result found")
+	}
+	if len(results) == 1 {
+		return results[0], nil
+	}
+
+	// ServerToolResult Result is of type any; merge strategy uses the last non-nil value
+	ret := &ServerToolResult{
+		Extra: make(map[string]any),
+	}
+
+	tZeroResult := reflect.TypeOf(results[0].Result)
+	data := reflect.MakeSlice(reflect.SliceOf(tZeroResult), 0, 0)
+	for _, r := range results {
+		if r == nil {
+			continue
+		}
+		if ret.Name == "" {
+			ret.Name = r.Name
+		}
+		if ret.CallID == "" {
+			ret.CallID = r.CallID
+		}
+		if r.Result != nil {
+			vResult := reflect.ValueOf(r.Result)
+			if tZeroResult != vResult.Type() {
+				return nil, fmt.Errorf("tool result types are different: %v  %v", tZeroResult, vResult.Type())
+			}
+			data = reflect.Append(data, vResult)
+		}
+		for k, v := range r.Extra {
+			ret.Extra[k] = v
+		}
+	}
+
+	d, err := internal.ConcatSliceValue(data)
+	if err != nil {
+		return nil, fmt.Errorf("failed to concat server tool result: %v", err)
+	}
+	ret.Result = d
+
+	return ret, nil
+}
+
+func concatMCPToolCall(calls []*MCPToolCall) (*MCPToolCall, error) {
+	if len(calls) == 0 {
+		return nil, fmt.Errorf("no mcp tool call found")
+	}
+	if len(calls) == 1 {
+		return calls[0], nil
+	}
+
+	ret := &MCPToolCall{
+		Extra: make(map[string]any),
+	}
+
+	for _, c := range calls {
+		if c == nil {
+			continue
+		}
+		if ret.ServerLabel == "" {
+			ret.ServerLabel = c.ServerLabel
+		}
+		if ret.ApprovalRequestID == "" {
+			ret.ApprovalRequestID = c.ApprovalRequestID
+		}
+		if ret.CallID == "" {
+			ret.CallID = c.CallID
+		}
+		if ret.Name == "" {
+			ret.Name = c.Name
+		}
+		ret.Arguments += c.Arguments
+		for k, v := range c.Extra {
+			ret.Extra[k] = v
+		}
+	}
+
+	return ret, nil
+}
+
+func concatMCPToolResult(results []*MCPToolResult) (*MCPToolResult, error) {
+	if len(results) == 0 {
+		return nil, fmt.Errorf("no mcp tool result found")
+	}
+	if len(results) == 1 {
+		return results[0], nil
+	}
+
+	ret := &MCPToolResult{
+		Extra: make(map[string]any),
+	}
+
+	for _, r := range results {
+		if r == nil {
+			continue
+		}
+		if ret.CallID == "" {
+			ret.CallID = r.CallID
+		}
+		if ret.Name == "" {
+			ret.Name = r.Name
+		}
+		ret.Result += r.Result
+		if r.Error != nil {
+			ret.Error = r.Error // Use the last error
+		}
+		for k, v := range r.Extra {
+			ret.Extra[k] = v
+		}
+	}
+
+	return ret, nil
+}
+
+func concatMCPListToolsResult(results []*MCPListToolsResult) (*MCPListToolsResult, error) {
+	if len(results) == 0 {
+		return nil, fmt.Errorf("no mcp list tools result found")
+	}
+	if len(results) == 1 {
+		return results[0], nil
+	}
+
+	ret := &MCPListToolsResult{
+		Tools: make([]MCPListToolsItem, 0),
+		Extra: make(map[string]any),
+	}
+
+	for _, r := range results {
+		if r == nil {
+			continue
+		}
+		if ret.ServerLabel == "" {
+			ret.ServerLabel = r.ServerLabel
+		}
+		ret.Tools = append(ret.Tools, r.Tools...)
+		if r.Error != "" {
+			ret.Error = r.Error // Use the last error
+		}
+		for k, v := range r.Extra {
+			ret.Extra[k] = v
+		}
+	}
+
+	return ret, nil
+}
+
+func concatMCPToolApprovalRequest(requests []*MCPToolApprovalRequest) (*MCPToolApprovalRequest, error) {
+	if len(requests) == 0 {
+		return nil, fmt.Errorf("no mcp tool approval request found")
+	}
+	if len(requests) == 1 {
+		return requests[0], nil
+	}
+
+	ret := &MCPToolApprovalRequest{
+		Extra: make(map[string]any),
+	}
+
+	for _, r := range requests {
+		if r == nil {
+			continue
+		}
+		if ret.CallID == "" {
+			ret.CallID = r.CallID
+		}
+		if ret.Name == "" {
+			ret.Name = r.Name
+		}
+		ret.Arguments += r.Arguments
+		if ret.ServerLabel == "" {
+			ret.ServerLabel = r.ServerLabel
+		}
+		for k, v := range r.Extra {
+			ret.Extra[k] = v
+		}
+	}
+
+	return ret, nil
+}
+
+func concatMCPToolApprovalResponse(responses []*MCPToolApprovalResponse) (*MCPToolApprovalResponse, error) {
+	if len(responses) == 0 {
+		return nil, fmt.Errorf("no mcp tool approval response found")
+	}
+	if len(responses) == 1 {
+		return responses[0], nil
+	}
+
+	return responses[len(responses)-1], nil
+}
+
+func expandSlice[T any](idx int, s []T) []T {
+	if len(s) > idx {
+		return s
+	}
+	return append(s, make([]T, idx-len(s)+1)...)
 }
