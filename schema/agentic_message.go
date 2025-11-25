@@ -17,8 +17,8 @@
 package schema
 
 import (
-	"github.com/cloudwego/eino/schema/anthropic"
-	"github.com/cloudwego/eino/schema/google"
+	"github.com/cloudwego/eino/schema/claude"
+	"github.com/cloudwego/eino/schema/gemini"
 	"github.com/cloudwego/eino/schema/openai"
 	"github.com/eino-contrib/jsonschema"
 )
@@ -66,16 +66,16 @@ type AgenticMessage struct {
 }
 
 type AgenticResponseMeta struct {
-	Status       *string
-	FinishReason string
-
 	TokenUsage *TokenUsage
 
-	GoogleAdditionalMeta *google.CandidateMeta
+	OpenAIExtensions *openai.ResponseMeta
+	GeminiExtensions *gemini.ResponseMeta
+	ClaudeExtensions *claude.MessageMeta
+	Extensions       any
 }
 
 type StreamMeta struct {
-	// Index is the index position of this block in the final response.
+	// Index specifies the index position of this block in the final response.
 	Index int
 }
 
@@ -166,8 +166,8 @@ type UserInputFile struct {
 type AssistantGenText struct {
 	Text string
 
-	OpenAIAnnotations  []*openai.TextAnnotation
-	AnthropicCitations []*anthropic.TextCitation
+	OpenAIAnnotations []*openai.TextAnnotation
+	ClaudeCitations   []*claude.TextCitation
 
 	// Extra stores additional information.
 	Extra map[string]any
@@ -203,7 +203,6 @@ type AssistantGenVideo struct {
 type Reasoning struct {
 	// Summary is the reasoning content summary.
 	Summary []*ReasoningSummary
-
 	// EncryptedContent is the encrypted reasoning content.
 	EncryptedContent string
 
@@ -212,8 +211,8 @@ type Reasoning struct {
 }
 
 type ReasoningSummary struct {
-	// Index specifies the ReasoningSummary chunk to be concatenated during streaming.
-	Index *int
+	// Index specifies the index position of this summary in the final Reasoning.
+	Index int
 
 	Text string
 }
@@ -221,10 +220,8 @@ type ReasoningSummary struct {
 type FunctionToolCall struct {
 	// CallID is the unique identifier for the tool call.
 	CallID string
-
 	// Name specifies the function tool invoked.
 	Name string
-
 	// Arguments is the JSON string arguments for the function tool call.
 	Arguments string
 
@@ -235,10 +232,8 @@ type FunctionToolCall struct {
 type FunctionToolResult struct {
 	// CallID is the unique identifier for the tool call.
 	CallID string
-
 	// Name specifies the function tool invoked.
 	Name string
-
 	// Result is the function tool result returned by the user
 	Result string
 
@@ -250,15 +245,12 @@ type ServerToolCall struct {
 	// Name specifies the server-side tool invoked.
 	// Supplied by the model server (e.g., `web_search` for OpenAI, `googleSearch` for Gemini).
 	Name string
-
 	// CallID is the unique identifier for the tool call.
 	// Empty if not provided by the model server.
 	CallID string
-
 	// Arguments are the raw inputs to the server-side tool,
 	// supplied by the component implementer.
 	Arguments any
-
 	// Extra stores additional information.
 	Extra map[string]any
 }
