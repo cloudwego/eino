@@ -166,8 +166,9 @@ type UserInputFile struct {
 type AssistantGenText struct {
 	Text string
 
-	OpenAIAnnotations []*openai.TextAnnotation
-	ClaudeCitations   []*claude.TextCitation
+	OpenAIExtensions *openai.OutputText
+	ClaudeExtensions *claude.TextBlock
+	Extensions       any
 
 	// Extra stores additional information.
 	Extra map[string]any
