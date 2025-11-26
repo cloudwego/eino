@@ -16,7 +16,7 @@
 
 package gemini
 
-type ResponseMeta struct {
+type ResponseMetaExtension struct {
 	ID            string             `json:"id"`
 	FinishReason  string             `json:"finish_reason"`
 	GroundingMeta *GroundingMetadata `json:"grounding_meta,omitempty"`
