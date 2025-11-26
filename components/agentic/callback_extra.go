@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-package agency
+package agentic
 
 import (
 	"github.com/cloudwego/eino/callbacks"
