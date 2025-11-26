@@ -451,6 +451,9 @@ func ConcatAgenticMessages(msgs []*AgenticMessage) (*AgenticMessage, error) {
 }
 
 func concatAgenticResponseMeta(metas []*AgenticResponseMeta) (*AgenticResponseMeta, error) {
+	if len(metas) == 0 {
+		return nil, nil
+	}
 	ret := &AgenticResponseMeta{
 		TokenUsage:       &TokenUsage{},
 		OpenAIExtensions: nil,
@@ -479,111 +482,142 @@ func concatAgenticContentBlocks(blocks []*ContentBlock) (*ContentBlock, error) {
 		return nil, fmt.Errorf("no content blocks to concat")
 	}
 	blockType := blocks[0].Type
+	index := blocks[0].StreamMeta.Index
 	switch blockType {
 	case ContentBlockTypeReasoning:
 		return concatContentBlockHelper(blocks, blockType, "reasoning",
 			func(b *ContentBlock) *Reasoning { return b.Reasoning },
 			concatReasoning,
-			func(r *Reasoning) *ContentBlock { return &ContentBlock{Type: blockType, Reasoning: r} })
+			func(r *Reasoning) *ContentBlock {
+				return &ContentBlock{Type: blockType, Reasoning: r, StreamMeta: &StreamMeta{Index: index}}
+			})
 
 	case ContentBlockTypeUserInputText:
 		return concatContentBlockHelper(blocks, blockType, "user input text",
 			func(b *ContentBlock) *UserInputText { return b.UserInputText },
 			concatUserInputText,
-			func(t *UserInputText) *ContentBlock { return &ContentBlock{Type: blockType, UserInputText: t} })
+			func(t *UserInputText) *ContentBlock {
+				return &ContentBlock{Type: blockType, UserInputText: t, StreamMeta: &StreamMeta{Index: index}}
+			})
 
 	case ContentBlockTypeUserInputImage:
 		return concatContentBlockHelper(blocks, blockType, "user input image",
 			func(b *ContentBlock) *UserInputImage { return b.UserInputImage },
 			concatUserInputImage,
-			func(i *UserInputImage) *ContentBlock { return &ContentBlock{Type: blockType, UserInputImage: i} })
+			func(i *UserInputImage) *ContentBlock {
+				return &ContentBlock{Type: blockType, UserInputImage: i, StreamMeta: &StreamMeta{Index: index}}
+			})
 
 	case ContentBlockTypeUserInputAudio:
 		return concatContentBlockHelper(blocks, blockType, "user input audio",
 			func(b *ContentBlock) *UserInputAudio { return b.UserInputAudio },
 			concatUserInputAudio,
-			func(a *UserInputAudio) *ContentBlock { return &ContentBlock{Type: blockType, UserInputAudio: a} })
+			func(a *UserInputAudio) *ContentBlock {
+				return &ContentBlock{Type: blockType, UserInputAudio: a, StreamMeta: &StreamMeta{Index: index}}
+			})
 
 	case ContentBlockTypeUserInputVideo:
 		return concatContentBlockHelper(blocks, blockType, "user input video",
 			func(b *ContentBlock) *UserInputVideo { return b.UserInputVideo },
 			concatUserInputVideo,
-			func(v *UserInputVideo) *ContentBlock { return &ContentBlock{Type: blockType, UserInputVideo: v} })
+			func(v *UserInputVideo) *ContentBlock {
+				return &ContentBlock{Type: blockType, UserInputVideo: v, StreamMeta: &StreamMeta{Index: index}}
+			})
 
 	case ContentBlockTypeUserInputFile:
 		return concatContentBlockHelper(blocks, blockType, "user input file",
 			func(b *ContentBlock) *UserInputFile { return b.UserInputFile },
 			concatUserInputFile,
-			func(f *UserInputFile) *ContentBlock { return &ContentBlock{Type: blockType, UserInputFile: f} })
+			func(f *UserInputFile) *ContentBlock {
+				return &ContentBlock{Type: blockType, UserInputFile: f, StreamMeta: &StreamMeta{Index: index}}
+			})
 
 	case ContentBlockTypeAssistantGenText:
 		return concatContentBlockHelper(blocks, blockType, "assistant gen text",
 			func(b *ContentBlock) *AssistantGenText { return b.AssistantGenText },
 			concatAssistantGenText,
-			func(t *AssistantGenText) *ContentBlock { return &ContentBlock{Type: blockType, AssistantGenText: t} })
+			func(t *AssistantGenText) *ContentBlock {
+				return &ContentBlock{Type: blockType, AssistantGenText: t, StreamMeta: &StreamMeta{Index: index}}
+			})
 
 	case ContentBlockTypeAssistantGenImage:
 		return concatContentBlockHelper(blocks, blockType, "assistant gen image",
 			func(b *ContentBlock) *AssistantGenImage { return b.AssistantGenImage },
 			concatAssistantGenImage,
-			func(i *AssistantGenImage) *ContentBlock { return &ContentBlock{Type: blockType, AssistantGenImage: i} })
+			func(i *AssistantGenImage) *ContentBlock {
+				return &ContentBlock{Type: blockType, AssistantGenImage: i, StreamMeta: &StreamMeta{Index: index}}
+			})
 
 	case ContentBlockTypeAssistantGenAudio:
 		return concatContentBlockHelper(blocks, blockType, "assistant gen audio",
 			func(b *ContentBlock) *AssistantGenAudio { return b.AssistantGenAudio },
 			concatAssistantGenAudio,
-			func(a *AssistantGenAudio) *ContentBlock { return &ContentBlock{Type: blockType, AssistantGenAudio: a} })
+			func(a *AssistantGenAudio) *ContentBlock {
+				return &ContentBlock{Type: blockType, AssistantGenAudio: a, StreamMeta: &StreamMeta{Index: index}}
+			})
 
 	case ContentBlockTypeAssistantGenVideo:
 		return concatContentBlockHelper(blocks, blockType, "assistant gen video",
 			func(b *ContentBlock) *AssistantGenVideo { return b.AssistantGenVideo },
 			concatAssistantGenVideo,
-			func(v *AssistantGenVideo) *ContentBlock { return &ContentBlock{Type: blockType, AssistantGenVideo: v} })
+			func(v *AssistantGenVideo) *ContentBlock {
+				return &ContentBlock{Type: blockType, AssistantGenVideo: v, StreamMeta: &StreamMeta{Index: index}}
+			})
 
 	case ContentBlockTypeFunctionToolCall:
 		return concatContentBlockHelper(blocks, blockType, "function tool call",
 			func(b *ContentBlock) *FunctionToolCall { return b.FunctionToolCall },
 			concatFunctionToolCall,
-			func(c *FunctionToolCall) *ContentBlock { return &ContentBlock{Type: blockType, FunctionToolCall: c} })
+			func(c *FunctionToolCall) *ContentBlock {
+				return &ContentBlock{Type: blockType, FunctionToolCall: c, StreamMeta: &StreamMeta{Index: index}}
+			})
 
 	case ContentBlockTypeFunctionToolResult:
 		return concatContentBlockHelper(blocks, blockType, "function tool result",
 			func(b *ContentBlock) *FunctionToolResult { return b.FunctionToolResult },
 			concatFunctionToolResult,
 			func(r *FunctionToolResult) *ContentBlock {
-				return &ContentBlock{Type: blockType, FunctionToolResult: r}
+				return &ContentBlock{Type: blockType, FunctionToolResult: r, StreamMeta: &StreamMeta{Index: index}}
 			})
 
 	case ContentBlockTypeServerToolCall:
 		return concatContentBlockHelper(blocks, blockType, "server tool call",
 			func(b *ContentBlock) *ServerToolCall { return b.ServerToolCall },
 			concatServerToolCall,
-			func(c *ServerToolCall) *ContentBlock { return &ContentBlock{Type: blockType, ServerToolCall: c} })
+			func(c *ServerToolCall) *ContentBlock {
+				return &ContentBlock{Type: blockType, ServerToolCall: c, StreamMeta: &StreamMeta{Index: index}}
+			})
 
 	case ContentBlockTypeServerToolResult:
 		return concatContentBlockHelper(blocks, blockType, "server tool result",
 			func(b *ContentBlock) *ServerToolResult { return b.ServerToolResult },
 			concatServerToolResult,
-			func(r *ServerToolResult) *ContentBlock { return &ContentBlock{Type: blockType, ServerToolResult: r} })
+			func(r *ServerToolResult) *ContentBlock {
+				return &ContentBlock{Type: blockType, ServerToolResult: r, StreamMeta: &StreamMeta{Index: index}}
+			})
 
 	case ContentBlockTypeMCPToolCall:
 		return concatContentBlockHelper(blocks, blockType, "MCP tool call",
 			func(b *ContentBlock) *MCPToolCall { return b.MCPToolCall },
 			concatMCPToolCall,
-			func(c *MCPToolCall) *ContentBlock { return &ContentBlock{Type: blockType, MCPToolCall: c} })
+			func(c *MCPToolCall) *ContentBlock {
+				return &ContentBlock{Type: blockType, MCPToolCall: c, StreamMeta: &StreamMeta{Index: index}}
+			})
 
 	case ContentBlockTypeMCPToolResult:
 		return concatContentBlockHelper(blocks, blockType, "MCP tool result",
 			func(b *ContentBlock) *MCPToolResult { return b.MCPToolResult },
 			concatMCPToolResult,
-			func(r *MCPToolResult) *ContentBlock { return &ContentBlock{Type: blockType, MCPToolResult: r} })
+			func(r *MCPToolResult) *ContentBlock {
+				return &ContentBlock{Type: blockType, MCPToolResult: r, StreamMeta: &StreamMeta{Index: index}}
+			})
 
 	case ContentBlockTypeMCPListTools:
 		return concatContentBlockHelper(blocks, blockType, "MCP list tools",
 			func(b *ContentBlock) *MCPListToolsResult { return b.MCPListToolsResult },
 			concatMCPListToolsResult,
 			func(r *MCPListToolsResult) *ContentBlock {
-				return &ContentBlock{Type: blockType, MCPListToolsResult: r}
+				return &ContentBlock{Type: blockType, MCPListToolsResult: r, StreamMeta: &StreamMeta{Index: index}}
 			})
 
 	case ContentBlockTypeMCPToolApprovalRequest:
@@ -591,7 +625,7 @@ func concatAgenticContentBlocks(blocks []*ContentBlock) (*ContentBlock, error) {
 			func(b *ContentBlock) *MCPToolApprovalRequest { return b.MCPToolApprovalRequest },
 			concatMCPToolApprovalRequest,
 			func(r *MCPToolApprovalRequest) *ContentBlock {
-				return &ContentBlock{Type: blockType, MCPToolApprovalRequest: r}
+				return &ContentBlock{Type: blockType, MCPToolApprovalRequest: r, StreamMeta: &StreamMeta{Index: index}}
 			})
 
 	case ContentBlockTypeMCPToolApprovalResponse:
@@ -599,7 +633,7 @@ func concatAgenticContentBlocks(blocks []*ContentBlock) (*ContentBlock, error) {
 			func(b *ContentBlock) *MCPToolApprovalResponse { return b.MCPToolApprovalResponse },
 			concatMCPToolApprovalResponse,
 			func(r *MCPToolApprovalResponse) *ContentBlock {
-				return &ContentBlock{Type: blockType, MCPToolApprovalResponse: r}
+				return &ContentBlock{Type: blockType, MCPToolApprovalResponse: r, StreamMeta: &StreamMeta{Index: index}}
 			})
 
 	default:
