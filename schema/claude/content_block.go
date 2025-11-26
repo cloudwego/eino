@@ -16,6 +16,10 @@
 
 package claude
 
+type TextBlock struct {
+	Citations []*TextCitation `json:"citations"`
+}
+
 type TextCitation struct {
 	Type TextCitationType `json:"type"`
 
