@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-package agency
+package agentic
 
 // Options is the common options for the model.
 type Options struct {
