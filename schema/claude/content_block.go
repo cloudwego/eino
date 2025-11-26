@@ -16,7 +16,7 @@
 
 package claude
 
-type TextBlock struct {
+type AssistantGenTextExtension struct {
 	Citations []*TextCitation `json:"citations"`
 }
 
