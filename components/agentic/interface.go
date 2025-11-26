@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-package agency
+package agentic
 
 import (
 	"context"
@@ -22,8 +22,8 @@ import (
 	"github.com/cloudwego/eino/schema"
 )
 
-type AgenticModel interface {
+type Model interface {
 	Generate(ctx context.Context, input []*schema.AgenticMessage, opts ...Option) (*schema.AgenticMessage, error)
 	Stream(ctx context.Context, input []*schema.AgenticMessage, opts ...Option) (*schema.StreamReader[*schema.AgenticMessage], error)
-	WithTools(tools []*schema.ToolInfo) (AgenticModel, error)
+	WithTools(tools []*schema.ToolInfo) (Model, error)
 }
