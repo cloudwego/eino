@@ -16,7 +16,7 @@
 
 package openai
 
-type OutputText struct {
+type AssistantGenTextExtension struct {
 	ItemID      string            `json:"item_id"`
 	Annotations []*TextAnnotation `json:"annotations"`
 }
