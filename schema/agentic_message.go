@@ -455,17 +455,17 @@ func concatAgenticResponseMeta(metas []*AgenticResponseMeta) (*AgenticResponseMe
 		return nil, nil
 	}
 	ret := &AgenticResponseMeta{
-		TokenUsage:       &TokenUsage{},
-		OpenAIExtensions: nil,
-		ClaudeExtensions: nil,
-		GeminiExtensions: nil,
-		Extensions:       nil,
+		TokenUsage:      &TokenUsage{},
+		OpenAIExtension: nil,
+		ClaudeExtension: nil,
+		GeminiExtension: nil,
+		Extension:       nil,
 	}
 	for _, meta := range metas {
-		ret.Extensions = meta.Extensions
-		ret.OpenAIExtensions = meta.OpenAIExtensions
-		ret.ClaudeExtensions = meta.ClaudeExtensions
-		ret.GeminiExtensions = meta.GeminiExtensions
+		ret.Extension = meta.Extension
+		ret.OpenAIExtension = meta.OpenAIExtension
+		ret.ClaudeExtension = meta.ClaudeExtension
+		ret.GeminiExtension = meta.GeminiExtension
 		if meta.TokenUsage != nil {
 			ret.TokenUsage.CompletionTokens += meta.TokenUsage.CompletionTokens
 			ret.TokenUsage.CompletionTokenDetails.ReasoningTokens += meta.TokenUsage.CompletionTokenDetails.ReasoningTokens
@@ -828,10 +828,10 @@ func concatAssistantGenText(texts []*AssistantGenText) (*AssistantGenText, error
 	}
 
 	ret := &AssistantGenText{
-		Text:              "",
-		OpenAIAnnotations: make([]*openai.TextAnnotation, 0),
-		ClaudeCitations:   make([]*claude.TextCitation, 0),
-		Extra:             make(map[string]any),
+		Text:            "",
+		OpenAIExtension: nil,
+		ClaudeExtension: nil,
+		Extra:           make(map[string]any),
 	}
 
 	for _, t := range texts {
@@ -839,8 +839,21 @@ func concatAssistantGenText(texts []*AssistantGenText) (*AssistantGenText, error
 			continue
 		}
 		ret.Text += t.Text
-		ret.OpenAIAnnotations = append(ret.OpenAIAnnotations, t.OpenAIAnnotations...)
-		ret.ClaudeCitations = append(ret.ClaudeCitations, t.ClaudeCitations...)
+		if t.OpenAIExtension != nil {
+			if ret.OpenAIExtension == nil {
+				ret.OpenAIExtension = &openai.AssistantGenTextExtension{}
+			}
+			if len(t.OpenAIExtension.ItemID) > 0 {
+				ret.OpenAIExtension.ItemID = t.OpenAIExtension.ItemID
+			}
+			ret.OpenAIExtension.Annotations = append(ret.OpenAIExtension.Annotations, t.OpenAIExtension.Annotations...)
+		}
+		if t.ClaudeExtension != nil {
+			if ret.ClaudeExtension == nil {
+				ret.ClaudeExtension = &claude.AssistantGenTextExtension{}
+			}
+			ret.ClaudeExtension.Citations = append(ret.ClaudeExtension.Citations, t.ClaudeExtension.Citations...)
+		}
 		for k, v := range t.Extra {
 			ret.Extra[k] = v
 		}
