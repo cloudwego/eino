@@ -68,10 +68,10 @@ type AgenticMessage struct {
 type AgenticResponseMeta struct {
 	TokenUsage *TokenUsage
 
-	OpenAIExtensions *openai.ResponseMeta
-	GeminiExtensions *gemini.ResponseMeta
-	ClaudeExtensions *claude.MessageMeta
-	Extensions       any
+	OpenAIExtension *openai.ResponseMetaExtension
+	GeminiExtension *gemini.ResponseMetaExtension
+	ClaudeExtension *claude.ResponseMetaExtension
+	Extension       any
 }
 
 type StreamMeta struct {
@@ -166,9 +166,9 @@ type UserInputFile struct {
 type AssistantGenText struct {
 	Text string
 
-	OpenAIExtensions *openai.OutputText
-	ClaudeExtensions *claude.TextBlock
-	Extensions       any
+	OpenAIExtension *openai.AssistantGenTextExtension
+	ClaudeExtension *claude.AssistantGenTextExtension
+	Extension       any
 
 	// Extra stores additional information.
 	Extra map[string]any
