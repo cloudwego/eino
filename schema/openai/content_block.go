@@ -16,6 +16,11 @@
 
 package openai
 
+type OutputText struct {
+	ItemID      string            `json:"item_id"`
+	Annotations []*TextAnnotation `json:"annotations"`
+}
+
 type TextAnnotation struct {
 	Type TextAnnotationType `json:"type"`
 
