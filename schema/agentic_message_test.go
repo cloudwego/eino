@@ -1230,3 +1230,152 @@ func TestAgenticPlaceholderFormat(t *testing.T) {
 func ptrOf[T any](v T) *T {
 	return &v
 }
+
+func TestAgenticMessageString(t *testing.T) {
+	longBase64 := "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=="
+
+	msg := &AgenticMessage{
+		Role: AgenticRoleTypeAssistant,
+		ContentBlocks: []*ContentBlock{
+			{
+				Type: ContentBlockTypeUserInputText,
+				UserInputText: &UserInputText{
+					Text: "What's the weather like in New York City today?",
+				},
+			},
+			{
+				Type: ContentBlockTypeUserInputImage,
+				UserInputImage: &UserInputImage{
+					URL:        ptrOf("https://example.com/weather-map.jpg"),
+					Base64Data: ptrOf(longBase64),
+					MIMEType:   "image/jpeg",
+					Detail:     ImageURLDetailHigh,
+				},
+			},
+			{
+				Type: ContentBlockTypeReasoning,
+				Reasoning: &Reasoning{
+					Summary: []*ReasoningSummary{
+						{Index: 0, Text: "First, I need to identify the location (New York City) from the user's query."},
+						{Index: 1, Text: "Then, I should call the weather API to get current conditions."},
+						{Index: 2, Text: "Finally, I'll format the response in a user-friendly way with temperature and conditions."},
+					},
+					EncryptedContent: "encrypted_reasoning_content_that_is_very_long_and_will_be_truncated_for_display",
+				},
+			},
+			{
+				Type: ContentBlockTypeAssistantGenText,
+				AssistantGenText: &AssistantGenText{
+					Text: "I'll check the current weather in New York City for you.",
+				},
+			},
+			{
+				Type: ContentBlockTypeFunctionToolCall,
+				FunctionToolCall: &FunctionToolCall{
+					CallID:    "call_weather_123",
+					Name:      "get_current_weather",
+					Arguments: `{"location":"New York City","unit":"fahrenheit"}`,
+				},
+				StreamMeta: &StreamMeta{Index: 0},
+			},
+			{
+				Type: ContentBlockTypeFunctionToolResult,
+				FunctionToolResult: &FunctionToolResult{
+					CallID: "call_weather_123",
+					Name:   "get_current_weather",
+					Result: `{"temperature":72,"condition":"sunny","humidity":45,"wind_speed":8}`,
+				},
+			},
+			{
+				Type: ContentBlockTypeMCPToolCall,
+				MCPToolCall: &MCPToolCall{
+					ServerLabel:       "weather-mcp-server",
+					CallID:            "mcp_forecast_456",
+					Name:              "get_7day_forecast",
+					Arguments:         `{"city":"New York","days":7}`,
+					ApprovalRequestID: "approval_req_789",
+				},
+			},
+			{
+				Type: ContentBlockTypeMCPToolResult,
+				MCPToolResult: &MCPToolResult{
+					CallID: "mcp_forecast_456",
+					Name:   "get_7day_forecast",
+					Result: `{"status":"partial","days_available":3}`,
+					Error: &MCPToolCallError{
+						Code:  503,
+						Error: "Service temporarily unavailable for full 7-day forecast",
+					},
+				},
+			},
+			{
+				Type: ContentBlockTypeMCPListTools,
+				MCPListToolsResult: &MCPListToolsResult{
+					ServerLabel: "weather-mcp-server",
+					Tools: []MCPListToolsItem{
+						{Name: "get_current_weather", Description: "Get current weather conditions for a location"},
+						{Name: "get_7day_forecast", Description: "Get 7-day weather forecast"},
+						{Name: "get_weather_alerts", Description: "Get active weather alerts and warnings"},
+					},
+				},
+			},
+		},
+		ResponseMeta: &AgenticResponseMeta{
+			TokenUsage: &TokenUsage{
+				PromptTokens:     250,
+				CompletionTokens: 180,
+				TotalTokens:      430,
+			},
+		},
+	}
+
+	// Print the formatted output
+	output := msg.String()
+
+	assert.Equal(t, `role: assistant
+content_blocks:
+  [0] type: user_input_text
+      text: What's the weather like in New York City today?
+  [1] type: user_input_image
+      url: https://example.com/weather-map.jpg
+      base64_data: iVBORw0KGgoAAAANSUhE...... (96 bytes)
+      mime_type: image/jpeg
+      detail: high
+  [2] type: reasoning
+      summary: 3 items
+        [0] First, I need to identify the location (New York City) from the user's query.
+        [1] Then, I should call the weather API to get current conditions.
+        [2] Finally, I'll format the response in a user-friendly way with temperature and conditions.
+      encrypted_content: encrypted_reasoning_content_that_is_very_long_and_...
+  [3] type: assistant_gen_text
+      text: I'll check the current weather in New York City for you.
+  [4] type: function_tool_call
+      call_id: call_weather_123
+      name: get_current_weather
+      arguments: {"location":"New York City","unit":"fahrenheit"}
+      stream_index: 0
+  [5] type: function_tool_result
+      call_id: call_weather_123
+      name: get_current_weather
+      result: {"temperature":72,"condition":"sunny","humidity":45,"wind_speed":8}
+  [6] type: mcp_tool_call
+      server_label: weather-mcp-server
+      call_id: mcp_forecast_456
+      name: get_7day_forecast
+      arguments: {"city":"New York","days":7}
+      approval_request_id: approval_req_789
+  [7] type: mcp_tool_result
+      call_id: mcp_forecast_456
+      name: get_7day_forecast
+      result: {"status":"partial","days_available":3}
+      error: [503] Service temporarily unavailable for full 7-day forecast
+  [8] type: mcp_list_tools
+      server_label: weather-mcp-server
+      tools: 3 items
+        - get_current_weather: Get current weather conditions for a location
+        - get_7day_forecast: Get 7-day weather forecast
+        - get_weather_alerts: Get active weather alerts and warnings
+response_meta:
+  token_usage: prompt=250, completion=180, total=430
+`, output)
+}

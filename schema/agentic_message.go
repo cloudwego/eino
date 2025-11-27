@@ -20,6 +20,7 @@ import (
 	"context"
 	"fmt"
 	"reflect"
+	"strings"
 
 	"github.com/cloudwego/eino/schema/claude"
 	"github.com/cloudwego/eino/schema/gemini"
@@ -1414,4 +1415,298 @@ func expandSlice[T any](idx int, s []T) []T {
 		return s
 	}
 	return append(s, make([]T, idx-len(s)+1)...)
+}
+
+func (m *AgenticMessage) String() string {
+	sb := &strings.Builder{}
+	sb.WriteString(fmt.Sprintf("role: %s\n", m.Role))
+
+	if len(m.ContentBlocks) > 0 {
+		sb.WriteString("content_blocks:\n")
+		for i, block := range m.ContentBlocks {
+			if block == nil {
+				continue
+			}
+			sb.WriteString(fmt.Sprintf("  [%d] %s", i, block.String()))
+		}
+	}
+
+	if m.ResponseMeta != nil {
+		sb.WriteString(m.ResponseMeta.String())
+	}
+
+	return sb.String()
+}
+
+func (b *ContentBlock) String() string {
+	sb := &strings.Builder{}
+	sb.WriteString(fmt.Sprintf("type: %s\n", b.Type))
+
+	switch b.Type {
+	case ContentBlockTypeReasoning:
+		if b.Reasoning != nil {
+			sb.WriteString(b.Reasoning.String())
+		}
+	case ContentBlockTypeUserInputText:
+		if b.UserInputText != nil {
+			sb.WriteString(b.UserInputText.String())
+		}
+	case ContentBlockTypeUserInputImage:
+		if b.UserInputImage != nil {
+			sb.WriteString(b.UserInputImage.String())
+		}
+	case ContentBlockTypeUserInputAudio:
+		if b.UserInputAudio != nil {
+			sb.WriteString(b.UserInputAudio.String())
+		}
+	case ContentBlockTypeUserInputVideo:
+		if b.UserInputVideo != nil {
+			sb.WriteString(b.UserInputVideo.String())
+		}
+	case ContentBlockTypeUserInputFile:
+		if b.UserInputFile != nil {
+			sb.WriteString(b.UserInputFile.String())
+		}
+	case ContentBlockTypeAssistantGenText:
+		if b.AssistantGenText != nil {
+			sb.WriteString(b.AssistantGenText.String())
+		}
+	case ContentBlockTypeAssistantGenImage:
+		if b.AssistantGenImage != nil {
+			sb.WriteString(b.AssistantGenImage.String())
+		}
+	case ContentBlockTypeAssistantGenAudio:
+		if b.AssistantGenAudio != nil {
+			sb.WriteString(b.AssistantGenAudio.String())
+		}
+	case ContentBlockTypeAssistantGenVideo:
+		if b.AssistantGenVideo != nil {
+			sb.WriteString(b.AssistantGenVideo.String())
+		}
+	case ContentBlockTypeFunctionToolCall:
+		if b.FunctionToolCall != nil {
+			sb.WriteString(b.FunctionToolCall.String())
+		}
+	case ContentBlockTypeFunctionToolResult:
+		if b.FunctionToolResult != nil {
+			sb.WriteString(b.FunctionToolResult.String())
+		}
+	case ContentBlockTypeServerToolCall:
+		if b.ServerToolCall != nil {
+			sb.WriteString(b.ServerToolCall.String())
+		}
+	case ContentBlockTypeServerToolResult:
+		if b.ServerToolResult != nil {
+			sb.WriteString(b.ServerToolResult.String())
+		}
+	case ContentBlockTypeMCPToolCall:
+		if b.MCPToolCall != nil {
+			sb.WriteString(b.MCPToolCall.String())
+		}
+	case ContentBlockTypeMCPToolResult:
+		if b.MCPToolResult != nil {
+			sb.WriteString(b.MCPToolResult.String())
+		}
+	case ContentBlockTypeMCPListTools:
+		if b.MCPListToolsResult != nil {
+			sb.WriteString(b.MCPListToolsResult.String())
+		}
+	case ContentBlockTypeMCPToolApprovalRequest:
+		if b.MCPToolApprovalRequest != nil {
+			sb.WriteString(b.MCPToolApprovalRequest.String())
+		}
+	case ContentBlockTypeMCPToolApprovalResponse:
+		if b.MCPToolApprovalResponse != nil {
+			sb.WriteString(b.MCPToolApprovalResponse.String())
+		}
+	}
+
+	if b.StreamMeta != nil {
+		sb.WriteString(fmt.Sprintf("      stream_index: %d\n", b.StreamMeta.Index))
+	}
+
+	return sb.String()
+}
+
+func (r *Reasoning) String() string {
+	sb := &strings.Builder{}
+	sb.WriteString(fmt.Sprintf("      summary: %d items\n", len(r.Summary)))
+	for _, s := range r.Summary {
+		sb.WriteString(fmt.Sprintf("        [%d] %s\n", s.Index, truncateString(s.Text, 100)))
+	}
+	if r.EncryptedContent != "" {
+		sb.WriteString(fmt.Sprintf("      encrypted_content: %s\n", truncateString(r.EncryptedContent, 50)))
+	}
+	return sb.String()
+}
+
+func (u *UserInputText) String() string {
+	return fmt.Sprintf("      text: %s\n", truncateString(u.Text, 200))
+}
+
+func (u *UserInputImage) String() string {
+	return formatMediaString(u.URL, u.Base64Data, u.MIMEType, u.Detail)
+}
+
+func (u *UserInputAudio) String() string {
+	return formatMediaString(u.URL, u.Base64Data, u.MIMEType, "")
+}
+
+func (u *UserInputVideo) String() string {
+	return formatMediaString(u.URL, u.Base64Data, u.MIMEType, "")
+}
+
+func (u *UserInputFile) String() string {
+	sb := &strings.Builder{}
+	if u.Name != nil {
+		sb.WriteString(fmt.Sprintf("      name: %s\n", *u.Name))
+	}
+	sb.WriteString(formatMediaString(u.URL, u.Base64Data, u.MIMEType, ""))
+	return sb.String()
+}
+
+func (a *AssistantGenText) String() string {
+	return fmt.Sprintf("      text: %s\n", truncateString(a.Text, 200))
+}
+
+func (a *AssistantGenImage) String() string {
+	return formatMediaString(a.URL, a.Base64Data, a.MIMEType, "")
+}
+
+func (a *AssistantGenAudio) String() string {
+	return formatMediaString(a.URL, a.Base64Data, a.MIMEType, "")
+}
+
+func (a *AssistantGenVideo) String() string {
+	return formatMediaString(a.URL, a.Base64Data, a.MIMEType, "")
+}
+
+func (f *FunctionToolCall) String() string {
+	sb := &strings.Builder{}
+	sb.WriteString(fmt.Sprintf("      call_id: %s\n", f.CallID))
+	sb.WriteString(fmt.Sprintf("      name: %s\n", f.Name))
+	sb.WriteString(fmt.Sprintf("      arguments: %s\n", truncateString(f.Arguments, 200)))
+	return sb.String()
+}
+
+func (f *FunctionToolResult) String() string {
+	sb := &strings.Builder{}
+	sb.WriteString(fmt.Sprintf("      call_id: %s\n", f.CallID))
+	sb.WriteString(fmt.Sprintf("      name: %s\n", f.Name))
+	sb.WriteString(fmt.Sprintf("      result: %s\n", truncateString(f.Result, 200)))
+	return sb.String()
+}
+
+func (s *ServerToolCall) String() string {
+	sb := &strings.Builder{}
+	sb.WriteString(fmt.Sprintf("      name: %s\n", s.Name))
+	if s.CallID != "" {
+		sb.WriteString(fmt.Sprintf("      call_id: %s\n", s.CallID))
+	}
+	sb.WriteString(fmt.Sprintf("      arguments: %v\n", s.Arguments))
+	return sb.String()
+}
+
+func (s *ServerToolResult) String() string {
+	sb := &strings.Builder{}
+	sb.WriteString(fmt.Sprintf("      name: %s\n", s.Name))
+	if s.CallID != "" {
+		sb.WriteString(fmt.Sprintf("      call_id: %s\n", s.CallID))
+	}
+	sb.WriteString(fmt.Sprintf("      result: %v\n", s.Result))
+	return sb.String()
+}
+
+func (m *MCPToolCall) String() string {
+	sb := &strings.Builder{}
+	sb.WriteString(fmt.Sprintf("      server_label: %s\n", m.ServerLabel))
+	sb.WriteString(fmt.Sprintf("      call_id: %s\n", m.CallID))
+	sb.WriteString(fmt.Sprintf("      name: %s\n", m.Name))
+	sb.WriteString(fmt.Sprintf("      arguments: %s\n", truncateString(m.Arguments, 200)))
+	if m.ApprovalRequestID != "" {
+		sb.WriteString(fmt.Sprintf("      approval_request_id: %s\n", m.ApprovalRequestID))
+	}
+	return sb.String()
+}
+
+func (m *MCPToolResult) String() string {
+	sb := &strings.Builder{}
+	sb.WriteString(fmt.Sprintf("      call_id: %s\n", m.CallID))
+	sb.WriteString(fmt.Sprintf("      name: %s\n", m.Name))
+	sb.WriteString(fmt.Sprintf("      result: %s\n", truncateString(m.Result, 200)))
+	if m.Error != nil {
+		sb.WriteString(fmt.Sprintf("      error: [%d] %s\n", m.Error.Code, m.Error.Error))
+	}
+	return sb.String()
+}
+
+func (m *MCPListToolsResult) String() string {
+	sb := &strings.Builder{}
+	sb.WriteString(fmt.Sprintf("      server_label: %s\n", m.ServerLabel))
+	sb.WriteString(fmt.Sprintf("      tools: %d items\n", len(m.Tools)))
+	for _, tool := range m.Tools {
+		sb.WriteString(fmt.Sprintf("        - %s: %s\n", tool.Name, truncateString(tool.Description, 100)))
+	}
+	if m.Error != "" {
+		sb.WriteString(fmt.Sprintf("      error: %s\n", m.Error))
+	}
+	return sb.String()
+}
+
+func (m *MCPToolApprovalRequest) String() string {
+	sb := &strings.Builder{}
+	sb.WriteString(fmt.Sprintf("      server_label: %s\n", m.ServerLabel))
+	sb.WriteString(fmt.Sprintf("      call_id: %s\n", m.CallID))
+	sb.WriteString(fmt.Sprintf("      name: %s\n", m.Name))
+	sb.WriteString(fmt.Sprintf("      arguments: %s\n", truncateString(m.Arguments, 200)))
+	return sb.String()
+}
+
+func (m *MCPToolApprovalResponse) String() string {
+	sb := &strings.Builder{}
+	sb.WriteString(fmt.Sprintf("      approval_request_id: %s\n", m.ApprovalRequestID))
+	sb.WriteString(fmt.Sprintf("      approve: %v\n", m.Approve))
+	if m.Reason != "" {
+		sb.WriteString(fmt.Sprintf("      reason: %s\n", truncateString(m.Reason, 100)))
+	}
+	return sb.String()
+}
+
+func (a *AgenticResponseMeta) String() string {
+	sb := &strings.Builder{}
+	sb.WriteString("response_meta:\n")
+	if a.TokenUsage != nil {
+		sb.WriteString(fmt.Sprintf("  token_usage: prompt=%d, completion=%d, total=%d\n",
+			a.TokenUsage.PromptTokens,
+			a.TokenUsage.CompletionTokens,
+			a.TokenUsage.TotalTokens))
+	}
+	return sb.String()
+}
+
+// truncateString truncates a string to maxLen characters, adding "..." if truncated
+func truncateString(s string, maxLen int) string {
+	if len(s) <= maxLen {
+		return s
+	}
+	return s[:maxLen] + "..."
+}
+
+// formatMediaString formats URL, Base64Data, MIMEType and Detail for media content
+func formatMediaString(url, base64Data *string, mimeType string, detail any) string {
+	sb := &strings.Builder{}
+	if url != nil && *url != "" {
+		sb.WriteString(fmt.Sprintf("      url: %s\n", truncateString(*url, 100)))
+	}
+	if base64Data != nil && *base64Data != "" {
+		// Only show first few characters of base64 data
+		sb.WriteString(fmt.Sprintf("      base64_data: %s... (%d bytes)\n", truncateString(*base64Data, 20), len(*base64Data)))
+	}
+	if mimeType != "" {
+		sb.WriteString(fmt.Sprintf("      mime_type: %s\n", mimeType))
+	}
+	if detail != nil && detail != "" {
+		sb.WriteString(fmt.Sprintf("      detail: %v\n", detail))
+	}
+	return sb.String()
 }
