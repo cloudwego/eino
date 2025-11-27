@@ -53,7 +53,7 @@ func TestNewPlannerWithFormattedOutput(t *testing.T) {
 	assert.NotNil(t, p)
 
 	// Verify the planner's name and description
-	assert.Equal(t, "Planner", p.Name(ctx))
+	assert.Equal(t, "planner", p.Name(ctx))
 	assert.Equal(t, "a planner agent", p.Description(ctx))
 }
 
@@ -81,7 +81,7 @@ func TestNewPlannerWithToolCalling(t *testing.T) {
 	assert.NotNil(t, p)
 
 	// Verify the planner's name and description
-	assert.Equal(t, "Planner", p.Name(ctx))
+	assert.Equal(t, "planner", p.Name(ctx))
 	assert.Equal(t, "a planner agent", p.Description(ctx))
 }
 
@@ -157,7 +157,7 @@ func TestPlannerRunWithToolCalling(t *testing.T) {
 		ID:   "tool_call_id",
 		Type: "function",
 		Function: schema.FunctionCall{
-			Name:      "Plan", // This should match PlanToolInfo.Name
+			Name:      "plan", // This should match PlanToolInfo.Name
 			Arguments: planArgs,
 		},
 	}
@@ -234,7 +234,7 @@ func TestNewExecutor(t *testing.T) {
 	assert.NotNil(t, executor)
 
 	// Verify the executor's name and description
-	assert.Equal(t, "Executor", executor.Name(ctx))
+	assert.Equal(t, "executor", executor.Name(ctx))
 	assert.Equal(t, "an executor agent", executor.Description(ctx))
 }
 
@@ -338,7 +338,7 @@ func TestNewReplanner(t *testing.T) {
 	assert.NotNil(t, rp)
 
 	// Verify the replanner's name and description
-	assert.Equal(t, "Replanner", rp.Name(ctx))
+	assert.Equal(t, "replanner", rp.Name(ctx))
 	assert.Equal(t, "a replanner agent", rp.Description(ctx))
 }
 
@@ -544,13 +544,13 @@ func TestNewPlanExecuteAgent(t *testing.T) {
 	mockReplanner := mockAdk.NewMockAgent(ctrl)
 
 	// Set up expectations for the mock agents
-	mockPlanner.EXPECT().Name(gomock.Any()).Return("Planner").AnyTimes()
+	mockPlanner.EXPECT().Name(gomock.Any()).Return("planner").AnyTimes()
 	mockPlanner.EXPECT().Description(gomock.Any()).Return("a planner agent").AnyTimes()
 
-	mockExecutor.EXPECT().Name(gomock.Any()).Return("Executor").AnyTimes()
+	mockExecutor.EXPECT().Name(gomock.Any()).Return("executor").AnyTimes()
 	mockExecutor.EXPECT().Description(gomock.Any()).Return("an executor agent").AnyTimes()
 
-	mockReplanner.EXPECT().Name(gomock.Any()).Return("Replanner").AnyTimes()
+	mockReplanner.EXPECT().Name(gomock.Any()).Return("replanner").AnyTimes()
 	mockReplanner.EXPECT().Description(gomock.Any()).Return("a replanner agent").AnyTimes()
 
 	conf := &Config{
@@ -578,13 +578,13 @@ func TestPlanExecuteAgentWithReplan(t *testing.T) {
 	mockReplanner := mockAdk.NewMockAgent(ctrl)
 
 	// Set up expectations for the mock agents
-	mockPlanner.EXPECT().Name(gomock.Any()).Return("Planner").AnyTimes()
+	mockPlanner.EXPECT().Name(gomock.Any()).Return("planner").AnyTimes()
 	mockPlanner.EXPECT().Description(gomock.Any()).Return("a planner agent").AnyTimes()
 
-	mockExecutor.EXPECT().Name(gomock.Any()).Return("Executor").AnyTimes()
+	mockExecutor.EXPECT().Name(gomock.Any()).Return("executor").AnyTimes()
 	mockExecutor.EXPECT().Description(gomock.Any()).Return("an executor agent").AnyTimes()
 
-	mockReplanner.EXPECT().Name(gomock.Any()).Return("Replanner").AnyTimes()
+	mockReplanner.EXPECT().Name(gomock.Any()).Return("replanner").AnyTimes()
 	mockReplanner.EXPECT().Description(gomock.Any()).Return("a replanner agent").AnyTimes()
 
 	// Create a plan

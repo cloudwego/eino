@@ -109,7 +109,7 @@ var (
 	// PlanToolInfo defines the schema for the Plan tool that can be used with ToolCallingChatModel.
 	// This schema instructs the model to generate a structured plan with ordered steps.
 	PlanToolInfo = schema.ToolInfo{
-		Name: "Plan",
+		Name: "plan",
 		Desc: "Plan with a list of steps to execute in order. Each step should be clear, actionable, and arranged in a logical sequence. The output will be used to guide the execution process.",
 		ParamsOneOf: schema.NewParamsOneOfByParams(
 			map[string]*schema.ParameterInfo{
@@ -126,7 +126,7 @@ var (
 	// RespondToolInfo defines the schema for the response tool that can be used with ToolCallingChatModel.
 	// This schema instructs the model to generate a direct response to the user.
 	RespondToolInfo = schema.ToolInfo{
-		Name: "Respond",
+		Name: "respond",
 		Desc: "Generate a direct response to the user. Use this tool when you have all the information needed to provide a final answer.",
 		ParamsOneOf: schema.NewParamsOneOfByParams(
 			map[string]*schema.ParameterInfo{
@@ -304,7 +304,7 @@ type planner struct {
 }
 
 func (p *planner) Name(_ context.Context) string {
-	return "Planner"
+	return "planner"
 }
 
 func (p *planner) Description(_ context.Context) string {
@@ -544,7 +544,7 @@ func NewExecutor(ctx context.Context, cfg *ExecutorConfig) (adk.Agent, error) {
 	}
 
 	agent, err := adk.NewChatModelAgent(ctx, &adk.ChatModelAgentConfig{
-		Name:          "Executor",
+		Name:          "executor",
 		Description:   "an executor agent",
 		Model:         cfg.Model,
 		ToolsConfig:   cfg.ToolsConfig,
@@ -632,7 +632,7 @@ func formatExecutedSteps(results []ExecutedStep) string {
 }
 
 func (r *replanner) Name(_ context.Context) string {
-	return "Replanner"
+	return "replanner"
 }
 
 func (r *replanner) Description(_ context.Context) string {
