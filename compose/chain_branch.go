@@ -180,6 +180,21 @@ func (cb *ChainBranch) AddChatTemplate(key string, node prompt.ChatTemplate, opt
 	return cb.addNode(key, gNode, options)
 }
 
+// AddAgenticChatTemplate adds a prompt.AgenticChatTemplate node to the branch.
+// eg.
+//
+//	chatTemplate, err := prompt.FromAgenticMessages(schema.FString, &schema.AgenticMessage{})
+//
+//	cb.AddAgenticChatTemplate("chat_template_key_01", chatTemplate)
+//
+//	chatTemplate2, err := prompt.FromAgenticMessages(schema.FString, &schema.AgenticMessage{})
+//
+//	cb.AddAgenticChatTemplate("chat_template_key_02", chatTemplate2)
+func (cb *ChainBranch) AddAgenticChatTemplate(key string, node prompt.AgenticChatTemplate, opts ...GraphAddNodeOpt) *ChainBranch {
+	gNode, options := toAgenticChatTemplateNode(node, opts...)
+	return cb.addNode(key, gNode, options)
+}
+
 // AddToolsNode adds a ToolsNode to the branch.
 // eg.
 //

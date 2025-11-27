@@ -24,14 +24,28 @@ import (
 	"github.com/cloudwego/eino/schema"
 )
 
+// FromAgenticMessages creates a new DefaultAgenticChatTemplate from the given templates and format type.
+// eg.
+//
+//	template := prompt.FromAgenticMessages(schema.FString, &schema.AgenticMessage{})
+//	// in chain, or graph
+//	chain := compose.NewChain[map[string]any, []*schema.AgenticMessage]()
+//	chain.AppendAgenticChatTemplate(template)
+func FromAgenticMessages(formatType schema.FormatType, templates ...schema.AgenticMessagesTemplate) *DefaultAgenticChatTemplate {
+	return &DefaultAgenticChatTemplate{
+		templates:  templates,
+		formatType: formatType,
+	}
+}
+
 type DefaultAgenticChatTemplate struct {
-	templates  []schema.MessagesTemplate
+	templates  []schema.AgenticMessagesTemplate
 	formatType schema.FormatType
 }
 
 func (t *DefaultAgenticChatTemplate) Format(ctx context.Context, vs map[string]any, opts ...Option) (result []*schema.AgenticMessage, err error) {
-	ctx = callbacks.EnsureRunInfo(ctx, t.GetType(), components.ComponentOfPrompt)
-	ctx = callbacks.OnStart(ctx, &CallbackInput{
+	ctx = callbacks.EnsureRunInfo(ctx, t.GetType(), components.ComponentOfAgenticPrompt)
+	ctx = callbacks.OnStart(ctx, &AgenticCallbackInput{
 		Variables: vs,
 		Templates: t.templates,
 	})
@@ -51,7 +65,7 @@ func (t *DefaultAgenticChatTemplate) Format(ctx context.Context, vs map[string]a
 		result = append(result, msgs...)
 	}
 
-	_ = callbacks.OnEnd(ctx, &CallbackOutput{
+	_ = callbacks.OnEnd(ctx, &AgenticCallbackOutput{
 		Result:    result,
 		Templates: t.templates,
 	})

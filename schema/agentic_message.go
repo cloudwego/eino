@@ -17,6 +17,7 @@
 package schema
 
 import (
+	"context"
 	"fmt"
 	"reflect"
 
@@ -360,6 +361,240 @@ type MCPToolApprovalResponse struct {
 
 	// Extra stores additional information.
 	Extra map[string]any
+}
+
+// AgenticMessagesTemplate is the interface for messages template.
+// It's used to render a template to a list of agentic messages.
+// e.g.
+//
+//	chatTemplate := prompt.FromAgenticMessages(
+//		&schema.AgenticMessage{
+//			Role: schema.AgenticRoleTypeSystem,
+//			ContentBlocks: []*schema.ContentBlock{
+//				{Type: schema.ContentBlockTypeUserInputText, UserInputText: &schema.UserInputText{Text: "you are an eino helper"}},
+//			},
+//		},
+//		schema.AgenticMessagesPlaceholder("history", false), // <= this will use the value of "history" in params
+//	)
+//	msgs, err := chatTemplate.Format(ctx, params)
+type AgenticMessagesTemplate interface {
+	Format(ctx context.Context, vs map[string]any, formatType FormatType) ([]*AgenticMessage, error)
+}
+
+var _ AgenticMessagesTemplate = &AgenticMessage{}
+var _ AgenticMessagesTemplate = AgenticMessagesPlaceholder("", false)
+
+type agenticMessagesPlaceholder struct {
+	key      string
+	optional bool
+}
+
+// AgenticMessagesPlaceholder can render a placeholder to a list of agentic messages in params.
+// e.g.
+//
+//	placeholder := AgenticMessagesPlaceholder("history", false)
+//	params := map[string]any{
+//		"history": []*schema.AgenticMessage{
+//			&schema.AgenticMessage{
+//				Role: schema.AgenticRoleTypeSystem,
+//				ContentBlocks: []*schema.ContentBlock{
+//					{Type: schema.ContentBlockTypeUserInputText, UserInputText: &schema.UserInputText{Text: "you are an eino helper"}},
+//				},
+//			},
+//		},
+//	}
+//	chatTemplate := chatTpl := prompt.FromMessages(
+//		schema.AgenticMessagesPlaceholder("history", false), // <= this will use the value of "history" in params
+//	)
+//	msgs, err := chatTemplate.Format(ctx, params)
+func AgenticMessagesPlaceholder(key string, optional bool) AgenticMessagesTemplate {
+	return &agenticMessagesPlaceholder{
+		key:      key,
+		optional: optional,
+	}
+}
+
+func (p *agenticMessagesPlaceholder) Format(_ context.Context, vs map[string]any, _ FormatType) ([]*AgenticMessage, error) {
+	v, ok := vs[p.key]
+	if !ok {
+		if p.optional {
+			return []*AgenticMessage{}, nil
+		}
+
+		return nil, fmt.Errorf("message placeholder format: %s not found", p.key)
+	}
+
+	msgs, ok := v.([]*AgenticMessage)
+	if !ok {
+		return nil, fmt.Errorf("only agentic messages can be used to format message placeholder, key: %v, actual type: %v", p.key, reflect.TypeOf(v))
+	}
+
+	return msgs, nil
+}
+
+// Format returns the agentic messages after rendering by the given formatType.
+// It formats only the user input fields (UserInputText, UserInputImage, UserInputAudio, UserInputVideo, UserInputFile).
+// e.g.
+//
+//	msg := &schema.AgenticMessage{
+//		Role: schema.AgenticRoleTypeUser,
+//		ContentBlocks: []*schema.ContentBlock{
+//			{Type: schema.ContentBlockTypeUserInputText, UserInputText: &schema.UserInputText{Text: "hello {name}"}},
+//		},
+//	}
+//	msgs, err := msg.Format(ctx, map[string]any{"name": "eino"}, schema.FString)
+//	// msgs[0].ContentBlocks[0].UserInputText.Text will be "hello eino"
+func (m *AgenticMessage) Format(_ context.Context, vs map[string]any, formatType FormatType) ([]*AgenticMessage, error) {
+	copied := *m
+
+	if len(m.ContentBlocks) > 0 {
+		copiedBlocks := make([]*ContentBlock, len(m.ContentBlocks))
+		for i, block := range m.ContentBlocks {
+			if block == nil {
+				copiedBlocks[i] = nil
+				continue
+			}
+
+			copiedBlock := *block
+			var err error
+
+			switch block.Type {
+			case ContentBlockTypeUserInputText:
+				if block.UserInputText != nil {
+					copiedBlock.UserInputText, err = formatUserInputText(block.UserInputText, vs, formatType)
+					if err != nil {
+						return nil, err
+					}
+				}
+			case ContentBlockTypeUserInputImage:
+				if block.UserInputImage != nil {
+					copiedBlock.UserInputImage, err = formatUserInputImage(block.UserInputImage, vs, formatType)
+					if err != nil {
+						return nil, err
+					}
+				}
+			case ContentBlockTypeUserInputAudio:
+				if block.UserInputAudio != nil {
+					copiedBlock.UserInputAudio, err = formatUserInputAudio(block.UserInputAudio, vs, formatType)
+					if err != nil {
+						return nil, err
+					}
+				}
+			case ContentBlockTypeUserInputVideo:
+				if block.UserInputVideo != nil {
+					copiedBlock.UserInputVideo, err = formatUserInputVideo(block.UserInputVideo, vs, formatType)
+					if err != nil {
+						return nil, err
+					}
+				}
+			case ContentBlockTypeUserInputFile:
+				if block.UserInputFile != nil {
+					copiedBlock.UserInputFile, err = formatUserInputFile(block.UserInputFile, vs, formatType)
+					if err != nil {
+						return nil, err
+					}
+				}
+			}
+
+			copiedBlocks[i] = &copiedBlock
+		}
+		copied.ContentBlocks = copiedBlocks
+	}
+
+	return []*AgenticMessage{&copied}, nil
+}
+
+func formatUserInputText(uit *UserInputText, vs map[string]any, formatType FormatType) (*UserInputText, error) {
+	text, err := formatContent(uit.Text, vs, formatType)
+	if err != nil {
+		return nil, err
+	}
+	copied := *uit
+	copied.Text = text
+	return &copied, nil
+}
+
+func formatUserInputImage(uii *UserInputImage, vs map[string]any, formatType FormatType) (*UserInputImage, error) {
+	copied := *uii
+	if uii.URL != nil && *uii.URL != "" {
+		url, err := formatContent(*uii.URL, vs, formatType)
+		if err != nil {
+			return nil, err
+		}
+		copied.URL = &url
+	}
+	if uii.Base64Data != nil && *uii.Base64Data != "" {
+		base64data, err := formatContent(*uii.Base64Data, vs, formatType)
+		if err != nil {
+			return nil, err
+		}
+		copied.Base64Data = &base64data
+	}
+	return &copied, nil
+}
+
+func formatUserInputAudio(uia *UserInputAudio, vs map[string]any, formatType FormatType) (*UserInputAudio, error) {
+	copied := *uia
+	if uia.URL != nil && *uia.URL != "" {
+		url, err := formatContent(*uia.URL, vs, formatType)
+		if err != nil {
+			return nil, err
+		}
+		copied.URL = &url
+	}
+	if uia.Base64Data != nil && *uia.Base64Data != "" {
+		base64data, err := formatContent(*uia.Base64Data, vs, formatType)
+		if err != nil {
+			return nil, err
+		}
+		copied.Base64Data = &base64data
+	}
+	return &copied, nil
+}
+
+func formatUserInputVideo(uiv *UserInputVideo, vs map[string]any, formatType FormatType) (*UserInputVideo, error) {
+	copied := *uiv
+	if uiv.URL != nil && *uiv.URL != "" {
+		url, err := formatContent(*uiv.URL, vs, formatType)
+		if err != nil {
+			return nil, err
+		}
+		copied.URL = &url
+	}
+	if uiv.Base64Data != nil && *uiv.Base64Data != "" {
+		base64data, err := formatContent(*uiv.Base64Data, vs, formatType)
+		if err != nil {
+			return nil, err
+		}
+		copied.Base64Data = &base64data
+	}
+	return &copied, nil
+}
+
+func formatUserInputFile(uif *UserInputFile, vs map[string]any, formatType FormatType) (*UserInputFile, error) {
+	copied := *uif
+	if uif.URL != nil && *uif.URL != "" {
+		url, err := formatContent(*uif.URL, vs, formatType)
+		if err != nil {
+			return nil, err
+		}
+		copied.URL = &url
+	}
+	if uif.Name != nil && *uif.Name != "" {
+		name, err := formatContent(*uif.Name, vs, formatType)
+		if err != nil {
+			return nil, err
+		}
+		copied.Name = &name
+	}
+	if uif.Base64Data != nil && *uif.Base64Data != "" {
+		base64data, err := formatContent(*uif.Base64Data, vs, formatType)
+		if err != nil {
+			return nil, err
+		}
+		copied.Base64Data = &base64data
+	}
+	return &copied, nil
 }
 
 func ConcatAgenticMessagesArray(mas [][]*AgenticMessage) ([]*AgenticMessage, error) {

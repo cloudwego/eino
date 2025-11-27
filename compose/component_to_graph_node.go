@@ -124,6 +124,16 @@ func toChatTemplateNode(node prompt.ChatTemplate, opts ...GraphAddNodeOpt) (*gra
 		opts...)
 }
 
+func toAgenticChatTemplateNode(node prompt.AgenticChatTemplate, opts ...GraphAddNodeOpt) (*graphNode, *graphAddNodeOpts) {
+	return toComponentNode(
+		node,
+		components.ComponentOfAgenticPrompt,
+		node.Format,
+		nil, nil, nil,
+		opts...,
+	)
+}
+
 func toDocumentTransformerNode(node document.Transformer, opts ...GraphAddNodeOpt) (*graphNode, *graphAddNodeOpts) {
 	return toComponentNode(
 		node,

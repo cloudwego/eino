@@ -202,6 +202,18 @@ func (c *Chain[I, O]) AppendChatTemplate(node prompt.ChatTemplate, opts ...Graph
 	return c
 }
 
+// AppendAgenticChatTemplate add a prompt.AgenticChatTemplate node to the chain.
+// eg.
+//
+//	chatTemplate, err := prompt.FromAgenticMessages(schema.FString, &schema.AgenticMessage{})
+//
+//	chain.AppendAgenticChatTemplate(chatTemplate)
+func (c *Chain[I, O]) AppendAgenticChatTemplate(node prompt.AgenticChatTemplate, opts ...GraphAddNodeOpt) *Chain[I, O] {
+	gNode, options := toAgenticChatTemplateNode(node, opts...)
+	c.addNode(gNode, options)
+	return c
+}
+
 // AppendToolsNode add a ToolsNode node to the chain.
 // e.g.
 //

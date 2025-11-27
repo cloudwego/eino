@@ -103,6 +103,17 @@ func (p *Parallel) AddChatTemplate(outputKey string, node prompt.ChatTemplate, o
 	return p.addNode(outputKey, gNode, options)
 }
 
+// AddAgenticChatTemplate adds a prompt.AgenticChatTemplate to the parallel.
+// eg.
+//
+//	chatTemplate01, err := prompt.FromAgenticMessages(schema.FString, &schema.AgenticMessage{})
+//
+//	p.AddAgenticChatTemplate("output_key01", chatTemplate01)
+func (p *Parallel) AddAgenticChatTemplate(outputKey string, node prompt.AgenticChatTemplate, opts ...GraphAddNodeOpt) *Parallel {
+	gNode, options := toAgenticChatTemplateNode(node, append(opts, WithOutputKey(outputKey))...)
+	return p.addNode(outputKey, gNode, options)
+}
+
 // AddToolsNode adds a tools node to the parallel.
 // eg.
 //

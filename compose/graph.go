@@ -380,6 +380,17 @@ func (g *graph) AddChatTemplateNode(key string, node prompt.ChatTemplate, opts .
 	return g.addNode(key, gNode, options)
 }
 
+// AddAgenticChatTemplateNode add node that implements prompt.AgenticChatTemplate.
+// e.g.
+//
+//	chatTemplate, err := prompt.FromAgenticMessages(schema.FString, &schema.AgenticMessage{})
+//
+//	graph.AddAgenticChatTemplateNode("chat_template_node_key", chatTemplate)
+func (g *graph) AddAgenticChatTemplateNode(key string, node prompt.AgenticChatTemplate, opts ...GraphAddNodeOpt) error {
+	gNode, options := toAgenticChatTemplateNode(node, opts...)
+	return g.addNode(key, gNode, options)
+}
+
 // AddToolsNode adds a node that implements ToolsNode.
 // e.g.
 //

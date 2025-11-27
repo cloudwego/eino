@@ -512,7 +512,7 @@ var _ MessagesTemplate = MessagesPlaceholder("", false)
 // e.g.
 //
 //	chatTemplate := prompt.FromMessages(
-//		schema.SystemMessage("you are eino helper"),
+//		schema.SystemMessage("you are an eino helper"),
 //		schema.MessagesPlaceholder("history", false), // <= this will use the value of "history" in params
 //	)
 //	msgs, err := chatTemplate.Format(ctx, params)
@@ -530,7 +530,7 @@ type messagesPlaceholder struct {
 //
 //	placeholder := MessagesPlaceholder("history", false)
 //	params := map[string]any{
-//		"history": []*schema.Message{{Role: "user", Content: "what is eino?"}, {Role: "assistant", Content: "eino is a great freamwork to build llm apps"}},
+//		"history": []*schema.Message{{Role: "user", Content: "what is eino?"}, {Role: "assistant", Content: "eino is a great framework to build llm apps"}},
 //		"query": "how to use eino?",
 //	}
 //	chatTemplate := chatTpl := prompt.FromMessages(

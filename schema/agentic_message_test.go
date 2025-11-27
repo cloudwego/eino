@@ -17,6 +17,7 @@
 package schema
 
 import (
+	"context"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -487,7 +488,7 @@ func TestConcatAgenticMessages(t *testing.T) {
 						FunctionToolCall: &FunctionToolCall{
 							CallID:    "call_123",
 							Name:      "get_weather",
-							Arguments: `{"loc`,
+							Arguments: `{"location`,
 						},
 						StreamMeta: &StreamMeta{Index: 0},
 					},
@@ -499,7 +500,7 @@ func TestConcatAgenticMessages(t *testing.T) {
 					{
 						Type: ContentBlockTypeFunctionToolCall,
 						FunctionToolCall: &FunctionToolCall{
-							Arguments: `ation":"NYC"}`,
+							Arguments: `":"NYC"}`,
 						},
 						StreamMeta: &StreamMeta{Index: 0},
 					},
@@ -1125,4 +1126,107 @@ func TestConcatAgenticMessages(t *testing.T) {
 		assert.Equal(t, "B2", result.ContentBlocks[1].AssistantGenText.Text)
 		assert.Equal(t, "C3", result.ContentBlocks[2].AssistantGenText.Text)
 	})
+}
+
+func TestAgenticMessageFormat(t *testing.T) {
+	m := &AgenticMessage{
+		Role: AgenticRoleTypeUser,
+		ContentBlocks: []*ContentBlock{
+			{
+				Type:          ContentBlockTypeUserInputText,
+				UserInputText: &UserInputText{Text: "{a}"},
+			},
+			{
+				Type: ContentBlockTypeUserInputImage,
+				UserInputImage: &UserInputImage{
+					URL:        ptrOf("{b}"),
+					Base64Data: ptrOf("{c}"),
+				},
+			},
+			{
+				Type: ContentBlockTypeUserInputAudio,
+				UserInputAudio: &UserInputAudio{
+					URL:        ptrOf("{d}"),
+					Base64Data: ptrOf("{e}"),
+				},
+			},
+			{
+				Type: ContentBlockTypeUserInputVideo,
+				UserInputVideo: &UserInputVideo{
+					URL:        ptrOf("{f}"),
+					Base64Data: ptrOf("{g}"),
+				},
+			},
+			{
+				Type: ContentBlockTypeUserInputFile,
+				UserInputFile: &UserInputFile{
+					URL:        ptrOf("{h}"),
+					Base64Data: ptrOf("{i}"),
+				},
+			},
+		},
+	}
+
+	result, err := m.Format(context.Background(), map[string]any{
+		"a": "1", "b": "2", "c": "3", "d": "4", "e": "5", "f": "6", "g": "7", "h": "8", "i": "9",
+	}, FString)
+	assert.NoError(t, err)
+	assert.Equal(t, []*AgenticMessage{{
+		Role: AgenticRoleTypeUser,
+		ContentBlocks: []*ContentBlock{
+			{
+				Type:          ContentBlockTypeUserInputText,
+				UserInputText: &UserInputText{Text: "1"},
+			},
+			{
+				Type: ContentBlockTypeUserInputImage,
+				UserInputImage: &UserInputImage{
+					URL:        ptrOf("2"),
+					Base64Data: ptrOf("3"),
+				},
+			},
+			{
+				Type: ContentBlockTypeUserInputAudio,
+				UserInputAudio: &UserInputAudio{
+					URL:        ptrOf("4"),
+					Base64Data: ptrOf("5"),
+				},
+			},
+			{
+				Type: ContentBlockTypeUserInputVideo,
+				UserInputVideo: &UserInputVideo{
+					URL:        ptrOf("6"),
+					Base64Data: ptrOf("7"),
+				},
+			},
+			{
+				Type: ContentBlockTypeUserInputFile,
+				UserInputFile: &UserInputFile{
+					URL:        ptrOf("8"),
+					Base64Data: ptrOf("9"),
+				},
+			},
+		},
+	}}, result)
+}
+
+func TestAgenticPlaceholderFormat(t *testing.T) {
+	ctx := context.Background()
+	ph := AgenticMessagesPlaceholder("a", false)
+
+	result, err := ph.Format(ctx, map[string]any{
+		"a": []*AgenticMessage{{Role: AgenticRoleTypeUser}, {Role: AgenticRoleTypeUser}},
+	}, FString)
+	assert.NoError(t, err)
+	assert.Equal(t, 2, len(result))
+
+	ph = AgenticMessagesPlaceholder("a", true)
+
+	result, err = ph.Format(ctx, map[string]any{}, FString)
+	assert.NoError(t, err)
+	assert.Equal(t, 0, len(result))
+}
+
+func ptrOf[T any](v T) *T {
+	return &v
 }
