@@ -29,8 +29,8 @@ import (
 
 	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/components/tool"
-	"github.com/cloudwego/eino/components/tool/utils"
 	"github.com/cloudwego/eino/internal"
+	"github.com/cloudwego/eino/internal/generic"
 	"github.com/cloudwego/eino/schema"
 )
 
@@ -88,8 +88,8 @@ func TestToolsNode(t *testing.T) {
 		err = g.AddChatModelNode(nodeOfModel, &mockIntentChatModel{})
 		assert.NoError(t, err)
 
-		ui := utils.NewTool(userCompanyToolInfo, queryUserCompany)
-		us := utils.NewStreamTool(userSalaryToolInfo, queryUserSalary)
+		ui := newTool(userCompanyToolInfo, queryUserCompany)
+		us := newStreamableTool(userSalaryToolInfo, queryUserSalary)
 
 		toolsNode, err := NewToolNode(ctx, &ToolsNodeConfig{
 			Tools: []tool.BaseTool{ui, us},
@@ -242,8 +242,8 @@ func TestToolsNode(t *testing.T) {
 
 	t.Run("order_consistency", func(t *testing.T) {
 		// Create a ToolsNode with multiple tools
-		ui := utils.NewTool(userCompanyToolInfo, queryUserCompany)
-		us := utils.NewTool(userSalaryToolInfo, queryUserSalary)
+		ui := newTool(userCompanyToolInfo, queryUserCompany)
+		us := newTool(userSalaryToolInfo, queryUserSalary)
 
 		toolsNode, err_ := NewToolNode(context.Background(), &ToolsNodeConfig{
 			Tools: []tool.BaseTool{ui, us},
@@ -959,4 +959,63 @@ func (m *myTool4) StreamableRun(ctx context.Context, argumentsInJSON string, opt
 	assert.Equal(m.t, 0, m.times)
 	m.times++
 	return schema.StreamReaderFromArray([]string{"tool4 input: ", argumentsInJSON}), nil
+}
+
+func newTool[I, O any](info *schema.ToolInfo, f func(ctx context.Context, in I) (O, error)) tool.InvokableTool {
+	return &invokableTool[I, O]{
+		info: info,
+		fn:   f,
+	}
+}
+
+type invokableTool[I, O any] struct {
+	info *schema.ToolInfo
+	fn   func(ctx context.Context, in I) (O, error)
+}
+
+func (f *invokableTool[I, O]) Info(ctx context.Context) (*schema.ToolInfo, error) {
+	return f.info, nil
+}
+
+func (f *invokableTool[I, O]) InvokableRun(ctx context.Context, argumentsInJSON string, _ ...tool.Option) (string, error) {
+	t := generic.NewInstance[I]()
+	err := sonic.UnmarshalString(argumentsInJSON, t)
+	if err != nil {
+		return "", err
+	}
+	o, err := f.fn(ctx, t)
+	if err != nil {
+		return "", err
+	}
+	return sonic.MarshalString(o)
+}
+
+func newStreamableTool[I, O any](info *schema.ToolInfo, f func(ctx context.Context, in I) (*schema.StreamReader[O], error)) tool.StreamableTool {
+	return &streamableTool[I, O]{
+		info: info,
+		fn:   f,
+	}
+}
+
+type streamableTool[I, O any] struct {
+	info *schema.ToolInfo
+	fn   func(ctx context.Context, in I) (*schema.StreamReader[O], error)
+}
+
+func (f *streamableTool[I, O]) Info(ctx context.Context) (*schema.ToolInfo, error) {
+	return f.info, nil
+}
+func (f *streamableTool[I, O]) StreamableRun(ctx context.Context, argumentsInJSON string, _ ...tool.Option) (*schema.StreamReader[string], error) {
+	t := generic.NewInstance[I]()
+	err := sonic.UnmarshalString(argumentsInJSON, t)
+	if err != nil {
+		return nil, err
+	}
+	sr, err := f.fn(ctx, t)
+	if err != nil {
+		return nil, err
+	}
+	return schema.StreamReaderWithConvert(sr, func(o O) (string, error) {
+		return sonic.MarshalString(o)
+	}), nil
 }
