@@ -15,3 +15,56 @@
  */
 
 package prompt
+
+import (
+	"context"
+
+	"github.com/cloudwego/eino/callbacks"
+	"github.com/cloudwego/eino/components"
+	"github.com/cloudwego/eino/schema"
+)
+
+type DefaultAgenticChatTemplate struct {
+	templates  []schema.MessagesTemplate
+	formatType schema.FormatType
+}
+
+func (t *DefaultAgenticChatTemplate) Format(ctx context.Context, vs map[string]any, opts ...Option) (result []*schema.AgenticMessage, err error) {
+	ctx = callbacks.EnsureRunInfo(ctx, t.GetType(), components.ComponentOfPrompt)
+	ctx = callbacks.OnStart(ctx, &CallbackInput{
+		Variables: vs,
+		Templates: t.templates,
+	})
+	defer func() {
+		if err != nil {
+			_ = callbacks.OnError(ctx, err)
+		}
+	}()
+
+	result = make([]*schema.AgenticMessage, 0, len(t.templates))
+	for _, template := range t.templates {
+		msgs, err := template.Format(ctx, vs, t.formatType)
+		if err != nil {
+			return nil, err
+		}
+
+		result = append(result, msgs...)
+	}
+
+	_ = callbacks.OnEnd(ctx, &CallbackOutput{
+		Result:    result,
+		Templates: t.templates,
+	})
+
+	return result, nil
+}
+
+// GetType returns the type of the chat template (Default).
+func (t *DefaultAgenticChatTemplate) GetType() string {
+	return "Default"
+}
+
+// IsCallbacksEnabled checks if the callbacks are enabled for the chat template.
+func (t *DefaultAgenticChatTemplate) IsCallbacksEnabled() bool {
+	return true
+}
