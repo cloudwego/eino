@@ -185,6 +185,10 @@ type MessageInputVideo struct {
 // Choose either URL or Base64Data.
 type MessageInputFile struct {
 	MessagePartCommon
+
+	// Name represents the filename.
+	// Optional.
+	Name string `json:"name,omitempty"`
 }
 
 // MessageInputPart represents the input part of message.
