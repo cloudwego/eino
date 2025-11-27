@@ -395,7 +395,14 @@ func (r *runner) restoreFromCheckPoint(
 			cp.State = data
 		}
 
-		ctx = context.WithValue(ctx, stateKey{}, &internalState{state: cp.State})
+		var parent *internalState
+		if prev := ctx.Value(stateKey{}); prev != nil {
+			if p, ok := prev.(*internalState); ok {
+				parent = p
+			}
+		}
+
+		ctx = context.WithValue(ctx, stateKey{}, &internalState{state: cp.State, parent: parent})
 	}
 
 	nextTasks, err := r.restoreTasks(ctx, cp.Inputs, cp.SkipPreHandler, cp.RerunNodes, isStream, optMap) // should restore after set state to context
