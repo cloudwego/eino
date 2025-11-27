@@ -126,8 +126,8 @@ type UserInputText struct {
 }
 
 type UserInputImage struct {
-	URL        *string
-	Base64Data *string
+	URL        string
+	Base64Data string
 	MIMEType   string
 	Detail     ImageURLDetail
 
@@ -136,8 +136,8 @@ type UserInputImage struct {
 }
 
 type UserInputAudio struct {
-	URL        *string
-	Base64Data *string
+	URL        string
+	Base64Data string
 	MIMEType   string
 
 	// Extra stores additional information.
@@ -145,8 +145,8 @@ type UserInputAudio struct {
 }
 
 type UserInputVideo struct {
-	URL        *string
-	Base64Data *string
+	URL        string
+	Base64Data string
 	MIMEType   string
 
 	// Extra stores additional information.
@@ -154,9 +154,9 @@ type UserInputVideo struct {
 }
 
 type UserInputFile struct {
-	URL        *string
-	Name       *string
-	Base64Data *string
+	URL        string
+	Name       string
+	Base64Data string
 	MIMEType   string
 
 	// Extra stores additional information.
@@ -175,8 +175,8 @@ type AssistantGenText struct {
 }
 
 type AssistantGenImage struct {
-	URL        *string
-	Base64Data *string
+	URL        string
+	Base64Data string
 	MIMEType   string
 
 	// Extra stores additional information.
@@ -184,8 +184,8 @@ type AssistantGenImage struct {
 }
 
 type AssistantGenAudio struct {
-	URL        *string
-	Base64Data *string
+	URL        string
+	Base64Data string
 	MIMEType   string
 
 	// Extra stores additional information.
@@ -193,8 +193,8 @@ type AssistantGenAudio struct {
 }
 
 type AssistantGenVideo struct {
-	URL        *string
-	Base64Data *string
+	URL        string
+	Base64Data string
 	MIMEType   string
 
 	// Extra stores additional information.
@@ -290,6 +290,8 @@ type MCPToolCall struct {
 }
 
 type MCPToolResult struct {
+	// ServerLabel is the MCP server label used to identify it in tool calls
+	ServerLabel string
 	// CallID is the unique ID of the tool call.
 	CallID string
 	// Name is the name of the tool to run.
@@ -304,7 +306,7 @@ type MCPToolResult struct {
 }
 
 type MCPToolCallError struct {
-	Code  int64
+	Code  *int64
 	Error string
 }
 
@@ -312,7 +314,7 @@ type MCPListToolsResult struct {
 	// ServerLabel is the MCP server label used to identify it in tool calls.
 	ServerLabel string
 	// Tools is the list of tools available on the server.
-	Tools []MCPListToolsItem
+	Tools []*MCPListToolsItem
 	// Error returned when the server fails to list tools.
 	Error string
 
@@ -354,4 +356,87 @@ type MCPToolApprovalResponse struct {
 
 	// Extra stores additional information.
 	Extra map[string]any
+}
+
+// DeveloperAgenticMessage represents a message with AgenticRoleType "developer".
+func DeveloperAgenticMessage(text string) *AgenticMessage {
+	return &AgenticMessage{
+		Role:          AgenticRoleTypeDeveloper,
+		ContentBlocks: []*ContentBlock{NewContentBlock(&UserInputText{Text: text})},
+	}
+}
+
+// SystemAgenticMessage represents a message with AgenticRoleType "system".
+func SystemAgenticMessage(text string) *AgenticMessage {
+	return &AgenticMessage{
+		Role:          AgenticRoleTypeSystem,
+		ContentBlocks: []*ContentBlock{NewContentBlock(&UserInputText{Text: text})},
+	}
+}
+
+// UserAgenticMessage represents a message with AgenticRoleType "user".
+func UserAgenticMessage(text string) *AgenticMessage {
+	return &AgenticMessage{
+		Role:          AgenticRoleTypeUser,
+		ContentBlocks: []*ContentBlock{NewContentBlock(&UserInputText{Text: text})},
+	}
+}
+
+// FunctionToolResultAgenticMessage represents a function tool result message with AgenticRoleType "user".
+func FunctionToolResultAgenticMessage(callID, name, result string) *AgenticMessage {
+	return &AgenticMessage{
+		Role: AgenticRoleTypeUser,
+		ContentBlocks: []*ContentBlock{
+			NewContentBlock(&FunctionToolResult{
+				CallID: callID,
+				Name:   name,
+				Result: result,
+			}),
+		},
+	}
+}
+
+func NewContentBlock(block any) *ContentBlock {
+	switch b := block.(type) {
+	case *Reasoning:
+		return &ContentBlock{Type: ContentBlockTypeReasoning, Reasoning: b}
+	case *UserInputText:
+		return &ContentBlock{Type: ContentBlockTypeUserInputText, UserInputText: b}
+	case *UserInputImage:
+		return &ContentBlock{Type: ContentBlockTypeUserInputImage, UserInputImage: b}
+	case *UserInputAudio:
+		return &ContentBlock{Type: ContentBlockTypeUserInputAudio, UserInputAudio: b}
+	case *UserInputVideo:
+		return &ContentBlock{Type: ContentBlockTypeUserInputVideo, UserInputVideo: b}
+	case *UserInputFile:
+		return &ContentBlock{Type: ContentBlockTypeUserInputFile, UserInputFile: b}
+	case *AssistantGenText:
+		return &ContentBlock{Type: ContentBlockTypeAssistantGenText, AssistantGenText: b}
+	case *AssistantGenImage:
+		return &ContentBlock{Type: ContentBlockTypeAssistantGenImage, AssistantGenImage: b}
+	case *AssistantGenAudio:
+		return &ContentBlock{Type: ContentBlockTypeAssistantGenAudio, AssistantGenAudio: b}
+	case *AssistantGenVideo:
+		return &ContentBlock{Type: ContentBlockTypeAssistantGenVideo, AssistantGenVideo: b}
+	case *FunctionToolCall:
+		return &ContentBlock{Type: ContentBlockTypeFunctionToolCall, FunctionToolCall: b}
+	case *FunctionToolResult:
+		return &ContentBlock{Type: ContentBlockTypeFunctionToolResult, FunctionToolResult: b}
+	case *ServerToolCall:
+		return &ContentBlock{Type: ContentBlockTypeServerToolCall, ServerToolCall: b}
+	case *ServerToolResult:
+		return &ContentBlock{Type: ContentBlockTypeServerToolResult, ServerToolResult: b}
+	case *MCPToolCall:
+		return &ContentBlock{Type: ContentBlockTypeMCPToolCall, MCPToolCall: b}
+	case *MCPToolResult:
+		return &ContentBlock{Type: ContentBlockTypeMCPToolResult, MCPToolResult: b}
+	case *MCPListToolsResult:
+		return &ContentBlock{Type: ContentBlockTypeMCPListTools, MCPListToolsResult: b}
+	case *MCPToolApprovalRequest:
+		return &ContentBlock{Type: ContentBlockTypeMCPToolApprovalRequest, MCPToolApprovalRequest: b}
+	case *MCPToolApprovalResponse:
+		return &ContentBlock{Type: ContentBlockTypeMCPToolApprovalResponse, MCPToolApprovalResponse: b}
+	default:
+		return nil
+	}
 }
