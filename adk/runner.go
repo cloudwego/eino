@@ -37,6 +37,8 @@ type Runner struct {
 	// store is the checkpoint store used to persist agent state upon interruption.
 	// If nil, checkpointing is disabled.
 	store compose.CheckPointStore
+
+	agentMiddlewares []AgentMiddleware
 }
 
 type RunnerConfig struct {
@@ -44,6 +46,8 @@ type RunnerConfig struct {
 	EnableStreaming bool
 
 	CheckPointStore compose.CheckPointStore
+
+	AgentMiddlewares []AgentMiddleware
 }
 
 // ResumeParams contains all parameters needed to resume an execution.
@@ -58,9 +62,10 @@ type ResumeParams struct {
 
 func NewRunner(_ context.Context, conf RunnerConfig) *Runner {
 	return &Runner{
-		enableStreaming: conf.EnableStreaming,
-		a:               conf.Agent,
-		store:           conf.CheckPointStore,
+		enableStreaming:  conf.EnableStreaming,
+		a:                conf.Agent,
+		store:            conf.CheckPointStore,
+		agentMiddlewares: conf.AgentMiddlewares,
 	}
 }
 
@@ -80,6 +85,7 @@ func (r *Runner) Run(ctx context.Context, messages []Message,
 	}
 
 	ctx = ctxWithNewRunCtx(ctx, input)
+	ctx = r.initAgentMWCtx(ctx)
 
 	AddSessionValues(ctx, o.sessionValues)
 
@@ -147,6 +153,7 @@ func (r *Runner) resume(ctx context.Context, checkPointID string, resumeData map
 		return nil, fmt.Errorf("failed to load from checkpoint: %w", err)
 	}
 
+	ctx = r.initAgentMWCtx(ctx)
 	o := getCommonOptions(nil, opts...)
 	AddSessionValues(ctx, o.sessionValues)
 
@@ -224,4 +231,15 @@ func (r *Runner) handleIter(ctx context.Context, aIter *AsyncIterator[*AgentEven
 
 		gen.Send(event)
 	}
+}
+
+func (r *Runner) initAgentMWCtx(ctx context.Context) context.Context {
+	if v, ok := ctx.Value(runnerPassedMiddlewaresCtxKey{}).(*runnerPassedMiddlewaresInfo); ok && v != nil {
+		// has been set, skip
+		return ctx
+	}
+	return context.WithValue(ctx, runnerPassedMiddlewaresCtxKey{}, &runnerPassedMiddlewaresInfo{
+		middlewares: r.agentMiddlewares,
+		isRootAgent: 0,
+	})
 }
