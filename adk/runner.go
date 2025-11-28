@@ -37,6 +37,9 @@ type Runner struct {
 	// store is the checkpoint store used to persist agent state upon interruption.
 	// If nil, checkpointing is disabled.
 	store compose.CheckPointStore
+	// sessionService manages session persistence and hooks.
+	// If nil, session persistence is disabled.
+	sessionService *SessionService
 }
 
 type RunnerConfig struct {
@@ -44,6 +47,8 @@ type RunnerConfig struct {
 	EnableStreaming bool
 
 	CheckPointStore compose.CheckPointStore
+	// SessionService is optional. If provided, enables session persistence.
+	SessionService *SessionService
 }
 
 // ResumeParams contains all parameters needed to resume an execution.
@@ -61,6 +66,7 @@ func NewRunner(_ context.Context, conf RunnerConfig) *Runner {
 		enableStreaming: conf.EnableStreaming,
 		a:               conf.Agent,
 		store:           conf.CheckPointStore,
+		sessionService:  conf.SessionService,
 	}
 }
 
@@ -83,14 +89,38 @@ func (r *Runner) Run(ctx context.Context, messages []Message,
 
 	AddSessionValues(ctx, o.sessionValues)
 
+	if r.sessionService != nil && o.sessionID != nil {
+		// load history from session
+		history, err := r.sessionService.load(ctx, *o.sessionID)
+		if err != nil {
+			niter, gen := NewAsyncIteratorPair[*AgentEvent]()
+			gen.Send(&AgentEvent{Err: fmt.Errorf("failed to load session history: %w", err)})
+			gen.Close()
+			return niter
+		}
+		// Add history to session context (not input messages)
+		session := getSession(ctx)
+		for _, event := range history {
+			session.addEvent(event)
+		}
+
+		// Save new input messages to session
+		if err := r.sessionService.saveInput(ctx, *o.sessionID, messages); err != nil {
+			niter, gen := NewAsyncIteratorPair[*AgentEvent]()
+			gen.Send(&AgentEvent{Err: fmt.Errorf("failed to save input to session: %w", err)})
+			gen.Close()
+			return niter
+		}
+	}
+
 	iter := fa.Run(ctx, input, opts...)
-	if r.store == nil {
+	if r.store == nil && r.sessionService == nil {
 		return iter
 	}
 
 	niter, gen := NewAsyncIteratorPair[*AgentEvent]()
 
-	go r.handleIter(ctx, iter, gen, o.checkPointID)
+	go r.handleIter(ctx, iter, gen, o.checkPointID, o.sessionID)
 	return niter
 }
 
@@ -156,18 +186,18 @@ func (r *Runner) resume(ctx context.Context, checkPointID string, resumeData map
 
 	fa := toFlowAgent(ctx, r.a)
 	aIter := fa.Resume(ctx, resumeInfo, opts...)
-	if r.store == nil {
+	if r.store == nil && r.sessionService == nil {
 		return aIter, nil
 	}
 
 	niter, gen := NewAsyncIteratorPair[*AgentEvent]()
 
-	go r.handleIter(ctx, aIter, gen, &checkPointID)
+	go r.handleIter(ctx, aIter, gen, &checkPointID, o.sessionID)
 	return niter, nil
 }
 
 func (r *Runner) handleIter(ctx context.Context, aIter *AsyncIterator[*AgentEvent],
-	gen *AsyncGenerator[*AgentEvent], checkPointID *string) {
+	gen *AsyncGenerator[*AgentEvent], checkPointID *string, sessionID *string) {
 	defer func() {
 		panicErr := recover()
 		if panicErr != nil {
@@ -177,21 +207,61 @@ func (r *Runner) handleIter(ctx context.Context, aIter *AsyncIterator[*AgentEven
 
 		gen.Close()
 	}()
+
+	// Wrap iterator with checkpoint handling if needed
+	processedIter := r.wrapWithCheckpoint(ctx, aIter, checkPointID)
+
+	// Handle session or just forward events
+	if r.sessionService != nil && sessionID != nil {
+		// Delegate to SessionService for session handling
+		r.sessionService.saveOutput(ctx, *sessionID, processedIter, gen)
+	} else {
+		// Just forward all events
+		for {
+			item, ok := processedIter.Next()
+			if !ok {
+				break
+			}
+			gen.Send(item)
+		}
+	}
+}
+
+// wrapWithCheckpoint wraps an iterator to process checkpoints for interrupt events.
+// Returns the original iterator if checkPointID is nil.
+func (r *Runner) wrapWithCheckpoint(ctx context.Context, aIter *AsyncIterator[*AgentEvent], checkPointID *string) *AsyncIterator[*AgentEvent] {
+	if checkPointID == nil {
+		return aIter // No checkpoint, return as-is
+	}
+
+	// Create intermediate iterator for checkpoint processing
+	niter, gen := NewAsyncIteratorPair[*AgentEvent]()
+	go func() {
+		defer gen.Close()
+		r.processCheckpoints(ctx, aIter, gen, *checkPointID)
+	}()
+	return niter
+}
+
+// processCheckpoints handles checkpoint save logic for interrupt events.
+func (r *Runner) processCheckpoints(ctx context.Context, aIter *AsyncIterator[*AgentEvent], gen *AsyncGenerator[*AgentEvent], checkPointID string) {
 	var (
 		interruptSignal *core.InterruptSignal
 		legacyData      any
 	)
+
 	for {
 		event, ok := aIter.Next()
 		if !ok {
 			break
 		}
 
+		// Handle checkpoint for interrupts
 		if event.Action != nil && event.Action.internalInterrupted != nil {
+			// Even if multiple interrupt happens, they should be merged into one
+			// action by CompositeInterrupt, so here in Runner we must assume at most
+			// one interrupt action happens
 			if interruptSignal != nil {
-				// even if multiple interrupt happens, they should be merged into one
-				// action by CompositeInterrupt, so here in Runner we must assume at most
-				// one interrupt action happens
 				panic("multiple interrupt actions should not happen in Runner")
 			}
 			interruptSignal = event.Action.internalInterrupted
@@ -210,15 +280,11 @@ func (r *Runner) handleIter(ctx context.Context, aIter *AsyncIterator[*AgentEven
 			}
 			legacyData = event.Action.Interrupted.Data
 
-			if checkPointID != nil {
-				// save checkpoint first before sending interrupt event,
-				// so when end-user receives interrupt event, they can resume from this checkpoint
-				err := r.saveCheckPoint(ctx, *checkPointID, &InterruptInfo{
-					Data: legacyData,
-				}, interruptSignal)
-				if err != nil {
-					gen.Send(&AgentEvent{Err: fmt.Errorf("failed to save checkpoint: %w", err)})
-				}
+			err := r.saveCheckPoint(ctx, checkPointID, &InterruptInfo{
+				Data: legacyData,
+			}, interruptSignal)
+			if err != nil {
+				gen.Send(&AgentEvent{Err: fmt.Errorf("failed to save checkpoint: %w", err)})
 			}
 		}
 
