@@ -59,4 +59,5 @@ const (
 	ComponentOfLoader      Component = "Loader"
 	ComponentOfTransformer Component = "DocumentTransformer"
 	ComponentOfTool        Component = "Tool"
+	ComponentOfReranker    Component = "Reranker"
 )
