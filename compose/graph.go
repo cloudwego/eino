@@ -806,8 +806,16 @@ func (g *graph) compile(ctx context.Context, opt *graphCompileOptions) (*composa
 
 	if g.stateGenerator != nil {
 		r.runCtx = func(ctx context.Context) context.Context {
+			var parent *internalState
+			if prev := ctx.Value(stateKey{}); prev != nil {
+				if p, ok := prev.(*internalState); ok {
+					parent = p
+				}
+			}
+
 			return context.WithValue(ctx, stateKey{}, &internalState{
-				state: g.stateGenerator(ctx),
+				state:  g.stateGenerator(ctx),
+				parent: parent,
 			})
 		}
 	}
