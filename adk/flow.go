@@ -278,60 +278,127 @@ func buildDefaultHistoryRewriter(agentName string) HistoryRewriter {
 func (a *flowAgent) Run(ctx context.Context, input *AgentInput, opts ...AgentRunOption) *AsyncIterator[*AgentEvent] {
 	agentName := a.Name(ctx)
 
-	var runCtx *runContext
-	ctx, runCtx = initRunCtx(ctx, agentName, input)
-	ctx = AppendAddressSegment(ctx, AddressSegmentAgent, agentName)
+	var (
+		enableMiddlewares = isAgentMiddlewareEnabled(a.Agent)
+		mwRunner          = &agentMWRunner{}
+		agentContext      = &AgentContext{
+			AgentInput:      input,
+			AgentRunOptions: opts,
+			agentName:       agentName,
+			entrance:        EntranceTypeRun,
+		}
+	)
 
-	o := getCommonOptions(nil, opts...)
-
-	input, err := a.genAgentInput(ctx, runCtx, o.skipTransferMessages)
-	if err != nil {
-		return genErrorIter(err)
+	if !enableMiddlewares {
+		agentContext.isRootAgent = isRootAgent(ctx)
+		mws := getRunnerPassedAgentMWs(ctx)
+		for _, mw := range mws {
+			mwRunner.beforeAgentFns = append(mwRunner.beforeAgentFns, mw.BeforeAgent)
+			mwRunner.onEventsFns = append(mwRunner.onEventsFns, mw.OnEvents)
+		}
+		var termIter *AsyncIterator[*AgentEvent]
+		ctx, termIter = mwRunner.execBeforeAgents(ctx, agentContext)
+		if termIter != nil {
+			return termIter
+		}
 	}
 
-	if wf, ok := a.Agent.(*workflowAgent); ok {
-		return wf.Run(ctx, input, opts...)
+	iter := func() *AsyncIterator[*AgentEvent] {
+		var runCtx *runContext
+		ctx, runCtx = initRunCtx(ctx, agentName, input)
+		ctx = AppendAddressSegment(ctx, AddressSegmentAgent, agentName)
+
+		agentInput, err := a.genAgentInput(ctx, runCtx, getCommonOptions(nil, agentContext.AgentRunOptions...).skipTransferMessages)
+		if err != nil {
+			return genErrorIter(err)
+		}
+
+		if wf, ok := a.Agent.(*workflowAgent); ok {
+			return wf.Run(ctx, agentInput, agentContext.AgentRunOptions...)
+		}
+
+		aIter := a.Agent.Run(ctx, agentInput, filterOptions(agentName, agentContext.AgentRunOptions)...)
+
+		iterator, generator := NewAsyncIteratorPair[*AgentEvent]()
+
+		go a.run(ctx, runCtx, aIter, generator, opts...)
+
+		return iterator
+	}()
+
+	if !enableMiddlewares {
+		iter = mwRunner.execOnEvents(ctx, agentContext, iter)
 	}
 
-	aIter := a.Agent.Run(ctx, input, filterOptions(agentName, opts)...)
-
-	iterator, generator := NewAsyncIteratorPair[*AgentEvent]()
-
-	go a.run(ctx, runCtx, aIter, generator, opts...)
-
-	return iterator
+	return iter
 }
 
 func (a *flowAgent) Resume(ctx context.Context, info *ResumeInfo, opts ...AgentRunOption) *AsyncIterator[*AgentEvent] {
-	ctx, info = buildResumeInfo(ctx, a.Name(ctx), info)
+	agentName := a.Name(ctx)
 
-	if info.WasInterrupted {
-		ra, ok := a.Agent.(ResumableAgent)
-		if !ok {
-			return genErrorIter(fmt.Errorf("failed to resume agent: agent '%s' is an interrupt point "+
-				"but is not a ResumableAgent", a.Name(ctx)))
+	var (
+		enableMiddlewares = isAgentMiddlewareEnabled(a.Agent)
+		mwRunner          = &agentMWRunner{}
+		agentContext      = &AgentContext{
+			ResumeInfo:      info,
+			AgentRunOptions: opts,
+			agentName:       agentName,
+			entrance:        EntranceTypeRun,
 		}
-		iterator, generator := NewAsyncIteratorPair[*AgentEvent]()
+	)
 
-		aIter := ra.Resume(ctx, info, opts...)
-		if _, ok := ra.(*workflowAgent); ok {
-			return aIter
+	if !enableMiddlewares {
+		agentContext.isRootAgent = isRootAgent(ctx)
+		mws := getRunnerPassedAgentMWs(ctx)
+		for _, mw := range mws {
+			mwRunner.beforeAgentFns = append(mwRunner.beforeAgentFns, mw.BeforeAgent)
+			mwRunner.onEventsFns = append(mwRunner.onEventsFns, mw.OnEvents)
 		}
-		go a.run(ctx, getRunCtx(ctx), aIter, generator, opts...)
-		return iterator
+		var termIter *AsyncIterator[*AgentEvent]
+		ctx, termIter = mwRunner.execBeforeAgents(ctx, agentContext)
+		if termIter != nil {
+			return termIter
+		}
 	}
 
-	nextAgentName, err := getNextResumeAgent(ctx, info)
-	if err != nil {
-		return genErrorIter(err)
+	iter := func() *AsyncIterator[*AgentEvent] {
+		ctx, info = buildResumeInfo(ctx, a.Name(ctx), agentContext.ResumeInfo)
+		opts = agentContext.AgentRunOptions
+
+		if info.WasInterrupted {
+			ra, ok := a.Agent.(ResumableAgent)
+			if !ok {
+				return genErrorIter(fmt.Errorf("failed to resume agent: agent '%s' is an interrupt point "+
+					"but is not a ResumableAgent", a.Name(ctx)))
+			}
+			iterator, generator := NewAsyncIteratorPair[*AgentEvent]()
+
+			aIter := ra.Resume(ctx, info, opts...)
+			if _, ok := ra.(*workflowAgent); ok {
+				return aIter
+			}
+			go a.run(ctx, getRunCtx(ctx), aIter, generator, opts...)
+			return iterator
+		}
+
+		nextAgentName, err := getNextResumeAgent(ctx, info)
+		if err != nil {
+			return genErrorIter(err)
+		}
+
+		subAgent := a.getAgent(ctx, nextAgentName)
+		if subAgent == nil {
+			return genErrorIter(fmt.Errorf("failed to resume agent: agent '%s' not found", nextAgentName))
+		}
+
+		return subAgent.Resume(ctx, info, opts...)
+	}()
+
+	if !enableMiddlewares {
+		iter = mwRunner.execOnEvents(ctx, agentContext, iter)
 	}
 
-	subAgent := a.getAgent(ctx, nextAgentName)
-	if subAgent == nil {
-		return genErrorIter(fmt.Errorf("failed to resume agent: agent '%s' not found", nextAgentName))
-	}
-
-	return subAgent.Resume(ctx, info, opts...)
+	return iter
 }
 
 type DeterministicTransferConfig struct {
