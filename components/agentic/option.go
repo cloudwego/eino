@@ -16,8 +16,22 @@
 
 package agentic
 
+import (
+	"github.com/cloudwego/eino/schema"
+)
+
 // Options is the common options for the model.
 type Options struct {
+	// Temperature is the temperature for the model, which controls the randomness of the model.
+	Temperature *float32
+	// Model is the model name.
+	Model *string
+	// TopP is the top p for the model, which controls the diversity of the model.
+	TopP *float32
+	// Tools is a list of tools the model may call.
+	Tools []*schema.ToolInfo
+	// ToolChoice controls which tool is called by the model.
+	ToolChoice *schema.ToolChoice
 }
 
 // Option is the call option for ChatModel component.
@@ -25,6 +39,54 @@ type Option struct {
 	apply func(opts *Options)
 
 	implSpecificOptFn any
+}
+
+// WithTemperature is the option to set the temperature for the model.
+func WithTemperature(temperature float32) Option {
+	return Option{
+		apply: func(opts *Options) {
+			opts.Temperature = &temperature
+		},
+	}
+}
+
+// WithModel is the option to set the model name.
+func WithModel(name string) Option {
+	return Option{
+		apply: func(opts *Options) {
+			opts.Model = &name
+		},
+	}
+}
+
+// WithTopP is the option to set the top p for the model.
+func WithTopP(topP float32) Option {
+	return Option{
+		apply: func(opts *Options) {
+			opts.TopP = &topP
+		},
+	}
+}
+
+// WithTools is the option to set tools for the model.
+func WithTools(tools []*schema.ToolInfo) Option {
+	if tools == nil {
+		tools = []*schema.ToolInfo{}
+	}
+	return Option{
+		apply: func(opts *Options) {
+			opts.Tools = tools
+		},
+	}
+}
+
+// WithToolChoice is the option to set tool choice for the model.
+func WithToolChoice(toolChoice schema.ToolChoice) Option {
+	return Option{
+		apply: func(opts *Options) {
+			opts.ToolChoice = &toolChoice
+		},
+	}
 }
 
 // WrapImplSpecificOptFn is the option to wrap the implementation specific option function.
