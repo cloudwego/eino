@@ -23,11 +23,11 @@ import (
 // Options is the common options for the model.
 type Options struct {
 	// Temperature is the temperature for the model, which controls the randomness of the model.
-	Temperature *float32
+	Temperature *float64
 	// Model is the model name.
 	Model *string
 	// TopP is the top p for the model, which controls the diversity of the model.
-	TopP *float32
+	TopP *float64
 	// Tools is a list of tools the model may call.
 	Tools []*schema.ToolInfo
 	// ToolChoice controls which tool is called by the model.
@@ -42,7 +42,7 @@ type Option struct {
 }
 
 // WithTemperature is the option to set the temperature for the model.
-func WithTemperature(temperature float32) Option {
+func WithTemperature(temperature float64) Option {
 	return Option{
 		apply: func(opts *Options) {
 			opts.Temperature = &temperature
@@ -60,7 +60,7 @@ func WithModel(name string) Option {
 }
 
 // WithTopP is the option to set the top p for the model.
-func WithTopP(topP float32) Option {
+func WithTopP(topP float64) Option {
 	return Option{
 		apply: func(opts *Options) {
 			opts.TopP = &topP
