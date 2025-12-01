@@ -76,7 +76,7 @@ type AgenticResponseMeta struct {
 
 type StreamMeta struct {
 	// Index specifies the index position of this block in the final response.
-	Index int
+	Index int64
 }
 
 type ContentBlock struct {
@@ -213,7 +213,7 @@ type Reasoning struct {
 
 type ReasoningSummary struct {
 	// Index specifies the index position of this summary in the final Reasoning.
-	Index int
+	Index int64
 
 	Text string
 }
