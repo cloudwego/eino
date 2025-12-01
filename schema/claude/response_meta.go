@@ -17,6 +17,6 @@
 package claude
 
 type ResponseMetaExtension struct {
-	ID         string `json:"id"`
-	StopReason string `json:"stop_reason"`
+	ID         string `json:"id,omitempty"`
+	StopReason string `json:"stop_reason,omitempty"`
 }
