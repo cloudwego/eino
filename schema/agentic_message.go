@@ -306,8 +306,8 @@ type MCPToolResult struct {
 }
 
 type MCPToolCallError struct {
-	Code  *int64
-	Error string
+	Code    *int64
+	Message string
 }
 
 type MCPListToolsResult struct {
