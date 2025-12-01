@@ -17,11 +17,11 @@
 package claude
 
 type AssistantGenTextExtension struct {
-	Citations []*TextCitation `json:"citations"`
+	Citations []*TextCitation `json:"citations,omitempty"`
 }
 
 type TextCitation struct {
-	Type TextCitationType `json:"type"`
+	Type TextCitationType `json:"type,omitempty"`
 
 	CharLocation            *CitationCharLocation            `json:"char_location,omitempty"`
 	PageLocation            *CitationPageLocation            `json:"page_location,omitempty"`
@@ -30,40 +30,40 @@ type TextCitation struct {
 }
 
 type CitationCharLocation struct {
-	CitedText string `json:"cited_text"`
+	CitedText string `json:"cited_text,omitempty"`
 
-	DocumentTitle string `json:"document_title"`
-	DocumentIndex int64  `json:"document_index"`
+	DocumentTitle string `json:"document_title,omitempty"`
+	DocumentIndex int64  `json:"document_index,omitempty"`
 
-	StartCharIndex int64 `json:"start_char_index"`
-	EndCharIndex   int64 `json:"end_char_index"`
+	StartCharIndex int64 `json:"start_char_index,omitempty"`
+	EndCharIndex   int64 `json:"end_char_index,omitempty"`
 }
 
 type CitationPageLocation struct {
-	CitedText string `json:"cited_text"`
+	CitedText string `json:"cited_text,omitempty"`
 
-	DocumentTitle string `json:"document_title"`
-	DocumentIndex int64  `json:"document_index"`
+	DocumentTitle string `json:"document_title,omitempty"`
+	DocumentIndex int64  `json:"document_index,omitempty"`
 
-	StartPageNumber int64 `json:"start_page_number"`
-	EndPageNumber   int64 `json:"end_page_number"`
+	StartPageNumber int64 `json:"start_page_number,omitempty"`
+	EndPageNumber   int64 `json:"end_page_number,omitempty"`
 }
 
 type CitationContentBlockLocation struct {
-	CitedText string `json:"cited_text"`
+	CitedText string `json:"cited_text,omitempty"`
 
-	DocumentTitle string `json:"document_title"`
-	DocumentIndex int64  `json:"document_index"`
+	DocumentTitle string `json:"document_title,omitempty"`
+	DocumentIndex int64  `json:"document_index,omitempty"`
 
-	StartBlockIndex int64 `json:"start_block_index"`
-	EndBlockIndex   int64 `json:"end_block_index"`
+	StartBlockIndex int64 `json:"start_block_index,omitempty"`
+	EndBlockIndex   int64 `json:"end_block_index,omitempty"`
 }
 
 type CitationWebSearchResultLocation struct {
-	CitedText string `json:"cited_text"`
+	CitedText string `json:"cited_text,omitempty"`
 
-	Title string `json:"title"`
-	URL   string `json:"url"`
+	Title string `json:"title,omitempty"`
+	URL   string `json:"url,omitempty"`
 
-	EncryptedIndex string `json:"encrypted_index"`
+	EncryptedIndex string `json:"encrypted_index,omitempty"`
 }
