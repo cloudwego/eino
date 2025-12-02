@@ -42,7 +42,7 @@ const (
 	ContentBlockTypeServerToolResult        ContentBlockType = "server_tool_result"
 	ContentBlockTypeMCPToolCall             ContentBlockType = "mcp_tool_call"
 	ContentBlockTypeMCPToolResult           ContentBlockType = "mcp_tool_result"
-	ContentBlockTypeMCPListTools            ContentBlockType = "mcp_list_tools"
+	ContentBlockTypeMCPListToolsResult      ContentBlockType = "mcp_list_tools_result"
 	ContentBlockTypeMCPToolApprovalRequest  ContentBlockType = "mcp_tool_approval_request"
 	ContentBlockTypeMCPToolApprovalResponse ContentBlockType = "mcp_tool_approval_response"
 )
@@ -332,8 +332,8 @@ type MCPListToolsItem struct {
 }
 
 type MCPToolApprovalRequest struct {
-	// CallID is the unique ID of the tool call.
-	CallID string
+	// ID is the approval request ID.
+	ID string
 	// Name is the name of the tool to run.
 	Name string
 	// Arguments is the JSON string arguments for the tool call.
@@ -431,7 +431,7 @@ func NewContentBlock(block any) *ContentBlock {
 	case *MCPToolResult:
 		return &ContentBlock{Type: ContentBlockTypeMCPToolResult, MCPToolResult: b}
 	case *MCPListToolsResult:
-		return &ContentBlock{Type: ContentBlockTypeMCPListTools, MCPListToolsResult: b}
+		return &ContentBlock{Type: ContentBlockTypeMCPListToolsResult, MCPListToolsResult: b}
 	case *MCPToolApprovalRequest:
 		return &ContentBlock{Type: ContentBlockTypeMCPToolApprovalRequest, MCPToolApprovalRequest: b}
 	case *MCPToolApprovalResponse:
