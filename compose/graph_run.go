@@ -169,9 +169,12 @@ func (r *runner) run(ctx context.Context, isStream bool, input any, opts ...Opti
 	if cp := getCheckPointFromCtx(ctx); cp != nil {
 		// in subgraph, try to load checkpoint from ctx
 		initialized = true
-		ctx, nextTasks, err = r.restoreFromCheckPoint(ctx, *path, getStateModifier(ctx), cp, isStream, cm, optMap)
 		ctx, input = onGraphStart(ctx, input, isStream)
 		haveOnStart = true
+
+		// restoreFromCheckPoint will 'fix' the ctx used by the 'nextTasks',
+		// so it should run after all operations on ctx are done, such as onGraphStart.
+		ctx, nextTasks, err = r.restoreFromCheckPoint(ctx, *path, getStateModifier(ctx), cp, isStream, cm, optMap)
 	} else if checkPointID != nil && !forceNewRun {
 		cp, err = getCheckPointFromStore(ctx, *checkPointID, r.checkPointer)
 		if err != nil {
@@ -184,9 +187,12 @@ func (r *runner) run(ctx context.Context, isStream bool, input any, opts ...Opti
 			ctx = setStateModifier(ctx, stateModifier)
 			ctx = setCheckPointToCtx(ctx, cp)
 
-			ctx, nextTasks, err = r.restoreFromCheckPoint(ctx, *NewNodePath(), stateModifier, cp, isStream, cm, optMap)
 			ctx, input = onGraphStart(ctx, input, isStream)
 			haveOnStart = true
+
+			// restoreFromCheckPoint will 'fix' the ctx used by the 'nextTasks',
+			// so it should run after all operations on ctx are done, such as onGraphStart.
+			ctx, nextTasks, err = r.restoreFromCheckPoint(ctx, *NewNodePath(), stateModifier, cp, isStream, cm, optMap)
 		}
 	}
 	if !initialized {
