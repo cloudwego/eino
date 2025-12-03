@@ -25,13 +25,14 @@ type component = components.Component
 // built-in component types in graph node.
 // it represents the type of the most primitive executable object provided by the user.
 const (
-	ComponentOfUnknown     component = "Unknown"
-	ComponentOfGraph       component = "Graph"
-	ComponentOfWorkflow    component = "Workflow"
-	ComponentOfChain       component = "Chain"
-	ComponentOfPassthrough component = "Passthrough"
-	ComponentOfToolsNode   component = "ToolsNode"
-	ComponentOfLambda      component = "Lambda"
+	ComponentOfUnknown          component = "Unknown"
+	ComponentOfGraph            component = "Graph"
+	ComponentOfWorkflow         component = "Workflow"
+	ComponentOfChain            component = "Chain"
+	ComponentOfPassthrough      component = "Passthrough"
+	ComponentOfToolsNode        component = "ToolsNode"
+	ComponentOfAgenticToolsNode component = "AgenticToolsNode"
+	ComponentOfLambda           component = "Lambda"
 )
 
 // NodeTriggerMode controls the triggering mode of graph nodes.
