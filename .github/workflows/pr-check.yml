@@ -47,6 +47,7 @@ jobs:
       contents: read
       pull-requests: read
     steps:
+      - uses: actions/checkout@v4
       - name: Validate commit messages format and scope
         uses: actions/github-script@v7
         with:
