@@ -17,15 +17,22 @@
 package openai
 
 type ResponseMetaExtension struct {
-	ID                string             `json:"id,omitempty"`
-	Status            string             `json:"status,omitempty"`
-	Error             *ResponseError     `json:"error,omitempty"`
-	IncompleteDetails *IncompleteDetails `json:"incomplete_details,omitempty"`
+	ID                string               `json:"id,omitempty"`
+	Status            string               `json:"status,omitempty"`
+	Error             *ResponseError       `json:"error,omitempty"`
+	StreamError       *StreamResponseError `json:"stream_error,omitempty"`
+	IncompleteDetails *IncompleteDetails   `json:"incomplete_details,omitempty"`
 }
 
 type ResponseError struct {
 	Code    string `json:"code,omitempty"`
 	Message string `json:"message,omitempty"`
+}
+
+type StreamResponseError struct {
+	Code    string
+	Message string
+	Param   string
 }
 
 type IncompleteDetails struct {
