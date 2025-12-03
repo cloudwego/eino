@@ -26,7 +26,12 @@ import (
 	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/components/tool"
 	"github.com/cloudwego/eino/components/tool/utils"
+	"github.com/cloudwego/eino/schema"
 )
+
+func init() {
+	schema.RegisterName[TODO]("_eino_adk_prebuilt_deep_todo")
+}
 
 // Config defines the configuration for creating a DeepAgent.
 type Config struct {
@@ -53,6 +58,8 @@ type Config struct {
 	// TaskToolDescriptionGenerator allows customizing the description for the task tool.
 	// If provided, this function generates the tool description based on available subagents.
 	TaskToolDescriptionGenerator func(ctx context.Context, availableAgents []adk.Agent) (string, error)
+
+	Middlewares []adk.AgentMiddleware
 }
 
 // New creates a new Deep agent instance with the provided configuration.
@@ -77,7 +84,7 @@ func New(ctx context.Context, cfg *Config) (adk.Agent, error) {
 			cfg.Instruction,
 			cfg.ToolsConfig,
 			cfg.MaxIteration,
-			middlewares, // append(cfg.Middlewares, middlewares...),
+			append(cfg.Middlewares, middlewares...),
 		)
 		if err != nil {
 			return nil, fmt.Errorf("failed to new task tool: %w", err)
@@ -92,7 +99,7 @@ func New(ctx context.Context, cfg *Config) (adk.Agent, error) {
 		Model:         cfg.ChatModel,
 		ToolsConfig:   cfg.ToolsConfig,
 		MaxIterations: cfg.MaxIteration,
-		Middlewares:   middlewares, //append(cfg.Middlewares, middlewares...),
+		Middlewares:   append(cfg.Middlewares, middlewares...),
 	})
 }
 
