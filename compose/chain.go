@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"reflect"
 
+	"github.com/cloudwego/eino/components/agentic"
 	"github.com/cloudwego/eino/components/document"
 	"github.com/cloudwego/eino/components/embedding"
 	"github.com/cloudwego/eino/components/indexer"
@@ -174,6 +175,18 @@ func (c *Chain[I, O]) AppendChatModel(node model.BaseChatModel, opts ...GraphAdd
 	return c
 }
 
+// AppendAgenticModel add a agentic.Model node to the chain.
+// e.g.
+//
+//	model, err := openai.NewAgenticModel(ctx, config)
+//	if err != nil {...}
+//	chain.AppendAgenticModel(model)
+func (c *Chain[I, O]) AppendAgenticModel(node agentic.Model, opts ...GraphAddNodeOpt) *Chain[I, O] {
+	gNode, options := toAgenticModelNode(node, opts...)
+	c.addNode(gNode, options)
+	return c
+}
+
 // AppendChatTemplate add a ChatTemplate node to the chain.
 // eg.
 //
@@ -189,16 +202,42 @@ func (c *Chain[I, O]) AppendChatTemplate(node prompt.ChatTemplate, opts ...Graph
 	return c
 }
 
+// AppendAgenticChatTemplate add a prompt.AgenticChatTemplate node to the chain.
+// eg.
+//
+//	chatTemplate, err := prompt.FromAgenticMessages(schema.FString, &schema.AgenticMessage{})
+//
+//	chain.AppendAgenticChatTemplate(chatTemplate)
+func (c *Chain[I, O]) AppendAgenticChatTemplate(node prompt.AgenticChatTemplate, opts ...GraphAddNodeOpt) *Chain[I, O] {
+	gNode, options := toAgenticChatTemplateNode(node, opts...)
+	c.addNode(gNode, options)
+	return c
+}
+
 // AppendToolsNode add a ToolsNode node to the chain.
 // e.g.
 //
-//	toolsNode, err := tools.NewToolNode(ctx, &tools.ToolsNodeConfig{
-//		Tools: []tools.Tool{...},
+//	toolsNode, err := compose.NewToolNode(ctx, &compose.ToolsNodeConfig{
+//		Tools: []tools.BaseTool{...},
 //	})
 //
 //	chain.AppendToolsNode(toolsNode)
 func (c *Chain[I, O]) AppendToolsNode(node *ToolsNode, opts ...GraphAddNodeOpt) *Chain[I, O] {
 	gNode, options := toToolsNode(node, opts...)
+	c.addNode(gNode, options)
+	return c
+}
+
+// AppendAgenticToolsNode add a AgenticToolsNode node to the chain.
+// e.g.
+//
+//	toolsNode, err := compose.NewAgenticToolsNode(ctx, &compose.ToolsNodeConfig{
+//		Tools: []tools.BaseTool{...},
+//	})
+//
+//	chain.AppendAgenticToolsNode(toolsNode)
+func (c *Chain[I, O]) AppendAgenticToolsNode(node *AgenticToolsNode, opts ...GraphAddNodeOpt) *Chain[I, O] {
+	gNode, options := toAgenticToolsNode(node, opts...)
 	c.addNode(gNode, options)
 	return c
 }
