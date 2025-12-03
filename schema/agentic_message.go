@@ -84,7 +84,7 @@ type AgenticResponseMeta struct {
 
 type StreamMeta struct {
 	// Index specifies the index position of this block in the final response.
-	Index int64
+	Index int
 }
 
 type ContentBlock struct {
