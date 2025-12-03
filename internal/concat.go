@@ -99,7 +99,7 @@ func ConcatItems[T any](items []T) (T, error) {
 	if typ.Kind() == reflect.Map {
 		cv, err = concatMaps(v)
 	} else {
-		cv, err = concatSliceValue(v)
+		cv, err = ConcatSliceValue(v)
 	}
 
 	if err != nil {
@@ -158,7 +158,7 @@ func concatMaps(ms reflect.Value) (reflect.Value, error) {
 		if v.Type().Elem().Kind() == reflect.Map {
 			cv, err = concatMaps(v)
 		} else {
-			cv, err = concatSliceValue(v)
+			cv, err = ConcatSliceValue(v)
 		}
 
 		if err != nil {
@@ -171,7 +171,7 @@ func concatMaps(ms reflect.Value) (reflect.Value, error) {
 	return ret, nil
 }
 
-func concatSliceValue(val reflect.Value) (reflect.Value, error) {
+func ConcatSliceValue(val reflect.Value) (reflect.Value, error) {
 	elmType := val.Type().Elem()
 
 	if val.Len() == 1 {
