@@ -1,5 +1,5 @@
 /*
- * Copyright 2024 CloudWeGo Authors
+ * Copyright 2025 CloudWeGo Authors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -14,22 +14,22 @@
  * limitations under the License.
  */
 
-package prompt
+package agentic
 
 import (
-	"context"
+	"testing"
+
+	"github.com/stretchr/testify/assert"
 
 	"github.com/cloudwego/eino/schema"
 )
 
-var _ ChatTemplate = &DefaultChatTemplate{}
-var _ AgenticChatTemplate = &DefaultAgenticChatTemplate{}
+func TestConvModel(t *testing.T) {
+	assert.NotNil(t, ConvCallbackInput(&CallbackInput{}))
+	assert.NotNil(t, ConvCallbackInput([]*schema.AgenticMessage{}))
+	assert.Nil(t, ConvCallbackInput("asd"))
 
-// ChatTemplate formats variables into a list of messages according to a prompt schema.
-type ChatTemplate interface {
-	Format(ctx context.Context, vs map[string]any, opts ...Option) ([]*schema.Message, error)
-}
-
-type AgenticChatTemplate interface {
-	Format(ctx context.Context, vs map[string]any, opts ...Option) ([]*schema.AgenticMessage, error)
+	assert.NotNil(t, ConvCallbackOutput(&CallbackOutput{}))
+	assert.NotNil(t, ConvCallbackOutput(&schema.AgenticMessage{}))
+	assert.Nil(t, ConvCallbackOutput("asd"))
 }
