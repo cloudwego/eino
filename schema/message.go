@@ -503,8 +503,6 @@ type TokenUsage struct {
 	CompletionTokenDetails CompletionTokenDetails `json:"completion_token_details"`
 	// TotalTokens is the total number of tokens.
 	TotalTokens int `json:"total_tokens"`
-	// CompletionTokensDetails is breakdown of completion tokens.
-	CompletionTokensDetails CompletionTokensDetails `json:"completion_token_details"`
 }
 
 type CompletionTokensDetails struct {
