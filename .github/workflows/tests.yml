@@ -44,7 +44,6 @@ jobs:
         with:
           name: eino-unit-test
           env_vars: GOLANG,EINO
-          fail_ci_if_error: 'false'
           files: ${{ env.COVERAGE_FILE }}
           token: ${{ secrets.CODECOV_TOKEN }}
           codecov_yml_path: ./github/.codecov.yml
