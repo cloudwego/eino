@@ -31,6 +31,7 @@ import (
 
 func init() {
 	schema.RegisterName[TODO]("_eino_adk_prebuilt_deep_todo")
+	schema.RegisterName[[]TODO]("_eino_adk_prebuilt_deep_todo_slice")
 }
 
 // Config defines the configuration for creating a DeepAgent.
