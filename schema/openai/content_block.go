@@ -21,6 +21,8 @@ type AssistantGenTextExtension struct {
 }
 
 type TextAnnotation struct {
+	Index int `json:"index,omitempty"`
+
 	Type TextAnnotationType `json:"type,omitempty"`
 
 	FileCitation          *TextAnnotationFileCitation          `json:"file_citation,omitempty"`
@@ -36,7 +38,7 @@ type TextAnnotationFileCitation struct {
 	Filename string `json:"filename,omitempty"`
 
 	// The index of the file in the list of files.
-	Index int64 `json:"index,omitempty"`
+	Index int `json:"index,omitempty"`
 }
 
 type TextAnnotationURLCitation struct {
@@ -46,9 +48,9 @@ type TextAnnotationURLCitation struct {
 	URL string `json:"url,omitempty"`
 
 	// The index of the first character of the URL citation in the message.
-	StartIndex int64 `json:"start_index,omitempty"`
+	StartIndex int `json:"start_index,omitempty"`
 	// The index of the last character of the URL citation in the message.
-	EndIndex int64 `json:"end_index,omitempty"`
+	EndIndex int `json:"end_index,omitempty"`
 }
 
 type TextAnnotationContainerFileCitation struct {
@@ -61,9 +63,9 @@ type TextAnnotationContainerFileCitation struct {
 	Filename string `json:"filename,omitempty"`
 
 	// The index of the first character of the container file citation in the message.
-	StartIndex int64 `json:"start_index,omitempty"`
+	StartIndex int `json:"start_index,omitempty"`
 	// The index of the last character of the container file citation in the message.
-	EndIndex int64 `json:"end_index,omitempty"`
+	EndIndex int `json:"end_index,omitempty"`
 }
 
 type TextAnnotationFilePath struct {
@@ -71,5 +73,5 @@ type TextAnnotationFilePath struct {
 	FileID string `json:"file_id,omitempty"`
 
 	// The index of the file in the list of files.
-	Index int64 `json:"index,omitempty"`
+	Index int `json:"index,omitempty"`
 }
