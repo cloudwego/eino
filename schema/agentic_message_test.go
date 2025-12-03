@@ -18,6 +18,7 @@ package schema
 
 import (
 	"context"
+	"reflect"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -137,7 +138,7 @@ func TestConcatAgenticMessages(t *testing.T) {
 		assert.Len(t, result.ContentBlocks, 1)
 		assert.Len(t, result.ContentBlocks[0].Reasoning.Summary, 1)
 		assert.Equal(t, "First Second", result.ContentBlocks[0].Reasoning.Summary[0].Text)
-		assert.Equal(t, int64(0), result.ContentBlocks[0].Reasoning.Summary[0].Index)
+		assert.Equal(t, 0, result.ContentBlocks[0].Reasoning.Summary[0].Index)
 	})
 
 	t.Run("concat reasoning with index", func(t *testing.T) {
@@ -185,11 +186,11 @@ func TestConcatAgenticMessages(t *testing.T) {
 	t.Run("concat user input text", func(t *testing.T) {
 		msgs := []*AgenticMessage{
 			{
-				Role: AgenticRoleTypeUser,
+				Role: AgenticRoleTypeAssistant,
 				ContentBlocks: []*ContentBlock{
 					{
-						Type: ContentBlockTypeUserInputText,
-						UserInputText: &UserInputText{
+						Type: ContentBlockTypeAssistantGenText,
+						AssistantGenText: &AssistantGenText{
 							Text: "Hello ",
 						},
 						StreamMeta: &StreamMeta{Index: 0},
@@ -197,11 +198,11 @@ func TestConcatAgenticMessages(t *testing.T) {
 				},
 			},
 			{
-				Role: AgenticRoleTypeUser,
+				Role: AgenticRoleTypeAssistant,
 				ContentBlocks: []*ContentBlock{
 					{
-						Type: ContentBlockTypeUserInputText,
-						UserInputText: &UserInputText{
+						Type: ContentBlockTypeAssistantGenText,
+						AssistantGenText: &AssistantGenText{
 							Text: "World!",
 						},
 						StreamMeta: &StreamMeta{Index: 0},
@@ -213,33 +214,33 @@ func TestConcatAgenticMessages(t *testing.T) {
 		result, err := ConcatAgenticMessages(msgs)
 		assert.NoError(t, err)
 		assert.Len(t, result.ContentBlocks, 1)
-		assert.Equal(t, "Hello World!", result.ContentBlocks[0].UserInputText.Text)
+		assert.Equal(t, "Hello World!", result.ContentBlocks[0].AssistantGenText.Text)
 	})
 
-	t.Run("concat user input image", func(t *testing.T) {
-		url1 := "https://example.com/image1.jpg"
-		url2 := "https://example.com/image2.jpg"
+	t.Run("concat assistant gen image", func(t *testing.T) {
+		base1 := "1"
+		base2 := "2"
 
 		msgs := []*AgenticMessage{
 			{
-				Role: AgenticRoleTypeUser,
+				Role: AgenticRoleTypeAssistant,
 				ContentBlocks: []*ContentBlock{
 					{
-						Type: ContentBlockTypeUserInputImage,
-						UserInputImage: &UserInputImage{
-							URL: url1,
+						Type: ContentBlockTypeAssistantGenImage,
+						AssistantGenImage: &AssistantGenImage{
+							Base64Data: base1,
 						},
 						StreamMeta: &StreamMeta{Index: 0},
 					},
 				},
 			},
 			{
-				Role: AgenticRoleTypeUser,
+				Role: AgenticRoleTypeAssistant,
 				ContentBlocks: []*ContentBlock{
 					{
-						Type: ContentBlockTypeUserInputImage,
-						UserInputImage: &UserInputImage{
-							URL: url2,
+						Type: ContentBlockTypeAssistantGenImage,
+						AssistantGenImage: &AssistantGenImage{
+							Base64Data: base2,
 						},
 						StreamMeta: &StreamMeta{Index: 0},
 					},
@@ -250,11 +251,10 @@ func TestConcatAgenticMessages(t *testing.T) {
 		result, err := ConcatAgenticMessages(msgs)
 		assert.NoError(t, err)
 		assert.Len(t, result.ContentBlocks, 1)
-		// Should take the last image
-		assert.Equal(t, url2, result.ContentBlocks[0].UserInputImage.URL)
+		assert.Equal(t, "12", result.ContentBlocks[0].AssistantGenImage.Base64Data)
 	})
 
-	t.Run("concat user input audio", func(t *testing.T) {
+	t.Run("concat user input audio - should error", func(t *testing.T) {
 		url1 := "https://example.com/audio1.mp3"
 		url2 := "https://example.com/audio2.mp3"
 
@@ -285,14 +285,12 @@ func TestConcatAgenticMessages(t *testing.T) {
 			},
 		}
 
-		result, err := ConcatAgenticMessages(msgs)
-		assert.NoError(t, err)
-		assert.Len(t, result.ContentBlocks, 1)
-		// Should take the last audio
-		assert.Equal(t, url2, result.ContentBlocks[0].UserInputAudio.URL)
+		_, err := ConcatAgenticMessages(msgs)
+		assert.Error(t, err)
+		assert.ErrorContains(t, err, "cannot concat multiple user input audios")
 	})
 
-	t.Run("concat user input video", func(t *testing.T) {
+	t.Run("concat user input video - should error", func(t *testing.T) {
 		url1 := "https://example.com/video1.mp4"
 		url2 := "https://example.com/video2.mp4"
 
@@ -323,11 +321,9 @@ func TestConcatAgenticMessages(t *testing.T) {
 			},
 		}
 
-		result, err := ConcatAgenticMessages(msgs)
-		assert.NoError(t, err)
-		assert.Len(t, result.ContentBlocks, 1)
-		// Should take the last video
-		assert.Equal(t, url2, result.ContentBlocks[0].UserInputVideo.URL)
+		_, err := ConcatAgenticMessages(msgs)
+		assert.Error(t, err)
+		assert.ErrorContains(t, err, "cannot concat multiple user input videos")
 	})
 
 	t.Run("concat assistant gen text", func(t *testing.T) {
@@ -365,9 +361,6 @@ func TestConcatAgenticMessages(t *testing.T) {
 	})
 
 	t.Run("concat assistant gen image", func(t *testing.T) {
-		url1 := "https://example.com/gen_image1.jpg"
-		url2 := "https://example.com/gen_image2.jpg"
-
 		msgs := []*AgenticMessage{
 			{
 				Role: AgenticRoleTypeAssistant,
@@ -375,7 +368,7 @@ func TestConcatAgenticMessages(t *testing.T) {
 					{
 						Type: ContentBlockTypeAssistantGenImage,
 						AssistantGenImage: &AssistantGenImage{
-							URL: url1,
+							Base64Data: "part1",
 						},
 						StreamMeta: &StreamMeta{Index: 0},
 					},
@@ -387,7 +380,7 @@ func TestConcatAgenticMessages(t *testing.T) {
 					{
 						Type: ContentBlockTypeAssistantGenImage,
 						AssistantGenImage: &AssistantGenImage{
-							URL: url2,
+							Base64Data: "part2",
 						},
 						StreamMeta: &StreamMeta{Index: 0},
 					},
@@ -398,14 +391,10 @@ func TestConcatAgenticMessages(t *testing.T) {
 		result, err := ConcatAgenticMessages(msgs)
 		assert.NoError(t, err)
 		assert.Len(t, result.ContentBlocks, 1)
-		// Should take the last image
-		assert.Equal(t, url2, result.ContentBlocks[0].AssistantGenImage.URL)
+		assert.Equal(t, "part1part2", result.ContentBlocks[0].AssistantGenImage.Base64Data)
 	})
 
 	t.Run("concat assistant gen audio", func(t *testing.T) {
-		url1 := "https://example.com/gen_audio1.mp3"
-		url2 := "https://example.com/gen_audio2.mp3"
-
 		msgs := []*AgenticMessage{
 			{
 				Role: AgenticRoleTypeAssistant,
@@ -413,7 +402,7 @@ func TestConcatAgenticMessages(t *testing.T) {
 					{
 						Type: ContentBlockTypeAssistantGenAudio,
 						AssistantGenAudio: &AssistantGenAudio{
-							URL: url1,
+							Base64Data: "audio1",
 						},
 						StreamMeta: &StreamMeta{Index: 0},
 					},
@@ -425,7 +414,7 @@ func TestConcatAgenticMessages(t *testing.T) {
 					{
 						Type: ContentBlockTypeAssistantGenAudio,
 						AssistantGenAudio: &AssistantGenAudio{
-							URL: url2,
+							Base64Data: "audio2",
 						},
 						StreamMeta: &StreamMeta{Index: 0},
 					},
@@ -436,14 +425,10 @@ func TestConcatAgenticMessages(t *testing.T) {
 		result, err := ConcatAgenticMessages(msgs)
 		assert.NoError(t, err)
 		assert.Len(t, result.ContentBlocks, 1)
-		// Should take the last audio
-		assert.Equal(t, url2, result.ContentBlocks[0].AssistantGenAudio.URL)
+		assert.Equal(t, "audio1audio2", result.ContentBlocks[0].AssistantGenAudio.Base64Data)
 	})
 
 	t.Run("concat assistant gen video", func(t *testing.T) {
-		url1 := "https://example.com/gen_video1.mp4"
-		url2 := "https://example.com/gen_video2.mp4"
-
 		msgs := []*AgenticMessage{
 			{
 				Role: AgenticRoleTypeAssistant,
@@ -451,7 +436,7 @@ func TestConcatAgenticMessages(t *testing.T) {
 					{
 						Type: ContentBlockTypeAssistantGenVideo,
 						AssistantGenVideo: &AssistantGenVideo{
-							URL: url1,
+							Base64Data: "video1",
 						},
 						StreamMeta: &StreamMeta{Index: 0},
 					},
@@ -463,7 +448,7 @@ func TestConcatAgenticMessages(t *testing.T) {
 					{
 						Type: ContentBlockTypeAssistantGenVideo,
 						AssistantGenVideo: &AssistantGenVideo{
-							URL: url2,
+							Base64Data: "video2",
 						},
 						StreamMeta: &StreamMeta{Index: 0},
 					},
@@ -474,8 +459,7 @@ func TestConcatAgenticMessages(t *testing.T) {
 		result, err := ConcatAgenticMessages(msgs)
 		assert.NoError(t, err)
 		assert.Len(t, result.ContentBlocks, 1)
-		// Should take the last video
-		assert.Equal(t, url2, result.ContentBlocks[0].AssistantGenVideo.URL)
+		assert.Equal(t, "video1video2", result.ContentBlocks[0].AssistantGenVideo.Base64Data)
 	})
 
 	t.Run("concat function tool call", func(t *testing.T) {
@@ -611,11 +595,9 @@ func TestConcatAgenticMessages(t *testing.T) {
 				Role: AgenticRoleTypeAssistant,
 				ContentBlocks: []*ContentBlock{
 					{
-						Type: ContentBlockTypeServerToolResult,
-						ServerToolResult: &ServerToolResult{
-							Result: "result2",
-						},
-						StreamMeta: &StreamMeta{Index: 0},
+						Type:             ContentBlockTypeServerToolResult,
+						ServerToolResult: &ServerToolResult{},
+						StreamMeta:       &StreamMeta{Index: 0},
 					},
 				},
 			},
@@ -626,6 +608,7 @@ func TestConcatAgenticMessages(t *testing.T) {
 		assert.Len(t, result.ContentBlocks, 1)
 		assert.Equal(t, "server_call_1", result.ContentBlocks[0].ServerToolResult.CallID)
 		assert.Equal(t, "server_func", result.ContentBlocks[0].ServerToolResult.Name)
+		assert.Equal(t, "result1", result.ContentBlocks[0].ServerToolResult.Result)
 	})
 
 	t.Run("concat mcp tool call", func(t *testing.T) {
@@ -676,9 +659,10 @@ func TestConcatAgenticMessages(t *testing.T) {
 					{
 						Type: ContentBlockTypeMCPToolResult,
 						MCPToolResult: &MCPToolResult{
-							CallID: "mcp_call_1",
-							Name:   "mcp_func",
-							Result: `{"res`,
+							ServerLabel: "mcp-server",
+							CallID:      "mcp_call_1",
+							Name:        "mcp_func",
+							Result:      `{"res`,
 						},
 						StreamMeta: &StreamMeta{Index: 0},
 					},
@@ -701,6 +685,7 @@ func TestConcatAgenticMessages(t *testing.T) {
 		result, err := ConcatAgenticMessages(msgs)
 		assert.NoError(t, err)
 		assert.Len(t, result.ContentBlocks, 1)
+		assert.Equal(t, "mcp-server", result.ContentBlocks[0].MCPToolResult.ServerLabel)
 		assert.Equal(t, "mcp_call_1", result.ContentBlocks[0].MCPToolResult.CallID)
 		assert.Equal(t, "mcp_func", result.ContentBlocks[0].MCPToolResult.Name)
 		assert.Equal(t, `{"result":true}`, result.ContentBlocks[0].MCPToolResult.Result)
@@ -786,7 +771,7 @@ func TestConcatAgenticMessages(t *testing.T) {
 		assert.Equal(t, `{"request":1}`, result.ContentBlocks[0].MCPToolApprovalRequest.Arguments)
 	})
 
-	t.Run("concat mcp tool approval response", func(t *testing.T) {
+	t.Run("concat mcp tool approval response - should error", func(t *testing.T) {
 		response1 := &MCPToolApprovalResponse{
 			ApprovalRequestID: "approval_1",
 			Approve:           false,
@@ -819,11 +804,9 @@ func TestConcatAgenticMessages(t *testing.T) {
 			},
 		}
 
-		result, err := ConcatAgenticMessages(msgs)
-		assert.NoError(t, err)
-		assert.Len(t, result.ContentBlocks, 1)
-		// Should take the last response
-		assert.Equal(t, response2, result.ContentBlocks[0].MCPToolApprovalResponse)
+		_, err := ConcatAgenticMessages(msgs)
+		assert.Error(t, err)
+		assert.ErrorContains(t, err, "cannot concat multiple mcp tool approval responses")
 	})
 
 	t.Run("concat response meta", func(t *testing.T) {
@@ -927,7 +910,7 @@ func TestConcatAgenticMessages(t *testing.T) {
 		assert.Equal(t, `{"path":"/tmp"}`, result.ContentBlocks[0].MCPToolCall.Arguments)
 	})
 
-	t.Run("concat user input text", func(t *testing.T) {
+	t.Run("concat user input text - should error", func(t *testing.T) {
 		msgs := []*AgenticMessage{
 			{
 				Role: AgenticRoleTypeUser,
@@ -955,10 +938,9 @@ func TestConcatAgenticMessages(t *testing.T) {
 			},
 		}
 
-		result, err := ConcatAgenticMessages(msgs)
-		assert.NoError(t, err)
-		assert.Len(t, result.ContentBlocks, 1)
-		assert.Equal(t, "What is the weather?", result.ContentBlocks[0].UserInputText.Text)
+		_, err := ConcatAgenticMessages(msgs)
+		assert.Error(t, err)
+		assert.ErrorContains(t, err, "cannot concat multiple user input texts")
 	})
 
 	t.Run("multiple stream indexes - sparse indexes", func(t *testing.T) {
@@ -1378,4 +1360,294 @@ content_blocks:
 response_meta:
   token_usage: prompt=250, completion=180, total=430
 `, output)
+
+	t.Run("full fields", func(t *testing.T) {
+		msg := &AgenticMessage{
+			Role: AgenticRoleTypeSystem,
+			ContentBlocks: []*ContentBlock{
+				{
+					Type: ContentBlockTypeUserInputAudio,
+					UserInputAudio: &UserInputAudio{
+						URL:        "http://audio.com",
+						Base64Data: "audio_data",
+						MIMEType:   "audio/mp3",
+					},
+				},
+				{
+					Type: ContentBlockTypeUserInputVideo,
+					UserInputVideo: &UserInputVideo{
+						URL:        "http://video.com",
+						Base64Data: "video_data",
+						MIMEType:   "video/mp4",
+					},
+				},
+				{
+					Type: ContentBlockTypeUserInputFile,
+					UserInputFile: &UserInputFile{
+						URL:        "http://file.com",
+						Name:       "file.txt",
+						Base64Data: "file_data",
+						MIMEType:   "text/plain",
+					},
+				},
+				{
+					Type: ContentBlockTypeAssistantGenImage,
+					AssistantGenImage: &AssistantGenImage{
+						URL:        "http://gen_image.com",
+						Base64Data: "gen_image_data",
+						MIMEType:   "image/png",
+					},
+				},
+				{
+					Type: ContentBlockTypeAssistantGenAudio,
+					AssistantGenAudio: &AssistantGenAudio{
+						URL:        "http://gen_audio.com",
+						Base64Data: "gen_audio_data",
+						MIMEType:   "audio/wav",
+					},
+				},
+				{
+					Type: ContentBlockTypeAssistantGenVideo,
+					AssistantGenVideo: &AssistantGenVideo{
+						URL:        "http://gen_video.com",
+						Base64Data: "gen_video_data",
+						MIMEType:   "video/mp4",
+					},
+				},
+				{
+					Type: ContentBlockTypeServerToolCall,
+					ServerToolCall: &ServerToolCall{
+						Name:      "server_tool",
+						CallID:    "call_1",
+						Arguments: map[string]any{"a": 1},
+					},
+				},
+				{
+					Type: ContentBlockTypeServerToolResult,
+					ServerToolResult: &ServerToolResult{
+						Name:   "server_tool",
+						CallID: "call_1",
+						Result: map[string]any{"success": true},
+					},
+				},
+				{
+					Type: ContentBlockTypeMCPToolApprovalRequest,
+					MCPToolApprovalRequest: &MCPToolApprovalRequest{
+						ID:          "req_1",
+						Name:        "mcp_tool",
+						ServerLabel: "mcp_server",
+						Arguments:   "{}",
+					},
+				},
+				{
+					Type: ContentBlockTypeMCPToolApprovalResponse,
+					MCPToolApprovalResponse: &MCPToolApprovalResponse{
+						ApprovalRequestID: "req_1",
+						Approve:           true,
+						Reason:            "looks good",
+					},
+				},
+			},
+		}
+
+		s := msg.String()
+		assert.Contains(t, s, "role: system")
+		assert.Contains(t, s, "type: user_input_audio")
+		assert.Contains(t, s, "http://audio.com")
+		assert.Contains(t, s, "type: user_input_video")
+		assert.Contains(t, s, "http://video.com")
+		assert.Contains(t, s, "type: user_input_file")
+		assert.Contains(t, s, "file.txt")
+		assert.Contains(t, s, "type: assistant_gen_image")
+		assert.Contains(t, s, "http://gen_image.com")
+		assert.Contains(t, s, "type: assistant_gen_audio")
+		assert.Contains(t, s, "http://gen_audio.com")
+		assert.Contains(t, s, "type: assistant_gen_video")
+		assert.Contains(t, s, "http://gen_video.com")
+		assert.Contains(t, s, "type: server_tool_call")
+		assert.Contains(t, s, "server_tool")
+		assert.Contains(t, s, "map[a:1]")
+		assert.Contains(t, s, "type: server_tool_result")
+		assert.Contains(t, s, "map[success:true]")
+		assert.Contains(t, s, "type: mcp_tool_approval_request")
+		assert.Contains(t, s, "req_1")
+		assert.Contains(t, s, "type: mcp_tool_approval_response")
+		assert.Contains(t, s, "looks good")
+	})
+
+	t.Run("nil/empty fields", func(t *testing.T) {
+		msg := &AgenticMessage{
+			Role: AgenticRoleTypeUser,
+			ContentBlocks: []*ContentBlock{
+				{Type: ContentBlockTypeUserInputAudio, UserInputAudio: &UserInputAudio{}}, // empty
+				{Type: ContentBlockTypeUserInputVideo, UserInputVideo: &UserInputVideo{}},
+				{Type: ContentBlockTypeUserInputFile, UserInputFile: &UserInputFile{}},
+				{Type: ContentBlockTypeAssistantGenImage, AssistantGenImage: &AssistantGenImage{}},
+				{Type: ContentBlockTypeAssistantGenAudio, AssistantGenAudio: &AssistantGenAudio{}},
+				{Type: ContentBlockTypeAssistantGenVideo, AssistantGenVideo: &AssistantGenVideo{}},
+				{Type: ContentBlockTypeServerToolCall, ServerToolCall: &ServerToolCall{Name: "t"}},                                 // No CallID
+				{Type: ContentBlockTypeServerToolResult, ServerToolResult: &ServerToolResult{Name: "t"}},                           // No CallID
+				{Type: ContentBlockTypeMCPToolResult, MCPToolResult: &MCPToolResult{Name: "t"}},                                    // No Error
+				{Type: ContentBlockTypeMCPListToolsResult, MCPListToolsResult: &MCPListToolsResult{}},                              // No Error
+				{Type: ContentBlockTypeMCPToolApprovalResponse, MCPToolApprovalResponse: &MCPToolApprovalResponse{Approve: false}}, // No Reason
+				nil, // Nil block in slice
+			},
+		}
+
+		s := msg.String()
+		assert.Contains(t, s, "type: user_input_audio")
+		assert.NotContains(t, s, "mime_type:")
+		assert.Contains(t, s, "type: server_tool_call")
+	})
+
+	t.Run("nil content struct in block", func(t *testing.T) {
+		// Test cases where the specific content struct is nil but type is set
+		// This shouldn't crash and should just print type
+		msg := &AgenticMessage{
+			ContentBlocks: []*ContentBlock{
+				{Type: ContentBlockTypeReasoning, Reasoning: nil},
+				{Type: ContentBlockTypeUserInputText, UserInputText: nil},
+				{Type: ContentBlockTypeUserInputImage, UserInputImage: nil},
+				{Type: ContentBlockTypeUserInputAudio, UserInputAudio: nil},
+				{Type: ContentBlockTypeUserInputVideo, UserInputVideo: nil},
+				{Type: ContentBlockTypeUserInputFile, UserInputFile: nil},
+				{Type: ContentBlockTypeAssistantGenText, AssistantGenText: nil},
+				{Type: ContentBlockTypeAssistantGenImage, AssistantGenImage: nil},
+				{Type: ContentBlockTypeAssistantGenAudio, AssistantGenAudio: nil},
+				{Type: ContentBlockTypeAssistantGenVideo, AssistantGenVideo: nil},
+				{Type: ContentBlockTypeFunctionToolCall, FunctionToolCall: nil},
+				{Type: ContentBlockTypeFunctionToolResult, FunctionToolResult: nil},
+				{Type: ContentBlockTypeServerToolCall, ServerToolCall: nil},
+				{Type: ContentBlockTypeServerToolResult, ServerToolResult: nil},
+				{Type: ContentBlockTypeMCPToolCall, MCPToolCall: nil},
+				{Type: ContentBlockTypeMCPToolResult, MCPToolResult: nil},
+				{Type: ContentBlockTypeMCPListToolsResult, MCPListToolsResult: nil},
+				{Type: ContentBlockTypeMCPToolApprovalRequest, MCPToolApprovalRequest: nil},
+				{Type: ContentBlockTypeMCPToolApprovalResponse, MCPToolApprovalResponse: nil},
+			},
+		}
+		s := msg.String()
+		assert.Contains(t, s, "type: reasoning")
+		// ensure no panic and basic output present
+	})
+}
+
+func TestDeveloperAgenticMessage(t *testing.T) {
+	t.Run("basic", func(t *testing.T) {
+		msg := DeveloperAgenticMessage("developer")
+		assert.Equal(t, AgenticRoleTypeDeveloper, msg.Role)
+		assert.Len(t, msg.ContentBlocks, 1)
+		assert.Equal(t, "developer", msg.ContentBlocks[0].UserInputText.Text)
+	})
+}
+
+func TestSystemAgenticMessage(t *testing.T) {
+	t.Run("basic", func(t *testing.T) {
+		msg := SystemAgenticMessage("system")
+		assert.Equal(t, AgenticRoleTypeSystem, msg.Role)
+		assert.Len(t, msg.ContentBlocks, 1)
+		assert.Equal(t, "system", msg.ContentBlocks[0].UserInputText.Text)
+	})
+}
+
+func TestUserAgenticMessage(t *testing.T) {
+	t.Run("basic", func(t *testing.T) {
+		msg := UserAgenticMessage("user")
+		assert.Equal(t, AgenticRoleTypeUser, msg.Role)
+		assert.Len(t, msg.ContentBlocks, 1)
+		assert.Equal(t, "user", msg.ContentBlocks[0].UserInputText.Text)
+	})
+}
+
+func TestFunctionToolResultAgenticMessage(t *testing.T) {
+	t.Run("basic", func(t *testing.T) {
+		msg := FunctionToolResultAgenticMessage("call_1", "tool_name", "result_str")
+		assert.Equal(t, AgenticRoleTypeUser, msg.Role)
+		assert.Len(t, msg.ContentBlocks, 1)
+		assert.Equal(t, ContentBlockTypeFunctionToolResult, msg.ContentBlocks[0].Type)
+		assert.Equal(t, "call_1", msg.ContentBlocks[0].FunctionToolResult.CallID)
+		assert.Equal(t, "tool_name", msg.ContentBlocks[0].FunctionToolResult.Name)
+		assert.Equal(t, "result_str", msg.ContentBlocks[0].FunctionToolResult.Result)
+	})
+}
+
+func TestNewContentBlock(t *testing.T) {
+	cbType := reflect.TypeOf(ContentBlock{})
+	for i := 0; i < cbType.NumField(); i++ {
+		field := cbType.Field(i)
+
+		// Skip non-content fields
+		if field.Name == "Type" || field.Name == "Extra" || field.Name == "StreamMeta" {
+			continue
+		}
+
+		t.Run(field.Name, func(t *testing.T) {
+			// Ensure field is a pointer
+			assert.Equal(t, reflect.Ptr, field.Type.Kind(), "Field %s should be a pointer", field.Name)
+
+			// Create a new instance of the field's type
+			// field.Type is *T, so Elem() is T. reflect.New(T) returns *T.
+			elemType := field.Type.Elem()
+			inputVal := reflect.New(elemType)
+			input := inputVal.Interface()
+
+			// Call NewContentBlock (generic) via type switch
+			var block *ContentBlock
+			switch v := input.(type) {
+			case *Reasoning:
+				block = NewContentBlock(v)
+			case *UserInputText:
+				block = NewContentBlock(v)
+			case *UserInputImage:
+				block = NewContentBlock(v)
+			case *UserInputAudio:
+				block = NewContentBlock(v)
+			case *UserInputVideo:
+				block = NewContentBlock(v)
+			case *UserInputFile:
+				block = NewContentBlock(v)
+			case *AssistantGenText:
+				block = NewContentBlock(v)
+			case *AssistantGenImage:
+				block = NewContentBlock(v)
+			case *AssistantGenAudio:
+				block = NewContentBlock(v)
+			case *AssistantGenVideo:
+				block = NewContentBlock(v)
+			case *FunctionToolCall:
+				block = NewContentBlock(v)
+			case *FunctionToolResult:
+				block = NewContentBlock(v)
+			case *ServerToolCall:
+				block = NewContentBlock(v)
+			case *ServerToolResult:
+				block = NewContentBlock(v)
+			case *MCPToolCall:
+				block = NewContentBlock(v)
+			case *MCPToolResult:
+				block = NewContentBlock(v)
+			case *MCPListToolsResult:
+				block = NewContentBlock(v)
+			case *MCPToolApprovalRequest:
+				block = NewContentBlock(v)
+			case *MCPToolApprovalResponse:
+				block = NewContentBlock(v)
+			default:
+				t.Fatalf("unsupported ContentBlock field type: %T", input)
+			}
+
+			// Assertions
+			assert.NotNil(t, block, "NewContentBlock should return non-nil for type %T", input)
+
+			// Check if the corresponding field in block is set equals to input
+			blockVal := reflect.ValueOf(block).Elem()
+			fieldVal := blockVal.FieldByName(field.Name)
+			assert.True(t, fieldVal.IsValid(), "Field %s not found in result", field.Name)
+			assert.Equal(t, input, fieldVal.Interface(), "Field %s should match input", field.Name)
+
+			// Check Type is set
+			typeVal := blockVal.FieldByName("Type")
+			assert.NotEmpty(t, typeVal.String(), "Type should be set for %s", field.Name)
+		})
+	}
 }
