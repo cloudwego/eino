@@ -59,24 +59,28 @@ type chatModelAgentRunOptions struct {
 	historyModifier func(context.Context, []Message) []Message
 }
 
+// WithChatModelOptions sets options for the underlying chat model.
 func WithChatModelOptions(opts []model.Option) AgentRunOption {
 	return WrapImplSpecificOptFn(func(t *chatModelAgentRunOptions) {
 		t.chatModelOptions = opts
 	})
 }
 
+// WithToolOptions sets options for tools used by the chat model agent.
 func WithToolOptions(opts []tool.Option) AgentRunOption {
 	return WrapImplSpecificOptFn(func(t *chatModelAgentRunOptions) {
 		t.toolOptions = opts
 	})
 }
 
+// WithAgentToolRunOptions specifies per-tool run options for the agent.
 func WithAgentToolRunOptions(opts map[string] /*tool name*/ []AgentRunOption) AgentRunOption {
 	return WrapImplSpecificOptFn(func(t *chatModelAgentRunOptions) {
 		t.agentToolOptions = opts
 	})
 }
 
+// WithHistoryModifier sets a function to modify history during resume.
 // Deprecated: use ResumeWithData and ChatModelAgentResumeData instead.
 func WithHistoryModifier(f func(context.Context, []Message) []Message) AgentRunOption {
 	return WrapImplSpecificOptFn(func(t *chatModelAgentRunOptions) {
@@ -229,6 +233,7 @@ type ChatModelAgent struct {
 
 type runFunc func(ctx context.Context, input *AgentInput, generator *AsyncGenerator[*AgentEvent], store *bridgeStore, opts ...compose.Option)
 
+// NewChatModelAgent constructs a chat model-backed agent with the provided config.
 func NewChatModelAgent(_ context.Context, config *ChatModelAgentConfig) (*ChatModelAgent, error) {
 	if config.Name == "" {
 		return nil, errors.New("agent 'Name' is required")

@@ -48,6 +48,8 @@ func (ag *AsyncGenerator[T]) Close() {
 	ag.ch.Close()
 }
 
+// NewAsyncIteratorPair returns a paired async iterator and generator
+// that share the same underlying channel.
 func NewAsyncIteratorPair[T any]() (*AsyncIterator[T], *AsyncGenerator[T]) {
 	ch := internal.NewUnboundedChan[T]()
 	return &AsyncIterator[T]{ch}, &AsyncGenerator[T]{ch}
@@ -72,6 +74,8 @@ func concatInstructions(instructions ...string) string {
 	return sb.String()
 }
 
+// GenTransferMessages generates assistant and tool messages to instruct a
+// transfer-to-agent tool call targeting the destination agent.
 func GenTransferMessages(_ context.Context, destAgentName string) (Message, Message) {
 	toolCallID := uuid.NewString()
 	tooCall := schema.ToolCall{ID: toolCallID, Function: schema.FunctionCall{Name: TransferToAgentToolName, Arguments: destAgentName}}
@@ -209,6 +213,8 @@ func copyAgentEvent(ae *AgentEvent) *AgentEvent {
 	return copied
 }
 
+// GetMessage extracts the Message from an AgentEvent. For streaming output,
+// it duplicates the stream and concatenates it into a single Message.
 func GetMessage(e *AgentEvent) (Message, *AgentEvent, error) {
 	if e.Output == nil || e.Output.MessageOutput == nil {
 		return nil, e, nil

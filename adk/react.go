@@ -26,6 +26,7 @@ import (
 	"github.com/cloudwego/eino/schema"
 )
 
+// ErrExceedMaxIterations indicates the agent reached the maximum iterations limit.
 var ErrExceedMaxIterations = errors.New("exceeds max iterations")
 
 type adkToolResultSender func(ctx context.Context, toolName, callID, result string, prePopAction *AgentAction)
@@ -60,6 +61,8 @@ func isAddressAtDepth(currentAddr, handlerAddr Address, depth int) bool {
 	return len(currentAddr) == expectedLen && currentAddr[:len(handlerAddr)].Equals(handlerAddr)
 }
 
+// State holds agent runtime state including messages, tool actions,
+// and remaining iterations.
 type State struct {
 	Messages []Message
 

@@ -57,6 +57,8 @@ type ResumeParams struct {
 	// Future extensible fields can be added here without breaking changes
 }
 
+// NewRunner creates a Runner that executes an Agent with optional streaming
+// and checkpoint persistence.
 func NewRunner(_ context.Context, conf RunnerConfig) *Runner {
 	return &Runner{
 		enableStreaming: conf.EnableStreaming,

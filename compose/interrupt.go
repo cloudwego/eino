@@ -27,27 +27,28 @@ import (
 	"github.com/cloudwego/eino/schema"
 )
 
+// WithInterruptBeforeNodes instructs to interrupt before the given nodes.
 func WithInterruptBeforeNodes(nodes []string) GraphCompileOption {
 	return func(options *graphCompileOptions) {
 		options.interruptBeforeNodes = nodes
 	}
 }
 
+// WithInterruptAfterNodes instructs to interrupt after the given nodes.
 func WithInterruptAfterNodes(nodes []string) GraphCompileOption {
 	return func(options *graphCompileOptions) {
 		options.interruptAfterNodes = nodes
 	}
 }
 
-// Deprecated: use Interrupt(ctx context.Context, info any) error instead.
-// If you really needs to use this error as a sub-error for a CompositeInterrupt call,
-// wrap it using WrapInterruptAndRerunIfNeeded first.
+// Deprecated: prefer Interrupt/StatefulInterrupt and CompositeInterrupt.
+// If you need to pass the legacy error into CompositeInterrupt, wrap it using WrapInterruptAndRerunIfNeeded first.
 var InterruptAndRerun = deprecatedInterruptAndRerun
 var deprecatedInterruptAndRerun = errors.New("interrupt and rerun")
 
-// Deprecated: use Interrupt(ctx context.Context, info any) error instead.
-// If you really needs to use this error as a sub-error for a CompositeInterrupt call,
-// wrap it using WrapInterruptAndRerunIfNeeded first.
+// NewInterruptAndRerunErr creates a legacy interrupt-and-rerun error.
+// Deprecated: prefer Interrupt(ctx, info) or StatefulInterrupt(ctx, info, state).
+// If passing into CompositeInterrupt, wrap using WrapInterruptAndRerunIfNeeded first.
 func NewInterruptAndRerunErr(extra any) error {
 	return deprecatedInterruptAndRerunErr(extra)
 }
@@ -235,6 +236,8 @@ func CompositeInterrupt(ctx context.Context, info any, state any, errs ...error)
 	return is
 }
 
+// IsInterruptRerunError reports whether the error represents an interrupt-and-rerun
+// and returns any attached info.
 func IsInterruptRerunError(err error) (any, bool) {
 	info, _, ok := isInterruptRerunError(err)
 	return info, ok
@@ -251,6 +254,7 @@ func isInterruptRerunError(err error) (info any, state any, ok bool) {
 	return nil, nil, false
 }
 
+// InterruptInfo aggregates interrupt metadata for composite or nested runs.
 type InterruptInfo struct {
 	State             any
 	BeforeNodes       []string
@@ -291,6 +295,7 @@ type AddressSegment = core.AddressSegment
 // InterruptCtx provides a complete, user-facing context for a single, resumable interrupt point.
 type InterruptCtx = core.InterruptCtx
 
+// ExtractInterruptInfo extracts InterruptInfo from an error if present.
 func ExtractInterruptInfo(err error) (info *InterruptInfo, existed bool) {
 	if err == nil {
 		return nil, false

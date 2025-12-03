@@ -14,6 +14,8 @@
  * limitations under the License.
  */
 
+// Package multiquery implements a query-rewriting retriever that expands
+// user queries into multiple variants to improve recall.
 package multiquery
 
 import (
@@ -56,7 +58,7 @@ var deduplicateFusion = func(ctx context.Context, docs [][]*schema.Document) ([]
 
 // NewRetriever creates a multi-query retriever.
 // multi-query retriever is useful when you want to retrieve documents from multiple retrievers with different queries.
-// eg.
+// e.g.
 //
 //	multiRetriever := multiquery.NewRetriever(ctx, &multiquery.Config{})
 //	docs, err := multiRetriever.Retrieve(ctx, "how to build agent with eino")
@@ -64,8 +66,6 @@ var deduplicateFusion = func(ctx context.Context, docs [][]*schema.Document) ([]
 //		...
 //	}
 //	println(docs)
-//
-// for more info: https://bytedance.larkoffice.com/wiki/G8T2w5bYuigJ4LkMi1ycw6VznAh#A4PqdcJmpoveWcxv8NPc70TanLb
 func NewRetriever(ctx context.Context, config *Config) (retriever.Retriever, error) {
 	var err error
 

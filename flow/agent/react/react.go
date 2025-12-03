@@ -155,10 +155,7 @@ type AgentConfig struct {
 	ToolsNodeName string
 }
 
-// Deprecated: This approach of adding persona involves unnecessary slice copying overhead.
-// Instead, directly include the persona message in the input messages when calling Generate or Stream.
-//
-// NewPersonaModifier add the system prompt as persona before the model is called.
+// NewPersonaModifier returns a MessageModifier that adds a persona message to the input.
 // example:
 //
 //	persona := "You are an expert in golang."
@@ -171,6 +168,9 @@ type AgentConfig struct {
 //	msg, err := agent.Generate(ctx, []*schema.Message{{Role: schema.User, Content: "how to build agent with eino"}})
 //	if err != nil {return}
 //	println(msg.Content)
+//
+// Deprecated: Prefer directly including the persona message in the
+// input when calling Generate or Stream to avoid extra copying.
 func NewPersonaModifier(persona string) MessageModifier {
 	return func(ctx context.Context, input []*schema.Message) []*schema.Message {
 		res := make([]*schema.Message, 0, len(input)+1)
@@ -205,6 +205,7 @@ func firstChunkStreamToolCallChecker(_ context.Context, sr *schema.StreamReader[
 	}
 }
 
+// Default graph and node names for the ReAct agent.
 const (
 	GraphName     = "ReActAgent"
 	ModelNodeName = "ChatModel"

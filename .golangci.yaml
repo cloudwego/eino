@@ -1,35 +1,148 @@
 # output configuration options
-output:
-  # Format: colored-line-number|line-number|json|tab|checkstyle|code-climate|junit-xml|github-actions
-  formats:
-    - format: colored-line-number
+version: "2"
 # All available settings of specific linters.
 # Refer to https://golangci-lint.run/usage/linters
-linters-settings:
-  gofumpt:
-    # Choose whether to use the extra rules.
-    # Default: false
-    extra-rules: true
-  govet:
-    # Disable analyzers by name.
-    # Run `go tool vet help` to see all analyzers.
-    disable:
-      - stdmethods
 linters:
+  default: standard
   enable:
-    - goimports
-    - gofmt
+    - revive
+    - godoclint
+    - funlen
+    - cyclop
   disable:
     - errcheck
-    - typecheck
     - staticcheck
     - unused
-    - gosimple
     - ineffassign
-    - gofumpt
-issues:
-  # include `vendor` `third_party` `testdata` `examples` `Godeps` `builtin`
-  exclude-use-default: true
-  exclude-files:
-    - ".*\\.mock\\.go$"
-  # exclude-dirs:
+  exclusions:
+    generated: lax
+    paths:
+      - ".*_test.go"
+      - ".*_mock.go"
+    rules:
+      - path: "^internal/.*"
+        linters:
+          - revive
+      - text: "var-naming: don't use underscores in Go names"
+        linters:
+          - revive
+      - path: "/utils/"
+        text: "var-naming: avoid meaningless package names"
+        linters:
+          - revive
+      - text: "exported: type name will be used as agent.AgentOption by other packages"
+        linters:
+          - revive
+      - path: "adk/prebuilt/deep/task_tool.go"
+        text: "argument-limit: maximum number of arguments per function exceeded"
+        linters:
+          - revive
+      - path: "compose/component_to_graph_node.go"
+        text: "argument-limit: maximum number of arguments per function exceeded"
+        linters:
+          - revive
+      - path: "compose/graph_run.go"
+        text: "argument-limit: maximum number of arguments per function exceeded"
+        linters:
+          - revive
+      - path: "adk/workflow.go"
+        text: "argument-limit: maximum number of arguments per function exceeded"
+        linters:
+          - revive
+      - path: "compose/graph.go"
+        linters:
+          - cyclop
+        text: "calculated cyclomatic complexity for function compile"
+      - path: "schema/message.go"
+        linters:
+          - cyclop
+        text: "calculated cyclomatic complexity for function ConcatMessages"
+      - path: "compose/graph_run.go"
+        linters:
+          - cyclop
+        text: "calculated cyclomatic complexity for function run"
+      - path: "compose/graph.go"
+        linters:
+          - funlen
+        text: "Function 'compile' is too long"
+      - path: "compose/graph_run.go"
+        linters:
+          - funlen
+        text: "Function 'run' is too long"
+  settings:
+    govet:
+      enable-all: true
+      # Disable analyzers by name.
+      # Run `go tool vet help` to see all analyzers.
+      disable:
+        - fieldalignment
+    revive:
+      # Sets the default failure confidence.
+      # This means that linting errors with less than 0.8 confidence will be ignored.
+      # Default: 0.8
+      confidence: 0.8
+      rules:
+        # Exported function and methods should have comments. 
+        - name: exported
+          severity: error
+          exclude:
+            - "^internal/.*"
+          arguments:
+            - "disable-checks-on-constants"
+            - "disable-checks-on-variables"
+            - "disable-checks-on-types"
+            - "disable-checks-on-methods"
+        - name: package-comments
+          disabled: false
+        - name: var-naming
+          disabled: false
+          arguments:
+            # AllowList
+            - [ "utils", "s_", "err_", "err__", "plan_", "userInput_", "executedSteps_", "executedStep_", "iterator_", "in_", "out_" ]
+            # DenyList
+            - [ ]
+            - - extra-bad-package-names:
+                  - helpers
+                  - models
+        - name: argument-limit
+          arguments: [ 6 ]
+        - name: function-length
+          arguments: [ 120, 0 ]
+    godoclint:
+      check-exported: true
+      require-package-documentation: true
+    funlen:
+      lines: 200
+      statements: 120
+    cyclop:
+      max-complexity: 40
+      package-average: 20
+
+formatters:
+  enable:
+    - gci
+    - gofmt
+  settings:
+    gofmt:
+      # Simplify code: gofmt with `-s` option.
+      # Default: true
+      simplify: true
+      # Apply the rewrite rules to the source before reformatting.
+      # https://pkg.go.dev/cmd/gofmt
+      # Default: []
+      rewrite-rules:
+        - pattern: 'interface{}'
+          replacement: 'any'
+        - pattern: 'a[b:len(a)]'
+          replacement: 'a[b:]'
+    gci:
+      # Section configuration to compare against.
+      # Section names are case-insensitive and may contain parameters in ().
+      # The default order of sections is `standard > default > custom > blank > dot > alias > localmodule`.
+      # If `custom-order` is `true`, it follows the order of `sections` option.
+      # Default: ["standard", "default"]
+      sections:
+        - standard
+        - default
+        - localmodule
+      custom-order: true

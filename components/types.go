@@ -14,16 +14,20 @@
  * limitations under the License.
  */
 
-// components are the basic components supported by eino.
+// Package components defines common interfaces that describe component
+// types and callback capabilities used across Eino.
 package components
 
 // Typer get the type name of one component's implementation
 // if Typer exists, the full name of the component instance will be {Typer}{Component} by default
 // recommend using Camel Case Naming Style for Typer
+// Typer exposes a component's type name used to form a readable identifier.
+// The full name is typically {Type}{Component}.
 type Typer interface {
 	GetType() string
 }
 
+// GetType returns the type name for a component that implements Typer.
 func GetType(component any) (string, bool) {
 	if typer, ok := component.(Typer); ok {
 		return typer.GetType(), true
@@ -35,10 +39,13 @@ func GetType(component any) (string, bool) {
 // Checker tells callback aspect status of component's implementation
 // When the Checker interface is implemented and returns true, the framework will not start the default aspect.
 // Instead, the component will decide the callback execution location and the information to be injected.
+// Checker indicates whether a component enables its own callback handling.
+// When true, the framework will not start the default aspect.
 type Checker interface {
 	IsCallbacksEnabled() bool
 }
 
+// IsCallbacksEnabled reports whether a component implements Checker and enables callbacks.
 func IsCallbacksEnabled(i any) bool {
 	if checker, ok := i.(Checker); ok {
 		return checker.IsCallbacksEnabled()
@@ -47,16 +54,24 @@ func IsCallbacksEnabled(i any) bool {
 	return false
 }
 
-// Component the name of different kinds of components
+// Component names representing the different categories of components.
 type Component string
 
 const (
-	ComponentOfPrompt      Component = "ChatTemplate"
-	ComponentOfChatModel   Component = "ChatModel"
-	ComponentOfEmbedding   Component = "Embedding"
-	ComponentOfIndexer     Component = "Indexer"
-	ComponentOfRetriever   Component = "Retriever"
-	ComponentOfLoader      Component = "Loader"
+	// ComponentOfPrompt identifies chat template components.
+	ComponentOfPrompt Component = "ChatTemplate"
+	// ComponentOfChatModel identifies chat model components.
+	ComponentOfChatModel Component = "ChatModel"
+	// ComponentOfEmbedding identifies embedding components.
+	ComponentOfEmbedding Component = "Embedding"
+	// ComponentOfIndexer identifies indexer components.
+	ComponentOfIndexer Component = "Indexer"
+	// ComponentOfRetriever identifies retriever components.
+	ComponentOfRetriever Component = "Retriever"
+	// ComponentOfLoader identifies loader components.
+	ComponentOfLoader Component = "Loader"
+	// ComponentOfTransformer identifies document transformer components.
 	ComponentOfTransformer Component = "DocumentTransformer"
-	ComponentOfTool        Component = "Tool"
+	// ComponentOfTool identifies tool components.
+	ComponentOfTool Component = "Tool"
 )

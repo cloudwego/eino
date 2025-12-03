@@ -14,6 +14,8 @@
  * limitations under the License.
  */
 
+// Package supervisor implements the supervisor pattern for multi-agent systems,
+// where a central agent coordinates a set of sub-agents.
 package supervisor
 
 import (

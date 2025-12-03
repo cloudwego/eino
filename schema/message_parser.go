@@ -24,6 +24,7 @@ import (
 	"github.com/bytedance/sonic"
 )
 
+// MessageParser parses a Message into a strongly typed value.
 type MessageParser[T any] interface {
 	Parse(ctx context.Context, m *Message) (T, error)
 }
@@ -31,11 +32,13 @@ type MessageParser[T any] interface {
 // MessageParseFrom determines the source of the data to be parsed. default is content (Message.Content).
 type MessageParseFrom string
 
+// MessageParseFrom indicates the source data used by the parser.
 const (
 	MessageParseFromContent  MessageParseFrom = "content"
 	MessageParseFromToolCall MessageParseFrom = "tool_call"
 )
 
+// MessageJSONParseConfig configures JSON parsing behavior for Message.
 type MessageJSONParseConfig struct {
 	// parse from content or tool call, default is content.
 	ParseFrom MessageParseFrom `json:"parse_from,omitempty"`
@@ -105,7 +108,7 @@ func (p *MessageJSONParser[T]) extractData(data string) (string, error) {
 	}
 
 	keys := strings.Split(p.ParseKeyPath, ".")
-	interfaceKeys := make([]interface{}, len(keys))
+	interfaceKeys := make([]any, len(keys))
 	for i, key := range keys {
 		interfaceKeys[i] = key
 	}

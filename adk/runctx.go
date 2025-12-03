@@ -88,6 +88,7 @@ func newRunSession() *runSession {
 	}
 }
 
+// GetSessionValues returns all session key-value pairs for the current run.
 func GetSessionValues(ctx context.Context) map[string]any {
 	session := getSession(ctx)
 	if session == nil {
@@ -97,6 +98,7 @@ func GetSessionValues(ctx context.Context) map[string]any {
 	return session.getValues()
 }
 
+// AddSessionValue sets a single session key-value pair for the current run.
 func AddSessionValue(ctx context.Context, key string, value any) {
 	session := getSession(ctx)
 	if session == nil {
@@ -106,6 +108,7 @@ func AddSessionValue(ctx context.Context, key string, value any) {
 	session.addValue(key, value)
 }
 
+// AddSessionValues sets multiple session key-value pairs for the current run.
 func AddSessionValues(ctx context.Context, kvs map[string]any) {
 	session := getSession(ctx)
 	if session == nil {
@@ -115,6 +118,7 @@ func AddSessionValues(ctx context.Context, kvs map[string]any) {
 	session.addValues(kvs)
 }
 
+// GetSessionValue retrieves a session value by key and reports whether it exists.
 func GetSessionValue(ctx context.Context, key string) (any, bool) {
 	session := getSession(ctx)
 	if session == nil {

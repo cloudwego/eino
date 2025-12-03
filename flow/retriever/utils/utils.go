@@ -14,6 +14,8 @@
  * limitations under the License.
  */
 
+// Package utils provides helper utilities for retriever flows, including
+// concurrent retrieval with callback instrumentation.
 package utils
 
 import (
@@ -28,6 +30,7 @@ import (
 )
 
 // RetrieveTask is a task for retrieving documents.
+// RetrieveTask represents a single retrieval job with its result or error.
 type RetrieveTask struct {
 	Name            string
 	Retriever       retriever.Retriever
@@ -38,6 +41,8 @@ type RetrieveTask struct {
 }
 
 // ConcurrentRetrieveWithCallback concurrently retrieves documents with callback.
+// ConcurrentRetrieveWithCallback runs retrieval tasks concurrently and
+// emits callbacks on start, error, and end.
 func ConcurrentRetrieveWithCallback(ctx context.Context, tasks []*RetrieveTask) {
 	wg := sync.WaitGroup{}
 	for i := range tasks {

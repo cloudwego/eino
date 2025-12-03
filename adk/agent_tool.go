@@ -14,6 +14,7 @@
  * limitations under the License.
  */
 
+// Package adk provides core agent development kit utilities and types.
 package adk
 
 import (
@@ -45,12 +46,14 @@ type AgentToolOptions struct {
 
 type AgentToolOption func(*AgentToolOptions)
 
+// WithFullChatHistoryAsInput enables using the full chat history as input.
 func WithFullChatHistoryAsInput() AgentToolOption {
 	return func(options *AgentToolOptions) {
 		options.fullChatHistoryAsInput = true
 	}
 }
 
+// WithAgentInputSchema sets a custom input schema for the agent tool.
 func WithAgentInputSchema(schema *schema.ParamsOneOf) AgentToolOption {
 	return func(options *AgentToolOptions) {
 		options.agentInputSchema = schema
@@ -63,6 +66,7 @@ func withAgentToolEnableStreaming(enabled bool) tool.Option {
 	})
 }
 
+// NewAgentTool creates a tool that wraps an agent for invocation.
 func NewAgentTool(_ context.Context, agent Agent, options ...AgentToolOption) tool.BaseTool {
 	opts := &AgentToolOptions{}
 	for _, opt := range options {

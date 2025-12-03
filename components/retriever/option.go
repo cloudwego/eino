@@ -33,7 +33,7 @@ type Options struct {
 
 	// DSLInfo is the dsl info for the retriever, which is used to retrieve the documents from the retriever.
 	// viking only
-	DSLInfo map[string]interface{}
+	DSLInfo map[string]any
 }
 
 // WithIndex wraps the index option.

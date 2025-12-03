@@ -14,6 +14,7 @@
  * limitations under the License.
  */
 
+// Package deep provides a prebuilt agent with deep task orchestration.
 package deep
 
 import (

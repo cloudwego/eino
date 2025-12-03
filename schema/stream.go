@@ -934,6 +934,8 @@ func MergeNamedStreamReaders[T any](srs map[string]*StreamReader[T]) *StreamRead
 	return InternalMergeNamedStreamReaders(ss, names)
 }
 
+// InternalMergeNamedStreamReaders merges multiple readers with their names
+// into a single multi-stream reader.
 func InternalMergeNamedStreamReaders[T any](srs []*StreamReader[T], names []string) *StreamReader[T] {
 	ss := make([]*stream[T], len(srs))
 

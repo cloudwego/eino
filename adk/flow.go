@@ -65,18 +65,21 @@ func (a *flowAgent) deepCopy() *flowAgent {
 	return ret
 }
 
+// SetSubAgents sets sub-agents for the given agent and returns the updated agent.
 func SetSubAgents(ctx context.Context, agent Agent, subAgents []Agent) (ResumableAgent, error) {
 	return setSubAgents(ctx, agent, subAgents)
 }
 
 type AgentOption func(options *flowAgent)
 
+// WithDisallowTransferToParent prevents a sub-agent from transferring to its parent.
 func WithDisallowTransferToParent() AgentOption {
 	return func(fa *flowAgent) {
 		fa.disallowTransferToParent = true
 	}
 }
 
+// WithHistoryRewriter sets a rewriter to transform conversation history.
 func WithHistoryRewriter(h HistoryRewriter) AgentOption {
 	return func(fa *flowAgent) {
 		fa.historyRewriter = h
@@ -102,6 +105,7 @@ func toFlowAgent(ctx context.Context, agent Agent, opts ...AgentOption) *flowAge
 	return fa
 }
 
+// AgentWithOptions wraps an agent with flow-specific options and returns it.
 func AgentWithOptions(ctx context.Context, agent Agent, opts ...AgentOption) Agent {
 	return toFlowAgent(ctx, agent, opts...)
 }

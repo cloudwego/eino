@@ -14,6 +14,7 @@
  * limitations under the License.
  */
 
+// Package planexecute implements a plan–execute–replan style agent.
 package planexecute
 
 import (
@@ -25,11 +26,10 @@ import (
 
 	"github.com/bytedance/sonic"
 
-	"github.com/cloudwego/eino/compose"
-
 	"github.com/cloudwego/eino/adk"
 	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/components/prompt"
+	"github.com/cloudwego/eino/compose"
 	"github.com/cloudwego/eino/internal/safe"
 	"github.com/cloudwego/eino/schema"
 )
@@ -800,6 +800,8 @@ func buildGenReplannerInputFn(planToolName, respondToolName string) GenModelInpu
 	}
 }
 
+// NewReplanner creates a plan-execute-replan agent wired with plan and respond tools.
+// It configures the provided ToolCallingChatModel with the tools and returns an Agent.
 func NewReplanner(_ context.Context, cfg *ReplannerConfig) (adk.Agent, error) {
 	planTool := cfg.PlanTool
 	if planTool == nil {

@@ -97,7 +97,7 @@ func (s *streamableTool[T, D]) StreamableRun(ctx context.Context, argumentsInJSO
 
 	var inst T
 	if s.um != nil {
-		var val interface{}
+		var val any
 		val, err = s.um(ctx, argumentsInJSON)
 		if err != nil {
 			return nil, fmt.Errorf("[LocalStreamFunc] failed to unmarshal arguments, toolName=%s, err=%w", s.getToolName(), err)
