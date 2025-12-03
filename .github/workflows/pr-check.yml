@@ -123,6 +123,9 @@ jobs:
   pr-title-check:
     name: PR Title Check
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
     steps:
       - uses: actions/checkout@v4
       - name: Read commit rules
@@ -144,7 +147,7 @@ jobs:
             core.setOutput('types', toMultiline(cfg.allowedTypes));
             core.setOutput('scopes', toMultiline(cfg.allowedScopes));
       - name: Validate PR title
-        uses: amannn/action-semantic-pull-request@v5.5.2
+        uses: amannn/action-semantic-pull-request@v6.1.1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
