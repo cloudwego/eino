@@ -24,6 +24,7 @@ import (
 )
 
 const (
+	// MetaKeySource is the metadata key storing the document's source URI.
 	MetaKeySource = "_source"
 )
 

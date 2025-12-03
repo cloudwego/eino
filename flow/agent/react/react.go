@@ -100,10 +100,10 @@ type AgentConfig struct {
 	ToolsNodeName string
 }
 
-// Deprecated: This approach of adding persona involves unnecessary slice copying overhead.
-// Instead, directly include the persona message in the input messages when calling Generate or Stream.
-//
-// NewPersonaModifier add the system prompt as persona before the model is called.
+// NewPersonaModifier returns a MessageModifier that prepends a system
+// persona message to the input before the model is called.
+// Deprecated: Prefer directly including the persona message in the
+// input when calling Generate or Stream to avoid extra copying.
 // example:
 //
 //	persona := "You are an expert in golang."
@@ -150,6 +150,7 @@ func firstChunkStreamToolCallChecker(_ context.Context, sr *schema.StreamReader[
 	}
 }
 
+// Default graph and node names for the ReAct agent.
 const (
 	GraphName     = "ReActAgent"
 	ModelNodeName = "ChatModel"

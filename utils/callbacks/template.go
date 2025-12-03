@@ -14,6 +14,7 @@
  * limitations under the License.
  */
 
+// Package callbacks provides ready-to-use callback handler templates for components.
 package callbacks
 
 import (
@@ -521,6 +522,8 @@ func (ch *ToolCallbackHandler) Needed(ctx context.Context, runInfo *callbacks.Ru
 	}
 }
 
+// ToolsNodeCallbackHandlers defines optional callbacks for the Tools node
+// lifecycle events.
 type ToolsNodeCallbackHandlers struct {
 	OnStart               func(ctx context.Context, info *callbacks.RunInfo, input *schema.Message) context.Context
 	OnEnd                 func(ctx context.Context, info *callbacks.RunInfo, input []*schema.Message) context.Context
@@ -528,6 +531,7 @@ type ToolsNodeCallbackHandlers struct {
 	OnError               func(ctx context.Context, info *callbacks.RunInfo, err error) context.Context
 }
 
+// Needed reports whether a handler is registered for the given timing.
 func (ch *ToolsNodeCallbackHandlers) Needed(ctx context.Context, runInfo *callbacks.RunInfo, timing callbacks.CallbackTiming) bool {
 	switch timing {
 	case callbacks.TimingOnStart:

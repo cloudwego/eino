@@ -45,8 +45,10 @@ type RunInfo = callbacks.RunInfo
 //		}
 type CallbackInput = callbacks.CallbackInput
 
+// CallbackOutput is the unified callback output alias used by Eino.
 type CallbackOutput = callbacks.CallbackOutput
 
+// Handler is the unified callback handler alias used by Eino.
 type Handler = callbacks.Handler
 
 // InitCallbackHandlers sets the global callback handlers.
@@ -68,6 +70,7 @@ func AppendGlobalHandlers(handlers ...Handler) {
 // CallbackTiming enumerates all the timing of callback aspects.
 type CallbackTiming = callbacks.CallbackTiming
 
+// CallbackTiming values enumerate the lifecycle moments when handlers run.
 const (
 	TimingOnStart CallbackTiming = iota
 	TimingOnEnd

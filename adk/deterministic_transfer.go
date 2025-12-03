@@ -24,6 +24,7 @@ import (
 	"github.com/cloudwego/eino/schema"
 )
 
+// AgentWithDeterministicTransferTo wraps an agent to transfer to given agents deterministically.
 func AgentWithDeterministicTransferTo(_ context.Context, config *DeterministicTransferConfig) Agent {
 	if ra, ok := config.Agent.(ResumableAgent); ok {
 		return &resumableAgentWithDeterministicTransferTo{

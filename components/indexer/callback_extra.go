@@ -14,6 +14,7 @@
  * limitations under the License.
  */
 
+// Package indexer defines callback payloads used by indexers.
 package indexer
 
 import (

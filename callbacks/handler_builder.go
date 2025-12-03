@@ -22,6 +22,8 @@ import (
 	"github.com/cloudwego/eino/schema"
 )
 
+// HandlerBuilder constructs a Handler by chaining callback functions
+// for start, end, error, and streaming aspects.
 type HandlerBuilder struct {
 	onStartFn                func(ctx context.Context, info *RunInfo, input CallbackInput) context.Context
 	onEndFn                  func(ctx context.Context, info *RunInfo, output CallbackOutput) context.Context
@@ -77,10 +79,12 @@ func (hb *handlerImpl) Needed(_ context.Context, _ *RunInfo, timing CallbackTimi
 
 // NewHandlerBuilder creates and returns a new HandlerBuilder instance.
 // HandlerBuilder is used to construct a Handler with custom callback functions
+// NewHandlerBuilder creates and returns a new HandlerBuilder.
 func NewHandlerBuilder() *HandlerBuilder {
 	return &HandlerBuilder{}
 }
 
+// OnStartFn sets the handler for the start timing.
 func (hb *HandlerBuilder) OnStartFn(
 	fn func(ctx context.Context, info *RunInfo, input CallbackInput) context.Context) *HandlerBuilder {
 
@@ -88,6 +92,7 @@ func (hb *HandlerBuilder) OnStartFn(
 	return hb
 }
 
+// OnEndFn sets the handler for the end timing.
 func (hb *HandlerBuilder) OnEndFn(
 	fn func(ctx context.Context, info *RunInfo, output CallbackOutput) context.Context) *HandlerBuilder {
 
@@ -95,6 +100,7 @@ func (hb *HandlerBuilder) OnEndFn(
 	return hb
 }
 
+// OnErrorFn sets the handler for the error timing.
 func (hb *HandlerBuilder) OnErrorFn(
 	fn func(ctx context.Context, info *RunInfo, err error) context.Context) *HandlerBuilder {
 

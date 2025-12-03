@@ -26,8 +26,11 @@ import (
 	"github.com/cloudwego/eino/schema"
 )
 
+// ErrExceedMaxIterations indicates the agent reached the maximum iterations limit.
 var ErrExceedMaxIterations = errors.New("exceeds max iterations")
 
+// State holds agent runtime state including messages, tool actions,
+// and remaining iterations.
 type State struct {
 	Messages []Message
 
@@ -41,6 +44,7 @@ type State struct {
 	RemainingIterations int
 }
 
+// SendToolGenAction records a tool generation action into the agent state.
 func SendToolGenAction(ctx context.Context, toolName string, action *AgentAction) error {
 	return compose.ProcessState(ctx, func(ctx context.Context, st *State) error {
 		st.ToolGenActions[toolName] = action

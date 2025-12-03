@@ -84,6 +84,8 @@ func newGraphBranch[T any](r *runnablePacker[T, []string, any], endNodes map[str
 	}
 }
 
+// NewGraphMultiBranch creates a branch for graphs where a condition selects
+// multiple end nodes; only keys present in endNodes are allowed.
 func NewGraphMultiBranch[T any](condition GraphMultiBranchCondition[T], endNodes map[string]bool) *GraphBranch {
 	condRun := func(ctx context.Context, in T, opts ...any) ([]string, error) {
 		ends, err := condition(ctx, in)
@@ -104,6 +106,8 @@ func NewGraphMultiBranch[T any](condition GraphMultiBranchCondition[T], endNodes
 	return newGraphBranch(newRunnablePacker(condRun, nil, nil, nil, false), endNodes)
 }
 
+// NewStreamGraphMultiBranch creates a streaming branch where a condition on
+// the input stream selects multiple end nodes.
 func NewStreamGraphMultiBranch[T any](condition StreamGraphMultiBranchCondition[T],
 	endNodes map[string]bool) *GraphBranch {
 

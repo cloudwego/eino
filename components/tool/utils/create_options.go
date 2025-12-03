@@ -24,10 +24,10 @@ import (
 )
 
 // UnmarshalArguments is the function type for unmarshalling the arguments.
-type UnmarshalArguments func(ctx context.Context, arguments string) (interface{}, error)
+type UnmarshalArguments func(ctx context.Context, arguments string) (any, error)
 
 // MarshalOutput is the function type for marshalling the output.
-type MarshalOutput func(ctx context.Context, output interface{}) (string, error)
+type MarshalOutput func(ctx context.Context, output any) (string, error)
 
 type toolOptions struct {
 	um         UnmarshalArguments
