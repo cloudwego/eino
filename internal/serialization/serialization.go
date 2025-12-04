@@ -530,6 +530,28 @@ func internalSpecificTypeUnmarshal(is *internalStruct, typ reflect.Type) (any, e
 
 func setSliceElems(dResult reflect.Value, values []*internalStruct) error {
 	t := dResult.Type()
+
+	// Handle arrays differently from slices
+	// Arrays have fixed size and cannot use reflect.Append
+	if dResult.Kind() == reflect.Array {
+		for i, internalValue := range values {
+			if i >= dResult.Len() {
+				return fmt.Errorf("array index out of bounds: trying to set index %d in array of length %d", i, dResult.Len())
+			}
+			value, err := internalUnmarshal(internalValue, t.Elem())
+			if err != nil {
+				return fmt.Errorf("unmarshal array[%s] element %d fail: %v", t.Elem(), i, err)
+			}
+			if value == nil {
+				dResult.Index(i).Set(reflect.Zero(t.Elem()))
+			} else {
+				dResult.Index(i).Set(reflect.ValueOf(value))
+			}
+		}
+		return nil
+	}
+
+	// For slices, use Append as before
 	for _, internalValue := range values {
 		value, err := internalUnmarshal(internalValue, t.Elem())
 		if err != nil {
@@ -636,9 +658,14 @@ func createValueFromType(t reflect.Type) (value reflect.Value, derefValue reflec
 		derefValue.Set(reflect.MakeMap(derefValue.Type()))
 	}
 
-	if (derefValue.Kind() == reflect.Slice || derefValue.Kind() == reflect.Array) && derefValue.IsNil() {
-		derefValue.Set(reflect.MakeSlice(derefValue.Type(), 0, 0))
+	// Use Len() == 0 instead of IsNil() for slices to avoid panic
+	// IsNil() can panic on uninitialized slice values created via reflect.New().Elem()
+	if derefValue.Kind() == reflect.Slice {
+		if derefValue.Len() == 0 && derefValue.Cap() == 0 {
+			derefValue.Set(reflect.MakeSlice(derefValue.Type(), 0, 0))
+		}
 	}
+	// Arrays cannot be nil and don't need initialization
 
 	return value, derefValue
 }

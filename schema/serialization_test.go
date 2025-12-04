@@ -23,6 +23,7 @@ import (
 	"reflect"
 	"testing"
 
+	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 
 	"github.com/cloudwego/eino/internal/serialization"
@@ -161,4 +162,30 @@ func TestRegister(t *testing.T) {
 
 	err = f()
 	assert.NoError(t, err)
+}
+
+// TestRegisterStructWithUUIDField reproduces issue #607
+// uuid.UUID is a [16]byte array. Prior to the fix, calling schema.RegisterName on
+// a struct with a uuid.UUID field would panic during deserialization.
+func TestRegisterStructWithUUIDField(t *testing.T) {
+	type Item struct {
+		ID uuid.UUID
+	}
+
+	RegisterName[Item]("test_item")
+
+	original := Item{
+		ID: uuid.MustParse("6ba7b810-9dad-11d1-80b4-00c04fd430c8"),
+	}
+
+	s := &serialization.InternalSerializer{}
+
+	data, err := s.Marshal(original)
+	assert.NoError(t, err)
+
+	var result Item
+	err = s.Unmarshal(data, &result)
+	assert.NoError(t, err)
+
+	assert.Equal(t, original.ID, result.ID)
 }
