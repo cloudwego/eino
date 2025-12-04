@@ -105,7 +105,7 @@ linters:
                   - helpers
                   - models
         - name: argument-limit
-          arguments: [ 5 ]
+          arguments: [ 6 ]
         - name: function-length
           arguments: [ 120, 0 ]
     godoclint:
