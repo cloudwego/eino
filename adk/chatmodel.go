@@ -465,7 +465,7 @@ func (h *cbHandler) onToolEndWithStreamOutput(ctx context.Context,
 
 	toolCallID := compose.GetToolCallID(ctx)
 	cvt := func(in *tool.CallbackOutput) (Message, error) {
-		return schema.ToolMessage(in.Response, toolCallID), nil
+		return schema.ToolMessage(in.Response, toolCallID, schema.WithToolName(runInfo.Name)), nil
 	}
 	out := schema.StreamReaderWithConvert(output, cvt)
 	event := EventFromMessage(nil, out, schema.Tool, runInfo.Name)
