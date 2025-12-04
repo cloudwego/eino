@@ -26,7 +26,7 @@ import (
 // ChatModelWithTools returns a chat model configured with tool schemas.
 // If a ToolCallingChatModel is provided, it is used directly (and optionally
 // configured with tools). Otherwise, a plain ChatModel is bound with tools.
-func ChatModelWithTools(model model.ChatModel, toolCallingModel model.ToolCallingChatModel, toolInfos []*schema.ToolInfo) (
+func ChatModelWithTools(cm model.ChatModel, toolCallingModel model.ToolCallingChatModel, toolInfos []*schema.ToolInfo) (
 	model.BaseChatModel, error) {
 
 	if toolCallingModel != nil {
@@ -36,16 +36,16 @@ func ChatModelWithTools(model model.ChatModel, toolCallingModel model.ToolCallin
 		return toolCallingModel.WithTools(toolInfos)
 	}
 
-	if model != nil {
+	if cm != nil {
 		if len(toolInfos) == 0 {
-			return model, nil
+			return cm, nil
 		}
-		err := model.BindTools(toolInfos)
+		err := cm.BindTools(toolInfos)
 		if err != nil {
 			return nil, err
 		}
 
-		return model, nil
+		return cm, nil
 	}
 
 	return nil, errors.New("no chat model provided")
