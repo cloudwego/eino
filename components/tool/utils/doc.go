@@ -14,4 +14,5 @@
  * limitations under the License.
  */
 
+// Package utils provides helper utilities for tools.
 package utils

@@ -24,6 +24,7 @@ import (
 	"github.com/cloudwego/eino/schema"
 )
 
+// Config configures the parent retriever.
 type Config struct {
 	// Retriever specifies the original retriever used to retrieve documents.
 	// For example: a vector database retriever like Milvus, or a full-text search retriever like Elasticsearch.

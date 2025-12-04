@@ -133,7 +133,7 @@ func (i *invokableTool[T, D]) InvokableRun(ctx context.Context, arguments string
 
 	var inst T
 	if i.um != nil {
-		var val interface{}
+		var val any
 		val, err = i.um(ctx, arguments)
 		if err != nil {
 			return "", fmt.Errorf("[LocalFunc] failed to unmarshal arguments, toolName=%s, err=%w", i.getToolName(), err)

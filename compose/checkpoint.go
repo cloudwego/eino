@@ -55,18 +55,21 @@ type Serializer interface {
 	Unmarshal(data []byte, v any) error
 }
 
+// WithCheckPointStore sets the checkpoint store implementation for a graph.
 func WithCheckPointStore(store CheckPointStore) GraphCompileOption {
 	return func(o *graphCompileOptions) {
 		o.checkPointStore = store
 	}
 }
 
+// WithSerializer sets the serializer used to persist checkpoint state.
 func WithSerializer(serializer Serializer) GraphCompileOption {
 	return func(o *graphCompileOptions) {
 		o.serializer = serializer
 	}
 }
 
+// WithCheckPointID sets the checkpoint ID to load from and write to by default.
 func WithCheckPointID(checkPointID string) Option {
 	return Option{
 		checkPointID: &checkPointID,
@@ -90,8 +93,10 @@ func WithForceNewRun() Option {
 	}
 }
 
+// StateModifier modifies state during checkpoint operations for a given node path.
 type StateModifier func(ctx context.Context, path NodePath, state any) error
 
+// WithStateModifier installs a state modifier invoked during checkpoint read/write.
 func WithStateModifier(sm StateModifier) Option {
 	return Option{
 		stateModifier: sm,

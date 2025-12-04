@@ -14,6 +14,7 @@
  * limitations under the License.
  */
 
+// Package document defines callback payloads used by document loaders.
 package document
 
 import (

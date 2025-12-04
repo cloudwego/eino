@@ -14,6 +14,8 @@
  * limitations under the License.
  */
 
+// Package parent provides an indexer that assigns stable IDs to sub-documents
+// and preserves relationships to their original parent document.
 package parent
 
 import (
@@ -25,6 +27,7 @@ import (
 	"github.com/cloudwego/eino/schema"
 )
 
+// Config configures the parent indexer that assigns IDs to sub-documents.
 type Config struct {
 	// Indexer is the underlying indexer implementation that handles the actual document indexing.
 	// For example: a vector database indexer like Milvus, or a full-text search indexer like Elasticsearch.
@@ -121,7 +124,7 @@ func (p *parentIndexer) Store(ctx context.Context, docs []*schema.Document, opts
 	startIdx := 0
 	for i, subDoc := range subDocs {
 		if subDoc.MetaData == nil {
-			subDoc.MetaData = make(map[string]interface{})
+			subDoc.MetaData = make(map[string]any)
 		}
 		subDoc.MetaData[p.parentIDKey] = subDoc.ID
 
@@ -130,9 +133,9 @@ func (p *parentIndexer) Store(ctx context.Context, docs []*schema.Document, opts
 		}
 
 		// generate new doc id
-		subIDs, err := p.subIDGenerator(ctx, subDocs[startIdx].ID, i-startIdx)
-		if err != nil {
-			return nil, err
+		subIDs, err_ := p.subIDGenerator(ctx, subDocs[startIdx].ID, i-startIdx)
+		if err_ != nil {
+			return nil, err_
 		}
 		if len(subIDs) != i-startIdx {
 			return nil, fmt.Errorf("generated sub IDs' num is unexpected")

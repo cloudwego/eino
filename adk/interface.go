@@ -41,6 +41,7 @@ type MessageVariant struct {
 	ToolName string
 }
 
+// EventFromMessage wraps a message or stream into an AgentEvent with role metadata.
 func EventFromMessage(msg Message, msgStream MessageStream,
 	role schema.RoleType, toolName string) *AgentEvent {
 	return &AgentEvent{
@@ -132,10 +133,12 @@ type AgentOutput struct {
 	CustomizedOutput any
 }
 
+// NewTransferToAgentAction creates an action to transfer to the specified agent.
 func NewTransferToAgentAction(destAgentName string) *AgentAction {
 	return &AgentAction{TransferToAgent: &TransferToAgentAction{DestAgentName: destAgentName}}
 }
 
+// NewExitAction creates an action that signals the agent to exit.
 func NewExitAction() *AgentAction {
 	return &AgentAction{Exit: true}
 }

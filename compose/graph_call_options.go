@@ -40,6 +40,7 @@ type graphInterruptOptions struct {
 	timeout *time.Duration
 }
 
+// GraphInterruptOption configures behavior when interrupting a running graph.
 type GraphInterruptOption func(o *graphInterruptOptions)
 
 // WithGraphInterruptTimeout specifies the max waiting time before generating an interrupt.

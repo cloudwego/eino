@@ -41,6 +41,8 @@ type ChainBranch struct {
 	err            error
 }
 
+// NewChainMultiBranch creates a chain branch where a condition selects
+// multiple end nodes to route execution.
 func NewChainMultiBranch[T any](cond GraphMultiBranchCondition[T]) *ChainBranch {
 	invokeCond := func(ctx context.Context, in T, opts ...any) (endNodes []string, err error) {
 		ends, err := cond(ctx, in)
@@ -60,6 +62,8 @@ func NewChainMultiBranch[T any](cond GraphMultiBranchCondition[T]) *ChainBranch 
 	}
 }
 
+// NewStreamChainMultiBranch creates a chain branch that selects multiple end
+// nodes based on a condition evaluated on the input stream.
 func NewStreamChainMultiBranch[T any](cond StreamGraphMultiBranchCondition[T]) *ChainBranch {
 	collectCon := func(ctx context.Context, in *schema.StreamReader[T], opts ...any) (endNodes []string, err error) {
 		ends, err := cond(ctx, in)

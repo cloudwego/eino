@@ -16,6 +16,7 @@
 
 package parser
 
+// Options configures the document parser with source URI and extra metadata.
 type Options struct {
 	// uri of source.
 	URI string
@@ -33,7 +34,7 @@ type Option struct {
 	implSpecificOptFn any
 }
 
-// WithURI specifies the URI of the document.
+// WithURI specifies the source URI of the document.
 // It will be used as to select parser in ExtParser.
 func WithURI(uri string) Option {
 	return Option{
@@ -43,7 +44,7 @@ func WithURI(uri string) Option {
 	}
 }
 
-// WithExtraMeta specifies the extra meta data of the document.
+// WithExtraMeta attaches extra metadata to the parsed document.
 func WithExtraMeta(meta map[string]any) Option {
 	return Option{
 		apply: func(opts *Options) {

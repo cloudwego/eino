@@ -93,8 +93,10 @@ type StreamToolOutput struct {
 	Result *schema.StreamReader[string]
 }
 
+// InvokableToolEndpoint is the function signature for non-streaming tool calls.
 type InvokableToolEndpoint func(ctx context.Context, input *ToolInput) (*ToolOutput, error)
 
+// StreamableToolEndpoint is the function signature for streaming tool calls.
 type StreamableToolEndpoint func(ctx context.Context, input *ToolInput) (*StreamToolOutput, error)
 
 // InvokableToolMiddleware is a function that wraps InvokableToolEndpoint to add custom processing logic.
@@ -105,6 +107,7 @@ type InvokableToolMiddleware func(InvokableToolEndpoint) InvokableToolEndpoint
 // It can be used to intercept, modify, or enhance tool call execution for streaming tools.
 type StreamableToolMiddleware func(StreamableToolEndpoint) StreamableToolEndpoint
 
+// ToolMiddleware groups middleware hooks for invokable and streamable tool calls.
 type ToolMiddleware struct {
 	// Invokable contains middleware function for non-streaming tool calls.
 	// Note: This middleware only applies to tools that implement the InvokableTool interface.
@@ -190,6 +193,7 @@ func NewToolNode(ctx context.Context, conf *ToolsNodeConfig) (*ToolsNode, error)
 	}, nil
 }
 
+// ToolsInterruptAndRerunExtra carries interrupt metadata for ToolsNode reruns.
 type ToolsInterruptAndRerunExtra struct {
 	ToolCalls     []schema.ToolCall
 	ExecutedTools map[string]string
@@ -725,6 +729,7 @@ func (tn *ToolsNode) Stream(ctx context.Context, input *schema.Message,
 	return schema.MergeStreamReaders(sOutput), nil
 }
 
+// GetType returns the component type string for the Tools node.
 func (tn *ToolsNode) GetType() string {
 	return ""
 }

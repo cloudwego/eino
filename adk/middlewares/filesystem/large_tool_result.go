@@ -106,7 +106,7 @@ func (t *toolResultOffloading) handleResult(ctx context.Context, result string, 
 		}
 
 		nResult := formatToolMessage(result)
-		nResult, err = pyfmt.Fmt(tooLargeToolMessage, map[string]interface{}{
+		nResult, err = pyfmt.Fmt(tooLargeToolMessage, map[string]any{
 			"tool_call_id":   input.CallID,
 			"file_path":      path,
 			"content_sample": nResult,

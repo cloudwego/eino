@@ -1077,6 +1077,7 @@ func validateDAG(chanSubscribeTo map[string]*chanCall, controlPredecessors map[s
 	return nil
 }
 
+// DAGInvalidLoopErr indicates the graph contains a cycle and is invalid.
 var DAGInvalidLoopErr = errors.New("DAG is invalid, has loop")
 
 func findLoops(startNodes []string, chanCalls map[string]*chanCall) [][]string {
@@ -1159,10 +1160,12 @@ func NewNodePath(nodeKeyPath ...string) *NodePath {
 	return &NodePath{path: nodeKeyPath}
 }
 
+// NodePath represents a path composed of node keys to locate a node.
 type NodePath struct {
 	path []string
 }
 
+// GetPath returns the sequence of node keys in the path.
 func (p *NodePath) GetPath() []string {
 	return p.path
 }
