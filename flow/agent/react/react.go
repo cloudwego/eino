@@ -100,10 +100,7 @@ type AgentConfig struct {
 	ToolsNodeName string
 }
 
-// NewPersonaModifier returns a MessageModifier that prepends a system
-// persona message to the input before the model is called.
-// Deprecated: Prefer directly including the persona message in the
-// input when calling Generate or Stream to avoid extra copying.
+// NewPersonaModifier returns a MessageModifier that adds a persona message to the input.
 // example:
 //
 //	persona := "You are an expert in golang."
@@ -116,6 +113,9 @@ type AgentConfig struct {
 //	msg, err := agent.Generate(ctx, []*schema.Message{{Role: schema.User, Content: "how to build agent with eino"}})
 //	if err != nil {return}
 //	println(msg.Content)
+//
+// Deprecated: Prefer directly including the persona message in the
+// input when calling Generate or Stream to avoid extra copying.
 func NewPersonaModifier(persona string) MessageModifier {
 	return func(ctx context.Context, input []*schema.Message) []*schema.Message {
 		res := make([]*schema.Message, 0, len(input)+1)

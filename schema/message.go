@@ -246,7 +246,6 @@ type MessageOutputPart struct {
 	Video *MessageOutputVideo `json:"video,omitempty"`
 }
 
-// ChatMessageImageURL represents an image part in a chat message.
 // Deprecated: This struct is deprecated as the MultiContent field is deprecated.
 // For the image input part of the model, use MessageInputImage.
 // For the image output part of the model, use MessageOutputImage.
@@ -284,7 +283,6 @@ const (
 	ChatMessagePartTypeFileURL ChatMessagePartType = "file_url"
 )
 
-// ChatMessageAudioURL represents an audio part in a chat message.
 // Deprecated: This struct is deprecated as the MultiContent field is deprecated.
 // For the audio input part of the model, use MessageInputAudio.
 // For the audio output part of the model, use MessageOutputAudio.
@@ -302,7 +300,6 @@ type ChatMessageAudioURL struct {
 	Extra map[string]any `json:"extra,omitempty"`
 }
 
-// ChatMessageVideoURL represents a video part in a chat message.
 // Deprecated: This struct is deprecated as the MultiContent field is deprecated.
 // For the video input part of the model, use MessageInputVideo.
 // For the video output part of the model, use MessageOutputVideo.
@@ -320,7 +317,6 @@ type ChatMessageVideoURL struct {
 	Extra map[string]any `json:"extra,omitempty"`
 }
 
-// ChatMessageFileURL represents a file part in a chat message.
 // Deprecated: This struct is deprecated as the MultiContent field is deprecated.
 // For the file input part of the model, use MessageInputFile.
 // Choose either URL or URI.
@@ -337,7 +333,6 @@ type ChatMessageFileURL struct {
 	Extra map[string]any `json:"extra,omitempty"`
 }
 
-// ChatMessagePart represents a single part within a chat message.
 // Deprecated: This struct is deprecated as the MultiContent field is deprecated.
 // For model input, use MessageInputPart. For model output, use MessageOutputPart.
 type ChatMessagePart struct {

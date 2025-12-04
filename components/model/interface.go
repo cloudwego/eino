@@ -33,7 +33,6 @@ type BaseChatModel interface {
 		*schema.StreamReader[*schema.Message], error)
 }
 
-// ChatModel is a legacy chat model interface.
 // Deprecated: Please use ToolCallingChatModel interface instead, which provides a safer way to bind tools
 // without the concurrency issues and tool overwriting problems that may arise from the BindTools method.
 type ChatModel interface {

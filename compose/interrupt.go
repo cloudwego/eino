@@ -41,7 +41,7 @@ func WithInterruptAfterNodes(nodes []string) GraphCompileOption {
 	}
 }
 
-// InterruptAndRerun is deprecated; prefer Interrupt/StatefulInterrupt and CompositeInterrupt.
+// Deprecated: prefer Interrupt/StatefulInterrupt and CompositeInterrupt.
 // If you need to pass the legacy error into CompositeInterrupt, wrap it using WrapInterruptAndRerunIfNeeded first.
 var InterruptAndRerun = deprecatedInterruptAndRerun
 var deprecatedInterruptAndRerun = errors.New("interrupt and rerun")

@@ -39,9 +39,9 @@ func WithChatModelOptions(opts ...model.Option) agent.AgentOption {
 	return agent.WithComposeOptions(compose.WithChatModelOption(opts...))
 }
 
-// WithToolList registers tool implementations for the Tools node.
-// Deprecated: This changes tool list for ToolsNode ONLY. If you also
-// need to pass ToolInfo to the chat model, use WithTools instead.
+// WithToolList returns an agent option that specifies compose.ToolsNodeOption for ToolsNode in agent.
+// If you also need to pass ToolInfo to the chat model, use WithTools instead.
+// Deprecated: This changes tool list for ToolsNode ONLY.
 func WithToolList(tools ...tool.BaseTool) agent.AgentOption {
 	return agent.WithComposeOptions(compose.WithToolsNodeOption(compose.WithToolList(tools...)))
 }
