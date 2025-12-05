@@ -1,5 +1,5 @@
 /*
- * Copyright 2024 CloudWeGo Authors
+ * Copyright 2025 CloudWeGo Authors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -14,21 +14,13 @@
  * limitations under the License.
  */
 
-package prompt
+package openai
 
-import (
-	"context"
+type TextAnnotationType string
 
-	"github.com/cloudwego/eino/schema"
+const (
+	TextAnnotationTypeFileCitation          TextAnnotationType = "file_citation"
+	TextAnnotationTypeURLCitation           TextAnnotationType = "url_citation"
+	TextAnnotationTypeContainerFileCitation TextAnnotationType = "container_file_citation"
+	TextAnnotationTypeFilePath              TextAnnotationType = "file_path"
 )
-
-var _ ChatTemplate = &DefaultChatTemplate{}
-var _ AgenticChatTemplate = &DefaultAgenticChatTemplate{}
-
-type ChatTemplate interface {
-	Format(ctx context.Context, vs map[string]any, opts ...Option) ([]*schema.Message, error)
-}
-
-type AgenticChatTemplate interface {
-	Format(ctx context.Context, vs map[string]any, opts ...Option) ([]*schema.AgenticMessage, error)
-}

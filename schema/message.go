@@ -39,44 +39,53 @@ import (
 func init() {
 	internal.RegisterStreamChunkConcatFunc(ConcatMessages)
 	internal.RegisterStreamChunkConcatFunc(ConcatMessageArray)
+
+	internal.RegisterStreamChunkConcatFunc(ConcatAgenticMessages)
+	internal.RegisterStreamChunkConcatFunc(ConcatAgenticMessagesArray)
+}
+
+func buildConcatGenericArray[T any](f func([]*T) (*T, error)) func([][]*T) ([]*T, error) {
+	return func(mas [][]*T) ([]*T, error) {
+		arrayLen := len(mas[0])
+
+		ret := make([]*T, arrayLen)
+		slicesToConcat := make([][]*T, arrayLen)
+
+		for _, ma := range mas {
+			if len(ma) != arrayLen {
+				return nil, fmt.Errorf("unexpected array length. "+
+					"Got %d, expected %d", len(ma), arrayLen)
+			}
+
+			for i := 0; i < arrayLen; i++ {
+				m := ma[i]
+				if m != nil {
+					slicesToConcat[i] = append(slicesToConcat[i], m)
+				}
+			}
+		}
+
+		for i, slice := range slicesToConcat {
+			if len(slice) == 0 {
+				ret[i] = nil
+			} else if len(slice) == 1 {
+				ret[i] = slice[0]
+			} else {
+				cm, err := f(slice)
+				if err != nil {
+					return nil, err
+				}
+
+				ret[i] = cm
+			}
+		}
+
+		return ret, nil
+	}
 }
 
 func ConcatMessageArray(mas [][]*Message) ([]*Message, error) {
-	arrayLen := len(mas[0])
-
-	ret := make([]*Message, arrayLen)
-	slicesToConcat := make([][]*Message, arrayLen)
-
-	for _, ma := range mas {
-		if len(ma) != arrayLen {
-			return nil, fmt.Errorf("unexpected array length. "+
-				"Got %d, expected %d", len(ma), arrayLen)
-		}
-
-		for i := 0; i < arrayLen; i++ {
-			m := ma[i]
-			if m != nil {
-				slicesToConcat[i] = append(slicesToConcat[i], m)
-			}
-		}
-	}
-
-	for i, slice := range slicesToConcat {
-		if len(slice) == 0 {
-			ret[i] = nil
-		} else if len(slice) == 1 {
-			ret[i] = slice[0]
-		} else {
-			cm, err := ConcatMessages(slice)
-			if err != nil {
-				return nil, err
-			}
-
-			ret[i] = cm
-		}
-	}
-
-	return ret, nil
+	return buildConcatGenericArray[Message](ConcatMessages)(mas)
 }
 
 // FormatType used by MessageTemplate.Format
@@ -484,8 +493,14 @@ type TokenUsage struct {
 	PromptTokenDetails PromptTokenDetails `json:"prompt_token_details"`
 	// CompletionTokens is the number of completion tokens.
 	CompletionTokens int `json:"completion_tokens"`
+	// CompletionTokenDetails is a breakdown of the completion tokens.
+	CompletionTokenDetails CompletionTokenDetails `json:"completion_token_details"`
 	// TotalTokens is the total number of tokens.
 	TotalTokens int `json:"total_tokens"`
+}
+
+type CompletionTokenDetails struct {
+	ReasoningTokens int `json:"reasoning_tokens"`
 }
 
 type PromptTokenDetails struct {
@@ -501,7 +516,7 @@ var _ MessagesTemplate = MessagesPlaceholder("", false)
 // e.g.
 //
 //	chatTemplate := prompt.FromMessages(
-//		schema.SystemMessage("you are eino helper"),
+//		schema.SystemMessage("you are an eino helper"),
 //		schema.MessagesPlaceholder("history", false), // <= this will use the value of "history" in params
 //	)
 //	msgs, err := chatTemplate.Format(ctx, params)
@@ -519,7 +534,7 @@ type messagesPlaceholder struct {
 //
 //	placeholder := MessagesPlaceholder("history", false)
 //	params := map[string]any{
-//		"history": []*schema.Message{{Role: "user", Content: "what is eino?"}, {Role: "assistant", Content: "eino is a great freamwork to build llm apps"}},
+//		"history": []*schema.Message{{Role: "user", Content: "what is eino?"}, {Role: "assistant", Content: "eino is a great framework to build llm apps"}},
 //		"query": "how to use eino?",
 //	}
 //	chatTemplate := chatTpl := prompt.FromMessages(
