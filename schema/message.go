@@ -208,6 +208,9 @@ type MessageInputPart struct {
 
 	// File is the file input of the part, it's used when Type is "file_url".
 	File *MessageInputFile `json:"file,omitempty"`
+
+	// Extra is used to store extra information.
+	Extra map[string]any `json:"extra,omitempty"`
 }
 
 // MessageOutputImage is used to represent an image part in message.
@@ -242,6 +245,9 @@ type MessageOutputPart struct {
 
 	// Video is the video output of the part, used when Type is ChatMessagePartTypeVideoURL.
 	Video *MessageOutputVideo `json:"video,omitempty"`
+
+	// Extra is used to store extra information.
+	Extra map[string]any `json:"extra,omitempty"`
 }
 
 // Deprecated: This struct is deprecated as the MultiContent field is deprecated.
