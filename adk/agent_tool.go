@@ -91,13 +91,14 @@ func (at *agentTool) Info(ctx context.Context) (*schema.ToolInfo, error) {
 }
 
 func (at *agentTool) InvokableRun(ctx context.Context, argumentsInJSON string, opts ...tool.Option) (string, error) {
-	var ms *mockStore
+	gen := getEmitGenerator(opts)
+	var ms *bridgeStore
 	var iter *AsyncIterator[*AgentEvent]
 	var err error
 
 	wasInterrupted, hasState, state := compose.GetInterruptState[[]byte](ctx)
 	if !wasInterrupted {
-		ms = newEmptyStore()
+		ms = newBridgeStore()
 		var input []Message
 		if at.fullChatHistoryAsInput {
 			input, err = getReactChatHistory(ctx, at.agent.Name(ctx))
@@ -124,16 +125,16 @@ func (at *agentTool) InvokableRun(ctx context.Context, argumentsInJSON string, o
 		}
 
 		iter = newInvokableAgentToolRunner(at.agent, ms).Run(ctx, input,
-			append(getOptionsByAgentName(at.agent.Name(ctx), opts), WithCheckPointID(mockCheckPointID))...)
+			append(getOptionsByAgentName(at.agent.Name(ctx), opts), WithCheckPointID(bridgeCheckpointID))...)
 	} else {
 		if !hasState {
 			return "", fmt.Errorf("agent tool '%s' interrupt has happened, but cannot find interrupt state", at.agent.Name(ctx))
 		}
 
-		ms = newResumeStore(state)
+		ms = newResumeBridgeStore(state)
 
 		iter, err = newInvokableAgentToolRunner(at.agent, ms).
-			Resume(ctx, mockCheckPointID, getOptionsByAgentName(at.agent.Name(ctx), opts)...)
+			Resume(ctx, bridgeCheckpointID, getOptionsByAgentName(at.agent.Name(ctx), opts)...)
 		if err != nil {
 			return "", err
 		}
@@ -150,11 +151,17 @@ func (at *agentTool) InvokableRun(ctx context.Context, argumentsInJSON string, o
 			return "", event.Err
 		}
 
+		if gen != nil {
+			if event.Action == nil || event.Action.Interrupted == nil {
+				gen.Send(event)
+			}
+		}
+
 		lastEvent = event
 	}
 
 	if lastEvent != nil && lastEvent.Action != nil && lastEvent.Action.Interrupted != nil {
-		data, existed, err_ := ms.Get(ctx, mockCheckPointID)
+		data, existed, err_ := ms.Get(ctx, bridgeCheckpointID)
 		if err_ != nil {
 			return "", fmt.Errorf("failed to get interrupt info: %w", err_)
 		}
@@ -193,12 +200,19 @@ func (at *agentTool) InvokableRun(ctx context.Context, argumentsInJSON string, o
 type agentToolOptions struct {
 	agentName string
 	opts      []AgentRunOption
+	generator *AsyncGenerator[*AgentEvent]
 }
 
 func withAgentToolOptions(agentName string, opts []AgentRunOption) tool.Option {
 	return tool.WrapImplSpecificOptFn(func(opt *agentToolOptions) {
 		opt.agentName = agentName
 		opt.opts = opts
+	})
+}
+
+func withAgentToolEventGenerator(gen *AsyncGenerator[*AgentEvent]) tool.Option {
+	return tool.WrapImplSpecificOptFn(func(o *agentToolOptions) {
+		o.generator = gen
 	})
 }
 
@@ -211,6 +225,16 @@ func getOptionsByAgentName(agentName string, opts []tool.Option) []AgentRunOptio
 		}
 	}
 	return ret
+}
+
+func getEmitGenerator(opts []tool.Option) *AsyncGenerator[*AgentEvent] {
+	for _, opt := range opts {
+		o := tool.GetImplSpecificOptions[agentToolOptions](nil, opt)
+		if o != nil && o.generator != nil {
+			return o.generator
+		}
+	}
+	return nil
 }
 
 func getReactChatHistory(ctx context.Context, destAgentName string) ([]Message, error) {
@@ -239,6 +263,20 @@ func getReactChatHistory(ctx context.Context, destAgentName string) ([]Message, 
 	}
 
 	return history, err
+}
+
+func compositeInterruptFromLast(ctx context.Context, ms *bridgeStore, lastEvent *AgentEvent) error {
+	if lastEvent == nil || lastEvent.Action == nil || lastEvent.Action.Interrupted == nil {
+		return nil
+	}
+	data, existed, err := ms.Get(ctx, bridgeCheckpointID)
+	if err != nil {
+		return fmt.Errorf("failed to get interrupt info: %w", err)
+	}
+	if !existed {
+		return fmt.Errorf("interrupt occurred but checkpoint data is missing")
+	}
+	return compose.CompositeInterrupt(ctx, "agent tool interrupt", data, lastEvent.Action.internalInterrupted)
 }
 
 func newInvokableAgentToolRunner(agent Agent, store compose.CheckPointStore) *Runner {

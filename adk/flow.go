@@ -362,9 +362,25 @@ func (a *flowAgent) run(
 			break
 		}
 
+		// RunPath ownership: the eino framework prepends parent context exactly once.
+		// Custom agents should NOT include parent segments in event.RunPath.
+		// Any event.RunPath provided by custom agents is treated as relative child provenance.
+		// STRONG RECOMMENDATION: Do NOT set RunPath in custom agents unless you truly need to add
+		//   relative child provenance; never add parent/current segments. Incorrect settings will
+		//   duplicate head segments after merge and cause non-recording.
+		// Here we merge: framework runCtx.RunPath + custom-provided event.RunPath.
 		event.AgentName = a.Name(ctx)
-		event.RunPath = runCtx.RunPath
-		if event.Action == nil || event.Action.Interrupted == nil {
+		if len(event.RunPath) > 0 {
+			rp := make([]RunStep, 0, len(runCtx.RunPath)+len(event.RunPath))
+			rp = append(rp, runCtx.RunPath...)
+			rp = append(rp, event.RunPath...)
+			event.RunPath = rp
+		} else {
+			event.RunPath = runCtx.RunPath
+		}
+		// Recording policy: exact RunPath match (non-interrupt) indicates events belonging to this agent execution.
+		// This prevents parent recording of child/tool-internal emissions.
+		if (event.Action == nil || event.Action.Interrupted == nil) && exactRunPathMatch(runCtx.RunPath, event.RunPath) {
 			// copy the event so that the copied event's stream is exclusive for any potential consumer
 			// copy before adding to session because once added to session it's stream could be consumed by genAgentInput at any time
 			// interrupt action are not added to session, because ALL information contained in it
@@ -374,7 +390,12 @@ func (a *flowAgent) run(
 			setAutomaticClose(event)
 			runCtx.Session.addEvent(copied)
 		}
-		lastAction = event.Action
+		// Action gating uses exact run-path match as well:
+		// only actions originating from this agent execution (not child/tool runs)
+		// should influence parent control flow (exit/transfer/interrupt).
+		if exactRunPathMatch(runCtx.RunPath, event.RunPath) {
+			lastAction = event.Action
+		}
 		generator.Send(event)
 	}
 
@@ -413,4 +434,16 @@ func (a *flowAgent) run(
 			generator.Send(subEvent)
 		}
 	}
+}
+
+func exactRunPathMatch(aPath, bPath []RunStep) bool {
+	if len(aPath) != len(bPath) {
+		return false
+	}
+	for i := range aPath {
+		if !aPath[i].Equals(bPath[i]) {
+			return false
+		}
+	}
+	return true
 }

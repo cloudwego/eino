@@ -218,32 +218,32 @@ func (r *Runner) saveCheckPoint(
 	return r.store.Set(ctx, key, buf.Bytes())
 }
 
-const mockCheckPointID = "adk_react_mock_key"
+const bridgeCheckpointID = "adk_react_mock_key"
 
-func newEmptyStore() *mockStore {
-	return &mockStore{}
+func newBridgeStore() *bridgeStore {
+	return &bridgeStore{}
 }
 
-func newResumeStore(data []byte) *mockStore {
-	return &mockStore{
+func newResumeBridgeStore(data []byte) *bridgeStore {
+	return &bridgeStore{
 		Data:  data,
 		Valid: true,
 	}
 }
 
-type mockStore struct {
+type bridgeStore struct {
 	Data  []byte
 	Valid bool
 }
 
-func (m *mockStore) Get(_ context.Context, _ string) ([]byte, bool, error) {
+func (m *bridgeStore) Get(_ context.Context, _ string) ([]byte, bool, error) {
 	if m.Valid {
 		return m.Data, true, nil
 	}
 	return nil, false, nil
 }
 
-func (m *mockStore) Set(_ context.Context, _ string, checkPoint []byte) error {
+func (m *bridgeStore) Set(_ context.Context, _ string, checkPoint []byte) error {
 	m.Data = checkPoint
 	m.Valid = true
 	return nil
