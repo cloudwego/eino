@@ -20,6 +20,8 @@ type options struct {
 	sessionValues        map[string]any
 	checkPointID         *string
 	skipTransferMessages bool
+	sessionID            *string
+	sessionOptions       []StoreOption
 }
 
 // AgentRunOption is the call option for adk Agent.
@@ -52,6 +54,21 @@ func WithSessionValues(v map[string]any) AgentRunOption {
 func WithSkipTransferMessages() AgentRunOption {
 	return WrapImplSpecificOptFn(func(t *options) {
 		t.skipTransferMessages = true
+	})
+}
+
+// WithSessionID sets the session ID for the agent run.
+func WithSessionID(id string) AgentRunOption {
+	return WrapImplSpecificOptFn(func(t *options) {
+		t.sessionID = &id
+	})
+}
+
+// WithSessionOptions passes StoreOption (e.g. WithLimit, WithRoundID) to the SessionStore.
+// These options control how session history is loaded and saved.
+func WithSessionOptions(opts ...StoreOption) AgentRunOption {
+	return WrapImplSpecificOptFn(func(t *options) {
+		t.sessionOptions = append(t.sessionOptions, opts...)
 	})
 }
 
