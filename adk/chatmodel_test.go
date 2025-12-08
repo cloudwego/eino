@@ -416,6 +416,54 @@ func TestParallelReturnDirectlyToolCall(t *testing.T) {
 	}
 }
 
+func TestConcurrentSameToolSendToolGenActionUsesToolCallID(t *testing.T) {
+	ctx := context.Background()
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	cm := mockModel.NewMockToolCallingChatModel(ctrl)
+
+	cm.EXPECT().WithTools(gomock.Any()).Return(cm, nil).AnyTimes()
+
+	cm.EXPECT().Generate(gomock.Any(), gomock.Any(), gomock.Any()).
+		Return(schema.AssistantMessage("tools", []schema.ToolCall{
+			{ID: "id1", Function: schema.FunctionCall{Name: "action_tool", Arguments: "A"}},
+			{ID: "id2", Function: schema.FunctionCall{Name: "action_tool", Arguments: "B"}},
+		}), nil).
+		Times(1)
+
+	cm.EXPECT().Generate(gomock.Any(), gomock.Any(), gomock.Any()).
+		Return(schema.AssistantMessage("done", nil), nil).
+		Times(1)
+
+	agent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+		Name:        "TestAgent",
+		Description: "Agent with action tool",
+		Instruction: "",
+		Model:       cm,
+		ToolsConfig: ToolsConfig{ToolsNodeConfig: compose.ToolsNodeConfig{Tools: []tool.BaseTool{actionTool{}}}},
+	})
+	assert.NoError(t, err)
+
+	iter := agent.Run(ctx, &AgentInput{Messages: []Message{schema.UserMessage("go")}})
+	seen := map[string]bool{}
+	for {
+		e, ok := iter.Next()
+		if !ok {
+			break
+		}
+		if e.Output != nil && e.Output.MessageOutput != nil && e.Output.MessageOutput.Message != nil && e.Output.MessageOutput.Message.Role == schema.Tool {
+			if e.Action != nil && e.Action.CustomizedAction != nil {
+				if s, ok := e.Action.CustomizedAction.(string); ok {
+					seen[s] = true
+				}
+			}
+		}
+	}
+	assert.True(t, seen["A"])
+	assert.True(t, seen["B"])
+}
+
 type myTool struct {
 	name     string
 	desc     string
@@ -432,6 +480,54 @@ func (m *myTool) Info(ctx context.Context) (*schema.ToolInfo, error) {
 func (m *myTool) InvokableRun(ctx context.Context, argumentsInJSON string, opts ...tool.Option) (string, error) {
 	time.Sleep(m.waitTime)
 	return "success", nil
+}
+
+type actionTool struct{}
+
+func (a actionTool) Info(ctx context.Context) (*schema.ToolInfo, error) {
+	return &schema.ToolInfo{Name: "action_tool", Desc: "action tool"}, nil
+}
+
+func (a actionTool) InvokableRun(ctx context.Context, argumentsInJSON string, _ ...tool.Option) (string, error) {
+	_ = SendToolGenAction(ctx, "action_tool", &AgentAction{CustomizedAction: argumentsInJSON})
+	return "ok", nil
+}
+
+type streamActionTool struct{}
+
+func (s streamActionTool) Info(ctx context.Context) (*schema.ToolInfo, error) {
+	return &schema.ToolInfo{Name: "action_tool_stream", Desc: "action stream tool"}, nil
+}
+
+func (s streamActionTool) StreamableRun(ctx context.Context, argumentsInJSON string, _ ...tool.Option) (*schema.StreamReader[string], error) {
+	_ = SendToolGenAction(ctx, "action_tool_stream", &AgentAction{CustomizedAction: argumentsInJSON})
+	sr, sw := schema.Pipe[string](1)
+	go func() {
+		defer sw.Close()
+		_ = sw.Send("o", nil)
+		_ = sw.Send("k", nil)
+	}()
+	return sr, nil
+}
+
+type legacyStreamActionTool struct{}
+
+func (s legacyStreamActionTool) Info(ctx context.Context) (*schema.ToolInfo, error) {
+	return &schema.ToolInfo{Name: "legacy_action_tool_stream", Desc: "legacy action stream tool"}, nil
+}
+
+func (s legacyStreamActionTool) StreamableRun(ctx context.Context, argumentsInJSON string, _ ...tool.Option) (*schema.StreamReader[string], error) {
+	_ = compose.ProcessState(ctx, func(ctx context.Context, st *State) error {
+		st.ToolGenActions["legacy_action_tool_stream"] = &AgentAction{CustomizedAction: argumentsInJSON}
+		return nil
+	})
+	sr, sw := schema.Pipe[string](1)
+	go func() {
+		defer sw.Close()
+		_ = sw.Send("o", nil)
+		_ = sw.Send("k", nil)
+	}()
+	return sr, nil
 }
 
 // TestChatModelAgentOutputKey tests the outputKey configuration and setOutputToSession function
@@ -717,4 +813,99 @@ func TestChatModelAgentOutputKey(t *testing.T) {
 		_, ok = iterator.Next()
 		assert.False(t, ok)
 	})
+}
+
+func TestConcurrentSameStreamToolSendToolGenActionUsesToolCallID(t *testing.T) {
+	ctx := context.Background()
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	cm := mockModel.NewMockToolCallingChatModel(ctrl)
+
+	cm.EXPECT().WithTools(gomock.Any()).Return(cm, nil).AnyTimes()
+
+	cm.EXPECT().Generate(gomock.Any(), gomock.Any(), gomock.Any()).
+		Return(schema.AssistantMessage("tools", []schema.ToolCall{
+			{ID: "sid1", Function: schema.FunctionCall{Name: "action_tool_stream", Arguments: "SA"}},
+			{ID: "sid2", Function: schema.FunctionCall{Name: "action_tool_stream", Arguments: "SB"}},
+		}), nil).
+		Times(1)
+
+	cm.EXPECT().Generate(gomock.Any(), gomock.Any(), gomock.Any()).
+		Return(schema.AssistantMessage("done", nil), nil).
+		Times(1)
+
+	agent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+		Name:        "TestAgent",
+		Description: "Agent with stream action tool",
+		Instruction: "",
+		Model:       cm,
+		ToolsConfig: ToolsConfig{ToolsNodeConfig: compose.ToolsNodeConfig{Tools: []tool.BaseTool{streamActionTool{}}}},
+	})
+	assert.NoError(t, err)
+
+	iter := agent.Run(ctx, &AgentInput{Messages: []Message{schema.UserMessage("go")}})
+	seen := map[string]bool{}
+	for {
+		e, ok := iter.Next()
+		if !ok {
+			break
+		}
+		if e.Output != nil && e.Output.MessageOutput != nil {
+			if e.Output.MessageOutput.IsStreaming {
+				if e.Action != nil && e.Action.CustomizedAction != nil {
+					if s, ok := e.Action.CustomizedAction.(string); ok {
+						seen[s] = true
+					}
+				}
+			}
+		}
+	}
+	assert.True(t, seen["SA"])
+	assert.True(t, seen["SB"])
+}
+
+func TestStreamToolLegacyNameKeyFallback(t *testing.T) {
+	ctx := context.Background()
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	cm := mockModel.NewMockToolCallingChatModel(ctrl)
+	cm.EXPECT().WithTools(gomock.Any()).Return(cm, nil).AnyTimes()
+
+	cm.EXPECT().Generate(gomock.Any(), gomock.Any(), gomock.Any()).
+		Return(schema.AssistantMessage("tools", []schema.ToolCall{
+			{ID: "lsid1", Function: schema.FunctionCall{Name: "legacy_action_tool_stream", Arguments: "LA"}},
+		}), nil).
+		Times(1)
+
+	cm.EXPECT().Generate(gomock.Any(), gomock.Any(), gomock.Any()).
+		Return(schema.AssistantMessage("done", nil), nil).
+		Times(1)
+
+	agent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+		Name:        "TestAgent",
+		Description: "Agent with legacy stream action tool",
+		Instruction: "",
+		Model:       cm,
+		ToolsConfig: ToolsConfig{ToolsNodeConfig: compose.ToolsNodeConfig{Tools: []tool.BaseTool{legacyStreamActionTool{}}}},
+	})
+	assert.NoError(t, err)
+
+	iter := agent.Run(ctx, &AgentInput{Messages: []Message{schema.UserMessage("go")}})
+	found := false
+	for {
+		e, ok := iter.Next()
+		if !ok {
+			break
+		}
+		if e.Output != nil && e.Output.MessageOutput != nil && e.Output.MessageOutput.IsStreaming {
+			if e.Action != nil && e.Action.CustomizedAction != nil {
+				if s, ok := e.Action.CustomizedAction.(string); ok {
+					found = (s == "LA")
+				}
+			}
+		}
+	}
+	assert.True(t, found)
 }

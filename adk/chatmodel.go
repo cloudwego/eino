@@ -470,6 +470,9 @@ func (h *cbHandler) onToolEndWithStreamOutput(ctx context.Context,
 	out := schema.StreamReaderWithConvert(output, cvt)
 	event := EventFromMessage(nil, out, schema.Tool, runInfo.Name)
 
+	action := popToolGenAction(ctx, runInfo.Name)
+	event.Action = action
+
 	returnDirectlyID, hasReturnDirectly := getReturnDirectlyToolCallID(ctx)
 	if hasReturnDirectly && returnDirectlyID == toolCallID {
 		// return-directly tool event will be sent on the end of tools node to ensure this event must be the last tool event.
