@@ -37,13 +37,24 @@ type Runner struct {
 	// store is the checkpoint store used to persist agent state upon interruption.
 	// If nil, checkpointing is disabled.
 	store compose.CheckPointStore
+
+	runnerMWHelper         runnerMWHelper
+	globalAgentMiddlewares []AgentMiddleware
 }
 
 type RunnerConfig struct {
-	Agent           Agent
+	// Agent is the agent to be executed.
+	Agent Agent
+
+	// EnableStreaming dictates whether the execution should be in streaming mode.
 	EnableStreaming bool
 
+	// CheckPointStore is the checkpoint store used to persist agent state upon interruption.
+	// If nil, checkpointing is disabled.
 	CheckPointStore compose.CheckPointStore
+
+	// RunnerMiddlewares provides hooks to customize runner and agent behavior at various stages of execution.
+	RunnerMiddlewares []RunnerMiddleware
 }
 
 // ResumeParams contains all parameters needed to resume an execution.
@@ -57,10 +68,28 @@ type ResumeParams struct {
 }
 
 func NewRunner(_ context.Context, conf RunnerConfig) *Runner {
+	var (
+		dedup    = map[string]struct{}{}
+		mwHelper = runnerMWHelper{}
+		agentMWs []AgentMiddleware
+	)
+	for _, m := range conf.RunnerMiddlewares {
+		if _, found := dedup[m.Name]; m.Name != "" && found {
+			continue
+		}
+		dedup[m.Name] = struct{}{}
+		mwHelper.beforeRunnerFns = append(mwHelper.beforeRunnerFns, m.BeforeRunner)
+		mwHelper.onEventsFns = append(mwHelper.onEventsFns, m.OnEvents)
+		if m.GlobalAgentMiddleware != nil {
+			agentMWs = append(agentMWs, *m.GlobalAgentMiddleware)
+		}
+	}
 	return &Runner{
-		enableStreaming: conf.EnableStreaming,
-		a:               conf.Agent,
-		store:           conf.CheckPointStore,
+		enableStreaming:        conf.EnableStreaming,
+		a:                      conf.Agent,
+		store:                  conf.CheckPointStore,
+		runnerMWHelper:         mwHelper,
+		globalAgentMiddlewares: agentMWs,
 	}
 }
 
@@ -74,24 +103,39 @@ func (r *Runner) Run(ctx context.Context, messages []Message,
 
 	fa := toFlowAgent(ctx, r.a)
 
-	input := &AgentInput{
+	rc := &RunnerContext{
 		Messages:        messages,
-		EnableStreaming: r.enableStreaming,
+		AgentRunOptions: opts,
+		agentName:       r.a.Name(ctx),
+		entrance:        EntranceTypeRun,
+		checkpointID:    o.checkPointID,
 	}
 
+	var termIter *AsyncIterator[*AgentEvent]
+	ctx, termIter = r.runnerMWHelper.execBeforeRunner(ctx, rc)
+	if termIter != nil {
+		return termIter
+	}
+
+	input := &AgentInput{
+		Messages:        rc.Messages,
+		EnableStreaming: r.enableStreaming,
+	}
 	ctx = ctxWithNewRunCtx(ctx, input)
+	ctx = r.initAgentMWCtx(ctx, r.globalAgentMiddlewares)
 
 	AddSessionValues(ctx, o.sessionValues)
 
-	iter := fa.Run(ctx, input, opts...)
+	iter := fa.Run(ctx, input, rc.AgentRunOptions...)
 	if r.store == nil {
-		return iter
+		return r.runnerMWHelper.execOnEvents(ctx, rc, iter)
 	}
 
 	niter, gen := NewAsyncIteratorPair[*AgentEvent]()
 
 	go r.handleIter(ctx, iter, gen, o.checkPointID)
-	return niter
+
+	return r.runnerMWHelper.execOnEvents(ctx, rc, niter)
 }
 
 // Query is a convenience method that starts a new execution with a single user query string.
@@ -147,7 +191,20 @@ func (r *Runner) resume(ctx context.Context, checkPointID string, resumeData map
 		return nil, fmt.Errorf("failed to load from checkpoint: %w", err)
 	}
 
-	o := getCommonOptions(nil, opts...)
+	rc := &RunnerContext{
+		AgentRunOptions: opts,
+		agentName:       r.a.Name(ctx),
+		entrance:        EntranceTypeResume,
+		checkpointID:    &checkPointID,
+	}
+	var termIter *AsyncIterator[*AgentEvent]
+	ctx, termIter = r.runnerMWHelper.execBeforeRunner(ctx, rc)
+	if termIter != nil {
+		return termIter, nil
+	}
+
+	ctx = r.initAgentMWCtx(ctx, r.globalAgentMiddlewares)
+	o := getCommonOptions(nil, rc.AgentRunOptions...)
 	AddSessionValues(ctx, o.sessionValues)
 
 	if len(resumeData) > 0 {
@@ -155,15 +212,16 @@ func (r *Runner) resume(ctx context.Context, checkPointID string, resumeData map
 	}
 
 	fa := toFlowAgent(ctx, r.a)
-	aIter := fa.Resume(ctx, resumeInfo, opts...)
+	aIter := fa.Resume(ctx, resumeInfo, rc.AgentRunOptions...)
 	if r.store == nil {
-		return aIter, nil
+		return r.runnerMWHelper.execOnEvents(ctx, rc, aIter), nil
 	}
 
 	niter, gen := NewAsyncIteratorPair[*AgentEvent]()
 
 	go r.handleIter(ctx, aIter, gen, &checkPointID)
-	return niter, nil
+
+	return r.runnerMWHelper.execOnEvents(ctx, rc, niter), nil
 }
 
 func (r *Runner) handleIter(ctx context.Context, aIter *AsyncIterator[*AgentEvent],
@@ -224,4 +282,15 @@ func (r *Runner) handleIter(ctx context.Context, aIter *AsyncIterator[*AgentEven
 
 		gen.Send(event)
 	}
+}
+
+func (r *Runner) initAgentMWCtx(ctx context.Context, agentMiddlewares []AgentMiddleware) context.Context {
+	if len(agentMiddlewares) == 0 {
+		return ctx
+	}
+	if v, ok := ctx.Value(globalAgentMiddlewareCtxKey{}).([]AgentMiddleware); ok && v != nil {
+		// has been set, skip
+		return ctx
+	}
+	return context.WithValue(ctx, globalAgentMiddlewareCtxKey{}, agentMiddlewares)
 }
