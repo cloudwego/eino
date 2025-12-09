@@ -264,6 +264,8 @@ type ChatMessageImageURL struct {
 	// Detail is the quality of the image url.
 	Detail ImageURLDetail `json:"detail,omitempty"`
 
+	Base64Data string `json:"base64data,omitempty"`
+
 	// MIMEType is the mime type of the image, eg. "image/png".
 	MIMEType string `json:"mime_type,omitempty"`
 	// Extra is used to store extra information for the image url.
@@ -496,7 +498,9 @@ type TokenUsage struct {
 
 type PromptTokenDetails struct {
 	// Cached tokens present in the prompt.
-	CachedTokens int `json:"cached_tokens"`
+	CachedTokens             int `json:"cached_tokens"`
+	CacheCreationInputTokens int `json:"cache_creation_input_tokens"`
+	CacheReadInputTokens     int `json:"cache_read_input_tokens"`
 }
 
 var _ MessagesTemplate = &Message{}
@@ -1201,6 +1205,12 @@ func ConcatMessages(msgs []*Message) (*Message, error) {
 
 				if msg.ResponseMeta.Usage.PromptTokenDetails.CachedTokens > ret.ResponseMeta.Usage.PromptTokenDetails.CachedTokens {
 					ret.ResponseMeta.Usage.PromptTokenDetails.CachedTokens = msg.ResponseMeta.Usage.PromptTokenDetails.CachedTokens
+				}
+				if msg.ResponseMeta.Usage.PromptTokenDetails.CacheCreationInputTokens > ret.ResponseMeta.Usage.PromptTokenDetails.CacheCreationInputTokens {
+					ret.ResponseMeta.Usage.PromptTokenDetails.CacheCreationInputTokens = msg.ResponseMeta.Usage.PromptTokenDetails.CacheCreationInputTokens
+				}
+				if msg.ResponseMeta.Usage.PromptTokenDetails.CacheReadInputTokens > ret.ResponseMeta.Usage.PromptTokenDetails.CacheReadInputTokens {
+					ret.ResponseMeta.Usage.PromptTokenDetails.CacheReadInputTokens = msg.ResponseMeta.Usage.PromptTokenDetails.CacheReadInputTokens
 				}
 			}
 
