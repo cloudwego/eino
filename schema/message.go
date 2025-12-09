@@ -129,6 +129,9 @@ type ToolCall struct {
 
 	// Extra is used to store extra information for the tool call.
 	Extra map[string]any `json:"extra,omitempty"`
+
+	// ThoughtSignatures is used by Gemini 3 to maintain reasoning context across API calls.
+	ThoughtSignature string `json:"thought_signature,omitempty"`
 }
 
 // ImageURLDetail is the detail of the image url.
@@ -901,7 +904,7 @@ func concatToolCalls(chunks []ToolCall) ([]ToolCall, error) {
 		}
 
 		args.Reset()
-		toolID, toolType, toolName := "", "", "" // these field will output atomically in any chunk
+		toolID, toolType, toolName, thoughtSignature := "", "", "", ""  // these field will output atomically in any chunk
 
 		for _, n := range v {
 			chunk := chunks[n]
@@ -936,12 +939,21 @@ func concatToolCalls(chunks []ToolCall) ([]ToolCall, error) {
 					return nil, err
 				}
 			}
+
+			if chunk.ThoughtSignature != "" {
+				if thoughtSignature == "" {
+					thoughtSignature = chunk.ThoughtSignature
+				} else if thoughtSignature != chunk.ThoughtSignature {
+					return nil, fmt.Errorf("cannot concat ToolCalls with different thought signature: '%s' '%s'", thoughtSignature, chunk.ThoughtSignature)
+				}
+			}
 		}
 
 		toolCall.ID = toolID
 		toolCall.Type = toolType
 		toolCall.Function.Name = toolName
 		toolCall.Function.Arguments = args.String()
+		toolCall.ThoughtSignature = thoughtSignature
 
 		merged = append(merged, toolCall)
 	}
