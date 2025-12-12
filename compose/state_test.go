@@ -18,9 +18,12 @@ package compose
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 	"unicode/utf8"
 
 	"github.com/stretchr/testify/assert"
@@ -200,7 +203,8 @@ func TestStateGraphUtils(t *testing.T) {
 		err := ProcessState[*testStruct](ctx, func(_ context.Context, state *testStruct) error {
 			return nil
 		})
-		assert.ErrorContains(t, err, "unexpected state type. expected: *compose.testStruct, got: <nil>")
+		assert.ErrorContains(t, err, "cannot find state with type: *compose.testStruct in states chain, "+
+			"current state type: <nil>")
 	})
 
 	t.Run("getState_type_error", func(t *testing.T) {
@@ -216,7 +220,8 @@ func TestStateGraphUtils(t *testing.T) {
 		err := ProcessState[string](ctx, func(_ context.Context, state string) error {
 			return nil
 		})
-		assert.ErrorContains(t, err, "unexpected state type. expected: string, got: *compose.testStruct")
+		assert.ErrorContains(t, err, "cannot find state with type: string in states chain, "+
+			"current state type: *compose.testStruct")
 
 	})
 }
@@ -326,4 +331,435 @@ func TestStreamState(t *testing.T) {
 	if err != io.EOF {
 		t.Fatal("result is unexpected")
 	}
+}
+
+// Nested Graph State Tests
+
+type NestedOuterState struct {
+	Value   string
+	Counter int
+}
+
+type NestedInnerState struct {
+	Value string
+}
+
+func init() {
+	schema.RegisterName[*NestedOuterState]("NestedOuterState")
+	schema.RegisterName[*NestedInnerState]("NestedInnerState")
+}
+
+func TestNestedGraphStateAccess(t *testing.T) {
+	// Test that inner graph can access outer graph's state
+	genOuterState := func(ctx context.Context) *NestedOuterState {
+		return &NestedOuterState{Value: "outer", Counter: 0}
+	}
+
+	genInnerState := func(ctx context.Context) *NestedInnerState {
+		return &NestedInnerState{Value: "inner"}
+	}
+
+	innerNode := func(ctx context.Context, input string) (string, error) {
+		// Access both inner and outer state
+		var outerValue string
+		err := ProcessState(ctx, func(ctx context.Context, s *NestedOuterState) error {
+			outerValue = s.Value
+			return nil
+		})
+		if err != nil {
+			return "", err
+		}
+
+		var innerValue string
+		err = ProcessState(ctx, func(ctx context.Context, s *NestedInnerState) error {
+			innerValue = s.Value
+			return nil
+		})
+		if err != nil {
+			return "", err
+		}
+
+		return fmt.Sprintf("%s_inner=%s_outer=%s", input, innerValue, outerValue), nil
+	}
+
+	innerGraph := NewGraph[string, string](WithGenLocalState(genInnerState))
+	_ = innerGraph.AddLambdaNode("inner_node", InvokableLambda(innerNode))
+	_ = innerGraph.AddEdge(START, "inner_node")
+	_ = innerGraph.AddEdge("inner_node", END)
+
+	outerGraph := NewGraph[string, string](WithGenLocalState(genOuterState))
+	_ = outerGraph.AddGraphNode("inner_graph", innerGraph)
+	_ = outerGraph.AddEdge(START, "inner_graph")
+	_ = outerGraph.AddEdge("inner_graph", END)
+
+	r, err := outerGraph.Compile(context.Background())
+	assert.NoError(t, err)
+
+	out, err := r.Invoke(context.Background(), "start")
+	assert.NoError(t, err)
+	assert.Equal(t, "start_inner=inner_outer=outer", out)
+}
+
+func TestNestedGraphStateShadowing(t *testing.T) {
+	// Test that inner state shadows outer state of the same type (lexical scoping)
+	type CommonState struct {
+		Value string
+	}
+
+	genOuterState := func(ctx context.Context) *CommonState {
+		return &CommonState{Value: "outer"}
+	}
+
+	genInnerState := func(ctx context.Context) *CommonState {
+		return &CommonState{Value: "inner"}
+	}
+
+	innerNode := func(ctx context.Context, input string) (string, error) {
+		var value string
+		err := ProcessState(ctx, func(ctx context.Context, s *CommonState) error {
+			// Should see "inner" because inner state shadows outer state
+			value = s.Value
+			return nil
+		})
+		if err != nil {
+			return "", err
+		}
+		return input + "_" + value, nil
+	}
+
+	innerGraph := NewGraph[string, string](WithGenLocalState(genInnerState))
+	_ = innerGraph.AddLambdaNode("inner_node", InvokableLambda(innerNode))
+	_ = innerGraph.AddEdge(START, "inner_node")
+	_ = innerGraph.AddEdge("inner_node", END)
+
+	outerGraph := NewGraph[string, string](WithGenLocalState(genOuterState))
+	_ = outerGraph.AddGraphNode("inner_graph", innerGraph)
+	_ = outerGraph.AddEdge(START, "inner_graph")
+	_ = outerGraph.AddEdge("inner_graph", END)
+
+	r, err := outerGraph.Compile(context.Background())
+	assert.NoError(t, err)
+
+	out, err := r.Invoke(context.Background(), "start")
+	assert.NoError(t, err)
+	assert.Equal(t, "start_inner", out)
+}
+
+func TestNestedGraphStateAfterResume(t *testing.T) {
+	// Test that state parent linking works correctly after resume
+	// when the outer state is restored from checkpoint (new instance)
+	genOuterState := func(ctx context.Context) *NestedOuterState {
+		return &NestedOuterState{Value: "outer", Counter: 0}
+	}
+
+	genInnerState := func(ctx context.Context) *NestedInnerState {
+		return &NestedInnerState{Value: "inner"}
+	}
+
+	// Node that modifies outer state
+	outerNode := func(ctx context.Context, input string) (string, error) {
+		err := ProcessState(ctx, func(ctx context.Context, s *NestedOuterState) error {
+			s.Counter = 42
+			return nil
+		})
+		if err != nil {
+			return "", err
+		}
+		return input, nil
+	}
+
+	// Inner node that reads outer state
+	innerNode := func(ctx context.Context, input string) (string, error) {
+		var outerCounter int
+		var outerValue string
+		err := ProcessState(ctx, func(ctx context.Context, s *NestedOuterState) error {
+			// Should see the modified counter value from the restored state
+			outerCounter = s.Counter
+			outerValue = s.Value
+			return nil
+		})
+		if err != nil {
+			return "", err
+		}
+		return fmt.Sprintf("%s_counter=%d_value=%s", input, outerCounter, outerValue), nil
+	}
+
+	innerGraph := NewGraph[string, string](WithGenLocalState(genInnerState))
+	_ = innerGraph.AddLambdaNode("inner_node", InvokableLambda(innerNode))
+	_ = innerGraph.AddEdge(START, "inner_node")
+	_ = innerGraph.AddEdge("inner_node", END)
+
+	outerGraph := NewGraph[string, string](WithGenLocalState(genOuterState))
+	_ = outerGraph.AddLambdaNode("outer_node", InvokableLambda(outerNode))
+	_ = outerGraph.AddGraphNode("inner_graph", innerGraph, WithGraphCompileOptions(WithInterruptBeforeNodes([]string{"inner_node"})))
+	_ = outerGraph.AddEdge(START, "outer_node")
+	_ = outerGraph.AddEdge("outer_node", "inner_graph")
+	_ = outerGraph.AddEdge("inner_graph", END)
+
+	store := newInMemoryStore()
+	r, err := outerGraph.Compile(context.Background(), WithCheckPointStore(store))
+	assert.NoError(t, err)
+
+	// First run - should interrupt after modifying outer state
+	_, err = r.Invoke(context.Background(), "start", WithCheckPointID("state_resume_test"))
+	assert.Error(t, err)
+
+	// Resume - outer state should be restored with Counter=42
+	// Inner graph should link to this restored outer state
+	out, err := r.Invoke(context.Background(), "start", WithCheckPointID("state_resume_test"))
+	assert.NoError(t, err)
+	assert.Equal(t, "start_counter=42_value=outer", out)
+}
+
+func TestLambdaNestedGraphStateAccess(t *testing.T) {
+	// Test that inner graph invoked from a lambda can access outer graph's state
+	// This tests the case: outer graph -> lambda node -> inner graph (using CompositeInterrupt)
+	genOuterState := func(ctx context.Context) *NestedOuterState {
+		return &NestedOuterState{Value: "outer", Counter: 100}
+	}
+
+	genInnerState := func(ctx context.Context) *NestedInnerState {
+		return &NestedInnerState{Value: "inner"}
+	}
+
+	// Inner node that accesses outer state
+	innerNode := func(ctx context.Context, input string) (string, error) {
+		var outerValue string
+		var outerCounter int
+		err := ProcessState(ctx, func(ctx context.Context, s *NestedOuterState) error {
+			outerValue = s.Value
+			outerCounter = s.Counter
+			return nil
+		})
+		if err != nil {
+			return "", err
+		}
+
+		var innerValue string
+		err = ProcessState(ctx, func(ctx context.Context, s *NestedInnerState) error {
+			innerValue = s.Value
+			return nil
+		})
+		if err != nil {
+			return "", err
+		}
+
+		return fmt.Sprintf("%s_inner=%s_outer=%s_%d", input, innerValue, outerValue, outerCounter), nil
+	}
+
+	// Build inner graph
+	innerGraph := NewGraph[string, string](WithGenLocalState(genInnerState))
+	_ = innerGraph.AddLambdaNode("inner_node", InvokableLambda(innerNode))
+	_ = innerGraph.AddEdge(START, "inner_node")
+	_ = innerGraph.AddEdge("inner_node", END)
+
+	// Compile inner graph as a standalone runnable
+	innerRunnable, err := innerGraph.Compile(context.Background())
+	assert.NoError(t, err)
+
+	// Lambda that invokes the inner graph
+	lambdaNode := InvokableLambda(func(ctx context.Context, input string) (string, error) {
+		// Simply invoke the inner graph - state context is passed through
+		return innerRunnable.Invoke(ctx, input)
+	})
+
+	// Build outer graph
+	outerGraph := NewGraph[string, string](WithGenLocalState(genOuterState))
+	_ = outerGraph.AddLambdaNode("lambda_with_graph", lambdaNode)
+	_ = outerGraph.AddEdge(START, "lambda_with_graph")
+	_ = outerGraph.AddEdge("lambda_with_graph", END)
+
+	r, err := outerGraph.Compile(context.Background())
+	assert.NoError(t, err)
+
+	out, err := r.Invoke(context.Background(), "start")
+	assert.NoError(t, err)
+	assert.Equal(t, "start_inner=inner_outer=outer_100", out)
+}
+
+func TestLambdaNestedGraphStateAfterResume(t *testing.T) {
+	// Test that state parent linking works correctly after resume
+	// in the lambda-nested case (outer graph -> lambda -> inner graph)
+	genOuterState := func(ctx context.Context) *NestedOuterState {
+		return &NestedOuterState{Value: "outer", Counter: 0}
+	}
+
+	genInnerState := func(ctx context.Context) *NestedInnerState {
+		return &NestedInnerState{Value: "inner"}
+	}
+
+	// Outer node that modifies state
+	outerNode := func(ctx context.Context, input string) (string, error) {
+		err := ProcessState(ctx, func(ctx context.Context, s *NestedOuterState) error {
+			s.Counter = 99
+			return nil
+		})
+		if err != nil {
+			return "", err
+		}
+		return input, nil
+	}
+
+	// Inner lambda that interrupts on first run, reads outer state on resume
+	innerLambda := InvokableLambda(func(ctx context.Context, input string) (string, error) {
+		wasInterrupted, _, _ := GetInterruptState[*NestedInnerState](ctx)
+		if !wasInterrupted {
+			// First run: interrupt
+			return "", StatefulInterrupt(ctx, "inner interrupt", &NestedInnerState{Value: "inner"})
+		}
+
+		// Resumed: read outer state
+		var outerCounter int
+		var outerValue string
+		err := ProcessState(ctx, func(ctx context.Context, s *NestedOuterState) error {
+			// Should see the modified counter from the restored state
+			outerCounter = s.Counter
+			outerValue = s.Value
+			return nil
+		})
+		if err != nil {
+			return "", err
+		}
+
+		return fmt.Sprintf("%s_counter=%d_value=%s", input, outerCounter, outerValue), nil
+	})
+
+	// Build inner graph
+	innerGraph := NewGraph[string, string](WithGenLocalState(genInnerState))
+	_ = innerGraph.AddLambdaNode("inner_lambda", innerLambda)
+	_ = innerGraph.AddEdge(START, "inner_lambda")
+	_ = innerGraph.AddEdge("inner_lambda", END)
+
+	// Compile inner graph as standalone runnable with checkpoint support
+	innerRunnable, err := innerGraph.Compile(context.Background(),
+		WithGraphName("inner"),
+		WithCheckPointStore(newInMemoryStore()))
+	assert.NoError(t, err)
+
+	// Composite lambda that invokes the inner graph and handles interrupts
+	compositeLambda := InvokableLambda(func(ctx context.Context, input string) (string, error) {
+		output, err := innerRunnable.Invoke(ctx, input, WithCheckPointID("inner-cp"))
+		if err != nil {
+			_, isInterrupt := ExtractInterruptInfo(err)
+			if !isInterrupt {
+				return "", err
+			}
+			// Wrap the interrupt using CompositeInterrupt
+			return "", CompositeInterrupt(ctx, "composite interrupt", nil, err)
+		}
+		return output, nil
+	})
+
+	// Build outer graph
+	outerGraph := NewGraph[string, string](WithGenLocalState(genOuterState))
+	_ = outerGraph.AddLambdaNode("outer_node", InvokableLambda(outerNode))
+	_ = outerGraph.AddLambdaNode("composite_lambda", compositeLambda)
+	_ = outerGraph.AddEdge(START, "outer_node")
+	_ = outerGraph.AddEdge("outer_node", "composite_lambda")
+	_ = outerGraph.AddEdge("composite_lambda", END)
+
+	// Compile outer graph
+	outerRunnable, err := outerGraph.Compile(context.Background(),
+		WithGraphName("root"),
+		WithCheckPointStore(newInMemoryStore()))
+	assert.NoError(t, err)
+
+	// First run - should interrupt after modifying outer state
+	checkPointID := "lambda_state_resume_test"
+	_, err = outerRunnable.Invoke(context.Background(), "start", WithCheckPointID(checkPointID))
+	assert.Error(t, err)
+
+	interruptInfo, isInterrupt := ExtractInterruptInfo(err)
+	assert.True(t, isInterrupt)
+
+	// Resume - outer state should be restored with Counter=99
+	// Inner lambda should link to this restored outer state
+	ctx := ResumeWithData(context.Background(), interruptInfo.InterruptContexts[0].ID, nil)
+	out, err := outerRunnable.Invoke(ctx, "start", WithCheckPointID(checkPointID))
+	assert.NoError(t, err)
+
+	// Verify the inner lambda saw the modified counter from the restored outer state
+	assert.Contains(t, out, "counter=99")
+	assert.Contains(t, out, "value=outer")
+}
+
+func TestNestedGraphStateConcurrency(t *testing.T) {
+	// Test that concurrent access to parent and child states uses correct locks
+	// This verifies that ProcessState properly locks the parent state's mutex when accessing it
+	genOuterState := func(ctx context.Context) *NestedOuterState {
+		return &NestedOuterState{Value: "outer", Counter: 0}
+	}
+
+	genInnerState := func(ctx context.Context) *NestedInnerState {
+		return &NestedInnerState{Value: "inner"}
+	}
+
+	// Inner node that concurrently modifies both outer and inner state
+	innerNode := func(ctx context.Context, input string) (string, error) {
+		var wg sync.WaitGroup
+		errors := make(chan error, 20)
+
+		// Launch 10 goroutines that modify outer state
+		// If locks don't work correctly, we'll see race conditions
+		for i := 0; i < 10; i++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				err := ProcessState(ctx, func(ctx context.Context, s *NestedOuterState) error {
+					// ProcessState should hold the parent's lock during this entire function
+					current := s.Counter
+					time.Sleep(time.Millisecond) // Simulate work
+					s.Counter = current + 1
+					return nil
+				})
+				if err != nil {
+					errors <- err
+				}
+			}()
+		}
+
+		// Launch 10 goroutines that modify inner state
+		for i := 0; i < 10; i++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				err := ProcessState(ctx, func(ctx context.Context, s *NestedInnerState) error {
+					// This uses the inner state's own lock
+					return nil
+				})
+				if err != nil {
+					errors <- err
+				}
+			}()
+		}
+
+		wg.Wait()
+		close(errors)
+
+		// Check for errors
+		for err := range errors {
+			return "", err
+		}
+
+		return input, nil
+	}
+
+	innerGraph := NewGraph[string, string](WithGenLocalState(genInnerState))
+	_ = innerGraph.AddLambdaNode("inner_node", InvokableLambda(innerNode))
+	_ = innerGraph.AddEdge(START, "inner_node")
+	_ = innerGraph.AddEdge("inner_node", END)
+
+	outerGraph := NewGraph[string, string](WithGenLocalState(genOuterState))
+	_ = outerGraph.AddGraphNode("inner_graph", innerGraph)
+	_ = outerGraph.AddEdge(START, "inner_graph")
+	_ = outerGraph.AddEdge("inner_graph", END)
+
+	r, err := outerGraph.Compile(context.Background())
+	assert.NoError(t, err)
+
+	_, err = r.Invoke(context.Background(), "start")
+	assert.NoError(t, err)
+
+	// Note: This test is primarily validated by running with -race flag
+	// If locks don't work correctly, the race detector will catch it
 }

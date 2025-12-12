@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"io"
 
+	"github.com/cloudwego/eino/internal/core"
 	"github.com/cloudwego/eino/schema"
 )
 
@@ -149,10 +150,16 @@ type AgentAction struct {
 	BreakLoop *BreakLoopAction
 
 	CustomizedAction any
+
+	internalInterrupted *core.InterruptSignal
 }
 
 type RunStep struct {
 	agentName string
+}
+
+func init() {
+	schema.RegisterName[[]RunStep]("eino_run_step_list")
 }
 
 func (r *RunStep) String() string {

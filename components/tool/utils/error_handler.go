@@ -20,6 +20,7 @@ import (
 	"context"
 
 	"github.com/cloudwego/eino/components/tool"
+	"github.com/cloudwego/eino/compose"
 	"github.com/cloudwego/eino/schema"
 )
 
@@ -138,6 +139,9 @@ type errorHelper struct {
 
 func (s *errorHelper) InvokableRun(ctx context.Context, argumentsInJSON string, opts ...tool.Option) (string, error) {
 	result, err := s.i(ctx, argumentsInJSON, opts...)
+	if _, ok := compose.IsInterruptRerunError(err); ok {
+		return result, err
+	}
 	if err != nil {
 		return s.h(ctx, err), nil
 	}
@@ -151,6 +155,9 @@ type streamErrorHelper struct {
 
 func (s *streamErrorHelper) StreamableRun(ctx context.Context, argumentsInJSON string, opts ...tool.Option) (*schema.StreamReader[string], error) {
 	result, err := s.s(ctx, argumentsInJSON, opts...)
+	if _, ok := compose.IsInterruptRerunError(err); ok {
+		return result, err
+	}
 	if err != nil {
 		return schema.StreamReaderFromArray([]string{s.h(ctx, err)}), nil
 	}

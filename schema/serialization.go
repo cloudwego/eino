@@ -26,6 +26,7 @@ import (
 
 func init() {
 	RegisterName[Message]("_eino_message")
+	RegisterName[[]*Message]("_eino_message_slice")
 	RegisterName[Document]("_eino_document")
 	RegisterName[RoleType]("_eino_role_type")
 	RegisterName[ToolCall]("_eino_tool_call")

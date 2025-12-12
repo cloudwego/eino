@@ -53,7 +53,7 @@ func TestNewPlannerWithFormattedOutput(t *testing.T) {
 	assert.NotNil(t, p)
 
 	// Verify the planner's name and description
-	assert.Equal(t, "Planner", p.Name(ctx))
+	assert.Equal(t, "planner", p.Name(ctx))
 	assert.Equal(t, "a planner agent", p.Description(ctx))
 }
 
@@ -81,7 +81,7 @@ func TestNewPlannerWithToolCalling(t *testing.T) {
 	assert.NotNil(t, p)
 
 	// Verify the planner's name and description
-	assert.Equal(t, "Planner", p.Name(ctx))
+	assert.Equal(t, "planner", p.Name(ctx))
 	assert.Equal(t, "a planner agent", p.Description(ctx))
 }
 
@@ -99,9 +99,12 @@ func TestPlannerRunWithFormattedOutput(t *testing.T) {
 	// Create a plan response
 	planJSON := `{"steps":["Step 1", "Step 2", "Step 3"]}`
 	planMsg := schema.AssistantMessage(planJSON, nil)
+	sr, sw := schema.Pipe[*schema.Message](1)
+	sw.Send(planMsg, nil)
+	sw.Close()
 
 	// Mock the Generate method
-	mockChatModel.EXPECT().Generate(gomock.Any(), gomock.Any(), gomock.Any()).Return(planMsg, nil).Times(1)
+	mockChatModel.EXPECT().Stream(gomock.Any(), gomock.Any(), gomock.Any()).Return(sr, nil).Times(1)
 
 	// Create the PlannerConfig
 	conf := &PlannerConfig{
@@ -154,19 +157,22 @@ func TestPlannerRunWithToolCalling(t *testing.T) {
 		ID:   "tool_call_id",
 		Type: "function",
 		Function: schema.FunctionCall{
-			Name:      "Plan", // This should match PlanToolInfo.Name
+			Name:      "plan", // This should match PlanToolInfo.Name
 			Arguments: planArgs,
 		},
 	}
 
 	toolCallMsg := schema.AssistantMessage("", nil)
 	toolCallMsg.ToolCalls = []schema.ToolCall{toolCall}
+	sr, sw := schema.Pipe[*schema.Message](1)
+	sw.Send(toolCallMsg, nil)
+	sw.Close()
 
 	// Mock the WithTools method to return a model that will be used for Generate
 	mockToolCallingModel.EXPECT().WithTools(gomock.Any()).Return(mockToolCallingModel, nil).Times(1)
 
 	// Mock the Generate method to return the tool call message
-	mockToolCallingModel.EXPECT().Generate(gomock.Any(), gomock.Any(), gomock.Any()).Return(toolCallMsg, nil).Times(1)
+	mockToolCallingModel.EXPECT().Stream(gomock.Any(), gomock.Any(), gomock.Any()).Return(sr, nil).Times(1)
 
 	// Create the PlannerConfig with ToolCallingChatModel
 	conf := &PlannerConfig{
@@ -228,7 +234,7 @@ func TestNewExecutor(t *testing.T) {
 	assert.NotNil(t, executor)
 
 	// Verify the executor's name and description
-	assert.Equal(t, "Executor", executor.Name(ctx))
+	assert.Equal(t, "executor", executor.Name(ctx))
 	assert.Equal(t, "an executor agent", executor.Description(ctx))
 }
 
@@ -332,7 +338,7 @@ func TestNewReplanner(t *testing.T) {
 	assert.NotNil(t, rp)
 
 	// Verify the replanner's name and description
-	assert.Equal(t, "Replanner", rp.Name(ctx))
+	assert.Equal(t, "replanner", rp.Name(ctx))
 	assert.Equal(t, "a replanner agent", rp.Description(ctx))
 }
 
@@ -371,10 +377,13 @@ func TestReplannerRunWithPlan(t *testing.T) {
 
 	toolCallMsg := schema.AssistantMessage("", nil)
 	toolCallMsg.ToolCalls = []schema.ToolCall{toolCall}
+	sr, sw := schema.Pipe[*schema.Message](1)
+	sw.Send(toolCallMsg, nil)
+	sw.Close()
 
 	// Mock the Generate method
 	mockToolCallingModel.EXPECT().WithTools(gomock.Any()).Return(mockToolCallingModel, nil).Times(1)
-	mockToolCallingModel.EXPECT().Generate(gomock.Any(), gomock.Any(), gomock.Any()).Return(toolCallMsg, nil).Times(1)
+	mockToolCallingModel.EXPECT().Stream(gomock.Any(), gomock.Any(), gomock.Any()).Return(sr, nil).Times(1)
 
 	// Create the ReplannerConfig
 	conf := &ReplannerConfig{
@@ -470,10 +479,13 @@ func TestReplannerRunWithRespond(t *testing.T) {
 
 	toolCallMsg := schema.AssistantMessage("", nil)
 	toolCallMsg.ToolCalls = []schema.ToolCall{toolCall}
+	sr, sw := schema.Pipe[*schema.Message](1)
+	sw.Send(toolCallMsg, nil)
+	sw.Close()
 
 	// Mock the Generate method
 	mockToolCallingModel.EXPECT().WithTools(gomock.Any()).Return(mockToolCallingModel, nil).Times(1)
-	mockToolCallingModel.EXPECT().Generate(gomock.Any(), gomock.Any(), gomock.Any()).Return(toolCallMsg, nil).Times(1)
+	mockToolCallingModel.EXPECT().Stream(gomock.Any(), gomock.Any(), gomock.Any()).Return(sr, nil).Times(1)
 
 	// Create the ReplannerConfig
 	conf := &ReplannerConfig{
@@ -511,7 +523,8 @@ func TestReplannerRunWithRespond(t *testing.T) {
 	event, ok = iterator.Next()
 	assert.True(t, ok)
 	assert.NotNil(t, event.Action)
-	assert.True(t, event.Action.Exit)
+	assert.NotNil(t, event.Action.BreakLoop)
+	assert.False(t, event.Action.BreakLoop.Done)
 
 	_, ok = iterator.Next()
 	assert.False(t, ok)
@@ -531,13 +544,13 @@ func TestNewPlanExecuteAgent(t *testing.T) {
 	mockReplanner := mockAdk.NewMockAgent(ctrl)
 
 	// Set up expectations for the mock agents
-	mockPlanner.EXPECT().Name(gomock.Any()).Return("Planner").AnyTimes()
+	mockPlanner.EXPECT().Name(gomock.Any()).Return("planner").AnyTimes()
 	mockPlanner.EXPECT().Description(gomock.Any()).Return("a planner agent").AnyTimes()
 
-	mockExecutor.EXPECT().Name(gomock.Any()).Return("Executor").AnyTimes()
+	mockExecutor.EXPECT().Name(gomock.Any()).Return("executor").AnyTimes()
 	mockExecutor.EXPECT().Description(gomock.Any()).Return("an executor agent").AnyTimes()
 
-	mockReplanner.EXPECT().Name(gomock.Any()).Return("Replanner").AnyTimes()
+	mockReplanner.EXPECT().Name(gomock.Any()).Return("replanner").AnyTimes()
 	mockReplanner.EXPECT().Description(gomock.Any()).Return("a replanner agent").AnyTimes()
 
 	conf := &Config{
@@ -565,13 +578,13 @@ func TestPlanExecuteAgentWithReplan(t *testing.T) {
 	mockReplanner := mockAdk.NewMockAgent(ctrl)
 
 	// Set up expectations for the mock agents
-	mockPlanner.EXPECT().Name(gomock.Any()).Return("Planner").AnyTimes()
+	mockPlanner.EXPECT().Name(gomock.Any()).Return("planner").AnyTimes()
 	mockPlanner.EXPECT().Description(gomock.Any()).Return("a planner agent").AnyTimes()
 
-	mockExecutor.EXPECT().Name(gomock.Any()).Return("Executor").AnyTimes()
+	mockExecutor.EXPECT().Name(gomock.Any()).Return("executor").AnyTimes()
 	mockExecutor.EXPECT().Description(gomock.Any()).Return("an executor agent").AnyTimes()
 
-	mockReplanner.EXPECT().Name(gomock.Any()).Return("Replanner").AnyTimes()
+	mockReplanner.EXPECT().Name(gomock.Any()).Return("replanner").AnyTimes()
 	mockReplanner.EXPECT().Description(gomock.Any()).Return("a replanner agent").AnyTimes()
 
 	// Create a plan

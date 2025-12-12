@@ -251,7 +251,6 @@ For a quick introduction to building AI applications with Eino, we recommend sta
 
 ## Dependencies
 - Go 1.18 and above.
-- Eino relies on [kin-openapi](https://github.com/getkin/kin-openapi) 's OpenAPI JSONSchema implementation. In order to remain compatible with Go 1.18, we have fixed kin-openapi's version to be v0.118.0.
 
 ## Security
 

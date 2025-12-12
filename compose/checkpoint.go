@@ -20,6 +20,7 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/cloudwego/eino/internal/core"
 	"github.com/cloudwego/eino/internal/serialization"
 	"github.com/cloudwego/eino/schema"
 )
@@ -29,6 +30,7 @@ func init() {
 	schema.RegisterName[*dagChannel]("_eino_dag_channel")
 	schema.RegisterName[*pregelChannel]("_eino_pregel_channel")
 	schema.RegisterName[dependencyState]("_eino_dependency_state")
+	_ = serialization.GenericRegister[channel]("_eino_channel")
 }
 
 // RegisterSerializableType registers a custom type for eino serialization.
@@ -46,10 +48,7 @@ func RegisterSerializableType[T any](name string) (err error) {
 	return serialization.GenericRegister[T](name)
 }
 
-type CheckPointStore interface {
-	Get(ctx context.Context, checkPointID string) ([]byte, bool, error)
-	Set(ctx context.Context, checkPointID string, checkPoint []byte) error
-}
+type CheckPointStore = core.CheckPointStore
 
 type Serializer interface {
 	Marshal(v any) ([]byte, error)
@@ -66,23 +65,6 @@ func WithSerializer(serializer Serializer) GraphCompileOption {
 	return func(o *graphCompileOptions) {
 		o.serializer = serializer
 	}
-}
-
-// Deprecated: you won't need to call RegisterInternalType anymore.
-func RegisterInternalType(f func(key string, value any) error) error {
-	err := f("_eino_checkpoint", &checkpoint{})
-	if err != nil {
-		return err
-	}
-	err = f("_eino_dag_channel", &dagChannel{})
-	if err != nil {
-		return err
-	}
-	err = f("_eino_pregel_channel", &pregelChannel{})
-	if err != nil {
-		return err
-	}
-	return f("_eino_dependency_state", dependencyState(0))
 }
 
 func WithCheckPointID(checkPointID string) Option {
@@ -123,33 +105,14 @@ type checkpoint struct {
 	SkipPreHandler map[string]bool
 	RerunNodes     []string
 
-	ToolsNodeExecutedTools map[string] /*tool node key*/ map[string] /*tool call id*/ string
-
 	SubGraphs map[string]*checkpoint
+
+	InterruptID2Addr  map[string]Address
+	InterruptID2State map[string]core.InterruptState
 }
 
-type nodePathKey struct{}
 type stateModifierKey struct{}
 type checkPointKey struct{} // *checkpoint
-
-func getNodeKey(ctx context.Context) (*NodePath, bool) {
-	if key, ok := ctx.Value(nodePathKey{}).(*NodePath); ok {
-		return key, true
-	}
-	return nil, false
-}
-
-func setNodeKey(ctx context.Context, key string) context.Context {
-	path, existed := getNodeKey(ctx)
-	if !existed || len(path.path) == 0 {
-		return context.WithValue(ctx, nodePathKey{}, NewNodePath(key))
-	}
-	return context.WithValue(ctx, nodePathKey{}, NewNodePath(append(path.path, key)...))
-}
-
-func clearNodeKey(ctx context.Context) context.Context {
-	return context.WithValue(ctx, nodePathKey{}, nil)
-}
 
 func getStateModifier(ctx context.Context) StateModifier {
 	if sm, ok := ctx.Value(stateModifierKey{}).(StateModifier); ok {
@@ -175,6 +138,7 @@ func getCheckPointFromStore(ctx context.Context, id string, cpr *checkPointer) (
 }
 
 func setCheckPointToCtx(ctx context.Context, cp *checkpoint) context.Context {
+	ctx = core.PopulateInterruptState(ctx, cp.InterruptID2Addr, cp.InterruptID2State)
 	return context.WithValue(ctx, checkPointKey{}, cp)
 }
 
@@ -190,6 +154,7 @@ func forwardCheckPoint(ctx context.Context, nodeKey string) context.Context {
 	if cp == nil {
 		return ctx
 	}
+
 	if subCP, ok := cp.SubGraphs[nodeKey]; ok {
 		delete(cp.SubGraphs, nodeKey) // only forward once
 		return context.WithValue(ctx, checkPointKey{}, subCP)
