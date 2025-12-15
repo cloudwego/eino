@@ -17,10 +17,12 @@
 package schema
 
 import (
+	"encoding/json"
 	"testing"
 
 	"github.com/eino-contrib/jsonschema"
 	"github.com/smartystreets/goconvey/convey"
+	"github.com/stretchr/testify/assert"
 )
 
 func TestParamsOneOfToJSONSchema(t *testing.T) {
@@ -81,5 +83,53 @@ func TestParamsOneOfToJSONSchema(t *testing.T) {
 			converted, err = oneOf.ToJSONSchema()
 			convey.So(err, convey.ShouldBeNil)
 		})
+
+		convey.Convey("user provides map[string]ParameterInfo, converts to json schema in order", func() {
+			params := &ParamsOneOf{
+				params: map[string]*ParameterInfo{
+					"c": {
+						Type: "string",
+					},
+					"a": {
+						Type: "object",
+						SubParams: map[string]*ParameterInfo{
+							"z": {
+								Type: "number",
+							},
+							"y": {
+								Type: "string",
+							},
+						},
+					},
+					"b": {
+						Type: "array",
+						ElemInfo: &ParameterInfo{
+							Type: "object",
+							SubParams: map[string]*ParameterInfo{
+								"p": {
+									Type: "integer",
+								},
+								"o": {
+									Type: "boolean",
+								},
+							},
+						},
+					},
+				},
+			}
+
+			schema1, err := params.ToJSONSchema()
+			assert.NoError(t, err)
+			json1, err := json.Marshal(schema1)
+			assert.NoError(t, err)
+
+			schema2, err := params.ToJSONSchema()
+			assert.NoError(t, err)
+			json2, err := json.Marshal(schema2)
+			assert.NoError(t, err)
+
+			assert.Equal(t, string(json1), string(json2))
+		})
+
 	})
 }
