@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"io"
 
+	"github.com/cloudwego/eino/internal/core"
 	"github.com/cloudwego/eino/schema"
 )
 
@@ -146,11 +147,19 @@ type AgentAction struct {
 
 	TransferToAgent *TransferToAgentAction
 
+	BreakLoop *BreakLoopAction
+
 	CustomizedAction any
+
+	internalInterrupted *core.InterruptSignal
 }
 
 type RunStep struct {
 	agentName string
+}
+
+func init() {
+	schema.RegisterName[[]RunStep]("eino_run_step_list")
 }
 
 func (r *RunStep) String() string {
@@ -188,6 +197,14 @@ type runStepSerialization struct {
 type AgentEvent struct {
 	AgentName string
 
+	// RunPath semantics:
+	// - The eino framework prepends parent context exactly once: parentRunPath + event.RunPath.
+	// - Custom agents should NOT include parent segments; any provided RunPath is treated as relative child provenance.
+	// - Exact RunPath match against the framework's runCtx.RunPath governs recording to runSession.
+	// STRONG RECOMMENDATION: Custom agents should NOT set RunPath themselves unless they fully understand
+	//   the merge and recording rules. Setting parent or absolute paths can lead to duplicated segments
+	//   after merge and unexpected non-recording. Prefer leaving RunPath empty and let the framework set
+	//   context, or append only relative child segments when implementing advanced orchestration.
 	RunPath []RunStep
 
 	Output *AgentOutput

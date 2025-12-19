@@ -579,6 +579,94 @@ func TestHostMultiAgent(t *testing.T) {
 			},
 		}, mockCallback.infos)
 	})
+
+	t.Run("summarize multiple intents", func(t *testing.T) {
+
+		handOffMsg := &schema.Message{
+			Role: schema.Assistant,
+			ToolCalls: []schema.ToolCall{
+				{
+					Index: generic.PtrOf(0),
+					Function: schema.FunctionCall{
+						Name:      specialist1.Name,
+						Arguments: `{"reason": "specialist 1 is good"}`,
+					},
+				}, {
+					Index: generic.PtrOf(1),
+					Function: schema.FunctionCall{
+						Name:      specialist2.Name,
+						Arguments: `{"reason": "specialist 2 is also good"}`,
+					},
+				},
+			},
+		}
+		sr := schema.StreamReaderFromArray([]*schema.Message{
+			handOffMsg,
+		})
+
+		specialist1Msg1 := &schema.Message{
+			Role:    schema.Assistant,
+			Content: "specialist 1 answer",
+		}
+		sr1 := schema.StreamReaderFromArray([]*schema.Message{
+			specialist1Msg1,
+		})
+
+		const summaryContent = "summarized answer"
+		sr2 := schema.StreamReaderFromArray([]*schema.Message{
+			{
+				Role:    schema.Assistant,
+				Content: summaryContent,
+			},
+		})
+
+		mockSumChatModel := model.NewMockChatModel(ctrl)
+		hostMA, err = NewMultiAgent(ctx, &MultiAgentConfig{
+			Host: Host{
+				ToolCallingModel: mockHostLLM,
+			},
+			Specialists: []*Specialist{
+				specialist1,
+				specialist2,
+			},
+			Summarizer: &Summarizer{
+				ChatModel: mockSumChatModel,
+			},
+		})
+		assert.NoError(t, err)
+
+		mockHostLLM.EXPECT().Stream(gomock.Any(), gomock.Any()).Return(sr, nil).Times(1)
+		mockSpecialistLLM1.EXPECT().Stream(gomock.Any(), gomock.Any()).Return(sr1, nil).Times(1)
+		mockSumChatModel.EXPECT().Stream(gomock.Any(), gomock.Cond(func(x any) bool {
+			return assert.Equal(t, defaultSummarizerPrompt, func() string {
+				if input := x.([]*schema.Message); len(input) > 0 {
+					return input[0].Content
+				}
+				return ""
+			}())
+		})).Return(sr2, nil).Times(1)
+
+		outStream, err := hostMA.Stream(ctx, nil)
+		assert.NoError(t, err)
+
+		var msgs []*schema.Message
+		for {
+			msg, err := outStream.Recv()
+			if err == io.EOF {
+				break
+			}
+			assert.NoError(t, err)
+			msgs = append(msgs, msg)
+		}
+		outStream.Close()
+
+		msg, err := schema.ConcatMessages(msgs)
+		assert.NoError(t, err)
+		if msg.Content != summaryContent {
+			t.Errorf("Unexpected message content: %s", msg.Content)
+		}
+	},
+	)
 }
 
 type mockAgentCallback struct {

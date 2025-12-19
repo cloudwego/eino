@@ -145,8 +145,9 @@ const (
 
 // MessagePartCommon represents the common abstract components for input and output of multi-modal types.
 type MessagePartCommon struct {
-	// URL can either be a traditional URL or a special URL conforming to RFC-2397 (https://www.rfc-editor.org/rfc/rfc2397).
-	// double check with model implementations for detailed instructions on how to use this.
+	// URL is primarily used for HTTP or HTTPS access links.
+	// For data in the format 'data:[<mediatype>][;base64],<data>' (the 'data' URL Schema of RFC-2397 (https://www.rfc-editor.org/rfc/rfc2397)),
+	// it is recommended to use Base64Data and MIMEType fields separately instead.
 	URL *string `json:"url,omitempty"`
 
 	// Base64Data represents the binary data in Base64 encoded string format.
@@ -184,6 +185,10 @@ type MessageInputVideo struct {
 // Choose either URL or Base64Data.
 type MessageInputFile struct {
 	MessagePartCommon
+
+	// Name represents the filename.
+	// Optional.
+	Name string `json:"name,omitempty"`
 }
 
 // MessageInputPart represents the input part of message.
@@ -203,6 +208,9 @@ type MessageInputPart struct {
 
 	// File is the file input of the part, it's used when Type is "file_url".
 	File *MessageInputFile `json:"file,omitempty"`
+
+	// Extra is used to store extra information.
+	Extra map[string]any `json:"extra,omitempty"`
 }
 
 // MessageOutputImage is used to represent an image part in message.
@@ -237,9 +245,13 @@ type MessageOutputPart struct {
 
 	// Video is the video output of the part, used when Type is ChatMessagePartTypeVideoURL.
 	Video *MessageOutputVideo `json:"video,omitempty"`
+
+	// Extra is used to store extra information.
+	Extra map[string]any `json:"extra,omitempty"`
 }
 
 // Deprecated: This struct is deprecated as the MultiContent field is deprecated.
+// For the image input part of the model, use MessageInputImage, For the image output part of the model, use MessageOutputImage
 // ChatMessageImageURL is used to represent an image part in a chat message.
 // Choose either URL or URI.
 // If your model implementation supports it, URL could be used to embed inline image data as defined in RFC-2397.
@@ -277,6 +289,7 @@ const (
 )
 
 // Deprecated: This struct is deprecated as the MultiContent field is deprecated.
+// For the audio input part of the model, use MessageInputAudio, For the audio output part of the model, use MessageOutputAudio
 // ChatMessageAudioURL is used to represent an audio part in a chat message.
 // Choose either URL or URI.
 // If your model implementation supports it, URL could be used to embed inline audio data as defined in RFC-2397.
@@ -293,6 +306,7 @@ type ChatMessageAudioURL struct {
 }
 
 // Deprecated: This struct is deprecated as the MultiContent field is deprecated.
+// For the video input part of the model, use MessageInputVideo, For the video output part of the model, use MessageOutputVideo
 // ChatMessageVideoURL is used to represent an video part in a chat message.
 // Choose either URL or URI.
 // If your model implementation supports it, URL could be used to embed inline video data as defined in RFC-2397.
@@ -309,6 +323,7 @@ type ChatMessageVideoURL struct {
 }
 
 // Deprecated: This struct is deprecated as the MultiContent field is deprecated.
+// For the file input part of the model, use MessageInputFile
 // ChatMessageFileURL is used to represent an file part in a chat message.
 // Choose either URL or URI.
 type ChatMessageFileURL struct {
@@ -325,6 +340,7 @@ type ChatMessageFileURL struct {
 }
 
 // Deprecated: This struct is deprecated as the MultiContent field is deprecated.
+// For the input of the model, use MessageInputPart, For the output of the model, use MessageOutputPart
 // ChatMessagePart is the part in a chat message.
 type ChatMessagePart struct {
 	// Type is the type of the part, eg. "text", "image_url", "audio_url", "video_url", "file_url".
@@ -392,17 +408,61 @@ type ResponseMeta struct {
 	LogProbs *LogProbs `json:"logprobs,omitempty"`
 }
 
+// Message denotes the data structure for model input and output, originating from either user input or model return.
+// It supports both text-only and multimodal content.
+//
+// For text-only input from a user, use the Content field:
+//
+//	&schema.Message{
+//		Role:    schema.User,
+//		Content: "What is the capital of France?",
+//	}
+//
+// For multimodal input from a user, use the UserInputMultiContent field.
+// This allows combining text with other media like images:
+//
+//	&schema.Message{
+//		Role: schema.User,
+//		UserInputMultiContent: []schema.MessageInputPart{
+//			{Type: schema.ChatMessagePartTypeText, Text: "What is in this image?"},
+//			{Type: schema.ChatMessagePartTypeImageURL, Image: &schema.MessageInputImage{
+//				MessagePartCommon: schema.MessagePartCommon{
+//					URL: toPtr("https://example.com/cat.jpg"),
+//				},
+//				Detail: schema.ImageURLDetailHigh,
+//			}},
+//		},
+//	}
+//
+// When the model returns multimodal content, it is available in the AssistantGenMultiContent field:
+//
+//	&schema.Message{
+//		Role: schema.Assistant,
+//		AssistantGenMultiContent: []schema.MessageOutputPart{
+//			{Type: schema.ChatMessagePartTypeText, Text: "Here is the generated image:"},
+//			{Type: schema.ChatMessagePartTypeImage, Image: &schema.MessageOutputImage{
+//				MessagePartCommon: schema.MessagePartCommon{
+//					Base64Data: toPtr("base64_image_binary"),
+//					MIMEType:   "image/png",
+//				},
+//			}},
+//		},
+//	}
 type Message struct {
-	Role    RoleType `json:"role"`
-	Content string   `json:"content"`
+	Role RoleType `json:"role"`
+
+	// Content is for user text input and model text output.
+	Content string `json:"content"`
 
 	// if MultiContent is not empty, use this instead of Content
 	// if MultiContent is empty, use Content
-	// Deprecated: will no longer be maintained use UserInputMultiContent instead.
+	// Deprecated: Use UserInputMultiContent for user multimodal inputs and AssistantGenMultiContent for model multimodal outputs.
 	MultiContent []ChatMessagePart `json:"multi_content,omitempty"`
 
+	// UserInputMultiContent passes multimodal content provided by the user to the model.
 	UserInputMultiContent []MessageInputPart `json:"user_input_multi_content,omitempty"`
 
+	// AssistantGenMultiContent is for receiving multimodal output from the model.
 	AssistantGenMultiContent []MessageOutputPart `json:"assistant_output_multi_content,omitempty"`
 
 	Name string `json:"name,omitempty"`
@@ -434,6 +494,15 @@ type TokenUsage struct {
 	CompletionTokens int `json:"completion_tokens"`
 	// TotalTokens is the total number of tokens.
 	TotalTokens int `json:"total_tokens"`
+	// CompletionTokensDetails is breakdown of completion tokens.
+	CompletionTokensDetails CompletionTokensDetails `json:"completion_token_details"`
+}
+
+type CompletionTokensDetails struct {
+	// ReasoningTokens tokens generated by the model for reasoning.
+	// This is currently supported by OpenAI, Gemini, ARK and Qwen  chat models.
+	// For other models, this field will be 0.
+	ReasoningTokens int `json:"reasoning_tokens,omitempty"`
 }
 
 type PromptTokenDetails struct {
@@ -562,19 +631,35 @@ func (m *Message) Format(_ context.Context, vs map[string]any, formatType Format
 	copied := *m
 	copied.Content = c
 
-	if len(m.MultiContent) != 0 {
-		copied.MultiContent = make([]ChatMessagePart, len(m.MultiContent))
-		copy(copied.MultiContent, m.MultiContent)
+	if len(m.MultiContent) > 0 {
+		copied.MultiContent, err = formatMultiContent(m.MultiContent, vs, formatType)
+		if err != nil {
+			return nil, err
+		}
 	}
 
-	for i, mc := range copied.MultiContent {
+	if len(m.UserInputMultiContent) > 0 {
+		copied.UserInputMultiContent, err = formatUserInputMultiContent(m.UserInputMultiContent, vs, formatType)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	return []*Message{&copied}, nil
+}
+
+func formatMultiContent(multiContent []ChatMessagePart, vs map[string]any, formatType FormatType) ([]ChatMessagePart, error) {
+	copiedMC := make([]ChatMessagePart, len(multiContent))
+	copy(copiedMC, multiContent)
+
+	for i, mc := range copiedMC {
 		switch mc.Type {
 		case ChatMessagePartTypeText:
 			nmc, err := formatContent(mc.Text, vs, formatType)
 			if err != nil {
 				return nil, err
 			}
-			copied.MultiContent[i].Text = nmc
+			copiedMC[i].Text = nmc
 		case ChatMessagePartTypeImageURL:
 			if mc.ImageURL == nil {
 				continue
@@ -583,7 +668,7 @@ func (m *Message) Format(_ context.Context, vs map[string]any, formatType Format
 			if err != nil {
 				return nil, err
 			}
-			copied.MultiContent[i].ImageURL.URL = url
+			copiedMC[i].ImageURL.URL = url
 		case ChatMessagePartTypeAudioURL:
 			if mc.AudioURL == nil {
 				continue
@@ -592,7 +677,7 @@ func (m *Message) Format(_ context.Context, vs map[string]any, formatType Format
 			if err != nil {
 				return nil, err
 			}
-			copied.MultiContent[i].AudioURL.URL = url
+			copiedMC[i].AudioURL.URL = url
 		case ChatMessagePartTypeVideoURL:
 			if mc.VideoURL == nil {
 				continue
@@ -601,7 +686,7 @@ func (m *Message) Format(_ context.Context, vs map[string]any, formatType Format
 			if err != nil {
 				return nil, err
 			}
-			copied.MultiContent[i].VideoURL.URL = url
+			copiedMC[i].VideoURL.URL = url
 		case ChatMessagePartTypeFileURL:
 			if mc.FileURL == nil {
 				continue
@@ -610,10 +695,101 @@ func (m *Message) Format(_ context.Context, vs map[string]any, formatType Format
 			if err != nil {
 				return nil, err
 			}
-			copied.MultiContent[i].FileURL.URL = url
+			copiedMC[i].FileURL.URL = url
 		}
 	}
-	return []*Message{&copied}, nil
+
+	return copiedMC, nil
+}
+
+func formatUserInputMultiContent(userInputMultiContent []MessageInputPart, vs map[string]any, formatType FormatType) ([]MessageInputPart, error) {
+	copiedUIMC := make([]MessageInputPart, len(userInputMultiContent))
+	copy(copiedUIMC, userInputMultiContent)
+
+	for i, uimc := range copiedUIMC {
+		switch uimc.Type {
+		case ChatMessagePartTypeText:
+			text, err := formatContent(uimc.Text, vs, formatType)
+			if err != nil {
+				return nil, err
+			}
+			copiedUIMC[i].Text = text
+		case ChatMessagePartTypeImageURL:
+			if uimc.Image == nil {
+				continue
+			}
+			if uimc.Image.URL != nil && *uimc.Image.URL != "" {
+				url, err := formatContent(*uimc.Image.URL, vs, formatType)
+				if err != nil {
+					return nil, err
+				}
+				copiedUIMC[i].Image.URL = &url
+			}
+			if uimc.Image.Base64Data != nil && *uimc.Image.Base64Data != "" {
+				base64data, err := formatContent(*uimc.Image.Base64Data, vs, formatType)
+				if err != nil {
+					return nil, err
+				}
+				copiedUIMC[i].Image.Base64Data = &base64data
+			}
+		case ChatMessagePartTypeAudioURL:
+			if uimc.Audio == nil {
+				continue
+			}
+			if uimc.Audio.URL != nil && *uimc.Audio.URL != "" {
+				url, err := formatContent(*uimc.Audio.URL, vs, formatType)
+				if err != nil {
+					return nil, err
+				}
+				copiedUIMC[i].Audio.URL = &url
+			}
+			if uimc.Audio.Base64Data != nil && *uimc.Audio.Base64Data != "" {
+				base64data, err := formatContent(*uimc.Audio.Base64Data, vs, formatType)
+				if err != nil {
+					return nil, err
+				}
+				copiedUIMC[i].Audio.Base64Data = &base64data
+			}
+		case ChatMessagePartTypeVideoURL:
+			if uimc.Video == nil {
+				continue
+			}
+			if uimc.Video.URL != nil && *uimc.Video.URL != "" {
+				url, err := formatContent(*uimc.Video.URL, vs, formatType)
+				if err != nil {
+					return nil, err
+				}
+				copiedUIMC[i].Video.URL = &url
+			}
+			if uimc.Video.Base64Data != nil && *uimc.Video.Base64Data != "" {
+				base64data, err := formatContent(*uimc.Video.Base64Data, vs, formatType)
+				if err != nil {
+					return nil, err
+				}
+				copiedUIMC[i].Video.Base64Data = &base64data
+			}
+		case ChatMessagePartTypeFileURL:
+			if uimc.File == nil {
+				continue
+			}
+			if uimc.File.URL != nil && *uimc.File.URL != "" {
+				url, err := formatContent(*uimc.File.URL, vs, formatType)
+				if err != nil {
+					return nil, err
+				}
+				copiedUIMC[i].File.URL = &url
+			}
+			if uimc.File.Base64Data != nil && *uimc.File.Base64Data != "" {
+				base64data, err := formatContent(*uimc.File.Base64Data, vs, formatType)
+				if err != nil {
+					return nil, err
+				}
+				copiedUIMC[i].File.Base64Data = &base64data
+			}
+		}
+	}
+
+	return copiedUIMC, nil
 }
 
 // String returns the string representation of the message.
@@ -801,6 +977,111 @@ func concatToolCalls(chunks []ToolCall) ([]ToolCall, error) {
 	return merged, nil
 }
 
+func isBase64AudioPart(part MessageOutputPart) bool {
+	return part.Type == ChatMessagePartTypeAudioURL &&
+		part.Audio != nil &&
+		part.Audio.Base64Data != nil &&
+		part.Audio.URL == nil
+}
+
+func concatAssistantMultiContent(parts []MessageOutputPart) ([]MessageOutputPart, error) {
+	if len(parts) == 0 {
+		return parts, nil
+	}
+
+	merged := make([]MessageOutputPart, 0, len(parts))
+	i := 0
+	for i < len(parts) {
+		currentPart := parts[i]
+		start := i
+
+		if currentPart.Type == ChatMessagePartTypeText {
+			// --- Text Merging ---
+			// Find end of contiguous text block
+			end := start + 1
+			for end < len(parts) && parts[end].Type == ChatMessagePartTypeText {
+				end++
+			}
+
+			// If only one part, just append it
+			if end == start+1 {
+				merged = append(merged, currentPart)
+			} else {
+				// Multiple parts to merge
+				var sb strings.Builder
+				for k := start; k < end; k++ {
+					sb.WriteString(parts[k].Text)
+				}
+				mergedPart := MessageOutputPart{
+					Type: ChatMessagePartTypeText,
+					Text: sb.String(),
+				}
+				merged = append(merged, mergedPart)
+			}
+			i = end
+		} else if isBase64AudioPart(currentPart) {
+			// --- Audio Merging ---
+			// Find end of contiguous audio block
+			end := start + 1
+			for end < len(parts) && isBase64AudioPart(parts[end]) {
+				end++
+			}
+
+			// If only one part, just append it
+			if end == start+1 {
+				merged = append(merged, currentPart)
+			} else {
+				// Multiple parts to merge
+				var b64Builder strings.Builder
+				var mimeType string
+				extraList := make([]map[string]any, 0, end-start)
+
+				for k := start; k < end; k++ {
+					audioPart := parts[k].Audio
+					if audioPart.Base64Data != nil {
+						b64Builder.WriteString(*audioPart.Base64Data)
+					}
+					if mimeType == "" {
+						mimeType = audioPart.MIMEType
+					}
+					if len(audioPart.Extra) > 0 {
+						extraList = append(extraList, audioPart.Extra)
+					}
+				}
+
+				var mergedExtra map[string]any
+				var err error
+				if len(extraList) > 0 {
+					mergedExtra, err = concatExtra(extraList)
+					if err != nil {
+						return nil, fmt.Errorf("failed to concat audio extra: %w", err)
+					}
+				}
+
+				mergedB64 := b64Builder.String()
+				mergedPart := MessageOutputPart{
+					Type: ChatMessagePartTypeAudioURL,
+					Audio: &MessageOutputAudio{
+						MessagePartCommon: MessagePartCommon{
+							Base64Data: &mergedB64,
+							MIMEType:   mimeType,
+							Extra:      mergedExtra,
+						},
+					},
+				}
+				merged = append(merged, mergedPart)
+			}
+			i = end
+		} else {
+			// --- Non-mergeable part ---
+			merged = append(merged, currentPart)
+			i++
+		}
+	}
+
+	return merged, nil
+}
+
 func concatExtra(extraList []map[string]any) (map[string]any, error) {
 	if len(extraList) == 1 {
 		return generic.CopyMap(extraList[0]), nil
@@ -828,13 +1109,15 @@ func concatExtra(extraList []map[string]any) (map[string]any, error) {
 // concatedMsg, err := ConcatMessages(msgs) // concatedMsg.Content will be full content of all messages
 func ConcatMessages(msgs []*Message) (*Message, error) {
 	var (
-		contents            []string
-		contentLen          int
-		reasoningContents   []string
-		reasoningContentLen int
-		toolCalls           []ToolCall
-		ret                 = Message{}
-		extraList           = make([]map[string]any, 0, len(msgs))
+		contents                      []string
+		contentLen                    int
+		reasoningContents             []string
+		reasoningContentLen           int
+		toolCalls                     []ToolCall
+		multiContentParts             []ChatMessagePart
+		assistantGenMultiContentParts []MessageOutputPart
+		ret                           = Message{}
+		extraList                     = make([]map[string]any, 0, len(msgs))
 	)
 
 	for idx, msg := range msgs {
@@ -894,9 +1177,13 @@ func ConcatMessages(msgs []*Message) (*Message, error) {
 			extraList = append(extraList, msg.Extra)
 		}
 
-		// There's no scenario that requires to concat messages with MultiContent currently
+		// The 'MultiContent' field is deprecated but is kept for backward compatibility.
 		if len(msg.MultiContent) > 0 {
-			ret.MultiContent = msg.MultiContent
+			multiContentParts = append(multiContentParts, msg.MultiContent...)
+		}
+
+		if len(msg.AssistantGenMultiContent) > 0 {
+			assistantGenMultiContentParts = append(assistantGenMultiContentParts, msg.AssistantGenMultiContent...)
 		}
 
 		if msg.ResponseMeta != nil && ret.ResponseMeta == nil {
@@ -990,6 +1277,18 @@ func ConcatMessages(msgs []*Message) (*Message, error) {
 		if len(extra) > 0 {
 			ret.Extra = extra
 		}
+	}
+
+	if len(multiContentParts) > 0 {
+		ret.MultiContent = multiContentParts
+	}
+
+	if len(assistantGenMultiContentParts) > 0 {
+		merged, err := concatAssistantMultiContent(assistantGenMultiContentParts)
+		if err != nil {
+			return nil, fmt.Errorf("failed to concat message's assistant multi content: %w", err)
+		}
+		ret.AssistantGenMultiContent = merged
 	}
 
 	return &ret, nil

@@ -17,74 +17,13 @@
 package schema
 
 import (
+	"encoding/json"
 	"testing"
 
 	"github.com/eino-contrib/jsonschema"
-	"github.com/getkin/kin-openapi/openapi3"
 	"github.com/smartystreets/goconvey/convey"
-	orderedmap "github.com/wk8/go-ordered-map/v2"
+	"github.com/stretchr/testify/assert"
 )
-
-func TestParamsOneOfToOpenAPIV3(t *testing.T) {
-	convey.Convey("ParamsOneOfToOpenAPIV3", t, func() {
-		var (
-			oneOf     ParamsOneOf
-			converted any
-			err       error
-		)
-
-		convey.Convey("user provides openAPIV3.0 json schema directly, use what the user provides", func() {
-			oneOf.openAPIV3 = &openapi3.Schema{
-				Type:        openapi3.TypeString,
-				Description: "this is the only argument",
-			}
-			converted, err = oneOf.ToOpenAPIV3()
-			convey.So(err, convey.ShouldBeNil)
-			convey.So(converted, convey.ShouldResemble, oneOf.openAPIV3)
-		})
-
-		convey.Convey("user provides map[string]ParameterInfo, converts to json schema", func() {
-			oneOf.params = map[string]*ParameterInfo{
-				"arg1": {
-					Type:     String,
-					Desc:     "this is the first argument",
-					Required: true,
-					Enum:     []string{"1", "2"},
-				},
-				"arg2": {
-					Type: Object,
-					Desc: "this is the second argument",
-					SubParams: map[string]*ParameterInfo{
-						"sub_arg1": {
-							Type:     String,
-							Desc:     "this is the sub argument",
-							Required: true,
-							Enum:     []string{"1", "2"},
-						},
-						"sub_arg2": {
-							Type: String,
-							Desc: "this is the sub argument 2",
-						},
-					},
-					Required: true,
-				},
-				"arg3": {
-					Type: Array,
-					Desc: "this is the third argument",
-					ElemInfo: &ParameterInfo{
-						Type:     String,
-						Desc:     "this is the element of the third argument",
-						Required: true,
-						Enum:     []string{"1", "2"},
-					},
-					Required: true,
-				},
-			}
-			converted, err = oneOf.ToOpenAPIV3()
-			convey.So(err, convey.ShouldBeNil)
-		})
-	})
-}
 
 func TestParamsOneOfToJSONSchema(t *testing.T) {
 	convey.Convey("ParamsOneOfToJSONSchema", t, func() {
@@ -144,107 +83,53 @@ func TestParamsOneOfToJSONSchema(t *testing.T) {
 			converted, err = oneOf.ToJSONSchema()
 			convey.So(err, convey.ShouldBeNil)
 		})
-	})
-}
 
-func TestJsonSchemaToOpenAPIV3(t *testing.T) {
-	convey.Convey("", t, func() {
-		js := &jsonschema.Schema{
-			Type:        "object",
-			Description: "this is the only argument",
-			Properties: orderedmap.New[string, *jsonschema.Schema](
-				orderedmap.WithInitialData(
-					orderedmap.Pair[string, *jsonschema.Schema]{
-						Key: "arg2",
-						Value: &jsonschema.Schema{
-							Type:        "array",
-							Description: "this is the second argument",
-							Items: &jsonschema.Schema{
-								Type:        "string",
-								Description: "this is the element of the second argument",
+		convey.Convey("user provides map[string]ParameterInfo, converts to json schema in order", func() {
+			params := &ParamsOneOf{
+				params: map[string]*ParameterInfo{
+					"c": {
+						Type: "string",
+					},
+					"a": {
+						Type: "object",
+						SubParams: map[string]*ParameterInfo{
+							"z": {
+								Type: "number",
+							},
+							"y": {
+								Type: "string",
 							},
 						},
 					},
-				),
-			),
-			Extras: map[string]any{
-				"key": "val",
-			},
-		}
-
-		expect := &openapi3.SchemaRef{
-			Value: &openapi3.Schema{
-				Type:        openapi3.TypeObject,
-				Description: "this is the only argument",
-				Properties: map[string]*openapi3.SchemaRef{
-					"arg2": {
-						Value: &openapi3.Schema{
-							Type:        openapi3.TypeArray,
-							Description: "this is the second argument",
-							Items: &openapi3.SchemaRef{
-								Value: &openapi3.Schema{
-									Type:        openapi3.TypeString,
-									Description: "this is the element of the second argument",
+					"b": {
+						Type: "array",
+						ElemInfo: &ParameterInfo{
+							Type: "object",
+							SubParams: map[string]*ParameterInfo{
+								"p": {
+									Type: "integer",
+								},
+								"o": {
+									Type: "boolean",
 								},
 							},
 						},
 					},
 				},
-				Extensions: map[string]any{
-					"key": "val",
-				},
-			},
-		}
+			}
 
-		js_, err := jsonSchemaToOpenAPIV3(js)
-		convey.So(err, convey.ShouldBeNil)
-		convey.So(js_, convey.ShouldEqual, expect)
-	})
-}
+			schema1, err := params.ToJSONSchema()
+			assert.NoError(t, err)
+			json1, err := json.Marshal(schema1)
+			assert.NoError(t, err)
 
-func TestOpenAPIV3ToJSONSchema(t *testing.T) {
-	convey.Convey("", t, func() {
-		openAPIV3 := &openapi3.SchemaRef{
-			Value: &openapi3.Schema{
-				Type:        openapi3.TypeObject,
-				Description: "this is the only argument",
-				Properties: map[string]*openapi3.SchemaRef{
-					"arg1": {
-						Value: &openapi3.Schema{
-							Type:        openapi3.TypeString,
-							Description: "this is the first argument",
-						},
-					},
-				},
-				Required: []string{"arg1"},
-				Extensions: map[string]any{
-					"key": "val",
-				},
-			},
-		}
+			schema2, err := params.ToJSONSchema()
+			assert.NoError(t, err)
+			json2, err := json.Marshal(schema2)
+			assert.NoError(t, err)
 
-		expected := &jsonschema.Schema{
-			Type:        "object",
-			Description: "this is the only argument",
-			Properties: orderedmap.New[string, *jsonschema.Schema](
-				orderedmap.WithInitialData(
-					orderedmap.Pair[string, *jsonschema.Schema]{
-						Key: "arg1",
-						Value: &jsonschema.Schema{
-							Type:        "string",
-							Description: "this is the first argument",
-						},
-					},
-				),
-			),
-			Required: []string{"arg1"},
-			Extras: map[string]any{
-				"key": "val",
-			},
-		}
+			assert.Equal(t, string(json1), string(json2))
+		})
 
-		js, err := openapiV3ToJSONSchema(openAPIV3.Value)
-		convey.So(err, convey.ShouldBeNil)
-		convey.So(js, convey.ShouldResemble, expected)
 	})
 }

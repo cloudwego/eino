@@ -246,7 +246,6 @@ Eino 框架由几个部分组成：
 
 ## 依赖说明
 - Go 1.18 及以上版本
-- Eino 依赖了 [kin-openapi](https://github.com/getkin/kin-openapi) 的 OpenAPI JSONSchema 实现。为了能够兼容 Go 1.18 版本，我们将 kin-openapi 的版本固定在了 v0.118.0。
 
 ## 安全
 

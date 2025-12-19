@@ -32,8 +32,9 @@ type GenLocalState[S any] func(ctx context.Context) (state S)
 type stateKey struct{}
 
 type internalState struct {
-	state any
-	mu    sync.Mutex
+	state  any
+	mu     sync.Mutex
+	parent *internalState
 }
 
 // StatePreHandler is a function called before the node is executed.
@@ -113,12 +114,25 @@ func streamConvertPostHandler[O, S any](handler StreamStatePostHandler[O, S]) *c
 // ProcessState processes the state from the context in a concurrency-safe way.
 // This is the recommended way to access and modify state in custom nodes.
 // The provided function handler will be executed with exclusive access to the state (protected by mutex).
-// note: this method will report error if state type doesn't match or state is not found in context
-// e.g.
+//
+// State Lookup Behavior:
+// - If the requested state type exists in the current graph, it will be returned
+// - If not found in current graph, ProcessState will search in parent graph states (for nested graphs)
+// - This enables nested graphs to access state from their parent graphs
+// - Follows lexical scoping: inner state of the same type shadows outer state
+//
+// Concurrency Safety:
+// - ProcessState automatically locks the mutex of the state being accessed (current or parent level)
+// - Each state level has its own mutex, allowing concurrent access to different levels
+// - The lock is held for the entire duration of the handler function
+//
+// Note: This method will report an error if the state type doesn't match or state is not found in the context chain.
+//
+// Example - Basic usage in a single graph:
 //
 //	lambdaFunc := func(ctx context.Context, in string, opts ...any) (string, error) {
-//		err := compose.ProcessState[*testState](ctx, func(state *testState) error {
-//			// do something with state in a concurrency-safe way
+//		err := compose.ProcessState[*MyState](ctx, func(ctx context.Context, state *MyState) error {
+//			// Safely modify state
 //			state.Count++
 //			return nil
 //		})
@@ -128,8 +142,26 @@ func streamConvertPostHandler[O, S any](handler StreamStatePostHandler[O, S]) *c
 //		return in, nil
 //	}
 //
-//	stateGraph := compose.NewStateGraph[string, string, testState](genStateFunc)
-//	stateGraph.AddNode("node1", lambdaFunc)
+// Example - Nested graph accessing parent state:
+//
+//	// In an inner graph node
+//	innerNode := func(ctx context.Context, input string) (string, error) {
+//		// Access parent graph's state
+//		err := compose.ProcessState[*OuterState](ctx, func(ctx context.Context, s *OuterState) error {
+//			s.Counter++  // Safely modify parent state
+//			return nil
+//		})
+//		if err != nil {
+//			return "", err
+//		}
+//
+//		// Also access inner graph's own state
+//		err = compose.ProcessState[*InnerState](ctx, func(ctx context.Context, s *InnerState) error {
+//			s.Data = "processed"
+//			return nil
+//		})
+//		return input, nil
+//	}
 func ProcessState[S any](ctx context.Context, handler func(context.Context, S) error) error {
 	s, pMu, err := getState[S](ctx)
 	if err != nil {
@@ -150,12 +182,15 @@ func getState[S any](ctx context.Context) (S, *sync.Mutex, error) {
 
 	interState := state.(*internalState)
 
-	cState, ok := interState.state.(S)
-	if !ok {
-		var s S
-		return s, nil, fmt.Errorf("unexpected state type. expected: %v, got: %v",
-			generic.TypeOf[S](), reflect.TypeOf(interState.state))
+	for interState != nil {
+		if cState, ok := interState.state.(S); ok {
+			return cState, &interState.mu, nil
+		}
+		interState = interState.parent
 	}
 
-	return cState, &interState.mu, nil
+	var s S
+	return s, nil, fmt.Errorf("cannot find state with type: %v in states chain, "+
+		"current state type: %v",
+		generic.TypeOf[S](), reflect.TypeOf(state.(*internalState).state))
 }

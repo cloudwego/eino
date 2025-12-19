@@ -303,11 +303,11 @@ func addMultiIntentsSummarizeNode(summarizer *Summarizer, g *compose.Graph[[]*sc
 				)
 				if summarizer.SystemPrompt != "" {
 					systemPrompt = summarizer.SystemPrompt
-					out = append(out, &schema.Message{
-						Role:    schema.System,
-						Content: systemPrompt,
-					})
 				}
+				out = append(out, &schema.Message{
+					Role:    schema.System,
+					Content: systemPrompt,
+				})
 
 				out = append(out, state.msgs...)
 				out = append(out, in...)

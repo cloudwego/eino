@@ -23,7 +23,6 @@ import (
 
 	"github.com/bytedance/sonic"
 	"github.com/eino-contrib/jsonschema"
-	"github.com/getkin/kin-openapi/openapi3gen"
 
 	"github.com/cloudwego/eino/components/tool"
 	"github.com/cloudwego/eino/internal/generic"
@@ -83,23 +82,6 @@ func goStruct2ToolInfo[T any](toolName, toolDesc string, opts ...Option) (*schem
 
 func goStruct2ParamsOneOf[T any](opts ...Option) (*schema.ParamsOneOf, error) {
 	options := getToolOptions(opts...)
-
-	if options.sc != nil && options.scModifier != nil {
-		return nil, fmt.Errorf("'SchemaCustomizerFn' and 'SchemaModifierFn' cannot be set at the same time")
-	}
-
-	// To be compatible with the current logic, if 'SchemaCustomizerFn' is defined, OpenAPIV3 Schema is still used.
-	if options.sc != nil {
-		sc, err := openapi3gen.NewSchemaRefForValue(generic.NewInstance[T](), nil,
-			openapi3gen.SchemaCustomizer(openapi3gen.SchemaCustomizerFn(options.sc)))
-		if err != nil {
-			return nil, fmt.Errorf("new SchemaRef from T failed: %w", err)
-		}
-
-		paramsOneOf := schema.NewParamsOneOfByOpenAPIV3(sc.Value)
-
-		return paramsOneOf, nil
-	}
 
 	r := &jsonschema.Reflector{
 		Anonymous:      true,

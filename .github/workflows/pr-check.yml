@@ -39,3 +39,118 @@ jobs:
         with:
           version: latest
           args: --timeout 5m
+
+  commit-msg-check:
+    name: Commit Message Check
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate commit messages format and scope
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const fs = require('fs');
+            const pr = context.payload.pull_request;
+            if (!pr) {
+              core.setFailed('This workflow must run on pull_request events.');
+              return;
+            }
+
+            let allowedTypes = [];
+            let allowedScopes = [];
+            try {
+              const raw = fs.readFileSync('.github/.commit-rules.json', 'utf8');
+              const cfg = JSON.parse(raw);
+              allowedTypes = Array.isArray(cfg.allowedTypes) ? cfg.allowedTypes : [];
+              allowedScopes = Array.isArray(cfg.allowedScopes) ? cfg.allowedScopes : [];
+            } catch (e) {
+              core.setFailed('Cannot read .github/.commit-rules.json: ' + e.message);
+              return;
+            }
+            if (!allowedTypes.length) {
+              core.setFailed('allowedTypes is empty in .github/.commit-rules.json');
+              return;
+            }
+
+            const { owner, repo } = context.repo;
+            const pull_number = pr.number;
+            const commits = await github.paginate(
+              github.rest.pulls.listCommits,
+              { owner, repo, pull_number, per_page: 100 }
+            );
+
+            let errors = [];
+
+            for (const c of commits) {
+              const sha = c.sha.slice(0, 7);
+              const subject = (c.commit.message || '').split('\n')[0];
+              const m = subject.match(/^([a-z]+)(\(([a-z0-9\-\/]+)\))?:\s(.+)$/);
+              if (!m) {
+                errors.push(`(${sha}) invalid format: "${subject}"`);
+                continue;
+              }
+
+              const type = m[1];
+              const scope = m[3]; // may be undefined
+              const desc = m[4];
+
+              if (!allowedTypes.includes(type)) {
+                errors.push(`(${sha}) invalid type "${type}"`);
+              }
+
+              if (!desc || !desc.trim()) {
+                errors.push(`(${sha}) description must be non-empty`);
+              }
+
+              if (scope) {
+                const topScope = scope.split('/')[0];
+                if (allowedScopes.length && !allowedScopes.includes(topScope)) {
+                  errors.push(`(${sha}) invalid scope "${scope}"`);
+                }
+              }
+            }
+
+            if (errors.length) {
+              core.setFailed('Commit message check failed:\n' + errors.join('\n'));
+            } else {
+              core.info('All commit messages conform to "<type>(optional scope): <description>" and scope rules.');
+            }
+
+  pr-title-check:
+    name: PR Title Check
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+    steps:
+      - uses: actions/checkout@v4
+      - name: Read commit rules
+        id: rules
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const fs = require('fs');
+            let cfg;
+            try {
+              const raw = fs.readFileSync('.github/.commit-rules.json', 'utf8');
+              cfg = JSON.parse(raw);
+            } catch (e) {
+              core.setFailed('Cannot read .github/.commit-rules.json: ' + e.message);
+              return;
+            }
+            const toMultiline = (list) => Array.isArray(list) ? list.join('\n') : '';
+            core.setOutput('types', toMultiline(cfg.allowedTypes));
+            core.setOutput('scopes', toMultiline(cfg.allowedScopes));
+      - name: Validate PR title
+        uses: amannn/action-semantic-pull-request@v6.1.1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          types: ${{ steps.rules.outputs.types }}
+          scopes: ${{ steps.rules.outputs.scopes }}
+          requireScope: false

@@ -128,6 +128,68 @@ func TestReact(t *testing.T) {
 	}
 }
 
+func TestReactWithMessageRewriterAndModifier(t *testing.T) {
+	ctx := context.Background()
+
+	ctrl := gomock.NewController(t)
+	cm := mockModel.NewMockToolCallingChatModel(ctrl)
+
+	// This test simulates a single Generate call with a long history.
+	// The MessageRewriter should shorten the history.
+	// The MessageModifier should add a system prompt.
+
+	cm.EXPECT().Generate(gomock.Any(), gomock.Any(), gomock.Any()).
+		DoAndReturn(func(ctx context.Context, input []*schema.Message, opts ...model.Option) (*schema.Message, error) {
+			// Check messages passed to the model.
+			// Expected: [system prompt, user: "message 2", assistant: "response 2"]
+			assert.Len(t, input, 3)
+			assert.Equal(t, schema.System, input[0].Role)
+			assert.Equal(t, "system prompt", input[0].Content)
+			assert.Equal(t, schema.User, input[1].Role)
+			assert.Equal(t, "message 2", input[1].Content)
+			assert.Equal(t, schema.Assistant, input[2].Role)
+			assert.Equal(t, "response 2", input[2].Content)
+			return schema.AssistantMessage("final response", nil), nil
+		}).Times(1)
+	cm.EXPECT().WithTools(gomock.Any()).Return(cm, nil).AnyTimes()
+
+	ra, err := NewAgent(ctx, &AgentConfig{
+		ToolCallingModel: cm,
+		MessageRewriter: func(ctx context.Context, messages []*schema.Message) []*schema.Message {
+			// Keep only the last 2 messages if history is longer.
+			assert.Len(t, messages, 4) // user1, assistant1, user2, assistant2
+			if len(messages) > 2 {
+				return messages[len(messages)-2:]
+			}
+			return messages
+		},
+		MessageModifier: func(ctx context.Context, messages []*schema.Message) []*schema.Message {
+			// messages should be the result from rewriter
+			assert.Len(t, messages, 2) // user2, assistant2
+
+			// Add a system prompt
+			res := make([]*schema.Message, 0, len(messages)+1)
+			res = append(res, schema.SystemMessage("system prompt"))
+			res = append(res, messages...)
+			return res
+		},
+	})
+	assert.NoError(t, err)
+
+	// Simulate a conversation history
+	history := []*schema.Message{
+		schema.UserMessage("message 1"),
+		schema.AssistantMessage("response 1", nil),
+		schema.UserMessage("message 2"),
+		schema.AssistantMessage("response 2", nil),
+	}
+
+	// Run the react agent
+	finalMsg, err := ra.Generate(ctx, history)
+	assert.NoError(t, err)
+	assert.Equal(t, "final response", finalMsg.Content)
+}
+
 func TestReactStream(t *testing.T) {
 	ctx := context.Background()
 

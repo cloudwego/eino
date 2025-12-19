@@ -161,20 +161,6 @@ func (a *flowAgent) getAgent(ctx context.Context, name string) *flowAgent {
 	return nil
 }
 
-func belongToRunPath(eventRunPath []RunStep, runPath []RunStep) bool {
-	if len(runPath) < len(eventRunPath) {
-		return false
-	}
-
-	for i, step := range eventRunPath {
-		if !runPath[i].Equals(step) {
-			return false
-		}
-	}
-
-	return true
-}
-
 func rewriteMessage(msg Message, agentName string) Message {
 	var sb strings.Builder
 	sb.WriteString("For context:")
@@ -219,7 +205,6 @@ func (ai *AgentInput) deepCopy() *AgentInput {
 
 func (a *flowAgent) genAgentInput(ctx context.Context, runCtx *runContext, skipTransferMessages bool) (*AgentInput, error) {
 	input := runCtx.RootInput.deepCopy()
-	runPath := runCtx.RunPath
 
 	events := runCtx.Session.getEvents()
 	historyEntries := make([]*HistoryEntry, 0)
@@ -232,10 +217,6 @@ func (a *flowAgent) genAgentInput(ctx context.Context, runCtx *runContext, skipT
 	}
 
 	for _, event := range events {
-		if !belongToRunPath(event.RunPath, runPath) {
-			continue
-		}
-
 		if skipTransferMessages && event.Action != nil && event.Action.TransferToAgent != nil {
 			// If skipTransferMessages is true and the event contain transfer action, the message in this event won't be appended to history entries.
 			if event.Output != nil &&
@@ -297,7 +278,9 @@ func buildDefaultHistoryRewriter(agentName string) HistoryRewriter {
 func (a *flowAgent) Run(ctx context.Context, input *AgentInput, opts ...AgentRunOption) *AsyncIterator[*AgentEvent] {
 	agentName := a.Name(ctx)
 
-	ctx, runCtx := initRunCtx(ctx, agentName, input)
+	var runCtx *runContext
+	ctx, runCtx = initRunCtx(ctx, agentName, input)
+	ctx = AppendAddressSegment(ctx, AddressSegmentAgent, agentName)
 
 	o := getCommonOptions(nil, opts...)
 
@@ -320,41 +303,35 @@ func (a *flowAgent) Run(ctx context.Context, input *AgentInput, opts ...AgentRun
 }
 
 func (a *flowAgent) Resume(ctx context.Context, info *ResumeInfo, opts ...AgentRunOption) *AsyncIterator[*AgentEvent] {
-	runCtx := getRunCtx(ctx)
-	if runCtx == nil {
-		return genErrorIter(fmt.Errorf("failed to resume agent: run context is empty"))
-	}
+	ctx, info = buildResumeInfo(ctx, a.Name(ctx), info)
 
-	agentName := a.Name(ctx)
-	targetName := agentName
-	if len(runCtx.RunPath) > 0 {
-		targetName = runCtx.RunPath[len(runCtx.RunPath)-1].agentName
-	}
-
-	if agentName != targetName {
-		// go to target flow agent
-		targetAgent := recursiveGetAgent(ctx, a, targetName)
-		if targetAgent == nil {
-			return genErrorIter(fmt.Errorf("failed to resume agent: cannot find agent: %s", agentName))
+	if info.WasInterrupted {
+		ra, ok := a.Agent.(ResumableAgent)
+		if !ok {
+			return genErrorIter(fmt.Errorf("failed to resume agent: agent '%s' is an interrupt point "+
+				"but is not a ResumableAgent", a.Name(ctx)))
 		}
-		return targetAgent.Resume(ctx, info, opts...)
+		iterator, generator := NewAsyncIteratorPair[*AgentEvent]()
+
+		aIter := ra.Resume(ctx, info, opts...)
+		if _, ok := ra.(*workflowAgent); ok {
+			return aIter
+		}
+		go a.run(ctx, getRunCtx(ctx), aIter, generator, opts...)
+		return iterator
 	}
 
-	if wf, ok := a.Agent.(*workflowAgent); ok {
-		return wf.Resume(ctx, info, opts...)
+	nextAgentName, err := getNextResumeAgent(ctx, info)
+	if err != nil {
+		return genErrorIter(err)
 	}
 
-	// resume current agent
-	ra, ok := a.Agent.(ResumableAgent)
-	if !ok {
-		return genErrorIter(fmt.Errorf("failed to resume agent: target agent[%s] isn't resumable", agentName))
+	subAgent := a.getAgent(ctx, nextAgentName)
+	if subAgent == nil {
+		return genErrorIter(fmt.Errorf("failed to resume agent: agent '%s' not found", nextAgentName))
 	}
-	iterator, generator := NewAsyncIteratorPair[*AgentEvent]()
-	aIter := ra.Resume(ctx, info, opts...)
 
-	go a.run(ctx, runCtx, aIter, generator, opts...)
-
-	return iterator
+	return subAgent.Resume(ctx, info, opts...)
 }
 
 type DeterministicTransferConfig struct {
@@ -385,22 +362,46 @@ func (a *flowAgent) run(
 			break
 		}
 
+		// RunPath ownership: the eino framework prepends parent context exactly once.
+		// Custom agents should NOT include parent segments in event.RunPath.
+		// Any event.RunPath provided by custom agents is treated as relative child provenance.
+		// STRONG RECOMMENDATION: Do NOT set RunPath in custom agents unless you truly need to add
+		//   relative child provenance; never add parent/current segments. Incorrect settings will
+		//   duplicate head segments after merge and cause non-recording.
+		// Here we merge: framework runCtx.RunPath + custom-provided event.RunPath.
 		event.AgentName = a.Name(ctx)
-		event.RunPath = runCtx.RunPath
-		// copy the event so that the copied event's stream is exclusive for any potential consumer
-		// copy before adding to session because once added to session it's stream could be consumed by genAgentInput at any time
-		copied := copyAgentEvent(event)
-		setAutomaticClose(copied)
-		setAutomaticClose(event)
-		runCtx.Session.addEvent(copied)
-		lastAction = event.Action
+		if len(event.RunPath) > 0 {
+			rp := make([]RunStep, 0, len(runCtx.RunPath)+len(event.RunPath))
+			rp = append(rp, runCtx.RunPath...)
+			rp = append(rp, event.RunPath...)
+			event.RunPath = rp
+		} else {
+			event.RunPath = runCtx.RunPath
+		}
+		// Recording policy: exact RunPath match (non-interrupt) indicates events belonging to this agent execution.
+		// This prevents parent recording of child/tool-internal emissions.
+		if (event.Action == nil || event.Action.Interrupted == nil) && exactRunPathMatch(runCtx.RunPath, event.RunPath) {
+			// copy the event so that the copied event's stream is exclusive for any potential consumer
+			// copy before adding to session because once added to session it's stream could be consumed by genAgentInput at any time
+			// interrupt action are not added to session, because ALL information contained in it
+			// is either presented to end-user, or made available to agents through other means
+			copied := copyAgentEvent(event)
+			setAutomaticClose(copied)
+			setAutomaticClose(event)
+			runCtx.Session.addEvent(copied)
+		}
+		// Action gating uses exact run-path match as well:
+		// only actions originating from this agent execution (not child/tool runs)
+		// should influence parent control flow (exit/transfer/interrupt).
+		if exactRunPathMatch(runCtx.RunPath, event.RunPath) {
+			lastAction = event.Action
+		}
 		generator.Send(event)
 	}
 
 	var destName string
 	if lastAction != nil {
 		if lastAction.Interrupted != nil {
-			appendInterruptRunCtx(ctx, runCtx)
 			return
 		}
 		if lastAction.Exit {
@@ -416,9 +417,8 @@ func (a *flowAgent) run(
 	if destName != "" {
 		agentToRun := a.getAgent(ctx, destName)
 		if agentToRun == nil {
-			e := errors.New(fmt.Sprintf(
-				"transfer failed: agent '%s' not found when transferring from '%s'",
-				destName, a.Name(ctx)))
+			e := fmt.Errorf("transfer failed: agent '%s' not found when transferring from '%s'",
+				destName, a.Name(ctx))
 			generator.Send(&AgentEvent{Err: e})
 			return
 		}
@@ -436,22 +436,14 @@ func (a *flowAgent) run(
 	}
 }
 
-func recursiveGetAgent(ctx context.Context, agent *flowAgent, agentName string) *flowAgent {
-	if agent == nil {
-		return nil
+func exactRunPathMatch(aPath, bPath []RunStep) bool {
+	if len(aPath) != len(bPath) {
+		return false
 	}
-	if agent.Name(ctx) == agentName {
-		return agent
-	}
-	a := agent.getAgent(ctx, agentName)
-	if a != nil {
-		return a
-	}
-	for _, sa := range agent.subAgents {
-		a = recursiveGetAgent(ctx, sa, agentName)
-		if a != nil {
-			return a
+	for i := range aPath {
+		if !aPath[i].Equals(bPath[i]) {
+			return false
 		}
 	}
-	return nil
+	return true
 }

@@ -24,6 +24,8 @@ import (
 	"strings"
 
 	"github.com/cloudwego/eino/internal"
+	"github.com/cloudwego/eino/internal/core"
+	"github.com/cloudwego/eino/internal/serialization"
 )
 
 type chanCall struct {
@@ -105,8 +107,11 @@ func runnableTransform(ctx context.Context, r *composableRunnable, input any, op
 }
 
 func (r *runner) run(ctx context.Context, isStream bool, input any, opts ...Option) (result any, err error) {
-	ctx, input = onGraphStart(ctx, input, isStream)
+	haveOnStart := false // delay triggering onGraphStart until state initialization is complete, so that the state can be accessed within onGraphStart.
 	defer func() {
+		if !haveOnStart {
+			ctx, input = onGraphStart(ctx, input, isStream)
+		}
 		if err != nil {
 			ctx, err = onGraphError(ctx, err)
 		} else {
@@ -156,7 +161,7 @@ func (r *runner) run(ctx context.Context, isStream bool, input any, opts ...Opti
 	}
 
 	// Extract subgraph
-	path, isSubGraph := getNodeKey(ctx)
+	path, isSubGraph := getNodePath(ctx)
 
 	// load checkpoint from ctx/store or init graph
 	initialized := false
@@ -164,6 +169,11 @@ func (r *runner) run(ctx context.Context, isStream bool, input any, opts ...Opti
 	if cp := getCheckPointFromCtx(ctx); cp != nil {
 		// in subgraph, try to load checkpoint from ctx
 		initialized = true
+		ctx, input = onGraphStart(ctx, input, isStream)
+		haveOnStart = true
+
+		// restoreFromCheckPoint will 'fix' the ctx used by the 'nextTasks',
+		// so it should run after all operations on ctx are done, such as onGraphStart.
 		ctx, nextTasks, err = r.restoreFromCheckPoint(ctx, *path, getStateModifier(ctx), cp, isStream, cm, optMap)
 	} else if checkPointID != nil && !forceNewRun {
 		cp, err = getCheckPointFromStore(ctx, *checkPointID, r.checkPointer)
@@ -177,6 +187,11 @@ func (r *runner) run(ctx context.Context, isStream bool, input any, opts ...Opti
 			ctx = setStateModifier(ctx, stateModifier)
 			ctx = setCheckPointToCtx(ctx, cp)
 
+			ctx, input = onGraphStart(ctx, input, isStream)
+			haveOnStart = true
+
+			// restoreFromCheckPoint will 'fix' the ctx used by the 'nextTasks',
+			// so it should run after all operations on ctx are done, such as onGraphStart.
 			ctx, nextTasks, err = r.restoreFromCheckPoint(ctx, *NewNodePath(), stateModifier, cp, isStream, cm, optMap)
 		}
 	}
@@ -185,6 +200,9 @@ func (r *runner) run(ctx context.Context, isStream bool, input any, opts ...Opti
 		if r.runCtx != nil {
 			ctx = r.runCtx(ctx)
 		}
+
+		ctx, input = onGraphStart(ctx, input, isStream)
+		haveOnStart = true
 
 		var isEnd bool
 		nextTasks, result, isEnd, err = r.calculateNextTasks(ctx, []*task{{
@@ -378,10 +396,22 @@ func (r *runner) restoreFromCheckPoint(
 		}
 	}
 	if cp.State != nil {
-		ctx = context.WithValue(ctx, stateKey{}, &internalState{state: cp.State})
+		isResumeTarget, hasData, data := GetResumeContext[any](ctx)
+		if isResumeTarget && hasData {
+			cp.State = data
+		}
+
+		var parent *internalState
+		if prev := ctx.Value(stateKey{}); prev != nil {
+			if p, ok := prev.(*internalState); ok {
+				parent = p
+			}
+		}
+
+		ctx = context.WithValue(ctx, stateKey{}, &internalState{state: cp.State, parent: parent})
 	}
 
-	nextTasks, err := r.restoreTasks(ctx, cp.Inputs, cp.SkipPreHandler, cp.ToolsNodeExecutedTools, cp.RerunNodes, isStream, optMap) // should restore after set state to context
+	nextTasks, err := r.restoreTasks(ctx, cp.Inputs, cp.SkipPreHandler, cp.RerunNodes, isStream, optMap) // should restore after set state to context
 	if err != nil {
 		return ctx, nil, newGraphRunError(fmt.Errorf("restore tasks fail: %w", err))
 	}
@@ -390,19 +420,19 @@ func (r *runner) restoreFromCheckPoint(
 
 func newInterruptTempInfo() *interruptTempInfo {
 	return &interruptTempInfo{
-		subGraphInterrupts:     map[string]*subGraphInterruptError{},
-		interruptRerunExtra:    map[string]any{},
-		interruptExecutedTools: make(map[string]map[string]string),
+		subGraphInterrupts:  map[string]*subGraphInterruptError{},
+		interruptRerunExtra: map[string]any{},
 	}
 }
 
 type interruptTempInfo struct {
-	subGraphInterrupts     map[string]*subGraphInterruptError
-	interruptRerunNodes    []string
-	interruptBeforeNodes   []string
-	interruptAfterNodes    []string
-	interruptRerunExtra    map[string]any
-	interruptExecutedTools map[string]map[string]string
+	subGraphInterrupts   map[string]*subGraphInterruptError
+	interruptRerunNodes  []string
+	interruptBeforeNodes []string
+	interruptAfterNodes  []string
+	interruptRerunExtra  map[string]any
+
+	signals []*core.InterruptSignal
 }
 
 func (r *runner) resolveInterruptCompletedTasks(tempInfo *interruptTempInfo, completedTasks []*task) (err error) {
@@ -410,23 +440,21 @@ func (r *runner) resolveInterruptCompletedTasks(tempInfo *interruptTempInfo, com
 		if completedTask.err != nil {
 			if info := isSubGraphInterrupt(completedTask.err); info != nil {
 				tempInfo.subGraphInterrupts[completedTask.nodeKey] = info
+				tempInfo.signals = append(tempInfo.signals, info.signal)
 				continue
 			}
-			extra, ok := IsInterruptRerunError(completedTask.err)
-			if ok {
-				tempInfo.interruptRerunNodes = append(tempInfo.interruptRerunNodes, completedTask.nodeKey)
-				if extra != nil {
-					tempInfo.interruptRerunExtra[completedTask.nodeKey] = extra
 
-					// save tool node info
-					if completedTask.call.action.meta.component == ComponentOfToolsNode {
-						if e, ok := extra.(*ToolsInterruptAndRerunExtra); ok {
-							tempInfo.interruptExecutedTools[completedTask.nodeKey] = e.ExecutedTools
-						}
-					}
+			ire := &core.InterruptSignal{}
+			if errors.As(completedTask.err, &ire) {
+				tempInfo.interruptRerunNodes = append(tempInfo.interruptRerunNodes, completedTask.nodeKey)
+				if ire.Info != nil {
+					tempInfo.interruptRerunExtra[completedTask.nodeKey] = ire.InterruptInfo.Info
 				}
+
+				tempInfo.signals = append(tempInfo.signals, ire)
 				continue
 			}
+
 			return wrapGraphNodeError(completedTask.nodeKey, completedTask.err)
 		}
 
@@ -472,6 +500,7 @@ func (r *runner) handleInterrupt(
 			cp.State = state.state
 		}
 	}
+
 	intInfo := &InterruptInfo{
 		State:           cp.State,
 		AfterNodes:      tempInfo.interruptAfterNodes,
@@ -480,10 +509,27 @@ func (r *runner) handleInterrupt(
 		RerunNodesExtra: tempInfo.interruptRerunExtra,
 		SubGraphs:       make(map[string]*InterruptInfo),
 	}
+
+	var info any
+	if cp.State != nil {
+		copiedState, err := deepCopyState(cp.State)
+		if err != nil {
+			return fmt.Errorf("failed to copy state: %w", err)
+		}
+		info = copiedState
+	}
+
+	is, err := core.Interrupt(ctx, info, nil, tempInfo.signals)
+	if err != nil {
+		return fmt.Errorf("failed to interrupt: %w", err)
+	}
+
+	cp.InterruptID2Addr, cp.InterruptID2State = core.SignalToPersistenceMaps(is)
+
 	for _, t := range nextTasks {
 		cp.Inputs[t.nodeKey] = t.input
 	}
-	err := r.checkPointer.convertCheckPoint(cp, isStream)
+	err = r.checkPointer.convertCheckPoint(cp, isStream)
 	if err != nil {
 		return fmt.Errorf("failed to convert checkpoint: %w", err)
 	}
@@ -491,6 +537,7 @@ func (r *runner) handleInterrupt(
 		return &subGraphInterruptError{
 			Info:       intInfo,
 			CheckPoint: cp,
+			signal:     is,
 		}
 	} else if checkPointID != nil {
 		err := r.checkPointer.set(ctx, *checkPointID, cp)
@@ -498,7 +545,33 @@ func (r *runner) handleInterrupt(
 			return fmt.Errorf("failed to set checkpoint: %w, checkPointID: %s", err, *checkPointID)
 		}
 	}
+
+	intInfo.InterruptContexts = core.ToInterruptContexts(is, nil)
 	return &interruptError{Info: intInfo}
+}
+
+// deepCopyState creates a deep copy of the state using serialization
+func deepCopyState(state any) (any, error) {
+	if state == nil {
+		return nil, nil
+	}
+	serializer := &serialization.InternalSerializer{}
+	data, err := serializer.Marshal(state)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal state: %w", err)
+	}
+
+	// Create new instance of the same type
+	stateType := reflect.TypeOf(state)
+	if stateType.Kind() == reflect.Ptr {
+		stateType = stateType.Elem()
+	}
+	newState := reflect.New(stateType).Interface()
+
+	if err := serializer.Unmarshal(data, newState); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal state: %w", err)
+	}
+	return newState, nil
 }
 
 func (r *runner) handleInterruptWithSubGraphAndRerunNodes(
@@ -546,11 +619,10 @@ func (r *runner) handleInterruptWithSubGraphAndRerunNodes(
 	}
 
 	cp := &checkpoint{
-		Channels:               cm.channels,
-		Inputs:                 make(map[string]any),
-		SkipPreHandler:         skipPreHandler,
-		ToolsNodeExecutedTools: tempInfo.interruptExecutedTools,
-		SubGraphs:              make(map[string]*checkpoint),
+		Channels:       cm.channels,
+		Inputs:         make(map[string]any),
+		SkipPreHandler: skipPreHandler,
+		SubGraphs:      make(map[string]*checkpoint),
 	}
 	if r.runCtx != nil {
 		// current graph has enable state
@@ -567,6 +639,23 @@ func (r *runner) handleInterruptWithSubGraphAndRerunNodes(
 		RerunNodesExtra: tempInfo.interruptRerunExtra,
 		SubGraphs:       make(map[string]*InterruptInfo),
 	}
+
+	var info any
+	if cp.State != nil {
+		copiedState, err := deepCopyState(cp.State)
+		if err != nil {
+			return fmt.Errorf("failed to copy state: %w", err)
+		}
+		info = copiedState
+	}
+
+	is, err := core.Interrupt(ctx, info, nil, tempInfo.signals)
+	if err != nil {
+		return fmt.Errorf("failed to interrupt: %w", err)
+	}
+
+	cp.InterruptID2Addr, cp.InterruptID2State = core.SignalToPersistenceMaps(is)
+
 	for _, t := range subgraphTasks {
 		cp.RerunNodes = append(cp.RerunNodes, t.nodeKey)
 		cp.SubGraphs[t.nodeKey] = tempInfo.subGraphInterrupts[t.nodeKey].CheckPoint
@@ -583,6 +672,7 @@ func (r *runner) handleInterruptWithSubGraphAndRerunNodes(
 		return &subGraphInterruptError{
 			Info:       intInfo,
 			CheckPoint: cp,
+			signal:     is,
 		}
 	} else if checkPointID != nil {
 		err = r.checkPointer.set(ctx, *checkPointID, cp)
@@ -590,6 +680,7 @@ func (r *runner) handleInterruptWithSubGraphAndRerunNodes(
 			return fmt.Errorf("failed to set checkpoint: %w, checkPointID: %s", err, *checkPointID)
 		}
 	}
+	intInfo.InterruptContexts = core.ToInterruptContexts(is, nil)
 	return &interruptError{Info: intInfo}
 }
 
@@ -631,7 +722,7 @@ func (r *runner) createTasks(ctx context.Context, nodeMap map[string]any, optMap
 		}
 
 		nextTasks = append(nextTasks, &task{
-			ctx:     setNodeKey(ctx, nodeKey),
+			ctx:     AppendAddressSegment(ctx, AddressSegmentNode, nodeKey),
 			nodeKey: nodeKey,
 			call:    call,
 			input:   nodeInput,
@@ -664,7 +755,6 @@ func (r *runner) restoreTasks(
 	ctx context.Context,
 	inputs map[string]any,
 	skipPreHandler map[string]bool,
-	toolNodeExecutedTools map[string]map[string]string,
 	rerunNodes []string,
 	isStream bool,
 	optMap map[string][]any) ([]*task, error) {
@@ -692,7 +782,7 @@ func (r *runner) restoreTasks(
 		}
 
 		newTask := &task{
-			ctx:            setNodeKey(ctx, key),
+			ctx:            AppendAddressSegment(ctx, AddressSegmentNode, key),
 			nodeKey:        key,
 			call:           call,
 			input:          input,
@@ -701,9 +791,6 @@ func (r *runner) restoreTasks(
 		}
 		if opt, ok := optMap[key]; ok {
 			newTask.option = opt
-		}
-		if executedTools, ok := toolNodeExecutedTools[key]; ok {
-			newTask.option = append(newTask.option, withExecutedTools(executedTools))
 		}
 
 		ret = append(ret, newTask)

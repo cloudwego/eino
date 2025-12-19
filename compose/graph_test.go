@@ -2014,3 +2014,53 @@ func TestSkipBranch(t *testing.T) {
 	assert.NoError(t, err)
 	assert.Equal(t, "input", result)
 }
+
+func TestGetStateInGraphCallback(t *testing.T) {
+	g := NewGraph[string, string](WithGenLocalState(func(ctx context.Context) (s *state) {
+		return &state{}
+	}))
+	assert.NoError(t, g.AddLambdaNode("1", InvokableLambda(func(ctx context.Context, input string) (output string, err error) {
+		return input, nil
+	})))
+	assert.NoError(t, g.AddEdge(START, "1"))
+	assert.NoError(t, g.AddEdge("1", END))
+
+	ctx := context.Background()
+	r, err := g.Compile(ctx)
+	assert.NoError(t, err)
+
+	_, err = r.Invoke(ctx, "input", WithCallbacks(&testGraphStateCallbackHandler{t: t}))
+	assert.NoError(t, err)
+}
+
+type state struct {
+	A string
+}
+
+type testGraphStateCallbackHandler struct {
+	t *testing.T
+}
+
+func (t *testGraphStateCallbackHandler) OnStart(ctx context.Context, info *callbacks.RunInfo, input callbacks.CallbackInput) context.Context {
+	assert.NoError(t.t, ProcessState[*state](ctx, func(ctx context.Context, s *state) error {
+		s.A = "test"
+		return nil
+	}))
+	return ctx
+}
+
+func (t *testGraphStateCallbackHandler) OnEnd(ctx context.Context, info *callbacks.RunInfo, output callbacks.CallbackOutput) context.Context {
+	return ctx
+}
+
+func (t *testGraphStateCallbackHandler) OnError(ctx context.Context, info *callbacks.RunInfo, err error) context.Context {
+	return ctx
+}
+
+func (t *testGraphStateCallbackHandler) OnStartWithStreamInput(ctx context.Context, info *callbacks.RunInfo, input *schema.StreamReader[callbacks.CallbackInput]) context.Context {
+	return ctx
+}
+
+func (t *testGraphStateCallbackHandler) OnEndWithStreamOutput(ctx context.Context, info *callbacks.RunInfo, output *schema.StreamReader[callbacks.CallbackOutput]) context.Context {
+	return ctx
+}
