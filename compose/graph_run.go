@@ -77,6 +77,7 @@ type runner struct {
 	preBranchHandlerManager *preBranchHandlerManager
 
 	checkPointer         *checkPointer
+	checkpointConfig     *CheckpointConfig
 	interruptBeforeNodes []string
 	interruptAfterNodes  []string
 
@@ -663,6 +664,9 @@ func (r *runner) handleInterruptWithSubGraphAndRerunNodes(
 	}
 	for _, t := range rerunTasks {
 		cp.RerunNodes = append(cp.RerunNodes, t.nodeKey)
+		if t.originalInput != nil {
+			cp.Inputs[t.nodeKey] = t.originalInput
+		}
 	}
 	err = r.checkPointer.convertCheckPoint(cp, isStream)
 	if err != nil {
@@ -760,6 +764,10 @@ func (r *runner) restoreTasks(
 	optMap map[string][]any) ([]*task, error) {
 	ret := make([]*task, 0, len(inputs))
 	for _, key := range rerunNodes {
+		if _, hasInput := inputs[key]; hasInput {
+			continue
+		}
+
 		call, ok := r.chanSubscribeTo[key]
 		if !ok {
 			return nil, fmt.Errorf("channel[%s] from checkpoint is not registered", key)
@@ -905,11 +913,12 @@ func (r *runner) calculateBranch(ctx context.Context, curNodeKey string, startCh
 
 func (r *runner) initTaskManager(runWrapper runnableCallWrapper, cancelVal *graphCancelChanVal, opts ...Option) *taskManager {
 	tm := &taskManager{
-		runWrapper:   runWrapper,
-		opts:         opts,
-		needAll:      !r.eager,
-		done:         internal.NewUnboundedChan[*task](),
-		runningTasks: make(map[string]*task),
+		runWrapper:       runWrapper,
+		opts:             opts,
+		needAll:          !r.eager,
+		done:             internal.NewUnboundedChan[*task](),
+		runningTasks:     make(map[string]*task),
+		checkpointConfig: r.checkpointConfig,
 	}
 	if cancelVal != nil {
 		tm.cancelCh = cancelVal.ch

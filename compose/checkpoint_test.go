@@ -1531,3 +1531,289 @@ func TestCancelInterrupt(t *testing.T) {
 		"3": "3",
 	}, result2)
 }
+
+func TestPersistRerunInputNonStream(t *testing.T) {
+	store := newInMemoryStore()
+
+	var receivedInput string
+	var callCount int
+
+	g := NewGraph[string, string]()
+
+	err := g.AddLambdaNode("1", InvokableLambda(func(ctx context.Context, input string) (output string, err error) {
+		callCount++
+		receivedInput = input
+		if callCount == 1 {
+			return "", Interrupt(ctx, "interrupt")
+		}
+		return input + "_processed", nil
+	}))
+	assert.NoError(t, err)
+
+	err = g.AddEdge(START, "1")
+	assert.NoError(t, err)
+	err = g.AddEdge("1", END)
+	assert.NoError(t, err)
+
+	ctx := context.Background()
+	r, err := g.Compile(ctx,
+		WithNodeTriggerMode(AllPredecessor),
+		WithCheckPointStore(store),
+		WithCheckpointConfig(CheckpointConfig{PersistRerunInput: true}),
+	)
+	assert.NoError(t, err)
+
+	_, err = r.Invoke(ctx, "test_input", WithCheckPointID("cp1"))
+	assert.NotNil(t, err)
+	info, ok := ExtractInterruptInfo(err)
+	assert.True(t, ok)
+	assert.Equal(t, []string{"1"}, info.RerunNodes)
+
+	assert.Equal(t, "test_input", receivedInput)
+
+	result, err := r.Invoke(ctx, "", WithCheckPointID("cp1"))
+	assert.NoError(t, err)
+	assert.Equal(t, "test_input_processed", result)
+	assert.Equal(t, "test_input", receivedInput)
+	assert.Equal(t, 2, callCount)
+}
+
+func TestPersistRerunInputStream(t *testing.T) {
+	store := newInMemoryStore()
+
+	var receivedInput string
+	var callCount int
+
+	g := NewGraph[string, string]()
+
+	err := g.AddLambdaNode("1", TransformableLambda(func(ctx context.Context, input *schema.StreamReader[string]) (output *schema.StreamReader[string], err error) {
+		callCount++
+
+		var sb string
+		for {
+			chunk, err := input.Recv()
+			if err == io.EOF {
+				break
+			}
+			if err != nil {
+				return nil, err
+			}
+			sb += chunk
+		}
+		receivedInput = sb
+
+		if callCount == 1 {
+			return nil, Interrupt(ctx, "interrupt")
+		}
+
+		return schema.StreamReaderFromArray([]string{sb + "_processed"}), nil
+	}))
+	assert.NoError(t, err)
+
+	err = g.AddEdge(START, "1")
+	assert.NoError(t, err)
+	err = g.AddEdge("1", END)
+	assert.NoError(t, err)
+
+	ctx := context.Background()
+	r, err := g.Compile(ctx,
+		WithNodeTriggerMode(AllPredecessor),
+		WithCheckPointStore(store),
+		WithCheckpointConfig(CheckpointConfig{PersistRerunInput: true}),
+	)
+	assert.NoError(t, err)
+
+	inputStream := schema.StreamReaderFromArray([]string{"chunk1", "chunk2", "chunk3"})
+
+	_, err = r.Transform(ctx, inputStream, WithCheckPointID("cp1"))
+	assert.NotNil(t, err)
+	info, ok := ExtractInterruptInfo(err)
+	assert.True(t, ok)
+	assert.Equal(t, []string{"1"}, info.RerunNodes)
+
+	assert.Equal(t, "chunk1chunk2chunk3", receivedInput)
+
+	emptyInputStream := schema.StreamReaderFromArray([]string{})
+
+	resultStream, err := r.Transform(ctx, emptyInputStream, WithCheckPointID("cp1"))
+	assert.NoError(t, err)
+
+	var result string
+	for {
+		chunk, err := resultStream.Recv()
+		if err == io.EOF {
+			break
+		}
+		assert.NoError(t, err)
+		result += chunk
+	}
+
+	assert.Equal(t, "chunk1chunk2chunk3_processed", result)
+	assert.Equal(t, "chunk1chunk2chunk3", receivedInput)
+	assert.Equal(t, 2, callCount)
+}
+
+type testPersistRerunInputState struct {
+	Prefix string
+}
+
+func TestPersistRerunInputWithPreHandler(t *testing.T) {
+	store := newInMemoryStore()
+
+	var receivedInput string
+	var callCount int
+
+	schema.Register[testPersistRerunInputState]()
+
+	g := NewGraph[string, string](WithGenLocalState(func(ctx context.Context) *testPersistRerunInputState {
+		return &testPersistRerunInputState{Prefix: "prefix_"}
+	}))
+
+	err := g.AddLambdaNode("1", InvokableLambda(func(ctx context.Context, input string) (output string, err error) {
+		callCount++
+		receivedInput = input
+		if callCount == 1 {
+			return "", Interrupt(ctx, "interrupt")
+		}
+		return input + "_processed", nil
+	}), WithStatePreHandler(func(ctx context.Context, in string, s *testPersistRerunInputState) (string, error) {
+		return s.Prefix + in, nil
+	}))
+	assert.NoError(t, err)
+
+	err = g.AddEdge(START, "1")
+	assert.NoError(t, err)
+	err = g.AddEdge("1", END)
+	assert.NoError(t, err)
+
+	ctx := context.Background()
+	r, err := g.Compile(ctx,
+		WithNodeTriggerMode(AllPredecessor),
+		WithCheckPointStore(store),
+		WithCheckpointConfig(CheckpointConfig{PersistRerunInput: true}),
+	)
+	assert.NoError(t, err)
+
+	_, err = r.Invoke(ctx, "test_input", WithCheckPointID("cp1"))
+	assert.NotNil(t, err)
+	info, ok := ExtractInterruptInfo(err)
+	assert.True(t, ok)
+	if ok {
+		assert.Equal(t, []string{"1"}, info.RerunNodes)
+	}
+
+	assert.Equal(t, "prefix_test_input", receivedInput)
+
+	result, err := r.Invoke(ctx, "", WithCheckPointID("cp1"))
+	assert.NoError(t, err)
+	assert.Equal(t, "prefix_test_input_processed", result)
+	assert.Equal(t, "prefix_test_input", receivedInput)
+	assert.Equal(t, 2, callCount)
+}
+
+func TestPersistRerunInputBackwardCompatibility(t *testing.T) {
+	store := newInMemoryStore()
+
+	var receivedInput string
+	var callCount int
+
+	g := NewGraph[string, string]()
+
+	err := g.AddLambdaNode("1", InvokableLambda(func(ctx context.Context, input string) (output string, err error) {
+		callCount++
+		receivedInput = input
+		if len(input) > 0 {
+			return "", StatefulInterrupt(ctx, "interrupt", input)
+		}
+
+		_, _, restoredInput := GetInterruptState[string](ctx)
+		return restoredInput + "_processed", nil
+	}))
+	assert.NoError(t, err)
+
+	err = g.AddEdge(START, "1")
+	assert.NoError(t, err)
+	err = g.AddEdge("1", END)
+	assert.NoError(t, err)
+
+	ctx := context.Background()
+	r, err := g.Compile(ctx,
+		WithNodeTriggerMode(AllPredecessor),
+		WithCheckPointStore(store),
+	)
+	assert.NoError(t, err)
+
+	_, err = r.Invoke(ctx, "test_input", WithCheckPointID("cp1"))
+	assert.NotNil(t, err)
+	info, ok := ExtractInterruptInfo(err)
+	assert.True(t, ok)
+	assert.Equal(t, []string{"1"}, info.RerunNodes)
+
+	assert.Equal(t, "test_input", receivedInput)
+
+	result, err := r.Invoke(ctx, "", WithCheckPointID("cp1"))
+	assert.NoError(t, err)
+	assert.Equal(t, "test_input_processed", result)
+	assert.Equal(t, "", receivedInput)
+	assert.Equal(t, 2, callCount)
+}
+
+func TestPersistRerunInputSubGraph(t *testing.T) {
+	store := newInMemoryStore()
+
+	var receivedInput string
+	var callCount int
+
+	subG := NewGraph[string, string]()
+	err := subG.AddLambdaNode("sub1", InvokableLambda(func(ctx context.Context, input string) (output string, err error) {
+		callCount++
+		receivedInput = input
+		if callCount == 1 {
+			return "", Interrupt(ctx, "interrupt")
+		}
+		return input + "_sub_processed", nil
+	}))
+	assert.NoError(t, err)
+	err = subG.AddEdge(START, "sub1")
+	assert.NoError(t, err)
+	err = subG.AddEdge("sub1", END)
+	assert.NoError(t, err)
+
+	g := NewGraph[string, string]()
+	err = g.AddLambdaNode("1", InvokableLambda(func(ctx context.Context, input string) (output string, err error) {
+		return input + "_main", nil
+	}))
+	assert.NoError(t, err)
+	err = g.AddGraphNode("2", subG)
+	assert.NoError(t, err)
+	err = g.AddEdge(START, "1")
+	assert.NoError(t, err)
+	err = g.AddEdge("1", "2")
+	assert.NoError(t, err)
+	err = g.AddEdge("2", END)
+	assert.NoError(t, err)
+
+	ctx := context.Background()
+	r, err := g.Compile(ctx,
+		WithNodeTriggerMode(AllPredecessor),
+		WithCheckPointStore(store),
+		WithCheckpointConfig(CheckpointConfig{PersistRerunInput: true}),
+	)
+	assert.NoError(t, err)
+
+	_, err = r.Invoke(ctx, "test", WithCheckPointID("cp1"))
+	assert.NotNil(t, err)
+	info, ok := ExtractInterruptInfo(err)
+	assert.True(t, ok)
+	assert.Contains(t, info.SubGraphs, "2")
+	subInfo := info.SubGraphs["2"]
+	assert.Equal(t, []string{"sub1"}, subInfo.RerunNodes)
+
+	assert.Equal(t, "test_main", receivedInput)
+
+	result, err := r.Invoke(ctx, "", WithCheckPointID("cp1"))
+	assert.NoError(t, err)
+	assert.Equal(t, "test_main_sub_processed", result)
+	assert.Equal(t, "test_main", receivedInput)
+	assert.Equal(t, 2, callCount)
+}
