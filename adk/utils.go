@@ -102,6 +102,10 @@ func getMessageFromWrappedEvent(e *agentEventWrapper) (Message, error) {
 		return e.concatenatedMessage, nil
 	}
 
+	if len(e.StreamErr) > 0 {
+		return nil, nil
+	}
+
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	if e.concatenatedMessage != nil {
@@ -120,7 +124,8 @@ func getMessageFromWrappedEvent(e *agentEventWrapper) (Message, error) {
 			if err == io.EOF {
 				break
 			}
-
+			e.StreamErr = err.Error()
+			e.AgentEvent.Output.MessageOutput.MessageStream = schema.StreamReaderFromArray(msgs)
 			return nil, err
 		}
 
@@ -137,6 +142,8 @@ func getMessageFromWrappedEvent(e *agentEventWrapper) (Message, error) {
 		var err error
 		e.concatenatedMessage, err = schema.ConcatMessages(msgs)
 		if err != nil {
+			e.StreamErr = err.Error()
+			e.AgentEvent.Output.MessageOutput.MessageStream = schema.StreamReaderFromArray(msgs)
 			return nil, err
 		}
 	}

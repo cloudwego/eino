@@ -39,3 +39,6 @@ output/*
 
 /vendor
 
+# Trae files
+.trae
+

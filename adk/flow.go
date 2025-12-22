@@ -20,6 +20,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"runtime/debug"
 	"strings"
 
@@ -230,8 +231,9 @@ func (a *flowAgent) genAgentInput(ctx context.Context, runCtx *runContext, skipT
 		}
 
 		msg, err := getMessageFromWrappedEvent(event)
-		if err != nil {
-			return nil, err
+		if err != nil { // skip this event if failed to get message, probably because the message stream contains err chunk
+			log.Printf("failed to get message from event: %v", err)
+			continue
 		}
 
 		if msg == nil {
