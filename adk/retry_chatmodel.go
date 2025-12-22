@@ -20,12 +20,15 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
+	"reflect"
 	"time"
 
 	"github.com/cloudwego/eino/callbacks"
 	"github.com/cloudwego/eino/components"
 	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/compose"
+	"github.com/cloudwego/eino/internal/generic"
 	"github.com/cloudwego/eino/schema"
 )
 
@@ -79,8 +82,8 @@ type ModelRetryConfig struct {
 
 	// BackoffFunc calculates the delay before the next retry attempt.
 	// The attempt parameter starts at 1 for the first retry.
-	// If nil, no delay is applied between retries.
-	// Example: func(attempt int) time.Duration { return time.Duration(attempt) * 100 * time.Millisecond }
+	// If nil, a default linear backoff is used: attempt * 100ms
+	// (i.e., 100ms for first retry, 200ms for second, etc.)
 	BackoffFunc func(attempt int) time.Duration
 }
 
@@ -141,7 +144,10 @@ func (r *retryChatModel) generateWithRetry(ctx context.Context,
 	var lastErr error
 	for {
 		remaining, err := r.getRemainingRetries(ctx)
-		if err != nil || remaining <= 0 {
+		if err != nil {
+			return nil, err
+		}
+		if remaining <= 0 {
 			if lastErr != nil {
 				return nil, &RetryExhaustedError{LastErr: lastErr}
 			}
@@ -160,7 +166,9 @@ func (r *retryChatModel) generateWithRetry(ctx context.Context,
 		lastErr = err
 		r.decrementRetries(ctx)
 
-		time.Sleep(backoffFunc(r.config.MaxRetries - remaining + 1))
+		attempt := r.config.MaxRetries - remaining + 1
+		log.Printf("retrying ChatModel.Generate (attempt %d/%d): %v", attempt, r.config.MaxRetries, err)
+		time.Sleep(backoffFunc(attempt))
 	}
 }
 
@@ -203,7 +211,10 @@ func (r *retryChatModel) streamWithRetry(ctx context.Context,
 	var lastErr error
 	for {
 		remaining, err := r.getRemainingRetries(ctx)
-		if err != nil || remaining <= 0 {
+		if err != nil {
+			return nil, err
+		}
+		if remaining <= 0 {
 			if lastErr != nil {
 				return nil, &RetryExhaustedError{LastErr: lastErr}
 			}
@@ -222,7 +233,9 @@ func (r *retryChatModel) streamWithRetry(ctx context.Context,
 		lastErr = err
 		r.decrementRetries(ctx)
 
-		time.Sleep(backoffFunc(r.config.MaxRetries - remaining + 1))
+		attempt := r.config.MaxRetries - remaining + 1
+		log.Printf("retrying ChatModel.Stream (attempt %d/%d): %v", attempt, r.config.MaxRetries, err)
+		time.Sleep(backoffFunc(attempt))
 	}
 }
 
@@ -243,10 +256,10 @@ func (r *retryChatModel) decrementRetries(ctx context.Context) {
 }
 
 func (r *retryChatModel) GetType() string {
-	if gt, ok := r.inner.(interface{ GetType() string }); ok {
+	if gt, ok := r.inner.(components.Typer); ok {
 		return gt.GetType()
 	}
-	return "RetryChatModel"
+	return generic.ParseTypeName(reflect.ValueOf(r.inner))
 }
 
 func (r *retryChatModel) IsCallbacksEnabled() bool { return true }

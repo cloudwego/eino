@@ -89,6 +89,10 @@ func setAutomaticClose(e *AgentEvent) {
 	e.Output.MessageOutput.MessageStream.SetAutomaticClose()
 }
 
+// getMessageFromWrappedEvent extracts the message from an AgentEvent.
+// If the stream contains an error chunk, this function returns (nil, err) and
+// sets StreamErr to prevent re-consumption. The nil message ensures that
+// failed stream responses are not included in subsequent agents' context windows.
 func getMessageFromWrappedEvent(e *agentEventWrapper) (Message, error) {
 	if e.AgentEvent.Output == nil || e.AgentEvent.Output.MessageOutput == nil {
 		return nil, nil

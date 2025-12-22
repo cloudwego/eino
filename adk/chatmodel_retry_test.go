@@ -200,30 +200,42 @@ func TestChatModelAgentRetry_NoTools_StreamError(t *testing.T) {
 	}
 	iterator := agent.Run(ctx, input)
 
-	event, ok := iterator.Next()
-	assert.True(t, ok)
-	assert.NotNil(t, event)
-	assert.Nil(t, event.Err)
-	assert.NotNil(t, event.Output)
-	assert.True(t, event.Output.MessageOutput.IsStreaming)
-
-	sr := event.Output.MessageOutput.MessageStream
-	chunks := 0
+	var events []*AgentEvent
 	for {
-		m, err := sr.Recv()
-		if err == io.EOF {
+		event, ok := iterator.Next()
+		if !ok {
 			break
 		}
-		if err != nil {
-			t.Fatalf("unexpected error: %v", err)
-		}
-		_ = m
-		chunks++
+		events = append(events, event)
 	}
-	assert.Equal(t, 5, chunks)
 
-	_, ok = iterator.Next()
-	assert.False(t, ok)
+	assert.Equal(t, 3, len(events))
+
+	var streamErrEventCount int
+	var errs []error
+	for i, event := range events {
+		if event.Output != nil && event.Output.MessageOutput != nil && event.Output.MessageOutput.IsStreaming {
+			sr := event.Output.MessageOutput.MessageStream
+			for {
+				msg, err := sr.Recv()
+				if err == io.EOF {
+					break
+				}
+				if err != nil {
+					streamErrEventCount++
+					errs = append(errs, err)
+					t.Logf("event %d: err: %v", i, err)
+					break
+				}
+				t.Logf("event %d: %v", i, msg.Content)
+			}
+		}
+	}
+
+	assert.Equal(t, 2, streamErrEventCount)
+	assert.Equal(t, 2, len(errs))
+	assert.True(t, errors.Is(errs[0], errRetryAble))
+	assert.True(t, errors.Is(errs[1], errRetryAble))
 	assert.Equal(t, int32(3), atomic.LoadInt32(&m.callCount))
 }
 
@@ -709,12 +721,37 @@ func TestChatModelAgentRetry_NoTools_NonRetryAbleStreamError(t *testing.T) {
 	}
 	iterator := agent.Run(ctx, input)
 
-	event, ok := iterator.Next()
-	assert.True(t, ok)
-	assert.NotNil(t, event)
-	assert.NotNil(t, event.Err)
-	assert.True(t, errors.Is(event.Err, errNonRetryAble))
+	var events []*AgentEvent
+	for {
+		event, ok := iterator.Next()
+		if !ok {
+			break
+		}
+		events = append(events, event)
+	}
 
-	_, ok = iterator.Next()
-	assert.False(t, ok)
+	assert.Equal(t, 2, len(events))
+
+	event0 := events[0]
+	assert.NotNil(t, event0.Output)
+	assert.NotNil(t, event0.Output.MessageOutput)
+	assert.True(t, event0.Output.MessageOutput.IsStreaming)
+	sr := event0.Output.MessageOutput.MessageStream
+	var streamErr error
+	for {
+		_, err := sr.Recv()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			streamErr = err
+			break
+		}
+	}
+	assert.NotNil(t, streamErr)
+	assert.True(t, errors.Is(streamErr, errNonRetryAble))
+
+	event1 := events[1]
+	assert.NotNil(t, event1.Err)
+	assert.True(t, errors.Is(event1.Err, errNonRetryAble))
 }

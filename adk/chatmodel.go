@@ -568,6 +568,52 @@ func (h *cbHandler) onGraphError(ctx context.Context,
 	return ctx
 }
 
+type noToolsCbHandler struct {
+	*AsyncGenerator[*AgentEvent]
+}
+
+func (h *noToolsCbHandler) onChatModelEnd(ctx context.Context,
+	_ *callbacks.RunInfo, output *model.CallbackOutput) context.Context {
+	event := EventFromMessage(output.Message, nil, schema.Assistant, "")
+	h.Send(event)
+	return ctx
+}
+
+func (h *noToolsCbHandler) onChatModelEndWithStreamOutput(ctx context.Context,
+	_ *callbacks.RunInfo, output *schema.StreamReader[*model.CallbackOutput]) context.Context {
+	cvt := func(in *model.CallbackOutput) (Message, error) {
+		return in.Message, nil
+	}
+	out := schema.StreamReaderWithConvert(output, cvt)
+	event := EventFromMessage(nil, out, schema.Assistant, "")
+	h.Send(event)
+	return ctx
+}
+
+func (h *noToolsCbHandler) onGraphError(ctx context.Context,
+	_ *callbacks.RunInfo, err error) context.Context {
+	// Unlike cbHandler.onGraphError, we don't handle interrupt errors here
+	// because the noTools path doesn't support tool-based interrupts.
+	h.Send(&AgentEvent{Err: err})
+	return ctx
+}
+
+func genNoToolsCallbacks(generator *AsyncGenerator[*AgentEvent]) compose.Option {
+	h := &noToolsCbHandler{
+		AsyncGenerator: generator,
+	}
+
+	cmHandler := &ub.ModelCallbackHandler{
+		OnEnd:                 h.onChatModelEnd,
+		OnEndWithStreamOutput: h.onChatModelEndWithStreamOutput,
+	}
+	graphHandler := callbacks.NewHandlerBuilder().OnErrorFn(h.onGraphError).Build()
+
+	cb := ub.NewHandlerHelper().ChatModel(cmHandler).Chain(graphHandler).Handler()
+
+	return compose.WithCallbacks(cb)
+}
+
 func genReactCallbacks(ctx context.Context, agentName string,
 	generator *AsyncGenerator[*AgentEvent],
 	enableStreaming bool,
@@ -785,36 +831,28 @@ func (a *ChatModelAgent) buildNoToolsRunFunc(ctx context.Context, instruction st
 			return
 		}
 
+		callOpt := genNoToolsCallbacks(generator)
+		var runOpts []compose.Option
+		runOpts = append(runOpts, opts...)
+		runOpts = append(runOpts, callOpt)
+
 		var msg Message
 		var msgStream MessageStream
 		if input.EnableStreaming {
-			msgStream, err = r.Stream(ctx, input, opts...)
+			msgStream, err = r.Stream(ctx, input, runOpts...)
 		} else {
-			msg, err = r.Invoke(ctx, input, opts...)
+			msg, err = r.Invoke(ctx, input, runOpts...)
 		}
 
-		var event *AgentEvent
 		if err == nil {
 			if a.outputKey != "" {
-				if msgStream != nil {
-					ss := msgStream.Copy(2)
-					event = EventFromMessage(msg, ss[1], schema.Assistant, "")
-					msgStream = ss[0]
-				} else {
-					event = EventFromMessage(msg, nil, schema.Assistant, "")
-				}
-				generator.Send(event)
 				err = setOutputToSession(ctx, msg, msgStream, a.outputKey)
 				if err != nil {
 					generator.Send(&AgentEvent{Err: err})
 				}
-			} else {
-				event = EventFromMessage(msg, msgStream, schema.Assistant, "")
-				generator.Send(event)
+			} else if msgStream != nil {
+				msgStream.Close()
 			}
-		} else {
-			event = &AgentEvent{Err: err}
-			generator.Send(event)
 		}
 
 		generator.Close()
