@@ -20,11 +20,13 @@ import (
 	"context"
 	"errors"
 	"io"
+	"runtime/debug"
 	"strings"
 
 	"github.com/google/uuid"
 
 	"github.com/cloudwego/eino/internal"
+	"github.com/cloudwego/eino/internal/safe"
 	"github.com/cloudwego/eino/schema"
 )
 
@@ -238,4 +240,60 @@ func genErrorIter(err error) *AsyncIterator[*AgentEvent] {
 	generator.Send(&AgentEvent{Err: err})
 	generator.Close()
 	return iterator
+}
+
+// NewAsyncOnSingleEventHandler creates an OnEvents middleware function that handles each event asynchronously.
+// It wraps the synchronous single event handler in a goroutine.
+func NewAsyncOnSingleEventHandler(onEvent func(ctx context.Context, ac *AgentContext, fromEvent *AgentEvent) (toEvent *AgentEvent)) (
+	onEventsFn func(ctx context.Context, ac *AgentContext, iter *AsyncIterator[*AgentEvent], gen *AsyncGenerator[*AgentEvent])) {
+	return func(ctx context.Context, ac *AgentContext, iter *AsyncIterator[*AgentEvent], gen *AsyncGenerator[*AgentEvent]) {
+		go NewSyncOnSingleEventHandler(onEvent)(ctx, ac, iter, gen)
+	}
+}
+
+// NewSyncOnSingleEventHandler creates an OnEvents middleware function that handles each event synchronously.
+// It applies the given onEvent function to each event in the iterator.
+// The function can be used in the following scenarios:
+// 1. Modify the event (modify message/error): Read and modify fromEvent, and finally return fromEvent
+// 2. Skip this event output: Return nil
+// 3. Terminate output: After consuming a specific event, return nil for any subsequent events received
+func NewSyncOnSingleEventHandler(onEvent func(ctx context.Context, ac *AgentContext, fromEvent *AgentEvent) (toEvent *AgentEvent)) (
+	onEventsFn func(ctx context.Context, ac *AgentContext, iter *AsyncIterator[*AgentEvent], gen *AsyncGenerator[*AgentEvent])) {
+	return func(ctx context.Context, ac *AgentContext, iter *AsyncIterator[*AgentEvent], gen *AsyncGenerator[*AgentEvent]) {
+		defer func() {
+			panicErr := recover()
+			if panicErr != nil {
+				e := safe.NewPanicErr(panicErr, debug.Stack())
+				gen.Send(&AgentEvent{Err: e})
+			}
+			gen.Close()
+		}()
+
+		for {
+			event, ok := iter.Next()
+			if !ok {
+				break
+			}
+			toEvent := onEvent(ctx, ac, event)
+			if toEvent == nil {
+				continue
+			}
+			gen.Send(toEvent)
+		}
+	}
+}
+
+// BypassIterator creates a goroutine that simply passes events from the input iterator to the output generator.
+// This is useful when you need to do something without modifying events.
+func BypassIterator(iter *AsyncIterator[*AgentEvent], gen *AsyncGenerator[*AgentEvent]) {
+	go func() {
+		defer gen.Close()
+		for {
+			event, ok := iter.Next()
+			if !ok {
+				break
+			}
+			gen.Send(event)
+		}
+	}()
 }
