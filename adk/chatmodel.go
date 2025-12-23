@@ -22,13 +22,11 @@ import (
 	"encoding/gob"
 	"errors"
 	"fmt"
-	"io"
 	"math"
 	"runtime/debug"
 	"strings"
 	"sync"
 	"sync/atomic"
-	"time"
 
 	"github.com/bytedance/sonic"
 
@@ -184,7 +182,7 @@ type ChatModelAgentConfig struct {
 	// Middlewares configures agent middleware for extending functionality.
 	Middlewares []AgentMiddleware
 
-	// ModelRetryConfig configures retry behavior for the ChatModel node.
+	// ModelRetryConfig configures retry behavior for the ChatModel.
 	// When set, the agent will automatically retry failed ChatModel calls
 	// based on the configured policy.
 	// Optional. If nil, no retry will be performed.
@@ -568,52 +566,6 @@ func (h *cbHandler) onGraphError(ctx context.Context,
 	return ctx
 }
 
-type noToolsCbHandler struct {
-	*AsyncGenerator[*AgentEvent]
-}
-
-func (h *noToolsCbHandler) onChatModelEnd(ctx context.Context,
-	_ *callbacks.RunInfo, output *model.CallbackOutput) context.Context {
-	event := EventFromMessage(output.Message, nil, schema.Assistant, "")
-	h.Send(event)
-	return ctx
-}
-
-func (h *noToolsCbHandler) onChatModelEndWithStreamOutput(ctx context.Context,
-	_ *callbacks.RunInfo, output *schema.StreamReader[*model.CallbackOutput]) context.Context {
-	cvt := func(in *model.CallbackOutput) (Message, error) {
-		return in.Message, nil
-	}
-	out := schema.StreamReaderWithConvert(output, cvt)
-	event := EventFromMessage(nil, out, schema.Assistant, "")
-	h.Send(event)
-	return ctx
-}
-
-func (h *noToolsCbHandler) onGraphError(ctx context.Context,
-	_ *callbacks.RunInfo, err error) context.Context {
-	// Unlike cbHandler.onGraphError, we don't handle interrupt errors here
-	// because the noTools path doesn't support tool-based interrupts.
-	h.Send(&AgentEvent{Err: err})
-	return ctx
-}
-
-func genNoToolsCallbacks(generator *AsyncGenerator[*AgentEvent]) compose.Option {
-	h := &noToolsCbHandler{
-		AsyncGenerator: generator,
-	}
-
-	cmHandler := &ub.ModelCallbackHandler{
-		OnEnd:                 h.onChatModelEnd,
-		OnEndWithStreamOutput: h.onChatModelEndWithStreamOutput,
-	}
-	graphHandler := callbacks.NewHandlerBuilder().OnErrorFn(h.onGraphError).Build()
-
-	cb := ub.NewHandlerHelper().ChatModel(cmHandler).Chain(graphHandler).Handler()
-
-	return compose.WithCallbacks(cb)
-}
-
 func genReactCallbacks(ctx context.Context, agentName string,
 	generator *AsyncGenerator[*AgentEvent],
 	enableStreaming bool,
@@ -639,6 +591,50 @@ func genReactCallbacks(ctx context.Context, agentName string,
 	graphHandler := callbacks.NewHandlerBuilder().OnErrorFn(h.onGraphError).Build()
 
 	cb := ub.NewHandlerHelper().ChatModel(cmHandler).Tool(toolHandler).ToolsNode(toolsNodeHandler).Chain(graphHandler).Handler()
+
+	return compose.WithCallbacks(cb)
+}
+
+type noToolsCbHandler struct {
+	*AsyncGenerator[*AgentEvent]
+}
+
+func (h *noToolsCbHandler) onChatModelEnd(ctx context.Context,
+	_ *callbacks.RunInfo, output *model.CallbackOutput) context.Context {
+	event := EventFromMessage(output.Message, nil, schema.Assistant, "")
+	h.Send(event)
+	return ctx
+}
+
+func (h *noToolsCbHandler) onChatModelEndWithStreamOutput(ctx context.Context,
+	_ *callbacks.RunInfo, output *schema.StreamReader[*model.CallbackOutput]) context.Context {
+	cvt := func(in *model.CallbackOutput) (Message, error) {
+		return in.Message, nil
+	}
+	out := schema.StreamReaderWithConvert(output, cvt)
+	event := EventFromMessage(nil, out, schema.Assistant, "")
+	h.Send(event)
+	return ctx
+}
+
+func (h *noToolsCbHandler) onGraphError(ctx context.Context,
+	_ *callbacks.RunInfo, err error) context.Context {
+	h.Send(&AgentEvent{Err: err})
+	return ctx
+}
+
+func genNoToolsCallbacks(generator *AsyncGenerator[*AgentEvent]) compose.Option {
+	h := &noToolsCbHandler{
+		AsyncGenerator: generator,
+	}
+
+	cmHandler := &ub.ModelCallbackHandler{
+		OnEnd:                 h.onChatModelEnd,
+		OnEndWithStreamOutput: h.onChatModelEndWithStreamOutput,
+	}
+	graphHandler := callbacks.NewHandlerBuilder().OnErrorFn(h.onGraphError).Build()
+
+	cb := ub.NewHandlerHelper().ChatModel(cmHandler).Chain(graphHandler).Handler()
 
 	return compose.WithCallbacks(cb)
 }
@@ -672,193 +668,6 @@ type ChatModelAgentResumeData struct {
 	HistoryModifier func(ctx context.Context, history []Message) []Message
 }
 
-func (a *ChatModelAgent) buildNoToolsRunFunc(ctx context.Context, instruction string) runFunc {
-	const chatModelNode = "ChatModel"
-
-	retryConfig := a.modelRetryConfig
-
-	if retryConfig == nil {
-		return func(ctx context.Context, input *AgentInput, generator *AsyncGenerator[*AgentEvent],
-			store *bridgeStore, opts ...compose.Option) {
-			r, err := compose.NewChain[*AgentInput, Message]().
-				AppendLambda(compose.InvokableLambda(func(ctx context.Context, input *AgentInput) ([]Message, error) {
-					return a.genModelInput(ctx, instruction, input)
-				})).
-				AppendChatModel(a.model).
-				Compile(ctx, compose.WithGraphName(a.name),
-					compose.WithCheckPointStore(store),
-					compose.WithSerializer(&gobSerializer{}))
-			if err != nil {
-				generator.Send(&AgentEvent{Err: err})
-				return
-			}
-
-			var msg Message
-			var msgStream MessageStream
-			if input.EnableStreaming {
-				msgStream, err = r.Stream(ctx, input, opts...)
-			} else {
-				msg, err = r.Invoke(ctx, input, opts...)
-			}
-
-			var event *AgentEvent
-			if err == nil {
-				if a.outputKey != "" {
-					if msgStream != nil {
-						ss := msgStream.Copy(2)
-						event = EventFromMessage(msg, ss[1], schema.Assistant, "")
-						msgStream = ss[0]
-					} else {
-						event = EventFromMessage(msg, nil, schema.Assistant, "")
-					}
-					generator.Send(event)
-					err = setOutputToSession(ctx, msg, msgStream, a.outputKey)
-					if err != nil {
-						generator.Send(&AgentEvent{Err: err})
-					}
-				} else {
-					event = EventFromMessage(msg, msgStream, schema.Assistant, "")
-					generator.Send(event)
-				}
-			} else {
-				event = &AgentEvent{Err: err}
-				generator.Send(event)
-			}
-
-			generator.Close()
-		}
-	}
-
-	genState := func(ctx context.Context) *State {
-		return &State{
-			ToolGenActions:   map[string]*AgentAction{},
-			RemainingRetries: retryConfig.MaxRetries,
-		}
-	}
-
-	const retryPassthroughNode = "RetryPassthrough"
-
-	g := compose.NewGraph[[]Message, Message](compose.WithGenLocalState(genState))
-
-	modelPreHandle := func(ctx context.Context, input []Message, st *State) ([]Message, error) {
-		if len(st.Messages) == 0 {
-			st.Messages = input
-		}
-		return st.Messages, nil
-	}
-
-	wrappedModel := newRetryChatModel(a.model, retryConfig)
-
-	_ = g.AddChatModelNode(chatModelNode, wrappedModel,
-		compose.WithStatePreHandler(modelPreHandle),
-		compose.WithNodeName(chatModelNode))
-	_ = g.AddEdge(compose.START, chatModelNode)
-
-	retryConverterLambda := compose.CollectableLambda(func(ctx context.Context, sr *schema.StreamReader[Message]) ([]Message, error) {
-		sr.Close()
-		var msgs []Message
-		_ = compose.ProcessState(ctx, func(_ context.Context, st *State) error {
-			msgs = st.Messages
-			return nil
-		})
-		return msgs, nil
-	})
-	_ = g.AddLambdaNode(retryPassthroughNode, retryConverterLambda, compose.WithNodeName(retryPassthroughNode))
-	_ = g.AddEdge(retryPassthroughNode, chatModelNode)
-
-	isRetryAble := retryConfig.IsRetryAble
-	if isRetryAble == nil {
-		isRetryAble = defaultIsRetryAble
-	}
-	backoffFunc := retryConfig.BackoffFunc
-	if backoffFunc == nil {
-		backoffFunc = defaultBackoff
-	}
-
-	retryBranch := compose.NewStreamGraphBranch(func(ctx context.Context, sr MessageStream) (string, error) {
-		defer sr.Close()
-		for {
-			_, err := sr.Recv()
-			if err == io.EOF {
-				return compose.END, nil
-			}
-			if err != nil {
-				if !isRetryAble(err) {
-					return "", err
-				}
-				var remaining int
-				_ = compose.ProcessState(ctx, func(_ context.Context, st *State) error {
-					remaining = st.RemainingRetries
-					st.RemainingRetries--
-					return nil
-				})
-				if remaining <= 0 {
-					return "", err
-				}
-				time.Sleep(backoffFunc(retryConfig.MaxRetries - remaining + 1))
-				return retryPassthroughNode, nil
-			}
-		}
-	}, map[string]bool{compose.END: true, retryPassthroughNode: true})
-
-	_ = g.AddBranch(chatModelNode, retryBranch)
-
-	return func(ctx context.Context, input *AgentInput, generator *AsyncGenerator[*AgentEvent],
-		store *bridgeStore, opts ...compose.Option) {
-
-		r, err := compose.NewChain[*AgentInput, Message]().
-			AppendLambda(compose.InvokableLambda(func(ctx context.Context, input *AgentInput) ([]Message, error) {
-				messages, err := a.genModelInput(ctx, instruction, input)
-						if err != nil {
-							return nil, err
-						}
-						state := &ChatModelAgentState{Messages: messages}
-						for _, b := range a.beforeChatModels {
-							err = b(ctx, state)
-							if err != nil {
-								return nil, err
-							}
-						}
-						return state.Messages, nil
-			})).
-			AppendGraph(g, compose.WithNodeName("NoToolsRetry")).
-			Compile(ctx, compose.WithGraphName(a.name),
-				compose.WithCheckPointStore(store),
-				compose.WithSerializer(&gobSerializer{}),
-				compose.WithMaxRunSteps(math.MaxInt))
-		if err != nil {
-			generator.Send(&AgentEvent{Err: err})
-			return
-		}
-
-		callOpt := genNoToolsCallbacks(generator)
-		var runOpts []compose.Option
-		runOpts = append(runOpts, opts...)
-		runOpts = append(runOpts, callOpt)
-
-		var msg Message
-		var msgStream MessageStream
-		if input.EnableStreaming {
-			msgStream, err = r.Stream(ctx, input, runOpts...)
-		} else {
-			msg, err = r.Invoke(ctx, input, runOpts...)
-		}
-
-		if err == nil {
-			if a.outputKey != "" {
-				err = setOutputToSession(ctx, msg, msgStream, a.outputKey)
-				if err != nil {
-					generator.Send(&AgentEvent{Err: err})
-				}
-			} else if msgStream != nil {
-				msgStream.Close()
-			}
-		}
-
-		generator.Close()
-	}
-}
-
 func (a *ChatModelAgent) buildRunFunc(ctx context.Context) runFunc {
 	a.once.Do(func() {
 		instruction := a.instruction
@@ -889,7 +698,64 @@ func (a *ChatModelAgent) buildRunFunc(ctx context.Context) runFunc {
 		}
 
 		if len(toolsNodeConf.Tools) == 0 {
-			a.run = a.buildNoToolsRunFunc(ctx, instruction)
+			var chatModel model.ToolCallingChatModel = a.model
+			if a.modelRetryConfig != nil {
+				chatModel = newRetryChatModel(a.model, a.modelRetryConfig)
+			}
+
+			a.run = func(ctx context.Context, input *AgentInput, generator *AsyncGenerator[*AgentEvent],
+				store *bridgeStore, opts ...compose.Option) {
+				r, err := compose.NewChain[*AgentInput, Message]().
+					AppendLambda(compose.InvokableLambda(func(ctx context.Context, input *AgentInput) ([]Message, error) {
+						messages, err := a.genModelInput(ctx, instruction, input)
+						if err != nil {
+							return nil, err
+						}
+						state := &ChatModelAgentState{Messages: messages}
+						for _, b := range a.beforeChatModels {
+							err = b(ctx, state)
+							if err != nil {
+								return nil, err
+							}
+						}
+						return state.Messages, nil
+					})).
+					AppendChatModel(chatModel).
+					Compile(ctx, compose.WithGraphName(a.name),
+						compose.WithCheckPointStore(store),
+						compose.WithSerializer(&gobSerializer{}))
+				if err != nil {
+					generator.Send(&AgentEvent{Err: err})
+					return
+				}
+
+				callOpt := genNoToolsCallbacks(generator)
+				var runOpts []compose.Option
+				runOpts = append(runOpts, opts...)
+				runOpts = append(runOpts, callOpt)
+
+				var msg Message
+				var msgStream MessageStream
+				if input.EnableStreaming {
+					msgStream, err = r.Stream(ctx, input, runOpts...)
+				} else {
+					msg, err = r.Invoke(ctx, input, runOpts...)
+				}
+
+				if err == nil {
+					if a.outputKey != "" {
+						err = setOutputToSession(ctx, msg, msgStream, a.outputKey)
+						if err != nil {
+							generator.Send(&AgentEvent{Err: err})
+						}
+					} else if msgStream != nil {
+						msgStream.Close()
+					}
+				}
+
+				generator.Close()
+			}
+
 			return
 		}
 

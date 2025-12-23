@@ -515,7 +515,7 @@ func TestChatModelAgentRetry_MaxRetriesExhausted(t *testing.T) {
 	cm := mockModel.NewMockToolCallingChatModel(ctrl)
 
 	cm.EXPECT().Generate(gomock.Any(), gomock.Any(), gomock.Any()).
-		Return(nil, errRetryAble).Times(3)
+		Return(nil, errRetryAble).Times(4)
 
 	agent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
 		Name:        "RetryTestAgent",

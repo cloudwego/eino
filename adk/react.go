@@ -20,8 +20,6 @@ import (
 	"context"
 	"errors"
 	"io"
-	"log"
-	"time"
 
 	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/compose"
@@ -41,7 +39,6 @@ type State struct {
 	AgentName string
 
 	RemainingIterations int
-	RemainingRetries    int
 }
 
 // SendToolGenAction attaches an AgentAction to the next tool event emitted for the
@@ -152,10 +149,6 @@ func getReturnDirectlyToolCallID(ctx context.Context) (string, bool) {
 
 func newReact(ctx context.Context, config *reactConfig) (reactGraph, error) {
 	genState := func(ctx context.Context) *State {
-		retries := 0
-		if config.modelRetryConfig != nil && config.modelRetryConfig.MaxRetries > 0 {
-			retries = config.modelRetryConfig.MaxRetries
-		}
 		return &State{
 			ToolGenActions: map[string]*AgentAction{},
 			AgentName:      config.agentName,
@@ -165,7 +158,6 @@ func newReact(ctx context.Context, config *reactConfig) (reactGraph, error) {
 				}
 				return config.maxIterations
 			}(),
-			RemainingRetries: retries,
 		}
 	}
 
@@ -181,12 +173,12 @@ func newReact(ctx context.Context, config *reactConfig) (reactGraph, error) {
 		return nil, err
 	}
 
-	var chatModel model.ToolCallingChatModel
+	var baseModel model.ToolCallingChatModel = config.model
 	if config.modelRetryConfig != nil {
-		chatModel, err = newRetryChatModel(config.model, config.modelRetryConfig).WithTools(toolsInfo)
-	} else {
-		chatModel, err = config.model.WithTools(toolsInfo)
+		baseModel = newRetryChatModel(config.model, config.modelRetryConfig)
 	}
+
+	chatModel, err := baseModel.WithTools(toolsInfo)
 	if err != nil {
 		return nil, err
 	}
@@ -213,42 +205,33 @@ func newReact(ctx context.Context, config *reactConfig) (reactGraph, error) {
 
 		return st.Messages, nil
 	}
-	modelStreamPostHandle := func(ctx context.Context, inputStream MessageStream, st *State) (MessageStream, error) {
-		ss := inputStream.Copy(2)
-		var s *ChatModelAgentState
-		input, err := schema.ConcatMessageStream(ss[0])
-		if err != nil {
-			log.Printf("failed to concat message stream in modelStreamPostHandle: %v", err)
-			s = &ChatModelAgentState{Messages: st.Messages}
-		} else {
-			s = &ChatModelAgentState{Messages: append(st.Messages, input)}
-		}
+	modelPostHandle := func(ctx context.Context, input Message, st *State) (Message, error) {
+		s := &ChatModelAgentState{Messages: append(st.Messages, input)}
 		for _, a := range config.afterChatModel {
 			err = a(ctx, s)
 			if err != nil {
-				ss[1].Close()
 				return nil, err
 			}
 		}
 		st.Messages = s.Messages
-		return ss[1], nil
+		return input, nil
 	}
 	_ = g.AddChatModelNode(chatModel_, chatModel,
-		compose.WithStatePreHandler(modelPreHandle), compose.WithStreamStatePostHandler(modelStreamPostHandle), compose.WithNodeName(chatModel_))
+		compose.WithStatePreHandler(modelPreHandle), compose.WithStatePostHandler(modelPostHandle), compose.WithNodeName(chatModel_))
 
-	toolPreHandle := func(ctx context.Context, _ Message, st *State) (Message, error) {
-		newInput := st.Messages[len(st.Messages)-1]
+	toolPreHandle := func(ctx context.Context, input Message, st *State) (Message, error) {
+		input = st.Messages[len(st.Messages)-1]
 		if len(config.toolsReturnDirectly) > 0 {
-			for i := range newInput.ToolCalls {
-				toolName := newInput.ToolCalls[i].Function.Name
+			for i := range input.ToolCalls {
+				toolName := input.ToolCalls[i].Function.Name
 				if config.toolsReturnDirectly[toolName] {
-					st.ReturnDirectlyToolCallID = newInput.ToolCalls[i].ID
+					st.ReturnDirectlyToolCallID = input.ToolCalls[i].ID
 					st.HasReturnDirectly = true
 				}
 			}
 		}
 
-		return newInput, nil
+		return input, nil
 	}
 
 	_ = g.AddToolsNode(toolNode_, toolsNode,
@@ -256,55 +239,13 @@ func newReact(ctx context.Context, config *reactConfig) (reactGraph, error) {
 
 	_ = g.AddEdge(compose.START, chatModel_)
 
-	const retryPassthrough_ = "RetryPassthrough"
-
-	if config.modelRetryConfig != nil {
-		retryConverterLambda := compose.CollectableLambda(func(ctx context.Context, sr MessageStream) ([]Message, error) {
-			sr.Close()
-			var msgs []Message
-			_ = compose.ProcessState(ctx, func(_ context.Context, st *State) error {
-				msgs = st.Messages
-				return nil
-			})
-			return msgs, nil
-		})
-		_ = g.AddLambdaNode(retryPassthrough_, retryConverterLambda, compose.WithNodeName(retryPassthrough_))
-		_ = g.AddEdge(retryPassthrough_, chatModel_)
-	}
-
-	var isRetryAble func(error) bool
-	var backoffFunc func(int) time.Duration
-	if config.modelRetryConfig != nil {
-		isRetryAble = config.modelRetryConfig.IsRetryAble
-		if isRetryAble == nil {
-			isRetryAble = defaultIsRetryAble
-		}
-		backoffFunc = config.modelRetryConfig.BackoffFunc
-		if backoffFunc == nil {
-			backoffFunc = defaultBackoff
-		}
-	}
-
-	toolCallAndRetryCheck := func(ctx context.Context, sMsg MessageStream) (string, error) {
+	toolCallCheck := func(ctx context.Context, sMsg MessageStream) (string, error) {
 		defer sMsg.Close()
 		for {
 			chunk, err_ := sMsg.Recv()
 			if err_ != nil {
 				if err_ == io.EOF {
 					return compose.END, nil
-				}
-
-				if isRetryAble != nil && isRetryAble(err_) {
-					var remaining int
-					_ = compose.ProcessState(ctx, func(_ context.Context, st *State) error {
-						remaining = st.RemainingRetries
-						st.RemainingRetries--
-						return nil
-					})
-					if remaining > 0 {
-						time.Sleep(backoffFunc(config.modelRetryConfig.MaxRetries - remaining + 1))
-						return retryPassthrough_, nil
-					}
 				}
 
 				return "", err_
@@ -315,12 +256,7 @@ func newReact(ctx context.Context, config *reactConfig) (reactGraph, error) {
 			}
 		}
 	}
-
-	branchEndNodes := map[string]bool{compose.END: true, toolNode_: true}
-	if config.modelRetryConfig != nil {
-		branchEndNodes[retryPassthrough_] = true
-	}
-	branch := compose.NewStreamGraphBranch(toolCallAndRetryCheck, branchEndNodes)
+	branch := compose.NewStreamGraphBranch(toolCallCheck, map[string]bool{compose.END: true, toolNode_: true})
 	_ = g.AddBranch(chatModel_, branch)
 
 	if len(config.toolsReturnDirectly) == 0 {
