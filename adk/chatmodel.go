@@ -649,7 +649,18 @@ func (a *ChatModelAgent) buildRunFunc(ctx context.Context) runFunc {
 				store *bridgeStore, opts ...compose.Option) {
 				r, err := compose.NewChain[*AgentInput, Message]().
 					AppendLambda(compose.InvokableLambda(func(ctx context.Context, input *AgentInput) ([]Message, error) {
-						return a.genModelInput(ctx, instruction, input)
+						messages, err := a.genModelInput(ctx, instruction, input)
+						if err != nil {
+							return nil, err
+						}
+						state := &ChatModelAgentState{Messages: messages}
+						for _, b := range a.beforeChatModels {
+							err = b(ctx, state)
+							if err != nil {
+								return nil, err
+							}
+						}
+						return state.Messages, nil
 					})).
 					AppendChatModel(a.model).
 					Compile(ctx, compose.WithGraphName(a.name),
