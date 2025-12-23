@@ -539,7 +539,7 @@ func TestParallelWorkflowResumeWithEvents(t *testing.T) {
 			assert.True(t, info.IsResumeTarget)
 			assert.Equal(t, "resume sa1", info.ResumeData)
 
-		// Get the events from session and verify visibility
+			// Get the events from session and verify visibility
 			runCtx := getRunCtx(ctx)
 			assert.NotNil(t, runCtx.Events, "sa1 resumer should have events")
 			allEvents := runCtx.Events.getEvents()
