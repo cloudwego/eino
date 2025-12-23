@@ -206,7 +206,7 @@ func (ai *AgentInput) deepCopy() *AgentInput {
 func (a *flowAgent) genAgentInput(ctx context.Context, runCtx *runContext, skipTransferMessages bool) (*AgentInput, error) {
 	input := runCtx.RootInput.deepCopy()
 
-	events := runCtx.Session.getEvents()
+	events := runCtx.Events.getEvents()
 	historyEntries := make([]*HistoryEntry, 0)
 
 	for _, m := range input.Messages {
@@ -388,7 +388,7 @@ func (a *flowAgent) run(
 			copied := copyAgentEvent(event)
 			setAutomaticClose(copied)
 			setAutomaticClose(event)
-			runCtx.Session.addEvent(copied)
+			runCtx.Events.addEvent(copied)
 		}
 		// Action gating uses exact run-path match as well:
 		// only actions originating from this agent execution (not child/tool runs)

@@ -900,7 +900,7 @@ func TestRunPathMisuse_DuplicatedHeadAndNoParentRecording(t *testing.T) {
 		}
 	}
 
-	evs := outerRunCtx.Session.getEvents()
+	evs := outerRunCtx.Events.getEvents()
 	if len(evs) != 0 {
 		t.Fatalf("outer session should not record misused event, recorded=%d", len(evs))
 	}

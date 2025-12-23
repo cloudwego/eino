@@ -29,8 +29,13 @@ import (
 )
 
 type runSession struct {
+	Values map[string]any
+
+	mtx sync.Mutex
+}
+
+type runEvents struct {
 	Events     []*agentEventWrapper
-	Values     map[string]any
 	LaneEvents *laneEvents
 
 	mtx sync.Mutex
@@ -73,6 +78,10 @@ func newRunSession() *runSession {
 	}
 }
 
+func newRunEvents() *runEvents {
+	return &runEvents{}
+}
+
 func GetSessionValues(ctx context.Context) map[string]any {
 	session := getSession(ctx)
 	if session == nil {
@@ -109,7 +118,7 @@ func GetSessionValue(ctx context.Context, key string) (any, bool) {
 	return session.getValue(key)
 }
 
-func (rs *runSession) addEvent(event *AgentEvent) {
+func (rs *runEvents) addEvent(event *AgentEvent) {
 	wrapper := &agentEventWrapper{AgentEvent: event, ts: time.Now().UnixNano()}
 	// If LaneEvents is not nil, we are in a parallel lane.
 	// Append to the lane's local event slice (lock-free).
@@ -124,7 +133,7 @@ func (rs *runSession) addEvent(event *AgentEvent) {
 	rs.mtx.Unlock()
 }
 
-func (rs *runSession) getEvents() []*agentEventWrapper {
+func (rs *runEvents) getEvents() []*agentEventWrapper {
 	// If there are no in-flight lane events, we can return the main slice directly.
 	if rs.LaneEvents == nil {
 		rs.mtx.Lock()
@@ -199,6 +208,7 @@ type runContext struct {
 	RunPath   []RunStep
 
 	Session *runSession
+	Events  *runEvents
 }
 
 func (rc *runContext) isRoot() bool {
@@ -210,6 +220,7 @@ func (rc *runContext) deepCopy() *runContext {
 		RootInput: rc.RootInput,
 		RunPath:   make([]RunStep, len(rc.RunPath)),
 		Session:   rc.Session,
+		Events:    rc.Events,
 	}
 
 	copy(copied.RunPath, rc.RunPath)
@@ -236,7 +247,7 @@ func initRunCtx(ctx context.Context, agentName string, input *AgentInput) (conte
 	if runCtx != nil {
 		runCtx = runCtx.deepCopy()
 	} else {
-		runCtx = &runContext{Session: newRunSession()}
+		runCtx = &runContext{Session: newRunSession(), Events: newRunEvents()}
 	}
 
 	runCtx.RunPath = append(runCtx.RunPath, RunStep{agentName})
@@ -273,19 +284,19 @@ func joinRunCtxs(parentCtx context.Context, childCtxs ...context.Context) {
 // commitEvents appends a slice of new events to the correct parent lane or main event log.
 func commitEvents(ctx context.Context, newEvents []*agentEventWrapper) {
 	runCtx := getRunCtx(ctx)
-	if runCtx == nil || runCtx.Session == nil {
+	if runCtx == nil || runCtx.Events == nil {
 		// Should not happen, but handle defensively.
 		return
 	}
 
 	// If the context we are committing to is itself a lane, append to its event slice.
-	if runCtx.Session.LaneEvents != nil {
-		runCtx.Session.LaneEvents.Events = append(runCtx.Session.LaneEvents.Events, newEvents...)
+	if runCtx.Events.LaneEvents != nil {
+		runCtx.Events.LaneEvents.Events = append(runCtx.Events.LaneEvents.Events, newEvents...)
 	} else {
 		// Otherwise, commit to the main, shared Events slice with a lock.
-		runCtx.Session.mtx.Lock()
-		runCtx.Session.Events = append(runCtx.Session.Events, newEvents...)
-		runCtx.Session.mtx.Unlock()
+		runCtx.Events.mtx.Lock()
+		runCtx.Events.Events = append(runCtx.Events.Events, newEvents...)
+		runCtx.Events.mtx.Unlock()
 	}
 }
 
@@ -295,8 +306,8 @@ func unwindLaneEvents(ctxs ...context.Context) []*agentEventWrapper {
 	var allNewEvents []*agentEventWrapper
 	for _, ctx := range ctxs {
 		runCtx := getRunCtx(ctx)
-		if runCtx != nil && runCtx.Session != nil && runCtx.Session.LaneEvents != nil {
-			allNewEvents = append(allNewEvents, runCtx.Session.LaneEvents.Events...)
+		if runCtx != nil && runCtx.Events != nil && runCtx.Events.LaneEvents != nil {
+			allNewEvents = append(allNewEvents, runCtx.Events.LaneEvents.Events...)
 		}
 	}
 	return allNewEvents
@@ -304,7 +315,7 @@ func unwindLaneEvents(ctxs ...context.Context) []*agentEventWrapper {
 
 func forkRunCtx(ctx context.Context) context.Context {
 	parentRunCtx := getRunCtx(ctx)
-	if parentRunCtx == nil || parentRunCtx.Session == nil {
+	if parentRunCtx == nil || parentRunCtx.Session == nil || parentRunCtx.Events == nil {
 		// Should not happen in a parallel workflow, but handle defensively.
 		return ctx
 	}
@@ -312,14 +323,16 @@ func forkRunCtx(ctx context.Context) context.Context {
 	// Create a new session for the child lane by manually copying the parent's session fields.
 	// This is crucial to ensure a new mutex is created and that the LaneEvents pointer is unique.
 	childSession := &runSession{
-		Events: parentRunCtx.Session.Events, // Share the committed history
 		Values: parentRunCtx.Session.Values, // Share the values map
 	}
 
-	// Fork the lane events within the new session struct.
-	childSession.LaneEvents = &laneEvents{
-		Parent: parentRunCtx.Session.LaneEvents,
-		Events: make([]*agentEventWrapper, 0),
+	// Fork the lane events within the new events struct.
+	childEvents := &runEvents{
+		Events: parentRunCtx.Events.Events, // Share the committed history
+		LaneEvents: &laneEvents{
+			Parent: parentRunCtx.Events.LaneEvents,
+			Events: make([]*agentEventWrapper, 0),
+		},
 	}
 
 	// Create a new runContext for the child lane, pointing to the new session.
@@ -327,6 +340,7 @@ func forkRunCtx(ctx context.Context) context.Context {
 		RootInput: parentRunCtx.RootInput,
 		RunPath:   make([]RunStep, len(parentRunCtx.RunPath)),
 		Session:   childSession,
+		Events:    childEvents,
 	}
 	copy(childRunCtx.RunPath, parentRunCtx.RunPath)
 
@@ -340,7 +354,7 @@ func updateRunPathOnly(ctx context.Context, agentNames ...string) context.Contex
 	runCtx := getRunCtx(ctx)
 	if runCtx == nil {
 		// This should not happen in a sequential workflow context, but handle defensively.
-		runCtx = &runContext{Session: newRunSession()}
+		runCtx = &runContext{Session: newRunSession(), Events: newRunEvents()}
 	} else {
 		runCtx = runCtx.deepCopy()
 	}
@@ -361,12 +375,16 @@ func ClearRunCtx(ctx context.Context) context.Context {
 }
 
 func ctxWithNewRunCtx(ctx context.Context, input *AgentInput, sharedParentSession bool) context.Context {
-	session := getSession(ctx)
-	if !sharedParentSession || session == nil {
+	var session *runSession
+	if sharedParentSession {
+		session = getSession(ctx)
+	}
+	if session == nil {
 		session = newRunSession()
 	}
+	events := newRunEvents()
 
-	return setRunCtx(ctx, &runContext{Session: session, RootInput: input})
+	return setRunCtx(ctx, &runContext{Session: session, Events: events, RootInput: input})
 }
 
 func getSession(ctx context.Context) *runSession {

@@ -440,12 +440,12 @@ func (a *workflowAgent) runParallel(ctx context.Context, generator *AsyncGenerat
 		if parState != nil && parState.SubAgentEvents != nil {
 			if existingEvents, ok := parState.SubAgentEvents[i]; ok {
 				// Add existing events to the child's lane events
-				childRunCtx := getRunCtx(childContexts[i])
-				if childRunCtx != nil && childRunCtx.Session != nil {
-					if childRunCtx.Session.LaneEvents == nil {
-						childRunCtx.Session.LaneEvents = &laneEvents{}
-					}
-					childRunCtx.Session.LaneEvents.Events = append(childRunCtx.Session.LaneEvents.Events, existingEvents...)
+			childRunCtx := getRunCtx(childContexts[i])
+			if childRunCtx != nil && childRunCtx.Events != nil {
+				if childRunCtx.Events.LaneEvents == nil {
+					childRunCtx.Events.LaneEvents = &laneEvents{}
+				}
+				childRunCtx.Events.LaneEvents.Events = append(childRunCtx.Events.LaneEvents.Events, existingEvents...)
 				}
 			}
 		}
@@ -509,8 +509,8 @@ func (a *workflowAgent) runParallel(ctx context.Context, generator *AsyncGenerat
 		subAgentEvents := make(map[int][]*agentEventWrapper)
 		for i, childCtx := range childContexts {
 			childRunCtx := getRunCtx(childCtx)
-			if childRunCtx != nil && childRunCtx.Session != nil && childRunCtx.Session.LaneEvents != nil {
-				subAgentEvents[i] = childRunCtx.Session.LaneEvents.Events
+			if childRunCtx != nil && childRunCtx.Events != nil && childRunCtx.Events.LaneEvents != nil {
+				subAgentEvents[i] = childRunCtx.Events.LaneEvents.Events
 			}
 		}
 

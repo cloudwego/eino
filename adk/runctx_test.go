@@ -356,8 +356,8 @@ func TestForkJoinRunCtx(t *testing.T) {
 
 	// 2. Run Agent A
 	eventA := newEvent("A")
-	mainRunCtx.Session.addEvent(eventA)
-	assert.Equal(t, []string{"A"}, getEventNames(mainRunCtx.Session.getEvents()), "After A")
+	mainRunCtx.Events.addEvent(eventA)
+	assert.Equal(t, []string{"A"}, getEventNames(mainRunCtx.Events.getEvents()), "After A")
 
 	// 3. Fork for Par(B, C)
 	ctxB := forkRunCtx(mainCtx)
@@ -369,21 +369,21 @@ func TestForkJoinRunCtx(t *testing.T) {
 	assert.NotSame(t, mainRunCtx.Session, runCtxB.Session, "Session B should be a new struct")
 	assert.NotSame(t, mainRunCtx.Session, runCtxC.Session, "Session C should be a new struct")
 	assert.NotSame(t, runCtxB.Session, runCtxC.Session, "Sessions B and C should be different")
-	assert.Nil(t, mainRunCtx.Session.LaneEvents, "Main session should have no lane events yet")
-	assert.NotNil(t, runCtxB.Session.LaneEvents, "Session B should have lane events")
-	assert.NotNil(t, runCtxC.Session.LaneEvents, "Session C should have lane events")
-	assert.Nil(t, runCtxB.Session.LaneEvents.Parent, "Lane B's parent should be the main (nil) lane")
-	assert.Nil(t, runCtxC.Session.LaneEvents.Parent, "Lane C's parent should be the main (nil) lane")
+	assert.Nil(t, mainRunCtx.Events.LaneEvents, "Main events should have no lane events yet")
+	assert.NotNil(t, runCtxB.Events.LaneEvents, "Session B should have lane events")
+	assert.NotNil(t, runCtxC.Events.LaneEvents, "Session C should have lane events")
+	assert.Nil(t, runCtxB.Events.LaneEvents.Parent, "Lane B's parent should be the main (nil) lane")
+	assert.Nil(t, runCtxC.Events.LaneEvents.Parent, "Lane C's parent should be the main (nil) lane")
 
 	// 4. Run Agent B
 	eventB := newEvent("B")
-	runCtxB.Session.addEvent(eventB)
-	assert.Equal(t, []string{"A", "B"}, getEventNames(runCtxB.Session.getEvents()), "After B")
+	runCtxB.Events.addEvent(eventB)
+	assert.Equal(t, []string{"A", "B"}, getEventNames(runCtxB.Events.getEvents()), "After B")
 
 	// 5. Run Agent C (and Nested Fork for Par(D, E))
 	eventC1 := newEvent("C1")
-	runCtxC.Session.addEvent(eventC1)
-	assert.Equal(t, []string{"A", "C1"}, getEventNames(runCtxC.Session.getEvents()), "After C1")
+	runCtxC.Events.addEvent(eventC1)
+	assert.Equal(t, []string{"A", "C1"}, getEventNames(runCtxC.Events.getEvents()), "After C1")
 
 	ctxD := forkRunCtx(ctxC)
 	ctxE := forkRunCtx(ctxC)
@@ -391,35 +391,35 @@ func TestForkJoinRunCtx(t *testing.T) {
 	// Assertions for Nested Fork
 	runCtxD := getRunCtx(ctxD)
 	runCtxE := getRunCtx(ctxE)
-	assert.NotNil(t, runCtxD.Session.LaneEvents.Parent, "Lane D's parent should be Lane C")
-	assert.Same(t, runCtxC.Session.LaneEvents, runCtxD.Session.LaneEvents.Parent, "Lane D's parent must be Lane C's node")
-	assert.Same(t, runCtxC.Session.LaneEvents, runCtxE.Session.LaneEvents.Parent, "Lane E's parent must be Lane C's node")
+	assert.NotNil(t, runCtxD.Events.LaneEvents.Parent, "Lane D's parent should be Lane C")
+	assert.Same(t, runCtxC.Events.LaneEvents, runCtxD.Events.LaneEvents.Parent, "Lane D's parent must be Lane C's node")
+	assert.Same(t, runCtxC.Events.LaneEvents, runCtxE.Events.LaneEvents.Parent, "Lane E's parent must be Lane C's node")
 
 	// 6. Run Agents D and E
 	eventD := newEvent("D")
-	runCtxD.Session.addEvent(eventD)
+	runCtxD.Events.addEvent(eventD)
 	eventE := newEvent("E")
-	runCtxE.Session.addEvent(eventE)
+	runCtxE.Events.addEvent(eventE)
 
-	assert.Equal(t, []string{"A", "C1", "D"}, getEventNames(runCtxD.Session.getEvents()), "After D")
-	assert.Equal(t, []string{"A", "C1", "E"}, getEventNames(runCtxE.Session.getEvents()), "After E")
+	assert.Equal(t, []string{"A", "C1", "D"}, getEventNames(runCtxD.Events.getEvents()), "After D")
+	assert.Equal(t, []string{"A", "C1", "E"}, getEventNames(runCtxE.Events.getEvents()), "After E")
 
 	// 7. Join Par(D, E)
 	joinRunCtxs(ctxC, ctxD, ctxE)
 
 	// Assertions for Nested Join
 	// The events should now be committed to Lane C's event slice.
-	assert.Equal(t, []string{"A", "C1", "D", "E"}, getEventNames(runCtxC.Session.getEvents()), "After joining D and E")
+	assert.Equal(t, []string{"A", "C1", "D", "E"}, getEventNames(runCtxC.Events.getEvents()), "After joining D and E")
 
 	// 8. Join Par(B, C)
 	joinRunCtxs(mainCtx, ctxB, ctxC)
 
 	// Assertions for Top-Level Join
-	// The events should now be committed to the main session's Events slice.
-	assert.Equal(t, []string{"A", "B", "C1", "D", "E"}, getEventNames(mainRunCtx.Session.getEvents()), "After joining B and C")
+	// The events should now be committed to the main events slice.
+	assert.Equal(t, []string{"A", "B", "C1", "D", "E"}, getEventNames(mainRunCtx.Events.getEvents()), "After joining B and C")
 
 	// 9. Run Agent F
 	eventF := newEvent("F")
-	mainRunCtx.Session.addEvent(eventF)
-	assert.Equal(t, []string{"A", "B", "C1", "D", "E", "F"}, getEventNames(mainRunCtx.Session.getEvents()), "After F")
+	mainRunCtx.Events.addEvent(eventF)
+	assert.Equal(t, []string{"A", "B", "C1", "D", "E", "F"}, getEventNames(mainRunCtx.Events.getEvents()), "After F")
 }

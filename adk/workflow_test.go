@@ -539,10 +539,10 @@ func TestParallelWorkflowResumeWithEvents(t *testing.T) {
 			assert.True(t, info.IsResumeTarget)
 			assert.Equal(t, "resume sa1", info.ResumeData)
 
-			// Get the events from session and verify visibility
+		// Get the events from session and verify visibility
 			runCtx := getRunCtx(ctx)
-			assert.NotNil(t, runCtx.Session, "sa1 resumer should have session")
-			allEvents := runCtx.Session.getEvents()
+			assert.NotNil(t, runCtx.Events, "sa1 resumer should have events")
+			allEvents := runCtx.Events.getEvents()
 
 			// Assert that allEvents only have 1 event, that is event1
 			assert.Equal(t, 1, len(allEvents), "sa1 should only see its own event in session")
@@ -582,8 +582,8 @@ func TestParallelWorkflowResumeWithEvents(t *testing.T) {
 
 			// Get the events from session and verify visibility
 			runCtx := getRunCtx(ctx)
-			assert.NotNil(t, runCtx.Session, "sa2 resumer should have session")
-			allEvents := runCtx.Session.getEvents()
+			assert.NotNil(t, runCtx.Events, "sa2 resumer should have events")
+			allEvents := runCtx.Events.getEvents()
 
 			// Assert that allEvents only have 1 event, that is event2
 			assert.Equal(t, 1, len(allEvents), "sa2 should only see its own event in session")
@@ -756,7 +756,7 @@ func TestNestedParallelWorkflow(t *testing.T) {
 
 			// Verify inner1 can see predecessor's event
 			runCtx := getRunCtx(ctx)
-			allEvents := runCtx.Session.getEvents()
+			allEvents := runCtx.Events.getEvents()
 			assert.Equal(t, 1, len(allEvents), "inner1 should see exactly 1 event (predecessor)")
 
 			assert.Equal(t, "predecessor", allEvents[0].AgentEvent.AgentName, "inner1 should see predecessor event")
@@ -781,7 +781,7 @@ func TestNestedParallelWorkflow(t *testing.T) {
 
 			// Verify inner1 can see predecessor's event during resume
 			runCtx := getRunCtx(ctx)
-			allEvents := runCtx.Session.getEvents()
+			allEvents := runCtx.Events.getEvents()
 			assert.Equal(t, 2, len(allEvents), "inner1 should see exactly 2 events (predecessor + own normal message) during resume")
 
 			// Find and verify predecessor event
@@ -807,7 +807,7 @@ func TestNestedParallelWorkflow(t *testing.T) {
 
 			// Verify inner2 can see predecessor's event
 			runCtx := getRunCtx(ctx)
-			allEvents := runCtx.Session.getEvents()
+			allEvents := runCtx.Events.getEvents()
 			assert.Equal(t, 1, len(allEvents), "inner2 should see exactly 1 event (predecessor)")
 
 			assert.Equal(t, "predecessor", allEvents[0].AgentEvent.AgentName, "inner2 should see predecessor event")
@@ -833,7 +833,7 @@ func TestNestedParallelWorkflow(t *testing.T) {
 
 			// Verify inner2 can see predecessor's event during resume
 			runCtx := getRunCtx(ctx)
-			allEvents := runCtx.Session.getEvents()
+			allEvents := runCtx.Events.getEvents()
 			assert.Equal(t, 2, len(allEvents), "inner2 should see exactly 2 events (predecessor + own normal message) during resume")
 
 			// Find and verify predecessor event
@@ -909,7 +909,7 @@ func TestNestedParallelWorkflow(t *testing.T) {
 
 			// Verify successor can see all events from predecessor and parallel agents
 			runCtx := getRunCtx(ctx)
-			allEvents := runCtx.Session.getEvents()
+			allEvents := runCtx.Events.getEvents()
 			assert.GreaterOrEqual(t, len(allEvents), 5, "successor should see all events")
 
 			var foundPredecessor, foundOuter1, foundOuter2, foundInner1, foundInner2 bool
