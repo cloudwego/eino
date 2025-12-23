@@ -1198,6 +1198,45 @@ func withValue(value string) AgentRunOption {
 	})
 }
 
+func TestRunner_WithSharedParentSession_ReusesSession(t *testing.T) {
+	ctx := context.Background()
+	session := newRunSession()
+	parentRunCtx := &runContext{Session: session}
+	ctx = setRunCtx(ctx, parentRunCtx)
+
+	var capturedSession *runSession
+
+	a := &myAgent{
+		name: "child",
+		runFn: func(ctx context.Context, input *AgentInput, options ...AgentRunOption) *AsyncIterator[*AgentEvent] {
+			capturedSession = getSession(ctx)
+			iter, gen := NewAsyncIteratorPair[*AgentEvent]()
+			gen.Close()
+			return iter
+		},
+		resumeFn: func(ctx context.Context, info *ResumeInfo, opts ...AgentRunOption) *AsyncIterator[*AgentEvent] {
+			iter, gen := NewAsyncIteratorPair[*AgentEvent]()
+			gen.Close()
+			return iter
+		},
+	}
+
+	runner := NewRunner(ctx, RunnerConfig{Agent: a})
+	iter := runner.Query(ctx, "q", WithSharedParentSession())
+	for {
+		if _, ok := iter.Next(); !ok {
+			break
+		}
+	}
+
+	if capturedSession == nil {
+		t.Fatalf("child session was not captured")
+	}
+	if capturedSession != session {
+		t.Fatalf("expected child to reuse parent session")
+	}
+}
+
 type myAgent struct {
 	name     string
 	runFn    func(ctx context.Context, input *AgentInput, options ...AgentRunOption) *AsyncIterator[*AgentEvent]

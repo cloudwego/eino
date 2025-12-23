@@ -79,7 +79,7 @@ func (r *Runner) Run(ctx context.Context, messages []Message,
 		EnableStreaming: r.enableStreaming,
 	}
 
-	ctx = ctxWithNewRunCtx(ctx, input)
+	ctx = ctxWithNewRunCtx(ctx, input, o.sharedParentSession)
 
 	AddSessionValues(ctx, o.sessionValues)
 
