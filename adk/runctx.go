@@ -315,18 +315,13 @@ func unwindLaneEvents(ctxs ...context.Context) []*agentEventWrapper {
 
 func forkRunCtx(ctx context.Context) context.Context {
 	parentRunCtx := getRunCtx(ctx)
-	if parentRunCtx == nil || parentRunCtx.Session == nil || parentRunCtx.Events == nil {
-		// Should not happen in a parallel workflow, but handle defensively.
+	// Should not happen in a parallel workflow, but handle defensively.
+	if parentRunCtx == nil || parentRunCtx.Events == nil {
 		return ctx
 	}
 
-	// Create a new session for the child lane by manually copying the parent's session fields.
+	// Create a new runEvents for the child lane by manually copying the parent's runEvents fields.
 	// This is crucial to ensure a new mutex is created and that the LaneEvents pointer is unique.
-	childSession := &runSession{
-		Values: parentRunCtx.Session.Values, // Share the values map
-	}
-
-	// Fork the lane events within the new events struct.
 	childEvents := &runEvents{
 		Events: parentRunCtx.Events.Events, // Share the committed history
 		LaneEvents: &laneEvents{
@@ -335,11 +330,11 @@ func forkRunCtx(ctx context.Context) context.Context {
 		},
 	}
 
-	// Create a new runContext for the child lane, pointing to the new session.
+	// Create a new runContext for the child lane, pointing to the new runEvents.
 	childRunCtx := &runContext{
 		RootInput: parentRunCtx.RootInput,
 		RunPath:   make([]RunStep, len(parentRunCtx.RunPath)),
-		Session:   childSession,
+		Session:   parentRunCtx.Session,
 		Events:    childEvents,
 	}
 	copy(childRunCtx.RunPath, parentRunCtx.RunPath)

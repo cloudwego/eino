@@ -1222,7 +1222,7 @@ func TestRunner_WithSharedParentSession_ReusesSession(t *testing.T) {
 	}
 
 	runner := NewRunner(ctx, RunnerConfig{Agent: a})
-	iter := runner.Query(ctx, "q", WithSharedParentSession())
+	iter := runner.Query(ctx, "q", withSharedParentSession())
 	for {
 		if _, ok := iter.Next(); !ok {
 			break

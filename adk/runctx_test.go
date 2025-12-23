@@ -366,9 +366,9 @@ func TestForkJoinRunCtx(t *testing.T) {
 	// Assertions for Fork
 	runCtxB := getRunCtx(ctxB)
 	runCtxC := getRunCtx(ctxC)
-	assert.NotSame(t, mainRunCtx.Session, runCtxB.Session, "Session B should be a new struct")
-	assert.NotSame(t, mainRunCtx.Session, runCtxC.Session, "Session C should be a new struct")
-	assert.NotSame(t, runCtxB.Session, runCtxC.Session, "Sessions B and C should be different")
+	assert.Same(t, mainRunCtx.Session, runCtxB.Session, "Session B should share parent session")
+	assert.Same(t, mainRunCtx.Session, runCtxC.Session, "Session C should share parent session")
+	assert.Same(t, runCtxB.Session, runCtxC.Session, "Sessions B and C should share parent session")
 	assert.Nil(t, mainRunCtx.Events.LaneEvents, "Main events should have no lane events yet")
 	assert.NotNil(t, runCtxB.Events.LaneEvents, "Session B should have lane events")
 	assert.NotNil(t, runCtxC.Events.LaneEvents, "Session C should have lane events")

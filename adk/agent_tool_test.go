@@ -584,7 +584,7 @@ func TestAgentTool_WithSharedParentSession_SharesSessionWithParent(t *testing.T)
 	input := &AgentInput{Messages: []Message{schema.UserMessage("q")}}
 	ctx, _ = initRunCtx(ctx, "outer", input)
 	r := NewRunner(ctx, RunnerConfig{Agent: innerSpy, EnableStreaming: false, CheckPointStore: newBridgeStore()})
-	it := r.Run(ctx, []Message{schema.UserMessage("q")}, WithSharedParentSession())
+	it := r.Run(ctx, []Message{schema.UserMessage("q")}, withSharedParentSession())
 	for {
 		if _, ok := it.Next(); !ok {
 			break

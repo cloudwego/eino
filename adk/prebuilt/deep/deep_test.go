@@ -22,8 +22,13 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"go.uber.org/mock/gomock"
 
+	"github.com/cloudwego/eino/adk"
+	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/components/tool"
+	mockModel "github.com/cloudwego/eino/internal/mock/components/model"
+	"github.com/cloudwego/eino/schema"
 )
 
 func TestWriteTodos(t *testing.T) {
@@ -38,4 +43,73 @@ func TestWriteTodos(t *testing.T) {
 	result, err := wt.InvokableRun(context.Background(), args)
 	assert.NoError(t, err)
 	assert.Equal(t, fmt.Sprintf("Updated todo list to %s", todos), result)
+}
+
+func TestDeepSubAgentSharesSession(t *testing.T) {
+	ctx := context.Background()
+	spy := &sessionSpyAgent{}
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	cm := mockModel.NewMockToolCallingChatModel(ctrl)
+
+	cm.EXPECT().WithTools(gomock.Any()).Return(cm, nil).AnyTimes()
+
+	calls := 0
+	cm.EXPECT().Generate(gomock.Any(), gomock.Any(), gomock.Any()).
+		DoAndReturn(func(ctx context.Context, msgs []*schema.Message, opts ...model.Option) (*schema.Message, error) {
+			calls++
+			if calls == 1 {
+				c := schema.ToolCall{ID: "id-1", Type: "function"}
+				c.Function.Name = taskToolName
+				c.Function.Arguments = fmt.Sprintf(`{"subagent_type":"%s","description":"from_parent"}`, spy.Name(ctx))
+				return schema.AssistantMessage("", []schema.ToolCall{c}), nil
+			}
+			return schema.AssistantMessage("done", nil), nil
+		}).AnyTimes()
+
+	agent, err := New(ctx, &Config{
+		Name:                   "deep",
+		Description:            "deep agent",
+		ChatModel:              cm,
+		Instruction:            "you are deep agent",
+		SubAgents:              []adk.Agent{spy},
+		ToolsConfig:            adk.ToolsConfig{},
+		MaxIteration:           2,
+		WithoutWriteTodos:      true,
+		WithoutGeneralSubAgent: true,
+	})
+	assert.NoError(t, err)
+
+	r := adk.NewRunner(ctx, adk.RunnerConfig{Agent: agent})
+	it := r.Run(ctx, []adk.Message{schema.UserMessage("hi")}, adk.WithSessionValues(map[string]any{"parent_key": "parent_val"}))
+	for {
+		if _, ok := it.Next(); !ok {
+			break
+		}
+	}
+
+	if assert.NotNil(t, spy.seen) {
+		assert.Equal(t, "parent_val", spy.seen["parent_key"])
+	}
+}
+
+type sessionSpyAgent struct {
+	seen map[string]any
+}
+
+func (s *sessionSpyAgent) Name(ctx context.Context) string {
+	return "spy-subagent"
+}
+
+func (s *sessionSpyAgent) Description(ctx context.Context) string {
+	return "spy subagent"
+}
+
+func (s *sessionSpyAgent) Run(ctx context.Context, input *adk.AgentInput, options ...adk.AgentRunOption) *adk.AsyncIterator[*adk.AgentEvent] {
+	s.seen = adk.GetSessionValues(ctx)
+	iter, gen := adk.NewAsyncIteratorPair[*adk.AgentEvent]()
+	gen.Send(adk.EventFromMessage(schema.AssistantMessage("ok", nil), nil, schema.Assistant, ""))
+	gen.Close()
+	return iter
 }

@@ -125,7 +125,7 @@ func (at *agentTool) InvokableRun(ctx context.Context, argumentsInJSON string, o
 		}
 
 		runOpts := getOptionsByAgentName(at.agent.Name(ctx), opts)
-		runOpts = append(runOpts, WithCheckPointID(bridgeCheckpointID), WithSharedParentSession())
+		runOpts = append(runOpts, WithCheckPointID(bridgeCheckpointID), withSharedParentSession())
 		iter = newInvokableAgentToolRunner(at.agent, ms).Run(ctx, input, runOpts...)
 	} else {
 		if !hasState {
@@ -135,7 +135,7 @@ func (at *agentTool) InvokableRun(ctx context.Context, argumentsInJSON string, o
 		ms = newResumeBridgeStore(state)
 
 		runOpts := getOptionsByAgentName(at.agent.Name(ctx), opts)
-		runOpts = append(runOpts, WithSharedParentSession())
+		runOpts = append(runOpts, withSharedParentSession())
 		iter, err = newInvokableAgentToolRunner(at.agent, ms).
 			Resume(ctx, bridgeCheckpointID, runOpts...)
 		if err != nil {

@@ -44,21 +44,24 @@ func getCommonOptions(base *options, opts ...AgentRunOption) *options {
 	return GetImplSpecificOptions[options](base, opts...)
 }
 
-func WithSharedParentSession() AgentRunOption {
-	return WrapImplSpecificOptFn(func(o *options) {
-		o.sharedParentSession = true
-	})
-}
-
+// WithSessionValues adds the given key-value pairs into the Session.
 func WithSessionValues(v map[string]any) AgentRunOption {
 	return WrapImplSpecificOptFn(func(o *options) {
 		o.sessionValues = v
 	})
 }
 
+// WithSkipTransferMessages skips transfer-to-agent messages when building history.
 func WithSkipTransferMessages() AgentRunOption {
 	return WrapImplSpecificOptFn(func(t *options) {
 		t.skipTransferMessages = true
+	})
+}
+
+// withSharedParentSession marks this run to reuse the parent runSession if available.
+func withSharedParentSession() AgentRunOption {
+	return WrapImplSpecificOptFn(func(o *options) {
+		o.sharedParentSession = true
 	})
 }
 
