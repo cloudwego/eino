@@ -34,6 +34,9 @@ type Options struct {
 	Tools []*schema.ToolInfo
 	// ToolChoice controls which tool is called by the model.
 	ToolChoice *schema.ToolChoice
+	// AllowedToolNames specifies a list of tool names that the model is allowed to call.
+	// This allows for constraining the model to a specific subset of the available tools.
+	AllowedToolNames []string
 }
 
 // Option is the call option for ChatModel component.
@@ -100,11 +103,13 @@ func WithTools(tools []*schema.ToolInfo) Option {
 	}
 }
 
-// WithToolChoice is the option to set tool choice for the model.
-func WithToolChoice(toolChoice schema.ToolChoice) Option {
+// WithToolChoice sets the tool choice for the model. It also allows for providing a list of
+// tool names to constrain the model to a specific subset of the available tools.
+func WithToolChoice(toolChoice schema.ToolChoice, allowedToolNames ...string) Option {
 	return Option{
 		apply: func(opts *Options) {
 			opts.ToolChoice = &toolChoice
+			opts.AllowedToolNames = allowedToolNames
 		},
 	}
 }
