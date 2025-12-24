@@ -545,9 +545,10 @@ func (e *emitEventsAgent) Run(context.Context, *AgentInput, ...AgentRunOption) *
 
 // spyAgent captures runSession from ctx in a single nested run
 type spyAgent struct {
-	a        Agent
-	mu       sync.Mutex
-	captured *runSession
+	a               Agent
+	mu              sync.Mutex
+	capturedEvents  *runEvents
+	capturedSession *runSession
 }
 
 func (s *spyAgent) Name(ctx context.Context) string        { return s.a.Name(ctx) }
@@ -555,22 +556,28 @@ func (s *spyAgent) Description(ctx context.Context) string { return s.a.Descript
 func (s *spyAgent) Run(ctx context.Context, input *AgentInput, options ...AgentRunOption) *AsyncIterator[*AgentEvent] {
 	if rc := getRunCtx(ctx); rc != nil {
 		s.mu.Lock()
-		s.captured = rc.Session
+		s.capturedEvents = rc.Events
+		s.capturedSession = rc.Session
 		s.mu.Unlock()
 	}
 	return s.a.Run(ctx, input, options...)
 }
 
-func (s *spyAgent) getCaptured() *runSession {
+func (s *spyAgent) getCapturedEvents() *runEvents {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.captured
+	return s.capturedEvents
+}
+
+func (s *spyAgent) getCapturedSession() *runSession {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.capturedSession
 }
 
 func TestAgentTool_WithSharedParentSession_SharesSessionWithParent(t *testing.T) {
 	ctx := context.Background()
-	session := newRunSession()
-	parentRunCtx := &runContext{Session: session}
+	parentRunCtx := &runContext{Session: newRunSession(), Events: newRunEvents()}
 	ctx = setRunCtx(ctx, parentRunCtx)
 
 	inner, _ := NewChatModelAgent(ctx, &ChatModelAgentConfig{
@@ -579,7 +586,6 @@ func TestAgentTool_WithSharedParentSession_SharesSessionWithParent(t *testing.T)
 		Model:       &emitOnceModel{},
 	})
 	innerSpy := &spyAgent{a: inner}
-	_ = NewAgentTool(ctx, innerSpy)
 
 	input := &AgentInput{Messages: []Message{schema.UserMessage("q")}}
 	ctx, _ = initRunCtx(ctx, "outer", input)
@@ -591,10 +597,10 @@ func TestAgentTool_WithSharedParentSession_SharesSessionWithParent(t *testing.T)
 		}
 	}
 
-	if innerSpy.getCaptured() == nil {
+	if innerSpy.getCapturedSession() == nil {
 		t.Fatalf("inner agent session was not captured")
 	}
-	if innerSpy.getCaptured() != session {
+	if innerSpy.getCapturedSession() != parentRunCtx.Session {
 		t.Fatalf("expected inner agent to reuse parent session")
 	}
 }
@@ -628,7 +634,7 @@ func TestNestedAgentTool_RunPath(t *testing.T) {
 	})
 
 	input := &AgentInput{Messages: []Message{schema.UserMessage("q")}}
-	ctx, _ = initRunCtx(ctx, "outer", input)
+	ctx, outerRunCtx := initRunCtx(ctx, "outer", input)
 	r := NewRunner(ctx, RunnerConfig{Agent: outer, EnableStreaming: false, CheckPointStore: newBridgeStore()})
 	it := r.Run(ctx, []Message{schema.UserMessage("q")})
 
@@ -663,14 +669,26 @@ func TestNestedAgentTool_RunPath(t *testing.T) {
 		}
 	}
 
-	if innerSpy.getCaptured() == nil {
+	for _, w := range outerRunCtx.Events.getEvents() {
+		if w.AgentName != "outer" {
+			t.Fatalf("outer session contains non-outer event: %s", w.AgentName)
+		}
+	}
+	if innerSpy.getCapturedEvents() == nil {
 		t.Fatalf("inner spy did not capture session")
 	}
-	if inner2Spy.getCaptured() == nil {
+	for _, w := range innerSpy.getCapturedEvents().getEvents() {
+		if w.AgentName != "inner" {
+			t.Fatalf("inner session contains non-inner event: %s", w.AgentName)
+		}
+	}
+	if inner2Spy.getCapturedEvents() == nil {
 		t.Fatalf("inner2 spy did not capture session")
 	}
-	if innerSpy.getCaptured() != inner2Spy.getCaptured() {
-		t.Fatalf("inner and inner2 sessions should be shared")
+	for _, w := range inner2Spy.getCapturedEvents().getEvents() {
+		if w.AgentName != "inner2" {
+			t.Fatalf("inner2 session contains non-inner2 event: %s", w.AgentName)
+		}
 	}
 }
 
@@ -806,7 +824,7 @@ func TestSequentialWorkflow_WithChatModelAgentTool_NestedRunPathAndSessions(t *t
 	}
 
 	input := &AgentInput{Messages: []Message{schema.UserMessage("q")}}
-	ctx, _ = initRunCtx(ctx, "outer-seq", input)
+	ctx, outerRunCtx := initRunCtx(ctx, "outer-seq", input)
 	r := NewRunner(ctx, RunnerConfig{Agent: outer, EnableStreaming: false, CheckPointStore: newBridgeStore()})
 	it := r.Run(ctx, []Message{schema.UserMessage("q")})
 
@@ -841,14 +859,26 @@ func TestSequentialWorkflow_WithChatModelAgentTool_NestedRunPathAndSessions(t *t
 		}
 	}
 
-	if innerSpy.getCaptured() == nil {
+	for _, w := range outerRunCtx.Events.getEvents() {
+		if w.AgentName != "outer-seq" {
+			t.Fatalf("outer session contains non-outer event: %s", w.AgentName)
+		}
+	}
+	if innerSpy.getCapturedEvents() == nil {
 		t.Fatalf("inner spy did not capture session")
 	}
-	if inner2Spy.getCaptured() == nil {
+	for _, w := range innerSpy.getCapturedEvents().getEvents() {
+		if w.AgentName != "inner" {
+			t.Fatalf("inner session contains non-inner event: %s", w.AgentName)
+		}
+	}
+	if inner2Spy.getCapturedEvents() == nil {
 		t.Fatalf("inner2 spy did not capture session")
 	}
-	if innerSpy.getCaptured() != inner2Spy.getCaptured() {
-		t.Fatalf("inner and inner2 sessions should be shared in sequential workflow")
+	for _, w := range inner2Spy.getCapturedEvents().getEvents() {
+		if w.AgentName != "inner2" {
+			t.Fatalf("inner2 session contains non-inner2 event: %s", w.AgentName)
+		}
 	}
 }
 
