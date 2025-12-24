@@ -849,6 +849,7 @@ func (g *graph) compile(ctx context.Context, opt *graphCompileOptions) (*composa
 		r.checkpointConfig = opt.checkpointConfig
 		r.interruptBeforeNodes = opt.interruptBeforeNodes
 		r.interruptAfterNodes = opt.interruptAfterNodes
+		r.autoCheckpointConfig = opt.autoCheckpointConfig
 		r.options = *opt
 	}
 

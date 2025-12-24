@@ -16,6 +16,8 @@
 
 package compose
 
+import "context"
+
 type graphCompileOptions struct {
 	maxRunSteps     int
 	graphName       string
@@ -34,16 +36,51 @@ type graphCompileOptions struct {
 	eagerDisabled bool
 
 	mergeConfigs map[string]FanInMergeConfig
+
+	autoCheckpointConfig *AutoCheckpointConfig
 }
 
 // CheckpointConfig contains configuration options for checkpoint behavior.
-// This configuration is inherited by subgraphs unless explicitly overridden.
+// This configuration is inherited by sub-graphs unless explicitly overridden.
 type CheckpointConfig struct {
 	// PersistRerunInput enables persisting the original input for rerun nodes in checkpoint.
-	// When enabled, stream inputs are tee'd before consumption so they can be persisted
+	// When enabled, stream inputs are copied before consumption so they can be persisted
 	// and restored when resuming from an interrupt.
 	// When disabled (default), rerun nodes receive zero/empty values on resume for backward compatibility.
 	PersistRerunInput bool
+
+	EnableAutoCheckpoint bool
+}
+
+// AutoCheckpointCallback is called when an auto checkpoint operation completes.
+type AutoCheckpointCallback func(ctx context.Context, info *AutoCheckpointInfo)
+
+// AutoCheckpointInfo contains information about an auto checkpoint event.
+type AutoCheckpointInfo struct {
+	CheckpointID string // The checkpoint ID used for saving
+	GraphName    string // The name of the graph
+	TriggerNode  string // The node that triggered the checkpoint
+	TriggerType  string // "before" or "after"
+	Error        error  // nil on success, error details on failure
+}
+
+// AutoCheckpointConfig contains configuration for automatic checkpoint behavior.
+// Auto checkpoint allows graphs to automatically save progress at specified points
+// to avoid accidental loss due to instance reboot or transient errors.
+type AutoCheckpointConfig struct {
+	// BeforeNodes specifies node keys where auto checkpoint should be triggered
+	// before the node starts execution. This is useful for nodes that have a
+	// higher chance of failure (e.g., ChatModel nodes with external dependencies).
+	BeforeNodes []string
+
+	// AfterNodes specifies node keys where auto checkpoint should be triggered
+	// after the node completes execution. This is useful for preserving the output
+	// of expensive nodes (e.g., ChatModel nodes) to avoid re-execution costs.
+	AfterNodes []string
+
+	// OnCheckpoint is called after each auto checkpoint attempt.
+	// Called with Error=nil on success, or with the error on failure.
+	OnCheckpoint AutoCheckpointCallback
 }
 
 func newGraphCompileOptions(opts ...GraphCompileOption) *graphCompileOptions {
@@ -129,19 +166,35 @@ type FanInMergeConfig struct {
 
 // WithFanInMergeConfig sets the fan-in merge configurations
 // for the graph nodes that receive inputs from multiple sources.
-func WithFanInMergeConfig(confs map[string]FanInMergeConfig) GraphCompileOption {
+func WithFanInMergeConfig(configs map[string]FanInMergeConfig) GraphCompileOption {
 	return func(o *graphCompileOptions) {
-		o.mergeConfigs = confs
+		o.mergeConfigs = configs
 	}
 }
 
 // WithCheckpointConfig sets the checkpoint configuration for the graph.
-// This configuration is inherited by subgraphs.
+// This configuration is inherited by sub-graphs.
 // CheckpointConfig.PersistRerunInput enables persisting rerun node inputs in checkpoint,
 // allowing nodes to be resumed with their original inputs after an interrupt.
 func WithCheckpointConfig(config CheckpointConfig) GraphCompileOption {
 	return func(o *graphCompileOptions) {
 		o.checkpointConfig = &config
+	}
+}
+
+// WithAutoCheckpoint sets the automatic checkpoint configuration for the graph.
+// Auto checkpoint allows graphs to automatically save progress at specified points:
+//   - BeforeNodes: checkpoint before these nodes start (useful for nodes with high failure rate)
+//   - AfterNodes: checkpoint after these nodes complete (useful for expensive nodes)
+//
+// This is useful for long-running graphs/workflows to avoid accidental loss of progress
+// due to instance reboot or transient errors.
+//
+// Note: Auto checkpoint requires a CheckPointStore to be configured via WithCheckPointStore.
+// The checkpoint will be saved using the checkpoint ID provided via WithCheckPointID at runtime.
+func WithAutoCheckpoint(config AutoCheckpointConfig) GraphCompileOption {
+	return func(o *graphCompileOptions) {
+		o.autoCheckpointConfig = &config
 	}
 }
 
