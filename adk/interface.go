@@ -154,6 +154,7 @@ type AgentAction struct {
 	internalInterrupted *core.InterruptSignal
 }
 
+// RunStep CheckpointSchema: persisted via serialization.RunCtx (gob).
 type RunStep struct {
 	agentName string
 }
@@ -194,6 +195,7 @@ type runStepSerialization struct {
 	AgentName string
 }
 
+// AgentEvent CheckpointSchema: persisted via serialization.RunCtx (gob).
 type AgentEvent struct {
 	AgentName string
 

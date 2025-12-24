@@ -161,22 +161,9 @@ func init() {
 	schema.RegisterName[*State]("_eino_adk_react_state")
 }
 
+// serialization CheckpointSchema: root checkpoint payload (gob).
+// Any type tagged with `CheckpointSchema:` is persisted and must remain backward compatible.
 type serialization struct {
-	// RunCtx carries the full execution context (including runSession) that will be
-	// gob-encoded into the checkpoint. This type and all transitively referenced
-	// structs form the persisted schema for adk checkpoints.
-	//
-	// IMPORTANT COMPATIBILITY NOTES:
-	//   - Changes to this struct (and any structs reachable from RunCtx) must
-	//     remain backward compatible with previously stored checkpoints.
-	//   - Always prefer adding new, optional fields. Do NOT remove or reorder
-	//     existing fields, as gob relies on field names and presence for decoding.
-	//   - When introducing new fields, make their zero value safe for older
-	//     data (e.g. handle nil pointers and missing slices/maps defensively
-	//     in decode/resume paths).
-	//   - If a breaking change is ever unavoidable, it must be accompanied by
-	//     a migration strategy and versioning; adk currently assumes checkpoints
-	//     written by older versions can still be decoded here.
 	RunCtx *runContext
 	// deprecated: still keep it here for backward compatibility
 	Info                *InterruptInfo

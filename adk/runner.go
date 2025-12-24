@@ -157,6 +157,7 @@ func (r *Runner) resume(ctx context.Context, checkPointID string, resumeData map
 		}
 	}
 	if runCtx.Session.valuesMtx == nil {
+		runCtx.Session.Values = make(map[string]any)
 		runCtx.Session.valuesMtx = &sync.Mutex{}
 	}
 	ctx = setRunCtx(ctx, runCtx)

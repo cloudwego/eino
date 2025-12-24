@@ -144,6 +144,7 @@ func (a *workflowAgent) Resume(ctx context.Context, info *ResumeInfo, opts ...Ag
 	return iterator
 }
 
+// WorkflowInterruptInfo CheckpointSchema: persisted via InterruptInfo.Data (gob).
 type WorkflowInterruptInfo struct {
 	OrigInput *AgentInput
 
