@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"reflect"
 	"strings"
+	"sync"
 
 	"github.com/cloudwego/eino/internal"
 	"github.com/cloudwego/eino/internal/core"
@@ -82,6 +83,61 @@ type runner struct {
 	interruptAfterNodes  []string
 
 	mergeConfigs map[string]FanInMergeConfig
+
+	autoCheckpointConfig *AutoCheckpointConfig
+}
+
+type runnerCtxKey struct{}
+
+type runnerContext struct {
+	taskManager    *taskManager
+	channelManager *channelManager
+	runner         *runner
+	isStream       bool
+	nodeKey        string
+	checkpointID   *string
+	ctx            context.Context
+
+	loopMu sync.Mutex
+}
+
+func (rc *runnerContext) Lock() {
+	rc.loopMu.Lock()
+}
+
+func (rc *runnerContext) Unlock() {
+	rc.loopMu.Unlock()
+}
+
+func setRunnerContext(ctx context.Context, rc *runnerContext) context.Context {
+	return context.WithValue(ctx, runnerCtxKey{}, rc)
+}
+
+func getRunnerContext(ctx context.Context) *runnerContext {
+	if rc, ok := ctx.Value(runnerCtxKey{}).(*runnerContext); ok {
+		return rc
+	}
+	return nil
+}
+
+type subGraphAutoCPCtxKey struct{}
+
+type subGraphAutoCPContext struct {
+	checkpointID        string
+	checkpointRequest   chan struct{}
+	checkpointResult    chan *checkpoint
+	parentRunnerContext *runnerContext
+}
+
+func setSubGraphAutoCPContext(ctx context.Context, ac *subGraphAutoCPContext) context.Context {
+	return context.WithValue(ctx, subGraphAutoCPCtxKey{}, ac)
+}
+
+func getSubGraphAutoCPContext(ctx context.Context) *subGraphAutoCPContext {
+	if ac, ok := ctx.Value(subGraphAutoCPCtxKey{}).(*subGraphAutoCPContext); ok {
+		return ac
+	}
+	return nil
 }
 
 func (r *runner) invoke(ctx context.Context, input any, opts ...Option) (any, error) {
@@ -130,6 +186,8 @@ func (r *runner) run(ctx context.Context, isStream bool, input any, opts ...Opti
 	cm := r.initChannelManager(isStream)
 	tm := r.initTaskManager(runWrapper, getGraphCancel(ctx), opts...)
 	maxSteps := r.options.maxRunSteps
+	subGraphAutoCPCtx := getSubGraphAutoCPContext(ctx)
+	parentRC := getRunnerContext(ctx)
 
 	if r.dag {
 		for i := range opts {
@@ -163,6 +221,24 @@ func (r *runner) run(ctx context.Context, isStream bool, input any, opts ...Opti
 
 	// Extract subgraph
 	path, isSubGraph := getNodePath(ctx)
+
+	var currentNodeKey string
+	if isSubGraph && path != nil && len(path.GetPath()) > 0 {
+		pathSlice := path.GetPath()
+		currentNodeKey = pathSlice[len(pathSlice)-1]
+	}
+
+	rc := &runnerContext{
+		taskManager:    tm,
+		channelManager: cm,
+		runner:         r,
+		isStream:       isStream,
+		nodeKey:        currentNodeKey,
+		checkpointID:   writeToCheckPointID,
+		ctx:            ctx,
+	}
+	ctx = setRunnerContext(ctx, rc)
+	rc.ctx = ctx
 
 	// load checkpoint from ctx/store or init graph
 	initialized := false
@@ -263,6 +339,7 @@ func (r *runner) run(ctx context.Context, isStream bool, input any, opts ...Opti
 		var totalCanceledTasks []*task
 
 		completedTasks, canceled, canceledTasks := tm.wait()
+
 		totalCanceledTasks = append(totalCanceledTasks, canceledTasks...)
 		tempInfo := newInterruptTempInfo()
 		if canceled {
@@ -287,6 +364,7 @@ func (r *runner) run(ctx context.Context, isStream bool, input any, opts ...Opti
 		if len(tempInfo.subGraphInterrupts)+len(tempInfo.interruptRerunNodes) > 0 {
 			var newCompletedTasks []*task
 			newCompletedTasks, canceledTasks = tm.waitAll()
+
 			totalCanceledTasks = append(totalCanceledTasks, canceledTasks...)
 			for _, ct := range canceledTasks {
 				// handle timeout tasks as rerun
@@ -332,6 +410,7 @@ func (r *runner) run(ctx context.Context, isStream bool, input any, opts ...Opti
 		if len(tempInfo.interruptBeforeNodes) > 0 || len(tempInfo.interruptAfterNodes) > 0 {
 			var newCompletedTasks []*task
 			newCompletedTasks, canceledTasks = tm.waitAll()
+
 			totalCanceledTasks = append(totalCanceledTasks, canceledTasks...)
 			for _, ct := range canceledTasks {
 				tempInfo.interruptRerunNodes = append(tempInfo.interruptRerunNodes, ct.nodeKey)
@@ -368,6 +447,22 @@ func (r *runner) run(ctx context.Context, isStream bool, input any, opts ...Opti
 
 			// simple interrupt
 			return nil, r.handleInterrupt(ctx, tempInfo, append(nextTasks, newNextTasks...), cm.channels, isStream, isSubGraph, writeToCheckPointID)
+		}
+
+		if subGraphAutoCPCtx != nil {
+			select {
+			case <-subGraphAutoCPCtx.checkpointRequest:
+				cp := r.createCheckpointSnapshot(ctx, cm, tm)
+				subGraphAutoCPCtx.checkpointResult <- cp
+			default:
+			}
+		}
+
+		if r.shouldAutoCheckpointAfter(completedTasks) || r.shouldAutoCheckpointBefore(nextTasks) {
+			autoCheckpointErr := r.performAutoCheckpoint(ctx, rc, isStream, parentRC, writeToCheckPointID, isSubGraph, nextTasks)
+			if autoCheckpointErr != nil {
+				_ = autoCheckpointErr
+			}
 		}
 	}
 }
@@ -714,6 +809,7 @@ func (r *runner) calculateNextTasks(ctx context.Context, completedTasks []*task,
 }
 
 func (r *runner) createTasks(ctx context.Context, nodeMap map[string]any, optMap map[string][]any) ([]*task, error) {
+	rc := getRunnerContext(ctx)
 	var nextTasks []*task
 	for nodeKey, nodeInput := range nodeMap {
 		call, ok := r.chanSubscribeTo[nodeKey]
@@ -721,17 +817,34 @@ func (r *runner) createTasks(ctx context.Context, nodeMap map[string]any, optMap
 			return nil, fmt.Errorf("node[%s] has not been registered", nodeKey)
 		}
 
-		if call.action.nodeInfo != nil && call.action.nodeInfo.compileOption != nil {
-			ctx = forwardCheckPoint(ctx, nodeKey)
+		isSubGraphNode := call.action.nodeInfo != nil && call.action.nodeInfo.compileOption != nil
+		taskCtx := ctx
+		if isSubGraphNode {
+			taskCtx = forwardCheckPoint(ctx, nodeKey)
 		}
 
-		nextTasks = append(nextTasks, &task{
-			ctx:     AppendAddressSegment(ctx, AddressSegmentNode, nodeKey),
+		newTask := &task{
+			ctx:     AppendAddressSegment(taskCtx, AddressSegmentNode, nodeKey),
 			nodeKey: nodeKey,
 			call:    call,
 			input:   nodeInput,
 			option:  optMap[nodeKey],
-		})
+		}
+
+		if isSubGraphNode && r.checkpointConfig != nil && r.checkpointConfig.EnableAutoCheckpoint {
+			newTask.checkpointRequest = make(chan struct{}, 1)
+			newTask.checkpointResult = make(chan *checkpoint, 1)
+			newTask.parentRunnerContext = rc
+
+			autoCPCtx := &subGraphAutoCPContext{
+				checkpointRequest:   newTask.checkpointRequest,
+				checkpointResult:    newTask.checkpointResult,
+				parentRunnerContext: rc,
+			}
+			newTask.ctx = setSubGraphAutoCPContext(newTask.ctx, autoCPCtx)
+		}
+
+		nextTasks = append(nextTasks, newTask)
 	}
 	return nextTasks, nil
 }
@@ -762,6 +875,7 @@ func (r *runner) restoreTasks(
 	rerunNodes []string,
 	isStream bool,
 	optMap map[string][]any) ([]*task, error) {
+	rc := getRunnerContext(ctx)
 	ret := make([]*task, 0, len(inputs))
 	for _, key := range rerunNodes {
 		if _, hasInput := inputs[key]; hasInput {
@@ -784,13 +898,14 @@ func (r *runner) restoreTasks(
 			return nil, fmt.Errorf("channel[%s] from checkpoint is not registered", key)
 		}
 
-		if call.action.nodeInfo != nil && call.action.nodeInfo.compileOption != nil {
-			// sub graph
-			ctx = forwardCheckPoint(ctx, key)
+		isSubGraphNode := call.action.nodeInfo != nil && call.action.nodeInfo.compileOption != nil
+		taskCtx := ctx
+		if isSubGraphNode {
+			taskCtx = forwardCheckPoint(ctx, key)
 		}
 
 		newTask := &task{
-			ctx:            AppendAddressSegment(ctx, AddressSegmentNode, key),
+			ctx:            AppendAddressSegment(taskCtx, AddressSegmentNode, key),
 			nodeKey:        key,
 			call:           call,
 			input:          input,
@@ -799,6 +914,19 @@ func (r *runner) restoreTasks(
 		}
 		if opt, ok := optMap[key]; ok {
 			newTask.option = opt
+		}
+
+		if isSubGraphNode && r.checkpointConfig != nil && r.checkpointConfig.EnableAutoCheckpoint {
+			newTask.checkpointRequest = make(chan struct{}, 1)
+			newTask.checkpointResult = make(chan *checkpoint, 1)
+			newTask.parentRunnerContext = rc
+
+			autoCPCtx := &subGraphAutoCPContext{
+				checkpointRequest:   newTask.checkpointRequest,
+				checkpointResult:    newTask.checkpointResult,
+				parentRunnerContext: rc,
+			}
+			newTask.ctx = setSubGraphAutoCPContext(newTask.ctx, autoCPCtx)
 		}
 
 		ret = append(ret, newTask)
@@ -1033,4 +1161,151 @@ func printTask(ts []*task) string {
 	sb.WriteString(ts[len(ts)-1].nodeKey)
 	sb.WriteString("]")
 	return sb.String()
+}
+
+func (r *runner) shouldAutoCheckpointBefore(nextTasks []*task) bool {
+	if r.autoCheckpointConfig == nil {
+		return false
+	}
+	for _, t := range nextTasks {
+		for _, node := range r.autoCheckpointConfig.BeforeNodes {
+			if t.nodeKey == node {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func (r *runner) shouldAutoCheckpointAfter(completedTasks []*task) bool {
+	if r.autoCheckpointConfig == nil {
+		return false
+	}
+	for _, t := range completedTasks {
+		for _, node := range r.autoCheckpointConfig.AfterNodes {
+			if t.nodeKey == node {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func (r *runner) createCheckpointSnapshot(
+	ctx context.Context,
+	cm *channelManager,
+	tm *taskManager,
+) *checkpoint {
+	cp := &checkpoint{
+		Channels:       cm.channels,
+		Inputs:         make(map[string]any),
+		SkipPreHandler: make(map[string]bool),
+		SubGraphs:      make(map[string]*checkpoint),
+	}
+
+	if r.runCtx != nil {
+		if state, ok := ctx.Value(stateKey{}).(*internalState); ok {
+			state.mu.Lock()
+			cp.State = state.state
+			state.mu.Unlock()
+		}
+	}
+
+	for nodeKey, task := range tm.runningTasks {
+		if task.originalInput != nil {
+			cp.Inputs[nodeKey] = task.originalInput
+			cp.SkipPreHandler[nodeKey] = task.skipPreHandler
+		}
+	}
+
+	return cp
+}
+
+func (r *runner) requestSubGraphCheckpoints(tm *taskManager) map[string]*checkpoint {
+	subCheckpoints := make(map[string]*checkpoint)
+	for nodeKey, task := range tm.runningTasks {
+		if task.checkpointRequest != nil {
+			subCP := task.requestCheckpoint()
+			if subCP != nil {
+				subCheckpoints[nodeKey] = subCP
+			}
+		}
+	}
+	return subCheckpoints
+}
+
+func (r *runner) performAutoCheckpoint(
+	ctx context.Context,
+	rc *runnerContext,
+	isStream bool,
+	parentRC *runnerContext,
+	writeToCheckPointID *string,
+	isSubGraph bool,
+	nextTasks []*task,
+) error {
+	cp := r.createCheckpointSnapshot(ctx, rc.channelManager, rc.taskManager)
+
+	for _, t := range nextTasks {
+		cp.RerunNodes = append(cp.RerunNodes, t.nodeKey)
+		cp.Inputs[t.nodeKey] = t.input
+	}
+
+	subCPs := r.requestSubGraphCheckpoints(rc.taskManager)
+	for nodeKey, subCP := range subCPs {
+		cp.SubGraphs[nodeKey] = subCP
+	}
+
+	err := r.checkPointer.convertCheckPoint(cp, isStream)
+	if err != nil {
+		return fmt.Errorf("failed to convert auto checkpoint: %w", err)
+	}
+
+	if isSubGraph && parentRC != nil {
+		return parentRC.onSubGraphAutoCheckpoint(ctx, cp, rc.nodeKey)
+	}
+
+	if writeToCheckPointID != nil && r.checkPointer.store != nil {
+		err = r.checkPointer.set(ctx, *writeToCheckPointID, cp)
+		if err != nil {
+			return fmt.Errorf("failed to save auto checkpoint: %w", err)
+		}
+	}
+
+	return nil
+}
+
+func (rc *runnerContext) onSubGraphAutoCheckpoint(ctx context.Context, subCP *checkpoint, subGraphNodeKey string) error {
+	rc.Lock()
+	defer rc.Unlock()
+
+	cp := rc.runner.createCheckpointSnapshot(ctx, rc.channelManager, rc.taskManager)
+	cp.SubGraphs[subGraphNodeKey] = subCP
+
+	for nodeKey, task := range rc.taskManager.runningTasks {
+		if nodeKey != subGraphNodeKey && task.checkpointRequest != nil {
+			otherSubCP := task.requestCheckpoint()
+			if otherSubCP != nil {
+				cp.SubGraphs[nodeKey] = otherSubCP
+			}
+		}
+	}
+
+	err := rc.runner.checkPointer.convertCheckPoint(cp, rc.isStream)
+	if err != nil {
+		return fmt.Errorf("failed to convert parent checkpoint: %w", err)
+	}
+
+	parentAutoCPCtx := getSubGraphAutoCPContext(rc.ctx)
+	if parentAutoCPCtx != nil && parentAutoCPCtx.parentRunnerContext != nil {
+		return parentAutoCPCtx.parentRunnerContext.onSubGraphAutoCheckpoint(parentAutoCPCtx.parentRunnerContext.ctx, cp, rc.nodeKey)
+	}
+
+	if rc.checkpointID != nil && rc.runner.checkPointer.store != nil {
+		err = rc.runner.checkPointer.set(ctx, *rc.checkpointID, cp)
+		if err != nil {
+			return fmt.Errorf("failed to save parent checkpoint: %w", err)
+		}
+	}
+
+	return nil
 }

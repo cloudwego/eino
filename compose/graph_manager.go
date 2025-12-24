@@ -255,6 +255,18 @@ type task struct {
 	option         []any
 	err            error
 	skipPreHandler bool
+
+	checkpointRequest   chan struct{}
+	checkpointResult    chan *checkpoint
+	parentRunnerContext *runnerContext
+}
+
+func (t *task) requestCheckpoint() *checkpoint {
+	if t.checkpointRequest == nil {
+		return nil
+	}
+	t.checkpointRequest <- struct{}{}
+	return <-t.checkpointResult
 }
 
 type taskManager struct {
