@@ -91,6 +91,82 @@ func TestAgentTool_Info(t *testing.T) {
 	assert.NotNil(t, info.ParamsOneOf)
 }
 
+func TestAgentTool_SharedParentSessionValues(t *testing.T) {
+	ctx := context.Background()
+
+	inner := &sessionValuesAgent{name: "inner"}
+	innerTool := NewAgentTool(ctx, inner).(tool.InvokableTool)
+
+	input := &AgentInput{Messages: []Message{schema.UserMessage("q")}}
+	ctx, _ = initRunCtx(ctx, "outer", input)
+	AddSessionValue(ctx, "parent_key", "parent_val")
+	parentSession := getRunCtx(ctx).Session
+
+	_, err := innerTool.InvokableRun(ctx, `{"request":"hello"}`)
+	assert.NoError(t, err)
+
+	assert.Equal(t, "parent_val", inner.seenParentValue)
+	assert.NotNil(t, inner.capturedSession)
+	assert.NotSame(t, parentSession, inner.capturedSession)
+	assert.NotNil(t, parentSession.valuesMtx)
+	assert.Same(t, parentSession.valuesMtx, inner.capturedSession.valuesMtx)
+
+	mtx := parentSession.valuesMtx
+	mtx.Lock()
+	inner.capturedSession.Values["direct_child_key"] = "direct_child_val"
+	mtx.Unlock()
+
+	mtx.Lock()
+	v2, ok2 := parentSession.Values["direct_child_key"]
+	mtx.Unlock()
+	assert.True(t, ok2)
+	assert.Equal(t, "direct_child_val", v2)
+
+	mtx.Lock()
+	parentSession.Values["direct_parent_key"] = "direct_parent_val"
+	mtx.Unlock()
+
+	mtx.Lock()
+	v3, ok3 := inner.capturedSession.Values["direct_parent_key"]
+	mtx.Unlock()
+	assert.True(t, ok3)
+	assert.Equal(t, "direct_parent_val", v3)
+
+	v, ok := GetSessionValue(ctx, "child_key")
+	assert.True(t, ok)
+	assert.Equal(t, "child_val", v)
+}
+
+type sessionValuesAgent struct {
+	name            string
+	seenParentValue any
+	capturedSession *runSession
+}
+
+func (a *sessionValuesAgent) Name(context.Context) string        { return a.name }
+func (a *sessionValuesAgent) Description(context.Context) string { return "test" }
+func (a *sessionValuesAgent) Run(ctx context.Context, _ *AgentInput, _ ...AgentRunOption) *AsyncIterator[*AgentEvent] {
+	if rc := getRunCtx(ctx); rc != nil {
+		a.capturedSession = rc.Session
+	}
+	a.seenParentValue, _ = GetSessionValue(ctx, "parent_key")
+	AddSessionValue(ctx, "child_key", "child_val")
+
+	it, gen := NewAsyncIteratorPair[*AgentEvent]()
+	gen.Send(&AgentEvent{
+		AgentName: a.name,
+		Output: &AgentOutput{
+			MessageOutput: &MessageVariant{
+				IsStreaming: false,
+				Message:     schema.AssistantMessage("ok", nil),
+				Role:        schema.Assistant,
+			},
+		},
+	})
+	gen.Close()
+	return it
+}
+
 func TestAgentTool_InvokableRun(t *testing.T) {
 	// Create a context
 	ctx := context.Background()

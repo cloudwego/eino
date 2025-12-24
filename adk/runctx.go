@@ -29,11 +29,12 @@ import (
 )
 
 type runSession struct {
-	Events     []*agentEventWrapper
-	Values     map[string]any
-	LaneEvents *laneEvents
+	Values    map[string]any
+	valuesMtx *sync.Mutex
 
-	mtx sync.Mutex
+	Events     []*agentEventWrapper
+	LaneEvents *laneEvents
+	mtx        sync.Mutex
 }
 
 type laneEvents struct {
@@ -69,7 +70,8 @@ func (a *agentEventWrapper) GobDecode(b []byte) error {
 
 func newRunSession() *runSession {
 	return &runSession{
-		Values: make(map[string]any),
+		Values:    make(map[string]any),
+		valuesMtx: &sync.Mutex{},
 	}
 }
 
@@ -162,34 +164,56 @@ func (rs *runSession) getEvents() []*agentEventWrapper {
 }
 
 func (rs *runSession) getValues() map[string]any {
-	rs.mtx.Lock()
+	if rs.valuesMtx == nil {
+		return map[string]any{}
+	}
+
+	rs.valuesMtx.Lock()
 	values := make(map[string]any, len(rs.Values))
 	for k, v := range rs.Values {
 		values[k] = v
 	}
-	rs.mtx.Unlock()
+	rs.valuesMtx.Unlock()
 
 	return values
 }
 
 func (rs *runSession) addValue(key string, value any) {
-	rs.mtx.Lock()
+	if rs.valuesMtx == nil {
+		return
+	}
+	if rs.Values == nil {
+		return
+	}
+
+	rs.valuesMtx.Lock()
 	rs.Values[key] = value
-	rs.mtx.Unlock()
+	rs.valuesMtx.Unlock()
 }
 
 func (rs *runSession) addValues(kvs map[string]any) {
-	rs.mtx.Lock()
+	if rs.valuesMtx == nil {
+		return
+	}
+	if rs.Values == nil {
+		return
+	}
+
+	rs.valuesMtx.Lock()
 	for k, v := range kvs {
 		rs.Values[k] = v
 	}
-	rs.mtx.Unlock()
+	rs.valuesMtx.Unlock()
 }
 
 func (rs *runSession) getValue(key string) (any, bool) {
-	rs.mtx.Lock()
+	if rs.valuesMtx == nil {
+		return nil, false
+	}
+
+	rs.valuesMtx.Lock()
 	value, ok := rs.Values[key]
-	rs.mtx.Unlock()
+	rs.valuesMtx.Unlock()
 
 	return value, ok
 }
@@ -312,8 +336,9 @@ func forkRunCtx(ctx context.Context) context.Context {
 	// Create a new session for the child lane by manually copying the parent's session fields.
 	// This is crucial to ensure a new mutex is created and that the LaneEvents pointer is unique.
 	childSession := &runSession{
-		Events: parentRunCtx.Session.Events, // Share the committed history
-		Values: parentRunCtx.Session.Values, // Share the values map
+		Events:    parentRunCtx.Session.Events, // Share the committed history
+		Values:    parentRunCtx.Session.Values, // Share the values map
+		valuesMtx: parentRunCtx.Session.valuesMtx,
 	}
 
 	// Fork the lane events within the new session struct.
@@ -360,8 +385,16 @@ func ClearRunCtx(ctx context.Context) context.Context {
 	return context.WithValue(ctx, runCtxKey{}, nil)
 }
 
-func ctxWithNewRunCtx(ctx context.Context, input *AgentInput) context.Context {
-	return setRunCtx(ctx, &runContext{Session: newRunSession(), RootInput: input})
+func ctxWithNewRunCtx(ctx context.Context, input *AgentInput, sharedParentSession bool) context.Context {
+	session := newRunSession()
+	if sharedParentSession {
+		parentSession := getSession(ctx)
+		if parentSession != nil {
+			session.Values = parentSession.Values
+			session.valuesMtx = parentSession.valuesMtx
+		}
+	}
+	return setRunCtx(ctx, &runContext{Session: session, RootInput: input})
 }
 
 func getSession(ctx context.Context) *runSession {

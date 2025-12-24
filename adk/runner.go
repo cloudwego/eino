@@ -20,6 +20,7 @@ import (
 	"context"
 	"fmt"
 	"runtime/debug"
+	"sync"
 
 	"github.com/cloudwego/eino/compose"
 	"github.com/cloudwego/eino/internal/core"
@@ -79,7 +80,7 @@ func (r *Runner) Run(ctx context.Context, messages []Message,
 		EnableStreaming: r.enableStreaming,
 	}
 
-	ctx = ctxWithNewRunCtx(ctx, input)
+	ctx = ctxWithNewRunCtx(ctx, input, o.sharedParentSession)
 
 	AddSessionValues(ctx, o.sessionValues)
 
@@ -142,12 +143,24 @@ func (r *Runner) resume(ctx context.Context, checkPointID string, resumeData map
 		return nil, fmt.Errorf("failed to resume: store is nil")
 	}
 
-	ctx, resumeInfo, err := r.loadCheckPoint(ctx, checkPointID)
+	ctx, runCtx, resumeInfo, err := r.loadCheckPoint(ctx, checkPointID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to load from checkpoint: %w", err)
 	}
 
 	o := getCommonOptions(nil, opts...)
+	if o.sharedParentSession {
+		parentSession := getSession(ctx)
+		if parentSession != nil {
+			runCtx.Session.Values = parentSession.Values
+			runCtx.Session.valuesMtx = parentSession.valuesMtx
+		}
+	}
+	if runCtx.Session.valuesMtx == nil {
+		runCtx.Session.valuesMtx = &sync.Mutex{}
+	}
+	ctx = setRunCtx(ctx, runCtx)
+
 	AddSessionValues(ctx, o.sessionValues)
 
 	if len(resumeData) > 0 {

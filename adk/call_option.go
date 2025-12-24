@@ -17,6 +17,7 @@
 package adk
 
 type options struct {
+	sharedParentSession  bool
 	sessionValues        map[string]any
 	checkPointID         *string
 	skipTransferMessages bool
@@ -52,6 +53,12 @@ func WithSessionValues(v map[string]any) AgentRunOption {
 func WithSkipTransferMessages() AgentRunOption {
 	return WrapImplSpecificOptFn(func(t *options) {
 		t.skipTransferMessages = true
+	})
+}
+
+func WithSharedParentSession() AgentRunOption {
+	return WrapImplSpecificOptFn(func(o *options) {
+		o.sharedParentSession = true
 	})
 }
 
