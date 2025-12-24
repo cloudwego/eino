@@ -28,13 +28,13 @@ import (
 	"github.com/cloudwego/eino/schema"
 )
 
-type runSession struct {
+type sessionValues struct {
 	Values map[string]any
 
 	mtx sync.Mutex
 }
 
-type runEvents struct {
+type runSession struct {
 	Events     []*agentEventWrapper
 	LaneEvents *laneEvents
 
@@ -72,14 +72,14 @@ func (a *agentEventWrapper) GobDecode(b []byte) error {
 	return gob.NewDecoder(bytes.NewReader(b)).Decode((*otherAgentEventWrapperForEncode)(a))
 }
 
-func newRunSession() *runSession {
-	return &runSession{
+func newRunSession() *sessionValues {
+	return &sessionValues{
 		Values: make(map[string]any),
 	}
 }
 
-func newRunEvents() *runEvents {
-	return &runEvents{}
+func newRunEvents() *runSession {
+	return &runSession{}
 }
 
 func GetSessionValues(ctx context.Context) map[string]any {
@@ -118,7 +118,7 @@ func GetSessionValue(ctx context.Context, key string) (any, bool) {
 	return session.getValue(key)
 }
 
-func (rs *runEvents) addEvent(event *AgentEvent) {
+func (rs *runSession) addEvent(event *AgentEvent) {
 	wrapper := &agentEventWrapper{AgentEvent: event, ts: time.Now().UnixNano()}
 	// If LaneEvents is not nil, we are in a parallel lane.
 	// Append to the lane's local event slice (lock-free).
@@ -133,7 +133,7 @@ func (rs *runEvents) addEvent(event *AgentEvent) {
 	rs.mtx.Unlock()
 }
 
-func (rs *runEvents) getEvents() []*agentEventWrapper {
+func (rs *runSession) getEvents() []*agentEventWrapper {
 	// If there are no in-flight lane events, we can return the main slice directly.
 	if rs.LaneEvents == nil {
 		rs.mtx.Lock()
@@ -170,7 +170,7 @@ func (rs *runEvents) getEvents() []*agentEventWrapper {
 	return finalEvents
 }
 
-func (rs *runSession) getValues() map[string]any {
+func (rs *sessionValues) getValues() map[string]any {
 	rs.mtx.Lock()
 	values := make(map[string]any, len(rs.Values))
 	for k, v := range rs.Values {
@@ -181,13 +181,13 @@ func (rs *runSession) getValues() map[string]any {
 	return values
 }
 
-func (rs *runSession) addValue(key string, value any) {
+func (rs *sessionValues) addValue(key string, value any) {
 	rs.mtx.Lock()
 	rs.Values[key] = value
 	rs.mtx.Unlock()
 }
 
-func (rs *runSession) addValues(kvs map[string]any) {
+func (rs *sessionValues) addValues(kvs map[string]any) {
 	rs.mtx.Lock()
 	for k, v := range kvs {
 		rs.Values[k] = v
@@ -195,7 +195,7 @@ func (rs *runSession) addValues(kvs map[string]any) {
 	rs.mtx.Unlock()
 }
 
-func (rs *runSession) getValue(key string) (any, bool) {
+func (rs *sessionValues) getValue(key string) (any, bool) {
 	rs.mtx.Lock()
 	value, ok := rs.Values[key]
 	rs.mtx.Unlock()
@@ -207,8 +207,8 @@ type runContext struct {
 	RootInput *AgentInput
 	RunPath   []RunStep
 
-	Session *runSession
-	Events  *runEvents
+	Session *sessionValues
+	Events  *runSession
 }
 
 func (rc *runContext) isRoot() bool {
@@ -320,9 +320,9 @@ func forkRunCtx(ctx context.Context) context.Context {
 		return ctx
 	}
 
-	// Create a new runEvents for the child lane by manually copying the parent's runEvents fields.
+	// Create a new runSession for the child lane by manually copying the parent's runSession fields.
 	// This is crucial to ensure a new mutex is created and that the LaneEvents pointer is unique.
-	childEvents := &runEvents{
+	childEvents := &runSession{
 		Events: parentRunCtx.Events.Events, // Share the committed history
 		LaneEvents: &laneEvents{
 			Parent: parentRunCtx.Events.LaneEvents,
@@ -330,7 +330,7 @@ func forkRunCtx(ctx context.Context) context.Context {
 		},
 	}
 
-	// Create a new runContext for the child lane, pointing to the new runEvents.
+	// Create a new runContext for the child lane, pointing to the new runSession.
 	childRunCtx := &runContext{
 		RootInput: parentRunCtx.RootInput,
 		RunPath:   make([]RunStep, len(parentRunCtx.RunPath)),
@@ -370,7 +370,7 @@ func ClearRunCtx(ctx context.Context) context.Context {
 }
 
 func ctxWithNewRunCtx(ctx context.Context, input *AgentInput, sharedParentSession bool) context.Context {
-	var session *runSession
+	var session *sessionValues
 	if sharedParentSession {
 		session = getSession(ctx)
 	}
@@ -382,7 +382,7 @@ func ctxWithNewRunCtx(ctx context.Context, input *AgentInput, sharedParentSessio
 	return setRunCtx(ctx, &runContext{Session: session, Events: events, RootInput: input})
 }
 
-func getSession(ctx context.Context) *runSession {
+func getSession(ctx context.Context) *sessionValues {
 	runCtx := getRunCtx(ctx)
 	if runCtx != nil {
 		return runCtx.Session

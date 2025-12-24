@@ -268,7 +268,7 @@ func TestRunner_WithSharedParentSession(t *testing.T) {
 	parentRunCtx := &runContext{Session: session}
 	ctx = setRunCtx(ctx, parentRunCtx)
 
-	var capturedSession *runSession
+	var capturedSession *sessionValues
 
 	a := &myAgent{
 		name: "child",

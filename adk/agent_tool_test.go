@@ -543,12 +543,12 @@ func (e *emitEventsAgent) Run(context.Context, *AgentInput, ...AgentRunOption) *
 	return it
 }
 
-// spyAgent captures runSession from ctx in a single nested run
+// spyAgent captures sessionValues from ctx in a single nested run
 type spyAgent struct {
 	a               Agent
 	mu              sync.Mutex
-	capturedEvents  *runEvents
-	capturedSession *runSession
+	capturedEvents  *runSession
+	capturedSession *sessionValues
 }
 
 func (s *spyAgent) Name(ctx context.Context) string        { return s.a.Name(ctx) }
@@ -563,13 +563,13 @@ func (s *spyAgent) Run(ctx context.Context, input *AgentInput, options ...AgentR
 	return s.a.Run(ctx, input, options...)
 }
 
-func (s *spyAgent) getCapturedEvents() *runEvents {
+func (s *spyAgent) getCapturedEvents() *runSession {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.capturedEvents
 }
 
-func (s *spyAgent) getCapturedSession() *runSession {
+func (s *spyAgent) getCapturedSession() *sessionValues {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.capturedSession

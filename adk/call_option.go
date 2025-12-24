@@ -58,7 +58,7 @@ func WithSkipTransferMessages() AgentRunOption {
 	})
 }
 
-// withSharedParentSession marks this run to reuse the parent runSession if available.
+// withSharedParentSession marks this run to reuse the parent sessionValues if available.
 func withSharedParentSession() AgentRunOption {
 	return WrapImplSpecificOptFn(func(o *options) {
 		o.sharedParentSession = true
