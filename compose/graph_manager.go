@@ -256,17 +256,37 @@ type task struct {
 	err            error
 	skipPreHandler bool
 
-	checkpointRequest   chan struct{}
-	checkpointResult    chan *checkpoint
+	subGraphAutoCPChan  chan *autoCPRequest
 	parentRunnerContext *runnerContext
 }
 
-func (t *task) requestCheckpoint() *checkpoint {
-	if t.checkpointRequest == nil {
+func (t *task) requestCheckpoint(ctx context.Context) *checkpoint {
+	if t.subGraphAutoCPChan == nil {
 		return nil
 	}
-	t.checkpointRequest <- struct{}{}
-	return <-t.checkpointResult
+	req := &autoCPRequest{
+		ctx:        ctx,
+		direction:  autoCPDownward,
+		resultChan: make(chan *autoCPResult, 1),
+	}
+	select {
+	case t.subGraphAutoCPChan <- req:
+		select {
+		case result := <-req.resultChan:
+			if result.err != nil {
+				return nil
+			}
+			return result.cp
+		case <-ctx.Done():
+			return nil
+		case <-time.After(100 * time.Millisecond):
+			return nil
+		}
+	case <-ctx.Done():
+		return nil
+	default:
+		return nil
+	}
 }
 
 type taskManager struct {

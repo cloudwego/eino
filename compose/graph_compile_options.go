@@ -16,6 +16,8 @@
 
 package compose
 
+import "context"
+
 type graphCompileOptions struct {
 	maxRunSteps     int
 	graphName       string
@@ -50,6 +52,18 @@ type CheckpointConfig struct {
 	EnableAutoCheckpoint bool
 }
 
+// AutoCheckpointCallback is called when an auto checkpoint operation completes.
+type AutoCheckpointCallback func(ctx context.Context, info *AutoCheckpointInfo)
+
+// AutoCheckpointInfo contains information about an auto checkpoint event.
+type AutoCheckpointInfo struct {
+	CheckpointID string // The checkpoint ID used for saving
+	GraphName    string // The name of the graph
+	TriggerNode  string // The node that triggered the checkpoint
+	TriggerType  string // "before" or "after"
+	Error        error  // nil on success, error details on failure
+}
+
 // AutoCheckpointConfig contains configuration for automatic checkpoint behavior.
 // Auto checkpoint allows graphs to automatically save progress at specified points
 // to avoid accidental loss due to instance reboot or transient errors.
@@ -63,6 +77,10 @@ type AutoCheckpointConfig struct {
 	// after the node completes execution. This is useful for preserving the output
 	// of expensive nodes (e.g., ChatModel nodes) to avoid re-execution costs.
 	AfterNodes []string
+
+	// OnCheckpoint is called after each auto checkpoint attempt.
+	// Called with Error=nil on success, or with the error on failure.
+	OnCheckpoint AutoCheckpointCallback
 }
 
 func newGraphCompileOptions(opts ...GraphCompileOption) *graphCompileOptions {
