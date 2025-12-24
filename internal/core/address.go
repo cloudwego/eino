@@ -25,7 +25,7 @@ import (
 	"github.com/cloudwego/eino/internal/generic"
 )
 
-// AddressSegmentType defines the type of segment in an execution address.
+// AddressSegmentType defines the type of a segment in an execution address.
 type AddressSegmentType string
 
 // Address represents a full, hierarchical address to a point in the execution structure.
