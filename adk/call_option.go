@@ -56,7 +56,7 @@ func WithSkipTransferMessages() AgentRunOption {
 	})
 }
 
-func WithSharedParentSession() AgentRunOption {
+func withSharedParentSession() AgentRunOption {
 	return WrapImplSpecificOptFn(func(o *options) {
 		o.sharedParentSession = true
 	})

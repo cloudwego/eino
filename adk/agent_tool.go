@@ -125,7 +125,7 @@ func (at *agentTool) InvokableRun(ctx context.Context, argumentsInJSON string, o
 		}
 
 		iter = newInvokableAgentToolRunner(at.agent, ms).Run(ctx, input,
-			append(getOptionsByAgentName(at.agent.Name(ctx), opts), WithCheckPointID(bridgeCheckpointID), WithSharedParentSession())...)
+			append(getOptionsByAgentName(at.agent.Name(ctx), opts), WithCheckPointID(bridgeCheckpointID), withSharedParentSession())...)
 	} else {
 		if !hasState {
 			return "", fmt.Errorf("agent tool '%s' interrupt has happened, but cannot find interrupt state", at.agent.Name(ctx))
@@ -134,7 +134,7 @@ func (at *agentTool) InvokableRun(ctx context.Context, argumentsInJSON string, o
 		ms = newResumeBridgeStore(state)
 
 		iter, err = newInvokableAgentToolRunner(at.agent, ms).
-			Resume(ctx, bridgeCheckpointID, append(getOptionsByAgentName(at.agent.Name(ctx), opts), WithSharedParentSession())...)
+			Resume(ctx, bridgeCheckpointID, append(getOptionsByAgentName(at.agent.Name(ctx), opts), withSharedParentSession())...)
 		if err != nil {
 			return "", err
 		}

@@ -164,10 +164,6 @@ func (rs *runSession) getEvents() []*agentEventWrapper {
 }
 
 func (rs *runSession) getValues() map[string]any {
-	if rs.valuesMtx == nil {
-		return map[string]any{}
-	}
-
 	rs.valuesMtx.Lock()
 	values := make(map[string]any, len(rs.Values))
 	for k, v := range rs.Values {
@@ -179,26 +175,12 @@ func (rs *runSession) getValues() map[string]any {
 }
 
 func (rs *runSession) addValue(key string, value any) {
-	if rs.valuesMtx == nil {
-		return
-	}
-	if rs.Values == nil {
-		return
-	}
-
 	rs.valuesMtx.Lock()
 	rs.Values[key] = value
 	rs.valuesMtx.Unlock()
 }
 
 func (rs *runSession) addValues(kvs map[string]any) {
-	if rs.valuesMtx == nil {
-		return
-	}
-	if rs.Values == nil {
-		return
-	}
-
 	rs.valuesMtx.Lock()
 	for k, v := range kvs {
 		rs.Values[k] = v
@@ -207,10 +189,6 @@ func (rs *runSession) addValues(kvs map[string]any) {
 }
 
 func (rs *runSession) getValue(key string) (any, bool) {
-	if rs.valuesMtx == nil {
-		return nil, false
-	}
-
 	rs.valuesMtx.Lock()
 	value, ok := rs.Values[key]
 	rs.valuesMtx.Unlock()
