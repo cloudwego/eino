@@ -61,6 +61,8 @@ type Config struct {
 	TaskToolDescriptionGenerator func(ctx context.Context, availableAgents []adk.Agent) (string, error)
 
 	Middlewares []adk.AgentMiddleware
+
+	ModelRetryConfig *adk.ModelRetryConfig
 }
 
 // New creates a new Deep agent instance with the provided configuration.
@@ -101,6 +103,8 @@ func New(ctx context.Context, cfg *Config) (adk.Agent, error) {
 		ToolsConfig:   cfg.ToolsConfig,
 		MaxIterations: cfg.MaxIteration,
 		Middlewares:   append(cfg.Middlewares, middlewares...),
+
+		ModelRetryConfig: cfg.ModelRetryConfig,
 	})
 }
 
