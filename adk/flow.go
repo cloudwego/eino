@@ -64,7 +64,7 @@ func (a *flowAgent) deepCopy() *flowAgent {
 	return ret
 }
 
-func SetSubAgents(ctx context.Context, agent Agent, subAgents []Agent) (Agent, error) {
+func SetSubAgents(ctx context.Context, agent Agent, subAgents []Agent) (ResumableAgent, error) {
 	return setSubAgents(ctx, agent, subAgents)
 }
 

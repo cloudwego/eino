@@ -36,7 +36,7 @@ type Config struct {
 // The supervisor can delegate tasks to sub-agents and receive their responses, while
 // sub-agents can only communicate with the supervisor (not with each other directly).
 // This hierarchical structure enables complex problem-solving through coordinated agent interactions.
-func New(ctx context.Context, conf *Config) (adk.Agent, error) {
+func New(ctx context.Context, conf *Config) (adk.ResumableAgent, error) {
 	subAgents := make([]adk.Agent, 0, len(conf.SubAgents))
 	supervisorName := conf.Supervisor.Name(ctx)
 	for _, subAgent := range conf.SubAgents {
