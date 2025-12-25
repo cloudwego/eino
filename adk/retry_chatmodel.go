@@ -68,27 +68,27 @@ func (e *RetryExhaustedError) Unwrap() error {
 	return ErrExceedMaxRetries
 }
 
-type RetryAbleError struct {
+type WillRetryError struct {
 	ErrStr       string
 	RetryAttempt int
 }
 
-func (e *RetryAbleError) Error() string {
+func (e *WillRetryError) Error() string {
 	return e.ErrStr
 }
 
-type NonRetryAbleError struct {
+type WontRetryError struct {
 	ErrStr       string
 	RetryAttempt int
 }
 
-func (e *NonRetryAbleError) Error() string {
+func (e *WontRetryError) Error() string {
 	return e.ErrStr
 }
 
 func init() {
-	schema.RegisterName[*RetryAbleError]("eino_adk_chatmodel_RetryAbleError")
-	schema.RegisterName[*NonRetryAbleError]("eino_adk_chatmodel_NonRetryAbleError")
+	schema.RegisterName[*WillRetryError]("eino_adk_chatmodel_WillRetryError")
+	schema.RegisterName[*WontRetryError]("eino_adk_chatmodel_WontRetryError")
 }
 
 // ModelRetryConfig configures retry behavior for the ChatModel node.
@@ -140,14 +140,13 @@ func defaultBackoff(_ context.Context, attempt int) time.Duration {
 
 func genErrWrapper(ctx context.Context, config ModelRetryConfig, info streamRetryInfo) func(error) error {
 	return func(err error) error {
-		if config.IsRetryAble == nil {
-			return &RetryAbleError{ErrStr: err.Error(), RetryAttempt: info.attempt}
-		}
+		isRetryAble := config.IsRetryAble == nil || config.IsRetryAble(ctx, err)
+		hasRetriesLeft := info.attempt < config.MaxRetries
 
-		if config.IsRetryAble(ctx, err) {
-			return &RetryAbleError{ErrStr: err.Error(), RetryAttempt: info.attempt}
+		if isRetryAble && hasRetriesLeft {
+			return &WillRetryError{ErrStr: err.Error(), RetryAttempt: info.attempt}
 		}
-		return &NonRetryAbleError{ErrStr: err.Error(), RetryAttempt: info.attempt}
+		return &WontRetryError{ErrStr: err.Error(), RetryAttempt: info.attempt}
 	}
 }
 

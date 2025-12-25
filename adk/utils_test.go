@@ -282,8 +282,8 @@ func TestGetMessageFromWrappedEvent_StreamError_PartialMessagesPreserved(t *test
 	assert.Equal(t, "chunk2", msgs[1].Content)
 }
 
-func TestAgentEventWrapper_GobEncoding_WithRetryAbleStreamError(t *testing.T) {
-	streamErr := &RetryAbleError{ErrStr: "stream error", RetryAttempt: 2}
+func TestAgentEventWrapper_GobEncoding_WithWillRetryError(t *testing.T) {
+	streamErr := &WillRetryError{ErrStr: "stream error", RetryAttempt: 2}
 
 	sr, sw := schema.Pipe[Message](10)
 	go func() {
@@ -308,7 +308,7 @@ func TestAgentEventWrapper_GobEncoding_WithRetryAbleStreamError(t *testing.T) {
 
 	_, err := getMessageFromWrappedEvent(wrapper)
 	assert.NotNil(t, err)
-	var wrapperErr *RetryAbleError
+	var wrapperErr *WillRetryError
 	assert.True(t, errors.As(wrapper.StreamErr, &wrapperErr))
 	assert.Equal(t, streamErr.ErrStr, wrapperErr.ErrStr)
 	assert.Equal(t, streamErr.RetryAttempt, wrapperErr.RetryAttempt)
@@ -325,14 +325,14 @@ func TestAgentEventWrapper_GobEncoding_WithRetryAbleStreamError(t *testing.T) {
 
 	assert.Equal(t, "TestAgent", decoded.AgentName)
 	assert.Equal(t, int64(12345), decoded.TS)
-	var decodedErr *RetryAbleError
+	var decodedErr *WillRetryError
 	assert.True(t, errors.As(decoded.StreamErr, &decodedErr))
 	assert.Equal(t, streamErr.ErrStr, decodedErr.ErrStr)
 	assert.Equal(t, streamErr.RetryAttempt, decodedErr.RetryAttempt)
 }
 
-func TestAgentEventWrapper_GobEncoding_WithNonRetryAbleStreamError(t *testing.T) {
-	streamErr := &NonRetryAbleError{ErrStr: "non-retryable error", RetryAttempt: 1}
+func TestAgentEventWrapper_GobEncoding_WithWontRetryError(t *testing.T) {
+	streamErr := &WontRetryError{ErrStr: "non-retryable error", RetryAttempt: 1}
 
 	sr, sw := schema.Pipe[Message](10)
 	go func() {
@@ -356,7 +356,7 @@ func TestAgentEventWrapper_GobEncoding_WithNonRetryAbleStreamError(t *testing.T)
 
 	_, err := getMessageFromWrappedEvent(wrapper)
 	assert.NotNil(t, err)
-	var wrapperErr *NonRetryAbleError
+	var wrapperErr *WontRetryError
 	assert.True(t, errors.As(wrapper.StreamErr, &wrapperErr))
 	assert.Equal(t, streamErr.ErrStr, wrapperErr.ErrStr)
 	assert.Equal(t, streamErr.RetryAttempt, wrapperErr.RetryAttempt)
@@ -373,7 +373,7 @@ func TestAgentEventWrapper_GobEncoding_WithNonRetryAbleStreamError(t *testing.T)
 
 	assert.Equal(t, "TestAgent", decoded.AgentName)
 	assert.Equal(t, int64(11111), decoded.TS)
-	var decodedErr *NonRetryAbleError
+	var decodedErr *WontRetryError
 	assert.True(t, errors.As(decoded.StreamErr, &decodedErr))
 	assert.Equal(t, streamErr.ErrStr, decodedErr.ErrStr)
 	assert.Equal(t, streamErr.RetryAttempt, decodedErr.RetryAttempt)

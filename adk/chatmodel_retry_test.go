@@ -174,70 +174,93 @@ func (m *streamErrorModel) WithTools(tools []*schema.ToolInfo) (model.ToolCallin
 	return m, nil
 }
 
-func TestChatModelAgentRetry_NoTools_StreamError(t *testing.T) {
-	ctx := context.Background()
-
-	m := &streamErrorModel{
-		failAtChunk: 2,
-		maxFailures: 2,
+func TestChatModelAgentRetry_StreamError(t *testing.T) {
+	tests := []struct {
+		name     string
+		withTool bool
+	}{
+		{"NoTools", false},
+		{"WithTools", true},
 	}
 
-	agent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
-		Name:        "RetryTestAgent",
-		Description: "Test agent for retry functionality",
-		Instruction: "You are a helpful assistant.",
-		Model:       m,
-		ModelRetryConfig: &ModelRetryConfig{
-			MaxRetries:  3,
-			IsRetryAble: func(ctx context.Context, err error) bool { return errors.Is(err, errRetryAble) },
-		},
-	})
-	assert.NoError(t, err)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := context.Background()
 
-	input := &AgentInput{
-		Messages:        []Message{schema.UserMessage("Hello")},
-		EnableStreaming: true,
-	}
-	iterator := agent.Run(ctx, input)
-
-	var events []*AgentEvent
-	for {
-		event, ok := iterator.Next()
-		if !ok {
-			break
-		}
-		events = append(events, event)
-	}
-
-	assert.Equal(t, 3, len(events))
-
-	var streamErrEventCount int
-	var errs []error
-	for i, event := range events {
-		if event.Output != nil && event.Output.MessageOutput != nil && event.Output.MessageOutput.IsStreaming {
-			sr := event.Output.MessageOutput.MessageStream
-			for {
-				msg, err := sr.Recv()
-				if err == io.EOF {
-					break
-				}
-				if err != nil {
-					streamErrEventCount++
-					errs = append(errs, err)
-					t.Logf("event %d: err: %v", i, err)
-					break
-				}
-				t.Logf("event %d: %v", i, msg.Content)
+			m := &streamErrorModel{
+				failAtChunk: 2,
+				maxFailures: 2,
+				returnTool:  false,
 			}
-		}
-	}
 
-	assert.Equal(t, 2, streamErrEventCount)
-	assert.Equal(t, 2, len(errs))
-	var retryAbleErr *RetryAbleError
-	assert.True(t, errors.As(errs[0], &retryAbleErr))
-	assert.True(t, errors.As(errs[1], &retryAbleErr))
-	assert.Equal(t, int32(3), atomic.LoadInt32(&m.callCount))
+			config := &ChatModelAgentConfig{
+				Name:        "RetryTestAgent",
+				Description: "Test agent for retry functionality",
+				Instruction: "You are a helpful assistant.",
+				Model:       m,
+				ModelRetryConfig: &ModelRetryConfig{
+					MaxRetries:  3,
+					IsRetryAble: func(ctx context.Context, err error) bool { return errors.Is(err, errRetryAble) },
+				},
+			}
+
+			if tt.withTool {
+				config.ToolsConfig = ToolsConfig{
+					ToolsNodeConfig: compose.ToolsNodeConfig{
+						Tools: []tool.BaseTool{&fakeToolForTest{tarCount: 0}},
+					},
+				}
+			}
+
+			agent, err := NewChatModelAgent(ctx, config)
+			assert.NoError(t, err)
+
+			input := &AgentInput{
+				Messages:        []Message{schema.UserMessage("Hello")},
+				EnableStreaming: true,
+			}
+			iterator := agent.Run(ctx, input)
+
+			var events []*AgentEvent
+			for {
+				event, ok := iterator.Next()
+				if !ok {
+					break
+				}
+				events = append(events, event)
+			}
+
+			assert.Equal(t, 3, len(events))
+
+			var streamErrEventCount int
+			var errs []error
+			for i, event := range events {
+				if event.Output != nil && event.Output.MessageOutput != nil && event.Output.MessageOutput.IsStreaming {
+					sr := event.Output.MessageOutput.MessageStream
+					for {
+						msg, err := sr.Recv()
+						if err == io.EOF {
+							break
+						}
+						if err != nil {
+							streamErrEventCount++
+							errs = append(errs, err)
+							t.Logf("event %d: err: %v", i, err)
+							break
+						}
+						t.Logf("event %d: %v", i, msg.Content)
+					}
+				}
+			}
+
+			assert.Equal(t, 2, streamErrEventCount)
+			assert.Equal(t, 2, len(errs))
+			var willRetryErr *WillRetryError
+			assert.True(t, errors.As(errs[0], &willRetryErr))
+			assert.True(t, errors.As(errs[1], &willRetryErr))
+			assert.Equal(t, int32(3), atomic.LoadInt32(&m.callCount))
+		})
+	}
 }
 
 func TestChatModelAgentRetry_WithTools_DirectError_Generate(t *testing.T) {
@@ -294,80 +317,7 @@ func TestChatModelAgentRetry_WithTools_DirectError_Generate(t *testing.T) {
 	assert.Equal(t, int32(2), atomic.LoadInt32(&callCount))
 }
 
-func TestChatModelAgentRetry_WithTools_StreamError(t *testing.T) {
-	ctx := context.Background()
-
-	m := &streamErrorModel{
-		failAtChunk: 2,
-		maxFailures: 2,
-		returnTool:  false,
-	}
-
-	fakeTool := &fakeToolForTest{tarCount: 0}
-
-	agent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
-		Name:        "RetryTestAgent",
-		Description: "Test agent for retry functionality",
-		Instruction: "You are a helpful assistant.",
-		Model:       m,
-		ToolsConfig: ToolsConfig{
-			ToolsNodeConfig: compose.ToolsNodeConfig{
-				Tools: []tool.BaseTool{fakeTool},
-			},
-		},
-		ModelRetryConfig: &ModelRetryConfig{
-			MaxRetries:  3,
-			IsRetryAble: func(ctx context.Context, err error) bool { return errors.Is(err, errRetryAble) },
-		},
-	})
-	assert.NoError(t, err)
-
-	input := &AgentInput{
-		Messages:        []Message{schema.UserMessage("Hello")},
-		EnableStreaming: true,
-	}
-	iterator := agent.Run(ctx, input)
-
-	var events []*AgentEvent
-	for {
-		event, ok := iterator.Next()
-		if !ok {
-			break
-		}
-		events = append(events, event)
-	}
-
-	assert.Equal(t, 3, len(events))
-
-	var streamErrEventCount int
-	var errs []error
-	for i, event := range events {
-		if event.Output != nil && event.Output.MessageOutput != nil && event.Output.MessageOutput.IsStreaming {
-			sr := event.Output.MessageOutput.MessageStream
-			for {
-				msg, err := sr.Recv()
-				if err == io.EOF {
-					break
-				}
-				if err != nil {
-					streamErrEventCount++
-					errs = append(errs, err)
-					t.Logf("event %d: err: %v", i, err)
-					break
-				}
-				t.Logf("event %d: %v", i, msg.Content)
-			}
-		}
-	}
-
-	assert.Equal(t, 2, streamErrEventCount)
-	assert.Equal(t, 2, len(errs))
-	var retryAbleErr *RetryAbleError
-	assert.True(t, errors.As(errs[0], &retryAbleErr))
-	assert.True(t, errors.As(errs[1], &retryAbleErr))
-}
-
-func TestChatModelAgentRetry_NonRetryAbleError(t *testing.T) {
+func TestChatModelAgentRetry_NonRetryableError(t *testing.T) {
 	ctx := context.Background()
 	ctrl := gomock.NewController(t)
 	defer ctrl.Finish()
@@ -422,91 +372,6 @@ func (m *inputCapturingModel) Stream(_ context.Context, input []*schema.Message,
 
 func (m *inputCapturingModel) WithTools(_ []*schema.ToolInfo) (model.ToolCallingChatModel, error) {
 	return m, nil
-}
-
-func TestChatModelAgentRetry_WithTools_StreamError_SequentialFlow(t *testing.T) {
-	ctx := context.Background()
-
-	retryModel := &streamErrorModel{
-		failAtChunk: 2,
-		maxFailures: 2,
-		returnTool:  false,
-	}
-
-	fakeTool := &fakeToolForTest{tarCount: 0}
-
-	retryAgent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
-		Name:        "RetryAgent",
-		Description: "Agent with retry that emits stream errors",
-		Instruction: "You are a helpful assistant.",
-		Model:       retryModel,
-		ToolsConfig: ToolsConfig{
-			ToolsNodeConfig: compose.ToolsNodeConfig{
-				Tools: []tool.BaseTool{fakeTool},
-			},
-		},
-		ModelRetryConfig: &ModelRetryConfig{
-			MaxRetries:  3,
-			IsRetryAble: func(ctx context.Context, err error) bool { return errors.Is(err, errRetryAble) },
-		},
-	})
-	assert.NoError(t, err)
-
-	capturingModel := &inputCapturingModel{}
-	successorAgent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
-		Name:        "SuccessorAgent",
-		Description: "Agent that captures input from previous agent",
-		Instruction: "You are a successor agent.",
-		Model:       capturingModel,
-		ToolsConfig: ToolsConfig{
-			ToolsNodeConfig: compose.ToolsNodeConfig{
-				Tools: []tool.BaseTool{fakeTool},
-			},
-		},
-	})
-	assert.NoError(t, err)
-
-	sequentialAgent, err := NewSequentialAgent(ctx, &SequentialAgentConfig{
-		Name:        "SequentialAgent",
-		Description: "Sequential agent with retry and successor",
-		SubAgents:   []Agent{retryAgent, successorAgent},
-	})
-	assert.NoError(t, err)
-
-	input := &AgentInput{
-		Messages:        []Message{schema.UserMessage("Hello")},
-		EnableStreaming: true,
-	}
-	iterator := sequentialAgent.Run(ctx, input)
-
-	var events []*AgentEvent
-	for {
-		event, ok := iterator.Next()
-		if !ok {
-			break
-		}
-		events = append(events, event)
-	}
-
-	assert.GreaterOrEqual(t, len(events), 4)
-
-	assert.Equal(t, 1, len(capturingModel.capturedInputs))
-
-	successorInput := capturingModel.capturedInputs[0]
-	var hasSuccessfulRetryAgentMessage bool
-	for _, msg := range successorInput {
-		if strings.Contains(msg.Content, "chunkchunkchunkchunkchunk") {
-			hasSuccessfulRetryAgentMessage = true
-			break
-		}
-	}
-	assert.True(t, hasSuccessfulRetryAgentMessage, "Successor agent should only receive the final successful message from retry agent")
-
-	for _, msg := range successorInput {
-		assert.NotContains(t, msg.Content, "retry-able error", "Successor agent should not receive failed stream error messages")
-	}
-
-	assert.Equal(t, int32(3), atomic.LoadInt32(&retryModel.callCount))
 }
 
 func TestChatModelAgentRetry_MaxRetriesExhausted(t *testing.T) {
@@ -751,8 +616,8 @@ func TestChatModelAgentRetry_NoTools_NonRetryAbleStreamError(t *testing.T) {
 		}
 	}
 	assert.NotNil(t, streamErr)
-	var nonRetryAbleErr *NonRetryAbleError
-	assert.True(t, errors.As(streamErr, &nonRetryAbleErr))
+	var wontRetryErr *WontRetryError
+	assert.True(t, errors.As(streamErr, &wontRetryErr))
 
 	event1 := events[1]
 	assert.NotNil(t, event1.Err)
@@ -784,6 +649,73 @@ func TestDefaultBackoff(t *testing.T) {
 	t.Logf("Backoff delay for attempt 100: %v", d100)
 	assert.True(t, d100 >= 10*time.Second && d100 <= 15*time.Second,
 		"Delay should still be capped at 10s + jitter for very high attempts, got %v", d100)
+}
+
+func TestRetryExhaustedError_ErrorString(t *testing.T) {
+	errWithLast := &RetryExhaustedError{
+		LastErr:      errors.New("connection timeout"),
+		TotalRetries: 3,
+	}
+	assert.Contains(t, errWithLast.Error(), "exceeds max retries")
+	assert.Contains(t, errWithLast.Error(), "connection timeout")
+
+	errWithoutLast := &RetryExhaustedError{
+		LastErr:      nil,
+		TotalRetries: 3,
+	}
+	assert.Equal(t, "exceeds max retries", errWithoutLast.Error())
+}
+
+func TestWillRetryError_WontRetryError_ErrorString(t *testing.T) {
+	willRetry := &WillRetryError{ErrStr: "transient error", RetryAttempt: 1}
+	assert.Equal(t, "transient error", willRetry.Error())
+
+	wontRetry := &WontRetryError{ErrStr: "permanent error", RetryAttempt: 2}
+	assert.Equal(t, "permanent error", wontRetry.Error())
+}
+
+func TestChatModelAgentRetry_DefaultIsRetryAble(t *testing.T) {
+	ctx := context.Background()
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	cm := mockModel.NewMockToolCallingChatModel(ctrl)
+
+	var callCount int32
+	cm.EXPECT().Generate(gomock.Any(), gomock.Any(), gomock.Any()).
+		DoAndReturn(func(ctx context.Context, input []*schema.Message, opts ...model.Option) (*schema.Message, error) {
+			count := atomic.AddInt32(&callCount, 1)
+			if count < 2 {
+				return nil, errors.New("any error should be retried")
+			}
+			return schema.AssistantMessage("Success", nil), nil
+		}).Times(2)
+
+	agent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+		Name:        "RetryTestAgent",
+		Description: "Test agent with default IsRetryAble",
+		Instruction: "You are a helpful assistant.",
+		Model:       cm,
+		ModelRetryConfig: &ModelRetryConfig{
+			MaxRetries: 3,
+		},
+	})
+	assert.NoError(t, err)
+
+	input := &AgentInput{
+		Messages: []Message{schema.UserMessage("Hello")},
+	}
+	iterator := agent.Run(ctx, input)
+
+	event, ok := iterator.Next()
+	assert.True(t, ok)
+	assert.NotNil(t, event)
+	assert.Nil(t, event.Err)
+	assert.Equal(t, "Success", event.Output.MessageOutput.Message.Content)
+
+	_, ok = iterator.Next()
+	assert.False(t, ok)
+	assert.Equal(t, int32(2), atomic.LoadInt32(&callCount))
 }
 
 func TestSequentialWorkflow_RetryAbleStreamError_SuccessfulRetry(t *testing.T) {
@@ -830,7 +762,7 @@ func TestSequentialWorkflow_RetryAbleStreamError_SuccessfulRetry(t *testing.T) {
 	iterator := sequentialAgent.Run(ctx, input)
 
 	var events []*AgentEvent
-	var retryAbleErrCount int
+	var willRetryErrCount int
 	for {
 		event, ok := iterator.Next()
 		if !ok {
@@ -845,9 +777,9 @@ func TestSequentialWorkflow_RetryAbleStreamError_SuccessfulRetry(t *testing.T) {
 					break
 				}
 				if err != nil {
-					var retryErr *RetryAbleError
+					var retryErr *WillRetryError
 					if errors.As(err, &retryErr) {
-						retryAbleErrCount++
+						willRetryErrCount++
 					}
 					break
 				}
@@ -855,7 +787,7 @@ func TestSequentialWorkflow_RetryAbleStreamError_SuccessfulRetry(t *testing.T) {
 		}
 	}
 
-	assert.Equal(t, 2, retryAbleErrCount, "End-user should receive 2 RetryAbleError events")
+	assert.Equal(t, 2, willRetryErrCount, "End-user should receive 2 WillRetryError events")
 	assert.Equal(t, 1, len(capturingModel.capturedInputs), "Agent B should be called exactly once")
 
 	successorInput := capturingModel.capturedInputs[0]
@@ -938,7 +870,7 @@ func TestSequentialWorkflow_NonRetryAbleStreamError_StopsFlow(t *testing.T) {
 	iterator := sequentialAgent.Run(ctx, input)
 
 	var events []*AgentEvent
-	var nonRetryAbleErrCount int
+	var wontRetryErrCount int
 	var finalErrEvent *AgentEvent
 	for {
 		event, ok := iterator.Next()
@@ -957,9 +889,9 @@ func TestSequentialWorkflow_NonRetryAbleStreamError_StopsFlow(t *testing.T) {
 					break
 				}
 				if err != nil {
-					var nonRetryErr *NonRetryAbleError
-					if errors.As(err, &nonRetryErr) {
-						nonRetryAbleErrCount++
+					var wontRetryErr *WontRetryError
+					if errors.As(err, &wontRetryErr) {
+						wontRetryErrCount++
 					}
 					break
 				}
@@ -967,7 +899,7 @@ func TestSequentialWorkflow_NonRetryAbleStreamError_StopsFlow(t *testing.T) {
 		}
 	}
 
-	assert.Equal(t, 1, nonRetryAbleErrCount, "End-user should receive 1 NonRetryAbleError in stream")
+	assert.Equal(t, 1, wontRetryErrCount, "End-user should receive 1 WontRetryError in stream")
 	assert.NotNil(t, finalErrEvent, "Should receive a final error event")
 	assert.True(t, errors.Is(finalErrEvent.Err, errNonRetryAble), "Final error should be the non-retryable error")
 	assert.Equal(t, 0, len(capturingModel.capturedInputs), "Agent B should NOT be called due to error")
