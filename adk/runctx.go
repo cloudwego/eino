@@ -56,9 +56,10 @@ type agentEventWrapper struct {
 	// StreamErr stores the error message if the MessageStream contained an error.
 	// This field guards against multiple calls to getMessageFromWrappedEvent
 	// when the stream has already been consumed and errored.
-	// It is a string instead of error to ensure successful gob serialization,
-	// since error is an interface type that requires type registration.
-	StreamErr string
+	// Normally when StreamErr happens, the Agent will return with the error,
+	// unless retry is configured for the agent generating this stream, in which case
+	// this StreamErr will be of type RetryAbleError or NonRetryAbleError.
+	StreamErr error
 }
 
 type otherAgentEventWrapperForEncode agentEventWrapper

@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math/rand"
 	"reflect"
 	"time"
 
@@ -52,7 +53,8 @@ var (
 // RetryExhaustedError is returned when all retry attempts have been exhausted.
 // It wraps the last error that occurred during retry attempts.
 type RetryExhaustedError struct {
-	LastErr error
+	LastErr      error
+	TotalRetries int
 }
 
 func (e *RetryExhaustedError) Error() string {
@@ -64,6 +66,29 @@ func (e *RetryExhaustedError) Error() string {
 
 func (e *RetryExhaustedError) Unwrap() error {
 	return ErrExceedMaxRetries
+}
+
+type RetryAbleError struct {
+	ErrStr       string
+	RetryAttempt int
+}
+
+func (e *RetryAbleError) Error() string {
+	return e.ErrStr
+}
+
+type NonRetryAbleError struct {
+	ErrStr       string
+	RetryAttempt int
+}
+
+func (e *NonRetryAbleError) Error() string {
+	return e.ErrStr
+}
+
+func init() {
+	schema.RegisterName[*RetryAbleError]("eino_adk_chatmodel_RetryAbleError")
+	schema.RegisterName[*NonRetryAbleError]("eino_adk_chatmodel_NonRetryAbleError")
 }
 
 // ModelRetryConfig configures retry behavior for the ChatModel node.
@@ -78,21 +103,52 @@ type ModelRetryConfig struct {
 	// If nil, all errors are considered retry-able.
 	// Return true if the error is transient and the operation should be retried.
 	// Return false if the error is permanent and should be propagated immediately.
-	IsRetryAble func(error) bool
+	IsRetryAble func(ctx context.Context, err error) bool
 
 	// BackoffFunc calculates the delay before the next retry attempt.
 	// The attempt parameter starts at 1 for the first retry.
-	// If nil, a default linear backoff is used: attempt * 100ms
-	// (i.e., 100ms for first retry, 200ms for second, etc.)
-	BackoffFunc func(attempt int) time.Duration
+	// If nil, a default exponential backoff with jitter is used:
+	// base delay 100ms, exponentially increasing up to 10s max,
+	// with random jitter (0-50% of delay) to prevent thundering herd.
+	BackoffFunc func(ctx context.Context, attempt int) time.Duration
 }
 
-func defaultIsRetryAble(err error) bool {
+func defaultIsRetryAble(_ context.Context, err error) bool {
 	return err != nil
 }
 
-func defaultBackoff(attempt int) time.Duration {
-	return time.Duration(attempt) * 100 * time.Millisecond
+func defaultBackoff(_ context.Context, attempt int) time.Duration {
+	baseDelay := 100 * time.Millisecond
+	maxDelay := 10 * time.Second
+
+	if attempt <= 0 {
+		return baseDelay
+	}
+
+	if attempt > 7 {
+		return maxDelay + time.Duration(rand.Int63n(int64(maxDelay/2)))
+	}
+
+	delay := baseDelay * time.Duration(1<<uint(attempt-1))
+	if delay > maxDelay {
+		delay = maxDelay
+	}
+
+	jitter := time.Duration(rand.Int63n(int64(delay / 2)))
+	return delay + jitter
+}
+
+func genErrWrapper(ctx context.Context, config ModelRetryConfig, info streamRetryInfo) func(error) error {
+	return func(err error) error {
+		if config.IsRetryAble == nil {
+			return &RetryAbleError{ErrStr: err.Error(), RetryAttempt: info.attempt}
+		}
+
+		if config.IsRetryAble(ctx, err) {
+			return &RetryAbleError{ErrStr: err.Error(), RetryAttempt: info.attempt}
+		}
+		return &NonRetryAbleError{ErrStr: err.Error(), RetryAttempt: info.attempt}
+	}
 }
 
 type retryChatModel struct {
@@ -132,7 +188,7 @@ func (r *retryChatModel) Generate(ctx context.Context, input []*schema.Message, 
 	}
 
 	var lastErr error
-	for attempt := 1; attempt <= r.config.MaxRetries+1; attempt++ {
+	for attempt := 0; attempt <= r.config.MaxRetries; attempt++ {
 		var out *schema.Message
 		var err error
 
@@ -146,18 +202,18 @@ func (r *retryChatModel) Generate(ctx context.Context, input []*schema.Message, 
 			return out, nil
 		}
 
-		if !isRetryAble(err) {
+		if !isRetryAble(ctx, err) {
 			return nil, err
 		}
 
 		lastErr = err
-		if attempt <= r.config.MaxRetries {
-			log.Printf("retrying ChatModel.Generate (attempt %d/%d): %v", attempt, r.config.MaxRetries, err)
-			time.Sleep(backoffFunc(attempt))
+		if attempt < r.config.MaxRetries {
+			log.Printf("retrying ChatModel.Generate (attempt %d/%d): %v", attempt+1, r.config.MaxRetries, err)
+			time.Sleep(backoffFunc(ctx, attempt+1))
 		}
 	}
 
-	return nil, &RetryExhaustedError{LastErr: lastErr}
+	return nil, &RetryExhaustedError{LastErr: lastErr, TotalRetries: r.config.MaxRetries}
 }
 
 func (r *retryChatModel) generateWithProxyCallbacks(ctx context.Context,
@@ -176,6 +232,17 @@ func (r *retryChatModel) generateWithProxyCallbacks(ctx context.Context,
 	return out, nil
 }
 
+type streamRetryKey struct{}
+
+type streamRetryInfo struct {
+	attempt int // first request is 0, first retry is 1
+}
+
+func getStreamRetryInfo(ctx context.Context) (*streamRetryInfo, bool) {
+	info, ok := ctx.Value(streamRetryKey{}).(*streamRetryInfo)
+	return info, ok
+}
+
 func (r *retryChatModel) Stream(ctx context.Context, input []*schema.Message, opts ...model.Option) (
 	*schema.StreamReader[*schema.Message], error) {
 
@@ -188,8 +255,12 @@ func (r *retryChatModel) Stream(ctx context.Context, input []*schema.Message, op
 		backoffFunc = defaultBackoff
 	}
 
+	retryInfo := &streamRetryInfo{}
+	ctx = context.WithValue(ctx, streamRetryKey{}, retryInfo)
+
 	var lastErr error
-	for attempt := 1; attempt <= r.config.MaxRetries+1; attempt++ {
+	for attempt := 0; attempt <= r.config.MaxRetries; attempt++ {
+		retryInfo.attempt = attempt
 		var stream *schema.StreamReader[*schema.Message]
 		var err error
 
@@ -200,13 +271,13 @@ func (r *retryChatModel) Stream(ctx context.Context, input []*schema.Message, op
 		}
 
 		if err != nil {
-			if !isRetryAble(err) {
+			if !isRetryAble(ctx, err) {
 				return nil, err
 			}
 			lastErr = err
-			if attempt <= r.config.MaxRetries {
-				log.Printf("retrying ChatModel.Stream (attempt %d/%d): %v", attempt, r.config.MaxRetries, err)
-				time.Sleep(backoffFunc(attempt))
+			if attempt < r.config.MaxRetries {
+				log.Printf("retrying ChatModel.Stream (attempt %d/%d): %v", attempt+1, r.config.MaxRetries, err)
+				time.Sleep(backoffFunc(ctx, attempt+1))
 			}
 			continue
 		}
@@ -221,18 +292,18 @@ func (r *retryChatModel) Stream(ctx context.Context, input []*schema.Message, op
 		}
 
 		returnCopy.Close()
-		if !isRetryAble(streamErr) {
+		if !isRetryAble(ctx, streamErr) {
 			return nil, streamErr
 		}
 
 		lastErr = streamErr
-		if attempt <= r.config.MaxRetries {
-			log.Printf("retrying ChatModel.Stream (attempt %d/%d): %v", attempt, r.config.MaxRetries, streamErr)
-			time.Sleep(backoffFunc(attempt))
+		if attempt < r.config.MaxRetries {
+			log.Printf("retrying ChatModel.Stream (attempt %d/%d): %v", attempt+1, r.config.MaxRetries, streamErr)
+			time.Sleep(backoffFunc(ctx, attempt+1))
 		}
 	}
 
-	return nil, &RetryExhaustedError{LastErr: lastErr}
+	return nil, &RetryExhaustedError{LastErr: lastErr, TotalRetries: r.config.MaxRetries}
 }
 
 func (r *retryChatModel) streamWithProxyCallbacks(ctx context.Context,

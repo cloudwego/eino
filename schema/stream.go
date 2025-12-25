@@ -572,17 +572,40 @@ type streamReaderWithConvert[T any] struct {
 	sr iStreamReader
 
 	convert func(any) (T, error)
+
+	errWrapper func(error) error
 }
 
-func newStreamReaderWithConvert[T any](origin iStreamReader, convert func(any) (T, error)) *StreamReader[T] {
+func newStreamReaderWithConvert[T any](origin iStreamReader, convert func(any) (T, error), opts ...ConvertOption) *StreamReader[T] {
+	opt := &convertOptions{}
+	for _, o := range opts {
+		o(opt)
+	}
+
 	srw := &streamReaderWithConvert[T]{
-		sr:      origin,
-		convert: convert,
+		sr:         origin,
+		convert:    convert,
+		errWrapper: opt.ErrWrapper,
 	}
 
 	return &StreamReader[T]{
 		typ: readerTypeWithConvert,
 		srw: srw,
+	}
+}
+
+type convertOptions struct {
+	ErrWrapper func(error) error
+}
+
+type ConvertOption func(*convertOptions)
+
+// WithErrWrapper wraps the first error encountered in a stream reader during conversion by StreamReaderWithConvert.
+// The error returned by the convert function will not be wrapped.
+// If the returned err is nil or is ErrNoValue, the stream chunk will be ignored
+func WithErrWrapper(wrapper func(error) error) ConvertOption {
+	return func(o *convertOptions) {
+		o.ErrWrapper = wrapper
 	}
 }
 
@@ -598,12 +621,12 @@ func newStreamReaderWithConvert[T any](origin iStreamReader, convert func(any) (
 //	defer stringReader.Close() // Close the reader if you using Recv(), or may cause memory/goroutine leak.
 //	s, err := stringReader.Recv()
 //	fmt.Println(s) // Output: val_1
-func StreamReaderWithConvert[T, D any](sr *StreamReader[T], convert func(T) (D, error)) *StreamReader[D] {
+func StreamReaderWithConvert[T, D any](sr *StreamReader[T], convert func(T) (D, error), opts ...ConvertOption) *StreamReader[D] {
 	c := func(a any) (D, error) {
 		return convert(a.(T))
 	}
 
-	return newStreamReaderWithConvert(sr, c)
+	return newStreamReaderWithConvert(sr, c, opts...)
 }
 
 func (srw *streamReaderWithConvert[T]) recv() (T, error) {
@@ -612,6 +635,16 @@ func (srw *streamReaderWithConvert[T]) recv() (T, error) {
 
 		if err != nil {
 			var t T
+			if err == io.EOF {
+				return t, err
+			}
+			if srw.errWrapper != nil {
+				err = srw.errWrapper(err)
+				if err != nil && !errors.Is(err, ErrNoValue) {
+					return t, err
+				}
+			}
+
 			return t, err
 		}
 

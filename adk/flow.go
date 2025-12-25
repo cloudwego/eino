@@ -231,9 +231,13 @@ func (a *flowAgent) genAgentInput(ctx context.Context, runCtx *runContext, skipT
 		}
 
 		msg, err := getMessageFromWrappedEvent(event)
-		if err != nil { // skip this event if failed to get message, probably because the message stream contains err chunk
-			log.Printf("failed to get message from event: %v", err)
-			continue
+		if err != nil {
+			var retryErr *RetryAbleError
+			if errors.As(err, &retryErr) {
+				log.Printf("failed to get message from event, but is retry-able err: %v", err)
+				continue
+			}
+			return nil, err
 		}
 
 		if msg == nil {

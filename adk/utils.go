@@ -106,8 +106,8 @@ func getMessageFromWrappedEvent(e *agentEventWrapper) (Message, error) {
 		return e.concatenatedMessage, nil
 	}
 
-	if len(e.StreamErr) > 0 {
-		return nil, nil
+	if e.StreamErr != nil {
+		return nil, e.StreamErr
 	}
 
 	e.mu.Lock()
@@ -128,7 +128,7 @@ func getMessageFromWrappedEvent(e *agentEventWrapper) (Message, error) {
 			if err == io.EOF {
 				break
 			}
-			e.StreamErr = err.Error()
+			e.StreamErr = err
 			// Replace the stream with successfully received messages only (no error at the end).
 			// The error is preserved in StreamErr for users to check.
 			// We intentionally exclude the error from the new stream to ensure gob encoding
@@ -150,7 +150,7 @@ func getMessageFromWrappedEvent(e *agentEventWrapper) (Message, error) {
 		var err error
 		e.concatenatedMessage, err = schema.ConcatMessages(msgs)
 		if err != nil {
-			e.StreamErr = err.Error()
+			e.StreamErr = err
 			e.AgentEvent.Output.MessageOutput.MessageStream = schema.StreamReaderFromArray(msgs)
 			return nil, err
 		}

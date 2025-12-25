@@ -414,6 +414,8 @@ type cbHandler struct {
 	returnDirectlyToolEvent atomic.Value
 	ctx                     context.Context
 	addr                    Address
+
+	modelRetryConfigs *ModelRetryConfig
 }
 
 func (h *cbHandler) onChatModelEnd(ctx context.Context,
@@ -435,10 +437,19 @@ func (h *cbHandler) onChatModelEndWithStreamOutput(ctx context.Context,
 		return ctx
 	}
 
+	var convertOpts []schema.ConvertOption
+	if h.modelRetryConfigs != nil {
+		retryInfo, exists := getStreamRetryInfo(ctx)
+		if !exists {
+			retryInfo = &streamRetryInfo{attempt: 0}
+		}
+		convertOpts = append(convertOpts, schema.WithErrWrapper(genErrWrapper(ctx, *h.modelRetryConfigs, *retryInfo)))
+	}
+
 	cvt := func(in *model.CallbackOutput) (Message, error) {
 		return in.Message, nil
 	}
-	out := schema.StreamReaderWithConvert(output, cvt)
+	out := schema.StreamReaderWithConvert(output, cvt, convertOpts...)
 	event := EventFromMessage(nil, out, schema.Assistant, "")
 	h.Send(event)
 
@@ -569,12 +580,17 @@ func (h *cbHandler) onGraphError(ctx context.Context,
 func genReactCallbacks(ctx context.Context, agentName string,
 	generator *AsyncGenerator[*AgentEvent],
 	enableStreaming bool,
-	store *bridgeStore) compose.Option {
+	store *bridgeStore,
+	modelRetryConfigs *ModelRetryConfig) compose.Option {
 
 	h := &cbHandler{
-		ctx:            ctx,
-		addr:           core.GetCurrentAddress(ctx),
-		AsyncGenerator: generator, agentName: agentName, store: store, enableStreaming: enableStreaming}
+		ctx:               ctx,
+		addr:              core.GetCurrentAddress(ctx),
+		AsyncGenerator:    generator,
+		agentName:         agentName,
+		store:             store,
+		enableStreaming:   enableStreaming,
+		modelRetryConfigs: modelRetryConfigs}
 
 	cmHandler := &ub.ModelCallbackHandler{
 		OnEnd:                 h.onChatModelEnd,
@@ -597,6 +613,7 @@ func genReactCallbacks(ctx context.Context, agentName string,
 
 type noToolsCbHandler struct {
 	*AsyncGenerator[*AgentEvent]
+	modelRetryConfigs *ModelRetryConfig
 }
 
 func (h *noToolsCbHandler) onChatModelEnd(ctx context.Context,
@@ -608,10 +625,19 @@ func (h *noToolsCbHandler) onChatModelEnd(ctx context.Context,
 
 func (h *noToolsCbHandler) onChatModelEndWithStreamOutput(ctx context.Context,
 	_ *callbacks.RunInfo, output *schema.StreamReader[*model.CallbackOutput]) context.Context {
+	var convertOpts []schema.ConvertOption
+	if h.modelRetryConfigs != nil {
+		retryInfo, exists := getStreamRetryInfo(ctx)
+		if !exists {
+			retryInfo = &streamRetryInfo{attempt: 0}
+		}
+		convertOpts = append(convertOpts, schema.WithErrWrapper(genErrWrapper(ctx, *h.modelRetryConfigs, *retryInfo)))
+	}
+
 	cvt := func(in *model.CallbackOutput) (Message, error) {
 		return in.Message, nil
 	}
-	out := schema.StreamReaderWithConvert(output, cvt)
+	out := schema.StreamReaderWithConvert(output, cvt, convertOpts...)
 	event := EventFromMessage(nil, out, schema.Assistant, "")
 	h.Send(event)
 	return ctx
@@ -623,9 +649,10 @@ func (h *noToolsCbHandler) onGraphError(ctx context.Context,
 	return ctx
 }
 
-func genNoToolsCallbacks(generator *AsyncGenerator[*AgentEvent]) compose.Option {
+func genNoToolsCallbacks(generator *AsyncGenerator[*AgentEvent], modelRetryConfigs *ModelRetryConfig) compose.Option {
 	h := &noToolsCbHandler{
-		AsyncGenerator: generator,
+		AsyncGenerator:    generator,
+		modelRetryConfigs: modelRetryConfigs,
 	}
 
 	cmHandler := &ub.ModelCallbackHandler{
@@ -729,7 +756,7 @@ func (a *ChatModelAgent) buildRunFunc(ctx context.Context) runFunc {
 					return
 				}
 
-				callOpt := genNoToolsCallbacks(generator)
+				callOpt := genNoToolsCallbacks(generator, a.modelRetryConfig)
 				var runOpts []compose.Option
 				runOpts = append(runOpts, opts...)
 				runOpts = append(runOpts, callOpt)
@@ -800,7 +827,7 @@ func (a *ChatModelAgent) buildRunFunc(ctx context.Context) runFunc {
 				return
 			}
 
-			callOpt := genReactCallbacks(ctx, a.name, generator, input.EnableStreaming, store)
+			callOpt := genReactCallbacks(ctx, a.name, generator, input.EnableStreaming, store, a.modelRetryConfig)
 			var runOpts []compose.Option
 			runOpts = append(runOpts, opts...)
 			runOpts = append(runOpts, callOpt)
