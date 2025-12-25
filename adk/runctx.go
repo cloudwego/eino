@@ -58,7 +58,7 @@ type agentEventWrapper struct {
 	// when the stream has already been consumed and errored.
 	// Normally when StreamErr happens, the Agent will return with the error,
 	// unless retry is configured for the agent generating this stream, in which case
-	// this StreamErr will be of type WillRetryError or WontRetryError.
+	// this StreamErr will be of type WillRetryError (indicating retry is pending).
 	StreamErr error
 }
 

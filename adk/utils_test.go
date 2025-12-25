@@ -331,54 +331,6 @@ func TestAgentEventWrapper_GobEncoding_WithWillRetryError(t *testing.T) {
 	assert.Equal(t, streamErr.RetryAttempt, decodedErr.RetryAttempt)
 }
 
-func TestAgentEventWrapper_GobEncoding_WithWontRetryError(t *testing.T) {
-	streamErr := &WontRetryError{ErrStr: "non-retryable error", RetryAttempt: 1}
-
-	sr, sw := schema.Pipe[Message](10)
-	go func() {
-		defer sw.Close()
-		sw.Send(schema.AssistantMessage("partial1", nil), nil)
-		sw.Send(nil, streamErr)
-	}()
-
-	wrapper := &agentEventWrapper{
-		AgentEvent: &AgentEvent{
-			AgentName: "TestAgent",
-			Output: &AgentOutput{
-				MessageOutput: &MessageVariant{
-					IsStreaming:   true,
-					MessageStream: sr,
-				},
-			},
-		},
-		TS: 11111,
-	}
-
-	_, err := getMessageFromWrappedEvent(wrapper)
-	assert.NotNil(t, err)
-	var wrapperErr *WontRetryError
-	assert.True(t, errors.As(wrapper.StreamErr, &wrapperErr))
-	assert.Equal(t, streamErr.ErrStr, wrapperErr.ErrStr)
-	assert.Equal(t, streamErr.RetryAttempt, wrapperErr.RetryAttempt)
-
-	var buf bytes.Buffer
-	enc := gob.NewEncoder(&buf)
-	err = enc.Encode(wrapper)
-	assert.NoError(t, err)
-
-	var decoded agentEventWrapper
-	dec := gob.NewDecoder(&buf)
-	err = dec.Decode(&decoded)
-	assert.NoError(t, err)
-
-	assert.Equal(t, "TestAgent", decoded.AgentName)
-	assert.Equal(t, int64(11111), decoded.TS)
-	var decodedErr *WontRetryError
-	assert.True(t, errors.As(decoded.StreamErr, &decodedErr))
-	assert.Equal(t, streamErr.ErrStr, decodedErr.ErrStr)
-	assert.Equal(t, streamErr.RetryAttempt, decodedErr.RetryAttempt)
-}
-
 func TestAgentEventWrapper_GobEncoding_WithUnregisteredError(t *testing.T) {
 	streamErr := errors.New("unregistered error type")
 

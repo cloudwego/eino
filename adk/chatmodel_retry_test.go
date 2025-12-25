@@ -616,8 +616,7 @@ func TestChatModelAgentRetry_NoTools_NonRetryAbleStreamError(t *testing.T) {
 		}
 	}
 	assert.NotNil(t, streamErr)
-	var wontRetryErr *WontRetryError
-	assert.True(t, errors.As(streamErr, &wontRetryErr))
+	assert.True(t, errors.Is(streamErr, errNonRetryAble), "Stream error should be the original error")
 
 	event1 := events[1]
 	assert.NotNil(t, event1.Err)
@@ -666,12 +665,9 @@ func TestRetryExhaustedError_ErrorString(t *testing.T) {
 	assert.Equal(t, "exceeds max retries", errWithoutLast.Error())
 }
 
-func TestWillRetryError_WontRetryError_ErrorString(t *testing.T) {
+func TestWillRetryError_ErrorString(t *testing.T) {
 	willRetry := &WillRetryError{ErrStr: "transient error", RetryAttempt: 1}
 	assert.Equal(t, "transient error", willRetry.Error())
-
-	wontRetry := &WontRetryError{ErrStr: "permanent error", RetryAttempt: 2}
-	assert.Equal(t, "permanent error", wontRetry.Error())
 }
 
 func TestChatModelAgentRetry_DefaultIsRetryAble(t *testing.T) {
@@ -870,7 +866,7 @@ func TestSequentialWorkflow_NonRetryAbleStreamError_StopsFlow(t *testing.T) {
 	iterator := sequentialAgent.Run(ctx, input)
 
 	var events []*AgentEvent
-	var wontRetryErrCount int
+	var streamErrFound bool
 	var finalErrEvent *AgentEvent
 	for {
 		event, ok := iterator.Next()
@@ -889,17 +885,15 @@ func TestSequentialWorkflow_NonRetryAbleStreamError_StopsFlow(t *testing.T) {
 					break
 				}
 				if err != nil {
-					var wontRetryErr *WontRetryError
-					if errors.As(err, &wontRetryErr) {
-						wontRetryErrCount++
-					}
+					streamErrFound = true
+					assert.True(t, errors.Is(err, errNonRetryAble), "Stream error should be the original error")
 					break
 				}
 			}
 		}
 	}
 
-	assert.Equal(t, 1, wontRetryErrCount, "End-user should receive 1 WontRetryError in stream")
+	assert.True(t, streamErrFound, "End-user should receive stream error")
 	assert.NotNil(t, finalErrEvent, "Should receive a final error event")
 	assert.True(t, errors.Is(finalErrEvent.Err, errNonRetryAble), "Final error should be the non-retryable error")
 	assert.Equal(t, 0, len(capturingModel.capturedInputs), "Agent B should NOT be called due to error")

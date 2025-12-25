@@ -77,18 +77,8 @@ func (e *WillRetryError) Error() string {
 	return e.ErrStr
 }
 
-type WontRetryError struct {
-	ErrStr       string
-	RetryAttempt int
-}
-
-func (e *WontRetryError) Error() string {
-	return e.ErrStr
-}
-
 func init() {
-	schema.RegisterName[*WillRetryError]("eino_adk_chatmodel_WillRetryError")
-	schema.RegisterName[*WontRetryError]("eino_adk_chatmodel_WontRetryError")
+	schema.RegisterName[*WillRetryError]("eino_adk_chatmodel_will_retry_error")
 }
 
 // ModelRetryConfig configures retry behavior for the ChatModel node.
@@ -146,7 +136,7 @@ func genErrWrapper(ctx context.Context, config ModelRetryConfig, info streamRetr
 		if isRetryAble && hasRetriesLeft {
 			return &WillRetryError{ErrStr: err.Error(), RetryAttempt: info.attempt}
 		}
-		return &WontRetryError{ErrStr: err.Error(), RetryAttempt: info.attempt}
+		return err
 	}
 }
 
