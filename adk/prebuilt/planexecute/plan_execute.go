@@ -36,6 +36,7 @@ import (
 
 func init() {
 	schema.RegisterName[*defaultPlan]("_eino_adk_plan_execute_default_plan")
+	schema.RegisterName[ExecutedStep]("_eino_adk_plan_execute_executed_step")
 }
 
 // Plan represents an execution plan with a sequence of actionable steps.
@@ -853,7 +854,7 @@ type Config struct {
 // 2. Execution: Execute the first step of the plan
 // 3. Replanning: Evaluate progress and either complete the task or revise the plan
 // This approach enables complex problem-solving through iterative refinement.
-func New(ctx context.Context, cfg *Config) (adk.Agent, error) {
+func New(ctx context.Context, cfg *Config) (adk.ResumableAgent, error) {
 	maxIterations := cfg.MaxIterations
 	if maxIterations <= 0 {
 		maxIterations = 10

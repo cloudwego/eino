@@ -580,14 +580,14 @@ func newWorkflowAgent(ctx context.Context, name, desc string,
 	return fa, nil
 }
 
-func NewSequentialAgent(ctx context.Context, config *SequentialAgentConfig) (Agent, error) {
+func NewSequentialAgent(ctx context.Context, config *SequentialAgentConfig) (ResumableAgent, error) {
 	return newWorkflowAgent(ctx, config.Name, config.Description, config.SubAgents, workflowAgentModeSequential, 0)
 }
 
-func NewParallelAgent(ctx context.Context, config *ParallelAgentConfig) (Agent, error) {
+func NewParallelAgent(ctx context.Context, config *ParallelAgentConfig) (ResumableAgent, error) {
 	return newWorkflowAgent(ctx, config.Name, config.Description, config.SubAgents, workflowAgentModeParallel, 0)
 }
 
-func NewLoopAgent(ctx context.Context, config *LoopAgentConfig) (Agent, error) {
+func NewLoopAgent(ctx context.Context, config *LoopAgentConfig) (ResumableAgent, error) {
 	return newWorkflowAgent(ctx, config.Name, config.Description, config.SubAgents, workflowAgentModeLoop, config.MaxIterations)
 }
