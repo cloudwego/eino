@@ -37,6 +37,7 @@ import (
 func init() {
 	schema.RegisterName[*defaultPlan]("_eino_adk_plan_execute_default_plan")
 	schema.RegisterName[ExecutedStep]("_eino_adk_plan_execute_executed_step")
+	schema.RegisterName[[]ExecutedStep]("_eino_adk_plan_execute_executed_steps")
 }
 
 // Plan represents an execution plan with a sequence of actionable steps.
