@@ -56,6 +56,11 @@ func getToolResultSendersFromCtx(ctx context.Context) *toolResultSenders {
 	return v.(*toolResultSenders)
 }
 
+func isAddressAtDepth(currentAddr, handlerAddr Address, depth int) bool {
+	expectedLen := len(handlerAddr) + depth
+	return len(currentAddr) == expectedLen && currentAddr[:len(handlerAddr)].Equals(handlerAddr)
+}
+
 type State struct {
 	Messages []Message
 
@@ -144,8 +149,8 @@ func newAdkToolResultCollectorMiddleware() compose.ToolMiddleware {
 				}
 				prePopAction := popToolGenAction(ctx, input.Name)
 				if sender != nil {
-					addr := core.GetCurrentAddress(ctx)
-					if len(addr) == len(senderAddr)+4 && addr[:len(senderAddr)].Equals(senderAddr) {
+					currentAddr := core.GetCurrentAddress(ctx)
+					if isAddressAtDepth(currentAddr, senderAddr, addrDepthTool) {
 						sender(ctx, input.Name, input.CallID, output.Result, prePopAction)
 					}
 				}
@@ -167,9 +172,11 @@ func newAdkToolResultCollectorMiddleware() compose.ToolMiddleware {
 				}
 				prePopAction := popToolGenAction(ctx, input.Name)
 				if streamSender != nil {
-					addr := core.GetCurrentAddress(ctx)
-					if len(addr) == len(senderAddr)+4 && addr[:len(senderAddr)].Equals(senderAddr) {
-						streamSender(ctx, input.Name, input.CallID, output.Result, prePopAction)
+					currentAddr := core.GetCurrentAddress(ctx)
+					if isAddressAtDepth(currentAddr, senderAddr, addrDepthTool) {
+						streams := output.Result.Copy(2)
+						streamSender(ctx, input.Name, input.CallID, streams[0], prePopAction)
+						output.Result = streams[1]
 					}
 				}
 				return output, nil
