@@ -23,7 +23,6 @@ import (
 
 	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/compose"
-	"github.com/cloudwego/eino/internal/core"
 	"github.com/cloudwego/eino/schema"
 )
 
@@ -54,6 +53,11 @@ func getToolResultSendersFromCtx(ctx context.Context) *toolResultSenders {
 		return nil
 	}
 	return v.(*toolResultSenders)
+}
+
+func isAddressAtDepth(currentAddr, handlerAddr Address, depth int) bool {
+	expectedLen := len(handlerAddr) + depth
+	return len(currentAddr) == expectedLen && currentAddr[:len(handlerAddr)].Equals(handlerAddr)
 }
 
 type State struct {
@@ -133,10 +137,8 @@ func newAdkToolResultCollectorMiddleware() compose.ToolMiddleware {
 			return func(ctx context.Context, input *compose.ToolInput) (*compose.ToolOutput, error) {
 				senders := getToolResultSendersFromCtx(ctx)
 				var sender adkToolResultSender
-				var senderAddr Address
 				if senders != nil {
 					sender = senders.sender
-					senderAddr = senders.addr
 				}
 				output, err := next(ctx, input)
 				if err != nil {
@@ -144,10 +146,7 @@ func newAdkToolResultCollectorMiddleware() compose.ToolMiddleware {
 				}
 				prePopAction := popToolGenAction(ctx, input.Name)
 				if sender != nil {
-					addr := core.GetCurrentAddress(ctx)
-					if len(addr) == len(senderAddr)+4 && addr[:len(senderAddr)].Equals(senderAddr) {
-						sender(ctx, input.Name, input.CallID, output.Result, prePopAction)
-					}
+					sender(ctx, input.Name, input.CallID, output.Result, prePopAction)
 				}
 				return output, nil
 			}
@@ -156,10 +155,8 @@ func newAdkToolResultCollectorMiddleware() compose.ToolMiddleware {
 			return func(ctx context.Context, input *compose.ToolInput) (*compose.StreamToolOutput, error) {
 				senders := getToolResultSendersFromCtx(ctx)
 				var streamSender adkStreamToolResultSender
-				var senderAddr Address
 				if senders != nil {
 					streamSender = senders.streamSender
-					senderAddr = senders.addr
 				}
 				output, err := next(ctx, input)
 				if err != nil {
@@ -167,10 +164,9 @@ func newAdkToolResultCollectorMiddleware() compose.ToolMiddleware {
 				}
 				prePopAction := popToolGenAction(ctx, input.Name)
 				if streamSender != nil {
-					addr := core.GetCurrentAddress(ctx)
-					if len(addr) == len(senderAddr)+4 && addr[:len(senderAddr)].Equals(senderAddr) {
-						streamSender(ctx, input.Name, input.CallID, output.Result, prePopAction)
-					}
+					streams := output.Result.Copy(2)
+					streamSender(ctx, input.Name, input.CallID, streams[0], prePopAction)
+					output.Result = streams[1]
 				}
 				return output, nil
 			}
@@ -252,7 +248,7 @@ func newReact(ctx context.Context, config *reactConfig) (reactGraph, error) {
 		return nil, err
 	}
 
-	var baseModel model.ToolCallingChatModel = config.model
+	baseModel := config.model
 	if config.modelRetryConfig != nil {
 		baseModel = newRetryChatModel(config.model, config.modelRetryConfig)
 	}

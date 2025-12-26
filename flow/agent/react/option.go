@@ -150,14 +150,23 @@ func WithMessageFuture() (agent.AgentOption, MessageFuture) {
 			h.sendMessage(msg)
 		}
 	}
+	createStreamToolResultSender := func() streamToolResultSender {
+		return func(toolName, callID string, resultStream *schema.StreamReader[string]) {
+			cvt := func(in string) (*schema.Message, error) {
+				return schema.ToolMessage(in, callID, schema.WithToolName(toolName)), nil
+			}
+			msgStream := schema.StreamReaderWithConvert(resultStream, cvt)
+			h.sendMessageStream(msgStream)
+		}
+	}
 	graphHandler := callbacks.NewHandlerBuilder().
 		OnStartFn(func(ctx context.Context, info *callbacks.RunInfo, input callbacks.CallbackInput) context.Context {
 			h.onGraphStart(ctx, info, input)
-			return setToolResultSenderToCtx(ctx, createToolResultSender())
+			return setToolResultSendersToCtx(ctx, createToolResultSender(), createStreamToolResultSender())
 		}).
 		OnStartWithStreamInputFn(func(ctx context.Context, info *callbacks.RunInfo, input *schema.StreamReader[callbacks.CallbackInput]) context.Context {
 			h.onGraphStartWithStreamInput(ctx, info, input)
-			return setToolResultSenderToCtx(ctx, createToolResultSender())
+			return setToolResultSendersToCtx(ctx, createToolResultSender(), createStreamToolResultSender())
 		}).
 		OnEndFn(h.onGraphEnd).
 		OnEndWithStreamOutputFn(h.onGraphEndWithStreamOutput).
@@ -253,7 +262,8 @@ func (h *cbHandler) onGraphStart(ctx context.Context,
 }
 
 func (h *cbHandler) onGraphStartWithStreamInput(ctx context.Context, _ *callbacks.RunInfo,
-	_ *schema.StreamReader[callbacks.CallbackInput]) context.Context {
+	input *schema.StreamReader[callbacks.CallbackInput]) context.Context {
+	input.Close()
 
 	h.sMsgs = internal.NewUnboundedChan[item[*schema.StreamReader[*schema.Message]]]()
 

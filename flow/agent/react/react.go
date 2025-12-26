@@ -27,19 +27,25 @@ import (
 )
 
 type toolResultSender func(toolName, callID, result string)
+type streamToolResultSender func(toolName, callID string, resultStream *schema.StreamReader[string])
+
+type toolResultSenders struct {
+	sender       toolResultSender
+	streamSender streamToolResultSender
+}
 
 type toolResultSenderCtxKey struct{}
 
-func setToolResultSenderToCtx(ctx context.Context, sender toolResultSender) context.Context {
-	return context.WithValue(ctx, toolResultSenderCtxKey{}, sender)
+func setToolResultSendersToCtx(ctx context.Context, sender toolResultSender, streamSender streamToolResultSender) context.Context {
+	return context.WithValue(ctx, toolResultSenderCtxKey{}, &toolResultSenders{sender: sender, streamSender: streamSender})
 }
 
-func getToolResultSenderFromCtx(ctx context.Context) toolResultSender {
+func getToolResultSendersFromCtx(ctx context.Context) *toolResultSenders {
 	v := ctx.Value(toolResultSenderCtxKey{})
 	if v == nil {
 		return nil
 	}
-	return v.(toolResultSender)
+	return v.(*toolResultSenders)
 }
 
 type state struct {
@@ -55,58 +61,33 @@ func newToolResultCollectorMiddleware() compose.ToolMiddleware {
 	return compose.ToolMiddleware{
 		Invokable: func(next compose.InvokableToolEndpoint) compose.InvokableToolEndpoint {
 			return func(ctx context.Context, input *compose.ToolInput) (*compose.ToolOutput, error) {
-				sender := getToolResultSenderFromCtx(ctx)
+				senders := getToolResultSendersFromCtx(ctx)
 				output, err := next(ctx, input)
 				if err != nil {
 					return nil, err
 				}
-				if sender != nil {
-					sender(input.Name, input.CallID, output.Result)
+				if senders != nil && senders.sender != nil {
+					senders.sender(input.Name, input.CallID, output.Result)
 				}
 				return output, nil
 			}
 		},
 		Streamable: func(next compose.StreamableToolEndpoint) compose.StreamableToolEndpoint {
 			return func(ctx context.Context, input *compose.ToolInput) (*compose.StreamToolOutput, error) {
+				senders := getToolResultSendersFromCtx(ctx)
 				output, err := next(ctx, input)
 				if err != nil {
 					return nil, err
 				}
-				wrappedStream := wrapStreamWithToolResultCollector(ctx, output.Result, input.Name, input.CallID)
-				return &compose.StreamToolOutput{Result: wrappedStream}, nil
+				if senders != nil && senders.streamSender != nil {
+					streams := output.Result.Copy(2)
+					senders.streamSender(input.Name, input.CallID, streams[0])
+					output.Result = streams[1]
+				}
+				return output, nil
 			}
 		},
 	}
-}
-
-func wrapStreamWithToolResultCollector(ctx context.Context, stream *schema.StreamReader[string], toolName, callID string) *schema.StreamReader[string] {
-	sender := getToolResultSenderFromCtx(ctx)
-	reader, writer := schema.Pipe[string](1)
-
-	go func() {
-		defer writer.Close()
-		var accumulated string
-
-		for {
-			chunk, err := stream.Recv()
-			if err == io.EOF {
-				break
-			}
-			if err != nil {
-				writer.Send("", err)
-				return
-			}
-
-			accumulated += chunk
-			writer.Send(chunk, nil)
-		}
-
-		if sender != nil {
-			sender(toolName, callID, accumulated)
-		}
-	}()
-
-	return reader
 }
 
 const (

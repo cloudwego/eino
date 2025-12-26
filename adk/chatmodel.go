@@ -41,6 +41,14 @@ import (
 	ub "github.com/cloudwego/eino/utils/callbacks"
 )
 
+const (
+	addrDepthChain      = 1
+	addrDepthReactGraph = 2
+	addrDepthChatModel  = 3
+	addrDepthToolsNode  = 3
+	addrDepthTool       = 4
+)
+
 type chatModelAgentRunOptions struct {
 	// run
 	chatModelOptions []model.Option
@@ -421,7 +429,7 @@ type cbHandler struct {
 func (h *cbHandler) onChatModelEnd(ctx context.Context,
 	_ *callbacks.RunInfo, output *model.CallbackOutput) context.Context {
 	addr := core.GetCurrentAddress(ctx)
-	if len(addr) != len(h.addr)+3 || !addr[:len(h.addr)].Equals(h.addr) {
+	if !isAddressAtDepth(addr, h.addr, addrDepthChatModel) {
 		return ctx
 	}
 
@@ -433,7 +441,7 @@ func (h *cbHandler) onChatModelEnd(ctx context.Context,
 func (h *cbHandler) onChatModelEndWithStreamOutput(ctx context.Context,
 	_ *callbacks.RunInfo, output *schema.StreamReader[*model.CallbackOutput]) context.Context {
 	addr := core.GetCurrentAddress(ctx)
-	if len(addr) != len(h.addr)+3 || !addr[:len(h.addr)].Equals(h.addr) {
+	if !isAddressAtDepth(addr, h.addr, addrDepthChatModel) {
 		return ctx
 	}
 
@@ -464,7 +472,7 @@ func (h *cbHandler) sendReturnDirectlyToolEvent() {
 
 func (h *cbHandler) onToolsNodeEnd(ctx context.Context, _ *callbacks.RunInfo, _ []*schema.Message) context.Context {
 	addr := core.GetCurrentAddress(ctx)
-	if len(addr) != len(h.addr)+3 || !addr[:len(h.addr)].Equals(h.addr) {
+	if !isAddressAtDepth(addr, h.addr, addrDepthToolsNode) {
 		return ctx
 	}
 	h.sendReturnDirectlyToolEvent()
@@ -473,7 +481,7 @@ func (h *cbHandler) onToolsNodeEnd(ctx context.Context, _ *callbacks.RunInfo, _ 
 
 func (h *cbHandler) onToolsNodeEndWithStreamOutput(ctx context.Context, _ *callbacks.RunInfo, _ *schema.StreamReader[[]*schema.Message]) context.Context {
 	addr := core.GetCurrentAddress(ctx)
-	if len(addr) != len(h.addr)+3 || !addr[:len(h.addr)].Equals(h.addr) {
+	if !isAddressAtDepth(addr, h.addr, addrDepthToolsNode) {
 		return ctx
 	}
 	h.sendReturnDirectlyToolEvent()
@@ -492,7 +500,7 @@ func init() {
 func (h *cbHandler) onGraphError(ctx context.Context,
 	_ *callbacks.RunInfo, err error) context.Context {
 	addr := core.GetCurrentAddress(ctx)
-	if len(addr) != len(h.addr)+1 || !addr[:len(h.addr)].Equals(h.addr) {
+	if !isAddressAtDepth(addr, h.addr, addrDepthChain) {
 		return ctx
 	}
 
@@ -586,15 +594,15 @@ func genReactCallbacks(ctx context.Context, agentName string,
 	}
 	reactGraphHandler := callbacks.NewHandlerBuilder().
 		OnStartFn(func(ctx context.Context, info *callbacks.RunInfo, input callbacks.CallbackInput) context.Context {
-			addr := core.GetCurrentAddress(ctx)
-			if len(addr) != len(h.addr)+2 || !addr[:len(h.addr)].Equals(h.addr) {
+			currentAddr := core.GetCurrentAddress(ctx)
+			if !isAddressAtDepth(currentAddr, h.addr, addrDepthReactGraph) {
 				return ctx
 			}
 			return setToolResultSendersToCtx(ctx, h.addr, createToolResultSender(), createStreamToolResultSender())
 		}).
 		OnStartWithStreamInputFn(func(ctx context.Context, info *callbacks.RunInfo, input *schema.StreamReader[callbacks.CallbackInput]) context.Context {
-			addr := core.GetCurrentAddress(ctx)
-			if len(addr) != len(h.addr)+2 || !addr[:len(h.addr)].Equals(h.addr) {
+			currentAddr := core.GetCurrentAddress(ctx)
+			if !isAddressAtDepth(currentAddr, h.addr, addrDepthReactGraph) {
 				return ctx
 			}
 			return setToolResultSendersToCtx(ctx, h.addr, createToolResultSender(), createStreamToolResultSender())
