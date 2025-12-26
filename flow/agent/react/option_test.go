@@ -478,3 +478,115 @@ func TestAgentWithAllOptions(t *testing.T) {
 	assert.True(t, modelOptReceived, "model option should be received by chat model")
 	assert.True(t, at.receivedToolOpt, "tool option should be received by tool")
 }
+
+type simpleToolForMiddlewareTest struct {
+	name   string
+	result string
+}
+
+func (s *simpleToolForMiddlewareTest) Info(_ context.Context) (*schema.ToolInfo, error) {
+	return &schema.ToolInfo{
+		Name: s.name,
+		Desc: "simple tool for middleware test",
+		ParamsOneOf: schema.NewParamsOneOfByParams(
+			map[string]*schema.ParameterInfo{
+				"input": {
+					Desc:     "input",
+					Required: true,
+					Type:     schema.String,
+				},
+			}),
+	}, nil
+}
+
+func (s *simpleToolForMiddlewareTest) InvokableRun(_ context.Context, _ string, _ ...tool.Option) (string, error) {
+	return s.result, nil
+}
+
+func TestMessageFuture_ToolResultMiddleware_EmitsFinalResult(t *testing.T) {
+	ctx := context.Background()
+
+	originalResult := "original_result"
+	modifiedResult := "modified_by_middleware"
+
+	testTool := &simpleToolForMiddlewareTest{name: "test_tool", result: originalResult}
+
+	resultModifyingMiddleware := compose.ToolMiddleware{
+		Invokable: func(next compose.InvokableToolEndpoint) compose.InvokableToolEndpoint {
+			return func(ctx context.Context, input *compose.ToolInput) (*compose.ToolOutput, error) {
+				output, err := next(ctx, input)
+				if err != nil {
+					return nil, err
+				}
+				output.Result = modifiedResult
+				return output, nil
+			}
+		},
+	}
+
+	ctrl := gomock.NewController(t)
+	cm := mockModel.NewMockToolCallingChatModel(ctrl)
+
+	info, err := testTool.Info(ctx)
+	assert.NoError(t, err)
+
+	cm.EXPECT().Generate(gomock.Any(), gomock.Any(), gomock.Any()).
+		Return(schema.AssistantMessage("",
+			[]schema.ToolCall{
+				{
+					ID: "tool-call-1",
+					Function: schema.FunctionCall{
+						Name:      info.Name,
+						Arguments: `{"input": "test"}`,
+					},
+				},
+			}), nil).
+		Times(1)
+	cm.EXPECT().Generate(gomock.Any(), gomock.Any(), gomock.Any()).
+		Return(schema.AssistantMessage("final response", nil), nil).
+		Times(1)
+	cm.EXPECT().WithTools(gomock.Any()).Return(cm, nil).AnyTimes()
+
+	option, future := WithMessageFuture()
+	a, err := NewAgent(ctx, &AgentConfig{
+		ToolCallingModel: cm,
+		ToolsConfig: compose.ToolsNodeConfig{
+			Tools:               []tool.BaseTool{testTool},
+			ToolCallMiddlewares: []compose.ToolMiddleware{resultModifyingMiddleware},
+		},
+		MaxStep: 3,
+	})
+	assert.NoError(t, err)
+
+	response, err := a.Generate(ctx, []*schema.Message{
+		schema.UserMessage("call the tool"),
+	}, option)
+	assert.NoError(t, err)
+	assert.Equal(t, "final response", response.Content)
+
+	iter := future.GetMessages()
+
+	msg1, hasNext, err := iter.Next()
+	assert.NoError(t, err)
+	assert.True(t, hasNext)
+	assert.Equal(t, schema.Assistant, msg1.Role)
+	assert.Equal(t, 1, len(msg1.ToolCalls))
+
+	msg2, hasNext, err := iter.Next()
+	assert.NoError(t, err)
+	assert.True(t, hasNext)
+	assert.Equal(t, schema.Tool, msg2.Role)
+	assert.Equal(t, modifiedResult, msg2.Content,
+		"MessageFuture should receive the middleware-modified tool result")
+	assert.NotEqual(t, originalResult, msg2.Content,
+		"MessageFuture should NOT receive the original tool result")
+
+	msg3, hasNext, err := iter.Next()
+	assert.NoError(t, err)
+	assert.True(t, hasNext)
+	assert.Equal(t, "final response", msg3.Content)
+
+	_, hasNext, err = iter.Next()
+	assert.NoError(t, err)
+	assert.False(t, hasNext)
+}
