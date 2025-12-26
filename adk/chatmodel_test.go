@@ -83,6 +83,72 @@ func TestChatModelAgentRun(t *testing.T) {
 		assert.False(t, ok)
 	})
 
+	t.Run("BasicChatModelWithAgentMiddleware", func(t *testing.T) {
+		ctx := context.Background()
+
+		// Create a mock chat model
+		ctrl := gomock.NewController(t)
+		cm := mockModel.NewMockToolCallingChatModel(ctrl)
+
+		// Set up expectations for the mock model
+		cm.EXPECT().Generate(gomock.Any(), gomock.Any(), gomock.Any()).
+			Return(schema.AssistantMessage("Hello, I am an AI assistant.", nil), nil).
+			Times(1)
+
+		afterChatModelExecuted := false
+
+		// Create a ChatModelAgent
+		agent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+			Name:        "TestAgent",
+			Description: "Test agent for unit testing",
+			Instruction: "You are a helpful assistant.",
+			Model:       cm,
+			Middlewares: []AgentMiddleware{
+				{
+					BeforeChatModel: func(ctx context.Context, state *ChatModelAgentState) error {
+						state.Messages = append(state.Messages, schema.UserMessage("m"))
+						return nil
+					},
+					AfterChatModel: func(ctx context.Context, state *ChatModelAgentState) error {
+						assert.Len(t, state.Messages, 4)
+						afterChatModelExecuted = true
+						return nil
+					},
+				},
+			},
+		})
+		assert.NoError(t, err)
+		assert.NotNil(t, agent)
+
+		// Run the agent
+		input := &AgentInput{
+			Messages: []Message{
+				schema.UserMessage("Hello, who are you?"),
+			},
+		}
+		iterator := agent.Run(ctx, input)
+		assert.NotNil(t, iterator)
+
+		// Get the event from the iterator
+		event, ok := iterator.Next()
+		assert.True(t, ok)
+		assert.NotNil(t, event)
+		assert.Nil(t, event.Err)
+		assert.NotNil(t, event.Output)
+		assert.NotNil(t, event.Output.MessageOutput)
+
+		// Verify the message content
+		msg := event.Output.MessageOutput.Message
+		assert.NotNil(t, msg)
+		assert.Equal(t, "Hello, I am an AI assistant.", msg.Content)
+
+		// No more events
+		_, ok = iterator.Next()
+		assert.False(t, ok)
+
+		assert.True(t, afterChatModelExecuted)
+	})
+
 	// Test with streaming output
 	t.Run("StreamOutput", func(t *testing.T) {
 		ctx := context.Background()

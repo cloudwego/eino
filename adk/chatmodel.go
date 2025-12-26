@@ -732,22 +732,39 @@ func (a *ChatModelAgent) buildRunFunc(ctx context.Context) runFunc {
 
 			a.run = func(ctx context.Context, input *AgentInput, generator *AsyncGenerator[*AgentEvent],
 				store *bridgeStore, opts ...compose.Option) {
-				r, err := compose.NewChain[*AgentInput, Message]().
+				r, err := compose.NewChain[*AgentInput, Message](compose.WithGenLocalState(func(ctx context.Context) (state *ChatModelAgentState) {
+					return &ChatModelAgentState{}
+				})).
 					AppendLambda(compose.InvokableLambda(func(ctx context.Context, input *AgentInput) ([]Message, error) {
 						messages, err := a.genModelInput(ctx, instruction, input)
 						if err != nil {
 							return nil, err
 						}
-						state := &ChatModelAgentState{Messages: messages}
-						for _, b := range a.beforeChatModels {
-							err = b(ctx, state)
-							if err != nil {
-								return nil, err
-							}
-						}
-						return state.Messages, nil
+						return messages, nil
 					})).
-					AppendChatModel(chatModel).
+					AppendChatModel(
+						chatModel,
+						compose.WithStatePreHandler(func(ctx context.Context, in []*schema.Message, state *ChatModelAgentState) ([]*schema.Message, error) {
+							state.Messages = in
+							for _, bc := range a.beforeChatModels {
+								err := bc(ctx, state)
+								if err != nil {
+									return nil, err
+								}
+							}
+							return state.Messages, nil
+						}),
+						compose.WithStatePostHandler(func(ctx context.Context, in *schema.Message, state *ChatModelAgentState) (*schema.Message, error) {
+							state.Messages = append(state.Messages, in)
+							for _, ac := range a.afterChatModels {
+								err := ac(ctx, state)
+								if err != nil {
+									return nil, err
+								}
+							}
+							return in, nil
+						}),
+					).
 					Compile(ctx, compose.WithGraphName(a.name),
 						compose.WithCheckPointStore(store),
 						compose.WithSerializer(&gobSerializer{}))
