@@ -770,6 +770,62 @@ func TestNestedAgentTool_NoInternalEventsWhenDisabled(t *testing.T) {
 	}
 }
 
+func TestNestedAgentTool_InnerToolResultNotEmittedToOuter(t *testing.T) {
+	ctx := context.Background()
+
+	innerTool := &simpleTool{name: "inner_tool", result: "inner_tool_result"}
+	inner, _ := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+		Name:        "inner",
+		Description: "inner agent with tool",
+		Model:       &fakeTCM{},
+		ToolsConfig: ToolsConfig{ToolsNodeConfig: compose.ToolsNodeConfig{Tools: []tool.BaseTool{innerTool}}},
+	})
+	innerAgentTool := NewAgentTool(ctx, inner)
+
+	outer, _ := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+		Name:        "outer",
+		Description: "outer agent",
+		Model:       &fakeTCM{},
+		ToolsConfig: ToolsConfig{ToolsNodeConfig: compose.ToolsNodeConfig{Tools: []tool.BaseTool{innerAgentTool}}},
+	})
+
+	r := NewRunner(ctx, RunnerConfig{Agent: outer, EnableStreaming: false, CheckPointStore: newBridgeStore()})
+	it := r.Run(ctx, []Message{schema.UserMessage("q")})
+
+	var allEvents []*AgentEvent
+	for {
+		ev, ok := it.Next()
+		if !ok {
+			break
+		}
+		allEvents = append(allEvents, ev)
+	}
+
+	for _, ev := range allEvents {
+		if ev.Output != nil && ev.Output.MessageOutput != nil &&
+			ev.Output.MessageOutput.Message != nil &&
+			ev.Output.MessageOutput.Message.Role == schema.Tool &&
+			ev.AgentName == "outer" &&
+			ev.Output.MessageOutput.Message.Content == "inner_tool_result" {
+			t.Fatalf("inner agent's tool result (inner_tool_result) should not be emitted as outer agent's event, but got event with AgentName=%s, Content=%s",
+				ev.AgentName, ev.Output.MessageOutput.Message.Content)
+		}
+	}
+}
+
+type simpleTool struct {
+	name   string
+	result string
+}
+
+func (s *simpleTool) Info(context.Context) (*schema.ToolInfo, error) {
+	return &schema.ToolInfo{Name: s.name, Desc: "simple tool"}, nil
+}
+
+func (s *simpleTool) InvokableRun(ctx context.Context, argumentsInJSON string, opts ...tool.Option) (string, error) {
+	return s.result, nil
+}
+
 func TestAgentTool_InterruptWithoutCheckpoint(t *testing.T) {
 	ctx := context.Background()
 	ctx, _ = initRunCtx(ctx, "TestAgent", &AgentInput{Messages: []Message{}})
@@ -1114,4 +1170,63 @@ func TestInvokableAgentTool_ErrorCases(t *testing.T) {
 	out2, err := atNo.(tool.InvokableTool).InvokableRun(ctx, `{"request":"x"}`)
 	assert.NoError(t, err)
 	assert.Equal(t, "", out2)
+}
+
+func TestChatModelAgent_ToolResultMiddleware_EmitsFinalResult(t *testing.T) {
+	ctx := context.Background()
+
+	originalResult := "original_result"
+	modifiedResult := "modified_by_middleware"
+
+	testTool := &simpleTool{name: "test_tool", result: originalResult}
+
+	resultModifyingMiddleware := compose.ToolMiddleware{
+		Invokable: func(next compose.InvokableToolEndpoint) compose.InvokableToolEndpoint {
+			return func(ctx context.Context, input *compose.ToolInput) (*compose.ToolOutput, error) {
+				output, err := next(ctx, input)
+				if err != nil {
+					return nil, err
+				}
+				output.Result = modifiedResult
+				return output, nil
+			}
+		},
+	}
+
+	agent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+		Name:        "test_agent",
+		Description: "test agent with middleware",
+		Model:       &fakeTCM{},
+		ToolsConfig: ToolsConfig{
+			ToolsNodeConfig: compose.ToolsNodeConfig{
+				Tools:               []tool.BaseTool{testTool},
+				ToolCallMiddlewares: []compose.ToolMiddleware{resultModifyingMiddleware},
+			},
+		},
+	})
+	assert.NoError(t, err)
+
+	r := NewRunner(ctx, RunnerConfig{Agent: agent, EnableStreaming: false, CheckPointStore: newBridgeStore()})
+	it := r.Run(ctx, []Message{schema.UserMessage("call the tool")})
+
+	var toolResultEvents []*AgentEvent
+	for {
+		ev, ok := it.Next()
+		if !ok {
+			break
+		}
+		if ev.Output != nil && ev.Output.MessageOutput != nil &&
+			ev.Output.MessageOutput.Message != nil &&
+			ev.Output.MessageOutput.Message.Role == schema.Tool {
+			toolResultEvents = append(toolResultEvents, ev)
+		}
+	}
+
+	assert.NotEmpty(t, toolResultEvents, "should have at least one tool result event")
+	for _, ev := range toolResultEvents {
+		assert.Equal(t, modifiedResult, ev.Output.MessageOutput.Message.Content,
+			"tool result event should contain the middleware-modified result, not the original")
+		assert.NotEqual(t, originalResult, ev.Output.MessageOutput.Message.Content,
+			"tool result event should NOT contain the original result")
+	}
 }

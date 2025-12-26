@@ -144,17 +144,25 @@ func WithMessageFuture() (agent.AgentOption, MessageFuture) {
 		OnEnd:                 h.onChatModelEnd,
 		OnEndWithStreamOutput: h.onChatModelEndWithStreamOutput,
 	}
-	toolHandler := &ub.ToolCallbackHandler{
-		OnEnd:                 h.onToolEnd,
-		OnEndWithStreamOutput: h.onToolEndWithStreamOutput,
+	createToolResultSender := func() toolResultSender {
+		return func(toolName, callID, result string) {
+			msg := schema.ToolMessage(result, callID, schema.WithToolName(toolName))
+			h.sendMessage(msg)
+		}
 	}
 	graphHandler := callbacks.NewHandlerBuilder().
-		OnStartFn(h.onGraphStart).
-		OnStartWithStreamInputFn(h.onGraphStartWithStreamInput).
+		OnStartFn(func(ctx context.Context, info *callbacks.RunInfo, input callbacks.CallbackInput) context.Context {
+			h.onGraphStart(ctx, info, input)
+			return setToolResultSenderToCtx(ctx, createToolResultSender())
+		}).
+		OnStartWithStreamInputFn(func(ctx context.Context, info *callbacks.RunInfo, input *schema.StreamReader[callbacks.CallbackInput]) context.Context {
+			h.onGraphStartWithStreamInput(ctx, info, input)
+			return setToolResultSenderToCtx(ctx, createToolResultSender())
+		}).
 		OnEndFn(h.onGraphEnd).
 		OnEndWithStreamOutputFn(h.onGraphEndWithStreamOutput).
 		OnErrorFn(h.onGraphError).Build()
-	cb := ub.NewHandlerHelper().ChatModel(cmHandler).Tool(toolHandler).Graph(graphHandler).Handler()
+	cb := ub.NewHandlerHelper().ChatModel(cmHandler).Graph(graphHandler).Handler()
 
 	option := agent.WithComposeOptions(compose.WithCallbacks(cb))
 
@@ -198,39 +206,6 @@ func (h *cbHandler) onChatModelEndWithStreamOutput(ctx context.Context,
 
 	c := func(output *model.CallbackOutput) (*schema.Message, error) {
 		return output.Message, nil
-	}
-	s := schema.StreamReaderWithConvert(input, c)
-
-	h.sendMessageStream(s)
-
-	return ctx
-}
-
-func (h *cbHandler) onToolEnd(ctx context.Context,
-	info *callbacks.RunInfo, input *tool.CallbackOutput) context.Context {
-
-	toolCallID := compose.GetToolCallID(ctx)
-	toolName := ""
-	if info != nil {
-		toolName = info.Name
-	}
-	msg := schema.ToolMessage(input.Response, toolCallID, schema.WithToolName(toolName))
-
-	h.sendMessage(msg)
-
-	return ctx
-}
-
-func (h *cbHandler) onToolEndWithStreamOutput(ctx context.Context,
-	info *callbacks.RunInfo, input *schema.StreamReader[*tool.CallbackOutput]) context.Context {
-
-	toolCallID := compose.GetToolCallID(ctx)
-	toolName := ""
-	if info != nil {
-		toolName = info.Name
-	}
-	c := func(output *tool.CallbackOutput) (*schema.Message, error) {
-		return schema.ToolMessage(output.Response, toolCallID, schema.WithToolName(toolName)), nil
 	}
 	s := schema.StreamReaderWithConvert(input, c)
 
