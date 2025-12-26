@@ -26,6 +26,7 @@ import (
 	"github.com/cloudwego/eino/components/indexer"
 	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/components/prompt"
+	"github.com/cloudwego/eino/components/reranker"
 	"github.com/cloudwego/eino/components/retriever"
 	"github.com/cloudwego/eino/schema"
 )
@@ -99,6 +100,11 @@ func (wf *Workflow[I, O]) AddToolsNode(key string, tools *ToolsNode, opts ...Gra
 
 func (wf *Workflow[I, O]) AddRetrieverNode(key string, retriever retriever.Retriever, opts ...GraphAddNodeOpt) *WorkflowNode {
 	_ = wf.g.AddRetrieverNode(key, retriever, opts...)
+	return wf.initNode(key)
+}
+
+func (wf *Workflow[I, O]) AddRerankerNode(key string, r reranker.Reranker, opts ...GraphAddNodeOpt) *WorkflowNode {
+	_ = wf.g.AddRerankerNode(key, r, opts...)
 	return wf.initNode(key)
 }
 
