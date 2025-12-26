@@ -26,6 +26,28 @@ import (
 	"github.com/cloudwego/eino/schema"
 )
 
+type toolResultSender func(toolName, callID, result string)
+type streamToolResultSender func(toolName, callID string, resultStream *schema.StreamReader[string])
+
+type toolResultSenders struct {
+	sender       toolResultSender
+	streamSender streamToolResultSender
+}
+
+type toolResultSenderCtxKey struct{}
+
+func setToolResultSendersToCtx(ctx context.Context, sender toolResultSender, streamSender streamToolResultSender) context.Context {
+	return context.WithValue(ctx, toolResultSenderCtxKey{}, &toolResultSenders{sender: sender, streamSender: streamSender})
+}
+
+func getToolResultSendersFromCtx(ctx context.Context) *toolResultSenders {
+	v := ctx.Value(toolResultSenderCtxKey{})
+	if v == nil {
+		return nil
+	}
+	return v.(*toolResultSenders)
+}
+
 type state struct {
 	Messages                 []*schema.Message
 	ReturnDirectlyToolCallID string
@@ -33,6 +55,39 @@ type state struct {
 
 func init() {
 	schema.RegisterName[*state]("_eino_react_state")
+}
+
+func newToolResultCollectorMiddleware() compose.ToolMiddleware {
+	return compose.ToolMiddleware{
+		Invokable: func(next compose.InvokableToolEndpoint) compose.InvokableToolEndpoint {
+			return func(ctx context.Context, input *compose.ToolInput) (*compose.ToolOutput, error) {
+				senders := getToolResultSendersFromCtx(ctx)
+				output, err := next(ctx, input)
+				if err != nil {
+					return nil, err
+				}
+				if senders != nil && senders.sender != nil {
+					senders.sender(input.Name, input.CallID, output.Result)
+				}
+				return output, nil
+			}
+		},
+		Streamable: func(next compose.StreamableToolEndpoint) compose.StreamableToolEndpoint {
+			return func(ctx context.Context, input *compose.ToolInput) (*compose.StreamToolOutput, error) {
+				senders := getToolResultSendersFromCtx(ctx)
+				output, err := next(ctx, input)
+				if err != nil {
+					return nil, err
+				}
+				if senders != nil && senders.streamSender != nil {
+					streams := output.Result.Copy(2)
+					senders.streamSender(input.Name, input.CallID, streams[0])
+					output.Result = streams[1]
+				}
+				return output, nil
+			}
+		},
+	}
 }
 
 const (
@@ -226,6 +281,11 @@ func NewAgent(ctx context.Context, config *AgentConfig) (_ *Agent, err error) {
 	if chatModel, err = agent.ChatModelWithTools(config.Model, config.ToolCallingModel, toolInfos); err != nil {
 		return nil, err
 	}
+
+	config.ToolsConfig.ToolCallMiddlewares = append(
+		[]compose.ToolMiddleware{newToolResultCollectorMiddleware()},
+		config.ToolsConfig.ToolCallMiddlewares...,
+	)
 
 	if toolsNode, err = compose.NewToolNode(ctx, &config.ToolsConfig); err != nil {
 		return nil, err

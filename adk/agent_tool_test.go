@@ -770,6 +770,62 @@ func TestNestedAgentTool_NoInternalEventsWhenDisabled(t *testing.T) {
 	}
 }
 
+func TestNestedAgentTool_InnerToolResultNotEmittedToOuter(t *testing.T) {
+	ctx := context.Background()
+
+	innerTool := &simpleTool{name: "inner_tool", result: "inner_tool_result"}
+	inner, _ := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+		Name:        "inner",
+		Description: "inner agent with tool",
+		Model:       &fakeTCM{},
+		ToolsConfig: ToolsConfig{ToolsNodeConfig: compose.ToolsNodeConfig{Tools: []tool.BaseTool{innerTool}}},
+	})
+	innerAgentTool := NewAgentTool(ctx, inner)
+
+	outer, _ := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+		Name:        "outer",
+		Description: "outer agent",
+		Model:       &fakeTCM{},
+		ToolsConfig: ToolsConfig{ToolsNodeConfig: compose.ToolsNodeConfig{Tools: []tool.BaseTool{innerAgentTool}}},
+	})
+
+	r := NewRunner(ctx, RunnerConfig{Agent: outer, EnableStreaming: false, CheckPointStore: newBridgeStore()})
+	it := r.Run(ctx, []Message{schema.UserMessage("q")})
+
+	var allEvents []*AgentEvent
+	for {
+		ev, ok := it.Next()
+		if !ok {
+			break
+		}
+		allEvents = append(allEvents, ev)
+	}
+
+	for _, ev := range allEvents {
+		if ev.Output != nil && ev.Output.MessageOutput != nil &&
+			ev.Output.MessageOutput.Message != nil &&
+			ev.Output.MessageOutput.Message.Role == schema.Tool &&
+			ev.AgentName == "outer" &&
+			ev.Output.MessageOutput.Message.Content == "inner_tool_result" {
+			t.Fatalf("inner agent's tool result (inner_tool_result) should not be emitted as outer agent's event, but got event with AgentName=%s, Content=%s",
+				ev.AgentName, ev.Output.MessageOutput.Message.Content)
+		}
+	}
+}
+
+type simpleTool struct {
+	name   string
+	result string
+}
+
+func (s *simpleTool) Info(context.Context) (*schema.ToolInfo, error) {
+	return &schema.ToolInfo{Name: s.name, Desc: "simple tool"}, nil
+}
+
+func (s *simpleTool) InvokableRun(ctx context.Context, argumentsInJSON string, opts ...tool.Option) (string, error) {
+	return s.result, nil
+}
+
 func TestAgentTool_InterruptWithoutCheckpoint(t *testing.T) {
 	ctx := context.Background()
 	ctx, _ = initRunCtx(ctx, "TestAgent", &AgentInput{Messages: []Message{}})
