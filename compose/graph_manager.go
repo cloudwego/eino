@@ -250,6 +250,7 @@ type task struct {
 	nodeKey        string
 	call           *chanCall
 	input          any
+	originalInput  any
 	output         any
 	option         []any
 	err            error
@@ -268,6 +269,8 @@ type taskManager struct {
 	cancelCh chan *time.Duration
 	canceled bool
 	deadline *time.Time
+
+	checkpointConfig *CheckpointConfig
 }
 
 func (t *taskManager) execute(currentTask *task) {
@@ -290,11 +293,23 @@ func (t *taskManager) submit(tasks []*task) error {
 		return nil
 	}
 
+	persistRerunInput := t.checkpointConfig != nil && t.checkpointConfig.PersistRerunInput
+
 	// synchronously execute one task, if there are no other tasks in the task pool and meet one of the following conditions：
 	// 1. the new task is the only one
 	// 2. the task manager mode is set to needAll
 	for i := 0; i < len(tasks); i++ {
 		currentTask := tasks[i]
+
+		if persistRerunInput {
+			if sr, ok := currentTask.input.(streamReader); ok {
+				copies := sr.copy(2)
+				currentTask.originalInput, currentTask.input = copies[0], copies[1]
+			} else {
+				currentTask.originalInput = currentTask.input
+			}
+		}
+
 		err := runPreHandler(currentTask, t.runWrapper)
 		if err != nil {
 			// pre-handler error, regarded as a failure of the task itself
@@ -374,6 +389,14 @@ func (t *taskManager) waitOne() (ta *task, success bool, canceled bool) {
 	}
 
 	delete(t.runningTasks, ta.nodeKey)
+
+	if ta.originalInput != nil && (ta.err == nil || !isInterruptError(ta.err)) {
+		if sr, ok := ta.originalInput.(streamReader); ok {
+			sr.close()
+		}
+		ta.originalInput = nil
+	}
+
 	if ta.err != nil {
 		// biz error, jump post processor
 		return ta, true, false
