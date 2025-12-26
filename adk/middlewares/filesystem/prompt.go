@@ -105,7 +105,8 @@ Examples:
 - Search Python files only: 'grep(pattern="import", glob="*.py")'
 - Show matching lines: 'grep(pattern="error", output_mode="content")'`
 
-	ToolsSystemPrompt = `## Filesystem Tools 'ls', 'read_file', 'write_file', 'edit_file', 'glob', 'grep'
+	ToolsSystemPrompt = `
+# Filesystem Tools 'ls', 'read_file', 'write_file', 'edit_file', 'glob', 'grep'
 
 You have access to a filesystem which you can interact with using these tools.
 All file paths must start with a '/'.
@@ -115,5 +116,6 @@ All file paths must start with a '/'.
 - write_file: write to a file in the filesystem
 - edit_file: edit a file in the filesystem
 - glob: find files matching a pattern (e.g., "**/*.py")
-- grep: search for text within files`
+- grep: search for text within files
+`
 )
