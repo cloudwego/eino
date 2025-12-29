@@ -214,6 +214,9 @@ func newReact(ctx context.Context, config *reactConfig) (reactGraph, error) {
 			}
 		}
 		st.Messages = s.Messages
+		if len(st.Messages) == 0 {
+			return nil, errors.New("messages is empty after afterChatModel callbacks")
+		}
 		return st.Messages[len(st.Messages)-1], nil
 	}
 	_ = g.AddChatModelNode(chatModel_, chatModel,
