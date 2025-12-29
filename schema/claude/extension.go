@@ -16,6 +16,15 @@
 
 package claude
 
+import (
+	"fmt"
+)
+
+type ResponseMetaExtension struct {
+	ID         string `json:"id,omitempty"`
+	StopReason string `json:"stop_reason,omitempty"`
+}
+
 type AssistantGenTextExtension struct {
 	Citations []*TextCitation `json:"citations,omitempty"`
 }
@@ -33,30 +42,30 @@ type CitationCharLocation struct {
 	CitedText string `json:"cited_text,omitempty"`
 
 	DocumentTitle string `json:"document_title,omitempty"`
-	DocumentIndex int64  `json:"document_index,omitempty"`
+	DocumentIndex int    `json:"document_index,omitempty"`
 
-	StartCharIndex int64 `json:"start_char_index,omitempty"`
-	EndCharIndex   int64 `json:"end_char_index,omitempty"`
+	StartCharIndex int `json:"start_char_index,omitempty"`
+	EndCharIndex   int `json:"end_char_index,omitempty"`
 }
 
 type CitationPageLocation struct {
 	CitedText string `json:"cited_text,omitempty"`
 
 	DocumentTitle string `json:"document_title,omitempty"`
-	DocumentIndex int64  `json:"document_index,omitempty"`
+	DocumentIndex int    `json:"document_index,omitempty"`
 
-	StartPageNumber int64 `json:"start_page_number,omitempty"`
-	EndPageNumber   int64 `json:"end_page_number,omitempty"`
+	StartPageNumber int `json:"start_page_number,omitempty"`
+	EndPageNumber   int `json:"end_page_number,omitempty"`
 }
 
 type CitationContentBlockLocation struct {
 	CitedText string `json:"cited_text,omitempty"`
 
 	DocumentTitle string `json:"document_title,omitempty"`
-	DocumentIndex int64  `json:"document_index,omitempty"`
+	DocumentIndex int    `json:"document_index,omitempty"`
 
-	StartBlockIndex int64 `json:"start_block_index,omitempty"`
-	EndBlockIndex   int64 `json:"end_block_index,omitempty"`
+	StartBlockIndex int `json:"start_block_index,omitempty"`
+	EndBlockIndex   int `json:"end_block_index,omitempty"`
 }
 
 type CitationWebSearchResultLocation struct {
@@ -66,4 +75,45 @@ type CitationWebSearchResultLocation struct {
 	URL   string `json:"url,omitempty"`
 
 	EncryptedIndex string `json:"encrypted_index,omitempty"`
+}
+
+func ConcatAssistantGenTextExtensions(chunks []*AssistantGenTextExtension) (*AssistantGenTextExtension, error) {
+	if len(chunks) == 0 {
+		return nil, fmt.Errorf("no assistant generated text extension found")
+	}
+	if len(chunks) == 1 {
+		return chunks[0], nil
+	}
+
+	ret := &AssistantGenTextExtension{
+		Citations: make([]*TextCitation, 0, len(chunks)),
+	}
+
+	for _, ext := range chunks {
+		ret.Citations = append(ret.Citations, ext.Citations...)
+	}
+
+	return ret, nil
+}
+
+func ConcatResponseMetaExtensions(chunks []*ResponseMetaExtension) (*ResponseMetaExtension, error) {
+	if len(chunks) == 0 {
+		return nil, fmt.Errorf("no response meta extension found")
+	}
+	if len(chunks) == 1 {
+		return chunks[0], nil
+	}
+
+	ret := &ResponseMetaExtension{}
+
+	for _, ext := range chunks {
+		if ext.ID != "" {
+			ret.ID = ext.ID
+		}
+		if ext.StopReason != "" {
+			ret.StopReason = ext.StopReason
+		}
+	}
+
+	return ret, nil
 }
