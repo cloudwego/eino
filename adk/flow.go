@@ -385,13 +385,13 @@ func (a *flowAgent) run(
 		//   relative child provenance; never add parent/current segments. Incorrect settings will
 		//   duplicate head segments after merge and cause non-recording.
 		// Here we merge: framework runCtx.RunPath + custom-provided event.RunPath.
-		event.AgentName = a.Name(ctx)
 		if len(event.RunPath) > 0 {
 			rp := make([]RunStep, 0, len(runCtx.RunPath)+len(event.RunPath))
 			rp = append(rp, runCtx.RunPath...)
 			rp = append(rp, event.RunPath...)
 			event.RunPath = rp
 		} else {
+			event.AgentName = a.Name(ctx)
 			event.RunPath = runCtx.RunPath
 		}
 		// Recording policy: exact RunPath match (non-interrupt) indicates events belonging to this agent execution.
