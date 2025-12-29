@@ -763,7 +763,7 @@ func (a *ChatModelAgent) buildRunFunc(ctx context.Context) runFunc {
 								}
 							}
 							if len(state.Messages) == 0 {
-								return nil, errors.New("messages is empty after afterChatModel callbacks")
+								return nil, errors.New("messages is empty after AfterChatModel")
 							}
 							return state.Messages[len(state.Messages)-1], nil
 						}),
