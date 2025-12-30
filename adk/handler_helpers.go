@@ -98,70 +98,70 @@ func (h *toolsFuncHandler) ModifyTools(ctx context.Context, config *HandlerTools
 	return h.fn(ctx, config)
 }
 
-// WithBeforeChatModel creates a handler with a before-chat-model hook.
-func WithBeforeChatModel(fn func(ctx context.Context, messages []Message) ([]Message, error)) Handler {
-	return &beforeChatModelHandler{fn: fn}
+// WithMessageStatePreProcessor creates a handler that processes and persists messages before chat model invocation.
+func WithMessageStatePreProcessor(fn func(ctx context.Context, messages []Message) ([]Message, error)) Handler {
+	return &messageStatePreProcessorHandler{fn: fn}
 }
 
-type beforeChatModelHandler struct {
+type messageStatePreProcessorHandler struct {
 	fn func(ctx context.Context, messages []Message) ([]Message, error)
 }
 
-func (h *beforeChatModelHandler) Name() string {
-	return "before-chat-model"
+func (h *messageStatePreProcessorHandler) Name() string {
+	return "message-state-pre-processor"
 }
 
-func (h *beforeChatModelHandler) BeforeChatModel(ctx context.Context, messages []Message) ([]Message, error) {
+func (h *messageStatePreProcessorHandler) PreProcessMessageState(ctx context.Context, messages []Message) ([]Message, error) {
 	return h.fn(ctx, messages)
 }
 
-// WithAfterChatModel creates a handler with an after-chat-model hook.
-func WithAfterChatModel(fn func(ctx context.Context, messages []Message) ([]Message, error)) Handler {
-	return &afterChatModelHandler{fn: fn}
+// WithMessageStatePostProcessor creates a handler that processes and persists messages after chat model invocation.
+func WithMessageStatePostProcessor(fn func(ctx context.Context, messages []Message) ([]Message, error)) Handler {
+	return &messageStatePostProcessorHandler{fn: fn}
 }
 
-type afterChatModelHandler struct {
+type messageStatePostProcessorHandler struct {
 	fn func(ctx context.Context, messages []Message) ([]Message, error)
 }
 
-func (h *afterChatModelHandler) Name() string {
-	return "after-chat-model"
+func (h *messageStatePostProcessorHandler) Name() string {
+	return "message-state-post-processor"
 }
 
-func (h *afterChatModelHandler) AfterChatModel(ctx context.Context, messages []Message) ([]Message, error) {
+func (h *messageStatePostProcessorHandler) PostProcessMessageState(ctx context.Context, messages []Message) ([]Message, error) {
 	return h.fn(ctx, messages)
 }
 
 // WithInvokableToolInterceptor creates a handler that intercepts non-streaming tool calls.
-func WithInvokableToolInterceptor(fn func(ctx context.Context, toolName, arguments string, opts []tool.Option, next InvokableToolCallNext) (string, error)) Handler {
+func WithInvokableToolInterceptor(fn func(ctx context.Context, toolName, arguments string, opts []tool.Option, next func(ctx context.Context, arguments string, opts []tool.Option) (string, error)) (string, error)) Handler {
 	return &invokableInterceptorHandler{fn: fn}
 }
 
 type invokableInterceptorHandler struct {
-	fn func(ctx context.Context, toolName, arguments string, opts []tool.Option, next InvokableToolCallNext) (string, error)
+	fn func(ctx context.Context, toolName, arguments string, opts []tool.Option, next func(ctx context.Context, arguments string, opts []tool.Option) (string, error)) (string, error)
 }
 
 func (h *invokableInterceptorHandler) Name() string {
 	return "invokable-tool-interceptor"
 }
 
-func (h *invokableInterceptorHandler) WrapInvokableToolCall(ctx context.Context, toolName string, arguments string, opts []tool.Option, next InvokableToolCallNext) (string, error) {
+func (h *invokableInterceptorHandler) WrapInvokableToolCall(ctx context.Context, toolName string, arguments string, opts []tool.Option, next func(ctx context.Context, arguments string, opts []tool.Option) (string, error)) (string, error) {
 	return h.fn(ctx, toolName, arguments, opts, next)
 }
 
 // WithStreamableToolInterceptor creates a handler that intercepts streaming tool calls.
-func WithStreamableToolInterceptor(fn func(ctx context.Context, toolName, arguments string, opts []tool.Option, next StreamableToolCallNext) (*schema.StreamReader[string], error)) Handler {
+func WithStreamableToolInterceptor(fn func(ctx context.Context, toolName, arguments string, opts []tool.Option, next func(ctx context.Context, arguments string, opts []tool.Option) (*schema.StreamReader[string], error)) (*schema.StreamReader[string], error)) Handler {
 	return &streamableInterceptorHandler{fn: fn}
 }
 
 type streamableInterceptorHandler struct {
-	fn func(ctx context.Context, toolName, arguments string, opts []tool.Option, next StreamableToolCallNext) (*schema.StreamReader[string], error)
+	fn func(ctx context.Context, toolName, arguments string, opts []tool.Option, next func(ctx context.Context, arguments string, opts []tool.Option) (*schema.StreamReader[string], error)) (*schema.StreamReader[string], error)
 }
 
 func (h *streamableInterceptorHandler) Name() string {
 	return "streamable-tool-interceptor"
 }
 
-func (h *streamableInterceptorHandler) WrapStreamableToolCall(ctx context.Context, toolName string, arguments string, opts []tool.Option, next StreamableToolCallNext) (*schema.StreamReader[string], error) {
+func (h *streamableInterceptorHandler) WrapStreamableToolCall(ctx context.Context, toolName string, arguments string, opts []tool.Option, next func(ctx context.Context, arguments string, opts []tool.Option) (*schema.StreamReader[string], error)) (*schema.StreamReader[string], error) {
 	return h.fn(ctx, toolName, arguments, opts, next)
 }

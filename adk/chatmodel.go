@@ -145,6 +145,7 @@ type ChatModelAgentState struct {
 }
 
 // AgentMiddleware provides hooks to customize agent behavior at various stages of execution.
+// AgentMiddleware implements the Handler interface and can be used alongside new Handler implementations.
 type AgentMiddleware struct {
 	// AdditionalInstruction adds supplementary text to the agent's system instruction.
 	// This instruction is concatenated with the base instruction before each chat model call.
@@ -163,6 +164,115 @@ type AgentMiddleware struct {
 	// WrapToolCall wraps tool calls with custom middleware logic.
 	// Each middleware contains Invokable and/or Streamable functions for tool calls.
 	WrapToolCall compose.ToolMiddleware
+}
+
+func (m AgentMiddleware) Name() string {
+	return "legacy-middleware"
+}
+
+func (m AgentMiddleware) ModifyInstruction(_ context.Context, instruction string) (string, error) {
+	if m.AdditionalInstruction == "" {
+		return instruction, nil
+	}
+	if instruction == "" {
+		return m.AdditionalInstruction, nil
+	}
+	return instruction + "\n" + m.AdditionalInstruction, nil
+}
+
+func (m AgentMiddleware) ModifyTools(_ context.Context, config *HandlerToolsConfig) error {
+	if len(m.AdditionalTools) > 0 {
+		config.AddTools(m.AdditionalTools...)
+	}
+	return nil
+}
+
+type legacyBeforeChatModelAdapter struct {
+	fn func(context.Context, *ChatModelAgentState) error
+}
+
+func (a *legacyBeforeChatModelAdapter) Name() string {
+	return "legacy-before-chat-model"
+}
+
+func (a *legacyBeforeChatModelAdapter) PreProcessMessageState(ctx context.Context, messages []Message) ([]Message, error) {
+	state := &ChatModelAgentState{Messages: messages}
+	if err := a.fn(ctx, state); err != nil {
+		return nil, err
+	}
+	return state.Messages, nil
+}
+
+type legacyAfterChatModelAdapter struct {
+	fn func(context.Context, *ChatModelAgentState) error
+}
+
+func (a *legacyAfterChatModelAdapter) Name() string {
+	return "legacy-after-chat-model"
+}
+
+func (a *legacyAfterChatModelAdapter) PostProcessMessageState(ctx context.Context, messages []Message) ([]Message, error) {
+	state := &ChatModelAgentState{Messages: messages}
+	if err := a.fn(ctx, state); err != nil {
+		return nil, err
+	}
+	return state.Messages, nil
+}
+
+type legacyInvokableToolMiddlewareAdapter struct {
+	mw compose.InvokableToolMiddleware
+}
+
+func (a *legacyInvokableToolMiddlewareAdapter) Name() string {
+	return "legacy-invokable-tool-middleware"
+}
+
+func (a *legacyInvokableToolMiddlewareAdapter) WrapInvokableToolCall(ctx context.Context, toolName string, arguments string, opts []tool.Option, next func(ctx context.Context, arguments string, opts []tool.Option) (string, error)) (string, error) {
+	endpoint := func(ctx context.Context, input *compose.ToolInput) (*compose.ToolOutput, error) {
+		result, err := next(ctx, input.Arguments, input.CallOptions)
+		if err != nil {
+			return nil, err
+		}
+		return &compose.ToolOutput{Result: result}, nil
+	}
+	wrapped := a.mw(endpoint)
+	out, err := wrapped(ctx, &compose.ToolInput{
+		Name:        toolName,
+		Arguments:   arguments,
+		CallOptions: opts,
+	})
+	if err != nil {
+		return "", err
+	}
+	return out.Result, nil
+}
+
+type legacyStreamableToolMiddlewareAdapter struct {
+	mw compose.StreamableToolMiddleware
+}
+
+func (a *legacyStreamableToolMiddlewareAdapter) Name() string {
+	return "legacy-streamable-tool-middleware"
+}
+
+func (a *legacyStreamableToolMiddlewareAdapter) WrapStreamableToolCall(ctx context.Context, toolName string, arguments string, opts []tool.Option, next func(ctx context.Context, arguments string, opts []tool.Option) (*schema.StreamReader[string], error)) (*schema.StreamReader[string], error) {
+	endpoint := func(ctx context.Context, input *compose.ToolInput) (*compose.StreamToolOutput, error) {
+		result, err := next(ctx, input.Arguments, input.CallOptions)
+		if err != nil {
+			return nil, err
+		}
+		return &compose.StreamToolOutput{Result: result}, nil
+	}
+	wrapped := a.mw(endpoint)
+	out, err := wrapped(ctx, &compose.ToolInput{
+		Name:        toolName,
+		Arguments:   arguments,
+		CallOptions: opts,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return out.Result, nil
 }
 
 type ChatModelAgentConfig struct {
@@ -208,8 +318,8 @@ type ChatModelAgentConfig struct {
 	// Each handler can implement one or more capability interfaces:
 	//   - InstructionModifier: modify the agent's system instruction
 	//   - ToolsModifier: add, remove, or modify tools
-	//   - BeforeChatModelHandler: hook before chat model calls
-	//   - AfterChatModelHandler: hook after chat model calls
+	//   - MessageStatePreProcessor: process and persist messages before chat model calls
+	//   - MessageStatePostProcessor: process and persist messages after chat model calls
 	//   - InvokableToolCallInterceptor: intercept non-streaming tool calls
 	//   - StreamableToolCallInterceptor: intercept streaming tool calls
 	Handlers []Handler
@@ -241,10 +351,8 @@ type ChatModelAgent struct {
 
 	exit tool.BaseTool
 
-	beforeChatModels, afterChatModels []func(context.Context, *ChatModelAgentState) error
-
-	beforeChatModelHandlers []BeforeChatModelHandler
-	afterChatModelHandlers  []AfterChatModelHandler
+	messageStatePreProcessors  []MessageStatePreProcessor
+	messageStatePostProcessors []MessageStatePostProcessor
 
 	modelRetryConfig *ModelRetryConfig
 
@@ -273,34 +381,31 @@ func NewChatModelAgent(ctx context.Context, config *ChatModelAgentConfig) (*Chat
 		genInput = config.GenModelInput
 	}
 
-	beforeChatModels := make([]func(context.Context, *ChatModelAgentState) error, 0)
-	afterChatModels := make([]func(context.Context, *ChatModelAgentState) error, 0)
-	instruction := config.Instruction
-	tc := config.ToolsConfig
+	allHandlers := make([]Handler, 0, len(config.Middlewares)+len(config.Handlers))
 	for _, m := range config.Middlewares {
-		if m.AdditionalInstruction != "" {
-			if instruction != "" {
-				instruction += "\n"
-			}
-			instruction += m.AdditionalInstruction
-		}
-		tc.Tools = append(tc.Tools, m.AdditionalTools...)
-
-		if m.WrapToolCall.Invokable != nil || m.WrapToolCall.Streamable != nil {
-			tc.ToolCallMiddlewares = append(tc.ToolCallMiddlewares, m.WrapToolCall)
-		}
+		allHandlers = append(allHandlers, m)
 		if m.BeforeChatModel != nil {
-			beforeChatModels = append(beforeChatModels, m.BeforeChatModel)
+			allHandlers = append(allHandlers, &legacyBeforeChatModelAdapter{fn: m.BeforeChatModel})
 		}
 		if m.AfterChatModel != nil {
-			afterChatModels = append(afterChatModels, m.AfterChatModel)
+			allHandlers = append(allHandlers, &legacyAfterChatModelAdapter{fn: m.AfterChatModel})
+		}
+		if m.WrapToolCall.Invokable != nil {
+			allHandlers = append(allHandlers, &legacyInvokableToolMiddlewareAdapter{mw: m.WrapToolCall.Invokable})
+		}
+		if m.WrapToolCall.Streamable != nil {
+			allHandlers = append(allHandlers, &legacyStreamableToolMiddlewareAdapter{mw: m.WrapToolCall.Streamable})
 		}
 	}
+	allHandlers = append(allHandlers, config.Handlers...)
 
-	var beforeChatModelHandlers []BeforeChatModelHandler
-	var afterChatModelHandlers []AfterChatModelHandler
+	instruction := config.Instruction
+	tc := config.ToolsConfig
 
-	for _, h := range config.Handlers {
+	var messageStatePreProcessors []MessageStatePreProcessor
+	var messageStatePostProcessors []MessageStatePostProcessor
+
+	for _, h := range allHandlers {
 		if im, ok := h.(InstructionModifier); ok {
 			var err error
 			instruction, err = im.ModifyInstruction(ctx, instruction)
@@ -318,12 +423,12 @@ func NewChatModelAgent(ctx context.Context, config *ChatModelAgentConfig) (*Chat
 			tc.ReturnDirectly = htc.ReturnDirectly()
 		}
 
-		if bh, ok := h.(BeforeChatModelHandler); ok {
-			beforeChatModelHandlers = append(beforeChatModelHandlers, bh)
+		if pp, ok := h.(MessageStatePreProcessor); ok {
+			messageStatePreProcessors = append(messageStatePreProcessors, pp)
 		}
 
-		if ah, ok := h.(AfterChatModelHandler); ok {
-			afterChatModelHandlers = append(afterChatModelHandlers, ah)
+		if pp, ok := h.(MessageStatePostProcessor); ok {
+			messageStatePostProcessors = append(messageStatePostProcessors, pp)
 		}
 
 		if ii, ok := h.(InvokableToolCallInterceptor); ok {
@@ -340,20 +445,18 @@ func NewChatModelAgent(ctx context.Context, config *ChatModelAgentConfig) (*Chat
 	}
 
 	return &ChatModelAgent{
-		name:                    config.Name,
-		description:             config.Description,
-		instruction:             instruction,
-		model:                   config.Model,
-		toolsConfig:             tc,
-		genModelInput:           genInput,
-		exit:                    config.Exit,
-		outputKey:               config.OutputKey,
-		maxIterations:           config.MaxIterations,
-		beforeChatModels:        beforeChatModels,
-		afterChatModels:         afterChatModels,
-		beforeChatModelHandlers: beforeChatModelHandlers,
-		afterChatModelHandlers:  afterChatModelHandlers,
-		modelRetryConfig:        config.ModelRetryConfig,
+		name:                       config.Name,
+		description:                config.Description,
+		instruction:                instruction,
+		model:                      config.Model,
+		toolsConfig:                tc,
+		genModelInput:              genInput,
+		exit:                       config.Exit,
+		outputKey:                  config.OutputKey,
+		maxIterations:              config.MaxIterations,
+		messageStatePreProcessors:  messageStatePreProcessors,
+		messageStatePostProcessors: messageStatePostProcessors,
+		modelRetryConfig:           config.ModelRetryConfig,
 	}, nil
 }
 
@@ -823,40 +926,27 @@ func (a *ChatModelAgent) buildRunFunc(ctx context.Context) runFunc {
 					AppendChatModel(
 						chatModel,
 						compose.WithStatePreHandler(func(ctx context.Context, in []*schema.Message, state *ChatModelAgentState) ([]*schema.Message, error) {
-							state.Messages = in
-							for _, bc := range a.beforeChatModels {
-								err := bc(ctx, state)
-								if err != nil {
-									return nil, err
-								}
-							}
-							messages := state.Messages
-							for _, h := range a.beforeChatModelHandlers {
+							messages := in
+							for _, p := range a.messageStatePreProcessors {
 								var err error
-								messages, err = h.BeforeChatModel(ctx, messages)
+								messages, err = p.PreProcessMessageState(ctx, messages)
 								if err != nil {
 									return nil, err
 								}
 							}
+							state.Messages = messages
 							return messages, nil
 						}),
 						compose.WithStatePostHandler(func(ctx context.Context, in *schema.Message, state *ChatModelAgentState) (*schema.Message, error) {
-							state.Messages = append(state.Messages, in)
-							for _, ac := range a.afterChatModels {
-								err := ac(ctx, state)
-								if err != nil {
-									return nil, err
-								}
-							}
-							messages := state.Messages
-							for _, h := range a.afterChatModelHandlers {
+							messages := append(state.Messages, in)
+							for _, p := range a.messageStatePostProcessors {
 								var err error
-								messages, err = h.AfterChatModel(ctx, messages)
+								messages, err = p.PostProcessMessageState(ctx, messages)
 								if err != nil {
 									return nil, err
 								}
 							}
-							_ = messages
+							state.Messages = messages
 							return in, nil
 						}),
 					).
@@ -900,16 +990,14 @@ func (a *ChatModelAgent) buildRunFunc(ctx context.Context) runFunc {
 
 		// react
 		conf := &reactConfig{
-			model:                   a.model,
-			toolsConfig:             &toolsNodeConf,
-			toolsReturnDirectly:     returnDirectly,
-			agentName:               a.name,
-			maxIterations:           a.maxIterations,
-			beforeChatModel:         a.beforeChatModels,
-			afterChatModel:          a.afterChatModels,
-			beforeChatModelHandlers: a.beforeChatModelHandlers,
-			afterChatModelHandlers:  a.afterChatModelHandlers,
-			modelRetryConfig:        a.modelRetryConfig,
+			model:                      a.model,
+			toolsConfig:                &toolsNodeConf,
+			toolsReturnDirectly:        returnDirectly,
+			agentName:                  a.name,
+			maxIterations:              a.maxIterations,
+			messageStatePreProcessors:  a.messageStatePreProcessors,
+			messageStatePostProcessors: a.messageStatePostProcessors,
+			modelRetryConfig:           a.modelRetryConfig,
 		}
 
 		g, err := newReact(ctx, conf)

@@ -188,10 +188,8 @@ type reactConfig struct {
 
 	maxIterations int
 
-	beforeChatModel, afterChatModel []func(context.Context, *ChatModelAgentState) error
-
-	beforeChatModelHandlers []BeforeChatModelHandler
-	afterChatModelHandlers  []AfterChatModelHandler
+	messageStatePreProcessors  []MessageStatePreProcessor
+	messageStatePostProcessors []MessageStatePostProcessor
 
 	modelRetryConfig *ModelRetryConfig
 }
@@ -282,18 +280,9 @@ func newReact(ctx context.Context, config *reactConfig) (reactGraph, error) {
 
 		messages := append(st.Messages, input...)
 
-		s := &ChatModelAgentState{Messages: messages}
-		for _, b := range config.beforeChatModel {
-			err = b(ctx, s)
-			if err != nil {
-				return nil, err
-			}
-		}
-		messages = s.Messages
-
-		for _, h := range config.beforeChatModelHandlers {
+		for _, p := range config.messageStatePreProcessors {
 			var err error
-			messages, err = h.BeforeChatModel(ctx, messages)
+			messages, err = p.PreProcessMessageState(ctx, messages)
 			if err != nil {
 				return nil, err
 			}
@@ -305,18 +294,9 @@ func newReact(ctx context.Context, config *reactConfig) (reactGraph, error) {
 	modelPostHandle := func(ctx context.Context, input Message, st *State) (Message, error) {
 		messages := append(st.Messages, input)
 
-		s := &ChatModelAgentState{Messages: messages}
-		for _, a := range config.afterChatModel {
-			err = a(ctx, s)
-			if err != nil {
-				return nil, err
-			}
-		}
-		messages = s.Messages
-
-		for _, h := range config.afterChatModelHandlers {
+		for _, p := range config.messageStatePostProcessors {
 			var err error
-			messages, err = h.AfterChatModel(ctx, messages)
+			messages, err = p.PostProcessMessageState(ctx, messages)
 			if err != nil {
 				return nil, err
 			}

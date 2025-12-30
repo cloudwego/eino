@@ -36,8 +36,8 @@ import (
 // A Handler can implement any combination of capability interfaces:
 //   - InstructionModifier: modify the agent's system instruction
 //   - ToolsModifier: add, remove, or modify tools
-//   - BeforeChatModelHandler: hook before chat model calls
-//   - AfterChatModelHandler: hook after chat model calls
+//   - MessageStatePreProcessor: process and persist messages before chat model calls
+//   - MessageStatePostProcessor: process and persist messages after chat model calls
 //   - InvokableToolCallInterceptor: intercept non-streaming tool calls
 //   - StreamableToolCallInterceptor: intercept streaming tool calls
 type Handler interface {
@@ -61,29 +61,27 @@ type ToolsModifier interface {
 	ModifyTools(ctx context.Context, config *HandlerToolsConfig) error
 }
 
-// BeforeChatModelHandler is called before each chat model invocation.
+// MessageStatePreProcessor processes and persists message state before each chat model invocation.
 // Unlike AgentMiddleware.BeforeChatModel which mutates state via pointer,
 // this interface uses a functional style: receive messages, return (possibly modified) messages.
-type BeforeChatModelHandler interface {
+//
+// The returned messages are persisted to the agent's internal state and will be visible
+// to subsequent iterations of the agent loop.
+type MessageStatePreProcessor interface {
 	Handler
-	BeforeChatModel(ctx context.Context, messages []Message) ([]Message, error)
+	PreProcessMessageState(ctx context.Context, messages []Message) ([]Message, error)
 }
 
-// AfterChatModelHandler is called after each chat model invocation.
+// MessageStatePostProcessor processes and persists message state after each chat model invocation.
 // Unlike AgentMiddleware.AfterChatModel which mutates state via pointer,
 // this interface uses a functional style: receive messages, return (possibly modified) messages.
-type AfterChatModelHandler interface {
+//
+// The returned messages are persisted to the agent's internal state and will be visible
+// to subsequent iterations of the agent loop.
+type MessageStatePostProcessor interface {
 	Handler
-	AfterChatModel(ctx context.Context, messages []Message) ([]Message, error)
+	PostProcessMessageState(ctx context.Context, messages []Message) ([]Message, error)
 }
-
-// InvokableToolCallNext is the function signature for calling the next handler
-// or the actual tool in an invokable tool call chain.
-type InvokableToolCallNext = func(ctx context.Context, arguments string, opts []tool.Option) (string, error)
-
-// StreamableToolCallNext is the function signature for calling the next handler
-// or the actual tool in a streamable tool call chain.
-type StreamableToolCallNext = func(ctx context.Context, arguments string, opts []tool.Option) (*schema.StreamReader[string], error)
 
 // InvokableToolCallInterceptor intercepts non-streaming tool calls.
 // This provides a simpler API than compose.ToolMiddleware.
@@ -101,7 +99,7 @@ type InvokableToolCallInterceptor interface {
 		toolName string,
 		arguments string,
 		opts []tool.Option,
-		next InvokableToolCallNext,
+		next func(ctx context.Context, arguments string, opts []tool.Option) (string, error),
 	) (string, error)
 }
 
@@ -120,6 +118,6 @@ type StreamableToolCallInterceptor interface {
 		toolName string,
 		arguments string,
 		opts []tool.Option,
-		next StreamableToolCallNext,
+		next func(ctx context.Context, arguments string, opts []tool.Option) (*schema.StreamReader[string], error),
 	) (*schema.StreamReader[string], error)
 }
