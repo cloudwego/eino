@@ -42,3 +42,4 @@ output/*
 # Trae files
 .trae
 
+.DS_Store

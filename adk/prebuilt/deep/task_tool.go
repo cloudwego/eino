@@ -157,7 +157,7 @@ func (t *taskTool) InvokableRun(ctx context.Context, argumentsInJSON string, opt
 		return "", err
 	}
 
-	return a.InvokableRun(ctx, params)
+	return a.InvokableRun(ctx, params, opts...)
 }
 
 func defaultTaskToolDescription(ctx context.Context, subAgents []adk.Agent) (string, error) {
