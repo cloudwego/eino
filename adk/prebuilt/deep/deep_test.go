@@ -93,6 +93,61 @@ func TestDeepSubAgentSharesSessionValues(t *testing.T) {
 	assert.Equal(t, "parent_val", spy.seenParentValue)
 }
 
+func TestDeepSubAgentFollowsStreamingMode(t *testing.T) {
+	ctx := context.Background()
+	spy := &spyStreamingSubAgent{}
+
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	cm := mockModel.NewMockToolCallingChatModel(ctrl)
+	cm.EXPECT().WithTools(gomock.Any()).Return(cm, nil).AnyTimes()
+
+	subName := spy.Name(ctx)
+	cm.EXPECT().Stream(gomock.Any(), gomock.Any(), gomock.Any()).
+		Return(schema.StreamReaderFromArray([]*schema.Message{
+			schema.AssistantMessage("", []schema.ToolCall{
+				{
+					ID:   "id-1",
+					Type: "function",
+					Function: schema.FunctionCall{
+						Name:      taskToolName,
+						Arguments: fmt.Sprintf(`{"subagent_type":"%s","description":"from_parent"}`, subName),
+					},
+				},
+			}),
+		}), nil).
+		Times(1)
+	cm.EXPECT().Stream(gomock.Any(), gomock.Any(), gomock.Any()).
+		Return(schema.StreamReaderFromArray([]*schema.Message{
+			schema.AssistantMessage("done", nil),
+		}), nil).
+		Times(1)
+
+	agent, err := New(ctx, &Config{
+		Name:                   "deep",
+		Description:            "deep agent",
+		ChatModel:              cm,
+		Instruction:            "you are deep agent",
+		SubAgents:              []adk.Agent{spy},
+		ToolsConfig:            adk.ToolsConfig{},
+		MaxIteration:           2,
+		WithoutWriteTodos:      true,
+		WithoutGeneralSubAgent: true,
+	})
+	assert.NoError(t, err)
+
+	r := adk.NewRunner(ctx, adk.RunnerConfig{Agent: agent, EnableStreaming: true})
+	it := r.Run(ctx, []adk.Message{schema.UserMessage("hi")})
+	for {
+		if _, ok := it.Next(); !ok {
+			break
+		}
+	}
+
+	assert.True(t, spy.seenEnableStreaming)
+}
+
 type spySubAgent struct {
 	seenParentValue any
 }
@@ -101,6 +156,22 @@ func (s *spySubAgent) Name(context.Context) string        { return "spy-subagent
 func (s *spySubAgent) Description(context.Context) string { return "spy" }
 func (s *spySubAgent) Run(ctx context.Context, _ *adk.AgentInput, _ ...adk.AgentRunOption) *adk.AsyncIterator[*adk.AgentEvent] {
 	s.seenParentValue, _ = adk.GetSessionValue(ctx, "parent_key")
+	it, gen := adk.NewAsyncIteratorPair[*adk.AgentEvent]()
+	gen.Send(adk.EventFromMessage(schema.AssistantMessage("ok", nil), nil, schema.Assistant, ""))
+	gen.Close()
+	return it
+}
+
+type spyStreamingSubAgent struct {
+	seenEnableStreaming bool
+}
+
+func (s *spyStreamingSubAgent) Name(context.Context) string        { return "spy-streaming-subagent" }
+func (s *spyStreamingSubAgent) Description(context.Context) string { return "spy" }
+func (s *spyStreamingSubAgent) Run(ctx context.Context, input *adk.AgentInput, _ ...adk.AgentRunOption) *adk.AsyncIterator[*adk.AgentEvent] {
+	if input != nil {
+		s.seenEnableStreaming = input.EnableStreaming
+	}
 	it, gen := adk.NewAsyncIteratorPair[*adk.AgentEvent]()
 	gen.Send(adk.EventFromMessage(schema.AssistantMessage("ok", nil), nil, schema.Assistant, ""))
 	gen.Close()

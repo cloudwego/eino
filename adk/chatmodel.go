@@ -854,6 +854,9 @@ func (a *ChatModelAgent) buildRunFunc(ctx context.Context) runFunc {
 			if a.toolsConfig.EmitInternalEvents {
 				runOpts = append(runOpts, compose.WithToolsNodeOption(compose.WithToolOption(withAgentToolEventGenerator(generator))))
 			}
+			if input.EnableStreaming {
+				runOpts = append(runOpts, compose.WithToolsNodeOption(compose.WithToolOption(withAgentToolEnableStreaming(true))))
+			}
 
 			var msg Message
 			var msgStream MessageStream
