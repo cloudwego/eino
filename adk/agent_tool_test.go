@@ -18,6 +18,7 @@ package adk
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"sync"
 	"testing"
@@ -840,6 +841,20 @@ func TestAgentTool_InterruptWithoutCheckpoint(t *testing.T) {
 	if !strings.Contains(err.Error(), "interrupt occurred but checkpoint data is missing") {
 		t.Fatalf("unexpected error: %v", err)
 	}
+}
+
+func compositeInterruptFromLast(ctx context.Context, ms *bridgeStore, lastEvent *AgentEvent) error {
+	if lastEvent == nil || lastEvent.Action == nil || lastEvent.Action.Interrupted == nil {
+		return nil
+	}
+	data, existed, err := ms.Get(ctx, bridgeCheckpointID)
+	if err != nil {
+		return fmt.Errorf("failed to get interrupt info: %w", err)
+	}
+	if !existed {
+		return fmt.Errorf("interrupt occurred but checkpoint data is missing")
+	}
+	return compose.CompositeInterrupt(ctx, "agent tool interrupt", data, lastEvent.Action.internalInterrupted)
 }
 
 func TestAgentTool_InvokableRun_FinalOnly(t *testing.T) {
