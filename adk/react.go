@@ -190,6 +190,9 @@ type reactConfig struct {
 
 	beforeChatModel, afterChatModel []func(context.Context, *ChatModelAgentState) error
 
+	beforeChatModelHandlers []BeforeChatModelHandler
+	afterChatModelHandlers  []AfterChatModelHandler
+
 	modelRetryConfig *ModelRetryConfig
 }
 
@@ -277,26 +280,49 @@ func newReact(ctx context.Context, config *reactConfig) (reactGraph, error) {
 		}
 		st.RemainingIterations--
 
-		s := &ChatModelAgentState{Messages: append(st.Messages, input...)}
+		messages := append(st.Messages, input...)
+
+		s := &ChatModelAgentState{Messages: messages}
 		for _, b := range config.beforeChatModel {
 			err = b(ctx, s)
 			if err != nil {
 				return nil, err
 			}
 		}
-		st.Messages = s.Messages
+		messages = s.Messages
 
+		for _, h := range config.beforeChatModelHandlers {
+			var err error
+			messages, err = h.BeforeChatModel(ctx, messages)
+			if err != nil {
+				return nil, err
+			}
+		}
+
+		st.Messages = messages
 		return st.Messages, nil
 	}
 	modelPostHandle := func(ctx context.Context, input Message, st *State) (Message, error) {
-		s := &ChatModelAgentState{Messages: append(st.Messages, input)}
+		messages := append(st.Messages, input)
+
+		s := &ChatModelAgentState{Messages: messages}
 		for _, a := range config.afterChatModel {
 			err = a(ctx, s)
 			if err != nil {
 				return nil, err
 			}
 		}
-		st.Messages = s.Messages
+		messages = s.Messages
+
+		for _, h := range config.afterChatModelHandlers {
+			var err error
+			messages, err = h.AfterChatModel(ctx, messages)
+			if err != nil {
+				return nil, err
+			}
+		}
+
+		st.Messages = messages
 		return input, nil
 	}
 	_ = g.AddChatModelNode(chatModel_, chatModel,

@@ -24,7 +24,6 @@ import (
 	"fmt"
 	"math"
 	"runtime/debug"
-	"strings"
 	"sync"
 	"sync/atomic"
 
@@ -204,6 +203,17 @@ type ChatModelAgentConfig struct {
 	// Middlewares configures agent middleware for extending functionality.
 	Middlewares []AgentMiddleware
 
+	// Handlers configures the new interface-based handlers.
+	// Handlers are processed after Middlewares, in registration order.
+	// Each handler can implement one or more capability interfaces:
+	//   - InstructionModifier: modify the agent's system instruction
+	//   - ToolsModifier: add, remove, or modify tools
+	//   - BeforeChatModelHandler: hook before chat model calls
+	//   - AfterChatModelHandler: hook after chat model calls
+	//   - InvokableToolCallInterceptor: intercept non-streaming tool calls
+	//   - StreamableToolCallInterceptor: intercept streaming tool calls
+	Handlers []Handler
+
 	// ModelRetryConfig configures retry behavior for the ChatModel.
 	// When set, the agent will automatically retry failed ChatModel calls
 	// based on the configured policy.
@@ -233,6 +243,9 @@ type ChatModelAgent struct {
 
 	beforeChatModels, afterChatModels []func(context.Context, *ChatModelAgentState) error
 
+	beforeChatModelHandlers []BeforeChatModelHandler
+	afterChatModelHandlers  []AfterChatModelHandler
+
 	modelRetryConfig *ModelRetryConfig
 
 	// runner
@@ -244,7 +257,7 @@ type ChatModelAgent struct {
 type runFunc func(ctx context.Context, input *AgentInput, generator *AsyncGenerator[*AgentEvent], store *bridgeStore, opts ...compose.Option)
 
 // NewChatModelAgent constructs a chat model-backed agent with the provided config.
-func NewChatModelAgent(_ context.Context, config *ChatModelAgentConfig) (*ChatModelAgent, error) {
+func NewChatModelAgent(ctx context.Context, config *ChatModelAgentConfig) (*ChatModelAgent, error) {
 	if config.Name == "" {
 		return nil, errors.New("agent 'Name' is required")
 	}
@@ -262,12 +275,15 @@ func NewChatModelAgent(_ context.Context, config *ChatModelAgentConfig) (*ChatMo
 
 	beforeChatModels := make([]func(context.Context, *ChatModelAgentState) error, 0)
 	afterChatModels := make([]func(context.Context, *ChatModelAgentState) error, 0)
-	sb := &strings.Builder{}
-	sb.WriteString(config.Instruction)
+	instruction := config.Instruction
 	tc := config.ToolsConfig
 	for _, m := range config.Middlewares {
-		sb.WriteString("\n")
-		sb.WriteString(m.AdditionalInstruction)
+		if m.AdditionalInstruction != "" {
+			if instruction != "" {
+				instruction += "\n"
+			}
+			instruction += m.AdditionalInstruction
+		}
 		tc.Tools = append(tc.Tools, m.AdditionalTools...)
 
 		if m.WrapToolCall.Invokable != nil || m.WrapToolCall.Streamable != nil {
@@ -281,19 +297,63 @@ func NewChatModelAgent(_ context.Context, config *ChatModelAgentConfig) (*ChatMo
 		}
 	}
 
+	var beforeChatModelHandlers []BeforeChatModelHandler
+	var afterChatModelHandlers []AfterChatModelHandler
+
+	for _, h := range config.Handlers {
+		if im, ok := h.(InstructionModifier); ok {
+			var err error
+			instruction, err = im.ModifyInstruction(ctx, instruction)
+			if err != nil {
+				return nil, fmt.Errorf("handler %q ModifyInstruction failed: %w", h.Name(), err)
+			}
+		}
+
+		if tm, ok := h.(ToolsModifier); ok {
+			htc := NewHandlerToolsConfig(tc.Tools, tc.ReturnDirectly)
+			if err := tm.ModifyTools(ctx, htc); err != nil {
+				return nil, fmt.Errorf("handler %q ModifyTools failed: %w", h.Name(), err)
+			}
+			tc.Tools = htc.Tools()
+			tc.ReturnDirectly = htc.ReturnDirectly()
+		}
+
+		if bh, ok := h.(BeforeChatModelHandler); ok {
+			beforeChatModelHandlers = append(beforeChatModelHandlers, bh)
+		}
+
+		if ah, ok := h.(AfterChatModelHandler); ok {
+			afterChatModelHandlers = append(afterChatModelHandlers, ah)
+		}
+
+		if ii, ok := h.(InvokableToolCallInterceptor); ok {
+			tc.ToolCallMiddlewares = append(tc.ToolCallMiddlewares, compose.ToolMiddleware{
+				Invokable: convertInvokableInterceptor(ii),
+			})
+		}
+
+		if si, ok := h.(StreamableToolCallInterceptor); ok {
+			tc.ToolCallMiddlewares = append(tc.ToolCallMiddlewares, compose.ToolMiddleware{
+				Streamable: convertStreamableInterceptor(si),
+			})
+		}
+	}
+
 	return &ChatModelAgent{
-		name:             config.Name,
-		description:      config.Description,
-		instruction:      sb.String(),
-		model:            config.Model,
-		toolsConfig:      tc,
-		genModelInput:    genInput,
-		exit:             config.Exit,
-		outputKey:        config.OutputKey,
-		maxIterations:    config.MaxIterations,
-		beforeChatModels: beforeChatModels,
-		afterChatModels:  afterChatModels,
-		modelRetryConfig: config.ModelRetryConfig,
+		name:                    config.Name,
+		description:             config.Description,
+		instruction:             instruction,
+		model:                   config.Model,
+		toolsConfig:             tc,
+		genModelInput:           genInput,
+		exit:                    config.Exit,
+		outputKey:               config.OutputKey,
+		maxIterations:           config.MaxIterations,
+		beforeChatModels:        beforeChatModels,
+		afterChatModels:         afterChatModels,
+		beforeChatModelHandlers: beforeChatModelHandlers,
+		afterChatModelHandlers:  afterChatModelHandlers,
+		modelRetryConfig:        config.ModelRetryConfig,
 	}, nil
 }
 
@@ -770,7 +830,15 @@ func (a *ChatModelAgent) buildRunFunc(ctx context.Context) runFunc {
 									return nil, err
 								}
 							}
-							return state.Messages, nil
+							messages := state.Messages
+							for _, h := range a.beforeChatModelHandlers {
+								var err error
+								messages, err = h.BeforeChatModel(ctx, messages)
+								if err != nil {
+									return nil, err
+								}
+							}
+							return messages, nil
 						}),
 						compose.WithStatePostHandler(func(ctx context.Context, in *schema.Message, state *ChatModelAgentState) (*schema.Message, error) {
 							state.Messages = append(state.Messages, in)
@@ -780,6 +848,15 @@ func (a *ChatModelAgent) buildRunFunc(ctx context.Context) runFunc {
 									return nil, err
 								}
 							}
+							messages := state.Messages
+							for _, h := range a.afterChatModelHandlers {
+								var err error
+								messages, err = h.AfterChatModel(ctx, messages)
+								if err != nil {
+									return nil, err
+								}
+							}
+							_ = messages
 							return in, nil
 						}),
 					).
@@ -823,14 +900,16 @@ func (a *ChatModelAgent) buildRunFunc(ctx context.Context) runFunc {
 
 		// react
 		conf := &reactConfig{
-			model:               a.model,
-			toolsConfig:         &toolsNodeConf,
-			toolsReturnDirectly: returnDirectly,
-			agentName:           a.name,
-			maxIterations:       a.maxIterations,
-			beforeChatModel:     a.beforeChatModels,
-			afterChatModel:      a.afterChatModels,
-			modelRetryConfig:    a.modelRetryConfig,
+			model:                   a.model,
+			toolsConfig:             &toolsNodeConf,
+			toolsReturnDirectly:     returnDirectly,
+			agentName:               a.name,
+			maxIterations:           a.maxIterations,
+			beforeChatModel:         a.beforeChatModels,
+			afterChatModel:          a.afterChatModels,
+			beforeChatModelHandlers: a.beforeChatModelHandlers,
+			afterChatModelHandlers:  a.afterChatModelHandlers,
+			modelRetryConfig:        a.modelRetryConfig,
 		}
 
 		g, err := newReact(ctx, conf)
@@ -1022,4 +1101,52 @@ func (g *gobSerializer) Marshal(v any) ([]byte, error) {
 func (g *gobSerializer) Unmarshal(data []byte, v any) error {
 	buf := bytes.NewBuffer(data)
 	return gob.NewDecoder(buf).Decode(v)
+}
+
+func convertInvokableInterceptor(interceptor InvokableToolCallInterceptor) compose.InvokableToolMiddleware {
+	return func(next compose.InvokableToolEndpoint) compose.InvokableToolEndpoint {
+		return func(ctx context.Context, input *compose.ToolInput) (*compose.ToolOutput, error) {
+			nextFn := func(ctx context.Context, arguments string, opts []tool.Option) (string, error) {
+				out, err := next(ctx, &compose.ToolInput{
+					Name:        input.Name,
+					Arguments:   arguments,
+					CallID:      input.CallID,
+					CallOptions: opts,
+				})
+				if err != nil {
+					return "", err
+				}
+				return out.Result, nil
+			}
+			result, err := interceptor.WrapInvokableToolCall(ctx, input.Name, input.Arguments, input.CallOptions, nextFn)
+			if err != nil {
+				return nil, err
+			}
+			return &compose.ToolOutput{Result: result}, nil
+		}
+	}
+}
+
+func convertStreamableInterceptor(interceptor StreamableToolCallInterceptor) compose.StreamableToolMiddleware {
+	return func(next compose.StreamableToolEndpoint) compose.StreamableToolEndpoint {
+		return func(ctx context.Context, input *compose.ToolInput) (*compose.StreamToolOutput, error) {
+			nextFn := func(ctx context.Context, arguments string, opts []tool.Option) (*schema.StreamReader[string], error) {
+				out, err := next(ctx, &compose.ToolInput{
+					Name:        input.Name,
+					Arguments:   arguments,
+					CallID:      input.CallID,
+					CallOptions: opts,
+				})
+				if err != nil {
+					return nil, err
+				}
+				return out.Result, nil
+			}
+			result, err := interceptor.WrapStreamableToolCall(ctx, input.Name, input.Arguments, input.CallOptions, nextFn)
+			if err != nil {
+				return nil, err
+			}
+			return &compose.StreamToolOutput{Result: result}, nil
+		}
+	}
 }
