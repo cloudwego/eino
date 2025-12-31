@@ -1,5 +1,5 @@
 /*
- * Copyright 2024 CloudWeGo Authors
+ * Copyright 2025 CloudWeGo Authors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-package prompt
+package agentic
 
 import (
 	"context"
@@ -22,13 +22,8 @@ import (
 	"github.com/cloudwego/eino/schema"
 )
 
-var _ ChatTemplate = &DefaultChatTemplate{}
-var _ AgenticChatTemplate = &DefaultAgenticChatTemplate{}
-
-type ChatTemplate interface {
-	Format(ctx context.Context, vs map[string]any, opts ...Option) ([]*schema.Message, error)
-}
-
-type AgenticChatTemplate interface {
-	Format(ctx context.Context, vs map[string]any, opts ...Option) ([]*schema.AgenticMessage, error)
+type Model interface {
+	Generate(ctx context.Context, input []*schema.AgenticMessage, opts ...Option) (*schema.AgenticMessage, error)
+	Stream(ctx context.Context, input []*schema.AgenticMessage, opts ...Option) (*schema.StreamReader[*schema.AgenticMessage], error)
+	WithTools(tools []*schema.ToolInfo) (Model, error)
 }
