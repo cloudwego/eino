@@ -765,7 +765,10 @@ func (a *ChatModelAgent) buildRunFunc(ctx context.Context) runFunc {
 									return nil, err
 								}
 							}
-							return in, nil
+							if len(state.Messages) == 0 {
+								return nil, errors.New("messages is empty after AfterChatModel")
+							}
+							return state.Messages[len(state.Messages)-1], nil
 						}),
 					).
 					Compile(ctx, compose.WithGraphName(a.name),
