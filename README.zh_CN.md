@@ -198,7 +198,7 @@ compiledGraph.Invoke(ctx, input, WithCallbacks(handler).DesignateNode("node_1"))
 ## 强大的编排 (Graph/Chain/Workflow)
 
 - 数据从 Retriever / Document Loader / ChatTemplate 流向 ChatModel，接着流向 Tool ，并被解析为最终答案。这种通过多个组件的有向、可控的数据流，可以通过**图编排**来实现。
-- 组件实例是图的**节点（Node）**，而**边（Edge）**则是数据流通道。
+- 组件实例是图的 **节点（Node）** ，而 **边（Edge）** 则是数据流通道。
 - 图编排功能强大且足够灵活，能够实现复杂的业务逻辑：
     - **类型检查、流处理、并发管理、切面注入和选项分配**都由框架处理。
     - 在运行时进行**分支（Branch）**执行、读写全局**状态（State）**，或者使用工作流进行字段级别的数据映射。
