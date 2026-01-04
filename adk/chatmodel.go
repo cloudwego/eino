@@ -890,7 +890,7 @@ func (a *ChatModelAgent) Run(ctx context.Context, input *AgentInput, opts ...Age
 		}()
 
 		store := newBridgeStore()
-		
+
 		run(ctx, agentContext.AgentInput, generator, store, ch, co...)
 	}()
 
