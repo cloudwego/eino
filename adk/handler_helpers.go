@@ -20,7 +20,6 @@ import (
 	"context"
 
 	"github.com/cloudwego/eino/components/tool"
-	"github.com/cloudwego/eino/compose"
 )
 
 // WithInstruction creates a handler that appends instruction text.
@@ -139,17 +138,16 @@ func (h *afterModelRewriteHistoryHandler) AfterModelRewriteHistory(ctx context.C
 	return h.fn(ctx, messages)
 }
 
-// WithToolMiddleware creates a handler that wraps tool calls using compose.ToolMiddleware.
-// This is the recommended way to wrap both invokable and streamable tool calls.
-func WithToolMiddleware(mw compose.ToolMiddleware) AgentHandler {
-	return &toolMiddlewareHandler{mw: mw}
+// WithToolCallHandler creates a handler that wraps tool calls.
+func WithToolCallHandler(handler ToolCallHandler) AgentHandler {
+	return &toolCallHandlerWrapper{handler: handler}
 }
 
-type toolMiddlewareHandler struct {
+type toolCallHandlerWrapper struct {
 	BaseAgentHandler
-	mw compose.ToolMiddleware
+	handler ToolCallHandler
 }
 
-func (h *toolMiddlewareHandler) GetToolMiddleware() compose.ToolMiddleware {
-	return h.mw
+func (h *toolCallHandlerWrapper) GetToolCallHandler() ToolCallHandler {
+	return h.handler
 }

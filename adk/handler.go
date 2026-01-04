@@ -22,6 +22,49 @@ import (
 	"github.com/cloudwego/eino/compose"
 )
 
+// Type aliases for tool call types.
+// These provide clearer names while maintaining compatibility with compose package.
+type (
+	// ToolCall contains information about a tool call.
+	// When modifying in handlers:
+	//   - Name: should not be modified
+	//   - CallID: should not be modified
+	//   - Arguments: may be modified
+	//   - CallOptions: may be modified
+	ToolCall = compose.ToolInput
+
+	// ToolResult contains the result of a non-streaming tool call.
+	ToolResult = compose.ToolOutput
+
+	// StreamToolResult contains the result of a streaming tool call.
+	StreamToolResult = compose.StreamToolOutput
+)
+
+// ToolCallHandler wraps tool call execution.
+// Implementations should call next() to execute the actual tool,
+// and can modify the call or result as needed.
+type ToolCallHandler interface {
+	// HandleInvoke wraps non-streaming tool calls.
+	// Call next(ctx, call) to execute the tool.
+	HandleInvoke(ctx context.Context, call *ToolCall, next func(context.Context, *ToolCall) (*ToolResult, error)) (*ToolResult, error)
+
+	// HandleStream wraps streaming tool calls.
+	// Call next(ctx, call) to execute the tool.
+	HandleStream(ctx context.Context, call *ToolCall, next func(context.Context, *ToolCall) (*StreamToolResult, error)) (*StreamToolResult, error)
+}
+
+// BaseToolCallHandler provides pass-through implementations for ToolCallHandler.
+// Embed this struct in custom handlers to only override the methods you need.
+type BaseToolCallHandler struct{}
+
+func (h BaseToolCallHandler) HandleInvoke(ctx context.Context, call *ToolCall, next func(context.Context, *ToolCall) (*ToolResult, error)) (*ToolResult, error) {
+	return next(ctx, call)
+}
+
+func (h BaseToolCallHandler) HandleStream(ctx context.Context, call *ToolCall, next func(context.Context, *ToolCall) (*StreamToolResult, error)) (*StreamToolResult, error) {
+	return next(ctx, call)
+}
+
 // AgentHandler defines the interface for customizing agent behavior.
 // Implementations can modify agent configuration, rewrite message history,
 // and wrap tool calls with custom logic.
@@ -41,18 +84,9 @@ type AgentHandler interface {
 	// The returned messages are persisted to the agent's internal state.
 	AfterModelRewriteHistory(ctx context.Context, messages []Message) (context.Context, []Message, error)
 
-	// GetToolMiddleware returns a ToolMiddleware for wrapping tool calls.
-	// Return an empty ToolMiddleware{} if no tool wrapping is needed.
-	//
-	// This follows the same pattern as compose.ToolMiddleware, allowing
-	// handlers to wrap both invokable and streamable tool calls.
-	//
-	// The middleware receives a compose.ToolInput which contains:
-	//   - Name: tool name (should not be modified)
-	//   - CallID: unique call identifier (should not be modified)
-	//   - Arguments: tool arguments (may be modified)
-	//   - CallOptions: tool options (may be modified)
-	GetToolMiddleware() compose.ToolMiddleware
+	// GetToolCallHandler returns a handler for wrapping tool calls.
+	// Return nil if no tool call wrapping is needed.
+	GetToolCallHandler() ToolCallHandler
 }
 
 // BaseAgentHandler provides default no-op implementations for AgentHandler.
@@ -71,6 +105,6 @@ func (b BaseAgentHandler) AfterModelRewriteHistory(ctx context.Context, messages
 	return ctx, messages, nil
 }
 
-func (b BaseAgentHandler) GetToolMiddleware() compose.ToolMiddleware {
-	return compose.ToolMiddleware{}
+func (b BaseAgentHandler) GetToolCallHandler() ToolCallHandler {
+	return nil
 }
