@@ -200,8 +200,37 @@ func (m AgentMiddleware) AfterModelRewriteHistory(ctx context.Context, messages 
 	return ctx, state.Messages, nil
 }
 
-func (m AgentMiddleware) GetToolMiddleware() compose.ToolMiddleware {
-	return m.WrapToolCall
+func (m AgentMiddleware) GetToolCallHandler() ToolCallHandler {
+	if m.WrapToolCall.Invokable == nil && m.WrapToolCall.Streamable == nil {
+		return nil
+	}
+	return &legacyToolMiddlewareAdapter{mw: m.WrapToolCall}
+}
+
+type legacyToolMiddlewareAdapter struct {
+	mw compose.ToolMiddleware
+}
+
+func (a *legacyToolMiddlewareAdapter) HandleInvoke(ctx context.Context, call *ToolCall, next func(context.Context, *ToolCall) (*ToolResult, error)) (*ToolResult, error) {
+	if a.mw.Invokable == nil {
+		return next(ctx, call)
+	}
+	endpoint := func(ctx context.Context, input *compose.ToolInput) (*compose.ToolOutput, error) {
+		return next(ctx, input)
+	}
+	wrapped := a.mw.Invokable(endpoint)
+	return wrapped(ctx, call)
+}
+
+func (a *legacyToolMiddlewareAdapter) HandleStream(ctx context.Context, call *ToolCall, next func(context.Context, *ToolCall) (*StreamToolResult, error)) (*StreamToolResult, error) {
+	if a.mw.Streamable == nil {
+		return next(ctx, call)
+	}
+	endpoint := func(ctx context.Context, input *compose.ToolInput) (*compose.StreamToolOutput, error) {
+		return next(ctx, input)
+	}
+	wrapped := a.mw.Streamable(endpoint)
+	return wrapped(ctx, call)
 }
 
 type ChatModelAgentConfig struct {
@@ -335,10 +364,29 @@ func NewChatModelAgent(ctx context.Context, config *ChatModelAgentConfig) (*Chat
 func collectToolMiddlewares(handlers []AgentHandler) []compose.ToolMiddleware {
 	var middlewares []compose.ToolMiddleware
 	for _, h := range handlers {
-		mw := h.GetToolMiddleware()
-		if mw.Invokable != nil || mw.Streamable != nil {
-			middlewares = append(middlewares, mw)
+		handler := h.GetToolCallHandler()
+		if handler == nil {
+			continue
 		}
+		mw := compose.ToolMiddleware{
+			Invokable: func(next compose.InvokableToolEndpoint) compose.InvokableToolEndpoint {
+				return func(ctx context.Context, input *compose.ToolInput) (*compose.ToolOutput, error) {
+					nextFn := func(ctx context.Context, call *ToolCall) (*ToolResult, error) {
+						return next(ctx, call)
+					}
+					return handler.HandleInvoke(ctx, input, nextFn)
+				}
+			},
+			Streamable: func(next compose.StreamableToolEndpoint) compose.StreamableToolEndpoint {
+				return func(ctx context.Context, input *compose.ToolInput) (*compose.StreamToolOutput, error) {
+					nextFn := func(ctx context.Context, call *ToolCall) (*StreamToolResult, error) {
+						return next(ctx, call)
+					}
+					return handler.HandleStream(ctx, input, nextFn)
+				}
+			},
+		}
+		middlewares = append(middlewares, mw)
 	}
 	return middlewares
 }

@@ -31,6 +31,39 @@ import (
 	"github.com/cloudwego/eino/schema"
 )
 
+type testToolCallHandler struct {
+	BaseToolCallHandler
+	name           string
+	beforeFn       func()
+	afterFn        func()
+	modifyResultFn func(string) string
+}
+
+func (h *testToolCallHandler) HandleInvoke(ctx context.Context, call *ToolCall, next func(context.Context, *ToolCall) (*ToolResult, error)) (*ToolResult, error) {
+	if h.beforeFn != nil {
+		h.beforeFn()
+	}
+	result, err := next(ctx, call)
+	if h.afterFn != nil {
+		h.afterFn()
+	}
+	if err == nil && h.modifyResultFn != nil {
+		result.Result = h.modifyResultFn(result.Result)
+	}
+	return result, err
+}
+
+func (h *testToolCallHandler) HandleStream(ctx context.Context, call *ToolCall, next func(context.Context, *ToolCall) (*StreamToolResult, error)) (*StreamToolResult, error) {
+	if h.beforeFn != nil {
+		h.beforeFn()
+	}
+	result, err := next(ctx, call)
+	if h.afterFn != nil {
+		h.afterFn()
+	}
+	return result, err
+}
+
 func TestHandlerExecutionOrder(t *testing.T) {
 	t.Run("MultipleInstructionHandlersPipeline", func(t *testing.T) {
 		ctx := context.Background()
@@ -381,32 +414,30 @@ func TestToolCallWrapperHandlers(t *testing.T) {
 				},
 			},
 			Handlers: []AgentHandler{
-				WithToolMiddleware(compose.ToolMiddleware{
-					Invokable: func(next compose.InvokableToolEndpoint) compose.InvokableToolEndpoint {
-						return func(ctx context.Context, input *compose.ToolInput) (*compose.ToolOutput, error) {
-							mu.Lock()
-							callOrder = append(callOrder, "wrapper1-before")
-							mu.Unlock()
-							result, err := next(ctx, input)
-							mu.Lock()
-							callOrder = append(callOrder, "wrapper1-after")
-							mu.Unlock()
-							return result, err
-						}
+				WithToolCallHandler(&testToolCallHandler{
+					name: "wrapper1",
+					beforeFn: func() {
+						mu.Lock()
+						callOrder = append(callOrder, "wrapper1-before")
+						mu.Unlock()
+					},
+					afterFn: func() {
+						mu.Lock()
+						callOrder = append(callOrder, "wrapper1-after")
+						mu.Unlock()
 					},
 				}),
-				WithToolMiddleware(compose.ToolMiddleware{
-					Invokable: func(next compose.InvokableToolEndpoint) compose.InvokableToolEndpoint {
-						return func(ctx context.Context, input *compose.ToolInput) (*compose.ToolOutput, error) {
-							mu.Lock()
-							callOrder = append(callOrder, "wrapper2-before")
-							mu.Unlock()
-							result, err := next(ctx, input)
-							mu.Lock()
-							callOrder = append(callOrder, "wrapper2-after")
-							mu.Unlock()
-							return result, err
-						}
+				WithToolCallHandler(&testToolCallHandler{
+					name: "wrapper2",
+					beforeFn: func() {
+						mu.Lock()
+						callOrder = append(callOrder, "wrapper2-before")
+						mu.Unlock()
+					},
+					afterFn: func() {
+						mu.Lock()
+						callOrder = append(callOrder, "wrapper2-after")
+						mu.Unlock()
 					},
 				}),
 			},
@@ -450,15 +481,10 @@ func TestToolCallWrapperHandlers(t *testing.T) {
 				},
 			},
 			Handlers: []AgentHandler{
-				WithToolMiddleware(compose.ToolMiddleware{
-					Invokable: func(next compose.InvokableToolEndpoint) compose.InvokableToolEndpoint {
-						return func(ctx context.Context, input *compose.ToolInput) (*compose.ToolOutput, error) {
-							result, err := next(ctx, input)
-							if err == nil {
-								result.Result = "modified: " + result.Result
-							}
-							return result, err
-						}
+				WithToolCallHandler(&testToolCallHandler{
+					name: "modifier",
+					modifyResultFn: func(result string) string {
+						return "modified: " + result
 					},
 				}),
 			},
