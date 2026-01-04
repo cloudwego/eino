@@ -20,148 +20,166 @@ import (
 	"context"
 
 	"github.com/cloudwego/eino/components/tool"
-	"github.com/cloudwego/eino/schema"
 )
 
-// WithInstruction creates a handler that appends instruction text.
-func WithInstruction(text string) Handler {
-	return &instructionHandler{text: text}
+func WithInstruction(text string) AgentHandler {
+	return &instructionHandler{
+		BaseAgentHandler: NewBaseAgentHandler("instruction"),
+		text:             text,
+	}
 }
 
 type instructionHandler struct {
+	BaseAgentHandler
 	text string
 }
 
-func (h *instructionHandler) Name() string {
-	return "instruction"
+func (h *instructionHandler) BeforeAgent(ctx context.Context, config *AgentConfig) (context.Context, error) {
+	if config.Instruction == "" {
+		config.Instruction = h.text
+	} else if h.text != "" {
+		config.Instruction = config.Instruction + "\n" + h.text
+	}
+	return ctx, nil
 }
 
-func (h *instructionHandler) ModifyInstruction(_ context.Context, instruction string) (string, error) {
-	if instruction == "" {
-		return h.text, nil
+func WithInstructionFunc(fn func(ctx context.Context, instruction string) (context.Context, string, error)) AgentHandler {
+	return &instructionFuncHandler{
+		BaseAgentHandler: NewBaseAgentHandler("instruction-func"),
+		fn:               fn,
 	}
-	if h.text == "" {
-		return instruction, nil
-	}
-	return instruction + "\n" + h.text, nil
-}
-
-// WithInstructionFunc creates a handler with custom instruction modification logic.
-func WithInstructionFunc(fn func(ctx context.Context, instruction string) (string, error)) Handler {
-	return &instructionFuncHandler{fn: fn}
 }
 
 type instructionFuncHandler struct {
-	fn func(ctx context.Context, instruction string) (string, error)
+	BaseAgentHandler
+	fn func(ctx context.Context, instruction string) (context.Context, string, error)
 }
 
-func (h *instructionFuncHandler) Name() string {
-	return "instruction-func"
+func (h *instructionFuncHandler) BeforeAgent(ctx context.Context, config *AgentConfig) (context.Context, error) {
+	newCtx, newInstruction, err := h.fn(ctx, config.Instruction)
+	if err != nil {
+		return ctx, err
+	}
+	config.Instruction = newInstruction
+	return newCtx, nil
 }
 
-func (h *instructionFuncHandler) ModifyInstruction(ctx context.Context, instruction string) (string, error) {
-	return h.fn(ctx, instruction)
-}
-
-// WithTools creates a handler that adds tools.
-func WithTools(tools ...tool.BaseTool) Handler {
-	return &toolsHandler{tools: tools}
+func WithTools(tools ...tool.BaseTool) AgentHandler {
+	return &toolsHandler{
+		BaseAgentHandler: NewBaseAgentHandler("tools"),
+		tools:            tools,
+	}
 }
 
 type toolsHandler struct {
+	BaseAgentHandler
 	tools []tool.BaseTool
 }
 
-func (h *toolsHandler) Name() string {
-	return "tools"
+func (h *toolsHandler) BeforeAgent(ctx context.Context, config *AgentConfig) (context.Context, error) {
+	for _, t := range h.tools {
+		config.Tools = append(config.Tools, ToolMeta{Tool: t, ReturnDirectly: false})
+	}
+	return ctx, nil
 }
 
-func (h *toolsHandler) ModifyTools(_ context.Context, config *HandlerToolsConfig) error {
-	config.AddTools(h.tools...)
-	return nil
-}
-
-// WithToolsFunc creates a handler with custom tools modification logic.
-func WithToolsFunc(fn func(ctx context.Context, config *HandlerToolsConfig) error) Handler {
-	return &toolsFuncHandler{fn: fn}
+func WithToolsFunc(fn func(ctx context.Context, tools []ToolMeta) (context.Context, []ToolMeta, error)) AgentHandler {
+	return &toolsFuncHandler{
+		BaseAgentHandler: NewBaseAgentHandler("tools-func"),
+		fn:               fn,
+	}
 }
 
 type toolsFuncHandler struct {
-	fn func(ctx context.Context, config *HandlerToolsConfig) error
+	BaseAgentHandler
+	fn func(ctx context.Context, tools []ToolMeta) (context.Context, []ToolMeta, error)
 }
 
-func (h *toolsFuncHandler) Name() string {
-	return "tools-func"
+func (h *toolsFuncHandler) BeforeAgent(ctx context.Context, config *AgentConfig) (context.Context, error) {
+	newCtx, newTools, err := h.fn(ctx, config.Tools)
+	if err != nil {
+		return ctx, err
+	}
+	config.Tools = newTools
+	return newCtx, nil
 }
 
-func (h *toolsFuncHandler) ModifyTools(ctx context.Context, config *HandlerToolsConfig) error {
+func WithBeforeAgent(fn func(ctx context.Context, config *AgentConfig) (context.Context, error)) AgentHandler {
+	return &beforeAgentHandler{
+		BaseAgentHandler: NewBaseAgentHandler("before-agent"),
+		fn:               fn,
+	}
+}
+
+type beforeAgentHandler struct {
+	BaseAgentHandler
+	fn func(ctx context.Context, config *AgentConfig) (context.Context, error)
+}
+
+func (h *beforeAgentHandler) BeforeAgent(ctx context.Context, config *AgentConfig) (context.Context, error) {
 	return h.fn(ctx, config)
 }
 
-// WithMessageStatePreProcessor creates a handler that processes and persists messages before chat model invocation.
-func WithMessageStatePreProcessor(fn func(ctx context.Context, messages []Message) ([]Message, error)) Handler {
-	return &messageStatePreProcessorHandler{fn: fn}
+func WithBeforeModelRewriteHistory(fn func(ctx context.Context, messages []Message) (context.Context, []Message, error)) AgentHandler {
+	return &beforeModelRewriteHistoryHandler{
+		BaseAgentHandler: NewBaseAgentHandler("before-model-rewrite-history"),
+		fn:               fn,
+	}
 }
 
-type messageStatePreProcessorHandler struct {
-	fn func(ctx context.Context, messages []Message) ([]Message, error)
+type beforeModelRewriteHistoryHandler struct {
+	BaseAgentHandler
+	fn func(ctx context.Context, messages []Message) (context.Context, []Message, error)
 }
 
-func (h *messageStatePreProcessorHandler) Name() string {
-	return "message-state-pre-processor"
-}
-
-func (h *messageStatePreProcessorHandler) PreProcessMessageState(ctx context.Context, messages []Message) ([]Message, error) {
+func (h *beforeModelRewriteHistoryHandler) BeforeModelRewriteHistory(ctx context.Context, messages []Message) (context.Context, []Message, error) {
 	return h.fn(ctx, messages)
 }
 
-// WithMessageStatePostProcessor creates a handler that processes and persists messages after chat model invocation.
-func WithMessageStatePostProcessor(fn func(ctx context.Context, messages []Message) ([]Message, error)) Handler {
-	return &messageStatePostProcessorHandler{fn: fn}
+func WithAfterModelRewriteHistory(fn func(ctx context.Context, messages []Message) (context.Context, []Message, error)) AgentHandler {
+	return &afterModelRewriteHistoryHandler{
+		BaseAgentHandler: NewBaseAgentHandler("after-model-rewrite-history"),
+		fn:               fn,
+	}
 }
 
-type messageStatePostProcessorHandler struct {
-	fn func(ctx context.Context, messages []Message) ([]Message, error)
+type afterModelRewriteHistoryHandler struct {
+	BaseAgentHandler
+	fn func(ctx context.Context, messages []Message) (context.Context, []Message, error)
 }
 
-func (h *messageStatePostProcessorHandler) Name() string {
-	return "message-state-post-processor"
-}
-
-func (h *messageStatePostProcessorHandler) PostProcessMessageState(ctx context.Context, messages []Message) ([]Message, error) {
+func (h *afterModelRewriteHistoryHandler) AfterModelRewriteHistory(ctx context.Context, messages []Message) (context.Context, []Message, error) {
 	return h.fn(ctx, messages)
 }
 
-// WithInvokableToolInterceptor creates a handler that intercepts non-streaming tool calls.
-func WithInvokableToolInterceptor(fn func(ctx context.Context, toolName, arguments string, opts []tool.Option, next func(ctx context.Context, arguments string, opts []tool.Option) (string, error)) (string, error)) Handler {
-	return &invokableInterceptorHandler{fn: fn}
+func WithInvokableToolWrapper(fn func(ctx context.Context, input *ToolCallInput, next func(context.Context, *ToolCallInput) (*ToolCallResult, error)) (*ToolCallResult, error)) AgentHandler {
+	return &invokableToolWrapperHandler{
+		BaseAgentHandler: NewBaseAgentHandler("invokable-tool-wrapper"),
+		fn:               fn,
+	}
 }
 
-type invokableInterceptorHandler struct {
-	fn func(ctx context.Context, toolName, arguments string, opts []tool.Option, next func(ctx context.Context, arguments string, opts []tool.Option) (string, error)) (string, error)
+type invokableToolWrapperHandler struct {
+	BaseAgentHandler
+	fn func(ctx context.Context, input *ToolCallInput, next func(context.Context, *ToolCallInput) (*ToolCallResult, error)) (*ToolCallResult, error)
 }
 
-func (h *invokableInterceptorHandler) Name() string {
-	return "invokable-tool-interceptor"
+func (h *invokableToolWrapperHandler) WrapInvokableToolCall(ctx context.Context, input *ToolCallInput, next func(context.Context, *ToolCallInput) (*ToolCallResult, error)) (*ToolCallResult, error) {
+	return h.fn(ctx, input, next)
 }
 
-func (h *invokableInterceptorHandler) WrapInvokableToolCall(ctx context.Context, toolName string, arguments string, opts []tool.Option, next func(ctx context.Context, arguments string, opts []tool.Option) (string, error)) (string, error) {
-	return h.fn(ctx, toolName, arguments, opts, next)
+func WithStreamableToolWrapper(fn func(ctx context.Context, input *ToolCallInput, next func(context.Context, *ToolCallInput) (*StreamToolCallResult, error)) (*StreamToolCallResult, error)) AgentHandler {
+	return &streamableToolWrapperHandler{
+		BaseAgentHandler: NewBaseAgentHandler("streamable-tool-wrapper"),
+		fn:               fn,
+	}
 }
 
-// WithStreamableToolInterceptor creates a handler that intercepts streaming tool calls.
-func WithStreamableToolInterceptor(fn func(ctx context.Context, toolName, arguments string, opts []tool.Option, next func(ctx context.Context, arguments string, opts []tool.Option) (*schema.StreamReader[string], error)) (*schema.StreamReader[string], error)) Handler {
-	return &streamableInterceptorHandler{fn: fn}
+type streamableToolWrapperHandler struct {
+	BaseAgentHandler
+	fn func(ctx context.Context, input *ToolCallInput, next func(context.Context, *ToolCallInput) (*StreamToolCallResult, error)) (*StreamToolCallResult, error)
 }
 
-type streamableInterceptorHandler struct {
-	fn func(ctx context.Context, toolName, arguments string, opts []tool.Option, next func(ctx context.Context, arguments string, opts []tool.Option) (*schema.StreamReader[string], error)) (*schema.StreamReader[string], error)
-}
-
-func (h *streamableInterceptorHandler) Name() string {
-	return "streamable-tool-interceptor"
-}
-
-func (h *streamableInterceptorHandler) WrapStreamableToolCall(ctx context.Context, toolName string, arguments string, opts []tool.Option, next func(ctx context.Context, arguments string, opts []tool.Option) (*schema.StreamReader[string], error)) (*schema.StreamReader[string], error) {
-	return h.fn(ctx, toolName, arguments, opts, next)
+func (h *streamableToolWrapperHandler) WrapStreamableToolCall(ctx context.Context, input *ToolCallInput, next func(context.Context, *ToolCallInput) (*StreamToolCallResult, error)) (*StreamToolCallResult, error) {
+	return h.fn(ctx, input, next)
 }
