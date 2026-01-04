@@ -31,15 +31,15 @@ import (
 	"github.com/cloudwego/eino/schema"
 )
 
-type testToolCallHandler struct {
-	BaseToolCallHandler
+type testToolCallWrapper struct {
+	BaseToolCallWrapper
 	name           string
 	beforeFn       func()
 	afterFn        func()
 	modifyResultFn func(string) string
 }
 
-func (h *testToolCallHandler) HandleInvoke(ctx context.Context, call *ToolCall, next func(context.Context, *ToolCall) (*ToolResult, error)) (*ToolResult, error) {
+func (h *testToolCallWrapper) WrapInvoke(ctx context.Context, call *ToolCall, next func(context.Context, *ToolCall) (*ToolResult, error)) (*ToolResult, error) {
 	if h.beforeFn != nil {
 		h.beforeFn()
 	}
@@ -53,7 +53,7 @@ func (h *testToolCallHandler) HandleInvoke(ctx context.Context, call *ToolCall, 
 	return result, err
 }
 
-func (h *testToolCallHandler) HandleStream(ctx context.Context, call *ToolCall, next func(context.Context, *ToolCall) (*StreamToolResult, error)) (*StreamToolResult, error) {
+func (h *testToolCallWrapper) WrapStream(ctx context.Context, call *ToolCall, next func(context.Context, *ToolCall) (*StreamToolResult, error)) (*StreamToolResult, error) {
 	if h.beforeFn != nil {
 		h.beforeFn()
 	}
@@ -414,7 +414,7 @@ func TestToolCallWrapperHandlers(t *testing.T) {
 				},
 			},
 			Handlers: []AgentHandler{
-				WithToolCallHandler(&testToolCallHandler{
+				WithToolCallWrapper(&testToolCallWrapper{
 					name: "wrapper1",
 					beforeFn: func() {
 						mu.Lock()
@@ -427,7 +427,7 @@ func TestToolCallWrapperHandlers(t *testing.T) {
 						mu.Unlock()
 					},
 				}),
-				WithToolCallHandler(&testToolCallHandler{
+				WithToolCallWrapper(&testToolCallWrapper{
 					name: "wrapper2",
 					beforeFn: func() {
 						mu.Lock()
@@ -481,7 +481,7 @@ func TestToolCallWrapperHandlers(t *testing.T) {
 				},
 			},
 			Handlers: []AgentHandler{
-				WithToolCallHandler(&testToolCallHandler{
+				WithToolCallWrapper(&testToolCallWrapper{
 					name: "modifier",
 					modifyResultFn: func(result string) string {
 						return "modified: " + result
@@ -566,12 +566,12 @@ func TestContextPropagation(t *testing.T) {
 			Description: "Test agent",
 			Model:       cm,
 			Handlers: []AgentHandler{
-				WithBeforeAgent(func(ctx context.Context, runCtx *AgentRunContext) (context.Context, error) {
-					return context.WithValue(ctx, key1, "value1"), nil
+				WithBeforeAgent(func(ctx context.Context, runCtx *AgentRunContext) (context.Context, *AgentRunContext, error) {
+					return context.WithValue(ctx, key1, "value1"), runCtx, nil
 				}),
-				WithBeforeAgent(func(ctx context.Context, runCtx *AgentRunContext) (context.Context, error) {
+				WithBeforeAgent(func(ctx context.Context, runCtx *AgentRunContext) (context.Context, *AgentRunContext, error) {
 					handler2ReceivedValue = ctx.Value(key1)
-					return ctx, nil
+					return ctx, runCtx, nil
 				}),
 			},
 		})
@@ -633,8 +633,8 @@ func TestHandlerErrorHandling(t *testing.T) {
 			Description: "Test agent",
 			Model:       cm,
 			Handlers: []AgentHandler{
-				WithBeforeAgent(func(ctx context.Context, runCtx *AgentRunContext) (context.Context, error) {
-					return ctx, assert.AnError
+				WithBeforeAgent(func(ctx context.Context, runCtx *AgentRunContext) (context.Context, *AgentRunContext, error) {
+					return ctx, runCtx, assert.AnError
 				}),
 			},
 		})
@@ -680,11 +680,11 @@ type countingHandler struct {
 	mu               sync.Mutex
 }
 
-func (h *countingHandler) BeforeAgent(ctx context.Context, runCtx *AgentRunContext) (context.Context, error) {
+func (h *countingHandler) BeforeAgent(ctx context.Context, runCtx *AgentRunContext) (context.Context, *AgentRunContext, error) {
 	h.mu.Lock()
 	h.beforeAgentCount++
 	h.mu.Unlock()
-	return ctx, nil
+	return ctx, runCtx, nil
 }
 
 func (h *countingHandler) BeforeModelRewriteHistory(ctx context.Context, messages []Message) (context.Context, []Message, error) {

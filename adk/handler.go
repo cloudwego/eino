@@ -27,7 +27,7 @@ import (
 // These provide clearer names while maintaining compatibility with compose package.
 type (
 	// ToolCall contains information about a tool call.
-	// When modifying in handlers:
+	// When modifying in wrappers:
 	//   - Name: should not be modified
 	//   - CallID: should not be modified
 	//   - Arguments: may be modified
@@ -54,28 +54,28 @@ type AgentRunContext struct {
 	Tools       []ToolMeta
 }
 
-// ToolCallHandler wraps tool call execution.
+// ToolCallWrapper wraps tool call execution.
 // Implementations should call next() to execute the actual tool,
 // and can modify the call or result as needed.
-type ToolCallHandler interface {
-	// HandleInvoke wraps non-streaming tool calls.
+type ToolCallWrapper interface {
+	// WrapInvoke wraps non-streaming tool calls.
 	// Call next(ctx, call) to execute the tool.
-	HandleInvoke(ctx context.Context, call *ToolCall, next func(context.Context, *ToolCall) (*ToolResult, error)) (*ToolResult, error)
+	WrapInvoke(ctx context.Context, call *ToolCall, next func(context.Context, *ToolCall) (*ToolResult, error)) (*ToolResult, error)
 
-	// HandleStream wraps streaming tool calls.
+	// WrapStream wraps streaming tool calls.
 	// Call next(ctx, call) to execute the tool.
-	HandleStream(ctx context.Context, call *ToolCall, next func(context.Context, *ToolCall) (*StreamToolResult, error)) (*StreamToolResult, error)
+	WrapStream(ctx context.Context, call *ToolCall, next func(context.Context, *ToolCall) (*StreamToolResult, error)) (*StreamToolResult, error)
 }
 
-// BaseToolCallHandler provides pass-through implementations for ToolCallHandler.
-// Embed this struct in custom handlers to only override the methods you need.
-type BaseToolCallHandler struct{}
+// BaseToolCallWrapper provides pass-through implementations for ToolCallWrapper.
+// Embed this struct in custom wrappers to only override the methods you need.
+type BaseToolCallWrapper struct{}
 
-func (h BaseToolCallHandler) HandleInvoke(ctx context.Context, call *ToolCall, next func(context.Context, *ToolCall) (*ToolResult, error)) (*ToolResult, error) {
+func (h BaseToolCallWrapper) WrapInvoke(ctx context.Context, call *ToolCall, next func(context.Context, *ToolCall) (*ToolResult, error)) (*ToolResult, error) {
 	return next(ctx, call)
 }
 
-func (h BaseToolCallHandler) HandleStream(ctx context.Context, call *ToolCall, next func(context.Context, *ToolCall) (*StreamToolResult, error)) (*StreamToolResult, error) {
+func (h BaseToolCallWrapper) WrapStream(ctx context.Context, call *ToolCall, next func(context.Context, *ToolCall) (*StreamToolResult, error)) (*StreamToolResult, error) {
 	return next(ctx, call)
 }
 
@@ -88,7 +88,7 @@ func (h BaseToolCallHandler) HandleStream(ctx context.Context, call *ToolCall, n
 type AgentHandler interface {
 	// BeforeAgent is called before each agent run, allowing modification of
 	// the agent's instruction and tools configuration.
-	BeforeAgent(ctx context.Context, runCtx *AgentRunContext) (context.Context, error)
+	BeforeAgent(ctx context.Context, runCtx *AgentRunContext) (context.Context, *AgentRunContext, error)
 
 	// BeforeModelRewriteHistory is called before each model invocation.
 	// The returned messages are persisted to the agent's internal state.
@@ -98,17 +98,17 @@ type AgentHandler interface {
 	// The returned messages are persisted to the agent's internal state.
 	AfterModelRewriteHistory(ctx context.Context, messages []Message) (context.Context, []Message, error)
 
-	// GetToolCallHandler returns a handler for wrapping tool calls.
+	// GetToolCallWrapper returns a wrapper for tool calls.
 	// Return nil if no tool call wrapping is needed.
-	GetToolCallHandler() ToolCallHandler
+	GetToolCallWrapper() ToolCallWrapper
 }
 
 // BaseAgentHandler provides default no-op implementations for AgentHandler.
 // Embed this struct in custom handlers to only override the methods you need.
 type BaseAgentHandler struct{}
 
-func (b BaseAgentHandler) BeforeAgent(ctx context.Context, runCtx *AgentRunContext) (context.Context, error) {
-	return ctx, nil
+func (b BaseAgentHandler) BeforeAgent(ctx context.Context, runCtx *AgentRunContext) (context.Context, *AgentRunContext, error) {
+	return ctx, runCtx, nil
 }
 
 func (b BaseAgentHandler) BeforeModelRewriteHistory(ctx context.Context, messages []Message) (context.Context, []Message, error) {
@@ -119,6 +119,6 @@ func (b BaseAgentHandler) AfterModelRewriteHistory(ctx context.Context, messages
 	return ctx, messages, nil
 }
 
-func (b BaseAgentHandler) GetToolCallHandler() ToolCallHandler {
+func (b BaseAgentHandler) GetToolCallWrapper() ToolCallWrapper {
 	return nil
 }
