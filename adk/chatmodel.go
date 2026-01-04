@@ -164,10 +164,6 @@ type AgentMiddleware struct {
 	WrapToolCall compose.ToolMiddleware
 }
 
-func (m AgentMiddleware) Name() string {
-	return "legacy-middleware"
-}
-
 func (m AgentMiddleware) BeforeAgent(ctx context.Context, config *AgentConfig) (context.Context, error) {
 	if m.AdditionalInstruction != "" {
 		if config.Instruction == "" {
@@ -204,34 +200,8 @@ func (m AgentMiddleware) AfterModelRewriteHistory(ctx context.Context, messages 
 	return ctx, state.Messages, nil
 }
 
-func (m AgentMiddleware) WrapInvokableToolCall(
-	ctx context.Context,
-	input *ToolCallInput,
-	next func(context.Context, *ToolCallInput) (*ToolCallResult, error),
-) (*ToolCallResult, error) {
-	if m.WrapToolCall.Invokable == nil {
-		return next(ctx, input)
-	}
-	endpoint := func(ctx context.Context, in *compose.ToolInput) (*compose.ToolOutput, error) {
-		return next(ctx, in)
-	}
-	wrapped := m.WrapToolCall.Invokable(endpoint)
-	return wrapped(ctx, input)
-}
-
-func (m AgentMiddleware) WrapStreamableToolCall(
-	ctx context.Context,
-	input *ToolCallInput,
-	next func(context.Context, *ToolCallInput) (*StreamToolCallResult, error),
-) (*StreamToolCallResult, error) {
-	if m.WrapToolCall.Streamable == nil {
-		return next(ctx, input)
-	}
-	endpoint := func(ctx context.Context, in *compose.ToolInput) (*compose.StreamToolOutput, error) {
-		return next(ctx, in)
-	}
-	wrapped := m.WrapToolCall.Streamable(endpoint)
-	return wrapped(ctx, input)
+func (m AgentMiddleware) GetToolMiddleware() compose.ToolMiddleware {
+	return m.WrapToolCall
 }
 
 type ChatModelAgentConfig struct {
@@ -345,13 +315,7 @@ func NewChatModelAgent(ctx context.Context, config *ChatModelAgentConfig) (*Chat
 	allHandlers = append(allHandlers, config.Handlers...)
 
 	tc := config.ToolsConfig
-
-	for _, h := range allHandlers {
-		tc.ToolCallMiddlewares = append(tc.ToolCallMiddlewares, compose.ToolMiddleware{
-			Invokable:  convertHandlerToInvokableMiddleware(h),
-			Streamable: convertHandlerToStreamableMiddleware(h),
-		})
-	}
+	tc.ToolCallMiddlewares = append(tc.ToolCallMiddlewares, collectToolMiddlewares(allHandlers)...)
 
 	return &ChatModelAgent{
 		name:             config.Name,
@@ -368,26 +332,15 @@ func NewChatModelAgent(ctx context.Context, config *ChatModelAgentConfig) (*Chat
 	}, nil
 }
 
-func convertHandlerToInvokableMiddleware(h AgentHandler) compose.InvokableToolMiddleware {
-	return func(next compose.InvokableToolEndpoint) compose.InvokableToolEndpoint {
-		return func(ctx context.Context, input *compose.ToolInput) (*compose.ToolOutput, error) {
-			nextFn := func(ctx context.Context, in *ToolCallInput) (*ToolCallResult, error) {
-				return next(ctx, in)
-			}
-			return h.WrapInvokableToolCall(ctx, input, nextFn)
+func collectToolMiddlewares(handlers []AgentHandler) []compose.ToolMiddleware {
+	var middlewares []compose.ToolMiddleware
+	for _, h := range handlers {
+		mw := h.GetToolMiddleware()
+		if mw.Invokable != nil || mw.Streamable != nil {
+			middlewares = append(middlewares, mw)
 		}
 	}
-}
-
-func convertHandlerToStreamableMiddleware(h AgentHandler) compose.StreamableToolMiddleware {
-	return func(next compose.StreamableToolEndpoint) compose.StreamableToolEndpoint {
-		return func(ctx context.Context, input *compose.ToolInput) (*compose.StreamToolOutput, error) {
-			nextFn := func(ctx context.Context, in *ToolCallInput) (*StreamToolCallResult, error) {
-				return next(ctx, in)
-			}
-			return h.WrapStreamableToolCall(ctx, input, nextFn)
-		}
-	}
+	return middlewares
 }
 
 const (
@@ -848,11 +801,11 @@ func (a *ChatModelAgent) applyBeforeAgent(ctx context.Context, input *AgentInput
 		RunOptions:  opts,
 	}
 
-	for _, h := range a.handlers {
+	for i, h := range a.handlers {
 		var err error
 		ctx, err = h.BeforeAgent(ctx, agentConfig)
 		if err != nil {
-			return ctx, "", nil, fmt.Errorf("handler %q BeforeAgent failed: %w", h.Name(), err)
+			return ctx, "", nil, fmt.Errorf("handler[%d] BeforeAgent failed: %w", i, err)
 		}
 	}
 
