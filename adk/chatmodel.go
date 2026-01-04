@@ -284,8 +284,7 @@ type ChatModelAgentConfig struct {
 }
 
 type graphConfig struct {
-	hasTools          bool
-	hasReturnDirectly bool
+	hasTools bool
 }
 
 type ChatModelAgent struct {
@@ -859,25 +858,13 @@ func (a *ChatModelAgent) applyBeforeAgent(ctx context.Context, input *AgentInput
 }
 
 func (a *ChatModelAgent) computeGraphConfig(tools []ToolMeta) graphConfig {
-	hasTools := len(tools) > 0
-	hasReturnDirectly := false
-	for _, t := range tools {
-		if t.ReturnDirectly {
-			hasReturnDirectly = true
-			break
-		}
-	}
 	return graphConfig{
-		hasTools:          hasTools,
-		hasReturnDirectly: hasReturnDirectly,
+		hasTools: len(tools) > 0,
 	}
 }
 
 func (a *ChatModelAgent) isGraphConfigCompatible(runtimeConfig graphConfig) bool {
 	if !a.graphConfig.hasTools && runtimeConfig.hasTools {
-		return false
-	}
-	if !a.graphConfig.hasReturnDirectly && runtimeConfig.hasReturnDirectly {
 		return false
 	}
 	return true
@@ -1020,16 +1007,15 @@ func (a *ChatModelAgent) buildNoToolsRunFunc(ctx context.Context, bc *buildConte
 	}
 }
 
-func (a *ChatModelAgent) buildReactRunFunc(ctx context.Context, bc *buildContext, supportRuntimeReturnDirectly bool) (runFunc, error) {
+func (a *ChatModelAgent) buildReactRunFunc(ctx context.Context, bc *buildContext) (runFunc, error) {
 	conf := &reactConfig{
-		model:                        a.model,
-		toolsConfig:                  &bc.toolsNodeConf,
-		toolsReturnDirectly:          bc.returnDirectly,
-		supportRuntimeReturnDirectly: supportRuntimeReturnDirectly,
-		agentName:                    a.name,
-		maxIterations:                a.maxIterations,
-		handlers:                     a.handlers,
-		modelRetryConfig:             a.modelRetryConfig,
+		model:               a.model,
+		toolsConfig:         &bc.toolsNodeConf,
+		toolsReturnDirectly: bc.returnDirectly,
+		agentName:           a.name,
+		maxIterations:       a.maxIterations,
+		handlers:            a.handlers,
+		modelRetryConfig:    a.modelRetryConfig,
 	}
 
 	g, err := newReact(ctx, conf)
@@ -1089,10 +1075,6 @@ func (a *ChatModelAgent) buildReactRunFunc(ctx context.Context, bc *buildContext
 			}
 		}
 
-		if supportRuntimeReturnDirectly {
-			ctx = setRuntimeReturnDirectlyToCtx(ctx, runtimeReturnDirectly)
-		}
-
 		var compileOptions []compose.GraphCompileOption
 		compileOptions = append(compileOptions,
 			compose.WithGraphName(a.name),
@@ -1102,8 +1084,15 @@ func (a *ChatModelAgent) buildReactRunFunc(ctx context.Context, bc *buildContext
 
 		runnable, err_ := compose.NewChain[*AgentInput, Message]().
 			AppendLambda(
-				compose.InvokableLambda(func(ctx context.Context, input *AgentInput) ([]Message, error) {
-					return a.genModelInput(ctx, instruction, input)
+				compose.InvokableLambda(func(ctx context.Context, input *AgentInput) (*reactInput, error) {
+					messages, err := a.genModelInput(ctx, instruction, input)
+					if err != nil {
+						return nil, err
+					}
+					return &reactInput{
+						Messages:              messages,
+						RuntimeReturnDirectly: runtimeReturnDirectly,
+					}, nil
 				}),
 			).
 			AppendGraph(g, compose.WithNodeName("ReAct"), compose.WithGraphCompileOptions(compose.WithMaxRunSteps(math.MaxInt))).
@@ -1180,7 +1169,7 @@ func (a *ChatModelAgent) buildRunFunc(ctx context.Context) runFunc {
 			return
 		}
 
-		run, err := a.buildReactRunFunc(ctx, bc, true)
+		run, err := a.buildReactRunFunc(ctx, bc)
 		if err != nil {
 			a.run = errFunc(err)
 			return
@@ -1218,7 +1207,7 @@ func (a *ChatModelAgent) getRunFunc(ctx context.Context, input *AgentInput) (run
 	if !runtimeConfig.hasTools {
 		tempRun = a.buildNoToolsRunFunc(ctx, bc)
 	} else {
-		tempRun, err = a.buildReactRunFunc(ctx, bc, runtimeConfig.hasReturnDirectly)
+		tempRun, err = a.buildReactRunFunc(ctx, bc)
 		if err != nil {
 			return nil, ctx, err
 		}

@@ -94,12 +94,12 @@ func TestReact(t *testing.T) {
 		assert.NotNil(t, compiled)
 
 		// Test with a user message
-		result, err := compiled.Invoke(ctx, []Message{
+		result, err := compiled.Invoke(ctx, &reactInput{Messages: []Message{
 			{
 				Role:    schema.User,
 				Content: "Use the test tool to say hello",
 			},
-		})
+		}})
 		assert.NoError(t, err)
 		assert.NotNil(t, result)
 	})
@@ -161,12 +161,12 @@ func TestReact(t *testing.T) {
 		assert.NotNil(t, compiled)
 
 		// Test with a user message when tool returns directly
-		result, err := compiled.Invoke(ctx, []Message{
+		result, err := compiled.Invoke(ctx, &reactInput{Messages: []Message{
 			{
 				Role:    schema.User,
 				Content: "Use the test tool to say hello",
 			},
-		})
+		}})
 		assert.NoError(t, err)
 		assert.NotNil(t, result)
 
@@ -253,12 +253,12 @@ func TestReact(t *testing.T) {
 		assert.NotNil(t, compiled)
 
 		// Test streaming with a user message
-		outStream, err := compiled.Stream(ctx, []Message{
+		outStream, err := compiled.Stream(ctx, &reactInput{Messages: []Message{
 			{
 				Role:    schema.User,
 				Content: "Use the test tool to say hello",
 			},
-		})
+		}})
 		assert.NoError(t, err)
 		assert.NotNil(t, outStream)
 
@@ -366,12 +366,12 @@ func TestReact(t *testing.T) {
 		times = 0
 
 		// Test streaming with a user message when tool returns directly
-		outStream, err := compiled.Stream(ctx, []Message{
+		outStream, err := compiled.Stream(ctx, &reactInput{Messages: []Message{
 			{
 				Role:    schema.User,
 				Content: "Use the test tool to say hello",
 			},
-		})
+		}})
 		assert.NoError(t, err)
 		assert.NotNil(t, outStream)
 
@@ -452,12 +452,12 @@ func TestReact(t *testing.T) {
 		assert.NotNil(t, compiled)
 
 		// Test with a user message
-		result, err := compiled.Invoke(ctx, []Message{
+		result, err := compiled.Invoke(ctx, &reactInput{Messages: []Message{
 			{
 				Role:    schema.User,
 				Content: "Use the test tool to say hello",
 			},
-		})
+		}})
 		assert.NoError(t, err)
 		assert.Equal(t, result.Content, "bye")
 
@@ -482,12 +482,12 @@ func TestReact(t *testing.T) {
 		assert.NotNil(t, compiled)
 
 		// Test with a user message
-		result, err = compiled.Invoke(ctx, []Message{
+		result, err = compiled.Invoke(ctx, &reactInput{Messages: []Message{
 			{
 				Role:    schema.User,
 				Content: "Use the test tool to say hello",
 			},
-		})
+		}})
 		assert.Error(t, err)
 		t.Logf("actual error: %v", err.Error())
 		assert.ErrorIs(t, err, ErrExceedMaxIterations)
