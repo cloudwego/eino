@@ -23,6 +23,7 @@ import (
 	"github.com/cloudwego/eino/components/indexer"
 	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/components/prompt"
+	"github.com/cloudwego/eino/components/reranker"
 	"github.com/cloudwego/eino/components/retriever"
 )
 
@@ -51,6 +52,17 @@ func toEmbeddingNode(node embedding.Embedder, opts ...GraphAddNodeOpt) (*graphNo
 		node,
 		components.ComponentOfEmbedding,
 		node.EmbedStrings,
+		nil,
+		nil,
+		nil,
+		opts...)
+}
+
+func toRerankerNode(node reranker.Reranker, opts ...GraphAddNodeOpt) (*graphNode, *graphAddNodeOpts) {
+	return toComponentNode(
+		node,
+		components.ComponentOfReranker,
+		node.Rerank,
 		nil,
 		nil,
 		nil,

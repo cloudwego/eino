@@ -26,6 +26,7 @@ import (
 	"github.com/cloudwego/eino/components/indexer"
 	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/components/prompt"
+	"github.com/cloudwego/eino/components/reranker"
 	"github.com/cloudwego/eino/components/retriever"
 	"github.com/cloudwego/eino/components/tool"
 	"github.com/cloudwego/eino/compose"
@@ -57,6 +58,7 @@ type HandlerHelper struct {
 	chatModelHandler   *ModelCallbackHandler
 	embeddingHandler   *EmbeddingCallbackHandler
 	indexerHandler     *IndexerCallbackHandler
+	rerankerHandler    *RerankerCallbackHandler
 	retrieverHandler   *RetrieverCallbackHandler
 	loaderHandler      *LoaderCallbackHandler
 	transformerHandler *TransformerCallbackHandler
@@ -97,6 +99,12 @@ func (c *HandlerHelper) Indexer(handler *IndexerCallbackHandler) *HandlerHelper 
 // Retriever sets the retriever handler for the handler helper, which will be called when the retriever component is executed.
 func (c *HandlerHelper) Retriever(handler *RetrieverCallbackHandler) *HandlerHelper {
 	c.retrieverHandler = handler
+	return c
+}
+
+// Reranker sets the reranker handler for the handler helper, which will be called when the reranker component is executed.
+func (c *HandlerHelper) Reranker(handler *RerankerCallbackHandler) *HandlerHelper {
+	c.rerankerHandler = handler
 	return c
 }
 
@@ -160,6 +168,8 @@ func (c *handlerTemplate) OnStart(ctx context.Context, info *callbacks.RunInfo, 
 		return c.indexerHandler.OnStart(ctx, info, indexer.ConvCallbackInput(input))
 	case components.ComponentOfRetriever:
 		return c.retrieverHandler.OnStart(ctx, info, retriever.ConvCallbackInput(input))
+	case components.ComponentOfReranker:
+		return c.rerankerHandler.OnStart(ctx, info, reranker.ConvCallbackInput(input))
 	case components.ComponentOfLoader:
 		return c.loaderHandler.OnStart(ctx, info, document.ConvLoaderCallbackInput(input))
 	case components.ComponentOfTransformer:
@@ -191,6 +201,8 @@ func (c *handlerTemplate) OnEnd(ctx context.Context, info *callbacks.RunInfo, ou
 		return c.indexerHandler.OnEnd(ctx, info, indexer.ConvCallbackOutput(output))
 	case components.ComponentOfRetriever:
 		return c.retrieverHandler.OnEnd(ctx, info, retriever.ConvCallbackOutput(output))
+	case components.ComponentOfReranker:
+		return c.rerankerHandler.OnEnd(ctx, info, reranker.ConvCallbackOutput(output))
 	case components.ComponentOfLoader:
 		return c.loaderHandler.OnEnd(ctx, info, document.ConvLoaderCallbackOutput(output))
 	case components.ComponentOfTransformer:
@@ -222,6 +234,8 @@ func (c *handlerTemplate) OnError(ctx context.Context, info *callbacks.RunInfo, 
 		return c.indexerHandler.OnError(ctx, info, err)
 	case components.ComponentOfRetriever:
 		return c.retrieverHandler.OnError(ctx, info, err)
+	case components.ComponentOfReranker:
+		return c.rerankerHandler.OnError(ctx, info, err)
 	case components.ComponentOfLoader:
 		return c.loaderHandler.OnError(ctx, info, err)
 	case components.ComponentOfTransformer:
@@ -310,6 +324,10 @@ func (c *handlerTemplate) Needed(ctx context.Context, info *callbacks.RunInfo, t
 		}
 	case components.ComponentOfRetriever:
 		if c.retrieverHandler != nil && c.retrieverHandler.Needed(ctx, info, timing) {
+			return true
+		}
+	case components.ComponentOfReranker:
+		if c.rerankerHandler != nil && c.rerankerHandler.Needed(ctx, info, timing) {
 			return true
 		}
 	case components.ComponentOfTool:
@@ -485,6 +503,30 @@ type RetrieverCallbackHandler struct {
 
 // Needed checks if the callback handler is needed for the given timing.
 func (ch *RetrieverCallbackHandler) Needed(ctx context.Context, runInfo *callbacks.RunInfo, timing callbacks.CallbackTiming) bool {
+	switch timing {
+	case callbacks.TimingOnStart:
+		return ch.OnStart != nil
+	case callbacks.TimingOnEnd:
+		return ch.OnEnd != nil
+	case callbacks.TimingOnError:
+		return ch.OnError != nil
+	default:
+		return false
+	}
+}
+
+// RerankerCallbackHandler is the handler for the reranker callback.
+type RerankerCallbackHandler struct {
+	// OnStart is the callback function for the start of the reranker.
+	OnStart func(ctx context.Context, runInfo *callbacks.RunInfo, input *reranker.CallbackInput) context.Context
+	// OnEnd is the callback function for the end of the reranker.
+	OnEnd func(ctx context.Context, runInfo *callbacks.RunInfo, output *reranker.CallbackOutput) context.Context
+	// OnError is the callback function for the error of the reranker.
+	OnError func(ctx context.Context, runInfo *callbacks.RunInfo, err error) context.Context
+}
+
+// Needed checks if the callback handler is needed for the given timing.
+func (ch *RerankerCallbackHandler) Needed(ctx context.Context, runInfo *callbacks.RunInfo, timing callbacks.CallbackTiming) bool {
 	switch timing {
 	case callbacks.TimingOnStart:
 		return ch.OnStart != nil

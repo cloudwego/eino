@@ -26,10 +26,13 @@ import (
 	"go.uber.org/mock/gomock"
 
 	"github.com/cloudwego/eino/components/prompt"
+	reranker "github.com/cloudwego/eino/components/reranker"
+
 	"github.com/cloudwego/eino/internal/mock/components/document"
 	"github.com/cloudwego/eino/internal/mock/components/embedding"
 	"github.com/cloudwego/eino/internal/mock/components/indexer"
 	"github.com/cloudwego/eino/internal/mock/components/model"
+	mockReranker "github.com/cloudwego/eino/internal/mock/components/reranker"
 	"github.com/cloudwego/eino/internal/mock/components/retriever"
 	"github.com/cloudwego/eino/schema"
 )
@@ -398,6 +401,16 @@ func TestChainMultiNodes(t *testing.T) {
 		assert.NotNil(t, r)
 	})
 
+	t.Run("test reranker Node", func(t *testing.T) {
+		chain := NewChain[*reranker.Request, []*schema.Document]()
+
+		chain.AppendReranker(mockReranker.NewMockReranker(gomock.NewController(t)))
+
+		r, err := chain.Compile(ctx)
+		assert.NoError(t, err)
+		assert.NotNil(t, r)
+	})
+
 	t.Run("test chat model", func(t *testing.T) {
 		chain := NewChain[[]*schema.Message, *schema.Message]()
 
@@ -559,6 +572,7 @@ func TestParallelMultiNodes(t *testing.T) {
 	p.AddLoader("loader", document.NewMockLoader(gomock.NewController(t)))
 	p.AddDocumentTransformer("document transformer", document.NewMockTransformer(gomock.NewController(t)))
 	p.AddRetriever("retriever", retriever.NewMockRetriever(gomock.NewController(t)))
+	p.AddReranker("reranker", mockReranker.NewMockReranker(gomock.NewController(t)))
 	p.AddChatModel("chatmodel", model.NewMockChatModel(gomock.NewController(t)))
 	p.AddChatTemplate("chatTemplate", prompt.FromMessages(schema.FString, schema.SystemMessage("hello")))
 	p.AddEmbedding("embedding", embedding.NewMockEmbedder(gomock.NewController(t)))
@@ -577,6 +591,12 @@ func TestParallelMultiNodes(t *testing.T) {
 	assert.NotNil(t, p.err)
 
 	p = NewParallel()
+	p.AddReranker("key", mockReranker.NewMockReranker(gomock.NewController(t)))
+	assert.Nil(t, p.err)
+	p.AddReranker("key", mockReranker.NewMockReranker(gomock.NewController(t)))
+	assert.NotNil(t, p.err)
+
+	p = NewParallel()
 	p.addNode("k", nil, nil)
 	assert.NotNil(t, p.err)
 
@@ -585,6 +605,17 @@ func TestParallelMultiNodes(t *testing.T) {
 	}
 	p.addNode("k", &graphNode{}, nil)
 	assert.NotNil(t, p.err)
+}
+
+func TestChainBranchAddReranker(t *testing.T) {
+	branch := NewChainBranch(func(ctx context.Context, input map[string]any) (string, error) {
+		return "reranker", nil
+	})
+	branch.AddReranker("reranker", mockReranker.NewMockReranker(gomock.NewController(t)))
+	assert.NoError(t, branch.err)
+	node, ok := branch.key2BranchNode["reranker"]
+	assert.True(t, ok)
+	assert.NotNil(t, node.First)
 }
 
 type FakeLambdaOptions struct {

@@ -27,9 +27,11 @@ import (
 	"go.uber.org/mock/gomock"
 
 	"github.com/cloudwego/eino/components/prompt"
+	"github.com/cloudwego/eino/components/reranker"
 	"github.com/cloudwego/eino/internal/mock/components/embedding"
 	"github.com/cloudwego/eino/internal/mock/components/indexer"
 	"github.com/cloudwego/eino/internal/mock/components/model"
+	mockReranker "github.com/cloudwego/eino/internal/mock/components/reranker"
 	"github.com/cloudwego/eino/schema"
 )
 
@@ -240,6 +242,36 @@ func TestWorkflow(t *testing.T) {
 
 		assert.Equal(t, &structEnd{"E:1+Post_E:2_[1 good Pre:1]_33_1"}, chunk)
 	}
+}
+
+func TestWorkflowRerankerNode(t *testing.T) {
+	ctx := context.Background()
+	ctrl := gomock.NewController(t)
+	inst := mockReranker.NewMockReranker(ctrl)
+	docs := []*schema.Document{{ID: "1"}}
+	var opt *reranker.Options
+	inst.EXPECT().Rerank(gomock.Any(), gomock.Any(), gomock.Any()).
+		DoAndReturn(func(ctx context.Context, req *reranker.Request, opts ...reranker.Option) ([]*schema.Document, error) {
+			assert.Equal(t, "query", req.Query)
+			assert.Equal(t, docs, req.Docs)
+			opt = reranker.GetCommonOptions(&reranker.Options{}, opts...)
+			return docs, nil
+		}).
+		Times(1)
+
+	w := NewWorkflow[*reranker.Request, []*schema.Document]()
+	w.AddRerankerNode("reranker", inst).AddInput(START)
+	w.End().AddInput("reranker")
+
+	r, err := w.Compile(ctx)
+	assert.NoError(t, err)
+
+	out, err := r.Invoke(ctx, &reranker.Request{Query: "query", Docs: docs}, WithRerankerOption(reranker.WithScoreThreshold(0.5)))
+	assert.NoError(t, err)
+	assert.Equal(t, docs, out)
+	assert.NotNil(t, opt)
+	assert.NotNil(t, opt.ScoreThreshold)
+	assert.InDelta(t, 0.5, *opt.ScoreThreshold, 1e-9)
 }
 
 func TestWorkflowWithMap(t *testing.T) {
