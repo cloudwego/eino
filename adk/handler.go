@@ -19,6 +19,7 @@ package adk
 import (
 	"context"
 
+	"github.com/cloudwego/eino/components/tool"
 	"github.com/cloudwego/eino/compose"
 )
 
@@ -39,6 +40,19 @@ type (
 	// StreamToolResult contains the result of a streaming tool call.
 	StreamToolResult = compose.StreamToolOutput
 )
+
+// ToolMeta contains a tool and its configuration.
+type ToolMeta struct {
+	Tool           tool.BaseTool
+	ReturnDirectly bool
+}
+
+// AgentRunContext contains runtime information passed to handlers before each agent run.
+// Handlers can modify Instruction and Tools to customize agent behavior.
+type AgentRunContext struct {
+	Instruction string
+	Tools       []ToolMeta
+}
 
 // ToolCallHandler wraps tool call execution.
 // Implementations should call next() to execute the actual tool,
@@ -74,7 +88,7 @@ func (h BaseToolCallHandler) HandleStream(ctx context.Context, call *ToolCall, n
 type AgentHandler interface {
 	// BeforeAgent is called before each agent run, allowing modification of
 	// the agent's instruction and tools configuration.
-	BeforeAgent(ctx context.Context, config *AgentConfig) (context.Context, error)
+	BeforeAgent(ctx context.Context, runCtx *AgentRunContext) (context.Context, error)
 
 	// BeforeModelRewriteHistory is called before each model invocation.
 	// The returned messages are persisted to the agent's internal state.
@@ -93,7 +107,7 @@ type AgentHandler interface {
 // Embed this struct in custom handlers to only override the methods you need.
 type BaseAgentHandler struct{}
 
-func (b BaseAgentHandler) BeforeAgent(ctx context.Context, config *AgentConfig) (context.Context, error) {
+func (b BaseAgentHandler) BeforeAgent(ctx context.Context, runCtx *AgentRunContext) (context.Context, error) {
 	return ctx, nil
 }
 

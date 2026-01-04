@@ -566,10 +566,10 @@ func TestContextPropagation(t *testing.T) {
 			Description: "Test agent",
 			Model:       cm,
 			Handlers: []AgentHandler{
-				WithBeforeAgent(func(ctx context.Context, config *AgentConfig) (context.Context, error) {
+				WithBeforeAgent(func(ctx context.Context, runCtx *AgentRunContext) (context.Context, error) {
 					return context.WithValue(ctx, key1, "value1"), nil
 				}),
-				WithBeforeAgent(func(ctx context.Context, config *AgentConfig) (context.Context, error) {
+				WithBeforeAgent(func(ctx context.Context, runCtx *AgentRunContext) (context.Context, error) {
 					handler2ReceivedValue = ctx.Value(key1)
 					return ctx, nil
 				}),
@@ -633,7 +633,7 @@ func TestHandlerErrorHandling(t *testing.T) {
 			Description: "Test agent",
 			Model:       cm,
 			Handlers: []AgentHandler{
-				WithBeforeAgent(func(ctx context.Context, config *AgentConfig) (context.Context, error) {
+				WithBeforeAgent(func(ctx context.Context, runCtx *AgentRunContext) (context.Context, error) {
 					return ctx, assert.AnError
 				}),
 			},
@@ -680,7 +680,7 @@ type countingHandler struct {
 	mu               sync.Mutex
 }
 
-func (h *countingHandler) BeforeAgent(ctx context.Context, config *AgentConfig) (context.Context, error) {
+func (h *countingHandler) BeforeAgent(ctx context.Context, runCtx *AgentRunContext) (context.Context, error) {
 	h.mu.Lock()
 	h.beforeAgentCount++
 	h.mu.Unlock()
