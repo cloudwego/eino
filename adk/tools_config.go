@@ -99,16 +99,16 @@ func (c *HandlerToolsConfig) ReturnDirectly() map[string]bool {
 	return result
 }
 
-func (c *HandlerToolsConfig) ToToolMetas() []ToolMeta {
+func (c *HandlerToolsConfig) ToToolMetas(ctx context.Context) ([]ToolMeta, error) {
 	result := make([]ToolMeta, len(c.tools))
 	for i, t := range c.tools {
 		result[i] = ToolMeta{Tool: t, ReturnDirectly: false}
 	}
 	for name, rd := range c.returnDirectly {
 		for i, t := range c.tools {
-			info, err := t.Info(context.Background())
+			info, err := t.Info(ctx)
 			if err != nil {
-				continue
+				return nil, err
 			}
 			if info.Name == name {
 				result[i].ReturnDirectly = rd
@@ -116,23 +116,24 @@ func (c *HandlerToolsConfig) ToToolMetas() []ToolMeta {
 			}
 		}
 	}
-	return result
+	return result, nil
 }
 
-func ToolMetasToHandlerToolsConfig(metas []ToolMeta) *HandlerToolsConfig {
+func ToolMetasToHandlerToolsConfig(ctx context.Context, metas []ToolMeta) (*HandlerToolsConfig, error) {
 	tools := make([]tool.BaseTool, len(metas))
 	returnDirectly := make(map[string]bool)
 	for i, m := range metas {
 		tools[i] = m.Tool
 		if m.ReturnDirectly {
-			info, err := m.Tool.Info(context.Background())
-			if err == nil {
-				returnDirectly[info.Name] = true
+			info, err := m.Tool.Info(ctx)
+			if err != nil {
+				return nil, err
 			}
+			returnDirectly[info.Name] = true
 		}
 	}
 	return &HandlerToolsConfig{
 		tools:          tools,
 		returnDirectly: returnDirectly,
-	}
+	}, nil
 }
