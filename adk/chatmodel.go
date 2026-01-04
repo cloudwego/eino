@@ -890,7 +890,7 @@ func (a *ChatModelAgent) Run(ctx context.Context, input *AgentInput, opts ...Age
 		}()
 
 		store := newBridgeStore()
-		co = append(co, compose.WithCallbacks(append(ch)...))
+		
 		run(ctx, agentContext.AgentInput, generator, store, ch, co...)
 	}()
 
