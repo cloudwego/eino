@@ -48,20 +48,6 @@ func setToolResultSendersToCtx(ctx context.Context, addr Address, sender adkTool
 	})
 }
 
-type runtimeReturnDirectlyCtxKey struct{}
-
-func setRuntimeReturnDirectlyToCtx(ctx context.Context, returnDirectly map[string]bool) context.Context {
-	return context.WithValue(ctx, runtimeReturnDirectlyCtxKey{}, returnDirectly)
-}
-
-func getRuntimeReturnDirectlyFromCtx(ctx context.Context) map[string]bool {
-	v := ctx.Value(runtimeReturnDirectlyCtxKey{})
-	if v == nil {
-		return nil
-	}
-	return v.(map[string]bool)
-}
-
 func getToolResultSendersFromCtx(ctx context.Context) *toolResultSenders {
 	v := ctx.Value(toolResultSendersCtxKey{})
 	if v == nil {
@@ -88,6 +74,8 @@ type State struct {
 	AgentName string
 
 	RemainingIterations int
+
+	RuntimeReturnDirectly map[string]bool
 }
 
 // SendToolGenAction attaches an AgentAction to the next tool event emitted for the
@@ -191,14 +179,17 @@ func newAdkToolResultCollectorMiddleware() compose.ToolMiddleware {
 	}
 }
 
+type reactInput struct {
+	Messages              []Message
+	RuntimeReturnDirectly map[string]bool
+}
+
 type reactConfig struct {
 	model model.ToolCallingChatModel
 
 	toolsConfig *compose.ToolsNodeConfig
 
 	toolsReturnDirectly map[string]bool
-
-	supportRuntimeReturnDirectly bool
 
 	agentName string
 
@@ -223,7 +214,7 @@ func genToolInfos(ctx context.Context, config *compose.ToolsNodeConfig) ([]*sche
 	return toolInfos, nil
 }
 
-type reactGraph = *compose.Graph[[]Message, Message]
+type reactGraph = *compose.Graph[*reactInput, Message]
 type sToolNodeOutput = *schema.StreamReader[[]Message]
 type sGraphOutput = MessageStream
 
@@ -256,11 +247,21 @@ func newReact(ctx context.Context, config *reactConfig) (reactGraph, error) {
 	}
 
 	const (
+		initNode_  = "Init"
 		chatModel_ = "ChatModel"
 		toolNode_  = "ToolNode"
 	)
 
-	g := compose.NewGraph[[]Message, Message](compose.WithGenLocalState(genState))
+	g := compose.NewGraph[*reactInput, Message](compose.WithGenLocalState(genState))
+
+	initLambda := func(ctx context.Context, input *reactInput) ([]Message, error) {
+		_ = compose.ProcessState(ctx, func(ctx context.Context, st *State) error {
+			st.RuntimeReturnDirectly = input.RuntimeReturnDirectly
+			return nil
+		})
+		return input.Messages, nil
+	}
+	_ = g.AddLambdaNode(initNode_, compose.InvokableLambda(initLambda), compose.WithNodeName(initNode_))
 
 	toolsInfo, err := genToolInfos(ctx, config.toolsConfig)
 	if err != nil {
@@ -327,10 +328,8 @@ func newReact(ctx context.Context, config *reactConfig) (reactGraph, error) {
 		input = st.Messages[len(st.Messages)-1]
 
 		returnDirectly := config.toolsReturnDirectly
-		if config.supportRuntimeReturnDirectly {
-			if runtimeRD := getRuntimeReturnDirectlyFromCtx(ctx); runtimeRD != nil {
-				returnDirectly = runtimeRD
-			}
+		if len(st.RuntimeReturnDirectly) > 0 {
+			returnDirectly = st.RuntimeReturnDirectly
 		}
 
 		if len(returnDirectly) > 0 {
@@ -349,7 +348,8 @@ func newReact(ctx context.Context, config *reactConfig) (reactGraph, error) {
 	_ = g.AddToolsNode(toolNode_, toolsNode,
 		compose.WithStatePreHandler(toolPreHandle), compose.WithNodeName(toolNode_))
 
-	_ = g.AddEdge(compose.START, chatModel_)
+	_ = g.AddEdge(compose.START, initNode_)
+	_ = g.AddEdge(initNode_, chatModel_)
 
 	toolCallCheck := func(ctx context.Context, sMsg MessageStream) (string, error) {
 		defer sMsg.Close()
@@ -371,11 +371,7 @@ func newReact(ctx context.Context, config *reactConfig) (reactGraph, error) {
 	branch := compose.NewStreamGraphBranch(toolCallCheck, map[string]bool{compose.END: true, toolNode_: true})
 	_ = g.AddBranch(chatModel_, branch)
 
-	needReturnDirectlyBranch := len(config.toolsReturnDirectly) > 0 || config.supportRuntimeReturnDirectly
-
-	if !needReturnDirectlyBranch {
-		_ = g.AddEdge(toolNode_, chatModel_)
-	} else {
+	{
 		const (
 			toolNodeToEndConverter = "ToolNodeToEndConverter"
 		)
