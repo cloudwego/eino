@@ -22,14 +22,26 @@ import (
 	"github.com/cloudwego/eino/components/tool"
 )
 
-// HandlerToolsConfig holds the tools configuration that can be modified by ToolsModifier.
-// It provides methods for safe modification of tools and their settings.
+type ToolMeta struct {
+	Tool           tool.BaseTool
+	ReturnDirectly bool
+}
+
+type AgentConfig struct {
+	Instruction string
+	Tools       []ToolMeta
+	Input       *AgentInput
+	RunOptions  *AgentRunOptions
+}
+
+type AgentRunOptions struct {
+}
+
 type HandlerToolsConfig struct {
 	tools          []tool.BaseTool
 	returnDirectly map[string]bool
 }
 
-// NewHandlerToolsConfig creates a new HandlerToolsConfig with the given tools and return-directly settings.
 func NewHandlerToolsConfig(tools []tool.BaseTool, returnDirectly map[string]bool) *HandlerToolsConfig {
 	tc := &HandlerToolsConfig{
 		tools:          make([]tool.BaseTool, len(tools)),
@@ -42,17 +54,14 @@ func NewHandlerToolsConfig(tools []tool.BaseTool, returnDirectly map[string]bool
 	return tc
 }
 
-// AddTool adds a tool to the configuration.
 func (c *HandlerToolsConfig) AddTool(t tool.BaseTool) {
 	c.tools = append(c.tools, t)
 }
 
-// AddTools adds multiple tools to the configuration.
 func (c *HandlerToolsConfig) AddTools(ts ...tool.BaseTool) {
 	c.tools = append(c.tools, ts...)
 }
 
-// RemoveTool removes a tool by name. Returns true if found and removed.
 func (c *HandlerToolsConfig) RemoveTool(ctx context.Context, name string) bool {
 	for i, t := range c.tools {
 		info, err := t.Info(ctx)
@@ -68,7 +77,6 @@ func (c *HandlerToolsConfig) RemoveTool(ctx context.Context, name string) bool {
 	return false
 }
 
-// SetReturnDirectly sets whether a tool should cause immediate return when called.
 func (c *HandlerToolsConfig) SetReturnDirectly(toolName string, returnDirectly bool) {
 	if returnDirectly {
 		c.returnDirectly[toolName] = true
@@ -77,18 +85,54 @@ func (c *HandlerToolsConfig) SetReturnDirectly(toolName string, returnDirectly b
 	}
 }
 
-// Tools returns a copy of the current tools list.
 func (c *HandlerToolsConfig) Tools() []tool.BaseTool {
 	result := make([]tool.BaseTool, len(c.tools))
 	copy(result, c.tools)
 	return result
 }
 
-// ReturnDirectly returns a copy of the return-directly map.
 func (c *HandlerToolsConfig) ReturnDirectly() map[string]bool {
 	result := make(map[string]bool)
 	for k, v := range c.returnDirectly {
 		result[k] = v
 	}
 	return result
+}
+
+func (c *HandlerToolsConfig) ToToolMetas() []ToolMeta {
+	result := make([]ToolMeta, len(c.tools))
+	for i, t := range c.tools {
+		result[i] = ToolMeta{Tool: t, ReturnDirectly: false}
+	}
+	for name, rd := range c.returnDirectly {
+		for i, t := range c.tools {
+			info, err := t.Info(context.Background())
+			if err != nil {
+				continue
+			}
+			if info.Name == name {
+				result[i].ReturnDirectly = rd
+				break
+			}
+		}
+	}
+	return result
+}
+
+func ToolMetasToHandlerToolsConfig(metas []ToolMeta) *HandlerToolsConfig {
+	tools := make([]tool.BaseTool, len(metas))
+	returnDirectly := make(map[string]bool)
+	for i, m := range metas {
+		tools[i] = m.Tool
+		if m.ReturnDirectly {
+			info, err := m.Tool.Info(context.Background())
+			if err == nil {
+				returnDirectly[info.Name] = true
+			}
+		}
+	}
+	return &HandlerToolsConfig{
+		tools:          tools,
+		returnDirectly: returnDirectly,
+	}
 }

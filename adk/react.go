@@ -48,6 +48,20 @@ func setToolResultSendersToCtx(ctx context.Context, addr Address, sender adkTool
 	})
 }
 
+type runtimeReturnDirectlyCtxKey struct{}
+
+func setRuntimeReturnDirectlyToCtx(ctx context.Context, returnDirectly map[string]bool) context.Context {
+	return context.WithValue(ctx, runtimeReturnDirectlyCtxKey{}, returnDirectly)
+}
+
+func getRuntimeReturnDirectlyFromCtx(ctx context.Context) map[string]bool {
+	v := ctx.Value(runtimeReturnDirectlyCtxKey{})
+	if v == nil {
+		return nil
+	}
+	return v.(map[string]bool)
+}
+
 func getToolResultSendersFromCtx(ctx context.Context) *toolResultSenders {
 	v := ctx.Value(toolResultSendersCtxKey{})
 	if v == nil {
@@ -76,22 +90,6 @@ type State struct {
 	RemainingIterations int
 }
 
-// SendToolGenAction attaches an AgentAction to the next tool event emitted for the
-// current tool execution.
-//
-// Where/when to use:
-//   - Invoke within a tool's Run (Invokable/Streamable) implementation to include
-//     an action alongside that tool's output event.
-//   - The action is scoped by the current tool call context: if a ToolCallID is
-//     available, it is used as the key to support concurrent calls of the same
-//     tool with different parameters; otherwise, the provided toolName is used.
-//   - The stored action is ephemeral and will be popped and attached to the tool
-//     event when the tool finishes (including streaming completion).
-//
-// Limitation:
-//   - This function is intended for use within ChatModelAgent runs only. It relies
-//     on ChatModelAgent's internal State to store and pop actions, which is not
-//     available in other agent types.
 func SendToolGenAction(ctx context.Context, toolName string, action *AgentAction) error {
 	key := toolName
 	toolCallID := compose.GetToolCallID(ctx)
@@ -184,12 +182,13 @@ type reactConfig struct {
 
 	toolsReturnDirectly map[string]bool
 
+	supportRuntimeReturnDirectly bool
+
 	agentName string
 
 	maxIterations int
 
-	messageStatePreProcessors  []MessageStatePreProcessor
-	messageStatePostProcessors []MessageStatePostProcessor
+	handlers []AgentHandler
 
 	modelRetryConfig *ModelRetryConfig
 }
@@ -280,9 +279,9 @@ func newReact(ctx context.Context, config *reactConfig) (reactGraph, error) {
 
 		messages := append(st.Messages, input...)
 
-		for _, p := range config.messageStatePreProcessors {
+		for _, h := range config.handlers {
 			var err error
-			messages, err = p.PreProcessMessageState(ctx, messages)
+			ctx, messages, err = h.BeforeModelRewriteHistory(ctx, messages)
 			if err != nil {
 				return nil, err
 			}
@@ -294,9 +293,9 @@ func newReact(ctx context.Context, config *reactConfig) (reactGraph, error) {
 	modelPostHandle := func(ctx context.Context, input Message, st *State) (Message, error) {
 		messages := append(st.Messages, input)
 
-		for _, p := range config.messageStatePostProcessors {
+		for _, h := range config.handlers {
 			var err error
-			messages, err = p.PostProcessMessageState(ctx, messages)
+			ctx, messages, err = h.AfterModelRewriteHistory(ctx, messages)
 			if err != nil {
 				return nil, err
 			}
@@ -310,10 +309,18 @@ func newReact(ctx context.Context, config *reactConfig) (reactGraph, error) {
 
 	toolPreHandle := func(ctx context.Context, input Message, st *State) (Message, error) {
 		input = st.Messages[len(st.Messages)-1]
-		if len(config.toolsReturnDirectly) > 0 {
+
+		returnDirectly := config.toolsReturnDirectly
+		if config.supportRuntimeReturnDirectly {
+			if runtimeRD := getRuntimeReturnDirectlyFromCtx(ctx); runtimeRD != nil {
+				returnDirectly = runtimeRD
+			}
+		}
+
+		if len(returnDirectly) > 0 {
 			for i := range input.ToolCalls {
 				toolName := input.ToolCalls[i].Function.Name
-				if config.toolsReturnDirectly[toolName] {
+				if returnDirectly[toolName] {
 					st.ReturnDirectlyToolCallID = input.ToolCalls[i].ID
 					st.HasReturnDirectly = true
 				}
@@ -348,7 +355,9 @@ func newReact(ctx context.Context, config *reactConfig) (reactGraph, error) {
 	branch := compose.NewStreamGraphBranch(toolCallCheck, map[string]bool{compose.END: true, toolNode_: true})
 	_ = g.AddBranch(chatModel_, branch)
 
-	if len(config.toolsReturnDirectly) == 0 {
+	needReturnDirectlyBranch := len(config.toolsReturnDirectly) > 0 || config.supportRuntimeReturnDirectly
+
+	if !needReturnDirectlyBranch {
 		_ = g.AddEdge(toolNode_, chatModel_)
 	} else {
 		const (

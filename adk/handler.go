@@ -19,105 +19,70 @@ package adk
 import (
 	"context"
 
-	"github.com/cloudwego/eino/components/tool"
-	"github.com/cloudwego/eino/schema"
+	"github.com/cloudwego/eino/compose"
 )
 
-// Handler is the base interface for the new middleware system.
-// Implementations can optionally implement capability interfaces
-// to provide specific functionality.
-//
-// Unlike the struct-based AgentMiddleware, Handler allows:
-//   - Custom implementations with internal state
-//   - Polymorphic composition of different handler types
-//   - Easy mocking and testing
-//   - Extensibility without modifying existing types
-//
-// A Handler can implement any combination of capability interfaces:
-//   - InstructionModifier: modify the agent's system instruction
-//   - ToolsModifier: add, remove, or modify tools
-//   - MessageStatePreProcessor: process and persist messages before chat model calls
-//   - MessageStatePostProcessor: process and persist messages after chat model calls
-//   - InvokableToolCallInterceptor: intercept non-streaming tool calls
-//   - StreamableToolCallInterceptor: intercept streaming tool calls
-type Handler interface {
+type ToolCallInput = compose.ToolInput
+type ToolCallResult = compose.ToolOutput
+type StreamToolCallResult = compose.StreamToolOutput
+
+type AgentHandler interface {
 	Name() string
-}
 
-// InstructionModifier modifies the agent's system instruction.
-// Unlike AgentMiddleware.AdditionalInstruction which only appends text,
-// this interface allows any transformation: prepend, replace, conditional logic, etc.
-type InstructionModifier interface {
-	Handler
-	ModifyInstruction(ctx context.Context, instruction string) (string, error)
-}
+	BeforeAgent(ctx context.Context, config *AgentConfig) (context.Context, error)
 
-// ToolsModifier modifies the agent's tools configuration.
-// Unlike AgentMiddleware.AdditionalTools which only adds tools,
-// this interface allows adding, removing, modifying tools,
-// and controlling which tools return directly.
-type ToolsModifier interface {
-	Handler
-	ModifyTools(ctx context.Context, config *HandlerToolsConfig) error
-}
+	BeforeModelRewriteHistory(ctx context.Context, messages []Message) (context.Context, []Message, error)
+	AfterModelRewriteHistory(ctx context.Context, messages []Message) (context.Context, []Message, error)
 
-// MessageStatePreProcessor processes and persists message state before each chat model invocation.
-// Unlike AgentMiddleware.BeforeChatModel which mutates state via pointer,
-// this interface uses a functional style: receive messages, return (possibly modified) messages.
-//
-// The returned messages are persisted to the agent's internal state and will be visible
-// to subsequent iterations of the agent loop.
-type MessageStatePreProcessor interface {
-	Handler
-	PreProcessMessageState(ctx context.Context, messages []Message) ([]Message, error)
-}
-
-// MessageStatePostProcessor processes and persists message state after each chat model invocation.
-// Unlike AgentMiddleware.AfterChatModel which mutates state via pointer,
-// this interface uses a functional style: receive messages, return (possibly modified) messages.
-//
-// The returned messages are persisted to the agent's internal state and will be visible
-// to subsequent iterations of the agent loop.
-type MessageStatePostProcessor interface {
-	Handler
-	PostProcessMessageState(ctx context.Context, messages []Message) ([]Message, error)
-}
-
-// InvokableToolCallInterceptor intercepts non-streaming tool calls.
-// This provides a simpler API than compose.ToolMiddleware.
-//
-// Use cases:
-//   - Logging tool calls and results
-//   - Caching tool results
-//   - Transforming arguments before execution
-//   - Transforming results after execution
-//   - Short-circuiting tool calls with custom results
-type InvokableToolCallInterceptor interface {
-	Handler
 	WrapInvokableToolCall(
 		ctx context.Context,
-		toolName string,
-		arguments string,
-		opts []tool.Option,
-		next func(ctx context.Context, arguments string, opts []tool.Option) (string, error),
-	) (string, error)
-}
+		input *ToolCallInput,
+		next func(context.Context, *ToolCallInput) (*ToolCallResult, error),
+	) (*ToolCallResult, error)
 
-// StreamableToolCallInterceptor intercepts streaming tool calls.
-// This provides a simpler API than compose.ToolMiddleware.
-//
-// Use cases:
-//   - Logging streaming tool calls
-//   - Transforming arguments before execution
-//   - Wrapping or transforming the result stream
-//   - Short-circuiting with custom streams
-type StreamableToolCallInterceptor interface {
-	Handler
 	WrapStreamableToolCall(
 		ctx context.Context,
-		toolName string,
-		arguments string,
-		opts []tool.Option,
-		next func(ctx context.Context, arguments string, opts []tool.Option) (*schema.StreamReader[string], error),
-	) (*schema.StreamReader[string], error)
+		input *ToolCallInput,
+		next func(context.Context, *ToolCallInput) (*StreamToolCallResult, error),
+	) (*StreamToolCallResult, error)
+}
+
+type BaseAgentHandler struct {
+	name string
+}
+
+func NewBaseAgentHandler(name string) BaseAgentHandler {
+	return BaseAgentHandler{name: name}
+}
+
+func (b BaseAgentHandler) Name() string {
+	return b.name
+}
+
+func (b BaseAgentHandler) BeforeAgent(ctx context.Context, config *AgentConfig) (context.Context, error) {
+	return ctx, nil
+}
+
+func (b BaseAgentHandler) BeforeModelRewriteHistory(ctx context.Context, messages []Message) (context.Context, []Message, error) {
+	return ctx, messages, nil
+}
+
+func (b BaseAgentHandler) AfterModelRewriteHistory(ctx context.Context, messages []Message) (context.Context, []Message, error) {
+	return ctx, messages, nil
+}
+
+func (b BaseAgentHandler) WrapInvokableToolCall(
+	ctx context.Context,
+	input *ToolCallInput,
+	next func(context.Context, *ToolCallInput) (*ToolCallResult, error),
+) (*ToolCallResult, error) {
+	return next(ctx, input)
+}
+
+func (b BaseAgentHandler) WrapStreamableToolCall(
+	ctx context.Context,
+	input *ToolCallInput,
+	next func(context.Context, *ToolCallInput) (*StreamToolCallResult, error),
+) (*StreamToolCallResult, error) {
+	return next(ctx, input)
 }
