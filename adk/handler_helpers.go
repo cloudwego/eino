@@ -32,13 +32,13 @@ type instructionHandler struct {
 	text string
 }
 
-func (h *instructionHandler) BeforeAgent(ctx context.Context, runCtx *AgentRunContext) (context.Context, error) {
+func (h *instructionHandler) BeforeAgent(ctx context.Context, runCtx *AgentRunContext) (context.Context, *AgentRunContext, error) {
 	if runCtx.Instruction == "" {
 		runCtx.Instruction = h.text
 	} else if h.text != "" {
 		runCtx.Instruction = runCtx.Instruction + "\n" + h.text
 	}
-	return ctx, nil
+	return ctx, runCtx, nil
 }
 
 // WithInstructionFunc creates a handler with custom instruction modification logic.
@@ -51,13 +51,13 @@ type instructionFuncHandler struct {
 	fn func(ctx context.Context, instruction string) (context.Context, string, error)
 }
 
-func (h *instructionFuncHandler) BeforeAgent(ctx context.Context, runCtx *AgentRunContext) (context.Context, error) {
+func (h *instructionFuncHandler) BeforeAgent(ctx context.Context, runCtx *AgentRunContext) (context.Context, *AgentRunContext, error) {
 	newCtx, newInstruction, err := h.fn(ctx, runCtx.Instruction)
 	if err != nil {
-		return ctx, err
+		return ctx, runCtx, err
 	}
 	runCtx.Instruction = newInstruction
-	return newCtx, nil
+	return newCtx, runCtx, nil
 }
 
 // WithTools creates a handler that adds tools.
@@ -70,11 +70,11 @@ type toolsHandler struct {
 	tools []tool.BaseTool
 }
 
-func (h *toolsHandler) BeforeAgent(ctx context.Context, runCtx *AgentRunContext) (context.Context, error) {
+func (h *toolsHandler) BeforeAgent(ctx context.Context, runCtx *AgentRunContext) (context.Context, *AgentRunContext, error) {
 	for _, t := range h.tools {
 		runCtx.Tools = append(runCtx.Tools, ToolMeta{Tool: t, ReturnDirectly: false})
 	}
-	return ctx, nil
+	return ctx, runCtx, nil
 }
 
 // WithToolsFunc creates a handler with custom tools modification logic.
@@ -87,26 +87,26 @@ type toolsFuncHandler struct {
 	fn func(ctx context.Context, tools []ToolMeta) (context.Context, []ToolMeta, error)
 }
 
-func (h *toolsFuncHandler) BeforeAgent(ctx context.Context, runCtx *AgentRunContext) (context.Context, error) {
+func (h *toolsFuncHandler) BeforeAgent(ctx context.Context, runCtx *AgentRunContext) (context.Context, *AgentRunContext, error) {
 	newCtx, newTools, err := h.fn(ctx, runCtx.Tools)
 	if err != nil {
-		return ctx, err
+		return ctx, runCtx, err
 	}
 	runCtx.Tools = newTools
-	return newCtx, nil
+	return newCtx, runCtx, nil
 }
 
 // WithBeforeAgent creates a handler with a generic BeforeAgent hook.
-func WithBeforeAgent(fn func(ctx context.Context, runCtx *AgentRunContext) (context.Context, error)) AgentHandler {
+func WithBeforeAgent(fn func(ctx context.Context, runCtx *AgentRunContext) (context.Context, *AgentRunContext, error)) AgentHandler {
 	return &beforeAgentHandler{fn: fn}
 }
 
 type beforeAgentHandler struct {
 	BaseAgentHandler
-	fn func(ctx context.Context, runCtx *AgentRunContext) (context.Context, error)
+	fn func(ctx context.Context, runCtx *AgentRunContext) (context.Context, *AgentRunContext, error)
 }
 
-func (h *beforeAgentHandler) BeforeAgent(ctx context.Context, runCtx *AgentRunContext) (context.Context, error) {
+func (h *beforeAgentHandler) BeforeAgent(ctx context.Context, runCtx *AgentRunContext) (context.Context, *AgentRunContext, error) {
 	return h.fn(ctx, runCtx)
 }
 
@@ -138,16 +138,16 @@ func (h *afterModelRewriteHistoryHandler) AfterModelRewriteHistory(ctx context.C
 	return h.fn(ctx, messages)
 }
 
-// WithToolCallHandler creates a handler that wraps tool calls.
-func WithToolCallHandler(handler ToolCallHandler) AgentHandler {
-	return &toolCallHandlerWrapper{handler: handler}
+// WithToolCallWrapper creates a handler that wraps tool calls.
+func WithToolCallWrapper(wrapper ToolCallWrapper) AgentHandler {
+	return &toolCallWrapperHandler{wrapper: wrapper}
 }
 
-type toolCallHandlerWrapper struct {
+type toolCallWrapperHandler struct {
 	BaseAgentHandler
-	handler ToolCallHandler
+	wrapper ToolCallWrapper
 }
 
-func (h *toolCallHandlerWrapper) GetToolCallHandler() ToolCallHandler {
-	return h.handler
+func (h *toolCallWrapperHandler) GetToolCallWrapper() ToolCallWrapper {
+	return h.wrapper
 }
