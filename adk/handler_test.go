@@ -381,25 +381,33 @@ func TestToolCallWrapperHandlers(t *testing.T) {
 				},
 			},
 			Handlers: []AgentHandler{
-				WithInvokableToolWrapper(func(ctx context.Context, input *ToolCallInput, next func(context.Context, *ToolCallInput) (*ToolCallResult, error)) (*ToolCallResult, error) {
-					mu.Lock()
-					callOrder = append(callOrder, "wrapper1-before")
-					mu.Unlock()
-					result, err := next(ctx, input)
-					mu.Lock()
-					callOrder = append(callOrder, "wrapper1-after")
-					mu.Unlock()
-					return result, err
+				WithToolMiddleware(compose.ToolMiddleware{
+					Invokable: func(next compose.InvokableToolEndpoint) compose.InvokableToolEndpoint {
+						return func(ctx context.Context, input *compose.ToolInput) (*compose.ToolOutput, error) {
+							mu.Lock()
+							callOrder = append(callOrder, "wrapper1-before")
+							mu.Unlock()
+							result, err := next(ctx, input)
+							mu.Lock()
+							callOrder = append(callOrder, "wrapper1-after")
+							mu.Unlock()
+							return result, err
+						}
+					},
 				}),
-				WithInvokableToolWrapper(func(ctx context.Context, input *ToolCallInput, next func(context.Context, *ToolCallInput) (*ToolCallResult, error)) (*ToolCallResult, error) {
-					mu.Lock()
-					callOrder = append(callOrder, "wrapper2-before")
-					mu.Unlock()
-					result, err := next(ctx, input)
-					mu.Lock()
-					callOrder = append(callOrder, "wrapper2-after")
-					mu.Unlock()
-					return result, err
+				WithToolMiddleware(compose.ToolMiddleware{
+					Invokable: func(next compose.InvokableToolEndpoint) compose.InvokableToolEndpoint {
+						return func(ctx context.Context, input *compose.ToolInput) (*compose.ToolOutput, error) {
+							mu.Lock()
+							callOrder = append(callOrder, "wrapper2-before")
+							mu.Unlock()
+							result, err := next(ctx, input)
+							mu.Lock()
+							callOrder = append(callOrder, "wrapper2-after")
+							mu.Unlock()
+							return result, err
+						}
+					},
 				}),
 			},
 		})
@@ -442,12 +450,16 @@ func TestToolCallWrapperHandlers(t *testing.T) {
 				},
 			},
 			Handlers: []AgentHandler{
-				WithInvokableToolWrapper(func(ctx context.Context, input *ToolCallInput, next func(context.Context, *ToolCallInput) (*ToolCallResult, error)) (*ToolCallResult, error) {
-					result, err := next(ctx, input)
-					if err == nil {
-						result.Result = "modified: " + result.Result
-					}
-					return result, err
+				WithToolMiddleware(compose.ToolMiddleware{
+					Invokable: func(next compose.InvokableToolEndpoint) compose.InvokableToolEndpoint {
+						return func(ctx context.Context, input *compose.ToolInput) (*compose.ToolOutput, error) {
+							result, err := next(ctx, input)
+							if err == nil {
+								result.Result = "modified: " + result.Result
+							}
+							return result, err
+						}
+					},
 				}),
 			},
 		})
@@ -560,9 +572,7 @@ func TestCustomHandler(t *testing.T) {
 		cm.EXPECT().Generate(gomock.Any(), gomock.Any(), gomock.Any()).
 			Return(schema.AssistantMessage("response", nil), nil).Times(1)
 
-		customHandler := &countingHandler{
-			BaseAgentHandler: NewBaseAgentHandler("counting-handler"),
-		}
+		customHandler := &countingHandler{}
 
 		agent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
 			Name:        "TestAgent",

@@ -22,42 +22,42 @@ import (
 	"github.com/cloudwego/eino/compose"
 )
 
-type ToolCallInput = compose.ToolInput
-type ToolCallResult = compose.ToolOutput
-type StreamToolCallResult = compose.StreamToolOutput
-
+// AgentHandler defines the interface for customizing agent behavior.
+// Implementations can modify agent configuration, rewrite message history,
+// and wrap tool calls with custom logic.
+//
+// Use BaseAgentHandler as an embedded struct to provide default no-op
+// implementations for all methods.
 type AgentHandler interface {
-	Name() string
-
+	// BeforeAgent is called before each agent run, allowing modification of
+	// the agent's instruction and tools configuration.
 	BeforeAgent(ctx context.Context, config *AgentConfig) (context.Context, error)
 
+	// BeforeModelRewriteHistory is called before each model invocation.
+	// The returned messages are persisted to the agent's internal state.
 	BeforeModelRewriteHistory(ctx context.Context, messages []Message) (context.Context, []Message, error)
+
+	// AfterModelRewriteHistory is called after each model invocation.
+	// The returned messages are persisted to the agent's internal state.
 	AfterModelRewriteHistory(ctx context.Context, messages []Message) (context.Context, []Message, error)
 
-	WrapInvokableToolCall(
-		ctx context.Context,
-		input *ToolCallInput,
-		next func(context.Context, *ToolCallInput) (*ToolCallResult, error),
-	) (*ToolCallResult, error)
-
-	WrapStreamableToolCall(
-		ctx context.Context,
-		input *ToolCallInput,
-		next func(context.Context, *ToolCallInput) (*StreamToolCallResult, error),
-	) (*StreamToolCallResult, error)
+	// GetToolMiddleware returns a ToolMiddleware for wrapping tool calls.
+	// Return an empty ToolMiddleware{} if no tool wrapping is needed.
+	//
+	// This follows the same pattern as compose.ToolMiddleware, allowing
+	// handlers to wrap both invokable and streamable tool calls.
+	//
+	// The middleware receives a compose.ToolInput which contains:
+	//   - Name: tool name (should not be modified)
+	//   - CallID: unique call identifier (should not be modified)
+	//   - Arguments: tool arguments (may be modified)
+	//   - CallOptions: tool options (may be modified)
+	GetToolMiddleware() compose.ToolMiddleware
 }
 
-type BaseAgentHandler struct {
-	name string
-}
-
-func NewBaseAgentHandler(name string) BaseAgentHandler {
-	return BaseAgentHandler{name: name}
-}
-
-func (b BaseAgentHandler) Name() string {
-	return b.name
-}
+// BaseAgentHandler provides default no-op implementations for AgentHandler.
+// Embed this struct in custom handlers to only override the methods you need.
+type BaseAgentHandler struct{}
 
 func (b BaseAgentHandler) BeforeAgent(ctx context.Context, config *AgentConfig) (context.Context, error) {
 	return ctx, nil
@@ -71,18 +71,6 @@ func (b BaseAgentHandler) AfterModelRewriteHistory(ctx context.Context, messages
 	return ctx, messages, nil
 }
 
-func (b BaseAgentHandler) WrapInvokableToolCall(
-	ctx context.Context,
-	input *ToolCallInput,
-	next func(context.Context, *ToolCallInput) (*ToolCallResult, error),
-) (*ToolCallResult, error) {
-	return next(ctx, input)
-}
-
-func (b BaseAgentHandler) WrapStreamableToolCall(
-	ctx context.Context,
-	input *ToolCallInput,
-	next func(context.Context, *ToolCallInput) (*StreamToolCallResult, error),
-) (*StreamToolCallResult, error) {
-	return next(ctx, input)
+func (b BaseAgentHandler) GetToolMiddleware() compose.ToolMiddleware {
+	return compose.ToolMiddleware{}
 }

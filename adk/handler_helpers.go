@@ -20,13 +20,12 @@ import (
 	"context"
 
 	"github.com/cloudwego/eino/components/tool"
+	"github.com/cloudwego/eino/compose"
 )
 
+// WithInstruction creates a handler that appends instruction text.
 func WithInstruction(text string) AgentHandler {
-	return &instructionHandler{
-		BaseAgentHandler: NewBaseAgentHandler("instruction"),
-		text:             text,
-	}
+	return &instructionHandler{text: text}
 }
 
 type instructionHandler struct {
@@ -43,11 +42,9 @@ func (h *instructionHandler) BeforeAgent(ctx context.Context, config *AgentConfi
 	return ctx, nil
 }
 
+// WithInstructionFunc creates a handler with custom instruction modification logic.
 func WithInstructionFunc(fn func(ctx context.Context, instruction string) (context.Context, string, error)) AgentHandler {
-	return &instructionFuncHandler{
-		BaseAgentHandler: NewBaseAgentHandler("instruction-func"),
-		fn:               fn,
-	}
+	return &instructionFuncHandler{fn: fn}
 }
 
 type instructionFuncHandler struct {
@@ -64,11 +61,9 @@ func (h *instructionFuncHandler) BeforeAgent(ctx context.Context, config *AgentC
 	return newCtx, nil
 }
 
+// WithTools creates a handler that adds tools.
 func WithTools(tools ...tool.BaseTool) AgentHandler {
-	return &toolsHandler{
-		BaseAgentHandler: NewBaseAgentHandler("tools"),
-		tools:            tools,
-	}
+	return &toolsHandler{tools: tools}
 }
 
 type toolsHandler struct {
@@ -83,11 +78,9 @@ func (h *toolsHandler) BeforeAgent(ctx context.Context, config *AgentConfig) (co
 	return ctx, nil
 }
 
+// WithToolsFunc creates a handler with custom tools modification logic.
 func WithToolsFunc(fn func(ctx context.Context, tools []ToolMeta) (context.Context, []ToolMeta, error)) AgentHandler {
-	return &toolsFuncHandler{
-		BaseAgentHandler: NewBaseAgentHandler("tools-func"),
-		fn:               fn,
-	}
+	return &toolsFuncHandler{fn: fn}
 }
 
 type toolsFuncHandler struct {
@@ -104,11 +97,9 @@ func (h *toolsFuncHandler) BeforeAgent(ctx context.Context, config *AgentConfig)
 	return newCtx, nil
 }
 
+// WithBeforeAgent creates a handler with a generic BeforeAgent hook.
 func WithBeforeAgent(fn func(ctx context.Context, config *AgentConfig) (context.Context, error)) AgentHandler {
-	return &beforeAgentHandler{
-		BaseAgentHandler: NewBaseAgentHandler("before-agent"),
-		fn:               fn,
-	}
+	return &beforeAgentHandler{fn: fn}
 }
 
 type beforeAgentHandler struct {
@@ -120,11 +111,9 @@ func (h *beforeAgentHandler) BeforeAgent(ctx context.Context, config *AgentConfi
 	return h.fn(ctx, config)
 }
 
+// WithBeforeModelRewriteHistory creates a handler that processes messages before model invocation.
 func WithBeforeModelRewriteHistory(fn func(ctx context.Context, messages []Message) (context.Context, []Message, error)) AgentHandler {
-	return &beforeModelRewriteHistoryHandler{
-		BaseAgentHandler: NewBaseAgentHandler("before-model-rewrite-history"),
-		fn:               fn,
-	}
+	return &beforeModelRewriteHistoryHandler{fn: fn}
 }
 
 type beforeModelRewriteHistoryHandler struct {
@@ -136,11 +125,9 @@ func (h *beforeModelRewriteHistoryHandler) BeforeModelRewriteHistory(ctx context
 	return h.fn(ctx, messages)
 }
 
+// WithAfterModelRewriteHistory creates a handler that processes messages after model invocation.
 func WithAfterModelRewriteHistory(fn func(ctx context.Context, messages []Message) (context.Context, []Message, error)) AgentHandler {
-	return &afterModelRewriteHistoryHandler{
-		BaseAgentHandler: NewBaseAgentHandler("after-model-rewrite-history"),
-		fn:               fn,
-	}
+	return &afterModelRewriteHistoryHandler{fn: fn}
 }
 
 type afterModelRewriteHistoryHandler struct {
@@ -152,34 +139,17 @@ func (h *afterModelRewriteHistoryHandler) AfterModelRewriteHistory(ctx context.C
 	return h.fn(ctx, messages)
 }
 
-func WithInvokableToolWrapper(fn func(ctx context.Context, input *ToolCallInput, next func(context.Context, *ToolCallInput) (*ToolCallResult, error)) (*ToolCallResult, error)) AgentHandler {
-	return &invokableToolWrapperHandler{
-		BaseAgentHandler: NewBaseAgentHandler("invokable-tool-wrapper"),
-		fn:               fn,
-	}
+// WithToolMiddleware creates a handler that wraps tool calls using compose.ToolMiddleware.
+// This is the recommended way to wrap both invokable and streamable tool calls.
+func WithToolMiddleware(mw compose.ToolMiddleware) AgentHandler {
+	return &toolMiddlewareHandler{mw: mw}
 }
 
-type invokableToolWrapperHandler struct {
+type toolMiddlewareHandler struct {
 	BaseAgentHandler
-	fn func(ctx context.Context, input *ToolCallInput, next func(context.Context, *ToolCallInput) (*ToolCallResult, error)) (*ToolCallResult, error)
+	mw compose.ToolMiddleware
 }
 
-func (h *invokableToolWrapperHandler) WrapInvokableToolCall(ctx context.Context, input *ToolCallInput, next func(context.Context, *ToolCallInput) (*ToolCallResult, error)) (*ToolCallResult, error) {
-	return h.fn(ctx, input, next)
-}
-
-func WithStreamableToolWrapper(fn func(ctx context.Context, input *ToolCallInput, next func(context.Context, *ToolCallInput) (*StreamToolCallResult, error)) (*StreamToolCallResult, error)) AgentHandler {
-	return &streamableToolWrapperHandler{
-		BaseAgentHandler: NewBaseAgentHandler("streamable-tool-wrapper"),
-		fn:               fn,
-	}
-}
-
-type streamableToolWrapperHandler struct {
-	BaseAgentHandler
-	fn func(ctx context.Context, input *ToolCallInput, next func(context.Context, *ToolCallInput) (*StreamToolCallResult, error)) (*StreamToolCallResult, error)
-}
-
-func (h *streamableToolWrapperHandler) WrapStreamableToolCall(ctx context.Context, input *ToolCallInput, next func(context.Context, *ToolCallInput) (*StreamToolCallResult, error)) (*StreamToolCallResult, error) {
-	return h.fn(ctx, input, next)
+func (h *toolMiddlewareHandler) GetToolMiddleware() compose.ToolMiddleware {
+	return h.mw
 }
