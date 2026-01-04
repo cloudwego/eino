@@ -32,11 +32,11 @@ type instructionHandler struct {
 	text string
 }
 
-func (h *instructionHandler) BeforeAgent(ctx context.Context, config *AgentConfig) (context.Context, error) {
-	if config.Instruction == "" {
-		config.Instruction = h.text
+func (h *instructionHandler) BeforeAgent(ctx context.Context, runCtx *AgentRunContext) (context.Context, error) {
+	if runCtx.Instruction == "" {
+		runCtx.Instruction = h.text
 	} else if h.text != "" {
-		config.Instruction = config.Instruction + "\n" + h.text
+		runCtx.Instruction = runCtx.Instruction + "\n" + h.text
 	}
 	return ctx, nil
 }
@@ -51,12 +51,12 @@ type instructionFuncHandler struct {
 	fn func(ctx context.Context, instruction string) (context.Context, string, error)
 }
 
-func (h *instructionFuncHandler) BeforeAgent(ctx context.Context, config *AgentConfig) (context.Context, error) {
-	newCtx, newInstruction, err := h.fn(ctx, config.Instruction)
+func (h *instructionFuncHandler) BeforeAgent(ctx context.Context, runCtx *AgentRunContext) (context.Context, error) {
+	newCtx, newInstruction, err := h.fn(ctx, runCtx.Instruction)
 	if err != nil {
 		return ctx, err
 	}
-	config.Instruction = newInstruction
+	runCtx.Instruction = newInstruction
 	return newCtx, nil
 }
 
@@ -70,9 +70,9 @@ type toolsHandler struct {
 	tools []tool.BaseTool
 }
 
-func (h *toolsHandler) BeforeAgent(ctx context.Context, config *AgentConfig) (context.Context, error) {
+func (h *toolsHandler) BeforeAgent(ctx context.Context, runCtx *AgentRunContext) (context.Context, error) {
 	for _, t := range h.tools {
-		config.Tools = append(config.Tools, ToolMeta{Tool: t, ReturnDirectly: false})
+		runCtx.Tools = append(runCtx.Tools, ToolMeta{Tool: t, ReturnDirectly: false})
 	}
 	return ctx, nil
 }
@@ -87,27 +87,27 @@ type toolsFuncHandler struct {
 	fn func(ctx context.Context, tools []ToolMeta) (context.Context, []ToolMeta, error)
 }
 
-func (h *toolsFuncHandler) BeforeAgent(ctx context.Context, config *AgentConfig) (context.Context, error) {
-	newCtx, newTools, err := h.fn(ctx, config.Tools)
+func (h *toolsFuncHandler) BeforeAgent(ctx context.Context, runCtx *AgentRunContext) (context.Context, error) {
+	newCtx, newTools, err := h.fn(ctx, runCtx.Tools)
 	if err != nil {
 		return ctx, err
 	}
-	config.Tools = newTools
+	runCtx.Tools = newTools
 	return newCtx, nil
 }
 
 // WithBeforeAgent creates a handler with a generic BeforeAgent hook.
-func WithBeforeAgent(fn func(ctx context.Context, config *AgentConfig) (context.Context, error)) AgentHandler {
+func WithBeforeAgent(fn func(ctx context.Context, runCtx *AgentRunContext) (context.Context, error)) AgentHandler {
 	return &beforeAgentHandler{fn: fn}
 }
 
 type beforeAgentHandler struct {
 	BaseAgentHandler
-	fn func(ctx context.Context, config *AgentConfig) (context.Context, error)
+	fn func(ctx context.Context, runCtx *AgentRunContext) (context.Context, error)
 }
 
-func (h *beforeAgentHandler) BeforeAgent(ctx context.Context, config *AgentConfig) (context.Context, error) {
-	return h.fn(ctx, config)
+func (h *beforeAgentHandler) BeforeAgent(ctx context.Context, runCtx *AgentRunContext) (context.Context, error) {
+	return h.fn(ctx, runCtx)
 }
 
 // WithBeforeModelRewriteHistory creates a handler that processes messages before model invocation.

@@ -164,16 +164,16 @@ type AgentMiddleware struct {
 	WrapToolCall compose.ToolMiddleware
 }
 
-func (m AgentMiddleware) BeforeAgent(ctx context.Context, config *AgentConfig) (context.Context, error) {
+func (m AgentMiddleware) BeforeAgent(ctx context.Context, runCtx *AgentRunContext) (context.Context, error) {
 	if m.AdditionalInstruction != "" {
-		if config.Instruction == "" {
-			config.Instruction = m.AdditionalInstruction
+		if runCtx.Instruction == "" {
+			runCtx.Instruction = m.AdditionalInstruction
 		} else {
-			config.Instruction = config.Instruction + "\n" + m.AdditionalInstruction
+			runCtx.Instruction = runCtx.Instruction + "\n" + m.AdditionalInstruction
 		}
 	}
 	for _, t := range m.AdditionalTools {
-		config.Tools = append(config.Tools, ToolMeta{Tool: t, ReturnDirectly: false})
+		runCtx.Tools = append(runCtx.Tools, ToolMeta{Tool: t, ReturnDirectly: false})
 	}
 	return ctx, nil
 }
@@ -829,7 +829,7 @@ func getPreAppliedBeforeAgentFromCtx(ctx context.Context) *preAppliedBeforeAgent
 	return v.(*preAppliedBeforeAgentData)
 }
 
-func (a *ChatModelAgent) applyBeforeAgent(ctx context.Context, input *AgentInput, opts *AgentRunOptions) (context.Context, string, []ToolMeta, error) {
+func (a *ChatModelAgent) applyBeforeAgent(ctx context.Context, input *AgentInput) (context.Context, string, []ToolMeta, error) {
 	toolMetas := make([]ToolMeta, 0, len(a.toolsConfig.Tools))
 	for _, t := range a.toolsConfig.Tools {
 		rd := false
@@ -842,22 +842,20 @@ func (a *ChatModelAgent) applyBeforeAgent(ctx context.Context, input *AgentInput
 		toolMetas = append(toolMetas, ToolMeta{Tool: t, ReturnDirectly: rd})
 	}
 
-	agentConfig := &AgentConfig{
+	runCtx := &AgentRunContext{
 		Instruction: a.instruction,
 		Tools:       toolMetas,
-		Input:       input,
-		RunOptions:  opts,
 	}
 
 	for i, h := range a.handlers {
 		var err error
-		ctx, err = h.BeforeAgent(ctx, agentConfig)
+		ctx, err = h.BeforeAgent(ctx, runCtx)
 		if err != nil {
 			return ctx, "", nil, fmt.Errorf("handler[%d] BeforeAgent failed: %w", i, err)
 		}
 	}
 
-	return ctx, agentConfig.Instruction, agentConfig.Tools, nil
+	return ctx, runCtx.Instruction, runCtx.Tools, nil
 }
 
 func (a *ChatModelAgent) computeGraphConfig(tools []ToolMeta) graphConfig {
@@ -939,7 +937,7 @@ func (a *ChatModelAgent) buildNoToolsRunFunc(ctx context.Context, bc *buildConte
 		if preApplied := getPreAppliedBeforeAgentFromCtx(ctx); preApplied != nil {
 			instruction = preApplied.instruction
 		} else {
-			ctx, instruction, _, err = a.applyBeforeAgent(ctx, input, nil)
+			ctx, instruction, _, err = a.applyBeforeAgent(ctx, input)
 			if err != nil {
 				generator.Send(&AgentEvent{Err: err})
 				return
@@ -1049,7 +1047,7 @@ func (a *ChatModelAgent) buildReactRunFunc(ctx context.Context, bc *buildContext
 			instruction = preApplied.instruction
 			tools = preApplied.tools
 		} else {
-			ctx, instruction, tools, err_ = a.applyBeforeAgent(ctx, input, nil)
+			ctx, instruction, tools, err_ = a.applyBeforeAgent(ctx, input)
 			if err_ != nil {
 				generator.Send(&AgentEvent{Err: err_})
 				return
@@ -1198,7 +1196,7 @@ func (a *ChatModelAgent) buildRunFunc(ctx context.Context) runFunc {
 func (a *ChatModelAgent) getRunFunc(ctx context.Context, input *AgentInput) (runFunc, context.Context, error) {
 	defaultRun := a.buildRunFunc(ctx)
 
-	ctx, instruction, tools, err := a.applyBeforeAgent(ctx, input, nil)
+	ctx, instruction, tools, err := a.applyBeforeAgent(ctx, input)
 	if err != nil {
 		return nil, ctx, err
 	}
