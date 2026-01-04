@@ -88,6 +88,9 @@ func WithHistoryModifier(f func(context.Context, []Message) []Message) AgentRunO
 type ToolsConfig struct {
 	compose.ToolsNodeConfig
 
+	// ReturnDirectly specifies tools that cause the agent to return immediately when called.
+	// If multiple listed tools are called simultaneously, only the first one triggers the return.
+	// The map keys are tool names indicate whether the tool should trigger immediate return.
 	ReturnDirectly map[string]bool
 
 	// EmitInternalEvents indicates whether internal events from agentTool should be emitted
@@ -105,6 +108,7 @@ type ToolsConfig struct {
 	EmitInternalEvents bool
 }
 
+// GenModelInput transforms agent instructions and input into a format suitable for the model.
 type GenModelInput func(ctx context.Context, instruction string, input *AgentInput) ([]Message, error)
 
 func defaultGenModelInput(ctx context.Context, instruction string, input *AgentInput) ([]Message, error) {
@@ -132,19 +136,31 @@ func defaultGenModelInput(ctx context.Context, instruction string, input *AgentI
 	return msgs, nil
 }
 
+// ChatModelAgentState represents the state of a chat model agent during conversation.
 type ChatModelAgentState struct {
+	// Messages contains all messages in the current conversation session.
 	Messages []Message
 }
 
+// AgentMiddleware provides hooks to customize agent behavior at various stages of execution.
+// AgentMiddleware implements the AgentHandler interface and can be used alongside new AgentHandler implementations.
 type AgentMiddleware struct {
+	// AdditionalInstruction adds supplementary text to the agent's system instruction.
+	// This instruction is concatenated with the base instruction before each chat model call.
 	AdditionalInstruction string
 
+	// AdditionalTools adds supplementary tools to the agent's available toolset.
+	// These tools are combined with the tools configured for the agent.
 	AdditionalTools []tool.BaseTool
 
+	// BeforeChatModel is called before each ChatModel invocation, allowing modification of the agent state.
 	BeforeChatModel func(context.Context, *ChatModelAgentState) error
 
+	// AfterChatModel is called after each ChatModel invocation, allowing modification of the agent state.
 	AfterChatModel func(context.Context, *ChatModelAgentState) error
 
+	// WrapToolCall wraps tool calls with custom middleware logic.
+	// Each middleware contains Invokable and/or Streamable functions for tool calls.
 	WrapToolCall compose.ToolMiddleware
 }
 
@@ -219,26 +235,52 @@ func (m AgentMiddleware) WrapStreamableToolCall(
 }
 
 type ChatModelAgentConfig struct {
-	Name        string
+	// Name of the agent. Better be unique across all agents.
+	Name string
+	// Description of the agent's capabilities.
+	// Helps other agents determine whether to transfer tasks to this agent.
 	Description string
+	// Instruction used as the system prompt for this agent.
+	// Optional. If empty, no system prompt will be used.
+	// Supports f-string placeholders for session values in default GenModelInput, for example:
+	// "You are a helpful assistant. The current time is {Time}. The current user is {User}."
+	// These placeholders will be replaced with session values for "Time" and "User".
 	Instruction string
 
 	Model model.ToolCallingChatModel
 
 	ToolsConfig ToolsConfig
 
+	// GenModelInput transforms instructions and input messages into the model's input format.
+	// Optional. Defaults to defaultGenModelInput which combines instruction and messages.
 	GenModelInput GenModelInput
 
+	// Exit defines the tool used to terminate the agent process.
+	// Optional. If nil, no Exit Action will be generated.
+	// You can use the provided 'ExitTool' implementation directly.
 	Exit tool.BaseTool
 
+	// OutputKey stores the agent's response in the session.
+	// Optional. When set, stores output via AddSessionValue(ctx, outputKey, msg.Content).
 	OutputKey string
 
+	// MaxIterations defines the upper limit of ChatModel generation cycles.
+	// The agent will terminate with an error if this limit is exceeded.
+	// Optional. Defaults to 20.
 	MaxIterations int
 
+	// Middlewares configures agent middleware for extending functionality.
 	Middlewares []AgentMiddleware
 
+	// Handlers configures the new interface-based handlers.
+	// Handlers are processed after Middlewares, in registration order.
+	// Each handler can implement any combination of the AgentHandler interface methods.
 	Handlers []AgentHandler
 
+	// ModelRetryConfig configures retry behavior for the ChatModel.
+	// When set, the agent will automatically retry failed ChatModel calls
+	// based on the configured policy.
+	// Optional. If nil, no retry will be performed.
 	ModelRetryConfig *ModelRetryConfig
 }
 
@@ -756,7 +798,11 @@ func errFunc(err error) runFunc {
 	}
 }
 
+// ChatModelAgentResumeData holds data that can be provided to a ChatModelAgent during a resume operation
+// to modify its behavior. It is provided via the adk.ResumeWithData function.
 type ChatModelAgentResumeData struct {
+	// HistoryModifier is a function that can transform the agent's message history before it is sent to the model.
+	// This allows for adding new information or context upon resumption.
 	HistoryModifier func(ctx context.Context, history []Message) []Message
 }
 
