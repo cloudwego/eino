@@ -44,6 +44,8 @@ type Config struct {
 	// ChatModel is the model used by DeepAgent for reasoning and task execution.
 	ChatModel model.ToolCallingChatModel
 	// Instruction contains the system prompt that guides the agent's behavior.
+	// When empty, a built-in default system prompt will be used, which includes general assistant
+	// behavior guidelines, security policies, coding style guidelines, and tool usage policies.
 	Instruction string
 	// SubAgents are specialized agents that can be invoked by the agent.
 	SubAgents []adk.Agent
@@ -74,7 +76,10 @@ func New(ctx context.Context, cfg *Config) (adk.ResumableAgent, error) {
 		return nil, err
 	}
 
-	middlewares = append([]adk.AgentMiddleware{{AdditionalInstruction: baseAgentPrompt}}, middlewares...)
+	instruction := cfg.Instruction
+	if len(instruction) == 0 {
+		instruction = baseAgentInstruction
+	}
 
 	if !cfg.WithoutGeneralSubAgent || len(cfg.SubAgents) > 0 {
 		tt, err := newTaskToolMiddleware(
@@ -84,10 +89,10 @@ func New(ctx context.Context, cfg *Config) (adk.ResumableAgent, error) {
 
 			cfg.WithoutGeneralSubAgent,
 			cfg.ChatModel,
-			cfg.Instruction,
+			instruction,
 			cfg.ToolsConfig,
 			cfg.MaxIteration,
-			append(cfg.Middlewares, middlewares...),
+			append(middlewares, cfg.Middlewares...),
 		)
 		if err != nil {
 			return nil, fmt.Errorf("failed to new task tool: %w", err)
@@ -98,11 +103,11 @@ func New(ctx context.Context, cfg *Config) (adk.ResumableAgent, error) {
 	return adk.NewChatModelAgent(ctx, &adk.ChatModelAgentConfig{
 		Name:          cfg.Name,
 		Description:   cfg.Description,
-		Instruction:   cfg.Instruction,
+		Instruction:   instruction,
 		Model:         cfg.ChatModel,
 		ToolsConfig:   cfg.ToolsConfig,
 		MaxIterations: cfg.MaxIteration,
-		Middlewares:   append(cfg.Middlewares, middlewares...),
+		Middlewares:   append(middlewares, cfg.Middlewares...),
 
 		ModelRetryConfig: cfg.ModelRetryConfig,
 	})
