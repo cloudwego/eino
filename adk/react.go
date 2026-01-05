@@ -190,6 +190,7 @@ type reactConfig struct {
 	toolsConfig *compose.ToolsNodeConfig
 
 	toolsReturnDirectly map[string]bool
+	hasReturnDirectly   bool
 
 	agentName string
 
@@ -392,7 +393,7 @@ func newReact(ctx context.Context, config *reactConfig) (reactGraph, error) {
 	branch := compose.NewStreamGraphBranch(toolCallCheck, map[string]bool{compose.END: true, toolNode_: true})
 	_ = g.AddBranch(chatModel_, branch)
 
-	{
+	if config.hasReturnDirectly {
 		const (
 			toolNodeToEndConverter = "ToolNodeToEndConverter"
 		)
@@ -432,6 +433,8 @@ func newReact(ctx context.Context, config *reactConfig) (reactGraph, error) {
 		branch = compose.NewStreamGraphBranch(checkReturnDirect,
 			map[string]bool{toolNodeToEndConverter: true, chatModel_: true})
 		_ = g.AddBranch(toolNode_, branch)
+	} else {
+		_ = g.AddEdge(toolNode_, chatModel_)
 	}
 
 	return g, nil

@@ -150,6 +150,7 @@ func TestReact(t *testing.T) {
 				Tools: []tool.BaseTool{fakeTool},
 			},
 			toolsReturnDirectly: map[string]bool{info.Name: true},
+			hasReturnDirectly:   true,
 		}
 
 		graph, err := newReact(ctx, config)
@@ -352,6 +353,7 @@ func TestReact(t *testing.T) {
 				Tools: []tool.BaseTool{fakeTool, fakeStreamTool},
 			},
 			toolsReturnDirectly: map[string]bool{streamInfo.Name: true},
+			hasReturnDirectly:   true,
 		}
 
 		graph, err := newReact(ctx, config)

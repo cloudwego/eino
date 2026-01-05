@@ -215,7 +215,8 @@ type ChatModelAgentConfig struct {
 }
 
 type graphConfig struct {
-	hasTools bool
+	hasTools          bool
+	hasReturnDirectly bool
 }
 
 type ChatModelAgent struct {
@@ -828,13 +829,24 @@ func (a *ChatModelAgent) applyBeforeAgent(ctx context.Context) (context.Context,
 }
 
 func (a *ChatModelAgent) computeGraphConfig(tools []ToolMeta) graphConfig {
+	hasReturnDirectly := false
+	for _, t := range tools {
+		if t.ReturnDirectly {
+			hasReturnDirectly = true
+			break
+		}
+	}
 	return graphConfig{
-		hasTools: len(tools) > 0,
+		hasTools:          len(tools) > 0,
+		hasReturnDirectly: hasReturnDirectly,
 	}
 }
 
 func (a *ChatModelAgent) isGraphConfigCompatible(runtimeConfig graphConfig) bool {
 	if !a.graphConfig.hasTools && runtimeConfig.hasTools {
+		return false
+	}
+	if !a.graphConfig.hasReturnDirectly && runtimeConfig.hasReturnDirectly {
 		return false
 	}
 	return true
@@ -995,11 +1007,12 @@ func (a *ChatModelAgent) buildNoToolsRunFunc(_ context.Context, bc *buildContext
 	}
 }
 
-func (a *ChatModelAgent) buildReactRunFunc(ctx context.Context, bc *buildContext) (runFunc, error) {
+func (a *ChatModelAgent) buildReactRunFunc(ctx context.Context, bc *buildContext, hasReturnDirectly bool) (runFunc, error) {
 	conf := &reactConfig{
 		model:               a.model,
 		toolsConfig:         &bc.toolsNodeConf,
 		toolsReturnDirectly: bc.returnDirectly,
+		hasReturnDirectly:   hasReturnDirectly,
 		agentName:           a.name,
 		maxIterations:       a.maxIterations,
 		handlers:            a.handlers,
@@ -1161,7 +1174,7 @@ func (a *ChatModelAgent) buildRunFunc(ctx context.Context) runFunc {
 			return
 		}
 
-		run, err := a.buildReactRunFunc(ctx, bc)
+		run, err := a.buildReactRunFunc(ctx, bc, a.graphConfig.hasReturnDirectly)
 		if err != nil {
 			a.run = errFunc(err)
 			return
@@ -1199,7 +1212,7 @@ func (a *ChatModelAgent) getRunFunc(ctx context.Context) (runFunc, context.Conte
 	if !runtimeConfig.hasTools {
 		tempRun = a.buildNoToolsRunFunc(ctx, bc)
 	} else {
-		tempRun, err = a.buildReactRunFunc(ctx, bc)
+		tempRun, err = a.buildReactRunFunc(ctx, bc, runtimeConfig.hasReturnDirectly)
 		if err != nil {
 			return nil, ctx, err
 		}
