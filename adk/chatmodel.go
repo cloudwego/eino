@@ -143,7 +143,8 @@ type ChatModelAgentState struct {
 }
 
 // AgentMiddleware provides hooks to customize agent behavior at various stages of execution.
-// AgentMiddleware implements the AgentHandler interface and can be used alongside new AgentHandler implementations.
+// It is a simple configuration struct that does not implement the AgentHandler interface,
+// allowing both to evolve independently.
 type AgentMiddleware struct {
 	// AdditionalInstruction adds supplementary text to the agent's system instruction.
 	// This instruction is concatenated with the base instruction before each chat model call.
@@ -162,75 +163,6 @@ type AgentMiddleware struct {
 	// WrapToolCall wraps tool calls with custom middleware logic.
 	// Each middleware contains Invokable and/or Streamable functions for tool calls.
 	WrapToolCall compose.ToolMiddleware
-}
-
-func (m AgentMiddleware) BeforeAgent(ctx context.Context, runCtx *AgentRunContext) (context.Context, *AgentRunContext, error) {
-	if m.AdditionalInstruction != "" {
-		if runCtx.Instruction == "" {
-			runCtx.Instruction = m.AdditionalInstruction
-		} else {
-			runCtx.Instruction = runCtx.Instruction + "\n" + m.AdditionalInstruction
-		}
-	}
-	for _, t := range m.AdditionalTools {
-		runCtx.Tools = append(runCtx.Tools, ToolMeta{Tool: t, ReturnDirectly: false})
-	}
-	return ctx, runCtx, nil
-}
-
-func (m AgentMiddleware) BeforeModelRewriteHistory(ctx context.Context, messages []Message) (context.Context, []Message, error) {
-	if m.BeforeChatModel == nil {
-		return ctx, messages, nil
-	}
-	state := &ChatModelAgentState{Messages: messages}
-	if err := m.BeforeChatModel(ctx, state); err != nil {
-		return ctx, nil, err
-	}
-	return ctx, state.Messages, nil
-}
-
-func (m AgentMiddleware) AfterModelRewriteHistory(ctx context.Context, messages []Message) (context.Context, []Message, error) {
-	if m.AfterChatModel == nil {
-		return ctx, messages, nil
-	}
-	state := &ChatModelAgentState{Messages: messages}
-	if err := m.AfterChatModel(ctx, state); err != nil {
-		return ctx, nil, err
-	}
-	return ctx, state.Messages, nil
-}
-
-func (m AgentMiddleware) GetToolCallWrapper() ToolCallWrapper {
-	if m.WrapToolCall.Invokable == nil && m.WrapToolCall.Streamable == nil {
-		return nil
-	}
-	return &legacyToolMiddlewareAdapter{mw: m.WrapToolCall}
-}
-
-type legacyToolMiddlewareAdapter struct {
-	mw compose.ToolMiddleware
-}
-
-func (a *legacyToolMiddlewareAdapter) WrapInvoke(ctx context.Context, call *ToolCall, next func(context.Context, *ToolCall) (*ToolResult, error)) (*ToolResult, error) {
-	if a.mw.Invokable == nil {
-		return next(ctx, call)
-	}
-	endpoint := func(ctx context.Context, input *compose.ToolInput) (*compose.ToolOutput, error) {
-		return next(ctx, input)
-	}
-	wrapped := a.mw.Invokable(endpoint)
-	return wrapped(ctx, call)
-}
-
-func (a *legacyToolMiddlewareAdapter) WrapStream(ctx context.Context, call *ToolCall, next func(context.Context, *ToolCall) (*StreamToolResult, error)) (*StreamToolResult, error) {
-	if a.mw.Streamable == nil {
-		return next(ctx, call)
-	}
-	endpoint := func(ctx context.Context, input *compose.ToolInput) (*compose.StreamToolOutput, error) {
-		return next(ctx, input)
-	}
-	wrapped := a.mw.Streamable(endpoint)
-	return wrapped(ctx, call)
 }
 
 type ChatModelAgentConfig struct {
@@ -307,7 +239,8 @@ type ChatModelAgent struct {
 
 	exit tool.BaseTool
 
-	handlers []AgentHandler
+	handlers    []AgentHandler
+	middlewares []AgentMiddleware
 
 	modelRetryConfig *ModelRetryConfig
 
@@ -336,14 +269,9 @@ func NewChatModelAgent(ctx context.Context, config *ChatModelAgentConfig) (*Chat
 		genInput = config.GenModelInput
 	}
 
-	allHandlers := make([]AgentHandler, 0, len(config.Middlewares)+len(config.Handlers))
-	for _, m := range config.Middlewares {
-		allHandlers = append(allHandlers, m)
-	}
-	allHandlers = append(allHandlers, config.Handlers...)
-
 	tc := config.ToolsConfig
-	tc.ToolCallMiddlewares = append(tc.ToolCallMiddlewares, collectToolMiddlewares(allHandlers)...)
+	tc.ToolCallMiddlewares = append(tc.ToolCallMiddlewares, collectToolMiddlewaresFromHandlers(config.Handlers)...)
+	tc.ToolCallMiddlewares = append(tc.ToolCallMiddlewares, collectToolMiddlewaresFromMiddlewares(config.Middlewares)...)
 
 	return &ChatModelAgent{
 		name:             config.Name,
@@ -355,12 +283,13 @@ func NewChatModelAgent(ctx context.Context, config *ChatModelAgentConfig) (*Chat
 		exit:             config.Exit,
 		outputKey:        config.OutputKey,
 		maxIterations:    config.MaxIterations,
-		handlers:         allHandlers,
+		handlers:         config.Handlers,
+		middlewares:      config.Middlewares,
 		modelRetryConfig: config.ModelRetryConfig,
 	}, nil
 }
 
-func collectToolMiddlewares(handlers []AgentHandler) []compose.ToolMiddleware {
+func collectToolMiddlewaresFromHandlers(handlers []AgentHandler) []compose.ToolMiddleware {
 	var middlewares []compose.ToolMiddleware
 	for _, h := range handlers {
 		wrapper := h.GetToolCallWrapper()
@@ -370,7 +299,7 @@ func collectToolMiddlewares(handlers []AgentHandler) []compose.ToolMiddleware {
 		mw := compose.ToolMiddleware{
 			Invokable: func(next compose.InvokableToolEndpoint) compose.InvokableToolEndpoint {
 				return func(ctx context.Context, input *compose.ToolInput) (*compose.ToolOutput, error) {
-					nextFn := func(ctx context.Context, call *ToolCall) (*ToolResult, error) {
+					nextFn := func(ctx context.Context, call *compose.ToolInput) (*compose.ToolOutput, error) {
 						return next(ctx, call)
 					}
 					return wrapper.WrapInvoke(ctx, input, nextFn)
@@ -378,7 +307,7 @@ func collectToolMiddlewares(handlers []AgentHandler) []compose.ToolMiddleware {
 			},
 			Streamable: func(next compose.StreamableToolEndpoint) compose.StreamableToolEndpoint {
 				return func(ctx context.Context, input *compose.ToolInput) (*compose.StreamToolOutput, error) {
-					nextFn := func(ctx context.Context, call *ToolCall) (*StreamToolResult, error) {
+					nextFn := func(ctx context.Context, call *compose.ToolInput) (*compose.StreamToolOutput, error) {
 						return next(ctx, call)
 					}
 					return wrapper.WrapStream(ctx, input, nextFn)
@@ -386,6 +315,17 @@ func collectToolMiddlewares(handlers []AgentHandler) []compose.ToolMiddleware {
 			},
 		}
 		middlewares = append(middlewares, mw)
+	}
+	return middlewares
+}
+
+func collectToolMiddlewaresFromMiddlewares(mws []AgentMiddleware) []compose.ToolMiddleware {
+	var middlewares []compose.ToolMiddleware
+	for _, m := range mws {
+		if m.WrapToolCall.Invokable == nil && m.WrapToolCall.Streamable == nil {
+			continue
+		}
+		middlewares = append(middlewares, m.WrapToolCall)
 	}
 	return middlewares
 }
@@ -846,6 +786,19 @@ func (a *ChatModelAgent) applyBeforeAgent(ctx context.Context, input *AgentInput
 		Tools:       toolMetas,
 	}
 
+	for _, m := range a.middlewares {
+		if m.AdditionalInstruction != "" {
+			if runCtx.Instruction == "" {
+				runCtx.Instruction = m.AdditionalInstruction
+			} else {
+				runCtx.Instruction = runCtx.Instruction + "\n" + m.AdditionalInstruction
+			}
+		}
+		for _, t := range m.AdditionalTools {
+			runCtx.Tools = append(runCtx.Tools, ToolMeta{Tool: t, ReturnDirectly: false})
+		}
+	}
+
 	for i, h := range a.handlers {
 		var err error
 		ctx, runCtx, err = h.BeforeAgent(ctx, runCtx)
@@ -948,6 +901,15 @@ func (a *ChatModelAgent) buildNoToolsRunFunc(ctx context.Context, bc *buildConte
 				chatModel,
 				compose.WithStatePreHandler(func(ctx context.Context, in []*schema.Message, state *ChatModelAgentState) ([]*schema.Message, error) {
 					messages := in
+					for _, m := range a.middlewares {
+						if m.BeforeChatModel != nil {
+							mwState := &ChatModelAgentState{Messages: messages}
+							if err := m.BeforeChatModel(ctx, mwState); err != nil {
+								return nil, err
+							}
+							messages = mwState.Messages
+						}
+					}
 					for _, h := range a.handlers {
 						var err error
 						ctx, messages, err = h.BeforeModelRewriteHistory(ctx, messages)
@@ -960,6 +922,15 @@ func (a *ChatModelAgent) buildNoToolsRunFunc(ctx context.Context, bc *buildConte
 				}),
 				compose.WithStatePostHandler(func(ctx context.Context, in *schema.Message, state *ChatModelAgentState) (*schema.Message, error) {
 					messages := append(state.Messages, in)
+					for _, m := range a.middlewares {
+						if m.AfterChatModel != nil {
+							mwState := &ChatModelAgentState{Messages: messages}
+							if err := m.AfterChatModel(ctx, mwState); err != nil {
+								return nil, err
+							}
+							messages = mwState.Messages
+						}
+					}
 					for _, h := range a.handlers {
 						var err error
 						ctx, messages, err = h.AfterModelRewriteHistory(ctx, messages)
@@ -1015,6 +986,7 @@ func (a *ChatModelAgent) buildReactRunFunc(ctx context.Context, bc *buildContext
 		agentName:           a.name,
 		maxIterations:       a.maxIterations,
 		handlers:            a.handlers,
+		middlewares:         a.middlewares,
 		modelRetryConfig:    a.modelRetryConfig,
 	}
 
