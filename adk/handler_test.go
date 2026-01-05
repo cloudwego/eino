@@ -305,6 +305,51 @@ func TestToolsHandlerCombinations(t *testing.T) {
 		}
 		assert.Equal(t, 2, eventCount)
 	})
+
+	t.Run("DynamicToolCanBeCalledByModel", func(t *testing.T) {
+		ctx := context.Background()
+		ctrl := gomock.NewController(t)
+		cm := mockModel.NewMockToolCallingChatModel(ctrl)
+
+		dynamicToolCalled := false
+		dynamicTool := &callableTool{
+			name: "dynamic_tool",
+			invokeFn: func() {
+				dynamicToolCalled = true
+			},
+		}
+		info, _ := dynamicTool.Info(ctx)
+
+		cm.EXPECT().WithTools(gomock.Any()).Return(cm, nil).AnyTimes()
+
+		cm.EXPECT().Generate(gomock.Any(), gomock.Any(), gomock.Any()).
+			Return(schema.AssistantMessage("Using dynamic tool", []schema.ToolCall{
+				{ID: "call1", Function: schema.FunctionCall{Name: info.Name, Arguments: "{}"}},
+			}), nil).Times(1)
+
+		cm.EXPECT().Generate(gomock.Any(), gomock.Any(), gomock.Any()).
+			Return(schema.AssistantMessage("done", nil), nil).Times(1)
+
+		agent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+			Name:        "TestAgent",
+			Description: "Test agent",
+			Model:       cm,
+			Handlers: []AgentHandler{
+				WithTools(dynamicTool),
+			},
+		})
+		assert.NoError(t, err)
+
+		iter := agent.Run(ctx, &AgentInput{Messages: []Message{schema.UserMessage("test")}})
+		for {
+			_, ok := iter.Next()
+			if !ok {
+				break
+			}
+		}
+
+		assert.True(t, dynamicToolCalled, "Dynamic tool should have been called")
+	})
 }
 
 func TestMessageRewriteHandlers(t *testing.T) {
@@ -669,6 +714,22 @@ func (t *namedTool) Info(_ context.Context) (*schema.ToolInfo, error) {
 }
 
 func (t *namedTool) InvokableRun(_ context.Context, _ string, _ ...tool.Option) (string, error) {
+	return t.name + " result", nil
+}
+
+type callableTool struct {
+	name     string
+	invokeFn func()
+}
+
+func (t *callableTool) Info(_ context.Context) (*schema.ToolInfo, error) {
+	return &schema.ToolInfo{Name: t.name, Desc: t.name + " description"}, nil
+}
+
+func (t *callableTool) InvokableRun(_ context.Context, _ string, _ ...tool.Option) (string, error) {
+	if t.invokeFn != nil {
+		t.invokeFn()
+	}
 	return t.name + " result", nil
 }
 
