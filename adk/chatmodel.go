@@ -856,6 +856,7 @@ type buildContext struct {
 	baseInstruction string
 	toolsNodeConf   compose.ToolsNodeConfig
 	returnDirectly  map[string]bool
+	initialTools    []ToolMeta
 }
 
 func (a *ChatModelAgent) prepareBuildContext(ctx context.Context) (*buildContext, error) {
@@ -885,10 +886,26 @@ func (a *ChatModelAgent) prepareBuildContext(ctx context.Context) (*buildContext
 		returnDirectly[exitInfo.Name] = true
 	}
 
+	initialTools := make([]ToolMeta, 0, len(toolsNodeConf.Tools)+len(a.middlewareTools))
+	for _, t := range toolsNodeConf.Tools {
+		rd := returnDirectly[func() string {
+			info, err := t.Info(ctx)
+			if err != nil {
+				return ""
+			}
+			return info.Name
+		}()]
+		initialTools = append(initialTools, ToolMeta{Tool: t, ReturnDirectly: rd})
+	}
+	for _, t := range a.middlewareTools {
+		initialTools = append(initialTools, ToolMeta{Tool: t, ReturnDirectly: false})
+	}
+
 	return &buildContext{
 		baseInstruction: baseInstruction,
 		toolsNodeConf:   toolsNodeConf,
 		returnDirectly:  returnDirectly,
+		initialTools:    initialTools,
 	}, nil
 }
 
@@ -1153,23 +1170,9 @@ func (a *ChatModelAgent) buildRunFunc(ctx context.Context) runFunc {
 			return
 		}
 
-		initialTools := make([]ToolMeta, 0, len(bc.toolsNodeConf.Tools)+len(a.middlewareTools))
-		for _, t := range bc.toolsNodeConf.Tools {
-			rd := bc.returnDirectly[func() string {
-				info, err := t.Info(ctx)
-				if err != nil {
-					return ""
-				}
-				return info.Name
-			}()]
-			initialTools = append(initialTools, ToolMeta{Tool: t, ReturnDirectly: rd})
-		}
-		for _, t := range a.middlewareTools {
-			initialTools = append(initialTools, ToolMeta{Tool: t, ReturnDirectly: false})
-		}
-		a.graphConfig = a.computeGraphConfig(initialTools)
+		a.graphConfig = a.computeGraphConfig(bc.initialTools)
 
-		if len(initialTools) == 0 {
+		if len(bc.initialTools) == 0 {
 			a.run = a.buildNoToolsRunFunc(ctx, bc)
 			return
 		}
@@ -1222,13 +1225,9 @@ func (a *ChatModelAgent) getRunFunc(ctx context.Context) (runFunc, context.Conte
 }
 
 func (a *ChatModelAgent) Run(ctx context.Context, input *AgentInput, opts ...AgentRunOption) *AsyncIterator[*AgentEvent] {
-	run, ctx, err := a.getRunFunc(ctx)
-
-	co := getComposeOptions(opts)
-	co = append(co, compose.WithCheckPointID(bridgeCheckpointID))
-
 	iterator, generator := NewAsyncIteratorPair[*AgentEvent]()
 
+	run, ctx, err := a.getRunFunc(ctx)
 	if err != nil {
 		go func() {
 			generator.Send(&AgentEvent{Err: err})
@@ -1236,6 +1235,9 @@ func (a *ChatModelAgent) Run(ctx context.Context, input *AgentInput, opts ...Age
 		}()
 		return iterator
 	}
+
+	co := getComposeOptions(opts)
+	co = append(co, compose.WithCheckPointID(bridgeCheckpointID))
 
 	go func() {
 		defer func() {
@@ -1255,13 +1257,9 @@ func (a *ChatModelAgent) Run(ctx context.Context, input *AgentInput, opts ...Age
 }
 
 func (a *ChatModelAgent) Resume(ctx context.Context, info *ResumeInfo, opts ...AgentRunOption) *AsyncIterator[*AgentEvent] {
-	run, ctx, err := a.getRunFunc(ctx)
-
-	co := getComposeOptions(opts)
-	co = append(co, compose.WithCheckPointID(bridgeCheckpointID))
-
 	iterator, generator := NewAsyncIteratorPair[*AgentEvent]()
 
+	run, ctx, err := a.getRunFunc(ctx)
 	if err != nil {
 		go func() {
 			generator.Send(&AgentEvent{Err: err})
@@ -1269,6 +1267,9 @@ func (a *ChatModelAgent) Resume(ctx context.Context, info *ResumeInfo, opts ...A
 		}()
 		return iterator
 	}
+
+	co := getComposeOptions(opts)
+	co = append(co, compose.WithCheckPointID(bridgeCheckpointID))
 
 	if info.InterruptState == nil {
 		panic(fmt.Sprintf("ChatModelAgent.Resume: agent '%s' was asked to resume but has no state", a.Name(ctx)))
