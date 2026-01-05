@@ -45,7 +45,6 @@ const (
 	addrDepthReactGraph = 2
 	addrDepthChatModel  = 3
 	addrDepthToolsNode  = 3
-	addrDepthTool       = 4
 )
 
 type chatModelAgentRunOptions struct {
@@ -253,7 +252,7 @@ type ChatModelAgent struct {
 type runFunc func(ctx context.Context, input *AgentInput, generator *AsyncGenerator[*AgentEvent], store *bridgeStore, opts ...compose.Option)
 
 // NewChatModelAgent constructs a chat model-backed agent with the provided config.
-func NewChatModelAgent(ctx context.Context, config *ChatModelAgentConfig) (*ChatModelAgent, error) {
+func NewChatModelAgent(_ context.Context, config *ChatModelAgentConfig) (*ChatModelAgent, error) {
 	if config.Name == "" {
 		return nil, errors.New("agent 'Name' is required")
 	}
@@ -768,7 +767,7 @@ func getPreAppliedBeforeAgentFromCtx(ctx context.Context) *preAppliedBeforeAgent
 	return v.(*preAppliedBeforeAgentData)
 }
 
-func (a *ChatModelAgent) applyBeforeAgent(ctx context.Context, input *AgentInput) (context.Context, string, []ToolMeta, error) {
+func (a *ChatModelAgent) applyBeforeAgent(ctx context.Context) (context.Context, string, []ToolMeta, error) {
 	toolMetas := make([]ToolMeta, 0, len(a.toolsConfig.Tools))
 	for _, t := range a.toolsConfig.Tools {
 		rd := false
@@ -863,8 +862,8 @@ func (a *ChatModelAgent) prepareBuildContext(ctx context.Context) (*buildContext
 	}, nil
 }
 
-func (a *ChatModelAgent) buildNoToolsRunFunc(ctx context.Context, bc *buildContext) runFunc {
-	var chatModel model.ToolCallingChatModel = a.model
+func (a *ChatModelAgent) buildNoToolsRunFunc(_ context.Context, bc *buildContext) runFunc {
+	chatModel := a.model
 	if a.modelRetryConfig != nil {
 		chatModel = newRetryChatModel(a.model, a.modelRetryConfig)
 	}
@@ -877,7 +876,7 @@ func (a *ChatModelAgent) buildNoToolsRunFunc(ctx context.Context, bc *buildConte
 		if preApplied := getPreAppliedBeforeAgentFromCtx(ctx); preApplied != nil {
 			instruction = preApplied.instruction
 		} else {
-			ctx, instruction, _, err = a.applyBeforeAgent(ctx, input)
+			ctx, instruction, _, err = a.applyBeforeAgent(ctx)
 			if err != nil {
 				generator.Send(&AgentEvent{Err: err})
 				return
@@ -1005,7 +1004,7 @@ func (a *ChatModelAgent) buildReactRunFunc(ctx context.Context, bc *buildContext
 			instruction = preApplied.instruction
 			tools = preApplied.tools
 		} else {
-			ctx, instruction, tools, err_ = a.applyBeforeAgent(ctx, input)
+			ctx, instruction, tools, err_ = a.applyBeforeAgent(ctx)
 			if err_ != nil {
 				generator.Send(&AgentEvent{Err: err_})
 				return
@@ -1154,10 +1153,10 @@ func (a *ChatModelAgent) buildRunFunc(ctx context.Context) runFunc {
 	return a.run
 }
 
-func (a *ChatModelAgent) getRunFunc(ctx context.Context, input *AgentInput) (runFunc, context.Context, error) {
+func (a *ChatModelAgent) getRunFunc(ctx context.Context) (runFunc, context.Context, error) {
 	defaultRun := a.buildRunFunc(ctx)
 
-	ctx, instruction, tools, err := a.applyBeforeAgent(ctx, input)
+	ctx, instruction, tools, err := a.applyBeforeAgent(ctx)
 	if err != nil {
 		return nil, ctx, err
 	}
@@ -1189,7 +1188,7 @@ func (a *ChatModelAgent) getRunFunc(ctx context.Context, input *AgentInput) (run
 }
 
 func (a *ChatModelAgent) Run(ctx context.Context, input *AgentInput, opts ...AgentRunOption) *AsyncIterator[*AgentEvent] {
-	run, ctx, err := a.getRunFunc(ctx, input)
+	run, ctx, err := a.getRunFunc(ctx)
 
 	co := getComposeOptions(opts)
 	co = append(co, compose.WithCheckPointID(bridgeCheckpointID))
@@ -1222,10 +1221,20 @@ func (a *ChatModelAgent) Run(ctx context.Context, input *AgentInput, opts ...Age
 }
 
 func (a *ChatModelAgent) Resume(ctx context.Context, info *ResumeInfo, opts ...AgentRunOption) *AsyncIterator[*AgentEvent] {
-	run := a.buildRunFunc(ctx)
+	run, ctx, err := a.getRunFunc(ctx)
 
 	co := getComposeOptions(opts)
 	co = append(co, compose.WithCheckPointID(bridgeCheckpointID))
+
+	iterator, generator := NewAsyncIteratorPair[*AgentEvent]()
+
+	if err != nil {
+		go func() {
+			generator.Send(&AgentEvent{Err: err})
+			generator.Close()
+		}()
+		return iterator
+	}
 
 	if info.InterruptState == nil {
 		panic(fmt.Sprintf("ChatModelAgent.Resume: agent '%s' was asked to resume but has no state", a.Name(ctx)))
@@ -1256,7 +1265,6 @@ func (a *ChatModelAgent) Resume(ctx context.Context, info *ResumeInfo, opts ...A
 		}
 	}
 
-	iterator, generator := NewAsyncIteratorPair[*AgentEvent]()
 	go func() {
 		defer func() {
 			panicErr := recover()
