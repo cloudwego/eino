@@ -242,9 +242,6 @@ type ChatModelAgent struct {
 	handlers    []AgentHandler
 	middlewares []AgentMiddleware
 
-	middlewareInstruction string
-	middlewareTools       []tool.BaseTool
-
 	modelRetryConfig *ModelRetryConfig
 
 	once        sync.Once
@@ -276,34 +273,19 @@ func NewChatModelAgent(_ context.Context, config *ChatModelAgentConfig) (*ChatMo
 	tc.ToolCallMiddlewares = append(tc.ToolCallMiddlewares, collectToolMiddlewaresFromHandlers(config.Handlers)...)
 	tc.ToolCallMiddlewares = append(tc.ToolCallMiddlewares, collectToolMiddlewaresFromMiddlewares(config.Middlewares)...)
 
-	var middlewareInstruction string
-	var middlewareTools []tool.BaseTool
-	for _, m := range config.Middlewares {
-		if m.AdditionalInstruction != "" {
-			if middlewareInstruction == "" {
-				middlewareInstruction = m.AdditionalInstruction
-			} else {
-				middlewareInstruction = middlewareInstruction + "\n" + m.AdditionalInstruction
-			}
-		}
-		middlewareTools = append(middlewareTools, m.AdditionalTools...)
-	}
-
 	return &ChatModelAgent{
-		name:                  config.Name,
-		description:           config.Description,
-		instruction:           config.Instruction,
-		model:                 config.Model,
-		toolsConfig:           tc,
-		genModelInput:         genInput,
-		exit:                  config.Exit,
-		outputKey:             config.OutputKey,
-		maxIterations:         config.MaxIterations,
-		handlers:              config.Handlers,
-		middlewares:           config.Middlewares,
-		middlewareInstruction: middlewareInstruction,
-		middlewareTools:       middlewareTools,
-		modelRetryConfig:      config.ModelRetryConfig,
+		name:             config.Name,
+		description:      config.Description,
+		instruction:      config.Instruction,
+		model:            config.Model,
+		toolsConfig:      tc,
+		genModelInput:    genInput,
+		exit:             config.Exit,
+		outputKey:        config.OutputKey,
+		maxIterations:    config.MaxIterations,
+		handlers:         config.Handlers,
+		middlewares:      config.Middlewares,
+		modelRetryConfig: config.ModelRetryConfig,
 	}, nil
 }
 
@@ -786,35 +768,10 @@ func getPreAppliedBeforeAgentFromCtx(ctx context.Context) *preAppliedBeforeAgent
 	return v.(*preAppliedBeforeAgentData)
 }
 
-func (a *ChatModelAgent) applyBeforeAgent(ctx context.Context) (context.Context, string, []ToolMeta, error) {
-	toolMetas := make([]ToolMeta, 0, len(a.toolsConfig.Tools))
-	for _, t := range a.toolsConfig.Tools {
-		rd := false
-		if a.toolsConfig.ReturnDirectly != nil {
-			info, err := t.Info(ctx)
-			if err == nil {
-				rd = a.toolsConfig.ReturnDirectly[info.Name]
-			}
-		}
-		toolMetas = append(toolMetas, ToolMeta{Tool: t, ReturnDirectly: rd})
-	}
-
-	for _, t := range a.middlewareTools {
-		toolMetas = append(toolMetas, ToolMeta{Tool: t, ReturnDirectly: false})
-	}
-
-	instruction := a.instruction
-	if a.middlewareInstruction != "" {
-		if instruction == "" {
-			instruction = a.middlewareInstruction
-		} else {
-			instruction = instruction + "\n" + a.middlewareInstruction
-		}
-	}
-
+func (a *ChatModelAgent) applyBeforeAgent(ctx context.Context, bc *buildContext) (context.Context, string, []ToolMeta, error) {
 	runCtx := &AgentRunContext{
-		Instruction: instruction,
-		Tools:       toolMetas,
+		Instruction: bc.baseInstruction,
+		Tools:       bc.initialTools,
 	}
 
 	for i, h := range a.handlers {
@@ -886,7 +843,14 @@ func (a *ChatModelAgent) prepareBuildContext(ctx context.Context) (*buildContext
 		returnDirectly[exitInfo.Name] = true
 	}
 
-	initialTools := make([]ToolMeta, 0, len(toolsNodeConf.Tools)+len(a.middlewareTools))
+	for _, m := range a.middlewares {
+		if m.AdditionalInstruction != "" {
+			baseInstruction = concatInstructions(baseInstruction, m.AdditionalInstruction)
+		}
+		toolsNodeConf.Tools = append(toolsNodeConf.Tools, m.AdditionalTools...)
+	}
+
+	initialTools := make([]ToolMeta, 0, len(toolsNodeConf.Tools))
 	for _, t := range toolsNodeConf.Tools {
 		rd := returnDirectly[func() string {
 			info, err := t.Info(ctx)
@@ -896,9 +860,6 @@ func (a *ChatModelAgent) prepareBuildContext(ctx context.Context) (*buildContext
 			return info.Name
 		}()]
 		initialTools = append(initialTools, ToolMeta{Tool: t, ReturnDirectly: rd})
-	}
-	for _, t := range a.middlewareTools {
-		initialTools = append(initialTools, ToolMeta{Tool: t, ReturnDirectly: false})
 	}
 
 	return &buildContext{
@@ -923,14 +884,11 @@ func (a *ChatModelAgent) buildNoToolsRunFunc(_ context.Context, bc *buildContext
 		if preApplied := getPreAppliedBeforeAgentFromCtx(ctx); preApplied != nil {
 			instruction = preApplied.instruction
 		} else {
-			ctx, instruction, _, err = a.applyBeforeAgent(ctx)
+			ctx, instruction, _, err = a.applyBeforeAgent(ctx, bc)
 			if err != nil {
 				generator.Send(&AgentEvent{Err: err})
 				return
 			}
-		}
-		if instruction == "" {
-			instruction = bc.baseInstruction
 		}
 
 		r, err := compose.NewChain[*AgentInput, Message](compose.WithGenLocalState(func(ctx context.Context) (state *ChatModelAgentState) {
@@ -1052,14 +1010,11 @@ func (a *ChatModelAgent) buildReactRunFunc(ctx context.Context, bc *buildContext
 			instruction = preApplied.instruction
 			tools = preApplied.tools
 		} else {
-			ctx, instruction, tools, err_ = a.applyBeforeAgent(ctx)
+			ctx, instruction, tools, err_ = a.applyBeforeAgent(ctx, bc)
 			if err_ != nil {
 				generator.Send(&AgentEvent{Err: err_})
 				return
 			}
-		}
-		if instruction == "" {
-			instruction = bc.baseInstruction
 		}
 
 		runtimeReturnDirectly := copyMap(bc.returnDirectly)
@@ -1193,7 +1148,12 @@ func (a *ChatModelAgent) buildRunFunc(ctx context.Context) runFunc {
 func (a *ChatModelAgent) getRunFunc(ctx context.Context) (runFunc, context.Context, error) {
 	defaultRun := a.buildRunFunc(ctx)
 
-	ctx, instruction, tools, err := a.applyBeforeAgent(ctx)
+	bc, err := a.prepareBuildContext(ctx)
+	if err != nil {
+		return nil, ctx, err
+	}
+
+	ctx, instruction, tools, err := a.applyBeforeAgent(ctx, bc)
 	if err != nil {
 		return nil, ctx, err
 	}
@@ -1204,11 +1164,6 @@ func (a *ChatModelAgent) getRunFunc(ctx context.Context) (runFunc, context.Conte
 
 	if a.isGraphConfigCompatible(runtimeConfig) {
 		return defaultRun, ctx, nil
-	}
-
-	bc, err := a.prepareBuildContext(ctx)
-	if err != nil {
-		return nil, ctx, err
 	}
 
 	var tempRun runFunc
