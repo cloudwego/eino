@@ -241,6 +241,9 @@ type ChatModelAgent struct {
 	handlers    []AgentHandler
 	middlewares []AgentMiddleware
 
+	middlewareInstruction string
+	middlewareTools       []tool.BaseTool
+
 	modelRetryConfig *ModelRetryConfig
 
 	once        sync.Once
@@ -272,19 +275,34 @@ func NewChatModelAgent(_ context.Context, config *ChatModelAgentConfig) (*ChatMo
 	tc.ToolCallMiddlewares = append(tc.ToolCallMiddlewares, collectToolMiddlewaresFromHandlers(config.Handlers)...)
 	tc.ToolCallMiddlewares = append(tc.ToolCallMiddlewares, collectToolMiddlewaresFromMiddlewares(config.Middlewares)...)
 
+	var middlewareInstruction string
+	var middlewareTools []tool.BaseTool
+	for _, m := range config.Middlewares {
+		if m.AdditionalInstruction != "" {
+			if middlewareInstruction == "" {
+				middlewareInstruction = m.AdditionalInstruction
+			} else {
+				middlewareInstruction = middlewareInstruction + "\n" + m.AdditionalInstruction
+			}
+		}
+		middlewareTools = append(middlewareTools, m.AdditionalTools...)
+	}
+
 	return &ChatModelAgent{
-		name:             config.Name,
-		description:      config.Description,
-		instruction:      config.Instruction,
-		model:            config.Model,
-		toolsConfig:      tc,
-		genModelInput:    genInput,
-		exit:             config.Exit,
-		outputKey:        config.OutputKey,
-		maxIterations:    config.MaxIterations,
-		handlers:         config.Handlers,
-		middlewares:      config.Middlewares,
-		modelRetryConfig: config.ModelRetryConfig,
+		name:                  config.Name,
+		description:           config.Description,
+		instruction:           config.Instruction,
+		model:                 config.Model,
+		toolsConfig:           tc,
+		genModelInput:         genInput,
+		exit:                  config.Exit,
+		outputKey:             config.OutputKey,
+		maxIterations:         config.MaxIterations,
+		handlers:              config.Handlers,
+		middlewares:           config.Middlewares,
+		middlewareInstruction: middlewareInstruction,
+		middlewareTools:       middlewareTools,
+		modelRetryConfig:      config.ModelRetryConfig,
 	}, nil
 }
 
@@ -780,22 +798,22 @@ func (a *ChatModelAgent) applyBeforeAgent(ctx context.Context) (context.Context,
 		toolMetas = append(toolMetas, ToolMeta{Tool: t, ReturnDirectly: rd})
 	}
 
-	runCtx := &AgentRunContext{
-		Instruction: a.instruction,
-		Tools:       toolMetas,
+	for _, t := range a.middlewareTools {
+		toolMetas = append(toolMetas, ToolMeta{Tool: t, ReturnDirectly: false})
 	}
 
-	for _, m := range a.middlewares {
-		if m.AdditionalInstruction != "" {
-			if runCtx.Instruction == "" {
-				runCtx.Instruction = m.AdditionalInstruction
-			} else {
-				runCtx.Instruction = runCtx.Instruction + "\n" + m.AdditionalInstruction
-			}
+	instruction := a.instruction
+	if a.middlewareInstruction != "" {
+		if instruction == "" {
+			instruction = a.middlewareInstruction
+		} else {
+			instruction = instruction + "\n" + a.middlewareInstruction
 		}
-		for _, t := range m.AdditionalTools {
-			runCtx.Tools = append(runCtx.Tools, ToolMeta{Tool: t, ReturnDirectly: false})
-		}
+	}
+
+	runCtx := &AgentRunContext{
+		Instruction: instruction,
+		Tools:       toolMetas,
 	}
 
 	for i, h := range a.handlers {
