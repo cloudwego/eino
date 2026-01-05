@@ -1140,7 +1140,7 @@ func (a *ChatModelAgent) buildRunFunc(ctx context.Context) runFunc {
 			return
 		}
 
-		initialTools := make([]ToolMeta, 0, len(bc.toolsNodeConf.Tools))
+		initialTools := make([]ToolMeta, 0, len(bc.toolsNodeConf.Tools)+len(a.middlewareTools))
 		for _, t := range bc.toolsNodeConf.Tools {
 			rd := bc.returnDirectly[func() string {
 				info, err := t.Info(ctx)
@@ -1151,9 +1151,12 @@ func (a *ChatModelAgent) buildRunFunc(ctx context.Context) runFunc {
 			}()]
 			initialTools = append(initialTools, ToolMeta{Tool: t, ReturnDirectly: rd})
 		}
+		for _, t := range a.middlewareTools {
+			initialTools = append(initialTools, ToolMeta{Tool: t, ReturnDirectly: false})
+		}
 		a.graphConfig = a.computeGraphConfig(initialTools)
 
-		if len(bc.toolsNodeConf.Tools) == 0 {
+		if len(initialTools) == 0 {
 			a.run = a.buildNoToolsRunFunc(ctx, bc)
 			return
 		}
