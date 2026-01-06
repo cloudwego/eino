@@ -244,10 +244,10 @@ type ChatModelAgent struct {
 
 	modelRetryConfig *ModelRetryConfig
 
-	once        sync.Once
-	run         runFunc
-	frozen      uint32
-	graphConfig graphConfig
+	once         sync.Once
+	run          runFunc
+	frozen       uint32
+	buildContext *buildContext
 }
 
 type runFunc func(ctx context.Context, input *AgentInput, generator *AsyncGenerator[*AgentEvent], store *bridgeStore, opts ...compose.Option)
@@ -799,11 +799,11 @@ func (a *ChatModelAgent) computeGraphConfig(tools []ToolMeta) graphConfig {
 	}
 }
 
-func (a *ChatModelAgent) isGraphConfigCompatible(runtimeConfig graphConfig) bool {
-	if !a.graphConfig.hasTools && runtimeConfig.hasTools {
+func isGraphConfigCompatible(defaultConfig, runtimeConfig graphConfig) bool {
+	if !defaultConfig.hasTools && runtimeConfig.hasTools {
 		return false
 	}
-	if !a.graphConfig.hasReturnDirectly && runtimeConfig.hasReturnDirectly {
+	if !defaultConfig.hasReturnDirectly && runtimeConfig.hasReturnDirectly {
 		return false
 	}
 	return true
@@ -814,6 +814,7 @@ type buildContext struct {
 	toolsNodeConf   compose.ToolsNodeConfig
 	returnDirectly  map[string]bool
 	initialTools    []ToolMeta
+	graphConfig     graphConfig
 }
 
 func (a *ChatModelAgent) prepareBuildContext(ctx context.Context) (*buildContext, error) {
@@ -862,11 +863,14 @@ func (a *ChatModelAgent) prepareBuildContext(ctx context.Context) (*buildContext
 		initialTools = append(initialTools, ToolMeta{Tool: t, ReturnDirectly: rd})
 	}
 
+	gc := a.computeGraphConfig(initialTools)
+
 	return &buildContext{
 		baseInstruction: baseInstruction,
 		toolsNodeConf:   toolsNodeConf,
 		returnDirectly:  returnDirectly,
 		initialTools:    initialTools,
+		graphConfig:     gc,
 	}, nil
 }
 
@@ -953,9 +957,7 @@ func (a *ChatModelAgent) buildNoToolsRunFunc(_ context.Context, bc *buildContext
 		}
 
 		callOpt := genNoToolsCallbacks(generator, a.modelRetryConfig)
-		var runOpts []compose.Option
-		runOpts = append(runOpts, opts...)
-		runOpts = append(runOpts, callOpt)
+		runOpts := append([]compose.Option{callOpt}, opts...)
 
 		var msg Message
 		var msgStream MessageStream
@@ -1126,14 +1128,14 @@ func (a *ChatModelAgent) buildRunFunc(ctx context.Context) runFunc {
 			return
 		}
 
-		a.graphConfig = a.computeGraphConfig(bc.initialTools)
+		a.buildContext = bc
 
 		if len(bc.initialTools) == 0 {
 			a.run = a.buildNoToolsRunFunc(ctx, bc)
 			return
 		}
 
-		run, err := a.buildReactRunFunc(ctx, bc, a.graphConfig.hasReturnDirectly)
+		run, err := a.buildReactRunFunc(ctx, bc, bc.graphConfig.hasReturnDirectly)
 		if err != nil {
 			a.run = errFunc(err)
 			return
@@ -1149,10 +1151,7 @@ func (a *ChatModelAgent) buildRunFunc(ctx context.Context) runFunc {
 func (a *ChatModelAgent) getRunFunc(ctx context.Context) (runFunc, context.Context, error) {
 	defaultRun := a.buildRunFunc(ctx)
 
-	bc, err := a.prepareBuildContext(ctx)
-	if err != nil {
-		return nil, ctx, err
-	}
+	bc := a.buildContext
 
 	ctx, instruction, tools, err := a.applyBeforeAgent(ctx, bc)
 	if err != nil {
@@ -1163,7 +1162,7 @@ func (a *ChatModelAgent) getRunFunc(ctx context.Context) (runFunc, context.Conte
 
 	runtimeConfig := a.computeGraphConfig(tools)
 
-	if a.isGraphConfigCompatible(runtimeConfig) {
+	if isGraphConfigCompatible(bc.graphConfig, runtimeConfig) {
 		return defaultRun, ctx, nil
 	}
 
