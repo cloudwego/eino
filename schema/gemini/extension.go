@@ -87,6 +87,7 @@ type SearchEntryPoint struct {
 	SDKBlob []byte `json:"sdk_blob,omitempty"`
 }
 
+// ConcatResponseMetaExtensions concatenates multiple ResponseMetaExtension chunks into a single one.
 func ConcatResponseMetaExtensions(chunks []*ResponseMetaExtension) (*ResponseMetaExtension, error) {
 	if len(chunks) == 0 {
 		return nil, fmt.Errorf("no response meta extension found")

@@ -398,6 +398,7 @@ type mcpToolCallVariant interface {
 	MCPToolCall | MCPToolResult | MCPListToolsResult | MCPToolApprovalRequest | MCPToolApprovalResponse
 }
 
+// NewContentBlock creates a new ContentBlock with the given content.
 func NewContentBlock[T contentBlockVariant](content *T) *ContentBlock {
 	switch b := any(content).(type) {
 	case *Reasoning:
@@ -443,6 +444,7 @@ func NewContentBlock[T contentBlockVariant](content *T) *ContentBlock {
 	}
 }
 
+// NewContentBlockChunk creates a new ContentBlock with the given content and streaming metadata.
 func NewContentBlockChunk[T contentBlockVariant](content *T, meta *StreamingMeta) *ContentBlock {
 	block := NewContentBlock(content)
 	block.StreamingMeta = meta
@@ -683,10 +685,12 @@ func formatUserInputFile(uif *UserInputFile, vs map[string]any, formatType Forma
 	return &copied, nil
 }
 
+// ConcatAgenticMessagesArray concatenates multiple streams of AgenticMessage into a single slice of AgenticMessage.
 func ConcatAgenticMessagesArray(mas [][]*AgenticMessage) ([]*AgenticMessage, error) {
 	return buildConcatGenericArray[AgenticMessage](ConcatAgenticMessages)(mas)
 }
 
+// ConcatAgenticMessages concatenates a list of AgenticMessage chunks into a single AgenticMessage.
 func ConcatAgenticMessages(msgs []*AgenticMessage) (*AgenticMessage, error) {
 	var (
 		role          AgenticRoleType
@@ -1682,6 +1686,7 @@ func concatMCPToolApprovalResponses(responses []*MCPToolApprovalResponse) (*MCPT
 	return nil, fmt.Errorf("cannot concat multiple mcp tool approval responses")
 }
 
+// String returns the string representation of AgenticMessage.
 func (m *AgenticMessage) String() string {
 	sb := &strings.Builder{}
 	sb.WriteString(fmt.Sprintf("role: %s\n", m.Role))
@@ -1703,6 +1708,7 @@ func (m *AgenticMessage) String() string {
 	return sb.String()
 }
 
+// String returns the string representation of ContentBlock.
 func (b *ContentBlock) String() string {
 	sb := &strings.Builder{}
 	sb.WriteString(fmt.Sprintf("type: %s\n", b.Type))
@@ -1793,6 +1799,7 @@ func (b *ContentBlock) String() string {
 	return sb.String()
 }
 
+// String returns the string representation of Reasoning.
 func (r *Reasoning) String() string {
 	sb := &strings.Builder{}
 	sb.WriteString(fmt.Sprintf("      summary: %d items\n", len(r.Summary)))
@@ -1805,22 +1812,27 @@ func (r *Reasoning) String() string {
 	return sb.String()
 }
 
+// String returns the string representation of UserInputText.
 func (u *UserInputText) String() string {
 	return fmt.Sprintf("      text: %s\n", u.Text)
 }
 
+// String returns the string representation of UserInputImage.
 func (u *UserInputImage) String() string {
 	return formatMediaString(u.URL, u.Base64Data, u.MIMEType, u.Detail)
 }
 
+// String returns the string representation of UserInputAudio.
 func (u *UserInputAudio) String() string {
 	return formatMediaString(u.URL, u.Base64Data, u.MIMEType, "")
 }
 
+// String returns the string representation of UserInputVideo.
 func (u *UserInputVideo) String() string {
 	return formatMediaString(u.URL, u.Base64Data, u.MIMEType, "")
 }
 
+// String returns the string representation of UserInputFile.
 func (u *UserInputFile) String() string {
 	sb := &strings.Builder{}
 	if u.Name != "" {
@@ -1830,22 +1842,27 @@ func (u *UserInputFile) String() string {
 	return sb.String()
 }
 
+// String returns the string representation of AssistantGenText.
 func (a *AssistantGenText) String() string {
 	return fmt.Sprintf("      text: %s\n", a.Text)
 }
 
+// String returns the string representation of AssistantGenImage.
 func (a *AssistantGenImage) String() string {
 	return formatMediaString(a.URL, a.Base64Data, a.MIMEType, "")
 }
 
+// String returns the string representation of AssistantGenAudio.
 func (a *AssistantGenAudio) String() string {
 	return formatMediaString(a.URL, a.Base64Data, a.MIMEType, "")
 }
 
+// String returns the string representation of AssistantGenVideo.
 func (a *AssistantGenVideo) String() string {
 	return formatMediaString(a.URL, a.Base64Data, a.MIMEType, "")
 }
 
+// String returns the string representation of FunctionToolCall.
 func (f *FunctionToolCall) String() string {
 	sb := &strings.Builder{}
 	sb.WriteString(fmt.Sprintf("      call_id: %s\n", f.CallID))
@@ -1854,6 +1871,7 @@ func (f *FunctionToolCall) String() string {
 	return sb.String()
 }
 
+// String returns the string representation of FunctionToolResult.
 func (f *FunctionToolResult) String() string {
 	sb := &strings.Builder{}
 	sb.WriteString(fmt.Sprintf("      call_id: %s\n", f.CallID))
@@ -1862,6 +1880,7 @@ func (f *FunctionToolResult) String() string {
 	return sb.String()
 }
 
+// String returns the string representation of ServerToolCall.
 func (s *ServerToolCall) String() string {
 	sb := &strings.Builder{}
 	sb.WriteString(fmt.Sprintf("      name: %s\n", s.Name))
@@ -1872,6 +1891,7 @@ func (s *ServerToolCall) String() string {
 	return sb.String()
 }
 
+// String returns the string representation of ServerToolResult.
 func (s *ServerToolResult) String() string {
 	sb := &strings.Builder{}
 	sb.WriteString(fmt.Sprintf("      name: %s\n", s.Name))
@@ -1882,6 +1902,7 @@ func (s *ServerToolResult) String() string {
 	return sb.String()
 }
 
+// String returns the string representation of MCPToolCall.
 func (m *MCPToolCall) String() string {
 	sb := &strings.Builder{}
 	sb.WriteString(fmt.Sprintf("      server_label: %s\n", m.ServerLabel))
@@ -1891,6 +1912,7 @@ func (m *MCPToolCall) String() string {
 	return sb.String()
 }
 
+// String returns the string representation of MCPToolResult.
 func (m *MCPToolResult) String() string {
 	sb := &strings.Builder{}
 	sb.WriteString(fmt.Sprintf("      call_id: %s\n", m.CallID))
@@ -1902,6 +1924,7 @@ func (m *MCPToolResult) String() string {
 	return sb.String()
 }
 
+// String returns the string representation of MCPListToolsResult.
 func (m *MCPListToolsResult) String() string {
 	sb := &strings.Builder{}
 	sb.WriteString(fmt.Sprintf("      server_label: %s\n", m.ServerLabel))
@@ -1915,6 +1938,7 @@ func (m *MCPListToolsResult) String() string {
 	return sb.String()
 }
 
+// String returns the string representation of MCPToolApprovalRequest.
 func (m *MCPToolApprovalRequest) String() string {
 	sb := &strings.Builder{}
 	sb.WriteString(fmt.Sprintf("      server_label: %s\n", m.ServerLabel))
@@ -1924,6 +1948,7 @@ func (m *MCPToolApprovalRequest) String() string {
 	return sb.String()
 }
 
+// String returns the string representation of MCPToolApprovalResponse.
 func (m *MCPToolApprovalResponse) String() string {
 	sb := &strings.Builder{}
 	sb.WriteString(fmt.Sprintf("      approval_request_id: %s\n", m.ApprovalRequestID))
@@ -1934,6 +1959,7 @@ func (m *MCPToolApprovalResponse) String() string {
 	return sb.String()
 }
 
+// String returns the string representation of AgenticResponseMeta.
 func (a *AgenticResponseMeta) String() string {
 	sb := &strings.Builder{}
 	sb.WriteString("response_meta:\n")
