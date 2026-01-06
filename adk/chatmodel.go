@@ -764,9 +764,12 @@ func getPreAppliedBeforeAgentFromCtx(ctx context.Context) *preAppliedBeforeAgent
 }
 
 func (a *ChatModelAgent) applyBeforeAgent(ctx context.Context, bc *buildContext) (context.Context, string, []ToolMeta, error) {
+	toolsCopy := make([]ToolMeta, len(bc.initialTools))
+	copy(toolsCopy, bc.initialTools)
+
 	runCtx := &AgentRunContext{
 		Instruction: bc.baseInstruction,
-		Tools:       bc.initialTools,
+		Tools:       toolsCopy,
 	}
 
 	for i, h := range a.handlers {
@@ -780,23 +783,30 @@ func (a *ChatModelAgent) applyBeforeAgent(ctx context.Context, bc *buildContext)
 	return ctx, runCtx.Instruction, runCtx.Tools, nil
 }
 
+func hasReturnDirectlyTool(tools []ToolMeta) bool {
+	for _, t := range tools {
+		if t.ReturnDirectly {
+			return true
+		}
+	}
+	return false
+}
+
 func isRuntimeCompatible(bc *buildContext, runtimeHasTools, runtimeHasReturnDirectly bool) bool {
-	if !bc.hasTools && runtimeHasTools {
+	if len(bc.initialTools) == 0 && runtimeHasTools {
 		return false
 	}
-	if !bc.hasReturnDirectly && runtimeHasReturnDirectly {
+	if !hasReturnDirectlyTool(bc.initialTools) && runtimeHasReturnDirectly {
 		return false
 	}
 	return true
 }
 
 type buildContext struct {
-	baseInstruction   string
-	toolsNodeConf     compose.ToolsNodeConfig
-	returnDirectly    map[string]bool
-	initialTools      []ToolMeta
-	hasTools          bool
-	hasReturnDirectly bool
+	baseInstruction string
+	toolsNodeConf   compose.ToolsNodeConfig
+	returnDirectly  map[string]bool
+	initialTools    []ToolMeta
 }
 
 func (a *ChatModelAgent) prepareBuildContext(ctx context.Context) (*buildContext, error) {
@@ -845,22 +855,11 @@ func (a *ChatModelAgent) prepareBuildContext(ctx context.Context) (*buildContext
 		initialTools = append(initialTools, ToolMeta{Tool: t, ReturnDirectly: rd})
 	}
 
-	hasTools := len(initialTools) > 0
-	hasReturnDirectly := false
-	for _, t := range initialTools {
-		if t.ReturnDirectly {
-			hasReturnDirectly = true
-			break
-		}
-	}
-
 	return &buildContext{
-		baseInstruction:   baseInstruction,
-		toolsNodeConf:     toolsNodeConf,
-		returnDirectly:    returnDirectly,
-		initialTools:      initialTools,
-		hasTools:          hasTools,
-		hasReturnDirectly: hasReturnDirectly,
+		baseInstruction: baseInstruction,
+		toolsNodeConf:   toolsNodeConf,
+		returnDirectly:  returnDirectly,
+		initialTools:    initialTools,
 	}, nil
 }
 
@@ -1125,7 +1124,7 @@ func (a *ChatModelAgent) buildRunFunc(ctx context.Context) runFunc {
 			return
 		}
 
-		run, err := a.buildReactRunFunc(ctx, bc, bc.hasReturnDirectly)
+		run, err := a.buildReactRunFunc(ctx, bc, hasReturnDirectlyTool(bc.initialTools))
 		if err != nil {
 			a.run = errFunc(err)
 			return
