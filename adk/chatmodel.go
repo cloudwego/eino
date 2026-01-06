@@ -214,11 +214,6 @@ type ChatModelAgentConfig struct {
 	ModelRetryConfig *ModelRetryConfig
 }
 
-type graphConfig struct {
-	hasTools          bool
-	hasReturnDirectly bool
-}
-
 type ChatModelAgent struct {
 	name        string
 	description string
@@ -785,36 +780,23 @@ func (a *ChatModelAgent) applyBeforeAgent(ctx context.Context, bc *buildContext)
 	return ctx, runCtx.Instruction, runCtx.Tools, nil
 }
 
-func (a *ChatModelAgent) computeGraphConfig(tools []ToolMeta) graphConfig {
-	hasReturnDirectly := false
-	for _, t := range tools {
-		if t.ReturnDirectly {
-			hasReturnDirectly = true
-			break
-		}
-	}
-	return graphConfig{
-		hasTools:          len(tools) > 0,
-		hasReturnDirectly: hasReturnDirectly,
-	}
-}
-
-func isGraphConfigCompatible(defaultConfig, runtimeConfig graphConfig) bool {
-	if !defaultConfig.hasTools && runtimeConfig.hasTools {
+func isRuntimeCompatible(bc *buildContext, runtimeHasTools, runtimeHasReturnDirectly bool) bool {
+	if !bc.hasTools && runtimeHasTools {
 		return false
 	}
-	if !defaultConfig.hasReturnDirectly && runtimeConfig.hasReturnDirectly {
+	if !bc.hasReturnDirectly && runtimeHasReturnDirectly {
 		return false
 	}
 	return true
 }
 
 type buildContext struct {
-	baseInstruction string
-	toolsNodeConf   compose.ToolsNodeConfig
-	returnDirectly  map[string]bool
-	initialTools    []ToolMeta
-	graphConfig     graphConfig
+	baseInstruction   string
+	toolsNodeConf     compose.ToolsNodeConfig
+	returnDirectly    map[string]bool
+	initialTools      []ToolMeta
+	hasTools          bool
+	hasReturnDirectly bool
 }
 
 func (a *ChatModelAgent) prepareBuildContext(ctx context.Context) (*buildContext, error) {
@@ -863,14 +845,22 @@ func (a *ChatModelAgent) prepareBuildContext(ctx context.Context) (*buildContext
 		initialTools = append(initialTools, ToolMeta{Tool: t, ReturnDirectly: rd})
 	}
 
-	gc := a.computeGraphConfig(initialTools)
+	hasTools := len(initialTools) > 0
+	hasReturnDirectly := false
+	for _, t := range initialTools {
+		if t.ReturnDirectly {
+			hasReturnDirectly = true
+			break
+		}
+	}
 
 	return &buildContext{
-		baseInstruction: baseInstruction,
-		toolsNodeConf:   toolsNodeConf,
-		returnDirectly:  returnDirectly,
-		initialTools:    initialTools,
-		graphConfig:     gc,
+		baseInstruction:   baseInstruction,
+		toolsNodeConf:     toolsNodeConf,
+		returnDirectly:    returnDirectly,
+		initialTools:      initialTools,
+		hasTools:          hasTools,
+		hasReturnDirectly: hasReturnDirectly,
 	}, nil
 }
 
@@ -1135,7 +1125,7 @@ func (a *ChatModelAgent) buildRunFunc(ctx context.Context) runFunc {
 			return
 		}
 
-		run, err := a.buildReactRunFunc(ctx, bc, bc.graphConfig.hasReturnDirectly)
+		run, err := a.buildReactRunFunc(ctx, bc, bc.hasReturnDirectly)
 		if err != nil {
 			a.run = errFunc(err)
 			return
@@ -1164,17 +1154,24 @@ func (a *ChatModelAgent) getRunFunc(ctx context.Context) (runFunc, context.Conte
 
 	ctx = setPreAppliedBeforeAgentToCtx(ctx, instruction, tools)
 
-	runtimeConfig := a.computeGraphConfig(tools)
+	runtimeHasTools := len(tools) > 0
+	runtimeHasReturnDirectly := false
+	for _, t := range tools {
+		if t.ReturnDirectly {
+			runtimeHasReturnDirectly = true
+			break
+		}
+	}
 
-	if isGraphConfigCompatible(bc.graphConfig, runtimeConfig) {
+	if isRuntimeCompatible(bc, runtimeHasTools, runtimeHasReturnDirectly) {
 		return defaultRun, ctx, nil
 	}
 
 	var tempRun runFunc
-	if !runtimeConfig.hasTools {
+	if !runtimeHasTools {
 		tempRun = a.buildNoToolsRunFunc(ctx, bc)
 	} else {
-		tempRun, err = a.buildReactRunFunc(ctx, bc, runtimeConfig.hasReturnDirectly)
+		tempRun, err = a.buildReactRunFunc(ctx, bc, runtimeHasReturnDirectly)
 		if err != nil {
 			return nil, ctx, err
 		}
