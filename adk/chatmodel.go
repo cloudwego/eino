@@ -1151,6 +1151,10 @@ func (a *ChatModelAgent) buildRunFunc(ctx context.Context) runFunc {
 func (a *ChatModelAgent) getRunFunc(ctx context.Context) (runFunc, context.Context, error) {
 	defaultRun := a.buildRunFunc(ctx)
 
+	if len(a.handlers) == 0 {
+		return defaultRun, ctx, nil
+	}
+
 	bc := a.buildContext
 
 	ctx, instruction, tools, err := a.applyBeforeAgent(ctx, bc)
