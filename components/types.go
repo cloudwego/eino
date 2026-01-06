@@ -21,8 +21,6 @@ package components
 // Typer get the type name of one component's implementation
 // if Typer exists, the full name of the component instance will be {Typer}{Component} by default
 // recommend using Camel Case Naming Style for Typer
-// Typer exposes a component's type name used to form a readable identifier.
-// The full name is typically {Type}{Component}.
 type Typer interface {
 	GetType() string
 }
@@ -39,8 +37,6 @@ func GetType(component any) (string, bool) {
 // Checker tells callback aspect status of component's implementation
 // When the Checker interface is implemented and returns true, the framework will not start the default aspect.
 // Instead, the component will decide the callback execution location and the information to be injected.
-// Checker indicates whether a component enables its own callback handling.
-// When true, the framework will not start the default aspect.
 type Checker interface {
 	IsCallbacksEnabled() bool
 }

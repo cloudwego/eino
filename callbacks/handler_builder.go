@@ -79,7 +79,6 @@ func (hb *handlerImpl) Needed(_ context.Context, _ *RunInfo, timing CallbackTimi
 
 // NewHandlerBuilder creates and returns a new HandlerBuilder instance.
 // HandlerBuilder is used to construct a Handler with custom callback functions
-// NewHandlerBuilder creates and returns a new HandlerBuilder.
 func NewHandlerBuilder() *HandlerBuilder {
 	return &HandlerBuilder{}
 }

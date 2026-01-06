@@ -41,8 +41,6 @@ type RetrieveTask struct {
 }
 
 // ConcurrentRetrieveWithCallback concurrently retrieves documents with callback.
-// ConcurrentRetrieveWithCallback runs retrieval tasks concurrently and
-// emits callbacks on start, error, and end.
 func ConcurrentRetrieveWithCallback(ctx context.Context, tasks []*RetrieveTask) {
 	wg := sync.WaitGroup{}
 	for i := range tasks {
