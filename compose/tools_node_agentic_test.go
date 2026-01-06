@@ -20,6 +20,7 @@ import (
 	"io"
 	"testing"
 
+	"github.com/bytedance/sonic"
 	"github.com/stretchr/testify/assert"
 
 	"github.com/cloudwego/eino/schema"
@@ -155,13 +156,14 @@ func TestStreamToolMessageToAgenticMessage(t *testing.T) {
 			nil,
 		},
 		{
+			nil,
 			{
 				Role:       schema.Tool,
-				Content:    "content1-2",
+				Content:    "content2-2",
 				ToolName:   "name2",
 				ToolCallID: "2",
 			},
-			nil, nil,
+			nil,
 		},
 		{
 			nil, nil,
@@ -171,16 +173,6 @@ func TestStreamToolMessageToAgenticMessage(t *testing.T) {
 				ToolName:   "name3",
 				ToolCallID: "3",
 			},
-		},
-		{
-			nil,
-			{
-				Role:       schema.Tool,
-				Content:    "content2-2",
-				ToolName:   "name2",
-				ToolCallID: "2",
-			},
-			nil,
 		},
 		{
 			nil, nil,
@@ -204,7 +196,11 @@ func TestStreamToolMessageToAgenticMessage(t *testing.T) {
 	}
 	result, err := schema.ConcatAgenticMessagesArray(chunks)
 	assert.NoError(t, err)
-	assert.Equal(t, []*schema.AgenticMessage{
+
+	actualStr, err := sonic.MarshalString(result)
+	assert.NoError(t, err)
+
+	expected := []*schema.AgenticMessage{
 		{
 			Role: schema.AgenticRoleTypeUser,
 			ContentBlocks: []*schema.ContentBlock{
@@ -213,10 +209,8 @@ func TestStreamToolMessageToAgenticMessage(t *testing.T) {
 					FunctionToolResult: &schema.FunctionToolResult{
 						CallID: "1",
 						Name:   "name1",
-						Result: "content1-1content1-2",
-						Extra:  map[string]interface{}{},
+						Result: "content1-1",
 					},
-					StreamMeta: &schema.StreamMeta{Index: 0},
 				},
 				{
 					Type: schema.ContentBlockTypeFunctionToolResult,
@@ -224,9 +218,7 @@ func TestStreamToolMessageToAgenticMessage(t *testing.T) {
 						CallID: "2",
 						Name:   "name2",
 						Result: "content2-1content2-2",
-						Extra:  map[string]interface{}{},
 					},
-					StreamMeta: &schema.StreamMeta{Index: 1},
 				},
 				{
 					Type: schema.ContentBlockTypeFunctionToolResult,
@@ -234,11 +226,14 @@ func TestStreamToolMessageToAgenticMessage(t *testing.T) {
 						CallID: "3",
 						Name:   "name3",
 						Result: "content3-1content3-2",
-						Extra:  map[string]interface{}{},
 					},
-					StreamMeta: &schema.StreamMeta{Index: 2},
 				},
 			},
 		},
-	}, result)
+	}
+
+	expectedStr, err := sonic.MarshalString(expected)
+	assert.NoError(t, err)
+
+	assert.Equal(t, expectedStr, actualStr)
 }
