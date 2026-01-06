@@ -14,6 +14,7 @@
  * limitations under the License.
  */
 
+// Package agentic defines callback payloads and configuration types for agentic models.
 package agentic
 
 import (
@@ -26,9 +27,9 @@ type Config struct {
 	// Model is the model name.
 	Model string
 	// Temperature is the temperature, which controls the randomness of the model.
-	Temperature float32
+	Temperature float64
 	// TopP is the top p, which controls the diversity of the model.
-	TopP float32
+	TopP float64
 }
 
 // CallbackInput is the input for the model callback.
