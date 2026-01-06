@@ -891,9 +891,10 @@ func (a *ChatModelAgent) buildNoToolsRunFunc(_ context.Context, bc *buildContext
 			}
 		}
 
-		r, err := compose.NewChain[*AgentInput, Message](compose.WithGenLocalState(func(ctx context.Context) (state *ChatModelAgentState) {
-			return &ChatModelAgentState{}
-		})).
+		r, err := compose.NewChain[*AgentInput, Message](
+			compose.WithGenLocalState(func(ctx context.Context) (state *ChatModelAgentState) {
+				return &ChatModelAgentState{}
+			})).
 			AppendLambda(compose.InvokableLambda(func(ctx context.Context, input *AgentInput) ([]Message, error) {
 				messages, err := a.genModelInput(ctx, instruction, input)
 				if err != nil {
@@ -903,47 +904,44 @@ func (a *ChatModelAgent) buildNoToolsRunFunc(_ context.Context, bc *buildContext
 			})).
 			AppendChatModel(
 				chatModel,
-				compose.WithStatePreHandler(func(ctx context.Context, in []*schema.Message, state *ChatModelAgentState) ([]*schema.Message, error) {
-					messages := in
+				compose.WithStatePreHandler(func(ctx context.Context, in []Message, state *ChatModelAgentState) (
+					_ []Message, err error) {
+					state.Messages = in
 					for _, m := range a.middlewares {
 						if m.BeforeChatModel != nil {
-							mwState := &ChatModelAgentState{Messages: messages}
-							if err := m.BeforeChatModel(ctx, mwState); err != nil {
+							if err = m.BeforeChatModel(ctx, state); err != nil {
 								return nil, err
 							}
-							messages = mwState.Messages
 						}
 					}
 					for _, h := range a.handlers {
-						var err error
-						ctx, messages, err = h.BeforeModelRewriteHistory(ctx, messages)
+						ctx, state.Messages, err = h.BeforeModelRewriteHistory(ctx, state.Messages)
 						if err != nil {
 							return nil, err
 						}
 					}
-					state.Messages = messages
-					return messages, nil
+					return state.Messages, nil
 				}),
-				compose.WithStatePostHandler(func(ctx context.Context, in *schema.Message, state *ChatModelAgentState) (*schema.Message, error) {
-					messages := append(state.Messages, in)
+				compose.WithStatePostHandler(func(ctx context.Context, in Message, state *ChatModelAgentState) (
+					_ Message, err error) {
+					state.Messages = append(state.Messages, in)
 					for _, m := range a.middlewares {
 						if m.AfterChatModel != nil {
-							mwState := &ChatModelAgentState{Messages: messages}
-							if err := m.AfterChatModel(ctx, mwState); err != nil {
+							if err = m.AfterChatModel(ctx, state); err != nil {
 								return nil, err
 							}
-							messages = mwState.Messages
 						}
 					}
 					for _, h := range a.handlers {
-						var err error
-						ctx, messages, err = h.AfterModelRewriteHistory(ctx, messages)
+						ctx, state.Messages, err = h.AfterModelRewriteHistory(ctx, state.Messages)
 						if err != nil {
 							return nil, err
 						}
 					}
-					state.Messages = messages
-					return in, nil
+					if len(state.Messages) == 0 {
+						return nil, errors.New("no messages left in state after ChatModel")
+					}
+					return state.Messages[len(state.Messages)-1], nil
 				}),
 			).
 			Compile(ctx, compose.WithGraphName(a.name),
@@ -1082,6 +1080,9 @@ func (a *ChatModelAgent) buildReactRunFunc(ctx context.Context, bc *buildContext
 		runOpts = append(runOpts, callOpt)
 		if a.toolsConfig.EmitInternalEvents {
 			runOpts = append(runOpts, compose.WithToolsNodeOption(compose.WithToolOption(withAgentToolEventGenerator(generator))))
+		}
+		if input.EnableStreaming {
+			runOpts = append(runOpts, compose.WithToolsNodeOption(compose.WithToolOption(withAgentToolEnableStreaming(true))))
 		}
 
 		toolInfos := make([]*schema.ToolInfo, 0, len(runtimeTools))
