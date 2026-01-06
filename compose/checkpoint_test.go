@@ -20,12 +20,16 @@ import (
 	"context"
 	"errors"
 	"io"
+	"sync"
 	"testing"
 	"time"
 
+	"github.com/bytedance/sonic"
 	"github.com/stretchr/testify/assert"
 
+	"github.com/cloudwego/eino/components/tool"
 	"github.com/cloudwego/eino/internal/callbacks"
+	"github.com/cloudwego/eino/internal/generic"
 	"github.com/cloudwego/eino/internal/serialization"
 	"github.com/cloudwego/eino/schema"
 )
@@ -1397,7 +1401,7 @@ func TestCancelInterrupt(t *testing.T) {
 	assert.NoError(t, err)
 	assert.Equal(t, "input12", result)
 
-	// interrupt rerun nodes
+	// interrupt rerun nodes - with auto-enabled PersistRerunInput, input is preserved
 	canceledCtx, cancel = WithGraphInterrupt(ctx)
 	go func() {
 		time.Sleep(500 * time.Millisecond)
@@ -1410,7 +1414,7 @@ func TestCancelInterrupt(t *testing.T) {
 	assert.Equal(t, []string{"1"}, info.RerunNodes)
 	result, err = r.Invoke(ctx, "input", WithCheckPointID("3"))
 	assert.NoError(t, err)
-	assert.Equal(t, "12", result)
+	assert.Equal(t, "input12", result)
 
 	// dag
 	g = NewGraph[string, string]()
@@ -1455,7 +1459,7 @@ func TestCancelInterrupt(t *testing.T) {
 	assert.NoError(t, err)
 	assert.Equal(t, "input12", result)
 
-	// interrupt rerun nodes
+	// interrupt rerun nodes - with auto-enabled PersistRerunInput, input is preserved
 	canceledCtx, cancel = WithGraphInterrupt(ctx)
 	go func() {
 		time.Sleep(300 * time.Millisecond)
@@ -1468,7 +1472,7 @@ func TestCancelInterrupt(t *testing.T) {
 	assert.Equal(t, []string{"1"}, info.RerunNodes)
 	result, err = r.Invoke(ctx, "input", WithCheckPointID("3"))
 	assert.NoError(t, err)
-	assert.Equal(t, "12", result)
+	assert.Equal(t, "input12", result)
 
 	// dag multi canceled nodes
 	gg := NewGraph[string, map[string]any]()
@@ -1513,7 +1517,7 @@ func TestCancelInterrupt(t *testing.T) {
 		"3": "input13",
 	}, result2)
 
-	// interrupt rerun nodes
+	// interrupt rerun nodes - with auto-enabled PersistRerunInput, input is preserved
 	canceledCtx, cancel = WithGraphInterrupt(ctx)
 	go func() {
 		time.Sleep(500 * time.Millisecond)
@@ -1527,8 +1531,8 @@ func TestCancelInterrupt(t *testing.T) {
 	result2, err = rr.Invoke(ctx, "input", WithCheckPointID("2"))
 	assert.NoError(t, err)
 	assert.Equal(t, map[string]any{
-		"2": "2",
-		"3": "3",
+		"2": "input12",
+		"3": "input13",
 	}, result2)
 }
 
@@ -1816,4 +1820,182 @@ func TestPersistRerunInputSubGraph(t *testing.T) {
 	assert.Equal(t, "test_main_sub_processed", result)
 	assert.Equal(t, "test_main", receivedInput)
 	assert.Equal(t, 2, callCount)
+}
+
+type longRunningToolInput struct {
+	Input string `json:"input"`
+}
+
+func TestToolsNodeWithExternalGraphInterrupt(t *testing.T) {
+	store := newInMemoryStore()
+	ctx := context.Background()
+
+	var mu sync.Mutex
+	var callCount int
+
+	longRunningToolInfo := &schema.ToolInfo{
+		Name: "long_running_tool",
+		Desc: "A tool that takes a long time to run",
+		ParamsOneOf: schema.NewParamsOneOfByParams(map[string]*schema.ParameterInfo{
+			"input": {Type: "string", Desc: "input"},
+		}),
+	}
+
+	longRunningTool := newCheckpointTestTool(longRunningToolInfo, func(ctx context.Context, in *longRunningToolInput) (string, error) {
+		mu.Lock()
+		callCount++
+		currentCount := callCount
+		mu.Unlock()
+
+		if currentCount == 1 {
+			time.Sleep(2 * time.Second)
+		}
+		return "result_" + in.Input, nil
+	})
+
+	toolsNode, err := NewToolNode(ctx, &ToolsNodeConfig{
+		Tools: []tool.BaseTool{longRunningTool},
+	})
+	assert.NoError(t, err)
+
+	g := NewGraph[*schema.Message, []*schema.Message]()
+	err = g.AddToolsNode("tools", toolsNode)
+	assert.NoError(t, err)
+	err = g.AddEdge(START, "tools")
+	assert.NoError(t, err)
+	err = g.AddEdge("tools", END)
+	assert.NoError(t, err)
+
+	r, err := g.Compile(ctx,
+		WithNodeTriggerMode(AllPredecessor),
+		WithCheckPointStore(store),
+	)
+	assert.NoError(t, err)
+
+	inputMsg := &schema.Message{
+		Role: schema.Assistant,
+		ToolCalls: []schema.ToolCall{{
+			ID:   "call_1",
+			Type: "function",
+			Function: schema.FunctionCall{
+				Name:      "long_running_tool",
+				Arguments: `{"input": "test"}`,
+			},
+		}},
+	}
+
+	canceledCtx, cancel := WithGraphInterrupt(ctx)
+	go func() {
+		time.Sleep(100 * time.Millisecond)
+		cancel(WithGraphInterruptTimeout(0))
+	}()
+
+	_, err = r.Invoke(canceledCtx, inputMsg, WithCheckPointID("cp1"))
+	assert.Error(t, err)
+	info, ok := ExtractInterruptInfo(err)
+	assert.True(t, ok, "Expected interrupt error, got: %v", err)
+	if ok {
+		assert.Equal(t, []string{"tools"}, info.RerunNodes)
+	}
+
+	result, err := r.Invoke(ctx, &schema.Message{}, WithCheckPointID("cp1"))
+	assert.NoError(t, err)
+	assert.Len(t, result, 1)
+	assert.Equal(t, `"result_test"`, result[0].Content)
+
+	mu.Lock()
+	assert.Equal(t, 2, callCount)
+	mu.Unlock()
+}
+
+func TestExternalInterruptRespectsExplicitPersistRerunInputFalse(t *testing.T) {
+	store := newInMemoryStore()
+	ctx := context.Background()
+
+	var mu sync.Mutex
+	var callCount int
+	var receivedInputOnResume string
+
+	g := NewGraph[string, string]()
+	err := g.AddLambdaNode("1", InvokableLambda(func(ctx context.Context, input string) (output string, err error) {
+		mu.Lock()
+		callCount++
+		currentCount := callCount
+		mu.Unlock()
+
+		if currentCount == 1 {
+			time.Sleep(2 * time.Second)
+		}
+		if currentCount == 2 {
+			mu.Lock()
+			receivedInputOnResume = input
+			mu.Unlock()
+		}
+		return input + "_processed", nil
+	}))
+	assert.NoError(t, err)
+
+	err = g.AddEdge(START, "1")
+	assert.NoError(t, err)
+	err = g.AddEdge("1", END)
+	assert.NoError(t, err)
+
+	r, err := g.Compile(ctx,
+		WithNodeTriggerMode(AllPredecessor),
+		WithCheckPointStore(store),
+		WithCheckpointConfig(CheckpointConfig{PersistRerunInput: false}),
+	)
+	assert.NoError(t, err)
+
+	canceledCtx, cancel := WithGraphInterrupt(ctx)
+	go func() {
+		time.Sleep(100 * time.Millisecond)
+		cancel(WithGraphInterruptTimeout(0))
+	}()
+
+	_, err = r.Invoke(canceledCtx, "test_input", WithCheckPointID("cp1"))
+	assert.Error(t, err)
+	info, ok := ExtractInterruptInfo(err)
+	assert.True(t, ok, "Expected interrupt error, got: %v", err)
+	if ok {
+		assert.Equal(t, []string{"1"}, info.RerunNodes)
+	}
+
+	result, err := r.Invoke(ctx, "", WithCheckPointID("cp1"))
+	assert.NoError(t, err)
+	assert.Equal(t, "_processed", result)
+
+	mu.Lock()
+	assert.Equal(t, "", receivedInputOnResume)
+	assert.Equal(t, 2, callCount)
+	mu.Unlock()
+}
+
+type checkpointTestTool[I, O any] struct {
+	info *schema.ToolInfo
+	fn   func(ctx context.Context, in I) (O, error)
+}
+
+func newCheckpointTestTool[I, O any](info *schema.ToolInfo, f func(ctx context.Context, in I) (O, error)) tool.InvokableTool {
+	return &checkpointTestTool[I, O]{
+		info: info,
+		fn:   f,
+	}
+}
+
+func (f *checkpointTestTool[I, O]) Info(ctx context.Context) (*schema.ToolInfo, error) {
+	return f.info, nil
+}
+
+func (f *checkpointTestTool[I, O]) InvokableRun(ctx context.Context, argumentsInJSON string, _ ...tool.Option) (string, error) {
+	t := generic.NewInstance[I]()
+	err := sonic.UnmarshalString(argumentsInJSON, t)
+	if err != nil {
+		return "", err
+	}
+	o, err := f.fn(ctx, t)
+	if err != nil {
+		return "", err
+	}
+	return sonic.MarshalString(o)
 }
