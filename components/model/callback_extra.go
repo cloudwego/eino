@@ -30,10 +30,10 @@ type TokenUsage struct {
 	PromptTokenDetails PromptTokenDetails
 	// CompletionTokens is the number of completion tokens.
 	CompletionTokens int
-	// CompletionTokensDetails is a breakdown of the completion tokens.
-	CompletionTokensDetails CompletionTokensDetails
 	// TotalTokens is the total number of tokens.
 	TotalTokens int
+	// CompletionTokensDetails is a breakdown of the completion tokens.
+	CompletionTokensDetails CompletionTokensDetails
 }
 
 type CompletionTokensDetails struct {
