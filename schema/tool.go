@@ -59,6 +59,27 @@ const (
 	ToolChoiceForced ToolChoice = "forced"
 )
 
+type AllowedTool struct {
+	// FunctionToolName is the name of the function tool.
+	FunctionToolName string
+
+	MCPTool *AllowedMCPTool
+
+	ServerTool *AllowedServerTool
+}
+type AllowedMCPTool struct {
+	// ServerLabel is the label of the MCP server.
+	ServerLabel string
+	// The name of the MCP tool.
+	Name string
+}
+
+type AllowedServerTool struct {
+	// The name of the server tool.
+	Name string
+}
+
+// ToolInfo is the information of a tool.
 // ToolInfo describes a tool that can be passed to a ChatModel via
 // [ToolCallingChatModel.WithTools] or [ChatModel.BindTools].
 //
