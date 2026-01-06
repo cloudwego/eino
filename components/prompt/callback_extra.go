@@ -34,6 +34,7 @@ type AgenticCallbackOutput struct {
 	Extra     map[string]any
 }
 
+// ConvAgenticCallbackInput converts the callback input to the agentic callback input.
 func ConvAgenticCallbackInput(src callbacks.CallbackInput) *AgenticCallbackInput {
 	switch t := src.(type) {
 	case *AgenticCallbackInput:
@@ -47,6 +48,7 @@ func ConvAgenticCallbackInput(src callbacks.CallbackInput) *AgenticCallbackInput
 	}
 }
 
+// ConvAgenticCallbackOutput converts the callback output to the agentic callback output.
 func ConvAgenticCallbackOutput(src callbacks.CallbackOutput) *AgenticCallbackOutput {
 	switch t := src.(type) {
 	case *AgenticCallbackOutput:

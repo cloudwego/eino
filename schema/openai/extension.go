@@ -112,6 +112,7 @@ type TextAnnotationFilePath struct {
 	Index int `json:"index,omitempty"`
 }
 
+// ConcatAssistantGenTextExtensions concatenates multiple AssistantGenTextExtension chunks into a single one.
 func ConcatAssistantGenTextExtensions(chunks []*AssistantGenTextExtension) (*AssistantGenTextExtension, error) {
 	if len(chunks) == 0 {
 		return nil, fmt.Errorf("no assistant generated text extension found")
@@ -166,6 +167,7 @@ func ConcatAssistantGenTextExtensions(chunks []*AssistantGenTextExtension) (*Ass
 	return ret, nil
 }
 
+// ConcatResponseMetaExtensions concatenates multiple ResponseMetaExtension chunks into a single one.
 func ConcatResponseMetaExtensions(chunks []*ResponseMetaExtension) (*ResponseMetaExtension, error) {
 	if len(chunks) == 0 {
 		return nil, fmt.Errorf("no response meta extension found")

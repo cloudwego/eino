@@ -23,13 +23,12 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/cloudwego/eino/schema/claude"
-	"github.com/cloudwego/eino/schema/gemini"
+	"github.com/eino-contrib/jsonschema"
 
 	"github.com/cloudwego/eino/internal"
+	"github.com/cloudwego/eino/schema/claude"
+	"github.com/cloudwego/eino/schema/gemini"
 	"github.com/cloudwego/eino/schema/openai"
-
-	"github.com/eino-contrib/jsonschema"
 )
 
 type ContentBlockType string
@@ -848,7 +847,8 @@ func concatAgenticResponseMeta(metas []*AgenticResponseMeta) (ret *AgenticRespon
 	}
 
 	if extensions.IsValid() && !extensions.IsZero() {
-		extension, err := internal.ConcatSliceValue(extensions)
+		var extension reflect.Value
+		extension, err = internal.ConcatSliceValue(extensions)
 		if err != nil {
 			return nil, fmt.Errorf("failed to concat extensions: %w", err)
 		}

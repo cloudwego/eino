@@ -14,6 +14,7 @@
  * limitations under the License.
  */
 
+// Package openai defines constants for openai.
 package openai
 
 type TextAnnotationType string

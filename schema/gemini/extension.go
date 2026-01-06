@@ -14,6 +14,7 @@
  * limitations under the License.
  */
 
+// Package gemini defines the extension for gemini.
 package gemini
 
 import (
@@ -42,7 +43,7 @@ type GroundingChunk struct {
 	Web *GroundingChunkWeb `json:"web,omitempty"`
 }
 
-// Chunk from the web.
+// GroundingChunkWeb is the chunk from the web.
 type GroundingChunkWeb struct {
 	// Domain of the (original) URI. This field is not supported in Gemini API.
 	Domain string `json:"domain,omitempty"`
@@ -79,7 +80,7 @@ type Segment struct {
 	Text string `json:"text,omitempty"`
 }
 
-// Google search entry point.
+// SearchEntryPoint is the Google search entry point.
 type SearchEntryPoint struct {
 	// Optional. Web content snippet that can be embedded in a web page or an app webview.
 	RenderedContent string `json:"rendered_content,omitempty"`
