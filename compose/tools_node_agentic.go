@@ -70,6 +70,7 @@ func agenticMessageToToolCallMessage(input *schema.AgenticMessage) *schema.Messa
 				Name:      block.FunctionToolCall.Name,
 				Arguments: block.FunctionToolCall.Arguments,
 			},
+			Extra: block.Extra,
 		})
 	}
 	return &schema.Message{
@@ -87,8 +88,8 @@ func toolMessageToAgenticMessage(input []*schema.Message) []*schema.AgenticMessa
 				CallID: m.ToolCallID,
 				Name:   m.ToolName,
 				Result: m.Content,
-				Extra:  m.Extra,
 			},
+			Extra: m.Extra,
 		})
 	}
 	return []*schema.AgenticMessage{{
@@ -110,9 +111,9 @@ func streamToolMessageToAgenticMessage(input *schema.StreamReader[[]*schema.Mess
 					CallID: m.ToolCallID,
 					Name:   m.ToolName,
 					Result: m.Content,
-					Extra:  m.Extra,
 				},
-				StreamMeta: &schema.StreamMeta{Index: int64(i)},
+				StreamingMeta: &schema.StreamingMeta{Index: i},
+				Extra:         m.Extra,
 			})
 		}
 		return []*schema.AgenticMessage{{

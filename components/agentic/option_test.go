@@ -29,7 +29,7 @@ func TestCommon(t *testing.T) {
 		WithTools([]*schema.ToolInfo{{Name: "test"}}),
 		WithModel("test"),
 		WithTemperature(0.1),
-		WithToolChoice(schema.ToolChoiceAllowed),
+		WithToolChoice(schema.ToolChoiceAllowed, []*schema.AllowedTool{{FunctionToolName: "test"}}...),
 		WithTopP(0.1),
 	)
 	assert.Len(t, o.Tools, 1)

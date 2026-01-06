@@ -14,6 +14,7 @@
  * limitations under the License.
  */
 
+// Package claude defines constants for claude.
 package claude
 
 type TextCitationType string
