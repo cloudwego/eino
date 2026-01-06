@@ -14,7 +14,12 @@
  * limitations under the License.
  */
 
+// Package gemini defines the extension for gemini.
 package gemini
+
+import (
+	"fmt"
+)
 
 type ResponseMetaExtension struct {
 	ID            string             `json:"id,omitempty"`
@@ -38,7 +43,7 @@ type GroundingChunk struct {
 	Web *GroundingChunkWeb `json:"web,omitempty"`
 }
 
-// Chunk from the web.
+// GroundingChunkWeb is the chunk from the web.
 type GroundingChunkWeb struct {
 	// Domain of the (original) URI. This field is not supported in Gemini API.
 	Domain string `json:"domain,omitempty"`
@@ -56,7 +61,7 @@ type GroundingSupport struct {
 	// A list of indices (into 'grounding_chunk') specifying the citations associated with
 	// the claim. For instance [1,3,4] means that grounding_chunk[1], grounding_chunk[3],
 	// grounding_chunk[4] are the retrieved content attributed to the claim.
-	GroundingChunkIndices []int32 `json:"grounding_chunk_indices,omitempty"`
+	GroundingChunkIndices []int `json:"grounding_chunk_indices,omitempty"`
 	// Segment of the content this support belongs to.
 	Segment *Segment `json:"segment,omitempty"`
 }
@@ -65,20 +70,46 @@ type GroundingSupport struct {
 type Segment struct {
 	// Output only. End index in the given Part, measured in bytes. Offset from the start
 	// of the Part, exclusive, starting at zero.
-	EndIndex int32 `json:"end_index,omitempty"`
+	EndIndex int `json:"end_index,omitempty"`
 	// Output only. The index of a Part object within its parent Content object.
-	PartIndex int32 `json:"part_index,omitempty"`
+	PartIndex int `json:"part_index,omitempty"`
 	// Output only. Start index in the given Part, measured in bytes. Offset from the start
 	// of the Part, inclusive, starting at zero.
-	StartIndex int32 `json:"start_index,omitempty"`
+	StartIndex int `json:"start_index,omitempty"`
 	// Output only. The text corresponding to the segment from the response.
 	Text string `json:"text,omitempty"`
 }
 
-// Google search entry point.
+// SearchEntryPoint is the Google search entry point.
 type SearchEntryPoint struct {
 	// Optional. Web content snippet that can be embedded in a web page or an app webview.
 	RenderedContent string `json:"rendered_content,omitempty"`
 	// Optional. Base64 encoded JSON representing array of tuple.
 	SDKBlob []byte `json:"sdk_blob,omitempty"`
+}
+
+// ConcatResponseMetaExtensions concatenates multiple ResponseMetaExtension chunks into a single one.
+func ConcatResponseMetaExtensions(chunks []*ResponseMetaExtension) (*ResponseMetaExtension, error) {
+	if len(chunks) == 0 {
+		return nil, fmt.Errorf("no response meta extension found")
+	}
+	if len(chunks) == 1 {
+		return chunks[0], nil
+	}
+
+	ret := &ResponseMetaExtension{}
+
+	for _, ext := range chunks {
+		if ext.ID != "" {
+			ret.ID = ext.ID
+		}
+		if ext.FinishReason != "" {
+			ret.FinishReason = ext.FinishReason
+		}
+		if ext.GroundingMeta != nil {
+			ret.GroundingMeta = ext.GroundingMeta
+		}
+	}
+
+	return ret, nil
 }
