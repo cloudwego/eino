@@ -94,7 +94,7 @@ func TestReact(t *testing.T) {
 		assert.NotNil(t, compiled)
 
 		// Test with a user message
-		result, err := compiled.Invoke(ctx, &reactInput{Messages: []Message{
+		result, err := compiled.Invoke(ctx, &reactInput{messages: []Message{
 			{
 				Role:    schema.User,
 				Content: "Use the test tool to say hello",
@@ -150,7 +150,6 @@ func TestReact(t *testing.T) {
 				Tools: []tool.BaseTool{fakeTool},
 			},
 			toolsReturnDirectly: map[string]struct{}{info.Name: {}},
-			hasReturnDirectly:   true,
 		}
 
 		graph, err := newReact(ctx, config)
@@ -162,7 +161,7 @@ func TestReact(t *testing.T) {
 		assert.NotNil(t, compiled)
 
 		// Test with a user message when tool returns directly
-		result, err := compiled.Invoke(ctx, &reactInput{Messages: []Message{
+		result, err := compiled.Invoke(ctx, &reactInput{messages: []Message{
 			{
 				Role:    schema.User,
 				Content: "Use the test tool to say hello",
@@ -254,7 +253,7 @@ func TestReact(t *testing.T) {
 		assert.NotNil(t, compiled)
 
 		// Test streaming with a user message
-		outStream, err := compiled.Stream(ctx, &reactInput{Messages: []Message{
+		outStream, err := compiled.Stream(ctx, &reactInput{messages: []Message{
 			{
 				Role:    schema.User,
 				Content: "Use the test tool to say hello",
@@ -353,7 +352,6 @@ func TestReact(t *testing.T) {
 				Tools: []tool.BaseTool{fakeTool, fakeStreamTool},
 			},
 			toolsReturnDirectly: map[string]struct{}{streamInfo.Name: {}},
-			hasReturnDirectly:   true,
 		}
 
 		graph, err := newReact(ctx, config)
@@ -368,7 +366,7 @@ func TestReact(t *testing.T) {
 		times = 0
 
 		// Test streaming with a user message when tool returns directly
-		outStream, err := compiled.Stream(ctx, &reactInput{Messages: []Message{
+		outStream, err := compiled.Stream(ctx, &reactInput{messages: []Message{
 			{
 				Role:    schema.User,
 				Content: "Use the test tool to say hello",
@@ -454,7 +452,7 @@ func TestReact(t *testing.T) {
 		assert.NotNil(t, compiled)
 
 		// Test with a user message
-		result, err := compiled.Invoke(ctx, &reactInput{Messages: []Message{
+		result, err := compiled.Invoke(ctx, &reactInput{messages: []Message{
 			{
 				Role:    schema.User,
 				Content: "Use the test tool to say hello",
@@ -484,7 +482,7 @@ func TestReact(t *testing.T) {
 		assert.NotNil(t, compiled)
 
 		// Test with a user message
-		result, err = compiled.Invoke(ctx, &reactInput{Messages: []Message{
+		result, err = compiled.Invoke(ctx, &reactInput{messages: []Message{
 			{
 				Role:    schema.User,
 				Content: "Use the test tool to say hello",

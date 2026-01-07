@@ -180,8 +180,8 @@ func newAdkToolResultCollectorMiddleware() compose.ToolMiddleware {
 }
 
 type reactInput struct {
-	Messages              []Message
-	RuntimeReturnDirectly map[string]struct{}
+	messages              []Message
+	runtimeReturnDirectly map[string]struct{}
 }
 
 type reactConfig struct {
@@ -190,7 +190,6 @@ type reactConfig struct {
 	toolsConfig *compose.ToolsNodeConfig
 
 	toolsReturnDirectly map[string]struct{}
-	hasReturnDirectly   bool
 
 	agentName string
 
@@ -258,10 +257,10 @@ func newReact(ctx context.Context, config *reactConfig) (reactGraph, error) {
 
 	initLambda := func(ctx context.Context, input *reactInput) ([]Message, error) {
 		_ = compose.ProcessState(ctx, func(ctx context.Context, st *State) error {
-			st.RuntimeReturnDirectly = input.RuntimeReturnDirectly
+			st.RuntimeReturnDirectly = input.runtimeReturnDirectly
 			return nil
 		})
-		return input.Messages, nil
+		return input.messages, nil
 	}
 	_ = g.AddLambdaNode(initNode_, compose.InvokableLambda(initLambda), compose.WithNodeName(initNode_))
 
@@ -393,7 +392,7 @@ func newReact(ctx context.Context, config *reactConfig) (reactGraph, error) {
 	branch := compose.NewStreamGraphBranch(toolCallCheck, map[string]bool{compose.END: true, toolNode_: true})
 	_ = g.AddBranch(chatModel_, branch)
 
-	if config.hasReturnDirectly {
+	if len(config.toolsReturnDirectly) > 0 {
 		const (
 			toolNodeToEndConverter = "ToolNodeToEndConverter"
 		)

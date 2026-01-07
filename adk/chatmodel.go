@@ -741,20 +741,20 @@ type ChatModelAgentResumeData struct {
 	HistoryModifier func(ctx context.Context, history []Message) []Message
 }
 
-type configChanges struct {
+type buildContext struct {
+	baseInstruction string
+	toolsNodeConf   compose.ToolsNodeConfig
+	returnDirectly  map[string]struct{}
+
+	instruction string
+	tools       []tool.BaseTool
+	toolInfos   []*schema.ToolInfo
+
 	needToolsGraph           bool
 	needReturnDirectlyBranch bool
 }
 
-func (a *ChatModelAgent) applyBeforeAgent(ctx context.Context, bc *buildContext) (
-	_ context.Context,
-	instruction string,
-	tools []tool.BaseTool,
-	toolInfos []*schema.ToolInfo,
-	returnDirectly map[string]struct{},
-	changes configChanges,
-	err error,
-) {
+func (a *ChatModelAgent) applyBeforeAgent(ctx context.Context, bc *buildContext) (context.Context, error) {
 	toolsCopy := make([]ToolMeta, len(bc.toolsNodeConf.Tools))
 	for i := range bc.toolsNodeConf.Tools {
 		t := bc.toolsNodeConf.Tools[i]
@@ -771,43 +771,37 @@ func (a *ChatModelAgent) applyBeforeAgent(ctx context.Context, bc *buildContext)
 		Tools:       toolsCopy,
 	}
 
+	var err error
 	for i, h := range a.handlers {
 		ctx, runCtx, err = h.BeforeAgent(ctx, runCtx)
 		if err != nil {
-			return ctx, "", nil, nil, nil, configChanges{}, fmt.Errorf("handler[%d] BeforeAgent failed: %w", i, err)
-		}
-	}
-
-	returnDirectly = copyMap(bc.returnDirectly)
-	runtimeHasReturnDirectly := false
-	for _, t := range runCtx.Tools {
-		tools = append(tools, t.Tool)
-		info, infoErr := t.Tool.Info(ctx)
-		if infoErr == nil {
-			toolInfos = append(toolInfos, info)
-			if t.ReturnDirectly {
-				returnDirectly[info.Name] = struct{}{}
-				runtimeHasReturnDirectly = true
-			}
+			return ctx, fmt.Errorf("handler[%d] BeforeAgent failed: %w", i, err)
 		}
 	}
 
 	initialHasTools := len(bc.toolsNodeConf.Tools) > 0
 	initialHasReturnDirectly := len(bc.returnDirectly) > 0
 
-	runtimeHasTools := len(tools) > 0
-	changes = configChanges{
-		needToolsGraph:           !initialHasTools && runtimeHasTools,
-		needReturnDirectlyBranch: !initialHasReturnDirectly && runtimeHasReturnDirectly,
+	bc.instruction = runCtx.Instruction
+	bc.returnDirectly = copyMap(bc.returnDirectly)
+	runtimeHasReturnDirectly := false
+	for _, t := range runCtx.Tools {
+		bc.tools = append(bc.tools, t.Tool)
+		info, infoErr := t.Tool.Info(ctx)
+		if infoErr == nil {
+			bc.toolInfos = append(bc.toolInfos, info)
+			if t.ReturnDirectly {
+				bc.returnDirectly[info.Name] = struct{}{}
+				runtimeHasReturnDirectly = true
+			}
+		}
 	}
 
-	return ctx, runCtx.Instruction, tools, toolInfos, returnDirectly, changes, nil
-}
+	runtimeHasTools := len(bc.tools) > 0
+	bc.needToolsGraph = !initialHasTools && runtimeHasTools
+	bc.needReturnDirectlyBranch = !initialHasReturnDirectly && runtimeHasReturnDirectly
 
-type buildContext struct {
-	baseInstruction string
-	toolsNodeConf   compose.ToolsNodeConfig
-	returnDirectly  map[string]struct{}
+	return ctx, nil
 }
 
 func (a *ChatModelAgent) prepareBuildContext(ctx context.Context) (*buildContext, error) {
@@ -949,11 +943,14 @@ func (a *ChatModelAgent) buildNoToolsRunFunc(_ context.Context, bc *buildContext
 }
 
 func (a *ChatModelAgent) buildReactRunFunc(ctx context.Context, bc *buildContext, hasReturnDirectly bool) (runFunc, error) {
+	toolsReturnDirectly := bc.returnDirectly
+	if !hasReturnDirectly {
+		toolsReturnDirectly = nil
+	}
 	conf := &reactConfig{
 		model:               a.model,
 		toolsConfig:         &bc.toolsNodeConf,
-		toolsReturnDirectly: bc.returnDirectly,
-		hasReturnDirectly:   hasReturnDirectly,
+		toolsReturnDirectly: toolsReturnDirectly,
 		agentName:           a.name,
 		maxIterations:       a.maxIterations,
 		handlers:            a.handlers,
@@ -983,8 +980,8 @@ func (a *ChatModelAgent) buildReactRunFunc(ctx context.Context, bc *buildContext
 						return nil, err
 					}
 					return &reactInput{
-						Messages:              messages,
-						RuntimeReturnDirectly: returnDirectly,
+						messages:              messages,
+						runtimeReturnDirectly: returnDirectly,
 					}, nil
 				}),
 			).
@@ -1059,46 +1056,36 @@ func (a *ChatModelAgent) buildRunFunc(ctx context.Context) runFunc {
 	return a.run
 }
 
-func (a *ChatModelAgent) getRunFunc(ctx context.Context) (
-	run runFunc,
-	instruction string,
-	tools []tool.BaseTool,
-	toolInfos []*schema.ToolInfo,
-	returnDirectly map[string]struct{},
-	_ context.Context,
-	err error,
-) {
+func (a *ChatModelAgent) getRunFunc(ctx context.Context) (runFunc, *buildContext, context.Context, error) {
 	defaultRun := a.buildRunFunc(ctx)
 	bc := a.buildContext
 
 	if len(a.handlers) == 0 {
-		instruction = bc.baseInstruction
-		returnDirectly = bc.returnDirectly
+		bc.instruction = bc.baseInstruction
 		for i := range bc.toolsNodeConf.Tools {
 			t := bc.toolsNodeConf.Tools[i]
-			tools = append(tools, t)
+			bc.tools = append(bc.tools, t)
 			info, infoErr := t.Info(ctx)
 			if infoErr == nil {
-				toolInfos = append(toolInfos, info)
+				bc.toolInfos = append(bc.toolInfos, info)
 			}
 		}
-		return defaultRun, instruction, tools, toolInfos, returnDirectly, ctx, nil
+		return defaultRun, bc, ctx, nil
 	}
 
-	var changes configChanges
-	ctx, instruction, tools, toolInfos, returnDirectly, changes, err = a.applyBeforeAgent(ctx, bc)
+	ctx, err := a.applyBeforeAgent(ctx, bc)
 	if err != nil {
-		return nil, "", nil, nil, nil, ctx, err
+		return nil, nil, ctx, err
 	}
 
-	needTempGraph := changes.needToolsGraph || changes.needReturnDirectlyBranch
+	needTempGraph := bc.needToolsGraph || bc.needReturnDirectlyBranch
 
 	if !needTempGraph {
-		return defaultRun, instruction, tools, toolInfos, returnDirectly, ctx, nil
+		return defaultRun, bc, ctx, nil
 	}
 
-	runtimeHasTools := len(tools) > 0
-	runtimeHasReturnDirectly := changes.needReturnDirectlyBranch
+	runtimeHasTools := len(bc.tools) > 0
+	runtimeHasReturnDirectly := bc.needReturnDirectlyBranch
 
 	var tempRun runFunc
 	if !runtimeHasTools {
@@ -1106,17 +1093,17 @@ func (a *ChatModelAgent) getRunFunc(ctx context.Context) (
 	} else {
 		tempRun, err = a.buildReactRunFunc(ctx, bc, runtimeHasReturnDirectly)
 		if err != nil {
-			return nil, "", nil, nil, nil, ctx, err
+			return nil, nil, ctx, err
 		}
 	}
 
-	return tempRun, instruction, tools, toolInfos, returnDirectly, ctx, nil
+	return tempRun, bc, ctx, nil
 }
 
 func (a *ChatModelAgent) Run(ctx context.Context, input *AgentInput, opts ...AgentRunOption) *AsyncIterator[*AgentEvent] {
 	iterator, generator := NewAsyncIteratorPair[*AgentEvent]()
 
-	run, instruction, tools, toolInfos, returnDirectly, ctx, err := a.getRunFunc(ctx)
+	run, bc, ctx, err := a.getRunFunc(ctx)
 	if err != nil {
 		go func() {
 			generator.Send(&AgentEvent{Err: err})
@@ -1127,8 +1114,8 @@ func (a *ChatModelAgent) Run(ctx context.Context, input *AgentInput, opts ...Age
 
 	co := getComposeOptions(opts)
 	co = append(co, compose.WithCheckPointID(bridgeCheckpointID))
-	co = append(co, compose.WithChatModelOption(model.WithTools(toolInfos)))
-	co = append(co, compose.WithToolsNodeOption(compose.WithToolList(tools...)))
+	co = append(co, compose.WithChatModelOption(model.WithTools(bc.toolInfos)))
+	co = append(co, compose.WithToolsNodeOption(compose.WithToolList(bc.tools...)))
 
 	go func() {
 		defer func() {
@@ -1141,7 +1128,7 @@ func (a *ChatModelAgent) Run(ctx context.Context, input *AgentInput, opts ...Age
 			generator.Close()
 		}()
 
-		run(ctx, input, generator, newBridgeStore(), instruction, returnDirectly, co...)
+		run(ctx, input, generator, newBridgeStore(), bc.instruction, bc.returnDirectly, co...)
 	}()
 
 	return iterator
@@ -1150,7 +1137,7 @@ func (a *ChatModelAgent) Run(ctx context.Context, input *AgentInput, opts ...Age
 func (a *ChatModelAgent) Resume(ctx context.Context, info *ResumeInfo, opts ...AgentRunOption) *AsyncIterator[*AgentEvent] {
 	iterator, generator := NewAsyncIteratorPair[*AgentEvent]()
 
-	run, instruction, tools, toolInfos, returnDirectly, ctx, err := a.getRunFunc(ctx)
+	run, bc, ctx, err := a.getRunFunc(ctx)
 	if err != nil {
 		go func() {
 			generator.Send(&AgentEvent{Err: err})
@@ -1161,8 +1148,8 @@ func (a *ChatModelAgent) Resume(ctx context.Context, info *ResumeInfo, opts ...A
 
 	co := getComposeOptions(opts)
 	co = append(co, compose.WithCheckPointID(bridgeCheckpointID))
-	co = append(co, compose.WithChatModelOption(model.WithTools(toolInfos)))
-	co = append(co, compose.WithToolsNodeOption(compose.WithToolList(tools...)))
+	co = append(co, compose.WithChatModelOption(model.WithTools(bc.toolInfos)))
+	co = append(co, compose.WithToolsNodeOption(compose.WithToolList(bc.tools...)))
 
 	if info.InterruptState == nil {
 		panic(fmt.Sprintf("ChatModelAgent.Resume: agent '%s' was asked to resume but has no state", a.Name(ctx)))
@@ -1205,7 +1192,7 @@ func (a *ChatModelAgent) Resume(ctx context.Context, info *ResumeInfo, opts ...A
 		}()
 
 		run(ctx, &AgentInput{EnableStreaming: info.EnableStreaming}, generator,
-			newResumeBridgeStore(stateByte), instruction, returnDirectly, co...)
+			newResumeBridgeStore(stateByte), bc.instruction, bc.returnDirectly, co...)
 	}()
 
 	return iterator
