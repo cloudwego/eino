@@ -90,7 +90,7 @@ type ToolsConfig struct {
 	// ReturnDirectly specifies tools that cause the agent to return immediately when called.
 	// If multiple listed tools are called simultaneously, only the first one triggers the return.
 	// The map keys are tool names indicate whether the tool should trigger immediate return.
-	ReturnDirectly map[string]bool
+	ReturnDirectly map[string]struct{}
 
 	// EmitInternalEvents indicates whether internal events from agentTool should be emitted
 	// to the parent generator via a tool option injection at run-time.
@@ -235,7 +235,7 @@ type ChatModelAgent struct {
 	buildContext *buildContext
 }
 
-type runFunc func(ctx context.Context, input *AgentInput, generator *AsyncGenerator[*AgentEvent], store *bridgeStore, instruction string, returnDirectly map[string]bool, opts ...compose.Option)
+type runFunc func(ctx context.Context, input *AgentInput, generator *AsyncGenerator[*AgentEvent], store *bridgeStore, instruction string, returnDirectly map[string]struct{}, opts ...compose.Option)
 
 // NewChatModelAgent constructs a chat model-backed agent with the provided config.
 func NewChatModelAgent(_ context.Context, config *ChatModelAgentConfig) (*ChatModelAgent, error) {
@@ -718,7 +718,7 @@ func setOutputToSession(ctx context.Context, msg Message, msgStream MessageStrea
 }
 
 func errFunc(err error) runFunc {
-	return func(ctx context.Context, input *AgentInput, generator *AsyncGenerator[*AgentEvent], store *bridgeStore, _ string, _ map[string]bool, _ ...compose.Option) {
+	return func(ctx context.Context, input *AgentInput, generator *AsyncGenerator[*AgentEvent], store *bridgeStore, _ string, _ map[string]struct{}, _ ...compose.Option) {
 		generator.Send(&AgentEvent{Err: err})
 	}
 }
@@ -741,7 +741,7 @@ func (a *ChatModelAgent) applyBeforeAgent(ctx context.Context, bc *buildContext)
 	instruction string,
 	tools []tool.BaseTool,
 	toolInfos []*schema.ToolInfo,
-	returnDirectly map[string]bool,
+	returnDirectly map[string]struct{},
 	changes configChanges,
 	err error,
 ) {
@@ -749,7 +749,7 @@ func (a *ChatModelAgent) applyBeforeAgent(ctx context.Context, bc *buildContext)
 	for i := range bc.toolsNodeConf.Tools {
 		t := bc.toolsNodeConf.Tools[i]
 		info, _ := t.Info(ctx)
-		rd := bc.returnDirectly[info.Name]
+		_, rd := bc.returnDirectly[info.Name]
 		toolsCopy[i] = ToolMeta{
 			Tool:           t,
 			ReturnDirectly: rd,
@@ -776,20 +776,14 @@ func (a *ChatModelAgent) applyBeforeAgent(ctx context.Context, bc *buildContext)
 		if infoErr == nil {
 			toolInfos = append(toolInfos, info)
 			if t.ReturnDirectly {
-				returnDirectly[info.Name] = true
+				returnDirectly[info.Name] = struct{}{}
 				runtimeHasReturnDirectly = true
 			}
 		}
 	}
 
 	initialHasTools := len(bc.toolsNodeConf.Tools) > 0
-	initialHasReturnDirectly := false
-	for _, t := range bc.returnDirectly {
-		if t {
-			initialHasReturnDirectly = true
-			break
-		}
-	}
+	initialHasReturnDirectly := len(bc.returnDirectly) > 0
 
 	runtimeHasTools := len(tools) > 0
 	changes = configChanges{
@@ -803,7 +797,7 @@ func (a *ChatModelAgent) applyBeforeAgent(ctx context.Context, bc *buildContext)
 type buildContext struct {
 	baseInstruction string
 	toolsNodeConf   compose.ToolsNodeConfig
-	returnDirectly  map[string]bool
+	returnDirectly  map[string]struct{}
 }
 
 func (a *ChatModelAgent) prepareBuildContext(ctx context.Context) (*buildContext, error) {
@@ -821,7 +815,7 @@ func (a *ChatModelAgent) prepareBuildContext(ctx context.Context) (*buildContext
 		baseInstruction = concatInstructions(baseInstruction, transferInstruction)
 
 		toolsNodeConf.Tools = append(toolsNodeConf.Tools, &transferToAgent{})
-		returnDirectly[TransferToAgentToolName] = true
+		returnDirectly[TransferToAgentToolName] = struct{}{}
 	}
 
 	if a.exit != nil {
@@ -830,7 +824,7 @@ func (a *ChatModelAgent) prepareBuildContext(ctx context.Context) (*buildContext
 		if err != nil {
 			return nil, err
 		}
-		returnDirectly[exitInfo.Name] = true
+		returnDirectly[exitInfo.Name] = struct{}{}
 	}
 
 	for _, m := range a.middlewares {
@@ -854,7 +848,7 @@ func (a *ChatModelAgent) buildNoToolsRunFunc(_ context.Context, bc *buildContext
 	}
 
 	return func(ctx context.Context, input *AgentInput, generator *AsyncGenerator[*AgentEvent],
-		store *bridgeStore, instruction string, returnDirectly map[string]bool, opts ...compose.Option) {
+		store *bridgeStore, instruction string, returnDirectly map[string]struct{}, opts ...compose.Option) {
 		var err error
 
 		r, err := compose.NewChain[*AgentInput, Message](
@@ -963,7 +957,7 @@ func (a *ChatModelAgent) buildReactRunFunc(ctx context.Context, bc *buildContext
 	}
 
 	return func(ctx context.Context, input *AgentInput, generator *AsyncGenerator[*AgentEvent], store *bridgeStore,
-		instruction string, returnDirectly map[string]bool, opts ...compose.Option) {
+		instruction string, returnDirectly map[string]struct{}, opts ...compose.Option) {
 		var compileOptions []compose.GraphCompileOption
 		compileOptions = append(compileOptions,
 			compose.WithGraphName(a.name),
@@ -1040,13 +1034,7 @@ func (a *ChatModelAgent) buildRunFunc(ctx context.Context) runFunc {
 			return
 		}
 
-		initialHasReturnDirectly := false
-		for _, t := range bc.returnDirectly {
-			if t {
-				initialHasReturnDirectly = true
-				break
-			}
-		}
+		initialHasReturnDirectly := len(bc.returnDirectly) > 0
 
 		run, err := a.buildReactRunFunc(ctx, bc, initialHasReturnDirectly)
 		if err != nil {
@@ -1066,7 +1054,7 @@ func (a *ChatModelAgent) getRunFunc(ctx context.Context) (
 	instruction string,
 	tools []tool.BaseTool,
 	toolInfos []*schema.ToolInfo,
-	returnDirectly map[string]bool,
+	returnDirectly map[string]struct{},
 	_ context.Context,
 	err error,
 ) {
