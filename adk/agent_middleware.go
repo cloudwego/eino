@@ -75,13 +75,13 @@ type ChatModelAgentState struct {
 	Messages []Message
 }
 
-type EntranceType string
+type InvocationType string
 
 const (
-	// EntranceTypeRun indicates the agent is starting a new execution from scratch.
-	EntranceTypeRun EntranceType = "Run"
-	// EntranceTypeResume indicates the agent is resuming a previously interrupted execution.
-	EntranceTypeResume EntranceType = "Resume"
+	// InvocationTypeRun indicates the agent is starting a new execution from scratch.
+	InvocationTypeRun InvocationType = "Run"
+	// InvocationTypeResume indicates the agent is resuming a previously interrupted execution.
+	InvocationTypeResume InvocationType = "Resume"
 )
 
 // AgentContext contains the context information for an agent's execution.
@@ -96,14 +96,14 @@ type AgentContext struct {
 
 	// internal properties, read only
 	agentName string
-	entrance  EntranceType
+	entrance  InvocationType
 }
 
 func (a *AgentContext) AgentName() string {
 	return a.agentName
 }
 
-func (a *AgentContext) EntranceType() EntranceType {
+func (a *AgentContext) EntranceType() InvocationType {
 	return a.entrance
 }
 

@@ -74,7 +74,7 @@ func (ma *multiAgent) Run(ctx context.Context, input *AgentInput, options ...Age
 		AgentInput:      input,
 		AgentRunOptions: options,
 		agentName:       ma.name,
-		entrance:        EntranceTypeRun,
+		entrance:        InvocationTypeRun,
 	}
 
 	mwHelper := newAgentMWHelper(append(globalAgentMiddlewares, ma.middlewares...)...)
@@ -94,7 +94,7 @@ func (ma *multiAgent) Resume(ctx context.Context, info *ResumeInfo, opts ...Agen
 		ResumeInfo:      info,
 		AgentRunOptions: opts,
 		agentName:       ma.name,
-		entrance:        EntranceTypeResume,
+		entrance:        InvocationTypeResume,
 	}
 
 	mwHelper := newAgentMWHelper(append(globalAgentMiddlewares, ma.middlewares...)...)
