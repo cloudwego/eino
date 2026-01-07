@@ -157,13 +157,22 @@ func (at *agentTool) InvokableRun(ctx context.Context, argumentsInJSON string, o
 			break
 		}
 
+		if lastEvent != nil &&
+			lastEvent.Output != nil &&
+			lastEvent.Output.MessageOutput != nil &&
+			lastEvent.Output.MessageOutput.MessageStream != nil {
+			lastEvent.Output.MessageOutput.MessageStream.Close()
+		}
+
 		if event.Err != nil {
 			return "", event.Err
 		}
 
 		if gen != nil {
 			if event.Action == nil || event.Action.Interrupted == nil {
+				tmp := copyAgentEvent(event)
 				gen.Send(event)
+				event = tmp
 			}
 		}
 
