@@ -746,10 +746,10 @@ type buildContext struct {
 	baseInstruction string
 	toolsNodeConf   compose.ToolsNodeConfig
 	returnDirectly  map[string]struct{}
-	toolInfos       []*schema.ToolInfo
 
-	needToolsGraph           bool
-	needReturnDirectlyBranch bool
+	toolUpdated  bool
+	toolInfos    []*schema.ToolInfo
+	rebuildGraph bool
 }
 
 func (a *ChatModelAgent) applyBeforeAgent(ctx context.Context, bc *buildContext) (context.Context, *buildContext, error) {
@@ -767,26 +767,21 @@ func (a *ChatModelAgent) applyBeforeAgent(ctx context.Context, bc *buildContext)
 		}
 	}
 
-	initialHasTools := len(bc.toolsNodeConf.Tools) > 0
-	initialHasReturnDirectly := len(bc.returnDirectly) > 0
-
 	runtimeBC := &buildContext{
 		baseInstruction: runCtx.Instruction,
 		toolsNodeConf:   compose.ToolsNodeConfig{Tools: runCtx.Tools},
 		returnDirectly:  runCtx.ReturnDirectly,
+		toolUpdated:     true,
+		rebuildGraph: (len(bc.toolsNodeConf.Tools) == 0 && len(runCtx.Tools) > 0) ||
+			(len(bc.returnDirectly) == 0 && len(runCtx.ReturnDirectly) > 0),
 	}
 
-	for _, t := range runCtx.Tools {
-		info, infoErr := t.Info(ctx)
-		if infoErr == nil {
-			runtimeBC.toolInfos = append(runtimeBC.toolInfos, info)
-		}
+	toolInfos, err := genToolInfos(ctx, &runtimeBC.toolsNodeConf)
+	if err != nil {
+		return ctx, nil, err
 	}
 
-	runtimeHasTools := len(runCtx.Tools) > 0
-	runtimeHasReturnDirectly := len(runCtx.ReturnDirectly) > 0
-	runtimeBC.needToolsGraph = !initialHasTools && runtimeHasTools
-	runtimeBC.needReturnDirectlyBranch = !initialHasReturnDirectly && runtimeHasReturnDirectly
+	runtimeBC.toolInfos = toolInfos
 
 	return ctx, runtimeBC, nil
 }
@@ -929,15 +924,11 @@ func (a *ChatModelAgent) buildNoToolsRunFunc(_ context.Context, bc *buildContext
 	}
 }
 
-func (a *ChatModelAgent) buildReactRunFunc(ctx context.Context, bc *buildContext, hasReturnDirectly bool) (runFunc, error) {
-	toolsReturnDirectly := bc.returnDirectly
-	if !hasReturnDirectly {
-		toolsReturnDirectly = nil
-	}
+func (a *ChatModelAgent) buildReactRunFunc(ctx context.Context, bc *buildContext) (runFunc, error) {
 	conf := &reactConfig{
 		model:               a.model,
 		toolsConfig:         &bc.toolsNodeConf,
-		toolsReturnDirectly: toolsReturnDirectly,
+		toolsReturnDirectly: bc.returnDirectly,
 		agentName:           a.name,
 		maxIterations:       a.maxIterations,
 		handlers:            a.handlers,
@@ -1028,9 +1019,7 @@ func (a *ChatModelAgent) buildRunFunc(ctx context.Context) runFunc {
 			return
 		}
 
-		initialHasReturnDirectly := len(bc.returnDirectly) > 0
-
-		run, err := a.buildReactRunFunc(ctx, bc, initialHasReturnDirectly)
+		run, err := a.buildReactRunFunc(ctx, bc)
 		if err != nil {
 			a.run = errFunc(err)
 			return
@@ -1043,7 +1032,7 @@ func (a *ChatModelAgent) buildRunFunc(ctx context.Context) runFunc {
 	return a.run
 }
 
-func (a *ChatModelAgent) getRunFunc(ctx context.Context) (runFunc, *buildContext, context.Context, error) {
+func (a *ChatModelAgent) getRunFunc(ctx context.Context) (context.Context, runFunc, *buildContext, error) {
 	defaultRun := a.buildRunFunc(ctx)
 	bc := a.buildContext
 
@@ -1053,47 +1042,35 @@ func (a *ChatModelAgent) getRunFunc(ctx context.Context) (runFunc, *buildContext
 			toolsNodeConf:   bc.toolsNodeConf,
 			returnDirectly:  bc.returnDirectly,
 		}
-		for i := range bc.toolsNodeConf.Tools {
-			t := bc.toolsNodeConf.Tools[i]
-			info, infoErr := t.Info(ctx)
-			if infoErr == nil {
-				runtimeBC.toolInfos = append(runtimeBC.toolInfos, info)
-			}
-		}
-		return defaultRun, runtimeBC, ctx, nil
+		return ctx, defaultRun, runtimeBC, nil
 	}
 
 	ctx, runtimeBC, err := a.applyBeforeAgent(ctx, bc)
 	if err != nil {
-		return nil, nil, ctx, err
+		return ctx, nil, nil, err
 	}
 
-	needTempGraph := runtimeBC.needToolsGraph || runtimeBC.needReturnDirectlyBranch
-
-	if !needTempGraph {
-		return defaultRun, runtimeBC, ctx, nil
+	if !runtimeBC.rebuildGraph {
+		return ctx, defaultRun, runtimeBC, nil
 	}
-
-	runtimeHasTools := len(runtimeBC.toolsNodeConf.Tools) > 0
-	runtimeHasReturnDirectly := runtimeBC.needReturnDirectlyBranch
 
 	var tempRun runFunc
-	if !runtimeHasTools {
+	if len(runtimeBC.toolsNodeConf.Tools) == 0 {
 		tempRun = a.buildNoToolsRunFunc(ctx, runtimeBC)
 	} else {
-		tempRun, err = a.buildReactRunFunc(ctx, runtimeBC, runtimeHasReturnDirectly)
+		tempRun, err = a.buildReactRunFunc(ctx, runtimeBC)
 		if err != nil {
-			return nil, nil, ctx, err
+			return ctx, nil, nil, err
 		}
 	}
 
-	return tempRun, runtimeBC, ctx, nil
+	return ctx, tempRun, runtimeBC, nil
 }
 
 func (a *ChatModelAgent) Run(ctx context.Context, input *AgentInput, opts ...AgentRunOption) *AsyncIterator[*AgentEvent] {
 	iterator, generator := NewAsyncIteratorPair[*AgentEvent]()
 
-	run, bc, ctx, err := a.getRunFunc(ctx)
+	ctx, run, bc, err := a.getRunFunc(ctx)
 	if err != nil {
 		go func() {
 			generator.Send(&AgentEvent{Err: err})
@@ -1104,8 +1081,10 @@ func (a *ChatModelAgent) Run(ctx context.Context, input *AgentInput, opts ...Age
 
 	co := getComposeOptions(opts)
 	co = append(co, compose.WithCheckPointID(bridgeCheckpointID))
-	co = append(co, compose.WithChatModelOption(model.WithTools(bc.toolInfos)))
-	co = append(co, compose.WithToolsNodeOption(compose.WithToolList(bc.toolsNodeConf.Tools...)))
+	if bc.toolUpdated {
+		co = append(co, compose.WithChatModelOption(model.WithTools(bc.toolInfos)))
+		co = append(co, compose.WithToolsNodeOption(compose.WithToolList(bc.toolsNodeConf.Tools...)))
+	}
 
 	go func() {
 		defer func() {
@@ -1127,7 +1106,7 @@ func (a *ChatModelAgent) Run(ctx context.Context, input *AgentInput, opts ...Age
 func (a *ChatModelAgent) Resume(ctx context.Context, info *ResumeInfo, opts ...AgentRunOption) *AsyncIterator[*AgentEvent] {
 	iterator, generator := NewAsyncIteratorPair[*AgentEvent]()
 
-	run, bc, ctx, err := a.getRunFunc(ctx)
+	ctx, run, bc, err := a.getRunFunc(ctx)
 	if err != nil {
 		go func() {
 			generator.Send(&AgentEvent{Err: err})
@@ -1138,8 +1117,10 @@ func (a *ChatModelAgent) Resume(ctx context.Context, info *ResumeInfo, opts ...A
 
 	co := getComposeOptions(opts)
 	co = append(co, compose.WithCheckPointID(bridgeCheckpointID))
-	co = append(co, compose.WithChatModelOption(model.WithTools(bc.toolInfos)))
-	co = append(co, compose.WithToolsNodeOption(compose.WithToolList(bc.toolsNodeConf.Tools...)))
+	if bc.toolUpdated {
+		co = append(co, compose.WithChatModelOption(model.WithTools(bc.toolInfos)))
+		co = append(co, compose.WithToolsNodeOption(compose.WithToolList(bc.toolsNodeConf.Tools...)))
+	}
 
 	if info.InterruptState == nil {
 		panic(fmt.Sprintf("ChatModelAgent.Resume: agent '%s' was asked to resume but has no state", a.Name(ctx)))
