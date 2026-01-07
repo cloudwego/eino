@@ -75,7 +75,7 @@ type State struct {
 
 	RemainingIterations int
 
-	RuntimeReturnDirectly map[string]bool
+	RuntimeReturnDirectly map[string]struct{}
 }
 
 // SendToolGenAction attaches an AgentAction to the next tool event emitted for the
@@ -181,7 +181,7 @@ func newAdkToolResultCollectorMiddleware() compose.ToolMiddleware {
 
 type reactInput struct {
 	Messages              []Message
-	RuntimeReturnDirectly map[string]bool
+	RuntimeReturnDirectly map[string]struct{}
 }
 
 type reactConfig struct {
@@ -189,7 +189,7 @@ type reactConfig struct {
 
 	toolsConfig *compose.ToolsNodeConfig
 
-	toolsReturnDirectly map[string]bool
+	toolsReturnDirectly map[string]struct{}
 	hasReturnDirectly   bool
 
 	agentName string
@@ -357,7 +357,7 @@ func newReact(ctx context.Context, config *reactConfig) (reactGraph, error) {
 		if len(returnDirectly) > 0 {
 			for i := range input.ToolCalls {
 				toolName := input.ToolCalls[i].Function.Name
-				if returnDirectly[toolName] {
+				if _, ok := returnDirectly[toolName]; ok {
 					st.ReturnDirectlyToolCallID = input.ToolCalls[i].ID
 					st.HasReturnDirectly = true
 				}

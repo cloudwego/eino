@@ -82,7 +82,7 @@ func TestReact(t *testing.T) {
 			toolsConfig: &compose.ToolsNodeConfig{
 				Tools: []tool.BaseTool{fakeTool},
 			},
-			toolsReturnDirectly: map[string]bool{},
+			toolsReturnDirectly: map[string]struct{}{},
 		}
 
 		graph, err := newReact(ctx, config)
@@ -149,7 +149,7 @@ func TestReact(t *testing.T) {
 			toolsConfig: &compose.ToolsNodeConfig{
 				Tools: []tool.BaseTool{fakeTool},
 			},
-			toolsReturnDirectly: map[string]bool{info.Name: true},
+			toolsReturnDirectly: map[string]struct{}{info.Name: {}},
 			hasReturnDirectly:   true,
 		}
 
@@ -242,7 +242,7 @@ func TestReact(t *testing.T) {
 			toolsConfig: &compose.ToolsNodeConfig{
 				Tools: []tool.BaseTool{fakeTool, fakeStreamTool},
 			},
-			toolsReturnDirectly: map[string]bool{},
+			toolsReturnDirectly: map[string]struct{}{},
 		}
 
 		graph, err := newReact(ctx, config)
@@ -352,7 +352,7 @@ func TestReact(t *testing.T) {
 			toolsConfig: &compose.ToolsNodeConfig{
 				Tools: []tool.BaseTool{fakeTool, fakeStreamTool},
 			},
-			toolsReturnDirectly: map[string]bool{streamInfo.Name: true},
+			toolsReturnDirectly: map[string]struct{}{streamInfo.Name: {}},
 			hasReturnDirectly:   true,
 		}
 
@@ -441,7 +441,7 @@ func TestReact(t *testing.T) {
 			toolsConfig: &compose.ToolsNodeConfig{
 				Tools: []tool.BaseTool{fakeTool},
 			},
-			toolsReturnDirectly: map[string]bool{},
+			toolsReturnDirectly: map[string]struct{}{},
 			maxIterations:       6,
 		}
 
@@ -471,7 +471,7 @@ func TestReact(t *testing.T) {
 			toolsConfig: &compose.ToolsNodeConfig{
 				Tools: []tool.BaseTool{fakeTool},
 			},
-			toolsReturnDirectly: map[string]bool{},
+			toolsReturnDirectly: map[string]struct{}{},
 			maxIterations:       5,
 		}
 
