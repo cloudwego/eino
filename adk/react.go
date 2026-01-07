@@ -374,8 +374,18 @@ func newReact(ctx context.Context, config *reactConfig) (reactGraph, error) {
 		return input, nil
 	}
 
+	toolPostHandle := func(_ context.Context, out *schema.StreamReader[[]*schema.Message], st *State) (*schema.StreamReader[[]*schema.Message], error) {
+		if st.returnDirectlyEvent != nil && st.generator != nil {
+			st.generator.Send(st.returnDirectlyEvent)
+			st.returnDirectlyEvent = nil
+		}
+		return out, nil
+	}
+
 	_ = g.AddToolsNode(toolNode_, toolsNode,
-		compose.WithStatePreHandler(toolPreHandle), compose.WithNodeName(toolNode_))
+		compose.WithStatePreHandler(toolPreHandle),
+		compose.WithStreamStatePostHandler(toolPostHandle),
+		compose.WithNodeName(toolNode_))
 
 	_ = g.AddEdge(compose.START, initNode_)
 	_ = g.AddEdge(initNode_, chatModel_)
