@@ -541,42 +541,6 @@ func init() {
 	schema.RegisterName[*ChatModelAgentInterruptInfo]("_eino_adk_chat_model_agent_interrupt_info")
 }
 
-func (h *cbHandler) onGraphError(ctx context.Context,
-	_ *callbacks.RunInfo, err error) context.Context {
-	addr := core.GetCurrentAddress(ctx)
-	if !isAddressAtDepth(addr, h.addr, addrDepthChain) {
-		return ctx
-	}
-
-	info, ok := compose.ExtractInterruptInfo(err)
-	if !ok {
-		h.Send(&AgentEvent{Err: err})
-		return ctx
-	}
-
-	data, existed, err := h.store.Get(ctx, bridgeCheckpointID)
-	if err != nil {
-		h.Send(&AgentEvent{AgentName: h.agentName, Err: fmt.Errorf("failed to get interrupt info: %w", err)})
-		return ctx
-	}
-	if !existed {
-		h.Send(&AgentEvent{AgentName: h.agentName, Err: fmt.Errorf("interrupt occurred but checkpoint data is missing")})
-		return ctx
-	}
-
-	is := FromInterruptContexts(info.InterruptContexts)
-
-	event := CompositeInterrupt(h.ctx, info, data, is)
-	event.Action.Interrupted.Data = &ChatModelAgentInterruptInfo{
-		Info: info,
-		Data: data,
-	}
-	event.AgentName = h.agentName
-	h.Send(event)
-
-	return ctx
-}
-
 func genReactCallbacks(ctx context.Context, agentName string,
 	generator *AsyncGenerator[*AgentEvent],
 	enableStreaming bool,
@@ -651,9 +615,8 @@ func genReactCallbacks(ctx context.Context, agentName string,
 			}
 			return setToolResultSendersToCtx(ctx, h.addr, createToolResultSender(), createStreamToolResultSender())
 		}).Build()
-	chainHandler := callbacks.NewHandlerBuilder().OnErrorFn(h.onGraphError).Build()
 
-	cb := ub.NewHandlerHelper().ChatModel(cmHandler).ToolsNode(toolsNodeHandler).Graph(reactGraphHandler).Chain(chainHandler).Handler()
+	cb := ub.NewHandlerHelper().ChatModel(cmHandler).ToolsNode(toolsNodeHandler).Graph(reactGraphHandler).Handler()
 
 	return compose.WithCallbacks(cb)
 }
@@ -690,12 +653,6 @@ func (h *noToolsCbHandler) onChatModelEndWithStreamOutput(ctx context.Context,
 	return ctx
 }
 
-func (h *noToolsCbHandler) onGraphError(ctx context.Context,
-	_ *callbacks.RunInfo, err error) context.Context {
-	h.Send(&AgentEvent{Err: err})
-	return ctx
-}
-
 func genNoToolsCallbacks(generator *AsyncGenerator[*AgentEvent], modelRetryConfigs *ModelRetryConfig) compose.Option {
 	h := &noToolsCbHandler{
 		AsyncGenerator:    generator,
@@ -706,9 +663,8 @@ func genNoToolsCallbacks(generator *AsyncGenerator[*AgentEvent], modelRetryConfi
 		OnEnd:                 h.onChatModelEnd,
 		OnEndWithStreamOutput: h.onChatModelEndWithStreamOutput,
 	}
-	graphHandler := callbacks.NewHandlerBuilder().OnErrorFn(h.onGraphError).Build()
 
-	cb := ub.NewHandlerHelper().ChatModel(cmHandler).Chain(graphHandler).Handler()
+	cb := ub.NewHandlerHelper().ChatModel(cmHandler).Handler()
 
 	return compose.WithCallbacks(cb)
 }
@@ -918,9 +874,9 @@ func (a *ChatModelAgent) buildNoToolsRunFunc(_ context.Context, bc *buildContext
 			} else if msgStream != nil {
 				msgStream.Close()
 			}
+		} else {
+			generator.Send(&AgentEvent{Err: err})
 		}
-
-		generator.Close()
 	}
 }
 
@@ -998,9 +954,35 @@ func (a *ChatModelAgent) buildReactRunFunc(ctx context.Context, bc *buildContext
 			} else if msgStream != nil {
 				msgStream.Close()
 			}
+
+			return
 		}
 
-		generator.Close()
+		info, ok := compose.ExtractInterruptInfo(err_)
+		if !ok {
+			generator.Send(&AgentEvent{Err: err_})
+			return
+		}
+
+		data, existed, err := store.Get(ctx, bridgeCheckpointID)
+		if err != nil {
+			generator.Send(&AgentEvent{AgentName: a.name, Err: fmt.Errorf("failed to get interrupt info: %w", err)})
+			return
+		}
+		if !existed {
+			generator.Send(&AgentEvent{AgentName: a.name, Err: fmt.Errorf("interrupt occurred but checkpoint data is missing")})
+			return
+		}
+
+		is := FromInterruptContexts(info.InterruptContexts)
+
+		event := CompositeInterrupt(ctx, info, data, is)
+		event.Action.Interrupted.Data = &ChatModelAgentInterruptInfo{
+			Info: info,
+			Data: data,
+		}
+		event.AgentName = a.name
+		generator.Send(event)
 	}, nil
 }
 
