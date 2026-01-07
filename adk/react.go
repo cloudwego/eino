@@ -29,33 +29,6 @@ import (
 // ErrExceedMaxIterations indicates the agent reached the maximum iterations limit.
 var ErrExceedMaxIterations = errors.New("exceeds max iterations")
 
-type adkToolResultSender func(ctx context.Context, toolName, callID, result string, prePopAction *AgentAction)
-type adkStreamToolResultSender func(ctx context.Context, toolName, callID string, resultStream *schema.StreamReader[string], prePopAction *AgentAction)
-
-type toolResultSenders struct {
-	addr         Address
-	sender       adkToolResultSender
-	streamSender adkStreamToolResultSender
-}
-
-type toolResultSendersCtxKey struct{}
-
-func setToolResultSendersToCtx(ctx context.Context, addr Address, sender adkToolResultSender, streamSender adkStreamToolResultSender) context.Context {
-	return context.WithValue(ctx, toolResultSendersCtxKey{}, &toolResultSenders{
-		addr:         addr,
-		sender:       sender,
-		streamSender: streamSender,
-	})
-}
-
-func getToolResultSendersFromCtx(ctx context.Context) *toolResultSenders {
-	v := ctx.Value(toolResultSendersCtxKey{})
-	if v == nil {
-		return nil
-	}
-	return v.(*toolResultSenders)
-}
-
 func isAddressAtDepth(currentAddr, handlerAddr Address, depth int) bool {
 	expectedLen := len(handlerAddr) + depth
 	return len(currentAddr) == expectedLen && currentAddr[:len(handlerAddr)].Equals(handlerAddr)
@@ -76,6 +49,9 @@ type State struct {
 	RemainingIterations int
 
 	RuntimeReturnDirectly map[string]struct{}
+
+	generator           *AsyncGenerator[*AgentEvent]
+	returnDirectlyEvent *AgentEvent
 }
 
 // SendToolGenAction attaches an AgentAction to the next tool event emitted for the
@@ -140,48 +116,79 @@ func newAdkToolResultCollectorMiddleware() compose.ToolMiddleware {
 	return compose.ToolMiddleware{
 		Invokable: func(next compose.InvokableToolEndpoint) compose.InvokableToolEndpoint {
 			return func(ctx context.Context, input *compose.ToolInput) (*compose.ToolOutput, error) {
-				senders := getToolResultSendersFromCtx(ctx)
-				var sender adkToolResultSender
-				if senders != nil {
-					sender = senders.sender
-				}
 				output, err := next(ctx, input)
 				if err != nil {
 					return nil, err
 				}
 				prePopAction := popToolGenAction(ctx, input.Name)
-				if sender != nil {
-					sender(ctx, input.Name, input.CallID, output.Result, prePopAction)
-				}
+				sendToolResultEvent(ctx, input.Name, input.CallID, output.Result, prePopAction)
 				return output, nil
 			}
 		},
 		Streamable: func(next compose.StreamableToolEndpoint) compose.StreamableToolEndpoint {
 			return func(ctx context.Context, input *compose.ToolInput) (*compose.StreamToolOutput, error) {
-				senders := getToolResultSendersFromCtx(ctx)
-				var streamSender adkStreamToolResultSender
-				if senders != nil {
-					streamSender = senders.streamSender
-				}
 				output, err := next(ctx, input)
 				if err != nil {
 					return nil, err
 				}
 				prePopAction := popToolGenAction(ctx, input.Name)
-				if streamSender != nil {
-					streams := output.Result.Copy(2)
-					streamSender(ctx, input.Name, input.CallID, streams[0], prePopAction)
-					output.Result = streams[1]
-				}
+				streams := output.Result.Copy(2)
+				sendStreamToolResultEvent(ctx, input.Name, input.CallID, streams[0], prePopAction)
+				output.Result = streams[1]
 				return output, nil
 			}
 		},
 	}
 }
 
+func sendToolResultEvent(ctx context.Context, toolName, callID, result string, prePopAction *AgentAction) {
+	msg := schema.ToolMessage(result, callID, schema.WithToolName(toolName))
+	event := EventFromMessage(msg, nil, schema.Tool, toolName)
+
+	if prePopAction != nil {
+		event.Action = prePopAction
+	} else {
+		event.Action = popToolGenAction(ctx, toolName)
+	}
+
+	_ = compose.ProcessState(ctx, func(_ context.Context, st *State) error {
+		if st.generator == nil {
+			return nil
+		}
+		if st.HasReturnDirectly && st.ReturnDirectlyToolCallID == callID {
+			st.returnDirectlyEvent = event
+		} else {
+			st.generator.Send(event)
+		}
+		return nil
+	})
+}
+
+func sendStreamToolResultEvent(ctx context.Context, toolName, callID string, resultStream *schema.StreamReader[string], prePopAction *AgentAction) {
+	cvt := func(in string) (Message, error) {
+		return schema.ToolMessage(in, callID, schema.WithToolName(toolName)), nil
+	}
+	msgStream := schema.StreamReaderWithConvert(resultStream, cvt)
+	event := EventFromMessage(nil, msgStream, schema.Tool, toolName)
+	event.Action = prePopAction
+
+	_ = compose.ProcessState(ctx, func(_ context.Context, st *State) error {
+		if st.generator == nil {
+			return nil
+		}
+		if st.HasReturnDirectly && st.ReturnDirectlyToolCallID == callID {
+			st.returnDirectlyEvent = event
+		} else {
+			st.generator.Send(event)
+		}
+		return nil
+	})
+}
+
 type reactInput struct {
 	messages              []Message
 	runtimeReturnDirectly map[string]struct{}
+	generator             *AsyncGenerator[*AgentEvent]
 }
 
 type reactConfig struct {
@@ -258,6 +265,7 @@ func newReact(ctx context.Context, config *reactConfig) (reactGraph, error) {
 	initLambda := func(ctx context.Context, input *reactInput) ([]Message, error) {
 		_ = compose.ProcessState(ctx, func(ctx context.Context, st *State) error {
 			st.RuntimeReturnDirectly = input.runtimeReturnDirectly
+			st.generator = input.generator
 			return nil
 		})
 		return input.messages, nil
