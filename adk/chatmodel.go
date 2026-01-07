@@ -872,7 +872,7 @@ func (a *ChatModelAgent) Run(ctx context.Context, input *AgentInput, opts ...Age
 		AgentInput:      input,
 		AgentRunOptions: opts,
 		agentName:       a.name,
-		entrance:        EntranceTypeRun,
+		entrance:        InvocationTypeRun,
 	}
 
 	mwHelper, run := a.buildRunFunc(ctx)
@@ -898,7 +898,7 @@ func (a *ChatModelAgent) Run(ctx context.Context, input *AgentInput, opts ...Age
 		}()
 
 		store := newBridgeStore()
-		
+
 		run(ctx, agentContext.AgentInput, generator, store, ch, co...)
 	}()
 
@@ -910,7 +910,7 @@ func (a *ChatModelAgent) Resume(ctx context.Context, info *ResumeInfo, opts ...A
 		ResumeInfo:      info,
 		AgentRunOptions: opts,
 		agentName:       a.name,
-		entrance:        EntranceTypeResume,
+		entrance:        InvocationTypeResume,
 	}
 
 	mwHelper, run := a.buildRunFunc(ctx)

@@ -582,9 +582,9 @@ func TestRunnerWithMWCallbacks(t *testing.T) {
 		}
 		mw2 := AgentMiddleware{
 			BeforeAgent: func(ctx context.Context, ac *AgentContext) (nextContext context.Context, err error) {
-				if ac.EntranceType() == EntranceTypeRun {
+				if ac.EntranceType() == InvocationTypeRun {
 					assert.Equal(t, "Hi", ac.AgentInput.Messages[0].Content)
-				} else if ac.EntranceType() == EntranceTypeResume {
+				} else if ac.EntranceType() == InvocationTypeResume {
 					assert.NotNil(t, ac.ResumeInfo)
 				} else {
 					assert.Fail(t, "invalid entrance")

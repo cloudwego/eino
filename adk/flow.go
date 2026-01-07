@@ -306,7 +306,7 @@ func (a *flowAgent) Run(ctx context.Context, input *AgentInput, opts ...AgentRun
 			AgentInput:      input,
 			AgentRunOptions: opts,
 			agentName:       agentName,
-			entrance:        EntranceTypeRun,
+			entrance:        InvocationTypeRun,
 		}
 	)
 
@@ -357,7 +357,7 @@ func (a *flowAgent) Resume(ctx context.Context, info *ResumeInfo, opts ...AgentR
 			ResumeInfo:      info,
 			AgentRunOptions: opts,
 			agentName:       agentName,
-			entrance:        EntranceTypeRun,
+			entrance:        InvocationTypeRun,
 		}
 	)
 
