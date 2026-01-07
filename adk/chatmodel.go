@@ -41,11 +41,7 @@ import (
 	ub "github.com/cloudwego/eino/utils/callbacks"
 )
 
-const (
-	addrDepthReactGraph = 2
-	addrDepthChatModel  = 3
-	addrDepthToolsNode  = 3
-)
+const addrDepthChatModel = 3
 
 type chatModelAgentRunOptions struct {
 	chatModelOptions []model.Option
@@ -506,34 +502,6 @@ func (h *cbHandler) onChatModelEndWithStreamOutput(ctx context.Context,
 	return ctx
 }
 
-func (h *cbHandler) sendReturnDirectlyToolEvent(ctx context.Context) {
-	_ = compose.ProcessState(ctx, func(_ context.Context, st *State) error {
-		if st.returnDirectlyEvent != nil {
-			h.Send(st.returnDirectlyEvent)
-			st.returnDirectlyEvent = nil
-		}
-		return nil
-	})
-}
-
-func (h *cbHandler) onToolsNodeEnd(ctx context.Context, _ *callbacks.RunInfo, _ []*schema.Message) context.Context {
-	addr := core.GetCurrentAddress(ctx)
-	if !isAddressAtDepth(addr, h.addr, addrDepthToolsNode) {
-		return ctx
-	}
-	h.sendReturnDirectlyToolEvent(ctx)
-	return ctx
-}
-
-func (h *cbHandler) onToolsNodeEndWithStreamOutput(ctx context.Context, _ *callbacks.RunInfo, _ *schema.StreamReader[[]*schema.Message]) context.Context {
-	addr := core.GetCurrentAddress(ctx)
-	if !isAddressAtDepth(addr, h.addr, addrDepthToolsNode) {
-		return ctx
-	}
-	h.sendReturnDirectlyToolEvent(ctx)
-	return ctx
-}
-
 type ChatModelAgentInterruptInfo struct {
 	Info *compose.InterruptInfo
 	Data []byte
@@ -562,12 +530,8 @@ func genReactCallbacks(ctx context.Context, agentName string,
 		OnEnd:                 h.onChatModelEnd,
 		OnEndWithStreamOutput: h.onChatModelEndWithStreamOutput,
 	}
-	toolsNodeHandler := &ub.ToolsNodeCallbackHandlers{
-		OnEnd:                 h.onToolsNodeEnd,
-		OnEndWithStreamOutput: h.onToolsNodeEndWithStreamOutput,
-	}
 
-	cb := ub.NewHandlerHelper().ChatModel(cmHandler).ToolsNode(toolsNodeHandler).Handler()
+	cb := ub.NewHandlerHelper().ChatModel(cmHandler).Handler()
 
 	return compose.WithCallbacks(cb)
 }
