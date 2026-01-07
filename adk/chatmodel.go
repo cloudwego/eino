@@ -755,8 +755,16 @@ func (a *ChatModelAgent) applyBeforeAgent(ctx context.Context, bc *buildContext)
 	changes configChanges,
 	err error,
 ) {
-	toolsCopy := make([]ToolMeta, len(bc.initialTools))
-	copy(toolsCopy, bc.initialTools)
+	toolsCopy := make([]ToolMeta, len(bc.toolsNodeConf.Tools))
+	for i := range bc.toolsNodeConf.Tools {
+		t := bc.toolsNodeConf.Tools[i]
+		info, _ := t.Info(ctx)
+		rd := bc.returnDirectly[info.Name]
+		toolsCopy[i] = ToolMeta{
+			Tool:           t,
+			ReturnDirectly: rd,
+		}
+	}
 
 	runCtx := &AgentRunContext{
 		Instruction: bc.baseInstruction,
@@ -784,10 +792,10 @@ func (a *ChatModelAgent) applyBeforeAgent(ctx context.Context, bc *buildContext)
 		}
 	}
 
-	initialHasTools := len(bc.initialTools) > 0
+	initialHasTools := len(bc.toolsNodeConf.Tools) > 0
 	initialHasReturnDirectly := false
-	for _, t := range bc.initialTools {
-		if t.ReturnDirectly {
+	for _, t := range bc.returnDirectly {
+		if t {
 			initialHasReturnDirectly = true
 			break
 		}
@@ -806,7 +814,6 @@ type buildContext struct {
 	baseInstruction string
 	toolsNodeConf   compose.ToolsNodeConfig
 	returnDirectly  map[string]bool
-	initialTools    []ToolMeta
 }
 
 func (a *ChatModelAgent) prepareBuildContext(ctx context.Context) (*buildContext, error) {
@@ -843,23 +850,10 @@ func (a *ChatModelAgent) prepareBuildContext(ctx context.Context) (*buildContext
 		toolsNodeConf.Tools = append(toolsNodeConf.Tools, m.AdditionalTools...)
 	}
 
-	initialTools := make([]ToolMeta, 0, len(toolsNodeConf.Tools))
-	for _, t := range toolsNodeConf.Tools {
-		rd := returnDirectly[func() string {
-			info, err := t.Info(ctx)
-			if err != nil {
-				return ""
-			}
-			return info.Name
-		}()]
-		initialTools = append(initialTools, ToolMeta{Tool: t, ReturnDirectly: rd})
-	}
-
 	return &buildContext{
 		baseInstruction: baseInstruction,
 		toolsNodeConf:   toolsNodeConf,
 		returnDirectly:  returnDirectly,
-		initialTools:    initialTools,
 	}, nil
 }
 
@@ -1051,14 +1045,14 @@ func (a *ChatModelAgent) buildRunFunc(ctx context.Context) runFunc {
 
 		a.buildContext = bc
 
-		if len(bc.initialTools) == 0 {
+		if len(bc.toolsNodeConf.Tools) == 0 {
 			a.run = a.buildNoToolsRunFunc(ctx, bc)
 			return
 		}
 
 		initialHasReturnDirectly := false
-		for _, t := range bc.initialTools {
-			if t.ReturnDirectly {
+		for _, t := range bc.returnDirectly {
+			if t {
 				initialHasReturnDirectly = true
 				break
 			}
@@ -1092,9 +1086,10 @@ func (a *ChatModelAgent) getRunFunc(ctx context.Context) (
 	if len(a.handlers) == 0 {
 		instruction = bc.baseInstruction
 		returnDirectly = bc.returnDirectly
-		for _, t := range bc.initialTools {
-			tools = append(tools, t.Tool)
-			info, infoErr := t.Tool.Info(ctx)
+		for i := range bc.toolsNodeConf.Tools {
+			t := bc.toolsNodeConf.Tools[i]
+			tools = append(tools, t)
+			info, infoErr := t.Info(ctx)
 			if infoErr == nil {
 				toolInfos = append(toolInfos, info)
 			}
