@@ -71,28 +71,27 @@ type toolsHandler struct {
 }
 
 func (h *toolsHandler) BeforeAgent(ctx context.Context, runCtx *AgentRunContext) (context.Context, *AgentRunContext, error) {
-	for _, t := range h.tools {
-		runCtx.Tools = append(runCtx.Tools, ToolMeta{Tool: t, ReturnDirectly: false})
-	}
+	runCtx.Tools = append(runCtx.Tools, h.tools...)
 	return ctx, runCtx, nil
 }
 
 // WithToolsFunc creates a handler with custom tools modification logic.
-func WithToolsFunc(fn func(ctx context.Context, tools []ToolMeta) (context.Context, []ToolMeta, error)) AgentHandler {
+func WithToolsFunc(fn func(ctx context.Context, tools []tool.BaseTool, returnDirectly map[string]struct{}) (context.Context, []tool.BaseTool, map[string]struct{}, error)) AgentHandler {
 	return &toolsFuncHandler{fn: fn}
 }
 
 type toolsFuncHandler struct {
 	BaseAgentHandler
-	fn func(ctx context.Context, tools []ToolMeta) (context.Context, []ToolMeta, error)
+	fn func(ctx context.Context, tools []tool.BaseTool, returnDirectly map[string]struct{}) (context.Context, []tool.BaseTool, map[string]struct{}, error)
 }
 
 func (h *toolsFuncHandler) BeforeAgent(ctx context.Context, runCtx *AgentRunContext) (context.Context, *AgentRunContext, error) {
-	newCtx, newTools, err := h.fn(ctx, runCtx.Tools)
+	newCtx, newTools, newReturnDirectly, err := h.fn(ctx, runCtx.Tools, runCtx.ReturnDirectly)
 	if err != nil {
 		return ctx, runCtx, err
 	}
 	runCtx.Tools = newTools
+	runCtx.ReturnDirectly = newReturnDirectly
 	return newCtx, runCtx, nil
 }
 
