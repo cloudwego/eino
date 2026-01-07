@@ -81,6 +81,7 @@ func WithAgentToolRunOptions(opts map[string] /*tool name*/ []AgentRunOption) Ag
 	})
 }
 
+// WithGraphCallbacks sets callback handlers for internal graph / chain execution.
 func WithGraphCallbacks(callbacks ...callbacks.Handler) AgentRunOption {
 	return WrapImplSpecificOptFn(func(t *chatModelAgentRunOptions) {
 		t.graphCallbacks = callbacks
@@ -872,7 +873,7 @@ func (a *ChatModelAgent) Run(ctx context.Context, input *AgentInput, opts ...Age
 		AgentInput:      input,
 		AgentRunOptions: opts,
 		agentName:       a.name,
-		entrance:        InvocationTypeRun,
+		invocationType:  InvocationTypeRun,
 	}
 
 	mwHelper, run := a.buildRunFunc(ctx)
@@ -910,7 +911,7 @@ func (a *ChatModelAgent) Resume(ctx context.Context, info *ResumeInfo, opts ...A
 		ResumeInfo:      info,
 		AgentRunOptions: opts,
 		agentName:       a.name,
-		entrance:        InvocationTypeResume,
+		invocationType:  InvocationTypeResume,
 	}
 
 	mwHelper, run := a.buildRunFunc(ctx)

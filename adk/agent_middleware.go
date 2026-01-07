@@ -95,16 +95,16 @@ type AgentContext struct {
 	AgentRunOptions []AgentRunOption
 
 	// internal properties, read only
-	agentName string
-	entrance  InvocationType
+	agentName      string
+	invocationType InvocationType
 }
 
 func (a *AgentContext) AgentName() string {
 	return a.agentName
 }
 
-func (a *AgentContext) EntranceType() InvocationType {
-	return a.entrance
+func (a *AgentContext) InvocationType() InvocationType {
+	return a.invocationType
 }
 
 func isAgentMiddlewareEnabled(a Agent) bool {
