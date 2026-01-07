@@ -42,7 +42,6 @@ import (
 )
 
 const (
-	addrDepthChain      = 1
 	addrDepthReactGraph = 2
 	addrDepthChatModel  = 3
 	addrDepthToolsNode  = 3
@@ -461,11 +460,10 @@ type cbHandler struct {
 	*AsyncGenerator[*AgentEvent]
 	agentName string
 
-	enableStreaming         bool
-	store                   *bridgeStore
-	returnDirectlyToolEvent atomic.Value
-	ctx                     context.Context
-	addr                    Address
+	enableStreaming bool
+	store           *bridgeStore
+	ctx             context.Context
+	addr            Address
 
 	modelRetryConfigs *ModelRetryConfig
 }
@@ -508,10 +506,14 @@ func (h *cbHandler) onChatModelEndWithStreamOutput(ctx context.Context,
 	return ctx
 }
 
-func (h *cbHandler) sendReturnDirectlyToolEvent() {
-	if e, ok := h.returnDirectlyToolEvent.Load().(*AgentEvent); ok && e != nil {
-		h.Send(e)
-	}
+func (h *cbHandler) sendReturnDirectlyToolEvent(ctx context.Context) {
+	_ = compose.ProcessState(ctx, func(_ context.Context, st *State) error {
+		if st.returnDirectlyEvent != nil {
+			h.Send(st.returnDirectlyEvent)
+			st.returnDirectlyEvent = nil
+		}
+		return nil
+	})
 }
 
 func (h *cbHandler) onToolsNodeEnd(ctx context.Context, _ *callbacks.RunInfo, _ []*schema.Message) context.Context {
@@ -519,7 +521,7 @@ func (h *cbHandler) onToolsNodeEnd(ctx context.Context, _ *callbacks.RunInfo, _ 
 	if !isAddressAtDepth(addr, h.addr, addrDepthToolsNode) {
 		return ctx
 	}
-	h.sendReturnDirectlyToolEvent()
+	h.sendReturnDirectlyToolEvent(ctx)
 	return ctx
 }
 
@@ -528,7 +530,7 @@ func (h *cbHandler) onToolsNodeEndWithStreamOutput(ctx context.Context, _ *callb
 	if !isAddressAtDepth(addr, h.addr, addrDepthToolsNode) {
 		return ctx
 	}
-	h.sendReturnDirectlyToolEvent()
+	h.sendReturnDirectlyToolEvent(ctx)
 	return ctx
 }
 
@@ -564,59 +566,8 @@ func genReactCallbacks(ctx context.Context, agentName string,
 		OnEnd:                 h.onToolsNodeEnd,
 		OnEndWithStreamOutput: h.onToolsNodeEndWithStreamOutput,
 	}
-	createToolResultSender := func() adkToolResultSender {
-		return func(toolCtx context.Context, toolName, callID, result string, prePopAction *AgentAction) {
-			msg := schema.ToolMessage(result, callID, schema.WithToolName(toolName))
-			event := EventFromMessage(msg, nil, schema.Tool, toolName)
 
-			if prePopAction != nil {
-				event.Action = prePopAction
-			} else {
-				event.Action = popToolGenAction(toolCtx, toolName)
-			}
-
-			returnDirectlyID, hasReturnDirectly := getReturnDirectlyToolCallID(toolCtx)
-			if hasReturnDirectly && returnDirectlyID == callID {
-				h.returnDirectlyToolEvent.Store(event)
-			} else {
-				h.Send(event)
-			}
-		}
-	}
-	createStreamToolResultSender := func() adkStreamToolResultSender {
-		return func(toolCtx context.Context, toolName, callID string, resultStream *schema.StreamReader[string], prePopAction *AgentAction) {
-			cvt := func(in string) (Message, error) {
-				return schema.ToolMessage(in, callID, schema.WithToolName(toolName)), nil
-			}
-			msgStream := schema.StreamReaderWithConvert(resultStream, cvt)
-			event := EventFromMessage(nil, msgStream, schema.Tool, toolName)
-			event.Action = prePopAction
-
-			returnDirectlyID, hasReturnDirectly := getReturnDirectlyToolCallID(toolCtx)
-			if hasReturnDirectly && returnDirectlyID == callID {
-				h.returnDirectlyToolEvent.Store(event)
-			} else {
-				h.Send(event)
-			}
-		}
-	}
-	reactGraphHandler := callbacks.NewHandlerBuilder().
-		OnStartFn(func(ctx context.Context, info *callbacks.RunInfo, input callbacks.CallbackInput) context.Context {
-			currentAddr := core.GetCurrentAddress(ctx)
-			if !isAddressAtDepth(currentAddr, h.addr, addrDepthReactGraph) {
-				return ctx
-			}
-			return setToolResultSendersToCtx(ctx, h.addr, createToolResultSender(), createStreamToolResultSender())
-		}).
-		OnStartWithStreamInputFn(func(ctx context.Context, info *callbacks.RunInfo, input *schema.StreamReader[callbacks.CallbackInput]) context.Context {
-			currentAddr := core.GetCurrentAddress(ctx)
-			if !isAddressAtDepth(currentAddr, h.addr, addrDepthReactGraph) {
-				return ctx
-			}
-			return setToolResultSendersToCtx(ctx, h.addr, createToolResultSender(), createStreamToolResultSender())
-		}).Build()
-
-	cb := ub.NewHandlerHelper().ChatModel(cmHandler).ToolsNode(toolsNodeHandler).Graph(reactGraphHandler).Handler()
+	cb := ub.NewHandlerHelper().ChatModel(cmHandler).ToolsNode(toolsNodeHandler).Handler()
 
 	return compose.WithCallbacks(cb)
 }
@@ -916,6 +867,7 @@ func (a *ChatModelAgent) buildReactRunFunc(ctx context.Context, bc *buildContext
 					return &reactInput{
 						messages:              messages,
 						runtimeReturnDirectly: returnDirectly,
+						generator:             generator,
 					}, nil
 				}),
 			).
@@ -1114,24 +1066,27 @@ func (a *ChatModelAgent) Resume(ctx context.Context, info *ResumeInfo, opts ...A
 			a.Name(ctx), info.InterruptState))
 	}
 
+	var historyModifier func(ctx context.Context, history []Message) []Message
 	if info.ResumeData != nil {
 		resumeData, ok := info.ResumeData.(*ChatModelAgentResumeData)
 		if !ok {
 			panic(fmt.Sprintf("ChatModelAgent.Resume: agent '%s' was asked to resume but has invalid resume data type: %T",
 				a.Name(ctx), info.ResumeData))
 		}
-
-		if resumeData.HistoryModifier != nil {
-			co = append(co, compose.WithStateModifier(func(ctx context.Context, path compose.NodePath, state any) error {
-				s, ok := state.(*State)
-				if !ok {
-					return fmt.Errorf("unexpected state type: %T, expected: %T", state, &State{})
-				}
-				s.Messages = resumeData.HistoryModifier(ctx, s.Messages)
-				return nil
-			}))
-		}
+		historyModifier = resumeData.HistoryModifier
 	}
+
+	co = append(co, compose.WithStateModifier(func(ctx context.Context, path compose.NodePath, state any) error {
+		s, ok := state.(*State)
+		if !ok {
+			return nil
+		}
+		s.generator = generator
+		if historyModifier != nil {
+			s.Messages = historyModifier(ctx, s.Messages)
+		}
+		return nil
+	}))
 
 	go func() {
 		defer func() {
