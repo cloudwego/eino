@@ -226,15 +226,15 @@ func TestToolsHandlerCombinations(t *testing.T) {
 				},
 			},
 			Handlers: []AgentHandler{
-				WithToolsFunc(func(ctx context.Context, tools []ToolMeta) (context.Context, []ToolMeta, error) {
-					filtered := make([]ToolMeta, 0)
+				WithToolsFunc(func(ctx context.Context, tools []tool.BaseTool, returnDirectly map[string]struct{}) (context.Context, []tool.BaseTool, map[string]struct{}, error) {
+					filtered := make([]tool.BaseTool, 0)
 					for _, t := range tools {
-						info, _ := t.Tool.Info(ctx)
+						info, _ := t.Info(ctx)
 						if info.Name != "tool2" {
 							filtered = append(filtered, t)
 						}
 					}
-					return ctx, filtered, nil
+					return ctx, filtered, returnDirectly, nil
 				}),
 			},
 		})
@@ -276,14 +276,14 @@ func TestToolsHandlerCombinations(t *testing.T) {
 				},
 			},
 			Handlers: []AgentHandler{
-				WithToolsFunc(func(ctx context.Context, tools []ToolMeta) (context.Context, []ToolMeta, error) {
-					for i := range tools {
-						info, _ := tools[i].Tool.Info(ctx)
+				WithToolsFunc(func(ctx context.Context, tools []tool.BaseTool, returnDirectly map[string]struct{}) (context.Context, []tool.BaseTool, map[string]struct{}, error) {
+					for _, t := range tools {
+						info, _ := t.Info(ctx)
 						if info.Name == "tool1" {
-							tools[i].ReturnDirectly = true
+							returnDirectly[info.Name] = struct{}{}
 						}
 					}
-					return ctx, tools, nil
+					return ctx, tools, returnDirectly, nil
 				}),
 			},
 		})

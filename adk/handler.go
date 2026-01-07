@@ -41,17 +41,12 @@ type (
 	StreamToolResult = compose.StreamToolOutput
 )
 
-// ToolMeta contains a tool and its configuration.
-type ToolMeta struct {
-	Tool           tool.BaseTool
-	ReturnDirectly bool
-}
-
 // AgentRunContext contains runtime information passed to handlers before each agent run.
-// Handlers can modify Instruction and Tools to customize agent behavior.
+// Handlers can modify Instruction, Tools, and ReturnDirectly to customize agent behavior.
 type AgentRunContext struct {
-	Instruction string
-	Tools       []ToolMeta
+	Instruction    string
+	Tools          []tool.BaseTool
+	ReturnDirectly map[string]struct{}
 }
 
 // ToolCallWrapper wraps tool call execution.

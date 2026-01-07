@@ -24,6 +24,7 @@ import (
 	"fmt"
 	"math"
 	"runtime/debug"
+	"slices"
 	"sync"
 	"sync/atomic"
 
@@ -752,20 +753,10 @@ type buildContext struct {
 }
 
 func (a *ChatModelAgent) applyBeforeAgent(ctx context.Context, bc *buildContext) (context.Context, *buildContext, error) {
-	toolsCopy := make([]ToolMeta, len(bc.toolsNodeConf.Tools))
-	for i := range bc.toolsNodeConf.Tools {
-		t := bc.toolsNodeConf.Tools[i]
-		info, _ := t.Info(ctx)
-		_, rd := bc.returnDirectly[info.Name]
-		toolsCopy[i] = ToolMeta{
-			Tool:           t,
-			ReturnDirectly: rd,
-		}
-	}
-
 	runCtx := &AgentRunContext{
-		Instruction: bc.baseInstruction,
-		Tools:       toolsCopy,
+		Instruction:    bc.baseInstruction,
+		Tools:          slices.Clone(bc.toolsNodeConf.Tools),
+		ReturnDirectly: copyMap(bc.returnDirectly),
 	}
 
 	var err error
@@ -781,25 +772,19 @@ func (a *ChatModelAgent) applyBeforeAgent(ctx context.Context, bc *buildContext)
 
 	runtimeBC := &buildContext{
 		baseInstruction: runCtx.Instruction,
-		returnDirectly:  copyMap(bc.returnDirectly),
+		toolsNodeConf:   compose.ToolsNodeConfig{Tools: runCtx.Tools},
+		returnDirectly:  runCtx.ReturnDirectly,
 	}
 
-	runtimeHasReturnDirectly := false
-	var tools []tool.BaseTool
 	for _, t := range runCtx.Tools {
-		tools = append(tools, t.Tool)
-		info, infoErr := t.Tool.Info(ctx)
+		info, infoErr := t.Info(ctx)
 		if infoErr == nil {
 			runtimeBC.toolInfos = append(runtimeBC.toolInfos, info)
-			if t.ReturnDirectly {
-				runtimeBC.returnDirectly[info.Name] = struct{}{}
-				runtimeHasReturnDirectly = true
-			}
 		}
 	}
-	runtimeBC.toolsNodeConf = compose.ToolsNodeConfig{Tools: tools}
 
-	runtimeHasTools := len(tools) > 0
+	runtimeHasTools := len(runCtx.Tools) > 0
+	runtimeHasReturnDirectly := len(runCtx.ReturnDirectly) > 0
 	runtimeBC.needToolsGraph = !initialHasTools && runtimeHasTools
 	runtimeBC.needReturnDirectlyBranch = !initialHasReturnDirectly && runtimeHasReturnDirectly
 
