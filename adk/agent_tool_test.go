@@ -883,7 +883,9 @@ func (s *streamingAgent) Description(context.Context) string { return "test" }
 func (s *streamingAgent) Run(context.Context, *AgentInput, ...AgentRunOption) *AsyncIterator[*AgentEvent] {
 	it, gen := NewAsyncIteratorPair[*AgentEvent]()
 	go func() {
-		mv := &MessageVariant{IsStreaming: true, MessageStream: schema.StreamReaderFromArray([]Message{schema.AssistantMessage("a", nil), schema.AssistantMessage("b", nil)})}
+		mv := &MessageVariant{IsStreaming: true, MessageStream: schema.StreamReaderFromArray([]Message{schema.AssistantMessage("1", nil), schema.AssistantMessage("2", nil)})}
+		gen.Send(&AgentEvent{AgentName: "stream", Output: &AgentOutput{MessageOutput: mv}})
+		mv = &MessageVariant{IsStreaming: true, MessageStream: schema.StreamReaderFromArray([]Message{schema.AssistantMessage("a", nil), schema.AssistantMessage("b", nil)})}
 		gen.Send(&AgentEvent{AgentName: "stream", Output: &AgentOutput{MessageOutput: mv}})
 		gen.Close()
 	}()
