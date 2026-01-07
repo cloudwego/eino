@@ -28,7 +28,7 @@ type MultiAgentConfig struct {
 	Middlewares []AgentMiddleware // optional
 }
 
-// The NewMultiAgent method enables wrapping any individual Agent into a Multi-Agent structure.
+// NewMultiAgent enables wrapping any individual Agent into a Multi-Agent structure.
 // It assigns a new Name and Description to the wrapped Agent and adds middleware-based runtime capabilities around it.
 // This method is essentially a simple wrapper for Agents, designed to address the following specific use cases:
 //  1. Customizing Agent Metadata: Modify the public-facing Name and Description of any existing Agent, while adding middleware to its execution flow.
@@ -74,7 +74,7 @@ func (ma *multiAgent) Run(ctx context.Context, input *AgentInput, options ...Age
 		AgentInput:      input,
 		AgentRunOptions: options,
 		agentName:       ma.name,
-		entrance:        InvocationTypeRun,
+		invocationType:  InvocationTypeRun,
 	}
 
 	mwHelper := newAgentMWHelper(append(globalAgentMiddlewares, ma.middlewares...)...)
@@ -94,7 +94,7 @@ func (ma *multiAgent) Resume(ctx context.Context, info *ResumeInfo, opts ...Agen
 		ResumeInfo:      info,
 		AgentRunOptions: opts,
 		agentName:       ma.name,
-		entrance:        InvocationTypeResume,
+		invocationType:  InvocationTypeResume,
 	}
 
 	mwHelper := newAgentMWHelper(append(globalAgentMiddlewares, ma.middlewares...)...)

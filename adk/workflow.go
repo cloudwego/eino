@@ -66,7 +66,7 @@ func (a *workflowAgent) Run(ctx context.Context, input *AgentInput, opts ...Agen
 			AgentInput:      input,
 			AgentRunOptions: opts,
 			agentName:       a.name,
-			entrance:        InvocationTypeRun,
+			invocationType:  InvocationTypeRun,
 		}
 	)
 
@@ -136,7 +136,7 @@ func (a *workflowAgent) Resume(ctx context.Context, info *ResumeInfo, opts ...Ag
 			ResumeInfo:      info,
 			AgentRunOptions: opts,
 			agentName:       a.name,
-			entrance:        InvocationTypeRun,
+			invocationType:  InvocationTypeRun,
 		}
 	)
 

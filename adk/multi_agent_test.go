@@ -54,7 +54,7 @@ func TestMultiAgent(t *testing.T) {
 		Name: "test",
 		BeforeAgent: func(ctx context.Context, ac *AgentContext) (nextContext context.Context, err error) {
 			assert.Equal(t, "mock_name", ac.AgentName())
-			assert.Equal(t, InvocationTypeRun, ac.EntranceType())
+			assert.Equal(t, InvocationTypeRun, ac.InvocationType())
 			assert.Equal(t, "hello", ac.AgentInput.Messages[0].Content)
 
 			ac.AgentInput.Messages[0].Content = "bye"
