@@ -1235,6 +1235,61 @@ func TestAgenticMessageString(t *testing.T) {
 				},
 			},
 			{
+				Type: ContentBlockTypeUserInputAudio,
+				UserInputAudio: &UserInputAudio{
+					URL:        "http://audio.com",
+					Base64Data: "audio_data",
+					MIMEType:   "audio/mp3",
+				},
+			},
+			{
+				Type: ContentBlockTypeUserInputVideo,
+				UserInputVideo: &UserInputVideo{
+					URL:        "http://video.com",
+					Base64Data: "video_data",
+					MIMEType:   "video/mp4",
+				},
+			},
+			{
+				Type: ContentBlockTypeUserInputFile,
+				UserInputFile: &UserInputFile{
+					URL:        "http://file.com",
+					Name:       "file.txt",
+					Base64Data: "file_data",
+					MIMEType:   "text/plain",
+				},
+			},
+			{
+				Type: ContentBlockTypeAssistantGenText,
+				AssistantGenText: &AssistantGenText{
+					Text: "I'll check the current weather in New York City for you.",
+				},
+			},
+			{
+				Type: ContentBlockTypeAssistantGenImage,
+				AssistantGenImage: &AssistantGenImage{
+					URL:        "http://gen_image.com",
+					Base64Data: "gen_image_data",
+					MIMEType:   "image/png",
+				},
+			},
+			{
+				Type: ContentBlockTypeAssistantGenAudio,
+				AssistantGenAudio: &AssistantGenAudio{
+					URL:        "http://gen_audio.com",
+					Base64Data: "gen_audio_data",
+					MIMEType:   "audio/wav",
+				},
+			},
+			{
+				Type: ContentBlockTypeAssistantGenVideo,
+				AssistantGenVideo: &AssistantGenVideo{
+					URL:        "http://gen_video.com",
+					Base64Data: "gen_video_data",
+					MIMEType:   "video/mp4",
+				},
+			},
+			{
 				Type: ContentBlockTypeReasoning,
 				Reasoning: &Reasoning{
 					Summary: []*ReasoningSummary{
@@ -1243,12 +1298,6 @@ func TestAgenticMessageString(t *testing.T) {
 						{Index: 2, Text: "Finally, I'll format the response in a user-friendly way with temperature and conditions."},
 					},
 					EncryptedContent: "encrypted_reasoning_content_that_is_very_long_and_will_be_truncated_for_display",
-				},
-			},
-			{
-				Type: ContentBlockTypeAssistantGenText,
-				AssistantGenText: &AssistantGenText{
-					Text: "I'll check the current weather in New York City for you.",
 				},
 			},
 			{
@@ -1266,6 +1315,39 @@ func TestAgenticMessageString(t *testing.T) {
 					CallID: "call_weather_123",
 					Name:   "get_current_weather",
 					Result: `{"temperature":72,"condition":"sunny","humidity":45,"wind_speed":8}`,
+				},
+			},
+			{
+				Type: ContentBlockTypeServerToolCall,
+				ServerToolCall: &ServerToolCall{
+					Name:      "server_tool",
+					CallID:    "call_1",
+					Arguments: map[string]any{"a": 1},
+				},
+			},
+			{
+				Type: ContentBlockTypeServerToolResult,
+				ServerToolResult: &ServerToolResult{
+					Name:   "server_tool",
+					CallID: "call_1",
+					Result: map[string]any{"success": true},
+				},
+			},
+			{
+				Type: ContentBlockTypeMCPToolApprovalRequest,
+				MCPToolApprovalRequest: &MCPToolApprovalRequest{
+					ID:          "req_1",
+					Name:        "mcp_tool",
+					ServerLabel: "mcp_server",
+					Arguments:   "{}",
+				},
+			},
+			{
+				Type: ContentBlockTypeMCPToolApprovalResponse,
+				MCPToolApprovalResponse: &MCPToolApprovalResponse{
+					ApprovalRequestID: "req_1",
+					Approve:           true,
+					Reason:            "looks good",
 				},
 			},
 			{
@@ -1322,34 +1404,80 @@ content_blocks:
       base64_data: iVBORw0KGgoAAAANSUhE...... (96 bytes)
       mime_type: image/jpeg
       detail: high
-  [2] type: reasoning
+  [2] type: user_input_audio
+      url: http://audio.com
+      base64_data: audio_data... (10 bytes)
+      mime_type: audio/mp3
+  [3] type: user_input_video
+      url: http://video.com
+      base64_data: video_data... (10 bytes)
+      mime_type: video/mp4
+  [4] type: user_input_file
+      name: file.txt
+      url: http://file.com
+      base64_data: file_data... (9 bytes)
+      mime_type: text/plain
+  [5] type: assistant_gen_text
+      text: I'll check the current weather in New York City for you.
+  [6] type: assistant_gen_image
+      url: http://gen_image.com
+      base64_data: gen_image_data... (14 bytes)
+      mime_type: image/png
+  [7] type: assistant_gen_audio
+      url: http://gen_audio.com
+      base64_data: gen_audio_data... (14 bytes)
+      mime_type: audio/wav
+  [8] type: assistant_gen_video
+      url: http://gen_video.com
+      base64_data: gen_video_data... (14 bytes)
+      mime_type: video/mp4
+  [9] type: reasoning
       summary: 3 items
         [0] First, I need to identify the location (New York City) from the user's query.
         [1] Then, I should call the weather API to get current conditions.
         [2] Finally, I'll format the response in a user-friendly way with temperature and conditions.
       encrypted_content: encrypted_reasoning_content_that_is_very_long_and_...
-  [3] type: assistant_gen_text
-      text: I'll check the current weather in New York City for you.
-  [4] type: function_tool_call
+  [10] type: function_tool_call
       call_id: call_weather_123
       name: get_current_weather
       arguments: {"location":"New York City","unit":"fahrenheit"}
       stream_index: 0
-  [5] type: function_tool_result
+  [11] type: function_tool_result
       call_id: call_weather_123
       name: get_current_weather
       result: {"temperature":72,"condition":"sunny","humidity":45,"wind_speed":8}
-  [6] type: mcp_tool_call
+  [12] type: server_tool_call
+      name: server_tool
+      call_id: call_1
+      arguments: {
+  "a": 1
+}
+  [13] type: server_tool_result
+      name: server_tool
+      call_id: call_1
+      result: {
+  "success": true
+}
+  [14] type: mcp_tool_approval_request
+      server_label: mcp_server
+      id: req_1
+      name: mcp_tool
+      arguments: {}
+  [15] type: mcp_tool_approval_response
+      approval_request_id: req_1
+      approve: true
+      reason: looks good
+  [16] type: mcp_tool_call
       server_label: weather-mcp-server
       call_id: mcp_forecast_456
       name: get_7day_forecast
       arguments: {"city":"New York","days":7}
-  [7] type: mcp_tool_result
+  [17] type: mcp_tool_result
       call_id: mcp_forecast_456
       name: get_7day_forecast
       result: {"status":"partial","days_available":3}
       error: [503] Service temporarily unavailable for full 7-day forecast
-  [8] type: mcp_list_tools_result
+  [18] type: mcp_list_tools_result
       server_label: weather-mcp-server
       tools: 3 items
         - get_current_weather: Get current weather conditions for a location
@@ -1358,120 +1486,6 @@ content_blocks:
 response_meta:
   token_usage: prompt=250, completion=180, total=430
 `, output)
-
-	t.Run("full fields", func(t *testing.T) {
-		msg := &AgenticMessage{
-			Role: AgenticRoleTypeSystem,
-			ContentBlocks: []*ContentBlock{
-				{
-					Type: ContentBlockTypeUserInputAudio,
-					UserInputAudio: &UserInputAudio{
-						URL:        "http://audio.com",
-						Base64Data: "audio_data",
-						MIMEType:   "audio/mp3",
-					},
-				},
-				{
-					Type: ContentBlockTypeUserInputVideo,
-					UserInputVideo: &UserInputVideo{
-						URL:        "http://video.com",
-						Base64Data: "video_data",
-						MIMEType:   "video/mp4",
-					},
-				},
-				{
-					Type: ContentBlockTypeUserInputFile,
-					UserInputFile: &UserInputFile{
-						URL:        "http://file.com",
-						Name:       "file.txt",
-						Base64Data: "file_data",
-						MIMEType:   "text/plain",
-					},
-				},
-				{
-					Type: ContentBlockTypeAssistantGenImage,
-					AssistantGenImage: &AssistantGenImage{
-						URL:        "http://gen_image.com",
-						Base64Data: "gen_image_data",
-						MIMEType:   "image/png",
-					},
-				},
-				{
-					Type: ContentBlockTypeAssistantGenAudio,
-					AssistantGenAudio: &AssistantGenAudio{
-						URL:        "http://gen_audio.com",
-						Base64Data: "gen_audio_data",
-						MIMEType:   "audio/wav",
-					},
-				},
-				{
-					Type: ContentBlockTypeAssistantGenVideo,
-					AssistantGenVideo: &AssistantGenVideo{
-						URL:        "http://gen_video.com",
-						Base64Data: "gen_video_data",
-						MIMEType:   "video/mp4",
-					},
-				},
-				{
-					Type: ContentBlockTypeServerToolCall,
-					ServerToolCall: &ServerToolCall{
-						Name:      "server_tool",
-						CallID:    "call_1",
-						Arguments: map[string]any{"a": 1},
-					},
-				},
-				{
-					Type: ContentBlockTypeServerToolResult,
-					ServerToolResult: &ServerToolResult{
-						Name:   "server_tool",
-						CallID: "call_1",
-						Result: map[string]any{"success": true},
-					},
-				},
-				{
-					Type: ContentBlockTypeMCPToolApprovalRequest,
-					MCPToolApprovalRequest: &MCPToolApprovalRequest{
-						ID:          "req_1",
-						Name:        "mcp_tool",
-						ServerLabel: "mcp_server",
-						Arguments:   "{}",
-					},
-				},
-				{
-					Type: ContentBlockTypeMCPToolApprovalResponse,
-					MCPToolApprovalResponse: &MCPToolApprovalResponse{
-						ApprovalRequestID: "req_1",
-						Approve:           true,
-						Reason:            "looks good",
-					},
-				},
-			},
-		}
-
-		s := msg.String()
-		assert.Contains(t, s, "role: system")
-		assert.Contains(t, s, "type: user_input_audio")
-		assert.Contains(t, s, "http://audio.com")
-		assert.Contains(t, s, "type: user_input_video")
-		assert.Contains(t, s, "http://video.com")
-		assert.Contains(t, s, "type: user_input_file")
-		assert.Contains(t, s, "file.txt")
-		assert.Contains(t, s, "type: assistant_gen_image")
-		assert.Contains(t, s, "http://gen_image.com")
-		assert.Contains(t, s, "type: assistant_gen_audio")
-		assert.Contains(t, s, "http://gen_audio.com")
-		assert.Contains(t, s, "type: assistant_gen_video")
-		assert.Contains(t, s, "http://gen_video.com")
-		assert.Contains(t, s, "type: server_tool_call")
-		assert.Contains(t, s, "server_tool")
-		assert.Contains(t, s, "map[a:1]")
-		assert.Contains(t, s, "type: server_tool_result")
-		assert.Contains(t, s, "map[success:true]")
-		assert.Contains(t, s, "type: mcp_tool_approval_request")
-		assert.Contains(t, s, "req_1")
-		assert.Contains(t, s, "type: mcp_tool_approval_response")
-		assert.Contains(t, s, "looks good")
-	})
 
 	t.Run("nil/empty fields", func(t *testing.T) {
 		msg := &AgenticMessage{
