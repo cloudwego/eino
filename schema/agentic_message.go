@@ -18,6 +18,7 @@ package schema
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"reflect"
 	"sort"
@@ -1834,7 +1835,7 @@ func (u *UserInputText) String() string {
 
 // String returns the string representation of UserInputImage.
 func (u *UserInputImage) String() string {
-	return formatMediaString(u.URL, u.Base64Data, u.MIMEType, u.Detail)
+	return formatMediaString(u.URL, u.Base64Data, u.MIMEType, string(u.Detail))
 }
 
 // String returns the string representation of UserInputAudio.
@@ -1902,7 +1903,7 @@ func (s *ServerToolCall) String() string {
 	if s.CallID != "" {
 		sb.WriteString(fmt.Sprintf("      call_id: %s\n", s.CallID))
 	}
-	sb.WriteString(fmt.Sprintf("      arguments: %v\n", s.Arguments))
+	sb.WriteString(fmt.Sprintf("      arguments: %s\n", printAny(s.Arguments)))
 	return sb.String()
 }
 
@@ -1913,7 +1914,7 @@ func (s *ServerToolResult) String() string {
 	if s.CallID != "" {
 		sb.WriteString(fmt.Sprintf("      call_id: %s\n", s.CallID))
 	}
-	sb.WriteString(fmt.Sprintf("      result: %v\n", s.Result))
+	sb.WriteString(fmt.Sprintf("      result: %s\n", printAny(s.Result)))
 	return sb.String()
 }
 
@@ -1996,7 +1997,7 @@ func truncateString(s string, maxLen int) string {
 }
 
 // formatMediaString formats URL, Base64Data, MIMEType and Detail for media content
-func formatMediaString(url, base64Data string, mimeType string, detail any) string {
+func formatMediaString(url, base64Data string, mimeType string, detail string) string {
 	sb := &strings.Builder{}
 	if url != "" {
 		sb.WriteString(fmt.Sprintf("      url: %s\n", truncateString(url, 100)))
@@ -2008,8 +2009,8 @@ func formatMediaString(url, base64Data string, mimeType string, detail any) stri
 	if mimeType != "" {
 		sb.WriteString(fmt.Sprintf("      mime_type: %s\n", mimeType))
 	}
-	if detail != nil && detail != "" {
-		sb.WriteString(fmt.Sprintf("      detail: %v\n", detail))
+	if detail != "" {
+		sb.WriteString(fmt.Sprintf("      detail: %s\n", detail))
 	}
 	return sb.String()
 }
@@ -2026,4 +2027,19 @@ func validateExtensionType(expected reflect.Type, actual any) (reflect.Type, boo
 		return expected, false
 	}
 	return expected, true
+}
+
+func printAny(a any) string {
+	switch v := a.(type) {
+	case string:
+		return v
+	case fmt.Stringer:
+		return v.String()
+	default:
+		b, err := json.MarshalIndent(a, "", "  ")
+		if err != nil {
+			return fmt.Sprintf("%v", a)
+		}
+		return string(b)
+	}
 }
