@@ -21,6 +21,7 @@ import (
 	"errors"
 	"reflect"
 
+	"github.com/cloudwego/eino/callbacks"
 	"github.com/cloudwego/eino/components"
 	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/compose"
@@ -34,6 +35,10 @@ type wrappedChatModel struct {
 }
 
 func newWrappedChatModel(inner model.ToolCallingChatModel, wrappers []ModelCallWrapper) model.ToolCallingChatModel {
+	needCallback := !components.IsCallbacksEnabled(inner)
+	if needCallback {
+		wrappers = append(wrappers, &callbackInjectionWrapper{})
+	}
 	if len(wrappers) == 0 {
 		return inner
 	}
@@ -70,11 +75,11 @@ func (w *wrappedChatModel) Stream(ctx context.Context, input []*schema.Message, 
 	call := &ModelCall{Messages: input, Options: opts}
 
 	endpoint := func(ctx context.Context, c *ModelCall) (*StreamModelResult, error) {
-		stream, err := w.inner.Stream(ctx, c.Messages, c.Options...)
+		sr, err := w.inner.Stream(ctx, c.Messages, c.Options...)
 		if err != nil {
 			return nil, err
 		}
-		return &StreamModelResult{Stream: stream}, nil
+		return &StreamModelResult{Stream: sr}, nil
 	}
 
 	for i := len(w.wrappers) - 1; i >= 0; i-- {
@@ -108,10 +113,7 @@ func (w *wrappedChatModel) GetType() string {
 }
 
 func (w *wrappedChatModel) IsCallbacksEnabled() bool {
-	if ch, ok := w.inner.(components.Checker); ok {
-		return ch.IsCallbacksEnabled()
-	}
-	return false
+	return true
 }
 
 func collectModelWrappersFromHandlers(handlers []AgentHandler) []ModelCallWrapper {
@@ -144,6 +146,32 @@ func toolCallWrappersToMiddlewares(wrappers []ToolCallWrapper) []compose.ToolMid
 		})
 	}
 	return middlewares
+}
+
+type callbackInjectionWrapper struct {
+	BaseModelCallWrapper
+}
+
+func (w *callbackInjectionWrapper) WrapGenerate(ctx context.Context, call *ModelCall, next func(context.Context, *ModelCall) (*ModelResult, error)) (*ModelResult, error) {
+	ctx = callbacks.OnStart(ctx, call.Messages)
+	result, err := next(ctx, call)
+	if err != nil {
+		callbacks.OnError(ctx, err)
+		return nil, err
+	}
+	callbacks.OnEnd(ctx, result.Message)
+	return result, nil
+}
+
+func (w *callbackInjectionWrapper) WrapStream(ctx context.Context, call *ModelCall, next func(context.Context, *ModelCall) (*StreamModelResult, error)) (*StreamModelResult, error) {
+	ctx = callbacks.OnStart(ctx, call.Messages)
+	result, err := next(ctx, call)
+	if err != nil {
+		callbacks.OnError(ctx, err)
+		return nil, err
+	}
+	_, wrappedStream := callbacks.OnEndWithStreamOutput(ctx, result.Stream)
+	return &StreamModelResult{Stream: wrappedStream}, nil
 }
 
 type eventSenderModelWrapper struct {
