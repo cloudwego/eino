@@ -390,10 +390,13 @@ func (a *flowAgent) run(
 		//   duplicate head segments after merge and cause non-recording.
 		// Here we merge: framework runCtx.RunPath + custom-provided event.RunPath.
 		if len(event.RunPath) > 0 {
-			rp := make([]RunStep, 0, len(runCtx.RunPath)+len(event.RunPath))
-			rp = append(rp, runCtx.RunPath...)
-			rp = append(rp, event.RunPath...)
-			event.RunPath = rp
+			// only append if the first step of event RunPath is a runner step different to runCtx.RunPath[0]'s runner step
+			if len(event.RunPath[0].runnerName) > 0 && event.RunPath[0].runnerName != runCtx.RunPath[0].runnerName {
+				rp := make([]RunStep, 0, len(runCtx.RunPath)+len(event.RunPath))
+				rp = append(rp, runCtx.RunPath...)
+				rp = append(rp, event.RunPath...)
+				event.RunPath = rp
+			}
 		} else {
 			event.AgentName = a.Name(ctx)
 			event.RunPath = runCtx.RunPath

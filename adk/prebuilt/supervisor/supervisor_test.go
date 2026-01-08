@@ -22,6 +22,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/bytedance/sonic"
 	"github.com/stretchr/testify/assert"
 	"go.uber.org/mock/gomock"
 
@@ -489,4 +490,312 @@ func TestNestedSupervisorInterruptResume(t *testing.T) {
 
 	assert.True(t, hasToolResponse, "Should have tool response indicating successful payment processing")
 	assert.True(t, hasTransferBack, "Should have transfer back to outer supervisor indicating completion")
+}
+
+func TestSupervisorExit(t *testing.T) {
+	ctx := context.Background()
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	supervisorAgent := mockAdk.NewMockAgent(ctrl)
+	subAgent := mockAdk.NewMockAgent(ctrl)
+
+	supervisorAgent.EXPECT().Name(gomock.Any()).Return("Supervisor").AnyTimes()
+	subAgent.EXPECT().Name(gomock.Any()).Return("SubAgent").AnyTimes()
+
+	// 1. Supervisor transfers to SubAgent
+	aMsg, tMsg := adk.GenTransferMessages(ctx, "SubAgent")
+	i1, g1 := adk.NewAsyncIteratorPair[*adk.AgentEvent]()
+	g1.Send(adk.EventFromMessage(aMsg, nil, schema.Assistant, ""))
+	event1 := adk.EventFromMessage(tMsg, nil, schema.Tool, tMsg.ToolName)
+	event1.Action = &adk.AgentAction{TransferToAgent: &adk.TransferToAgentAction{DestAgentName: "SubAgent"}}
+	g1.Send(event1)
+	g1.Close()
+	supervisorAgent.EXPECT().Run(gomock.Any(), gomock.Any(), gomock.Any()).Return(i1).Times(1)
+
+	// 2. SubAgent emits Exit action
+	i2, g2 := adk.NewAsyncIteratorPair[*adk.AgentEvent]()
+	exitEvent := &adk.AgentEvent{
+		AgentName: "SubAgent",
+		Action:    &adk.AgentAction{Exit: true},
+		Output: &adk.AgentOutput{
+			MessageOutput: &adk.MessageVariant{
+				Role:    schema.Assistant,
+				Message: schema.AssistantMessage("Exiting...", nil),
+			},
+		},
+	}
+	g2.Send(exitEvent)
+	g2.Close()
+	subAgent.EXPECT().Run(gomock.Any(), gomock.Any(), gomock.Any()).Return(i2).Times(1)
+
+	conf := &Config{
+		Supervisor: supervisorAgent,
+		SubAgents:  []adk.Agent{subAgent},
+	}
+
+	multiAgent, err := New(ctx, conf)
+	assert.NoError(t, err)
+
+	runner := adk.NewRunner(ctx, adk.RunnerConfig{Agent: multiAgent})
+	aIter := runner.Run(ctx, []adk.Message{schema.UserMessage("test")})
+
+	// Collect events
+	var events []*adk.AgentEvent
+	for {
+		event, ok := aIter.Next()
+		if !ok {
+			break
+		}
+		events = append(events, event)
+	}
+
+	foundExit := false
+	foundTransferBack := false
+
+	for _, e := range events {
+		if e.Action != nil {
+			if e.Action.Exit {
+				foundExit = true
+			}
+			if e.Action.TransferToAgent != nil && e.Action.TransferToAgent.DestAgentName == "Supervisor" {
+				foundTransferBack = true
+			}
+		}
+	}
+
+	assert.True(t, foundExit, "Should have found Exit action")
+	assert.False(t, foundTransferBack, "Should NOT have found Transfer back to Supervisor after Exit")
+}
+
+func TestNestedSupervisorExit(t *testing.T) {
+	ctx := context.Background()
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	topSupervisor := mockAdk.NewMockAgent(ctrl)
+	midSupervisor := mockAdk.NewMockAgent(ctrl)
+	worker := mockAdk.NewMockAgent(ctrl)
+
+	topSupervisor.EXPECT().Name(gomock.Any()).Return("TopSupervisor").AnyTimes()
+	midSupervisor.EXPECT().Name(gomock.Any()).Return("MidSupervisor").AnyTimes()
+	worker.EXPECT().Name(gomock.Any()).Return("Worker").AnyTimes()
+
+	// 1. TopSupervisor transfers to MidSupervisor
+	aMsg1, tMsg1 := adk.GenTransferMessages(ctx, "MidSupervisor")
+	i1, g1 := adk.NewAsyncIteratorPair[*adk.AgentEvent]()
+	g1.Send(adk.EventFromMessage(aMsg1, nil, schema.Assistant, ""))
+	event1 := adk.EventFromMessage(tMsg1, nil, schema.Tool, tMsg1.ToolName)
+	event1.Action = &adk.AgentAction{TransferToAgent: &adk.TransferToAgentAction{DestAgentName: "MidSupervisor"}}
+	g1.Send(event1)
+	g1.Close()
+	topSupervisor.EXPECT().Run(gomock.Any(), gomock.Any(), gomock.Any()).Return(i1).AnyTimes()
+
+	// 2. MidSupervisor transfers to Worker
+	aMsg2, tMsg2 := adk.GenTransferMessages(ctx, "Worker")
+	i2, g2 := adk.NewAsyncIteratorPair[*adk.AgentEvent]()
+	g2.Send(adk.EventFromMessage(aMsg2, nil, schema.Assistant, ""))
+	event2 := adk.EventFromMessage(tMsg2, nil, schema.Tool, tMsg2.ToolName)
+	event2.Action = &adk.AgentAction{TransferToAgent: &adk.TransferToAgentAction{DestAgentName: "Worker"}}
+	g2.Send(event2)
+	g2.Close()
+	midSupervisor.EXPECT().Run(gomock.Any(), gomock.Any(), gomock.Any()).Return(i2).AnyTimes()
+
+	// 3. Worker emits Exit action
+	i3, g3 := adk.NewAsyncIteratorPair[*adk.AgentEvent]()
+	exitEvent := &adk.AgentEvent{
+		AgentName: "Worker",
+		Action:    &adk.AgentAction{Exit: true},
+		Output: &adk.AgentOutput{
+			MessageOutput: &adk.MessageVariant{
+				Role:    schema.Assistant,
+				Message: schema.AssistantMessage("Worker Exiting...", nil),
+			},
+		},
+	}
+	g3.Send(exitEvent)
+	g3.Close()
+	worker.EXPECT().Run(gomock.Any(), gomock.Any(), gomock.Any()).Return(i3).Times(1)
+
+	// Build Nested System
+	// Mid System: MidSupervisor -> [Worker]
+	midSystem, err := New(ctx, &Config{
+		Supervisor: midSupervisor,
+		SubAgents:  []adk.Agent{worker},
+	})
+	assert.NoError(t, err)
+	// We need to give the midSystem the name "MidSupervisor" so TopSupervisor can find it
+	// supervisor.New returns a ResumableAgent that delegates Name() to the supervisor agent.
+	// So midSystem.Name() should already be "MidSupervisor" because midSupervisor.Name() is "MidSupervisor".
+
+	// Top System: TopSupervisor -> [midSystem]
+	topSystem, err := New(ctx, &Config{
+		Supervisor: topSupervisor,
+		SubAgents:  []adk.Agent{midSystem},
+	})
+	assert.NoError(t, err)
+
+	runner := adk.NewRunner(ctx, adk.RunnerConfig{Agent: topSystem})
+	aIter := runner.Run(ctx, []adk.Message{schema.UserMessage("test nested exit")})
+
+	// Collect events
+	var events []*adk.AgentEvent
+	for {
+		event, ok := aIter.Next()
+		if !ok {
+			break
+		}
+		events = append(events, event)
+	}
+
+	foundExit := false
+	foundTransferBackToMidAfterExit := false
+	foundTransferBackToTopAfterExit := false
+
+	for _, e := range events {
+		m, _ := sonic.MarshalIndent(e, " ", " ")
+		fmt.Println(string(m))
+		if e.Action != nil {
+			if e.Action.Exit {
+				foundExit = true
+			}
+			if foundExit && e.Action.TransferToAgent != nil {
+				if e.Action.TransferToAgent.DestAgentName == "MidSupervisor" {
+					foundTransferBackToMidAfterExit = true
+				}
+				if e.Action.TransferToAgent.DestAgentName == "TopSupervisor" {
+					foundTransferBackToTopAfterExit = true
+				}
+			}
+		}
+	}
+
+	assert.True(t, foundExit, "Should have found Exit action")
+	assert.False(t, foundTransferBackToMidAfterExit, "Should NOT have found Transfer back to MidSupervisor after Exit")
+	assert.False(t, foundTransferBackToTopAfterExit, "Should NOT have found Transfer back to TopSupervisor after Exit")
+}
+
+func TestChatModelAgentInternalEventsExit(t *testing.T) {
+	ctx := context.Background()
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	supervisorAgent := mockAdk.NewMockAgent(ctrl)
+	workerModel := mockModel.NewMockToolCallingChatModel(ctrl)
+	innerAgent := mockAdk.NewMockAgent(ctrl)
+
+	supervisorAgent.EXPECT().Name(gomock.Any()).Return("Supervisor").AnyTimes()
+	innerAgent.EXPECT().Name(gomock.Any()).Return("InnerAgent").AnyTimes()
+	innerAgent.EXPECT().Description(gomock.Any()).Return("Inner Agent Description").AnyTimes()
+
+	// 1. Supervisor transfers to Worker
+	aMsg, tMsg := adk.GenTransferMessages(ctx, "Worker")
+	i1, g1 := adk.NewAsyncIteratorPair[*adk.AgentEvent]()
+	g1.Send(adk.EventFromMessage(aMsg, nil, schema.Assistant, ""))
+	event1 := adk.EventFromMessage(tMsg, nil, schema.Tool, tMsg.ToolName)
+	event1.Action = &adk.AgentAction{TransferToAgent: &adk.TransferToAgentAction{DestAgentName: "Worker"}}
+	g1.Send(event1)
+	g1.Close()
+	supervisorAgent.EXPECT().Run(gomock.Any(), gomock.Any(), gomock.Any()).Return(i1).AnyTimes()
+
+	// 2. Worker runs, calls AgentTool (InnerAgent)
+	// Mock WorkerModel behavior
+	workerModel.EXPECT().WithTools(gomock.Any()).Return(workerModel, nil).AnyTimes()
+
+	// 2.1 Worker generates tool call
+	toolCallMsg := schema.AssistantMessage("", []schema.ToolCall{
+		{
+			ID:   "call_inner_1",
+			Type: "function",
+			Function: schema.FunctionCall{
+				Name:      "InnerAgent",
+				Arguments: `{"request": "do exit"}`,
+			},
+		},
+	})
+	workerModel.EXPECT().Generate(gomock.Any(), gomock.Any(), gomock.Any()).
+		Return(toolCallMsg, nil).Times(1)
+
+	// 2.2 InnerAgent runs and emits Exit
+	iInner, gInner := adk.NewAsyncIteratorPair[*adk.AgentEvent]()
+	innerExitEvent := &adk.AgentEvent{
+		AgentName: "InnerAgent",
+		Action:    &adk.AgentAction{Exit: true}, // Inner agent exits
+		RunPath:   []adk.RunStep{},              // Empty RunPath for mock inner agent
+		Output: &adk.AgentOutput{
+			MessageOutput: &adk.MessageVariant{
+				Role:    schema.Assistant,
+				Message: schema.AssistantMessage("Inner Exiting...", nil),
+			},
+		},
+	}
+	gInner.Send(innerExitEvent)
+	gInner.Close()
+	innerAgent.EXPECT().Run(gomock.Any(), gomock.Any(), gomock.Any()).Return(iInner).Times(1)
+
+	// 2.3 Worker receives tool result (empty string or whatever AgentTool returns on exit/interrupt)
+	// AgentTool implementation details: if Exit action is present, it returns whatever output is there.
+	// The Exit action itself is passed as internal event.
+
+	// 2.4 Worker generates final response
+	finalMsg := schema.AssistantMessage("Worker Finished", nil)
+	workerModel.EXPECT().Generate(gomock.Any(), gomock.Any(), gomock.Any()).
+		Return(finalMsg, nil).AnyTimes()
+
+	// Build Worker Agent
+	agentTool := adk.NewAgentTool(ctx, innerAgent)
+	workerAgent, err := adk.NewChatModelAgent(ctx, &adk.ChatModelAgentConfig{
+		Name:        "Worker",
+		Description: "Worker Agent",
+		Model:       workerModel,
+		ToolsConfig: adk.ToolsConfig{
+			ToolsNodeConfig: compose.ToolsNodeConfig{
+				Tools: []tool.BaseTool{agentTool},
+			},
+			EmitInternalEvents: true, // Key configuration
+		},
+	})
+	assert.NoError(t, err)
+
+	// Build System
+	sys, err := New(ctx, &Config{
+		Supervisor: supervisorAgent,
+		SubAgents:  []adk.Agent{workerAgent},
+	})
+	assert.NoError(t, err)
+
+	runner := adk.NewRunner(ctx, adk.RunnerConfig{Agent: sys})
+	aIter := runner.Run(ctx, []adk.Message{schema.UserMessage("start")})
+
+	// Collect events
+	var events []*adk.AgentEvent
+	for {
+		event, ok := aIter.Next()
+		if !ok {
+			break
+		}
+		events = append(events, event)
+	}
+
+	foundInnerExit := false
+	foundTransferBack := false
+
+	for _, e := range events {
+		m, _ := sonic.MarshalIndent(e, " ", " ")
+		fmt.Println(string(m))
+
+		// Check for InnerAgent exit event (propagated as internal event)
+		if e.AgentName == "InnerAgent" && e.Action != nil && e.Action.Exit {
+			foundInnerExit = true
+		}
+
+		// Check for transfer back to Supervisor
+		if e.AgentName == "Worker" && e.Action != nil && e.Action.TransferToAgent != nil &&
+			e.Action.TransferToAgent.DestAgentName == "Supervisor" {
+			foundTransferBack = true
+		}
+	}
+
+	assert.True(t, foundInnerExit, "Should have captured InnerAgent Exit event")
+	assert.True(t, foundTransferBack, "Should have found Transfer back to Supervisor (Worker should NOT be considered exited)")
 }

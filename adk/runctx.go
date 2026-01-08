@@ -258,7 +258,7 @@ func initRunCtx(ctx context.Context, agentName string, input *AgentInput) (conte
 		runCtx = &runContext{Session: newRunSession()}
 	}
 
-	runCtx.RunPath = append(runCtx.RunPath, RunStep{agentName})
+	runCtx.RunPath = append(runCtx.RunPath, RunStep{agentName: agentName})
 	if runCtx.isRoot() && input != nil {
 		runCtx.RootInput = input
 	}
@@ -366,7 +366,7 @@ func updateRunPathOnly(ctx context.Context, agentNames ...string) context.Contex
 	}
 
 	for _, agentName := range agentNames {
-		runCtx.RunPath = append(runCtx.RunPath, RunStep{agentName})
+		runCtx.RunPath = append(runCtx.RunPath, RunStep{agentName: agentName})
 	}
 
 	return setRunCtx(ctx, runCtx)
@@ -378,22 +378,6 @@ func updateRunPathOnly(ctx context.Context, agentNames ...string) context.Contex
 // inside multi-agents, so this function helps isolate the contexts properly.
 func ClearRunCtx(ctx context.Context) context.Context {
 	return context.WithValue(ctx, runCtxKey{}, nil)
-}
-
-func ctxWithNewRunCtx(ctx context.Context, input *AgentInput, sharedParentSession bool) context.Context {
-	var session *runSession
-	if sharedParentSession {
-		if parentSession := getSession(ctx); parentSession != nil {
-			session = &runSession{
-				Values:    parentSession.Values,
-				valuesMtx: parentSession.valuesMtx,
-			}
-		}
-	}
-	if session == nil {
-		session = newRunSession()
-	}
-	return setRunCtx(ctx, &runContext{Session: session, RootInput: input})
 }
 
 func getSession(ctx context.Context) *runSession {

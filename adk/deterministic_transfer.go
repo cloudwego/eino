@@ -54,9 +54,13 @@ func (a *agentWithDeterministicTransferTo) Name(ctx context.Context) string {
 func (a *agentWithDeterministicTransferTo) Run(ctx context.Context,
 	input *AgentInput, options ...AgentRunOption) *AsyncIterator[*AgentEvent] {
 
-	if _, ok := a.agent.(*flowAgent); ok {
+	/*if _, ok := a.agent.(*flowAgent); ok {
 		ctx = ClearRunCtx(ctx)
-	}
+	}*/
+
+	// TODO: ClearRunCtx is too much for this.
+	// What we actually want is just to clear the AgentEvent list from runSession,
+	// while keeping the RunPath and SessionValues from runSession intact.
 
 	aIter := a.agent.Run(ctx, input, options...)
 
@@ -82,9 +86,13 @@ func (a *resumableAgentWithDeterministicTransferTo) Name(ctx context.Context) st
 func (a *resumableAgentWithDeterministicTransferTo) Run(ctx context.Context,
 	input *AgentInput, options ...AgentRunOption) *AsyncIterator[*AgentEvent] {
 
-	if _, ok := a.agent.(*flowAgent); ok {
+	/*if _, ok := a.agent.(*flowAgent); ok {
 		ctx = ClearRunCtx(ctx)
-	}
+	}*/
+
+	// TODO: ClearRunCtx is too much for this.
+	// What we actually want is just to clear the AgentEvent list from runSession,
+	// while keeping the RunPath and SessionValues from runSession intact.
 
 	aIter := a.agent.Run(ctx, input, options...)
 
@@ -114,7 +122,11 @@ func appendTransferAction(ctx context.Context, aIter *AsyncIterator[*AgentEvent]
 		generator.Close()
 	}()
 
-	interrupted := false
+	var (
+		interrupted       bool
+		exit              bool
+		currentRunnerStep *string
+	)
 
 	for {
 		event, ok := aIter.Next()
@@ -129,9 +141,47 @@ func appendTransferAction(ctx context.Context, aIter *AsyncIterator[*AgentEvent]
 		} else {
 			interrupted = false
 		}
+
+		// if this event is Exit, it could either be:
+		// 1. an exit event from current Runner scope: should be honored and skip the deterministic transfer
+		// 2. an exit event from nested Runner scope: should be ignored and continue the deterministic transfer
+		// How to distinguish the two cases:
+		// 1. calculate current Runner scope: the last runner step from current RunPath
+		// 2. calculate event Runner scope: the last runner step from event.RunPath, maybe nil
+		// 3. check whether they are the same.
+		if event.Action != nil && event.Action.Exit {
+			var eventRunnerStep string
+			if len(event.RunPath) > 0 {
+				for i := len(event.RunPath) - 1; i >= 0; i-- {
+					if event.RunPath[i].runnerName != "" {
+						eventRunnerStep = event.RunPath[i].runnerName
+						break
+					}
+				}
+			}
+
+			if eventRunnerStep == "" {
+				exit = true
+				continue
+			}
+
+			if currentRunnerStep == nil {
+				runCtx := getRunCtx(ctx)
+				for i := len(runCtx.RunPath) - 1; i >= 0; i-- {
+					if runCtx.RunPath[i].runnerName != "" {
+						currentRunnerStep = &runCtx.RunPath[i].runnerName
+						break
+					}
+				}
+			}
+
+			if currentRunnerStep != nil && *currentRunnerStep == eventRunnerStep {
+				exit = true
+			}
+		}
 	}
 
-	if interrupted {
+	if interrupted || exit {
 		return
 	}
 

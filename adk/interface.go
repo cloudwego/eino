@@ -20,6 +20,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/gob"
+	"encoding/json"
 	"fmt"
 	"io"
 
@@ -159,7 +160,8 @@ type AgentAction struct {
 
 // RunStep CheckpointSchema: persisted via serialization.RunCtx (gob).
 type RunStep struct {
-	agentName string
+	agentName  string
+	runnerName string
 }
 
 func init() {
@@ -167,15 +169,18 @@ func init() {
 }
 
 func (r *RunStep) String() string {
+	if r.runnerName != "" {
+		return r.runnerName + "(Runner)"
+	}
 	return r.agentName
 }
 
 func (r *RunStep) Equals(r1 RunStep) bool {
-	return r.agentName == r1.agentName
+	return r.agentName == r1.agentName && r.runnerName == r1.runnerName
 }
 
 func (r *RunStep) GobEncode() ([]byte, error) {
-	s := &runStepSerialization{AgentName: r.agentName}
+	s := &runStepSerialization{AgentName: r.agentName, RunnerName: r.runnerName}
 	buf := &bytes.Buffer{}
 	err := gob.NewEncoder(buf).Encode(s)
 	if err != nil {
@@ -191,11 +196,20 @@ func (r *RunStep) GobDecode(b []byte) error {
 		return fmt.Errorf("failed to gob decode RunStep: %w", err)
 	}
 	r.agentName = s.AgentName
+	r.runnerName = s.RunnerName
 	return nil
 }
 
+func (r *RunStep) MarshalJSON() ([]byte, error) {
+	if r.runnerName != "" {
+		return json.Marshal(r.runnerName + "(Runner)")
+	}
+	return json.Marshal(r.agentName)
+}
+
 type runStepSerialization struct {
-	AgentName string
+	AgentName  string
+	RunnerName string
 }
 
 // AgentEvent CheckpointSchema: persisted via serialization.RunCtx (gob).
