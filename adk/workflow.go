@@ -580,14 +580,17 @@ func newWorkflowAgent(ctx context.Context, name, desc string,
 	return fa, nil
 }
 
+// NewSequentialAgent creates an agent that runs sub-agents sequentially.
 func NewSequentialAgent(ctx context.Context, config *SequentialAgentConfig) (ResumableAgent, error) {
 	return newWorkflowAgent(ctx, config.Name, config.Description, config.SubAgents, workflowAgentModeSequential, 0)
 }
 
+// NewParallelAgent creates an agent that runs sub-agents in parallel.
 func NewParallelAgent(ctx context.Context, config *ParallelAgentConfig) (ResumableAgent, error) {
 	return newWorkflowAgent(ctx, config.Name, config.Description, config.SubAgents, workflowAgentModeParallel, 0)
 }
 
+// NewLoopAgent creates an agent that loops over sub-agents with a max iteration limit.
 func NewLoopAgent(ctx context.Context, config *LoopAgentConfig) (ResumableAgent, error) {
 	return newWorkflowAgent(ctx, config.Name, config.Description, config.SubAgents, workflowAgentModeLoop, config.MaxIterations)
 }

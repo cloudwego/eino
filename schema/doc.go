@@ -14,4 +14,6 @@
  * limitations under the License.
  */
 
+// Package schema defines core data structures and utilities for
+// messages, streams, and tool schemas used across Eino.
 package schema

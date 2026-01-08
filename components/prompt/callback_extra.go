@@ -14,6 +14,7 @@
  * limitations under the License.
  */
 
+// Package prompt defines callback payloads for prompt components.
 package prompt
 
 import (

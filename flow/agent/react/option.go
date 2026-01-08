@@ -39,9 +39,9 @@ func WithChatModelOptions(opts ...model.Option) agent.AgentOption {
 	return agent.WithComposeOptions(compose.WithChatModelOption(opts...))
 }
 
-// Deprecated: this option changes tool list for ToolsNode ONLY,
-// if your need to pass new ToolInfo list to chat model as well, use the new WithTools function instead.
-// WithToolList returns an agent option that specifies the list of tools can be called which are BaseTool but must implement InvokableTool or StreamableTool.
+// WithToolList returns an agent option that specifies compose.ToolsNodeOption for ToolsNode in agent.
+// If you also need to pass ToolInfo to the chat model, use WithTools instead.
+// Deprecated: This changes tool list for ToolsNode ONLY.
 func WithToolList(tools ...tool.BaseTool) agent.AgentOption {
 	return agent.WithComposeOptions(compose.WithToolsNodeOption(compose.WithToolList(tools...)))
 }
@@ -106,10 +106,14 @@ func WithTools(ctx context.Context, tools ...tool.BaseTool) ([]agent.AgentOption
 	return opts, nil
 }
 
+// Iterator provides a lightweight FIFO stream of values and errors
+// produced during agent execution.
 type Iterator[T any] struct {
 	ch *internal.UnboundedChan[item[T]]
 }
 
+// Next retrieves the next value from the iterator.
+// It returns the zero value and false when the stream is exhausted.
 func (iter *Iterator[T]) Next() (T, bool, error) {
 	ch := iter.ch
 	if ch == nil {
@@ -126,6 +130,8 @@ func (iter *Iterator[T]) Next() (T, bool, error) {
 	return i.v, true, i.err
 }
 
+// MessageFuture exposes asynchronous accessors for messages produced
+// by Generate and Stream calls.
 type MessageFuture interface {
 	// GetMessages returns an iterator for retrieving messages generated during "agent.Generate" calls.
 	GetMessages() *Iterator[*schema.Message]

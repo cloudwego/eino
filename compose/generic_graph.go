@@ -28,8 +28,12 @@ type newGraphOptions struct {
 	stateType reflect.Type
 }
 
+// NewGraphOption configures behavior when creating a new graph, such as
+// providing local state generation.
 type NewGraphOption func(ngo *newGraphOptions)
 
+// WithGenLocalState registers a function to generate per-run local state
+// that can be shared across nodes in the graph.
 func WithGenLocalState[S any](gls GenLocalState[S]) NewGraphOption {
 	return func(ngo *newGraphOptions) {
 		ngo.withState = func(ctx context.Context) any {

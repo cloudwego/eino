@@ -66,7 +66,7 @@ func GenericRegister[T any](key string) error {
 
 type InternalSerializer struct{}
 
-func (i *InternalSerializer) Marshal(v interface{}) ([]byte, error) {
+func (i *InternalSerializer) Marshal(v any) ([]byte, error) {
 	is, err := internalMarshal(v, nil)
 	if err != nil {
 		return nil, err

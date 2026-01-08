@@ -18,6 +18,7 @@ package document
 
 import "github.com/cloudwego/eino/components/document/parser"
 
+// LoaderOptions configures document loaders, including parser options.
 type LoaderOptions struct {
 	ParserOptions []parser.Option
 }
@@ -97,6 +98,7 @@ func GetLoaderCommonOptions(base *LoaderOptions, opts ...LoaderOption) *LoaderOp
 	return base
 }
 
+// WithParserOptions attaches parser options to a loader request.
 func WithParserOptions(opts ...parser.Option) LoaderOption {
 	return LoaderOption{
 		apply: func(o *LoaderOptions) {

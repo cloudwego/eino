@@ -14,6 +14,7 @@
  * limitations under the License.
  */
 
+// Package model defines callback payloads and configuration types for chat models.
 package model
 
 import (
@@ -42,6 +43,7 @@ type CompletionTokensDetails struct {
 	ReasoningTokens int `json:"reasoning_tokens,omitempty"`
 }
 
+// PromptTokenDetails provides a breakdown of prompt token usage.
 type PromptTokenDetails struct {
 	// Cached tokens present in the prompt.
 	CachedTokens int

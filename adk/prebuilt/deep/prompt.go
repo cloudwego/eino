@@ -26,7 +26,7 @@ package deep
 
 const (
 	writeTodosPrompt = `
-# Task Management
+# 'write_todos'
 You have access to the 'write_todos' tools to help you manage and plan tasks. Use these tools VERY frequently to ensure that you are tracking your tasks and giving the user visibility into your progress.
 These tools are also EXTREMELY helpful for planning tasks, and for breaking down larger complex tasks into smaller steps. If you do not use this tool when planning, you may forget to do important tasks - and that is unacceptable.
 
@@ -105,7 +105,7 @@ When NOT to use the task tool:
 - You should use the 'task' tool whenever you have a complex task that will take multiple steps, and is independent from other tasks that the agent needs to complete. These agents are highly competent and efficient.
 `
 
-	baseAgentPrompt = `
+	baseAgentInstruction = `
 You are a helpful assistant. Use the instructions below and the tools available to you to assist the user.
 
 IMPORTANT: Assist with authorized security testing, defensive security, CTF challenges, and educational contexts. Refuse requests for destructive techniques, DoS attacks, mass targeting, supply chain compromise, or detection evasion for malicious purposes. Dual-use security tools (C2 frameworks, credential testing, exploit development) require clear authorization context: pentesting engagements, CTF competitions, security research, or defensive use cases.

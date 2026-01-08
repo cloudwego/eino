@@ -54,18 +54,18 @@ func mergeValues(vs []any, opts *mergeOptions) (any, error) {
 
 		ss := make([]streamReader, len(vs)-1)
 		for i := 0; i < len(ss); i++ {
-			s_, ok_ := vs[i+1].(streamReader)
+			sri, ok_ := vs[i+1].(streamReader)
 			if !ok_ {
 				return nil, fmt.Errorf("(mergeStream) unexpected type. "+
 					"expect: %v, got: %v", t0, reflect.TypeOf(vs[i]))
 			}
 
-			if st := s_.getChunkType(); st != t {
+			if st := sri.getChunkType(); st != t {
 				return nil, fmt.Errorf("(mergeStream) chunk type mismatch. "+
 					"expect: %v, got: %v", t, st)
 			}
 
-			ss[i] = s_
+			ss[i] = sri
 		}
 
 		if opts != nil && opts.streamMergeWithSourceEOF {

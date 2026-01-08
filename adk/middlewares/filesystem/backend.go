@@ -14,6 +14,7 @@
  * limitations under the License.
  */
 
+// Package filesystem provides middlewares and types for file system operations.
 package filesystem
 
 import (

@@ -125,6 +125,7 @@ const (
 	AddressSegmentTool  AddressSegmentType = "tool"
 )
 
+// AppendAddressSegment adds an address segment for the current execution context.
 func AppendAddressSegment(ctx context.Context, segType AddressSegmentType, segID string) context.Context {
 	return core.AppendAddressSegment(ctx, segType, segID, "")
 }
@@ -145,10 +146,12 @@ func encapsulateAddress(addr Address) Address {
 type InterruptCtx = core.InterruptCtx
 type InterruptSignal = core.InterruptSignal
 
+// FromInterruptContexts converts user-facing interrupt contexts to an interrupt signal.
 func FromInterruptContexts(contexts []*InterruptCtx) *InterruptSignal {
 	return core.FromInterruptContexts(contexts)
 }
 
+// WithCheckPointID sets the checkpoint ID used for interruption persistence.
 func WithCheckPointID(id string) AgentRunOption {
 	return WrapImplSpecificOptFn(func(t *options) {
 		t.checkPointID = &id

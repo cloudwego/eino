@@ -14,6 +14,7 @@
  * limitations under the License.
  */
 
+// Package agent defines common option types used by agents and multi-agents.
 package agent
 
 import "github.com/cloudwego/eino/compose"

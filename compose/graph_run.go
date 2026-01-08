@@ -642,9 +642,9 @@ func (r *runner) handleInterruptWithSubGraphAndRerunNodes(
 
 	var info any
 	if cp.State != nil {
-		copiedState, err := deepCopyState(cp.State)
-		if err != nil {
-			return fmt.Errorf("failed to copy state: %w", err)
+		copiedState, err_ := deepCopyState(cp.State)
+		if err_ != nil {
+			return fmt.Errorf("failed to copy state: %w", err_)
 		}
 		info = copiedState
 	}

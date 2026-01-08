@@ -18,6 +18,7 @@ package adk
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"sync"
 	"testing"
@@ -842,6 +843,20 @@ func TestAgentTool_InterruptWithoutCheckpoint(t *testing.T) {
 	}
 }
 
+func compositeInterruptFromLast(ctx context.Context, ms *bridgeStore, lastEvent *AgentEvent) error {
+	if lastEvent == nil || lastEvent.Action == nil || lastEvent.Action.Interrupted == nil {
+		return nil
+	}
+	data, existed, err := ms.Get(ctx, bridgeCheckpointID)
+	if err != nil {
+		return fmt.Errorf("failed to get interrupt info: %w", err)
+	}
+	if !existed {
+		return fmt.Errorf("interrupt occurred but checkpoint data is missing")
+	}
+	return compose.CompositeInterrupt(ctx, "agent tool interrupt", data, lastEvent.Action.internalInterrupted)
+}
+
 func TestAgentTool_InvokableRun_FinalOnly(t *testing.T) {
 	ctx := context.Background()
 
@@ -868,7 +883,9 @@ func (s *streamingAgent) Description(context.Context) string { return "test" }
 func (s *streamingAgent) Run(context.Context, *AgentInput, ...AgentRunOption) *AsyncIterator[*AgentEvent] {
 	it, gen := NewAsyncIteratorPair[*AgentEvent]()
 	go func() {
-		mv := &MessageVariant{IsStreaming: true, MessageStream: schema.StreamReaderFromArray([]Message{schema.AssistantMessage("a", nil), schema.AssistantMessage("b", nil)})}
+		mv := &MessageVariant{IsStreaming: true, MessageStream: schema.StreamReaderFromArray([]Message{schema.AssistantMessage("1", nil), schema.AssistantMessage("2", nil)})}
+		gen.Send(&AgentEvent{AgentName: "stream", Output: &AgentOutput{MessageOutput: mv}})
+		mv = &MessageVariant{IsStreaming: true, MessageStream: schema.StreamReaderFromArray([]Message{schema.AssistantMessage("a", nil), schema.AssistantMessage("b", nil)})}
 		gen.Send(&AgentEvent{AgentName: "stream", Output: &AgentOutput{MessageOutput: mv}})
 		gen.Close()
 	}()

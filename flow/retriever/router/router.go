@@ -14,6 +14,8 @@
  * limitations under the License.
  */
 
+// Package router provides retrieval routing helpers that merge results
+// from multiple retrievers and apply ranking strategies.
 package router
 
 import (
