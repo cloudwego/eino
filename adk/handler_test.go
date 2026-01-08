@@ -761,3 +761,205 @@ func (h *countingHandler) AfterModelRewriteHistory(ctx context.Context, messages
 	h.mu.Unlock()
 	return ctx, messages, nil
 }
+
+type testModelCallWrapper struct {
+	BaseModelCallWrapper
+	name           string
+	beforeFn       func()
+	afterFn        func()
+	modifyResultFn func(*schema.Message) *schema.Message
+}
+
+func (h *testModelCallWrapper) WrapGenerate(ctx context.Context, call *ModelCall, next func(context.Context, *ModelCall) (*ModelResult, error)) (*ModelResult, error) {
+	if h.beforeFn != nil {
+		h.beforeFn()
+	}
+	result, err := next(ctx, call)
+	if h.afterFn != nil {
+		h.afterFn()
+	}
+	if err == nil && h.modifyResultFn != nil {
+		result.Message = h.modifyResultFn(result.Message)
+	}
+	return result, err
+}
+
+func (h *testModelCallWrapper) WrapStream(ctx context.Context, call *ModelCall, next func(context.Context, *ModelCall) (*StreamModelResult, error)) (*StreamModelResult, error) {
+	if h.beforeFn != nil {
+		h.beforeFn()
+	}
+	result, err := next(ctx, call)
+	if h.afterFn != nil {
+		h.afterFn()
+	}
+	return result, err
+}
+
+func TestModelCallWrapperHandlers(t *testing.T) {
+	t.Run("MultipleModelWrappersPipeline", func(t *testing.T) {
+		ctx := context.Background()
+		ctrl := gomock.NewController(t)
+		cm := mockModel.NewMockToolCallingChatModel(ctrl)
+
+		var callOrder []string
+		var mu sync.Mutex
+
+		cm.EXPECT().Generate(gomock.Any(), gomock.Any(), gomock.Any()).
+			Return(schema.AssistantMessage("response", nil), nil).Times(1)
+
+		agent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+			Name:        "TestAgent",
+			Description: "Test agent",
+			Model:       cm,
+			Handlers: []AgentHandler{
+				WithModelCallWrapper(&testModelCallWrapper{
+					name: "wrapper1",
+					beforeFn: func() {
+						mu.Lock()
+						callOrder = append(callOrder, "wrapper1-before")
+						mu.Unlock()
+					},
+					afterFn: func() {
+						mu.Lock()
+						callOrder = append(callOrder, "wrapper1-after")
+						mu.Unlock()
+					},
+				}),
+				WithModelCallWrapper(&testModelCallWrapper{
+					name: "wrapper2",
+					beforeFn: func() {
+						mu.Lock()
+						callOrder = append(callOrder, "wrapper2-before")
+						mu.Unlock()
+					},
+					afterFn: func() {
+						mu.Lock()
+						callOrder = append(callOrder, "wrapper2-after")
+						mu.Unlock()
+					},
+				}),
+			},
+		})
+		assert.NoError(t, err)
+
+		iter := agent.Run(ctx, &AgentInput{Messages: []Message{schema.UserMessage("test")}})
+		for {
+			_, ok := iter.Next()
+			if !ok {
+				break
+			}
+		}
+
+		assert.Equal(t, []string{"wrapper1-before", "wrapper2-before", "wrapper2-after", "wrapper1-after"}, callOrder)
+	})
+
+	t.Run("ModelWrapperCanModifyResult", func(t *testing.T) {
+		ctx := context.Background()
+		ctrl := gomock.NewController(t)
+		cm := mockModel.NewMockToolCallingChatModel(ctrl)
+
+		cm.EXPECT().Generate(gomock.Any(), gomock.Any(), gomock.Any()).
+			Return(schema.AssistantMessage("original response", nil), nil).Times(1)
+
+		agent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+			Name:        "TestAgent",
+			Description: "Test agent",
+			Model:       cm,
+			Handlers: []AgentHandler{
+				WithModelCallWrapper(&testModelCallWrapper{
+					name: "modifier",
+					modifyResultFn: func(msg *schema.Message) *schema.Message {
+						return schema.AssistantMessage("modified: "+msg.Content, nil)
+					},
+				}),
+			},
+		})
+		assert.NoError(t, err)
+
+		iter := agent.Run(ctx, &AgentInput{Messages: []Message{schema.UserMessage("test")}})
+		var lastContent string
+		for {
+			event, ok := iter.Next()
+			if !ok {
+				break
+			}
+			if event.Output != nil && event.Output.MessageOutput != nil &&
+				event.Output.MessageOutput.Message != nil &&
+				event.Output.MessageOutput.Message.Role == schema.Assistant {
+				lastContent = event.Output.MessageOutput.Message.Content
+			}
+		}
+
+		assert.Equal(t, "modified: original response", lastContent)
+	})
+
+	t.Run("ModelWrapperWithTools", func(t *testing.T) {
+		ctx := context.Background()
+		ctrl := gomock.NewController(t)
+		cm := mockModel.NewMockToolCallingChatModel(ctrl)
+
+		testTool := &namedTool{name: "test_tool"}
+		info, _ := testTool.Info(ctx)
+
+		var callOrder []string
+		var mu sync.Mutex
+
+		cm.EXPECT().WithTools(gomock.Any()).Return(cm, nil).AnyTimes()
+		cm.EXPECT().Generate(gomock.Any(), gomock.Any(), gomock.Any()).
+			DoAndReturn(func(ctx context.Context, msgs []*schema.Message, opts ...model.Option) (*schema.Message, error) {
+				mu.Lock()
+				callOrder = append(callOrder, "model-call")
+				mu.Unlock()
+				return schema.AssistantMessage("Using tool", []schema.ToolCall{
+					{ID: "call1", Function: schema.FunctionCall{Name: info.Name, Arguments: "{}"}},
+				}), nil
+			}).Times(1)
+		cm.EXPECT().Generate(gomock.Any(), gomock.Any(), gomock.Any()).
+			DoAndReturn(func(ctx context.Context, msgs []*schema.Message, opts ...model.Option) (*schema.Message, error) {
+				mu.Lock()
+				callOrder = append(callOrder, "model-call")
+				mu.Unlock()
+				return schema.AssistantMessage("done", nil), nil
+			}).Times(1)
+
+		agent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+			Name:        "TestAgent",
+			Description: "Test agent",
+			Model:       cm,
+			ToolsConfig: ToolsConfig{
+				ToolsNodeConfig: compose.ToolsNodeConfig{
+					Tools: []tool.BaseTool{testTool},
+				},
+			},
+			Handlers: []AgentHandler{
+				WithModelCallWrapper(&testModelCallWrapper{
+					name: "wrapper",
+					beforeFn: func() {
+						mu.Lock()
+						callOrder = append(callOrder, "wrapper-before")
+						mu.Unlock()
+					},
+					afterFn: func() {
+						mu.Lock()
+						callOrder = append(callOrder, "wrapper-after")
+						mu.Unlock()
+					},
+				}),
+			},
+		})
+		assert.NoError(t, err)
+
+		iter := agent.Run(ctx, &AgentInput{Messages: []Message{schema.UserMessage("test")}})
+		for {
+			_, ok := iter.Next()
+			if !ok {
+				break
+			}
+		}
+
+		assert.Equal(t, []string{
+			"wrapper-before", "model-call", "wrapper-after",
+			"wrapper-before", "model-call", "wrapper-after",
+		}, callOrder)
+	})
+}

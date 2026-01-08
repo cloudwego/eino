@@ -150,3 +150,17 @@ type toolCallWrapperHandler struct {
 func (h *toolCallWrapperHandler) GetToolCallWrapper() ToolCallWrapper {
 	return h.wrapper
 }
+
+// WithModelCallWrapper creates a handler that wraps model calls.
+func WithModelCallWrapper(wrapper ModelCallWrapper) AgentHandler {
+	return &modelCallWrapperHandler{wrapper: wrapper}
+}
+
+type modelCallWrapperHandler struct {
+	BaseAgentHandler
+	wrapper ModelCallWrapper
+}
+
+func (h *modelCallWrapperHandler) GetModelCallWrapper() ModelCallWrapper {
+	return h.wrapper
+}

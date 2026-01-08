@@ -29,6 +29,7 @@ import (
 	"github.com/cloudwego/eino/callbacks"
 	"github.com/cloudwego/eino/components"
 	"github.com/cloudwego/eino/components/model"
+	"github.com/cloudwego/eino/compose"
 	"github.com/cloudwego/eino/internal/generic"
 	"github.com/cloudwego/eino/schema"
 )
@@ -128,13 +129,13 @@ func defaultBackoff(_ context.Context, attempt int) time.Duration {
 	return delay + jitter
 }
 
-func genErrWrapper(ctx context.Context, config ModelRetryConfig, info streamRetryInfo) func(error) error {
+func genErrWrapper(ctx context.Context, maxRetries, attempt int, isRetryAbleFunc func(ctx context.Context, err error) bool) func(error) error {
 	return func(err error) error {
-		isRetryAble := config.IsRetryAble == nil || config.IsRetryAble(ctx, err)
-		hasRetriesLeft := info.attempt < config.MaxRetries
+		isRetryAble := isRetryAbleFunc == nil || isRetryAbleFunc(ctx, err)
+		hasRetriesLeft := attempt < maxRetries
 
 		if isRetryAble && hasRetriesLeft {
-			return &WillRetryError{ErrStr: err.Error(), RetryAttempt: info.attempt}
+			return &WillRetryError{ErrStr: err.Error(), RetryAttempt: attempt}
 		}
 		return err
 	}
@@ -221,17 +222,6 @@ func (r *retryChatModel) generateWithProxyCallbacks(ctx context.Context,
 	return out, nil
 }
 
-type streamRetryKey struct{}
-
-type streamRetryInfo struct {
-	attempt int // first request is 0, first retry is 1
-}
-
-func getStreamRetryInfo(ctx context.Context) (*streamRetryInfo, bool) {
-	info, ok := ctx.Value(streamRetryKey{}).(*streamRetryInfo)
-	return info, ok
-}
-
 func (r *retryChatModel) Stream(ctx context.Context, input []*schema.Message, opts ...model.Option) (
 	*schema.StreamReader[*schema.Message], error) {
 
@@ -244,12 +234,20 @@ func (r *retryChatModel) Stream(ctx context.Context, input []*schema.Message, op
 		backoffFunc = defaultBackoff
 	}
 
-	retryInfo := &streamRetryInfo{}
-	ctx = context.WithValue(ctx, streamRetryKey{}, retryInfo)
+	defer func() {
+		_ = compose.ProcessState(ctx, func(_ context.Context, st *State) error {
+			st.retryAttempt = 0
+			return nil
+		})
+	}()
 
 	var lastErr error
 	for attempt := 0; attempt <= r.config.MaxRetries; attempt++ {
-		retryInfo.attempt = attempt
+		_ = compose.ProcessState(ctx, func(_ context.Context, st *State) error {
+			st.retryAttempt = attempt
+			return nil
+		})
+
 		var stream *schema.StreamReader[*schema.Message]
 		var err error
 
