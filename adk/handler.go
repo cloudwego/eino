@@ -19,8 +19,10 @@ package adk
 import (
 	"context"
 
+	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/components/tool"
 	"github.com/cloudwego/eino/compose"
+	"github.com/cloudwego/eino/schema"
 )
 
 // Type aliases for tool call types.
@@ -74,6 +76,34 @@ func (h BaseToolCallWrapper) WrapStream(ctx context.Context, call *ToolCall, nex
 	return next(ctx, call)
 }
 
+type ModelCall struct {
+	Messages []*schema.Message
+	Options  []model.Option
+}
+
+type ModelResult struct {
+	Message *schema.Message
+}
+
+type StreamModelResult struct {
+	Stream *schema.StreamReader[*schema.Message]
+}
+
+type ModelCallWrapper interface {
+	WrapGenerate(ctx context.Context, call *ModelCall, next func(context.Context, *ModelCall) (*ModelResult, error)) (*ModelResult, error)
+	WrapStream(ctx context.Context, call *ModelCall, next func(context.Context, *ModelCall) (*StreamModelResult, error)) (*StreamModelResult, error)
+}
+
+type BaseModelCallWrapper struct{}
+
+func (h BaseModelCallWrapper) WrapGenerate(ctx context.Context, call *ModelCall, next func(context.Context, *ModelCall) (*ModelResult, error)) (*ModelResult, error) {
+	return next(ctx, call)
+}
+
+func (h BaseModelCallWrapper) WrapStream(ctx context.Context, call *ModelCall, next func(context.Context, *ModelCall) (*StreamModelResult, error)) (*StreamModelResult, error) {
+	return next(ctx, call)
+}
+
 // AgentHandler defines the interface for customizing agent behavior.
 // Implementations can modify agent configuration, rewrite message history,
 // and wrap tool calls with custom logic.
@@ -96,6 +126,10 @@ type AgentHandler interface {
 	// GetToolCallWrapper returns a wrapper for tool calls.
 	// Return nil if no tool call wrapping is needed.
 	GetToolCallWrapper() ToolCallWrapper
+
+	// GetModelCallWrapper returns a wrapper for model calls.
+	// Return nil if no model call wrapping is needed.
+	GetModelCallWrapper() ModelCallWrapper
 }
 
 // BaseAgentHandler provides default no-op implementations for AgentHandler.
@@ -115,5 +149,9 @@ func (b BaseAgentHandler) AfterModelRewriteHistory(ctx context.Context, messages
 }
 
 func (b BaseAgentHandler) GetToolCallWrapper() ToolCallWrapper {
+	return nil
+}
+
+func (b BaseAgentHandler) GetModelCallWrapper() ModelCallWrapper {
 	return nil
 }

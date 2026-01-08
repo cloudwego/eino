@@ -30,18 +30,13 @@ import (
 
 	"github.com/bytedance/sonic"
 
-	"github.com/cloudwego/eino/callbacks"
 	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/components/prompt"
 	"github.com/cloudwego/eino/components/tool"
 	"github.com/cloudwego/eino/compose"
-	"github.com/cloudwego/eino/internal/core"
 	"github.com/cloudwego/eino/internal/safe"
 	"github.com/cloudwego/eino/schema"
-	ub "github.com/cloudwego/eino/utils/callbacks"
 )
-
-const addrDepthChatModel = 3
 
 type chatModelAgentRunOptions struct {
 	chatModelOptions []model.Option
@@ -215,8 +210,9 @@ type ChatModelAgent struct {
 	description string
 	instruction string
 
-	model       model.ToolCallingChatModel
-	toolsConfig ToolsConfig
+	model        model.ToolCallingChatModel
+	wrappedModel model.ToolCallingChatModel
+	toolsConfig  ToolsConfig
 
 	genModelInput GenModelInput
 
@@ -261,14 +257,33 @@ func NewChatModelAgent(_ context.Context, config *ChatModelAgentConfig) (*ChatMo
 	}
 
 	tc := config.ToolsConfig
+	toolEventSender := &toolResultEventSenderWrapper{}
+	tc.ToolCallMiddlewares = append(
+		toolCallWrappersToMiddlewares([]ToolCallWrapper{toolEventSender}),
+		tc.ToolCallMiddlewares...,
+	)
 	tc.ToolCallMiddlewares = append(tc.ToolCallMiddlewares, collectToolMiddlewaresFromHandlers(config.Handlers)...)
 	tc.ToolCallMiddlewares = append(tc.ToolCallMiddlewares, collectToolMiddlewaresFromMiddlewares(config.Middlewares)...)
+
+	userWrappers := collectModelWrappersFromHandlers(config.Handlers)
+	eventSender := &eventSenderModelWrapper{modelRetryConfig: config.ModelRetryConfig}
+	innerWrappers := []ModelCallWrapper{eventSender}
+	innerWrappers = append(innerWrappers, userWrappers...)
+
+	var wrappedModel model.ToolCallingChatModel
+	if config.ModelRetryConfig != nil {
+		wrappedInner := newWrappedChatModel(config.Model, innerWrappers)
+		wrappedModel = newRetryChatModel(wrappedInner, config.ModelRetryConfig)
+	} else {
+		wrappedModel = newWrappedChatModel(config.Model, innerWrappers)
+	}
 
 	return &ChatModelAgent{
 		name:             config.Name,
 		description:      config.Description,
 		instruction:      config.Instruction,
 		model:            config.Model,
+		wrappedModel:     wrappedModel,
 		toolsConfig:      tc,
 		genModelInput:    genInput,
 		exit:             config.Exit,
@@ -452,56 +467,6 @@ func (a *ChatModelAgent) OnDisallowTransferToParent(_ context.Context) error {
 	return nil
 }
 
-type cbHandler struct {
-	*AsyncGenerator[*AgentEvent]
-	agentName string
-
-	enableStreaming bool
-	store           *bridgeStore
-	ctx             context.Context
-	addr            Address
-
-	modelRetryConfigs *ModelRetryConfig
-}
-
-func (h *cbHandler) onChatModelEnd(ctx context.Context,
-	_ *callbacks.RunInfo, output *model.CallbackOutput) context.Context {
-	addr := core.GetCurrentAddress(ctx)
-	if !isAddressAtDepth(addr, h.addr, addrDepthChatModel) {
-		return ctx
-	}
-
-	event := EventFromMessage(output.Message, nil, schema.Assistant, "")
-	h.Send(event)
-	return ctx
-}
-
-func (h *cbHandler) onChatModelEndWithStreamOutput(ctx context.Context,
-	_ *callbacks.RunInfo, output *schema.StreamReader[*model.CallbackOutput]) context.Context {
-	addr := core.GetCurrentAddress(ctx)
-	if !isAddressAtDepth(addr, h.addr, addrDepthChatModel) {
-		return ctx
-	}
-
-	var convertOpts []schema.ConvertOption
-	if h.modelRetryConfigs != nil {
-		retryInfo, exists := getStreamRetryInfo(ctx)
-		if !exists {
-			retryInfo = &streamRetryInfo{attempt: 0}
-		}
-		convertOpts = append(convertOpts, schema.WithErrWrapper(genErrWrapper(ctx, *h.modelRetryConfigs, *retryInfo)))
-	}
-
-	cvt := func(in *model.CallbackOutput) (Message, error) {
-		return in.Message, nil
-	}
-	out := schema.StreamReaderWithConvert(output, cvt, convertOpts...)
-	event := EventFromMessage(nil, out, schema.Assistant, "")
-	h.Send(event)
-
-	return ctx
-}
-
 type ChatModelAgentInterruptInfo struct {
 	Info *compose.InterruptInfo
 	Data []byte
@@ -509,79 +474,6 @@ type ChatModelAgentInterruptInfo struct {
 
 func init() {
 	schema.RegisterName[*ChatModelAgentInterruptInfo]("_eino_adk_chat_model_agent_interrupt_info")
-}
-
-func genReactCallbacks(ctx context.Context, agentName string,
-	generator *AsyncGenerator[*AgentEvent],
-	enableStreaming bool,
-	store *bridgeStore,
-	modelRetryConfigs *ModelRetryConfig) compose.Option {
-
-	h := &cbHandler{
-		ctx:               ctx,
-		addr:              core.GetCurrentAddress(ctx),
-		AsyncGenerator:    generator,
-		agentName:         agentName,
-		store:             store,
-		enableStreaming:   enableStreaming,
-		modelRetryConfigs: modelRetryConfigs}
-
-	cmHandler := &ub.ModelCallbackHandler{
-		OnEnd:                 h.onChatModelEnd,
-		OnEndWithStreamOutput: h.onChatModelEndWithStreamOutput,
-	}
-
-	cb := ub.NewHandlerHelper().ChatModel(cmHandler).Handler()
-
-	return compose.WithCallbacks(cb)
-}
-
-type noToolsCbHandler struct {
-	*AsyncGenerator[*AgentEvent]
-	modelRetryConfigs *ModelRetryConfig
-}
-
-func (h *noToolsCbHandler) onChatModelEnd(ctx context.Context,
-	_ *callbacks.RunInfo, output *model.CallbackOutput) context.Context {
-	event := EventFromMessage(output.Message, nil, schema.Assistant, "")
-	h.Send(event)
-	return ctx
-}
-
-func (h *noToolsCbHandler) onChatModelEndWithStreamOutput(ctx context.Context,
-	_ *callbacks.RunInfo, output *schema.StreamReader[*model.CallbackOutput]) context.Context {
-	var convertOpts []schema.ConvertOption
-	if h.modelRetryConfigs != nil {
-		retryInfo, exists := getStreamRetryInfo(ctx)
-		if !exists {
-			retryInfo = &streamRetryInfo{attempt: 0}
-		}
-		convertOpts = append(convertOpts, schema.WithErrWrapper(genErrWrapper(ctx, *h.modelRetryConfigs, *retryInfo)))
-	}
-
-	cvt := func(in *model.CallbackOutput) (Message, error) {
-		return in.Message, nil
-	}
-	out := schema.StreamReaderWithConvert(output, cvt, convertOpts...)
-	event := EventFromMessage(nil, out, schema.Assistant, "")
-	h.Send(event)
-	return ctx
-}
-
-func genNoToolsCallbacks(generator *AsyncGenerator[*AgentEvent], modelRetryConfigs *ModelRetryConfig) compose.Option {
-	h := &noToolsCbHandler{
-		AsyncGenerator:    generator,
-		modelRetryConfigs: modelRetryConfigs,
-	}
-
-	cmHandler := &ub.ModelCallbackHandler{
-		OnEnd:                 h.onChatModelEnd,
-		OnEndWithStreamOutput: h.onChatModelEndWithStreamOutput,
-	}
-
-	cb := ub.NewHandlerHelper().ChatModel(cmHandler).Handler()
-
-	return compose.WithCallbacks(cb)
 }
 
 func setOutputToSession(ctx context.Context, msg Message, msgStream MessageStream, outputKey string) error {
@@ -640,9 +532,12 @@ func (a *ChatModelAgent) applyBeforeAgent(ctx context.Context, bc *buildContext)
 
 	runtimeBC := &buildContext{
 		baseInstruction: runCtx.Instruction,
-		toolsNodeConf:   compose.ToolsNodeConfig{Tools: runCtx.Tools},
-		returnDirectly:  runCtx.ReturnDirectly,
-		toolUpdated:     true,
+		toolsNodeConf: compose.ToolsNodeConfig{
+			Tools:               runCtx.Tools,
+			ToolCallMiddlewares: bc.toolsNodeConf.ToolCallMiddlewares,
+		},
+		returnDirectly: runCtx.ReturnDirectly,
+		toolUpdated:    true,
 		rebuildGraph: (len(bc.toolsNodeConf.Tools) == 0 && len(runCtx.Tools) > 0) ||
 			(len(bc.returnDirectly) == 0 && len(runCtx.ReturnDirectly) > 0),
 	}
@@ -659,7 +554,10 @@ func (a *ChatModelAgent) applyBeforeAgent(ctx context.Context, bc *buildContext)
 
 func (a *ChatModelAgent) prepareBuildContext(ctx context.Context) (*buildContext, error) {
 	baseInstruction := a.instruction
-	toolsNodeConf := a.toolsConfig.ToolsNodeConfig
+	toolsNodeConf := compose.ToolsNodeConfig{
+		Tools:               slices.Clone(a.toolsConfig.Tools),
+		ToolCallMiddlewares: slices.Clone(a.toolsConfig.ToolCallMiddlewares),
+	}
 	returnDirectly := copyMap(a.toolsConfig.ReturnDirectly)
 
 	transferToAgents := a.subAgents
@@ -699,21 +597,27 @@ func (a *ChatModelAgent) prepareBuildContext(ctx context.Context) (*buildContext
 }
 
 func (a *ChatModelAgent) buildNoToolsRunFunc(_ context.Context, bc *buildContext) runFunc {
-	chatModel := a.model
-	if a.modelRetryConfig != nil {
-		chatModel = newRetryChatModel(a.model, a.modelRetryConfig)
-	}
-
 	return func(ctx context.Context, input *AgentInput, generator *AsyncGenerator[*AgentEvent],
-		store *bridgeStore, instruction string, returnDirectly map[string]struct{}, opts ...compose.Option) {
+		store *bridgeStore, instruction string, _ map[string]struct{}, opts ...compose.Option) {
 		var err error
 
-		r, err := compose.NewChain[*AgentInput, Message](
-			compose.WithGenLocalState(func(ctx context.Context) (state *ChatModelAgentState) {
-				return &ChatModelAgentState{}
+		chatModel := a.wrappedModel
+
+		type noToolsInput struct {
+			input     *AgentInput
+			generator *AsyncGenerator[*AgentEvent]
+		}
+
+		r, err := compose.NewChain[noToolsInput, Message](
+			compose.WithGenLocalState(func(ctx context.Context) (state *State) {
+				return &State{}
 			})).
-			AppendLambda(compose.InvokableLambda(func(ctx context.Context, input *AgentInput) ([]Message, error) {
-				messages, err := a.genModelInput(ctx, instruction, input)
+			AppendLambda(compose.InvokableLambda(func(ctx context.Context, in noToolsInput) ([]Message, error) {
+				_ = compose.ProcessState(ctx, func(_ context.Context, st *State) error {
+					st.generator = in.generator
+					return nil
+				})
+				messages, err := a.genModelInput(ctx, instruction, in.input)
 				if err != nil {
 					return nil, err
 				}
@@ -721,14 +625,16 @@ func (a *ChatModelAgent) buildNoToolsRunFunc(_ context.Context, bc *buildContext
 			})).
 			AppendChatModel(
 				chatModel,
-				compose.WithStatePreHandler(func(ctx context.Context, in []Message, state *ChatModelAgentState) (
+				compose.WithStatePreHandler(func(ctx context.Context, in []Message, state *State) (
 					_ []Message, err error) {
 					state.Messages = in
 					for _, m := range a.middlewares {
 						if m.BeforeChatModel != nil {
-							if err = m.BeforeChatModel(ctx, state); err != nil {
+							mwState := &ChatModelAgentState{Messages: state.Messages}
+							if err = m.BeforeChatModel(ctx, mwState); err != nil {
 								return nil, err
 							}
+							state.Messages = mwState.Messages
 						}
 					}
 					for _, h := range a.handlers {
@@ -739,14 +645,16 @@ func (a *ChatModelAgent) buildNoToolsRunFunc(_ context.Context, bc *buildContext
 					}
 					return state.Messages, nil
 				}),
-				compose.WithStatePostHandler(func(ctx context.Context, in Message, state *ChatModelAgentState) (
+				compose.WithStatePostHandler(func(ctx context.Context, in Message, state *State) (
 					_ Message, err error) {
 					state.Messages = append(state.Messages, in)
 					for _, m := range a.middlewares {
 						if m.AfterChatModel != nil {
-							if err = m.AfterChatModel(ctx, state); err != nil {
+							mwState := &ChatModelAgentState{Messages: state.Messages}
+							if err = m.AfterChatModel(ctx, mwState); err != nil {
 								return nil, err
 							}
+							state.Messages = mwState.Messages
 						}
 					}
 					for _, h := range a.handlers {
@@ -769,15 +677,14 @@ func (a *ChatModelAgent) buildNoToolsRunFunc(_ context.Context, bc *buildContext
 			return
 		}
 
-		callOpt := genNoToolsCallbacks(generator, a.modelRetryConfig)
-		runOpts := append([]compose.Option{callOpt}, opts...)
+		in := noToolsInput{input: input, generator: generator}
 
 		var msg Message
 		var msgStream MessageStream
 		if input.EnableStreaming {
-			msgStream, err = r.Stream(ctx, input, runOpts...)
+			msgStream, err = r.Stream(ctx, in, opts...)
 		} else {
-			msg, err = r.Invoke(ctx, input, runOpts...)
+			msg, err = r.Invoke(ctx, in, opts...)
 		}
 
 		if err == nil {
@@ -797,14 +704,13 @@ func (a *ChatModelAgent) buildNoToolsRunFunc(_ context.Context, bc *buildContext
 
 func (a *ChatModelAgent) buildReactRunFunc(ctx context.Context, bc *buildContext) (runFunc, error) {
 	conf := &reactConfig{
-		model:               a.model,
+		model:               a.wrappedModel,
 		toolsConfig:         &bc.toolsNodeConf,
 		toolsReturnDirectly: bc.returnDirectly,
 		agentName:           a.name,
 		maxIterations:       a.maxIterations,
 		handlers:            a.handlers,
 		middlewares:         a.middlewares,
-		modelRetryConfig:    a.modelRetryConfig,
 	}
 
 	g, err := newReact(ctx, conf)
@@ -842,10 +748,8 @@ func (a *ChatModelAgent) buildReactRunFunc(ctx context.Context, bc *buildContext
 			return
 		}
 
-		callOpt := genReactCallbacks(ctx, a.name, generator, input.EnableStreaming, store, a.modelRetryConfig)
 		var runOpts []compose.Option
 		runOpts = append(runOpts, opts...)
-		runOpts = append(runOpts, callOpt)
 		if a.toolsConfig.EmitInternalEvents {
 			runOpts = append(runOpts, compose.WithToolsNodeOption(compose.WithToolOption(withAgentToolEventGenerator(generator))))
 		}
