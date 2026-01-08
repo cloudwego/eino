@@ -1786,3 +1786,164 @@ func consumeUntilInterrupt(iter *AsyncIterator[*AgentEvent]) (normalEvents []*Ag
 	}
 	return
 }
+
+type returnDirectlyTool struct {
+	name string
+}
+
+func (t *returnDirectlyTool) Info(_ context.Context) (*schema.ToolInfo, error) {
+	return &schema.ToolInfo{
+		Name: t.name,
+		Desc: "A tool that returns directly",
+	}, nil
+}
+
+func (t *returnDirectlyTool) InvokableRun(_ context.Context, _ string, _ ...tool.Option) (string, error) {
+	return "return directly result", nil
+}
+
+type interruptingTool struct {
+	name string
+}
+
+func (i *interruptingTool) Info(_ context.Context) (*schema.ToolInfo, error) {
+	return &schema.ToolInfo{
+		Name: i.name,
+		Desc: "A tool that interrupts",
+	}, nil
+}
+
+func (i *interruptingTool) InvokableRun(ctx context.Context, _ string, _ ...tool.Option) (string, error) {
+	if wasInterrupted, _, _ := compose.GetInterruptState[any](ctx); !wasInterrupted {
+		return "", compose.Interrupt(ctx, "interrupt data")
+	}
+
+	if isResumeFlow, hasResumeData, data := compose.GetResumeContext[string](ctx); isResumeFlow && hasResumeData {
+		return data, nil
+	}
+
+	return "resumed without data", nil
+}
+
+type twoToolCallModel struct {
+	returnDirectlyToolName string
+	interruptingToolName   string
+	callCount              int
+}
+
+func (m *twoToolCallModel) Generate(_ context.Context, _ []*schema.Message, _ ...model.Option) (*schema.Message, error) {
+	m.callCount++
+	if m.callCount == 1 {
+		return &schema.Message{
+			Role:    schema.Assistant,
+			Content: "",
+			ToolCalls: []schema.ToolCall{
+				{
+					ID:   "call_return_directly",
+					Type: "function",
+					Function: schema.FunctionCall{
+						Name:      m.returnDirectlyToolName,
+						Arguments: "{}",
+					},
+				},
+				{
+					ID:   "call_interrupting",
+					Type: "function",
+					Function: schema.FunctionCall{
+						Name:      m.interruptingToolName,
+						Arguments: "{}",
+					},
+				},
+			},
+		}, nil
+	}
+	return schema.AssistantMessage("final response", nil), nil
+}
+
+func (m *twoToolCallModel) Stream(_ context.Context, _ []*schema.Message, _ ...model.Option) (*schema.StreamReader[*schema.Message], error) {
+	panic("not implemented")
+}
+
+func (m *twoToolCallModel) WithTools(_ []*schema.ToolInfo) (model.ToolCallingChatModel, error) {
+	return m, nil
+}
+
+func TestReturnDirectlyEventSentAfterResume(t *testing.T) {
+	ctx := context.Background()
+
+	returnDirectlyToolName := "return_directly_tool"
+	interruptingToolName := "interrupting_tool"
+
+	mdl := &twoToolCallModel{
+		returnDirectlyToolName: returnDirectlyToolName,
+		interruptingToolName:   interruptingToolName,
+	}
+
+	agent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+		Name:        "TestAgent",
+		Description: "Test agent for return directly + interrupt",
+		Model:       mdl,
+		ToolsConfig: ToolsConfig{
+			ToolsNodeConfig: compose.ToolsNodeConfig{
+				Tools: []tool.BaseTool{
+					&returnDirectlyTool{name: returnDirectlyToolName},
+					&interruptingTool{name: interruptingToolName},
+				},
+			},
+			ReturnDirectly: map[string]struct{}{
+				returnDirectlyToolName: {},
+			},
+		},
+	})
+	assert.NoError(t, err)
+
+	store := newMyStore()
+	runner := NewRunner(ctx, RunnerConfig{
+		Agent:           agent,
+		EnableStreaming: false,
+		CheckPointStore: store,
+	})
+
+	iter := runner.Query(ctx, "test input", WithCheckPointID("test_checkpoint"))
+
+	var interruptEvent *AgentEvent
+	for {
+		event, ok := iter.Next()
+		if !ok {
+			break
+		}
+		if event.Action != nil && event.Action.Interrupted != nil {
+			interruptEvent = event
+		}
+	}
+
+	assert.NotNil(t, interruptEvent, "Should have an interrupt event")
+	assert.NotEmpty(t, interruptEvent.Action.Interrupted.InterruptContexts)
+
+	interruptID := interruptEvent.Action.Interrupted.InterruptContexts[0].ID
+	resumeIter, err := runner.ResumeWithParams(ctx, "test_checkpoint", &ResumeParams{
+		Targets: map[string]any{
+			interruptID: "resume data",
+		},
+	})
+	assert.NoError(t, err)
+
+	var resumeEvents []*AgentEvent
+	for {
+		event, ok := resumeIter.Next()
+		if !ok {
+			break
+		}
+		resumeEvents = append(resumeEvents, event)
+	}
+
+	var hasReturnDirectlyEvent bool
+	for _, e := range resumeEvents {
+		if e.Output != nil && e.Output.MessageOutput != nil {
+			if e.Output.MessageOutput.Role == schema.Tool && e.Output.MessageOutput.ToolName == returnDirectlyToolName {
+				hasReturnDirectlyEvent = true
+			}
+		}
+	}
+	assert.True(t, hasReturnDirectlyEvent, "ReturnDirectlyEvent should be sent after resume")
+}

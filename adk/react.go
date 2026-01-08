@@ -45,9 +45,10 @@ type State struct {
 
 	RuntimeReturnDirectly map[string]struct{}
 
-	generator           *AsyncGenerator[*AgentEvent]
-	returnDirectlyEvent *AgentEvent // TODO: what happens when tool return directly and tool interrupt happens at the same time?
-	retryAttempt        int
+	ReturnDirectlyEvent *AgentEvent
+
+	generator    *AsyncGenerator[*AgentEvent]
+	retryAttempt int
 }
 
 // SendToolGenAction attaches an AgentAction to the next tool event emitted for the
@@ -128,7 +129,7 @@ func (w *toolResultEventSenderWrapper) WrapInvoke(ctx context.Context, call *Too
 			return nil
 		}
 		if st.HasReturnDirectly && st.ReturnDirectlyToolCallID == call.CallID {
-			st.returnDirectlyEvent = event
+			st.ReturnDirectlyEvent = event
 		} else {
 			st.generator.Send(event)
 		}
@@ -159,7 +160,7 @@ func (w *toolResultEventSenderWrapper) WrapStream(ctx context.Context, call *Too
 			return nil
 		}
 		if st.HasReturnDirectly && st.ReturnDirectlyToolCallID == call.CallID {
-			st.returnDirectlyEvent = event
+			st.ReturnDirectlyEvent = event
 		} else {
 			st.generator.Send(event)
 		}
@@ -348,9 +349,9 @@ func newReact(ctx context.Context, config *reactConfig) (reactGraph, error) {
 	}
 
 	toolPostHandle := func(_ context.Context, out *schema.StreamReader[[]*schema.Message], st *State) (*schema.StreamReader[[]*schema.Message], error) {
-		if st.returnDirectlyEvent != nil && st.generator != nil {
-			st.generator.Send(st.returnDirectlyEvent)
-			st.returnDirectlyEvent = nil
+		if st.ReturnDirectlyEvent != nil && st.generator != nil {
+			st.generator.Send(st.ReturnDirectlyEvent)
+			st.ReturnDirectlyEvent = nil
 		}
 		return out, nil
 	}
