@@ -695,8 +695,10 @@ func ConcatAgenticMessages(msgs []*AgenticMessage) (*AgenticMessage, error) {
 		role          AgenticRoleType
 		blocks        []*ContentBlock
 		metas         []*AgenticResponseMeta
+		extra         map[string]any
 		blockIndices  []int
 		indexToBlocks = map[int][]*ContentBlock{}
+		extraList     = make([]map[string]any, 0, len(msgs))
 	)
 
 	if len(msgs) == 1 {
@@ -747,6 +749,10 @@ func ConcatAgenticMessages(msgs []*AgenticMessage) (*AgenticMessage, error) {
 		if msg.ResponseMeta != nil {
 			metas = append(metas, msg.ResponseMeta)
 		}
+
+		if msg.Extra != nil {
+			extraList = append(extraList, msg.Extra)
+		}
 	}
 
 	meta, err := concatAgenticResponseMeta(metas)
@@ -758,7 +764,8 @@ func ConcatAgenticMessages(msgs []*AgenticMessage) (*AgenticMessage, error) {
 		// All blocks are streaming, concat each group by index
 		indexToBlock := map[int]*ContentBlock{}
 		for idx, bs := range indexToBlocks {
-			b, err := concatChunksOfSameContentBlock(bs)
+			var b *ContentBlock
+			b, err = concatChunksOfSameContentBlock(bs)
 			if err != nil {
 				return nil, err
 			}
@@ -773,10 +780,18 @@ func ConcatAgenticMessages(msgs []*AgenticMessage) (*AgenticMessage, error) {
 		}
 	}
 
+	if len(extraList) > 0 {
+		extra, err = concatExtra(extraList)
+		if err != nil {
+			return nil, err
+		}
+	}
+
 	return &AgenticMessage{
 		Role:          role,
 		ResponseMeta:  meta,
 		ContentBlocks: blocks,
+		Extra:         extra,
 	}, nil
 }
 
