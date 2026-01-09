@@ -201,9 +201,9 @@ func handleFlowAgentEvents(ctx context.Context, iter *AsyncIterator[*AgentEvent]
 	}()
 
 	var (
-		interruptEvent     *AgentEvent
-		exit               bool
-		currentRunnerStep  *string
+		interruptEvent    *AgentEvent
+		exit              bool
+		currentRunnerStep *string
 	)
 
 	for {
@@ -304,6 +304,16 @@ func appendTransferAction(ctx context.Context, aIter *AsyncIterator[*AgentEvent]
 			break
 		}
 
+		var eventRunnerStep string
+		if event.Action != nil && event.Action.Exit && len(event.RunPath) > 0 {
+			for i := len(event.RunPath) - 1; i >= 0; i-- {
+				if event.RunPath[i].runnerName != "" {
+					eventRunnerStep = event.RunPath[i].runnerName
+					break
+				}
+			}
+		}
+
 		generator.Send(event)
 
 		if event.Action != nil && event.Action.Interrupted != nil {
@@ -313,16 +323,6 @@ func appendTransferAction(ctx context.Context, aIter *AsyncIterator[*AgentEvent]
 		}
 
 		if event.Action != nil && event.Action.Exit {
-			var eventRunnerStep string
-			if len(event.RunPath) > 0 {
-				for i := len(event.RunPath) - 1; i >= 0; i-- {
-					if event.RunPath[i].runnerName != "" {
-						eventRunnerStep = event.RunPath[i].runnerName
-						break
-					}
-				}
-			}
-
 			if eventRunnerStep == "" {
 				exit = true
 				continue
