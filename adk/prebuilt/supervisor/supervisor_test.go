@@ -688,15 +688,36 @@ func TestChatModelAgentInternalEventsExit(t *testing.T) {
 	innerAgent.EXPECT().Name(gomock.Any()).Return("InnerAgent").AnyTimes()
 	innerAgent.EXPECT().Description(gomock.Any()).Return("Inner Agent Description").AnyTimes()
 
-	// 1. Supervisor transfers to Worker
-	aMsg, tMsg := adk.GenTransferMessages(ctx, "Worker")
-	i1, g1 := adk.NewAsyncIteratorPair[*adk.AgentEvent]()
-	g1.Send(adk.EventFromMessage(aMsg, nil, schema.Assistant, ""))
-	event1 := adk.EventFromMessage(tMsg, nil, schema.Tool, tMsg.ToolName)
-	event1.Action = &adk.AgentAction{TransferToAgent: &adk.TransferToAgentAction{DestAgentName: "Worker"}}
-	g1.Send(event1)
-	g1.Close()
-	supervisorAgent.EXPECT().Run(gomock.Any(), gomock.Any(), gomock.Any()).Return(i1).AnyTimes()
+	// 1. Supervisor transfers to Worker (only once, then exits when worker transfers back)
+	supervisorRunCount := 0
+	supervisorAgent.EXPECT().Run(gomock.Any(), gomock.Any(), gomock.Any()).DoAndReturn(
+		func(ctx context.Context, input *adk.AgentInput, opts ...adk.AgentRunOption) *adk.AsyncIterator[*adk.AgentEvent] {
+			supervisorRunCount++
+			iter, gen := adk.NewAsyncIteratorPair[*adk.AgentEvent]()
+			go func() {
+				defer gen.Close()
+				if supervisorRunCount == 1 {
+					aMsg, tMsg := adk.GenTransferMessages(ctx, "Worker")
+					gen.Send(adk.EventFromMessage(aMsg, nil, schema.Assistant, ""))
+					event1 := adk.EventFromMessage(tMsg, nil, schema.Tool, tMsg.ToolName)
+					event1.Action = &adk.AgentAction{TransferToAgent: &adk.TransferToAgentAction{DestAgentName: "Worker"}}
+					gen.Send(event1)
+				} else {
+					exitEvent := &adk.AgentEvent{
+						AgentName: "Supervisor",
+						Action:    &adk.AgentAction{Exit: true},
+						Output: &adk.AgentOutput{
+							MessageOutput: &adk.MessageVariant{
+								Role:    schema.Assistant,
+								Message: schema.AssistantMessage("Supervisor done", nil),
+							},
+						},
+					}
+					gen.Send(exitEvent)
+				}
+			}()
+			return iter
+		}).AnyTimes()
 
 	// 2. Worker runs, calls AgentTool (InnerAgent)
 	// Mock WorkerModel behavior
@@ -717,21 +738,26 @@ func TestChatModelAgentInternalEventsExit(t *testing.T) {
 		Return(toolCallMsg, nil).Times(1)
 
 	// 2.2 InnerAgent runs and emits Exit
-	iInner, gInner := adk.NewAsyncIteratorPair[*adk.AgentEvent]()
-	innerExitEvent := &adk.AgentEvent{
-		AgentName: "InnerAgent",
-		Action:    &adk.AgentAction{Exit: true}, // Inner agent exits
-		RunPath:   []adk.RunStep{},              // Empty RunPath for mock inner agent
-		Output: &adk.AgentOutput{
-			MessageOutput: &adk.MessageVariant{
-				Role:    schema.Assistant,
-				Message: schema.AssistantMessage("Inner Exiting...", nil),
-			},
-		},
-	}
-	gInner.Send(innerExitEvent)
-	gInner.Close()
-	innerAgent.EXPECT().Run(gomock.Any(), gomock.Any(), gomock.Any()).Return(iInner).Times(1)
+	innerAgent.EXPECT().Run(gomock.Any(), gomock.Any(), gomock.Any()).DoAndReturn(
+		func(ctx context.Context, input *adk.AgentInput, opts ...adk.AgentRunOption) *adk.AsyncIterator[*adk.AgentEvent] {
+			iter, gen := adk.NewAsyncIteratorPair[*adk.AgentEvent]()
+			go func() {
+				defer gen.Close()
+				innerExitEvent := &adk.AgentEvent{
+					AgentName: "InnerAgent",
+					Action:    &adk.AgentAction{Exit: true},
+					RunPath:   []adk.RunStep{},
+					Output: &adk.AgentOutput{
+						MessageOutput: &adk.MessageVariant{
+							Role:    schema.Assistant,
+							Message: schema.AssistantMessage("Inner Exiting...", nil),
+						},
+					},
+				}
+				gen.Send(innerExitEvent)
+			}()
+			return iter
+		}).AnyTimes()
 
 	// 2.3 Worker receives tool result (empty string or whatever AgentTool returns on exit/interrupt)
 	// AgentTool implementation details: if Exit action is present, it returns whatever output is there.
