@@ -247,6 +247,19 @@ Eino 框架由几个部分组成：
 ## 依赖说明
 - Go 1.18 及以上版本
 
+## 代码规范
+
+本仓库开启了 `golangci-lint` 检查以约束基础代码规范，可通过以下命令在本地检查：
+
+```bash
+golangci-lint run ./...
+```
+
+主要规则包括：
+- 导出的函数、接口、package 等需要添加注释，且注释符合 GoDoc 规范。
+- 代码格式需符合 `gofmt -s` 规范。
+- import 顺序需符合 `goimports` 规范（std -> third party -> local）。
+
 ## 安全
 
 如果你在该项目中发现潜在的安全问题，或你认为可能发现了安全问题，请通过我们的[安全中心](https://security.bytedance.com/src)

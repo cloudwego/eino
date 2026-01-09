@@ -252,6 +252,19 @@ For a quick introduction to building AI applications with Eino, we recommend sta
 ## Dependencies
 - Go 1.18 and above.
 
+## Code Style
+
+This repo uses `golangci-lint` to enforce basic code conventions. You can check locally with:
+
+```bash
+golangci-lint run ./...
+```
+
+Rules enforced include:
+- Exported functions, interfaces, packages, etc. should have proper GoDoc comments.
+- Code should be formatted with `gofmt -s`.
+- Import order should follow `goimports` (std -> third party -> local).
+
 ## Security
 
 If you discover a potential security issue in this project, or think you may
