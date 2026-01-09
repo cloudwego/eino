@@ -460,3 +460,371 @@ func TestDeterministicTransferExitSkipsTransfer(t *testing.T) {
 	assert.True(t, outerSawExit, "outer should see exit event from inner")
 	assert.False(t, transferGenerated, "transfer should not be generated when inner exits")
 }
+
+func TestDeterministicTransferNestedRunnerExit(t *testing.T) {
+	t.Run("exit_from_nested_runner_does_not_skip_transfer", func(t *testing.T) {
+		ctx := context.Background()
+		store := newDTTestStore()
+
+		deepAgent := &dtTestAgent{
+			name: "deep",
+			runFn: func(ctx context.Context, input *AgentInput, options ...AgentRunOption) *AsyncIterator[*AgentEvent] {
+				iter, gen := NewAsyncIteratorPair[*AgentEvent]()
+				go func() {
+					defer gen.Close()
+					ev := EventFromMessage(schema.AssistantMessage("deep exits", nil), nil, schema.Assistant, "")
+					ev.Action = &AgentAction{Exit: true}
+					gen.Send(ev)
+				}()
+				return iter
+			},
+		}
+
+		middleAgent := &dtTestAgent{
+			name: "middle",
+			runFn: func(ctx context.Context, input *AgentInput, options ...AgentRunOption) *AsyncIterator[*AgentEvent] {
+				innerRunner := NewRunner(ctx, RunnerConfig{
+					Agent:           toFlowAgent(ctx, deepAgent),
+					EnableStreaming: true,
+					CheckPointStore: store,
+				})
+
+				innerIter := innerRunner.Run(ctx, []Message{schema.UserMessage("test")}, withSharedParentSession())
+
+				iter, gen := NewAsyncIteratorPair[*AgentEvent]()
+				go func() {
+					defer gen.Close()
+					for {
+						ev, ok := innerIter.Next()
+						if !ok {
+							break
+						}
+						gen.Send(ev)
+					}
+				}()
+				return iter
+			},
+		}
+
+		middleFlowAgent := toFlowAgent(ctx, middleAgent)
+
+		wrapped := AgentWithDeterministicTransferTo(ctx, &DeterministicTransferConfig{
+			Agent:        middleFlowAgent,
+			ToAgentNames: []string{"next_agent"},
+		})
+
+		var sawExitFromDeep bool
+		var transferGenerated bool
+		var exitEventRunPath []RunStep
+
+		outerAgent := &dtTestAgent{
+			name: "outer",
+			runFn: func(ctx context.Context, input *AgentInput, options ...AgentRunOption) *AsyncIterator[*AgentEvent] {
+				innerIter := wrapped.Run(ctx, input, options...)
+				iter, gen := NewAsyncIteratorPair[*AgentEvent]()
+				go func() {
+					defer gen.Close()
+					for {
+						ev, ok := innerIter.Next()
+						if !ok {
+							break
+						}
+						if ev.Action != nil && ev.Action.Exit {
+							sawExitFromDeep = true
+							exitEventRunPath = ev.RunPath
+						}
+						if ev.Action != nil && ev.Action.TransferToAgent != nil {
+							transferGenerated = true
+						}
+						gen.Send(ev)
+					}
+				}()
+				return iter
+			},
+		}
+
+		outerFlowAgent := toFlowAgent(ctx, outerAgent)
+
+		runner := NewRunner(ctx, RunnerConfig{
+			Agent:           outerFlowAgent,
+			EnableStreaming: true,
+			CheckPointStore: store,
+		})
+
+		iter := runner.Run(ctx, []Message{schema.UserMessage("test")}, WithCheckPointID("cp1"))
+
+		for {
+			_, ok := iter.Next()
+			if !ok {
+				break
+			}
+		}
+
+		assert.True(t, sawExitFromDeep, "should see exit event from deep agent")
+		assert.True(t, transferGenerated, "transfer should be generated because exit is from nested runner scope (deep), not current scope (middle)")
+
+		var hasDeepRunnerInPath bool
+		for _, step := range exitEventRunPath {
+			if step.runnerName == "deep" {
+				hasDeepRunnerInPath = true
+				break
+			}
+		}
+		assert.True(t, hasDeepRunnerInPath, "exit event RunPath should contain deep runner scope")
+	})
+
+	t.Run("exit_from_current_runner_skips_transfer", func(t *testing.T) {
+		ctx := context.Background()
+		store := newDTTestStore()
+
+		middleAgent := &dtTestAgent{
+			name: "middle",
+			runFn: func(ctx context.Context, input *AgentInput, options ...AgentRunOption) *AsyncIterator[*AgentEvent] {
+				iter, gen := NewAsyncIteratorPair[*AgentEvent]()
+				go func() {
+					defer gen.Close()
+					ev := EventFromMessage(schema.AssistantMessage("middle exits directly", nil), nil, schema.Assistant, "")
+					ev.Action = &AgentAction{Exit: true}
+					gen.Send(ev)
+				}()
+				return iter
+			},
+		}
+
+		middleFlowAgent := toFlowAgent(ctx, middleAgent)
+
+		wrapped := AgentWithDeterministicTransferTo(ctx, &DeterministicTransferConfig{
+			Agent:        middleFlowAgent,
+			ToAgentNames: []string{"next_agent"},
+		})
+
+		var sawExit bool
+		var transferGenerated bool
+
+		outerAgent := &dtTestAgent{
+			name: "outer",
+			runFn: func(ctx context.Context, input *AgentInput, options ...AgentRunOption) *AsyncIterator[*AgentEvent] {
+				innerIter := wrapped.Run(ctx, input, options...)
+				iter, gen := NewAsyncIteratorPair[*AgentEvent]()
+				go func() {
+					defer gen.Close()
+					for {
+						ev, ok := innerIter.Next()
+						if !ok {
+							break
+						}
+						if ev.Action != nil && ev.Action.Exit {
+							sawExit = true
+						}
+						if ev.Action != nil && ev.Action.TransferToAgent != nil {
+							transferGenerated = true
+						}
+						gen.Send(ev)
+					}
+				}()
+				return iter
+			},
+		}
+
+		outerFlowAgent := toFlowAgent(ctx, outerAgent)
+
+		runner := NewRunner(ctx, RunnerConfig{
+			Agent:           outerFlowAgent,
+			EnableStreaming: true,
+			CheckPointStore: store,
+		})
+
+		iter := runner.Run(ctx, []Message{schema.UserMessage("test")}, WithCheckPointID("cp1"))
+
+		for {
+			_, ok := iter.Next()
+			if !ok {
+				break
+			}
+		}
+
+		assert.True(t, sawExit, "should see exit event from middle agent")
+		assert.False(t, transferGenerated, "transfer should NOT be generated because exit is from current runner scope")
+	})
+
+	t.Run("non_flowagent_exit_from_nested_runner_does_not_skip_transfer", func(t *testing.T) {
+		ctx := context.Background()
+		store := newDTTestStore()
+
+		deepAgent := &dtTestAgent{
+			name: "deep",
+			runFn: func(ctx context.Context, input *AgentInput, options ...AgentRunOption) *AsyncIterator[*AgentEvent] {
+				iter, gen := NewAsyncIteratorPair[*AgentEvent]()
+				go func() {
+					defer gen.Close()
+					ev := EventFromMessage(schema.AssistantMessage("deep exits", nil), nil, schema.Assistant, "")
+					ev.Action = &AgentAction{Exit: true}
+					gen.Send(ev)
+				}()
+				return iter
+			},
+		}
+
+		middleAgent := &dtTestAgent{
+			name: "middle",
+			runFn: func(ctx context.Context, input *AgentInput, options ...AgentRunOption) *AsyncIterator[*AgentEvent] {
+				innerRunner := NewRunner(ctx, RunnerConfig{
+					Agent:           toFlowAgent(ctx, deepAgent),
+					EnableStreaming: true,
+					CheckPointStore: store,
+				})
+
+				innerIter := innerRunner.Run(ctx, []Message{schema.UserMessage("test")}, withSharedParentSession())
+
+				iter, gen := NewAsyncIteratorPair[*AgentEvent]()
+				go func() {
+					defer gen.Close()
+					for {
+						ev, ok := innerIter.Next()
+						if !ok {
+							break
+						}
+						gen.Send(ev)
+					}
+				}()
+				return iter
+			},
+		}
+
+		wrapped := AgentWithDeterministicTransferTo(ctx, &DeterministicTransferConfig{
+			Agent:        middleAgent,
+			ToAgentNames: []string{"next_agent"},
+		})
+
+		var sawExitFromDeep bool
+		var transferGenerated bool
+		var exitEventRunPath []RunStep
+
+		outerAgent := &dtTestAgent{
+			name: "outer",
+			runFn: func(ctx context.Context, input *AgentInput, options ...AgentRunOption) *AsyncIterator[*AgentEvent] {
+				innerIter := wrapped.Run(ctx, input, options...)
+				iter, gen := NewAsyncIteratorPair[*AgentEvent]()
+				go func() {
+					defer gen.Close()
+					for {
+						ev, ok := innerIter.Next()
+						if !ok {
+							break
+						}
+						if ev.Action != nil && ev.Action.Exit {
+							sawExitFromDeep = true
+							exitEventRunPath = ev.RunPath
+						}
+						if ev.Action != nil && ev.Action.TransferToAgent != nil {
+							transferGenerated = true
+						}
+						gen.Send(ev)
+					}
+				}()
+				return iter
+			},
+		}
+
+		outerFlowAgent := toFlowAgent(ctx, outerAgent)
+
+		runner := NewRunner(ctx, RunnerConfig{
+			Agent:           outerFlowAgent,
+			EnableStreaming: true,
+			CheckPointStore: store,
+		})
+
+		iter := runner.Run(ctx, []Message{schema.UserMessage("test")}, WithCheckPointID("cp1"))
+
+		for {
+			_, ok := iter.Next()
+			if !ok {
+				break
+			}
+		}
+
+		assert.True(t, sawExitFromDeep, "should see exit event from deep agent")
+		assert.True(t, transferGenerated, "transfer should be generated because exit is from nested runner scope (deep), not current scope (middle)")
+
+		var hasDeepRunnerInPath bool
+		for _, step := range exitEventRunPath {
+			if step.runnerName == "deep" {
+				hasDeepRunnerInPath = true
+				break
+			}
+		}
+		assert.True(t, hasDeepRunnerInPath, "exit event RunPath should contain deep runner scope")
+	})
+
+	t.Run("non_flowagent_exit_from_current_runner_skips_transfer", func(t *testing.T) {
+		ctx := context.Background()
+		store := newDTTestStore()
+
+		middleAgent := &dtTestAgent{
+			name: "middle",
+			runFn: func(ctx context.Context, input *AgentInput, options ...AgentRunOption) *AsyncIterator[*AgentEvent] {
+				iter, gen := NewAsyncIteratorPair[*AgentEvent]()
+				go func() {
+					defer gen.Close()
+					ev := EventFromMessage(schema.AssistantMessage("middle exits directly", nil), nil, schema.Assistant, "")
+					ev.Action = &AgentAction{Exit: true}
+					gen.Send(ev)
+				}()
+				return iter
+			},
+		}
+
+		wrapped := AgentWithDeterministicTransferTo(ctx, &DeterministicTransferConfig{
+			Agent:        middleAgent,
+			ToAgentNames: []string{"next_agent"},
+		})
+
+		var sawExit bool
+		var transferGenerated bool
+
+		outerAgent := &dtTestAgent{
+			name: "outer",
+			runFn: func(ctx context.Context, input *AgentInput, options ...AgentRunOption) *AsyncIterator[*AgentEvent] {
+				innerIter := wrapped.Run(ctx, input, options...)
+				iter, gen := NewAsyncIteratorPair[*AgentEvent]()
+				go func() {
+					defer gen.Close()
+					for {
+						ev, ok := innerIter.Next()
+						if !ok {
+							break
+						}
+						if ev.Action != nil && ev.Action.Exit {
+							sawExit = true
+						}
+						if ev.Action != nil && ev.Action.TransferToAgent != nil {
+							transferGenerated = true
+						}
+						gen.Send(ev)
+					}
+				}()
+				return iter
+			},
+		}
+
+		outerFlowAgent := toFlowAgent(ctx, outerAgent)
+
+		runner := NewRunner(ctx, RunnerConfig{
+			Agent:           outerFlowAgent,
+			EnableStreaming: true,
+			CheckPointStore: store,
+		})
+
+		iter := runner.Run(ctx, []Message{schema.UserMessage("test")}, WithCheckPointID("cp1"))
+
+		for {
+			_, ok := iter.Next()
+			if !ok {
+				break
+			}
+		}
+
+		assert.True(t, sawExit, "should see exit event from middle agent")
+		assert.False(t, transferGenerated, "transfer should NOT be generated because exit is from current runner scope")
+	})
+}
