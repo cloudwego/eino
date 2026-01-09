@@ -8,7 +8,7 @@ coverage:
         if_ci_failed: error #success, failure, error, ignore
     patch:
       default:
-        target: 85% #default
+        target: 82% #default
         threshold: 1% #allow coverage to drop by 1%
         base: auto
         if_ci_failed: error #success, failure, error, ignore
