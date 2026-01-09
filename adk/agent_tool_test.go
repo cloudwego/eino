@@ -694,9 +694,11 @@ func TestNestedAgentTool_RunPath(t *testing.T) {
 		t.Fatalf("no inner2 event found in ephemerals")
 	}
 
-	got := make([]string, len(target.RunPath))
+	var got []string
 	for i := range target.RunPath {
-		got[i] = target.RunPath[i].agentName
+		if target.RunPath[i].agentName != "" {
+			got = append(got, target.RunPath[i].agentName)
+		}
 	}
 	want := []string{"outer", "inner", "inner2"}
 	if len(got) != len(want) {
@@ -956,9 +958,11 @@ func TestSequentialWorkflow_WithChatModelAgentTool_NestedRunPathAndSessions(t *t
 		t.Fatalf("no inner2 event found")
 	}
 
-	got := make([]string, len(target.RunPath))
+	var got []string
 	for i := range target.RunPath {
-		got[i] = target.RunPath[i].agentName
+		if target.RunPath[i].agentName != "" {
+			got = append(got, target.RunPath[i].agentName)
+		}
 	}
 	want := []string{"outer-seq", "inner", "inner2"}
 	if len(got) != len(want) {
@@ -1008,13 +1012,12 @@ func (b *badAgent) Run(ctx context.Context, input *AgentInput, _ ...AgentRunOpti
 	return it
 }
 
-func TestRunPathMisuse_DuplicatedHeadAndNoParentRecording(t *testing.T) {
+func TestRunPathMisuse_NotModifiedWithoutRunnerStep(t *testing.T) {
 	ctx := context.Background()
-	input := &AgentInput{Messages: []Message{schema.UserMessage("q")}}
-	ctx, outerRunCtx := initRunCtx(ctx, "outer", input)
-	fa := toFlowAgent(ctx, &badAgent{parent: "outer"})
+	bad := &badAgent{parent: "outer"}
+	r := NewRunner(ctx, RunnerConfig{Agent: bad, EnableStreaming: false, CheckPointStore: newBridgeStore()})
+	it := r.Run(ctx, []Message{schema.UserMessage("q")})
 
-	it := fa.Run(ctx, input)
 	var last *AgentEvent
 	for {
 		ev, ok := it.Next()
@@ -1027,11 +1030,13 @@ func TestRunPathMisuse_DuplicatedHeadAndNoParentRecording(t *testing.T) {
 		t.Fatalf("no event emitted")
 	}
 
-	got := make([]string, len(last.RunPath))
+	var got []string
 	for i := range last.RunPath {
-		got[i] = last.RunPath[i].agentName
+		if last.RunPath[i].agentName != "" {
+			got = append(got, last.RunPath[i].agentName)
+		}
 	}
-	want := []string{"outer", "bad", "outer", "bad"}
+	want := []string{"outer", "bad"}
 	if len(got) != len(want) {
 		t.Fatalf("unexpected runPath len: got %d want %d: %+v", len(got), len(want), got)
 	}
@@ -1041,9 +1046,10 @@ func TestRunPathMisuse_DuplicatedHeadAndNoParentRecording(t *testing.T) {
 		}
 	}
 
-	evs := outerRunCtx.Session.getEvents()
-	if len(evs) != 0 {
-		t.Fatalf("outer session should not record misused event, recorded=%d", len(evs))
+	for i := range last.RunPath {
+		if last.RunPath[i].runnerName != "" {
+			t.Fatalf("misused event should not have runner step prepended, but found runnerName at %d: %s", i, last.RunPath[i].runnerName)
+		}
 	}
 }
 

@@ -673,7 +673,7 @@ func TestParallelWorkflowResumeWithEvents(t *testing.T) {
 		// Verify sa3 event properties
 		assert.NotNil(t, sa3Event, "should have event from sa3")
 		assert.Equal(t, "sa3", sa3Event.AgentName, "sa3 event should have correct agent name")
-		assert.Equal(t, []RunStep{{"parallel agent"}, {"sa3"}}, sa3Event.RunPath, "sa3 event should have correct run path")
+		assert.Equal(t, []RunStep{{runnerName: "parallel agent"}, {agentName: "parallel agent"}, {agentName: "sa3"}}, sa3Event.RunPath, "sa3 event should have correct run path")
 		assert.NotNil(t, sa3Event.Output, "sa3 event should have output")
 		assert.NotNil(t, sa3Event.Output.MessageOutput, "sa3 event should have message output")
 		assert.Equal(t, "sa3 completed", sa3Event.Output.MessageOutput.Message.Content, "sa3 event should have correct message content")
@@ -681,14 +681,14 @@ func TestParallelWorkflowResumeWithEvents(t *testing.T) {
 		// Verify sa4 event properties
 		assert.NotNil(t, sa4Event, "should have event from sa4")
 		assert.Equal(t, "sa4", sa4Event.AgentName, "sa4 event should have correct agent name")
-		assert.Equal(t, []RunStep{{"parallel agent"}, {"sa4"}}, sa4Event.RunPath, "sa4 event should have correct run path")
+		assert.Equal(t, []RunStep{{runnerName: "parallel agent"}, {agentName: "parallel agent"}, {agentName: "sa4"}}, sa4Event.RunPath, "sa4 event should have correct run path")
 		assert.NotNil(t, sa4Event.Output, "sa4 event should have output")
 		assert.NotNil(t, sa4Event.Output.MessageOutput, "sa4 event should have message output")
 		assert.Equal(t, "sa4 completed", sa4Event.Output.MessageOutput.Message.Content, "sa4 event should have correct message content")
 
 		assert.NotNil(t, interruptEvent)
 		assert.Equal(t, "parallel agent", interruptEvent.AgentName)
-		assert.Equal(t, []RunStep{{"parallel agent"}}, interruptEvent.RunPath)
+		assert.Equal(t, []RunStep{{runnerName: "parallel agent"}, {agentName: "parallel agent"}}, interruptEvent.RunPath)
 		assert.NotNil(t, interruptEvent.Action.Interrupted)
 
 		var sa1InfoFound, sa2InfoFound bool
