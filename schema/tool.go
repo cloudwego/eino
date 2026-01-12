@@ -63,6 +63,7 @@ type AllowedTool struct {
 
 	ServerTool *AllowedServerTool
 }
+
 type AllowedMCPTool struct {
 	// ServerLabel is the label of the MCP server.
 	ServerLabel string
