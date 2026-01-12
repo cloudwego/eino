@@ -24,7 +24,6 @@ import (
 	"fmt"
 	"math"
 	"runtime/debug"
-	"slices"
 	"sync"
 	"sync/atomic"
 
@@ -518,7 +517,7 @@ type buildContext struct {
 func (a *ChatModelAgent) applyBeforeAgent(ctx context.Context, bc *buildContext) (context.Context, *buildContext, error) {
 	runCtx := &AgentRunContext{
 		Instruction:    bc.baseInstruction,
-		Tools:          slices.Clone(bc.toolsNodeConf.Tools),
+		Tools:          cloneSlice(bc.toolsNodeConf.Tools),
 		ReturnDirectly: copyMap(bc.returnDirectly),
 	}
 
@@ -555,8 +554,8 @@ func (a *ChatModelAgent) applyBeforeAgent(ctx context.Context, bc *buildContext)
 func (a *ChatModelAgent) prepareBuildContext(ctx context.Context) (*buildContext, error) {
 	baseInstruction := a.instruction
 	toolsNodeConf := compose.ToolsNodeConfig{
-		Tools:               slices.Clone(a.toolsConfig.Tools),
-		ToolCallMiddlewares: slices.Clone(a.toolsConfig.ToolCallMiddlewares),
+		Tools:               cloneSlice(a.toolsConfig.Tools),
+		ToolCallMiddlewares: cloneSlice(a.toolsConfig.ToolCallMiddlewares),
 	}
 	returnDirectly := copyMap(a.toolsConfig.ReturnDirectly)
 

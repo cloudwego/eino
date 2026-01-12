@@ -63,6 +63,15 @@ func copyMap[K comparable, V any](m map[K]V) map[K]V {
 	return res
 }
 
+func cloneSlice[T any](s []T) []T {
+	if s == nil {
+		return nil
+	}
+	res := make([]T, len(s))
+	copy(res, s)
+	return res
+}
+
 func concatInstructions(instructions ...string) string {
 	var sb strings.Builder
 	sb.WriteString(instructions[0])
