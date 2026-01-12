@@ -26,52 +26,6 @@ import (
 	"github.com/cloudwego/eino/schema"
 )
 
-func TestStripCurrentRunnerScope(t *testing.T) {
-	tests := []struct {
-		name     string
-		input    []RunStep
-		expected []RunStep
-	}{
-		{
-			name:     "empty path",
-			input:    nil,
-			expected: nil,
-		},
-		{
-			name:     "single runner scope - cleared",
-			input:    []RunStep{{runnerName: "inner"}, {agentName: "innerAgent"}},
-			expected: nil,
-		},
-		{
-			name:     "runner step only - cleared",
-			input:    []RunStep{{runnerName: "inner"}},
-			expected: nil,
-		},
-		{
-			name:     "nested runner scope - preserves nested",
-			input:    []RunStep{{runnerName: "inner"}, {agentName: "innerAgent"}, {runnerName: "nested"}, {agentName: "nestedAgent"}},
-			expected: []RunStep{{runnerName: "nested"}, {agentName: "nestedAgent"}},
-		},
-		{
-			name:     "multiple agent steps before nested runner",
-			input:    []RunStep{{runnerName: "inner"}, {agentName: "a1"}, {agentName: "a2"}, {runnerName: "nested"}, {agentName: "nestedAgent"}},
-			expected: []RunStep{{runnerName: "nested"}, {agentName: "nestedAgent"}},
-		},
-		{
-			name:     "deeply nested - preserves all nested scopes",
-			input:    []RunStep{{runnerName: "r1"}, {agentName: "a1"}, {runnerName: "r2"}, {agentName: "a2"}, {runnerName: "r3"}, {agentName: "a3"}},
-			expected: []RunStep{{runnerName: "r2"}, {agentName: "a2"}, {runnerName: "r3"}, {agentName: "a3"}},
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			result := stripCurrentRunnerScope(tt.input)
-			assert.Equal(t, tt.expected, result)
-		})
-	}
-}
-
 type dtTestStore struct {
 	data map[string][]byte
 }
@@ -158,10 +112,11 @@ func TestDeterministicTransferFlowAgentInterruptResume(t *testing.T) {
 				ev := agentEvents[0]
 				assert.Equal(t, "inner", ev.AgentName, "innerAgent resumeFn: event should be from inner agent")
 				assert.Equal(t, "before interrupt", ev.Output.MessageOutput.Message.Content, "innerAgent resumeFn: event content should be 'before interrupt'")
-				assert.Len(t, ev.RunPath, 2, "innerAgent resumeFn: RunPath should have 2 steps")
-				if len(ev.RunPath) == 2 {
-					assert.Equal(t, "inner", ev.RunPath[0].runnerName, "innerAgent resumeFn: RunPath[0] should be inner runner")
-					assert.Equal(t, "inner", ev.RunPath[1].agentName, "innerAgent resumeFn: RunPath[1] should be inner agent")
+				assert.Len(t, ev.RunPath, 3, "innerAgent resumeFn: RunPath should have 3 steps (outer runner, outer agent, inner agent)")
+				if len(ev.RunPath) == 3 {
+					assert.Equal(t, "outer", ev.RunPath[0].runnerName, "innerAgent resumeFn: RunPath[0] should be outer runner")
+					assert.Equal(t, "outer", ev.RunPath[1].agentName, "innerAgent resumeFn: RunPath[1] should be outer agent")
+					assert.Equal(t, "inner", ev.RunPath[2].agentName, "innerAgent resumeFn: RunPath[2] should be inner agent")
 				}
 			}
 
@@ -203,12 +158,13 @@ func TestDeterministicTransferFlowAgentInterruptResume(t *testing.T) {
 			assert.Len(t, agentEvents, 1, "outerAgent resumeFn: should have exactly 1 agent event")
 			if len(agentEvents) == 1 {
 				ev := agentEvents[0]
-				assert.Equal(t, "outer", ev.AgentName, "outerAgent resumeFn: event should be from outer agent")
+				assert.Equal(t, "inner", ev.AgentName, "outerAgent resumeFn: event should be from inner agent (preserved original)")
 				assert.Equal(t, "before interrupt", ev.Output.MessageOutput.Message.Content, "outerAgent resumeFn: event content should be 'before interrupt'")
-				assert.Len(t, ev.RunPath, 2, "outerAgent resumeFn: RunPath should have 2 steps")
-				if len(ev.RunPath) == 2 {
+				assert.Len(t, ev.RunPath, 3, "outerAgent resumeFn: RunPath should have 3 steps (no inner runner)")
+				if len(ev.RunPath) == 3 {
 					assert.Equal(t, "outer", ev.RunPath[0].runnerName, "outerAgent resumeFn: RunPath[0] should be outer runner")
 					assert.Equal(t, "outer", ev.RunPath[1].agentName, "outerAgent resumeFn: RunPath[1] should be outer agent")
+					assert.Equal(t, "inner", ev.RunPath[2].agentName, "outerAgent resumeFn: RunPath[2] should be inner agent")
 				}
 			}
 
@@ -315,7 +271,7 @@ func TestDeterministicTransferFlowAgentInterruptResume(t *testing.T) {
 	assert.Contains(t, resumeErr.Error(), "next_agent", "error should mention the missing agent")
 }
 
-func TestDeterministicTransferRunPathStripping(t *testing.T) {
+func TestDeterministicTransferRunPathPreserved(t *testing.T) {
 	ctx := context.Background()
 	store := newDTTestStore()
 
@@ -378,11 +334,13 @@ func TestDeterministicTransferRunPathStripping(t *testing.T) {
 		}
 	}
 
+	assert.NotEmpty(t, collectedRunPaths, "should have collected RunPaths")
 	for _, rp := range collectedRunPaths {
-		for _, step := range rp {
-			if step.runnerName == "inner" {
-				t.Errorf("inner runner scope should have been stripped, but found runnerName='inner' in RunPath: %+v", rp)
-			}
+		assert.Len(t, rp, 3, "RunPath should have 3 steps (outer runner, outer agent, inner agent)")
+		if len(rp) == 3 {
+			assert.Equal(t, "outer", rp[0].runnerName, "RunPath[0] should be outer runner")
+			assert.Equal(t, "outer", rp[1].agentName, "RunPath[1] should be outer agent")
+			assert.Equal(t, "inner", rp[2].agentName, "RunPath[2] should be inner agent")
 		}
 	}
 }
@@ -462,7 +420,7 @@ func TestDeterministicTransferExitSkipsTransfer(t *testing.T) {
 }
 
 func TestDeterministicTransferNestedRunnerExit(t *testing.T) {
-	t.Run("exit_from_nested_runner_does_not_skip_transfer", func(t *testing.T) {
+	t.Run("flowagent_exit_from_nested_runner_does_not_skip_transfer", func(t *testing.T) {
 		ctx := context.Background()
 		store := newDTTestStore()
 
@@ -515,7 +473,6 @@ func TestDeterministicTransferNestedRunnerExit(t *testing.T) {
 
 		var sawExitFromDeep bool
 		var transferGenerated bool
-		var exitEventRunPath []RunStep
 
 		outerAgent := &dtTestAgent{
 			name: "outer",
@@ -531,7 +488,6 @@ func TestDeterministicTransferNestedRunnerExit(t *testing.T) {
 						}
 						if ev.Action != nil && ev.Action.Exit {
 							sawExitFromDeep = true
-							exitEventRunPath = ev.RunPath
 						}
 						if ev.Action != nil && ev.Action.TransferToAgent != nil {
 							transferGenerated = true
@@ -562,18 +518,9 @@ func TestDeterministicTransferNestedRunnerExit(t *testing.T) {
 
 		assert.True(t, sawExitFromDeep, "should see exit event from deep agent")
 		assert.True(t, transferGenerated, "transfer should be generated because exit is from nested runner scope (deep), not current scope (middle)")
-
-		var hasDeepRunnerInPath bool
-		for _, step := range exitEventRunPath {
-			if step.runnerName == "deep" {
-				hasDeepRunnerInPath = true
-				break
-			}
-		}
-		assert.True(t, hasDeepRunnerInPath, "exit event RunPath should contain deep runner scope")
 	})
 
-	t.Run("exit_from_current_runner_skips_transfer", func(t *testing.T) {
+	t.Run("flowagent_exit_from_current_scope_skips_transfer", func(t *testing.T) {
 		ctx := context.Background()
 		store := newDTTestStore()
 

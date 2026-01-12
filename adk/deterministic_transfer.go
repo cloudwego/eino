@@ -20,8 +20,8 @@ import (
 	"context"
 	"fmt"
 	"runtime/debug"
+	"sync"
 
-	"github.com/cloudwego/eino/compose"
 	"github.com/cloudwego/eino/internal/safe"
 	"github.com/cloudwego/eino/schema"
 )
@@ -31,21 +31,7 @@ func init() {
 }
 
 type deterministicTransferState struct {
-	CheckpointData []byte
-}
-
-func stripCurrentRunnerScope(eventRunPath []RunStep) []RunStep {
-	if len(eventRunPath) == 0 {
-		return nil
-	}
-
-	for i := 1; i < len(eventRunPath); i++ {
-		if eventRunPath[i].runnerName != "" {
-			return eventRunPath[i:]
-		}
-	}
-
-	return nil
+	EventList []*agentEventWrapper
 }
 
 // AgentWithDeterministicTransferTo wraps an agent to transfer to given agents deterministically.
@@ -79,7 +65,7 @@ func (a *agentWithDeterministicTransferTo) Run(ctx context.Context,
 	input *AgentInput, options ...AgentRunOption) *AsyncIterator[*AgentEvent] {
 
 	if fa, ok := a.agent.(*flowAgent); ok {
-		return runFlowAgentWithRunner(ctx, fa, input, a.toAgentNames, options...)
+		return runFlowAgentWithIsolatedSession(ctx, fa, input, a.toAgentNames, options...)
 	}
 
 	aIter := a.agent.Run(ctx, input, options...)
@@ -107,7 +93,7 @@ func (a *resumableAgentWithDeterministicTransferTo) Run(ctx context.Context,
 	input *AgentInput, options ...AgentRunOption) *AsyncIterator[*AgentEvent] {
 
 	if fa, ok := a.agent.(*flowAgent); ok {
-		return runFlowAgentWithRunner(ctx, fa, input, a.toAgentNames, options...)
+		return runFlowAgentWithIsolatedSession(ctx, fa, input, a.toAgentNames, options...)
 	}
 
 	aIter := a.agent.Run(ctx, input, options...)
@@ -120,7 +106,7 @@ func (a *resumableAgentWithDeterministicTransferTo) Run(ctx context.Context,
 
 func (a *resumableAgentWithDeterministicTransferTo) Resume(ctx context.Context, info *ResumeInfo, opts ...AgentRunOption) *AsyncIterator[*AgentEvent] {
 	if fa, ok := a.agent.(*flowAgent); ok {
-		return resumeFlowAgentWithRunner(ctx, fa, info, a.toAgentNames, opts...)
+		return resumeFlowAgentWithIsolatedSession(ctx, fa, info, a.toAgentNames, opts...)
 	}
 
 	aIter := a.agent.Resume(ctx, info, opts...)
@@ -131,37 +117,38 @@ func (a *resumableAgentWithDeterministicTransferTo) Resume(ctx context.Context, 
 	return iterator
 }
 
-func runFlowAgentWithRunner(ctx context.Context, fa *flowAgent, input *AgentInput,
+func runFlowAgentWithIsolatedSession(ctx context.Context, fa *flowAgent, input *AgentInput,
 	toAgentNames []string, options ...AgentRunOption) *AsyncIterator[*AgentEvent] {
 
-	o := getCommonOptions(nil, options...)
-	enableStreaming := false
-	if o.checkPointID != nil {
-		enableStreaming = true
+	parentSession := getSession(ctx)
+	parentRunCtx := getRunCtx(ctx)
+
+	isolatedSession := &runSession{
+		Values:    parentSession.Values,
+		valuesMtx: parentSession.valuesMtx,
+	}
+	if isolatedSession.valuesMtx == nil {
+		isolatedSession.valuesMtx = &sync.Mutex{}
+	}
+	if isolatedSession.Values == nil {
+		isolatedSession.Values = make(map[string]any)
 	}
 
-	ms := newBridgeStore()
-	runner := &Runner{
-		a:               fa,
-		enableStreaming: enableStreaming,
-		store:           ms,
-	}
+	ctx = setRunCtx(ctx, &runContext{
+		Session:   isolatedSession,
+		RootInput: parentRunCtx.RootInput,
+		RunPath:   parentRunCtx.RunPath,
+	})
 
-	var messages []Message
-	if input != nil {
-		messages = input.Messages
-	}
-
-	iter := runner.Run(ctx, messages,
-		append(options, WithCheckPointID(bridgeCheckpointID))...)
+	iter := fa.Run(ctx, input, options...)
 
 	iterator, generator := NewAsyncIteratorPair[*AgentEvent]()
-	go handleFlowAgentEvents(ctx, iter, generator, ms, toAgentNames)
+	go handleFlowAgentEvents(ctx, iter, generator, isolatedSession, parentSession, toAgentNames)
 
 	return iterator
 }
 
-func resumeFlowAgentWithRunner(ctx context.Context, fa *flowAgent, info *ResumeInfo,
+func resumeFlowAgentWithIsolatedSession(ctx context.Context, fa *flowAgent, info *ResumeInfo,
 	toAgentNames []string, opts ...AgentRunOption) *AsyncIterator[*AgentEvent] {
 
 	state, ok := info.InterruptState.(*deterministicTransferState)
@@ -169,26 +156,37 @@ func resumeFlowAgentWithRunner(ctx context.Context, fa *flowAgent, info *ResumeI
 		return genErrorIter(fmt.Errorf("invalid interrupt state for flowAgent resume in deterministic transfer"))
 	}
 
-	ms := newResumeBridgeStore(state.CheckpointData)
-	runner := &Runner{
-		a:               fa,
-		enableStreaming: info.EnableStreaming,
-		store:           ms,
+	parentSession := getSession(ctx)
+	parentRunCtx := getRunCtx(ctx)
+
+	isolatedSession := &runSession{
+		Values:    parentSession.Values,
+		valuesMtx: parentSession.valuesMtx,
+		Events:    state.EventList,
+	}
+	if isolatedSession.valuesMtx == nil {
+		isolatedSession.valuesMtx = &sync.Mutex{}
+	}
+	if isolatedSession.Values == nil {
+		isolatedSession.Values = make(map[string]any)
 	}
 
-	iter, err := runner.Resume(ctx, bridgeCheckpointID, opts...)
-	if err != nil {
-		return genErrorIter(err)
-	}
+	ctx = setRunCtx(ctx, &runContext{
+		Session:   isolatedSession,
+		RootInput: parentRunCtx.RootInput,
+		RunPath:   parentRunCtx.RunPath,
+	})
+
+	iter := fa.Resume(ctx, info, opts...)
 
 	iterator, generator := NewAsyncIteratorPair[*AgentEvent]()
-	go handleFlowAgentEvents(ctx, iter, generator, ms, toAgentNames)
+	go handleFlowAgentEvents(ctx, iter, generator, isolatedSession, parentSession, toAgentNames)
 
 	return iterator
 }
 
 func handleFlowAgentEvents(ctx context.Context, iter *AsyncIterator[*AgentEvent],
-	generator *AsyncGenerator[*AgentEvent], ms compose.CheckPointStore, toAgentNames []string) {
+	generator *AsyncGenerator[*AgentEvent], isolatedSession, parentSession *runSession, toAgentNames []string) {
 
 	defer func() {
 		panicErr := recover()
@@ -200,85 +198,37 @@ func handleFlowAgentEvents(ctx context.Context, iter *AsyncIterator[*AgentEvent]
 		generator.Close()
 	}()
 
-	var (
-		interruptEvent    *AgentEvent
-		exit              bool
-		currentRunnerStep *string
-	)
+	var interruptEvent *AgentEvent
 
-	for {
-		event, ok := iter.Next()
-		if !ok {
-			break
+	interrupted, exit := processEventsWithTransfer(ctx, iter, generator, toAgentNames, func(event *AgentEvent) (skipSend bool) {
+		if parentSession != nil && (event.Action == nil || event.Action.Interrupted == nil) {
+			copied := copyAgentEvent(event)
+			setAutomaticClose(copied)
+			setAutomaticClose(event)
+			parentSession.addEvent(copied)
 		}
-
-		event.RunPath = stripCurrentRunnerScope(event.RunPath)
 
 		if event.Action != nil && event.Action.internalInterrupted != nil {
 			interruptEvent = event
-			continue
+			return true
 		}
-
-		if event.Action != nil && event.Action.Exit {
-			var eventRunnerStep string
-			if len(event.RunPath) > 0 {
-				for i := len(event.RunPath) - 1; i >= 0; i-- {
-					if event.RunPath[i].runnerName != "" {
-						eventRunnerStep = event.RunPath[i].runnerName
-						break
-					}
-				}
-			}
-
-			if eventRunnerStep == "" {
-				exit = true
-				generator.Send(event)
-				continue
-			}
-
-			if currentRunnerStep == nil {
-				runCtx := getRunCtx(ctx)
-				for i := len(runCtx.RunPath) - 1; i >= 0; i-- {
-					if runCtx.RunPath[i].runnerName != "" {
-						currentRunnerStep = &runCtx.RunPath[i].runnerName
-						break
-					}
-				}
-			}
-
-			if currentRunnerStep != nil && *currentRunnerStep == eventRunnerStep {
-				exit = true
-			}
-		}
-
-		generator.Send(event)
-	}
+		return false
+	})
 
 	if interruptEvent != nil && interruptEvent.Action != nil && interruptEvent.Action.internalInterrupted != nil {
-		data, _, _ := ms.Get(ctx, bridgeCheckpointID)
-		state := &deterministicTransferState{CheckpointData: data}
+		events := isolatedSession.getEvents()
+		state := &deterministicTransferState{EventList: events}
 		compositeEvent := CompositeInterrupt(ctx, "deterministic transfer wrapper interrupted",
 			state, interruptEvent.Action.internalInterrupted)
 		generator.Send(compositeEvent)
 		return
 	}
 
-	if exit {
+	if interrupted || exit {
 		return
 	}
 
-	for _, toAgentName := range toAgentNames {
-		aMsg, tMsg := GenTransferMessages(ctx, toAgentName)
-		aEvent := EventFromMessage(aMsg, nil, schema.Assistant, "")
-		generator.Send(aEvent)
-		tEvent := EventFromMessage(tMsg, nil, schema.Tool, tMsg.ToolName)
-		tEvent.Action = &AgentAction{
-			TransferToAgent: &TransferToAgentAction{
-				DestAgentName: toAgentName,
-			},
-		}
-		generator.Send(tEvent)
-	}
+	appendTransferEvents(generator, toAgentNames)
 }
 
 func appendTransferAction(ctx context.Context, aIter *AsyncIterator[*AgentEvent], generator *AsyncGenerator[*AgentEvent], toAgentNames []string) {
@@ -292,14 +242,23 @@ func appendTransferAction(ctx context.Context, aIter *AsyncIterator[*AgentEvent]
 		generator.Close()
 	}()
 
-	var (
-		interrupted       bool
-		exit              bool
-		currentRunnerStep *string
-	)
+	interrupted, exit := processEventsWithTransfer(ctx, aIter, generator, toAgentNames, nil)
+
+	if interrupted || exit {
+		return
+	}
+
+	appendTransferEvents(generator, toAgentNames)
+}
+
+func processEventsWithTransfer(ctx context.Context, iter *AsyncIterator[*AgentEvent],
+	generator *AsyncGenerator[*AgentEvent], toAgentNames []string,
+	beforeSend func(event *AgentEvent) (skipSend bool)) (interrupted, exit bool) {
+
+	var currentRunnerStep *string
 
 	for {
-		event, ok := aIter.Next()
+		event, ok := iter.Next()
 		if !ok {
 			break
 		}
@@ -311,6 +270,12 @@ func appendTransferAction(ctx context.Context, aIter *AsyncIterator[*AgentEvent]
 					eventRunnerStep = event.RunPath[i].runnerName
 					break
 				}
+			}
+		}
+
+		if beforeSend != nil {
+			if beforeSend(event) {
+				continue
 			}
 		}
 
@@ -344,12 +309,12 @@ func appendTransferAction(ctx context.Context, aIter *AsyncIterator[*AgentEvent]
 		}
 	}
 
-	if interrupted || exit {
-		return
-	}
+	return interrupted, exit
+}
 
+func appendTransferEvents(generator *AsyncGenerator[*AgentEvent], toAgentNames []string) {
 	for _, toAgentName := range toAgentNames {
-		aMsg, tMsg := GenTransferMessages(ctx, toAgentName)
+		aMsg, tMsg := GenTransferMessages(context.Background(), toAgentName)
 		aEvent := EventFromMessage(aMsg, nil, schema.Assistant, "")
 		generator.Send(aEvent)
 		tEvent := EventFromMessage(tMsg, nil, schema.Tool, tMsg.ToolName)
