@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-package filesystem
+package reduction
 
 import (
 	"bufio"
@@ -27,14 +27,27 @@ import (
 
 	"github.com/slongfield/pyfmt"
 
+	"github.com/cloudwego/eino/adk/filesystem"
 	"github.com/cloudwego/eino/compose"
 	"github.com/cloudwego/eino/schema"
 )
 
+const (
+	tooLargeToolMessage = `Tool result too large, the result of this tool call {tool_call_id} was saved in the filesystem at this path: {file_path}
+You can read the result from the filesystem by using the '{read_file_tool_name}' tool, but make sure to only read part of the result at a time.
+You can do this by specifying an offset and limit in the '{read_file_tool_name}' tool call.
+For example, to read the first 100 lines, you can use the '{read_file_tool_name}' tool with offset=0 and limit=100.
+
+Here are the first 10 lines of the result:
+{content_sample}`
+)
+
 type toolResultOffloadingConfig struct {
-	Backend       Backend
-	TokenLimit    int
-	PathGenerator func(ctx context.Context, input *compose.ToolInput) (string, error)
+	Backend          Backend
+	ReadFileToolName string
+	TokenLimit       int
+	PathGenerator    func(ctx context.Context, input *compose.ToolInput) (string, error)
+	TokenCounter     func(msg *schema.Message) int
 }
 
 func newToolResultOffloading(ctx context.Context, config *toolResultOffloadingConfig) compose.ToolMiddleware {
@@ -42,6 +55,8 @@ func newToolResultOffloading(ctx context.Context, config *toolResultOffloadingCo
 		backend:       config.Backend,
 		tokenLimit:    config.TokenLimit,
 		pathGenerator: config.PathGenerator,
+		toolName:      config.ReadFileToolName,
+		counter:       config.TokenCounter,
 	}
 
 	if offloading.tokenLimit == 0 {
@@ -54,6 +69,14 @@ func newToolResultOffloading(ctx context.Context, config *toolResultOffloadingCo
 		}
 	}
 
+	if len(offloading.toolName) == 0 {
+		offloading.toolName = "read_file"
+	}
+
+	if offloading.counter == nil {
+		offloading.counter = defaultTokenCounter
+	}
+
 	return compose.ToolMiddleware{
 		Invokable:  offloading.invoke,
 		Streamable: offloading.stream,
@@ -64,6 +87,8 @@ type toolResultOffloading struct {
 	backend       Backend
 	tokenLimit    int
 	pathGenerator func(ctx context.Context, input *compose.ToolInput) (string, error)
+	toolName      string
+	counter       func(msg *schema.Message) int
 }
 
 func (t *toolResultOffloading) invoke(endpoint compose.InvokableToolEndpoint) compose.InvokableToolEndpoint {
@@ -99,7 +124,7 @@ func (t *toolResultOffloading) stream(endpoint compose.StreamableToolEndpoint) c
 }
 
 func (t *toolResultOffloading) handleResult(ctx context.Context, result string, input *compose.ToolInput) (string, error) {
-	if len(result) > t.tokenLimit*4 {
+	if t.counter(schema.ToolMessage(result, input.CallID, schema.WithToolName(input.Name))) > t.tokenLimit*4 {
 		path, err := t.pathGenerator(ctx, input)
 		if err != nil {
 			return "", err
@@ -107,15 +132,16 @@ func (t *toolResultOffloading) handleResult(ctx context.Context, result string, 
 
 		nResult := formatToolMessage(result)
 		nResult, err = pyfmt.Fmt(tooLargeToolMessage, map[string]any{
-			"tool_call_id":   input.CallID,
-			"file_path":      path,
-			"content_sample": nResult,
+			"tool_call_id":        input.CallID,
+			"file_path":           path,
+			"content_sample":      nResult,
+			"read_file_tool_name": t.toolName,
 		})
 		if err != nil {
 			return "", err
 		}
 
-		err = t.backend.Write(ctx, &WriteRequest{
+		err = t.backend.Write(ctx, &filesystem.WriteRequest{
 			FilePath: path,
 			Content:  result,
 		})

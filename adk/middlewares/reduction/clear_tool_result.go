@@ -55,7 +55,16 @@ type ClearToolResultConfig struct {
 
 // NewClearToolResult creates a new middleware that clears old tool results
 // based on token thresholds while protecting recent messages.
+//
+// Deprecated: Use NewToolResultMiddleware instead, which combines clearing
+// and offloading strategies for better tool result management.
 func NewClearToolResult(ctx context.Context, config *ClearToolResultConfig) (adk.AgentMiddleware, error) {
+	return adk.AgentMiddleware{
+		BeforeChatModel: newClearToolResult(ctx, config),
+	}, nil
+}
+
+func newClearToolResult(ctx context.Context, config *ClearToolResultConfig) func(ctx context.Context, state *adk.ChatModelAgentState) error {
 	if config == nil {
 		config = &ClearToolResultConfig{}
 	}
@@ -81,12 +90,9 @@ func NewClearToolResult(ctx context.Context, config *ClearToolResultConfig) (adk
 	if counter == nil {
 		counter = defaultTokenCounter
 	}
-
-	return adk.AgentMiddleware{
-		BeforeChatModel: func(ctx context.Context, state *adk.ChatModelAgentState) error {
-			return reduceByTokens(state, toolResultTokenThreshold, keepRecentTokens, placeholder, counter, config.ExcludeTools)
-		},
-	}, nil
+	return func(ctx context.Context, state *adk.ChatModelAgentState) error {
+		return reduceByTokens(state, toolResultTokenThreshold, keepRecentTokens, placeholder, counter, config.ExcludeTools)
+	}
 }
 
 // defaultTokenCounter estimates token count using character count / 4

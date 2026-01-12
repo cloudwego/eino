@@ -21,32 +21,35 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/stretchr/testify/assert"
+
+	"github.com/cloudwego/eino/adk/filesystem"
 	"github.com/cloudwego/eino/components/tool"
 )
 
 // setupTestBackend creates a test backend with some initial files
-func setupTestBackend() *InMemoryBackend {
-	backend := NewInMemoryBackend()
+func setupTestBackend() *filesystem.InMemoryBackend {
+	backend := filesystem.NewInMemoryBackend()
 	ctx := context.Background()
 
 	// Create test files
-	backend.Write(ctx, &WriteRequest{
+	backend.Write(ctx, &filesystem.WriteRequest{
 		FilePath: "/file1.txt",
 		Content:  "line1\nline2\nline3\nline4\nline5",
 	})
-	backend.Write(ctx, &WriteRequest{
+	backend.Write(ctx, &filesystem.WriteRequest{
 		FilePath: "/file2.go",
 		Content:  "package main\n\nfunc main() {\n\tprintln(\"hello\")\n}",
 	})
-	backend.Write(ctx, &WriteRequest{
+	backend.Write(ctx, &filesystem.WriteRequest{
 		FilePath: "/dir1/file3.txt",
 		Content:  "hello world\nfoo bar\nhello again",
 	})
-	backend.Write(ctx, &WriteRequest{
+	backend.Write(ctx, &filesystem.WriteRequest{
 		FilePath: "/dir1/file4.py",
 		Content:  "print('hello')\nprint('world')",
 	})
-	backend.Write(ctx, &WriteRequest{
+	backend.Write(ctx, &filesystem.WriteRequest{
 		FilePath: "/dir2/file5.go",
 		Content:  "package test\n\nfunc test() {}",
 	})
@@ -213,16 +216,17 @@ func TestWriteFileTool(t *testing.T) {
 
 	// Verify the file was actually written
 	ctx := context.Background()
-	content, err := backend.Read(ctx, &ReadRequest{
+	content, err := backend.Read(ctx, &filesystem.ReadRequest{
 		FilePath: "/newfile.txt",
+		Offset:   0,
+		Limit:    100,
 	})
 	if err != nil {
 		t.Fatalf("Failed to read written file: %v", err)
 	}
-	if !strings.Contains(content, "new content") {
+	if content != "     1\tnew content" {
 		t.Errorf("Expected written content to be 'new content', got %q", content)
 	}
-
 }
 
 func TestEditFileTool(t *testing.T) {
@@ -275,7 +279,7 @@ func TestEditFileTool(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			// Setup file if needed
 			if tt.setupFile != "" {
-				backend.Write(ctx, &WriteRequest{
+				backend.Write(ctx, &filesystem.WriteRequest{
 					FilePath: tt.setupFile,
 					Content:  tt.setupContent,
 				})
@@ -291,7 +295,7 @@ func TestEditFileTool(t *testing.T) {
 			if err != nil {
 				t.Fatalf("edit_file tool failed: %v", err)
 			}
-			result, err := backend.Read(ctx, &ReadRequest{
+			result, err := backend.Read(ctx, &filesystem.ReadRequest{
 				FilePath: tt.setupFile,
 				Offset:   0,
 				Limit:    0,
@@ -421,4 +425,215 @@ func TestGrepTool(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestExecuteTool(t *testing.T) {
+	backend := setupTestBackend()
+
+	tests := []struct {
+		name        string
+		resp        *filesystem.ExecuteResponse
+		input       string
+		expected    string
+		shouldError bool
+	}{
+		{
+			name: "successful command execution",
+			resp: &filesystem.ExecuteResponse{
+				Output:   "hello world",
+				ExitCode: ptrOf(0),
+			},
+			input:    `{"command": "echo hello world"}`,
+			expected: "hello world",
+		},
+		{
+			name: "command with non-zero exit code",
+			resp: &filesystem.ExecuteResponse{
+				Output:   "error: file not found",
+				ExitCode: ptrOf(1),
+			},
+			input:    `{"command": "cat nonexistent.txt"}`,
+			expected: "error: file not found\n[Command failed with exit code 1]",
+		},
+		{
+			name: "command with truncated output",
+			resp: &filesystem.ExecuteResponse{
+				Output:    "partial output...",
+				ExitCode:  ptrOf(0),
+				Truncated: true,
+			},
+			input:    `{"command": "cat largefile.txt"}`,
+			expected: "partial output...\n[Output was truncated due to size limits]",
+		},
+		{
+			name: "command with both non-zero exit code and truncated output",
+			resp: &filesystem.ExecuteResponse{
+				Output:    "error output...",
+				ExitCode:  ptrOf(2),
+				Truncated: true,
+			},
+			input:    `{"command": "failing command"}`,
+			expected: "error output...\n[Command failed with exit code 2]\n[Output was truncated due to size limits]",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			executeTool, err := newExecuteTool(&mockShellBackend{
+				Backend: backend,
+				resp:    tt.resp,
+			}, nil)
+			assert.NoError(t, err)
+
+			result, err := invokeTool(t, executeTool, tt.input)
+			if tt.shouldError {
+				assert.Error(t, err)
+				return
+			}
+			assert.NoError(t, err)
+			assert.Equal(t, tt.expected, result)
+		})
+	}
+}
+
+func ptrOf[T any](t T) *T {
+	return &t
+}
+
+type mockShellBackend struct {
+	filesystem.Backend
+	resp *filesystem.ExecuteResponse
+}
+
+func (m *mockShellBackend) Execute(ctx context.Context, req *filesystem.ExecuteRequest) (*filesystem.ExecuteResponse, error) {
+	return m.resp, nil
+}
+
+func TestNewMiddleware(t *testing.T) {
+	ctx := context.Background()
+	backend := setupTestBackend()
+
+	t.Run("nil config returns error", func(t *testing.T) {
+		_, err := NewMiddleware(ctx, nil)
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "config should not be nil")
+	})
+
+	t.Run("nil backend returns error", func(t *testing.T) {
+		_, err := NewMiddleware(ctx, &Config{Backend: nil})
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "backend should not be nil")
+	})
+
+	t.Run("valid config with default settings", func(t *testing.T) {
+		m, err := NewMiddleware(ctx, &Config{Backend: backend})
+		assert.NoError(t, err)
+
+		// Check default system prompt
+		assert.Contains(t, m.AdditionalInstruction, ToolsSystemPrompt)
+
+		// Check tools are registered (6 tools for regular Backend)
+		assert.Len(t, m.AdditionalTools, 6)
+
+		// Check WrapToolCall is set (offloading enabled by default)
+		assert.NotNil(t, m.WrapToolCall)
+	})
+
+	t.Run("custom system prompt", func(t *testing.T) {
+		customPrompt := "Custom system prompt"
+		m, err := NewMiddleware(ctx, &Config{
+			Backend:            backend,
+			CustomSystemPrompt: &customPrompt,
+		})
+		assert.NoError(t, err)
+		assert.Equal(t, customPrompt, m.AdditionalInstruction)
+	})
+
+	t.Run("disable large tool result offloading", func(t *testing.T) {
+		m, err := NewMiddleware(ctx, &Config{
+			Backend:                          backend,
+			WithoutLargeToolResultOffloading: true,
+		})
+		assert.NoError(t, err)
+		assert.Nil(t, m.WrapToolCall.Invokable)
+		assert.Nil(t, m.WrapToolCall.Streamable)
+	})
+
+	t.Run("ShellBackend adds execute tool", func(t *testing.T) {
+		shellBackend := &mockShellBackend{
+			Backend: backend,
+			resp:    &filesystem.ExecuteResponse{Output: "ok"},
+		}
+		m, err := NewMiddleware(ctx, &Config{Backend: shellBackend})
+		assert.NoError(t, err)
+
+		// ShellBackend should have 7 tools (6 + execute)
+		assert.Len(t, m.AdditionalTools, 7)
+	})
+}
+
+func TestGetFilesystemTools(t *testing.T) {
+	ctx := context.Background()
+	backend := setupTestBackend()
+
+	t.Run("returns 6 tools for regular Backend", func(t *testing.T) {
+		tools, err := getFilesystemTools(ctx, &Config{Backend: backend})
+		assert.NoError(t, err)
+		assert.Len(t, tools, 6)
+
+		// Verify tool names
+		toolNames := make([]string, 0, len(tools))
+		for _, tool := range tools {
+			info, _ := tool.Info(ctx)
+			toolNames = append(toolNames, info.Name)
+		}
+		assert.Contains(t, toolNames, "ls")
+		assert.Contains(t, toolNames, "read_file")
+		assert.Contains(t, toolNames, "write_file")
+		assert.Contains(t, toolNames, "edit_file")
+		assert.Contains(t, toolNames, "glob")
+		assert.Contains(t, toolNames, "grep")
+	})
+
+	t.Run("returns 7 tools for ShellBackend", func(t *testing.T) {
+		shellBackend := &mockShellBackend{
+			Backend: backend,
+			resp:    &filesystem.ExecuteResponse{Output: "ok"},
+		}
+		tools, err := getFilesystemTools(ctx, &Config{Backend: shellBackend})
+		assert.NoError(t, err)
+		assert.Len(t, tools, 7)
+
+		// Verify execute tool is included
+		toolNames := make([]string, 0, len(tools))
+		for _, tool := range tools {
+			info, _ := tool.Info(ctx)
+			toolNames = append(toolNames, info.Name)
+		}
+		assert.Contains(t, toolNames, "execute")
+	})
+
+	t.Run("custom tool descriptions", func(t *testing.T) {
+		customLsDesc := "Custom ls description"
+		customReadDesc := "Custom read description"
+
+		tools, err := getFilesystemTools(ctx, &Config{
+			Backend:                backend,
+			CustomLsToolDesc:       &customLsDesc,
+			CustomReadFileToolDesc: &customReadDesc,
+		})
+		assert.NoError(t, err)
+		assert.Len(t, tools, 6)
+
+		// Verify custom descriptions are applied
+		for _, tool := range tools {
+			info, _ := tool.Info(ctx)
+			if info.Name == "ls" {
+				assert.Equal(t, customLsDesc, info.Desc)
+			}
+			if info.Name == "read_file" {
+				assert.Equal(t, customReadDesc, info.Desc)
+			}
+		}
+	})
 }

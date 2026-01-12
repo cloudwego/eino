@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-package filesystem
+package reduction
 
 import (
 	"context"
@@ -24,6 +24,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/cloudwego/eino/adk/filesystem"
 	"github.com/cloudwego/eino/compose"
 	"github.com/cloudwego/eino/schema"
 )
@@ -39,32 +40,8 @@ func newMockBackend() *mockBackend {
 	}
 }
 
-func (m *mockBackend) Write(ctx context.Context, req *WriteRequest) error {
-	m.files[req.FilePath] = req.Content
-	return nil
-}
-
-func (m *mockBackend) Read(ctx context.Context, req *ReadRequest) (string, error) {
-	content, ok := m.files[req.FilePath]
-	if !ok {
-		return "", errors.New("file not found")
-	}
-	return content, nil
-}
-
-func (m *mockBackend) LsInfo(ctx context.Context, _ *LsInfoRequest) ([]FileInfo, error) {
-	return nil, nil
-}
-
-func (m *mockBackend) GrepRaw(ctx context.Context, _ *GrepRequest) ([]GrepMatch, error) {
-	return nil, nil
-}
-
-func (m *mockBackend) GlobInfo(ctx context.Context, _ *GlobInfoRequest) ([]FileInfo, error) {
-	return nil, nil
-}
-
-func (m *mockBackend) Edit(ctx context.Context, _ *EditRequest) error {
+func (m *mockBackend) Write(_ context.Context, wr *filesystem.WriteRequest) error {
+	m.files[wr.FilePath] = wr.Content
 	return nil
 }
 
@@ -583,29 +560,9 @@ type failingBackend struct {
 	writeErr error
 }
 
-func (f *failingBackend) Write(ctx context.Context, req *WriteRequest) error {
+func (f *failingBackend) Write(context.Context, *filesystem.WriteRequest) error {
 	if f.writeErr != nil {
 		return f.writeErr
 	}
-	return nil
-}
-
-func (f *failingBackend) Read(ctx context.Context, req *ReadRequest) (string, error) {
-	return "", nil
-}
-
-func (f *failingBackend) LsInfo(ctx context.Context, _ *LsInfoRequest) ([]FileInfo, error) {
-	return nil, nil
-}
-
-func (f *failingBackend) GrepRaw(ctx context.Context, _ *GrepRequest) ([]GrepMatch, error) {
-	return nil, nil
-}
-
-func (f *failingBackend) GlobInfo(ctx context.Context, _ *GlobInfoRequest) ([]FileInfo, error) {
-	return nil, nil
-}
-
-func (f *failingBackend) Edit(ctx context.Context, _ *EditRequest) error {
 	return nil
 }

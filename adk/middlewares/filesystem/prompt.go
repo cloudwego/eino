@@ -105,6 +105,49 @@ Examples:
 - Search Python files only: 'grep(pattern="import", glob="*.py")'
 - Show matching lines: 'grep(pattern="error", output_mode="content")'`
 
+	ExecuteToolDesc = `
+Executes a given command in the sandbox environment with proper handling and security measures.
+
+Before executing the command, please follow these steps:
+
+1. Directory Verification:
+- If the command will create new directories or files, first use the ls tool to verify the parent directory exists and is the correct location
+- For example, before running "mkdir foo/bar", first use ls to check that "foo" exists and is the intended parent directory
+
+2. Command Execution:
+- Always quote file paths that contain spaces with double quotes (e.g., cd "path with spaces/file.txt")
+- Examples of proper quoting:
+- cd "/Users/name/My Documents" (correct)
+- cd /Users/name/My Documents (incorrect - will fail)
+- python "/path/with spaces/script.py" (correct)
+- python /path/with spaces/script.py (incorrect - will fail)
+- After ensuring proper quoting, execute the command
+- Capture the output of the command
+
+Usage notes:
+- The command parameter is required
+- Commands run in an isolated sandbox environment
+- Returns combined stdout/stderr output with exit code
+- If the output is very large, it may be truncated
+- VERY IMPORTANT: You MUST avoid using search commands like find and grep. Instead use the grep, glob tools to search. You MUST avoid read tools like cat, head, tail, and use read_file to read files.
+- When issuing multiple commands, use the ';' or '&&' operator to separate them. DO NOT use newlines (newlines are ok in quoted strings)
+- Use '&&' when commands depend on each other (e.g., "mkdir dir && cd dir")
+- Use ';' only when you need to run commands sequentially but don't care if earlier commands fail
+- Try to maintain your current working directory throughout the session by using absolute paths and avoiding usage of cd
+
+Examples:
+Good examples:
+- execute(command="pytest /foo/bar/tests")
+- execute(command="python /path/to/script.py")
+- execute(command="npm install && npm test")
+
+Bad examples (avoid these):
+- execute(command="cd /foo/bar && pytest tests")  # Use absolute path instead
+- execute(command="cat file.txt")  # Use read_file tool instead
+- execute(command="find . -name '*.py'")  # Use glob tool instead
+- execute(command="grep -r 'pattern' .")  # Use grep tool instead
+`
+
 	ToolsSystemPrompt = `
 # Filesystem Tools 'ls', 'read_file', 'write_file', 'edit_file', 'glob', 'grep'
 
@@ -117,5 +160,14 @@ All file paths must start with a '/'.
 - edit_file: edit a file in the filesystem
 - glob: find files matching a pattern (e.g., "**/*.py")
 - grep: search for text within files
+`
+
+	ExecuteToolsSystemPrompt = `
+# Execute Tool 'execute'
+
+You have access to an 'execute' tool for running shell commands in a sandboxed environment.
+Use this tool to run commands, scripts, tests, builds, and other shell operations.
+
+- execute: run a shell command in the sandbox (returns output and exit code)
 `
 )
