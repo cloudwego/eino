@@ -137,10 +137,8 @@ func forwardEventsAndAppendTransfer(iter *AsyncIterator[*AgentEvent],
 		lastEvent = event
 	}
 
-	if lastEvent != nil && lastEvent.Action != nil {
-		if lastEvent.Action.Interrupted != nil || lastEvent.Action.Exit {
-			return
-		}
+	if lastEvent != nil && lastEvent.Action != nil && (lastEvent.Action.Interrupted != nil || lastEvent.Action.Exit) {
+		return
 	}
 
 	sendTransferEvents(generator, toAgentNames)

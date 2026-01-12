@@ -143,6 +143,17 @@ func NewExitAction() *AgentAction {
 	return &AgentAction{Exit: true}
 }
 
+// AgentAction represents actions that an agent can emit during execution.
+//
+// Action Scoping in Agent Tools:
+// When an agent is wrapped as an agent tool (via NewAgentTool), actions emitted by the inner agent
+// are scoped to the tool boundary:
+//   - Interrupted: Propagated via CompositeInterrupt to allow proper interrupt/resume across boundaries
+//   - Exit, TransferToAgent, BreakLoop: Ignored outside the agent tool; these actions only affect
+//     the inner agent's execution and do not propagate to the parent agent
+//
+// This scoping ensures that nested agents cannot unexpectedly terminate or transfer control
+// of their parent agent's execution flow.
 type AgentAction struct {
 	Exit bool
 

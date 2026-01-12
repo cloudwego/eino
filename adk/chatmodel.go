@@ -97,7 +97,17 @@ type ToolsConfig struct {
 	ReturnDirectly map[string]bool
 
 	// EmitInternalEvents indicates whether internal events from agentTool should be emitted
-	// to the parent generator via a tool option injection at run-time.
+	// to the parent agent's AsyncGenerator, allowing real-time streaming of nested agent output
+	// to the end-user via Runner.
+	//
+	// Note that these forwarded events are NOT recorded in the parent agent's runSession.
+	// They are only emitted to the end-user and have no effect on the parent agent's state
+	// or checkpoint.
+	//
+	// Action Scoping:
+	// Actions emitted by the inner agent are scoped to the agent tool boundary:
+	//   - Interrupted: Propagated via CompositeInterrupt to allow proper interrupt/resume
+	//   - Exit, TransferToAgent, BreakLoop: Ignored outside the agent tool
 	EmitInternalEvents bool
 }
 

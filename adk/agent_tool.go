@@ -67,6 +67,25 @@ func withAgentToolEnableStreaming(enabled bool) tool.Option {
 }
 
 // NewAgentTool creates a tool that wraps an agent for invocation.
+//
+// Event Streaming:
+// When EmitInternalEvents is enabled in ToolsConfig, the agent tool will emit AgentEvent
+// from the inner agent to the parent agent's AsyncGenerator, allowing real-time streaming
+// of the inner agent's output to the end-user via Runner.
+//
+// Note that these forwarded events are NOT recorded in the parent agent's runSession.
+// They are only emitted to the end-user and have no effect on the parent agent's state
+// or checkpoint. The only exception is Interrupted action, which is propagated via
+// CompositeInterrupt to enable proper interrupt/resume across agent boundaries.
+//
+// Action Scoping:
+// Actions emitted by the inner agent are scoped to the agent tool boundary:
+//   - Interrupted: Propagated via CompositeInterrupt to allow proper interrupt/resume across boundaries
+//   - Exit, TransferToAgent, BreakLoop: Ignored outside the agent tool; these actions only affect
+//     the inner agent's execution and do not propagate to the parent agent
+//
+// This scoping ensures that nested agents cannot unexpectedly terminate or transfer control
+// of their parent agent's execution flow.
 func NewAgentTool(_ context.Context, agent Agent, options ...AgentToolOption) tool.BaseTool {
 	opts := &AgentToolOptions{}
 	for _, opt := range options {
