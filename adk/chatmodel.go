@@ -256,6 +256,11 @@ func NewChatModelAgent(_ context.Context, config *ChatModelAgentConfig) (*ChatMo
 	}
 
 	tc := config.ToolsConfig
+	// Tool call middleware execution order (outermost to innermost):
+	// 1. toolResultEventSenderWrapper (internal - sends tool result events)
+	// 2. Handlers' ToolCallWrappers (via GetToolCallWrapper, in registration order)
+	// 3. Middlewares' WrapToolCall (in registration order)
+	// 4. User-provided ToolsConfig.ToolCallMiddlewares (original order preserved)
 	toolEventSender := &toolResultEventSenderWrapper{}
 	tc.ToolCallMiddlewares = append(
 		toolCallWrappersToMiddlewares([]ToolCallWrapper{toolEventSender}),
@@ -525,7 +530,7 @@ func (a *ChatModelAgent) applyBeforeAgent(ctx context.Context, bc *buildContext)
 	for i, h := range a.handlers {
 		ctx, runCtx, err = h.BeforeAgent(ctx, runCtx)
 		if err != nil {
-			return ctx, nil, fmt.Errorf("handler[%d] BeforeAgent failed: %w", i, err)
+			return ctx, nil, fmt.Errorf("handler[%d] (%T) BeforeAgent failed: %w", i, h, err)
 		}
 	}
 
