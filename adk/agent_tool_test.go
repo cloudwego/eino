@@ -1012,7 +1012,7 @@ func (b *badAgent) Run(ctx context.Context, input *AgentInput, _ ...AgentRunOpti
 	return it
 }
 
-func TestRunPathMisuse_NotModifiedWithoutRunnerStep(t *testing.T) {
+func TestRunPathMisuse_PrependedCausingDuplication(t *testing.T) {
 	ctx := context.Background()
 	bad := &badAgent{parent: "outer"}
 	r := NewRunner(ctx, RunnerConfig{Agent: bad, EnableStreaming: false, CheckPointStore: newBridgeStore()})
@@ -1036,7 +1036,7 @@ func TestRunPathMisuse_NotModifiedWithoutRunnerStep(t *testing.T) {
 			got = append(got, last.RunPath[i].agentName)
 		}
 	}
-	want := []string{"outer", "bad"}
+	want := []string{"bad", "outer", "bad"}
 	if len(got) != len(want) {
 		t.Fatalf("unexpected runPath len: got %d want %d: %+v", len(got), len(want), got)
 	}
@@ -1046,10 +1046,8 @@ func TestRunPathMisuse_NotModifiedWithoutRunnerStep(t *testing.T) {
 		}
 	}
 
-	for i := range last.RunPath {
-		if last.RunPath[i].runnerName != "" {
-			t.Fatalf("misused event should not have runner step prepended, but found runnerName at %d: %s", i, last.RunPath[i].runnerName)
-		}
+	if last.RunPath[0].runnerName != "bad" {
+		t.Fatalf("expected runner step prepended, but got runnerName: %s", last.RunPath[0].runnerName)
 	}
 }
 

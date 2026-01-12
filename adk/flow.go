@@ -390,8 +390,21 @@ func (a *flowAgent) run(
 		//   duplicate head segments after merge and cause non-recording.
 		// Here we merge: framework runCtx.RunPath + custom-provided event.RunPath.
 		if len(event.RunPath) > 0 {
-			// only append if the first step of event RunPath is a runner step different to runCtx.RunPath[0]'s runner step
-			if len(event.RunPath[0].runnerName) > 0 && event.RunPath[0].runnerName != runCtx.RunPath[0].runnerName {
+			// RunPath Prepending Logic:
+			// The framework prepends parent context exactly once: parentRunPath + event.RunPath.
+			//
+			// Three cases based on event.RunPath[0]:
+			// 1. Starts with agent step (runnerName empty): Prepend. This is a relative child path
+			//    from a custom agent or sub-agent, needs parent context.
+			//
+			// 2. Starts with runner step matching current runner: Skip. The event already has
+			//    the current runner's context, prepending would cause duplication.
+			//
+			// 3. Starts with runner step different from current runner: Prepend. The event
+			//    crossed a Runner boundary (e.g., from agent tools with nested Runner).
+			shouldPrepend := len(event.RunPath[0].runnerName) == 0 ||
+				event.RunPath[0].runnerName != runCtx.RunPath[0].runnerName
+			if shouldPrepend {
 				rp := make([]RunStep, 0, len(runCtx.RunPath)+len(event.RunPath))
 				rp = append(rp, runCtx.RunPath...)
 				rp = append(rp, event.RunPath...)

@@ -145,6 +145,18 @@ func NewExitAction() *AgentAction {
 }
 
 type AgentAction struct {
+	// Exit signals that the agent wants to terminate execution.
+	//
+	// Exit Scoping Rules:
+	// - An Exit action terminates execution up to the nearest Runner boundary.
+	// - When a sub-agent emits Exit, the parent flowAgent will see the exit event,
+	//   but the exit only takes effect if it originated from the same Runner scope.
+	// - Exit from a nested Runner (e.g., agent tools with their own Runner) does NOT
+	//   terminate the parent Runner's execution.
+	//
+	// This scoping is determined by comparing the exit event's RunPath (specifically
+	// the runnerName in the path) with the current execution context's runnerName.
+	// See RunStep documentation for more details on runner boundary marking.
 	Exit bool
 
 	Interrupted *InterruptInfo
@@ -158,10 +170,26 @@ type AgentAction struct {
 	internalInterrupted *core.InterruptSignal
 }
 
-// RunStep CheckpointSchema: persisted via serialization.RunCtx (gob).
+// RunStep represents a step in the execution path (RunPath).
+// It can represent either an agent step (agentName set) or a runner boundary step (runnerName set).
+//
+// Runner Boundary Marking:
+// The runnerName field marks Runner boundaries in the RunPath. This serves two critical purposes:
+//
+//  1. Exit Scoping: When an agent emits an Exit action, the framework needs to determine if the exit
+//     should propagate up or be contained within the current Runner scope. By comparing the exit event's
+//     runnerName with the current context's runnerName, we can distinguish:
+//     - Exit from current Runner scope → should terminate the current execution
+//     - Exit from nested Runner scope → should NOT terminate the parent execution
+//
+//  2. RunPath Prepending: When events flow up from nested Runners, the parent's RunPath should be
+//     prepended exactly once. The runnerName check (in flowAgent.run) ensures prepending only occurs
+//     when crossing a Runner boundary, preventing infinite prepending at each agent level.
+//
+// CheckpointSchema: persisted via serialization.RunCtx (gob).
 type RunStep struct {
 	agentName  string
-	runnerName string
+	runnerName string // marks Runner boundary; empty for agent steps
 }
 
 func init() {
@@ -217,13 +245,17 @@ type AgentEvent struct {
 	AgentName string
 
 	// RunPath semantics:
-	// - The eino framework prepends parent context exactly once: parentRunPath + event.RunPath.
-	// - Custom agents should NOT include parent segments; any provided RunPath is treated as relative child provenance.
+	// - The eino framework prepends parent context exactly once: runCtx.RunPath + event.RunPath.
+	//   The runCtx.RunPath includes both the Runner step and all ancestor agent steps set by flowAgent,
+	//   e.g., [{runnerName: "root"}, {agentName: "supervisor"}, {agentName: "worker"}].
+	// - Custom agents should NOT include parent segments; any provided RunPath is treated as relative
+	//   child provenance that will be appended to the existing context.
 	// - Exact RunPath match against the framework's runCtx.RunPath governs recording to runSession.
+	//
 	// STRONG RECOMMENDATION: Custom agents should NOT set RunPath themselves unless they fully understand
-	//   the merge and recording rules. Setting parent or absolute paths can lead to duplicated segments
-	//   after merge and unexpected non-recording. Prefer leaving RunPath empty and let the framework set
-	//   context, or append only relative child segments when implementing advanced orchestration.
+	// the merge and recording rules. Setting parent or absolute paths can lead to duplicated segments
+	// after merge and unexpected non-recording. Prefer leaving RunPath empty and let the framework set
+	// context, or append only relative child segments when implementing advanced orchestration.
 	RunPath []RunStep
 
 	Output *AgentOutput
