@@ -66,14 +66,14 @@ const (
 )
 
 type AgenticMessage struct {
-	// ResponseMeta is the response metadata.
-	ResponseMeta *AgenticResponseMeta
-
 	// Role is the message role.
 	Role AgenticRoleType
 
 	// ContentBlocks is the list of content blocks.
 	ContentBlocks []*ContentBlock
+
+	// ResponseMeta is the response metadata.
+	ResponseMeta *AgenticResponseMeta
 
 	// Extra is the additional information.
 	Extra map[string]any
