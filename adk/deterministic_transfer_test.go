@@ -407,3 +407,327 @@ func TestDeterministicTransferExitSkipsTransfer(t *testing.T) {
 	assert.True(t, outerSawExit, "outer should see exit event from inner")
 	assert.False(t, transferGenerated, "transfer should not be generated when inner exits")
 }
+
+type nonFlowTestAgent struct {
+	name     string
+	runFn    func(ctx context.Context, input *AgentInput, options ...AgentRunOption) *AsyncIterator[*AgentEvent]
+	resumeFn func(ctx context.Context, info *ResumeInfo, opts ...AgentRunOption) *AsyncIterator[*AgentEvent]
+}
+
+func (a *nonFlowTestAgent) Name(_ context.Context) string {
+	return a.name
+}
+
+func (a *nonFlowTestAgent) Description(_ context.Context) string {
+	return a.name + " description"
+}
+
+func (a *nonFlowTestAgent) Run(ctx context.Context, input *AgentInput, options ...AgentRunOption) *AsyncIterator[*AgentEvent] {
+	return a.runFn(ctx, input, options...)
+}
+
+func (a *nonFlowTestAgent) Resume(ctx context.Context, info *ResumeInfo, opts ...AgentRunOption) *AsyncIterator[*AgentEvent] {
+	if a.resumeFn != nil {
+		return a.resumeFn(ctx, info, opts...)
+	}
+	return a.runFn(ctx, &AgentInput{}, opts...)
+}
+
+type nonResumableTestAgent struct {
+	name  string
+	runFn func(ctx context.Context, input *AgentInput, options ...AgentRunOption) *AsyncIterator[*AgentEvent]
+}
+
+func (a *nonResumableTestAgent) Name(_ context.Context) string {
+	return a.name
+}
+
+func (a *nonResumableTestAgent) Description(_ context.Context) string {
+	return a.name + " description"
+}
+
+func (a *nonResumableTestAgent) Run(ctx context.Context, input *AgentInput, options ...AgentRunOption) *AsyncIterator[*AgentEvent] {
+	return a.runFn(ctx, input, options...)
+}
+
+func TestDeterministicTransferNonFlowAgent_ExitSkipsTransfer(t *testing.T) {
+	ctx := context.Background()
+
+	agent := &nonFlowTestAgent{
+		name: "test_agent",
+		runFn: func(ctx context.Context, input *AgentInput, options ...AgentRunOption) *AsyncIterator[*AgentEvent] {
+			iter, gen := NewAsyncIteratorPair[*AgentEvent]()
+			go func() {
+				defer gen.Close()
+				ev := EventFromMessage(schema.AssistantMessage("exiting", nil), nil, schema.Assistant, "")
+				ev.Action = &AgentAction{Exit: true}
+				gen.Send(ev)
+			}()
+			return iter
+		},
+	}
+
+	wrapped := AgentWithDeterministicTransferTo(ctx, &DeterministicTransferConfig{
+		Agent:        agent,
+		ToAgentNames: []string{"next_agent"},
+	})
+
+	iter := wrapped.Run(ctx, &AgentInput{Messages: []Message{schema.UserMessage("test")}})
+
+	var events []*AgentEvent
+	var sawExit bool
+	var sawTransfer bool
+	for {
+		ev, ok := iter.Next()
+		if !ok {
+			break
+		}
+		events = append(events, ev)
+		if ev.Action != nil && ev.Action.Exit {
+			sawExit = true
+		}
+		if ev.Action != nil && ev.Action.TransferToAgent != nil {
+			sawTransfer = true
+		}
+	}
+
+	assert.True(t, sawExit, "should see exit event")
+	assert.False(t, sawTransfer, "should NOT see transfer when exit is last event")
+	assert.Len(t, events, 1, "should have exactly 1 event (exit)")
+}
+
+func TestDeterministicTransferNonFlowAgent_AppendsTransfer(t *testing.T) {
+	ctx := context.Background()
+
+	agent := &nonFlowTestAgent{
+		name: "test_agent",
+		runFn: func(ctx context.Context, input *AgentInput, options ...AgentRunOption) *AsyncIterator[*AgentEvent] {
+			iter, gen := NewAsyncIteratorPair[*AgentEvent]()
+			go func() {
+				defer gen.Close()
+				ev := EventFromMessage(schema.AssistantMessage("normal output", nil), nil, schema.Assistant, "")
+				gen.Send(ev)
+			}()
+			return iter
+		},
+	}
+
+	wrapped := AgentWithDeterministicTransferTo(ctx, &DeterministicTransferConfig{
+		Agent:        agent,
+		ToAgentNames: []string{"next_agent"},
+	})
+
+	iter := wrapped.Run(ctx, &AgentInput{Messages: []Message{schema.UserMessage("test")}})
+
+	var events []*AgentEvent
+	var sawTransfer bool
+	var transferTarget string
+	for {
+		ev, ok := iter.Next()
+		if !ok {
+			break
+		}
+		events = append(events, ev)
+		if ev.Action != nil && ev.Action.TransferToAgent != nil {
+			sawTransfer = true
+			transferTarget = ev.Action.TransferToAgent.DestAgentName
+		}
+	}
+
+	assert.True(t, sawTransfer, "should see transfer event after normal completion")
+	assert.Equal(t, "next_agent", transferTarget, "transfer target should be next_agent")
+	assert.Greater(t, len(events), 1, "should have more than 1 event (output + transfer messages)")
+}
+
+func TestDeterministicTransferNonFlowAgent_InterruptSkipsTransfer(t *testing.T) {
+	ctx := context.Background()
+
+	agent := &nonFlowTestAgent{
+		name: "test_agent",
+		runFn: func(ctx context.Context, input *AgentInput, options ...AgentRunOption) *AsyncIterator[*AgentEvent] {
+			iter, gen := NewAsyncIteratorPair[*AgentEvent]()
+			go func() {
+				defer gen.Close()
+				ev := &AgentEvent{
+					Action: &AgentAction{
+						Interrupted: &InterruptInfo{Data: "test interrupt"},
+					},
+				}
+				gen.Send(ev)
+			}()
+			return iter
+		},
+	}
+
+	wrapped := AgentWithDeterministicTransferTo(ctx, &DeterministicTransferConfig{
+		Agent:        agent,
+		ToAgentNames: []string{"next_agent"},
+	})
+
+	iter := wrapped.Run(ctx, &AgentInput{Messages: []Message{schema.UserMessage("test")}})
+
+	var events []*AgentEvent
+	var sawInterrupt bool
+	var sawTransfer bool
+	for {
+		ev, ok := iter.Next()
+		if !ok {
+			break
+		}
+		events = append(events, ev)
+		if ev.Action != nil && ev.Action.Interrupted != nil {
+			sawInterrupt = true
+		}
+		if ev.Action != nil && ev.Action.TransferToAgent != nil {
+			sawTransfer = true
+		}
+	}
+
+	assert.True(t, sawInterrupt, "should see interrupt event")
+	assert.False(t, sawTransfer, "should NOT see transfer when interrupted")
+	assert.Len(t, events, 1, "should have exactly 1 event (interrupt)")
+}
+
+func TestDeterministicTransferNonFlowAgent_Resume(t *testing.T) {
+	ctx := context.Background()
+
+	var resumeCalled bool
+	agent := &nonFlowTestAgent{
+		name: "test_agent",
+		runFn: func(ctx context.Context, input *AgentInput, options ...AgentRunOption) *AsyncIterator[*AgentEvent] {
+			iter, gen := NewAsyncIteratorPair[*AgentEvent]()
+			go func() {
+				defer gen.Close()
+				ev := EventFromMessage(schema.AssistantMessage("from run", nil), nil, schema.Assistant, "")
+				gen.Send(ev)
+			}()
+			return iter
+		},
+		resumeFn: func(ctx context.Context, info *ResumeInfo, opts ...AgentRunOption) *AsyncIterator[*AgentEvent] {
+			resumeCalled = true
+			iter, gen := NewAsyncIteratorPair[*AgentEvent]()
+			go func() {
+				defer gen.Close()
+				ev := EventFromMessage(schema.AssistantMessage("from resume", nil), nil, schema.Assistant, "")
+				gen.Send(ev)
+			}()
+			return iter
+		},
+	}
+
+	wrapped := AgentWithDeterministicTransferTo(ctx, &DeterministicTransferConfig{
+		Agent:        agent,
+		ToAgentNames: []string{"next_agent"},
+	})
+
+	ra, ok := wrapped.(ResumableAgent)
+	assert.True(t, ok, "wrapped agent should be ResumableAgent")
+
+	iter := ra.Resume(ctx, &ResumeInfo{WasInterrupted: true})
+
+	var events []*AgentEvent
+	var sawTransfer bool
+	for {
+		ev, ok := iter.Next()
+		if !ok {
+			break
+		}
+		events = append(events, ev)
+		if ev.Action != nil && ev.Action.TransferToAgent != nil {
+			sawTransfer = true
+		}
+	}
+
+	assert.True(t, resumeCalled, "resume should have been called on inner agent")
+	assert.True(t, sawTransfer, "should see transfer event after resume completion")
+}
+
+func TestDeterministicTransferFlowAgent_ResumeWithInvalidState(t *testing.T) {
+	ctx := context.Background()
+
+	innerAgent := &dtTestAgent{
+		name: "inner",
+		runFn: func(ctx context.Context, input *AgentInput, options ...AgentRunOption) *AsyncIterator[*AgentEvent] {
+			iter, gen := NewAsyncIteratorPair[*AgentEvent]()
+			go func() {
+				defer gen.Close()
+				gen.Send(EventFromMessage(schema.AssistantMessage("test", nil), nil, schema.Assistant, ""))
+			}()
+			return iter
+		},
+	}
+
+	innerFlowAgent := toFlowAgent(ctx, innerAgent)
+
+	wrapped := AgentWithDeterministicTransferTo(ctx, &DeterministicTransferConfig{
+		Agent:        innerFlowAgent,
+		ToAgentNames: []string{"next_agent"},
+	})
+
+	ra, ok := wrapped.(ResumableAgent)
+	assert.True(t, ok, "wrapped flowAgent should be ResumableAgent")
+
+	iter := ra.Resume(ctx, &ResumeInfo{
+		WasInterrupted: true,
+		InterruptState: nil,
+	})
+
+	var gotError bool
+	var errorMsg string
+	for {
+		ev, ok := iter.Next()
+		if !ok {
+			break
+		}
+		if ev.Err != nil {
+			gotError = true
+			errorMsg = ev.Err.Error()
+		}
+	}
+
+	assert.True(t, gotError, "should get error for invalid state")
+	assert.Contains(t, errorMsg, "invalid interrupt state", "error should mention invalid state")
+}
+
+func TestDeterministicTransferNonResumableAgent(t *testing.T) {
+	ctx := context.Background()
+
+	agent := &nonResumableTestAgent{
+		name: "non_resumable",
+		runFn: func(ctx context.Context, input *AgentInput, options ...AgentRunOption) *AsyncIterator[*AgentEvent] {
+			iter, gen := NewAsyncIteratorPair[*AgentEvent]()
+			go func() {
+				defer gen.Close()
+				ev := EventFromMessage(schema.AssistantMessage("output", nil), nil, schema.Assistant, "")
+				gen.Send(ev)
+			}()
+			return iter
+		},
+	}
+
+	wrapped := AgentWithDeterministicTransferTo(ctx, &DeterministicTransferConfig{
+		Agent:        agent,
+		ToAgentNames: []string{"next_agent"},
+	})
+
+	_, isResumable := wrapped.(ResumableAgent)
+	assert.False(t, isResumable, "wrapped non-resumable agent should NOT be ResumableAgent")
+
+	assert.Equal(t, "non_resumable", wrapped.Name(ctx), "Name should delegate to inner agent")
+	assert.Equal(t, "non_resumable description", wrapped.Description(ctx), "Description should delegate to inner agent")
+
+	iter := wrapped.Run(ctx, &AgentInput{Messages: []Message{schema.UserMessage("test")}})
+
+	var sawTransfer bool
+	for {
+		ev, ok := iter.Next()
+		if !ok {
+			break
+		}
+		if ev.Action != nil && ev.Action.TransferToAgent != nil {
+			sawTransfer = true
+		}
+	}
+
+	assert.True(t, sawTransfer, "should see transfer event")
+}
