@@ -71,7 +71,7 @@ func (a *agentWithDeterministicTransferTo) Run(ctx context.Context,
 	aIter := a.agent.Run(ctx, input, options...)
 
 	iterator, generator := NewAsyncIteratorPair[*AgentEvent]()
-	go appendTransferAction(ctx, aIter, generator, a.toAgentNames)
+	go forwardEventsAndAppendTransfer(aIter, generator, a.toAgentNames)
 
 	return iterator
 }
@@ -99,7 +99,7 @@ func (a *resumableAgentWithDeterministicTransferTo) Run(ctx context.Context,
 	aIter := a.agent.Run(ctx, input, options...)
 
 	iterator, generator := NewAsyncIteratorPair[*AgentEvent]()
-	go appendTransferAction(ctx, aIter, generator, a.toAgentNames)
+	go forwardEventsAndAppendTransfer(aIter, generator, a.toAgentNames)
 
 	return iterator
 }
@@ -112,9 +112,38 @@ func (a *resumableAgentWithDeterministicTransferTo) Resume(ctx context.Context, 
 	aIter := a.agent.Resume(ctx, info, opts...)
 
 	iterator, generator := NewAsyncIteratorPair[*AgentEvent]()
-	go appendTransferAction(ctx, aIter, generator, a.toAgentNames)
+	go forwardEventsAndAppendTransfer(aIter, generator, a.toAgentNames)
 
 	return iterator
+}
+
+func forwardEventsAndAppendTransfer(iter *AsyncIterator[*AgentEvent],
+	generator *AsyncGenerator[*AgentEvent], toAgentNames []string) {
+
+	defer func() {
+		if panicErr := recover(); panicErr != nil {
+			generator.Send(&AgentEvent{Err: safe.NewPanicErr(panicErr, debug.Stack())})
+		}
+		generator.Close()
+	}()
+
+	var lastEvent *AgentEvent
+	for {
+		event, ok := iter.Next()
+		if !ok {
+			break
+		}
+		generator.Send(event)
+		lastEvent = event
+	}
+
+	if lastEvent != nil && lastEvent.Action != nil {
+		if lastEvent.Action.Interrupted != nil || lastEvent.Action.Exit {
+			return
+		}
+	}
+
+	sendTransferEvents(generator, toAgentNames)
 }
 
 func runFlowAgentWithIsolatedSession(ctx context.Context, fa *flowAgent, input *AgentInput,
@@ -189,18 +218,20 @@ func handleFlowAgentEvents(ctx context.Context, iter *AsyncIterator[*AgentEvent]
 	generator *AsyncGenerator[*AgentEvent], isolatedSession, parentSession *runSession, toAgentNames []string) {
 
 	defer func() {
-		panicErr := recover()
-		if panicErr != nil {
-			e := safe.NewPanicErr(panicErr, debug.Stack())
-			generator.Send(&AgentEvent{Err: e})
+		if panicErr := recover(); panicErr != nil {
+			generator.Send(&AgentEvent{Err: safe.NewPanicErr(panicErr, debug.Stack())})
 		}
-
 		generator.Close()
 	}()
 
-	var interruptEvent *AgentEvent
+	var lastEvent *AgentEvent
 
-	interrupted, exit := processEventsWithTransfer(ctx, iter, generator, toAgentNames, func(event *AgentEvent) (skipSend bool) {
+	for {
+		event, ok := iter.Next()
+		if !ok {
+			break
+		}
+
 		if parentSession != nil && (event.Action == nil || event.Action.Interrupted == nil) {
 			copied := copyAgentEvent(event)
 			setAutomaticClose(copied)
@@ -209,114 +240,39 @@ func handleFlowAgentEvents(ctx context.Context, iter *AsyncIterator[*AgentEvent]
 		}
 
 		if event.Action != nil && event.Action.internalInterrupted != nil {
-			interruptEvent = event
-			return true
-		}
-		return false
-	})
-
-	if interruptEvent != nil && interruptEvent.Action != nil && interruptEvent.Action.internalInterrupted != nil {
-		events := isolatedSession.getEvents()
-		state := &deterministicTransferState{EventList: events}
-		compositeEvent := CompositeInterrupt(ctx, "deterministic transfer wrapper interrupted",
-			state, interruptEvent.Action.internalInterrupted)
-		generator.Send(compositeEvent)
-		return
-	}
-
-	if interrupted || exit {
-		return
-	}
-
-	appendTransferEvents(ctx, generator, toAgentNames)
-}
-
-func appendTransferAction(ctx context.Context, aIter *AsyncIterator[*AgentEvent], generator *AsyncGenerator[*AgentEvent], toAgentNames []string) {
-	defer func() {
-		panicErr := recover()
-		if panicErr != nil {
-			e := safe.NewPanicErr(panicErr, debug.Stack())
-			generator.Send(&AgentEvent{Err: e})
-		}
-
-		generator.Close()
-	}()
-
-	interrupted, exit := processEventsWithTransfer(ctx, aIter, generator, toAgentNames, nil)
-
-	if interrupted || exit {
-		return
-	}
-
-	appendTransferEvents(ctx, generator, toAgentNames)
-}
-
-func processEventsWithTransfer(ctx context.Context, iter *AsyncIterator[*AgentEvent],
-	generator *AsyncGenerator[*AgentEvent], toAgentNames []string,
-	beforeSend func(event *AgentEvent) (skipSend bool)) (interrupted, exit bool) {
-
-	var currentRunnerStep *string
-
-	for {
-		event, ok := iter.Next()
-		if !ok {
-			break
-		}
-
-		var eventRunnerStep string
-		if event.Action != nil && event.Action.Exit && len(event.RunPath) > 0 {
-			for i := len(event.RunPath) - 1; i >= 0; i-- {
-				if event.RunPath[i].runnerName != "" {
-					eventRunnerStep = event.RunPath[i].runnerName
-					break
-				}
-			}
-		}
-
-		if beforeSend != nil {
-			if beforeSend(event) {
-				continue
-			}
+			lastEvent = event
+			continue
 		}
 
 		generator.Send(event)
+		lastEvent = event
+	}
 
-		if event.Action != nil && event.Action.Interrupted != nil {
-			interrupted = true
-		} else {
-			interrupted = false
+	if lastEvent != nil && lastEvent.Action != nil {
+		if lastEvent.Action.internalInterrupted != nil {
+			events := isolatedSession.getEvents()
+			state := &deterministicTransferState{EventList: events}
+			compositeEvent := CompositeInterrupt(ctx, "deterministic transfer wrapper interrupted",
+				state, lastEvent.Action.internalInterrupted)
+			generator.Send(compositeEvent)
+			return
 		}
 
-		if event.Action != nil && event.Action.Exit {
-			if eventRunnerStep == "" {
-				exit = true
-				continue
-			}
-
-			if currentRunnerStep == nil {
-				runCtx := getRunCtx(ctx)
-				for i := len(runCtx.RunPath) - 1; i >= 0; i-- {
-					if runCtx.RunPath[i].runnerName != "" {
-						currentRunnerStep = &runCtx.RunPath[i].runnerName
-						break
-					}
-				}
-			}
-
-			if currentRunnerStep != nil && *currentRunnerStep == eventRunnerStep {
-				exit = true
-			}
+		if lastEvent.Action.Exit {
+			return
 		}
 	}
 
-	return interrupted, exit
+	sendTransferEvents(generator, toAgentNames)
 }
 
-func appendTransferEvents(ctx context.Context, generator *AsyncGenerator[*AgentEvent], toAgentNames []string) {
+func sendTransferEvents(generator *AsyncGenerator[*AgentEvent], toAgentNames []string) {
 	for _, toAgentName := range toAgentNames {
-		aMsg, tMsg := GenTransferMessages(ctx, toAgentName)
+		aMsg, tMsg := GenTransferMessages(context.Background(), toAgentName)
+
 		aEvent := EventFromMessage(aMsg, nil, schema.Assistant, "")
 		generator.Send(aEvent)
+
 		tEvent := EventFromMessage(tMsg, nil, schema.Tool, tMsg.ToolName)
 		tEvent.Action = &AgentAction{
 			TransferToAgent: &TransferToAgentAction{

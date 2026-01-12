@@ -20,7 +20,6 @@ import (
 	"context"
 	"testing"
 
-	"github.com/bytedance/sonic"
 	"github.com/stretchr/testify/assert"
 
 	"github.com/cloudwego/eino/schema"
@@ -112,11 +111,10 @@ func TestDeterministicTransferFlowAgentInterruptResume(t *testing.T) {
 				ev := agentEvents[0]
 				assert.Equal(t, "inner", ev.AgentName, "innerAgent resumeFn: event should be from inner agent")
 				assert.Equal(t, "before interrupt", ev.Output.MessageOutput.Message.Content, "innerAgent resumeFn: event content should be 'before interrupt'")
-				assert.Len(t, ev.RunPath, 3, "innerAgent resumeFn: RunPath should have 3 steps (outer runner, outer agent, inner agent)")
-				if len(ev.RunPath) == 3 {
-					assert.Equal(t, "outer", ev.RunPath[0].runnerName, "innerAgent resumeFn: RunPath[0] should be outer runner")
-					assert.Equal(t, "outer", ev.RunPath[1].agentName, "innerAgent resumeFn: RunPath[1] should be outer agent")
-					assert.Equal(t, "inner", ev.RunPath[2].agentName, "innerAgent resumeFn: RunPath[2] should be inner agent")
+				assert.Len(t, ev.RunPath, 2, "innerAgent resumeFn: RunPath should have 2 steps (outer agent, inner agent)")
+				if len(ev.RunPath) == 2 {
+					assert.Equal(t, "outer", ev.RunPath[0].agentName, "innerAgent resumeFn: RunPath[0] should be outer agent")
+					assert.Equal(t, "inner", ev.RunPath[1].agentName, "innerAgent resumeFn: RunPath[1] should be inner agent")
 				}
 			}
 
@@ -160,11 +158,10 @@ func TestDeterministicTransferFlowAgentInterruptResume(t *testing.T) {
 				ev := agentEvents[0]
 				assert.Equal(t, "inner", ev.AgentName, "outerAgent resumeFn: event should be from inner agent (preserved original)")
 				assert.Equal(t, "before interrupt", ev.Output.MessageOutput.Message.Content, "outerAgent resumeFn: event content should be 'before interrupt'")
-				assert.Len(t, ev.RunPath, 3, "outerAgent resumeFn: RunPath should have 3 steps (no inner runner)")
-				if len(ev.RunPath) == 3 {
-					assert.Equal(t, "outer", ev.RunPath[0].runnerName, "outerAgent resumeFn: RunPath[0] should be outer runner")
-					assert.Equal(t, "outer", ev.RunPath[1].agentName, "outerAgent resumeFn: RunPath[1] should be outer agent")
-					assert.Equal(t, "inner", ev.RunPath[2].agentName, "outerAgent resumeFn: RunPath[2] should be inner agent")
+				assert.Len(t, ev.RunPath, 2, "outerAgent resumeFn: RunPath should have 2 steps")
+				if len(ev.RunPath) == 2 {
+					assert.Equal(t, "outer", ev.RunPath[0].agentName, "outerAgent resumeFn: RunPath[0] should be outer agent")
+					assert.Equal(t, "inner", ev.RunPath[1].agentName, "outerAgent resumeFn: RunPath[1] should be inner agent")
 				}
 			}
 
@@ -192,8 +189,6 @@ func TestDeterministicTransferFlowAgentInterruptResume(t *testing.T) {
 			break
 		}
 		events = append(events, ev)
-		m, _ := sonic.MarshalIndent(ev, "", "  ")
-		t.Logf("Run Event: %s", string(m))
 		if ev.Action != nil && ev.Action.Interrupted != nil {
 			interrupted = true
 			interruptEvent = ev
@@ -250,16 +245,11 @@ func TestDeterministicTransferFlowAgentInterruptResume(t *testing.T) {
 			break
 		}
 
-		m, _ := sonic.MarshalIndent(ev, "", "  ")
-		t.Logf("Resume Event: %s", string(m))
-
 		if ev.Err != nil {
 			resumeErr = ev.Err
-			t.Logf("Resume error: %v", resumeErr)
 		}
 		if ev.Action != nil && ev.Action.TransferToAgent != nil {
 			hasTransfer = true
-			t.Logf("Transfer to: %s", ev.Action.TransferToAgent.DestAgentName)
 		}
 		resumeEvents = append(resumeEvents, ev)
 	}
@@ -336,11 +326,10 @@ func TestDeterministicTransferRunPathPreserved(t *testing.T) {
 
 	assert.NotEmpty(t, collectedRunPaths, "should have collected RunPaths")
 	for _, rp := range collectedRunPaths {
-		assert.Len(t, rp, 3, "RunPath should have 3 steps (outer runner, outer agent, inner agent)")
-		if len(rp) == 3 {
-			assert.Equal(t, "outer", rp[0].runnerName, "RunPath[0] should be outer runner")
-			assert.Equal(t, "outer", rp[1].agentName, "RunPath[1] should be outer agent")
-			assert.Equal(t, "inner", rp[2].agentName, "RunPath[2] should be inner agent")
+		assert.Len(t, rp, 2, "RunPath should have 2 steps (outer agent, inner agent)")
+		if len(rp) == 2 {
+			assert.Equal(t, "outer", rp[0].agentName, "RunPath[0] should be outer agent")
+			assert.Equal(t, "inner", rp[1].agentName, "RunPath[1] should be inner agent")
 		}
 	}
 }
@@ -417,404 +406,4 @@ func TestDeterministicTransferExitSkipsTransfer(t *testing.T) {
 
 	assert.True(t, outerSawExit, "outer should see exit event from inner")
 	assert.False(t, transferGenerated, "transfer should not be generated when inner exits")
-}
-
-func TestDeterministicTransferNestedRunnerExit(t *testing.T) {
-	t.Run("flowagent_exit_from_nested_runner_does_not_skip_transfer", func(t *testing.T) {
-		ctx := context.Background()
-		store := newDTTestStore()
-
-		deepAgent := &dtTestAgent{
-			name: "deep",
-			runFn: func(ctx context.Context, input *AgentInput, options ...AgentRunOption) *AsyncIterator[*AgentEvent] {
-				iter, gen := NewAsyncIteratorPair[*AgentEvent]()
-				go func() {
-					defer gen.Close()
-					ev := EventFromMessage(schema.AssistantMessage("deep exits", nil), nil, schema.Assistant, "")
-					ev.Action = &AgentAction{Exit: true}
-					gen.Send(ev)
-				}()
-				return iter
-			},
-		}
-
-		middleAgent := &dtTestAgent{
-			name: "middle",
-			runFn: func(ctx context.Context, input *AgentInput, options ...AgentRunOption) *AsyncIterator[*AgentEvent] {
-				innerRunner := NewRunner(ctx, RunnerConfig{
-					Agent:           toFlowAgent(ctx, deepAgent),
-					EnableStreaming: true,
-					CheckPointStore: store,
-				})
-
-				innerIter := innerRunner.Run(ctx, []Message{schema.UserMessage("test")}, withSharedParentSession())
-
-				iter, gen := NewAsyncIteratorPair[*AgentEvent]()
-				go func() {
-					defer gen.Close()
-					for {
-						ev, ok := innerIter.Next()
-						if !ok {
-							break
-						}
-						gen.Send(ev)
-					}
-				}()
-				return iter
-			},
-		}
-
-		middleFlowAgent := toFlowAgent(ctx, middleAgent)
-
-		wrapped := AgentWithDeterministicTransferTo(ctx, &DeterministicTransferConfig{
-			Agent:        middleFlowAgent,
-			ToAgentNames: []string{"next_agent"},
-		})
-
-		var sawExitFromDeep bool
-		var transferGenerated bool
-
-		outerAgent := &dtTestAgent{
-			name: "outer",
-			runFn: func(ctx context.Context, input *AgentInput, options ...AgentRunOption) *AsyncIterator[*AgentEvent] {
-				innerIter := wrapped.Run(ctx, input, options...)
-				iter, gen := NewAsyncIteratorPair[*AgentEvent]()
-				go func() {
-					defer gen.Close()
-					for {
-						ev, ok := innerIter.Next()
-						if !ok {
-							break
-						}
-						if ev.Action != nil && ev.Action.Exit {
-							sawExitFromDeep = true
-						}
-						if ev.Action != nil && ev.Action.TransferToAgent != nil {
-							transferGenerated = true
-						}
-						gen.Send(ev)
-					}
-				}()
-				return iter
-			},
-		}
-
-		outerFlowAgent := toFlowAgent(ctx, outerAgent)
-
-		runner := NewRunner(ctx, RunnerConfig{
-			Agent:           outerFlowAgent,
-			EnableStreaming: true,
-			CheckPointStore: store,
-		})
-
-		iter := runner.Run(ctx, []Message{schema.UserMessage("test")}, WithCheckPointID("cp1"))
-
-		for {
-			_, ok := iter.Next()
-			if !ok {
-				break
-			}
-		}
-
-		assert.True(t, sawExitFromDeep, "should see exit event from deep agent")
-		assert.True(t, transferGenerated, "transfer should be generated because exit is from nested runner scope (deep), not current scope (middle)")
-	})
-
-	t.Run("flowagent_exit_from_current_scope_skips_transfer", func(t *testing.T) {
-		ctx := context.Background()
-		store := newDTTestStore()
-
-		middleAgent := &dtTestAgent{
-			name: "middle",
-			runFn: func(ctx context.Context, input *AgentInput, options ...AgentRunOption) *AsyncIterator[*AgentEvent] {
-				iter, gen := NewAsyncIteratorPair[*AgentEvent]()
-				go func() {
-					defer gen.Close()
-					ev := EventFromMessage(schema.AssistantMessage("middle exits directly", nil), nil, schema.Assistant, "")
-					ev.Action = &AgentAction{Exit: true}
-					gen.Send(ev)
-				}()
-				return iter
-			},
-		}
-
-		middleFlowAgent := toFlowAgent(ctx, middleAgent)
-
-		wrapped := AgentWithDeterministicTransferTo(ctx, &DeterministicTransferConfig{
-			Agent:        middleFlowAgent,
-			ToAgentNames: []string{"next_agent"},
-		})
-
-		var sawExit bool
-		var transferGenerated bool
-
-		outerAgent := &dtTestAgent{
-			name: "outer",
-			runFn: func(ctx context.Context, input *AgentInput, options ...AgentRunOption) *AsyncIterator[*AgentEvent] {
-				innerIter := wrapped.Run(ctx, input, options...)
-				iter, gen := NewAsyncIteratorPair[*AgentEvent]()
-				go func() {
-					defer gen.Close()
-					for {
-						ev, ok := innerIter.Next()
-						if !ok {
-							break
-						}
-						if ev.Action != nil && ev.Action.Exit {
-							sawExit = true
-						}
-						if ev.Action != nil && ev.Action.TransferToAgent != nil {
-							transferGenerated = true
-						}
-						gen.Send(ev)
-					}
-				}()
-				return iter
-			},
-		}
-
-		outerFlowAgent := toFlowAgent(ctx, outerAgent)
-
-		runner := NewRunner(ctx, RunnerConfig{
-			Agent:           outerFlowAgent,
-			EnableStreaming: true,
-			CheckPointStore: store,
-		})
-
-		iter := runner.Run(ctx, []Message{schema.UserMessage("test")}, WithCheckPointID("cp1"))
-
-		for {
-			_, ok := iter.Next()
-			if !ok {
-				break
-			}
-		}
-
-		assert.True(t, sawExit, "should see exit event from middle agent")
-		assert.False(t, transferGenerated, "transfer should NOT be generated because exit is from current runner scope")
-	})
-
-	t.Run("non_flowagent_exit_from_nested_runner_does_not_skip_transfer", func(t *testing.T) {
-		ctx := context.Background()
-		store := newDTTestStore()
-
-		deepAgent := &dtTestAgent{
-			name: "deep",
-			runFn: func(ctx context.Context, input *AgentInput, options ...AgentRunOption) *AsyncIterator[*AgentEvent] {
-				iter, gen := NewAsyncIteratorPair[*AgentEvent]()
-				go func() {
-					defer gen.Close()
-					ev := EventFromMessage(schema.AssistantMessage("deep exits", nil), nil, schema.Assistant, "")
-					ev.Action = &AgentAction{Exit: true}
-					gen.Send(ev)
-				}()
-				return iter
-			},
-		}
-
-		middleAgent := &dtTestAgent{
-			name: "middle",
-			runFn: func(ctx context.Context, input *AgentInput, options ...AgentRunOption) *AsyncIterator[*AgentEvent] {
-				innerRunner := NewRunner(ctx, RunnerConfig{
-					Agent:           toFlowAgent(ctx, deepAgent),
-					EnableStreaming: true,
-					CheckPointStore: store,
-				})
-
-				innerIter := innerRunner.Run(ctx, []Message{schema.UserMessage("test")}, withSharedParentSession())
-
-				iter, gen := NewAsyncIteratorPair[*AgentEvent]()
-				go func() {
-					defer gen.Close()
-					for {
-						ev, ok := innerIter.Next()
-						if !ok {
-							break
-						}
-						gen.Send(ev)
-					}
-				}()
-				return iter
-			},
-		}
-
-		wrapped := AgentWithDeterministicTransferTo(ctx, &DeterministicTransferConfig{
-			Agent:        middleAgent,
-			ToAgentNames: []string{"next_agent"},
-		})
-
-		var sawExitFromDeep bool
-		var transferGenerated bool
-		var exitEventRunPath []RunStep
-
-		outerAgent := &dtTestAgent{
-			name: "outer",
-			runFn: func(ctx context.Context, input *AgentInput, options ...AgentRunOption) *AsyncIterator[*AgentEvent] {
-				innerIter := wrapped.Run(ctx, input, options...)
-				iter, gen := NewAsyncIteratorPair[*AgentEvent]()
-				go func() {
-					defer gen.Close()
-					for {
-						ev, ok := innerIter.Next()
-						if !ok {
-							break
-						}
-						if ev.Action != nil && ev.Action.Exit {
-							sawExitFromDeep = true
-							exitEventRunPath = ev.RunPath
-						}
-						if ev.Action != nil && ev.Action.TransferToAgent != nil {
-							transferGenerated = true
-						}
-						gen.Send(ev)
-					}
-				}()
-				return iter
-			},
-		}
-
-		outerFlowAgent := toFlowAgent(ctx, outerAgent)
-
-		runner := NewRunner(ctx, RunnerConfig{
-			Agent:           outerFlowAgent,
-			EnableStreaming: true,
-			CheckPointStore: store,
-		})
-
-		iter := runner.Run(ctx, []Message{schema.UserMessage("test")}, WithCheckPointID("cp1"))
-
-		for {
-			_, ok := iter.Next()
-			if !ok {
-				break
-			}
-		}
-
-		assert.True(t, sawExitFromDeep, "should see exit event from deep agent")
-		assert.True(t, transferGenerated, "transfer should be generated because exit is from nested runner scope (deep), not current scope (middle)")
-
-		var hasDeepRunnerInPath bool
-		for _, step := range exitEventRunPath {
-			if step.runnerName == "deep" {
-				hasDeepRunnerInPath = true
-				break
-			}
-		}
-		assert.True(t, hasDeepRunnerInPath, "exit event RunPath should contain deep runner scope")
-	})
-
-	t.Run("non_flowagent_exit_from_current_runner_skips_transfer", func(t *testing.T) {
-		ctx := context.Background()
-		store := newDTTestStore()
-
-		middleAgent := &dtTestAgent{
-			name: "middle",
-			runFn: func(ctx context.Context, input *AgentInput, options ...AgentRunOption) *AsyncIterator[*AgentEvent] {
-				iter, gen := NewAsyncIteratorPair[*AgentEvent]()
-				go func() {
-					defer gen.Close()
-					ev := EventFromMessage(schema.AssistantMessage("middle exits directly", nil), nil, schema.Assistant, "")
-					ev.Action = &AgentAction{Exit: true}
-					gen.Send(ev)
-				}()
-				return iter
-			},
-		}
-
-		wrapped := AgentWithDeterministicTransferTo(ctx, &DeterministicTransferConfig{
-			Agent:        middleAgent,
-			ToAgentNames: []string{"next_agent"},
-		})
-
-		var sawExit bool
-		var transferGenerated bool
-
-		outerAgent := &dtTestAgent{
-			name: "outer",
-			runFn: func(ctx context.Context, input *AgentInput, options ...AgentRunOption) *AsyncIterator[*AgentEvent] {
-				innerIter := wrapped.Run(ctx, input, options...)
-				iter, gen := NewAsyncIteratorPair[*AgentEvent]()
-				go func() {
-					defer gen.Close()
-					for {
-						ev, ok := innerIter.Next()
-						if !ok {
-							break
-						}
-						if ev.Action != nil && ev.Action.Exit {
-							sawExit = true
-						}
-						if ev.Action != nil && ev.Action.TransferToAgent != nil {
-							transferGenerated = true
-						}
-						gen.Send(ev)
-					}
-				}()
-				return iter
-			},
-		}
-
-		outerFlowAgent := toFlowAgent(ctx, outerAgent)
-
-		runner := NewRunner(ctx, RunnerConfig{
-			Agent:           outerFlowAgent,
-			EnableStreaming: true,
-			CheckPointStore: store,
-		})
-
-		iter := runner.Run(ctx, []Message{schema.UserMessage("test")}, WithCheckPointID("cp1"))
-
-		for {
-			_, ok := iter.Next()
-			if !ok {
-				break
-			}
-		}
-
-		assert.True(t, sawExit, "should see exit event from middle agent")
-		assert.False(t, transferGenerated, "transfer should NOT be generated because exit is from current runner scope")
-	})
-}
-
-func TestRunStepJSONRoundTrip(t *testing.T) {
-	tests := []struct {
-		name string
-		step RunStep
-	}{
-		{"agent step", RunStep{agentName: "myAgent"}},
-		{"runner step", RunStep{runnerName: "myRunner"}},
-		{"empty step", RunStep{}},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			data, err := sonic.Marshal(&tt.step)
-			assert.NoError(t, err)
-
-			var decoded RunStep
-			err = sonic.Unmarshal(data, &decoded)
-			assert.NoError(t, err)
-			assert.True(t, tt.step.Equals(decoded), "expected %+v, got %+v", tt.step, decoded)
-		})
-	}
-}
-
-func TestRunStepJSONRoundTripSlice(t *testing.T) {
-	steps := []RunStep{
-		{runnerName: "outer"},
-		{agentName: "supervisor"},
-		{agentName: "worker"},
-	}
-
-	data, err := sonic.Marshal(steps)
-	assert.NoError(t, err)
-
-	var decoded []RunStep
-	err = sonic.Unmarshal(data, &decoded)
-	assert.NoError(t, err)
-
-	assert.Len(t, decoded, len(steps))
-	for i := range steps {
-		assert.True(t, steps[i].Equals(decoded[i]), "step %d: expected %+v, got %+v", i, steps[i], decoded[i])
-	}
 }

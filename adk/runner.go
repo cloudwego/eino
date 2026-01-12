@@ -68,24 +68,6 @@ func NewRunner(_ context.Context, conf RunnerConfig) *Runner {
 	}
 }
 
-func (r *Runner) ctxWithNewRunCtx(ctx context.Context, input *AgentInput, sharedParentSession bool) context.Context {
-	var session *runSession
-	if sharedParentSession {
-		if parentSession := getSession(ctx); parentSession != nil {
-			session = &runSession{
-				Values:    parentSession.Values,
-				valuesMtx: parentSession.valuesMtx,
-			}
-		}
-	}
-	if session == nil {
-		session = newRunSession()
-	}
-	return setRunCtx(ctx, &runContext{Session: session, RootInput: input, RunPath: []RunStep{
-		{runnerName: r.a.Name(ctx)},
-	}})
-}
-
 // Run starts a new execution of the agent with a given set of messages.
 // It returns an iterator that yields agent events as they occur.
 // If the Runner was configured with a CheckPointStore, it will automatically save the agent's state
@@ -101,7 +83,7 @@ func (r *Runner) Run(ctx context.Context, messages []Message,
 		EnableStreaming: r.enableStreaming,
 	}
 
-	ctx = r.ctxWithNewRunCtx(ctx, input, o.sharedParentSession)
+	ctx = ctxWithNewRunCtx(ctx, input, o.sharedParentSession)
 
 	AddSessionValues(ctx, o.sessionValues)
 

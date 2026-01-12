@@ -380,6 +380,22 @@ func ClearRunCtx(ctx context.Context) context.Context {
 	return context.WithValue(ctx, runCtxKey{}, nil)
 }
 
+func ctxWithNewRunCtx(ctx context.Context, input *AgentInput, sharedParentSession bool) context.Context {
+	var session *runSession
+	if sharedParentSession {
+		if parentSession := getSession(ctx); parentSession != nil {
+			session = &runSession{
+				Values:    parentSession.Values,
+				valuesMtx: parentSession.valuesMtx,
+			}
+		}
+	}
+	if session == nil {
+		session = newRunSession()
+	}
+	return setRunCtx(ctx, &runContext{Session: session, RootInput: input})
+}
+
 func getSession(ctx context.Context) *runSession {
 	runCtx := getRunCtx(ctx)
 	if runCtx != nil {

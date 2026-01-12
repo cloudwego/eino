@@ -170,6 +170,12 @@ func (at *agentTool) InvokableRun(ctx context.Context, argumentsInJSON string, o
 
 		if gen != nil {
 			if event.Action == nil || event.Action.Interrupted == nil {
+				if parentRunCtx := getRunCtx(ctx); parentRunCtx != nil && len(parentRunCtx.RunPath) > 0 {
+					rp := make([]RunStep, 0, len(parentRunCtx.RunPath)+len(event.RunPath))
+					rp = append(rp, parentRunCtx.RunPath...)
+					rp = append(rp, event.RunPath...)
+					event.RunPath = rp
+				}
 				tmp := copyAgentEvent(event)
 				gen.Send(event)
 				event = tmp

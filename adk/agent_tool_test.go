@@ -694,11 +694,9 @@ func TestNestedAgentTool_RunPath(t *testing.T) {
 		t.Fatalf("no inner2 event found in ephemerals")
 	}
 
-	var got []string
+	got := make([]string, len(target.RunPath))
 	for i := range target.RunPath {
-		if target.RunPath[i].agentName != "" {
-			got = append(got, target.RunPath[i].agentName)
-		}
+		got[i] = target.RunPath[i].agentName
 	}
 	want := []string{"outer", "inner", "inner2"}
 	if len(got) != len(want) {
@@ -958,11 +956,9 @@ func TestSequentialWorkflow_WithChatModelAgentTool_NestedRunPathAndSessions(t *t
 		t.Fatalf("no inner2 event found")
 	}
 
-	var got []string
+	got := make([]string, len(target.RunPath))
 	for i := range target.RunPath {
-		if target.RunPath[i].agentName != "" {
-			got = append(got, target.RunPath[i].agentName)
-		}
+		got[i] = target.RunPath[i].agentName
 	}
 	want := []string{"outer-seq", "inner", "inner2"}
 	if len(got) != len(want) {
@@ -994,60 +990,6 @@ func TestSequentialWorkflow_WithChatModelAgentTool_NestedRunPathAndSessions(t *t
 		if w.AgentName != "inner2" {
 			t.Fatalf("inner2 session contains non-inner2 event: %s", w.AgentName)
 		}
-	}
-}
-
-type badAgent struct{ parent string }
-
-func (b *badAgent) Name(context.Context) string        { return "bad" }
-func (b *badAgent) Description(context.Context) string { return "misuse" }
-func (b *badAgent) Run(ctx context.Context, input *AgentInput, _ ...AgentRunOption) *AsyncIterator[*AgentEvent] {
-	it, gen := NewAsyncIteratorPair[*AgentEvent]()
-	go func() {
-		ev := EventFromMessage(schema.AssistantMessage("x", nil), nil, schema.Assistant, "")
-		ev.RunPath = []RunStep{{agentName: b.parent}, {agentName: "bad"}}
-		gen.Send(ev)
-		gen.Close()
-	}()
-	return it
-}
-
-func TestRunPathMisuse_PrependedCausingDuplication(t *testing.T) {
-	ctx := context.Background()
-	bad := &badAgent{parent: "outer"}
-	r := NewRunner(ctx, RunnerConfig{Agent: bad, EnableStreaming: false, CheckPointStore: newBridgeStore()})
-	it := r.Run(ctx, []Message{schema.UserMessage("q")})
-
-	var last *AgentEvent
-	for {
-		ev, ok := it.Next()
-		if !ok {
-			break
-		}
-		last = ev
-	}
-	if last == nil {
-		t.Fatalf("no event emitted")
-	}
-
-	var got []string
-	for i := range last.RunPath {
-		if last.RunPath[i].agentName != "" {
-			got = append(got, last.RunPath[i].agentName)
-		}
-	}
-	want := []string{"bad", "outer", "bad"}
-	if len(got) != len(want) {
-		t.Fatalf("unexpected runPath len: got %d want %d: %+v", len(got), len(want), got)
-	}
-	for i := range want {
-		if got[i] != want[i] {
-			t.Fatalf("runPath mismatch at %d: got %s want %s; full: %+v", i, got[i], want[i], got)
-		}
-	}
-
-	if last.RunPath[0].runnerName != "bad" {
-		t.Fatalf("expected runner step prepended, but got runnerName: %s", last.RunPath[0].runnerName)
 	}
 }
 
