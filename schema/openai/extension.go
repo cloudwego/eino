@@ -200,6 +200,12 @@ func ConcatResponseMetaExtensions(chunks []*ResponseMetaExtension) (*ResponseMet
 		if ext.ServiceTier != "" {
 			ret.ServiceTier = ext.ServiceTier
 		}
+		if ext.CreatedAt != 0 {
+			ret.CreatedAt = ext.CreatedAt
+		}
+		if ext.PromptCacheRetention != "" {
+			ret.PromptCacheRetention = ext.PromptCacheRetention
+		}
 	}
 
 	return ret, nil
