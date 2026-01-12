@@ -775,3 +775,46 @@ func TestDeterministicTransferNestedRunnerExit(t *testing.T) {
 		assert.False(t, transferGenerated, "transfer should NOT be generated because exit is from current runner scope")
 	})
 }
+
+func TestRunStepJSONRoundTrip(t *testing.T) {
+	tests := []struct {
+		name string
+		step RunStep
+	}{
+		{"agent step", RunStep{agentName: "myAgent"}},
+		{"runner step", RunStep{runnerName: "myRunner"}},
+		{"empty step", RunStep{}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			data, err := sonic.Marshal(&tt.step)
+			assert.NoError(t, err)
+
+			var decoded RunStep
+			err = sonic.Unmarshal(data, &decoded)
+			assert.NoError(t, err)
+			assert.True(t, tt.step.Equals(decoded), "expected %+v, got %+v", tt.step, decoded)
+		})
+	}
+}
+
+func TestRunStepJSONRoundTripSlice(t *testing.T) {
+	steps := []RunStep{
+		{runnerName: "outer"},
+		{agentName: "supervisor"},
+		{agentName: "worker"},
+	}
+
+	data, err := sonic.Marshal(steps)
+	assert.NoError(t, err)
+
+	var decoded []RunStep
+	err = sonic.Unmarshal(data, &decoded)
+	assert.NoError(t, err)
+
+	assert.Len(t, decoded, len(steps))
+	for i := range steps {
+		assert.True(t, steps[i].Equals(decoded[i]), "step %d: expected %+v, got %+v", i, steps[i], decoded[i])
+	}
+}

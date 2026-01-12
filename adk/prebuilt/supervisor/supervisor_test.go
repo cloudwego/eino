@@ -22,7 +22,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/bytedance/sonic"
 	"github.com/stretchr/testify/assert"
 	"go.uber.org/mock/gomock"
 
@@ -653,8 +652,6 @@ func TestNestedSupervisorExit(t *testing.T) {
 	foundTransferBackToTopAfterExit := false
 
 	for _, e := range events {
-		m, _ := sonic.MarshalIndent(e, " ", " ")
-		fmt.Println(string(m))
 		if e.Action != nil {
 			if e.Action.Exit {
 				foundExit = true
@@ -807,9 +804,6 @@ func TestChatModelAgentInternalEventsExit(t *testing.T) {
 	foundTransferBack := false
 
 	for _, e := range events {
-		m, _ := sonic.MarshalIndent(e, " ", " ")
-		fmt.Println(string(m))
-
 		// Check for InnerAgent exit event (propagated as internal event)
 		if e.AgentName == "InnerAgent" && e.Action != nil && e.Action.Exit {
 			foundInnerExit = true

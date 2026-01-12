@@ -18,7 +18,7 @@ package adk
 
 import (
 	"context"
-	"fmt"
+	"errors"
 	"runtime/debug"
 	"sync"
 
@@ -153,7 +153,7 @@ func resumeFlowAgentWithIsolatedSession(ctx context.Context, fa *flowAgent, info
 
 	state, ok := info.InterruptState.(*deterministicTransferState)
 	if !ok || state == nil {
-		return genErrorIter(fmt.Errorf("invalid interrupt state for flowAgent resume in deterministic transfer"))
+		return genErrorIter(errors.New("invalid interrupt state for flowAgent resume in deterministic transfer"))
 	}
 
 	parentSession := getSession(ctx)
@@ -228,7 +228,7 @@ func handleFlowAgentEvents(ctx context.Context, iter *AsyncIterator[*AgentEvent]
 		return
 	}
 
-	appendTransferEvents(generator, toAgentNames)
+	appendTransferEvents(ctx, generator, toAgentNames)
 }
 
 func appendTransferAction(ctx context.Context, aIter *AsyncIterator[*AgentEvent], generator *AsyncGenerator[*AgentEvent], toAgentNames []string) {
@@ -248,7 +248,7 @@ func appendTransferAction(ctx context.Context, aIter *AsyncIterator[*AgentEvent]
 		return
 	}
 
-	appendTransferEvents(generator, toAgentNames)
+	appendTransferEvents(ctx, generator, toAgentNames)
 }
 
 func processEventsWithTransfer(ctx context.Context, iter *AsyncIterator[*AgentEvent],
@@ -312,9 +312,9 @@ func processEventsWithTransfer(ctx context.Context, iter *AsyncIterator[*AgentEv
 	return interrupted, exit
 }
 
-func appendTransferEvents(generator *AsyncGenerator[*AgentEvent], toAgentNames []string) {
+func appendTransferEvents(ctx context.Context, generator *AsyncGenerator[*AgentEvent], toAgentNames []string) {
 	for _, toAgentName := range toAgentNames {
-		aMsg, tMsg := GenTransferMessages(context.Background(), toAgentName)
+		aMsg, tMsg := GenTransferMessages(ctx, toAgentName)
 		aEvent := EventFromMessage(aMsg, nil, schema.Assistant, "")
 		generator.Send(aEvent)
 		tEvent := EventFromMessage(tMsg, nil, schema.Tool, tMsg.ToolName)

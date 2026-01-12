@@ -23,6 +23,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"strings"
 
 	"github.com/cloudwego/eino/internal/core"
 	"github.com/cloudwego/eino/schema"
@@ -233,6 +234,21 @@ func (r *RunStep) MarshalJSON() ([]byte, error) {
 		return json.Marshal(r.runnerName + "(Runner)")
 	}
 	return json.Marshal(r.agentName)
+}
+
+func (r *RunStep) UnmarshalJSON(data []byte) error {
+	var s string
+	if err := json.Unmarshal(data, &s); err != nil {
+		return err
+	}
+	if strings.HasSuffix(s, "(Runner)") {
+		r.runnerName = strings.TrimSuffix(s, "(Runner)")
+		r.agentName = ""
+	} else {
+		r.agentName = s
+		r.runnerName = ""
+	}
+	return nil
 }
 
 type runStepSerialization struct {
