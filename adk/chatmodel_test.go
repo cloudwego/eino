@@ -25,6 +25,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"go.uber.org/mock/gomock"
 
+	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/components/tool"
 	"github.com/cloudwego/eino/compose"
 	mockModel "github.com/cloudwego/eino/internal/mock/components/model"
@@ -1182,4 +1183,117 @@ func (s *simpleToolForMiddlewareTest) InvokableRun(_ context.Context, _ string, 
 
 func (s *simpleToolForMiddlewareTest) StreamableRun(_ context.Context, _ string, _ ...tool.Option) (*schema.StreamReader[string], error) {
 	return schema.StreamReaderFromArray([]string{s.result}), nil
+}
+
+func TestGetComposeOptions(t *testing.T) {
+	t.Run("WithChatModelOptions", func(t *testing.T) {
+		ctx := context.Background()
+		ctrl := gomock.NewController(t)
+		cm := mockModel.NewMockToolCallingChatModel(ctrl)
+
+		var capturedTemperature float32
+		cm.EXPECT().Generate(gomock.Any(), gomock.Any(), gomock.Any()).
+			DoAndReturn(func(ctx context.Context, msgs []*schema.Message, opts ...model.Option) (*schema.Message, error) {
+				options := model.GetCommonOptions(&model.Options{}, opts...)
+				if options.Temperature != nil {
+					capturedTemperature = *options.Temperature
+				}
+				return schema.AssistantMessage("response", nil), nil
+			}).Times(1)
+
+		agent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+			Name:        "TestAgent",
+			Description: "Test agent",
+			Model:       cm,
+		})
+		assert.NoError(t, err)
+
+		temp := float32(0.7)
+		iter := agent.Run(ctx, &AgentInput{Messages: []Message{schema.UserMessage("test")}},
+			WithChatModelOptions([]model.Option{model.WithTemperature(temp)}))
+		for {
+			_, ok := iter.Next()
+			if !ok {
+				break
+			}
+		}
+
+		assert.Equal(t, temp, capturedTemperature, "Temperature should be passed through WithChatModelOptions")
+	})
+
+	t.Run("WithToolOptions", func(t *testing.T) {
+		ctx := context.Background()
+		ctrl := gomock.NewController(t)
+		cm := mockModel.NewMockToolCallingChatModel(ctrl)
+
+		var toolOptionsCaptured bool
+		testTool := &toolOptionCapturingTool{
+			name: "test_tool",
+			onRun: func(opts []tool.Option) {
+				if len(opts) > 0 {
+					toolOptionsCaptured = true
+				}
+			},
+		}
+		info, _ := testTool.Info(ctx)
+
+		cm.EXPECT().WithTools(gomock.Any()).Return(cm, nil).AnyTimes()
+		cm.EXPECT().Generate(gomock.Any(), gomock.Any(), gomock.Any()).
+			Return(schema.AssistantMessage("Using tool", []schema.ToolCall{
+				{ID: "call1", Function: schema.FunctionCall{Name: info.Name, Arguments: "{}"}},
+			}), nil).Times(1)
+		cm.EXPECT().Generate(gomock.Any(), gomock.Any(), gomock.Any()).
+			Return(schema.AssistantMessage("done", nil), nil).Times(1)
+
+		agent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+			Name:        "TestAgent",
+			Description: "Test agent",
+			Model:       cm,
+			ToolsConfig: ToolsConfig{
+				ToolsNodeConfig: compose.ToolsNodeConfig{
+					Tools: []tool.BaseTool{testTool},
+				},
+			},
+		})
+		assert.NoError(t, err)
+
+		iter := agent.Run(ctx, &AgentInput{Messages: []Message{schema.UserMessage("test")}},
+			WithToolOptions([]tool.Option{testToolOption("test_value")}))
+		for {
+			_, ok := iter.Next()
+			if !ok {
+				break
+			}
+		}
+
+		assert.True(t, toolOptionsCaptured, "Tool options should be passed through WithToolOptions")
+	})
+
+
+}
+
+type toolOptionCapturingTool struct {
+	name  string
+	onRun func(opts []tool.Option)
+}
+
+func (t *toolOptionCapturingTool) Info(_ context.Context) (*schema.ToolInfo, error) {
+	return &schema.ToolInfo{Name: t.name, Desc: t.name + " description"}, nil
+}
+
+func (t *toolOptionCapturingTool) InvokableRun(_ context.Context, _ string, opts ...tool.Option) (string, error) {
+	if t.onRun != nil {
+		t.onRun(opts)
+	}
+	return t.name + " result", nil
+}
+
+type testToolOptions struct {
+	value string
+}
+
+func testToolOption(value string) tool.Option {
+	return tool.WrapImplSpecificOptFn(func(o *testToolOptions) {
+		o.value = value
+	})
 }

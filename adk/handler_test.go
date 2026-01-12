@@ -34,10 +34,12 @@ import (
 
 type testToolCallWrapper struct {
 	BaseToolCallWrapper
-	name           string
-	beforeFn       func()
-	afterFn        func()
-	modifyResultFn func(string) string
+	name             string
+	beforeFn         func()
+	afterFn          func()
+	streamBeforeFn   func()
+	streamAfterFn    func()
+	modifyResultFn   func(string) string
 }
 
 func (h *testToolCallWrapper) WrapInvoke(ctx context.Context, call *ToolCall, next func(context.Context, *ToolCall) (*ToolResult, error)) (*ToolResult, error) {
@@ -55,12 +57,12 @@ func (h *testToolCallWrapper) WrapInvoke(ctx context.Context, call *ToolCall, ne
 }
 
 func (h *testToolCallWrapper) WrapStream(ctx context.Context, call *ToolCall, next func(context.Context, *ToolCall) (*StreamToolResult, error)) (*StreamToolResult, error) {
-	if h.beforeFn != nil {
-		h.beforeFn()
+	if h.streamBeforeFn != nil {
+		h.streamBeforeFn()
 	}
 	result, err := next(ctx, call)
-	if h.afterFn != nil {
-		h.afterFn()
+	if h.streamAfterFn != nil {
+		h.streamAfterFn()
 	}
 	return result, err
 }
@@ -501,6 +503,96 @@ func TestToolCallWrapperHandlers(t *testing.T) {
 		assert.Equal(t, []string{"wrapper1-before", "wrapper2-before", "wrapper2-after", "wrapper1-after"}, callOrder)
 	})
 
+	t.Run("StreamingToolWrappersPipeline", func(t *testing.T) {
+		ctx := context.Background()
+		ctrl := gomock.NewController(t)
+		cm := mockModel.NewMockToolCallingChatModel(ctrl)
+
+		testTool := &streamingNamedTool{name: "streaming_tool"}
+		info, _ := testTool.Info(ctx)
+
+		var callOrder []string
+		var mu sync.Mutex
+
+		cm.EXPECT().WithTools(gomock.Any()).Return(cm, nil).AnyTimes()
+		cm.EXPECT().Stream(gomock.Any(), gomock.Any(), gomock.Any()).
+			Return(schema.StreamReaderFromArray([]*schema.Message{
+				schema.AssistantMessage("Using tool", []schema.ToolCall{
+					{ID: "call1", Function: schema.FunctionCall{Name: info.Name, Arguments: "{}"}},
+				}),
+			}), nil).Times(1)
+		cm.EXPECT().Stream(gomock.Any(), gomock.Any(), gomock.Any()).
+			Return(schema.StreamReaderFromArray([]*schema.Message{
+				schema.AssistantMessage("done", nil),
+			}), nil).Times(1)
+
+		agent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+			Name:        "TestAgent",
+			Description: "Test agent",
+			Model:       cm,
+			ToolsConfig: ToolsConfig{
+				ToolsNodeConfig: compose.ToolsNodeConfig{
+					Tools: []tool.BaseTool{testTool},
+				},
+			},
+			Handlers: []AgentHandler{
+				WithToolCallWrapper(&testToolCallWrapper{
+					name: "wrapper1",
+					streamBeforeFn: func() {
+						mu.Lock()
+						callOrder = append(callOrder, "wrapper1-stream-before")
+						mu.Unlock()
+					},
+					streamAfterFn: func() {
+						mu.Lock()
+						callOrder = append(callOrder, "wrapper1-stream-after")
+						mu.Unlock()
+					},
+				}),
+				WithToolCallWrapper(&testToolCallWrapper{
+					name: "wrapper2",
+					streamBeforeFn: func() {
+						mu.Lock()
+						callOrder = append(callOrder, "wrapper2-stream-before")
+						mu.Unlock()
+					},
+					streamAfterFn: func() {
+						mu.Lock()
+						callOrder = append(callOrder, "wrapper2-stream-after")
+						mu.Unlock()
+					},
+				}),
+			},
+		})
+		assert.NoError(t, err)
+
+		r := NewRunner(ctx, RunnerConfig{Agent: agent, EnableStreaming: true, CheckPointStore: newBridgeStore()})
+		iter := r.Run(ctx, []Message{schema.UserMessage("test")})
+
+		var hasStreamingToolResult bool
+		for {
+			event, ok := iter.Next()
+			if !ok {
+				break
+			}
+			if event.Output != nil && event.Output.MessageOutput != nil &&
+				event.Output.MessageOutput.IsStreaming &&
+				event.Output.MessageOutput.Role == schema.Tool {
+				hasStreamingToolResult = true
+				for {
+					_, err := event.Output.MessageOutput.MessageStream.Recv()
+					if err != nil {
+						break
+					}
+				}
+			}
+		}
+
+		assert.True(t, hasStreamingToolResult, "Should have streaming tool result")
+		assert.Equal(t, []string{"wrapper1-stream-before", "wrapper2-stream-before", "wrapper2-stream-after", "wrapper1-stream-after"}, callOrder,
+			"Streaming wrappers should be called in correct order")
+	})
+
 	t.Run("ToolWrapperCanModifyResult", func(t *testing.T) {
 		ctx := context.Background()
 		ctrl := gomock.NewController(t)
@@ -716,6 +808,22 @@ func (t *namedTool) Info(_ context.Context) (*schema.ToolInfo, error) {
 
 func (t *namedTool) InvokableRun(_ context.Context, _ string, _ ...tool.Option) (string, error) {
 	return t.name + " result", nil
+}
+
+type streamingNamedTool struct {
+	name string
+}
+
+func (t *streamingNamedTool) Info(_ context.Context) (*schema.ToolInfo, error) {
+	return &schema.ToolInfo{Name: t.name, Desc: t.name + " description"}, nil
+}
+
+func (t *streamingNamedTool) InvokableRun(_ context.Context, _ string, _ ...tool.Option) (string, error) {
+	return t.name + " result", nil
+}
+
+func (t *streamingNamedTool) StreamableRun(_ context.Context, _ string, _ ...tool.Option) (*schema.StreamReader[string], error) {
+	return schema.StreamReaderFromArray([]string{t.name + " stream result"}), nil
 }
 
 type callableTool struct {

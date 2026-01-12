@@ -134,8 +134,8 @@ func getReturnDirectlyToolCallID(ctx context.Context) (string, bool) {
 	return toolCallID, hasReturnDirectly
 }
 
-func newReact(ctx context.Context, config *reactConfig) (reactGraph, error) {
-	genState := func(ctx context.Context) *State {
+func genReactState(config *reactConfig) func(ctx context.Context) *State {
+	return func(ctx context.Context) *State {
 		return &State{
 			ToolGenActions: map[string]*AgentAction{},
 			AgentName:      config.agentName,
@@ -147,14 +147,16 @@ func newReact(ctx context.Context, config *reactConfig) (reactGraph, error) {
 			}(),
 		}
 	}
+}
 
+func newReact(ctx context.Context, config *reactConfig) (reactGraph, error) {
 	const (
 		initNode_  = "Init"
 		chatModel_ = "ChatModel"
 		toolNode_  = "ToolNode"
 	)
 
-	g := compose.NewGraph[*reactInput, Message](compose.WithGenLocalState(genState))
+	g := compose.NewGraph[*reactInput, Message](compose.WithGenLocalState(genReactState(config)))
 
 	initLambda := func(ctx context.Context, input *reactInput) ([]Message, error) {
 		_ = compose.ProcessState(ctx, func(ctx context.Context, st *State) error {

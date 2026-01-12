@@ -1829,11 +1829,21 @@ type twoToolCallModel struct {
 	returnDirectlyToolName string
 	interruptingToolName   string
 	callCount              int
+	receivedTools          []*schema.ToolInfo
+	mu                     sync.Mutex
 }
 
-func (m *twoToolCallModel) Generate(_ context.Context, _ []*schema.Message, _ ...model.Option) (*schema.Message, error) {
+func (m *twoToolCallModel) Generate(_ context.Context, _ []*schema.Message, opts ...model.Option) (*schema.Message, error) {
+	m.mu.Lock()
 	m.callCount++
-	if m.callCount == 1 {
+	callNum := m.callCount
+	options := model.GetCommonOptions(&model.Options{}, opts...)
+	if options.Tools != nil {
+		m.receivedTools = options.Tools
+	}
+	m.mu.Unlock()
+
+	if callNum == 1 {
 		return &schema.Message{
 			Role:    schema.Assistant,
 			Content: "",
@@ -1868,11 +1878,33 @@ func (m *twoToolCallModel) WithTools(_ []*schema.ToolInfo) (model.ToolCallingCha
 	return m, nil
 }
 
+func (m *twoToolCallModel) GetReceivedTools() []*schema.ToolInfo {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.receivedTools
+}
+
+type dynamicTool struct {
+	name string
+}
+
+func (t *dynamicTool) Info(_ context.Context) (*schema.ToolInfo, error) {
+	return &schema.ToolInfo{
+		Name: t.name,
+		Desc: "A dynamically added tool",
+	}, nil
+}
+
+func (t *dynamicTool) InvokableRun(_ context.Context, _ string, _ ...tool.Option) (string, error) {
+	return "dynamic tool result", nil
+}
+
 func TestReturnDirectlyEventSentAfterResume(t *testing.T) {
 	ctx := context.Background()
 
 	returnDirectlyToolName := "return_directly_tool"
 	interruptingToolName := "interrupting_tool"
+	dynamicToolName := "dynamic_tool"
 
 	mdl := &twoToolCallModel{
 		returnDirectlyToolName: returnDirectlyToolName,
@@ -1893,6 +1925,9 @@ func TestReturnDirectlyEventSentAfterResume(t *testing.T) {
 			ReturnDirectly: map[string]struct{}{
 				returnDirectlyToolName: {},
 			},
+		},
+		Handlers: []AgentHandler{
+			WithTools(&dynamicTool{name: dynamicToolName}),
 		},
 	})
 	assert.NoError(t, err)
@@ -1920,6 +1955,15 @@ func TestReturnDirectlyEventSentAfterResume(t *testing.T) {
 	assert.NotNil(t, interruptEvent, "Should have an interrupt event")
 	assert.NotEmpty(t, interruptEvent.Action.Interrupted.InterruptContexts)
 
+	receivedToolsBeforeResume := mdl.GetReceivedTools()
+	var hasDynamicToolBeforeResume bool
+	for _, ti := range receivedToolsBeforeResume {
+		if ti.Name == dynamicToolName {
+			hasDynamicToolBeforeResume = true
+		}
+	}
+	assert.True(t, hasDynamicToolBeforeResume, "Dynamic tool should be in tool list before interrupt")
+
 	interruptID := interruptEvent.Action.Interrupted.InterruptContexts[0].ID
 	resumeIter, err := runner.ResumeWithParams(ctx, "test_checkpoint", &ResumeParams{
 		Targets: map[string]any{
@@ -1946,4 +1990,13 @@ func TestReturnDirectlyEventSentAfterResume(t *testing.T) {
 		}
 	}
 	assert.True(t, hasReturnDirectlyEvent, "ReturnDirectlyEvent should be sent after resume")
+
+	receivedToolsAfterResume := mdl.GetReceivedTools()
+	var hasDynamicToolAfterResume bool
+	for _, ti := range receivedToolsAfterResume {
+		if ti.Name == dynamicToolName {
+			hasDynamicToolAfterResume = true
+		}
+	}
+	assert.True(t, hasDynamicToolAfterResume, "Dynamic tool should be in tool list after resume (bc.toolUpdated path)")
 }
