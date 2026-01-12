@@ -194,7 +194,7 @@ func (w *eventSenderModelWrapper) WrapGenerate(ctx context.Context, call *ModelC
 	}
 
 	if gen == nil {
-		return nil, errors.New("generator is nil when sending event in WrapGenerate")
+		return nil, errors.New("generator is nil when sending event in WrapGenerate: ensure agent state is properly initialized")
 	}
 
 	event := EventFromMessage(result.Message, nil, schema.Assistant, "")
@@ -225,7 +225,7 @@ func (w *eventSenderModelWrapper) WrapStream(ctx context.Context, call *ModelCal
 
 	if gen == nil {
 		result.Stream.Close()
-		return nil, errors.New("generator is nil when sending event in WrapStream")
+		return nil, errors.New("generator is nil when sending event in WrapStream: ensure agent state is properly initialized")
 	}
 
 	streams := result.Stream.Copy(2)
@@ -251,7 +251,7 @@ func popToolGenAction(ctx context.Context, toolName string) *AgentAction {
 	toolCallID := compose.GetToolCallID(ctx)
 
 	var action *AgentAction
-	err := compose.ProcessState(ctx, func(ctx context.Context, st *State) error {
+	_ = compose.ProcessState(ctx, func(ctx context.Context, st *State) error {
 		if len(toolCallID) > 0 {
 			if a := st.ToolGenActions[toolCallID]; a != nil {
 				action = a
@@ -267,10 +267,6 @@ func popToolGenAction(ctx context.Context, toolName string) *AgentAction {
 
 		return nil
 	})
-
-	if err != nil {
-		panic("impossible")
-	}
 
 	return action
 }
