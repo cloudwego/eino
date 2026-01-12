@@ -29,21 +29,10 @@ type graphCompileOptions struct {
 	serializer           Serializer
 	interruptBeforeNodes []string
 	interruptAfterNodes  []string
-	checkpointConfig     *CheckpointConfig
 
 	eagerDisabled bool
 
 	mergeConfigs map[string]FanInMergeConfig
-}
-
-// CheckpointConfig contains configuration options for checkpoint behavior.
-// This configuration is inherited by subgraphs unless explicitly overridden.
-type CheckpointConfig struct {
-	// PersistRerunInput enables persisting the original input for rerun nodes in checkpoint.
-	// When enabled, stream inputs are tee'd before consumption so they can be persisted
-	// and restored when resuming from an interrupt.
-	// When disabled (default), rerun nodes receive zero/empty values on resume for backward compatibility.
-	PersistRerunInput bool
 }
 
 func newGraphCompileOptions(opts ...GraphCompileOption) *graphCompileOptions {
@@ -132,16 +121,6 @@ type FanInMergeConfig struct {
 func WithFanInMergeConfig(confs map[string]FanInMergeConfig) GraphCompileOption {
 	return func(o *graphCompileOptions) {
 		o.mergeConfigs = confs
-	}
-}
-
-// WithCheckpointConfig sets the checkpoint configuration for the graph.
-// This configuration is inherited by subgraphs.
-// CheckpointConfig.PersistRerunInput enables persisting rerun node inputs in checkpoint,
-// allowing nodes to be resumed with their original inputs after an interrupt.
-func WithCheckpointConfig(config CheckpointConfig) GraphCompileOption {
-	return func(o *graphCompileOptions) {
-		o.checkpointConfig = &config
 	}
 }
 

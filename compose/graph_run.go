@@ -77,7 +77,6 @@ type runner struct {
 	preBranchHandlerManager *preBranchHandlerManager
 
 	checkPointer         *checkPointer
-	checkpointConfig     *CheckpointConfig
 	interruptBeforeNodes []string
 	interruptAfterNodes  []string
 
@@ -912,18 +911,13 @@ func (r *runner) calculateBranch(ctx context.Context, curNodeKey string, startCh
 }
 
 func (r *runner) initTaskManager(runWrapper runnableCallWrapper, cancelVal *graphCancelChanVal, opts ...Option) *taskManager {
-	checkpointConfig := r.checkpointConfig
-	if cancelVal != nil && checkpointConfig == nil {
-		checkpointConfig = &CheckpointConfig{PersistRerunInput: true}
-	}
-
 	tm := &taskManager{
-		runWrapper:       runWrapper,
-		opts:             opts,
-		needAll:          !r.eager,
-		done:             internal.NewUnboundedChan[*task](),
-		runningTasks:     make(map[string]*task),
-		checkpointConfig: checkpointConfig,
+		runWrapper:        runWrapper,
+		opts:              opts,
+		needAll:           !r.eager,
+		done:              internal.NewUnboundedChan[*task](),
+		runningTasks:      make(map[string]*task),
+		persistRerunInput: cancelVal != nil,
 	}
 	if cancelVal != nil {
 		tm.cancelCh = cancelVal.ch

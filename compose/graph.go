@@ -696,15 +696,6 @@ func (g *graph) compile(ctx context.Context, opt *graphCompileOptions) (*composa
 	for name, node := range g.nodes {
 		node.beforeChildGraphCompile(name, key2SubGraphs)
 
-		if opt != nil && opt.checkpointConfig != nil && node.g != nil {
-			if node.nodeInfo.compileOption == nil {
-				node.nodeInfo.compileOption = &graphCompileOptions{}
-			}
-			if node.nodeInfo.compileOption.checkpointConfig == nil {
-				node.nodeInfo.compileOption.checkpointConfig = opt.checkpointConfig
-			}
-		}
-
 		r, err := node.compileIfNeeded(ctx)
 		if err != nil {
 			return nil, err
@@ -846,7 +837,6 @@ func (g *graph) compile(ctx context.Context, opt *graphCompileOptions) (*composa
 		outputPairs[START] = r.inputConvertStreamPair
 		r.checkPointer = newCheckPointer(inputPairs, outputPairs, opt.checkPointStore, opt.serializer)
 
-		r.checkpointConfig = opt.checkpointConfig
 		r.interruptBeforeNodes = opt.interruptBeforeNodes
 		r.interruptAfterNodes = opt.interruptAfterNodes
 		r.options = *opt

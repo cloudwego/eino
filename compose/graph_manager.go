@@ -270,7 +270,7 @@ type taskManager struct {
 	canceled bool
 	deadline *time.Time
 
-	checkpointConfig *CheckpointConfig
+	persistRerunInput bool
 }
 
 func (t *taskManager) execute(currentTask *task) {
@@ -293,15 +293,13 @@ func (t *taskManager) submit(tasks []*task) error {
 		return nil
 	}
 
-	persistRerunInput := t.checkpointConfig != nil && t.checkpointConfig.PersistRerunInput
-
 	// synchronously execute one task, if there are no other tasks in the task pool and meet one of the following conditions：
 	// 1. the new task is the only one
 	// 2. the task manager mode is set to needAll
 	for i := 0; i < len(tasks); i++ {
 		currentTask := tasks[i]
 
-		if persistRerunInput {
+		if t.persistRerunInput {
 			if sr, ok := currentTask.input.(streamReader); ok {
 				copies := sr.copy(2)
 				currentTask.originalInput, currentTask.input = copies[0], copies[1]
