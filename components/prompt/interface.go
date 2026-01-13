@@ -30,6 +30,7 @@ type ChatTemplate interface {
 	Format(ctx context.Context, vs map[string]any, opts ...Option) ([]*schema.Message, error)
 }
 
+// AgenticChatTemplate formats variables into a list of agentic messages according to a prompt schema.
 type AgenticChatTemplate interface {
 	Format(ctx context.Context, vs map[string]any, opts ...Option) ([]*schema.AgenticMessage, error)
 }

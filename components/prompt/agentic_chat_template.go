@@ -1,5 +1,5 @@
 /*
- * Copyright 2025 CloudWeGo Authors
+ * Copyright 2026 CloudWeGo Authors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -45,9 +45,9 @@ type DefaultAgenticChatTemplate struct {
 
 func (t *DefaultAgenticChatTemplate) Format(ctx context.Context, vs map[string]any, opts ...Option) (result []*schema.AgenticMessage, err error) {
 	ctx = callbacks.EnsureRunInfo(ctx, t.GetType(), components.ComponentOfAgenticPrompt)
-	ctx = callbacks.OnStart(ctx, &AgenticCallbackInput{
-		Variables: vs,
-		Templates: t.templates,
+	ctx = callbacks.OnStart(ctx, &CallbackInput{
+		Variables:        vs,
+		AgenticTemplates: t.templates,
 	})
 	defer func() {
 		if err != nil {
@@ -65,15 +65,15 @@ func (t *DefaultAgenticChatTemplate) Format(ctx context.Context, vs map[string]a
 		result = append(result, msgs...)
 	}
 
-	_ = callbacks.OnEnd(ctx, &AgenticCallbackOutput{
-		Result:    result,
-		Templates: t.templates,
+	_ = callbacks.OnEnd(ctx, &CallbackOutput{
+		AgenticResult:    result,
+		AgenticTemplates: t.templates,
 	})
 
 	return result, nil
 }
 
-// GetType returns the type of the chat template (Default).
+// GetType returns the type of the agentic template (DefaultAgentic).
 func (t *DefaultAgenticChatTemplate) GetType() string {
 	return "Default"
 }

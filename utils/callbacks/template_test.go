@@ -25,7 +25,6 @@ import (
 
 	"github.com/cloudwego/eino/callbacks"
 	"github.com/cloudwego/eino/components"
-	"github.com/cloudwego/eino/components/agentic"
 	"github.com/cloudwego/eino/components/document"
 	"github.com/cloudwego/eino/components/embedding"
 	"github.com/cloudwego/eino/components/indexer"
@@ -143,15 +142,15 @@ func TestNewComponentTemplate(t *testing.T) {
 					return ctx
 				}).Build()).
 			AgenticModel(&AgenticModelCallbackHandler{
-				OnStart: func(ctx context.Context, runInfo *callbacks.RunInfo, input *agentic.CallbackInput) context.Context {
+				OnStart: func(ctx context.Context, runInfo *callbacks.RunInfo, input *model.CallbackInput) context.Context {
 					cnt++
 					return ctx
 				},
-				OnEnd: func(ctx context.Context, runInfo *callbacks.RunInfo, output *agentic.CallbackOutput) context.Context {
+				OnEnd: func(ctx context.Context, runInfo *callbacks.RunInfo, output *model.CallbackOutput) context.Context {
 					cnt++
 					return ctx
 				},
-				OnEndWithStreamOutput: func(ctx context.Context, runInfo *callbacks.RunInfo, output *schema.StreamReader[*agentic.CallbackOutput]) context.Context {
+				OnEndWithStreamOutput: func(ctx context.Context, runInfo *callbacks.RunInfo, output *schema.StreamReader[*model.CallbackOutput]) context.Context {
 					output.Close()
 					cnt++
 					return ctx
@@ -162,11 +161,11 @@ func TestNewComponentTemplate(t *testing.T) {
 				},
 			}).
 			AgenticPrompt(&AgenticPromptCallbackHandler{
-				OnStart: func(ctx context.Context, runInfo *callbacks.RunInfo, input *prompt.AgenticCallbackInput) context.Context {
+				OnStart: func(ctx context.Context, runInfo *callbacks.RunInfo, input *prompt.CallbackInput) context.Context {
 					cnt++
 					return ctx
 				},
-				OnEnd: func(ctx context.Context, runInfo *callbacks.RunInfo, output *prompt.AgenticCallbackOutput) context.Context {
+				OnEnd: func(ctx context.Context, runInfo *callbacks.RunInfo, output *prompt.CallbackOutput) context.Context {
 					cnt++
 					return ctx
 				},
@@ -306,11 +305,11 @@ func TestNewComponentTemplate(t *testing.T) {
 				}
 			},
 		}).AgenticPrompt(&AgenticPromptCallbackHandler{
-			OnStart: func(ctx context.Context, runInfo *callbacks.RunInfo, input *prompt.AgenticCallbackInput) context.Context {
+			OnStart: func(ctx context.Context, runInfo *callbacks.RunInfo, input *prompt.CallbackInput) context.Context {
 				cnt++
 				return ctx
 			},
-			OnEnd: func(ctx context.Context, runInfo *callbacks.RunInfo, output *prompt.AgenticCallbackOutput) context.Context {
+			OnEnd: func(ctx context.Context, runInfo *callbacks.RunInfo, output *prompt.CallbackOutput) context.Context {
 				cnt++
 				return ctx
 			},
@@ -485,7 +484,7 @@ func TestNewComponentTemplate(t *testing.T) {
 
 		// Set it now
 		tpl2.AgenticModel(&AgenticModelCallbackHandler{
-			OnStart: func(ctx context.Context, runInfo *callbacks.RunInfo, input *agentic.CallbackInput) context.Context {
+			OnStart: func(ctx context.Context, runInfo *callbacks.RunInfo, input *model.CallbackInput) context.Context {
 				return ctx
 			},
 		})
@@ -549,7 +548,7 @@ func TestNewComponentTemplate(t *testing.T) {
 			Prompt(&PromptCallbackHandler{OnStart: func(ctx context.Context, runInfo *callbacks.RunInfo, input *prompt.CallbackInput) context.Context {
 				return ctx
 			}}).
-			AgenticPrompt(&AgenticPromptCallbackHandler{OnStart: func(ctx context.Context, runInfo *callbacks.RunInfo, input *prompt.AgenticCallbackInput) context.Context {
+			AgenticPrompt(&AgenticPromptCallbackHandler{OnStart: func(ctx context.Context, runInfo *callbacks.RunInfo, input *prompt.CallbackInput) context.Context {
 				return ctx
 			}})
 

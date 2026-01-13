@@ -541,7 +541,7 @@ func NewContentBlockChunk[T contentBlockVariant](content *T, meta *StreamingMeta
 	return block
 }
 
-// AgenticMessagesTemplate is the interface for messages template.
+// AgenticMessagesTemplate is the interface for agentic messages template.
 // It's used to render a template to a list of agentic messages.
 // e.g.
 //

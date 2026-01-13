@@ -22,7 +22,6 @@ import (
 
 	"github.com/cloudwego/eino/callbacks"
 	"github.com/cloudwego/eino/components"
-	"github.com/cloudwego/eino/components/agentic"
 	"github.com/cloudwego/eino/components/document"
 	"github.com/cloudwego/eino/components/embedding"
 	"github.com/cloudwego/eino/components/indexer"
@@ -176,11 +175,11 @@ func (c *handlerTemplate) OnStart(ctx context.Context, info *callbacks.RunInfo, 
 	case components.ComponentOfPrompt:
 		return c.promptHandler.OnStart(ctx, info, prompt.ConvCallbackInput(input))
 	case components.ComponentOfAgenticPrompt:
-		return c.agenticPromptHandler.OnStart(ctx, info, prompt.ConvAgenticCallbackInput(input))
+		return c.agenticPromptHandler.OnStart(ctx, info, prompt.ConvCallbackInput(input))
 	case components.ComponentOfChatModel:
 		return c.chatModelHandler.OnStart(ctx, info, model.ConvCallbackInput(input))
 	case components.ComponentOfAgenticModel:
-		return c.agenticModelHandler.OnStart(ctx, info, agentic.ConvCallbackInput(input))
+		return c.agenticModelHandler.OnStart(ctx, info, model.ConvCallbackInput(input))
 	case components.ComponentOfEmbedding:
 		return c.embeddingHandler.OnStart(ctx, info, embedding.ConvCallbackInput(input))
 	case components.ComponentOfIndexer:
@@ -213,11 +212,11 @@ func (c *handlerTemplate) OnEnd(ctx context.Context, info *callbacks.RunInfo, ou
 	case components.ComponentOfPrompt:
 		return c.promptHandler.OnEnd(ctx, info, prompt.ConvCallbackOutput(output))
 	case components.ComponentOfAgenticPrompt:
-		return c.agenticPromptHandler.OnEnd(ctx, info, prompt.ConvAgenticCallbackOutput(output))
+		return c.agenticPromptHandler.OnEnd(ctx, info, prompt.ConvCallbackOutput(output))
 	case components.ComponentOfChatModel:
 		return c.chatModelHandler.OnEnd(ctx, info, model.ConvCallbackOutput(output))
 	case components.ComponentOfAgenticModel:
-		return c.agenticModelHandler.OnEnd(ctx, info, agentic.ConvCallbackOutput(output))
+		return c.agenticModelHandler.OnEnd(ctx, info, model.ConvCallbackOutput(output))
 	case components.ComponentOfEmbedding:
 		return c.embeddingHandler.OnEnd(ctx, info, embedding.ConvCallbackOutput(output))
 	case components.ComponentOfIndexer:
@@ -305,8 +304,8 @@ func (c *handlerTemplate) OnEndWithStreamOutput(ctx context.Context, info *callb
 			}))
 	case components.ComponentOfAgenticModel:
 		return c.agenticModelHandler.OnEndWithStreamOutput(ctx, info,
-			schema.StreamReaderWithConvert(output, func(item callbacks.CallbackOutput) (*agentic.CallbackOutput, error) {
-				return agentic.ConvCallbackOutput(item), nil
+			schema.StreamReaderWithConvert(output, func(item callbacks.CallbackOutput) (*model.CallbackOutput, error) {
+				return model.ConvCallbackOutput(item), nil
 			}))
 	case components.ComponentOfTool:
 		return c.toolHandler.OnEndWithStreamOutput(ctx, info,
@@ -632,9 +631,9 @@ func convToolsNodeCallbackOutput(src callbacks.CallbackInput) []*schema.Message 
 // AgenticPromptCallbackHandler is the handler for the agentic prompt callback.
 type AgenticPromptCallbackHandler struct {
 	// OnStart is the callback function for the start of the agentic prompt.
-	OnStart func(ctx context.Context, runInfo *callbacks.RunInfo, input *prompt.AgenticCallbackInput) context.Context
+	OnStart func(ctx context.Context, runInfo *callbacks.RunInfo, input *prompt.CallbackInput) context.Context
 	// OnEnd is the callback function for the end of the agentic prompt.
-	OnEnd func(ctx context.Context, runInfo *callbacks.RunInfo, output *prompt.AgenticCallbackOutput) context.Context
+	OnEnd func(ctx context.Context, runInfo *callbacks.RunInfo, output *prompt.CallbackOutput) context.Context
 	// OnError is the callback function for the error of the agentic prompt.
 	OnError func(ctx context.Context, runInfo *callbacks.RunInfo, err error) context.Context
 }
@@ -655,9 +654,9 @@ func (ch *AgenticPromptCallbackHandler) Needed(ctx context.Context, runInfo *cal
 
 // AgenticModelCallbackHandler is the handler for the agentic chat model callback.
 type AgenticModelCallbackHandler struct {
-	OnStart               func(ctx context.Context, runInfo *callbacks.RunInfo, input *agentic.CallbackInput) context.Context
-	OnEnd                 func(ctx context.Context, runInfo *callbacks.RunInfo, output *agentic.CallbackOutput) context.Context
-	OnEndWithStreamOutput func(ctx context.Context, runInfo *callbacks.RunInfo, output *schema.StreamReader[*agentic.CallbackOutput]) context.Context
+	OnStart               func(ctx context.Context, runInfo *callbacks.RunInfo, input *model.CallbackInput) context.Context
+	OnEnd                 func(ctx context.Context, runInfo *callbacks.RunInfo, output *model.CallbackOutput) context.Context
+	OnEndWithStreamOutput func(ctx context.Context, runInfo *callbacks.RunInfo, output *schema.StreamReader[*model.CallbackOutput]) context.Context
 	OnError               func(ctx context.Context, runInfo *callbacks.RunInfo, err error) context.Context
 }
 
