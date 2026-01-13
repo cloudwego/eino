@@ -138,32 +138,30 @@ func (h *afterModelRewriteHistoryHandler) AfterModelRewriteHistory(ctx context.C
 	return h.fn(ctx, messages)
 }
 
-// WithToolCallWrapper creates a handler that wraps tool calls.
-func WithToolCallWrapper(wrapper ToolCallWrapper) AgentHandler {
-	return &toolCallWrapperHandler{
-		ToolCallWrapper: wrapper,
-	}
+// WithToolWrapper creates a handler that wraps tools.
+// The wrapper function is converted to compose.ToolMiddleware internally.
+func WithToolWrapper(fn func(context.Context, tool.BaseTool) (tool.BaseTool, error)) AgentHandler {
+	return &toolWrapperHandler{fn: fn}
 }
 
-type toolCallWrapperHandler struct {
+type toolWrapperHandler struct {
 	BaseAgentHandler
-	ToolCallWrapper
+	fn func(context.Context, tool.BaseTool) (tool.BaseTool, error)
 }
 
-// WrapModelFunc is a function type for wrapping chat models.
-type WrapModelFunc func(ctx context.Context, m model.BaseChatModel) (model.BaseChatModel, error)
+func (h *toolWrapperHandler) WrapTool(ctx context.Context, t tool.BaseTool) (tool.BaseTool, error) {
+	return h.fn(ctx, t)
+}
 
 // WithModelWrapper creates a handler that wraps the chat model.
 // The wrapper is applied once when the agent is built, not per-call.
-func WithModelWrapper(fn WrapModelFunc) AgentHandler {
-	return &modelWrapperHandler{
-		fn: fn,
-	}
+func WithModelWrapper(fn func(context.Context, model.BaseChatModel) (model.BaseChatModel, error)) AgentHandler {
+	return &modelWrapperHandler{fn: fn}
 }
 
 type modelWrapperHandler struct {
 	BaseAgentHandler
-	fn WrapModelFunc
+	fn func(context.Context, model.BaseChatModel) (model.BaseChatModel, error)
 }
 
 func (h *modelWrapperHandler) WrapModel(ctx context.Context, m model.BaseChatModel) (model.BaseChatModel, error) {
