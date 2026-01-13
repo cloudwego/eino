@@ -139,28 +139,50 @@ func (h *afterModelRewriteHistoryHandler) AfterModelRewriteHistory(ctx context.C
 
 // WithToolCallWrapper creates a handler that wraps tool calls.
 func WithToolCallWrapper(wrapper ToolCallWrapper) AgentHandler {
-	return &toolCallWrapperHandler{wrapper: wrapper}
+	return &toolCallWrapperHandler{
+		BaseModelCallWrapper: BaseModelCallWrapper{},
+		ToolCallWrapper:      wrapper,
+	}
 }
 
 type toolCallWrapperHandler struct {
-	BaseAgentHandler
-	wrapper ToolCallWrapper
+	BaseModelCallWrapper
+	ToolCallWrapper
 }
 
-func (h *toolCallWrapperHandler) GetToolCallWrapper() ToolCallWrapper {
-	return h.wrapper
+func (h *toolCallWrapperHandler) BeforeAgent(ctx context.Context, runCtx *AgentRunContext) (context.Context, *AgentRunContext, error) {
+	return ctx, runCtx, nil
+}
+
+func (h *toolCallWrapperHandler) BeforeModelRewriteHistory(ctx context.Context, messages []Message) (context.Context, []Message, error) {
+	return ctx, messages, nil
+}
+
+func (h *toolCallWrapperHandler) AfterModelRewriteHistory(ctx context.Context, messages []Message) (context.Context, []Message, error) {
+	return ctx, messages, nil
 }
 
 // WithModelCallWrapper creates a handler that wraps model calls.
 func WithModelCallWrapper(wrapper ModelCallWrapper) AgentHandler {
-	return &modelCallWrapperHandler{wrapper: wrapper}
+	return &modelCallWrapperHandler{
+		BaseToolCallWrapper: BaseToolCallWrapper{},
+		ModelCallWrapper:    wrapper,
+	}
 }
 
 type modelCallWrapperHandler struct {
-	BaseAgentHandler
-	wrapper ModelCallWrapper
+	BaseToolCallWrapper
+	ModelCallWrapper
 }
 
-func (h *modelCallWrapperHandler) GetModelCallWrapper() ModelCallWrapper {
-	return h.wrapper
+func (h *modelCallWrapperHandler) BeforeAgent(ctx context.Context, runCtx *AgentRunContext) (context.Context, *AgentRunContext, error) {
+	return ctx, runCtx, nil
+}
+
+func (h *modelCallWrapperHandler) BeforeModelRewriteHistory(ctx context.Context, messages []Message) (context.Context, []Message, error) {
+	return ctx, messages, nil
+}
+
+func (h *modelCallWrapperHandler) AfterModelRewriteHistory(ctx context.Context, messages []Message) (context.Context, []Message, error) {
+	return ctx, messages, nil
 }

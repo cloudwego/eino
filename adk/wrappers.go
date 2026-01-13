@@ -60,7 +60,7 @@ func (w *wrappedChatModel) Generate(ctx context.Context, input []*schema.Message
 		wrapper := w.wrappers[i]
 		next := endpoint
 		endpoint = func(ctx context.Context, c *ModelCall) (*ModelResult, error) {
-			return wrapper.WrapGenerate(ctx, c, next)
+			return wrapper.WrapModelGenerate(ctx, c, next)
 		}
 	}
 
@@ -86,7 +86,7 @@ func (w *wrappedChatModel) Stream(ctx context.Context, input []*schema.Message, 
 		wrapper := w.wrappers[i]
 		next := endpoint
 		endpoint = func(ctx context.Context, c *ModelCall) (*StreamModelResult, error) {
-			return wrapper.WrapStream(ctx, c, next)
+			return wrapper.WrapModelStream(ctx, c, next)
 		}
 	}
 
@@ -117,13 +117,9 @@ func (w *wrappedChatModel) IsCallbacksEnabled() bool {
 }
 
 func collectModelWrappersFromHandlers(handlers []AgentHandler) []ModelCallWrapper {
-	var wrappers []ModelCallWrapper
-	for _, h := range handlers {
-		wrapper := h.GetModelCallWrapper()
-		if wrapper == nil {
-			continue
-		}
-		wrappers = append(wrappers, wrapper)
+	wrappers := make([]ModelCallWrapper, len(handlers))
+	for i, h := range handlers {
+		wrappers[i] = h
 	}
 	return wrappers
 }
@@ -135,12 +131,12 @@ func toolCallWrappersToMiddlewares(wrappers []ToolCallWrapper) []compose.ToolMid
 		middlewares = append(middlewares, compose.ToolMiddleware{
 			Invokable: func(next compose.InvokableToolEndpoint) compose.InvokableToolEndpoint {
 				return func(ctx context.Context, input *compose.ToolInput) (*compose.ToolOutput, error) {
-					return wrapper.WrapInvoke(ctx, input, next)
+					return wrapper.WrapToolInvoke(ctx, input, next)
 				}
 			},
 			Streamable: func(next compose.StreamableToolEndpoint) compose.StreamableToolEndpoint {
 				return func(ctx context.Context, input *compose.ToolInput) (*compose.StreamToolOutput, error) {
-					return wrapper.WrapStream(ctx, input, next)
+					return wrapper.WrapToolStream(ctx, input, next)
 				}
 			},
 		})
@@ -152,7 +148,7 @@ type callbackInjectionWrapper struct {
 	BaseModelCallWrapper
 }
 
-func (w *callbackInjectionWrapper) WrapGenerate(ctx context.Context, call *ModelCall, next func(context.Context, *ModelCall) (*ModelResult, error)) (*ModelResult, error) {
+func (w *callbackInjectionWrapper) WrapModelGenerate(ctx context.Context, call *ModelCall, next func(context.Context, *ModelCall) (*ModelResult, error)) (*ModelResult, error) {
 	ctx = callbacks.OnStart(ctx, call.Messages)
 	result, err := next(ctx, call)
 	if err != nil {
@@ -163,7 +159,7 @@ func (w *callbackInjectionWrapper) WrapGenerate(ctx context.Context, call *Model
 	return result, nil
 }
 
-func (w *callbackInjectionWrapper) WrapStream(ctx context.Context, call *ModelCall, next func(context.Context, *ModelCall) (*StreamModelResult, error)) (*StreamModelResult, error) {
+func (w *callbackInjectionWrapper) WrapModelStream(ctx context.Context, call *ModelCall, next func(context.Context, *ModelCall) (*StreamModelResult, error)) (*StreamModelResult, error) {
 	ctx = callbacks.OnStart(ctx, call.Messages)
 	result, err := next(ctx, call)
 	if err != nil {
@@ -178,7 +174,7 @@ type eventSenderModelWrapper struct {
 	modelRetryConfig *ModelRetryConfig
 }
 
-func (w *eventSenderModelWrapper) WrapGenerate(ctx context.Context, call *ModelCall, next func(context.Context, *ModelCall) (*ModelResult, error)) (*ModelResult, error) {
+func (w *eventSenderModelWrapper) WrapModelGenerate(ctx context.Context, call *ModelCall, next func(context.Context, *ModelCall) (*ModelResult, error)) (*ModelResult, error) {
 	result, err := next(ctx, call)
 	if err != nil {
 		return nil, err
@@ -194,7 +190,7 @@ func (w *eventSenderModelWrapper) WrapGenerate(ctx context.Context, call *ModelC
 	}
 
 	if gen == nil {
-		return nil, errors.New("generator is nil when sending event in WrapGenerate: ensure agent state is properly initialized")
+		return nil, errors.New("generator is nil when sending event in WrapModelGenerate: ensure agent state is properly initialized")
 	}
 
 	event := EventFromMessage(result.Message, nil, schema.Assistant, "")
@@ -203,7 +199,7 @@ func (w *eventSenderModelWrapper) WrapGenerate(ctx context.Context, call *ModelC
 	return result, nil
 }
 
-func (w *eventSenderModelWrapper) WrapStream(ctx context.Context, call *ModelCall, next func(context.Context, *ModelCall) (*StreamModelResult, error)) (*StreamModelResult, error) {
+func (w *eventSenderModelWrapper) WrapModelStream(ctx context.Context, call *ModelCall, next func(context.Context, *ModelCall) (*StreamModelResult, error)) (*StreamModelResult, error) {
 	result, err := next(ctx, call)
 	if err != nil {
 		return nil, err
@@ -225,7 +221,7 @@ func (w *eventSenderModelWrapper) WrapStream(ctx context.Context, call *ModelCal
 
 	if gen == nil {
 		result.Stream.Close()
-		return nil, errors.New("generator is nil when sending event in WrapStream: ensure agent state is properly initialized")
+		return nil, errors.New("generator is nil when sending event in WrapModelStream: ensure agent state is properly initialized")
 	}
 
 	streams := result.Stream.Copy(2)
@@ -273,7 +269,7 @@ func popToolGenAction(ctx context.Context, toolName string) *AgentAction {
 
 type toolResultEventSenderWrapper struct{}
 
-func (w *toolResultEventSenderWrapper) WrapInvoke(ctx context.Context, call *ToolCall, next func(context.Context, *ToolCall) (*ToolResult, error)) (*ToolResult, error) {
+func (w *toolResultEventSenderWrapper) WrapToolInvoke(ctx context.Context, call *ToolCall, next func(context.Context, *ToolCall) (*ToolResult, error)) (*ToolResult, error) {
 	result, err := next(ctx, call)
 	if err != nil {
 		return nil, err
@@ -301,7 +297,7 @@ func (w *toolResultEventSenderWrapper) WrapInvoke(ctx context.Context, call *Too
 	return result, nil
 }
 
-func (w *toolResultEventSenderWrapper) WrapStream(ctx context.Context, call *ToolCall, next func(context.Context, *ToolCall) (*StreamToolResult, error)) (*StreamToolResult, error) {
+func (w *toolResultEventSenderWrapper) WrapToolStream(ctx context.Context, call *ToolCall, next func(context.Context, *ToolCall) (*StreamToolResult, error)) (*StreamToolResult, error) {
 	result, err := next(ctx, call)
 	if err != nil {
 		return nil, err
