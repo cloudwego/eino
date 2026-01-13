@@ -159,7 +159,7 @@ func TestHandlerExecutionOrder(t *testing.T) {
 			Description: "Test agent",
 			Instruction: "Base instruction.",
 			Model:       cm,
-			Handlers: []AgentHandler{
+			Handlers: []HandlerMiddleware{
 				WithInstruction("Handler 1 addition."),
 				WithInstruction("Handler 2 addition."),
 				WithInstructionFunc(func(ctx context.Context, instruction string) (context.Context, string, error) {
@@ -205,7 +205,7 @@ func TestHandlerExecutionOrder(t *testing.T) {
 			Middlewares: []AgentMiddleware{
 				{AdditionalInstruction: "Middleware instruction."},
 			},
-			Handlers: []AgentHandler{
+			Handlers: []HandlerMiddleware{
 				WithInstruction("Handler instruction."),
 			},
 		})
@@ -253,7 +253,7 @@ func TestToolsHandlerCombinations(t *testing.T) {
 					Tools: []tool.BaseTool{tool1},
 				},
 			},
-			Handlers: []AgentHandler{
+			Handlers: []HandlerMiddleware{
 				WithTools(tool2),
 			},
 		})
@@ -300,7 +300,7 @@ func TestToolsHandlerCombinations(t *testing.T) {
 					Tools: []tool.BaseTool{tool1, tool2, tool3},
 				},
 			},
-			Handlers: []AgentHandler{
+			Handlers: []HandlerMiddleware{
 				WithToolsFunc(func(ctx context.Context, tools []tool.BaseTool, returnDirectly map[string]struct{}) (context.Context, []tool.BaseTool, map[string]struct{}, error) {
 					filtered := make([]tool.BaseTool, 0)
 					for _, t := range tools {
@@ -350,7 +350,7 @@ func TestToolsHandlerCombinations(t *testing.T) {
 					Tools: []tool.BaseTool{tool1},
 				},
 			},
-			Handlers: []AgentHandler{
+			Handlers: []HandlerMiddleware{
 				WithToolsFunc(func(ctx context.Context, tools []tool.BaseTool, returnDirectly map[string]struct{}) (context.Context, []tool.BaseTool, map[string]struct{}, error) {
 					for _, t := range tools {
 						info, _ := t.Info(ctx)
@@ -409,7 +409,7 @@ func TestToolsHandlerCombinations(t *testing.T) {
 			Name:        "TestAgent",
 			Description: "Test agent",
 			Model:       cm,
-			Handlers: []AgentHandler{
+			Handlers: []HandlerMiddleware{
 				WithTools(dynamicTool),
 			},
 		})
@@ -445,7 +445,7 @@ func TestMessageRewriteHandlers(t *testing.T) {
 			Description: "Test agent",
 			Instruction: "instruction",
 			Model:       cm,
-			Handlers: []AgentHandler{
+			Handlers: []HandlerMiddleware{
 				WithBeforeModelRewriteHistory(func(ctx context.Context, messages []Message) (context.Context, []Message, error) {
 					return ctx, append(messages, schema.UserMessage("injected1")), nil
 				}),
@@ -480,7 +480,7 @@ func TestMessageRewriteHandlers(t *testing.T) {
 			Name:        "TestAgent",
 			Description: "Test agent",
 			Model:       cm,
-			Handlers: []AgentHandler{
+			Handlers: []HandlerMiddleware{
 				WithAfterModelRewriteHistory(func(ctx context.Context, messages []Message) (context.Context, []Message, error) {
 					afterCalled = true
 					assert.True(t, len(messages) > 0)
@@ -533,7 +533,7 @@ func TestToolCallWrapperHandlers(t *testing.T) {
 					Tools: []tool.BaseTool{testTool},
 				},
 			},
-			Handlers: []AgentHandler{
+			Handlers: []HandlerMiddleware{
 				WithToolWrapper(newTestToolWrapperFn(
 					func() {
 						mu.Lock()
@@ -605,7 +605,7 @@ func TestToolCallWrapperHandlers(t *testing.T) {
 					Tools: []tool.BaseTool{testTool},
 				},
 			},
-			Handlers: []AgentHandler{
+			Handlers: []HandlerMiddleware{
 				WithToolWrapper(newTestStreamToolWrapperFn(
 					func() {
 						mu.Lock()
@@ -686,7 +686,7 @@ func TestToolCallWrapperHandlers(t *testing.T) {
 					Tools: []tool.BaseTool{testTool},
 				},
 			},
-			Handlers: []AgentHandler{
+			Handlers: []HandlerMiddleware{
 				WithToolWrapper(newResultModifyingToolWrapperFn(func(result string) string {
 					return "modified: " + result
 				})),
@@ -728,7 +728,7 @@ func TestContextPropagation(t *testing.T) {
 			Name:        "TestAgent",
 			Description: "Test agent",
 			Model:       cm,
-			Handlers: []AgentHandler{
+			Handlers: []HandlerMiddleware{
 				WithBeforeModelRewriteHistory(func(ctx context.Context, messages []Message) (context.Context, []Message, error) {
 					return context.WithValue(ctx, key1, "value1"), messages, nil
 				}),
@@ -768,11 +768,11 @@ func TestContextPropagation(t *testing.T) {
 			Name:        "TestAgent",
 			Description: "Test agent",
 			Model:       cm,
-			Handlers: []AgentHandler{
-				WithBeforeAgent(func(ctx context.Context, runCtx *AgentRunContext) (context.Context, *AgentRunContext, error) {
+			Handlers: []HandlerMiddleware{
+				WithBeforeAgent(func(ctx context.Context, runCtx *AgentContext) (context.Context, *AgentContext, error) {
 					return context.WithValue(ctx, key1, "value1"), runCtx, nil
 				}),
-				WithBeforeAgent(func(ctx context.Context, runCtx *AgentRunContext) (context.Context, *AgentRunContext, error) {
+				WithBeforeAgent(func(ctx context.Context, runCtx *AgentContext) (context.Context, *AgentContext, error) {
 					handler2ReceivedValue = ctx.Value(key1)
 					return ctx, runCtx, nil
 				}),
@@ -807,7 +807,7 @@ func TestCustomHandler(t *testing.T) {
 			Name:        "TestAgent",
 			Description: "Test agent",
 			Model:       cm,
-			Handlers:    []AgentHandler{customHandler},
+			Handlers:    []HandlerMiddleware{customHandler},
 		})
 		assert.NoError(t, err)
 
@@ -835,8 +835,8 @@ func TestHandlerErrorHandling(t *testing.T) {
 			Name:        "TestAgent",
 			Description: "Test agent",
 			Model:       cm,
-			Handlers: []AgentHandler{
-				WithBeforeAgent(func(ctx context.Context, runCtx *AgentRunContext) (context.Context, *AgentRunContext, error) {
+			Handlers: []HandlerMiddleware{
+				WithBeforeAgent(func(ctx context.Context, runCtx *AgentContext) (context.Context, *AgentContext, error) {
 					return ctx, runCtx, assert.AnError
 				}),
 			},
@@ -908,14 +908,14 @@ func (t *callableTool) InvokableRun(_ context.Context, _ string, _ ...tool.Optio
 }
 
 type countingHandler struct {
-	*BaseAgentHandler
+	*BaseHandlerMiddleware
 	beforeAgentCount int
 	beforeModelCount int
 	afterModelCount  int
 	mu               sync.Mutex
 }
 
-func (h *countingHandler) BeforeAgent(ctx context.Context, runCtx *AgentRunContext) (context.Context, *AgentRunContext, error) {
+func (h *countingHandler) BeforeAgent(ctx context.Context, runCtx *AgentContext) (context.Context, *AgentContext, error) {
 	h.mu.Lock()
 	h.beforeAgentCount++
 	h.mu.Unlock()
@@ -990,7 +990,7 @@ func TestModelWrapperHandlers(t *testing.T) {
 			Name:        "TestAgent",
 			Description: "Test agent",
 			Model:       cm,
-			Handlers: []AgentHandler{
+			Handlers: []HandlerMiddleware{
 				WithModelWrapper(newTestModelWrapperFn(
 					func() {
 						mu.Lock()
@@ -1050,7 +1050,7 @@ func TestModelWrapperHandlers(t *testing.T) {
 			Name:        "TestAgent",
 			Description: "Test agent",
 			Model:       cm,
-			Handlers: []AgentHandler{
+			Handlers: []HandlerMiddleware{
 				WithModelWrapper(newTestModelWrapperFn(
 					func() {
 						mu.Lock()
@@ -1116,7 +1116,7 @@ func TestModelWrapperHandlers(t *testing.T) {
 					Tools: []tool.BaseTool{testTool},
 				},
 			},
-			Handlers: []AgentHandler{
+			Handlers: []HandlerMiddleware{
 				WithModelWrapper(newTestModelWrapperFn(
 					func() {
 						mu.Lock()
@@ -1226,7 +1226,7 @@ func TestModelWrapper_InputModification(t *testing.T) {
 			Name:        "TestAgent",
 			Description: "Test agent",
 			Model:       cm,
-			Handlers: []AgentHandler{
+			Handlers: []HandlerMiddleware{
 				WithModelWrapper(newInputModifyingWrapperFn("[WRAPPER]")),
 			},
 		})
@@ -1271,7 +1271,7 @@ func TestModelWrapper_InputModification(t *testing.T) {
 			Name:        "TestAgent",
 			Description: "Test agent",
 			Model:       cm,
-			Handlers: []AgentHandler{
+			Handlers: []HandlerMiddleware{
 				WithModelWrapper(newInputModifyingWrapperFn("[WRAPPER]")),
 			},
 		})

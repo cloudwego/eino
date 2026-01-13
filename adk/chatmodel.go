@@ -138,11 +138,11 @@ type ChatModelAgentState struct {
 //   - Callbacks only return error, cannot return modified context
 //   - Configuration is scattered across closures when using factory functions
 //
-// For new code requiring extensibility, consider using AgentHandler (interface-based) instead.
+// For new code requiring extensibility, consider using HandlerMiddleware (interface-based) instead.
 // AgentMiddleware is kept for backward compatibility and remains suitable for simple,
 // static additions like extra instruction or tools.
 //
-// See AgentHandler documentation for detailed comparison.
+// See HandlerMiddleware documentation for detailed comparison.
 type AgentMiddleware struct {
 	// AdditionalInstruction adds supplementary text to the agent's system instruction.
 	// This instruction is concatenated with the base instruction before each chat model call.
@@ -210,8 +210,8 @@ type ChatModelAgentConfig struct {
 	//   - Centralize configuration in struct fields instead of closures
 	//
 	// Handlers are processed after Middlewares, in registration order.
-	// See AgentHandler documentation for when to use Handlers vs Middlewares.
-	Handlers []AgentHandler
+	// See HandlerMiddleware documentation for when to use Handlers vs Middlewares.
+	Handlers []HandlerMiddleware
 
 	// ModelRetryConfig configures retry behavior for the ChatModel.
 	// When set, the agent will automatically retry failed ChatModel calls
@@ -241,7 +241,7 @@ type ChatModelAgent struct {
 
 	exit tool.BaseTool
 
-	handlers    []AgentHandler
+	handlers    []HandlerMiddleware
 	middlewares []AgentMiddleware
 
 	modelRetryConfig *ModelRetryConfig
@@ -306,7 +306,7 @@ func NewChatModelAgent(ctx context.Context, config *ChatModelAgentConfig) (*Chat
 	}, nil
 }
 
-func collectToolMiddlewaresFromHandlers(handlers []AgentHandler) []compose.ToolMiddleware {
+func collectToolMiddlewaresFromHandlers(handlers []HandlerMiddleware) []compose.ToolMiddleware {
 	var middlewares []compose.ToolMiddleware
 	for _, h := range handlers {
 		handler := h
@@ -506,7 +506,7 @@ type buildContext struct {
 }
 
 func (a *ChatModelAgent) applyBeforeAgent(ctx context.Context, bc *buildContext) (context.Context, *buildContext, error) {
-	runCtx := &AgentRunContext{
+	runCtx := &AgentContext{
 		Instruction:    bc.baseInstruction,
 		Tools:          cloneSlice(bc.toolsNodeConf.Tools),
 		ReturnDirectly: copyMap(bc.returnDirectly),

@@ -1926,7 +1926,7 @@ func TestReturnDirectlyEventSentAfterResume(t *testing.T) {
 				returnDirectlyToolName: {},
 			},
 		},
-		Handlers: []AgentHandler{
+		Handlers: []HandlerMiddleware{
 			WithTools(&dynamicTool{name: dynamicToolName}),
 		},
 	})
