@@ -22,7 +22,6 @@ import (
 	"fmt"
 	"reflect"
 
-	"github.com/cloudwego/eino/components/agentic"
 	"github.com/cloudwego/eino/components/document"
 	"github.com/cloudwego/eino/components/embedding"
 	"github.com/cloudwego/eino/components/indexer"
@@ -181,7 +180,7 @@ func (c *Chain[I, O]) AppendChatModel(node model.BaseChatModel, opts ...GraphAdd
 //	model, err := openai.NewAgenticModel(ctx, config)
 //	if err != nil {...}
 //	chain.AppendAgenticModel(model)
-func (c *Chain[I, O]) AppendAgenticModel(node agentic.Model, opts ...GraphAddNodeOpt) *Chain[I, O] {
+func (c *Chain[I, O]) AppendAgenticModel(node model.AgenticModel, opts ...GraphAddNodeOpt) *Chain[I, O] {
 	gNode, options := toAgenticModelNode(node, opts...)
 	c.addNode(gNode, options)
 	return c

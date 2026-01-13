@@ -19,7 +19,6 @@ package compose
 import (
 	"fmt"
 
-	"github.com/cloudwego/eino/components/agentic"
 	"github.com/cloudwego/eino/components/document"
 	"github.com/cloudwego/eino/components/embedding"
 	"github.com/cloudwego/eino/components/indexer"
@@ -84,7 +83,7 @@ func (p *Parallel) AddChatModel(outputKey string, node model.BaseChatModel, opts
 //
 //	p.AddAgenticModel("output_key1", model1)
 //	p.AddAgenticModel("output_key2", model2)
-func (p *Parallel) AddAgenticModel(outputKey string, node agentic.Model, opts ...GraphAddNodeOpt) *Parallel {
+func (p *Parallel) AddAgenticModel(outputKey string, node model.AgenticModel, opts ...GraphAddNodeOpt) *Parallel {
 	gNode, options := toAgenticModelNode(node, append(opts, WithOutputKey(outputKey))...)
 	return p.addNode(outputKey, gNode, options)
 }
