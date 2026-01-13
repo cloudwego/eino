@@ -28,7 +28,7 @@ import (
 	"github.com/cloudwego/eino/schema"
 )
 
-func buildWrappedModel(ctx context.Context, m model.ToolCallingChatModel, handlers []HandlerMiddleware, retryConfig *ModelRetryConfig) (model.ToolCallingChatModel, error) {
+func buildWrappedModel(ctx context.Context, m model.ToolCallingChatModel, handlers []handlerInfo, retryConfig *ModelRetryConfig) (model.ToolCallingChatModel, error) {
 	var wrapped model.BaseChatModel = m
 
 	if !components.IsCallbacksEnabled(m) {
@@ -40,10 +40,12 @@ func buildWrappedModel(ctx context.Context, m model.ToolCallingChatModel, handle
 	}
 
 	for i := len(handlers) - 1; i >= 0; i-- {
-		var err error
-		wrapped, err = handlers[i].WrapModel(ctx, wrapped)
-		if err != nil {
-			return nil, err
+		if handlers[i].hasWrapModel {
+			var err error
+			wrapped, err = handlers[i].handler.WrapModel(ctx, wrapped)
+			if err != nil {
+				return nil, err
+			}
 		}
 	}
 
