@@ -31,6 +31,16 @@ import (
 	"github.com/cloudwego/eino/schema"
 )
 
+type interruptTestToolsHandler struct {
+	*BaseHandlerMiddleware
+	tools []tool.BaseTool
+}
+
+func (h *interruptTestToolsHandler) BeforeAgent(ctx context.Context, runCtx *AgentContext) (context.Context, *AgentContext, error) {
+	runCtx.Tools = append(runCtx.Tools, h.tools...)
+	return ctx, runCtx, nil
+}
+
 func TestSaveAgentEventWrapper(t *testing.T) {
 	sr, sw := schema.Pipe[Message](1)
 	sw.Send(schema.UserMessage("test"), nil)
@@ -1927,7 +1937,7 @@ func TestReturnDirectlyEventSentAfterResume(t *testing.T) {
 			},
 		},
 		Handlers: []HandlerMiddleware{
-			WithTools(&dynamicTool{name: dynamicToolName}),
+			&interruptTestToolsHandler{tools: []tool.BaseTool{&dynamicTool{name: dynamicToolName}}},
 		},
 	})
 	assert.NoError(t, err)
