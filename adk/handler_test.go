@@ -908,7 +908,7 @@ func (t *callableTool) InvokableRun(_ context.Context, _ string, _ ...tool.Optio
 }
 
 type countingHandler struct {
-	BaseAgentHandler
+	*BaseAgentHandler
 	beforeAgentCount int
 	beforeModelCount int
 	afterModelCount  int
