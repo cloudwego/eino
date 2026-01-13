@@ -25,11 +25,28 @@ import (
 )
 
 func TestConvPrompt(t *testing.T) {
-	assert.NotNil(t, ConvCallbackInput(&CallbackInput{}))
+	assert.NotNil(t, ConvCallbackInput(&CallbackInput{
+		AgenticTemplates: []schema.AgenticMessagesTemplate{
+			&schema.AgenticMessage{},
+		},
+	}))
 	assert.NotNil(t, ConvCallbackInput(map[string]any{}))
 	assert.Nil(t, ConvCallbackInput("asd"))
 
-	assert.NotNil(t, ConvCallbackOutput(&CallbackOutput{}))
+	assert.NotNil(t, ConvCallbackOutput(&CallbackOutput{
+		AgenticResult: []*schema.AgenticMessage{
+			{},
+		},
+		AgenticTemplates: []schema.AgenticMessagesTemplate{
+			&schema.AgenticMessage{},
+		},
+	}))
 	assert.NotNil(t, ConvCallbackOutput([]*schema.Message{}))
+
+	agenticResult := []*schema.AgenticMessage{{}}
+	out := ConvCallbackOutput(agenticResult)
+	assert.NotNil(t, out)
+	assert.Equal(t, agenticResult, out.AgenticResult)
+
 	assert.Nil(t, ConvCallbackOutput("asd"))
 }
