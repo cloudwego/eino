@@ -98,7 +98,7 @@ type reactConfig struct {
 
 	maxIterations int
 
-	handlers    []AgentHandler
+	handlers    []HandlerMiddleware
 	middlewares []AgentMiddleware
 }
 

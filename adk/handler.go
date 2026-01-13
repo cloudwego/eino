@@ -23,17 +23,17 @@ import (
 	"github.com/cloudwego/eino/components/tool"
 )
 
-// AgentRunContext contains runtime information passed to handlers before each agent run.
+// AgentContext contains runtime information passed to handlers before each agent run.
 // Handlers can modify Instruction, Tools, and ReturnDirectly to customize agent behavior.
-type AgentRunContext struct {
+type AgentContext struct {
 	Instruction    string
 	Tools          []tool.BaseTool
 	ReturnDirectly map[string]struct{}
 }
 
-// AgentHandler defines the interface for customizing agent behavior.
+// HandlerMiddleware defines the interface for customizing agent behavior.
 //
-// Why AgentHandler instead of AgentMiddleware?
+// Why HandlerMiddleware instead of AgentMiddleware?
 //
 // AgentMiddleware is a struct type, which has inherent limitations:
 //   - Struct types are closed: users cannot add new methods to extend functionality
@@ -42,23 +42,23 @@ type AgentRunContext struct {
 //     call those methods (config.Middlewares is []AgentMiddleware, not a user type)
 //   - Callbacks in AgentMiddleware only return error, cannot return modified context
 //
-// AgentHandler is an interface type, which is open for extension:
+// HandlerMiddleware is an interface type, which is open for extension:
 //   - Users can implement custom handlers with arbitrary internal state and methods
 //   - All methods return (context.Context, ..., error), allowing context propagation
 //   - Configuration is centralized in struct fields rather than scattered in closures
 //
-// AgentHandler vs AgentMiddleware:
+// HandlerMiddleware vs AgentMiddleware:
 //   - Use AgentMiddleware for simple, static additions (extra instruction/tools)
-//   - Use AgentHandler for dynamic behavior, context modification, or call wrapping
+//   - Use HandlerMiddleware for dynamic behavior, context modification, or call wrapping
 //   - AgentMiddleware is kept for backward compatibility with existing users
 //   - Both can be used together; middlewares are applied first, then handlers
 //
-// Use BaseAgentHandler as an embedded struct to provide default no-op
+// Use *BaseHandlerMiddleware as an embedded struct to provide default no-op
 // implementations for all methods.
-type AgentHandler interface {
+type HandlerMiddleware interface {
 	// BeforeAgent is called before each agent run, allowing modification of
 	// the agent's instruction and tools configuration.
-	BeforeAgent(ctx context.Context, runCtx *AgentRunContext) (context.Context, *AgentRunContext, error)
+	BeforeAgent(ctx context.Context, runCtx *AgentContext) (context.Context, *AgentContext, error)
 
 	// BeforeModelRewriteHistory is called before each model invocation.
 	// The returned messages are persisted to the agent's internal state.
@@ -79,26 +79,26 @@ type AgentHandler interface {
 	WrapModel(ctx context.Context, m model.BaseChatModel) (model.BaseChatModel, error)
 }
 
-// BaseAgentHandler provides default no-op implementations for AgentHandler.
-// Embed *BaseAgentHandler in custom handlers to only override the methods you need.
-type BaseAgentHandler struct{}
+// BaseHandlerMiddleware provides default no-op implementations for HandlerMiddleware.
+// Embed *BaseHandlerMiddleware in custom handlers to only override the methods you need.
+type BaseHandlerMiddleware struct{}
 
-func (b *BaseAgentHandler) WrapTool(_ context.Context, t tool.BaseTool) (tool.BaseTool, error) {
+func (b *BaseHandlerMiddleware) WrapTool(_ context.Context, t tool.BaseTool) (tool.BaseTool, error) {
 	return t, nil
 }
 
-func (b *BaseAgentHandler) WrapModel(_ context.Context, m model.BaseChatModel) (model.BaseChatModel, error) {
+func (b *BaseHandlerMiddleware) WrapModel(_ context.Context, m model.BaseChatModel) (model.BaseChatModel, error) {
 	return m, nil
 }
 
-func (b *BaseAgentHandler) BeforeAgent(ctx context.Context, runCtx *AgentRunContext) (context.Context, *AgentRunContext, error) {
+func (b *BaseHandlerMiddleware) BeforeAgent(ctx context.Context, runCtx *AgentContext) (context.Context, *AgentContext, error) {
 	return ctx, runCtx, nil
 }
 
-func (b *BaseAgentHandler) BeforeModelRewriteHistory(ctx context.Context, messages []Message) (context.Context, []Message, error) {
+func (b *BaseHandlerMiddleware) BeforeModelRewriteHistory(ctx context.Context, messages []Message) (context.Context, []Message, error) {
 	return ctx, messages, nil
 }
 
-func (b *BaseAgentHandler) AfterModelRewriteHistory(ctx context.Context, messages []Message) (context.Context, []Message, error) {
+func (b *BaseHandlerMiddleware) AfterModelRewriteHistory(ctx context.Context, messages []Message) (context.Context, []Message, error) {
 	return ctx, messages, nil
 }
