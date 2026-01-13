@@ -55,24 +55,24 @@ type AgentRunContext struct {
 // Implementations should call next() to execute the actual tool,
 // and can modify the call or result as needed.
 type ToolCallWrapper interface {
-	// WrapInvoke wraps non-streaming tool calls.
+	// WrapToolInvoke wraps non-streaming tool calls.
 	// Call next(ctx, call) to execute the tool.
-	WrapInvoke(ctx context.Context, call *ToolCall, next func(context.Context, *ToolCall) (*ToolResult, error)) (*ToolResult, error)
+	WrapToolInvoke(ctx context.Context, call *ToolCall, next func(context.Context, *ToolCall) (*ToolResult, error)) (*ToolResult, error)
 
-	// WrapStream wraps streaming tool calls.
+	// WrapToolStream wraps streaming tool calls.
 	// Call next(ctx, call) to execute the tool.
-	WrapStream(ctx context.Context, call *ToolCall, next func(context.Context, *ToolCall) (*StreamToolResult, error)) (*StreamToolResult, error)
+	WrapToolStream(ctx context.Context, call *ToolCall, next func(context.Context, *ToolCall) (*StreamToolResult, error)) (*StreamToolResult, error)
 }
 
 // BaseToolCallWrapper provides pass-through implementations for ToolCallWrapper.
 // Embed this struct in custom wrappers to only override the methods you need.
 type BaseToolCallWrapper struct{}
 
-func (h BaseToolCallWrapper) WrapInvoke(ctx context.Context, call *ToolCall, next func(context.Context, *ToolCall) (*ToolResult, error)) (*ToolResult, error) {
+func (h BaseToolCallWrapper) WrapToolInvoke(ctx context.Context, call *ToolCall, next func(context.Context, *ToolCall) (*ToolResult, error)) (*ToolResult, error) {
 	return next(ctx, call)
 }
 
-func (h BaseToolCallWrapper) WrapStream(ctx context.Context, call *ToolCall, next func(context.Context, *ToolCall) (*StreamToolResult, error)) (*StreamToolResult, error) {
+func (h BaseToolCallWrapper) WrapToolStream(ctx context.Context, call *ToolCall, next func(context.Context, *ToolCall) (*StreamToolResult, error)) (*StreamToolResult, error) {
 	return next(ctx, call)
 }
 
@@ -90,23 +90,39 @@ type StreamModelResult struct {
 }
 
 type ModelCallWrapper interface {
-	WrapGenerate(ctx context.Context, call *ModelCall, next func(context.Context, *ModelCall) (*ModelResult, error)) (*ModelResult, error)
-	WrapStream(ctx context.Context, call *ModelCall, next func(context.Context, *ModelCall) (*StreamModelResult, error)) (*StreamModelResult, error)
+	WrapModelGenerate(ctx context.Context, call *ModelCall, next func(context.Context, *ModelCall) (*ModelResult, error)) (*ModelResult, error)
+	WrapModelStream(ctx context.Context, call *ModelCall, next func(context.Context, *ModelCall) (*StreamModelResult, error)) (*StreamModelResult, error)
 }
 
 type BaseModelCallWrapper struct{}
 
-func (h BaseModelCallWrapper) WrapGenerate(ctx context.Context, call *ModelCall, next func(context.Context, *ModelCall) (*ModelResult, error)) (*ModelResult, error) {
+func (h BaseModelCallWrapper) WrapModelGenerate(ctx context.Context, call *ModelCall, next func(context.Context, *ModelCall) (*ModelResult, error)) (*ModelResult, error) {
 	return next(ctx, call)
 }
 
-func (h BaseModelCallWrapper) WrapStream(ctx context.Context, call *ModelCall, next func(context.Context, *ModelCall) (*StreamModelResult, error)) (*StreamModelResult, error) {
+func (h BaseModelCallWrapper) WrapModelStream(ctx context.Context, call *ModelCall, next func(context.Context, *ModelCall) (*StreamModelResult, error)) (*StreamModelResult, error) {
 	return next(ctx, call)
 }
 
 // AgentHandler defines the interface for customizing agent behavior.
-// Implementations can modify agent configuration, rewrite message history,
-// and wrap tool calls with custom logic.
+//
+// Design Rationale:
+//
+// The interface combines hook methods and wrapper interfaces because they represent
+// coordinated extension points in the agent lifecycle. A single handler often needs
+// to work across multiple points (e.g., a memory handler adds tools in BeforeAgent,
+// injects memories in BeforeModelRewriteHistory, and saves in AfterModelRewriteHistory).
+//
+// Method naming:
+//   - BeforeModelRewriteHistory (not BeforeChatModel): Emphasizes that the primary
+//     purpose is to rewrite message history, and returns a new context.
+//   - WrapToolInvoke/WrapToolStream and WrapModelGenerate/WrapModelStream: Prefixed
+//     with Tool/Model to avoid name collision when embedding both wrapper interfaces.
+//
+// AgentHandler vs AgentMiddleware:
+//   - Use AgentMiddleware for simple, static additions (extra instruction/tools)
+//   - Use AgentHandler for dynamic behavior, context modification, or call wrapping
+//   - Both can be used together; middlewares are applied first, then handlers
 //
 // Use BaseAgentHandler as an embedded struct to provide default no-op
 // implementations for all methods.
@@ -123,18 +139,16 @@ type AgentHandler interface {
 	// The returned messages are persisted to the agent's internal state.
 	AfterModelRewriteHistory(ctx context.Context, messages []Message) (context.Context, []Message, error)
 
-	// GetToolCallWrapper returns a wrapper for tool calls.
-	// Return nil if no tool call wrapping is needed.
-	GetToolCallWrapper() ToolCallWrapper
-
-	// GetModelCallWrapper returns a wrapper for model calls.
-	// Return nil if no model call wrapping is needed.
-	GetModelCallWrapper() ModelCallWrapper
+	ToolCallWrapper
+	ModelCallWrapper
 }
 
 // BaseAgentHandler provides default no-op implementations for AgentHandler.
 // Embed this struct in custom handlers to only override the methods you need.
-type BaseAgentHandler struct{}
+type BaseAgentHandler struct {
+	BaseToolCallWrapper
+	BaseModelCallWrapper
+}
 
 func (b BaseAgentHandler) BeforeAgent(ctx context.Context, runCtx *AgentRunContext) (context.Context, *AgentRunContext, error) {
 	return ctx, runCtx, nil
@@ -146,12 +160,4 @@ func (b BaseAgentHandler) BeforeModelRewriteHistory(ctx context.Context, message
 
 func (b BaseAgentHandler) AfterModelRewriteHistory(ctx context.Context, messages []Message) (context.Context, []Message, error) {
 	return ctx, messages, nil
-}
-
-func (b BaseAgentHandler) GetToolCallWrapper() ToolCallWrapper {
-	return nil
-}
-
-func (b BaseAgentHandler) GetModelCallWrapper() ModelCallWrapper {
-	return nil
 }

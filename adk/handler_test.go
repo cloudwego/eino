@@ -42,7 +42,7 @@ type testToolCallWrapper struct {
 	modifyResultFn   func(string) string
 }
 
-func (h *testToolCallWrapper) WrapInvoke(ctx context.Context, call *ToolCall, next func(context.Context, *ToolCall) (*ToolResult, error)) (*ToolResult, error) {
+func (h *testToolCallWrapper) WrapToolInvoke(ctx context.Context, call *ToolCall, next func(context.Context, *ToolCall) (*ToolResult, error)) (*ToolResult, error) {
 	if h.beforeFn != nil {
 		h.beforeFn()
 	}
@@ -56,7 +56,7 @@ func (h *testToolCallWrapper) WrapInvoke(ctx context.Context, call *ToolCall, ne
 	return result, err
 }
 
-func (h *testToolCallWrapper) WrapStream(ctx context.Context, call *ToolCall, next func(context.Context, *ToolCall) (*StreamToolResult, error)) (*StreamToolResult, error) {
+func (h *testToolCallWrapper) WrapToolStream(ctx context.Context, call *ToolCall, next func(context.Context, *ToolCall) (*StreamToolResult, error)) (*StreamToolResult, error) {
 	if h.streamBeforeFn != nil {
 		h.streamBeforeFn()
 	}
@@ -879,7 +879,7 @@ type testModelCallWrapper struct {
 	modifyResultFn func(*schema.Message) *schema.Message
 }
 
-func (h *testModelCallWrapper) WrapGenerate(ctx context.Context, call *ModelCall, next func(context.Context, *ModelCall) (*ModelResult, error)) (*ModelResult, error) {
+func (h *testModelCallWrapper) WrapModelGenerate(ctx context.Context, call *ModelCall, next func(context.Context, *ModelCall) (*ModelResult, error)) (*ModelResult, error) {
 	if h.beforeFn != nil {
 		h.beforeFn()
 	}
@@ -893,7 +893,7 @@ func (h *testModelCallWrapper) WrapGenerate(ctx context.Context, call *ModelCall
 	return result, err
 }
 
-func (h *testModelCallWrapper) WrapStream(ctx context.Context, call *ModelCall, next func(context.Context, *ModelCall) (*StreamModelResult, error)) (*StreamModelResult, error) {
+func (h *testModelCallWrapper) WrapModelStream(ctx context.Context, call *ModelCall, next func(context.Context, *ModelCall) (*StreamModelResult, error)) (*StreamModelResult, error) {
 	if h.beforeFn != nil {
 		h.beforeFn()
 	}
@@ -1102,7 +1102,7 @@ type inputOutputModifyingWrapper struct {
 	outputSuffix string
 }
 
-func (w *inputOutputModifyingWrapper) WrapGenerate(ctx context.Context, call *ModelCall, next func(context.Context, *ModelCall) (*ModelResult, error)) (*ModelResult, error) {
+func (w *inputOutputModifyingWrapper) WrapModelGenerate(ctx context.Context, call *ModelCall, next func(context.Context, *ModelCall) (*ModelResult, error)) (*ModelResult, error) {
 	modifiedMessages := make([]*schema.Message, len(call.Messages))
 	for i, msg := range call.Messages {
 		if msg.Role == schema.User {
@@ -1122,7 +1122,7 @@ func (w *inputOutputModifyingWrapper) WrapGenerate(ctx context.Context, call *Mo
 	return result, nil
 }
 
-func (w *inputOutputModifyingWrapper) WrapStream(ctx context.Context, call *ModelCall, next func(context.Context, *ModelCall) (*StreamModelResult, error)) (*StreamModelResult, error) {
+func (w *inputOutputModifyingWrapper) WrapModelStream(ctx context.Context, call *ModelCall, next func(context.Context, *ModelCall) (*StreamModelResult, error)) (*StreamModelResult, error) {
 	modifiedMessages := make([]*schema.Message, len(call.Messages))
 	for i, msg := range call.Messages {
 		if msg.Role == schema.User {

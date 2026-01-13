@@ -258,7 +258,7 @@ func NewChatModelAgent(_ context.Context, config *ChatModelAgentConfig) (*ChatMo
 	tc := config.ToolsConfig
 	// Tool call middleware execution order (outermost to innermost):
 	// 1. toolResultEventSenderWrapper (internal - sends tool result events)
-	// 2. Handlers' ToolCallWrappers (via GetToolCallWrapper, in registration order)
+	// 2. Handlers' embedded ToolCallWrapper (in registration order)
 	// 3. Middlewares' WrapToolCall (in registration order)
 	// 4. User-provided ToolsConfig.ToolCallMiddlewares (original order preserved)
 	toolEventSender := &toolResultEventSenderWrapper{}
@@ -302,17 +302,14 @@ func NewChatModelAgent(_ context.Context, config *ChatModelAgentConfig) (*ChatMo
 func collectToolMiddlewaresFromHandlers(handlers []AgentHandler) []compose.ToolMiddleware {
 	var middlewares []compose.ToolMiddleware
 	for _, h := range handlers {
-		wrapper := h.GetToolCallWrapper()
-		if wrapper == nil {
-			continue
-		}
+		handler := h
 		mw := compose.ToolMiddleware{
 			Invokable: func(next compose.InvokableToolEndpoint) compose.InvokableToolEndpoint {
 				return func(ctx context.Context, input *compose.ToolInput) (*compose.ToolOutput, error) {
 					nextFn := func(ctx context.Context, call *compose.ToolInput) (*compose.ToolOutput, error) {
 						return next(ctx, call)
 					}
-					return wrapper.WrapInvoke(ctx, input, nextFn)
+					return handler.WrapToolInvoke(ctx, input, nextFn)
 				}
 			},
 			Streamable: func(next compose.StreamableToolEndpoint) compose.StreamableToolEndpoint {
@@ -320,7 +317,7 @@ func collectToolMiddlewaresFromHandlers(handlers []AgentHandler) []compose.ToolM
 					nextFn := func(ctx context.Context, call *compose.ToolInput) (*compose.StreamToolOutput, error) {
 						return next(ctx, call)
 					}
-					return wrapper.WrapStream(ctx, input, nextFn)
+					return handler.WrapToolStream(ctx, input, nextFn)
 				}
 			},
 		}
