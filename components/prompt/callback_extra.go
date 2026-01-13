@@ -22,52 +22,14 @@ import (
 	"github.com/cloudwego/eino/schema"
 )
 
-type AgenticCallbackInput struct {
-	Variables map[string]any
-	Templates []schema.AgenticMessagesTemplate
-	Extra     map[string]any
-}
-
-type AgenticCallbackOutput struct {
-	Result    []*schema.AgenticMessage
-	Templates []schema.AgenticMessagesTemplate
-	Extra     map[string]any
-}
-
-// ConvAgenticCallbackInput converts the callback input to the agentic callback input.
-func ConvAgenticCallbackInput(src callbacks.CallbackInput) *AgenticCallbackInput {
-	switch t := src.(type) {
-	case *AgenticCallbackInput:
-		return t
-	case map[string]any:
-		return &AgenticCallbackInput{
-			Variables: t,
-		}
-	default:
-		return nil
-	}
-}
-
-// ConvAgenticCallbackOutput converts the callback output to the agentic callback output.
-func ConvAgenticCallbackOutput(src callbacks.CallbackOutput) *AgenticCallbackOutput {
-	switch t := src.(type) {
-	case *AgenticCallbackOutput:
-		return t
-	case []*schema.AgenticMessage:
-		return &AgenticCallbackOutput{
-			Result: t,
-		}
-	default:
-		return nil
-	}
-}
-
 // CallbackInput is the input for the callback.
 type CallbackInput struct {
 	// Variables is the variables for the callback.
 	Variables map[string]any
 	// Templates is the templates for the callback.
 	Templates []schema.MessagesTemplate
+	// AgenticTemplates is the agentic templates for the callback.
+	AgenticTemplates []schema.AgenticMessagesTemplate
 	// Extra is the extra information for the callback.
 	Extra map[string]any
 }
@@ -76,8 +38,12 @@ type CallbackInput struct {
 type CallbackOutput struct {
 	// Result is the result for the callback.
 	Result []*schema.Message
+	// AgenticResult is the agentic result for the callback.
+	AgenticResult []*schema.AgenticMessage
 	// Templates is the templates for the callback.
 	Templates []schema.MessagesTemplate
+	// AgenticTemplates is the agentic templates for the callback.
+	AgenticTemplates []schema.AgenticMessagesTemplate
 	// Extra is the extra information for the callback.
 	Extra map[string]any
 }
@@ -104,6 +70,10 @@ func ConvCallbackOutput(src callbacks.CallbackOutput) *CallbackOutput {
 	case []*schema.Message:
 		return &CallbackOutput{
 			Result: t,
+		}
+	case []*schema.AgenticMessage:
+		return &CallbackOutput{
+			AgenticResult: t,
 		}
 	default:
 		return nil

@@ -18,7 +18,6 @@ package compose
 
 import (
 	"github.com/cloudwego/eino/components"
-	"github.com/cloudwego/eino/components/agentic"
 	"github.com/cloudwego/eino/components/document"
 	"github.com/cloudwego/eino/components/embedding"
 	"github.com/cloudwego/eino/components/indexer"
@@ -102,7 +101,7 @@ func toChatModelNode(node model.BaseChatModel, opts ...GraphAddNodeOpt) (*graphN
 		opts...)
 }
 
-func toAgenticModelNode(node agentic.Model, opts ...GraphAddNodeOpt) (*graphNode, *graphAddNodeOpts) {
+func toAgenticModelNode(node model.AgenticModel, opts ...GraphAddNodeOpt) (*graphNode, *graphAddNodeOpts) {
 	return toComponentNode(
 		node,
 		components.ComponentOfAgenticModel,
