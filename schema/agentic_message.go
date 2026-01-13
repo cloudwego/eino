@@ -66,14 +66,14 @@ const (
 )
 
 type AgenticMessage struct {
-	// ResponseMeta is the response metadata.
-	ResponseMeta *AgenticResponseMeta
-
 	// Role is the message role.
 	Role AgenticRoleType
 
 	// ContentBlocks is the list of content blocks.
 	ContentBlocks []*ContentBlock
+
+	// ResponseMeta is the response metadata.
+	ResponseMeta *AgenticResponseMeta
 
 	// Extra is the additional information.
 	Extra map[string]any
@@ -541,7 +541,7 @@ func NewContentBlockChunk[T contentBlockVariant](content *T, meta *StreamingMeta
 	return block
 }
 
-// AgenticMessagesTemplate is the interface for messages template.
+// AgenticMessagesTemplate is the interface for agentic messages template.
 // It's used to render a template to a list of agentic messages.
 // e.g.
 //

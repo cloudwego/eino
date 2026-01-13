@@ -23,7 +23,6 @@ import (
 	"reflect"
 	"strings"
 
-	"github.com/cloudwego/eino/components/agentic"
 	"github.com/cloudwego/eino/components/document"
 	"github.com/cloudwego/eino/components/embedding"
 	"github.com/cloudwego/eino/components/indexer"
@@ -361,7 +360,7 @@ func (g *graph) AddChatModelNode(key string, node model.BaseChatModel, opts ...G
 //	})
 //
 //	graph.AddAgenticModelNode("agentic_model_node_key", model)
-func (g *graph) AddAgenticModelNode(key string, node agentic.Model, opts ...GraphAddNodeOpt) error {
+func (g *graph) AddAgenticModelNode(key string, node model.AgenticModel, opts ...GraphAddNodeOpt) error {
 	gNode, options := toAgenticModelNode(node, opts...)
 	return g.addNode(key, gNode, options)
 }
