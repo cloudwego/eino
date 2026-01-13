@@ -22,21 +22,29 @@ import "github.com/cloudwego/eino/schema"
 type Options struct {
 	// Temperature is the temperature for the model, which controls the randomness of the model.
 	Temperature *float32
-	// MaxTokens is the max number of tokens, if reached the max tokens, the model will stop generating, and mostly return an finish reason of "length".
-	MaxTokens *int
 	// Model is the model name.
 	Model *string
 	// TopP is the top p for the model, which controls the diversity of the model.
 	TopP *float32
-	// Stop is the stop words for the model, which controls the stopping condition of the model.
-	Stop []string
 	// Tools is a list of tools the model may call.
 	Tools []*schema.ToolInfo
 	// ToolChoice controls which tool is called by the model.
 	ToolChoice *schema.ToolChoice
+
+	// Options only for chat model.
+
+	// MaxTokens is the max number of tokens, if reached the max tokens, the model will stop generating, and mostly return an finish reason of "length".
+	MaxTokens *int
 	// AllowedToolNames specifies a list of tool names that the model is allowed to call.
 	// This allows for constraining the model to a specific subset of the available tools.
 	AllowedToolNames []string
+	// Stop is the stop words for the model, which controls the stopping condition of the model.
+	Stop []string
+
+	// Options only for agentic model.
+
+	// AllowedTools is a list of allowed tools the model may call.
+	AllowedTools []*schema.AllowedTool
 }
 
 // Option is the call option for ChatModel component.
@@ -56,6 +64,7 @@ func WithTemperature(temperature float32) Option {
 }
 
 // WithMaxTokens is the option to set the max tokens for the model.
+// Only available for ChatModel.
 func WithMaxTokens(maxTokens int) Option {
 	return Option{
 		apply: func(opts *Options) {
@@ -83,6 +92,7 @@ func WithTopP(topP float32) Option {
 }
 
 // WithStop is the option to set the stop words for the model.
+// Only available for ChatModel.
 func WithStop(stop []string) Option {
 	return Option{
 		apply: func(opts *Options) {
@@ -105,11 +115,23 @@ func WithTools(tools []*schema.ToolInfo) Option {
 
 // WithToolChoice sets the tool choice for the model. It also allows for providing a list of
 // tool names to constrain the model to a specific subset of the available tools.
+// Only available for ChatModel.
 func WithToolChoice(toolChoice schema.ToolChoice, allowedToolNames ...string) Option {
 	return Option{
 		apply: func(opts *Options) {
 			opts.ToolChoice = &toolChoice
 			opts.AllowedToolNames = allowedToolNames
+		},
+	}
+}
+
+// WithAgenticToolChoice is the option to set tool choice for the agentic model.
+// Only available for AgenticModel.
+func WithAgenticToolChoice(toolChoice schema.ToolChoice, allowedTools ...*schema.AllowedTool) Option {
+	return Option{
+		apply: func(opts *Options) {
+			opts.ToolChoice = &toolChoice
+			opts.AllowedTools = allowedTools
 		},
 	}
 }
