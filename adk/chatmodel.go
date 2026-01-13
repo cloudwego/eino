@@ -255,7 +255,7 @@ type ChatModelAgent struct {
 type runFunc func(ctx context.Context, input *AgentInput, generator *AsyncGenerator[*AgentEvent], store *bridgeStore, instruction string, returnDirectly map[string]struct{}, opts ...compose.Option)
 
 // NewChatModelAgent constructs a chat model-backed agent with the provided config.
-func NewChatModelAgent(_ context.Context, config *ChatModelAgentConfig) (*ChatModelAgent, error) {
+func NewChatModelAgent(ctx context.Context, config *ChatModelAgentConfig) (*ChatModelAgent, error) {
 	if config.Name == "" {
 		return nil, errors.New("agent 'Name' is required")
 	}
@@ -285,17 +285,9 @@ func NewChatModelAgent(_ context.Context, config *ChatModelAgentConfig) (*ChatMo
 	tc.ToolCallMiddlewares = append(tc.ToolCallMiddlewares, collectToolMiddlewaresFromHandlers(config.Handlers)...)
 	tc.ToolCallMiddlewares = append(tc.ToolCallMiddlewares, collectToolMiddlewaresFromMiddlewares(config.Middlewares)...)
 
-	userWrappers := collectModelWrappersFromHandlers(config.Handlers)
-	eventSender := &eventSenderModelWrapper{modelRetryConfig: config.ModelRetryConfig}
-	innerWrappers := []ModelCallWrapper{eventSender}
-	innerWrappers = append(innerWrappers, userWrappers...)
-
-	var wrappedModel model.ToolCallingChatModel
-	if config.ModelRetryConfig != nil {
-		wrappedInner := newWrappedChatModel(config.Model, innerWrappers)
-		wrappedModel = newRetryChatModel(wrappedInner, config.ModelRetryConfig)
-	} else {
-		wrappedModel = newWrappedChatModel(config.Model, innerWrappers)
+	wrappedModel, err := buildWrappedModel(ctx, config.Model, config.Handlers, config.ModelRetryConfig)
+	if err != nil {
+		return nil, err
 	}
 
 	return &ChatModelAgent{

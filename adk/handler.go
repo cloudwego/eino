@@ -22,7 +22,6 @@ import (
 	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/components/tool"
 	"github.com/cloudwego/eino/compose"
-	"github.com/cloudwego/eino/schema"
 )
 
 // Type aliases for tool call types.
@@ -76,34 +75,6 @@ func (h BaseToolCallWrapper) WrapToolStream(ctx context.Context, call *ToolCall,
 	return next(ctx, call)
 }
 
-type ModelCall struct {
-	Messages []*schema.Message
-	Options  []model.Option
-}
-
-type ModelResult struct {
-	Message *schema.Message
-}
-
-type StreamModelResult struct {
-	Stream *schema.StreamReader[*schema.Message]
-}
-
-type ModelCallWrapper interface {
-	WrapModelGenerate(ctx context.Context, call *ModelCall, next func(context.Context, *ModelCall) (*ModelResult, error)) (*ModelResult, error)
-	WrapModelStream(ctx context.Context, call *ModelCall, next func(context.Context, *ModelCall) (*StreamModelResult, error)) (*StreamModelResult, error)
-}
-
-type BaseModelCallWrapper struct{}
-
-func (h BaseModelCallWrapper) WrapModelGenerate(ctx context.Context, call *ModelCall, next func(context.Context, *ModelCall) (*ModelResult, error)) (*ModelResult, error) {
-	return next(ctx, call)
-}
-
-func (h BaseModelCallWrapper) WrapModelStream(ctx context.Context, call *ModelCall, next func(context.Context, *ModelCall) (*StreamModelResult, error)) (*StreamModelResult, error) {
-	return next(ctx, call)
-}
-
 // AgentHandler defines the interface for customizing agent behavior.
 //
 // Why AgentHandler instead of AgentMiddleware?
@@ -142,14 +113,21 @@ type AgentHandler interface {
 	AfterModelRewriteHistory(ctx context.Context, messages []Message) (context.Context, []Message, error)
 
 	ToolCallWrapper
-	ModelCallWrapper
+
+	// WrapModel wraps a chat model with custom behavior.
+	// Return the input model unchanged if no wrapping is needed.
+	// This is called once when the agent is built, not per-call.
+	WrapModel(ctx context.Context, m model.BaseChatModel) (model.BaseChatModel, error)
 }
 
 // BaseAgentHandler provides default no-op implementations for AgentHandler.
 // Embed this struct in custom handlers to only override the methods you need.
 type BaseAgentHandler struct {
 	BaseToolCallWrapper
-	BaseModelCallWrapper
+}
+
+func (b BaseAgentHandler) WrapModel(_ context.Context, m model.BaseChatModel) (model.BaseChatModel, error) {
+	return m, nil
 }
 
 func (b BaseAgentHandler) BeforeAgent(ctx context.Context, runCtx *AgentRunContext) (context.Context, *AgentRunContext, error) {
