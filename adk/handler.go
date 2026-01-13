@@ -106,22 +106,24 @@ func (h BaseModelCallWrapper) WrapModelStream(ctx context.Context, call *ModelCa
 
 // AgentHandler defines the interface for customizing agent behavior.
 //
-// Design Rationale:
+// Why AgentHandler instead of AgentMiddleware?
 //
-// The interface combines hook methods and wrapper interfaces because they represent
-// coordinated extension points in the agent lifecycle. A single handler often needs
-// to work across multiple points (e.g., a memory handler adds tools in BeforeAgent,
-// injects memories in BeforeModelRewriteHistory, and saves in AfterModelRewriteHistory).
+// AgentMiddleware is a struct type, which has inherent limitations:
+//   - Struct types are closed: users cannot add new methods to extend functionality
+//   - The framework only recognizes AgentMiddleware's fixed fields, so even if users
+//     embed AgentMiddleware in a custom struct and add methods, the framework cannot
+//     call those methods (config.Middlewares is []AgentMiddleware, not a user type)
+//   - Callbacks in AgentMiddleware only return error, cannot return modified context
 //
-// Method naming:
-//   - BeforeModelRewriteHistory (not BeforeChatModel): Emphasizes that the primary
-//     purpose is to rewrite message history, and returns a new context.
-//   - WrapToolInvoke/WrapToolStream and WrapModelGenerate/WrapModelStream: Prefixed
-//     with Tool/Model to avoid name collision when embedding both wrapper interfaces.
+// AgentHandler is an interface type, which is open for extension:
+//   - Users can implement custom handlers with arbitrary internal state and methods
+//   - All methods return (context.Context, ..., error), allowing context propagation
+//   - Configuration is centralized in struct fields rather than scattered in closures
 //
 // AgentHandler vs AgentMiddleware:
 //   - Use AgentMiddleware for simple, static additions (extra instruction/tools)
 //   - Use AgentHandler for dynamic behavior, context modification, or call wrapping
+//   - AgentMiddleware is kept for backward compatibility with existing users
 //   - Both can be used together; middlewares are applied first, then handlers
 //
 // Use BaseAgentHandler as an embedded struct to provide default no-op

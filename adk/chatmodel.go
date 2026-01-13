@@ -132,8 +132,17 @@ type ChatModelAgentState struct {
 }
 
 // AgentMiddleware provides hooks to customize agent behavior at various stages of execution.
-// It is a simple configuration struct that does not implement the AgentHandler interface,
-// allowing both to evolve independently.
+//
+// Limitations of AgentMiddleware (struct-based):
+//   - Struct types are closed: users cannot add new methods
+//   - Callbacks only return error, cannot return modified context
+//   - Configuration is scattered across closures when using factory functions
+//
+// For new code requiring extensibility, consider using AgentHandler (interface-based) instead.
+// AgentMiddleware is kept for backward compatibility and remains suitable for simple,
+// static additions like extra instruction or tools.
+//
+// See AgentHandler documentation for detailed comparison.
 type AgentMiddleware struct {
 	// AdditionalInstruction adds supplementary text to the agent's system instruction.
 	// This instruction is concatenated with the base instruction before each chat model call.
@@ -190,11 +199,18 @@ type ChatModelAgentConfig struct {
 	MaxIterations int
 
 	// Middlewares configures agent middleware for extending functionality.
+	// Use for simple, static additions like extra instruction or tools.
+	// Kept for backward compatibility; for new code, consider using Handlers instead.
 	Middlewares []AgentMiddleware
 
-	// Handlers configures the new interface-based handlers.
+	// Handlers configures interface-based handlers for extending agent behavior.
+	// Unlike Middlewares (struct-based), Handlers allow users to:
+	//   - Add custom methods to their handler implementations
+	//   - Return modified context from handler methods
+	//   - Centralize configuration in struct fields instead of closures
+	//
 	// Handlers are processed after Middlewares, in registration order.
-	// Each handler can implement any combination of the AgentHandler interface methods.
+	// See AgentHandler documentation for when to use Handlers vs Middlewares.
 	Handlers []AgentHandler
 
 	// ModelRetryConfig configures retry behavior for the ChatModel.
