@@ -29,7 +29,7 @@ func WithInstruction(text string) AgentHandler {
 }
 
 type instructionHandler struct {
-	BaseAgentHandler
+	*BaseAgentHandler
 	text string
 }
 
@@ -48,7 +48,7 @@ func WithInstructionFunc(fn func(ctx context.Context, instruction string) (conte
 }
 
 type instructionFuncHandler struct {
-	BaseAgentHandler
+	*BaseAgentHandler
 	fn func(ctx context.Context, instruction string) (context.Context, string, error)
 }
 
@@ -67,7 +67,7 @@ func WithTools(tools ...tool.BaseTool) AgentHandler {
 }
 
 type toolsHandler struct {
-	BaseAgentHandler
+	*BaseAgentHandler
 	tools []tool.BaseTool
 }
 
@@ -82,7 +82,7 @@ func WithToolsFunc(fn func(ctx context.Context, tools []tool.BaseTool, returnDir
 }
 
 type toolsFuncHandler struct {
-	BaseAgentHandler
+	*BaseAgentHandler
 	fn func(ctx context.Context, tools []tool.BaseTool, returnDirectly map[string]struct{}) (context.Context, []tool.BaseTool, map[string]struct{}, error)
 }
 
@@ -102,7 +102,7 @@ func WithBeforeAgent(fn func(ctx context.Context, runCtx *AgentRunContext) (cont
 }
 
 type beforeAgentHandler struct {
-	BaseAgentHandler
+	*BaseAgentHandler
 	fn func(ctx context.Context, runCtx *AgentRunContext) (context.Context, *AgentRunContext, error)
 }
 
@@ -116,7 +116,7 @@ func WithBeforeModelRewriteHistory(fn func(ctx context.Context, messages []Messa
 }
 
 type beforeModelRewriteHistoryHandler struct {
-	BaseAgentHandler
+	*BaseAgentHandler
 	fn func(ctx context.Context, messages []Message) (context.Context, []Message, error)
 }
 
@@ -130,7 +130,7 @@ func WithAfterModelRewriteHistory(fn func(ctx context.Context, messages []Messag
 }
 
 type afterModelRewriteHistoryHandler struct {
-	BaseAgentHandler
+	*BaseAgentHandler
 	fn func(ctx context.Context, messages []Message) (context.Context, []Message, error)
 }
 
@@ -145,7 +145,7 @@ func WithToolWrapper(fn func(context.Context, tool.BaseTool) (tool.BaseTool, err
 }
 
 type toolWrapperHandler struct {
-	BaseAgentHandler
+	*BaseAgentHandler
 	fn func(context.Context, tool.BaseTool) (tool.BaseTool, error)
 }
 
@@ -160,7 +160,7 @@ func WithModelWrapper(fn func(context.Context, model.BaseChatModel) (model.BaseC
 }
 
 type modelWrapperHandler struct {
-	BaseAgentHandler
+	*BaseAgentHandler
 	fn func(context.Context, model.BaseChatModel) (model.BaseChatModel, error)
 }
 

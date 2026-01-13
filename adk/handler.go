@@ -80,25 +80,25 @@ type AgentHandler interface {
 }
 
 // BaseAgentHandler provides default no-op implementations for AgentHandler.
-// Embed this struct in custom handlers to only override the methods you need.
+// Embed *BaseAgentHandler in custom handlers to only override the methods you need.
 type BaseAgentHandler struct{}
 
-func (b BaseAgentHandler) WrapTool(_ context.Context, t tool.BaseTool) (tool.BaseTool, error) {
+func (b *BaseAgentHandler) WrapTool(_ context.Context, t tool.BaseTool) (tool.BaseTool, error) {
 	return t, nil
 }
 
-func (b BaseAgentHandler) WrapModel(_ context.Context, m model.BaseChatModel) (model.BaseChatModel, error) {
+func (b *BaseAgentHandler) WrapModel(_ context.Context, m model.BaseChatModel) (model.BaseChatModel, error) {
 	return m, nil
 }
 
-func (b BaseAgentHandler) BeforeAgent(ctx context.Context, runCtx *AgentRunContext) (context.Context, *AgentRunContext, error) {
+func (b *BaseAgentHandler) BeforeAgent(ctx context.Context, runCtx *AgentRunContext) (context.Context, *AgentRunContext, error) {
 	return ctx, runCtx, nil
 }
 
-func (b BaseAgentHandler) BeforeModelRewriteHistory(ctx context.Context, messages []Message) (context.Context, []Message, error) {
+func (b *BaseAgentHandler) BeforeModelRewriteHistory(ctx context.Context, messages []Message) (context.Context, []Message, error) {
 	return ctx, messages, nil
 }
 
-func (b BaseAgentHandler) AfterModelRewriteHistory(ctx context.Context, messages []Message) (context.Context, []Message, error) {
+func (b *BaseAgentHandler) AfterModelRewriteHistory(ctx context.Context, messages []Message) (context.Context, []Message, error) {
 	return ctx, messages, nil
 }
