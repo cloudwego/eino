@@ -273,13 +273,12 @@ func NewChatModelAgent(ctx context.Context, config *ChatModelAgentConfig) (*Chat
 
 	tc := config.ToolsConfig
 	// Tool call middleware execution order (outermost to innermost):
-	// 1. toolResultEventSenderWrapper (internal - sends tool result events)
-	// 2. Handlers' embedded ToolCallWrapper (in registration order)
+	// 1. wrapToolWithEventSender (internal - sends tool result events)
+	// 2. Handlers' WrapTool (in registration order)
 	// 3. Middlewares' WrapToolCall (in registration order)
 	// 4. User-provided ToolsConfig.ToolCallMiddlewares (original order preserved)
-	toolEventSender := &toolResultEventSenderWrapper{}
 	tc.ToolCallMiddlewares = append(
-		toolCallWrappersToMiddlewares([]ToolCallWrapper{toolEventSender}),
+		[]compose.ToolMiddleware{wrapToolFuncToMiddleware(wrapToolWithEventSender)},
 		tc.ToolCallMiddlewares...,
 	)
 	tc.ToolCallMiddlewares = append(tc.ToolCallMiddlewares, collectToolMiddlewaresFromHandlers(config.Handlers)...)
@@ -311,25 +310,7 @@ func collectToolMiddlewaresFromHandlers(handlers []AgentHandler) []compose.ToolM
 	var middlewares []compose.ToolMiddleware
 	for _, h := range handlers {
 		handler := h
-		mw := compose.ToolMiddleware{
-			Invokable: func(next compose.InvokableToolEndpoint) compose.InvokableToolEndpoint {
-				return func(ctx context.Context, input *compose.ToolInput) (*compose.ToolOutput, error) {
-					nextFn := func(ctx context.Context, call *compose.ToolInput) (*compose.ToolOutput, error) {
-						return next(ctx, call)
-					}
-					return handler.WrapToolInvoke(ctx, input, nextFn)
-				}
-			},
-			Streamable: func(next compose.StreamableToolEndpoint) compose.StreamableToolEndpoint {
-				return func(ctx context.Context, input *compose.ToolInput) (*compose.StreamToolOutput, error) {
-					nextFn := func(ctx context.Context, call *compose.ToolInput) (*compose.StreamToolOutput, error) {
-						return next(ctx, call)
-					}
-					return handler.WrapToolStream(ctx, input, nextFn)
-				}
-			},
-		}
-		middlewares = append(middlewares, mw)
+		middlewares = append(middlewares, wrapToolFuncToMiddleware(handler.WrapTool))
 	}
 	return middlewares
 }

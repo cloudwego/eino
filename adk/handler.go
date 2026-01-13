@@ -21,25 +21,6 @@ import (
 
 	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/components/tool"
-	"github.com/cloudwego/eino/compose"
-)
-
-// Type aliases for tool call types.
-// These provide clearer names while maintaining compatibility with compose package.
-type (
-	// ToolCall contains information about a tool call.
-	// When modifying in wrappers:
-	//   - Name: should not be modified
-	//   - CallID: should not be modified
-	//   - Arguments: may be modified
-	//   - CallOptions: may be modified
-	ToolCall = compose.ToolInput
-
-	// ToolResult contains the result of a non-streaming tool call.
-	ToolResult = compose.ToolOutput
-
-	// StreamToolResult contains the result of a streaming tool call.
-	StreamToolResult = compose.StreamToolOutput
 )
 
 // AgentRunContext contains runtime information passed to handlers before each agent run.
@@ -48,31 +29,6 @@ type AgentRunContext struct {
 	Instruction    string
 	Tools          []tool.BaseTool
 	ReturnDirectly map[string]struct{}
-}
-
-// ToolCallWrapper wraps tool call execution.
-// Implementations should call next() to execute the actual tool,
-// and can modify the call or result as needed.
-type ToolCallWrapper interface {
-	// WrapToolInvoke wraps non-streaming tool calls.
-	// Call next(ctx, call) to execute the tool.
-	WrapToolInvoke(ctx context.Context, call *ToolCall, next func(context.Context, *ToolCall) (*ToolResult, error)) (*ToolResult, error)
-
-	// WrapToolStream wraps streaming tool calls.
-	// Call next(ctx, call) to execute the tool.
-	WrapToolStream(ctx context.Context, call *ToolCall, next func(context.Context, *ToolCall) (*StreamToolResult, error)) (*StreamToolResult, error)
-}
-
-// BaseToolCallWrapper provides pass-through implementations for ToolCallWrapper.
-// Embed this struct in custom wrappers to only override the methods you need.
-type BaseToolCallWrapper struct{}
-
-func (h BaseToolCallWrapper) WrapToolInvoke(ctx context.Context, call *ToolCall, next func(context.Context, *ToolCall) (*ToolResult, error)) (*ToolResult, error) {
-	return next(ctx, call)
-}
-
-func (h BaseToolCallWrapper) WrapToolStream(ctx context.Context, call *ToolCall, next func(context.Context, *ToolCall) (*StreamToolResult, error)) (*StreamToolResult, error) {
-	return next(ctx, call)
 }
 
 // AgentHandler defines the interface for customizing agent behavior.
@@ -112,7 +68,10 @@ type AgentHandler interface {
 	// The returned messages are persisted to the agent's internal state.
 	AfterModelRewriteHistory(ctx context.Context, messages []Message) (context.Context, []Message, error)
 
-	ToolCallWrapper
+	// WrapTool wraps a tool with custom behavior.
+	// Return the input tool unchanged if no wrapping is needed.
+	// This is converted to compose.ToolMiddleware internally.
+	WrapTool(ctx context.Context, t tool.BaseTool) (tool.BaseTool, error)
 
 	// WrapModel wraps a chat model with custom behavior.
 	// Return the input model unchanged if no wrapping is needed.
@@ -122,8 +81,10 @@ type AgentHandler interface {
 
 // BaseAgentHandler provides default no-op implementations for AgentHandler.
 // Embed this struct in custom handlers to only override the methods you need.
-type BaseAgentHandler struct {
-	BaseToolCallWrapper
+type BaseAgentHandler struct{}
+
+func (b BaseAgentHandler) WrapTool(_ context.Context, t tool.BaseTool) (tool.BaseTool, error) {
+	return t, nil
 }
 
 func (b BaseAgentHandler) WrapModel(_ context.Context, m model.BaseChatModel) (model.BaseChatModel, error) {

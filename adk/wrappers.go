@@ -23,6 +23,7 @@ import (
 	"github.com/cloudwego/eino/callbacks"
 	"github.com/cloudwego/eino/components"
 	"github.com/cloudwego/eino/components/model"
+	"github.com/cloudwego/eino/components/tool"
 	"github.com/cloudwego/eino/compose"
 	"github.com/cloudwego/eino/schema"
 )
@@ -83,24 +84,111 @@ func (a *baseChatModelAdapter) IsCallbacksEnabled() bool {
 	return true
 }
 
-func toolCallWrappersToMiddlewares(wrappers []ToolCallWrapper) []compose.ToolMiddleware {
-	var middlewares []compose.ToolMiddleware
-	for _, w := range wrappers {
-		wrapper := w
-		middlewares = append(middlewares, compose.ToolMiddleware{
-			Invokable: func(next compose.InvokableToolEndpoint) compose.InvokableToolEndpoint {
-				return func(ctx context.Context, input *compose.ToolInput) (*compose.ToolOutput, error) {
-					return wrapper.WrapToolInvoke(ctx, input, next)
+func wrapToolFuncToMiddleware(wrapFn func(context.Context, tool.BaseTool) (tool.BaseTool, error)) compose.ToolMiddleware {
+	return compose.ToolMiddleware{
+		Invokable: func(next compose.InvokableToolEndpoint) compose.InvokableToolEndpoint {
+			return func(ctx context.Context, input *compose.ToolInput) (*compose.ToolOutput, error) {
+				virtualTool := &endpointInvokableTool{
+					name:        input.Name,
+					callID:      input.CallID,
+					arguments:   input.Arguments,
+					callOptions: input.CallOptions,
+					next:        next,
 				}
-			},
-			Streamable: func(next compose.StreamableToolEndpoint) compose.StreamableToolEndpoint {
-				return func(ctx context.Context, input *compose.ToolInput) (*compose.StreamToolOutput, error) {
-					return wrapper.WrapToolStream(ctx, input, next)
+				wrapped, err := wrapFn(ctx, virtualTool)
+				if err != nil {
+					return nil, err
 				}
-			},
-		})
+				if inv, ok := wrapped.(tool.InvokableTool); ok {
+					result, err := inv.InvokableRun(ctx, input.Arguments, input.CallOptions...)
+					if err != nil {
+						return nil, err
+					}
+					return &compose.ToolOutput{Result: result}, nil
+				}
+				return next(ctx, input)
+			}
+		},
+		Streamable: func(next compose.StreamableToolEndpoint) compose.StreamableToolEndpoint {
+			return func(ctx context.Context, input *compose.ToolInput) (*compose.StreamToolOutput, error) {
+				virtualTool := &endpointStreamableTool{
+					name:           input.Name,
+					callID:         input.CallID,
+					arguments:      input.Arguments,
+					callOptions:    input.CallOptions,
+					nextStreamable: next,
+				}
+				wrapped, err := wrapFn(ctx, virtualTool)
+				if err != nil {
+					return nil, err
+				}
+				if st, ok := wrapped.(tool.StreamableTool); ok {
+					result, err := st.StreamableRun(ctx, input.Arguments, input.CallOptions...)
+					if err != nil {
+						return nil, err
+					}
+					return &compose.StreamToolOutput{Result: result}, nil
+				}
+				return next(ctx, input)
+			}
+		},
 	}
-	return middlewares
+}
+
+type endpointInvokableTool struct {
+	name        string
+	callID      string
+	arguments   string
+	callOptions []tool.Option
+	next        compose.InvokableToolEndpoint
+}
+
+func (t *endpointInvokableTool) Info(_ context.Context) (*schema.ToolInfo, error) {
+	return &schema.ToolInfo{Name: t.name}, nil
+}
+
+func (t *endpointInvokableTool) InvokableRun(ctx context.Context, _ string, _ ...tool.Option) (string, error) {
+	input := &compose.ToolInput{
+		Name:        t.name,
+		CallID:      t.callID,
+		Arguments:   t.arguments,
+		CallOptions: t.callOptions,
+	}
+	output, err := t.next(ctx, input)
+	if err != nil {
+		return "", err
+	}
+	return output.Result, nil
+}
+
+type endpointStreamableTool struct {
+	name           string
+	callID         string
+	arguments      string
+	callOptions    []tool.Option
+	nextStreamable compose.StreamableToolEndpoint
+}
+
+func (t *endpointStreamableTool) Info(_ context.Context) (*schema.ToolInfo, error) {
+	return &schema.ToolInfo{Name: t.name}, nil
+}
+
+func (t *endpointStreamableTool) InvokableRun(_ context.Context, _ string, _ ...tool.Option) (string, error) {
+	return "", errors.New("InvokableRun not supported on streaming endpoint tool")
+}
+
+func (t *endpointStreamableTool) StreamableRun(ctx context.Context, _ string, _ ...tool.Option) (*schema.StreamReader[string], error) {
+	input := &compose.ToolInput{
+		Name:        t.name,
+		CallID:      t.callID,
+		Arguments:   t.arguments,
+		CallOptions: t.callOptions,
+	}
+	output, err := t.nextStreamable(ctx, input)
+	if err != nil {
+		return nil, err
+	}
+	return output.Result, nil
 }
 
 type callbackInjectionModelWrapper struct{}
@@ -241,17 +329,35 @@ func popToolGenAction(ctx context.Context, toolName string) *AgentAction {
 	return action
 }
 
-type toolResultEventSenderWrapper struct{}
+func wrapToolWithEventSender(_ context.Context, t tool.BaseTool) (tool.BaseTool, error) {
+	return &eventSenderTool{inner: t}, nil
+}
 
-func (w *toolResultEventSenderWrapper) WrapToolInvoke(ctx context.Context, call *ToolCall, next func(context.Context, *ToolCall) (*ToolResult, error)) (*ToolResult, error) {
-	result, err := next(ctx, call)
-	if err != nil {
-		return nil, err
+type eventSenderTool struct {
+	inner tool.BaseTool
+}
+
+func (t *eventSenderTool) Info(ctx context.Context) (*schema.ToolInfo, error) {
+	return t.inner.Info(ctx)
+}
+
+func (t *eventSenderTool) InvokableRun(ctx context.Context, args string, opts ...tool.Option) (string, error) {
+	inv, ok := t.inner.(tool.InvokableTool)
+	if !ok {
+		return "", errors.New("inner tool does not implement InvokableTool")
 	}
 
-	prePopAction := popToolGenAction(ctx, call.Name)
-	msg := schema.ToolMessage(result.Result, call.CallID, schema.WithToolName(call.Name))
-	event := EventFromMessage(msg, nil, schema.Tool, call.Name)
+	result, err := inv.InvokableRun(ctx, args, opts...)
+	if err != nil {
+		return "", err
+	}
+
+	toolName, _ := t.getToolName(ctx)
+	callID := compose.GetToolCallID(ctx)
+
+	prePopAction := popToolGenAction(ctx, toolName)
+	msg := schema.ToolMessage(result, callID, schema.WithToolName(toolName))
+	event := EventFromMessage(msg, nil, schema.Tool, toolName)
 	if prePopAction != nil {
 		event.Action = prePopAction
 	}
@@ -260,7 +366,7 @@ func (w *toolResultEventSenderWrapper) WrapToolInvoke(ctx context.Context, call 
 		if st.generator == nil {
 			return nil
 		}
-		if st.HasReturnDirectly && st.ReturnDirectlyToolCallID == call.CallID {
+		if st.HasReturnDirectly && st.ReturnDirectlyToolCallID == callID {
 			st.ReturnDirectlyEvent = event
 		} else {
 			st.generator.Send(event)
@@ -271,27 +377,35 @@ func (w *toolResultEventSenderWrapper) WrapToolInvoke(ctx context.Context, call 
 	return result, nil
 }
 
-func (w *toolResultEventSenderWrapper) WrapToolStream(ctx context.Context, call *ToolCall, next func(context.Context, *ToolCall) (*StreamToolResult, error)) (*StreamToolResult, error) {
-	result, err := next(ctx, call)
+func (t *eventSenderTool) StreamableRun(ctx context.Context, args string, opts ...tool.Option) (*schema.StreamReader[string], error) {
+	st, ok := t.inner.(tool.StreamableTool)
+	if !ok {
+		return nil, errors.New("inner tool does not implement StreamableTool")
+	}
+
+	result, err := st.StreamableRun(ctx, args, opts...)
 	if err != nil {
 		return nil, err
 	}
 
-	prePopAction := popToolGenAction(ctx, call.Name)
-	streams := result.Result.Copy(2)
+	toolName, _ := t.getToolName(ctx)
+	callID := compose.GetToolCallID(ctx)
+
+	prePopAction := popToolGenAction(ctx, toolName)
+	streams := result.Copy(2)
 
 	cvt := func(in string) (Message, error) {
-		return schema.ToolMessage(in, call.CallID, schema.WithToolName(call.Name)), nil
+		return schema.ToolMessage(in, callID, schema.WithToolName(toolName)), nil
 	}
 	msgStream := schema.StreamReaderWithConvert(streams[0], cvt)
-	event := EventFromMessage(nil, msgStream, schema.Tool, call.Name)
+	event := EventFromMessage(nil, msgStream, schema.Tool, toolName)
 	event.Action = prePopAction
 
 	_ = compose.ProcessState(ctx, func(_ context.Context, st *State) error {
 		if st.generator == nil {
 			return nil
 		}
-		if st.HasReturnDirectly && st.ReturnDirectlyToolCallID == call.CallID {
+		if st.HasReturnDirectly && st.ReturnDirectlyToolCallID == callID {
 			st.ReturnDirectlyEvent = event
 		} else {
 			st.generator.Send(event)
@@ -299,6 +413,13 @@ func (w *toolResultEventSenderWrapper) WrapToolStream(ctx context.Context, call 
 		return nil
 	})
 
-	result.Result = streams[1]
-	return result, nil
+	return streams[1], nil
+}
+
+func (t *eventSenderTool) getToolName(ctx context.Context) (string, error) {
+	info, err := t.inner.Info(ctx)
+	if err != nil {
+		return "", err
+	}
+	return info.Name, nil
 }
