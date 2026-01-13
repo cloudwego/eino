@@ -98,7 +98,7 @@ type reactConfig struct {
 
 	maxIterations int
 
-	handlers    []HandlerMiddleware
+	handlers    []handlerInfo
 	middlewares []AgentMiddleware
 }
 
@@ -201,11 +201,13 @@ func newReact(ctx context.Context, config *reactConfig) (reactGraph, error) {
 			}
 		}
 
-		for _, h := range config.handlers {
-			var err error
-			ctx, messages, err = h.BeforeModelRewriteHistory(ctx, messages)
-			if err != nil {
-				return nil, err
+		for _, info := range config.handlers {
+			if info.hasBeforeModelRewriteHistory {
+				var err error
+				ctx, messages, err = info.handler.BeforeModelRewriteHistory(ctx, messages)
+				if err != nil {
+					return nil, err
+				}
 			}
 		}
 
@@ -225,11 +227,13 @@ func newReact(ctx context.Context, config *reactConfig) (reactGraph, error) {
 			}
 		}
 
-		for _, h := range config.handlers {
-			var err error
-			ctx, messages, err = h.AfterModelRewriteHistory(ctx, messages)
-			if err != nil {
-				return nil, err
+		for _, info := range config.handlers {
+			if info.hasAfterModelRewriteHistory {
+				var err error
+				ctx, messages, err = info.handler.AfterModelRewriteHistory(ctx, messages)
+				if err != nil {
+					return nil, err
+				}
 			}
 		}
 

@@ -18,6 +18,7 @@ package adk
 
 import (
 	"context"
+	"reflect"
 
 	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/components/tool"
@@ -101,4 +102,36 @@ func (b *BaseHandlerMiddleware) BeforeModelRewriteHistory(ctx context.Context, m
 
 func (b *BaseHandlerMiddleware) AfterModelRewriteHistory(ctx context.Context, messages []Message) (context.Context, []Message, error) {
 	return ctx, messages, nil
+}
+
+type handlerInfo struct {
+	handler                      HandlerMiddleware
+	hasBeforeAgent               bool
+	hasBeforeModelRewriteHistory bool
+	hasAfterModelRewriteHistory  bool
+	hasWrapTool                  bool
+	hasWrapModel                 bool
+}
+
+var baseHandlerMiddlewareType = reflect.TypeOf(&BaseHandlerMiddleware{})
+
+func isMethodOverridden(handler HandlerMiddleware, methodName string) bool {
+	handlerType := reflect.TypeOf(handler)
+	handlerMethod, ok1 := handlerType.MethodByName(methodName)
+	baseMethod, ok2 := baseHandlerMiddlewareType.MethodByName(methodName)
+	if !ok1 || !ok2 {
+		return true
+	}
+	return handlerMethod.Func.Pointer() != baseMethod.Func.Pointer()
+}
+
+func newHandlerInfo(h HandlerMiddleware) handlerInfo {
+	return handlerInfo{
+		handler:                      h,
+		hasBeforeAgent:               isMethodOverridden(h, "BeforeAgent"),
+		hasBeforeModelRewriteHistory: isMethodOverridden(h, "BeforeModelRewriteHistory"),
+		hasAfterModelRewriteHistory:  isMethodOverridden(h, "AfterModelRewriteHistory"),
+		hasWrapTool:                  isMethodOverridden(h, "WrapTool"),
+		hasWrapModel:                 isMethodOverridden(h, "WrapModel"),
+	}
 }

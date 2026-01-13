@@ -241,7 +241,7 @@ type ChatModelAgent struct {
 
 	exit tool.BaseTool
 
-	handlers    []HandlerMiddleware
+	handlers    []handlerInfo
 	middlewares []AgentMiddleware
 
 	modelRetryConfig *ModelRetryConfig
@@ -271,6 +271,11 @@ func NewChatModelAgent(ctx context.Context, config *ChatModelAgentConfig) (*Chat
 		genInput = config.GenModelInput
 	}
 
+	handlerInfos := make([]handlerInfo, len(config.Handlers))
+	for i, h := range config.Handlers {
+		handlerInfos[i] = newHandlerInfo(h)
+	}
+
 	tc := config.ToolsConfig
 	// Tool call middleware execution order (outermost to innermost):
 	// 1. wrapToolWithEventSender (internal - sends tool result events)
@@ -281,10 +286,10 @@ func NewChatModelAgent(ctx context.Context, config *ChatModelAgentConfig) (*Chat
 		[]compose.ToolMiddleware{wrapToolFuncToMiddleware(wrapToolWithEventSender)},
 		tc.ToolCallMiddlewares...,
 	)
-	tc.ToolCallMiddlewares = append(tc.ToolCallMiddlewares, collectToolMiddlewaresFromHandlers(config.Handlers)...)
+	tc.ToolCallMiddlewares = append(tc.ToolCallMiddlewares, collectToolMiddlewaresFromHandlers(handlerInfos)...)
 	tc.ToolCallMiddlewares = append(tc.ToolCallMiddlewares, collectToolMiddlewaresFromMiddlewares(config.Middlewares)...)
 
-	wrappedModel, err := buildWrappedModel(ctx, config.Model, config.Handlers, config.ModelRetryConfig)
+	wrappedModel, err := buildWrappedModel(ctx, config.Model, handlerInfos, config.ModelRetryConfig)
 	if err != nil {
 		return nil, err
 	}
@@ -300,17 +305,19 @@ func NewChatModelAgent(ctx context.Context, config *ChatModelAgentConfig) (*Chat
 		exit:             config.Exit,
 		outputKey:        config.OutputKey,
 		maxIterations:    config.MaxIterations,
-		handlers:         config.Handlers,
+		handlers:         handlerInfos,
 		middlewares:      config.Middlewares,
 		modelRetryConfig: config.ModelRetryConfig,
 	}, nil
 }
 
-func collectToolMiddlewaresFromHandlers(handlers []HandlerMiddleware) []compose.ToolMiddleware {
+func collectToolMiddlewaresFromHandlers(handlers []handlerInfo) []compose.ToolMiddleware {
 	var middlewares []compose.ToolMiddleware
-	for _, h := range handlers {
-		handler := h
-		middlewares = append(middlewares, wrapToolFuncToMiddleware(handler.WrapTool))
+	for _, info := range handlers {
+		if info.hasWrapTool {
+			h := info.handler
+			middlewares = append(middlewares, wrapToolFuncToMiddleware(h.WrapTool))
+		}
 	}
 	return middlewares
 }
@@ -513,10 +520,12 @@ func (a *ChatModelAgent) applyBeforeAgent(ctx context.Context, bc *buildContext)
 	}
 
 	var err error
-	for i, h := range a.handlers {
-		ctx, runCtx, err = h.BeforeAgent(ctx, runCtx)
-		if err != nil {
-			return ctx, nil, fmt.Errorf("handler[%d] (%T) BeforeAgent failed: %w", i, h, err)
+	for i, info := range a.handlers {
+		if info.hasBeforeAgent {
+			ctx, runCtx, err = info.handler.BeforeAgent(ctx, runCtx)
+			if err != nil {
+				return ctx, nil, fmt.Errorf("handler[%d] (%T) BeforeAgent failed: %w", i, info.handler, err)
+			}
 		}
 	}
 
@@ -624,10 +633,12 @@ func (a *ChatModelAgent) buildNoToolsRunFunc(_ context.Context, bc *buildContext
 						state.Messages = mwState.Messages
 					}
 				}
-				for _, h := range a.handlers {
-					ctx, state.Messages, err = h.BeforeModelRewriteHistory(ctx, state.Messages)
-					if err != nil {
-						return nil, err
+				for _, info := range a.handlers {
+					if info.hasBeforeModelRewriteHistory {
+						ctx, state.Messages, err = info.handler.BeforeModelRewriteHistory(ctx, state.Messages)
+						if err != nil {
+							return nil, err
+						}
 					}
 				}
 				return state.Messages, nil
@@ -644,10 +655,12 @@ func (a *ChatModelAgent) buildNoToolsRunFunc(_ context.Context, bc *buildContext
 						state.Messages = mwState.Messages
 					}
 				}
-				for _, h := range a.handlers {
-					ctx, state.Messages, err = h.AfterModelRewriteHistory(ctx, state.Messages)
-					if err != nil {
-						return nil, err
+				for _, info := range a.handlers {
+					if info.hasAfterModelRewriteHistory {
+						ctx, state.Messages, err = info.handler.AfterModelRewriteHistory(ctx, state.Messages)
+						if err != nil {
+							return nil, err
+						}
 					}
 				}
 				if len(state.Messages) == 0 {
