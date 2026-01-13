@@ -19,109 +19,68 @@ package adk
 import (
 	"context"
 	"errors"
-	"reflect"
 
 	"github.com/cloudwego/eino/callbacks"
 	"github.com/cloudwego/eino/components"
 	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/compose"
-	"github.com/cloudwego/eino/internal/generic"
 	"github.com/cloudwego/eino/schema"
 )
 
-type wrappedChatModel struct {
-	inner    model.ToolCallingChatModel
-	wrappers []ModelCallWrapper
-}
+func buildWrappedModel(ctx context.Context, m model.ToolCallingChatModel, handlers []AgentHandler, retryConfig *ModelRetryConfig) (model.ToolCallingChatModel, error) {
+	var wrapped model.BaseChatModel = m
 
-func newWrappedChatModel(inner model.ToolCallingChatModel, wrappers []ModelCallWrapper) model.ToolCallingChatModel {
-	needCallback := !components.IsCallbacksEnabled(inner)
-	if needCallback {
-		wrappers = append(wrappers, &callbackInjectionWrapper{})
-	}
-	if len(wrappers) == 0 {
-		return inner
-	}
-	return &wrappedChatModel{inner: inner, wrappers: wrappers}
-}
-
-func (w *wrappedChatModel) Generate(ctx context.Context, input []*schema.Message, opts ...model.Option) (*schema.Message, error) {
-	call := &ModelCall{Messages: input, Options: opts}
-
-	endpoint := func(ctx context.Context, c *ModelCall) (*ModelResult, error) {
-		msg, err := w.inner.Generate(ctx, c.Messages, c.Options...)
+	if !components.IsCallbacksEnabled(m) {
+		var err error
+		wrapped, err = (&callbackInjectionModelWrapper{}).WrapModel(ctx, wrapped)
 		if err != nil {
 			return nil, err
 		}
-		return &ModelResult{Message: msg}, nil
 	}
 
-	for i := len(w.wrappers) - 1; i >= 0; i-- {
-		wrapper := w.wrappers[i]
-		next := endpoint
-		endpoint = func(ctx context.Context, c *ModelCall) (*ModelResult, error) {
-			return wrapper.WrapModelGenerate(ctx, c, next)
-		}
-	}
-
-	result, err := endpoint(ctx, call)
-	if err != nil {
-		return nil, err
-	}
-	return result.Message, nil
-}
-
-func (w *wrappedChatModel) Stream(ctx context.Context, input []*schema.Message, opts ...model.Option) (*schema.StreamReader[*schema.Message], error) {
-	call := &ModelCall{Messages: input, Options: opts}
-
-	endpoint := func(ctx context.Context, c *ModelCall) (*StreamModelResult, error) {
-		sr, err := w.inner.Stream(ctx, c.Messages, c.Options...)
+	for i := len(handlers) - 1; i >= 0; i-- {
+		var err error
+		wrapped, err = handlers[i].WrapModel(ctx, wrapped)
 		if err != nil {
 			return nil, err
 		}
-		return &StreamModelResult{Stream: sr}, nil
 	}
 
-	for i := len(w.wrappers) - 1; i >= 0; i-- {
-		wrapper := w.wrappers[i]
-		next := endpoint
-		endpoint = func(ctx context.Context, c *ModelCall) (*StreamModelResult, error) {
-			return wrapper.WrapModelStream(ctx, c, next)
-		}
-	}
-
-	result, err := endpoint(ctx, call)
+	wrapped, err := (&eventSenderModelWrapper{modelRetryConfig: retryConfig}).WrapModel(ctx, wrapped)
 	if err != nil {
 		return nil, err
 	}
-	return result.Stream, nil
+
+	result := &baseChatModelAdapter{inner: wrapped, toolBinder: m}
+	if retryConfig != nil {
+		return newRetryChatModel(result, retryConfig), nil
+	}
+	return result, nil
 }
 
-func (w *wrappedChatModel) WithTools(tools []*schema.ToolInfo) (model.ToolCallingChatModel, error) {
-	newInner, err := w.inner.WithTools(tools)
+type baseChatModelAdapter struct {
+	inner      model.BaseChatModel
+	toolBinder model.ToolCallingChatModel
+}
+
+func (a *baseChatModelAdapter) Generate(ctx context.Context, input []*schema.Message, opts ...model.Option) (*schema.Message, error) {
+	return a.inner.Generate(ctx, input, opts...)
+}
+
+func (a *baseChatModelAdapter) Stream(ctx context.Context, input []*schema.Message, opts ...model.Option) (*schema.StreamReader[*schema.Message], error) {
+	return a.inner.Stream(ctx, input, opts...)
+}
+
+func (a *baseChatModelAdapter) WithTools(tools []*schema.ToolInfo) (model.ToolCallingChatModel, error) {
+	newToolBinder, err := a.toolBinder.WithTools(tools)
 	if err != nil {
 		return nil, err
 	}
-	return &wrappedChatModel{inner: newInner, wrappers: w.wrappers}, nil
+	return &baseChatModelAdapter{inner: a.inner, toolBinder: newToolBinder}, nil
 }
 
-func (w *wrappedChatModel) GetType() string {
-	if gt, ok := w.inner.(components.Typer); ok {
-		return gt.GetType()
-	}
-	return generic.ParseTypeName(reflect.ValueOf(w.inner))
-}
-
-func (w *wrappedChatModel) IsCallbacksEnabled() bool {
+func (a *baseChatModelAdapter) IsCallbacksEnabled() bool {
 	return true
-}
-
-func collectModelWrappersFromHandlers(handlers []AgentHandler) []ModelCallWrapper {
-	wrappers := make([]ModelCallWrapper, len(handlers))
-	for i, h := range handlers {
-		wrappers[i] = h
-	}
-	return wrappers
 }
 
 func toolCallWrappersToMiddlewares(wrappers []ToolCallWrapper) []compose.ToolMiddleware {
@@ -144,38 +103,53 @@ func toolCallWrappersToMiddlewares(wrappers []ToolCallWrapper) []compose.ToolMid
 	return middlewares
 }
 
-type callbackInjectionWrapper struct {
-	BaseModelCallWrapper
+type callbackInjectionModelWrapper struct{}
+
+func (w *callbackInjectionModelWrapper) WrapModel(_ context.Context, m model.BaseChatModel) (model.BaseChatModel, error) {
+	return &callbackInjectedModel{inner: m}, nil
 }
 
-func (w *callbackInjectionWrapper) WrapModelGenerate(ctx context.Context, call *ModelCall, next func(context.Context, *ModelCall) (*ModelResult, error)) (*ModelResult, error) {
-	ctx = callbacks.OnStart(ctx, call.Messages)
-	result, err := next(ctx, call)
+type callbackInjectedModel struct {
+	inner model.BaseChatModel
+}
+
+func (m *callbackInjectedModel) Generate(ctx context.Context, input []*schema.Message, opts ...model.Option) (*schema.Message, error) {
+	ctx = callbacks.OnStart(ctx, input)
+	result, err := m.inner.Generate(ctx, input, opts...)
 	if err != nil {
 		callbacks.OnError(ctx, err)
 		return nil, err
 	}
-	callbacks.OnEnd(ctx, result.Message)
+	callbacks.OnEnd(ctx, result)
 	return result, nil
 }
 
-func (w *callbackInjectionWrapper) WrapModelStream(ctx context.Context, call *ModelCall, next func(context.Context, *ModelCall) (*StreamModelResult, error)) (*StreamModelResult, error) {
-	ctx = callbacks.OnStart(ctx, call.Messages)
-	result, err := next(ctx, call)
+func (m *callbackInjectedModel) Stream(ctx context.Context, input []*schema.Message, opts ...model.Option) (*schema.StreamReader[*schema.Message], error) {
+	ctx = callbacks.OnStart(ctx, input)
+	result, err := m.inner.Stream(ctx, input, opts...)
 	if err != nil {
 		callbacks.OnError(ctx, err)
 		return nil, err
 	}
-	_, wrappedStream := callbacks.OnEndWithStreamOutput(ctx, result.Stream)
-	return &StreamModelResult{Stream: wrappedStream}, nil
+	_, wrappedStream := callbacks.OnEndWithStreamOutput(ctx, result)
+	return wrappedStream, nil
 }
 
 type eventSenderModelWrapper struct {
 	modelRetryConfig *ModelRetryConfig
 }
 
-func (w *eventSenderModelWrapper) WrapModelGenerate(ctx context.Context, call *ModelCall, next func(context.Context, *ModelCall) (*ModelResult, error)) (*ModelResult, error) {
-	result, err := next(ctx, call)
+func (w *eventSenderModelWrapper) WrapModel(_ context.Context, m model.BaseChatModel) (model.BaseChatModel, error) {
+	return &eventSenderModel{inner: m, modelRetryConfig: w.modelRetryConfig}, nil
+}
+
+type eventSenderModel struct {
+	inner            model.BaseChatModel
+	modelRetryConfig *ModelRetryConfig
+}
+
+func (m *eventSenderModel) Generate(ctx context.Context, input []*schema.Message, opts ...model.Option) (*schema.Message, error) {
+	result, err := m.inner.Generate(ctx, input, opts...)
 	if err != nil {
 		return nil, err
 	}
@@ -190,17 +164,17 @@ func (w *eventSenderModelWrapper) WrapModelGenerate(ctx context.Context, call *M
 	}
 
 	if gen == nil {
-		return nil, errors.New("generator is nil when sending event in WrapModelGenerate: ensure agent state is properly initialized")
+		return nil, errors.New("generator is nil when sending event in Generate: ensure agent state is properly initialized")
 	}
 
-	event := EventFromMessage(result.Message, nil, schema.Assistant, "")
+	event := EventFromMessage(result, nil, schema.Assistant, "")
 	gen.Send(event)
 
 	return result, nil
 }
 
-func (w *eventSenderModelWrapper) WrapModelStream(ctx context.Context, call *ModelCall, next func(context.Context, *ModelCall) (*StreamModelResult, error)) (*StreamModelResult, error) {
-	result, err := next(ctx, call)
+func (m *eventSenderModel) Stream(ctx context.Context, input []*schema.Message, opts ...model.Option) (*schema.StreamReader[*schema.Message], error) {
+	result, err := m.inner.Stream(ctx, input, opts...)
 	if err != nil {
 		return nil, err
 	}
@@ -215,32 +189,32 @@ func (w *eventSenderModelWrapper) WrapModelStream(ctx context.Context, call *Mod
 		return nil
 	})
 	if err != nil {
-		result.Stream.Close()
+		result.Close()
 		return nil, err
 	}
 
 	if gen == nil {
-		result.Stream.Close()
-		return nil, errors.New("generator is nil when sending event in WrapModelStream: ensure agent state is properly initialized")
+		result.Close()
+		return nil, errors.New("generator is nil when sending event in Stream: ensure agent state is properly initialized")
 	}
 
-	streams := result.Stream.Copy(2)
+	streams := result.Copy(2)
 
 	eventStream := streams[0]
-	if w.modelRetryConfig != nil {
+	if m.modelRetryConfig != nil {
 		convertOpts := []schema.ConvertOption{
-			schema.WithErrWrapper(genErrWrapper(ctx, w.modelRetryConfig.MaxRetries,
-				retryAttempt, w.modelRetryConfig.IsRetryAble)),
+			schema.WithErrWrapper(genErrWrapper(ctx, m.modelRetryConfig.MaxRetries,
+				retryAttempt, m.modelRetryConfig.IsRetryAble)),
 		}
 		eventStream = schema.StreamReaderWithConvert(streams[0],
-			func(m *schema.Message) (*schema.Message, error) { return m, nil },
+			func(msg *schema.Message) (*schema.Message, error) { return msg, nil },
 			convertOpts...)
 	}
 
 	event := EventFromMessage(nil, eventStream, schema.Assistant, "")
 	gen.Send(event)
 
-	return &StreamModelResult{Stream: streams[1]}, nil
+	return streams[1], nil
 }
 
 func popToolGenAction(ctx context.Context, toolName string) *AgentAction {

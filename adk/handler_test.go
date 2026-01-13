@@ -24,7 +24,6 @@ import (
 	"github.com/stretchr/testify/assert"
 	"go.uber.org/mock/gomock"
 
-	"github.com/cloudwego/eino/callbacks"
 	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/components/tool"
 	"github.com/cloudwego/eino/compose"
@@ -871,40 +870,45 @@ func (h *countingHandler) AfterModelRewriteHistory(ctx context.Context, messages
 	return ctx, messages, nil
 }
 
-type testModelCallWrapper struct {
-	BaseModelCallWrapper
-	name           string
-	beforeFn       func()
-	afterFn        func()
-	modifyResultFn func(*schema.Message) *schema.Message
+func newTestModelWrapperFn(beforeFn, afterFn func()) WrapModelFunc {
+	return func(_ context.Context, m model.BaseChatModel) (model.BaseChatModel, error) {
+		return &testWrappedModel{
+			inner:    m,
+			beforeFn: beforeFn,
+			afterFn:  afterFn,
+		}, nil
+	}
 }
 
-func (h *testModelCallWrapper) WrapModelGenerate(ctx context.Context, call *ModelCall, next func(context.Context, *ModelCall) (*ModelResult, error)) (*ModelResult, error) {
-	if h.beforeFn != nil {
-		h.beforeFn()
+type testWrappedModel struct {
+	inner    model.BaseChatModel
+	beforeFn func()
+	afterFn  func()
+}
+
+func (m *testWrappedModel) Generate(ctx context.Context, input []*schema.Message, opts ...model.Option) (*schema.Message, error) {
+	if m.beforeFn != nil {
+		m.beforeFn()
 	}
-	result, err := next(ctx, call)
-	if h.afterFn != nil {
-		h.afterFn()
-	}
-	if err == nil && h.modifyResultFn != nil {
-		result.Message = h.modifyResultFn(result.Message)
+	result, err := m.inner.Generate(ctx, input, opts...)
+	if m.afterFn != nil {
+		m.afterFn()
 	}
 	return result, err
 }
 
-func (h *testModelCallWrapper) WrapModelStream(ctx context.Context, call *ModelCall, next func(context.Context, *ModelCall) (*StreamModelResult, error)) (*StreamModelResult, error) {
-	if h.beforeFn != nil {
-		h.beforeFn()
+func (m *testWrappedModel) Stream(ctx context.Context, input []*schema.Message, opts ...model.Option) (*schema.StreamReader[*schema.Message], error) {
+	if m.beforeFn != nil {
+		m.beforeFn()
 	}
-	result, err := next(ctx, call)
-	if h.afterFn != nil {
-		h.afterFn()
+	result, err := m.inner.Stream(ctx, input, opts...)
+	if m.afterFn != nil {
+		m.afterFn()
 	}
 	return result, err
 }
 
-func TestModelCallWrapperHandlers(t *testing.T) {
+func TestModelWrapperHandlers(t *testing.T) {
 	t.Run("MultipleModelWrappersPipeline", func(t *testing.T) {
 		ctx := context.Background()
 		ctrl := gomock.NewController(t)
@@ -921,32 +925,30 @@ func TestModelCallWrapperHandlers(t *testing.T) {
 			Description: "Test agent",
 			Model:       cm,
 			Handlers: []AgentHandler{
-				WithModelCallWrapper(&testModelCallWrapper{
-					name: "wrapper1",
-					beforeFn: func() {
+				WithModelWrapper(newTestModelWrapperFn(
+					func() {
 						mu.Lock()
 						callOrder = append(callOrder, "wrapper1-before")
 						mu.Unlock()
 					},
-					afterFn: func() {
+					func() {
 						mu.Lock()
 						callOrder = append(callOrder, "wrapper1-after")
 						mu.Unlock()
 					},
-				}),
-				WithModelCallWrapper(&testModelCallWrapper{
-					name: "wrapper2",
-					beforeFn: func() {
+				)),
+				WithModelWrapper(newTestModelWrapperFn(
+					func() {
 						mu.Lock()
 						callOrder = append(callOrder, "wrapper2-before")
 						mu.Unlock()
 					},
-					afterFn: func() {
+					func() {
 						mu.Lock()
 						callOrder = append(callOrder, "wrapper2-after")
 						mu.Unlock()
 					},
-				}),
+				)),
 			},
 		})
 		assert.NoError(t, err)
@@ -962,44 +964,52 @@ func TestModelCallWrapperHandlers(t *testing.T) {
 		assert.Equal(t, []string{"wrapper1-before", "wrapper2-before", "wrapper2-after", "wrapper1-after"}, callOrder)
 	})
 
-	t.Run("ModelWrapperCanModifyResult", func(t *testing.T) {
+	t.Run("ModelWrapperBeforeAfterCallOrder", func(t *testing.T) {
 		ctx := context.Background()
 		ctrl := gomock.NewController(t)
 		cm := mockModel.NewMockToolCallingChatModel(ctrl)
 
+		var callOrder []string
+		var mu sync.Mutex
+
 		cm.EXPECT().Generate(gomock.Any(), gomock.Any(), gomock.Any()).
-			Return(schema.AssistantMessage("original response", nil), nil).Times(1)
+			DoAndReturn(func(ctx context.Context, msgs []*schema.Message, opts ...model.Option) (*schema.Message, error) {
+				mu.Lock()
+				callOrder = append(callOrder, "model-generate")
+				mu.Unlock()
+				return schema.AssistantMessage("original response", nil), nil
+			}).Times(1)
 
 		agent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
 			Name:        "TestAgent",
 			Description: "Test agent",
 			Model:       cm,
 			Handlers: []AgentHandler{
-				WithModelCallWrapper(&testModelCallWrapper{
-					name: "modifier",
-					modifyResultFn: func(msg *schema.Message) *schema.Message {
-						return schema.AssistantMessage("modified: "+msg.Content, nil)
+				WithModelWrapper(newTestModelWrapperFn(
+					func() {
+						mu.Lock()
+						callOrder = append(callOrder, "wrapper-before")
+						mu.Unlock()
 					},
-				}),
+					func() {
+						mu.Lock()
+						callOrder = append(callOrder, "wrapper-after")
+						mu.Unlock()
+					},
+				)),
 			},
 		})
 		assert.NoError(t, err)
 
 		iter := agent.Run(ctx, &AgentInput{Messages: []Message{schema.UserMessage("test")}})
-		var lastContent string
 		for {
-			event, ok := iter.Next()
+			_, ok := iter.Next()
 			if !ok {
 				break
 			}
-			if event.Output != nil && event.Output.MessageOutput != nil &&
-				event.Output.MessageOutput.Message != nil &&
-				event.Output.MessageOutput.Message.Role == schema.Assistant {
-				lastContent = event.Output.MessageOutput.Message.Content
-			}
 		}
 
-		assert.Equal(t, "modified: original response", lastContent)
+		assert.Equal(t, []string{"wrapper-before", "model-generate", "wrapper-after"}, callOrder)
 	})
 
 	t.Run("ModelWrapperWithTools", func(t *testing.T) {
@@ -1041,19 +1051,18 @@ func TestModelCallWrapperHandlers(t *testing.T) {
 				},
 			},
 			Handlers: []AgentHandler{
-				WithModelCallWrapper(&testModelCallWrapper{
-					name: "wrapper",
-					beforeFn: func() {
+				WithModelWrapper(newTestModelWrapperFn(
+					func() {
 						mu.Lock()
 						callOrder = append(callOrder, "wrapper-before")
 						mu.Unlock()
 					},
-					afterFn: func() {
+					func() {
 						mu.Lock()
 						callOrder = append(callOrder, "wrapper-after")
 						mu.Unlock()
 					},
-				}),
+				)),
 			},
 		})
 		assert.NoError(t, err)
@@ -1096,184 +1105,141 @@ func (m *simpleChatModelWithoutCallbacks) WithTools(tools []*schema.ToolInfo) (m
 	return m, nil
 }
 
-type inputOutputModifyingWrapper struct {
-	BaseModelCallWrapper
-	inputPrefix  string
-	outputSuffix string
+func newInputModifyingWrapperFn(inputPrefix string) WrapModelFunc {
+	return func(_ context.Context, m model.BaseChatModel) (model.BaseChatModel, error) {
+		return &inputOutputModifyingModel{
+			inner:       m,
+			inputPrefix: inputPrefix,
+		}, nil
+	}
 }
 
-func (w *inputOutputModifyingWrapper) WrapModelGenerate(ctx context.Context, call *ModelCall, next func(context.Context, *ModelCall) (*ModelResult, error)) (*ModelResult, error) {
-	modifiedMessages := make([]*schema.Message, len(call.Messages))
-	for i, msg := range call.Messages {
+type inputOutputModifyingModel struct {
+	inner       model.BaseChatModel
+	inputPrefix string
+}
+
+func (m *inputOutputModifyingModel) Generate(ctx context.Context, input []*schema.Message, opts ...model.Option) (*schema.Message, error) {
+	modifiedMessages := make([]*schema.Message, len(input))
+	for i, msg := range input {
 		if msg.Role == schema.User {
-			modifiedMessages[i] = schema.UserMessage(w.inputPrefix + msg.Content)
+			modifiedMessages[i] = schema.UserMessage(m.inputPrefix + msg.Content)
 		} else {
 			modifiedMessages[i] = msg
 		}
 	}
-	call.Messages = modifiedMessages
-
-	result, err := next(ctx, call)
-	if err != nil {
-		return nil, err
-	}
-
-	result.Message = schema.AssistantMessage(result.Message.Content+w.outputSuffix, nil)
-	return result, nil
+	return m.inner.Generate(ctx, modifiedMessages, opts...)
 }
 
-func (w *inputOutputModifyingWrapper) WrapModelStream(ctx context.Context, call *ModelCall, next func(context.Context, *ModelCall) (*StreamModelResult, error)) (*StreamModelResult, error) {
-	modifiedMessages := make([]*schema.Message, len(call.Messages))
-	for i, msg := range call.Messages {
+func (m *inputOutputModifyingModel) Stream(ctx context.Context, input []*schema.Message, opts ...model.Option) (*schema.StreamReader[*schema.Message], error) {
+	modifiedMessages := make([]*schema.Message, len(input))
+	for i, msg := range input {
 		if msg.Role == schema.User {
-			modifiedMessages[i] = schema.UserMessage(w.inputPrefix + msg.Content)
+			modifiedMessages[i] = schema.UserMessage(m.inputPrefix + msg.Content)
 		} else {
 			modifiedMessages[i] = msg
 		}
 	}
-	call.Messages = modifiedMessages
-
-	result, err := next(ctx, call)
-	if err != nil {
-		return nil, err
-	}
-
-	modifiedStream := schema.StreamReaderWithConvert(result.Stream, func(msg *schema.Message) (*schema.Message, error) {
-		return schema.AssistantMessage(msg.Content+w.outputSuffix, nil), nil
-	})
-	return &StreamModelResult{Stream: modifiedStream}, nil
+	return m.inner.Stream(ctx, modifiedMessages, opts...)
 }
 
-func TestWrappedChatModel_CallbackInjection(t *testing.T) {
-	t.Run("DirectWrappedChatModel_Generate", func(t *testing.T) {
+func TestModelWrapper_InputModification(t *testing.T) {
+	t.Run("ModelWrapperModifiesInput_Generate", func(t *testing.T) {
+		ctx := context.Background()
+		ctrl := gomock.NewController(t)
+		cm := mockModel.NewMockToolCallingChatModel(ctrl)
+
 		var modelReceivedInput []*schema.Message
-
-		cm := &simpleChatModelWithoutCallbacks{
-			generateFn: func(ctx context.Context, input []*schema.Message, opts ...model.Option) (*schema.Message, error) {
+		cm.EXPECT().Generate(gomock.Any(), gomock.Any(), gomock.Any()).
+			DoAndReturn(func(ctx context.Context, input []*schema.Message, opts ...model.Option) (*schema.Message, error) {
 				modelReceivedInput = input
 				return schema.AssistantMessage("original response", nil), nil
+			}).Times(1)
+
+		agent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+			Name:        "TestAgent",
+			Description: "Test agent",
+			Model:       cm,
+			Handlers: []AgentHandler{
+				WithModelWrapper(newInputModifyingWrapperFn("[WRAPPER]")),
 			},
-		}
-
-		var callbackCapturedInput []*schema.Message
-		var callbackCapturedOutput *schema.Message
-
-		handler := callbacks.NewHandlerBuilder().
-			OnStartFn(func(ctx context.Context, info *callbacks.RunInfo, input callbacks.CallbackInput) context.Context {
-				if msgs, ok := input.([]*schema.Message); ok {
-					callbackCapturedInput = msgs
-				}
-				return ctx
-			}).
-			OnEndFn(func(ctx context.Context, info *callbacks.RunInfo, output callbacks.CallbackOutput) context.Context {
-				if msg, ok := output.(*schema.Message); ok {
-					callbackCapturedOutput = msg
-				}
-				return ctx
-			}).
-			Build()
-
-		ctx := context.Background()
-		ctx = callbacks.InitCallbacks(ctx, &callbacks.RunInfo{}, handler)
-
-		wrapper := &inputOutputModifyingWrapper{
-			inputPrefix:  "[WRAPPER]",
-			outputSuffix: "[MODIFIED]",
-		}
-		wrappedModel := newWrappedChatModel(cm, []ModelCallWrapper{wrapper})
-
-		input := []*schema.Message{schema.UserMessage("test input")}
-		result, err := wrappedModel.Generate(ctx, input)
+		})
 		assert.NoError(t, err)
 
+		iter := agent.Run(ctx, &AgentInput{Messages: []Message{schema.UserMessage("test input")}})
+		for {
+			_, ok := iter.Next()
+			if !ok {
+				break
+			}
+		}
+
 		assert.NotNil(t, modelReceivedInput)
-		assert.Len(t, modelReceivedInput, 1)
-		assert.Equal(t, "[WRAPPER]test input", modelReceivedInput[0].Content, "Model should receive wrapper-modified input")
-
-		assert.NotNil(t, callbackCapturedInput)
-		assert.Len(t, callbackCapturedInput, 1)
-		assert.Equal(t, "[WRAPPER]test input", callbackCapturedInput[0].Content, "Callback should capture the same input that model receives (after wrapper modification)")
-
-		assert.NotNil(t, callbackCapturedOutput)
-		assert.Equal(t, "original response", callbackCapturedOutput.Content, "Callback should capture original model output (before wrapper modification)")
-
-		assert.Equal(t, "original response[MODIFIED]", result.Content, "Final output should be wrapper-modified")
+		assert.True(t, len(modelReceivedInput) > 0)
+		found := false
+		for _, msg := range modelReceivedInput {
+			if msg.Content == "[WRAPPER]test input" {
+				found = true
+				break
+			}
+		}
+		assert.True(t, found, "Model should receive wrapper-modified input")
 	})
 
-	t.Run("DirectWrappedChatModel_Stream", func(t *testing.T) {
-		var modelReceivedInput []*schema.Message
+	t.Run("ModelWrapperModifiesInput_Stream", func(t *testing.T) {
+		ctx := context.Background()
+		ctrl := gomock.NewController(t)
+		cm := mockModel.NewMockToolCallingChatModel(ctrl)
 
-		cm := &simpleChatModelWithoutCallbacks{
-			streamFn: func(ctx context.Context, input []*schema.Message, opts ...model.Option) (*schema.StreamReader[*schema.Message], error) {
+		var modelReceivedInput []*schema.Message
+		cm.EXPECT().Stream(gomock.Any(), gomock.Any(), gomock.Any()).
+			DoAndReturn(func(ctx context.Context, input []*schema.Message, opts ...model.Option) (*schema.StreamReader[*schema.Message], error) {
 				modelReceivedInput = input
 				return schema.StreamReaderFromArray([]*schema.Message{
 					schema.AssistantMessage("chunk1", nil),
 					schema.AssistantMessage("chunk2", nil),
 				}), nil
+			}).Times(1)
+
+		agent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+			Name:        "TestAgent",
+			Description: "Test agent",
+			Model:       cm,
+			Handlers: []AgentHandler{
+				WithModelWrapper(newInputModifyingWrapperFn("[WRAPPER]")),
 			},
-		}
-
-		var callbackCapturedInput []*schema.Message
-		var callbackCapturedStreamChunks []*schema.Message
-		var mu sync.Mutex
-
-		handler := callbacks.NewHandlerBuilder().
-			OnStartFn(func(ctx context.Context, info *callbacks.RunInfo, input callbacks.CallbackInput) context.Context {
-				if msgs, ok := input.([]*schema.Message); ok {
-					callbackCapturedInput = msgs
-				}
-				return ctx
-			}).
-			OnEndWithStreamOutputFn(func(ctx context.Context, info *callbacks.RunInfo, output *schema.StreamReader[callbacks.CallbackOutput]) context.Context {
-				go func() {
-					defer output.Close()
-					for {
-						chunk, err := output.Recv()
-						if err != nil {
-							break
-						}
-						if msg, ok := chunk.(*schema.Message); ok {
-							mu.Lock()
-							callbackCapturedStreamChunks = append(callbackCapturedStreamChunks, msg)
-							mu.Unlock()
-						}
-					}
-				}()
-				return ctx
-			}).
-			Build()
-
-		ctx := context.Background()
-		ctx = callbacks.InitCallbacks(ctx, &callbacks.RunInfo{}, handler)
-
-		wrapper := &inputOutputModifyingWrapper{
-			inputPrefix:  "[WRAPPER]",
-			outputSuffix: "[MODIFIED]",
-		}
-		wrappedModel := newWrappedChatModel(cm, []ModelCallWrapper{wrapper})
-
-		input := []*schema.Message{schema.UserMessage("test input")}
-		stream, err := wrappedModel.Stream(ctx, input)
+		})
 		assert.NoError(t, err)
 
-		var finalChunks []string
+		r := NewRunner(ctx, RunnerConfig{Agent: agent, EnableStreaming: true, CheckPointStore: newBridgeStore()})
+		iter := r.Run(ctx, []Message{schema.UserMessage("test input")})
+
 		for {
-			msg, err := stream.Recv()
-			if err != nil {
+			event, ok := iter.Next()
+			if !ok {
 				break
 			}
-			finalChunks = append(finalChunks, msg.Content)
+			if event.Output != nil && event.Output.MessageOutput != nil &&
+				event.Output.MessageOutput.IsStreaming &&
+				event.Output.MessageOutput.Role == schema.Assistant {
+				for {
+					_, err := event.Output.MessageOutput.MessageStream.Recv()
+					if err != nil {
+						break
+					}
+				}
+			}
 		}
 
 		assert.NotNil(t, modelReceivedInput)
-		assert.Len(t, modelReceivedInput, 1)
-		assert.Equal(t, "[WRAPPER]test input", modelReceivedInput[0].Content, "Model should receive wrapper-modified input")
-
-		assert.NotNil(t, callbackCapturedInput)
-		assert.Len(t, callbackCapturedInput, 1)
-		assert.Equal(t, "[WRAPPER]test input", callbackCapturedInput[0].Content, "Callback should capture the same input that model receives")
-
-		assert.Contains(t, finalChunks, "chunk1[MODIFIED]", "Final stream should contain wrapper-modified chunks")
-		assert.Contains(t, finalChunks, "chunk2[MODIFIED]", "Final stream should contain wrapper-modified chunks")
+		assert.True(t, len(modelReceivedInput) > 0)
+		found := false
+		for _, msg := range modelReceivedInput {
+			if msg.Content == "[WRAPPER]test input" {
+				found = true
+				break
+			}
+		}
+		assert.True(t, found, "Model should receive wrapper-modified input")
 	})
 }

@@ -19,6 +19,7 @@ package adk
 import (
 	"context"
 
+	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/components/tool"
 )
 
@@ -140,49 +141,31 @@ func (h *afterModelRewriteHistoryHandler) AfterModelRewriteHistory(ctx context.C
 // WithToolCallWrapper creates a handler that wraps tool calls.
 func WithToolCallWrapper(wrapper ToolCallWrapper) AgentHandler {
 	return &toolCallWrapperHandler{
-		BaseModelCallWrapper: BaseModelCallWrapper{},
-		ToolCallWrapper:      wrapper,
+		ToolCallWrapper: wrapper,
 	}
 }
 
 type toolCallWrapperHandler struct {
-	BaseModelCallWrapper
+	BaseAgentHandler
 	ToolCallWrapper
 }
 
-func (h *toolCallWrapperHandler) BeforeAgent(ctx context.Context, runCtx *AgentRunContext) (context.Context, *AgentRunContext, error) {
-	return ctx, runCtx, nil
-}
+// WrapModelFunc is a function type for wrapping chat models.
+type WrapModelFunc func(ctx context.Context, m model.BaseChatModel) (model.BaseChatModel, error)
 
-func (h *toolCallWrapperHandler) BeforeModelRewriteHistory(ctx context.Context, messages []Message) (context.Context, []Message, error) {
-	return ctx, messages, nil
-}
-
-func (h *toolCallWrapperHandler) AfterModelRewriteHistory(ctx context.Context, messages []Message) (context.Context, []Message, error) {
-	return ctx, messages, nil
-}
-
-// WithModelCallWrapper creates a handler that wraps model calls.
-func WithModelCallWrapper(wrapper ModelCallWrapper) AgentHandler {
-	return &modelCallWrapperHandler{
-		BaseToolCallWrapper: BaseToolCallWrapper{},
-		ModelCallWrapper:    wrapper,
+// WithModelWrapper creates a handler that wraps the chat model.
+// The wrapper is applied once when the agent is built, not per-call.
+func WithModelWrapper(fn WrapModelFunc) AgentHandler {
+	return &modelWrapperHandler{
+		fn: fn,
 	}
 }
 
-type modelCallWrapperHandler struct {
-	BaseToolCallWrapper
-	ModelCallWrapper
+type modelWrapperHandler struct {
+	BaseAgentHandler
+	fn WrapModelFunc
 }
 
-func (h *modelCallWrapperHandler) BeforeAgent(ctx context.Context, runCtx *AgentRunContext) (context.Context, *AgentRunContext, error) {
-	return ctx, runCtx, nil
-}
-
-func (h *modelCallWrapperHandler) BeforeModelRewriteHistory(ctx context.Context, messages []Message) (context.Context, []Message, error) {
-	return ctx, messages, nil
-}
-
-func (h *modelCallWrapperHandler) AfterModelRewriteHistory(ctx context.Context, messages []Message) (context.Context, []Message, error) {
-	return ctx, messages, nil
+func (h *modelWrapperHandler) WrapModel(ctx context.Context, m model.BaseChatModel) (model.BaseChatModel, error) {
+	return h.fn(ctx, m)
 }
