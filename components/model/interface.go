@@ -54,3 +54,15 @@ type ToolCallingChatModel interface {
 	// This method does not modify the current instance, making it safer for concurrent use.
 	WithTools(tools []*schema.ToolInfo) (ToolCallingChatModel, error)
 }
+
+// AgenticModel defines the interface for agentic models that support AgenticMessage.
+// It provides methods for generating complete and streaming outputs, and supports
+// tool calling via the WithTools method.
+type AgenticModel interface {
+	Generate(ctx context.Context, input []*schema.AgenticMessage, opts ...Option) (*schema.AgenticMessage, error)
+	Stream(ctx context.Context, input []*schema.AgenticMessage, opts ...Option) (*schema.StreamReader[*schema.AgenticMessage], error)
+
+	// WithTools returns a new Model instance with the specified tools bound.
+	// This method does not modify the current instance, making it safer for concurrent use.
+	WithTools(tools []*schema.ToolInfo) (AgenticModel, error)
+}

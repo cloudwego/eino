@@ -20,7 +20,6 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/cloudwego/eino/components/agentic"
 	"github.com/cloudwego/eino/components/document"
 	"github.com/cloudwego/eino/components/embedding"
 	"github.com/cloudwego/eino/components/indexer"
@@ -158,7 +157,7 @@ func (cb *ChainBranch) AddChatModel(key string, node model.BaseChatModel, opts .
 //	})
 //	cb.AddAgenticModel("agentic_model_key_1", model1)
 //	cb.AddAgenticModel("agentic_model_key_2", model2)
-func (cb *ChainBranch) AddAgenticModel(key string, node agentic.Model, opts ...GraphAddNodeOpt) *ChainBranch {
+func (cb *ChainBranch) AddAgenticModel(key string, node model.AgenticModel, opts ...GraphAddNodeOpt) *ChainBranch {
 	gNode, options := toAgenticModelNode(node, opts...)
 	return cb.addNode(key, gNode, options)
 }
