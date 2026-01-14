@@ -241,8 +241,9 @@ type ChatModelAgent struct {
 
 	exit tool.BaseTool
 
-	handlers    []handlerInfo
-	middlewares []AgentMiddleware
+	handlers          []handlerInfo
+	hasAnyBeforeAgent bool
+	middlewares       []AgentMiddleware
 
 	modelRetryConfig *ModelRetryConfig
 
@@ -272,21 +273,38 @@ func NewChatModelAgent(ctx context.Context, config *ChatModelAgentConfig) (*Chat
 	}
 
 	handlerInfos := make([]handlerInfo, len(config.Handlers))
+	hasAnyBeforeAgent := false
 	for i, h := range config.Handlers {
 		handlerInfos[i] = newHandlerInfo(h)
+		if handlerInfos[i].hasBeforeAgent {
+			hasAnyBeforeAgent = true
+		}
 	}
 
 	tc := config.ToolsConfig
+
+	// Apply HandlerMiddleware.WrapTool to static tools at construction time,
+	// but only if no handler has BeforeAgent (which could modify the tool list).
+	// If any handler has BeforeAgent, tools will be wrapped in applyBeforeAgent instead.
+	if !hasAnyBeforeAgent {
+		wrappedTools, err := applyToolWrappers(ctx, tc.Tools, handlerInfos)
+		if err != nil {
+			return nil, err
+		}
+		tc.Tools = wrappedTools
+	}
+
 	// Tool call middleware execution order (outermost to innermost):
-	// 1. wrapToolWithEventSender (internal - sends tool result events)
-	// 2. Handlers' WrapTool (in registration order)
+	// 1. eventSenderToolMiddleware (internal - sends tool result events after all modifications)
+	// 2. User-provided ToolsConfig.ToolCallMiddlewares (original order preserved)
 	// 3. Middlewares' WrapToolCall (in registration order)
-	// 4. User-provided ToolsConfig.ToolCallMiddlewares (original order preserved)
+	//
+	// Note: HandlerMiddleware.WrapTool is applied directly to tools (not as middleware)
+	// at construction time or after BeforeAgent, so it's closest to the original tool.
 	tc.ToolCallMiddlewares = append(
-		[]compose.ToolMiddleware{wrapToolFuncToMiddleware(wrapToolWithEventSender)},
+		[]compose.ToolMiddleware{eventSenderToolMiddleware()},
 		tc.ToolCallMiddlewares...,
 	)
-	tc.ToolCallMiddlewares = append(tc.ToolCallMiddlewares, collectToolMiddlewaresFromHandlers(handlerInfos)...)
 	tc.ToolCallMiddlewares = append(tc.ToolCallMiddlewares, collectToolMiddlewaresFromMiddlewares(config.Middlewares)...)
 
 	wrappedModel, err := buildWrappedModel(ctx, config.Model, handlerInfos, config.ModelRetryConfig)
@@ -295,31 +313,21 @@ func NewChatModelAgent(ctx context.Context, config *ChatModelAgentConfig) (*Chat
 	}
 
 	return &ChatModelAgent{
-		name:             config.Name,
-		description:      config.Description,
-		instruction:      config.Instruction,
-		model:            config.Model,
-		wrappedModel:     wrappedModel,
-		toolsConfig:      tc,
-		genModelInput:    genInput,
-		exit:             config.Exit,
-		outputKey:        config.OutputKey,
-		maxIterations:    config.MaxIterations,
-		handlers:         handlerInfos,
-		middlewares:      config.Middlewares,
-		modelRetryConfig: config.ModelRetryConfig,
+		name:              config.Name,
+		description:       config.Description,
+		instruction:       config.Instruction,
+		model:             config.Model,
+		wrappedModel:      wrappedModel,
+		toolsConfig:       tc,
+		genModelInput:     genInput,
+		exit:              config.Exit,
+		outputKey:         config.OutputKey,
+		maxIterations:     config.MaxIterations,
+		handlers:          handlerInfos,
+		hasAnyBeforeAgent: hasAnyBeforeAgent,
+		middlewares:       config.Middlewares,
+		modelRetryConfig:  config.ModelRetryConfig,
 	}, nil
-}
-
-func collectToolMiddlewaresFromHandlers(handlers []handlerInfo) []compose.ToolMiddleware {
-	var middlewares []compose.ToolMiddleware
-	for _, info := range handlers {
-		if info.hasWrapTool {
-			h := info.handler
-			middlewares = append(middlewares, wrapToolFuncToMiddleware(h.WrapTool))
-		}
-	}
-	return middlewares
 }
 
 func collectToolMiddlewaresFromMiddlewares(mws []AgentMiddleware) []compose.ToolMiddleware {
@@ -529,10 +537,22 @@ func (a *ChatModelAgent) applyBeforeAgent(ctx context.Context, bc *buildContext)
 		}
 	}
 
+	// Apply HandlerMiddleware.WrapTool to all tools after BeforeAgent.
+	// This is only done when hasAnyBeforeAgent is true (tools might have been modified).
+	// When hasAnyBeforeAgent is false, tools are already wrapped at construction time.
+	tools := runCtx.Tools
+	if a.hasAnyBeforeAgent {
+		var err error
+		tools, err = applyToolWrappers(ctx, runCtx.Tools, a.handlers)
+		if err != nil {
+			return ctx, nil, err
+		}
+	}
+
 	runtimeBC := &buildContext{
 		baseInstruction: runCtx.Instruction,
 		toolsNodeConf: compose.ToolsNodeConfig{
-			Tools:               runCtx.Tools,
+			Tools:               tools,
 			ToolCallMiddlewares: bc.toolsNodeConf.ToolCallMiddlewares,
 		},
 		returnDirectly: runCtx.ReturnDirectly,
