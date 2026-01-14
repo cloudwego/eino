@@ -14,11 +14,12 @@ English | [中文](README.zh_CN.md)
 
 # Overview
 
-**Eino['aino]** (pronounced similarly to "I know") aims to be the ultimate LLM application development framework in Golang. Drawing inspirations from many excellent LLM application development frameworks in the open-source community such as LangChain & LlamaIndex, etc., as well as learning from cutting-edge research and real world applications, Eino offers an LLM application development framework that emphasizes on simplicity, scalability, reliability and effectiveness that better aligns with Golang programming conventions.
+**Eino['aino]** (pronounced similarly to "I know") aims to be the ultimate LLM application development framework in Golang. Drawing inspirations from many excellent LLM application development frameworks in the open-source community such as LangChain & Google ADK, etc., as well as learning from cutting-edge research and real world applications, Eino offers an LLM application development framework that emphasizes on simplicity, scalability, reliability and effectiveness that better aligns with Golang programming conventions.
 
 What Eino provides are:
 - a carefully curated list of **component** abstractions and implementations that can be easily reused and combined to build LLM applications
 - a powerful **composition** framework that does the heavy lifting of strong type checking, stream processing, concurrency management, aspect injection, option assignment, etc. for the user.
+- an **Agent Development Kit (ADK)** that provides high-level abstractions for building AI agents with multi-agent orchestration, human-in-the-loop interrupts, and prebuilt agent patterns.
 - a set of meticulously designed **API** that obsesses on simplicity and clarity.
 - an ever-growing collection of best practices in the form of bundled **flows** and **examples**.
 - a useful set of tools that covers the entire development cycle, from visualized development and debugging to online tracing and evaluation.
@@ -140,13 +141,7 @@ our, err := runnable.Invoke(ctx, []*schema.Message{
 })
 ```
 
-Now let's create a 'ReAct' agent: A ChatModel binds to Tools. It receives input Messages and decides independently whether to call the Tool or output the final result. The execution result of the Tool will again become the input Message for the ChatModel and serve as the context for the next round of independent judgment.
-
-![](.github/static/img/eino/react.png)
-
-We provide a complete implementation for ReAct Agent out of the box in the `flow` package. Check out the code here: [flow/agent/react](https://github.com/cloudwego/eino/blob/main/flow/agent/react/react.go)
-
-Our implementation of ReAct Agent uses Eino's **graph orchestration** exclusively, which provides the following benefits out of the box:
+Eino's **graph orchestration** provides the following benefits out of the box:
 - Type checking: it makes sure the two nodes' input and output types match at compile time.
 - Stream processing: concatenates message stream before passing to chatModel and toolsNode if needed, and copies the stream into callback handlers.
 - Concurrency management: the shared state can be safely read and written because the StatePreHandler is concurrency safe.
@@ -181,6 +176,103 @@ compiledGraph.Invoke(ctx, input, WithChatModelOption(WithTemperature(0.5))
 compiledGraph.Invoke(ctx, input, WithCallbacks(handler).DesignateNode("node_1"))
 ```
 
+Now let's create a 'ReAct' agent: A ChatModel binds to Tools. It receives input Messages and decides independently whether to call the Tool or output the final result. The execution result of the Tool will again become the input Message for the ChatModel and serve as the context for the next round of independent judgment.
+
+![](.github/static/img/eino/react.png)
+
+Eino's **Agent Development Kit (ADK)** provides `ChatModelAgent` that implements this pattern out of the box:
+
+```Go
+agent, _ := adk.NewChatModelAgent(ctx, &adk.ChatModelAgentConfig{
+    Name:        "assistant",
+    Description: "A helpful assistant that can use tools",
+    Model:       chatModel,
+    ToolsConfig: adk.ToolsConfig{
+        ToolsNodeConfig: compose.ToolsNodeConfig{
+            Tools: []tool.BaseTool{weatherTool, calculatorTool},
+        },
+    },
+})
+
+runner := adk.NewRunner(ctx, adk.RunnerConfig{Agent: agent})
+iter := runner.Query(ctx, "What's the weather in Beijing this weekend?")
+for {
+    event, ok := iter.Next()
+    if !ok {
+        break
+    }
+    // process agent events (model outputs, tool calls, etc.)
+}
+```
+
+The ADK handles the ReAct loop internally, emitting events for each step of the agent's reasoning process.
+
+Beyond the basic ReAct pattern, ADK provides powerful capabilities for building production-ready agent systems:
+
+**Multi-Agent with Context Management**: Agents can transfer control to sub-agents or be wrapped as tools. The framework automatically manages conversation context across agent boundaries:
+
+```Go
+// Set up agent hierarchy - mainAgent can now transfer to sub-agents
+mainAgentWithSubs, _ := adk.SetSubAgents(ctx, mainAgent, []adk.Agent{researchAgent, codeAgent})
+```
+
+When `mainAgent` transfers to `researchAgent`, the conversation history is automatically rewritten to provide appropriate context for the sub-agent.
+
+Agents can also be wrapped as tools, allowing one agent to invoke another as part of its tool-calling workflow:
+
+```Go
+// Wrap an agent as a tool that can be called by other agents
+researchTool := adk.NewAgentTool(ctx, researchAgent)
+```
+
+**Interrupt Anywhere, Resume Directly**: Any agent can pause execution for human approval or external input, and resume exactly where it left off:
+
+```Go
+// Inside a tool or agent, trigger an interrupt
+return adk.Interrupt(ctx, "Please confirm this action")
+
+// Later, resume from checkpoint
+iter, _ := runner.Resume(ctx, checkpointID)
+```
+
+**Prebuilt Agent Patterns**: Ready-to-use implementations for common architectures:
+
+```Go
+// Deep Agent: battle-tested pattern for complex task orchestration with 
+// built-in task management, sub-agent delegation, and progress tracking
+deepAgent, _ := deep.New(ctx, &deep.Config{
+    Name:        "deep_agent",
+    Description: "An agent that breaks down and executes complex tasks",
+    ChatModel:   chatModel,
+    SubAgents:   []adk.Agent{researchAgent, codeAgent},
+    ToolsConfig: adk.ToolsConfig{...},
+})
+
+// Supervisor pattern: one agent coordinates multiple specialists
+supervisorAgent, _ := supervisor.New(ctx, &supervisor.Config{
+    Supervisor: coordinatorAgent,
+    SubAgents:  []adk.Agent{writerAgent, reviewerAgent},
+})
+
+// Sequential execution: agents run one after another
+seqAgent, _ := adk.NewSequentialAgent(ctx, &adk.SequentialAgentConfig{
+    SubAgents: []adk.Agent{plannerAgent, executorAgent, summarizerAgent},
+})
+```
+
+**Extensible Middleware System**: Add capabilities to agents without modifying their core logic:
+
+```Go
+fsMiddleware, _ := filesystem.NewMiddleware(ctx, &filesystem.Config{
+    Backend: myFileSystem,
+})
+
+agent, _ := adk.NewChatModelAgent(ctx, &adk.ChatModelAgentConfig{
+    // ...
+    Middlewares: []adk.AgentMiddleware{fsMiddleware},
+})
+```
+
 # Key Features
 
 ## Rich Components
@@ -201,7 +293,18 @@ compiledGraph.Invoke(ctx, input, WithCallbacks(handler).DesignateNode("node_1"))
 - Graph orchestration is powerful and flexible enough to implement complex business logic:
   - type checking, stream processing, concurrency management, aspect injection and option assignment are handled by the framework.
   - branch out execution at runtime, read and write global state, or do field level data mapping using workflow(currently in alpha stage).
+  - **Aspects (Callbacks)** handle cross-cutting concerns such as logging, tracing, and metrics. Five aspects are supported: OnStart, OnEnd, OnError, OnStartWithStreamInput, OnEndWithStreamOutput. Custom callback handlers can be added during graph run via options.
 
+## Agent Development Kit (ADK)
+
+While graph orchestration gives you fine-grained control, the **ADK** package provides higher-level abstractions optimized for building AI agents:
+
+- **ChatModelAgent**: A ReAct-style agent that handles tool calling, conversation state, and the reasoning loop automatically.
+- **Multi-Agent with Context Engineering**: Build hierarchical agent systems where conversation history is automatically managed across agent transfers and agent-as-tool invocations, enabling seamless context sharing between specialized agents.
+- **Workflow Agents**: Compose agents using `SequentialAgent`, `ParallelAgent`, and `LoopAgent` for complex execution flows.
+- **Human-in-the-Loop**: `Interrupt` and `Resume` mechanisms with checkpoint persistence for workflows requiring human approval or input.
+- **Prebuilt Patterns**: Ready-to-use implementations including Deep Agent (task orchestration), Supervisor (hierarchical coordination), and Plan-Execute-Replan.
+- **Agent Middlewares**: Extensible middleware system for adding tools (filesystem operations) and managing context (token reduction).
 
 ## Complete Stream Processing
 
@@ -221,20 +324,13 @@ compiledGraph.Invoke(ctx, input, WithCallbacks(handler).DesignateNode("node_1"))
 | Collect            | Accepts stream type StreamReader[I] and returns non-stream type O           |
 | Transform          | Accepts stream type StreamReader[I] and returns stream type StreamReader[O] |
 
-## Highly Extensible Aspects (Callbacks)
-
-- Aspects handle cross-cutting concerns such as logging, tracing, metrics, etc., as well as exposing internal details of component implementations.
-- Five aspects are supported: **OnStart, OnEnd, OnError, OnStartWithStreamInput, OnEndWithStreamOutput**.
-- Developers can easily create custom callback handlers, add them during graph run via options, and they will be invoked during graph run.
-- Graph can also inject aspects to those component implementations that do not support callbacks on their own.
-
 # Eino Framework Structure
 
 ![](.github/static/img/eino/eino_framework.jpeg)
 
 The Eino framework consists of several parts:
 
-- Eino(this repo): Contains Eino's type definitions, streaming mechanism, component abstractions, orchestration capabilities, aspect mechanisms, etc.
+- Eino(this repo): Contains Eino's type definitions, streaming mechanism, component abstractions, orchestration capabilities, agent implementations, aspect mechanisms, etc.
 
 - [EinoExt](https://github.com/cloudwego/eino-ext): Component implementations, callback handlers implementations, component usage examples, and various tools such as evaluators, prompt optimizers.
 
