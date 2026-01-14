@@ -26,7 +26,6 @@ import (
 	"reflect"
 	"time"
 
-	"github.com/cloudwego/eino/callbacks"
 	"github.com/cloudwego/eino/components"
 	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/compose"
@@ -141,18 +140,17 @@ func genErrWrapper(ctx context.Context, maxRetries, attempt int, isRetryAbleFunc
 	}
 }
 
+// retryChatModel wraps a ToolCallingChatModel with retry logic.
+// The inner model is always wrapped by baseChatModelAdapter (which returns true for
+// IsCallbacksEnabled), so we don't need to handle callback injection here.
+// Callbacks are handled by callbackInjectionModelWrapper in buildWrappedModel.
 type retryChatModel struct {
-	inner                 model.ToolCallingChatModel
-	config                *ModelRetryConfig
-	innerHandlesCallbacks bool
+	inner  model.ToolCallingChatModel
+	config *ModelRetryConfig
 }
 
 func newRetryChatModel(inner model.ToolCallingChatModel, config *ModelRetryConfig) *retryChatModel {
-	innerHandlesCallbacks := false
-	if ch, ok := inner.(components.Checker); ok {
-		innerHandlesCallbacks = ch.IsCallbacksEnabled()
-	}
-	return &retryChatModel{inner: inner, config: config, innerHandlesCallbacks: innerHandlesCallbacks}
+	return &retryChatModel{inner: inner, config: config}
 }
 
 func (r *retryChatModel) WithTools(tools []*schema.ToolInfo) (model.ToolCallingChatModel, error) {
@@ -160,11 +158,7 @@ func (r *retryChatModel) WithTools(tools []*schema.ToolInfo) (model.ToolCallingC
 	if err != nil {
 		return nil, err
 	}
-	innerHandlesCallbacks := false
-	if ch, ok := newInner.(components.Checker); ok {
-		innerHandlesCallbacks = ch.IsCallbacksEnabled()
-	}
-	return &retryChatModel{inner: newInner, config: r.config, innerHandlesCallbacks: innerHandlesCallbacks}, nil
+	return &retryChatModel{inner: newInner, config: r.config}, nil
 }
 
 func (r *retryChatModel) Generate(ctx context.Context, input []*schema.Message, opts ...model.Option) (*schema.Message, error) {
@@ -179,15 +173,7 @@ func (r *retryChatModel) Generate(ctx context.Context, input []*schema.Message, 
 
 	var lastErr error
 	for attempt := 0; attempt <= r.config.MaxRetries; attempt++ {
-		var out *schema.Message
-		var err error
-
-		if r.innerHandlesCallbacks {
-			out, err = r.inner.Generate(ctx, input, opts...)
-		} else {
-			out, err = r.generateWithProxyCallbacks(ctx, input, opts...)
-		}
-
+		out, err := r.inner.Generate(ctx, input, opts...)
 		if err == nil {
 			return out, nil
 		}
@@ -204,22 +190,6 @@ func (r *retryChatModel) Generate(ctx context.Context, input []*schema.Message, 
 	}
 
 	return nil, &RetryExhaustedError{LastErr: lastErr, TotalRetries: r.config.MaxRetries}
-}
-
-func (r *retryChatModel) generateWithProxyCallbacks(ctx context.Context,
-	input []*schema.Message, opts ...model.Option) (*schema.Message, error) {
-
-	ctx = callbacks.EnsureRunInfo(ctx, r.GetType(), components.ComponentOfChatModel)
-	nCtx := callbacks.OnStart(ctx, &model.CallbackInput{Messages: input})
-
-	out, err := r.inner.Generate(nCtx, input, opts...)
-	if err != nil {
-		callbacks.OnError(nCtx, err)
-		return nil, err
-	}
-
-	callbacks.OnEnd(nCtx, &model.CallbackOutput{Message: out})
-	return out, nil
 }
 
 func (r *retryChatModel) Stream(ctx context.Context, input []*schema.Message, opts ...model.Option) (
@@ -248,15 +218,7 @@ func (r *retryChatModel) Stream(ctx context.Context, input []*schema.Message, op
 			return nil
 		})
 
-		var stream *schema.StreamReader[*schema.Message]
-		var err error
-
-		if r.innerHandlesCallbacks {
-			stream, err = r.inner.Stream(ctx, input, opts...)
-		} else {
-			stream, err = r.streamWithProxyCallbacks(ctx, input, opts...)
-		}
-
+		stream, err := r.inner.Stream(ctx, input, opts...)
 		if err != nil {
 			if !isRetryAble(ctx, err) {
 				return nil, err
@@ -291,27 +253,6 @@ func (r *retryChatModel) Stream(ctx context.Context, input []*schema.Message, op
 	}
 
 	return nil, &RetryExhaustedError{LastErr: lastErr, TotalRetries: r.config.MaxRetries}
-}
-
-func (r *retryChatModel) streamWithProxyCallbacks(ctx context.Context,
-	input []*schema.Message, opts ...model.Option) (*schema.StreamReader[*schema.Message], error) {
-
-	ctx = callbacks.EnsureRunInfo(ctx, r.GetType(), components.ComponentOfChatModel)
-	nCtx := callbacks.OnStart(ctx, &model.CallbackInput{Messages: input})
-
-	stream, err := r.inner.Stream(nCtx, input, opts...)
-	if err != nil {
-		callbacks.OnError(nCtx, err)
-		return nil, err
-	}
-
-	out := schema.StreamReaderWithConvert(stream, func(m *schema.Message) (*model.CallbackOutput, error) {
-		return &model.CallbackOutput{Message: m}, nil
-	})
-	_, out = callbacks.OnEndWithStreamOutput(nCtx, out)
-	return schema.StreamReaderWithConvert(out, func(o *model.CallbackOutput) (*schema.Message, error) {
-		return o.Message, nil
-	}), nil
 }
 
 func consumeStreamForError(stream *schema.StreamReader[*schema.Message]) error {
