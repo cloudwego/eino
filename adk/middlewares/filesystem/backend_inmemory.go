@@ -43,13 +43,8 @@ func (b *InMemoryBackend) LsInfo(ctx context.Context, req *LsInfoRequest) ([]Fil
 	b.mu.RLock()
 	defer b.mu.RUnlock()
 
-	path := req.Path
-	if path == "" {
-		path = "/"
-	}
-
 	// Normalize path
-	path = normalizePath(path)
+	path := normalizePath(req.Path)
 
 	var result []FileInfo
 	seen := make(map[string]bool)
@@ -187,11 +182,7 @@ func (b *InMemoryBackend) GlobInfo(ctx context.Context, req *GlobInfoRequest) ([
 	b.mu.RLock()
 	defer b.mu.RUnlock()
 
-	path := req.Path
-	if path == "" {
-		path = "/"
-	}
-	path = normalizePath(path)
+	path := normalizePath(req.Path)
 
 	var result []FileInfo
 
@@ -223,6 +214,10 @@ func (b *InMemoryBackend) Write(ctx context.Context, req *WriteRequest) error {
 	defer b.mu.Unlock()
 
 	filePath := normalizePath(req.FilePath)
+	if _, ok := b.files[filePath]; ok {
+		return fmt.Errorf("file already exists: %s", filePath)
+	}
+
 	b.files[filePath] = req.Content
 
 	return nil

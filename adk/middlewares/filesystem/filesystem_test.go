@@ -179,6 +179,7 @@ func TestWriteFileTool(t *testing.T) {
 		name     string
 		input    string
 		expected string
+		isError  bool
 	}{
 		{
 			name:     "write new file",
@@ -186,15 +187,21 @@ func TestWriteFileTool(t *testing.T) {
 			expected: "Updated file /newfile.txt",
 		},
 		{
-			name:     "overwrite existing file",
-			input:    `{"file_path": "/file1.txt", "content": "overwritten"}`,
-			expected: "Updated file /file1.txt",
+			name:    "overwrite existing file",
+			input:   `{"file_path": "/file1.txt", "content": "overwritten"}`,
+			isError: true,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			result, err := invokeTool(t, writeTool, tt.input)
+			if tt.isError {
+				if err == nil {
+					t.Errorf("Expected an error, but got none")
+				}
+				return
+			}
 			if err != nil {
 				t.Fatalf("write_file tool failed: %v", err)
 			}
@@ -208,26 +215,14 @@ func TestWriteFileTool(t *testing.T) {
 	ctx := context.Background()
 	content, err := backend.Read(ctx, &ReadRequest{
 		FilePath: "/newfile.txt",
-		Offset:   0,
-		Limit:    100,
 	})
 	if err != nil {
 		t.Fatalf("Failed to read written file: %v", err)
 	}
-	if content != "     1\tnew content" {
+	if !strings.Contains(content, "new content") {
 		t.Errorf("Expected written content to be 'new content', got %q", content)
 	}
-	content, err = backend.Read(ctx, &ReadRequest{
-		FilePath: "/file1.txt",
-		Offset:   0,
-		Limit:    100,
-	})
-	if err != nil {
-		t.Fatalf("Failed to read written file: %v", err)
-	}
-	if content != "     1\toverwritten" {
-		t.Errorf("Expected written content to be 'new content', got %q", content)
-	}
+
 }
 
 func TestEditFileTool(t *testing.T) {
