@@ -28,8 +28,14 @@ import (
 	"github.com/cloudwego/eino/schema"
 )
 
-func buildWrappedModel(ctx context.Context, m model.ToolCallingChatModel, handlers []handlerInfo, retryConfig *ModelRetryConfig) (model.ToolCallingChatModel, error) {
+func buildWrappedModel(ctx context.Context, m model.ToolCallingChatModel, handlers []handlerInfo, middlewares []AgentMiddleware, retryConfig *ModelRetryConfig) (model.ToolCallingChatModel, error) {
 	var wrapped model.BaseChatModel = m
+
+	// Model wrapper order (innermost to outermost):
+	// 1. callbackInjectionModelWrapper (if model doesn't handle callbacks)
+	// 2. HandlerMiddleware.WrapModel (reverse handler order)
+	// 3. eventSenderModelWrapper
+	// 4. stateModelWrapper (state management + BeforeChatModel/AfterChatModel + BeforeModelRewriteHistory/AfterModelRewriteHistory)
 
 	if !components.IsCallbacksEnabled(m) {
 		var err error
@@ -53,6 +59,8 @@ func buildWrappedModel(ctx context.Context, m model.ToolCallingChatModel, handle
 	if err != nil {
 		return nil, err
 	}
+
+	wrapped = &stateModelWrapper{inner: wrapped, handlers: handlers, middlewares: middlewares}
 
 	result := &baseChatModelAdapter{inner: wrapped, toolBinder: m}
 	if retryConfig != nil {
@@ -319,4 +327,156 @@ func eventSenderToolMiddleware() compose.ToolMiddleware {
 			}
 		},
 	}
+}
+
+type stateModelWrapper struct {
+	inner       model.BaseChatModel
+	handlers    []handlerInfo
+	middlewares []AgentMiddleware
+}
+
+func (w *stateModelWrapper) Generate(ctx context.Context, input []*schema.Message, opts ...model.Option) (*schema.Message, error) {
+	var stateMessages []Message
+	_ = compose.ProcessState(ctx, func(_ context.Context, st *State) error {
+		stateMessages = st.Messages
+		return nil
+	})
+	messages := append(stateMessages, input...)
+
+	for _, m := range w.middlewares {
+		if m.BeforeChatModel != nil {
+			state := &ChatModelAgentState{Messages: messages}
+			if err := m.BeforeChatModel(ctx, state); err != nil {
+				return nil, err
+			}
+			messages = state.Messages
+		}
+	}
+
+	for _, info := range w.handlers {
+		if info.hasBeforeModelRewriteHistory {
+			var err error
+			ctx, messages, err = info.handler.BeforeModelRewriteHistory(ctx, messages)
+			if err != nil {
+				return nil, err
+			}
+		}
+	}
+
+	_ = compose.ProcessState(ctx, func(_ context.Context, st *State) error {
+		st.Messages = messages
+		return nil
+	})
+
+	result, err := w.inner.Generate(ctx, messages, opts...)
+	if err != nil {
+		return nil, err
+	}
+
+	messages = append(messages, result)
+
+	for _, info := range w.handlers {
+		if info.hasAfterModelRewriteHistory {
+			var err error
+			ctx, messages, err = info.handler.AfterModelRewriteHistory(ctx, messages)
+			if err != nil {
+				return nil, err
+			}
+		}
+	}
+
+	for _, m := range w.middlewares {
+		if m.AfterChatModel != nil {
+			state := &ChatModelAgentState{Messages: messages}
+			if err := m.AfterChatModel(ctx, state); err != nil {
+				return nil, err
+			}
+			messages = state.Messages
+		}
+	}
+
+	_ = compose.ProcessState(ctx, func(_ context.Context, st *State) error {
+		st.Messages = messages
+		return nil
+	})
+
+	if len(messages) == 0 {
+		return nil, errors.New("no messages left in state after model call")
+	}
+	return messages[len(messages)-1], nil
+}
+
+func (w *stateModelWrapper) Stream(ctx context.Context, input []*schema.Message, opts ...model.Option) (*schema.StreamReader[*schema.Message], error) {
+	var stateMessages []Message
+	_ = compose.ProcessState(ctx, func(_ context.Context, st *State) error {
+		stateMessages = st.Messages
+		return nil
+	})
+	messages := append(stateMessages, input...)
+
+	for _, m := range w.middlewares {
+		if m.BeforeChatModel != nil {
+			state := &ChatModelAgentState{Messages: messages}
+			if err := m.BeforeChatModel(ctx, state); err != nil {
+				return nil, err
+			}
+			messages = state.Messages
+		}
+	}
+
+	for _, info := range w.handlers {
+		if info.hasBeforeModelRewriteHistory {
+			var err error
+			ctx, messages, err = info.handler.BeforeModelRewriteHistory(ctx, messages)
+			if err != nil {
+				return nil, err
+			}
+		}
+	}
+
+	_ = compose.ProcessState(ctx, func(_ context.Context, st *State) error {
+		st.Messages = messages
+		return nil
+	})
+
+	stream, err := w.inner.Stream(ctx, messages, opts...)
+	if err != nil {
+		return nil, err
+	}
+
+	result, err := schema.ConcatMessageStream(stream)
+	if err != nil {
+		return nil, err
+	}
+
+	messages = append(messages, result)
+
+	for _, info := range w.handlers {
+		if info.hasAfterModelRewriteHistory {
+			ctx, messages, err = info.handler.AfterModelRewriteHistory(ctx, messages)
+			if err != nil {
+				return nil, err
+			}
+		}
+	}
+
+	for _, m := range w.middlewares {
+		if m.AfterChatModel != nil {
+			state := &ChatModelAgentState{Messages: messages}
+			if err := m.AfterChatModel(ctx, state); err != nil {
+				return nil, err
+			}
+			messages = state.Messages
+		}
+	}
+
+	_ = compose.ProcessState(ctx, func(_ context.Context, st *State) error {
+		st.Messages = messages
+		return nil
+	})
+
+	if len(messages) == 0 {
+		return nil, errors.New("no messages left in state after model call")
+	}
+	return schema.StreamReaderFromArray([]*schema.Message{messages[len(messages)-1]}), nil
 }

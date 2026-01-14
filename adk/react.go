@@ -188,60 +188,10 @@ func newReact(ctx context.Context, config *reactConfig) (reactGraph, error) {
 			return nil, ErrExceedMaxIterations
 		}
 		st.RemainingIterations--
-
-		messages := append(st.Messages, input...)
-
-		for _, m := range config.middlewares {
-			if m.BeforeChatModel != nil {
-				state := &ChatModelAgentState{Messages: messages}
-				if err := m.BeforeChatModel(ctx, state); err != nil {
-					return nil, err
-				}
-				messages = state.Messages
-			}
-		}
-
-		for _, info := range config.handlers {
-			if info.hasBeforeModelRewriteHistory {
-				var err error
-				ctx, messages, err = info.handler.BeforeModelRewriteHistory(ctx, messages)
-				if err != nil {
-					return nil, err
-				}
-			}
-		}
-
-		st.Messages = messages
-		return st.Messages, nil
-	}
-	modelPostHandle := func(ctx context.Context, input Message, st *State) (Message, error) {
-		messages := append(st.Messages, input)
-
-		for _, m := range config.middlewares {
-			if m.AfterChatModel != nil {
-				state := &ChatModelAgentState{Messages: messages}
-				if err := m.AfterChatModel(ctx, state); err != nil {
-					return nil, err
-				}
-				messages = state.Messages
-			}
-		}
-
-		for _, info := range config.handlers {
-			if info.hasAfterModelRewriteHistory {
-				var err error
-				ctx, messages, err = info.handler.AfterModelRewriteHistory(ctx, messages)
-				if err != nil {
-					return nil, err
-				}
-			}
-		}
-
-		st.Messages = messages
 		return input, nil
 	}
 	_ = g.AddChatModelNode(chatModel_, chatModel,
-		compose.WithStatePreHandler(modelPreHandle), compose.WithStatePostHandler(modelPostHandle), compose.WithNodeName(chatModel_))
+		compose.WithStatePreHandler(modelPreHandle), compose.WithNodeName(chatModel_))
 
 	toolPreHandle := func(ctx context.Context, input Message, st *State) (Message, error) {
 		input = st.Messages[len(st.Messages)-1]
