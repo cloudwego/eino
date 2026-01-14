@@ -307,7 +307,7 @@ func NewChatModelAgent(ctx context.Context, config *ChatModelAgentConfig) (*Chat
 	)
 	tc.ToolCallMiddlewares = append(tc.ToolCallMiddlewares, collectToolMiddlewaresFromMiddlewares(config.Middlewares)...)
 
-	wrappedModel, err := buildWrappedModel(ctx, config.Model, handlerInfos, config.ModelRetryConfig)
+	wrappedModel, err := buildWrappedModel(ctx, config.Model, handlerInfos, config.Middlewares, config.ModelRetryConfig)
 	if err != nil {
 		return nil, err
 	}
@@ -542,7 +542,6 @@ func (a *ChatModelAgent) applyBeforeAgent(ctx context.Context, bc *buildContext)
 	// When hasAnyBeforeAgent is false, tools are already wrapped at construction time.
 	tools := runCtx.Tools
 	if a.hasAnyBeforeAgent {
-		var err error
 		tools, err = applyToolWrappers(ctx, runCtx.Tools, a.handlers)
 		if err != nil {
 			return ctx, nil, err
@@ -615,7 +614,7 @@ func (a *ChatModelAgent) prepareBuildContext(ctx context.Context) (*buildContext
 	}, nil
 }
 
-func (a *ChatModelAgent) buildNoToolsRunFunc(_ context.Context, bc *buildContext) runFunc {
+func (a *ChatModelAgent) buildNoToolsRunFunc(_ context.Context) runFunc {
 	chatModel := a.wrappedModel
 
 	type noToolsInput struct {
@@ -639,56 +638,7 @@ func (a *ChatModelAgent) buildNoToolsRunFunc(_ context.Context, bc *buildContext
 			}
 			return messages, nil
 		})).
-		AppendChatModel(
-			chatModel,
-			compose.WithStatePreHandler(func(ctx context.Context, in []Message, state *State) (
-				_ []Message, err error) {
-				state.Messages = in
-				for _, m := range a.middlewares {
-					if m.BeforeChatModel != nil {
-						mwState := &ChatModelAgentState{Messages: state.Messages}
-						if err = m.BeforeChatModel(ctx, mwState); err != nil {
-							return nil, err
-						}
-						state.Messages = mwState.Messages
-					}
-				}
-				for _, info := range a.handlers {
-					if info.hasBeforeModelRewriteHistory {
-						ctx, state.Messages, err = info.handler.BeforeModelRewriteHistory(ctx, state.Messages)
-						if err != nil {
-							return nil, err
-						}
-					}
-				}
-				return state.Messages, nil
-			}),
-			compose.WithStatePostHandler(func(ctx context.Context, in Message, state *State) (
-				_ Message, err error) {
-				state.Messages = append(state.Messages, in)
-				for _, m := range a.middlewares {
-					if m.AfterChatModel != nil {
-						mwState := &ChatModelAgentState{Messages: state.Messages}
-						if err = m.AfterChatModel(ctx, mwState); err != nil {
-							return nil, err
-						}
-						state.Messages = mwState.Messages
-					}
-				}
-				for _, info := range a.handlers {
-					if info.hasAfterModelRewriteHistory {
-						ctx, state.Messages, err = info.handler.AfterModelRewriteHistory(ctx, state.Messages)
-						if err != nil {
-							return nil, err
-						}
-					}
-				}
-				if len(state.Messages) == 0 {
-					return nil, errors.New("no messages left in state after ChatModel")
-				}
-				return state.Messages[len(state.Messages)-1], nil
-			}),
-		)
+		AppendChatModel(chatModel)
 
 	return func(ctx context.Context, input *AgentInput, generator *AsyncGenerator[*AgentEvent],
 		store *bridgeStore, instruction string, _ map[string]struct{}, opts ...compose.Option) {
@@ -856,7 +806,7 @@ func (a *ChatModelAgent) buildRunFunc(ctx context.Context) runFunc {
 		a.buildContext = bc
 
 		if len(bc.toolsNodeConf.Tools) == 0 {
-			a.run = a.buildNoToolsRunFunc(ctx, bc)
+			a.run = a.buildNoToolsRunFunc(ctx)
 			return
 		}
 
@@ -897,7 +847,7 @@ func (a *ChatModelAgent) getRunFunc(ctx context.Context) (context.Context, runFu
 
 	var tempRun runFunc
 	if len(runtimeBC.toolsNodeConf.Tools) == 0 {
-		tempRun = a.buildNoToolsRunFunc(ctx, runtimeBC)
+		tempRun = a.buildNoToolsRunFunc(ctx)
 	} else {
 		tempRun, err = a.buildReactRunFunc(ctx, runtimeBC)
 		if err != nil {

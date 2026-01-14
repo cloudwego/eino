@@ -35,6 +35,26 @@ import (
 	"github.com/cloudwego/eino/schema"
 )
 
+type testModelWrapper struct {
+	inner model.ToolCallingChatModel
+}
+
+func (w *testModelWrapper) Generate(ctx context.Context, input []*schema.Message, opts ...model.Option) (*schema.Message, error) {
+	return (&stateModelWrapper{inner: w.inner}).Generate(ctx, input, opts...)
+}
+
+func (w *testModelWrapper) Stream(ctx context.Context, input []*schema.Message, opts ...model.Option) (*schema.StreamReader[*schema.Message], error) {
+	return (&stateModelWrapper{inner: w.inner}).Stream(ctx, input, opts...)
+}
+
+func (w *testModelWrapper) WithTools(tools []*schema.ToolInfo) (model.ToolCallingChatModel, error) {
+	newInner, err := w.inner.WithTools(tools)
+	if err != nil {
+		return nil, err
+	}
+	return &testModelWrapper{inner: newInner}, nil
+}
+
 // TestReact tests the newReact function with different scenarios
 func TestReact(t *testing.T) {
 	// Basic test for newReact function
@@ -78,7 +98,7 @@ func TestReact(t *testing.T) {
 
 		// Create a reactConfig
 		config := &reactConfig{
-			model: cm,
+			model: &testModelWrapper{inner: cm},
 			toolsConfig: &compose.ToolsNodeConfig{
 				Tools: []tool.BaseTool{fakeTool},
 			},
@@ -145,7 +165,7 @@ func TestReact(t *testing.T) {
 
 		// Create a reactConfig with toolsReturnDirectly
 		config := &reactConfig{
-			model: cm,
+			model: &testModelWrapper{inner: cm},
 			toolsConfig: &compose.ToolsNodeConfig{
 				Tools: []tool.BaseTool{fakeTool},
 			},
@@ -237,7 +257,7 @@ func TestReact(t *testing.T) {
 
 		// Create a reactConfig
 		config := &reactConfig{
-			model: cm,
+			model: &testModelWrapper{inner: cm},
 			toolsConfig: &compose.ToolsNodeConfig{
 				Tools: []tool.BaseTool{fakeTool, fakeStreamTool},
 			},
@@ -347,7 +367,7 @@ func TestReact(t *testing.T) {
 
 		// Create a reactConfig with toolsReturnDirectly
 		config := &reactConfig{
-			model: cm,
+			model: &testModelWrapper{inner: cm},
 			toolsConfig: &compose.ToolsNodeConfig{
 				Tools: []tool.BaseTool{fakeTool, fakeStreamTool},
 			},
@@ -435,7 +455,7 @@ func TestReact(t *testing.T) {
 
 		// don't exceed max iterations
 		config := &reactConfig{
-			model: cm,
+			model: &testModelWrapper{inner: cm},
 			toolsConfig: &compose.ToolsNodeConfig{
 				Tools: []tool.BaseTool{fakeTool},
 			},
@@ -465,7 +485,7 @@ func TestReact(t *testing.T) {
 		times = 0
 		// exceed max iterations
 		config = &reactConfig{
-			model: cm,
+			model: &testModelWrapper{inner: cm},
 			toolsConfig: &compose.ToolsNodeConfig{
 				Tools: []tool.BaseTool{fakeTool},
 			},

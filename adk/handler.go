@@ -62,21 +62,23 @@ type HandlerMiddleware interface {
 	BeforeAgent(ctx context.Context, runCtx *AgentContext) (context.Context, *AgentContext, error)
 
 	// BeforeModelRewriteHistory is called before each model invocation.
-	// The returned messages are persisted to the agent's internal state.
+	// The returned messages are persisted to the agent's internal state and passed to the model.
+	// The returned context is propagated to the model call and subsequent handlers.
 	BeforeModelRewriteHistory(ctx context.Context, messages []Message) (context.Context, []Message, error)
 
 	// AfterModelRewriteHistory is called after each model invocation.
+	// The input messages include the model's response as the last message.
 	// The returned messages are persisted to the agent's internal state.
 	AfterModelRewriteHistory(ctx context.Context, messages []Message) (context.Context, []Message, error)
 
 	// WrapTool wraps a tool with custom behavior.
 	// Return the input tool unchanged if no wrapping is needed.
-	// This is converted to compose.ToolMiddleware internally.
+	// Called at construction time (or after BeforeAgent if tools are modified dynamically).
 	WrapTool(ctx context.Context, t tool.BaseTool) (tool.BaseTool, error)
 
 	// WrapModel wraps a chat model with custom behavior.
 	// Return the input model unchanged if no wrapping is needed.
-	// This is called once when the agent is built, not per-call.
+	// Called once when the agent is built, not per-call.
 	WrapModel(ctx context.Context, m model.BaseChatModel) (model.BaseChatModel, error)
 }
 
