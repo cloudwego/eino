@@ -72,18 +72,18 @@ func (m *approvableTool) Info(_ context.Context) (*schema.ToolInfo, error) {
 }
 
 func (m *approvableTool) InvokableRun(ctx context.Context, argumentsInJSON string, _ ...tool.Option) (string, error) {
-	wasInterrupted, _, storedArguments := compose.GetInterruptState[string](ctx)
+	wasInterrupted, _, storedArguments := tool.GetInterruptState[string](ctx)
 	if !wasInterrupted {
-		return "", compose.StatefulInterrupt(ctx, &approvalInfo{
+		return "", tool.StatefulInterrupt(ctx, &approvalInfo{
 			ToolName:        m.name,
 			ArgumentsInJSON: argumentsInJSON,
 			ToolCallID:      compose.GetToolCallID(ctx),
 		}, argumentsInJSON)
 	}
 
-	isResumeTarget, hasData, data := compose.GetResumeContext[*approvalResult](ctx)
+	isResumeTarget, hasData, data := tool.GetResumeContext[*approvalResult](ctx)
 	if !isResumeTarget {
-		return "", compose.StatefulInterrupt(ctx, &approvalInfo{
+		return "", tool.StatefulInterrupt(ctx, &approvalInfo{
 			ToolName:        m.name,
 			ArgumentsInJSON: storedArguments,
 			ToolCallID:      compose.GetToolCallID(ctx),

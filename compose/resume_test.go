@@ -544,8 +544,8 @@ func (t *mockReentryTool) Info(_ context.Context) (*schema.ToolInfo, error) {
 }
 
 func (t *mockReentryTool) InvokableRun(ctx context.Context, _ string, _ ...tool.Option) (string, error) {
-	wasInterrupted, hasState, _ := GetInterruptState[any](ctx)
-	isResume, hasData, data := GetResumeContext[*myResumeData](ctx)
+	wasInterrupted, hasState, _ := tool.GetInterruptState[any](ctx)
+	isResume, hasData, data := tool.GetResumeContext[*myResumeData](ctx)
 
 	callID := GetToolCallID(ctx)
 
@@ -557,7 +557,7 @@ func (t *mockReentryTool) InvokableRun(ctx context.Context, _ string, _ ...tool.
 			assert.False(t.t, wasInterrupted, "re-entrant call 'call_3' should not have been interrupted on its first run")
 			assert.False(t.t, hasState, "re-entrant call 'call_3' should not have state on its first run")
 			// Now, interrupt it as part of the test flow.
-			return "", StatefulInterrupt(ctx, nil, "some state for "+callID)
+			return "", tool.StatefulInterrupt(ctx, nil, "some state for "+callID)
 		}
 		// This is the resumed run of the re-entrant call.
 		assert.True(t.t, wasInterrupted, "resumed call 'call_3' must have been interrupted")
@@ -568,7 +568,7 @@ func (t *mockReentryTool) InvokableRun(ctx context.Context, _ string, _ ...tool.
 	// Standard logic for the initial calls (call_1, call_2)
 	if !wasInterrupted {
 		// First run for call_1 and call_2, should interrupt.
-		return "", StatefulInterrupt(ctx, nil, "some state for "+callID)
+		return "", tool.StatefulInterrupt(ctx, nil, "some state for "+callID)
 	}
 
 	// From here, wasInterrupted is true for call_1 and call_2.
@@ -579,7 +579,7 @@ func (t *mockReentryTool) InvokableRun(ctx context.Context, _ string, _ ...tool.
 	}
 
 	// The tool was interrupted before, but is not being resumed now. Re-interrupt.
-	return "", StatefulInterrupt(ctx, nil, "some state for "+callID)
+	return "", tool.StatefulInterrupt(ctx, nil, "some state for "+callID)
 }
 
 func TestReentryForResumedTools(t *testing.T) {
@@ -723,10 +723,10 @@ func (t *mockInterruptingTool) InvokableRun(ctx context.Context, argumentsInJSON
 	var args map[string]string
 	_ = json.Unmarshal([]byte(argumentsInJSON), &args)
 
-	wasInterrupted, hasState, state := GetInterruptState[*myInterruptState](ctx)
+	wasInterrupted, hasState, state := tool.GetInterruptState[*myInterruptState](ctx)
 	if !wasInterrupted {
 		// First run: interrupt
-		return "", StatefulInterrupt(ctx,
+		return "", tool.StatefulInterrupt(ctx,
 			map[string]any{"reason": "tool maintenance"},
 			&myInterruptState{OriginalInput: args["input"]},
 		)
@@ -736,7 +736,7 @@ func (t *mockInterruptingTool) InvokableRun(ctx context.Context, argumentsInJSON
 	assert.True(t.tt, hasState)
 	assert.Equal(t.tt, "test", state.OriginalInput)
 
-	isResume, hasData, data := GetResumeContext[*myResumeData](ctx)
+	isResume, hasData, data := tool.GetResumeContext[*myResumeData](ctx)
 	assert.True(t.tt, isResume)
 	assert.True(t.tt, hasData)
 	assert.Equal(t.tt, "let's continue tool", data.Message)

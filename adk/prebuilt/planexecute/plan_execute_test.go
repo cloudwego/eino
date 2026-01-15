@@ -745,14 +745,14 @@ func (m *interruptibleTool) Info(_ context.Context) (*schema.ToolInfo, error) {
 }
 
 func (m *interruptibleTool) InvokableRun(ctx context.Context, argumentsInJSON string, _ ...tool.Option) (string, error) {
-	wasInterrupted, _, _ := compose.GetInterruptState[any](ctx)
+	wasInterrupted, _, _ := tool.GetInterruptState[any](ctx)
 	if !wasInterrupted {
-		return "", compose.Interrupt(ctx, fmt.Sprintf("Tool '%s' requires human approval", m.name))
+		return "", tool.Interrupt(ctx, fmt.Sprintf("Tool '%s' requires human approval", m.name))
 	}
 
-	isResumeTarget, hasData, data := compose.GetResumeContext[string](ctx)
+	isResumeTarget, hasData, data := tool.GetResumeContext[string](ctx)
 	if !isResumeTarget {
-		return "", compose.Interrupt(ctx, fmt.Sprintf("Tool '%s' requires human approval", m.name))
+		return "", tool.Interrupt(ctx, fmt.Sprintf("Tool '%s' requires human approval", m.name))
 	}
 
 	if hasData {

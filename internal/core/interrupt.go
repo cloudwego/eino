@@ -166,6 +166,13 @@ func (ic *InterruptCtx) EqualsWithoutID(other *InterruptCtx) bool {
 	return true
 }
 
+// InterruptContextsProvider is an interface for errors that contain interrupt contexts.
+// This allows different packages to check for and extract interrupt contexts from errors
+// without needing to know the concrete error type.
+type InterruptContextsProvider interface {
+	GetInterruptContexts() []*InterruptCtx
+}
+
 // FromInterruptContexts converts a list of user-facing InterruptCtx objects into an
 // internal InterruptSignal tree. It correctly handles common ancestors and ensures
 // that the resulting tree is consistent with the original interrupt chain.

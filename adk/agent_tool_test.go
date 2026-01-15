@@ -854,7 +854,7 @@ func compositeInterruptFromLast(ctx context.Context, ms *bridgeStore, lastEvent 
 	if !existed {
 		return fmt.Errorf("interrupt occurred but checkpoint data is missing")
 	}
-	return compose.CompositeInterrupt(ctx, "agent tool interrupt", data, lastEvent.Action.internalInterrupted)
+	return tool.CompositeInterrupt(ctx, "agent tool interrupt", data, lastEvent.Action.internalInterrupted)
 }
 
 func TestAgentTool_InvokableRun_FinalOnly(t *testing.T) {

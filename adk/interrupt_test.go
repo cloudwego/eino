@@ -1259,12 +1259,12 @@ func (m *myTool1) Info(_ context.Context) (*schema.ToolInfo, error) {
 }
 
 func (m *myTool1) InvokableRun(ctx context.Context, _ string, _ ...tool.Option) (string, error) {
-	if wasInterrupted, _, _ := compose.GetInterruptState[any](ctx); !wasInterrupted {
-		return "", compose.Interrupt(ctx, nil)
+	if wasInterrupted, _, _ := tool.GetInterruptState[any](ctx); !wasInterrupted {
+		return "", tool.Interrupt(ctx, nil)
 	}
 
-	if isResumeFlow, hasResumeData, data := compose.GetResumeContext[string](ctx); !isResumeFlow {
-		return "", compose.Interrupt(ctx, nil)
+	if isResumeFlow, hasResumeData, data := tool.GetResumeContext[string](ctx); !isResumeFlow {
+		return "", tool.Interrupt(ctx, nil)
 	} else if hasResumeData {
 		return data, nil
 	}
@@ -1435,15 +1435,15 @@ func init() {
 }
 
 func (m *myStatefulTool) InvokableRun(ctx context.Context, _ string, _ ...tool.Option) (string, error) {
-	wasInterrupted, hasState, state := compose.GetInterruptState[myStatefulToolState](ctx)
+	wasInterrupted, hasState, state := tool.GetInterruptState[myStatefulToolState](ctx)
 	if !wasInterrupted {
-		return "", compose.StatefulInterrupt(ctx, fmt.Sprintf("interrupt from %s", m.name), myStatefulToolState{InterruptCount: 1})
+		return "", tool.StatefulInterrupt(ctx, fmt.Sprintf("interrupt from %s", m.name), myStatefulToolState{InterruptCount: 1})
 	}
 
-	isResumeFlow, hasResumeData, data := compose.GetResumeContext[string](ctx)
+	isResumeFlow, hasResumeData, data := tool.GetResumeContext[string](ctx)
 	if !isResumeFlow || !hasResumeData {
 		assert.True(m.t, hasState, "tool %s should have interrupt state on resume", m.name)
-		return "", compose.StatefulInterrupt(ctx, fmt.Sprintf("interrupt from %s", m.name), myStatefulToolState{InterruptCount: state.InterruptCount + 1})
+		return "", tool.StatefulInterrupt(ctx, fmt.Sprintf("interrupt from %s", m.name), myStatefulToolState{InterruptCount: state.InterruptCount + 1})
 	}
 
 	return data, nil

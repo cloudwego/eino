@@ -125,7 +125,7 @@ func (at *agentTool) InvokableRun(ctx context.Context, argumentsInJSON string, o
 	var iter *AsyncIterator[*AgentEvent]
 	var err error
 
-	wasInterrupted, hasState, state := compose.GetInterruptState[[]byte](ctx)
+	wasInterrupted, hasState, state := tool.GetInterruptState[[]byte](ctx)
 	if !wasInterrupted {
 		ms = newBridgeStore()
 		var input []Message
@@ -213,7 +213,7 @@ func (at *agentTool) InvokableRun(ctx context.Context, argumentsInJSON string, o
 			return "", fmt.Errorf("interrupt has happened, but cannot find interrupt info")
 		}
 
-		return "", compose.CompositeInterrupt(ctx, "agent tool interrupt", data,
+		return "", tool.CompositeInterrupt(ctx, "agent tool interrupt", data,
 			lastEvent.Action.internalInterrupted)
 	}
 

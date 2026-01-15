@@ -319,6 +319,13 @@ func (e *interruptError) Error() string {
 	return fmt.Sprintf("interrupt happened, info: %+v", e.Info)
 }
 
+func (e *interruptError) GetInterruptContexts() []*InterruptCtx {
+	if e.Info == nil {
+		return nil
+	}
+	return e.Info.InterruptContexts
+}
+
 func isSubGraphInterrupt(err error) *subGraphInterruptError {
 	if err == nil {
 		return nil
@@ -339,6 +346,13 @@ type subGraphInterruptError struct {
 
 func (e *subGraphInterruptError) Error() string {
 	return fmt.Sprintf("interrupt happened, info: %+v", e.Info)
+}
+
+func (e *subGraphInterruptError) GetInterruptContexts() []*InterruptCtx {
+	if e.Info == nil {
+		return nil
+	}
+	return e.Info.InterruptContexts
 }
 
 func isInterruptError(err error) bool {
