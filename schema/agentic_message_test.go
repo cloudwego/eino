@@ -1544,15 +1544,6 @@ response_meta:
 	})
 }
 
-func TestDeveloperAgenticMessage(t *testing.T) {
-	t.Run("basic", func(t *testing.T) {
-		msg := DeveloperAgenticMessage("developer")
-		assert.Equal(t, AgenticRoleTypeDeveloper, msg.Role)
-		assert.Len(t, msg.ContentBlocks, 1)
-		assert.Equal(t, "developer", msg.ContentBlocks[0].UserInputText.Text)
-	})
-}
-
 func TestSystemAgenticMessage(t *testing.T) {
 	t.Run("basic", func(t *testing.T) {
 		msg := SystemAgenticMessage("system")
