@@ -58,8 +58,14 @@ type InterruptInfo struct {
 // but does not need to save any internal state to be restored upon resumption.
 // The `info` parameter is user-facing data that describes the reason for the interrupt.
 func Interrupt(ctx context.Context, info any) *AgentEvent {
+	var rp []RunStep
+	rCtx := getRunCtx(ctx)
+	if rCtx != nil {
+		rp = rCtx.RunPath
+	}
+
 	is, err := core.Interrupt(ctx, info, nil, nil,
-		core.WithLayerPayload(getRunCtx(ctx).RunPath))
+		core.WithLayerPayload(rp))
 	if err != nil {
 		return &AgentEvent{Err: err}
 	}
@@ -81,8 +87,14 @@ func Interrupt(ctx context.Context, info any) *AgentEvent {
 // The `info` parameter is user-facing data describing the interrupt.
 // The `state` parameter is the agent's internal state object, which will be serialized and stored.
 func StatefulInterrupt(ctx context.Context, info any, state any) *AgentEvent {
+	var rp []RunStep
+	rCtx := getRunCtx(ctx)
+	if rCtx != nil {
+		rp = rCtx.RunPath
+	}
+
 	is, err := core.Interrupt(ctx, info, state, nil,
-		core.WithLayerPayload(getRunCtx(ctx).RunPath))
+		core.WithLayerPayload(rp))
 	if err != nil {
 		return &AgentEvent{Err: err}
 	}
@@ -107,8 +119,14 @@ func StatefulInterrupt(ctx context.Context, info any, state any) *AgentEvent {
 // The `subInterruptSignals` is a variadic list of the InterruptSignal objects from the interrupted sub-agents.
 func CompositeInterrupt(ctx context.Context, info any, state any,
 	subInterruptSignals ...*InterruptSignal) *AgentEvent {
+	var rp []RunStep
+	rCtx := getRunCtx(ctx)
+	if rCtx != nil {
+		rp = rCtx.RunPath
+	}
+
 	is, err := core.Interrupt(ctx, info, state, subInterruptSignals,
-		core.WithLayerPayload(getRunCtx(ctx).RunPath))
+		core.WithLayerPayload(rp))
 	if err != nil {
 		return &AgentEvent{Err: err}
 	}
