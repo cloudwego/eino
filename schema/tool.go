@@ -79,13 +79,15 @@ type AgenticForcedToolChoice struct {
 }
 
 // AllowedTool represents a tool that the model is allowed or forced to call.
-// Exactly one of FunctionToolName, MCPTool, or ServerTool must be specified.
+// Exactly one of FunctionName, MCPTool, or ServerTool must be specified.
 type AllowedTool struct {
-	// FunctionToolName is the name of the function tool.
-	FunctionToolName string
+	// FunctionName specifies a function tool by name.
+	FunctionName string
 
+	// MCPTool specifies an MCP tool.
 	MCPTool *AllowedMCPTool
 
+	// ServerTool specifies a server tool.
 	ServerTool *AllowedServerTool
 }
 

@@ -28,8 +28,6 @@ type CallbackInput struct {
 	Variables map[string]any
 	// Templates is the templates for the callback.
 	Templates []schema.MessagesTemplate
-	// AgenticTemplates is the agentic templates for the callback.
-	AgenticTemplates []schema.AgenticMessagesTemplate
 	// Extra is the extra information for the callback.
 	Extra map[string]any
 }
@@ -38,12 +36,8 @@ type CallbackInput struct {
 type CallbackOutput struct {
 	// Result is the result for the callback.
 	Result []*schema.Message
-	// AgenticResult is the agentic result for the callback.
-	AgenticResult []*schema.AgenticMessage
 	// Templates is the templates for the callback.
 	Templates []schema.MessagesTemplate
-	// AgenticTemplates is the agentic templates for the callback.
-	AgenticTemplates []schema.AgenticMessagesTemplate
 	// Extra is the extra information for the callback.
 	Extra map[string]any
 }
@@ -70,10 +64,6 @@ func ConvCallbackOutput(src callbacks.CallbackOutput) *CallbackOutput {
 	case []*schema.Message:
 		return &CallbackOutput{
 			Result: t,
-		}
-	case []*schema.AgenticMessage:
-		return &CallbackOutput{
-			AgenticResult: t,
 		}
 	default:
 		return nil
