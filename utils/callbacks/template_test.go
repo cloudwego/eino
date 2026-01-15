@@ -142,15 +142,15 @@ func TestNewComponentTemplate(t *testing.T) {
 					return ctx
 				}).Build()).
 			AgenticModel(&AgenticModelCallbackHandler{
-				OnStart: func(ctx context.Context, runInfo *callbacks.RunInfo, input *model.CallbackInput) context.Context {
+				OnStart: func(ctx context.Context, runInfo *callbacks.RunInfo, input *model.AgenticCallbackInput) context.Context {
 					cnt++
 					return ctx
 				},
-				OnEnd: func(ctx context.Context, runInfo *callbacks.RunInfo, output *model.CallbackOutput) context.Context {
+				OnEnd: func(ctx context.Context, runInfo *callbacks.RunInfo, output *model.AgenticCallbackOutput) context.Context {
 					cnt++
 					return ctx
 				},
-				OnEndWithStreamOutput: func(ctx context.Context, runInfo *callbacks.RunInfo, output *schema.StreamReader[*model.CallbackOutput]) context.Context {
+				OnEndWithStreamOutput: func(ctx context.Context, runInfo *callbacks.RunInfo, output *schema.StreamReader[*model.AgenticCallbackOutput]) context.Context {
 					output.Close()
 					cnt++
 					return ctx
@@ -484,7 +484,7 @@ func TestNewComponentTemplate(t *testing.T) {
 
 		// Set it now
 		tpl2.AgenticModel(&AgenticModelCallbackHandler{
-			OnStart: func(ctx context.Context, runInfo *callbacks.RunInfo, input *model.CallbackInput) context.Context {
+			OnStart: func(ctx context.Context, runInfo *callbacks.RunInfo, input *model.AgenticCallbackInput) context.Context {
 				return ctx
 			},
 		})
