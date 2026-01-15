@@ -66,7 +66,9 @@ func Interrupt(ctx context.Context, info any) *AgentEvent {
 
 	return &AgentEvent{
 		Action: &AgentAction{
-			Interrupted:         &InterruptInfo{},
+			Interrupted: &InterruptInfo{
+				InterruptContexts: core.ToInterruptContexts(is, nil),
+			},
 			internalInterrupted: is,
 		},
 	}
@@ -85,7 +87,9 @@ func StatefulInterrupt(ctx context.Context, info any, state any) *AgentEvent {
 
 	return &AgentEvent{
 		Action: &AgentAction{
-			Interrupted:         &InterruptInfo{},
+			Interrupted: &InterruptInfo{
+				InterruptContexts: core.ToInterruptContexts(is, nil),
+			},
 			internalInterrupted: is,
 		},
 	}
@@ -107,7 +111,9 @@ func CompositeInterrupt(ctx context.Context, info any, state any,
 
 	return &AgentEvent{
 		Action: &AgentAction{
-			Interrupted:         &InterruptInfo{},
+			Interrupted: &InterruptInfo{
+				InterruptContexts: core.ToInterruptContexts(is, nil),
+			},
 			internalInterrupted: is,
 		},
 	}

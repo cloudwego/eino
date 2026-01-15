@@ -70,6 +70,44 @@ func TestSaveAgentEventWrapper(t *testing.T) {
 	assert.NoError(t, err)
 }
 
+func TestInterruptFunctionsPopulateInterruptContextsImmediately(t *testing.T) {
+	ctx := context.Background()
+	ctx, _ = initRunCtx(ctx, "TestAgent", &AgentInput{Messages: []Message{}})
+
+	t.Run("Interrupt populates InterruptContexts", func(t *testing.T) {
+		event := Interrupt(ctx, "test info")
+		assert.NotNil(t, event.Action)
+		assert.NotNil(t, event.Action.Interrupted)
+		assert.NotNil(t, event.Action.Interrupted.InterruptContexts)
+		assert.Equal(t, 1, len(event.Action.Interrupted.InterruptContexts))
+		assert.Equal(t, "test info", event.Action.Interrupted.InterruptContexts[0].Info)
+		assert.True(t, event.Action.Interrupted.InterruptContexts[0].IsRootCause)
+	})
+
+	t.Run("StatefulInterrupt populates InterruptContexts", func(t *testing.T) {
+		event := StatefulInterrupt(ctx, "stateful info", "my state")
+		assert.NotNil(t, event.Action)
+		assert.NotNil(t, event.Action.Interrupted)
+		assert.NotNil(t, event.Action.Interrupted.InterruptContexts)
+		assert.Equal(t, 1, len(event.Action.Interrupted.InterruptContexts))
+		assert.Equal(t, "stateful info", event.Action.Interrupted.InterruptContexts[0].Info)
+		assert.True(t, event.Action.Interrupted.InterruptContexts[0].IsRootCause)
+	})
+
+	t.Run("CompositeInterrupt populates InterruptContexts", func(t *testing.T) {
+		subEvent := Interrupt(ctx, "sub info")
+		event := CompositeInterrupt(ctx, "composite info", "composite state", subEvent.Action.internalInterrupted)
+		assert.NotNil(t, event.Action)
+		assert.NotNil(t, event.Action.Interrupted)
+		assert.NotNil(t, event.Action.Interrupted.InterruptContexts)
+		assert.Equal(t, 1, len(event.Action.Interrupted.InterruptContexts))
+		assert.Equal(t, "sub info", event.Action.Interrupted.InterruptContexts[0].Info)
+		assert.True(t, event.Action.Interrupted.InterruptContexts[0].IsRootCause)
+		assert.NotNil(t, event.Action.Interrupted.InterruptContexts[0].Parent)
+		assert.Equal(t, "composite info", event.Action.Interrupted.InterruptContexts[0].Parent.Info)
+	})
+}
+
 func TestSimpleInterrupt(t *testing.T) {
 	data := "hello world"
 	agent := &myAgent{
