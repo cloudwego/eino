@@ -236,13 +236,15 @@ func FromInterruptContexts(contexts []*InterruptCtx) *InterruptSignal {
 // Each returned context has its Parent field populated (if it has a parent),
 // allowing traversal up the interrupt chain.
 func ToInterruptContexts(is *InterruptSignal, addrModifier func(Address) Address) []*InterruptCtx {
+	return ToInterruptContextsWithFilter(is, addrModifier, nil)
+}
+
+func ToInterruptContextsWithFilter(is *InterruptSignal, addrModifier func(Address) Address, parentFilter func(Address) bool) []*InterruptCtx {
 	if is == nil {
 		return nil
 	}
 	var rootCauseContexts []*InterruptCtx
 
-	// A recursive helper that traverses the signal tree, building the parent-linked
-	// context objects and appending only the root causes to the final list.
 	var buildContexts func(*InterruptSignal, *InterruptCtx)
 	buildContexts = func(signal *InterruptSignal, parentCtx *InterruptCtx) {
 		currentCtx := &InterruptCtx{
@@ -253,23 +255,51 @@ func ToInterruptContexts(is *InterruptSignal, addrModifier func(Address) Address
 			Parent:      parentCtx,
 		}
 
-		if addrModifier != nil {
-			currentCtx.Address = addrModifier(currentCtx.Address)
-		}
-
-		// Only add the context to the final list if it's a root cause.
 		if currentCtx.IsRootCause {
 			rootCauseContexts = append(rootCauseContexts, currentCtx)
 		}
 
-		// Recurse into children, passing the newly created context as their parent.
 		for _, subSignal := range signal.Subs {
 			buildContexts(subSignal, currentCtx)
 		}
 	}
 
 	buildContexts(is, nil)
+
+	for _, ctx := range rootCauseContexts {
+		if parentFilter != nil {
+			filterParentChain(ctx, parentFilter)
+		}
+		if addrModifier != nil {
+			encapsulateContextAddresses(ctx, addrModifier)
+		}
+	}
+
 	return rootCauseContexts
+}
+
+func filterParentChain(ctx *InterruptCtx, shouldKeep func(Address) bool) {
+	if ctx == nil {
+		return
+	}
+
+	parent := ctx.Parent
+	for parent != nil {
+		if shouldKeep(parent.Address) {
+			break
+		}
+		parent = parent.Parent
+	}
+
+	ctx.Parent = parent
+
+	filterParentChain(parent, shouldKeep)
+}
+
+func encapsulateContextAddresses(ctx *InterruptCtx, addrModifier func(Address) Address) {
+	for c := ctx; c != nil; c = c.Parent {
+		c.Address = addrModifier(c.Address)
+	}
 }
 
 // SignalToPersistenceMaps flattens an InterruptSignal tree into two maps suitable for persistence in a checkpoint.

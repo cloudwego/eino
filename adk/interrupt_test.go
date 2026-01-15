@@ -73,6 +73,7 @@ func TestSaveAgentEventWrapper(t *testing.T) {
 func TestInterruptFunctionsPopulateInterruptContextsImmediately(t *testing.T) {
 	ctx := context.Background()
 	ctx, _ = initRunCtx(ctx, "TestAgent", &AgentInput{Messages: []Message{}})
+	ctx = AppendAddressSegment(ctx, AddressSegmentAgent, "TestAgent")
 
 	t.Run("Interrupt populates InterruptContexts", func(t *testing.T) {
 		event := Interrupt(ctx, "test info")
@@ -82,6 +83,9 @@ func TestInterruptFunctionsPopulateInterruptContextsImmediately(t *testing.T) {
 		assert.Equal(t, 1, len(event.Action.Interrupted.InterruptContexts))
 		assert.Equal(t, "test info", event.Action.Interrupted.InterruptContexts[0].Info)
 		assert.True(t, event.Action.Interrupted.InterruptContexts[0].IsRootCause)
+		assert.Equal(t, Address{
+			{Type: AddressSegmentAgent, ID: "TestAgent"},
+		}, event.Action.Interrupted.InterruptContexts[0].Address)
 	})
 
 	t.Run("StatefulInterrupt populates InterruptContexts", func(t *testing.T) {
@@ -94,17 +98,37 @@ func TestInterruptFunctionsPopulateInterruptContextsImmediately(t *testing.T) {
 		assert.True(t, event.Action.Interrupted.InterruptContexts[0].IsRootCause)
 	})
 
-	t.Run("CompositeInterrupt populates InterruptContexts", func(t *testing.T) {
-		subEvent := Interrupt(ctx, "sub info")
+	t.Run("CompositeInterrupt populates InterruptContexts with filtered parent chain", func(t *testing.T) {
+		subCtx := AppendAddressSegment(ctx, AddressSegmentAgent, "SubAgent")
+		subEvent := Interrupt(subCtx, "sub info")
 		event := CompositeInterrupt(ctx, "composite info", "composite state", subEvent.Action.internalInterrupted)
 		assert.NotNil(t, event.Action)
 		assert.NotNil(t, event.Action.Interrupted)
 		assert.NotNil(t, event.Action.Interrupted.InterruptContexts)
 		assert.Equal(t, 1, len(event.Action.Interrupted.InterruptContexts))
-		assert.Equal(t, "sub info", event.Action.Interrupted.InterruptContexts[0].Info)
-		assert.True(t, event.Action.Interrupted.InterruptContexts[0].IsRootCause)
-		assert.NotNil(t, event.Action.Interrupted.InterruptContexts[0].Parent)
-		assert.Equal(t, "composite info", event.Action.Interrupted.InterruptContexts[0].Parent.Info)
+
+		rootCause := event.Action.Interrupted.InterruptContexts[0]
+		assert.Equal(t, "sub info", rootCause.Info)
+		assert.True(t, rootCause.IsRootCause)
+		assert.Equal(t, Address{
+			{Type: AddressSegmentAgent, ID: "TestAgent"},
+			{Type: AddressSegmentAgent, ID: "SubAgent"},
+		}, rootCause.Address)
+
+		assert.NotNil(t, rootCause.Parent, "Parent should not be nil for composite interrupt")
+		assert.Equal(t, "composite info", rootCause.Parent.Info)
+		assert.Equal(t, Address{
+			{Type: AddressSegmentAgent, ID: "TestAgent"},
+		}, rootCause.Parent.Address)
+	})
+
+	t.Run("Address only contains agent/tool segments", func(t *testing.T) {
+		event := Interrupt(ctx, "test info")
+		addr := event.Action.Interrupted.InterruptContexts[0].Address
+		for _, seg := range addr {
+			assert.True(t, seg.Type == AddressSegmentAgent || seg.Type == AddressSegmentTool,
+				"Address should only contain agent/tool segments, got: %s", seg.Type)
+		}
 	})
 }
 

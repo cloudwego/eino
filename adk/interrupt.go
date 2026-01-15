@@ -64,10 +64,12 @@ func Interrupt(ctx context.Context, info any) *AgentEvent {
 		return &AgentEvent{Err: err}
 	}
 
+	contexts := core.ToInterruptContextsWithFilter(is, encapsulateAddress, shouldKeepParent)
+
 	return &AgentEvent{
 		Action: &AgentAction{
 			Interrupted: &InterruptInfo{
-				InterruptContexts: core.ToInterruptContexts(is, nil),
+				InterruptContexts: contexts,
 			},
 			internalInterrupted: is,
 		},
@@ -85,10 +87,12 @@ func StatefulInterrupt(ctx context.Context, info any, state any) *AgentEvent {
 		return &AgentEvent{Err: err}
 	}
 
+	contexts := core.ToInterruptContextsWithFilter(is, encapsulateAddress, shouldKeepParent)
+
 	return &AgentEvent{
 		Action: &AgentAction{
 			Interrupted: &InterruptInfo{
-				InterruptContexts: core.ToInterruptContexts(is, nil),
+				InterruptContexts: contexts,
 			},
 			internalInterrupted: is,
 		},
@@ -109,10 +113,12 @@ func CompositeInterrupt(ctx context.Context, info any, state any,
 		return &AgentEvent{Err: err}
 	}
 
+	contexts := core.ToInterruptContextsWithFilter(is, encapsulateAddress, shouldKeepParent)
+
 	return &AgentEvent{
 		Action: &AgentAction{
 			Interrupted: &InterruptInfo{
-				InterruptContexts: core.ToInterruptContexts(is, nil),
+				InterruptContexts: contexts,
 			},
 			internalInterrupted: is,
 		},
@@ -144,6 +150,14 @@ func encapsulateAddress(addr Address) Address {
 		}
 	}
 	return newAddr
+}
+
+func shouldKeepParent(addr Address) bool {
+	if len(addr) == 0 {
+		return false
+	}
+	leafType := addr[len(addr)-1].Type
+	return leafType == AddressSegmentAgent || leafType == AddressSegmentTool
 }
 
 // InterruptCtx provides a structured, user-facing view of a single point of interruption.
