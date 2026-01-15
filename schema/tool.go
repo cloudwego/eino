@@ -55,6 +55,31 @@ const (
 	ToolChoiceForced ToolChoice = "forced"
 )
 
+type AgenticToolChoice struct {
+	// Type is the tool choice mode.
+	Type ToolChoice
+	// Allowed optionally specifies the list of tools that the model is permitted to call.
+	Allowed *AgenticAllowedToolChoice
+	// Forced optionally specifies the list of tools that the model is required to call.
+	Forced *AgenticForcedToolChoice
+}
+
+// AgenticAllowedToolChoice specifies a list of allowed tools for the model.
+type AgenticAllowedToolChoice struct {
+	// Tools is the list of allowed tools for the model to call.
+	// Optional.
+	Tools []*AllowedTool
+}
+
+// AgenticForcedToolChoice specifies a list of tools that the model must call.
+type AgenticForcedToolChoice struct {
+	// Tools is the list of tools that the model must call.
+	// Optional.
+	Tools []*AllowedTool
+}
+
+// AllowedTool represents a tool that the model is allowed or forced to call.
+// Exactly one of FunctionToolName, MCPTool, or ServerTool must be specified.
 type AllowedTool struct {
 	// FunctionToolName is the name of the function tool.
 	FunctionToolName string
@@ -64,15 +89,17 @@ type AllowedTool struct {
 	ServerTool *AllowedServerTool
 }
 
+// AllowedMCPTool contains the information for identifying an MCP tool.
 type AllowedMCPTool struct {
 	// ServerLabel is the label of the MCP server.
 	ServerLabel string
-	// The name of the MCP tool.
+	// Name is the name of the MCP tool.
 	Name string
 }
 
+// AllowedServerTool contains the information for identifying a server tool.
 type AllowedServerTool struct {
-	// The name of the server tool.
+	// Name is the name of the server tool.
 	Name string
 }
 

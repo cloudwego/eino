@@ -92,11 +92,18 @@ func TestOptions(t *testing.T) {
 		)
 		opts := GetCommonOptions(
 			nil,
-			WithAgenticToolChoice(toolChoice, allowedTools...),
+			WithAgenticToolChoice(&schema.AgenticToolChoice{
+				Type: toolChoice,
+				Forced: &schema.AgenticForcedToolChoice{
+					Tools: allowedTools,
+				},
+			}),
 		)
 
-		convey.So(opts.ToolChoice, convey.ShouldResemble, &toolChoice)
-		convey.So(opts.AllowedTools, convey.ShouldResemble, allowedTools)
+		convey.So(opts.AgenticToolChoice, convey.ShouldNotBeNil)
+		convey.So(opts.AgenticToolChoice.Type, convey.ShouldEqual, toolChoice)
+		convey.So(opts.AgenticToolChoice.Forced, convey.ShouldNotBeNil)
+		convey.So(opts.AgenticToolChoice.Forced.Tools, convey.ShouldResemble, allowedTools)
 	})
 }
 
