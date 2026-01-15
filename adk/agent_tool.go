@@ -26,6 +26,7 @@ import (
 
 	"github.com/cloudwego/eino/components/tool"
 	"github.com/cloudwego/eino/compose"
+	"github.com/cloudwego/eino/internal/callbacks"
 	"github.com/cloudwego/eino/schema"
 )
 
@@ -105,6 +106,10 @@ func (at *agentTool) InvokableRun(ctx context.Context, argumentsInJSON string, o
 	var ms *bridgeStore
 	var iter *AsyncIterator[*AgentEvent]
 	var err error
+
+	if v := ctx.Value(callbacks.CtxManagerKey{}); v != nil {
+		ctx = context.WithValue(ctx, callbacks.CtxManagerKey{}, nil) // reset graph callback manager
+	}
 
 	wasInterrupted, hasState, state := compose.GetInterruptState[[]byte](ctx)
 	if !wasInterrupted {
