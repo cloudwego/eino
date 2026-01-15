@@ -27,7 +27,7 @@ import (
 func TestConvAgenticPrompt(t *testing.T) {
 	assert.NotNil(t, ConvAgenticCallbackInput(&AgenticCallbackInput{
 		Variables: map[string]any{},
-		AgenticTemplates: []schema.AgenticMessagesTemplate{
+		Templates: []schema.AgenticMessagesTemplate{
 			&schema.AgenticMessage{},
 		},
 	}))
@@ -35,10 +35,10 @@ func TestConvAgenticPrompt(t *testing.T) {
 	assert.Nil(t, ConvAgenticCallbackInput("asd"))
 
 	assert.NotNil(t, ConvAgenticCallbackOutput(&AgenticCallbackOutput{
-		AgenticResult: []*schema.AgenticMessage{
+		Result: []*schema.AgenticMessage{
 			{},
 		},
-		AgenticTemplates: []schema.AgenticMessagesTemplate{
+		Templates: []schema.AgenticMessagesTemplate{
 			&schema.AgenticMessage{},
 		},
 	}))
