@@ -87,7 +87,7 @@ func TestOptions(t *testing.T) {
 		var (
 			toolChoice   = schema.ToolChoiceForced
 			allowedTools = []*schema.AllowedTool{
-				{FunctionToolName: "agentic_tool"},
+				{FunctionName: "agentic_tool"},
 			}
 		)
 		opts := GetCommonOptions(

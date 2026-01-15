@@ -1,5 +1,5 @@
 /*
- * Copyright 2024 CloudWeGo Authors
+ * Copyright 2026 CloudWeGo Authors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -24,22 +24,23 @@ import (
 	"github.com/cloudwego/eino/schema"
 )
 
-func TestConvPrompt(t *testing.T) {
-	assert.NotNil(t, ConvCallbackInput(&CallbackInput{
-		Templates: []schema.MessagesTemplate{
-			&schema.Message{},
+func TestConvAgenticPrompt(t *testing.T) {
+	assert.NotNil(t, ConvAgenticCallbackInput(&AgenticCallbackInput{
+		Variables: map[string]any{},
+		AgenticTemplates: []schema.AgenticMessagesTemplate{
+			&schema.AgenticMessage{},
 		},
 	}))
-	assert.NotNil(t, ConvCallbackInput(map[string]any{}))
-	assert.Nil(t, ConvCallbackInput("asd"))
+	assert.NotNil(t, ConvAgenticCallbackInput(map[string]any{}))
+	assert.Nil(t, ConvAgenticCallbackInput("asd"))
 
-	assert.NotNil(t, ConvCallbackOutput(&CallbackOutput{
-		Result: []*schema.Message{
+	assert.NotNil(t, ConvAgenticCallbackOutput(&AgenticCallbackOutput{
+		AgenticResult: []*schema.AgenticMessage{
 			{},
 		},
-		Templates: []schema.MessagesTemplate{
-			&schema.Message{},
+		AgenticTemplates: []schema.AgenticMessagesTemplate{
+			&schema.AgenticMessage{},
 		},
 	}))
-	assert.NotNil(t, ConvCallbackOutput([]*schema.Message{}))
+	assert.NotNil(t, ConvAgenticCallbackOutput([]*schema.AgenticMessage{}))
 }
