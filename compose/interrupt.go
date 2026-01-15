@@ -348,13 +348,6 @@ func (e *subGraphInterruptError) Error() string {
 	return fmt.Sprintf("interrupt happened, info: %+v", e.Info)
 }
 
-func (e *subGraphInterruptError) GetInterruptContexts() []*InterruptCtx {
-	if e.Info == nil {
-		return nil
-	}
-	return e.Info.InterruptContexts
-}
-
 func isInterruptError(err error) bool {
 	if _, ok := ExtractInterruptInfo(err); ok {
 		return true
