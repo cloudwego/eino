@@ -46,8 +46,8 @@ type DefaultAgenticChatTemplate struct {
 func (t *DefaultAgenticChatTemplate) Format(ctx context.Context, vs map[string]any, opts ...Option) (result []*schema.AgenticMessage, err error) {
 	ctx = callbacks.EnsureRunInfo(ctx, t.GetType(), components.ComponentOfAgenticPrompt)
 	ctx = callbacks.OnStart(ctx, &AgenticCallbackInput{
-		Variables:        vs,
-		AgenticTemplates: t.templates,
+		Variables: vs,
+		Templates: t.templates,
 	})
 	defer func() {
 		if err != nil {
@@ -66,8 +66,8 @@ func (t *DefaultAgenticChatTemplate) Format(ctx context.Context, vs map[string]a
 	}
 
 	_ = callbacks.OnEnd(ctx, &AgenticCallbackOutput{
-		AgenticResult:    result,
-		AgenticTemplates: t.templates,
+		Result:    result,
+		Templates: t.templates,
 	})
 
 	return result, nil
