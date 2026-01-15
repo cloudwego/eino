@@ -59,7 +59,6 @@ const (
 type AgenticRoleType string
 
 const (
-	AgenticRoleTypeDeveloper AgenticRoleType = "developer"
 	AgenticRoleTypeSystem    AgenticRoleType = "system"
 	AgenticRoleTypeUser      AgenticRoleType = "user"
 	AgenticRoleTypeAssistant AgenticRoleType = "assistant"
@@ -424,14 +423,6 @@ type MCPToolApprovalResponse struct {
 	// Reason is the rationale for the decision.
 	// Optional.
 	Reason string
-}
-
-// DeveloperAgenticMessage represents a message with AgenticRoleType "developer".
-func DeveloperAgenticMessage(text string) *AgenticMessage {
-	return &AgenticMessage{
-		Role:          AgenticRoleTypeDeveloper,
-		ContentBlocks: []*ContentBlock{NewContentBlock(&UserInputText{Text: text})},
-	}
 }
 
 // SystemAgenticMessage represents a message with AgenticRoleType "system".
