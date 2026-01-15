@@ -19,6 +19,7 @@ package deep
 import (
 	"context"
 	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -359,4 +360,116 @@ func (n *namedPlanExecuteAgent) Name(_ context.Context) string {
 
 func (n *namedPlanExecuteAgent) Description(_ context.Context) string {
 	return n.description
+}
+
+type testBeforeAgentHandler struct {
+	*adk.BaseHandlerMiddleware
+	fn func(ctx context.Context, runCtx *adk.AgentContext) (context.Context, *adk.AgentContext, error)
+}
+
+func (h *testBeforeAgentHandler) BeforeAgent(ctx context.Context, runCtx *adk.AgentContext) (context.Context, *adk.AgentContext, error) {
+	return h.fn(ctx, runCtx)
+}
+
+func TestDeepAgent_DisableDefaultInstructionFormatting(t *testing.T) {
+	ctx := context.Background()
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	cm := mockModel.NewMockToolCallingChatModel(ctrl)
+	cm.EXPECT().WithTools(gomock.Any()).Return(cm, nil).AnyTimes()
+
+	var capturedMessages []*schema.Message
+	cm.EXPECT().Generate(gomock.Any(), gomock.Any(), gomock.Any()).
+		DoAndReturn(func(ctx context.Context, msgs []*schema.Message, opts ...model.Option) (*schema.Message, error) {
+			capturedMessages = msgs
+			return schema.AssistantMessage("done", nil), nil
+		}).Times(1)
+
+	instruction := `Output in this format: {"name": "value"}`
+
+	agent, err := New(ctx, &Config{
+		Name:                            "deep",
+		Description:                     "deep agent",
+		ChatModel:                       cm,
+		Instruction:                     instruction,
+		MaxIteration:                    1,
+		WithoutWriteTodos:               true,
+		WithoutGeneralSubAgent:          true,
+		DisableDefaultInstructionFormatting: true,
+	})
+	assert.NoError(t, err)
+
+	r := adk.NewRunner(ctx, adk.RunnerConfig{Agent: agent})
+	it := r.Run(ctx, []adk.Message{schema.UserMessage("hi")},
+		adk.WithSessionValues(map[string]any{"name": "test"}))
+
+	for {
+		ev, ok := it.Next()
+		if !ok {
+			break
+		}
+		assert.Nil(t, ev.Err)
+	}
+
+	assert.NotEmpty(t, capturedMessages)
+	assert.Equal(t, instruction, capturedMessages[0].Content)
+}
+
+func TestDeepAgent_Handlers_CustomFormatting(t *testing.T) {
+	ctx := context.Background()
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	cm := mockModel.NewMockToolCallingChatModel(ctrl)
+	cm.EXPECT().WithTools(gomock.Any()).Return(cm, nil).AnyTimes()
+
+	var capturedMessages []*schema.Message
+	cm.EXPECT().Generate(gomock.Any(), gomock.Any(), gomock.Any()).
+		DoAndReturn(func(ctx context.Context, msgs []*schema.Message, opts ...model.Option) (*schema.Message, error) {
+			capturedMessages = msgs
+			return schema.AssistantMessage("done", nil), nil
+		}).Times(1)
+
+	beforeAgentCalled := false
+	handler := &testBeforeAgentHandler{
+		BaseHandlerMiddleware: &adk.BaseHandlerMiddleware{},
+		fn: func(ctx context.Context, runCtx *adk.AgentContext) (context.Context, *adk.AgentContext, error) {
+			beforeAgentCalled = true
+			vs := adk.GetSessionValues(ctx)
+			if user, ok := vs["user"].(string); ok {
+				runCtx.Instruction = strings.ReplaceAll(runCtx.Instruction, "{{ user }}", user)
+			}
+			return ctx, runCtx, nil
+		},
+	}
+
+	agent, err := New(ctx, &Config{
+		Name:                            "deep",
+		Description:                     "deep agent",
+		ChatModel:                       cm,
+		Instruction:                     "Hello {{ user }}, welcome!",
+		MaxIteration:                    1,
+		WithoutWriteTodos:               true,
+		WithoutGeneralSubAgent:          true,
+		DisableDefaultInstructionFormatting: true,
+		Handlers:                        []adk.HandlerMiddleware{handler},
+	})
+	assert.NoError(t, err)
+
+	r := adk.NewRunner(ctx, adk.RunnerConfig{Agent: agent})
+	it := r.Run(ctx, []adk.Message{schema.UserMessage("hi")},
+		adk.WithSessionValues(map[string]any{"user": "Bob"}))
+
+	for {
+		ev, ok := it.Next()
+		if !ok {
+			break
+		}
+		assert.Nil(t, ev.Err)
+	}
+
+	assert.True(t, beforeAgentCalled)
+	assert.NotEmpty(t, capturedMessages)
+	assert.Equal(t, "Hello Bob, welcome!", capturedMessages[0].Content)
 }
