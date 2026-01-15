@@ -28,11 +28,11 @@ type Options struct {
 	TopP *float32
 	// Tools is a list of tools the model may call.
 	Tools []*schema.ToolInfo
+
+	// Options only available for chat model.
+
 	// ToolChoice controls which tool is called by the model.
 	ToolChoice *schema.ToolChoice
-
-	// Options only for chat model.
-
 	// MaxTokens is the max number of tokens, if reached the max tokens, the model will stop generating, and mostly return an finish reason of "length".
 	MaxTokens *int
 	// AllowedToolNames specifies a list of tool names that the model is allowed to call.
@@ -41,10 +41,10 @@ type Options struct {
 	// Stop is the stop words for the model, which controls the stopping condition of the model.
 	Stop []string
 
-	// Options only for agentic model.
+	// Options only available for agentic model.
 
-	// AllowedTools is a list of allowed tools the model may call.
-	AllowedTools []*schema.AllowedTool
+	// AgenticToolChoice controls how the agentic model calls tools.
+	AgenticToolChoice *schema.AgenticToolChoice
 }
 
 // Option is the call option for ChatModel component.
@@ -127,11 +127,10 @@ func WithToolChoice(toolChoice schema.ToolChoice, allowedToolNames ...string) Op
 
 // WithAgenticToolChoice is the option to set tool choice for the agentic model.
 // Only available for AgenticModel.
-func WithAgenticToolChoice(toolChoice schema.ToolChoice, allowedTools ...*schema.AllowedTool) Option {
+func WithAgenticToolChoice(toolChoice *schema.AgenticToolChoice) Option {
 	return Option{
 		apply: func(opts *Options) {
-			opts.ToolChoice = &toolChoice
-			opts.AllowedTools = allowedTools
+			opts.AgenticToolChoice = toolChoice
 		},
 	}
 }

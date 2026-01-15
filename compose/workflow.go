@@ -89,15 +89,33 @@ func (wf *Workflow[I, O]) AddChatModelNode(key string, chatModel model.BaseChatM
 	return wf.initNode(key)
 }
 
+// AddAgenticModelNode adds an agentic model node and returns it.
+func (wf *Workflow[I, O]) AddAgenticModelNode(key string, agenticModel model.AgenticModel, opts ...GraphAddNodeOpt) *WorkflowNode {
+	_ = wf.g.AddAgenticModelNode(key, agenticModel, opts...)
+	return wf.initNode(key)
+}
+
 // AddChatTemplateNode adds a chat template node and returns it.
 func (wf *Workflow[I, O]) AddChatTemplateNode(key string, chatTemplate prompt.ChatTemplate, opts ...GraphAddNodeOpt) *WorkflowNode {
 	_ = wf.g.AddChatTemplateNode(key, chatTemplate, opts...)
 	return wf.initNode(key)
 }
 
+// AddAgenticChatTemplateNode adds an agentic chat template node and returns it.
+func (wf *Workflow[I, O]) AddAgenticChatTemplateNode(key string, chatTemplate prompt.AgenticChatTemplate, opts ...GraphAddNodeOpt) *WorkflowNode {
+	_ = wf.g.AddAgenticChatTemplateNode(key, chatTemplate, opts...)
+	return wf.initNode(key)
+}
+
 // AddToolsNode adds a tools node and returns it.
 func (wf *Workflow[I, O]) AddToolsNode(key string, tools *ToolsNode, opts ...GraphAddNodeOpt) *WorkflowNode {
 	_ = wf.g.AddToolsNode(key, tools, opts...)
+	return wf.initNode(key)
+}
+
+// AddAgenticToolsNode adds an agentic tools node and returns it.
+func (wf *Workflow[I, O]) AddAgenticToolsNode(key string, tools *AgenticToolsNode, opts ...GraphAddNodeOpt) *WorkflowNode {
+	_ = wf.g.AddAgenticToolsNode(key, tools, opts...)
 	return wf.initNode(key)
 }
 
