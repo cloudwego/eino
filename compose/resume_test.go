@@ -1008,3 +1008,85 @@ func TestLegacyInterrupt(t *testing.T) {
 	_, err = compiledGraph.Invoke(resumeCtx, "input", WithCheckPointID(checkPointID))
 	assert.Error(t, err)
 }
+
+type wrapperToolForTest struct {
+	compiledGraph Runnable[string, string]
+}
+
+func (w *wrapperToolForTest) Info(ctx context.Context) (*schema.ToolInfo, error) {
+	return &schema.ToolInfo{
+		Name: "wrapperTool",
+		Desc: "A tool that wraps a nested graph",
+	}, nil
+}
+
+func (w *wrapperToolForTest) InvokableRun(ctx context.Context, input string, opts ...tool.Option) (string, error) {
+	result, err := w.compiledGraph.Invoke(ctx, input)
+	if err != nil {
+		if _, ok := ExtractInterruptInfo(err); ok {
+			return "", tool.CompositeInterrupt(ctx, "wrapper tool interrupt", nil, err)
+		}
+		return "", err
+	}
+	return result, nil
+}
+
+func TestToolCompositeInterruptWithNestedGraphInterrupt(t *testing.T) {
+	ctx := context.Background()
+
+	subSubGraph := NewGraph[string, string]()
+	err := subSubGraph.AddLambdaNode("interruptNode", InvokableLambda(func(ctx context.Context, input string) (string, error) {
+		return "", Interrupt(ctx, "sub-sub graph interrupt info")
+	}))
+	assert.NoError(t, err)
+	assert.NoError(t, subSubGraph.AddEdge(START, "interruptNode"))
+	assert.NoError(t, subSubGraph.AddEdge("interruptNode", END))
+
+	nestedGraph := NewGraph[string, string]()
+	err = nestedGraph.AddGraphNode("subSubGraph", subSubGraph)
+	assert.NoError(t, err)
+	assert.NoError(t, nestedGraph.AddEdge(START, "subSubGraph"))
+	assert.NoError(t, nestedGraph.AddEdge("subSubGraph", END))
+	compiledNestedGraph, err := nestedGraph.Compile(ctx)
+	assert.NoError(t, err)
+
+	wrapperTool := &wrapperToolForTest{compiledGraph: compiledNestedGraph.(Runnable[string, string])}
+
+	toolsNode, err := NewToolNode(ctx, &ToolsNodeConfig{Tools: []tool.BaseTool{wrapperTool}})
+	assert.NoError(t, err)
+
+	outerGraph := NewGraph[*schema.Message, []*schema.Message]()
+	err = outerGraph.AddToolsNode("tools", toolsNode)
+	assert.NoError(t, err)
+	assert.NoError(t, outerGraph.AddEdge(START, "tools"))
+	assert.NoError(t, outerGraph.AddEdge("tools", END))
+
+	compiledOuterGraph, err := outerGraph.Compile(ctx)
+	assert.NoError(t, err)
+
+	_, err = compiledOuterGraph.Invoke(ctx, &schema.Message{
+		Role: schema.Assistant,
+		ToolCalls: []schema.ToolCall{
+			{ID: "call_1", Function: schema.FunctionCall{Name: "wrapperTool", Arguments: `"test"`}},
+		},
+	})
+	assert.Error(t, err)
+
+	info, ok := ExtractInterruptInfo(err)
+	assert.True(t, ok, "should be an interrupt error")
+	assert.NotNil(t, info)
+	assert.NotEmpty(t, info.InterruptContexts)
+
+	rootCause := info.InterruptContexts[0]
+	assert.Equal(t, "sub-sub graph interrupt info", rootCause.Info)
+	assert.True(t, rootCause.IsRootCause)
+
+	var wrapperToolParent *InterruptCtx
+	for p := rootCause.Parent; p != nil; p = p.Parent {
+		if p.Info == "wrapper tool interrupt" {
+			wrapperToolParent = p
+			break
+		}
+	}
+	assert.NotNil(t, wrapperToolParent, "should have parent from wrapper tool with info 'wrapper tool interrupt'")
+}

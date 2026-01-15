@@ -19,25 +19,12 @@ package tool
 import (
 	"context"
 	"errors"
-	"fmt"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 
 	"github.com/cloudwego/eino/internal/core"
 )
-
-type mockInterruptContextsProvider struct {
-	contexts []*core.InterruptCtx
-}
-
-func (m *mockInterruptContextsProvider) Error() string {
-	return fmt.Sprintf("mock interrupt error with %d contexts", len(m.contexts))
-}
-
-func (m *mockInterruptContextsProvider) GetInterruptContexts() []*core.InterruptCtx {
-	return m.contexts
-}
 
 func TestInterrupt(t *testing.T) {
 	ctx := context.Background()
@@ -102,26 +89,6 @@ func TestCompositeInterrupt(t *testing.T) {
 		assert.Equal(t, "sub info", signal.Subs[0].Info)
 	})
 
-	t.Run("with InterruptContextsProvider sub error", func(t *testing.T) {
-		subCtx := &core.InterruptCtx{
-			ID:          "test-id",
-			Info:        "provider info",
-			IsRootCause: true,
-		}
-		providerErr := &mockInterruptContextsProvider{
-			contexts: []*core.InterruptCtx{subCtx},
-		}
-
-		err := CompositeInterrupt(ctx, "composite info", "my state", providerErr)
-		assert.Error(t, err)
-
-		var signal *core.InterruptSignal
-		assert.True(t, errors.As(err, &signal))
-		assert.Equal(t, "composite info", signal.Info)
-		assert.Equal(t, "my state", signal.State)
-		assert.Len(t, signal.Subs, 1)
-	})
-
 	t.Run("with non-interrupt error returns error", func(t *testing.T) {
 		nonInterruptErr := errors.New("regular error")
 
@@ -143,38 +110,6 @@ func TestCompositeInterrupt(t *testing.T) {
 		var signal *core.InterruptSignal
 		assert.True(t, errors.As(err, &signal))
 		assert.Len(t, signal.Subs, 2)
-	})
-
-	t.Run("with mixed InterruptSignal and InterruptContextsProvider", func(t *testing.T) {
-		subSignal, _ := core.Interrupt(ctx, "signal info", nil, nil)
-		subCtx := &core.InterruptCtx{
-			ID:          "test-id",
-			Info:        "provider info",
-			IsRootCause: true,
-		}
-		providerErr := &mockInterruptContextsProvider{
-			contexts: []*core.InterruptCtx{subCtx},
-		}
-
-		err := CompositeInterrupt(ctx, "composite info", nil, subSignal, providerErr)
-		assert.Error(t, err)
-
-		var signal *core.InterruptSignal
-		assert.True(t, errors.As(err, &signal))
-		assert.Len(t, signal.Subs, 2)
-	})
-
-	t.Run("with empty InterruptContextsProvider", func(t *testing.T) {
-		providerErr := &mockInterruptContextsProvider{
-			contexts: nil,
-		}
-
-		err := CompositeInterrupt(ctx, "composite info", nil, providerErr)
-		assert.Error(t, err)
-
-		var signal *core.InterruptSignal
-		assert.True(t, errors.As(err, &signal))
-		assert.Empty(t, signal.Subs)
 	})
 }
 
