@@ -65,6 +65,30 @@ type Config struct {
 
 	Middlewares []adk.AgentMiddleware
 
+	// Handlers configures interface-based handlers for extending agent behavior.
+	// Unlike Middlewares (struct-based), Handlers allow users to:
+	//   - Add custom methods to their handler implementations
+	//   - Return modified context from handler methods
+	//   - Centralize configuration in struct fields instead of closures
+	//
+	// Handlers are processed after Middlewares, in registration order.
+	// See adk.HandlerMiddleware documentation for details.
+	Handlers []adk.HandlerMiddleware
+
+	// DisableDefaultInstructionFormatting disables the default FString template formatting on the Instruction.
+	//
+	// By default, when SessionValues are present, the Instruction is formatted using FString
+	// (e.g., "{name}" is replaced with the value of "name" from SessionValues).
+	//
+	// Set to true if:
+	//   - Your Instruction contains curly braces that should be literal (e.g., JSON examples)
+	//   - You are using SessionValues for purposes other than instruction formatting
+	//   - You want to handle instruction formatting yourself via a BeforeAgent handler
+	//
+	// Note: This only disables the default formatting. Custom formatting logic in BeforeAgent
+	// handlers is not affected.
+	DisableDefaultInstructionFormatting bool
+
 	ModelRetryConfig *adk.ModelRetryConfig
 }
 
@@ -101,17 +125,33 @@ func New(ctx context.Context, cfg *Config) (adk.ResumableAgent, error) {
 		middlewares = append(middlewares, tt)
 	}
 
+	var genModelInput adk.GenModelInput
+	if cfg.DisableDefaultInstructionFormatting {
+		genModelInput = genModelInputWithoutFormatting
+	}
+
 	return adk.NewChatModelAgent(ctx, &adk.ChatModelAgentConfig{
 		Name:          cfg.Name,
 		Description:   cfg.Description,
 		Instruction:   instruction,
 		Model:         cfg.ChatModel,
 		ToolsConfig:   cfg.ToolsConfig,
+		GenModelInput: genModelInput,
 		MaxIterations: cfg.MaxIteration,
 		Middlewares:   append(middlewares, cfg.Middlewares...),
+		Handlers:      cfg.Handlers,
 
 		ModelRetryConfig: cfg.ModelRetryConfig,
 	})
+}
+
+func genModelInputWithoutFormatting(_ context.Context, instruction string, input *adk.AgentInput) ([]adk.Message, error) {
+	msgs := make([]adk.Message, 0, len(input.Messages)+1)
+	if instruction != "" {
+		msgs = append(msgs, schema.SystemMessage(instruction))
+	}
+	msgs = append(msgs, input.Messages...)
+	return msgs, nil
 }
 
 func buildBuiltinAgentMiddlewares(withoutWriteTodos bool) ([]adk.AgentMiddleware, error) {

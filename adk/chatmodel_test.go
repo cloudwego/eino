@@ -1297,3 +1297,39 @@ func testToolOption(value string) tool.Option {
 		o.value = value
 	})
 }
+
+func TestDefaultGenModelInput_FStringFormattingError(t *testing.T) {
+	ctx := context.Background()
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	cm := mockModel.NewMockToolCallingChatModel(ctrl)
+
+	agent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+		Name:        "TestAgent",
+		Description: "Test agent with JSON instruction",
+		Instruction: `Output in this format: {"name": "value"}`,
+		Model:       cm,
+	})
+	assert.NoError(t, err)
+
+	r := NewRunner(ctx, RunnerConfig{Agent: agent})
+	it := r.Run(ctx, []Message{schema.UserMessage("hi")},
+		WithSessionValues(map[string]any{"name": "test"}))
+
+	var foundError error
+	for {
+		ev, ok := it.Next()
+		if !ok {
+			break
+		}
+		if ev.Err != nil {
+			foundError = ev.Err
+		}
+	}
+
+	assert.NotNil(t, foundError, "should have an error due to FString formatting failure")
+	assert.Contains(t, foundError.Error(), "defaultGenModelInput")
+	assert.Contains(t, foundError.Error(), "FString template")
+	assert.Contains(t, foundError.Error(), "SessionValues")
+}
