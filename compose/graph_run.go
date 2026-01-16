@@ -130,22 +130,9 @@ func (r *runner) run(ctx context.Context, isStream bool, input any, opts ...Opti
 	tm := r.initTaskManager(runWrapper, getGraphCancel(ctx), opts...)
 	maxSteps := r.options.maxRunSteps
 
-	if r.dag {
-		for i := range opts {
-			if opts[i].maxRunSteps > 0 {
-				return nil, newGraphRunError(fmt.Errorf("cannot set max run steps in dag"))
-			}
-		}
-	} else {
-		// Update maxSteps if provided in options.
-		for i := range opts {
-			if opts[i].maxRunSteps > 0 {
-				maxSteps = opts[i].maxRunSteps
-			}
-		}
-		if maxSteps < 1 {
-			return nil, newGraphRunError(errors.New("max run steps limit must be at least 1"))
-		}
+	maxSteps, err = r.resolveMaxSteps(maxSteps, opts)
+	if err != nil {
+		return nil, err
 	}
 
 	// Extract and validate options for each node.
@@ -277,19 +264,7 @@ func (r *runner) run(ctx context.Context, isStream bool, input any, opts ...Opti
 		completedTasks, canceled, canceledTasks := tm.wait()
 		totalCanceledTasks = append(totalCanceledTasks, canceledTasks...)
 		tempInfo := newInterruptTempInfo()
-		if canceled {
-			if len(canceledTasks) > 0 {
-				// as rerun nodes
-				for _, t := range canceledTasks {
-					tempInfo.interruptRerunNodes = append(tempInfo.interruptRerunNodes, t.nodeKey)
-				}
-			} else {
-				// as interrupt after
-				for _, t := range completedTasks {
-					tempInfo.interruptAfterNodes = append(tempInfo.interruptAfterNodes, t.nodeKey)
-				}
-			}
-		}
+		tempInfo.collectCanceledInfo(canceled, canceledTasks, completedTasks)
 
 		err = r.resolveInterruptCompletedTasks(tempInfo, completedTasks)
 		if err != nil {
@@ -384,6 +359,26 @@ func (r *runner) run(ctx context.Context, isStream bool, input any, opts ...Opti
 	}
 }
 
+func (r *runner) resolveMaxSteps(maxSteps int, opts []Option) (int, error) {
+	if r.dag {
+		for i := range opts {
+			if opts[i].maxRunSteps > 0 {
+				return 0, newGraphRunError(fmt.Errorf("cannot set max run steps in dag"))
+			}
+		}
+		return maxSteps, nil
+	}
+	for i := range opts {
+		if opts[i].maxRunSteps > 0 {
+			maxSteps = opts[i].maxRunSteps
+		}
+	}
+	if maxSteps < 1 {
+		return 0, newGraphRunError(errors.New("max run steps limit must be at least 1"))
+	}
+	return maxSteps, nil
+}
+
 func (r *runner) restoreCheckPointState(
 	ctx context.Context,
 	path NodePath,
@@ -441,6 +436,21 @@ type interruptTempInfo struct {
 	interruptRerunExtra  map[string]any
 
 	signals []*core.InterruptSignal
+}
+
+func (ti *interruptTempInfo) collectCanceledInfo(canceled bool, canceledTasks, completedTasks []*task) {
+	if !canceled {
+		return
+	}
+	if len(canceledTasks) > 0 {
+		for _, t := range canceledTasks {
+			ti.interruptRerunNodes = append(ti.interruptRerunNodes, t.nodeKey)
+		}
+	} else {
+		for _, t := range completedTasks {
+			ti.interruptAfterNodes = append(ti.interruptAfterNodes, t.nodeKey)
+		}
+	}
 }
 
 func (r *runner) resolveInterruptCompletedTasks(tempInfo *interruptTempInfo, completedTasks []*task) (err error) {
