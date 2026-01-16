@@ -24,6 +24,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"go.uber.org/mock/gomock"
 
+	"github.com/cloudwego/eino/callbacks"
 	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/components/tool"
 	mockModel "github.com/cloudwego/eino/internal/mock/components/model"
@@ -36,6 +37,15 @@ type myInterruptState struct {
 
 type myResumeData struct {
 	Message string
+}
+
+type resumeTestState struct {
+	OnStartCalledOnResume bool `json:"on_start_called_on_resume"`
+	Counter               int  `json:"counter"`
+}
+
+func init() {
+	schema.Register[resumeTestState]()
 }
 
 func TestInterruptStateAndResumeForRootGraph(t *testing.T) {
@@ -100,6 +110,78 @@ func TestInterruptStateAndResumeForRootGraph(t *testing.T) {
 	// Verify the final result
 	assert.NoError(t, err)
 	assert.Equal(t, "Resumed successfully with input: initial input", output)
+}
+
+func TestProcessStateInOnStartDuringResume(t *testing.T) {
+	graphOnStartCallCount := 0
+	processStateErrorOnResume := error(nil)
+
+	cb := callbacks.NewHandlerBuilder().
+		OnStartFn(func(ctx context.Context, info *callbacks.RunInfo, input callbacks.CallbackInput) context.Context {
+			if info.Name == "test-process-state-onstart" {
+				graphOnStartCallCount++
+				err := ProcessState[*resumeTestState](ctx, func(ctx context.Context, s *resumeTestState) error {
+					s.Counter++
+					return nil
+				})
+				if graphOnStartCallCount > 1 {
+					processStateErrorOnResume = err
+				}
+			}
+			return ctx
+		}).
+		Build()
+
+	g := NewGraph[string, string](WithGenLocalState(func(ctx context.Context) *resumeTestState {
+		return &resumeTestState{}
+	}))
+
+	lambda := InvokableLambda(func(ctx context.Context, input string) (string, error) {
+		wasInterrupted, _, _ := GetInterruptState[*myInterruptState](ctx)
+		if !wasInterrupted {
+			return "", StatefulInterrupt(ctx,
+				map[string]any{"reason": "test interrupt"},
+				&myInterruptState{OriginalInput: input},
+			)
+		}
+
+		var stateCounter int
+		err := ProcessState[*resumeTestState](ctx, func(ctx context.Context, s *resumeTestState) error {
+			stateCounter = s.Counter
+			return nil
+		})
+		assert.NoError(t, err)
+		assert.Equal(t, 2, stateCounter, "Counter should be 2 (first run OnStart + resume OnStart)")
+
+		return "success", nil
+	})
+
+	_ = g.AddLambdaNode("lambda", lambda)
+	_ = g.AddEdge(START, "lambda")
+	_ = g.AddEdge("lambda", END)
+
+	graph, err := g.Compile(context.Background(),
+		WithCheckPointStore(newInMemoryStore()),
+		WithGraphName("test-process-state-onstart"),
+	)
+	assert.NoError(t, err)
+
+	checkPointID := "test-checkpoint-process-state"
+	_, err = graph.Invoke(context.Background(), "test input", WithCheckPointID(checkPointID), WithCallbacks(cb))
+
+	assert.Error(t, err, "First invocation should return an error")
+	interruptInfo, isInterrupt := ExtractInterruptInfo(err)
+	assert.True(t, isInterrupt, "Should be an interrupt error")
+	assert.NotNil(t, interruptInfo)
+	assert.Equal(t, 1, graphOnStartCallCount, "Graph OnStart should be called once on first run")
+
+	ctx := ResumeWithData(context.Background(), interruptInfo.InterruptContexts[0].ID, &myResumeData{})
+
+	output, err := graph.Invoke(ctx, "", WithCheckPointID(checkPointID), WithCallbacks(cb))
+	assert.NoError(t, err)
+	assert.Equal(t, "success", output)
+	assert.Equal(t, 2, graphOnStartCallCount, "Graph OnStart should be called twice (first run + resume)")
+	assert.NoError(t, processStateErrorOnResume, "ProcessState should work in OnStart during resume")
 }
 
 func TestInterruptStateAndResumeForSubGraph(t *testing.T) {

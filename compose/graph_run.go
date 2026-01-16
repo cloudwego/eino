@@ -169,12 +169,19 @@ func (r *runner) run(ctx context.Context, isStream bool, input any, opts ...Opti
 	if cp := getCheckPointFromCtx(ctx); cp != nil {
 		// in subgraph, try to load checkpoint from ctx
 		initialized = true
+
+		ctx, err = r.restoreCheckPointState(ctx, *path, getStateModifier(ctx), cp, isStream, cm)
+		if err != nil {
+			return nil, err
+		}
+
 		ctx, input = onGraphStart(ctx, input, isStream)
 		haveOnStart = true
 
-		// restoreFromCheckPoint will 'fix' the ctx used by the 'nextTasks',
-		// so it should run after all operations on ctx are done, such as onGraphStart.
-		ctx, nextTasks, err = r.restoreFromCheckPoint(ctx, *path, getStateModifier(ctx), cp, isStream, cm, optMap)
+		nextTasks, err = r.restoreTasks(ctx, cp.Inputs, cp.SkipPreHandler, cp.RerunNodes, isStream, optMap)
+		if err != nil {
+			return nil, newGraphRunError(fmt.Errorf("restore tasks fail: %w", err))
+		}
 	} else if checkPointID != nil && !forceNewRun {
 		cp, err = getCheckPointFromStore(ctx, *checkPointID, r.checkPointer)
 		if err != nil {
@@ -187,12 +194,18 @@ func (r *runner) run(ctx context.Context, isStream bool, input any, opts ...Opti
 			ctx = setStateModifier(ctx, stateModifier)
 			ctx = setCheckPointToCtx(ctx, cp)
 
+			ctx, err = r.restoreCheckPointState(ctx, *NewNodePath(), stateModifier, cp, isStream, cm)
+			if err != nil {
+				return nil, err
+			}
+
 			ctx, input = onGraphStart(ctx, input, isStream)
 			haveOnStart = true
 
-			// restoreFromCheckPoint will 'fix' the ctx used by the 'nextTasks',
-			// so it should run after all operations on ctx are done, such as onGraphStart.
-			ctx, nextTasks, err = r.restoreFromCheckPoint(ctx, *NewNodePath(), stateModifier, cp, isStream, cm, optMap)
+			nextTasks, err = r.restoreTasks(ctx, cp.Inputs, cp.SkipPreHandler, cp.RerunNodes, isStream, optMap)
+			if err != nil {
+				return nil, newGraphRunError(fmt.Errorf("restore tasks fail: %w", err))
+			}
 		}
 	}
 	if !initialized {
@@ -371,28 +384,27 @@ func (r *runner) run(ctx context.Context, isStream bool, input any, opts ...Opti
 	}
 }
 
-func (r *runner) restoreFromCheckPoint(
+func (r *runner) restoreCheckPointState(
 	ctx context.Context,
 	path NodePath,
 	sm StateModifier,
 	cp *checkpoint,
 	isStream bool,
 	cm *channelManager,
-	optMap map[string][]any,
-) (context.Context, []*task, error) {
+) (context.Context, error) {
 	err := r.checkPointer.restoreCheckPoint(cp, isStream)
 	if err != nil {
-		return ctx, nil, newGraphRunError(fmt.Errorf("restore checkpoint fail: %w", err))
+		return ctx, newGraphRunError(fmt.Errorf("restore checkpoint fail: %w", err))
 	}
 
 	err = cm.loadChannels(cp.Channels)
 	if err != nil {
-		return ctx, nil, newGraphRunError(err)
+		return ctx, newGraphRunError(err)
 	}
 	if sm != nil && cp.State != nil {
 		err = sm(ctx, path, cp.State)
 		if err != nil {
-			return ctx, nil, newGraphRunError(fmt.Errorf("state modifier fail: %w", err))
+			return ctx, newGraphRunError(fmt.Errorf("state modifier fail: %w", err))
 		}
 	}
 	if cp.State != nil {
@@ -411,11 +423,7 @@ func (r *runner) restoreFromCheckPoint(
 		ctx = context.WithValue(ctx, stateKey{}, &internalState{state: cp.State, parent: parent})
 	}
 
-	nextTasks, err := r.restoreTasks(ctx, cp.Inputs, cp.SkipPreHandler, cp.RerunNodes, isStream, optMap) // should restore after set state to context
-	if err != nil {
-		return ctx, nil, newGraphRunError(fmt.Errorf("restore tasks fail: %w", err))
-	}
-	return ctx, nextTasks, nil
+	return ctx, nil
 }
 
 func newInterruptTempInfo() *interruptTempInfo {
