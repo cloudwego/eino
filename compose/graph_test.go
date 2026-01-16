@@ -2014,3 +2014,8 @@ func TestSkipBranch(t *testing.T) {
 	assert.NoError(t, err)
 	assert.Equal(t, "input", result)
 }
+
+func TestUniqueSlice(t *testing.T) {
+	assert.Equal(t, []string{"a", "b", "c"}, uniqueSlice([]string{"a", "b", "a", "c", "b"}))
+	assert.Equal(t, []string{}, uniqueSlice([]string{}))
+}
