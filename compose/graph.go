@@ -865,7 +865,20 @@ func getSuccessors(c *chanCall) []string {
 			ret = append(ret, node)
 		}
 	}
-	return ret
+	return uniqueSlice(ret)
+}
+
+func uniqueSlice(s []string) []string {
+	seen := make(map[string]struct{}, len(s))
+	cur := 0
+	for i := range s {
+		if _, ok := seen[s[i]]; !ok {
+			seen[s[i]] = struct{}{}
+			s[cur] = s[i]
+			cur++
+		}
+	}
+	return s[:cur]
 }
 
 type subGraphCompileCallback struct {
