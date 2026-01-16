@@ -237,12 +237,21 @@ func (c *channelManager) reportBranch(from string, skippedNodes []string) error 
 		for _, successor := range c.successors[key] {
 			skipped := c.channels[successor].reportSkip([]string{key})
 			if skipped {
-				nKeys = append(nKeys, successor)
+				nKeys = appendIfNotExist(nKeys, successor)
 			}
 			// todo: detect if end node has been skipped?
 		}
 	}
 	return nil
+}
+
+func appendIfNotExist(s []string, elem string) []string {
+	for _, i := range s {
+		if i == elem {
+			return s
+		}
+	}
+	return append(s, elem)
 }
 
 type task struct {
