@@ -42,7 +42,7 @@ func TestSessionValues(t *testing.T) {
 			"key2": 42,
 			"key3": true,
 		}
-		AddSessionValues(ctx, values)
+		assert.NoError(t, AddSessionValues(ctx, values))
 
 		// Get all values from the session
 		retrievedValues := GetSessionValues(ctx)
@@ -62,7 +62,10 @@ func TestSessionValues(t *testing.T) {
 		values := map[string]any{
 			"key1": "value1",
 		}
-		AddSessionValues(ctx, values)
+		err := AddSessionValues(ctx, values)
+
+		// Should return error
+		assert.ErrorIs(t, err, ErrSessionNotInitialized)
 
 		// Get values should return empty map
 		retrievedValues := GetSessionValues(ctx)
@@ -88,7 +91,7 @@ func TestSessionValues(t *testing.T) {
 		ctx = setRunCtx(ctx, runCtx)
 
 		// Add nil values map
-		AddSessionValues(ctx, nil)
+		assert.NoError(t, AddSessionValues(ctx, nil))
 
 		// Get values should still be empty
 		retrievedValues := GetSessionValues(ctx)
@@ -105,7 +108,7 @@ func TestSessionValues(t *testing.T) {
 		ctx = setRunCtx(ctx, runCtx)
 
 		// Add empty values map
-		AddSessionValues(ctx, map[string]any{})
+		assert.NoError(t, AddSessionValues(ctx, map[string]any{}))
 
 		// Get values should be empty
 		retrievedValues := GetSessionValues(ctx)
@@ -131,7 +134,7 @@ func TestSessionValues(t *testing.T) {
 			"map":    map[string]int{"x": 1, "y": 2},
 			"struct": struct{ Name string }{Name: "test"},
 		}
-		AddSessionValues(ctx, values)
+		assert.NoError(t, AddSessionValues(ctx, values))
 
 		// Get all values from the session
 		retrievedValues := GetSessionValues(ctx)
@@ -161,14 +164,14 @@ func TestSessionValues(t *testing.T) {
 			"key1": "initial1",
 			"key2": "initial2",
 		}
-		AddSessionValues(ctx, initialValues)
+		assert.NoError(t, AddSessionValues(ctx, initialValues))
 
 		// Add values that overwrite some keys
 		overwriteValues := map[string]any{
 			"key1": "overwritten1",
 			"key3": "new3",
 		}
-		AddSessionValues(ctx, overwriteValues)
+		assert.NoError(t, AddSessionValues(ctx, overwriteValues))
 
 		// Get all values from the session
 		retrievedValues := GetSessionValues(ctx)
@@ -193,7 +196,7 @@ func TestSessionValues(t *testing.T) {
 		initialValues := map[string]any{
 			"counter": 0,
 		}
-		AddSessionValues(ctx, initialValues)
+		assert.NoError(t, AddSessionValues(ctx, initialValues))
 
 		// Simulate concurrent access
 		done := make(chan bool)
@@ -204,7 +207,7 @@ func TestSessionValues(t *testing.T) {
 				values := map[string]any{
 					"goroutine1": i,
 				}
-				AddSessionValues(ctx, values)
+				_ = AddSessionValues(ctx, values)
 			}
 			done <- true
 		}()
@@ -215,7 +218,7 @@ func TestSessionValues(t *testing.T) {
 				values := map[string]any{
 					"goroutine2": i,
 				}
-				AddSessionValues(ctx, values)
+				_ = AddSessionValues(ctx, values)
 			}
 			done <- true
 		}()
@@ -245,7 +248,7 @@ func TestSessionValues(t *testing.T) {
 			"key1": "value1",
 			"key2": 42,
 		}
-		AddSessionValues(ctx, values)
+		assert.NoError(t, AddSessionValues(ctx, values))
 
 		// Get individual values
 		value1, exists1 := GetSessionValue(ctx, "key1")
@@ -273,8 +276,8 @@ func TestSessionValues(t *testing.T) {
 		ctx = setRunCtx(ctx, runCtx)
 
 		// Add individual values
-		AddSessionValue(ctx, "key1", "value1")
-		AddSessionValue(ctx, "key2", 42)
+		assert.NoError(t, AddSessionValue(ctx, "key1", "value1"))
+		assert.NoError(t, AddSessionValue(ctx, "key2", 42))
 
 		// Get all values
 		retrievedValues := GetSessionValues(ctx)
@@ -290,7 +293,10 @@ func TestSessionValues(t *testing.T) {
 		ctx := context.Background()
 
 		// Add individual value to a context without a run session
-		AddSessionValue(ctx, "key1", "value1")
+		err := AddSessionValue(ctx, "key1", "value1")
+
+		// Should return error
+		assert.ErrorIs(t, err, ErrSessionNotInitialized)
 
 		// Get individual value should return false
 		value, exists := GetSessionValue(ctx, "key1")
@@ -322,7 +328,7 @@ func TestSessionValues(t *testing.T) {
 		values := map[string]any{
 			"integration_key": "integration_value",
 		}
-		AddSessionValues(ctx, values)
+		assert.NoError(t, AddSessionValues(ctx, values))
 
 		// Get values from the session
 		retrievedValues := GetSessionValues(ctx)

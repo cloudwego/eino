@@ -41,9 +41,9 @@ func TestWriteTodos(t *testing.T) {
 	todos := `[{"content":"content1","status":"pending"},{"content":"content2","status":"pending"}]`
 	args := fmt.Sprintf(`{"todos": %s}`, todos)
 
-	result, err := wt.InvokableRun(context.Background(), args)
-	assert.NoError(t, err)
-	assert.Equal(t, fmt.Sprintf("Updated todo list to %s", todos), result)
+	// Without a session, AddSessionValue should return ErrSessionNotInitialized
+	_, err = wt.InvokableRun(context.Background(), args)
+	assert.ErrorIs(t, err, adk.ErrSessionNotInitialized)
 }
 
 func TestDeepSubAgentSharesSessionValues(t *testing.T) {

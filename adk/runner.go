@@ -84,7 +84,7 @@ func (r *Runner) Run(ctx context.Context, messages []Message,
 
 	ctx = ctxWithNewRunCtx(ctx, input, o.sharedParentSession)
 
-	AddSessionValues(ctx, o.sessionValues)
+	_ = AddSessionValues(ctx, o.sessionValues)
 
 	iter := fa.Run(ctx, input, opts...)
 	if r.store == nil {
@@ -167,7 +167,7 @@ func (r *Runner) resume(ctx context.Context, checkPointID string, resumeData map
 
 	ctx = setRunCtx(ctx, runCtx)
 
-	AddSessionValues(ctx, o.sessionValues)
+	_ = AddSessionValues(ctx, o.sessionValues)
 
 	if len(resumeData) > 0 {
 		ctx = core.BatchResumeWithData(ctx, resumeData)

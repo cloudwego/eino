@@ -326,7 +326,7 @@ func (p *planner) Run(ctx context.Context, input *adk.AgentInput,
 
 	iterator, generator := adk.NewAsyncIteratorPair[*adk.AgentEvent]()
 
-	adk.AddSessionValue(ctx, UserInputSessionKey, input.Messages)
+	_ = adk.AddSessionValue(ctx, UserInputSessionKey, input.Messages)
 
 	go func() {
 		defer func() {
@@ -400,7 +400,7 @@ func (p *planner) Run(ctx context.Context, input *adk.AgentInput,
 						return nil, fmt.Errorf("unmarshal plan error: %w", err)
 					}
 
-					adk.AddSessionValue(ctx, PlanSessionKey, plan)
+					_ = adk.AddSessionValue(ctx, PlanSessionKey, plan)
 
 					return plan, nil
 				}),
@@ -666,7 +666,7 @@ func (r *replanner) genInput(ctx context.Context) ([]adk.Message, error) {
 		Step:   step,
 		Result: executedStep_,
 	})
-	adk.AddSessionValue(ctx, ExecutedStepsSessionKey, executedSteps_)
+	_ = adk.AddSessionValue(ctx, ExecutedStepsSessionKey, executedSteps_)
 
 	userInput, ok := adk.GetSessionValue(ctx, UserInputSessionKey)
 	if !ok {
@@ -757,7 +757,7 @@ func (r *replanner) Run(ctx context.Context, input *adk.AgentInput, _ ...adk.Age
 						return nil, fmt.Errorf("unmarshal plan error: %w", err)
 					}
 
-					adk.AddSessionValue(ctx, PlanSessionKey, plan)
+					_ = adk.AddSessionValue(ctx, PlanSessionKey, plan)
 
 					return plan, nil
 				}),

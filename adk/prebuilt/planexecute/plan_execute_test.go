@@ -255,7 +255,7 @@ func TestExecutorRun(t *testing.T) {
 
 	// Store a plan in the session
 	plan := &defaultPlan{Steps: []string{"Step 1", "Step 2", "Step 3"}}
-	adk.AddSessionValue(ctx, PlanSessionKey, plan)
+	_ = adk.AddSessionValue(ctx, PlanSessionKey, plan)
 
 	// Set up expectations for the mock model
 	// The model should return the last user message as its response
@@ -610,8 +610,8 @@ func TestPlanExecuteAgentWithReplan(t *testing.T) {
 			iterator, generator := adk.NewAsyncIteratorPair[*adk.AgentEvent]()
 
 			// Set the plan in the session
-			adk.AddSessionValue(ctx, PlanSessionKey, originalPlan)
-			adk.AddSessionValue(ctx, UserInputSessionKey, userInput)
+			_ = adk.AddSessionValue(ctx, PlanSessionKey, originalPlan)
+			_ = adk.AddSessionValue(ctx, UserInputSessionKey, userInput)
 
 			// Send a message event
 			planJSON, _ := sonic.MarshalString(originalPlan)
@@ -635,10 +635,10 @@ func TestPlanExecuteAgentWithReplan(t *testing.T) {
 			// Check if this is the first replanning (original plan has 3 steps)
 			if len(currentPlan.Steps) == 3 {
 				msg = schema.AssistantMessage(originalExecuteResult, nil)
-				adk.AddSessionValue(ctx, ExecutedStepSessionKey, originalExecuteResult)
+				_ = adk.AddSessionValue(ctx, ExecutedStepSessionKey, originalExecuteResult)
 			} else {
 				msg = schema.AssistantMessage(updatedExecuteResult, nil)
-				adk.AddSessionValue(ctx, ExecutedStepSessionKey, updatedExecuteResult)
+				_ = adk.AddSessionValue(ctx, ExecutedStepSessionKey, updatedExecuteResult)
 			}
 			event := adk.EventFromMessage(msg, nil, schema.Assistant, "")
 			generator.Send(event)
@@ -667,8 +667,8 @@ func TestPlanExecuteAgentWithReplan(t *testing.T) {
 				generator.Send(event)
 
 				// Set the updated plan & execute result in the session
-				adk.AddSessionValue(ctx, PlanSessionKey, updatedPlan)
-				adk.AddSessionValue(ctx, ExecutedStepsSessionKey, []ExecutedStep{{
+				_ = adk.AddSessionValue(ctx, PlanSessionKey, updatedPlan)
+				_ = adk.AddSessionValue(ctx, ExecutedStepsSessionKey, []ExecutedStep{{
 					Step:   currentPlan.Steps[0],
 					Result: originalExecuteResult,
 				}})
@@ -835,8 +835,8 @@ func TestPlanExecuteAgentInterruptResume(t *testing.T) {
 		func(ctx context.Context, input *adk.AgentInput, opts ...adk.AgentRunOption) *adk.AsyncIterator[*adk.AgentEvent] {
 			iterator, generator := adk.NewAsyncIteratorPair[*adk.AgentEvent]()
 
-			adk.AddSessionValue(ctx, PlanSessionKey, plan)
-			adk.AddSessionValue(ctx, UserInputSessionKey, userInput)
+			_ = adk.AddSessionValue(ctx, PlanSessionKey, plan)
+			_ = adk.AddSessionValue(ctx, UserInputSessionKey, userInput)
 
 			planJSON, _ := sonic.MarshalString(plan)
 			msg := schema.AssistantMessage(planJSON, nil)

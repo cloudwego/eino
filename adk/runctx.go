@@ -20,6 +20,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/gob"
+	"errors"
 	"fmt"
 	"sort"
 	"sync"
@@ -27,6 +28,9 @@ import (
 
 	"github.com/cloudwego/eino/schema"
 )
+
+// ErrSessionNotInitialized is returned when session is not available in the context.
+var ErrSessionNotInitialized = errors.New("session not initialized")
 
 // runSession CheckpointSchema: persisted via serialization.RunCtx (gob).
 type runSession struct {
@@ -99,23 +103,27 @@ func GetSessionValues(ctx context.Context) map[string]any {
 }
 
 // AddSessionValue sets a single session key-value pair for the current run.
-func AddSessionValue(ctx context.Context, key string, value any) {
+// Returns ErrSessionNotInitialized if called before Runner.Run() has initialized the session.
+func AddSessionValue(ctx context.Context, key string, value any) error {
 	session := getSession(ctx)
 	if session == nil {
-		return
+		return ErrSessionNotInitialized
 	}
 
 	session.addValue(key, value)
+	return nil
 }
 
 // AddSessionValues sets multiple session key-value pairs for the current run.
-func AddSessionValues(ctx context.Context, kvs map[string]any) {
+// Returns ErrSessionNotInitialized if called before Runner.Run() has initialized the session.
+func AddSessionValues(ctx context.Context, kvs map[string]any) error {
 	session := getSession(ctx)
 	if session == nil {
-		return
+		return ErrSessionNotInitialized
 	}
 
 	session.addValues(kvs)
+	return nil
 }
 
 // GetSessionValue retrieves a session value by key and reports whether it exists.

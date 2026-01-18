@@ -138,7 +138,9 @@ type writeTodosArguments struct {
 
 func newWriteTodos() (adk.AgentMiddleware, error) {
 	t, err := utils.InferTool("write_todos", writeTodosToolDescription, func(ctx context.Context, input writeTodosArguments) (output string, err error) {
-		adk.AddSessionValue(ctx, SessionKeyTodos, input.Todos)
+		if err = adk.AddSessionValue(ctx, SessionKeyTodos, input.Todos); err != nil {
+			return "", err
+		}
 		todos, err := sonic.MarshalString(input.Todos)
 		if err != nil {
 			return "", err
