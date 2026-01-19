@@ -19,6 +19,7 @@ package compose
 import (
 	"context"
 	"encoding/json"
+	"sync"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -530,9 +531,45 @@ func TestMultipleInterruptsAndResumes(t *testing.T) {
 	assert.Equal(t, "process p2 done", finalOutput["p2"])
 }
 
+// toolsNodeResumeTargetCallback captures isResumeTarget for ToolsNode during OnStart
+type toolsNodeResumeTargetCallback struct {
+	mu                sync.Mutex
+	isResumeTargetLog []bool
+}
+
+func (c *toolsNodeResumeTargetCallback) OnStart(ctx context.Context, info *callbacks.RunInfo, _ callbacks.CallbackInput) context.Context {
+	if info.Component == ComponentOfToolsNode {
+		isResumeTarget, _, _ := GetResumeContext[any](ctx)
+		c.mu.Lock()
+		c.isResumeTargetLog = append(c.isResumeTargetLog, isResumeTarget)
+		c.mu.Unlock()
+	}
+	return ctx
+}
+
+func (c *toolsNodeResumeTargetCallback) OnEnd(ctx context.Context, _ *callbacks.RunInfo, _ callbacks.CallbackOutput) context.Context {
+	return ctx
+}
+
+func (c *toolsNodeResumeTargetCallback) OnError(ctx context.Context, _ *callbacks.RunInfo, _ error) context.Context {
+	return ctx
+}
+
+func (c *toolsNodeResumeTargetCallback) OnStartWithStreamInput(ctx context.Context, _ *callbacks.RunInfo, input *schema.StreamReader[callbacks.CallbackInput]) context.Context {
+	input.Close()
+	return ctx
+}
+
+func (c *toolsNodeResumeTargetCallback) OnEndWithStreamOutput(ctx context.Context, _ *callbacks.RunInfo, output *schema.StreamReader[callbacks.CallbackOutput]) context.Context {
+	output.Close()
+	return ctx
+}
+
 // mockReentryTool is a helper for the reentry test
 type mockReentryTool struct {
-	t *testing.T
+	t                     *testing.T
+	mu                    sync.Mutex
+	isResumeTargetByRunID map[string]bool
 }
 
 func (t *mockReentryTool) Info(_ context.Context) (*schema.ToolInfo, error) {
@@ -548,6 +585,12 @@ func (t *mockReentryTool) InvokableRun(ctx context.Context, _ string, _ ...tool.
 	isResume, hasData, data := tool.GetResumeContext[*myResumeData](ctx)
 
 	callID := GetToolCallID(ctx)
+
+	t.mu.Lock()
+	if t.isResumeTargetByRunID != nil {
+		t.isResumeTargetByRunID[callID] = isResume
+	}
+	t.mu.Unlock()
 
 	// Special handling for the re-entrant call to make assertions explicit.
 	if callID == "call_3" {
@@ -593,8 +636,9 @@ func TestReentryForResumedTools(t *testing.T) {
 	// and this time the tool's runCtx should think it was not interrupted nor resumed.
 	ctrl := gomock.NewController(t)
 
-	// 1. Define the interrupting tool
-	reentryTool := &mockReentryTool{t: t}
+	// 1. Define the interrupting tool and callback
+	reentryTool := &mockReentryTool{t: t, isResumeTargetByRunID: make(map[string]bool)}
+	toolsNodeCB := &toolsNodeResumeTargetCallback{}
 
 	// 2. Define the graph
 	g := NewGraph[[]*schema.Message, *schema.Message]()
@@ -653,7 +697,7 @@ func TestReentryForResumedTools(t *testing.T) {
 	checkPointID := "reentry-test"
 
 	// --- 1. First invocation: call_1 and call_2 should interrupt ---
-	_, err = graph.Invoke(context.Background(), []*schema.Message{schema.UserMessage("start")}, WithCheckPointID(checkPointID))
+	_, err = graph.Invoke(context.Background(), []*schema.Message{schema.UserMessage("start")}, WithCheckPointID(checkPointID), WithCallbacks(toolsNodeCB))
 	assert.Error(t, err)
 	interruptInfo1, _ := ExtractInterruptInfo(err)
 	interrupts1 := interruptInfo1.InterruptContexts
@@ -671,10 +715,22 @@ func TestReentryForResumedTools(t *testing.T) {
 	assert.True(t, found1["runnable:root;node:tools;tool:reentry_tool:call_1"])
 	assert.True(t, found1["runnable:root;node:tools;tool:reentry_tool:call_2"])
 
+	// First invocation: neither call_1 nor call_2 should be resume targets
+	assert.False(t, reentryTool.isResumeTargetByRunID["call_1"], "first run: call_1 should not be resume target")
+	assert.False(t, reentryTool.isResumeTargetByRunID["call_2"], "first run: call_2 should not be resume target")
+
+	// First invocation: ToolsNode should NOT be a resume target
+	assert.Len(t, toolsNodeCB.isResumeTargetLog, 1, "ToolsNode OnStart should be called once in first invocation")
+	assert.False(t, toolsNodeCB.isResumeTargetLog[0], "first run: ToolsNode should NOT be resume target")
+
+	// Clear for next invocation
+	reentryTool.isResumeTargetByRunID = make(map[string]bool)
+	toolsNodeCB.isResumeTargetLog = nil
+
 	// --- 2. Second invocation: resume call_1, expect call_2 to interrupt again ---
 	resumeCtx2 := ResumeWithData(context.Background(), addrToID1["runnable:root;node:tools;tool:reentry_tool:call_1"],
 		&myResumeData{Message: "resume call 1"})
-	_, err = graph.Invoke(resumeCtx2, []*schema.Message{schema.UserMessage("start")}, WithCheckPointID(checkPointID))
+	_, err = graph.Invoke(resumeCtx2, []*schema.Message{schema.UserMessage("start")}, WithCheckPointID(checkPointID), WithCallbacks(toolsNodeCB))
 	assert.Error(t, err)
 	interruptInfo2, _ := ExtractInterruptInfo(err)
 	interrupts2 := interruptInfo2.InterruptContexts
@@ -684,9 +740,21 @@ func TestReentryForResumedTools(t *testing.T) {
 	assert.NotNil(t, rootCause2.Parent)
 	assert.Equal(t, "runnable:root;node:tools", rootCause2.Parent.Address.String())
 
+	// Second invocation: call_1 is resumed, call_2 is NOT resumed (re-interrupts)
+	assert.True(t, reentryTool.isResumeTargetByRunID["call_1"], "second run: call_1 should be resume target")
+	assert.False(t, reentryTool.isResumeTargetByRunID["call_2"], "second run: call_2 should NOT be resume target (it re-interrupts)")
+
+	// Second invocation: ToolsNode SHOULD be a resume target (because call_1 child is being resumed)
+	assert.Len(t, toolsNodeCB.isResumeTargetLog, 1, "ToolsNode OnStart should be called once in second invocation")
+	assert.True(t, toolsNodeCB.isResumeTargetLog[0], "second run: ToolsNode SHOULD be resume target (child call_1 is being resumed)")
+
+	// Clear for next invocation
+	reentryTool.isResumeTargetByRunID = make(map[string]bool)
+	toolsNodeCB.isResumeTargetLog = nil
+
 	// --- 3. Third invocation: resume call_2, model makes a new call (call_3) which should interrupt ---
 	resumeCtx3 := ResumeWithData(context.Background(), rootCause2.ID, &myResumeData{Message: "resume call 2"})
-	_, err = graph.Invoke(resumeCtx3, []*schema.Message{schema.UserMessage("start")}, WithCheckPointID(checkPointID))
+	_, err = graph.Invoke(resumeCtx3, []*schema.Message{schema.UserMessage("start")}, WithCheckPointID(checkPointID), WithCallbacks(toolsNodeCB))
 	assert.Error(t, err)
 	interruptInfo3, _ := ExtractInterruptInfo(err)
 	interrupts3 := interruptInfo3.InterruptContexts
@@ -696,12 +764,34 @@ func TestReentryForResumedTools(t *testing.T) {
 	assert.NotNil(t, rootCause3.Parent)
 	assert.Equal(t, "runnable:root;node:tools", rootCause3.Parent.Address.String())
 
+	// Third invocation: call_2 is resumed, call_3 is new (not resumed)
+	assert.True(t, reentryTool.isResumeTargetByRunID["call_2"], "third run: call_2 should be resume target")
+	assert.False(t, reentryTool.isResumeTargetByRunID["call_3"], "third run: call_3 should NOT be resume target (it's new)")
+
+	// Third invocation: ToolsNode is called twice (once for call_2 resume, once for call_3 new)
+	// First call: ToolsNode SHOULD be resume target (call_2 is being resumed)
+	// Second call: ToolsNode should NOT be resume target (call_3 is new, no children to resume)
+	assert.Len(t, toolsNodeCB.isResumeTargetLog, 2, "ToolsNode OnStart should be called twice in third invocation")
+	assert.True(t, toolsNodeCB.isResumeTargetLog[0], "third run first ToolsNode call: SHOULD be resume target (child call_2 is being resumed)")
+	assert.False(t, toolsNodeCB.isResumeTargetLog[1], "third run second ToolsNode call: should NOT be resume target (call_3 is new)")
+
+	// Clear for next invocation
+	reentryTool.isResumeTargetByRunID = make(map[string]bool)
+	toolsNodeCB.isResumeTargetLog = nil
+
 	// --- 4. Final invocation: resume call_3, expect final answer ---
 	resumeCtx4 := ResumeWithData(context.Background(), rootCause3.ID,
 		&myResumeData{Message: "resume call 3"})
-	output, err := graph.Invoke(resumeCtx4, []*schema.Message{schema.UserMessage("start")}, WithCheckPointID(checkPointID))
+	output, err := graph.Invoke(resumeCtx4, []*schema.Message{schema.UserMessage("start")}, WithCheckPointID(checkPointID), WithCallbacks(toolsNodeCB))
 	assert.NoError(t, err)
 	assert.Equal(t, "all done", output.Content)
+
+	// Fourth invocation: call_3 is resumed
+	assert.True(t, reentryTool.isResumeTargetByRunID["call_3"], "fourth run: call_3 should be resume target")
+
+	// Fourth invocation: ToolsNode SHOULD be resume target (call_3 is being resumed)
+	assert.Len(t, toolsNodeCB.isResumeTargetLog, 1, "ToolsNode OnStart should be called once in fourth invocation")
+	assert.True(t, toolsNodeCB.isResumeTargetLog[0], "fourth run: ToolsNode SHOULD be resume target (child call_3 is being resumed)")
 }
 
 // mockInterruptingTool is a helper for the nested tool interrupt test
@@ -1010,7 +1100,8 @@ func TestLegacyInterrupt(t *testing.T) {
 }
 
 type wrapperToolForTest struct {
-	compiledGraph Runnable[string, string]
+	compiledGraph     Runnable[string, string]
+	isResumeTargetLog []bool
 }
 
 func (w *wrapperToolForTest) Info(ctx context.Context) (*schema.ToolInfo, error) {
@@ -1021,6 +1112,9 @@ func (w *wrapperToolForTest) Info(ctx context.Context) (*schema.ToolInfo, error)
 }
 
 func (w *wrapperToolForTest) InvokableRun(ctx context.Context, input string, opts ...tool.Option) (string, error) {
+	isResumeTarget, _, _ := tool.GetResumeContext[any](ctx)
+	w.isResumeTargetLog = append(w.isResumeTargetLog, isResumeTarget)
+
 	result, err := w.compiledGraph.Invoke(ctx, input)
 	if err != nil {
 		if _, ok := ExtractInterruptInfo(err); ok {
@@ -1034,9 +1128,16 @@ func (w *wrapperToolForTest) InvokableRun(ctx context.Context, input string, opt
 func TestToolCompositeInterruptWithNestedGraphInterrupt(t *testing.T) {
 	ctx := context.Background()
 
+	var innerNodeIsResumeTarget bool
 	subSubGraph := NewGraph[string, string]()
 	err := subSubGraph.AddLambdaNode("interruptNode", InvokableLambda(func(ctx context.Context, input string) (string, error) {
-		return "", Interrupt(ctx, "sub-sub graph interrupt info")
+		wasInterrupted, _, _ := GetInterruptState[any](ctx)
+		if !wasInterrupted {
+			return "", Interrupt(ctx, "sub-sub graph interrupt info")
+		}
+		isResumeTarget, _, _ := GetResumeContext[any](ctx)
+		innerNodeIsResumeTarget = isResumeTarget
+		return "resumed successfully", nil
 	}))
 	assert.NoError(t, err)
 	assert.NoError(t, subSubGraph.AddEdge(START, "interruptNode"))
@@ -1061,15 +1162,18 @@ func TestToolCompositeInterruptWithNestedGraphInterrupt(t *testing.T) {
 	assert.NoError(t, outerGraph.AddEdge(START, "tools"))
 	assert.NoError(t, outerGraph.AddEdge("tools", END))
 
-	compiledOuterGraph, err := outerGraph.Compile(ctx)
+	compiledOuterGraph, err := outerGraph.Compile(ctx, WithCheckPointStore(newInMemoryStore()))
 	assert.NoError(t, err)
 
-	_, err = compiledOuterGraph.Invoke(ctx, &schema.Message{
+	checkpointID := "test-wrapper-tool-resume"
+	inputMsg := &schema.Message{
 		Role: schema.Assistant,
 		ToolCalls: []schema.ToolCall{
 			{ID: "call_1", Function: schema.FunctionCall{Name: "wrapperTool", Arguments: `"test"`}},
 		},
-	})
+	}
+
+	_, err = compiledOuterGraph.Invoke(ctx, inputMsg, WithCheckPointID(checkpointID))
 	assert.Error(t, err)
 
 	info, ok := ExtractInterruptInfo(err)
@@ -1089,4 +1193,16 @@ func TestToolCompositeInterruptWithNestedGraphInterrupt(t *testing.T) {
 		}
 	}
 	assert.NotNil(t, wrapperToolParent, "should have parent from wrapper tool with info 'wrapper tool interrupt'")
+
+	assert.Len(t, wrapperTool.isResumeTargetLog, 1)
+	assert.False(t, wrapperTool.isResumeTargetLog[0], "first invocation: wrapper tool should not be resume target")
+
+	resumeCtx := Resume(ctx, rootCause.ID)
+	_, err = compiledOuterGraph.Invoke(resumeCtx, inputMsg, WithCheckPointID(checkpointID))
+	assert.NoError(t, err)
+
+	assert.True(t, innerNodeIsResumeTarget, "inner node should be resume target")
+
+	assert.Len(t, wrapperTool.isResumeTargetLog, 2)
+	assert.True(t, wrapperTool.isResumeTargetLog[1], "second invocation: wrapper tool should be resume target because its child is targeted")
 }
