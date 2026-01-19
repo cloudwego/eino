@@ -235,11 +235,12 @@ func FromInterruptContexts(contexts []*InterruptCtx) *InterruptSignal {
 // user-facing InterruptCtx objects for the root causes of the interruption.
 // Each returned context has its Parent field populated (if it has a parent),
 // allowing traversal up the interrupt chain.
-func ToInterruptContexts(is *InterruptSignal, addrModifier func(Address) Address) []*InterruptCtx {
-	return ToInterruptContextsWithFilter(is, addrModifier, nil)
-}
-
-func ToInterruptContextsWithFilter(is *InterruptSignal, addrModifier func(Address) Address, parentFilter func(Address) bool) []*InterruptCtx {
+//
+// If allowedSegmentTypes is nil, all segment types are kept and addresses are unchanged.
+// If allowedSegmentTypes is provided, it:
+//  1. Filters the parent chain to only keep contexts whose leaf segment type is allowed
+//  2. Strips non-allowed segment types from all addresses
+func ToInterruptContexts(is *InterruptSignal, allowedSegmentTypes []AddressSegmentType) []*InterruptCtx {
 	if is == nil {
 		return nil
 	}
@@ -266,26 +267,29 @@ func ToInterruptContextsWithFilter(is *InterruptSignal, addrModifier func(Addres
 
 	buildContexts(is, nil)
 
-	for _, ctx := range rootCauseContexts {
-		if parentFilter != nil {
-			filterParentChain(ctx, parentFilter)
+	if len(allowedSegmentTypes) > 0 {
+		allowedSet := make(map[AddressSegmentType]bool, len(allowedSegmentTypes))
+		for _, t := range allowedSegmentTypes {
+			allowedSet[t] = true
 		}
-		if addrModifier != nil {
-			encapsulateContextAddresses(ctx, addrModifier)
+
+		for _, ctx := range rootCauseContexts {
+			filterParentChain(ctx, allowedSet)
+			encapsulateContextAddresses(ctx, allowedSet)
 		}
 	}
 
 	return rootCauseContexts
 }
 
-func filterParentChain(ctx *InterruptCtx, shouldKeep func(Address) bool) {
+func filterParentChain(ctx *InterruptCtx, allowedSet map[AddressSegmentType]bool) {
 	if ctx == nil {
 		return
 	}
 
 	parent := ctx.Parent
 	for parent != nil {
-		if shouldKeep(parent.Address) {
+		if len(parent.Address) > 0 && allowedSet[parent.Address[len(parent.Address)-1].Type] {
 			break
 		}
 		parent = parent.Parent
@@ -293,12 +297,18 @@ func filterParentChain(ctx *InterruptCtx, shouldKeep func(Address) bool) {
 
 	ctx.Parent = parent
 
-	filterParentChain(parent, shouldKeep)
+	filterParentChain(parent, allowedSet)
 }
 
-func encapsulateContextAddresses(ctx *InterruptCtx, addrModifier func(Address) Address) {
+func encapsulateContextAddresses(ctx *InterruptCtx, allowedSet map[AddressSegmentType]bool) {
 	for c := ctx; c != nil; c = c.Parent {
-		c.Address = addrModifier(c.Address)
+		newAddr := make(Address, 0, len(c.Address))
+		for _, seg := range c.Address {
+			if allowedSet[seg.Type] {
+				newAddr = append(newAddr, seg)
+			}
+		}
+		c.Address = newAddr
 	}
 }
 

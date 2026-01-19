@@ -215,7 +215,7 @@ func (r *Runner) handleIter(ctx context.Context, aIter *AsyncIterator[*AgentEven
 				panic("multiple interrupt actions should not happen in Runner")
 			}
 			interruptSignal = event.Action.internalInterrupted
-			interruptContexts := core.ToInterruptContextsWithFilter(interruptSignal, encapsulateAddress, shouldKeepParent)
+			interruptContexts := core.ToInterruptContexts(interruptSignal, allowedAddressSegmentTypes)
 			event = &AgentEvent{
 				AgentName: event.AgentName,
 				RunPath:   event.RunPath,

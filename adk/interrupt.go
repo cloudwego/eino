@@ -70,7 +70,7 @@ func Interrupt(ctx context.Context, info any) *AgentEvent {
 		return &AgentEvent{Err: err}
 	}
 
-	contexts := core.ToInterruptContextsWithFilter(is, encapsulateAddress, shouldKeepParent)
+	contexts := core.ToInterruptContexts(is, allowedAddressSegmentTypes)
 
 	return &AgentEvent{
 		Action: &AgentAction{
@@ -99,7 +99,7 @@ func StatefulInterrupt(ctx context.Context, info any, state any) *AgentEvent {
 		return &AgentEvent{Err: err}
 	}
 
-	contexts := core.ToInterruptContextsWithFilter(is, encapsulateAddress, shouldKeepParent)
+	contexts := core.ToInterruptContexts(is, allowedAddressSegmentTypes)
 
 	return &AgentEvent{
 		Action: &AgentAction{
@@ -131,7 +131,7 @@ func CompositeInterrupt(ctx context.Context, info any, state any,
 		return &AgentEvent{Err: err}
 	}
 
-	contexts := core.ToInterruptContextsWithFilter(is, encapsulateAddress, shouldKeepParent)
+	contexts := core.ToInterruptContexts(is, allowedAddressSegmentTypes)
 
 	return &AgentEvent{
 		Action: &AgentAction{
@@ -155,27 +155,11 @@ const (
 	AddressSegmentTool  AddressSegmentType = "tool"
 )
 
+var allowedAddressSegmentTypes = []AddressSegmentType{AddressSegmentAgent, AddressSegmentTool}
+
 // AppendAddressSegment adds an address segment for the current execution context.
 func AppendAddressSegment(ctx context.Context, segType AddressSegmentType, segID string) context.Context {
 	return core.AppendAddressSegment(ctx, segType, segID, "")
-}
-
-func encapsulateAddress(addr Address) Address {
-	newAddr := make(Address, 0, len(addr))
-	for _, seg := range addr {
-		if seg.Type == AddressSegmentAgent || seg.Type == AddressSegmentTool {
-			newAddr = append(newAddr, seg)
-		}
-	}
-	return newAddr
-}
-
-func shouldKeepParent(addr Address) bool {
-	if len(addr) == 0 {
-		return false
-	}
-	leafType := addr[len(addr)-1].Type
-	return leafType == AddressSegmentAgent || leafType == AddressSegmentTool
 }
 
 // InterruptCtx provides a structured, user-facing view of a single point of interruption.
