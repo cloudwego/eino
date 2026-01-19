@@ -179,7 +179,7 @@ func (c *handlerTemplate) OnStart(ctx context.Context, info *callbacks.RunInfo, 
 	case components.ComponentOfChatModel:
 		return c.chatModelHandler.OnStart(ctx, info, model.ConvCallbackInput(input))
 	case components.ComponentOfAgenticModel:
-		return c.agenticModelHandler.OnStart(ctx, info, model.ConvCallbackInput(input))
+		return c.agenticModelHandler.OnStart(ctx, info, model.ConvAgenticCallbackInput(input))
 	case components.ComponentOfEmbedding:
 		return c.embeddingHandler.OnStart(ctx, info, embedding.ConvCallbackInput(input))
 	case components.ComponentOfIndexer:
@@ -216,7 +216,7 @@ func (c *handlerTemplate) OnEnd(ctx context.Context, info *callbacks.RunInfo, ou
 	case components.ComponentOfChatModel:
 		return c.chatModelHandler.OnEnd(ctx, info, model.ConvCallbackOutput(output))
 	case components.ComponentOfAgenticModel:
-		return c.agenticModelHandler.OnEnd(ctx, info, model.ConvCallbackOutput(output))
+		return c.agenticModelHandler.OnEnd(ctx, info, model.ConvAgenticCallbackOutput(output))
 	case components.ComponentOfEmbedding:
 		return c.embeddingHandler.OnEnd(ctx, info, embedding.ConvCallbackOutput(output))
 	case components.ComponentOfIndexer:
@@ -304,8 +304,8 @@ func (c *handlerTemplate) OnEndWithStreamOutput(ctx context.Context, info *callb
 			}))
 	case components.ComponentOfAgenticModel:
 		return c.agenticModelHandler.OnEndWithStreamOutput(ctx, info,
-			schema.StreamReaderWithConvert(output, func(item callbacks.CallbackOutput) (*model.CallbackOutput, error) {
-				return model.ConvCallbackOutput(item), nil
+			schema.StreamReaderWithConvert(output, func(item callbacks.CallbackOutput) (*model.AgenticCallbackOutput, error) {
+				return model.ConvAgenticCallbackOutput(item), nil
 			}))
 	case components.ComponentOfTool:
 		return c.toolHandler.OnEndWithStreamOutput(ctx, info,
@@ -654,9 +654,9 @@ func (ch *AgenticPromptCallbackHandler) Needed(ctx context.Context, runInfo *cal
 
 // AgenticModelCallbackHandler is the handler for the agentic chat model callback.
 type AgenticModelCallbackHandler struct {
-	OnStart               func(ctx context.Context, runInfo *callbacks.RunInfo, input *model.CallbackInput) context.Context
-	OnEnd                 func(ctx context.Context, runInfo *callbacks.RunInfo, output *model.CallbackOutput) context.Context
-	OnEndWithStreamOutput func(ctx context.Context, runInfo *callbacks.RunInfo, output *schema.StreamReader[*model.CallbackOutput]) context.Context
+	OnStart               func(ctx context.Context, runInfo *callbacks.RunInfo, input *model.AgenticCallbackInput) context.Context
+	OnEnd                 func(ctx context.Context, runInfo *callbacks.RunInfo, output *model.AgenticCallbackOutput) context.Context
+	OnEndWithStreamOutput func(ctx context.Context, runInfo *callbacks.RunInfo, output *schema.StreamReader[*model.AgenticCallbackOutput]) context.Context
 	OnError               func(ctx context.Context, runInfo *callbacks.RunInfo, err error) context.Context
 }
 
