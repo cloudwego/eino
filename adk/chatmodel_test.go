@@ -1269,7 +1269,6 @@ func TestGetComposeOptions(t *testing.T) {
 		assert.True(t, toolOptionsCaptured, "Tool options should be passed through WithToolOptions")
 	})
 
-
 }
 
 type toolOptionCapturingTool struct {
