@@ -270,19 +270,12 @@ type AssistantGenVideo struct {
 }
 
 type Reasoning struct {
-	// Summary is the reasoning content summary.
-	Summary []*ReasoningSummary
-
-	// EncryptedContent is the encrypted reasoning content.
-	EncryptedContent string
-}
-
-type ReasoningSummary struct {
-	// Index specifies the index position of this summary in the final Reasoning.
-	Index int
-
-	// Text is the reasoning content summary.
+	// Text is either the thought summary or the raw reasoning text itself.
 	Text string
+
+	// Signature contains encrypted reasoning tokens.
+	// Required by some models when passing reasoning text back.
+	Signature string
 }
 
 type FunctionToolCall struct {
@@ -1172,40 +1165,13 @@ func concatReasoning(reasons []*Reasoning) (*Reasoning, error) {
 
 	ret := &Reasoning{}
 
-	var allSummaries []*ReasoningSummary
 	for _, r := range reasons {
-		if r == nil {
-			continue
+		if r.Text != "" {
+			ret.Text += r.Text
 		}
-		allSummaries = append(allSummaries, r.Summary...)
-		if r.EncryptedContent != "" {
-			ret.EncryptedContent += r.EncryptedContent
+		if r.Signature != "" {
+			ret.Signature += r.Signature
 		}
-	}
-
-	var (
-		indices        []int
-		indexToSummary = map[int]*ReasoningSummary{}
-	)
-
-	for _, s := range allSummaries {
-		if s == nil {
-			continue
-		}
-		if indexToSummary[s.Index] == nil {
-			indexToSummary[s.Index] = &ReasoningSummary{}
-			indices = append(indices, s.Index)
-		}
-		indexToSummary[s.Index].Text += s.Text
-	}
-
-	sort.Slice(indices, func(i, j int) bool {
-		return indices[i] < indices[j]
-	})
-
-	ret.Summary = make([]*ReasoningSummary, 0, len(indices))
-	for _, idx := range indices {
-		ret.Summary = append(ret.Summary, indexToSummary[idx])
 	}
 
 	return ret, nil
@@ -1899,12 +1865,9 @@ func (b *ContentBlock) String() string {
 // String returns the string representation of Reasoning.
 func (r *Reasoning) String() string {
 	sb := &strings.Builder{}
-	sb.WriteString(fmt.Sprintf("      summary: %d items\n", len(r.Summary)))
-	for _, s := range r.Summary {
-		sb.WriteString(fmt.Sprintf("        [%d] %s\n", s.Index, s.Text))
-	}
-	if r.EncryptedContent != "" {
-		sb.WriteString(fmt.Sprintf("      encrypted_content: %s\n", truncateString(r.EncryptedContent, 50)))
+	sb.WriteString(fmt.Sprintf("      text: %s\n", r.Text))
+	if r.Signature != "" {
+		sb.WriteString(fmt.Sprintf("      signature: %s\n", truncateString(r.Signature, 50)))
 	}
 	return sb.String()
 }
