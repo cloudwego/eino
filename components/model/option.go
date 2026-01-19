@@ -28,13 +28,13 @@ type Options struct {
 	TopP *float32
 	// Tools is a list of tools the model may call.
 	Tools []*schema.ToolInfo
+	// MaxTokens is the max number of tokens, if reached the max tokens, the model will stop generating, and mostly return a finish reason of "length".
+	MaxTokens *int
 
 	// Options only available for chat model.
 
 	// ToolChoice controls which tool is called by the model.
 	ToolChoice *schema.ToolChoice
-	// MaxTokens is the max number of tokens, if reached the max tokens, the model will stop generating, and mostly return an finish reason of "length".
-	MaxTokens *int
 	// AllowedToolNames specifies a list of tool names that the model is allowed to call.
 	// This allows for constraining the model to a specific subset of the available tools.
 	AllowedToolNames []string
