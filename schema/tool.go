@@ -58,9 +58,13 @@ const (
 type AgenticToolChoice struct {
 	// Type is the tool choice mode.
 	Type ToolChoice
+
 	// Allowed optionally specifies the list of tools that the model is permitted to call.
+	// Optional.
 	Allowed *AgenticAllowedToolChoice
+
 	// Forced optionally specifies the list of tools that the model is required to call.
+	// Optional.
 	Forced *AgenticForcedToolChoice
 }
 
