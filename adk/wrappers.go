@@ -28,7 +28,14 @@ import (
 	"github.com/cloudwego/eino/schema"
 )
 
-func buildWrappedModel(ctx context.Context, m model.ToolCallingChatModel, handlers []handlerInfo, middlewares []AgentMiddleware, retryConfig *ModelRetryConfig) (model.ToolCallingChatModel, error) {
+type modelWrapperBuilder struct {
+	ctx         context.Context
+	handlers    []handlerInfo
+	middlewares []AgentMiddleware
+	retryConfig *ModelRetryConfig
+}
+
+func (b *modelWrapperBuilder) build(m model.ToolCallingChatModel) (model.BaseChatModel, error) {
 	var wrapped model.BaseChatModel = m
 
 	// Model wrapper order (innermost to outermost):
@@ -39,30 +46,46 @@ func buildWrappedModel(ctx context.Context, m model.ToolCallingChatModel, handle
 
 	if !components.IsCallbacksEnabled(m) {
 		var err error
-		wrapped, err = (&callbackInjectionModelWrapper{}).WrapModel(ctx, wrapped)
+		wrapped, err = (&callbackInjectionModelWrapper{}).WrapModel(b.ctx, wrapped)
 		if err != nil {
 			return nil, err
 		}
 	}
 
-	for i := len(handlers) - 1; i >= 0; i-- {
-		if handlers[i].hasWrapModel {
+	for i := len(b.handlers) - 1; i >= 0; i-- {
+		if b.handlers[i].hasWrapModel {
 			var err error
-			wrapped, err = handlers[i].handler.WrapModel(ctx, wrapped)
+			wrapped, err = b.handlers[i].handler.WrapModel(b.ctx, wrapped)
 			if err != nil {
 				return nil, err
 			}
 		}
 	}
 
-	wrapped, err := (&eventSenderModelWrapper{modelRetryConfig: retryConfig}).WrapModel(ctx, wrapped)
+	wrapped, err := (&eventSenderModelWrapper{modelRetryConfig: b.retryConfig}).WrapModel(b.ctx, wrapped)
 	if err != nil {
 		return nil, err
 	}
 
-	wrapped = &stateModelWrapper{inner: wrapped, handlers: handlers, middlewares: middlewares}
+	wrapped = &stateModelWrapper{inner: wrapped, handlers: b.handlers, middlewares: b.middlewares}
 
-	result := &baseChatModelAdapter{inner: wrapped, toolBinder: m}
+	return wrapped, nil
+}
+
+func buildWrappedModel(ctx context.Context, m model.ToolCallingChatModel, handlers []handlerInfo, middlewares []AgentMiddleware, retryConfig *ModelRetryConfig) (model.ToolCallingChatModel, error) {
+	builder := &modelWrapperBuilder{
+		ctx:         ctx,
+		handlers:    handlers,
+		middlewares: middlewares,
+		retryConfig: retryConfig,
+	}
+
+	wrapped, err := builder.build(m)
+	if err != nil {
+		return nil, err
+	}
+
+	result := &baseChatModelAdapter{inner: wrapped, toolBinder: m, builder: builder}
 	if retryConfig != nil {
 		return newRetryChatModel(result, retryConfig), nil
 	}
@@ -72,6 +95,7 @@ func buildWrappedModel(ctx context.Context, m model.ToolCallingChatModel, handle
 type baseChatModelAdapter struct {
 	inner      model.BaseChatModel
 	toolBinder model.ToolCallingChatModel
+	builder    *modelWrapperBuilder
 }
 
 func (a *baseChatModelAdapter) Generate(ctx context.Context, input []*schema.Message, opts ...model.Option) (*schema.Message, error) {
@@ -87,7 +111,11 @@ func (a *baseChatModelAdapter) WithTools(tools []*schema.ToolInfo) (model.ToolCa
 	if err != nil {
 		return nil, err
 	}
-	return &baseChatModelAdapter{inner: a.inner, toolBinder: newToolBinder}, nil
+	newInner, err := a.builder.build(newToolBinder)
+	if err != nil {
+		return nil, err
+	}
+	return &baseChatModelAdapter{inner: newInner, toolBinder: newToolBinder, builder: a.builder}, nil
 }
 
 func (a *baseChatModelAdapter) IsCallbacksEnabled() bool {

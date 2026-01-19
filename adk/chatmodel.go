@@ -143,6 +143,24 @@ type ChatModelAgentState struct {
 // static additions like extra instruction or tools.
 //
 // See HandlerMiddleware documentation for detailed comparison.
+//
+// Execution Order (relative to HandlerMiddleware and ToolsConfig):
+//
+// Model call lifecycle (all execute in registration order):
+//  1. AgentMiddleware.BeforeChatModel
+//  2. HandlerMiddleware.BeforeModelRewriteHistory
+//  3. HandlerMiddleware.WrapModel chain (first registered handler's wrapper runs first)
+//  4. Model.Generate/Stream
+//  5. HandlerMiddleware.WrapModel chain post-processing (first registered runs last)
+//  6. HandlerMiddleware.AfterModelRewriteHistory
+//  7. AgentMiddleware.AfterChatModel
+//
+// Tool call lifecycle (outermost to innermost, all in registration order):
+//  1. eventSenderToolMiddleware (internal - sends tool result events)
+//  2. ToolsConfig.ToolCallMiddlewares
+//  3. AgentMiddleware.WrapToolCall
+//  4. HandlerMiddleware.WrapTool (first registered handler's wrapper is outermost)
+//  5. Tool.Invoke/Stream
 type AgentMiddleware struct {
 	// AdditionalInstruction adds supplementary text to the agent's system instruction.
 	// This instruction is concatenated with the base instruction before each chat model call.

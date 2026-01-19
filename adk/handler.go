@@ -45,14 +45,16 @@ type AgentContext struct {
 //
 // HandlerMiddleware is an interface type, which is open for extension:
 //   - Users can implement custom handlers with arbitrary internal state and methods
-//   - All methods return (context.Context, ..., error), allowing context propagation
+//   - Hook methods return (context.Context, ..., error) for direct context propagation
+//   - Wrapper methods (WrapTool, WrapModel) enable context propagation through the
+//     wrapped endpoint chain: wrappers can pass modified context to the next wrapper
 //   - Configuration is centralized in struct fields rather than scattered in closures
 //
 // HandlerMiddleware vs AgentMiddleware:
 //   - Use AgentMiddleware for simple, static additions (extra instruction/tools)
 //   - Use HandlerMiddleware for dynamic behavior, context modification, or call wrapping
 //   - AgentMiddleware is kept for backward compatibility with existing users
-//   - Both can be used together; middlewares are applied first, then handlers
+//   - Both can be used together; see AgentMiddleware documentation for execution order
 //
 // Use *BaseHandlerMiddleware as an embedded struct to provide default no-op
 // implementations for all methods.
@@ -79,11 +81,27 @@ type HandlerMiddleware interface {
 	// WrapModel wraps a chat model with custom behavior.
 	// Return the input model unchanged if no wrapping is needed.
 	// Called once when the agent is built, not per-call.
+	//
+	// Note: The parameter is BaseChatModel (not ToolCallingChatModel) because wrappers
+	// only need to intercept Generate/Stream calls. Tool binding (WithTools) is handled
+	// separately by the framework and does not flow through user wrappers.
 	WrapModel(ctx context.Context, m model.BaseChatModel) (model.BaseChatModel, error)
 }
 
 // BaseHandlerMiddleware provides default no-op implementations for HandlerMiddleware.
 // Embed *BaseHandlerMiddleware in custom handlers to only override the methods you need.
+//
+// Example:
+//
+//	type MyHandler struct {
+//		*adk.BaseHandlerMiddleware
+//		// custom fields
+//	}
+//
+//	func (h *MyHandler) BeforeModelRewriteHistory(ctx context.Context, messages []adk.Message) (context.Context, []adk.Message, error) {
+//		// custom logic
+//		return ctx, messages, nil
+//	}
 type BaseHandlerMiddleware struct{}
 
 func (b *BaseHandlerMiddleware) WrapTool(_ context.Context, t tool.BaseTool) (tool.BaseTool, error) {
