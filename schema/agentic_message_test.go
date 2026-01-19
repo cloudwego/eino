@@ -109,9 +109,7 @@ func TestConcatAgenticMessages(t *testing.T) {
 					{
 						Type: ContentBlockTypeReasoning,
 						Reasoning: &Reasoning{
-							Summary: []*ReasoningSummary{
-								{Index: 0, Text: "First "},
-							},
+							Text: "First ",
 						},
 						StreamingMeta: &StreamingMeta{Index: 0},
 					},
@@ -123,9 +121,7 @@ func TestConcatAgenticMessages(t *testing.T) {
 					{
 						Type: ContentBlockTypeReasoning,
 						Reasoning: &Reasoning{
-							Summary: []*ReasoningSummary{
-								{Index: 0, Text: "Second"},
-							},
+							Text: "Second",
 						},
 						StreamingMeta: &StreamingMeta{Index: 0},
 					},
@@ -136,9 +132,7 @@ func TestConcatAgenticMessages(t *testing.T) {
 		result, err := ConcatAgenticMessages(msgs)
 		assert.NoError(t, err)
 		assert.Len(t, result.ContentBlocks, 1)
-		assert.Len(t, result.ContentBlocks[0].Reasoning.Summary, 1)
-		assert.Equal(t, "First Second", result.ContentBlocks[0].Reasoning.Summary[0].Text)
-		assert.Equal(t, 0, result.ContentBlocks[0].Reasoning.Summary[0].Index)
+		assert.Equal(t, "First Second", result.ContentBlocks[0].Reasoning.Text)
 	})
 
 	t.Run("concat reasoning with index", func(t *testing.T) {
@@ -149,10 +143,7 @@ func TestConcatAgenticMessages(t *testing.T) {
 					{
 						Type: ContentBlockTypeReasoning,
 						Reasoning: &Reasoning{
-							Summary: []*ReasoningSummary{
-								{Index: 0, Text: "Part1-"},
-								{Index: 1, Text: "Part2-"},
-							},
+							Text: "Part1-",
 						},
 						StreamingMeta: &StreamingMeta{Index: 0},
 					},
@@ -164,10 +155,7 @@ func TestConcatAgenticMessages(t *testing.T) {
 					{
 						Type: ContentBlockTypeReasoning,
 						Reasoning: &Reasoning{
-							Summary: []*ReasoningSummary{
-								{Index: 0, Text: "Part3"},
-								{Index: 1, Text: "Part4"},
-							},
+							Text: "Part3",
 						},
 						StreamingMeta: &StreamingMeta{Index: 0},
 					},
@@ -178,9 +166,7 @@ func TestConcatAgenticMessages(t *testing.T) {
 		result, err := ConcatAgenticMessages(msgs)
 		assert.NoError(t, err)
 		assert.Len(t, result.ContentBlocks, 1)
-		assert.Len(t, result.ContentBlocks[0].Reasoning.Summary, 2)
-		assert.Equal(t, "Part1-Part3", result.ContentBlocks[0].Reasoning.Summary[0].Text)
-		assert.Equal(t, "Part2-Part4", result.ContentBlocks[0].Reasoning.Summary[1].Text)
+		assert.Equal(t, "Part1-Part3", result.ContentBlocks[0].Reasoning.Text)
 	})
 
 	t.Run("concat user input text", func(t *testing.T) {
@@ -1292,12 +1278,10 @@ func TestAgenticMessageString(t *testing.T) {
 			{
 				Type: ContentBlockTypeReasoning,
 				Reasoning: &Reasoning{
-					Summary: []*ReasoningSummary{
-						{Index: 0, Text: "First, I need to identify the location (New York City) from the user's query."},
-						{Index: 1, Text: "Then, I should call the weather API to get current conditions."},
-						{Index: 2, Text: "Finally, I'll format the response in a user-friendly way with temperature and conditions."},
-					},
-					EncryptedContent: "encrypted_reasoning_content_that_is_very_long_and_will_be_truncated_for_display",
+					Text: "First, I need to identify the location (New York City) from the user's query.\n" +
+						"Then, I should call the weather API to get current conditions.\n" +
+						"Finally, I'll format the response in a user-friendly way with temperature and conditions.",
+					Signature: "encrypted_reasoning_content_that_is_very_long_and_will_be_truncated_for_display",
 				},
 			},
 			{
@@ -1432,11 +1416,10 @@ content_blocks:
       base64_data: gen_video_data... (14 bytes)
       mime_type: video/mp4
   [9] type: reasoning
-      summary: 3 items
-        [0] First, I need to identify the location (New York City) from the user's query.
-        [1] Then, I should call the weather API to get current conditions.
-        [2] Finally, I'll format the response in a user-friendly way with temperature and conditions.
-      encrypted_content: encrypted_reasoning_content_that_is_very_long_and_...
+      text: First, I need to identify the location (New York City) from the user's query.
+Then, I should call the weather API to get current conditions.
+Finally, I'll format the response in a user-friendly way with temperature and conditions.
+      signature: encrypted_reasoning_content_that_is_very_long_and_...
   [10] type: function_tool_call
       call_id: call_weather_123
       name: get_current_weather
