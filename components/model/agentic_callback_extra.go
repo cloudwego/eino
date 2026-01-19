@@ -25,6 +25,8 @@ import (
 type AgenticConfig struct {
 	// Model is the model name.
 	Model string
+	// MaxTokens is the max number of output tokens, if reached the max tokens, the model will stop generating.
+	MaxTokens int
 	// Temperature is the temperature, which controls the randomness of the agentic model.
 	Temperature float32
 	// TopP is the top p, which controls the diversity of the agentic model.
