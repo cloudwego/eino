@@ -30,6 +30,8 @@ type Options struct {
 	Tools []*schema.ToolInfo
 	// MaxTokens is the max number of tokens, if reached the max tokens, the model will stop generating, and mostly return a finish reason of "length".
 	MaxTokens *int
+	// Stop is the stop words for the model, which controls the stopping condition of the model.
+	Stop []string
 
 	// Options only available for chat model.
 
@@ -38,8 +40,6 @@ type Options struct {
 	// AllowedToolNames specifies a list of tool names that the model is allowed to call.
 	// This allows for constraining the model to a specific subset of the available tools.
 	AllowedToolNames []string
-	// Stop is the stop words for the model, which controls the stopping condition of the model.
-	Stop []string
 
 	// Options only available for agentic model.
 
@@ -64,7 +64,6 @@ func WithTemperature(temperature float32) Option {
 }
 
 // WithMaxTokens is the option to set the max tokens for the model.
-// Only available for ChatModel.
 func WithMaxTokens(maxTokens int) Option {
 	return Option{
 		apply: func(opts *Options) {
@@ -92,7 +91,6 @@ func WithTopP(topP float32) Option {
 }
 
 // WithStop is the option to set the stop words for the model.
-// Only available for ChatModel.
 func WithStop(stop []string) Option {
 	return Option{
 		apply: func(opts *Options) {
