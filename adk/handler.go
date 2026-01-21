@@ -22,7 +22,22 @@ import (
 
 	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/components/tool"
+	"github.com/cloudwego/eino/compose"
+	"github.com/cloudwego/eino/schema"
 )
+
+type (
+	ToolMiddleware         = compose.ToolMiddleware
+	ToolInput              = compose.ToolInput
+	ToolOutput             = compose.ToolOutput
+	StreamToolOutput       = compose.StreamToolOutput
+	InvokableToolEndpoint  = compose.InvokableToolEndpoint
+	StreamableToolEndpoint = compose.StreamableToolEndpoint
+)
+
+type ModelContext struct {
+	ToolInfos []*schema.ToolInfo
+}
 
 // AgentContext contains runtime information passed to handlers before each agent run.
 // Handlers can modify Instruction, Tools, and ReturnDirectly to customize agent behavior.
@@ -46,7 +61,7 @@ type AgentContext struct {
 // HandlerMiddleware is an interface type, which is open for extension:
 //   - Users can implement custom handlers with arbitrary internal state and methods
 //   - Hook methods return (context.Context, ..., error) for direct context propagation
-//   - Wrapper methods (WrapTool, WrapModel) enable context propagation through the
+//   - Wrapper methods (WrapToolCall, WrapModel) enable context propagation through the
 //     wrapped endpoint chain: wrappers can pass modified context to the next wrapper
 //   - Configuration is centralized in struct fields rather than scattered in closures
 //
@@ -73,10 +88,14 @@ type HandlerMiddleware interface {
 	// The returned messages are persisted to the agent's internal state.
 	AfterModelRewriteHistory(ctx context.Context, messages []Message) (context.Context, []Message, error)
 
-	// WrapTool wraps a tool with custom behavior.
-	// Return the input tool unchanged if no wrapping is needed.
-	// Called at construction time (or after BeforeAgent if tools are modified dynamically).
-	WrapTool(ctx context.Context, t tool.BaseTool) (tool.BaseTool, error)
+	// WrapToolCall returns middleware for tool calls.
+	//
+	// The middleware receives ToolInput which contains:
+	//   - CallID: The unique ID assigned by the model for this tool call
+	//   - Name: The name of the tool being invoked
+	//   - Arguments: The arguments string for the tool call
+	//   - CallOptions: Options for the tool call
+	WrapToolCall() ToolMiddleware
 
 	// WrapModel wraps a chat model with custom behavior.
 	// Return the input model unchanged if no wrapping is needed.
@@ -85,7 +104,10 @@ type HandlerMiddleware interface {
 	// Note: The parameter is BaseChatModel (not ToolCallingChatModel) because wrappers
 	// only need to intercept Generate/Stream calls. Tool binding (WithTools) is handled
 	// separately by the framework and does not flow through user wrappers.
-	WrapModel(ctx context.Context, m model.BaseChatModel) (model.BaseChatModel, error)
+	//
+	// The mc parameter contains the original model configuration (e.g., tool infos)
+	// that can be used by wrappers for context engineering purposes.
+	WrapModel(ctx context.Context, m model.BaseChatModel, mc *ModelContext) (model.BaseChatModel, error)
 }
 
 // BaseHandlerMiddleware provides default no-op implementations for HandlerMiddleware.
@@ -104,11 +126,11 @@ type HandlerMiddleware interface {
 //	}
 type BaseHandlerMiddleware struct{}
 
-func (b *BaseHandlerMiddleware) WrapTool(_ context.Context, t tool.BaseTool) (tool.BaseTool, error) {
-	return t, nil
+func (b *BaseHandlerMiddleware) WrapToolCall() ToolMiddleware {
+	return ToolMiddleware{}
 }
 
-func (b *BaseHandlerMiddleware) WrapModel(_ context.Context, m model.BaseChatModel) (model.BaseChatModel, error) {
+func (b *BaseHandlerMiddleware) WrapModel(_ context.Context, m model.BaseChatModel, _ *ModelContext) (model.BaseChatModel, error) {
 	return m, nil
 }
 
@@ -129,7 +151,7 @@ type handlerInfo struct {
 	hasBeforeAgent               bool
 	hasBeforeModelRewriteHistory bool
 	hasAfterModelRewriteHistory  bool
-	hasWrapTool                  bool
+	hasWrapToolCall              bool
 	hasWrapModel                 bool
 }
 
@@ -151,7 +173,7 @@ func newHandlerInfo(h HandlerMiddleware) handlerInfo {
 		hasBeforeAgent:               isMethodOverridden(h, "BeforeAgent"),
 		hasBeforeModelRewriteHistory: isMethodOverridden(h, "BeforeModelRewriteHistory"),
 		hasAfterModelRewriteHistory:  isMethodOverridden(h, "AfterModelRewriteHistory"),
-		hasWrapTool:                  isMethodOverridden(h, "WrapTool"),
+		hasWrapToolCall:              isMethodOverridden(h, "WrapToolCall"),
 		hasWrapModel:                 isMethodOverridden(h, "WrapModel"),
 	}
 }

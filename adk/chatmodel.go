@@ -143,24 +143,6 @@ type ChatModelAgentState struct {
 // static additions like extra instruction or tools.
 //
 // See HandlerMiddleware documentation for detailed comparison.
-//
-// Execution Order (relative to HandlerMiddleware and ToolsConfig):
-//
-// Model call lifecycle (all execute in registration order):
-//  1. AgentMiddleware.BeforeChatModel
-//  2. HandlerMiddleware.BeforeModelRewriteHistory
-//  3. HandlerMiddleware.WrapModel chain (first registered handler's wrapper runs first)
-//  4. Model.Generate/Stream
-//  5. HandlerMiddleware.WrapModel chain post-processing (first registered runs last)
-//  6. HandlerMiddleware.AfterModelRewriteHistory
-//  7. AgentMiddleware.AfterChatModel
-//
-// Tool call lifecycle (outermost to innermost, all in registration order):
-//  1. eventSenderToolMiddleware (internal - sends tool result events)
-//  2. ToolsConfig.ToolCallMiddlewares
-//  3. AgentMiddleware.WrapToolCall
-//  4. HandlerMiddleware.WrapTool (first registered handler's wrapper is outermost)
-//  5. Tool.Invoke/Stream
 type AgentMiddleware struct {
 	// AdditionalInstruction adds supplementary text to the agent's system instruction.
 	// This instruction is concatenated with the base instruction before each chat model call.
@@ -229,6 +211,24 @@ type ChatModelAgentConfig struct {
 	//
 	// Handlers are processed after Middlewares, in registration order.
 	// See HandlerMiddleware documentation for when to use Handlers vs Middlewares.
+	//
+	// Execution Order (relative to AgentMiddleware and ToolsConfig):
+	//
+	// Model call lifecycle (all execute in registration order):
+	//  1. AgentMiddleware.BeforeChatModel
+	//  2. HandlerMiddleware.BeforeModelRewriteHistory
+	//  3. HandlerMiddleware.WrapModel chain (first registered handler's wrapper runs first)
+	//  4. Model.Generate/Stream
+	//  5. HandlerMiddleware.WrapModel chain post-processing (first registered runs last)
+	//  6. HandlerMiddleware.AfterModelRewriteHistory
+	//  7. AgentMiddleware.AfterChatModel
+	//
+	// Tool call lifecycle (outermost to innermost, all in registration order):
+	//  1. eventSenderToolMiddleware (internal - sends tool result events)
+	//  2. ToolsConfig.ToolCallMiddlewares
+	//  3. AgentMiddleware.WrapToolCall
+	//  4. HandlerMiddleware.WrapToolCall (first registered handler's wrapper is outermost)
+	//  5. Tool.Invoke/Stream
 	Handlers []HandlerMiddleware
 
 	// ModelRetryConfig configures retry behavior for the ChatModel.
@@ -301,24 +301,11 @@ func NewChatModelAgent(ctx context.Context, config *ChatModelAgentConfig) (*Chat
 
 	tc := config.ToolsConfig
 
-	// Apply HandlerMiddleware.WrapTool to static tools at construction time,
-	// but only if no handler has BeforeAgent (which could modify the tool list).
-	// If any handler has BeforeAgent, tools will be wrapped in applyBeforeAgent instead.
-	if !hasAnyBeforeAgent {
-		wrappedTools, err := applyToolWrappers(ctx, tc.Tools, handlerInfos)
-		if err != nil {
-			return nil, err
-		}
-		tc.Tools = wrappedTools
-	}
-
 	// Tool call middleware execution order (outermost to innermost):
 	// 1. eventSenderToolMiddleware (internal - sends tool result events after all modifications)
 	// 2. User-provided ToolsConfig.ToolCallMiddlewares (original order preserved)
 	// 3. Middlewares' WrapToolCall (in registration order)
-	//
-	// Note: HandlerMiddleware.WrapTool is applied directly to tools (not as middleware)
-	// at construction time or after BeforeAgent, so it's closest to the original tool.
+	// 4. HandlerMiddleware.WrapToolCall (in registration order)
 	tc.ToolCallMiddlewares = append(
 		[]compose.ToolMiddleware{eventSenderToolMiddleware()},
 		tc.ToolCallMiddlewares...,
@@ -555,22 +542,21 @@ func (a *ChatModelAgent) applyBeforeAgent(ctx context.Context, bc *buildContext)
 		}
 	}
 
-	// Apply HandlerMiddleware.WrapTool to all tools after BeforeAgent.
-	// This is only done when hasAnyBeforeAgent is true (tools might have been modified).
-	// When hasAnyBeforeAgent is false, tools are already wrapped at construction time.
-	tools := runCtx.Tools
-	if a.hasAnyBeforeAgent {
-		tools, err = applyToolWrappers(ctx, runCtx.Tools, a.handlers)
-		if err != nil {
-			return ctx, nil, err
+	toolCallMiddlewares := cloneSlice(bc.toolsNodeConf.ToolCallMiddlewares)
+	for i := len(a.handlers) - 1; i >= 0; i-- {
+		if a.handlers[i].hasWrapToolCall {
+			m := a.handlers[i].handler.WrapToolCall()
+			if m.Invokable != nil || m.Streamable != nil {
+				toolCallMiddlewares = append(toolCallMiddlewares, m)
+			}
 		}
 	}
 
 	runtimeBC := &buildContext{
 		baseInstruction: runCtx.Instruction,
 		toolsNodeConf: compose.ToolsNodeConfig{
-			Tools:               tools,
-			ToolCallMiddlewares: bc.toolsNodeConf.ToolCallMiddlewares,
+			Tools:               runCtx.Tools,
+			ToolCallMiddlewares: toolCallMiddlewares,
 		},
 		returnDirectly: runCtx.ReturnDirectly,
 		toolUpdated:    true,
@@ -623,6 +609,15 @@ func (a *ChatModelAgent) prepareBuildContext(ctx context.Context) (*buildContext
 			baseInstruction = concatInstructions(baseInstruction, m.AdditionalInstruction)
 		}
 		toolsNodeConf.Tools = append(toolsNodeConf.Tools, m.AdditionalTools...)
+	}
+
+	for i := len(a.handlers) - 1; i >= 0; i-- {
+		if a.handlers[i].hasWrapToolCall {
+			m := a.handlers[i].handler.WrapToolCall()
+			if m.Invokable != nil || m.Streamable != nil {
+				toolsNodeConf.ToolCallMiddlewares = append(toolsNodeConf.ToolCallMiddlewares, m)
+			}
+		}
 	}
 
 	return &buildContext{

@@ -113,128 +113,71 @@ func (h *testAfterModelRewriteHistoryHandler) AfterModelRewriteHistory(ctx conte
 
 type testToolWrapperHandler struct {
 	*BaseHandlerMiddleware
-	fn func(context.Context, tool.BaseTool) (tool.BaseTool, error)
+	middleware ToolMiddleware
 }
 
-func (h *testToolWrapperHandler) WrapTool(ctx context.Context, t tool.BaseTool) (tool.BaseTool, error) {
-	return h.fn(ctx, t)
+func (h *testToolWrapperHandler) WrapToolCall() ToolMiddleware {
+	return h.middleware
 }
 
 type testModelWrapperHandler struct {
 	*BaseHandlerMiddleware
-	fn func(context.Context, model.BaseChatModel) (model.BaseChatModel, error)
+	fn func(context.Context, model.BaseChatModel, *ModelContext) (model.BaseChatModel, error)
 }
 
-func (h *testModelWrapperHandler) WrapModel(ctx context.Context, m model.BaseChatModel) (model.BaseChatModel, error) {
-	return h.fn(ctx, m)
+func (h *testModelWrapperHandler) WrapModel(ctx context.Context, m model.BaseChatModel, mc *ModelContext) (model.BaseChatModel, error) {
+	return h.fn(ctx, m, mc)
 }
 
-func newTestToolWrapperFn(beforeFn, afterFn func()) func(context.Context, tool.BaseTool) (tool.BaseTool, error) {
-	return func(_ context.Context, t tool.BaseTool) (tool.BaseTool, error) {
-		return &testWrappedTool{
-			inner:    t,
-			beforeFn: beforeFn,
-			afterFn:  afterFn,
-		}, nil
+func newTestToolMiddleware(beforeFn, afterFn func()) ToolMiddleware {
+	return ToolMiddleware{
+		Invokable: func(next InvokableToolEndpoint) InvokableToolEndpoint {
+			return func(ctx context.Context, input *ToolInput) (*ToolOutput, error) {
+				if beforeFn != nil {
+					beforeFn()
+				}
+				result, err := next(ctx, input)
+				if afterFn != nil {
+					afterFn()
+				}
+				return result, err
+			}
+		},
 	}
 }
 
-func newTestStreamToolWrapperFn(streamBeforeFn, streamAfterFn func()) func(context.Context, tool.BaseTool) (tool.BaseTool, error) {
-	return func(_ context.Context, t tool.BaseTool) (tool.BaseTool, error) {
-		return &testWrappedStreamTool{
-			inner:          t,
-			streamBeforeFn: streamBeforeFn,
-			streamAfterFn:  streamAfterFn,
-		}, nil
+func newTestStreamToolMiddleware(streamBeforeFn, streamAfterFn func()) ToolMiddleware {
+	return ToolMiddleware{
+		Streamable: func(next StreamableToolEndpoint) StreamableToolEndpoint {
+			return func(ctx context.Context, input *ToolInput) (*StreamToolOutput, error) {
+				if streamBeforeFn != nil {
+					streamBeforeFn()
+				}
+				result, err := next(ctx, input)
+				if streamAfterFn != nil {
+					streamAfterFn()
+				}
+				return result, err
+			}
+		},
 	}
 }
 
-func newResultModifyingToolWrapperFn(modifyFn func(string) string) func(context.Context, tool.BaseTool) (tool.BaseTool, error) {
-	return func(_ context.Context, t tool.BaseTool) (tool.BaseTool, error) {
-		return &resultModifyingTool{
-			inner:    t,
-			modifyFn: modifyFn,
-		}, nil
+func newResultModifyingToolMiddleware(modifyFn func(string) string) ToolMiddleware {
+	return ToolMiddleware{
+		Invokable: func(next InvokableToolEndpoint) InvokableToolEndpoint {
+			return func(ctx context.Context, input *ToolInput) (*ToolOutput, error) {
+				result, err := next(ctx, input)
+				if err != nil {
+					return nil, err
+				}
+				if result != nil {
+					result.Result = modifyFn(result.Result)
+				}
+				return result, nil
+			}
+		},
 	}
-}
-
-type resultModifyingTool struct {
-	inner    tool.BaseTool
-	modifyFn func(string) string
-}
-
-func (t *resultModifyingTool) Info(ctx context.Context) (*schema.ToolInfo, error) {
-	return t.inner.Info(ctx)
-}
-
-func (t *resultModifyingTool) InvokableRun(ctx context.Context, args string, opts ...tool.Option) (string, error) {
-	inv, ok := t.inner.(tool.InvokableTool)
-	if !ok {
-		return "", nil
-	}
-	result, err := inv.InvokableRun(ctx, args, opts...)
-	if err != nil {
-		return "", err
-	}
-	return t.modifyFn(result), nil
-}
-
-type testWrappedTool struct {
-	inner    tool.BaseTool
-	beforeFn func()
-	afterFn  func()
-}
-
-func (t *testWrappedTool) Info(ctx context.Context) (*schema.ToolInfo, error) {
-	return t.inner.Info(ctx)
-}
-
-func (t *testWrappedTool) InvokableRun(ctx context.Context, args string, opts ...tool.Option) (string, error) {
-	if t.beforeFn != nil {
-		t.beforeFn()
-	}
-	inv, ok := t.inner.(tool.InvokableTool)
-	if !ok {
-		return "", nil
-	}
-	result, err := inv.InvokableRun(ctx, args, opts...)
-	if t.afterFn != nil {
-		t.afterFn()
-	}
-	return result, err
-}
-
-type testWrappedStreamTool struct {
-	inner          tool.BaseTool
-	streamBeforeFn func()
-	streamAfterFn  func()
-}
-
-func (t *testWrappedStreamTool) Info(ctx context.Context) (*schema.ToolInfo, error) {
-	return t.inner.Info(ctx)
-}
-
-func (t *testWrappedStreamTool) InvokableRun(ctx context.Context, args string, opts ...tool.Option) (string, error) {
-	inv, ok := t.inner.(tool.InvokableTool)
-	if !ok {
-		return "", nil
-	}
-	return inv.InvokableRun(ctx, args, opts...)
-}
-
-func (t *testWrappedStreamTool) StreamableRun(ctx context.Context, args string, opts ...tool.Option) (*schema.StreamReader[string], error) {
-	if t.streamBeforeFn != nil {
-		t.streamBeforeFn()
-	}
-	st, ok := t.inner.(tool.StreamableTool)
-	if !ok {
-		return nil, nil
-	}
-	result, err := st.StreamableRun(ctx, args, opts...)
-	if t.streamAfterFn != nil {
-		t.streamAfterFn()
-	}
-	return result, err
 }
 
 func TestHandlerExecutionOrder(t *testing.T) {
@@ -632,7 +575,7 @@ func TestToolCallWrapperHandlers(t *testing.T) {
 				},
 			},
 			Handlers: []HandlerMiddleware{
-				&testToolWrapperHandler{fn: newTestToolWrapperFn(
+				&testToolWrapperHandler{middleware: newTestToolMiddleware(
 					func() {
 						mu.Lock()
 						callOrder = append(callOrder, "wrapper1-before")
@@ -644,7 +587,7 @@ func TestToolCallWrapperHandlers(t *testing.T) {
 						mu.Unlock()
 					},
 				)},
-				&testToolWrapperHandler{fn: newTestToolWrapperFn(
+				&testToolWrapperHandler{middleware: newTestToolMiddleware(
 					func() {
 						mu.Lock()
 						callOrder = append(callOrder, "wrapper2-before")
@@ -668,7 +611,7 @@ func TestToolCallWrapperHandlers(t *testing.T) {
 			}
 		}
 
-		assert.Equal(t, []string{"wrapper1-before", "wrapper2-before", "wrapper2-after", "wrapper1-after"}, callOrder)
+		assert.Equal(t, []string{"wrapper2-before", "wrapper1-before", "wrapper1-after", "wrapper2-after"}, callOrder)
 	})
 
 	t.Run("StreamingToolWrappersPipeline", func(t *testing.T) {
@@ -704,7 +647,7 @@ func TestToolCallWrapperHandlers(t *testing.T) {
 				},
 			},
 			Handlers: []HandlerMiddleware{
-				&testToolWrapperHandler{fn: newTestStreamToolWrapperFn(
+				&testToolWrapperHandler{middleware: newTestStreamToolMiddleware(
 					func() {
 						mu.Lock()
 						callOrder = append(callOrder, "wrapper1-stream-before")
@@ -716,7 +659,7 @@ func TestToolCallWrapperHandlers(t *testing.T) {
 						mu.Unlock()
 					},
 				)},
-				&testToolWrapperHandler{fn: newTestStreamToolWrapperFn(
+				&testToolWrapperHandler{middleware: newTestStreamToolMiddleware(
 					func() {
 						mu.Lock()
 						callOrder = append(callOrder, "wrapper2-stream-before")
@@ -755,7 +698,7 @@ func TestToolCallWrapperHandlers(t *testing.T) {
 		}
 
 		assert.True(t, hasStreamingToolResult, "Should have streaming tool result")
-		assert.Equal(t, []string{"wrapper1-stream-before", "wrapper2-stream-before", "wrapper2-stream-after", "wrapper1-stream-after"}, callOrder,
+		assert.Equal(t, []string{"wrapper2-stream-before", "wrapper1-stream-before", "wrapper1-stream-after", "wrapper2-stream-after"}, callOrder,
 			"Streaming wrappers should be called in correct order")
 	})
 
@@ -785,7 +728,7 @@ func TestToolCallWrapperHandlers(t *testing.T) {
 				},
 			},
 			Handlers: []HandlerMiddleware{
-				&testToolWrapperHandler{fn: newResultModifyingToolWrapperFn(func(result string) string {
+				&testToolWrapperHandler{middleware: newResultModifyingToolMiddleware(func(result string) string {
 					return "modified: " + result
 				})},
 			},
@@ -1034,8 +977,8 @@ func (h *countingHandler) AfterModelRewriteHistory(ctx context.Context, messages
 	return ctx, messages, nil
 }
 
-func newTestModelWrapperFn(beforeFn, afterFn func()) func(context.Context, model.BaseChatModel) (model.BaseChatModel, error) {
-	return func(_ context.Context, m model.BaseChatModel) (model.BaseChatModel, error) {
+func newTestModelWrapperFn(beforeFn, afterFn func()) func(context.Context, model.BaseChatModel, *ModelContext) (model.BaseChatModel, error) {
+	return func(_ context.Context, m model.BaseChatModel, _ *ModelContext) (model.BaseChatModel, error) {
 		return &testWrappedModel{
 			inner:    m,
 			beforeFn: beforeFn,
@@ -1269,8 +1212,8 @@ func (m *simpleChatModelWithoutCallbacks) WithTools(tools []*schema.ToolInfo) (m
 	return m, nil
 }
 
-func newInputModifyingWrapperFn(inputPrefix string) func(context.Context, model.BaseChatModel) (model.BaseChatModel, error) {
-	return func(_ context.Context, m model.BaseChatModel) (model.BaseChatModel, error) {
+func newInputModifyingWrapperFn(inputPrefix string) func(context.Context, model.BaseChatModel, *ModelContext) (model.BaseChatModel, error) {
+	return func(_ context.Context, m model.BaseChatModel, _ *ModelContext) (model.BaseChatModel, error) {
 		return &inputOutputModifyingModel{
 			inner:       m,
 			inputPrefix: inputPrefix,

@@ -23,16 +23,16 @@ import (
 	"github.com/cloudwego/eino/callbacks"
 	"github.com/cloudwego/eino/components"
 	"github.com/cloudwego/eino/components/model"
-	"github.com/cloudwego/eino/components/tool"
 	"github.com/cloudwego/eino/compose"
 	"github.com/cloudwego/eino/schema"
 )
 
 type modelWrapperBuilder struct {
-	ctx         context.Context
-	handlers    []handlerInfo
-	middlewares []AgentMiddleware
-	retryConfig *ModelRetryConfig
+	ctx          context.Context
+	handlers     []handlerInfo
+	middlewares  []AgentMiddleware
+	retryConfig  *ModelRetryConfig
+	modelContext *ModelContext
 }
 
 func (b *modelWrapperBuilder) build(m model.ToolCallingChatModel) (model.BaseChatModel, error) {
@@ -55,7 +55,7 @@ func (b *modelWrapperBuilder) build(m model.ToolCallingChatModel) (model.BaseCha
 	for i := len(b.handlers) - 1; i >= 0; i-- {
 		if b.handlers[i].hasWrapModel {
 			var err error
-			wrapped, err = b.handlers[i].handler.WrapModel(b.ctx, wrapped)
+			wrapped, err = b.handlers[i].handler.WrapModel(b.ctx, wrapped, b.modelContext)
 			if err != nil {
 				return nil, err
 			}
@@ -111,40 +111,22 @@ func (a *baseChatModelAdapter) WithTools(tools []*schema.ToolInfo) (model.ToolCa
 	if err != nil {
 		return nil, err
 	}
-	newInner, err := a.builder.build(newToolBinder)
+	newBuilder := &modelWrapperBuilder{
+		ctx:          a.builder.ctx,
+		handlers:     a.builder.handlers,
+		middlewares:  a.builder.middlewares,
+		retryConfig:  a.builder.retryConfig,
+		modelContext: &ModelContext{ToolInfos: tools},
+	}
+	newInner, err := newBuilder.build(newToolBinder)
 	if err != nil {
 		return nil, err
 	}
-	return &baseChatModelAdapter{inner: newInner, toolBinder: newToolBinder, builder: a.builder}, nil
+	return &baseChatModelAdapter{inner: newInner, toolBinder: newToolBinder, builder: newBuilder}, nil
 }
 
 func (a *baseChatModelAdapter) IsCallbacksEnabled() bool {
 	return true
-}
-
-func applyToolWrappers(ctx context.Context, tools []tool.BaseTool, handlers []handlerInfo) ([]tool.BaseTool, error) {
-	if len(handlers) == 0 {
-		return tools, nil
-	}
-
-	wrapped := make([]tool.BaseTool, len(tools))
-	for i, t := range tools {
-		w := t
-		// Apply wrappers in reverse order so that the first handler's wrapper
-		// is outermost (its before/after runs first/last respectively).
-		for j := len(handlers) - 1; j >= 0; j-- {
-			info := handlers[j]
-			if info.hasWrapTool {
-				var err error
-				w, err = info.handler.WrapTool(ctx, w)
-				if err != nil {
-					return nil, err
-				}
-			}
-		}
-		wrapped[i] = w
-	}
-	return wrapped, nil
 }
 
 type callbackInjectionModelWrapper struct{}
@@ -285,10 +267,10 @@ func popToolGenAction(ctx context.Context, toolName string) *AgentAction {
 	return action
 }
 
-func eventSenderToolMiddleware() compose.ToolMiddleware {
-	return compose.ToolMiddleware{
-		Invokable: func(next compose.InvokableToolEndpoint) compose.InvokableToolEndpoint {
-			return func(ctx context.Context, input *compose.ToolInput) (*compose.ToolOutput, error) {
+func eventSenderToolMiddleware() ToolMiddleware {
+	return ToolMiddleware{
+		Invokable: func(next InvokableToolEndpoint) InvokableToolEndpoint {
+			return func(ctx context.Context, input *ToolInput) (*ToolOutput, error) {
 				output, err := next(ctx, input)
 				if err != nil {
 					return nil, err
@@ -319,8 +301,8 @@ func eventSenderToolMiddleware() compose.ToolMiddleware {
 				return output, nil
 			}
 		},
-		Streamable: func(next compose.StreamableToolEndpoint) compose.StreamableToolEndpoint {
-			return func(ctx context.Context, input *compose.ToolInput) (*compose.StreamToolOutput, error) {
+		Streamable: func(next StreamableToolEndpoint) StreamableToolEndpoint {
+			return func(ctx context.Context, input *ToolInput) (*StreamToolOutput, error) {
 				output, err := next(ctx, input)
 				if err != nil {
 					return nil, err
