@@ -42,7 +42,7 @@ func (b *modelWrapperBuilder) build(m model.ToolCallingChatModel) (model.BaseCha
 	// 1. callbackInjectionModelWrapper (if model doesn't handle callbacks)
 	// 2. HandlerMiddleware.WrapModel (reverse handler order)
 	// 3. eventSenderModelWrapper
-	// 4. stateModelWrapper (state management + BeforeChatModel/AfterChatModel + BeforeModelRewriteHistory/AfterModelRewriteHistory)
+	// 4. stateModelWrapper (state management + BeforeChatModel/AfterChatModel + BeforeModelRewriteState/AfterModelRewriteState)
 
 	if !components.IsCallbacksEnabled(m) {
 		var err error
@@ -364,12 +364,14 @@ func (w *stateModelWrapper) Generate(ctx context.Context, input []*schema.Messag
 	}
 
 	for _, info := range w.handlers {
-		if info.hasBeforeModelRewriteHistory {
+		if info.hasBeforeModelRewriteState {
+			state := &ChatModelAgentState{Messages: messages}
 			var err error
-			ctx, messages, err = info.handler.BeforeModelRewriteHistory(ctx, messages)
+			ctx, state, err = info.handler.BeforeModelRewriteState(ctx, state)
 			if err != nil {
 				return nil, err
 			}
+			messages = state.Messages
 		}
 	}
 
@@ -386,12 +388,14 @@ func (w *stateModelWrapper) Generate(ctx context.Context, input []*schema.Messag
 	messages = append(messages, result)
 
 	for _, info := range w.handlers {
-		if info.hasAfterModelRewriteHistory {
+		if info.hasAfterModelRewriteState {
+			state := &ChatModelAgentState{Messages: messages}
 			var err error
-			ctx, messages, err = info.handler.AfterModelRewriteHistory(ctx, messages)
+			ctx, state, err = info.handler.AfterModelRewriteState(ctx, state)
 			if err != nil {
 				return nil, err
 			}
+			messages = state.Messages
 		}
 	}
 
@@ -435,12 +439,14 @@ func (w *stateModelWrapper) Stream(ctx context.Context, input []*schema.Message,
 	}
 
 	for _, info := range w.handlers {
-		if info.hasBeforeModelRewriteHistory {
+		if info.hasBeforeModelRewriteState {
+			state := &ChatModelAgentState{Messages: messages}
 			var err error
-			ctx, messages, err = info.handler.BeforeModelRewriteHistory(ctx, messages)
+			ctx, state, err = info.handler.BeforeModelRewriteState(ctx, state)
 			if err != nil {
 				return nil, err
 			}
+			messages = state.Messages
 		}
 	}
 
@@ -462,11 +468,14 @@ func (w *stateModelWrapper) Stream(ctx context.Context, input []*schema.Message,
 	messages = append(messages, result)
 
 	for _, info := range w.handlers {
-		if info.hasAfterModelRewriteHistory {
-			ctx, messages, err = info.handler.AfterModelRewriteHistory(ctx, messages)
+		if info.hasAfterModelRewriteState {
+			state := &ChatModelAgentState{Messages: messages}
+			var err error
+			ctx, state, err = info.handler.AfterModelRewriteState(ctx, state)
 			if err != nil {
 				return nil, err
 			}
+			messages = state.Messages
 		}
 	}
 

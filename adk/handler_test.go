@@ -93,22 +93,22 @@ func (h *testBeforeAgentHandler) BeforeAgent(ctx context.Context, runCtx *AgentC
 	return h.fn(ctx, runCtx)
 }
 
-type testBeforeModelRewriteHistoryHandler struct {
+type testBeforeModelRewriteStateHandler struct {
 	*BaseHandlerMiddleware
-	fn func(ctx context.Context, messages []Message) (context.Context, []Message, error)
+	fn func(ctx context.Context, state *ChatModelAgentState) (context.Context, *ChatModelAgentState, error)
 }
 
-func (h *testBeforeModelRewriteHistoryHandler) BeforeModelRewriteHistory(ctx context.Context, messages []Message) (context.Context, []Message, error) {
-	return h.fn(ctx, messages)
+func (h *testBeforeModelRewriteStateHandler) BeforeModelRewriteState(ctx context.Context, state *ChatModelAgentState) (context.Context, *ChatModelAgentState, error) {
+	return h.fn(ctx, state)
 }
 
-type testAfterModelRewriteHistoryHandler struct {
+type testAfterModelRewriteStateHandler struct {
 	*BaseHandlerMiddleware
-	fn func(ctx context.Context, messages []Message) (context.Context, []Message, error)
+	fn func(ctx context.Context, state *ChatModelAgentState) (context.Context, *ChatModelAgentState, error)
 }
 
-func (h *testAfterModelRewriteHistoryHandler) AfterModelRewriteHistory(ctx context.Context, messages []Message) (context.Context, []Message, error) {
-	return h.fn(ctx, messages)
+func (h *testAfterModelRewriteStateHandler) AfterModelRewriteState(ctx context.Context, state *ChatModelAgentState) (context.Context, *ChatModelAgentState, error) {
+	return h.fn(ctx, state)
 }
 
 type testToolWrapperHandler struct {
@@ -469,7 +469,7 @@ func TestToolsHandlerCombinations(t *testing.T) {
 }
 
 func TestMessageRewriteHandlers(t *testing.T) {
-	t.Run("BeforeModelRewriteHistoryPipeline", func(t *testing.T) {
+	t.Run("BeforeModelRewriteStatePipeline", func(t *testing.T) {
 		ctx := context.Background()
 		ctrl := gomock.NewController(t)
 		cm := mockModel.NewMockToolCallingChatModel(ctrl)
@@ -487,11 +487,13 @@ func TestMessageRewriteHandlers(t *testing.T) {
 			Instruction: "instruction",
 			Model:       cm,
 			Handlers: []HandlerMiddleware{
-				&testBeforeModelRewriteHistoryHandler{fn: func(ctx context.Context, messages []Message) (context.Context, []Message, error) {
-					return ctx, append(messages, schema.UserMessage("injected1")), nil
+				&testBeforeModelRewriteStateHandler{fn: func(ctx context.Context, state *ChatModelAgentState) (context.Context, *ChatModelAgentState, error) {
+					state.Messages = append(state.Messages, schema.UserMessage("injected1"))
+					return ctx, state, nil
 				}},
-				&testBeforeModelRewriteHistoryHandler{fn: func(ctx context.Context, messages []Message) (context.Context, []Message, error) {
-					return ctx, append(messages, schema.UserMessage("injected2")), nil
+				&testBeforeModelRewriteStateHandler{fn: func(ctx context.Context, state *ChatModelAgentState) (context.Context, *ChatModelAgentState, error) {
+					state.Messages = append(state.Messages, schema.UserMessage("injected2"))
+					return ctx, state, nil
 				}},
 			},
 		})
@@ -508,7 +510,7 @@ func TestMessageRewriteHandlers(t *testing.T) {
 		assert.Equal(t, 4, capturedMsgCount)
 	})
 
-	t.Run("AfterModelRewriteHistory", func(t *testing.T) {
+	t.Run("AfterModelRewriteState", func(t *testing.T) {
 		ctx := context.Background()
 		ctrl := gomock.NewController(t)
 		cm := mockModel.NewMockToolCallingChatModel(ctrl)
@@ -522,12 +524,12 @@ func TestMessageRewriteHandlers(t *testing.T) {
 			Description: "Test agent",
 			Model:       cm,
 			Handlers: []HandlerMiddleware{
-				&testAfterModelRewriteHistoryHandler{fn: func(ctx context.Context, messages []Message) (context.Context, []Message, error) {
+				&testAfterModelRewriteStateHandler{fn: func(ctx context.Context, state *ChatModelAgentState) (context.Context, *ChatModelAgentState, error) {
 					afterCalled = true
-					assert.True(t, len(messages) > 0)
-					lastMsg := messages[len(messages)-1]
+					assert.True(t, len(state.Messages) > 0)
+					lastMsg := state.Messages[len(state.Messages)-1]
 					assert.Equal(t, schema.Assistant, lastMsg.Role)
-					return ctx, messages, nil
+					return ctx, state, nil
 				}},
 			},
 		})
@@ -770,12 +772,12 @@ func TestContextPropagation(t *testing.T) {
 			Description: "Test agent",
 			Model:       cm,
 			Handlers: []HandlerMiddleware{
-				&testBeforeModelRewriteHistoryHandler{fn: func(ctx context.Context, messages []Message) (context.Context, []Message, error) {
-					return context.WithValue(ctx, key1, "value1"), messages, nil
+				&testBeforeModelRewriteStateHandler{fn: func(ctx context.Context, state *ChatModelAgentState) (context.Context, *ChatModelAgentState, error) {
+					return context.WithValue(ctx, key1, "value1"), state, nil
 				}},
-				&testBeforeModelRewriteHistoryHandler{fn: func(ctx context.Context, messages []Message) (context.Context, []Message, error) {
+				&testBeforeModelRewriteStateHandler{fn: func(ctx context.Context, state *ChatModelAgentState) (context.Context, *ChatModelAgentState, error) {
 					handler2ReceivedValue1 = ctx.Value(key1)
-					return context.WithValue(ctx, key2, "value2"), messages, nil
+					return context.WithValue(ctx, key2, "value2"), state, nil
 				}},
 			},
 		})
@@ -963,18 +965,18 @@ func (h *countingHandler) BeforeAgent(ctx context.Context, runCtx *AgentContext)
 	return ctx, runCtx, nil
 }
 
-func (h *countingHandler) BeforeModelRewriteHistory(ctx context.Context, messages []Message) (context.Context, []Message, error) {
+func (h *countingHandler) BeforeModelRewriteState(ctx context.Context, state *ChatModelAgentState) (context.Context, *ChatModelAgentState, error) {
 	h.mu.Lock()
 	h.beforeModelCount++
 	h.mu.Unlock()
-	return ctx, messages, nil
+	return ctx, state, nil
 }
 
-func (h *countingHandler) AfterModelRewriteHistory(ctx context.Context, messages []Message) (context.Context, []Message, error) {
+func (h *countingHandler) AfterModelRewriteState(ctx context.Context, state *ChatModelAgentState) (context.Context, *ChatModelAgentState, error) {
 	h.mu.Lock()
 	h.afterModelCount++
 	h.mu.Unlock()
-	return ctx, messages, nil
+	return ctx, state, nil
 }
 
 func newTestModelWrapperFn(beforeFn, afterFn func()) func(context.Context, model.BaseChatModel, *ModelContext) (model.BaseChatModel, error) {

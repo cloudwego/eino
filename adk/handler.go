@@ -35,7 +35,12 @@ type (
 	StreamableToolEndpoint = compose.StreamableToolEndpoint
 )
 
+// ModelContext contains context information passed to WrapModel.
 type ModelContext struct {
+	// ToolInfos is the finalized tool info list after all BeforeAgent handlers have run.
+	// This list remains constant throughout the entire agent execution.
+	// Model wrappers can use this to implement dynamic tool loading by combining
+	// these base tools with additional tools per model request.
 	ToolInfos []*schema.ToolInfo
 }
 
@@ -78,15 +83,15 @@ type HandlerMiddleware interface {
 	// the agent's instruction and tools configuration.
 	BeforeAgent(ctx context.Context, runCtx *AgentContext) (context.Context, *AgentContext, error)
 
-	// BeforeModelRewriteHistory is called before each model invocation.
-	// The returned messages are persisted to the agent's internal state and passed to the model.
+	// BeforeModelRewriteState is called before each model invocation.
+	// The returned state is persisted to the agent's internal state and passed to the model.
 	// The returned context is propagated to the model call and subsequent handlers.
-	BeforeModelRewriteHistory(ctx context.Context, messages []Message) (context.Context, []Message, error)
+	BeforeModelRewriteState(ctx context.Context, state *ChatModelAgentState) (context.Context, *ChatModelAgentState, error)
 
-	// AfterModelRewriteHistory is called after each model invocation.
-	// The input messages include the model's response as the last message.
-	// The returned messages are persisted to the agent's internal state.
-	AfterModelRewriteHistory(ctx context.Context, messages []Message) (context.Context, []Message, error)
+	// AfterModelRewriteState is called after each model invocation.
+	// The input state includes the model's response as the last message.
+	// The returned state is persisted to the agent's internal state.
+	AfterModelRewriteState(ctx context.Context, state *ChatModelAgentState) (context.Context, *ChatModelAgentState, error)
 
 	// WrapToolCall returns middleware for tool calls.
 	//
@@ -120,9 +125,9 @@ type HandlerMiddleware interface {
 //		// custom fields
 //	}
 //
-//	func (h *MyHandler) BeforeModelRewriteHistory(ctx context.Context, messages []adk.Message) (context.Context, []adk.Message, error) {
+//	func (h *MyHandler) BeforeModelRewriteState(ctx context.Context, state *adk.ChatModelAgentState) (context.Context, *adk.ChatModelAgentState, error) {
 //		// custom logic
-//		return ctx, messages, nil
+//		return ctx, state, nil
 //	}
 type BaseHandlerMiddleware struct{}
 
@@ -138,21 +143,21 @@ func (b *BaseHandlerMiddleware) BeforeAgent(ctx context.Context, runCtx *AgentCo
 	return ctx, runCtx, nil
 }
 
-func (b *BaseHandlerMiddleware) BeforeModelRewriteHistory(ctx context.Context, messages []Message) (context.Context, []Message, error) {
-	return ctx, messages, nil
+func (b *BaseHandlerMiddleware) BeforeModelRewriteState(ctx context.Context, state *ChatModelAgentState) (context.Context, *ChatModelAgentState, error) {
+	return ctx, state, nil
 }
 
-func (b *BaseHandlerMiddleware) AfterModelRewriteHistory(ctx context.Context, messages []Message) (context.Context, []Message, error) {
-	return ctx, messages, nil
+func (b *BaseHandlerMiddleware) AfterModelRewriteState(ctx context.Context, state *ChatModelAgentState) (context.Context, *ChatModelAgentState, error) {
+	return ctx, state, nil
 }
 
 type handlerInfo struct {
-	handler                      HandlerMiddleware
-	hasBeforeAgent               bool
-	hasBeforeModelRewriteHistory bool
-	hasAfterModelRewriteHistory  bool
-	hasWrapToolCall              bool
-	hasWrapModel                 bool
+	handler                    HandlerMiddleware
+	hasBeforeAgent             bool
+	hasBeforeModelRewriteState bool
+	hasAfterModelRewriteState  bool
+	hasWrapToolCall            bool
+	hasWrapModel               bool
 }
 
 var baseHandlerMiddlewareType = reflect.TypeOf(&BaseHandlerMiddleware{})
@@ -169,11 +174,11 @@ func isMethodOverridden(handler HandlerMiddleware, methodName string) bool {
 
 func newHandlerInfo(h HandlerMiddleware) handlerInfo {
 	return handlerInfo{
-		handler:                      h,
-		hasBeforeAgent:               isMethodOverridden(h, "BeforeAgent"),
-		hasBeforeModelRewriteHistory: isMethodOverridden(h, "BeforeModelRewriteHistory"),
-		hasAfterModelRewriteHistory:  isMethodOverridden(h, "AfterModelRewriteHistory"),
-		hasWrapToolCall:              isMethodOverridden(h, "WrapToolCall"),
-		hasWrapModel:                 isMethodOverridden(h, "WrapModel"),
+		handler:                    h,
+		hasBeforeAgent:             isMethodOverridden(h, "BeforeAgent"),
+		hasBeforeModelRewriteState: isMethodOverridden(h, "BeforeModelRewriteState"),
+		hasAfterModelRewriteState:  isMethodOverridden(h, "AfterModelRewriteState"),
+		hasWrapToolCall:            isMethodOverridden(h, "WrapToolCall"),
+		hasWrapModel:               isMethodOverridden(h, "WrapModel"),
 	}
 }

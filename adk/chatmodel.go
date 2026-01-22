@@ -214,21 +214,36 @@ type ChatModelAgentConfig struct {
 	//
 	// Execution Order (relative to AgentMiddleware and ToolsConfig):
 	//
-	// Model call lifecycle (all execute in registration order):
-	//  1. AgentMiddleware.BeforeChatModel
-	//  2. HandlerMiddleware.BeforeModelRewriteHistory
-	//  3. HandlerMiddleware.WrapModel chain (first registered handler's wrapper runs first)
+	// Model call lifecycle:
+	//  1. AgentMiddleware.BeforeChatModel (hook, runs before model call)
+	//  2. HandlerMiddleware.BeforeModelRewriteState (hook, can modify state before model call)
+	//  3. HandlerMiddleware.WrapModel pre-processing (wrapper, first registered runs first)
 	//  4. Model.Generate/Stream
-	//  5. HandlerMiddleware.WrapModel chain post-processing (first registered runs last)
-	//  6. HandlerMiddleware.AfterModelRewriteHistory
-	//  7. AgentMiddleware.AfterChatModel
+	//  5. HandlerMiddleware.WrapModel post-processing (wrapper, first registered runs last)
+	//  6. HandlerMiddleware.AfterModelRewriteState (hook, can modify state after model call)
+	//  7. AgentMiddleware.AfterChatModel (hook, runs after model call)
+	//  8. eventSenderModelWrapper post-processing (internal - sends model response events)
 	//
-	// Tool call lifecycle (outermost to innermost, all in registration order):
-	//  1. eventSenderToolMiddleware (internal - sends tool result events)
-	//  2. ToolsConfig.ToolCallMiddlewares
-	//  3. AgentMiddleware.WrapToolCall
-	//  4. HandlerMiddleware.WrapToolCall (first registered handler's wrapper is outermost)
+	// Tool call lifecycle (outermost to innermost):
+	//  1. eventSenderToolMiddleware (internal - sends tool result events after all processing)
+	//  2. ToolsConfig.ToolCallMiddlewares (wrapper)
+	//  3. AgentMiddleware.WrapToolCall (wrapper)
+	//  4. HandlerMiddleware.WrapToolCall (wrapper, first registered is outermost)
 	//  5. Tool.Invoke/Stream
+	//
+	// Tool List Modification:
+	//
+	// There are two ways to modify the tool list:
+	//
+	//  1. In BeforeAgent: Modify AgentContext.Tools ([]tool.BaseTool) directly. This affects
+	//     both the tool info list passed to ChatModel AND the actual tools available for
+	//     execution. Changes persist for the entire agent run.
+	//
+	//  2. In WrapModel: Create a model wrapper that modifies the tool info list per model
+	//     request using model.WithTools(toolInfos). This ONLY affects the tool info list
+	//     passed to ChatModel, NOT the actual tools available for execution. Use this for
+	//     dynamic tool filtering/selection based on conversation context. The modification
+	//     is scoped to this model request only.
 	Handlers []HandlerMiddleware
 
 	// ModelRetryConfig configures retry behavior for the ChatModel.
