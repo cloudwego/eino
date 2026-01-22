@@ -146,3 +146,48 @@ func Register[T any]() {
 		panic(err)
 	}
 }
+
+// HumanReadableSerializer produces clean, human-readable JSON output for serialization.
+// It can be used with compose.WithSerializer() to store checkpoints in a human-readable format.
+//
+// Unlike the default InternalSerializer which uses verbose wrapper structures for type preservation,
+// HumanReadableSerializer produces clean JSON that:
+//   - Uses standard JSON field names from struct tags
+//   - Omits empty fields when `omitempty` is specified
+//   - Only adds "$type" annotations for custom registered types stored in interface{} fields
+//   - Produces significantly smaller output for most use cases
+//
+// Example usage:
+//
+//	graph, err := compose.NewGraph[Input, Output](
+//	    compose.WithCheckPointStore(store),
+//	    compose.WithSerializer(&schema.HumanReadableSerializer{}),
+//	)
+//
+// Note: All custom types stored in interface{} fields must be registered using
+// schema.RegisterName[T]() or schema.Register[T]() for proper deserialization.
+type HumanReadableSerializer = serialization.HumanReadableSerializer
+
+// GobSerializer uses Go's encoding/gob package for serialization.
+// It produces compact binary output that is efficient for Go-to-Go communication.
+//
+// Gob is a binary format that is:
+//   - Compact: produces smaller output than JSON-based serializers
+//   - Fast: efficient encoding/decoding for Go types
+//   - Type-safe: preserves Go type information
+//
+// However, gob has some limitations:
+//   - Not human-readable (binary format)
+//   - Go-specific (not interoperable with other languages)
+//   - Requires type registration for interface{} fields
+//
+// Example usage:
+//
+//	graph, err := compose.NewGraph[Input, Output](
+//	    compose.WithCheckPointStore(store),
+//	    compose.WithSerializer(&schema.GobSerializer{}),
+//	)
+//
+// Note: All custom types stored in interface{} fields must be registered using
+// schema.RegisterName[T]() or schema.Register[T]() for proper deserialization.
+type GobSerializer = serialization.GobSerializer
