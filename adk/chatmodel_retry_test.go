@@ -670,6 +670,27 @@ func TestWillRetryError_ErrorString(t *testing.T) {
 	assert.Equal(t, "transient error", willRetry.Error())
 }
 
+type customError struct {
+	code int
+	msg  string
+}
+
+func (e *customError) Error() string {
+	return e.msg
+}
+
+func TestWillRetryError_Unwrap(t *testing.T) {
+	originalErr := &customError{code: 500, msg: "internal error"}
+	willRetry := &WillRetryError{ErrStr: originalErr.Error(), RetryAttempt: 1, err: originalErr}
+
+	assert.True(t, errors.Is(willRetry, originalErr))
+
+	var targetErr *customError
+	assert.True(t, errors.As(willRetry, &targetErr))
+	assert.Equal(t, 500, targetErr.code)
+	assert.Equal(t, "internal error", targetErr.msg)
+}
+
 func TestChatModelAgentRetry_DefaultIsRetryAble(t *testing.T) {
 	ctx := context.Background()
 	ctrl := gomock.NewController(t)

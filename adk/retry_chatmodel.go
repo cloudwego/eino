@@ -68,13 +68,29 @@ func (e *RetryExhaustedError) Unwrap() error {
 	return ErrExceedMaxRetries
 }
 
+// WillRetryError is emitted when a retryable error occurs and a retry will be attempted.
+// It allows end-users to observe retry events in real-time via AgentEvent.
+//
+// Field design rationale:
+//   - ErrStr (exported): Stores the error message string for Gob serialization during checkpointing.
+//     This ensures the error message is preserved after checkpoint restore.
+//   - err (unexported): Stores the original error for Unwrap() support at runtime.
+//     This field is intentionally unexported because Gob serialization would fail for unregistered
+//     concrete error types. Since end-users only need the original error when the AgentEvent first
+//     occurs (not after restoring from checkpoint), skipping serialization is acceptable.
+//     After checkpoint restore, err will be nil and Unwrap() returns nil.
 type WillRetryError struct {
 	ErrStr       string
 	RetryAttempt int
+	err          error
 }
 
 func (e *WillRetryError) Error() string {
 	return e.ErrStr
+}
+
+func (e *WillRetryError) Unwrap() error {
+	return e.err
 }
 
 func init() {
@@ -134,7 +150,7 @@ func genErrWrapper(ctx context.Context, config ModelRetryConfig, info streamRetr
 		hasRetriesLeft := info.attempt < config.MaxRetries
 
 		if isRetryAble && hasRetriesLeft {
-			return &WillRetryError{ErrStr: err.Error(), RetryAttempt: info.attempt}
+			return &WillRetryError{ErrStr: err.Error(), RetryAttempt: info.attempt, err: err}
 		}
 		return err
 	}
