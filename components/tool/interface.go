@@ -41,3 +41,24 @@ type StreamableTool interface {
 
 	StreamableRun(ctx context.Context, argumentsInJSON string, opts ...Option) (*schema.StreamReader[string], error)
 }
+
+type CallInfo struct {
+	// Name is the name of the tool to be executed.
+	Name string
+
+	// CallID is the unique identifier for this tool call.
+	CallID string
+
+	// Arguments contains the arguments for the tool call.
+	Arguments string
+}
+
+// MultimodalInvokableTool represents a tool that can return structured, multimodal content.
+// This interface should be implemented by tools that produce complex outputs beyond a simple string,
+// such as content that includes text, images, or other data formats.
+type MultimodalInvokableTool interface {
+	BaseTool
+	// InvokableRun executes the tool with the given call information and options.
+	// It returns a ToolOutput, which can contain a mix of different content types.
+	InvokableRun(ctx context.Context, callInfo *CallInfo, opts ...Option) (*schema.ToolOutput, error)
+}
