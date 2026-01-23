@@ -360,3 +360,158 @@ func (n *namedPlanExecuteAgent) Name(_ context.Context) string {
 func (n *namedPlanExecuteAgent) Description(_ context.Context) string {
 	return n.description
 }
+
+func TestDeepAgentOutputKey(t *testing.T) {
+	t.Run("OutputKeyStoresInSession", func(t *testing.T) {
+		ctx := context.Background()
+
+		ctrl := gomock.NewController(t)
+		defer ctrl.Finish()
+
+		cm := mockModel.NewMockToolCallingChatModel(ctrl)
+		cm.EXPECT().WithTools(gomock.Any()).Return(cm, nil).AnyTimes()
+
+		cm.EXPECT().Generate(gomock.Any(), gomock.Any(), gomock.Any()).
+			Return(schema.AssistantMessage("Hello from DeepAgent", nil), nil).
+			Times(1)
+
+		agent, err := New(ctx, &Config{
+			Name:                   "deep",
+			Description:            "deep agent",
+			ChatModel:              cm,
+			Instruction:            "you are deep agent",
+			MaxIteration:           2,
+			WithoutWriteTodos:      true,
+			WithoutGeneralSubAgent: true,
+			OutputKey:              "deep_output",
+		})
+		assert.NoError(t, err)
+
+		var capturedSessionValues map[string]any
+		wrappedAgent := &sessionCaptureAgent{
+			Agent:          agent,
+			captureSession: func(values map[string]any) { capturedSessionValues = values },
+		}
+
+		r := adk.NewRunner(ctx, adk.RunnerConfig{Agent: wrappedAgent})
+		it := r.Run(ctx, []adk.Message{schema.UserMessage("hi")})
+		for {
+			if _, ok := it.Next(); !ok {
+				break
+			}
+		}
+
+		assert.Contains(t, capturedSessionValues, "deep_output")
+		assert.Equal(t, "Hello from DeepAgent", capturedSessionValues["deep_output"])
+	})
+
+	t.Run("OutputKeyWithStreamingStoresInSession", func(t *testing.T) {
+		ctx := context.Background()
+
+		ctrl := gomock.NewController(t)
+		defer ctrl.Finish()
+
+		cm := mockModel.NewMockToolCallingChatModel(ctrl)
+		cm.EXPECT().WithTools(gomock.Any()).Return(cm, nil).AnyTimes()
+
+		cm.EXPECT().Stream(gomock.Any(), gomock.Any(), gomock.Any()).
+			Return(schema.StreamReaderFromArray([]*schema.Message{
+				schema.AssistantMessage("Hello", nil),
+				schema.AssistantMessage(" from", nil),
+				schema.AssistantMessage(" DeepAgent", nil),
+			}), nil).
+			Times(1)
+
+		agent, err := New(ctx, &Config{
+			Name:                   "deep",
+			Description:            "deep agent",
+			ChatModel:              cm,
+			Instruction:            "you are deep agent",
+			MaxIteration:           2,
+			WithoutWriteTodos:      true,
+			WithoutGeneralSubAgent: true,
+			OutputKey:              "deep_output",
+		})
+		assert.NoError(t, err)
+
+		var capturedSessionValues map[string]any
+		wrappedAgent := &sessionCaptureAgent{
+			Agent:          agent,
+			captureSession: func(values map[string]any) { capturedSessionValues = values },
+		}
+
+		r := adk.NewRunner(ctx, adk.RunnerConfig{Agent: wrappedAgent, EnableStreaming: true})
+		it := r.Run(ctx, []adk.Message{schema.UserMessage("hi")})
+		for {
+			if _, ok := it.Next(); !ok {
+				break
+			}
+		}
+
+		assert.Contains(t, capturedSessionValues, "deep_output")
+		assert.Equal(t, "Hello from DeepAgent", capturedSessionValues["deep_output"])
+	})
+
+	t.Run("OutputKeyNotSetWhenEmpty", func(t *testing.T) {
+		ctx := context.Background()
+
+		ctrl := gomock.NewController(t)
+		defer ctrl.Finish()
+
+		cm := mockModel.NewMockToolCallingChatModel(ctrl)
+		cm.EXPECT().WithTools(gomock.Any()).Return(cm, nil).AnyTimes()
+
+		cm.EXPECT().Generate(gomock.Any(), gomock.Any(), gomock.Any()).
+			Return(schema.AssistantMessage("Hello from DeepAgent", nil), nil).
+			Times(1)
+
+		agent, err := New(ctx, &Config{
+			Name:                   "deep",
+			Description:            "deep agent",
+			ChatModel:              cm,
+			Instruction:            "you are deep agent",
+			MaxIteration:           2,
+			WithoutWriteTodos:      true,
+			WithoutGeneralSubAgent: true,
+		})
+		assert.NoError(t, err)
+
+		var capturedSessionValues map[string]any
+		wrappedAgent := &sessionCaptureAgent{
+			Agent:          agent,
+			captureSession: func(values map[string]any) { capturedSessionValues = values },
+		}
+
+		r := adk.NewRunner(ctx, adk.RunnerConfig{Agent: wrappedAgent})
+		it := r.Run(ctx, []adk.Message{schema.UserMessage("hi")})
+		for {
+			if _, ok := it.Next(); !ok {
+				break
+			}
+		}
+
+		assert.NotContains(t, capturedSessionValues, "deep_output")
+	})
+}
+
+type sessionCaptureAgent struct {
+	adk.Agent
+	captureSession func(map[string]any)
+}
+
+func (s *sessionCaptureAgent) Run(ctx context.Context, input *adk.AgentInput, opts ...adk.AgentRunOption) *adk.AsyncIterator[*adk.AgentEvent] {
+	innerIt := s.Agent.Run(ctx, input, opts...)
+	it, gen := adk.NewAsyncIteratorPair[*adk.AgentEvent]()
+	go func() {
+		defer gen.Close()
+		for {
+			event, ok := innerIt.Next()
+			if !ok {
+				break
+			}
+			gen.Send(event)
+		}
+		s.captureSession(adk.GetSessionValues(ctx))
+	}()
+	return it
+}

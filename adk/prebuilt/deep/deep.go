@@ -66,6 +66,10 @@ type Config struct {
 	Middlewares []adk.AgentMiddleware
 
 	ModelRetryConfig *adk.ModelRetryConfig
+
+	// OutputKey stores the agent's response in the session.
+	// Optional. When set, stores output via AddSessionValue(ctx, outputKey, msg.Content).
+	OutputKey string
 }
 
 // New creates a new Deep agent instance with the provided configuration.
@@ -111,6 +115,7 @@ func New(ctx context.Context, cfg *Config) (adk.ResumableAgent, error) {
 		Middlewares:   append(middlewares, cfg.Middlewares...),
 
 		ModelRetryConfig: cfg.ModelRetryConfig,
+		OutputKey:        cfg.OutputKey,
 	})
 }
 
