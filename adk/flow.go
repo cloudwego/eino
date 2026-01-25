@@ -299,59 +299,128 @@ func (a *flowAgent) Run(ctx context.Context, input *AgentInput, opts ...AgentRun
 		return genErrorIter(err)
 	}
 
-	if wf, ok := a.Agent.(*workflowAgent); ok {
-		return wf.Run(ctx, input, opts...)
+	var (
+		mwHelper     *agentMWHelper
+		needExecMW   = !isAgentMiddlewareEnabled(a.Agent)
+		agentContext = &AgentContext{
+			AgentInput:      input,
+			AgentRunOptions: opts,
+			agentName:       agentName,
+			invocationType:  InvocationTypeRun,
+		}
+	)
+
+	if needExecMW {
+		mwHelper = newAgentMWHelper(GetGlobalAgentMiddlewares()...)
+		var termIter *AsyncIterator[*AgentEvent]
+		ctx, termIter = mwHelper.execBeforeAgents(ctx, agentContext)
+		if termIter != nil {
+			return termIter
+		}
+		// TODO: set back input in runCtx ?
 	}
 
-	aIter := a.Agent.Run(ctx, input, filterOptions(agentName, opts)...)
+	input = agentContext.AgentInput
+	opts = agentContext.AgentRunOptions
+	iter := func() *AsyncIterator[*AgentEvent] {
+		if wf, ok := a.Agent.(*workflowAgent); ok {
+			return wf.Run(ctx, input, opts...)
+		}
+		if mf, ok := a.Agent.(*multiAgent); ok {
+			return mf.Run(ctx, input, opts...)
+		}
 
-	iterator, generator := NewAsyncIteratorPair[*AgentEvent]()
+		aIter := a.Agent.Run(ctx, input, filterOptions(agentName, opts)...)
 
-	go a.run(ctx, runCtx, aIter, generator, opts...)
+		iterator, generator := NewAsyncIteratorPair[*AgentEvent]()
 
-	return iterator
+		go a.run(ctx, runCtx, aIter, generator, opts...)
+
+		return iterator
+	}()
+
+	if needExecMW {
+		iter = mwHelper.execOnEvents(ctx, agentContext, iter)
+	}
+
+	return iter
 }
 
 func (a *flowAgent) Resume(ctx context.Context, info *ResumeInfo, opts ...AgentRunOption) *AsyncIterator[*AgentEvent] {
+	agentName := a.Name(ctx)
 	ctx, info = buildResumeInfo(ctx, a.Name(ctx), info)
 
-	if info.WasInterrupted {
-		ra, ok := a.Agent.(ResumableAgent)
-		if !ok {
-			return genErrorIter(fmt.Errorf("failed to resume agent: agent '%s' is an interrupt point "+
-				"but is not a ResumableAgent", a.Name(ctx)))
+	var (
+		mwHelper     *agentMWHelper
+		needExecMW   = !isAgentMiddlewareEnabled(a.Agent)
+		agentContext = &AgentContext{
+			ResumeInfo:      info,
+			AgentRunOptions: opts,
+			agentName:       agentName,
+			invocationType:  InvocationTypeRun,
 		}
-		iterator, generator := NewAsyncIteratorPair[*AgentEvent]()
+	)
 
-		aIter := ra.Resume(ctx, info, opts...)
-		if _, ok := ra.(*workflowAgent); ok {
-			return aIter
+	if needExecMW {
+		mwHelper = newAgentMWHelper(GetGlobalAgentMiddlewares()...)
+		var termIter *AsyncIterator[*AgentEvent]
+		ctx, termIter = mwHelper.execBeforeAgents(ctx, agentContext)
+		if termIter != nil {
+			return termIter
 		}
-		go a.run(ctx, getRunCtx(ctx), aIter, generator, opts...)
-		return iterator
 	}
 
-	nextAgentName, err := getNextResumeAgent(ctx, info)
-	if err != nil {
-		return genErrorIter(err)
-	}
+	info = agentContext.ResumeInfo
+	opts = agentContext.AgentRunOptions
 
-	subAgent := a.getAgent(ctx, nextAgentName)
-	if subAgent == nil {
-		// the inner agent wrapped by flowAgent may be ANY agent, including flowAgent,
-		// AgentWithDeterministicTransferTo, or any other custom agent user defined,
-		// or any combinations of the above in any order,
-		// that ultimately wraps the flowAgent with sub-agents
-		// We need to go through these wrappers to reach the flowAgent with sub-agents.
-		if len(a.subAgents) == 0 {
-			if ra, ok := a.Agent.(ResumableAgent); ok {
-				return ra.Resume(ctx, info, opts...)
+	iter := func() *AsyncIterator[*AgentEvent] {
+		if info.WasInterrupted {
+			ra, ok := a.Agent.(ResumableAgent)
+			if !ok {
+				return genErrorIter(fmt.Errorf("failed to resume agent: agent '%s' is an interrupt point "+
+					"but is not a ResumableAgent", a.Name(ctx)))
 			}
+			iterator, generator := NewAsyncIteratorPair[*AgentEvent]()
+
+			aIter := ra.Resume(ctx, info, opts...)
+			if _, ok := ra.(*workflowAgent); ok {
+				return aIter
+			}
+			if _, ok := ra.(*multiAgent); ok {
+				return aIter
+			}
+			go a.run(ctx, getRunCtx(ctx), aIter, generator, opts...)
+			return iterator
 		}
-		return genErrorIter(fmt.Errorf("failed to resume agent: agent '%s' not found from flowAgent '%s'", nextAgentName, a.Name(ctx)))
+
+		nextAgentName, err := getNextResumeAgent(ctx, info)
+		if err != nil {
+			return genErrorIter(err)
+		}
+
+		subAgent := a.getAgent(ctx, nextAgentName)
+		if subAgent == nil {
+			// the inner agent wrapped by flowAgent may be ANY agent, including flowAgent,
+			// AgentWithDeterministicTransferTo, or any other custom agent user defined,
+			// or any combinations of the above in any order,
+			// that ultimately wraps the flowAgent with sub-agents
+			// We need to go through these wrappers to reach the flowAgent with sub-agents.
+			if len(a.subAgents) == 0 {
+				if ra, ok := a.Agent.(ResumableAgent); ok {
+					return ra.Resume(ctx, info, opts...)
+				}
+			}
+			return genErrorIter(fmt.Errorf("failed to resume agent: agent '%s' not found from flowAgent '%s'", nextAgentName, a.Name(ctx)))
+		}
+
+		return subAgent.Resume(ctx, info, opts...)
+	}()
+
+	if needExecMW {
+		iter = mwHelper.execOnEvents(ctx, agentContext, iter)
 	}
 
-	return subAgent.Resume(ctx, info, opts...)
+	return iter
 }
 
 type DeterministicTransferConfig struct {

@@ -834,6 +834,10 @@ func NewReplanner(_ context.Context, cfg *ReplannerConfig) (adk.Agent, error) {
 
 // Config provides configuration options for creating a plan-execute-replan agent.
 type Config struct {
+	Name        string
+	Description string
+	Middlewares []adk.AgentMiddleware
+
 	// Planner specifies the agent that generates the plan.
 	// You can use provided NewPlanner to create a planner agent.
 	Planner adk.Agent
@@ -871,8 +875,14 @@ func New(ctx context.Context, cfg *Config) (adk.ResumableAgent, error) {
 		return nil, err
 	}
 
+	name := cfg.Name
+	if name == "" {
+		name = "plan_execute_replan"
+	}
 	return adk.NewSequentialAgent(ctx, &adk.SequentialAgentConfig{
-		Name:      "plan_execute_replan",
-		SubAgents: []adk.Agent{cfg.Planner, loop},
+		Name:        name,
+		Description: cfg.Description,
+		SubAgents:   []adk.Agent{cfg.Planner, loop},
+		Middlewares: cfg.Middlewares,
 	})
 }

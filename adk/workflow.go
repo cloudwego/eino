@@ -40,6 +40,7 @@ type workflowAgent struct {
 	name        string
 	description string
 	subAgents   []*flowAgent
+	middlewares []AgentMiddleware
 
 	mode workflowAgentMode
 
@@ -54,9 +55,30 @@ func (a *workflowAgent) Description(_ context.Context) string {
 	return a.description
 }
 
-func (a *workflowAgent) Run(ctx context.Context, _ *AgentInput, opts ...AgentRunOption) *AsyncIterator[*AgentEvent] {
-	iterator, generator := NewAsyncIteratorPair[*AgentEvent]()
+func (a *workflowAgent) IsAgentMiddlewareEnabled() bool {
+	return true
+}
 
+func (a *workflowAgent) Run(ctx context.Context, input *AgentInput, opts ...AgentRunOption) *AsyncIterator[*AgentEvent] {
+	var (
+		mwHelper     = newAgentMWHelper(append(GetGlobalAgentMiddlewares(), a.middlewares...)...)
+		agentContext = &AgentContext{
+			AgentInput:      input,
+			AgentRunOptions: opts,
+			agentName:       a.name,
+			invocationType:  InvocationTypeRun,
+		}
+	)
+
+	// FIXME: write back new *AgentInput to runCtx ?
+	var termIter *AsyncIterator[*AgentEvent]
+	ctx, termIter = mwHelper.execBeforeAgents(ctx, agentContext)
+	if termIter != nil {
+		return termIter
+	}
+
+	iterator, generator := NewAsyncIteratorPair[*AgentEvent]()
+	opts = agentContext.AgentRunOptions
 	go func() {
 
 		var err error
@@ -85,7 +107,7 @@ func (a *workflowAgent) Run(ctx context.Context, _ *AgentInput, opts ...AgentRun
 		}
 	}()
 
-	return iterator
+	return mwHelper.execOnEvents(ctx, agentContext, iterator)
 }
 
 type sequentialWorkflowState struct {
@@ -108,8 +130,25 @@ func init() {
 }
 
 func (a *workflowAgent) Resume(ctx context.Context, info *ResumeInfo, opts ...AgentRunOption) *AsyncIterator[*AgentEvent] {
-	iterator, generator := NewAsyncIteratorPair[*AgentEvent]()
+	var (
+		mwHelper     = newAgentMWHelper(append(GetGlobalAgentMiddlewares(), a.middlewares...)...)
+		agentContext = &AgentContext{
+			ResumeInfo:      info,
+			AgentRunOptions: opts,
+			agentName:       a.name,
+			invocationType:  InvocationTypeRun,
+		}
+	)
 
+	var termIter *AsyncIterator[*AgentEvent]
+	ctx, termIter = mwHelper.execBeforeAgents(ctx, agentContext)
+	if termIter != nil {
+		return termIter
+	}
+
+	iterator, generator := NewAsyncIteratorPair[*AgentEvent]()
+	info = agentContext.ResumeInfo
+	opts = agentContext.AgentRunOptions
 	go func() {
 		var err error
 		defer func() {
@@ -141,7 +180,8 @@ func (a *workflowAgent) Resume(ctx context.Context, info *ResumeInfo, opts ...Ag
 			err = fmt.Errorf("unsupported workflow agent state type: %T", s)
 		}
 	}()
-	return iterator
+
+	return mwHelper.execOnEvents(ctx, agentContext, iterator)
 }
 
 // WorkflowInterruptInfo CheckpointSchema: persisted via InterruptInfo.Data (gob).
@@ -538,29 +578,33 @@ type SequentialAgentConfig struct {
 	Name        string
 	Description string
 	SubAgents   []Agent
+	Middlewares []AgentMiddleware
 }
 
 type ParallelAgentConfig struct {
 	Name        string
 	Description string
 	SubAgents   []Agent
+	Middlewares []AgentMiddleware
 }
 
 type LoopAgentConfig struct {
 	Name        string
 	Description string
 	SubAgents   []Agent
+	Middlewares []AgentMiddleware
 
 	MaxIterations int
 }
 
 func newWorkflowAgent(ctx context.Context, name, desc string,
-	subAgents []Agent, mode workflowAgentMode, maxIterations int) (*flowAgent, error) {
+	subAgents []Agent, mode workflowAgentMode, maxIterations int, middlewares ...AgentMiddleware) (*flowAgent, error) {
 
 	wa := &workflowAgent{
 		name:        name,
 		description: desc,
 		mode:        mode,
+		middlewares: middlewares,
 
 		maxIterations: maxIterations,
 	}
@@ -582,15 +626,15 @@ func newWorkflowAgent(ctx context.Context, name, desc string,
 
 // NewSequentialAgent creates an agent that runs sub-agents sequentially.
 func NewSequentialAgent(ctx context.Context, config *SequentialAgentConfig) (ResumableAgent, error) {
-	return newWorkflowAgent(ctx, config.Name, config.Description, config.SubAgents, workflowAgentModeSequential, 0)
+	return newWorkflowAgent(ctx, config.Name, config.Description, config.SubAgents, workflowAgentModeSequential, 0, config.Middlewares...)
 }
 
 // NewParallelAgent creates an agent that runs sub-agents in parallel.
 func NewParallelAgent(ctx context.Context, config *ParallelAgentConfig) (ResumableAgent, error) {
-	return newWorkflowAgent(ctx, config.Name, config.Description, config.SubAgents, workflowAgentModeParallel, 0)
+	return newWorkflowAgent(ctx, config.Name, config.Description, config.SubAgents, workflowAgentModeParallel, 0, config.Middlewares...)
 }
 
 // NewLoopAgent creates an agent that loops over sub-agents with a max iteration limit.
 func NewLoopAgent(ctx context.Context, config *LoopAgentConfig) (ResumableAgent, error) {
-	return newWorkflowAgent(ctx, config.Name, config.Description, config.SubAgents, workflowAgentModeLoop, config.MaxIterations)
+	return newWorkflowAgent(ctx, config.Name, config.Description, config.SubAgents, workflowAgentModeLoop, config.MaxIterations, config.Middlewares...)
 }

@@ -47,6 +47,7 @@ func TestNewSupervisor(t *testing.T) {
 	subAgent2 := mockAdk.NewMockAgent(ctrl)
 
 	supervisorAgent.EXPECT().Name(gomock.Any()).Return("SupervisorAgent").AnyTimes()
+	supervisorAgent.EXPECT().Description(gomock.Any()).Return("mock desc").AnyTimes()
 	subAgent1.EXPECT().Name(gomock.Any()).Return("SubAgent1").AnyTimes()
 	subAgent2.EXPECT().Name(gomock.Any()).Return("SubAgent2").AnyTimes()
 

@@ -25,6 +25,10 @@ import (
 )
 
 type Config struct {
+	Name        string
+	Description string
+	Middlewares []adk.AgentMiddleware
+
 	// Supervisor specifies the agent that will act as the supervisor, coordinating and managing the sub-agents.
 	Supervisor adk.Agent
 
@@ -48,5 +52,20 @@ func New(ctx context.Context, conf *Config) (adk.ResumableAgent, error) {
 		}))
 	}
 
-	return adk.SetSubAgents(ctx, conf.Supervisor, subAgents)
+	sa, err := adk.SetSubAgents(ctx, conf.Supervisor, subAgents)
+	if err != nil {
+		return nil, err
+	}
+
+	name := conf.Name
+	if name == "" {
+		name = supervisorName
+	}
+
+	return adk.NewMultiAgent(ctx, adk.MultiAgentConfig{
+		Agent:       sa,
+		Name:        name,
+		Description: conf.Description,
+		Middlewares: conf.Middlewares,
+	})
 }
