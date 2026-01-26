@@ -43,4 +43,5 @@ output/*
 .trae
 
 .DS_Store
+*.log
 CLAUDE.md
