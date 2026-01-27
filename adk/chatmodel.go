@@ -686,8 +686,7 @@ func genNoToolsCallbacks(generator *AsyncGenerator[*AgentEvent], modelRetryConfi
 
 func setOutputToSession(ctx context.Context, msg Message, msgStream MessageStream, outputKey string) error {
 	if msg != nil {
-		AddSessionValue(ctx, outputKey, msg.Content)
-		return nil
+		return AddSessionValue(ctx, outputKey, msg.Content)
 	}
 
 	concatenated, err := schema.ConcatMessageStream(msgStream)
@@ -695,8 +694,7 @@ func setOutputToSession(ctx context.Context, msg Message, msgStream MessageStrea
 		return err
 	}
 
-	AddSessionValue(ctx, outputKey, concatenated.Content)
-	return nil
+	return AddSessionValue(ctx, outputKey, concatenated.Content)
 }
 
 func errFunc(err error) runFunc {
