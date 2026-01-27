@@ -24,7 +24,9 @@ import (
 	"runtime/debug"
 	"strings"
 
+	"github.com/cloudwego/eino/callbacks"
 	"github.com/cloudwego/eino/compose"
+	icb "github.com/cloudwego/eino/internal/callbacks"
 	"github.com/cloudwego/eino/internal/safe"
 	"github.com/cloudwego/eino/schema"
 )
@@ -287,6 +289,12 @@ func buildDefaultHistoryRewriter(agentName string) HistoryRewriter {
 
 func (a *flowAgent) Run(ctx context.Context, input *AgentInput, opts ...AgentRunOption) *AsyncIterator[*AgentEvent] {
 	agentName := a.Name(ctx)
+	agentType := getAgentType(a.Agent)
+
+	ctx = initAgentCallbacks(ctx, agentName, agentType, opts...)
+
+	cbInput := &AgentCallbackInput{Input: input}
+	ctx, _ = icb.On(ctx, cbInput, icb.OnStartHandle[*AgentCallbackInput], callbacks.TimingOnStart, true)
 
 	var runCtx *runContext
 	ctx, runCtx = initRunCtx(ctx, agentName, input)
@@ -313,13 +321,21 @@ func (a *flowAgent) Run(ctx context.Context, input *AgentInput, opts ...AgentRun
 }
 
 func (a *flowAgent) Resume(ctx context.Context, info *ResumeInfo, opts ...AgentRunOption) *AsyncIterator[*AgentEvent] {
-	ctx, info = buildResumeInfo(ctx, a.Name(ctx), info)
+	agentName := a.Name(ctx)
+	agentType := getAgentType(a.Agent)
+
+	ctx, info = buildResumeInfo(ctx, agentName, info)
+
+	ctx = initAgentCallbacks(ctx, agentName, agentType, opts...)
+
+	cbInput := &AgentCallbackInput{ResumeInfo: info}
+	ctx, _ = icb.On(ctx, cbInput, icb.OnStartHandle[*AgentCallbackInput], callbacks.TimingOnStart, true)
 
 	if info.WasInterrupted {
 		ra, ok := a.Agent.(ResumableAgent)
 		if !ok {
 			return genErrorIter(fmt.Errorf("failed to resume agent: agent '%s' is an interrupt point "+
-				"but is not a ResumableAgent", a.Name(ctx)))
+				"but is not a ResumableAgent", agentName))
 		}
 		iterator, generator := NewAsyncIteratorPair[*AgentEvent]()
 
@@ -348,7 +364,7 @@ func (a *flowAgent) Resume(ctx context.Context, info *ResumeInfo, opts ...AgentR
 				return ra.Resume(ctx, info, opts...)
 			}
 		}
-		return genErrorIter(fmt.Errorf("failed to resume agent: agent '%s' not found from flowAgent '%s'", nextAgentName, a.Name(ctx)))
+		return genErrorIter(fmt.Errorf("failed to resume agent: agent '%s' not found from flowAgent '%s'", nextAgentName, agentName))
 	}
 
 	return subAgent.Resume(ctx, info, opts...)
@@ -365,6 +381,15 @@ func (a *flowAgent) run(
 	aIter *AsyncIterator[*AgentEvent],
 	generator *AsyncGenerator[*AgentEvent],
 	opts ...AgentRunOption) {
+
+	cbIter, cbGen := NewAsyncIteratorPair[*AgentEvent]()
+
+	cbOutput := &AgentCallbackOutput{Events: cbIter}
+	icb.On(ctx, cbOutput, func(ctx context.Context, output *AgentCallbackOutput,
+		runInfo *icb.RunInfo, handlers []icb.Handler) (context.Context, *AgentCallbackOutput) {
+		return icb.OnEndHandleWithCopy(ctx, output, runInfo, handlers, copyAgentCallbackOutput)
+	}, callbacks.TimingOnEnd, false)
+
 	defer func() {
 		panicErr := recover()
 		if panicErr != nil {
@@ -372,6 +397,7 @@ func (a *flowAgent) run(
 			generator.Send(&AgentEvent{Err: e})
 		}
 
+		cbGen.Close()
 		generator.Close()
 	}()
 
@@ -401,6 +427,8 @@ func (a *flowAgent) run(
 			setAutomaticClose(copied)
 			setAutomaticClose(event)
 			runCtx.Session.addEvent(copied)
+
+			cbGen.Send(copyAgentEvent(event))
 		}
 		// Action gating uses exact run-path match as well:
 		// only actions originating from this agent execution (not child/tool runs)
