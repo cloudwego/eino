@@ -61,6 +61,10 @@ func (a *agentWithDeterministicTransferTo) Name(ctx context.Context) string {
 	return a.agent.Name(ctx)
 }
 
+func (a *agentWithDeterministicTransferTo) GetType() string {
+	return "DeterministicTransfer"
+}
+
 func (a *agentWithDeterministicTransferTo) Run(ctx context.Context,
 	input *AgentInput, options ...AgentRunOption) *AsyncIterator[*AgentEvent] {
 
@@ -87,6 +91,10 @@ func (a *resumableAgentWithDeterministicTransferTo) Description(ctx context.Cont
 
 func (a *resumableAgentWithDeterministicTransferTo) Name(ctx context.Context) string {
 	return a.agent.Name(ctx)
+}
+
+func (a *resumableAgentWithDeterministicTransferTo) GetType() string {
+	return "DeterministicTransfer"
 }
 
 func (a *resumableAgentWithDeterministicTransferTo) Run(ctx context.Context,
