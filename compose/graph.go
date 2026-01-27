@@ -352,6 +352,19 @@ func (g *graph) AddChatModelNode(key string, node model.BaseChatModel, opts ...G
 	return g.addNode(key, gNode, options)
 }
 
+// AddAgenticModelNode add node that implements agentic.Model.
+// e.g.
+//
+//	model, err := openai.NewAgenticModel(ctx, &openai.AgenticModelConfig{
+//		Model: "gpt-4o",
+//	})
+//
+//	graph.AddAgenticModelNode("agentic_model_node_key", model)
+func (g *graph) AddAgenticModelNode(key string, node model.AgenticModel, opts ...GraphAddNodeOpt) error {
+	gNode, options := toAgenticModelNode(node, opts...)
+	return g.addNode(key, gNode, options)
+}
+
 // AddChatTemplateNode add node that implements prompt.ChatTemplate.
 // e.g.
 //
@@ -366,14 +379,36 @@ func (g *graph) AddChatTemplateNode(key string, node prompt.ChatTemplate, opts .
 	return g.addNode(key, gNode, options)
 }
 
-// AddToolsNode adds a node that implements tools.ToolsNode.
+// AddAgenticChatTemplateNode add node that implements prompt.AgenticChatTemplate.
 // e.g.
 //
-//	toolsNode, err := tools.NewToolNode(ctx, &tools.ToolsNodeConfig{})
+//	chatTemplate, err := prompt.FromAgenticMessages(schema.FString, &schema.AgenticMessage{})
+//
+//	graph.AddAgenticChatTemplateNode("chat_template_node_key", chatTemplate)
+func (g *graph) AddAgenticChatTemplateNode(key string, node prompt.AgenticChatTemplate, opts ...GraphAddNodeOpt) error {
+	gNode, options := toAgenticChatTemplateNode(node, opts...)
+	return g.addNode(key, gNode, options)
+}
+
+// AddToolsNode adds a node that implements ToolsNode.
+// e.g.
+//
+//	toolsNode, err := compose.NewToolNode(ctx, &compose.ToolsNodeConfig{})
 //
 //	graph.AddToolsNode("tools_node_key", toolsNode)
 func (g *graph) AddToolsNode(key string, node *ToolsNode, opts ...GraphAddNodeOpt) error {
 	gNode, options := toToolsNode(node, opts...)
+	return g.addNode(key, gNode, options)
+}
+
+// AddAgenticToolsNode adds a node that implements AgenticToolsNode.
+// e.g.
+//
+//	toolsNode, err := compose.NewAgenticToolsNode(ctx, &compose.ToolsNodeConfig{})
+//
+//	graph.AddAgenticToolsNode("tools_node_key", toolsNode)
+func (g *graph) AddAgenticToolsNode(key string, node *AgenticToolsNode, opts ...GraphAddNodeOpt) error {
+	gNode, options := toAgenticToolsNode(node, opts...)
 	return g.addNode(key, gNode, options)
 }
 

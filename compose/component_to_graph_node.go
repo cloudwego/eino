@@ -101,6 +101,17 @@ func toChatModelNode(node model.BaseChatModel, opts ...GraphAddNodeOpt) (*graphN
 		opts...)
 }
 
+func toAgenticModelNode(node model.AgenticModel, opts ...GraphAddNodeOpt) (*graphNode, *graphAddNodeOpts) {
+	return toComponentNode(
+		node,
+		components.ComponentOfAgenticModel,
+		node.Generate,
+		node.Stream,
+		nil, nil,
+		opts...,
+	)
+}
+
 func toChatTemplateNode(node prompt.ChatTemplate, opts ...GraphAddNodeOpt) (*graphNode, *graphAddNodeOpts) {
 	return toComponentNode(
 		node,
@@ -110,6 +121,16 @@ func toChatTemplateNode(node prompt.ChatTemplate, opts ...GraphAddNodeOpt) (*gra
 		nil,
 		nil,
 		opts...)
+}
+
+func toAgenticChatTemplateNode(node prompt.AgenticChatTemplate, opts ...GraphAddNodeOpt) (*graphNode, *graphAddNodeOpts) {
+	return toComponentNode(
+		node,
+		components.ComponentOfAgenticPrompt,
+		node.Format,
+		nil, nil, nil,
+		opts...,
+	)
 }
 
 func toDocumentTransformerNode(node document.Transformer, opts ...GraphAddNodeOpt) (*graphNode, *graphAddNodeOpts) {
@@ -132,6 +153,17 @@ func toToolsNode(node *ToolsNode, opts ...GraphAddNodeOpt) (*graphNode, *graphAd
 		nil,
 		nil,
 		opts...)
+}
+
+func toAgenticToolsNode(node *AgenticToolsNode, opts ...GraphAddNodeOpt) (*graphNode, *graphAddNodeOpts) {
+	return toComponentNode(
+		node,
+		ComponentOfAgenticToolsNode,
+		node.Invoke,
+		node.Stream,
+		nil, nil,
+		opts...,
+	)
 }
 
 func toLambdaNode(node *Lambda, opts ...GraphAddNodeOpt) (*graphNode, *graphAddNodeOpts) {
