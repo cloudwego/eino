@@ -23,13 +23,10 @@ import (
 	"io"
 	"log"
 	"math/rand"
-	"reflect"
 	"time"
 
-	"github.com/cloudwego/eino/callbacks"
-	"github.com/cloudwego/eino/components"
 	"github.com/cloudwego/eino/components/model"
-	"github.com/cloudwego/eino/internal/generic"
+	"github.com/cloudwego/eino/compose"
 	"github.com/cloudwego/eino/schema"
 )
 
@@ -144,45 +141,45 @@ func defaultBackoff(_ context.Context, attempt int) time.Duration {
 	return delay + jitter
 }
 
-func genErrWrapper(ctx context.Context, config ModelRetryConfig, info streamRetryInfo) func(error) error {
+func genErrWrapper(ctx context.Context, maxRetries, attempt int, isRetryAbleFunc func(ctx context.Context, err error) bool) func(error) error {
 	return func(err error) error {
-		isRetryAble := config.IsRetryAble == nil || config.IsRetryAble(ctx, err)
-		hasRetriesLeft := info.attempt < config.MaxRetries
+		isRetryAble := isRetryAbleFunc == nil || isRetryAbleFunc(ctx, err)
+		hasRetriesLeft := attempt < maxRetries
 
 		if isRetryAble && hasRetriesLeft {
-			return &WillRetryError{ErrStr: err.Error(), RetryAttempt: info.attempt, err: err}
+			return &WillRetryError{ErrStr: err.Error(), RetryAttempt: attempt, err: err}
 		}
 		return err
 	}
 }
 
-type retryChatModel struct {
-	inner                 model.ToolCallingChatModel
-	config                *ModelRetryConfig
-	innerHandlesCallbacks bool
+func consumeStreamForError(stream *schema.StreamReader[*schema.Message]) error {
+	defer stream.Close()
+	for {
+		_, err := stream.Recv()
+		if err == io.EOF {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+	}
 }
 
-func newRetryChatModel(inner model.ToolCallingChatModel, config *ModelRetryConfig) *retryChatModel {
-	innerHandlesCallbacks := false
-	if ch, ok := inner.(components.Checker); ok {
-		innerHandlesCallbacks = ch.IsCallbacksEnabled()
-	}
-	return &retryChatModel{inner: inner, config: config, innerHandlesCallbacks: innerHandlesCallbacks}
+// retryModelWrapper wraps a BaseChatModel with retry logic.
+// This is used inside the model wrapper chain, positioned between eventSenderModelWrapper
+// and stateModelWrapper, so that retry only affects the inner chain (event sending, user wrappers,
+// callback injection) without re-running state management (BeforeModelRewriteState/AfterModelRewriteState).
+type retryModelWrapper struct {
+	inner  model.BaseChatModel
+	config *ModelRetryConfig
 }
 
-func (r *retryChatModel) WithTools(tools []*schema.ToolInfo) (model.ToolCallingChatModel, error) {
-	newInner, err := r.inner.WithTools(tools)
-	if err != nil {
-		return nil, err
-	}
-	innerHandlesCallbacks := false
-	if ch, ok := newInner.(components.Checker); ok {
-		innerHandlesCallbacks = ch.IsCallbacksEnabled()
-	}
-	return &retryChatModel{inner: newInner, config: r.config, innerHandlesCallbacks: innerHandlesCallbacks}, nil
+func newRetryModelWrapper(inner model.BaseChatModel, config *ModelRetryConfig) *retryModelWrapper {
+	return &retryModelWrapper{inner: inner, config: config}
 }
 
-func (r *retryChatModel) Generate(ctx context.Context, input []*schema.Message, opts ...model.Option) (*schema.Message, error) {
+func (r *retryModelWrapper) Generate(ctx context.Context, input []*schema.Message, opts ...model.Option) (*schema.Message, error) {
 	isRetryAble := r.config.IsRetryAble
 	if isRetryAble == nil {
 		isRetryAble = defaultIsRetryAble
@@ -194,15 +191,7 @@ func (r *retryChatModel) Generate(ctx context.Context, input []*schema.Message, 
 
 	var lastErr error
 	for attempt := 0; attempt <= r.config.MaxRetries; attempt++ {
-		var out *schema.Message
-		var err error
-
-		if r.innerHandlesCallbacks {
-			out, err = r.inner.Generate(ctx, input, opts...)
-		} else {
-			out, err = r.generateWithProxyCallbacks(ctx, input, opts...)
-		}
-
+		out, err := r.inner.Generate(ctx, input, opts...)
 		if err == nil {
 			return out, nil
 		}
@@ -221,34 +210,7 @@ func (r *retryChatModel) Generate(ctx context.Context, input []*schema.Message, 
 	return nil, &RetryExhaustedError{LastErr: lastErr, TotalRetries: r.config.MaxRetries}
 }
 
-func (r *retryChatModel) generateWithProxyCallbacks(ctx context.Context,
-	input []*schema.Message, opts ...model.Option) (*schema.Message, error) {
-
-	ctx = callbacks.EnsureRunInfo(ctx, r.GetType(), components.ComponentOfChatModel)
-	nCtx := callbacks.OnStart(ctx, &model.CallbackInput{Messages: input})
-
-	out, err := r.inner.Generate(nCtx, input, opts...)
-	if err != nil {
-		callbacks.OnError(nCtx, err)
-		return nil, err
-	}
-
-	callbacks.OnEnd(nCtx, &model.CallbackOutput{Message: out})
-	return out, nil
-}
-
-type streamRetryKey struct{}
-
-type streamRetryInfo struct {
-	attempt int // first request is 0, first retry is 1
-}
-
-func getStreamRetryInfo(ctx context.Context) (*streamRetryInfo, bool) {
-	info, ok := ctx.Value(streamRetryKey{}).(*streamRetryInfo)
-	return info, ok
-}
-
-func (r *retryChatModel) Stream(ctx context.Context, input []*schema.Message, opts ...model.Option) (
+func (r *retryModelWrapper) Stream(ctx context.Context, input []*schema.Message, opts ...model.Option) (
 	*schema.StreamReader[*schema.Message], error) {
 
 	isRetryAble := r.config.IsRetryAble
@@ -260,21 +222,21 @@ func (r *retryChatModel) Stream(ctx context.Context, input []*schema.Message, op
 		backoffFunc = defaultBackoff
 	}
 
-	retryInfo := &streamRetryInfo{}
-	ctx = context.WithValue(ctx, streamRetryKey{}, retryInfo)
+	defer func() {
+		_ = compose.ProcessState(ctx, func(_ context.Context, st *State) error {
+			st.setRetryAttempt(0)
+			return nil
+		})
+	}()
 
 	var lastErr error
 	for attempt := 0; attempt <= r.config.MaxRetries; attempt++ {
-		retryInfo.attempt = attempt
-		var stream *schema.StreamReader[*schema.Message]
-		var err error
+		_ = compose.ProcessState(ctx, func(_ context.Context, st *State) error {
+			st.setRetryAttempt(attempt)
+			return nil
+		})
 
-		if r.innerHandlesCallbacks {
-			stream, err = r.inner.Stream(ctx, input, opts...)
-		} else {
-			stream, err = r.streamWithProxyCallbacks(ctx, input, opts...)
-		}
-
+		stream, err := r.inner.Stream(ctx, input, opts...)
 		if err != nil {
 			if !isRetryAble(ctx, err) {
 				return nil, err
@@ -310,46 +272,3 @@ func (r *retryChatModel) Stream(ctx context.Context, input []*schema.Message, op
 
 	return nil, &RetryExhaustedError{LastErr: lastErr, TotalRetries: r.config.MaxRetries}
 }
-
-func (r *retryChatModel) streamWithProxyCallbacks(ctx context.Context,
-	input []*schema.Message, opts ...model.Option) (*schema.StreamReader[*schema.Message], error) {
-
-	ctx = callbacks.EnsureRunInfo(ctx, r.GetType(), components.ComponentOfChatModel)
-	nCtx := callbacks.OnStart(ctx, &model.CallbackInput{Messages: input})
-
-	stream, err := r.inner.Stream(nCtx, input, opts...)
-	if err != nil {
-		callbacks.OnError(nCtx, err)
-		return nil, err
-	}
-
-	out := schema.StreamReaderWithConvert(stream, func(m *schema.Message) (*model.CallbackOutput, error) {
-		return &model.CallbackOutput{Message: m}, nil
-	})
-	_, out = callbacks.OnEndWithStreamOutput(nCtx, out)
-	return schema.StreamReaderWithConvert(out, func(o *model.CallbackOutput) (*schema.Message, error) {
-		return o.Message, nil
-	}), nil
-}
-
-func consumeStreamForError(stream *schema.StreamReader[*schema.Message]) error {
-	defer stream.Close()
-	for {
-		_, err := stream.Recv()
-		if err == io.EOF {
-			return nil
-		}
-		if err != nil {
-			return err
-		}
-	}
-}
-
-func (r *retryChatModel) GetType() string {
-	if gt, ok := r.inner.(components.Typer); ok {
-		return gt.GetType()
-	}
-	return generic.ParseTypeName(reflect.ValueOf(r.inner))
-}
-
-func (r *retryChatModel) IsCallbacksEnabled() bool { return true }
