@@ -479,6 +479,10 @@ func (a *ChatModelAgent) Description(_ context.Context) string {
 	return a.description
 }
 
+func (a *ChatModelAgent) GetType() string {
+	return "ChatModel"
+}
+
 func (a *ChatModelAgent) OnSetSubAgents(_ context.Context, subAgents []Agent) error {
 	if atomic.LoadUint32(&a.frozen) == 1 {
 		return errors.New("agent has been frozen after run")

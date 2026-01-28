@@ -48,5 +48,9 @@ func New(ctx context.Context, conf *Config) (adk.ResumableAgent, error) {
 		}))
 	}
 
-	return adk.SetSubAgents(ctx, conf.Supervisor, subAgents)
+	fa, err := adk.SetSubAgents(ctx, conf.Supervisor, subAgents)
+	if err != nil {
+		return nil, err
+	}
+	return adk.NewMultiAgent(ctx, supervisorName, conf.Supervisor.Description(ctx), fa), nil
 }

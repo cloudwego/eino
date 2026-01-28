@@ -47,6 +47,7 @@ func TestNewSupervisor(t *testing.T) {
 	subAgent2 := mockAdk.NewMockAgent(ctrl)
 
 	supervisorAgent.EXPECT().Name(gomock.Any()).Return("SupervisorAgent").AnyTimes()
+	supervisorAgent.EXPECT().Description(gomock.Any()).Return("Supervisor agent description").AnyTimes()
 	subAgent1.EXPECT().Name(gomock.Any()).Return("SubAgent1").AnyTimes()
 	subAgent2.EXPECT().Name(gomock.Any()).Return("SubAgent2").AnyTimes()
 
@@ -500,6 +501,7 @@ func TestSupervisorExit(t *testing.T) {
 	subAgent := mockAdk.NewMockAgent(ctrl)
 
 	supervisorAgent.EXPECT().Name(gomock.Any()).Return("Supervisor").AnyTimes()
+	supervisorAgent.EXPECT().Description(gomock.Any()).Return("Supervisor description").AnyTimes()
 	subAgent.EXPECT().Name(gomock.Any()).Return("SubAgent").AnyTimes()
 
 	// 1. Supervisor transfers to SubAgent
@@ -577,7 +579,9 @@ func TestNestedSupervisorExit(t *testing.T) {
 	worker := mockAdk.NewMockAgent(ctrl)
 
 	topSupervisor.EXPECT().Name(gomock.Any()).Return("TopSupervisor").AnyTimes()
+	topSupervisor.EXPECT().Description(gomock.Any()).Return("Top supervisor description").AnyTimes()
 	midSupervisor.EXPECT().Name(gomock.Any()).Return("MidSupervisor").AnyTimes()
+	midSupervisor.EXPECT().Description(gomock.Any()).Return("Mid supervisor description").AnyTimes()
 	worker.EXPECT().Name(gomock.Any()).Return("Worker").AnyTimes()
 
 	// 1. TopSupervisor transfers to MidSupervisor
@@ -682,6 +686,7 @@ func TestChatModelAgentInternalEventsExit(t *testing.T) {
 	innerAgent := mockAdk.NewMockAgent(ctrl)
 
 	supervisorAgent.EXPECT().Name(gomock.Any()).Return("Supervisor").AnyTimes()
+	supervisorAgent.EXPECT().Description(gomock.Any()).Return("Supervisor description").AnyTimes()
 	innerAgent.EXPECT().Name(gomock.Any()).Return("InnerAgent").AnyTimes()
 	innerAgent.EXPECT().Description(gomock.Any()).Return("Inner Agent Description").AnyTimes()
 

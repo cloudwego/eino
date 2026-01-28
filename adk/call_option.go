@@ -16,11 +16,14 @@
 
 package adk
 
+import "github.com/cloudwego/eino/callbacks"
+
 type options struct {
 	sharedParentSession  bool
 	sessionValues        map[string]any
 	checkPointID         *string
 	skipTransferMessages bool
+	handlers             []callbacks.Handler
 }
 
 // AgentRunOption is the call option for adk Agent.
@@ -61,6 +64,15 @@ func WithSkipTransferMessages() AgentRunOption {
 func withSharedParentSession() AgentRunOption {
 	return WrapImplSpecificOptFn(func(o *options) {
 		o.sharedParentSession = true
+	})
+}
+
+// WithCallbacks adds callback handlers to receive agent lifecycle events.
+// Handlers receive OnStart with AgentCallbackInput and OnEnd with AgentCallbackOutput.
+// Multiple handlers can be added; each receives an independent copy of the event stream.
+func WithCallbacks(handlers ...callbacks.Handler) AgentRunOption {
+	return WrapImplSpecificOptFn(func(o *options) {
+		o.handlers = append(o.handlers, handlers...)
 	})
 }
 
