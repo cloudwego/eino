@@ -61,12 +61,16 @@ type messageVariantSerialization struct {
 	IsStreaming   bool
 	Message       Message
 	MessageStream Message
+	Role          schema.RoleType
+	ToolName      string
 }
 
 func (mv *MessageVariant) GobEncode() ([]byte, error) {
 	s := &messageVariantSerialization{
 		IsStreaming: mv.IsStreaming,
 		Message:     mv.Message,
+		Role:        mv.Role,
+		ToolName:    mv.ToolName,
 	}
 	if mv.IsStreaming {
 		var messages []Message
@@ -102,6 +106,8 @@ func (mv *MessageVariant) GobDecode(b []byte) error {
 	}
 	mv.IsStreaming = s.IsStreaming
 	mv.Message = s.Message
+	mv.Role = s.Role
+	mv.ToolName = s.ToolName
 	if s.MessageStream != nil {
 		mv.MessageStream = schema.StreamReaderFromArray([]*schema.Message{s.MessageStream})
 	}

@@ -37,7 +37,8 @@ func newTaskToolMiddleware(
 	subAgents []adk.Agent,
 
 	withoutGeneralSubAgent bool,
-	cm model.ToolCallingChatModel,
+	// cm is the chat model. Tools are configured via model.WithTools call option.
+	cm model.BaseChatModel,
 	instruction string,
 	toolsConfig adk.ToolsConfig,
 	maxIteration int,
@@ -59,7 +60,8 @@ func newTaskTool(
 	subAgents []adk.Agent,
 
 	withoutGeneralSubAgent bool,
-	Model model.ToolCallingChatModel,
+	// Model is the chat model. Tools are configured via model.WithTools call option.
+	Model model.BaseChatModel,
 	Instruction string,
 	ToolsConfig adk.ToolsConfig,
 	MaxIteration int,
