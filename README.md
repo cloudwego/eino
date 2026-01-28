@@ -18,8 +18,8 @@ English | [中文](README.zh_CN.md)
 
 What Eino provides are:
 - a carefully curated list of **component** abstractions and implementations that can be easily reused and combined to build LLM applications
-- a powerful **composition** framework that does the heavy lifting of strong type checking, stream processing, concurrency management, aspect injection, option assignment, etc. for the user.
 - an **Agent Development Kit (ADK)** that provides high-level abstractions for building AI agents with multi-agent orchestration, human-in-the-loop interrupts, and prebuilt agent patterns.
+- a powerful **composition** framework that does the heavy lifting of strong type checking, stream processing, concurrency management, aspect injection, option assignment, etc. for the user.
 - a set of meticulously designed **API** that obsesses on simplicity and clarity.
 - an ever-growing collection of best practices in the form of bundled **flows** and **examples**.
 - a useful set of tools that covers the entire development cycle, from visualized development and debugging to online tracing and evaluation.
@@ -286,18 +286,9 @@ agent, _ := adk.NewChatModelAgent(ctx, &adk.ChatModelAgentConfig{
     - ReAct Agent, MultiQueryRetriever, Host MultiAgent, etc. They consist of multiple components and non-trivial business logic.
     - They are still transparent from the outside. A MultiQueryRetriever can be used anywhere that accepts a Retriever.
 
-## Powerful Orchestration
-
-- Data flows from Retriever / Document Loaders / ChatTemplate to ChatModel, then flows to Tools and parsed as Final Answer. This directed, controlled flow of data through multiple components can be implemented through **graph orchestration**.
-- Component instances are graph nodes, and edges are data flow channels.
-- Graph orchestration is powerful and flexible enough to implement complex business logic:
-  - type checking, stream processing, concurrency management, aspect injection and option assignment are handled by the framework.
-  - branch out execution at runtime, read and write global state, or do field level data mapping using workflow(currently in alpha stage).
-  - **Aspects (Callbacks)** handle cross-cutting concerns such as logging, tracing, and metrics. Five aspects are supported: OnStart, OnEnd, OnError, OnStartWithStreamInput, OnEndWithStreamOutput. Custom callback handlers can be added during graph run via options.
-
 ## Agent Development Kit (ADK)
 
-While graph orchestration gives you fine-grained control, the **ADK** package provides higher-level abstractions optimized for building AI agents:
+The **ADK** package provides high-level abstractions optimized for building AI agents:
 
 - **ChatModelAgent**: A ReAct-style agent that handles tool calling, conversation state, and the reasoning loop automatically.
 - **Multi-Agent with Context Engineering**: Build hierarchical agent systems where conversation history is automatically managed across agent transfers and agent-as-tool invocations, enabling seamless context sharing between specialized agents.
@@ -305,6 +296,22 @@ While graph orchestration gives you fine-grained control, the **ADK** package pr
 - **Human-in-the-Loop**: `Interrupt` and `Resume` mechanisms with checkpoint persistence for workflows requiring human approval or input.
 - **Prebuilt Patterns**: Ready-to-use implementations including Deep Agent (task orchestration), Supervisor (hierarchical coordination), and Plan-Execute-Replan.
 - **Agent Middlewares**: Extensible middleware system for adding tools (filesystem operations) and managing context (token reduction).
+
+## Powerful Orchestration
+
+For fine-grained control, Eino provides **graph orchestration** where data flows from Retriever / Document Loaders / ChatTemplate to ChatModel, then flows to Tools and parsed as Final Answer.
+
+- Component instances are graph nodes, and edges are data flow channels.
+- Graph orchestration is powerful and flexible enough to implement complex business logic:
+  - type checking, stream processing, concurrency management, aspect injection and option assignment are handled by the framework.
+  - branch out execution at runtime, read and write global state, or do field level data mapping using workflow.
+
+## Aspects (Callbacks)
+
+**Aspects** handle cross-cutting concerns such as logging, tracing, and metrics. They can be applied to components directly, orchestrated graphs, or ADK agents.
+
+- Five aspect types are supported: OnStart, OnEnd, OnError, OnStartWithStreamInput, OnEndWithStreamOutput.
+- Custom callback handlers can be added at runtime via options.
 
 ## Complete Stream Processing
 

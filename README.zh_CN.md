@@ -18,8 +18,8 @@
 
 Eino 提供的价值如下：
 - 精心整理的一系列 **组件（component）** 抽象与实现，可轻松复用与组合，用于构建 LLM 应用。
-- 强大的 **编排（orchestration）** 框架，为用户承担繁重的类型检查、流式处理、并发管理、切面注入、选项赋值等工作。
 - **智能体开发套件（ADK）**，提供构建 AI 智能体的高级抽象，支持多智能体编排、人机协作中断机制以及预置的智能体模式。
+- 强大的 **编排（orchestration）** 框架，为用户承担繁重的类型检查、流式处理、并发管理、切面注入、选项赋值等工作。
 - 一套精心设计、注重简洁明了的 **API**。
 - 以集成 **流程（flow）** 和 **示例（example）** 形式不断扩充的最佳实践集合。
 - 一套实用 **工具（DevOps tools）**，涵盖从可视化开发与调试到在线追踪与评估的整个开发生命周期。
@@ -285,18 +285,9 @@ agent, _ := adk.NewChatModelAgent(ctx, &adk.ChatModelAgentConfig{
     - ReAct Agent、MultiQueryRetriever、Host MultiAgent 等。它们由多个组件和复杂的业务逻辑构成。
     - 从外部看，它们的实现细节依然透明。例如在任何接受 Retriever 的地方，都可以使用 MultiQueryRetriever。
 
-## 强大的编排 (Graph/Chain/Workflow)
-
-- 数据从 Retriever / Document Loader / ChatTemplate 流向 ChatModel，接着流向 Tool ，并被解析为最终答案。这种通过多个组件的有向、可控的数据流，可以通过**图编排**来实现。
-- 组件实例是图的 **节点（Node）** ，而 **边（Edge）** 则是数据流通道。
-- 图编排功能强大且足够灵活，能够实现复杂的业务逻辑：
-    - **类型检查、流处理、并发管理、切面注入和选项分配**都由框架处理。
-    - 在运行时进行**分支（Branch）**执行、读写全局**状态（State）**，或者使用工作流进行字段级别的数据映射。
-    - **切面（Callbacks）** 处理日志记录、追踪、指标统计等横切关注点。支持五种切面：OnStart、OnEnd、OnError、OnStartWithStreamInput、OnEndWithStreamOutput。可通过 Option 在图运行时添加自定义回调处理程序。
-
 ## 智能体开发套件（ADK）
 
-图编排提供细粒度控制，而 **ADK** 包则提供了针对构建 AI 智能体优化的更高级抽象：
+**ADK** 包提供了针对构建 AI 智能体优化的高级抽象：
 
 - **ChatModelAgent**：ReAct 风格的智能体，自动处理工具调用、对话状态和推理循环。
 - **多智能体与上下文工程**：构建层级化智能体系统，对话历史在智能体转移和智能体作为工具调用时自动管理，实现专业智能体间的无缝上下文共享。
@@ -304,6 +295,22 @@ agent, _ := adk.NewChatModelAgent(ctx, &adk.ChatModelAgentConfig{
 - **人机协作**：`Interrupt` 和 `Resume` 机制，支持检查点持久化，适用于需要人工审批或输入的工作流。
 - **预置模式**：开箱即用的实现，包括 Deep Agent（任务编排）、Supervisor（层级协调）和 Plan-Execute-Replan。
 - **智能体中间件**：可扩展的中间件系统，用于添加工具（文件系统操作）和管理上下文（token 缩减）。
+
+## 强大的编排 (Graph/Chain/Workflow)
+
+如需细粒度控制，Eino 提供**图编排**能力，数据从 Retriever / Document Loader / ChatTemplate 流向 ChatModel，接着流向 Tool ，并被解析为最终答案。
+
+- 组件实例是图的 **节点（Node）** ，而 **边（Edge）** 则是数据流通道。
+- 图编排功能强大且足够灵活，能够实现复杂的业务逻辑：
+    - **类型检查、流处理、并发管理、切面注入和选项分配**都由框架处理。
+    - 在运行时进行**分支（Branch）**执行、读写全局**状态（State）**，或者使用工作流进行字段级别的数据映射。
+
+## 切面（Callbacks）
+
+**切面**处理日志记录、追踪、指标统计等横切关注点。切面可以直接应用于组件、编排图或 ADK 智能体。
+
+- 支持五种切面类型：OnStart、OnEnd、OnError、OnStartWithStreamInput、OnEndWithStreamOutput。
+- 可通过 Option 在运行时添加自定义回调处理程序。
 
 ## 完整的流式处理能力
 
