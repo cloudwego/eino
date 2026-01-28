@@ -655,8 +655,8 @@ func TestParallelReturnDirectlyToolCall(t *testing.T) {
 					&myTool{name: "tool3", desc: "tool3", waitTime: 100 * time.Millisecond},
 				},
 			},
-			ReturnDirectly: map[string]bool{
-				"tool1": true,
+			ReturnDirectly: map[string]struct{}{
+				"tool1": {},
 			},
 		},
 	})
@@ -783,7 +783,7 @@ func (s legacyStreamActionTool) Info(ctx context.Context) (*schema.ToolInfo, err
 
 func (s legacyStreamActionTool) StreamableRun(ctx context.Context, argumentsInJSON string, _ ...tool.Option) (*schema.StreamReader[string], error) {
 	_ = compose.ProcessState(ctx, func(ctx context.Context, st *State) error {
-		st.ToolGenActions["legacy_action_tool_stream"] = &AgentAction{CustomizedAction: argumentsInJSON}
+		st.setToolGenAction("legacy_action_tool_stream", &AgentAction{CustomizedAction: argumentsInJSON})
 		return nil
 	})
 	sr, sw := schema.Pipe[string](1)
@@ -1383,269 +1383,114 @@ func (s *simpleToolForMiddlewareTest) StreamableRun(_ context.Context, _ string,
 	return schema.StreamReaderFromArray([]string{s.result}), nil
 }
 
-func TestSendEvent(t *testing.T) {
-	t.Run("SendEventWithoutExecCtx", func(t *testing.T) {
+func TestGetComposeOptions(t *testing.T) {
+	t.Run("WithChatModelOptions", func(t *testing.T) {
 		ctx := context.Background()
-		event := &AgentEvent{
-			Output: &AgentOutput{
-				MessageOutput: &MessageVariant{
-					Message: schema.AssistantMessage("custom event", nil),
-				},
-			},
-		}
-		err := SendEvent(ctx, event)
-		assert.Error(t, err)
-		assert.Contains(t, err.Error(), "SendEvent failed: must be called within a ChatModelAgent Run() or Resume() execution context")
-	})
-
-	t.Run("SendEventWithNilGenerator", func(t *testing.T) {
-		ctx := context.Background()
-		execCtx := &chatModelAgentExecCtx{
-			generator: nil,
-		}
-		ctx = withChatModelAgentExecCtx(ctx, execCtx)
-
-		event := &AgentEvent{
-			Output: &AgentOutput{
-				MessageOutput: &MessageVariant{
-					Message: schema.AssistantMessage("custom event", nil),
-				},
-			},
-		}
-		err := SendEvent(ctx, event)
-		assert.Error(t, err)
-		assert.Contains(t, err.Error(), "SendEvent failed: must be called within a ChatModelAgent Run() or Resume() execution context")
-	})
-
-	t.Run("SendEventInMiddleware", func(t *testing.T) {
-		ctx := context.Background()
-
 		ctrl := gomock.NewController(t)
 		cm := mockModel.NewMockToolCallingChatModel(ctrl)
 
+		var capturedTemperature float32
 		cm.EXPECT().Generate(gomock.Any(), gomock.Any(), gomock.Any()).
-			Return(schema.AssistantMessage("Hello, I am an AI assistant.", nil), nil).
-			Times(1)
-
-		var customEventReceived bool
-		customEventContent := "custom_event_from_middleware"
+			DoAndReturn(func(ctx context.Context, msgs []*schema.Message, opts ...model.Option) (*schema.Message, error) {
+				options := model.GetCommonOptions(&model.Options{}, opts...)
+				if options.Temperature != nil {
+					capturedTemperature = *options.Temperature
+				}
+				return schema.AssistantMessage("response", nil), nil
+			}).Times(1)
 
 		agent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
 			Name:        "TestAgent",
-			Description: "Test agent for SendEvent",
-			Instruction: "You are a helpful assistant.",
+			Description: "Test agent",
 			Model:       cm,
-			Middlewares: []AgentMiddleware{
-				{
-					BeforeChatModel: func(ctx context.Context, state *ChatModelAgentState) error {
-						customEvent := &AgentEvent{
-							Output: &AgentOutput{
-								MessageOutput: &MessageVariant{
-									Message: schema.AssistantMessage(customEventContent, nil),
-								},
-							},
-						}
-						return SendEvent(ctx, customEvent)
-					},
-				},
-			},
 		})
 		assert.NoError(t, err)
-		assert.NotNil(t, agent)
 
-		input := &AgentInput{
-			Messages: []Message{
-				schema.UserMessage("Hello"),
-			},
-		}
-		iterator := agent.Run(ctx, input)
-		assert.NotNil(t, iterator)
-
+		temp := float32(0.7)
+		iter := agent.Run(ctx, &AgentInput{Messages: []Message{schema.UserMessage("test")}},
+			WithChatModelOptions([]model.Option{model.WithTemperature(temp)}))
 		for {
-			event, ok := iterator.Next()
+			_, ok := iter.Next()
 			if !ok {
 				break
 			}
-			if event.Output != nil && event.Output.MessageOutput != nil &&
-				event.Output.MessageOutput.Message != nil &&
-				event.Output.MessageOutput.Message.Content == customEventContent {
-				customEventReceived = true
-			}
 		}
 
-		assert.True(t, customEventReceived, "should receive custom event sent from middleware")
+		assert.Equal(t, temp, capturedTemperature, "Temperature should be passed through WithChatModelOptions")
 	})
 
-	t.Run("SendEventInMiddlewareWithTools", func(t *testing.T) {
+	t.Run("WithToolOptions", func(t *testing.T) {
 		ctx := context.Background()
-
 		ctrl := gomock.NewController(t)
 		cm := mockModel.NewMockToolCallingChatModel(ctrl)
 
-		fakeTool := &fakeToolForTest{
-			tarCount: 1,
+		var toolOptionsCaptured bool
+		testTool := &toolOptionCapturingTool{
+			name: "test_tool",
+			onRun: func(opts []tool.Option) {
+				if len(opts) > 0 {
+					toolOptionsCaptured = true
+				}
+			},
 		}
-		info, err := fakeTool.Info(ctx)
-		assert.NoError(t, err)
+		info, _ := testTool.Info(ctx)
 
-		cm.EXPECT().Generate(gomock.Any(), gomock.Any(), gomock.Any()).
-			Return(schema.AssistantMessage("Using tool",
-				[]schema.ToolCall{
-					{
-						ID: "tool-call-1",
-						Function: schema.FunctionCall{
-							Name:      info.Name,
-							Arguments: `{"name": "test user"}`,
-						},
-					}}), nil).
-			Times(1)
-		cm.EXPECT().Generate(gomock.Any(), gomock.Any(), gomock.Any()).
-			Return(schema.AssistantMessage("Task completed", nil), nil).
-			Times(1)
 		cm.EXPECT().WithTools(gomock.Any()).Return(cm, nil).AnyTimes()
-
-		var customEventReceived bool
-		customEventContent := "custom_event_from_middleware_with_tools"
+		cm.EXPECT().Generate(gomock.Any(), gomock.Any(), gomock.Any()).
+			Return(schema.AssistantMessage("Using tool", []schema.ToolCall{
+				{ID: "call1", Function: schema.FunctionCall{Name: info.Name, Arguments: "{}"}},
+			}), nil).Times(1)
+		cm.EXPECT().Generate(gomock.Any(), gomock.Any(), gomock.Any()).
+			Return(schema.AssistantMessage("done", nil), nil).Times(1)
 
 		agent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
 			Name:        "TestAgent",
-			Description: "Test agent for SendEvent with tools",
-			Instruction: "You are a helpful assistant.",
+			Description: "Test agent",
 			Model:       cm,
 			ToolsConfig: ToolsConfig{
 				ToolsNodeConfig: compose.ToolsNodeConfig{
-					Tools: []tool.BaseTool{fakeTool},
-				},
-			},
-			Middlewares: []AgentMiddleware{
-				{
-					BeforeChatModel: func(ctx context.Context, state *ChatModelAgentState) error {
-						customEvent := &AgentEvent{
-							Output: &AgentOutput{
-								MessageOutput: &MessageVariant{
-									Message: schema.AssistantMessage(customEventContent, nil),
-								},
-							},
-						}
-						return SendEvent(ctx, customEvent)
-					},
+					Tools: []tool.BaseTool{testTool},
 				},
 			},
 		})
 		assert.NoError(t, err)
-		assert.NotNil(t, agent)
 
-		input := &AgentInput{
-			Messages: []Message{
-				schema.UserMessage("Use the test tool"),
-			},
-		}
-		iterator := agent.Run(ctx, input)
-		assert.NotNil(t, iterator)
-
-		customEventCount := 0
+		iter := agent.Run(ctx, &AgentInput{Messages: []Message{schema.UserMessage("test")}},
+			WithToolOptions([]tool.Option{testToolOption("test_value")}))
 		for {
-			event, ok := iterator.Next()
+			_, ok := iter.Next()
 			if !ok {
 				break
 			}
-			if event.Output != nil && event.Output.MessageOutput != nil &&
-				event.Output.MessageOutput.Message != nil &&
-				event.Output.MessageOutput.Message.Content == customEventContent {
-				customEventReceived = true
-				customEventCount++
-			}
 		}
 
-		assert.True(t, customEventReceived, "should receive custom event sent from middleware with tools")
-		assert.Equal(t, 2, customEventCount, "middleware should be called twice (once for each ChatModel call)")
+		assert.True(t, toolOptionsCaptured, "Tool options should be passed through WithToolOptions")
 	})
 
-	t.Run("SendEventInMiddlewareStreaming", func(t *testing.T) {
-		ctx := context.Background()
-
-		ctrl := gomock.NewController(t)
-		cm := mockModel.NewMockToolCallingChatModel(ctrl)
-
-		sr := schema.StreamReaderFromArray([]*schema.Message{
-			schema.AssistantMessage("Hello", nil),
-			schema.AssistantMessage(", streaming", nil),
-		})
-		cm.EXPECT().Stream(gomock.Any(), gomock.Any(), gomock.Any()).
-			Return(sr, nil).
-			Times(1)
-
-		var customEventReceived bool
-		customEventContent := "custom_event_streaming"
-
-		agent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
-			Name:        "TestAgent",
-			Description: "Test agent for SendEvent streaming",
-			Instruction: "You are a helpful assistant.",
-			Model:       cm,
-			Middlewares: []AgentMiddleware{
-				{
-					BeforeChatModel: func(ctx context.Context, state *ChatModelAgentState) error {
-						customEvent := &AgentEvent{
-							Output: &AgentOutput{
-								MessageOutput: &MessageVariant{
-									Message: schema.AssistantMessage(customEventContent, nil),
-								},
-							},
-						}
-						return SendEvent(ctx, customEvent)
-					},
-				},
-			},
-		})
-		assert.NoError(t, err)
-		assert.NotNil(t, agent)
-
-		input := &AgentInput{
-			Messages:        []Message{schema.UserMessage("Hello")},
-			EnableStreaming: true,
-		}
-		iterator := agent.Run(ctx, input)
-		assert.NotNil(t, iterator)
-
-		for {
-			event, ok := iterator.Next()
-			if !ok {
-				break
-			}
-			if event.Output != nil && event.Output.MessageOutput != nil &&
-				event.Output.MessageOutput.Message != nil &&
-				event.Output.MessageOutput.Message.Content == customEventContent {
-				customEventReceived = true
-			}
-		}
-
-		assert.True(t, customEventReceived, "should receive custom event in streaming mode")
-	})
 }
 
-func TestChatModelAgentExecCtx(t *testing.T) {
-	t.Run("WithAndGetExecCtx", func(t *testing.T) {
-		ctx := context.Background()
+type toolOptionCapturingTool struct {
+	name  string
+	onRun func(opts []tool.Option)
+}
 
-		result := getChatModelAgentExecCtx(ctx)
-		assert.Nil(t, result)
+func (t *toolOptionCapturingTool) Info(_ context.Context) (*schema.ToolInfo, error) {
+	return &schema.ToolInfo{Name: t.name, Desc: t.name + " description"}, nil
+}
 
-		execCtx := &chatModelAgentExecCtx{}
-		ctx = withChatModelAgentExecCtx(ctx, execCtx)
+func (t *toolOptionCapturingTool) InvokableRun(_ context.Context, _ string, opts ...tool.Option) (string, error) {
+	if t.onRun != nil {
+		t.onRun(opts)
+	}
+	return t.name + " result", nil
+}
 
-		result = getChatModelAgentExecCtx(ctx)
-		assert.NotNil(t, result)
-		assert.Equal(t, execCtx, result)
-	})
+type testToolOptions struct {
+	value string
+}
 
-	t.Run("ExecCtxSendMethod", func(t *testing.T) {
-		var nilExecCtx *chatModelAgentExecCtx
-		nilExecCtx.send(&AgentEvent{})
-
-		execCtxWithNilGenerator := &chatModelAgentExecCtx{
-			generator: nil,
-		}
-		execCtxWithNilGenerator.send(&AgentEvent{})
+func testToolOption(value string) tool.Option {
+	return tool.WrapImplSpecificOptFn(func(o *testToolOptions) {
+		o.value = value
 	})
 }
