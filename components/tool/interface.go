@@ -41,3 +41,18 @@ type StreamableTool interface {
 
 	StreamableRun(ctx context.Context, argumentsInJSON string, opts ...Option) (*schema.StreamReader[string], error)
 }
+
+type ToolCallInfo struct {
+	// Arguments contains the arguments for the tool call.
+	TextArguments string
+}
+
+type EnhancedInvokableTool interface {
+	BaseTool
+	InvokableRun(ctx context.Context, toolCallInfo *ToolCallInfo, opts ...Option) (*schema.ToolResult, error)
+}
+
+type EnhancedStreamableTool interface {
+	BaseTool
+	StreamableRun(ctx context.Context, toolCallInfo *ToolCallInfo, opts ...Option) (*schema.StreamReader[*schema.ToolResult], error)
+}

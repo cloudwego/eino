@@ -39,6 +39,8 @@ import (
 func init() {
 	internal.RegisterStreamChunkConcatFunc(ConcatMessages)
 	internal.RegisterStreamChunkConcatFunc(ConcatMessageArray)
+
+	internal.RegisterStreamChunkConcatFunc(ConcatToolResults)
 }
 
 // ConcatMessageArray merges aligned slices of messages into a single slice,
@@ -250,6 +252,162 @@ type MessageOutputPart struct {
 
 	// Extra is used to store extra information.
 	Extra map[string]any `json:"extra,omitempty"`
+}
+
+// ToolPartType defines the type of content in a tool output part.
+// It is used to distinguish between different types of multimodal content returned by tools.
+type ToolPartType string
+
+const (
+	// ToolPartTypeText means the part is a text.
+	ToolPartTypeText ToolPartType = "text"
+
+	// ToolPartTypeImage means the part is an image url.
+	ToolPartTypeImage ToolPartType = "image"
+
+	// ToolPartTypeAudio means the part is an audio url.
+	ToolPartTypeAudio ToolPartType = "audio"
+
+	// ToolPartTypeVideo means the part is a video url.
+	ToolPartTypeVideo ToolPartType = "video"
+
+	// ToolPartTypeFile means the part is a file url.
+	ToolPartTypeFile ToolPartType = "file"
+)
+
+// ToolOutputImage represents an image in tool output.
+// It contains URL or Base64-encoded data along with MIME type information.
+type ToolOutputImage struct {
+	MessagePartCommon
+}
+
+// ToolOutputAudio represents an audio file in tool output.
+// It contains URL or Base64-encoded data along with MIME type information.
+type ToolOutputAudio struct {
+	MessagePartCommon
+}
+
+// ToolOutputVideo represents a video file in tool output.
+// It contains URL or Base64-encoded data along with MIME type information.
+type ToolOutputVideo struct {
+	MessagePartCommon
+}
+
+// ToolOutputFile represents a generic file in tool output.
+// It contains URL or Base64-encoded data along with MIME type information.
+type ToolOutputFile struct {
+	MessagePartCommon
+}
+
+// ToolOutputPart represents a part of tool execution output.
+// It supports streaming scenarios through the Index field for chunk merging.
+type ToolOutputPart struct {
+
+	// Type is the type of the part, e.g., "text", "image_url", "audio_url", "video_url".
+	Type ToolPartType `json:"type"`
+
+	// Text is the text content, used when Type is "text".
+	Text string `json:"text,omitempty"`
+
+	// Image is the image content, used when Type is ToolPartTypeImage.
+	Image *ToolOutputImage `json:"image,omitempty"`
+
+	// Audio is the audio content, used when Type is ToolPartTypeAudio.
+	Audio *ToolOutputAudio `json:"audio,omitempty"`
+
+	// Video is the video content, used when Type is ToolPartTypeVideo.
+	Video *ToolOutputVideo `json:"video,omitempty"`
+
+	// File is the file content, used when Type is ToolPartTypeFile.
+	File *ToolOutputFile `json:"file,omitempty"`
+
+	// Extra is used to store extra information.
+	Extra map[string]any `json:"extra,omitempty"`
+}
+
+// ToolResult represents the structured multimodal output from a tool execution.
+// It is used when a tool needs to return more than just a simple string,
+// such as images, files, or other structured data.
+type ToolResult struct {
+	// Content contains the multimodal output parts. Each part can be a different
+	// type of content, like text, an image, or a file.
+	Content []ToolOutputPart `json:"content,omitempty"`
+}
+
+func convToolOutputPartToMessageInputPart(toolPart ToolOutputPart) (MessageInputPart, error) {
+	switch toolPart.Type {
+	case ToolPartTypeText:
+		return MessageInputPart{
+			Type: ChatMessagePartTypeText,
+			Text: toolPart.Text,
+		}, nil
+	case ToolPartTypeImage:
+		if toolPart.Image != nil {
+			return MessageInputPart{
+				Type:  ChatMessagePartTypeImageURL,
+				Image: &MessageInputImage{MessagePartCommon: toolPart.Image.MessagePartCommon},
+			}, nil
+		}
+	case ToolPartTypeAudio:
+		if toolPart.Audio != nil {
+			return MessageInputPart{
+				Type:  ChatMessagePartTypeAudioURL,
+				Audio: &MessageInputAudio{MessagePartCommon: toolPart.Audio.MessagePartCommon},
+			}, nil
+		}
+
+	case ToolPartTypeVideo:
+		if toolPart.Video != nil {
+			return MessageInputPart{
+				Type:  ChatMessagePartTypeVideoURL,
+				Video: &MessageInputVideo{MessagePartCommon: toolPart.Video.MessagePartCommon},
+			}, nil
+		}
+	case ToolPartTypeFile:
+		if toolPart.File != nil {
+			return MessageInputPart{
+				Type: ChatMessagePartTypeFileURL,
+				File: &MessageInputFile{MessagePartCommon: toolPart.File.MessagePartCommon},
+			}, nil
+		}
+	default:
+		return MessageInputPart{}, fmt.Errorf("unknown tool part type: %v", toolPart.Type)
+	}
+	return MessageInputPart{}, fmt.Errorf("unknown tool part type: %v", toolPart.Type)
+}
+
+// ToMessageInputParts converts ToolOutputPart slice to MessageInputPart slice.
+// This is used when passing tool results as input to the model.
+//
+// Parameters:
+//   - None (method receiver is *ToolResult)
+//
+// Returns:
+//   - []MessageInputPart: The converted message input parts that can be used in a Message.
+//   - error: An error if conversion fails due to unknown part types or nil content fields.
+//
+// Example:
+//
+//	toolResult := &schema.ToolResult{
+//	    Content: []schema.ToolOutputPart{
+//	        {Type: schema.ToolPartTypeText, Text: "Result text"},
+//	        {Type: schema.ToolPartTypeImage, Image: &schema.ToolOutputImage{...}},
+//	    },
+//	}
+//	inputParts, err := toolResult.ToMessageInputParts()
+func (tr *ToolResult) ToMessageInputParts() ([]MessageInputPart, error) {
+	if tr == nil || len(tr.Content) == 0 {
+		return nil, nil
+	}
+	result := make([]MessageInputPart, len(tr.Content))
+	for i, part := range tr.Content {
+		var err error
+		result[i], err = convToolOutputPartToMessageInputPart(part)
+		if err != nil {
+			return nil, err
+		}
+	}
+	return result, nil
 }
 
 // Deprecated: This struct is deprecated as the MultiContent field is deprecated.
@@ -890,6 +1048,147 @@ func ToolMessage(content string, toolCallID string, opts ...ToolMessageOption) *
 		ToolCallID: toolCallID,
 		ToolName:   o.toolName,
 	}
+}
+
+// ConcatToolResults merges multiple ToolResult chunks into a single ToolResult.
+// It groups ToolOutputParts by their Index field and merges parts with the same Index.
+// Parts without an Index are kept as standalone parts.
+// For text parts with the same Index, their Text fields are concatenated.
+//
+// This function is primarily used in streaming scenarios where tool output is delivered
+// in multiple chunks that need to be merged into a complete result.
+//
+// Parameters:
+//   - chunks: A slice of ToolResult pointers representing sequential chunks from a stream.
+//
+// Returns:
+//   - *ToolResult: The merged ToolResult containing all content from the chunks.
+//   - error: An error if merging fails (e.g., due to extra field concatenation errors).
+func ConcatToolResults(chunks []*ToolResult) (*ToolResult, error) {
+	if len(chunks) == 0 {
+		return &ToolResult{}, nil
+	}
+
+	// Collect all parts from all chunks into a temporary list
+	var allParts []ToolOutputPart
+	for _, chunk := range chunks {
+		if chunk != nil && len(chunk.Content) > 0 {
+			allParts = append(allParts, chunk.Content...)
+		}
+	}
+
+	if len(allParts) == 0 {
+		return &ToolResult{}, nil
+	}
+
+	// Merge contiguous parts of the same type
+	merged, err := concatToolOutputParts(allParts)
+	if err != nil {
+		return nil, err
+	}
+
+	return &ToolResult{Content: merged}, nil
+}
+
+func isBase64AudioToolPart(part ToolOutputPart) bool {
+	return part.Type == ToolPartTypeAudio &&
+		part.Audio != nil &&
+		part.Audio.Base64Data != nil &&
+		part.Audio.URL == nil
+}
+
+func concatToolOutputParts(parts []ToolOutputPart) ([]ToolOutputPart, error) {
+	merged := make([]ToolOutputPart, 0, len(parts))
+	i := 0
+	for i < len(parts) {
+		currentPart := parts[i]
+		start := i
+
+		if currentPart.Type == ToolPartTypeText {
+			// --- Text Merging ---
+			// Find end of contiguous text block
+			end := start + 1
+			for end < len(parts) && parts[end].Type == ToolPartTypeText {
+				end++
+			}
+
+			// If only one part, just append it
+			if end == start+1 {
+				merged = append(merged, currentPart)
+			} else {
+				// Multiple parts to merge
+				var sb strings.Builder
+				for k := start; k < end; k++ {
+					sb.WriteString(parts[k].Text)
+				}
+				mergedPart := ToolOutputPart{
+					Type: ToolPartTypeText,
+					Text: sb.String(),
+				}
+				merged = append(merged, mergedPart)
+			}
+			i = end
+		} else if isBase64AudioToolPart(currentPart) {
+			// --- Audio Merging ---
+			// Find end of contiguous audio block
+			end := start + 1
+			for end < len(parts) && isBase64AudioToolPart(parts[end]) {
+				end++
+			}
+
+			// If only one part, just append it
+			if end == start+1 {
+				merged = append(merged, currentPart)
+			} else {
+				// Multiple parts to merge
+				var b64Builder strings.Builder
+				var mimeType string
+				extraList := make([]map[string]any, 0, end-start)
+
+				for k := start; k < end; k++ {
+					audioPart := parts[k].Audio
+					if audioPart.Base64Data != nil {
+						b64Builder.WriteString(*audioPart.Base64Data)
+					}
+					if mimeType == "" {
+						mimeType = audioPart.MIMEType
+					}
+					if len(audioPart.Extra) > 0 {
+						extraList = append(extraList, audioPart.Extra)
+					}
+				}
+
+				var mergedExtra map[string]any
+				var err error
+				if len(extraList) > 0 {
+					mergedExtra, err = concatExtra(extraList)
+					if err != nil {
+						return nil, fmt.Errorf("failed to concat tool audio extra: %w", err)
+					}
+				}
+
+				mergedB64 := b64Builder.String()
+				mergedPart := ToolOutputPart{
+					Type: ToolPartTypeAudio,
+					Audio: &ToolOutputAudio{
+						MessagePartCommon: MessagePartCommon{
+							Base64Data: &mergedB64,
+							MIMEType:   mimeType,
+							Extra:      mergedExtra,
+						},
+					},
+				}
+				merged = append(merged, mergedPart)
+			}
+			i = end
+		} else {
+			// --- Non-mergeable part ---
+			merged = append(merged, currentPart)
+			i++
+		}
+	}
+
+	return merged, nil
 }
 
 func concatToolCalls(chunks []ToolCall) ([]ToolCall, error) {

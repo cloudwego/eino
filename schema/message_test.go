@@ -1008,3 +1008,311 @@ func TestFormatUserInputMultiContent(t *testing.T) {
 		}
 	})
 }
+
+func TestConcatToolResults(t *testing.T) {
+	t.Run("empty_chunks", func(t *testing.T) {
+		result, err := ConcatToolResults([]*ToolResult{})
+		assert.NoError(t, err)
+		assert.NotNil(t, result)
+		assert.Empty(t, result.Content)
+	})
+
+	t.Run("nil_chunks", func(t *testing.T) {
+		result, err := ConcatToolResults([]*ToolResult{nil, nil})
+		assert.NoError(t, err)
+		assert.NotNil(t, result)
+		assert.Empty(t, result.Content)
+	})
+
+	t.Run("single_text_part", func(t *testing.T) {
+		chunks := []*ToolResult{
+			{
+				Content: []ToolOutputPart{
+					{Type: ToolPartTypeText, Text: "Hello World"},
+				},
+			},
+		}
+		result, err := ConcatToolResults(chunks)
+		assert.NoError(t, err)
+		assert.Len(t, result.Content, 1)
+		assert.Equal(t, ToolPartTypeText, result.Content[0].Type)
+		assert.Equal(t, "Hello World", result.Content[0].Text)
+	})
+
+	t.Run("multiple_text_parts_merge", func(t *testing.T) {
+		chunks := []*ToolResult{
+			{
+				Content: []ToolOutputPart{
+					{Type: ToolPartTypeText, Text: "Hello "},
+				},
+			},
+			{
+				Content: []ToolOutputPart{
+					{Type: ToolPartTypeText, Text: "World"},
+				},
+			},
+			{
+				Content: []ToolOutputPart{
+					{Type: ToolPartTypeText, Text: "!"},
+				},
+			},
+		}
+		result, err := ConcatToolResults(chunks)
+		assert.NoError(t, err)
+		assert.Len(t, result.Content, 1)
+		assert.Equal(t, ToolPartTypeText, result.Content[0].Type)
+		assert.Equal(t, "Hello World!", result.Content[0].Text)
+	})
+
+	t.Run("multiple_audio_parts_merge", func(t *testing.T) {
+		base64Data1 := "YXVkaW8x" // "audio1" in base64
+		base64Data2 := "YXVkaW8y" // "audio2" in base64
+		base64Data3 := "YXVkaW8z" // "audio3" in base64
+
+		chunks := []*ToolResult{
+			{
+				Content: []ToolOutputPart{
+					{
+						Type: ToolPartTypeAudio,
+						Audio: &ToolOutputAudio{
+							MessagePartCommon: MessagePartCommon{
+								Base64Data: &base64Data1,
+								MIMEType:   "audio/wav",
+							},
+						},
+					},
+				},
+			},
+			{
+				Content: []ToolOutputPart{
+					{
+						Type: ToolPartTypeAudio,
+						Audio: &ToolOutputAudio{
+							MessagePartCommon: MessagePartCommon{
+								Base64Data: &base64Data2,
+								MIMEType:   "audio/wav",
+							},
+						},
+					},
+				},
+			},
+			{
+				Content: []ToolOutputPart{
+					{
+						Type: ToolPartTypeAudio,
+						Audio: &ToolOutputAudio{
+							MessagePartCommon: MessagePartCommon{
+								Base64Data: &base64Data3,
+								MIMEType:   "audio/wav",
+							},
+						},
+					},
+				},
+			},
+		}
+
+		result, err := ConcatToolResults(chunks)
+		assert.NoError(t, err)
+		assert.Len(t, result.Content, 1)
+		assert.Equal(t, ToolPartTypeAudio, result.Content[0].Type)
+		assert.NotNil(t, result.Content[0].Audio)
+		assert.NotNil(t, result.Content[0].Audio.Base64Data)
+		assert.Equal(t, "YXVkaW8xYXVkaW8yYXVkaW8z", *result.Content[0].Audio.Base64Data)
+		assert.Equal(t, "audio/wav", result.Content[0].Audio.MIMEType)
+	})
+
+	t.Run("mixed_types_no_merge", func(t *testing.T) {
+		imageURL := "https://example.com/image.png"
+		videoURL := "https://example.com/video.mp4"
+
+		chunks := []*ToolResult{
+			{
+				Content: []ToolOutputPart{
+					{Type: ToolPartTypeText, Text: "Text part"},
+					{
+						Type: ToolPartTypeImage,
+						Image: &ToolOutputImage{
+							MessagePartCommon: MessagePartCommon{
+								URL: &imageURL,
+							},
+						},
+					},
+				},
+			},
+			{
+				Content: []ToolOutputPart{
+					{
+						Type: ToolPartTypeVideo,
+						Video: &ToolOutputVideo{
+							MessagePartCommon: MessagePartCommon{
+								URL: &videoURL,
+							},
+						},
+					},
+				},
+			},
+		}
+
+		result, err := ConcatToolResults(chunks)
+		assert.NoError(t, err)
+		assert.Len(t, result.Content, 3)
+		assert.Equal(t, ToolPartTypeText, result.Content[0].Type)
+		assert.Equal(t, ToolPartTypeImage, result.Content[1].Type)
+		assert.Equal(t, ToolPartTypeVideo, result.Content[2].Type)
+	})
+
+	t.Run("mixed_text_and_audio_merge", func(t *testing.T) {
+		base64Data1 := "YXVkaW8x"
+		base64Data2 := "YXVkaW8y"
+
+		chunks := []*ToolResult{
+			{
+				Content: []ToolOutputPart{
+					{Type: ToolPartTypeText, Text: "Part 1 "},
+					{Type: ToolPartTypeText, Text: "Part 2"},
+				},
+			},
+			{
+				Content: []ToolOutputPart{
+					{
+						Type: ToolPartTypeAudio,
+						Audio: &ToolOutputAudio{
+							MessagePartCommon: MessagePartCommon{
+								Base64Data: &base64Data1,
+								MIMEType:   "audio/wav",
+							},
+						},
+					},
+				},
+			},
+			{
+				Content: []ToolOutputPart{
+					{
+						Type: ToolPartTypeAudio,
+						Audio: &ToolOutputAudio{
+							MessagePartCommon: MessagePartCommon{
+								Base64Data: &base64Data2,
+								MIMEType:   "audio/wav",
+							},
+						},
+					},
+				},
+			},
+			{
+				Content: []ToolOutputPart{
+					{Type: ToolPartTypeText, Text: " Part 3"},
+				},
+			},
+		}
+
+		result, err := ConcatToolResults(chunks)
+		assert.NoError(t, err)
+		assert.Len(t, result.Content, 3)
+
+		// First merged text part
+		assert.Equal(t, ToolPartTypeText, result.Content[0].Type)
+		assert.Equal(t, "Part 1 Part 2", result.Content[0].Text)
+
+		// Merged audio part
+		assert.Equal(t, ToolPartTypeAudio, result.Content[1].Type)
+		assert.NotNil(t, result.Content[1].Audio)
+		assert.NotNil(t, result.Content[1].Audio.Base64Data)
+		assert.Equal(t, "YXVkaW8xYXVkaW8y", *result.Content[1].Audio.Base64Data)
+
+		// Last text part
+		assert.Equal(t, ToolPartTypeText, result.Content[2].Type)
+		assert.Equal(t, " Part 3", result.Content[2].Text)
+	})
+
+	t.Run("audio_with_url_not_merged", func(t *testing.T) {
+		audioURL := "https://example.com/audio.wav"
+		base64Data := "YXVkaW8x"
+
+		chunks := []*ToolResult{
+			{
+				Content: []ToolOutputPart{
+					{
+						Type: ToolPartTypeAudio,
+						Audio: &ToolOutputAudio{
+							MessagePartCommon: MessagePartCommon{
+								URL:      &audioURL,
+								MIMEType: "audio/wav",
+							},
+						},
+					},
+				},
+			},
+			{
+				Content: []ToolOutputPart{
+					{
+						Type: ToolPartTypeAudio,
+						Audio: &ToolOutputAudio{
+							MessagePartCommon: MessagePartCommon{
+								Base64Data: &base64Data,
+								MIMEType:   "audio/wav",
+							},
+						},
+					},
+				},
+			},
+		}
+
+		result, err := ConcatToolResults(chunks)
+		assert.NoError(t, err)
+		// Audio with URL should not be merged with Base64 audio
+		assert.Len(t, result.Content, 2)
+	})
+
+	t.Run("audio_extra_fields_merge", func(t *testing.T) {
+		base64Data1 := "YXVkaW8x"
+		base64Data2 := "YXVkaW8y"
+
+		chunks := []*ToolResult{
+			{
+				Content: []ToolOutputPart{
+					{
+						Type: ToolPartTypeAudio,
+						Audio: &ToolOutputAudio{
+							MessagePartCommon: MessagePartCommon{
+								Base64Data: &base64Data1,
+								MIMEType:   "audio/wav",
+								Extra: map[string]any{
+									"key1": "value1",
+								},
+							},
+						},
+					},
+				},
+			},
+			{
+				Content: []ToolOutputPart{
+					{
+						Type: ToolPartTypeAudio,
+						Audio: &ToolOutputAudio{
+							MessagePartCommon: MessagePartCommon{
+								Base64Data: &base64Data2,
+								MIMEType:   "audio/wav",
+								Extra: map[string]any{
+									"key2": "value2",
+								},
+							},
+						},
+					},
+				},
+			},
+		}
+
+		result, err := ConcatToolResults(chunks)
+		assert.NoError(t, err)
+		assert.Len(t, result.Content, 1)
+		assert.Equal(t, ToolPartTypeAudio, result.Content[0].Type)
+		assert.NotNil(t, result.Content[0].Audio)
+		assert.NotNil(t, result.Content[0].Audio.Base64Data)
+		assert.Equal(t, "YXVkaW8xYXVkaW8y", *result.Content[0].Audio.Base64Data)
+
+		// Check extra fields are merged
+		assert.NotNil(t, result.Content[0].Audio.Extra)
+		assert.Equal(t, "value1", result.Content[0].Audio.Extra["key1"])
+		assert.Equal(t, "value2", result.Content[0].Audio.Extra["key2"])
+	})
+}
