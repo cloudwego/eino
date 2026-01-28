@@ -38,7 +38,7 @@ func TestWriteTodos(t *testing.T) {
 
 	wt := m[0].AdditionalTools[0].(tool.InvokableTool)
 
-	todos := `[{"content":"content1","status":"pending"},{"content":"content2","status":"pending"}]`
+	todos := `[{"content":"content1","activeForm":"","status":"pending"},{"content":"content2","activeForm":"","status":"pending"}]`
 	args := fmt.Sprintf(`{"todos": %s}`, todos)
 
 	result, err := wt.InvokableRun(context.Background(), args)

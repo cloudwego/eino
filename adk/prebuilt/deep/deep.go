@@ -133,8 +133,9 @@ func buildBuiltinAgentMiddlewares(withoutWriteTodos bool) ([]adk.AgentMiddleware
 }
 
 type TODO struct {
-	Content string `json:"content"`
-	Status  string `json:"status" jsonschema:"enum=pending,enum=in_progress,enum=completed"`
+	Content    string `json:"content"`
+	ActiveForm string `json:"activeForm"`
+	Status     string `json:"status" jsonschema:"enum=pending,enum=in_progress,enum=completed"`
 }
 
 type writeTodosArguments struct {
