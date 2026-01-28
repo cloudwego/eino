@@ -35,6 +35,26 @@ import (
 	"github.com/cloudwego/eino/schema"
 )
 
+type testModelWrapper struct {
+	inner model.ToolCallingChatModel
+}
+
+func (w *testModelWrapper) Generate(ctx context.Context, input []*schema.Message, opts ...model.Option) (*schema.Message, error) {
+	return (&stateModelWrapper{inner: w.inner}).Generate(ctx, input, opts...)
+}
+
+func (w *testModelWrapper) Stream(ctx context.Context, input []*schema.Message, opts ...model.Option) (*schema.StreamReader[*schema.Message], error) {
+	return (&stateModelWrapper{inner: w.inner}).Stream(ctx, input, opts...)
+}
+
+func (w *testModelWrapper) WithTools(tools []*schema.ToolInfo) (model.ToolCallingChatModel, error) {
+	newInner, err := w.inner.WithTools(tools)
+	if err != nil {
+		return nil, err
+	}
+	return &testModelWrapper{inner: newInner}, nil
+}
+
 // TestReact tests the newReact function with different scenarios
 func TestReact(t *testing.T) {
 	// Basic test for newReact function
@@ -78,11 +98,11 @@ func TestReact(t *testing.T) {
 
 		// Create a reactConfig
 		config := &reactConfig{
-			model: cm,
+			model: &testModelWrapper{inner: cm},
 			toolsConfig: &compose.ToolsNodeConfig{
 				Tools: []tool.BaseTool{fakeTool},
 			},
-			toolsReturnDirectly: map[string]bool{},
+			toolsReturnDirectly: map[string]struct{}{},
 		}
 
 		graph, err := newReact(ctx, config)
@@ -94,12 +114,12 @@ func TestReact(t *testing.T) {
 		assert.NotNil(t, compiled)
 
 		// Test with a user message
-		result, err := compiled.Invoke(ctx, []Message{
+		result, err := compiled.Invoke(ctx, &reactInput{messages: []Message{
 			{
 				Role:    schema.User,
 				Content: "Use the test tool to say hello",
 			},
-		})
+		}})
 		assert.NoError(t, err)
 		assert.NotNil(t, result)
 	})
@@ -145,11 +165,11 @@ func TestReact(t *testing.T) {
 
 		// Create a reactConfig with toolsReturnDirectly
 		config := &reactConfig{
-			model: cm,
+			model: &testModelWrapper{inner: cm},
 			toolsConfig: &compose.ToolsNodeConfig{
 				Tools: []tool.BaseTool{fakeTool},
 			},
-			toolsReturnDirectly: map[string]bool{info.Name: true},
+			toolsReturnDirectly: map[string]struct{}{info.Name: {}},
 		}
 
 		graph, err := newReact(ctx, config)
@@ -161,12 +181,12 @@ func TestReact(t *testing.T) {
 		assert.NotNil(t, compiled)
 
 		// Test with a user message when tool returns directly
-		result, err := compiled.Invoke(ctx, []Message{
+		result, err := compiled.Invoke(ctx, &reactInput{messages: []Message{
 			{
 				Role:    schema.User,
 				Content: "Use the test tool to say hello",
 			},
-		})
+		}})
 		assert.NoError(t, err)
 		assert.NotNil(t, result)
 
@@ -237,11 +257,11 @@ func TestReact(t *testing.T) {
 
 		// Create a reactConfig
 		config := &reactConfig{
-			model: cm,
+			model: &testModelWrapper{inner: cm},
 			toolsConfig: &compose.ToolsNodeConfig{
 				Tools: []tool.BaseTool{fakeTool, fakeStreamTool},
 			},
-			toolsReturnDirectly: map[string]bool{},
+			toolsReturnDirectly: map[string]struct{}{},
 		}
 
 		graph, err := newReact(ctx, config)
@@ -253,12 +273,12 @@ func TestReact(t *testing.T) {
 		assert.NotNil(t, compiled)
 
 		// Test streaming with a user message
-		outStream, err := compiled.Stream(ctx, []Message{
+		outStream, err := compiled.Stream(ctx, &reactInput{messages: []Message{
 			{
 				Role:    schema.User,
 				Content: "Use the test tool to say hello",
 			},
-		})
+		}})
 		assert.NoError(t, err)
 		assert.NotNil(t, outStream)
 
@@ -347,11 +367,11 @@ func TestReact(t *testing.T) {
 
 		// Create a reactConfig with toolsReturnDirectly
 		config := &reactConfig{
-			model: cm,
+			model: &testModelWrapper{inner: cm},
 			toolsConfig: &compose.ToolsNodeConfig{
 				Tools: []tool.BaseTool{fakeTool, fakeStreamTool},
 			},
-			toolsReturnDirectly: map[string]bool{streamInfo.Name: true},
+			toolsReturnDirectly: map[string]struct{}{streamInfo.Name: {}},
 		}
 
 		graph, err := newReact(ctx, config)
@@ -366,12 +386,12 @@ func TestReact(t *testing.T) {
 		times = 0
 
 		// Test streaming with a user message when tool returns directly
-		outStream, err := compiled.Stream(ctx, []Message{
+		outStream, err := compiled.Stream(ctx, &reactInput{messages: []Message{
 			{
 				Role:    schema.User,
 				Content: "Use the test tool to say hello",
 			},
-		})
+		}})
 		assert.NoError(t, err)
 		assert.NotNil(t, outStream)
 
@@ -435,11 +455,11 @@ func TestReact(t *testing.T) {
 
 		// don't exceed max iterations
 		config := &reactConfig{
-			model: cm,
+			model: &testModelWrapper{inner: cm},
 			toolsConfig: &compose.ToolsNodeConfig{
 				Tools: []tool.BaseTool{fakeTool},
 			},
-			toolsReturnDirectly: map[string]bool{},
+			toolsReturnDirectly: map[string]struct{}{},
 			maxIterations:       6,
 		}
 
@@ -452,12 +472,12 @@ func TestReact(t *testing.T) {
 		assert.NotNil(t, compiled)
 
 		// Test with a user message
-		result, err := compiled.Invoke(ctx, []Message{
+		result, err := compiled.Invoke(ctx, &reactInput{messages: []Message{
 			{
 				Role:    schema.User,
 				Content: "Use the test tool to say hello",
 			},
-		})
+		}})
 		assert.NoError(t, err)
 		assert.Equal(t, result.Content, "bye")
 
@@ -465,11 +485,11 @@ func TestReact(t *testing.T) {
 		times = 0
 		// exceed max iterations
 		config = &reactConfig{
-			model: cm,
+			model: &testModelWrapper{inner: cm},
 			toolsConfig: &compose.ToolsNodeConfig{
 				Tools: []tool.BaseTool{fakeTool},
 			},
-			toolsReturnDirectly: map[string]bool{},
+			toolsReturnDirectly: map[string]struct{}{},
 			maxIterations:       5,
 		}
 
@@ -482,12 +502,12 @@ func TestReact(t *testing.T) {
 		assert.NotNil(t, compiled)
 
 		// Test with a user message
-		result, err = compiled.Invoke(ctx, []Message{
+		result, err = compiled.Invoke(ctx, &reactInput{messages: []Message{
 			{
 				Role:    schema.User,
 				Content: "Use the test tool to say hello",
 			},
-		})
+		}})
 		assert.Error(t, err)
 		t.Logf("actual error: %v", err.Error())
 		assert.ErrorIs(t, err, ErrExceedMaxIterations)
