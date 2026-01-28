@@ -1433,3 +1433,504 @@ func TestModelWrapper_InputModification(t *testing.T) {
 		assert.True(t, found, "Model should receive wrapper-modified input")
 	})
 }
+
+func TestRunLocalValueFunctions(t *testing.T) {
+	t.Run("SetAndGetRunLocalValue", func(t *testing.T) {
+		ctx := context.Background()
+		ctrl := gomock.NewController(t)
+		cm := mockModel.NewMockToolCallingChatModel(ctrl)
+
+		var capturedValue any
+		var capturedFound bool
+
+		cm.EXPECT().Generate(gomock.Any(), gomock.Any(), gomock.Any()).
+			Return(schema.AssistantMessage("response", nil), nil).Times(1)
+
+		agent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+			Name:        "TestAgent",
+			Description: "Test agent",
+			Model:       cm,
+			Handlers: []ChatModelAgentMiddleware{
+				&testBeforeModelRewriteStateHandler{fn: func(ctx context.Context, state *ChatModelAgentState) (context.Context, *ChatModelAgentState, error) {
+					err := SetRunLocalValue(ctx, "test_key", "test_value")
+					assert.NoError(t, err)
+					return ctx, state, nil
+				}},
+				&testAfterModelRewriteStateHandler{fn: func(ctx context.Context, state *ChatModelAgentState) (context.Context, *ChatModelAgentState, error) {
+					val, found, err := GetRunLocalValue(ctx, "test_key")
+					assert.NoError(t, err)
+					capturedValue = val
+					capturedFound = found
+					return ctx, state, nil
+				}},
+			},
+		})
+		assert.NoError(t, err)
+
+		iter := agent.Run(ctx, &AgentInput{Messages: []Message{schema.UserMessage("test")}})
+		for {
+			_, ok := iter.Next()
+			if !ok {
+				break
+			}
+		}
+
+		assert.True(t, capturedFound, "Value should be found")
+		assert.Equal(t, "test_value", capturedValue, "Value should match what was set")
+	})
+
+	t.Run("DeleteRunLocalValue", func(t *testing.T) {
+		ctx := context.Background()
+		ctrl := gomock.NewController(t)
+		cm := mockModel.NewMockToolCallingChatModel(ctrl)
+
+		var valueAfterDelete any
+		var foundAfterDelete bool
+
+		cm.EXPECT().Generate(gomock.Any(), gomock.Any(), gomock.Any()).
+			Return(schema.AssistantMessage("response", nil), nil).Times(1)
+
+		agent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+			Name:        "TestAgent",
+			Description: "Test agent",
+			Model:       cm,
+			Handlers: []ChatModelAgentMiddleware{
+				&testBeforeModelRewriteStateHandler{fn: func(ctx context.Context, state *ChatModelAgentState) (context.Context, *ChatModelAgentState, error) {
+					err := SetRunLocalValue(ctx, "delete_key", "delete_value")
+					assert.NoError(t, err)
+
+					err = DeleteRunLocalValue(ctx, "delete_key")
+					assert.NoError(t, err)
+					return ctx, state, nil
+				}},
+				&testAfterModelRewriteStateHandler{fn: func(ctx context.Context, state *ChatModelAgentState) (context.Context, *ChatModelAgentState, error) {
+					val, found, err := GetRunLocalValue(ctx, "delete_key")
+					assert.NoError(t, err)
+					valueAfterDelete = val
+					foundAfterDelete = found
+					return ctx, state, nil
+				}},
+			},
+		})
+		assert.NoError(t, err)
+
+		iter := agent.Run(ctx, &AgentInput{Messages: []Message{schema.UserMessage("test")}})
+		for {
+			_, ok := iter.Next()
+			if !ok {
+				break
+			}
+		}
+
+		assert.False(t, foundAfterDelete, "Value should not be found after deletion")
+		assert.Nil(t, valueAfterDelete, "Value should be nil after deletion")
+	})
+
+	t.Run("GetNonExistentKey", func(t *testing.T) {
+		ctx := context.Background()
+		ctrl := gomock.NewController(t)
+		cm := mockModel.NewMockToolCallingChatModel(ctrl)
+
+		var capturedValue any
+		var capturedFound bool
+
+		cm.EXPECT().Generate(gomock.Any(), gomock.Any(), gomock.Any()).
+			Return(schema.AssistantMessage("response", nil), nil).Times(1)
+
+		agent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+			Name:        "TestAgent",
+			Description: "Test agent",
+			Model:       cm,
+			Handlers: []ChatModelAgentMiddleware{
+				&testBeforeModelRewriteStateHandler{fn: func(ctx context.Context, state *ChatModelAgentState) (context.Context, *ChatModelAgentState, error) {
+					val, found, err := GetRunLocalValue(ctx, "non_existent_key")
+					assert.NoError(t, err)
+					capturedValue = val
+					capturedFound = found
+					return ctx, state, nil
+				}},
+			},
+		})
+		assert.NoError(t, err)
+
+		iter := agent.Run(ctx, &AgentInput{Messages: []Message{schema.UserMessage("test")}})
+		for {
+			_, ok := iter.Next()
+			if !ok {
+				break
+			}
+		}
+
+		assert.False(t, capturedFound, "Non-existent key should not be found")
+		assert.Nil(t, capturedValue, "Non-existent key should return nil value")
+	})
+
+	t.Run("RunLocalValueOutsideContext", func(t *testing.T) {
+		ctx := context.Background()
+
+		err := SetRunLocalValue(ctx, "key", "value")
+		assert.Error(t, err, "SetRunLocalValue should fail outside agent context")
+		assert.Contains(t, err.Error(), "SetRunLocalValue failed")
+
+		_, _, err = GetRunLocalValue(ctx, "key")
+		assert.Error(t, err, "GetRunLocalValue should fail outside agent context")
+		assert.Contains(t, err.Error(), "GetRunLocalValue failed")
+
+		err = DeleteRunLocalValue(ctx, "key")
+		assert.Error(t, err, "DeleteRunLocalValue should fail outside agent context")
+		assert.Contains(t, err.Error(), "DeleteRunLocalValue failed")
+	})
+
+	t.Run("RunLocalValuePersistsAcrossModelCalls", func(t *testing.T) {
+		ctx := context.Background()
+		ctrl := gomock.NewController(t)
+		cm := mockModel.NewMockToolCallingChatModel(ctrl)
+
+		testTool := &namedTool{name: "test_tool"}
+		info, _ := testTool.Info(ctx)
+
+		var firstCallValue any
+		var secondCallValue any
+		callCount := 0
+
+		cm.EXPECT().WithTools(gomock.Any()).Return(cm, nil).AnyTimes()
+		cm.EXPECT().Generate(gomock.Any(), gomock.Any(), gomock.Any()).
+			Return(schema.AssistantMessage("Using tool", []schema.ToolCall{
+				{ID: "call1", Function: schema.FunctionCall{Name: info.Name, Arguments: "{}"}},
+			}), nil).Times(1)
+		cm.EXPECT().Generate(gomock.Any(), gomock.Any(), gomock.Any()).
+			Return(schema.AssistantMessage("done", nil), nil).Times(1)
+
+		agent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+			Name:        "TestAgent",
+			Description: "Test agent",
+			Model:       cm,
+			ToolsConfig: ToolsConfig{
+				ToolsNodeConfig: compose.ToolsNodeConfig{
+					Tools: []tool.BaseTool{testTool},
+				},
+			},
+			Handlers: []ChatModelAgentMiddleware{
+				&testBeforeModelRewriteStateHandler{fn: func(ctx context.Context, state *ChatModelAgentState) (context.Context, *ChatModelAgentState, error) {
+					callCount++
+					if callCount == 1 {
+						err := SetRunLocalValue(ctx, "persist_key", "persist_value")
+						assert.NoError(t, err)
+						val, _, _ := GetRunLocalValue(ctx, "persist_key")
+						firstCallValue = val
+					} else {
+						val, _, _ := GetRunLocalValue(ctx, "persist_key")
+						secondCallValue = val
+					}
+					return ctx, state, nil
+				}},
+			},
+		})
+		assert.NoError(t, err)
+
+		iter := agent.Run(ctx, &AgentInput{Messages: []Message{schema.UserMessage("test")}})
+		for {
+			_, ok := iter.Next()
+			if !ok {
+				break
+			}
+		}
+
+		assert.Equal(t, "persist_value", firstCallValue, "First call should set value")
+		assert.Equal(t, "persist_value", secondCallValue, "Value should persist to second model call")
+	})
+}
+
+func TestIsMethodOverridden(t *testing.T) {
+	t.Run("OverriddenMethod", func(t *testing.T) {
+		handler := &testInstructionHandler{
+			BaseChatModelAgentMiddleware: &BaseChatModelAgentMiddleware{},
+			text:                         "test",
+		}
+		assert.True(t, isMethodOverridden(handler, "BeforeAgent"), "BeforeAgent should be detected as overridden")
+		assert.False(t, isMethodOverridden(handler, "WrapModel"), "Promoted method should not be detected as overridden")
+	})
+
+	t.Run("BaseTypeMethodsAreDefined", func(t *testing.T) {
+		handler := &BaseChatModelAgentMiddleware{}
+		assert.True(t, isMethodOverridden(handler, "WrapModel"), "WrapModel is defined on base type")
+		assert.True(t, isMethodOverridden(handler, "WrapInvokableToolCall"), "WrapInvokableToolCall is defined on base type")
+		assert.True(t, isMethodOverridden(handler, "WrapStreamableToolCall"), "WrapStreamableToolCall is defined on base type")
+		assert.True(t, isMethodOverridden(handler, "BeforeAgent"), "BeforeAgent is defined on base type")
+		assert.True(t, isMethodOverridden(handler, "BeforeModelRewriteState"), "BeforeModelRewriteState is defined on base type")
+		assert.True(t, isMethodOverridden(handler, "AfterModelRewriteState"), "AfterModelRewriteState is defined on base type")
+	})
+
+	t.Run("PartialOverride", func(t *testing.T) {
+		handler := &countingHandler{
+			BaseChatModelAgentMiddleware: &BaseChatModelAgentMiddleware{},
+		}
+		assert.True(t, isMethodOverridden(handler, "BeforeAgent"), "BeforeAgent should be overridden")
+		assert.True(t, isMethodOverridden(handler, "BeforeModelRewriteState"), "BeforeModelRewriteState should be overridden")
+		assert.True(t, isMethodOverridden(handler, "AfterModelRewriteState"), "AfterModelRewriteState should be overridden")
+		assert.False(t, isMethodOverridden(handler, "WrapModel"), "WrapModel is promoted, not overridden")
+		assert.False(t, isMethodOverridden(handler, "WrapInvokableToolCall"), "WrapInvokableToolCall is promoted, not overridden")
+	})
+
+	t.Run("ToolWrapperMethodsOverridden", func(t *testing.T) {
+		handler := &testToolWrapperHandler{
+			BaseChatModelAgentMiddleware: &BaseChatModelAgentMiddleware{},
+			wrapInvokableFn:              func(e InvokableToolCallEndpoint, tc *ToolContext) InvokableToolCallEndpoint { return e },
+			wrapStreamableFn:             func(e StreamableToolCallEndpoint, tc *ToolContext) StreamableToolCallEndpoint { return e },
+		}
+		assert.True(t, isMethodOverridden(handler, "WrapInvokableToolCall"), "WrapInvokableToolCall should be overridden")
+		assert.True(t, isMethodOverridden(handler, "WrapStreamableToolCall"), "WrapStreamableToolCall should be overridden")
+		assert.False(t, isMethodOverridden(handler, "BeforeAgent"), "BeforeAgent is promoted, not overridden")
+	})
+
+	t.Run("ModelWrapperMethodOverridden", func(t *testing.T) {
+		handler := &testModelWrapperHandler{
+			BaseChatModelAgentMiddleware: &BaseChatModelAgentMiddleware{},
+			fn:                           func(m model.BaseChatModel, mc *ModelContext) model.BaseChatModel { return m },
+		}
+		assert.True(t, isMethodOverridden(handler, "WrapModel"), "WrapModel should be overridden")
+		assert.False(t, isMethodOverridden(handler, "BeforeAgent"), "BeforeAgent is promoted, not overridden")
+	})
+
+	t.Run("NonExistentMethodReturnsFalse", func(t *testing.T) {
+		handler := &BaseChatModelAgentMiddleware{}
+		assert.False(t, isMethodOverridden(handler, "NonExistentMethod"), "Non-existent method should return false")
+	})
+}
+
+func TestNewHandlerInfo(t *testing.T) {
+	t.Run("BaseHandlerNoOverrides", func(t *testing.T) {
+		handler := &BaseChatModelAgentMiddleware{}
+		info := newHandlerInfo(handler)
+
+		assert.Equal(t, handler, info.handler)
+		assert.True(t, info.hasBeforeAgent, "Base type defines BeforeAgent")
+		assert.True(t, info.hasBeforeModelRewriteState, "Base type defines BeforeModelRewriteState")
+		assert.True(t, info.hasAfterModelRewriteState, "Base type defines AfterModelRewriteState")
+		assert.True(t, info.hasWrapInvokableToolCall, "Base type defines WrapInvokableToolCall")
+		assert.True(t, info.hasWrapStreamableToolCall, "Base type defines WrapStreamableToolCall")
+		assert.True(t, info.hasWrapModel, "Base type defines WrapModel")
+	})
+
+	t.Run("HandlerWithBeforeAgentOverride", func(t *testing.T) {
+		handler := &testInstructionHandler{
+			BaseChatModelAgentMiddleware: &BaseChatModelAgentMiddleware{},
+			text:                         "test",
+		}
+		info := newHandlerInfo(handler)
+
+		assert.Equal(t, handler, info.handler)
+		assert.True(t, info.hasBeforeAgent, "Should detect BeforeAgent override")
+		assert.False(t, info.hasBeforeModelRewriteState, "Should not detect promoted method as override")
+		assert.False(t, info.hasAfterModelRewriteState, "Should not detect promoted method as override")
+		assert.False(t, info.hasWrapInvokableToolCall, "Should not detect promoted method as override")
+		assert.False(t, info.hasWrapStreamableToolCall, "Should not detect promoted method as override")
+		assert.False(t, info.hasWrapModel, "Should not detect promoted method as override")
+	})
+
+	t.Run("HandlerWithAllMethods", func(t *testing.T) {
+		handler := &countingHandler{
+			BaseChatModelAgentMiddleware: &BaseChatModelAgentMiddleware{},
+		}
+		info := newHandlerInfo(handler)
+
+		assert.Equal(t, handler, info.handler)
+		assert.True(t, info.hasBeforeAgent, "Should detect BeforeAgent override")
+		assert.True(t, info.hasBeforeModelRewriteState, "Should detect BeforeModelRewriteState override")
+		assert.True(t, info.hasAfterModelRewriteState, "Should detect AfterModelRewriteState override")
+		assert.False(t, info.hasWrapInvokableToolCall, "Should not detect promoted method as override")
+		assert.False(t, info.hasWrapStreamableToolCall, "Should not detect promoted method as override")
+		assert.False(t, info.hasWrapModel, "Should not detect promoted method as override")
+	})
+
+	t.Run("HandlerWithToolWrappers", func(t *testing.T) {
+		handler := &testToolWrapperHandler{
+			BaseChatModelAgentMiddleware: &BaseChatModelAgentMiddleware{},
+			wrapInvokableFn:              func(e InvokableToolCallEndpoint, tc *ToolContext) InvokableToolCallEndpoint { return e },
+			wrapStreamableFn:             func(e StreamableToolCallEndpoint, tc *ToolContext) StreamableToolCallEndpoint { return e },
+		}
+		info := newHandlerInfo(handler)
+
+		assert.False(t, info.hasBeforeAgent, "Should not detect promoted method as override")
+		assert.False(t, info.hasBeforeModelRewriteState, "Should not detect promoted method as override")
+		assert.False(t, info.hasAfterModelRewriteState, "Should not detect promoted method as override")
+		assert.True(t, info.hasWrapInvokableToolCall, "Should detect WrapInvokableToolCall override")
+		assert.True(t, info.hasWrapStreamableToolCall, "Should detect WrapStreamableToolCall override")
+		assert.False(t, info.hasWrapModel, "Should not detect promoted method as override")
+	})
+
+	t.Run("HandlerWithModelWrapper", func(t *testing.T) {
+		handler := &testModelWrapperHandler{
+			BaseChatModelAgentMiddleware: &BaseChatModelAgentMiddleware{},
+			fn:                           func(m model.BaseChatModel, mc *ModelContext) model.BaseChatModel { return m },
+		}
+		info := newHandlerInfo(handler)
+
+		assert.False(t, info.hasBeforeAgent, "Should not detect promoted method as override")
+		assert.False(t, info.hasBeforeModelRewriteState, "Should not detect promoted method as override")
+		assert.False(t, info.hasAfterModelRewriteState, "Should not detect promoted method as override")
+		assert.False(t, info.hasWrapInvokableToolCall, "Should not detect promoted method as override")
+		assert.False(t, info.hasWrapStreamableToolCall, "Should not detect promoted method as override")
+		assert.True(t, info.hasWrapModel, "Should detect WrapModel override")
+	})
+}
+
+func TestHandlerErrorPropagation(t *testing.T) {
+	t.Run("BeforeModelRewriteStateErrorStopsRun", func(t *testing.T) {
+		ctx := context.Background()
+		ctrl := gomock.NewController(t)
+		cm := mockModel.NewMockToolCallingChatModel(ctrl)
+
+		agent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+			Name:        "TestAgent",
+			Description: "Test agent",
+			Model:       cm,
+			Handlers: []ChatModelAgentMiddleware{
+				&testBeforeModelRewriteStateHandler{fn: func(ctx context.Context, state *ChatModelAgentState) (context.Context, *ChatModelAgentState, error) {
+					return ctx, state, assert.AnError
+				}},
+			},
+		})
+		assert.NoError(t, err)
+
+		iter := agent.Run(ctx, &AgentInput{Messages: []Message{schema.UserMessage("test")}})
+
+		var gotErr error
+		for {
+			event, ok := iter.Next()
+			if !ok {
+				break
+			}
+			if event.Err != nil {
+				gotErr = event.Err
+			}
+		}
+
+		assert.Error(t, gotErr)
+	})
+
+	t.Run("AfterModelRewriteStateErrorStopsRun", func(t *testing.T) {
+		ctx := context.Background()
+		ctrl := gomock.NewController(t)
+		cm := mockModel.NewMockToolCallingChatModel(ctrl)
+
+		cm.EXPECT().Generate(gomock.Any(), gomock.Any(), gomock.Any()).
+			Return(schema.AssistantMessage("response", nil), nil).Times(1)
+
+		agent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+			Name:        "TestAgent",
+			Description: "Test agent",
+			Model:       cm,
+			Handlers: []ChatModelAgentMiddleware{
+				&testAfterModelRewriteStateHandler{fn: func(ctx context.Context, state *ChatModelAgentState) (context.Context, *ChatModelAgentState, error) {
+					return ctx, state, assert.AnError
+				}},
+			},
+		})
+		assert.NoError(t, err)
+
+		iter := agent.Run(ctx, &AgentInput{Messages: []Message{schema.UserMessage("test")}})
+
+		var gotErr error
+		for {
+			event, ok := iter.Next()
+			if !ok {
+				break
+			}
+			if event.Err != nil {
+				gotErr = event.Err
+			}
+		}
+
+		assert.Error(t, gotErr)
+	})
+
+	t.Run("MultipleHandlersFirstErrorStops", func(t *testing.T) {
+		ctx := context.Background()
+		ctrl := gomock.NewController(t)
+		cm := mockModel.NewMockToolCallingChatModel(ctrl)
+
+		secondHandlerCalled := false
+
+		agent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+			Name:        "TestAgent",
+			Description: "Test agent",
+			Model:       cm,
+			Handlers: []ChatModelAgentMiddleware{
+				&testBeforeModelRewriteStateHandler{fn: func(ctx context.Context, state *ChatModelAgentState) (context.Context, *ChatModelAgentState, error) {
+					return ctx, state, assert.AnError
+				}},
+				&testBeforeModelRewriteStateHandler{fn: func(ctx context.Context, state *ChatModelAgentState) (context.Context, *ChatModelAgentState, error) {
+					secondHandlerCalled = true
+					return ctx, state, nil
+				}},
+			},
+		})
+		assert.NoError(t, err)
+
+		iter := agent.Run(ctx, &AgentInput{Messages: []Message{schema.UserMessage("test")}})
+		for {
+			_, ok := iter.Next()
+			if !ok {
+				break
+			}
+		}
+
+		assert.False(t, secondHandlerCalled, "Second handler should not be called after first handler error")
+	})
+}
+
+func TestToolContextInWrappers(t *testing.T) {
+	t.Run("ToolContextHasCorrectNameAndCallID", func(t *testing.T) {
+		ctx := context.Background()
+		ctrl := gomock.NewController(t)
+		cm := mockModel.NewMockToolCallingChatModel(ctrl)
+
+		testTool := &namedTool{name: "context_test_tool"}
+		info, _ := testTool.Info(ctx)
+
+		var capturedToolName string
+		var capturedCallID string
+
+		cm.EXPECT().WithTools(gomock.Any()).Return(cm, nil).AnyTimes()
+		cm.EXPECT().Generate(gomock.Any(), gomock.Any(), gomock.Any()).
+			Return(schema.AssistantMessage("Using tool", []schema.ToolCall{
+				{ID: "test_call_id_123", Function: schema.FunctionCall{Name: info.Name, Arguments: "{}"}},
+			}), nil).Times(1)
+		cm.EXPECT().Generate(gomock.Any(), gomock.Any(), gomock.Any()).
+			Return(schema.AssistantMessage("done", nil), nil).Times(1)
+
+		agent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+			Name:        "TestAgent",
+			Description: "Test agent",
+			Model:       cm,
+			ToolsConfig: ToolsConfig{
+				ToolsNodeConfig: compose.ToolsNodeConfig{
+					Tools: []tool.BaseTool{testTool},
+				},
+			},
+			Handlers: []ChatModelAgentMiddleware{
+				&testToolWrapperHandler{
+					BaseChatModelAgentMiddleware: &BaseChatModelAgentMiddleware{},
+					wrapInvokableFn: func(endpoint InvokableToolCallEndpoint, tCtx *ToolContext) InvokableToolCallEndpoint {
+						capturedToolName = tCtx.Name
+						capturedCallID = tCtx.CallID
+						return endpoint
+					},
+				},
+			},
+		})
+		assert.NoError(t, err)
+
+		iter := agent.Run(ctx, &AgentInput{Messages: []Message{schema.UserMessage("test")}})
+		for {
+			_, ok := iter.Next()
+			if !ok {
+				break
+			}
+		}
+
+		assert.Equal(t, "context_test_tool", capturedToolName, "ToolContext should have correct tool name")
+		assert.Equal(t, "test_call_id_123", capturedCallID, "ToolContext should have correct call ID")
+	})
+}

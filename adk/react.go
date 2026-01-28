@@ -273,7 +273,9 @@ type reactInput struct {
 }
 
 type reactConfig struct {
-	model model.ToolCallingChatModel
+	// model is the chat model used by the react graph.
+	// Tools are configured via model.WithTools call option, not the WithTools method.
+	model model.BaseChatModel
 
 	toolsConfig      *compose.ToolsNodeConfig
 	modelWrapperConf *modelWrapperConfig

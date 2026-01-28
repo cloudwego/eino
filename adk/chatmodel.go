@@ -201,7 +201,10 @@ type ChatModelAgentConfig struct {
 	// These placeholders will be replaced with session values for "Time" and "User".
 	Instruction string
 
-	Model model.ToolCallingChatModel
+	// Model is the chat model used by the agent.
+	// If your ChatModelAgent uses any tools, this model must support the model.WithTools
+	// call option, as that's how ChatModelAgent configures the model with tool information.
+	Model model.BaseChatModel
 
 	ToolsConfig ToolsConfig
 
@@ -289,7 +292,7 @@ type ChatModelAgent struct {
 	description string
 	instruction string
 
-	model       model.ToolCallingChatModel
+	model       model.BaseChatModel
 	toolsConfig ToolsConfig
 
 	genModelInput GenModelInput

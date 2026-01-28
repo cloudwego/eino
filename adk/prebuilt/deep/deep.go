@@ -43,7 +43,9 @@ type Config struct {
 	Description string
 
 	// ChatModel is the model used by DeepAgent for reasoning and task execution.
-	ChatModel model.ToolCallingChatModel
+	// If the agent uses any tools, this model must support the model.WithTools call option,
+	// as that's how the agent configures the model with tool information.
+	ChatModel model.BaseChatModel
 	// Instruction contains the system prompt that guides the agent's behavior.
 	// When empty, a built-in default system prompt will be used, which includes general assistant
 	// behavior guidelines, security policies, coding style guidelines, and tool usage policies.
