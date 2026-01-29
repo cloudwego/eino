@@ -40,6 +40,38 @@ type callbackRecorder struct {
 	closeOnce      sync.Once
 }
 
+func (r *callbackRecorder) getOnStartCalled() bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.onStartCalled
+}
+
+func (r *callbackRecorder) getOnEndCalled() bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.onEndCalled
+}
+
+func (r *callbackRecorder) getRunInfo() *callbacks.RunInfo {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.runInfo
+}
+
+func (r *callbackRecorder) getInputReceived() *AgentCallbackInput {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.inputReceived
+}
+
+func (r *callbackRecorder) getEventsReceived() []*AgentEvent {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	result := make([]*AgentEvent, len(r.eventsReceived))
+	copy(result, r.eventsReceived)
+	return result
+}
+
 func newRecordingHandler(recorder *callbackRecorder) callbacks.Handler {
 	recorder.eventsDone = make(chan struct{})
 	return callbacks.NewHandlerBuilder().
@@ -121,10 +153,11 @@ func TestCallbackOnStartInvocation(t *testing.T) {
 
 	<-recorder.eventsDone
 
-	assert.True(t, recorder.onStartCalled, "OnStart should be called")
-	assert.NotNil(t, recorder.inputReceived, "Input should be received")
-	assert.NotNil(t, recorder.inputReceived.Input, "AgentInput should be set")
-	assert.Len(t, recorder.inputReceived.Input.Messages, 1)
+	assert.True(t, recorder.getOnStartCalled(), "OnStart should be called")
+	inputReceived := recorder.getInputReceived()
+	assert.NotNil(t, inputReceived, "Input should be received")
+	assert.NotNil(t, inputReceived.Input, "AgentInput should be set")
+	assert.Len(t, inputReceived.Input.Messages, 1)
 }
 
 func TestCallbackOnEndInvocation(t *testing.T) {
@@ -160,8 +193,8 @@ func TestCallbackOnEndInvocation(t *testing.T) {
 
 	<-recorder.eventsDone
 
-	assert.True(t, recorder.onEndCalled, "OnEnd should be called")
-	assert.NotEmpty(t, recorder.eventsReceived, "Events should be received")
+	assert.True(t, recorder.getOnEndCalled(), "OnEnd should be called")
+	assert.NotEmpty(t, recorder.getEventsReceived(), "Events should be received")
 }
 
 func TestCallbackRunInfoForChatModelAgent(t *testing.T) {
@@ -197,10 +230,11 @@ func TestCallbackRunInfoForChatModelAgent(t *testing.T) {
 
 	<-recorder.eventsDone
 
-	assert.NotNil(t, recorder.runInfo)
-	assert.Equal(t, "TestChatAgent", recorder.runInfo.Name)
-	assert.Equal(t, "ChatModel", recorder.runInfo.Type)
-	assert.Equal(t, ComponentOfAgent, recorder.runInfo.Component)
+	runInfo := recorder.getRunInfo()
+	assert.NotNil(t, runInfo)
+	assert.Equal(t, "TestChatAgent", runInfo.Name)
+	assert.Equal(t, "ChatModel", runInfo.Type)
+	assert.Equal(t, ComponentOfAgent, runInfo.Component)
 }
 
 func TestMultipleCallbackHandlers(t *testing.T) {
@@ -239,13 +273,13 @@ func TestMultipleCallbackHandlers(t *testing.T) {
 	<-recorder1.eventsDone
 	<-recorder2.eventsDone
 
-	assert.True(t, recorder1.onStartCalled, "Handler1 OnStart should be called")
-	assert.True(t, recorder2.onStartCalled, "Handler2 OnStart should be called")
-	assert.True(t, recorder1.onEndCalled, "Handler1 OnEnd should be called")
-	assert.True(t, recorder2.onEndCalled, "Handler2 OnEnd should be called")
+	assert.True(t, recorder1.getOnStartCalled(), "Handler1 OnStart should be called")
+	assert.True(t, recorder2.getOnStartCalled(), "Handler2 OnStart should be called")
+	assert.True(t, recorder1.getOnEndCalled(), "Handler1 OnEnd should be called")
+	assert.True(t, recorder2.getOnEndCalled(), "Handler2 OnEnd should be called")
 
-	assert.NotEmpty(t, recorder1.eventsReceived, "Handler1 should receive events")
-	assert.NotEmpty(t, recorder2.eventsReceived, "Handler2 should receive events")
+	assert.NotEmpty(t, recorder1.getEventsReceived(), "Handler1 should receive events")
+	assert.NotEmpty(t, recorder2.getEventsReceived(), "Handler2 should receive events")
 }
 
 func TestCallbackWithWorkflowAgent(t *testing.T) {
@@ -359,10 +393,11 @@ func TestCallbackEventsMatchAgentOutput(t *testing.T) {
 	<-recorder.eventsDone
 
 	assert.NotEmpty(t, agentEvents, "Agent should emit events")
-	assert.NotEmpty(t, recorder.eventsReceived, "Callback should receive events")
+	eventsReceived := recorder.getEventsReceived()
+	assert.NotEmpty(t, eventsReceived, "Callback should receive events")
 
 	foundExpectedContent := false
-	for _, event := range recorder.eventsReceived {
+	for _, event := range eventsReceived {
 		if event.Output != nil && event.Output.MessageOutput != nil {
 			msg := event.Output.MessageOutput.Message
 			if msg != nil && msg.Content == expectedContent {

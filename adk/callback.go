@@ -133,3 +133,60 @@ func getAgentType(agent Agent) string {
 	}
 	return ""
 }
+
+type RunnerCallbackInput struct {
+	Messages     []Message
+	ResumeParams *ResumeParams
+	CheckPointID string
+}
+
+type RunnerCallbackOutput struct {
+	Events *AsyncIterator[*AgentEvent]
+}
+
+func copyRunnerCallbackOutput(out *RunnerCallbackOutput, n int) []*RunnerCallbackOutput {
+	if out == nil || out.Events == nil {
+		result := make([]*RunnerCallbackOutput, n)
+		for i := 0; i < n; i++ {
+			result[i] = out
+		}
+		return result
+	}
+	iters := copyEventIterator(out.Events, n)
+	result := make([]*RunnerCallbackOutput, n)
+	for i, iter := range iters {
+		result[i] = &RunnerCallbackOutput{Events: iter}
+	}
+	return result
+}
+
+// ConvRunnerCallbackInput converts a generic CallbackInput to RunnerCallbackInput.
+// Returns nil if the input is not a RunnerCallbackInput.
+func ConvRunnerCallbackInput(input callbacks.CallbackInput) *RunnerCallbackInput {
+	if v, ok := input.(*RunnerCallbackInput); ok {
+		return v
+	}
+	return nil
+}
+
+// ConvRunnerCallbackOutput converts a generic CallbackOutput to RunnerCallbackOutput.
+// Returns nil if the output is not a RunnerCallbackOutput.
+func ConvRunnerCallbackOutput(output callbacks.CallbackOutput) *RunnerCallbackOutput {
+	if v, ok := output.(*RunnerCallbackOutput); ok {
+		return v
+	}
+	return nil
+}
+
+func initRunnerCallbacks(ctx context.Context, agentName string, opts ...AgentRunOption) context.Context {
+	ri := &callbacks.RunInfo{
+		Name:      agentName,
+		Component: ComponentOfRunner,
+	}
+
+	o := getCommonOptions(nil, opts...)
+	if len(o.handlers) == 0 {
+		return icb.ReuseHandlers(ctx, ri)
+	}
+	return icb.AppendHandlers(ctx, ri, o.handlers...)
+}
