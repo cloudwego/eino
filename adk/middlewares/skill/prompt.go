@@ -87,7 +87,7 @@ Skill 可能包含 Python 脚本或其他可执行文件。始终使用绝对路
 When users ask you to perform tasks, check if any of the available skills below can help complete the task more effectively. Skills provide specialized capabilities and domain knowledge.
 
 How to invoke:
-- Use this tool with the skill name only (no arguments)
+- Use the exact string inside <name> tag as the skill name (no arguments)
 - Examples:
   - ` + "`" + `skill: "pdf"` + "`" + ` - invoke the pdf skill
   - ` + "`" + `skill: "xlsx"` + "`" + ` - invoke the xlsx skill
@@ -99,7 +99,7 @@ Important:
 - This is a BLOCKING REQUIREMENT: invoke the relevant Skill tool BEFORE generating any other response about the task
 - Only use skills listed in <available_skills> below
 - Do not invoke a skill that is already running
-- Do not use this tool for built-in CLI commands (like /help, /clear, etc.)
+- Skill content may contain relative paths. Convert them to absolute paths using the base directory provided in the tool result
 </skills_instructions>
 
 `
@@ -109,7 +109,7 @@ Important:
 当用户要求你执行任务时，检查下方可用 Skill 列表中是否有 Skill 可以更有效地完成任务。Skill 提供专业能力和领域知识。
 
 如何调用：
-- 仅使用 Skill 名称调用此工具（无需其他参数）
+- 使用 <name> 标签内的完整字符串作为 Skill 名称（无需其他参数）
 - 示例：
   - ` + "`" + `skill: "pdf"` + "`" + ` - 调用 pdf Skill
   - ` + "`" + `skill: "xlsx"` + "`" + ` - 调用 xlsx Skill
@@ -121,7 +121,7 @@ Important:
 - 这是阻塞性要求：在生成任何关于任务的其他响应之前，先调用相关的 Skill 工具
 - 仅使用 <available_skills> 中列出的 Skill
 - 不要调用已经运行中的 Skill
-- 不要将此工具用于内置 CLI 命令（如 /help、/clear 等）
+- Skill 内容中可能包含相对路径，需使用工具返回的 base directory 将其转换为绝对路径
 </skills_instructions>
 
 `
