@@ -65,7 +65,6 @@ type HandlerHelper struct {
 	toolHandler        *ToolCallbackHandler
 	toolsNodeHandler   *ToolsNodeCallbackHandlers
 	agentHandler       *AgentCallbackHandler
-	runnerHandler      *RunnerCallbackHandler
 	composeTemplates   map[components.Component]callbacks.Handler
 }
 
@@ -134,12 +133,6 @@ func (c *HandlerHelper) Agent(handler *AgentCallbackHandler) *HandlerHelper {
 	return c
 }
 
-// Runner sets the runner handler for the handler helper, which will be called when the runner is executed.
-func (c *HandlerHelper) Runner(handler *RunnerCallbackHandler) *HandlerHelper {
-	c.runnerHandler = handler
-	return c
-}
-
 // Graph sets the graph handler for the handler helper, which will be called when the graph is executed.
 func (c *HandlerHelper) Graph(handler callbacks.Handler) *HandlerHelper {
 	c.composeTemplates[compose.ComponentOfGraph] = handler
@@ -186,8 +179,6 @@ func (c *handlerTemplate) OnStart(ctx context.Context, info *callbacks.RunInfo, 
 		return c.toolsNodeHandler.OnStart(ctx, info, convToolsNodeCallbackInput(input))
 	case adk.ComponentOfAgent:
 		return c.agentHandler.OnStart(ctx, info, adk.ConvAgentCallbackInput(input))
-	case adk.ComponentOfRunner:
-		return c.runnerHandler.OnStart(ctx, info, adk.ConvRunnerCallbackInput(input))
 	case compose.ComponentOfGraph,
 		compose.ComponentOfChain,
 		compose.ComponentOfLambda:
@@ -221,8 +212,6 @@ func (c *handlerTemplate) OnEnd(ctx context.Context, info *callbacks.RunInfo, ou
 		return c.toolsNodeHandler.OnEnd(ctx, info, convToolsNodeCallbackOutput(output))
 	case adk.ComponentOfAgent:
 		return c.agentHandler.OnEnd(ctx, info, adk.ConvAgentCallbackOutput(output))
-	case adk.ComponentOfRunner:
-		return c.runnerHandler.OnEnd(ctx, info, adk.ConvRunnerCallbackOutput(output))
 	case compose.ComponentOfGraph,
 		compose.ComponentOfChain,
 		compose.ComponentOfLambda:
@@ -254,8 +243,6 @@ func (c *handlerTemplate) OnError(ctx context.Context, info *callbacks.RunInfo, 
 		return c.toolHandler.OnError(ctx, info, err)
 	case compose.ComponentOfToolsNode:
 		return c.toolsNodeHandler.OnError(ctx, info, err)
-	case adk.ComponentOfRunner:
-		return c.runnerHandler.OnError(ctx, info, err)
 	case compose.ComponentOfGraph,
 		compose.ComponentOfChain,
 		compose.ComponentOfLambda:
@@ -352,10 +339,6 @@ func (c *handlerTemplate) Needed(ctx context.Context, info *callbacks.RunInfo, t
 		}
 	case adk.ComponentOfAgent:
 		if c.agentHandler != nil && c.agentHandler.Needed(ctx, info, timing) {
-			return true
-		}
-	case adk.ComponentOfRunner:
-		if c.runnerHandler != nil && c.runnerHandler.Needed(ctx, info, timing) {
 			return true
 		}
 	case compose.ComponentOfGraph,
@@ -609,25 +592,6 @@ func (ch *AgentCallbackHandler) Needed(ctx context.Context, info *callbacks.RunI
 		return ch.OnStart != nil
 	case callbacks.TimingOnEnd:
 		return ch.OnEnd != nil
-	default:
-		return false
-	}
-}
-
-type RunnerCallbackHandler struct {
-	OnStart func(ctx context.Context, info *callbacks.RunInfo, input *adk.RunnerCallbackInput) context.Context
-	OnEnd   func(ctx context.Context, info *callbacks.RunInfo, output *adk.RunnerCallbackOutput) context.Context
-	OnError func(ctx context.Context, info *callbacks.RunInfo, err error) context.Context
-}
-
-func (ch *RunnerCallbackHandler) Needed(ctx context.Context, info *callbacks.RunInfo, timing callbacks.CallbackTiming) bool {
-	switch timing {
-	case callbacks.TimingOnStart:
-		return ch.OnStart != nil
-	case callbacks.TimingOnEnd:
-		return ch.OnEnd != nil
-	case callbacks.TimingOnError:
-		return ch.OnError != nil
 	default:
 		return false
 	}

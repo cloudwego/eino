@@ -32,10 +32,6 @@ import (
 // Use this to filter callback events to only agent-related events.
 const ComponentOfAgent components.Component = "Agent"
 
-// ComponentOfRunner is the component type identifier for ADK runners in callbacks.
-// Use this to filter callback events to only runner-related events.
-const ComponentOfRunner components.Component = "Runner"
-
 type Message = *schema.Message
 type MessageStream = *schema.StreamReader[Message]
 

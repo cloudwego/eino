@@ -22,8 +22,6 @@ import (
 	"runtime/debug"
 	"sync"
 
-	"github.com/cloudwego/eino/callbacks"
-	icb "github.com/cloudwego/eino/internal/callbacks"
 	"github.com/cloudwego/eino/internal/core"
 	"github.com/cloudwego/eino/internal/safe"
 	"github.com/cloudwego/eino/schema"
@@ -78,12 +76,6 @@ func (r *Runner) Run(ctx context.Context, messages []Message,
 	opts ...AgentRunOption) *AsyncIterator[*AgentEvent] {
 	o := getCommonOptions(nil, opts...)
 
-	agentName := r.a.Name(ctx)
-	ctx = initRunnerCallbacks(ctx, agentName, opts...)
-
-	cbInput := &RunnerCallbackInput{Messages: messages}
-	ctx, _ = icb.On(ctx, cbInput, icb.OnStartHandle[*RunnerCallbackInput], callbacks.TimingOnStart, true)
-
 	fa := toFlowAgent(ctx, r.a)
 
 	input := &AgentInput{
@@ -96,22 +88,13 @@ func (r *Runner) Run(ctx context.Context, messages []Message,
 	AddSessionValues(ctx, o.sessionValues)
 
 	iter := fa.Run(ctx, input, opts...)
-
-	cbIter, cbGen := NewAsyncIteratorPair[*AgentEvent]()
-	cbOutput := &RunnerCallbackOutput{Events: cbIter}
-	icb.On(ctx, cbOutput, func(ctx context.Context, output *RunnerCallbackOutput,
-		runInfo *icb.RunInfo, handlers []icb.Handler) (context.Context, *RunnerCallbackOutput) {
-		return icb.OnEndHandleWithCopy(ctx, output, runInfo, handlers, copyRunnerCallbackOutput)
-	}, callbacks.TimingOnEnd, false)
+	if r.store == nil {
+		return iter
+	}
 
 	niter, gen := NewAsyncIteratorPair[*AgentEvent]()
 
-	if r.store == nil {
-		go r.forwardIter(iter, gen, cbGen)
-		return niter
-	}
-
-	go r.handleIter(ctx, iter, gen, cbGen, o.checkPointID)
+	go r.handleIter(ctx, iter, gen, o.checkPointID)
 	return niter
 }
 
@@ -163,19 +146,8 @@ func (r *Runner) resume(ctx context.Context, checkPointID string, resumeData map
 		return nil, fmt.Errorf("failed to resume: store is nil")
 	}
 
-	agentName := r.a.Name(ctx)
-	ctx = initRunnerCallbacks(ctx, agentName, opts...)
-
-	var resumeParams *ResumeParams
-	if len(resumeData) > 0 {
-		resumeParams = &ResumeParams{Targets: resumeData}
-	}
-	cbInput := &RunnerCallbackInput{ResumeParams: resumeParams, CheckPointID: checkPointID}
-	ctx, _ = icb.On(ctx, cbInput, icb.OnStartHandle[*RunnerCallbackInput], callbacks.TimingOnStart, true)
-
 	ctx, runCtx, resumeInfo, err := r.loadCheckPoint(ctx, checkPointID)
 	if err != nil {
-		icb.On(ctx, err, icb.OnErrorHandle, callbacks.TimingOnError, false)
 		return nil, fmt.Errorf("failed to load from checkpoint: %w", err)
 	}
 
@@ -204,47 +176,18 @@ func (r *Runner) resume(ctx context.Context, checkPointID string, resumeData map
 
 	fa := toFlowAgent(ctx, r.a)
 	aIter := fa.Resume(ctx, resumeInfo, opts...)
-
-	cbIter, cbGen := NewAsyncIteratorPair[*AgentEvent]()
-	cbOutput := &RunnerCallbackOutput{Events: cbIter}
-	icb.On(ctx, cbOutput, func(ctx context.Context, output *RunnerCallbackOutput,
-		runInfo *icb.RunInfo, handlers []icb.Handler) (context.Context, *RunnerCallbackOutput) {
-		return icb.OnEndHandleWithCopy(ctx, output, runInfo, handlers, copyRunnerCallbackOutput)
-	}, callbacks.TimingOnEnd, false)
+	if r.store == nil {
+		return aIter, nil
+	}
 
 	niter, gen := NewAsyncIteratorPair[*AgentEvent]()
 
-	go r.handleIter(ctx, aIter, gen, cbGen, &checkPointID)
+	go r.handleIter(ctx, aIter, gen, &checkPointID)
 	return niter, nil
 }
 
-func (r *Runner) forwardIter(aIter *AsyncIterator[*AgentEvent], gen *AsyncGenerator[*AgentEvent], cbGen *AsyncGenerator[*AgentEvent]) {
-	defer func() {
-		panicErr := recover()
-		if panicErr != nil {
-			e := safe.NewPanicErr(panicErr, debug.Stack())
-			gen.Send(&AgentEvent{Err: e})
-		}
-
-		cbGen.Close()
-		gen.Close()
-	}()
-
-	for {
-		event, ok := aIter.Next()
-		if !ok {
-			break
-		}
-		copied := copyAgentEvent(event)
-		setAutomaticClose(copied)
-		setAutomaticClose(event)
-		cbGen.Send(copied)
-		gen.Send(event)
-	}
-}
-
 func (r *Runner) handleIter(ctx context.Context, aIter *AsyncIterator[*AgentEvent],
-	gen *AsyncGenerator[*AgentEvent], cbGen *AsyncGenerator[*AgentEvent], checkPointID *string) {
+	gen *AsyncGenerator[*AgentEvent], checkPointID *string) {
 	defer func() {
 		panicErr := recover()
 		if panicErr != nil {
@@ -252,7 +195,6 @@ func (r *Runner) handleIter(ctx context.Context, aIter *AsyncIterator[*AgentEven
 			gen.Send(&AgentEvent{Err: e})
 		}
 
-		cbGen.Close()
 		gen.Close()
 	}()
 	var (
@@ -300,10 +242,6 @@ func (r *Runner) handleIter(ctx context.Context, aIter *AsyncIterator[*AgentEven
 			}
 		}
 
-		copied := copyAgentEvent(event)
-		setAutomaticClose(copied)
-		setAutomaticClose(event)
-		cbGen.Send(copied)
 		gen.Send(event)
 	}
 }
