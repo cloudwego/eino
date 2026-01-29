@@ -293,19 +293,23 @@ func (a *flowAgent) Run(ctx context.Context, input *AgentInput, opts ...AgentRun
 
 	ctx = initAgentCallbacks(ctx, agentName, agentType, opts...)
 
-	cbInput := &AgentCallbackInput{Input: input}
-	ctx, _ = icb.On(ctx, cbInput, icb.OnStartHandle[*AgentCallbackInput], callbacks.TimingOnStart, true)
-
 	var runCtx *runContext
 	ctx, runCtx = initRunCtx(ctx, agentName, input)
 	ctx = AppendAddressSegment(ctx, AddressSegmentAgent, agentName)
 
 	o := getCommonOptions(nil, opts...)
 
-	input, err := a.genAgentInput(ctx, runCtx, o.skipTransferMessages)
+	processedInput, err := a.genAgentInput(ctx, runCtx, o.skipTransferMessages)
 	if err != nil {
+		cbInput := &AgentCallbackInput{Input: input}
+		ctx, _ = icb.On(ctx, cbInput, icb.OnStartHandle[*AgentCallbackInput], callbacks.TimingOnStart, true)
 		return wrapIterWithOnEnd(ctx, genErrorIter(err))
 	}
+
+	cbInput := &AgentCallbackInput{Input: processedInput}
+	ctx, _ = icb.On(ctx, cbInput, icb.OnStartHandle[*AgentCallbackInput], callbacks.TimingOnStart, true)
+
+	input = processedInput
 
 	if wf, ok := a.Agent.(*workflowAgent); ok {
 		return wrapIterWithOnEnd(ctx, wf.Run(ctx, input, opts...))
