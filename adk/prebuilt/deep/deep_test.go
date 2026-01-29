@@ -32,6 +32,40 @@ import (
 	"github.com/cloudwego/eino/schema"
 )
 
+func TestGenModelInput(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("WithInstruction", func(t *testing.T) {
+		input := &adk.AgentInput{
+			Messages: []*schema.Message{
+				schema.UserMessage("hello"),
+			},
+		}
+
+		msgs, err := genModelInput(ctx, "You are a helpful assistant", input)
+		assert.NoError(t, err)
+		assert.Len(t, msgs, 2)
+		assert.Equal(t, schema.System, msgs[0].Role)
+		assert.Equal(t, "You are a helpful assistant", msgs[0].Content)
+		assert.Equal(t, schema.User, msgs[1].Role)
+		assert.Equal(t, "hello", msgs[1].Content)
+	})
+
+	t.Run("WithoutInstruction", func(t *testing.T) {
+		input := &adk.AgentInput{
+			Messages: []*schema.Message{
+				schema.UserMessage("hello"),
+			},
+		}
+
+		msgs, err := genModelInput(ctx, "", input)
+		assert.NoError(t, err)
+		assert.Len(t, msgs, 1)
+		assert.Equal(t, schema.User, msgs[0].Role)
+		assert.Equal(t, "hello", msgs[0].Content)
+	})
+}
+
 func TestWriteTodos(t *testing.T) {
 	m, err := buildBuiltinAgentMiddlewares(false)
 	assert.NoError(t, err)
