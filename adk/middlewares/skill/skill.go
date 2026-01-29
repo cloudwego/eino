@@ -105,7 +105,7 @@ func (s *skillTool) Info(ctx context.Context) (*schema.ToolInfo, error) {
 		return nil, fmt.Errorf("failed to list skills: %w", err)
 	}
 
-	desc, err := renderToolDescription(skills, s.useChinese)
+	desc, err := renderToolDescription(skills)
 	if err != nil {
 		return nil, fmt.Errorf("failed to render skill tool description: %w", err)
 	}
@@ -155,12 +155,8 @@ func (s *skillTool) InvokableRun(ctx context.Context, argumentsInJSON string, op
 	return fmt.Sprintf(resultFmt, skill.Name) + fmt.Sprintf(contentFmt, skill.BaseDirectory, skill.Content), nil
 }
 
-func renderToolDescription(matters []FrontMatter, useChinese bool) (string, error) {
-	tplContent := toolDescriptionTemplate
-	if useChinese {
-		tplContent = toolDescriptionTemplateChinese
-	}
-	tpl, err := template.New("skills").Parse(tplContent)
+func renderToolDescription(matters []FrontMatter) (string, error) {
+	tpl, err := template.New("skills").Parse(toolDescriptionTemplate)
 	if err != nil {
 		return "", err
 	}
