@@ -452,3 +452,111 @@ func TestCallbackOnEndForWorkflowAgent(t *testing.T) {
 	assert.True(t, recorder.getOnEndCalled(), "OnEnd should be called for workflow agent")
 	assert.NotEmpty(t, recorder.getEventsReceived(), "Events should be received for workflow agent")
 }
+
+type ctxKeyForTest string
+
+const testOnStartMarkerKey ctxKeyForTest = "onStartMarker"
+
+func TestSubAgentContextIsolation(t *testing.T) {
+	ctx := context.Background()
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	cm1 := mockModel.NewMockToolCallingChatModel(ctrl)
+	cm1.EXPECT().Generate(gomock.Any(), gomock.Any(), gomock.Any()).
+		Return(schema.AssistantMessage("transferring to Agent2",
+			[]schema.ToolCall{
+				{
+					ID: "transfer_1",
+					Function: schema.FunctionCall{
+						Name:      TransferToAgentToolName,
+						Arguments: `{"agent_name": "Agent2"}`,
+					},
+				},
+			}), nil).
+		Times(1)
+	cm1.EXPECT().WithTools(gomock.Any()).Return(cm1, nil).AnyTimes()
+
+	cm2 := mockModel.NewMockToolCallingChatModel(ctrl)
+	cm2.EXPECT().Generate(gomock.Any(), gomock.Any(), gomock.Any()).
+		Return(schema.AssistantMessage("final response from Agent2", nil), nil).
+		Times(1)
+	cm2.EXPECT().WithTools(gomock.Any()).Return(cm2, nil).AnyTimes()
+
+	agent1, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+		Name:        "Agent1",
+		Description: "First agent that transfers to Agent2",
+		Instruction: "You are agent 1",
+		Model:       cm1,
+	})
+	assert.NoError(t, err)
+
+	agent2, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+		Name:        "Agent2",
+		Description: "Second agent",
+		Instruction: "You are agent 2",
+		Model:       cm2,
+	})
+	assert.NoError(t, err)
+
+	agentWithSubAgents, err := SetSubAgents(ctx, agent1, []Agent{agent2})
+	assert.NoError(t, err)
+
+	runner := NewRunner(ctx, RunnerConfig{Agent: agentWithSubAgents})
+
+	var mu sync.Mutex
+	onStartContextMarkers := make(map[string][]string)
+
+	handler := callbacks.NewHandlerBuilder().
+		OnStartFn(func(ctx context.Context, info *callbacks.RunInfo, input callbacks.CallbackInput) context.Context {
+			if info.Component != ComponentOfAgent {
+				return ctx
+			}
+			mu.Lock()
+			marker, _ := ctx.Value(testOnStartMarkerKey).(string)
+			onStartContextMarkers[info.Name] = append(onStartContextMarkers[info.Name], marker)
+			mu.Unlock()
+
+			return context.WithValue(ctx, testOnStartMarkerKey, info.Name+"_marker")
+		}).
+		OnEndFn(func(ctx context.Context, info *callbacks.RunInfo, output callbacks.CallbackOutput) context.Context {
+			if info.Component != ComponentOfAgent {
+				return ctx
+			}
+			if agentOutput := ConvAgentCallbackOutput(output); agentOutput != nil && agentOutput.Events != nil {
+				go func() {
+					for {
+						_, ok := agentOutput.Events.Next()
+						if !ok {
+							break
+						}
+					}
+				}()
+			}
+			return ctx
+		}).
+		Build()
+
+	iter := runner.Query(ctx, "hello", WithCallbacks(handler))
+	for {
+		_, ok := iter.Next()
+		if !ok {
+			break
+		}
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+
+	assert.NotEmpty(t, onStartContextMarkers["Agent1"], "Agent1's OnStart should be called")
+	assert.NotEmpty(t, onStartContextMarkers["Agent2"], "Agent2's OnStart should be called")
+
+	if len(onStartContextMarkers["Agent1"]) > 0 {
+		assert.Equal(t, "", onStartContextMarkers["Agent1"][0],
+			"Agent1's OnStart should receive context without marker (initial context)")
+	}
+	if len(onStartContextMarkers["Agent2"]) > 0 {
+		assert.Equal(t, "", onStartContextMarkers["Agent2"][0],
+			"Agent2's first OnStart should NOT inherit Agent1's marker - context should be isolated")
+	}
+}
