@@ -339,6 +339,13 @@ func (w *stateModelWrapper) IsCallbacksEnabled() bool {
 	return true
 }
 
+func (w *stateModelWrapper) GetType() string {
+	if typer, ok := w.inner.(components.Typer); ok {
+		return typer.GetType()
+	}
+	return ""
+}
+
 func (w *stateModelWrapper) wrapGenerateEndpoint(endpoint generateEndpoint) generateEndpoint {
 	for i := len(w.handlers) - 1; i >= 0; i-- {
 		if w.handlers[i].hasWrapModel {
