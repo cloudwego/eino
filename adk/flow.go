@@ -304,11 +304,11 @@ func (a *flowAgent) Run(ctx context.Context, input *AgentInput, opts ...AgentRun
 
 	input, err := a.genAgentInput(ctx, runCtx, o.skipTransferMessages)
 	if err != nil {
-		return genErrorIter(err)
+		return wrapIterWithOnEnd(ctx, genErrorIter(err))
 	}
 
 	if wf, ok := a.Agent.(*workflowAgent); ok {
-		return wf.Run(ctx, input, opts...)
+		return wrapIterWithOnEnd(ctx, wf.Run(ctx, input, opts...))
 	}
 
 	aIter := a.Agent.Run(ctx, input, filterOptions(agentName, opts)...)
@@ -334,14 +334,14 @@ func (a *flowAgent) Resume(ctx context.Context, info *ResumeInfo, opts ...AgentR
 	if info.WasInterrupted {
 		ra, ok := a.Agent.(ResumableAgent)
 		if !ok {
-			return genErrorIter(fmt.Errorf("failed to resume agent: agent '%s' is an interrupt point "+
-				"but is not a ResumableAgent", agentName))
+			return wrapIterWithOnEnd(ctx, genErrorIter(fmt.Errorf("failed to resume agent: agent '%s' is an interrupt point "+
+				"but is not a ResumableAgent", agentName)))
 		}
 		iterator, generator := NewAsyncIteratorPair[*AgentEvent]()
 
 		aIter := ra.Resume(ctx, info, opts...)
 		if _, ok := ra.(*workflowAgent); ok {
-			return aIter
+			return wrapIterWithOnEnd(ctx, aIter)
 		}
 		go a.run(ctx, getRunCtx(ctx), aIter, generator, opts...)
 		return iterator
@@ -349,7 +349,7 @@ func (a *flowAgent) Resume(ctx context.Context, info *ResumeInfo, opts ...AgentR
 
 	nextAgentName, err := getNextResumeAgent(ctx, info)
 	if err != nil {
-		return genErrorIter(err)
+		return wrapIterWithOnEnd(ctx, genErrorIter(err))
 	}
 
 	subAgent := a.getAgent(ctx, nextAgentName)
@@ -361,13 +361,13 @@ func (a *flowAgent) Resume(ctx context.Context, info *ResumeInfo, opts ...AgentR
 		// We need to go through these wrappers to reach the flowAgent with sub-agents.
 		if len(a.subAgents) == 0 {
 			if ra, ok := a.Agent.(ResumableAgent); ok {
-				return ra.Resume(ctx, info, opts...)
+				return wrapIterWithOnEnd(ctx, ra.Resume(ctx, info, opts...))
 			}
 		}
-		return genErrorIter(fmt.Errorf("failed to resume agent: agent '%s' not found from flowAgent '%s'", nextAgentName, agentName))
+		return wrapIterWithOnEnd(ctx, genErrorIter(fmt.Errorf("failed to resume agent: agent '%s' not found from flowAgent '%s'", nextAgentName, agentName)))
 	}
 
-	return subAgent.Resume(ctx, info, opts...)
+	return wrapIterWithOnEnd(ctx, subAgent.Resume(ctx, info, opts...))
 }
 
 type DeterministicTransferConfig struct {
@@ -488,4 +488,31 @@ func exactRunPathMatch(aPath, bPath []RunStep) bool {
 		}
 	}
 	return true
+}
+
+func wrapIterWithOnEnd(ctx context.Context, iter *AsyncIterator[*AgentEvent]) *AsyncIterator[*AgentEvent] {
+	cbIter, cbGen := NewAsyncIteratorPair[*AgentEvent]()
+	cbOutput := &AgentCallbackOutput{Events: cbIter}
+	icb.On(ctx, cbOutput, func(ctx context.Context, output *AgentCallbackOutput,
+		runInfo *icb.RunInfo, handlers []icb.Handler) (context.Context, *AgentCallbackOutput) {
+		return icb.OnEndHandleWithCopy(ctx, output, runInfo, handlers, copyAgentCallbackOutput)
+	}, callbacks.TimingOnEnd, false)
+
+	outIter, outGen := NewAsyncIteratorPair[*AgentEvent]()
+	go func() {
+		defer func() {
+			cbGen.Close()
+			outGen.Close()
+		}()
+		for {
+			event, ok := iter.Next()
+			if !ok {
+				break
+			}
+			copied := copyAgentEvent(event)
+			cbGen.Send(copied)
+			outGen.Send(event)
+		}
+	}()
+	return outIter
 }

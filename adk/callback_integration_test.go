@@ -408,3 +408,62 @@ func TestCallbackEventsMatchAgentOutput(t *testing.T) {
 	}
 	assert.True(t, foundExpectedContent, "Callback events should contain the expected content")
 }
+
+func TestCallbackOnEndForWorkflowAgent(t *testing.T) {
+	ctx := context.Background()
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	cm1 := mockModel.NewMockToolCallingChatModel(ctrl)
+	cm1.EXPECT().Generate(gomock.Any(), gomock.Any(), gomock.Any()).
+		Return(schema.AssistantMessage("response 1", nil), nil).
+		Times(1)
+	cm1.EXPECT().WithTools(gomock.Any()).Return(cm1, nil).AnyTimes()
+
+	cm2 := mockModel.NewMockToolCallingChatModel(ctrl)
+	cm2.EXPECT().Generate(gomock.Any(), gomock.Any(), gomock.Any()).
+		Return(schema.AssistantMessage("response 2", nil), nil).
+		Times(1)
+	cm2.EXPECT().WithTools(gomock.Any()).Return(cm2, nil).AnyTimes()
+
+	agent1, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+		Name:        "Agent1",
+		Description: "First agent",
+		Instruction: "You are agent 1",
+		Model:       cm1,
+	})
+	assert.NoError(t, err)
+
+	agent2, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+		Name:        "Agent2",
+		Description: "Second agent",
+		Instruction: "You are agent 2",
+		Model:       cm2,
+	})
+	assert.NoError(t, err)
+
+	seqAgent, err := NewSequentialAgent(ctx, &SequentialAgentConfig{
+		Name:        "SequentialAgent",
+		Description: "Sequential workflow",
+		SubAgents:   []Agent{agent1, agent2},
+	})
+	assert.NoError(t, err)
+
+	recorder := &callbackRecorder{}
+	handler := newRecordingHandler(recorder)
+
+	runner := NewRunner(ctx, RunnerConfig{Agent: seqAgent})
+	iter := runner.Query(ctx, "hello", WithCallbacks(handler))
+	for {
+		_, ok := iter.Next()
+		if !ok {
+			break
+		}
+	}
+
+	<-recorder.eventsDone
+
+	assert.True(t, recorder.getOnStartCalled(), "OnStart should be called for workflow agent")
+	assert.True(t, recorder.getOnEndCalled(), "OnEnd should be called for workflow agent")
+	assert.NotEmpty(t, recorder.getEventsReceived(), "Events should be received for workflow agent")
+}
