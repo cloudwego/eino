@@ -20,12 +20,15 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"go.uber.org/mock/gomock"
 
 	"github.com/cloudwego/eino/adk"
+	"github.com/cloudwego/eino/callbacks"
+	"github.com/cloudwego/eino/components"
 	"github.com/cloudwego/eino/components/tool"
 	"github.com/cloudwego/eino/compose"
 	mockAdk "github.com/cloudwego/eino/internal/mock/adk"
@@ -823,4 +826,116 @@ func TestChatModelAgentInternalEventsExit(t *testing.T) {
 
 	assert.True(t, foundInnerExit, "Should have captured InnerAgent Exit event")
 	assert.True(t, foundTransferBack, "Should have found Transfer back to Supervisor (Worker should NOT be considered exited)")
+}
+
+func TestSupervisorContainerUnifiedTracing(t *testing.T) {
+	ctx := context.Background()
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	supervisorModel := mockModel.NewMockToolCallingChatModel(ctrl)
+	subAgentModel := mockModel.NewMockToolCallingChatModel(ctrl)
+
+	supervisorModel.EXPECT().WithTools(gomock.Any()).Return(supervisorModel, nil).AnyTimes()
+	subAgentModel.EXPECT().WithTools(gomock.Any()).Return(subAgentModel, nil).AnyTimes()
+
+	transferMsg := schema.AssistantMessage("", []schema.ToolCall{
+		{
+			ID:   "transfer_1",
+			Type: "function",
+			Function: schema.FunctionCall{
+				Name:      "transfer_to_agent",
+				Arguments: `{"agent_name":"SubAgent"}`,
+			},
+		},
+	})
+	supervisorModel.EXPECT().Generate(gomock.Any(), gomock.Any(), gomock.Any()).
+		Return(transferMsg, nil).Times(1)
+
+	subAgentResponse := schema.AssistantMessage("SubAgent response", nil)
+	subAgentModel.EXPECT().Generate(gomock.Any(), gomock.Any(), gomock.Any()).
+		Return(subAgentResponse, nil).Times(1)
+
+	finalResponse := schema.AssistantMessage("Final response", nil)
+	supervisorModel.EXPECT().Generate(gomock.Any(), gomock.Any(), gomock.Any()).
+		Return(finalResponse, nil).Times(1)
+
+	supervisorAgent, err := adk.NewChatModelAgent(ctx, &adk.ChatModelAgentConfig{
+		Name:        "SupervisorAgent",
+		Description: "Supervisor agent",
+		Instruction: "You are a supervisor",
+		Model:       supervisorModel,
+	})
+	assert.NoError(t, err)
+
+	subAgent, err := adk.NewChatModelAgent(ctx, &adk.ChatModelAgentConfig{
+		Name:        "SubAgent",
+		Description: "Sub agent",
+		Instruction: "You are a sub agent",
+		Model:       subAgentModel,
+	})
+	assert.NoError(t, err)
+
+	multiAgent, err := New(ctx, &Config{
+		Supervisor: supervisorAgent,
+		SubAgents:  []adk.Agent{subAgent},
+	})
+	assert.NoError(t, err)
+
+	assert.Equal(t, "SupervisorAgent", multiAgent.Name(ctx))
+
+	typer, ok := multiAgent.(components.Typer)
+	assert.True(t, ok, "Should implement components.Typer")
+	assert.Equal(t, "Supervisor", typer.GetType())
+
+	var mu sync.Mutex
+	var onStartCalls []string
+	var onEndCalls []string
+
+	handler := callbacks.NewHandlerBuilder().
+		OnStartFn(func(ctx context.Context, info *callbacks.RunInfo, input callbacks.CallbackInput) context.Context {
+			if info.Component != adk.ComponentOfAgent {
+				return ctx
+			}
+			mu.Lock()
+			onStartCalls = append(onStartCalls, info.Name+":"+info.Type)
+			mu.Unlock()
+			return ctx
+		}).
+		OnEndFn(func(ctx context.Context, info *callbacks.RunInfo, output callbacks.CallbackOutput) context.Context {
+			if info.Component != adk.ComponentOfAgent {
+				return ctx
+			}
+			mu.Lock()
+			onEndCalls = append(onEndCalls, info.Name+":"+info.Type)
+			mu.Unlock()
+			if agentOutput := adk.ConvAgentCallbackOutput(output); agentOutput != nil && agentOutput.Events != nil {
+				go func() {
+					for {
+						_, ok := agentOutput.Events.Next()
+						if !ok {
+							break
+						}
+					}
+				}()
+			}
+			return ctx
+		}).
+		Build()
+
+	runner := adk.NewRunner(ctx, adk.RunnerConfig{Agent: multiAgent})
+	iter := runner.Query(ctx, "hello", adk.WithCallbacks(handler))
+
+	for {
+		_, ok := iter.Next()
+		if !ok {
+			break
+		}
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+
+	assert.NotEmpty(t, onStartCalls, "Should have OnStart calls")
+	assert.Contains(t, onStartCalls, "SupervisorAgent:Supervisor", "Should have supervisor container OnStart with type 'Supervisor'")
 }
