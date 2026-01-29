@@ -1008,3 +1008,535 @@ func TestFormatUserInputMultiContent(t *testing.T) {
 		}
 	})
 }
+
+func TestConcatToolResults(t *testing.T) {
+	t.Run("empty_chunks", func(t *testing.T) {
+		result, err := ConcatToolResults([]*ToolResult{})
+		assert.NoError(t, err)
+		assert.NotNil(t, result)
+		assert.Empty(t, result.Content)
+	})
+
+	t.Run("nil_chunks", func(t *testing.T) {
+		result, err := ConcatToolResults([]*ToolResult{nil, nil})
+		assert.NoError(t, err)
+		assert.NotNil(t, result)
+		assert.Empty(t, result.Content)
+	})
+
+	t.Run("single_text_part", func(t *testing.T) {
+		chunks := []*ToolResult{
+			{
+				Content: []ToolOutputPart{
+					{Type: ToolPartTypeText, Text: "Hello World"},
+				},
+			},
+		}
+		result, err := ConcatToolResults(chunks)
+		assert.NoError(t, err)
+		assert.Len(t, result.Content, 1)
+		assert.Equal(t, ToolPartTypeText, result.Content[0].Type)
+		assert.Equal(t, "Hello World", result.Content[0].Text)
+	})
+
+	t.Run("multiple_text_parts_merge", func(t *testing.T) {
+		chunks := []*ToolResult{
+			{
+				Content: []ToolOutputPart{
+					{Type: ToolPartTypeText, Text: "Hello "},
+				},
+			},
+			{
+				Content: []ToolOutputPart{
+					{Type: ToolPartTypeText, Text: "World"},
+				},
+			},
+			{
+				Content: []ToolOutputPart{
+					{Type: ToolPartTypeText, Text: "!"},
+				},
+			},
+		}
+		result, err := ConcatToolResults(chunks)
+		assert.NoError(t, err)
+		assert.Len(t, result.Content, 1)
+		assert.Equal(t, ToolPartTypeText, result.Content[0].Type)
+		assert.Equal(t, "Hello World!", result.Content[0].Text)
+	})
+
+	t.Run("multiple_audio_parts_merge", func(t *testing.T) {
+		base64Data1 := "YXVkaW8x" // "audio1" in base64
+		base64Data2 := "YXVkaW8y" // "audio2" in base64
+		base64Data3 := "YXVkaW8z" // "audio3" in base64
+
+		chunks := []*ToolResult{
+			{
+				Content: []ToolOutputPart{
+					{
+						Type: ToolPartTypeAudio,
+						Audio: &ToolOutputAudio{
+							MessagePartCommon: MessagePartCommon{
+								Base64Data: &base64Data1,
+								MIMEType:   "audio/wav",
+							},
+						},
+					},
+				},
+			},
+			{
+				Content: []ToolOutputPart{
+					{
+						Type: ToolPartTypeAudio,
+						Audio: &ToolOutputAudio{
+							MessagePartCommon: MessagePartCommon{
+								Base64Data: &base64Data2,
+								MIMEType:   "audio/wav",
+							},
+						},
+					},
+				},
+			},
+			{
+				Content: []ToolOutputPart{
+					{
+						Type: ToolPartTypeAudio,
+						Audio: &ToolOutputAudio{
+							MessagePartCommon: MessagePartCommon{
+								Base64Data: &base64Data3,
+								MIMEType:   "audio/wav",
+							},
+						},
+					},
+				},
+			},
+		}
+
+		result, err := ConcatToolResults(chunks)
+		assert.NoError(t, err)
+		assert.Len(t, result.Content, 1)
+		assert.Equal(t, ToolPartTypeAudio, result.Content[0].Type)
+		assert.NotNil(t, result.Content[0].Audio)
+		assert.NotNil(t, result.Content[0].Audio.Base64Data)
+		assert.Equal(t, "YXVkaW8xYXVkaW8yYXVkaW8z", *result.Content[0].Audio.Base64Data)
+		assert.Equal(t, "audio/wav", result.Content[0].Audio.MIMEType)
+	})
+
+	t.Run("mixed_types_no_merge", func(t *testing.T) {
+		imageURL := "https://example.com/image.png"
+		videoURL := "https://example.com/video.mp4"
+
+		chunks := []*ToolResult{
+			{
+				Content: []ToolOutputPart{
+					{Type: ToolPartTypeText, Text: "Text part"},
+					{
+						Type: ToolPartTypeImage,
+						Image: &ToolOutputImage{
+							MessagePartCommon: MessagePartCommon{
+								URL: &imageURL,
+							},
+						},
+					},
+				},
+			},
+			{
+				Content: []ToolOutputPart{
+					{
+						Type: ToolPartTypeVideo,
+						Video: &ToolOutputVideo{
+							MessagePartCommon: MessagePartCommon{
+								URL: &videoURL,
+							},
+						},
+					},
+				},
+			},
+		}
+
+		result, err := ConcatToolResults(chunks)
+		assert.NoError(t, err)
+		assert.Len(t, result.Content, 3)
+		assert.Equal(t, ToolPartTypeText, result.Content[0].Type)
+		assert.Equal(t, ToolPartTypeImage, result.Content[1].Type)
+		assert.Equal(t, ToolPartTypeVideo, result.Content[2].Type)
+	})
+
+	t.Run("mixed_text_and_audio_merge", func(t *testing.T) {
+		base64Data1 := "YXVkaW8x"
+		base64Data2 := "YXVkaW8y"
+
+		chunks := []*ToolResult{
+			{
+				Content: []ToolOutputPart{
+					{Type: ToolPartTypeText, Text: "Part 1 "},
+					{Type: ToolPartTypeText, Text: "Part 2"},
+				},
+			},
+			{
+				Content: []ToolOutputPart{
+					{
+						Type: ToolPartTypeAudio,
+						Audio: &ToolOutputAudio{
+							MessagePartCommon: MessagePartCommon{
+								Base64Data: &base64Data1,
+								MIMEType:   "audio/wav",
+							},
+						},
+					},
+				},
+			},
+			{
+				Content: []ToolOutputPart{
+					{
+						Type: ToolPartTypeAudio,
+						Audio: &ToolOutputAudio{
+							MessagePartCommon: MessagePartCommon{
+								Base64Data: &base64Data2,
+								MIMEType:   "audio/wav",
+							},
+						},
+					},
+				},
+			},
+			{
+				Content: []ToolOutputPart{
+					{Type: ToolPartTypeText, Text: " Part 3"},
+				},
+			},
+		}
+
+		result, err := ConcatToolResults(chunks)
+		assert.NoError(t, err)
+		assert.Len(t, result.Content, 3)
+
+		// First merged text part
+		assert.Equal(t, ToolPartTypeText, result.Content[0].Type)
+		assert.Equal(t, "Part 1 Part 2", result.Content[0].Text)
+
+		// Merged audio part
+		assert.Equal(t, ToolPartTypeAudio, result.Content[1].Type)
+		assert.NotNil(t, result.Content[1].Audio)
+		assert.NotNil(t, result.Content[1].Audio.Base64Data)
+		assert.Equal(t, "YXVkaW8xYXVkaW8y", *result.Content[1].Audio.Base64Data)
+
+		// Last text part
+		assert.Equal(t, ToolPartTypeText, result.Content[2].Type)
+		assert.Equal(t, " Part 3", result.Content[2].Text)
+	})
+
+	t.Run("audio_with_url_not_merged", func(t *testing.T) {
+		audioURL := "https://example.com/audio.wav"
+		base64Data := "YXVkaW8x"
+
+		chunks := []*ToolResult{
+			{
+				Content: []ToolOutputPart{
+					{
+						Type: ToolPartTypeAudio,
+						Audio: &ToolOutputAudio{
+							MessagePartCommon: MessagePartCommon{
+								URL:      &audioURL,
+								MIMEType: "audio/wav",
+							},
+						},
+					},
+				},
+			},
+			{
+				Content: []ToolOutputPart{
+					{
+						Type: ToolPartTypeAudio,
+						Audio: &ToolOutputAudio{
+							MessagePartCommon: MessagePartCommon{
+								Base64Data: &base64Data,
+								MIMEType:   "audio/wav",
+							},
+						},
+					},
+				},
+			},
+		}
+
+		result, err := ConcatToolResults(chunks)
+		assert.NoError(t, err)
+		// Audio with URL should not be merged with Base64 audio
+		assert.Len(t, result.Content, 2)
+	})
+
+	t.Run("audio_extra_fields_merge", func(t *testing.T) {
+		base64Data1 := "YXVkaW8x"
+		base64Data2 := "YXVkaW8y"
+
+		chunks := []*ToolResult{
+			{
+				Content: []ToolOutputPart{
+					{
+						Type: ToolPartTypeAudio,
+						Audio: &ToolOutputAudio{
+							MessagePartCommon: MessagePartCommon{
+								Base64Data: &base64Data1,
+								MIMEType:   "audio/wav",
+								Extra: map[string]any{
+									"key1": "value1",
+								},
+							},
+						},
+					},
+				},
+			},
+			{
+				Content: []ToolOutputPart{
+					{
+						Type: ToolPartTypeAudio,
+						Audio: &ToolOutputAudio{
+							MessagePartCommon: MessagePartCommon{
+								Base64Data: &base64Data2,
+								MIMEType:   "audio/wav",
+								Extra: map[string]any{
+									"key2": "value2",
+								},
+							},
+						},
+					},
+				},
+			},
+		}
+
+		result, err := ConcatToolResults(chunks)
+		assert.NoError(t, err)
+		assert.Len(t, result.Content, 1)
+		assert.Equal(t, ToolPartTypeAudio, result.Content[0].Type)
+		assert.NotNil(t, result.Content[0].Audio)
+		assert.NotNil(t, result.Content[0].Audio.Base64Data)
+		assert.Equal(t, "YXVkaW8xYXVkaW8y", *result.Content[0].Audio.Base64Data)
+
+		// Check extra fields are merged
+		assert.NotNil(t, result.Content[0].Audio.Extra)
+		assert.Equal(t, "value1", result.Content[0].Audio.Extra["key1"])
+		assert.Equal(t, "value2", result.Content[0].Audio.Extra["key2"])
+	})
+}
+
+func TestMessageString(t *testing.T) {
+	t.Run("basic message", func(t *testing.T) {
+		msg := &Message{
+			Role:    User,
+			Content: "Hello, world!",
+		}
+		result := msg.String()
+		assert.Contains(t, result, "user: Hello, world!")
+	})
+
+	t.Run("message with UserInputMultiContent", func(t *testing.T) {
+		imageURL := "https://example.com/image.png"
+		msg := &Message{
+			Role:    User,
+			Content: "",
+			UserInputMultiContent: []MessageInputPart{
+				{Type: ChatMessagePartTypeText, Text: "Describe this image:"},
+				{Type: ChatMessagePartTypeImageURL, Image: &MessageInputImage{
+					MessagePartCommon: MessagePartCommon{URL: &imageURL},
+				}},
+			},
+		}
+		result := msg.String()
+		assert.Contains(t, result, "user_input_multi_content:")
+		assert.Contains(t, result, "[0] text: Describe this image:")
+		assert.Contains(t, result, "[1] image: url=https://example.com/image.png")
+	})
+
+	t.Run("message with AssistantGenMultiContent", func(t *testing.T) {
+		base64Data := "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=="
+		msg := &Message{
+			Role:    Assistant,
+			Content: "",
+			AssistantGenMultiContent: []MessageOutputPart{
+				{Type: ChatMessagePartTypeText, Text: "Here is the generated image:"},
+				{Type: ChatMessagePartTypeImageURL, Image: &MessageOutputImage{
+					MessagePartCommon: MessagePartCommon{
+						Base64Data: &base64Data,
+						MIMEType:   "image/png",
+					},
+				}},
+			},
+		}
+		result := msg.String()
+		assert.Contains(t, result, "assistant_gen_multi_content:")
+		assert.Contains(t, result, "[0] text: Here is the generated image:")
+		assert.Contains(t, result, "[1] image: base64[")
+		assert.Contains(t, result, "mime=image/png")
+	})
+
+	t.Run("message with MultiContent (deprecated)", func(t *testing.T) {
+		msg := &Message{
+			Role:    User,
+			Content: "",
+			MultiContent: []ChatMessagePart{
+				{Type: ChatMessagePartTypeText, Text: "What is this?"},
+				{Type: ChatMessagePartTypeImageURL, ImageURL: &ChatMessageImageURL{URL: "https://example.com/photo.jpg"}},
+			},
+		}
+		result := msg.String()
+		assert.Contains(t, result, "multi_content:")
+		assert.Contains(t, result, "[0] text: What is this?")
+		assert.Contains(t, result, "[1] image_url: https://example.com/photo.jpg")
+	})
+
+	t.Run("message with ToolCalls", func(t *testing.T) {
+		idx := 0
+		msg := &Message{
+			Role:    Assistant,
+			Content: "",
+			ToolCalls: []ToolCall{
+				{
+					Index: &idx,
+					ID:    "call_123",
+					Type:  "function",
+					Function: FunctionCall{
+						Name:      "get_weather",
+						Arguments: `{"location": "Beijing"}`,
+					},
+				},
+			},
+		}
+		result := msg.String()
+		assert.Contains(t, result, "tool_calls:")
+		assert.Contains(t, result, "index[0]:")
+		assert.Contains(t, result, "get_weather")
+	})
+
+	t.Run("tool message", func(t *testing.T) {
+		msg := &Message{
+			Role:       Tool,
+			Content:    `{"temperature": 25}`,
+			ToolCallID: "call_123",
+			ToolName:   "get_weather",
+		}
+		result := msg.String()
+		assert.Contains(t, result, "tool: {\"temperature\": 25}")
+		assert.Contains(t, result, "tool_call_id: call_123")
+		assert.Contains(t, result, "tool_call_name: get_weather")
+	})
+
+	t.Run("message with reasoning content", func(t *testing.T) {
+		msg := &Message{
+			Role:             Assistant,
+			Content:          "The answer is 42.",
+			ReasoningContent: "Let me think about this step by step...",
+		}
+		result := msg.String()
+		assert.Contains(t, result, "reasoning content:")
+		assert.Contains(t, result, "Let me think about this step by step...")
+	})
+
+	t.Run("message with response meta", func(t *testing.T) {
+		msg := &Message{
+			Role:    Assistant,
+			Content: "Hello!",
+			ResponseMeta: &ResponseMeta{
+				FinishReason: "stop",
+				Usage: &TokenUsage{
+					PromptTokens:     10,
+					CompletionTokens: 5,
+					TotalTokens:      15,
+				},
+			},
+		}
+		result := msg.String()
+		assert.Contains(t, result, "finish_reason: stop")
+		assert.Contains(t, result, "usage:")
+	})
+
+	t.Run("message with audio input", func(t *testing.T) {
+		audioURL := "https://example.com/audio.wav"
+		msg := &Message{
+			Role: User,
+			UserInputMultiContent: []MessageInputPart{
+				{Type: ChatMessagePartTypeAudioURL, Audio: &MessageInputAudio{
+					MessagePartCommon: MessagePartCommon{URL: &audioURL},
+				}},
+			},
+		}
+		result := msg.String()
+		assert.Contains(t, result, "[0] audio: url=https://example.com/audio.wav")
+	})
+
+	t.Run("message with video input", func(t *testing.T) {
+		videoURL := "https://example.com/video.mp4"
+		msg := &Message{
+			Role: User,
+			UserInputMultiContent: []MessageInputPart{
+				{Type: ChatMessagePartTypeVideoURL, Video: &MessageInputVideo{
+					MessagePartCommon: MessagePartCommon{URL: &videoURL},
+				}},
+			},
+		}
+		result := msg.String()
+		assert.Contains(t, result, "[0] video: url=https://example.com/video.mp4")
+	})
+
+	t.Run("message with file input", func(t *testing.T) {
+		fileURL := "https://example.com/document.pdf"
+		msg := &Message{
+			Role: User,
+			UserInputMultiContent: []MessageInputPart{
+				{Type: ChatMessagePartTypeFileURL, File: &MessageInputFile{
+					MessagePartCommon: MessagePartCommon{URL: &fileURL},
+				}},
+			},
+		}
+		result := msg.String()
+		assert.Contains(t, result, "[0] file: url=https://example.com/document.pdf")
+	})
+
+	t.Run("truncate long text", func(t *testing.T) {
+		longText := "This is a very long text that should be truncated because it exceeds the maximum length limit for display purposes in the String method output."
+		msg := &Message{
+			Role: User,
+			UserInputMultiContent: []MessageInputPart{
+				{Type: ChatMessagePartTypeText, Text: longText},
+			},
+		}
+		result := msg.String()
+		assert.Contains(t, result, "...")
+	})
+
+	t.Run("nil media parts", func(t *testing.T) {
+		msg := &Message{
+			Role: User,
+			UserInputMultiContent: []MessageInputPart{
+				{Type: ChatMessagePartTypeImageURL, Image: nil},
+			},
+		}
+		result := msg.String()
+		assert.Contains(t, result, "[0] image: <nil>")
+	})
+
+	t.Run("combined multi-content types", func(t *testing.T) {
+		imageURL := "https://example.com/image.png"
+		base64Audio := "YXVkaW9kYXRh"
+		msg := &Message{
+			Role:    User,
+			Content: "Main content",
+			UserInputMultiContent: []MessageInputPart{
+				{Type: ChatMessagePartTypeText, Text: "User input text"},
+				{Type: ChatMessagePartTypeImageURL, Image: &MessageInputImage{
+					MessagePartCommon: MessagePartCommon{URL: &imageURL},
+				}},
+			},
+			AssistantGenMultiContent: []MessageOutputPart{
+				{Type: ChatMessagePartTypeText, Text: "Assistant output text"},
+				{Type: ChatMessagePartTypeAudioURL, Audio: &MessageOutputAudio{
+					MessagePartCommon: MessagePartCommon{
+						Base64Data: &base64Audio,
+						MIMEType:   "audio/wav",
+					},
+				}},
+			},
+		}
+		result := msg.String()
+		assert.Contains(t, result, "user: Main content")
+		assert.Contains(t, result, "user_input_multi_content:")
+		assert.Contains(t, result, "assistant_gen_multi_content:")
+	})
+}
