@@ -40,6 +40,26 @@ type callbackRecorder struct {
 	closeOnce      sync.Once
 }
 
+func (r *callbackRecorder) getOnStartCalled() bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.onStartCalled
+}
+
+func (r *callbackRecorder) getOnEndCalled() bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.onEndCalled
+}
+
+func (r *callbackRecorder) getEventsReceived() []*AgentEvent {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	result := make([]*AgentEvent, len(r.eventsReceived))
+	copy(result, r.eventsReceived)
+	return result
+}
+
 func newRecordingHandler(recorder *callbackRecorder) callbacks.Handler {
 	recorder.eventsDone = make(chan struct{})
 	return callbacks.NewHandlerBuilder().
