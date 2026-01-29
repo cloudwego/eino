@@ -114,9 +114,22 @@ func New(ctx context.Context, cfg *Config) (adk.ResumableAgent, error) {
 		MaxIterations: cfg.MaxIteration,
 		Middlewares:   append(middlewares, cfg.Middlewares...),
 
+		GenModelInput:    genModelInput,
 		ModelRetryConfig: cfg.ModelRetryConfig,
 		OutputKey:        cfg.OutputKey,
 	})
+}
+
+func genModelInput(ctx context.Context, instruction string, input *adk.AgentInput) ([]*schema.Message, error) {
+	msgs := make([]*schema.Message, 0, len(input.Messages)+1)
+
+	if instruction != "" {
+		msgs = append(msgs, schema.SystemMessage(instruction))
+	}
+
+	msgs = append(msgs, input.Messages...)
+
+	return msgs, nil
 }
 
 func buildBuiltinAgentMiddlewares(withoutWriteTodos bool) ([]adk.AgentMiddleware, error) {
