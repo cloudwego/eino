@@ -119,30 +119,30 @@ content1`, result)
 	assert.Equal(t, "skill", info.Name)
 	desc = strings.TrimPrefix(info.Desc, toolDescriptionBaseChinese)
 	assert.Equal(t, `
-<可用技能>
-<技能>
-<名称>
+<available_skills>
+<skill>
+<name>
 name1
-</名称>
-<描述>
+</name>
+<description>
 desc1
-</描述>
-</技能>
-<技能>
-<名称>
+</description>
+</skill>
+<skill>
+<name>
 name2
-</名称>
-<描述>
+</name>
+<description>
 desc2
-</描述>
-</技能>
-</可用技能>
+</description>
+</skill>
+</available_skills>
 `, desc)
 
 	result, err = to.InvokableRun(ctx, `{"skill": "name1"}`)
 	assert.NoError(t, err)
-	assert.Equal(t, `正在启动技能：name1
-此技能的目录：basedir1
+	assert.Equal(t, `正在启动 Skill：name1
+此 Skill 的目录：basedir1
 
 content1`, result)
 }
