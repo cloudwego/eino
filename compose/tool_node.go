@@ -401,7 +401,7 @@ func wrapEnhancedInvokableToolCall(eiTool tool.EnhancedInvokableTool, middleware
 		eiTool = &enhancedInvokableToolWithCallback{eiTool: eiTool}
 	}
 	return middleware(func(ctx context.Context, input *ToolInput) (*EnhancedInvokableToolOutput, error) {
-		result, err := eiTool.InvokableRun(ctx, &schema.ToolArguments{TextArguments: input.Arguments}, input.CallOptions...)
+		result, err := eiTool.InvokableRun(ctx, &schema.ToolCallInfo{TextArguments: input.Arguments}, input.CallOptions...)
 		if err != nil {
 			return nil, err
 		}
@@ -420,7 +420,7 @@ func wrapEnhancedStreamableToolCall(est tool.EnhancedStreamableTool, middlewares
 		est = &enhancedStreamableToolWithCallback{est: est}
 	}
 	return middleware(func(ctx context.Context, input *ToolInput) (*EnhancedStreamableToolOutput, error) {
-		result, err := est.StreamableRun(ctx, &schema.ToolArguments{TextArguments: input.Arguments}, input.CallOptions...)
+		result, err := est.StreamableRun(ctx, &schema.ToolCallInfo{TextArguments: input.Arguments}, input.CallOptions...)
 		if err != nil {
 			return nil, err
 		}
@@ -460,8 +460,8 @@ func (e *enhancedInvokableToolWithCallback) Info(ctx context.Context) (*schema.T
 	return e.eiTool.Info(ctx)
 }
 
-func (e *enhancedInvokableToolWithCallback) InvokableRun(ctx context.Context, toolArguments *schema.ToolArguments, opts ...tool.Option) (*schema.ToolResult, error) {
-	return invokeEnhancedWithCallbacks(e.eiTool.InvokableRun)(ctx, toolArguments, opts...)
+func (e *enhancedInvokableToolWithCallback) InvokableRun(ctx context.Context, toolCallInfo *schema.ToolCallInfo, opts ...tool.Option) (*schema.ToolResult, error) {
+	return invokeEnhancedWithCallbacks(e.eiTool.InvokableRun)(ctx, toolCallInfo, opts...)
 }
 
 type enhancedStreamableToolWithCallback struct {
@@ -472,8 +472,8 @@ func (e *enhancedStreamableToolWithCallback) Info(ctx context.Context) (*schema.
 	return e.est.Info(ctx)
 }
 
-func (e *enhancedStreamableToolWithCallback) StreamableRun(ctx context.Context, toolArguments *schema.ToolArguments, opts ...tool.Option) (*schema.StreamReader[*schema.ToolResult], error) {
-	return streamEnhancedWithCallbacks(e.est.StreamableRun)(ctx, toolArguments, opts...)
+func (e *enhancedStreamableToolWithCallback) StreamableRun(ctx context.Context, toolCallInfo *schema.ToolCallInfo, opts ...tool.Option) (*schema.StreamReader[*schema.ToolResult], error) {
+	return streamEnhancedWithCallbacks(e.est.StreamableRun)(ctx, toolCallInfo, opts...)
 }
 
 func streamableToInvokable(e StreamableToolEndpoint) InvokableToolEndpoint {
@@ -524,25 +524,25 @@ func enhancedInvokableToEnhancedStreamable(e EnhancedInvokableToolEndpoint) Enha
 	}
 }
 
-func invokeEnhancedWithCallbacks(i func(ctx context.Context, toolArguments *schema.ToolArguments, opts ...tool.Option) (*schema.ToolResult, error)) func(ctx context.Context, toolArguments *schema.ToolArguments, opts ...tool.Option) (*schema.ToolResult, error) {
-	return runWithCallbacks(i, onStart[*schema.ToolArguments], onEnd[*schema.ToolResult], onError)
+func invokeEnhancedWithCallbacks(i func(ctx context.Context, toolCallInfo *schema.ToolCallInfo, opts ...tool.Option) (*schema.ToolResult, error)) func(ctx context.Context, toolCallInfo *schema.ToolCallInfo, opts ...tool.Option) (*schema.ToolResult, error) {
+	return runWithCallbacks(i, onStart[*schema.ToolCallInfo], onEnd[*schema.ToolResult], onError)
 }
 
-func streamEnhancedWithCallbacks(s func(ctx context.Context, toolArguments *schema.ToolArguments, opts ...tool.Option) (*schema.StreamReader[*schema.ToolResult], error)) func(ctx context.Context, toolArguments *schema.ToolArguments, opts ...tool.Option) (*schema.StreamReader[*schema.ToolResult], error) {
-	return runWithCallbacks(s, onStart[*schema.ToolArguments], onEndWithStreamOutput[*schema.ToolResult], onError)
+func streamEnhancedWithCallbacks(s func(ctx context.Context, toolCallInfo *schema.ToolCallInfo, opts ...tool.Option) (*schema.StreamReader[*schema.ToolResult], error)) func(ctx context.Context, toolCallInfo *schema.ToolCallInfo, opts ...tool.Option) (*schema.StreamReader[*schema.ToolResult], error) {
+	return runWithCallbacks(s, onStart[*schema.ToolCallInfo], onEndWithStreamOutput[*schema.ToolResult], onError)
 }
 
 type toolCallTask struct {
 	// in
-	endpoint                   InvokableToolEndpoint
-	streamEndpoint             StreamableToolEndpoint
-	enhancedInvokableEndpoint  EnhancedInvokableToolEndpoint
-	enhancedStreamableEndpoint EnhancedStreamableToolEndpoint
-	meta                       *executorMeta
-	name                       string
-	arg                        string
-	callID                     string
-	useEnhanced                bool
+	endpoint           InvokableToolEndpoint
+	streamEndpoint     StreamableToolEndpoint
+	enhancedInvokable  EnhancedInvokableToolEndpoint
+	enhancedStreamable EnhancedStreamableToolEndpoint
+	meta               *executorMeta
+	name               string
+	arg                string
+	callID             string
+	useEnhanced        bool
 
 	// out
 	executed        bool
@@ -607,8 +607,8 @@ func (tn *ToolsNode) genToolCallTasks(ctx context.Context, tuple *toolsTuple,
 			toolCallTasks[i].callID = toolCall.ID
 
 			if tuple.enhancedInvokableEndpoints[index] != nil && tuple.enhancedStreamableEndpoints[index] != nil {
-				toolCallTasks[i].enhancedInvokableEndpoint = tuple.enhancedInvokableEndpoints[index]
-				toolCallTasks[i].enhancedStreamableEndpoint = tuple.enhancedStreamableEndpoints[index]
+				toolCallTasks[i].enhancedInvokable = tuple.enhancedInvokableEndpoints[index]
+				toolCallTasks[i].enhancedStreamable = tuple.enhancedStreamableEndpoints[index]
 				toolCallTasks[i].useEnhanced = true
 			} else {
 				toolCallTasks[i].endpoint = tuple.endpoints[index]
@@ -669,7 +669,7 @@ func runToolCallTaskByInvoke(ctx context.Context, task *toolCallTask, opts ...to
 	ctx = appendToolAddressSegment(ctx, task.name, task.callID)
 
 	if task.useEnhanced {
-		enhancedOutput, err := task.enhancedInvokableEndpoint(ctx, &ToolInput{
+		enhancedOutput, err := task.enhancedInvokable(ctx, &ToolInput{
 			Name:        task.name,
 			Arguments:   task.arg,
 			CallID:      task.callID,
@@ -708,7 +708,7 @@ func runToolCallTaskByStream(ctx context.Context, task *toolCallTask, opts ...to
 	ctx = appendToolAddressSegment(ctx, task.name, task.callID)
 
 	if task.useEnhanced {
-		enhancedOutput, err := task.enhancedStreamableEndpoint(ctx, &ToolInput{
+		enhancedOutput, err := task.enhancedStreamable(ctx, &ToolInput{
 			Name:        task.name,
 			Arguments:   task.arg,
 			CallID:      task.callID,
@@ -798,18 +798,18 @@ func (tn *ToolsNode) Invoke(ctx context.Context, input *schema.Message,
 	}
 
 	var executedTools map[string]string
-	var executedEnhancedTools map[string]*schema.ToolResult
+	var executedMultimodalTools map[string]*schema.ToolResult
 	if wasInterrupted, hasState, tnState := GetInterruptState[*toolsInterruptAndRerunState](ctx); wasInterrupted && hasState {
 		input = tnState.Input
 		if tnState.ExecutedTools != nil {
 			executedTools = tnState.ExecutedTools
 		}
 		if tnState.ExecutedEnhancedTools != nil {
-			executedEnhancedTools = tnState.ExecutedEnhancedTools
+			executedMultimodalTools = tnState.ExecutedEnhancedTools
 		}
 	}
 
-	tasks, err := tn.genToolCallTasks(ctx, tuple, input, executedTools, executedEnhancedTools, false)
+	tasks, err := tn.genToolCallTasks(ctx, tuple, input, executedTools, executedMultimodalTools, false)
 	if err != nil {
 		return nil, err
 	}
@@ -960,7 +960,7 @@ func (tn *ToolsNode) Stream(ctx context.Context, input *schema.Message,
 		// concat and save tool output
 		for _, t := range tasks {
 			if t.executed {
-				if t.useEnhanced {
+				if t.useEnhanced && t.enhancedSOutput != nil {
 					eo, err_ := concatStreamReader(t.enhancedSOutput)
 					if err_ != nil {
 						return nil, fmt.Errorf("failed to concat enhanced tool[name:%s id:%s]'s stream output: %w", t.name, t.callID, err_)

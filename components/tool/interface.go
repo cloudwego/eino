@@ -47,12 +47,12 @@ type StreamableTool interface {
 // which can contain text, images, audio, video, and files.
 type EnhancedInvokableTool interface {
 	BaseTool
-	InvokableRun(ctx context.Context, toolArguments *schema.ToolArguments, opts ...Option) (*schema.ToolResult, error)
+	InvokableRun(ctx context.Context, toolCallInfo *schema.ToolCallInfo, opts ...Option) (*schema.ToolResult, error)
 }
 
 // EnhancedStreamableTool is a streaming tool interface that supports returning structured multimodal results.
 // It provides a stream reader for accessing multimodal content progressively.
 type EnhancedStreamableTool interface {
 	BaseTool
-	StreamableRun(ctx context.Context, toolArguments *schema.ToolArguments, opts ...Option) (*schema.StreamReader[*schema.ToolResult], error)
+	StreamableRun(ctx context.Context, toolCallInfo *schema.ToolCallInfo, opts ...Option) (*schema.StreamReader[*schema.ToolResult], error)
 }

@@ -325,9 +325,9 @@ type ToolOutputPart struct {
 	Extra map[string]any `json:"extra,omitempty"`
 }
 
-// ToolArguments contains the input information for a tool call.
+// ToolCallInfo contains the input information for a tool call.
 // It is used to pass tool call arguments to enhanced tools.
-type ToolArguments struct {
+type ToolCallInfo struct {
 	// TextArguments contains the arguments for the tool call in JSON format.
 	TextArguments string
 }
@@ -336,9 +336,9 @@ type ToolArguments struct {
 // It is used when a tool needs to return more than just a simple string,
 // such as images, files, or other structured data.
 type ToolResult struct {
-	// Parts contains the multimodal output parts. Each part can be a different
+	// Content contains the multimodal output parts. Each part can be a different
 	// type of content, like text, an image, or a file.
-	Parts []ToolOutputPart `json:"parts,omitempty"`
+	Content []ToolOutputPart `json:"content,omitempty"`
 }
 
 func convToolOutputPartToMessageInputPart(toolPart ToolOutputPart) (MessageInputPart, error) {
@@ -349,40 +349,38 @@ func convToolOutputPartToMessageInputPart(toolPart ToolOutputPart) (MessageInput
 			Text: toolPart.Text,
 		}, nil
 	case ToolPartTypeImage:
-		if toolPart.Image == nil {
-			return MessageInputPart{}, fmt.Errorf("image content is nil for tool part type %v", toolPart.Type)
+		if toolPart.Image != nil {
+			return MessageInputPart{
+				Type:  ChatMessagePartTypeImageURL,
+				Image: &MessageInputImage{MessagePartCommon: toolPart.Image.MessagePartCommon},
+			}, nil
 		}
-		return MessageInputPart{
-			Type:  ChatMessagePartTypeImageURL,
-			Image: &MessageInputImage{MessagePartCommon: toolPart.Image.MessagePartCommon},
-		}, nil
 	case ToolPartTypeAudio:
-		if toolPart.Audio == nil {
-			return MessageInputPart{}, fmt.Errorf("audio content is nil for tool part type %v", toolPart.Type)
+		if toolPart.Audio != nil {
+			return MessageInputPart{
+				Type:  ChatMessagePartTypeAudioURL,
+				Audio: &MessageInputAudio{MessagePartCommon: toolPart.Audio.MessagePartCommon},
+			}, nil
 		}
-		return MessageInputPart{
-			Type:  ChatMessagePartTypeAudioURL,
-			Audio: &MessageInputAudio{MessagePartCommon: toolPart.Audio.MessagePartCommon},
-		}, nil
+
 	case ToolPartTypeVideo:
-		if toolPart.Video == nil {
-			return MessageInputPart{}, fmt.Errorf("video content is nil for tool part type %v", toolPart.Type)
+		if toolPart.Video != nil {
+			return MessageInputPart{
+				Type:  ChatMessagePartTypeVideoURL,
+				Video: &MessageInputVideo{MessagePartCommon: toolPart.Video.MessagePartCommon},
+			}, nil
 		}
-		return MessageInputPart{
-			Type:  ChatMessagePartTypeVideoURL,
-			Video: &MessageInputVideo{MessagePartCommon: toolPart.Video.MessagePartCommon},
-		}, nil
 	case ToolPartTypeFile:
-		if toolPart.File == nil {
-			return MessageInputPart{}, fmt.Errorf("file content is nil for tool part type %v", toolPart.Type)
+		if toolPart.File != nil {
+			return MessageInputPart{
+				Type: ChatMessagePartTypeFileURL,
+				File: &MessageInputFile{MessagePartCommon: toolPart.File.MessagePartCommon},
+			}, nil
 		}
-		return MessageInputPart{
-			Type: ChatMessagePartTypeFileURL,
-			File: &MessageInputFile{MessagePartCommon: toolPart.File.MessagePartCommon},
-		}, nil
 	default:
 		return MessageInputPart{}, fmt.Errorf("unknown tool part type: %v", toolPart.Type)
 	}
+	return MessageInputPart{}, fmt.Errorf("unknown tool part type: %v", toolPart.Type)
 }
 
 // ToMessageInputParts converts ToolOutputPart slice to MessageInputPart slice.
@@ -398,18 +396,18 @@ func convToolOutputPartToMessageInputPart(toolPart ToolOutputPart) (MessageInput
 // Example:
 //
 //	toolResult := &schema.ToolResult{
-//	    Parts: []schema.ToolOutputPart{
+//	    Content: []schema.ToolOutputPart{
 //	        {Type: schema.ToolPartTypeText, Text: "Result text"},
 //	        {Type: schema.ToolPartTypeImage, Image: &schema.ToolOutputImage{...}},
 //	    },
 //	}
 //	inputParts, err := toolResult.ToMessageInputParts()
 func (tr *ToolResult) ToMessageInputParts() ([]MessageInputPart, error) {
-	if tr == nil || len(tr.Parts) == 0 {
+	if tr == nil || len(tr.Content) == 0 {
 		return nil, nil
 	}
-	result := make([]MessageInputPart, len(tr.Parts))
-	for i, part := range tr.Parts {
+	result := make([]MessageInputPart, len(tr.Content))
+	for i, part := range tr.Content {
 		var err error
 		result[i], err = convToolOutputPartToMessageInputPart(part)
 		if err != nil {
@@ -1030,195 +1028,170 @@ func (m *Message) String() string {
 func formatInputPart(part MessageInputPart) string {
 	switch part.Type {
 	case ChatMessagePartTypeText:
-		return fmt.Sprintf("text: %s", part.Text)
+		return fmt.Sprintf("text: %s", truncateString(part.Text, 100))
 	case ChatMessagePartTypeImageURL:
-		return fmt.Sprintf("image: %s", formatMessageInputMedia(part.Image))
+		return fmt.Sprintf("image: %s", formatMediaPartCommon(part.Image))
 	case ChatMessagePartTypeAudioURL:
-		return fmt.Sprintf("audio: %s", formatMessageInputMedia(part.Audio))
+		return fmt.Sprintf("audio: %s", formatMediaPartCommon(part.Audio))
 	case ChatMessagePartTypeVideoURL:
-		return fmt.Sprintf("video: %s", formatMessageInputMedia(part.Video))
+		return fmt.Sprintf("video: %s", formatMediaPartCommon(part.Video))
 	case ChatMessagePartTypeFileURL:
-		return fmt.Sprintf("file: %s", formatMessageInputFile(part.File))
+		return fmt.Sprintf("file: %s", formatMediaPartCommon(part.File))
 	default:
 		return fmt.Sprintf("unknown type: %s", part.Type)
 	}
-}
-
-func formatMessageInputMedia[T MessageInputImage | MessageInputAudio | MessageInputVideo](media *T) string {
-	if media == nil {
-		return "<nil>"
-	}
-	var parts []string
-	switch v := any(media).(type) {
-	case *MessageInputImage:
-		if v.URL != nil {
-			parts = append(parts, fmt.Sprintf("url=%s", *v.URL))
-		}
-		if v.Base64Data != nil {
-			parts = append(parts, fmt.Sprintf("base64[%d bytes]", len(*v.Base64Data)))
-		}
-		if v.MIMEType != "" {
-			parts = append(parts, fmt.Sprintf("mime=%s", v.MIMEType))
-		}
-		if v.Detail != "" {
-			parts = append(parts, fmt.Sprintf("detail=%s", v.Detail))
-		}
-		if len(v.Extra) > 0 {
-			parts = append(parts, fmt.Sprintf("extra=%v", v.Extra))
-		}
-	case *MessageInputAudio:
-		if v.URL != nil {
-			parts = append(parts, fmt.Sprintf("url=%s", *v.URL))
-		}
-		if v.Base64Data != nil {
-			parts = append(parts, fmt.Sprintf("base64[%d bytes]", len(*v.Base64Data)))
-		}
-		if v.MIMEType != "" {
-			parts = append(parts, fmt.Sprintf("mime=%s", v.MIMEType))
-		}
-		if len(v.Extra) > 0 {
-			parts = append(parts, fmt.Sprintf("extra=%v", v.Extra))
-		}
-	case *MessageInputVideo:
-		if v.URL != nil {
-			parts = append(parts, fmt.Sprintf("url=%s", *v.URL))
-		}
-		if v.Base64Data != nil {
-			parts = append(parts, fmt.Sprintf("base64[%d bytes]", len(*v.Base64Data)))
-		}
-		if v.MIMEType != "" {
-			parts = append(parts, fmt.Sprintf("mime=%s", v.MIMEType))
-		}
-		if len(v.Extra) > 0 {
-			parts = append(parts, fmt.Sprintf("extra=%v", v.Extra))
-		}
-	}
-	if len(parts) == 0 {
-		return "<empty>"
-	}
-	return strings.Join(parts, ", ")
-}
-
-func formatMessageInputFile(file *MessageInputFile) string {
-	if file == nil {
-		return "<nil>"
-	}
-	var parts []string
-	if file.URL != nil {
-		parts = append(parts, fmt.Sprintf("url=%s", *file.URL))
-	}
-	if file.Base64Data != nil {
-		parts = append(parts, fmt.Sprintf("base64[%d bytes]", len(*file.Base64Data)))
-	}
-	if file.MIMEType != "" {
-		parts = append(parts, fmt.Sprintf("mime=%s", file.MIMEType))
-	}
-	if file.Name != "" {
-		parts = append(parts, fmt.Sprintf("name=%s", file.Name))
-	}
-	if len(file.Extra) > 0 {
-		parts = append(parts, fmt.Sprintf("extra=%v", file.Extra))
-	}
-	if len(parts) == 0 {
-		return "<empty>"
-	}
-	return strings.Join(parts, ", ")
 }
 
 func formatOutputPart(part MessageOutputPart) string {
 	switch part.Type {
 	case ChatMessagePartTypeText:
-		return fmt.Sprintf("text: %s", part.Text)
+		return fmt.Sprintf("text: %s", truncateString(part.Text, 100))
 	case ChatMessagePartTypeImageURL:
-		return fmt.Sprintf("image: %s", formatMessageOutputMedia(part.Image))
+		return fmt.Sprintf("image: %s", formatMediaOutput(part.Image))
 	case ChatMessagePartTypeAudioURL:
-		return fmt.Sprintf("audio: %s", formatMessageOutputMedia(part.Audio))
+		return fmt.Sprintf("audio: %s", formatMediaOutput(part.Audio))
 	case ChatMessagePartTypeVideoURL:
-		return fmt.Sprintf("video: %s", formatMessageOutputMedia(part.Video))
+		return fmt.Sprintf("video: %s", formatMediaOutput(part.Video))
 	default:
 		return fmt.Sprintf("unknown type: %s", part.Type)
 	}
-}
-
-func formatMessageOutputMedia[T MessageOutputImage | MessageOutputAudio | MessageOutputVideo](media *T) string {
-	if media == nil {
-		return "<nil>"
-	}
-	var parts []string
-	switch v := any(media).(type) {
-	case *MessageOutputImage:
-		if v.URL != nil {
-			parts = append(parts, fmt.Sprintf("url=%s", *v.URL))
-		}
-		if v.Base64Data != nil {
-			parts = append(parts, fmt.Sprintf("base64[%d bytes]", len(*v.Base64Data)))
-		}
-		if v.MIMEType != "" {
-			parts = append(parts, fmt.Sprintf("mime=%s", v.MIMEType))
-		}
-		if len(v.Extra) > 0 {
-			parts = append(parts, fmt.Sprintf("extra=%v", v.Extra))
-		}
-	case *MessageOutputAudio:
-		if v.URL != nil {
-			parts = append(parts, fmt.Sprintf("url=%s", *v.URL))
-		}
-		if v.Base64Data != nil {
-			parts = append(parts, fmt.Sprintf("base64[%d bytes]", len(*v.Base64Data)))
-		}
-		if v.MIMEType != "" {
-			parts = append(parts, fmt.Sprintf("mime=%s", v.MIMEType))
-		}
-		if len(v.Extra) > 0 {
-			parts = append(parts, fmt.Sprintf("extra=%v", v.Extra))
-		}
-	case *MessageOutputVideo:
-		if v.URL != nil {
-			parts = append(parts, fmt.Sprintf("url=%s", *v.URL))
-		}
-		if v.Base64Data != nil {
-			parts = append(parts, fmt.Sprintf("base64[%d bytes]", len(*v.Base64Data)))
-		}
-		if v.MIMEType != "" {
-			parts = append(parts, fmt.Sprintf("mime=%s", v.MIMEType))
-		}
-		if len(v.Extra) > 0 {
-			parts = append(parts, fmt.Sprintf("extra=%v", v.Extra))
-		}
-	}
-	if len(parts) == 0 {
-		return "<empty>"
-	}
-	return strings.Join(parts, ", ")
 }
 
 func formatChatMessagePart(part ChatMessagePart) string {
 	switch part.Type {
 	case ChatMessagePartTypeText:
-		return fmt.Sprintf("text: %s", part.Text)
+		return fmt.Sprintf("text: %s", truncateString(part.Text, 100))
 	case ChatMessagePartTypeImageURL:
 		if part.ImageURL != nil {
-			return fmt.Sprintf("image_url: %s", part.ImageURL.URL)
+			return fmt.Sprintf("image_url: %s", truncateString(part.ImageURL.URL, 100))
 		}
 		return "image_url: <nil>"
 	case ChatMessagePartTypeAudioURL:
 		if part.AudioURL != nil {
-			return fmt.Sprintf("audio_url: %s", part.AudioURL.URL)
+			return fmt.Sprintf("audio_url: %s", truncateString(part.AudioURL.URL, 100))
 		}
 		return "audio_url: <nil>"
 	case ChatMessagePartTypeVideoURL:
 		if part.VideoURL != nil {
-			return fmt.Sprintf("video_url: %s", part.VideoURL.URL)
+			return fmt.Sprintf("video_url: %s", truncateString(part.VideoURL.URL, 100))
 		}
 		return "video_url: <nil>"
 	case ChatMessagePartTypeFileURL:
 		if part.FileURL != nil {
-			return fmt.Sprintf("file_url: %s", part.FileURL.URL)
+			return fmt.Sprintf("file_url: %s", truncateString(part.FileURL.URL, 100))
 		}
 		return "file_url: <nil>"
 	default:
 		return fmt.Sprintf("unknown type: %s", part.Type)
 	}
+
+}
+
+type mediaPartFormatter interface {
+	getURL() *string
+	getBase64Data() *string
+	getMIMEType() string
+}
+
+type messageInputImageWrapper struct{ *MessageInputImage }
+
+func (w messageInputImageWrapper) getURL() *string        { return w.URL }
+func (w messageInputImageWrapper) getBase64Data() *string { return w.Base64Data }
+func (w messageInputImageWrapper) getMIMEType() string    { return w.MIMEType }
+
+type messageInputAudioWrapper struct{ *MessageInputAudio }
+
+func (w messageInputAudioWrapper) getURL() *string        { return w.URL }
+func (w messageInputAudioWrapper) getBase64Data() *string { return w.Base64Data }
+func (w messageInputAudioWrapper) getMIMEType() string    { return w.MIMEType }
+
+type messageInputVideoWrapper struct{ *MessageInputVideo }
+
+func (w messageInputVideoWrapper) getURL() *string        { return w.URL }
+func (w messageInputVideoWrapper) getBase64Data() *string { return w.Base64Data }
+func (w messageInputVideoWrapper) getMIMEType() string    { return w.MIMEType }
+
+type messageInputFileWrapper struct{ *MessageInputFile }
+
+func (w messageInputFileWrapper) getURL() *string        { return w.URL }
+func (w messageInputFileWrapper) getBase64Data() *string { return w.Base64Data }
+func (w messageInputFileWrapper) getMIMEType() string    { return w.MIMEType }
+
+type messageOutputImageWrapper struct{ *MessageOutputImage }
+
+func (w messageOutputImageWrapper) getURL() *string        { return w.URL }
+func (w messageOutputImageWrapper) getBase64Data() *string { return w.Base64Data }
+func (w messageOutputImageWrapper) getMIMEType() string    { return w.MIMEType }
+
+type messageOutputAudioWrapper struct{ *MessageOutputAudio }
+
+func (w messageOutputAudioWrapper) getURL() *string        { return w.URL }
+func (w messageOutputAudioWrapper) getBase64Data() *string { return w.Base64Data }
+func (w messageOutputAudioWrapper) getMIMEType() string    { return w.MIMEType }
+
+type messageOutputVideoWrapper struct{ *MessageOutputVideo }
+
+func (w messageOutputVideoWrapper) getURL() *string        { return w.URL }
+func (w messageOutputVideoWrapper) getBase64Data() *string { return w.Base64Data }
+func (w messageOutputVideoWrapper) getMIMEType() string    { return w.MIMEType }
+
+func formatMediaPartCommon[T any](media *T) string {
+	if media == nil {
+		return "<nil>"
+	}
+
+	var wrapper mediaPartFormatter
+	switch v := any(media).(type) {
+	case *MessageInputImage:
+		wrapper = messageInputImageWrapper{v}
+	case *MessageInputAudio:
+		wrapper = messageInputAudioWrapper{v}
+	case *MessageInputVideo:
+		wrapper = messageInputVideoWrapper{v}
+	case *MessageInputFile:
+		wrapper = messageInputFileWrapper{v}
+	default:
+		return fmt.Sprintf("%+v", media)
+	}
+
+	return formatMediaFormatter(wrapper)
+}
+
+func formatMediaOutput[T any](media *T) string {
+	if media == nil {
+		return "<nil>"
+	}
+
+	var wrapper mediaPartFormatter
+	switch v := any(media).(type) {
+	case *MessageOutputImage:
+		wrapper = messageOutputImageWrapper{v}
+	case *MessageOutputAudio:
+		wrapper = messageOutputAudioWrapper{v}
+	case *MessageOutputVideo:
+		wrapper = messageOutputVideoWrapper{v}
+	default:
+		return fmt.Sprintf("%+v", media)
+	}
+
+	return formatMediaFormatter(wrapper)
+}
+
+func formatMediaFormatter(m mediaPartFormatter) string {
+	if m.getURL() != nil {
+		return fmt.Sprintf("url=%s", truncateString(*m.getURL(), 80))
+	}
+	if m.getBase64Data() != nil {
+		return fmt.Sprintf("base64[%d bytes], mime=%s", len(*m.getBase64Data()), m.getMIMEType())
+	}
+	return fmt.Sprintf("mime=%s", m.getMIMEType())
+}
+
+func truncateString(s string, maxLen int) string {
+	if len(s) <= maxLen {
+		return s
+	}
+	return s[:maxLen] + "..."
 }
 
 // SystemMessage represents a message with Role "system".
@@ -1276,81 +1249,73 @@ func ToolMessage(content string, toolCallID string, opts ...ToolMessageOption) *
 }
 
 // ConcatToolResults merges multiple ToolResult chunks into a single ToolResult.
-// It collects all ToolOutputParts from the input chunks and merges contiguous text parts within each chunk.
+// It collects all ToolOutputParts from the input chunks and merges contiguous parts of the same type.
 //
 // Merge rules:
-//   - Text parts: Contiguous text parts within each chunk are concatenated into a single text part.
-//   - Non-text parts (image, audio, video, file): These parts are kept as-is without merging.
-//     Each non-text part type can only appear in one chunk; if the same non-text type appears
-//     in multiple chunks, an error is returned.
+//   - Text parts: Contiguous text parts are concatenated into a single text part.
+//   - Audio parts: Contiguous base64-encoded audio parts (without URL) are merged by concatenating
+//     their Base64Data fields. The MIMEType is taken from the first part, and Extra fields are merged.
+//   - Other parts: Image, video, file, and URL-based audio parts are kept as standalone parts without merging.
 //
 // This function is primarily used in streaming scenarios where tool output is delivered
 // in multiple chunks that need to be merged into a complete result.
 //
 // Parameters:
 //   - chunks: A slice of ToolResult pointers representing sequential chunks from a stream.
-//     Nil chunks and chunks with empty Parts are safely ignored.
+//     Nil chunks and chunks with empty Content are safely ignored.
 //
 // Returns:
 //   - *ToolResult: The merged ToolResult containing all content from the chunks.
 //     Returns an empty ToolResult if chunks is empty or all chunks are nil/empty.
-//   - error: An error if the same non-text part type appears in multiple chunks.
+//   - error: An error if merging fails (e.g., due to extra field concatenation errors).
 func ConcatToolResults(chunks []*ToolResult) (*ToolResult, error) {
 	if len(chunks) == 0 {
 		return &ToolResult{}, nil
 	}
 
-	nonTextPartTypes := make(map[ToolPartType]int)
-
+	// Collect all parts from all chunks into a temporary list
 	var allParts []ToolOutputPart
-	for chunkIdx, chunk := range chunks {
-		if chunk == nil || len(chunk.Parts) == 0 {
-			continue
+	for _, chunk := range chunks {
+		if chunk != nil && len(chunk.Content) > 0 {
+			allParts = append(allParts, chunk.Content...)
 		}
-
-		for _, part := range chunk.Parts {
-			if part.Type != ToolPartTypeText {
-				if prevChunkIdx, exists := nonTextPartTypes[part.Type]; exists {
-					return nil, fmt.Errorf("conflicting %s parts found in chunk %d and chunk %d: "+
-						"non-text modality parts cannot appear in multiple chunks", part.Type, prevChunkIdx, chunkIdx)
-				}
-				nonTextPartTypes[part.Type] = chunkIdx
-			}
-		}
-
-		mergedChunkParts := mergeTextPartsInChunk(chunk.Parts)
-		allParts = append(allParts, mergedChunkParts...)
 	}
 
 	if len(allParts) == 0 {
 		return &ToolResult{}, nil
 	}
 
-	return &ToolResult{Parts: allParts}, nil
-}
-
-func mergeTextPartsInChunk(parts []ToolOutputPart) []ToolOutputPart {
-	if len(parts) == 0 {
-		return nil
+	// Merge contiguous parts of the same type
+	merged, err := concatToolOutputParts(allParts)
+	if err != nil {
+		return nil, err
 	}
 
+	return &ToolResult{Content: merged}, nil
+}
+
+func concatToolOutputParts(parts []ToolOutputPart) ([]ToolOutputPart, error) {
 	merged := make([]ToolOutputPart, 0, len(parts))
 	i := 0
-
 	for i < len(parts) {
 		currentPart := parts[i]
+		start := i
 
 		if currentPart.Type == ToolPartTypeText {
-			end := i + 1
+			// --- Text Merging ---
+			// Find end of contiguous text block
+			end := start + 1
 			for end < len(parts) && parts[end].Type == ToolPartTypeText {
 				end++
 			}
 
-			if end == i+1 {
+			// If only one part, just append it
+			if end == start+1 {
 				merged = append(merged, currentPart)
 			} else {
+				// Multiple parts to merge
 				var sb strings.Builder
-				for k := i; k < end; k++ {
+				for k := start; k < end; k++ {
 					sb.WriteString(parts[k].Text)
 				}
 				mergedPart := ToolOutputPart{
@@ -1360,13 +1325,73 @@ func mergeTextPartsInChunk(parts []ToolOutputPart) []ToolOutputPart {
 				merged = append(merged, mergedPart)
 			}
 			i = end
+		} else if isBase64AudioToolPart(currentPart) {
+			// --- Audio Merging ---
+			// Find end of contiguous audio block
+			end := start + 1
+			for end < len(parts) && isBase64AudioToolPart(parts[end]) {
+				end++
+			}
+
+			// If only one part, just append it
+			if end == start+1 {
+				merged = append(merged, currentPart)
+			} else {
+				// Multiple parts to merge
+				var b64Builder strings.Builder
+				var mimeType string
+				extraList := make([]map[string]any, 0, end-start)
+
+				for k := start; k < end; k++ {
+					audioPart := parts[k].Audio
+					if audioPart.Base64Data != nil {
+						b64Builder.WriteString(*audioPart.Base64Data)
+					}
+					if mimeType == "" {
+						mimeType = audioPart.MIMEType
+					}
+					if len(audioPart.Extra) > 0 {
+						extraList = append(extraList, audioPart.Extra)
+					}
+				}
+
+				var mergedExtra map[string]any
+				var err error
+				if len(extraList) > 0 {
+					mergedExtra, err = concatExtra(extraList)
+					if err != nil {
+						return nil, fmt.Errorf("failed to concat tool audio extra: %w", err)
+					}
+				}
+
+				mergedB64 := b64Builder.String()
+				mergedPart := ToolOutputPart{
+					Type: ToolPartTypeAudio,
+					Audio: &ToolOutputAudio{
+						MessagePartCommon: MessagePartCommon{
+							Base64Data: &mergedB64,
+							MIMEType:   mimeType,
+							Extra:      mergedExtra,
+						},
+					},
+				}
+				merged = append(merged, mergedPart)
+			}
+			i = end
 		} else {
+			// --- Non-mergeable part ---
 			merged = append(merged, currentPart)
 			i++
 		}
 	}
 
-	return merged
+	return merged, nil
+}
+func isBase64AudioToolPart(part ToolOutputPart) bool {
+	return part.Type == ToolPartTypeAudio &&
+		part.Audio != nil &&
+		part.Audio.Base64Data != nil &&
+		part.Audio.URL == nil
 }
 
 func concatToolCalls(chunks []ToolCall) ([]ToolCall, error) {
@@ -1566,18 +1591,23 @@ func concatUserMultiContent(parts []MessageInputPart) ([]MessageInputPart, error
 	i := 0
 	for i < len(parts) {
 		currentPart := parts[i]
+		start := i
 
 		if currentPart.Type == ChatMessagePartTypeText {
-			end := i + 1
+			// --- Text Merging ---
+			// Find end of contiguous text block
+			end := start + 1
 			for end < len(parts) && parts[end].Type == ChatMessagePartTypeText {
 				end++
 			}
 
-			if end == i+1 {
+			// If only one part, just append it
+			if end == start+1 {
 				merged = append(merged, currentPart)
 			} else {
+				// Multiple parts to merge
 				var sb strings.Builder
-				for k := i; k < end; k++ {
+				for k := start; k < end; k++ {
 					sb.WriteString(parts[k].Text)
 				}
 				mergedPart := MessageInputPart{
@@ -1587,14 +1617,73 @@ func concatUserMultiContent(parts []MessageInputPart) ([]MessageInputPart, error
 				merged = append(merged, mergedPart)
 			}
 			i = end
-		} else {
+		} else if isBase64MessageInputAudioPart(currentPart) {
+			// --- Audio Merging ---
+			// Find end of contiguous audio block
+			end := start + 1
+			for end < len(parts) && isBase64MessageInputAudioPart(parts[end]) {
+				end++
+			}
 
+			// If only one part, just append it
+			if end == start+1 {
+				merged = append(merged, currentPart)
+			} else {
+				// Multiple parts to merge
+				var b64Builder strings.Builder
+				var mimeType string
+				extraList := make([]map[string]any, 0, end-start)
+
+				for k := start; k < end; k++ {
+					audioPart := parts[k].Audio
+					if audioPart.Base64Data != nil {
+						b64Builder.WriteString(*audioPart.Base64Data)
+					}
+					if mimeType == "" {
+						mimeType = audioPart.MIMEType
+					}
+					if len(audioPart.Extra) > 0 {
+						extraList = append(extraList, audioPart.Extra)
+					}
+				}
+
+				var mergedExtra map[string]any
+				var err error
+				if len(extraList) > 0 {
+					mergedExtra, err = concatExtra(extraList)
+					if err != nil {
+						return nil, fmt.Errorf("failed to concat audio extra: %w", err)
+					}
+				}
+
+				mergedB64 := b64Builder.String()
+				mergedPart := MessageInputPart{
+					Type: ChatMessagePartTypeAudioURL,
+					Audio: &MessageInputAudio{
+						MessagePartCommon: MessagePartCommon{
+							Base64Data: &mergedB64,
+							MIMEType:   mimeType,
+							Extra:      mergedExtra,
+						},
+					},
+				}
+				merged = append(merged, mergedPart)
+			}
+			i = end
+		} else {
+			// --- Non-mergeable part ---
 			merged = append(merged, currentPart)
 			i++
 		}
 	}
 
 	return merged, nil
+}
+func isBase64MessageInputAudioPart(part MessageInputPart) bool {
+	return part.Type == ChatMessagePartTypeAudioURL &&
+		part.Audio != nil &&
+		part.Audio.Base64Data != nil &&
+		part.Audio.URL == nil
 }
 
 func concatExtra(extraList []map[string]any) (map[string]any, error) {
@@ -1798,7 +1887,7 @@ func ConcatMessages(msgs []*Message) (*Message, error) {
 	if len(assistantGenMultiContentParts) > 0 {
 		merged, err := concatAssistantMultiContent(assistantGenMultiContentParts)
 		if err != nil {
-			return nil, fmt.Errorf("failed to concat message's assistant multicontent: %w", err)
+			return nil, fmt.Errorf("failed to concat message's user multi content: %w", err)
 		}
 		ret.AssistantGenMultiContent = merged
 	}
@@ -1806,7 +1895,7 @@ func ConcatMessages(msgs []*Message) (*Message, error) {
 	if len(userInputMultiContentParts) > 0 {
 		merged, err := concatUserMultiContent(userInputMultiContentParts)
 		if err != nil {
-			return nil, fmt.Errorf("failed to concat message's user multicontent: %w", err)
+			return nil, fmt.Errorf("failed to concat message's assistant multi content: %w", err)
 		}
 		ret.UserInputMultiContent = merged
 	}
