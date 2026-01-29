@@ -1601,3 +1601,69 @@ func TestIndirectDependencyWithBranch(t *testing.T) {
 		assert.Equal(t, out, map[string]any{"output": 2, "static": 2})
 	})
 }
+
+func TestInvalidIndirectEdge(t *testing.T) {
+	t.Run("indirect edge without valid path should fail", func(t *testing.T) {
+		wf := NewWorkflow[string, map[string]any]()
+
+		wf.AddLambdaNode("1", InvokableLambda(func(ctx context.Context, in string) (output string, err error) {
+			return in + "_1", nil
+		})).AddInput(START)
+
+		wf.AddLambdaNode("2", InvokableLambda(func(ctx context.Context, in string) (output string, err error) {
+			return in + "_2", nil
+		})).AddInput(START)
+
+		wf.End().AddInput("2", ToField("2")).
+			AddInputWithOptions("1", []*FieldMapping{ToField("1")}, WithNoDirectDependency())
+
+		_, err := wf.Compile(context.Background())
+		assert.Error(t, err)
+		assert.ErrorContains(t, err, "invalid indirect edges found: ['1' to 'end'] (no path exists through direct dependencies)")
+	})
+
+	t.Run("indirect edge with valid path should succeed", func(t *testing.T) {
+		wf := NewWorkflow[string, map[string]any]()
+
+		wf.AddLambdaNode("1", InvokableLambda(func(ctx context.Context, in string) (output string, err error) {
+			return in + "_1", nil
+		})).AddInput(START)
+
+		wf.AddLambdaNode("2", InvokableLambda(func(ctx context.Context, in string) (output string, err error) {
+			return in + "_2", nil
+		})).AddInput("1")
+
+		wf.End().AddInput("2", ToField("2")).
+			AddInputWithOptions("1", []*FieldMapping{ToField("1")}, WithNoDirectDependency())
+
+		r, err := wf.Compile(context.Background())
+		assert.NoError(t, err)
+		out, err := r.Invoke(context.Background(), "query")
+		assert.NoError(t, err)
+		assert.Equal(t, map[string]any{"1": "query_1", "2": "query_1_2"}, out)
+	})
+
+	t.Run("multiple indirect edges, some valid some invalid", func(t *testing.T) {
+		wf := NewWorkflow[string, map[string]any]()
+
+		wf.AddLambdaNode("1", InvokableLambda(func(ctx context.Context, in string) (output string, err error) {
+			return in + "_1", nil
+		})).AddInput(START)
+
+		wf.AddLambdaNode("2", InvokableLambda(func(ctx context.Context, in string) (output string, err error) {
+			return in + "_2", nil
+		})).AddInput("1")
+
+		wf.AddLambdaNode("3", InvokableLambda(func(ctx context.Context, in string) (output string, err error) {
+			return in + "_3", nil
+		})).AddInput(START)
+
+		wf.End().AddInput("2", ToField("2")).
+			AddInputWithOptions("1", []*FieldMapping{ToField("1")}, WithNoDirectDependency()).
+			AddInputWithOptions("3", []*FieldMapping{ToField("3")}, WithNoDirectDependency())
+
+		_, err := wf.Compile(context.Background())
+		assert.Error(t, err)
+		assert.ErrorContains(t, err, "invalid indirect edges found: ['3' to 'end'] (no path exists through direct dependencies)")
+	})
+}

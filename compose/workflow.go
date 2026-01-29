@@ -488,9 +488,71 @@ func (wf *Workflow[I, O]) compile(ctx context.Context, options *graphCompileOpti
 		}
 	}
 
-	// TODO: check indirect edges are legal
+	if err := wf.checkIndirectEdges(); err != nil {
+		return nil, err
+	}
 
 	return wf.g.compile(ctx, options)
+}
+
+// checkIndirectEdges validates that all indirect edges (edges with noDirectDependency)
+// It have a valid execution path from the predecessor to the successor through other nodes with direct dependencies.
+// This ensures that the predecessor will complete before the successor executes, even without a direct dependency.
+func (wf *Workflow[I, O]) checkIndirectEdges() error {
+	var invalidEdges []string
+	for nodeKey, deps := range wf.dependencies {
+		for fromNodeKey, depType := range deps {
+			if depType == noDirectDependency {
+				if !wf.hasPath(fromNodeKey, nodeKey) {
+					invalidEdges = append(invalidEdges, fmt.Sprintf("'%s' to '%s'", fromNodeKey, nodeKey))
+				}
+			}
+		}
+	}
+	if len(invalidEdges) > 0 {
+		return fmt.Errorf("invalid indirect edges found: %v (no path exists through direct dependencies)", invalidEdges)
+	}
+	return nil
+}
+
+// hasPath checks if there is a path from startNode to endNode through direct dependencies.
+// It performs a BFS traversal following the control edges.
+func (wf *Workflow[I, O]) hasPath(startNode, endNode string) bool {
+	if startNode == endNode {
+		return true
+	}
+
+	successors := make(map[string][]string)
+	for node, deps := range wf.dependencies {
+		for predecessor, depType := range deps {
+			if depType != noDirectDependency {
+				successors[predecessor] = append(successors[predecessor], node)
+			}
+		}
+	}
+
+	visited := make(map[string]bool)
+	queue := []string{startNode}
+
+	for len(queue) > 0 {
+		current := queue[0]
+		queue = queue[1:]
+
+		if current == endNode {
+			return true
+		}
+
+		if visited[current] {
+			continue
+		}
+		visited[current] = true
+
+		for _, successor := range successors[current] {
+			queue = append(queue, successor)
+		}
+	}
+
+	return false
 }
 
 func (wf *Workflow[I, O]) initNode(key string) *WorkflowNode {
