@@ -289,9 +289,6 @@ func buildDefaultHistoryRewriter(agentName string) HistoryRewriter {
 
 func (a *flowAgent) Run(ctx context.Context, input *AgentInput, opts ...AgentRunOption) *AsyncIterator[*AgentEvent] {
 	agentName := a.Name(ctx)
-	agentType := getAgentType(a.Agent)
-
-	ctx = initAgentCallbacks(ctx, agentName, agentType, opts...)
 
 	var runCtx *runContext
 	ctx, runCtx = initRunCtx(ctx, agentName, input)
@@ -308,6 +305,8 @@ func (a *flowAgent) Run(ctx context.Context, input *AgentInput, opts ...AgentRun
 
 	ctxForSubAgents := ctx
 
+	agentType := getAgentType(a.Agent)
+	ctx = initAgentCallbacks(ctx, agentName, agentType, filterOptions(agentName, opts)...)
 	cbInput := &AgentCallbackInput{Input: processedInput}
 	ctx, _ = icb.On(ctx, cbInput, icb.OnStartHandle[*AgentCallbackInput], callbacks.TimingOnStart, true)
 
@@ -328,14 +327,13 @@ func (a *flowAgent) Run(ctx context.Context, input *AgentInput, opts ...AgentRun
 
 func (a *flowAgent) Resume(ctx context.Context, info *ResumeInfo, opts ...AgentRunOption) *AsyncIterator[*AgentEvent] {
 	agentName := a.Name(ctx)
-	agentType := getAgentType(a.Agent)
 
 	ctx, info = buildResumeInfo(ctx, agentName, info)
 
-	ctx = initAgentCallbacks(ctx, agentName, agentType, opts...)
-
 	ctxForSubAgents := ctx
 
+	agentType := getAgentType(a.Agent)
+	ctx = initAgentCallbacks(ctx, agentName, agentType, filterOptions(agentName, opts)...)
 	cbInput := &AgentCallbackInput{ResumeInfo: info}
 	ctx, _ = icb.On(ctx, cbInput, icb.OnStartHandle[*AgentCallbackInput], callbacks.TimingOnStart, true)
 

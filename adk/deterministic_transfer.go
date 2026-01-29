@@ -22,6 +22,7 @@ import (
 	"runtime/debug"
 	"sync"
 
+	"github.com/cloudwego/eino/components"
 	"github.com/cloudwego/eino/internal/safe"
 	"github.com/cloudwego/eino/schema"
 )
@@ -62,6 +63,9 @@ func (a *agentWithDeterministicTransferTo) Name(ctx context.Context) string {
 }
 
 func (a *agentWithDeterministicTransferTo) GetType() string {
+	if typer, ok := a.agent.(components.Typer); ok {
+		return typer.GetType()
+	}
 	return "DeterministicTransfer"
 }
 
@@ -94,6 +98,9 @@ func (a *resumableAgentWithDeterministicTransferTo) Name(ctx context.Context) st
 }
 
 func (a *resumableAgentWithDeterministicTransferTo) GetType() string {
+	if typer, ok := a.agent.(components.Typer); ok {
+		return typer.GetType()
+	}
 	return "DeterministicTransfer"
 }
 
