@@ -19,12 +19,14 @@ package adk
 import (
 	"context"
 	"errors"
+	"reflect"
 
 	"github.com/cloudwego/eino/callbacks"
 	"github.com/cloudwego/eino/components"
 	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/components/tool"
 	"github.com/cloudwego/eino/compose"
+	"github.com/cloudwego/eino/internal/generic"
 	"github.com/cloudwego/eino/schema"
 )
 
@@ -343,7 +345,7 @@ func (w *stateModelWrapper) GetType() string {
 	if typer, ok := w.inner.(components.Typer); ok {
 		return typer.GetType()
 	}
-	return ""
+	return generic.ParseTypeName(reflect.ValueOf(w.inner))
 }
 
 func (w *stateModelWrapper) wrapGenerateEndpoint(endpoint generateEndpoint) generateEndpoint {

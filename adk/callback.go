@@ -51,10 +51,10 @@ func copyEventIterator(iter *AsyncIterator[*AgentEvent], n int) []*AsyncIterator
 		return []*AsyncIterator[*AgentEvent]{iter}
 	}
 
-	pairs := make([]*AsyncIterator[*AgentEvent], n)
+	iterators := make([]*AsyncIterator[*AgentEvent], n)
 	generators := make([]*AsyncGenerator[*AgentEvent], n)
 	for i := 0; i < n; i++ {
-		pairs[i], generators[i] = NewAsyncIteratorPair[*AgentEvent]()
+		iterators[i], generators[i] = NewAsyncIteratorPair[*AgentEvent]()
 	}
 
 	go func() {
@@ -76,7 +76,7 @@ func copyEventIterator(iter *AsyncIterator[*AgentEvent], n int) []*AsyncIterator
 		}
 	}()
 
-	return pairs
+	return iterators
 }
 
 func copyAgentCallbackOutput(out *AgentCallbackOutput, n int) []*AgentCallbackOutput {

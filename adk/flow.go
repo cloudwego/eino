@@ -427,8 +427,6 @@ func (a *flowAgent) run(
 			setAutomaticClose(copied)
 			setAutomaticClose(event)
 			runCtx.Session.addEvent(copied)
-
-			cbGen.Send(copyAgentEvent(event))
 		}
 		// Action gating uses exact run-path match as well:
 		// only actions originating from this agent execution (not child/tool runs)
@@ -436,6 +434,10 @@ func (a *flowAgent) run(
 		if exactRunPathMatch(runCtx.RunPath, event.RunPath) {
 			lastAction = event.Action
 		}
+		copied := copyAgentEvent(event)
+		setAutomaticClose(copied)
+		setAutomaticClose(event)
+		cbGen.Send(copied)
 		generator.Send(event)
 	}
 
