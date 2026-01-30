@@ -19,12 +19,14 @@ package adk
 import (
 	"context"
 	"errors"
+	"reflect"
 
 	"github.com/cloudwego/eino/callbacks"
 	"github.com/cloudwego/eino/components"
 	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/components/tool"
 	"github.com/cloudwego/eino/compose"
+	"github.com/cloudwego/eino/internal/generic"
 	"github.com/cloudwego/eino/schema"
 )
 
@@ -53,6 +55,7 @@ func buildModelWrappers(m model.BaseChatModel, config *modelWrapperConfig) model
 
 	wrapped = &stateModelWrapper{
 		inner:       wrapped,
+		original:    m,
 		handlers:    config.handlers,
 		middlewares: config.middlewares,
 		toolInfos:   config.toolInfos,
@@ -330,6 +333,7 @@ func (h *eventSenderToolHandler) WrapStreamableToolCall(next compose.StreamableT
 
 type stateModelWrapper struct {
 	inner       model.BaseChatModel
+	original    model.BaseChatModel
 	handlers    []handlerInfo
 	middlewares []AgentMiddleware
 	toolInfos   []*schema.ToolInfo
@@ -337,6 +341,13 @@ type stateModelWrapper struct {
 
 func (w *stateModelWrapper) IsCallbacksEnabled() bool {
 	return true
+}
+
+func (w *stateModelWrapper) GetType() string {
+	if typer, ok := w.original.(components.Typer); ok {
+		return typer.GetType()
+	}
+	return generic.ParseTypeName(reflect.ValueOf(w.original))
 }
 
 func (w *stateModelWrapper) wrapGenerateEndpoint(endpoint generateEndpoint) generateEndpoint {
