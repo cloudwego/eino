@@ -1023,28 +1023,28 @@ func (f *streamableTool[I, O]) StreamableRun(ctx context.Context, argumentsInJSO
 
 type enhancedInvokableTool struct {
 	info *schema.ToolInfo
-	fn   func(ctx context.Context, input *schema.ToolCallInfo) (*schema.ToolResult, error)
+	fn   func(ctx context.Context, input *schema.ToolArguments) (*schema.ToolResult, error)
 }
 
 func (e *enhancedInvokableTool) Info(ctx context.Context) (*schema.ToolInfo, error) {
 	return e.info, nil
 }
 
-func (e *enhancedInvokableTool) InvokableRun(ctx context.Context, toolCallInfo *schema.ToolCallInfo, _ ...tool.Option) (*schema.ToolResult, error) {
-	return e.fn(ctx, toolCallInfo)
+func (e *enhancedInvokableTool) InvokableRun(ctx context.Context, toolArguments *schema.ToolArguments, _ ...tool.Option) (*schema.ToolResult, error) {
+	return e.fn(ctx, toolArguments)
 }
 
 type enhancedStreamableTool struct {
 	info *schema.ToolInfo
-	fn   func(ctx context.Context, input *schema.ToolCallInfo) (*schema.StreamReader[*schema.ToolResult], error)
+	fn   func(ctx context.Context, input *schema.ToolArguments) (*schema.StreamReader[*schema.ToolResult], error)
 }
 
 func (e *enhancedStreamableTool) Info(ctx context.Context) (*schema.ToolInfo, error) {
 	return e.info, nil
 }
 
-func (e *enhancedStreamableTool) StreamableRun(ctx context.Context, toolCallInfo *schema.ToolCallInfo, _ ...tool.Option) (*schema.StreamReader[*schema.ToolResult], error) {
-	return e.fn(ctx, toolCallInfo)
+func (e *enhancedStreamableTool) StreamableRun(ctx context.Context, toolArguments *schema.ToolArguments, _ ...tool.Option) (*schema.StreamReader[*schema.ToolResult], error) {
+	return e.fn(ctx, toolArguments)
 }
 
 func TestEnhancedToolNode(t *testing.T) {
@@ -1055,9 +1055,9 @@ func TestEnhancedToolNode(t *testing.T) {
 			Name: "enhanced_invokable_tool",
 			Desc: "test enhanced invokable tool",
 		},
-		fn: func(ctx context.Context, input *schema.ToolCallInfo) (*schema.ToolResult, error) {
+		fn: func(ctx context.Context, input *schema.ToolArguments) (*schema.ToolResult, error) {
 			return &schema.ToolResult{
-				Content: []schema.ToolOutputPart{
+				Parts: []schema.ToolOutputPart{
 					{Type: schema.ToolPartTypeText, Text: "invokable result: " + input.TextArguments},
 				},
 			}, nil
@@ -1069,10 +1069,10 @@ func TestEnhancedToolNode(t *testing.T) {
 			Name: "enhanced_streamable_tool",
 			Desc: "test enhanced streamable tool",
 		},
-		fn: func(ctx context.Context, input *schema.ToolCallInfo) (*schema.StreamReader[*schema.ToolResult], error) {
+		fn: func(ctx context.Context, input *schema.ToolArguments) (*schema.StreamReader[*schema.ToolResult], error) {
 			results := []*schema.ToolResult{
-				{Content: []schema.ToolOutputPart{{Type: schema.ToolPartTypeText, Text: "stream part 1: " + input.TextArguments}}},
-				{Content: []schema.ToolOutputPart{{Type: schema.ToolPartTypeText, Text: " stream part 2"}}},
+				{Parts: []schema.ToolOutputPart{{Type: schema.ToolPartTypeText, Text: "stream part 1: " + input.TextArguments}}},
+				{Parts: []schema.ToolOutputPart{{Type: schema.ToolPartTypeText, Text: " stream part 2"}}},
 			}
 			return schema.StreamReaderFromArray(results), nil
 		},
@@ -1144,9 +1144,9 @@ func TestEnhancedToolConversion(t *testing.T) {
 			Name: "enhanced_only_invokable",
 			Desc: "test enhanced invokable only",
 		},
-		fn: func(ctx context.Context, input *schema.ToolCallInfo) (*schema.ToolResult, error) {
+		fn: func(ctx context.Context, input *schema.ToolArguments) (*schema.ToolResult, error) {
 			return &schema.ToolResult{
-				Content: []schema.ToolOutputPart{
+				Parts: []schema.ToolOutputPart{
 					{Type: schema.ToolPartTypeText, Text: "enhanced: " + input.TextArguments},
 				},
 			}, nil
@@ -1198,9 +1198,9 @@ func TestEnhancedToolMiddleware(t *testing.T) {
 			Name: "enhanced_tool_with_middleware",
 			Desc: "test enhanced tool with middleware",
 		},
-		fn: func(ctx context.Context, input *schema.ToolCallInfo) (*schema.ToolResult, error) {
+		fn: func(ctx context.Context, input *schema.ToolArguments) (*schema.ToolResult, error) {
 			return &schema.ToolResult{
-				Content: []schema.ToolOutputPart{
+				Parts: []schema.ToolOutputPart{
 					{Text: "result", Type: schema.ToolPartTypeText},
 				},
 			}, nil
@@ -1277,9 +1277,9 @@ func TestEnhancedToolPriority(t *testing.T) {
 			Name: "test_tool",
 			Desc: "test tool with both enhanced and regular",
 		},
-		fn: func(ctx context.Context, input *schema.ToolCallInfo) (*schema.ToolResult, error) {
+		fn: func(ctx context.Context, input *schema.ToolArguments) (*schema.ToolResult, error) {
 			return &schema.ToolResult{
-				Content: []schema.ToolOutputPart{
+				Parts: []schema.ToolOutputPart{
 					{Text: "enhanced result", Type: schema.ToolPartTypeText},
 				},
 			}, nil

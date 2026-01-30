@@ -100,7 +100,7 @@ func handlersToToolMiddlewares(handlers []handlerInfo) []compose.ToolMiddleware 
 	var middlewares []compose.ToolMiddleware
 	for i := len(handlers) - 1; i >= 0; i-- {
 		h := handlers[i]
-		if !h.hasWrapInvokableToolCall && !h.hasWrapStreamableToolCall {
+		if !h.hasWrapInvokableToolCall && !h.hasWrapStreamableToolCall && !h.hasWrapEnhancedInvokableToolCall && !h.hasWrapEnhancedStreamableToolCall {
 			continue
 		}
 
@@ -166,6 +166,70 @@ func handlersToToolMiddlewares(handlers []handlerInfo) []compose.ToolMiddleware 
 						return nil, err
 					}
 					return &compose.StreamToolOutput{Result: result}, nil
+				}
+			}
+		}
+
+		if h.hasWrapEnhancedInvokableToolCall {
+			handler := h.handler
+			m.EnhancedInvokable = func(next compose.EnhancedInvokableToolEndpoint) compose.EnhancedInvokableToolEndpoint {
+				return func(ctx context.Context, input *compose.ToolInput) (*compose.EnhancedInvokableToolOutput, error) {
+					tCtx := &ToolContext{
+						Name:   input.Name,
+						CallID: input.CallID,
+					}
+					wrappedEndpoint := handler.WrapEnhancedInvokableToolCall(
+						func(ctx context.Context, toolArguments *schema.ToolArguments, opts ...tool.Option) (*schema.ToolResult, error) {
+							output, err := next(ctx, &compose.ToolInput{
+								Name:        input.Name,
+								CallID:      input.CallID,
+								Arguments:   toolArguments.TextArguments,
+								CallOptions: opts,
+							})
+							if err != nil {
+								return nil, err
+							}
+							return output.Result, nil
+						},
+						tCtx,
+					)
+					result, err := wrappedEndpoint(ctx, &schema.ToolArguments{TextArguments: input.Arguments}, input.CallOptions...)
+					if err != nil {
+						return nil, err
+					}
+					return &compose.EnhancedInvokableToolOutput{Result: result}, nil
+				}
+			}
+		}
+
+		if h.hasWrapEnhancedStreamableToolCall {
+			handler := h.handler
+			m.EnhancedStreamable = func(next compose.EnhancedStreamableToolEndpoint) compose.EnhancedStreamableToolEndpoint {
+				return func(ctx context.Context, input *compose.ToolInput) (*compose.EnhancedStreamableToolOutput, error) {
+					tCtx := &ToolContext{
+						Name:   input.Name,
+						CallID: input.CallID,
+					}
+					wrappedEndpoint := handler.WrapEnhancedStreamableToolCall(
+						func(ctx context.Context, toolArguments *schema.ToolArguments, opts ...tool.Option) (*schema.StreamReader[*schema.ToolResult], error) {
+							output, err := next(ctx, &compose.ToolInput{
+								Name:        input.Name,
+								CallID:      input.CallID,
+								Arguments:   toolArguments.TextArguments,
+								CallOptions: opts,
+							})
+							if err != nil {
+								return nil, err
+							}
+							return output.Result, nil
+						},
+						tCtx,
+					)
+					result, err := wrappedEndpoint(ctx, &schema.ToolArguments{TextArguments: input.Arguments}, input.CallOptions...)
+					if err != nil {
+						return nil, err
+					}
+					return &compose.EnhancedStreamableToolOutput{Result: result}, nil
 				}
 			}
 		}
@@ -328,6 +392,81 @@ func (h *eventSenderToolHandler) WrapStreamableToolCall(next compose.StreamableT
 		})
 
 		return &compose.StreamToolOutput{Result: streams[1]}, nil
+	}
+}
+
+func (h *eventSenderToolHandler) WrapEnhancedInvokableToolCall(next compose.EnhancedInvokableToolEndpoint) compose.EnhancedInvokableToolEndpoint {
+	return func(ctx context.Context, input *compose.ToolInput) (*compose.EnhancedInvokableToolOutput, error) {
+		output, err := next(ctx, input)
+		if err != nil {
+			return nil, err
+		}
+
+		toolName := input.Name
+		callID := input.CallID
+
+		prePopAction := popToolGenAction(ctx, toolName)
+		msg := schema.ToolMessage("", callID, schema.WithToolName(toolName))
+		msg.UserInputMultiContent, err = output.Result.ToMessageInputParts()
+		if err != nil {
+			return nil, err
+		}
+		event := EventFromMessage(msg, nil, schema.Tool, toolName)
+		if prePopAction != nil {
+			event.Action = prePopAction
+		}
+
+		execCtx := getChatModelAgentExecCtx(ctx)
+		_ = compose.ProcessState(ctx, func(_ context.Context, st *State) error {
+			if st.getReturnDirectlyToolCallID() == callID {
+				st.setReturnDirectlyEvent(event)
+			} else {
+				execCtx.send(event)
+			}
+			return nil
+		})
+
+		return output, nil
+	}
+}
+
+func (h *eventSenderToolHandler) WrapEnhancedStreamableToolCall(next compose.EnhancedStreamableToolEndpoint) compose.EnhancedStreamableToolEndpoint {
+	return func(ctx context.Context, input *compose.ToolInput) (*compose.EnhancedStreamableToolOutput, error) {
+		output, err := next(ctx, input)
+		if err != nil {
+			return nil, err
+		}
+
+		toolName := input.Name
+		callID := input.CallID
+
+		prePopAction := popToolGenAction(ctx, toolName)
+		streams := output.Result.Copy(2)
+
+		cvt := func(in *schema.ToolResult) (Message, error) {
+			msg := schema.ToolMessage("", callID, schema.WithToolName(toolName))
+			var cvtErr error
+			msg.UserInputMultiContent, cvtErr = in.ToMessageInputParts()
+			if cvtErr != nil {
+				return nil, cvtErr
+			}
+			return msg, nil
+		}
+		msgStream := schema.StreamReaderWithConvert(streams[0], cvt)
+		event := EventFromMessage(nil, msgStream, schema.Tool, toolName)
+		event.Action = prePopAction
+
+		execCtx := getChatModelAgentExecCtx(ctx)
+		_ = compose.ProcessState(ctx, func(_ context.Context, st *State) error {
+			if st.getReturnDirectlyToolCallID() == callID {
+				st.setReturnDirectlyEvent(event)
+			} else {
+				execCtx.send(event)
+			}
+			return nil
+		})
+
+		return &compose.EnhancedStreamableToolOutput{Result: streams[1]}, nil
 	}
 }
 
