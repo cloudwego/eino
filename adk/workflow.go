@@ -54,6 +54,19 @@ func (a *workflowAgent) Description(_ context.Context) string {
 	return a.description
 }
 
+func (a *workflowAgent) GetType() string {
+	switch a.mode {
+	case workflowAgentModeSequential:
+		return "Sequential"
+	case workflowAgentModeParallel:
+		return "Parallel"
+	case workflowAgentModeLoop:
+		return "Loop"
+	default:
+		return "WorkflowAgent"
+	}
+}
+
 func (a *workflowAgent) Run(ctx context.Context, _ *AgentInput, opts ...AgentRunOption) *AsyncIterator[*AgentEvent] {
 	iterator, generator := NewAsyncIteratorPair[*AgentEvent]()
 
