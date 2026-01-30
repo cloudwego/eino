@@ -365,7 +365,8 @@ golangci-lint run ./...
 ## 安全
 
 如果你在该项目中发现潜在的安全问题，或你认为可能发现了安全问题，请通过我们的[安全中心](https://security.bytedance.com/src)
-或[漏洞报告邮箱](sec@bytedance.com)通知字节跳动安全团队。
+或[漏洞报告邮箱](mailto:sec@bytedance.com?subject=关于Eino的反馈)通知字节跳动安全团队。
+
 
 请**不要**创建公开的 GitHub Issue。
 
