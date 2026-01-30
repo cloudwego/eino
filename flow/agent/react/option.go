@@ -165,14 +165,54 @@ func WithMessageFuture() (agent.AgentOption, MessageFuture) {
 			h.sendMessageStream(msgStream)
 		}
 	}
+
+	createEnhancedToolResultSender := func() enhancedToolResultSender {
+		return func(toolName, callID string, result *schema.ToolResult) {
+			var err error
+			msg := schema.ToolMessage("", callID, schema.WithToolName(toolName))
+			msg.UserInputMultiContent, err = result.ToMessageInputParts()
+			if err != nil {
+				return
+			}
+			h.sendMessage(msg)
+		}
+	}
+
+	createEnhancedStreamToolResultSender := func() enhancedStreamToolResultSender {
+		return func(toolName, callID string, resultStream *schema.StreamReader[*schema.ToolResult]) {
+			cvt := func(result *schema.ToolResult) (*schema.Message, error) {
+				var err error
+				msg := schema.ToolMessage("", callID, schema.WithToolName(toolName))
+				msg.UserInputMultiContent, err = result.ToMessageInputParts()
+				if err != nil {
+					return nil, err
+				}
+				return msg, nil
+			}
+			msgStream := schema.StreamReaderWithConvert(resultStream, cvt)
+			h.sendMessageStream(msgStream)
+		}
+	}
+
 	graphHandler := callbacks.NewHandlerBuilder().
 		OnStartFn(func(ctx context.Context, info *callbacks.RunInfo, input callbacks.CallbackInput) context.Context {
 			h.onGraphStart(ctx, info, input)
-			return setToolResultSendersToCtx(ctx, createToolResultSender(), createStreamToolResultSender())
+			return setToolResultSendersToCtx(ctx, &toolResultSenders{
+				sender:                         createToolResultSender(),
+				streamSender:                   createStreamToolResultSender(),
+				enhancedResultSender:           createEnhancedToolResultSender(),
+				enhancedStreamToolResultSender: createEnhancedStreamToolResultSender(),
+			})
 		}).
 		OnStartWithStreamInputFn(func(ctx context.Context, info *callbacks.RunInfo, input *schema.StreamReader[callbacks.CallbackInput]) context.Context {
 			h.onGraphStartWithStreamInput(ctx, info, input)
-			return setToolResultSendersToCtx(ctx, createToolResultSender(), createStreamToolResultSender())
+			return setToolResultSendersToCtx(ctx, &toolResultSenders{
+				sender:                         createToolResultSender(),
+				streamSender:                   createStreamToolResultSender(),
+				enhancedResultSender:           createEnhancedToolResultSender(),
+				enhancedStreamToolResultSender: createEnhancedStreamToolResultSender(),
+			})
+
 		}).
 		OnEndFn(h.onGraphEnd).
 		OnEndWithStreamOutputFn(h.onGraphEndWithStreamOutput).

@@ -27,17 +27,22 @@ import (
 )
 
 type toolResultSender func(toolName, callID, result string)
-type streamToolResultSender func(toolName, callID string, resultStream *schema.StreamReader[string])
 
+type enhancedToolResultSender func(toolName, callID string, result *schema.ToolResult)
+type streamToolResultSender func(toolName, callID string, resultStream *schema.StreamReader[string])
+type enhancedStreamToolResultSender func(toolName, callID string, resultStream *schema.StreamReader[*schema.ToolResult])
 type toolResultSenders struct {
 	sender       toolResultSender
 	streamSender streamToolResultSender
+
+	enhancedResultSender           enhancedToolResultSender
+	enhancedStreamToolResultSender enhancedStreamToolResultSender
 }
 
 type toolResultSenderCtxKey struct{}
 
-func setToolResultSendersToCtx(ctx context.Context, sender toolResultSender, streamSender streamToolResultSender) context.Context {
-	return context.WithValue(ctx, toolResultSenderCtxKey{}, &toolResultSenders{sender: sender, streamSender: streamSender})
+func setToolResultSendersToCtx(ctx context.Context, senders *toolResultSenders) context.Context {
+	return context.WithValue(ctx, toolResultSenderCtxKey{}, senders)
 }
 
 func getToolResultSendersFromCtx(ctx context.Context) *toolResultSenders {
@@ -82,6 +87,35 @@ func newToolResultCollectorMiddleware() compose.ToolMiddleware {
 				if senders != nil && senders.streamSender != nil {
 					streams := output.Result.Copy(2)
 					senders.streamSender(input.Name, input.CallID, streams[0])
+					output.Result = streams[1]
+				}
+				return output, nil
+			}
+		},
+		EnhancedInvokable: func(next compose.EnhancedInvokableToolEndpoint) compose.EnhancedInvokableToolEndpoint {
+			return func(ctx context.Context, input *compose.ToolInput) (*compose.EnhancedInvokableToolOutput, error) {
+				senders := getToolResultSendersFromCtx(ctx)
+				output, err := next(ctx, input)
+				if err != nil {
+					return nil, err
+				}
+				if senders != nil && senders.enhancedResultSender != nil {
+					senders.enhancedResultSender(input.Name, input.CallID, output.Result)
+				}
+				return output, nil
+
+			}
+		},
+		EnhancedStreamable: func(next compose.EnhancedStreamableToolEndpoint) compose.EnhancedStreamableToolEndpoint {
+			return func(ctx context.Context, input *compose.ToolInput) (*compose.EnhancedStreamableToolOutput, error) {
+				senders := getToolResultSendersFromCtx(ctx)
+				output, err := next(ctx, input)
+				if err != nil {
+					return nil, err
+				}
+				if senders != nil && senders.enhancedStreamToolResultSender != nil {
+					streams := output.Result.Copy(2)
+					senders.enhancedStreamToolResultSender(input.Name, input.CallID, streams[0])
 					output.Result = streams[1]
 				}
 				return output, nil
