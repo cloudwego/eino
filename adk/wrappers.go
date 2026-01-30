@@ -179,11 +179,11 @@ func handlersToToolMiddlewares(handlers []handlerInfo) []compose.ToolMiddleware 
 						CallID: input.CallID,
 					}
 					wrappedEndpoint := handler.WrapEnhancedInvokableToolCall(
-						func(ctx context.Context, toolArguments *schema.ToolArguments, opts ...tool.Option) (*schema.ToolResult, error) {
+						func(ctx context.Context, toolArgument *schema.ToolArgument, opts ...tool.Option) (*schema.ToolResult, error) {
 							output, err := next(ctx, &compose.ToolInput{
 								Name:        input.Name,
 								CallID:      input.CallID,
-								Arguments:   toolArguments.TextArguments,
+								Arguments:   toolArgument.TextArgument,
 								CallOptions: opts,
 							})
 							if err != nil {
@@ -193,7 +193,7 @@ func handlersToToolMiddlewares(handlers []handlerInfo) []compose.ToolMiddleware 
 						},
 						tCtx,
 					)
-					result, err := wrappedEndpoint(ctx, &schema.ToolArguments{TextArguments: input.Arguments}, input.CallOptions...)
+					result, err := wrappedEndpoint(ctx, &schema.ToolArgument{TextArgument: input.Arguments}, input.CallOptions...)
 					if err != nil {
 						return nil, err
 					}
@@ -211,11 +211,11 @@ func handlersToToolMiddlewares(handlers []handlerInfo) []compose.ToolMiddleware 
 						CallID: input.CallID,
 					}
 					wrappedEndpoint := handler.WrapEnhancedStreamableToolCall(
-						func(ctx context.Context, toolArguments *schema.ToolArguments, opts ...tool.Option) (*schema.StreamReader[*schema.ToolResult], error) {
+						func(ctx context.Context, toolArgument *schema.ToolArgument, opts ...tool.Option) (*schema.StreamReader[*schema.ToolResult], error) {
 							output, err := next(ctx, &compose.ToolInput{
 								Name:        input.Name,
 								CallID:      input.CallID,
-								Arguments:   toolArguments.TextArguments,
+								Arguments:   toolArgument.TextArgument,
 								CallOptions: opts,
 							})
 							if err != nil {
@@ -225,7 +225,7 @@ func handlersToToolMiddlewares(handlers []handlerInfo) []compose.ToolMiddleware 
 						},
 						tCtx,
 					)
-					result, err := wrappedEndpoint(ctx, &schema.ToolArguments{TextArguments: input.Arguments}, input.CallOptions...)
+					result, err := wrappedEndpoint(ctx, &schema.ToolArgument{TextArgument: input.Arguments}, input.CallOptions...)
 					if err != nil {
 						return nil, err
 					}
