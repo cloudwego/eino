@@ -45,3 +45,6 @@ output/*
 .DS_Store
 *.log
 CLAUDE.md
+
+# Specs directories
+*/specs

@@ -125,7 +125,10 @@ func defaultGenModelInput(ctx context.Context, instruction string, input *AgentI
 			ct := prompt.FromMessages(schema.FString, sp)
 			ms, err := ct.Format(ctx, vs)
 			if err != nil {
-				return nil, err
+				return nil, fmt.Errorf("defaultGenModelInput: failed to format instruction using FString template. "+
+					"This formatting is triggered automatically when SessionValues are present. "+
+					"If your instruction contains literal curly braces (e.g., JSON), provide a custom GenModelInput that uses another format. If you are using "+
+					"SessionValues for purposes other than instruction formatting, provide a custom GenModelInput that does no formatting at all: %w", err)
 			}
 
 			sp = ms[0]
