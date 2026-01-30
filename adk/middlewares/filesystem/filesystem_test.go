@@ -381,7 +381,7 @@ func TestGrepTool(t *testing.T) {
 		{
 			name:     "grep with count mode",
 			input:    `{"pattern": "hello", "output_mode": "count"}`,
-			expected: "4", // 2 in file3.txt, 1 in file4.py, 1 in file2.go
+			expected: "/dir1/file3.txt:2\n/dir1/file4.py:1\n/file2.go:1", // 2 in file3.txt, 1 in file4.py, 1 in file2.go
 		},
 		{
 			name:     "grep with content mode",
@@ -396,12 +396,12 @@ func TestGrepTool(t *testing.T) {
 		{
 			name:     "grep with glob filter",
 			input:    `{"pattern": "hello", "glob": "*.txt", "output_mode": "count"}`,
-			expected: "2", // only in file3.txt
+			expected: "/dir1/file3.txt:2", // only in file3.txt
 		},
 		{
 			name:     "grep with path filter",
 			input:    `{"pattern": "package", "path": "/dir2", "output_mode": "count"}`,
-			expected: "1", // only in dir2/file5.go
+			expected: "/dir2/file5.go:1", // only in dir2/file5.go
 		},
 	}
 
