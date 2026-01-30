@@ -24,6 +24,7 @@ import (
 	"github.com/bytedance/sonic"
 
 	"github.com/cloudwego/eino/adk"
+	"github.com/cloudwego/eino/adk/internal"
 	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/components/tool"
 	"github.com/cloudwego/eino/components/tool/utils"
@@ -85,7 +86,13 @@ func New(ctx context.Context, cfg *Config) (adk.ResumableAgent, error) {
 
 	instruction := cfg.Instruction
 	if len(instruction) == 0 {
-		instruction = baseAgentInstruction
+		instruction, err = internal.SelectPrompt(internal.I18nPrompts{
+			English: baseAgentInstruction,
+			Chinese: baseAgentInstructionChinese,
+		})
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	if !cfg.WithoutGeneralSubAgent || len(cfg.SubAgents) > 0 {
@@ -158,20 +165,42 @@ type writeTodosArguments struct {
 }
 
 func newWriteTodos() (adk.AgentMiddleware, error) {
-	t, err := utils.InferTool("write_todos", writeTodosToolDescription, func(ctx context.Context, input writeTodosArguments) (output string, err error) {
+	toolDesc, err := internal.SelectPrompt(internal.I18nPrompts{
+		English: writeTodosToolDescription,
+		Chinese: writeTodosToolDescriptionChinese,
+	})
+	if err != nil {
+		return adk.AgentMiddleware{}, err
+	}
+	prompt, err := internal.SelectPrompt(internal.I18nPrompts{
+		English: writeTodosPrompt,
+		Chinese: writeTodosPromptChinese,
+	})
+	if err != nil {
+		return adk.AgentMiddleware{}, err
+	}
+	resultMsg, err := internal.SelectPrompt(internal.I18nPrompts{
+		English: "Updated todo list to %s",
+		Chinese: "已更新待办列表为 %s",
+	})
+	if err != nil {
+		return adk.AgentMiddleware{}, err
+	}
+
+	t, err := utils.InferTool("write_todos", toolDesc, func(ctx context.Context, input writeTodosArguments) (output string, err error) {
 		adk.AddSessionValue(ctx, SessionKeyTodos, input.Todos)
 		todos, err := sonic.MarshalString(input.Todos)
 		if err != nil {
 			return "", err
 		}
-		return fmt.Sprintf("Updated todo list to %s", todos), nil
+		return fmt.Sprintf(resultMsg, todos), nil
 	})
 	if err != nil {
 		return adk.AgentMiddleware{}, err
 	}
 
 	return adk.AgentMiddleware{
-		AdditionalInstruction: writeTodosPrompt,
+		AdditionalInstruction: prompt,
 		AdditionalTools:       []tool.BaseTool{t},
 	}, nil
 }
