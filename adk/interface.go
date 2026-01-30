@@ -23,9 +23,14 @@ import (
 	"fmt"
 	"io"
 
+	"github.com/cloudwego/eino/components"
 	"github.com/cloudwego/eino/internal/core"
 	"github.com/cloudwego/eino/schema"
 )
+
+// ComponentOfAgent is the component type identifier for ADK agents in callbacks.
+// Use this to filter callback events to only agent-related events.
+const ComponentOfAgent components.Component = "Agent"
 
 type Message = *schema.Message
 type MessageStream = *schema.StreamReader[Message]

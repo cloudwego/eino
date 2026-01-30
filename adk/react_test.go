@@ -40,11 +40,11 @@ type testModelWrapper struct {
 }
 
 func (w *testModelWrapper) Generate(ctx context.Context, input []*schema.Message, opts ...model.Option) (*schema.Message, error) {
-	return (&stateModelWrapper{inner: w.inner}).Generate(ctx, input, opts...)
+	return (&stateModelWrapper{inner: w.inner, original: w.inner}).Generate(ctx, input, opts...)
 }
 
 func (w *testModelWrapper) Stream(ctx context.Context, input []*schema.Message, opts ...model.Option) (*schema.StreamReader[*schema.Message], error) {
-	return (&stateModelWrapper{inner: w.inner}).Stream(ctx, input, opts...)
+	return (&stateModelWrapper{inner: w.inner, original: w.inner}).Stream(ctx, input, opts...)
 }
 
 func (w *testModelWrapper) WithTools(tools []*schema.ToolInfo) (model.ToolCallingChatModel, error) {
