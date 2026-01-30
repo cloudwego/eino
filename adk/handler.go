@@ -36,9 +36,9 @@ type InvokableToolCallEndpoint func(ctx context.Context, argumentsInJSON string,
 // Middleware authors implement wrappers around this endpoint to add custom behavior.
 type StreamableToolCallEndpoint func(ctx context.Context, argumentsInJSON string, opts ...tool.Option) (*schema.StreamReader[string], error)
 
-type EnhancedInvokableToolCallEndpoint func(ctx context.Context, toolArguments *schema.ToolArguments, opts ...tool.Option) (*schema.ToolResult, error)
+type EnhancedInvokableToolCallEndpoint func(ctx context.Context, toolArgument *schema.ToolArgument, opts ...tool.Option) (*schema.ToolResult, error)
 
-type EnhancedStreamableToolCallEndpoint func(ctx context.Context, toolArguments *schema.ToolArguments, opts ...tool.Option) (*schema.StreamReader[*schema.ToolResult], error)
+type EnhancedStreamableToolCallEndpoint func(ctx context.Context, toolArgument *schema.ToolArgument, opts ...tool.Option) (*schema.StreamReader[*schema.ToolResult], error)
 
 // ToolContext provides metadata about the tool being wrapped.
 type ToolContext struct {
