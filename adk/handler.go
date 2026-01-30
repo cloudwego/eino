@@ -36,6 +36,10 @@ type InvokableToolCallEndpoint func(ctx context.Context, argumentsInJSON string,
 // Middleware authors implement wrappers around this endpoint to add custom behavior.
 type StreamableToolCallEndpoint func(ctx context.Context, argumentsInJSON string, opts ...tool.Option) (*schema.StreamReader[string], error)
 
+type EnhancedInvokableToolCallEndpoint func(ctx context.Context, toolArguments *schema.ToolArguments, opts ...tool.Option) (*schema.ToolResult, error)
+
+type EnhancedStreamableToolCallEndpoint func(ctx context.Context, toolArguments *schema.ToolArguments, opts ...tool.Option) (*schema.StreamReader[*schema.ToolResult], error)
+
 // ToolContext provides metadata about the tool being wrapped.
 type ToolContext struct {
 	Name   string
@@ -146,6 +150,10 @@ type ChatModelAgentMiddleware interface {
 	//   - CallID: The unique identifier for this specific tool call
 	WrapStreamableToolCall(endpoint StreamableToolCallEndpoint, tCtx *ToolContext) StreamableToolCallEndpoint
 
+	WrapEnhancedInvokableToolCall(endpoint EnhancedInvokableToolCallEndpoint, tCtx *ToolContext) EnhancedInvokableToolCallEndpoint
+
+	WrapEnhancedStreamableToolCall(endpoint EnhancedStreamableToolCallEndpoint, tCtx *ToolContext) EnhancedStreamableToolCallEndpoint
+
 	// WrapModel wraps a chat model with custom behavior.
 	// Return the input model unchanged if no wrapping is needed.
 	//
@@ -183,6 +191,14 @@ func (b *BaseChatModelAgentMiddleware) WrapStreamableToolCall(endpoint Streamabl
 	return endpoint
 }
 
+func (b *BaseChatModelAgentMiddleware) WrapEnhancedInvokableToolCall(endpoint EnhancedInvokableToolCallEndpoint, tCtx *ToolContext) EnhancedInvokableToolCallEndpoint {
+	return endpoint
+}
+
+func (b *BaseChatModelAgentMiddleware) WrapEnhancedStreamableToolCall(endpoint EnhancedStreamableToolCallEndpoint, tCtx *ToolContext) EnhancedStreamableToolCallEndpoint {
+	return endpoint
+}
+
 func (b *BaseChatModelAgentMiddleware) WrapModel(m model.BaseChatModel, _ *ModelContext) model.BaseChatModel {
 	return m
 }
@@ -200,13 +216,15 @@ func (b *BaseChatModelAgentMiddleware) AfterModelRewriteState(ctx context.Contex
 }
 
 type handlerInfo struct {
-	handler                    ChatModelAgentMiddleware
-	hasBeforeAgent             bool
-	hasBeforeModelRewriteState bool
-	hasAfterModelRewriteState  bool
-	hasWrapInvokableToolCall   bool
-	hasWrapStreamableToolCall  bool
-	hasWrapModel               bool
+	handler                           ChatModelAgentMiddleware
+	hasBeforeAgent                    bool
+	hasBeforeModelRewriteState        bool
+	hasAfterModelRewriteState         bool
+	hasWrapInvokableToolCall          bool
+	hasWrapStreamableToolCall         bool
+	hasWrapEnhancedInvokableToolCall  bool
+	hasWrapEnhancedStreamableToolCall bool
+	hasWrapModel                      bool
 }
 
 // isMethodOverridden checks if a method is actually defined on the handler type
@@ -242,13 +260,15 @@ func isMethodOverridden(handler ChatModelAgentMiddleware, methodName string) boo
 
 func newHandlerInfo(h ChatModelAgentMiddleware) handlerInfo {
 	return handlerInfo{
-		handler:                    h,
-		hasBeforeAgent:             isMethodOverridden(h, "BeforeAgent"),
-		hasBeforeModelRewriteState: isMethodOverridden(h, "BeforeModelRewriteState"),
-		hasAfterModelRewriteState:  isMethodOverridden(h, "AfterModelRewriteState"),
-		hasWrapInvokableToolCall:   isMethodOverridden(h, "WrapInvokableToolCall"),
-		hasWrapStreamableToolCall:  isMethodOverridden(h, "WrapStreamableToolCall"),
-		hasWrapModel:               isMethodOverridden(h, "WrapModel"),
+		handler:                           h,
+		hasBeforeAgent:                    isMethodOverridden(h, "BeforeAgent"),
+		hasBeforeModelRewriteState:        isMethodOverridden(h, "BeforeModelRewriteState"),
+		hasAfterModelRewriteState:         isMethodOverridden(h, "AfterModelRewriteState"),
+		hasWrapInvokableToolCall:          isMethodOverridden(h, "WrapInvokableToolCall"),
+		hasWrapStreamableToolCall:         isMethodOverridden(h, "WrapStreamableToolCall"),
+		hasWrapEnhancedInvokableToolCall:  isMethodOverridden(h, "WrapEnhancedInvokableToolCall"),
+		hasWrapEnhancedStreamableToolCall: isMethodOverridden(h, "WrapEnhancedStreamableToolCall"),
+		hasWrapModel:                      isMethodOverridden(h, "WrapModel"),
 	}
 }
 
