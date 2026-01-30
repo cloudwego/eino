@@ -367,7 +367,11 @@ func (a *flowAgent) Resume(ctx context.Context, info *ResumeInfo, opts ...AgentR
 		// We need to go through these wrappers to reach the flowAgent with sub-agents.
 		if len(a.subAgents) == 0 {
 			if ra, ok := a.Agent.(ResumableAgent); ok {
-				return wrapIterWithOnEnd(ctx, ra.Resume(ctxForSubAgents, info, opts...))
+				// Use ctx (callback-enriched) instead of ctxForSubAgents here.
+				// This is the inner agent that flowAgent wraps (e.g., supervisorContainer),
+				// not a sub-agent. The callback context from OnStart should be propagated
+				// to ensure unified tracing for container patterns.
+				return wrapIterWithOnEnd(ctx, ra.Resume(ctx, info, opts...))
 			}
 		}
 		return wrapIterWithOnEnd(ctx, genErrorIter(fmt.Errorf("failed to resume agent: agent '%s' not found from flowAgent '%s'", nextAgentName, agentName)))
