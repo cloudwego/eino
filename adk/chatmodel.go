@@ -355,7 +355,11 @@ func NewChatModelAgent(ctx context.Context, config *ChatModelAgentConfig) (*Chat
 	// 5. callbackInjectedToolCall (internal - injects callbacks if tool doesn't handle them)
 	eventSender := &eventSenderToolHandler{}
 	tc.ToolCallMiddlewares = append(
-		[]compose.ToolMiddleware{{Invokable: eventSender.WrapInvokableToolCall, Streamable: eventSender.WrapStreamableToolCall}},
+		[]compose.ToolMiddleware{{Invokable: eventSender.WrapInvokableToolCall,
+			Streamable:         eventSender.WrapStreamableToolCall,
+			EnhancedInvokable:  eventSender.WrapEnhancedInvokableToolCall,
+			EnhancedStreamable: eventSender.WrapEnhancedStreamableToolCall,
+		}},
 		tc.ToolCallMiddlewares...,
 	)
 	tc.ToolCallMiddlewares = append(tc.ToolCallMiddlewares, collectToolMiddlewaresFromMiddlewares(config.Middlewares)...)
