@@ -438,10 +438,60 @@ func newGlobTool(fs filesystem.Backend, desc *string) (tool.BaseTool, error) {
 }
 
 type grepArgs struct {
-	Pattern    string  `json:"pattern"`
-	Path       *string `json:"path,omitempty"`
-	Glob       *string `json:"glob,omitempty"`
-	OutputMode string  `json:"output_mode" jsonschema:"enum=files_with_matches,enum=content,enum=count"`
+	// Pattern is the regular expression pattern to search for in file contents.
+	Pattern string `json:"pattern"`
+
+	// Path is the file or directory to search in. Defaults to current working directory.
+	Path *string `json:"path,omitempty"`
+
+	// Glob is the glob pattern to filter files (e.g. "*.js", "*.{ts,tsx}").
+	Glob *string `json:"glob,omitempty"`
+
+	// OutputMode specifies the output format.
+	// "content" shows matching lines (supports context, line numbers, head_limit).
+	// "files_with_matches" shows file paths (supports head_limit).
+	// "count" shows match counts (supports head_limit).
+	// Defaults to "files_with_matches".
+	OutputMode string `json:"output_mode,omitempty"`
+
+	// BeforeLines is the number of lines to show before each match.
+	// Only applicable when output_mode is "content".
+	BeforeLines *int `json:"-B,omitempty" `
+
+	// AfterLines is the number of lines to show after each match.
+	// Only applicable when output_mode is "content".
+	AfterLines *int `json:"-A,omitempty" `
+
+	// ContextAlias is an alias for Context (number of lines before and after).
+	ContextAlias *int `json:"-C,omitempty"`
+
+	// Context is the number of lines to show before and after each match.
+	// Only applicable when output_mode is "content".
+	Context *int `json:"context,omitempty"`
+
+	// ShowLineNumbers enables showing line numbers in output.
+	// Only applicable when output_mode is "content". Defaults to true.
+	ShowLineNumbers *bool `json:"-n,omitempty"`
+
+	// CaseInsensitive enables case insensitive search.
+	CaseInsensitive *bool `json:"-i,omitempty"`
+
+	// FileType is the file type to search (e.g., js, py, rust, go, java).
+	// More efficient than Glob for standard file types.
+	FileType *string `json:"type,omitempty" `
+
+	// HeadLimit limits output to first N lines/entries.
+	// Works across all output modes. Defaults to 0 (unlimited).
+	HeadLimit *int `json:"head_limit,omitempty" `
+
+	// Offset skips first N lines/entries before applying HeadLimit.
+	// Works across all output modes. Defaults to 0.
+	Offset *int `json:"offset,omitempty"`
+
+	// Multiline enables multiline mode where patterns can span lines.
+	//   - true: Allows patterns to match across lines, "." matches newlines
+	//   - false: Default, matches only within single lines
+	Multiline *bool `json:"multiline,omitempty"`
 }
 
 func newGrepTool(fs filesystem.Backend, desc *string) (tool.BaseTool, error) {
@@ -450,46 +500,93 @@ func newGrepTool(fs filesystem.Backend, desc *string) (tool.BaseTool, error) {
 		d = *desc
 	}
 	return utils.InferTool("grep", d, func(ctx context.Context, input grepArgs) (string, error) {
-		var path, glob string
-		if input.Path != nil {
-			path = *input.Path
+		// Extract string parameters
+		path := valueOrDefault(input.Path, "")
+		glob := valueOrDefault(input.Glob, "")
+		fileType := valueOrDefault(input.FileType, "")
+
+		// Determine output mode
+		var outputMode filesystem.OutputMode
+		switch input.OutputMode {
+		case "content":
+			outputMode = filesystem.ContentOfOutputMode
+		case "count":
+			outputMode = filesystem.CountOfOutputMode
+		default:
+			outputMode = filesystem.FilesWithMatchesOfOutputMode
 		}
-		if input.Glob != nil {
-			glob = *input.Glob
-		}
+
+		// Extract context parameters with priority handling
+		contextLines := valueOrDefault(input.ContextAlias, valueOrDefault(input.Context, 0))
+		beforeLines := valueOrDefault(input.BeforeLines, 0)
+		afterLines := valueOrDefault(input.AfterLines, 0)
+
+		// Extract boolean flags
+		caseInsensitive := valueOrDefault(input.CaseInsensitive, false)
+		enableMultiline := valueOrDefault(input.Multiline, false)
+
+		// Extract pagination parameters
+		headLimit := valueOrDefault(input.HeadLimit, 0)
+		offset := valueOrDefault(input.Offset, 0)
+
 		matches, err := fs.GrepRaw(ctx, &filesystem.GrepRequest{
-			Pattern: input.Pattern,
-			Path:    path,
-			Glob:    glob,
+			Pattern:         input.Pattern,
+			Path:            path,
+			Glob:            glob,
+			OutputMode:      outputMode,
+			FileType:        fileType,
+			CaseInsensitive: caseInsensitive,
+			AfterLines:      afterLines,
+			BeforeLines:     beforeLines,
+			ContextLines:    contextLines,
+			HeadLimit:       headLimit,
+			Offset:          offset,
+			EnableMultiline: enableMultiline,
 		})
 		if err != nil {
 			return "", err
 		}
+
 		switch input.OutputMode {
-		case "count":
-			return strconv.Itoa(len(matches)), nil
+		case "files_with_matches":
+			var results []string
+			for _, match := range matches {
+				results = append(results, match.Path)
+			}
+			return strings.Join(results, "\n"), nil
+
 		case "content":
 			var b strings.Builder
-			for _, m := range matches {
-				b.WriteString(m.Path)
+			showLineNum := valueOrDefault(input.ShowLineNumbers, true)
+
+			for _, match := range matches {
+				b.WriteString(match.Path)
+				if showLineNum {
+					b.WriteString(":")
+					b.WriteString(strconv.Itoa(match.LineNumber))
+				}
 				b.WriteString(":")
-				b.WriteString(strconv.Itoa(m.Line))
-				b.WriteString(":")
-				b.WriteString(m.Content)
+				b.WriteString(match.Content)
 				b.WriteString("\n")
 			}
-			return b.String(), nil
-		default:
-			// default by files_with_matches
-			seen := map[string]struct{}{}
-			var files []string
-			for _, m := range matches {
-				if _, ok := seen[m.Path]; !ok {
-					files = append(files, m.Path)
-					seen[m.Path] = struct{}{}
-				}
+			return strings.TrimSuffix(b.String(), "\n"), nil
+
+		case "count":
+			var b strings.Builder
+			for _, match := range matches {
+				b.WriteString(match.Path)
+				b.WriteString(":")
+				b.WriteString(strconv.Itoa(match.Count))
+				b.WriteString("\n")
 			}
-			return strings.Join(files, "\n"), nil
+			return strings.TrimSuffix(b.String(), "\n"), nil
+
+		default:
+			var results []string
+			for _, match := range matches {
+				results = append(results, match.Path)
+			}
+			return strings.Join(results, "\n"), nil
 		}
 	})
 }
@@ -570,4 +667,12 @@ func convExecuteResponse(response *filesystem.ExecuteResponse) string {
 	}
 
 	return strings.Join(parts, "\n")
+}
+
+// valueOrDefault returns the value pointed to by ptr, or defaultValue if ptr is nil.
+func valueOrDefault[T any](ptr *T, defaultValue T) T {
+	if ptr != nil {
+		return *ptr
+	}
+	return defaultValue
 }

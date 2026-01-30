@@ -20,6 +20,8 @@ import (
 	"context"
 	"fmt"
 	"path/filepath"
+	"regexp"
+	"sort"
 	"strings"
 	"sync"
 )
@@ -135,12 +137,39 @@ func (b *InMemoryBackend) GrepRaw(ctx context.Context, req *GrepRequest) ([]Grep
 	b.mu.RLock()
 	defer b.mu.RUnlock()
 
+	// Validate pattern is not empty
+	if req.Pattern == "" {
+		return nil, fmt.Errorf("pattern cannot be empty")
+	}
+
 	searchPath := "/"
 	if req.Path != "" {
 		searchPath = normalizePath(req.Path)
 	}
 
-	var matches []GrepMatch
+	if req.OutputMode == "" {
+		req.OutputMode = FilesWithMatchesOfOutputMode
+	}
+
+	// Compile regex pattern once
+	var re *regexp.Regexp
+	var err error
+	if req.CaseInsensitive {
+		re, err = regexp.Compile("(?i)" + req.Pattern)
+	} else {
+		re, err = regexp.Compile(req.Pattern)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("invalid regex pattern: %w", err)
+	}
+
+	var allMatches []GrepMatch
+	fileMatchCounts := make(map[string]int)
+	matchedFiles := make(map[string]bool) // For files_with_matches mode
+
+	// Determine if we need detailed match information
+	needDetailedMatches := req.OutputMode == ContentOfOutputMode ||
+		req.ContextLines > 0 || req.BeforeLines > 0 || req.AfterLines > 0
 
 	for filePath, content := range b.files {
 		normalizedFilePath := normalizePath(filePath)
@@ -148,6 +177,14 @@ func (b *InMemoryBackend) GrepRaw(ctx context.Context, req *GrepRequest) ([]Grep
 		// Check if file is under the search path
 		if searchPath != "/" && !strings.HasPrefix(normalizedFilePath, searchPath+"/") && normalizedFilePath != searchPath {
 			continue
+		}
+
+		// Check file type if provided
+		if req.FileType != "" {
+			ext := strings.TrimPrefix(filepath.Ext(normalizedFilePath), ".")
+			if !matchFileType(ext, req.FileType) {
+				continue
+			}
 		}
 
 		// Check glob pattern if provided
@@ -161,20 +198,313 @@ func (b *InMemoryBackend) GrepRaw(ctx context.Context, req *GrepRequest) ([]Grep
 			}
 		}
 
-		// Search for pattern in file content
-		lines := strings.Split(content, "\n")
-		for lineNum, line := range lines {
-			if strings.Contains(line, req.Pattern) {
-				matches = append(matches, GrepMatch{
-					Path:    normalizedFilePath,
-					Line:    lineNum + 1, // 1-based line number
-					Content: line,
-				})
+		// For files_with_matches mode, we only need to know if file has any match
+		if req.OutputMode == FilesWithMatchesOfOutputMode {
+			hasMatch := re.MatchString(content)
+			if hasMatch {
+				matchedFiles[normalizedFilePath] = true
+			}
+			continue
+		}
+
+		// For other modes, collect detailed match information
+		var fileMatches []GrepMatch
+
+		if req.EnableMultiline {
+			// Multiline mode: match across entire file content
+			matches := re.FindAllStringIndex(content, -1)
+			if len(matches) > 0 {
+				for _, match := range matches {
+					matchStart := match[0]
+					matchEnd := match[1]
+					matchedText := content[matchStart:matchEnd]
+
+					// Find the starting line number
+					startLineNum := 1 + strings.Count(content[:matchStart], "\n")
+
+					// Split matched text into lines and create a GrepMatch for each line
+					matchedLines := strings.Split(matchedText, "\n")
+					for i, matchedLine := range matchedLines {
+						fileMatches = append(fileMatches, GrepMatch{
+							Path:       normalizedFilePath,
+							LineNumber: startLineNum + i,
+							Content:    matchedLine,
+						})
+					}
+				}
+			}
+		} else {
+			// Single-line mode: match within each line
+			lines := strings.Split(content, "\n")
+			for lineNum, line := range lines {
+				if re.MatchString(line) {
+					fileMatches = append(fileMatches, GrepMatch{
+						Path:       normalizedFilePath,
+						LineNumber: lineNum + 1,
+						Content:    line,
+					})
+				}
+			}
+		}
+
+		if len(fileMatches) > 0 {
+			fileMatchCounts[normalizedFilePath] = len(fileMatches)
+			if needDetailedMatches {
+				allMatches = append(allMatches, fileMatches...)
 			}
 		}
 	}
 
-	return matches, nil
+	// Apply offset and head limit
+	offset := 0
+	if req.Offset > 0 {
+		offset = req.Offset
+	}
+	headLimit := 0
+	if req.HeadLimit > 0 {
+		headLimit = req.HeadLimit
+	}
+
+	// Process based on output mode
+	switch req.OutputMode {
+	case FilesWithMatchesOfOutputMode:
+		// Return unique file paths (sorted for consistent ordering)
+		var paths []string
+		for path := range matchedFiles {
+			paths = append(paths, path)
+		}
+		sort.Strings(paths)
+
+		var results []GrepMatch
+		for _, path := range paths {
+			results = append(results, GrepMatch{
+				Path: path,
+			})
+		}
+		return applyPagination(results, offset, headLimit), nil
+
+	case ContentOfOutputMode:
+		// Return matching lines with context
+		results := allMatches
+
+		// Apply context lines if needed
+		if req.ContextLines > 0 || req.BeforeLines > 0 || req.AfterLines > 0 {
+			results = b.applyContext(allMatches, req)
+		}
+
+		return applyPagination(results, offset, headLimit), nil
+
+	case CountOfOutputMode:
+		// Return match counts per file (sorted for consistent ordering)
+		var paths []string
+		for path := range fileMatchCounts {
+			paths = append(paths, path)
+		}
+		sort.Strings(paths)
+
+		var results []GrepMatch
+		for _, path := range paths {
+			results = append(results, GrepMatch{
+				Path:  path,
+				Count: fileMatchCounts[path],
+			})
+		}
+		return applyPagination(results, offset, headLimit), nil
+
+	default:
+		return nil, fmt.Errorf("invalid output mode: %s", req.OutputMode)
+	}
+}
+
+// matchFileType checks if the file extension matches the given file type.
+func matchFileType(ext, fileType string) bool {
+	typeMap := map[string][]string{
+		"ada":          {"adb", "ads"},
+		"agda":         {"agda", "lagda"},
+		"aidl":         {"aidl"},
+		"amake":        {"bp", "mk"},
+		"asciidoc":     {"adoc", "asc", "asciidoc"},
+		"asm":          {"S", "asm", "s"},
+		"asp":          {"ascx", "asp", "aspx"},
+		"ats":          {"ats", "dats", "hats", "sats"},
+		"avro":         {"avdl", "avpr", "avsc"},
+		"awk":          {"awk"},
+		"bat":          {"bat"},
+		"bazel":        {"BUILD", "bazel", "bzl"},
+		"bitbake":      {"bb", "bbappend", "bbclass", "conf", "inc"},
+		"c":            {"c", "h", "H", "cats"},
+		"cabal":        {"cabal"},
+		"cbor":         {"cbor"},
+		"ceylon":       {"ceylon"},
+		"clojure":      {"clj", "cljc", "cljs", "cljx"},
+		"cmake":        {"cmake"},
+		"coffeescript": {"coffee"},
+		"config":       {"cfg", "conf", "config", "ini"},
+		"coq":          {"v"},
+		"cpp":          {"C", "cc", "cpp", "cxx", "c++", "h", "hh", "hpp", "hxx", "h++", "inl"},
+		"crystal":      {"cr", "ecr"},
+		"cs":           {"cs"},
+		"csharp":       {"cs"},
+		"cshtml":       {"cshtml"},
+		"css":          {"css", "scss", "sass", "less"},
+		"csv":          {"csv"},
+		"cuda":         {"cu", "cuh"},
+		"cython":       {"pxd", "pxi", "pyx"},
+		"d":            {"d"},
+		"dart":         {"dart"},
+		"devicetree":   {"dts", "dtsi"},
+		"dhall":        {"dhall"},
+		"diff":         {"diff", "patch"},
+		"docker":       {"dockerfile"},
+		"go":           {"go"},
+		"groovy":       {"gradle", "groovy"},
+		"haskell":      {"c2hs", "cpphs", "hs", "hsc", "lhs"},
+		"html":         {"ejs", "htm", "html"},
+		"java":         {"java", "jsp", "jspx", "properties"},
+		"js":           {"cjs", "js", "jsx", "mjs", "vue"},
+		"json":         {"json", "sarif"},
+		"jsonl":        {"jsonl"},
+		"julia":        {"jl"},
+		"jupyter":      {"ipynb", "jpynb"},
+		"kotlin":       {"kt", "kts"},
+		"less":         {"less"},
+		"lua":          {"lua"},
+		"make":         {"mak", "mk"},
+		"markdown":     {"markdown", "md", "mdown", "mdwn", "mdx", "mkd", "mkdn"},
+		"md":           {"markdown", "md", "mdown", "mdwn", "mdx", "mkd", "mkdn"},
+		"matlab":       {"m"},
+		"ocaml":        {"ml", "mli", "mll", "mly"},
+		"perl":         {"PL", "perl", "pl", "plh", "plx", "pm", "t"},
+		"php":          {"php", "php3", "php4", "php5", "php7", "php8", "pht", "phtml"},
+		"python":       {"py", "pyi"},
+		"py":           {"py", "pyi"},
+		"ruby":         {"gemspec", "rb", "rbw"},
+		"rust":         {"rs"},
+		"sass":         {"sass", "scss"},
+		"scala":        {"sbt", "scala"},
+		"sh":           {"bash", "sh", "zsh"},
+		"sql":          {"psql", "sql"},
+		"swift":        {"swift"},
+		"toml":         {"toml"},
+		"ts":           {"cts", "mts", "ts", "tsx"},
+		"typescript":   {"cts", "mts", "ts", "tsx"},
+		"txt":          {"txt"},
+		"vue":          {"vue"},
+		"xml":          {"dtd", "xml", "xsd", "xsl", "xslt"},
+		"yaml":         {"yaml", "yml"},
+		"zig":          {"zig"},
+	}
+
+	if exts, ok := typeMap[fileType]; ok {
+		for _, e := range exts {
+			if ext == e {
+				return true
+			}
+		}
+	}
+	return ext == fileType
+}
+
+// applyContext adds context lines around matches.
+func (b *InMemoryBackend) applyContext(matches []GrepMatch, req *GrepRequest) []GrepMatch {
+	if len(matches) == 0 {
+		return matches
+	}
+
+	beforeLines := 0
+	afterLines := 0
+
+	if req.ContextLines > 0 {
+		beforeLines = req.ContextLines
+		afterLines = req.ContextLines
+	} else {
+		if req.BeforeLines > 0 {
+			beforeLines = req.BeforeLines
+		}
+		if req.AfterLines > 0 {
+			afterLines = req.AfterLines
+		}
+	}
+
+	if beforeLines <= 0 && afterLines <= 0 {
+		return matches
+	}
+
+	// Group matches by file path for efficient processing
+	matchesByFile := make(map[string][]GrepMatch)
+	fileOrder := make([]string, 0)
+	seenFiles := make(map[string]bool)
+
+	for _, match := range matches {
+		if !seenFiles[match.Path] {
+			fileOrder = append(fileOrder, match.Path)
+			seenFiles[match.Path] = true
+		}
+		matchesByFile[match.Path] = append(matchesByFile[match.Path], match)
+	}
+
+	var result []GrepMatch
+
+	// Process each file once
+	for _, filePath := range fileOrder {
+		fileMatches := matchesByFile[filePath]
+
+		// Get file content once per file
+		b.mu.RLock()
+		content, exists := b.files[filePath]
+		b.mu.RUnlock()
+
+		if !exists {
+			// If file doesn't exist, keep original matches
+			result = append(result, fileMatches...)
+			continue
+		}
+
+		lines := strings.Split(content, "\n")
+		processedLines := make(map[int]bool)
+
+		// Process all matches for this file
+		for _, match := range fileMatches {
+			startLine := match.LineNumber - beforeLines
+			if startLine < 1 {
+				startLine = 1
+			}
+
+			endLine := match.LineNumber + afterLines
+			if endLine > len(lines) {
+				endLine = len(lines)
+			}
+
+			for lineNum := startLine; lineNum <= endLine; lineNum++ {
+				if !processedLines[lineNum] {
+					processedLines[lineNum] = true
+					result = append(result, GrepMatch{
+						Path:       filePath,
+						LineNumber: lineNum,
+						Content:    lines[lineNum-1],
+					})
+				}
+			}
+		}
+	}
+
+	return result
+}
+
+// applyPagination applies offset and head limit to results.
+func applyPagination(matches []GrepMatch, offset, headLimit int) []GrepMatch {
+	if offset > 0 {
+		if offset >= len(matches) {
+			return []GrepMatch{}
+		}
+		matches = matches[offset:]
+	}
+
+	if headLimit > 0 && headLimit < len(matches) {
+		matches = matches[:headLimit]
+	}
+
+	return matches
 }
 
 // GlobInfo returns file info entries matching the glob pattern.
