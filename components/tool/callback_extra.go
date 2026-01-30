@@ -47,7 +47,7 @@ func ConvCallbackInput(src callbacks.CallbackInput) *CallbackInput {
 		return t
 	case string:
 		return &CallbackInput{ArgumentsInJSON: t}
-	case *schema.ToolCallInfo:
+	case *schema.ToolArguments:
 		return &CallbackInput{ArgumentsInJSON: t.TextArguments}
 	default:
 		return nil
