@@ -24,6 +24,7 @@ import (
 	"github.com/bytedance/sonic"
 
 	"github.com/cloudwego/eino/adk"
+	"github.com/cloudwego/eino/adk/internal"
 	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/components/tool"
 	"github.com/cloudwego/eino/components/tool/utils"
@@ -86,6 +87,9 @@ func New(ctx context.Context, cfg *Config) (adk.ResumableAgent, error) {
 	instruction := cfg.Instruction
 	if len(instruction) == 0 {
 		instruction = baseAgentInstruction
+		if internal.UseChinese() {
+			instruction = baseAgentInstructionChinese
+		}
 	}
 
 	if !cfg.WithoutGeneralSubAgent || len(cfg.SubAgents) > 0 {
@@ -158,20 +162,29 @@ type writeTodosArguments struct {
 }
 
 func newWriteTodos() (adk.AgentMiddleware, error) {
-	t, err := utils.InferTool("write_todos", writeTodosToolDescription, func(ctx context.Context, input writeTodosArguments) (output string, err error) {
+	toolDesc := writeTodosToolDescription
+	prompt := writeTodosPrompt
+	resultMsg := "Updated todo list to %s"
+	if internal.UseChinese() {
+		toolDesc = writeTodosToolDescriptionChinese
+		prompt = writeTodosPromptChinese
+		resultMsg = "已更新 todo list 为 %s"
+	}
+
+	t, err := utils.InferTool("write_todos", toolDesc, func(ctx context.Context, input writeTodosArguments) (output string, err error) {
 		adk.AddSessionValue(ctx, SessionKeyTodos, input.Todos)
 		todos, err := sonic.MarshalString(input.Todos)
 		if err != nil {
 			return "", err
 		}
-		return fmt.Sprintf("Updated todo list to %s", todos), nil
+		return fmt.Sprintf(resultMsg, todos), nil
 	})
 	if err != nil {
 		return adk.AgentMiddleware{}, err
 	}
 
 	return adk.AgentMiddleware{
-		AdditionalInstruction: writeTodosPrompt,
+		AdditionalInstruction: prompt,
 		AdditionalTools:       []tool.BaseTool{t},
 	}, nil
 }

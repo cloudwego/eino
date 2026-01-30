@@ -104,10 +104,11 @@ func NewMiddleware(ctx context.Context, config *Config) (adk.AgentMiddleware, er
 		systemPrompt = *config.CustomSystemPrompt
 	} else {
 		systemPrompt = ToolsSystemPrompt
+		executePrompt := ExecuteToolsSystemPrompt
 		_, ok1 := config.Backend.(filesystem.StreamingShellBackend)
 		_, ok2 := config.Backend.(filesystem.ShellBackend)
 		if ok1 || ok2 {
-			systemPrompt += ExecuteToolsSystemPrompt
+			systemPrompt += executePrompt
 		}
 	}
 

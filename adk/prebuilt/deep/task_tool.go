@@ -26,6 +26,7 @@ import (
 	"github.com/slongfield/pyfmt"
 
 	"github.com/cloudwego/eino/adk"
+	"github.com/cloudwego/eino/adk/internal"
 	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/components/tool"
 	"github.com/cloudwego/eino/schema"
@@ -48,8 +49,12 @@ func newTaskToolMiddleware(
 	if err != nil {
 		return adk.AgentMiddleware{}, err
 	}
+	prompt := taskPrompt
+	if internal.UseChinese() {
+		prompt = taskPromptChinese
+	}
 	return adk.AgentMiddleware{
-		AdditionalInstruction: taskPrompt,
+		AdditionalInstruction: prompt,
 		AdditionalTools:       []tool.BaseTool{t},
 	}, nil
 }
@@ -78,9 +83,13 @@ func newTaskTool(
 	}
 
 	if !withoutGeneralSubAgent {
+		agentDesc := generalAgentDescription
+		if internal.UseChinese() {
+			agentDesc = generalAgentDescriptionChinese
+		}
 		generalAgent, err := adk.NewChatModelAgent(ctx, &adk.ChatModelAgentConfig{
 			Name:          generalAgentName,
-			Description:   generalAgentDescription,
+			Description:   agentDesc,
 			Instruction:   Instruction,
 			Model:         Model,
 			ToolsConfig:   ToolsConfig,
@@ -169,7 +178,11 @@ func defaultTaskToolDescription(ctx context.Context, subAgents []adk.Agent) (str
 		desc := a.Description(ctx)
 		subAgentsDescBuilder.WriteString(fmt.Sprintf("- %s: %s\n", name, desc))
 	}
-	return pyfmt.Fmt(taskToolDescription, map[string]any{
+	toolDesc := taskToolDescription
+	if internal.UseChinese() {
+		toolDesc = taskToolDescriptionChinese
+	}
+	return pyfmt.Fmt(toolDesc, map[string]any{
 		"other_agents": subAgentsDescBuilder.String(),
 	})
 }

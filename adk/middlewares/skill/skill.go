@@ -27,6 +27,7 @@ import (
 	"github.com/slongfield/pyfmt"
 
 	"github.com/cloudwego/eino/adk"
+	"github.com/cloudwego/eino/adk/internal"
 	"github.com/cloudwego/eino/components/tool"
 	"github.com/cloudwego/eino/schema"
 )
@@ -53,8 +54,8 @@ type Config struct {
 	Backend Backend
 	// SkillToolName is the custom name for the skill tool. If nil, the default name "skill" is used.
 	SkillToolName *string
-	// UseChinese controls whether to use Chinese prompts. When set to true, Chinese prompts are used;
-	// when set to false (default), English prompts are used.
+	// Deprecated: Use adk.SetUseChinese(true) instead to enable Chinese prompts globally.
+	// This field will be removed in a future version.
 	UseChinese bool
 }
 
@@ -81,7 +82,7 @@ func New(ctx context.Context, config *Config) (adk.AgentMiddleware, error) {
 
 func buildSystemPrompt(skillToolName string, useChinese bool) string {
 	prompt := systemPrompt
-	if useChinese {
+	if useChinese || internal.UseChinese() {
 		prompt = systemPromptChinese
 	}
 	return pyfmt.Must(prompt, map[string]string{
@@ -112,9 +113,9 @@ func (s *skillTool) Info(ctx context.Context) (*schema.ToolInfo, error) {
 
 	descBase := toolDescriptionBase
 	paramDesc := "The skill name (no arguments). E.g., \"pdf\" or \"xlsx\""
-	if s.useChinese {
+	if s.useChinese || internal.UseChinese() {
 		descBase = toolDescriptionBaseChinese
-		paramDesc = "技能名称（无需其他参数）。例如：\"pdf\" 或 \"xlsx\""
+		paramDesc = "Skill 名称（无需其他参数）。例如：\"pdf\" 或 \"xlsx\""
 	}
 
 	return &schema.ToolInfo{
@@ -147,7 +148,7 @@ func (s *skillTool) InvokableRun(ctx context.Context, argumentsInJSON string, op
 
 	resultFmt := toolResult
 	contentFmt := userContent
-	if s.useChinese {
+	if s.useChinese || internal.UseChinese() {
 		resultFmt = toolResultChinese
 		contentFmt = userContentChinese
 	}
