@@ -100,7 +100,7 @@ func TestAgentTool_SharedParentSessionValues(t *testing.T) {
 
 	input := &AgentInput{Messages: []Message{schema.UserMessage("q")}}
 	ctx, _ = initRunCtx(ctx, "outer", input)
-	AddSessionValue(ctx, "parent_key", "parent_val")
+	assert.NoError(t, AddSessionValue(ctx, "parent_key", "parent_val"))
 	parentSession := getRunCtx(ctx).Session
 
 	_, err := innerTool.InvokableRun(ctx, `{"request":"hello"}`)
@@ -151,7 +151,7 @@ func (a *sessionValuesAgent) Run(ctx context.Context, _ *AgentInput, _ ...AgentR
 		a.capturedSession = rc.Session
 	}
 	a.seenParentValue, _ = GetSessionValue(ctx, "parent_key")
-	AddSessionValue(ctx, "child_key", "child_val")
+	_ = AddSessionValue(ctx, "child_key", "child_val")
 
 	it, gen := NewAsyncIteratorPair[*AgentEvent]()
 	gen.Send(&AgentEvent{
