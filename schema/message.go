@@ -325,11 +325,11 @@ type ToolOutputPart struct {
 	Extra map[string]any `json:"extra,omitempty"`
 }
 
-// ToolArguments contains the input information for a tool call.
+// ToolArgument contains the input information for a tool call.
 // It is used to pass tool call arguments to enhanced tools.
-type ToolArguments struct {
-	// TextArguments contains the arguments for the tool call in JSON format.
-	TextArguments string
+type ToolArgument struct {
+	// TextArgument contains the arguments for the tool call in JSON format.
+	TextArgument string
 }
 
 // ToolResult represents the structured multimodal output from a tool execution.

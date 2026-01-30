@@ -401,7 +401,7 @@ func wrapEnhancedInvokableToolCall(eiTool tool.EnhancedInvokableTool, middleware
 		eiTool = &enhancedInvokableToolWithCallback{eiTool: eiTool}
 	}
 	return middleware(func(ctx context.Context, input *ToolInput) (*EnhancedInvokableToolOutput, error) {
-		result, err := eiTool.InvokableRun(ctx, &schema.ToolArguments{TextArguments: input.Arguments}, input.CallOptions...)
+		result, err := eiTool.InvokableRun(ctx, &schema.ToolArgument{TextArgument: input.Arguments}, input.CallOptions...)
 		if err != nil {
 			return nil, err
 		}
@@ -420,7 +420,7 @@ func wrapEnhancedStreamableToolCall(est tool.EnhancedStreamableTool, middlewares
 		est = &enhancedStreamableToolWithCallback{est: est}
 	}
 	return middleware(func(ctx context.Context, input *ToolInput) (*EnhancedStreamableToolOutput, error) {
-		result, err := est.StreamableRun(ctx, &schema.ToolArguments{TextArguments: input.Arguments}, input.CallOptions...)
+		result, err := est.StreamableRun(ctx, &schema.ToolArgument{TextArgument: input.Arguments}, input.CallOptions...)
 		if err != nil {
 			return nil, err
 		}
@@ -460,8 +460,8 @@ func (e *enhancedInvokableToolWithCallback) Info(ctx context.Context) (*schema.T
 	return e.eiTool.Info(ctx)
 }
 
-func (e *enhancedInvokableToolWithCallback) InvokableRun(ctx context.Context, toolArguments *schema.ToolArguments, opts ...tool.Option) (*schema.ToolResult, error) {
-	return invokeEnhancedWithCallbacks(e.eiTool.InvokableRun)(ctx, toolArguments, opts...)
+func (e *enhancedInvokableToolWithCallback) InvokableRun(ctx context.Context, toolArgument *schema.ToolArgument, opts ...tool.Option) (*schema.ToolResult, error) {
+	return invokeEnhancedWithCallbacks(e.eiTool.InvokableRun)(ctx, toolArgument, opts...)
 }
 
 type enhancedStreamableToolWithCallback struct {
@@ -472,8 +472,8 @@ func (e *enhancedStreamableToolWithCallback) Info(ctx context.Context) (*schema.
 	return e.est.Info(ctx)
 }
 
-func (e *enhancedStreamableToolWithCallback) StreamableRun(ctx context.Context, toolArguments *schema.ToolArguments, opts ...tool.Option) (*schema.StreamReader[*schema.ToolResult], error) {
-	return streamEnhancedWithCallbacks(e.est.StreamableRun)(ctx, toolArguments, opts...)
+func (e *enhancedStreamableToolWithCallback) StreamableRun(ctx context.Context, toolArgument *schema.ToolArgument, opts ...tool.Option) (*schema.StreamReader[*schema.ToolResult], error) {
+	return streamEnhancedWithCallbacks(e.est.StreamableRun)(ctx, toolArgument, opts...)
 }
 
 func streamableToInvokable(e StreamableToolEndpoint) InvokableToolEndpoint {
@@ -524,12 +524,12 @@ func enhancedInvokableToEnhancedStreamable(e EnhancedInvokableToolEndpoint) Enha
 	}
 }
 
-func invokeEnhancedWithCallbacks(i func(ctx context.Context, toolArguments *schema.ToolArguments, opts ...tool.Option) (*schema.ToolResult, error)) func(ctx context.Context, toolArguments *schema.ToolArguments, opts ...tool.Option) (*schema.ToolResult, error) {
-	return runWithCallbacks(i, onStart[*schema.ToolArguments], onEnd[*schema.ToolResult], onError)
+func invokeEnhancedWithCallbacks(i func(ctx context.Context, toolArgument *schema.ToolArgument, opts ...tool.Option) (*schema.ToolResult, error)) func(ctx context.Context, toolArgument *schema.ToolArgument, opts ...tool.Option) (*schema.ToolResult, error) {
+	return runWithCallbacks(i, onStart[*schema.ToolArgument], onEnd[*schema.ToolResult], onError)
 }
 
-func streamEnhancedWithCallbacks(s func(ctx context.Context, toolArguments *schema.ToolArguments, opts ...tool.Option) (*schema.StreamReader[*schema.ToolResult], error)) func(ctx context.Context, toolArguments *schema.ToolArguments, opts ...tool.Option) (*schema.StreamReader[*schema.ToolResult], error) {
-	return runWithCallbacks(s, onStart[*schema.ToolArguments], onEndWithStreamOutput[*schema.ToolResult], onError)
+func streamEnhancedWithCallbacks(s func(ctx context.Context, toolArgument *schema.ToolArgument, opts ...tool.Option) (*schema.StreamReader[*schema.ToolResult], error)) func(ctx context.Context, toolArgument *schema.ToolArgument, opts ...tool.Option) (*schema.StreamReader[*schema.ToolResult], error) {
+	return runWithCallbacks(s, onStart[*schema.ToolArgument], onEndWithStreamOutput[*schema.ToolResult], onError)
 }
 
 type toolCallTask struct {
