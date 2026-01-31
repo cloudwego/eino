@@ -247,3 +247,68 @@ demo
 }
 
 ```
+
+# TaskData
+
+```
+{
+  "id": "29",
+  "subject": "项目规划和技术选型",
+  "description": "确定项目技术栈（前端框架、后端框架、数据库），设计整体架构，规划目录结构。",
+  "activeForm": "规划项目技术栈和架构",
+  "status": "completed",
+  "blocks": [
+    "30"
+  ],
+  "blockedBy": []
+}
+
+{
+  "id": "30",
+  "subject": "创建项目基础结构",
+  "description": "初始化项目，创建必要的目录结构，配置开发环境，安装依赖包。",
+  "activeForm": "创建项目基础结构",
+  "status": "completed",
+  "blocks": [
+    "31",
+    "32",
+    "38"
+  ],
+  "blockedBy": [
+    "29"
+  ]
+}
+
+{
+  "id": "31",
+  "subject": "设计数据库模型",
+  "description": "设计文章数据表结构，包含标题、内容、作者、发布时间、分类等字段。创建数据库迁移文件。",
+  "activeForm": "设计数据库模型",
+  "status": "in_progress",
+  "blocks": [
+    "32"
+  ],
+  "blockedBy": [
+    "30"
+  ]
+}
+
+{
+  "id": "32",
+  "subject": "实现后端API基础框架",
+  "description": "搭建后端服务器，配置路由，创建基础API框架，设置数据库连接。",
+  "activeForm": "实现后端API基础框架",
+  "status": "pending",
+  "blocks": [
+    "33",
+    "34",
+    "35",
+    "36",
+    "37"
+  ],
+  "blockedBy": [
+    "30",
+    "31"
+  ]
+}
+```

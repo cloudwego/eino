@@ -51,7 +51,7 @@ func listTasks(ctx context.Context, backend Backend, baseDir string) ([]*task, e
 		Path: baseDir,
 	})
 	if err != nil {
-		return nil, fmt.Errorf("failed to list files in %s: %w", baseDir, err)
+		return nil, fmt.Errorf("%s list files in %s failed, err: %w", taskListToolName, baseDir, err)
 	}
 
 	var tasks []*task
@@ -61,17 +61,22 @@ func listTasks(ctx context.Context, backend Backend, baseDir string) ([]*task, e
 			continue
 		}
 
+		taskID := strings.TrimSuffix(fileName, ".json")
+		if !isValidTaskID(taskID) {
+			continue
+		}
+
 		content, err := backend.Read(ctx, &ReadRequest{
 			FilePath: file.Path,
 		})
 		if err != nil {
-			return nil, fmt.Errorf("failed to read task file %s: %w", file.Path, err)
+			return nil, fmt.Errorf("%s read task file %s failed, err: %w", taskListToolName, file.Path, err)
 		}
 
 		taskData := &task{}
 		err = sonic.UnmarshalString(content, taskData)
 		if err != nil {
-			return nil, fmt.Errorf("failed to parse task file %s: %w", file.Path, err)
+			return nil, fmt.Errorf("%s parse task file %s failed, err: %w", taskListToolName, file.Path, err)
 		}
 
 		tasks = append(tasks, taskData)

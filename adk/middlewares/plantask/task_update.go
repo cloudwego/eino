@@ -123,13 +123,17 @@ func (t *taskUpdateTool) InvokableRun(ctx context.Context, argumentsInJSON strin
 	}
 
 	if !isValidTaskID(params.TaskID) {
-		return "", fmt.Errorf("invalid task ID format: %s", params.TaskID)
+		return "", fmt.Errorf("%s validate task ID failed, err: invalid format: %s", taskUpdateToolName, params.TaskID)
 	}
 
 	taskFileName := fmt.Sprintf("%s.json", params.TaskID)
 	taskFilePath := filepath.Join(t.BaseDir, taskFileName)
 
 	if params.Status == "deleted" {
+		if err := t.removeTaskFromDependencies(ctx, params.TaskID); err != nil {
+			return "", fmt.Errorf("%s remove Task #%s from dependencies failed, err: %w", taskUpdateToolName, params.TaskID, err)
+		}
+
 		err = t.Backend.Delete(ctx, &DeleteRequest{
 			FilePath: taskFilePath,
 		})
@@ -171,13 +175,50 @@ func (t *taskUpdateTool) InvokableRun(ctx context.Context, argumentsInJSON strin
 		taskData.Status = params.Status
 		updatedFields = append(updatedFields, "status")
 	}
-	if len(params.AddBlocks) > 0 {
-		taskData.Blocks = appendUnique(taskData.Blocks, params.AddBlocks...)
-		updatedFields = append(updatedFields, "blocks")
-	}
-	if len(params.AddBlockedBy) > 0 {
-		taskData.BlockedBy = appendUnique(taskData.BlockedBy, params.AddBlockedBy...)
-		updatedFields = append(updatedFields, "blockedBy")
+	if len(params.AddBlocks) > 0 || len(params.AddBlockedBy) > 0 {
+		tasks, err := listTasks(ctx, t.Backend, t.BaseDir)
+		if err != nil {
+			return "", fmt.Errorf("%s list tasks failed, err: %w", taskUpdateToolName, err)
+		}
+		taskMap := make(map[string]*task, len(tasks))
+		for _, tk := range tasks {
+			taskMap[tk.ID] = tk
+		}
+
+		if len(params.AddBlocks) > 0 {
+			for _, blockedTaskID := range params.AddBlocks {
+				if !isValidTaskID(blockedTaskID) {
+					return "", fmt.Errorf("%s validate blocked task ID failed, err: invalid format: %s", taskUpdateToolName, blockedTaskID)
+				}
+				if hasCyclicDependency(taskMap, params.TaskID, blockedTaskID) {
+					return "", fmt.Errorf("%s adding Task #%s to blocks of Task #%s would create a cyclic dependency", taskUpdateToolName, blockedTaskID, params.TaskID)
+				}
+			}
+			for _, blockedTaskID := range params.AddBlocks {
+				if err := t.addBlockedByToTask(ctx, blockedTaskID, params.TaskID); err != nil {
+					return "", fmt.Errorf("%s update Task #%s blocks failed, err: %w", taskUpdateToolName, params.TaskID, err)
+				}
+			}
+			taskData.Blocks = appendUnique(taskData.Blocks, params.AddBlocks...)
+			updatedFields = append(updatedFields, "blocks")
+		}
+		if len(params.AddBlockedBy) > 0 {
+			for _, blockingTaskID := range params.AddBlockedBy {
+				if !isValidTaskID(blockingTaskID) {
+					return "", fmt.Errorf("%s validate blocking task ID failed, err: invalid format: %s", taskUpdateToolName, blockingTaskID)
+				}
+				if hasCyclicDependency(taskMap, blockingTaskID, params.TaskID) {
+					return "", fmt.Errorf("%s adding Task #%s to blockedBy of Task #%s would create a cyclic dependency", taskUpdateToolName, blockingTaskID, params.TaskID)
+				}
+			}
+			for _, blockingTaskID := range params.AddBlockedBy {
+				if err := t.addBlocksToTask(ctx, blockingTaskID, params.TaskID); err != nil {
+					return "", fmt.Errorf("%s update Task #%s blockedBy failed, err: %w", taskUpdateToolName, params.TaskID, err)
+				}
+			}
+			taskData.BlockedBy = appendUnique(taskData.BlockedBy, params.AddBlockedBy...)
+			updatedFields = append(updatedFields, "blockedBy")
+		}
 	}
 	if params.Owner != "" {
 		taskData.Owner = params.Owner
@@ -211,6 +252,109 @@ func (t *taskUpdateTool) InvokableRun(ctx context.Context, argumentsInJSON strin
 	}
 
 	return fmt.Sprintf("Updated task #%s %s", params.TaskID, strings.Join(updatedFields, ", ")), nil
+}
+
+func (t *taskUpdateTool) removeTaskFromDependencies(ctx context.Context, deletedTaskID string) error {
+	tasks, err := listTasks(ctx, t.Backend, t.BaseDir)
+	if err != nil {
+		return err
+	}
+
+	for _, taskData := range tasks {
+		if taskData.ID == deletedTaskID {
+			continue
+		}
+
+		modified := false
+		newBlocks := make([]string, 0, len(taskData.Blocks))
+		for _, id := range taskData.Blocks {
+			if id != deletedTaskID {
+				newBlocks = append(newBlocks, id)
+			} else {
+				modified = true
+			}
+		}
+
+		newBlockedBy := make([]string, 0, len(taskData.BlockedBy))
+		for _, id := range taskData.BlockedBy {
+			if id != deletedTaskID {
+				newBlockedBy = append(newBlockedBy, id)
+			} else {
+				modified = true
+			}
+		}
+
+		if modified {
+			taskData.Blocks = newBlocks
+			taskData.BlockedBy = newBlockedBy
+
+			updatedContent, err := sonic.MarshalString(taskData)
+			if err != nil {
+				return fmt.Errorf("failed to marshal task #%s: %w", taskData.ID, err)
+			}
+
+			taskFilePath := filepath.Join(t.BaseDir, fmt.Sprintf("%s.json", taskData.ID))
+			if err := t.Backend.Write(ctx, &WriteRequest{FilePath: taskFilePath, Content: updatedContent}); err != nil {
+				return fmt.Errorf("failed to write task #%s: %w", taskData.ID, err)
+			}
+		}
+	}
+
+	return nil
+}
+
+func (t *taskUpdateTool) addBlockedByToTask(ctx context.Context, targetTaskID, blockerTaskID string) error {
+	taskFilePath := filepath.Join(t.BaseDir, fmt.Sprintf("%s.json", targetTaskID))
+
+	content, err := t.Backend.Read(ctx, &ReadRequest{FilePath: taskFilePath})
+	if err != nil {
+		return fmt.Errorf("failed to read task #%s for updating blockedBy: %w", targetTaskID, err)
+	}
+
+	targetTask := &task{}
+	if err := sonic.UnmarshalString(content, targetTask); err != nil {
+		return fmt.Errorf("failed to parse task #%s: %w", targetTaskID, err)
+	}
+
+	targetTask.BlockedBy = appendUnique(targetTask.BlockedBy, blockerTaskID)
+
+	updatedContent, err := sonic.MarshalString(targetTask)
+	if err != nil {
+		return fmt.Errorf("failed to marshal task #%s: %w", targetTaskID, err)
+	}
+
+	if err := t.Backend.Write(ctx, &WriteRequest{FilePath: taskFilePath, Content: updatedContent}); err != nil {
+		return fmt.Errorf("failed to write task #%s: %w", targetTaskID, err)
+	}
+
+	return nil
+}
+
+func (t *taskUpdateTool) addBlocksToTask(ctx context.Context, targetTaskID, blockedTaskID string) error {
+	taskFilePath := filepath.Join(t.BaseDir, fmt.Sprintf("%s.json", targetTaskID))
+
+	content, err := t.Backend.Read(ctx, &ReadRequest{FilePath: taskFilePath})
+	if err != nil {
+		return fmt.Errorf("failed to read task #%s for updating blocks: %w", targetTaskID, err)
+	}
+
+	targetTask := &task{}
+	if err := sonic.UnmarshalString(content, targetTask); err != nil {
+		return fmt.Errorf("failed to parse task #%s: %w", targetTaskID, err)
+	}
+
+	targetTask.Blocks = appendUnique(targetTask.Blocks, blockedTaskID)
+
+	updatedContent, err := sonic.MarshalString(targetTask)
+	if err != nil {
+		return fmt.Errorf("failed to marshal task #%s: %w", targetTaskID, err)
+	}
+
+	if err := t.Backend.Write(ctx, &WriteRequest{FilePath: taskFilePath, Content: updatedContent}); err != nil {
+		return fmt.Errorf("failed to write task #%s: %w", targetTaskID, err)
+	}
+
+	return nil
 }
 
 const taskUpdateToolName = "TaskUpdate"

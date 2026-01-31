@@ -84,3 +84,35 @@ func appendUnique(slice []string, items ...string) []string {
 	}
 	return slice
 }
+
+func hasCyclicDependency(taskMap map[string]*task, blockerID, blockedID string) bool {
+	if blockerID == blockedID {
+		return true
+	}
+
+	visited := make(map[string]bool)
+	return canReach(taskMap, blockedID, blockerID, visited)
+}
+
+func canReach(taskMap map[string]*task, fromID, toID string, visited map[string]bool) bool {
+	if fromID == toID {
+		return true
+	}
+	if visited[fromID] {
+		return false
+	}
+	visited[fromID] = true
+
+	fromTask, exists := taskMap[fromID]
+	if !exists {
+		return false
+	}
+
+	for _, blockedID := range fromTask.Blocks {
+		if canReach(taskMap, blockedID, toID, visited) {
+			return true
+		}
+	}
+
+	return false
+}

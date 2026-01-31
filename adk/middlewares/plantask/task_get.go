@@ -67,7 +67,7 @@ func (t *taskGetTool) InvokableRun(ctx context.Context, argumentsInJSON string, 
 	}
 
 	if !isValidTaskID(params.TaskID) {
-		return "", fmt.Errorf("invalid task ID format: %s", params.TaskID)
+		return "", fmt.Errorf("%s validate task ID failed, err: invalid format: %s", taskGetToolName, params.TaskID)
 	}
 
 	taskFileName := fmt.Sprintf("%s.json", params.TaskID)

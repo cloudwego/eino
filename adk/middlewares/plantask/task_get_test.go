@@ -72,9 +72,9 @@ func TestTaskGetToolInvalidTaskID(t *testing.T) {
 
 	_, err := tool.InvokableRun(ctx, `{"taskId": "../../../etc/passwd"}`)
 	assert.Error(t, err)
-	assert.Contains(t, err.Error(), "invalid task ID format")
+	assert.Contains(t, err.Error(), "validate task ID failed")
 
 	_, err = tool.InvokableRun(ctx, `{"taskId": "abc"}`)
 	assert.Error(t, err)
-	assert.Contains(t, err.Error(), "invalid task ID format")
+	assert.Contains(t, err.Error(), "validate task ID failed")
 }
