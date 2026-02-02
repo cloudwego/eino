@@ -82,14 +82,12 @@ type Config struct {
 	UseChinese bool
 	// AgentHub provides agent factories for context mode (fork/isolate) execution.
 	// Required when skills use "context: fork" or "context: isolate" in frontmatter.
-	// The agent factory is retrieved by agent name from this hub.
+	// The agent factory is retrieved by agent name (skill.Agent) from this hub.
+	// When skill.Agent is empty, AgentHub.Get is called with an empty string,
+	// allowing the hub implementation to return a default agent.
 	AgentHub AgentHub
-	// FallbackAgentName is the agent name used when a skill specifies context mode
-	// but does not provide an "agent" field in its frontmatter.
-	// The agent factory will be retrieved from AgentHub using this name.
-	FallbackAgentName string
 	// ModelHub provides model instances for skills that specify a "model" field in frontmatter.
-	// Can be used with or without context mode.
+	// Currently only used with context mode (fork/isolate).
 	// If nil, skills with model specification will return an error.
 	ModelHub ModelHub
 }
@@ -110,12 +108,11 @@ func NewHandler(ctx context.Context, config *Config) (adk.ChatModelAgentMiddlewa
 	return &skillHandler{
 		instruction: buildSystemPrompt(name, config.UseChinese),
 		tool: &skillTool{
-			b:                 config.Backend,
-			toolName:          name,
-			useChinese:        config.UseChinese,
-			agentHub:          config.AgentHub,
-			modelHub:          config.ModelHub,
-			fallbackAgentName: config.FallbackAgentName,
+			b:          config.Backend,
+			toolName:   name,
+			useChinese: config.UseChinese,
+			agentHub:   config.AgentHub,
+			modelHub:   config.ModelHub,
 		},
 	}, nil
 }
@@ -178,12 +175,11 @@ func buildSystemPrompt(skillToolName string, useChinese bool) (string, error) {
 }
 
 type skillTool struct {
-	b                 Backend
-	toolName          string
-	useChinese        bool
-	agentHub          AgentHub
-	fallbackAgentName string
-	modelHub          ModelHub
+	b          Backend
+	toolName   string
+	useChinese bool
+	agentHub   AgentHub
+	modelHub   ModelHub
 }
 
 type descriptionTemplateHelper struct {
@@ -291,17 +287,9 @@ func (s *skillTool) runAgentMode(ctx context.Context, skill Skill, forkHistory b
 		return "", fmt.Errorf("skill '%s' requires context:%s but AgentHub is not configured", skill.Name, skill.Context)
 	}
 
-	agentName := skill.Agent
-	if agentName == "" {
-		agentName = s.fallbackAgentName
-	}
-	if agentName == "" {
-		return "", fmt.Errorf("skill '%s' requires context:%s but no agent name is specified (neither in skill frontmatter nor FallbackAgentName)", skill.Name, skill.Context)
-	}
-
-	agentFactory, err := s.agentHub.Get(ctx, agentName)
+	agentFactory, err := s.agentHub.Get(ctx, skill.Agent)
 	if err != nil {
-		return "", fmt.Errorf("failed to get agent '%s' from AgentHub: %w", agentName, err)
+		return "", fmt.Errorf("failed to get agent '%s' from AgentHub: %w", skill.Agent, err)
 	}
 
 	agent, err := agentFactory(ctx, m)
