@@ -71,7 +71,7 @@ func (h *testToolsHandler) BeforeAgent(ctx context.Context, runCtx *ChatModelAge
 
 type testToolsFuncHandler struct {
 	*BaseChatModelAgentMiddleware
-	fn func(ctx context.Context, tools []tool.BaseTool, returnDirectly map[string]struct{}) (context.Context, []tool.BaseTool, map[string]struct{}, error)
+	fn func(ctx context.Context, tools []tool.BaseTool, returnDirectly map[string]bool) (context.Context, []tool.BaseTool, map[string]bool, error)
 }
 
 func (h *testToolsFuncHandler) BeforeAgent(ctx context.Context, runCtx *ChatModelAgentContext) (context.Context, *ChatModelAgentContext, error) {
@@ -344,7 +344,7 @@ func TestToolsHandlerCombinations(t *testing.T) {
 				},
 			},
 			Handlers: []ChatModelAgentMiddleware{
-				&testToolsFuncHandler{fn: func(ctx context.Context, tools []tool.BaseTool, returnDirectly map[string]struct{}) (context.Context, []tool.BaseTool, map[string]struct{}, error) {
+				&testToolsFuncHandler{fn: func(ctx context.Context, tools []tool.BaseTool, returnDirectly map[string]bool) (context.Context, []tool.BaseTool, map[string]bool, error) {
 					filtered := make([]tool.BaseTool, 0)
 					for _, t := range tools {
 						info, _ := t.Info(ctx)
@@ -394,11 +394,11 @@ func TestToolsHandlerCombinations(t *testing.T) {
 				},
 			},
 			Handlers: []ChatModelAgentMiddleware{
-				&testToolsFuncHandler{fn: func(ctx context.Context, tools []tool.BaseTool, returnDirectly map[string]struct{}) (context.Context, []tool.BaseTool, map[string]struct{}, error) {
+				&testToolsFuncHandler{fn: func(ctx context.Context, tools []tool.BaseTool, returnDirectly map[string]bool) (context.Context, []tool.BaseTool, map[string]bool, error) {
 					for _, t := range tools {
 						info, _ := t.Info(ctx)
 						if info.Name == "tool1" {
-							returnDirectly[info.Name] = struct{}{}
+							returnDirectly[info.Name] = true
 						}
 					}
 					return ctx, tools, returnDirectly, nil

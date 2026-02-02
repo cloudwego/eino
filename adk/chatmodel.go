@@ -38,7 +38,7 @@ import (
 )
 
 type chatModelAgentExecCtx struct {
-	runtimeReturnDirectly map[string]struct{}
+	runtimeReturnDirectly map[string]bool
 	generator             *AsyncGenerator[*AgentEvent]
 }
 
@@ -104,7 +104,7 @@ type ToolsConfig struct {
 	// ReturnDirectly specifies tools that cause the agent to return immediately when called.
 	// If multiple listed tools are called simultaneously, only the first one triggers the return.
 	// The map keys are tool names indicate whether the tool should trigger immediate return.
-	ReturnDirectly map[string]struct{}
+	ReturnDirectly map[string]bool
 
 	// EmitInternalEvents indicates whether internal events from agentTool should be emitted
 	// to the parent agent's AsyncGenerator, allowing real-time streaming of nested agent output
@@ -321,7 +321,7 @@ type ChatModelAgent struct {
 	exeCtx *execContext
 }
 
-type runFunc func(ctx context.Context, input *AgentInput, generator *AsyncGenerator[*AgentEvent], store *bridgeStore, instruction string, returnDirectly map[string]struct{}, opts ...compose.Option)
+type runFunc func(ctx context.Context, input *AgentInput, generator *AsyncGenerator[*AgentEvent], store *bridgeStore, instruction string, returnDirectly map[string]bool, opts ...compose.Option)
 
 // NewChatModelAgent constructs a chat model-backed agent with the provided config.
 func NewChatModelAgent(ctx context.Context, config *ChatModelAgentConfig) (*ChatModelAgent, error) {
@@ -551,7 +551,7 @@ func setOutputToSession(ctx context.Context, msg Message, msgStream MessageStrea
 }
 
 func errFunc(err error) runFunc {
-	return func(ctx context.Context, input *AgentInput, generator *AsyncGenerator[*AgentEvent], store *bridgeStore, _ string, _ map[string]struct{}, _ ...compose.Option) {
+	return func(ctx context.Context, input *AgentInput, generator *AsyncGenerator[*AgentEvent], store *bridgeStore, _ string, _ map[string]bool, _ ...compose.Option) {
 		generator.Send(&AgentEvent{Err: err})
 	}
 }
@@ -567,7 +567,7 @@ type ChatModelAgentResumeData struct {
 type execContext struct {
 	instruction    string
 	toolsNodeConf  compose.ToolsNodeConfig
-	returnDirectly map[string]struct{}
+	returnDirectly map[string]bool
 
 	toolInfos      []*schema.ToolInfo
 	unwrappedTools []tool.BaseTool
@@ -636,7 +636,7 @@ func (a *ChatModelAgent) prepareExecContext(ctx context.Context) (*execContext, 
 		instruction = concatInstructions(instruction, transferInstruction)
 
 		toolsNodeConf.Tools = append(toolsNodeConf.Tools, &transferToAgent{})
-		returnDirectly[TransferToAgentToolName] = struct{}{}
+		returnDirectly[TransferToAgentToolName] = true
 	}
 
 	if a.exit != nil {
@@ -645,7 +645,7 @@ func (a *ChatModelAgent) prepareExecContext(ctx context.Context) (*execContext, 
 		if err != nil {
 			return nil, err
 		}
-		returnDirectly[exitInfo.Name] = struct{}{}
+		returnDirectly[exitInfo.Name] = true
 	}
 
 	for _, m := range a.middlewares {
@@ -700,7 +700,7 @@ func (a *ChatModelAgent) buildNoToolsRunFunc(_ context.Context) runFunc {
 		AppendChatModel(wrappedModel)
 
 	return func(ctx context.Context, input *AgentInput, generator *AsyncGenerator[*AgentEvent],
-		store *bridgeStore, instruction string, _ map[string]struct{}, opts ...compose.Option) {
+		store *bridgeStore, instruction string, _ map[string]bool, opts ...compose.Option) {
 
 		r, err := chain.Compile(ctx, compose.WithGraphName(a.name),
 			compose.WithCheckPointStore(store),
@@ -779,7 +779,7 @@ func (a *ChatModelAgent) buildReactRunFunc(ctx context.Context, bc *execContext)
 		AppendGraph(g, compose.WithNodeName("ReAct"), compose.WithGraphCompileOptions(compose.WithMaxRunSteps(math.MaxInt)))
 
 	return func(ctx context.Context, input *AgentInput, generator *AsyncGenerator[*AgentEvent], store *bridgeStore,
-		instruction string, returnDirectly map[string]struct{}, opts ...compose.Option) {
+		instruction string, returnDirectly map[string]bool, opts ...compose.Option) {
 		var compileOptions []compose.GraphCompileOption
 		compileOptions = append(compileOptions,
 			compose.WithGraphName(a.name),

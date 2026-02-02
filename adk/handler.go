@@ -73,7 +73,7 @@ type ChatModelAgentContext struct {
 	// ReturnDirectly is the set of tool names currently configured to cause the Agent to return directly.
 	// This is based on the return directly map configured for the agent, plus any modifications
 	// by previous BeforeAgent handlers.
-	ReturnDirectly map[string]struct{}
+	ReturnDirectly map[string]bool
 }
 
 // ChatModelAgentMiddleware defines the interface for customizing ChatModelAgent behavior.

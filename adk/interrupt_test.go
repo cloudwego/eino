@@ -1932,8 +1932,8 @@ func TestReturnDirectlyEventSentAfterResume(t *testing.T) {
 					&interruptingTool{name: interruptingToolName},
 				},
 			},
-			ReturnDirectly: map[string]struct{}{
-				returnDirectlyToolName: {},
+			ReturnDirectly: map[string]bool{
+				returnDirectlyToolName: true,
 			},
 		},
 		Handlers: []ChatModelAgentMiddleware{
