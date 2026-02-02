@@ -674,6 +674,26 @@ func (a *ChatModelAgent) prepareExecContext(ctx context.Context) (*execContext, 
 	}, nil
 }
 
+func hasAnyAfterAgent(handlers []handlerInfo) bool {
+	for _, h := range handlers {
+		if h.hasAfterAgent {
+			return true
+		}
+	}
+	return false
+}
+
+func invokeAfterAgentHandlers(ctx context.Context, handlers []handlerInfo, state *ChatModelAgentState) error {
+	for i, info := range handlers {
+		if info.hasAfterAgent {
+			if err := info.handler.AfterAgent(ctx, state); err != nil {
+				return fmt.Errorf("handler[%d] (%T) AfterAgent failed: %w", i, info.handler, err)
+			}
+		}
+	}
+	return nil
+}
+
 func (a *ChatModelAgent) buildNoToolsRunFunc(_ context.Context) runFunc {
 	wrappedModel := buildModelWrappers(a.model, &modelWrapperConfig{
 		handlers:    a.handlers,
@@ -686,6 +706,29 @@ func (a *ChatModelAgent) buildNoToolsRunFunc(_ context.Context) runFunc {
 		instruction string
 	}
 
+	handlers := a.handlers
+	hasAfterAgent := hasAnyAfterAgent(handlers)
+
+	afterAgentLambda := compose.TransformableLambda(func(ctx context.Context, msgStream MessageStream) (MessageStream, error) {
+		if !hasAfterAgent {
+			return msgStream, nil
+		}
+
+		var stateMessages []Message
+		_ = compose.ProcessState(ctx, func(_ context.Context, st *State) error {
+			stateMessages = st.Messages
+			return nil
+		})
+
+		state := &ChatModelAgentState{Messages: stateMessages}
+
+		if err := invokeAfterAgentHandlers(ctx, handlers, state); err != nil {
+			return nil, err
+		}
+
+		return msgStream, nil
+	})
+
 	chain := compose.NewChain[noToolsInput, Message](
 		compose.WithGenLocalState(func(ctx context.Context) (state *State) {
 			return &State{}
@@ -697,7 +740,8 @@ func (a *ChatModelAgent) buildNoToolsRunFunc(_ context.Context) runFunc {
 			}
 			return messages, nil
 		})).
-		AppendChatModel(wrappedModel)
+		AppendChatModel(wrappedModel).
+		AppendLambda(afterAgentLambda)
 
 	return func(ctx context.Context, input *AgentInput, generator *AsyncGenerator[*AgentEvent],
 		store *bridgeStore, instruction string, _ map[string]struct{}, opts ...compose.Option) {

@@ -165,6 +165,23 @@ type ChatModelAgentMiddleware interface {
 	// The mc parameter contains the current tool configuration:
 	//   - Tools: The tool infos that will be sent to the model
 	WrapModel(m model.BaseChatModel, mc *ModelContext) model.BaseChatModel
+
+	// AfterAgent is called after the agent completes its execution, while the RunLocalValues
+	// are still accessible.
+	//
+	// The state parameter contains the final conversation state including all messages.
+	// For streaming mode, the final message has already been concatenated and emitted
+	// as an AgentEvent before this method is called.
+	//
+	// Common use cases include:
+	//   - Cleanup: Delete temporary files or resources tracked in RunLocalValues
+	//   - Persistence: Save the final messages to an external session store
+	//   - Logging/Metrics: Record final state for observability
+	//
+	// This method cannot modify the agent's output or influence subsequent execution.
+	// If an error is returned, subsequent AfterAgent handlers will not be called,
+	// and the error will be propagated as an AgentEvent.
+	AfterAgent(ctx context.Context, state *ChatModelAgentState) error
 }
 
 // BaseChatModelAgentMiddleware provides default no-op implementations for ChatModelAgentMiddleware.
@@ -215,6 +232,10 @@ func (b *BaseChatModelAgentMiddleware) AfterModelRewriteState(ctx context.Contex
 	return ctx, state, nil
 }
 
+func (b *BaseChatModelAgentMiddleware) AfterAgent(ctx context.Context, state *ChatModelAgentState) error {
+	return nil
+}
+
 type handlerInfo struct {
 	handler                           ChatModelAgentMiddleware
 	hasBeforeAgent                    bool
@@ -225,6 +246,7 @@ type handlerInfo struct {
 	hasWrapEnhancedInvokableToolCall  bool
 	hasWrapEnhancedStreamableToolCall bool
 	hasWrapModel                      bool
+	hasAfterAgent                     bool
 }
 
 // isMethodOverridden checks if a method is actually defined on the handler type
@@ -269,6 +291,7 @@ func newHandlerInfo(h ChatModelAgentMiddleware) handlerInfo {
 		hasWrapEnhancedInvokableToolCall:  isMethodOverridden(h, "WrapEnhancedInvokableToolCall"),
 		hasWrapEnhancedStreamableToolCall: isMethodOverridden(h, "WrapEnhancedStreamableToolCall"),
 		hasWrapModel:                      isMethodOverridden(h, "WrapModel"),
+		hasAfterAgent:                     isMethodOverridden(h, "AfterAgent"),
 	}
 }
 
