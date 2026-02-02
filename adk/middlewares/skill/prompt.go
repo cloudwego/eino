@@ -148,4 +148,7 @@ Important:
 
 %s`
 	toolName = "skill"
+
+	forkResultFormat        = "Skill '%s' executed in fork mode. Result:\n%s"
+	forkResultFormatChinese = "Skill '%s' 已在 fork 模式下执行。结果：\n%s"
 )
