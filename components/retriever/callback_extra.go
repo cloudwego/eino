@@ -14,6 +14,7 @@
  * limitations under the License.
  */
 
+// Package retriever defines callback payloads for retrieval components.
 package retriever
 
 import (

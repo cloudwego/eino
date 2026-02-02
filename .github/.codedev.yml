@@ -3,13 +3,13 @@ coverage:
     project: #add everything under here, more options at https://docs.codecov.com/docs/commit-status
       default: # default is the status check's name, not default settings
         target: auto #default
-        threshold: 83%
+        threshold: 1% #allow coverage to drop by 1%
         base: auto
         if_ci_failed: error #success, failure, error, ignore
     patch:
       default:
-        target: auto #default
-        threshold: 80%
+        target: 82% #default
+        threshold: 1% #allow coverage to drop by 1%
         base: auto
         if_ci_failed: error #success, failure, error, ignore
 

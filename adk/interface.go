@@ -41,6 +41,7 @@ type MessageVariant struct {
 	ToolName string
 }
 
+// EventFromMessage wraps a message or stream into an AgentEvent with role metadata.
 func EventFromMessage(msg Message, msgStream MessageStream,
 	role schema.RoleType, toolName string) *AgentEvent {
 	return &AgentEvent{
@@ -132,14 +133,27 @@ type AgentOutput struct {
 	CustomizedOutput any
 }
 
+// NewTransferToAgentAction creates an action to transfer to the specified agent.
 func NewTransferToAgentAction(destAgentName string) *AgentAction {
 	return &AgentAction{TransferToAgent: &TransferToAgentAction{DestAgentName: destAgentName}}
 }
 
+// NewExitAction creates an action that signals the agent to exit.
 func NewExitAction() *AgentAction {
 	return &AgentAction{Exit: true}
 }
 
+// AgentAction represents actions that an agent can emit during execution.
+//
+// Action Scoping in Agent Tools:
+// When an agent is wrapped as an agent tool (via NewAgentTool), actions emitted by the inner agent
+// are scoped to the tool boundary:
+//   - Interrupted: Propagated via CompositeInterrupt to allow proper interrupt/resume across boundaries
+//   - Exit, TransferToAgent, BreakLoop: Ignored outside the agent tool; these actions only affect
+//     the inner agent's execution and do not propagate to the parent agent
+//
+// This scoping ensures that nested agents cannot unexpectedly terminate or transfer control
+// of their parent agent's execution flow.
 type AgentAction struct {
 	Exit bool
 
@@ -154,6 +168,7 @@ type AgentAction struct {
 	internalInterrupted *core.InterruptSignal
 }
 
+// RunStep CheckpointSchema: persisted via serialization.RunCtx (gob).
 type RunStep struct {
 	agentName string
 }
@@ -194,17 +209,15 @@ type runStepSerialization struct {
 	AgentName string
 }
 
+// AgentEvent CheckpointSchema: persisted via serialization.RunCtx (gob).
 type AgentEvent struct {
 	AgentName string
 
-	// RunPath semantics:
-	// - The eino framework prepends parent context exactly once: parentRunPath + event.RunPath.
-	// - Custom agents should NOT include parent segments; any provided RunPath is treated as relative child provenance.
-	// - Exact RunPath match against the framework's runCtx.RunPath governs recording to runSession.
-	// STRONG RECOMMENDATION: Custom agents should NOT set RunPath themselves unless they fully understand
-	//   the merge and recording rules. Setting parent or absolute paths can lead to duplicated segments
-	//   after merge and unexpected non-recording. Prefer leaving RunPath empty and let the framework set
-	//   context, or append only relative child segments when implementing advanced orchestration.
+	// RunPath represents the execution path from root agent to the current event source.
+	// This field is managed entirely by the eino framework and cannot be set by end-users
+	// because RunStep's fields are unexported. The framework sets RunPath exactly once:
+	// - flowAgent sets it when the event has no RunPath (len == 0)
+	// - agentTool prepends parent RunPath when forwarding events from nested agents
 	RunPath []RunStep
 
 	Output *AgentOutput

@@ -14,6 +14,7 @@
  * limitations under the License.
  */
 
+// Package planexecute implements a plan–execute–replan style agent.
 package planexecute
 
 import (
@@ -25,17 +26,18 @@ import (
 
 	"github.com/bytedance/sonic"
 
-	"github.com/cloudwego/eino/compose"
-
 	"github.com/cloudwego/eino/adk"
 	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/components/prompt"
+	"github.com/cloudwego/eino/compose"
 	"github.com/cloudwego/eino/internal/safe"
 	"github.com/cloudwego/eino/schema"
 )
 
 func init() {
 	schema.RegisterName[*defaultPlan]("_eino_adk_plan_execute_default_plan")
+	schema.RegisterName[ExecutedStep]("_eino_adk_plan_execute_executed_step")
+	schema.RegisterName[[]ExecutedStep]("_eino_adk_plan_execute_executed_steps")
 }
 
 // Plan represents an execution plan with a sequence of actionable steps.
@@ -798,6 +800,8 @@ func buildGenReplannerInputFn(planToolName, respondToolName string) GenModelInpu
 	}
 }
 
+// NewReplanner creates a plan-execute-replan agent wired with plan and respond tools.
+// It configures the provided ToolCallingChatModel with the tools and returns an Agent.
 func NewReplanner(_ context.Context, cfg *ReplannerConfig) (adk.Agent, error) {
 	planTool := cfg.PlanTool
 	if planTool == nil {
@@ -853,7 +857,7 @@ type Config struct {
 // 2. Execution: Execute the first step of the plan
 // 3. Replanning: Evaluate progress and either complete the task or revise the plan
 // This approach enables complex problem-solving through iterative refinement.
-func New(ctx context.Context, cfg *Config) (adk.Agent, error) {
+func New(ctx context.Context, cfg *Config) (adk.ResumableAgent, error) {
 	maxIterations := cfg.MaxIterations
 	if maxIterations <= 0 {
 		maxIterations = 10

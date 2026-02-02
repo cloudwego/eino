@@ -17,12 +17,17 @@
 package adk
 
 import (
+	"bytes"
+	"encoding/gob"
+	"errors"
 	"fmt"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
+
+	"github.com/cloudwego/eino/schema"
 )
 
 func TestAsyncIteratorPair_Basic(t *testing.T) {
@@ -164,4 +169,237 @@ func TestGenErrorIter(t *testing.T) {
 	assert.Equal(t, "test", e.Err.Error())
 	_, ok = iter.Next()
 	assert.False(t, ok)
+}
+
+func TestGetMessageFromWrappedEvent_StreamError_MultipleCallsGuard(t *testing.T) {
+	streamErr := errors.New("stream error")
+
+	sr, sw := schema.Pipe[Message](10)
+	go func() {
+		defer sw.Close()
+		sw.Send(schema.AssistantMessage("chunk1", nil), nil)
+		sw.Send(schema.AssistantMessage("chunk2", nil), nil)
+		sw.Send(nil, streamErr)
+	}()
+
+	wrapper := &agentEventWrapper{
+		AgentEvent: &AgentEvent{
+			Output: &AgentOutput{
+				MessageOutput: &MessageVariant{
+					IsStreaming:   true,
+					MessageStream: sr,
+				},
+			},
+		},
+	}
+
+	msg1, err1 := getMessageFromWrappedEvent(wrapper)
+	assert.Nil(t, msg1)
+	assert.NotNil(t, err1)
+	assert.Equal(t, "stream error", err1.Error())
+
+	assert.NotEmpty(t, wrapper.StreamErr)
+	assert.Equal(t, err1, wrapper.StreamErr)
+
+	msg2, err2 := getMessageFromWrappedEvent(wrapper)
+	assert.Nil(t, msg2)
+	assert.Equal(t, err1, err2)
+}
+
+func TestGetMessageFromWrappedEvent_StreamSuccess_MultipleCallsCached(t *testing.T) {
+	sr, sw := schema.Pipe[Message](10)
+	go func() {
+		defer sw.Close()
+		sw.Send(schema.AssistantMessage("chunk1", nil), nil)
+		sw.Send(schema.AssistantMessage("chunk2", nil), nil)
+	}()
+
+	wrapper := &agentEventWrapper{
+		AgentEvent: &AgentEvent{
+			Output: &AgentOutput{
+				MessageOutput: &MessageVariant{
+					IsStreaming:   true,
+					MessageStream: sr,
+				},
+			},
+		},
+	}
+
+	msg1, err1 := getMessageFromWrappedEvent(wrapper)
+	assert.NotNil(t, msg1)
+	assert.Nil(t, err1)
+	assert.Equal(t, "chunk1chunk2", msg1.Content)
+
+	assert.NotNil(t, wrapper.concatenatedMessage)
+
+	msg2, err2 := getMessageFromWrappedEvent(wrapper)
+	assert.NotNil(t, msg2)
+	assert.Nil(t, err2)
+	assert.Equal(t, "chunk1chunk2", msg2.Content)
+	assert.Same(t, msg1, msg2)
+}
+
+func TestGetMessageFromWrappedEvent_StreamError_PartialMessagesPreserved(t *testing.T) {
+	streamErr := errors.New("stream error at chunk3")
+
+	sr, sw := schema.Pipe[Message](10)
+	go func() {
+		defer sw.Close()
+		sw.Send(schema.AssistantMessage("chunk1", nil), nil)
+		sw.Send(schema.AssistantMessage("chunk2", nil), nil)
+		sw.Send(nil, streamErr)
+	}()
+
+	wrapper := &agentEventWrapper{
+		AgentEvent: &AgentEvent{
+			Output: &AgentOutput{
+				MessageOutput: &MessageVariant{
+					IsStreaming:   true,
+					MessageStream: sr,
+				},
+			},
+		},
+	}
+
+	_, err := getMessageFromWrappedEvent(wrapper)
+	assert.NotNil(t, err)
+	assert.Equal(t, streamErr, wrapper.StreamErr)
+
+	newStream := wrapper.AgentEvent.Output.MessageOutput.MessageStream
+	assert.NotNil(t, newStream)
+
+	var msgs []Message
+	for {
+		msg, err := newStream.Recv()
+		if err != nil {
+			break
+		}
+		msgs = append(msgs, msg)
+	}
+
+	assert.Equal(t, 2, len(msgs))
+	assert.Equal(t, "chunk1", msgs[0].Content)
+	assert.Equal(t, "chunk2", msgs[1].Content)
+}
+
+func TestAgentEventWrapper_GobEncoding_WithWillRetryError(t *testing.T) {
+	streamErr := &WillRetryError{ErrStr: "stream error", RetryAttempt: 2}
+
+	sr, sw := schema.Pipe[Message](10)
+	go func() {
+		defer sw.Close()
+		sw.Send(schema.AssistantMessage("partial1", nil), nil)
+		sw.Send(schema.AssistantMessage("partial2", nil), nil)
+		sw.Send(nil, streamErr)
+	}()
+
+	wrapper := &agentEventWrapper{
+		AgentEvent: &AgentEvent{
+			AgentName: "TestAgent",
+			Output: &AgentOutput{
+				MessageOutput: &MessageVariant{
+					IsStreaming:   true,
+					MessageStream: sr,
+				},
+			},
+		},
+		TS: 12345,
+	}
+
+	_, err := getMessageFromWrappedEvent(wrapper)
+	assert.NotNil(t, err)
+	var wrapperErr *WillRetryError
+	assert.True(t, errors.As(wrapper.StreamErr, &wrapperErr))
+	assert.Equal(t, streamErr.ErrStr, wrapperErr.ErrStr)
+	assert.Equal(t, streamErr.RetryAttempt, wrapperErr.RetryAttempt)
+
+	var buf bytes.Buffer
+	enc := gob.NewEncoder(&buf)
+	err = enc.Encode(wrapper)
+	assert.NoError(t, err)
+
+	var decoded agentEventWrapper
+	dec := gob.NewDecoder(&buf)
+	err = dec.Decode(&decoded)
+	assert.NoError(t, err)
+
+	assert.Equal(t, "TestAgent", decoded.AgentName)
+	assert.Equal(t, int64(12345), decoded.TS)
+	var decodedErr *WillRetryError
+	assert.True(t, errors.As(decoded.StreamErr, &decodedErr))
+	assert.Equal(t, streamErr.ErrStr, decodedErr.ErrStr)
+	assert.Equal(t, streamErr.RetryAttempt, decodedErr.RetryAttempt)
+}
+
+func TestAgentEventWrapper_GobEncoding_WithUnregisteredError(t *testing.T) {
+	streamErr := errors.New("unregistered error type")
+
+	sr, sw := schema.Pipe[Message](10)
+	go func() {
+		defer sw.Close()
+		sw.Send(schema.AssistantMessage("partial1", nil), nil)
+		sw.Send(nil, streamErr)
+	}()
+
+	wrapper := &agentEventWrapper{
+		AgentEvent: &AgentEvent{
+			AgentName: "TestAgent",
+			Output: &AgentOutput{
+				MessageOutput: &MessageVariant{
+					IsStreaming:   true,
+					MessageStream: sr,
+				},
+			},
+		},
+		TS: 22222,
+	}
+
+	_, err := getMessageFromWrappedEvent(wrapper)
+	assert.NotNil(t, err)
+	assert.Equal(t, streamErr, wrapper.StreamErr)
+
+	var buf bytes.Buffer
+	enc := gob.NewEncoder(&buf)
+	err = enc.Encode(wrapper)
+	assert.Error(t, err, "gob encoding should fail for unregistered error types")
+}
+
+func TestAgentEventWrapper_GobEncoding_WithStreamSuccess(t *testing.T) {
+	sr, sw := schema.Pipe[Message](10)
+	go func() {
+		defer sw.Close()
+		sw.Send(schema.AssistantMessage("success1", nil), nil)
+		sw.Send(schema.AssistantMessage("success2", nil), nil)
+	}()
+
+	wrapper := &agentEventWrapper{
+		AgentEvent: &AgentEvent{
+			AgentName: "TestAgent",
+			Output: &AgentOutput{
+				MessageOutput: &MessageVariant{
+					IsStreaming:   true,
+					MessageStream: sr,
+				},
+			},
+		},
+		TS: 67890,
+	}
+
+	msg, err := getMessageFromWrappedEvent(wrapper)
+	assert.NoError(t, err)
+	assert.Equal(t, "success1success2", msg.Content)
+
+	var buf bytes.Buffer
+	enc := gob.NewEncoder(&buf)
+	err = enc.Encode(wrapper)
+	assert.NoError(t, err)
+
+	var decoded agentEventWrapper
+	dec := gob.NewDecoder(&buf)
+	err = dec.Decode(&decoded)
+	assert.NoError(t, err)
+
+	assert.Equal(t, "TestAgent", decoded.AgentName)
+	assert.Equal(t, int64(67890), decoded.TS)
+	assert.Empty(t, decoded.StreamErr)
 }

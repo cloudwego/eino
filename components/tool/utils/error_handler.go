@@ -24,6 +24,7 @@ import (
 	"github.com/cloudwego/eino/schema"
 )
 
+// ErrorHandler converts a tool error into a string response.
 type ErrorHandler func(context.Context, error) string
 
 // WrapToolWithErrorHandler wraps any BaseTool with custom error handling.

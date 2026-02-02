@@ -20,18 +20,24 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
+	"runtime/debug"
 	"strconv"
 	"strings"
 
 	"github.com/cloudwego/eino/adk"
+	"github.com/cloudwego/eino/adk/filesystem"
 	"github.com/cloudwego/eino/components/tool"
 	"github.com/cloudwego/eino/components/tool/utils"
 	"github.com/cloudwego/eino/compose"
+	"github.com/cloudwego/eino/schema"
 )
 
 // Config is the configuration for the filesystem middleware
 type Config struct {
-	// Backend provides filesystem operations used by tools and offloading
+	// Backend provides filesystem operations used by tools and offloading.
+	// If the Backend also implements ShellBackend, an additional execute tool
+	// will be registered to support shell command execution.
 	// required
 	Backend Backend
 
@@ -67,6 +73,9 @@ type Config struct {
 	// CustomEditToolDesc overrides the edit_file tool description
 	// optional, EditFileToolDesc by default
 	CustomEditToolDesc *string
+	// CustomExecuteToolDesc overrides the execute tool description
+	// optional, ExecuteToolDesc by default
+	CustomExecuteToolDesc *string
 }
 
 func (c *Config) Validate() error {
@@ -74,7 +83,7 @@ func (c *Config) Validate() error {
 		return errors.New("config should not be nil")
 	}
 	if c.Backend == nil {
-		return errors.New("Backend should not be nil")
+		return errors.New("backend should not be nil")
 	}
 	return nil
 }
@@ -90,9 +99,16 @@ func NewMiddleware(ctx context.Context, config *Config) (adk.AgentMiddleware, er
 		return adk.AgentMiddleware{}, err
 	}
 
-	systemPrompt := ToolsSystemPrompt
+	var systemPrompt string
 	if config.CustomSystemPrompt != nil {
 		systemPrompt = *config.CustomSystemPrompt
+	} else {
+		systemPrompt = ToolsSystemPrompt
+		_, ok1 := config.Backend.(filesystem.StreamingShellBackend)
+		_, ok2 := config.Backend.(filesystem.ShellBackend)
+		if ok1 || ok2 {
+			systemPrompt += ExecuteToolsSystemPrompt
+		}
 	}
 
 	m := adk.AgentMiddleware{
@@ -102,7 +118,7 @@ func NewMiddleware(ctx context.Context, config *Config) (adk.AgentMiddleware, er
 
 	if !config.WithoutLargeToolResultOffloading {
 		m.WrapToolCall = newToolResultOffloading(ctx, &toolResultOffloadingConfig{
-			FS:            config.Backend,
+			Backend:       config.Backend,
 			TokenLimit:    config.LargeToolResultOffloadingTokenLimit,
 			PathGenerator: config.LargeToolResultOffloadingPathGen,
 		})
@@ -111,7 +127,7 @@ func NewMiddleware(ctx context.Context, config *Config) (adk.AgentMiddleware, er
 	return m, nil
 }
 
-func getFilesystemTools(ctx context.Context, validatedConfig *Config) ([]tool.BaseTool, error) {
+func getFilesystemTools(_ context.Context, validatedConfig *Config) ([]tool.BaseTool, error) {
 	var tools []tool.BaseTool
 
 	lsTool, err := newLsTool(validatedConfig.Backend, validatedConfig.CustomLsToolDesc)
@@ -150,11 +166,21 @@ func getFilesystemTools(ctx context.Context, validatedConfig *Config) ([]tool.Ba
 	}
 	tools = append(tools, grepTool)
 
-	//execTool, err := newExecuteTool(fs, customToolDescriptions["execute"])
-	//if err != nil {
-	//	return nil, err
-	//}
-	//tools = append(tools, execTool)
+	if sb, ok := validatedConfig.Backend.(filesystem.StreamingShellBackend); ok {
+		var executeTool tool.BaseTool
+		executeTool, err = newStreamingExecuteTool(sb, validatedConfig.CustomExecuteToolDesc)
+		if err != nil {
+			return nil, err
+		}
+		tools = append(tools, executeTool)
+	} else if sb, ok := validatedConfig.Backend.(filesystem.ShellBackend); ok {
+		var executeTool tool.BaseTool
+		executeTool, err = newExecuteTool(sb, validatedConfig.CustomExecuteToolDesc)
+		if err != nil {
+			return nil, err
+		}
+		tools = append(tools, executeTool)
+	}
 
 	return tools, nil
 }
@@ -163,17 +189,13 @@ type lsArgs struct {
 	Path string `json:"path"`
 }
 
-func newLsTool(fs Backend, desc *string) (tool.BaseTool, error) {
+func newLsTool(fs filesystem.Backend, desc *string) (tool.BaseTool, error) {
 	d := ListFilesToolDesc
 	if desc != nil {
 		d = *desc
 	}
 	return utils.InferTool("ls", d, func(ctx context.Context, input lsArgs) (string, error) {
-		p := input.Path
-		if p == "" {
-			p = "/"
-		}
-		infos, err := fs.LsInfo(ctx, &LsInfoRequest{Path: p})
+		infos, err := fs.LsInfo(ctx, &filesystem.LsInfoRequest{Path: input.Path})
 		if err != nil {
 			return "", err
 		}
@@ -191,7 +213,7 @@ type readFileArgs struct {
 	Limit    int    `json:"limit"`
 }
 
-func newReadFileTool(fs Backend, desc *string) (tool.BaseTool, error) {
+func newReadFileTool(fs filesystem.Backend, desc *string) (tool.BaseTool, error) {
 	d := ReadFileToolDesc
 	if desc != nil {
 		d = *desc
@@ -203,7 +225,7 @@ func newReadFileTool(fs Backend, desc *string) (tool.BaseTool, error) {
 		if input.Limit <= 0 {
 			input.Limit = 200
 		}
-		return fs.Read(ctx, &ReadRequest{
+		return fs.Read(ctx, &filesystem.ReadRequest{
 			FilePath: input.FilePath,
 			Offset:   input.Offset,
 			Limit:    input.Limit,
@@ -216,13 +238,13 @@ type writeFileArgs struct {
 	Content  string `json:"content"`
 }
 
-func newWriteFileTool(fs Backend, desc *string) (tool.BaseTool, error) {
+func newWriteFileTool(fs filesystem.Backend, desc *string) (tool.BaseTool, error) {
 	d := WriteFileToolDesc
 	if desc != nil {
 		d = *desc
 	}
 	return utils.InferTool("write_file", d, func(ctx context.Context, input writeFileArgs) (string, error) {
-		err := fs.Write(ctx, &WriteRequest{
+		err := fs.Write(ctx, &filesystem.WriteRequest{
 			FilePath: input.FilePath,
 			Content:  input.Content,
 		})
@@ -240,13 +262,13 @@ type editFileArgs struct {
 	ReplaceAll bool   `json:"replace_all"`
 }
 
-func newEditFileTool(fs Backend, desc *string) (tool.BaseTool, error) {
+func newEditFileTool(fs filesystem.Backend, desc *string) (tool.BaseTool, error) {
 	d := EditFileToolDesc
 	if desc != nil {
 		d = *desc
 	}
 	return utils.InferTool("edit_file", d, func(ctx context.Context, input editFileArgs) (string, error) {
-		err := fs.Edit(ctx, &EditRequest{
+		err := fs.Edit(ctx, &filesystem.EditRequest{
 			FilePath:   input.FilePath,
 			OldString:  input.OldString,
 			NewString:  input.NewString,
@@ -264,19 +286,15 @@ type globArgs struct {
 	Path    string `json:"path"`
 }
 
-func newGlobTool(fs Backend, desc *string) (tool.BaseTool, error) {
+func newGlobTool(fs filesystem.Backend, desc *string) (tool.BaseTool, error) {
 	d := GlobToolDesc
 	if desc != nil {
 		d = *desc
 	}
 	return utils.InferTool("glob", d, func(ctx context.Context, input globArgs) (string, error) {
-		p := input.Path
-		if p == "" {
-			p = "/"
-		}
-		infos, err := fs.GlobInfo(ctx, &GlobInfoRequest{
+		infos, err := fs.GlobInfo(ctx, &filesystem.GlobInfoRequest{
 			Pattern: input.Pattern,
-			Path:    p,
+			Path:    input.Path,
 		})
 		if err != nil {
 			return "", err
@@ -296,7 +314,7 @@ type grepArgs struct {
 	OutputMode string  `json:"output_mode" jsonschema:"enum=files_with_matches,enum=content,enum=count"`
 }
 
-func newGrepTool(fs Backend, desc *string) (tool.BaseTool, error) {
+func newGrepTool(fs filesystem.Backend, desc *string) (tool.BaseTool, error) {
 	d := GrepToolDesc
 	if desc != nil {
 		d = *desc
@@ -309,7 +327,7 @@ func newGrepTool(fs Backend, desc *string) (tool.BaseTool, error) {
 		if input.Glob != nil {
 			glob = *input.Glob
 		}
-		matches, err := fs.GrepRaw(ctx, &GrepRequest{
+		matches, err := fs.GrepRaw(ctx, &filesystem.GrepRequest{
 			Pattern: input.Pattern,
 			Path:    path,
 			Glob:    glob,
@@ -344,4 +362,82 @@ func newGrepTool(fs Backend, desc *string) (tool.BaseTool, error) {
 			return strings.Join(files, "\n"), nil
 		}
 	})
+}
+
+type executeArgs struct {
+	Command string `json:"command"`
+}
+
+func newExecuteTool(sb filesystem.ShellBackend, desc *string) (tool.BaseTool, error) {
+	d := ExecuteToolDesc
+	if desc != nil {
+		d = *desc
+	}
+
+	return utils.InferTool("execute", d, func(ctx context.Context, input executeArgs) (string, error) {
+		result, err := sb.Execute(ctx, &filesystem.ExecuteRequest{
+			Command: input.Command,
+		})
+		if err != nil {
+			return "", err
+		}
+
+		return convExecuteResponse(result), nil
+	})
+}
+
+func newStreamingExecuteTool(sb filesystem.StreamingShellBackend, desc *string) (tool.BaseTool, error) {
+	d := ExecuteToolDesc
+	if desc != nil {
+		d = *desc
+	}
+	return utils.InferStreamTool("execute", d, func(ctx context.Context, input executeArgs) (*schema.StreamReader[string], error) {
+		result, err := sb.ExecuteStreaming(ctx, &filesystem.ExecuteRequest{
+			Command: input.Command,
+		})
+		if err != nil {
+			return nil, err
+		}
+		sr, sw := schema.Pipe[string](10)
+		go func() {
+			defer func() {
+				e := recover()
+				if e != nil {
+					sw.Send("", fmt.Errorf("panic: %v,\n stack: %s", e, string(debug.Stack())))
+				}
+				sw.Close()
+			}()
+			for {
+				chunk, recvErr := result.Recv()
+				if recvErr == io.EOF {
+					break
+				}
+				if recvErr != nil {
+					sw.Send("", recvErr)
+					break
+				}
+
+				if str := convExecuteResponse(chunk); str != "" {
+					sw.Send(str, nil)
+				}
+			}
+		}()
+
+		return sr, nil
+	})
+}
+
+func convExecuteResponse(response *filesystem.ExecuteResponse) string {
+	if response == nil {
+		return ""
+	}
+	parts := []string{response.Output}
+	if response.ExitCode != nil && *response.ExitCode != 0 {
+		parts = append(parts, fmt.Sprintf("[Command failed with exit code %d]", *response.ExitCode))
+	}
+	if response.Truncated {
+		parts = append(parts, fmt.Sprintf("[Output was truncated due to size limits]"))
+	}
+
+	return strings.Join(parts, "\n")
 }

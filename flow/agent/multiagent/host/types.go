@@ -38,6 +38,7 @@ type MultiAgent struct {
 	graphAddNodeOpts []compose.GraphAddNodeOpt
 }
 
+// Generate runs the multi-agent synchronously and returns the final message.
 func (ma *MultiAgent) Generate(ctx context.Context, input []*schema.Message, opts ...agent.AgentOption) (*schema.Message, error) {
 	composeOptions := agent.GetComposeOptions(opts...)
 
@@ -49,6 +50,7 @@ func (ma *MultiAgent) Generate(ctx context.Context, input []*schema.Message, opt
 	return ma.runnable.Invoke(ctx, input, composeOptions...)
 }
 
+// Stream runs the multi-agent in streaming mode and returns a message stream.
 func (ma *MultiAgent) Stream(ctx context.Context, input []*schema.Message, opts ...agent.AgentOption) (*schema.StreamReader[*schema.Message], error) {
 	composeOptions := agent.GetComposeOptions(opts...)
 
@@ -65,6 +67,7 @@ func (ma *MultiAgent) ExportGraph() (compose.AnyGraph, []compose.GraphAddNodeOpt
 	return ma.graph, ma.graphAddNodeOpts
 }
 
+// HostNodeKey returns the graph node key used for the host agent.
 func (ma *MultiAgent) HostNodeKey() string {
 	return defaultHostNodeKey
 }
@@ -76,7 +79,7 @@ type MultiAgentConfig struct {
 
 	Name         string // the name of the host multi-agent
 	HostNodeName string // the name of the host node in the graph, default is "host"
-	// StreamOutputHandler is a function to determine whether the model's streaming output contains tool calls.
+	// StreamToolCallChecker is a function to determine whether the model's streaming output contains tool calls.
 	// Different models have different ways of outputting tool calls in streaming mode:
 	// - Some models (like OpenAI) output tool calls directly
 	// - Others (like Claude) output text first, then tool calls
@@ -169,6 +172,8 @@ type Specialist struct {
 	Streamable compose.Stream[[]*schema.Message, *schema.Message, agent.AgentOption]
 }
 
+// Summarizer defines a lightweight agent used to summarize
+// conversations or tool outputs using a chat model and prompt.
 type Summarizer struct {
 	ChatModel    model.BaseChatModel
 	SystemPrompt string

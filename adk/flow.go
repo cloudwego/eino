@@ -20,6 +20,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"runtime/debug"
 	"strings"
 
@@ -64,18 +65,21 @@ func (a *flowAgent) deepCopy() *flowAgent {
 	return ret
 }
 
-func SetSubAgents(ctx context.Context, agent Agent, subAgents []Agent) (Agent, error) {
+// SetSubAgents sets sub-agents for the given agent and returns the updated agent.
+func SetSubAgents(ctx context.Context, agent Agent, subAgents []Agent) (ResumableAgent, error) {
 	return setSubAgents(ctx, agent, subAgents)
 }
 
 type AgentOption func(options *flowAgent)
 
+// WithDisallowTransferToParent prevents a sub-agent from transferring to its parent.
 func WithDisallowTransferToParent() AgentOption {
 	return func(fa *flowAgent) {
 		fa.disallowTransferToParent = true
 	}
 }
 
+// WithHistoryRewriter sets a rewriter to transform conversation history.
 func WithHistoryRewriter(h HistoryRewriter) AgentOption {
 	return func(fa *flowAgent) {
 		fa.historyRewriter = h
@@ -101,6 +105,7 @@ func toFlowAgent(ctx context.Context, agent Agent, opts ...AgentOption) *flowAge
 	return fa
 }
 
+// AgentWithOptions wraps an agent with flow-specific options and returns it.
 func AgentWithOptions(ctx context.Context, agent Agent, opts ...AgentOption) Agent {
 	return toFlowAgent(ctx, agent, opts...)
 }
@@ -231,6 +236,11 @@ func (a *flowAgent) genAgentInput(ctx context.Context, runCtx *runContext, skipT
 
 		msg, err := getMessageFromWrappedEvent(event)
 		if err != nil {
+			var retryErr *WillRetryError
+			if errors.As(err, &retryErr) {
+				log.Printf("failed to get message from event, but will retry: %v", err)
+				continue
+			}
 			return nil, err
 		}
 
@@ -328,7 +338,17 @@ func (a *flowAgent) Resume(ctx context.Context, info *ResumeInfo, opts ...AgentR
 
 	subAgent := a.getAgent(ctx, nextAgentName)
 	if subAgent == nil {
-		return genErrorIter(fmt.Errorf("failed to resume agent: agent '%s' not found", nextAgentName))
+		// the inner agent wrapped by flowAgent may be ANY agent, including flowAgent,
+		// AgentWithDeterministicTransferTo, or any other custom agent user defined,
+		// or any combinations of the above in any order,
+		// that ultimately wraps the flowAgent with sub-agents
+		// We need to go through these wrappers to reach the flowAgent with sub-agents.
+		if len(a.subAgents) == 0 {
+			if ra, ok := a.Agent.(ResumableAgent); ok {
+				return ra.Resume(ctx, info, opts...)
+			}
+		}
+		return genErrorIter(fmt.Errorf("failed to resume agent: agent '%s' not found from flowAgent '%s'", nextAgentName, a.Name(ctx)))
 	}
 
 	return subAgent.Resume(ctx, info, opts...)
@@ -362,20 +382,12 @@ func (a *flowAgent) run(
 			break
 		}
 
-		// RunPath ownership: the eino framework prepends parent context exactly once.
-		// Custom agents should NOT include parent segments in event.RunPath.
-		// Any event.RunPath provided by custom agents is treated as relative child provenance.
-		// STRONG RECOMMENDATION: Do NOT set RunPath in custom agents unless you truly need to add
-		//   relative child provenance; never add parent/current segments. Incorrect settings will
-		//   duplicate head segments after merge and cause non-recording.
-		// Here we merge: framework runCtx.RunPath + custom-provided event.RunPath.
-		event.AgentName = a.Name(ctx)
-		if len(event.RunPath) > 0 {
-			rp := make([]RunStep, 0, len(runCtx.RunPath)+len(event.RunPath))
-			rp = append(rp, runCtx.RunPath...)
-			rp = append(rp, event.RunPath...)
-			event.RunPath = rp
-		} else {
+		// RunPath ownership: the eino framework sets RunPath exactly once.
+		// If event.RunPath is already set (e.g., by agentTool), we don't modify it.
+		// If event.RunPath is nil/empty, we set it to the current runCtx.RunPath.
+		// This ensures RunPath is set exactly once and not duplicated.
+		if len(event.RunPath) == 0 {
+			event.AgentName = a.Name(ctx)
 			event.RunPath = runCtx.RunPath
 		}
 		// Recording policy: exact RunPath match (non-interrupt) indicates events belonging to this agent execution.

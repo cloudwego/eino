@@ -32,14 +32,14 @@ import (
 )
 
 type toolResultOffloadingConfig struct {
-	FS            Backend
+	Backend       Backend
 	TokenLimit    int
 	PathGenerator func(ctx context.Context, input *compose.ToolInput) (string, error)
 }
 
 func newToolResultOffloading(ctx context.Context, config *toolResultOffloadingConfig) compose.ToolMiddleware {
 	offloading := &toolResultOffloading{
-		fs:            config.FS,
+		backend:       config.Backend,
 		tokenLimit:    config.TokenLimit,
 		pathGenerator: config.PathGenerator,
 	}
@@ -61,7 +61,7 @@ func newToolResultOffloading(ctx context.Context, config *toolResultOffloadingCo
 }
 
 type toolResultOffloading struct {
-	fs            Backend
+	backend       Backend
 	tokenLimit    int
 	pathGenerator func(ctx context.Context, input *compose.ToolInput) (string, error)
 }
@@ -106,7 +106,7 @@ func (t *toolResultOffloading) handleResult(ctx context.Context, result string, 
 		}
 
 		nResult := formatToolMessage(result)
-		nResult, err = pyfmt.Fmt(tooLargeToolMessage, map[string]interface{}{
+		nResult, err = pyfmt.Fmt(tooLargeToolMessage, map[string]any{
 			"tool_call_id":   input.CallID,
 			"file_path":      path,
 			"content_sample": nResult,
@@ -115,7 +115,7 @@ func (t *toolResultOffloading) handleResult(ctx context.Context, result string, 
 			return "", err
 		}
 
-		err = t.fs.Write(ctx, &WriteRequest{
+		err = t.backend.Write(ctx, &WriteRequest{
 			FilePath: path,
 			Content:  result,
 		})

@@ -26,8 +26,43 @@ import (
 	"github.com/cloudwego/eino/schema"
 )
 
+// ErrExceedMaxIterations indicates the agent reached the maximum iterations limit.
 var ErrExceedMaxIterations = errors.New("exceeds max iterations")
 
+type adkToolResultSender func(ctx context.Context, toolName, callID, result string, prePopAction *AgentAction)
+type adkStreamToolResultSender func(ctx context.Context, toolName, callID string, resultStream *schema.StreamReader[string], prePopAction *AgentAction)
+
+type toolResultSenders struct {
+	addr         Address
+	sender       adkToolResultSender
+	streamSender adkStreamToolResultSender
+}
+
+type toolResultSendersCtxKey struct{}
+
+func setToolResultSendersToCtx(ctx context.Context, addr Address, sender adkToolResultSender, streamSender adkStreamToolResultSender) context.Context {
+	return context.WithValue(ctx, toolResultSendersCtxKey{}, &toolResultSenders{
+		addr:         addr,
+		sender:       sender,
+		streamSender: streamSender,
+	})
+}
+
+func getToolResultSendersFromCtx(ctx context.Context) *toolResultSenders {
+	v := ctx.Value(toolResultSendersCtxKey{})
+	if v == nil {
+		return nil
+	}
+	return v.(*toolResultSenders)
+}
+
+func isAddressAtDepth(currentAddr, handlerAddr Address, depth int) bool {
+	expectedLen := len(handlerAddr) + depth
+	return len(currentAddr) == expectedLen && currentAddr[:len(handlerAddr)].Equals(handlerAddr)
+}
+
+// State holds agent runtime state including messages, tool actions,
+// and remaining iterations.
 type State struct {
 	Messages []Message
 
@@ -99,6 +134,49 @@ func popToolGenAction(ctx context.Context, toolName string) *AgentAction {
 	return action
 }
 
+func newAdkToolResultCollectorMiddleware() compose.ToolMiddleware {
+	return compose.ToolMiddleware{
+		Invokable: func(next compose.InvokableToolEndpoint) compose.InvokableToolEndpoint {
+			return func(ctx context.Context, input *compose.ToolInput) (*compose.ToolOutput, error) {
+				senders := getToolResultSendersFromCtx(ctx)
+				var sender adkToolResultSender
+				if senders != nil {
+					sender = senders.sender
+				}
+				output, err := next(ctx, input)
+				if err != nil {
+					return nil, err
+				}
+				prePopAction := popToolGenAction(ctx, input.Name)
+				if sender != nil {
+					sender(ctx, input.Name, input.CallID, output.Result, prePopAction)
+				}
+				return output, nil
+			}
+		},
+		Streamable: func(next compose.StreamableToolEndpoint) compose.StreamableToolEndpoint {
+			return func(ctx context.Context, input *compose.ToolInput) (*compose.StreamToolOutput, error) {
+				senders := getToolResultSendersFromCtx(ctx)
+				var streamSender adkStreamToolResultSender
+				if senders != nil {
+					streamSender = senders.streamSender
+				}
+				output, err := next(ctx, input)
+				if err != nil {
+					return nil, err
+				}
+				prePopAction := popToolGenAction(ctx, input.Name)
+				if streamSender != nil {
+					streams := output.Result.Copy(2)
+					streamSender(ctx, input.Name, input.CallID, streams[0], prePopAction)
+					output.Result = streams[1]
+				}
+				return output, nil
+			}
+		},
+	}
+}
+
 type reactConfig struct {
 	model model.ToolCallingChatModel
 
@@ -111,6 +189,8 @@ type reactConfig struct {
 	maxIterations int
 
 	beforeChatModel, afterChatModel []func(context.Context, *ChatModelAgentState) error
+
+	modelRetryConfig *ModelRetryConfig
 }
 
 func genToolInfos(ctx context.Context, config *compose.ToolsNodeConfig) ([]*schema.ToolInfo, error) {
@@ -171,10 +251,20 @@ func newReact(ctx context.Context, config *reactConfig) (reactGraph, error) {
 		return nil, err
 	}
 
-	chatModel, err := config.model.WithTools(toolsInfo)
+	baseModel := config.model
+	if config.modelRetryConfig != nil {
+		baseModel = newRetryChatModel(config.model, config.modelRetryConfig)
+	}
+
+	chatModel, err := baseModel.WithTools(toolsInfo)
 	if err != nil {
 		return nil, err
 	}
+
+	config.toolsConfig.ToolCallMiddlewares = append(
+		[]compose.ToolMiddleware{newAdkToolResultCollectorMiddleware()},
+		config.toolsConfig.ToolCallMiddlewares...,
+	)
 
 	toolsNode, err := compose.NewToolNode(ctx, config.toolsConfig)
 	if err != nil {

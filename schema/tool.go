@@ -27,6 +27,7 @@ import (
 // It must be one of the following values: "object", "number", "integer", "string", "array", "null", "boolean", which is the same as the type of the parameter in JSONSchema.
 type DataType string
 
+// Supported JSONSchema data types for tool parameters.
 const (
 	Object  DataType = "object"
 	Number  DataType = "number"

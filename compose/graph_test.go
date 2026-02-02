@@ -2064,3 +2064,8 @@ func (t *testGraphStateCallbackHandler) OnStartWithStreamInput(ctx context.Conte
 func (t *testGraphStateCallbackHandler) OnEndWithStreamOutput(ctx context.Context, info *callbacks.RunInfo, output *schema.StreamReader[callbacks.CallbackOutput]) context.Context {
 	return ctx
 }
+
+func TestUniqueSlice(t *testing.T) {
+	assert.Equal(t, []string{"a", "b", "c"}, uniqueSlice([]string{"a", "b", "a", "c", "b"}))
+	assert.Equal(t, []string{}, uniqueSlice([]string{}))
+}

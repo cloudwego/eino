@@ -73,7 +73,7 @@ func TestToolResultOffloading_SmallResult(t *testing.T) {
 	backend := newMockBackend()
 
 	config := &toolResultOffloadingConfig{
-		FS:         backend,
+		Backend:    backend,
 		TokenLimit: 100, // Small limit for testing
 	}
 
@@ -115,7 +115,7 @@ func TestToolResultOffloading_LargeResult(t *testing.T) {
 	backend := newMockBackend()
 
 	config := &toolResultOffloadingConfig{
-		FS:         backend,
+		Backend:    backend,
 		TokenLimit: 10, // Very small limit to trigger offloading
 	}
 
@@ -173,7 +173,7 @@ func TestToolResultOffloading_CustomPathGenerator(t *testing.T) {
 
 	customPath := "/custom/path/result.txt"
 	config := &toolResultOffloadingConfig{
-		FS:         backend,
+		Backend:    backend,
 		TokenLimit: 10,
 		PathGenerator: func(ctx context.Context, input *compose.ToolInput) (string, error) {
 			return customPath, nil
@@ -221,7 +221,7 @@ func TestToolResultOffloading_PathGeneratorError(t *testing.T) {
 
 	expectedErr := errors.New("path generation failed")
 	config := &toolResultOffloadingConfig{
-		FS:         backend,
+		Backend:    backend,
 		TokenLimit: 10,
 		PathGenerator: func(ctx context.Context, input *compose.ToolInput) (string, error) {
 			return "", expectedErr
@@ -257,7 +257,7 @@ func TestToolResultOffloading_EndpointError(t *testing.T) {
 	backend := newMockBackend()
 
 	config := &toolResultOffloadingConfig{
-		FS:         backend,
+		Backend:    backend,
 		TokenLimit: 100,
 	}
 
@@ -290,7 +290,7 @@ func TestToolResultOffloading_DefaultTokenLimit(t *testing.T) {
 	backend := newMockBackend()
 
 	config := &toolResultOffloadingConfig{
-		FS:         backend,
+		Backend:    backend,
 		TokenLimit: 0, // Should default to 20000
 	}
 
@@ -330,7 +330,7 @@ func TestToolResultOffloading_Stream(t *testing.T) {
 	backend := newMockBackend()
 
 	config := &toolResultOffloadingConfig{
-		FS:         backend,
+		Backend:    backend,
 		TokenLimit: 10,
 	}
 
@@ -402,7 +402,7 @@ func TestToolResultOffloading_StreamError(t *testing.T) {
 	backend := newMockBackend()
 
 	config := &toolResultOffloadingConfig{
-		FS:         backend,
+		Backend:    backend,
 		TokenLimit: 10,
 	}
 
@@ -550,7 +550,7 @@ func TestToolResultOffloading_BackendWriteError(t *testing.T) {
 	}
 
 	config := &toolResultOffloadingConfig{
-		FS:         backend,
+		Backend:    backend,
 		TokenLimit: 10,
 	}
 

@@ -47,9 +47,11 @@ func GetInterruptState[T any](ctx context.Context) (wasInterrupted bool, hasStat
 // resumed state by calling GetInterruptState.
 //
 // It returns three values:
-//   - isResumeFlow: A boolean that is true if the current component's address was explicitly targeted
-//     by a call to Resume() or ResumeWithData().
-//   - hasData: A boolean that is true if data was provided for this component (i.e., not nil).
+//   - isResumeTarget: A boolean that is true if the current component's address OR any of its
+//     descendant addresses was explicitly targeted by a call to Resume() or ResumeWithData().
+//     This allows composite components (like tools containing nested graphs) to know they should
+//     execute their children to reach the actual resume target.
+//   - hasData: A boolean that is true if data was provided for this specific component (i.e., not nil).
 //   - data: The typed data provided by the user.
 //
 // ### How to Use This Function: A Decision Framework
@@ -65,12 +67,12 @@ func GetInterruptState[T any](ctx context.Context) (wasInterrupted bool, hasStat
 //
 // #### Strategy 2: Explicit "Targeted Resume" (Most Common)
 // For applications with multiple, distinct interrupt points that must be resumed independently, it is
-// crucial to differentiate which point is being resumed. This is the primary use case for the `isResumeFlow` flag.
-//   - If `isResumeFlow` is `true`: Your component is the explicit target. You should consume
-//     the `data` (if any) and complete your work.
-//   - If `isResumeFlow` is `false`: Another component is the target. You MUST re-interrupt
-//     (e.g., by returning `StatefulInterrupt(...)`) to preserve your state and allow the
-//     resume signal to propagate.
+// crucial to differentiate which point is being resumed. This is the primary use case for the `isResumeTarget` flag.
+//   - If `isResumeTarget` is `true`: Your component (or one of its descendants) is the target.
+//     If `hasData` is true, you are the direct target and should consume the data.
+//     If `hasData` is false, a descendant is the target—execute your children to reach it.
+//   - If `isResumeTarget` is `false`: Neither you nor your descendants are the target. You MUST
+//     re-interrupt (e.g., by returning `StatefulInterrupt(...)`) to preserve your state.
 //
 // ### Guidance for Composite Components
 //

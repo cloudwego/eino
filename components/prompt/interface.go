@@ -24,6 +24,7 @@ import (
 
 var _ ChatTemplate = &DefaultChatTemplate{}
 
+// ChatTemplate formats variables into a list of messages according to a prompt schema.
 type ChatTemplate interface {
 	Format(ctx context.Context, vs map[string]any, opts ...Option) ([]*schema.Message, error)
 }

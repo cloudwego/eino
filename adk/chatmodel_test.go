@@ -83,6 +83,72 @@ func TestChatModelAgentRun(t *testing.T) {
 		assert.False(t, ok)
 	})
 
+	t.Run("BasicChatModelWithAgentMiddleware", func(t *testing.T) {
+		ctx := context.Background()
+
+		// Create a mock chat model
+		ctrl := gomock.NewController(t)
+		cm := mockModel.NewMockToolCallingChatModel(ctrl)
+
+		// Set up expectations for the mock model
+		cm.EXPECT().Generate(gomock.Any(), gomock.Any(), gomock.Any()).
+			Return(schema.AssistantMessage("Hello, I am an AI assistant.", nil), nil).
+			Times(1)
+
+		afterChatModelExecuted := false
+
+		// Create a ChatModelAgent
+		agent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+			Name:        "TestAgent",
+			Description: "Test agent for unit testing",
+			Instruction: "You are a helpful assistant.",
+			Model:       cm,
+			Middlewares: []AgentMiddleware{
+				{
+					BeforeChatModel: func(ctx context.Context, state *ChatModelAgentState) error {
+						state.Messages = append(state.Messages, schema.UserMessage("m"))
+						return nil
+					},
+					AfterChatModel: func(ctx context.Context, state *ChatModelAgentState) error {
+						assert.Len(t, state.Messages, 4)
+						afterChatModelExecuted = true
+						return nil
+					},
+				},
+			},
+		})
+		assert.NoError(t, err)
+		assert.NotNil(t, agent)
+
+		// Run the agent
+		input := &AgentInput{
+			Messages: []Message{
+				schema.UserMessage("Hello, who are you?"),
+			},
+		}
+		iterator := agent.Run(ctx, input)
+		assert.NotNil(t, iterator)
+
+		// Get the event from the iterator
+		event, ok := iterator.Next()
+		assert.True(t, ok)
+		assert.NotNil(t, event)
+		assert.Nil(t, event.Err)
+		assert.NotNil(t, event.Output)
+		assert.NotNil(t, event.Output.MessageOutput)
+
+		// Verify the message content
+		msg := event.Output.MessageOutput.Message
+		assert.NotNil(t, msg)
+		assert.Equal(t, "Hello, I am an AI assistant.", msg.Content)
+
+		// No more events
+		_, ok = iterator.Next()
+		assert.False(t, ok)
+
+		assert.True(t, afterChatModelExecuted)
+	})
+
 	// Test with streaming output
 	t.Run("StreamOutput", func(t *testing.T) {
 		ctx := context.Background()
@@ -908,4 +974,212 @@ func TestStreamToolLegacyNameKeyFallback(t *testing.T) {
 		}
 	}
 	assert.True(t, found)
+}
+
+func TestChatModelAgent_ToolResultMiddleware_EmitsFinalResult(t *testing.T) {
+	originalResult := "original_result"
+	modifiedResult := "modified_by_middleware"
+
+	resultModifyingMiddleware := compose.ToolMiddleware{
+		Invokable: func(next compose.InvokableToolEndpoint) compose.InvokableToolEndpoint {
+			return func(ctx context.Context, input *compose.ToolInput) (*compose.ToolOutput, error) {
+				output, err := next(ctx, input)
+				if err != nil {
+					return nil, err
+				}
+				output.Result = modifiedResult
+				return output, nil
+			}
+		},
+		Streamable: func(next compose.StreamableToolEndpoint) compose.StreamableToolEndpoint {
+			return func(ctx context.Context, input *compose.ToolInput) (*compose.StreamToolOutput, error) {
+				output, err := next(ctx, input)
+				if err != nil {
+					return nil, err
+				}
+				output.Result = schema.StreamReaderFromArray([]string{modifiedResult})
+				return output, nil
+			}
+		},
+	}
+
+	t.Run("Invoke", func(t *testing.T) {
+		ctx := context.Background()
+		testTool := &simpleToolForMiddlewareTest{name: "test_tool", result: originalResult}
+
+		ctrl := gomock.NewController(t)
+		cm := mockModel.NewMockToolCallingChatModel(ctrl)
+
+		info, err := testTool.Info(ctx)
+		assert.NoError(t, err)
+
+		cm.EXPECT().Generate(gomock.Any(), gomock.Any(), gomock.Any()).
+			Return(schema.AssistantMessage("",
+				[]schema.ToolCall{
+					{
+						ID: "tool-call-1",
+						Function: schema.FunctionCall{
+							Name:      info.Name,
+							Arguments: `{"input": "test"}`,
+						},
+					},
+				}), nil).
+			Times(1)
+		cm.EXPECT().Generate(gomock.Any(), gomock.Any(), gomock.Any()).
+			Return(schema.AssistantMessage("final response", nil), nil).
+			Times(1)
+		cm.EXPECT().WithTools(gomock.Any()).Return(cm, nil).AnyTimes()
+
+		agent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+			Name:        "test_agent",
+			Description: "test agent with middleware",
+			Model:       cm,
+			ToolsConfig: ToolsConfig{
+				ToolsNodeConfig: compose.ToolsNodeConfig{
+					Tools:               []tool.BaseTool{testTool},
+					ToolCallMiddlewares: []compose.ToolMiddleware{resultModifyingMiddleware},
+				},
+			},
+		})
+		assert.NoError(t, err)
+
+		r := NewRunner(ctx, RunnerConfig{Agent: agent, EnableStreaming: false, CheckPointStore: newBridgeStore()})
+		it := r.Run(ctx, []Message{schema.UserMessage("call the tool")})
+
+		var toolResultEvents []*AgentEvent
+		for {
+			ev, ok := it.Next()
+			if !ok {
+				break
+			}
+			if ev.Output != nil && ev.Output.MessageOutput != nil &&
+				ev.Output.MessageOutput.Message != nil &&
+				ev.Output.MessageOutput.Message.Role == schema.Tool {
+				toolResultEvents = append(toolResultEvents, ev)
+			}
+		}
+
+		assert.NotEmpty(t, toolResultEvents, "should have at least one tool result event")
+		for _, ev := range toolResultEvents {
+			assert.Equal(t, modifiedResult, ev.Output.MessageOutput.Message.Content,
+				"tool result event should contain the middleware-modified result, not the original")
+			assert.NotEqual(t, originalResult, ev.Output.MessageOutput.Message.Content,
+				"tool result event should NOT contain the original result")
+		}
+	})
+
+	t.Run("Stream", func(t *testing.T) {
+		ctx := context.Background()
+		testTool := &simpleToolForMiddlewareTest{name: "test_tool_stream", result: originalResult}
+
+		ctrl := gomock.NewController(t)
+		cm := mockModel.NewMockToolCallingChatModel(ctrl)
+
+		info, err := testTool.Info(ctx)
+		assert.NoError(t, err)
+
+		cm.EXPECT().Stream(gomock.Any(), gomock.Any(), gomock.Any()).
+			Return(schema.StreamReaderFromArray([]*schema.Message{
+				schema.AssistantMessage("", []schema.ToolCall{
+					{
+						ID: "tool-call-1",
+						Function: schema.FunctionCall{
+							Name:      info.Name,
+							Arguments: `{"input": "test"}`,
+						},
+					},
+				}),
+			}), nil).
+			Times(1)
+		cm.EXPECT().Stream(gomock.Any(), gomock.Any(), gomock.Any()).
+			Return(schema.StreamReaderFromArray([]*schema.Message{
+				schema.AssistantMessage("final response", nil),
+			}), nil).
+			Times(1)
+		cm.EXPECT().WithTools(gomock.Any()).Return(cm, nil).AnyTimes()
+
+		agent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+			Name:        "test_agent",
+			Description: "test agent with middleware",
+			Model:       cm,
+			ToolsConfig: ToolsConfig{
+				ToolsNodeConfig: compose.ToolsNodeConfig{
+					Tools:               []tool.BaseTool{testTool},
+					ToolCallMiddlewares: []compose.ToolMiddleware{resultModifyingMiddleware},
+				},
+			},
+		})
+		assert.NoError(t, err)
+
+		r := NewRunner(ctx, RunnerConfig{Agent: agent, EnableStreaming: true, CheckPointStore: newBridgeStore()})
+		it := r.Run(ctx, []Message{schema.UserMessage("call the tool")})
+
+		var toolResultContents []string
+		for {
+			ev, ok := it.Next()
+			if !ok {
+				break
+			}
+			if ev.Output != nil && ev.Output.MessageOutput != nil {
+				if ev.Output.MessageOutput.Message != nil &&
+					ev.Output.MessageOutput.Message.Role == schema.Tool {
+					toolResultContents = append(toolResultContents, ev.Output.MessageOutput.Message.Content)
+				}
+				if ev.Output.MessageOutput.IsStreaming &&
+					ev.Output.MessageOutput.MessageStream != nil &&
+					ev.Output.MessageOutput.Role == schema.Tool {
+					var msgs []*schema.Message
+					for {
+						msg, err := ev.Output.MessageOutput.MessageStream.Recv()
+						if err != nil {
+							break
+						}
+						msgs = append(msgs, msg)
+					}
+					if len(msgs) > 0 {
+						concated, err := schema.ConcatMessages(msgs)
+						if err == nil {
+							toolResultContents = append(toolResultContents, concated.Content)
+						}
+					}
+				}
+			}
+		}
+
+		assert.NotEmpty(t, toolResultContents, "should have at least one tool result event")
+		for _, content := range toolResultContents {
+			assert.Equal(t, modifiedResult, content,
+				"tool result event should contain the middleware-modified result, not the original")
+			assert.NotEqual(t, originalResult, content,
+				"tool result event should NOT contain the original result")
+		}
+	})
+}
+
+type simpleToolForMiddlewareTest struct {
+	name   string
+	result string
+}
+
+func (s *simpleToolForMiddlewareTest) Info(_ context.Context) (*schema.ToolInfo, error) {
+	return &schema.ToolInfo{
+		Name: s.name,
+		Desc: "simple tool",
+		ParamsOneOf: schema.NewParamsOneOfByParams(
+			map[string]*schema.ParameterInfo{
+				"input": {
+					Desc:     "input",
+					Required: true,
+					Type:     schema.String,
+				},
+			}),
+	}, nil
+}
+
+func (s *simpleToolForMiddlewareTest) InvokableRun(_ context.Context, _ string, _ ...tool.Option) (string, error) {
+	return s.result, nil
+}
+
+func (s *simpleToolForMiddlewareTest) StreamableRun(_ context.Context, _ string, _ ...tool.Option) (*schema.StreamReader[string], error) {
+	return schema.StreamReaderFromArray([]string{s.result}), nil
 }

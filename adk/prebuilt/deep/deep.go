@@ -14,6 +14,7 @@
  * limitations under the License.
  */
 
+// Package deep provides a prebuilt agent with deep task orchestration.
 package deep
 
 import (
@@ -44,6 +45,8 @@ type Config struct {
 	// ChatModel is the model used by DeepAgent for reasoning and task execution.
 	ChatModel model.ToolCallingChatModel
 	// Instruction contains the system prompt that guides the agent's behavior.
+	// When empty, a built-in default system prompt will be used, which includes general assistant
+	// behavior guidelines, security policies, coding style guidelines, and tool usage policies.
 	Instruction string
 	// SubAgents are specialized agents that can be invoked by the agent.
 	SubAgents []adk.Agent
@@ -61,18 +64,27 @@ type Config struct {
 	TaskToolDescriptionGenerator func(ctx context.Context, availableAgents []adk.Agent) (string, error)
 
 	Middlewares []adk.AgentMiddleware
+
+	ModelRetryConfig *adk.ModelRetryConfig
+
+	// OutputKey stores the agent's response in the session.
+	// Optional. When set, stores output via AddSessionValue(ctx, outputKey, msg.Content).
+	OutputKey string
 }
 
 // New creates a new Deep agent instance with the provided configuration.
 // This function initializes built-in tools, creates a task tool for subagent orchestration,
 // and returns a fully configured ChatModelAgent ready for execution.
-func New(ctx context.Context, cfg *Config) (adk.Agent, error) {
+func New(ctx context.Context, cfg *Config) (adk.ResumableAgent, error) {
 	middlewares, err := buildBuiltinAgentMiddlewares(cfg.WithoutWriteTodos)
 	if err != nil {
 		return nil, err
 	}
 
-	middlewares = append([]adk.AgentMiddleware{{AdditionalInstruction: baseAgentPrompt}}, middlewares...)
+	instruction := cfg.Instruction
+	if len(instruction) == 0 {
+		instruction = baseAgentInstruction
+	}
 
 	if !cfg.WithoutGeneralSubAgent || len(cfg.SubAgents) > 0 {
 		tt, err := newTaskToolMiddleware(
@@ -82,10 +94,10 @@ func New(ctx context.Context, cfg *Config) (adk.Agent, error) {
 
 			cfg.WithoutGeneralSubAgent,
 			cfg.ChatModel,
-			cfg.Instruction,
+			instruction,
 			cfg.ToolsConfig,
 			cfg.MaxIteration,
-			append(cfg.Middlewares, middlewares...),
+			append(middlewares, cfg.Middlewares...),
 		)
 		if err != nil {
 			return nil, fmt.Errorf("failed to new task tool: %w", err)
@@ -96,12 +108,28 @@ func New(ctx context.Context, cfg *Config) (adk.Agent, error) {
 	return adk.NewChatModelAgent(ctx, &adk.ChatModelAgentConfig{
 		Name:          cfg.Name,
 		Description:   cfg.Description,
-		Instruction:   cfg.Instruction,
+		Instruction:   instruction,
 		Model:         cfg.ChatModel,
 		ToolsConfig:   cfg.ToolsConfig,
 		MaxIterations: cfg.MaxIteration,
-		Middlewares:   append(cfg.Middlewares, middlewares...),
+		Middlewares:   append(middlewares, cfg.Middlewares...),
+
+		GenModelInput:    genModelInput,
+		ModelRetryConfig: cfg.ModelRetryConfig,
+		OutputKey:        cfg.OutputKey,
 	})
+}
+
+func genModelInput(ctx context.Context, instruction string, input *adk.AgentInput) ([]*schema.Message, error) {
+	msgs := make([]*schema.Message, 0, len(input.Messages)+1)
+
+	if instruction != "" {
+		msgs = append(msgs, schema.SystemMessage(instruction))
+	}
+
+	msgs = append(msgs, input.Messages...)
+
+	return msgs, nil
 }
 
 func buildBuiltinAgentMiddlewares(withoutWriteTodos bool) ([]adk.AgentMiddleware, error) {
@@ -118,8 +146,9 @@ func buildBuiltinAgentMiddlewares(withoutWriteTodos bool) ([]adk.AgentMiddleware
 }
 
 type TODO struct {
-	Content string `json:"content"`
-	Status  string `json:"status" jsonschema:"enum=pending,enum=in_progress,enum=completed"`
+	Content    string `json:"content"`
+	ActiveForm string `json:"activeForm"`
+	Status     string `json:"status" jsonschema:"enum=pending,enum=in_progress,enum=completed"`
 }
 
 type writeTodosArguments struct {

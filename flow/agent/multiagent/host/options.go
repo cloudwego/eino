@@ -22,6 +22,7 @@ type options struct {
 	agentCallbacks []MultiAgentCallback
 }
 
+// WithAgentCallbacks registers callbacks to be invoked by the host multi-agent.
 func WithAgentCallbacks(agentCallbacks ...MultiAgentCallback) agent.AgentOption {
 	return agent.WrapImplSpecificOptFn(func(opts *options) {
 		opts.agentCallbacks = append(opts.agentCallbacks, agentCallbacks...)

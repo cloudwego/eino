@@ -166,6 +166,13 @@ func (ic *InterruptCtx) EqualsWithoutID(other *InterruptCtx) bool {
 	return true
 }
 
+// InterruptContextsProvider is an interface for errors that contain interrupt contexts.
+// This allows different packages to check for and extract interrupt contexts from errors
+// without needing to know the concrete error type.
+type InterruptContextsProvider interface {
+	GetInterruptContexts() []*InterruptCtx
+}
+
 // FromInterruptContexts converts a list of user-facing InterruptCtx objects into an
 // internal InterruptSignal tree. It correctly handles common ancestors and ensures
 // that the resulting tree is consistent with the original interrupt chain.
@@ -228,14 +235,17 @@ func FromInterruptContexts(contexts []*InterruptCtx) *InterruptSignal {
 // user-facing InterruptCtx objects for the root causes of the interruption.
 // Each returned context has its Parent field populated (if it has a parent),
 // allowing traversal up the interrupt chain.
-func ToInterruptContexts(is *InterruptSignal, addrModifier func(Address) Address) []*InterruptCtx {
+//
+// If allowedSegmentTypes is nil, all segment types are kept and addresses are unchanged.
+// If allowedSegmentTypes is provided, it:
+//  1. Filters the parent chain to only keep contexts whose leaf segment type is allowed
+//  2. Strips non-allowed segment types from all addresses
+func ToInterruptContexts(is *InterruptSignal, allowedSegmentTypes []AddressSegmentType) []*InterruptCtx {
 	if is == nil {
 		return nil
 	}
 	var rootCauseContexts []*InterruptCtx
 
-	// A recursive helper that traverses the signal tree, building the parent-linked
-	// context objects and appending only the root causes to the final list.
 	var buildContexts func(*InterruptSignal, *InterruptCtx)
 	buildContexts = func(signal *InterruptSignal, parentCtx *InterruptCtx) {
 		currentCtx := &InterruptCtx{
@@ -246,23 +256,60 @@ func ToInterruptContexts(is *InterruptSignal, addrModifier func(Address) Address
 			Parent:      parentCtx,
 		}
 
-		if addrModifier != nil {
-			currentCtx.Address = addrModifier(currentCtx.Address)
-		}
-
-		// Only add the context to the final list if it's a root cause.
 		if currentCtx.IsRootCause {
 			rootCauseContexts = append(rootCauseContexts, currentCtx)
 		}
 
-		// Recurse into children, passing the newly created context as their parent.
 		for _, subSignal := range signal.Subs {
 			buildContexts(subSignal, currentCtx)
 		}
 	}
 
 	buildContexts(is, nil)
+
+	if len(allowedSegmentTypes) > 0 {
+		allowedSet := make(map[AddressSegmentType]bool, len(allowedSegmentTypes))
+		for _, t := range allowedSegmentTypes {
+			allowedSet[t] = true
+		}
+
+		for _, ctx := range rootCauseContexts {
+			filterParentChain(ctx, allowedSet)
+			encapsulateContextAddresses(ctx, allowedSet)
+		}
+	}
+
 	return rootCauseContexts
+}
+
+func filterParentChain(ctx *InterruptCtx, allowedSet map[AddressSegmentType]bool) {
+	if ctx == nil {
+		return
+	}
+
+	parent := ctx.Parent
+	for parent != nil {
+		if len(parent.Address) > 0 && allowedSet[parent.Address[len(parent.Address)-1].Type] {
+			break
+		}
+		parent = parent.Parent
+	}
+
+	ctx.Parent = parent
+
+	filterParentChain(parent, allowedSet)
+}
+
+func encapsulateContextAddresses(ctx *InterruptCtx, allowedSet map[AddressSegmentType]bool) {
+	for c := ctx; c != nil; c = c.Parent {
+		newAddr := make(Address, 0, len(c.Address))
+		for _, seg := range c.Address {
+			if allowedSet[seg.Type] {
+				newAddr = append(newAddr, seg)
+			}
+		}
+		c.Address = newAddr
+	}
 }
 
 // SignalToPersistenceMaps flattens an InterruptSignal tree into two maps suitable for persistence in a checkpoint.

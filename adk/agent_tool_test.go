@@ -18,6 +18,7 @@ package adk
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"sync"
 	"testing"
@@ -89,6 +90,82 @@ func TestAgentTool_Info(t *testing.T) {
 	assert.Equal(t, "TestAgent", info.Name)
 	assert.Equal(t, "Test agent description", info.Desc)
 	assert.NotNil(t, info.ParamsOneOf)
+}
+
+func TestAgentTool_SharedParentSessionValues(t *testing.T) {
+	ctx := context.Background()
+
+	inner := &sessionValuesAgent{name: "inner"}
+	innerTool := NewAgentTool(ctx, inner).(tool.InvokableTool)
+
+	input := &AgentInput{Messages: []Message{schema.UserMessage("q")}}
+	ctx, _ = initRunCtx(ctx, "outer", input)
+	AddSessionValue(ctx, "parent_key", "parent_val")
+	parentSession := getRunCtx(ctx).Session
+
+	_, err := innerTool.InvokableRun(ctx, `{"request":"hello"}`)
+	assert.NoError(t, err)
+
+	assert.Equal(t, "parent_val", inner.seenParentValue)
+	assert.NotNil(t, inner.capturedSession)
+	assert.NotSame(t, parentSession, inner.capturedSession)
+	assert.NotNil(t, parentSession.valuesMtx)
+	assert.Same(t, parentSession.valuesMtx, inner.capturedSession.valuesMtx)
+
+	mtx := parentSession.valuesMtx
+	mtx.Lock()
+	inner.capturedSession.Values["direct_child_key"] = "direct_child_val"
+	mtx.Unlock()
+
+	mtx.Lock()
+	v2, ok2 := parentSession.Values["direct_child_key"]
+	mtx.Unlock()
+	assert.True(t, ok2)
+	assert.Equal(t, "direct_child_val", v2)
+
+	mtx.Lock()
+	parentSession.Values["direct_parent_key"] = "direct_parent_val"
+	mtx.Unlock()
+
+	mtx.Lock()
+	v3, ok3 := inner.capturedSession.Values["direct_parent_key"]
+	mtx.Unlock()
+	assert.True(t, ok3)
+	assert.Equal(t, "direct_parent_val", v3)
+
+	v, ok := GetSessionValue(ctx, "child_key")
+	assert.True(t, ok)
+	assert.Equal(t, "child_val", v)
+}
+
+type sessionValuesAgent struct {
+	name            string
+	seenParentValue any
+	capturedSession *runSession
+}
+
+func (a *sessionValuesAgent) Name(context.Context) string        { return a.name }
+func (a *sessionValuesAgent) Description(context.Context) string { return "test" }
+func (a *sessionValuesAgent) Run(ctx context.Context, _ *AgentInput, _ ...AgentRunOption) *AsyncIterator[*AgentEvent] {
+	if rc := getRunCtx(ctx); rc != nil {
+		a.capturedSession = rc.Session
+	}
+	a.seenParentValue, _ = GetSessionValue(ctx, "parent_key")
+	AddSessionValue(ctx, "child_key", "child_val")
+
+	it, gen := NewAsyncIteratorPair[*AgentEvent]()
+	gen.Send(&AgentEvent{
+		AgentName: a.name,
+		Output: &AgentOutput{
+			MessageOutput: &MessageVariant{
+				IsStreaming: false,
+				Message:     schema.AssistantMessage("ok", nil),
+				Role:        schema.Assistant,
+			},
+		},
+	})
+	gen.Close()
+	return it
 }
 
 func TestAgentTool_InvokableRun(t *testing.T) {
@@ -694,6 +771,62 @@ func TestNestedAgentTool_NoInternalEventsWhenDisabled(t *testing.T) {
 	}
 }
 
+func TestNestedAgentTool_InnerToolResultNotEmittedToOuter(t *testing.T) {
+	ctx := context.Background()
+
+	innerTool := &simpleTool{name: "inner_tool", result: "inner_tool_result"}
+	inner, _ := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+		Name:        "inner",
+		Description: "inner agent with tool",
+		Model:       &fakeTCM{},
+		ToolsConfig: ToolsConfig{ToolsNodeConfig: compose.ToolsNodeConfig{Tools: []tool.BaseTool{innerTool}}},
+	})
+	innerAgentTool := NewAgentTool(ctx, inner)
+
+	outer, _ := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+		Name:        "outer",
+		Description: "outer agent",
+		Model:       &fakeTCM{},
+		ToolsConfig: ToolsConfig{ToolsNodeConfig: compose.ToolsNodeConfig{Tools: []tool.BaseTool{innerAgentTool}}},
+	})
+
+	r := NewRunner(ctx, RunnerConfig{Agent: outer, EnableStreaming: false, CheckPointStore: newBridgeStore()})
+	it := r.Run(ctx, []Message{schema.UserMessage("q")})
+
+	var allEvents []*AgentEvent
+	for {
+		ev, ok := it.Next()
+		if !ok {
+			break
+		}
+		allEvents = append(allEvents, ev)
+	}
+
+	for _, ev := range allEvents {
+		if ev.Output != nil && ev.Output.MessageOutput != nil &&
+			ev.Output.MessageOutput.Message != nil &&
+			ev.Output.MessageOutput.Message.Role == schema.Tool &&
+			ev.AgentName == "outer" &&
+			ev.Output.MessageOutput.Message.Content == "inner_tool_result" {
+			t.Fatalf("inner agent's tool result (inner_tool_result) should not be emitted as outer agent's event, but got event with AgentName=%s, Content=%s",
+				ev.AgentName, ev.Output.MessageOutput.Message.Content)
+		}
+	}
+}
+
+type simpleTool struct {
+	name   string
+	result string
+}
+
+func (s *simpleTool) Info(context.Context) (*schema.ToolInfo, error) {
+	return &schema.ToolInfo{Name: s.name, Desc: "simple tool"}, nil
+}
+
+func (s *simpleTool) InvokableRun(ctx context.Context, argumentsInJSON string, opts ...tool.Option) (string, error) {
+	return s.result, nil
+}
+
 func TestAgentTool_InterruptWithoutCheckpoint(t *testing.T) {
 	ctx := context.Background()
 	ctx, _ = initRunCtx(ctx, "TestAgent", &AgentInput{Messages: []Message{}})
@@ -708,6 +841,20 @@ func TestAgentTool_InterruptWithoutCheckpoint(t *testing.T) {
 	if !strings.Contains(err.Error(), "interrupt occurred but checkpoint data is missing") {
 		t.Fatalf("unexpected error: %v", err)
 	}
+}
+
+func compositeInterruptFromLast(ctx context.Context, ms *bridgeStore, lastEvent *AgentEvent) error {
+	if lastEvent == nil || lastEvent.Action == nil || lastEvent.Action.Interrupted == nil {
+		return nil
+	}
+	data, existed, err := ms.Get(ctx, bridgeCheckpointID)
+	if err != nil {
+		return fmt.Errorf("failed to get interrupt info: %w", err)
+	}
+	if !existed {
+		return fmt.Errorf("interrupt occurred but checkpoint data is missing")
+	}
+	return tool.CompositeInterrupt(ctx, "agent tool interrupt", data, lastEvent.Action.internalInterrupted)
 }
 
 func TestAgentTool_InvokableRun_FinalOnly(t *testing.T) {
@@ -736,7 +883,9 @@ func (s *streamingAgent) Description(context.Context) string { return "test" }
 func (s *streamingAgent) Run(context.Context, *AgentInput, ...AgentRunOption) *AsyncIterator[*AgentEvent] {
 	it, gen := NewAsyncIteratorPair[*AgentEvent]()
 	go func() {
-		mv := &MessageVariant{IsStreaming: true, MessageStream: schema.StreamReaderFromArray([]Message{schema.AssistantMessage("a", nil), schema.AssistantMessage("b", nil)})}
+		mv := &MessageVariant{IsStreaming: true, MessageStream: schema.StreamReaderFromArray([]Message{schema.AssistantMessage("1", nil), schema.AssistantMessage("2", nil)})}
+		gen.Send(&AgentEvent{AgentName: "stream", Output: &AgentOutput{MessageOutput: mv}})
+		mv = &MessageVariant{IsStreaming: true, MessageStream: schema.StreamReaderFromArray([]Message{schema.AssistantMessage("a", nil), schema.AssistantMessage("b", nil)})}
 		gen.Send(&AgentEvent{AgentName: "stream", Output: &AgentOutput{MessageOutput: mv}})
 		gen.Close()
 	}()
@@ -841,60 +990,6 @@ func TestSequentialWorkflow_WithChatModelAgentTool_NestedRunPathAndSessions(t *t
 		if w.AgentName != "inner2" {
 			t.Fatalf("inner2 session contains non-inner2 event: %s", w.AgentName)
 		}
-	}
-}
-
-type badAgent struct{ parent string }
-
-func (b *badAgent) Name(context.Context) string        { return "bad" }
-func (b *badAgent) Description(context.Context) string { return "misuse" }
-func (b *badAgent) Run(ctx context.Context, input *AgentInput, _ ...AgentRunOption) *AsyncIterator[*AgentEvent] {
-	it, gen := NewAsyncIteratorPair[*AgentEvent]()
-	go func() {
-		ev := EventFromMessage(schema.AssistantMessage("x", nil), nil, schema.Assistant, "")
-		ev.RunPath = []RunStep{{agentName: b.parent}, {agentName: "bad"}}
-		gen.Send(ev)
-		gen.Close()
-	}()
-	return it
-}
-
-func TestRunPathMisuse_DuplicatedHeadAndNoParentRecording(t *testing.T) {
-	ctx := context.Background()
-	input := &AgentInput{Messages: []Message{schema.UserMessage("q")}}
-	ctx, outerRunCtx := initRunCtx(ctx, "outer", input)
-	fa := toFlowAgent(ctx, &badAgent{parent: "outer"})
-
-	it := fa.Run(ctx, input)
-	var last *AgentEvent
-	for {
-		ev, ok := it.Next()
-		if !ok {
-			break
-		}
-		last = ev
-	}
-	if last == nil {
-		t.Fatalf("no event emitted")
-	}
-
-	got := make([]string, len(last.RunPath))
-	for i := range last.RunPath {
-		got[i] = last.RunPath[i].agentName
-	}
-	want := []string{"outer", "bad", "outer", "bad"}
-	if len(got) != len(want) {
-		t.Fatalf("unexpected runPath len: got %d want %d: %+v", len(got), len(want), got)
-	}
-	for i := range want {
-		if got[i] != want[i] {
-			t.Fatalf("runPath mismatch at %d: got %s want %s; full: %+v", i, got[i], want[i], got)
-		}
-	}
-
-	evs := outerRunCtx.Session.getEvents()
-	if len(evs) != 0 {
-		t.Fatalf("outer session should not record misused event, recorded=%d", len(evs))
 	}
 }
 

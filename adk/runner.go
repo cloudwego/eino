@@ -20,8 +20,8 @@ import (
 	"context"
 	"fmt"
 	"runtime/debug"
+	"sync"
 
-	"github.com/cloudwego/eino/compose"
 	"github.com/cloudwego/eino/internal/core"
 	"github.com/cloudwego/eino/internal/safe"
 	"github.com/cloudwego/eino/schema"
@@ -36,14 +36,16 @@ type Runner struct {
 	enableStreaming bool
 	// store is the checkpoint store used to persist agent state upon interruption.
 	// If nil, checkpointing is disabled.
-	store compose.CheckPointStore
+	store CheckPointStore
 }
+
+type CheckPointStore = core.CheckPointStore
 
 type RunnerConfig struct {
 	Agent           Agent
 	EnableStreaming bool
 
-	CheckPointStore compose.CheckPointStore
+	CheckPointStore CheckPointStore
 }
 
 // ResumeParams contains all parameters needed to resume an execution.
@@ -56,6 +58,8 @@ type ResumeParams struct {
 	// Future extensible fields can be added here without breaking changes
 }
 
+// NewRunner creates a Runner that executes an Agent with optional streaming
+// and checkpoint persistence.
 func NewRunner(_ context.Context, conf RunnerConfig) *Runner {
 	return &Runner{
 		enableStreaming: conf.EnableStreaming,
@@ -79,7 +83,7 @@ func (r *Runner) Run(ctx context.Context, messages []Message,
 		EnableStreaming: r.enableStreaming,
 	}
 
-	ctx = ctxWithNewRunCtx(ctx, input)
+	ctx = ctxWithNewRunCtx(ctx, input, o.sharedParentSession)
 
 	AddSessionValues(ctx, o.sessionValues)
 
@@ -142,12 +146,28 @@ func (r *Runner) resume(ctx context.Context, checkPointID string, resumeData map
 		return nil, fmt.Errorf("failed to resume: store is nil")
 	}
 
-	ctx, resumeInfo, err := r.loadCheckPoint(ctx, checkPointID)
+	ctx, runCtx, resumeInfo, err := r.loadCheckPoint(ctx, checkPointID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to load from checkpoint: %w", err)
 	}
 
 	o := getCommonOptions(nil, opts...)
+	if o.sharedParentSession {
+		parentSession := getSession(ctx)
+		if parentSession != nil {
+			runCtx.Session.Values = parentSession.Values
+			runCtx.Session.valuesMtx = parentSession.valuesMtx
+		}
+	}
+	if runCtx.Session.valuesMtx == nil {
+		runCtx.Session.valuesMtx = &sync.Mutex{}
+	}
+	if runCtx.Session.Values == nil {
+		runCtx.Session.Values = make(map[string]any)
+	}
+
+	ctx = setRunCtx(ctx, runCtx)
+
 	AddSessionValues(ctx, o.sessionValues)
 
 	if len(resumeData) > 0 {
@@ -195,7 +215,7 @@ func (r *Runner) handleIter(ctx context.Context, aIter *AsyncIterator[*AgentEven
 				panic("multiple interrupt actions should not happen in Runner")
 			}
 			interruptSignal = event.Action.internalInterrupted
-			interruptContexts := core.ToInterruptContexts(interruptSignal, encapsulateAddress)
+			interruptContexts := core.ToInterruptContexts(interruptSignal, allowedAddressSegmentTypes)
 			event = &AgentEvent{
 				AgentName: event.AgentName,
 				RunPath:   event.RunPath,

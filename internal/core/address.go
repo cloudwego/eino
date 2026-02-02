@@ -175,6 +175,21 @@ func AppendAddressSegment(ctx context.Context, segType AddressSegmentType, segID
 		}
 	}
 
+	// Also mark as resume target if any descendant address is a resume target.
+	// This allows composite components (e.g., a tool containing a nested graph) to know
+	// they should execute their children to reach the actual resume target.
+	// We only consider descendants whose resume data has not yet been consumed.
+	if !runCtx.isResumeTarget {
+		for id_, addr := range rInfo.id2Addr {
+			if len(addr) > len(currentAddress) && addr[:len(currentAddress)].Equals(currentAddress) {
+				if !rInfo.id2ResumeDataUsed[id_] {
+					runCtx.isResumeTarget = true
+					break
+				}
+			}
+		}
+	}
+
 	return context.WithValue(ctx, addrCtxKey{}, runCtx)
 }
 

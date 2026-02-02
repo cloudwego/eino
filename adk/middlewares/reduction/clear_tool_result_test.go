@@ -17,6 +17,7 @@
 package reduction
 
 import (
+	"context"
 	"fmt"
 	"strings"
 	"testing"
@@ -262,4 +263,40 @@ func Test_reduceByTokens(t *testing.T) {
 			}
 		})
 	}
+}
+
+func Test_newClearToolResult(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("nil config uses defaults", func(t *testing.T) {
+		fn := newClearToolResult(ctx, nil)
+		assert.NotNil(t, fn)
+
+		// Test that function works with nil config (uses defaults)
+		state := &adk.ChatModelAgentState{
+			Messages: []adk.Message{
+				schema.UserMessage("hello"),
+				schema.ToolMessage("short result", "call-1", schema.WithToolName("tool1")),
+			},
+		}
+		err := fn(ctx, state)
+		assert.NoError(t, err)
+		// Default threshold is 20000, so short result should not be cleared
+		assert.Equal(t, "short result", state.Messages[1].Content)
+	})
+
+	t.Run("empty config uses defaults", func(t *testing.T) {
+		fn := newClearToolResult(ctx, &ClearToolResultConfig{})
+		assert.NotNil(t, fn)
+
+		state := &adk.ChatModelAgentState{
+			Messages: []adk.Message{
+				schema.UserMessage("hello"),
+				schema.ToolMessage("short result", "call-1", schema.WithToolName("tool1")),
+			},
+		}
+		err := fn(ctx, state)
+		assert.NoError(t, err)
+		assert.Equal(t, "short result", state.Messages[1].Content)
+	})
 }

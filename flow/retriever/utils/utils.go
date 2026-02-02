@@ -14,6 +14,8 @@
  * limitations under the License.
  */
 
+// Package utils provides helper utilities for retriever flows, including
+// concurrent retrieval with callback instrumentation.
 package utils
 
 import (
@@ -28,6 +30,7 @@ import (
 )
 
 // RetrieveTask is a task for retrieving documents.
+// RetrieveTask represents a single retrieval job with its result or error.
 type RetrieveTask struct {
 	Name            string
 	Retriever       retriever.Retriever

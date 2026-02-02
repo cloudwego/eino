@@ -14,6 +14,7 @@
  * limitations under the License.
  */
 
+// Package react provides helpers to build callback handlers for React agents.
 package react
 
 import (

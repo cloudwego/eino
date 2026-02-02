@@ -28,24 +28,38 @@ import (
 	"github.com/cloudwego/eino/schema"
 )
 
+// runSession CheckpointSchema: persisted via serialization.RunCtx (gob).
 type runSession struct {
-	Events     []*agentEventWrapper
-	Values     map[string]any
-	LaneEvents *laneEvents
+	Values    map[string]any
+	valuesMtx *sync.Mutex
 
-	mtx sync.Mutex
+	Events     []*agentEventWrapper
+	LaneEvents *laneEvents
+	mtx        sync.Mutex
 }
 
+// laneEvents CheckpointSchema: persisted via serialization.RunCtx (gob).
 type laneEvents struct {
 	Events []*agentEventWrapper
 	Parent *laneEvents
 }
 
+// agentEventWrapper CheckpointSchema: persisted via serialization.RunCtx (gob).
 type agentEventWrapper struct {
 	*AgentEvent
 	mu                  sync.Mutex
 	concatenatedMessage Message
-	ts                  int64
+	// TS is the timestamp (in nanoseconds) when this event was created.
+	// It is primarily used by the laneEvents mechanism to order events
+	// from different agents in a multi-agent flow.
+	TS int64
+	// StreamErr stores the error message if the MessageStream contained an error.
+	// This field guards against multiple calls to getMessageFromWrappedEvent
+	// when the stream has already been consumed and errored.
+	// Normally when StreamErr happens, the Agent will return with the error,
+	// unless retry is configured for the agent generating this stream, in which case
+	// this StreamErr will be of type WillRetryError (indicating retry is pending).
+	StreamErr error
 }
 
 type otherAgentEventWrapperForEncode agentEventWrapper
@@ -69,10 +83,12 @@ func (a *agentEventWrapper) GobDecode(b []byte) error {
 
 func newRunSession() *runSession {
 	return &runSession{
-		Values: make(map[string]any),
+		Values:    make(map[string]any),
+		valuesMtx: &sync.Mutex{},
 	}
 }
 
+// GetSessionValues returns all session key-value pairs for the current run.
 func GetSessionValues(ctx context.Context) map[string]any {
 	session := getSession(ctx)
 	if session == nil {
@@ -82,6 +98,7 @@ func GetSessionValues(ctx context.Context) map[string]any {
 	return session.getValues()
 }
 
+// AddSessionValue sets a single session key-value pair for the current run.
 func AddSessionValue(ctx context.Context, key string, value any) {
 	session := getSession(ctx)
 	if session == nil {
@@ -91,6 +108,7 @@ func AddSessionValue(ctx context.Context, key string, value any) {
 	session.addValue(key, value)
 }
 
+// AddSessionValues sets multiple session key-value pairs for the current run.
 func AddSessionValues(ctx context.Context, kvs map[string]any) {
 	session := getSession(ctx)
 	if session == nil {
@@ -100,6 +118,7 @@ func AddSessionValues(ctx context.Context, kvs map[string]any) {
 	session.addValues(kvs)
 }
 
+// GetSessionValue retrieves a session value by key and reports whether it exists.
 func GetSessionValue(ctx context.Context, key string) (any, bool) {
 	session := getSession(ctx)
 	if session == nil {
@@ -110,7 +129,7 @@ func GetSessionValue(ctx context.Context, key string) (any, bool) {
 }
 
 func (rs *runSession) addEvent(event *AgentEvent) {
-	wrapper := &agentEventWrapper{AgentEvent: event, ts: time.Now().UnixNano()}
+	wrapper := &agentEventWrapper{AgentEvent: event, TS: time.Now().UnixNano()}
 	// If LaneEvents is not nil, we are in a parallel lane.
 	// Append to the lane's local event slice (lock-free).
 	if rs.LaneEvents != nil {
@@ -162,34 +181,34 @@ func (rs *runSession) getEvents() []*agentEventWrapper {
 }
 
 func (rs *runSession) getValues() map[string]any {
-	rs.mtx.Lock()
+	rs.valuesMtx.Lock()
 	values := make(map[string]any, len(rs.Values))
 	for k, v := range rs.Values {
 		values[k] = v
 	}
-	rs.mtx.Unlock()
+	rs.valuesMtx.Unlock()
 
 	return values
 }
 
 func (rs *runSession) addValue(key string, value any) {
-	rs.mtx.Lock()
+	rs.valuesMtx.Lock()
 	rs.Values[key] = value
-	rs.mtx.Unlock()
+	rs.valuesMtx.Unlock()
 }
 
 func (rs *runSession) addValues(kvs map[string]any) {
-	rs.mtx.Lock()
+	rs.valuesMtx.Lock()
 	for k, v := range kvs {
 		rs.Values[k] = v
 	}
-	rs.mtx.Unlock()
+	rs.valuesMtx.Unlock()
 }
 
 func (rs *runSession) getValue(key string) (any, bool) {
-	rs.mtx.Lock()
+	rs.valuesMtx.Lock()
 	value, ok := rs.Values[key]
-	rs.mtx.Unlock()
+	rs.valuesMtx.Unlock()
 
 	return value, ok
 }
@@ -239,7 +258,7 @@ func initRunCtx(ctx context.Context, agentName string, input *AgentInput) (conte
 		runCtx = &runContext{Session: newRunSession()}
 	}
 
-	runCtx.RunPath = append(runCtx.RunPath, RunStep{agentName})
+	runCtx.RunPath = append(runCtx.RunPath, RunStep{agentName: agentName})
 	if runCtx.isRoot() && input != nil {
 		runCtx.RootInput = input
 	}
@@ -263,7 +282,7 @@ func joinRunCtxs(parentCtx context.Context, childCtxs ...context.Context) {
 
 	// 2. Sort the collected events by their creation timestamp for chronological order.
 	sort.Slice(newEvents, func(i, j int) bool {
-		return newEvents[i].ts < newEvents[j].ts
+		return newEvents[i].TS < newEvents[j].TS
 	})
 
 	// 3. Commit the sorted events to the parent.
@@ -312,8 +331,9 @@ func forkRunCtx(ctx context.Context) context.Context {
 	// Create a new session for the child lane by manually copying the parent's session fields.
 	// This is crucial to ensure a new mutex is created and that the LaneEvents pointer is unique.
 	childSession := &runSession{
-		Events: parentRunCtx.Session.Events, // Share the committed history
-		Values: parentRunCtx.Session.Values, // Share the values map
+		Events:    parentRunCtx.Session.Events, // Share the committed history
+		Values:    parentRunCtx.Session.Values, // Share the values map
+		valuesMtx: parentRunCtx.Session.valuesMtx,
 	}
 
 	// Fork the lane events within the new session struct.
@@ -346,7 +366,7 @@ func updateRunPathOnly(ctx context.Context, agentNames ...string) context.Contex
 	}
 
 	for _, agentName := range agentNames {
-		runCtx.RunPath = append(runCtx.RunPath, RunStep{agentName})
+		runCtx.RunPath = append(runCtx.RunPath, RunStep{agentName: agentName})
 	}
 
 	return setRunCtx(ctx, runCtx)
@@ -360,8 +380,20 @@ func ClearRunCtx(ctx context.Context) context.Context {
 	return context.WithValue(ctx, runCtxKey{}, nil)
 }
 
-func ctxWithNewRunCtx(ctx context.Context, input *AgentInput) context.Context {
-	return setRunCtx(ctx, &runContext{Session: newRunSession(), RootInput: input})
+func ctxWithNewRunCtx(ctx context.Context, input *AgentInput, sharedParentSession bool) context.Context {
+	var session *runSession
+	if sharedParentSession {
+		if parentSession := getSession(ctx); parentSession != nil {
+			session = &runSession{
+				Values:    parentSession.Values,
+				valuesMtx: parentSession.valuesMtx,
+			}
+		}
+	}
+	if session == nil {
+		session = newRunSession()
+	}
+	return setRunCtx(ctx, &runContext{Session: session, RootInput: input})
 }
 
 func getSession(ctx context.Context) *runSession {

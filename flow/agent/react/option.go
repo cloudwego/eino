@@ -39,9 +39,9 @@ func WithChatModelOptions(opts ...model.Option) agent.AgentOption {
 	return agent.WithComposeOptions(compose.WithChatModelOption(opts...))
 }
 
-// Deprecated: this option changes tool list for ToolsNode ONLY,
-// if your need to pass new ToolInfo list to chat model as well, use the new WithTools function instead.
-// WithToolList returns an agent option that specifies the list of tools can be called which are BaseTool but must implement InvokableTool or StreamableTool.
+// WithToolList returns an agent option that specifies compose.ToolsNodeOption for ToolsNode in agent.
+// If you also need to pass ToolInfo to the chat model, use WithTools instead.
+// Deprecated: This changes tool list for ToolsNode ONLY.
 func WithToolList(tools ...tool.BaseTool) agent.AgentOption {
 	return agent.WithComposeOptions(compose.WithToolsNodeOption(compose.WithToolList(tools...)))
 }
@@ -106,10 +106,14 @@ func WithTools(ctx context.Context, tools ...tool.BaseTool) ([]agent.AgentOption
 	return opts, nil
 }
 
+// Iterator provides a lightweight FIFO stream of values and errors
+// produced during agent execution.
 type Iterator[T any] struct {
 	ch *internal.UnboundedChan[item[T]]
 }
 
+// Next retrieves the next value from the iterator.
+// It returns the zero value and false when the stream is exhausted.
 func (iter *Iterator[T]) Next() (T, bool, error) {
 	ch := iter.ch
 	if ch == nil {
@@ -126,6 +130,8 @@ func (iter *Iterator[T]) Next() (T, bool, error) {
 	return i.v, true, i.err
 }
 
+// MessageFuture exposes asynchronous accessors for messages produced
+// by Generate and Stream calls.
 type MessageFuture interface {
 	// GetMessages returns an iterator for retrieving messages generated during "agent.Generate" calls.
 	GetMessages() *Iterator[*schema.Message]
@@ -144,17 +150,34 @@ func WithMessageFuture() (agent.AgentOption, MessageFuture) {
 		OnEnd:                 h.onChatModelEnd,
 		OnEndWithStreamOutput: h.onChatModelEndWithStreamOutput,
 	}
-	toolHandler := &ub.ToolCallbackHandler{
-		OnEnd:                 h.onToolEnd,
-		OnEndWithStreamOutput: h.onToolEndWithStreamOutput,
+	createToolResultSender := func() toolResultSender {
+		return func(toolName, callID, result string) {
+			msg := schema.ToolMessage(result, callID, schema.WithToolName(toolName))
+			h.sendMessage(msg)
+		}
+	}
+	createStreamToolResultSender := func() streamToolResultSender {
+		return func(toolName, callID string, resultStream *schema.StreamReader[string]) {
+			cvt := func(in string) (*schema.Message, error) {
+				return schema.ToolMessage(in, callID, schema.WithToolName(toolName)), nil
+			}
+			msgStream := schema.StreamReaderWithConvert(resultStream, cvt)
+			h.sendMessageStream(msgStream)
+		}
 	}
 	graphHandler := callbacks.NewHandlerBuilder().
-		OnStartFn(h.onGraphStart).
-		OnStartWithStreamInputFn(h.onGraphStartWithStreamInput).
+		OnStartFn(func(ctx context.Context, info *callbacks.RunInfo, input callbacks.CallbackInput) context.Context {
+			h.onGraphStart(ctx, info, input)
+			return setToolResultSendersToCtx(ctx, createToolResultSender(), createStreamToolResultSender())
+		}).
+		OnStartWithStreamInputFn(func(ctx context.Context, info *callbacks.RunInfo, input *schema.StreamReader[callbacks.CallbackInput]) context.Context {
+			h.onGraphStartWithStreamInput(ctx, info, input)
+			return setToolResultSendersToCtx(ctx, createToolResultSender(), createStreamToolResultSender())
+		}).
 		OnEndFn(h.onGraphEnd).
 		OnEndWithStreamOutputFn(h.onGraphEndWithStreamOutput).
 		OnErrorFn(h.onGraphError).Build()
-	cb := ub.NewHandlerHelper().ChatModel(cmHandler).Tool(toolHandler).Graph(graphHandler).Handler()
+	cb := ub.NewHandlerHelper().ChatModel(cmHandler).Graph(graphHandler).Handler()
 
 	option := agent.WithComposeOptions(compose.WithCallbacks(cb))
 
@@ -206,39 +229,6 @@ func (h *cbHandler) onChatModelEndWithStreamOutput(ctx context.Context,
 	return ctx
 }
 
-func (h *cbHandler) onToolEnd(ctx context.Context,
-	info *callbacks.RunInfo, input *tool.CallbackOutput) context.Context {
-
-	toolCallID := compose.GetToolCallID(ctx)
-	toolName := ""
-	if info != nil {
-		toolName = info.Name
-	}
-	msg := schema.ToolMessage(input.Response, toolCallID, schema.WithToolName(toolName))
-
-	h.sendMessage(msg)
-
-	return ctx
-}
-
-func (h *cbHandler) onToolEndWithStreamOutput(ctx context.Context,
-	info *callbacks.RunInfo, input *schema.StreamReader[*tool.CallbackOutput]) context.Context {
-
-	toolCallID := compose.GetToolCallID(ctx)
-	toolName := ""
-	if info != nil {
-		toolName = info.Name
-	}
-	c := func(output *tool.CallbackOutput) (*schema.Message, error) {
-		return schema.ToolMessage(output.Response, toolCallID, schema.WithToolName(toolName)), nil
-	}
-	s := schema.StreamReaderWithConvert(input, c)
-
-	h.sendMessageStream(s)
-
-	return ctx
-}
-
 func (h *cbHandler) onGraphError(ctx context.Context,
 	_ *callbacks.RunInfo, err error) context.Context {
 
@@ -278,7 +268,8 @@ func (h *cbHandler) onGraphStart(ctx context.Context,
 }
 
 func (h *cbHandler) onGraphStartWithStreamInput(ctx context.Context, _ *callbacks.RunInfo,
-	_ *schema.StreamReader[callbacks.CallbackInput]) context.Context {
+	input *schema.StreamReader[callbacks.CallbackInput]) context.Context {
+	input.Close()
 
 	h.sMsgs = internal.NewUnboundedChan[item[*schema.StreamReader[*schema.Message]]]()
 

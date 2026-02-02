@@ -48,6 +48,8 @@ func (ag *AsyncGenerator[T]) Close() {
 	ag.ch.Close()
 }
 
+// NewAsyncIteratorPair returns a paired async iterator and generator
+// that share the same underlying channel.
 func NewAsyncIteratorPair[T any]() (*AsyncIterator[T], *AsyncGenerator[T]) {
 	ch := internal.NewUnboundedChan[T]()
 	return &AsyncIterator[T]{ch}, &AsyncGenerator[T]{ch}
@@ -72,6 +74,8 @@ func concatInstructions(instructions ...string) string {
 	return sb.String()
 }
 
+// GenTransferMessages generates assistant and tool messages to instruct a
+// transfer-to-agent tool call targeting the destination agent.
 func GenTransferMessages(_ context.Context, destAgentName string) (Message, Message) {
 	toolCallID := uuid.NewString()
 	tooCall := schema.ToolCall{ID: toolCallID, Function: schema.FunctionCall{Name: TransferToAgentToolName, Arguments: destAgentName}}
@@ -89,6 +93,10 @@ func setAutomaticClose(e *AgentEvent) {
 	e.Output.MessageOutput.MessageStream.SetAutomaticClose()
 }
 
+// getMessageFromWrappedEvent extracts the message from an AgentEvent.
+// If the stream contains an error chunk, this function returns (nil, err) and
+// sets StreamErr to prevent re-consumption. The nil message ensures that
+// failed stream responses are not included in subsequent agents' context windows.
 func getMessageFromWrappedEvent(e *agentEventWrapper) (Message, error) {
 	if e.AgentEvent.Output == nil || e.AgentEvent.Output.MessageOutput == nil {
 		return nil, nil
@@ -100,6 +108,10 @@ func getMessageFromWrappedEvent(e *agentEventWrapper) (Message, error) {
 
 	if e.concatenatedMessage != nil {
 		return e.concatenatedMessage, nil
+	}
+
+	if e.StreamErr != nil {
+		return nil, e.StreamErr
 	}
 
 	e.mu.Lock()
@@ -120,7 +132,12 @@ func getMessageFromWrappedEvent(e *agentEventWrapper) (Message, error) {
 			if err == io.EOF {
 				break
 			}
-
+			e.StreamErr = err
+			// Replace the stream with successfully received messages only (no error at the end).
+			// The error is preserved in StreamErr for users to check.
+			// We intentionally exclude the error from the new stream to ensure gob encoding
+			// compatibility, as the stream may be consumed during serialization.
+			e.AgentEvent.Output.MessageOutput.MessageStream = schema.StreamReaderFromArray(msgs)
 			return nil, err
 		}
 
@@ -137,6 +154,8 @@ func getMessageFromWrappedEvent(e *agentEventWrapper) (Message, error) {
 		var err error
 		e.concatenatedMessage, err = schema.ConcatMessages(msgs)
 		if err != nil {
+			e.StreamErr = err
+			e.AgentEvent.Output.MessageOutput.MessageStream = schema.StreamReaderFromArray(msgs)
 			return nil, err
 		}
 	}
@@ -194,6 +213,8 @@ func copyAgentEvent(ae *AgentEvent) *AgentEvent {
 	return copied
 }
 
+// GetMessage extracts the Message from an AgentEvent. For streaming output,
+// it duplicates the stream and concatenates it into a single Message.
 func GetMessage(e *AgentEvent) (Message, *AgentEvent, error) {
 	if e.Output == nil || e.Output.MessageOutput == nil {
 		return nil, e, nil

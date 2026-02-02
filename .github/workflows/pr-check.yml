@@ -28,16 +28,15 @@ jobs:
         uses: actions/setup-go@v5
         with:
           go-version: 1.18
-          # for self-hosted, the cache path is shared across projects
-          # and it works well without the cache of github actions
-          # Enable it if we're going to use Github only
+          # for self-hosted, the cache path is shared across projects,
+          # and it works well without the cache of GitHub actions
+          # Enable it if we're going to use GitHub only
           cache: true
 
-      - name: Golangci Lint
+      - name: Golang CI Lint
         # https://golangci-lint.run/
-        uses: golangci/golangci-lint-action@v6
+        uses: golangci/golangci-lint-action@v9.2.0
         with:
-          version: latest
           args: --timeout 5m
 
   commit-msg-check:

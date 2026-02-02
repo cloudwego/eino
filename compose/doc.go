@@ -14,4 +14,6 @@
  * limitations under the License.
  */
 
+// Package compose provides graph and workflow primitives to build
+// composable, interruptible execution pipelines with callback support.
 package compose

@@ -41,6 +41,14 @@ import (
 	ub "github.com/cloudwego/eino/utils/callbacks"
 )
 
+const (
+	addrDepthChain      = 1
+	addrDepthReactGraph = 2
+	addrDepthChatModel  = 3
+	addrDepthToolsNode  = 3
+	addrDepthTool       = 4
+)
+
 type chatModelAgentRunOptions struct {
 	// run
 	chatModelOptions []model.Option
@@ -51,24 +59,28 @@ type chatModelAgentRunOptions struct {
 	historyModifier func(context.Context, []Message) []Message
 }
 
+// WithChatModelOptions sets options for the underlying chat model.
 func WithChatModelOptions(opts []model.Option) AgentRunOption {
 	return WrapImplSpecificOptFn(func(t *chatModelAgentRunOptions) {
 		t.chatModelOptions = opts
 	})
 }
 
+// WithToolOptions sets options for tools used by the chat model agent.
 func WithToolOptions(opts []tool.Option) AgentRunOption {
 	return WrapImplSpecificOptFn(func(t *chatModelAgentRunOptions) {
 		t.toolOptions = opts
 	})
 }
 
+// WithAgentToolRunOptions specifies per-tool run options for the agent.
 func WithAgentToolRunOptions(opts map[string] /*tool name*/ []AgentRunOption) AgentRunOption {
 	return WrapImplSpecificOptFn(func(t *chatModelAgentRunOptions) {
 		t.agentToolOptions = opts
 	})
 }
 
+// WithHistoryModifier sets a function to modify history during resume.
 // Deprecated: use ResumeWithData and ChatModelAgentResumeData instead.
 func WithHistoryModifier(f func(context.Context, []Message) []Message) AgentRunOption {
 	return WrapImplSpecificOptFn(func(t *chatModelAgentRunOptions) {
@@ -85,7 +97,17 @@ type ToolsConfig struct {
 	ReturnDirectly map[string]bool
 
 	// EmitInternalEvents indicates whether internal events from agentTool should be emitted
-	// to the parent generator via a tool option injection at run-time.
+	// to the parent agent's AsyncGenerator, allowing real-time streaming of nested agent output
+	// to the end-user via Runner.
+	//
+	// Note that these forwarded events are NOT recorded in the parent agent's runSession.
+	// They are only emitted to the end-user and have no effect on the parent agent's state
+	// or checkpoint.
+	//
+	// Action Scoping:
+	// Actions emitted by the inner agent are scoped to the agent tool boundary:
+	//   - Interrupted: Propagated via CompositeInterrupt to allow proper interrupt/resume
+	//   - Exit, TransferToAgent, BreakLoop: Ignored outside the agent tool
 	EmitInternalEvents bool
 }
 
@@ -103,7 +125,10 @@ func defaultGenModelInput(ctx context.Context, instruction string, input *AgentI
 			ct := prompt.FromMessages(schema.FString, sp)
 			ms, err := ct.Format(ctx, vs)
 			if err != nil {
-				return nil, err
+				return nil, fmt.Errorf("defaultGenModelInput: failed to format instruction using FString template. "+
+					"This formatting is triggered automatically when SessionValues are present. "+
+					"If your instruction contains literal curly braces (e.g., JSON), provide a custom GenModelInput that uses another format. If you are using "+
+					"SessionValues for purposes other than instruction formatting, provide a custom GenModelInput that does no formatting at all: %w", err)
 			}
 
 			sp = ms[0]
@@ -181,6 +206,12 @@ type ChatModelAgentConfig struct {
 
 	// Middlewares configures agent middleware for extending functionality.
 	Middlewares []AgentMiddleware
+
+	// ModelRetryConfig configures retry behavior for the ChatModel.
+	// When set, the agent will automatically retry failed ChatModel calls
+	// based on the configured policy.
+	// Optional. If nil, no retry will be performed.
+	ModelRetryConfig *ModelRetryConfig
 }
 
 type ChatModelAgent struct {
@@ -205,6 +236,8 @@ type ChatModelAgent struct {
 
 	beforeChatModels, afterChatModels []func(context.Context, *ChatModelAgentState) error
 
+	modelRetryConfig *ModelRetryConfig
+
 	// runner
 	once   sync.Once
 	run    runFunc
@@ -213,6 +246,7 @@ type ChatModelAgent struct {
 
 type runFunc func(ctx context.Context, input *AgentInput, generator *AsyncGenerator[*AgentEvent], store *bridgeStore, opts ...compose.Option)
 
+// NewChatModelAgent constructs a chat model-backed agent with the provided config.
 func NewChatModelAgent(_ context.Context, config *ChatModelAgentConfig) (*ChatModelAgent, error) {
 	if config.Name == "" {
 		return nil, errors.New("agent 'Name' is required")
@@ -262,6 +296,7 @@ func NewChatModelAgent(_ context.Context, config *ChatModelAgentConfig) (*ChatMo
 		maxIterations:    config.MaxIterations,
 		beforeChatModels: beforeChatModels,
 		afterChatModels:  afterChatModels,
+		modelRetryConfig: config.ModelRetryConfig,
 	}, nil
 }
 
@@ -405,12 +440,14 @@ type cbHandler struct {
 	returnDirectlyToolEvent atomic.Value
 	ctx                     context.Context
 	addr                    Address
+
+	modelRetryConfigs *ModelRetryConfig
 }
 
 func (h *cbHandler) onChatModelEnd(ctx context.Context,
 	_ *callbacks.RunInfo, output *model.CallbackOutput) context.Context {
 	addr := core.GetCurrentAddress(ctx)
-	if len(addr) != len(h.addr)+3 || !addr[:len(h.addr)].Equals(h.addr) {
+	if !isAddressAtDepth(addr, h.addr, addrDepthChatModel) {
 		return ctx
 	}
 
@@ -422,68 +459,25 @@ func (h *cbHandler) onChatModelEnd(ctx context.Context,
 func (h *cbHandler) onChatModelEndWithStreamOutput(ctx context.Context,
 	_ *callbacks.RunInfo, output *schema.StreamReader[*model.CallbackOutput]) context.Context {
 	addr := core.GetCurrentAddress(ctx)
-	if len(addr) != len(h.addr)+3 || !addr[:len(h.addr)].Equals(h.addr) {
+	if !isAddressAtDepth(addr, h.addr, addrDepthChatModel) {
 		return ctx
+	}
+
+	var convertOpts []schema.ConvertOption
+	if h.modelRetryConfigs != nil {
+		retryInfo, exists := getStreamRetryInfo(ctx)
+		if !exists {
+			retryInfo = &streamRetryInfo{attempt: 0}
+		}
+		convertOpts = append(convertOpts, schema.WithErrWrapper(genErrWrapper(ctx, *h.modelRetryConfigs, *retryInfo)))
 	}
 
 	cvt := func(in *model.CallbackOutput) (Message, error) {
 		return in.Message, nil
 	}
-	out := schema.StreamReaderWithConvert(output, cvt)
+	out := schema.StreamReaderWithConvert(output, cvt, convertOpts...)
 	event := EventFromMessage(nil, out, schema.Assistant, "")
 	h.Send(event)
-
-	return ctx
-}
-
-func (h *cbHandler) onToolEnd(ctx context.Context,
-	runInfo *callbacks.RunInfo, output *tool.CallbackOutput) context.Context {
-	addr := core.GetCurrentAddress(ctx)
-	if len(addr) != len(h.addr)+4 || !addr[:len(h.addr)].Equals(h.addr) {
-		return ctx
-	}
-
-	toolCallID := compose.GetToolCallID(ctx)
-	msg := schema.ToolMessage(output.Response, toolCallID, schema.WithToolName(runInfo.Name))
-	event := EventFromMessage(msg, nil, schema.Tool, runInfo.Name)
-
-	action := popToolGenAction(ctx, runInfo.Name)
-	event.Action = action
-
-	returnDirectlyID, hasReturnDirectly := getReturnDirectlyToolCallID(ctx)
-	if hasReturnDirectly && returnDirectlyID == toolCallID {
-		// return-directly tool event will be sent on the end of tools node to ensure this event must be the last tool event.
-		h.returnDirectlyToolEvent.Store(event)
-	} else {
-		h.Send(event)
-	}
-	return ctx
-}
-
-func (h *cbHandler) onToolEndWithStreamOutput(ctx context.Context,
-	runInfo *callbacks.RunInfo, output *schema.StreamReader[*tool.CallbackOutput]) context.Context {
-	addr := core.GetCurrentAddress(ctx)
-	if len(addr) != len(h.addr)+4 || !addr[:len(h.addr)].Equals(h.addr) {
-		return ctx
-	}
-
-	toolCallID := compose.GetToolCallID(ctx)
-	cvt := func(in *tool.CallbackOutput) (Message, error) {
-		return schema.ToolMessage(in.Response, toolCallID, schema.WithToolName(runInfo.Name)), nil
-	}
-	out := schema.StreamReaderWithConvert(output, cvt)
-	event := EventFromMessage(nil, out, schema.Tool, runInfo.Name)
-
-	action := popToolGenAction(ctx, runInfo.Name)
-	event.Action = action
-
-	returnDirectlyID, hasReturnDirectly := getReturnDirectlyToolCallID(ctx)
-	if hasReturnDirectly && returnDirectlyID == toolCallID {
-		// return-directly tool event will be sent on the end of tools node to ensure this event must be the last tool event.
-		h.returnDirectlyToolEvent.Store(event)
-	} else {
-		h.Send(event)
-	}
 
 	return ctx
 }
@@ -496,7 +490,7 @@ func (h *cbHandler) sendReturnDirectlyToolEvent() {
 
 func (h *cbHandler) onToolsNodeEnd(ctx context.Context, _ *callbacks.RunInfo, _ []*schema.Message) context.Context {
 	addr := core.GetCurrentAddress(ctx)
-	if len(addr) != len(h.addr)+3 || !addr[:len(h.addr)].Equals(h.addr) {
+	if !isAddressAtDepth(addr, h.addr, addrDepthToolsNode) {
 		return ctx
 	}
 	h.sendReturnDirectlyToolEvent()
@@ -505,7 +499,7 @@ func (h *cbHandler) onToolsNodeEnd(ctx context.Context, _ *callbacks.RunInfo, _ 
 
 func (h *cbHandler) onToolsNodeEndWithStreamOutput(ctx context.Context, _ *callbacks.RunInfo, _ *schema.StreamReader[[]*schema.Message]) context.Context {
 	addr := core.GetCurrentAddress(ctx)
-	if len(addr) != len(h.addr)+3 || !addr[:len(h.addr)].Equals(h.addr) {
+	if !isAddressAtDepth(addr, h.addr, addrDepthToolsNode) {
 		return ctx
 	}
 	h.sendReturnDirectlyToolEvent()
@@ -524,7 +518,7 @@ func init() {
 func (h *cbHandler) onGraphError(ctx context.Context,
 	_ *callbacks.RunInfo, err error) context.Context {
 	addr := core.GetCurrentAddress(ctx)
-	if len(addr) != len(h.addr)+1 || !addr[:len(h.addr)].Equals(h.addr) {
+	if !isAddressAtDepth(addr, h.addr, addrDepthChain) {
 		return ctx
 	}
 
@@ -560,28 +554,135 @@ func (h *cbHandler) onGraphError(ctx context.Context,
 func genReactCallbacks(ctx context.Context, agentName string,
 	generator *AsyncGenerator[*AgentEvent],
 	enableStreaming bool,
-	store *bridgeStore) compose.Option {
+	store *bridgeStore,
+	modelRetryConfigs *ModelRetryConfig) compose.Option {
 
 	h := &cbHandler{
-		ctx:            ctx,
-		addr:           core.GetCurrentAddress(ctx),
-		AsyncGenerator: generator, agentName: agentName, store: store, enableStreaming: enableStreaming}
+		ctx:               ctx,
+		addr:              core.GetCurrentAddress(ctx),
+		AsyncGenerator:    generator,
+		agentName:         agentName,
+		store:             store,
+		enableStreaming:   enableStreaming,
+		modelRetryConfigs: modelRetryConfigs}
 
 	cmHandler := &ub.ModelCallbackHandler{
 		OnEnd:                 h.onChatModelEnd,
 		OnEndWithStreamOutput: h.onChatModelEndWithStreamOutput,
 	}
-	toolHandler := &ub.ToolCallbackHandler{
-		OnEnd:                 h.onToolEnd,
-		OnEndWithStreamOutput: h.onToolEndWithStreamOutput,
-	}
 	toolsNodeHandler := &ub.ToolsNodeCallbackHandlers{
 		OnEnd:                 h.onToolsNodeEnd,
 		OnEndWithStreamOutput: h.onToolsNodeEndWithStreamOutput,
 	}
+	createToolResultSender := func() adkToolResultSender {
+		return func(toolCtx context.Context, toolName, callID, result string, prePopAction *AgentAction) {
+			msg := schema.ToolMessage(result, callID, schema.WithToolName(toolName))
+			event := EventFromMessage(msg, nil, schema.Tool, toolName)
+
+			if prePopAction != nil {
+				event.Action = prePopAction
+			} else {
+				event.Action = popToolGenAction(toolCtx, toolName)
+			}
+
+			returnDirectlyID, hasReturnDirectly := getReturnDirectlyToolCallID(toolCtx)
+			if hasReturnDirectly && returnDirectlyID == callID {
+				h.returnDirectlyToolEvent.Store(event)
+			} else {
+				h.Send(event)
+			}
+		}
+	}
+	createStreamToolResultSender := func() adkStreamToolResultSender {
+		return func(toolCtx context.Context, toolName, callID string, resultStream *schema.StreamReader[string], prePopAction *AgentAction) {
+			cvt := func(in string) (Message, error) {
+				return schema.ToolMessage(in, callID, schema.WithToolName(toolName)), nil
+			}
+			msgStream := schema.StreamReaderWithConvert(resultStream, cvt)
+			event := EventFromMessage(nil, msgStream, schema.Tool, toolName)
+			event.Action = prePopAction
+
+			returnDirectlyID, hasReturnDirectly := getReturnDirectlyToolCallID(toolCtx)
+			if hasReturnDirectly && returnDirectlyID == callID {
+				h.returnDirectlyToolEvent.Store(event)
+			} else {
+				h.Send(event)
+			}
+		}
+	}
+	reactGraphHandler := callbacks.NewHandlerBuilder().
+		OnStartFn(func(ctx context.Context, info *callbacks.RunInfo, input callbacks.CallbackInput) context.Context {
+			currentAddr := core.GetCurrentAddress(ctx)
+			if !isAddressAtDepth(currentAddr, h.addr, addrDepthReactGraph) {
+				return ctx
+			}
+			return setToolResultSendersToCtx(ctx, h.addr, createToolResultSender(), createStreamToolResultSender())
+		}).
+		OnStartWithStreamInputFn(func(ctx context.Context, info *callbacks.RunInfo, input *schema.StreamReader[callbacks.CallbackInput]) context.Context {
+			currentAddr := core.GetCurrentAddress(ctx)
+			if !isAddressAtDepth(currentAddr, h.addr, addrDepthReactGraph) {
+				return ctx
+			}
+			return setToolResultSendersToCtx(ctx, h.addr, createToolResultSender(), createStreamToolResultSender())
+		}).Build()
+	chainHandler := callbacks.NewHandlerBuilder().OnErrorFn(h.onGraphError).Build()
+
+	cb := ub.NewHandlerHelper().ChatModel(cmHandler).ToolsNode(toolsNodeHandler).Graph(reactGraphHandler).Chain(chainHandler).Handler()
+
+	return compose.WithCallbacks(cb)
+}
+
+type noToolsCbHandler struct {
+	*AsyncGenerator[*AgentEvent]
+	modelRetryConfigs *ModelRetryConfig
+}
+
+func (h *noToolsCbHandler) onChatModelEnd(ctx context.Context,
+	_ *callbacks.RunInfo, output *model.CallbackOutput) context.Context {
+	event := EventFromMessage(output.Message, nil, schema.Assistant, "")
+	h.Send(event)
+	return ctx
+}
+
+func (h *noToolsCbHandler) onChatModelEndWithStreamOutput(ctx context.Context,
+	_ *callbacks.RunInfo, output *schema.StreamReader[*model.CallbackOutput]) context.Context {
+	var convertOpts []schema.ConvertOption
+	if h.modelRetryConfigs != nil {
+		retryInfo, exists := getStreamRetryInfo(ctx)
+		if !exists {
+			retryInfo = &streamRetryInfo{attempt: 0}
+		}
+		convertOpts = append(convertOpts, schema.WithErrWrapper(genErrWrapper(ctx, *h.modelRetryConfigs, *retryInfo)))
+	}
+
+	cvt := func(in *model.CallbackOutput) (Message, error) {
+		return in.Message, nil
+	}
+	out := schema.StreamReaderWithConvert(output, cvt, convertOpts...)
+	event := EventFromMessage(nil, out, schema.Assistant, "")
+	h.Send(event)
+	return ctx
+}
+
+func (h *noToolsCbHandler) onGraphError(ctx context.Context,
+	_ *callbacks.RunInfo, err error) context.Context {
+	h.Send(&AgentEvent{Err: err})
+	return ctx
+}
+
+func genNoToolsCallbacks(generator *AsyncGenerator[*AgentEvent], modelRetryConfigs *ModelRetryConfig) compose.Option {
+	h := &noToolsCbHandler{
+		AsyncGenerator:    generator,
+		modelRetryConfigs: modelRetryConfigs,
+	}
+
+	cmHandler := &ub.ModelCallbackHandler{
+		OnEnd:                 h.onChatModelEnd,
+		OnEndWithStreamOutput: h.onChatModelEndWithStreamOutput,
+	}
 	graphHandler := callbacks.NewHandlerBuilder().OnErrorFn(h.onGraphError).Build()
 
-	cb := ub.NewHandlerHelper().ChatModel(cmHandler).Tool(toolHandler).ToolsNode(toolsNodeHandler).Chain(graphHandler).Handler()
+	cb := ub.NewHandlerHelper().ChatModel(cmHandler).Chain(graphHandler).Handler()
 
 	return compose.WithCallbacks(cb)
 }
@@ -645,13 +746,46 @@ func (a *ChatModelAgent) buildRunFunc(ctx context.Context) runFunc {
 		}
 
 		if len(toolsNodeConf.Tools) == 0 {
+			var chatModel model.ToolCallingChatModel = a.model
+			if a.modelRetryConfig != nil {
+				chatModel = newRetryChatModel(a.model, a.modelRetryConfig)
+			}
+
 			a.run = func(ctx context.Context, input *AgentInput, generator *AsyncGenerator[*AgentEvent],
 				store *bridgeStore, opts ...compose.Option) {
-				r, err := compose.NewChain[*AgentInput, Message]().
+				r, err := compose.NewChain[*AgentInput, Message](compose.WithGenLocalState(func(ctx context.Context) (state *ChatModelAgentState) {
+					return &ChatModelAgentState{}
+				})).
 					AppendLambda(compose.InvokableLambda(func(ctx context.Context, input *AgentInput) ([]Message, error) {
-						return a.genModelInput(ctx, instruction, input)
+						messages, err := a.genModelInput(ctx, instruction, input)
+						if err != nil {
+							return nil, err
+						}
+						return messages, nil
 					})).
-					AppendChatModel(a.model).
+					AppendChatModel(
+						chatModel,
+						compose.WithStatePreHandler(func(ctx context.Context, in []*schema.Message, state *ChatModelAgentState) ([]*schema.Message, error) {
+							state.Messages = in
+							for _, bc := range a.beforeChatModels {
+								err := bc(ctx, state)
+								if err != nil {
+									return nil, err
+								}
+							}
+							return state.Messages, nil
+						}),
+						compose.WithStatePostHandler(func(ctx context.Context, in *schema.Message, state *ChatModelAgentState) (*schema.Message, error) {
+							state.Messages = append(state.Messages, in)
+							for _, ac := range a.afterChatModels {
+								err := ac(ctx, state)
+								if err != nil {
+									return nil, err
+								}
+							}
+							return state.Messages[len(state.Messages)-1], nil
+						}),
+					).
 					Compile(ctx, compose.WithGraphName(a.name),
 						compose.WithCheckPointStore(store),
 						compose.WithSerializer(&gobSerializer{}))
@@ -660,38 +794,28 @@ func (a *ChatModelAgent) buildRunFunc(ctx context.Context) runFunc {
 					return
 				}
 
+				callOpt := genNoToolsCallbacks(generator, a.modelRetryConfig)
+				var runOpts []compose.Option
+				runOpts = append(runOpts, opts...)
+				runOpts = append(runOpts, callOpt)
+
 				var msg Message
 				var msgStream MessageStream
 				if input.EnableStreaming {
-					msgStream, err = r.Stream(ctx, input, opts...)
+					msgStream, err = r.Stream(ctx, input, runOpts...)
 				} else {
-					msg, err = r.Invoke(ctx, input, opts...)
+					msg, err = r.Invoke(ctx, input, runOpts...)
 				}
 
-				var event *AgentEvent
 				if err == nil {
 					if a.outputKey != "" {
-						if msgStream != nil {
-							// copy the stream first because when setting output to session, the stream will be consumed
-							ss := msgStream.Copy(2)
-							event = EventFromMessage(msg, ss[1], schema.Assistant, "")
-							msgStream = ss[0]
-						} else {
-							event = EventFromMessage(msg, nil, schema.Assistant, "")
-						}
-						// send event asap, because setting output to session will block until stream fully consumed
-						generator.Send(event)
 						err = setOutputToSession(ctx, msg, msgStream, a.outputKey)
 						if err != nil {
 							generator.Send(&AgentEvent{Err: err})
 						}
-					} else {
-						event = EventFromMessage(msg, msgStream, schema.Assistant, "")
-						generator.Send(event)
+					} else if msgStream != nil {
+						msgStream.Close()
 					}
-				} else {
-					event = &AgentEvent{Err: err}
-					generator.Send(event)
 				}
 
 				generator.Close()
@@ -709,6 +833,7 @@ func (a *ChatModelAgent) buildRunFunc(ctx context.Context) runFunc {
 			maxIterations:       a.maxIterations,
 			beforeChatModel:     a.beforeChatModels,
 			afterChatModel:      a.afterChatModels,
+			modelRetryConfig:    a.modelRetryConfig,
 		}
 
 		g, err := newReact(ctx, conf)
@@ -740,12 +865,15 @@ func (a *ChatModelAgent) buildRunFunc(ctx context.Context) runFunc {
 				return
 			}
 
-			callOpt := genReactCallbacks(ctx, a.name, generator, input.EnableStreaming, store)
+			callOpt := genReactCallbacks(ctx, a.name, generator, input.EnableStreaming, store, a.modelRetryConfig)
 			var runOpts []compose.Option
 			runOpts = append(runOpts, opts...)
 			runOpts = append(runOpts, callOpt)
 			if a.toolsConfig.EmitInternalEvents {
 				runOpts = append(runOpts, compose.WithToolsNodeOption(compose.WithToolOption(withAgentToolEventGenerator(generator))))
+			}
+			if input.EnableStreaming {
+				runOpts = append(runOpts, compose.WithToolsNodeOption(compose.WithToolOption(withAgentToolEnableStreaming(true))))
 			}
 
 			var msg Message

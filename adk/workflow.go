@@ -144,6 +144,7 @@ func (a *workflowAgent) Resume(ctx context.Context, info *ResumeInfo, opts ...Ag
 	return iterator
 }
 
+// WorkflowInterruptInfo CheckpointSchema: persisted via InterruptInfo.Data (gob).
 type WorkflowInterruptInfo struct {
 	OrigInput *AgentInput
 
@@ -579,14 +580,17 @@ func newWorkflowAgent(ctx context.Context, name, desc string,
 	return fa, nil
 }
 
-func NewSequentialAgent(ctx context.Context, config *SequentialAgentConfig) (Agent, error) {
+// NewSequentialAgent creates an agent that runs sub-agents sequentially.
+func NewSequentialAgent(ctx context.Context, config *SequentialAgentConfig) (ResumableAgent, error) {
 	return newWorkflowAgent(ctx, config.Name, config.Description, config.SubAgents, workflowAgentModeSequential, 0)
 }
 
-func NewParallelAgent(ctx context.Context, config *ParallelAgentConfig) (Agent, error) {
+// NewParallelAgent creates an agent that runs sub-agents in parallel.
+func NewParallelAgent(ctx context.Context, config *ParallelAgentConfig) (ResumableAgent, error) {
 	return newWorkflowAgent(ctx, config.Name, config.Description, config.SubAgents, workflowAgentModeParallel, 0)
 }
 
-func NewLoopAgent(ctx context.Context, config *LoopAgentConfig) (Agent, error) {
+// NewLoopAgent creates an agent that loops over sub-agents with a max iteration limit.
+func NewLoopAgent(ctx context.Context, config *LoopAgentConfig) (ResumableAgent, error) {
 	return newWorkflowAgent(ctx, config.Name, config.Description, config.SubAgents, workflowAgentModeLoop, config.MaxIterations)
 }

@@ -78,55 +78,66 @@ func NewWorkflow[I, O any](opts ...NewGraphOption) *Workflow[I, O] {
 	return wf
 }
 
+// Compile builds the workflow into a runnable graph.
 func (wf *Workflow[I, O]) Compile(ctx context.Context, opts ...GraphCompileOption) (Runnable[I, O], error) {
 	return compileAnyGraph[I, O](ctx, wf, opts...)
 }
 
+// AddChatModelNode adds a chat model node and returns it.
 func (wf *Workflow[I, O]) AddChatModelNode(key string, chatModel model.BaseChatModel, opts ...GraphAddNodeOpt) *WorkflowNode {
 	_ = wf.g.AddChatModelNode(key, chatModel, opts...)
 	return wf.initNode(key)
 }
 
+// AddChatTemplateNode adds a chat template node and returns it.
 func (wf *Workflow[I, O]) AddChatTemplateNode(key string, chatTemplate prompt.ChatTemplate, opts ...GraphAddNodeOpt) *WorkflowNode {
 	_ = wf.g.AddChatTemplateNode(key, chatTemplate, opts...)
 	return wf.initNode(key)
 }
 
+// AddToolsNode adds a tools node and returns it.
 func (wf *Workflow[I, O]) AddToolsNode(key string, tools *ToolsNode, opts ...GraphAddNodeOpt) *WorkflowNode {
 	_ = wf.g.AddToolsNode(key, tools, opts...)
 	return wf.initNode(key)
 }
 
+// AddRetrieverNode adds a retriever node and returns it.
 func (wf *Workflow[I, O]) AddRetrieverNode(key string, retriever retriever.Retriever, opts ...GraphAddNodeOpt) *WorkflowNode {
 	_ = wf.g.AddRetrieverNode(key, retriever, opts...)
 	return wf.initNode(key)
 }
 
+// AddEmbeddingNode adds an embedding node and returns it.
 func (wf *Workflow[I, O]) AddEmbeddingNode(key string, embedding embedding.Embedder, opts ...GraphAddNodeOpt) *WorkflowNode {
 	_ = wf.g.AddEmbeddingNode(key, embedding, opts...)
 	return wf.initNode(key)
 }
 
+// AddIndexerNode adds an indexer node to the workflow and returns it.
 func (wf *Workflow[I, O]) AddIndexerNode(key string, indexer indexer.Indexer, opts ...GraphAddNodeOpt) *WorkflowNode {
 	_ = wf.g.AddIndexerNode(key, indexer, opts...)
 	return wf.initNode(key)
 }
 
+// AddLoaderNode adds a document loader node to the workflow and returns it.
 func (wf *Workflow[I, O]) AddLoaderNode(key string, loader document.Loader, opts ...GraphAddNodeOpt) *WorkflowNode {
 	_ = wf.g.AddLoaderNode(key, loader, opts...)
 	return wf.initNode(key)
 }
 
+// AddDocumentTransformerNode adds a document transformer node and returns it.
 func (wf *Workflow[I, O]) AddDocumentTransformerNode(key string, transformer document.Transformer, opts ...GraphAddNodeOpt) *WorkflowNode {
 	_ = wf.g.AddDocumentTransformerNode(key, transformer, opts...)
 	return wf.initNode(key)
 }
 
+// AddGraphNode adds a nested graph node to the workflow and returns it.
 func (wf *Workflow[I, O]) AddGraphNode(key string, graph AnyGraph, opts ...GraphAddNodeOpt) *WorkflowNode {
 	_ = wf.g.AddGraphNode(key, graph, opts...)
 	return wf.initNode(key)
 }
 
+// AddLambdaNode adds a lambda node to the workflow and returns it.
 func (wf *Workflow[I, O]) AddLambdaNode(key string, lambda *Lambda, opts ...GraphAddNodeOpt) *WorkflowNode {
 	_ = wf.g.AddLambdaNode(key, lambda, opts...)
 	return wf.initNode(key)
@@ -140,6 +151,7 @@ func (wf *Workflow[I, O]) End() *WorkflowNode {
 	return wf.initNode(END)
 }
 
+// AddPassthroughNode adds a passthrough node to the workflow and returns it.
 func (wf *Workflow[I, O]) AddPassthroughNode(key string, opts ...GraphAddNodeOpt) *WorkflowNode {
 	_ = wf.g.AddPassthroughNode(key, opts...)
 	return wf.initNode(key)
@@ -179,6 +191,7 @@ type workflowAddInputOpts struct {
 	dependencyWithoutInput bool
 }
 
+// WorkflowAddInputOpt configures behavior of AddInputWithOptions.
 type WorkflowAddInputOpt func(*workflowAddInputOpts)
 
 func getAddInputOpts(opts []WorkflowAddInputOpt) *workflowAddInputOpts {
@@ -372,6 +385,8 @@ func (n *WorkflowNode) checkAndAddMappedPath(paths []FieldPath) error {
 	return nil
 }
 
+// WorkflowBranch represents a branch added to a workflow.
+// Each branch may define its own end nodes and mappings.
 type WorkflowBranch struct {
 	fromNodeKey string
 	*GraphBranch
@@ -394,6 +409,7 @@ func (wf *Workflow[I, O]) AddBranch(fromNodeKey string, branch *GraphBranch) *Wo
 	return wb
 }
 
+// AddEnd connects a node to END with optional field mappings.
 // Deprecated: use *Workflow[I,O].End() to obtain a WorkflowNode instance for END, then work with it just like a normal WorkflowNode.
 func (wf *Workflow[I, O]) AddEnd(fromNodeKey string, inputs ...*FieldMapping) *Workflow[I, O] {
 	for _, input := range inputs {

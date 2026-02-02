@@ -58,15 +58,25 @@ type InterruptInfo struct {
 // but does not need to save any internal state to be restored upon resumption.
 // The `info` parameter is user-facing data that describes the reason for the interrupt.
 func Interrupt(ctx context.Context, info any) *AgentEvent {
+	var rp []RunStep
+	rCtx := getRunCtx(ctx)
+	if rCtx != nil {
+		rp = rCtx.RunPath
+	}
+
 	is, err := core.Interrupt(ctx, info, nil, nil,
-		core.WithLayerPayload(getRunCtx(ctx).RunPath))
+		core.WithLayerPayload(rp))
 	if err != nil {
 		return &AgentEvent{Err: err}
 	}
 
+	contexts := core.ToInterruptContexts(is, allowedAddressSegmentTypes)
+
 	return &AgentEvent{
 		Action: &AgentAction{
-			Interrupted:         &InterruptInfo{},
+			Interrupted: &InterruptInfo{
+				InterruptContexts: contexts,
+			},
 			internalInterrupted: is,
 		},
 	}
@@ -77,15 +87,25 @@ func Interrupt(ctx context.Context, info any) *AgentEvent {
 // The `info` parameter is user-facing data describing the interrupt.
 // The `state` parameter is the agent's internal state object, which will be serialized and stored.
 func StatefulInterrupt(ctx context.Context, info any, state any) *AgentEvent {
+	var rp []RunStep
+	rCtx := getRunCtx(ctx)
+	if rCtx != nil {
+		rp = rCtx.RunPath
+	}
+
 	is, err := core.Interrupt(ctx, info, state, nil,
-		core.WithLayerPayload(getRunCtx(ctx).RunPath))
+		core.WithLayerPayload(rp))
 	if err != nil {
 		return &AgentEvent{Err: err}
 	}
 
+	contexts := core.ToInterruptContexts(is, allowedAddressSegmentTypes)
+
 	return &AgentEvent{
 		Action: &AgentAction{
-			Interrupted:         &InterruptInfo{},
+			Interrupted: &InterruptInfo{
+				InterruptContexts: contexts,
+			},
 			internalInterrupted: is,
 		},
 	}
@@ -99,15 +119,25 @@ func StatefulInterrupt(ctx context.Context, info any, state any) *AgentEvent {
 // The `subInterruptSignals` is a variadic list of the InterruptSignal objects from the interrupted sub-agents.
 func CompositeInterrupt(ctx context.Context, info any, state any,
 	subInterruptSignals ...*InterruptSignal) *AgentEvent {
+	var rp []RunStep
+	rCtx := getRunCtx(ctx)
+	if rCtx != nil {
+		rp = rCtx.RunPath
+	}
+
 	is, err := core.Interrupt(ctx, info, state, subInterruptSignals,
-		core.WithLayerPayload(getRunCtx(ctx).RunPath))
+		core.WithLayerPayload(rp))
 	if err != nil {
 		return &AgentEvent{Err: err}
 	}
 
+	contexts := core.ToInterruptContexts(is, allowedAddressSegmentTypes)
+
 	return &AgentEvent{
 		Action: &AgentAction{
-			Interrupted:         &InterruptInfo{},
+			Interrupted: &InterruptInfo{
+				InterruptContexts: contexts,
+			},
 			internalInterrupted: is,
 		},
 	}
@@ -125,18 +155,11 @@ const (
 	AddressSegmentTool  AddressSegmentType = "tool"
 )
 
+var allowedAddressSegmentTypes = []AddressSegmentType{AddressSegmentAgent, AddressSegmentTool}
+
+// AppendAddressSegment adds an address segment for the current execution context.
 func AppendAddressSegment(ctx context.Context, segType AddressSegmentType, segID string) context.Context {
 	return core.AppendAddressSegment(ctx, segType, segID, "")
-}
-
-func encapsulateAddress(addr Address) Address {
-	newAddr := make(Address, 0, len(addr))
-	for _, seg := range addr {
-		if seg.Type == AddressSegmentAgent || seg.Type == AddressSegmentTool {
-			newAddr = append(newAddr, seg)
-		}
-	}
-	return newAddr
 }
 
 // InterruptCtx provides a structured, user-facing view of a single point of interruption.
@@ -145,10 +168,12 @@ func encapsulateAddress(addr Address) Address {
 type InterruptCtx = core.InterruptCtx
 type InterruptSignal = core.InterruptSignal
 
+// FromInterruptContexts converts user-facing interrupt contexts to an interrupt signal.
 func FromInterruptContexts(contexts []*InterruptCtx) *InterruptSignal {
 	return core.FromInterruptContexts(contexts)
 }
 
+// WithCheckPointID sets the checkpoint ID used for interruption persistence.
 func WithCheckPointID(id string) AgentRunOption {
 	return WrapImplSpecificOptFn(func(t *options) {
 		t.checkPointID = &id
@@ -161,6 +186,8 @@ func init() {
 	schema.RegisterName[*State]("_eino_adk_react_state")
 }
 
+// serialization CheckpointSchema: root checkpoint payload (gob).
+// Any type tagged with `CheckpointSchema:` is persisted and must remain backward compatible.
 type serialization struct {
 	RunCtx *runContext
 	// deprecated: still keep it here for backward compatibility
@@ -171,24 +198,23 @@ type serialization struct {
 }
 
 func (r *Runner) loadCheckPoint(ctx context.Context, checkpointID string) (
-	context.Context, *ResumeInfo, error) {
+	context.Context, *runContext, *ResumeInfo, error) {
 	data, existed, err := r.store.Get(ctx, checkpointID)
 	if err != nil {
-		return nil, nil, fmt.Errorf("failed to get checkpoint from store: %w", err)
+		return nil, nil, nil, fmt.Errorf("failed to get checkpoint from store: %w", err)
 	}
 	if !existed {
-		return nil, nil, fmt.Errorf("checkpoint[%s] not exist", checkpointID)
+		return nil, nil, nil, fmt.Errorf("checkpoint[%s] not exist", checkpointID)
 	}
 
 	s := &serialization{}
 	err = gob.NewDecoder(bytes.NewReader(data)).Decode(s)
 	if err != nil {
-		return nil, nil, fmt.Errorf("failed to decode checkpoint: %w", err)
+		return nil, nil, nil, fmt.Errorf("failed to decode checkpoint: %w", err)
 	}
 	ctx = core.PopulateInterruptState(ctx, s.InterruptID2Address, s.InterruptID2State)
-	ctx = setRunCtx(ctx, s.RunCtx)
 
-	return ctx, &ResumeInfo{
+	return ctx, s.RunCtx, &ResumeInfo{
 		EnableStreaming: s.EnableStreaming,
 		InterruptInfo:   s.Info,
 	}, nil

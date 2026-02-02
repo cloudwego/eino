@@ -40,6 +40,7 @@ type graphInterruptOptions struct {
 	timeout *time.Duration
 }
 
+// GraphInterruptOption configures behavior when interrupting a running graph.
 type GraphInterruptOption func(o *graphInterruptOptions)
 
 // WithGraphInterruptTimeout specifies the max waiting time before generating an interrupt.
@@ -53,6 +54,21 @@ func WithGraphInterruptTimeout(timeout time.Duration) GraphInterruptOption {
 // WithGraphInterrupt creates a context with graph cancellation support.
 // When the returned context is used to invoke a graph or workflow, calling the interrupt function will trigger an interrupt.
 // The graph will wait for current tasks to complete by default.
+//
+// Input Persistence: When WithGraphInterrupt is used, ALL nodes (in both root graph and subgraphs) will automatically
+// persist their inputs (both streaming and non-streaming) before execution. If the graph is interrupted, these inputs
+// are restored when the graph resumes from a checkpoint, ensuring interrupted nodes receive their original inputs.
+//
+// This behavior differs from internal interrupts triggered via compose.Interrupt() within a node's function body.
+// Internal interrupts do NOT automatically persist inputs - the node author must manage input persistence manually,
+// either by saving it in the global graph state or using compose.StatefulInterrupt() to store it in local interrupt state.
+// WithGraphInterrupt enables automatic input persistence because external interrupts can occur at any point during
+// node execution, making it impossible for the node to prepare for the interrupt.
+//
+// Why input persistence is not enabled by default for internal interrupts: Enabling it universally would break
+// existing code that relies on checking "input == nil" to determine whether the node is running for the first time
+// or resuming from an interrupt. The recommended approach is to use compose.GetInterruptState() to explicitly
+// determine whether the current execution is a first run or a resume.
 func WithGraphInterrupt(parent context.Context) (ctx context.Context, interrupt func(opts ...GraphInterruptOption)) {
 	ch := make(chan *time.Duration, 1)
 	ctx = context.WithValue(parent, graphCancelChanKey{}, &graphCancelChanVal{

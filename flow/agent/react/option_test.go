@@ -478,3 +478,226 @@ func TestAgentWithAllOptions(t *testing.T) {
 	assert.True(t, modelOptReceived, "model option should be received by chat model")
 	assert.True(t, at.receivedToolOpt, "tool option should be received by tool")
 }
+
+type simpleToolForMiddlewareTest struct {
+	name   string
+	result string
+}
+
+func (s *simpleToolForMiddlewareTest) Info(_ context.Context) (*schema.ToolInfo, error) {
+	return &schema.ToolInfo{
+		Name: s.name,
+		Desc: "simple tool for middleware test",
+		ParamsOneOf: schema.NewParamsOneOfByParams(
+			map[string]*schema.ParameterInfo{
+				"input": {
+					Desc:     "input",
+					Required: true,
+					Type:     schema.String,
+				},
+			}),
+	}, nil
+}
+
+func (s *simpleToolForMiddlewareTest) InvokableRun(_ context.Context, _ string, _ ...tool.Option) (string, error) {
+	return s.result, nil
+}
+
+func (s *simpleToolForMiddlewareTest) StreamableRun(_ context.Context, _ string, _ ...tool.Option) (*schema.StreamReader[string], error) {
+	return schema.StreamReaderFromArray([]string{s.result}), nil
+}
+
+func TestMessageFuture_ToolResultMiddleware_EmitsFinalResult(t *testing.T) {
+	originalResult := "original_result"
+	modifiedResult := "modified_by_middleware"
+
+	resultModifyingMiddleware := compose.ToolMiddleware{
+		Invokable: func(next compose.InvokableToolEndpoint) compose.InvokableToolEndpoint {
+			return func(ctx context.Context, input *compose.ToolInput) (*compose.ToolOutput, error) {
+				output, err := next(ctx, input)
+				if err != nil {
+					return nil, err
+				}
+				output.Result = modifiedResult
+				return output, nil
+			}
+		},
+		Streamable: func(next compose.StreamableToolEndpoint) compose.StreamableToolEndpoint {
+			return func(ctx context.Context, input *compose.ToolInput) (*compose.StreamToolOutput, error) {
+				output, err := next(ctx, input)
+				if err != nil {
+					return nil, err
+				}
+				output.Result = schema.StreamReaderFromArray([]string{modifiedResult})
+				return output, nil
+			}
+		},
+	}
+
+	t.Run("Invoke", func(t *testing.T) {
+		ctx := context.Background()
+		testTool := &simpleToolForMiddlewareTest{name: "test_tool", result: originalResult}
+
+		ctrl := gomock.NewController(t)
+		cm := mockModel.NewMockToolCallingChatModel(ctrl)
+
+		info, err := testTool.Info(ctx)
+		assert.NoError(t, err)
+
+		cm.EXPECT().Generate(gomock.Any(), gomock.Any(), gomock.Any()).
+			Return(schema.AssistantMessage("",
+				[]schema.ToolCall{
+					{
+						ID: "tool-call-1",
+						Function: schema.FunctionCall{
+							Name:      info.Name,
+							Arguments: `{"input": "test"}`,
+						},
+					},
+				}), nil).
+			Times(1)
+		cm.EXPECT().Generate(gomock.Any(), gomock.Any(), gomock.Any()).
+			Return(schema.AssistantMessage("final response", nil), nil).
+			Times(1)
+		cm.EXPECT().WithTools(gomock.Any()).Return(cm, nil).AnyTimes()
+
+		option, future := WithMessageFuture()
+		a, err := NewAgent(ctx, &AgentConfig{
+			ToolCallingModel: cm,
+			ToolsConfig: compose.ToolsNodeConfig{
+				Tools:               []tool.BaseTool{testTool},
+				ToolCallMiddlewares: []compose.ToolMiddleware{resultModifyingMiddleware},
+			},
+			MaxStep: 3,
+		})
+		assert.NoError(t, err)
+
+		response, err := a.Generate(ctx, []*schema.Message{
+			schema.UserMessage("call the tool"),
+		}, option)
+		assert.NoError(t, err)
+		assert.Equal(t, "final response", response.Content)
+
+		iter := future.GetMessages()
+
+		var allMsgs []*schema.Message
+		for {
+			msg, hasNext, err := iter.Next()
+			if err != nil || !hasNext {
+				break
+			}
+			allMsgs = append(allMsgs, msg)
+		}
+
+		assert.GreaterOrEqual(t, len(allMsgs), 3, "should have at least 3 messages")
+		if len(allMsgs) >= 3 {
+			assert.Equal(t, schema.Assistant, allMsgs[0].Role)
+			assert.Equal(t, 1, len(allMsgs[0].ToolCalls))
+
+			assert.Equal(t, schema.Tool, allMsgs[1].Role)
+			assert.Equal(t, modifiedResult, allMsgs[1].Content,
+				"MessageFuture should receive the middleware-modified tool result")
+			assert.NotEqual(t, originalResult, allMsgs[1].Content,
+				"MessageFuture should NOT receive the original tool result")
+
+			assert.Equal(t, "final response", allMsgs[2].Content)
+		}
+	})
+
+	t.Run("Stream", func(t *testing.T) {
+		ctx := context.Background()
+		testTool := &simpleToolForMiddlewareTest{name: "test_tool_stream", result: originalResult}
+
+		ctrl := gomock.NewController(t)
+		cm := mockModel.NewMockToolCallingChatModel(ctrl)
+
+		info, err := testTool.Info(ctx)
+		assert.NoError(t, err)
+
+		cm.EXPECT().Stream(gomock.Any(), gomock.Any(), gomock.Any()).
+			Return(schema.StreamReaderFromArray([]*schema.Message{
+				schema.AssistantMessage("", []schema.ToolCall{
+					{
+						ID: "tool-call-1",
+						Function: schema.FunctionCall{
+							Name:      info.Name,
+							Arguments: `{"input": "test"}`,
+						},
+					},
+				}),
+			}), nil).
+			Times(1)
+		cm.EXPECT().Stream(gomock.Any(), gomock.Any(), gomock.Any()).
+			Return(schema.StreamReaderFromArray([]*schema.Message{
+				schema.AssistantMessage("final response", nil),
+			}), nil).
+			Times(1)
+		cm.EXPECT().WithTools(gomock.Any()).Return(cm, nil).AnyTimes()
+
+		option, future := WithMessageFuture()
+		a, err := NewAgent(ctx, &AgentConfig{
+			ToolCallingModel: cm,
+			ToolsConfig: compose.ToolsNodeConfig{
+				Tools:               []tool.BaseTool{testTool},
+				ToolCallMiddlewares: []compose.ToolMiddleware{resultModifyingMiddleware},
+			},
+			MaxStep: 3,
+		})
+		assert.NoError(t, err)
+
+		response, err := a.Stream(ctx, []*schema.Message{
+			schema.UserMessage("call the tool"),
+		}, option)
+		assert.NoError(t, err)
+
+		var msgs []*schema.Message
+		for {
+			msg, err := response.Recv()
+			if err != nil {
+				break
+			}
+			msgs = append(msgs, msg)
+		}
+		finalMsg, err := schema.ConcatMessages(msgs)
+		assert.NoError(t, err)
+		assert.Equal(t, "final response", finalMsg.Content)
+
+		iter := future.GetMessageStreams()
+
+		var allMsgs []*schema.Message
+		for {
+			msgStream, hasNext, err := iter.Next()
+			if err != nil || !hasNext {
+				break
+			}
+			var streamMsgs []*schema.Message
+			for {
+				msg, err := msgStream.Recv()
+				if err != nil {
+					break
+				}
+				streamMsgs = append(streamMsgs, msg)
+			}
+			if len(streamMsgs) > 0 {
+				concated, err := schema.ConcatMessages(streamMsgs)
+				if err == nil {
+					allMsgs = append(allMsgs, concated)
+				}
+			}
+		}
+
+		assert.GreaterOrEqual(t, len(allMsgs), 3, "should have at least 3 messages")
+		if len(allMsgs) >= 3 {
+			assert.Equal(t, schema.Assistant, allMsgs[0].Role)
+			assert.Equal(t, 1, len(allMsgs[0].ToolCalls))
+
+			assert.Equal(t, schema.Tool, allMsgs[1].Role)
+			assert.Equal(t, modifiedResult, allMsgs[1].Content,
+				"MessageFuture should receive the middleware-modified tool result")
+			assert.NotEqual(t, originalResult, allMsgs[1].Content,
+				"MessageFuture should NOT receive the original tool result")
+
+			assert.Equal(t, "final response", allMsgs[2].Content)
+		}
+	})
+}
