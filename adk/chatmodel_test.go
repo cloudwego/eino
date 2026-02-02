@@ -655,8 +655,8 @@ func TestParallelReturnDirectlyToolCall(t *testing.T) {
 					&myTool{name: "tool3", desc: "tool3", waitTime: 100 * time.Millisecond},
 				},
 			},
-			ReturnDirectly: map[string]struct{}{
-				"tool1": {},
+			ReturnDirectly: map[string]bool{
+				"tool1": true,
 			},
 		},
 	})
