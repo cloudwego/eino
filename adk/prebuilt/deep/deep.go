@@ -67,6 +67,16 @@ type Config struct {
 
 	Middlewares []adk.AgentMiddleware
 
+	// Handlers configures interface-based handlers for extending agent behavior.
+	// Unlike Middlewares (struct-based), Handlers allow users to:
+	//   - Add custom methods to their handler implementations
+	//   - Return modified context from handler methods
+	//   - Centralize configuration in struct fields instead of closures
+	//
+	// Handlers are processed after Middlewares, in registration order.
+	// See adk.ChatModelAgentMiddleware documentation for when to use Handlers vs Middlewares.
+	Handlers []adk.ChatModelAgentMiddleware
+
 	ModelRetryConfig *adk.ModelRetryConfig
 
 	// OutputKey stores the agent's response in the session.
@@ -115,6 +125,7 @@ func New(ctx context.Context, cfg *Config) (adk.ResumableAgent, error) {
 		ToolsConfig:   cfg.ToolsConfig,
 		MaxIterations: cfg.MaxIteration,
 		Middlewares:   append(middlewares, cfg.Middlewares...),
+		Handlers:      cfg.Handlers,
 
 		GenModelInput:    genModelInput,
 		ModelRetryConfig: cfg.ModelRetryConfig,
