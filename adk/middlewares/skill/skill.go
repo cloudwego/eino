@@ -92,6 +92,31 @@ type Config struct {
 	ModelHub ModelHub
 }
 
+// NewHandler creates a new skill middleware handler for ChatModelAgent.
+//
+// The handler provides a skill tool that allows agents to load and execute skills
+// defined in SKILL.md files. Skills can run in different modes based on their
+// frontmatter configuration:
+//
+//   - Inline mode (default): Skill content is returned directly as tool result
+//   - Fork mode (context: fork): Creates a new agent with forked message history
+//   - Isolate mode (context: isolate): Creates a new agent with isolated context
+//
+// Example usage:
+//
+//	handler, err := skill.NewHandler(ctx, &skill.Config{
+//	    Backend:  backend,
+//	    AgentHub: myAgentHub,
+//	    ModelHub: myModelHub,
+//	})
+//	if err != nil {
+//	    return err
+//	}
+//
+//	agent, err := adk.NewChatModelAgent(ctx, &adk.ChatModelAgentConfig{
+//	    // ...
+//	    Handlers: []adk.ChatModelAgentMiddleware{handler},
+//	})
 func NewHandler(ctx context.Context, config *Config) (adk.ChatModelAgentMiddleware, error) {
 	if config == nil {
 		return nil, fmt.Errorf("config is required")
