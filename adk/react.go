@@ -280,7 +280,7 @@ type reactConfig struct {
 	toolsConfig      *compose.ToolsNodeConfig
 	modelWrapperConf *modelWrapperConfig
 
-	toolsReturnDirectly map[string]struct{}
+	toolsReturnDirectly map[string]bool
 
 	agentName string
 
