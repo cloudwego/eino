@@ -333,9 +333,10 @@ func genReactState(config *reactConfig) func(ctx context.Context) *State {
 
 func newReact(ctx context.Context, config *reactConfig) (reactGraph, error) {
 	const (
-		initNode_  = "Init"
-		chatModel_ = "ChatModel"
-		toolNode_  = "ToolNode"
+		initNode_       = "Init"
+		chatModel_      = "ChatModel"
+		toolNode_       = "ToolNode"
+		afterAgentNode_ = "AfterAgent"
 	)
 
 	g := compose.NewGraph[*reactInput, Message](compose.WithGenLocalState(genReactState(config)))
@@ -401,13 +402,43 @@ func newReact(ctx context.Context, config *reactConfig) (reactGraph, error) {
 	_ = g.AddEdge(compose.START, initNode_)
 	_ = g.AddEdge(initNode_, chatModel_)
 
+	var handlers []handlerInfo
+	if config.modelWrapperConf != nil {
+		handlers = config.modelWrapperConf.handlers
+	}
+	hasAfterAgent := hasAnyAfterAgent(handlers)
+
+	afterAgentLambda := func(ctx context.Context, msgStream MessageStream) (MessageStream, error) {
+		if !hasAfterAgent {
+			return msgStream, nil
+		}
+
+		var stateMessages []Message
+		_ = compose.ProcessState(ctx, func(_ context.Context, st *State) error {
+			stateMessages = st.Messages
+			return nil
+		})
+
+		state := &ChatModelAgentState{Messages: stateMessages}
+
+		if err := invokeAfterAgentHandlers(ctx, handlers, state); err != nil {
+			return nil, err
+		}
+
+		return msgStream, nil
+	}
+
+	_ = g.AddLambdaNode(afterAgentNode_, compose.TransformableLambda(afterAgentLambda),
+		compose.WithNodeName(afterAgentNode_))
+	_ = g.AddEdge(afterAgentNode_, compose.END)
+
 	toolCallCheck := func(ctx context.Context, sMsg MessageStream) (string, error) {
 		defer sMsg.Close()
 		for {
 			chunk, err_ := sMsg.Recv()
 			if err_ != nil {
 				if err_ == io.EOF {
-					return compose.END, nil
+					return afterAgentNode_, nil
 				}
 
 				return "", err_
@@ -418,7 +449,7 @@ func newReact(ctx context.Context, config *reactConfig) (reactGraph, error) {
 			}
 		}
 	}
-	branch := compose.NewStreamGraphBranch(toolCallCheck, map[string]bool{compose.END: true, toolNode_: true})
+	branch := compose.NewStreamGraphBranch(toolCallCheck, map[string]bool{afterAgentNode_: true, toolNode_: true})
 	_ = g.AddBranch(chatModel_, branch)
 
 	if len(config.toolsReturnDirectly) > 0 {
@@ -444,7 +475,7 @@ func newReact(ctx context.Context, config *reactConfig) (reactGraph, error) {
 
 		_ = g.AddLambdaNode(toolNodeToEndConverter, compose.TransformableLambda(cvt),
 			compose.WithNodeName(toolNodeToEndConverter))
-		_ = g.AddEdge(toolNodeToEndConverter, compose.END)
+		_ = g.AddEdge(toolNodeToEndConverter, afterAgentNode_)
 
 		checkReturnDirect := func(ctx context.Context,
 			sToolCallMessages sToolNodeOutput) (string, error) {
