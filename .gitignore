@@ -45,6 +45,9 @@ output/*
 # Specs files (internal documentation)
 **/specs/
 
+# Reports (generated analysis files)
+reports/
+
 .DS_Store
 *.log
 CLAUDE.md
