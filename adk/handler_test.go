@@ -1675,8 +1675,12 @@ func TestIsMethodOverridden(t *testing.T) {
 	t.Run("ToolWrapperMethodsOverridden", func(t *testing.T) {
 		handler := &testToolWrapperHandler{
 			BaseChatModelAgentMiddleware: &BaseChatModelAgentMiddleware{},
-			wrapInvokableFn:              func(_ context.Context, e InvokableToolCallEndpoint, tc *ToolContext) InvokableToolCallEndpoint { return e },
-			wrapStreamableFn:             func(_ context.Context, e StreamableToolCallEndpoint, tc *ToolContext) StreamableToolCallEndpoint { return e },
+			wrapInvokableFn: func(_ context.Context, e InvokableToolCallEndpoint, tc *ToolContext) InvokableToolCallEndpoint {
+				return e
+			},
+			wrapStreamableFn: func(_ context.Context, e StreamableToolCallEndpoint, tc *ToolContext) StreamableToolCallEndpoint {
+				return e
+			},
 		}
 		assert.True(t, isMethodOverridden(handler, "WrapInvokableToolCall"), "WrapInvokableToolCall should be overridden")
 		assert.True(t, isMethodOverridden(handler, "WrapStreamableToolCall"), "WrapStreamableToolCall should be overridden")
@@ -1746,8 +1750,12 @@ func TestNewHandlerInfo(t *testing.T) {
 	t.Run("HandlerWithToolWrappers", func(t *testing.T) {
 		handler := &testToolWrapperHandler{
 			BaseChatModelAgentMiddleware: &BaseChatModelAgentMiddleware{},
-			wrapInvokableFn:              func(_ context.Context, e InvokableToolCallEndpoint, tc *ToolContext) InvokableToolCallEndpoint { return e },
-			wrapStreamableFn:             func(_ context.Context, e StreamableToolCallEndpoint, tc *ToolContext) StreamableToolCallEndpoint { return e },
+			wrapInvokableFn: func(_ context.Context, e InvokableToolCallEndpoint, tc *ToolContext) InvokableToolCallEndpoint {
+				return e
+			},
+			wrapStreamableFn: func(_ context.Context, e StreamableToolCallEndpoint, tc *ToolContext) StreamableToolCallEndpoint {
+				return e
+			},
 		}
 		info := newHandlerInfo(handler)
 
