@@ -95,11 +95,11 @@ func (h *testBeforeAgentHandler) BeforeAgent(ctx context.Context, runCtx *ChatMo
 
 type testBeforeModelRewriteStateHandler struct {
 	*BaseChatModelAgentMiddleware
-	fn func(ctx context.Context, state *ChatModelAgentState) (context.Context, *ChatModelAgentState, error)
+	fn func(ctx context.Context, state *ChatModelAgentState, mc *ModelContext) (context.Context, *ChatModelAgentState, error)
 }
 
-func (h *testBeforeModelRewriteStateHandler) BeforeModelRewriteState(ctx context.Context, state *ChatModelAgentState) (context.Context, *ChatModelAgentState, error) {
-	return h.fn(ctx, state)
+func (h *testBeforeModelRewriteStateHandler) BeforeModelRewriteState(ctx context.Context, state *ChatModelAgentState, mc *ModelContext) (context.Context, *ChatModelAgentState, error) {
+	return h.fn(ctx, state, mc)
 }
 
 type testAfterModelRewriteStateHandler struct {
@@ -489,11 +489,11 @@ func TestMessageRewriteHandlers(t *testing.T) {
 			Instruction: "instruction",
 			Model:       cm,
 			Handlers: []ChatModelAgentMiddleware{
-				&testBeforeModelRewriteStateHandler{fn: func(ctx context.Context, state *ChatModelAgentState) (context.Context, *ChatModelAgentState, error) {
+				&testBeforeModelRewriteStateHandler{fn: func(ctx context.Context, state *ChatModelAgentState, mc *ModelContext) (context.Context, *ChatModelAgentState, error) {
 					state.Messages = append(state.Messages, schema.UserMessage("injected1"))
 					return ctx, state, nil
 				}},
-				&testBeforeModelRewriteStateHandler{fn: func(ctx context.Context, state *ChatModelAgentState) (context.Context, *ChatModelAgentState, error) {
+				&testBeforeModelRewriteStateHandler{fn: func(ctx context.Context, state *ChatModelAgentState, mc *ModelContext) (context.Context, *ChatModelAgentState, error) {
 					state.Messages = append(state.Messages, schema.UserMessage("injected2"))
 					return ctx, state, nil
 				}},
@@ -853,10 +853,10 @@ func TestContextPropagation(t *testing.T) {
 			Description: "Test agent",
 			Model:       cm,
 			Handlers: []ChatModelAgentMiddleware{
-				&testBeforeModelRewriteStateHandler{fn: func(ctx context.Context, state *ChatModelAgentState) (context.Context, *ChatModelAgentState, error) {
+				&testBeforeModelRewriteStateHandler{fn: func(ctx context.Context, state *ChatModelAgentState, mc *ModelContext) (context.Context, *ChatModelAgentState, error) {
 					return context.WithValue(ctx, key1, "value1"), state, nil
 				}},
-				&testBeforeModelRewriteStateHandler{fn: func(ctx context.Context, state *ChatModelAgentState) (context.Context, *ChatModelAgentState, error) {
+				&testBeforeModelRewriteStateHandler{fn: func(ctx context.Context, state *ChatModelAgentState, mc *ModelContext) (context.Context, *ChatModelAgentState, error) {
 					handler2ReceivedValue1 = ctx.Value(key1)
 					return context.WithValue(ctx, key2, "value2"), state, nil
 				}},
@@ -1046,7 +1046,7 @@ func (h *countingHandler) BeforeAgent(ctx context.Context, runCtx *ChatModelAgen
 	return ctx, runCtx, nil
 }
 
-func (h *countingHandler) BeforeModelRewriteState(ctx context.Context, state *ChatModelAgentState) (context.Context, *ChatModelAgentState, error) {
+func (h *countingHandler) BeforeModelRewriteState(ctx context.Context, state *ChatModelAgentState, mc *ModelContext) (context.Context, *ChatModelAgentState, error) {
 	h.mu.Lock()
 	h.beforeModelCount++
 	h.mu.Unlock()
@@ -1451,7 +1451,7 @@ func TestRunLocalValueFunctions(t *testing.T) {
 			Description: "Test agent",
 			Model:       cm,
 			Handlers: []ChatModelAgentMiddleware{
-				&testBeforeModelRewriteStateHandler{fn: func(ctx context.Context, state *ChatModelAgentState) (context.Context, *ChatModelAgentState, error) {
+				&testBeforeModelRewriteStateHandler{fn: func(ctx context.Context, state *ChatModelAgentState, mc *ModelContext) (context.Context, *ChatModelAgentState, error) {
 					err := SetRunLocalValue(ctx, "test_key", "test_value")
 					assert.NoError(t, err)
 					return ctx, state, nil
@@ -1495,7 +1495,7 @@ func TestRunLocalValueFunctions(t *testing.T) {
 			Description: "Test agent",
 			Model:       cm,
 			Handlers: []ChatModelAgentMiddleware{
-				&testBeforeModelRewriteStateHandler{fn: func(ctx context.Context, state *ChatModelAgentState) (context.Context, *ChatModelAgentState, error) {
+				&testBeforeModelRewriteStateHandler{fn: func(ctx context.Context, state *ChatModelAgentState, mc *ModelContext) (context.Context, *ChatModelAgentState, error) {
 					err := SetRunLocalValue(ctx, "delete_key", "delete_value")
 					assert.NoError(t, err)
 
@@ -1542,7 +1542,7 @@ func TestRunLocalValueFunctions(t *testing.T) {
 			Description: "Test agent",
 			Model:       cm,
 			Handlers: []ChatModelAgentMiddleware{
-				&testBeforeModelRewriteStateHandler{fn: func(ctx context.Context, state *ChatModelAgentState) (context.Context, *ChatModelAgentState, error) {
+				&testBeforeModelRewriteStateHandler{fn: func(ctx context.Context, state *ChatModelAgentState, mc *ModelContext) (context.Context, *ChatModelAgentState, error) {
 					val, found, err := GetRunLocalValue(ctx, "non_existent_key")
 					assert.NoError(t, err)
 					capturedValue = val
@@ -1611,7 +1611,7 @@ func TestRunLocalValueFunctions(t *testing.T) {
 				},
 			},
 			Handlers: []ChatModelAgentMiddleware{
-				&testBeforeModelRewriteStateHandler{fn: func(ctx context.Context, state *ChatModelAgentState) (context.Context, *ChatModelAgentState, error) {
+				&testBeforeModelRewriteStateHandler{fn: func(ctx context.Context, state *ChatModelAgentState, mc *ModelContext) (context.Context, *ChatModelAgentState, error) {
 					callCount++
 					if callCount == 1 {
 						err := SetRunLocalValue(ctx, "persist_key", "persist_value")
@@ -1786,7 +1786,7 @@ func TestHandlerErrorPropagation(t *testing.T) {
 			Description: "Test agent",
 			Model:       cm,
 			Handlers: []ChatModelAgentMiddleware{
-				&testBeforeModelRewriteStateHandler{fn: func(ctx context.Context, state *ChatModelAgentState) (context.Context, *ChatModelAgentState, error) {
+				&testBeforeModelRewriteStateHandler{fn: func(ctx context.Context, state *ChatModelAgentState, mc *ModelContext) (context.Context, *ChatModelAgentState, error) {
 					return ctx, state, assert.AnError
 				}},
 			},
@@ -1857,10 +1857,10 @@ func TestHandlerErrorPropagation(t *testing.T) {
 			Description: "Test agent",
 			Model:       cm,
 			Handlers: []ChatModelAgentMiddleware{
-				&testBeforeModelRewriteStateHandler{fn: func(ctx context.Context, state *ChatModelAgentState) (context.Context, *ChatModelAgentState, error) {
+				&testBeforeModelRewriteStateHandler{fn: func(ctx context.Context, state *ChatModelAgentState, mc *ModelContext) (context.Context, *ChatModelAgentState, error) {
 					return ctx, state, assert.AnError
 				}},
-				&testBeforeModelRewriteStateHandler{fn: func(ctx context.Context, state *ChatModelAgentState) (context.Context, *ChatModelAgentState, error) {
+				&testBeforeModelRewriteStateHandler{fn: func(ctx context.Context, state *ChatModelAgentState, mc *ModelContext) (context.Context, *ChatModelAgentState, error) {
 					secondHandlerCalled = true
 					return ctx, state, nil
 				}},

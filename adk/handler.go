@@ -121,7 +121,10 @@ type ChatModelAgentMiddleware interface {
 	//
 	// The ChatModelAgentState struct provides access to:
 	//   - Messages: the conversation history
-	BeforeModelRewriteState(ctx context.Context, state *ChatModelAgentState) (context.Context, *ChatModelAgentState, error)
+	//
+	// The ModelContext struct provides read-only access to:
+	//   - Tools: the current tool list that will be sent to the model
+	BeforeModelRewriteState(ctx context.Context, state *ChatModelAgentState, mc *ModelContext) (context.Context, *ChatModelAgentState, error)
 
 	// AfterModelRewriteState is called after each model invocation.
 	// The input state includes the model's response as the last message.
@@ -182,7 +185,7 @@ type ChatModelAgentMiddleware interface {
 //		// custom fields
 //	}
 //
-//	func (h *MyHandler) BeforeModelRewriteState(ctx context.Context, state *adk.ChatModelAgentState) (context.Context, *adk.ChatModelAgentState, error) {
+//	func (h *MyHandler) BeforeModelRewriteState(ctx context.Context, state *adk.ChatModelAgentState, mc *adk.ModelContext) (context.Context, *adk.ChatModelAgentState, error) {
 //		// custom logic
 //		return ctx, state, nil
 //	}
@@ -212,7 +215,7 @@ func (b *BaseChatModelAgentMiddleware) BeforeAgent(ctx context.Context, runCtx *
 	return ctx, runCtx, nil
 }
 
-func (b *BaseChatModelAgentMiddleware) BeforeModelRewriteState(ctx context.Context, state *ChatModelAgentState) (context.Context, *ChatModelAgentState, error) {
+func (b *BaseChatModelAgentMiddleware) BeforeModelRewriteState(ctx context.Context, state *ChatModelAgentState, mc *ModelContext) (context.Context, *ChatModelAgentState, error) {
 	return ctx, state, nil
 }
 

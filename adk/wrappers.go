@@ -302,7 +302,7 @@ func (m *eventSenderModel) Stream(ctx context.Context, input []*schema.Message, 
 		return nil
 	})
 
-	streams := result.Copy(3)
+	streams := result.Copy(2)
 
 	eventStream := streams[0]
 	if m.modelRetryConfig != nil {
@@ -317,17 +317,6 @@ func (m *eventSenderModel) Stream(ctx context.Context, input []*schema.Message, 
 
 	event := EventFromMessage(nil, eventStream, schema.Assistant, "")
 	execCtx.send(event)
-
-	go func() {
-		defer streams[2].Close()
-		for {
-			msg, err := streams[2].Recv()
-			if err != nil {
-				break
-			}
-			_ = msg
-		}
-	}()
 
 	return streams[1], nil
 }
@@ -630,10 +619,13 @@ func (w *stateModelWrapper) Generate(ctx context.Context, input []*schema.Messag
 		}
 	}
 
+	baseOpts := &model.Options{Tools: w.toolInfos}
+	commonOpts := model.GetCommonOptions(baseOpts, opts...)
+	mc := &ModelContext{Tools: commonOpts.Tools, ModelRetryConfig: w.modelRetryConfig}
 	for _, info := range w.handlers {
 		if info.hasBeforeModelRewriteState {
 			var err error
-			ctx, state, err = info.handler.BeforeModelRewriteState(ctx, state)
+			ctx, state, err = info.handler.BeforeModelRewriteState(ctx, state, mc)
 			if err != nil {
 				return nil, err
 			}
@@ -697,10 +689,13 @@ func (w *stateModelWrapper) Stream(ctx context.Context, input []*schema.Message,
 		}
 	}
 
+	baseOpts := &model.Options{Tools: w.toolInfos}
+	commonOpts := model.GetCommonOptions(baseOpts, opts...)
+	mc := &ModelContext{Tools: commonOpts.Tools, ModelRetryConfig: w.modelRetryConfig}
 	for _, info := range w.handlers {
 		if info.hasBeforeModelRewriteState {
 			var err error
-			ctx, state, err = info.handler.BeforeModelRewriteState(ctx, state)
+			ctx, state, err = info.handler.BeforeModelRewriteState(ctx, state, mc)
 			if err != nil {
 				return nil, err
 			}
