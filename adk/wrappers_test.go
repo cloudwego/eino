@@ -24,6 +24,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 
+	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/components/tool"
 	"github.com/cloudwego/eino/compose"
 	"github.com/cloudwego/eino/schema"
@@ -700,6 +701,276 @@ func TestEnhancedToolEndpointErrorFromNext(t *testing.T) {
 		assert.Error(t, err)
 		assert.Equal(t, expectedErr, err)
 	})
+}
+
+func TestWrapModelStreamChunksPreserved(t *testing.T) {
+	t.Run("AgentEventMessageStreamShouldPreserveChunksWithNoopWrapModel", func(t *testing.T) {
+		ctx := context.Background()
+
+		chunk1 := schema.AssistantMessage("Hello ", nil)
+		chunk2 := schema.AssistantMessage("World", nil)
+
+		mockModel := &mockStreamingModel{
+			chunks: []*schema.Message{chunk1, chunk2},
+		}
+
+		noopWrapModelHandler := &testModelWrapperHandler{
+			BaseChatModelAgentMiddleware: &BaseChatModelAgentMiddleware{},
+			fn: func(m model.BaseChatModel, mc *ModelContext) model.BaseChatModel {
+				return m
+			},
+		}
+
+		agent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+			Name:        "TestAgent",
+			Description: "Test agent",
+			Model:       mockModel,
+			Handlers:    []ChatModelAgentMiddleware{noopWrapModelHandler},
+			ModelRetryConfig: &ModelRetryConfig{
+				MaxRetries: 3,
+			},
+		})
+		assert.NoError(t, err)
+
+		r := NewRunner(ctx, RunnerConfig{
+			Agent:           agent,
+			EnableStreaming: true,
+		})
+		iter := r.Run(ctx, []Message{schema.UserMessage("test")})
+
+		var streamingEvents []*AgentEvent
+		for {
+			event, ok := iter.Next()
+			if !ok {
+				break
+			}
+			if event.Output != nil && event.Output.MessageOutput != nil &&
+				event.Output.MessageOutput.IsStreaming &&
+				event.Output.MessageOutput.Role == schema.Assistant {
+				streamingEvents = append(streamingEvents, event)
+			}
+		}
+
+		assert.GreaterOrEqual(t, len(streamingEvents), 1, "Should have at least one streaming event")
+
+		if len(streamingEvents) > 0 {
+			event := streamingEvents[0]
+			assert.NotNil(t, event.Output.MessageOutput.MessageStream, "Event should have message stream")
+
+			var receivedChunks []*schema.Message
+			for {
+				chunk, recvErr := event.Output.MessageOutput.MessageStream.Recv()
+				if recvErr != nil {
+					break
+				}
+				receivedChunks = append(receivedChunks, chunk)
+			}
+
+			assert.Equal(t, 2, len(receivedChunks),
+				"AgentEvent's MessageStream should contain 2 separate chunks, not 1 concatenated chunk. "+
+					"Got %d chunks instead. This indicates the stream is being concatenated before being sent to AgentEvent.",
+				len(receivedChunks))
+
+			if len(receivedChunks) >= 2 {
+				assert.Equal(t, "Hello ", receivedChunks[0].Content, "First chunk content should be preserved")
+				assert.Equal(t, "World", receivedChunks[1].Content, "Second chunk content should be preserved")
+			}
+		}
+	})
+
+	t.Run("AgentEventMessageStreamShouldPreserveChunksWithStreamConsumingWrapModel", func(t *testing.T) {
+		ctx := context.Background()
+
+		chunk1 := schema.AssistantMessage("Hello ", nil)
+		chunk2 := schema.AssistantMessage("World", nil)
+
+		mockModel := &mockStreamingModel{
+			chunks: []*schema.Message{chunk1, chunk2},
+		}
+
+		streamConsumingWrapModelHandler := &testModelWrapperHandler{
+			BaseChatModelAgentMiddleware: &BaseChatModelAgentMiddleware{},
+			fn: func(m model.BaseChatModel, mc *ModelContext) model.BaseChatModel {
+				return &streamConsumingModelWrapper{inner: m}
+			},
+		}
+
+		agent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+			Name:        "TestAgent",
+			Description: "Test agent",
+			Model:       mockModel,
+			Handlers:    []ChatModelAgentMiddleware{streamConsumingWrapModelHandler},
+			ModelRetryConfig: &ModelRetryConfig{
+				MaxRetries: 3,
+			},
+		})
+		assert.NoError(t, err)
+
+		r := NewRunner(ctx, RunnerConfig{
+			Agent:           agent,
+			EnableStreaming: true,
+		})
+		iter := r.Run(ctx, []Message{schema.UserMessage("test")})
+
+		var streamingEvents []*AgentEvent
+		for {
+			event, ok := iter.Next()
+			if !ok {
+				break
+			}
+			if event.Output != nil && event.Output.MessageOutput != nil &&
+				event.Output.MessageOutput.IsStreaming &&
+				event.Output.MessageOutput.Role == schema.Assistant {
+				streamingEvents = append(streamingEvents, event)
+			}
+		}
+
+		assert.GreaterOrEqual(t, len(streamingEvents), 1, "Should have at least one streaming event")
+
+		if len(streamingEvents) > 0 {
+			event := streamingEvents[0]
+			assert.NotNil(t, event.Output.MessageOutput.MessageStream, "Event should have message stream")
+
+			var receivedChunks []*schema.Message
+			for {
+				chunk, recvErr := event.Output.MessageOutput.MessageStream.Recv()
+				if recvErr != nil {
+					break
+				}
+				receivedChunks = append(receivedChunks, chunk)
+			}
+
+			assert.Equal(t, 2, len(receivedChunks),
+				"AgentEvent's MessageStream should contain 2 separate chunks, not 1 concatenated chunk. "+
+					"Got %d chunks instead. This indicates the stream is being concatenated before being sent to AgentEvent.",
+				len(receivedChunks))
+
+			if len(receivedChunks) >= 2 {
+				assert.Equal(t, "Hello ", receivedChunks[0].Content, "First chunk content should be preserved")
+				assert.Equal(t, "World", receivedChunks[1].Content, "Second chunk content should be preserved")
+			}
+		}
+	})
+
+	t.Run("AgentEventMessageStreamShouldPreserveChunksWithMultipleWrapModelHandlers", func(t *testing.T) {
+		ctx := context.Background()
+
+		chunk1 := schema.AssistantMessage("Hello ", nil)
+		chunk2 := schema.AssistantMessage("World", nil)
+
+		mockModel := &mockStreamingModel{
+			chunks: []*schema.Message{chunk1, chunk2},
+		}
+
+		handler1 := &testModelWrapperHandler{
+			BaseChatModelAgentMiddleware: &BaseChatModelAgentMiddleware{},
+			fn: func(m model.BaseChatModel, mc *ModelContext) model.BaseChatModel {
+				return &streamConsumingModelWrapper{inner: m}
+			},
+		}
+
+		handler2 := &testModelWrapperHandler{
+			BaseChatModelAgentMiddleware: &BaseChatModelAgentMiddleware{},
+			fn: func(m model.BaseChatModel, mc *ModelContext) model.BaseChatModel {
+				return m
+			},
+		}
+
+		agent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+			Name:        "TestAgent",
+			Description: "Test agent",
+			Model:       mockModel,
+			Handlers:    []ChatModelAgentMiddleware{handler1, handler2},
+			ModelRetryConfig: &ModelRetryConfig{
+				MaxRetries: 3,
+			},
+		})
+		assert.NoError(t, err)
+
+		r := NewRunner(ctx, RunnerConfig{
+			Agent:           agent,
+			EnableStreaming: true,
+		})
+		iter := r.Run(ctx, []Message{schema.UserMessage("test")})
+
+		var streamingEvents []*AgentEvent
+		for {
+			event, ok := iter.Next()
+			if !ok {
+				break
+			}
+			if event.Output != nil && event.Output.MessageOutput != nil &&
+				event.Output.MessageOutput.IsStreaming &&
+				event.Output.MessageOutput.Role == schema.Assistant {
+				streamingEvents = append(streamingEvents, event)
+			}
+		}
+
+		assert.GreaterOrEqual(t, len(streamingEvents), 1, "Should have at least one streaming event")
+
+		if len(streamingEvents) > 0 {
+			event := streamingEvents[0]
+			assert.NotNil(t, event.Output.MessageOutput.MessageStream, "Event should have message stream")
+
+			var receivedChunks []*schema.Message
+			for {
+				chunk, recvErr := event.Output.MessageOutput.MessageStream.Recv()
+				if recvErr != nil {
+					break
+				}
+				receivedChunks = append(receivedChunks, chunk)
+			}
+
+			assert.Equal(t, 2, len(receivedChunks),
+				"AgentEvent's MessageStream should contain 2 separate chunks, not 1 concatenated chunk. "+
+					"Got %d chunks instead. This indicates the stream is being concatenated before being sent to AgentEvent.",
+				len(receivedChunks))
+
+			if len(receivedChunks) >= 2 {
+				assert.Equal(t, "Hello ", receivedChunks[0].Content, "First chunk content should be preserved")
+				assert.Equal(t, "World", receivedChunks[1].Content, "Second chunk content should be preserved")
+			}
+		}
+	})
+}
+
+type mockStreamingModel struct {
+	chunks []*schema.Message
+}
+
+func (m *mockStreamingModel) Generate(ctx context.Context, input []*schema.Message, opts ...model.Option) (*schema.Message, error) {
+	return schema.ConcatMessages(m.chunks)
+}
+
+func (m *mockStreamingModel) Stream(ctx context.Context, input []*schema.Message, opts ...model.Option) (*schema.StreamReader[*schema.Message], error) {
+	sr, sw := schema.Pipe[*schema.Message](len(m.chunks))
+	go func() {
+		defer sw.Close()
+		for _, chunk := range m.chunks {
+			sw.Send(chunk, nil)
+		}
+	}()
+	return sr, nil
+}
+
+type streamConsumingModelWrapper struct {
+	inner model.BaseChatModel
+}
+
+func (m *streamConsumingModelWrapper) Generate(ctx context.Context, input []*schema.Message, opts ...model.Option) (*schema.Message, error) {
+	return m.inner.Generate(ctx, input, opts...)
+}
+
+func (m *streamConsumingModelWrapper) Stream(ctx context.Context, input []*schema.Message, opts ...model.Option) (*schema.StreamReader[*schema.Message], error) {
+	stream, err := m.inner.Stream(ctx, input, opts...)
+	if err != nil {
+		return nil, err
+	}
+	result, err := schema.ConcatMessageStream(stream)
+	if err != nil {
+		return nil, err
+	}
+	return schema.StreamReaderFromArray([]*schema.Message{result}), nil
 }
 
 func TestHandlersToToolMiddlewaresConditionCheck(t *testing.T) {

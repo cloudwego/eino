@@ -287,7 +287,7 @@ func (m *eventSenderModel) Stream(ctx context.Context, input []*schema.Message, 
 		return nil
 	})
 
-	streams := result.Copy(2)
+	streams := result.Copy(3)
 
 	eventStream := streams[0]
 	if m.modelRetryConfig != nil {
@@ -302,6 +302,17 @@ func (m *eventSenderModel) Stream(ctx context.Context, input []*schema.Message, 
 
 	event := EventFromMessage(nil, eventStream, schema.Assistant, "")
 	execCtx.send(event)
+
+	go func() {
+		defer streams[2].Close()
+		for {
+			msg, err := streams[2].Recv()
+			if err != nil {
+				break
+			}
+			_ = msg
+		}
+	}()
 
 	return streams[1], nil
 }
