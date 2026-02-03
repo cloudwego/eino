@@ -238,6 +238,11 @@ type eventSenderModelWrapper struct {
 	*BaseChatModelAgentMiddleware
 }
 
+// NewEventSenderModelWrapper returns a ChatModelAgentMiddleware that sends model response events.
+// By default, the framework applies this wrapper after all user middlewares, so events contain
+// modified messages. To send events with original (unmodified) output, pass this as a Handler
+// after the modifying middleware (placing it innermost in the wrapper chain).
+// When detected in Handlers, the framework skips the default event sender to avoid duplicates.
 func NewEventSenderModelWrapper() ChatModelAgentMiddleware {
 	return &eventSenderModelWrapper{
 		BaseChatModelAgentMiddleware: &BaseChatModelAgentMiddleware{},
