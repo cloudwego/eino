@@ -84,6 +84,7 @@ func newTaskTool(
 			ToolsConfig:   ToolsConfig,
 			MaxIterations: MaxIteration,
 			Middlewares:   middlewares,
+			GenModelInput: genModelInput,
 		})
 		if err != nil {
 			return nil, err
