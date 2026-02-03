@@ -87,8 +87,11 @@ type Config struct {
 	// allowing the hub implementation to return a default agent.
 	AgentHub AgentHub
 	// ModelHub provides model instances for skills that specify a "model" field in frontmatter.
-	// Currently only used with context mode (fork/isolate).
-	// If nil, skills with model specification will return an error.
+	// Used in two scenarios:
+	//   - With context mode (fork/isolate): The model is passed to the AgentFactory
+	//   - Without context mode (inline): The model becomes active for subsequent ChatModel requests
+	// If nil, skills with model specification will be ignored in inline mode,
+	// or return an error in context mode.
 	ModelHub ModelHub
 }
 
@@ -145,7 +148,7 @@ func NewHandler(ctx context.Context, config *Config) (adk.ChatModelAgentMiddlewa
 type skillHandler struct {
 	*adk.BaseChatModelAgentMiddleware
 	instruction string
-	tool        tool.BaseTool
+	tool        *skillTool
 }
 
 func (h *skillHandler) BeforeAgent(ctx context.Context, runCtx *adk.ChatModelAgentContext) (context.Context, *adk.ChatModelAgentContext, error) {
@@ -153,6 +156,57 @@ func (h *skillHandler) BeforeAgent(ctx context.Context, runCtx *adk.ChatModelAge
 	runCtx.Tools = append(runCtx.Tools, h.tool)
 	return ctx, runCtx, nil
 }
+
+func (h *skillHandler) WrapModel(m model.BaseChatModel, mc *adk.ModelContext) model.BaseChatModel {
+	if h.tool.modelHub == nil {
+		return m
+	}
+	return &skillModelWrapper{
+		inner:    m,
+		modelHub: h.tool.modelHub,
+	}
+}
+
+type skillModelWrapper struct {
+	inner    model.BaseChatModel
+	modelHub ModelHub
+}
+
+func (w *skillModelWrapper) Generate(ctx context.Context, input []*schema.Message, opts ...model.Option) (*schema.Message, error) {
+	m, err := w.getActiveModel(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if m != nil {
+		return m.Generate(ctx, input, opts...)
+	}
+	return w.inner.Generate(ctx, input, opts...)
+}
+
+func (w *skillModelWrapper) Stream(ctx context.Context, input []*schema.Message, opts ...model.Option) (*schema.StreamReader[*schema.Message], error) {
+	m, err := w.getActiveModel(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if m != nil {
+		return m.Stream(ctx, input, opts...)
+	}
+	return w.inner.Stream(ctx, input, opts...)
+}
+
+func (w *skillModelWrapper) getActiveModel(ctx context.Context) (model.BaseChatModel, error) {
+	modelName, found, _ := adk.GetRunLocalValue(ctx, activeModelKey)
+	if !found {
+		return nil, nil
+	}
+	name, ok := modelName.(string)
+	if !ok || name == "" {
+		return nil, nil
+	}
+	return w.modelHub.Get(ctx, name)
+}
+
+const activeModelKey = "__skill_active_model__"
 
 // New creates a new skill middleware.
 // It provides a tool for the agent to use skills.
@@ -271,8 +325,15 @@ func (s *skillTool) InvokableRun(ctx context.Context, argumentsInJSON string, op
 	case ContextModeIsolate:
 		return s.runAgentMode(ctx, skill, false)
 	default:
-		return s.buildSkillResult(skill), nil
+		if skill.Model != "" {
+			s.setActiveModel(ctx, skill.Model)
+		}
+		return s.buildSkillResult(skill)
 	}
+}
+
+func (s *skillTool) setActiveModel(ctx context.Context, modelName string) {
+	_ = adk.SetRunLocalValue(ctx, activeModelKey, modelName)
 }
 
 func (s *skillTool) buildSkillResult(skill Skill) (string, error) {
