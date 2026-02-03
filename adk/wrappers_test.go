@@ -32,26 +32,26 @@ import (
 
 type testEnhancedToolWrapperHandler struct {
 	*BaseChatModelAgentMiddleware
-	wrapEnhancedInvokableFn  func(EnhancedInvokableToolCallEndpoint, *ToolContext) EnhancedInvokableToolCallEndpoint
-	wrapEnhancedStreamableFn func(EnhancedStreamableToolCallEndpoint, *ToolContext) EnhancedStreamableToolCallEndpoint
+	wrapEnhancedInvokableFn  func(context.Context, EnhancedInvokableToolCallEndpoint, *ToolContext) EnhancedInvokableToolCallEndpoint
+	wrapEnhancedStreamableFn func(context.Context, EnhancedStreamableToolCallEndpoint, *ToolContext) EnhancedStreamableToolCallEndpoint
 }
 
-func (h *testEnhancedToolWrapperHandler) WrapEnhancedInvokableToolCall(endpoint EnhancedInvokableToolCallEndpoint, tCtx *ToolContext) EnhancedInvokableToolCallEndpoint {
+func (h *testEnhancedToolWrapperHandler) WrapEnhancedInvokableToolCall(ctx context.Context, endpoint EnhancedInvokableToolCallEndpoint, tCtx *ToolContext) EnhancedInvokableToolCallEndpoint {
 	if h.wrapEnhancedInvokableFn != nil {
-		return h.wrapEnhancedInvokableFn(endpoint, tCtx)
+		return h.wrapEnhancedInvokableFn(ctx, endpoint, tCtx)
 	}
 	return endpoint
 }
 
-func (h *testEnhancedToolWrapperHandler) WrapEnhancedStreamableToolCall(endpoint EnhancedStreamableToolCallEndpoint, tCtx *ToolContext) EnhancedStreamableToolCallEndpoint {
+func (h *testEnhancedToolWrapperHandler) WrapEnhancedStreamableToolCall(ctx context.Context, endpoint EnhancedStreamableToolCallEndpoint, tCtx *ToolContext) EnhancedStreamableToolCallEndpoint {
 	if h.wrapEnhancedStreamableFn != nil {
-		return h.wrapEnhancedStreamableFn(endpoint, tCtx)
+		return h.wrapEnhancedStreamableFn(ctx, endpoint, tCtx)
 	}
 	return endpoint
 }
 
-func newTestEnhancedInvokableToolCallWrapper(beforeFn, afterFn func()) func(EnhancedInvokableToolCallEndpoint, *ToolContext) EnhancedInvokableToolCallEndpoint {
-	return func(endpoint EnhancedInvokableToolCallEndpoint, tCtx *ToolContext) EnhancedInvokableToolCallEndpoint {
+func newTestEnhancedInvokableToolCallWrapper(beforeFn, afterFn func()) func(context.Context, EnhancedInvokableToolCallEndpoint, *ToolContext) EnhancedInvokableToolCallEndpoint {
+	return func(_ context.Context, endpoint EnhancedInvokableToolCallEndpoint, _ *ToolContext) EnhancedInvokableToolCallEndpoint {
 		return func(ctx context.Context, toolArgument *schema.ToolArgument, opts ...tool.Option) (*schema.ToolResult, error) {
 			if beforeFn != nil {
 				beforeFn()
@@ -65,8 +65,8 @@ func newTestEnhancedInvokableToolCallWrapper(beforeFn, afterFn func()) func(Enha
 	}
 }
 
-func newTestEnhancedStreamableToolCallWrapper(beforeFn, afterFn func()) func(EnhancedStreamableToolCallEndpoint, *ToolContext) EnhancedStreamableToolCallEndpoint {
-	return func(endpoint EnhancedStreamableToolCallEndpoint, tCtx *ToolContext) EnhancedStreamableToolCallEndpoint {
+func newTestEnhancedStreamableToolCallWrapper(beforeFn, afterFn func()) func(context.Context, EnhancedStreamableToolCallEndpoint, *ToolContext) EnhancedStreamableToolCallEndpoint {
+	return func(_ context.Context, endpoint EnhancedStreamableToolCallEndpoint, _ *ToolContext) EnhancedStreamableToolCallEndpoint {
 		return func(ctx context.Context, toolArgument *schema.ToolArgument, opts ...tool.Option) (*schema.StreamReader[*schema.ToolResult], error) {
 			if beforeFn != nil {
 				beforeFn()
@@ -87,7 +87,7 @@ func TestHandlersToToolMiddlewaresEnhanced(t *testing.T) {
 			{
 				handler: &testEnhancedToolWrapperHandler{
 					BaseChatModelAgentMiddleware: &BaseChatModelAgentMiddleware{},
-					wrapEnhancedInvokableFn: func(endpoint EnhancedInvokableToolCallEndpoint, tCtx *ToolContext) EnhancedInvokableToolCallEndpoint {
+					wrapEnhancedInvokableFn: func(_ context.Context, endpoint EnhancedInvokableToolCallEndpoint, _ *ToolContext) EnhancedInvokableToolCallEndpoint {
 						return func(ctx context.Context, toolArgument *schema.ToolArgument, opts ...tool.Option) (*schema.ToolResult, error) {
 							called = true
 							return endpoint(ctx, toolArgument, opts...)
@@ -129,7 +129,7 @@ func TestHandlersToToolMiddlewaresEnhanced(t *testing.T) {
 			{
 				handler: &testEnhancedToolWrapperHandler{
 					BaseChatModelAgentMiddleware: &BaseChatModelAgentMiddleware{},
-					wrapEnhancedStreamableFn: func(endpoint EnhancedStreamableToolCallEndpoint, tCtx *ToolContext) EnhancedStreamableToolCallEndpoint {
+					wrapEnhancedStreamableFn: func(_ context.Context, endpoint EnhancedStreamableToolCallEndpoint, _ *ToolContext) EnhancedStreamableToolCallEndpoint {
 						return func(ctx context.Context, toolArgument *schema.ToolArgument, opts ...tool.Option) (*schema.StreamReader[*schema.ToolResult], error) {
 							called = true
 							return endpoint(ctx, toolArgument, opts...)
@@ -172,7 +172,7 @@ func TestHandlersToToolMiddlewaresEnhanced(t *testing.T) {
 			{
 				handler: &testToolWrapperHandler{
 					BaseChatModelAgentMiddleware: &BaseChatModelAgentMiddleware{},
-					wrapInvokableFn: func(endpoint InvokableToolCallEndpoint, tCtx *ToolContext) InvokableToolCallEndpoint {
+					wrapInvokableFn: func(_ context.Context, endpoint InvokableToolCallEndpoint, _ *ToolContext) InvokableToolCallEndpoint {
 						return func(ctx context.Context, argumentsInJSON string, opts ...tool.Option) (string, error) {
 							invokableCalled = true
 							return endpoint(ctx, argumentsInJSON, opts...)
@@ -184,7 +184,7 @@ func TestHandlersToToolMiddlewaresEnhanced(t *testing.T) {
 			{
 				handler: &testToolWrapperHandler{
 					BaseChatModelAgentMiddleware: &BaseChatModelAgentMiddleware{},
-					wrapStreamableFn: func(endpoint StreamableToolCallEndpoint, tCtx *ToolContext) StreamableToolCallEndpoint {
+					wrapStreamableFn: func(_ context.Context, endpoint StreamableToolCallEndpoint, _ *ToolContext) StreamableToolCallEndpoint {
 						return func(ctx context.Context, argumentsInJSON string, opts ...tool.Option) (*schema.StreamReader[string], error) {
 							streamableCalled = true
 							return endpoint(ctx, argumentsInJSON, opts...)
@@ -196,7 +196,7 @@ func TestHandlersToToolMiddlewaresEnhanced(t *testing.T) {
 			{
 				handler: &testEnhancedToolWrapperHandler{
 					BaseChatModelAgentMiddleware: &BaseChatModelAgentMiddleware{},
-					wrapEnhancedInvokableFn: func(endpoint EnhancedInvokableToolCallEndpoint, tCtx *ToolContext) EnhancedInvokableToolCallEndpoint {
+					wrapEnhancedInvokableFn: func(_ context.Context, endpoint EnhancedInvokableToolCallEndpoint, _ *ToolContext) EnhancedInvokableToolCallEndpoint {
 						return func(ctx context.Context, toolArgument *schema.ToolArgument, opts ...tool.Option) (*schema.ToolResult, error) {
 							enhancedInvokableCalled = true
 							return endpoint(ctx, toolArgument, opts...)
@@ -208,7 +208,7 @@ func TestHandlersToToolMiddlewaresEnhanced(t *testing.T) {
 			{
 				handler: &testEnhancedToolWrapperHandler{
 					BaseChatModelAgentMiddleware: &BaseChatModelAgentMiddleware{},
-					wrapEnhancedStreamableFn: func(endpoint EnhancedStreamableToolCallEndpoint, tCtx *ToolContext) EnhancedStreamableToolCallEndpoint {
+					wrapEnhancedStreamableFn: func(_ context.Context, endpoint EnhancedStreamableToolCallEndpoint, _ *ToolContext) EnhancedStreamableToolCallEndpoint {
 						return func(ctx context.Context, toolArgument *schema.ToolArgument, opts ...tool.Option) (*schema.StreamReader[*schema.ToolResult], error) {
 							enhancedStreamableCalled = true
 							return endpoint(ctx, toolArgument, opts...)
@@ -271,7 +271,7 @@ func TestHandlersToToolMiddlewaresEnhanced(t *testing.T) {
 			{
 				handler: &testEnhancedToolWrapperHandler{
 					BaseChatModelAgentMiddleware: &BaseChatModelAgentMiddleware{},
-					wrapEnhancedInvokableFn: func(endpoint EnhancedInvokableToolCallEndpoint, tCtx *ToolContext) EnhancedInvokableToolCallEndpoint {
+					wrapEnhancedInvokableFn: func(_ context.Context, endpoint EnhancedInvokableToolCallEndpoint, _ *ToolContext) EnhancedInvokableToolCallEndpoint {
 						return func(ctx context.Context, toolArgument *schema.ToolArgument, opts ...tool.Option) (*schema.ToolResult, error) {
 							return nil, expectedErr
 						}
@@ -298,7 +298,7 @@ func TestHandlersToToolMiddlewaresEnhanced(t *testing.T) {
 			{
 				handler: &testEnhancedToolWrapperHandler{
 					BaseChatModelAgentMiddleware: &BaseChatModelAgentMiddleware{},
-					wrapEnhancedStreamableFn: func(endpoint EnhancedStreamableToolCallEndpoint, tCtx *ToolContext) EnhancedStreamableToolCallEndpoint {
+					wrapEnhancedStreamableFn: func(_ context.Context, endpoint EnhancedStreamableToolCallEndpoint, _ *ToolContext) EnhancedStreamableToolCallEndpoint {
 						return func(ctx context.Context, toolArgument *schema.ToolArgument, opts ...tool.Option) (*schema.StreamReader[*schema.ToolResult], error) {
 							return nil, expectedErr
 						}
@@ -439,7 +439,7 @@ func TestEnhancedToolContextPropagation(t *testing.T) {
 			{
 				handler: &testEnhancedToolWrapperHandler{
 					BaseChatModelAgentMiddleware: &BaseChatModelAgentMiddleware{},
-					wrapEnhancedInvokableFn: func(endpoint EnhancedInvokableToolCallEndpoint, tCtx *ToolContext) EnhancedInvokableToolCallEndpoint {
+					wrapEnhancedInvokableFn: func(_ context.Context, endpoint EnhancedInvokableToolCallEndpoint, tCtx *ToolContext) EnhancedInvokableToolCallEndpoint {
 						capturedCtx = tCtx
 						return endpoint
 					},
@@ -471,7 +471,7 @@ func TestEnhancedToolContextPropagation(t *testing.T) {
 			{
 				handler: &testEnhancedToolWrapperHandler{
 					BaseChatModelAgentMiddleware: &BaseChatModelAgentMiddleware{},
-					wrapEnhancedStreamableFn: func(endpoint EnhancedStreamableToolCallEndpoint, tCtx *ToolContext) EnhancedStreamableToolCallEndpoint {
+					wrapEnhancedStreamableFn: func(_ context.Context, endpoint EnhancedStreamableToolCallEndpoint, tCtx *ToolContext) EnhancedStreamableToolCallEndpoint {
 						capturedCtx = tCtx
 						return endpoint
 					},
@@ -508,7 +508,7 @@ func TestBaseChatModelAgentMiddlewareEnhancedDefaults(t *testing.T) {
 			return &schema.ToolResult{}, nil
 		}
 
-		wrapped := base.WrapEnhancedInvokableToolCall(endpoint, &ToolContext{Name: "test", CallID: "1"})
+		wrapped := base.WrapEnhancedInvokableToolCall(context.Background(), endpoint, &ToolContext{Name: "test", CallID: "1"})
 		_, err := wrapped(context.Background(), &schema.ToolArgument{TextArgument: "{}"})
 
 		assert.NoError(t, err)
@@ -524,7 +524,7 @@ func TestBaseChatModelAgentMiddlewareEnhancedDefaults(t *testing.T) {
 			return schema.StreamReaderFromArray([]*schema.ToolResult{}), nil
 		}
 
-		wrapped := base.WrapEnhancedStreamableToolCall(endpoint, &ToolContext{Name: "test", CallID: "1"})
+		wrapped := base.WrapEnhancedStreamableToolCall(context.Background(), endpoint, &ToolContext{Name: "test", CallID: "1"})
 		_, err := wrapped(context.Background(), &schema.ToolArgument{TextArgument: "{}"})
 
 		assert.NoError(t, err)
@@ -539,7 +539,7 @@ func TestEnhancedToolArgumentsPropagation(t *testing.T) {
 			{
 				handler: &testEnhancedToolWrapperHandler{
 					BaseChatModelAgentMiddleware: &BaseChatModelAgentMiddleware{},
-					wrapEnhancedInvokableFn: func(endpoint EnhancedInvokableToolCallEndpoint, tCtx *ToolContext) EnhancedInvokableToolCallEndpoint {
+					wrapEnhancedInvokableFn: func(_ context.Context, endpoint EnhancedInvokableToolCallEndpoint, _ *ToolContext) EnhancedInvokableToolCallEndpoint {
 						return func(ctx context.Context, toolArgument *schema.ToolArgument, opts ...tool.Option) (*schema.ToolResult, error) {
 							capturedArgs = toolArgument.TextArgument
 							return endpoint(ctx, toolArgument, opts...)
@@ -579,7 +579,7 @@ func TestEnhancedToolResultPropagation(t *testing.T) {
 			{
 				handler: &testEnhancedToolWrapperHandler{
 					BaseChatModelAgentMiddleware: &BaseChatModelAgentMiddleware{},
-					wrapEnhancedInvokableFn: func(endpoint EnhancedInvokableToolCallEndpoint, tCtx *ToolContext) EnhancedInvokableToolCallEndpoint {
+					wrapEnhancedInvokableFn: func(_ context.Context, endpoint EnhancedInvokableToolCallEndpoint, _ *ToolContext) EnhancedInvokableToolCallEndpoint {
 						return func(ctx context.Context, toolArgument *schema.ToolArgument, opts ...tool.Option) (*schema.ToolResult, error) {
 							result, err := endpoint(ctx, toolArgument, opts...)
 							capturedResult = result
@@ -615,7 +615,7 @@ func TestEnhancedToolResultPropagation(t *testing.T) {
 			{
 				handler: &testEnhancedToolWrapperHandler{
 					BaseChatModelAgentMiddleware: &BaseChatModelAgentMiddleware{},
-					wrapEnhancedInvokableFn: func(endpoint EnhancedInvokableToolCallEndpoint, tCtx *ToolContext) EnhancedInvokableToolCallEndpoint {
+					wrapEnhancedInvokableFn: func(_ context.Context, endpoint EnhancedInvokableToolCallEndpoint, _ *ToolContext) EnhancedInvokableToolCallEndpoint {
 						return func(ctx context.Context, toolArgument *schema.ToolArgument, opts ...tool.Option) (*schema.ToolResult, error) {
 							_, err := endpoint(ctx, toolArgument, opts...)
 							if err != nil {
@@ -652,7 +652,7 @@ func TestEnhancedToolEndpointErrorFromNext(t *testing.T) {
 			{
 				handler: &testEnhancedToolWrapperHandler{
 					BaseChatModelAgentMiddleware: &BaseChatModelAgentMiddleware{},
-					wrapEnhancedInvokableFn: func(endpoint EnhancedInvokableToolCallEndpoint, tCtx *ToolContext) EnhancedInvokableToolCallEndpoint {
+					wrapEnhancedInvokableFn: func(_ context.Context, endpoint EnhancedInvokableToolCallEndpoint, _ *ToolContext) EnhancedInvokableToolCallEndpoint {
 						return func(ctx context.Context, toolArgument *schema.ToolArgument, opts ...tool.Option) (*schema.ToolResult, error) {
 							return endpoint(ctx, toolArgument, opts...)
 						}
@@ -680,7 +680,7 @@ func TestEnhancedToolEndpointErrorFromNext(t *testing.T) {
 			{
 				handler: &testEnhancedToolWrapperHandler{
 					BaseChatModelAgentMiddleware: &BaseChatModelAgentMiddleware{},
-					wrapEnhancedStreamableFn: func(endpoint EnhancedStreamableToolCallEndpoint, tCtx *ToolContext) EnhancedStreamableToolCallEndpoint {
+					wrapEnhancedStreamableFn: func(_ context.Context, endpoint EnhancedStreamableToolCallEndpoint, _ *ToolContext) EnhancedStreamableToolCallEndpoint {
 						return func(ctx context.Context, toolArgument *schema.ToolArgument, opts ...tool.Option) (*schema.StreamReader[*schema.ToolResult], error) {
 							return endpoint(ctx, toolArgument, opts...)
 						}
@@ -716,7 +716,7 @@ func TestWrapModelStreamChunksPreserved(t *testing.T) {
 
 		noopWrapModelHandler := &testModelWrapperHandler{
 			BaseChatModelAgentMiddleware: &BaseChatModelAgentMiddleware{},
-			fn: func(m model.BaseChatModel, mc *ModelContext) model.BaseChatModel {
+			fn: func(_ context.Context, m model.BaseChatModel, _ *ModelContext) model.BaseChatModel {
 				return m
 			},
 		}
@@ -790,7 +790,7 @@ func TestWrapModelStreamChunksPreserved(t *testing.T) {
 
 		streamConsumingWrapModelHandler := &testModelWrapperHandler{
 			BaseChatModelAgentMiddleware: &BaseChatModelAgentMiddleware{},
-			fn: func(m model.BaseChatModel, mc *ModelContext) model.BaseChatModel {
+			fn: func(_ context.Context, m model.BaseChatModel, _ *ModelContext) model.BaseChatModel {
 				return &streamConsumingModelWrapper{inner: m}
 			},
 		}
@@ -863,14 +863,14 @@ func TestWrapModelStreamChunksPreserved(t *testing.T) {
 
 		handler1 := &testModelWrapperHandler{
 			BaseChatModelAgentMiddleware: &BaseChatModelAgentMiddleware{},
-			fn: func(m model.BaseChatModel, mc *ModelContext) model.BaseChatModel {
+			fn: func(_ context.Context, m model.BaseChatModel, _ *ModelContext) model.BaseChatModel {
 				return &streamConsumingModelWrapper{inner: m}
 			},
 		}
 
 		handler2 := &testModelWrapperHandler{
 			BaseChatModelAgentMiddleware: &BaseChatModelAgentMiddleware{},
-			fn: func(m model.BaseChatModel, mc *ModelContext) model.BaseChatModel {
+			fn: func(_ context.Context, m model.BaseChatModel, _ *ModelContext) model.BaseChatModel {
 				return m
 			},
 		}
@@ -985,7 +985,7 @@ func TestHandlersToToolMiddlewaresConditionCheck(t *testing.T) {
 			{
 				handler: &testEnhancedToolWrapperHandler{
 					BaseChatModelAgentMiddleware: &BaseChatModelAgentMiddleware{},
-					wrapEnhancedInvokableFn: func(endpoint EnhancedInvokableToolCallEndpoint, tCtx *ToolContext) EnhancedInvokableToolCallEndpoint {
+					wrapEnhancedInvokableFn: func(_ context.Context, endpoint EnhancedInvokableToolCallEndpoint, _ *ToolContext) EnhancedInvokableToolCallEndpoint {
 						return endpoint
 					},
 				},
@@ -1075,7 +1075,7 @@ func TestEventSenderModelWrapperCustomPosition(t *testing.T) {
 		modifiedContent := "Modified"
 		contentModifyingHandler := &testModelWrapperHandler{
 			BaseChatModelAgentMiddleware: &BaseChatModelAgentMiddleware{},
-			fn: func(m model.BaseChatModel, mc *ModelContext) model.BaseChatModel {
+			fn: func(_ context.Context, m model.BaseChatModel, _ *ModelContext) model.BaseChatModel {
 				return &contentModifyingModelWrapper{inner: m, newContent: modifiedContent}
 			},
 		}
@@ -1126,7 +1126,7 @@ func TestEventSenderModelWrapperCustomPosition(t *testing.T) {
 		modifiedContent := "Modified"
 		contentModifyingHandler := &testModelWrapperHandler{
 			BaseChatModelAgentMiddleware: &BaseChatModelAgentMiddleware{},
-			fn: func(m model.BaseChatModel, mc *ModelContext) model.BaseChatModel {
+			fn: func(_ context.Context, m model.BaseChatModel, _ *ModelContext) model.BaseChatModel {
 				return &contentModifyingModelWrapper{inner: m, newContent: modifiedContent}
 			},
 		}

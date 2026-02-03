@@ -113,35 +113,35 @@ func (h *testAfterModelRewriteStateHandler) AfterModelRewriteState(ctx context.C
 
 type testToolWrapperHandler struct {
 	*BaseChatModelAgentMiddleware
-	wrapInvokableFn  func(InvokableToolCallEndpoint, *ToolContext) InvokableToolCallEndpoint
-	wrapStreamableFn func(StreamableToolCallEndpoint, *ToolContext) StreamableToolCallEndpoint
+	wrapInvokableFn  func(context.Context, InvokableToolCallEndpoint, *ToolContext) InvokableToolCallEndpoint
+	wrapStreamableFn func(context.Context, StreamableToolCallEndpoint, *ToolContext) StreamableToolCallEndpoint
 }
 
-func (h *testToolWrapperHandler) WrapInvokableToolCall(endpoint InvokableToolCallEndpoint, tCtx *ToolContext) InvokableToolCallEndpoint {
+func (h *testToolWrapperHandler) WrapInvokableToolCall(ctx context.Context, endpoint InvokableToolCallEndpoint, tCtx *ToolContext) InvokableToolCallEndpoint {
 	if h.wrapInvokableFn != nil {
-		return h.wrapInvokableFn(endpoint, tCtx)
+		return h.wrapInvokableFn(ctx, endpoint, tCtx)
 	}
 	return endpoint
 }
 
-func (h *testToolWrapperHandler) WrapStreamableToolCall(endpoint StreamableToolCallEndpoint, tCtx *ToolContext) StreamableToolCallEndpoint {
+func (h *testToolWrapperHandler) WrapStreamableToolCall(ctx context.Context, endpoint StreamableToolCallEndpoint, tCtx *ToolContext) StreamableToolCallEndpoint {
 	if h.wrapStreamableFn != nil {
-		return h.wrapStreamableFn(endpoint, tCtx)
+		return h.wrapStreamableFn(ctx, endpoint, tCtx)
 	}
 	return endpoint
 }
 
 type testModelWrapperHandler struct {
 	*BaseChatModelAgentMiddleware
-	fn func(model.BaseChatModel, *ModelContext) model.BaseChatModel
+	fn func(context.Context, model.BaseChatModel, *ModelContext) model.BaseChatModel
 }
 
-func (h *testModelWrapperHandler) WrapModel(m model.BaseChatModel, mc *ModelContext) model.BaseChatModel {
-	return h.fn(m, mc)
+func (h *testModelWrapperHandler) WrapModel(ctx context.Context, m model.BaseChatModel, mc *ModelContext) model.BaseChatModel {
+	return h.fn(ctx, m, mc)
 }
 
-func newTestInvokableToolCallWrapper(beforeFn, afterFn func()) func(InvokableToolCallEndpoint, *ToolContext) InvokableToolCallEndpoint {
-	return func(endpoint InvokableToolCallEndpoint, tCtx *ToolContext) InvokableToolCallEndpoint {
+func newTestInvokableToolCallWrapper(beforeFn, afterFn func()) func(context.Context, InvokableToolCallEndpoint, *ToolContext) InvokableToolCallEndpoint {
+	return func(_ context.Context, endpoint InvokableToolCallEndpoint, _ *ToolContext) InvokableToolCallEndpoint {
 		return func(ctx context.Context, argumentsInJSON string, opts ...tool.Option) (string, error) {
 			if beforeFn != nil {
 				beforeFn()
@@ -155,8 +155,8 @@ func newTestInvokableToolCallWrapper(beforeFn, afterFn func()) func(InvokableToo
 	}
 }
 
-func newResultModifyingInvokableToolCallWrapper(modifyFn func(string) string) func(InvokableToolCallEndpoint, *ToolContext) InvokableToolCallEndpoint {
-	return func(endpoint InvokableToolCallEndpoint, tCtx *ToolContext) InvokableToolCallEndpoint {
+func newResultModifyingInvokableToolCallWrapper(modifyFn func(string) string) func(context.Context, InvokableToolCallEndpoint, *ToolContext) InvokableToolCallEndpoint {
+	return func(_ context.Context, endpoint InvokableToolCallEndpoint, _ *ToolContext) InvokableToolCallEndpoint {
 		return func(ctx context.Context, argumentsInJSON string, opts ...tool.Option) (string, error) {
 			result, err := endpoint(ctx, argumentsInJSON, opts...)
 			if err == nil && modifyFn != nil {
@@ -167,8 +167,8 @@ func newResultModifyingInvokableToolCallWrapper(modifyFn func(string) string) fu
 	}
 }
 
-func newTestStreamableToolCallWrapper(beforeFn, afterFn func()) func(StreamableToolCallEndpoint, *ToolContext) StreamableToolCallEndpoint {
-	return func(endpoint StreamableToolCallEndpoint, tCtx *ToolContext) StreamableToolCallEndpoint {
+func newTestStreamableToolCallWrapper(beforeFn, afterFn func()) func(context.Context, StreamableToolCallEndpoint, *ToolContext) StreamableToolCallEndpoint {
+	return func(_ context.Context, endpoint StreamableToolCallEndpoint, _ *ToolContext) StreamableToolCallEndpoint {
 		return func(ctx context.Context, argumentsInJSON string, opts ...tool.Option) (*schema.StreamReader[string], error) {
 			if beforeFn != nil {
 				beforeFn()
@@ -781,7 +781,7 @@ func TestToolContextFunctions(t *testing.T) {
 			Handlers: []ChatModelAgentMiddleware{
 				&testModelWrapperHandler{
 					BaseChatModelAgentMiddleware: &BaseChatModelAgentMiddleware{},
-					fn: func(m model.BaseChatModel, mc *ModelContext) model.BaseChatModel {
+					fn: func(_ context.Context, m model.BaseChatModel, mc *ModelContext) model.BaseChatModel {
 						return &toolChainingTestModel{
 							inner: m,
 							mc:    mc,
@@ -1060,8 +1060,8 @@ func (h *countingHandler) AfterModelRewriteState(ctx context.Context, state *Cha
 	return ctx, state, nil
 }
 
-func newTestModelWrapperFn(beforeFn, afterFn func()) func(model.BaseChatModel, *ModelContext) model.BaseChatModel {
-	return func(m model.BaseChatModel, _ *ModelContext) model.BaseChatModel {
+func newTestModelWrapperFn(beforeFn, afterFn func()) func(context.Context, model.BaseChatModel, *ModelContext) model.BaseChatModel {
+	return func(_ context.Context, m model.BaseChatModel, _ *ModelContext) model.BaseChatModel {
 		return &testWrappedModel{
 			inner:    m,
 			beforeFn: beforeFn,
@@ -1295,8 +1295,8 @@ func (m *simpleChatModelWithoutCallbacks) WithTools(tools []*schema.ToolInfo) (m
 	return m, nil
 }
 
-func newInputModifyingWrapperFn(inputPrefix string) func(model.BaseChatModel, *ModelContext) model.BaseChatModel {
-	return func(m model.BaseChatModel, _ *ModelContext) model.BaseChatModel {
+func newInputModifyingWrapperFn(inputPrefix string) func(context.Context, model.BaseChatModel, *ModelContext) model.BaseChatModel {
+	return func(_ context.Context, m model.BaseChatModel, _ *ModelContext) model.BaseChatModel {
 		return &inputOutputModifyingModel{
 			inner:       m,
 			inputPrefix: inputPrefix,
@@ -1675,8 +1675,8 @@ func TestIsMethodOverridden(t *testing.T) {
 	t.Run("ToolWrapperMethodsOverridden", func(t *testing.T) {
 		handler := &testToolWrapperHandler{
 			BaseChatModelAgentMiddleware: &BaseChatModelAgentMiddleware{},
-			wrapInvokableFn:              func(e InvokableToolCallEndpoint, tc *ToolContext) InvokableToolCallEndpoint { return e },
-			wrapStreamableFn:             func(e StreamableToolCallEndpoint, tc *ToolContext) StreamableToolCallEndpoint { return e },
+			wrapInvokableFn:              func(_ context.Context, e InvokableToolCallEndpoint, tc *ToolContext) InvokableToolCallEndpoint { return e },
+			wrapStreamableFn:             func(_ context.Context, e StreamableToolCallEndpoint, tc *ToolContext) StreamableToolCallEndpoint { return e },
 		}
 		assert.True(t, isMethodOverridden(handler, "WrapInvokableToolCall"), "WrapInvokableToolCall should be overridden")
 		assert.True(t, isMethodOverridden(handler, "WrapStreamableToolCall"), "WrapStreamableToolCall should be overridden")
@@ -1686,7 +1686,7 @@ func TestIsMethodOverridden(t *testing.T) {
 	t.Run("ModelWrapperMethodOverridden", func(t *testing.T) {
 		handler := &testModelWrapperHandler{
 			BaseChatModelAgentMiddleware: &BaseChatModelAgentMiddleware{},
-			fn:                           func(m model.BaseChatModel, mc *ModelContext) model.BaseChatModel { return m },
+			fn:                           func(_ context.Context, m model.BaseChatModel, mc *ModelContext) model.BaseChatModel { return m },
 		}
 		assert.True(t, isMethodOverridden(handler, "WrapModel"), "WrapModel should be overridden")
 		assert.False(t, isMethodOverridden(handler, "BeforeAgent"), "BeforeAgent is promoted, not overridden")
@@ -1746,8 +1746,8 @@ func TestNewHandlerInfo(t *testing.T) {
 	t.Run("HandlerWithToolWrappers", func(t *testing.T) {
 		handler := &testToolWrapperHandler{
 			BaseChatModelAgentMiddleware: &BaseChatModelAgentMiddleware{},
-			wrapInvokableFn:              func(e InvokableToolCallEndpoint, tc *ToolContext) InvokableToolCallEndpoint { return e },
-			wrapStreamableFn:             func(e StreamableToolCallEndpoint, tc *ToolContext) StreamableToolCallEndpoint { return e },
+			wrapInvokableFn:              func(_ context.Context, e InvokableToolCallEndpoint, tc *ToolContext) InvokableToolCallEndpoint { return e },
+			wrapStreamableFn:             func(_ context.Context, e StreamableToolCallEndpoint, tc *ToolContext) StreamableToolCallEndpoint { return e },
 		}
 		info := newHandlerInfo(handler)
 
@@ -1762,7 +1762,7 @@ func TestNewHandlerInfo(t *testing.T) {
 	t.Run("HandlerWithModelWrapper", func(t *testing.T) {
 		handler := &testModelWrapperHandler{
 			BaseChatModelAgentMiddleware: &BaseChatModelAgentMiddleware{},
-			fn:                           func(m model.BaseChatModel, mc *ModelContext) model.BaseChatModel { return m },
+			fn:                           func(_ context.Context, m model.BaseChatModel, mc *ModelContext) model.BaseChatModel { return m },
 		}
 		info := newHandlerInfo(handler)
 
@@ -1912,7 +1912,7 @@ func TestToolContextInWrappers(t *testing.T) {
 			Handlers: []ChatModelAgentMiddleware{
 				&testToolWrapperHandler{
 					BaseChatModelAgentMiddleware: &BaseChatModelAgentMiddleware{},
-					wrapInvokableFn: func(endpoint InvokableToolCallEndpoint, tCtx *ToolContext) InvokableToolCallEndpoint {
+					wrapInvokableFn: func(_ context.Context, endpoint InvokableToolCallEndpoint, tCtx *ToolContext) InvokableToolCallEndpoint {
 						capturedToolName = tCtx.Name
 						capturedCallID = tCtx.CallID
 						return endpoint

@@ -87,7 +87,7 @@ func (m *middleware) BeforeAgent(ctx context.Context, runCtx *adk.ChatModelAgent
 	return ctx, &nRunCtx, nil
 }
 
-func (m *middleware) WrapModel(cm model.BaseChatModel, mc *adk.ModelContext) model.BaseChatModel {
+func (m *middleware) WrapModel(_ context.Context, cm model.BaseChatModel, mc *adk.ModelContext) model.BaseChatModel {
 	return &wrapper{allTools: mc.Tools, cm: cm, dynamicTools: m.dynamicTools}
 }
 

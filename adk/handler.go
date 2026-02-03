@@ -141,7 +141,7 @@ type ChatModelAgentMiddleware interface {
 	// The tCtx parameter provides metadata about the tool:
 	//   - Name: The name of the tool being wrapped
 	//   - CallID: The unique identifier for this specific tool call
-	WrapInvokableToolCall(endpoint InvokableToolCallEndpoint, tCtx *ToolContext) InvokableToolCallEndpoint
+	WrapInvokableToolCall(ctx context.Context, endpoint InvokableToolCallEndpoint, tCtx *ToolContext) InvokableToolCallEndpoint
 
 	// WrapStreamableToolCall wraps a tool's streaming execution with custom behavior.
 	// Return the input endpoint unchanged if no wrapping is needed.
@@ -153,11 +153,11 @@ type ChatModelAgentMiddleware interface {
 	// The tCtx parameter provides metadata about the tool:
 	//   - Name: The name of the tool being wrapped
 	//   - CallID: The unique identifier for this specific tool call
-	WrapStreamableToolCall(endpoint StreamableToolCallEndpoint, tCtx *ToolContext) StreamableToolCallEndpoint
+	WrapStreamableToolCall(ctx context.Context, endpoint StreamableToolCallEndpoint, tCtx *ToolContext) StreamableToolCallEndpoint
 
-	WrapEnhancedInvokableToolCall(endpoint EnhancedInvokableToolCallEndpoint, tCtx *ToolContext) EnhancedInvokableToolCallEndpoint
+	WrapEnhancedInvokableToolCall(ctx context.Context, endpoint EnhancedInvokableToolCallEndpoint, tCtx *ToolContext) EnhancedInvokableToolCallEndpoint
 
-	WrapEnhancedStreamableToolCall(endpoint EnhancedStreamableToolCallEndpoint, tCtx *ToolContext) EnhancedStreamableToolCallEndpoint
+	WrapEnhancedStreamableToolCall(ctx context.Context, endpoint EnhancedStreamableToolCallEndpoint, tCtx *ToolContext) EnhancedStreamableToolCallEndpoint
 
 	// WrapModel wraps a chat model with custom behavior.
 	// Return the input model unchanged if no wrapping is needed.
@@ -169,7 +169,7 @@ type ChatModelAgentMiddleware interface {
 	//
 	// The mc parameter contains the current tool configuration:
 	//   - Tools: The tool infos that will be sent to the model
-	WrapModel(m model.BaseChatModel, mc *ModelContext) model.BaseChatModel
+	WrapModel(ctx context.Context, m model.BaseChatModel, mc *ModelContext) model.BaseChatModel
 }
 
 // BaseChatModelAgentMiddleware provides default no-op implementations for ChatModelAgentMiddleware.
@@ -188,23 +188,23 @@ type ChatModelAgentMiddleware interface {
 //	}
 type BaseChatModelAgentMiddleware struct{}
 
-func (b *BaseChatModelAgentMiddleware) WrapInvokableToolCall(endpoint InvokableToolCallEndpoint, _ *ToolContext) InvokableToolCallEndpoint {
+func (b *BaseChatModelAgentMiddleware) WrapInvokableToolCall(_ context.Context, endpoint InvokableToolCallEndpoint, _ *ToolContext) InvokableToolCallEndpoint {
 	return endpoint
 }
 
-func (b *BaseChatModelAgentMiddleware) WrapStreamableToolCall(endpoint StreamableToolCallEndpoint, _ *ToolContext) StreamableToolCallEndpoint {
+func (b *BaseChatModelAgentMiddleware) WrapStreamableToolCall(_ context.Context, endpoint StreamableToolCallEndpoint, _ *ToolContext) StreamableToolCallEndpoint {
 	return endpoint
 }
 
-func (b *BaseChatModelAgentMiddleware) WrapEnhancedInvokableToolCall(endpoint EnhancedInvokableToolCallEndpoint, tCtx *ToolContext) EnhancedInvokableToolCallEndpoint {
+func (b *BaseChatModelAgentMiddleware) WrapEnhancedInvokableToolCall(_ context.Context, endpoint EnhancedInvokableToolCallEndpoint, _ *ToolContext) EnhancedInvokableToolCallEndpoint {
 	return endpoint
 }
 
-func (b *BaseChatModelAgentMiddleware) WrapEnhancedStreamableToolCall(endpoint EnhancedStreamableToolCallEndpoint, tCtx *ToolContext) EnhancedStreamableToolCallEndpoint {
+func (b *BaseChatModelAgentMiddleware) WrapEnhancedStreamableToolCall(_ context.Context, endpoint EnhancedStreamableToolCallEndpoint, _ *ToolContext) EnhancedStreamableToolCallEndpoint {
 	return endpoint
 }
 
-func (b *BaseChatModelAgentMiddleware) WrapModel(m model.BaseChatModel, _ *ModelContext) model.BaseChatModel {
+func (b *BaseChatModelAgentMiddleware) WrapModel(_ context.Context, m model.BaseChatModel, _ *ModelContext) model.BaseChatModel {
 	return m
 }
 
