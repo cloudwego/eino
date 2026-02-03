@@ -249,16 +249,31 @@ type ChatModelAgentConfig struct {
 	//  1. AgentMiddleware.BeforeChatModel (hook, runs before model call)
 	//  2. ChatModelAgentMiddleware.BeforeModelRewriteState (hook, can modify state before model call)
 	//  3. retryModelWrapper (internal - retries on failure, if configured)
-	//  4. eventSenderModelWrapper pre-processing (internal - prepares event sending)
-	//  5. ChatModelAgentMiddleware.WrapModel pre-processing (wrapper, first registered runs first)
+	//  4. eventSenderModelWrapper (internal - sends model response events)
+	//  5. ChatModelAgentMiddleware.WrapModel (wrapper, first registered is outermost)
 	//  6. callbackInjectionModelWrapper (internal - injects callbacks if not enabled)
 	//  7. Model.Generate/Stream
-	//  8. callbackInjectionModelWrapper post-processing
-	//  9. ChatModelAgentMiddleware.WrapModel post-processing (wrapper, first registered runs last)
-	// 10. eventSenderModelWrapper post-processing (internal - sends model response events)
-	// 11. retryModelWrapper post-processing (internal - handles retry logic)
-	// 12. ChatModelAgentMiddleware.AfterModelRewriteState (hook, can modify state after model call)
-	// 13. AgentMiddleware.AfterChatModel (hook, runs after model call)
+	//  8. ChatModelAgentMiddleware.AfterModelRewriteState (hook, can modify state after model call)
+	//  9. AgentMiddleware.AfterChatModel (hook, runs after model call)
+	//
+	// Custom Event Sender Position:
+	// By default, events are sent after all user middlewares (WrapModel) have processed the output,
+	// containing the modified messages. To send events with original (unmodified) output, pass
+	// NewEventSenderModelWrapper as a Handler after the modifying middleware:
+	//
+	//   agent, _ := adk.NewChatModelAgent(ctx, &adk.ChatModelAgentConfig{
+	//       Handlers: []adk.ChatModelAgentMiddleware{
+	//           myCustomHandler,                   // First registered = outermost wrapper
+	//           adk.NewEventSenderModelWrapper(),  // Last registered = innermost, events sent with original output
+	//       },
+	//   })
+	//
+	// Handler order: first registered is outermost. So [A, B, C] becomes A(B(C(model))).
+	// EventSenderModelWrapper sends events in post-processing, so placing it innermost
+	// means it receives the original model output before outer handlers modify it.
+	//
+	// When EventSenderModelWrapper is detected in Handlers, the framework skips
+	// the default event sender to avoid duplicate events.
 	//
 	// Tool call lifecycle (outermost to innermost):
 	//  1. eventSenderToolHandler (internal ToolMiddleware - sends tool result events after all processing)
