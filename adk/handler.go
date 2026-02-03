@@ -340,3 +340,18 @@ func DeleteRunLocalValue(ctx context.Context, key string) error {
 	}
 	return nil
 }
+
+// SendEvent sends a custom AgentEvent to the event stream during agent execution.
+// This allows ChatModelAgentMiddleware implementations to emit custom events that will be
+// received by the caller iterating over the agent's event stream.
+//
+// This function can only be called from within a ChatModelAgentMiddleware during agent execution.
+// Returns an error if called outside of an agent execution context.
+func SendEvent(ctx context.Context, event *AgentEvent) error {
+	execCtx := getChatModelAgentExecCtx(ctx)
+	if execCtx == nil || execCtx.generator == nil {
+		return fmt.Errorf("SendEvent failed: must be called within a ChatModelAgent Run() or Resume() execution context")
+	}
+	execCtx.generator.Send(event)
+	return nil
+}
