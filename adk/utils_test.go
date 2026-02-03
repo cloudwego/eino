@@ -18,7 +18,9 @@ package adk
 
 import (
 	"bytes"
+	"context"
 	"encoding/gob"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"sync"
@@ -402,4 +404,115 @@ func TestAgentEventWrapper_GobEncoding_WithStreamSuccess(t *testing.T) {
 	assert.Equal(t, "TestAgent", decoded.AgentName)
 	assert.Equal(t, int64(67890), decoded.TS)
 	assert.Empty(t, decoded.StreamErr)
+}
+
+func TestGenTransferMessages(t *testing.T) {
+	ctx := context.Background()
+	destAgentName := "test_agent"
+
+	assistantMsg, toolMsg := GenTransferMessages(ctx, destAgentName)
+
+	// Verify assistant message
+	assert.NotNil(t, assistantMsg)
+	assert.Equal(t, "", assistantMsg.Content)
+
+	// Verify tool calls in assistant message
+	assert.NotNil(t, assistantMsg.ToolCalls, "assistant message should have tool calls")
+	assert.Equal(t, 1, len(assistantMsg.ToolCalls), "should have exactly one tool call")
+
+	toolCall := assistantMsg.ToolCalls[0]
+
+	// Verify tool call ID is not empty
+	assert.NotEmpty(t, toolCall.ID, "tool call ID should not be empty")
+
+	// Verify tool call function name
+	assert.Equal(t, TransferToAgentToolName, toolCall.Function.Name,
+		"tool call function name should be TransferToAgentToolName")
+
+	// Verify tool call arguments is valid JSON
+	var args map[string]string
+	err := json.Unmarshal([]byte(toolCall.Function.Arguments), &args)
+	assert.NoError(t, err, "tool call arguments should be valid JSON")
+
+	// Verify arguments contain agent_name field
+	agentName, exists := args["agent_name"]
+	assert.True(t, exists, "arguments should contain agent_name field")
+	assert.Equal(t, destAgentName, agentName, "agent_name should match destAgentName")
+
+	// Verify tool message
+	assert.NotNil(t, toolMsg)
+	assert.NotEmpty(t, toolMsg.Content, "tool message content should not be empty")
+	assert.Contains(t, toolMsg.Content, destAgentName,
+		"tool message content should contain destAgentName")
+
+	// Verify tool message has tool name
+	assert.NotEmpty(t, toolMsg.ToolName, "tool message should have tool name")
+	assert.Equal(t, TransferToAgentToolName, toolMsg.ToolName,
+		"tool message tool name should be TransferToAgentToolName")
+
+	// Verify tool message has tool call ID
+	assert.NotEmpty(t, toolMsg.ToolCallID, "tool message should have tool call ID")
+	assert.Equal(t, toolCall.ID, toolMsg.ToolCallID,
+		"tool message tool call ID should match assistant message tool call ID")
+}
+
+func TestGenTransferMessages_EmptyAgentName(t *testing.T) {
+	ctx := context.Background()
+	destAgentName := ""
+
+	assistantMsg, toolMsg := GenTransferMessages(ctx, destAgentName)
+
+	// Verify assistant message
+	assert.NotNil(t, assistantMsg)
+	assert.NotNil(t, assistantMsg.ToolCalls)
+	assert.Equal(t, 1, len(assistantMsg.ToolCalls))
+
+	toolCall := assistantMsg.ToolCalls[0]
+
+	// Verify arguments structure even with empty agent name
+	var args map[string]string
+	err := json.Unmarshal([]byte(toolCall.Function.Arguments), &args)
+	assert.NoError(t, err, "tool call arguments should be valid JSON even with empty agent name")
+
+	agentName, exists := args["agent_name"]
+	assert.True(t, exists)
+	assert.Equal(t, "", agentName, "agent_name should be empty string")
+
+	// Verify tool message
+	assert.NotNil(t, toolMsg)
+	assert.NotEmpty(t, toolMsg.Content)
+}
+
+func TestGenTransferMessages_SpecialCharactersInAgentName(t *testing.T) {
+	ctx := context.Background()
+	specialNames := []string{
+		"agent-with-dashes",
+		"agent_with_underscores",
+		"agent.with.dots",
+		"agent with spaces",
+		"agent/with/slashes",
+		`agent"with"quotes`,
+		"agent'with'apostrophes",
+	}
+
+	for _, destAgentName := range specialNames {
+		t.Run(destAgentName, func(t *testing.T) {
+			assistantMsg, _ := GenTransferMessages(ctx, destAgentName)
+
+			assert.NotNil(t, assistantMsg.ToolCalls)
+			assert.Equal(t, 1, len(assistantMsg.ToolCalls))
+
+			toolCall := assistantMsg.ToolCalls[0]
+
+			// Verify arguments can be parsed correctly
+			var args map[string]string
+			err := json.Unmarshal([]byte(toolCall.Function.Arguments), &args)
+			assert.NoError(t, err, "arguments should be valid JSON for special characters")
+
+			agentName, exists := args["agent_name"]
+			assert.True(t, exists)
+			assert.Equal(t, destAgentName, agentName,
+				"agent_name should preserve special characters")
+		})
+	}
 }
