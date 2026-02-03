@@ -778,7 +778,7 @@ func TestWrapModelStreamChunksPreserved(t *testing.T) {
 		}
 	})
 
-	t.Run("AgentEventMessageStreamShouldPreserveChunksWithStreamConsumingWrapModel", func(t *testing.T) {
+	t.Run("AgentEventMessageStreamShouldReflectUserMiddlewareModifications", func(t *testing.T) {
 		ctx := context.Background()
 
 		chunk1 := schema.AssistantMessage("Hello ", nil)
@@ -840,19 +840,18 @@ func TestWrapModelStreamChunksPreserved(t *testing.T) {
 				receivedChunks = append(receivedChunks, chunk)
 			}
 
-			assert.Equal(t, 2, len(receivedChunks),
-				"AgentEvent's MessageStream should contain 2 separate chunks, not 1 concatenated chunk. "+
-					"Got %d chunks instead. This indicates the stream is being concatenated before being sent to AgentEvent.",
+			assert.Equal(t, 1, len(receivedChunks),
+				"AgentEvent's MessageStream should contain 1 concatenated chunk (modified by user middleware). "+
+					"Got %d chunks instead.",
 				len(receivedChunks))
 
-			if len(receivedChunks) >= 2 {
-				assert.Equal(t, "Hello ", receivedChunks[0].Content, "First chunk content should be preserved")
-				assert.Equal(t, "World", receivedChunks[1].Content, "Second chunk content should be preserved")
+			if len(receivedChunks) >= 1 {
+				assert.Equal(t, "Hello World", receivedChunks[0].Content, "Chunk content should be concatenated by user middleware")
 			}
 		}
 	})
 
-	t.Run("AgentEventMessageStreamShouldPreserveChunksWithMultipleWrapModelHandlers", func(t *testing.T) {
+	t.Run("AgentEventMessageStreamShouldReflectMultipleUserMiddlewareModifications", func(t *testing.T) {
 		ctx := context.Background()
 
 		chunk1 := schema.AssistantMessage("Hello ", nil)
@@ -921,14 +920,13 @@ func TestWrapModelStreamChunksPreserved(t *testing.T) {
 				receivedChunks = append(receivedChunks, chunk)
 			}
 
-			assert.Equal(t, 2, len(receivedChunks),
-				"AgentEvent's MessageStream should contain 2 separate chunks, not 1 concatenated chunk. "+
-					"Got %d chunks instead. This indicates the stream is being concatenated before being sent to AgentEvent.",
+			assert.Equal(t, 1, len(receivedChunks),
+				"AgentEvent's MessageStream should contain 1 concatenated chunk (modified by user middleware). "+
+					"Got %d chunks instead.",
 				len(receivedChunks))
 
-			if len(receivedChunks) >= 2 {
-				assert.Equal(t, "Hello ", receivedChunks[0].Content, "First chunk content should be preserved")
-				assert.Equal(t, "World", receivedChunks[1].Content, "Second chunk content should be preserved")
+			if len(receivedChunks) >= 1 {
+				assert.Equal(t, "Hello World", receivedChunks[0].Content, "Chunk content should be concatenated by user middleware")
 			}
 		}
 	})
@@ -1022,4 +1020,177 @@ func TestHandlersToToolMiddlewaresConditionCheck(t *testing.T) {
 		assert.NotNil(t, middlewares[0].EnhancedInvokable)
 		assert.NotNil(t, middlewares[0].EnhancedStreamable)
 	})
+}
+
+func TestEventSenderModelWrapperCustomPosition(t *testing.T) {
+	t.Run("UserConfiguredEventSenderSkipsDefaultEventSender", func(t *testing.T) {
+		ctx := context.Background()
+
+		chunk1 := schema.AssistantMessage("Hello ", nil)
+		chunk2 := schema.AssistantMessage("World", nil)
+
+		mockModel := &mockStreamingModel{
+			chunks: []*schema.Message{chunk1, chunk2},
+		}
+
+		agent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+			Name:        "TestAgent",
+			Description: "Test agent",
+			Model:       mockModel,
+			Handlers:    []ChatModelAgentMiddleware{NewEventSenderModelWrapper()},
+		})
+		assert.NoError(t, err)
+
+		r := NewRunner(ctx, RunnerConfig{
+			Agent:           agent,
+			EnableStreaming: true,
+		})
+		iter := r.Run(ctx, []Message{schema.UserMessage("test")})
+
+		var streamingEvents []*AgentEvent
+		for {
+			event, ok := iter.Next()
+			if !ok {
+				break
+			}
+			if event.Output != nil && event.Output.MessageOutput != nil &&
+				event.Output.MessageOutput.IsStreaming &&
+				event.Output.MessageOutput.Role == schema.Assistant {
+				streamingEvents = append(streamingEvents, event)
+			}
+		}
+
+		assert.Equal(t, 1, len(streamingEvents), "Should have exactly one streaming event (no duplicate from default event sender)")
+	})
+
+	t.Run("EventSenderAfterUserMiddlewareByDefault", func(t *testing.T) {
+		ctx := context.Background()
+
+		mockModel := &mockStreamingModel{
+			chunks: []*schema.Message{
+				schema.AssistantMessage("Original", nil),
+			},
+		}
+
+		modifiedContent := "Modified"
+		contentModifyingHandler := &testModelWrapperHandler{
+			BaseChatModelAgentMiddleware: &BaseChatModelAgentMiddleware{},
+			fn: func(m model.BaseChatModel, mc *ModelContext) model.BaseChatModel {
+				return &contentModifyingModelWrapper{inner: m, newContent: modifiedContent}
+			},
+		}
+
+		agent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+			Name:        "TestAgent",
+			Description: "Test agent",
+			Model:       mockModel,
+			Handlers:    []ChatModelAgentMiddleware{contentModifyingHandler},
+		})
+		assert.NoError(t, err)
+
+		r := NewRunner(ctx, RunnerConfig{
+			Agent:           agent,
+			EnableStreaming: false,
+		})
+		iter := r.Run(ctx, []Message{schema.UserMessage("test")})
+
+		var assistantEvents []*AgentEvent
+		for {
+			event, ok := iter.Next()
+			if !ok {
+				break
+			}
+			if event.Output != nil && event.Output.MessageOutput != nil &&
+				event.Output.MessageOutput.Role == schema.Assistant {
+				assistantEvents = append(assistantEvents, event)
+			}
+		}
+
+		assert.GreaterOrEqual(t, len(assistantEvents), 1, "Should have at least one assistant event")
+		if len(assistantEvents) > 0 {
+			msg := assistantEvents[0].Output.MessageOutput.Message
+			assert.Equal(t, modifiedContent, msg.Content, "Event should contain modified content from user middleware")
+		}
+	})
+
+	t.Run("EventSenderInnermostGetsOriginalOutput", func(t *testing.T) {
+		ctx := context.Background()
+
+		originalContent := "Original"
+		mockModel := &mockStreamingModel{
+			chunks: []*schema.Message{
+				schema.AssistantMessage(originalContent, nil),
+			},
+		}
+
+		modifiedContent := "Modified"
+		contentModifyingHandler := &testModelWrapperHandler{
+			BaseChatModelAgentMiddleware: &BaseChatModelAgentMiddleware{},
+			fn: func(m model.BaseChatModel, mc *ModelContext) model.BaseChatModel {
+				return &contentModifyingModelWrapper{inner: m, newContent: modifiedContent}
+			},
+		}
+
+		agent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+			Name:        "TestAgent",
+			Description: "Test agent",
+			Model:       mockModel,
+			Handlers: []ChatModelAgentMiddleware{
+				contentModifyingHandler,
+				NewEventSenderModelWrapper(),
+			},
+		})
+		assert.NoError(t, err)
+
+		r := NewRunner(ctx, RunnerConfig{
+			Agent:           agent,
+			EnableStreaming: false,
+		})
+		iter := r.Run(ctx, []Message{schema.UserMessage("test")})
+
+		var assistantEvents []*AgentEvent
+		for {
+			event, ok := iter.Next()
+			if !ok {
+				break
+			}
+			if event.Output != nil && event.Output.MessageOutput != nil &&
+				event.Output.MessageOutput.Role == schema.Assistant {
+				assistantEvents = append(assistantEvents, event)
+			}
+		}
+
+		assert.GreaterOrEqual(t, len(assistantEvents), 1, "Should have at least one assistant event")
+		if len(assistantEvents) > 0 {
+			msg := assistantEvents[0].Output.MessageOutput.Message
+			assert.Equal(t, originalContent, msg.Content, "Event should contain original content (EventSenderModelWrapper is innermost)")
+		}
+	})
+}
+
+type contentModifyingModelWrapper struct {
+	inner      model.BaseChatModel
+	newContent string
+}
+
+func (m *contentModifyingModelWrapper) Generate(ctx context.Context, input []*schema.Message, opts ...model.Option) (*schema.Message, error) {
+	result, err := m.inner.Generate(ctx, input, opts...)
+	if err != nil {
+		return nil, err
+	}
+	result.Content = m.newContent
+	return result, nil
+}
+
+func (m *contentModifyingModelWrapper) Stream(ctx context.Context, input []*schema.Message, opts ...model.Option) (*schema.StreamReader[*schema.Message], error) {
+	stream, err := m.inner.Stream(ctx, input, opts...)
+	if err != nil {
+		return nil, err
+	}
+	result, err := schema.ConcatMessageStream(stream)
+	if err != nil {
+		return nil, err
+	}
+	result.Content = m.newContent
+	return schema.StreamReaderFromArray([]*schema.Message{result}), nil
 }

@@ -51,6 +51,11 @@ type ModelContext struct {
 	// Tools contains the current tool list configured for the agent.
 	// This is populated at request time with the tools that will be sent to the model.
 	Tools []*schema.ToolInfo
+
+	// ModelRetryConfig contains the retry configuration for the model.
+	// This is populated at request time from the agent's ModelRetryConfig.
+	// Used by EventSenderModelWrapper to wrap stream errors appropriately.
+	ModelRetryConfig *ModelRetryConfig
 }
 
 // ChatModelAgentContext contains runtime information passed to handlers before each ChatModelAgent run.
