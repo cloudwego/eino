@@ -47,18 +47,13 @@ func buildModelWrappers(m model.BaseChatModel, config *modelWrapperConfig) model
 		wrapped = (&callbackInjectionModelWrapper{}).WrapModel(wrapped)
 	}
 
-	wrapped = (&eventSenderModelWrapper{modelRetryConfig: config.retryConfig}).WrapModel(wrapped)
-
-	if config.retryConfig != nil {
-		wrapped = newRetryModelWrapper(wrapped, config.retryConfig)
-	}
-
 	wrapped = &stateModelWrapper{
-		inner:       wrapped,
-		original:    m,
-		handlers:    config.handlers,
-		middlewares: config.middlewares,
-		toolInfos:   config.toolInfos,
+		inner:            wrapped,
+		original:         m,
+		handlers:         config.handlers,
+		middlewares:      config.middlewares,
+		toolInfos:        config.toolInfos,
+		modelRetryConfig: config.retryConfig,
 	}
 
 	return wrapped
@@ -115,6 +110,7 @@ func handlersToToolMiddlewares(handlers []handlerInfo) []compose.ToolMiddleware 
 						CallID: input.CallID,
 					}
 					wrappedEndpoint := handler.WrapInvokableToolCall(
+						ctx,
 						func(ctx context.Context, argumentsInJSON string, opts ...tool.Option) (string, error) {
 							output, err := next(ctx, &compose.ToolInput{
 								Name:        input.Name,
@@ -147,6 +143,7 @@ func handlersToToolMiddlewares(handlers []handlerInfo) []compose.ToolMiddleware 
 						CallID: input.CallID,
 					}
 					wrappedEndpoint := handler.WrapStreamableToolCall(
+						ctx,
 						func(ctx context.Context, argumentsInJSON string, opts ...tool.Option) (*schema.StreamReader[string], error) {
 							output, err := next(ctx, &compose.ToolInput{
 								Name:        input.Name,
@@ -179,6 +176,7 @@ func handlersToToolMiddlewares(handlers []handlerInfo) []compose.ToolMiddleware 
 						CallID: input.CallID,
 					}
 					wrappedEndpoint := handler.WrapEnhancedInvokableToolCall(
+						ctx,
 						func(ctx context.Context, toolArgument *schema.ToolArgument, opts ...tool.Option) (*schema.ToolResult, error) {
 							output, err := next(ctx, &compose.ToolInput{
 								Name:        input.Name,
@@ -211,6 +209,7 @@ func handlersToToolMiddlewares(handlers []handlerInfo) []compose.ToolMiddleware 
 						CallID: input.CallID,
 					}
 					wrappedEndpoint := handler.WrapEnhancedStreamableToolCall(
+						ctx,
 						func(ctx context.Context, toolArgument *schema.ToolArgument, opts ...tool.Option) (*schema.StreamReader[*schema.ToolResult], error) {
 							output, err := next(ctx, &compose.ToolInput{
 								Name:        input.Name,
@@ -240,11 +239,26 @@ func handlersToToolMiddlewares(handlers []handlerInfo) []compose.ToolMiddleware 
 }
 
 type eventSenderModelWrapper struct {
-	modelRetryConfig *ModelRetryConfig
+	*BaseChatModelAgentMiddleware
 }
 
-func (w *eventSenderModelWrapper) WrapModel(m model.BaseChatModel) model.BaseChatModel {
-	return &eventSenderModel{inner: m, modelRetryConfig: w.modelRetryConfig}
+// NewEventSenderModelWrapper returns a ChatModelAgentMiddleware that sends model response events.
+// By default, the framework applies this wrapper after all user middlewares, so events contain
+// modified messages. To send events with original (unmodified) output, pass this as a Handler
+// after the modifying middleware (placing it innermost in the wrapper chain).
+// When detected in Handlers, the framework skips the default event sender to avoid duplicates.
+func NewEventSenderModelWrapper() ChatModelAgentMiddleware {
+	return &eventSenderModelWrapper{
+		BaseChatModelAgentMiddleware: &BaseChatModelAgentMiddleware{},
+	}
+}
+
+func (w *eventSenderModelWrapper) WrapModel(_ context.Context, m model.BaseChatModel, mc *ModelContext) model.BaseChatModel {
+	var retryConfig *ModelRetryConfig
+	if mc != nil {
+		retryConfig = mc.ModelRetryConfig
+	}
+	return &eventSenderModel{inner: m, modelRetryConfig: retryConfig}
 }
 
 type eventSenderModel struct {
@@ -263,7 +277,8 @@ func (m *eventSenderModel) Generate(ctx context.Context, input []*schema.Message
 		return nil, errors.New("generator is nil when sending event in Generate: ensure agent state is properly initialized")
 	}
 
-	event := EventFromMessage(result, nil, schema.Assistant, "")
+	msgCopy := *result
+	event := EventFromMessage(&msgCopy, nil, schema.Assistant, "")
 	execCtx.send(event)
 
 	return result, nil
@@ -471,11 +486,12 @@ func (h *eventSenderToolHandler) WrapEnhancedStreamableToolCall(next compose.Enh
 }
 
 type stateModelWrapper struct {
-	inner       model.BaseChatModel
-	original    model.BaseChatModel
-	handlers    []handlerInfo
-	middlewares []AgentMiddleware
-	toolInfos   []*schema.ToolInfo
+	inner            model.BaseChatModel
+	original         model.BaseChatModel
+	handlers         []handlerInfo
+	middlewares      []AgentMiddleware
+	toolInfos        []*schema.ToolInfo
+	modelRetryConfig *ModelRetryConfig
 }
 
 func (w *stateModelWrapper) IsCallbacksEnabled() bool {
@@ -489,7 +505,19 @@ func (w *stateModelWrapper) GetType() string {
 	return generic.ParseTypeName(reflect.ValueOf(w.original))
 }
 
+func (w *stateModelWrapper) hasUserEventSender() bool {
+	for _, info := range w.handlers {
+		if _, ok := info.handler.(*eventSenderModelWrapper); ok {
+			return true
+		}
+	}
+	return false
+}
+
 func (w *stateModelWrapper) wrapGenerateEndpoint(endpoint generateEndpoint) generateEndpoint {
+	hasUserEventSender := w.hasUserEventSender()
+	retryConfig := w.modelRetryConfig
+
 	for i := len(w.handlers) - 1; i >= 0; i-- {
 		if w.handlers[i].hasWrapModel {
 			handler := w.handlers[i].handler
@@ -498,16 +526,42 @@ func (w *stateModelWrapper) wrapGenerateEndpoint(endpoint generateEndpoint) gene
 			endpoint = func(ctx context.Context, input []*schema.Message, opts ...model.Option) (*schema.Message, error) {
 				baseOpts := &model.Options{Tools: baseToolInfos}
 				commonOpts := model.GetCommonOptions(baseOpts, opts...)
-				mc := &ModelContext{Tools: commonOpts.Tools}
-				wrappedModel := handler.WrapModel(&endpointModel{generate: innerEndpoint}, mc)
+				mc := &ModelContext{Tools: commonOpts.Tools, ModelRetryConfig: retryConfig}
+				wrappedModel := handler.WrapModel(ctx, &endpointModel{generate: innerEndpoint}, mc)
 				return wrappedModel.Generate(ctx, input, opts...)
 			}
 		}
 	}
+
+	if !hasUserEventSender {
+		innerEndpoint := endpoint
+		eventSender := NewEventSenderModelWrapper()
+		endpoint = func(ctx context.Context, input []*schema.Message, opts ...model.Option) (*schema.Message, error) {
+			execCtx := getChatModelAgentExecCtx(ctx)
+			if execCtx == nil || execCtx.generator == nil {
+				return innerEndpoint(ctx, input, opts...)
+			}
+			mc := &ModelContext{ModelRetryConfig: retryConfig}
+			wrappedModel := eventSender.WrapModel(ctx, &endpointModel{generate: innerEndpoint}, mc)
+			return wrappedModel.Generate(ctx, input, opts...)
+		}
+	}
+
+	if w.modelRetryConfig != nil {
+		innerEndpoint := endpoint
+		endpoint = func(ctx context.Context, input []*schema.Message, opts ...model.Option) (*schema.Message, error) {
+			retryWrapper := newRetryModelWrapper(&endpointModel{generate: innerEndpoint}, w.modelRetryConfig)
+			return retryWrapper.Generate(ctx, input, opts...)
+		}
+	}
+
 	return endpoint
 }
 
 func (w *stateModelWrapper) wrapStreamEndpoint(endpoint streamEndpoint) streamEndpoint {
+	hasUserEventSender := w.hasUserEventSender()
+	retryConfig := w.modelRetryConfig
+
 	for i := len(w.handlers) - 1; i >= 0; i-- {
 		if w.handlers[i].hasWrapModel {
 			handler := w.handlers[i].handler
@@ -516,12 +570,35 @@ func (w *stateModelWrapper) wrapStreamEndpoint(endpoint streamEndpoint) streamEn
 			endpoint = func(ctx context.Context, input []*schema.Message, opts ...model.Option) (*schema.StreamReader[*schema.Message], error) {
 				baseOpts := &model.Options{Tools: baseToolInfos}
 				commonOpts := model.GetCommonOptions(baseOpts, opts...)
-				mc := &ModelContext{Tools: commonOpts.Tools}
-				wrappedModel := handler.WrapModel(&endpointModel{stream: innerEndpoint}, mc)
+				mc := &ModelContext{Tools: commonOpts.Tools, ModelRetryConfig: retryConfig}
+				wrappedModel := handler.WrapModel(ctx, &endpointModel{stream: innerEndpoint}, mc)
 				return wrappedModel.Stream(ctx, input, opts...)
 			}
 		}
 	}
+
+	if !hasUserEventSender {
+		innerEndpoint := endpoint
+		eventSender := NewEventSenderModelWrapper()
+		endpoint = func(ctx context.Context, input []*schema.Message, opts ...model.Option) (*schema.StreamReader[*schema.Message], error) {
+			execCtx := getChatModelAgentExecCtx(ctx)
+			if execCtx == nil || execCtx.generator == nil {
+				return innerEndpoint(ctx, input, opts...)
+			}
+			mc := &ModelContext{ModelRetryConfig: retryConfig}
+			wrappedModel := eventSender.WrapModel(ctx, &endpointModel{stream: innerEndpoint}, mc)
+			return wrappedModel.Stream(ctx, input, opts...)
+		}
+	}
+
+	if w.modelRetryConfig != nil {
+		innerEndpoint := endpoint
+		endpoint = func(ctx context.Context, input []*schema.Message, opts ...model.Option) (*schema.StreamReader[*schema.Message], error) {
+			retryWrapper := newRetryModelWrapper(&endpointModel{stream: innerEndpoint}, w.modelRetryConfig)
+			return retryWrapper.Stream(ctx, input, opts...)
+		}
+	}
+
 	return endpoint
 }
 
@@ -542,10 +619,13 @@ func (w *stateModelWrapper) Generate(ctx context.Context, input []*schema.Messag
 		}
 	}
 
+	baseOpts := &model.Options{Tools: w.toolInfos}
+	commonOpts := model.GetCommonOptions(baseOpts, opts...)
+	mc := &ModelContext{Tools: commonOpts.Tools, ModelRetryConfig: w.modelRetryConfig}
 	for _, info := range w.handlers {
 		if info.hasBeforeModelRewriteState {
 			var err error
-			ctx, state, err = info.handler.BeforeModelRewriteState(ctx, state)
+			ctx, state, err = info.handler.BeforeModelRewriteState(ctx, state, mc)
 			if err != nil {
 				return nil, err
 			}
@@ -609,10 +689,13 @@ func (w *stateModelWrapper) Stream(ctx context.Context, input []*schema.Message,
 		}
 	}
 
+	baseOpts := &model.Options{Tools: w.toolInfos}
+	commonOpts := model.GetCommonOptions(baseOpts, opts...)
+	mc := &ModelContext{Tools: commonOpts.Tools, ModelRetryConfig: w.modelRetryConfig}
 	for _, info := range w.handlers {
 		if info.hasBeforeModelRewriteState {
 			var err error
-			ctx, state, err = info.handler.BeforeModelRewriteState(ctx, state)
+			ctx, state, err = info.handler.BeforeModelRewriteState(ctx, state, mc)
 			if err != nil {
 				return nil, err
 			}
