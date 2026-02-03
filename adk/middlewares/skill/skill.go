@@ -157,53 +157,23 @@ func (h *skillHandler) BeforeAgent(ctx context.Context, runCtx *adk.ChatModelAge
 	return ctx, runCtx, nil
 }
 
-func (h *skillHandler) WrapModel(m model.BaseChatModel, mc *adk.ModelContext) model.BaseChatModel {
+func (h *skillHandler) WrapModel(ctx context.Context, m model.BaseChatModel, mc *adk.ModelContext) model.BaseChatModel {
 	if h.tool.modelHub == nil {
 		return m
 	}
-	return &skillModelWrapper{
-		inner:    m,
-		modelHub: h.tool.modelHub,
-	}
-}
-
-type skillModelWrapper struct {
-	inner    model.BaseChatModel
-	modelHub ModelHub
-}
-
-func (w *skillModelWrapper) Generate(ctx context.Context, input []*schema.Message, opts ...model.Option) (*schema.Message, error) {
-	m, err := w.getActiveModel(ctx)
-	if err != nil {
-		return nil, err
-	}
-	if m != nil {
-		return m.Generate(ctx, input, opts...)
-	}
-	return w.inner.Generate(ctx, input, opts...)
-}
-
-func (w *skillModelWrapper) Stream(ctx context.Context, input []*schema.Message, opts ...model.Option) (*schema.StreamReader[*schema.Message], error) {
-	m, err := w.getActiveModel(ctx)
-	if err != nil {
-		return nil, err
-	}
-	if m != nil {
-		return m.Stream(ctx, input, opts...)
-	}
-	return w.inner.Stream(ctx, input, opts...)
-}
-
-func (w *skillModelWrapper) getActiveModel(ctx context.Context) (model.BaseChatModel, error) {
 	modelName, found, _ := adk.GetRunLocalValue(ctx, activeModelKey)
 	if !found {
-		return nil, nil
+		return m
 	}
 	name, ok := modelName.(string)
 	if !ok || name == "" {
-		return nil, nil
+		return m
 	}
-	return w.modelHub.Get(ctx, name)
+	newModel, err := h.tool.modelHub.Get(ctx, name)
+	if err != nil {
+		return m
+	}
+	return newModel
 }
 
 const activeModelKey = "__skill_active_model__"
