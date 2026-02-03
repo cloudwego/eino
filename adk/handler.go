@@ -51,6 +51,11 @@ type ModelContext struct {
 	// Tools contains the current tool list configured for the agent.
 	// This is populated at request time with the tools that will be sent to the model.
 	Tools []*schema.ToolInfo
+
+	// ModelRetryConfig contains the retry configuration for the model.
+	// This is populated at request time from the agent's ModelRetryConfig.
+	// Used by EventSenderModelWrapper to wrap stream errors appropriately.
+	ModelRetryConfig *ModelRetryConfig
 }
 
 // ChatModelAgentContext contains runtime information passed to handlers before each ChatModelAgent run.
@@ -116,7 +121,10 @@ type ChatModelAgentMiddleware interface {
 	//
 	// The ChatModelAgentState struct provides access to:
 	//   - Messages: the conversation history
-	BeforeModelRewriteState(ctx context.Context, state *ChatModelAgentState) (context.Context, *ChatModelAgentState, error)
+	//
+	// The ModelContext struct provides read-only access to:
+	//   - Tools: the current tool list that will be sent to the model
+	BeforeModelRewriteState(ctx context.Context, state *ChatModelAgentState, mc *ModelContext) (context.Context, *ChatModelAgentState, error)
 
 	// AfterModelRewriteState is called after each model invocation.
 	// The input state includes the model's response as the last message.
@@ -136,7 +144,7 @@ type ChatModelAgentMiddleware interface {
 	// The tCtx parameter provides metadata about the tool:
 	//   - Name: The name of the tool being wrapped
 	//   - CallID: The unique identifier for this specific tool call
-	WrapInvokableToolCall(endpoint InvokableToolCallEndpoint, tCtx *ToolContext) InvokableToolCallEndpoint
+	WrapInvokableToolCall(ctx context.Context, endpoint InvokableToolCallEndpoint, tCtx *ToolContext) InvokableToolCallEndpoint
 
 	// WrapStreamableToolCall wraps a tool's streaming execution with custom behavior.
 	// Return the input endpoint unchanged if no wrapping is needed.
@@ -148,11 +156,11 @@ type ChatModelAgentMiddleware interface {
 	// The tCtx parameter provides metadata about the tool:
 	//   - Name: The name of the tool being wrapped
 	//   - CallID: The unique identifier for this specific tool call
-	WrapStreamableToolCall(endpoint StreamableToolCallEndpoint, tCtx *ToolContext) StreamableToolCallEndpoint
+	WrapStreamableToolCall(ctx context.Context, endpoint StreamableToolCallEndpoint, tCtx *ToolContext) StreamableToolCallEndpoint
 
-	WrapEnhancedInvokableToolCall(endpoint EnhancedInvokableToolCallEndpoint, tCtx *ToolContext) EnhancedInvokableToolCallEndpoint
+	WrapEnhancedInvokableToolCall(ctx context.Context, endpoint EnhancedInvokableToolCallEndpoint, tCtx *ToolContext) EnhancedInvokableToolCallEndpoint
 
-	WrapEnhancedStreamableToolCall(endpoint EnhancedStreamableToolCallEndpoint, tCtx *ToolContext) EnhancedStreamableToolCallEndpoint
+	WrapEnhancedStreamableToolCall(ctx context.Context, endpoint EnhancedStreamableToolCallEndpoint, tCtx *ToolContext) EnhancedStreamableToolCallEndpoint
 
 	// WrapModel wraps a chat model with custom behavior.
 	// Return the input model unchanged if no wrapping is needed.
@@ -164,7 +172,7 @@ type ChatModelAgentMiddleware interface {
 	//
 	// The mc parameter contains the current tool configuration:
 	//   - Tools: The tool infos that will be sent to the model
-	WrapModel(m model.BaseChatModel, mc *ModelContext) model.BaseChatModel
+	WrapModel(ctx context.Context, m model.BaseChatModel, mc *ModelContext) model.BaseChatModel
 }
 
 // BaseChatModelAgentMiddleware provides default no-op implementations for ChatModelAgentMiddleware.
@@ -177,29 +185,29 @@ type ChatModelAgentMiddleware interface {
 //		// custom fields
 //	}
 //
-//	func (h *MyHandler) BeforeModelRewriteState(ctx context.Context, state *adk.ChatModelAgentState) (context.Context, *adk.ChatModelAgentState, error) {
+//	func (h *MyHandler) BeforeModelRewriteState(ctx context.Context, state *adk.ChatModelAgentState, mc *adk.ModelContext) (context.Context, *adk.ChatModelAgentState, error) {
 //		// custom logic
 //		return ctx, state, nil
 //	}
 type BaseChatModelAgentMiddleware struct{}
 
-func (b *BaseChatModelAgentMiddleware) WrapInvokableToolCall(endpoint InvokableToolCallEndpoint, _ *ToolContext) InvokableToolCallEndpoint {
+func (b *BaseChatModelAgentMiddleware) WrapInvokableToolCall(_ context.Context, endpoint InvokableToolCallEndpoint, _ *ToolContext) InvokableToolCallEndpoint {
 	return endpoint
 }
 
-func (b *BaseChatModelAgentMiddleware) WrapStreamableToolCall(endpoint StreamableToolCallEndpoint, _ *ToolContext) StreamableToolCallEndpoint {
+func (b *BaseChatModelAgentMiddleware) WrapStreamableToolCall(_ context.Context, endpoint StreamableToolCallEndpoint, _ *ToolContext) StreamableToolCallEndpoint {
 	return endpoint
 }
 
-func (b *BaseChatModelAgentMiddleware) WrapEnhancedInvokableToolCall(endpoint EnhancedInvokableToolCallEndpoint, tCtx *ToolContext) EnhancedInvokableToolCallEndpoint {
+func (b *BaseChatModelAgentMiddleware) WrapEnhancedInvokableToolCall(_ context.Context, endpoint EnhancedInvokableToolCallEndpoint, _ *ToolContext) EnhancedInvokableToolCallEndpoint {
 	return endpoint
 }
 
-func (b *BaseChatModelAgentMiddleware) WrapEnhancedStreamableToolCall(endpoint EnhancedStreamableToolCallEndpoint, tCtx *ToolContext) EnhancedStreamableToolCallEndpoint {
+func (b *BaseChatModelAgentMiddleware) WrapEnhancedStreamableToolCall(_ context.Context, endpoint EnhancedStreamableToolCallEndpoint, _ *ToolContext) EnhancedStreamableToolCallEndpoint {
 	return endpoint
 }
 
-func (b *BaseChatModelAgentMiddleware) WrapModel(m model.BaseChatModel, _ *ModelContext) model.BaseChatModel {
+func (b *BaseChatModelAgentMiddleware) WrapModel(_ context.Context, m model.BaseChatModel, _ *ModelContext) model.BaseChatModel {
 	return m
 }
 
@@ -207,7 +215,7 @@ func (b *BaseChatModelAgentMiddleware) BeforeAgent(ctx context.Context, runCtx *
 	return ctx, runCtx, nil
 }
 
-func (b *BaseChatModelAgentMiddleware) BeforeModelRewriteState(ctx context.Context, state *ChatModelAgentState) (context.Context, *ChatModelAgentState, error) {
+func (b *BaseChatModelAgentMiddleware) BeforeModelRewriteState(ctx context.Context, state *ChatModelAgentState, mc *ModelContext) (context.Context, *ChatModelAgentState, error) {
 	return ctx, state, nil
 }
 
@@ -333,5 +341,20 @@ func DeleteRunLocalValue(ctx context.Context, key string) error {
 	if err != nil {
 		return fmt.Errorf("DeleteRunLocalValue failed: must be called within a ChatModelAgent Run() or Resume() execution context: %w", err)
 	}
+	return nil
+}
+
+// SendEvent sends a custom AgentEvent to the event stream during agent execution.
+// This allows ChatModelAgentMiddleware implementations to emit custom events that will be
+// received by the caller iterating over the agent's event stream.
+//
+// This function can only be called from within a ChatModelAgentMiddleware during agent execution.
+// Returns an error if called outside of an agent execution context.
+func SendEvent(ctx context.Context, event *AgentEvent) error {
+	execCtx := getChatModelAgentExecCtx(ctx)
+	if execCtx == nil || execCtx.generator == nil {
+		return fmt.Errorf("SendEvent failed: must be called within a ChatModelAgent Run() or Resume() execution context")
+	}
+	execCtx.generator.Send(event)
 	return nil
 }
