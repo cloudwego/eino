@@ -18,6 +18,7 @@ package adk
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -88,7 +89,9 @@ func concatInstructions(instructions ...string) string {
 // transfer-to-agent tool call targeting the destination agent.
 func GenTransferMessages(_ context.Context, destAgentName string) (Message, Message) {
 	toolCallID := uuid.NewString()
-	tooCall := schema.ToolCall{ID: toolCallID, Function: schema.FunctionCall{Name: TransferToAgentToolName, Arguments: destAgentName}}
+	args := map[string]string{"agent_name": destAgentName}
+	argsJSON, _ := json.Marshal(args)
+	tooCall := schema.ToolCall{ID: toolCallID, Function: schema.FunctionCall{Name: TransferToAgentToolName, Arguments: string(argsJSON)}}
 	assistantMessage := schema.AssistantMessage("", []schema.ToolCall{tooCall})
 	msg, err := transferToAgentToolOutput(destAgentName)
 	if err != nil {
