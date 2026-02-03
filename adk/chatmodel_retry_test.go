@@ -230,34 +230,35 @@ func TestChatModelAgentRetry_StreamError(t *testing.T) {
 				events = append(events, event)
 			}
 
-			assert.GreaterOrEqual(t, len(events), 1, "Should have at least one event")
+			assert.Equal(t, 3, len(events))
 
-			var chunkCount int
-			var lastEventChunks int
+			var streamErrEventCount int
+			var errs []error
 			for i, event := range events {
 				if event.Output != nil && event.Output.MessageOutput != nil && event.Output.MessageOutput.IsStreaming {
 					sr := event.Output.MessageOutput.MessageStream
-					eventChunks := 0
 					for {
 						msg, err := sr.Recv()
 						if err == io.EOF {
 							break
 						}
 						if err != nil {
+							streamErrEventCount++
+							errs = append(errs, err)
 							t.Logf("event %d: err: %v", i, err)
 							break
 						}
-						chunkCount++
-						eventChunks++
 						t.Logf("event %d: %v", i, msg.Content)
 					}
-					lastEventChunks = eventChunks
 				}
 			}
 
-			assert.GreaterOrEqual(t, chunkCount, 1, "Should have at least one chunk across all events")
-			assert.GreaterOrEqual(t, lastEventChunks, 1, "Final event should have successful chunks")
-			assert.Equal(t, int32(3), atomic.LoadInt32(&m.callCount), "Model should be called 3 times (initial + 2 retries)")
+			assert.Equal(t, 2, streamErrEventCount)
+			assert.Equal(t, 2, len(errs))
+			var willRetryErr *WillRetryError
+			assert.True(t, errors.As(errs[0], &willRetryErr))
+			assert.True(t, errors.As(errs[1], &willRetryErr))
+			assert.Equal(t, int32(3), atomic.LoadInt32(&m.callCount))
 		})
 	}
 }
@@ -596,31 +597,30 @@ func TestChatModelAgentRetry_NoTools_NonRetryAbleStreamError(t *testing.T) {
 		events = append(events, event)
 	}
 
-	assert.GreaterOrEqual(t, len(events), 1, "Should have at least one event")
+	assert.Equal(t, 2, len(events))
 
-	var foundError bool
-	for _, event := range events {
-		if event.Err != nil && errors.Is(event.Err, errNonRetryAble) {
-			foundError = true
+	event0 := events[0]
+	assert.NotNil(t, event0.Output)
+	assert.NotNil(t, event0.Output.MessageOutput)
+	assert.True(t, event0.Output.MessageOutput.IsStreaming)
+	sr := event0.Output.MessageOutput.MessageStream
+	var streamErr error
+	for {
+		_, err := sr.Recv()
+		if err == io.EOF {
 			break
 		}
-		if event.Output != nil && event.Output.MessageOutput != nil && event.Output.MessageOutput.IsStreaming {
-			sr := event.Output.MessageOutput.MessageStream
-			for {
-				_, err := sr.Recv()
-				if err == io.EOF {
-					break
-				}
-				if err != nil {
-					if errors.Is(err, errNonRetryAble) {
-						foundError = true
-					}
-					break
-				}
-			}
+		if err != nil {
+			streamErr = err
+			break
 		}
 	}
-	assert.True(t, foundError, "Should receive the non-retryable error either in event.Err or stream error")
+	assert.NotNil(t, streamErr)
+	assert.True(t, errors.Is(streamErr, errNonRetryAble), "Stream error should be the original error")
+
+	event1 := events[1]
+	assert.NotNil(t, event1.Err)
+	assert.True(t, errors.Is(event1.Err, errNonRetryAble))
 }
 
 func TestDefaultBackoff(t *testing.T) {
@@ -779,7 +779,7 @@ func TestSequentialWorkflow_RetryAbleStreamError_SuccessfulRetry(t *testing.T) {
 	iterator := sequentialAgent.Run(ctx, input)
 
 	var events []*AgentEvent
-	var successfulChunks int
+	var willRetryErrCount int
 	for {
 		event, ok := iterator.Next()
 		if !ok {
@@ -794,14 +794,17 @@ func TestSequentialWorkflow_RetryAbleStreamError_SuccessfulRetry(t *testing.T) {
 					break
 				}
 				if err != nil {
+					var retryErr *WillRetryError
+					if errors.As(err, &retryErr) {
+						willRetryErrCount++
+					}
 					break
 				}
-				successfulChunks++
 			}
 		}
 	}
 
-	assert.GreaterOrEqual(t, successfulChunks, 1, "End-user should receive successful chunks (retry events are handled internally)")
+	assert.Equal(t, 2, willRetryErrCount, "End-user should receive 2 WillRetryError events")
 	assert.Equal(t, 1, len(capturingModel.capturedInputs), "Agent B should be called exactly once")
 
 	successorInput := capturingModel.capturedInputs[0]
@@ -884,6 +887,7 @@ func TestSequentialWorkflow_NonRetryAbleStreamError_StopsFlow(t *testing.T) {
 	iterator := sequentialAgent.Run(ctx, input)
 
 	var events []*AgentEvent
+	var streamErrFound bool
 	var finalErrEvent *AgentEvent
 	for {
 		event, ok := iterator.Next()
@@ -902,12 +906,15 @@ func TestSequentialWorkflow_NonRetryAbleStreamError_StopsFlow(t *testing.T) {
 					break
 				}
 				if err != nil {
+					streamErrFound = true
+					assert.True(t, errors.Is(err, errNonRetryAble), "Stream error should be the original error")
 					break
 				}
 			}
 		}
 	}
 
+	assert.True(t, streamErrFound, "End-user should receive stream error")
 	assert.NotNil(t, finalErrEvent, "Should receive a final error event")
 	assert.True(t, errors.Is(finalErrEvent.Err, errNonRetryAble), "Final error should be the non-retryable error")
 	assert.Equal(t, 0, len(capturingModel.capturedInputs), "Agent B should NOT be called due to error")
