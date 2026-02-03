@@ -161,7 +161,10 @@ func (h *skillHandler) WrapModel(ctx context.Context, m model.BaseChatModel, mc 
 	if h.tool.modelHub == nil {
 		return m
 	}
-	modelName, found, _ := adk.GetRunLocalValue(ctx, activeModelKey)
+	modelName, found, err := adk.GetRunLocalValue(ctx, activeModelKey)
+	if err != nil {
+		return m
+	}
 	if !found {
 		return m
 	}
