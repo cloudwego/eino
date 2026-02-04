@@ -27,6 +27,7 @@ import (
 
 	"github.com/slongfield/pyfmt"
 
+	"github.com/cloudwego/eino/adk/internal"
 	"github.com/cloudwego/eino/compose"
 	"github.com/cloudwego/eino/schema"
 )
@@ -106,7 +107,14 @@ func (t *toolResultOffloading) handleResult(ctx context.Context, result string, 
 		}
 
 		nResult := formatToolMessage(result)
-		nResult, err = pyfmt.Fmt(tooLargeToolMessage, map[string]any{
+		msgTemplate, err := internal.SelectPrompt(internal.I18nPrompts{
+			English: tooLargeToolMessage,
+			Chinese: tooLargeToolMessageChinese,
+		})
+		if err != nil {
+			return "", err
+		}
+		nResult, err = pyfmt.Fmt(msgTemplate, map[string]any{
 			"tool_call_id":   input.CallID,
 			"file_path":      path,
 			"content_sample": nResult,
