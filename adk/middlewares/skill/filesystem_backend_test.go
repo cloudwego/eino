@@ -27,15 +27,17 @@ import (
 )
 
 func TestNewBackendFromFilesystem(t *testing.T) {
+	ctx := context.Background()
+
 	t.Run("nil config returns error", func(t *testing.T) {
-		backend, err := NewBackendFromFilesystem(nil)
+		backend, err := NewBackendFromFilesystem(ctx, nil)
 		assert.Nil(t, backend)
 		assert.Error(t, err)
 		assert.Contains(t, err.Error(), "config is required")
 	})
 
 	t.Run("nil backend returns error", func(t *testing.T) {
-		backend, err := NewBackendFromFilesystem(&FilesystemBackendConfig{
+		backend, err := NewBackendFromFilesystem(ctx, &FilesystemBackendConfig{
 			BaseDir: "/skills",
 		})
 		assert.Nil(t, backend)
@@ -45,7 +47,7 @@ func TestNewBackendFromFilesystem(t *testing.T) {
 
 	t.Run("empty baseDir returns error", func(t *testing.T) {
 		fsBackend := filesystem.NewInMemoryBackend()
-		backend, err := NewBackendFromFilesystem(&FilesystemBackendConfig{
+		backend, err := NewBackendFromFilesystem(ctx, &FilesystemBackendConfig{
 			Backend: fsBackend,
 			BaseDir: "",
 		})
@@ -57,7 +59,7 @@ func TestNewBackendFromFilesystem(t *testing.T) {
 	t.Run("valid config succeeds", func(t *testing.T) {
 		fsBackend := filesystem.NewInMemoryBackend()
 
-		backend, err := NewBackendFromFilesystem(&FilesystemBackendConfig{
+		backend, err := NewBackendFromFilesystem(ctx, &FilesystemBackendConfig{
 			Backend: fsBackend,
 			BaseDir: "/skills",
 		})
@@ -76,7 +78,7 @@ func TestFilesystemBackend_List(t *testing.T) {
 			Content:  "",
 		})
 
-		backend, err := NewBackendFromFilesystem(&FilesystemBackendConfig{
+		backend, err := NewBackendFromFilesystem(ctx, &FilesystemBackendConfig{
 			Backend: fsBackend,
 			BaseDir: "/skills",
 		})
@@ -94,7 +96,7 @@ func TestFilesystemBackend_List(t *testing.T) {
 			Content:  "some content",
 		})
 
-		backend, err := NewBackendFromFilesystem(&FilesystemBackendConfig{
+		backend, err := NewBackendFromFilesystem(ctx, &FilesystemBackendConfig{
 			Backend: fsBackend,
 			BaseDir: "/skills",
 		})
@@ -116,7 +118,7 @@ description: Root skill
 Content`,
 		})
 
-		backend, err := NewBackendFromFilesystem(&FilesystemBackendConfig{
+		backend, err := NewBackendFromFilesystem(ctx, &FilesystemBackendConfig{
 			Backend: fsBackend,
 			BaseDir: "/skills",
 		})
@@ -142,7 +144,7 @@ metadata:
 This is the skill content.`,
 		})
 
-		backend, err := NewBackendFromFilesystem(&FilesystemBackendConfig{
+		backend, err := NewBackendFromFilesystem(ctx, &FilesystemBackendConfig{
 			Backend: fsBackend,
 			BaseDir: "/skills",
 		})
@@ -174,7 +176,7 @@ description: Second skill
 Content 2`,
 		})
 
-		backend, err := NewBackendFromFilesystem(&FilesystemBackendConfig{
+		backend, err := NewBackendFromFilesystem(ctx, &FilesystemBackendConfig{
 			Backend: fsBackend,
 			BaseDir: "/skills",
 		})
@@ -196,7 +198,7 @@ Content 2`,
 			Content:  `No frontmatter here`,
 		})
 
-		backend, err := NewBackendFromFilesystem(&FilesystemBackendConfig{
+		backend, err := NewBackendFromFilesystem(ctx, &FilesystemBackendConfig{
 			Backend: fsBackend,
 			BaseDir: "/skills",
 		})
@@ -211,7 +213,7 @@ Content 2`,
 	t.Run("non-existent baseDir returns empty list", func(t *testing.T) {
 		fsBackend := filesystem.NewInMemoryBackend()
 
-		backend, err := NewBackendFromFilesystem(&FilesystemBackendConfig{
+		backend, err := NewBackendFromFilesystem(ctx, &FilesystemBackendConfig{
 			Backend: fsBackend,
 			BaseDir: "/path/that/does/not/exist",
 		})
@@ -241,7 +243,7 @@ description: Nested skill
 Content`,
 		})
 
-		backend, err := NewBackendFromFilesystem(&FilesystemBackendConfig{
+		backend, err := NewBackendFromFilesystem(ctx, &FilesystemBackendConfig{
 			Backend: fsBackend,
 			BaseDir: "/skills",
 		})
@@ -264,7 +266,7 @@ func TestFilesystemBackend_Get(t *testing.T) {
 			Content:  "",
 		})
 
-		backend, err := NewBackendFromFilesystem(&FilesystemBackendConfig{
+		backend, err := NewBackendFromFilesystem(ctx, &FilesystemBackendConfig{
 			Backend: fsBackend,
 			BaseDir: "/skills",
 		})
@@ -287,7 +289,7 @@ description: Test skill description
 Test content here.`,
 		})
 
-		backend, err := NewBackendFromFilesystem(&FilesystemBackendConfig{
+		backend, err := NewBackendFromFilesystem(ctx, &FilesystemBackendConfig{
 			Backend: fsBackend,
 			BaseDir: "/skills",
 		})
@@ -313,7 +315,7 @@ Content for ` + name,
 			})
 		}
 
-		backend, err := NewBackendFromFilesystem(&FilesystemBackendConfig{
+		backend, err := NewBackendFromFilesystem(ctx, &FilesystemBackendConfig{
 			Backend: fsBackend,
 			BaseDir: "/skills",
 		})

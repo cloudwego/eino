@@ -46,7 +46,8 @@ type FilesystemBackendConfig struct {
 // NewBackendFromFilesystem creates a new Backend implementation that reads skills from a filesystem.
 // It searches for SKILL.md files in immediate subdirectories of the configured BaseDir.
 // Only first-level subdirectories are scanned; deeply nested SKILL.md files are ignored.
-func NewBackendFromFilesystem(config *FilesystemBackendConfig) (Backend, error) {
+func NewBackendFromFilesystem(ctx context.Context, config *FilesystemBackendConfig) (Backend, error) {
+	_ = ctx
 	if config == nil {
 		return nil, fmt.Errorf("config is required")
 	}
