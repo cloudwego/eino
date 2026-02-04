@@ -141,6 +141,58 @@ func TestNewComponentTemplate(t *testing.T) {
 					cnt++
 					return ctx
 				}).Build()).
+			AgenticModel(&AgenticModelCallbackHandler{
+				OnStart: func(ctx context.Context, runInfo *callbacks.RunInfo, input *model.AgenticCallbackInput) context.Context {
+					cnt++
+					return ctx
+				},
+				OnEnd: func(ctx context.Context, runInfo *callbacks.RunInfo, output *model.AgenticCallbackOutput) context.Context {
+					cnt++
+					return ctx
+				},
+				OnEndWithStreamOutput: func(ctx context.Context, runInfo *callbacks.RunInfo, output *schema.StreamReader[*model.AgenticCallbackOutput]) context.Context {
+					output.Close()
+					cnt++
+					return ctx
+				},
+				OnError: func(ctx context.Context, runInfo *callbacks.RunInfo, err error) context.Context {
+					cnt++
+					return ctx
+				},
+			}).
+			AgenticPrompt(&AgenticPromptCallbackHandler{
+				OnStart: func(ctx context.Context, runInfo *callbacks.RunInfo, input *prompt.CallbackInput) context.Context {
+					cnt++
+					return ctx
+				},
+				OnEnd: func(ctx context.Context, runInfo *callbacks.RunInfo, output *prompt.CallbackOutput) context.Context {
+					cnt++
+					return ctx
+				},
+				OnError: func(ctx context.Context, runInfo *callbacks.RunInfo, err error) context.Context {
+					cnt++
+					return ctx
+				},
+			}).
+			AgenticToolsNode(&AgenticToolsNodeCallbackHandlers{
+				OnStart: func(ctx context.Context, info *callbacks.RunInfo, input *schema.AgenticMessage) context.Context {
+					cnt++
+					return ctx
+				},
+				OnEnd: func(ctx context.Context, info *callbacks.RunInfo, input []*schema.AgenticMessage) context.Context {
+					cnt++
+					return ctx
+				},
+				OnEndWithStreamOutput: func(ctx context.Context, info *callbacks.RunInfo, output *schema.StreamReader[[]*schema.AgenticMessage]) context.Context {
+					output.Close()
+					cnt++
+					return ctx
+				},
+				OnError: func(ctx context.Context, info *callbacks.RunInfo, err error) context.Context {
+					cnt++
+					return ctx
+				},
+			}).
 			Handler()
 
 		types := []components.Component{
@@ -150,6 +202,9 @@ func TestNewComponentTemplate(t *testing.T) {
 			components.ComponentOfRetriever,
 			components.ComponentOfTool,
 			compose.ComponentOfLambda,
+			components.ComponentOfAgenticModel,
+			components.ComponentOfAgenticPrompt,
+			compose.ComponentOfAgenticToolsNode,
 		}
 
 		handler := tpl.Handler()
@@ -168,28 +223,28 @@ func TestNewComponentTemplate(t *testing.T) {
 			handler.OnEndWithStreamOutput(ctx, &callbacks.RunInfo{Component: typ}, sor)
 		}
 
-		assert.Equal(t, 22, cnt)
+		assert.Equal(t, 33, cnt)
 
 		ctx = context.Background()
 		ctx = callbacks.InitCallbacks(ctx, &callbacks.RunInfo{Component: components.ComponentOfTransformer}, handler)
 		callbacks.OnStart[any](ctx, nil)
-		assert.Equal(t, 22, cnt)
+		assert.Equal(t, 33, cnt)
 
 		ctx = callbacks.ReuseHandlers(ctx, &callbacks.RunInfo{Component: components.ComponentOfPrompt})
 		ctx = callbacks.OnStart[any](ctx, nil)
-		assert.Equal(t, 23, cnt)
+		assert.Equal(t, 34, cnt)
 
 		ctx = callbacks.ReuseHandlers(ctx, &callbacks.RunInfo{Component: components.ComponentOfIndexer})
 		callbacks.OnEnd[any](ctx, nil)
-		assert.Equal(t, 23, cnt)
+		assert.Equal(t, 34, cnt)
 
 		ctx = callbacks.ReuseHandlers(ctx, &callbacks.RunInfo{Component: components.ComponentOfEmbedding})
 		callbacks.OnError(ctx, nil)
-		assert.Equal(t, 24, cnt)
+		assert.Equal(t, 35, cnt)
 
 		ctx = callbacks.ReuseHandlers(ctx, &callbacks.RunInfo{Component: components.ComponentOfLoader})
 		callbacks.OnStart[any](ctx, nil)
-		assert.Equal(t, 24, cnt)
+		assert.Equal(t, 35, cnt)
 
 		tpl.Transformer(&TransformerCallbackHandler{
 			OnStart: func(ctx context.Context, runInfo *callbacks.RunInfo, input *document.TransformerCallbackInput) context.Context {
@@ -249,6 +304,37 @@ func TestNewComponentTemplate(t *testing.T) {
 					}
 				}
 			},
+		}).AgenticPrompt(&AgenticPromptCallbackHandler{
+			OnStart: func(ctx context.Context, runInfo *callbacks.RunInfo, input *prompt.CallbackInput) context.Context {
+				cnt++
+				return ctx
+			},
+			OnEnd: func(ctx context.Context, runInfo *callbacks.RunInfo, output *prompt.CallbackOutput) context.Context {
+				cnt++
+				return ctx
+			},
+			OnError: func(ctx context.Context, runInfo *callbacks.RunInfo, err error) context.Context {
+				cnt++
+				return ctx
+			},
+		}).AgenticToolsNode(&AgenticToolsNodeCallbackHandlers{
+			OnStart: func(ctx context.Context, info *callbacks.RunInfo, input *schema.AgenticMessage) context.Context {
+				cnt++
+				return ctx
+			},
+			OnEnd: func(ctx context.Context, info *callbacks.RunInfo, input []*schema.AgenticMessage) context.Context {
+				cnt++
+				return ctx
+			},
+			OnEndWithStreamOutput: func(ctx context.Context, info *callbacks.RunInfo, output *schema.StreamReader[[]*schema.AgenticMessage]) context.Context {
+				output.Close()
+				cnt++
+				return ctx
+			},
+			OnError: func(ctx context.Context, info *callbacks.RunInfo, err error) context.Context {
+				cnt++
+				return ctx
+			},
 		})
 
 		handler = tpl.Handler()
@@ -256,35 +342,221 @@ func TestNewComponentTemplate(t *testing.T) {
 		ctx = callbacks.InitCallbacks(ctx, &callbacks.RunInfo{Component: components.ComponentOfTransformer}, handler)
 
 		ctx = callbacks.OnStart[any](ctx, nil)
-		assert.Equal(t, 25, cnt)
+		assert.Equal(t, 36, cnt)
 
 		callbacks.OnEnd[any](ctx, nil)
-		assert.Equal(t, 26, cnt)
+		assert.Equal(t, 37, cnt)
 
 		ctx = callbacks.ReuseHandlers(ctx, &callbacks.RunInfo{Component: components.ComponentOfLoader})
 		callbacks.OnEnd[any](ctx, nil)
-		assert.Equal(t, 27, cnt)
+		assert.Equal(t, 38, cnt)
 
 		ctx = callbacks.ReuseHandlers(ctx, &callbacks.RunInfo{Component: compose.ComponentOfToolsNode})
 		callbacks.OnStart[any](ctx, nil)
-		assert.Equal(t, 28, cnt)
+		assert.Equal(t, 39, cnt)
 
 		sr, sw := schema.Pipe[any](0)
 		sw.Close()
 		callbacks.OnEndWithStreamOutput[any](ctx, sr)
-		assert.Equal(t, 29, cnt)
+		assert.Equal(t, 40, cnt)
 
 		sr1, sw1 := schema.Pipe[[]*schema.Message](1)
 		sw1.Send([]*schema.Message{{}}, nil)
 		sw1.Close()
 		callbacks.OnEndWithStreamOutput[[]*schema.Message](ctx, sr1)
-		assert.Equal(t, 30, cnt)
+		// Check AgenticModel stream
+		sir2, siw2 := schema.Pipe[callbacks.CallbackOutput](1)
+		siw2.Close()
+		handler.OnEndWithStreamOutput(ctx, &callbacks.RunInfo{Component: components.ComponentOfAgenticModel}, sir2)
+		assert.Equal(t, 42, cnt)
 
-		callbacks.OnError(ctx, nil)
-		assert.Equal(t, 30, cnt)
+		// Check AgenticToolsNode stream
+		sir3, siw3 := schema.Pipe[callbacks.CallbackOutput](1)
+		siw3.Close()
+		handler.OnEndWithStreamOutput(ctx, &callbacks.RunInfo{Component: compose.ComponentOfAgenticToolsNode}, sir3)
+		assert.Equal(t, 43, cnt)
 
 		ctx = callbacks.ReuseHandlers(ctx, nil)
 		callbacks.OnStart[any](ctx, nil)
-		assert.Equal(t, 30, cnt)
+		assert.Equal(t, 43, cnt)
+	})
+
+	t.Run("EdgeCases", func(t *testing.T) {
+		ctx := context.Background()
+		cnt := 0
+
+		// 1. Test Graph and Chain Setters and Execution
+		tpl := NewHandlerHelper().
+			Graph(callbacks.NewHandlerBuilder().
+				OnStartFn(func(ctx context.Context, info *callbacks.RunInfo, input callbacks.CallbackInput) context.Context {
+					cnt++
+					return ctx
+				}).Build()).
+			Chain(callbacks.NewHandlerBuilder().
+				OnEndFn(func(ctx context.Context, info *callbacks.RunInfo, output callbacks.CallbackOutput) context.Context {
+					cnt++
+					return ctx
+				}).Build())
+
+		h := tpl.Handler()
+
+		// Trigger Graph OnStart
+		h.OnStart(ctx, &callbacks.RunInfo{Component: compose.ComponentOfGraph}, nil)
+		assert.Equal(t, 1, cnt)
+
+		// Trigger Chain OnEnd
+		h.OnEnd(ctx, &callbacks.RunInfo{Component: compose.ComponentOfChain}, nil)
+		assert.Equal(t, 2, cnt)
+
+		// 2. Test Needed logic for Graph/Chain when handler is present/absent
+		// Graph is present (OnStart)
+		needed := h.(callbacks.TimingChecker).Needed(ctx, &callbacks.RunInfo{Component: compose.ComponentOfGraph}, callbacks.TimingOnStart)
+		assert.True(t, needed)
+
+		// Chain is present (OnEnd) - but we check OnStart which is not defined in the builder above?
+		// NewHandlerBuilder returns a handler that usually returns true for Needed if the specific func is not nil.
+		// Let's verify Chain OnStart is NOT needed because we only set OnEndFn.
+		needed = h.(callbacks.TimingChecker).Needed(ctx, &callbacks.RunInfo{Component: compose.ComponentOfChain}, callbacks.TimingOnStart)
+		assert.False(t, needed) // Should be false because OnStartFn wasn't set for Chain
+
+		// Lambda is NOT present
+		needed = h.(callbacks.TimingChecker).Needed(ctx, &callbacks.RunInfo{Component: compose.ComponentOfLambda}, callbacks.TimingOnStart)
+		assert.False(t, needed)
+
+		// 3. Test Conversion Fallbacks (Default cases)
+		// We need a handler with ToolsNode and AgenticToolsNode to test their conversion fallbacks
+		tpl2 := NewHandlerHelper().
+			ToolsNode(&ToolsNodeCallbackHandlers{
+				OnStart: func(ctx context.Context, info *callbacks.RunInfo, input *schema.Message) context.Context {
+					if input == nil {
+						cnt++
+					}
+					return ctx
+				},
+				OnEnd: func(ctx context.Context, info *callbacks.RunInfo, input []*schema.Message) context.Context {
+					if input == nil {
+						cnt++
+					}
+					return ctx
+				},
+			}).
+			AgenticToolsNode(&AgenticToolsNodeCallbackHandlers{
+				OnStart: func(ctx context.Context, info *callbacks.RunInfo, input *schema.AgenticMessage) context.Context {
+					if input == nil {
+						cnt++
+					}
+					return ctx
+				},
+				OnEnd: func(ctx context.Context, info *callbacks.RunInfo, input []*schema.AgenticMessage) context.Context {
+					if input == nil {
+						cnt++
+					}
+					return ctx
+				},
+			})
+
+		h2 := tpl2.Handler()
+
+		// Pass wrong type (string) to trigger default case in convToolsNodeCallbackInput -> returns nil
+		h2.OnStart(ctx, &callbacks.RunInfo{Component: compose.ComponentOfToolsNode}, "wrong-input-type")
+		assert.Equal(t, 3, cnt) // +1
+
+		// Pass wrong type to trigger default case in convToolsNodeCallbackOutput -> returns nil
+		h2.OnEnd(ctx, &callbacks.RunInfo{Component: compose.ComponentOfToolsNode}, "wrong-output-type")
+		assert.Equal(t, 4, cnt) // +1
+
+		// Pass wrong type to trigger default case in convAgenticToolsNodeCallbackInput -> returns nil
+		h2.OnStart(ctx, &callbacks.RunInfo{Component: compose.ComponentOfAgenticToolsNode}, "wrong-input-type")
+		assert.Equal(t, 5, cnt) // +1
+
+		// Pass wrong type to trigger default case in convAgenticToolsNodeCallbackOutput -> returns nil
+		h2.OnEnd(ctx, &callbacks.RunInfo{Component: compose.ComponentOfAgenticToolsNode}, "wrong-output-type")
+		assert.Equal(t, 6, cnt) // +1
+
+		// 4. Test Needed for Agentic components when handlers are Set vs Unset
+		// tpl2 has AgenticToolsNode set
+		needed = h2.(callbacks.TimingChecker).Needed(ctx, &callbacks.RunInfo{Component: compose.ComponentOfAgenticToolsNode}, callbacks.TimingOnStart)
+		assert.True(t, needed)
+
+		// tpl2 does NOT have AgenticModel set
+		needed = h2.(callbacks.TimingChecker).Needed(ctx, &callbacks.RunInfo{Component: components.ComponentOfAgenticModel}, callbacks.TimingOnStart)
+		assert.False(t, needed)
+
+		// Set it now
+		tpl2.AgenticModel(&AgenticModelCallbackHandler{
+			OnStart: func(ctx context.Context, runInfo *callbacks.RunInfo, input *model.AgenticCallbackInput) context.Context {
+				return ctx
+			},
+		})
+
+		needed = h2.(callbacks.TimingChecker).Needed(ctx, &callbacks.RunInfo{Component: components.ComponentOfAgenticModel}, callbacks.TimingOnStart)
+		assert.True(t, needed)
+
+		// Check invalid component
+		needed = h2.(callbacks.TimingChecker).Needed(ctx, &callbacks.RunInfo{Component: "UnknownComponent"}, callbacks.TimingOnStart)
+		assert.False(t, needed)
+
+		// Check RunInfo nil
+		needed = h2.(callbacks.TimingChecker).Needed(ctx, nil, callbacks.TimingOnStart)
+		assert.False(t, needed)
+
+		// 5. Test Needed for Transformer, Loader, Indexer, etc to ensure switch coverage
+		tpl3 := NewHandlerHelper().
+			Transformer(&TransformerCallbackHandler{OnStart: func(ctx context.Context, info *callbacks.RunInfo, input *document.TransformerCallbackInput) context.Context {
+				return ctx
+			}}).
+			Loader(&LoaderCallbackHandler{OnStart: func(ctx context.Context, info *callbacks.RunInfo, input *document.LoaderCallbackInput) context.Context {
+				return ctx
+			}}).
+			Indexer(&IndexerCallbackHandler{OnStart: func(ctx context.Context, info *callbacks.RunInfo, input *indexer.CallbackInput) context.Context {
+				return ctx
+			}}).
+			Retriever(&RetrieverCallbackHandler{OnStart: func(ctx context.Context, info *callbacks.RunInfo, input *retriever.CallbackInput) context.Context {
+				return ctx
+			}}).
+			Embedding(&EmbeddingCallbackHandler{OnStart: func(ctx context.Context, info *callbacks.RunInfo, input *embedding.CallbackInput) context.Context {
+				return ctx
+			}}).
+			Tool(&ToolCallbackHandler{OnStart: func(ctx context.Context, info *callbacks.RunInfo, input *tool.CallbackInput) context.Context {
+				return ctx
+			}})
+
+		h3 := tpl3.Handler()
+		checker := h3.(callbacks.TimingChecker)
+
+		assert.True(t, checker.Needed(ctx, &callbacks.RunInfo{Component: components.ComponentOfTransformer}, callbacks.TimingOnStart))
+		assert.True(t, checker.Needed(ctx, &callbacks.RunInfo{Component: components.ComponentOfLoader}, callbacks.TimingOnStart))
+		assert.True(t, checker.Needed(ctx, &callbacks.RunInfo{Component: components.ComponentOfIndexer}, callbacks.TimingOnStart))
+		assert.True(t, checker.Needed(ctx, &callbacks.RunInfo{Component: components.ComponentOfRetriever}, callbacks.TimingOnStart))
+		assert.True(t, checker.Needed(ctx, &callbacks.RunInfo{Component: components.ComponentOfEmbedding}, callbacks.TimingOnStart))
+		assert.True(t, checker.Needed(ctx, &callbacks.RunInfo{Component: components.ComponentOfTool}, callbacks.TimingOnStart))
+
+		// Verify False paths (by using a helper without them)
+		emptyH := NewHandlerHelper().Handler().(callbacks.TimingChecker)
+		assert.False(t, emptyH.Needed(ctx, &callbacks.RunInfo{Component: components.ComponentOfTransformer}, callbacks.TimingOnStart))
+		assert.False(t, emptyH.Needed(ctx, &callbacks.RunInfo{Component: components.ComponentOfLoader}, callbacks.TimingOnStart))
+		assert.False(t, emptyH.Needed(ctx, &callbacks.RunInfo{Component: components.ComponentOfIndexer}, callbacks.TimingOnStart))
+		assert.False(t, emptyH.Needed(ctx, &callbacks.RunInfo{Component: components.ComponentOfRetriever}, callbacks.TimingOnStart))
+		assert.False(t, emptyH.Needed(ctx, &callbacks.RunInfo{Component: components.ComponentOfEmbedding}, callbacks.TimingOnStart))
+		assert.False(t, emptyH.Needed(ctx, &callbacks.RunInfo{Component: components.ComponentOfTool}, callbacks.TimingOnStart))
+
+		// 6. Test Needed for remaining components (ChatModel, Prompt, AgenticPrompt)
+		tpl4 := NewHandlerHelper().
+			ChatModel(&ModelCallbackHandler{OnStart: func(ctx context.Context, runInfo *callbacks.RunInfo, input *model.CallbackInput) context.Context {
+				return ctx
+			}}).
+			Prompt(&PromptCallbackHandler{OnStart: func(ctx context.Context, runInfo *callbacks.RunInfo, input *prompt.CallbackInput) context.Context {
+				return ctx
+			}}).
+			AgenticPrompt(&AgenticPromptCallbackHandler{OnStart: func(ctx context.Context, runInfo *callbacks.RunInfo, input *prompt.CallbackInput) context.Context {
+				return ctx
+			}})
+
+		h4 := tpl4.Handler()
+		checker4 := h4.(callbacks.TimingChecker)
+
+		assert.True(t, checker4.Needed(ctx, &callbacks.RunInfo{Component: components.ComponentOfChatModel}, callbacks.TimingOnStart))
+		assert.True(t, checker4.Needed(ctx, &callbacks.RunInfo{Component: components.ComponentOfPrompt}, callbacks.TimingOnStart))
+		assert.True(t, checker4.Needed(ctx, &callbacks.RunInfo{Component: components.ComponentOfAgenticPrompt}, callbacks.TimingOnStart))
 	})
 }
