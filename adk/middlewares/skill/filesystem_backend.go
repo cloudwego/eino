@@ -105,9 +105,13 @@ func (b *filesystemBackend) list(ctx context.Context) ([]Skill, error) {
 	}
 
 	for _, entry := range entries {
-		skill, err := b.loadSkillFromFile(ctx, entry.Path)
-		if err != nil {
-			return nil, fmt.Errorf("failed to load skill from %s: %w", entry.Path, err)
+		filePath := entry.Path
+		if !filepath.IsAbs(filePath) {
+			filePath = filepath.Join(b.baseDir, filePath)
+		}
+		skill, loadErr := b.loadSkillFromFile(ctx, filePath)
+		if loadErr != nil {
+			return nil, fmt.Errorf("failed to load skill from %s: %w", filePath, loadErr)
 		}
 
 		skills = append(skills, skill)
@@ -139,10 +143,7 @@ func (b *filesystemBackend) loadSkillFromFile(ctx context.Context, path string) 
 	absDir := filepath.Dir(path)
 
 	return Skill{
-		FrontMatter: FrontMatter{
-			Name:        fm.Name,
-			Description: fm.Description,
-		},
+		FrontMatter:   fm,
 		Content:       strings.TrimSpace(content),
 		BaseDirectory: absDir,
 	}, nil
