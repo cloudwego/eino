@@ -132,10 +132,13 @@ type ChatModelAgentMiddleware interface {
 	//
 	// The ChatModelAgentState struct provides access to:
 	//   - Messages: the conversation history including the model's response
-	AfterModelRewriteState(ctx context.Context, state *ChatModelAgentState) (context.Context, *ChatModelAgentState, error)
+	//
+	// The ModelContext struct provides read-only access to:
+	//   - Tools: the current tool list that was sent to the model
+	AfterModelRewriteState(ctx context.Context, state *ChatModelAgentState, mc *ModelContext) (context.Context, *ChatModelAgentState, error)
 
 	// WrapInvokableToolCall wraps a tool's synchronous execution with custom behavior.
-	// Return the input endpoint unchanged if no wrapping is needed.
+	// Return the input endpoint unchanged and nil error if no wrapping is needed.
 	//
 	// This method is only called for tools that implement InvokableTool.
 	// If a tool only implements StreamableTool, this method will not be called for that tool.
@@ -144,10 +147,10 @@ type ChatModelAgentMiddleware interface {
 	// The tCtx parameter provides metadata about the tool:
 	//   - Name: The name of the tool being wrapped
 	//   - CallID: The unique identifier for this specific tool call
-	WrapInvokableToolCall(ctx context.Context, endpoint InvokableToolCallEndpoint, tCtx *ToolContext) InvokableToolCallEndpoint
+	WrapInvokableToolCall(ctx context.Context, endpoint InvokableToolCallEndpoint, tCtx *ToolContext) (InvokableToolCallEndpoint, error)
 
 	// WrapStreamableToolCall wraps a tool's streaming execution with custom behavior.
-	// Return the input endpoint unchanged if no wrapping is needed.
+	// Return the input endpoint unchanged and nil error if no wrapping is needed.
 	//
 	// This method is only called for tools that implement StreamableTool.
 	// If a tool only implements InvokableTool, this method will not be called for that tool.
@@ -156,14 +159,14 @@ type ChatModelAgentMiddleware interface {
 	// The tCtx parameter provides metadata about the tool:
 	//   - Name: The name of the tool being wrapped
 	//   - CallID: The unique identifier for this specific tool call
-	WrapStreamableToolCall(ctx context.Context, endpoint StreamableToolCallEndpoint, tCtx *ToolContext) StreamableToolCallEndpoint
+	WrapStreamableToolCall(ctx context.Context, endpoint StreamableToolCallEndpoint, tCtx *ToolContext) (StreamableToolCallEndpoint, error)
 
-	WrapEnhancedInvokableToolCall(ctx context.Context, endpoint EnhancedInvokableToolCallEndpoint, tCtx *ToolContext) EnhancedInvokableToolCallEndpoint
+	WrapEnhancedInvokableToolCall(ctx context.Context, endpoint EnhancedInvokableToolCallEndpoint, tCtx *ToolContext) (EnhancedInvokableToolCallEndpoint, error)
 
-	WrapEnhancedStreamableToolCall(ctx context.Context, endpoint EnhancedStreamableToolCallEndpoint, tCtx *ToolContext) EnhancedStreamableToolCallEndpoint
+	WrapEnhancedStreamableToolCall(ctx context.Context, endpoint EnhancedStreamableToolCallEndpoint, tCtx *ToolContext) (EnhancedStreamableToolCallEndpoint, error)
 
 	// WrapModel wraps a chat model with custom behavior.
-	// Return the input model unchanged if no wrapping is needed.
+	// Return the input model unchanged and nil error if no wrapping is needed.
 	//
 	// This method is called at request time when the model is about to be invoked.
 	// Note: The parameter is BaseChatModel (not ToolCallingChatModel) because wrappers
@@ -172,7 +175,7 @@ type ChatModelAgentMiddleware interface {
 	//
 	// The mc parameter contains the current tool configuration:
 	//   - Tools: The tool infos that will be sent to the model
-	WrapModel(ctx context.Context, m model.BaseChatModel, mc *ModelContext) model.BaseChatModel
+	WrapModel(ctx context.Context, m model.BaseChatModel, mc *ModelContext) (model.BaseChatModel, error)
 }
 
 // BaseChatModelAgentMiddleware provides default no-op implementations for ChatModelAgentMiddleware.
@@ -191,24 +194,24 @@ type ChatModelAgentMiddleware interface {
 //	}
 type BaseChatModelAgentMiddleware struct{}
 
-func (b *BaseChatModelAgentMiddleware) WrapInvokableToolCall(_ context.Context, endpoint InvokableToolCallEndpoint, _ *ToolContext) InvokableToolCallEndpoint {
-	return endpoint
+func (b *BaseChatModelAgentMiddleware) WrapInvokableToolCall(_ context.Context, endpoint InvokableToolCallEndpoint, _ *ToolContext) (InvokableToolCallEndpoint, error) {
+	return endpoint, nil
 }
 
-func (b *BaseChatModelAgentMiddleware) WrapStreamableToolCall(_ context.Context, endpoint StreamableToolCallEndpoint, _ *ToolContext) StreamableToolCallEndpoint {
-	return endpoint
+func (b *BaseChatModelAgentMiddleware) WrapStreamableToolCall(_ context.Context, endpoint StreamableToolCallEndpoint, _ *ToolContext) (StreamableToolCallEndpoint, error) {
+	return endpoint, nil
 }
 
-func (b *BaseChatModelAgentMiddleware) WrapEnhancedInvokableToolCall(_ context.Context, endpoint EnhancedInvokableToolCallEndpoint, _ *ToolContext) EnhancedInvokableToolCallEndpoint {
-	return endpoint
+func (b *BaseChatModelAgentMiddleware) WrapEnhancedInvokableToolCall(_ context.Context, endpoint EnhancedInvokableToolCallEndpoint, _ *ToolContext) (EnhancedInvokableToolCallEndpoint, error) {
+	return endpoint, nil
 }
 
-func (b *BaseChatModelAgentMiddleware) WrapEnhancedStreamableToolCall(_ context.Context, endpoint EnhancedStreamableToolCallEndpoint, _ *ToolContext) EnhancedStreamableToolCallEndpoint {
-	return endpoint
+func (b *BaseChatModelAgentMiddleware) WrapEnhancedStreamableToolCall(_ context.Context, endpoint EnhancedStreamableToolCallEndpoint, _ *ToolContext) (EnhancedStreamableToolCallEndpoint, error) {
+	return endpoint, nil
 }
 
-func (b *BaseChatModelAgentMiddleware) WrapModel(_ context.Context, m model.BaseChatModel, _ *ModelContext) model.BaseChatModel {
-	return m
+func (b *BaseChatModelAgentMiddleware) WrapModel(_ context.Context, m model.BaseChatModel, _ *ModelContext) (model.BaseChatModel, error) {
+	return m, nil
 }
 
 func (b *BaseChatModelAgentMiddleware) BeforeAgent(ctx context.Context, runCtx *ChatModelAgentContext) (context.Context, *ChatModelAgentContext, error) {
@@ -219,7 +222,7 @@ func (b *BaseChatModelAgentMiddleware) BeforeModelRewriteState(ctx context.Conte
 	return ctx, state, nil
 }
 
-func (b *BaseChatModelAgentMiddleware) AfterModelRewriteState(ctx context.Context, state *ChatModelAgentState) (context.Context, *ChatModelAgentState, error) {
+func (b *BaseChatModelAgentMiddleware) AfterModelRewriteState(ctx context.Context, state *ChatModelAgentState, mc *ModelContext) (context.Context, *ChatModelAgentState, error) {
 	return ctx, state, nil
 }
 
