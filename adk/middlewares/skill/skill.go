@@ -157,26 +157,26 @@ func (h *skillHandler) BeforeAgent(ctx context.Context, runCtx *adk.ChatModelAge
 	return ctx, runCtx, nil
 }
 
-func (h *skillHandler) WrapModel(ctx context.Context, m model.BaseChatModel, mc *adk.ModelContext) model.BaseChatModel {
+func (h *skillHandler) WrapModel(ctx context.Context, m model.BaseChatModel, mc *adk.ModelContext) (model.BaseChatModel, error) {
 	if h.tool.modelHub == nil {
-		return m
+		return m, nil
 	}
 	modelName, found, err := adk.GetRunLocalValue(ctx, activeModelKey)
 	if err != nil {
-		return m
+		return nil, fmt.Errorf("failed to get active model from run local value: %w", err)
 	}
 	if !found {
-		return m
+		return m, nil
 	}
 	name, ok := modelName.(string)
 	if !ok || name == "" {
-		return m
+		return m, nil
 	}
 	newModel, err := h.tool.modelHub.Get(ctx, name)
 	if err != nil {
-		return m
+		return nil, fmt.Errorf("failed to get model '%s' from ModelHub: %w", name, err)
 	}
-	return newModel
+	return newModel, nil
 }
 
 const activeModelKey = "__skill_active_model__"
