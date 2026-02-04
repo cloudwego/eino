@@ -95,7 +95,7 @@ type Config struct {
 	ModelHub ModelHub
 }
 
-// NewHandler creates a new skill middleware handler for ChatModelAgent.
+// NewChatModelAgentMiddleware creates a new skill middleware handler for ChatModelAgent.
 //
 // The handler provides a skill tool that allows agents to load and execute skills
 // defined in SKILL.md files. Skills can run in different modes based on their
@@ -107,7 +107,7 @@ type Config struct {
 //
 // Example usage:
 //
-//	handler, err := skill.NewHandler(ctx, &skill.Config{
+//	handler, err := skill.NewChatModelAgentMiddleware(ctx, &skill.Config{
 //	    Backend:  backend,
 //	    AgentHub: myAgentHub,
 //	    ModelHub: myModelHub,
@@ -120,7 +120,7 @@ type Config struct {
 //	    // ...
 //	    Handlers: []adk.ChatModelAgentMiddleware{handler},
 //	})
-func NewHandler(ctx context.Context, config *Config) (adk.ChatModelAgentMiddleware, error) {
+func NewChatModelAgentMiddleware(ctx context.Context, config *Config) (adk.ChatModelAgentMiddleware, error) {
 	if config == nil {
 		return nil, fmt.Errorf("config is required")
 	}
@@ -189,7 +189,7 @@ const activeModelKey = "__skill_active_model__"
 // New creates a new skill middleware.
 // It provides a tool for the agent to use skills.
 //
-// Deprecated: Use NewHandler instead. New does not support fork mode execution
+// Deprecated: Use NewChatModelAgentMiddleware instead. New does not support fork mode execution
 // because AgentMiddleware cannot save message history for fork mode.
 func New(ctx context.Context, config *Config) (adk.AgentMiddleware, error) {
 	if config == nil {
