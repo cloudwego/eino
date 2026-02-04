@@ -31,70 +31,103 @@ import (
 	"github.com/cloudwego/eino/schema"
 )
 
+// ToolReductionMiddlewareConfig is the configuration for the tool reduction middleware.
 type ToolReductionMiddlewareConfig struct {
+	// ToolTruncation configures the truncation strategy for tool outputs.
+	// If nil, no truncation will be applied.
 	ToolTruncation *ToolTruncation
 
+	// ToolOffload configures the offloading strategy for tool outputs.
+	// If nil, no offloading will be applied.
 	ToolOffload *ToolOffload
 }
 
+// ToolTruncation holds configuration for tool output truncation.
 type ToolTruncation struct {
+	// ToolTruncationConfigMapping maps tool names to their specific truncation configurations.
+	// The key is the tool name.
 	ToolTruncationConfigMapping map[string]ToolTruncationConfig
 }
 
-// ToolTruncationConfig configures how a tool's result is truncated
+// ToolTruncationConfig configures how a tool's result is truncated.
 type ToolTruncationConfig struct {
-	// provide one of the configs at least
+	// MaxLength is the maximum allowed length of the tool output.
+	// If the output exceeds this length, it will be truncated.
+	// At least one of MaxLength or MaxLineLength must be provided.
 	MaxLength *int
 
+	// MaxLineLength is the maximum allowed length for a single line in the tool output.
+	// If a line exceeds this length, it will be truncated.
+	// At least one of MaxLength or MaxLineLength must be provided.
 	MaxLineLength *int
 }
 
+// ToolOffload holds configuration for tool output offloading.
 type ToolOffload struct {
+	// TokenCounter is used to count the number of tokens in the conversation messages.
+	// It is required to determine when to trigger offloading based on token usage.
 	TokenCounter func(ctx context.Context, msg []adk.Message) (int64, error)
 
+	// ToolOffloadThreshold defines the thresholds for triggering the offloading process.
 	ToolOffloadThreshold *ToolOffloadThresholdConfig
 
-	// ToolOffloadConfigMapping maps tool names to their offloading configurations.
+	// ToolOffloadConfigMapping maps tool names to their specific offloading configurations.
+	// The key is the tool name.
 	ToolOffloadConfigMapping map[string]ToolOffloadConfig
 
-	// ToolOffloadPostProcess processes the agent state after offloading, called once per reduction.
+	// ToolOffloadPostProcess is an optional callback function to process the agent state after offloading.
+	// It is called once per reduction cycle if offloading occurred.
 	ToolOffloadPostProcess func(ctx context.Context, state *adk.ChatModelAgentState) context.Context
 }
 
+// ToolOffloadThresholdConfig defines the conditions under which tool offloading is triggered.
 type ToolOffloadThresholdConfig struct {
-	// required, default 30k
+	// MaxTokens is the maximum number of tokens allowed in the conversation before offloading is attempted.
+	// Default is typically around 30k if not specified.
 	MaxTokens int64
 
-	// messages except system
-	// optional, default 5
+	// OffloadBatchSize is the number of tool calls to process in a single offloading batch.
+	// Default is 5.
 	OffloadBatchSize int
 
-	// optional, default 0
+	// RetentionSuffixLimit is the number of most recent messages to retain without offloading.
+	// This ensures the model has some immediate context. Default is 0.
 	RetentionSuffixLimit int
 }
 
-// ToolOffloadConfig configures how a tool's result is offloaded
+// ToolOffloadConfig configures how a specific tool's result is offloaded.
 type ToolOffloadConfig struct {
-	// OffloadBackend is the backend interface used to store offloaded content
+	// OffloadBackend is the storage backend where offloaded content will be saved.
 	OffloadBackend Backend
 
+	// OffloadHandler determines the content to offload and the file path for a given tool execution.
+	// It receives name, call_id, input and output of this tool call, which you could modify them in-place.
+	// It returns an OffloadInfo struct containing the decision and data.
 	OffloadHandler func(ctx context.Context, detail *ToolDetail) (*OffloadInfo, error)
 }
 
-// ToolDetail contains details about a tool's input and output
+// ToolDetail contains detailed information about a tool execution, used by the OffloadHandler.
 type ToolDetail struct {
+	// ToolContext provides metadata about the tool call (e.g., tool name, call ID).
 	ToolContext *adk.ToolContext
 
+	// ToolArgument contains the arguments passed to the tool.
 	ToolArgument *schema.ToolArgument
-	
+
+	// ToolResult contains the output returned by the tool.
 	ToolResult *schema.ToolResult
 }
 
+// OffloadInfo contains the result of the OffloadHandler's decision.
 type OffloadInfo struct {
+	// NeedOffload indicates whether the tool output should be offloaded.
 	NeedOffload bool
 
+	// FilePath is the path where the offloaded content should be stored.
+	// This path is typically relative to the backend's root.
 	FilePath string
 
+	// OffloadContent is the actual content to be written to the storage backend.
 	OffloadContent string
 }
 
