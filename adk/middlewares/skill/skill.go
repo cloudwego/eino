@@ -403,8 +403,8 @@ func (s *skillTool) runAgentMode(ctx context.Context, skill Skill, forkHistory b
 	}
 
 	resultFmt, err := internal.SelectPrompt(internal.I18nPrompts{
-		English: forkResultFormat,
-		Chinese: forkResultFormatChinese,
+		English: subAgentResultFormat,
+		Chinese: subAgentResultFormatChinese,
 	})
 	if err != nil {
 		return "", err

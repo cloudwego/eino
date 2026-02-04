@@ -149,6 +149,6 @@ Important:
 %s`
 	toolName = "skill"
 
-	forkResultFormat        = "Skill '%s' executed in fork mode. Result:\n%s"
-	forkResultFormatChinese = "Skill '%s' 已在 fork 模式下执行。结果：\n%s"
+	subAgentResultFormat        = "Skill \"%s\" completed (sub-agent execution).\n\nResult:\n%s"
+	subAgentResultFormatChinese = "Skill \"%s\" 已完成（子 Agent 执行）。\n\n结果：\n%s"
 )
