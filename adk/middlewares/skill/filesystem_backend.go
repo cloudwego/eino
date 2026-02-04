@@ -139,10 +139,7 @@ func (b *filesystemBackend) loadSkillFromFile(ctx context.Context, path string) 
 	absDir := filepath.Dir(path)
 
 	return Skill{
-		FrontMatter: FrontMatter{
-			Name:        fm.Name,
-			Description: fm.Description,
-		},
+		FrontMatter:   fm,
 		Content:       strings.TrimSpace(content),
 		BaseDirectory: absDir,
 	}, nil

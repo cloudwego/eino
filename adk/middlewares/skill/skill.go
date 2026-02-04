@@ -216,15 +216,18 @@ func New(ctx context.Context, config *Config) (adk.AgentMiddleware, error) {
 }
 
 func buildSystemPrompt(skillToolName string, useChinese bool) (string, error) {
-	prompt, err := internal.SelectPrompt(internal.I18nPrompts{
-		English: systemPrompt,
-		Chinese: systemPromptChinese,
-	})
-	if err != nil {
-		return "", err
-	}
+	var prompt string
 	if useChinese {
 		prompt = systemPromptChinese
+	} else {
+		var err error
+		prompt, err = internal.SelectPrompt(internal.I18nPrompts{
+			English: systemPrompt,
+			Chinese: systemPromptChinese,
+		})
+		if err != nil {
+			return "", err
+		}
 	}
 	return pyfmt.Fmt(prompt, map[string]string{
 		"tool_name": skillToolName,
