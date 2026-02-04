@@ -34,11 +34,18 @@ type filesystemBackend struct {
 	baseDir string
 }
 
+// FilesystemBackendConfig contains configuration for creating a FilesystemBackend.
 type FilesystemBackendConfig struct {
+	// Backend is the filesystem.Backend implementation used for file operations.
 	Backend filesystem.Backend
+	// BaseDir is the base directory where skill directories are located.
+	// Each skill should be in a subdirectory containing a SKILL.md file.
 	BaseDir string
 }
 
+// NewFilesystemBackend creates a new Backend implementation that reads skills from a filesystem.
+// It searches for SKILL.md files in immediate subdirectories of the configured BaseDir.
+// Only first-level subdirectories are scanned; deeply nested SKILL.md files are ignored.
 func NewFilesystemBackend(config *FilesystemBackendConfig) (Backend, error) {
 	if config == nil {
 		return nil, fmt.Errorf("config is required")
