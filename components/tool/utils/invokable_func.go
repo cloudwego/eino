@@ -200,3 +200,130 @@ func snakeToCamel(s string) string {
 
 	return strings.Join(parts, "")
 }
+
+// InferMultimodalTool wraps a regular Go function into a MultimodalInvokableTool.
+// It automatically infers the tool's input schema from the function's generic type `T`.
+// The provided function `i` should have a signature like:
+// `func(ctx context.Context, input T) (D, error)`
+// where `T` is a struct representing the input parameters, and `D` is the output type.
+// If `D` is `*schema.ToolOutput`, it is used directly. Otherwise, it's marshalled into
+// a text-based ToolOutput.
+func InferMultimodalTool[T, D any](toolName, toolDesc string, i InvokeFunc[T, D], opts ...Option) (tool.MultimodalInvokableTool, error) {
+	ti, err := goStruct2ToolInfo[T](toolName, toolDesc, opts...)
+	if err != nil {
+		return nil, err
+	}
+
+	return NewMultimodalTool(ti, i, opts...), nil
+}
+
+// InferOptionableMultimodalTool is similar to InferMultimodalTool but for functions that accept tool.Option.
+// The provided function `i` should have a signature like:
+// `func(ctx context.Context, input T, opts ...tool.Option) (D, error)`
+func InferOptionableMultimodalTool[T, D any](toolName, toolDesc string, i OptionableInvokeFunc[T, D], opts ...Option) (tool.MultimodalInvokableTool, error) {
+	ti, err := goStruct2ToolInfo[T](toolName, toolDesc, opts...)
+	if err != nil {
+		return nil, err
+	}
+
+	return newOptionableMultimodalTool(ti, i, opts...), nil
+}
+
+// NewMultimodalTool creates a MultimodalInvokableTool from a function and a predefined tool description.
+// The function `i`'s output `D` will be automatically handled: if it's already a `*schema.ToolOutput`,
+// it's used as is. Otherwise, it's converted to a string and wrapped in a ToolOutput.
+func NewMultimodalTool[T, D any](desc *schema.ToolInfo, i InvokeFunc[T, D], opts ...Option) tool.MultimodalInvokableTool {
+	return newOptionableMultimodalTool(desc, func(ctx context.Context, input T, _ ...tool.Option) (D, error) {
+		return i(ctx, input)
+	}, opts...)
+}
+
+func newOptionableMultimodalTool[T, D any](desc *schema.ToolInfo, i OptionableInvokeFunc[T, D], opts ...Option) tool.MultimodalInvokableTool {
+	to := getToolOptions(opts...)
+
+	return &multimodalInvokableTool[T, D]{
+		info: desc,
+		um:   to.um,
+		mm:   to.mm,
+		Fn:   i,
+	}
+}
+
+type multimodalInvokableTool[T, D any] struct {
+	info *schema.ToolInfo
+
+	um UnmarshalArguments
+	mm MarshalMultimodalOutput
+
+	Fn OptionableInvokeFunc[T, D]
+}
+
+func (i *multimodalInvokableTool[T, D]) Info(ctx context.Context) (*schema.ToolInfo, error) {
+	return i.info, nil
+}
+
+func (i *multimodalInvokableTool[T, D]) InvokableRun(ctx context.Context, callInfo *tool.CallInfo, opts ...tool.Option) (*schema.ToolOutput, error) {
+	arguments := callInfo.Arguments
+	var inst T
+	if i.um != nil {
+		var val any
+		var err error
+		val, err = i.um(ctx, arguments)
+		if err != nil {
+			return nil, fmt.Errorf("[LocalFunc] failed to unmarshal arguments, toolName=%s, err=%w", i.getToolName(), err)
+		}
+		gt, ok := val.(T)
+		if !ok {
+			return nil, fmt.Errorf("[LocalFunc] invalid type, toolName=%s, expected=%T, given=%T", i.getToolName(), inst, val)
+		}
+		inst = gt
+	} else {
+		inst = generic.NewInstance[T]()
+
+		err := sonic.UnmarshalString(arguments, &inst)
+		if err != nil {
+			return nil, fmt.Errorf("[LocalFunc] failed to unmarshal arguments in json, toolName=%s, err=%w", i.getToolName(), err)
+		}
+	}
+
+	resp, err := i.Fn(ctx, inst, opts...)
+	if err != nil {
+		return nil, fmt.Errorf("[LocalFunc] failed to invoke tool, toolName=%s, err=%w", i.getToolName(), err)
+	}
+
+	var output *schema.ToolOutput
+	if i.mm != nil {
+		output, err = i.mm(ctx, resp)
+		if err != nil {
+			return nil, fmt.Errorf("[LocalFunc] failed to marshal multimodal output, toolName=%s, err=%w", i.getToolName(), err)
+		}
+	} else {
+		if val, ok := any(resp).(*schema.ToolOutput); ok {
+			output = val
+		} else {
+			var s string
+			s, err = marshalString(resp)
+			if err != nil {
+				return nil, fmt.Errorf("[LocalFunc] failed to marshal output in json, toolName=%s, err=%w", i.getToolName(), err)
+			}
+			output = &schema.ToolOutput{
+				Content: []schema.MessageInputPart{
+					{
+						Type: schema.ChatMessagePartTypeText,
+						Text: s,
+					},
+				},
+			}
+		}
+	}
+
+	return output, nil
+}
+
+func (i *multimodalInvokableTool[T, D]) getToolName() string {
+	if i.info == nil {
+		return ""
+	}
+
+	return i.info.Name
+}

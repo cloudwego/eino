@@ -21,6 +21,8 @@ import (
 	"reflect"
 
 	"github.com/eino-contrib/jsonschema"
+
+	"github.com/cloudwego/eino/schema"
 )
 
 // UnmarshalArguments is the function type for unmarshalling the arguments.
@@ -29,9 +31,14 @@ type UnmarshalArguments func(ctx context.Context, arguments string) (any, error)
 // MarshalOutput is the function type for marshalling the output.
 type MarshalOutput func(ctx context.Context, output any) (string, error)
 
+// MarshalMultimodalOutput is a function type for marshalling a tool's output into a structured,
+// multimodal format. It takes the raw output and converts it into a ToolOutput object.
+type MarshalMultimodalOutput func(ctx context.Context, output any) (*schema.ToolOutput, error)
+
 type toolOptions struct {
 	um         UnmarshalArguments
 	m          MarshalOutput
+	mm         MarshalMultimodalOutput
 	scModifier SchemaModifierFn
 }
 
@@ -51,6 +58,15 @@ func WithUnmarshalArguments(um UnmarshalArguments) Option {
 func WithMarshalOutput(m MarshalOutput) Option {
 	return func(o *toolOptions) {
 		o.m = m
+	}
+}
+
+// WithMarshalMultimodalOutput provides an option to specify a custom marshaller for converting
+// a tool's raw output into a multimodal ToolOutput format. This is useful when the default
+// marshalling logic is not sufficient.
+func WithMarshalMultimodalOutput(mm MarshalMultimodalOutput) Option {
+	return func(o *toolOptions) {
+		o.mm = mm
 	}
 }
 

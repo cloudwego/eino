@@ -252,6 +252,15 @@ type MessageOutputPart struct {
 	Extra map[string]any `json:"extra,omitempty"`
 }
 
+// ToolOutput represents the structured multimodal output from a tool execution.
+// It is used when a tool needs to return more than just a simple string,
+// such as images, files, or other structured data.
+type ToolOutput struct {
+	// Content contains the multimodal output parts. Each part can be a different
+	// type of content, like text, an image, or a file.
+	Content []MessageInputPart `json:"content,omitempty"`
+}
+
 // Deprecated: This struct is deprecated as the MultiContent field is deprecated.
 // For the image input part of the model, use MessageInputImage.
 // For the image output part of the model, use MessageOutputImage.

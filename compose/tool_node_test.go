@@ -827,6 +827,7 @@ func TestToolRerun(t *testing.T) {
 			"3": "tool3 input: input",
 			"4": "tool4 input: input",
 		},
+		ExecutedMultimodalTools: map[string]*schema.ToolOutput{},
 	}, info.RerunNodesExtra["tool node"])
 
 	sr, err := r.Stream(ctx, nil, WithCheckPointID("1"))
