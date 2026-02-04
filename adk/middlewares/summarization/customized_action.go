@@ -29,7 +29,7 @@ type CustomizedAction struct {
 	Before *BeforeSummaryAction `json:"before,omitempty"`
 
 	// After is set when Type is ActionTypeAfterSummary.
-	// Emitted after summary generation, before applying new messages to state.
+	// Emitted after summarization.
 	After *AfterSummaryAction `json:"after,omitempty"`
 }
 
