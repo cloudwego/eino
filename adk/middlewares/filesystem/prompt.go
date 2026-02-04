@@ -67,21 +67,20 @@ Usage:
 - The edit will FAIL if 'old_string' is not unique in the file. Either provide a larger string with more surrounding context to make it unique or use 'replace_all' to change every instance of 'old_string'.
 - Use 'replace_all' for replacing and renaming strings across the file. This parameter is useful if you want to rename a variable for instance.`
 
-	WriteFileToolDesc = `Writes to a new file in the filesystem.
+	WriteFileToolDesc = `Writes a file to the local filesystem.
 
 Usage:
-- The file_path parameter must be an absolute path, not a relative path
-- The content parameter must be a string
-- The write_file tool will create the a new file.
-- Prefer to edit existing files over creating new ones when possible.`
+- This tool will overwrite the existing file if there is one at the provided path.
+- If this is an existing file, you MUST use the Read tool first to read the file's contents. This tool will fail if you did not read the file first.
+- ALWAYS prefer editing existing files in the codebase. NEVER write new files unless explicitly required.
+- NEVER proactively create documentation files (*.md) or README files. Only create documentation files if explicitly requested by the User.
+- Only use emojis if the user explicitly requests it. Avoid writing emojis to files unless asked.`
 
-	GlobToolDesc = `Find files matching a glob pattern.
-
-Usage:
-- The glob tool finds files by matching patterns with wildcards
-- Supports standard glob patterns: '*' (any characters), '**' (any directories), '?' (single character)
-- Patterns can be absolute (starting with '/') or relative
-- Returns a list of absolute file paths that match the pattern
+	GlobToolDesc = `Fast file pattern matching tool that works with any codebase size
+- Supports glob patterns like "**/*.js" or "src/**/*.ts"
+- Returns matching file paths sorted by modification time
+- Use this tool when you need to find files by name patterns
+- You can call multiple tools in a single response. It is always better to speculatively perform multiple searches in parallel if they are potentially useful.
 
 Examples:
 - '**/*.py' - Find all Python files

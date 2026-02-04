@@ -216,9 +216,14 @@ func newLsTool(fs filesystem.Backend, desc *string) (tool.BaseTool, error) {
 }
 
 type readFileArgs struct {
-	FilePath string `json:"file_path"`
-	Offset   int    `json:"offset"`
-	Limit    int    `json:"limit"`
+	// FilePath is the absolute path to the file to read.
+	FilePath string `json:"file_path" jsonschema:"description=The absolute path to the file to read"`
+
+	// Offset is the line number to start reading from.
+	Offset int `json:"offset" jsonschema:"description=The line number to start reading from. Only provide if the file is too large to read at once"`
+
+	// Limit is the number of lines to read.
+	Limit int `json:"limit" jsonschema:"description=The number of lines to read. Only provide if the file is too large to read at once."`
 }
 
 func newReadFileTool(fs filesystem.Backend, desc *string) (tool.BaseTool, error) {
@@ -242,8 +247,11 @@ func newReadFileTool(fs filesystem.Backend, desc *string) (tool.BaseTool, error)
 }
 
 type writeFileArgs struct {
-	FilePath string `json:"file_path"`
-	Content  string `json:"content"`
+	// FilePath is the absolute path to the file to write.
+	FilePath string `json:"file_path" jsonschema:"description=The absolute path to the file to write (must be absolute\\, not relative)"`
+
+	// Content is the content to write to the file.
+	Content string `json:"content" jsonschema:"description=The content to write to the file"`
 }
 
 func newWriteFileTool(fs filesystem.Backend, desc *string) (tool.BaseTool, error) {
@@ -264,10 +272,17 @@ func newWriteFileTool(fs filesystem.Backend, desc *string) (tool.BaseTool, error
 }
 
 type editFileArgs struct {
-	FilePath   string `json:"file_path"`
-	OldString  string `json:"old_string"`
-	NewString  string `json:"new_string"`
-	ReplaceAll bool   `json:"replace_all"`
+	// FilePath is the absolute path to the file to modify.
+	FilePath string `json:"file_path" jsonschema:"description=The absolute path to the file to modify"`
+
+	// OldString is the text to replace.
+	OldString string `json:"old_string" jsonschema:"description=The text to replace"`
+
+	// NewString is the text to replace it with.
+	NewString string `json:"new_string" jsonschema:"description=The text to replace it with (must be different from old_string)"`
+
+	// ReplaceAll indicates whether to replace all occurrences of old_string.
+	ReplaceAll bool `json:"replace_all" jsonschema:"description=Replace all occurences of old_string (default false),default=false"`
 }
 
 func newEditFileTool(fs filesystem.Backend, desc *string) (tool.BaseTool, error) {
@@ -290,8 +305,11 @@ func newEditFileTool(fs filesystem.Backend, desc *string) (tool.BaseTool, error)
 }
 
 type globArgs struct {
-	Pattern string `json:"pattern"`
-	Path    string `json:"path"`
+	// Pattern is the glob pattern to match files against.
+	Pattern string `json:"pattern" jsonschema:"description=The glob pattern to match files against"`
+
+	// Path is the directory to search in.
+	Path string `json:"path" jsonschema:"description=The directory to search in. If not specified\\, the current working directory will be used. IMPORTANT: Omit this field to use the default directory. DO NOT enter 'undefined' or 'null' - simply omit it for the default behavior. Must be a valid directory path if provided."`
 }
 
 func newGlobTool(fs filesystem.Backend, desc *string) (tool.BaseTool, error) {
@@ -317,59 +335,59 @@ func newGlobTool(fs filesystem.Backend, desc *string) (tool.BaseTool, error) {
 
 type grepArgs struct {
 	// Pattern is the regular expression pattern to search for in file contents.
-	Pattern string `json:"pattern"`
+	Pattern string `json:"pattern" jsonschema:"description=The regular expression pattern to search for in file contents"`
 
 	// Path is the file or directory to search in. Defaults to current working directory.
-	Path *string `json:"path,omitempty"`
+	Path *string `json:"path,omitempty" jsonschema:"description=File or directory to search in (rg PATH). Defaults to current working directory."`
 
 	// Glob is the glob pattern to filter files (e.g. "*.js", "*.{ts,tsx}").
-	Glob *string `json:"glob,omitempty"`
+	Glob *string `json:"glob,omitempty" jsonschema:"description=Glob pattern to filter files (e.g. '*.js'\\, '*.{ts\\,tsx}') - maps to rg --glob"`
 
 	// OutputMode specifies the output format.
 	// "content" shows matching lines (supports context, line numbers, head_limit).
 	// "files_with_matches" shows file paths (supports head_limit).
 	// "count" shows match counts (supports head_limit).
 	// Defaults to "files_with_matches".
-	OutputMode string `json:"output_mode,omitempty"`
+	OutputMode string `json:"output_mode,omitempty" jsonschema:"description=Output mode: 'content' shows matching lines (supports -A/-B/-C context\\, -n line numbers\\, head_limit)\\, 'files_with_matches' shows file paths (supports head_limit)\\, 'count' shows match counts (supports head_limit). Defaults to 'files_with_matches'.,enum=content,enum=files_with_matches,enum=count"`
 
 	// BeforeLines is the number of lines to show before each match.
 	// Only applicable when output_mode is "content".
-	BeforeLines *int `json:"-B,omitempty" `
+	BeforeLines *int `json:"-B,omitempty" jsonschema:"description=Number of lines to show before each match (rg -B). Requires output_mode: 'content'\\, ignored otherwise."`
 
 	// AfterLines is the number of lines to show after each match.
 	// Only applicable when output_mode is "content".
-	AfterLines *int `json:"-A,omitempty" `
+	AfterLines *int `json:"-A,omitempty" jsonschema:"description=Number of lines to show after each match (rg -A). Requires output_mode: 'content'\\, ignored otherwise."`
 
 	// ContextAlias is an alias for Context (number of lines before and after).
-	ContextAlias *int `json:"-C,omitempty"`
+	ContextAlias *int `json:"-C,omitempty" jsonschema:"description=Alias for context."`
 
 	// Context is the number of lines to show before and after each match.
 	// Only applicable when output_mode is "content".
-	Context *int `json:"context,omitempty"`
+	Context *int `json:"context,omitempty" jsonschema:"description=Number of lines to show before and after each match (rg -C). Requires output_mode: 'content'\\, ignored otherwise."`
 
 	// ShowLineNumbers enables showing line numbers in output.
 	// Only applicable when output_mode is "content". Defaults to true.
-	ShowLineNumbers *bool `json:"-n,omitempty"`
+	ShowLineNumbers *bool `json:"-n,omitempty" jsonschema:"description=Show line numbers in output (rg -n). Requires output_mode: 'content'\\, ignored otherwise. Defaults to true."`
 
 	// CaseInsensitive enables case insensitive search.
-	CaseInsensitive *bool `json:"-i,omitempty"`
+	CaseInsensitive *bool `json:"-i,omitempty" jsonschema:"description=Case insensitive search (rg -i)"`
 
 	// FileType is the file type to search (e.g., js, py, rust, go, java).
 	// More efficient than Glob for standard file types.
-	FileType *string `json:"type,omitempty" `
+	FileType *string `json:"type,omitempty" jsonschema:"description=File type to search (rg --type). Common types: js\\, py\\, rust\\, go\\, java\\, etc. More efficient than include for standard file types."`
 
 	// HeadLimit limits output to first N lines/entries.
 	// Works across all output modes. Defaults to 0 (unlimited).
-	HeadLimit *int `json:"head_limit,omitempty" `
+	HeadLimit *int `json:"head_limit,omitempty" jsonschema:"description=Limit output to first N lines/entries\\, equivalent to '| head -N'. Works across all output modes: content (limits output lines)\\, files_with_matches (limits file paths)\\, count (limits count entries). Defaults to 0 (unlimited)."`
 
 	// Offset skips first N lines/entries before applying HeadLimit.
 	// Works across all output modes. Defaults to 0.
-	Offset *int `json:"offset,omitempty"`
+	Offset *int `json:"offset,omitempty" jsonschema:"description=Skip first N lines/entries before applying head_limit\\, equivalent to '| tail -n +N | head -N'. Works across all output modes. Defaults to 0."`
 
 	// Multiline enables multiline mode where patterns can span lines.
 	//   - true: Allows patterns to match across lines, "." matches newlines
 	//   - false: Default, matches only within single lines
-	Multiline *bool `json:"multiline,omitempty"`
+	Multiline *bool `json:"multiline,omitempty" jsonschema:"description=Enable multiline mode where . matches newlines and patterns can span lines (rg -U --multiline-dotall). Default: false."`
 }
 
 func newGrepTool(fs filesystem.Backend, desc *string) (tool.BaseTool, error) {
