@@ -14,8 +14,7 @@
  * limitations under the License.
  */
 
-// Package reduction provides middlewares to trim context and clear tool results.
-package reduction
+package internal
 
 import (
 	"context"
