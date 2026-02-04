@@ -29,6 +29,7 @@ import (
 
 	"github.com/bytedance/sonic"
 
+	"github.com/cloudwego/eino/adk/internal"
 	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/components/prompt"
 	"github.com/cloudwego/eino/components/tool"
@@ -407,14 +408,14 @@ func collectToolMiddlewaresFromMiddlewares(mws []AgentMiddleware) []compose.Tool
 }
 
 const (
-	TransferToAgentToolName = "transfer_to_agent"
-	TransferToAgentToolDesc = "Transfer the question to another agent."
+	TransferToAgentToolName        = "transfer_to_agent"
+	TransferToAgentToolDesc        = "Transfer the question to another agent."
+	TransferToAgentToolDescChinese = "将问题移交给其他 Agent。"
 )
 
 var (
 	toolInfoTransferToAgent = &schema.ToolInfo{
 		Name: TransferToAgentToolName,
-		Desc: TransferToAgentToolDesc,
 
 		ParamsOneOf: schema.NewParamsOneOfByParams(map[string]*schema.ParameterInfo{
 			"agent_name": {
@@ -467,11 +468,27 @@ func (et ExitTool) InvokableRun(ctx context.Context, argumentsInJSON string, _ .
 type transferToAgent struct{}
 
 func (tta transferToAgent) Info(_ context.Context) (*schema.ToolInfo, error) {
-	return toolInfoTransferToAgent, nil
+	desc, err := internal.SelectPrompt(internal.I18nPrompts{
+		English: TransferToAgentToolDesc,
+		Chinese: TransferToAgentToolDescChinese,
+	})
+	if err != nil {
+		return nil, err
+	}
+	info := *toolInfoTransferToAgent
+	info.Desc = desc
+	return &info, nil
 }
 
-func transferToAgentToolOutput(destName string) string {
-	return fmt.Sprintf("successfully transferred to agent [%s]", destName)
+func transferToAgentToolOutput(destName string) (string, error) {
+	tpl, err := internal.SelectPrompt(internal.I18nPrompts{
+		English: "successfully transferred to agent [%s]",
+		Chinese: "成功移交任务至 agent [%s]",
+	})
+	if err != nil {
+		return "", err
+	}
+	return fmt.Sprintf(tpl, destName), nil
 }
 
 func (tta transferToAgent) InvokableRun(ctx context.Context, argumentsInJSON string, _ ...tool.Option) (string, error) {
@@ -490,7 +507,7 @@ func (tta transferToAgent) InvokableRun(ctx context.Context, argumentsInJSON str
 		return "", err
 	}
 
-	return transferToAgentToolOutput(params.AgentName), nil
+	return transferToAgentToolOutput(params.AgentName)
 }
 
 func (a *ChatModelAgent) Name(_ context.Context) string {
@@ -647,7 +664,10 @@ func (a *ChatModelAgent) prepareExecContext(ctx context.Context) (*execContext, 
 	}
 
 	if len(transferToAgents) > 0 {
-		transferInstruction := genTransferToAgentInstruction(ctx, transferToAgents)
+		transferInstruction, err := genTransferToAgentInstruction(ctx, transferToAgents)
+		if err != nil {
+			return nil, err
+		}
 		instruction = concatInstructions(instruction, transferInstruction)
 
 		toolsNodeConf.Tools = append(toolsNodeConf.Tools, &transferToAgent{})

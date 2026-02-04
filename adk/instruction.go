@@ -20,6 +20,8 @@ import (
 	"context"
 	"fmt"
 	"strings"
+
+	"github.com/cloudwego/eino/adk/internal"
 )
 
 const (
@@ -30,14 +32,39 @@ Decision rule:
 - If another agent is better according its description: CALL '%s' function with their agent name
 
 When transferring: OUTPUT ONLY THE FUNCTION CALL`
+
+	TransferToAgentInstructionChinese = `可用的其他 agent：%s
+
+决策规则：
+- 如果根据你的职责描述，你最适合回答这个问题：ANSWER
+- 如果根据其职责描述，另一个 agent 更适合：调用 %s 函数，并传入该 agent 的名称
+
+当进行移交时：只输出函数调用，不要输出其他任何内容`
+
+	agentDescriptionTpl        = "\n- Agent name: %s\n  Agent description: %s"
+	agentDescriptionTplChinese = "\n- Agent 名字: %s\n  Agent 描述: %s"
 )
 
-func genTransferToAgentInstruction(ctx context.Context, agents []Agent) string {
-	var sb strings.Builder
-	for _, agent := range agents {
-		sb.WriteString(fmt.Sprintf("\n- Agent name: %s\n  Agent description: %s",
-			agent.Name(ctx), agent.Description(ctx)))
+func genTransferToAgentInstruction(ctx context.Context, agents []Agent) (string, error) {
+	tpl, err := internal.SelectPrompt(internal.I18nPrompts{
+		English: agentDescriptionTpl,
+		Chinese: agentDescriptionTplChinese,
+	})
+	if err != nil {
+		return "", err
+	}
+	instruction, err := internal.SelectPrompt(internal.I18nPrompts{
+		English: TransferToAgentInstruction,
+		Chinese: TransferToAgentInstructionChinese,
+	})
+	if err != nil {
+		return "", err
 	}
 
-	return fmt.Sprintf(TransferToAgentInstruction, sb.String(), TransferToAgentToolName)
+	var sb strings.Builder
+	for _, agent := range agents {
+		sb.WriteString(fmt.Sprintf(tpl, agent.Name(ctx), agent.Description(ctx)))
+	}
+
+	return fmt.Sprintf(instruction, sb.String(), TransferToAgentToolName), nil
 }
