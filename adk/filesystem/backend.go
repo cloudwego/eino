@@ -27,6 +27,18 @@ import (
 type FileInfo struct {
 	// Path is the absolute path of the file or directory.
 	Path string
+
+	// IsDir indicates whether the entry is a directory.
+	// true for directories, false for regular files.
+	IsDir bool
+
+	// Size is the file size in bytes.
+	// For directories, this value may be 0 or platform-dependent.
+	Size int64
+
+	// ModifiedAt is the last modification time in ISO 8601 format.
+	// Example: "2025-01-15T10:30:00Z"
+	ModifiedAt string
 }
 
 // GrepMatch represents a single pattern match result.
@@ -36,8 +48,8 @@ type GrepMatch struct {
 	// Path is the file path where the match was found.
 	Path string
 
-	// LineNumber is the line number where the match was found.
-	LineNumber int
+	// Line is the 1-based line number of the match.
+	Line int
 
 	// Count is the total number of matches found in the file.
 	Count int

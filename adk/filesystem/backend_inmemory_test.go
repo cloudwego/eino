@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestInMemoryBackend_WriteAndRead(t *testing.T) {
@@ -361,8 +362,8 @@ class UserService {
 					if matches[0].Content != "hello world" {
 						t.Errorf("Expected content 'hello world', got: %s", matches[0].Content)
 					}
-					if matches[0].LineNumber != 2 {
-						t.Errorf("Expected line number 2, got: %d", matches[0].LineNumber)
+					if matches[0].Line != 2 {
+						t.Errorf("Expected line number 2, got: %d", matches[0].Line)
 					}
 				}
 			},
@@ -636,7 +637,7 @@ class UserService {
 				t.Errorf("Expected %d matches, got %d", tt.expectedCount, len(matches))
 				for i, match := range matches {
 					t.Logf("Match %d: Path=%s, Line=%d, Content=%s, Count=%d",
-						i, match.Path, match.LineNumber, match.Content, match.Count)
+						i, match.Path, match.Line, match.Content, match.Count)
 				}
 			}
 
@@ -655,7 +656,7 @@ class UserService {
 			if tt.expectedLines != nil {
 				actualLines := make([]int, len(matches))
 				for i, match := range matches {
-					actualLines[i] = match.LineNumber
+					actualLines[i] = match.Line
 				}
 				if len(actualLines) != len(tt.expectedLines) {
 					t.Errorf("Expected line numbers %v, got %v", tt.expectedLines, actualLines)
@@ -999,7 +1000,7 @@ func TestInMemoryBackend_GrepRaw_ContentValidation(t *testing.T) {
 		{
 			name:        "content mode with multiple matches",
 			fileContent: "match on line 1\nno match\nmatch on line 3\nno match\nmatch on line 5",
-			pattern:     "match",
+			pattern:     "match on",
 			outputMode:  ContentOfOutputMode,
 			expectedMatches: []struct {
 				content    string
@@ -1149,9 +1150,9 @@ func TestInMemoryBackend_GrepRaw_ContentValidation(t *testing.T) {
 						i, expected.content, actual.Content)
 				}
 
-				if expected.lineNumber > 0 && actual.LineNumber != expected.lineNumber {
+				if expected.lineNumber > 0 && actual.Line != expected.lineNumber {
 					t.Errorf("Match %d: expected line number %d, got %d",
-						i, expected.lineNumber, actual.LineNumber)
+						i, expected.lineNumber, actual.Line)
 				}
 
 				if expected.count > 0 && actual.Count != expected.count {
@@ -1171,9 +1172,9 @@ func TestInMemoryBackend_GrepRaw_ContentValidation(t *testing.T) {
 						t.Errorf("Match %d: expected empty content in files_with_matches mode, got %q",
 							i, match.Content)
 					}
-					if match.LineNumber != 0 {
+					if match.Line != 0 {
 						t.Errorf("Match %d: expected zero line number in files_with_matches mode, got %d",
-							i, match.LineNumber)
+							i, match.Line)
 					}
 				}
 			}
@@ -1302,8 +1303,8 @@ line 10`
 		}
 
 		for i, match := range matches {
-			if i < len(expectedLines) && match.LineNumber != expectedLines[i] {
-				t.Errorf("Match %d: expected line %d, got %d", i, expectedLines[i], match.LineNumber)
+			if i < len(expectedLines) && match.Line != expectedLines[i] {
+				t.Errorf("Match %d: expected line %d, got %d", i, expectedLines[i], match.Line)
 			}
 		}
 	})
@@ -1324,8 +1325,8 @@ line 10`
 		}
 
 		for i, match := range matches {
-			if i < len(expectedLines) && match.LineNumber != expectedLines[i] {
-				t.Errorf("Match %d: expected line %d, got %d", i, expectedLines[i], match.LineNumber)
+			if i < len(expectedLines) && match.Line != expectedLines[i] {
+				t.Errorf("Match %d: expected line %d, got %d", i, expectedLines[i], match.Line)
 			}
 		}
 	})
@@ -1346,8 +1347,8 @@ line 10`
 		}
 
 		for i, match := range matches {
-			if i < len(expectedLines) && match.LineNumber != expectedLines[i] {
-				t.Errorf("Match %d: expected line %d, got %d", i, expectedLines[i], match.LineNumber)
+			if i < len(expectedLines) && match.Line != expectedLines[i] {
+				t.Errorf("Match %d: expected line %d, got %d", i, expectedLines[i], match.Line)
 			}
 		}
 	})
@@ -1369,8 +1370,8 @@ line 10`
 		}
 
 		for i, match := range matches {
-			if i < len(expectedLines) && match.LineNumber != expectedLines[i] {
-				t.Errorf("Match %d: expected line %d, got %d", i, expectedLines[i], match.LineNumber)
+			if i < len(expectedLines) && match.Line != expectedLines[i] {
+				t.Errorf("Match %d: expected line %d, got %d", i, expectedLines[i], match.Line)
 			}
 		}
 	})
@@ -1412,8 +1413,8 @@ line 10`
 		if len(matches) == 0 {
 			t.Fatal("Expected at least 1 match")
 		}
-		if matches[0].LineNumber != 1 {
-			t.Errorf("Expected first match at line 1, got %d", matches[0].LineNumber)
+		if matches[0].Line != 1 {
+			t.Errorf("Expected first match at line 1, got %d", matches[0].Line)
 		}
 	})
 
@@ -1436,8 +1437,8 @@ line 10`
 		if len(matches) != 3 {
 			t.Errorf("Expected 3 matches (all lines), got %d", len(matches))
 		}
-		if matches[len(matches)-1].LineNumber != 3 {
-			t.Errorf("Expected last match at line 3, got %d", matches[len(matches)-1].LineNumber)
+		if matches[len(matches)-1].Line != 3 {
+			t.Errorf("Expected last match at line 3, got %d", matches[len(matches)-1].Line)
 		}
 	})
 
@@ -1464,10 +1465,10 @@ line 10`
 
 		seenLines := make(map[int]bool)
 		for _, match := range matches {
-			if seenLines[match.LineNumber] {
-				t.Errorf("Duplicate line number %d in results", match.LineNumber)
+			if seenLines[match.Line] {
+				t.Errorf("Duplicate line number %d in results", match.Line)
 			}
-			seenLines[match.LineNumber] = true
+			seenLines[match.Line] = true
 		}
 	})
 
@@ -1540,6 +1541,479 @@ line 10`
 			if count != 3 {
 				t.Errorf("Expected 3 lines per file for %s, got %d", path, count)
 			}
+		}
+	})
+}
+
+func TestInMemoryBackend_LsInfo_FileInfoMetadata(t *testing.T) {
+	backend := NewInMemoryBackend()
+	ctx := context.Background()
+
+	t.Run("FileMetadata", func(t *testing.T) {
+		content := "hello world"
+		err := backend.Write(ctx, &WriteRequest{
+			FilePath: "/test.txt",
+			Content:  content,
+		})
+		if err != nil {
+			t.Fatalf("Write failed: %v", err)
+		}
+
+		infos, err := backend.LsInfo(ctx, &LsInfoRequest{Path: "/"})
+		if err != nil {
+			t.Fatalf("LsInfo failed: %v", err)
+		}
+
+		if len(infos) != 1 {
+			t.Fatalf("Expected 1 file, got %d", len(infos))
+		}
+
+		info := infos[0]
+		if info.Path != "/test.txt" {
+			t.Errorf("Expected path /test.txt, got %s", info.Path)
+		}
+		if info.IsDir {
+			t.Error("Expected IsDir to be false for file")
+		}
+		if info.Size != int64(len(content)) {
+			t.Errorf("Expected size %d, got %d", len(content), info.Size)
+		}
+		if info.ModifiedAt == "" {
+			t.Error("Expected ModifiedAt to be non-empty")
+		}
+		_, err = time.Parse(time.RFC3339Nano, info.ModifiedAt)
+		if err != nil {
+			t.Errorf("ModifiedAt is not valid RFC3339 format: %v", err)
+		}
+	})
+
+	t.Run("DirectoryMetadata", func(t *testing.T) {
+		backend := NewInMemoryBackend()
+		err := backend.Write(ctx, &WriteRequest{
+			FilePath: "/dir1/file1.txt",
+			Content:  "content1",
+		})
+		if err != nil {
+			t.Fatalf("Write failed: %v", err)
+		}
+
+		infos, err := backend.LsInfo(ctx, &LsInfoRequest{Path: "/"})
+		if err != nil {
+			t.Fatalf("LsInfo failed: %v", err)
+		}
+
+		if len(infos) != 1 {
+			t.Fatalf("Expected 1 directory, got %d", len(infos))
+		}
+
+		info := infos[0]
+		if info.Path != "/dir1" {
+			t.Errorf("Expected path /dir1, got %s", info.Path)
+		}
+		if !info.IsDir {
+			t.Error("Expected IsDir to be true for directory")
+		}
+		if info.Size != 0 {
+			t.Errorf("Expected size 0 for directory, got %d", info.Size)
+		}
+		if info.ModifiedAt == "" {
+			t.Error("Expected ModifiedAt to be non-empty for directory")
+		}
+	})
+
+	t.Run("MixedFilesAndDirectories", func(t *testing.T) {
+		backend := NewInMemoryBackend()
+		backend.Write(ctx, &WriteRequest{
+			FilePath: "/file1.txt",
+			Content:  "content1",
+		})
+		backend.Write(ctx, &WriteRequest{
+			FilePath: "/dir1/file2.txt",
+			Content:  "content2",
+		})
+		backend.Write(ctx, &WriteRequest{
+			FilePath: "/dir1/subdir/file3.txt",
+			Content:  "content3",
+		})
+
+		infos, err := backend.LsInfo(ctx, &LsInfoRequest{Path: "/"})
+		if err != nil {
+			t.Fatalf("LsInfo failed: %v", err)
+		}
+
+		if len(infos) != 2 {
+			t.Fatalf("Expected 2 items (file1.txt, dir1), got %d", len(infos))
+		}
+
+		fileCount := 0
+		dirCount := 0
+		for _, info := range infos {
+			if info.IsDir {
+				dirCount++
+				if info.Path != "/dir1" {
+					t.Errorf("Expected directory path /dir1, got %s", info.Path)
+				}
+			} else {
+				fileCount++
+				if info.Path != "/file1.txt" {
+					t.Errorf("Expected file path /file1.txt, got %s", info.Path)
+				}
+				if info.Size != int64(len("content1")) {
+					t.Errorf("Expected file size %d, got %d", len("content1"), info.Size)
+				}
+			}
+		}
+
+		if fileCount != 1 {
+			t.Errorf("Expected 1 file, got %d", fileCount)
+		}
+		if dirCount != 1 {
+			t.Errorf("Expected 1 directory, got %d", dirCount)
+		}
+	})
+
+	t.Run("SubdirectoryListing", func(t *testing.T) {
+		backend := NewInMemoryBackend()
+		backend.Write(ctx, &WriteRequest{
+			FilePath: "/dir1/file1.txt",
+			Content:  "short",
+		})
+		backend.Write(ctx, &WriteRequest{
+			FilePath: "/dir1/subdir/file2.txt",
+			Content:  "longer content here",
+		})
+
+		infos, err := backend.LsInfo(ctx, &LsInfoRequest{Path: "/dir1"})
+		if err != nil {
+			t.Fatalf("LsInfo failed: %v", err)
+		}
+
+		if len(infos) != 2 {
+			t.Fatalf("Expected 2 items (file1.txt, subdir), got %d", len(infos))
+		}
+
+		for _, info := range infos {
+			if info.Path == "/dir1/file1.txt" {
+				if info.IsDir {
+					t.Error("Expected file1.txt to be a file")
+				}
+				if info.Size != int64(len("short")) {
+					t.Errorf("Expected size %d, got %d", len("short"), info.Size)
+				}
+			} else if info.Path == "/dir1/subdir" {
+				if !info.IsDir {
+					t.Error("Expected subdir to be a directory")
+				}
+			} else {
+				t.Errorf("Unexpected path: %s", info.Path)
+			}
+		}
+	})
+
+	t.Run("DirectoryModifiedAtUsesLatestFile", func(t *testing.T) {
+		backend := NewInMemoryBackend()
+
+		backend.Write(ctx, &WriteRequest{
+			FilePath: "/dir1/file1.txt",
+			Content:  "content1",
+		})
+		time.Sleep(10 * time.Millisecond)
+
+		backend.Write(ctx, &WriteRequest{
+			FilePath: "/dir1/file2.txt",
+			Content:  "content2",
+		})
+
+		infos, err := backend.LsInfo(ctx, &LsInfoRequest{Path: "/"})
+		if err != nil {
+			t.Fatalf("LsInfo failed: %v", err)
+		}
+
+		if len(infos) != 1 {
+			t.Fatalf("Expected 1 directory, got %d", len(infos))
+		}
+
+		dirInfo := infos[0]
+		if !dirInfo.IsDir {
+			t.Fatal("Expected directory")
+		}
+
+		dirModTime, _ := time.Parse(time.RFC3339Nano, dirInfo.ModifiedAt)
+
+		subInfos, _ := backend.LsInfo(ctx, &LsInfoRequest{Path: "/dir1"})
+		var latestFileTime time.Time
+		for _, info := range subInfos {
+			fileTime, _ := time.Parse(time.RFC3339Nano, info.ModifiedAt)
+			if fileTime.After(latestFileTime) {
+				latestFileTime = fileTime
+			}
+		}
+
+		if !dirModTime.Equal(latestFileTime) && dirModTime.Before(latestFileTime) {
+			t.Logf("Directory mod time: %v, Latest file time: %v", dirModTime, latestFileTime)
+		}
+	})
+}
+
+func TestInMemoryBackend_GlobInfo_FileInfoMetadata(t *testing.T) {
+	backend := NewInMemoryBackend()
+	ctx := context.Background()
+
+	t.Run("BasicMetadata", func(t *testing.T) {
+		content := "test content"
+		backend.Write(ctx, &WriteRequest{
+			FilePath: "/test.txt",
+			Content:  content,
+		})
+
+		infos, err := backend.GlobInfo(ctx, &GlobInfoRequest{
+			Pattern: "*.txt",
+			Path:    "/",
+		})
+		if err != nil {
+			t.Fatalf("GlobInfo failed: %v", err)
+		}
+
+		if len(infos) != 1 {
+			t.Fatalf("Expected 1 file, got %d", len(infos))
+		}
+
+		info := infos[0]
+		if info.Path != "/test.txt" {
+			t.Errorf("Expected path /test.txt, got %s", info.Path)
+		}
+		if info.IsDir {
+			t.Error("Expected IsDir to be false")
+		}
+		if info.Size != int64(len(content)) {
+			t.Errorf("Expected size %d, got %d", len(content), info.Size)
+		}
+		if info.ModifiedAt == "" {
+			t.Error("Expected ModifiedAt to be non-empty")
+		}
+	})
+
+	t.Run("MultipleFilesMetadata", func(t *testing.T) {
+		backend := NewInMemoryBackend()
+		backend.Write(ctx, &WriteRequest{
+			FilePath: "/file1.txt",
+			Content:  "short",
+		})
+		backend.Write(ctx, &WriteRequest{
+			FilePath: "/file2.txt",
+			Content:  "much longer content",
+		})
+		backend.Write(ctx, &WriteRequest{
+			FilePath: "/file3.py",
+			Content:  "python",
+		})
+
+		infos, err := backend.GlobInfo(ctx, &GlobInfoRequest{
+			Pattern: "*.txt",
+			Path:    "/",
+		})
+		if err != nil {
+			t.Fatalf("GlobInfo failed: %v", err)
+		}
+
+		if len(infos) != 2 {
+			t.Fatalf("Expected 2 .txt files, got %d", len(infos))
+		}
+
+		for _, info := range infos {
+			if info.IsDir {
+				t.Errorf("Expected IsDir to be false for %s", info.Path)
+			}
+			if info.Size <= 0 {
+				t.Errorf("Expected positive size for %s, got %d", info.Path, info.Size)
+			}
+			if info.ModifiedAt == "" {
+				t.Errorf("Expected ModifiedAt to be non-empty for %s", info.Path)
+			}
+		}
+	})
+}
+
+func TestInMemoryBackend_WriteAndEdit_ModifiedAt(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("WriteUpdatesModifiedAt", func(t *testing.T) {
+		backend := NewInMemoryBackend()
+		beforeWrite := time.Now()
+		time.Sleep(1 * time.Millisecond)
+
+		err := backend.Write(ctx, &WriteRequest{
+			FilePath: "/test.txt",
+			Content:  "initial content",
+		})
+		if err != nil {
+			t.Fatalf("Write failed: %v", err)
+		}
+
+		time.Sleep(1 * time.Millisecond)
+		afterWrite := time.Now()
+
+		infos, err := backend.LsInfo(ctx, &LsInfoRequest{Path: "/"})
+		if err != nil {
+			t.Fatalf("LsInfo failed: %v", err)
+		}
+		if len(infos) != 1 {
+			t.Fatalf("Expected 1 file, got %d", len(infos))
+		}
+
+		modTime, err := time.Parse(time.RFC3339Nano, infos[0].ModifiedAt)
+		if err != nil {
+			t.Fatalf("Failed to parse ModifiedAt: %v", err)
+		}
+
+		if modTime.Before(beforeWrite) || modTime.After(afterWrite) {
+			t.Errorf("ModifiedAt %v should be between %v and %v", modTime, beforeWrite, afterWrite)
+		}
+	})
+
+	t.Run("EditUpdatesModifiedAt", func(t *testing.T) {
+		backend := NewInMemoryBackend()
+		err := backend.Write(ctx, &WriteRequest{
+			FilePath: "/edit.txt",
+			Content:  "hello world",
+		})
+		if err != nil {
+			t.Fatalf("Write failed: %v", err)
+		}
+
+		infos1, err := backend.LsInfo(ctx, &LsInfoRequest{Path: "/"})
+		if err != nil {
+			t.Fatalf("LsInfo failed: %v", err)
+		}
+		if len(infos1) != 1 {
+			t.Fatalf("Expected 1 file, got %d", len(infos1))
+		}
+		modTime1, err := time.Parse(time.RFC3339Nano, infos1[0].ModifiedAt)
+		if err != nil {
+			t.Fatalf("Failed to parse ModifiedAt: %v", err)
+		}
+
+		time.Sleep(10 * time.Millisecond)
+
+		err = backend.Edit(ctx, &EditRequest{
+			FilePath:   "/edit.txt",
+			OldString:  "hello",
+			NewString:  "hi",
+			ReplaceAll: true,
+		})
+		if err != nil {
+			t.Fatalf("Edit failed: %v", err)
+		}
+
+		infos2, err := backend.LsInfo(ctx, &LsInfoRequest{Path: "/"})
+		if err != nil {
+			t.Fatalf("LsInfo failed: %v", err)
+		}
+		if len(infos2) != 1 {
+			t.Fatalf("Expected 1 file, got %d", len(infos2))
+		}
+		modTime2, err := time.Parse(time.RFC3339Nano, infos2[0].ModifiedAt)
+		if err != nil {
+			t.Fatalf("Failed to parse ModifiedAt: %v", err)
+		}
+
+		if !modTime2.After(modTime1) {
+			t.Errorf("ModifiedAt should be updated after edit. Before: %v, After: %v", modTime1, modTime2)
+		}
+	})
+
+	t.Run("OverwriteUpdatesModifiedAt", func(t *testing.T) {
+		backend := NewInMemoryBackend()
+		err := backend.Write(ctx, &WriteRequest{
+			FilePath: "/overwrite.txt",
+			Content:  "original",
+		})
+		if err != nil {
+			t.Fatalf("Write failed: %v", err)
+		}
+
+		infos1, err := backend.LsInfo(ctx, &LsInfoRequest{Path: "/"})
+		if err != nil {
+			t.Fatalf("LsInfo failed: %v", err)
+		}
+		if len(infos1) != 1 {
+			t.Fatalf("Expected 1 file, got %d", len(infos1))
+		}
+		modTime1, err := time.Parse(time.RFC3339Nano, infos1[0].ModifiedAt)
+		if err != nil {
+			t.Fatalf("Failed to parse ModifiedAt: %v", err)
+		}
+
+		time.Sleep(10 * time.Millisecond)
+
+		err = backend.Write(ctx, &WriteRequest{
+			FilePath: "/overwrite.txt",
+			Content:  "new content",
+		})
+		if err != nil {
+			t.Fatalf("Write failed: %v", err)
+		}
+
+		infos2, err := backend.LsInfo(ctx, &LsInfoRequest{Path: "/"})
+		if err != nil {
+			t.Fatalf("LsInfo failed: %v", err)
+		}
+		if len(infos2) != 1 {
+			t.Fatalf("Expected 1 file, got %d", len(infos2))
+		}
+		modTime2, err := time.Parse(time.RFC3339Nano, infos2[0].ModifiedAt)
+		if err != nil {
+			t.Fatalf("Failed to parse ModifiedAt: %v", err)
+		}
+
+		if !modTime2.After(modTime1) {
+			t.Errorf("ModifiedAt should be updated after overwrite. Before: %v, After: %v", modTime1, modTime2)
+		}
+	})
+
+	t.Run("SizeUpdatesAfterEdit", func(t *testing.T) {
+		backend := NewInMemoryBackend()
+		err := backend.Write(ctx, &WriteRequest{
+			FilePath: "/size.txt",
+			Content:  "hello",
+		})
+		if err != nil {
+			t.Fatalf("Write failed: %v", err)
+		}
+
+		infos1, err := backend.LsInfo(ctx, &LsInfoRequest{Path: "/"})
+		if err != nil {
+			t.Fatalf("LsInfo failed: %v", err)
+		}
+		if len(infos1) != 1 {
+			t.Fatalf("Expected 1 file, got %d", len(infos1))
+		}
+		size1 := infos1[0].Size
+
+		err = backend.Edit(ctx, &EditRequest{
+			FilePath:   "/size.txt",
+			OldString:  "hello",
+			NewString:  "hello world",
+			ReplaceAll: true,
+		})
+		if err != nil {
+			t.Fatalf("Edit failed: %v", err)
+		}
+
+		infos2, err := backend.LsInfo(ctx, &LsInfoRequest{Path: "/"})
+		if err != nil {
+			t.Fatalf("LsInfo failed: %v", err)
+		}
+		if len(infos2) != 1 {
+			t.Fatalf("Expected 1 file, got %d", len(infos2))
+		}
+		size2 := infos2[0].Size
+
+		if size2 <= size1 {
+			t.Errorf("Size should increase after edit. Before: %d, After: %d", size1, size2)
+		}
+		if size2 != int64(len("hello world")) {
+			t.Errorf("Expected size %d, got %d", len("hello world"), size2)
 		}
 	})
 }

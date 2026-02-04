@@ -192,9 +192,10 @@ func TestWriteFileTool(t *testing.T) {
 			expected: "Updated file /newfile.txt",
 		},
 		{
-			name:    "overwrite existing file",
-			input:   `{"file_path": "/file1.txt", "content": "overwritten"}`,
-			isError: true,
+			name:     "overwrite existing file",
+			input:    `{"file_path": "/file1.txt", "content": "overwritten"}`,
+			isError:  false,
+			expected: "Updated file /file1.txt",
 		},
 	}
 

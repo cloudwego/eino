@@ -24,19 +24,25 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 )
+
+type fileEntry struct {
+	content    string
+	modifiedAt time.Time
+}
 
 // InMemoryBackend is an in-memory implementation of the Backend interface.
 // It stores files in a map and is safe for concurrent use.
 type InMemoryBackend struct {
 	mu    sync.RWMutex
-	files map[string]string // map[filePath]content
+	files map[string]*fileEntry
 }
 
 // NewInMemoryBackend creates a new in-memory backend.
 func NewInMemoryBackend() *InMemoryBackend {
 	return &InMemoryBackend{
-		files: make(map[string]string),
+		files: make(map[string]*fileEntry),
 	}
 }
 
@@ -50,8 +56,9 @@ func (b *InMemoryBackend) LsInfo(ctx context.Context, req *LsInfoRequest) ([]Fil
 
 	var result []FileInfo
 	seen := make(map[string]bool)
+	dirInfo := make(map[string]*FileInfo)
 
-	for filePath := range b.files {
+	for filePath, entry := range b.files {
 		normalizedFilePath := normalizePath(filePath)
 
 		// Check if file is under the given path
@@ -63,7 +70,12 @@ func (b *InMemoryBackend) LsInfo(ctx context.Context, req *LsInfoRequest) ([]Fil
 			if relativePath == "" {
 				// The path itself is a file
 				if !seen[normalizedFilePath] {
-					result = append(result, FileInfo{Path: normalizedFilePath})
+					result = append(result, FileInfo{
+						Path:       normalizedFilePath,
+						IsDir:      false,
+						Size:       int64(len(entry.content)),
+						ModifiedAt: entry.modifiedAt.Format(time.RFC3339Nano),
+					})
 					seen[normalizedFilePath] = true
 				}
 				continue
@@ -78,15 +90,45 @@ func (b *InMemoryBackend) LsInfo(ctx context.Context, req *LsInfoRequest) ([]Fil
 				}
 				childPath += parts[0]
 
+				isDir := len(parts) > 1
 				if !seen[childPath] {
-					result = append(result, FileInfo{Path: childPath})
+					if isDir {
+						dirInfo[childPath] = &FileInfo{
+							Path:       childPath,
+							IsDir:      true,
+							Size:       0,
+							ModifiedAt: entry.modifiedAt.Format(time.RFC3339Nano),
+						}
+					} else {
+						result = append(result, FileInfo{
+							Path:       childPath,
+							IsDir:      false,
+							Size:       int64(len(entry.content)),
+							ModifiedAt: entry.modifiedAt.Format(time.RFC3339Nano),
+						})
+					}
 					seen[childPath] = true
+				} else if isDir {
+					if info, ok := dirInfo[childPath]; ok {
+						if entry.modifiedAt.After(mustParseTime(info.ModifiedAt)) {
+							info.ModifiedAt = entry.modifiedAt.Format(time.RFC3339Nano)
+						}
+					}
 				}
 			}
 		}
 	}
 
+	for _, info := range dirInfo {
+		result = append(result, *info)
+	}
+
 	return result, nil
+}
+
+func mustParseTime(s string) time.Time {
+	t, _ := time.Parse(time.RFC3339Nano, s)
+	return t
 }
 
 // Read reads file content with offset and limit.
@@ -96,7 +138,7 @@ func (b *InMemoryBackend) Read(ctx context.Context, req *ReadRequest) (string, e
 
 	filePath := normalizePath(req.FilePath)
 
-	content, exists := b.files[filePath]
+	entry, exists := b.files[filePath]
 	if !exists {
 		return "", fmt.Errorf("file not found: %s", filePath)
 	}
@@ -110,7 +152,7 @@ func (b *InMemoryBackend) Read(ctx context.Context, req *ReadRequest) (string, e
 		limit = 200
 	}
 
-	lines := strings.Split(content, "\n")
+	lines := strings.Split(entry.content, "\n")
 	totalLines := len(lines)
 
 	if offset >= totalLines {
@@ -137,9 +179,13 @@ func (b *InMemoryBackend) GrepRaw(ctx context.Context, req *GrepRequest) ([]Grep
 	b.mu.RLock()
 	defer b.mu.RUnlock()
 
-	// Validate pattern is not empty
 	if req.Pattern == "" {
 		return nil, fmt.Errorf("pattern cannot be empty")
+	}
+
+	re, err := b.compilePattern(req)
+	if err != nil {
+		return nil, err
 	}
 
 	searchPath := "/"
@@ -151,169 +197,198 @@ func (b *InMemoryBackend) GrepRaw(ctx context.Context, req *GrepRequest) ([]Grep
 		req.OutputMode = FilesWithMatchesOfOutputMode
 	}
 
-	// Compile regex pattern once
-	var re *regexp.Regexp
-	var err error
-	if req.CaseInsensitive {
-		re, err = regexp.Compile("(?i)" + req.Pattern)
-	} else {
-		re, err = regexp.Compile(req.Pattern)
+	collector := newGrepCollector()
+
+	for filePath, entry := range b.files {
+		normalizedFilePath := normalizePath(filePath)
+
+		if skip, err := b.shouldSkipFile(normalizedFilePath, searchPath, req); skip || err != nil {
+			if err != nil {
+				return nil, err
+			}
+			continue
+		}
+
+		collector.processFile(normalizedFilePath, entry.content, re, req)
 	}
+
+	return collector.buildResults(b, req)
+}
+
+func (b *InMemoryBackend) compilePattern(req *GrepRequest) (*regexp.Regexp, error) {
+	pattern := req.Pattern
+	if req.CaseInsensitive {
+		pattern = "(?i)" + pattern
+	}
+	re, err := regexp.Compile(pattern)
 	if err != nil {
 		return nil, fmt.Errorf("invalid regex pattern: %w", err)
 	}
+	return re, nil
+}
 
-	var allMatches []GrepMatch
-	fileMatchCounts := make(map[string]int)
-	matchedFiles := make(map[string]bool) // For files_with_matches mode
+func (b *InMemoryBackend) shouldSkipFile(filePath, searchPath string, req *GrepRequest) (bool, error) {
+	if searchPath != "/" && !strings.HasPrefix(filePath, searchPath+"/") && filePath != searchPath {
+		return true, nil
+	}
 
-	// Determine if we need detailed match information
-	needDetailedMatches := req.OutputMode == ContentOfOutputMode ||
+	if req.FileType != "" {
+		ext := strings.TrimPrefix(filepath.Ext(filePath), ".")
+		if !matchFileType(ext, req.FileType) {
+			return true, nil
+		}
+	}
+
+	if req.Glob != "" {
+		matched, err := filepath.Match(req.Glob, filepath.Base(filePath))
+		if err != nil {
+			return false, fmt.Errorf("invalid glob pattern: %w", err)
+		}
+		if !matched {
+			return true, nil
+		}
+	}
+
+	return false, nil
+}
+
+type grepCollector struct {
+	allMatches      []GrepMatch
+	fileMatchCounts map[string]int
+	matchedFiles    map[string]bool
+}
+
+func newGrepCollector() *grepCollector {
+	return &grepCollector{
+		allMatches:      []GrepMatch{},
+		fileMatchCounts: make(map[string]int),
+		matchedFiles:    make(map[string]bool),
+	}
+}
+
+func (c *grepCollector) processFile(filePath, content string, re *regexp.Regexp, req *GrepRequest) {
+	if req.OutputMode == FilesWithMatchesOfOutputMode {
+		if re.MatchString(content) {
+			c.matchedFiles[filePath] = true
+		}
+		return
+	}
+
+	fileMatches := c.findMatches(filePath, content, re, req)
+	if len(fileMatches) > 0 {
+		c.fileMatchCounts[filePath] = len(fileMatches)
+		if c.needDetailedMatches(req) {
+			c.allMatches = append(c.allMatches, fileMatches...)
+		}
+	}
+}
+
+func (c *grepCollector) needDetailedMatches(req *GrepRequest) bool {
+	return req.OutputMode == ContentOfOutputMode ||
 		req.ContextLines > 0 || req.BeforeLines > 0 || req.AfterLines > 0
+}
 
-	for filePath, content := range b.files {
-		normalizedFilePath := normalizePath(filePath)
+func (c *grepCollector) findMatches(filePath, content string, re *regexp.Regexp, req *GrepRequest) []GrepMatch {
+	if req.EnableMultiline {
+		return c.findMultilineMatches(filePath, content, re)
+	}
+	return c.findSingleLineMatches(filePath, content, re)
+}
 
-		// Check if file is under the search path
-		if searchPath != "/" && !strings.HasPrefix(normalizedFilePath, searchPath+"/") && normalizedFilePath != searchPath {
-			continue
-		}
+func (c *grepCollector) findMultilineMatches(filePath, content string, re *regexp.Regexp) []GrepMatch {
+	var fileMatches []GrepMatch
+	matches := re.FindAllStringIndex(content, -1)
+	for _, match := range matches {
+		matchStart := match[0]
+		matchedText := content[matchStart:match[1]]
+		startLineNum := 1 + strings.Count(content[:matchStart], "\n")
 
-		// Check file type if provided
-		if req.FileType != "" {
-			ext := strings.TrimPrefix(filepath.Ext(normalizedFilePath), ".")
-			if !matchFileType(ext, req.FileType) {
-				continue
-			}
-		}
-
-		// Check glob pattern if provided
-		if req.Glob != "" {
-			matched, err := filepath.Match(req.Glob, filepath.Base(normalizedFilePath))
-			if err != nil {
-				return nil, fmt.Errorf("invalid glob pattern: %w", err)
-			}
-			if !matched {
-				continue
-			}
-		}
-
-		// For files_with_matches mode, we only need to know if file has any match
-		if req.OutputMode == FilesWithMatchesOfOutputMode {
-			hasMatch := re.MatchString(content)
-			if hasMatch {
-				matchedFiles[normalizedFilePath] = true
-			}
-			continue
-		}
-
-		// For other modes, collect detailed match information
-		var fileMatches []GrepMatch
-
-		if req.EnableMultiline {
-			// Multiline mode: match across entire file content
-			matches := re.FindAllStringIndex(content, -1)
-			if len(matches) > 0 {
-				for _, match := range matches {
-					matchStart := match[0]
-					matchEnd := match[1]
-					matchedText := content[matchStart:matchEnd]
-
-					// Find the starting line number
-					startLineNum := 1 + strings.Count(content[:matchStart], "\n")
-
-					// Split matched text into lines and create a GrepMatch for each line
-					matchedLines := strings.Split(matchedText, "\n")
-					for i, matchedLine := range matchedLines {
-						fileMatches = append(fileMatches, GrepMatch{
-							Path:       normalizedFilePath,
-							LineNumber: startLineNum + i,
-							Content:    matchedLine,
-						})
-					}
-				}
-			}
-		} else {
-			// Single-line mode: match within each line
-			lines := strings.Split(content, "\n")
-			for lineNum, line := range lines {
-				if re.MatchString(line) {
-					fileMatches = append(fileMatches, GrepMatch{
-						Path:       normalizedFilePath,
-						LineNumber: lineNum + 1,
-						Content:    line,
-					})
-				}
-			}
-		}
-
-		if len(fileMatches) > 0 {
-			fileMatchCounts[normalizedFilePath] = len(fileMatches)
-			if needDetailedMatches {
-				allMatches = append(allMatches, fileMatches...)
-			}
+		matchedLines := strings.Split(matchedText, "\n")
+		for i, matchedLine := range matchedLines {
+			fileMatches = append(fileMatches, GrepMatch{
+				Path:    filePath,
+				Line:    startLineNum + i,
+				Content: matchedLine,
+			})
 		}
 	}
+	return fileMatches
+}
 
-	// Apply offset and head limit
-	offset := 0
-	if req.Offset > 0 {
-		offset = req.Offset
+func (c *grepCollector) findSingleLineMatches(filePath, content string, re *regexp.Regexp) []GrepMatch {
+	var fileMatches []GrepMatch
+	lines := strings.Split(content, "\n")
+	for lineNum, line := range lines {
+		if re.MatchString(line) {
+			fileMatches = append(fileMatches, GrepMatch{
+				Path:    filePath,
+				Line:    lineNum + 1,
+				Content: line,
+			})
+		}
 	}
-	headLimit := 0
-	if req.HeadLimit > 0 {
-		headLimit = req.HeadLimit
+	return fileMatches
+}
+
+func (c *grepCollector) buildResults(b *InMemoryBackend, req *GrepRequest) ([]GrepMatch, error) {
+	offset := req.Offset
+	if offset < 0 {
+		offset = 0
+	}
+	headLimit := req.HeadLimit
+	if headLimit < 0 {
+		headLimit = 0
 	}
 
-	// Process based on output mode
 	switch req.OutputMode {
 	case FilesWithMatchesOfOutputMode:
-		// Return unique file paths (sorted for consistent ordering)
-		var paths []string
-		for path := range matchedFiles {
-			paths = append(paths, path)
-		}
-		sort.Strings(paths)
-
-		var results []GrepMatch
-		for _, path := range paths {
-			results = append(results, GrepMatch{
-				Path: path,
-			})
-		}
-		return applyPagination(results, offset, headLimit), nil
-
+		return c.buildFilesWithMatchesResult(offset, headLimit), nil
 	case ContentOfOutputMode:
-		// Return matching lines with context
-		results := allMatches
-
-		// Apply context lines if needed
-		if req.ContextLines > 0 || req.BeforeLines > 0 || req.AfterLines > 0 {
-			results = b.applyContext(allMatches, req)
-		}
-
-		return applyPagination(results, offset, headLimit), nil
-
+		return c.buildContentResult(b, req, offset, headLimit), nil
 	case CountOfOutputMode:
-		// Return match counts per file (sorted for consistent ordering)
-		var paths []string
-		for path := range fileMatchCounts {
-			paths = append(paths, path)
-		}
-		sort.Strings(paths)
-
-		var results []GrepMatch
-		for _, path := range paths {
-			results = append(results, GrepMatch{
-				Path:  path,
-				Count: fileMatchCounts[path],
-			})
-		}
-		return applyPagination(results, offset, headLimit), nil
-
+		return c.buildCountResult(offset, headLimit), nil
 	default:
 		return nil, fmt.Errorf("invalid output mode: %s", req.OutputMode)
 	}
+}
+
+func (c *grepCollector) buildFilesWithMatchesResult(offset, headLimit int) []GrepMatch {
+	paths := make([]string, 0, len(c.matchedFiles))
+	for path := range c.matchedFiles {
+		paths = append(paths, path)
+	}
+	sort.Strings(paths)
+
+	results := make([]GrepMatch, 0, len(paths))
+	for _, path := range paths {
+		results = append(results, GrepMatch{Path: path})
+	}
+	return applyPagination(results, offset, headLimit)
+}
+
+func (c *grepCollector) buildContentResult(b *InMemoryBackend, req *GrepRequest, offset, headLimit int) []GrepMatch {
+	results := c.allMatches
+	if req.ContextLines > 0 || req.BeforeLines > 0 || req.AfterLines > 0 {
+		results = b.applyContext(c.allMatches, req)
+	}
+	return applyPagination(results, offset, headLimit)
+}
+
+func (c *grepCollector) buildCountResult(offset, headLimit int) []GrepMatch {
+	paths := make([]string, 0, len(c.fileMatchCounts))
+	for path := range c.fileMatchCounts {
+		paths = append(paths, path)
+	}
+	sort.Strings(paths)
+
+	results := make([]GrepMatch, 0, len(paths))
+	for _, path := range paths {
+		results = append(results, GrepMatch{
+			Path:  path,
+			Count: c.fileMatchCounts[path],
+		})
+	}
+	return applyPagination(results, offset, headLimit)
 }
 
 // matchFileType checks if the file extension matches the given file type.
@@ -451,7 +526,7 @@ func (b *InMemoryBackend) applyContext(matches []GrepMatch, req *GrepRequest) []
 
 		// Get file content once per file
 		b.mu.RLock()
-		content, exists := b.files[filePath]
+		entry, exists := b.files[filePath]
 		b.mu.RUnlock()
 
 		if !exists {
@@ -460,17 +535,17 @@ func (b *InMemoryBackend) applyContext(matches []GrepMatch, req *GrepRequest) []
 			continue
 		}
 
-		lines := strings.Split(content, "\n")
+		lines := strings.Split(entry.content, "\n")
 		processedLines := make(map[int]bool)
 
 		// Process all matches for this file
 		for _, match := range fileMatches {
-			startLine := match.LineNumber - beforeLines
+			startLine := match.Line - beforeLines
 			if startLine < 1 {
 				startLine = 1
 			}
 
-			endLine := match.LineNumber + afterLines
+			endLine := match.Line + afterLines
 			if endLine > len(lines) {
 				endLine = len(lines)
 			}
@@ -479,9 +554,9 @@ func (b *InMemoryBackend) applyContext(matches []GrepMatch, req *GrepRequest) []
 				if !processedLines[lineNum] {
 					processedLines[lineNum] = true
 					result = append(result, GrepMatch{
-						Path:       filePath,
-						LineNumber: lineNum,
-						Content:    lines[lineNum-1],
+						Path:    filePath,
+						Line:    lineNum,
+						Content: lines[lineNum-1],
 					})
 				}
 			}
@@ -516,7 +591,7 @@ func (b *InMemoryBackend) GlobInfo(ctx context.Context, req *GlobInfoRequest) ([
 
 	var result []FileInfo
 
-	for filePath := range b.files {
+	for filePath, entry := range b.files {
 		normalizedFilePath := normalizePath(filePath)
 
 		// Check if file is under the given path
@@ -531,24 +606,28 @@ func (b *InMemoryBackend) GlobInfo(ctx context.Context, req *GlobInfoRequest) ([
 		}
 
 		if matched {
-			result = append(result, FileInfo{Path: normalizedFilePath})
+			result = append(result, FileInfo{
+				Path:       normalizedFilePath,
+				IsDir:      false,
+				Size:       int64(len(entry.content)),
+				ModifiedAt: entry.modifiedAt.Format(time.RFC3339Nano),
+			})
 		}
 	}
 
 	return result, nil
 }
 
-// Write creates or updates file content.
+// Write creates or overwrites file content.
 func (b *InMemoryBackend) Write(ctx context.Context, req *WriteRequest) error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
 	filePath := normalizePath(req.FilePath)
-	if _, ok := b.files[filePath]; ok {
-		return fmt.Errorf("file already exists: %s", filePath)
+	b.files[filePath] = &fileEntry{
+		content:    req.Content,
+		modifiedAt: time.Now(),
 	}
-
-	b.files[filePath] = req.Content
 
 	return nil
 }
@@ -560,7 +639,7 @@ func (b *InMemoryBackend) Edit(ctx context.Context, req *EditRequest) error {
 
 	filePath := normalizePath(req.FilePath)
 
-	content, exists := b.files[filePath]
+	entry, exists := b.files[filePath]
 	if !exists {
 		return fmt.Errorf("file not found: %s", filePath)
 	}
@@ -569,6 +648,7 @@ func (b *InMemoryBackend) Edit(ctx context.Context, req *EditRequest) error {
 		return fmt.Errorf("oldString must be non-empty")
 	}
 
+	content := entry.content
 	if !strings.Contains(content, req.OldString) {
 		return fmt.Errorf("oldString not found in file: %s", filePath)
 	}
@@ -583,10 +663,16 @@ func (b *InMemoryBackend) Edit(ctx context.Context, req *EditRequest) error {
 		}
 	}
 
+	var newContent string
 	if req.ReplaceAll {
-		b.files[filePath] = strings.ReplaceAll(content, req.OldString, req.NewString)
+		newContent = strings.ReplaceAll(content, req.OldString, req.NewString)
 	} else {
-		b.files[filePath] = strings.Replace(content, req.OldString, req.NewString, 1)
+		newContent = strings.Replace(content, req.OldString, req.NewString, 1)
+	}
+
+	b.files[filePath] = &fileEntry{
+		content:    newContent,
+		modifiedAt: time.Now(),
 	}
 
 	return nil
