@@ -272,16 +272,10 @@ type ExecuteResponse struct {
 	Truncated bool   // Whether the output was truncated
 }
 
-// ShellBackend is a shell backend interface that extends Backend and adds command execution functionality.
-type ShellBackend interface {
-	Backend
-	// Execute executes a command and returns the result.
+type Shell interface {
 	Execute(ctx context.Context, input *ExecuteRequest) (result *ExecuteResponse, err error)
 }
 
-// StreamingShellBackend is a streaming shell backend interface that supports streaming command execution results.
-type StreamingShellBackend interface {
-	Backend
-	// ExecuteStreaming executes a command in streaming mode and returns the result.
+type StreamingShell interface {
 	ExecuteStreaming(ctx context.Context, input *ExecuteRequest) (result *schema.StreamReader[*ExecuteResponse], err error)
 }
