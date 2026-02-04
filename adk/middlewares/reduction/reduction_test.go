@@ -39,12 +39,12 @@ func TestReductionMiddlewareTrunc(t *testing.T) {
 	tools := []tool.BaseTool{it, st}
 	config := &ToolReductionMiddlewareConfig{
 		ToolTruncation: &ToolTruncation{
-			ToolTruncationConfigMapping: make(map[string]ToolTruncationConfig, len(tools)),
+			ToolConfigs: make(map[string]ToolTruncationConfig, len(tools)),
 		},
 	}
 	for _, t := range tools {
 		info, _ := t.Info(ctx)
-		config.ToolTruncation.ToolTruncationConfigMapping[info.Name] = ToolTruncationConfig{
+		config.ToolTruncation.ToolConfigs[info.Name] = ToolTruncationConfig{
 			MaxLength:     ptrOf(70),
 			MaxLineLength: ptrOf(30),
 		}
@@ -134,7 +134,7 @@ func TestReductionMiddlewareOffload(t *testing.T) {
 					OffloadBatchSize:     1,
 					RetentionSuffixLimit: 0,
 				},
-				ToolOffloadConfigMapping: map[string]ToolOffloadConfig{
+				ToolConfigs: map[string]ToolOffloadConfig{
 					"get_weather":          {OffloadBackend: backend, OffloadHandler: handler},
 					"mock_streamable_tool": {OffloadBackend: backend, OffloadHandler: handler},
 				},
@@ -200,7 +200,7 @@ func TestDefaultOffloadHandler(t *testing.T) {
 		ToolArgument: &schema.ToolArgument{TextArgument: "anything"},
 		ToolResult:   &schema.ToolResult{Parts: []schema.ToolOutputPart{{Type: schema.ToolPartTypeText, Text: "hello"}}},
 	}
-	
+
 	fn := defaultOffloadHandler("/tmp")
 	info, err := fn(ctx, detail)
 	assert.NoError(t, err)

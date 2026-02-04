@@ -44,9 +44,9 @@ type ToolReductionMiddlewareConfig struct {
 
 // ToolTruncation holds configuration for tool output truncation.
 type ToolTruncation struct {
-	// ToolTruncationConfigMapping maps tool names to their specific truncation configurations.
+	// ToolConfigs maps tool names to their specific truncation configurations.
 	// The key is the tool name.
-	ToolTruncationConfigMapping map[string]ToolTruncationConfig
+	ToolConfigs map[string]ToolTruncationConfig
 }
 
 // ToolTruncationConfig configures how a tool's result is truncated.
@@ -71,9 +71,9 @@ type ToolOffload struct {
 	// ToolOffloadThreshold defines the thresholds for triggering the offloading process.
 	ToolOffloadThreshold *ToolOffloadThresholdConfig
 
-	// ToolOffloadConfigMapping maps tool names to their specific offloading configurations.
+	// ToolConfigs maps tool names to their specific offloading configurations.
 	// The key is the tool name.
-	ToolOffloadConfigMapping map[string]ToolOffloadConfig
+	ToolConfigs map[string]ToolOffloadConfig
 
 	// ToolOffloadPostProcess is an optional callback function to process the agent state after offloading.
 	// It is called once per reduction cycle if offloading occurred.
@@ -137,10 +137,10 @@ func NewToolReductionMiddleware(_ context.Context, config *ToolReductionMiddlewa
 		return mw, fmt.Errorf("at least provide one of ToolTruncationMapping or ToolOffloadMapping")
 	}
 	if config.ToolTruncation != nil {
-		if config.ToolTruncation.ToolTruncationConfigMapping == nil {
-			return mw, fmt.Errorf("ToolTruncation.ToolTruncationConfigMapping must be set")
+		if config.ToolTruncation.ToolConfigs == nil {
+			return mw, fmt.Errorf("ToolTruncation.ToolConfigs must be set")
 		}
-		for toolName, truncConfig := range config.ToolTruncation.ToolTruncationConfigMapping {
+		for toolName, truncConfig := range config.ToolTruncation.ToolConfigs {
 			if truncConfig.MaxLength == nil && truncConfig.MaxLineLength == nil {
 				return mw, fmt.Errorf("trunc config for %s error: at least one of MaxLength / MaxLineLength must be set", toolName)
 			}
@@ -148,10 +148,10 @@ func NewToolReductionMiddleware(_ context.Context, config *ToolReductionMiddlewa
 	}
 	if config.ToolOffload != nil {
 		to := config.ToolOffload
-		if to.TokenCounter == nil || to.ToolOffloadThreshold == nil || to.ToolOffloadConfigMapping == nil {
-			return mw, fmt.Errorf("ToolOffload.TokenCounter / ToolOffloadThreshold / ToolOffloadConfigMapping must be set")
+		if to.TokenCounter == nil || to.ToolOffloadThreshold == nil || to.ToolConfigs == nil {
+			return mw, fmt.Errorf("ToolOffload.TokenCounter / ToolOffloadThreshold / ToolConfigs must be set")
 		}
-		for toolName, offloadConfig := range to.ToolOffloadConfigMapping {
+		for toolName, offloadConfig := range to.ToolConfigs {
 			if offloadConfig.OffloadBackend == nil || offloadConfig.OffloadHandler == nil {
 				return mw, fmt.Errorf(" offload config for %s error: ToolOffload.ToolOffloadBackend / ToolOffloadHandler must be set", toolName)
 			}
@@ -169,15 +169,15 @@ func NewDefaultToolReductionMiddleware(ctx context.Context, needReductionTools [
 
 	config := &ToolReductionMiddlewareConfig{
 		ToolTruncation: &ToolTruncation{
-			ToolTruncationConfigMapping: make(map[string]ToolTruncationConfig, len(needReductionTools)),
+			ToolConfigs: make(map[string]ToolTruncationConfig, len(needReductionTools)),
 		},
 		ToolOffload: &ToolOffload{
 			TokenCounter: defaultTokenCounter,
 			ToolOffloadThreshold: &ToolOffloadThresholdConfig{
-				MaxTokens:        300000,
+				MaxTokens:        200000,
 				OffloadBatchSize: 5,
 			},
-			ToolOffloadConfigMapping: make(map[string]ToolOffloadConfig, len(needReductionTools)),
+			ToolConfigs: make(map[string]ToolOffloadConfig, len(needReductionTools)),
 		},
 	}
 
@@ -186,8 +186,8 @@ func NewDefaultToolReductionMiddleware(ctx context.Context, needReductionTools [
 		if err != nil {
 			return nil, err
 		}
-		config.ToolTruncation.ToolTruncationConfigMapping[info.Name] = ToolTruncationConfig{MaxLength: &truncMaxLength}
-		config.ToolOffload.ToolOffloadConfigMapping[info.Name] = ToolOffloadConfig{
+		config.ToolTruncation.ToolConfigs[info.Name] = ToolTruncationConfig{MaxLength: &truncMaxLength}
+		config.ToolOffload.ToolConfigs[info.Name] = ToolOffloadConfig{
 			OffloadBackend: backend,
 			OffloadHandler: defaultOffloadHandler(offloadRootDir),
 		}
@@ -207,10 +207,10 @@ type toolReductionMiddleware struct {
 
 func (t *toolReductionMiddleware) WrapInvokableToolCall(_ context.Context, endpoint adk.InvokableToolCallEndpoint, tCtx *adk.ToolContext) (adk.InvokableToolCallEndpoint, error) {
 	config := t.config.ToolTruncation
-	if config == nil || config.ToolTruncationConfigMapping == nil {
+	if config == nil || config.ToolConfigs == nil {
 		return endpoint, nil
 	}
-	tc, found := config.ToolTruncationConfigMapping[tCtx.Name]
+	tc, found := config.ToolConfigs[tCtx.Name]
 	if !found {
 		return endpoint, nil
 	}
@@ -237,10 +237,10 @@ func (t *toolReductionMiddleware) WrapInvokableToolCall(_ context.Context, endpo
 
 func (t *toolReductionMiddleware) WrapStreamableToolCall(_ context.Context, endpoint adk.StreamableToolCallEndpoint, tCtx *adk.ToolContext) (adk.StreamableToolCallEndpoint, error) {
 	config := t.config.ToolTruncation
-	if config == nil || config.ToolTruncationConfigMapping == nil {
+	if config == nil || config.ToolConfigs == nil {
 		return endpoint, nil
 	}
-	tc, found := config.ToolTruncationConfigMapping[tCtx.Name]
+	tc, found := config.ToolConfigs[tCtx.Name]
 	if !found {
 		return endpoint, nil
 	}
@@ -252,22 +252,23 @@ func (t *toolReductionMiddleware) WrapStreamableToolCall(_ context.Context, endp
 		}
 
 		var chunks []string
+		readers := output.Copy(2)
+		output = readers[0]
+		errResp := readers[1]
+		defer output.Close()
+
 		for {
 			chunk, err := output.Recv()
 			if err != nil {
 				if err != io.EOF {
-					sr, sw := schema.Pipe[string](10)
-					for _, origChunk := range chunks {
-						sw.Send(origChunk, nil)
-					}
-					sw.Send("", err)
-					sw.Close()
-					return sr, nil
+					return errResp, nil
 				}
 				break
 			}
 			chunks = append(chunks, chunk)
 		}
+		errResp.Close() // close err resp when not using it
+
 		result := strings.Join(chunks, "")
 		detail := &ToolDetail{
 			ToolContext: tCtx,
@@ -403,7 +404,7 @@ func (t *toolReductionMiddleware) BeforeModelRewriteState(ctx context.Context, s
 				if resultMsg.Role != schema.Tool { // unexpected
 					break
 				}
-				tc, found := offloadConfig.ToolOffloadConfigMapping[toolCall.Function.Name]
+				tc, found := offloadConfig.ToolConfigs[toolCall.Function.Name]
 				if !found {
 					continue
 				}
