@@ -18,9 +18,11 @@ package reduction
 
 import (
 	"context"
+	"fmt"
 
 	"github.com/cloudwego/eino/adk"
 	"github.com/cloudwego/eino/adk/filesystem"
+	"github.com/cloudwego/eino/components/tool"
 	"github.com/cloudwego/eino/compose"
 	"github.com/cloudwego/eino/schema"
 )
@@ -100,6 +102,11 @@ type ToolResultConfig struct {
 //   - Use the filesystem middleware (github.com/cloudwego/eino/adk/middlewares/filesystem)
 //     which provides the read_file tool automatically, OR
 //   - Implement your own read_file tool that reads from the same Backend
+//
+// Deprecated: Use NewChatModelAgentMiddleware instead. NewChatModelAgentMiddleware returns
+// a ChatModelAgentMiddleware which provides better context propagation through wrapper methods
+// and is the recommended approach for new code. See ChatModelAgentMiddleware documentation
+// for details on the benefits over AgentMiddleware.
 func NewToolResultMiddleware(ctx context.Context, cfg *ToolResultConfig) (adk.AgentMiddleware, error) {
 	bc := newClearToolResult(ctx, &ClearToolResultConfig{
 		ToolResultTokenThreshold:   cfg.ClearingTokenThreshold,
@@ -117,5 +124,144 @@ func NewToolResultMiddleware(ctx context.Context, cfg *ToolResultConfig) (adk.Ag
 	return adk.AgentMiddleware{
 		BeforeChatModel: bc,
 		WrapToolCall:    tm,
+	}, nil
+}
+
+// NewChatModelAgentMiddleware creates a tool result reduction middleware as a ChatModelAgentMiddleware.
+//
+// This is the recommended constructor for new code. It returns a ChatModelAgentMiddleware which provides:
+//   - Better context propagation through WrapInvokableToolCall and WrapStreamableToolCall methods
+//   - BeforeModelRewriteState hook for modifying agent state before model invocation
+//   - More flexible extension points compared to the struct-based AgentMiddleware
+//
+// This middleware combines two strategies to manage tool result tokens:
+//
+//  1. Clearing: Replaces old tool results with a placeholder when the total
+//     tool result tokens exceed the threshold, while protecting recent messages.
+//
+//  2. Offloading: Writes large individual tool results to the filesystem and
+//     returns a summary message guiding the LLM to read the full content.
+//
+// NOTE: If you are using the filesystem middleware (github.com/cloudwego/eino/adk/middlewares/filesystem),
+// this functionality is already included by default. Set Config.WithoutLargeToolResultOffloading = true
+// in the filesystem middleware if you want to use this middleware separately instead.
+//
+// NOTE: This middleware only handles offloading results to the filesystem.
+// You MUST also provide a read_file tool to your agent, otherwise the agent
+// will not be able to read the offloaded content. You can either:
+//   - Use the filesystem middleware (github.com/cloudwego/eino/adk/middlewares/filesystem)
+//     which provides the read_file tool automatically, OR
+//   - Implement your own read_file tool that reads from the same Backend
+//
+// Example usage:
+//
+//	middleware, err := reduction.NewChatModelAgentMiddleware(ctx, &reduction.ToolResultConfig{
+//	    Backend: myBackend,
+//	})
+//	agent, err := adk.NewChatModelAgent(ctx, &adk.ChatModelAgentConfig{
+//	    // ...
+//	    Handlers: []adk.ChatModelAgentMiddleware{middleware},
+//	})
+func NewChatModelAgentMiddleware(ctx context.Context, cfg *ToolResultConfig) (adk.ChatModelAgentMiddleware, error) {
+	m := &toolResultMiddleware{
+		clearConfig: &ClearToolResultConfig{
+			ToolResultTokenThreshold:   cfg.ClearingTokenThreshold,
+			KeepRecentTokens:           cfg.KeepRecentTokens,
+			ClearToolResultPlaceholder: cfg.ClearToolResultPlaceholder,
+			TokenCounter:               cfg.TokenCounter,
+			ExcludeTools:               cfg.ExcludeTools,
+		},
+		offloading: &toolResultOffloading{
+			backend:       cfg.Backend,
+			tokenLimit:    cfg.OffloadingTokenLimit,
+			pathGenerator: cfg.PathGenerator,
+			toolName:      cfg.ReadFileToolName,
+			counter:       cfg.TokenCounter,
+		},
+	}
+
+	if m.clearConfig.ToolResultTokenThreshold == 0 {
+		m.clearConfig.ToolResultTokenThreshold = 20000
+	}
+	if m.clearConfig.KeepRecentTokens == 0 {
+		m.clearConfig.KeepRecentTokens = 40000
+	}
+	if m.clearConfig.ClearToolResultPlaceholder == "" {
+		m.clearConfig.ClearToolResultPlaceholder = "[Old tool result content cleared]"
+	}
+	if m.clearConfig.TokenCounter == nil {
+		m.clearConfig.TokenCounter = defaultTokenCounter
+	}
+
+	if m.offloading.tokenLimit == 0 {
+		m.offloading.tokenLimit = 20000
+	}
+	if m.offloading.pathGenerator == nil {
+		m.offloading.pathGenerator = func(ctx context.Context, input *compose.ToolInput) (string, error) {
+			return fmt.Sprintf("/large_tool_result/%s", input.CallID), nil
+		}
+	}
+	if len(m.offloading.toolName) == 0 {
+		m.offloading.toolName = "read_file"
+	}
+	if m.offloading.counter == nil {
+		m.offloading.counter = defaultTokenCounter
+	}
+
+	return m, nil
+}
+
+type toolResultMiddleware struct {
+	adk.BaseChatModelAgentMiddleware
+	clearConfig *ClearToolResultConfig
+	offloading  *toolResultOffloading
+}
+
+func (m *toolResultMiddleware) BeforeModelRewriteState(ctx context.Context, state *adk.ChatModelAgentState, mc *adk.ModelContext) (context.Context, *adk.ChatModelAgentState, error) {
+	err := reduceByTokens(
+		state,
+		m.clearConfig.ToolResultTokenThreshold,
+		m.clearConfig.KeepRecentTokens,
+		m.clearConfig.ClearToolResultPlaceholder,
+		m.clearConfig.TokenCounter,
+		m.clearConfig.ExcludeTools,
+	)
+	if err != nil {
+		return ctx, nil, err
+	}
+	return ctx, state, nil
+}
+
+func (m *toolResultMiddleware) WrapInvokableToolCall(ctx context.Context, endpoint adk.InvokableToolCallEndpoint, tCtx *adk.ToolContext) (adk.InvokableToolCallEndpoint, error) {
+	return func(ctx context.Context, argumentsInJSON string, opts ...tool.Option) (string, error) {
+		result, err := endpoint(ctx, argumentsInJSON, opts...)
+		if err != nil {
+			return "", err
+		}
+		return m.offloading.handleResult(ctx, result, &compose.ToolInput{
+			Name:   tCtx.Name,
+			CallID: tCtx.CallID,
+		})
+	}, nil
+}
+
+func (m *toolResultMiddleware) WrapStreamableToolCall(ctx context.Context, endpoint adk.StreamableToolCallEndpoint, tCtx *adk.ToolContext) (adk.StreamableToolCallEndpoint, error) {
+	return func(ctx context.Context, argumentsInJSON string, opts ...tool.Option) (*schema.StreamReader[string], error) {
+		sr, err := endpoint(ctx, argumentsInJSON, opts...)
+		if err != nil {
+			return nil, err
+		}
+		result, err := concatString(sr)
+		if err != nil {
+			return nil, err
+		}
+		result, err = m.offloading.handleResult(ctx, result, &compose.ToolInput{
+			Name:   tCtx.Name,
+			CallID: tCtx.CallID,
+		})
+		if err != nil {
+			return nil, err
+		}
+		return schema.StreamReaderFromArray([]string{result}), nil
 	}, nil
 }
