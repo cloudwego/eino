@@ -18,24 +18,35 @@ package skill
 
 import (
 	"context"
-	"os"
-	"path/filepath"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/cloudwego/eino/adk/filesystem"
 )
 
-func TestNewLocalBackend(t *testing.T) {
+func TestNewFilesystemBackend(t *testing.T) {
 	t.Run("nil config returns error", func(t *testing.T) {
-		backend, err := NewLocalBackend(nil)
+		backend, err := NewFilesystemBackend(nil)
 		assert.Nil(t, backend)
 		assert.Error(t, err)
 		assert.Contains(t, err.Error(), "config is required")
 	})
 
+	t.Run("nil backend returns error", func(t *testing.T) {
+		backend, err := NewFilesystemBackend(&FilesystemBackendConfig{
+			BaseDir: "/skills",
+		})
+		assert.Nil(t, backend)
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "backend is required")
+	})
+
 	t.Run("empty baseDir returns error", func(t *testing.T) {
-		backend, err := NewLocalBackend(&LocalBackendConfig{
+		fsBackend := filesystem.NewInMemoryBackend()
+		backend, err := NewFilesystemBackend(&FilesystemBackendConfig{
+			Backend: fsBackend,
 			BaseDir: "",
 		})
 		assert.Nil(t, backend)
@@ -43,53 +54,32 @@ func TestNewLocalBackend(t *testing.T) {
 		assert.Contains(t, err.Error(), "baseDir is required")
 	})
 
-	t.Run("non-existent baseDir returns error", func(t *testing.T) {
-		backend, err := NewLocalBackend(&LocalBackendConfig{
-			BaseDir: "/path/that/does/not/exist",
-		})
-		assert.Nil(t, backend)
-		assert.Error(t, err)
-		assert.Contains(t, err.Error(), "failed to stat baseDir")
-	})
+	t.Run("valid config succeeds", func(t *testing.T) {
+		fsBackend := filesystem.NewInMemoryBackend()
 
-	t.Run("baseDir is a file returns error", func(t *testing.T) {
-		// Create a temporary file
-		tmpFile, err := os.CreateTemp("", "skill-test-*")
-		require.NoError(t, err)
-		defer os.Remove(tmpFile.Name())
-		tmpFile.Close()
-
-		backend, err := NewLocalBackend(&LocalBackendConfig{
-			BaseDir: tmpFile.Name(),
-		})
-		assert.Nil(t, backend)
-		assert.Error(t, err)
-		assert.Contains(t, err.Error(), "baseDir is not a directory")
-	})
-
-	t.Run("valid baseDir succeeds", func(t *testing.T) {
-		tmpDir, err := os.MkdirTemp("", "skill-test-*")
-		require.NoError(t, err)
-		defer os.RemoveAll(tmpDir)
-
-		backend, err := NewLocalBackend(&LocalBackendConfig{
-			BaseDir: tmpDir,
+		backend, err := NewFilesystemBackend(&FilesystemBackendConfig{
+			Backend: fsBackend,
+			BaseDir: "/skills",
 		})
 		assert.NoError(t, err)
 		assert.NotNil(t, backend)
-		assert.Equal(t, tmpDir, backend.baseDir)
 	})
 }
 
-func TestLocalBackend_List(t *testing.T) {
+func TestFilesystemBackend_List(t *testing.T) {
 	ctx := context.Background()
 
 	t.Run("empty directory returns empty list", func(t *testing.T) {
-		tmpDir, err := os.MkdirTemp("", "skill-test-*")
-		require.NoError(t, err)
-		defer os.RemoveAll(tmpDir)
+		fsBackend := filesystem.NewInMemoryBackend()
+		_ = fsBackend.Write(ctx, &filesystem.WriteRequest{
+			FilePath: "/skills/.keep",
+			Content:  "",
+		})
 
-		backend, err := NewLocalBackend(&LocalBackendConfig{BaseDir: tmpDir})
+		backend, err := NewFilesystemBackend(&FilesystemBackendConfig{
+			Backend: fsBackend,
+			BaseDir: "/skills",
+		})
 		require.NoError(t, err)
 
 		skills, err := backend.List(ctx)
@@ -98,15 +88,16 @@ func TestLocalBackend_List(t *testing.T) {
 	})
 
 	t.Run("directory with no SKILL.md files returns empty list", func(t *testing.T) {
-		tmpDir, err := os.MkdirTemp("", "skill-test-*")
-		require.NoError(t, err)
-		defer os.RemoveAll(tmpDir)
+		fsBackend := filesystem.NewInMemoryBackend()
+		_ = fsBackend.Write(ctx, &filesystem.WriteRequest{
+			FilePath: "/skills/subdir/other.txt",
+			Content:  "some content",
+		})
 
-		// Create a subdirectory without SKILL.md
-		subDir := filepath.Join(tmpDir, "subdir")
-		require.NoError(t, os.Mkdir(subDir, 0755))
-
-		backend, err := NewLocalBackend(&LocalBackendConfig{BaseDir: tmpDir})
+		backend, err := NewFilesystemBackend(&FilesystemBackendConfig{
+			Backend: fsBackend,
+			BaseDir: "/skills",
+		})
 		require.NoError(t, err)
 
 		skills, err := backend.List(ctx)
@@ -115,19 +106,20 @@ func TestLocalBackend_List(t *testing.T) {
 	})
 
 	t.Run("files in root directory are ignored", func(t *testing.T) {
-		tmpDir, err := os.MkdirTemp("", "skill-test-*")
-		require.NoError(t, err)
-		defer os.RemoveAll(tmpDir)
-
-		// Create a SKILL.md in root (should be ignored, only subdirs are scanned)
-		skillFile := filepath.Join(tmpDir, "SKILL.md")
-		require.NoError(t, os.WriteFile(skillFile, []byte(`---
+		fsBackend := filesystem.NewInMemoryBackend()
+		_ = fsBackend.Write(ctx, &filesystem.WriteRequest{
+			FilePath: "/skills/SKILL.md",
+			Content: `---
 name: root-skill
 description: Root skill
 ---
-Content`), 0644))
+Content`,
+		})
 
-		backend, err := NewLocalBackend(&LocalBackendConfig{BaseDir: tmpDir})
+		backend, err := NewFilesystemBackend(&FilesystemBackendConfig{
+			Backend: fsBackend,
+			BaseDir: "/skills",
+		})
 		require.NoError(t, err)
 
 		skills, err := backend.List(ctx)
@@ -136,15 +128,10 @@ Content`), 0644))
 	})
 
 	t.Run("valid skill directory returns skill", func(t *testing.T) {
-		tmpDir, err := os.MkdirTemp("", "skill-test-*")
-		require.NoError(t, err)
-		defer os.RemoveAll(tmpDir)
-
-		// Create a skill directory with SKILL.md
-		skillDir := filepath.Join(tmpDir, "my-skill")
-		require.NoError(t, os.Mkdir(skillDir, 0755))
-		skillFile := filepath.Join(skillDir, "SKILL.md")
-		require.NoError(t, os.WriteFile(skillFile, []byte(`---
+		fsBackend := filesystem.NewInMemoryBackend()
+		_ = fsBackend.Write(ctx, &filesystem.WriteRequest{
+			FilePath: "/skills/my-skill/SKILL.md",
+			Content: `---
 name: pdf-processing
 description: Extract text and tables from PDF files, fill forms, merge documents.
 license: Apache-2.0
@@ -152,9 +139,13 @@ metadata:
   author: example-org
   version: "1.0"
 ---
-This is the skill content.`), 0644))
+This is the skill content.`,
+		})
 
-		backend, err := NewLocalBackend(&LocalBackendConfig{BaseDir: tmpDir})
+		backend, err := NewFilesystemBackend(&FilesystemBackendConfig{
+			Backend: fsBackend,
+			BaseDir: "/skills",
+		})
 		require.NoError(t, err)
 
 		skills, err := backend.List(ctx)
@@ -165,53 +156,50 @@ This is the skill content.`), 0644))
 	})
 
 	t.Run("multiple skill directories returns all skills", func(t *testing.T) {
-		tmpDir, err := os.MkdirTemp("", "skill-test-*")
-		require.NoError(t, err)
-		defer os.RemoveAll(tmpDir)
-
-		// Create first skill
-		skill1Dir := filepath.Join(tmpDir, "skill-1")
-		require.NoError(t, os.Mkdir(skill1Dir, 0755))
-		require.NoError(t, os.WriteFile(filepath.Join(skill1Dir, "SKILL.md"), []byte(`---
+		fsBackend := filesystem.NewInMemoryBackend()
+		_ = fsBackend.Write(ctx, &filesystem.WriteRequest{
+			FilePath: "/skills/skill-1/SKILL.md",
+			Content: `---
 name: skill-1
 description: First skill
 ---
-Content 1`), 0644))
-
-		// Create second skill
-		skill2Dir := filepath.Join(tmpDir, "skill-2")
-		require.NoError(t, os.Mkdir(skill2Dir, 0755))
-		require.NoError(t, os.WriteFile(filepath.Join(skill2Dir, "SKILL.md"), []byte(`---
+Content 1`,
+		})
+		_ = fsBackend.Write(ctx, &filesystem.WriteRequest{
+			FilePath: "/skills/skill-2/SKILL.md",
+			Content: `---
 name: skill-2
 description: Second skill
 ---
-Content 2`), 0644))
+Content 2`,
+		})
 
-		backend, err := NewLocalBackend(&LocalBackendConfig{BaseDir: tmpDir})
+		backend, err := NewFilesystemBackend(&FilesystemBackendConfig{
+			Backend: fsBackend,
+			BaseDir: "/skills",
+		})
 		require.NoError(t, err)
 
 		skills, err := backend.List(ctx)
 		assert.NoError(t, err)
 		assert.Len(t, skills, 2)
 
-		// Check both skills exist (order may vary due to filesystem)
 		names := []string{skills[0].Name, skills[1].Name}
 		assert.Contains(t, names, "skill-1")
 		assert.Contains(t, names, "skill-2")
 	})
 
 	t.Run("invalid SKILL.md returns error", func(t *testing.T) {
-		tmpDir, err := os.MkdirTemp("", "skill-test-*")
-		require.NoError(t, err)
-		defer os.RemoveAll(tmpDir)
+		fsBackend := filesystem.NewInMemoryBackend()
+		_ = fsBackend.Write(ctx, &filesystem.WriteRequest{
+			FilePath: "/skills/invalid-skill/SKILL.md",
+			Content:  `No frontmatter here`,
+		})
 
-		// Create a skill directory with invalid SKILL.md (no frontmatter)
-		skillDir := filepath.Join(tmpDir, "invalid-skill")
-		require.NoError(t, os.Mkdir(skillDir, 0755))
-		skillFile := filepath.Join(skillDir, "SKILL.md")
-		require.NoError(t, os.WriteFile(skillFile, []byte(`No frontmatter here`), 0644))
-
-		backend, err := NewLocalBackend(&LocalBackendConfig{BaseDir: tmpDir})
+		backend, err := NewFilesystemBackend(&FilesystemBackendConfig{
+			Backend: fsBackend,
+			BaseDir: "/skills",
+		})
 		require.NoError(t, err)
 
 		skills, err := backend.List(ctx)
@@ -219,17 +207,36 @@ Content 2`), 0644))
 		assert.Nil(t, skills)
 		assert.Contains(t, err.Error(), "failed to load skill")
 	})
+
+	t.Run("non-existent baseDir returns empty list", func(t *testing.T) {
+		fsBackend := filesystem.NewInMemoryBackend()
+
+		backend, err := NewFilesystemBackend(&FilesystemBackendConfig{
+			Backend: fsBackend,
+			BaseDir: "/path/that/does/not/exist",
+		})
+		require.NoError(t, err)
+
+		skills, err := backend.List(ctx)
+		assert.NoError(t, err)
+		assert.Empty(t, skills)
+	})
 }
 
-func TestLocalBackend_Get(t *testing.T) {
+func TestFilesystemBackend_Get(t *testing.T) {
 	ctx := context.Background()
 
 	t.Run("skill not found returns error", func(t *testing.T) {
-		tmpDir, err := os.MkdirTemp("", "skill-test-*")
-		require.NoError(t, err)
-		defer os.RemoveAll(tmpDir)
+		fsBackend := filesystem.NewInMemoryBackend()
+		_ = fsBackend.Write(ctx, &filesystem.WriteRequest{
+			FilePath: "/skills/.keep",
+			Content:  "",
+		})
 
-		backend, err := NewLocalBackend(&LocalBackendConfig{BaseDir: tmpDir})
+		backend, err := NewFilesystemBackend(&FilesystemBackendConfig{
+			Backend: fsBackend,
+			BaseDir: "/skills",
+		})
 		require.NoError(t, err)
 
 		skill, err := backend.Get(ctx, "non-existent")
@@ -239,20 +246,20 @@ func TestLocalBackend_Get(t *testing.T) {
 	})
 
 	t.Run("existing skill is returned", func(t *testing.T) {
-		tmpDir, err := os.MkdirTemp("", "skill-test-*")
-		require.NoError(t, err)
-		defer os.RemoveAll(tmpDir)
-
-		// Create a skill directory
-		skillDir := filepath.Join(tmpDir, "test-skill")
-		require.NoError(t, os.Mkdir(skillDir, 0755))
-		require.NoError(t, os.WriteFile(filepath.Join(skillDir, "SKILL.md"), []byte(`---
+		fsBackend := filesystem.NewInMemoryBackend()
+		_ = fsBackend.Write(ctx, &filesystem.WriteRequest{
+			FilePath: "/skills/test-skill/SKILL.md",
+			Content: `---
 name: test-skill
 description: Test skill description
 ---
-Test content here.`), 0644))
+Test content here.`,
+		})
 
-		backend, err := NewLocalBackend(&LocalBackendConfig{BaseDir: tmpDir})
+		backend, err := NewFilesystemBackend(&FilesystemBackendConfig{
+			Backend: fsBackend,
+			BaseDir: "/skills",
+		})
 		require.NoError(t, err)
 
 		skill, err := backend.Get(ctx, "test-skill")
@@ -263,22 +270,22 @@ Test content here.`), 0644))
 	})
 
 	t.Run("get specific skill from multiple", func(t *testing.T) {
-		tmpDir, err := os.MkdirTemp("", "skill-test-*")
-		require.NoError(t, err)
-		defer os.RemoveAll(tmpDir)
-
-		// Create multiple skills
+		fsBackend := filesystem.NewInMemoryBackend()
 		for _, name := range []string{"alpha", "beta", "gamma"} {
-			skillDir := filepath.Join(tmpDir, name)
-			require.NoError(t, os.Mkdir(skillDir, 0755))
-			require.NoError(t, os.WriteFile(filepath.Join(skillDir, "SKILL.md"), []byte(`---
-name: `+name+`
-description: Skill `+name+`
+			_ = fsBackend.Write(ctx, &filesystem.WriteRequest{
+				FilePath: "/skills/" + name + "/SKILL.md",
+				Content: `---
+name: ` + name + `
+description: Skill ` + name + `
 ---
-Content for `+name), 0644))
+Content for ` + name,
+			})
 		}
 
-		backend, err := NewLocalBackend(&LocalBackendConfig{BaseDir: tmpDir})
+		backend, err := NewFilesystemBackend(&FilesystemBackendConfig{
+			Backend: fsBackend,
+			BaseDir: "/skills",
+		})
 		require.NoError(t, err)
 
 		skill, err := backend.Get(ctx, "beta")
@@ -327,7 +334,6 @@ Content  `
 		fm, content, err := parseFrontmatter(data)
 		assert.NoError(t, err)
 		assert.Equal(t, "name: test", fm)
-		// Note: parseFrontmatter trims trailing whitespace from input data
 		assert.Equal(t, "Content", content)
 	})
 
@@ -391,73 +397,70 @@ Content with --- in the middle`
 }
 
 func TestLoadSkillFromFile(t *testing.T) {
-	t.Run("valid skill file", func(t *testing.T) {
-		tmpDir, err := os.MkdirTemp("", "skill-test-*")
-		require.NoError(t, err)
-		defer os.RemoveAll(tmpDir)
+	ctx := context.Background()
 
-		skillFile := filepath.Join(tmpDir, "SKILL.md")
-		require.NoError(t, os.WriteFile(skillFile, []byte(`---
+	t.Run("valid skill file", func(t *testing.T) {
+		fsBackend := filesystem.NewInMemoryBackend()
+		_ = fsBackend.Write(ctx, &filesystem.WriteRequest{
+			FilePath: "/skills/SKILL.md",
+			Content: `---
 name: file-skill
 description: Skill from file
 ---
-File skill content.`), 0644))
+File skill content.`,
+		})
 
-		backend := &LocalBackend{baseDir: tmpDir}
-		skill, err := backend.loadSkillFromFile(skillFile)
+		backend := &filesystemBackend{backend: fsBackend, baseDir: "/skills"}
+		skill, err := backend.loadSkillFromFile(ctx, "/skills/SKILL.md")
 		assert.NoError(t, err)
 		assert.Equal(t, "file-skill", skill.Name)
 		assert.Equal(t, "Skill from file", skill.Description)
 		assert.Equal(t, "File skill content.", skill.Content)
-
-		// Verify BaseDirectory is set correctly
-		absDir, _ := filepath.Abs(tmpDir)
-		assert.Equal(t, absDir, skill.BaseDirectory)
+		assert.Equal(t, "/skills", skill.BaseDirectory)
 	})
 
 	t.Run("non-existent file returns error", func(t *testing.T) {
-		backend := &LocalBackend{baseDir: "/tmp"}
-		skill, err := backend.loadSkillFromFile("/path/to/nonexistent/SKILL.md")
+		fsBackend := filesystem.NewInMemoryBackend()
+		backend := &filesystemBackend{backend: fsBackend, baseDir: "/tmp"}
+		skill, err := backend.loadSkillFromFile(ctx, "/path/to/nonexistent/SKILL.md")
 		assert.Error(t, err)
 		assert.Empty(t, skill)
 		assert.Contains(t, err.Error(), "failed to read file")
 	})
 
 	t.Run("invalid yaml in frontmatter returns error", func(t *testing.T) {
-		tmpDir, err := os.MkdirTemp("", "skill-test-*")
-		require.NoError(t, err)
-		defer os.RemoveAll(tmpDir)
-
-		skillFile := filepath.Join(tmpDir, "SKILL.md")
-		require.NoError(t, os.WriteFile(skillFile, []byte(`---
+		fsBackend := filesystem.NewInMemoryBackend()
+		_ = fsBackend.Write(ctx, &filesystem.WriteRequest{
+			FilePath: "/skills/SKILL.md",
+			Content: `---
 name: [invalid yaml
 ---
-Content`), 0644))
+Content`,
+		})
 
-		backend := &LocalBackend{baseDir: tmpDir}
-		skill, err := backend.loadSkillFromFile(skillFile)
+		backend := &filesystemBackend{backend: fsBackend, baseDir: "/skills"}
+		skill, err := backend.loadSkillFromFile(ctx, "/skills/SKILL.md")
 		assert.Error(t, err)
 		assert.Empty(t, skill)
 		assert.Contains(t, err.Error(), "failed to unmarshal frontmatter")
 	})
 
 	t.Run("content with extra whitespace is trimmed", func(t *testing.T) {
-		tmpDir, err := os.MkdirTemp("", "skill-test-*")
-		require.NoError(t, err)
-		defer os.RemoveAll(tmpDir)
-
-		skillFile := filepath.Join(tmpDir, "SKILL.md")
-		require.NoError(t, os.WriteFile(skillFile, []byte(`---
+		fsBackend := filesystem.NewInMemoryBackend()
+		_ = fsBackend.Write(ctx, &filesystem.WriteRequest{
+			FilePath: "/skills/SKILL.md",
+			Content: `---
 name: trimmed-skill
 description: desc
 ---
 
    Content with whitespace   
 
-`), 0644))
+`,
+		})
 
-		backend := &LocalBackend{baseDir: tmpDir}
-		skill, err := backend.loadSkillFromFile(skillFile)
+		backend := &filesystemBackend{backend: fsBackend, baseDir: "/skills"}
+		skill, err := backend.loadSkillFromFile(ctx, "/skills/SKILL.md")
 		assert.NoError(t, err)
 		assert.Equal(t, "Content with whitespace", skill.Content)
 	})

@@ -19,55 +19,44 @@ package skill
 import (
 	"context"
 	"fmt"
-	"os"
 	"path/filepath"
 	"strings"
 
 	"gopkg.in/yaml.v3"
+
+	"github.com/cloudwego/eino/adk/filesystem"
 )
 
 const skillFileName = "SKILL.md"
 
-// LocalBackend is a Backend implementation that reads skills from the local filesystem.
-// Skills are stored in subdirectories of baseDir, each containing a SKILL.md file.
-type LocalBackend struct {
-	// baseDir is the root directory containing skill subdirectories.
+type filesystemBackend struct {
+	backend filesystem.Backend
 	baseDir string
 }
 
-// LocalBackendConfig is the configuration for creating a LocalBackend.
-type LocalBackendConfig struct {
-	// BaseDir is the root directory containing skill subdirectories.
-	// Each subdirectory should contain a SKILL.md file with frontmatter and content.
+type FilesystemBackendConfig struct {
+	Backend filesystem.Backend
 	BaseDir string
 }
 
-// NewLocalBackend creates a new LocalBackend with the given configuration.
-func NewLocalBackend(config *LocalBackendConfig) (*LocalBackend, error) {
+func NewFilesystemBackend(config *FilesystemBackendConfig) (Backend, error) {
 	if config == nil {
 		return nil, fmt.Errorf("config is required")
+	}
+	if config.Backend == nil {
+		return nil, fmt.Errorf("backend is required")
 	}
 	if config.BaseDir == "" {
 		return nil, fmt.Errorf("baseDir is required")
 	}
 
-	// Verify the directory exists
-	info, err := os.Stat(config.BaseDir)
-	if err != nil {
-		return nil, fmt.Errorf("failed to stat baseDir: %w", err)
-	}
-	if !info.IsDir() {
-		return nil, fmt.Errorf("baseDir is not a directory: %s", config.BaseDir)
-	}
-
-	return &LocalBackend{
+	return &filesystemBackend{
+		backend: config.Backend,
 		baseDir: config.BaseDir,
 	}, nil
 }
 
-// List returns all skills from the local filesystem.
-// It scans subdirectories of baseDir for SKILL.md files and parses them as skills.
-func (b *LocalBackend) List(ctx context.Context) ([]FrontMatter, error) {
+func (b *filesystemBackend) List(ctx context.Context) ([]FrontMatter, error) {
 	skills, err := b.list(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("failed to list skills: %w", err)
@@ -81,9 +70,7 @@ func (b *LocalBackend) List(ctx context.Context) ([]FrontMatter, error) {
 	return matters, nil
 }
 
-// Get returns a skill by name from the local filesystem.
-// It searches subdirectories for a SKILL.md file with matching name.
-func (b *LocalBackend) Get(ctx context.Context, name string) (Skill, error) {
+func (b *filesystemBackend) Get(ctx context.Context, name string) (Skill, error) {
 	skills, err := b.list(ctx)
 	if err != nil {
 		return Skill{}, fmt.Errorf("failed to list skills: %w", err)
@@ -98,29 +85,27 @@ func (b *LocalBackend) Get(ctx context.Context, name string) (Skill, error) {
 	return Skill{}, fmt.Errorf("skill not found: %s", name)
 }
 
-func (b *LocalBackend) list(ctx context.Context) ([]Skill, error) {
+func (b *filesystemBackend) list(ctx context.Context) ([]Skill, error) {
 	var skills []Skill
 
-	entries, err := os.ReadDir(b.baseDir)
+	entries, err := b.backend.LsInfo(ctx, &filesystem.LsInfoRequest{
+		Path: b.baseDir,
+	})
 	if err != nil {
 		return nil, fmt.Errorf("failed to read directory: %w", err)
 	}
 
 	for _, entry := range entries {
-		if !entry.IsDir() {
+		if entry.Path == b.baseDir {
 			continue
 		}
 
-		skillDir := filepath.Join(b.baseDir, entry.Name())
-		skillPath := filepath.Join(skillDir, skillFileName)
-
-		// Check if SKILL.md exists in this directory
-		if _, err := os.Stat(skillPath); os.IsNotExist(err) {
-			continue
-		}
-
-		skill, err := b.loadSkillFromFile(skillPath)
+		skillPath := filepath.Join(entry.Path, skillFileName)
+		skill, err := b.loadSkillFromFile(ctx, skillPath)
 		if err != nil {
+			if strings.Contains(err.Error(), "failed to read file") {
+				continue
+			}
 			return nil, fmt.Errorf("failed to load skill from %s: %w", skillPath, err)
 		}
 
@@ -130,21 +115,18 @@ func (b *LocalBackend) list(ctx context.Context) ([]Skill, error) {
 	return skills, nil
 }
 
-// loadSkillFromFile loads a skill from a SKILL.md file.
-// The file format is:
-//
-//	---
-//	name: skill-name
-//	description: skill description
-//	---
-//	Content goes here...
-func (b *LocalBackend) loadSkillFromFile(path string) (Skill, error) {
-	data, err := os.ReadFile(path)
+func (b *filesystemBackend) loadSkillFromFile(ctx context.Context, path string) (Skill, error) {
+	data, err := b.backend.Read(ctx, &filesystem.ReadRequest{
+		FilePath: path,
+		Limit:    10000,
+	})
 	if err != nil {
 		return Skill{}, fmt.Errorf("failed to read file: %w", err)
 	}
 
-	frontmatter, content, err := parseFrontmatter(string(data))
+	data = stripLineNumbers(data)
+
+	frontmatter, content, err := parseFrontmatter(data)
 	if err != nil {
 		return Skill{}, fmt.Errorf("failed to parse frontmatter: %w", err)
 	}
@@ -154,11 +136,7 @@ func (b *LocalBackend) loadSkillFromFile(path string) (Skill, error) {
 		return Skill{}, fmt.Errorf("failed to unmarshal frontmatter: %w", err)
 	}
 
-	// Get the absolute path of the directory containing SKILL.md
-	absDir, err := filepath.Abs(filepath.Dir(path))
-	if err != nil {
-		return Skill{}, fmt.Errorf("failed to get absolute path: %w", err)
-	}
+	absDir := filepath.Dir(path)
 
 	return Skill{
 		FrontMatter: FrontMatter{
@@ -170,19 +148,28 @@ func (b *LocalBackend) loadSkillFromFile(path string) (Skill, error) {
 	}, nil
 }
 
-// parseFrontmatter parses a markdown file with YAML frontmatter.
-// Returns the frontmatter content (without ---), the remaining content, and any error.
+func stripLineNumbers(data string) string {
+	lines := strings.Split(data, "\n")
+	result := make([]string, 0, len(lines))
+	for _, line := range lines {
+		idx := strings.Index(line, "\t")
+		if idx != -1 {
+			line = line[idx+1:]
+		}
+		result = append(result, line)
+	}
+	return strings.Join(result, "\n")
+}
+
 func parseFrontmatter(data string) (frontmatter string, content string, err error) {
 	const delimiter = "---"
 
 	data = strings.TrimSpace(data)
 
-	// Must start with ---
 	if !strings.HasPrefix(data, delimiter) {
 		return "", "", fmt.Errorf("file does not start with frontmatter delimiter")
 	}
 
-	// Find the closing ---
 	rest := data[len(delimiter):]
 	endIdx := strings.Index(rest, "\n"+delimiter)
 	if endIdx == -1 {
@@ -192,7 +179,6 @@ func parseFrontmatter(data string) (frontmatter string, content string, err erro
 	frontmatter = strings.TrimSpace(rest[:endIdx])
 	content = rest[endIdx+len("\n"+delimiter):]
 
-	// Remove the newline after the closing ---
 	if strings.HasPrefix(content, "\n") {
 		content = content[1:]
 	}
