@@ -27,6 +27,7 @@ import (
 	"github.com/slongfield/pyfmt"
 
 	"github.com/cloudwego/eino/adk"
+	"github.com/cloudwego/eino/adk/internal"
 	"github.com/cloudwego/eino/components/tool"
 	"github.com/cloudwego/eino/schema"
 )
@@ -53,8 +54,8 @@ type Config struct {
 	Backend Backend
 	// SkillToolName is the custom name for the skill tool. If nil, the default name "skill" is used.
 	SkillToolName *string
-	// UseChinese controls whether to use Chinese prompts. When set to true, Chinese prompts are used;
-	// when set to false (default), English prompts are used.
+	// Deprecated: Use adk.SetLanguage(adk.LanguageChinese) instead to enable Chinese prompts globally.
+	// This field will be removed in a future version.
 	UseChinese bool
 }
 
@@ -73,18 +74,29 @@ func New(ctx context.Context, config *Config) (adk.AgentMiddleware, error) {
 		name = *config.SkillToolName
 	}
 
+	sp, err := buildSystemPrompt(name, config.UseChinese)
+	if err != nil {
+		return adk.AgentMiddleware{}, err
+	}
+
 	return adk.AgentMiddleware{
-		AdditionalInstruction: buildSystemPrompt(name, config.UseChinese),
+		AdditionalInstruction: sp,
 		AdditionalTools:       []tool.BaseTool{&skillTool{b: config.Backend, toolName: name, useChinese: config.UseChinese}},
 	}, nil
 }
 
-func buildSystemPrompt(skillToolName string, useChinese bool) string {
-	prompt := systemPrompt
+func buildSystemPrompt(skillToolName string, useChinese bool) (string, error) {
+	prompt, err := internal.SelectPrompt(internal.I18nPrompts{
+		English: systemPrompt,
+		Chinese: systemPromptChinese,
+	})
+	if err != nil {
+		return "", err
+	}
 	if useChinese {
 		prompt = systemPromptChinese
 	}
-	return pyfmt.Must(prompt, map[string]string{
+	return pyfmt.Fmt(prompt, map[string]string{
 		"tool_name": skillToolName,
 	})
 }
@@ -110,11 +122,19 @@ func (s *skillTool) Info(ctx context.Context) (*schema.ToolInfo, error) {
 		return nil, fmt.Errorf("failed to render skill tool description: %w", err)
 	}
 
-	descBase := toolDescriptionBase
-	paramDesc := "The skill name (no arguments). E.g., \"pdf\" or \"xlsx\""
-	if s.useChinese {
-		descBase = toolDescriptionBaseChinese
-		paramDesc = "技能名称（无需其他参数）。例如：\"pdf\" 或 \"xlsx\""
+	descBase, err := internal.SelectPrompt(internal.I18nPrompts{
+		English: toolDescriptionBase,
+		Chinese: toolDescriptionBaseChinese,
+	})
+	if err != nil {
+		return nil, err
+	}
+	paramDesc, err := internal.SelectPrompt(internal.I18nPrompts{
+		English: "The skill name (no arguments). E.g., \"pdf\" or \"xlsx\"",
+		Chinese: "Skill 名称（无需其他参数）。例如：\"pdf\" 或 \"xlsx\"",
+	})
+	if err != nil {
+		return nil, err
 	}
 
 	return &schema.ToolInfo{
@@ -145,11 +165,19 @@ func (s *skillTool) InvokableRun(ctx context.Context, argumentsInJSON string, op
 		return "", fmt.Errorf("failed to get skill: %w", err)
 	}
 
-	resultFmt := toolResult
-	contentFmt := userContent
-	if s.useChinese {
-		resultFmt = toolResultChinese
-		contentFmt = userContentChinese
+	resultFmt, err := internal.SelectPrompt(internal.I18nPrompts{
+		English: toolResult,
+		Chinese: toolResultChinese,
+	})
+	if err != nil {
+		return "", err
+	}
+	contentFmt, err := internal.SelectPrompt(internal.I18nPrompts{
+		English: userContent,
+		Chinese: userContentChinese,
+	})
+	if err != nil {
+		return "", err
 	}
 
 	return fmt.Sprintf(resultFmt, skill.Name) + fmt.Sprintf(contentFmt, skill.BaseDirectory, skill.Content), nil

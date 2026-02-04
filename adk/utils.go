@@ -19,6 +19,7 @@ package adk
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"strings"
 
@@ -89,7 +90,11 @@ func GenTransferMessages(_ context.Context, destAgentName string) (Message, Mess
 	toolCallID := uuid.NewString()
 	tooCall := schema.ToolCall{ID: toolCallID, Function: schema.FunctionCall{Name: TransferToAgentToolName, Arguments: destAgentName}}
 	assistantMessage := schema.AssistantMessage("", []schema.ToolCall{tooCall})
-	toolMessage := schema.ToolMessage(transferToAgentToolOutput(destAgentName), toolCallID, schema.WithToolName(TransferToAgentToolName))
+	msg, err := transferToAgentToolOutput(destAgentName)
+	if err != nil {
+		msg = fmt.Sprintf("successfully transferred to agent [%s]", destAgentName)
+	}
+	toolMessage := schema.ToolMessage(msg, toolCallID, schema.WithToolName(TransferToAgentToolName))
 	return assistantMessage, toolMessage
 }
 
