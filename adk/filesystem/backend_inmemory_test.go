@@ -1216,7 +1216,7 @@ func TestInMemoryBackend_GlobInfo(t *testing.T) {
 		Content:  "content4",
 	})
 
-	// Test GlobInfo - match all .txt files
+	// Test GlobInfo - match .txt files in root only
 	infos, err := backend.GlobInfo(ctx, &GlobInfoRequest{
 		Pattern: "*.txt",
 		Path:    "/",
@@ -1224,7 +1224,7 @@ func TestInMemoryBackend_GlobInfo(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GlobInfo failed: %v", err)
 	}
-	if len(infos) != 2 { // only file1.txt in root
+	if len(infos) != 1 { // only file1.txt in root
 		t.Errorf("Expected 1 .txt file in root, got %d", len(infos))
 	}
 
