@@ -24,6 +24,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 
+	"github.com/cloudwego/eino/adk/internal"
 	"github.com/cloudwego/eino/components/tool"
 )
 
@@ -108,7 +109,9 @@ Base directory for this skill: basedir1
 content1`, result)
 
 	// chinese
-	m, err = New(ctx, &Config{Backend: backend, UseChinese: true})
+	internal.SetLanguage(internal.LanguageChinese)
+	defer internal.SetLanguage(internal.LanguageEnglish)
+	m, err = New(ctx, &Config{Backend: backend})
 	assert.NoError(t, err)
 	assert.Len(t, m.AdditionalTools, 1)
 
@@ -163,14 +166,6 @@ func TestSkillToolName(t *testing.T) {
 	// customized
 	name := "load_skill"
 	m, err = New(ctx, &Config{Backend: &inMemoryBackend{m: []Skill{}}, SkillToolName: &name})
-	assert.NoError(t, err)
-	assert.Contains(t, m.AdditionalInstruction, "'load_skill'")
-	info, err = m.AdditionalTools[0].Info(ctx)
-	assert.NoError(t, err)
-	assert.Equal(t, "load_skill", info.Name)
-
-	// chinese
-	m, err = New(ctx, &Config{Backend: &inMemoryBackend{m: []Skill{}}, SkillToolName: &name, UseChinese: true})
 	assert.NoError(t, err)
 	assert.Contains(t, m.AdditionalInstruction, "'load_skill'")
 	info, err = m.AdditionalTools[0].Info(ctx)
