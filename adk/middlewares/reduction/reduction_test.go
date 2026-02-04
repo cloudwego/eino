@@ -29,7 +29,6 @@ import (
 	"github.com/cloudwego/eino/adk/filesystem"
 	"github.com/cloudwego/eino/components/tool"
 	"github.com/cloudwego/eino/components/tool/utils"
-	"github.com/cloudwego/eino/compose"
 	"github.com/cloudwego/eino/schema"
 )
 
@@ -106,20 +105,20 @@ func TestReductionMiddlewareOffload(t *testing.T) {
 	t.Run("test offload", func(t *testing.T) {
 		handler := func(ctx context.Context, detail *ToolDetail) (*OffloadInfo, error) {
 			arguments := make(map[string]string)
-			if err := json.Unmarshal([]byte(detail.Input.Arguments), &arguments); err != nil {
+			if err := json.Unmarshal([]byte(detail.ToolArgument.TextArgument), &arguments); err != nil {
 				return nil, err
 			}
 			offloadContent := &OffloadContent{
 				Arguments: arguments,
-				Result:    detail.Output.Result,
+				Result:    detail.ToolResult.Parts[0].Text,
 			}
 			replacedArguments := make(map[string]string, len(arguments))
-			filePath := fmt.Sprintf("/tmp/%s", detail.Input.CallID)
+			filePath := fmt.Sprintf("/tmp/%s", detail.ToolContext.CallID)
 			for k := range arguments {
 				replacedArguments[k] = "argument offloaded"
 			}
-			detail.Input.Arguments = toJson(replacedArguments)
-			detail.Output.Result = "result offloaded, retrieve it from " + filePath
+			detail.ToolArgument.TextArgument = toJson(replacedArguments)
+			detail.ToolResult.Parts[0].Text = "result offloaded, retrieve it from " + filePath
 			return &OffloadInfo{
 				NeedOffload:    true,
 				FilePath:       filePath,
@@ -129,7 +128,7 @@ func TestReductionMiddlewareOffload(t *testing.T) {
 
 		config := &ToolReductionMiddlewareConfig{
 			ToolOffload: &ToolOffload{
-				Tokenizer: defaultTokenizer,
+				TokenCounter: defaultTokenCounter,
 				ToolOffloadThreshold: &ToolOffloadThresholdConfig{
 					MaxTokens:            20,
 					OffloadBatchSize:     1,
@@ -194,14 +193,14 @@ func TestReductionMiddlewareOffload(t *testing.T) {
 func TestDefaultOffloadHandler(t *testing.T) {
 	ctx := context.Background()
 	detail := &ToolDetail{
-		Input: &compose.ToolInput{
-			Name:      "mock_name",
-			Arguments: "anything",
-			CallID:    "mock_call_id_12345",
+		ToolContext: &adk.ToolContext{
+			Name:   "mock_name",
+			CallID: "mock_call_id_12345",
 		},
-		Output: &compose.ToolOutput{Result: "hello"},
+		ToolArgument: &schema.ToolArgument{TextArgument: "anything"},
+		ToolResult:   &schema.ToolResult{Parts: []schema.ToolOutputPart{{Type: schema.ToolPartTypeText, Text: "hello"}}},
 	}
-
+	
 	fn := defaultOffloadHandler("/tmp")
 	info, err := fn(ctx, detail)
 	assert.NoError(t, err)
@@ -244,12 +243,43 @@ func mockStreamableTool() tool.StreamableTool {
 	s2 := strings.Repeat("hello world", 8)
 	s3 := s1 + s2
 	t, _ := utils.InferStreamTool("mock_streamable_tool", "test desc", func(ctx context.Context, input ContentContainer) (output *schema.StreamReader[string], err error) {
-		sr, sw := schema.Pipe[string](1)
-		sw.Send(s3, nil)
+		sr, sw := schema.Pipe[string](11)
+		for _, part := range splitStrings(s3, 10) {
+			sw.Send(part, nil)
+		}
 		sw.Close()
 		return sr, nil
 	})
 	return t
+}
+
+func splitStrings(s string, n int) []string {
+	if n <= 0 {
+		n = 1
+	}
+	if n == 1 {
+		return []string{s}
+	}
+	if len(s) <= n {
+		parts := make([]string, n)
+		for i := 0; i < len(s); i++ {
+			parts[i] = string(s[i])
+		}
+		return parts
+	}
+	baseLen := len(s) / n
+	extra := len(s) % n
+	parts := make([]string, 0, n)
+	start := 0
+	for i := 0; i < n; i++ {
+		end := start + baseLen
+		if i < extra {
+			end++
+		}
+		parts = append(parts, s[start:end])
+		start = end
+	}
+	return parts
 }
 
 func ptrOf[T any](v T) *T {

@@ -14,15 +14,55 @@
  * limitations under the License.
  */
 
+// Package reduction provides middlewares to trim context and clear tool results.
 package reduction
 
+import "github.com/cloudwego/eino/adk/internal"
+
+func getLineTruncFmt() string {
+	s, _ := internal.SelectPrompt(internal.I18nPrompts{
+		English: lineTruncFmt,
+		Chinese: lineTruncFmtZh,
+	})
+	if s == "" {
+		return lineTruncFmt
+	}
+	return s
+}
+
+func getContentTruncFmt() string {
+	s, _ := internal.SelectPrompt(internal.I18nPrompts{
+		English: contentTruncFmt,
+		Chinese: contentTruncFmtZh,
+	})
+	if s == "" {
+		return contentTruncFmt
+	}
+	return s
+}
+
+func getToolOffloadResultFmt() string {
+	s, _ := internal.SelectPrompt(internal.I18nPrompts{
+		English: toolOffloadResultFmt,
+		Chinese: toolOffloadResultFmtZh,
+	})
+	if s == "" {
+		return toolOffloadResultFmt
+	}
+	return s
+}
+
 const (
-	lineTruncFmt    = `... (line truncated due to length limitation, %d chars total)`
-	contentTruncFmt = `... (content truncated due to length limitation, %d chars total)`
+	lineTruncFmt   = `... (line truncated due to length limitation, %d chars total)`
+	lineTruncFmtZh = `...(由于长度限制截断本行, 总计 %d 字符)`
+
+	contentTruncFmt   = `... (content truncated due to length limitation, %d chars total)`
+	contentTruncFmtZh = `...(由于长度限制截断末尾, 总计 %d 字符)`
 )
 
 const (
-	toolOffloadResultFmt = `Tool result is too large, retrieve from %s if needed`
+	toolOffloadResultFmt   = `Tool result is too large, retrieve from %s if needed`
+	toolOffloadResultFmtZh = `工具输出结果过长, 需要时从 %s 中导入`
 )
 
 const (

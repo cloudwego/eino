@@ -14,6 +14,7 @@
  * limitations under the License.
  */
 
+// Package internal provides middlewares to trim context and clear tool results.
 package internal
 
 import (

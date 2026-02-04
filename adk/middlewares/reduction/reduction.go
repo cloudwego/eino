@@ -28,7 +28,6 @@ import (
 	"github.com/cloudwego/eino/adk"
 	"github.com/cloudwego/eino/adk/filesystem"
 	"github.com/cloudwego/eino/components/tool"
-	"github.com/cloudwego/eino/compose"
 	"github.com/cloudwego/eino/schema"
 )
 
@@ -51,7 +50,7 @@ type ToolTruncationConfig struct {
 }
 
 type ToolOffload struct {
-	Tokenizer func(ctx context.Context, msg []adk.Message) (int64, error)
+	TokenCounter func(ctx context.Context, msg []adk.Message) (int64, error)
 
 	ToolOffloadThreshold *ToolOffloadThresholdConfig
 
@@ -84,10 +83,11 @@ type ToolOffloadConfig struct {
 
 // ToolDetail contains details about a tool's input and output
 type ToolDetail struct {
-	// Input is the tool's input parameters
-	Input *compose.ToolInput
-	// Output is the tool's execution result
-	Output *compose.ToolOutput
+	ToolContext *adk.ToolContext
+
+	ToolArgument *schema.ToolArgument
+	
+	ToolResult *schema.ToolResult
 }
 
 type OffloadInfo struct {
@@ -115,8 +115,8 @@ func NewToolReductionMiddleware(_ context.Context, config *ToolReductionMiddlewa
 	}
 	if config.ToolOffload != nil {
 		to := config.ToolOffload
-		if to.Tokenizer == nil || to.ToolOffloadThreshold == nil || to.ToolOffloadConfigMapping == nil {
-			return mw, fmt.Errorf("ToolOffload.Tokenizer / ToolOffloadThreshold / ToolOffloadConfigMapping must be set")
+		if to.TokenCounter == nil || to.ToolOffloadThreshold == nil || to.ToolOffloadConfigMapping == nil {
+			return mw, fmt.Errorf("ToolOffload.TokenCounter / ToolOffloadThreshold / ToolOffloadConfigMapping must be set")
 		}
 		for toolName, offloadConfig := range to.ToolOffloadConfigMapping {
 			if offloadConfig.OffloadBackend == nil || offloadConfig.OffloadHandler == nil {
@@ -139,7 +139,7 @@ func NewDefaultToolReductionMiddleware(ctx context.Context, needReductionTools [
 			ToolTruncationConfigMapping: make(map[string]ToolTruncationConfig, len(needReductionTools)),
 		},
 		ToolOffload: &ToolOffload{
-			Tokenizer: defaultTokenizer,
+			TokenCounter: defaultTokenCounter,
 			ToolOffloadThreshold: &ToolOffloadThresholdConfig{
 				MaxTokens:        300000,
 				OffloadBatchSize: 5,
@@ -173,7 +173,6 @@ type toolReductionMiddleware struct {
 }
 
 func (t *toolReductionMiddleware) WrapInvokableToolCall(_ context.Context, endpoint adk.InvokableToolCallEndpoint, tCtx *adk.ToolContext) (adk.InvokableToolCallEndpoint, error) {
-	toolName := tCtx.Name
 	config := t.config.ToolTruncation
 	if config == nil || config.ToolTruncationConfigMapping == nil {
 		return endpoint, nil
@@ -188,16 +187,15 @@ func (t *toolReductionMiddleware) WrapInvokableToolCall(_ context.Context, endpo
 		if err != nil {
 			return "", err
 		}
-
 		detail := &ToolDetail{
-			Input: &compose.ToolInput{
-				Name:        toolName,
-				Arguments:   argumentsInJSON,
-				CallID:      tCtx.CallID,
-				CallOptions: opts,
+			ToolContext: tCtx,
+			ToolArgument: &schema.ToolArgument{
+				TextArgument: argumentsInJSON,
 			},
-			Output: &compose.ToolOutput{
-				Result: output,
+			ToolResult: &schema.ToolResult{
+				Parts: []schema.ToolOutputPart{
+					{Type: schema.ToolPartTypeText, Text: output},
+				},
 			},
 		}
 		return t.toolTruncationHandler(ctx, tc, detail), nil
@@ -205,7 +203,6 @@ func (t *toolReductionMiddleware) WrapInvokableToolCall(_ context.Context, endpo
 }
 
 func (t *toolReductionMiddleware) WrapStreamableToolCall(_ context.Context, endpoint adk.StreamableToolCallEndpoint, tCtx *adk.ToolContext) (adk.StreamableToolCallEndpoint, error) {
-	toolName := tCtx.Name
 	config := t.config.ToolTruncation
 	if config == nil || config.ToolTruncationConfigMapping == nil {
 		return endpoint, nil
@@ -221,45 +218,48 @@ func (t *toolReductionMiddleware) WrapStreamableToolCall(_ context.Context, endp
 			return nil, err
 		}
 
-		sr, sw := schema.Pipe[string](10)
-		go func() {
-			defer sw.Close()
-
-			result := strings.Builder{}
-			for {
-				chunk, err := output.Recv()
-				if err != nil {
-					if err != io.EOF {
-						sw.Send("", err)
+		var chunks []string
+		for {
+			chunk, err := output.Recv()
+			if err != nil {
+				if err != io.EOF {
+					sr, sw := schema.Pipe[string](10)
+					for _, origChunk := range chunks {
+						sw.Send(origChunk, nil)
 					}
-					break
+					sw.Send("", err)
+					sw.Close()
+					return sr, nil
 				}
-				result.WriteString(chunk)
+				break
 			}
-
-			detail := &ToolDetail{
-				Input: &compose.ToolInput{
-					Name:        toolName,
-					Arguments:   argumentsInJSON,
-					CallID:      tCtx.CallID,
-					CallOptions: opts,
+			chunks = append(chunks, chunk)
+		}
+		result := strings.Join(chunks, "")
+		detail := &ToolDetail{
+			ToolContext: tCtx,
+			ToolArgument: &schema.ToolArgument{
+				TextArgument: argumentsInJSON,
+			},
+			ToolResult: &schema.ToolResult{
+				Parts: []schema.ToolOutputPart{
+					{Type: schema.ToolPartTypeText, Text: result},
 				},
-				Output: &compose.ToolOutput{
-					Result: result.String(),
-				},
-			}
-			truncResult := t.toolTruncationHandler(ctx, tc, detail)
-			sw.Send(truncResult, nil)
-		}()
-
-		return sr, nil
+			},
+		}
+		truncResult := t.toolTruncationHandler(ctx, tc, detail)
+		return schema.StreamReaderFromArray([]string{truncResult}), nil
 	}, nil
 }
 
-func (t *toolReductionMiddleware) toolTruncationHandler(ctx context.Context, config ToolTruncationConfig, detail *ToolDetail) (truncResult string) {
+func (t *toolReductionMiddleware) toolTruncationHandler(_ context.Context, config ToolTruncationConfig, detail *ToolDetail) (truncResult string) {
+	var resultText string
+	if len(detail.ToolResult.Parts) > 0 {
+		resultText = detail.ToolResult.Parts[0].Text
+	}
 	if config.MaxLineLength != nil {
 		sb := strings.Builder{}
-		lines := strings.Split(detail.Output.Result, "\n")
+		lines := strings.Split(resultText, "\n")
 		for i, line := range lines {
 			if i > 0 {
 				sb.WriteString("\n")
@@ -270,22 +270,22 @@ func (t *toolReductionMiddleware) toolTruncationHandler(ctx context.Context, con
 				if leftMaxLength < 0 {
 					leftMaxLength = 0
 				}
-				s, truncated := truncateIfTooLong(leftMaxLength, contentTruncFmt, line)
+				s, truncated := truncateIfTooLong(leftMaxLength, getContentTruncFmt(), line)
 				if truncated {
 					sb.WriteString(s)
 					break
 				}
 			}
 
-			s, _ := truncateIfTooLong(*config.MaxLineLength, lineTruncFmt, line)
+			s, _ := truncateIfTooLong(*config.MaxLineLength, getLineTruncFmt(), line)
 			sb.WriteString(s)
 		}
 		return sb.String()
 	} else if config.MaxLength != nil {
-		truncResult, _ = truncateIfTooLong(*config.MaxLength, contentTruncFmt, detail.Output.Result)
+		truncResult, _ = truncateIfTooLong(*config.MaxLength, getContentTruncFmt(), resultText)
 		return truncResult
 	} else {
-		return detail.Output.Result
+		return resultText
 	}
 }
 
@@ -309,7 +309,7 @@ func (t *toolReductionMiddleware) BeforeModelRewriteState(ctx context.Context, s
 	)
 
 	// init msg tokens
-	estimatedTokens, err = offloadConfig.Tokenizer(ctx, state.Messages)
+	estimatedTokens, err = offloadConfig.TokenCounter(ctx, state.Messages)
 	if err != nil {
 		return ctx, state, err
 	}
@@ -355,7 +355,7 @@ func (t *toolReductionMiddleware) BeforeModelRewriteState(ctx context.Context, s
 			if trMsgEnd > len(state.Messages) {
 				trMsgEnd = len(state.Messages)
 			}
-			beforeTokens, err := offloadConfig.Tokenizer(ctx, state.Messages[tcMsgIndex:trMsgEnd])
+			beforeTokens, err := offloadConfig.TokenCounter(ctx, state.Messages[tcMsgIndex:trMsgEnd])
 			if err != nil {
 				return ctx, state, nil
 			}
@@ -375,16 +375,22 @@ func (t *toolReductionMiddleware) BeforeModelRewriteState(ctx context.Context, s
 					continue
 				}
 
-				td := &ToolDetail{
-					Input: &compose.ToolInput{
-						Name:      toolCall.Function.Name,
-						Arguments: toolCall.Function.Arguments,
-						CallID:    toolCall.ID,
-					},
-					Output: &compose.ToolOutput{
-						Result: resultMsg.Content,
-					},
+				toolResult, fromContent, toolResultErr := toolResultFromMessage(resultMsg)
+				if toolResultErr != nil {
+					return ctx, state, toolResultErr
 				}
+
+				td := &ToolDetail{
+					ToolContext: &adk.ToolContext{
+						Name:   toolCall.Function.Name,
+						CallID: toolCall.ID,
+					},
+					ToolArgument: &schema.ToolArgument{
+						TextArgument: toolCall.Function.Arguments,
+					},
+					ToolResult: toolResult,
+				}
+
 				offloadInfo, offloadErr := tc.OffloadHandler(ctx, td)
 				if offloadErr != nil {
 					return ctx, state, offloadErr
@@ -401,15 +407,25 @@ func (t *toolReductionMiddleware) BeforeModelRewriteState(ctx context.Context, s
 					return ctx, state, writeErr
 				}
 
-				tcMsg.ToolCalls[tcIndex].Function.Arguments = td.Input.Arguments
-				resultMsg.Content = td.Output.Result
+				tcMsg.ToolCalls[tcIndex].Function.Arguments = td.ToolArgument.TextArgument
+				if fromContent {
+					if len(td.ToolResult.Parts) > 0 {
+						resultMsg.Content = td.ToolResult.Parts[0].Text
+					}
+				} else {
+					var convErr error
+					resultMsg.UserInputMultiContent, convErr = td.ToolResult.ToMessageInputParts()
+					if convErr != nil {
+						return ctx, state, convErr
+					}
+				}
 			}
 
 			// set dedup flag
 			setMsgOffloadedFlag(tcMsg)
 
 			// calc tool_call msg tokens
-			afterTokens, err := offloadConfig.Tokenizer(ctx, state.Messages[tcMsgIndex:trMsgEnd])
+			afterTokens, err := offloadConfig.TokenCounter(ctx, state.Messages[tcMsgIndex:trMsgEnd])
 			if err != nil {
 				return ctx, state, err
 			}
@@ -430,9 +446,9 @@ func (t *toolReductionMiddleware) BeforeModelRewriteState(ctx context.Context, s
 	return ctx, state, nil
 }
 
-// defaultTokenizer estimates tokens, which treats one token as ~4 characters of text for common English text.
+// defaultTokenCounter estimates tokens, which treats one token as ~4 characters of text for common English text.
 // github.com/tiktoken-go/tokenizer is highly recommended to replace it.
-func defaultTokenizer(_ context.Context, msgs []*schema.Message) (int64, error) {
+func defaultTokenCounter(_ context.Context, msgs []*schema.Message) (int64, error) {
 	var tokens int64
 	for _, msg := range msgs {
 		if msg == nil {
@@ -468,18 +484,22 @@ func defaultTokenizer(_ context.Context, msgs []*schema.Message) (int64, error) 
 
 func defaultOffloadHandler(rootDir string) func(ctx context.Context, detail *ToolDetail) (*OffloadInfo, error) {
 	return func(ctx context.Context, detail *ToolDetail) (*OffloadInfo, error) {
-		fileName := detail.Input.CallID
+		fileName := detail.ToolContext.CallID
 		if fileName == "" {
 			fileName = uuid.NewString()
 		}
 		filePath := filepath.Join(rootDir, fileName)
-		nResult := fmt.Sprintf(toolOffloadResultFmt, filePath)
+		nResult := fmt.Sprintf(getToolOffloadResultFmt(), filePath)
+		if len(detail.ToolResult.Parts) == 0 || detail.ToolResult.Parts[0].Type != schema.ToolPartTypeText {
+			// brutal judge
+			return nil, fmt.Errorf("default offload currently not support multimodal content")
+		}
 		offloadInfo := &OffloadInfo{
 			NeedOffload:    true,
 			FilePath:       filePath,
-			OffloadContent: detail.Output.Result,
+			OffloadContent: detail.ToolResult.Parts[0].Text,
 		}
-		detail.Output.Result = nResult
+		detail.ToolResult.Parts[0].Text = nResult
 
 		return offloadInfo, nil
 	}
@@ -509,4 +529,62 @@ func setMsgCachedToken(msg *schema.Message, tokens int64) {
 		msg.Extra = make(map[string]any)
 	}
 	msg.Extra[msgReducedTokens] = tokens
+}
+
+func toolResultFromMessage(msg *schema.Message) (result *schema.ToolResult, fromContent bool, err error) {
+	if msg.Role != schema.Tool {
+		return nil, false, fmt.Errorf("message role %s is not a tool", msg.Role)
+	}
+	if msg.Content != "" {
+		return &schema.ToolResult{Parts: []schema.ToolOutputPart{{Type: schema.ToolPartTypeText, Text: msg.Content}}}, true, nil
+	}
+	result = &schema.ToolResult{Parts: make([]schema.ToolOutputPart, 0, len(msg.UserInputMultiContent))}
+	for _, part := range msg.UserInputMultiContent {
+		top, convErr := convMessageInputPartToToolOutputPart(part)
+		if convErr != nil {
+			return nil, false, convErr
+		}
+		result.Parts = append(result.Parts, top)
+	}
+	return result, false, nil
+}
+
+func convMessageInputPartToToolOutputPart(msgPart schema.MessageInputPart) (schema.ToolOutputPart, error) {
+	switch msgPart.Type {
+	case schema.ChatMessagePartTypeText:
+		return schema.ToolOutputPart{
+			Type: schema.ToolPartTypeText,
+			Text: msgPart.Text,
+		}, nil
+	case schema.ChatMessagePartTypeImageURL:
+		return schema.ToolOutputPart{
+			Type: schema.ToolPartTypeImage,
+			Image: &schema.ToolOutputImage{
+				MessagePartCommon: msgPart.Image.MessagePartCommon,
+			},
+		}, nil
+	case schema.ChatMessagePartTypeAudioURL:
+		return schema.ToolOutputPart{
+			Type: schema.ToolPartTypeAudio,
+			Audio: &schema.ToolOutputAudio{
+				MessagePartCommon: msgPart.Audio.MessagePartCommon,
+			},
+		}, nil
+	case schema.ChatMessagePartTypeVideoURL:
+		return schema.ToolOutputPart{
+			Type: schema.ToolPartTypeVideo,
+			Video: &schema.ToolOutputVideo{
+				MessagePartCommon: msgPart.Video.MessagePartCommon,
+			},
+		}, nil
+	case schema.ChatMessagePartTypeFileURL:
+		return schema.ToolOutputPart{
+			Type: schema.ToolPartTypeFile,
+			File: &schema.ToolOutputFile{
+				MessagePartCommon: msgPart.File.MessagePartCommon,
+			},
+		}, nil
+	default:
+		return schema.ToolOutputPart{}, fmt.Errorf("unknown msg part type: %v", msgPart.Type)
+	}
 }
