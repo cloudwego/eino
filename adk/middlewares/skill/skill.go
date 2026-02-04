@@ -397,9 +397,9 @@ func (s *skillTool) runAgentMode(ctx context.Context, skill Skill, forkHistory b
 		if event == nil || event.Output == nil || event.Output.MessageOutput == nil {
 			continue
 		}
-		msg, err := event.Output.MessageOutput.GetMessage()
-		if err != nil {
-			return "", fmt.Errorf("failed to get message from event: %w", err)
+		msg, msgErr := event.Output.MessageOutput.GetMessage()
+		if msgErr != nil {
+			return "", fmt.Errorf("failed to get message from event: %w", msgErr)
 		}
 		if msg != nil && msg.Content != "" {
 			results = append(results, msg.Content)
