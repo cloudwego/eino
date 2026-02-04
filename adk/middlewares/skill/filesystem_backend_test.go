@@ -221,6 +221,37 @@ Content 2`,
 		assert.NoError(t, err)
 		assert.Empty(t, skills)
 	})
+
+	t.Run("deeply nested SKILL.md is ignored", func(t *testing.T) {
+		fsBackend := filesystem.NewInMemoryBackend()
+		_ = fsBackend.Write(ctx, &filesystem.WriteRequest{
+			FilePath: "/skills/valid-skill/SKILL.md",
+			Content: `---
+name: valid-skill
+description: Valid skill
+---
+Content`,
+		})
+		_ = fsBackend.Write(ctx, &filesystem.WriteRequest{
+			FilePath: "/skills/deep/nested/SKILL.md",
+			Content: `---
+name: nested-skill
+description: Nested skill
+---
+Content`,
+		})
+
+		backend, err := NewFilesystemBackend(&FilesystemBackendConfig{
+			Backend: fsBackend,
+			BaseDir: "/skills",
+		})
+		require.NoError(t, err)
+
+		skills, err := backend.List(ctx)
+		assert.NoError(t, err)
+		assert.Len(t, skills, 1)
+		assert.Equal(t, "valid-skill", skills[0].Name)
+	})
 }
 
 func TestFilesystemBackend_Get(t *testing.T) {
