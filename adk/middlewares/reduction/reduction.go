@@ -24,6 +24,7 @@ import (
 	"strings"
 
 	"github.com/google/uuid"
+	"github.com/slongfield/pyfmt"
 
 	"github.com/cloudwego/eino/adk"
 	"github.com/cloudwego/eino/adk/filesystem"
@@ -33,6 +34,9 @@ import (
 
 // ToolReductionMiddlewareConfig is the configuration for the tool reduction middleware.
 type ToolReductionMiddlewareConfig struct {
+	// Backend is the storage backend where truncated content will be saved.
+	Backend Backend
+
 	// ToolTruncation configures the truncation strategy for tool outputs.
 	// If nil, no truncation will be applied.
 	ToolTruncation *ToolTruncation
@@ -44,6 +48,9 @@ type ToolReductionMiddlewareConfig struct {
 
 // ToolTruncation holds configuration for tool output truncation.
 type ToolTruncation struct {
+	// ReadFileToolName is used in truncated content to tell agent how to retrieve original content.
+	ReadFileToolName string
+
 	// ToolConfigs maps tool names to their specific truncation configurations.
 	// The key is the tool name.
 	ToolConfigs map[string]ToolTruncationConfig
@@ -51,15 +58,13 @@ type ToolTruncation struct {
 
 // ToolTruncationConfig configures how a tool's result is truncated.
 type ToolTruncationConfig struct {
+	// RootDir root dir to save truncated content, file name is {tool_call_id}.
+	// Default is /tmp/trunc
+	RootDir string
+
 	// MaxLength is the maximum allowed length of the tool output.
 	// If the output exceeds this length, it will be truncated.
-	// At least one of MaxLength or MaxLineLength must be provided.
-	MaxLength *int
-
-	// MaxLineLength is the maximum allowed length for a single line in the tool output.
-	// If a line exceeds this length, it will be truncated.
-	// At least one of MaxLength or MaxLineLength must be provided.
-	MaxLineLength *int
+	MaxLength int
 }
 
 // ToolOffload holds configuration for tool output offloading.
@@ -97,16 +102,14 @@ type ToolOffloadThresholdConfig struct {
 
 // ToolOffloadConfig configures how a specific tool's result is offloaded.
 type ToolOffloadConfig struct {
-	// OffloadBackend is the storage backend where offloaded content will be saved.
-	OffloadBackend Backend
-
-	// OffloadHandler determines the content to offload and the file path for a given tool execution.
+	// Handler determines the content to offload and the file path for a given tool execution.
 	// It receives name, call_id, input and output of this tool call, which you could modify them in-place.
 	// It returns an OffloadInfo struct containing the decision and data.
-	OffloadHandler func(ctx context.Context, detail *ToolDetail) (*OffloadInfo, error)
+	// Different from ToolTruncationConfig, you need to set OffloadInfo.FilePath to tell Backend full path to write.
+	Handler func(ctx context.Context, detail *ToolDetail) (*OffloadInfo, error)
 }
 
-// ToolDetail contains detailed information about a tool execution, used by the OffloadHandler.
+// ToolDetail contains detailed information about a tool execution, used by the Handler.
 type ToolDetail struct {
 	// ToolContext provides metadata about the tool call (e.g., tool name, call ID).
 	ToolContext *adk.ToolContext
@@ -118,7 +121,7 @@ type ToolDetail struct {
 	ToolResult *schema.ToolResult
 }
 
-// OffloadInfo contains the result of the OffloadHandler's decision.
+// OffloadInfo contains the result of the Handler's decision.
 type OffloadInfo struct {
 	// NeedOffload indicates whether the tool output should be offloaded.
 	NeedOffload bool
@@ -136,13 +139,22 @@ func NewToolReductionMiddleware(_ context.Context, config *ToolReductionMiddlewa
 	if config.ToolTruncation == nil && config.ToolOffload == nil {
 		return mw, fmt.Errorf("at least provide one of ToolTruncationMapping or ToolOffloadMapping")
 	}
+	if config.Backend == nil {
+		return mw, fmt.Errorf("at least provide Backend")
+	}
 	if config.ToolTruncation != nil {
 		if config.ToolTruncation.ToolConfigs == nil {
 			return mw, fmt.Errorf("ToolTruncation.ToolConfigs must be set")
 		}
+		if config.ToolTruncation.ReadFileToolName == "" {
+			return mw, fmt.Errorf("ToolTruncation.ReadFileToolName must be set")
+		}
 		for toolName, truncConfig := range config.ToolTruncation.ToolConfigs {
-			if truncConfig.MaxLength == nil && truncConfig.MaxLineLength == nil {
-				return mw, fmt.Errorf("trunc config for %s error: at least one of MaxLength / MaxLineLength must be set", toolName)
+			if truncConfig.RootDir == "" {
+				truncConfig.RootDir = "/tmp/trunc"
+			}
+			if truncConfig.MaxLength == 0 {
+				return mw, fmt.Errorf("trunc config for %s error: MaxLength must be set", toolName)
 			}
 		}
 	}
@@ -152,8 +164,8 @@ func NewToolReductionMiddleware(_ context.Context, config *ToolReductionMiddlewa
 			return mw, fmt.Errorf("ToolOffload.TokenCounter / ToolOffloadThreshold / ToolConfigs must be set")
 		}
 		for toolName, offloadConfig := range to.ToolConfigs {
-			if offloadConfig.OffloadBackend == nil || offloadConfig.OffloadHandler == nil {
-				return mw, fmt.Errorf(" offload config for %s error: ToolOffload.ToolOffloadBackend / ToolOffloadHandler must be set", toolName)
+			if offloadConfig.Handler == nil {
+				return mw, fmt.Errorf(" offload config for %s error: ToolOffloadHandler must be set", toolName)
 			}
 		}
 	}
@@ -165,11 +177,14 @@ func NewToolReductionMiddleware(_ context.Context, config *ToolReductionMiddlewa
 func NewDefaultToolReductionMiddleware(ctx context.Context, needReductionTools []tool.BaseTool) (adk.ChatModelAgentMiddleware, error) {
 	truncMaxLength := 30000
 	backend := filesystem.NewInMemoryBackend()
-	offloadRootDir := "/tmp"
+	truncRootDir := "/tmp/trunc"
+	offloadRootDir := "/tmp/offload"
 
 	config := &ToolReductionMiddlewareConfig{
+		Backend: backend,
 		ToolTruncation: &ToolTruncation{
-			ToolConfigs: make(map[string]ToolTruncationConfig, len(needReductionTools)),
+			ReadFileToolName: "read_file",
+			ToolConfigs:      make(map[string]ToolTruncationConfig, len(needReductionTools)),
 		},
 		ToolOffload: &ToolOffload{
 			TokenCounter: defaultTokenCounter,
@@ -186,10 +201,12 @@ func NewDefaultToolReductionMiddleware(ctx context.Context, needReductionTools [
 		if err != nil {
 			return nil, err
 		}
-		config.ToolTruncation.ToolConfigs[info.Name] = ToolTruncationConfig{MaxLength: &truncMaxLength}
+		config.ToolTruncation.ToolConfigs[info.Name] = ToolTruncationConfig{
+			RootDir:   truncRootDir,
+			MaxLength: truncMaxLength,
+		}
 		config.ToolOffload.ToolConfigs[info.Name] = ToolOffloadConfig{
-			OffloadBackend: backend,
-			OffloadHandler: defaultOffloadHandler(offloadRootDir),
+			Handler: defaultOffloadHandler(offloadRootDir),
 		}
 	}
 
@@ -231,7 +248,11 @@ func (t *toolReductionMiddleware) WrapInvokableToolCall(_ context.Context, endpo
 				},
 			},
 		}
-		return t.toolTruncationHandler(ctx, tc, detail), nil
+		truncatedResult, err := t.toolTruncationHandler(ctx, tc, detail)
+		if err != nil {
+			return "", err
+		}
+		return truncatedResult, nil
 	}, nil
 }
 
@@ -281,54 +302,39 @@ func (t *toolReductionMiddleware) WrapStreamableToolCall(_ context.Context, endp
 				},
 			},
 		}
-		truncResult := t.toolTruncationHandler(ctx, tc, detail)
+		truncResult, err := t.toolTruncationHandler(ctx, tc, detail)
+		if err != nil {
+			return nil, err
+		}
 		return schema.StreamReaderFromArray([]string{truncResult}), nil
 	}, nil
 }
 
-func (t *toolReductionMiddleware) toolTruncationHandler(_ context.Context, config ToolTruncationConfig, detail *ToolDetail) (truncResult string) {
-	var resultText string
-	if len(detail.ToolResult.Parts) > 0 {
-		resultText = detail.ToolResult.Parts[0].Text
+func (t *toolReductionMiddleware) toolTruncationHandler(ctx context.Context, config ToolTruncationConfig, detail *ToolDetail) (truncResult string, err error) {
+	resultText := detail.ToolResult.Parts[0].Text
+	if len(resultText) <= config.MaxLength {
+		return resultText, nil
 	}
-	if config.MaxLineLength != nil {
-		sb := strings.Builder{}
-		lines := strings.Split(resultText, "\n")
-		for i, line := range lines {
-			if i > 0 {
-				sb.WriteString("\n")
-			}
 
-			if config.MaxLength != nil {
-				leftMaxLength := *config.MaxLength - sb.Len()
-				if leftMaxLength < 0 {
-					leftMaxLength = 0
-				}
-				s, truncated := truncateIfTooLong(leftMaxLength, getContentTruncFmt(), line)
-				if truncated {
-					sb.WriteString(s)
-					break
-				}
-			}
-
-			s, _ := truncateIfTooLong(*config.MaxLineLength, getLineTruncFmt(), line)
-			sb.WriteString(s)
-		}
-		return sb.String()
-	} else if config.MaxLength != nil {
-		truncResult, _ = truncateIfTooLong(*config.MaxLength, getContentTruncFmt(), resultText)
-		return truncResult
-	} else {
-		return resultText
+	filePath := filepath.Join(config.RootDir, detail.ToolContext.CallID)
+	truncatedMsg, err := pyfmt.Fmt(getContentTruncFmt(), map[string]any{
+		"removed_count":       len(resultText) - config.MaxLength,
+		"file_path":           filePath,
+		"read_file_tool_name": t.config.ToolTruncation.ReadFileToolName,
+	})
+	if err != nil {
+		return "", err
 	}
-}
 
-func truncateIfTooLong(maxLength int, format, content string) (string, bool) {
-	truncatedMsg := fmt.Sprintf(format, len(content))
-	if maxLength+len(truncatedMsg) < len(content) {
-		return content[:maxLength] + truncatedMsg, true
+	truncResult = resultText[:config.MaxLength] + truncatedMsg
+	err = t.config.Backend.Write(ctx, &filesystem.WriteRequest{
+		FilePath: filepath.Join(config.RootDir, detail.ToolContext.CallID),
+		Content:  resultText,
+	})
+	if err != nil {
+		return "", err
 	}
-	return content, false
+	return truncResult, nil
 }
 
 func (t *toolReductionMiddleware) BeforeModelRewriteState(ctx context.Context, state *adk.ChatModelAgentState, mc *adk.ModelContext) (context.Context, *adk.ChatModelAgentState, error) {
@@ -425,7 +431,7 @@ func (t *toolReductionMiddleware) BeforeModelRewriteState(ctx context.Context, s
 					ToolResult: toolResult,
 				}
 
-				offloadInfo, offloadErr := tc.OffloadHandler(ctx, td)
+				offloadInfo, offloadErr := tc.Handler(ctx, td)
 				if offloadErr != nil {
 					return ctx, state, offloadErr
 				}
@@ -433,7 +439,7 @@ func (t *toolReductionMiddleware) BeforeModelRewriteState(ctx context.Context, s
 					continue
 				}
 
-				writeErr := tc.OffloadBackend.Write(ctx, &filesystem.WriteRequest{
+				writeErr := t.config.Backend.Write(ctx, &filesystem.WriteRequest{
 					FilePath: offloadInfo.FilePath,
 					Content:  offloadInfo.OffloadContent,
 				})
