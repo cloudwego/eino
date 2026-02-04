@@ -17,9 +17,10 @@
 **Eino['aino]** 是一个 Go 语言的 LLM 应用开发框架，借鉴了 LangChain、Google ADK 等开源项目，按照 Go 的惯例设计。
 
 Eino 提供：
-- **组件**：`ChatModel`、`Tool`、`Retriever`、`ChatTemplate` 等可复用模块
+- **[组件](https://github.com/cloudwego/eino-ext)**：`ChatModel`、`Tool`、`Retriever`、`ChatTemplate` 等可复用模块，官方实现覆盖 OpenAI、Ollama 等
 - **智能体开发套件（ADK）**：支持工具调用、多智能体协同、上下文管理、中断/恢复等人机交互，以及开箱即用的智能体模式
 - **编排**：把组件组装成图或工作流，既能独立运行，也能作为工具给智能体调用
+- **[示例](https://github.com/cloudwego/eino-examples)**：常见模式和实际场景的可运行代码
 
 ![](.github/static/img/eino/eino_concept.jpeg)
 
@@ -130,62 +131,29 @@ agent, _ := adk.NewChatModelAgent(ctx, &adk.ChatModelAgentConfig{
 
 # 主要特性
 
-## 组件
+## 组件生态
 
-- **组件抽象**和多种**实现**
-    - 包括 ChatModel、Tool、ChatTemplate、Retriever、Document Loader、Lambda 等
-    - 每种组件有自己的接口：输入输出类型、Option 类型、流式范式
-    - 编排时只关心抽象，实现细节透明
+Eino 定义了组件抽象（ChatModel、Tool、Retriever、Embedding 等），官方实现覆盖 OpenAI、Claude、Gemini、Ark、Ollama、Elasticsearch 等。
 
-- 实现可以嵌套，封装复杂逻辑
-    - ReAct Agent、MultiQueryRetriever、Host MultiAgent 等都是多组件组合
-    - 对外还是透明的，MultiQueryRetriever 能用在任何需要 Retriever 的地方
-
-## 智能体开发套件（ADK）
-
-**ADK** 提供构建 AI 智能体的抽象：
-
-- **ChatModelAgent**：ReAct 风格智能体，处理工具调用、对话状态、推理循环
-- **多智能体与上下文工程**：层级化智能体系统，智能体切换和作为工具调用时自动管理对话历史
-- **工作流智能体**：用 `SequentialAgent`、`ParallelAgent`、`LoopAgent` 组合智能体
-- **人机协作**：`Interrupt` 和 `Resume` 机制，支持检查点持久化
-- **预置模式**：Deep Agent（任务编排）、Supervisor（层级协调）、Plan-Execute-Replan
-- **智能体中间件**：可扩展的中间件，用于添加工具和管理上下文
-
-## 编排
-
-**图编排**提供细粒度控制，数据从 Retriever / Document Loader / ChatTemplate 流向 ChatModel，再到 Tool 和最终输出。
-
-- 组件实例是图节点，边是数据流通道
-- 特性：
-  - 类型检查、流处理、并发管理、切面注入、选项赋值
-  - 运行时分支、全局状态读写、workflow 字段级数据映射
-
-## 切面（Callbacks）
-
-**切面**处理横切关注点：日志、追踪、指标。可用于组件、编排图、ADK 智能体。
-
-- 五种切面：OnStart、OnEnd、OnError、OnStartWithStreamInput、OnEndWithStreamOutput
-- 运行时通过 Option 添加自定义回调
+→ [eino-ext](https://github.com/cloudwego/eino-ext)
 
 ## 流式处理
 
-ChatModel 实时输出消息块，Eino 在编排中处理流式：
+Eino 在编排中自动处理流式：拼接、装箱、合并、复制。组件只需实现有业务意义的流式范式，框架处理剩下的。
 
-- 下游节点只接受非流输入（如 ToolsNode）时，自动**拼接**流块
-- 图执行中需要流时，自动把非流**转成**流
-- 多个流汇入同一节点时，自动**合并**
-- 流分发到多个节点或回调时，自动**复制**
-- **分支**和**状态处理器**都支持流
+→ [文档](https://www.cloudwego.io/zh/docs/eino/core_modules/chain_and_graph_orchestration/stream_programming_essentials/)
 
-编译后的 Graph 支持 4 种流式范式：
+## 回调切面
 
-| 流处理范式     | 说明                                               |
-|-----------|-----------------------------------------------|
-| Invoke    | 非流输入 I，非流输出 O                            |
-| Stream    | 非流输入 I，流输出 StreamReader[O]              |
-| Collect   | 流输入 StreamReader[I]，非流输出 O              |
-| Transform | 流输入 StreamReader[I]，流输出 StreamReader[O] |
+在固定切点（OnStart、OnEnd、OnError、OnStartWithStreamInput、OnEndWithStreamOutput）注入日志、追踪、指标，适用于组件、图、智能体。
+
+→ [文档](https://www.cloudwego.io/zh/docs/eino/core_modules/chain_and_graph_orchestration/callback_manual/)
+
+## 中断/恢复
+
+任何智能体或工具都能暂停等待人工输入，从检查点恢复。框架处理状态持久化和路由。
+
+→ [文档](https://www.cloudwego.io/zh/docs/eino/core_modules/eino_adk/agent_hitl/) · [示例](https://github.com/cloudwego/eino-examples/tree/main/adk/human-in-the-loop)
 
 # 框架结构
 

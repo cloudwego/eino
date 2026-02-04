@@ -17,9 +17,10 @@ English | [中文](README.zh_CN.md)
 **Eino['aino]** is an LLM application development framework in Golang. It draws from LangChain, Google ADK, and other open-source frameworks, and is designed to follow Golang conventions.
 
 Eino provides:
-- **Components**: reusable building blocks like `ChatModel`, `Tool`, `Retriever`, and `ChatTemplate`.
+- **[Components](https://github.com/cloudwego/eino-ext)**: reusable building blocks like `ChatModel`, `Tool`, `Retriever`, and `ChatTemplate`, with official implementations for OpenAI, Ollama, and more.
 - **Agent Development Kit (ADK)**: build AI agents with tool use, multi-agent coordination, context management, interrupt/resume for human-in-the-loop, and ready-to-use agent patterns.
 - **Composition**: connect components into graphs and workflows that can run standalone or be exposed as tools for agents.
+- **[Examples](https://github.com/cloudwego/eino-examples)**: working code for common patterns and real-world use cases.
 
 ![](.github/static/img/eino/eino_concept.jpeg)
 
@@ -130,62 +131,29 @@ This lets you build domain-specific pipelines with exact control, then let agent
 
 # Key Features
 
-## Components
+## Component Ecosystem
 
-- **Component abstractions** with multiple **implementations** ready to use
-    - Abstractions include ChatModel, Tool, ChatTemplate, Retriever, Document Loader, Lambda, etc.
-    - Each component type has its own interface: defined Input & Output types, Option types, and streaming paradigms
-    - Implementations are transparent when orchestrating components
+Eino defines component abstractions (ChatModel, Tool, Retriever, Embedding, etc.) with official implementations for OpenAI, Claude, Gemini, Ark, Ollama, Elasticsearch, and more.
 
-- Implementations can be nested and capture complex business logic
-    - ReAct Agent, MultiQueryRetriever, Host MultiAgent, etc. consist of multiple components and non-trivial logic
-    - They remain transparent from the outside. A MultiQueryRetriever can be used anywhere that accepts a Retriever
-
-## Agent Development Kit (ADK)
-
-The **ADK** package provides abstractions for building AI agents:
-
-- **ChatModelAgent**: A ReAct-style agent that handles tool calling, conversation state, and the reasoning loop
-- **Multi-Agent with Context Engineering**: Hierarchical agent systems where conversation history is managed across agent transfers and agent-as-tool invocations
-- **Workflow Agents**: Compose agents using `SequentialAgent`, `ParallelAgent`, and `LoopAgent`
-- **Human-in-the-Loop**: `Interrupt` and `Resume` mechanisms with checkpoint persistence
-- **Prebuilt Patterns**: Deep Agent (task orchestration), Supervisor (hierarchical coordination), and Plan-Execute-Replan
-- **Agent Middlewares**: Extensible middleware system for adding tools and managing context
-
-## Orchestration
-
-**Graph orchestration** provides fine-grained control over data flow from Retriever / Document Loaders / ChatTemplate to ChatModel, then to Tools and final output.
-
-- Component instances are graph nodes; edges are data flow channels
-- Features:
-  - Type checking, stream processing, concurrency management, aspect injection, and option assignment
-  - Runtime branching, global state read/write, field-level data mapping via workflow
-
-## Aspects (Callbacks)
-
-**Aspects** handle cross-cutting concerns: logging, tracing, and metrics. They can be applied to components, orchestrated graphs, or ADK agents.
-
-- Five aspect types: OnStart, OnEnd, OnError, OnStartWithStreamInput, OnEndWithStreamOutput
-- Custom callback handlers can be added at runtime via options
+→ [eino-ext](https://github.com/cloudwego/eino-ext)
 
 ## Stream Processing
 
-ChatModel outputs message chunks in real time. Eino handles streaming throughout orchestration:
+Eino automatically handles streaming throughout orchestration: concatenating, boxing, merging, and copying streams as data flows between nodes. Components only implement the streaming paradigms that make sense for them; the framework handles the rest.
 
-- **Concatenates** stream chunks for downstream nodes that accept non-stream input (e.g., ToolsNode)
-- **Boxes** non-stream into stream when needed during graph execution
-- **Merges** multiple streams when they converge into a single node
-- **Copies** streams when they fan out to different nodes or callback handlers
-- **Branch** and **state handlers** are stream-aware
+→ [docs](https://www.cloudwego.io/docs/eino/core_modules/chain_and_graph_orchestration/stream_programming_essentials/)
 
-A compiled Graph supports 4 streaming paradigms:
+## Callback Aspects
 
-| Streaming Paradigm | Explanation                                                                 |
-| ------------------ | --------------------------------------------------------------------------- |
-| Invoke             | Accepts non-stream type I and returns non-stream type O                     |
-| Stream             | Accepts non-stream type I and returns stream type StreamReader[O]           |
-| Collect            | Accepts stream type StreamReader[I] and returns non-stream type O           |
-| Transform          | Accepts stream type StreamReader[I] and returns stream type StreamReader[O] |
+Inject logging, tracing, and metrics at fixed points (OnStart, OnEnd, OnError, OnStartWithStreamInput, OnEndWithStreamOutput) across components, graphs, and agents.
+
+→ [docs](https://www.cloudwego.io/docs/eino/core_modules/chain_and_graph_orchestration/callback_manual/)
+
+## Interrupt/Resume
+
+Any agent or tool can pause execution for human input and resume from checkpoint. The framework handles state persistence and routing.
+
+→ [docs](https://www.cloudwego.io/docs/eino/core_modules/eino_adk/agent_hitl/) · [examples](https://github.com/cloudwego/eino-examples/tree/main/adk/human-in-the-loop)
 
 # Framework Structure
 
