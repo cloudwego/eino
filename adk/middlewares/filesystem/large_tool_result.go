@@ -27,13 +27,14 @@ import (
 
 	"github.com/slongfield/pyfmt"
 
+	"github.com/cloudwego/eino/adk/filesystem"
 	"github.com/cloudwego/eino/adk/internal"
 	"github.com/cloudwego/eino/compose"
 	"github.com/cloudwego/eino/schema"
 )
 
 type toolResultOffloadingConfig struct {
-	Backend       Backend
+	Backend       filesystem.Backend
 	TokenLimit    int
 	PathGenerator func(ctx context.Context, input *compose.ToolInput) (string, error)
 }
@@ -62,7 +63,7 @@ func newToolResultOffloading(ctx context.Context, config *toolResultOffloadingCo
 }
 
 type toolResultOffloading struct {
-	backend       Backend
+	backend       filesystem.Backend
 	tokenLimit    int
 	pathGenerator func(ctx context.Context, input *compose.ToolInput) (string, error)
 }

@@ -561,18 +561,6 @@ func TestNewMiddleware(t *testing.T) {
 		assert.Nil(t, m.WrapToolCall.Invokable)
 		assert.Nil(t, m.WrapToolCall.Streamable)
 	})
-
-	t.Run("ShellBackend adds execute tool", func(t *testing.T) {
-		shellBackend := &mockShellBackend{
-			Backend: backend,
-			resp:    &filesystem.ExecuteResponse{Output: "ok"},
-		}
-		m, err := NewMiddleware(ctx, &Config{Backend: shellBackend})
-		assert.NoError(t, err)
-
-		// ShellBackend should have 7 tools (6 + execute)
-		assert.Len(t, m.AdditionalTools, 7)
-	})
 }
 
 func TestGetFilesystemTools(t *testing.T) {
@@ -598,12 +586,12 @@ func TestGetFilesystemTools(t *testing.T) {
 		assert.Contains(t, toolNames, "grep")
 	})
 
-	t.Run("returns 7 tools for ShellBackend", func(t *testing.T) {
+	t.Run("returns 7 tools for Shell", func(t *testing.T) {
 		shellBackend := &mockShellBackend{
 			Backend: backend,
 			resp:    &filesystem.ExecuteResponse{Output: "ok"},
 		}
-		tools, err := getFilesystemTools(ctx, &Config{Backend: shellBackend})
+		tools, err := getFilesystemTools(ctx, &Config{Backend: shellBackend, Shell: shellBackend})
 		assert.NoError(t, err)
 		assert.Len(t, tools, 7)
 
@@ -699,7 +687,7 @@ func TestNewChatModelAgentMiddleware(t *testing.T) {
 			Backend: backend,
 			resp:    &filesystem.ExecuteResponse{Output: "ok"},
 		}
-		m, err := NewChatModelAgentMiddleware(ctx, &Config{Backend: shellBackend})
+		m, err := NewChatModelAgentMiddleware(ctx, &Config{Backend: shellBackend, Shell: shellBackend})
 		assert.NoError(t, err)
 
 		fm, ok := m.(*filesystemMiddleware)
