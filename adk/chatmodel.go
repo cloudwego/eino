@@ -928,6 +928,10 @@ func (a *ChatModelAgent) getRunFunc(ctx context.Context) (context.Context, runFu
 	defaultRun := a.buildRunFunc(ctx)
 	bc := a.exeCtx
 
+	if bc == nil {
+		return ctx, defaultRun, bc, nil
+	}
+
 	if len(a.handlers) == 0 {
 		runtimeBC := &execContext{
 			instruction:    bc.instruction,
@@ -974,9 +978,12 @@ func (a *ChatModelAgent) Run(ctx context.Context, input *AgentInput, opts ...Age
 
 	co := getComposeOptions(opts)
 	co = append(co, compose.WithCheckPointID(bridgeCheckpointID))
-	co = append(co, compose.WithChatModelOption(model.WithTools(bc.toolInfos)))
-	if bc.toolUpdated {
-		co = append(co, compose.WithToolsNodeOption(compose.WithToolList(bc.toolsNodeConf.Tools...)))
+
+	if bc != nil {
+		co = append(co, compose.WithChatModelOption(model.WithTools(bc.toolInfos)))
+		if bc.toolUpdated {
+			co = append(co, compose.WithToolsNodeOption(compose.WithToolList(bc.toolsNodeConf.Tools...)))
+		}
 	}
 
 	go func() {
@@ -990,7 +997,17 @@ func (a *ChatModelAgent) Run(ctx context.Context, input *AgentInput, opts ...Age
 			generator.Close()
 		}()
 
-		run(ctx, input, generator, newBridgeStore(), bc.instruction, bc.returnDirectly, co...)
+		var (
+			instruction    string
+			returnDirectly map[string]bool
+		)
+
+		if bc != nil {
+			instruction = bc.instruction
+			returnDirectly = bc.returnDirectly
+		}
+
+		run(ctx, input, generator, newBridgeStore(), instruction, returnDirectly, co...)
 	}()
 
 	return iterator
@@ -1010,9 +1027,12 @@ func (a *ChatModelAgent) Resume(ctx context.Context, info *ResumeInfo, opts ...A
 
 	co := getComposeOptions(opts)
 	co = append(co, compose.WithCheckPointID(bridgeCheckpointID))
-	co = append(co, compose.WithChatModelOption(model.WithTools(bc.toolInfos)))
-	if bc.toolUpdated {
-		co = append(co, compose.WithToolsNodeOption(compose.WithToolList(bc.toolsNodeConf.Tools...)))
+
+	if bc != nil {
+		co = append(co, compose.WithChatModelOption(model.WithTools(bc.toolInfos)))
+		if bc.toolUpdated {
+			co = append(co, compose.WithToolsNodeOption(compose.WithToolList(bc.toolsNodeConf.Tools...)))
+		}
 	}
 
 	if info.InterruptState == nil {
@@ -1057,8 +1077,18 @@ func (a *ChatModelAgent) Resume(ctx context.Context, info *ResumeInfo, opts ...A
 			generator.Close()
 		}()
 
+		var (
+			instruction    string
+			returnDirectly map[string]bool
+		)
+
+		if bc != nil {
+			instruction = bc.instruction
+			returnDirectly = bc.returnDirectly
+		}
+
 		run(ctx, &AgentInput{EnableStreaming: info.EnableStreaming}, generator,
-			newResumeBridgeStore(stateByte), bc.instruction, bc.returnDirectly, co...)
+			newResumeBridgeStore(stateByte), instruction, returnDirectly, co...)
 	}()
 
 	return iterator
