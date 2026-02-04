@@ -1494,3 +1494,84 @@ func testToolOption(value string) tool.Option {
 		o.value = value
 	})
 }
+
+type errorTool struct {
+	infoErr error
+}
+
+func (e *errorTool) Info(_ context.Context) (*schema.ToolInfo, error) {
+	return nil, e.infoErr
+}
+
+func (e *errorTool) InvokableRun(_ context.Context, _ string, _ ...tool.Option) (string, error) {
+	return "", nil
+}
+
+func TestChatModelAgent_PrepareExecContextError(t *testing.T) {
+	t.Run("Run_WithToolInfoError_ReturnsError", func(t *testing.T) {
+		ctx := context.Background()
+
+		ctrl := gomock.NewController(t)
+		cm := mockModel.NewMockToolCallingChatModel(ctrl)
+
+		expectedErr := errors.New("tool info error")
+		errTool := &errorTool{infoErr: expectedErr}
+
+		agent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+			Name:        "TestAgent",
+			Description: "Test agent",
+			Model:       cm,
+			ToolsConfig: ToolsConfig{
+				ToolsNodeConfig: compose.ToolsNodeConfig{
+					Tools: []tool.BaseTool{errTool},
+				},
+			},
+		})
+		assert.NoError(t, err)
+
+		iter := agent.Run(ctx, &AgentInput{Messages: []Message{schema.UserMessage("test")}})
+
+		event, ok := iter.Next()
+		assert.True(t, ok)
+		assert.NotNil(t, event.Err)
+		assert.Contains(t, event.Err.Error(), "tool info error")
+
+		_, ok = iter.Next()
+		assert.False(t, ok)
+	})
+
+	t.Run("Resume_WithToolInfoError_ReturnsError", func(t *testing.T) {
+		ctx := context.Background()
+
+		ctrl := gomock.NewController(t)
+		cm := mockModel.NewMockToolCallingChatModel(ctrl)
+
+		expectedErr := errors.New("tool info error for resume")
+		errTool := &errorTool{infoErr: expectedErr}
+
+		agent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+			Name:        "TestAgent",
+			Description: "Test agent",
+			Model:       cm,
+			ToolsConfig: ToolsConfig{
+				ToolsNodeConfig: compose.ToolsNodeConfig{
+					Tools: []tool.BaseTool{errTool},
+				},
+			},
+		})
+		assert.NoError(t, err)
+
+		iter := agent.Resume(ctx, &ResumeInfo{
+			InterruptState:  []byte("dummy"),
+			EnableStreaming: false,
+		})
+
+		event, ok := iter.Next()
+		assert.True(t, ok)
+		assert.NotNil(t, event.Err)
+		assert.Contains(t, event.Err.Error(), "tool info error for resume")
+
+		_, ok = iter.Next()
+		assert.False(t, ok)
+	})
+}
