@@ -101,9 +101,14 @@ type middleware struct {
 func (m *middleware) BeforeModelRewriteState(ctx context.Context, state *adk.ChatModelAgentState,
 	mtx *adk.ModelContext) (context.Context, *adk.ChatModelAgentState, error) {
 
+	var tools []*schema.ToolInfo
+	if mtx != nil {
+		tools = mtx.Tools
+	}
+
 	triggered, err := m.shouldSummarize(ctx, &TokenCounterInput{
 		Messages: state.Messages,
-		Tools:    mtx.Tools,
+		Tools:    tools,
 	})
 	if err != nil {
 		return nil, nil, err
@@ -151,14 +156,13 @@ func (m *middleware) BeforeModelRewriteState(ctx context.Context, state *adk.Cha
 		return nil, nil, err
 	}
 
-	var newMessages []adk.Message
 	if m.cfg.Finalize != nil {
-		newMessages, err = m.cfg.Finalize(ctx, state.Messages, summary)
+		state.Messages, err = m.cfg.Finalize(ctx, state.Messages, summary)
 		if err != nil {
 			return nil, nil, err
 		}
 	} else {
-		newMessages = append(systemMsgs, summary)
+		state.Messages = append(systemMsgs, summary)
 	}
 
 	if m.cfg.EmitInternalEvents {
@@ -167,7 +171,7 @@ func (m *middleware) BeforeModelRewriteState(ctx context.Context, state *adk.Cha
 				CustomizedAction: &CustomizedAction{
 					Type: ActionTypeAfterSummary,
 					After: &AfterSummaryAction{
-						Messages: newMessages,
+						Messages: state.Messages,
 					},
 				},
 			},
@@ -176,8 +180,6 @@ func (m *middleware) BeforeModelRewriteState(ctx context.Context, state *adk.Cha
 			return nil, nil, fmt.Errorf("failed to send internal event: %w", err)
 		}
 	}
-
-	state.Messages = newMessages
 
 	return ctx, state, nil
 }
