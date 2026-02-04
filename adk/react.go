@@ -74,6 +74,8 @@ type State struct {
 	AgentName string
 
 	RemainingIterations int
+
+	EarlyStop bool
 }
 
 // SendToolGenAction attaches an AgentAction to the next tool event emitted for the
@@ -188,6 +190,9 @@ type reactConfig struct {
 
 	maxIterations int
 
+	earlyStoppingInstruction string
+	earlyStoppingMethod      string
+
 	beforeChatModel, afterChatModel []func(context.Context, *ChatModelAgentState) error
 
 	modelRetryConfig *ModelRetryConfig
@@ -223,6 +228,15 @@ func getReturnDirectlyToolCallID(ctx context.Context) (string, bool) {
 	_ = compose.ProcessState(ctx, handler)
 
 	return toolCallID, hasReturnDirectly
+}
+
+func getEarlyStopFlag(ctx context.Context) bool {
+	var earlyStop bool
+	_ = compose.ProcessState(ctx, func(_ context.Context, st *State) error {
+		earlyStop = st.EarlyStop
+		return nil
+	})
+	return earlyStop
 }
 
 func newReact(ctx context.Context, config *reactConfig) (reactGraph, error) {
@@ -272,12 +286,21 @@ func newReact(ctx context.Context, config *reactConfig) (reactGraph, error) {
 	}
 
 	modelPreHandle := func(ctx context.Context, input []Message, st *State) ([]Message, error) {
+		earlyStop := false
 		if st.RemainingIterations <= 0 {
-			return nil, ErrExceedMaxIterations
+			if config.earlyStoppingMethod == earlyStoppingMethodForce {
+				return nil, ErrExceedMaxIterations
+			}
+			earlyStop = true
+			st.EarlyStop = true
+		} else {
+			st.RemainingIterations--
 		}
-		st.RemainingIterations--
 
 		s := &ChatModelAgentState{Messages: append(st.Messages, input...)}
+		if earlyStop {
+			s.Messages = append(s.Messages, schema.UserMessage(config.earlyStoppingInstruction))
+		}
 		for _, b := range config.beforeChatModel {
 			err = b(ctx, s)
 			if err != nil {
@@ -323,6 +346,7 @@ func newReact(ctx context.Context, config *reactConfig) (reactGraph, error) {
 	_ = g.AddEdge(compose.START, chatModel_)
 
 	toolCallCheck := func(ctx context.Context, sMsg MessageStream) (string, error) {
+		earlyStop := getEarlyStopFlag(ctx)
 		defer sMsg.Close()
 		for {
 			chunk, err_ := sMsg.Recv()
@@ -334,7 +358,7 @@ func newReact(ctx context.Context, config *reactConfig) (reactGraph, error) {
 				return "", err_
 			}
 
-			if len(chunk.ToolCalls) > 0 {
+			if !earlyStop && len(chunk.ToolCalls) > 0 {
 				return toolNode_, nil
 			}
 		}
