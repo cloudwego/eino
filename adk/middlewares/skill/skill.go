@@ -133,8 +133,13 @@ func NewHandler(ctx context.Context, config *Config) (adk.ChatModelAgentMiddlewa
 		name = *config.SkillToolName
 	}
 
+	instruction, err := buildSystemPrompt(name, config.UseChinese)
+	if err != nil {
+		return nil, err
+	}
+
 	return &skillHandler{
-		instruction: buildSystemPrompt(name, config.UseChinese),
+		instruction: instruction,
 		tool: &skillTool{
 			b:          config.Backend,
 			toolName:   name,
@@ -357,7 +362,10 @@ func (s *skillTool) runAgentMode(ctx context.Context, skill Skill, forkHistory b
 	}
 
 	var messages []adk.Message
-	skillContent := s.buildSkillResult(skill)
+	skillContent, err := s.buildSkillResult(skill)
+	if err != nil {
+		return "", fmt.Errorf("failed to build skill result: %w", err)
+	}
 
 	if forkHistory {
 		messages, err = s.getMessagesFromState(ctx)
@@ -394,9 +402,12 @@ func (s *skillTool) runAgentMode(ctx context.Context, skill Skill, forkHistory b
 		}
 	}
 
-	resultFmt := forkResultFormat
-	if s.useChinese {
-		resultFmt = forkResultFormatChinese
+	resultFmt, err := internal.SelectPrompt(internal.I18nPrompts{
+		English: forkResultFormat,
+		Chinese: forkResultFormatChinese,
+	})
+	if err != nil {
+		return "", err
 	}
 
 	return fmt.Sprintf(resultFmt, skill.Name, strings.Join(results, "\n")), nil
