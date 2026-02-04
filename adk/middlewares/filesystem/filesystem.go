@@ -37,10 +37,17 @@ import (
 // Config is the configuration for the filesystem middleware
 type Config struct {
 	// Backend provides filesystem operations used by tools and offloading.
-	// If the Backend also implements ShellBackend, an additional execute tool
-	// will be registered to support shell command execution.
 	// required
-	Backend Backend
+	Backend filesystem.Backend
+
+	// Shell provides shell command execution capability.
+	// If set, an execute tool will be registered to support shell command execution.
+	// optional, mutually exclusive with StreamingShell
+	Shell filesystem.Shell
+	// StreamingShell provides streaming shell command execution capability.
+	// If set, a streaming execute tool will be registered for real-time output.
+	// optional, mutually exclusive with Shell
+	StreamingShell filesystem.StreamingShell
 
 	// WithoutLargeToolResultOffloading disables automatic offloading of large tool result to Backend
 	// optional, false(enabled) by default
@@ -86,6 +93,9 @@ func (c *Config) Validate() error {
 	if c.Backend == nil {
 		return errors.New("backend should not be nil")
 	}
+	if c.StreamingShell != nil && c.Shell != nil {
+		return errors.New("shell and streaming shell should not be both set")
+	}
 	return nil
 }
 
@@ -109,7 +119,6 @@ func NewMiddleware(ctx context.Context, config *Config) (adk.AgentMiddleware, er
 	if config.CustomSystemPrompt != nil {
 		systemPrompt = *config.CustomSystemPrompt
 	} else {
-		var err error
 		systemPrompt, err = internal.SelectPrompt(internal.I18nPrompts{
 			English: ToolsSystemPrompt,
 			Chinese: ToolsSystemPromptChinese,
@@ -117,10 +126,9 @@ func NewMiddleware(ctx context.Context, config *Config) (adk.AgentMiddleware, er
 		if err != nil {
 			return adk.AgentMiddleware{}, err
 		}
-		_, ok1 := config.Backend.(filesystem.StreamingShellBackend)
-		_, ok2 := config.Backend.(filesystem.ShellBackend)
-		if ok1 || ok2 {
-			executePrompt, err := internal.SelectPrompt(internal.I18nPrompts{
+		if config.Shell != nil || config.StreamingShell != nil {
+			var executePrompt string
+			executePrompt, err = internal.SelectPrompt(internal.I18nPrompts{
 				English: ExecuteToolsSystemPrompt,
 				Chinese: ExecuteToolsSystemPromptChinese,
 			})
@@ -187,10 +195,9 @@ func NewChatModelAgentMiddleware(ctx context.Context, config *Config) (adk.ChatM
 		if err != nil {
 			return nil, err
 		}
-		_, ok1 := config.Backend.(filesystem.StreamingShellBackend)
-		_, ok2 := config.Backend.(filesystem.ShellBackend)
-		if ok1 || ok2 {
-			executePrompt, err := internal.SelectPrompt(internal.I18nPrompts{
+		if config.Shell != nil || config.StreamingShell != nil {
+			var executePrompt string
+			executePrompt, err = internal.SelectPrompt(internal.I18nPrompts{
 				English: ExecuteToolsSystemPrompt,
 				Chinese: ExecuteToolsSystemPromptChinese,
 			})
@@ -324,16 +331,16 @@ func getFilesystemTools(_ context.Context, validatedConfig *Config) ([]tool.Base
 	}
 	tools = append(tools, grepTool)
 
-	if sb, ok := validatedConfig.Backend.(filesystem.StreamingShellBackend); ok {
+	if validatedConfig.StreamingShell != nil {
 		var executeTool tool.BaseTool
-		executeTool, err = newStreamingExecuteTool(sb, validatedConfig.CustomExecuteToolDesc)
+		executeTool, err = newStreamingExecuteTool(validatedConfig.StreamingShell, validatedConfig.CustomExecuteToolDesc)
 		if err != nil {
 			return nil, err
 		}
 		tools = append(tools, executeTool)
-	} else if sb, ok := validatedConfig.Backend.(filesystem.ShellBackend); ok {
+	} else if validatedConfig.Shell != nil {
 		var executeTool tool.BaseTool
-		executeTool, err = newExecuteTool(sb, validatedConfig.CustomExecuteToolDesc)
+		executeTool, err = newExecuteTool(validatedConfig.Shell, validatedConfig.CustomExecuteToolDesc)
 		if err != nil {
 			return nil, err
 		}
@@ -641,7 +648,7 @@ type executeArgs struct {
 	Command string `json:"command"`
 }
 
-func newExecuteTool(sb filesystem.ShellBackend, desc *string) (tool.BaseTool, error) {
+func newExecuteTool(sb filesystem.Shell, desc *string) (tool.BaseTool, error) {
 	d, err := selectToolDesc(desc, ExecuteToolDesc, ExecuteToolDescChinese)
 	if err != nil {
 		return nil, err
@@ -658,7 +665,7 @@ func newExecuteTool(sb filesystem.ShellBackend, desc *string) (tool.BaseTool, er
 	})
 }
 
-func newStreamingExecuteTool(sb filesystem.StreamingShellBackend, desc *string) (tool.BaseTool, error) {
+func newStreamingExecuteTool(sb filesystem.StreamingShell, desc *string) (tool.BaseTool, error) {
 	d, err := selectToolDesc(desc, ExecuteToolDesc, ExecuteToolDescChinese)
 	if err != nil {
 		return nil, err
