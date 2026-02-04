@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-package reduction
+package internal
 
 import (
 	"context"
@@ -103,7 +103,7 @@ type ToolResultConfig struct {
 //     which provides the read_file tool automatically, OR
 //   - Implement your own read_file tool that reads from the same Backend
 //
-// Deprecated: Use NewChatModelAgentMiddleware instead. NewChatModelAgentMiddleware returns
+// Deprecated: Use NewToolResultHandler instead. NewToolResultHandler returns
 // a ChatModelAgentMiddleware which provides better context propagation through wrapper methods
 // and is the recommended approach for new code. See ChatModelAgentMiddleware documentation
 // for details on the benefits over AgentMiddleware.
@@ -127,7 +127,7 @@ func NewToolResultMiddleware(ctx context.Context, cfg *ToolResultConfig) (adk.Ag
 	}, nil
 }
 
-// NewChatModelAgentMiddleware creates a tool result reduction middleware as a ChatModelAgentMiddleware.
+// NewToolResultHandler creates a tool result reduction middleware as a ChatModelAgentMiddleware.
 //
 // This is the recommended constructor for new code. It returns a ChatModelAgentMiddleware which provides:
 //   - Better context propagation through WrapInvokableToolCall and WrapStreamableToolCall methods
@@ -155,14 +155,14 @@ func NewToolResultMiddleware(ctx context.Context, cfg *ToolResultConfig) (adk.Ag
 //
 // Example usage:
 //
-//	middleware, err := reduction.NewChatModelAgentMiddleware(ctx, &reduction.ToolResultConfig{
+//	middleware, err := NewToolResultHandler(ctx, &ToolResultConfig{
 //	    Backend: myBackend,
 //	})
 //	agent, err := adk.NewChatModelAgent(ctx, &adk.ChatModelAgentConfig{
 //	    // ...
 //	    Handlers: []adk.ChatModelAgentMiddleware{middleware},
 //	})
-func NewChatModelAgentMiddleware(ctx context.Context, cfg *ToolResultConfig) (adk.ChatModelAgentMiddleware, error) {
+func NewToolResultHandler(ctx context.Context, cfg *ToolResultConfig) (adk.ChatModelAgentMiddleware, error) {
 	m := &toolResultMiddleware{
 		clearConfig: &ClearToolResultConfig{
 			ToolResultTokenThreshold:   cfg.ClearingTokenThreshold,
