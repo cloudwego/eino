@@ -104,11 +104,11 @@ func (h *testBeforeModelRewriteStateHandler) BeforeModelRewriteState(ctx context
 
 type testAfterModelRewriteStateHandler struct {
 	*BaseChatModelAgentMiddleware
-	fn func(ctx context.Context, state *ChatModelAgentState) (context.Context, *ChatModelAgentState, error)
+	fn func(ctx context.Context, state *ChatModelAgentState, mc *ModelContext) (context.Context, *ChatModelAgentState, error)
 }
 
-func (h *testAfterModelRewriteStateHandler) AfterModelRewriteState(ctx context.Context, state *ChatModelAgentState) (context.Context, *ChatModelAgentState, error) {
-	return h.fn(ctx, state)
+func (h *testAfterModelRewriteStateHandler) AfterModelRewriteState(ctx context.Context, state *ChatModelAgentState, mc *ModelContext) (context.Context, *ChatModelAgentState, error) {
+	return h.fn(ctx, state, mc)
 }
 
 type testToolWrapperHandler struct {
@@ -117,18 +117,18 @@ type testToolWrapperHandler struct {
 	wrapStreamableFn func(context.Context, StreamableToolCallEndpoint, *ToolContext) StreamableToolCallEndpoint
 }
 
-func (h *testToolWrapperHandler) WrapInvokableToolCall(ctx context.Context, endpoint InvokableToolCallEndpoint, tCtx *ToolContext) InvokableToolCallEndpoint {
+func (h *testToolWrapperHandler) WrapInvokableToolCall(ctx context.Context, endpoint InvokableToolCallEndpoint, tCtx *ToolContext) (InvokableToolCallEndpoint, error) {
 	if h.wrapInvokableFn != nil {
-		return h.wrapInvokableFn(ctx, endpoint, tCtx)
+		return h.wrapInvokableFn(ctx, endpoint, tCtx), nil
 	}
-	return endpoint
+	return endpoint, nil
 }
 
-func (h *testToolWrapperHandler) WrapStreamableToolCall(ctx context.Context, endpoint StreamableToolCallEndpoint, tCtx *ToolContext) StreamableToolCallEndpoint {
+func (h *testToolWrapperHandler) WrapStreamableToolCall(ctx context.Context, endpoint StreamableToolCallEndpoint, tCtx *ToolContext) (StreamableToolCallEndpoint, error) {
 	if h.wrapStreamableFn != nil {
-		return h.wrapStreamableFn(ctx, endpoint, tCtx)
+		return h.wrapStreamableFn(ctx, endpoint, tCtx), nil
 	}
-	return endpoint
+	return endpoint, nil
 }
 
 type testModelWrapperHandler struct {
@@ -136,8 +136,8 @@ type testModelWrapperHandler struct {
 	fn func(context.Context, model.BaseChatModel, *ModelContext) model.BaseChatModel
 }
 
-func (h *testModelWrapperHandler) WrapModel(ctx context.Context, m model.BaseChatModel, mc *ModelContext) model.BaseChatModel {
-	return h.fn(ctx, m, mc)
+func (h *testModelWrapperHandler) WrapModel(ctx context.Context, m model.BaseChatModel, mc *ModelContext) (model.BaseChatModel, error) {
+	return h.fn(ctx, m, mc), nil
 }
 
 func newTestInvokableToolCallWrapper(beforeFn, afterFn func()) func(context.Context, InvokableToolCallEndpoint, *ToolContext) InvokableToolCallEndpoint {
@@ -526,7 +526,7 @@ func TestMessageRewriteHandlers(t *testing.T) {
 			Description: "Test agent",
 			Model:       cm,
 			Handlers: []ChatModelAgentMiddleware{
-				&testAfterModelRewriteStateHandler{fn: func(ctx context.Context, state *ChatModelAgentState) (context.Context, *ChatModelAgentState, error) {
+				&testAfterModelRewriteStateHandler{fn: func(ctx context.Context, state *ChatModelAgentState, mc *ModelContext) (context.Context, *ChatModelAgentState, error) {
 					afterCalled = true
 					assert.True(t, len(state.Messages) > 0)
 					lastMsg := state.Messages[len(state.Messages)-1]
@@ -1053,7 +1053,7 @@ func (h *countingHandler) BeforeModelRewriteState(ctx context.Context, state *Ch
 	return ctx, state, nil
 }
 
-func (h *countingHandler) AfterModelRewriteState(ctx context.Context, state *ChatModelAgentState) (context.Context, *ChatModelAgentState, error) {
+func (h *countingHandler) AfterModelRewriteState(ctx context.Context, state *ChatModelAgentState, mc *ModelContext) (context.Context, *ChatModelAgentState, error) {
 	h.mu.Lock()
 	h.afterModelCount++
 	h.mu.Unlock()
@@ -1456,7 +1456,7 @@ func TestRunLocalValueFunctions(t *testing.T) {
 					assert.NoError(t, err)
 					return ctx, state, nil
 				}},
-				&testAfterModelRewriteStateHandler{fn: func(ctx context.Context, state *ChatModelAgentState) (context.Context, *ChatModelAgentState, error) {
+				&testAfterModelRewriteStateHandler{fn: func(ctx context.Context, state *ChatModelAgentState, mc *ModelContext) (context.Context, *ChatModelAgentState, error) {
 					val, found, err := GetRunLocalValue(ctx, "test_key")
 					assert.NoError(t, err)
 					capturedValue = val
@@ -1503,7 +1503,7 @@ func TestRunLocalValueFunctions(t *testing.T) {
 					assert.NoError(t, err)
 					return ctx, state, nil
 				}},
-				&testAfterModelRewriteStateHandler{fn: func(ctx context.Context, state *ChatModelAgentState) (context.Context, *ChatModelAgentState, error) {
+				&testAfterModelRewriteStateHandler{fn: func(ctx context.Context, state *ChatModelAgentState, mc *ModelContext) (context.Context, *ChatModelAgentState, error) {
 					val, found, err := GetRunLocalValue(ctx, "delete_key")
 					assert.NoError(t, err)
 					valueAfterDelete = val
@@ -1830,7 +1830,7 @@ func TestHandlerErrorPropagation(t *testing.T) {
 			Description: "Test agent",
 			Model:       cm,
 			Handlers: []ChatModelAgentMiddleware{
-				&testAfterModelRewriteStateHandler{fn: func(ctx context.Context, state *ChatModelAgentState) (context.Context, *ChatModelAgentState, error) {
+				&testAfterModelRewriteStateHandler{fn: func(ctx context.Context, state *ChatModelAgentState, mc *ModelContext) (context.Context, *ChatModelAgentState, error) {
 					return ctx, state, assert.AnError
 				}},
 			},
