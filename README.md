@@ -17,259 +17,116 @@ English | [中文](README.zh_CN.md)
 **Eino['aino]** is an LLM application development framework in Golang. It draws from LangChain, Google ADK, and other open-source frameworks, and is designed to follow Golang conventions.
 
 Eino provides:
-- **Component** abstractions and implementations for building LLM applications
-- An **Agent Development Kit (ADK)** for building AI agents with multi-agent orchestration, human-in-the-loop interrupts, and prebuilt agent patterns
-- A **composition** framework that handles type checking, stream processing, concurrency management, aspect injection, and option assignment
-- **APIs** designed for simplicity and clarity
-- Bundled **flows** and **examples**
-- Tools for visualized development, debugging, tracing, and evaluation
+- **Components**: reusable building blocks like `ChatModel`, `Tool`, `Retriever`, and `ChatTemplate`.
+- **Agent Development Kit (ADK)**: build AI agents with tool use, multi-agent coordination, context management, interrupt/resume for human-in-the-loop, and ready-to-use agent patterns.
+- **Composition**: connect components into graphs and workflows that can run standalone or be exposed as tools for agents.
 
 ![](.github/static/img/eino/eino_concept.jpeg)
 
-# A quick walkthrough
+# Quick Start
 
-Use a component directly:
-```Go
-model, _ := openai.NewChatModel(ctx, config) // create an invokable LLM instance
-message, _ := model.Generate(ctx, []*Message{
-    SystemMessage("you are a helpful assistant."),
-    UserMessage("what does the future AI App look like?")})
-```
+## ChatModelAgent
 
-You can use components directly, but orchestration provides additional benefits:
-- Encapsulates common LLM application patterns
-- Handles stream response processing
-- Manages type safety, concurrency, aspect injection, and option assignment
-
-Eino provides three orchestration APIs:
-
-| API      | Characteristics and usage                                             |
-| -------- |-----------------------------------------------------------------------|
-| Chain    | Simple chained directed graph that can only go forward.               |
-| Graph    | Cyclic or Acyclic directed graph. Powerful and flexible.              |
-| Workflow | Acyclic graph that supports data mapping at struct field level. |
-
-A simple chain: ChatTemplate followed by ChatModel.
-
-![](.github/static/img/eino/simple_chain.png)
+Configure a ChatModel, optionally add tools, and you have a working agent:
 
 ```Go
-chain, _ := NewChain[map[string]any, *Message]().
-           AppendChatTemplate(prompt).
-           AppendChatModel(model).
-           Compile(ctx)
-
-chain.Invoke(ctx, map[string]any{"query": "what's your name?"})
-```
-
-A graph that uses ChatModel to generate answers or tool calls, then uses ToolsNode to execute tools if needed.
-
-![](.github/static/img/eino/tool_call_graph.png)
-
-```Go
-graph := NewGraph[map[string]any, *schema.Message]()
-
-_ = graph.AddChatTemplateNode("node_template", chatTpl)
-_ = graph.AddChatModelNode("node_model", chatModel)
-_ = graph.AddToolsNode("node_tools", toolsNode)
-_ = graph.AddLambdaNode("node_converter", takeOne)
-
-_ = graph.AddEdge(START, "node_template")
-_ = graph.AddEdge("node_template", "node_model")
-_ = graph.AddBranch("node_model", branch)
-_ = graph.AddEdge("node_tools", "node_converter")
-_ = graph.AddEdge("node_converter", END)
-
-compiledGraph, err := graph.Compile(ctx)
-if err != nil {
-return err
-}
-out, err := compiledGraph.Invoke(ctx, map[string]any{"query":"Beijing's weather this weekend"})
-```
-
-A workflow with field-level input/output mapping:
-
-![](.github/static/img/eino/simple_workflow.png)
-
-```Go
-type Input1 struct {
-    Input string
-}
-
-type Output1 struct {
-    Output string
-}
-
-type Input2 struct {
-    Role schema.RoleType
-}
-
-type Output2 struct {
-    Output string
-}
-
-type Input3 struct {
-    Query string
-    MetaData string
-}
-
-var (
-    ctx context.Context
-    m model.BaseChatModel
-    lambda1 func(context.Context, Input1) (Output1, error)
-    lambda2 func(context.Context, Input2) (Output2, error)
-    lambda3 func(context.Context, Input3) (*schema.Message, error)
-)
-
-wf := NewWorkflow[[]*schema.Message, *schema.Message]()
-wf.AddChatModelNode("model", m).AddInput(START)
-wf.AddLambdaNode("lambda1", InvokableLambda(lambda1)).
-    AddInput("model", MapFields("Content", "Input"))
-wf.AddLambdaNode("lambda2", InvokableLambda(lambda2)).
-    AddInput("model", MapFields("Role", "Role"))
-wf.AddLambdaNode("lambda3", InvokableLambda(lambda3)).
-    AddInput("lambda1", MapFields("Output", "Query")).
-    AddInput("lambda2", MapFields("Output", "MetaData"))
-wf.End().AddInput("lambda3")
-runnable, err := wf.Compile(ctx)
-if err != nil {
-    return err
-}
-our, err := runnable.Invoke(ctx, []*schema.Message{
-    schema.UserMessage("kick start this workflow!"),
+chatModel, _ := openai.NewChatModel(ctx, &openai.ChatModelConfig{
+    Model:  "gpt-4o",
+    APIKey: os.Getenv("OPENAI_API_KEY"),
 })
+
+agent, _ := adk.NewChatModelAgent(ctx, &adk.ChatModelAgentConfig{
+    Model: chatModel,
+})
+
+runner := adk.NewRunner(ctx, adk.RunnerConfig{Agent: agent})
+iter := runner.Query(ctx, "Hello, who are you?")
+for {
+    event, ok := iter.Next()
+    if !ok {
+        break
+    }
+    fmt.Println(event.Message.Content)
+}
 ```
 
-**Graph orchestration** provides:
-- Type checking: ensures node input/output types match at compile time
-- Stream processing: concatenates message streams before passing to chatModel and toolsNode, copies streams to callback handlers
-- Concurrency management: StatePreHandler is concurrency safe for shared state
-- Aspect injection: injects callback aspects before and after ChatModel execution
-- Option assignment: call options can be assigned globally, to specific component types, or to specific nodes
-
-Extend compiled graphs with callbacks:
-```Go
-handler := NewHandlerBuilder().
-  OnStartFn(
-    func(ctx context.Context, info *RunInfo, input CallbackInput) context.Context) {
-        log.Infof("onStart, runInfo: %v, input: %v", info, input)
-    }).
-  OnEndFn(
-    func(ctx context.Context, info *RunInfo, output CallbackOutput) context.Context) {
-        log.Infof("onEnd, runInfo: %v, out: %v", info, output)
-    }).
-  Build()
-  
-compiledGraph.Invoke(ctx, input, WithCallbacks(handler))
-```
-
-Assign options to different nodes:
-```Go
-// assign to All nodes
-compiledGraph.Invoke(ctx, input, WithCallbacks(handler))
-
-// assign only to ChatModel nodes
-compiledGraph.Invoke(ctx, input, WithChatModelOption(WithTemperature(0.5))
-
-// assign only to node_1
-compiledGraph.Invoke(ctx, input, WithCallbacks(handler).DesignateNode("node_1"))
-```
-
-A ReAct agent: ChatModel binds to Tools, receives input Messages, and decides whether to call Tools or output the final result. Tool execution results become input Messages for the next round.
-
-![](.github/static/img/eino/react.png)
-
-The **Agent Development Kit (ADK)** provides `ChatModelAgent` for this pattern:
+Add tools to give the agent capabilities:
 
 ```Go
 agent, _ := adk.NewChatModelAgent(ctx, &adk.ChatModelAgentConfig{
-    Name:        "assistant",
-    Description: "A helpful assistant that can use tools",
-    Model:       chatModel,
+    Model: chatModel,
     ToolsConfig: adk.ToolsConfig{
         ToolsNodeConfig: compose.ToolsNodeConfig{
             Tools: []tool.BaseTool{weatherTool, calculatorTool},
         },
     },
 })
-
-runner := adk.NewRunner(ctx, adk.RunnerConfig{Agent: agent})
-iter := runner.Query(ctx, "What's the weather in Beijing this weekend?")
-for {
-    event, ok := iter.Next()
-    if !ok {
-        break
-    }
-    // process agent events (model outputs, tool calls, etc.)
-}
 ```
 
-The ADK handles the ReAct loop internally, emitting events for each step.
+The agent handles the ReAct loop internally — it decides when to call tools and when to respond.
 
-ADK also provides:
+→ [ChatModelAgent examples](https://github.com/cloudwego/eino-examples/tree/main/adk/intro) · [docs](https://www.cloudwego.io/docs/eino/core_modules/eino_adk/agent_implementation/chat_model/)
 
-**Multi-Agent with Context Management**: Agents can transfer control to sub-agents or be wrapped as tools. The framework manages conversation context across agent boundaries:
+## DeepAgent
 
-```Go
-// Set up agent hierarchy - mainAgent can now transfer to sub-agents
-mainAgentWithSubs, _ := adk.SetSubAgents(ctx, mainAgent, []adk.Agent{researchAgent, codeAgent})
-```
-
-When `mainAgent` transfers to `researchAgent`, conversation history is rewritten to provide context for the sub-agent.
-
-Agents can be wrapped as tools:
+For complex tasks, use DeepAgent. It breaks down problems into steps, delegates to sub-agents, and tracks progress:
 
 ```Go
-// Wrap an agent as a tool that can be called by other agents
-researchTool := adk.NewAgentTool(ctx, researchAgent)
-```
-
-**Interrupt and Resume**: Any agent can pause execution for human approval or external input:
-
-```Go
-// Inside a tool or agent, trigger an interrupt
-return adk.Interrupt(ctx, "Please confirm this action")
-
-// Later, resume from checkpoint
-iter, _ := runner.Resume(ctx, checkpointID)
-```
-
-**Prebuilt Agent Patterns**:
-
-```Go
-// Deep Agent: task orchestration with task management, sub-agent delegation, and progress tracking
 deepAgent, _ := deep.New(ctx, &deep.Config{
-    Name:        "deep_agent",
-    Description: "An agent that breaks down and executes complex tasks",
-    ChatModel:   chatModel,
-    SubAgents:   []adk.Agent{researchAgent, codeAgent},
-    ToolsConfig: adk.ToolsConfig{...},
+    ChatModel: chatModel,
+    SubAgents: []adk.Agent{researchAgent, codeAgent},
+    ToolsConfig: adk.ToolsConfig{
+        ToolsNodeConfig: compose.ToolsNodeConfig{
+            Tools: []tool.BaseTool{shellTool, pythonTool, webSearchTool},
+        },
+    },
 })
 
-// Supervisor pattern: one agent coordinates multiple specialists
-supervisorAgent, _ := supervisor.New(ctx, &supervisor.Config{
-    Supervisor: coordinatorAgent,
-    SubAgents:  []adk.Agent{writerAgent, reviewerAgent},
-})
-
-// Sequential execution: agents run one after another
-seqAgent, _ := adk.NewSequentialAgent(ctx, &adk.SequentialAgentConfig{
-    SubAgents: []adk.Agent{plannerAgent, executorAgent, summarizerAgent},
-})
+runner := adk.NewRunner(ctx, adk.RunnerConfig{Agent: deepAgent})
+iter := runner.Query(ctx, "Analyze the sales data in report.csv and generate a summary chart")
 ```
 
-**Middleware System**: Add capabilities to agents without modifying their core logic:
+DeepAgent can be configured to coordinate multiple specialized agents, run shell commands, execute Python code, and search the web.
+
+→ [DeepAgent example](https://github.com/cloudwego/eino-examples/tree/main/adk/multiagent/deep) · [docs](https://www.cloudwego.io/docs/eino/core_modules/eino_adk/agent_implementation/deepagents/)
+
+## Composition
+
+When you need precise control over execution flow, use `compose` to build graphs and workflows:
 
 ```Go
-fsMiddleware, _ := filesystem.NewMiddleware(ctx, &filesystem.Config{
-    Backend: myFileSystem,
-})
+graph := compose.NewGraph[*Input, *Output]()
+graph.AddLambdaNode("validate", validateFn)
+graph.AddChatModelNode("generate", chatModel)
+graph.AddLambdaNode("format", formatFn)
+
+graph.AddEdge(compose.START, "validate")
+graph.AddEdge("validate", "generate")
+graph.AddEdge("generate", "format")
+graph.AddEdge("format", compose.END)
+
+runnable, _ := graph.Compile(ctx)
+result, _ := runnable.Invoke(ctx, input)
+```
+
+Compositions can be exposed as tools for agents, bridging deterministic workflows with autonomous behavior:
+
+```Go
+tool, _ := graphtool.NewInvokableGraphTool(graph, "data_pipeline", "Process and validate data")
 
 agent, _ := adk.NewChatModelAgent(ctx, &adk.ChatModelAgentConfig{
-    // ...
-    Middlewares: []adk.AgentMiddleware{fsMiddleware},
+    Model: chatModel,
+    ToolsConfig: adk.ToolsConfig{
+        ToolsNodeConfig: compose.ToolsNodeConfig{
+            Tools: []tool.BaseTool{tool},
+        },
+    },
 })
 ```
+
+This lets you build domain-specific pipelines with exact control, then let agents decide when to use them.
+
+→ [GraphTool examples](https://github.com/cloudwego/eino-examples/tree/main/adk/common/tool/graphtool) · [compose docs](https://www.cloudwego.io/docs/eino/core_modules/chain_and_graph_orchestration/)
 
 # Key Features
 
