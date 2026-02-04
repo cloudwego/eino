@@ -391,14 +391,15 @@ func (s *skillTool) runAgentMode(ctx context.Context, skill Skill, forkHistory b
 		if !ok {
 			break
 		}
-		if event == nil {
+		if event == nil || event.Output == nil || event.Output.MessageOutput == nil {
 			continue
 		}
-		if event.Output != nil && event.Output.MessageOutput != nil {
-			msgOutput := event.Output.MessageOutput
-			if !msgOutput.IsStreaming && msgOutput.Message.Content != "" {
-				results = append(results, msgOutput.Message.Content)
-			}
+		msg, err := event.Output.MessageOutput.GetMessage()
+		if err != nil {
+			return "", fmt.Errorf("failed to get message from event: %w", err)
+		}
+		if msg != nil && msg.Content != "" {
+			results = append(results, msg.Content)
 		}
 	}
 
