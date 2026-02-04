@@ -23,8 +23,10 @@ import (
 
 	"github.com/stretchr/testify/assert"
 
+	"github.com/cloudwego/eino/adk"
 	"github.com/cloudwego/eino/adk/filesystem"
 	"github.com/cloudwego/eino/components/tool"
+	"github.com/cloudwego/eino/schema"
 )
 
 // setupTestBackend creates a test backend with some initial files
@@ -644,5 +646,260 @@ func TestGetFilesystemTools(t *testing.T) {
 				assert.Equal(t, customReadDesc, info.Desc)
 			}
 		}
+	})
+}
+
+func TestNewChatModelAgentMiddleware(t *testing.T) {
+	ctx := context.Background()
+	backend := setupTestBackend()
+
+	t.Run("nil config returns error", func(t *testing.T) {
+		_, err := NewChatModelAgentMiddleware(ctx, nil)
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "config should not be nil")
+	})
+
+	t.Run("nil backend returns error", func(t *testing.T) {
+		_, err := NewChatModelAgentMiddleware(ctx, &Config{Backend: nil})
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "backend should not be nil")
+	})
+
+	t.Run("valid config with default settings", func(t *testing.T) {
+		m, err := NewChatModelAgentMiddleware(ctx, &Config{Backend: backend})
+		assert.NoError(t, err)
+		assert.NotNil(t, m)
+
+		fm, ok := m.(*filesystemMiddleware)
+		assert.True(t, ok)
+		assert.Contains(t, fm.additionalInstruction, ToolsSystemPrompt)
+		assert.Len(t, fm.additionalTools, 6)
+		assert.NotNil(t, fm.offloading)
+	})
+
+	t.Run("custom system prompt", func(t *testing.T) {
+		customPrompt := "Custom system prompt"
+		m, err := NewChatModelAgentMiddleware(ctx, &Config{
+			Backend:            backend,
+			CustomSystemPrompt: &customPrompt,
+		})
+		assert.NoError(t, err)
+
+		fm, ok := m.(*filesystemMiddleware)
+		assert.True(t, ok)
+		assert.Equal(t, customPrompt, fm.additionalInstruction)
+	})
+
+	t.Run("disable large tool result offloading", func(t *testing.T) {
+		m, err := NewChatModelAgentMiddleware(ctx, &Config{
+			Backend:                          backend,
+			WithoutLargeToolResultOffloading: true,
+		})
+		assert.NoError(t, err)
+
+		fm, ok := m.(*filesystemMiddleware)
+		assert.True(t, ok)
+		assert.Nil(t, fm.offloading)
+	})
+
+	t.Run("ShellBackend adds execute tool", func(t *testing.T) {
+		shellBackend := &mockShellBackend{
+			Backend: backend,
+			resp:    &filesystem.ExecuteResponse{Output: "ok"},
+		}
+		m, err := NewChatModelAgentMiddleware(ctx, &Config{Backend: shellBackend})
+		assert.NoError(t, err)
+
+		fm, ok := m.(*filesystemMiddleware)
+		assert.True(t, ok)
+		assert.Len(t, fm.additionalTools, 7)
+	})
+}
+
+func TestFilesystemMiddleware_BeforeAgent(t *testing.T) {
+	ctx := context.Background()
+	backend := setupTestBackend()
+
+	t.Run("adds instruction and tools to context", func(t *testing.T) {
+		m, err := NewChatModelAgentMiddleware(ctx, &Config{Backend: backend})
+		assert.NoError(t, err)
+
+		runCtx := &adk.ChatModelAgentContext{
+			Instruction: "Original instruction",
+			Tools:       nil,
+		}
+
+		newCtx, newRunCtx, err := m.BeforeAgent(ctx, runCtx)
+		assert.NoError(t, err)
+		assert.NotNil(t, newCtx)
+		assert.NotNil(t, newRunCtx)
+		assert.Contains(t, newRunCtx.Instruction, "Original instruction")
+		assert.Contains(t, newRunCtx.Instruction, ToolsSystemPrompt)
+		assert.Len(t, newRunCtx.Tools, 6)
+	})
+
+	t.Run("nil runCtx returns nil", func(t *testing.T) {
+		m, err := NewChatModelAgentMiddleware(ctx, &Config{Backend: backend})
+		assert.NoError(t, err)
+
+		newCtx, newRunCtx, err := m.BeforeAgent(ctx, nil)
+		assert.NoError(t, err)
+		assert.NotNil(t, newCtx)
+		assert.Nil(t, newRunCtx)
+	})
+}
+
+func TestFilesystemMiddleware_WrapInvokableToolCall(t *testing.T) {
+	ctx := context.Background()
+	backend := setupTestBackend()
+
+	t.Run("small result passes through unchanged", func(t *testing.T) {
+		m, err := NewChatModelAgentMiddleware(ctx, &Config{Backend: backend})
+		assert.NoError(t, err)
+
+		endpoint := func(ctx context.Context, args string, opts ...tool.Option) (string, error) {
+			return "small result", nil
+		}
+
+		tCtx := &adk.ToolContext{Name: "test_tool", CallID: "call-1"}
+		wrapped, err := m.WrapInvokableToolCall(ctx, endpoint, tCtx)
+		assert.NoError(t, err)
+
+		result, err := wrapped(ctx, "{}")
+		assert.NoError(t, err)
+		assert.Equal(t, "small result", result)
+	})
+
+	t.Run("large result is offloaded", func(t *testing.T) {
+		m, err := NewChatModelAgentMiddleware(ctx, &Config{
+			Backend:                             backend,
+			LargeToolResultOffloadingTokenLimit: 10,
+		})
+		assert.NoError(t, err)
+
+		largeResult := strings.Repeat("x", 100)
+		endpoint := func(ctx context.Context, args string, opts ...tool.Option) (string, error) {
+			return largeResult, nil
+		}
+
+		tCtx := &adk.ToolContext{Name: "test_tool", CallID: "call-large"}
+		wrapped, err := m.WrapInvokableToolCall(ctx, endpoint, tCtx)
+		assert.NoError(t, err)
+
+		result, err := wrapped(ctx, "{}")
+		assert.NoError(t, err)
+		assert.Contains(t, result, "Tool result too large")
+		assert.Contains(t, result, "/large_tool_result/call-large")
+	})
+
+	t.Run("offloading disabled returns endpoint unchanged", func(t *testing.T) {
+		m, err := NewChatModelAgentMiddleware(ctx, &Config{
+			Backend:                          backend,
+			WithoutLargeToolResultOffloading: true,
+		})
+		assert.NoError(t, err)
+
+		endpoint := func(ctx context.Context, args string, opts ...tool.Option) (string, error) {
+			return "result", nil
+		}
+
+		tCtx := &adk.ToolContext{Name: "test_tool", CallID: "call-1"}
+		wrapped, err := m.WrapInvokableToolCall(ctx, endpoint, tCtx)
+		assert.NoError(t, err)
+
+		result, err := wrapped(ctx, "{}")
+		assert.NoError(t, err)
+		assert.Equal(t, "result", result)
+	})
+}
+
+func TestFilesystemMiddleware_WrapStreamableToolCall(t *testing.T) {
+	ctx := context.Background()
+	backend := setupTestBackend()
+
+	t.Run("small result passes through unchanged", func(t *testing.T) {
+		m, err := NewChatModelAgentMiddleware(ctx, &Config{Backend: backend})
+		assert.NoError(t, err)
+
+		endpoint := func(ctx context.Context, args string, opts ...tool.Option) (*schema.StreamReader[string], error) {
+			return schema.StreamReaderFromArray([]string{"small", " result"}), nil
+		}
+
+		tCtx := &adk.ToolContext{Name: "test_tool", CallID: "call-1"}
+		wrapped, err := m.WrapStreamableToolCall(ctx, endpoint, tCtx)
+		assert.NoError(t, err)
+
+		sr, err := wrapped(ctx, "{}")
+		assert.NoError(t, err)
+
+		var result strings.Builder
+		for {
+			chunk, err := sr.Recv()
+			if err != nil {
+				break
+			}
+			result.WriteString(chunk)
+		}
+		assert.Equal(t, "small result", result.String())
+	})
+
+	t.Run("large result is offloaded", func(t *testing.T) {
+		m, err := NewChatModelAgentMiddleware(ctx, &Config{
+			Backend:                             backend,
+			LargeToolResultOffloadingTokenLimit: 10,
+		})
+		assert.NoError(t, err)
+
+		largeResult := strings.Repeat("x", 100)
+		endpoint := func(ctx context.Context, args string, opts ...tool.Option) (*schema.StreamReader[string], error) {
+			return schema.StreamReaderFromArray([]string{largeResult}), nil
+		}
+
+		tCtx := &adk.ToolContext{Name: "test_tool", CallID: "call-stream-large"}
+		wrapped, err := m.WrapStreamableToolCall(ctx, endpoint, tCtx)
+		assert.NoError(t, err)
+
+		sr, err := wrapped(ctx, "{}")
+		assert.NoError(t, err)
+
+		var result strings.Builder
+		for {
+			chunk, err := sr.Recv()
+			if err != nil {
+				break
+			}
+			result.WriteString(chunk)
+		}
+		assert.Contains(t, result.String(), "Tool result too large")
+		assert.Contains(t, result.String(), "/large_tool_result/call-stream-large")
+	})
+
+	t.Run("offloading disabled returns endpoint unchanged", func(t *testing.T) {
+		m, err := NewChatModelAgentMiddleware(ctx, &Config{
+			Backend:                          backend,
+			WithoutLargeToolResultOffloading: true,
+		})
+		assert.NoError(t, err)
+
+		endpoint := func(ctx context.Context, args string, opts ...tool.Option) (*schema.StreamReader[string], error) {
+			return schema.StreamReaderFromArray([]string{"result"}), nil
+		}
+
+		tCtx := &adk.ToolContext{Name: "test_tool", CallID: "call-1"}
+		wrapped, err := m.WrapStreamableToolCall(ctx, endpoint, tCtx)
+		assert.NoError(t, err)
+
+		sr, err := wrapped(ctx, "{}")
+		assert.NoError(t, err)
+
+		var result strings.Builder
+		for {
+			chunk, err := sr.Recv()
+			if err != nil {
+				break
+			}
+			result.WriteString(chunk)
+		}
+		assert.Equal(t, "result", result.String())
 	})
 }
