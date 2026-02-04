@@ -43,10 +43,10 @@ type FilesystemBackendConfig struct {
 	BaseDir string
 }
 
-// NewFilesystemBackend creates a new Backend implementation that reads skills from a filesystem.
+// NewBackendFromFilesystem creates a new Backend implementation that reads skills from a filesystem.
 // It searches for SKILL.md files in immediate subdirectories of the configured BaseDir.
 // Only first-level subdirectories are scanned; deeply nested SKILL.md files are ignored.
-func NewFilesystemBackend(config *FilesystemBackendConfig) (Backend, error) {
+func NewBackendFromFilesystem(config *FilesystemBackendConfig) (Backend, error) {
 	if config == nil {
 		return nil, fmt.Errorf("config is required")
 	}
@@ -119,7 +119,6 @@ func (b *filesystemBackend) list(ctx context.Context) ([]Skill, error) {
 func (b *filesystemBackend) loadSkillFromFile(ctx context.Context, path string) (Skill, error) {
 	data, err := b.backend.Read(ctx, &filesystem.ReadRequest{
 		FilePath: path,
-		Limit:    10000,
 	})
 	if err != nil {
 		return Skill{}, fmt.Errorf("failed to read file: %w", err)
