@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-package reduction
+package internal
 
 import (
 	"context"
@@ -308,7 +308,7 @@ func TestNewChatModelAgentMiddleware(t *testing.T) {
 
 	t.Run("valid config with default settings", func(t *testing.T) {
 		backend := &clearToolResultMockBackend{}
-		m, err := NewChatModelAgentMiddleware(ctx, &ToolResultConfig{
+		m, err := NewToolResultHandler(ctx, &ToolResultConfig{
 			Backend: backend,
 		})
 		assert.NoError(t, err)
@@ -327,7 +327,7 @@ func TestNewChatModelAgentMiddleware(t *testing.T) {
 
 	t.Run("custom config values", func(t *testing.T) {
 		backend := &clearToolResultMockBackend{}
-		m, err := NewChatModelAgentMiddleware(ctx, &ToolResultConfig{
+		m, err := NewToolResultHandler(ctx, &ToolResultConfig{
 			Backend:                    backend,
 			ClearingTokenThreshold:     5000,
 			KeepRecentTokens:           10000,
@@ -352,7 +352,7 @@ func TestToolResultMiddleware_BeforeModelRewriteState(t *testing.T) {
 	backend := &clearToolResultMockBackend{}
 
 	t.Run("clears old tool results when threshold exceeded", func(t *testing.T) {
-		m, err := NewChatModelAgentMiddleware(ctx, &ToolResultConfig{
+		m, err := NewToolResultHandler(ctx, &ToolResultConfig{
 			Backend:                backend,
 			ClearingTokenThreshold: 20,
 			KeepRecentTokens:       10,
@@ -380,7 +380,7 @@ func TestToolResultMiddleware_BeforeModelRewriteState(t *testing.T) {
 	})
 
 	t.Run("no clearing when under threshold", func(t *testing.T) {
-		m, err := NewChatModelAgentMiddleware(ctx, &ToolResultConfig{
+		m, err := NewToolResultHandler(ctx, &ToolResultConfig{
 			Backend:                backend,
 			ClearingTokenThreshold: 100000,
 			KeepRecentTokens:       100000,
@@ -406,7 +406,7 @@ func TestToolResultMiddleware_WrapInvokableToolCall(t *testing.T) {
 	backend := &clearToolResultMockBackend{}
 
 	t.Run("small result passes through unchanged", func(t *testing.T) {
-		m, err := NewChatModelAgentMiddleware(ctx, &ToolResultConfig{
+		m, err := NewToolResultHandler(ctx, &ToolResultConfig{
 			Backend: backend,
 		})
 		assert.NoError(t, err)
@@ -425,7 +425,7 @@ func TestToolResultMiddleware_WrapInvokableToolCall(t *testing.T) {
 	})
 
 	t.Run("large result is offloaded", func(t *testing.T) {
-		m, err := NewChatModelAgentMiddleware(ctx, &ToolResultConfig{
+		m, err := NewToolResultHandler(ctx, &ToolResultConfig{
 			Backend:              backend,
 			OffloadingTokenLimit: 5,
 		})
@@ -452,7 +452,7 @@ func TestToolResultMiddleware_WrapStreamableToolCall(t *testing.T) {
 	backend := &clearToolResultMockBackend{}
 
 	t.Run("small result passes through unchanged", func(t *testing.T) {
-		m, err := NewChatModelAgentMiddleware(ctx, &ToolResultConfig{
+		m, err := NewToolResultHandler(ctx, &ToolResultConfig{
 			Backend: backend,
 		})
 		assert.NoError(t, err)
@@ -480,7 +480,7 @@ func TestToolResultMiddleware_WrapStreamableToolCall(t *testing.T) {
 	})
 
 	t.Run("large result is offloaded", func(t *testing.T) {
-		m, err := NewChatModelAgentMiddleware(ctx, &ToolResultConfig{
+		m, err := NewToolResultHandler(ctx, &ToolResultConfig{
 			Backend:              backend,
 			OffloadingTokenLimit: 5,
 		})
