@@ -88,33 +88,19 @@ func (b *filesystemBackend) Get(ctx context.Context, name string) (Skill, error)
 func (b *filesystemBackend) list(ctx context.Context) ([]Skill, error) {
 	var skills []Skill
 
-	entries, err := b.backend.LsInfo(ctx, &filesystem.LsInfoRequest{
-		Path: b.baseDir,
+	pattern := "*/" + skillFileName
+	entries, err := b.backend.GlobInfo(ctx, &filesystem.GlobInfoRequest{
+		Pattern: pattern,
+		Path:    b.baseDir,
 	})
 	if err != nil {
-		return nil, fmt.Errorf("failed to read directory: %w", err)
+		return nil, fmt.Errorf("failed to glob skill files: %w", err)
 	}
 
 	for _, entry := range entries {
-		if entry.Path == b.baseDir {
-			continue
-		}
-
-		skillPath := filepath.Join(entry.Path, skillFileName)
-
-		infos, err := b.backend.LsInfo(ctx, &filesystem.LsInfoRequest{
-			Path: skillPath,
-		})
+		skill, err := b.loadSkillFromFile(ctx, entry.Path)
 		if err != nil {
-			return nil, fmt.Errorf("failed to check skill file: %w", err)
-		}
-		if len(infos) == 0 {
-			continue
-		}
-
-		skill, err := b.loadSkillFromFile(ctx, skillPath)
-		if err != nil {
-			return nil, fmt.Errorf("failed to load skill from %s: %w", skillPath, err)
+			return nil, fmt.Errorf("failed to load skill from %s: %w", entry.Path, err)
 		}
 
 		skills = append(skills, skill)

@@ -182,20 +182,25 @@ func (b *InMemoryBackend) GlobInfo(ctx context.Context, req *GlobInfoRequest) ([
 	b.mu.RLock()
 	defer b.mu.RUnlock()
 
-	path := normalizePath(req.Path)
+	basePath := normalizePath(req.Path)
 
 	var result []FileInfo
 
 	for filePath := range b.files {
 		normalizedFilePath := normalizePath(filePath)
 
-		// Check if file is under the given path
-		if path != "/" && !strings.HasPrefix(normalizedFilePath, path+"/") && normalizedFilePath != path {
+		if basePath != "/" && !strings.HasPrefix(normalizedFilePath, basePath+"/") && normalizedFilePath != basePath {
 			continue
 		}
 
-		// Match against the pattern
-		matched, err := filepath.Match(req.Pattern, filepath.Base(normalizedFilePath))
+		var relativePath string
+		if basePath == "/" {
+			relativePath = strings.TrimPrefix(normalizedFilePath, "/")
+		} else {
+			relativePath = strings.TrimPrefix(normalizedFilePath, basePath+"/")
+		}
+
+		matched, err := filepath.Match(req.Pattern, relativePath)
 		if err != nil {
 			return nil, fmt.Errorf("invalid glob pattern: %w", err)
 		}
