@@ -36,18 +36,18 @@ type testEnhancedToolWrapperHandler struct {
 	wrapEnhancedStreamableFn func(context.Context, EnhancedStreamableToolCallEndpoint, *ToolContext) EnhancedStreamableToolCallEndpoint
 }
 
-func (h *testEnhancedToolWrapperHandler) WrapEnhancedInvokableToolCall(ctx context.Context, endpoint EnhancedInvokableToolCallEndpoint, tCtx *ToolContext) EnhancedInvokableToolCallEndpoint {
+func (h *testEnhancedToolWrapperHandler) WrapEnhancedInvokableToolCall(ctx context.Context, endpoint EnhancedInvokableToolCallEndpoint, tCtx *ToolContext) (EnhancedInvokableToolCallEndpoint, error) {
 	if h.wrapEnhancedInvokableFn != nil {
-		return h.wrapEnhancedInvokableFn(ctx, endpoint, tCtx)
+		return h.wrapEnhancedInvokableFn(ctx, endpoint, tCtx), nil
 	}
-	return endpoint
+	return endpoint, nil
 }
 
-func (h *testEnhancedToolWrapperHandler) WrapEnhancedStreamableToolCall(ctx context.Context, endpoint EnhancedStreamableToolCallEndpoint, tCtx *ToolContext) EnhancedStreamableToolCallEndpoint {
+func (h *testEnhancedToolWrapperHandler) WrapEnhancedStreamableToolCall(ctx context.Context, endpoint EnhancedStreamableToolCallEndpoint, tCtx *ToolContext) (EnhancedStreamableToolCallEndpoint, error) {
 	if h.wrapEnhancedStreamableFn != nil {
-		return h.wrapEnhancedStreamableFn(ctx, endpoint, tCtx)
+		return h.wrapEnhancedStreamableFn(ctx, endpoint, tCtx), nil
 	}
-	return endpoint
+	return endpoint, nil
 }
 
 func newTestEnhancedInvokableToolCallWrapper(beforeFn, afterFn func()) func(context.Context, EnhancedInvokableToolCallEndpoint, *ToolContext) EnhancedInvokableToolCallEndpoint {
@@ -508,7 +508,8 @@ func TestBaseChatModelAgentMiddlewareEnhancedDefaults(t *testing.T) {
 			return &schema.ToolResult{}, nil
 		}
 
-		wrapped := base.WrapEnhancedInvokableToolCall(context.Background(), endpoint, &ToolContext{Name: "test", CallID: "1"})
+		wrapped, wrapErr := base.WrapEnhancedInvokableToolCall(context.Background(), endpoint, &ToolContext{Name: "test", CallID: "1"})
+		assert.NoError(t, wrapErr)
 		_, err := wrapped(context.Background(), &schema.ToolArgument{TextArgument: "{}"})
 
 		assert.NoError(t, err)
@@ -524,7 +525,8 @@ func TestBaseChatModelAgentMiddlewareEnhancedDefaults(t *testing.T) {
 			return schema.StreamReaderFromArray([]*schema.ToolResult{}), nil
 		}
 
-		wrapped := base.WrapEnhancedStreamableToolCall(context.Background(), endpoint, &ToolContext{Name: "test", CallID: "1"})
+		wrapped, wrapErr := base.WrapEnhancedStreamableToolCall(context.Background(), endpoint, &ToolContext{Name: "test", CallID: "1"})
+		assert.NoError(t, wrapErr)
 		_, err := wrapped(context.Background(), &schema.ToolArgument{TextArgument: "{}"})
 
 		assert.NoError(t, err)
