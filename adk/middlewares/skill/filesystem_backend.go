@@ -101,11 +101,19 @@ func (b *filesystemBackend) list(ctx context.Context) ([]Skill, error) {
 		}
 
 		skillPath := filepath.Join(entry.Path, skillFileName)
+
+		infos, err := b.backend.LsInfo(ctx, &filesystem.LsInfoRequest{
+			Path: skillPath,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("failed to check skill file: %w", err)
+		}
+		if len(infos) == 0 {
+			continue
+		}
+
 		skill, err := b.loadSkillFromFile(ctx, skillPath)
 		if err != nil {
-			if strings.Contains(err.Error(), "failed to read file") {
-				continue
-			}
 			return nil, fmt.Errorf("failed to load skill from %s: %w", skillPath, err)
 		}
 
