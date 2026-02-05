@@ -25,6 +25,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/bmatcuk/doublestar/v4"
 )
 
 type fileEntry struct {
@@ -71,7 +73,7 @@ func (b *InMemoryBackend) LsInfo(ctx context.Context, req *LsInfoRequest) ([]Fil
 				// The path itself is a file
 				if !seen[normalizedFilePath] {
 					result = append(result, FileInfo{
-						Path:       normalizedFilePath,
+						Path:       filepath.Base(normalizedFilePath),
 						IsDir:      false,
 						Size:       int64(len(entry.content)),
 						ModifiedAt: entry.modifiedAt.Format(time.RFC3339Nano),
@@ -94,14 +96,14 @@ func (b *InMemoryBackend) LsInfo(ctx context.Context, req *LsInfoRequest) ([]Fil
 				if !seen[childPath] {
 					if isDir {
 						dirInfo[childPath] = &FileInfo{
-							Path:       childPath,
+							Path:       parts[0],
 							IsDir:      true,
 							Size:       0,
 							ModifiedAt: entry.modifiedAt.Format(time.RFC3339Nano),
 						}
 					} else {
 						result = append(result, FileInfo{
-							Path:       childPath,
+							Path:       parts[0],
 							IsDir:      false,
 							Size:       int64(len(entry.content)),
 							ModifiedAt: entry.modifiedAt.Format(time.RFC3339Nano),
@@ -588,31 +590,40 @@ func (b *InMemoryBackend) GlobInfo(ctx context.Context, req *GlobInfoRequest) ([
 	defer b.mu.RUnlock()
 
 	basePath := normalizePath(req.Path)
+	isAbsolutePattern := strings.HasPrefix(req.Pattern, "/")
 
 	var result []FileInfo
 
 	for filePath, entry := range b.files {
 		normalizedFilePath := normalizePath(filePath)
 
-		if basePath != "/" && !strings.HasPrefix(normalizedFilePath, basePath+"/") && normalizedFilePath != basePath {
-			continue
-		}
+		var matchPath string
+		var resultPath string
 
-		var relativePath string
-		if basePath == "/" {
-			relativePath = strings.TrimPrefix(normalizedFilePath, "/")
+		if isAbsolutePattern {
+			matchPath = normalizedFilePath
+			resultPath = normalizedFilePath
 		} else {
-			relativePath = strings.TrimPrefix(normalizedFilePath, basePath+"/")
+			if basePath != "/" && !strings.HasPrefix(normalizedFilePath, basePath+"/") && normalizedFilePath != basePath {
+				continue
+			}
+
+			if basePath == "/" {
+				matchPath = strings.TrimPrefix(normalizedFilePath, "/")
+			} else {
+				matchPath = strings.TrimPrefix(normalizedFilePath, basePath+"/")
+			}
+			resultPath = matchPath
 		}
 
-		matched, err := filepath.Match(req.Pattern, relativePath)
+		matched, err := doublestar.Match(req.Pattern, matchPath)
 		if err != nil {
 			return nil, fmt.Errorf("invalid glob pattern: %w", err)
 		}
 
 		if matched {
 			result = append(result, FileInfo{
-				Path:       normalizedFilePath,
+				Path:       resultPath,
 				IsDir:      false,
 				Size:       int64(len(entry.content)),
 				ModifiedAt: entry.modifiedAt.Format(time.RFC3339Nano),

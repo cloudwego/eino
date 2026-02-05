@@ -259,7 +259,7 @@ func TestReductionMiddlewareClear(t *testing.T) {
 		backend := filesystem.NewInMemoryBackend()
 		handler := func(ctx context.Context, detail *ToolDetail) (*OffloadInfo, error) {
 			arguments := make(map[string]string)
-			if err := json.Unmarshal([]byte(detail.ToolArgument.TextArgument), &arguments); err != nil {
+			if err := json.Unmarshal([]byte(detail.ToolArgument.Text), &arguments); err != nil {
 				return nil, err
 			}
 			offloadContent := &OffloadContent{
@@ -271,7 +271,7 @@ func TestReductionMiddlewareClear(t *testing.T) {
 			for k := range arguments {
 				replacedArguments[k] = "argument offloaded"
 			}
-			detail.ToolArgument.TextArgument = toJson(replacedArguments)
+			detail.ToolArgument.Text = toJson(replacedArguments)
 			detail.ToolResult.Parts[0].Text = "result offloaded, retrieve it from " + filePath
 			return &OffloadInfo{
 				NeedClear:      true,
@@ -364,7 +364,7 @@ func TestDefaultOffloadHandler(t *testing.T) {
 			Name:   "mock_name",
 			CallID: "mock_call_id_12345",
 		},
-		ToolArgument: &schema.ToolArgument{TextArgument: "anything"},
+		ToolArgument: &schema.ToolArgument{Text: "anything"},
 		ToolResult:   &schema.ToolResult{Parts: []schema.ToolOutputPart{{Type: schema.ToolPartTypeText, Text: "hello"}}},
 	}
 

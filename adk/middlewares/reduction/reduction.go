@@ -248,7 +248,7 @@ func (t *toolReductionMiddleware) WrapInvokableToolCall(_ context.Context, endpo
 		detail := &ToolDetail{
 			ToolContext: tCtx,
 			ToolArgument: &schema.ToolArgument{
-				TextArgument: argumentsInJSON,
+				Text: argumentsInJSON,
 			},
 			ToolResult: &schema.ToolResult{
 				Parts: []schema.ToolOutputPart{
@@ -299,7 +299,7 @@ func (t *toolReductionMiddleware) WrapStreamableToolCall(_ context.Context, endp
 		detail := &ToolDetail{
 			ToolContext: tCtx,
 			ToolArgument: &schema.ToolArgument{
-				TextArgument: argumentsInJSON,
+				Text: argumentsInJSON,
 			},
 			ToolResult: &schema.ToolResult{
 				Parts: []schema.ToolOutputPart{
@@ -428,7 +428,7 @@ func (t *toolReductionMiddleware) BeforeModelRewriteState(ctx context.Context, s
 						CallID: toolCall.ID,
 					},
 					ToolArgument: &schema.ToolArgument{
-						TextArgument: toolCall.Function.Arguments,
+						Text: toolCall.Function.Arguments,
 					},
 					ToolResult: toolResult,
 				}
@@ -450,7 +450,7 @@ func (t *toolReductionMiddleware) BeforeModelRewriteState(ctx context.Context, s
 					}
 				}
 
-				tcMsg.ToolCalls[tcIndex].Function.Arguments = td.ToolArgument.TextArgument
+				tcMsg.ToolCalls[tcIndex].Function.Arguments = td.ToolArgument.Text
 				if fromContent {
 					if len(td.ToolResult.Parts) > 0 {
 						resultMsg.Content = td.ToolResult.Parts[0].Text
