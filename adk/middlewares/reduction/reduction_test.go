@@ -44,6 +44,7 @@ func TestReductionMiddlewareTrunc(t *testing.T) {
 		}
 		backend := filesystem.NewInMemoryBackend()
 		config := &Config{
+			Backend: backend,
 			ToolConfig: map[string]*ToolReductionConfig{
 				"mock_invokable_tool": {
 					Backend:           backend,
@@ -57,7 +58,7 @@ func TestReductionMiddlewareTrunc(t *testing.T) {
 
 		mw, err := New(ctx, config)
 		assert.NoError(t, err)
-		exp := `hello worldhello worldhello worldhello worldhello worldhello worldhell...(129 chars truncated, full result saved to /tmp/trunc/12345, use read_file tool to retrieve if needed)`
+		exp := "hello worldhello worldhello worldhello worldhello worldhello worldhell<persisted-output>\nOutput too large (199). Full output saved to: /tmp/trunc/12345\nPreview (first 35):\nhello worldhello worldhello worldhe\n\nPreview (last 35):\nldhello worldhello worldhello world\n\n</persisted-output>"
 
 		edp, err := mw.WrapInvokableToolCall(ctx, it.InvokableRun, tCtx)
 		assert.NoError(t, err)
@@ -78,6 +79,7 @@ func TestReductionMiddlewareTrunc(t *testing.T) {
 		}
 		backend := filesystem.NewInMemoryBackend()
 		config := &Config{
+			SkipTruncation: true,
 			ToolConfig: map[string]*ToolReductionConfig{
 				"mock_streamable_tool": {
 					Backend:           backend,
@@ -90,7 +92,7 @@ func TestReductionMiddlewareTrunc(t *testing.T) {
 		}
 		mw, err := New(ctx, config)
 		assert.NoError(t, err)
-		exp := `hello worldhello worldhello worldhello worldhello worldhello worldhell...(129 chars truncated, full result saved to /tmp/trunc/54321, use read_file tool to retrieve if needed)`
+		exp := "hello worldhello worldhello worldhello worldhello worldhello worldhell<persisted-output>\nOutput too large (199). Full output saved to: /tmp/trunc/54321\nPreview (first 35):\nhello worldhello worldhello worldhe\n\nPreview (last 35):\nldhello worldhello worldhello world\n\n</persisted-output>"
 
 		edp, err := mw.WrapStreamableToolCall(ctx, st.StreamableRun, tCtx)
 		assert.NoError(t, err)
@@ -110,7 +112,6 @@ func TestReductionMiddlewareTrunc(t *testing.T) {
 
 func TestReductionMiddlewareClear(t *testing.T) {
 	ctx := context.Background()
-	backend := filesystem.NewInMemoryBackend()
 	it := mockInvokableTool()
 	st := mockStreamableTool()
 	tools := []tool.BaseTool{it, st}
@@ -124,7 +125,138 @@ func TestReductionMiddlewareClear(t *testing.T) {
 		Result    string            `json:"result"`
 	}
 
+	t.Run("test default clear", func(t *testing.T) {
+		backend := filesystem.NewInMemoryBackend()
+		config := &Config{
+			SkipTruncation:            true,
+			TokenCounter:              defaultTokenCounter,
+			MaxTokensForClear:         20,
+			ClearRetentionSuffixLimit: 0,
+			ToolConfig: map[string]*ToolReductionConfig{
+				"get_weather": {
+					Backend:          backend,
+					SkipTruncation:   false,
+					SkipClear:        false,
+					ReadFileToolName: "read_file",
+					RootDir:          "/tmp",
+					ClearHandler:     defaultClearHandler("/tmp/clear", true, "read_file"),
+				},
+			},
+		}
+
+		mw, err := New(ctx, config)
+		assert.NoError(t, err)
+		_, s, err := mw.BeforeModelRewriteState(ctx, &adk.ChatModelAgentState{
+			Messages: []adk.Message{
+				schema.SystemMessage("you are a helpful assistant"),
+				schema.UserMessage("If it's warmer than 20°C in London, set the thermostat to 20°C, otherwise set it to 18°C."),
+				schema.AssistantMessage("", []schema.ToolCall{
+					{
+						ID:       "call_987654321",
+						Type:     "function",
+						Function: schema.FunctionCall{Name: "get_weather", Arguments: `{"location": "London, UK", "unit": "c"}`},
+					},
+				}),
+				schema.ToolMessage("Sunny", "call_123456789"),
+				schema.AssistantMessage("", []schema.ToolCall{
+					{
+						ID:       "call_123456789",
+						Type:     "function",
+						Function: schema.FunctionCall{Name: "get_weather", Arguments: `{"location": "London, UK", "unit": "c"}`},
+					},
+				}),
+				schema.ToolMessage("Sunny", "call_123456789"),
+			},
+		}, &adk.ModelContext{
+			Tools: toolsInfo,
+		})
+		assert.NoError(t, err)
+		assert.Equal(t, []schema.ToolCall{
+			{
+				ID:       "call_987654321",
+				Type:     "function",
+				Function: schema.FunctionCall{Name: "get_weather", Arguments: `{"location": "London, UK", "unit": "c"}`},
+			},
+		}, s.Messages[2].ToolCalls)
+		assert.Equal(t, []schema.ToolCall{
+			{
+				ID:       "call_123456789",
+				Type:     "function",
+				Function: schema.FunctionCall{Name: "get_weather", Arguments: `{"location": "London, UK", "unit": "c"}`},
+			},
+		}, s.Messages[4].ToolCalls)
+		assert.Equal(t, "<persisted-output>Tool result saved to: /tmp/clear/call_987654321\nUse read_file to view</persisted-output>", s.Messages[3].Content)
+		fileContent, err := backend.Read(ctx, &filesystem.ReadRequest{
+			FilePath: "/tmp/clear/call_987654321",
+		})
+		assert.NoError(t, err)
+		fileContent = strings.TrimPrefix(strings.TrimSpace(fileContent), "1\t")
+		assert.Equal(t, "Sunny", fileContent)
+	})
+
+	t.Run("test default clear without offloading", func(t *testing.T) {
+		config := &Config{
+			SkipTruncation:            true,
+			TokenCounter:              defaultTokenCounter,
+			MaxTokensForClear:         20,
+			ClearRetentionSuffixLimit: 0,
+			ToolConfig: map[string]*ToolReductionConfig{
+				"get_weather": {
+					SkipTruncation:   true,
+					SkipClear:        false,
+					ReadFileToolName: "read_file",
+					RootDir:          "/tmp",
+					ClearHandler:     defaultClearHandler("", false, ""),
+				},
+			},
+		}
+
+		mw, err := New(ctx, config)
+		assert.NoError(t, err)
+		_, s, err := mw.BeforeModelRewriteState(ctx, &adk.ChatModelAgentState{
+			Messages: []adk.Message{
+				schema.SystemMessage("you are a helpful assistant"),
+				schema.UserMessage("If it's warmer than 20°C in London, set the thermostat to 20°C, otherwise set it to 18°C."),
+				schema.AssistantMessage("", []schema.ToolCall{
+					{
+						ID:       "call_987654321",
+						Type:     "function",
+						Function: schema.FunctionCall{Name: "get_weather", Arguments: `{"location": "London, UK", "unit": "c"}`},
+					},
+				}),
+				schema.ToolMessage("Sunny", "call_123456789"),
+				schema.AssistantMessage("", []schema.ToolCall{
+					{
+						ID:       "call_123456789",
+						Type:     "function",
+						Function: schema.FunctionCall{Name: "get_weather", Arguments: `{"location": "London, UK", "unit": "c"}`},
+					},
+				}),
+				schema.ToolMessage("Sunny", "call_123456789"),
+			},
+		}, &adk.ModelContext{
+			Tools: toolsInfo,
+		})
+		assert.NoError(t, err)
+		assert.Equal(t, []schema.ToolCall{
+			{
+				ID:       "call_987654321",
+				Type:     "function",
+				Function: schema.FunctionCall{Name: "get_weather", Arguments: `{"location": "London, UK", "unit": "c"}`},
+			},
+		}, s.Messages[2].ToolCalls)
+		assert.Equal(t, []schema.ToolCall{
+			{
+				ID:       "call_123456789",
+				Type:     "function",
+				Function: schema.FunctionCall{Name: "get_weather", Arguments: `{"location": "London, UK", "unit": "c"}`},
+			},
+		}, s.Messages[4].ToolCalls)
+		assert.Equal(t, "[Old tool result content cleared]", s.Messages[3].Content)
+	})
+
 	t.Run("test clear", func(t *testing.T) {
+		backend := filesystem.NewInMemoryBackend()
 		handler := func(ctx context.Context, detail *ToolDetail) (*OffloadInfo, error) {
 			arguments := make(map[string]string)
 			if err := json.Unmarshal([]byte(detail.ToolArgument.TextArgument), &arguments); err != nil {
@@ -142,12 +274,14 @@ func TestReductionMiddlewareClear(t *testing.T) {
 			detail.ToolArgument.TextArgument = toJson(replacedArguments)
 			detail.ToolResult.Parts[0].Text = "result offloaded, retrieve it from " + filePath
 			return &OffloadInfo{
+				NeedClear:      true,
 				NeedOffload:    true,
 				FilePath:       filePath,
 				OffloadContent: toJson(offloadContent),
 			}, nil
 		}
 		config := &Config{
+			SkipTruncation:            true,
 			TokenCounter:              defaultTokenCounter,
 			MaxTokensForClear:         20,
 			ClearRetentionSuffixLimit: 0,
@@ -234,10 +368,11 @@ func TestDefaultOffloadHandler(t *testing.T) {
 		ToolResult:   &schema.ToolResult{Parts: []schema.ToolOutputPart{{Type: schema.ToolPartTypeText, Text: "hello"}}},
 	}
 
-	fn := defaultClearHandler("/tmp")
+	fn := defaultClearHandler("/tmp", true, "read_file")
 	info, err := fn(ctx, detail)
 	assert.NoError(t, err)
 	assert.Equal(t, &OffloadInfo{
+		NeedClear:      true,
 		NeedOffload:    true,
 		FilePath:       "/tmp/mock_call_id_12345",
 		OffloadContent: "hello",
