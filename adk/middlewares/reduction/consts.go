@@ -19,13 +19,24 @@ package reduction
 
 import "github.com/cloudwego/eino/adk/internal"
 
-func getContentTruncFmt() string {
+func getTruncWithOffloadingFmt() string {
 	s, _ := internal.SelectPrompt(internal.I18nPrompts{
-		English: contentTruncFmt,
-		Chinese: contentTruncFmtZh,
+		English: truncWithOffloadingFmt,
+		Chinese: truncWithOffloadingFmtZh,
 	})
 	if s == "" {
-		return contentTruncFmt
+		return truncWithOffloadingFmt
+	}
+	return s
+}
+
+func getTruncWithoutOffloadingFmt() string {
+	s, _ := internal.SelectPrompt(internal.I18nPrompts{
+		English: truncWithoutOffloadingFmt,
+		Chinese: truncWithoutOffloadingFmtZh,
+	})
+	if s == "" {
+		return truncWithoutOffloadingFmt
 	}
 	return s
 }
@@ -42,8 +53,11 @@ func getToolOffloadResultFmt() string {
 }
 
 const (
-	contentTruncFmt   = `...({removed_count} chars truncated, full result saved to {file_path}, use {read_file_tool_name} tool to retrieve if needed)`
-	contentTruncFmtZh = `...(后续 {removed_count} 个字符被截断, 完整内容保存在 {file_path}, 需要时使用 {read_file_tool_name} 工具导入)`
+	truncWithOffloadingFmt   = `...({removed_count} chars truncated, full result saved to {file_path}, use {read_file_tool_name} tool to retrieve if needed)`
+	truncWithOffloadingFmtZh = `...(后续 {removed_count} 个字符被截断, 完整内容保存在 {file_path}, 需要时使用 {read_file_tool_name} 工具导入)`
+
+	truncWithoutOffloadingFmt   = `...({removed_count} chars truncated)`
+	truncWithoutOffloadingFmtZh = `...(后续 {removed_count} 个字符被截断)`
 )
 
 const (
