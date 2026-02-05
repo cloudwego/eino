@@ -161,8 +161,28 @@ type ChatModelAgentMiddleware interface {
 	//   - CallID: The unique identifier for this specific tool call
 	WrapStreamableToolCall(ctx context.Context, endpoint StreamableToolCallEndpoint, tCtx *ToolContext) (StreamableToolCallEndpoint, error)
 
+	// WrapEnhancedInvokableToolCall wraps an enhanced tool's synchronous execution with custom behavior.
+	// Return the input endpoint unchanged and nil error if no wrapping is needed.
+	//
+	// This method is only called for tools that implement EnhancedInvokableTool.
+	// If a tool only implements EnhancedStreamableTool, this method will not be called for that tool.
+	//
+	// This method is called at request time when the tool is about to be executed.
+	// The tCtx parameter provides metadata about the tool:
+	//   - Name: The name of the tool being wrapped
+	//   - CallID: The unique identifier for this specific tool call
 	WrapEnhancedInvokableToolCall(ctx context.Context, endpoint EnhancedInvokableToolCallEndpoint, tCtx *ToolContext) (EnhancedInvokableToolCallEndpoint, error)
 
+	// WrapEnhancedStreamableToolCall wraps an enhanced tool's streaming execution with custom behavior.
+	// Return the input endpoint unchanged and nil error if no wrapping is needed.
+	//
+	// This method is only called for tools that implement EnhancedStreamableTool.
+	// If a tool only implements EnhancedInvokableTool, this method will not be called for that tool.
+	//
+	// This method is called at request time when the tool is about to be executed.
+	// The tCtx parameter provides metadata about the tool:
+	//   - Name: The name of the tool being wrapped
+	//   - CallID: The unique identifier for this specific tool call
 	WrapEnhancedStreamableToolCall(ctx context.Context, endpoint EnhancedStreamableToolCallEndpoint, tCtx *ToolContext) (EnhancedStreamableToolCallEndpoint, error)
 
 	// WrapModel wraps a chat model with custom behavior.
