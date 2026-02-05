@@ -23,7 +23,9 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/bytedance/sonic"
 	"github.com/google/uuid"
+	"github.com/slongfield/pyfmt"
 
 	"github.com/cloudwego/eino/adk"
 	"github.com/cloudwego/eino/adk/filesystem"
@@ -31,82 +33,94 @@ import (
 	"github.com/cloudwego/eino/schema"
 )
 
-// ToolReductionMiddlewareConfig is the configuration for the tool reduction middleware.
-type ToolReductionMiddlewareConfig struct {
-	// ToolTruncation configures the truncation strategy for tool outputs.
-	// If nil, no truncation will be applied.
-	ToolTruncation *ToolTruncation
+// Config is the configuration for tool reduction middleware.
+// This middleware manages tool outputs in two phases to optimize context usage:
+//
+//  1. Truncation Phase:
+//     Triggered immediately after a tool execution completes.
+//     If the tool output length exceeds MaxLengthForTrunc, the full content is saved
+//     to the configured Backend, and the tool output is replaced with a truncated notice.
+//     This prevents immediate context overflow from a single large tool output.
+//
+//  2. Clear Phase:
+//     Triggered before sending messages to the model (in BeforeModelRewriteState).
+//     If the total token count exceeds MaxTokensForClear, the middleware iterates through
+//     historical messages. Based on RootDir and ClearRetentionSuffixLimit, it offloads tool call arguments and results
+//     to the Backend to reduce token usage, keeping the conversation within limits while retaining access to the
+//     important information. After all, ClearPostProcess will be called, which you could save or notify current state.
+type Config struct {
+	// Backend is the storage backend where truncated content will be saved.
+	// Optional. When Backend not set, truncated / cleared content will be discarded.
+	Backend Backend
 
-	// ToolOffload configures the offloading strategy for tool outputs.
-	// If nil, no offloading will be applied.
-	ToolOffload *ToolOffload
-}
+	// ReadFileToolName is tool name used to retrieve from file.
+	// After offloading content to file, you should give agent the same tool to retrieve content.
+	// Required. Default is "read_file".
+	ReadFileToolName string
 
-// ToolTruncation holds configuration for tool output truncation.
-type ToolTruncation struct {
-	// ToolConfigs maps tool names to their specific truncation configurations.
-	// The key is the tool name.
-	ToolConfigs map[string]ToolTruncationConfig
-}
+	// RootDir root dir to save truncated/cleared content.
+	// Required.
+	// Default is /tmp, truncated content saves to /tmp/trunc/{tool_call_id}, cleared content saves to  /tmp/clear/{tool_call_id}
+	RootDir string
 
-// ToolTruncationConfig configures how a tool's result is truncated.
-type ToolTruncationConfig struct {
-	// MaxLength is the maximum allowed length of the tool output.
+	// MaxLengthForTrunc is the maximum allowed length of the tool output.
 	// If the output exceeds this length, it will be truncated.
-	// At least one of MaxLength or MaxLineLength must be provided.
-	MaxLength *int
+	// Required. Default is 50000.
+	MaxLengthForTrunc int
 
-	// MaxLineLength is the maximum allowed length for a single line in the tool output.
-	// If a line exceeds this length, it will be truncated.
-	// At least one of MaxLength or MaxLineLength must be provided.
-	MaxLineLength *int
-}
-
-// ToolOffload holds configuration for tool output offloading.
-type ToolOffload struct {
 	// TokenCounter is used to count the number of tokens in the conversation messages.
-	// It is required to determine when to trigger offloading based on token usage.
-	TokenCounter func(ctx context.Context, msg []adk.Message) (int64, error)
+	// It is used to determine when to trigger clearing based on token usage, and token usage after clearing.
+	// Required.
+	TokenCounter func(ctx context.Context, msg []adk.Message, tools []*schema.ToolInfo) (int64, error)
 
-	// ToolOffloadThreshold defines the thresholds for triggering the offloading process.
-	ToolOffloadThreshold *ToolOffloadThresholdConfig
+	// MaxTokensForClear is the maximum number of tokens allowed in the conversation before clearing is attempted.
+	// Required. Default is 30000.
+	MaxTokensForClear int64
 
-	// ToolConfigs maps tool names to their specific offloading configurations.
-	// The key is the tool name.
-	ToolConfigs map[string]ToolOffloadConfig
+	// ClearRetentionSuffixLimit is the number of most recent messages to retain without clearing.
+	// This ensures the model has some immediate context.
+	// Optional. Default is 1.
+	ClearRetentionSuffixLimit int
 
-	// ToolOffloadPostProcess is an optional callback function to process the agent state after offloading.
-	// It is called once per reduction cycle if offloading occurred.
-	ToolOffloadPostProcess func(ctx context.Context, state *adk.ChatModelAgentState) context.Context
+	// ClearPostProcess is clear post process handler.
+	// Optional.
+	ClearPostProcess func(ctx context.Context, state *adk.ChatModelAgentState) context.Context
+
+	// ToolConfig is the specific configuration that applies to tools by name.
+	// This configuration takes precedence over GeneralConfig for the specified tools.
+	// Optional.
+	ToolConfig map[string]*ToolReductionConfig
 }
 
-// ToolOffloadThresholdConfig defines the conditions under which tool offloading is triggered.
-type ToolOffloadThresholdConfig struct {
-	// MaxTokens is the maximum number of tokens allowed in the conversation before offloading is attempted.
-	// Default is typically around 30k if not specified.
-	MaxTokens int64
+type ToolReductionConfig struct {
+	// Backend is the storage backend where truncated content will be saved.
+	// Optional. When Backend not set, truncated / cleared content will be discarded.
+	Backend Backend
 
-	// OffloadBatchSize is the number of tool calls to process in a single offloading batch.
-	// Default is 5.
-	OffloadBatchSize int
+	// SkipTruncation skip truncating this tool.
+	SkipTruncation bool
 
-	// RetentionSuffixLimit is the number of most recent messages to retain without offloading.
-	// This ensures the model has some immediate context. Default is 0.
-	RetentionSuffixLimit int
+	// SkipClear skip clearing this tool.
+	SkipClear bool
+
+	// ReadFileToolName is tool name used to retrieve from file.
+	// Optional. Default is "read_file".
+	ReadFileToolName string
+
+	// RootDir root dir to save truncated content, file name is {tool_call_id}.
+	// Default is /tmp, truncated content saves to /tmp/trunc/{tool_call_id}, cleared content saves to  /tmp/clear/{tool_call_id}
+	RootDir string
+
+	// MaxLengthForTrunc is the maximum allowed length of the tool output.
+	// If the output exceeds this length, it will be truncated.
+	// Required. Default is 50000.
+	MaxLengthForTrunc int
+
+	// ClearHandler is used to process tool call arguments and results during clearing.
+	// Optional. When handler is not set, it's considered to skip clearing this tool.
+	ClearHandler func(ctx context.Context, detail *ToolDetail) (*OffloadInfo, error)
 }
 
-// ToolOffloadConfig configures how a specific tool's result is offloaded.
-type ToolOffloadConfig struct {
-	// OffloadBackend is the storage backend where offloaded content will be saved.
-	OffloadBackend Backend
-
-	// OffloadHandler determines the content to offload and the file path for a given tool execution.
-	// It receives name, call_id, input and output of this tool call, which you could modify them in-place.
-	// It returns an OffloadInfo struct containing the decision and data.
-	OffloadHandler func(ctx context.Context, detail *ToolDetail) (*OffloadInfo, error)
-}
-
-// ToolDetail contains detailed information about a tool execution, used by the OffloadHandler.
 type ToolDetail struct {
 	// ToolContext provides metadata about the tool call (e.g., tool name, call ID).
 	ToolContext *adk.ToolContext
@@ -118,7 +132,7 @@ type ToolDetail struct {
 	ToolResult *schema.ToolResult
 }
 
-// OffloadInfo contains the result of the OffloadHandler's decision.
+// OffloadInfo contains the result of the Handler's decision.
 type OffloadInfo struct {
 	// NeedOffload indicates whether the tool output should be offloaded.
 	NeedOffload bool
@@ -131,87 +145,79 @@ type OffloadInfo struct {
 	OffloadContent string
 }
 
-// New creates tool reduction middleware from config
-func New(_ context.Context, config *ToolReductionMiddlewareConfig) (mw adk.ChatModelAgentMiddleware, err error) {
-	if config.ToolTruncation == nil && config.ToolOffload == nil {
-		return mw, fmt.Errorf("at least provide one of ToolTruncationMapping or ToolOffloadMapping")
+func (t *ToolReductionConfig) fillDefaults() *ToolReductionConfig {
+	if t.ReadFileToolName == "" {
+		t.ReadFileToolName = "read_file"
 	}
-	if config.ToolTruncation != nil {
-		if config.ToolTruncation.ToolConfigs == nil {
-			return mw, fmt.Errorf("ToolTruncation.ToolConfigs must be set")
+	if t.RootDir == "" {
+		t.RootDir = "/tmp"
+		if !t.SkipClear && t.ClearHandler == nil {
+			t.ClearHandler = defaultClearHandler("/tmp/clear")
 		}
-		for toolName, truncConfig := range config.ToolTruncation.ToolConfigs {
-			if truncConfig.MaxLength == nil && truncConfig.MaxLineLength == nil {
-				return mw, fmt.Errorf("trunc config for %s error: at least one of MaxLength / MaxLineLength must be set", toolName)
-			}
-		}
-	}
-	if config.ToolOffload != nil {
-		to := config.ToolOffload
-		if to.TokenCounter == nil || to.ToolOffloadThreshold == nil || to.ToolConfigs == nil {
-			return mw, fmt.Errorf("ToolOffload.TokenCounter / ToolOffloadThreshold / ToolConfigs must be set")
-		}
-		for toolName, offloadConfig := range to.ToolConfigs {
-			if offloadConfig.OffloadBackend == nil || offloadConfig.OffloadHandler == nil {
-				return mw, fmt.Errorf(" offload config for %s error: ToolOffload.ToolOffloadBackend / ToolOffloadHandler must be set", toolName)
-			}
+	} else {
+		if !t.SkipClear && t.ClearHandler == nil {
+			t.ClearHandler = defaultClearHandler(filepath.Join(t.RootDir, "clear"))
 		}
 	}
-
-	return &toolReductionMiddleware{config: config}, nil
+	if t.MaxLengthForTrunc == 0 {
+		t.MaxLengthForTrunc = 50000
+	}
+	return t
 }
 
-// NewDefaultToolReductionMiddleware creates default tool reduction middleware
-func NewDefaultToolReductionMiddleware(ctx context.Context, needReductionTools []tool.BaseTool) (adk.ChatModelAgentMiddleware, error) {
-	truncMaxLength := 30000
-	backend := filesystem.NewInMemoryBackend()
-	offloadRootDir := "/tmp"
-
-	config := &ToolReductionMiddlewareConfig{
-		ToolTruncation: &ToolTruncation{
-			ToolConfigs: make(map[string]ToolTruncationConfig, len(needReductionTools)),
-		},
-		ToolOffload: &ToolOffload{
-			TokenCounter: defaultTokenCounter,
-			ToolOffloadThreshold: &ToolOffloadThresholdConfig{
-				MaxTokens:        200000,
-				OffloadBatchSize: 5,
-			},
-			ToolConfigs: make(map[string]ToolOffloadConfig, len(needReductionTools)),
-		},
+// New creates tool reduction middleware from config
+func New(_ context.Context, config *Config) (adk.ChatModelAgentMiddleware, error) {
+	if config == nil {
+		return nil, fmt.Errorf("config must not be nil")
 	}
+	if config.TokenCounter == nil {
+		config.TokenCounter = defaultTokenCounter
+	}
+	if config.ClearRetentionSuffixLimit == 0 {
+		config.ClearRetentionSuffixLimit = 1
+	}
+	defaultReductionConfig := &ToolReductionConfig{
+		Backend:           config.Backend,
+		SkipTruncation:    false,
+		SkipClear:         false,
+		ReadFileToolName:  config.ReadFileToolName,
+		RootDir:           config.RootDir,
+		MaxLengthForTrunc: config.MaxLengthForTrunc,
+	}
+	defaultReductionConfig = defaultReductionConfig.fillDefaults()
 
-	for _, t := range needReductionTools {
-		info, err := t.Info(ctx)
-		if err != nil {
-			return nil, err
+	for _, reductionConfig := range config.ToolConfig {
+		if reductionConfig == nil {
+			continue
 		}
-		config.ToolTruncation.ToolConfigs[info.Name] = ToolTruncationConfig{MaxLength: &truncMaxLength}
-		config.ToolOffload.ToolConfigs[info.Name] = ToolOffloadConfig{
-			OffloadBackend: backend,
-			OffloadHandler: defaultOffloadHandler(offloadRootDir),
-		}
+		reductionConfig = reductionConfig.fillDefaults()
 	}
 
 	return &toolReductionMiddleware{
-		BaseChatModelAgentMiddleware: adk.BaseChatModelAgentMiddleware{},
-		config:                       config,
+		config:        config,
+		defaultConfig: defaultReductionConfig,
 	}, nil
 }
 
 type toolReductionMiddleware struct {
 	adk.BaseChatModelAgentMiddleware
 
-	config *ToolReductionMiddlewareConfig
+	config        *Config
+	defaultConfig *ToolReductionConfig
+}
+
+func (t *toolReductionMiddleware) getToolConfig(toolName string) *ToolReductionConfig {
+	if t.config.ToolConfig != nil {
+		if cfg, ok := t.config.ToolConfig[toolName]; ok {
+			return cfg
+		}
+	}
+	return t.defaultConfig
 }
 
 func (t *toolReductionMiddleware) WrapInvokableToolCall(_ context.Context, endpoint adk.InvokableToolCallEndpoint, tCtx *adk.ToolContext) (adk.InvokableToolCallEndpoint, error) {
-	config := t.config.ToolTruncation
-	if config == nil || config.ToolConfigs == nil {
-		return endpoint, nil
-	}
-	tc, found := config.ToolConfigs[tCtx.Name]
-	if !found {
+	cfg := t.getToolConfig(tCtx.Name)
+	if cfg == nil || cfg.SkipTruncation {
 		return endpoint, nil
 	}
 
@@ -231,17 +237,17 @@ func (t *toolReductionMiddleware) WrapInvokableToolCall(_ context.Context, endpo
 				},
 			},
 		}
-		return t.toolTruncationHandler(ctx, tc, detail), nil
+		truncatedResult, err := t.toolTruncationHandler(ctx, cfg, detail)
+		if err != nil {
+			return "", err
+		}
+		return truncatedResult, nil
 	}, nil
 }
 
 func (t *toolReductionMiddleware) WrapStreamableToolCall(_ context.Context, endpoint adk.StreamableToolCallEndpoint, tCtx *adk.ToolContext) (adk.StreamableToolCallEndpoint, error) {
-	config := t.config.ToolTruncation
-	if config == nil || config.ToolConfigs == nil {
-		return endpoint, nil
-	}
-	tc, found := config.ToolConfigs[tCtx.Name]
-	if !found {
+	cfg := t.getToolConfig(tCtx.Name)
+	if cfg == nil || cfg.SkipTruncation {
 		return endpoint, nil
 	}
 
@@ -258,9 +264,10 @@ func (t *toolReductionMiddleware) WrapStreamableToolCall(_ context.Context, endp
 		defer output.Close()
 
 		for {
-			chunk, err := output.Recv()
-			if err != nil {
-				if err != io.EOF {
+			var recvErr error
+			chunk, recvErr := output.Recv()
+			if recvErr != nil {
+				if recvErr != io.EOF {
 					return errResp, nil
 				}
 				break
@@ -281,74 +288,68 @@ func (t *toolReductionMiddleware) WrapStreamableToolCall(_ context.Context, endp
 				},
 			},
 		}
-		truncResult := t.toolTruncationHandler(ctx, tc, detail)
+		truncResult, err := t.toolTruncationHandler(ctx, cfg, detail)
+		if err != nil {
+			return nil, err
+		}
 		return schema.StreamReaderFromArray([]string{truncResult}), nil
 	}, nil
 }
 
-func (t *toolReductionMiddleware) toolTruncationHandler(_ context.Context, config ToolTruncationConfig, detail *ToolDetail) (truncResult string) {
-	var resultText string
-	if len(detail.ToolResult.Parts) > 0 {
-		resultText = detail.ToolResult.Parts[0].Text
+func (t *toolReductionMiddleware) toolTruncationHandler(ctx context.Context, config *ToolReductionConfig, detail *ToolDetail) (truncResult string, err error) {
+	resultText := detail.ToolResult.Parts[0].Text
+	if len(resultText) <= config.MaxLengthForTrunc {
+		return resultText, nil
 	}
-	if config.MaxLineLength != nil {
-		sb := strings.Builder{}
-		lines := strings.Split(resultText, "\n")
-		for i, line := range lines {
-			if i > 0 {
-				sb.WriteString("\n")
-			}
 
-			if config.MaxLength != nil {
-				leftMaxLength := *config.MaxLength - sb.Len()
-				if leftMaxLength < 0 {
-					leftMaxLength = 0
-				}
-				s, truncated := truncateIfTooLong(leftMaxLength, getContentTruncFmt(), line)
-				if truncated {
-					sb.WriteString(s)
-					break
-				}
-			}
+	filePath := filepath.Join(config.RootDir, "trunc", detail.ToolContext.CallID)
+	var truncatedMsg string
+	if config.Backend != nil {
+		truncatedMsg, err = pyfmt.Fmt(getTruncWithOffloadingFmt(), map[string]any{
+			"removed_count":       len(resultText) - config.MaxLengthForTrunc,
+			"file_path":           filePath,
+			"read_file_tool_name": config.ReadFileToolName,
+		})
 
-			s, _ := truncateIfTooLong(*config.MaxLineLength, getLineTruncFmt(), line)
-			sb.WriteString(s)
-		}
-		return sb.String()
-	} else if config.MaxLength != nil {
-		truncResult, _ = truncateIfTooLong(*config.MaxLength, getContentTruncFmt(), resultText)
-		return truncResult
 	} else {
-		return resultText
+		truncatedMsg, err = pyfmt.Fmt(getTruncWithoutOffloadingFmt(), map[string]any{
+			"removed_count": len(resultText) - config.MaxLengthForTrunc,
+		})
 	}
+	if err != nil {
+		return "", err
+	}
+
+	truncResult = resultText[:config.MaxLengthForTrunc] + truncatedMsg
+
+	if config.Backend != nil {
+		err = config.Backend.Write(ctx, &filesystem.WriteRequest{
+			FilePath: filePath,
+			Content:  resultText,
+		})
+		if err != nil {
+			return "", err
+		}
+	}
+
+	return truncResult, nil
 }
 
-func truncateIfTooLong(maxLength int, format, content string) (string, bool) {
-	truncatedMsg := fmt.Sprintf(format, len(content))
-	if maxLength+len(truncatedMsg) < len(content) {
-		return content[:maxLength] + truncatedMsg, true
-	}
-	return content, false
-}
-
-func (t *toolReductionMiddleware) BeforeModelRewriteState(ctx context.Context, state *adk.ChatModelAgentState, mc *adk.ModelContext) (context.Context, *adk.ChatModelAgentState, error) {
-	if t.config.ToolOffload == nil {
-		return ctx, state, nil
-	}
+func (t *toolReductionMiddleware) BeforeModelRewriteState(ctx context.Context, state *adk.ChatModelAgentState, mc *adk.ModelContext) (
+	context.Context, *adk.ChatModelAgentState, error) {
 
 	var (
 		err             error
 		estimatedTokens int64
-		offloadConfig   = t.config.ToolOffload
 	)
 
 	// init msg tokens
-	estimatedTokens, err = offloadConfig.TokenCounter(ctx, state.Messages)
+	estimatedTokens, err = t.config.TokenCounter(ctx, state.Messages, mc.Tools)
 	if err != nil {
 		return ctx, state, err
 	}
 
-	if estimatedTokens < offloadConfig.ToolOffloadThreshold.MaxTokens {
+	if estimatedTokens < t.config.MaxTokensForClear {
 		return ctx, state, nil
 	}
 
@@ -363,7 +364,7 @@ func (t *toolReductionMiddleware) BeforeModelRewriteState(ctx context.Context, s
 			break
 		}
 	}
-	retention := offloadConfig.ToolOffloadThreshold.RetentionSuffixLimit
+	retention := t.config.ClearRetentionSuffixLimit
 	for ; retention > 0 && end > 0; end-- {
 		msg := state.Messages[end-1]
 		if msg.Role == schema.Assistant && len(msg.ToolCalls) > 0 {
@@ -380,7 +381,6 @@ func (t *toolReductionMiddleware) BeforeModelRewriteState(ctx context.Context, s
 
 	// recursively handle
 	tcMsgIndex := start
-	batchCount := 0
 
 	for tcMsgIndex < end {
 		tcMsg := state.Messages[tcMsgIndex]
@@ -388,10 +388,6 @@ func (t *toolReductionMiddleware) BeforeModelRewriteState(ctx context.Context, s
 			trMsgEnd := tcMsgIndex + 1 + len(tcMsg.ToolCalls)
 			if trMsgEnd > len(state.Messages) {
 				trMsgEnd = len(state.Messages)
-			}
-			beforeTokens, err := offloadConfig.TokenCounter(ctx, state.Messages[tcMsgIndex:trMsgEnd])
-			if err != nil {
-				return ctx, state, nil
 			}
 
 			j := tcMsgIndex
@@ -404,8 +400,9 @@ func (t *toolReductionMiddleware) BeforeModelRewriteState(ctx context.Context, s
 				if resultMsg.Role != schema.Tool { // unexpected
 					break
 				}
-				tc, found := offloadConfig.ToolConfigs[toolCall.Function.Name]
-				if !found {
+
+				cfg := t.getToolConfig(toolCall.Function.Name)
+				if cfg == nil || cfg.SkipClear {
 					continue
 				}
 
@@ -425,20 +422,21 @@ func (t *toolReductionMiddleware) BeforeModelRewriteState(ctx context.Context, s
 					ToolResult: toolResult,
 				}
 
-				offloadInfo, offloadErr := tc.OffloadHandler(ctx, td)
+				offloadInfo, offloadErr := cfg.ClearHandler(ctx, td)
 				if offloadErr != nil {
 					return ctx, state, offloadErr
 				}
 				if !offloadInfo.NeedOffload {
 					continue
 				}
-
-				writeErr := tc.OffloadBackend.Write(ctx, &filesystem.WriteRequest{
-					FilePath: offloadInfo.FilePath,
-					Content:  offloadInfo.OffloadContent,
-				})
-				if writeErr != nil {
-					return ctx, state, writeErr
+				if cfg.Backend != nil {
+					writeErr := cfg.Backend.Write(ctx, &filesystem.WriteRequest{
+						FilePath: offloadInfo.FilePath,
+						Content:  offloadInfo.OffloadContent,
+					})
+					if writeErr != nil {
+						return ctx, state, writeErr
+					}
 				}
 
 				tcMsg.ToolCalls[tcIndex].Function.Arguments = td.ToolArgument.TextArgument
@@ -457,24 +455,12 @@ func (t *toolReductionMiddleware) BeforeModelRewriteState(ctx context.Context, s
 
 			// set dedup flag
 			setMsgOffloadedFlag(tcMsg)
-
-			// calc tool_call msg tokens
-			afterTokens, err := offloadConfig.TokenCounter(ctx, state.Messages[tcMsgIndex:trMsgEnd])
-			if err != nil {
-				return ctx, state, err
-			}
-			estimatedTokens -= beforeTokens - afterTokens
-			batchCount++
-		}
-
-		if batchCount == offloadConfig.ToolOffloadThreshold.OffloadBatchSize {
-			if estimatedTokens < offloadConfig.ToolOffloadThreshold.MaxTokens {
-				break
-			} else {
-				batchCount = 0
-			}
 		}
 		tcMsgIndex++
+	}
+
+	if t.config.ClearPostProcess != nil {
+		ctx = t.config.ClearPostProcess(ctx, state)
 	}
 
 	return ctx, state, nil
@@ -482,7 +468,7 @@ func (t *toolReductionMiddleware) BeforeModelRewriteState(ctx context.Context, s
 
 // defaultTokenCounter estimates tokens, which treats one token as ~4 characters of text for common English text.
 // github.com/tiktoken-go/tokenizer is highly recommended to replace it.
-func defaultTokenCounter(_ context.Context, msgs []*schema.Message) (int64, error) {
+func defaultTokenCounter(_ context.Context, msgs []*schema.Message, tools []*schema.ToolInfo) (int64, error) {
 	var tokens int64
 	for _, msg := range msgs {
 		if msg == nil {
@@ -513,10 +499,21 @@ func defaultTokenCounter(_ context.Context, msgs []*schema.Message) (int64, erro
 		tokens += n
 	}
 
+	for _, tl := range tools {
+		tl_ := *tl
+		tl_.Extra = nil
+		text, err := sonic.MarshalString(tl_)
+		if err != nil {
+			return 0, fmt.Errorf("failed to marshal tool info: %w", err)
+		}
+
+		tokens += int64(len(text) / 4)
+	}
+
 	return tokens, nil
 }
 
-func defaultOffloadHandler(rootDir string) func(ctx context.Context, detail *ToolDetail) (*OffloadInfo, error) {
+func defaultClearHandler(rootDir string) func(ctx context.Context, detail *ToolDetail) (*OffloadInfo, error) {
 	return func(ctx context.Context, detail *ToolDetail) (*OffloadInfo, error) {
 		fileName := detail.ToolContext.CallID
 		if fileName == "" {
