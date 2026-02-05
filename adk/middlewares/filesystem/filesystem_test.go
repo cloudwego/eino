@@ -532,7 +532,7 @@ func TestNewMiddleware(t *testing.T) {
 	t.Run("nil backend returns error", func(t *testing.T) {
 		_, err := NewMiddleware(ctx, &Config{Backend: nil})
 		assert.Error(t, err)
-		assert.Contains(t, err.Error(), "backend should not be nil")
+		assert.Contains(t, err.Error(), "at least one of Backend, Shell, or StreamingShell must be set")
 	})
 
 	t.Run("valid config with default settings", func(t *testing.T) {
@@ -649,7 +649,7 @@ func TestNew(t *testing.T) {
 	t.Run("nil backend returns error", func(t *testing.T) {
 		_, err := New(ctx, &Config{Backend: nil})
 		assert.Error(t, err)
-		assert.Contains(t, err.Error(), "backend should not be nil")
+		assert.Contains(t, err.Error(), "at least one of Backend, Shell, or StreamingShell must be set")
 	})
 
 	t.Run("valid config with default settings", func(t *testing.T) {
