@@ -155,7 +155,7 @@ func NewMiddleware(ctx context.Context, config *Config) (adk.AgentMiddleware, er
 	return m, nil
 }
 
-// NewChatModelAgentMiddleware constructs and returns the filesystem middleware as a ChatModelAgentMiddleware.
+// New constructs and returns the filesystem middleware as a ChatModelAgentMiddleware.
 //
 // This is the recommended constructor for new code. It returns a ChatModelAgentMiddleware which provides:
 //   - Better context propagation through WrapInvokableToolCall and WrapStreamableToolCall methods
@@ -167,14 +167,14 @@ func NewMiddleware(ctx context.Context, config *Config) (adk.AgentMiddleware, er
 //
 // Example usage:
 //
-//	middleware, err := filesystem.NewChatModelAgentMiddleware(ctx, &filesystem.Config{
+//	middleware, err := filesystem.New(ctx, &filesystem.Config{
 //	    Backend: myBackend,
 //	})
 //	agent, err := adk.NewChatModelAgent(ctx, &adk.ChatModelAgentConfig{
 //	    // ...
 //	    Handlers: []adk.ChatModelAgentMiddleware{middleware},
 //	})
-func NewChatModelAgentMiddleware(ctx context.Context, config *Config) (adk.ChatModelAgentMiddleware, error) {
+func New(ctx context.Context, config *Config) (adk.ChatModelAgentMiddleware, error) {
 	err := config.Validate()
 	if err != nil {
 		return nil, err
