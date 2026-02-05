@@ -19,53 +19,71 @@ package reduction
 
 import "github.com/cloudwego/eino/adk/internal"
 
-func getTruncWithOffloadingFmt() string {
-	s, _ := internal.SelectPrompt(internal.I18nPrompts{
-		English: truncWithOffloadingFmt,
-		Chinese: truncWithOffloadingFmtZh,
-	})
-	if s == "" {
-		return truncWithOffloadingFmt
-	}
-	return s
-}
-
-func getTruncWithoutOffloadingFmt() string {
-	s, _ := internal.SelectPrompt(internal.I18nPrompts{
-		English: truncWithoutOffloadingFmt,
-		Chinese: truncWithoutOffloadingFmtZh,
-	})
-	if s == "" {
-		return truncWithoutOffloadingFmt
-	}
-	return s
-}
-
-func getToolOffloadResultFmt() string {
-	s, _ := internal.SelectPrompt(internal.I18nPrompts{
-		English: toolOffloadResultFmt,
-		Chinese: toolOffloadResultFmtZh,
-	})
-	if s == "" {
-		return toolOffloadResultFmt
-	}
-	return s
-}
-
 const (
-	truncWithOffloadingFmt   = `...({removed_count} chars truncated, full result saved to {file_path}, use {read_file_tool_name} tool to retrieve if needed)`
-	truncWithOffloadingFmtZh = `...(后续 {removed_count} 个字符被截断, 完整内容保存在 {file_path}, 需要时使用 {read_file_tool_name} 工具导入)`
+	truncFmt = `<persisted-output>
+Output too large ({original_size}). Full output saved to: {file_path}
+Preview (first {preview_size}):
+{preview_first}
 
-	truncWithoutOffloadingFmt   = `...({removed_count} chars truncated)`
-	truncWithoutOffloadingFmtZh = `...(后续 {removed_count} 个字符被截断)`
+Preview (last {preview_size}):
+{preview_last}
+
+</persisted-output>`
+	truncFmtZh = `<persisted-output>
+输出结果过大 ({original_size}). 完整输出保存到: {file_path}
+预览 (前 {preview_size}):
+{preview_first}
+
+预览 (后 {preview_size}):
+{preview_last}
+
+</persisted-output>`
 )
 
 const (
-	toolOffloadResultFmt   = `Tool result is too large, retrieve from %s if needed`
-	toolOffloadResultFmtZh = `工具输出结果过长, 需要时从 %s 中导入`
+	clearWithOffloadingFmt = `<persisted-output>Tool result saved to: {file_path}
+Use {read_tool_name} to view</persisted-output>`
+	clearWithOffloadingFmtZh = `<persisted-output>工具结果已保存至: {file_path}
+使用 {read_tool_name} 进行查看</persisted-output>`
+
+	clearWithoutOffloadingFmt   = `[Old tool result content cleared]`
+	clearWithoutOffloadingFmtZh = `[工具输出结果已清理]`
 )
 
 const (
 	msgReducedFlag   = "_reduction_mw_processed"
 	msgReducedTokens = "_reduction_mw_tokens"
 )
+
+func getTruncFmt() string {
+	s, _ := internal.SelectPrompt(internal.I18nPrompts{
+		English: truncFmt,
+		Chinese: truncFmtZh,
+	})
+	if s == "" {
+		return truncFmt
+	}
+	return s
+}
+
+func getClearWithOffloadingFmt() string {
+	s, _ := internal.SelectPrompt(internal.I18nPrompts{
+		English: clearWithOffloadingFmt,
+		Chinese: clearWithOffloadingFmtZh,
+	})
+	if s == "" {
+		return clearWithOffloadingFmt
+	}
+	return s
+}
+
+func getClearWithoutOffloadingFmt() string {
+	s, _ := internal.SelectPrompt(internal.I18nPrompts{
+		English: clearWithoutOffloadingFmt,
+		Chinese: clearWithoutOffloadingFmtZh,
+	})
+	if s == "" {
+		return clearWithoutOffloadingFmt
+	}
+	return s
+}
