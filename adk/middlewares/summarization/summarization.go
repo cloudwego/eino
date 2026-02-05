@@ -40,6 +40,10 @@ type Config struct {
 	// Model is the chat model used to generate summaries.
 	Model model.BaseChatModel
 
+	// ModelOptions specifies options passed to the model when generating summaries.
+	// Optional.
+	ModelOptions []model.Option
+
 	// TokenCounter calculates the token count for a message.
 	// Optional. Defaults to a simple estimator (~4 chars/token).
 	TokenCounter TokenCounterFunc
@@ -54,6 +58,7 @@ type Config struct {
 	// Event Scoping:
 	//   - ActionTypeBeforeSummary: emitted before calling model to generate summary
 	//   - ActionTypeAfterSummary: emitted after summary generation completes
+	// Optional. Defaults to false.
 	EmitInternalEvents bool
 
 	// Instruction overrides the default summarization instruction.
@@ -253,7 +258,7 @@ func (m *middleware) summarize(ctx context.Context, msgs []adk.Message) (adk.Mes
 		Content: instruction,
 	})
 
-	resp, err := m.cfg.Model.Generate(ctx, input)
+	resp, err := m.cfg.Model.Generate(ctx, input, m.cfg.ModelOptions...)
 	if err != nil {
 		return nil, fmt.Errorf("failed to generate summary: %w", err)
 	}
