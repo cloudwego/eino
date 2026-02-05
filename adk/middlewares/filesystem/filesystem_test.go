@@ -638,24 +638,24 @@ func TestGetFilesystemTools(t *testing.T) {
 	})
 }
 
-func TestNewChatModelAgentMiddleware(t *testing.T) {
+func TestNew(t *testing.T) {
 	ctx := context.Background()
 	backend := setupTestBackend()
 
 	t.Run("nil config returns error", func(t *testing.T) {
-		_, err := NewChatModelAgentMiddleware(ctx, nil)
+		_, err := New(ctx, nil)
 		assert.Error(t, err)
 		assert.Contains(t, err.Error(), "config should not be nil")
 	})
 
 	t.Run("nil backend returns error", func(t *testing.T) {
-		_, err := NewChatModelAgentMiddleware(ctx, &Config{Backend: nil})
+		_, err := New(ctx, &Config{Backend: nil})
 		assert.Error(t, err)
 		assert.Contains(t, err.Error(), "backend should not be nil")
 	})
 
 	t.Run("valid config with default settings", func(t *testing.T) {
-		m, err := NewChatModelAgentMiddleware(ctx, &Config{Backend: backend})
+		m, err := New(ctx, &Config{Backend: backend})
 		assert.NoError(t, err)
 		assert.NotNil(t, m)
 
@@ -668,7 +668,7 @@ func TestNewChatModelAgentMiddleware(t *testing.T) {
 
 	t.Run("custom system prompt", func(t *testing.T) {
 		customPrompt := "Custom system prompt"
-		m, err := NewChatModelAgentMiddleware(ctx, &Config{
+		m, err := New(ctx, &Config{
 			Backend:            backend,
 			CustomSystemPrompt: &customPrompt,
 		})
@@ -680,7 +680,7 @@ func TestNewChatModelAgentMiddleware(t *testing.T) {
 	})
 
 	t.Run("disable large tool result offloading", func(t *testing.T) {
-		m, err := NewChatModelAgentMiddleware(ctx, &Config{
+		m, err := New(ctx, &Config{
 			Backend:                          backend,
 			WithoutLargeToolResultOffloading: true,
 		})
@@ -696,7 +696,7 @@ func TestNewChatModelAgentMiddleware(t *testing.T) {
 			Backend: backend,
 			resp:    &filesystem.ExecuteResponse{Output: "ok"},
 		}
-		m, err := NewChatModelAgentMiddleware(ctx, &Config{Backend: shellBackend, Shell: shellBackend})
+		m, err := New(ctx, &Config{Backend: shellBackend, Shell: shellBackend})
 		assert.NoError(t, err)
 
 		fm, ok := m.(*filesystemMiddleware)
@@ -710,7 +710,7 @@ func TestFilesystemMiddleware_BeforeAgent(t *testing.T) {
 	backend := setupTestBackend()
 
 	t.Run("adds instruction and tools to context", func(t *testing.T) {
-		m, err := NewChatModelAgentMiddleware(ctx, &Config{Backend: backend})
+		m, err := New(ctx, &Config{Backend: backend})
 		assert.NoError(t, err)
 
 		runCtx := &adk.ChatModelAgentContext{
@@ -728,7 +728,7 @@ func TestFilesystemMiddleware_BeforeAgent(t *testing.T) {
 	})
 
 	t.Run("nil runCtx returns nil", func(t *testing.T) {
-		m, err := NewChatModelAgentMiddleware(ctx, &Config{Backend: backend})
+		m, err := New(ctx, &Config{Backend: backend})
 		assert.NoError(t, err)
 
 		newCtx, newRunCtx, err := m.BeforeAgent(ctx, nil)
@@ -743,7 +743,7 @@ func TestFilesystemMiddleware_WrapInvokableToolCall(t *testing.T) {
 	backend := setupTestBackend()
 
 	t.Run("small result passes through unchanged", func(t *testing.T) {
-		m, err := NewChatModelAgentMiddleware(ctx, &Config{Backend: backend})
+		m, err := New(ctx, &Config{Backend: backend})
 		assert.NoError(t, err)
 
 		endpoint := func(ctx context.Context, args string, opts ...tool.Option) (string, error) {
@@ -760,7 +760,7 @@ func TestFilesystemMiddleware_WrapInvokableToolCall(t *testing.T) {
 	})
 
 	t.Run("large result is offloaded", func(t *testing.T) {
-		m, err := NewChatModelAgentMiddleware(ctx, &Config{
+		m, err := New(ctx, &Config{
 			Backend:                             backend,
 			LargeToolResultOffloadingTokenLimit: 10,
 		})
@@ -782,7 +782,7 @@ func TestFilesystemMiddleware_WrapInvokableToolCall(t *testing.T) {
 	})
 
 	t.Run("offloading disabled returns endpoint unchanged", func(t *testing.T) {
-		m, err := NewChatModelAgentMiddleware(ctx, &Config{
+		m, err := New(ctx, &Config{
 			Backend:                          backend,
 			WithoutLargeToolResultOffloading: true,
 		})
@@ -807,7 +807,7 @@ func TestFilesystemMiddleware_WrapStreamableToolCall(t *testing.T) {
 	backend := setupTestBackend()
 
 	t.Run("small result passes through unchanged", func(t *testing.T) {
-		m, err := NewChatModelAgentMiddleware(ctx, &Config{Backend: backend})
+		m, err := New(ctx, &Config{Backend: backend})
 		assert.NoError(t, err)
 
 		endpoint := func(ctx context.Context, args string, opts ...tool.Option) (*schema.StreamReader[string], error) {
@@ -833,7 +833,7 @@ func TestFilesystemMiddleware_WrapStreamableToolCall(t *testing.T) {
 	})
 
 	t.Run("large result is offloaded", func(t *testing.T) {
-		m, err := NewChatModelAgentMiddleware(ctx, &Config{
+		m, err := New(ctx, &Config{
 			Backend:                             backend,
 			LargeToolResultOffloadingTokenLimit: 10,
 		})
@@ -864,7 +864,7 @@ func TestFilesystemMiddleware_WrapStreamableToolCall(t *testing.T) {
 	})
 
 	t.Run("offloading disabled returns endpoint unchanged", func(t *testing.T) {
-		m, err := NewChatModelAgentMiddleware(ctx, &Config{
+		m, err := New(ctx, &Config{
 			Backend:                          backend,
 			WithoutLargeToolResultOffloading: true,
 		})

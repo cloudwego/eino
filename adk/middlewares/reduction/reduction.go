@@ -131,8 +131,8 @@ type OffloadInfo struct {
 	OffloadContent string
 }
 
-// NewToolReductionMiddleware creates tool reduction middleware from config
-func NewToolReductionMiddleware(_ context.Context, config *ToolReductionMiddlewareConfig) (mw adk.ChatModelAgentMiddleware, err error) {
+// New creates tool reduction middleware from config
+func New(_ context.Context, config *ToolReductionMiddlewareConfig) (mw adk.ChatModelAgentMiddleware, err error) {
 	if config.ToolTruncation == nil && config.ToolOffload == nil {
 		return mw, fmt.Errorf("at least provide one of ToolTruncationMapping or ToolOffloadMapping")
 	}
