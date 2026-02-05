@@ -302,7 +302,7 @@ func NewChatModelAgent(_ context.Context, config *ChatModelAgentConfig) (*ChatMo
 
 	method := config.EarlyStoppingMethod
 	if method == "" {
-		method = earlyStoppingMethodGenerate
+		method = earlyStoppingMethodForce
 	}
 	if method != earlyStoppingMethodForce && method != earlyStoppingMethodGenerate {
 		return nil, errors.New("invalid EarlyStoppingMethod")
