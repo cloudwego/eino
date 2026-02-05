@@ -1194,6 +1194,91 @@ func TestInMemoryBackend_GrepRaw_ContentValidation(t *testing.T) {
 	}
 }
 
+func TestInMemoryBackend_LsInfo_PathIsFilename(t *testing.T) {
+	backend := NewInMemoryBackend()
+	ctx := context.Background()
+
+	backend.Write(ctx, &WriteRequest{
+		FilePath: "/file1.txt",
+		Content:  "content1",
+	})
+	backend.Write(ctx, &WriteRequest{
+		FilePath: "/file2.txt",
+		Content:  "content2",
+	})
+	backend.Write(ctx, &WriteRequest{
+		FilePath: "/dir1/file3.txt",
+		Content:  "content3",
+	})
+	backend.Write(ctx, &WriteRequest{
+		FilePath: "/dir1/subdir/file4.txt",
+		Content:  "content4",
+	})
+
+	t.Run("RootDirectory", func(t *testing.T) {
+		infos, err := backend.LsInfo(ctx, &LsInfoRequest{Path: "/"})
+		if err != nil {
+			t.Fatalf("LsInfo failed: %v", err)
+		}
+
+		for _, info := range infos {
+			if strings.Contains(info.Path, "/") {
+				t.Errorf("Path should be filename only, got: %s", info.Path)
+			}
+			if info.IsDir {
+				if info.Path != "dir1" {
+					t.Errorf("Expected directory name 'dir1', got: %s", info.Path)
+				}
+			} else {
+				if info.Path != "file1.txt" && info.Path != "file2.txt" {
+					t.Errorf("Expected filename 'file1.txt' or 'file2.txt', got: %s", info.Path)
+				}
+			}
+		}
+	})
+
+	t.Run("Subdirectory", func(t *testing.T) {
+		infos, err := backend.LsInfo(ctx, &LsInfoRequest{Path: "/dir1"})
+		if err != nil {
+			t.Fatalf("LsInfo failed: %v", err)
+		}
+
+		for _, info := range infos {
+			if strings.Contains(info.Path, "/") {
+				t.Errorf("Path should be filename only, got: %s", info.Path)
+			}
+			if info.IsDir {
+				if info.Path != "subdir" {
+					t.Errorf("Expected directory name 'subdir', got: %s", info.Path)
+				}
+			} else {
+				if info.Path != "file3.txt" {
+					t.Errorf("Expected filename 'file3.txt', got: %s", info.Path)
+				}
+			}
+		}
+	})
+
+	t.Run("NestedSubdirectory", func(t *testing.T) {
+		infos, err := backend.LsInfo(ctx, &LsInfoRequest{Path: "/dir1/subdir"})
+		if err != nil {
+			t.Fatalf("LsInfo failed: %v", err)
+		}
+
+		if len(infos) != 1 {
+			t.Fatalf("Expected 1 file, got %d", len(infos))
+		}
+
+		info := infos[0]
+		if info.Path != "file4.txt" {
+			t.Errorf("Expected filename 'file4.txt', got: %s", info.Path)
+		}
+		if strings.Contains(info.Path, "/") {
+			t.Errorf("Path should be filename only, got: %s", info.Path)
+		}
+	})
+}
+
 func TestInMemoryBackend_GlobInfo(t *testing.T) {
 	backend := NewInMemoryBackend()
 	ctx := context.Background()
@@ -1227,6 +1312,9 @@ func TestInMemoryBackend_GlobInfo(t *testing.T) {
 	if len(infos) != 1 { // only file1.txt in root
 		t.Errorf("Expected 1 .txt file in root, got %d", len(infos))
 	}
+	if infos[0].Path != "file1.txt" {
+		t.Errorf("Expected relative path 'file1.txt', got %s", infos[0].Path)
+	}
 
 	// Test GlobInfo - match all .py files in dir1
 	infos, err = backend.GlobInfo(ctx, &GlobInfoRequest{
@@ -1239,6 +1327,320 @@ func TestInMemoryBackend_GlobInfo(t *testing.T) {
 	if len(infos) != 1 { // file4.py
 		t.Errorf("Expected 1 .py file in /dir1, got %d", len(infos))
 	}
+	if infos[0].Path != "file4.py" {
+		t.Errorf("Expected relative path 'file4.py', got %s", infos[0].Path)
+	}
+}
+
+func TestInMemoryBackend_GlobInfo_RelativePath(t *testing.T) {
+	backend := NewInMemoryBackend()
+	ctx := context.Background()
+
+	backend.Write(ctx, &WriteRequest{
+		FilePath: "/Users/bytedance/Desktop/github/eino/file1.go",
+		Content:  "content1",
+	})
+	backend.Write(ctx, &WriteRequest{
+		FilePath: "/Users/bytedance/Desktop/github/openai-go/paginationmanual_test.go",
+		Content:  "content2",
+	})
+	backend.Write(ctx, &WriteRequest{
+		FilePath: "/Users/bytedance/Desktop/github/openai-go/paginationauto_test.go",
+		Content:  "content3",
+	})
+	backend.Write(ctx, &WriteRequest{
+		FilePath: "/Users/bytedance/Desktop/other/test.go",
+		Content:  "content4",
+	})
+
+	t.Run("GlobFromRootWithPattern", func(t *testing.T) {
+		infos, err := backend.GlobInfo(ctx, &GlobInfoRequest{
+			Pattern: "**/*.go",
+			Path:    "/Users/bytedance/Desktop/github",
+		})
+		if err != nil {
+			t.Fatalf("GlobInfo failed: %v", err)
+		}
+
+		if len(infos) != 3 {
+			t.Fatalf("Expected 3 .go files, got %d", len(infos))
+		}
+
+		expectedPaths := map[string]bool{
+			"eino/file1.go":                      false,
+			"openai-go/paginationmanual_test.go": false,
+			"openai-go/paginationauto_test.go":   false,
+		}
+
+		for _, info := range infos {
+			if _, exists := expectedPaths[info.Path]; exists {
+				expectedPaths[info.Path] = true
+			} else {
+				t.Errorf("Unexpected path: %s", info.Path)
+			}
+		}
+
+		for path, found := range expectedPaths {
+			if !found {
+				t.Errorf("Expected path not found: %s", path)
+			}
+		}
+	})
+
+	t.Run("GlobFromSubdirectory", func(t *testing.T) {
+		infos, err := backend.GlobInfo(ctx, &GlobInfoRequest{
+			Pattern: "*.go",
+			Path:    "/Users/bytedance/Desktop/github/openai-go",
+		})
+		if err != nil {
+			t.Fatalf("GlobInfo failed: %v", err)
+		}
+
+		if len(infos) != 2 {
+			t.Fatalf("Expected 2 .go files, got %d", len(infos))
+		}
+
+		expectedPaths := map[string]bool{
+			"paginationmanual_test.go": false,
+			"paginationauto_test.go":   false,
+		}
+
+		for _, info := range infos {
+			if _, exists := expectedPaths[info.Path]; exists {
+				expectedPaths[info.Path] = true
+			} else {
+				t.Errorf("Unexpected path: %s", info.Path)
+			}
+		}
+
+		for path, found := range expectedPaths {
+			if !found {
+				t.Errorf("Expected path not found: %s", path)
+			}
+		}
+	})
+
+	t.Run("GlobFromRootWithAbsolutePattern", func(t *testing.T) {
+		infos, err := backend.GlobInfo(ctx, &GlobInfoRequest{
+			Pattern: "/Users/bytedance/Desktop/github/**/*.go",
+			Path:    "/",
+		})
+		if err != nil {
+			t.Fatalf("GlobInfo failed: %v", err)
+		}
+
+		expected := map[string]bool{
+			"/Users/bytedance/Desktop/github/eino/file1.go":                      false,
+			"/Users/bytedance/Desktop/github/openai-go/paginationmanual_test.go": false,
+			"/Users/bytedance/Desktop/github/openai-go/paginationauto_test.go":   false,
+		}
+		for _, info := range infos {
+			if _, ok := expected[info.Path]; ok {
+				expected[info.Path] = true
+			}
+		}
+		for path, found := range expected {
+			if !found {
+				t.Errorf("Expected absolute path not found: %s", path)
+			}
+		}
+	})
+
+	t.Run("GlobRecursiveWithRelativePattern", func(t *testing.T) {
+		infos, err := backend.GlobInfo(ctx, &GlobInfoRequest{
+			Pattern: "**/*.go",
+			Path:    "/Users/bytedance/Desktop/github",
+		})
+		if err != nil {
+			t.Fatalf("GlobInfo failed: %v", err)
+		}
+
+		if len(infos) != 3 {
+			t.Fatalf("Expected 3 .go files with ** pattern, got %d", len(infos))
+		}
+
+		expected := map[string]bool{
+			"eino/file1.go":                      false,
+			"openai-go/paginationmanual_test.go": false,
+			"openai-go/paginationauto_test.go":   false,
+		}
+
+		for _, info := range infos {
+			if _, ok := expected[info.Path]; ok {
+				expected[info.Path] = true
+			} else {
+				t.Errorf("Unexpected path: %s", info.Path)
+			}
+		}
+
+		for path, found := range expected {
+			if !found {
+				t.Errorf("Expected relative path not found: %s", path)
+			}
+		}
+	})
+}
+
+func TestInMemoryBackend_GlobInfo_RecursivePattern(t *testing.T) {
+	backend := NewInMemoryBackend()
+	ctx := context.Background()
+
+	backend.Write(ctx, &WriteRequest{
+		FilePath: "/project/src/main.go",
+		Content:  "main",
+	})
+	backend.Write(ctx, &WriteRequest{
+		FilePath: "/project/src/utils/helper.go",
+		Content:  "helper",
+	})
+	backend.Write(ctx, &WriteRequest{
+		FilePath: "/project/src/utils/deep/nested.go",
+		Content:  "nested",
+	})
+	backend.Write(ctx, &WriteRequest{
+		FilePath: "/project/test/test.go",
+		Content:  "test",
+	})
+	backend.Write(ctx, &WriteRequest{
+		FilePath: "/project/README.md",
+		Content:  "readme",
+	})
+
+	t.Run("DoubleStarMatchesAllSubdirectories", func(t *testing.T) {
+		infos, err := backend.GlobInfo(ctx, &GlobInfoRequest{
+			Pattern: "**/*.go",
+			Path:    "/project",
+		})
+		if err != nil {
+			t.Fatalf("GlobInfo failed: %v", err)
+		}
+
+		if len(infos) != 4 {
+			t.Fatalf("Expected 4 .go files, got %d", len(infos))
+		}
+
+		expected := map[string]bool{
+			"src/main.go":              false,
+			"src/utils/helper.go":      false,
+			"src/utils/deep/nested.go": false,
+			"test/test.go":             false,
+		}
+
+		for _, info := range infos {
+			if _, ok := expected[info.Path]; ok {
+				expected[info.Path] = true
+			} else {
+				t.Errorf("Unexpected path: %s", info.Path)
+			}
+		}
+
+		for path, found := range expected {
+			if !found {
+				t.Errorf("Expected path not found: %s", path)
+			}
+		}
+	})
+
+	t.Run("DoubleStarInMiddleOfPattern", func(t *testing.T) {
+		infos, err := backend.GlobInfo(ctx, &GlobInfoRequest{
+			Pattern: "src/**/*.go",
+			Path:    "/project",
+		})
+		if err != nil {
+			t.Fatalf("GlobInfo failed: %v", err)
+		}
+
+		if len(infos) != 3 {
+			t.Fatalf("Expected 3 .go files under src/, got %d", len(infos))
+		}
+
+		expected := map[string]bool{
+			"src/main.go":              false,
+			"src/utils/helper.go":      false,
+			"src/utils/deep/nested.go": false,
+		}
+
+		for _, info := range infos {
+			if _, ok := expected[info.Path]; ok {
+				expected[info.Path] = true
+			} else {
+				t.Errorf("Unexpected path: %s", info.Path)
+			}
+		}
+
+		for path, found := range expected {
+			if !found {
+				t.Errorf("Expected path not found: %s", path)
+			}
+		}
+	})
+
+	t.Run("DoubleStarAtEnd", func(t *testing.T) {
+		infos, err := backend.GlobInfo(ctx, &GlobInfoRequest{
+			Pattern: "src/**",
+			Path:    "/project",
+		})
+		if err != nil {
+			t.Fatalf("GlobInfo failed: %v", err)
+		}
+
+		if len(infos) != 3 {
+			t.Fatalf("Expected 3 files under src/, got %d", len(infos))
+		}
+
+		expected := map[string]bool{
+			"src/main.go":              false,
+			"src/utils/helper.go":      false,
+			"src/utils/deep/nested.go": false,
+		}
+
+		for _, info := range infos {
+			if _, ok := expected[info.Path]; ok {
+				expected[info.Path] = true
+			}
+		}
+
+		for path, found := range expected {
+			if !found {
+				t.Errorf("Expected path not found: %s", path)
+			}
+		}
+	})
+
+	t.Run("AbsolutePatternWithDoubleStarRecursive", func(t *testing.T) {
+		infos, err := backend.GlobInfo(ctx, &GlobInfoRequest{
+			Pattern: "/project/**/*.go",
+			Path:    "/",
+		})
+		if err != nil {
+			t.Fatalf("GlobInfo failed: %v", err)
+		}
+
+		if len(infos) != 4 {
+			t.Fatalf("Expected 4 .go files, got %d", len(infos))
+		}
+
+		expected := map[string]bool{
+			"/project/src/main.go":              false,
+			"/project/src/utils/helper.go":      false,
+			"/project/src/utils/deep/nested.go": false,
+			"/project/test/test.go":             false,
+		}
+
+		for _, info := range infos {
+			if _, ok := expected[info.Path]; ok {
+				expected[info.Path] = true
+			} else {
+				t.Errorf("Unexpected path: %s", info.Path)
+			}
+		}
+
+		for path, found := range expected {
+			if !found {
+				t.Errorf("Expected absolute path not found: %s", path)
+			}
+		}
+	})
 }
 
 func TestInMemoryBackend_Concurrent(t *testing.T) {
@@ -1569,8 +1971,8 @@ func TestInMemoryBackend_LsInfo_FileInfoMetadata(t *testing.T) {
 		}
 
 		info := infos[0]
-		if info.Path != "/test.txt" {
-			t.Errorf("Expected path /test.txt, got %s", info.Path)
+		if info.Path != "test.txt" {
+			t.Errorf("Expected path test.txt, got %s", info.Path)
 		}
 		if info.IsDir {
 			t.Error("Expected IsDir to be false for file")
@@ -1607,8 +2009,8 @@ func TestInMemoryBackend_LsInfo_FileInfoMetadata(t *testing.T) {
 		}
 
 		info := infos[0]
-		if info.Path != "/dir1" {
-			t.Errorf("Expected path /dir1, got %s", info.Path)
+		if info.Path != "dir1" {
+			t.Errorf("Expected path dir1, got %s", info.Path)
 		}
 		if !info.IsDir {
 			t.Error("Expected IsDir to be true for directory")
@@ -1650,13 +2052,13 @@ func TestInMemoryBackend_LsInfo_FileInfoMetadata(t *testing.T) {
 		for _, info := range infos {
 			if info.IsDir {
 				dirCount++
-				if info.Path != "/dir1" {
-					t.Errorf("Expected directory path /dir1, got %s", info.Path)
+				if info.Path != "dir1" {
+					t.Errorf("Expected directory path dir1, got %s", info.Path)
 				}
 			} else {
 				fileCount++
-				if info.Path != "/file1.txt" {
-					t.Errorf("Expected file path /file1.txt, got %s", info.Path)
+				if info.Path != "file1.txt" {
+					t.Errorf("Expected file path file1.txt, got %s", info.Path)
 				}
 				if info.Size != int64(len("content1")) {
 					t.Errorf("Expected file size %d, got %d", len("content1"), info.Size)
@@ -1693,14 +2095,14 @@ func TestInMemoryBackend_LsInfo_FileInfoMetadata(t *testing.T) {
 		}
 
 		for _, info := range infos {
-			if info.Path == "/dir1/file1.txt" {
+			if info.Path == "file1.txt" {
 				if info.IsDir {
 					t.Error("Expected file1.txt to be a file")
 				}
 				if info.Size != int64(len("short")) {
 					t.Errorf("Expected size %d, got %d", len("short"), info.Size)
 				}
-			} else if info.Path == "/dir1/subdir" {
+			} else if info.Path == "subdir" {
 				if !info.IsDir {
 					t.Error("Expected subdir to be a directory")
 				}
@@ -1779,8 +2181,8 @@ func TestInMemoryBackend_GlobInfo_FileInfoMetadata(t *testing.T) {
 		}
 
 		info := infos[0]
-		if info.Path != "/test.txt" {
-			t.Errorf("Expected path /test.txt, got %s", info.Path)
+		if info.Path != "test.txt" {
+			t.Errorf("Expected path test.txt, got %s", info.Path)
 		}
 		if info.IsDir {
 			t.Error("Expected IsDir to be false")
