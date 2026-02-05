@@ -321,6 +321,6 @@ const fallbackUserMessagesInstruction = `In addition to the summary, here are th
 
 const fallbackUserMessagesInstructionZh = `除了上述总结外，以下是用户最近的消息，供参考：\n%s`
 
-const truncatedMarkerFormat = "…%d tokens truncated…"
+const truncatedMarkerFormat = "…%d characters truncated…"
 
-const truncatedMarkerFormatZh = "…已截断 %d 个 token…"
+const truncatedMarkerFormatZh = "…已截断 %d 个字符…"

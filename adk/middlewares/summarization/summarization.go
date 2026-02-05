@@ -217,14 +217,10 @@ func (m *middleware) countTokens(ctx context.Context, input *TokenCounterInput) 
 }
 
 func defaultTokenCounter(ctx context.Context, input *TokenCounterInput) (int, error) {
-	counter := func(text string) int {
-		return (len(text) + 3) / 4
-	}
-
 	var totalTokens int
 	for _, msg := range input.Messages {
 		text := extractTextContent(msg)
-		totalTokens += counter(text)
+		totalTokens += estimateTokenCount(text)
 	}
 
 	for _, tl := range input.Tools {
@@ -235,10 +231,14 @@ func defaultTokenCounter(ctx context.Context, input *TokenCounterInput) (int, er
 			return 0, fmt.Errorf("failed to marshal tool info: %w", err)
 		}
 
-		totalTokens += counter(text)
+		totalTokens += estimateTokenCount(text)
 	}
 
 	return totalTokens, nil
+}
+
+func estimateTokenCount(text string) int {
+	return (len(text) + 3) / 4
 }
 
 func (m *middleware) summarize(ctx context.Context, msgs []adk.Message) (adk.Message, error) {
@@ -402,7 +402,7 @@ func defaultTrimUserMessage(msg adk.Message, remainingTokens int) adk.Message {
 		return nil
 	}
 
-	trimmed := truncateTextByTokens(textContent, remainingTokens)
+	trimmed := truncateTextByChars(textContent)
 	if trimmed == "" {
 		return nil
 	}
@@ -413,64 +413,28 @@ func defaultTrimUserMessage(msg adk.Message, remainingTokens int) adk.Message {
 	}
 }
 
-func truncateTextByTokens(text string, maxTokens int) string {
-	const approxBytesPerToken = 4
+func truncateTextByChars(text string) string {
+	const maxRunes = 2000
 
 	if text == "" {
 		return ""
 	}
 
-	maxBytes := maxTokens * approxBytesPerToken
-	if len(text) <= maxBytes {
+	if utf8.RuneCountInString(text) <= maxRunes {
 		return text
 	}
 
-	leftBudget := maxBytes / 2
-	rightBudget := maxBytes - leftBudget
+	halfRunes := maxRunes / 2
+	runes := []rune(text)
+	totalRunes := len(runes)
 
-	prefix, suffix, removedBytes := splitStringAtUTF8Boundary(text, leftBudget, rightBudget)
+	prefix := string(runes[:halfRunes])
+	suffix := string(runes[totalRunes-halfRunes:])
+	removedChars := totalRunes - maxRunes
 
-	removedTokens := (removedBytes + approxBytesPerToken - 1) / approxBytesPerToken
-	marker := fmt.Sprintf(getTruncatedMarkerFormat(), removedTokens)
+	marker := fmt.Sprintf(getTruncatedMarkerFormat(), removedChars)
 
 	return prefix + marker + suffix
-}
-
-func splitStringAtUTF8Boundary(s string, leftBytes, rightBytes int) (prefix, suffix string, removedBytes int) {
-	if s == "" {
-		return "", "", 0
-	}
-
-	totalBytes := len(s)
-
-	prefixEnd := 0
-	for i, r := range s {
-		charEnd := i + utf8.RuneLen(r)
-		if charEnd <= leftBytes {
-			prefixEnd = charEnd
-		} else {
-			break
-		}
-	}
-
-	suffixStart := totalBytes
-	targetStart := totalBytes - rightBytes
-	for i := range s {
-		if i >= targetStart {
-			suffixStart = i
-			break
-		}
-	}
-
-	if suffixStart < prefixEnd {
-		suffixStart = prefixEnd
-	}
-
-	prefix = s[:prefixEnd]
-	suffix = s[suffixStart:]
-	removedBytes = suffixStart - prefixEnd
-
-	return prefix, suffix, removedBytes
 }
 
 func extractTextContent(msg adk.Message) string {
