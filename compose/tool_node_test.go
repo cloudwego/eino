@@ -1058,7 +1058,7 @@ func TestEnhancedToolNode(t *testing.T) {
 		fn: func(ctx context.Context, input *schema.ToolArgument) (*schema.ToolResult, error) {
 			return &schema.ToolResult{
 				Parts: []schema.ToolOutputPart{
-					{Type: schema.ToolPartTypeText, Text: "invokable result: " + input.TextArgument},
+					{Type: schema.ToolPartTypeText, Text: "invokable result: " + input.Text},
 				},
 			}, nil
 		},
@@ -1071,7 +1071,7 @@ func TestEnhancedToolNode(t *testing.T) {
 		},
 		fn: func(ctx context.Context, input *schema.ToolArgument) (*schema.StreamReader[*schema.ToolResult], error) {
 			results := []*schema.ToolResult{
-				{Parts: []schema.ToolOutputPart{{Type: schema.ToolPartTypeText, Text: "stream part 1: " + input.TextArgument}}},
+				{Parts: []schema.ToolOutputPart{{Type: schema.ToolPartTypeText, Text: "stream part 1: " + input.Text}}},
 				{Parts: []schema.ToolOutputPart{{Type: schema.ToolPartTypeText, Text: " stream part 2"}}},
 			}
 			return schema.StreamReaderFromArray(results), nil
@@ -1147,7 +1147,7 @@ func TestEnhancedToolConversion(t *testing.T) {
 		fn: func(ctx context.Context, input *schema.ToolArgument) (*schema.ToolResult, error) {
 			return &schema.ToolResult{
 				Parts: []schema.ToolOutputPart{
-					{Type: schema.ToolPartTypeText, Text: "enhanced: " + input.TextArgument},
+					{Type: schema.ToolPartTypeText, Text: "enhanced: " + input.Text},
 				},
 			}, nil
 		},

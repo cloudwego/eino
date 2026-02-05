@@ -220,7 +220,7 @@ func (s *enhancedStreamableTool[T]) StreamableRun(ctx context.Context, toolArgum
 	var inst T
 	if s.um != nil {
 		var val any
-		val, err = s.um(ctx, toolArgument.TextArgument)
+		val, err = s.um(ctx, toolArgument.Text)
 		if err != nil {
 			return nil, fmt.Errorf("[EnhancedLocalStreamFunc] failed to unmarshal arguments, toolName=%s, err=%w", s.getToolName(), err)
 		}
@@ -233,7 +233,7 @@ func (s *enhancedStreamableTool[T]) StreamableRun(ctx context.Context, toolArgum
 	} else {
 		inst = generic.NewInstance[T]()
 
-		err = sonic.UnmarshalString(toolArgument.TextArgument, &inst)
+		err = sonic.UnmarshalString(toolArgument.Text, &inst)
 		if err != nil {
 			return nil, fmt.Errorf("[EnhancedLocalStreamFunc] failed to unmarshal arguments in json, toolName=%s, err=%w", s.getToolName(), err)
 		}

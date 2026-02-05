@@ -209,7 +209,7 @@ func TestNewEnhancedStreamTool(t *testing.T) {
 		assert.NoError(t, err)
 		assert.Equal(t, "enhanced_stream_search", info.Name)
 
-		sr, err := tl.StreamableRun(ctx, &schema.ToolArgument{TextArgument: `{"query":"test"}`})
+		sr, err := tl.StreamableRun(ctx, &schema.ToolArgument{Text: `{"query":"test"}`})
 		assert.NoError(t, err)
 		defer sr.Close()
 
@@ -281,7 +281,7 @@ func TestInferEnhancedStreamTool(t *testing.T) {
 		assert.NoError(t, err)
 		assert.Equal(t, "infer_enhanced_stream", info.Name)
 
-		sr, err := tl.StreamableRun(ctx, &schema.ToolArgument{TextArgument: `{"query":"hello"}`})
+		sr, err := tl.StreamableRun(ctx, &schema.ToolArgument{Text: `{"query":"hello"}`})
 		assert.NoError(t, err)
 		defer sr.Close()
 
@@ -303,7 +303,7 @@ func TestInferOptionableEnhancedStreamTool(t *testing.T) {
 		assert.NoError(t, err)
 		assert.Equal(t, "infer_optionable_enhanced_stream", info.Name)
 
-		sr, err := tl.StreamableRun(ctx, &schema.ToolArgument{TextArgument: `{"query":"world"}`}, FakeWithEnhancedStreamOption("custom"))
+		sr, err := tl.StreamableRun(ctx, &schema.ToolArgument{Text: `{"query":"world"}`}, FakeWithEnhancedStreamOption("custom"))
 		assert.NoError(t, err)
 		defer sr.Close()
 
@@ -317,7 +317,7 @@ func TestInferOptionableEnhancedStreamTool(t *testing.T) {
 		tl, err := InferOptionableEnhancedStreamTool("infer_optionable_enhanced_stream", "test infer optionable enhanced stream tool", fakeOptionableEnhancedStreamFunc)
 		assert.NoError(t, err)
 
-		sr, err := tl.StreamableRun(ctx, &schema.ToolArgument{TextArgument: `{"query":"test"}`})
+		sr, err := tl.StreamableRun(ctx, &schema.ToolArgument{Text: `{"query":"test"}`})
 		assert.NoError(t, err)
 		defer sr.Close()
 
