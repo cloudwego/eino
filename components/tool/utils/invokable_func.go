@@ -56,6 +56,33 @@ func InferOptionableTool[T, D any](toolName, toolDesc string, i OptionableInvoke
 	return newOptionableTool(ti, i, opts...), nil
 }
 
+// EnhancedInvokeFunc is the function type for the enhanced tool.
+type EnhancedInvokeFunc[T any] func(ctx context.Context, input T) (output *schema.ToolResult, err error)
+
+// OptionableEnhancedInvokeFunc is the function type for the enhanced tool with tool option.
+type OptionableEnhancedInvokeFunc[T any] func(ctx context.Context, input T, opts ...tool.Option) (output *schema.ToolResult, err error)
+
+// InferEnhancedTool creates an EnhancedInvokableTool from a given function by inferring the ToolInfo from the function's request parameters.
+// End-user can pass a SchemaCustomizerFn in opts to customize the go struct tag parsing process, overriding default behavior.
+func InferEnhancedTool[T any](toolName, toolDesc string, i EnhancedInvokeFunc[T], opts ...Option) (tool.EnhancedInvokableTool, error) {
+	ti, err := goStruct2ToolInfo[T](toolName, toolDesc, opts...)
+	if err != nil {
+		return nil, err
+	}
+
+	return NewEnhancedTool(ti, i, opts...), nil
+}
+
+// InferOptionableEnhancedTool creates an EnhancedInvokableTool from a given function by inferring the ToolInfo from the function's request parameters, with tool option.
+func InferOptionableEnhancedTool[T any](toolName, toolDesc string, i OptionableEnhancedInvokeFunc[T], opts ...Option) (tool.EnhancedInvokableTool, error) {
+	ti, err := goStruct2ToolInfo[T](toolName, toolDesc, opts...)
+	if err != nil {
+		return nil, err
+	}
+
+	return newOptionableEnhancedTool(ti, i, opts...), nil
+}
+
 // GoStruct2ParamsOneOf converts a go struct to a ParamsOneOf.
 // if you attempt to use ResponseFormat of some ChatModel to get StructuredOutput, you can infer the JSONSchema from the go struct.
 func GoStruct2ParamsOneOf[T any](opts ...Option) (*schema.ParamsOneOf, error) {
@@ -199,4 +226,77 @@ func snakeToCamel(s string) string {
 	}
 
 	return strings.Join(parts, "")
+}
+
+// NewEnhancedTool Create an enhanced tool, where the input is in JSON format and output is *schema.ToolResult.
+func NewEnhancedTool[T any](desc *schema.ToolInfo, i EnhancedInvokeFunc[T], opts ...Option) tool.EnhancedInvokableTool {
+	return newOptionableEnhancedTool(desc, func(ctx context.Context, input T, _ ...tool.Option) (*schema.ToolResult, error) {
+		return i(ctx, input)
+	}, opts...)
+}
+
+func newOptionableEnhancedTool[T any](desc *schema.ToolInfo, i OptionableEnhancedInvokeFunc[T], opts ...Option) tool.EnhancedInvokableTool {
+	to := getToolOptions(opts...)
+
+	return &enhancedInvokableTool[T]{
+		info: desc,
+		um:   to.um,
+		Fn:   i,
+	}
+}
+
+type enhancedInvokableTool[T any] struct {
+	info *schema.ToolInfo
+
+	um UnmarshalArguments
+
+	Fn OptionableEnhancedInvokeFunc[T]
+}
+
+func (e *enhancedInvokableTool[T]) Info(ctx context.Context) (*schema.ToolInfo, error) {
+	return e.info, nil
+}
+
+func (e *enhancedInvokableTool[T]) InvokableRun(ctx context.Context, toolArgument *schema.ToolArgument, opts ...tool.Option) (*schema.ToolResult, error) {
+	var inst T
+	var err error
+
+	if e.um != nil {
+		var val any
+		val, err = e.um(ctx, toolArgument.TextArgument)
+		if err != nil {
+			return nil, fmt.Errorf("[EnhancedLocalFunc] failed to unmarshal arguments, toolName=%s, err=%w", e.getToolName(), err)
+		}
+		gt, ok := val.(T)
+		if !ok {
+			return nil, fmt.Errorf("[EnhancedLocalFunc] invalid type, toolName=%s, expected=%T, given=%T", e.getToolName(), inst, val)
+		}
+		inst = gt
+	} else {
+		inst = generic.NewInstance[T]()
+
+		err = sonic.UnmarshalString(toolArgument.TextArgument, &inst)
+		if err != nil {
+			return nil, fmt.Errorf("[EnhancedLocalFunc] failed to unmarshal arguments in json, toolName=%s, err=%w", e.getToolName(), err)
+		}
+	}
+
+	resp, err := e.Fn(ctx, inst, opts...)
+	if err != nil {
+		return nil, fmt.Errorf("[EnhancedLocalFunc] failed to invoke tool, toolName=%s, err=%w", e.getToolName(), err)
+	}
+
+	return resp, nil
+}
+
+func (e *enhancedInvokableTool[T]) GetType() string {
+	return snakeToCamel(e.getToolName())
+}
+
+func (e *enhancedInvokableTool[T]) getToolName() string {
+	if e.info == nil {
+		return ""
+	}
+
+	return e.info.Name
 }

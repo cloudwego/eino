@@ -827,6 +827,7 @@ func TestToolRerun(t *testing.T) {
 			"3": "tool3 input: input",
 			"4": "tool4 input: input",
 		},
+		ExecutedEnhancedTools: make(map[string]*schema.ToolResult),
 	}, info.RerunNodesExtra["tool node"])
 
 	sr, err := r.Stream(ctx, nil, WithCheckPointID("1"))
@@ -1018,4 +1019,292 @@ func (f *streamableTool[I, O]) StreamableRun(ctx context.Context, argumentsInJSO
 	return schema.StreamReaderWithConvert(sr, func(o O) (string, error) {
 		return sonic.MarshalString(o)
 	}), nil
+}
+
+type enhancedInvokableTool struct {
+	info *schema.ToolInfo
+	fn   func(ctx context.Context, input *schema.ToolArgument) (*schema.ToolResult, error)
+}
+
+func (e *enhancedInvokableTool) Info(ctx context.Context) (*schema.ToolInfo, error) {
+	return e.info, nil
+}
+
+func (e *enhancedInvokableTool) InvokableRun(ctx context.Context, toolArgument *schema.ToolArgument, _ ...tool.Option) (*schema.ToolResult, error) {
+	return e.fn(ctx, toolArgument)
+}
+
+type enhancedStreamableTool struct {
+	info *schema.ToolInfo
+	fn   func(ctx context.Context, input *schema.ToolArgument) (*schema.StreamReader[*schema.ToolResult], error)
+}
+
+func (e *enhancedStreamableTool) Info(ctx context.Context) (*schema.ToolInfo, error) {
+	return e.info, nil
+}
+
+func (e *enhancedStreamableTool) StreamableRun(ctx context.Context, toolArgument *schema.ToolArgument, _ ...tool.Option) (*schema.StreamReader[*schema.ToolResult], error) {
+	return e.fn(ctx, toolArgument)
+}
+
+func TestEnhancedToolNode(t *testing.T) {
+	ctx := context.Background()
+
+	enhancedInvokable := &enhancedInvokableTool{
+		info: &schema.ToolInfo{
+			Name: "enhanced_invokable_tool",
+			Desc: "test enhanced invokable tool",
+		},
+		fn: func(ctx context.Context, input *schema.ToolArgument) (*schema.ToolResult, error) {
+			return &schema.ToolResult{
+				Parts: []schema.ToolOutputPart{
+					{Type: schema.ToolPartTypeText, Text: "invokable result: " + input.TextArgument},
+				},
+			}, nil
+		},
+	}
+
+	enhancedStreamable := &enhancedStreamableTool{
+		info: &schema.ToolInfo{
+			Name: "enhanced_streamable_tool",
+			Desc: "test enhanced streamable tool",
+		},
+		fn: func(ctx context.Context, input *schema.ToolArgument) (*schema.StreamReader[*schema.ToolResult], error) {
+			results := []*schema.ToolResult{
+				{Parts: []schema.ToolOutputPart{{Type: schema.ToolPartTypeText, Text: "stream part 1: " + input.TextArgument}}},
+				{Parts: []schema.ToolOutputPart{{Type: schema.ToolPartTypeText, Text: " stream part 2"}}},
+			}
+			return schema.StreamReaderFromArray(results), nil
+		},
+	}
+
+	toolNode, err := NewToolNode(ctx, &ToolsNodeConfig{
+		Tools: []tool.BaseTool{enhancedInvokable, enhancedStreamable},
+	})
+	assert.NoError(t, err)
+	assert.NotNil(t, toolNode)
+
+	t.Run("enhanced invokable tool", func(t *testing.T) {
+		input := schema.AssistantMessage("", []schema.ToolCall{
+			{
+				ID: "call1",
+				Function: schema.FunctionCall{
+					Name:      "enhanced_invokable_tool",
+					Arguments: "test input",
+				},
+			},
+		})
+
+		output, err := toolNode.Invoke(ctx, input)
+		assert.NoError(t, err)
+		assert.Len(t, output, 1)
+		assert.Equal(t, schema.Tool, output[0].Role)
+		assert.Equal(t, "call1", output[0].ToolCallID)
+	})
+
+	t.Run("enhanced streamable tool", func(t *testing.T) {
+		input := schema.AssistantMessage("", []schema.ToolCall{
+			{
+				ID: "call2",
+				Function: schema.FunctionCall{
+					Name:      "enhanced_streamable_tool",
+					Arguments: "test stream",
+				},
+			},
+		})
+
+		streamReader, err := toolNode.Stream(ctx, input)
+		assert.NoError(t, err)
+		assert.NotNil(t, streamReader)
+
+		var messages []*schema.Message
+		for {
+			chunk, err := streamReader.Recv()
+			if err != nil {
+				break
+			}
+			if chunk != nil {
+				messages = append(messages, chunk...)
+			}
+		}
+		message, err := schema.ConcatMessages(messages)
+		assert.NoError(t, err)
+		assert.Len(t, messages, 2)
+		assert.Equal(t, schema.Tool, messages[0].Role)
+		assert.Equal(t, "call2", messages[0].ToolCallID)
+		assert.Contains(t, message.UserInputMultiContent[0].Text, "stream part")
+	})
+}
+
+func TestEnhancedToolConversion(t *testing.T) {
+	ctx := context.Background()
+
+	enhancedInvokable := &enhancedInvokableTool{
+		info: &schema.ToolInfo{
+			Name: "enhanced_only_invokable",
+			Desc: "test enhanced invokable only",
+		},
+		fn: func(ctx context.Context, input *schema.ToolArgument) (*schema.ToolResult, error) {
+			return &schema.ToolResult{
+				Parts: []schema.ToolOutputPart{
+					{Type: schema.ToolPartTypeText, Text: "enhanced: " + input.TextArgument},
+				},
+			}, nil
+		},
+	}
+
+	toolNode, err := NewToolNode(ctx, &ToolsNodeConfig{
+		Tools: []tool.BaseTool{enhancedInvokable},
+	})
+	assert.NoError(t, err)
+
+	t.Run("enhanced invokable auto-converts to streamable", func(t *testing.T) {
+		input := schema.AssistantMessage("", []schema.ToolCall{
+			{
+				ID: "call1",
+				Function: schema.FunctionCall{
+					Name:      "enhanced_only_invokable",
+					Arguments: "test",
+				},
+			},
+		})
+
+		streamReader, err := toolNode.Stream(ctx, input)
+		assert.NoError(t, err)
+		assert.NotNil(t, streamReader)
+
+		var messages []*schema.Message
+		for {
+			chunk, err := streamReader.Recv()
+			if err != nil {
+				break
+			}
+			if chunk != nil {
+				messages = append(messages, chunk...)
+			}
+		}
+		assert.Len(t, messages, 1)
+	})
+}
+
+func TestEnhancedToolMiddleware(t *testing.T) {
+	ctx := context.Background()
+
+	var invokableMiddlewareCalled bool
+	var streamableMiddlewareCalled bool
+
+	enhancedInvokable := &enhancedInvokableTool{
+		info: &schema.ToolInfo{
+			Name: "enhanced_tool_with_middleware",
+			Desc: "test enhanced tool with middleware",
+		},
+		fn: func(ctx context.Context, input *schema.ToolArgument) (*schema.ToolResult, error) {
+			return &schema.ToolResult{
+				Parts: []schema.ToolOutputPart{
+					{Text: "result", Type: schema.ToolPartTypeText},
+				},
+			}, nil
+		},
+	}
+
+	toolNode, err := NewToolNode(ctx, &ToolsNodeConfig{
+		Tools: []tool.BaseTool{enhancedInvokable},
+		ToolCallMiddlewares: []ToolMiddleware{
+			{
+				EnhancedInvokable: func(next EnhancedInvokableToolEndpoint) EnhancedInvokableToolEndpoint {
+					return func(ctx context.Context, input *ToolInput) (*EnhancedInvokableToolOutput, error) {
+						invokableMiddlewareCalled = true
+						return next(ctx, input)
+					}
+				},
+				EnhancedStreamable: func(next EnhancedStreamableToolEndpoint) EnhancedStreamableToolEndpoint {
+					return func(ctx context.Context, input *ToolInput) (*EnhancedStreamableToolOutput, error) {
+						streamableMiddlewareCalled = true
+						return next(ctx, input)
+					}
+				},
+			},
+		},
+	})
+	assert.NoError(t, err)
+
+	t.Run("enhanced invokable middleware", func(t *testing.T) {
+		invokableMiddlewareCalled = false
+		input := schema.AssistantMessage("", []schema.ToolCall{
+			{
+				ID: "call1",
+				Function: schema.FunctionCall{
+					Name:      "enhanced_tool_with_middleware",
+					Arguments: "test",
+				},
+			},
+		})
+
+		_, err := toolNode.Invoke(ctx, input)
+		assert.NoError(t, err)
+		assert.True(t, invokableMiddlewareCalled)
+	})
+
+	t.Run("enhanced streamable middleware", func(t *testing.T) {
+		streamableMiddlewareCalled = false
+		input := schema.AssistantMessage("", []schema.ToolCall{
+			{
+				ID: "call2",
+				Function: schema.FunctionCall{
+					Name:      "enhanced_tool_with_middleware",
+					Arguments: "test",
+				},
+			},
+		})
+
+		streamReader, err := toolNode.Stream(ctx, input)
+		assert.NoError(t, err)
+		for {
+			_, err := streamReader.Recv()
+			if err != nil {
+				break
+			}
+		}
+		assert.False(t, streamableMiddlewareCalled)
+	})
+}
+
+func TestEnhancedToolPriority(t *testing.T) {
+	ctx := context.Background()
+
+	enhancedInvokable := &enhancedInvokableTool{
+		info: &schema.ToolInfo{
+			Name: "test_tool",
+			Desc: "test tool with both enhanced and regular",
+		},
+		fn: func(ctx context.Context, input *schema.ToolArgument) (*schema.ToolResult, error) {
+			return &schema.ToolResult{
+				Parts: []schema.ToolOutputPart{
+					{Text: "enhanced result", Type: schema.ToolPartTypeText},
+				},
+			}, nil
+		},
+	}
+
+	toolNode, err := NewToolNode(ctx, &ToolsNodeConfig{
+		Tools: []tool.BaseTool{enhancedInvokable},
+	})
+	assert.NoError(t, err)
+
+	t.Run("enhanced tool is used when available", func(t *testing.T) {
+		input := schema.AssistantMessage("", []schema.ToolCall{
+			{
+				ID: "call1",
+				Function: schema.FunctionCall{
+					Name:      "test_tool",
+					Arguments: "test",
+				},
+			},
+		})
+
+		output, err := toolNode.Invoke(ctx, input)
+		assert.NoError(t, err)
+		assert.Len(t, output, 1)
+		assert.Contains(t, output[0].UserInputMultiContent[0].Text, "enhanced result")
+	})
 }

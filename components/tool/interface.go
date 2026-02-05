@@ -41,3 +41,18 @@ type StreamableTool interface {
 
 	StreamableRun(ctx context.Context, argumentsInJSON string, opts ...Option) (*schema.StreamReader[string], error)
 }
+
+// EnhancedInvokableTool is a tool interface that supports returning structured multimodal results.
+// Unlike InvokableTool which returns a string, this interface returns *schema.ToolResult
+// which can contain text, images, audio, video, and files.
+type EnhancedInvokableTool interface {
+	BaseTool
+	InvokableRun(ctx context.Context, toolArgument *schema.ToolArgument, opts ...Option) (*schema.ToolResult, error)
+}
+
+// EnhancedStreamableTool is a streaming tool interface that supports returning structured multimodal results.
+// It provides a stream reader for accessing multimodal content progressively.
+type EnhancedStreamableTool interface {
+	BaseTool
+	StreamableRun(ctx context.Context, toolArgument *schema.ToolArgument, opts ...Option) (*schema.StreamReader[*schema.ToolResult], error)
+}
