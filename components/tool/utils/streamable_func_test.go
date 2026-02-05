@@ -167,3 +167,163 @@ func TestInferStreamTool(t *testing.T) {
 		}
 	}
 }
+
+type EnhancedStreamInput struct {
+	Query string `json:"query" jsonschema:"description=the search query"`
+}
+
+func TestNewEnhancedStreamTool(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("simple_case", func(t *testing.T) {
+		tl := NewEnhancedStreamTool[*EnhancedStreamInput](
+			&schema.ToolInfo{
+				Name: "enhanced_stream_search",
+				Desc: "search with enhanced stream output",
+				ParamsOneOf: schema.NewParamsOneOfByParams(
+					map[string]*schema.ParameterInfo{
+						"query": {
+							Type: "string",
+							Desc: "the search query",
+						},
+					}),
+			},
+			func(ctx context.Context, input *EnhancedStreamInput) (*schema.StreamReader[*schema.ToolResult], error) {
+				sr, sw := schema.Pipe[*schema.ToolResult](2)
+				sw.Send(&schema.ToolResult{
+					Parts: []schema.ToolOutputPart{
+						{Type: schema.ToolPartTypeText, Text: "result for: " + input.Query},
+					},
+				}, nil)
+				sw.Send(&schema.ToolResult{
+					Parts: []schema.ToolOutputPart{
+						{Type: schema.ToolPartTypeText, Text: "more results"},
+					},
+				}, nil)
+				sw.Close()
+				return sr, nil
+			},
+		)
+
+		info, err := tl.Info(ctx)
+		assert.NoError(t, err)
+		assert.Equal(t, "enhanced_stream_search", info.Name)
+
+		sr, err := tl.StreamableRun(ctx, &schema.ToolArgument{Text: `{"query":"test"}`})
+		assert.NoError(t, err)
+		defer sr.Close()
+
+		idx := 0
+		for {
+			m, err := sr.Recv()
+			if errors.Is(err, io.EOF) {
+				break
+			}
+			assert.NoError(t, err)
+
+			if idx == 0 {
+				assert.Len(t, m.Parts, 1)
+				assert.Equal(t, schema.ToolPartTypeText, m.Parts[0].Type)
+				assert.Equal(t, "result for: test", m.Parts[0].Text)
+			} else {
+				assert.Len(t, m.Parts, 1)
+				assert.Equal(t, "more results", m.Parts[0].Text)
+			}
+			idx++
+		}
+		assert.Equal(t, 2, idx)
+	})
+}
+
+type FakeEnhancedStreamOption struct {
+	Prefix string
+}
+
+func FakeWithEnhancedStreamOption(prefix string) tool.Option {
+	return tool.WrapImplSpecificOptFn(func(t *FakeEnhancedStreamOption) {
+		t.Prefix = prefix
+	})
+}
+
+func fakeEnhancedStreamFunc(ctx context.Context, input EnhancedStreamInput) (*schema.StreamReader[*schema.ToolResult], error) {
+	return schema.StreamReaderFromArray([]*schema.ToolResult{
+		{
+			Parts: []schema.ToolOutputPart{
+				{Type: schema.ToolPartTypeText, Text: "result: " + input.Query},
+			},
+		},
+	}), nil
+}
+
+func fakeOptionableEnhancedStreamFunc(ctx context.Context, input EnhancedStreamInput, opts ...tool.Option) (*schema.StreamReader[*schema.ToolResult], error) {
+	baseOpt := &FakeEnhancedStreamOption{
+		Prefix: "default",
+	}
+	option := tool.GetImplSpecificOptions(baseOpt, opts...)
+
+	return schema.StreamReaderFromArray([]*schema.ToolResult{
+		{
+			Parts: []schema.ToolOutputPart{
+				{Type: schema.ToolPartTypeText, Text: option.Prefix + ": " + input.Query},
+			},
+		},
+	}), nil
+}
+
+func TestInferEnhancedStreamTool(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("infer_enhanced_stream_tool", func(t *testing.T) {
+		tl, err := InferEnhancedStreamTool("infer_enhanced_stream", "test infer enhanced stream tool", fakeEnhancedStreamFunc)
+		assert.NoError(t, err)
+
+		info, err := tl.Info(ctx)
+		assert.NoError(t, err)
+		assert.Equal(t, "infer_enhanced_stream", info.Name)
+
+		sr, err := tl.StreamableRun(ctx, &schema.ToolArgument{Text: `{"query":"hello"}`})
+		assert.NoError(t, err)
+		defer sr.Close()
+
+		m, err := sr.Recv()
+		assert.NoError(t, err)
+		assert.Len(t, m.Parts, 1)
+		assert.Equal(t, "result: hello", m.Parts[0].Text)
+	})
+}
+
+func TestInferOptionableEnhancedStreamTool(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("infer_optionable_enhanced_stream_tool", func(t *testing.T) {
+		tl, err := InferOptionableEnhancedStreamTool("infer_optionable_enhanced_stream", "test infer optionable enhanced stream tool", fakeOptionableEnhancedStreamFunc)
+		assert.NoError(t, err)
+
+		info, err := tl.Info(ctx)
+		assert.NoError(t, err)
+		assert.Equal(t, "infer_optionable_enhanced_stream", info.Name)
+
+		sr, err := tl.StreamableRun(ctx, &schema.ToolArgument{Text: `{"query":"world"}`}, FakeWithEnhancedStreamOption("custom"))
+		assert.NoError(t, err)
+		defer sr.Close()
+
+		m, err := sr.Recv()
+		assert.NoError(t, err)
+		assert.Len(t, m.Parts, 1)
+		assert.Equal(t, "custom: world", m.Parts[0].Text)
+	})
+
+	t.Run("infer_optionable_enhanced_stream_tool_default_option", func(t *testing.T) {
+		tl, err := InferOptionableEnhancedStreamTool("infer_optionable_enhanced_stream", "test infer optionable enhanced stream tool", fakeOptionableEnhancedStreamFunc)
+		assert.NoError(t, err)
+
+		sr, err := tl.StreamableRun(ctx, &schema.ToolArgument{Text: `{"query":"test"}`})
+		assert.NoError(t, err)
+		defer sr.Close()
+
+		m, err := sr.Recv()
+		assert.NoError(t, err)
+		assert.Len(t, m.Parts, 1)
+		assert.Equal(t, "default: test", m.Parts[0].Text)
+	})
+}
