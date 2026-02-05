@@ -328,8 +328,8 @@ type ToolOutputPart struct {
 // ToolArgument contains the input information for a tool call.
 // It is used to pass tool call arguments to enhanced tools.
 type ToolArgument struct {
-	// TextArgument contains the arguments for the tool call in JSON format.
-	TextArgument string
+	// Text contains the arguments for the tool call in JSON format.
+	Text string `json:"text,omitempty"`
 }
 
 // ToolResult represents the structured multimodal output from a tool execution.

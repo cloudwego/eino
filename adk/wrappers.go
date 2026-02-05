@@ -187,7 +187,7 @@ func handlersToToolMiddlewares(handlers []handlerInfo) []compose.ToolMiddleware 
 							output, err := next(ctx, &compose.ToolInput{
 								Name:        input.Name,
 								CallID:      input.CallID,
-								Arguments:   toolArgument.TextArgument,
+								Arguments:   toolArgument.Text,
 								CallOptions: opts,
 							})
 							if err != nil {
@@ -200,7 +200,7 @@ func handlersToToolMiddlewares(handlers []handlerInfo) []compose.ToolMiddleware 
 					if err != nil {
 						return nil, err
 					}
-					result, err := wrappedEndpoint(ctx, &schema.ToolArgument{TextArgument: input.Arguments}, input.CallOptions...)
+					result, err := wrappedEndpoint(ctx, &schema.ToolArgument{Text: input.Arguments}, input.CallOptions...)
 					if err != nil {
 						return nil, err
 					}
@@ -223,7 +223,7 @@ func handlersToToolMiddlewares(handlers []handlerInfo) []compose.ToolMiddleware 
 							output, err := next(ctx, &compose.ToolInput{
 								Name:        input.Name,
 								CallID:      input.CallID,
-								Arguments:   toolArgument.TextArgument,
+								Arguments:   toolArgument.Text,
 								CallOptions: opts,
 							})
 							if err != nil {
@@ -236,7 +236,7 @@ func handlersToToolMiddlewares(handlers []handlerInfo) []compose.ToolMiddleware 
 					if err != nil {
 						return nil, err
 					}
-					result, err := wrappedEndpoint(ctx, &schema.ToolArgument{TextArgument: input.Arguments}, input.CallOptions...)
+					result, err := wrappedEndpoint(ctx, &schema.ToolArgument{Text: input.Arguments}, input.CallOptions...)
 					if err != nil {
 						return nil, err
 					}

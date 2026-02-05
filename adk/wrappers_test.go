@@ -510,7 +510,7 @@ func TestBaseChatModelAgentMiddlewareEnhancedDefaults(t *testing.T) {
 
 		wrapped, wrapErr := base.WrapEnhancedInvokableToolCall(context.Background(), endpoint, &ToolContext{Name: "test", CallID: "1"})
 		assert.NoError(t, wrapErr)
-		_, err := wrapped(context.Background(), &schema.ToolArgument{TextArgument: "{}"})
+		_, err := wrapped(context.Background(), &schema.ToolArgument{Text: "{}"})
 
 		assert.NoError(t, err)
 		assert.True(t, called)
@@ -527,7 +527,7 @@ func TestBaseChatModelAgentMiddlewareEnhancedDefaults(t *testing.T) {
 
 		wrapped, wrapErr := base.WrapEnhancedStreamableToolCall(context.Background(), endpoint, &ToolContext{Name: "test", CallID: "1"})
 		assert.NoError(t, wrapErr)
-		_, err := wrapped(context.Background(), &schema.ToolArgument{TextArgument: "{}"})
+		_, err := wrapped(context.Background(), &schema.ToolArgument{Text: "{}"})
 
 		assert.NoError(t, err)
 		assert.True(t, called)
@@ -543,7 +543,7 @@ func TestEnhancedToolArgumentsPropagation(t *testing.T) {
 					BaseChatModelAgentMiddleware: &BaseChatModelAgentMiddleware{},
 					wrapEnhancedInvokableFn: func(_ context.Context, endpoint EnhancedInvokableToolCallEndpoint, _ *ToolContext) EnhancedInvokableToolCallEndpoint {
 						return func(ctx context.Context, toolArgument *schema.ToolArgument, opts ...tool.Option) (*schema.ToolResult, error) {
-							capturedArgs = toolArgument.TextArgument
+							capturedArgs = toolArgument.Text
 							return endpoint(ctx, toolArgument, opts...)
 						}
 					},

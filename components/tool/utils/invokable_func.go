@@ -263,7 +263,7 @@ func (e *enhancedInvokableTool[T]) InvokableRun(ctx context.Context, toolArgumen
 
 	if e.um != nil {
 		var val any
-		val, err = e.um(ctx, toolArgument.TextArgument)
+		val, err = e.um(ctx, toolArgument.Text)
 		if err != nil {
 			return nil, fmt.Errorf("[EnhancedLocalFunc] failed to unmarshal arguments, toolName=%s, err=%w", e.getToolName(), err)
 		}
@@ -275,7 +275,7 @@ func (e *enhancedInvokableTool[T]) InvokableRun(ctx context.Context, toolArgumen
 	} else {
 		inst = generic.NewInstance[T]()
 
-		err = sonic.UnmarshalString(toolArgument.TextArgument, &inst)
+		err = sonic.UnmarshalString(toolArgument.Text, &inst)
 		if err != nil {
 			return nil, fmt.Errorf("[EnhancedLocalFunc] failed to unmarshal arguments in json, toolName=%s, err=%w", e.getToolName(), err)
 		}

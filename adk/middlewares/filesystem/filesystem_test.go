@@ -84,17 +84,17 @@ func TestLsTool(t *testing.T) {
 		{
 			name:     "list root",
 			input:    `{"path": "/"}`,
-			expected: []string{"/file1.txt", "/file2.go", "/dir1", "/dir2"},
+			expected: []string{"file1.txt", "file2.go", "dir1", "dir2"},
 		},
 		{
 			name:     "list empty path (defaults to root)",
 			input:    `{"path": ""}`,
-			expected: []string{"/file1.txt", "/file2.go", "/dir1", "/dir2"},
+			expected: []string{"file1.txt", "file2.go", "dir1", "dir2"},
 		},
 		{
 			name:     "list dir1",
 			input:    `{"path": "/dir1"}`,
-			expected: []string{"/dir1/file3.txt", "/dir1/file4.py"},
+			expected: []string{"file3.txt", "file4.py"},
 		},
 	}
 
@@ -328,27 +328,34 @@ func TestGlobTool(t *testing.T) {
 		{
 			name:     "match all .txt files in root",
 			input:    `{"pattern": "*.txt", "path": "/"}`,
-			expected: []string{"/file1.txt"},
+			expected: []string{"file1.txt"},
 		},
 		{
 			name:     "match all .go files in root",
 			input:    `{"pattern": "*.go", "path": "/"}`,
-			expected: []string{"/file2.go"},
+			expected: []string{"file2.go"},
 		},
 		{
 			name:     "match all .txt files in dir1",
 			input:    `{"pattern": "*.txt", "path": "/dir1"}`,
-			expected: []string{"/dir1/file3.txt"},
+			expected: []string{"file3.txt"},
 		},
 		{
 			name:     "match all .py files in dir1",
 			input:    `{"pattern": "*.py", "path": "/dir1"}`,
-			expected: []string{"/dir1/file4.py"},
+			expected: []string{"file4.py"},
 		},
+
 		{
 			name:     "empty path defaults to root",
 			input:    `{"pattern": "*.go", "path": ""}`,
-			expected: []string{"/file2.go"},
+			expected: []string{"file2.go"},
+		},
+
+		{
+			name:     "match all .txt files in dir1 in root dir",
+			input:    `{"pattern": "/dir1/*.txt", "path": "/"}`,
+			expected: []string{"/dir1/file3.txt"},
 		},
 	}
 
