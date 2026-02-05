@@ -370,22 +370,29 @@ func TestExtractTextContent(t *testing.T) {
 	})
 }
 
-func TestTruncateTextByTokens(t *testing.T) {
+func TestTruncateTextByChars(t *testing.T) {
 	t.Run("returns empty for empty string", func(t *testing.T) {
-		result := truncateTextByTokens("", 10)
+		result := truncateTextByChars("")
 		assert.Equal(t, "", result)
 	})
 
 	t.Run("returns original if under limit", func(t *testing.T) {
-		result := truncateTextByTokens("short", 100)
+		result := truncateTextByChars("short")
 		assert.Equal(t, "short", result)
 	})
 
 	t.Run("truncates long text", func(t *testing.T) {
-		longText := strings.Repeat("a", 100)
-		result := truncateTextByTokens(longText, 5)
+		longText := strings.Repeat("a", 3000)
+		result := truncateTextByChars(longText)
 		assert.Less(t, len(result), len(longText))
 		assert.Contains(t, result, "truncated")
+	})
+
+	t.Run("preserves prefix and suffix", func(t *testing.T) {
+		longText := strings.Repeat("a", 1000) + strings.Repeat("b", 1000) + strings.Repeat("c", 1000)
+		result := truncateTextByChars(longText)
+		assert.True(t, strings.HasPrefix(result, strings.Repeat("a", 1000)))
+		assert.True(t, strings.HasSuffix(result, strings.Repeat("c", 1000)))
 	})
 }
 
