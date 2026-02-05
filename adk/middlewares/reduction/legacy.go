@@ -22,7 +22,7 @@ import "github.com/cloudwego/eino/adk/middlewares/reduction/internal"
 //
 // DEPRECATED: All top-level exports in this file are maintained exclusively for backward compatibility.
 // New reduction middleware implementations are now developed and maintained in this package.
-// It is STRONGLY RECOMMENDED that new code directly use the NewToolReductionMiddleware instead.
+// It is STRONGLY RECOMMENDED that new code directly use the New instead.
 //
 // Existing code relying on these exports will continue to work indefinitely,
 // but no new features or bug fixes will be backported to this compatibility layer.
