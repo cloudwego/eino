@@ -36,44 +36,62 @@ func TestReductionMiddlewareTrunc(t *testing.T) {
 	ctx := context.Background()
 	it := mockInvokableTool()
 	st := mockStreamableTool()
-	tools := []tool.BaseTool{it, st}
-	config := &ToolReductionMiddlewareConfig{
-		ToolTruncation: &ToolTruncation{
-			ToolConfigs: make(map[string]ToolTruncationConfig, len(tools)),
-		},
-	}
-	for _, t := range tools {
-		info, _ := t.Info(ctx)
-		config.ToolTruncation.ToolConfigs[info.Name] = ToolTruncationConfig{
-			MaxLength:     ptrOf(70),
-			MaxLineLength: ptrOf(30),
-		}
-	}
 
-	t.Run("test invokable line and max length trunc", func(t *testing.T) {
+	t.Run("test invokable max length trunc", func(t *testing.T) {
 		tCtx := &adk.ToolContext{
 			Name:   "mock_invokable_tool",
 			CallID: "12345",
 		}
-		mw := &toolReductionMiddleware{config: config}
-		exp := `hello worldhello worldhello wo... (line truncated due to length limitation, 110 chars total)
-... (content truncated due to length limitation, 88 chars total)`
+		backend := filesystem.NewInMemoryBackend()
+		config := &ToolReductionMiddlewareConfig{
+			ToolConfig: map[string]*ToolReductionConfig{
+				"mock_invokable_tool": {
+					Backend: backend,
+					TruncationConfig: &TruncationConfig{
+						ReadFileToolName:  "read_file",
+						RootDir:           "/tmp/trunc",
+						MaxLengthForTrunc: 70,
+					},
+				},
+			},
+		}
+		mw, err := New(ctx, config)
+		assert.NoError(t, err)
+		exp := `hello worldhello worldhello worldhello worldhello worldhello worldhell...(129 chars truncated, full result saved to /tmp/trunc/12345, use read_file tool to retrieve if needed)`
 
 		edp, err := mw.WrapInvokableToolCall(ctx, it.InvokableRun, tCtx)
 		assert.NoError(t, err)
 		resp, err := edp(ctx, `{"value":"asd"}`)
 		assert.NoError(t, err)
 		assert.Equal(t, exp, resp)
+		content, err := backend.Read(ctx, &filesystem.ReadRequest{FilePath: "/tmp/trunc/12345"})
+		assert.NoError(t, err)
+		expOrigContent := `     1	hello worldhello worldhello worldhello worldhello worldhello worldhello worldhello worldhello worldhello world
+     2	hello worldhello worldhello worldhello worldhello worldhello worldhello worldhello world`
+		assert.Equal(t, expOrigContent, content)
 	})
 
 	t.Run("test streamable line and max length trunc", func(t *testing.T) {
 		tCtx := &adk.ToolContext{
 			Name:   "mock_streamable_tool",
-			CallID: "12345",
+			CallID: "54321",
 		}
-		mw := &toolReductionMiddleware{config: config}
-		exp := `hello worldhello worldhello wo... (line truncated due to length limitation, 110 chars total)
-... (content truncated due to length limitation, 88 chars total)`
+		backend := filesystem.NewInMemoryBackend()
+		config := &ToolReductionMiddlewareConfig{
+			ToolConfig: map[string]*ToolReductionConfig{
+				"mock_streamable_tool": {
+					Backend: backend,
+					TruncationConfig: &TruncationConfig{
+						ReadFileToolName:  "read_file",
+						RootDir:           "/tmp/trunc",
+						MaxLengthForTrunc: 70,
+					},
+				},
+			},
+		}
+		mw, err := New(ctx, config)
+		assert.NoError(t, err)
+		exp := `hello worldhello worldhello worldhello worldhello worldhello worldhell...(129 chars truncated, full result saved to /tmp/trunc/54321, use read_file tool to retrieve if needed)`
 
 		edp, err := mw.WrapStreamableToolCall(ctx, st.StreamableRun, tCtx)
 		assert.NoError(t, err)
@@ -83,10 +101,15 @@ func TestReductionMiddlewareTrunc(t *testing.T) {
 		assert.NoError(t, err)
 		resp.Close()
 		assert.Equal(t, exp, s)
+		content, err := backend.Read(ctx, &filesystem.ReadRequest{FilePath: "/tmp/trunc/54321"})
+		assert.NoError(t, err)
+		expOrigContent := `     1	hello worldhello worldhello worldhello worldhello worldhello worldhello worldhello worldhello worldhello world
+     2	hello worldhello worldhello worldhello worldhello worldhello worldhello worldhello world`
+		assert.Equal(t, expOrigContent, content)
 	})
 }
 
-func TestReductionMiddlewareOffload(t *testing.T) {
+func TestReductionMiddlewareClear(t *testing.T) {
 	ctx := context.Background()
 	backend := filesystem.NewInMemoryBackend()
 	it := mockInvokableTool()
@@ -102,7 +125,7 @@ func TestReductionMiddlewareOffload(t *testing.T) {
 		Result    string            `json:"result"`
 	}
 
-	t.Run("test offload", func(t *testing.T) {
+	t.Run("test clear", func(t *testing.T) {
 		handler := func(ctx context.Context, detail *ToolDetail) (*OffloadInfo, error) {
 			arguments := make(map[string]string)
 			if err := json.Unmarshal([]byte(detail.ToolArgument.TextArgument), &arguments); err != nil {
@@ -125,24 +148,21 @@ func TestReductionMiddlewareOffload(t *testing.T) {
 				OffloadContent: toJson(offloadContent),
 			}, nil
 		}
-
 		config := &ToolReductionMiddlewareConfig{
-			ToolOffload: &ToolOffload{
-				TokenCounter: defaultTokenCounter,
-				ToolOffloadThreshold: &ToolOffloadThresholdConfig{
-					MaxTokens:            20,
-					OffloadBatchSize:     1,
-					RetentionSuffixLimit: 0,
-				},
-				ToolConfigs: map[string]ToolOffloadConfig{
-					"get_weather":          {OffloadBackend: backend, OffloadHandler: handler},
-					"mock_streamable_tool": {OffloadBackend: backend, OffloadHandler: handler},
-				},
-				ToolOffloadPostProcess: nil,
+			GeneralConfig: &ToolReductionConfig{
+				Backend:     backend,
+				ClearConfig: &ClearConfig{handler},
 			},
+			TokenCounter: defaultTokenCounter,
+			ClearThreshold: &ClearThresholdConfig{
+				MaxTokens:            20,
+				OffloadBatchSize:     1,
+				RetentionSuffixLimit: 0,
+			},
+			ClearPostProcess: nil,
 		}
 
-		mw := &toolReductionMiddleware{config: config}
+		mw, err := New(ctx, config)
 		_, s, err := mw.BeforeModelRewriteState(ctx, &adk.ChatModelAgentState{
 			Messages: []adk.Message{
 				schema.SystemMessage("you are a helpful assistant"),
@@ -210,16 +230,6 @@ func TestDefaultOffloadHandler(t *testing.T) {
 		OffloadContent: "hello",
 	}, info)
 
-}
-
-func TestNewDefaultToolReductionMiddleware(t *testing.T) {
-	ctx := context.Background()
-	it := mockInvokableTool()
-	st := mockStreamableTool()
-	tools := []tool.BaseTool{it, st}
-	mw, err := NewDefaultToolReductionMiddleware(ctx, tools)
-	assert.NoError(t, err)
-	assert.NotNil(t, mw)
 }
 
 func mockInvokableTool() tool.InvokableTool {

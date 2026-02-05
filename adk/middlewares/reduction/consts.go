@@ -19,17 +19,6 @@ package reduction
 
 import "github.com/cloudwego/eino/adk/internal"
 
-func getLineTruncFmt() string {
-	s, _ := internal.SelectPrompt(internal.I18nPrompts{
-		English: lineTruncFmt,
-		Chinese: lineTruncFmtZh,
-	})
-	if s == "" {
-		return lineTruncFmt
-	}
-	return s
-}
-
 func getContentTruncFmt() string {
 	s, _ := internal.SelectPrompt(internal.I18nPrompts{
 		English: contentTruncFmt,
@@ -53,11 +42,8 @@ func getToolOffloadResultFmt() string {
 }
 
 const (
-	lineTruncFmt   = `... (line truncated due to length limitation, %d chars total)`
-	lineTruncFmtZh = `...(由于长度限制截断本行, 总计 %d 字符)`
-
-	contentTruncFmt   = `... (content truncated due to length limitation, %d chars total)`
-	contentTruncFmtZh = `...(由于长度限制截断末尾, 总计 %d 字符)`
+	contentTruncFmt   = `...({removed_count} chars truncated, full result saved to {file_path}, use {read_file_tool_name} tool to retrieve if needed)`
+	contentTruncFmtZh = `...(后续 {removed_count} 个字符被截断, 完整内容保存在 {file_path}, 需要时使用 {read_file_tool_name} 工具导入)`
 )
 
 const (
