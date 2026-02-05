@@ -401,7 +401,7 @@ func wrapEnhancedInvokableToolCall(eiTool tool.EnhancedInvokableTool, middleware
 		eiTool = &enhancedInvokableToolWithCallback{eiTool: eiTool}
 	}
 	return middleware(func(ctx context.Context, input *ToolInput) (*EnhancedInvokableToolOutput, error) {
-		result, err := eiTool.InvokableRun(ctx, &schema.ToolArgument{TextArgument: input.Arguments}, input.CallOptions...)
+		result, err := eiTool.InvokableRun(ctx, &schema.ToolArgument{Text: input.Arguments}, input.CallOptions...)
 		if err != nil {
 			return nil, err
 		}
@@ -420,7 +420,7 @@ func wrapEnhancedStreamableToolCall(est tool.EnhancedStreamableTool, middlewares
 		est = &enhancedStreamableToolWithCallback{est: est}
 	}
 	return middleware(func(ctx context.Context, input *ToolInput) (*EnhancedStreamableToolOutput, error) {
-		result, err := est.StreamableRun(ctx, &schema.ToolArgument{TextArgument: input.Arguments}, input.CallOptions...)
+		result, err := est.StreamableRun(ctx, &schema.ToolArgument{Text: input.Arguments}, input.CallOptions...)
 		if err != nil {
 			return nil, err
 		}

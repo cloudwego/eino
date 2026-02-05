@@ -25,7 +25,7 @@ import (
 
 // FileInfo represents basic file metadata information.
 type FileInfo struct {
-	// Path is the absolute path of the file or directory.
+	// Path is the path of the file or directory, which can be a filename, relative path, or absolute path.
 	Path string
 
 	// IsDir indicates whether the entry is a directory.
