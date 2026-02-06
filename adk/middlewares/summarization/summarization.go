@@ -273,11 +273,6 @@ func (m *middleware) summarize(ctx context.Context, msgs []adk.Message) (adk.Mes
 	return summary, nil
 }
 
-var (
-	allUserMessagesCloseTagRegex = regexp.MustCompile(`</?all_user_messages>`)
-	pendingTasksRegex            = regexp.MustCompile(`(?m)^(\d+\.\s*)?Pending Tasks:`)
-)
-
 func (m *middleware) postProcessSummary(ctx context.Context, messages []adk.Message, summary adk.Message) (adk.Message, error) {
 	maxUserMsgTokens := m.getMaxUserMessageTokens()
 	content, err := m.insertUserMessagesIntoSummary(ctx, messages, summary.Content, maxUserMsgTokens)
@@ -363,12 +358,8 @@ func (m *middleware) insertUserMessagesIntoSummary(ctx context.Context, messages
 		return summary, nil
 	}
 
-	if loc := findLastMatch(allUserMessagesCloseTagRegex, summary); loc != nil {
-		return summary[:loc[0]] + userMsgsText + "\n" + summary[loc[0]:], nil
-	}
-
-	if loc := findLastMatch(pendingTasksRegex, summary); loc != nil {
-		return summary[:loc[0]] + userMsgsText + "\n\n" + summary[loc[0]:], nil
+	if loc := findLastMatch(getPendingTasksRegex(), summary); loc != nil {
+		return strings.TrimRight(summary[:loc[0]], "\n") + "\n" + userMsgsText + "\n\n" + summary[loc[0]:], nil
 	}
 
 	return appendSection(summary, fmt.Sprintf(getFallbackUserMessagesInstruction(), userMsgsText)), nil
