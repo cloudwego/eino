@@ -437,17 +437,30 @@ func TestAppendSection(t *testing.T) {
 	}
 }
 
-func TestFindLastMatch(t *testing.T) {
+func TestPendingTasksRegex(t *testing.T) {
 	t.Run("no match returns nil", func(t *testing.T) {
-		result := findLastMatch(allUserMessagesCloseTagRegex, "no tags here")
+		result := findLastMatch(getPendingTasksRegex(), "no tasks here")
 		assert.Nil(t, result)
 	})
 
-	t.Run("finds last match", func(t *testing.T) {
-		text := "<all_user_messages>first</all_user_messages> middle <all_user_messages>second</all_user_messages>"
-		result := findLastMatch(allUserMessagesCloseTagRegex, text)
+	t.Run("does not match inline content", func(t *testing.T) {
+		text := "6. Pending Tasks: Outline any pending tasks"
+		result := findLastMatch(getPendingTasksRegex(), text)
+		assert.Nil(t, result)
+	})
+
+	t.Run("finds last match english", func(t *testing.T) {
+		text := "7. Pending Tasks:\n- task1\n\n8. Pending Tasks:\n- task2"
+		result := findLastMatch(pendingTasksRegex, text)
 		assert.NotNil(t, result)
-		assert.Equal(t, "</all_user_messages>", text[result[0]:result[1]])
+		assert.Equal(t, "8. Pending Tasks:", text[result[0]:result[1]])
+	})
+
+	t.Run("finds last match chinese", func(t *testing.T) {
+		text := "7. 待处理任务：\n- 任务1\n\n8. 待处理任务：\n- 任务2"
+		result := findLastMatch(pendingTasksRegexZh, text)
+		assert.NotNil(t, result)
+		assert.Equal(t, "8. 待处理任务：", text[result[0]:result[1]])
 	})
 }
 
