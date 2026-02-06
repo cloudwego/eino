@@ -721,21 +721,21 @@ func (a *ChatModelAgent) buildNoToolsRunFunc(_ context.Context) runFunc {
 		instruction string
 	}
 
-	chain := compose.NewChain[noToolsInput, Message](
-		compose.WithGenLocalState(func(ctx context.Context) (state *State) {
-			return &State{}
-		})).
-		AppendLambda(compose.InvokableLambda(func(ctx context.Context, in noToolsInput) ([]Message, error) {
-			messages, err := a.genModelInput(ctx, in.instruction, in.input)
-			if err != nil {
-				return nil, err
-			}
-			return messages, nil
-		})).
-		AppendChatModel(wrappedModel)
-
 	return func(ctx context.Context, input *AgentInput, generator *AsyncGenerator[*AgentEvent],
 		store *bridgeStore, instruction string, _ map[string]bool, opts ...compose.Option) {
+
+		chain := compose.NewChain[noToolsInput, Message](
+			compose.WithGenLocalState(func(ctx context.Context) (state *State) {
+				return &State{}
+			})).
+			AppendLambda(compose.InvokableLambda(func(ctx context.Context, in noToolsInput) ([]Message, error) {
+				messages, err := a.genModelInput(ctx, in.instruction, in.input)
+				if err != nil {
+					return nil, err
+				}
+				return messages, nil
+			})).
+			AppendChatModel(wrappedModel)
 
 		r, err := chain.Compile(ctx, compose.WithGraphName(a.name),
 			compose.WithCheckPointStore(store),
@@ -789,32 +789,33 @@ func (a *ChatModelAgent) buildReactRunFunc(ctx context.Context, bc *execContext)
 		maxIterations:       a.maxIterations,
 	}
 
-	g, err := newReact(ctx, conf)
-	if err != nil {
-		return nil, err
-	}
-
 	type reactRunInput struct {
 		input       *AgentInput
 		instruction string
 	}
 
-	chain := compose.NewChain[reactRunInput, Message]().
-		AppendLambda(
-			compose.InvokableLambda(func(ctx context.Context, in reactRunInput) (*reactInput, error) {
-				messages, err := a.genModelInput(ctx, in.instruction, in.input)
-				if err != nil {
-					return nil, err
-				}
-				return &reactInput{
-					messages: messages,
-				}, nil
-			}),
-		).
-		AppendGraph(g, compose.WithNodeName("ReAct"), compose.WithGraphCompileOptions(compose.WithMaxRunSteps(math.MaxInt)))
-
 	return func(ctx context.Context, input *AgentInput, generator *AsyncGenerator[*AgentEvent], store *bridgeStore,
 		instruction string, returnDirectly map[string]bool, opts ...compose.Option) {
+		g, err := newReact(ctx, conf)
+		if err != nil {
+			generator.Send(&AgentEvent{Err: err})
+			return
+		}
+
+		chain := compose.NewChain[reactRunInput, Message]().
+			AppendLambda(
+				compose.InvokableLambda(func(ctx context.Context, in reactRunInput) (*reactInput, error) {
+					messages, genErr := a.genModelInput(ctx, in.instruction, in.input)
+					if genErr != nil {
+						return nil, genErr
+					}
+					return &reactInput{
+						messages: messages,
+					}, nil
+				}),
+			).
+			AppendGraph(g, compose.WithNodeName("ReAct"), compose.WithGraphCompileOptions(compose.WithMaxRunSteps(math.MaxInt)))
+
 		var compileOptions []compose.GraphCompileOption
 		compileOptions = append(compileOptions,
 			compose.WithGraphName(a.name),
