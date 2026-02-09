@@ -24,9 +24,10 @@ import (
 	"github.com/bytedance/sonic"
 
 	"github.com/cloudwego/eino/adk"
+	"github.com/cloudwego/eino/adk/filesystem"
 	"github.com/cloudwego/eino/adk/internal"
+	filesystem2 "github.com/cloudwego/eino/adk/middlewares/filesystem"
 	"github.com/cloudwego/eino/components/model"
-	"github.com/cloudwego/eino/components/tool"
 	"github.com/cloudwego/eino/components/tool/utils"
 	"github.com/cloudwego/eino/schema"
 )
@@ -57,6 +58,19 @@ type Config struct {
 	ToolsConfig adk.ToolsConfig
 	// MaxIteration limits the maximum number of reasoning iterations the agent can perform.
 	MaxIteration int
+
+	// Backend provides filesystem operations used by tools and offloading.
+	// If set, filesystem tools (read_file, write_file, edit_file, glob, grep) will be registered.
+	// Optional.
+	Backend filesystem.Backend
+	// Shell provides shell command execution capability.
+	// If set, an execute tool will be registered to support shell command execution.
+	// Optional. Mutually exclusive with StreamingShell.
+	Shell filesystem.Shell
+	// StreamingShell provides streaming shell command execution capability.
+	// If set, a streaming execute tool will be registered to support streaming shell command execution.
+	// Optional. Mutually exclusive with Shell.
+	StreamingShell filesystem.StreamingShell
 
 	// WithoutWriteTodos disables the built-in write_todos tool when set to true.
 	WithoutWriteTodos bool
@@ -89,7 +103,7 @@ type Config struct {
 // This function initializes built-in tools, creates a task tool for subagent orchestration,
 // and returns a fully configured ChatModelAgent ready for execution.
 func New(ctx context.Context, cfg *Config) (adk.ResumableAgent, error) {
-	middlewares, err := buildBuiltinAgentMiddlewares(cfg.WithoutWriteTodos)
+	handlers, err := buildBuiltinAgentMiddlewares(ctx, cfg)
 	if err != nil {
 		return nil, err
 	}
@@ -116,12 +130,13 @@ func New(ctx context.Context, cfg *Config) (adk.ResumableAgent, error) {
 			instruction,
 			cfg.ToolsConfig,
 			cfg.MaxIteration,
-			append(middlewares, cfg.Middlewares...),
+			cfg.Middlewares,
+			append(handlers, cfg.Handlers...),
 		)
 		if err != nil {
 			return nil, fmt.Errorf("failed to new task tool: %w", err)
 		}
-		middlewares = append(middlewares, tt)
+		handlers = append(handlers, tt)
 	}
 
 	return adk.NewChatModelAgent(ctx, &adk.ChatModelAgentConfig{
@@ -131,8 +146,8 @@ func New(ctx context.Context, cfg *Config) (adk.ResumableAgent, error) {
 		Model:         cfg.ChatModel,
 		ToolsConfig:   cfg.ToolsConfig,
 		MaxIterations: cfg.MaxIteration,
-		Middlewares:   append(middlewares, cfg.Middlewares...),
-		Handlers:      cfg.Handlers,
+		Middlewares:   cfg.Middlewares,
+		Handlers:      append(handlers, cfg.Handlers...),
 
 		GenModelInput:    genModelInput,
 		ModelRetryConfig: cfg.ModelRetryConfig,
@@ -152,14 +167,27 @@ func genModelInput(ctx context.Context, instruction string, input *adk.AgentInpu
 	return msgs, nil
 }
 
-func buildBuiltinAgentMiddlewares(withoutWriteTodos bool) ([]adk.AgentMiddleware, error) {
-	var ms []adk.AgentMiddleware
-	if !withoutWriteTodos {
+func buildBuiltinAgentMiddlewares(ctx context.Context, cfg *Config) ([]adk.ChatModelAgentMiddleware, error) {
+	var ms []adk.ChatModelAgentMiddleware
+	if !cfg.WithoutWriteTodos {
 		t, err := newWriteTodos()
 		if err != nil {
 			return nil, err
 		}
 		ms = append(ms, t)
+	}
+
+	if cfg.Backend != nil || cfg.Shell != nil || cfg.StreamingShell != nil {
+		fm, err := filesystem2.New(ctx, &filesystem2.Config{
+			Backend:                          cfg.Backend,
+			Shell:                            cfg.Shell,
+			StreamingShell:                   cfg.StreamingShell,
+			WithoutLargeToolResultOffloading: true,
+		})
+		if err != nil {
+			return nil, err
+		}
+		ms = append(ms, fm)
 	}
 
 	return ms, nil
@@ -175,27 +203,27 @@ type writeTodosArguments struct {
 	Todos []TODO `json:"todos"`
 }
 
-func newWriteTodos() (adk.AgentMiddleware, error) {
+func newWriteTodos() (adk.ChatModelAgentMiddleware, error) {
 	toolDesc, err := internal.SelectPrompt(internal.I18nPrompts{
 		English: writeTodosToolDescription,
 		Chinese: writeTodosToolDescriptionChinese,
 	})
 	if err != nil {
-		return adk.AgentMiddleware{}, err
+		return nil, err
 	}
 	prompt, err := internal.SelectPrompt(internal.I18nPrompts{
 		English: writeTodosPrompt,
 		Chinese: writeTodosPromptChinese,
 	})
 	if err != nil {
-		return adk.AgentMiddleware{}, err
+		return nil, err
 	}
 	resultMsg, err := internal.SelectPrompt(internal.I18nPrompts{
 		English: "Updated todo list to %s",
 		Chinese: "已更新待办列表为 %s",
 	})
 	if err != nil {
-		return adk.AgentMiddleware{}, err
+		return nil, err
 	}
 
 	t, err := utils.InferTool("write_todos", toolDesc, func(ctx context.Context, input writeTodosArguments) (output string, err error) {
@@ -207,11 +235,8 @@ func newWriteTodos() (adk.AgentMiddleware, error) {
 		return fmt.Sprintf(resultMsg, todos), nil
 	})
 	if err != nil {
-		return adk.AgentMiddleware{}, err
+		return nil, err
 	}
 
-	return adk.AgentMiddleware{
-		AdditionalInstruction: prompt,
-		AdditionalTools:       []tool.BaseTool{t},
-	}, nil
+	return buildAppendPromptTool(prompt, t), nil
 }

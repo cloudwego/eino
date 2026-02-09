@@ -37,16 +37,19 @@ import (
 // Config is the configuration for the filesystem middleware
 type Config struct {
 	// Backend provides filesystem operations used by tools and offloading.
-	// required
+	// If set, filesystem tools (read_file, write_file, edit_file, glob, grep) will be registered.
+	// At least one of Backend, Shell, or StreamingShell must be set.
 	Backend filesystem.Backend
 
 	// Shell provides shell command execution capability.
 	// If set, an execute tool will be registered to support shell command execution.
-	// optional, mutually exclusive with StreamingShell
+	// At least one of Backend, Shell, or StreamingShell must be set.
+	// Mutually exclusive with StreamingShell.
 	Shell filesystem.Shell
 	// StreamingShell provides streaming shell command execution capability.
-	// If set, a streaming execute tool will be registered for real-time output.
-	// optional, mutually exclusive with Shell
+	// If set, a streaming execute tool will be registered to support streaming shell command execution.
+	// At least one of Backend, Shell, or StreamingShell must be set.
+	// Mutually exclusive with Shell.
 	StreamingShell filesystem.StreamingShell
 
 	// WithoutLargeToolResultOffloading disables automatic offloading of large tool result to Backend
@@ -90,8 +93,8 @@ func (c *Config) Validate() error {
 	if c == nil {
 		return errors.New("config should not be nil")
 	}
-	if c.Backend == nil {
-		return errors.New("backend should not be nil")
+	if c.Backend == nil && c.Shell == nil && c.StreamingShell == nil {
+		return errors.New("at least one of Backend, Shell, or StreamingShell must be set")
 	}
 	if c.StreamingShell != nil && c.Shell != nil {
 		return errors.New("shell and streaming shell should not be both set")
@@ -101,7 +104,7 @@ func (c *Config) Validate() error {
 
 // NewMiddleware constructs and returns the filesystem middleware.
 //
-// Deprecated: Use NewChatModelAgentMiddleware instead. NewChatModelAgentMiddleware returns
+// Deprecated: Use New instead. New returns
 // a ChatModelAgentMiddleware which provides better context propagation through wrapper methods
 // and is the recommended approach for new code. See ChatModelAgentMiddleware documentation
 // for details on the benefits over AgentMiddleware.
@@ -294,6 +297,27 @@ func (m *filesystemMiddleware) WrapStreamableToolCall(ctx context.Context, endpo
 
 func getFilesystemTools(_ context.Context, validatedConfig *Config) ([]tool.BaseTool, error) {
 	var tools []tool.BaseTool
+	var err error
+
+	if validatedConfig.StreamingShell != nil {
+		var executeTool tool.BaseTool
+		executeTool, err = newStreamingExecuteTool(validatedConfig.StreamingShell, validatedConfig.CustomExecuteToolDesc)
+		if err != nil {
+			return nil, err
+		}
+		tools = append(tools, executeTool)
+	} else if validatedConfig.Shell != nil {
+		var executeTool tool.BaseTool
+		executeTool, err = newExecuteTool(validatedConfig.Shell, validatedConfig.CustomExecuteToolDesc)
+		if err != nil {
+			return nil, err
+		}
+		tools = append(tools, executeTool)
+	}
+
+	if validatedConfig.Backend == nil {
+		return tools, nil
+	}
 
 	lsTool, err := newLsTool(validatedConfig.Backend, validatedConfig.CustomLsToolDesc)
 	if err != nil {
@@ -330,22 +354,6 @@ func getFilesystemTools(_ context.Context, validatedConfig *Config) ([]tool.Base
 		return nil, err
 	}
 	tools = append(tools, grepTool)
-
-	if validatedConfig.StreamingShell != nil {
-		var executeTool tool.BaseTool
-		executeTool, err = newStreamingExecuteTool(validatedConfig.StreamingShell, validatedConfig.CustomExecuteToolDesc)
-		if err != nil {
-			return nil, err
-		}
-		tools = append(tools, executeTool)
-	} else if validatedConfig.Shell != nil {
-		var executeTool tool.BaseTool
-		executeTool, err = newExecuteTool(validatedConfig.Shell, validatedConfig.CustomExecuteToolDesc)
-		if err != nil {
-			return nil, err
-		}
-		tools = append(tools, executeTool)
-	}
 
 	return tools, nil
 }
