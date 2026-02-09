@@ -151,15 +151,7 @@ func (t *taskCreateTool) InvokableRun(ctx context.Context, argumentsInJSON strin
 		return "", fmt.Errorf("%s marshal task #%d failed, err: %w", TaskCreateToolName, taskID, err)
 	}
 
-	taskFilePath := filepath.Join(t.BaseDir, taskFileName)
-	err = t.Backend.Write(ctx, &WriteRequest{
-		FilePath: taskFilePath,
-		Content:  taskData,
-	})
-	if err != nil {
-		return "", fmt.Errorf("%s create Task #%d failed, err: %w", TaskCreateToolName, taskID, err)
-	}
-
+	//  Write highwatermark file first
 	highwatermarkPath := filepath.Join(t.BaseDir, highWatermarkFileName)
 	err = t.Backend.Write(ctx, &WriteRequest{
 		FilePath: highwatermarkPath,
@@ -167,6 +159,15 @@ func (t *taskCreateTool) InvokableRun(ctx context.Context, argumentsInJSON strin
 	})
 	if err != nil {
 		return "", fmt.Errorf("%s update highwatermark file %s failed, err: %w", TaskCreateToolName, highwatermarkPath, err)
+	}
+
+	taskFilePath := filepath.Join(t.BaseDir, taskFileName)
+	err = t.Backend.Write(ctx, &WriteRequest{
+		FilePath: taskFilePath,
+		Content:  taskData,
+	})
+	if err != nil {
+		return "", fmt.Errorf("%s create Task #%d failed, err: %w", TaskCreateToolName, taskID, err)
 	}
 
 	resp := &taskOut{
