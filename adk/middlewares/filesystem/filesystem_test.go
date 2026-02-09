@@ -890,3 +890,138 @@ func TestFilesystemMiddleware_WrapStreamableToolCall(t *testing.T) {
 		assert.Equal(t, "result", result.String())
 	})
 }
+
+func TestGrepToolWithSortingAndPagination(t *testing.T) {
+	backend := filesystem.NewInMemoryBackend()
+	ctx := context.Background()
+
+	backend.Write(ctx, &filesystem.WriteRequest{
+		FilePath: "/zebra.txt",
+		Content:  "match1\nmatch2\nmatch3",
+	})
+	backend.Write(ctx, &filesystem.WriteRequest{
+		FilePath: "/apple.txt",
+		Content:  "match4\nmatch5",
+	})
+	backend.Write(ctx, &filesystem.WriteRequest{
+		FilePath: "/banana.txt",
+		Content:  "match6\nmatch7\nmatch8",
+	})
+
+	grepTool, err := newGrepTool(backend, nil)
+	assert.NoError(t, err)
+
+	t.Run("files sorted by basename", func(t *testing.T) {
+		result, err := invokeTool(t, grepTool, `{"pattern": "match", "output_mode": "files_with_matches"}`)
+		assert.NoError(t, err)
+		lines := strings.Split(strings.TrimSpace(result), "\n")
+		assert.Equal(t, 3, len(lines))
+		assert.Contains(t, lines[0], "apple.txt")
+		assert.Contains(t, lines[1], "banana.txt")
+		assert.Contains(t, lines[2], "zebra.txt")
+	})
+
+	t.Run("files_with_matches with offset", func(t *testing.T) {
+		result, err := invokeTool(t, grepTool, `{"pattern": "match", "output_mode": "files_with_matches", "offset": 1}`)
+		assert.NoError(t, err)
+		lines := strings.Split(strings.TrimSpace(result), "\n")
+		assert.Equal(t, 2, len(lines))
+		assert.Contains(t, lines[0], "banana.txt")
+		assert.Contains(t, lines[1], "zebra.txt")
+	})
+
+	t.Run("files_with_matches with head_limit", func(t *testing.T) {
+		result, err := invokeTool(t, grepTool, `{"pattern": "match", "output_mode": "files_with_matches", "head_limit": 2}`)
+		assert.NoError(t, err)
+		lines := strings.Split(strings.TrimSpace(result), "\n")
+		assert.Equal(t, 2, len(lines))
+		assert.Contains(t, lines[0], "apple.txt")
+		assert.Contains(t, lines[1], "banana.txt")
+	})
+
+	t.Run("files_with_matches with offset and head_limit", func(t *testing.T) {
+		result, err := invokeTool(t, grepTool, `{"pattern": "match", "output_mode": "files_with_matches", "offset": 1, "head_limit": 1}`)
+		assert.NoError(t, err)
+		lines := strings.Split(strings.TrimSpace(result), "\n")
+		assert.Equal(t, 1, len(lines))
+		assert.Contains(t, lines[0], "banana.txt")
+	})
+
+	t.Run("content mode sorted and paginated", func(t *testing.T) {
+		result, err := invokeTool(t, grepTool, `{"pattern": "match", "output_mode": "content", "head_limit": 3}`)
+		assert.NoError(t, err)
+		lines := strings.Split(strings.TrimSpace(result), "\n")
+		assert.Equal(t, 3, len(lines))
+		assert.Contains(t, lines[0], "apple.txt")
+	})
+
+	t.Run("content mode with offset", func(t *testing.T) {
+		result, err := invokeTool(t, grepTool, `{"pattern": "match", "output_mode": "content", "offset": 2, "head_limit": 2}`)
+		assert.NoError(t, err)
+		lines := strings.Split(strings.TrimSpace(result), "\n")
+		assert.Equal(t, 2, len(lines))
+	})
+
+	t.Run("count mode sorted", func(t *testing.T) {
+		result, err := invokeTool(t, grepTool, `{"pattern": "match", "output_mode": "count"}`)
+		assert.NoError(t, err)
+		lines := strings.Split(strings.TrimSpace(result), "\n")
+		assert.Equal(t, 3, len(lines))
+		assert.Contains(t, lines[0], "apple.txt:2")
+		assert.Contains(t, lines[1], "banana.txt:3")
+		assert.Contains(t, lines[2], "zebra.txt:3")
+	})
+
+	t.Run("count mode with pagination", func(t *testing.T) {
+		result, err := invokeTool(t, grepTool, `{"pattern": "match", "output_mode": "count", "offset": 1, "head_limit": 1}`)
+		assert.NoError(t, err)
+		lines := strings.Split(strings.TrimSpace(result), "\n")
+		assert.Equal(t, 1, len(lines))
+		assert.Contains(t, lines[0], "banana.txt:3")
+	})
+
+	t.Run("offset exceeds result count", func(t *testing.T) {
+		result, err := invokeTool(t, grepTool, `{"pattern": "match", "output_mode": "files_with_matches", "offset": 100}`)
+		assert.NoError(t, err)
+		assert.Equal(t, "", result)
+	})
+
+	t.Run("negative offset treated as zero", func(t *testing.T) {
+		result, err := invokeTool(t, grepTool, `{"pattern": "match", "output_mode": "files_with_matches", "offset": -5}`)
+		assert.NoError(t, err)
+		lines := strings.Split(strings.TrimSpace(result), "\n")
+		assert.Equal(t, 3, len(lines))
+	})
+}
+
+func TestApplyPagination(t *testing.T) {
+	t.Run("basic pagination", func(t *testing.T) {
+		items := []string{"a", "b", "c", "d", "e"}
+		result := applyPagination(items, 0, 3)
+		assert.Equal(t, []string{"a", "b", "c"}, result)
+	})
+
+	t.Run("with offset", func(t *testing.T) {
+		items := []string{"a", "b", "c", "d", "e"}
+		result := applyPagination(items, 2, 2)
+		assert.Equal(t, []string{"c", "d"}, result)
+	})
+
+	t.Run("offset exceeds length", func(t *testing.T) {
+		items := []string{"a", "b", "c"}
+		result := applyPagination(items, 10, 5)
+		assert.Equal(t, []string{}, result)
+	})
+
+	t.Run("negative offset", func(t *testing.T) {
+		items := []string{"a", "b", "c"}
+		result := applyPagination(items, -1, 2)
+		assert.Equal(t, []string{"a", "b"}, result)
+	})
+
+	t.Run("zero head limit means no limit", func(t *testing.T) {
+		items := []string{"a", "b", "c", "d", "e"}
+		result := applyPagination(items, 1, 0)
+		assert.Equal(t, []string{"b", "c", "d", "e"}, result)
+	})
+}

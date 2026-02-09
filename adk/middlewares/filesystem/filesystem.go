@@ -21,7 +21,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"path/filepath"
 	"runtime/debug"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -507,6 +509,10 @@ type grepArgs struct {
 	// Defaults to "files_with_matches".
 	OutputMode string `json:"output_mode,omitempty" jsonschema:"description=Output mode: 'content' shows matching lines (supports -A/-B/-C context\\, -n line numbers\\, head_limit)\\, 'files_with_matches' shows file paths (supports head_limit)\\, 'count' shows match counts (supports head_limit). Defaults to 'files_with_matches'.,enum=content,enum=files_with_matches,enum=count"`
 
+	// Context is the number of lines to show before and after each match.
+	// Only applicable when output_mode is "content".
+	Context *int `json:"context,omitempty" jsonschema:"description=Number of lines to show before and after each match (rg -C). Requires output_mode: 'content'\\, ignored otherwise."`
+
 	// BeforeLines is the number of lines to show before each match.
 	// Only applicable when output_mode is "content".
 	BeforeLines *int `json:"-B,omitempty" jsonschema:"description=Number of lines to show before each match (rg -B). Requires output_mode: 'content'\\, ignored otherwise."`
@@ -514,13 +520,6 @@ type grepArgs struct {
 	// AfterLines is the number of lines to show after each match.
 	// Only applicable when output_mode is "content".
 	AfterLines *int `json:"-A,omitempty" jsonschema:"description=Number of lines to show after each match (rg -A). Requires output_mode: 'content'\\, ignored otherwise."`
-
-	// ContextAlias is an alias for Context (number of lines before and after).
-	ContextAlias *int `json:"-C,omitempty" jsonschema:"description=Alias for context."`
-
-	// Context is the number of lines to show before and after each match.
-	// Only applicable when output_mode is "content".
-	Context *int `json:"context,omitempty" jsonschema:"description=Number of lines to show before and after each match (rg -C). Requires output_mode: 'content'\\, ignored otherwise."`
 
 	// ShowLineNumbers enables showing line numbers in output.
 	// Only applicable when output_mode is "content". Defaults to true.
@@ -557,22 +556,16 @@ func newGrepTool(fs filesystem.Backend, desc *string) (tool.BaseTool, error) {
 		path := valueOrDefault(input.Path, "")
 		glob := valueOrDefault(input.Glob, "")
 		fileType := valueOrDefault(input.FileType, "")
+		var beforeLines, afterLines int
 
-		// Determine output mode
-		var outputMode filesystem.OutputMode
-		switch input.OutputMode {
-		case "content":
-			outputMode = filesystem.ContentOfOutputMode
-		case "count":
-			outputMode = filesystem.CountOfOutputMode
-		default:
-			outputMode = filesystem.FilesWithMatchesOfOutputMode
+		if input.Context != nil {
+			beforeLines = valueOrDefault(input.Context, 0)
+			afterLines = valueOrDefault(input.Context, 0)
+		} else {
+			// Extract context parameters
+			beforeLines = valueOrDefault(input.BeforeLines, 0)
+			afterLines = valueOrDefault(input.AfterLines, 0)
 		}
-
-		// Extract context parameters with priority handling
-		contextLines := valueOrDefault(input.ContextAlias, valueOrDefault(input.Context, 0))
-		beforeLines := valueOrDefault(input.BeforeLines, 0)
-		afterLines := valueOrDefault(input.AfterLines, 0)
 
 		// Extract boolean flags
 		caseInsensitive := valueOrDefault(input.CaseInsensitive, false)
@@ -586,60 +579,33 @@ func newGrepTool(fs filesystem.Backend, desc *string) (tool.BaseTool, error) {
 			Pattern:         input.Pattern,
 			Path:            path,
 			Glob:            glob,
-			OutputMode:      outputMode,
 			FileType:        fileType,
 			CaseInsensitive: caseInsensitive,
 			AfterLines:      afterLines,
 			BeforeLines:     beforeLines,
-			ContextLines:    contextLines,
-			HeadLimit:       headLimit,
-			Offset:          offset,
 			EnableMultiline: enableMultiline,
 		})
 		if err != nil {
 			return "", err
 		}
 
+		sort.SliceStable(matches, func(i, j int) bool {
+			return filepath.Base(matches[i].Path) < filepath.Base(matches[j].Path)
+		})
+
 		switch input.OutputMode {
-		case "files_with_matches":
-			var results []string
-			for _, match := range matches {
-				results = append(results, match.Path)
-			}
-			return strings.Join(results, "\n"), nil
-
 		case "content":
-			var b strings.Builder
-			showLineNum := valueOrDefault(input.ShowLineNumbers, true)
-
-			for _, match := range matches {
-				b.WriteString(match.Path)
-				if showLineNum {
-					b.WriteString(":")
-					b.WriteString(strconv.Itoa(match.Line))
-				}
-				b.WriteString(":")
-				b.WriteString(match.Content)
-				b.WriteString("\n")
-			}
-			return strings.TrimSuffix(b.String(), "\n"), nil
+			matches = applyPagination(matches, offset, headLimit)
+			return formatContentMatches(matches, valueOrDefault(input.ShowLineNumbers, true)), nil
 
 		case "count":
-			var b strings.Builder
-			for _, match := range matches {
-				b.WriteString(match.Path)
-				b.WriteString(":")
-				b.WriteString(strconv.Itoa(match.Count))
-				b.WriteString("\n")
-			}
-			return strings.TrimSuffix(b.String(), "\n"), nil
+			return formatCountMatches(matches, offset, headLimit), nil
+
+		case "files_with_matches":
+			return formatFileMatches(matches, offset, headLimit), nil
 
 		default:
-			var results []string
-			for _, match := range matches {
-				results = append(results, match.Path)
-			}
-			return strings.Join(results, "\n"), nil
+			return formatFileMatches(matches, offset, headLimit), nil
 		}
 	})
 }
@@ -727,6 +693,72 @@ func valueOrDefault[T any](ptr *T, defaultValue T) T {
 		return *ptr
 	}
 	return defaultValue
+}
+
+func applyPagination[T any](items []T, offset, headLimit int) []T {
+	if offset < 0 {
+		offset = 0
+	}
+	if offset >= len(items) {
+		return []T{}
+	}
+	items = items[offset:]
+
+	if headLimit > 0 && headLimit < len(items) {
+		items = items[:headLimit]
+	}
+	return items
+}
+
+func formatFileMatches(matches []filesystem.GrepMatch, offset, headLimit int) string {
+	seen := make(map[string]bool)
+	var uniquePaths []string
+	for _, match := range matches {
+		if !seen[match.Path] {
+			seen[match.Path] = true
+			uniquePaths = append(uniquePaths, match.Path)
+		}
+	}
+	uniquePaths = applyPagination(uniquePaths, offset, headLimit)
+	return strings.Join(uniquePaths, "\n")
+}
+
+func formatContentMatches(matches []filesystem.GrepMatch, showLineNum bool) string {
+	var b strings.Builder
+	for _, match := range matches {
+		b.WriteString(match.Path)
+		if showLineNum {
+			b.WriteString(":")
+			b.WriteString(strconv.Itoa(match.Line))
+		}
+		b.WriteString(":")
+		b.WriteString(match.Content)
+		b.WriteString("\n")
+	}
+	return strings.TrimSuffix(b.String(), "\n")
+}
+
+func formatCountMatches(matches []filesystem.GrepMatch, offset, headLimit int) string {
+	countMap := make(map[string]int)
+	for _, match := range matches {
+		countMap[match.Path]++
+	}
+
+	var paths []string
+	for path := range countMap {
+		paths = append(paths, path)
+	}
+	sort.Strings(paths)
+	paths = applyPagination(paths, offset, headLimit)
+
+	var b strings.Builder
+	for _, path := range paths {
+		b.WriteString(path)
+		b.WriteString(":")
+		b.WriteString(strconv.Itoa(countMap[path]))
+		b.WriteString("\n")
+	}
+	return strings.TrimSuffix(b.String(), "\n")
 }
 
 // selectToolDesc returns the custom description if provided, otherwise selects the appropriate
