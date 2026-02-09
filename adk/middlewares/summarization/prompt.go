@@ -22,21 +22,7 @@ import (
 	"github.com/cloudwego/eino/adk/internal"
 )
 
-var (
-	pendingTasksRegex   = regexp.MustCompile(`(?m)^\d+\.\s*Pending Tasks:\s*$`)
-	pendingTasksRegexZh = regexp.MustCompile(`(?m)^\d+\.\s*待处理任务[：:]\s*$`)
-)
-
-func getPendingTasksRegex() *regexp.Regexp {
-	s := internal.SelectPrompt(internal.I18nPrompts{
-		English: "en",
-		Chinese: "zh",
-	})
-	if s == "zh" {
-		return pendingTasksRegexZh
-	}
-	return pendingTasksRegex
-}
+var allUserMessagesTagRegex = regexp.MustCompile(`(?s)<all_user_messages>.*</all_user_messages>`)
 
 func getSystemPrompt() string {
 	return internal.SelectPrompt(internal.I18nPrompts{
@@ -73,17 +59,17 @@ func getTranscriptPathInstruction() string {
 	})
 }
 
-func getFallbackUserMessagesInstruction() string {
-	return internal.SelectPrompt(internal.I18nPrompts{
-		English: fallbackUserMessagesInstruction,
-		Chinese: fallbackUserMessagesInstructionZh,
-	})
-}
-
 func getTruncatedMarkerFormat() string {
 	return internal.SelectPrompt(internal.I18nPrompts{
 		English: truncatedMarkerFormat,
 		Chinese: truncatedMarkerFormatZh,
+	})
+}
+
+func getUserMessagesReplacedNote() string {
+	return internal.SelectPrompt(internal.I18nPrompts{
+		English: userMessagesReplacedNote,
+		Chinese: userMessagesReplacedNoteZh,
 	})
 }
 
@@ -116,7 +102,7 @@ Your summary should include the following sections:
 3. Files and Code Sections: Enumerate specific files and code sections examined, modified, or created. Pay special attention to the most recent messages and include full code snippets where applicable and include a summary of why this file read or edit is important.
 4. Errors and fixes: List all errors that you ran into, and how you fixed them. Pay special attention to specific user feedback that you received, especially if the user told you to do something differently.
 5. Problem Solving: Document problems solved and any ongoing troubleshooting efforts.
-6. All user messages: List ALL user messages that are not tool results. These are critical for understanding the users' feedback and changing intent.
+6. All user messages: List ALL user messages that are not tool results in the <all_user_messages>...</all_user_messages> block. These are critical for understanding the users' feedback and changing intent.
 6. Pending Tasks: Outline any pending tasks that you have explicitly been asked to work on.
 7. Current Work: Describe in detail precisely what was being worked on immediately before this summary request, paying special attention to the most recent messages from both user and assistant. Include file names and code snippets where applicable.
 8. Optional Next Step: List the next step that you will take that is related to the most recent work you were doing. IMPORTANT: ensure that this step is DIRECTLY in line with the user's most recent explicit requests, and the task you were working on immediately before this summary request. If your last task was concluded, then only list next steps if they are explicitly in line with the users request. Do not start on tangential requests or really old requests that were already completed without confirming with the user first.
@@ -157,8 +143,10 @@ Here's an example of how your output should be structured:
    [Description of solved problems and ongoing troubleshooting]
 
 6. All user messages: 
+<all_user_messages>
     - [Detailed non tool use user message]
     - [...]
+</all_user_messages>
 
 7. Pending Tasks:
    - [Task 1]
@@ -216,8 +204,8 @@ const summaryInstructionZh = `你的任务是对目前为止的对话创建一�
 3. 文件和代码部分：列举检查、修改或创建的具体文件和代码部分。特别注意最近的消息，在适用的地方包含完整的代码片段，并总结为什么这个文件的读取或编辑很重要
 4. 错误和修复：列出你遇到的所有错误以及如何修复它们。特别注意你收到的具体用户反馈，尤其是用户要求你以不同方式处理的情况
 5. 问题解决：记录已解决的问题和任何正在进行的故障排除工作
-6. 所有用户消息：列出所有非工具结果的用户消息。这些对于理解用户的反馈和变化的意图至关重要
-7. 待处理任务：列出明确要求你处理的任何待处理任务
+6. 所有用户消息：在 <all_user_messages>...</all_user_messages> 块中列出所有非工具结果的用户消息。这些对于理解用户的反馈和变化的意图至关重要
+6. 待处理任务：列出明确要求你处理的任何待处理任务
 8. 当前工作：详细描述在此总结请求之前正在进行的工作，特别注意用户和助手的最近消息。在适用的地方包含文件名和代码片段
 9. 可选的下一步：列出与你最近工作相关的下一步操作。重要提示：确保这一步与用户最近的明确请求以及你在此总结请求之前正在处理的任务直接相关。如果你的上一个任务已经完成，则只有在与用户请求明确相关时才列出下一步。不要在未与用户确认的情况下开始处理无关的请求或已经完成的旧请求。
    如果有下一步，请包含最近对话中的直接引用，准确显示你正在处理的任务以及你停止的位置。这应该是逐字引用，以确保任务理解不会偏离。
@@ -257,8 +245,10 @@ const summaryInstructionZh = `你的任务是对目前为止的对话创建一�
    [已解决问题和正在进行的故障排除的描述]
 
 6. 所有用户消息：
+<all_user_messages>
     - [详细的非工具使用用户消息]
     - [...]
+</all_user_messages>
 
 7. 待处理任务：
    - [任务 1]
@@ -303,10 +293,10 @@ const transcriptPathInstruction = `If you need specific details from before comp
 
 const transcriptPathInstructionZh = `如果你需要压缩之前的具体细节（如精确的代码片段、错误消息或你生成的内容），请阅读完整的对话记录：%s`
 
-const fallbackUserMessagesInstruction = `In addition to the summary, here are the user's most recent messages for reference:\n%s`
-
-const fallbackUserMessagesInstructionZh = `除了上述总结外，以下是用户最近的消息，供参考：\n%s`
-
 const truncatedMarkerFormat = "…%d characters truncated…"
 
 const truncatedMarkerFormatZh = "…已截断 %d 个字符…"
+
+const userMessagesReplacedNote = "Some earlier user messages have been cleared. Below are the most recent user messages:"
+
+const userMessagesReplacedNoteZh = "部分较早的用户消息已被清除，以下是保留的最近用户消息："
