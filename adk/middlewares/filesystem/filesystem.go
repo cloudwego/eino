@@ -119,22 +119,16 @@ func NewMiddleware(ctx context.Context, config *Config) (adk.AgentMiddleware, er
 	if config.CustomSystemPrompt != nil {
 		systemPrompt = *config.CustomSystemPrompt
 	} else {
-		systemPrompt, err = internal.SelectPrompt(internal.I18nPrompts{
+		systemPrompt = internal.SelectPrompt(internal.I18nPrompts{
 			English: ToolsSystemPrompt,
 			Chinese: ToolsSystemPromptChinese,
 		})
-		if err != nil {
-			return adk.AgentMiddleware{}, err
-		}
 		if config.Shell != nil || config.StreamingShell != nil {
 			var executePrompt string
-			executePrompt, err = internal.SelectPrompt(internal.I18nPrompts{
+			executePrompt = internal.SelectPrompt(internal.I18nPrompts{
 				English: ExecuteToolsSystemPrompt,
 				Chinese: ExecuteToolsSystemPromptChinese,
 			})
-			if err != nil {
-				return adk.AgentMiddleware{}, err
-			}
 			systemPrompt += executePrompt
 		}
 	}
@@ -188,22 +182,15 @@ func New(ctx context.Context, config *Config) (adk.ChatModelAgentMiddleware, err
 	if config.CustomSystemPrompt != nil {
 		systemPrompt = *config.CustomSystemPrompt
 	} else {
-		systemPrompt, err = internal.SelectPrompt(internal.I18nPrompts{
+		systemPrompt = internal.SelectPrompt(internal.I18nPrompts{
 			English: ToolsSystemPrompt,
 			Chinese: ToolsSystemPromptChinese,
 		})
-		if err != nil {
-			return nil, err
-		}
 		if config.Shell != nil || config.StreamingShell != nil {
-			var executePrompt string
-			executePrompt, err = internal.SelectPrompt(internal.I18nPrompts{
+			executePrompt := internal.SelectPrompt(internal.I18nPrompts{
 				English: ExecuteToolsSystemPrompt,
 				Chinese: ExecuteToolsSystemPromptChinese,
 			})
-			if err != nil {
-				return nil, err
-			}
 			systemPrompt += executePrompt
 		}
 	}
@@ -738,5 +725,5 @@ func selectToolDesc(customDesc *string, defaultEnglish, defaultChinese string) (
 	return internal.SelectPrompt(internal.I18nPrompts{
 		English: defaultEnglish,
 		Chinese: defaultChinese,
-	})
+	}), nil
 }

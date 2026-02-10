@@ -49,13 +49,10 @@ func newTaskToolMiddleware(
 	if err != nil {
 		return adk.AgentMiddleware{}, err
 	}
-	prompt, err := internal.SelectPrompt(internal.I18nPrompts{
+	prompt := internal.SelectPrompt(internal.I18nPrompts{
 		English: taskPrompt,
 		Chinese: taskPromptChinese,
 	})
-	if err != nil {
-		return adk.AgentMiddleware{}, err
-	}
 
 	return adk.AgentMiddleware{
 		AdditionalInstruction: prompt,
@@ -87,13 +84,10 @@ func newTaskTool(
 	}
 
 	if !withoutGeneralSubAgent {
-		agentDesc, err := internal.SelectPrompt(internal.I18nPrompts{
+		agentDesc := internal.SelectPrompt(internal.I18nPrompts{
 			English: generalAgentDescription,
 			Chinese: generalAgentDescriptionChinese,
 		})
-		if err != nil {
-			return nil, err
-		}
 		generalAgent, err := adk.NewChatModelAgent(ctx, &adk.ChatModelAgentConfig{
 			Name:          generalAgentName,
 			Description:   agentDesc,
@@ -186,13 +180,10 @@ func defaultTaskToolDescription(ctx context.Context, subAgents []adk.Agent) (str
 		desc := a.Description(ctx)
 		subAgentsDescBuilder.WriteString(fmt.Sprintf("- %s: %s\n", name, desc))
 	}
-	toolDesc, err := internal.SelectPrompt(internal.I18nPrompts{
+	toolDesc := internal.SelectPrompt(internal.I18nPrompts{
 		English: taskToolDescription,
 		Chinese: taskToolDescriptionChinese,
 	})
-	if err != nil {
-		return "", err
-	}
 	return pyfmt.Fmt(toolDesc, map[string]any{
 		"other_agents": subAgentsDescBuilder.String(),
 	})

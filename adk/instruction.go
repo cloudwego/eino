@@ -45,26 +45,20 @@ When transferring: OUTPUT ONLY THE FUNCTION CALL`
 	agentDescriptionTplChinese = "\n- Agent 名字: %s\n  Agent 描述: %s"
 )
 
-func genTransferToAgentInstruction(ctx context.Context, agents []Agent) (string, error) {
-	tpl, err := internal.SelectPrompt(internal.I18nPrompts{
+func genTransferToAgentInstruction(ctx context.Context, agents []Agent) string {
+	tpl := internal.SelectPrompt(internal.I18nPrompts{
 		English: agentDescriptionTpl,
 		Chinese: agentDescriptionTplChinese,
 	})
-	if err != nil {
-		return "", err
-	}
-	instruction, err := internal.SelectPrompt(internal.I18nPrompts{
+	instruction := internal.SelectPrompt(internal.I18nPrompts{
 		English: TransferToAgentInstruction,
 		Chinese: TransferToAgentInstructionChinese,
 	})
-	if err != nil {
-		return "", err
-	}
 
 	var sb strings.Builder
 	for _, agent := range agents {
 		sb.WriteString(fmt.Sprintf(tpl, agent.Name(ctx), agent.Description(ctx)))
 	}
 
-	return fmt.Sprintf(instruction, sb.String(), TransferToAgentToolName), nil
+	return fmt.Sprintf(instruction, sb.String(), TransferToAgentToolName)
 }
