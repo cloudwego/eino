@@ -110,7 +110,19 @@ func NewMiddleware(ctx context.Context, config *Config) (adk.AgentMiddleware, er
 	if err != nil {
 		return adk.AgentMiddleware{}, err
 	}
-	ts, err := getFilesystemTools(ctx, config)
+	ts, err := getFilesystemTools(ctx, &MiddlewareConfig{
+		Backend:                 config.Backend,
+		Shell:                   config.Shell,
+		StreamingShell:          config.StreamingShell,
+		CustomSystemPrompt:      config.CustomSystemPrompt,
+		CustomLsToolDesc:        config.CustomLsToolDesc,
+		CustomReadFileToolDesc:  config.CustomReadFileToolDesc,
+		CustomGrepToolDesc:      config.CustomGrepToolDesc,
+		CustomGlobToolDesc:      config.CustomGlobToolDesc,
+		CustomWriteFileToolDesc: config.CustomWriteFileToolDesc,
+		CustomEditToolDesc:      config.CustomEditToolDesc,
+		CustomExecuteToolDesc:   config.CustomExecuteToolDesc,
+	})
 	if err != nil {
 		return adk.AgentMiddleware{}, err
 	}
@@ -149,6 +161,61 @@ func NewMiddleware(ctx context.Context, config *Config) (adk.AgentMiddleware, er
 	return m, nil
 }
 
+// MiddlewareConfig is the configuration for the filesystem middleware
+type MiddlewareConfig struct {
+	// Backend provides filesystem operations used by tools and offloading.
+	// required
+	Backend filesystem.Backend
+
+	// Shell provides shell command execution capability.
+	// If set, an execute tool will be registered to support shell command execution.
+	// optional, mutually exclusive with StreamingShell
+	Shell filesystem.Shell
+	// StreamingShell provides streaming shell command execution capability.
+	// If set, a streaming execute tool will be registered for real-time output.
+	// optional, mutually exclusive with Shell
+	StreamingShell filesystem.StreamingShell
+
+	// CustomSystemPrompt overrides the default ToolsSystemPrompt appended to agent instruction
+	// optional, ToolsSystemPrompt by default
+	CustomSystemPrompt *string
+
+	// CustomLsToolDesc overrides the ls tool description used in tool registration
+	// optional, ListFilesToolDesc by default
+	CustomLsToolDesc *string
+	// CustomReadFileToolDesc overrides the read_file tool description
+	// optional, ReadFileToolDesc by default
+	CustomReadFileToolDesc *string
+	// CustomGrepToolDesc overrides the grep tool description
+	// optional, GrepToolDesc by default
+	CustomGrepToolDesc *string
+	// CustomGlobToolDesc overrides the glob tool description
+	// optional, GlobToolDesc by default
+	CustomGlobToolDesc *string
+	// CustomWriteFileToolDesc overrides the write_file tool description
+	// optional, WriteFileToolDesc by default
+	CustomWriteFileToolDesc *string
+	// CustomEditToolDesc overrides the edit_file tool description
+	// optional, EditFileToolDesc by default
+	CustomEditToolDesc *string
+	// CustomExecuteToolDesc overrides the execute tool description
+	// optional, ExecuteToolDesc by default
+	CustomExecuteToolDesc *string
+}
+
+func (c *MiddlewareConfig) Validate() error {
+	if c == nil {
+		return errors.New("config should not be nil")
+	}
+	if c.Backend == nil {
+		return errors.New("backend should not be nil")
+	}
+	if c.StreamingShell != nil && c.Shell != nil {
+		return errors.New("shell and streaming shell should not be both set")
+	}
+	return nil
+}
+
 // New constructs and returns the filesystem middleware as a ChatModelAgentMiddleware.
 //
 // This is the recommended constructor for new code. It returns a ChatModelAgentMiddleware which provides:
@@ -168,7 +235,7 @@ func NewMiddleware(ctx context.Context, config *Config) (adk.AgentMiddleware, er
 //	    // ...
 //	    Handlers: []adk.ChatModelAgentMiddleware{middleware},
 //	})
-func New(ctx context.Context, config *Config) (adk.ChatModelAgentMiddleware, error) {
+func New(ctx context.Context, config *MiddlewareConfig) (adk.ChatModelAgentMiddleware, error) {
 	err := config.Validate()
 	if err != nil {
 		return nil, err
@@ -200,22 +267,6 @@ func New(ctx context.Context, config *Config) (adk.ChatModelAgentMiddleware, err
 		additionalTools:       ts,
 	}
 
-	if !config.WithoutLargeToolResultOffloading {
-		m.offloading = &toolResultOffloading{
-			backend:       config.Backend,
-			tokenLimit:    config.LargeToolResultOffloadingTokenLimit,
-			pathGenerator: config.LargeToolResultOffloadingPathGen,
-		}
-		if m.offloading.tokenLimit == 0 {
-			m.offloading.tokenLimit = 20000
-		}
-		if m.offloading.pathGenerator == nil {
-			m.offloading.pathGenerator = func(ctx context.Context, input *compose.ToolInput) (string, error) {
-				return fmt.Sprintf("/large_tool_result/%s", input.CallID), nil
-			}
-		}
-	}
-
 	return m, nil
 }
 
@@ -223,7 +274,6 @@ type filesystemMiddleware struct {
 	adk.BaseChatModelAgentMiddleware
 	additionalInstruction string
 	additionalTools       []tool.BaseTool
-	offloading            *toolResultOffloading
 }
 
 func (m *filesystemMiddleware) BeforeAgent(ctx context.Context, runCtx *adk.ChatModelAgentContext) (context.Context, *adk.ChatModelAgentContext, error) {
@@ -239,47 +289,7 @@ func (m *filesystemMiddleware) BeforeAgent(ctx context.Context, runCtx *adk.Chat
 	return ctx, &nRunCtx, nil
 }
 
-func (m *filesystemMiddleware) WrapInvokableToolCall(ctx context.Context, endpoint adk.InvokableToolCallEndpoint, tCtx *adk.ToolContext) (adk.InvokableToolCallEndpoint, error) {
-	if m.offloading == nil {
-		return endpoint, nil
-	}
-	return func(ctx context.Context, argumentsInJSON string, opts ...tool.Option) (string, error) {
-		result, err := endpoint(ctx, argumentsInJSON, opts...)
-		if err != nil {
-			return "", err
-		}
-		return m.offloading.handleResult(ctx, result, &compose.ToolInput{
-			Name:   tCtx.Name,
-			CallID: tCtx.CallID,
-		})
-	}, nil
-}
-
-func (m *filesystemMiddleware) WrapStreamableToolCall(ctx context.Context, endpoint adk.StreamableToolCallEndpoint, tCtx *adk.ToolContext) (adk.StreamableToolCallEndpoint, error) {
-	if m.offloading == nil {
-		return endpoint, nil
-	}
-	return func(ctx context.Context, argumentsInJSON string, opts ...tool.Option) (*schema.StreamReader[string], error) {
-		sr, err := endpoint(ctx, argumentsInJSON, opts...)
-		if err != nil {
-			return nil, err
-		}
-		result, err := concatString(sr)
-		if err != nil {
-			return nil, err
-		}
-		result, err = m.offloading.handleResult(ctx, result, &compose.ToolInput{
-			Name:   tCtx.Name,
-			CallID: tCtx.CallID,
-		})
-		if err != nil {
-			return nil, err
-		}
-		return schema.StreamReaderFromArray([]string{result}), nil
-	}, nil
-}
-
-func getFilesystemTools(_ context.Context, validatedConfig *Config) ([]tool.BaseTool, error) {
+func getFilesystemTools(_ context.Context, validatedConfig *MiddlewareConfig) ([]tool.BaseTool, error) {
 	var tools []tool.BaseTool
 
 	lsTool, err := newLsTool(validatedConfig.Backend, validatedConfig.CustomLsToolDesc)
