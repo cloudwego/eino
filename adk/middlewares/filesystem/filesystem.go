@@ -34,6 +34,16 @@ import (
 	"github.com/cloudwego/eino/schema"
 )
 
+const (
+	ToolNameLs        = "ls"
+	ToolNameReadFile  = "read_file"
+	ToolNameWriteFile = "write_file"
+	ToolNameEditFile  = "edit_file"
+	ToolNameGlob      = "glob"
+	ToolNameGrep      = "grep"
+	ToolNameExecute   = "execute"
+)
+
 // Config is the configuration for the filesystem middleware
 type Config struct {
 	// Backend provides filesystem operations used by tools and offloading.
@@ -356,7 +366,7 @@ func newLsTool(fs filesystem.Backend, desc *string) (tool.BaseTool, error) {
 	if err != nil {
 		return nil, err
 	}
-	return utils.InferTool("ls", d, func(ctx context.Context, input lsArgs) (string, error) {
+	return utils.InferTool(ToolNameLs, d, func(ctx context.Context, input lsArgs) (string, error) {
 		infos, err := fs.LsInfo(ctx, &filesystem.LsInfoRequest{Path: input.Path})
 		if err != nil {
 			return "", err
@@ -385,7 +395,7 @@ func newReadFileTool(fs filesystem.Backend, desc *string) (tool.BaseTool, error)
 	if err != nil {
 		return nil, err
 	}
-	return utils.InferTool("read_file", d, func(ctx context.Context, input readFileArgs) (string, error) {
+	return utils.InferTool(ToolNameReadFile, d, func(ctx context.Context, input readFileArgs) (string, error) {
 		if input.Offset < 0 {
 			input.Offset = 0
 		}
@@ -413,7 +423,7 @@ func newWriteFileTool(fs filesystem.Backend, desc *string) (tool.BaseTool, error
 	if err != nil {
 		return nil, err
 	}
-	return utils.InferTool("write_file", d, func(ctx context.Context, input writeFileArgs) (string, error) {
+	return utils.InferTool(ToolNameWriteFile, d, func(ctx context.Context, input writeFileArgs) (string, error) {
 		err := fs.Write(ctx, &filesystem.WriteRequest{
 			FilePath: input.FilePath,
 			Content:  input.Content,
@@ -444,7 +454,7 @@ func newEditFileTool(fs filesystem.Backend, desc *string) (tool.BaseTool, error)
 	if err != nil {
 		return nil, err
 	}
-	return utils.InferTool("edit_file", d, func(ctx context.Context, input editFileArgs) (string, error) {
+	return utils.InferTool(ToolNameEditFile, d, func(ctx context.Context, input editFileArgs) (string, error) {
 		err := fs.Edit(ctx, &filesystem.EditRequest{
 			FilePath:   input.FilePath,
 			OldString:  input.OldString,
@@ -471,7 +481,7 @@ func newGlobTool(fs filesystem.Backend, desc *string) (tool.BaseTool, error) {
 	if err != nil {
 		return nil, err
 	}
-	return utils.InferTool("glob", d, func(ctx context.Context, input globArgs) (string, error) {
+	return utils.InferTool(ToolNameGlob, d, func(ctx context.Context, input globArgs) (string, error) {
 		infos, err := fs.GlobInfo(ctx, &filesystem.GlobInfoRequest{
 			Pattern: input.Pattern,
 			Path:    input.Path,
@@ -549,7 +559,7 @@ func newGrepTool(fs filesystem.Backend, desc *string) (tool.BaseTool, error) {
 	if err != nil {
 		return nil, err
 	}
-	return utils.InferTool("grep", d, func(ctx context.Context, input grepArgs) (string, error) {
+	return utils.InferTool(ToolNameGrep, d, func(ctx context.Context, input grepArgs) (string, error) {
 		// Extract string parameters
 		path := valueOrDefault(input.Path, "")
 		glob := valueOrDefault(input.Glob, "")
@@ -650,7 +660,7 @@ func newExecuteTool(sb filesystem.Shell, desc *string) (tool.BaseTool, error) {
 	if err != nil {
 		return nil, err
 	}
-	return utils.InferTool("execute", d, func(ctx context.Context, input executeArgs) (string, error) {
+	return utils.InferTool(ToolNameExecute, d, func(ctx context.Context, input executeArgs) (string, error) {
 		result, err := sb.Execute(ctx, &filesystem.ExecuteRequest{
 			Command: input.Command,
 		})
@@ -667,7 +677,7 @@ func newStreamingExecuteTool(sb filesystem.StreamingShell, desc *string) (tool.B
 	if err != nil {
 		return nil, err
 	}
-	return utils.InferStreamTool("execute", d, func(ctx context.Context, input executeArgs) (*schema.StreamReader[string], error) {
+	return utils.InferStreamTool(ToolNameExecute, d, func(ctx context.Context, input executeArgs) (*schema.StreamReader[string], error) {
 		result, err := sb.ExecuteStreaming(ctx, &filesystem.ExecuteRequest{
 			Command: input.Command,
 		})
