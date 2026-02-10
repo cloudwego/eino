@@ -28,7 +28,7 @@ var (
 )
 
 func getPendingTasksRegex() *regexp.Regexp {
-	s, _ := internal.SelectPrompt(internal.I18nPrompts{
+	s := internal.SelectPrompt(internal.I18nPrompts{
 		English: "en",
 		Chinese: "zh",
 	})
@@ -39,80 +39,52 @@ func getPendingTasksRegex() *regexp.Regexp {
 }
 
 func getSystemPrompt() string {
-	s, _ := internal.SelectPrompt(internal.I18nPrompts{
+	return internal.SelectPrompt(internal.I18nPrompts{
 		English: systemPrompt,
 		Chinese: systemPromptZh,
 	})
-	if s == "" {
-		return systemPrompt
-	}
-	return s
 }
 
 func getSummaryInstruction() string {
-	s, _ := internal.SelectPrompt(internal.I18nPrompts{
+	return internal.SelectPrompt(internal.I18nPrompts{
 		English: summaryInstruction,
 		Chinese: summaryInstructionZh,
 	})
-	if s == "" {
-		return summaryInstruction
-	}
-	return s
 }
 
 func getSummaryPreamble() string {
-	s, _ := internal.SelectPrompt(internal.I18nPrompts{
+	return internal.SelectPrompt(internal.I18nPrompts{
 		English: summaryPreamble,
 		Chinese: summaryPreambleZh,
 	})
-	if s == "" {
-		return summaryPreamble
-	}
-	return s
 }
 
 func getContinueInstruction() string {
-	s, _ := internal.SelectPrompt(internal.I18nPrompts{
+	return internal.SelectPrompt(internal.I18nPrompts{
 		English: continueInstruction,
 		Chinese: continueInstructionZh,
 	})
-	if s == "" {
-		return continueInstruction
-	}
-	return s
 }
 
 func getTranscriptPathInstruction() string {
-	s, _ := internal.SelectPrompt(internal.I18nPrompts{
+	return internal.SelectPrompt(internal.I18nPrompts{
 		English: transcriptPathInstruction,
 		Chinese: transcriptPathInstructionZh,
 	})
-	if s == "" {
-		return transcriptPathInstruction
-	}
-	return s
 }
 
 func getFallbackUserMessagesInstruction() string {
-	s, _ := internal.SelectPrompt(internal.I18nPrompts{
+	return internal.SelectPrompt(internal.I18nPrompts{
 		English: fallbackUserMessagesInstruction,
 		Chinese: fallbackUserMessagesInstructionZh,
 	})
-	if s == "" {
-		return fallbackUserMessagesInstruction
-	}
-	return s
 }
 
 func getTruncatedMarkerFormat() string {
-	s, _ := internal.SelectPrompt(internal.I18nPrompts{
+	return internal.SelectPrompt(internal.I18nPrompts{
 		English: truncatedMarkerFormat,
 		Chinese: truncatedMarkerFormatZh,
 	})
-	if s == "" {
-		return truncatedMarkerFormat
-	}
-	return s
 }
 
 const systemPrompt = `You are a helpful AI assistant tasked with summarizing conversations.`

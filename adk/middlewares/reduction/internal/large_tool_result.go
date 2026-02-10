@@ -140,13 +140,10 @@ func (t *toolResultOffloading) handleResult(ctx context.Context, result string, 
 		}
 
 		nResult := formatToolMessage(result)
-		tpl, err := internal.SelectPrompt(internal.I18nPrompts{
+		tpl := internal.SelectPrompt(internal.I18nPrompts{
 			English: tooLargeToolMessage,
 			Chinese: tooLargeToolMessageChinese,
 		})
-		if err != nil {
-			return "", err
-		}
 		nResult, err = pyfmt.Fmt(tpl, map[string]any{
 			"tool_call_id":        input.CallID,
 			"file_path":           path,

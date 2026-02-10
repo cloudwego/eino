@@ -56,34 +56,22 @@ const (
 )
 
 func getTruncFmt() string {
-	s, _ := internal.SelectPrompt(internal.I18nPrompts{
+	return internal.SelectPrompt(internal.I18nPrompts{
 		English: truncFmt,
 		Chinese: truncFmtZh,
 	})
-	if s == "" {
-		return truncFmt
-	}
-	return s
 }
 
 func getClearWithOffloadingFmt() string {
-	s, _ := internal.SelectPrompt(internal.I18nPrompts{
+	return internal.SelectPrompt(internal.I18nPrompts{
 		English: clearWithOffloadingFmt,
 		Chinese: clearWithOffloadingFmtZh,
 	})
-	if s == "" {
-		return clearWithOffloadingFmt
-	}
-	return s
 }
 
 func getClearWithoutOffloadingFmt() string {
-	s, _ := internal.SelectPrompt(internal.I18nPrompts{
+	return internal.SelectPrompt(internal.I18nPrompts{
 		English: clearWithoutOffloadingFmt,
 		Chinese: clearWithoutOffloadingFmtZh,
 	})
-	if s == "" {
-		return clearWithoutOffloadingFmt
-	}
-	return s
 }

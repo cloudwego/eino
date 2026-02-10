@@ -220,14 +220,10 @@ func buildSystemPrompt(skillToolName string, useChinese bool) (string, error) {
 	if useChinese {
 		prompt = systemPromptChinese
 	} else {
-		var err error
-		prompt, err = internal.SelectPrompt(internal.I18nPrompts{
+		prompt = internal.SelectPrompt(internal.I18nPrompts{
 			English: systemPrompt,
 			Chinese: systemPromptChinese,
 		})
-		if err != nil {
-			return "", err
-		}
 	}
 	return pyfmt.Fmt(prompt, map[string]string{
 		"tool_name": skillToolName,
@@ -257,20 +253,14 @@ func (s *skillTool) Info(ctx context.Context) (*schema.ToolInfo, error) {
 		return nil, fmt.Errorf("failed to render skill tool description: %w", err)
 	}
 
-	descBase, err := internal.SelectPrompt(internal.I18nPrompts{
+	descBase := internal.SelectPrompt(internal.I18nPrompts{
 		English: toolDescriptionBase,
 		Chinese: toolDescriptionBaseChinese,
 	})
-	if err != nil {
-		return nil, err
-	}
-	paramDesc, err := internal.SelectPrompt(internal.I18nPrompts{
+	paramDesc := internal.SelectPrompt(internal.I18nPrompts{
 		English: "The skill name (no arguments). E.g., \"pdf\" or \"xlsx\"",
 		Chinese: "Skill 名称（无需其他参数）。例如：\"pdf\" 或 \"xlsx\"",
 	})
-	if err != nil {
-		return nil, err
-	}
 
 	return &schema.ToolInfo{
 		Name: s.toolName,
@@ -318,20 +308,14 @@ func (s *skillTool) setActiveModel(ctx context.Context, modelName string) {
 }
 
 func (s *skillTool) buildSkillResult(skill Skill) (string, error) {
-	resultFmt, err := internal.SelectPrompt(internal.I18nPrompts{
+	resultFmt := internal.SelectPrompt(internal.I18nPrompts{
 		English: toolResult,
 		Chinese: toolResultChinese,
 	})
-	if err != nil {
-		return "", err
-	}
-	contentFmt, err := internal.SelectPrompt(internal.I18nPrompts{
+	contentFmt := internal.SelectPrompt(internal.I18nPrompts{
 		English: userContent,
 		Chinese: userContentChinese,
 	})
-	if err != nil {
-		return "", err
-	}
 
 	return fmt.Sprintf(resultFmt, skill.Name) + fmt.Sprintf(contentFmt, skill.BaseDirectory, skill.Content), nil
 }
@@ -406,13 +390,10 @@ func (s *skillTool) runAgentMode(ctx context.Context, skill Skill, forkHistory b
 		}
 	}
 
-	resultFmt, err := internal.SelectPrompt(internal.I18nPrompts{
+	resultFmt := internal.SelectPrompt(internal.I18nPrompts{
 		English: subAgentResultFormat,
 		Chinese: subAgentResultFormatChinese,
 	})
-	if err != nil {
-		return "", err
-	}
 
 	return fmt.Sprintf(resultFmt, skill.Name, strings.Join(results, "\n")), nil
 }
