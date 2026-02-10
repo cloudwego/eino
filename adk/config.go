@@ -30,6 +30,6 @@ const (
 
 // SetLanguage sets the language for the ADK built-in prompts.
 // The default language is English if not explicitly set.
-func SetLanguage(lang Language) {
-	internal.SetLanguage(lang)
+func SetLanguage(lang Language) error {
+	return internal.SetLanguage(lang)
 }

@@ -96,13 +96,10 @@ func New(ctx context.Context, cfg *Config) (adk.ResumableAgent, error) {
 
 	instruction := cfg.Instruction
 	if len(instruction) == 0 {
-		instruction, err = internal.SelectPrompt(internal.I18nPrompts{
+		instruction = internal.SelectPrompt(internal.I18nPrompts{
 			English: baseAgentInstruction,
 			Chinese: baseAgentInstructionChinese,
 		})
-		if err != nil {
-			return nil, err
-		}
 	}
 
 	if !cfg.WithoutGeneralSubAgent || len(cfg.SubAgents) > 0 {
@@ -176,27 +173,18 @@ type writeTodosArguments struct {
 }
 
 func newWriteTodos() (adk.AgentMiddleware, error) {
-	toolDesc, err := internal.SelectPrompt(internal.I18nPrompts{
+	toolDesc := internal.SelectPrompt(internal.I18nPrompts{
 		English: writeTodosToolDescription,
 		Chinese: writeTodosToolDescriptionChinese,
 	})
-	if err != nil {
-		return adk.AgentMiddleware{}, err
-	}
-	prompt, err := internal.SelectPrompt(internal.I18nPrompts{
+	prompt := internal.SelectPrompt(internal.I18nPrompts{
 		English: writeTodosPrompt,
 		Chinese: writeTodosPromptChinese,
 	})
-	if err != nil {
-		return adk.AgentMiddleware{}, err
-	}
-	resultMsg, err := internal.SelectPrompt(internal.I18nPrompts{
+	resultMsg := internal.SelectPrompt(internal.I18nPrompts{
 		English: "Updated todo list to %s",
 		Chinese: "已更新待办列表为 %s",
 	})
-	if err != nil {
-		return adk.AgentMiddleware{}, err
-	}
 
 	t, err := utils.InferTool("write_todos", toolDesc, func(ctx context.Context, input writeTodosArguments) (output string, err error) {
 		adk.AddSessionValue(ctx, SessionKeyTodos, input.Todos)
