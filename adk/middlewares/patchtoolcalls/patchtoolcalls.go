@@ -112,13 +112,10 @@ func (m *middleware) createPatchedToolMessage(ctx context.Context, tc schema.Too
 		}
 		return schema.ToolMessage(content, tc.ID, schema.WithToolName(tc.Function.Name)), nil
 	}
-	tpl, err := internal.SelectPrompt(internal.I18nPrompts{
+	tpl := internal.SelectPrompt(internal.I18nPrompts{
 		English: defaultPatchedToolMessageTemplate,
 		Chinese: defaultPatchedToolMessageTemplateChinese,
 	})
-	if err != nil {
-		return nil, err
-	}
 
 	return schema.ToolMessage(fmt.Sprintf(tpl, tc.Function.Name, tc.ID), tc.ID, schema.WithToolName(tc.Function.Name)), nil
 }

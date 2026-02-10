@@ -53,13 +53,10 @@ type taskUpdateArgs struct {
 }
 
 func (t *taskUpdateTool) Info(ctx context.Context) (*schema.ToolInfo, error) {
-	desc, err := internal.SelectPrompt(internal.I18nPrompts{
+	desc := internal.SelectPrompt(internal.I18nPrompts{
 		English: taskUpdateToolDesc,
 		Chinese: taskUpdateToolDescChinese,
 	})
-	if err != nil {
-		return nil, fmt.Errorf("failed to select prompt: %w", err)
-	}
 
 	return &schema.ToolInfo{
 		Name: TaskUpdateToolName,

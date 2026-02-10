@@ -47,13 +47,10 @@ type taskCreateArgs struct {
 }
 
 func (t *taskCreateTool) Info(ctx context.Context) (*schema.ToolInfo, error) {
-	desc, err := internal.SelectPrompt(internal.I18nPrompts{
+	desc := internal.SelectPrompt(internal.I18nPrompts{
 		English: taskCreateToolDesc,
 		Chinese: taskCreateToolDescChinese,
 	})
-	if err != nil {
-		return nil, fmt.Errorf("failed to select prompt: %w", err)
-	}
 
 	return &schema.ToolInfo{
 		Name: TaskCreateToolName,
