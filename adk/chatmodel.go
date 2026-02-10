@@ -468,27 +468,21 @@ func (et ExitTool) InvokableRun(ctx context.Context, argumentsInJSON string, _ .
 type transferToAgent struct{}
 
 func (tta transferToAgent) Info(_ context.Context) (*schema.ToolInfo, error) {
-	desc, err := internal.SelectPrompt(internal.I18nPrompts{
+	desc := internal.SelectPrompt(internal.I18nPrompts{
 		English: TransferToAgentToolDesc,
 		Chinese: TransferToAgentToolDescChinese,
 	})
-	if err != nil {
-		return nil, err
-	}
 	info := *toolInfoTransferToAgent
 	info.Desc = desc
 	return &info, nil
 }
 
-func transferToAgentToolOutput(destName string) (string, error) {
-	tpl, err := internal.SelectPrompt(internal.I18nPrompts{
+func transferToAgentToolOutput(destName string) string {
+	tpl := internal.SelectPrompt(internal.I18nPrompts{
 		English: "successfully transferred to agent [%s]",
 		Chinese: "成功移交任务至 agent [%s]",
 	})
-	if err != nil {
-		return "", err
-	}
-	return fmt.Sprintf(tpl, destName), nil
+	return fmt.Sprintf(tpl, destName)
 }
 
 func (tta transferToAgent) InvokableRun(ctx context.Context, argumentsInJSON string, _ ...tool.Option) (string, error) {
@@ -507,7 +501,7 @@ func (tta transferToAgent) InvokableRun(ctx context.Context, argumentsInJSON str
 		return "", err
 	}
 
-	return transferToAgentToolOutput(params.AgentName)
+	return transferToAgentToolOutput(params.AgentName), nil
 }
 
 func (a *ChatModelAgent) Name(_ context.Context) string {
@@ -664,10 +658,7 @@ func (a *ChatModelAgent) prepareExecContext(ctx context.Context) (*execContext, 
 	}
 
 	if len(transferToAgents) > 0 {
-		transferInstruction, err := genTransferToAgentInstruction(ctx, transferToAgents)
-		if err != nil {
-			return nil, err
-		}
+		transferInstruction := genTransferToAgentInstruction(ctx, transferToAgents)
 		instruction = concatInstructions(instruction, transferInstruction)
 
 		toolsNodeConf.Tools = append(toolsNodeConf.Tools, &transferToAgent{})

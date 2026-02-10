@@ -42,13 +42,10 @@ type taskListTool struct {
 }
 
 func (t *taskListTool) Info(ctx context.Context) (*schema.ToolInfo, error) {
-	desc, err := internal.SelectPrompt(internal.I18nPrompts{
+	desc := internal.SelectPrompt(internal.I18nPrompts{
 		English: taskListToolDesc,
 		Chinese: taskListToolDescChinese,
 	})
-	if err != nil {
-		return nil, fmt.Errorf("failed to select prompt: %w", err)
-	}
 
 	return &schema.ToolInfo{
 		Name:        TaskListToolName,
