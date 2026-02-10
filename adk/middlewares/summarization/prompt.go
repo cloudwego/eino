@@ -192,7 +192,7 @@ IMPORTANT: Do NOT use any tools. You MUST respond with ONLY the <summary>...</su
 `
 
 const summaryInstructionZh = `你的任务是对目前为止的对话创建一份详细的总结，需要密切关注用户的明确请求和你之前的操作。
-这份总结应该全面捕捉技术细节、代码模式和架构决策，这些对于在不丢失上下文的情况下继续开发工作至关重要。
+这份总结应该全面捕捉技术细节、代码模式和架构决策，以确保继续开发工作时不丢失上下文。
 
 在提供最终总结之前，请将你的分析过程包裹在 <analysis> 标签中，以组织思路并确保涵盖所有必要的要点。在分析过程中：
 
@@ -293,11 +293,11 @@ const summaryInstructionZh = `你的任务是对目前为止的对话创建一�
 
 const summaryPreamble = `This session is being continued from a previous conversation that ran out of context. The summary below covers the earlier portion of the conversation.`
 
-const summaryPreambleZh = `此会话是从之前上下文耗尽的对话中继续的。以下总结涵盖了对话的早期部分。`
+const summaryPreambleZh = `此会话延续自此前一段因上下文耗尽而终止的对话。以下总结概述了此前对话的内容。`
 
 const continueInstruction = `Please continue the conversation from where we left it off without asking the user any further questions. Continue with the last task that you were asked to work on.`
 
-const continueInstructionZh = `请从我们中断的地方继续对话，无需向用户提出任何进一步的问题。继续处理你被要求完成的上一个任务。`
+const continueInstructionZh = `请从我们中断的地方继续对话，无需向用户提出任何进一步的问题。继续完成先前指令中未完成的任务。`
 
 const transcriptPathInstruction = `If you need specific details from before compaction (like exact code snippets, error messages, or content you generated), read the full transcript at: %s`
 
