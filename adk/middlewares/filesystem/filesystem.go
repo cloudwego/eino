@@ -101,7 +101,7 @@ func (c *Config) Validate() error {
 
 // NewMiddleware constructs and returns the filesystem middleware.
 //
-// Deprecated: Use NewChatModelAgentMiddleware instead. NewChatModelAgentMiddleware returns
+// Deprecated: Use New instead. New returns
 // a ChatModelAgentMiddleware which provides better context propagation through wrapper methods
 // and is the recommended approach for new code. See ChatModelAgentMiddleware documentation
 // for details on the benefits over AgentMiddleware.
