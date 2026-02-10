@@ -26,7 +26,6 @@ import (
 	"github.com/cloudwego/eino/adk"
 	"github.com/cloudwego/eino/adk/filesystem"
 	"github.com/cloudwego/eino/components/tool"
-	"github.com/cloudwego/eino/schema"
 )
 
 // setupTestBackend creates a test backend with some initial files
@@ -528,70 +527,19 @@ func (m *mockShellBackend) Execute(ctx context.Context, req *filesystem.ExecuteR
 	return m.resp, nil
 }
 
-func TestNewMiddleware(t *testing.T) {
-	ctx := context.Background()
-	backend := setupTestBackend()
-
-	t.Run("nil config returns error", func(t *testing.T) {
-		_, err := NewMiddleware(ctx, nil)
-		assert.Error(t, err)
-		assert.Contains(t, err.Error(), "config should not be nil")
-	})
-
-	t.Run("nil backend returns error", func(t *testing.T) {
-		_, err := NewMiddleware(ctx, &Config{Backend: nil})
-		assert.Error(t, err)
-		assert.Contains(t, err.Error(), "backend should not be nil")
-	})
-
-	t.Run("valid config with default settings", func(t *testing.T) {
-		m, err := NewMiddleware(ctx, &Config{Backend: backend})
-		assert.NoError(t, err)
-
-		// Check default system prompt
-		assert.Contains(t, m.AdditionalInstruction, ToolsSystemPrompt)
-
-		// Check tools are registered (6 tools for regular Backend)
-		assert.Len(t, m.AdditionalTools, 6)
-
-		// Check WrapToolCall is set (offloading enabled by default)
-		assert.NotNil(t, m.WrapToolCall)
-	})
-
-	t.Run("custom system prompt", func(t *testing.T) {
-		customPrompt := "Custom system prompt"
-		m, err := NewMiddleware(ctx, &Config{
-			Backend:            backend,
-			CustomSystemPrompt: &customPrompt,
-		})
-		assert.NoError(t, err)
-		assert.Equal(t, customPrompt, m.AdditionalInstruction)
-	})
-
-	t.Run("disable large tool result offloading", func(t *testing.T) {
-		m, err := NewMiddleware(ctx, &Config{
-			Backend:                          backend,
-			WithoutLargeToolResultOffloading: true,
-		})
-		assert.NoError(t, err)
-		assert.Nil(t, m.WrapToolCall.Invokable)
-		assert.Nil(t, m.WrapToolCall.Streamable)
-	})
-}
-
 func TestGetFilesystemTools(t *testing.T) {
 	ctx := context.Background()
 	backend := setupTestBackend()
 
 	t.Run("returns 6 tools for regular Backend", func(t *testing.T) {
-		tools, err := getFilesystemTools(ctx, &Config{Backend: backend})
+		tools, err := getFilesystemTools(ctx, &MiddlewareConfig{Backend: backend})
 		assert.NoError(t, err)
 		assert.Len(t, tools, 6)
 
 		// Verify tool names
 		toolNames := make([]string, 0, len(tools))
-		for _, tool := range tools {
-			info, _ := tool.Info(ctx)
+		for _, to := range tools {
+			info, _ := to.Info(ctx)
 			toolNames = append(toolNames, info.Name)
 		}
 		assert.Contains(t, toolNames, "ls")
@@ -607,14 +555,14 @@ func TestGetFilesystemTools(t *testing.T) {
 			Backend: backend,
 			resp:    &filesystem.ExecuteResponse{Output: "ok"},
 		}
-		tools, err := getFilesystemTools(ctx, &Config{Backend: shellBackend, Shell: shellBackend})
+		tools, err := getFilesystemTools(ctx, &MiddlewareConfig{Backend: shellBackend, Shell: shellBackend})
 		assert.NoError(t, err)
 		assert.Len(t, tools, 7)
 
 		// Verify execute tool is included
 		toolNames := make([]string, 0, len(tools))
-		for _, tool := range tools {
-			info, _ := tool.Info(ctx)
+		for _, to := range tools {
+			info, _ := to.Info(ctx)
 			toolNames = append(toolNames, info.Name)
 		}
 		assert.Contains(t, toolNames, "execute")
@@ -624,7 +572,7 @@ func TestGetFilesystemTools(t *testing.T) {
 		customLsDesc := "Custom ls description"
 		customReadDesc := "Custom read description"
 
-		tools, err := getFilesystemTools(ctx, &Config{
+		tools, err := getFilesystemTools(ctx, &MiddlewareConfig{
 			Backend:                backend,
 			CustomLsToolDesc:       &customLsDesc,
 			CustomReadFileToolDesc: &customReadDesc,
@@ -633,8 +581,8 @@ func TestGetFilesystemTools(t *testing.T) {
 		assert.Len(t, tools, 6)
 
 		// Verify custom descriptions are applied
-		for _, tool := range tools {
-			info, _ := tool.Info(ctx)
+		for _, to := range tools {
+			info, _ := to.Info(ctx)
 			if info.Name == "ls" {
 				assert.Equal(t, customLsDesc, info.Desc)
 			}
@@ -656,13 +604,13 @@ func TestNew(t *testing.T) {
 	})
 
 	t.Run("nil backend returns error", func(t *testing.T) {
-		_, err := New(ctx, &Config{Backend: nil})
+		_, err := New(ctx, &MiddlewareConfig{Backend: nil})
 		assert.Error(t, err)
 		assert.Contains(t, err.Error(), "backend should not be nil")
 	})
 
 	t.Run("valid config with default settings", func(t *testing.T) {
-		m, err := New(ctx, &Config{Backend: backend})
+		m, err := New(ctx, &MiddlewareConfig{Backend: backend})
 		assert.NoError(t, err)
 		assert.NotNil(t, m)
 
@@ -670,12 +618,11 @@ func TestNew(t *testing.T) {
 		assert.True(t, ok)
 		assert.Contains(t, fm.additionalInstruction, ToolsSystemPrompt)
 		assert.Len(t, fm.additionalTools, 6)
-		assert.NotNil(t, fm.offloading)
 	})
 
 	t.Run("custom system prompt", func(t *testing.T) {
 		customPrompt := "Custom system prompt"
-		m, err := New(ctx, &Config{
+		m, err := New(ctx, &MiddlewareConfig{
 			Backend:            backend,
 			CustomSystemPrompt: &customPrompt,
 		})
@@ -686,24 +633,12 @@ func TestNew(t *testing.T) {
 		assert.Equal(t, customPrompt, fm.additionalInstruction)
 	})
 
-	t.Run("disable large tool result offloading", func(t *testing.T) {
-		m, err := New(ctx, &Config{
-			Backend:                          backend,
-			WithoutLargeToolResultOffloading: true,
-		})
-		assert.NoError(t, err)
-
-		fm, ok := m.(*filesystemMiddleware)
-		assert.True(t, ok)
-		assert.Nil(t, fm.offloading)
-	})
-
 	t.Run("ShellBackend adds execute tool", func(t *testing.T) {
 		shellBackend := &mockShellBackend{
 			Backend: backend,
 			resp:    &filesystem.ExecuteResponse{Output: "ok"},
 		}
-		m, err := New(ctx, &Config{Backend: shellBackend, Shell: shellBackend})
+		m, err := New(ctx, &MiddlewareConfig{Backend: shellBackend, Shell: shellBackend})
 		assert.NoError(t, err)
 
 		fm, ok := m.(*filesystemMiddleware)
@@ -717,7 +652,7 @@ func TestFilesystemMiddleware_BeforeAgent(t *testing.T) {
 	backend := setupTestBackend()
 
 	t.Run("adds instruction and tools to context", func(t *testing.T) {
-		m, err := New(ctx, &Config{Backend: backend})
+		m, err := New(ctx, &MiddlewareConfig{Backend: backend})
 		assert.NoError(t, err)
 
 		runCtx := &adk.ChatModelAgentContext{
@@ -735,7 +670,7 @@ func TestFilesystemMiddleware_BeforeAgent(t *testing.T) {
 	})
 
 	t.Run("nil runCtx returns nil", func(t *testing.T) {
-		m, err := New(ctx, &Config{Backend: backend})
+		m, err := New(ctx, &MiddlewareConfig{Backend: backend})
 		assert.NoError(t, err)
 
 		newCtx, newRunCtx, err := m.BeforeAgent(ctx, nil)
@@ -750,7 +685,7 @@ func TestFilesystemMiddleware_WrapInvokableToolCall(t *testing.T) {
 	backend := setupTestBackend()
 
 	t.Run("small result passes through unchanged", func(t *testing.T) {
-		m, err := New(ctx, &Config{Backend: backend})
+		m, err := New(ctx, &MiddlewareConfig{Backend: backend})
 		assert.NoError(t, err)
 
 		endpoint := func(ctx context.Context, args string, opts ...tool.Option) (string, error) {
@@ -766,136 +701,4 @@ func TestFilesystemMiddleware_WrapInvokableToolCall(t *testing.T) {
 		assert.Equal(t, "small result", result)
 	})
 
-	t.Run("large result is offloaded", func(t *testing.T) {
-		m, err := New(ctx, &Config{
-			Backend:                             backend,
-			LargeToolResultOffloadingTokenLimit: 10,
-		})
-		assert.NoError(t, err)
-
-		largeResult := strings.Repeat("x", 100)
-		endpoint := func(ctx context.Context, args string, opts ...tool.Option) (string, error) {
-			return largeResult, nil
-		}
-
-		tCtx := &adk.ToolContext{Name: "test_tool", CallID: "call-large"}
-		wrapped, err := m.WrapInvokableToolCall(ctx, endpoint, tCtx)
-		assert.NoError(t, err)
-
-		result, err := wrapped(ctx, "{}")
-		assert.NoError(t, err)
-		assert.Contains(t, result, "Tool result too large")
-		assert.Contains(t, result, "/large_tool_result/call-large")
-	})
-
-	t.Run("offloading disabled returns endpoint unchanged", func(t *testing.T) {
-		m, err := New(ctx, &Config{
-			Backend:                          backend,
-			WithoutLargeToolResultOffloading: true,
-		})
-		assert.NoError(t, err)
-
-		endpoint := func(ctx context.Context, args string, opts ...tool.Option) (string, error) {
-			return "result", nil
-		}
-
-		tCtx := &adk.ToolContext{Name: "test_tool", CallID: "call-1"}
-		wrapped, err := m.WrapInvokableToolCall(ctx, endpoint, tCtx)
-		assert.NoError(t, err)
-
-		result, err := wrapped(ctx, "{}")
-		assert.NoError(t, err)
-		assert.Equal(t, "result", result)
-	})
-}
-
-func TestFilesystemMiddleware_WrapStreamableToolCall(t *testing.T) {
-	ctx := context.Background()
-	backend := setupTestBackend()
-
-	t.Run("small result passes through unchanged", func(t *testing.T) {
-		m, err := New(ctx, &Config{Backend: backend})
-		assert.NoError(t, err)
-
-		endpoint := func(ctx context.Context, args string, opts ...tool.Option) (*schema.StreamReader[string], error) {
-			return schema.StreamReaderFromArray([]string{"small", " result"}), nil
-		}
-
-		tCtx := &adk.ToolContext{Name: "test_tool", CallID: "call-1"}
-		wrapped, err := m.WrapStreamableToolCall(ctx, endpoint, tCtx)
-		assert.NoError(t, err)
-
-		sr, err := wrapped(ctx, "{}")
-		assert.NoError(t, err)
-
-		var result strings.Builder
-		for {
-			chunk, err := sr.Recv()
-			if err != nil {
-				break
-			}
-			result.WriteString(chunk)
-		}
-		assert.Equal(t, "small result", result.String())
-	})
-
-	t.Run("large result is offloaded", func(t *testing.T) {
-		m, err := New(ctx, &Config{
-			Backend:                             backend,
-			LargeToolResultOffloadingTokenLimit: 10,
-		})
-		assert.NoError(t, err)
-
-		largeResult := strings.Repeat("x", 100)
-		endpoint := func(ctx context.Context, args string, opts ...tool.Option) (*schema.StreamReader[string], error) {
-			return schema.StreamReaderFromArray([]string{largeResult}), nil
-		}
-
-		tCtx := &adk.ToolContext{Name: "test_tool", CallID: "call-stream-large"}
-		wrapped, err := m.WrapStreamableToolCall(ctx, endpoint, tCtx)
-		assert.NoError(t, err)
-
-		sr, err := wrapped(ctx, "{}")
-		assert.NoError(t, err)
-
-		var result strings.Builder
-		for {
-			chunk, err := sr.Recv()
-			if err != nil {
-				break
-			}
-			result.WriteString(chunk)
-		}
-		assert.Contains(t, result.String(), "Tool result too large")
-		assert.Contains(t, result.String(), "/large_tool_result/call-stream-large")
-	})
-
-	t.Run("offloading disabled returns endpoint unchanged", func(t *testing.T) {
-		m, err := New(ctx, &Config{
-			Backend:                          backend,
-			WithoutLargeToolResultOffloading: true,
-		})
-		assert.NoError(t, err)
-
-		endpoint := func(ctx context.Context, args string, opts ...tool.Option) (*schema.StreamReader[string], error) {
-			return schema.StreamReaderFromArray([]string{"result"}), nil
-		}
-
-		tCtx := &adk.ToolContext{Name: "test_tool", CallID: "call-1"}
-		wrapped, err := m.WrapStreamableToolCall(ctx, endpoint, tCtx)
-		assert.NoError(t, err)
-
-		sr, err := wrapped(ctx, "{}")
-		assert.NoError(t, err)
-
-		var result strings.Builder
-		for {
-			chunk, err := sr.Recv()
-			if err != nil {
-				break
-			}
-			result.WriteString(chunk)
-		}
-		assert.Equal(t, "result", result.String())
-	})
 }
