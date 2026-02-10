@@ -36,8 +36,13 @@ var language atomic.Value
 
 // SetLanguage sets the language for the ADK built-in prompts.
 // The default language is English if not explicitly set.
-func SetLanguage(lang Language) {
+func SetLanguage(lang Language) error {
+	if lang != LanguageEnglish &&
+		lang != LanguageChinese {
+		return fmt.Errorf("invalid language: %v", lang)
+	}
 	language.Store(lang)
+	return nil
 }
 
 // GetLanguage returns the current language setting for the ADK built-in prompts.
@@ -57,14 +62,15 @@ type I18nPrompts struct {
 
 // SelectPrompt returns the appropriate prompt string based on the current language setting.
 // Returns an error if the current language is not supported.
-func SelectPrompt(prompts I18nPrompts) (string, error) {
+func SelectPrompt(prompts I18nPrompts) string {
 	lang := getLanguage()
 	switch lang {
 	case LanguageEnglish:
-		return prompts.English, nil
+		return prompts.English
 	case LanguageChinese:
-		return prompts.Chinese, nil
+		return prompts.Chinese
 	default:
-		return "", fmt.Errorf("failed to select prompts: unsupported language type: %d", lang)
+		// unreachable
+		panic(fmt.Sprintf("invalid language: %v", lang))
 	}
 }
