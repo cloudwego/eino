@@ -299,7 +299,7 @@ func (a *flowAgent) Run(ctx context.Context, input *AgentInput, opts ...AgentRun
 	processedInput, err := a.genAgentInput(ctx, runCtx, o.skipTransferMessages)
 	if err != nil {
 		cbInput := &AgentCallbackInput{Input: input}
-		ctx, _ = icb.On(ctx, cbInput, icb.OnStartHandle[*AgentCallbackInput], callbacks.TimingOnStart, true)
+		ctx = callbacks.OnStart(ctx, cbInput)
 		return wrapIterWithOnEnd(ctx, genErrorIter(err))
 	}
 
@@ -308,7 +308,7 @@ func (a *flowAgent) Run(ctx context.Context, input *AgentInput, opts ...AgentRun
 	agentType := getAgentType(a.Agent)
 	ctx = initAgentCallbacks(ctx, agentName, agentType, filterOptions(agentName, opts)...)
 	cbInput := &AgentCallbackInput{Input: processedInput}
-	ctx, _ = icb.On(ctx, cbInput, icb.OnStartHandle[*AgentCallbackInput], callbacks.TimingOnStart, true)
+	ctx = callbacks.OnStart(ctx, cbInput)
 
 	input = processedInput
 
@@ -335,7 +335,7 @@ func (a *flowAgent) Resume(ctx context.Context, info *ResumeInfo, opts ...AgentR
 	agentType := getAgentType(a.Agent)
 	ctx = initAgentCallbacks(ctx, agentName, agentType, filterOptions(agentName, opts)...)
 	cbInput := &AgentCallbackInput{ResumeInfo: info}
-	ctx, _ = icb.On(ctx, cbInput, icb.OnStartHandle[*AgentCallbackInput], callbacks.TimingOnStart, true)
+	ctx = callbacks.OnStart(ctx, cbInput)
 
 	if info.WasInterrupted {
 		ra, ok := a.Agent.(ResumableAgent)
@@ -396,10 +396,7 @@ func (a *flowAgent) run(
 	cbIter, cbGen := NewAsyncIteratorPair[*AgentEvent]()
 
 	cbOutput := &AgentCallbackOutput{Events: cbIter}
-	icb.On(ctx, cbOutput, func(ctx context.Context, output *AgentCallbackOutput,
-		runInfo *icb.RunInfo, handlers []icb.Handler) (context.Context, *AgentCallbackOutput) {
-		return icb.OnEndHandleWithCopy(ctx, output, runInfo, handlers, copyAgentCallbackOutput)
-	}, callbacks.TimingOnEnd, false)
+	icb.On(ctx, cbOutput, icb.BuildOnEndHandleWithCopy(copyAgentCallbackOutput), callbacks.TimingOnEnd, false)
 
 	defer func() {
 		panicErr := recover()
@@ -504,10 +501,7 @@ func exactRunPathMatch(aPath, bPath []RunStep) bool {
 func wrapIterWithOnEnd(ctx context.Context, iter *AsyncIterator[*AgentEvent]) *AsyncIterator[*AgentEvent] {
 	cbIter, cbGen := NewAsyncIteratorPair[*AgentEvent]()
 	cbOutput := &AgentCallbackOutput{Events: cbIter}
-	icb.On(ctx, cbOutput, func(ctx context.Context, output *AgentCallbackOutput,
-		runInfo *icb.RunInfo, handlers []icb.Handler) (context.Context, *AgentCallbackOutput) {
-		return icb.OnEndHandleWithCopy(ctx, output, runInfo, handlers, copyAgentCallbackOutput)
-	}, callbacks.TimingOnEnd, false)
+	icb.On(ctx, cbOutput, icb.BuildOnEndHandleWithCopy(copyAgentCallbackOutput), callbacks.TimingOnEnd, false)
 
 	outIter, outGen := NewAsyncIteratorPair[*AgentEvent]()
 	go func() {
