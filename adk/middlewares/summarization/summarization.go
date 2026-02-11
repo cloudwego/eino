@@ -33,7 +33,9 @@ import (
 )
 
 type TokenCounterFunc func(ctx context.Context, input *TokenCounterInput) (int, error)
+type PrepareFunc func(ctx context.Context, originalMessages []adk.Message) ([]adk.Message, error)
 type FinalizeFunc func(ctx context.Context, originalMessages []adk.Message, summary adk.Message) ([]adk.Message, error)
+type CallbackFunc func(ctx context.Context, before, after adk.ChatModelAgentState) error
 
 // Config defines the configuration for the summarization middleware.
 type Config struct {
@@ -70,9 +72,25 @@ type Config struct {
 	// Optional but strongly recommended.
 	TranscriptFilePath string
 
-	// Finalize is called after summary is generated. The returned messages are used as the final output.
+	// Prepare is called before summary generation. The returned messages are the context to be summarized.
+	// Optional.
+	Prepare PrepareFunc
+
+	// Finalize is called after summary generation. The returned messages are used as the final output.
 	// Optional.
 	Finalize FinalizeFunc
+
+	// Callback is called after Finalize, before exiting the middleware.
+	// Read-only, do not modify state.
+	// Optional.
+	Callback CallbackFunc
+
+	// PreserveUserMessages controls whether to preserve original user messages in the summary.
+	// When enabled, replaces the <all_user_messages> section in the model-generated summary
+	// with recent original user messages from the conversation.
+	// When disabled, the model-generated content is kept unchanged.
+	// Optional. Enabled by default.
+	PreserveUserMessages *PreserveUserMessages
 }
 
 type TokenCounterInput struct {
@@ -82,8 +100,13 @@ type TokenCounterInput struct {
 
 // TriggerCondition specifies when summarization should be activated.
 type TriggerCondition struct {
-	// MaxTokens triggers summarization when total token count exceeds this threshold.
-	MaxTokens int
+	// ContextTokens triggers summarization when total token count exceeds this threshold.
+	ContextTokens int
+}
+
+// PreserveUserMessages controls whether to preserve original user messages in the summary.
+type PreserveUserMessages struct {
+	Enabled bool
 }
 
 // New creates a summarization middleware that automatically summarizes conversation history
@@ -122,41 +145,44 @@ func (m *middleware) BeforeModelRewriteState(ctx context.Context, state *adk.Cha
 		return ctx, state, nil
 	}
 
+	beforeState := *state
+
 	if m.cfg.EmitInternalEvents {
-		err = adk.SendEvent(ctx, &adk.AgentEvent{
-			Action: &adk.AgentAction{
-				CustomizedAction: &CustomizedAction{
-					Type: ActionTypeBeforeSummary,
-					Before: &BeforeSummaryAction{
-						Messages: state.Messages,
-					},
-				},
-			},
+		err = m.emitEvent(ctx, &CustomizedAction{
+			Type:   ActionTypeBeforeSummary,
+			Before: &BeforeSummaryAction{Messages: state.Messages},
 		})
 		if err != nil {
-			return nil, nil, fmt.Errorf("failed to send internal event: %w", err)
+			return nil, nil, err
 		}
 	}
 
 	var (
 		systemMsgs     []adk.Message
-		msgsExclSystem []adk.Message
+		summarizeInput []adk.Message
 	)
 
 	for _, msg := range state.Messages {
 		if msg.Role == schema.System {
 			systemMsgs = append(systemMsgs, msg)
 		} else {
-			msgsExclSystem = append(msgsExclSystem, msg)
+			summarizeInput = append(summarizeInput, msg)
 		}
 	}
 
-	summary, err := m.summarize(ctx, msgsExclSystem)
+	if m.cfg.Prepare != nil {
+		summarizeInput, err = m.cfg.Prepare(ctx, state.Messages)
+		if err != nil {
+			return nil, nil, err
+		}
+	}
+
+	summary, err := m.summarize(ctx, summarizeInput)
 	if err != nil {
 		return nil, nil, err
 	}
 
-	summary, err = m.postProcessSummary(ctx, state.Messages, summary)
+	summary, err = m.postProcessSummary(ctx, summarizeInput, summary)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -170,19 +196,20 @@ func (m *middleware) BeforeModelRewriteState(ctx context.Context, state *adk.Cha
 		state.Messages = append(systemMsgs, summary)
 	}
 
+	if m.cfg.Callback != nil {
+		err = m.cfg.Callback(ctx, beforeState, *state)
+		if err != nil {
+			return nil, nil, err
+		}
+	}
+
 	if m.cfg.EmitInternalEvents {
-		err = adk.SendEvent(ctx, &adk.AgentEvent{
-			Action: &adk.AgentAction{
-				CustomizedAction: &CustomizedAction{
-					Type: ActionTypeAfterSummary,
-					After: &AfterSummaryAction{
-						Messages: state.Messages,
-					},
-				},
-			},
+		err = m.emitEvent(ctx, &CustomizedAction{
+			Type:  ActionTypeAfterSummary,
+			After: &AfterSummaryAction{Messages: state.Messages},
 		})
 		if err != nil {
-			return nil, nil, fmt.Errorf("failed to send internal event: %w", err)
+			return nil, nil, err
 		}
 	}
 
@@ -194,19 +221,31 @@ func (m *middleware) shouldSummarize(ctx context.Context, input *TokenCounterInp
 	if err != nil {
 		return false, fmt.Errorf("failed to count tokens: %w", err)
 	}
-	return tokens > m.getTriggerMaxTokens(), nil
+	return tokens > m.getTriggerContextTokens(), nil
 }
 
-func (m *middleware) getTriggerMaxTokens() int {
-	const defaultTriggerMaxTokens = 190000
+func (m *middleware) getTriggerContextTokens() int {
+	const defaultTriggerContextTokens = 190000
 	if m.cfg.Trigger != nil {
-		return m.cfg.Trigger.MaxTokens
+		return m.cfg.Trigger.ContextTokens
 	}
-	return defaultTriggerMaxTokens
+	return defaultTriggerContextTokens
 }
 
-func (m *middleware) getMaxUserMessageTokens() int {
-	return m.getTriggerMaxTokens() * 2 / 3
+func (m *middleware) getUserMessageContextTokens() int {
+	return m.getTriggerContextTokens() * 2 / 3
+}
+
+func (m *middleware) emitEvent(ctx context.Context, action *CustomizedAction) error {
+	err := adk.SendEvent(ctx, &adk.AgentEvent{
+		Action: &adk.AgentAction{
+			CustomizedAction: action,
+		},
+	})
+	if err != nil {
+		return fmt.Errorf("failed to send internal event: %w", err)
+	}
+	return nil
 }
 
 func (m *middleware) countTokens(ctx context.Context, input *TokenCounterInput) (int, error) {
@@ -274,12 +313,14 @@ func (m *middleware) summarize(ctx context.Context, msgs []adk.Message) (adk.Mes
 }
 
 func (m *middleware) postProcessSummary(ctx context.Context, messages []adk.Message, summary adk.Message) (adk.Message, error) {
-	maxUserMsgTokens := m.getMaxUserMessageTokens()
-	content, err := m.insertUserMessagesIntoSummary(ctx, messages, summary.Content, maxUserMsgTokens)
-	if err != nil {
-		return nil, fmt.Errorf("failed to insert user messages into summary: %w", err)
+	if m.cfg.PreserveUserMessages == nil || m.cfg.PreserveUserMessages.Enabled {
+		maxUserMsgTokens := m.getUserMessageContextTokens()
+		content, err := m.replaceUserMessagesInSummary(ctx, messages, summary.Content, maxUserMsgTokens)
+		if err != nil {
+			return nil, fmt.Errorf("failed to replace user messages in summary: %w", err)
+		}
+		summary.Content = content
 	}
-	summary.Content = content
 
 	if path := m.cfg.TranscriptFilePath; path != "" {
 		summary.Content = appendSection(summary.Content, fmt.Sprintf(getTranscriptPathInstruction(), path))
@@ -303,7 +344,7 @@ func (m *middleware) postProcessSummary(ctx context.Context, messages []adk.Mess
 	return summary, nil
 }
 
-func (m *middleware) insertUserMessagesIntoSummary(ctx context.Context, messages []adk.Message, summary string, maxTokens int) (string, error) {
+func (m *middleware) replaceUserMessagesInSummary(ctx context.Context, messages []adk.Message, summary string, contextTokens int) (string, error) {
 	var userMsgs []adk.Message
 	for _, msg := range messages {
 		if typ, ok := getContentType(msg); ok && typ == contentTypeSummary {
@@ -314,35 +355,43 @@ func (m *middleware) insertUserMessagesIntoSummary(ctx context.Context, messages
 		}
 	}
 
-	var (
-		totalTokens int
-		selected    []adk.Message
-	)
-	for i := len(userMsgs) - 1; i >= 0; i-- {
-		msg := userMsgs[i]
-		tokens, err := m.countTokens(ctx, &TokenCounterInput{
-			Messages: []adk.Message{msg},
-		})
-		if err != nil {
-			return "", fmt.Errorf("failed to count tokens: %w", err)
-		}
-
-		remaining := maxTokens - totalTokens
-		if tokens <= remaining {
-			totalTokens += tokens
-			selected = append(selected, msg)
-			continue
-		}
-
-		trimmedMsg := defaultTrimUserMessage(msg, remaining)
-		if trimmedMsg != nil {
-			selected = append(selected, trimmedMsg)
-		}
-		break
+	if len(userMsgs) == 0 {
+		return summary, nil
 	}
 
-	for i, j := 0, len(selected)-1; i < j; i, j = i+1, j-1 {
-		selected[i], selected[j] = selected[j], selected[i]
+	var selected []adk.Message
+	if len(userMsgs) == 1 {
+		selected = userMsgs
+	} else {
+		var totalTokens int
+		for i := len(userMsgs) - 1; i >= 0; i-- {
+			msg := userMsgs[i]
+
+			tokens, err := m.countTokens(ctx, &TokenCounterInput{
+				Messages: []adk.Message{msg},
+			})
+			if err != nil {
+				return "", fmt.Errorf("failed to count tokens: %w", err)
+			}
+
+			remaining := contextTokens - totalTokens
+			if tokens <= remaining {
+				totalTokens += tokens
+				selected = append(selected, msg)
+				continue
+			}
+
+			trimmedMsg := defaultTrimUserMessage(msg, remaining)
+			if trimmedMsg != nil {
+				selected = append(selected, trimmedMsg)
+			}
+
+			break
+		}
+
+		for i, j := 0, len(selected)-1; i < j; i, j = i+1, j-1 {
+			selected[i], selected[j] = selected[j], selected[i]
+		}
 	}
 
 	var msgLines []string
@@ -354,15 +403,25 @@ func (m *middleware) insertUserMessagesIntoSummary(ctx context.Context, messages
 	}
 	userMsgsText := strings.Join(msgLines, "\n")
 
-	if userMsgsText == "" || strings.Contains(summary, userMsgsText) {
+	if userMsgsText == "" {
 		return summary, nil
 	}
 
-	if loc := findLastMatch(getPendingTasksRegex(), summary); loc != nil {
-		return strings.TrimRight(summary[:loc[0]], "\n") + "\n" + userMsgsText + "\n\n" + summary[loc[0]:], nil
+	lastMatch := findLastMatch(allUserMessagesTagRegex, summary)
+	if lastMatch == nil {
+		return summary, nil
 	}
 
-	return appendSection(summary, fmt.Sprintf(getFallbackUserMessagesInstruction(), userMsgsText)), nil
+	var replacement string
+	if len(selected) < len(userMsgs) {
+		replacement = "<all_user_messages>\n" + getUserMessagesReplacedNote() + "\n" + userMsgsText + "\n</all_user_messages>"
+	} else {
+		replacement = "<all_user_messages>\n" + userMsgsText + "\n</all_user_messages>"
+	}
+
+	content := summary[:lastMatch[0]] + replacement + summary[lastMatch[1]:]
+
+	return content, nil
 }
 
 func findLastMatch(re *regexp.Regexp, s string) []int {
@@ -465,8 +524,8 @@ func (c *Config) check() error {
 }
 
 func (c *TriggerCondition) check() error {
-	if c.MaxTokens <= 0 {
-		return fmt.Errorf("trigger.MaxTokens must be positive")
+	if c.ContextTokens <= 0 {
+		return fmt.Errorf("trigger.ContextTokens must be positive")
 	}
 	return nil
 }
