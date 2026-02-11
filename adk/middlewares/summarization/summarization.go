@@ -107,6 +107,11 @@ type TriggerCondition struct {
 // PreserveUserMessages controls whether to preserve original user messages in the summary.
 type PreserveUserMessages struct {
 	Enabled bool
+
+	// MaxTokens limits the maximum token count for preserved user messages.
+	// When set, only the most recent user messages within this limit are preserved.
+	// Optional. Defaults to 1/3 of TriggerCondition.ContextTokens if not specified.
+	MaxTokens int
 }
 
 // New creates a summarization middleware that automatically summarizes conversation history
@@ -233,7 +238,10 @@ func (m *middleware) getTriggerContextTokens() int {
 }
 
 func (m *middleware) getUserMessageContextTokens() int {
-	return m.getTriggerContextTokens() * 2 / 3
+	if m.cfg.PreserveUserMessages != nil && m.cfg.PreserveUserMessages.MaxTokens > 0 {
+		return m.cfg.PreserveUserMessages.MaxTokens
+	}
+	return m.getTriggerContextTokens() / 3
 }
 
 func (m *middleware) emitEvent(ctx context.Context, action *CustomizedAction) error {
