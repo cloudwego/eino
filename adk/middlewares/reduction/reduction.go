@@ -103,28 +103,19 @@ type ToolReductionConfig struct {
 	// Required.
 	Backend Backend
 
-	// SkipTruncation skip truncating this tool.
+	// SkipTruncation skip truncation for this tool.
 	SkipTruncation bool
 
-	// SkipClear skip clearing this tool.
+	// TruncHandler is used to process tool call results during truncation.
+	// Optional. Default using defaultTruncHandler when SkipTruncation is false but TruncHandler is nil.
+	TruncHandler func(ctx context.Context, detail *ToolDetail) (*TruncResult, error)
+
+	// SkipClear skip clear for this tool.
 	SkipClear bool
 
-	// ReadFileToolName is tool name used to retrieve from file.
-	// Required. Default is "read_file".
-	ReadFileToolName string
-
-	// RootDir root dir to save truncated content, file name is {tool_call_id}.
-	// Default is /tmp, truncated content saves to /tmp/trunc/{tool_call_id}, cleared content saves to  /tmp/clear/{tool_call_id}
-	RootDir string
-
-	// MaxLengthForTrunc is the maximum allowed length of the tool output.
-	// If the output exceeds this length, it will be truncated.
-	// Required. Default is 50000.
-	MaxLengthForTrunc int
-
 	// ClearHandler is used to process tool call arguments and results during clearing.
-	// Optional. When handler is not set, it's considered to skip clearing this tool.
-	ClearHandler func(ctx context.Context, detail *ToolDetail) (*OffloadInfo, error)
+	// Optional. Default using defaultClearHandler when SkipClear is false but ClearHandler is nil.
+	ClearHandler func(ctx context.Context, detail *ToolDetail) (*ClearResult, error)
 }
 
 type ToolDetail struct {
@@ -138,43 +129,96 @@ type ToolDetail struct {
 	ToolResult *schema.ToolResult
 }
 
-// OffloadInfo contains the result of the Handler's decision.
-type OffloadInfo struct {
-	// NeedClear indicates whether the tool output should be clear.
-	NeedClear bool
+type TruncResult struct {
+	// NeedTrunc indicates whether the tool result should be truncated.
+	NeedTrunc bool
 
-	// NeedOffload indicates whether the tool output should be offloaded.
+	// ToolResult contains the result returned by the tool after trunc
+	// Required when NeedTrunc is true.
+	ToolResult *schema.ToolResult
+
+	// NeedOffload indicates whether the tool result should be offloaded.
 	NeedOffload bool
 
-	// FilePath is the path where the offloaded content should be stored.
+	// OffloadFilePath is the path where the offloaded content should be stored.
 	// This path is typically relative to the backend's root.
-	FilePath string
+	// Required when NeedOffload is true.
+	OffloadFilePath string
 
 	// OffloadContent is the actual content to be written to the storage backend.
+	// Required when NeedOffload is true.
 	OffloadContent string
 }
 
-func (t *ToolReductionConfig) fillDefaults() (*ToolReductionConfig, error) {
-	if t.Backend == nil && !t.SkipTruncation {
-		return nil, fmt.Errorf("backend must be set when not skipping truncation")
+// ClearResult contains the result of the Handler's decision.
+type ClearResult struct {
+	// NeedClear indicates whether the tool argument and result should be cleared.
+	NeedClear bool
+
+	// ToolArgument contains the arguments passed to the tool after clear.
+	// Required when NeedClear is true.
+	ToolArgument *schema.ToolArgument
+
+	// ToolResult contains the output returned by the tool after clear.
+	// Required when NeedClear is true
+	ToolResult *schema.ToolResult
+
+	// NeedOffload indicates whether the tool argument and result should be offloaded.
+	NeedOffload bool
+
+	// OffloadFilePath is the path where the offloaded content should be stored.
+	// This path is typically relative to the backend's root.
+	// Required when NeedOffload is true.
+	OffloadFilePath string
+
+	// OffloadContent is the actual content to be written to the storage backend.
+	// Required when NeedOffload is true.
+	OffloadContent string
+}
+
+func (t *Config) copyAndFillDefaults() (*Config, error) {
+	cfg := &Config{
+		Backend:                   t.Backend,
+		SkipTruncation:            t.SkipTruncation,
+		SkipClear:                 t.SkipClear,
+		ReadFileToolName:          t.ReadFileToolName,
+		RootDir:                   t.RootDir,
+		MaxLengthForTrunc:         t.MaxLengthForTrunc,
+		TokenCounter:              t.TokenCounter,
+		MaxTokensForClear:         t.MaxTokensForClear,
+		ClearRetentionSuffixLimit: t.ClearRetentionSuffixLimit,
+		ClearPostProcess:          t.ClearPostProcess,
 	}
-	if t.ReadFileToolName == "" {
-		t.ReadFileToolName = "read_file"
+	if cfg.TokenCounter == nil {
+		cfg.TokenCounter = defaultTokenCounter
 	}
-	if t.RootDir == "" {
-		t.RootDir = "/tmp"
-		if !t.SkipClear && t.ClearHandler == nil {
-			t.ClearHandler = defaultClearHandler("/tmp/clear", t.Backend != nil, t.ReadFileToolName)
+	if cfg.ClearRetentionSuffixLimit == 0 {
+		cfg.ClearRetentionSuffixLimit = 1
+	}
+	if cfg.ReadFileToolName == "" {
+		cfg.ReadFileToolName = "read_file"
+	}
+	if cfg.RootDir == "" {
+		cfg.RootDir = "/tmp"
+	}
+	if cfg.MaxLengthForTrunc == 0 {
+		cfg.MaxLengthForTrunc = 50000
+	}
+	if t.ToolConfig != nil {
+		cfg.ToolConfig = make(map[string]*ToolReductionConfig, len(t.ToolConfig))
+		for toolName, trc := range t.ToolConfig {
+			cpConfig := &ToolReductionConfig{
+				Backend:        trc.Backend,
+				SkipTruncation: trc.SkipTruncation,
+				SkipClear:      trc.SkipClear,
+				TruncHandler:   trc.TruncHandler,
+				ClearHandler:   trc.ClearHandler,
+			}
+			cfg.ToolConfig[toolName] = cpConfig
 		}
-	} else {
-		if !t.SkipClear && t.ClearHandler == nil {
-			t.ClearHandler = defaultClearHandler(filepath.Join(t.RootDir, "clear"), t.Backend != nil, t.ReadFileToolName)
-		}
 	}
-	if t.MaxLengthForTrunc == 0 {
-		t.MaxLengthForTrunc = 50000
-	}
-	return t, nil
+
+	return cfg, nil
 }
 
 // New creates tool reduction middleware from config
@@ -183,33 +227,24 @@ func New(_ context.Context, config *Config) (adk.ChatModelAgentMiddleware, error
 	if config == nil {
 		return nil, fmt.Errorf("config must not be nil")
 	}
-	if config.TokenCounter == nil {
-		config.TokenCounter = defaultTokenCounter
+	if config.Backend == nil && !config.SkipTruncation {
+		return nil, fmt.Errorf("backend must be set when not skipping truncation")
 	}
-	if config.ClearRetentionSuffixLimit == 0 {
-		config.ClearRetentionSuffixLimit = 1
-	}
-	defaultReductionConfig := &ToolReductionConfig{
-		Backend:           config.Backend,
-		SkipTruncation:    config.SkipTruncation,
-		SkipClear:         config.SkipClear,
-		ReadFileToolName:  config.ReadFileToolName,
-		RootDir:           config.RootDir,
-		MaxLengthForTrunc: config.MaxLengthForTrunc,
-	}
-	defaultReductionConfig, err = defaultReductionConfig.fillDefaults()
+
+	config, err = config.copyAndFillDefaults()
 	if err != nil {
 		return nil, err
 	}
-
-	for _, reductionConfig := range config.ToolConfig {
-		if reductionConfig == nil {
-			continue
-		}
-		reductionConfig, err = reductionConfig.fillDefaults()
-		if err != nil {
-			return nil, err
-		}
+	defaultReductionConfig := &ToolReductionConfig{
+		Backend:        config.Backend,
+		SkipTruncation: config.SkipTruncation,
+		SkipClear:      config.SkipClear,
+	}
+	if !defaultReductionConfig.SkipTruncation {
+		defaultReductionConfig.TruncHandler = defaultTruncHandler(config.RootDir, config.MaxLengthForTrunc)
+	}
+	if !defaultReductionConfig.SkipClear {
+		defaultReductionConfig.ClearHandler = defaultClearHandler(config.RootDir, config.Backend != nil, config.ReadFileToolName)
 	}
 
 	return &toolReductionMiddleware{
@@ -225,9 +260,13 @@ type toolReductionMiddleware struct {
 	defaultConfig *ToolReductionConfig
 }
 
-func (t *toolReductionMiddleware) getToolConfig(toolName string) *ToolReductionConfig {
+func (t *toolReductionMiddleware) getToolConfig(toolName string, sc scene) *ToolReductionConfig {
 	if t.config.ToolConfig != nil {
 		if cfg, ok := t.config.ToolConfig[toolName]; ok {
+			if (sc == sceneTruncation && !cfg.SkipTruncation && cfg.TruncHandler == nil) ||
+				(sc == sceneClear && !cfg.SkipClear && cfg.ClearHandler == nil) {
+				return t.defaultConfig
+			}
 			return cfg
 		}
 	}
@@ -235,8 +274,8 @@ func (t *toolReductionMiddleware) getToolConfig(toolName string) *ToolReductionC
 }
 
 func (t *toolReductionMiddleware) WrapInvokableToolCall(_ context.Context, endpoint adk.InvokableToolCallEndpoint, tCtx *adk.ToolContext) (adk.InvokableToolCallEndpoint, error) {
-	cfg := t.getToolConfig(tCtx.Name)
-	if cfg == nil || cfg.SkipTruncation {
+	cfg := t.getToolConfig(tCtx.Name, sceneTruncation)
+	if cfg == nil || cfg.TruncHandler == nil {
 		return endpoint, nil
 	}
 
@@ -256,17 +295,31 @@ func (t *toolReductionMiddleware) WrapInvokableToolCall(_ context.Context, endpo
 				},
 			},
 		}
-		truncatedResult, err := t.toolTruncationHandler(ctx, cfg, detail)
+		truncResult, err := cfg.TruncHandler(ctx, detail)
 		if err != nil {
 			return "", err
 		}
-		return truncatedResult, nil
+		if !truncResult.NeedTrunc {
+			return output, nil
+		}
+		if truncResult.NeedOffload {
+			if cfg.Backend == nil {
+				return "", fmt.Errorf("truncation: no backend for offload")
+			}
+			if err = cfg.Backend.Write(ctx, &filesystem.WriteRequest{
+				FilePath: truncResult.OffloadFilePath,
+				Content:  truncResult.OffloadContent,
+			}); err != nil {
+				return "", err
+			}
+		}
+		return truncResult.ToolResult.Parts[0].Text, nil
 	}, nil
 }
 
 func (t *toolReductionMiddleware) WrapStreamableToolCall(_ context.Context, endpoint adk.StreamableToolCallEndpoint, tCtx *adk.ToolContext) (adk.StreamableToolCallEndpoint, error) {
-	cfg := t.getToolConfig(tCtx.Name)
-	if cfg == nil || cfg.SkipTruncation {
+	cfg := t.getToolConfig(tCtx.Name, sceneTruncation)
+	if cfg == nil || cfg.TruncHandler == nil {
 		return endpoint, nil
 	}
 
@@ -279,7 +332,7 @@ func (t *toolReductionMiddleware) WrapStreamableToolCall(_ context.Context, endp
 		var chunks []string
 		readers := output.Copy(2)
 		output = readers[0]
-		errResp := readers[1]
+		origResp := readers[1]
 		defer output.Close()
 
 		for {
@@ -287,13 +340,12 @@ func (t *toolReductionMiddleware) WrapStreamableToolCall(_ context.Context, endp
 			chunk, recvErr := output.Recv()
 			if recvErr != nil {
 				if recvErr != io.EOF {
-					return errResp, nil
+					return origResp, nil
 				}
 				break
 			}
 			chunks = append(chunks, chunk)
 		}
-		errResp.Close() // close err resp when not using it
 
 		result := strings.Join(chunks, "")
 		detail := &ToolDetail{
@@ -307,43 +359,28 @@ func (t *toolReductionMiddleware) WrapStreamableToolCall(_ context.Context, endp
 				},
 			},
 		}
-		truncResult, err := t.toolTruncationHandler(ctx, cfg, detail)
+		truncResult, err := cfg.TruncHandler(ctx, detail)
 		if err != nil {
 			return nil, err
 		}
-		return schema.StreamReaderFromArray([]string{truncResult}), nil
+		if !truncResult.NeedTrunc {
+			return origResp, nil
+		}
+		origResp.Close() // close err resp when not using it
+
+		if truncResult.NeedOffload {
+			if cfg.Backend == nil {
+				return nil, fmt.Errorf("truncation: no backend for offload")
+			}
+			if err = cfg.Backend.Write(ctx, &filesystem.WriteRequest{
+				FilePath: truncResult.OffloadFilePath,
+				Content:  truncResult.OffloadContent,
+			}); err != nil {
+				return nil, err
+			}
+		}
+		return schema.StreamReaderFromArray([]string{truncResult.ToolResult.Parts[0].Text}), nil
 	}, nil
-}
-
-func (t *toolReductionMiddleware) toolTruncationHandler(ctx context.Context, config *ToolReductionConfig, detail *ToolDetail) (truncResult string, err error) {
-	resultText := detail.ToolResult.Parts[0].Text
-	if len(resultText) <= config.MaxLengthForTrunc {
-		return resultText, nil
-	}
-
-	filePath := filepath.Join(config.RootDir, "trunc", detail.ToolContext.CallID)
-	previewSize := config.MaxLengthForTrunc / 2
-	truncatedMsg, err := pyfmt.Fmt(getTruncFmt(), map[string]any{
-		"original_size": len(resultText),
-		"file_path":     filePath,
-		"preview_size":  previewSize,
-		"preview_first": resultText[:previewSize],
-		"preview_last":  resultText[len(resultText)-previewSize:],
-	})
-	if err != nil {
-		return "", err
-	}
-
-	truncResult = resultText[:config.MaxLengthForTrunc] + truncatedMsg
-	err = config.Backend.Write(ctx, &filesystem.WriteRequest{
-		FilePath: filePath,
-		Content:  resultText,
-	})
-	if err != nil {
-		return "", err
-	}
-
-	return truncResult, nil
 }
 
 func (t *toolReductionMiddleware) BeforeModelRewriteState(ctx context.Context, state *adk.ChatModelAgentState, mc *adk.ModelContext) (
@@ -412,8 +449,8 @@ func (t *toolReductionMiddleware) BeforeModelRewriteState(ctx context.Context, s
 					break
 				}
 
-				cfg := t.getToolConfig(toolCall.Function.Name)
-				if cfg == nil || cfg.SkipClear {
+				cfg := t.getToolConfig(toolCall.Function.Name, sceneClear)
+				if cfg == nil || cfg.ClearHandler == nil {
 					continue
 				}
 
@@ -440,9 +477,12 @@ func (t *toolReductionMiddleware) BeforeModelRewriteState(ctx context.Context, s
 				if !offloadInfo.NeedClear {
 					continue
 				}
-				if offloadInfo.NeedOffload && cfg.Backend != nil {
+				if offloadInfo.NeedOffload {
+					if cfg.Backend == nil {
+						return ctx, state, fmt.Errorf("clear: no backend for offload")
+					}
 					writeErr := cfg.Backend.Write(ctx, &filesystem.WriteRequest{
-						FilePath: offloadInfo.FilePath,
+						FilePath: offloadInfo.OffloadFilePath,
 						Content:  offloadInfo.OffloadContent,
 					})
 					if writeErr != nil {
@@ -450,14 +490,14 @@ func (t *toolReductionMiddleware) BeforeModelRewriteState(ctx context.Context, s
 					}
 				}
 
-				tcMsg.ToolCalls[tcIndex].Function.Arguments = td.ToolArgument.Text
+				tcMsg.ToolCalls[tcIndex].Function.Arguments = offloadInfo.ToolArgument.Text
 				if fromContent {
-					if len(td.ToolResult.Parts) > 0 {
-						resultMsg.Content = td.ToolResult.Parts[0].Text
+					if len(offloadInfo.ToolResult.Parts) > 0 {
+						resultMsg.Content = offloadInfo.ToolResult.Parts[0].Text
 					}
 				} else {
 					var convErr error
-					resultMsg.UserInputMultiContent, convErr = td.ToolResult.ToMessageInputParts()
+					resultMsg.UserInputMultiContent, convErr = offloadInfo.ToolResult.ToMessageInputParts()
 					if convErr != nil {
 						return ctx, state, convErr
 					}
@@ -524,8 +564,42 @@ func defaultTokenCounter(_ context.Context, msgs []*schema.Message, tools []*sch
 	return tokens, nil
 }
 
-func defaultClearHandler(rootDir string, needOffload bool, readFileToolName string) func(ctx context.Context, detail *ToolDetail) (*OffloadInfo, error) {
-	return func(ctx context.Context, detail *ToolDetail) (offloadInfo *OffloadInfo, err error) {
+func defaultTruncHandler(rootDir string, truncMaxLength int) func(ctx context.Context, detail *ToolDetail) (truncResult *TruncResult, err error) {
+	return func(ctx context.Context, detail *ToolDetail) (offloadInfo *TruncResult, err error) {
+		resultText := detail.ToolResult.Parts[0].Text
+		if len(resultText) <= truncMaxLength {
+			return &TruncResult{NeedTrunc: false}, nil
+		}
+
+		filePath := filepath.Join(rootDir, "trunc", detail.ToolContext.CallID)
+		previewSize := truncMaxLength / 2
+		truncNotify, err := pyfmt.Fmt(getTruncFmt(), map[string]any{
+			"original_size": len(resultText),
+			"file_path":     filePath,
+			"preview_size":  previewSize,
+			"preview_first": resultText[:previewSize],
+			"preview_last":  resultText[len(resultText)-previewSize:],
+		})
+		if err != nil {
+			return nil, err
+		}
+
+		return &TruncResult{
+			ToolResult: &schema.ToolResult{
+				Parts: []schema.ToolOutputPart{
+					{Type: schema.ToolPartTypeText, Text: resultText[:truncMaxLength] + truncNotify},
+				},
+			},
+			NeedTrunc:       true,
+			NeedOffload:     true,
+			OffloadFilePath: filePath,
+			OffloadContent:  resultText,
+		}, nil
+	}
+}
+
+func defaultClearHandler(rootDir string, needOffload bool, readFileToolName string) func(ctx context.Context, detail *ToolDetail) (*ClearResult, error) {
+	return func(ctx context.Context, detail *ToolDetail) (clearResult *ClearResult, err error) {
 		if len(detail.ToolResult.Parts) == 0 || detail.ToolResult.Parts[0].Type != schema.ToolPartTypeText {
 			// brutal judge
 			return nil, fmt.Errorf("default offload currently not support multimodal content")
@@ -546,23 +620,29 @@ func defaultClearHandler(rootDir string, needOffload bool, readFileToolName stri
 			if err != nil {
 				return nil, err
 			}
-			offloadInfo = &OffloadInfo{
-				NeedClear:      true,
-				NeedOffload:    true,
-				FilePath:       filePath,
-				OffloadContent: detail.ToolResult.Parts[0].Text,
+			clearResult = &ClearResult{
+				ToolArgument:    detail.ToolArgument,
+				NeedClear:       true,
+				NeedOffload:     true,
+				OffloadFilePath: filePath,
+				OffloadContent:  detail.ToolResult.Parts[0].Text,
 			}
 		} else {
 			nResult = getClearWithoutOffloadingFmt()
-			offloadInfo = &OffloadInfo{
-				NeedClear:   true,
-				NeedOffload: false,
+			clearResult = &ClearResult{
+				ToolArgument: detail.ToolArgument,
+				NeedClear:    true,
+				NeedOffload:  false,
 			}
 		}
 
-		detail.ToolResult.Parts[0].Text = nResult
+		clearResult.ToolResult = &schema.ToolResult{
+			Parts: []schema.ToolOutputPart{
+				{Type: schema.ToolPartTypeText, Text: nResult},
+			},
+		}
 
-		return offloadInfo, nil
+		return clearResult, nil
 	}
 }
 
