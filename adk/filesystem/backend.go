@@ -50,9 +50,6 @@ type GrepMatch struct {
 
 	// Line is the 1-based line number of the match.
 	Line int
-
-	// Count is the total number of matches found in the file.
-	Count int
 }
 
 // LsInfoRequest contains parameters for listing file information.
@@ -128,45 +125,17 @@ type GrepRequest struct {
 	// Default: false (patterns match within single lines only).
 	EnableMultiline bool
 
-	// ===== Output Configuration =====
-
-	// OutputMode specifies the output format.
-	// Default: "files_with_matches"
-	// See GrepMatch.Content for format details.
-	OutputMode OutputMode
-
 	// ===== Context Display (Content mode only) =====
 
 	// AfterLines shows N lines after each match.
 	// Only applicable when OutputMode is "content".
 	// Values <= 0 are treated as unset.
-	// Priority: This parameter is ignored if ContextLines > 0.
 	AfterLines int
 
 	// BeforeLines shows N lines before each match.
 	// Only applicable when OutputMode is "content".
 	// Values <= 0 are treated as unset.
-	// Priority: This parameter is ignored if ContextLines > 0.
 	BeforeLines int
-
-	// ContextLines shows N lines before and after each match.
-	// Only applicable when OutputMode is "content".
-	// Values <= 0 are treated as unset.
-	// Priority: When ContextLines > 0, it takes precedence over both AfterLines and BeforeLines.
-	// This means setting ContextLines will override any values set in AfterLines or BeforeLines.
-	ContextLines int
-
-	// ===== Result Pagination =====
-
-	// HeadLimit limits output to first N entries.
-	// Works across all output modes. Default: 0 (no limit).
-	// Values <= 0 are treated as no limit.
-	HeadLimit int
-
-	// Offset skips first N results before applying HeadLimit.
-	// Works across all output modes. Default: 0.
-	// Values <= 0 are treated as 0.
-	Offset int
 }
 
 // GlobInfoRequest contains parameters for glob pattern matching.
