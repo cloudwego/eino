@@ -75,3 +75,10 @@ func getClearWithoutOffloadingFmt() string {
 		Chinese: clearWithoutOffloadingFmtZh,
 	})
 }
+
+type scene int
+
+const (
+	sceneTruncation scene = 1
+	sceneClear      scene = 2
+)
