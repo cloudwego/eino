@@ -70,7 +70,7 @@ func TestMiddlewareBeforeModelRewriteState(t *testing.T) {
 		mw := &middleware{
 			cfg: &Config{
 				Model:   cm,
-				Trigger: &TriggerCondition{MaxTokens: 1000},
+				Trigger: &TriggerCondition{ContextTokens: 1000},
 			},
 			BaseChatModelAgentMiddleware: &adk.BaseChatModelAgentMiddleware{},
 		}
@@ -100,7 +100,7 @@ func TestMiddlewareBeforeModelRewriteState(t *testing.T) {
 		mw := &middleware{
 			cfg: &Config{
 				Model:   cm,
-				Trigger: &TriggerCondition{MaxTokens: 10},
+				Trigger: &TriggerCondition{ContextTokens: 10},
 			},
 			BaseChatModelAgentMiddleware: &adk.BaseChatModelAgentMiddleware{},
 		}
@@ -139,7 +139,7 @@ func TestMiddlewareBeforeModelRewriteState(t *testing.T) {
 		mw := &middleware{
 			cfg: &Config{
 				Model:   cm,
-				Trigger: &TriggerCondition{MaxTokens: 10},
+				Trigger: &TriggerCondition{ContextTokens: 10},
 			},
 			BaseChatModelAgentMiddleware: &adk.BaseChatModelAgentMiddleware{},
 		}
@@ -172,7 +172,7 @@ func TestMiddlewareBeforeModelRewriteState(t *testing.T) {
 		mw := &middleware{
 			cfg: &Config{
 				Model:   cm,
-				Trigger: &TriggerCondition{MaxTokens: 10},
+				Trigger: &TriggerCondition{ContextTokens: 10},
 			},
 			BaseChatModelAgentMiddleware: &adk.BaseChatModelAgentMiddleware{},
 		}
@@ -207,7 +207,7 @@ func TestMiddlewareBeforeModelRewriteState(t *testing.T) {
 		mw := &middleware{
 			cfg: &Config{
 				Model:   cm,
-				Trigger: &TriggerCondition{MaxTokens: 10},
+				Trigger: &TriggerCondition{ContextTokens: 10},
 				Finalize: func(ctx context.Context, originalMessages []adk.Message, summary adk.Message) ([]adk.Message, error) {
 					return []adk.Message{
 						schema.SystemMessage("system prompt"),
@@ -238,7 +238,7 @@ func TestMiddlewareShouldSummarize(t *testing.T) {
 	t.Run("returns true when over threshold", func(t *testing.T) {
 		mw := &middleware{
 			cfg: &Config{
-				Trigger: &TriggerCondition{MaxTokens: 10},
+				Trigger: &TriggerCondition{ContextTokens: 10},
 			},
 		}
 
@@ -256,7 +256,7 @@ func TestMiddlewareShouldSummarize(t *testing.T) {
 	t.Run("returns false when under threshold", func(t *testing.T) {
 		mw := &middleware{
 			cfg: &Config{
-				Trigger: &TriggerCondition{MaxTokens: 1000},
+				Trigger: &TriggerCondition{ContextTokens: 1000},
 			},
 		}
 
@@ -437,30 +437,27 @@ func TestAppendSection(t *testing.T) {
 	}
 }
 
-func TestPendingTasksRegex(t *testing.T) {
-	t.Run("no match returns nil", func(t *testing.T) {
-		result := findLastMatch(getPendingTasksRegex(), "no tasks here")
-		assert.Nil(t, result)
+func TestAllUserMessagesTagRegex(t *testing.T) {
+	t.Run("matches tag", func(t *testing.T) {
+		text := `<all_user_messages>
+    - msg1
+    - msg2
+</all_user_messages>`
+		assert.True(t, allUserMessagesTagRegex.MatchString(text))
 	})
 
-	t.Run("does not match inline content", func(t *testing.T) {
-		text := "6. Pending Tasks: Outline any pending tasks"
-		result := findLastMatch(getPendingTasksRegex(), text)
-		assert.Nil(t, result)
-	})
-
-	t.Run("finds last match english", func(t *testing.T) {
-		text := "7. Pending Tasks:\n- task1\n\n8. Pending Tasks:\n- task2"
-		result := findLastMatch(pendingTasksRegex, text)
-		assert.NotNil(t, result)
-		assert.Equal(t, "8. Pending Tasks:", text[result[0]:result[1]])
-	})
-
-	t.Run("finds last match chinese", func(t *testing.T) {
-		text := "7. 待处理任务：\n- 任务1\n\n8. 待处理任务：\n- 任务2"
-		result := findLastMatch(pendingTasksRegexZh, text)
-		assert.NotNil(t, result)
-		assert.Equal(t, "8. 待处理任务：", text[result[0]:result[1]])
+	t.Run("replaces tag content", func(t *testing.T) {
+		text := `before
+<all_user_messages>
+    - old msg
+</all_user_messages>
+after`
+		replacement := "<all_user_messages>\n    - new msg\n</all_user_messages>"
+		result := allUserMessagesTagRegex.ReplaceAllString(text, replacement)
+		assert.Contains(t, result, "new msg")
+		assert.NotContains(t, result, "old msg")
+		assert.Contains(t, result, "before")
+		assert.Contains(t, result, "after")
 	})
 }
 
@@ -496,7 +493,7 @@ func TestConfigCheck(t *testing.T) {
 
 		c := &Config{
 			Model:   cm,
-			Trigger: &TriggerCondition{MaxTokens: -1},
+			Trigger: &TriggerCondition{ContextTokens: -1},
 		}
 		err := c.check()
 		assert.Error(t, err)
@@ -618,10 +615,10 @@ func TestMiddlewareSummarize(t *testing.T) {
 	})
 }
 
-func TestInsertUserMessagesIntoSummary(t *testing.T) {
+func TestReplaceUserMessagesInSummary(t *testing.T) {
 	ctx := context.Background()
 
-	t.Run("inserts user messages", func(t *testing.T) {
+	t.Run("replaces user messages section", func(t *testing.T) {
 		mw := &middleware{
 			cfg: &Config{},
 		}
@@ -632,23 +629,36 @@ func TestInsertUserMessagesIntoSummary(t *testing.T) {
 			schema.UserMessage("msg2"),
 		}
 
-		result, err := mw.insertUserMessagesIntoSummary(ctx, msgs, "summary content", 1000)
+		summary := `1. Primary Request:
+   test
+
+6. All user messages:
+<all_user_messages>
+    - [old message]
+</all_user_messages>
+
+7. Pending Tasks:
+   - task1`
+
+		result, err := mw.replaceUserMessagesInSummary(ctx, msgs, summary, 1000)
 		assert.NoError(t, err)
 		assert.Contains(t, result, "msg1")
 		assert.Contains(t, result, "msg2")
+		assert.NotContains(t, result, "old message")
+		assert.Contains(t, result, "7. Pending Tasks:")
 	})
 
-	t.Run("skips if already exists", func(t *testing.T) {
+	t.Run("returns original if no matching sections", func(t *testing.T) {
 		mw := &middleware{
 			cfg: &Config{},
 		}
 
 		msgs := []adk.Message{
-			schema.UserMessage("existing message"),
+			schema.UserMessage("test"),
 		}
 
-		summary := "summary with     - existing message"
-		result, err := mw.insertUserMessagesIntoSummary(ctx, msgs, summary, 1000)
+		summary := "summary without sections"
+		result, err := mw.replaceUserMessagesInSummary(ctx, msgs, summary, 1000)
 		assert.NoError(t, err)
 		assert.Equal(t, summary, result)
 	})
@@ -669,7 +679,15 @@ func TestInsertUserMessagesIntoSummary(t *testing.T) {
 			schema.UserMessage("regular message"),
 		}
 
-		result, err := mw.insertUserMessagesIntoSummary(ctx, msgs, "summary content", 1000)
+		summary := `6. All user messages:
+<all_user_messages>
+    - [old]
+</all_user_messages>
+
+7. Pending Tasks:
+   - task`
+
+		result, err := mw.replaceUserMessagesInSummary(ctx, msgs, summary, 1000)
 		assert.NoError(t, err)
 		assert.Contains(t, result, "regular message")
 		assert.NotContains(t, result, "    - summary")
@@ -685,10 +703,103 @@ func TestInsertUserMessagesIntoSummary(t *testing.T) {
 		}
 
 		msgs := []adk.Message{
-			schema.UserMessage("test"),
+			schema.UserMessage("test1"),
+			schema.UserMessage("test2"),
 		}
 
-		_, err := mw.insertUserMessagesIntoSummary(ctx, msgs, "summary", 1000)
+		_, err := mw.replaceUserMessagesInSummary(ctx, msgs, "summary", 1000)
 		assert.Error(t, err)
+	})
+
+	t.Run("returns original if empty user messages", func(t *testing.T) {
+		mw := &middleware{
+			cfg: &Config{},
+		}
+
+		msgs := []adk.Message{
+			schema.AssistantMessage("response", nil),
+		}
+
+		summary := `6. All user messages:
+    - [old]
+
+7. Pending Tasks:
+   - task`
+
+		result, err := mw.replaceUserMessagesInSummary(ctx, msgs, summary, 1000)
+		assert.NoError(t, err)
+		assert.Equal(t, summary, result)
+	})
+}
+
+func TestAllUserMessagesTagRegexMatch(t *testing.T) {
+	t.Run("matches xml tag", func(t *testing.T) {
+		text := "<all_user_messages>\n    - msg\n</all_user_messages>"
+		assert.True(t, allUserMessagesTagRegex.MatchString(text))
+	})
+
+	t.Run("does not match without tag", func(t *testing.T) {
+		text := "6. All user messages:\n    - msg"
+		assert.False(t, allUserMessagesTagRegex.MatchString(text))
+	})
+}
+
+func TestDefaultTrimUserMessage(t *testing.T) {
+	t.Run("returns nil for zero remaining tokens", func(t *testing.T) {
+		msg := schema.UserMessage("test")
+		result := defaultTrimUserMessage(msg, 0)
+		assert.Nil(t, result)
+	})
+
+	t.Run("returns nil for empty content", func(t *testing.T) {
+		msg := schema.UserMessage("")
+		result := defaultTrimUserMessage(msg, 100)
+		assert.Nil(t, result)
+	})
+
+	t.Run("trims long message", func(t *testing.T) {
+		longText := strings.Repeat("a", 3000)
+		msg := schema.UserMessage(longText)
+		result := defaultTrimUserMessage(msg, 100)
+		assert.NotNil(t, result)
+		assert.Less(t, len(result.Content), len(longText))
+	})
+}
+
+func TestDefaultTokenCounter(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("counts tool tokens", func(t *testing.T) {
+		input := &TokenCounterInput{
+			Messages: []adk.Message{},
+			Tools: []*schema.ToolInfo{
+				{Name: "test_tool", Desc: "description"},
+			},
+		}
+		count, err := defaultTokenCounter(ctx, input)
+		assert.NoError(t, err)
+		assert.Greater(t, count, 0)
+	})
+}
+
+func TestPostProcessSummary(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("with transcript path", func(t *testing.T) {
+		mw := &middleware{
+			cfg: &Config{
+				TranscriptFilePath: "/path/to/transcript.txt",
+			},
+		}
+
+		summary := &schema.Message{
+			Role:    schema.User,
+			Content: "summary content",
+		}
+
+		result, err := mw.postProcessSummary(ctx, []adk.Message{}, summary)
+		assert.NoError(t, err)
+		assert.Len(t, result.UserInputMultiContent, 2)
+		assert.Contains(t, result.UserInputMultiContent[0].Text, "/path/to/transcript.txt")
 	})
 }
