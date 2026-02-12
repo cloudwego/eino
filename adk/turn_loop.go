@@ -46,8 +46,8 @@ type ConsumeOption struct {
 	Mode ConsumeMode
 	// CancelOption specifies when and how the running agent should be canceled.
 	// Only meaningful when Mode is ConsumePreemptive and the agent
-	// implements Cancellable. Default nil value means CancelImmediate.
-	CancelOption *CancelOption
+	// implements Cancellable. Default zero value means CancelImmediate.
+	CancelOption CancelOption
 }
 
 // NonPreemptiveConsumeOption is a convenience value for the common
@@ -68,14 +68,14 @@ type MessageSource[T any] interface {
 type TurnLoopConfig[T any] struct {
 	// Source provides messages to drive the loop. Required.
 	Source MessageSource[T]
-	// GenInput converts a received message into AgentInput. Required.
-	GenInput func(ctx context.Context, item T) (*AgentInput, error)
+	// GenInput converts a received message into AgentInput and optional
+	// RunOptions for the agent. Required.
+	GenInput func(ctx context.Context, item T) (*AgentInput, []AgentRunOption, error)
 	// GetAgent returns the Agent to run for a given message. Required.
 	GetAgent func(ctx context.Context, item T) (Agent, error)
 	// OnAgentEvent is called for each event emitted by the agent. Optional.
-	OnAgentEvent func(ctx context.Context, event *AgentEvent) error
-	// RunOptions are passed to Agent.Run on each turn. Optional.
-	RunOptions []AgentRunOption
+	// The inputItem is the message that triggered the current agent turn.
+	OnAgentEvent func(ctx context.Context, inputItem T, event *AgentEvent) error
 	// ReceiveTimeout is the timeout passed to Source.Receive on each iteration.
 	// Zero means no timeout. Optional.
 	ReceiveTimeout time.Duration
@@ -87,10 +87,9 @@ type TurnLoopConfig[T any] struct {
 // agent implements Cancellable.
 type TurnLoop[T any] struct {
 	source         MessageSource[T]
-	genInput       func(ctx context.Context, item T) (*AgentInput, error)
+	genInput       func(ctx context.Context, item T) (*AgentInput, []AgentRunOption, error)
 	getAgent       func(ctx context.Context, item T) (Agent, error)
-	onAgentEvent   func(ctx context.Context, event *AgentEvent) error
-	runOptions     []AgentRunOption
+	onAgentEvent   func(ctx context.Context, inputItem T, event *AgentEvent) error
 	receiveTimeout time.Duration
 }
 
@@ -112,7 +111,6 @@ func NewTurnLoop[T any](config TurnLoopConfig[T]) (*TurnLoop[T], error) {
 		genInput:       config.GenInput,
 		getAgent:       config.GetAgent,
 		onAgentEvent:   config.OnAgentEvent,
-		runOptions:     config.RunOptions,
 		receiveTimeout: config.ReceiveTimeout,
 	}, nil
 }
@@ -148,7 +146,7 @@ func (l *TurnLoop[T]) Run(ctx context.Context) error {
 	}
 
 	for {
-		input, e := l.genInput(ctx, item)
+		input, runOpts, e := l.genInput(ctx, item)
 		if e != nil {
 			return fmt.Errorf("failed to generate agent input: %w", e)
 		}
@@ -168,7 +166,7 @@ func (l *TurnLoop[T]) Run(ctx context.Context) error {
 
 		// Run the agent and forward events through a channel so we can
 		// select between agent events and incoming messages.
-		iter := agent.Run(ctx, input, l.runOptions...)
+		iter := agent.Run(ctx, input, runOpts...)
 		eventCh := make(chan iterResult, 1)
 		go func() {
 			for {
@@ -199,7 +197,7 @@ func (l *TurnLoop[T]) Run(ctx context.Context) error {
 					break eventLoop
 				}
 				if l.onAgentEvent != nil {
-					if e_ := l.onAgentEvent(ctx, ev.event); e_ != nil {
+					if e_ := l.onAgentEvent(ctx, item, ev.event); e_ != nil {
 						turnErr = fmt.Errorf("OnAgentEvent failed: %w", e_)
 						break eventLoop
 					}

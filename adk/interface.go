@@ -301,10 +301,10 @@ type Cancellable interface {
 	// Cancel signals the agent to stop, either immediately or after reaching the
 	// specified execution point(s) defined by opt.Mode.
 	//
-	// The opt parameter must be non-nil. Use opt.Mode to control when the
-	// cancellation takes effect (e.g., CancelImmediate, CancelAfterChatModel,
-	// CancelAfterToolCall, or a combination via bitwise OR).
+	// Use opt.Mode to control when the cancellation takes effect
+	// (e.g., CancelImmediate, CancelAfterChatModel, CancelAfterToolCall,
+	// or a combination via bitwise OR). The zero value defaults to CancelImmediate.
 	//
 	// If the agent has already finished execution, Cancel returns ErrAgentFinished.
-	Cancel(ctx context.Context, opt *CancelOption) error
+	Cancel(ctx context.Context, opt CancelOption) error
 }
