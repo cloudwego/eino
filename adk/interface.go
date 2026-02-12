@@ -20,6 +20,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/gob"
+	"errors"
 	"fmt"
 	"io"
 
@@ -268,4 +269,42 @@ type ResumableAgent interface {
 	Agent
 
 	Resume(ctx context.Context, info *ResumeInfo, opts ...AgentRunOption) *AsyncIterator[*AgentEvent]
+}
+
+// CancelMode specifies when an agent should be canceled.
+// Modes can be combined with bitwise OR to cancel at multiple execution points.
+// For example, CancelAfterChatModel | CancelAfterToolCall cancels the agent
+// after whichever execution point is reached first.
+type CancelMode int
+
+const (
+	// CancelImmediate cancels the agent immediately without waiting
+	// for any execution point.
+	CancelImmediate CancelMode = 0
+	// CancelAfterChatModel cancels the agent after a chat model call completes.
+	CancelAfterChatModel CancelMode = 1 << iota
+	// CancelAfterToolCall cancels the agent after a tool call completes.
+	CancelAfterToolCall
+)
+
+// ErrAgentFinished is returned by Cancel when the agent has already finished execution.
+var ErrAgentFinished = errors.New("agent has already finished execution")
+
+// CancelOption holds options for cancelling an agent.
+type CancelOption struct {
+	Mode CancelMode
+}
+
+// Cancellable is an optional interface that an Agent can implement to support
+// cancellation during execution.
+type Cancellable interface {
+	// Cancel signals the agent to stop, either immediately or after reaching the
+	// specified execution point(s) defined by opt.Mode.
+	//
+	// The opt parameter must be non-nil. Use opt.Mode to control when the
+	// cancellation takes effect (e.g., CancelImmediate, CancelAfterChatModel,
+	// CancelAfterToolCall, or a combination via bitwise OR).
+	//
+	// If the agent has already finished execution, Cancel returns ErrAgentFinished.
+	Cancel(ctx context.Context, opt *CancelOption) error
 }
