@@ -293,7 +293,7 @@ func TestGetReactHistory(t *testing.T) {
 		schema.UserMessage("user query"),
 		schema.UserMessage("For context: [MyAgent] called tool: `tool1` with arguments: arguments1."),
 		schema.UserMessage("For context: [MyAgent] `tool1` tool returned result: tool result 1."),
-		schema.UserMessage("For context: [MyAgent] called tool: `transfer_to_agent` with arguments: DestAgentName."),
+		schema.UserMessage("For context: [MyAgent] called tool: `transfer_to_agent` with arguments: {\"agent_name\":\"DestAgentName\"}."),
 		schema.UserMessage("For context: [MyAgent] `transfer_to_agent` tool returned result: successfully transferred to agent [DestAgentName]."),
 	}, result)
 }
@@ -398,7 +398,7 @@ func TestAgentToolWithOptions(t *testing.T) {
 		assert.Len(t, mockAgent.capturedInput, 4) // 2 from history + 2 transfer messages
 		assert.Equal(t, "first user message", mockAgent.capturedInput[0].Content)
 		assert.Equal(t, "For context: [react-agent] said: first assistant response.", mockAgent.capturedInput[1].Content)
-		assert.Equal(t, "For context: [react-agent] called tool: `transfer_to_agent` with arguments: test-agent.", mockAgent.capturedInput[2].Content)
+		assert.Equal(t, "For context: [react-agent] called tool: `transfer_to_agent` with arguments: {\"agent_name\":\"test-agent\"}.", mockAgent.capturedInput[2].Content)
 		assert.Equal(t, "For context: [react-agent] `transfer_to_agent` tool returned result: successfully transferred to agent [test-agent].", mockAgent.capturedInput[3].Content)
 	})
 
@@ -568,7 +568,7 @@ func TestAgentToolWithOptions(t *testing.T) {
 		assert.Len(t, mockAgent.capturedInput, 4) // 2 history + 2 transfer messages
 		assert.Equal(t, "previous conversation", mockAgent.capturedInput[0].Content)
 		assert.Equal(t, "For context: [react-agent] said: previous response.", mockAgent.capturedInput[1].Content)
-		assert.Equal(t, "For context: [react-agent] called tool: `transfer_to_agent` with arguments: combined-agent.", mockAgent.capturedInput[2].Content)
+		assert.Equal(t, "For context: [react-agent] called tool: `transfer_to_agent` with arguments: {\"agent_name\":\"combined-agent\"}.", mockAgent.capturedInput[2].Content)
 		assert.Equal(t, "For context: [react-agent] `transfer_to_agent` tool returned result: successfully transferred to agent [combined-agent].", mockAgent.capturedInput[3].Content)
 	})
 }
