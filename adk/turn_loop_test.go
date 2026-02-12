@@ -84,7 +84,7 @@ type turnLoopCancellableAgent struct {
 	startedCh      chan struct{} // closed when Run is entered
 	cancelCh       chan struct{} // closed by Cancel
 	cancelled      atomic.Bool
-	cancelledOpt   *CancelOption // records the CancelOption passed to Cancel
+	cancelledOpt   CancelOption // records the CancelOption passed to Cancel
 }
 
 func (a *turnLoopCancellableAgent) Name(_ context.Context) string        { return a.name }
@@ -99,7 +99,7 @@ func (a *turnLoopCancellableAgent) Run(_ context.Context, _ *AgentInput, _ ...Ag
 	return iter
 }
 
-func (a *turnLoopCancellableAgent) Cancel(_ context.Context, opt *CancelOption) error {
+func (a *turnLoopCancellableAgent) Cancel(_ context.Context, opt CancelOption) error {
 	a.cancelled.Store(true)
 	a.cancelledOpt = opt
 	close(a.cancelCh)
@@ -137,7 +137,7 @@ func (a *turnLoopBlockingAgent) Run(_ context.Context, _ *AgentInput, _ ...Agent
 func TestNewTurnLoop_Validation(t *testing.T) {
 	t.Run("missing source", func(t *testing.T) {
 		_, err := NewTurnLoop(TurnLoopConfig[string]{
-			GenInput: func(_ context.Context, _ string) (*AgentInput, error) { return nil, nil },
+			GenInput: func(_ context.Context, _ string) (*AgentInput, []AgentRunOption, error) { return nil, nil, nil },
 			GetAgent: func(_ context.Context, _ string) (Agent, error) { return nil, nil },
 		})
 		require.Error(t, err)
@@ -156,7 +156,7 @@ func TestNewTurnLoop_Validation(t *testing.T) {
 	t.Run("missing GetAgent", func(t *testing.T) {
 		_, err := NewTurnLoop(TurnLoopConfig[string]{
 			Source:   &turnLoopMockSource{},
-			GenInput: func(_ context.Context, _ string) (*AgentInput, error) { return nil, nil },
+			GenInput: func(_ context.Context, _ string) (*AgentInput, []AgentRunOption, error) { return nil, nil, nil },
 		})
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "GetAgent")
@@ -165,7 +165,7 @@ func TestNewTurnLoop_Validation(t *testing.T) {
 	t.Run("valid config", func(t *testing.T) {
 		loop, err := NewTurnLoop(TurnLoopConfig[string]{
 			Source:   &turnLoopMockSource{},
-			GenInput: func(_ context.Context, _ string) (*AgentInput, error) { return nil, nil },
+			GenInput: func(_ context.Context, _ string) (*AgentInput, []AgentRunOption, error) { return nil, nil, nil },
 			GetAgent: func(_ context.Context, _ string) (Agent, error) { return nil, nil },
 		})
 		require.NoError(t, err)
@@ -195,14 +195,14 @@ func TestTurnLoop_NormalLoop(t *testing.T) {
 
 	loop, err := NewTurnLoop(TurnLoopConfig[string]{
 		Source: source,
-		GenInput: func(_ context.Context, item string) (*AgentInput, error) {
+		GenInput: func(_ context.Context, item string) (*AgentInput, []AgentRunOption, error) {
 			receivedItems = append(receivedItems, item)
-			return &AgentInput{Messages: []Message{schema.UserMessage(item)}}, nil
+			return &AgentInput{Messages: []Message{schema.UserMessage(item)}}, nil, nil
 		},
 		GetAgent: func(_ context.Context, _ string) (Agent, error) {
 			return agent, nil
 		},
-		OnAgentEvent: func(_ context.Context, event *AgentEvent) error {
+		OnAgentEvent: func(_ context.Context, _ string, event *AgentEvent) error {
 			receivedEvents = append(receivedEvents, event)
 			return nil
 		},
@@ -224,8 +224,8 @@ func TestTurnLoop_SourceError(t *testing.T) {
 
 	loop, err := NewTurnLoop(TurnLoopConfig[string]{
 		Source: source,
-		GenInput: func(_ context.Context, _ string) (*AgentInput, error) {
-			return &AgentInput{}, nil
+		GenInput: func(_ context.Context, _ string) (*AgentInput, []AgentRunOption, error) {
+			return &AgentInput{}, nil, nil
 		},
 		GetAgent: func(_ context.Context, _ string) (Agent, error) {
 			return &turnLoopMockAgent{name: "a"}, nil
@@ -242,8 +242,8 @@ func TestTurnLoop_GenInputError(t *testing.T) {
 
 	loop, err := NewTurnLoop(TurnLoopConfig[string]{
 		Source: &turnLoopMockSource{items: []string{"msg1"}, err: errors.New("should not reach")},
-		GenInput: func(_ context.Context, _ string) (*AgentInput, error) {
-			return nil, genErr
+		GenInput: func(_ context.Context, _ string) (*AgentInput, []AgentRunOption, error) {
+			return nil, nil, genErr
 		},
 		GetAgent: func(_ context.Context, _ string) (Agent, error) {
 			return &turnLoopMockAgent{name: "a"}, nil
@@ -261,8 +261,8 @@ func TestTurnLoop_GetAgentError(t *testing.T) {
 
 	loop, err := NewTurnLoop(TurnLoopConfig[string]{
 		Source: &turnLoopMockSource{items: []string{"msg1"}, err: errors.New("should not reach")},
-		GenInput: func(_ context.Context, _ string) (*AgentInput, error) {
-			return &AgentInput{}, nil
+		GenInput: func(_ context.Context, _ string) (*AgentInput, []AgentRunOption, error) {
+			return &AgentInput{}, nil, nil
 		},
 		GetAgent: func(_ context.Context, _ string) (Agent, error) {
 			return nil, agentErr
@@ -284,13 +284,13 @@ func TestTurnLoop_OnAgentEventError(t *testing.T) {
 
 	loop, err := NewTurnLoop(TurnLoopConfig[string]{
 		Source: &turnLoopMockSource{items: []string{"msg1"}, err: errors.New("should not reach")},
-		GenInput: func(_ context.Context, _ string) (*AgentInput, error) {
-			return &AgentInput{}, nil
+		GenInput: func(_ context.Context, _ string) (*AgentInput, []AgentRunOption, error) {
+			return &AgentInput{}, nil, nil
 		},
 		GetAgent: func(_ context.Context, _ string) (Agent, error) {
 			return agent, nil
 		},
-		OnAgentEvent: func(_ context.Context, _ *AgentEvent) error {
+		OnAgentEvent: func(_ context.Context, _ string, _ *AgentEvent) error {
 			return eventErr
 		},
 	})
@@ -321,8 +321,8 @@ func TestTurnLoop_ContextCancellation(t *testing.T) {
 
 	loop, err := NewTurnLoop(TurnLoopConfig[string]{
 		Source: source,
-		GenInput: func(_ context.Context, item string) (*AgentInput, error) {
-			return &AgentInput{Messages: []Message{schema.UserMessage(item)}}, nil
+		GenInput: func(_ context.Context, item string) (*AgentInput, []AgentRunOption, error) {
+			return &AgentInput{Messages: []Message{schema.UserMessage(item)}}, nil, nil
 		},
 		GetAgent: func(_ context.Context, _ string) (Agent, error) {
 			return agent, nil
@@ -348,13 +348,13 @@ func TestTurnLoop_MultipleEventsPerTurn(t *testing.T) {
 
 	loop, err := NewTurnLoop(TurnLoopConfig[string]{
 		Source: &turnLoopMockSource{items: []string{"msg1"}, err: context.DeadlineExceeded},
-		GenInput: func(_ context.Context, item string) (*AgentInput, error) {
-			return &AgentInput{Messages: []Message{schema.UserMessage(item)}}, nil
+		GenInput: func(_ context.Context, item string) (*AgentInput, []AgentRunOption, error) {
+			return &AgentInput{Messages: []Message{schema.UserMessage(item)}}, nil, nil
 		},
 		GetAgent: func(_ context.Context, _ string) (Agent, error) {
 			return agent, nil
 		},
-		OnAgentEvent: func(_ context.Context, _ *AgentEvent) error {
+		OnAgentEvent: func(_ context.Context, _ string, _ *AgentEvent) error {
 			eventCount++
 			return nil
 		},
@@ -374,8 +374,8 @@ func TestTurnLoop_NoOnAgentEvent(t *testing.T) {
 
 	loop, err := NewTurnLoop(TurnLoopConfig[string]{
 		Source: &turnLoopMockSource{items: []string{"msg1"}, err: context.DeadlineExceeded},
-		GenInput: func(_ context.Context, item string) (*AgentInput, error) {
-			return &AgentInput{Messages: []Message{schema.UserMessage(item)}}, nil
+		GenInput: func(_ context.Context, item string) (*AgentInput, []AgentRunOption, error) {
+			return &AgentInput{Messages: []Message{schema.UserMessage(item)}}, nil, nil
 		},
 		GetAgent: func(_ context.Context, _ string) (Agent, error) {
 			return agent, nil
@@ -396,8 +396,8 @@ func TestTurnLoop_AgentErrorEvent(t *testing.T) {
 
 	loop, err := NewTurnLoop(TurnLoopConfig[string]{
 		Source: &turnLoopMockSource{items: []string{"msg1"}, err: context.DeadlineExceeded},
-		GenInput: func(_ context.Context, item string) (*AgentInput, error) {
-			return &AgentInput{Messages: []Message{schema.UserMessage(item)}}, nil
+		GenInput: func(_ context.Context, item string) (*AgentInput, []AgentRunOption, error) {
+			return &AgentInput{Messages: []Message{schema.UserMessage(item)}}, nil, nil
 		},
 		GetAgent: func(_ context.Context, _ string) (Agent, error) {
 			return agent, nil
@@ -435,7 +435,7 @@ func TestTurnLoop_PreemptiveCancellation(t *testing.T) {
 			return "slow-msg", NonPreemptiveConsumeOption, nil
 		case 2:
 			<-slowAgent.startedCh
-			return "preempt-msg", ConsumeOption{Mode: ConsumePreemptive, CancelOption: &CancelOption{Mode: CancelImmediate}}, nil
+			return "preempt-msg", ConsumeOption{Mode: ConsumePreemptive, CancelOption: CancelOption{Mode: CancelImmediate}}, nil
 		default:
 			return "", NonPreemptiveConsumeOption, context.DeadlineExceeded
 		}
@@ -443,9 +443,9 @@ func TestTurnLoop_PreemptiveCancellation(t *testing.T) {
 
 	loop, err := NewTurnLoop(TurnLoopConfig[string]{
 		Source: source,
-		GenInput: func(_ context.Context, item string) (*AgentInput, error) {
+		GenInput: func(_ context.Context, item string) (*AgentInput, []AgentRunOption, error) {
 			processedItems = append(processedItems, item)
-			return &AgentInput{Messages: []Message{schema.UserMessage(item)}}, nil
+			return &AgentInput{Messages: []Message{schema.UserMessage(item)}}, nil, nil
 		},
 		GetAgent: func(_ context.Context, item string) (Agent, error) {
 			if item == "slow-msg" {
@@ -485,7 +485,7 @@ func TestTurnLoop_PreemptiveWithCancelMode(t *testing.T) {
 			<-slowAgent.startedCh
 			return "preempt-msg", ConsumeOption{
 				Mode:         ConsumePreemptive,
-				CancelOption: &CancelOption{Mode: CancelAfterChatModel | CancelAfterToolCall},
+				CancelOption: CancelOption{Mode: CancelAfterChatModel | CancelAfterToolCall},
 			}, nil
 		default:
 			return "", NonPreemptiveConsumeOption, context.DeadlineExceeded
@@ -494,8 +494,8 @@ func TestTurnLoop_PreemptiveWithCancelMode(t *testing.T) {
 
 	loop, err := NewTurnLoop(TurnLoopConfig[string]{
 		Source: source,
-		GenInput: func(_ context.Context, item string) (*AgentInput, error) {
-			return &AgentInput{Messages: []Message{schema.UserMessage(item)}}, nil
+		GenInput: func(_ context.Context, item string) (*AgentInput, []AgentRunOption, error) {
+			return &AgentInput{Messages: []Message{schema.UserMessage(item)}}, nil, nil
 		},
 		GetAgent: func(_ context.Context, item string) (Agent, error) {
 			if item == "slow-msg" {
@@ -545,9 +545,9 @@ func TestTurnLoop_PreemptiveNonCancellableAgent(t *testing.T) {
 
 	loop, err := NewTurnLoop(TurnLoopConfig[string]{
 		Source: source,
-		GenInput: func(_ context.Context, item string) (*AgentInput, error) {
+		GenInput: func(_ context.Context, item string) (*AgentInput, []AgentRunOption, error) {
 			processedItems = append(processedItems, item)
-			return &AgentInput{Messages: []Message{schema.UserMessage(item)}}, nil
+			return &AgentInput{Messages: []Message{schema.UserMessage(item)}}, nil, nil
 		},
 		GetAgent: func(_ context.Context, item string) (Agent, error) {
 			if item == "blocking-msg" {
