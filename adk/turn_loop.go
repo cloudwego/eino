@@ -19,7 +19,10 @@ package adk
 import (
 	"context"
 	"fmt"
+	`runtime/debug`
 	"time"
+
+	`github.com/cloudwego/eino/internal/safe`
 )
 
 // ConsumeMode specifies how a received message should be consumed
@@ -115,34 +118,20 @@ func NewTurnLoop[T any](config TurnLoopConfig[T]) (*TurnLoop[T], error) {
 	}, nil
 }
 
-// recvResult holds the result of a concurrent Receive call.
-type recvResult[T any] struct {
-	item   T
-	option ConsumeOption
-	err    error
-}
-
-// iterResult holds the result of a single AsyncIterator.Next call.
-type iterResult struct {
-	event *AgentEvent
-	ok    bool
-}
-
-// Run starts the blocking loop that continuously receives messages, runs
-// agents, and dispatches events. While an agent is running, the next message
-// is received concurrently. If that message's ConsumeOption has ConsumePreemptive
-// mode and the running agent implements Cancellable, the agent is canceled
-// (using the CancelMode from the option) and the new message is processed
-// immediately.
+// Run starts the blocking loop that continuously receives messages from the
+// source, runs the agent returned by GetAgent for each message, and dispatches
+// resulting events to OnAgentEvent. It blocks until the source returns an error
+// (including context cancellation) or a callback fails.
+//
+// If a received message has ConsumePreemptive mode and the current agent
+// implements Cancellable, the agent is canceled and the new message is processed
+// immediately. If the agent does not implement Cancellable, preemptive messages
+// are queued and processed after the current agent finishes.
 func (l *TurnLoop[T]) Run(ctx context.Context) error {
-	// done is closed when Run returns, signaling background goroutines to exit.
-	done := make(chan struct{})
-	defer close(done)
-
-	// Initial blocking receive — no agent running yet, mode is irrelevant.
-	item, _, err := l.source.Receive(ctx, l.receiveTimeout)
+	// Initial blocking receive — no agent is running yet.
+	item, option, err := l.source.Receive(ctx, l.receiveTimeout)
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to receive message: %w", err)
 	}
 
 	for {
@@ -156,94 +145,91 @@ func (l *TurnLoop[T]) Run(ctx context.Context) error {
 			return fmt.Errorf("failed to get agent: %w", e)
 		}
 
-		// Start receiving the next message concurrently with agent execution.
-		// The channel is buffered so the goroutine never blocks on send.
-		recvCh := make(chan recvResult[T], 1)
-		go func() {
-			i, opt, e_ := l.source.Receive(ctx, l.receiveTimeout)
-			recvCh <- recvResult[T]{i, opt, e_}
-		}()
-
-		// Run the agent and forward events through a channel so we can
-		// select between agent events and incoming messages.
+		ca, isAgentCancellable := agent.(Cancellable)
 		iter := agent.Run(ctx, input, runOpts...)
-		eventCh := make(chan iterResult, 1)
-		go func() {
+
+		// handleEvents drains the agent iterator, forwarding each event to the
+		// OnAgentEvent callback. It is called directly in the non-cancellable
+		// path and from a goroutine in the cancellable path.
+		handleEvents := func() error {
 			for {
 				event, ok := iter.Next()
-				select {
-				case eventCh <- iterResult{event, ok}:
-				case <-done:
-					return
-				}
 				if !ok {
-					return
+					break
 				}
-			}
-		}()
 
-		var pending *recvResult[T]
-		var turnErr error
+				if event.Err != nil {
+					return fmt.Errorf("agent run failed: %w", event.Err)
+				}
 
-	eventLoop:
-		for {
-			select {
-			case ev := <-eventCh:
-				if !ev.ok {
-					break eventLoop
-				}
-				if ev.event.Err != nil {
-					turnErr = fmt.Errorf("agent run failed: %w", ev.event.Err)
-					break eventLoop
-				}
 				if l.onAgentEvent != nil {
-					if e_ := l.onAgentEvent(ctx, item, ev.event); e_ != nil {
-						turnErr = fmt.Errorf("OnAgentEvent failed: %w", e_)
-						break eventLoop
+					e = l.onAgentEvent(ctx, item, event)
+					if e != nil {
+						return fmt.Errorf("OnAgentEvent callback failed: %w", e)
 					}
 				}
+			}
 
-			case recv := <-recvCh:
-				recvCh = nil // nil channel never matches in select
-				if recv.option.Mode == ConsumePreemptive && recv.err == nil {
-					if ca, ok := agent.(Cancellable); ok {
-						if e_ := ca.Cancel(ctx, recv.option.CancelOption); e_ != nil {
-							return fmt.Errorf("failed to cancel agent: %w", e_)
-						}
-						// Drain remaining events after cancellation.
-						for {
-							ev := <-eventCh
-							if !ev.ok {
-								break
-							}
-						}
-						pending = &recvResult[T]{item: recv.item}
-						break eventLoop
+			return nil
+		}
+
+		var handleEventErr error
+		if isAgentCancellable {
+			// Cancellable path: consume events in a goroutine so the main
+			// goroutine can block on Receive concurrently.
+			done := make(chan struct{})
+
+			go func() {
+				defer func() {
+					// Recover panics from the iterator or callback so they
+					// don't crash the process; surface them as errors instead.
+					panicErr := recover()
+					if panicErr != nil {
+						handleEventErr = safe.NewPanicErr(panicErr, debug.Stack())
 					}
+
+					close(done)
+				}()
+
+				handleEventErr = handleEvents()
+			}()
+
+			// Block on the next message while events are being consumed above.
+			item, option, err = l.source.Receive(ctx, l.receiveTimeout)
+			if err != nil {
+				<-done // wait for the event goroutine before returning
+				return fmt.Errorf("failed to receive message: %w", err)
+			}
+
+			// If the new message requests preemption, cancel the running agent.
+			// Cancel triggers the iterator to terminate, which unblocks the
+			// event goroutine above.
+			if option.Mode == ConsumePreemptive {
+				err = ca.Cancel(ctx, option.CancelOption)
+				if err != nil {
+					<-done // wait for the event goroutine before returning
+					return fmt.Errorf("failed to cancel agent: %w", err)
 				}
-				// Non-preemptive, preemptive but not Cancellable, or
-				// source error: buffer and let the eventLoop finish
-				// processing the current agent's events first.
-				pending = &recvResult[T]{item: recv.item, err: recv.err}
 			}
-		}
 
-		if turnErr != nil {
-			return turnErr
-		}
-
-		if pending != nil {
-			if pending.err != nil {
-				return pending.err
+			// Wait for event consumption to finish (normal completion or
+			// post-cancel drain) before starting the next turn.
+			<-done
+			if handleEventErr != nil {
+				return fmt.Errorf("failed to handle events: %w", handleEventErr)
 			}
-			item = pending.item
 		} else {
-			// Agent finished before the next message arrived; wait for it.
-			recv := <-recvCh
-			if recv.err != nil {
-				return recv.err
+			// Non-cancellable path: consume all events sequentially, then
+			// block on the next message.
+			if handleEventErr = handleEvents(); handleEventErr != nil {
+				return fmt.Errorf("failed to handle events: %w", handleEventErr)
 			}
-			item = recv.item
+
+			item, option, err = l.source.Receive(ctx, l.receiveTimeout)
+			if err != nil {
+				return fmt.Errorf("failed to receive message: %w", err)
+			}
 		}
 	}
 }
+
