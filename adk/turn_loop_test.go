@@ -106,30 +106,6 @@ func (a *turnLoopCancellableAgent) Cancel(_ context.Context, opt CancelOption) e
 	return nil
 }
 
-// turnLoopBlockingAgent blocks until blockCh is closed, then emits its events.
-// It does NOT implement Cancellable.
-type turnLoopBlockingAgent struct {
-	name      string
-	startedCh chan struct{}
-	blockCh   chan struct{}
-	events    []*AgentEvent
-}
-
-func (a *turnLoopBlockingAgent) Name(_ context.Context) string        { return a.name }
-func (a *turnLoopBlockingAgent) Description(_ context.Context) string  { return "blocking mock" }
-func (a *turnLoopBlockingAgent) Run(_ context.Context, _ *AgentInput, _ ...AgentRunOption) *AsyncIterator[*AgentEvent] {
-	iter, gen := NewAsyncIteratorPair[*AgentEvent]()
-	close(a.startedCh)
-	go func() {
-		defer gen.Close()
-		<-a.blockCh
-		for _, e := range a.events {
-			gen.Send(e)
-		}
-	}()
-	return iter
-}
-
 // ---------------------------------------------------------------------------
 // Tests — validation
 // ---------------------------------------------------------------------------
@@ -298,7 +274,7 @@ func TestTurnLoop_OnAgentEventError(t *testing.T) {
 
 	err = loop.Run(context.Background())
 	assert.ErrorIs(t, err, eventErr)
-	assert.Contains(t, err.Error(), "OnAgentEvent failed")
+	assert.Contains(t, err.Error(), "OnAgentEvent callback failed")
 }
 
 func TestTurnLoop_ContextCancellation(t *testing.T) {
@@ -513,14 +489,12 @@ func TestTurnLoop_PreemptiveWithCancelMode(t *testing.T) {
 }
 
 func TestTurnLoop_PreemptiveNonCancellableAgent(t *testing.T) {
-	agentStarted := make(chan struct{})
-	agentContinue := make(chan struct{})
-
-	blockingAgent := &turnLoopBlockingAgent{
-		name:      "blocking-agent",
-		startedCh: agentStarted,
-		blockCh:   agentContinue,
-		events:    []*AgentEvent{{Output: &AgentOutput{}}},
+	// A non-cancellable agent cannot be preempted, so the new Run processes
+	// events sequentially before calling Receive. The preemptive message is
+	// effectively queued and processed in the next turn.
+	nonCancellableAgent := &turnLoopMockAgent{
+		name:   "non-cancellable-agent",
+		events: []*AgentEvent{{Output: &AgentOutput{}}},
 	}
 	fastAgent := &turnLoopMockAgent{
 		name:   "fast-agent",
@@ -533,10 +507,10 @@ func TestTurnLoop_PreemptiveNonCancellableAgent(t *testing.T) {
 		callCount++
 		switch callCount {
 		case 1:
-			return "blocking-msg", NonPreemptiveConsumeOption, nil
+			return "non-cancel-msg", NonPreemptiveConsumeOption, nil
 		case 2:
-			<-agentStarted
-			close(agentContinue)
+			// Even though Mode is ConsumePreemptive, the agent doesn't
+			// implement Cancellable, so it's treated as non-preemptive.
 			return "preempt-msg", ConsumeOption{Mode: ConsumePreemptive}, nil
 		default:
 			return "", NonPreemptiveConsumeOption, context.DeadlineExceeded
@@ -550,8 +524,8 @@ func TestTurnLoop_PreemptiveNonCancellableAgent(t *testing.T) {
 			return &AgentInput{Messages: []Message{schema.UserMessage(item)}}, nil, nil
 		},
 		GetAgent: func(_ context.Context, item string) (Agent, error) {
-			if item == "blocking-msg" {
-				return blockingAgent, nil
+			if item == "non-cancel-msg" {
+				return nonCancellableAgent, nil
 			}
 			return fastAgent, nil
 		},
@@ -560,5 +534,5 @@ func TestTurnLoop_PreemptiveNonCancellableAgent(t *testing.T) {
 
 	err = loop.Run(context.Background())
 	assert.ErrorIs(t, err, context.DeadlineExceeded)
-	assert.Equal(t, []string{"blocking-msg", "preempt-msg"}, processedItems)
+	assert.Equal(t, []string{"non-cancel-msg", "preempt-msg"}, processedItems)
 }
