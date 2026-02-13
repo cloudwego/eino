@@ -407,6 +407,10 @@ func newStreamingExecuteTool(sb filesystem.StreamingShellBackend, desc *string) 
 				}
 				sw.Close()
 			}()
+
+			var hasSentContent bool
+			var exitCode *int
+
 			for {
 				chunk, recvErr := result.Recv()
 				if recvErr == io.EOF {
@@ -414,12 +418,33 @@ func newStreamingExecuteTool(sb filesystem.StreamingShellBackend, desc *string) 
 				}
 				if recvErr != nil {
 					sw.Send("", recvErr)
-					break
+					return
 				}
 
-				if str := convExecuteResponse(chunk); str != "" {
-					sw.Send(str, nil)
+				if chunk == nil {
+					continue
 				}
+				if chunk.ExitCode != nil {
+					exitCode = chunk.ExitCode
+				}
+
+				parts := make([]string, 0, 2)
+				if chunk.Output != "" {
+					parts = append(parts, chunk.Output)
+				}
+				if chunk.Truncated {
+					parts = append(parts, "[Output was truncated due to size limits]")
+				}
+				if len(parts) > 0 {
+					sw.Send(strings.Join(parts, "\n"), nil)
+					hasSentContent = true
+				}
+			}
+
+			if exitCode != nil && *exitCode != 0 {
+				sw.Send(fmt.Sprintf("\n[Command failed with exit code %d]", *exitCode), nil)
+			} else if !hasSentContent {
+				sw.Send("[Command executed successfully with no output]", nil)
 			}
 		}()
 
@@ -436,8 +461,12 @@ func convExecuteResponse(response *filesystem.ExecuteResponse) string {
 		parts = append(parts, fmt.Sprintf("[Command failed with exit code %d]", *response.ExitCode))
 	}
 	if response.Truncated {
-		parts = append(parts, fmt.Sprintf("[Output was truncated due to size limits]"))
+		parts = append(parts, "[Output was truncated due to size limits]")
 	}
 
-	return strings.Join(parts, "\n")
+	result := strings.Join(parts, "\n")
+	if result == "" && response.ExitCode != nil && *response.ExitCode == 0 {
+		return "[Command executed successfully with no output]"
+	}
+	return result
 }

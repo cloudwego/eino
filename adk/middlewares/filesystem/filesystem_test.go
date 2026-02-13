@@ -475,6 +475,15 @@ func TestExecuteTool(t *testing.T) {
 			input:    `{"command": "failing command"}`,
 			expected: "error output...\n[Command failed with exit code 2]\n[Output was truncated due to size limits]",
 		},
+		{
+			name: "successful command with no output",
+			resp: &filesystem.ExecuteResponse{
+				Output:   "",
+				ExitCode: ptrOf(0),
+			},
+			input:    `{"command": "mkdir /tmp/test"}`,
+			expected: "[Command executed successfully with no output]",
+		},
 	}
 
 	for _, tt := range tests {
