@@ -465,7 +465,7 @@ func convExecuteResponse(response *filesystem.ExecuteResponse) string {
 	}
 
 	result := strings.Join(parts, "\n")
-	if result == "" && response.ExitCode != nil && *response.ExitCode == 0 {
+	if result == "" && (response.ExitCode == nil || *response.ExitCode == 0) {
 		return "[Command executed successfully with no output]"
 	}
 	return result
