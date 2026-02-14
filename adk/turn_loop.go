@@ -69,27 +69,12 @@ func WithCancelOptions(opts ...CancelOption) ConsumeOption {
 	}
 }
 
-type receiveConfig struct {
-	Timeout     *time.Duration
-	NonBlocking bool
-}
-
-type ReceiveOption func(*receiveConfig)
-
-func WithReceiveTimeout(timeout time.Duration) ReceiveOption {
-	return func(config *receiveConfig) {
-		config.Timeout = &timeout
-	}
-}
-
-func WithReceiveNonBlocking() ReceiveOption {
-	return func(config *receiveConfig) {
-		config.NonBlocking = true
-	}
+type ReceiveConfig struct {
+	Timeout time.Duration
 }
 
 type MessageSource[T any] interface {
-	Receive(ctx context.Context, option ...ReceiveOption) (context.Context, T, []ConsumeOption, error)
+	Receive(context.Context, ReceiveConfig) (context.Context, T, []ConsumeOption, error)
 }
 
 // TurnLoopConfig is the configuration for creating a TurnLoop.
@@ -154,7 +139,9 @@ func NewTurnLoop[T any](config TurnLoopConfig[T]) (*TurnLoop[T], error) {
 // are queued and processed after the current agent finishes.
 func (l *TurnLoop[T]) Run(ctx context.Context) error {
 	// Initial blocking receive — no agent is running yet.
-	nCtx, item, option, err := l.source.Receive(ctx, WithReceiveTimeout(l.receiveTimeout))
+	nCtx, item, option, err := l.source.Receive(ctx, ReceiveConfig{
+		Timeout: l.receiveTimeout,
+	})
 	if err != nil {
 		return fmt.Errorf("failed to receive message: %w", err)
 	}
@@ -225,7 +212,9 @@ func (l *TurnLoop[T]) Run(ctx context.Context) error {
 			}()
 
 			// Block on the next message while events are being consumed above.
-			nCtx, item, option, err = l.source.Receive(nCtx, WithReceiveTimeout(l.receiveTimeout))
+			nCtx, item, option, err = l.source.Receive(nCtx, ReceiveConfig{
+				Timeout: l.receiveTimeout,
+			})
 			if err != nil {
 				<-done // wait for the event goroutine before returning
 				return fmt.Errorf("failed to receive message: %w", err)
@@ -267,7 +256,9 @@ func (l *TurnLoop[T]) Run(ctx context.Context) error {
 				return fmt.Errorf("failed to handle events: %w", handleEventErr)
 			}
 
-			nCtx, item, option, err = l.source.Receive(nCtx, WithReceiveTimeout(l.receiveTimeout))
+			nCtx, item, option, err = l.source.Receive(nCtx, ReceiveConfig{
+				Timeout: l.receiveTimeout,
+			})
 			if err != nil {
 				return fmt.Errorf("failed to receive message: %w", err)
 			}
