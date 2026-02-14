@@ -23,6 +23,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"time"
 
 	"github.com/cloudwego/eino/components"
 	"github.com/cloudwego/eino/internal/core"
@@ -290,21 +291,31 @@ const (
 // ErrAgentFinished is returned by Cancel when the agent has already finished execution.
 var ErrAgentFinished = errors.New("agent has already finished execution")
 
-// CancelOption holds options for cancelling an agent.
-type CancelOption struct {
-	Mode CancelMode
+type cancelConfig struct {
+	Mode    CancelMode
+	Timeout *time.Duration
 }
 
-// Cancellable is an optional interface that an Agent can implement to support
-// cancellation during execution.
-type Cancellable interface {
-	// Cancel signals the agent to stop, either immediately or after reaching the
-	// specified execution point(s) defined by opt.Mode.
-	//
-	// Use opt.Mode to control when the cancellation takes effect
-	// (e.g., CancelImmediate, CancelAfterChatModel, CancelAfterToolCall,
-	// or a combination via bitwise OR). The zero value defaults to CancelImmediate.
-	//
-	// If the agent has already finished execution, Cancel returns ErrAgentFinished.
-	Cancel(ctx context.Context, opt CancelOption) error
+type CancelOption func(*cancelConfig)
+
+func WithCancelMode(mode CancelMode) CancelOption {
+	return func(config *cancelConfig) {
+		config.Mode = mode
+	}
+}
+
+func WithCancelTimeout(timeout time.Duration) CancelOption {
+	return func(config *cancelConfig) {
+		config.Timeout = &timeout
+	}
+}
+
+type CancelFunc func(context.Context, ...CancelOption) error
+
+type CancellableRun interface {
+	RunWithCancel(ctx context.Context, input *AgentInput, options ...AgentRunOption) (*AsyncIterator[*AgentEvent], CancelFunc)
+}
+
+type CancellableResume interface {
+	ResumeWithCancel(ctx context.Context, info *ResumeInfo, opts ...AgentRunOption) (*AsyncIterator[*AgentEvent], CancelFunc)
 }
