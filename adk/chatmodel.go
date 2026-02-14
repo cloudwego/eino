@@ -242,6 +242,15 @@ type ChatModelAgentConfig struct {
 	// Optional. Defaults to 20.
 	MaxIterations int
 
+	// EarlyStoppingMethod controls how the agent behaves when max iterations are exceeded.
+	// Supported values: "force" (return ErrExceedMaxIterations) or "generate" (use EarlyStoppingInstruction).
+	// Optional. Defaults to "force".
+	EarlyStoppingMethod string
+
+	// EarlyStoppingInstruction is appended as the final user message when EarlyStoppingMethod is "generate".
+	// Optional. If empty, a final user message will still be appended.
+	EarlyStoppingInstruction string
+
 	// Middlewares configures agent middleware for extending functionality.
 	Middlewares []AgentMiddleware
 
@@ -262,8 +271,10 @@ type ChatModelAgent struct {
 
 	genModelInput GenModelInput
 
-	outputKey     string
-	maxIterations int
+	outputKey                string
+	maxIterations            int
+	earlyStoppingInstruction string
+	earlyStoppingMethod      string
 
 	subAgents   []Agent
 	parentAgent Agent
@@ -283,6 +294,11 @@ type ChatModelAgent struct {
 }
 
 type runFunc func(ctx context.Context, input *AgentInput, generator *AsyncGenerator[*AgentEvent], store *bridgeStore, opts ...compose.Option)
+
+const (
+	earlyStoppingMethodForce    = "force"
+	earlyStoppingMethodGenerate = "generate"
+)
 
 // NewChatModelAgent constructs a chat model-backed agent with the provided config.
 func NewChatModelAgent(_ context.Context, config *ChatModelAgentConfig) (*ChatModelAgent, error) {
@@ -322,19 +338,29 @@ func NewChatModelAgent(_ context.Context, config *ChatModelAgentConfig) (*ChatMo
 		}
 	}
 
+	method := config.EarlyStoppingMethod
+	if method == "" {
+		method = earlyStoppingMethodForce
+	}
+	if method != earlyStoppingMethodForce && method != earlyStoppingMethodGenerate {
+		return nil, errors.New("invalid EarlyStoppingMethod")
+	}
+
 	return &ChatModelAgent{
-		name:             config.Name,
-		description:      config.Description,
-		instruction:      sb.String(),
-		model:            config.Model,
-		toolsConfig:      tc,
-		genModelInput:    genInput,
-		exit:             config.Exit,
-		outputKey:        config.OutputKey,
-		maxIterations:    config.MaxIterations,
-		beforeChatModels: beforeChatModels,
-		afterChatModels:  afterChatModels,
-		modelRetryConfig: config.ModelRetryConfig,
+		name:                     config.Name,
+		description:              config.Description,
+		instruction:              sb.String(),
+		model:                    config.Model,
+		toolsConfig:              tc,
+		genModelInput:            genInput,
+		exit:                     config.Exit,
+		outputKey:                config.OutputKey,
+		maxIterations:            config.MaxIterations,
+		earlyStoppingInstruction: config.EarlyStoppingInstruction,
+		earlyStoppingMethod:      method,
+		beforeChatModels:         beforeChatModels,
+		afterChatModels:          afterChatModels,
+		modelRetryConfig:         config.ModelRetryConfig,
 	}, nil
 }
 
@@ -740,6 +766,21 @@ func setOutputToSession(ctx context.Context, msg Message, msgStream MessageStrea
 	return nil
 }
 
+func emitOutputKeyEvent(ctx context.Context, outputKey string, generator *AsyncGenerator[*AgentEvent]) {
+	if outputKey == "" || generator == nil {
+		return
+	}
+	value, ok := GetSessionValue(ctx, outputKey)
+	if !ok {
+		return
+	}
+	generator.Send(&AgentEvent{
+		Output: &AgentOutput{
+			CustomizedOutput: map[string]any{outputKey: value},
+		},
+	})
+}
+
 func errFunc(err error) runFunc {
 	return func(ctx context.Context, input *AgentInput, generator *AsyncGenerator[*AgentEvent], store *bridgeStore, _ ...compose.Option) {
 		generator.Send(&AgentEvent{Err: err})
@@ -854,6 +895,8 @@ func (a *ChatModelAgent) buildRunFunc(ctx context.Context) runFunc {
 						err = setOutputToSession(ctx, msg, msgStream, a.outputKey)
 						if err != nil {
 							generator.Send(&AgentEvent{Err: err})
+						} else {
+							emitOutputKeyEvent(ctx, a.outputKey, generator)
 						}
 					} else if msgStream != nil {
 						msgStream.Close()
@@ -868,14 +911,16 @@ func (a *ChatModelAgent) buildRunFunc(ctx context.Context) runFunc {
 
 		// react
 		conf := &reactConfig{
-			model:               a.model,
-			toolsConfig:         &toolsNodeConf,
-			toolsReturnDirectly: returnDirectly,
-			agentName:           a.name,
-			maxIterations:       a.maxIterations,
-			beforeChatModel:     a.beforeChatModels,
-			afterChatModel:      a.afterChatModels,
-			modelRetryConfig:    a.modelRetryConfig,
+			model:                    a.model,
+			toolsConfig:              &toolsNodeConf,
+			toolsReturnDirectly:      returnDirectly,
+			agentName:                a.name,
+			maxIterations:            a.maxIterations,
+			earlyStoppingMethod:      a.earlyStoppingMethod,
+			earlyStoppingInstruction: a.earlyStoppingInstruction,
+			beforeChatModel:          a.beforeChatModels,
+			afterChatModel:           a.afterChatModels,
+			modelRetryConfig:         a.modelRetryConfig,
 		}
 
 		g, err := newReact(ctx, conf)
@@ -935,6 +980,8 @@ func (a *ChatModelAgent) buildRunFunc(ctx context.Context) runFunc {
 					err_ = setOutputToSession(ctx, msg, msgStream, a.outputKey)
 					if err_ != nil {
 						generator.Send(&AgentEvent{Err: err_})
+					} else {
+						emitOutputKeyEvent(ctx, a.outputKey, generator)
 					}
 				} else if msgStream != nil {
 					msgStream.Close()
