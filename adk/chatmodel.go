@@ -57,8 +57,7 @@ func SendEvent(ctx context.Context, event *AgentEvent) error {
 }
 
 type chatModelAgentExecCtx struct {
-	runtimeReturnDirectly map[string]bool
-	generator             *AsyncGenerator[*AgentEvent]
+	generator *AsyncGenerator[*AgentEvent]
 }
 
 func (e *chatModelAgentExecCtx) send(event *AgentEvent) {
@@ -920,8 +919,7 @@ func (a *ChatModelAgent) buildRunFunc(ctx context.Context) runFunc {
 			}
 
 			ctx = withChatModelAgentExecCtx(ctx, &chatModelAgentExecCtx{
-				runtimeReturnDirectly: returnDirectly,
-				generator:             generator,
+				generator: generator,
 			})
 
 			var msg Message

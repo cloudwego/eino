@@ -1432,15 +1432,12 @@ func TestChatModelAgentExecCtx(t *testing.T) {
 		result := getChatModelAgentExecCtx(ctx)
 		assert.Nil(t, result)
 
-		execCtx := &chatModelAgentExecCtx{
-			runtimeReturnDirectly: map[string]bool{"tool1": true},
-		}
+		execCtx := &chatModelAgentExecCtx{}
 		ctx = withChatModelAgentExecCtx(ctx, execCtx)
 
 		result = getChatModelAgentExecCtx(ctx)
 		assert.NotNil(t, result)
 		assert.Equal(t, execCtx, result)
-		assert.True(t, result.runtimeReturnDirectly["tool1"])
 	})
 
 	t.Run("ExecCtxSendMethod", func(t *testing.T) {
