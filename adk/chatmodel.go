@@ -41,6 +41,45 @@ import (
 	ub "github.com/cloudwego/eino/utils/callbacks"
 )
 
+// SendEvent sends a custom AgentEvent to the event stream during agent execution.
+// This allows ChatModelAgentMiddleware implementations to emit custom events that will be
+// received by the caller iterating over the agent's event stream.
+//
+// This function can only be called from within a ChatModelAgentMiddleware during agent execution.
+// Returns an error if called outside of an agent execution context.
+func SendEvent(ctx context.Context, event *AgentEvent) error {
+	execCtx := getChatModelAgentExecCtx(ctx)
+	if execCtx == nil || execCtx.generator == nil {
+		return fmt.Errorf("SendEvent failed: must be called within a ChatModelAgent Run() or Resume() execution context")
+	}
+	execCtx.generator.Send(event)
+	return nil
+}
+
+type chatModelAgentExecCtx struct {
+	runtimeReturnDirectly map[string]bool
+	generator             *AsyncGenerator[*AgentEvent]
+}
+
+func (e *chatModelAgentExecCtx) send(event *AgentEvent) {
+	if e != nil && e.generator != nil {
+		e.generator.Send(event)
+	}
+}
+
+type chatModelAgentExecCtxKey struct{}
+
+func withChatModelAgentExecCtx(ctx context.Context, execCtx *chatModelAgentExecCtx) context.Context {
+	return context.WithValue(ctx, chatModelAgentExecCtxKey{}, execCtx)
+}
+
+func getChatModelAgentExecCtx(ctx context.Context) *chatModelAgentExecCtx {
+	if v := ctx.Value(chatModelAgentExecCtxKey{}); v != nil {
+		return v.(*chatModelAgentExecCtx)
+	}
+	return nil
+}
+
 const (
 	addrDepthChain      = 1
 	addrDepthReactGraph = 2
@@ -799,6 +838,10 @@ func (a *ChatModelAgent) buildRunFunc(ctx context.Context) runFunc {
 				runOpts = append(runOpts, opts...)
 				runOpts = append(runOpts, callOpt)
 
+				ctx = withChatModelAgentExecCtx(ctx, &chatModelAgentExecCtx{
+					generator: generator,
+				})
+
 				var msg Message
 				var msgStream MessageStream
 				if input.EnableStreaming {
@@ -875,6 +918,11 @@ func (a *ChatModelAgent) buildRunFunc(ctx context.Context) runFunc {
 			if input.EnableStreaming {
 				runOpts = append(runOpts, compose.WithToolsNodeOption(compose.WithToolOption(withAgentToolEnableStreaming(true))))
 			}
+
+			ctx = withChatModelAgentExecCtx(ctx, &chatModelAgentExecCtx{
+				runtimeReturnDirectly: returnDirectly,
+				generator:             generator,
+			})
 
 			var msg Message
 			var msgStream MessageStream
