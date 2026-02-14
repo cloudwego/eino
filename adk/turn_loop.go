@@ -58,7 +58,7 @@ func WithPreemptive() ConsumeOption {
 
 func WithPreemptiveOnTimeout(timeout time.Duration) ConsumeOption {
 	return func(config *consumeConfig) {
-		config.Mode = ConsumePreemptive
+		config.Mode = ConsumePreemptiveOnTimeout
 		config.Timeout = timeout
 	}
 }
@@ -235,11 +235,22 @@ func (l *TurnLoop[T]) Run(ctx context.Context) error {
 			// Cancel triggers the iterator to terminate, which unblocks the
 			// event goroutine above.
 			o := applyConsumeOptions(option)
-			if o.Mode == ConsumePreemptive {
+			switch o.Mode {
+			case ConsumePreemptive:
 				err = cancelFunc(nCtx, o.CancelOpts...)
 				if err != nil {
 					<-done // wait for the event goroutine before returning
 					return fmt.Errorf("failed to cancel agent: %w", err)
+				}
+			case ConsumePreemptiveOnTimeout:
+				select {
+				case <-done:
+				case <-time.After(o.Timeout):
+					err = cancelFunc(nCtx, o.CancelOpts...)
+					if err != nil {
+						<-done // wait for the event goroutine before returning
+						return fmt.Errorf("failed to cancel agent: %w", err)
+					}
 				}
 			}
 
