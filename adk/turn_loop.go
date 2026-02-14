@@ -19,10 +19,10 @@ package adk
 import (
 	"context"
 	"fmt"
-	`runtime/debug`
+	"runtime/debug"
 	"time"
 
-	`github.com/cloudwego/eino/internal/safe`
+	"github.com/cloudwego/eino/internal/safe"
 )
 
 // ConsumeMode specifies how a received message should be consumed
@@ -38,33 +38,58 @@ const (
 	// If the agent does not implement Cancellable, the message is
 	// buffered and processed after the agent finishes.
 	ConsumePreemptive
+
+	ConsumePreemptiveOnTimeout
 )
 
-// ConsumeOption describes how a received message should be consumed.
-// It combines ConsumeMode (preemptive vs queued) with CancelMode
-// (how to cancel the running agent when preempting).
-type ConsumeOption struct {
-	// Mode specifies whether the message should preempt the current agent
-	// or be queued. Default zero value is ConsumeNonPreemptive.
-	Mode ConsumeMode
-	// CancelOption specifies when and how the running agent should be canceled.
-	// Only meaningful when Mode is ConsumePreemptive and the agent
-	// implements Cancellable. Default zero value means CancelImmediate.
-	CancelOption CancelOption
+type consumeConfig struct {
+	Mode       ConsumeMode
+	Timeout    time.Duration
+	CancelOpts []CancelOption
 }
 
-// NonPreemptiveConsumeOption is a convenience value for the common
-// non-preemptive (queued) case.
-var NonPreemptiveConsumeOption = ConsumeOption{Mode: ConsumeNonPreemptive}
+type ConsumeOption func(*consumeConfig)
 
-// MessageSource is an interface for pulling typed messages from an external source.
-// Receive blocks until a message is available or an error occurs.
-// The timeout parameter specifies the maximum duration to wait for a message.
-// The returned ConsumeOption indicates whether the message should preempt the
-// currently running agent (and how to cancel it) or be queued for processing
-// after it finishes.
+func WithPreemptive() ConsumeOption {
+	return func(config *consumeConfig) {
+		config.Mode = ConsumePreemptive
+	}
+}
+
+func WithPreemptiveOnTimeout(timeout time.Duration) ConsumeOption {
+	return func(config *consumeConfig) {
+		config.Mode = ConsumePreemptive
+		config.Timeout = timeout
+	}
+}
+
+func WithCancelOptions(opts ...CancelOption) ConsumeOption {
+	return func(config *consumeConfig) {
+		config.CancelOpts = append(config.CancelOpts, opts...)
+	}
+}
+
+type receiveConfig struct {
+	Timeout     *time.Duration
+	NonBlocking bool
+}
+
+type ReceiveOption func(*receiveConfig)
+
+func WithReceiveTimeout(timeout time.Duration) ReceiveOption {
+	return func(config *receiveConfig) {
+		config.Timeout = &timeout
+	}
+}
+
+func WithReceiveNonBlocking() ReceiveOption {
+	return func(config *receiveConfig) {
+		config.NonBlocking = true
+	}
+}
+
 type MessageSource[T any] interface {
-	Receive(ctx context.Context, timeout time.Duration) (T, ConsumeOption, error)
+	Receive(ctx context.Context, option ...ReceiveOption) (context.Context, T, []ConsumeOption, error)
 }
 
 // TurnLoopConfig is the configuration for creating a TurnLoop.
@@ -129,24 +154,29 @@ func NewTurnLoop[T any](config TurnLoopConfig[T]) (*TurnLoop[T], error) {
 // are queued and processed after the current agent finishes.
 func (l *TurnLoop[T]) Run(ctx context.Context) error {
 	// Initial blocking receive — no agent is running yet.
-	item, option, err := l.source.Receive(ctx, l.receiveTimeout)
+	nCtx, item, option, err := l.source.Receive(ctx, WithReceiveTimeout(l.receiveTimeout))
 	if err != nil {
 		return fmt.Errorf("failed to receive message: %w", err)
 	}
 
 	for {
-		input, runOpts, e := l.genInput(ctx, item)
+		input, runOpts, e := l.genInput(nCtx, item)
 		if e != nil {
 			return fmt.Errorf("failed to generate agent input: %w", e)
 		}
 
-		agent, e := l.getAgent(ctx, item)
+		agent, e := l.getAgent(nCtx, item)
 		if e != nil {
 			return fmt.Errorf("failed to get agent: %w", e)
 		}
 
-		ca, isAgentCancellable := agent.(Cancellable)
-		iter := agent.Run(ctx, input, runOpts...)
+		var cancelFunc CancelFunc
+		var iter *AsyncIterator[*AgentEvent]
+		if ca, isAgentCancellable := agent.(CancellableRun); isAgentCancellable {
+			iter, cancelFunc = ca.RunWithCancel(nCtx, input, runOpts...)
+		} else {
+			iter = agent.Run(nCtx, input, runOpts...)
+		}
 
 		// handleEvents drains the agent iterator, forwarding each event to the
 		// OnAgentEvent callback. It is called directly in the non-cancellable
@@ -174,7 +204,7 @@ func (l *TurnLoop[T]) Run(ctx context.Context) error {
 		}
 
 		var handleEventErr error
-		if isAgentCancellable {
+		if cancelFunc != nil {
 			// Cancellable path: consume events in a goroutine so the main
 			// goroutine can block on Receive concurrently.
 			done := make(chan struct{})
@@ -195,7 +225,7 @@ func (l *TurnLoop[T]) Run(ctx context.Context) error {
 			}()
 
 			// Block on the next message while events are being consumed above.
-			item, option, err = l.source.Receive(ctx, l.receiveTimeout)
+			nCtx, item, option, err = l.source.Receive(ctx, WithReceiveTimeout(l.receiveTimeout))
 			if err != nil {
 				<-done // wait for the event goroutine before returning
 				return fmt.Errorf("failed to receive message: %w", err)
@@ -204,8 +234,9 @@ func (l *TurnLoop[T]) Run(ctx context.Context) error {
 			// If the new message requests preemption, cancel the running agent.
 			// Cancel triggers the iterator to terminate, which unblocks the
 			// event goroutine above.
-			if option.Mode == ConsumePreemptive {
-				err = ca.Cancel(ctx, option.CancelOption)
+			o := applyConsumeOptions(option)
+			if o.Mode == ConsumePreemptive {
+				err = cancelFunc(ctx, o.CancelOpts...)
 				if err != nil {
 					<-done // wait for the event goroutine before returning
 					return fmt.Errorf("failed to cancel agent: %w", err)
@@ -225,7 +256,7 @@ func (l *TurnLoop[T]) Run(ctx context.Context) error {
 				return fmt.Errorf("failed to handle events: %w", handleEventErr)
 			}
 
-			item, option, err = l.source.Receive(ctx, l.receiveTimeout)
+			nCtx, item, option, err = l.source.Receive(ctx, WithReceiveTimeout(l.receiveTimeout))
 			if err != nil {
 				return fmt.Errorf("failed to receive message: %w", err)
 			}
@@ -233,3 +264,10 @@ func (l *TurnLoop[T]) Run(ctx context.Context) error {
 	}
 }
 
+func applyConsumeOptions(opts []ConsumeOption) *consumeConfig {
+	var config consumeConfig
+	for _, opt := range opts {
+		opt(&config)
+	}
+	return &config
+}
