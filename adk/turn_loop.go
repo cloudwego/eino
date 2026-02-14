@@ -225,7 +225,7 @@ func (l *TurnLoop[T]) Run(ctx context.Context) error {
 			}()
 
 			// Block on the next message while events are being consumed above.
-			nCtx, item, option, err = l.source.Receive(ctx, WithReceiveTimeout(l.receiveTimeout))
+			nCtx, item, option, err = l.source.Receive(nCtx, WithReceiveTimeout(l.receiveTimeout))
 			if err != nil {
 				<-done // wait for the event goroutine before returning
 				return fmt.Errorf("failed to receive message: %w", err)
@@ -236,7 +236,7 @@ func (l *TurnLoop[T]) Run(ctx context.Context) error {
 			// event goroutine above.
 			o := applyConsumeOptions(option)
 			if o.Mode == ConsumePreemptive {
-				err = cancelFunc(ctx, o.CancelOpts...)
+				err = cancelFunc(nCtx, o.CancelOpts...)
 				if err != nil {
 					<-done // wait for the event goroutine before returning
 					return fmt.Errorf("failed to cancel agent: %w", err)
@@ -256,7 +256,7 @@ func (l *TurnLoop[T]) Run(ctx context.Context) error {
 				return fmt.Errorf("failed to handle events: %w", handleEventErr)
 			}
 
-			nCtx, item, option, err = l.source.Receive(ctx, WithReceiveTimeout(l.receiveTimeout))
+			nCtx, item, option, err = l.source.Receive(nCtx, WithReceiveTimeout(l.receiveTimeout))
 			if err != nil {
 				return fmt.Errorf("failed to receive message: %w", err)
 			}
