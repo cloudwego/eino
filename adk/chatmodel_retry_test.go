@@ -175,92 +175,148 @@ func (m *streamErrorModel) WithTools(tools []*schema.ToolInfo) (model.ToolCallin
 }
 
 func TestChatModelAgentRetry_StreamError(t *testing.T) {
-	tests := []struct {
-		name     string
-		withTool bool
-	}{
-		{"NoTools", false},
-		{"WithTools", true},
-	}
+	t.Run("WithTools", func(t *testing.T) {
+		ctx := context.Background()
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			ctx := context.Background()
+		m := &streamErrorModel{
+			failAtChunk: 2,
+			maxFailures: 2,
+			returnTool:  false,
+		}
 
-			m := &streamErrorModel{
-				failAtChunk: 2,
-				maxFailures: 2,
-				returnTool:  false,
-			}
-
-			config := &ChatModelAgentConfig{
-				Name:        "RetryTestAgent",
-				Description: "Test agent for retry functionality",
-				Instruction: "You are a helpful assistant.",
-				Model:       m,
-				ModelRetryConfig: &ModelRetryConfig{
-					MaxRetries:  3,
-					IsRetryAble: func(ctx context.Context, err error) bool { return errors.Is(err, errRetryAble) },
+		config := &ChatModelAgentConfig{
+			Name:        "RetryTestAgent",
+			Description: "Test agent for retry functionality",
+			Instruction: "You are a helpful assistant.",
+			Model:       m,
+			ModelRetryConfig: &ModelRetryConfig{
+				MaxRetries:  3,
+				IsRetryAble: func(ctx context.Context, err error) bool { return errors.Is(err, errRetryAble) },
+			},
+			ToolsConfig: ToolsConfig{
+				ToolsNodeConfig: compose.ToolsNodeConfig{
+					Tools: []tool.BaseTool{&fakeToolForTest{tarCount: 0}},
 				},
+			},
+		}
+
+		agent, err := NewChatModelAgent(ctx, config)
+		assert.NoError(t, err)
+
+		input := &AgentInput{
+			Messages:        []Message{schema.UserMessage("Hello")},
+			EnableStreaming: true,
+		}
+		iterator := agent.Run(ctx, input)
+
+		var events []*AgentEvent
+		for {
+			event, ok := iterator.Next()
+			if !ok {
+				break
 			}
+			events = append(events, event)
+		}
 
-			if tt.withTool {
-				config.ToolsConfig = ToolsConfig{
-					ToolsNodeConfig: compose.ToolsNodeConfig{
-						Tools: []tool.BaseTool{&fakeToolForTest{tarCount: 0}},
-					},
-				}
-			}
+		assert.Equal(t, 3, len(events))
 
-			agent, err := NewChatModelAgent(ctx, config)
-			assert.NoError(t, err)
-
-			input := &AgentInput{
-				Messages:        []Message{schema.UserMessage("Hello")},
-				EnableStreaming: true,
-			}
-			iterator := agent.Run(ctx, input)
-
-			var events []*AgentEvent
-			for {
-				event, ok := iterator.Next()
-				if !ok {
-					break
-				}
-				events = append(events, event)
-			}
-
-			assert.Equal(t, 3, len(events))
-
-			var streamErrEventCount int
-			var errs []error
-			for i, event := range events {
-				if event.Output != nil && event.Output.MessageOutput != nil && event.Output.MessageOutput.IsStreaming {
-					sr := event.Output.MessageOutput.MessageStream
-					for {
-						msg, err := sr.Recv()
-						if err == io.EOF {
-							break
-						}
-						if err != nil {
-							streamErrEventCount++
-							errs = append(errs, err)
-							t.Logf("event %d: err: %v", i, err)
-							break
-						}
-						t.Logf("event %d: %v", i, msg.Content)
+		var streamErrEventCount int
+		var errs []error
+		for i, event := range events {
+			if event.Output != nil && event.Output.MessageOutput != nil && event.Output.MessageOutput.IsStreaming {
+				sr := event.Output.MessageOutput.MessageStream
+				for {
+					msg, err := sr.Recv()
+					if err == io.EOF {
+						break
 					}
+					if err != nil {
+						streamErrEventCount++
+						errs = append(errs, err)
+						t.Logf("event %d: err: %v", i, err)
+						break
+					}
+					t.Logf("event %d: %v", i, msg.Content)
 				}
 			}
+		}
 
-			assert.Equal(t, 2, streamErrEventCount)
-			assert.Equal(t, 2, len(errs))
-			var willRetryErr *WillRetryError
-			assert.True(t, errors.As(errs[0], &willRetryErr))
-			assert.True(t, errors.As(errs[1], &willRetryErr))
-			assert.Equal(t, int32(3), atomic.LoadInt32(&m.callCount))
-		})
-	}
+		assert.Equal(t, 2, streamErrEventCount)
+		assert.Equal(t, 2, len(errs))
+		var willRetryErr *WillRetryError
+		assert.True(t, errors.As(errs[0], &willRetryErr))
+		assert.True(t, errors.As(errs[1], &willRetryErr))
+		assert.Equal(t, int32(3), atomic.LoadInt32(&m.callCount))
+	})
+
+	t.Run("NoTools", func(t *testing.T) {
+		ctx := context.Background()
+
+		m := &streamErrorModel{
+			failAtChunk: 2,
+			maxFailures: 2,
+			returnTool:  false,
+		}
+
+		config := &ChatModelAgentConfig{
+			Name:        "RetryTestAgent",
+			Description: "Test agent for retry functionality",
+			Instruction: "You are a helpful assistant.",
+			Model:       m,
+			ModelRetryConfig: &ModelRetryConfig{
+				MaxRetries:  3,
+				IsRetryAble: func(ctx context.Context, err error) bool { return errors.Is(err, errRetryAble) },
+			},
+		}
+
+		agent, err := NewChatModelAgent(ctx, config)
+		assert.NoError(t, err)
+
+		input := &AgentInput{
+			Messages:        []Message{schema.UserMessage("Hello")},
+			EnableStreaming: true,
+		}
+		iterator := agent.Run(ctx, input)
+
+		var events []*AgentEvent
+		for {
+			event, ok := iterator.Next()
+			if !ok {
+				break
+			}
+			events = append(events, event)
+		}
+
+		assert.Equal(t, 3, len(events))
+
+		var streamErrEventCount int
+		var errs []error
+		for i, event := range events {
+			if event.Output != nil && event.Output.MessageOutput != nil && event.Output.MessageOutput.IsStreaming {
+				sr := event.Output.MessageOutput.MessageStream
+				for {
+					msg, err := sr.Recv()
+					if err == io.EOF {
+						break
+					}
+					if err != nil {
+						streamErrEventCount++
+						errs = append(errs, err)
+						t.Logf("event %d: err: %v", i, err)
+						break
+					}
+					t.Logf("event %d: %v", i, msg.Content)
+				}
+			}
+		}
+
+		assert.Equal(t, 2, streamErrEventCount)
+		assert.Equal(t, 2, len(errs))
+		var willRetryErr *WillRetryError
+		assert.True(t, errors.As(errs[0], &willRetryErr))
+		assert.True(t, errors.As(errs[1], &willRetryErr))
+		assert.Equal(t, int32(3), atomic.LoadInt32(&m.callCount))
+	})
 }
 
 func TestChatModelAgentRetry_WithTools_DirectError_Generate(t *testing.T) {

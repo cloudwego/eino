@@ -25,6 +25,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"go.uber.org/mock/gomock"
 
+	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/components/tool"
 	"github.com/cloudwego/eino/compose"
 	mockModel "github.com/cloudwego/eino/internal/mock/components/model"
@@ -147,6 +148,204 @@ func TestChatModelAgentRun(t *testing.T) {
 		assert.False(t, ok)
 
 		assert.True(t, afterChatModelExecuted)
+	})
+
+	t.Run("AfterChatModel_NoTools_ModifyDoesNotAffectEvent", func(t *testing.T) {
+		ctx := context.Background()
+
+		ctrl := gomock.NewController(t)
+		cm := mockModel.NewMockToolCallingChatModel(ctrl)
+
+		cm.EXPECT().Generate(gomock.Any(), gomock.Any(), gomock.Any()).
+			Return(schema.AssistantMessage("original content", nil), nil).
+			Times(1)
+
+		var capturedMessages []*schema.Message
+
+		agent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+			Name:        "TestAgent",
+			Description: "Test agent for AfterChatModel NoTools scenario",
+			Instruction: "You are a helpful assistant.",
+			Model:       cm,
+			Middlewares: []AgentMiddleware{
+				{
+					AfterChatModel: func(ctx context.Context, state *ChatModelAgentState) error {
+						capturedMessages = make([]*schema.Message, len(state.Messages))
+						copy(capturedMessages, state.Messages)
+						state.Messages = append(state.Messages, schema.AssistantMessage("appended content", nil))
+						return nil
+					},
+				},
+			},
+		})
+		assert.NoError(t, err)
+
+		input := &AgentInput{
+			Messages: []Message{schema.UserMessage("Hello")},
+		}
+		iterator := agent.Run(ctx, input)
+
+		event, ok := iterator.Next()
+		assert.True(t, ok)
+		assert.NotNil(t, event)
+		assert.Nil(t, event.Err)
+		assert.NotNil(t, event.Output)
+		assert.NotNil(t, event.Output.MessageOutput)
+
+		msg := event.Output.MessageOutput.Message
+		assert.NotNil(t, msg)
+		assert.Equal(t, "original content", msg.Content)
+
+		_, ok = iterator.Next()
+		assert.False(t, ok)
+
+		assert.Len(t, capturedMessages, 3)
+	})
+
+	t.Run("AfterChatModel_ReAct_ModifyAffectsFlow", func(t *testing.T) {
+		ctx := context.Background()
+
+		ctrl := gomock.NewController(t)
+		cm := mockModel.NewMockToolCallingChatModel(ctrl)
+
+		generateCount := 0
+		cm.EXPECT().Generate(gomock.Any(), gomock.Any(), gomock.Any()).
+			DoAndReturn(func(ctx context.Context, msgs []*schema.Message, opts ...model.Option) (*schema.Message, error) {
+				generateCount++
+				if generateCount == 1 {
+					return schema.AssistantMessage("first response with tool call", []schema.ToolCall{
+						{ID: "tc1", Function: schema.FunctionCall{Name: "test_tool", Arguments: "{}"}},
+					}), nil
+				}
+				return schema.AssistantMessage("final response", nil), nil
+			}).AnyTimes()
+		cm.EXPECT().WithTools(gomock.Any()).Return(cm, nil).AnyTimes()
+
+		toolCalled := false
+		testTool := &fakeToolForTest{tarCount: 0}
+
+		agent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+			Name:        "TestAgent",
+			Description: "Test agent for AfterChatModel ReAct scenario",
+			Instruction: "You are a helpful assistant.",
+			Model:       cm,
+			ToolsConfig: ToolsConfig{
+				ToolsNodeConfig: compose.ToolsNodeConfig{
+					Tools: []tool.BaseTool{testTool},
+				},
+			},
+			Middlewares: []AgentMiddleware{
+				{
+					AfterChatModel: func(ctx context.Context, state *ChatModelAgentState) error {
+						lastMsg := state.Messages[len(state.Messages)-1]
+						if len(lastMsg.ToolCalls) > 0 {
+							toolCalled = true
+							state.Messages[len(state.Messages)-1] = schema.AssistantMessage("modified to remove tool call", nil)
+						}
+						return nil
+					},
+				},
+			},
+		})
+		assert.NoError(t, err)
+
+		input := &AgentInput{
+			Messages: []Message{schema.UserMessage("Hello")},
+		}
+		iterator := agent.Run(ctx, input)
+
+		var events []*AgentEvent
+		for {
+			event, ok := iterator.Next()
+			if !ok {
+				break
+			}
+			events = append(events, event)
+		}
+
+		assert.True(t, toolCalled)
+		assert.Equal(t, 1, generateCount)
+
+		assert.Equal(t, 1, len(events))
+		event := events[0]
+		assert.NotNil(t, event.Output)
+		assert.NotNil(t, event.Output.MessageOutput)
+		assert.Equal(t, "first response with tool call", event.Output.MessageOutput.Message.Content)
+		assert.Len(t, event.Output.MessageOutput.Message.ToolCalls, 1)
+	})
+
+	t.Run("AfterChatModel_ReAct_AppendToolCall_AffectsFlow", func(t *testing.T) {
+		ctx := context.Background()
+
+		ctrl := gomock.NewController(t)
+		cm := mockModel.NewMockToolCallingChatModel(ctrl)
+
+		generateCount := 0
+		cm.EXPECT().Generate(gomock.Any(), gomock.Any(), gomock.Any()).
+			DoAndReturn(func(ctx context.Context, msgs []*schema.Message, opts ...model.Option) (*schema.Message, error) {
+				generateCount++
+				if generateCount == 1 {
+					return schema.AssistantMessage("first response no tool", nil), nil
+				}
+				return schema.AssistantMessage("final response", nil), nil
+			}).AnyTimes()
+		cm.EXPECT().WithTools(gomock.Any()).Return(cm, nil).AnyTimes()
+
+		testTool := &fakeToolForTest{tarCount: 0}
+
+		agent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+			Name:        "TestAgent",
+			Description: "Test agent for AfterChatModel ReAct append tool call",
+			Instruction: "You are a helpful assistant.",
+			Model:       cm,
+			ToolsConfig: ToolsConfig{
+				ToolsNodeConfig: compose.ToolsNodeConfig{
+					Tools: []tool.BaseTool{testTool},
+				},
+			},
+			Middlewares: []AgentMiddleware{
+				{
+					AfterChatModel: func(ctx context.Context, state *ChatModelAgentState) error {
+						if generateCount == 1 {
+							state.Messages[len(state.Messages)-1] = schema.AssistantMessage("modified with tool call", []schema.ToolCall{
+								{ID: "tc1", Function: schema.FunctionCall{Name: "test_tool", Arguments: "{}"}},
+							})
+						}
+						return nil
+					},
+				},
+			},
+		})
+		assert.NoError(t, err)
+
+		input := &AgentInput{
+			Messages: []Message{schema.UserMessage("Hello")},
+		}
+		iterator := agent.Run(ctx, input)
+
+		var events []*AgentEvent
+		for {
+			event, ok := iterator.Next()
+			if !ok {
+				break
+			}
+			events = append(events, event)
+		}
+
+		assert.Equal(t, 2, generateCount)
+
+		assert.Equal(t, 3, len(events))
+
+		event0 := events[0]
+		assert.NotNil(t, event0.Output)
+		assert.NotNil(t, event0.Output.MessageOutput)
+		assert.Equal(t, "first response no tool", event0.Output.MessageOutput.Message.Content)
+		assert.Empty(t, event0.Output.MessageOutput.Message.ToolCalls)
+
+		event2 := events[2]
+		assert.NotNil(t, event2.Output)
+		assert.NotNil(t, event2.Output.MessageOutput)
+		assert.Equal(t, "final response", event2.Output.MessageOutput.Message.Content)
 	})
 
 	// Test with streaming output
