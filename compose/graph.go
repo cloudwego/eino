@@ -1040,53 +1040,59 @@ func transferTask(script [][]string, invertedEdges map[string][]string) [][]stri
 }
 
 func validateDAG(chanSubscribeTo map[string]*chanCall, controlPredecessors map[string][]string) error {
-	m := map[string]int{}
+	visited := make(map[string]bool)
+	recursionStack := make(map[string]bool)
+	var loops [][]string
+
 	for node := range chanSubscribeTo {
-		if edges, ok := controlPredecessors[node]; ok {
-			m[node] = len(edges)
-			for _, pre := range edges {
-				if pre == START {
-					m[node] -= 1
-				}
-			}
-		} else {
-			m[node] = 0
-		}
-	}
-	hasChanged := true
-	for hasChanged {
-		hasChanged = false
-		for node := range m {
-			if m[node] == 0 {
-				hasChanged = true
-				for _, subNode := range chanSubscribeTo[node].controls {
-					if subNode == END {
-						continue
-					}
-					m[subNode]--
-				}
-				for _, subBranch := range chanSubscribeTo[node].writeToBranches {
-					for subNode := range subBranch.endNodes {
-						if subNode == END {
-							continue
-						}
-						m[subNode]--
-					}
-				}
-				m[node] = -1
+		if !visited[node] {
+			path := findLoopsDFS(node, chanSubscribeTo, visited, recursionStack)
+			if len(path) > 0 {
+				loops = append(loops, path)
 			}
 		}
 	}
 
-	var loopStarts []string
-	for k, v := range m {
-		if v > 0 {
-			loopStarts = append(loopStarts, k)
+	if len(loops) > 0 {
+		return fmt.Errorf("%w: %s", DAGInvalidLoopErr, formatLoops(loops))
+	}
+
+	return nil
+}
+
+func findLoopsDFS(node string, chanSubscribeTo map[string]*chanCall, visited, recursionStack map[string]bool) []string {
+	visited[node] = true
+	recursionStack[node] = true
+
+	for _, subNode := range chanSubscribeTo[node].controls {
+		if subNode == END {
+			continue
+		}
+		if !visited[subNode] {
+			if path := findLoopsDFS(subNode, chanSubscribeTo, visited, recursionStack); len(path) > 0 {
+				return append([]string{node}, path...)
+			}
+		} else if recursionStack[subNode] {
+			return []string{node, subNode}
 		}
 	}
-	if len(loopStarts) > 0 {
-		return fmt.Errorf("%w: %s", DAGInvalidLoopErr, formatLoops(findLoops(loopStarts, chanSubscribeTo)))
+
+	for _, subBranch := range chanSubscribeTo[node].writeToBranches {
+		for subNode := range subBranch.endNodes {
+			if subNode == END {
+				continue
+			}
+			if !visited[subNode] {
+				if path := findLoopsDFS(subNode, chanSubscribeTo, visited, recursionStack); len(path) > 0 {
+					return append([]string{node}, path...)
+				}
+			} else if recursionStack[subNode] {
+				return []string{node, subNode}
+			}
+		}
 	}
+
+	recursionStack[node] = false
 	return nil
 }
 
