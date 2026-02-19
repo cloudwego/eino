@@ -88,7 +88,7 @@ type TurnLoopConfig[T any] struct {
 	GetAgent func(ctx context.Context, item T) (Agent, error)
 	// OnAgentEvent is called for each event emitted by the agent. Optional.
 	// The inputItem is the message that triggered the current agent turn.
-	OnAgentEvent func(ctx context.Context, inputItem T, event *AgentEvent) error
+	OnAgentEvents func(ctx context.Context, inputItem T, event *AsyncIterator[*AgentEvent]) error
 	// ReceiveTimeout is the timeout passed to Source.Receive on each iteration.
 	// Zero means no timeout. Optional.
 	ReceiveTimeout time.Duration
@@ -102,7 +102,7 @@ type TurnLoop[T any] struct {
 	source         MessageSource[T]
 	genInput       func(ctx context.Context, item T) (*AgentInput, []AgentRunOption, error)
 	getAgent       func(ctx context.Context, item T) (Agent, error)
-	onAgentEvent   func(ctx context.Context, inputItem T, event *AgentEvent) error
+	onAgentEvents  func(ctx context.Context, inputItem T, event *AsyncIterator[*AgentEvent]) error
 	receiveTimeout time.Duration
 }
 
@@ -123,7 +123,7 @@ func NewTurnLoop[T any](config TurnLoopConfig[T]) (*TurnLoop[T], error) {
 		source:         config.Source,
 		genInput:       config.GenInput,
 		getAgent:       config.GetAgent,
-		onAgentEvent:   config.OnAgentEvent,
+		onAgentEvents:  config.OnAgentEvents,
 		receiveTimeout: config.ReceiveTimeout,
 	}, nil
 }
@@ -169,24 +169,10 @@ func (l *TurnLoop[T]) Run(ctx context.Context) error {
 		// OnAgentEvent callback. It is called directly in the non-cancellable
 		// path and from a goroutine in the cancellable path.
 		handleEvents := func() error {
-			for {
-				event, ok := iter.Next()
-				if !ok {
-					break
-				}
-
-				if event.Err != nil {
-					return fmt.Errorf("agent run failed: %w", event.Err)
-				}
-
-				if l.onAgentEvent != nil {
-					e = l.onAgentEvent(ctx, item, event)
-					if e != nil {
-						return fmt.Errorf("OnAgentEvent callback failed: %w", e)
-					}
-				}
+			oe := l.onAgentEvents(ctx, item, iter)
+			if oe != nil {
+				return oe
 			}
-
 			return nil
 		}
 
