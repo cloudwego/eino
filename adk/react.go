@@ -22,6 +22,7 @@ import (
 	"encoding/gob"
 	"errors"
 	"io"
+	"sync/atomic"
 
 	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/compose"
@@ -285,6 +286,7 @@ type reactConfig struct {
 	agentName string
 
 	maxIterations int
+	cancelSig     <-chan *cancelConfig
 }
 
 func genToolInfos(ctx context.Context, config *compose.ToolsNodeConfig) ([]*schema.ToolInfo, error) {
@@ -333,10 +335,25 @@ func genReactState(config *reactConfig) func(ctx context.Context) *State {
 
 func newReact(ctx context.Context, config *reactConfig) (reactGraph, error) {
 	const (
-		initNode_  = "Init"
-		chatModel_ = "ChatModel"
-		toolNode_  = "ToolNode"
+		initNode_       = "Init"
+		chatModel_      = "ChatModel"
+		beforeToolNode_ = "BeforeToolNode"
+		toolNode_       = "ToolNode"
+		afterToolNode_  = "AfterToolNode"
 	)
+
+	checkCancel := config.cancelSig != nil
+	cs := &cancelSig{
+		sig:      config.cancelSig,
+		sigStore: atomic.Value{},
+	}
+
+	nodeNameAfterModel := func() string {
+		if checkCancel {
+			return beforeToolNode_
+		}
+		return toolNode_
+	}
 
 	g := compose.NewGraph[*reactInput, Message](compose.WithGenLocalState(genReactState(config)))
 
@@ -414,12 +431,24 @@ func newReact(ctx context.Context, config *reactConfig) (reactGraph, error) {
 			}
 
 			if len(chunk.ToolCalls) > 0 {
-				return toolNode_, nil
+				return nodeNameAfterModel(), nil
 			}
 		}
 	}
-	branch := compose.NewStreamGraphBranch(toolCallCheck, map[string]bool{compose.END: true, toolNode_: true})
+	branch := compose.NewStreamGraphBranch(toolCallCheck, map[string]bool{compose.END: true, nodeNameAfterModel(): true})
 	_ = g.AddBranch(chatModel_, branch)
+
+	if checkCancel {
+		beforeToolNode := func(ctx context.Context, input *schema.Message) (output *schema.Message, err error) {
+			if sig := checkCancelSig(cs); sig != nil && sig.Mode != CancelAfterToolCall {
+				return nil, compose.Interrupt(ctx, "cancelled externally")
+			}
+
+			return input, nil
+		}
+		_ = g.AddLambdaNode(beforeToolNode_, compose.InvokableLambda(beforeToolNode), compose.WithNodeName(beforeToolNode_))
+		g.AddEdge(beforeToolNode_, toolNode_)
+	}
 
 	if len(config.toolsReturnDirectly) > 0 {
 		const (
@@ -466,4 +495,22 @@ func newReact(ctx context.Context, config *reactConfig) (reactGraph, error) {
 	}
 
 	return g, nil
+}
+
+type cancelSig struct {
+	sig      <-chan *cancelConfig
+	sigStore atomic.Value
+}
+
+func checkCancelSig(cs *cancelSig) *cancelConfig {
+	if val, ok := cs.sigStore.Load().(*cancelConfig); ok {
+		return val
+	}
+	select {
+	case s := <-cs.sig:
+		cs.sigStore.Store(s)
+		return s
+	default:
+		return nil
+	}
 }

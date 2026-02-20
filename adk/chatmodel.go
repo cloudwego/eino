@@ -337,7 +337,8 @@ type ChatModelAgent struct {
 	exeCtx *execContext
 }
 
-type runFunc func(ctx context.Context, input *AgentInput, generator *AsyncGenerator[*AgentEvent], store *bridgeStore, instruction string, returnDirectly map[string]bool, opts ...compose.Option)
+type runFunc func(ctx context.Context, input *AgentInput, generator *AsyncGenerator[*AgentEvent],
+	store *bridgeStore, instruction string, returnDirectly map[string]bool, cancelSig <-chan *cancelConfig, opts ...compose.Option)
 
 // NewChatModelAgent constructs a chat model-backed agent with the provided config.
 func NewChatModelAgent(ctx context.Context, config *ChatModelAgentConfig) (*ChatModelAgent, error) {
@@ -577,7 +578,7 @@ func setOutputToSession(ctx context.Context, msg Message, msgStream MessageStrea
 }
 
 func errFunc(err error) runFunc {
-	return func(ctx context.Context, input *AgentInput, generator *AsyncGenerator[*AgentEvent], store *bridgeStore, _ string, _ map[string]bool, _ ...compose.Option) {
+	return func(ctx context.Context, input *AgentInput, generator *AsyncGenerator[*AgentEvent], store *bridgeStore, _ string, _ map[string]bool, _ <-chan *cancelConfig, _ ...compose.Option) {
 		generator.Send(&AgentEvent{Err: err})
 	}
 }
@@ -713,7 +714,7 @@ func (a *ChatModelAgent) buildNoToolsRunFunc(_ context.Context) runFunc {
 	}
 
 	return func(ctx context.Context, input *AgentInput, generator *AsyncGenerator[*AgentEvent],
-		store *bridgeStore, instruction string, _ map[string]bool, opts ...compose.Option) {
+		store *bridgeStore, instruction string, _ map[string]bool, _ <-chan *cancelConfig, opts ...compose.Option) {
 
 		chain := compose.NewChain[noToolsInput, Message](
 			compose.WithGenLocalState(func(ctx context.Context) (state *State) {
@@ -765,7 +766,7 @@ func (a *ChatModelAgent) buildNoToolsRunFunc(_ context.Context) runFunc {
 	}
 }
 
-func (a *ChatModelAgent) buildReactRunFunc(ctx context.Context, bc *execContext) (runFunc, error) {
+func (a *ChatModelAgent) buildReActRunFunc(_ context.Context, bc *execContext) (runFunc, error) {
 	conf := &reactConfig{
 		model:       a.model,
 		toolsConfig: &bc.toolsNodeConf,
@@ -786,7 +787,7 @@ func (a *ChatModelAgent) buildReactRunFunc(ctx context.Context, bc *execContext)
 	}
 
 	return func(ctx context.Context, input *AgentInput, generator *AsyncGenerator[*AgentEvent], store *bridgeStore,
-		instruction string, returnDirectly map[string]bool, opts ...compose.Option) {
+		instruction string, returnDirectly map[string]bool, cancelSig <-chan *cancelConfig, opts ...compose.Option) {
 		g, err := newReact(ctx, conf)
 		if err != nil {
 			generator.Send(&AgentEvent{Err: err})
@@ -903,7 +904,7 @@ func (a *ChatModelAgent) buildRunFunc(ctx context.Context) runFunc {
 			return
 		}
 
-		run, err := a.buildReactRunFunc(ctx, ec)
+		run, err := a.buildReActRunFunc(ctx, ec)
 		if err != nil {
 			a.run = errFunc(err)
 			return
@@ -947,7 +948,7 @@ func (a *ChatModelAgent) getRunFunc(ctx context.Context) (context.Context, runFu
 	if len(runtimeBC.toolsNodeConf.Tools) == 0 {
 		tempRun = a.buildNoToolsRunFunc(ctx)
 	} else {
-		tempRun, err = a.buildReactRunFunc(ctx, runtimeBC)
+		tempRun, err = a.buildReActRunFunc(ctx, runtimeBC)
 		if err != nil {
 			return ctx, nil, nil, err
 		}
@@ -999,7 +1000,7 @@ func (a *ChatModelAgent) Run(ctx context.Context, input *AgentInput, opts ...Age
 			returnDirectly = bc.returnDirectly
 		}
 
-		run(ctx, input, generator, newBridgeStore(), instruction, returnDirectly, co...)
+		run(ctx, input, generator, newBridgeStore(), instruction, returnDirectly, nil, co...)
 	}()
 
 	return iterator
@@ -1051,7 +1052,7 @@ func (a *ChatModelAgent) RunWithCancel(ctx context.Context, input *AgentInput, o
 			returnDirectly = bc.returnDirectly
 		}
 
-		run(ctx, input, generator, newBridgeStore(), instruction, returnDirectly, co...)
+		run(ctx, input, generator, newBridgeStore(), instruction, returnDirectly, nil, co...)
 	}()
 
 	return iterator, cancelFn
@@ -1163,7 +1164,7 @@ func (a *ChatModelAgent) Resume(ctx context.Context, info *ResumeInfo, opts ...A
 		}
 
 		run(ctx, &AgentInput{EnableStreaming: info.EnableStreaming}, generator,
-			newResumeBridgeStore(stateByte), instruction, returnDirectly, co...)
+			newResumeBridgeStore(stateByte), instruction, returnDirectly, nil, co...)
 	}()
 
 	return iterator
@@ -1247,7 +1248,7 @@ func (a *ChatModelAgent) ResumeWithCancel(ctx context.Context, info *ResumeInfo,
 		}
 
 		run(ctx, &AgentInput{EnableStreaming: info.EnableStreaming}, generator,
-			newResumeBridgeStore(stateByte), instruction, returnDirectly, co...)
+			newResumeBridgeStore(stateByte), instruction, returnDirectly, nil, co...)
 	}()
 
 	return iterator, cancelFn
