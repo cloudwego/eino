@@ -325,6 +325,56 @@ func (a *flowAgent) Run(ctx context.Context, input *AgentInput, opts ...AgentRun
 	return iterator
 }
 
+func (a *flowAgent) RunWithCancel(ctx context.Context, input *AgentInput, opts ...AgentRunOption) (*AsyncIterator[*AgentEvent], CancelFunc) {
+	agentName := a.Name(ctx)
+
+	var runCtx *runContext
+	ctx, runCtx = initRunCtx(ctx, agentName, input)
+	ctx = AppendAddressSegment(ctx, AddressSegmentAgent, agentName)
+
+	o := getCommonOptions(nil, opts...)
+
+	processedInput, err := a.genAgentInput(ctx, runCtx, o.skipTransferMessages)
+	if err != nil {
+		cbInput := &AgentCallbackInput{Input: input}
+		ctx = callbacks.OnStart(ctx, cbInput)
+		return wrapIterWithOnEnd(ctx, genErrorIter(err)), notCancellableFuncInternal
+	}
+
+	ctxForSubAgents := ctx
+
+	agentType := getAgentType(a.Agent)
+	ctx = initAgentCallbacks(ctx, agentName, agentType, filterOptions(agentName, opts)...)
+	cbInput := &AgentCallbackInput{Input: processedInput}
+	ctx = callbacks.OnStart(ctx, cbInput)
+
+	input = processedInput
+
+	if wf, ok := a.Agent.(*workflowAgent); ok {
+		return wrapIterWithOnEnd(ctx, wf.Run(ctx, input, opts...)), notCancellableFuncInternal
+	}
+
+	var aIter *AsyncIterator[*AgentEvent]
+	var cancelFn CancelFunc
+
+	if ca, ok := a.Agent.(CancellableRun); ok {
+		aIter, cancelFn = ca.RunWithCancel(ctx, input, filterOptions(agentName, opts)...)
+	} else {
+		aIter = a.Agent.Run(ctx, input, filterOptions(agentName, opts)...)
+		cancelFn = notCancellableFuncInternal
+	}
+
+	iterator, generator := NewAsyncIteratorPair[*AgentEvent]()
+
+	go a.run(ctx, ctxForSubAgents, runCtx, aIter, generator, opts...)
+
+	return iterator, cancelFn
+}
+
+func notCancellableFuncInternal(_ context.Context, _ ...CancelOption) error {
+	return ErrAgentNotCancellable
+}
+
 func (a *flowAgent) Resume(ctx context.Context, info *ResumeInfo, opts ...AgentRunOption) *AsyncIterator[*AgentEvent] {
 	agentName := a.Name(ctx)
 
@@ -378,6 +428,71 @@ func (a *flowAgent) Resume(ctx context.Context, info *ResumeInfo, opts ...AgentR
 	}
 
 	return wrapIterWithOnEnd(ctx, subAgent.Resume(ctxForSubAgents, info, opts...))
+}
+
+func (a *flowAgent) ResumeWithCancel(ctx context.Context, info *ResumeInfo, opts ...AgentRunOption) (*AsyncIterator[*AgentEvent], CancelFunc) {
+	agentName := a.Name(ctx)
+
+	ctx, info = buildResumeInfo(ctx, agentName, info)
+
+	ctxForSubAgents := ctx
+
+	agentType := getAgentType(a.Agent)
+	ctx = initAgentCallbacks(ctx, agentName, agentType, filterOptions(agentName, opts)...)
+	cbInput := &AgentCallbackInput{ResumeInfo: info}
+	ctx = callbacks.OnStart(ctx, cbInput)
+
+	if info.WasInterrupted {
+		ra, ok := a.Agent.(ResumableAgent)
+		if !ok {
+			return wrapIterWithOnEnd(ctx, genErrorIter(fmt.Errorf("failed to resume agent: agent '%s' is an interrupt point "+
+				"but is not a ResumableAgent", agentName))), notCancellableFuncInternal
+		}
+
+		var aIter *AsyncIterator[*AgentEvent]
+		var cancelFn CancelFunc
+
+		if ca, ok := ra.(CancellableResume); ok {
+			aIter, cancelFn = ca.ResumeWithCancel(ctx, info, opts...)
+		} else {
+			aIter = ra.Resume(ctx, info, opts...)
+			cancelFn = notCancellableFuncInternal
+		}
+
+		if _, ok := ra.(*workflowAgent); ok {
+			return wrapIterWithOnEnd(ctx, aIter), cancelFn
+		}
+
+		iterator, generator := NewAsyncIteratorPair[*AgentEvent]()
+		go a.run(ctx, ctxForSubAgents, getRunCtx(ctxForSubAgents), aIter, generator, opts...)
+		return iterator, cancelFn
+	}
+
+	nextAgentName, err := getNextResumeAgent(ctx, info)
+	if err != nil {
+		return wrapIterWithOnEnd(ctx, genErrorIter(err)), notCancellableFuncInternal
+	}
+
+	subAgent := a.getAgent(ctxForSubAgents, nextAgentName)
+	if subAgent == nil {
+		if len(a.subAgents) == 0 {
+			if ra, ok := a.Agent.(ResumableAgent); ok {
+				if ca, ok := ra.(CancellableResume); ok {
+					iter, cancelFn := ca.ResumeWithCancel(ctx, info, opts...)
+					return wrapIterWithOnEnd(ctx, iter), cancelFn
+				}
+				return wrapIterWithOnEnd(ctx, ra.Resume(ctx, info, opts...)), notCancellableFuncInternal
+			}
+		}
+		return wrapIterWithOnEnd(ctx, genErrorIter(fmt.Errorf("failed to resume agent: agent '%s' not found from flowAgent '%s'", nextAgentName, agentName))), notCancellableFuncInternal
+	}
+
+	if ca, ok := ResumableAgent(subAgent).(CancellableResume); ok {
+		iter, cancelFn := ca.ResumeWithCancel(ctxForSubAgents, info, opts...)
+		return wrapIterWithOnEnd(ctx, iter), cancelFn
+	}
+
+	return wrapIterWithOnEnd(ctx, subAgent.Resume(ctxForSubAgents, info, opts...)), notCancellableFuncInternal
 }
 
 type DeterministicTransferConfig struct {

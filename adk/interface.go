@@ -291,6 +291,9 @@ const (
 // ErrAgentFinished is returned by Cancel when the agent has already finished execution.
 var ErrAgentFinished = errors.New("agent has already finished execution")
 
+// ErrAgentNotCancellable is returned by Cancel when the agent does not support cancellation.
+var ErrAgentNotCancellable = errors.New("agent does not implement CancellableRun interface")
+
 type cancelConfig struct {
 	Mode    CancelMode
 	Timeout *time.Duration

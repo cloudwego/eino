@@ -1005,6 +1005,89 @@ func (a *ChatModelAgent) Run(ctx context.Context, input *AgentInput, opts ...Age
 	return iterator
 }
 
+func (a *ChatModelAgent) RunWithCancel(ctx context.Context, input *AgentInput, opts ...AgentRunOption) (*AsyncIterator[*AgentEvent], CancelFunc) {
+	iterator, generator := NewAsyncIteratorPair[*AgentEvent]()
+
+	ctx, run, bc, err := a.getRunFunc(ctx)
+	if err != nil {
+		go func() {
+			generator.Send(&AgentEvent{Err: err})
+			generator.Close()
+		}()
+		return iterator, notCancellableFuncInternal
+	}
+
+	co := getComposeOptions(opts)
+	co = append(co, compose.WithCheckPointID(bridgeCheckpointID))
+
+	if bc != nil {
+		co = append(co, compose.WithChatModelOption(model.WithTools(bc.toolInfos)))
+		if bc.toolUpdated {
+			co = append(co, compose.WithToolsNodeOption(compose.WithToolList(bc.toolsNodeConf.Tools...)))
+		}
+	}
+
+	ctx, graphInterrupt := compose.WithGraphInterrupt(ctx)
+	cancelFn := buildGraphCancelFunc(graphInterrupt)
+
+	go func() {
+		defer func() {
+			panicErr := recover()
+			if panicErr != nil {
+				e := safe.NewPanicErr(panicErr, debug.Stack())
+				generator.Send(&AgentEvent{Err: e})
+			}
+
+			generator.Close()
+		}()
+
+		var (
+			instruction    string
+			returnDirectly map[string]bool
+		)
+
+		if bc != nil {
+			instruction = bc.instruction
+			returnDirectly = bc.returnDirectly
+		}
+
+		run(ctx, input, generator, newBridgeStore(), instruction, returnDirectly, co...)
+	}()
+
+	return iterator, cancelFn
+}
+
+func buildGraphCancelFunc(graphInterrupt func(opts ...compose.GraphInterruptOption)) CancelFunc {
+	var once sync.Once
+	var cancelled bool
+
+	return func(_ context.Context, opts ...CancelOption) error {
+		cfg := &cancelConfig{
+			Mode: CancelImmediate,
+		}
+		for _, opt := range opts {
+			opt(cfg)
+		}
+
+		var err error
+		once.Do(func() {
+			var interruptOpts []compose.GraphInterruptOption
+			if cfg.Timeout != nil {
+				interruptOpts = append(interruptOpts, compose.WithGraphInterruptTimeout(*cfg.Timeout))
+			}
+
+			graphInterrupt(interruptOpts...)
+			cancelled = true
+		})
+
+		if !cancelled {
+			err = ErrAgentFinished
+		}
+
+		return err
+	}
+}
+
 func (a *ChatModelAgent) Resume(ctx context.Context, info *ResumeInfo, opts ...AgentRunOption) *AsyncIterator[*AgentEvent] {
 	iterator, generator := NewAsyncIteratorPair[*AgentEvent]()
 
@@ -1084,6 +1167,90 @@ func (a *ChatModelAgent) Resume(ctx context.Context, info *ResumeInfo, opts ...A
 	}()
 
 	return iterator
+}
+
+func (a *ChatModelAgent) ResumeWithCancel(ctx context.Context, info *ResumeInfo, opts ...AgentRunOption) (*AsyncIterator[*AgentEvent], CancelFunc) {
+	iterator, generator := NewAsyncIteratorPair[*AgentEvent]()
+
+	ctx, run, bc, err := a.getRunFunc(ctx)
+	if err != nil {
+		go func() {
+			generator.Send(&AgentEvent{Err: err})
+			generator.Close()
+		}()
+		return iterator, notCancellableFuncInternal
+	}
+
+	co := getComposeOptions(opts)
+	co = append(co, compose.WithCheckPointID(bridgeCheckpointID))
+
+	if bc != nil {
+		co = append(co, compose.WithChatModelOption(model.WithTools(bc.toolInfos)))
+		if bc.toolUpdated {
+			co = append(co, compose.WithToolsNodeOption(compose.WithToolList(bc.toolsNodeConf.Tools...)))
+		}
+	}
+
+	if info.InterruptState == nil {
+		panic(fmt.Sprintf("ChatModelAgent.ResumeWithCancel: agent '%s' was asked to resume but has no state", a.Name(ctx)))
+	}
+
+	stateByte, ok := info.InterruptState.([]byte)
+	if !ok {
+		panic(fmt.Sprintf("ChatModelAgent.ResumeWithCancel: agent '%s' was asked to resume but has invalid interrupt state type: %T",
+			a.Name(ctx), info.InterruptState))
+	}
+
+	var historyModifier func(ctx context.Context, history []Message) []Message
+	if info.ResumeData != nil {
+		resumeData, ok := info.ResumeData.(*ChatModelAgentResumeData)
+		if !ok {
+			panic(fmt.Sprintf("ChatModelAgent.ResumeWithCancel: agent '%s' was asked to resume but has invalid resume data type: %T",
+				a.Name(ctx), info.ResumeData))
+		}
+		historyModifier = resumeData.HistoryModifier
+	}
+
+	if historyModifier != nil {
+		co = append(co, compose.WithStateModifier(func(ctx context.Context, path compose.NodePath, state any) error {
+			s, ok := state.(*State)
+			if !ok {
+				return nil
+			}
+			s.Messages = historyModifier(ctx, s.Messages)
+			return nil
+		}))
+	}
+
+	ctx, graphInterrupt := compose.WithGraphInterrupt(ctx)
+	cancelFn := buildGraphCancelFunc(graphInterrupt)
+
+	go func() {
+		defer func() {
+			panicErr := recover()
+			if panicErr != nil {
+				e := safe.NewPanicErr(panicErr, debug.Stack())
+				generator.Send(&AgentEvent{Err: e})
+			}
+
+			generator.Close()
+		}()
+
+		var (
+			instruction    string
+			returnDirectly map[string]bool
+		)
+
+		if bc != nil {
+			instruction = bc.instruction
+			returnDirectly = bc.returnDirectly
+		}
+
+		run(ctx, &AgentInput{EnableStreaming: info.EnableStreaming}, generator,
+			newResumeBridgeStore(stateByte), instruction, returnDirectly, co...)
+	}()
+
+	return iterator, cancelFn
 }
 
 func getComposeOptions(opts []AgentRunOption) []compose.Option {

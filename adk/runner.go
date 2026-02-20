@@ -105,6 +105,112 @@ func (r *Runner) Query(ctx context.Context,
 	return r.Run(ctx, []Message{schema.UserMessage(query)}, opts...)
 }
 
+// RunWithCancel starts a new execution of the agent and returns both an iterator and a cancel function.
+// The cancel function can be used to interrupt the running agent at specific points based on the CancelMode.
+// If the Runner was configured with a CheckPointStore and WithCheckPointID option, it will automatically
+// save the agent's state upon cancellation for later resumption.
+//
+// The agent must implement the CancellableRun interface to support cancellation. If the agent does not
+// implement CancellableRun, ErrAgentNotCancellable is returned.
+func (r *Runner) RunWithCancel(ctx context.Context, messages []Message,
+	opts ...AgentRunOption) (*AsyncIterator[*AgentEvent], CancelFunc, error) {
+	if _, ok := r.a.(CancellableRun); !ok {
+		return nil, nil, ErrAgentNotCancellable
+	}
+
+	o := getCommonOptions(nil, opts...)
+
+	fa := toFlowAgent(ctx, r.a)
+
+	input := &AgentInput{
+		Messages:        messages,
+		EnableStreaming: r.enableStreaming,
+	}
+
+	ctx = ctxWithNewRunCtx(ctx, input, o.sharedParentSession)
+
+	AddSessionValues(ctx, o.sessionValues)
+
+	iter, cancelFn := fa.RunWithCancel(ctx, input, opts...)
+
+	if r.store == nil {
+		return iter, cancelFn, nil
+	}
+
+	niter, gen := NewAsyncIteratorPair[*AgentEvent]()
+
+	go r.handleIter(ctx, iter, gen, o.checkPointID)
+	return niter, cancelFn, nil
+}
+
+// ResumeWithCancel continues an interrupted execution from a checkpoint and returns both an iterator and a cancel function.
+// This method uses the "Implicit Resume All" strategy where all previously interrupted points proceed without specific data.
+// The cancel function can be used to interrupt the running agent again at specific points based on the CancelMode.
+func (r *Runner) ResumeWithCancel(ctx context.Context, checkPointID string, opts ...AgentRunOption) (
+	*AsyncIterator[*AgentEvent], CancelFunc, error) {
+	return r.resumeWithCancel(ctx, checkPointID, nil, opts...)
+}
+
+// ResumeWithParamsAndCancel continues an interrupted execution from a checkpoint with specific parameters
+// and returns both an iterator and a cancel function.
+// The params.Targets map should contain the addresses of the components to be resumed as keys.
+func (r *Runner) ResumeWithParamsAndCancel(ctx context.Context, checkPointID string, params *ResumeParams,
+	opts ...AgentRunOption) (*AsyncIterator[*AgentEvent], CancelFunc, error) {
+	return r.resumeWithCancel(ctx, checkPointID, params.Targets, opts...)
+}
+
+func (r *Runner) resumeWithCancel(ctx context.Context, checkPointID string, resumeData map[string]any,
+	opts ...AgentRunOption) (*AsyncIterator[*AgentEvent], CancelFunc, error) {
+	if _, ok := r.a.(CancellableResume); !ok {
+		return nil, nil, ErrAgentNotCancellable
+	}
+
+	if r.store == nil {
+		return nil, nil, fmt.Errorf("failed to resume: store is nil")
+	}
+
+	ctx, runCtx, resumeInfo, err := r.loadCheckPoint(ctx, checkPointID)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to load from checkpoint: %w", err)
+	}
+
+	o := getCommonOptions(nil, opts...)
+	if o.sharedParentSession {
+		parentSession := getSession(ctx)
+		if parentSession != nil {
+			runCtx.Session.Values = parentSession.Values
+			runCtx.Session.valuesMtx = parentSession.valuesMtx
+		}
+	}
+	if runCtx.Session.valuesMtx == nil {
+		runCtx.Session.valuesMtx = &sync.Mutex{}
+	}
+	if runCtx.Session.Values == nil {
+		runCtx.Session.Values = make(map[string]any)
+	}
+
+	ctx = setRunCtx(ctx, runCtx)
+
+	AddSessionValues(ctx, o.sessionValues)
+
+	if len(resumeData) > 0 {
+		ctx = core.BatchResumeWithData(ctx, resumeData)
+	}
+
+	fa := toFlowAgent(ctx, r.a)
+
+	aIter, cancelFn := fa.ResumeWithCancel(ctx, resumeInfo, opts...)
+
+	if r.store == nil {
+		return aIter, cancelFn, nil
+	}
+
+	niter, gen := NewAsyncIteratorPair[*AgentEvent]()
+
+	go r.handleIter(ctx, aIter, gen, &checkPointID)
+	return niter, cancelFn, nil
+}
+
 // Resume continues an interrupted execution from a checkpoint, using an "Implicit Resume All" strategy.
 // This method is best for simpler use cases where the act of resuming implies that all previously
 // interrupted points should proceed without specific data.
