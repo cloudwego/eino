@@ -22,10 +22,13 @@ import (
 	"encoding/gob"
 	"errors"
 	"io"
+	"runtime/debug"
 	"sync/atomic"
+	"time"
 
 	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/compose"
+	"github.com/cloudwego/eino/internal/safe"
 	"github.com/cloudwego/eino/schema"
 )
 
@@ -286,7 +289,6 @@ type reactConfig struct {
 	agentName string
 
 	maxIterations int
-	cancelSig     <-chan *cancelConfig
 }
 
 func genToolInfos(ctx context.Context, config *compose.ToolsNodeConfig) ([]*schema.ToolInfo, error) {
@@ -333,7 +335,7 @@ func genReactState(config *reactConfig) func(ctx context.Context) *State {
 	}
 }
 
-func newReact(ctx context.Context, config *reactConfig) (reactGraph, error) {
+func newReact(ctx context.Context, config *reactConfig, cs *cancelSig) (reactGraph, error) {
 	const (
 		initNode_       = "Init"
 		chatModel_      = "ChatModel"
@@ -342,11 +344,7 @@ func newReact(ctx context.Context, config *reactConfig) (reactGraph, error) {
 		afterToolNode_  = "AfterToolNode"
 	)
 
-	checkCancel := config.cancelSig != nil
-	cs := &cancelSig{
-		sig:      config.cancelSig,
-		sigStore: atomic.Value{},
-	}
+	checkCancel := cs != nil
 
 	nodeNameAfterModel := func() string {
 		if checkCancel {
@@ -515,19 +513,97 @@ func newReact(ctx context.Context, config *reactConfig) (reactGraph, error) {
 }
 
 type cancelSig struct {
-	sig      <-chan *cancelConfig
-	sigStore atomic.Value
+	done   chan struct{}
+	config atomic.Value
+}
+
+func newCancelSig() *cancelSig {
+	return &cancelSig{
+		done: make(chan struct{}),
+	}
+}
+
+func (cs *cancelSig) cancel(cfg *cancelConfig) {
+	cs.config.Store(cfg)
+	close(cs.done)
+}
+
+func (cs *cancelSig) isCancelled() bool {
+	select {
+	case <-cs.done:
+		return true
+	default:
+		return false
+	}
 }
 
 func checkCancelSig(cs *cancelSig) *cancelConfig {
-	if val, ok := cs.sigStore.Load().(*cancelConfig); ok {
-		return val
+	if cs == nil {
+		return nil
 	}
 	select {
-	case s := <-cs.sig:
-		cs.sigStore.Store(s)
-		return s
+	case <-cs.done:
+		return cs.config.Load().(*cancelConfig)
 	default:
 		return nil
 	}
+}
+
+func wrapModelForCancelable(m model.BaseChatModel, cs *cancelSig) model.BaseChatModel {
+	return &cancelableChatModel{
+		inner: m,
+		cs:    cs,
+	}
+}
+
+type cancelableChatModel struct {
+	inner model.BaseChatModel
+	cs    *cancelSig
+}
+
+func (c *cancelableChatModel) Generate(ctx context.Context, input []*schema.Message, opts ...model.Option) (*schema.Message, error) {
+	if cfg := checkCancelSig(c.cs); cfg != nil && cfg.Mode == CancelImmediate {
+		return nil, compose.Interrupt(ctx, "cancelled externally")
+	}
+	type resultPair struct {
+		res *schema.Message
+		err error
+	}
+	resultCh := make(chan *resultPair, 1)
+	go func() {
+		defer func() {
+			panicErr := recover()
+			if panicErr != nil {
+				e := safe.NewPanicErr(panicErr, debug.Stack())
+				resultCh <- &resultPair{nil, e}
+			}
+		}()
+
+		res, err := c.inner.Generate(ctx, input, opts...)
+		resultCh <- &resultPair{res: res, err: err}
+	}()
+
+	var timeCh <-chan time.Time
+	select {
+	case <-c.cs.done:
+		cfg := c.cs.config.Load().(*cancelConfig)
+		if cfg.Mode == CancelImmediate {
+			if cfg.Timeout == nil {
+				return nil, compose.Interrupt(ctx, "cancelled externally")
+			}
+			timeCh = time.After(*cfg.Timeout)
+		}
+	case res := <-resultCh:
+		return res.res, res.err
+	}
+	select {
+	case <-timeCh:
+		return nil, compose.Interrupt(ctx, "cancelled externally")
+	case res := <-resultCh:
+		return res.res, res.err
+	}
+}
+
+func (c *cancelableChatModel) Stream(ctx context.Context, input []*schema.Message, opts ...model.Option) (*schema.StreamReader[*schema.Message], error) {
+	panic("implement me")
 }

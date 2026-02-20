@@ -338,7 +338,7 @@ type ChatModelAgent struct {
 }
 
 type runFunc func(ctx context.Context, input *AgentInput, generator *AsyncGenerator[*AgentEvent],
-	store *bridgeStore, instruction string, returnDirectly map[string]bool, cancelSig <-chan *cancelConfig, opts ...compose.Option)
+	store *bridgeStore, instruction string, returnDirectly map[string]bool, cs *cancelSig, opts ...compose.Option)
 
 // NewChatModelAgent constructs a chat model-backed agent with the provided config.
 func NewChatModelAgent(ctx context.Context, config *ChatModelAgentConfig) (*ChatModelAgent, error) {
@@ -578,7 +578,7 @@ func setOutputToSession(ctx context.Context, msg Message, msgStream MessageStrea
 }
 
 func errFunc(err error) runFunc {
-	return func(ctx context.Context, input *AgentInput, generator *AsyncGenerator[*AgentEvent], store *bridgeStore, _ string, _ map[string]bool, _ <-chan *cancelConfig, _ ...compose.Option) {
+	return func(ctx context.Context, input *AgentInput, generator *AsyncGenerator[*AgentEvent], store *bridgeStore, _ string, _ map[string]bool, _ *cancelSig, _ ...compose.Option) {
 		generator.Send(&AgentEvent{Err: err})
 	}
 }
@@ -714,7 +714,7 @@ func (a *ChatModelAgent) buildNoToolsRunFunc(_ context.Context) runFunc {
 	}
 
 	return func(ctx context.Context, input *AgentInput, generator *AsyncGenerator[*AgentEvent],
-		store *bridgeStore, instruction string, _ map[string]bool, _ <-chan *cancelConfig, opts ...compose.Option) {
+		store *bridgeStore, instruction string, _ map[string]bool, _ *cancelSig, opts ...compose.Option) {
 
 		chain := compose.NewChain[noToolsInput, Message](
 			compose.WithGenLocalState(func(ctx context.Context) (state *State) {
@@ -787,8 +787,8 @@ func (a *ChatModelAgent) buildReActRunFunc(_ context.Context, bc *execContext) (
 	}
 
 	return func(ctx context.Context, input *AgentInput, generator *AsyncGenerator[*AgentEvent], store *bridgeStore,
-		instruction string, returnDirectly map[string]bool, cancelSig <-chan *cancelConfig, opts ...compose.Option) {
-		g, err := newReact(ctx, conf)
+		instruction string, returnDirectly map[string]bool, cs *cancelSig, opts ...compose.Option) {
+		g, err := newReact(ctx, conf, cs)
 		if err != nil {
 			generator.Send(&AgentEvent{Err: err})
 			return
@@ -1029,7 +1029,8 @@ func (a *ChatModelAgent) RunWithCancel(ctx context.Context, input *AgentInput, o
 	}
 
 	ctx, graphInterrupt := compose.WithGraphInterrupt(ctx)
-	cancelFn := buildGraphCancelFunc(graphInterrupt)
+	cs := newCancelSig()
+	cancelFn := buildCancelFunc(graphInterrupt, cs)
 
 	go func() {
 		defer func() {
@@ -1052,13 +1053,13 @@ func (a *ChatModelAgent) RunWithCancel(ctx context.Context, input *AgentInput, o
 			returnDirectly = bc.returnDirectly
 		}
 
-		run(ctx, input, generator, newBridgeStore(), instruction, returnDirectly, nil, co...)
+		run(ctx, input, generator, newBridgeStore(), instruction, returnDirectly, cs, co...)
 	}()
 
 	return iterator, cancelFn
 }
 
-func buildGraphCancelFunc(graphInterrupt func(opts ...compose.GraphInterruptOption)) CancelFunc {
+func buildCancelFunc(graphInterrupt func(opts ...compose.GraphInterruptOption), cs *cancelSig) CancelFunc {
 	var once sync.Once
 	var cancelled bool
 
@@ -1072,6 +1073,8 @@ func buildGraphCancelFunc(graphInterrupt func(opts ...compose.GraphInterruptOpti
 
 		var err error
 		once.Do(func() {
+			cs.cancel(cfg)
+
 			var interruptOpts []compose.GraphInterruptOption
 			if cfg.Timeout != nil {
 				interruptOpts = append(interruptOpts, compose.WithGraphInterruptTimeout(*cfg.Timeout))
@@ -1224,7 +1227,8 @@ func (a *ChatModelAgent) ResumeWithCancel(ctx context.Context, info *ResumeInfo,
 	}
 
 	ctx, graphInterrupt := compose.WithGraphInterrupt(ctx)
-	cancelFn := buildGraphCancelFunc(graphInterrupt)
+	cs := newCancelSig()
+	cancelFn := buildCancelFunc(graphInterrupt, cs)
 
 	go func() {
 		defer func() {
@@ -1248,7 +1252,7 @@ func (a *ChatModelAgent) ResumeWithCancel(ctx context.Context, info *ResumeInfo,
 		}
 
 		run(ctx, &AgentInput{EnableStreaming: info.EnableStreaming}, generator,
-			newResumeBridgeStore(stateByte), instruction, returnDirectly, nil, co...)
+			newResumeBridgeStore(stateByte), instruction, returnDirectly, cs, co...)
 	}()
 
 	return iterator, cancelFn
