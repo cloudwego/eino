@@ -355,6 +355,13 @@ func newReact(ctx context.Context, config *reactConfig) (reactGraph, error) {
 		return toolNode_
 	}
 
+	nodeNameAfterTool := func() string {
+		if checkCancel {
+			return afterToolNode_
+		}
+		return chatModel_
+	}
+
 	g := compose.NewGraph[*reactInput, Message](compose.WithGenLocalState(genReactState(config)))
 
 	initLambda := func(ctx context.Context, input *reactInput) ([]Message, error) {
@@ -439,7 +446,7 @@ func newReact(ctx context.Context, config *reactConfig) (reactGraph, error) {
 	_ = g.AddBranch(chatModel_, branch)
 
 	if checkCancel {
-		beforeToolNode := func(ctx context.Context, input *schema.Message) (output *schema.Message, err error) {
+		beforeToolNode := func(ctx context.Context, input Message) (output Message, err error) {
 			if sig := checkCancelSig(cs); sig != nil && sig.Mode != CancelAfterToolCall {
 				return nil, compose.Interrupt(ctx, "cancelled externally")
 			}
@@ -448,6 +455,16 @@ func newReact(ctx context.Context, config *reactConfig) (reactGraph, error) {
 		}
 		_ = g.AddLambdaNode(beforeToolNode_, compose.InvokableLambda(beforeToolNode), compose.WithNodeName(beforeToolNode_))
 		g.AddEdge(beforeToolNode_, toolNode_)
+
+		afterToolNode := func(ctx context.Context, input []Message) (output []Message, err error) {
+			if sig := checkCancelSig(cs); sig != nil && sig.Mode != CancelAfterChatModel {
+				return nil, compose.Interrupt(ctx, "cancelled externally")
+			}
+
+			return input, nil
+		}
+		_ = g.AddLambdaNode(afterToolNode_, compose.InvokableLambda(afterToolNode), compose.WithNodeName(afterToolNode_))
+		g.AddEdge(afterToolNode_, chatModel_)
 	}
 
 	if len(config.toolsReturnDirectly) > 0 {
@@ -484,14 +501,14 @@ func newReact(ctx context.Context, config *reactConfig) (reactGraph, error) {
 				return toolNodeToEndConverter, nil
 			}
 
-			return chatModel_, nil
+			return nodeNameAfterTool(), nil
 		}
 
 		branch = compose.NewStreamGraphBranch(checkReturnDirect,
-			map[string]bool{toolNodeToEndConverter: true, chatModel_: true})
+			map[string]bool{toolNodeToEndConverter: true, nodeNameAfterTool(): true})
 		_ = g.AddBranch(toolNode_, branch)
 	} else {
-		_ = g.AddEdge(toolNode_, chatModel_)
+		_ = g.AddEdge(toolNode_, nodeNameAfterTool())
 	}
 
 	return g, nil
