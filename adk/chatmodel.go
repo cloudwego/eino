@@ -1024,7 +1024,6 @@ func (a *ChatModelAgent) runInternal(ctx context.Context, input *AgentInput, wit
 
 func buildCancelFunc(cs *cancelSig) CancelFunc {
 	var once sync.Once
-	var cancelled bool
 
 	return func(_ context.Context, opts ...CancelOption) error {
 		cfg := &cancelConfig{
@@ -1034,17 +1033,17 @@ func buildCancelFunc(cs *cancelSig) CancelFunc {
 			opt(cfg)
 		}
 
-		var err error
+		cancelled := false
 		once.Do(func() {
 			cs.cancel(cfg)
 			cancelled = true
 		})
 
 		if !cancelled {
-			err = ErrAgentFinished
+			return ErrAgentFinished
 		}
 
-		return err
+		return nil
 	}
 }
 

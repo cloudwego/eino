@@ -22,13 +22,10 @@ import (
 	"encoding/gob"
 	"errors"
 	"io"
-	"runtime/debug"
 	"sync/atomic"
-	"time"
 
 	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/compose"
-	"github.com/cloudwego/eino/internal/safe"
 	"github.com/cloudwego/eino/schema"
 )
 
@@ -371,15 +368,19 @@ func newReact(ctx context.Context, config *reactConfig, cs *cancelSig) (reactGra
 	if config.modelWrapperConf != nil {
 		wrappedModel = buildModelWrappers(config.model, config.modelWrapperConf)
 	}
+
+	toolsConfig := config.toolsConfig
 	if checkCancel {
 		wrappedModel = wrapModelForCancelable(wrappedModel, cs)
-		tcMWs := make([]compose.ToolMiddleware, 0, len(config.toolsConfig.ToolCallMiddlewares)+1)
+		tcMWs := make([]compose.ToolMiddleware, 0, len(toolsConfig.ToolCallMiddlewares)+1)
 		tcMWs = append(tcMWs, cancelableTool(cs))
-		tcMWs = append(tcMWs, config.toolsConfig.ToolCallMiddlewares...)
-		config.toolsConfig.ToolCallMiddlewares = tcMWs
+		tcMWs = append(tcMWs, toolsConfig.ToolCallMiddlewares...)
+		toolsConfigCopy := *toolsConfig
+		toolsConfigCopy.ToolCallMiddlewares = tcMWs
+		toolsConfig = &toolsConfigCopy
 	}
 
-	toolsNode, err := compose.NewToolNode(ctx, config.toolsConfig)
+	toolsNode, err := compose.NewToolNode(ctx, toolsConfig)
 	if err != nil {
 		return nil, err
 	}
@@ -430,26 +431,6 @@ func newReact(ctx context.Context, config *reactConfig, cs *cancelSig) (reactGra
 	_ = g.AddEdge(compose.START, initNode_)
 	_ = g.AddEdge(initNode_, chatModel_)
 
-	toolCallCheck := func(ctx context.Context, sMsg MessageStream) (string, error) {
-		defer sMsg.Close()
-		for {
-			chunk, err_ := sMsg.Recv()
-			if err_ != nil {
-				if err_ == io.EOF {
-					return compose.END, nil
-				}
-
-				return "", err_
-			}
-
-			if len(chunk.ToolCalls) > 0 {
-				return nodeNameAfterModel(), nil
-			}
-		}
-	}
-	branch := compose.NewStreamGraphBranch(toolCallCheck, map[string]bool{compose.END: true, nodeNameAfterModel(): true})
-	_ = g.AddBranch(chatModel_, branch)
-
 	if checkCancel {
 		beforeToolNode := func(ctx context.Context, input Message) (output Message, err error) {
 			if sig := checkCancelSig(cs); sig != nil && sig.Mode != CancelAfterToolCall {
@@ -471,6 +452,26 @@ func newReact(ctx context.Context, config *reactConfig, cs *cancelSig) (reactGra
 		_ = g.AddLambdaNode(afterToolNode_, compose.InvokableLambda(afterToolNode), compose.WithNodeName(afterToolNode_))
 		g.AddEdge(afterToolNode_, chatModel_)
 	}
+
+	toolCallCheck := func(ctx context.Context, sMsg MessageStream) (string, error) {
+		defer sMsg.Close()
+		for {
+			chunk, err_ := sMsg.Recv()
+			if err_ != nil {
+				if err_ == io.EOF {
+					return compose.END, nil
+				}
+
+				return "", err_
+			}
+
+			if len(chunk.ToolCalls) > 0 {
+				return nodeNameAfterModel(), nil
+			}
+		}
+	}
+	branch := compose.NewStreamGraphBranch(toolCallCheck, map[string]bool{compose.END: true, nodeNameAfterModel(): true})
+	_ = g.AddBranch(chatModel_, branch)
 
 	if len(config.toolsReturnDirectly) > 0 {
 		const (
@@ -556,350 +557,4 @@ func checkCancelSig(cs *cancelSig) *cancelConfig {
 	}
 }
 
-func wrapModelForCancelable(m model.BaseChatModel, cs *cancelSig) model.BaseChatModel {
-	return &cancelableChatModel{
-		inner: m,
-		cs:    cs,
-	}
-}
 
-type cancelableChatModel struct {
-	inner model.BaseChatModel
-	cs    *cancelSig
-}
-
-func (c *cancelableChatModel) Generate(ctx context.Context, input []*schema.Message, opts ...model.Option) (*schema.Message, error) {
-	if cfg := checkCancelSig(c.cs); cfg != nil && cfg.Mode == CancelImmediate {
-		return nil, compose.Interrupt(ctx, "cancelled externally")
-	}
-	type resultPair struct {
-		res *schema.Message
-		err error
-	}
-	resultCh := make(chan *resultPair, 1)
-	go func() {
-		defer func() {
-			panicErr := recover()
-			if panicErr != nil {
-				e := safe.NewPanicErr(panicErr, debug.Stack())
-				resultCh <- &resultPair{nil, e}
-			}
-		}()
-
-		res, err := c.inner.Generate(ctx, input, opts...)
-		resultCh <- &resultPair{res: res, err: err}
-	}()
-
-	var timeCh <-chan time.Time
-	select {
-	case <-c.cs.done:
-		cfg := c.cs.config.Load().(*cancelConfig)
-		if cfg.Mode == CancelImmediate {
-			if cfg.Timeout == nil {
-				return nil, compose.Interrupt(ctx, "cancelled externally")
-			}
-			timeCh = time.After(*cfg.Timeout)
-		}
-	case res := <-resultCh:
-		return res.res, res.err
-	}
-	select {
-	case <-timeCh:
-		return nil, compose.Interrupt(ctx, "cancelled externally")
-	case res := <-resultCh:
-		return res.res, res.err
-	}
-}
-
-func (c *cancelableChatModel) Stream(ctx context.Context, input []*schema.Message, opts ...model.Option) (*schema.StreamReader[*schema.Message], error) {
-	if cfg := checkCancelSig(c.cs); cfg != nil && cfg.Mode == CancelImmediate {
-		return nil, compose.Interrupt(ctx, "cancelled externally")
-	}
-
-	type resultPair struct {
-		stream *schema.StreamReader[*schema.Message]
-		err    error
-	}
-	resultCh := make(chan *resultPair, 1)
-	go func() {
-		defer func() {
-			panicErr := recover()
-			if panicErr != nil {
-				e := safe.NewPanicErr(panicErr, debug.Stack())
-				resultCh <- &resultPair{nil, e}
-			}
-		}()
-
-		stream, err := c.inner.Stream(ctx, input, opts...)
-		if err != nil {
-			resultCh <- &resultPair{nil, err}
-			return
-		}
-		copies := stream.Copy(2)
-		checkCopy := copies[0]
-		returnCopy := copies[1]
-
-		_ = consumeStreamForError(checkCopy)
-
-		resultCh <- &resultPair{stream: returnCopy, err: nil}
-	}()
-
-	var timeCh <-chan time.Time
-	select {
-	case <-c.cs.done:
-		cfg := c.cs.config.Load().(*cancelConfig)
-		if cfg.Mode == CancelImmediate {
-			if cfg.Timeout == nil {
-				return nil, compose.Interrupt(ctx, "cancelled externally")
-			}
-			timeCh = time.After(*cfg.Timeout)
-		}
-	case res := <-resultCh:
-		return res.stream, res.err
-	}
-	select {
-	case <-timeCh:
-		return nil, compose.Interrupt(ctx, "cancelled externally")
-	case res := <-resultCh:
-		return res.stream, res.err
-	}
-}
-
-func cancelableTool(cs *cancelSig) compose.ToolMiddleware {
-	return compose.ToolMiddleware{
-		Invokable: func(endpoint compose.InvokableToolEndpoint) compose.InvokableToolEndpoint {
-			return func(ctx context.Context, input *compose.ToolInput) (*compose.ToolOutput, error) {
-				if cfg := checkCancelSig(cs); cfg != nil && cfg.Mode == CancelImmediate {
-					return nil, compose.Interrupt(ctx, "cancelled externally")
-				}
-
-				type resultPair struct {
-					output *compose.ToolOutput
-					err    error
-				}
-				resultCh := make(chan *resultPair, 1)
-				go func() {
-					defer func() {
-						panicErr := recover()
-						if panicErr != nil {
-							e := safe.NewPanicErr(panicErr, debug.Stack())
-							resultCh <- &resultPair{nil, e}
-						}
-					}()
-
-					output, err := endpoint(ctx, input)
-					resultCh <- &resultPair{output: output, err: err}
-				}()
-
-				var timeCh <-chan time.Time
-				select {
-				case <-cs.done:
-					cfg := cs.config.Load().(*cancelConfig)
-					if cfg.Mode == CancelImmediate {
-						if cfg.Timeout == nil {
-							return nil, compose.Interrupt(ctx, "cancelled externally")
-						}
-						timeCh = time.After(*cfg.Timeout)
-					}
-				case res := <-resultCh:
-					return res.output, res.err
-				}
-				select {
-				case <-timeCh:
-					return nil, compose.Interrupt(ctx, "cancelled externally")
-				case res := <-resultCh:
-					return res.output, res.err
-				}
-			}
-		},
-		Streamable: func(endpoint compose.StreamableToolEndpoint) compose.StreamableToolEndpoint {
-			return func(ctx context.Context, input *compose.ToolInput) (*compose.StreamToolOutput, error) {
-				if cfg := checkCancelSig(cs); cfg != nil && cfg.Mode == CancelImmediate {
-					return nil, compose.Interrupt(ctx, "cancelled externally")
-				}
-
-				output, err := endpoint(ctx, input)
-				if err != nil {
-					return nil, err
-				}
-
-				copies := output.Result.Copy(2)
-				checkCopy := copies[0]
-				returnCopy := copies[1]
-
-				doneCh := make(chan error, 1)
-				go func() {
-					defer func() {
-						panicErr := recover()
-						if panicErr != nil {
-							e := safe.NewPanicErr(panicErr, debug.Stack())
-							doneCh <- e
-						}
-					}()
-
-					doneCh <- consumeStreamForErrorString(checkCopy)
-				}()
-
-				var timeCh <-chan time.Time
-				select {
-				case <-cs.done:
-					cfg := cs.config.Load().(*cancelConfig)
-					if cfg.Mode == CancelImmediate {
-						if cfg.Timeout == nil {
-							returnCopy.Close()
-							return nil, compose.Interrupt(ctx, "cancelled externally")
-						}
-						timeCh = time.After(*cfg.Timeout)
-					}
-				case streamErr := <-doneCh:
-					if streamErr != nil {
-						returnCopy.Close()
-						return nil, streamErr
-					}
-					return &compose.StreamToolOutput{Result: returnCopy}, nil
-				}
-				select {
-				case <-timeCh:
-					returnCopy.Close()
-					return nil, compose.Interrupt(ctx, "cancelled externally")
-				case streamErr := <-doneCh:
-					if streamErr != nil {
-						returnCopy.Close()
-						return nil, streamErr
-					}
-					return &compose.StreamToolOutput{Result: returnCopy}, nil
-				}
-			}
-		},
-		EnhancedInvokable: func(endpoint compose.EnhancedInvokableToolEndpoint) compose.EnhancedInvokableToolEndpoint {
-			return func(ctx context.Context, input *compose.ToolInput) (*compose.EnhancedInvokableToolOutput, error) {
-				if cfg := checkCancelSig(cs); cfg != nil && cfg.Mode == CancelImmediate {
-					return nil, compose.Interrupt(ctx, "cancelled externally")
-				}
-
-				type resultPair struct {
-					output *compose.EnhancedInvokableToolOutput
-					err    error
-				}
-				resultCh := make(chan *resultPair, 1)
-				go func() {
-					defer func() {
-						panicErr := recover()
-						if panicErr != nil {
-							e := safe.NewPanicErr(panicErr, debug.Stack())
-							resultCh <- &resultPair{nil, e}
-						}
-					}()
-
-					output, err := endpoint(ctx, input)
-					resultCh <- &resultPair{output: output, err: err}
-				}()
-
-				var timeCh <-chan time.Time
-				select {
-				case <-cs.done:
-					cfg := cs.config.Load().(*cancelConfig)
-					if cfg.Mode == CancelImmediate {
-						if cfg.Timeout == nil {
-							return nil, compose.Interrupt(ctx, "cancelled externally")
-						}
-						timeCh = time.After(*cfg.Timeout)
-					}
-				case res := <-resultCh:
-					return res.output, res.err
-				}
-				select {
-				case <-timeCh:
-					return nil, compose.Interrupt(ctx, "cancelled externally")
-				case res := <-resultCh:
-					return res.output, res.err
-				}
-			}
-		},
-		EnhancedStreamable: func(endpoint compose.EnhancedStreamableToolEndpoint) compose.EnhancedStreamableToolEndpoint {
-			return func(ctx context.Context, input *compose.ToolInput) (*compose.EnhancedStreamableToolOutput, error) {
-				if cfg := checkCancelSig(cs); cfg != nil && cfg.Mode == CancelImmediate {
-					return nil, compose.Interrupt(ctx, "cancelled externally")
-				}
-
-				output, err := endpoint(ctx, input)
-				if err != nil {
-					return nil, err
-				}
-
-				copies := output.Result.Copy(2)
-				checkCopy := copies[0]
-				returnCopy := copies[1]
-
-				doneCh := make(chan error, 1)
-				go func() {
-					defer func() {
-						panicErr := recover()
-						if panicErr != nil {
-							e := safe.NewPanicErr(panicErr, debug.Stack())
-							doneCh <- e
-						}
-					}()
-
-					doneCh <- consumeStreamForErrorToolResult(checkCopy)
-				}()
-
-				var timeCh <-chan time.Time
-				select {
-				case <-cs.done:
-					cfg := cs.config.Load().(*cancelConfig)
-					if cfg.Mode == CancelImmediate {
-						if cfg.Timeout == nil {
-							returnCopy.Close()
-							return nil, compose.Interrupt(ctx, "cancelled externally")
-						}
-						timeCh = time.After(*cfg.Timeout)
-					}
-				case streamErr := <-doneCh:
-					if streamErr != nil {
-						returnCopy.Close()
-						return nil, streamErr
-					}
-					return &compose.EnhancedStreamableToolOutput{Result: returnCopy}, nil
-				}
-				select {
-				case <-timeCh:
-					returnCopy.Close()
-					return nil, compose.Interrupt(ctx, "cancelled externally")
-				case streamErr := <-doneCh:
-					if streamErr != nil {
-						returnCopy.Close()
-						return nil, streamErr
-					}
-					return &compose.EnhancedStreamableToolOutput{Result: returnCopy}, nil
-				}
-			}
-		},
-	}
-}
-
-func consumeStreamForErrorString(stream *schema.StreamReader[string]) error {
-	defer stream.Close()
-	for {
-		_, err := stream.Recv()
-		if err == io.EOF {
-			return nil
-		}
-		if err != nil {
-			return err
-		}
-	}
-}
-
-func consumeStreamForErrorToolResult(stream *schema.StreamReader[*schema.ToolResult]) error {
-	defer stream.Close()
-	for {
-		_, err := stream.Recv()
-		if err == io.EOF {
-			return nil
-		}
-		if err != nil {
-			return err
-		}
-	}
-}

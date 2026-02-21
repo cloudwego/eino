@@ -88,8 +88,10 @@ type TurnLoopConfig[T any] struct {
 	GenInput func(ctx context.Context, item T) (*AgentInput, []AgentRunOption, error)
 	// GetAgent returns the Agent to run for a given message. Required.
 	GetAgent func(ctx context.Context, item T) (Agent, error)
-	// OnAgentEvent is called for each event emitted by the agent. Optional.
+	// OnAgentEvents is called for each event emitted by the agent. Optional.
 	// The inputItem is the message that triggered the current agent turn.
+	// If not provided, the default implementation will consume all events and
+	// return any error event encountered.
 	OnAgentEvents func(ctx context.Context, inputItem T, event *AsyncIterator[*AgentEvent]) error
 	// ReceiveTimeout is the timeout passed to Source.Receive on each iteration.
 	// Zero means no timeout. Optional.
@@ -121,11 +123,27 @@ func NewTurnLoop[T any](config TurnLoopConfig[T]) (*TurnLoop[T], error) {
 		return nil, fmt.Errorf("TurnLoopConfig.GetAgent is required")
 	}
 
+	onAgentEvents := config.OnAgentEvents
+	if onAgentEvents == nil {
+		onAgentEvents = func(_ context.Context, _ T, iter *AsyncIterator[*AgentEvent]) error {
+			for {
+				event, ok := iter.Next()
+				if !ok {
+					break
+				}
+				if event.Err != nil {
+					return event.Err
+				}
+			}
+			return nil
+		}
+	}
+
 	return &TurnLoop[T]{
 		source:         config.Source,
 		genInput:       config.GenInput,
 		getAgent:       config.GetAgent,
-		onAgentEvents:  config.OnAgentEvents,
+		onAgentEvents:  onAgentEvents,
 		receiveTimeout: config.ReceiveTimeout,
 	}, nil
 }

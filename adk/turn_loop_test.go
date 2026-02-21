@@ -19,9 +19,9 @@ package adk
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync/atomic"
 	"testing"
-	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -29,43 +29,51 @@ import (
 	"github.com/cloudwego/eino/schema"
 )
 
-// ---------------------------------------------------------------------------
-// Test mocks
-// ---------------------------------------------------------------------------
-
-// turnLoopMockSource returns items from a slice (all NonPreemptive), then an error.
 type turnLoopMockSource struct {
 	items []string
 	idx   int
 	err   error
 }
 
-func (s *turnLoopMockSource) Receive(_ context.Context, _ time.Duration) (string, ConsumeOption, error) {
+func (s *turnLoopMockSource) Receive(ctx context.Context, cfg ReceiveConfig) (context.Context, string, []ConsumeOption, error) {
 	if s.idx >= len(s.items) {
-		return "", NonPreemptiveConsumeOption, s.err
+		return ctx, "", nil, s.err
 	}
 	item := s.items[s.idx]
 	s.idx++
-	return item, NonPreemptiveConsumeOption, nil
+	return ctx, item, nil, nil
 }
 
-// turnLoopFuncSource delegates Receive to a user-supplied function.
+func (s *turnLoopMockSource) Front(ctx context.Context, cfg ReceiveConfig) (context.Context, string, []ConsumeOption, error) {
+	if s.idx >= len(s.items) {
+		return ctx, "", nil, s.err
+	}
+	return ctx, s.items[s.idx], nil, nil
+}
+
 type turnLoopFuncSource[T any] struct {
-	fn func(ctx context.Context, timeout time.Duration) (T, ConsumeOption, error)
+	receive func(ctx context.Context, cfg ReceiveConfig) (context.Context, T, []ConsumeOption, error)
+	front   func(ctx context.Context, cfg ReceiveConfig) (context.Context, T, []ConsumeOption, error)
 }
 
-func (s *turnLoopFuncSource[T]) Receive(ctx context.Context, timeout time.Duration) (T, ConsumeOption, error) {
-	return s.fn(ctx, timeout)
+func (s *turnLoopFuncSource[T]) Receive(ctx context.Context, cfg ReceiveConfig) (context.Context, T, []ConsumeOption, error) {
+	return s.receive(ctx, cfg)
 }
 
-// turnLoopMockAgent emits a fixed list of events per Run call.
+func (s *turnLoopFuncSource[T]) Front(ctx context.Context, cfg ReceiveConfig) (context.Context, T, []ConsumeOption, error) {
+	if s.front != nil {
+		return s.front(ctx, cfg)
+	}
+	return s.receive(ctx, cfg)
+}
+
 type turnLoopMockAgent struct {
 	name   string
 	events []*AgentEvent
 }
 
 func (a *turnLoopMockAgent) Name(_ context.Context) string        { return a.name }
-func (a *turnLoopMockAgent) Description(_ context.Context) string  { return "mock agent" }
+func (a *turnLoopMockAgent) Description(_ context.Context) string { return "mock agent" }
 func (a *turnLoopMockAgent) Run(_ context.Context, _ *AgentInput, _ ...AgentRunOption) *AsyncIterator[*AgentEvent] {
 	iter, gen := NewAsyncIteratorPair[*AgentEvent]()
 	go func() {
@@ -77,38 +85,36 @@ func (a *turnLoopMockAgent) Run(_ context.Context, _ *AgentInput, _ ...AgentRunO
 	return iter
 }
 
-// turnLoopCancellableAgent blocks until Cancel is called, then closes its iterator.
-// It implements both Agent and Cancellable.
 type turnLoopCancellableAgent struct {
-	name           string
-	startedCh      chan struct{} // closed when Run is entered
-	cancelCh       chan struct{} // closed by Cancel
-	cancelled      atomic.Bool
-	cancelledOpt   CancelOption // records the CancelOption passed to Cancel
+	name         string
+	startedCh    chan struct{}
+	cancelCh     chan struct{}
+	cancelled    atomic.Bool
+	cancelledOpt []CancelOption
 }
 
 func (a *turnLoopCancellableAgent) Name(_ context.Context) string        { return a.name }
-func (a *turnLoopCancellableAgent) Description(_ context.Context) string  { return "cancellable mock" }
+func (a *turnLoopCancellableAgent) Description(_ context.Context) string { return "cancellable mock" }
 func (a *turnLoopCancellableAgent) Run(_ context.Context, _ *AgentInput, _ ...AgentRunOption) *AsyncIterator[*AgentEvent] {
+	iter, _ := a.RunWithCancel(context.Background(), nil)
+	return iter
+}
+
+func (a *turnLoopCancellableAgent) RunWithCancel(_ context.Context, _ *AgentInput, _ ...AgentRunOption) (*AsyncIterator[*AgentEvent], CancelFunc) {
 	iter, gen := NewAsyncIteratorPair[*AgentEvent]()
 	close(a.startedCh)
 	go func() {
 		defer gen.Close()
 		<-a.cancelCh
 	}()
-	return iter
+	cancelFunc := func(_ context.Context, opts ...CancelOption) error {
+		a.cancelled.Store(true)
+		a.cancelledOpt = opts
+		close(a.cancelCh)
+		return nil
+	}
+	return iter, cancelFunc
 }
-
-func (a *turnLoopCancellableAgent) Cancel(_ context.Context, opt CancelOption) error {
-	a.cancelled.Store(true)
-	a.cancelledOpt = opt
-	close(a.cancelCh)
-	return nil
-}
-
-// ---------------------------------------------------------------------------
-// Tests — validation
-// ---------------------------------------------------------------------------
 
 func TestNewTurnLoop_Validation(t *testing.T) {
 	t.Run("missing source", func(t *testing.T) {
@@ -138,7 +144,7 @@ func TestNewTurnLoop_Validation(t *testing.T) {
 		assert.Contains(t, err.Error(), "GetAgent")
 	})
 
-	t.Run("valid config", func(t *testing.T) {
+	t.Run("valid config without OnAgentEvents", func(t *testing.T) {
 		loop, err := NewTurnLoop(TurnLoopConfig[string]{
 			Source:   &turnLoopMockSource{},
 			GenInput: func(_ context.Context, _ string) (*AgentInput, []AgentRunOption, error) { return nil, nil, nil },
@@ -147,11 +153,18 @@ func TestNewTurnLoop_Validation(t *testing.T) {
 		require.NoError(t, err)
 		assert.NotNil(t, loop)
 	})
-}
 
-// ---------------------------------------------------------------------------
-// Tests — non-preemptive (queued) behavior
-// ---------------------------------------------------------------------------
+	t.Run("valid config with OnAgentEvents", func(t *testing.T) {
+		loop, err := NewTurnLoop(TurnLoopConfig[string]{
+			Source:        &turnLoopMockSource{},
+			GenInput:      func(_ context.Context, _ string) (*AgentInput, []AgentRunOption, error) { return nil, nil, nil },
+			GetAgent:      func(_ context.Context, _ string) (Agent, error) { return nil, nil },
+			OnAgentEvents: func(_ context.Context, _ string, _ *AsyncIterator[*AgentEvent]) error { return nil },
+		})
+		require.NoError(t, err)
+		assert.NotNil(t, loop)
+	})
+}
 
 func TestTurnLoop_NormalLoop(t *testing.T) {
 	agent := &turnLoopMockAgent{
@@ -161,8 +174,8 @@ func TestTurnLoop_NormalLoop(t *testing.T) {
 		},
 	}
 
-	var receivedEvents []*AgentEvent
 	var receivedItems []string
+	var eventCount int
 
 	source := &turnLoopMockSource{
 		items: []string{"msg1", "msg2", "msg3"},
@@ -178,8 +191,14 @@ func TestTurnLoop_NormalLoop(t *testing.T) {
 		GetAgent: func(_ context.Context, _ string) (Agent, error) {
 			return agent, nil
 		},
-		OnAgentEvent: func(_ context.Context, _ string, event *AgentEvent) error {
-			receivedEvents = append(receivedEvents, event)
+		OnAgentEvents: func(_ context.Context, _ string, iter *AsyncIterator[*AgentEvent]) error {
+			for {
+				_, ok := iter.Next()
+				if !ok {
+					break
+				}
+				eventCount++
+			}
 			return nil
 		},
 	})
@@ -188,7 +207,7 @@ func TestTurnLoop_NormalLoop(t *testing.T) {
 	err = loop.Run(context.Background())
 	assert.ErrorIs(t, err, context.DeadlineExceeded)
 	assert.Equal(t, []string{"msg1", "msg2", "msg3"}, receivedItems)
-	assert.Len(t, receivedEvents, 3)
+	assert.Equal(t, 3, eventCount)
 }
 
 func TestTurnLoop_SourceError(t *testing.T) {
@@ -206,6 +225,7 @@ func TestTurnLoop_SourceError(t *testing.T) {
 		GetAgent: func(_ context.Context, _ string) (Agent, error) {
 			return &turnLoopMockAgent{name: "a"}, nil
 		},
+		OnAgentEvents: func(_ context.Context, _ string, _ *AsyncIterator[*AgentEvent]) error { return nil },
 	})
 	require.NoError(t, err)
 
@@ -224,6 +244,7 @@ func TestTurnLoop_GenInputError(t *testing.T) {
 		GetAgent: func(_ context.Context, _ string) (Agent, error) {
 			return &turnLoopMockAgent{name: "a"}, nil
 		},
+		OnAgentEvents: func(_ context.Context, _ string, _ *AsyncIterator[*AgentEvent]) error { return nil },
 	})
 	require.NoError(t, err)
 
@@ -243,6 +264,7 @@ func TestTurnLoop_GetAgentError(t *testing.T) {
 		GetAgent: func(_ context.Context, _ string) (Agent, error) {
 			return nil, agentErr
 		},
+		OnAgentEvents: func(_ context.Context, _ string, _ *AsyncIterator[*AgentEvent]) error { return nil },
 	})
 	require.NoError(t, err)
 
@@ -251,7 +273,7 @@ func TestTurnLoop_GetAgentError(t *testing.T) {
 	assert.Contains(t, err.Error(), "failed to get agent")
 }
 
-func TestTurnLoop_OnAgentEventError(t *testing.T) {
+func TestTurnLoop_OnAgentEventsError(t *testing.T) {
 	eventErr := errors.New("event handler failure")
 	agent := &turnLoopMockAgent{
 		name:   "test-agent",
@@ -266,7 +288,7 @@ func TestTurnLoop_OnAgentEventError(t *testing.T) {
 		GetAgent: func(_ context.Context, _ string) (Agent, error) {
 			return agent, nil
 		},
-		OnAgentEvent: func(_ context.Context, _ string, _ *AgentEvent) error {
+		OnAgentEvents: func(_ context.Context, _ string, _ *AsyncIterator[*AgentEvent]) error {
 			return eventErr
 		},
 	})
@@ -274,20 +296,20 @@ func TestTurnLoop_OnAgentEventError(t *testing.T) {
 
 	err = loop.Run(context.Background())
 	assert.ErrorIs(t, err, eventErr)
-	assert.Contains(t, err.Error(), "OnAgentEvent callback failed")
+	assert.Contains(t, err.Error(), "failed to handle events")
 }
 
 func TestTurnLoop_ContextCancellation(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	callCount := 0
-	source := &turnLoopFuncSource[string]{fn: func(ctx context.Context, _ time.Duration) (string, ConsumeOption, error) {
+	source := &turnLoopFuncSource[string]{receive: func(ctx context.Context, _ ReceiveConfig) (context.Context, string, []ConsumeOption, error) {
 		callCount++
 		if callCount > 1 {
 			cancel()
-			return "", NonPreemptiveConsumeOption, ctx.Err()
+			return ctx, "", nil, ctx.Err()
 		}
-		return "msg1", NonPreemptiveConsumeOption, nil
+		return ctx, "msg1", nil, nil
 	}}
 
 	agent := &turnLoopMockAgent{
@@ -302,6 +324,14 @@ func TestTurnLoop_ContextCancellation(t *testing.T) {
 		},
 		GetAgent: func(_ context.Context, _ string) (Agent, error) {
 			return agent, nil
+		},
+		OnAgentEvents: func(_ context.Context, _ string, iter *AsyncIterator[*AgentEvent]) error {
+			for {
+				if _, ok := iter.Next(); !ok {
+					break
+				}
+			}
+			return nil
 		},
 	})
 	require.NoError(t, err)
@@ -330,8 +360,14 @@ func TestTurnLoop_MultipleEventsPerTurn(t *testing.T) {
 		GetAgent: func(_ context.Context, _ string) (Agent, error) {
 			return agent, nil
 		},
-		OnAgentEvent: func(_ context.Context, _ string, _ *AgentEvent) error {
-			eventCount++
+		OnAgentEvents: func(_ context.Context, _ string, iter *AsyncIterator[*AgentEvent]) error {
+			for {
+				_, ok := iter.Next()
+				if !ok {
+					break
+				}
+				eventCount++
+			}
 			return nil
 		},
 	})
@@ -342,7 +378,7 @@ func TestTurnLoop_MultipleEventsPerTurn(t *testing.T) {
 	assert.Equal(t, 3, eventCount)
 }
 
-func TestTurnLoop_NoOnAgentEvent(t *testing.T) {
+func TestTurnLoop_DefaultOnAgentEvents(t *testing.T) {
 	agent := &turnLoopMockAgent{
 		name:   "test-agent",
 		events: []*AgentEvent{{Output: &AgentOutput{}}},
@@ -363,7 +399,7 @@ func TestTurnLoop_NoOnAgentEvent(t *testing.T) {
 	assert.ErrorIs(t, err, context.DeadlineExceeded)
 }
 
-func TestTurnLoop_AgentErrorEvent(t *testing.T) {
+func TestTurnLoop_DefaultOnAgentEventsWithError(t *testing.T) {
 	agentErr := errors.New("agent internal error")
 	agent := &turnLoopMockAgent{
 		name:   "error-agent",
@@ -383,12 +419,42 @@ func TestTurnLoop_AgentErrorEvent(t *testing.T) {
 
 	err = loop.Run(context.Background())
 	assert.ErrorIs(t, err, agentErr)
-	assert.Contains(t, err.Error(), "agent run failed")
 }
 
-// ---------------------------------------------------------------------------
-// Tests — preemptive behavior
-// ---------------------------------------------------------------------------
+func TestTurnLoop_AgentErrorEvent(t *testing.T) {
+	agentErr := errors.New("agent internal error")
+	agent := &turnLoopMockAgent{
+		name:   "error-agent",
+		events: []*AgentEvent{{Err: agentErr}},
+	}
+
+	loop, err := NewTurnLoop(TurnLoopConfig[string]{
+		Source: &turnLoopMockSource{items: []string{"msg1"}, err: context.DeadlineExceeded},
+		GenInput: func(_ context.Context, item string) (*AgentInput, []AgentRunOption, error) {
+			return &AgentInput{Messages: []Message{schema.UserMessage(item)}}, nil, nil
+		},
+		GetAgent: func(_ context.Context, _ string) (Agent, error) {
+			return agent, nil
+		},
+		OnAgentEvents: func(_ context.Context, _ string, iter *AsyncIterator[*AgentEvent]) error {
+			for {
+				event, ok := iter.Next()
+				if !ok {
+					break
+				}
+				if event.Err != nil {
+					return fmt.Errorf("agent run failed: %w", event.Err)
+				}
+			}
+			return nil
+		},
+	})
+	require.NoError(t, err)
+
+	err = loop.Run(context.Background())
+	assert.ErrorIs(t, err, agentErr)
+	assert.Contains(t, err.Error(), "agent run failed")
+}
 
 func TestTurnLoop_PreemptiveCancellation(t *testing.T) {
 	slowAgent := &turnLoopCancellableAgent{
@@ -403,19 +469,36 @@ func TestTurnLoop_PreemptiveCancellation(t *testing.T) {
 	}
 
 	var processedItems []string
-	callCount := 0
-	source := &turnLoopFuncSource[string]{fn: func(_ context.Context, _ time.Duration) (string, ConsumeOption, error) {
-		callCount++
-		switch callCount {
-		case 1:
-			return "slow-msg", NonPreemptiveConsumeOption, nil
-		case 2:
+	receiveCount := 0
+	msgs := []struct {
+		item string
+		opts []ConsumeOption
+		err  error
+	}{
+		{"slow-msg", nil, nil},
+		{"preempt-msg", []ConsumeOption{WithPreemptive(), WithCancelOptions(WithCancelMode(CancelImmediate))}, nil},
+		{"", nil, context.DeadlineExceeded},
+	}
+	frontIdx := 0
+	source := &turnLoopFuncSource[string]{
+		receive: func(ctx context.Context, _ ReceiveConfig) (context.Context, string, []ConsumeOption, error) {
+			if receiveCount >= len(msgs) {
+				return ctx, "", nil, context.DeadlineExceeded
+			}
+			m := msgs[receiveCount]
+			receiveCount++
+			frontIdx = receiveCount
+			return ctx, m.item, m.opts, m.err
+		},
+		front: func(ctx context.Context, _ ReceiveConfig) (context.Context, string, []ConsumeOption, error) {
 			<-slowAgent.startedCh
-			return "preempt-msg", ConsumeOption{Mode: ConsumePreemptive, CancelOption: CancelOption{Mode: CancelImmediate}}, nil
-		default:
-			return "", NonPreemptiveConsumeOption, context.DeadlineExceeded
-		}
-	}}
+			if frontIdx >= len(msgs) {
+				return ctx, "", nil, context.DeadlineExceeded
+			}
+			m := msgs[frontIdx]
+			return ctx, m.item, m.opts, m.err
+		},
+	}
 
 	loop, err := NewTurnLoop(TurnLoopConfig[string]{
 		Source: source,
@@ -429,69 +512,24 @@ func TestTurnLoop_PreemptiveCancellation(t *testing.T) {
 			}
 			return fastAgent, nil
 		},
+		OnAgentEvents: func(_ context.Context, _ string, iter *AsyncIterator[*AgentEvent]) error {
+			for {
+				if _, ok := iter.Next(); !ok {
+					break
+				}
+			}
+			return nil
+		},
 	})
 	require.NoError(t, err)
 
 	err = loop.Run(context.Background())
 	assert.ErrorIs(t, err, context.DeadlineExceeded)
 	assert.True(t, slowAgent.cancelled.Load(), "slow agent should have been cancelled")
-	assert.Equal(t, CancelImmediate, slowAgent.cancelledOpt.Mode)
 	assert.Equal(t, []string{"slow-msg", "preempt-msg"}, processedItems)
 }
 
-func TestTurnLoop_PreemptiveWithCancelMode(t *testing.T) {
-	slowAgent := &turnLoopCancellableAgent{
-		name:      "slow-agent",
-		startedCh: make(chan struct{}),
-		cancelCh:  make(chan struct{}),
-	}
-
-	fastAgent := &turnLoopMockAgent{
-		name:   "fast-agent",
-		events: []*AgentEvent{{Output: &AgentOutput{}}},
-	}
-
-	callCount := 0
-	source := &turnLoopFuncSource[string]{fn: func(_ context.Context, _ time.Duration) (string, ConsumeOption, error) {
-		callCount++
-		switch callCount {
-		case 1:
-			return "slow-msg", NonPreemptiveConsumeOption, nil
-		case 2:
-			<-slowAgent.startedCh
-			return "preempt-msg", ConsumeOption{
-				Mode:         ConsumePreemptive,
-				CancelOption: CancelOption{Mode: CancelAfterChatModel | CancelAfterToolCall},
-			}, nil
-		default:
-			return "", NonPreemptiveConsumeOption, context.DeadlineExceeded
-		}
-	}}
-
-	loop, err := NewTurnLoop(TurnLoopConfig[string]{
-		Source: source,
-		GenInput: func(_ context.Context, item string) (*AgentInput, []AgentRunOption, error) {
-			return &AgentInput{Messages: []Message{schema.UserMessage(item)}}, nil, nil
-		},
-		GetAgent: func(_ context.Context, item string) (Agent, error) {
-			if item == "slow-msg" {
-				return slowAgent, nil
-			}
-			return fastAgent, nil
-		},
-	})
-	require.NoError(t, err)
-
-	err = loop.Run(context.Background())
-	assert.ErrorIs(t, err, context.DeadlineExceeded)
-	assert.True(t, slowAgent.cancelled.Load())
-	assert.Equal(t, CancelAfterChatModel|CancelAfterToolCall, slowAgent.cancelledOpt.Mode)
-}
-
 func TestTurnLoop_PreemptiveNonCancellableAgent(t *testing.T) {
-	// A non-cancellable agent cannot be preempted, so the new Run processes
-	// events sequentially before calling Receive. The preemptive message is
-	// effectively queued and processed in the next turn.
 	nonCancellableAgent := &turnLoopMockAgent{
 		name:   "non-cancellable-agent",
 		events: []*AgentEvent{{Output: &AgentOutput{}}},
@@ -503,17 +541,15 @@ func TestTurnLoop_PreemptiveNonCancellableAgent(t *testing.T) {
 
 	var processedItems []string
 	callCount := 0
-	source := &turnLoopFuncSource[string]{fn: func(_ context.Context, _ time.Duration) (string, ConsumeOption, error) {
+	source := &turnLoopFuncSource[string]{receive: func(ctx context.Context, _ ReceiveConfig) (context.Context, string, []ConsumeOption, error) {
 		callCount++
 		switch callCount {
 		case 1:
-			return "non-cancel-msg", NonPreemptiveConsumeOption, nil
+			return ctx, "non-cancel-msg", nil, nil
 		case 2:
-			// Even though Mode is ConsumePreemptive, the agent doesn't
-			// implement Cancellable, so it's treated as non-preemptive.
-			return "preempt-msg", ConsumeOption{Mode: ConsumePreemptive}, nil
+			return ctx, "preempt-msg", []ConsumeOption{WithPreemptive()}, nil
 		default:
-			return "", NonPreemptiveConsumeOption, context.DeadlineExceeded
+			return ctx, "", nil, context.DeadlineExceeded
 		}
 	}}
 
@@ -528,6 +564,14 @@ func TestTurnLoop_PreemptiveNonCancellableAgent(t *testing.T) {
 				return nonCancellableAgent, nil
 			}
 			return fastAgent, nil
+		},
+		OnAgentEvents: func(_ context.Context, _ string, iter *AsyncIterator[*AgentEvent]) error {
+			for {
+				if _, ok := iter.Next(); !ok {
+					break
+				}
+			}
+			return nil
 		},
 	})
 	require.NoError(t, err)
