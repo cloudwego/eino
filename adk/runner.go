@@ -74,28 +74,8 @@ func NewRunner(_ context.Context, conf RunnerConfig) *Runner {
 // upon interruption.
 func (r *Runner) Run(ctx context.Context, messages []Message,
 	opts ...AgentRunOption) *AsyncIterator[*AgentEvent] {
-	o := getCommonOptions(nil, opts...)
-
-	fa := toFlowAgent(ctx, r.a)
-
-	input := &AgentInput{
-		Messages:        messages,
-		EnableStreaming: r.enableStreaming,
-	}
-
-	ctx = ctxWithNewRunCtx(ctx, input, o.sharedParentSession)
-
-	AddSessionValues(ctx, o.sessionValues)
-
-	iter := fa.Run(ctx, input, opts...)
-	if r.store == nil {
-		return iter
-	}
-
-	niter, gen := NewAsyncIteratorPair[*AgentEvent]()
-
-	go r.handleIter(ctx, iter, gen, o.checkPointID)
-	return niter
+	iter, _, _ := r.runWithCancel(ctx, messages, false, opts...)
+	return iter
 }
 
 // Query is a convenience method that starts a new execution with a single user query string.
@@ -114,8 +94,15 @@ func (r *Runner) Query(ctx context.Context,
 // implement CancellableRun, ErrAgentNotCancellable is returned.
 func (r *Runner) RunWithCancel(ctx context.Context, messages []Message,
 	opts ...AgentRunOption) (*AsyncIterator[*AgentEvent], CancelFunc, error) {
-	if _, ok := r.a.(CancellableRun); !ok {
-		return nil, nil, ErrAgentNotCancellable
+	return r.runWithCancel(ctx, messages, true, opts...)
+}
+
+func (r *Runner) runWithCancel(ctx context.Context, messages []Message, withCancel bool,
+	opts ...AgentRunOption) (*AsyncIterator[*AgentEvent], CancelFunc, error) {
+	if withCancel {
+		if _, ok := r.a.(CancellableRun); !ok {
+			return nil, nil, ErrAgentNotCancellable
+		}
 	}
 
 	o := getCommonOptions(nil, opts...)
@@ -131,7 +118,13 @@ func (r *Runner) RunWithCancel(ctx context.Context, messages []Message,
 
 	AddSessionValues(ctx, o.sessionValues)
 
-	iter, cancelFn := fa.RunWithCancel(ctx, input, opts...)
+	var iter *AsyncIterator[*AgentEvent]
+	var cancelFn CancelFunc
+	if withCancel {
+		iter, cancelFn = fa.RunWithCancel(ctx, input, opts...)
+	} else {
+		iter = fa.Run(ctx, input, opts...)
+	}
 
 	if r.store == nil {
 		return iter, cancelFn, nil
@@ -148,7 +141,7 @@ func (r *Runner) RunWithCancel(ctx context.Context, messages []Message,
 // The cancel function can be used to interrupt the running agent again at specific points based on the CancelMode.
 func (r *Runner) ResumeWithCancel(ctx context.Context, checkPointID string, opts ...AgentRunOption) (
 	*AsyncIterator[*AgentEvent], CancelFunc, error) {
-	return r.resumeWithCancel(ctx, checkPointID, nil, opts...)
+	return r.resumeWithCancel(ctx, checkPointID, nil, true, opts...)
 }
 
 // ResumeWithParamsAndCancel continues an interrupted execution from a checkpoint with specific parameters
@@ -156,13 +149,51 @@ func (r *Runner) ResumeWithCancel(ctx context.Context, checkPointID string, opts
 // The params.Targets map should contain the addresses of the components to be resumed as keys.
 func (r *Runner) ResumeWithParamsAndCancel(ctx context.Context, checkPointID string, params *ResumeParams,
 	opts ...AgentRunOption) (*AsyncIterator[*AgentEvent], CancelFunc, error) {
-	return r.resumeWithCancel(ctx, checkPointID, params.Targets, opts...)
+	return r.resumeWithCancel(ctx, checkPointID, params.Targets, true, opts...)
+}
+
+// Resume continues an interrupted execution from a checkpoint, using an "Implicit Resume All" strategy.
+// This method is best for simpler use cases where the act of resuming implies that all previously
+// interrupted points should proceed without specific data.
+//
+// When using this method, all interrupted agents will receive `isResumeFlow = false` when they
+// call `GetResumeContext`, as no specific agent was targeted. This is suitable for the "Simple Confirmation"
+// pattern where an agent only needs to know `wasInterrupted` is true to continue.
+func (r *Runner) Resume(ctx context.Context, checkPointID string, opts ...AgentRunOption) (
+	*AsyncIterator[*AgentEvent], error) {
+	iter, _, err := r.resumeWithCancel(ctx, checkPointID, nil, false, opts...)
+	return iter, err
+}
+
+// ResumeWithParams continues an interrupted execution from a checkpoint with specific parameters.
+// This is the most common and powerful way to resume, allowing you to target specific interrupt points
+// (identified by their address/ID) and provide them with data.
+//
+// The params.Targets map should contain the addresses of the components to be resumed as keys. These addresses
+// can point to any interruptible component in the entire execution graph, including ADK agents, compose
+// graph nodes, or tools. The value can be the resume data for that component, or `nil` if no data is needed.
+//
+// When using this method:
+//   - Components whose addresses are in the params.Targets map will receive `isResumeFlow = true` when they
+//     call `GetResumeContext`.
+//   - Interrupted components whose addresses are NOT in the params.Targets map must decide how to proceed:
+//     -- "Leaf" components (the actual root causes of the original interrupt) MUST re-interrupt themselves
+//     to preserve their state.
+//     -- "Composite" agents (like SequentialAgent or ChatModelAgent) should generally proceed with their
+//     execution. They act as conduits, allowing the resume signal to flow to their children. They will
+//     naturally re-interrupt if one of their interrupted children re-interrupts, as they receive the
+//     new `CompositeInterrupt` signal from them.
+func (r *Runner) ResumeWithParams(ctx context.Context, checkPointID string, params *ResumeParams, opts ...AgentRunOption) (*AsyncIterator[*AgentEvent], error) {
+	iter, _, err := r.resumeWithCancel(ctx, checkPointID, params.Targets, false, opts...)
+	return iter, err
 }
 
 func (r *Runner) resumeWithCancel(ctx context.Context, checkPointID string, resumeData map[string]any,
-	opts ...AgentRunOption) (*AsyncIterator[*AgentEvent], CancelFunc, error) {
-	if _, ok := r.a.(CancellableResume); !ok {
-		return nil, nil, ErrAgentNotCancellable
+	withCancel bool, opts ...AgentRunOption) (*AsyncIterator[*AgentEvent], CancelFunc, error) {
+	if withCancel {
+		if _, ok := r.a.(CancellableResume); !ok {
+			return nil, nil, ErrAgentNotCancellable
+		}
 	}
 
 	if r.store == nil {
@@ -199,7 +230,13 @@ func (r *Runner) resumeWithCancel(ctx context.Context, checkPointID string, resu
 
 	fa := toFlowAgent(ctx, r.a)
 
-	aIter, cancelFn := fa.ResumeWithCancel(ctx, resumeInfo, opts...)
+	var aIter *AsyncIterator[*AgentEvent]
+	var cancelFn CancelFunc
+	if withCancel {
+		aIter, cancelFn = fa.ResumeWithCancel(ctx, resumeInfo, opts...)
+	} else {
+		aIter = fa.Resume(ctx, resumeInfo, opts...)
+	}
 
 	if r.store == nil {
 		return aIter, cancelFn, nil
@@ -209,87 +246,6 @@ func (r *Runner) resumeWithCancel(ctx context.Context, checkPointID string, resu
 
 	go r.handleIter(ctx, aIter, gen, &checkPointID)
 	return niter, cancelFn, nil
-}
-
-// Resume continues an interrupted execution from a checkpoint, using an "Implicit Resume All" strategy.
-// This method is best for simpler use cases where the act of resuming implies that all previously
-// interrupted points should proceed without specific data.
-//
-// When using this method, all interrupted agents will receive `isResumeFlow = false` when they
-// call `GetResumeContext`, as no specific agent was targeted. This is suitable for the "Simple Confirmation"
-// pattern where an agent only needs to know `wasInterrupted` is true to continue.
-func (r *Runner) Resume(ctx context.Context, checkPointID string, opts ...AgentRunOption) (
-	*AsyncIterator[*AgentEvent], error) {
-	return r.resume(ctx, checkPointID, nil, opts...)
-}
-
-// ResumeWithParams continues an interrupted execution from a checkpoint with specific parameters.
-// This is the most common and powerful way to resume, allowing you to target specific interrupt points
-// (identified by their address/ID) and provide them with data.
-//
-// The params.Targets map should contain the addresses of the components to be resumed as keys. These addresses
-// can point to any interruptible component in the entire execution graph, including ADK agents, compose
-// graph nodes, or tools. The value can be the resume data for that component, or `nil` if no data is needed.
-//
-// When using this method:
-//   - Components whose addresses are in the params.Targets map will receive `isResumeFlow = true` when they
-//     call `GetResumeContext`.
-//   - Interrupted components whose addresses are NOT in the params.Targets map must decide how to proceed:
-//     -- "Leaf" components (the actual root causes of the original interrupt) MUST re-interrupt themselves
-//     to preserve their state.
-//     -- "Composite" agents (like SequentialAgent or ChatModelAgent) should generally proceed with their
-//     execution. They act as conduits, allowing the resume signal to flow to their children. They will
-//     naturally re-interrupt if one of their interrupted children re-interrupts, as they receive the
-//     new `CompositeInterrupt` signal from them.
-func (r *Runner) ResumeWithParams(ctx context.Context, checkPointID string, params *ResumeParams, opts ...AgentRunOption) (*AsyncIterator[*AgentEvent], error) {
-	return r.resume(ctx, checkPointID, params.Targets, opts...)
-}
-
-// resume is the internal implementation for both Resume and ResumeWithParams.
-func (r *Runner) resume(ctx context.Context, checkPointID string, resumeData map[string]any,
-	opts ...AgentRunOption) (*AsyncIterator[*AgentEvent], error) {
-	if r.store == nil {
-		return nil, fmt.Errorf("failed to resume: store is nil")
-	}
-
-	ctx, runCtx, resumeInfo, err := r.loadCheckPoint(ctx, checkPointID)
-	if err != nil {
-		return nil, fmt.Errorf("failed to load from checkpoint: %w", err)
-	}
-
-	o := getCommonOptions(nil, opts...)
-	if o.sharedParentSession {
-		parentSession := getSession(ctx)
-		if parentSession != nil {
-			runCtx.Session.Values = parentSession.Values
-			runCtx.Session.valuesMtx = parentSession.valuesMtx
-		}
-	}
-	if runCtx.Session.valuesMtx == nil {
-		runCtx.Session.valuesMtx = &sync.Mutex{}
-	}
-	if runCtx.Session.Values == nil {
-		runCtx.Session.Values = make(map[string]any)
-	}
-
-	ctx = setRunCtx(ctx, runCtx)
-
-	AddSessionValues(ctx, o.sessionValues)
-
-	if len(resumeData) > 0 {
-		ctx = core.BatchResumeWithData(ctx, resumeData)
-	}
-
-	fa := toFlowAgent(ctx, r.a)
-	aIter := fa.Resume(ctx, resumeInfo, opts...)
-	if r.store == nil {
-		return aIter, nil
-	}
-
-	niter, gen := NewAsyncIteratorPair[*AgentEvent]()
-
-	go r.handleIter(ctx, aIter, gen, &checkPointID)
-	return niter, nil
 }
 
 func (r *Runner) handleIter(ctx context.Context, aIter *AsyncIterator[*AgentEvent],
