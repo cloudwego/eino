@@ -34,7 +34,7 @@ import (
 type slowChatModel struct {
 	delay       time.Duration
 	response    *schema.Message
-	callCount   atomic.Int32
+	callCount   int32
 	startedChan chan struct{}
 }
 
@@ -47,14 +47,14 @@ func newSlowChatModel(delay time.Duration, response *schema.Message) *slowChatMo
 }
 
 func (m *slowChatModel) Generate(ctx context.Context, input []*schema.Message, opts ...model.Option) (*schema.Message, error) {
-	m.callCount.Add(1)
+	atomic.AddInt32(&m.callCount, 1)
 	m.startedChan <- struct{}{}
 	time.Sleep(m.delay)
 	return m.response, nil
 }
 
 func (m *slowChatModel) Stream(ctx context.Context, input []*schema.Message, opts ...model.Option) (*schema.StreamReader[*schema.Message], error) {
-	m.callCount.Add(1)
+	atomic.AddInt32(&m.callCount, 1)
 	m.startedChan <- struct{}{}
 	time.Sleep(m.delay)
 	return schema.StreamReaderFromArray([]*schema.Message{m.response}), nil
@@ -99,7 +99,7 @@ type slowTool struct {
 	name        string
 	delay       time.Duration
 	result      string
-	callCount   atomic.Int32
+	callCount   int32
 	startedChan chan struct{}
 }
 
@@ -123,7 +123,7 @@ func (t *slowTool) Info(ctx context.Context) (*schema.ToolInfo, error) {
 }
 
 func (t *slowTool) InvokableRun(ctx context.Context, argumentsInJSON string, opts ...tool.Option) (string, error) {
-	t.callCount.Add(1)
+	atomic.AddInt32(&t.callCount, 1)
 	select {
 	case t.startedChan <- struct{}{}:
 	default:
@@ -348,7 +348,7 @@ func TestRunWithCancel_WithTools(t *testing.T) {
 		}
 
 		assert.True(t, len(events) > 0)
-		assert.True(t, slowTool.callCount.Load() >= 1, "Tool should have been called")
+		assert.True(t, atomic.LoadInt32(&slowTool.callCount) >= 1, "Tool should have been called")
 	})
 
 	t.Run("CancelAfterToolCall_CompletesToolExecution", func(t *testing.T) {
@@ -413,7 +413,7 @@ func TestRunWithCancel_WithTools(t *testing.T) {
 		}
 
 		assert.True(t, len(events) > 0)
-		assert.True(t, slowTool.callCount.Load() >= 1, "Tool should have been called")
+		assert.True(t, atomic.LoadInt32(&slowTool.callCount) >= 1, "Tool should have been called")
 	})
 }
 
@@ -421,7 +421,7 @@ type slowToolWithSignal struct {
 	name        string
 	delay       time.Duration
 	result      string
-	callCount   atomic.Int32
+	callCount   int32
 	startedChan chan struct{}
 }
 
@@ -436,7 +436,7 @@ func (t *slowToolWithSignal) Info(ctx context.Context) (*schema.ToolInfo, error)
 }
 
 func (t *slowToolWithSignal) InvokableRun(ctx context.Context, argumentsInJSON string, opts ...tool.Option) (string, error) {
-	t.callCount.Add(1)
+	atomic.AddInt32(&t.callCount, 1)
 	t.startedChan <- struct{}{}
 	time.Sleep(t.delay)
 	return t.result, nil

@@ -309,7 +309,6 @@ func WithCancelMode(mode CancelMode) CancelOption {
 }
 
 // WithCancelTimeout sets a timeout duration for CancelImmediate mode.
-// When set, the agent continues execution until the timeout elapses after cancel is triggered.
 func WithCancelTimeout(timeout time.Duration) CancelOption {
 	return func(config *cancelConfig) {
 		config.Timeout = &timeout

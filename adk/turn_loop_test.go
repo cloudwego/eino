@@ -89,7 +89,7 @@ type turnLoopCancellableAgent struct {
 	name         string
 	startedCh    chan struct{}
 	cancelCh     chan struct{}
-	cancelled    atomic.Bool
+	cancelled    int32
 	cancelledOpt []CancelOption
 }
 
@@ -108,7 +108,7 @@ func (a *turnLoopCancellableAgent) RunWithCancel(_ context.Context, _ *AgentInpu
 		<-a.cancelCh
 	}()
 	cancelFunc := func(_ context.Context, opts ...CancelOption) error {
-		a.cancelled.Store(true)
+		atomic.StoreInt32(&a.cancelled, 1)
 		a.cancelledOpt = opts
 		close(a.cancelCh)
 		return nil
@@ -525,7 +525,7 @@ func TestTurnLoop_PreemptiveCancellation(t *testing.T) {
 
 	err = loop.Run(context.Background())
 	assert.ErrorIs(t, err, context.DeadlineExceeded)
-	assert.True(t, slowAgent.cancelled.Load(), "slow agent should have been cancelled")
+	assert.True(t, atomic.LoadInt32(&slowAgent.cancelled) == 1, "slow agent should have been cancelled")
 	assert.Equal(t, []string{"slow-msg", "preempt-msg"}, processedItems)
 }
 
