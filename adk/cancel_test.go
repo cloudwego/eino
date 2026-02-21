@@ -819,13 +819,37 @@ func TestResumeWithCancel(t *testing.T) {
 		}
 		assert.True(t, hasInterrupted, "First run should have interrupted event")
 
-		slowModel.delay = 100 * time.Millisecond
-		slowModel.response = &schema.Message{
-			Role:    schema.Assistant,
-			Content: "Final response after resume",
+		newModelStarted := make(chan struct{}, 1)
+		slowModel2 := &cancelTestChatModel{
+			delay: 100 * time.Millisecond,
+			response: &schema.Message{
+				Role:    schema.Assistant,
+				Content: "Final response after resume",
+			},
+			startedChan: newModelStarted,
+			doneChan:    make(chan struct{}, 1),
 		}
 
-		resumeIter, resumeCancelFn, err := runner.ResumeWithCancel(ctx, checkpointID)
+		agent2, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+			Name:        "TestAgent",
+			Description: "Test agent with tool",
+			Instruction: "You are a test assistant",
+			Model:       slowModel2,
+			ToolsConfig: ToolsConfig{
+				ToolsNodeConfig: compose.ToolsNodeConfig{
+					Tools: []tool.BaseTool{st},
+				},
+			},
+		})
+		assert.NoError(t, err)
+
+		runner2 := NewRunner(ctx, RunnerConfig{
+			Agent:           agent2,
+			EnableStreaming: false,
+			CheckPointStore: store,
+		})
+
+		resumeIter, resumeCancelFn, err := runner2.ResumeWithCancel(ctx, checkpointID)
 		assert.NoError(t, err)
 		assert.NotNil(t, resumeIter)
 		assert.NotNil(t, resumeCancelFn)
@@ -906,10 +930,46 @@ func TestResumeWithCancel(t *testing.T) {
 			}
 		}
 
-		slowModel.delay = 2 * time.Second
-		slowModel.startedChan = resumeModelStarted
+		slowModel2 := &cancelTestChatModel{
+			delay: 2 * time.Second,
+			response: &schema.Message{
+				Role:    schema.Assistant,
+				Content: "",
+				ToolCalls: []schema.ToolCall{
+					{
+						ID:   "call_1",
+						Type: "function",
+						Function: schema.FunctionCall{
+							Name:      "slow_tool",
+							Arguments: `{"input": "test"}`,
+						},
+					},
+				},
+			},
+			startedChan: resumeModelStarted,
+			doneChan:    make(chan struct{}, 1),
+		}
 
-		resumeIter, resumeCancelFn, err := runner.ResumeWithCancel(ctx, checkpointID)
+		agent2, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+			Name:        "TestAgent",
+			Description: "Test agent with tool",
+			Instruction: "You are a test assistant",
+			Model:       slowModel2,
+			ToolsConfig: ToolsConfig{
+				ToolsNodeConfig: compose.ToolsNodeConfig{
+					Tools: []tool.BaseTool{st},
+				},
+			},
+		})
+		assert.NoError(t, err)
+
+		runner2 := NewRunner(ctx, RunnerConfig{
+			Agent:           agent2,
+			EnableStreaming: false,
+			CheckPointStore: store,
+		})
+
+		resumeIter, resumeCancelFn, err := runner2.ResumeWithCancel(ctx, checkpointID)
 		assert.NoError(t, err)
 
 		resumeEventsCh := make(chan []*AgentEvent, 1)
