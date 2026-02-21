@@ -18,6 +18,7 @@ package adk
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"runtime/debug"
 	"time"
@@ -75,6 +76,7 @@ type ReceiveConfig struct {
 
 type MessageSource[T any] interface {
 	Receive(context.Context, ReceiveConfig) (context.Context, T, []ConsumeOption, error)
+	Front(context.Context, ReceiveConfig) (context.Context, T, []ConsumeOption, error)
 }
 
 // TurnLoopConfig is the configuration for creating a TurnLoop.
@@ -128,6 +130,8 @@ func NewTurnLoop[T any](config TurnLoopConfig[T]) (*TurnLoop[T], error) {
 	}, nil
 }
 
+var ErrLoopExit = errors.New("loop exit")
+
 // Run starts the blocking loop that continuously receives messages from the
 // source, runs the agent returned by GetAgent for each message, and dispatches
 // resulting events to OnAgentEvent. It blocks until the source returns an error
@@ -138,15 +142,17 @@ func NewTurnLoop[T any](config TurnLoopConfig[T]) (*TurnLoop[T], error) {
 // immediately. If the agent does not implement Cancellable, preemptive messages
 // are queued and processed after the current agent finishes.
 func (l *TurnLoop[T]) Run(ctx context.Context) error {
-	// Initial blocking receive — no agent is running yet.
-	nCtx, item, option, err := l.source.Receive(ctx, ReceiveConfig{
-		Timeout: l.receiveTimeout,
-	})
-	if err != nil {
-		return fmt.Errorf("failed to receive message: %w", err)
-	}
-
 	for {
+		nCtx, item, option, err := l.source.Receive(ctx, ReceiveConfig{
+			Timeout: l.receiveTimeout,
+		})
+		if errors.Is(err, ErrLoopExit) {
+			return nil
+		}
+		if err != nil {
+			return fmt.Errorf("failed to receive message: %w", err)
+		}
+
 		input, runOpts, e := l.genInput(nCtx, item)
 		if e != nil {
 			return fmt.Errorf("failed to generate agent input: %w", e)
@@ -198,12 +204,15 @@ func (l *TurnLoop[T]) Run(ctx context.Context) error {
 			}()
 
 			// Block on the next message while events are being consumed above.
-			nCtx, item, option, err = l.source.Receive(nCtx, ReceiveConfig{
+			_, _, option, err = l.source.Front(nCtx, ReceiveConfig{
 				Timeout: l.receiveTimeout,
 			})
 			if err != nil {
 				<-done // wait for the event goroutine before returning
-				return fmt.Errorf("failed to receive message: %w", err)
+				if errors.Is(err, ErrLoopExit) {
+					return nil
+				}
+				return fmt.Errorf("failed to front message: %w", err)
 			}
 
 			// If the new message requests preemption, cancel the running agent.
@@ -233,20 +242,19 @@ func (l *TurnLoop[T]) Run(ctx context.Context) error {
 			// post-cancel drain) before starting the next turn.
 			<-done
 			if handleEventErr != nil {
+				if errors.Is(handleEventErr, ErrLoopExit) {
+					return nil
+				}
 				return fmt.Errorf("failed to handle events: %w", handleEventErr)
 			}
 		} else {
 			// Non-cancellable path: consume all events sequentially, then
 			// block on the next message.
 			if handleEventErr = handleEvents(); handleEventErr != nil {
+				if errors.Is(handleEventErr, ErrLoopExit) {
+					return nil
+				}
 				return fmt.Errorf("failed to handle events: %w", handleEventErr)
-			}
-
-			nCtx, item, option, err = l.source.Receive(nCtx, ReceiveConfig{
-				Timeout: l.receiveTimeout,
-			})
-			if err != nil {
-				return fmt.Errorf("failed to receive message: %w", err)
 			}
 		}
 	}
