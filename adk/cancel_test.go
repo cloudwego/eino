@@ -578,3 +578,375 @@ func (a *nonCancellableTestAgent) Run(_ context.Context, input *AgentInput, _ ..
 	gen.Close()
 	return iter
 }
+
+func TestRunWithCancel_Streaming(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("CancelImmediate_DuringModelStream", func(t *testing.T) {
+		modelStarted := make(chan struct{}, 1)
+		st := newSlowTool("slow_tool", 100*time.Millisecond, "tool result")
+
+		slowModel := &cancelTestChatModel{
+			delay: 2 * time.Second,
+			response: &schema.Message{
+				Role:    schema.Assistant,
+				Content: "",
+				ToolCalls: []schema.ToolCall{
+					{
+						ID:   "call_1",
+						Type: "function",
+						Function: schema.FunctionCall{
+							Name:      "slow_tool",
+							Arguments: `{"input": "test"}`,
+						},
+					},
+				},
+			},
+			startedChan: modelStarted,
+			doneChan:    make(chan struct{}, 1),
+		}
+
+		agent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+			Name:        "TestAgent",
+			Description: "Test agent with tool",
+			Instruction: "You are a test assistant",
+			Model:       slowModel,
+			ToolsConfig: ToolsConfig{
+				ToolsNodeConfig: compose.ToolsNodeConfig{
+					Tools: []tool.BaseTool{st},
+				},
+			},
+		})
+		assert.NoError(t, err)
+
+		runner := NewRunner(ctx, RunnerConfig{
+			Agent:           agent,
+			EnableStreaming: true,
+		})
+
+		iter, cancelFn, err := runner.RunWithCancel(ctx, []Message{schema.UserMessage("Use the tool")})
+		assert.NoError(t, err)
+		assert.NotNil(t, iter)
+		assert.NotNil(t, cancelFn)
+
+		eventsCh := make(chan []*AgentEvent, 1)
+		go func() {
+			var events []*AgentEvent
+			for {
+				event, ok := iter.Next()
+				if !ok {
+					break
+				}
+				events = append(events, event)
+			}
+			eventsCh <- events
+		}()
+
+		select {
+		case <-modelStarted:
+		case <-time.After(5 * time.Second):
+			t.Fatal("Model did not start within 5 seconds")
+		}
+
+		time.Sleep(100 * time.Millisecond)
+
+		err = cancelFn(ctx)
+		assert.NoError(t, err)
+
+		start := time.Now()
+		events := <-eventsCh
+		elapsed := time.Since(start)
+
+		assert.True(t, elapsed < 1*time.Second, "Should return quickly after cancel, elapsed: %v", elapsed)
+		assert.True(t, len(events) > 0)
+
+		hasInterrupted := false
+		for _, e := range events {
+			assert.Nil(t, e.Err, "Should not have error event after cancel")
+			if e.Action != nil && e.Action.Interrupted != nil {
+				hasInterrupted = true
+			}
+		}
+		assert.True(t, hasInterrupted, "Should have interrupted event after cancel")
+	})
+
+	t.Run("CancelAfterToolCall_Streaming", func(t *testing.T) {
+		toolStarted := make(chan struct{}, 1)
+		st := &slowToolWithSignal{
+			name:        "slow_tool",
+			delay:       500 * time.Millisecond,
+			result:      "tool result",
+			startedChan: toolStarted,
+		}
+
+		modelWithToolCall := &simpleChatModel{
+			response: &schema.Message{
+				Role:    schema.Assistant,
+				Content: "",
+				ToolCalls: []schema.ToolCall{
+					{
+						ID:   "call_1",
+						Type: "function",
+						Function: schema.FunctionCall{
+							Name:      "slow_tool",
+							Arguments: `{"input": "test"}`,
+						},
+					},
+				},
+			},
+		}
+
+		agent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+			Name:        "TestAgent",
+			Description: "Test agent with tool",
+			Instruction: "You are a test assistant",
+			Model:       modelWithToolCall,
+			ToolsConfig: ToolsConfig{
+				ToolsNodeConfig: compose.ToolsNodeConfig{
+					Tools: []tool.BaseTool{st},
+				},
+			},
+		})
+		assert.NoError(t, err)
+
+		runner := NewRunner(ctx, RunnerConfig{
+			Agent:           agent,
+			EnableStreaming: true,
+		})
+
+		iter, cancelFn, err := runner.RunWithCancel(ctx, []Message{schema.UserMessage("Use the tool")})
+		assert.NoError(t, err)
+		assert.NotNil(t, iter)
+		assert.NotNil(t, cancelFn)
+
+		<-toolStarted
+
+		time.Sleep(100 * time.Millisecond)
+
+		err = cancelFn(ctx, WithCancelMode(CancelAfterToolCall))
+		assert.NoError(t, err)
+
+		var events []*AgentEvent
+		for {
+			event, ok := iter.Next()
+			if !ok {
+				break
+			}
+			assert.Nil(t, event.Err, "Should not have error event after cancel")
+			events = append(events, event)
+		}
+
+		assert.True(t, len(events) > 0)
+		assert.True(t, atomic.LoadInt32(&st.callCount) >= 1, "Tool should have been called")
+	})
+}
+
+func TestResumeWithCancel(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("RunWithCancel_ThenResumeWithCancel", func(t *testing.T) {
+		modelStarted := make(chan struct{}, 1)
+		modelCallCount := int32(0)
+		st := newSlowTool("slow_tool", 100*time.Millisecond, "tool result")
+
+		slowModel := &cancelTestChatModel{
+			delay: 500 * time.Millisecond,
+			response: &schema.Message{
+				Role:    schema.Assistant,
+				Content: "",
+				ToolCalls: []schema.ToolCall{
+					{
+						ID:   "call_1",
+						Type: "function",
+						Function: schema.FunctionCall{
+							Name:      "slow_tool",
+							Arguments: `{"input": "test"}`,
+						},
+					},
+				},
+			},
+			startedChan: modelStarted,
+			doneChan:    make(chan struct{}, 1),
+		}
+
+		agent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+			Name:        "TestAgent",
+			Description: "Test agent with tool",
+			Instruction: "You are a test assistant",
+			Model:       slowModel,
+			ToolsConfig: ToolsConfig{
+				ToolsNodeConfig: compose.ToolsNodeConfig{
+					Tools: []tool.BaseTool{st},
+				},
+			},
+		})
+		assert.NoError(t, err)
+
+		store := newCancelTestStore()
+		checkpointID := "resume-cancel-test-1"
+		runner := NewRunner(ctx, RunnerConfig{
+			Agent:           agent,
+			EnableStreaming: false,
+			CheckPointStore: store,
+		})
+
+		iter, cancelFn, err := runner.RunWithCancel(ctx, []Message{schema.UserMessage("Use the tool")}, WithCheckPointID(checkpointID))
+		assert.NoError(t, err)
+
+		<-modelStarted
+		atomic.AddInt32(&modelCallCount, 1)
+
+		err = cancelFn(ctx)
+		assert.NoError(t, err)
+
+		var events []*AgentEvent
+		for {
+			event, ok := iter.Next()
+			if !ok {
+				break
+			}
+			assert.Nil(t, event.Err, "Should not have error event after cancel")
+			events = append(events, event)
+		}
+		assert.True(t, len(events) > 0)
+
+		hasInterrupted := false
+		for _, e := range events {
+			if e.Action != nil && e.Action.Interrupted != nil {
+				hasInterrupted = true
+				break
+			}
+		}
+		assert.True(t, hasInterrupted, "First run should have interrupted event")
+
+		slowModel.delay = 100 * time.Millisecond
+		slowModel.response = &schema.Message{
+			Role:    schema.Assistant,
+			Content: "Final response after resume",
+		}
+
+		resumeIter, resumeCancelFn, err := runner.ResumeWithCancel(ctx, checkpointID)
+		assert.NoError(t, err)
+		assert.NotNil(t, resumeIter)
+		assert.NotNil(t, resumeCancelFn)
+
+		var resumeEvents []*AgentEvent
+		for {
+			event, ok := resumeIter.Next()
+			if !ok {
+				break
+			}
+			assert.Nil(t, event.Err, "Should not have error event during resume")
+			resumeEvents = append(resumeEvents, event)
+		}
+
+		assert.True(t, len(resumeEvents) > 0, "Resume should produce events")
+	})
+
+	t.Run("ResumeWithCancel_ThenCancel", func(t *testing.T) {
+		firstModelStarted := make(chan struct{}, 1)
+		resumeModelStarted := make(chan struct{}, 1)
+		modelCallCount := int32(0)
+		st := newSlowTool("slow_tool", 100*time.Millisecond, "tool result")
+
+		slowModel := &cancelTestChatModel{
+			delay: 500 * time.Millisecond,
+			response: &schema.Message{
+				Role:    schema.Assistant,
+				Content: "",
+				ToolCalls: []schema.ToolCall{
+					{
+						ID:   "call_1",
+						Type: "function",
+						Function: schema.FunctionCall{
+							Name:      "slow_tool",
+							Arguments: `{"input": "test"}`,
+						},
+					},
+				},
+			},
+			startedChan: firstModelStarted,
+			doneChan:    make(chan struct{}, 1),
+		}
+
+		agent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+			Name:        "TestAgent",
+			Description: "Test agent with tool",
+			Instruction: "You are a test assistant",
+			Model:       slowModel,
+			ToolsConfig: ToolsConfig{
+				ToolsNodeConfig: compose.ToolsNodeConfig{
+					Tools: []tool.BaseTool{st},
+				},
+			},
+		})
+		assert.NoError(t, err)
+
+		store := newCancelTestStore()
+		checkpointID := "resume-then-cancel-test-1"
+		runner := NewRunner(ctx, RunnerConfig{
+			Agent:           agent,
+			EnableStreaming: false,
+			CheckPointStore: store,
+		})
+
+		iter, cancelFn, err := runner.RunWithCancel(ctx, []Message{schema.UserMessage("Use the tool")}, WithCheckPointID(checkpointID))
+		assert.NoError(t, err)
+
+		<-firstModelStarted
+		atomic.AddInt32(&modelCallCount, 1)
+
+		err = cancelFn(ctx)
+		assert.NoError(t, err)
+
+		for {
+			_, ok := iter.Next()
+			if !ok {
+				break
+			}
+		}
+
+		slowModel.delay = 2 * time.Second
+		slowModel.startedChan = resumeModelStarted
+
+		resumeIter, resumeCancelFn, err := runner.ResumeWithCancel(ctx, checkpointID)
+		assert.NoError(t, err)
+
+		resumeEventsCh := make(chan []*AgentEvent, 1)
+		go func() {
+			var events []*AgentEvent
+			for {
+				event, ok := resumeIter.Next()
+				if !ok {
+					break
+				}
+				events = append(events, event)
+			}
+			resumeEventsCh <- events
+		}()
+
+		<-resumeModelStarted
+		atomic.AddInt32(&modelCallCount, 1)
+
+		time.Sleep(100 * time.Millisecond)
+
+		err = resumeCancelFn(ctx)
+		assert.NoError(t, err)
+
+		start := time.Now()
+		resumeEvents := <-resumeEventsCh
+		elapsed := time.Since(start)
+
+		assert.True(t, elapsed < 1*time.Second, "Resume should return quickly after cancel, elapsed: %v", elapsed)
+		assert.True(t, len(resumeEvents) > 0)
+
+		hasInterrupted := false
+		for _, e := range resumeEvents {
+			assert.Nil(t, e.Err, "Should not have error event after resume cancel")
+			if e.Action != nil && e.Action.Interrupted != nil {
+				hasInterrupted = true
+			}
+		}
+		assert.True(t, hasInterrupted, "Resume should have interrupted event after cancel")
+	})
+}
