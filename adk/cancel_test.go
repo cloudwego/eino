@@ -741,6 +741,16 @@ func TestRunWithCancel_Streaming(t *testing.T) {
 	})
 }
 
+// TestResumeWithCancel tests the workflow of Cancel followed by Resume.
+//
+// IMPORTANT: When Cancel is triggered, the cancelableChatModel.Generate/Stream
+// method returns immediately with an Interrupt error, but the inner model's
+// Generate/Stream call continues running in a background goroutine until completion.
+// This means the original model instance's fields (e.g., delay, response) may still
+// be read by the background goroutine after Cancel returns.
+//
+// To avoid data races, we create new agent and runner instances for the Resume phase
+// instead of reusing and modifying the original model instance.
 func TestResumeWithCancel(t *testing.T) {
 	ctx := context.Background()
 
