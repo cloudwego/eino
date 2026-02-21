@@ -316,9 +316,11 @@ func WithCancelTimeout(timeout time.Duration) CancelOption {
 type CancelFunc func(context.Context, ...CancelOption) error
 
 type CancellableRun interface {
+	Agent
 	RunWithCancel(ctx context.Context, input *AgentInput, options ...AgentRunOption) (*AsyncIterator[*AgentEvent], CancelFunc)
 }
 
 type CancellableResume interface {
+	ResumableAgent
 	ResumeWithCancel(ctx context.Context, info *ResumeInfo, opts ...AgentRunOption) (*AsyncIterator[*AgentEvent], CancelFunc)
 }
