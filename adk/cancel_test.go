@@ -31,39 +31,6 @@ import (
 	"github.com/cloudwego/eino/schema"
 )
 
-type slowChatModel struct {
-	delay       time.Duration
-	response    *schema.Message
-	callCount   int32
-	startedChan chan struct{}
-}
-
-func newSlowChatModel(delay time.Duration, response *schema.Message) *slowChatModel {
-	return &slowChatModel{
-		delay:       delay,
-		response:    response,
-		startedChan: make(chan struct{}, 10),
-	}
-}
-
-func (m *slowChatModel) Generate(ctx context.Context, input []*schema.Message, opts ...model.Option) (*schema.Message, error) {
-	atomic.AddInt32(&m.callCount, 1)
-	m.startedChan <- struct{}{}
-	time.Sleep(m.delay)
-	return m.response, nil
-}
-
-func (m *slowChatModel) Stream(ctx context.Context, input []*schema.Message, opts ...model.Option) (*schema.StreamReader[*schema.Message], error) {
-	atomic.AddInt32(&m.callCount, 1)
-	m.startedChan <- struct{}{}
-	time.Sleep(m.delay)
-	return schema.StreamReaderFromArray([]*schema.Message{m.response}), nil
-}
-
-func (m *slowChatModel) BindTools(tools []*schema.ToolInfo) error {
-	return nil
-}
-
 type cancelTestChatModel struct {
 	delay       time.Duration
 	response    *schema.Message
