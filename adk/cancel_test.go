@@ -218,14 +218,14 @@ func TestRunWithCancel_WithTools(t *testing.T) {
 		assert.True(t, elapsed < 1*time.Second, "Should return quickly after cancel, elapsed: %v", elapsed)
 		assert.True(t, len(events) > 0)
 
-		hasCancelResult := false
+		hasInterrupted := false
 		for _, e := range events {
-			if e.Err != nil || (e.Action != nil && e.Action.Interrupted != nil) {
-				hasCancelResult = true
-				break
+			assert.Nil(t, e.Err, "Should not have error event after cancel")
+			if e.Action != nil && e.Action.Interrupted != nil {
+				hasInterrupted = true
 			}
 		}
-		assert.True(t, hasCancelResult, "Should have an error or interrupted event after cancel")
+		assert.True(t, hasInterrupted, "Should have interrupted event after cancel")
 	})
 
 	t.Run("CancelAfterChatModel_DuringToolCall", func(t *testing.T) {
@@ -286,6 +286,7 @@ func TestRunWithCancel_WithTools(t *testing.T) {
 			if !ok {
 				break
 			}
+			assert.Nil(t, event.Err, "Should not have error event after cancel")
 			events = append(events, event)
 		}
 
@@ -351,6 +352,7 @@ func TestRunWithCancel_WithTools(t *testing.T) {
 			if !ok {
 				break
 			}
+			assert.Nil(t, event.Err, "Should not have error event after cancel")
 			events = append(events, event)
 		}
 
@@ -461,6 +463,7 @@ func TestRunWithCancel_WithCheckpoint(t *testing.T) {
 			if !ok {
 				break
 			}
+			assert.Nil(t, event.Err, "Should not have error event after cancel")
 			events = append(events, event)
 		}
 
