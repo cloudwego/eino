@@ -536,15 +536,6 @@ func (cs *cancelSig) cancel(cfg *cancelConfig) {
 	close(cs.done)
 }
 
-func (cs *cancelSig) isCancelled() bool {
-	select {
-	case <-cs.done:
-		return true
-	default:
-		return false
-	}
-}
-
 func checkCancelSig(cs *cancelSig) *cancelConfig {
 	if cs == nil {
 		return nil

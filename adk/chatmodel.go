@@ -38,6 +38,10 @@ import (
 	"github.com/cloudwego/eino/schema"
 )
 
+var _ ResumableAgent = &ChatModelAgent{}
+var _ CancellableRun = &ChatModelAgent{}
+var _ CancellableResume = &ChatModelAgent{}
+
 type chatModelAgentExecCtx struct {
 	runtimeReturnDirectly map[string]bool
 	generator             *AsyncGenerator[*AgentEvent]

@@ -137,37 +137,12 @@ func TestCancelSig(t *testing.T) {
 	})
 }
 
-func TestChatModelAgentImplementsCancellableRun(t *testing.T) {
-	ctx := context.Background()
-
-	slowTool := newSlowTool("slow_tool", 100*time.Millisecond, "tool result")
-	slowModel := &simpleChatModel{
-		response: schema.AssistantMessage("Hello", nil),
-	}
-
-	agent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
-		Name:        "TestAgent",
-		Description: "Test agent",
-		Instruction: "You are a test assistant",
-		Model:       slowModel,
-		ToolsConfig: ToolsConfig{
-			ToolsNodeConfig: compose.ToolsNodeConfig{
-				Tools: []tool.BaseTool{slowTool},
-			},
-		},
-	})
-	assert.NoError(t, err)
-
-	_, ok := (interface{})(agent).(CancellableRun)
-	assert.True(t, ok, "ChatModelAgent should implement CancellableRun interface")
-}
-
 func TestRunWithCancel_WithTools(t *testing.T) {
 	ctx := context.Background()
 
 	t.Run("CancelImmediate_DuringModelCall", func(t *testing.T) {
 		modelStarted := make(chan struct{}, 1)
-		slowTool := newSlowTool("slow_tool", 100*time.Millisecond, "tool result")
+		st := newSlowTool("slow_tool", 100*time.Millisecond, "tool result")
 
 		slowModel := &cancelTestChatModel{
 			delay: 2 * time.Second,
@@ -196,7 +171,7 @@ func TestRunWithCancel_WithTools(t *testing.T) {
 			Model:       slowModel,
 			ToolsConfig: ToolsConfig{
 				ToolsNodeConfig: compose.ToolsNodeConfig{
-					Tools: []tool.BaseTool{slowTool},
+					Tools: []tool.BaseTool{st},
 				},
 			},
 		})
@@ -255,7 +230,7 @@ func TestRunWithCancel_WithTools(t *testing.T) {
 
 	t.Run("CancelAfterChatModel_DuringToolCall", func(t *testing.T) {
 		toolStarted := make(chan struct{}, 1)
-		slowTool := &slowToolWithSignal{
+		st := &slowToolWithSignal{
 			name:        "slow_tool",
 			delay:       2 * time.Second,
 			result:      "tool result",
@@ -286,7 +261,7 @@ func TestRunWithCancel_WithTools(t *testing.T) {
 			Model:       modelWithToolCall,
 			ToolsConfig: ToolsConfig{
 				ToolsNodeConfig: compose.ToolsNodeConfig{
-					Tools: []tool.BaseTool{slowTool},
+					Tools: []tool.BaseTool{st},
 				},
 			},
 		})
@@ -315,12 +290,12 @@ func TestRunWithCancel_WithTools(t *testing.T) {
 		}
 
 		assert.True(t, len(events) > 0)
-		assert.True(t, atomic.LoadInt32(&slowTool.callCount) >= 1, "Tool should have been called")
+		assert.True(t, atomic.LoadInt32(&st.callCount) >= 1, "Tool should have been called")
 	})
 
 	t.Run("CancelAfterToolCall_CompletesToolExecution", func(t *testing.T) {
 		toolStarted := make(chan struct{}, 1)
-		slowTool := &slowToolWithSignal{
+		st := &slowToolWithSignal{
 			name:        "slow_tool",
 			delay:       500 * time.Millisecond,
 			result:      "tool result",
@@ -351,7 +326,7 @@ func TestRunWithCancel_WithTools(t *testing.T) {
 			Model:       modelWithToolCall,
 			ToolsConfig: ToolsConfig{
 				ToolsNodeConfig: compose.ToolsNodeConfig{
-					Tools: []tool.BaseTool{slowTool},
+					Tools: []tool.BaseTool{st},
 				},
 			},
 		})
@@ -380,7 +355,7 @@ func TestRunWithCancel_WithTools(t *testing.T) {
 		}
 
 		assert.True(t, len(events) > 0)
-		assert.True(t, atomic.LoadInt32(&slowTool.callCount) >= 1, "Tool should have been called")
+		assert.True(t, atomic.LoadInt32(&st.callCount) >= 1, "Tool should have been called")
 	})
 }
 
@@ -430,7 +405,7 @@ func TestRunWithCancel_WithCheckpoint(t *testing.T) {
 
 	t.Run("CancelWithCheckpoint", func(t *testing.T) {
 		modelStarted := make(chan struct{}, 1)
-		slowTool := newSlowTool("slow_tool", 100*time.Millisecond, "tool result")
+		st := newSlowTool("slow_tool", 100*time.Millisecond, "tool result")
 
 		slowModel := &cancelTestChatModel{
 			delay: 500 * time.Millisecond,
@@ -459,7 +434,7 @@ func TestRunWithCancel_WithCheckpoint(t *testing.T) {
 			Model:       slowModel,
 			ToolsConfig: ToolsConfig{
 				ToolsNodeConfig: compose.ToolsNodeConfig{
-					Tools: []tool.BaseTool{slowTool},
+					Tools: []tool.BaseTool{st},
 				},
 			},
 		})
@@ -498,7 +473,7 @@ func TestCancelFuncMultipleCalls(t *testing.T) {
 
 	t.Run("SecondCancelReturnsErrAgentFinished", func(t *testing.T) {
 		modelStarted := make(chan struct{}, 1)
-		slowTool := newSlowTool("slow_tool", 100*time.Millisecond, "tool result")
+		st := newSlowTool("slow_tool", 100*time.Millisecond, "tool result")
 
 		slowModel := &cancelTestChatModel{
 			delay: 1 * time.Second,
@@ -527,7 +502,7 @@ func TestCancelFuncMultipleCalls(t *testing.T) {
 			Model:       slowModel,
 			ToolsConfig: ToolsConfig{
 				ToolsNodeConfig: compose.ToolsNodeConfig{
-					Tools: []tool.BaseTool{slowTool},
+					Tools: []tool.BaseTool{st},
 				},
 			},
 		})
