@@ -51,12 +51,16 @@ type consumeConfig struct {
 
 type ConsumeOption func(*consumeConfig)
 
+// WithPreemptive sets the consume mode to preemptive, which cancels the
+// currently running agent immediately.
 func WithPreemptive() ConsumeOption {
 	return func(config *consumeConfig) {
 		config.Mode = ConsumePreemptive
 	}
 }
 
+// WithPreemptiveOnTimeout sets the consume mode to preemptive with a timeout.
+// If the current agent does not complete within the timeout, it will be canceled.
 func WithPreemptiveOnTimeout(timeout time.Duration) ConsumeOption {
 	return func(config *consumeConfig) {
 		config.Mode = ConsumePreemptiveOnTimeout
@@ -64,6 +68,7 @@ func WithPreemptiveOnTimeout(timeout time.Duration) ConsumeOption {
 	}
 }
 
+// WithCancelOptions appends cancel options to be used when canceling the agent.
 func WithCancelOptions(opts ...CancelOption) ConsumeOption {
 	return func(config *consumeConfig) {
 		config.CancelOpts = append(config.CancelOpts, opts...)

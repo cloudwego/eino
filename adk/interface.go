@@ -301,12 +301,15 @@ type cancelConfig struct {
 
 type CancelOption func(*cancelConfig)
 
+// WithCancelMode sets the cancel mode for the cancel operation.
 func WithCancelMode(mode CancelMode) CancelOption {
 	return func(config *cancelConfig) {
 		config.Mode = mode
 	}
 }
 
+// WithCancelTimeout sets a timeout duration for CancelImmediate mode.
+// When set, the agent continues execution until the timeout elapses after cancel is triggered.
 func WithCancelTimeout(timeout time.Duration) CancelOption {
 	return func(config *cancelConfig) {
 		config.Timeout = &timeout

@@ -556,5 +556,3 @@ func checkCancelSig(cs *cancelSig) *cancelConfig {
 		return nil
 	}
 }
-
-
