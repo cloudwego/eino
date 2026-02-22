@@ -300,6 +300,7 @@ func (l *TurnLoop[T]) WithCancel(ctx context.Context) (context.Context, TurnLoop
 //
 //	err := turnLoop.Run(ctx, WithTurnLoopResume("session-123"))
 func (l *TurnLoop[T]) Run(ctx context.Context, opts ...TurnLoopRunOption[T]) error {
+	fmt.Println("=== Run entered ===")  // 临时加这行
 	var runCfg turnLoopRunConfig[T]
 	for _, opt := range opts {
 		opt(&runCfg)

@@ -582,20 +582,25 @@ func TestTurnLoop_PreemptiveNonCancellableAgent(t *testing.T) {
 }
 
 func TestTurnLoop_WithCancel_Basic(t *testing.T) {
-	agent := &turnLoopMockAgent{
-		name:   "test-agent",
-		events: []*AgentEvent{{Output: &AgentOutput{}}},
+	agent := &turnLoopCancellableAgent{
+		name:      "test-agent",
+		startedCh: make(chan struct{}),
+		cancelCh:  make(chan struct{}),
 	}
 
-	receiveCh := make(chan struct{})
+	receiveCount := int32(0)
+	frontBlocked := make(chan struct{})
 	source := &turnLoopFuncSource[string]{
 		receive: func(ctx context.Context, _ ReceiveConfig) (context.Context, string, []ConsumeOption, error) {
-			select {
-			case <-ctx.Done():
-				return ctx, "", nil, ctx.Err()
-			case <-receiveCh:
+			cnt := atomic.AddInt32(&receiveCount, 1)
+			if cnt == 1 {
 				return ctx, "msg1", nil, nil
 			}
+			return ctx, "", nil, context.DeadlineExceeded
+		},
+		front: func(ctx context.Context, _ ReceiveConfig) (context.Context, string, []ConsumeOption, error) {
+			<-frontBlocked
+			return ctx, "", nil, context.DeadlineExceeded
 		},
 	}
 
@@ -607,6 +612,14 @@ func TestTurnLoop_WithCancel_Basic(t *testing.T) {
 		GetAgent: func(_ context.Context, _ string) (Agent, error) {
 			return agent, nil
 		},
+		OnAgentEvents: func(_ context.Context, _ string, iter *AsyncIterator[*AgentEvent]) error {
+			for {
+				if _, ok := iter.Next(); !ok {
+					break
+				}
+			}
+			return nil
+		},
 	})
 	require.NoError(t, err)
 
@@ -616,7 +629,9 @@ func TestTurnLoop_WithCancel_Basic(t *testing.T) {
 		done <- loop.Run(ctx)
 	}()
 
-	cancel()
+	<-agent.startedCh
+	e := cancel()
+	assert.NoError(t, e)
 
 	err = <-done
 	assert.NoError(t, err)
@@ -629,21 +644,19 @@ func TestTurnLoop_WithCancel_DuringAgentRun(t *testing.T) {
 		cancelCh:  make(chan struct{}),
 	}
 
-	receiveCount := 0
+	receiveCount := int32(0)
+	frontBlocked := make(chan struct{})
 	source := &turnLoopFuncSource[string]{
 		receive: func(ctx context.Context, _ ReceiveConfig) (context.Context, string, []ConsumeOption, error) {
-			receiveCount++
-			if receiveCount == 1 {
+			cnt := atomic.AddInt32(&receiveCount, 1)
+			if cnt == 1 {
 				return ctx, "msg1", nil, nil
 			}
 			return ctx, "", nil, context.DeadlineExceeded
 		},
 		front: func(ctx context.Context, _ ReceiveConfig) (context.Context, string, []ConsumeOption, error) {
-			<-slowAgent.startedCh
-			select {
-			case <-ctx.Done():
-				return ctx, "", nil, ctx.Err()
-			}
+			<-frontBlocked
+			return ctx, "", nil, context.DeadlineExceeded
 		},
 	}
 
@@ -773,21 +786,19 @@ func TestTurnLoop_WithCancel_WithCancelOptions(t *testing.T) {
 		cancelCh:  make(chan struct{}),
 	}
 
-	receiveCount := 0
+	receiveCount := int32(0)
+	frontBlocked := make(chan struct{})
 	source := &turnLoopFuncSource[string]{
 		receive: func(ctx context.Context, _ ReceiveConfig) (context.Context, string, []ConsumeOption, error) {
-			receiveCount++
-			if receiveCount == 1 {
+			cnt := atomic.AddInt32(&receiveCount, 1)
+			if cnt == 1 {
 				return ctx, "msg1", nil, nil
 			}
 			return ctx, "", nil, context.DeadlineExceeded
 		},
 		front: func(ctx context.Context, _ ReceiveConfig) (context.Context, string, []ConsumeOption, error) {
-			<-slowAgent.startedCh
-			select {
-			case <-ctx.Done():
-				return ctx, "", nil, ctx.Err()
-			}
+			<-frontBlocked
+			return ctx, "", nil, context.DeadlineExceeded
 		},
 	}
 
@@ -821,4 +832,12 @@ func TestTurnLoop_WithCancel_WithCancelOptions(t *testing.T) {
 
 	<-done
 	assert.Len(t, slowAgent.cancelledOpt, 1)
+}
+
+func TestTurnLoop_ExternalCancel_WithCheckpoint_ThenResume(t *testing.T) {
+	t.Skip("TODO: Implement after verifying TurnLoop checkpoint mechanism")
+}
+
+func TestTurnLoop_InternalToolInterrupt_WithCheckpoint_ThenResume(t *testing.T) {
+	t.Skip("TODO: Implement after verifying TurnLoop checkpoint mechanism")
 }
