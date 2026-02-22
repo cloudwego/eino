@@ -580,3 +580,245 @@ func TestTurnLoop_PreemptiveNonCancellableAgent(t *testing.T) {
 	assert.ErrorIs(t, err, context.DeadlineExceeded)
 	assert.Equal(t, []string{"non-cancel-msg", "preempt-msg"}, processedItems)
 }
+
+func TestTurnLoop_WithCancel_Basic(t *testing.T) {
+	agent := &turnLoopMockAgent{
+		name:   "test-agent",
+		events: []*AgentEvent{{Output: &AgentOutput{}}},
+	}
+
+	receiveCh := make(chan struct{})
+	source := &turnLoopFuncSource[string]{
+		receive: func(ctx context.Context, _ ReceiveConfig) (context.Context, string, []ConsumeOption, error) {
+			select {
+			case <-ctx.Done():
+				return ctx, "", nil, ctx.Err()
+			case <-receiveCh:
+				return ctx, "msg1", nil, nil
+			}
+		},
+	}
+
+	loop, err := NewTurnLoop(TurnLoopConfig[string]{
+		Source: source,
+		GenInput: func(_ context.Context, item string) (*AgentInput, []AgentRunOption, error) {
+			return &AgentInput{Messages: []Message{schema.UserMessage(item)}}, nil, nil
+		},
+		GetAgent: func(_ context.Context, _ string) (Agent, error) {
+			return agent, nil
+		},
+	})
+	require.NoError(t, err)
+
+	ctx, cancel := loop.WithCancel(context.Background())
+	done := make(chan error)
+	go func() {
+		done <- loop.Run(ctx)
+	}()
+
+	cancel()
+
+	err = <-done
+	assert.NoError(t, err)
+}
+
+func TestTurnLoop_WithCancel_DuringAgentRun(t *testing.T) {
+	slowAgent := &turnLoopCancellableAgent{
+		name:      "slow-agent",
+		startedCh: make(chan struct{}),
+		cancelCh:  make(chan struct{}),
+	}
+
+	receiveCount := 0
+	source := &turnLoopFuncSource[string]{
+		receive: func(ctx context.Context, _ ReceiveConfig) (context.Context, string, []ConsumeOption, error) {
+			receiveCount++
+			if receiveCount == 1 {
+				return ctx, "msg1", nil, nil
+			}
+			return ctx, "", nil, context.DeadlineExceeded
+		},
+		front: func(ctx context.Context, _ ReceiveConfig) (context.Context, string, []ConsumeOption, error) {
+			<-slowAgent.startedCh
+			select {
+			case <-ctx.Done():
+				return ctx, "", nil, ctx.Err()
+			}
+		},
+	}
+
+	loop, err := NewTurnLoop(TurnLoopConfig[string]{
+		Source: source,
+		GenInput: func(_ context.Context, item string) (*AgentInput, []AgentRunOption, error) {
+			return &AgentInput{Messages: []Message{schema.UserMessage(item)}}, nil, nil
+		},
+		GetAgent: func(_ context.Context, _ string) (Agent, error) {
+			return slowAgent, nil
+		},
+		OnAgentEvents: func(_ context.Context, _ string, iter *AsyncIterator[*AgentEvent]) error {
+			for {
+				if _, ok := iter.Next(); !ok {
+					break
+				}
+			}
+			return nil
+		},
+	})
+	require.NoError(t, err)
+
+	ctx, cancel := loop.WithCancel(context.Background())
+	done := make(chan error)
+	go func() {
+		done <- loop.Run(ctx)
+	}()
+
+	<-slowAgent.startedCh
+	cancel(WithCancelMode(CancelImmediate))
+
+	err = <-done
+	assert.NoError(t, err)
+	assert.True(t, atomic.LoadInt32(&slowAgent.cancelled) == 1, "agent should have been cancelled")
+}
+
+func TestTurnLoop_WithCancel_NonCancellableAgent_ReturnsError(t *testing.T) {
+	agent := &turnLoopMockAgent{
+		name:   "non-cancellable-agent",
+		events: []*AgentEvent{{Output: &AgentOutput{}}},
+	}
+
+	source := &turnLoopFuncSource[string]{
+		receive: func(ctx context.Context, _ ReceiveConfig) (context.Context, string, []ConsumeOption, error) {
+			return ctx, "msg1", nil, nil
+		},
+	}
+
+	loop, err := NewTurnLoop(TurnLoopConfig[string]{
+		Source: source,
+		GenInput: func(_ context.Context, item string) (*AgentInput, []AgentRunOption, error) {
+			return &AgentInput{Messages: []Message{schema.UserMessage(item)}}, nil, nil
+		},
+		GetAgent: func(_ context.Context, _ string) (Agent, error) {
+			return agent, nil
+		},
+	})
+	require.NoError(t, err)
+
+	ctx, _ := loop.WithCancel(context.Background())
+	err = loop.Run(ctx)
+
+	assert.ErrorIs(t, err, ErrAgentNotCancellableInTurnLoop)
+	assert.Contains(t, err.Error(), "non-cancellable-agent")
+}
+
+func TestTurnLoop_WithCancel_MultipleCalls(t *testing.T) {
+	agent := &turnLoopMockAgent{
+		name:   "test-agent",
+		events: []*AgentEvent{{Output: &AgentOutput{}}},
+	}
+
+	loop, err := NewTurnLoop(TurnLoopConfig[string]{
+		Source: &turnLoopMockSource{items: []string{"msg1"}, err: context.DeadlineExceeded},
+		GenInput: func(_ context.Context, item string) (*AgentInput, []AgentRunOption, error) {
+			return &AgentInput{Messages: []Message{schema.UserMessage(item)}}, nil, nil
+		},
+		GetAgent: func(_ context.Context, _ string) (Agent, error) {
+			return agent, nil
+		},
+	})
+	require.NoError(t, err)
+
+	_, cancel := loop.WithCancel(context.Background())
+
+	err1 := cancel()
+	err2 := cancel()
+
+	assert.NoError(t, err1)
+	assert.ErrorIs(t, err2, ErrAgentFinished)
+}
+
+func TestTurnLoop_WithCancel_IndependentCancels(t *testing.T) {
+	loop, err := NewTurnLoop(TurnLoopConfig[string]{
+		Source: &turnLoopMockSource{items: []string{}, err: context.DeadlineExceeded},
+		GenInput: func(_ context.Context, item string) (*AgentInput, []AgentRunOption, error) {
+			return &AgentInput{Messages: []Message{schema.UserMessage(item)}}, nil, nil
+		},
+		GetAgent: func(_ context.Context, _ string) (Agent, error) {
+			return &turnLoopMockAgent{name: "a"}, nil
+		},
+	})
+	require.NoError(t, err)
+
+	ctx1, cancel1 := loop.WithCancel(context.Background())
+	ctx2, cancel2 := loop.WithCancel(context.Background())
+
+	cs1 := getTurnLoopCancelSig(ctx1)
+	cs2 := getTurnLoopCancelSig(ctx2)
+
+	assert.NotNil(t, cs1)
+	assert.NotNil(t, cs2)
+	assert.NotEqual(t, cs1, cs2)
+
+	cancel1()
+	assert.True(t, cs1.isCancelled())
+	assert.False(t, cs2.isCancelled())
+
+	cancel2()
+	assert.True(t, cs2.isCancelled())
+}
+
+func TestTurnLoop_WithCancel_WithCancelOptions(t *testing.T) {
+	slowAgent := &turnLoopCancellableAgent{
+		name:      "slow-agent",
+		startedCh: make(chan struct{}),
+		cancelCh:  make(chan struct{}),
+	}
+
+	receiveCount := 0
+	source := &turnLoopFuncSource[string]{
+		receive: func(ctx context.Context, _ ReceiveConfig) (context.Context, string, []ConsumeOption, error) {
+			receiveCount++
+			if receiveCount == 1 {
+				return ctx, "msg1", nil, nil
+			}
+			return ctx, "", nil, context.DeadlineExceeded
+		},
+		front: func(ctx context.Context, _ ReceiveConfig) (context.Context, string, []ConsumeOption, error) {
+			<-slowAgent.startedCh
+			select {
+			case <-ctx.Done():
+				return ctx, "", nil, ctx.Err()
+			}
+		},
+	}
+
+	loop, err := NewTurnLoop(TurnLoopConfig[string]{
+		Source: source,
+		GenInput: func(_ context.Context, item string) (*AgentInput, []AgentRunOption, error) {
+			return &AgentInput{Messages: []Message{schema.UserMessage(item)}}, nil, nil
+		},
+		GetAgent: func(_ context.Context, _ string) (Agent, error) {
+			return slowAgent, nil
+		},
+		OnAgentEvents: func(_ context.Context, _ string, iter *AsyncIterator[*AgentEvent]) error {
+			for {
+				if _, ok := iter.Next(); !ok {
+					break
+				}
+			}
+			return nil
+		},
+	})
+	require.NoError(t, err)
+
+	ctx, cancel := loop.WithCancel(context.Background())
+	done := make(chan error)
+	go func() {
+		done <- loop.Run(ctx)
+	}()
+
+	<-slowAgent.startedCh
+	cancel(WithCancelMode(CancelAfterToolCall))
+
+	<-done
+	assert.Len(t, slowAgent.cancelledOpt, 1)
+}

@@ -182,8 +182,7 @@ func TestRunWithCancel_WithTools(t *testing.T) {
 			EnableStreaming: false,
 		})
 
-		iter, cancelFn, err := runner.RunWithCancel(ctx, []Message{schema.UserMessage("Use the tool")})
-		assert.NoError(t, err)
+		iter, cancelFn := runner.RunWithCancel(ctx, []Message{schema.UserMessage("Use the tool")})
 		assert.NotNil(t, iter)
 		assert.NotNil(t, cancelFn)
 
@@ -449,8 +448,7 @@ func TestRunWithCancel_WithCheckpoint(t *testing.T) {
 			CheckPointStore: store,
 		})
 
-		iter, cancelFn, err := runner.RunWithCancel(ctx, []Message{schema.UserMessage("Use the tool")}, WithCheckPointID("cancel-1"))
-		assert.NoError(t, err)
+		iter, cancelFn := runner.RunWithCancel(ctx, []Message{schema.UserMessage("Use the tool")}, WithCheckPointID("cancel-1"))
 
 		<-modelStarted
 
@@ -516,16 +514,15 @@ func TestCancelFuncMultipleCalls(t *testing.T) {
 			EnableStreaming: false,
 		})
 
-		iter, cancelFn, err := runner.RunWithCancel(ctx, []Message{schema.UserMessage("Use the tool")})
-		assert.NoError(t, err)
+		iter, cancelFn := runner.RunWithCancel(ctx, []Message{schema.UserMessage("Use the tool")})
 
 		<-modelStarted
 
-		err = cancelFn(ctx)
-		assert.NoError(t, err)
+		cancelErr := cancelFn(ctx)
+		assert.NoError(t, cancelErr)
 
-		err = cancelFn(ctx)
-		assert.ErrorIs(t, err, ErrAgentFinished)
+		cancelErr = cancelFn(ctx)
+		assert.ErrorIs(t, cancelErr, ErrAgentFinished)
 
 		for {
 			_, ok := iter.Next()
@@ -548,9 +545,17 @@ func TestAgentNotCancellable(t *testing.T) {
 		EnableStreaming: false,
 	})
 
-	t.Run("RunWithCancelReturnsError", func(t *testing.T) {
-		_, _, err := runner.RunWithCancel(ctx, []Message{schema.UserMessage("Hello")})
-		assert.ErrorIs(t, err, ErrAgentNotCancellable)
+	t.Run("RunWithCancelReturnsNilCancelFunc", func(t *testing.T) {
+		iter, cancelFn := runner.RunWithCancel(ctx, []Message{schema.UserMessage("Hello")})
+		assert.NotNil(t, iter)
+		assert.Nil(t, cancelFn)
+
+		for {
+			_, ok := iter.Next()
+			if !ok {
+				break
+			}
+		}
 	})
 }
 
@@ -624,8 +629,7 @@ func TestRunWithCancel_Streaming(t *testing.T) {
 			EnableStreaming: true,
 		})
 
-		iter, cancelFn, err := runner.RunWithCancel(ctx, []Message{schema.UserMessage("Use the tool")})
-		assert.NoError(t, err)
+		iter, cancelFn := runner.RunWithCancel(ctx, []Message{schema.UserMessage("Use the tool")})
 		assert.NotNil(t, iter)
 		assert.NotNil(t, cancelFn)
 
@@ -650,8 +654,8 @@ func TestRunWithCancel_Streaming(t *testing.T) {
 
 		time.Sleep(100 * time.Millisecond)
 
-		err = cancelFn(ctx)
-		assert.NoError(t, err)
+		cancelErr := cancelFn(ctx)
+		assert.NoError(t, cancelErr)
 
 		start := time.Now()
 		events := <-eventsCh
@@ -714,8 +718,7 @@ func TestRunWithCancel_Streaming(t *testing.T) {
 			EnableStreaming: true,
 		})
 
-		iter, cancelFn, err := runner.RunWithCancel(ctx, []Message{schema.UserMessage("Use the tool")})
-		assert.NoError(t, err)
+		iter, cancelFn := runner.RunWithCancel(ctx, []Message{schema.UserMessage("Use the tool")})
 		assert.NotNil(t, iter)
 		assert.NotNil(t, cancelFn)
 
@@ -723,8 +726,8 @@ func TestRunWithCancel_Streaming(t *testing.T) {
 
 		time.Sleep(100 * time.Millisecond)
 
-		err = cancelFn(ctx, WithCancelMode(CancelAfterToolCall))
-		assert.NoError(t, err)
+		cancelErr := cancelFn(ctx, WithCancelMode(CancelAfterToolCall))
+		assert.NoError(t, cancelErr)
 
 		var events []*AgentEvent
 		for {
@@ -800,14 +803,13 @@ func TestResumeWithCancel(t *testing.T) {
 			CheckPointStore: store,
 		})
 
-		iter, cancelFn, err := runner.RunWithCancel(ctx, []Message{schema.UserMessage("Use the tool")}, WithCheckPointID(checkpointID))
-		assert.NoError(t, err)
+		iter, cancelFn := runner.RunWithCancel(ctx, []Message{schema.UserMessage("Use the tool")}, WithCheckPointID(checkpointID))
 
 		<-modelStarted
 		atomic.AddInt32(&modelCallCount, 1)
 
-		err = cancelFn(ctx)
-		assert.NoError(t, err)
+		cancelErr := cancelFn(ctx)
+		assert.NoError(t, cancelErr)
 
 		var events []*AgentEvent
 		for {
@@ -924,14 +926,13 @@ func TestResumeWithCancel(t *testing.T) {
 			CheckPointStore: store,
 		})
 
-		iter, cancelFn, err := runner.RunWithCancel(ctx, []Message{schema.UserMessage("Use the tool")}, WithCheckPointID(checkpointID))
-		assert.NoError(t, err)
+		iter, cancelFn := runner.RunWithCancel(ctx, []Message{schema.UserMessage("Use the tool")}, WithCheckPointID(checkpointID))
 
 		<-firstModelStarted
 		atomic.AddInt32(&modelCallCount, 1)
 
-		err = cancelFn(ctx)
-		assert.NoError(t, err)
+		cancelErr := cancelFn(ctx)
+		assert.NoError(t, cancelErr)
 
 		for {
 			_, ok := iter.Next()

@@ -90,21 +90,15 @@ func (r *Runner) Query(ctx context.Context,
 // If the Runner was configured with a CheckPointStore and WithCheckPointID option, it will automatically
 // save the agent's state upon cancellation for later resumption.
 //
-// The agent must implement the CancellableRun interface to support cancellation. If the agent does not
-// implement CancellableRun, ErrAgentNotCancellable is returned.
+// If the agent does not implement CancellableRun, the returned CancelFunc will be nil.
 func (r *Runner) RunWithCancel(ctx context.Context, messages []Message,
-	opts ...AgentRunOption) (*AsyncIterator[*AgentEvent], CancelFunc, error) {
-	return r.runWithCancel(ctx, messages, true, opts...)
+	opts ...AgentRunOption) (*AsyncIterator[*AgentEvent], CancelFunc) {
+	iter, cancelFn, _ := r.runWithCancel(ctx, messages, true, opts...)
+	return iter, cancelFn
 }
 
 func (r *Runner) runWithCancel(ctx context.Context, messages []Message, withCancel bool,
 	opts ...AgentRunOption) (*AsyncIterator[*AgentEvent], CancelFunc, error) {
-	if withCancel {
-		if _, ok := r.a.(CancellableRun); !ok {
-			return nil, nil, ErrAgentNotCancellable
-		}
-	}
-
 	o := getCommonOptions(nil, opts...)
 
 	fa := toFlowAgent(ctx, r.a)
@@ -121,7 +115,11 @@ func (r *Runner) runWithCancel(ctx context.Context, messages []Message, withCanc
 	var iter *AsyncIterator[*AgentEvent]
 	var cancelFn CancelFunc
 	if withCancel {
-		iter, cancelFn = fa.RunWithCancel(ctx, input, opts...)
+		if _, ok := r.a.(CancellableRun); ok {
+			iter, cancelFn = fa.RunWithCancel(ctx, input, opts...)
+		} else {
+			iter = fa.Run(ctx, input, opts...)
+		}
 	} else {
 		iter = fa.Run(ctx, input, opts...)
 	}
@@ -139,6 +137,8 @@ func (r *Runner) runWithCancel(ctx context.Context, messages []Message, withCanc
 // ResumeWithCancel continues an interrupted execution from a checkpoint and returns both an iterator and a cancel function.
 // This method uses the "Implicit Resume All" strategy where all previously interrupted points proceed without specific data.
 // The cancel function can be used to interrupt the running agent again at specific points based on the CancelMode.
+//
+// If the agent does not implement CancellableResume, the returned CancelFunc will be nil.
 func (r *Runner) ResumeWithCancel(ctx context.Context, checkPointID string, opts ...AgentRunOption) (
 	*AsyncIterator[*AgentEvent], CancelFunc, error) {
 	return r.resumeWithCancel(ctx, checkPointID, nil, true, opts...)
@@ -147,6 +147,8 @@ func (r *Runner) ResumeWithCancel(ctx context.Context, checkPointID string, opts
 // ResumeWithParamsAndCancel continues an interrupted execution from a checkpoint with specific parameters
 // and returns both an iterator and a cancel function.
 // The params.Targets map should contain the addresses of the components to be resumed as keys.
+//
+// If the agent does not implement CancellableResume, the returned CancelFunc will be nil.
 func (r *Runner) ResumeWithParamsAndCancel(ctx context.Context, checkPointID string, params *ResumeParams,
 	opts ...AgentRunOption) (*AsyncIterator[*AgentEvent], CancelFunc, error) {
 	return r.resumeWithCancel(ctx, checkPointID, params.Targets, true, opts...)
@@ -190,12 +192,6 @@ func (r *Runner) ResumeWithParams(ctx context.Context, checkPointID string, para
 
 func (r *Runner) resumeWithCancel(ctx context.Context, checkPointID string, resumeData map[string]any,
 	withCancel bool, opts ...AgentRunOption) (*AsyncIterator[*AgentEvent], CancelFunc, error) {
-	if withCancel {
-		if _, ok := r.a.(CancellableResume); !ok {
-			return nil, nil, ErrAgentNotCancellable
-		}
-	}
-
 	if r.store == nil {
 		return nil, nil, fmt.Errorf("failed to resume: store is nil")
 	}
@@ -233,7 +229,11 @@ func (r *Runner) resumeWithCancel(ctx context.Context, checkPointID string, resu
 	var aIter *AsyncIterator[*AgentEvent]
 	var cancelFn CancelFunc
 	if withCancel {
-		aIter, cancelFn = fa.ResumeWithCancel(ctx, resumeInfo, opts...)
+		if _, ok := r.a.(CancellableResume); ok {
+			aIter, cancelFn = fa.ResumeWithCancel(ctx, resumeInfo, opts...)
+		} else {
+			aIter = fa.Resume(ctx, resumeInfo, opts...)
+		}
 	} else {
 		aIter = fa.Resume(ctx, resumeInfo, opts...)
 	}
