@@ -288,9 +288,6 @@ const (
 	CancelAfterToolCall
 )
 
-// ErrAgentFinished is returned by Cancel when the agent has already finished execution.
-var ErrAgentFinished = errors.New("agent has already finished execution")
-
 // ErrAgentNotCancellable is returned by Cancel when the agent does not support cancellation.
 var ErrAgentNotCancellable = errors.New("agent does not implement CancellableAgent interface")
 
@@ -315,7 +312,7 @@ func WithCancelTimeout(timeout time.Duration) CancelOption {
 	}
 }
 
-type CancelFunc func(context.Context, ...CancelOption) error
+type CancelFunc func(...CancelOption) error
 
 type CancellableAgent interface {
 	Agent
