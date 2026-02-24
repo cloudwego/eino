@@ -291,7 +291,7 @@ const continueInstructionZh = `请从我们中断的地方继续对话，无需�
 
 const transcriptPathInstruction = `If you need specific details from before compaction (like exact code snippets, error messages, or content you generated), read the full transcript at: %s`
 
-const transcriptPathInstructionZh = `如果你需要压缩之前的具体细节（如精确的代码片段、错误消息或你生成的内容），请阅读完整的对话记录：%s`
+const transcriptPathInstructionZh = `如果你需要压缩之前的具体细节（如精确的代码片段、错误消息或你生成的内容），完整的对话记录位于：%s`
 
 const truncatedMarkerFormat = "…%d characters truncated…"
 
