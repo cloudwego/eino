@@ -179,6 +179,13 @@ func (cs *turnLoopCancelSig) getConfig() *cancelConfig {
 	return nil
 }
 
+func (cs *turnLoopCancelSig) getDoneChan() <-chan struct{} {
+	if cs != nil {
+		return cs.done
+	}
+	return nil
+}
+
 type turnLoopCancelSigKey struct{}
 
 func withTurnLoopCancelSig(ctx context.Context, cs *turnLoopCancelSig) context.Context {
@@ -395,8 +402,8 @@ func (l *TurnLoop[T]) Run(ctx context.Context, opts ...TurnLoopRunOption[T]) err
 			return l.handleEvents(ctx, item, iter, checkPointID)
 		}
 
-		var handleEventErr error
 		if cancelFunc != nil {
+			var handleEventErr error
 			done := make(chan struct{})
 
 			go func() {
@@ -429,27 +436,14 @@ func (l *TurnLoop[T]) Run(ctx context.Context, opts ...TurnLoopRunOption[T]) err
 				})
 			}()
 
-			var externalCancelled bool
 			select {
 			case <-frontDone:
 			case <-done:
-			case <-func() <-chan struct{} {
-				if cs != nil {
-					return cs.done
-				}
-				return nil
-			}():
-				externalCancelled = true
-				cfg := cs.getConfig()
-				err := cancelFunc(cancelConfigToOpts(cfg)...)
+			case <-cs.getDoneChan():
+				err := cancelAndWait(cancelFunc, cs, done)
 				if err != nil {
-					<-done
-					return fmt.Errorf("failed to cancel agent: %w", err)
+					return err
 				}
-			}
-
-			if externalCancelled {
-				<-done
 				return l.wrapHandleEventErr(handleEventErr)
 			}
 
@@ -478,29 +472,29 @@ func (l *TurnLoop[T]) Run(ctx context.Context, opts ...TurnLoopRunOption[T]) err
 						<-done
 						return fmt.Errorf("failed to cancel agent: %w", err)
 					}
-				case <-func() <-chan struct{} {
-					if cs != nil {
-						return cs.done
-					}
-					return nil
-				}():
-					cfg := cs.getConfig()
-					err := cancelFunc(cancelConfigToOpts(cfg)...)
+				case <-cs.getDoneChan():
+					err := cancelAndWait(cancelFunc, cs, done)
 					if err != nil {
-						<-done
-						return fmt.Errorf("failed to cancel agent: %w", err)
+						return err
 					}
-					<-done
 					return l.wrapHandleEventErr(handleEventErr)
 				}
 			}
 
-			<-done
+			select {
+			case <-done:
+			case <-cs.getDoneChan():
+				err := cancelAndWait(cancelFunc, cs, done)
+				if err != nil {
+					return err
+				}
+				return l.wrapHandleEventErr(handleEventErr)
+			}
 			if err := l.wrapHandleEventErr(handleEventErr); err != nil {
 				return err
 			}
 		} else {
-			if handleEventErr = handleEvents(); handleEventErr != nil {
+			if handleEventErr := handleEvents(); handleEventErr != nil {
 				if err := l.wrapHandleEventErr(handleEventErr); err != nil {
 					return err
 				}
@@ -542,6 +536,17 @@ func (l *TurnLoop[T]) handleEvents(ctx context.Context, item T, iter *AsyncItera
 			}
 		}
 	}
+	return nil
+}
+
+func cancelAndWait(cf CancelFunc, cs *turnLoopCancelSig, done chan struct{}) error {
+	cfg := cs.getConfig()
+	err := cf(cancelConfigToOpts(cfg)...)
+	if err != nil {
+		<-done
+		return fmt.Errorf("failed to cancel agent: %w", err)
+	}
+	<-done
 	return nil
 }
 
