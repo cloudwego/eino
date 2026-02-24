@@ -69,43 +69,23 @@ func (c *cancelableChatModel) Generate(ctx context.Context, input []*schema.Mess
 	if cfg := checkCancelSig(c.cs); cfg != nil && cfg.Mode == CancelImmediate {
 		return nil, compose.Interrupt(ctx, "cancelled externally")
 	}
-	type resultPair struct {
-		res *schema.Message
-		err error
-	}
-	resultCh := make(chan *resultPair, 1)
+
+	resultCh := make(chan cancelWaitResult[*schema.Message], 1)
 	go func() {
 		defer func() {
-			panicErr := recover()
-			if panicErr != nil {
-				e := safe.NewPanicErr(panicErr, debug.Stack())
-				resultCh <- &resultPair{nil, e}
+			if panicErr := recover(); panicErr != nil {
+				resultCh <- cancelWaitResult[*schema.Message]{err: safe.NewPanicErr(panicErr, debug.Stack())}
 			}
 		}()
-
 		res, err := c.inner.Generate(ctx, input, opts...)
-		resultCh <- &resultPair{res: res, err: err}
+		resultCh <- cancelWaitResult[*schema.Message]{result: res, err: err}
 	}()
 
-	var timeCh <-chan time.Time
-	select {
-	case <-c.cs.done:
-		cfg := c.cs.config.Load().(*cancelConfig)
-		if cfg.Mode == CancelImmediate {
-			if cfg.Timeout == nil {
-				return nil, compose.Interrupt(ctx, "cancelled externally")
-			}
-			timeCh = time.After(*cfg.Timeout)
-		}
-	case res := <-resultCh:
-		return res.res, res.err
-	}
-	select {
-	case <-timeCh:
+	res := waitWithCancel(c.cs, resultCh)
+	if res.cancelled {
 		return nil, compose.Interrupt(ctx, "cancelled externally")
-	case res := <-resultCh:
-		return res.res, res.err
 	}
+	return res.result, res.err
 }
 
 func (c *cancelableChatModel) Stream(ctx context.Context, input []*schema.Message, opts ...model.Option) (*schema.StreamReader[*schema.Message], error) {
@@ -113,53 +93,29 @@ func (c *cancelableChatModel) Stream(ctx context.Context, input []*schema.Messag
 		return nil, compose.Interrupt(ctx, "cancelled externally")
 	}
 
-	type resultPair struct {
-		stream *schema.StreamReader[*schema.Message]
-		err    error
-	}
-	resultCh := make(chan *resultPair, 1)
+	resultCh := make(chan cancelWaitResult[*schema.StreamReader[*schema.Message]], 1)
 	go func() {
 		defer func() {
-			panicErr := recover()
-			if panicErr != nil {
-				e := safe.NewPanicErr(panicErr, debug.Stack())
-				resultCh <- &resultPair{nil, e}
+			if panicErr := recover(); panicErr != nil {
+				resultCh <- cancelWaitResult[*schema.StreamReader[*schema.Message]]{err: safe.NewPanicErr(panicErr, debug.Stack())}
 			}
 		}()
 
 		stream, err := c.inner.Stream(ctx, input, opts...)
 		if err != nil {
-			resultCh <- &resultPair{nil, err}
+			resultCh <- cancelWaitResult[*schema.StreamReader[*schema.Message]]{err: err}
 			return
 		}
 		copies := stream.Copy(2)
-		checkCopy := copies[0]
-		returnCopy := copies[1]
-
-		_ = consumeStreamForError(checkCopy)
-
-		resultCh <- &resultPair{stream: returnCopy, err: nil}
+		_ = consumeStreamForError(copies[0])
+		resultCh <- cancelWaitResult[*schema.StreamReader[*schema.Message]]{result: copies[1]}
 	}()
 
-	var timeCh <-chan time.Time
-	select {
-	case <-c.cs.done:
-		cfg := c.cs.config.Load().(*cancelConfig)
-		if cfg.Mode == CancelImmediate {
-			if cfg.Timeout == nil {
-				return nil, compose.Interrupt(ctx, "cancelled externally")
-			}
-			timeCh = time.After(*cfg.Timeout)
-		}
-	case res := <-resultCh:
-		return res.stream, res.err
-	}
-	select {
-	case <-timeCh:
+	res := waitWithCancel(c.cs, resultCh)
+	if res.cancelled {
 		return nil, compose.Interrupt(ctx, "cancelled externally")
-	case res := <-resultCh:
-		return res.stream, res.err
 	}
+	return res.result, res.err
 }
 
 func cancelableToolInvokable(cs *cancelSig, endpoint compose.InvokableToolEndpoint) compose.InvokableToolEndpoint {
