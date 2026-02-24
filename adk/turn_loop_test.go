@@ -23,6 +23,7 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+	"unsafe"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -879,21 +880,21 @@ func (m *turnLoopTestModel) WithTools(_ []*schema.ToolInfo) (model.ToolCallingCh
 }
 
 type turnLoopSlowModel struct {
-	delay     time.Duration
-	startedCh chan struct{}
+	delay     int64
+	startedCh unsafe.Pointer
 	doneCh    chan struct{}
 	message   *schema.Message
 }
 
 func (m *turnLoopSlowModel) Generate(_ context.Context, _ []*schema.Message, _ ...model.Option) (*schema.Message, error) {
-	if m.startedCh != nil {
+	if ch := (*chan struct{})(atomic.LoadPointer(&m.startedCh)); ch != nil {
 		select {
-		case m.startedCh <- struct{}{}:
+		case *ch <- struct{}{}:
 		default:
 		}
 	}
-	if m.delay > 0 {
-		time.Sleep(m.delay)
+	if delay := atomic.LoadInt64(&m.delay); delay > 0 {
+		time.Sleep(time.Duration(delay))
 	}
 	if m.doneCh != nil {
 		select {
@@ -937,11 +938,11 @@ func TestTurnLoop_ExternalCancel_WithStore(t *testing.T) {
 
 	modelStarted := make(chan struct{}, 1)
 	testModel := &turnLoopSlowModel{
-		delay:     5 * time.Second,
-		startedCh: modelStarted,
-		doneCh:    make(chan struct{}, 1),
-		message:   schema.AssistantMessage("task completed", nil),
+		doneCh:  make(chan struct{}, 1),
+		message: schema.AssistantMessage("task completed", nil),
 	}
+	atomic.StoreInt64(&testModel.delay, int64(5*time.Second))
+	atomic.StorePointer(&testModel.startedCh, unsafe.Pointer(&modelStarted))
 
 	agent, err := NewChatModelAgent(context.Background(), &ChatModelAgentConfig{
 		Name:        "test-agent",
@@ -1017,8 +1018,8 @@ func TestTurnLoop_ExternalCancel_WithStore(t *testing.T) {
 	assert.Equal(t, "msg1", interruptErr.Item)
 	assert.True(t, len(store.data) > 0, "checkpoint should be stored")
 
-	testModel.startedCh = nil
-	testModel.delay = 0
+	atomic.StorePointer(&testModel.startedCh, nil)
+	atomic.StoreInt64(&testModel.delay, 0)
 
 	done = make(chan error)
 	go func() {
