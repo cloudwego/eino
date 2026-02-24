@@ -22,10 +22,14 @@ import (
 	"fmt"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/cloudwego/eino/components/model"
+	"github.com/cloudwego/eino/components/tool"
+	"github.com/cloudwego/eino/compose"
 	"github.com/cloudwego/eino/schema"
 )
 
@@ -834,10 +838,281 @@ func TestTurnLoop_WithCancel_WithCancelOptions(t *testing.T) {
 	assert.Len(t, slowAgent.cancelledOpt, 1)
 }
 
-func TestTurnLoop_ExternalCancel_WithCheckpoint_ThenResume(t *testing.T) {
-	t.Skip("TODO: Implement after verifying TurnLoop checkpoint mechanism")
+type turnLoopInMemoryStore struct {
+	data map[string][]byte
+}
+
+func newTurnLoopInMemoryStore() *turnLoopInMemoryStore {
+	return &turnLoopInMemoryStore{data: make(map[string][]byte)}
+}
+
+func (s *turnLoopInMemoryStore) Get(_ context.Context, key string) ([]byte, bool, error) {
+	v, ok := s.data[key]
+	return v, ok, nil
+}
+
+func (s *turnLoopInMemoryStore) Set(_ context.Context, key string, value []byte) error {
+	s.data[key] = value
+	return nil
+}
+
+type turnLoopTestModel struct {
+	messages []*schema.Message
+	idx      int
+}
+
+func (m *turnLoopTestModel) Generate(_ context.Context, _ []*schema.Message, _ ...model.Option) (*schema.Message, error) {
+	if m.idx >= len(m.messages) {
+		return nil, fmt.Errorf("no more messages")
+	}
+	msg := m.messages[m.idx]
+	m.idx++
+	return msg, nil
+}
+
+func (m *turnLoopTestModel) Stream(_ context.Context, _ []*schema.Message, _ ...model.Option) (*schema.StreamReader[*schema.Message], error) {
+	panic("not implemented")
+}
+
+func (m *turnLoopTestModel) WithTools(_ []*schema.ToolInfo) (model.ToolCallingChatModel, error) {
+	return m, nil
+}
+
+type turnLoopSlowModel struct {
+	delay     time.Duration
+	startedCh chan struct{}
+	doneCh    chan struct{}
+	message   *schema.Message
+}
+
+func (m *turnLoopSlowModel) Generate(_ context.Context, _ []*schema.Message, _ ...model.Option) (*schema.Message, error) {
+	if m.startedCh != nil {
+		select {
+		case m.startedCh <- struct{}{}:
+		default:
+		}
+	}
+	if m.delay > 0 {
+		time.Sleep(m.delay)
+	}
+	if m.doneCh != nil {
+		select {
+		case m.doneCh <- struct{}{}:
+		default:
+		}
+	}
+	return m.message, nil
+}
+
+func (m *turnLoopSlowModel) Stream(_ context.Context, _ []*schema.Message, _ ...model.Option) (*schema.StreamReader[*schema.Message], error) {
+	panic("not implemented")
+}
+
+type turnLoopInterruptTool struct {
+	name string
+}
+
+func (t *turnLoopInterruptTool) Info(_ context.Context) (*schema.ToolInfo, error) {
+	return &schema.ToolInfo{
+		Name: t.name,
+		Desc: "A tool that interrupts",
+	}, nil
+}
+
+func (t *turnLoopInterruptTool) InvokableRun(ctx context.Context, _ string, _ ...tool.Option) (string, error) {
+	wasInterrupted, _, _ := tool.GetInterruptState[any](ctx)
+	if !wasInterrupted {
+		return "", tool.Interrupt(ctx, "need approval")
+	}
+	isResumeTarget, hasData, data := tool.GetResumeContext[string](ctx)
+	if isResumeTarget && hasData {
+		return data, nil
+	}
+	return "approved", nil
+}
+
+func TestTurnLoop_ExternalCancel_WithStore(t *testing.T) {
+	store := newTurnLoopInMemoryStore()
+	const checkPointID = "external-cancel-test"
+
+	modelStarted := make(chan struct{}, 1)
+	testModel := &turnLoopSlowModel{
+		delay:     5 * time.Second,
+		startedCh: modelStarted,
+		doneCh:    make(chan struct{}, 1),
+		message:   schema.AssistantMessage("task completed", nil),
+	}
+
+	agent, err := NewChatModelAgent(context.Background(), &ChatModelAgentConfig{
+		Name:        "test-agent",
+		Description: "test agent for external cancel",
+		Model:       testModel,
+	})
+	require.NoError(t, err)
+
+	receiveCount := int32(0)
+	turnCount := int32(0)
+	frontBlocked := make(chan struct{})
+	source := &turnLoopFuncSource[string]{
+		receive: func(ctx context.Context, _ ReceiveConfig) (context.Context, string, []ConsumeOption, error) {
+			cnt := atomic.AddInt32(&receiveCount, 1)
+			if cnt == 1 {
+				return ctx, "msg1", []ConsumeOption{WithConsumeCheckPointID(checkPointID)}, nil
+			}
+			return ctx, "", nil, ErrLoopExit
+		},
+		front: func(ctx context.Context, _ ReceiveConfig) (context.Context, string, []ConsumeOption, error) {
+			<-frontBlocked
+			return ctx, "", nil, context.DeadlineExceeded
+		},
+	}
+
+	loop, err := NewTurnLoop(TurnLoopConfig[string]{
+		Source: source,
+		GenInput: func(_ context.Context, item string) (*AgentInput, []AgentRunOption, error) {
+			return &AgentInput{Messages: []Message{schema.UserMessage(item)}}, nil, nil
+		},
+		GetAgent: func(_ context.Context, _ string) (Agent, error) {
+			return agent, nil
+		},
+		OnAgentEvents: func(_ context.Context, _ string, iter *AsyncIterator[*AgentEvent]) error {
+			atomic.AddInt32(&turnCount, 1)
+			for {
+				if _, ok := iter.Next(); !ok {
+					break
+				}
+			}
+			return nil
+		},
+		Store: store,
+	})
+	require.NoError(t, err)
+
+	ctx, cancel := loop.WithCancel(context.Background())
+	done := make(chan error)
+	go func() {
+		done <- loop.Run(ctx)
+	}()
+
+	select {
+	case <-modelStarted:
+	case err := <-done:
+		t.Fatalf("loop.Run returned early with error: %v", err)
+	case <-time.After(3 * time.Second):
+		t.Fatalf("timeout waiting for model to start")
+	}
+
+	err = cancel(WithCancelMode(CancelImmediate))
+
+	var runErr error
+	select {
+	case runErr = <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatalf("timeout waiting for loop.Run to return after cancel")
+	}
+
+	var interruptErr *TurnLoopInterruptError[string]
+	require.True(t, errors.As(runErr, &interruptErr), "expected TurnLoopInterruptError, got: %v", runErr)
+	assert.Equal(t, checkPointID, interruptErr.CheckpointID)
+	assert.Equal(t, "msg1", interruptErr.Item)
+	assert.True(t, len(store.data) > 0, "checkpoint should be stored")
+
+	testModel.startedCh = nil
+	testModel.delay = 0
+
+	done = make(chan error)
+	go func() {
+		done <- loop.Run(context.Background(), WithTurnLoopResume(checkPointID, "msg1"))
+	}()
+
+	select {
+	case runErr = <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatalf("timeout waiting for loop.Run (resume) to return")
+	}
+	assert.NoError(t, runErr)
+	assert.Equal(t, int32(2), atomic.LoadInt32(&turnCount), "should have 2 turns total (1 from first run + 1 from resume)")
 }
 
 func TestTurnLoop_InternalToolInterrupt_WithCheckpoint_ThenResume(t *testing.T) {
-	t.Skip("TODO: Implement after verifying TurnLoop checkpoint mechanism")
+	store := newTurnLoopInMemoryStore()
+	const checkPointID = "tool-interrupt-test"
+
+	interruptTool := &turnLoopInterruptTool{name: "approval_tool"}
+
+	testModel := &turnLoopTestModel{
+		messages: []*schema.Message{
+			schema.AssistantMessage("", []schema.ToolCall{
+				{ID: "call1", Function: schema.FunctionCall{Name: "approval_tool", Arguments: "{}"}},
+			}),
+			schema.AssistantMessage("task completed", nil),
+		},
+	}
+
+	agent, err := NewChatModelAgent(context.Background(), &ChatModelAgentConfig{
+		Name:        "test-agent",
+		Description: "test agent",
+		Model:       testModel,
+		ToolsConfig: ToolsConfig{
+			ToolsNodeConfig: compose.ToolsNodeConfig{
+				Tools: []tool.BaseTool{interruptTool},
+			},
+		},
+	})
+	require.NoError(t, err)
+
+	receiveCount := int32(0)
+	frontBlocked := make(chan struct{})
+	source := &turnLoopFuncSource[string]{
+		receive: func(ctx context.Context, _ ReceiveConfig) (context.Context, string, []ConsumeOption, error) {
+			cnt := atomic.AddInt32(&receiveCount, 1)
+			if cnt == 1 {
+				return ctx, "msg1", []ConsumeOption{WithConsumeCheckPointID(checkPointID)}, nil
+			}
+			return ctx, "", nil, ErrLoopExit
+		},
+		front: func(ctx context.Context, _ ReceiveConfig) (context.Context, string, []ConsumeOption, error) {
+			<-frontBlocked
+			return ctx, "", nil, context.DeadlineExceeded
+		},
+	}
+
+	var interruptErr *TurnLoopInterruptError[string]
+	loop, err := NewTurnLoop(TurnLoopConfig[string]{
+		Source: source,
+		GenInput: func(_ context.Context, item string) (*AgentInput, []AgentRunOption, error) {
+			return &AgentInput{Messages: []Message{schema.UserMessage(item)}}, nil, nil
+		},
+		GetAgent: func(_ context.Context, _ string) (Agent, error) {
+			return agent, nil
+		},
+		OnAgentEvents: func(_ context.Context, _ string, iter *AsyncIterator[*AgentEvent]) error {
+			for {
+				if _, ok := iter.Next(); !ok {
+					break
+				}
+			}
+			return nil
+		},
+		Store: store,
+	})
+	require.NoError(t, err)
+
+	err = loop.Run(context.Background())
+	require.True(t, errors.As(err, &interruptErr), "expected TurnLoopInterruptError, got: %v", err)
+	assert.Equal(t, checkPointID, interruptErr.CheckpointID)
+	assert.Equal(t, "msg1", interruptErr.Item)
+	assert.Len(t, interruptErr.InterruptContexts, 1)
+	assert.Equal(t, "need approval", interruptErr.InterruptContexts[0].Info)
+
+	interruptID := interruptErr.InterruptContexts[0].ID
+	assert.NotEmpty(t, interruptID)
+	assert.True(t, len(store.data) > 0, "checkpoint should be stored")
+
+	testModel.idx = 1
+	receiveCount = 0
+
+	resumeCtx := compose.ResumeWithData(context.Background(), interruptID, "user approved")
+	err = loop.Run(resumeCtx, WithTurnLoopResume(checkPointID, "msg1"))
+	assert.NoError(t, err)
 }

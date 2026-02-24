@@ -231,6 +231,7 @@ func NewTurnLoop[T any](config TurnLoopConfig[T]) (*TurnLoop[T], error) {
 		getAgent:       config.GetAgent,
 		onAgentEvents:  onAgentEvents,
 		receiveTimeout: config.ReceiveTimeout,
+		store:          config.Store,
 	}, nil
 }
 
@@ -300,7 +301,6 @@ func (l *TurnLoop[T]) WithCancel(ctx context.Context) (context.Context, TurnLoop
 //
 //	err := turnLoop.Run(ctx, WithTurnLoopResume("session-123"))
 func (l *TurnLoop[T]) Run(ctx context.Context, opts ...TurnLoopRunOption[T]) error {
-	fmt.Println("=== Run entered ===")  // 临时加这行
 	var runCfg turnLoopRunConfig[T]
 	for _, opt := range opts {
 		opt(&runCfg)
@@ -539,7 +539,6 @@ func (l *TurnLoop[T]) handleEvents(ctx context.Context, item T, iter *AsyncItera
 		if !ok {
 			break
 		}
-
 		if e.Action != nil && e.Action.Interrupted != nil {
 			return &TurnLoopInterruptError[T]{
 				Item:              item,

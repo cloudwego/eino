@@ -706,19 +706,23 @@ func (a *ChatModelAgent) prepareExecContext(ctx context.Context) (*execContext, 
 }
 
 func (a *ChatModelAgent) buildNoToolsRunFunc(_ context.Context) runFunc {
-	wrappedModel := buildModelWrappers(a.model, &modelWrapperConfig{
-		handlers:    a.handlers,
-		middlewares: a.middlewares,
-		retryConfig: a.modelRetryConfig,
-	})
-
 	type noToolsInput struct {
 		input       *AgentInput
 		instruction string
 	}
 
 	return func(ctx context.Context, input *AgentInput, generator *AsyncGenerator[*AgentEvent],
-		store *bridgeStore, instruction string, _ map[string]bool, _ *cancelSig, opts ...compose.Option) {
+		store *bridgeStore, instruction string, _ map[string]bool, cs *cancelSig, opts ...compose.Option) {
+
+		wrappedModel := buildModelWrappers(a.model, &modelWrapperConfig{
+			handlers:    a.handlers,
+			middlewares: a.middlewares,
+			retryConfig: a.modelRetryConfig,
+		})
+
+		if cs != nil {
+			wrappedModel = wrapModelForCancelable(wrappedModel, cs)
+		}
 
 		chain := compose.NewChain[noToolsInput, Message](
 			compose.WithGenLocalState(func(ctx context.Context) (state *State) {
@@ -764,9 +768,33 @@ func (a *ChatModelAgent) buildNoToolsRunFunc(_ context.Context) runFunc {
 			} else if msgStream != nil {
 				msgStream.Close()
 			}
-		} else {
-			generator.Send(&AgentEvent{Err: err})
+			return
 		}
+
+		info, ok := compose.ExtractInterruptInfo(err)
+		if !ok {
+			generator.Send(&AgentEvent{Err: err})
+			return
+		}
+
+		data, existed, sErr := store.Get(ctx, bridgeCheckpointID)
+		if sErr != nil {
+			generator.Send(&AgentEvent{AgentName: a.name, Err: fmt.Errorf("failed to get interrupt info: %w", sErr)})
+			return
+		}
+		if !existed {
+			generator.Send(&AgentEvent{AgentName: a.name, Err: fmt.Errorf("interrupt occurred but checkpoint data is missing")})
+			return
+		}
+
+		is := FromInterruptContexts(info.InterruptContexts)
+		event := CompositeInterrupt(ctx, info, data, is)
+		event.Action.Interrupted.Data = &ChatModelAgentInterruptInfo{
+			Info: info,
+			Data: data,
+		}
+		event.AgentName = a.name
+		generator.Send(event)
 	}
 }
 
