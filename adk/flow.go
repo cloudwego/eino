@@ -342,7 +342,7 @@ func (a *flowAgent) runInternal(ctx context.Context, input *AgentInput, withCanc
 	return iterator, cancelFn
 }
 
-func notCancellableFuncInternal(_ context.Context, _ ...CancelOption) error {
+func notCancellableFuncInternal(_ ...CancelOption) error {
 	return ErrAgentNotCancellable
 }
 
