@@ -38,6 +38,10 @@ import (
 	"github.com/cloudwego/eino/schema"
 )
 
+var _ ResumableAgent = &ChatModelAgent{}
+var _ CancellableAgent = &ChatModelAgent{}
+var _ CancellableResumableAgent = &ChatModelAgent{}
+
 type chatModelAgentExecCtx struct {
 	runtimeReturnDirectly map[string]bool
 	generator             *AsyncGenerator[*AgentEvent]
@@ -337,7 +341,8 @@ type ChatModelAgent struct {
 	exeCtx *execContext
 }
 
-type runFunc func(ctx context.Context, input *AgentInput, generator *AsyncGenerator[*AgentEvent], store *bridgeStore, instruction string, returnDirectly map[string]bool, opts ...compose.Option)
+type runFunc func(ctx context.Context, input *AgentInput, generator *AsyncGenerator[*AgentEvent],
+	store *bridgeStore, instruction string, returnDirectly map[string]bool, cs *cancelSig, opts ...compose.Option)
 
 // NewChatModelAgent constructs a chat model-backed agent with the provided config.
 func NewChatModelAgent(ctx context.Context, config *ChatModelAgentConfig) (*ChatModelAgent, error) {
@@ -577,7 +582,7 @@ func setOutputToSession(ctx context.Context, msg Message, msgStream MessageStrea
 }
 
 func errFunc(err error) runFunc {
-	return func(ctx context.Context, input *AgentInput, generator *AsyncGenerator[*AgentEvent], store *bridgeStore, _ string, _ map[string]bool, _ ...compose.Option) {
+	return func(ctx context.Context, input *AgentInput, generator *AsyncGenerator[*AgentEvent], store *bridgeStore, _ string, _ map[string]bool, _ *cancelSig, _ ...compose.Option) {
 		generator.Send(&AgentEvent{Err: err})
 	}
 }
@@ -701,19 +706,23 @@ func (a *ChatModelAgent) prepareExecContext(ctx context.Context) (*execContext, 
 }
 
 func (a *ChatModelAgent) buildNoToolsRunFunc(_ context.Context) runFunc {
-	wrappedModel := buildModelWrappers(a.model, &modelWrapperConfig{
-		handlers:    a.handlers,
-		middlewares: a.middlewares,
-		retryConfig: a.modelRetryConfig,
-	})
-
 	type noToolsInput struct {
 		input       *AgentInput
 		instruction string
 	}
 
 	return func(ctx context.Context, input *AgentInput, generator *AsyncGenerator[*AgentEvent],
-		store *bridgeStore, instruction string, _ map[string]bool, opts ...compose.Option) {
+		store *bridgeStore, instruction string, _ map[string]bool, cs *cancelSig, opts ...compose.Option) {
+
+		wrappedModel := buildModelWrappers(a.model, &modelWrapperConfig{
+			handlers:    a.handlers,
+			middlewares: a.middlewares,
+			retryConfig: a.modelRetryConfig,
+		})
+
+		if cs != nil {
+			wrappedModel = wrapModelForCancelable(wrappedModel, cs)
+		}
 
 		chain := compose.NewChain[noToolsInput, Message](
 			compose.WithGenLocalState(func(ctx context.Context) (state *State) {
@@ -759,13 +768,37 @@ func (a *ChatModelAgent) buildNoToolsRunFunc(_ context.Context) runFunc {
 			} else if msgStream != nil {
 				msgStream.Close()
 			}
-		} else {
-			generator.Send(&AgentEvent{Err: err})
+			return
 		}
+
+		info, ok := compose.ExtractInterruptInfo(err)
+		if !ok {
+			generator.Send(&AgentEvent{Err: err})
+			return
+		}
+
+		data, existed, sErr := store.Get(ctx, bridgeCheckpointID)
+		if sErr != nil {
+			generator.Send(&AgentEvent{AgentName: a.name, Err: fmt.Errorf("failed to get interrupt info: %w", sErr)})
+			return
+		}
+		if !existed {
+			generator.Send(&AgentEvent{AgentName: a.name, Err: fmt.Errorf("interrupt occurred but checkpoint data is missing")})
+			return
+		}
+
+		is := FromInterruptContexts(info.InterruptContexts)
+		event := CompositeInterrupt(ctx, info, data, is)
+		event.Action.Interrupted.Data = &ChatModelAgentInterruptInfo{
+			Info: info,
+			Data: data,
+		}
+		event.AgentName = a.name
+		generator.Send(event)
 	}
 }
 
-func (a *ChatModelAgent) buildReactRunFunc(ctx context.Context, bc *execContext) (runFunc, error) {
+func (a *ChatModelAgent) buildReActRunFunc(_ context.Context, bc *execContext) (runFunc, error) {
 	conf := &reactConfig{
 		model:       a.model,
 		toolsConfig: &bc.toolsNodeConf,
@@ -786,8 +819,8 @@ func (a *ChatModelAgent) buildReactRunFunc(ctx context.Context, bc *execContext)
 	}
 
 	return func(ctx context.Context, input *AgentInput, generator *AsyncGenerator[*AgentEvent], store *bridgeStore,
-		instruction string, returnDirectly map[string]bool, opts ...compose.Option) {
-		g, err := newReact(ctx, conf)
+		instruction string, returnDirectly map[string]bool, cs *cancelSig, opts ...compose.Option) {
+		g, err := newReact(ctx, conf, cs)
 		if err != nil {
 			generator.Send(&AgentEvent{Err: err})
 			return
@@ -903,7 +936,7 @@ func (a *ChatModelAgent) buildRunFunc(ctx context.Context) runFunc {
 			return
 		}
 
-		run, err := a.buildReactRunFunc(ctx, ec)
+		run, err := a.buildReActRunFunc(ctx, ec)
 		if err != nil {
 			a.run = errFunc(err)
 			return
@@ -947,7 +980,7 @@ func (a *ChatModelAgent) getRunFunc(ctx context.Context) (context.Context, runFu
 	if len(runtimeBC.toolsNodeConf.Tools) == 0 {
 		tempRun = a.buildNoToolsRunFunc(ctx)
 	} else {
-		tempRun, err = a.buildReactRunFunc(ctx, runtimeBC)
+		tempRun, err = a.buildReActRunFunc(ctx, runtimeBC)
 		if err != nil {
 			return ctx, nil, nil, err
 		}
@@ -957,6 +990,15 @@ func (a *ChatModelAgent) getRunFunc(ctx context.Context) (context.Context, runFu
 }
 
 func (a *ChatModelAgent) Run(ctx context.Context, input *AgentInput, opts ...AgentRunOption) *AsyncIterator[*AgentEvent] {
+	iter, _ := a.runInternal(ctx, input, false, opts...)
+	return iter
+}
+
+func (a *ChatModelAgent) RunWithCancel(ctx context.Context, input *AgentInput, opts ...AgentRunOption) (*AsyncIterator[*AgentEvent], CancelFunc) {
+	return a.runInternal(ctx, input, true, opts...)
+}
+
+func (a *ChatModelAgent) runInternal(ctx context.Context, input *AgentInput, withCancel bool, opts ...AgentRunOption) (*AsyncIterator[*AgentEvent], CancelFunc) {
 	iterator, generator := NewAsyncIteratorPair[*AgentEvent]()
 
 	ctx, run, bc, err := a.getRunFunc(ctx)
@@ -965,7 +1007,7 @@ func (a *ChatModelAgent) Run(ctx context.Context, input *AgentInput, opts ...Age
 			generator.Send(&AgentEvent{Err: err})
 			generator.Close()
 		}()
-		return iterator
+		return iterator, notCancellableFuncInternal
 	}
 
 	co := getComposeOptions(opts)
@@ -976,6 +1018,13 @@ func (a *ChatModelAgent) Run(ctx context.Context, input *AgentInput, opts ...Age
 		if bc.toolUpdated {
 			co = append(co, compose.WithToolsNodeOption(compose.WithToolList(bc.toolsNodeConf.Tools...)))
 		}
+	}
+
+	var cs *cancelSig
+	var cancelFn CancelFunc = notCancellableFuncInternal
+	if withCancel {
+		cs = newCancelSig()
+		cancelFn = buildCancelFunc(cs)
 	}
 
 	go func() {
@@ -999,13 +1048,47 @@ func (a *ChatModelAgent) Run(ctx context.Context, input *AgentInput, opts ...Age
 			returnDirectly = bc.returnDirectly
 		}
 
-		run(ctx, input, generator, newBridgeStore(), instruction, returnDirectly, co...)
+		run(ctx, input, generator, newBridgeStore(), instruction, returnDirectly, cs, co...)
 	}()
 
-	return iterator
+	return iterator, cancelFn
+}
+
+func buildCancelFunc(cs *cancelSig) CancelFunc {
+	var once sync.Once
+
+	return func(_ context.Context, opts ...CancelOption) error {
+		cfg := &cancelConfig{
+			Mode: CancelImmediate,
+		}
+		for _, opt := range opts {
+			opt(cfg)
+		}
+
+		cancelled := false
+		once.Do(func() {
+			cs.cancel(cfg)
+			cancelled = true
+		})
+
+		if !cancelled {
+			return ErrAgentFinished
+		}
+
+		return nil
+	}
 }
 
 func (a *ChatModelAgent) Resume(ctx context.Context, info *ResumeInfo, opts ...AgentRunOption) *AsyncIterator[*AgentEvent] {
+	iter, _ := a.resumeInternal(ctx, info, false, opts...)
+	return iter
+}
+
+func (a *ChatModelAgent) ResumeWithCancel(ctx context.Context, info *ResumeInfo, opts ...AgentRunOption) (*AsyncIterator[*AgentEvent], CancelFunc) {
+	return a.resumeInternal(ctx, info, true, opts...)
+}
+
+func (a *ChatModelAgent) resumeInternal(ctx context.Context, info *ResumeInfo, withCancel bool, opts ...AgentRunOption) (*AsyncIterator[*AgentEvent], CancelFunc) {
 	iterator, generator := NewAsyncIteratorPair[*AgentEvent]()
 
 	ctx, run, bc, err := a.getRunFunc(ctx)
@@ -1014,7 +1097,7 @@ func (a *ChatModelAgent) Resume(ctx context.Context, info *ResumeInfo, opts ...A
 			generator.Send(&AgentEvent{Err: err})
 			generator.Close()
 		}()
-		return iterator
+		return iterator, notCancellableFuncInternal
 	}
 
 	co := getComposeOptions(opts)
@@ -1027,22 +1110,27 @@ func (a *ChatModelAgent) Resume(ctx context.Context, info *ResumeInfo, opts ...A
 		}
 	}
 
+	methodName := "Resume"
+	if withCancel {
+		methodName = "ResumeWithCancel"
+	}
+
 	if info.InterruptState == nil {
-		panic(fmt.Sprintf("ChatModelAgent.Resume: agent '%s' was asked to resume but has no state", a.Name(ctx)))
+		panic(fmt.Sprintf("ChatModelAgent.%s: agent '%s' was asked to resume but has no state", methodName, a.Name(ctx)))
 	}
 
 	stateByte, ok := info.InterruptState.([]byte)
 	if !ok {
-		panic(fmt.Sprintf("ChatModelAgent.Resume: agent '%s' was asked to resume but has invalid interrupt state type: %T",
-			a.Name(ctx), info.InterruptState))
+		panic(fmt.Sprintf("ChatModelAgent.%s: agent '%s' was asked to resume but has invalid interrupt state type: %T",
+			methodName, a.Name(ctx), info.InterruptState))
 	}
 
 	var historyModifier func(ctx context.Context, history []Message) []Message
 	if info.ResumeData != nil {
 		resumeData, ok := info.ResumeData.(*ChatModelAgentResumeData)
 		if !ok {
-			panic(fmt.Sprintf("ChatModelAgent.Resume: agent '%s' was asked to resume but has invalid resume data type: %T",
-				a.Name(ctx), info.ResumeData))
+			panic(fmt.Sprintf("ChatModelAgent.%s: agent '%s' was asked to resume but has invalid resume data type: %T",
+				methodName, a.Name(ctx), info.ResumeData))
 		}
 		historyModifier = resumeData.HistoryModifier
 	}
@@ -1056,6 +1144,13 @@ func (a *ChatModelAgent) Resume(ctx context.Context, info *ResumeInfo, opts ...A
 			s.Messages = historyModifier(ctx, s.Messages)
 			return nil
 		}))
+	}
+
+	var cs *cancelSig
+	var cancelFn CancelFunc = notCancellableFuncInternal
+	if withCancel {
+		cs = newCancelSig()
+		cancelFn = buildCancelFunc(cs)
 	}
 
 	go func() {
@@ -1080,10 +1175,10 @@ func (a *ChatModelAgent) Resume(ctx context.Context, info *ResumeInfo, opts ...A
 		}
 
 		run(ctx, &AgentInput{EnableStreaming: info.EnableStreaming}, generator,
-			newResumeBridgeStore(stateByte), instruction, returnDirectly, co...)
+			newResumeBridgeStore(stateByte), instruction, returnDirectly, cs, co...)
 	}()
 
-	return iterator
+	return iterator, cancelFn
 }
 
 func getComposeOptions(opts []AgentRunOption) []compose.Option {
