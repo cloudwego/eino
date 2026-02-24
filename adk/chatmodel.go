@@ -39,8 +39,8 @@ import (
 )
 
 var _ ResumableAgent = &ChatModelAgent{}
-var _ CancellableRun = &ChatModelAgent{}
-var _ CancellableResume = &ChatModelAgent{}
+var _ CancellableAgent = &ChatModelAgent{}
+var _ CancellableResumableAgent = &ChatModelAgent{}
 
 type chatModelAgentExecCtx struct {
 	runtimeReturnDirectly map[string]bool

@@ -198,7 +198,7 @@ func getTurnLoopCancelSig(ctx context.Context) *turnLoopCancelSig {
 type TurnLoopCancelFunc func(opts ...CancelOption) error
 
 // ErrAgentNotCancellableInTurnLoop is returned when WithCancel context is used
-// but the Agent does not implement CancellableRun.
+// but the Agent does not implement CancellableAgent.
 var ErrAgentNotCancellableInTurnLoop = errors.New("agent does not support cancel but WithCancel context was provided")
 
 // NewTurnLoop creates a new TurnLoop from the given configuration.
@@ -363,7 +363,7 @@ func (l *TurnLoop[T]) Run(ctx context.Context, opts ...TurnLoopRunOption[T]) err
 
 		var cancelFunc CancelFunc
 		var iter *AsyncIterator[*AgentEvent]
-		_, isAgentCancellable := agent.(CancellableRun)
+		_, isAgentCancellable := agent.(CancellableAgent)
 		if cs != nil && !isAgentCancellable {
 			return fmt.Errorf("%w: agent %s", ErrAgentNotCancellableInTurnLoop, agent.Name(nCtx))
 		}

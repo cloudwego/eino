@@ -328,7 +328,7 @@ func (a *flowAgent) runInternal(ctx context.Context, input *AgentInput, withCanc
 	var aIter *AsyncIterator[*AgentEvent]
 	var cancelFn CancelFunc = notCancellableFuncInternal
 
-	ca, supportCancel := a.Agent.(CancellableRun)
+	ca, supportCancel := a.Agent.(CancellableAgent)
 	if withCancel && supportCancel {
 		aIter, cancelFn = ca.RunWithCancel(ctx, input, filterOptions(agentName, opts)...)
 	} else {
@@ -371,7 +371,7 @@ func (a *flowAgent) resumeInternal(ctx context.Context, info *ResumeInfo, withCa
 		var aIter *AsyncIterator[*AgentEvent]
 		var cancelFn CancelFunc = notCancellableFuncInternal
 
-		ca, supportCancel := a.Agent.(CancellableResume)
+		ca, supportCancel := a.Agent.(CancellableResumableAgent)
 		if withCancel && supportCancel {
 			aIter, cancelFn = ca.ResumeWithCancel(ctx, info, opts...)
 		} else if ra, ok := a.Agent.(ResumableAgent); ok {
@@ -398,7 +398,7 @@ func (a *flowAgent) resumeInternal(ctx context.Context, info *ResumeInfo, withCa
 	subAgent := a.getAgent(ctxForSubAgents, nextAgentName)
 	if subAgent == nil {
 		if len(a.subAgents) == 0 {
-			ca, supportCancel := a.Agent.(CancellableResume)
+			ca, supportCancel := a.Agent.(CancellableResumableAgent)
 			if withCancel && supportCancel {
 				iter, cancelFn := ca.ResumeWithCancel(ctx, info, opts...)
 				return wrapIterWithOnEnd(ctx, iter), cancelFn
@@ -410,7 +410,7 @@ func (a *flowAgent) resumeInternal(ctx context.Context, info *ResumeInfo, withCa
 		return wrapIterWithOnEnd(ctx, genErrorIter(fmt.Errorf("failed to resume agent: agent '%s' not found from flowAgent '%s'", nextAgentName, agentName))), notCancellableFuncInternal
 	}
 
-	ca, supportCancel := ResumableAgent(subAgent).(CancellableResume)
+	ca, supportCancel := ResumableAgent(subAgent).(CancellableResumableAgent)
 	if withCancel && supportCancel {
 		iter, cancelFn := ca.ResumeWithCancel(ctxForSubAgents, info, opts...)
 		return wrapIterWithOnEnd(ctx, iter), cancelFn

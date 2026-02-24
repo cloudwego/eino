@@ -90,7 +90,7 @@ func (r *Runner) Query(ctx context.Context,
 // If the Runner was configured with a CheckPointStore and WithCheckPointID option, it will automatically
 // save the agent's state upon cancellation for later resumption.
 //
-// If the agent does not implement CancellableRun, the returned CancelFunc will be nil.
+// If the agent does not implement CancellableAgent, the returned CancelFunc will be nil.
 func (r *Runner) RunWithCancel(ctx context.Context, messages []Message,
 	opts ...AgentRunOption) (*AsyncIterator[*AgentEvent], CancelFunc) {
 	iter, cancelFn, _ := r.runWithCancel(ctx, messages, true, opts...)
@@ -115,7 +115,7 @@ func (r *Runner) runWithCancel(ctx context.Context, messages []Message, withCanc
 	var iter *AsyncIterator[*AgentEvent]
 	var cancelFn CancelFunc
 	if withCancel {
-		if _, ok := r.a.(CancellableRun); ok {
+		if _, ok := r.a.(CancellableAgent); ok {
 			iter, cancelFn = fa.RunWithCancel(ctx, input, opts...)
 		} else {
 			iter = fa.Run(ctx, input, opts...)
@@ -138,7 +138,7 @@ func (r *Runner) runWithCancel(ctx context.Context, messages []Message, withCanc
 // This method uses the "Implicit Resume All" strategy where all previously interrupted points proceed without specific data.
 // The cancel function can be used to interrupt the running agent again at specific points based on the CancelMode.
 //
-// If the agent does not implement CancellableResume, the returned CancelFunc will be nil.
+// If the agent does not implement CancellableResumableAgent, the returned CancelFunc will be nil.
 func (r *Runner) ResumeWithCancel(ctx context.Context, checkPointID string, opts ...AgentRunOption) (
 	*AsyncIterator[*AgentEvent], CancelFunc, error) {
 	return r.resumeWithCancel(ctx, checkPointID, nil, true, opts...)
@@ -148,7 +148,7 @@ func (r *Runner) ResumeWithCancel(ctx context.Context, checkPointID string, opts
 // and returns both an iterator and a cancel function.
 // The params.Targets map should contain the addresses of the components to be resumed as keys.
 //
-// If the agent does not implement CancellableResume, the returned CancelFunc will be nil.
+// If the agent does not implement CancellableResumableAgent, the returned CancelFunc will be nil.
 func (r *Runner) ResumeWithParamsAndCancel(ctx context.Context, checkPointID string, params *ResumeParams,
 	opts ...AgentRunOption) (*AsyncIterator[*AgentEvent], CancelFunc, error) {
 	return r.resumeWithCancel(ctx, checkPointID, params.Targets, true, opts...)
@@ -229,7 +229,7 @@ func (r *Runner) resumeWithCancel(ctx context.Context, checkPointID string, resu
 	var aIter *AsyncIterator[*AgentEvent]
 	var cancelFn CancelFunc
 	if withCancel {
-		if _, ok := r.a.(CancellableResume); ok {
+		if _, ok := r.a.(CancellableResumableAgent); ok {
 			aIter, cancelFn = fa.ResumeWithCancel(ctx, resumeInfo, opts...)
 		} else {
 			aIter = fa.Resume(ctx, resumeInfo, opts...)
