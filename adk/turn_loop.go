@@ -192,11 +192,6 @@ func getTurnLoopCancelSig(ctx context.Context) *turnLoopCancelSig {
 	return nil
 }
 
-// TurnLoopCancelFunc is the cancel function returned by WithCancel.
-// Unlike Agent's CancelFunc, it does not require a context parameter
-// since the context is already bound when WithCancel is called.
-type TurnLoopCancelFunc func(opts ...CancelOption) error
-
 // ErrAgentNotCancellableInTurnLoop is returned when WithCancel context is used
 // but the Agent does not implement CancellableAgent.
 var ErrAgentNotCancellableInTurnLoop = errors.New("agent does not support cancel but WithCancel context was provided")
@@ -258,7 +253,7 @@ var ErrLoopExit = errors.New("loop exit")
 //	}()
 //	// Later, to cancel:
 //	cancel(adk.WithCancelMode(adk.CancelAfterToolCall))
-func (l *TurnLoop[T]) WithCancel(ctx context.Context) (context.Context, TurnLoopCancelFunc) {
+func (l *TurnLoop[T]) WithCancel(ctx context.Context) (context.Context, CancelFunc) {
 	cs := newTurnLoopCancelSig()
 	ctx = withTurnLoopCancelSig(ctx, cs)
 
@@ -270,16 +265,9 @@ func (l *TurnLoop[T]) WithCancel(ctx context.Context) (context.Context, TurnLoop
 		for _, opt := range opts {
 			opt(cfg)
 		}
-
-		cancelled := false
 		once.Do(func() {
 			cs.cancel(cfg)
-			cancelled = true
 		})
-
-		if !cancelled {
-			return ErrAgentFinished
-		}
 		return nil
 	}
 
@@ -453,8 +441,8 @@ func (l *TurnLoop[T]) Run(ctx context.Context, opts ...TurnLoopRunOption[T]) err
 			}():
 				externalCancelled = true
 				cfg := cs.getConfig()
-				err := cancelFunc(nCtx, cancelConfigToOpts(cfg)...)
-				if err != nil && !errors.Is(err, ErrAgentFinished) {
+				err := cancelFunc(cancelConfigToOpts(cfg)...)
+				if err != nil {
 					<-done
 					return fmt.Errorf("failed to cancel agent: %w", err)
 				}
@@ -476,7 +464,7 @@ func (l *TurnLoop[T]) Run(ctx context.Context, opts ...TurnLoopRunOption[T]) err
 			o := applyConsumeOptions(option)
 			switch o.Mode {
 			case ConsumePreemptive:
-				err := cancelFunc(nCtx, o.CancelOpts...)
+				err := cancelFunc(o.CancelOpts...)
 				if err != nil {
 					<-done
 					return fmt.Errorf("failed to cancel agent: %w", err)
@@ -485,7 +473,7 @@ func (l *TurnLoop[T]) Run(ctx context.Context, opts ...TurnLoopRunOption[T]) err
 				select {
 				case <-done:
 				case <-time.After(o.Timeout):
-					err := cancelFunc(nCtx, o.CancelOpts...)
+					err := cancelFunc(o.CancelOpts...)
 					if err != nil {
 						<-done
 						return fmt.Errorf("failed to cancel agent: %w", err)
@@ -497,8 +485,8 @@ func (l *TurnLoop[T]) Run(ctx context.Context, opts ...TurnLoopRunOption[T]) err
 					return nil
 				}():
 					cfg := cs.getConfig()
-					err := cancelFunc(nCtx, cancelConfigToOpts(cfg)...)
-					if err != nil && !errors.Is(err, ErrAgentFinished) {
+					err := cancelFunc(cancelConfigToOpts(cfg)...)
+					if err != nil {
 						<-done
 						return fmt.Errorf("failed to cancel agent: %w", err)
 					}
