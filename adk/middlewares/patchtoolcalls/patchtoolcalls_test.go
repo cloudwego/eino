@@ -29,7 +29,7 @@ import (
 
 func TestPatchToolCalls(t *testing.T) {
 	ctx := context.Background()
-	m, err := NewMiddleware(ctx, nil)
+	m, err := New(ctx, nil)
 	assert.NoError(t, err)
 
 	// empty messages
@@ -68,7 +68,7 @@ func TestPatchToolCalls(t *testing.T) {
 	assert.Equal(t, "tool_b", patchedMsg.ToolName)
 	assert.Equal(t, fmt.Sprintf(defaultPatchedToolMessageTemplate, "tool_b", "call_2"), patchedMsg.Content)
 
-	m, err = NewMiddleware(ctx, &Config{
+	m, err = New(ctx, &Config{
 		PatchedContentGenerator: func(ctx context.Context, toolName, toolCallID string) (string, error) {
 			return fmt.Sprintf("123 %s %s", toolName, toolCallID), nil
 		},

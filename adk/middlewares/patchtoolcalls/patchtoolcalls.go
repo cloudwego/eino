@@ -42,11 +42,11 @@ type Config struct {
 	PatchedContentGenerator func(ctx context.Context, toolName, toolCallID string) (string, error)
 }
 
-// NewMiddleware creates a new patch tool calls middleware with the given configuration.
+// New creates a new patch tool calls middleware with the given configuration.
 //
 // The middleware scans the message history before each model invocation and inserts
 // placeholder tool messages for any tool calls that don't have corresponding responses.
-func NewMiddleware(ctx context.Context, cfg *Config) (adk.ChatModelAgentMiddleware, error) {
+func New(ctx context.Context, cfg *Config) (adk.ChatModelAgentMiddleware, error) {
 	if cfg == nil {
 		cfg = &Config{}
 	}
