@@ -144,7 +144,7 @@ func TestReact(t *testing.T) {
 			toolsReturnDirectly: map[string]bool{},
 		}
 
-		graph, err := newReact(ctx, config)
+		graph, err := newReact(ctx, config, nil)
 		assert.NoError(t, err)
 		assert.NotNil(t, graph)
 
@@ -211,7 +211,7 @@ func TestReact(t *testing.T) {
 			toolsReturnDirectly: map[string]bool{info.Name: true},
 		}
 
-		graph, err := newReact(ctx, config)
+		graph, err := newReact(ctx, config, nil)
 		assert.NoError(t, err)
 		assert.NotNil(t, graph)
 
@@ -303,7 +303,7 @@ func TestReact(t *testing.T) {
 			toolsReturnDirectly: map[string]bool{},
 		}
 
-		graph, err := newReact(ctx, config)
+		graph, err := newReact(ctx, config, nil)
 		assert.NoError(t, err)
 		assert.NotNil(t, graph)
 
@@ -413,7 +413,7 @@ func TestReact(t *testing.T) {
 			toolsReturnDirectly: map[string]bool{streamInfo.Name: true},
 		}
 
-		graph, err := newReact(ctx, config)
+		graph, err := newReact(ctx, config, nil)
 		assert.NoError(t, err)
 		assert.NotNil(t, graph)
 
@@ -502,7 +502,7 @@ func TestReact(t *testing.T) {
 			maxIterations:       6,
 		}
 
-		graph, err := newReact(ctx, config)
+		graph, err := newReact(ctx, config, nil)
 		assert.NoError(t, err)
 		assert.NotNil(t, graph)
 
@@ -532,7 +532,7 @@ func TestReact(t *testing.T) {
 			maxIterations:       5,
 		}
 
-		graph, err = newReact(ctx, config)
+		graph, err = newReact(ctx, config, nil)
 		assert.NoError(t, err)
 		assert.NotNil(t, graph)
 
