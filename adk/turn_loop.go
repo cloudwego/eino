@@ -78,6 +78,8 @@ func WithCancelOptions(opts ...CancelOption) ConsumeOption {
 	}
 }
 
+// WithConsumeCheckPointID sets the checkpoint ID for the consumed message.
+// When set, the checkpoint will be saved with this ID if an interrupt occurs.
 func WithConsumeCheckPointID(id string) ConsumeOption {
 	return func(config *consumeConfig) {
 		config.CheckPointID = id
@@ -101,6 +103,9 @@ type turnLoopRunConfig[T any] struct {
 // TurnLoopRunOption is an option for TurnLoop.Run.
 type TurnLoopRunOption[T any] func(*turnLoopRunConfig[T])
 
+// WithTurnLoopResume configures the TurnLoop to resume from a previously saved checkpoint.
+// The checkPointID identifies the checkpoint to resume from, and item is the original input
+// that triggered the interrupted execution.
 func WithTurnLoopResume[T any](checkPointID string, item T) TurnLoopRunOption[T] {
 	return func(c *turnLoopRunConfig[T]) {
 		c.checkPointID = checkPointID
@@ -300,6 +305,8 @@ func (l *TurnLoop[T]) WithCancel(ctx context.Context) (context.Context, TurnLoop
 // To enable checkpoint-based resumption, use WithTurnLoopResume:
 //
 //	err := turnLoop.Run(ctx, WithTurnLoopResume("session-123"))
+//
+//nolint:cyclop,funlen // This is a core method, splitting would make the logic harder to follow
 func (l *TurnLoop[T]) Run(ctx context.Context, opts ...TurnLoopRunOption[T]) error {
 	var runCfg turnLoopRunConfig[T]
 	for _, opt := range opts {
