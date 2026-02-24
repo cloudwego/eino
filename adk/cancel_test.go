@@ -207,7 +207,7 @@ func TestRunWithCancel_WithTools(t *testing.T) {
 
 		time.Sleep(100 * time.Millisecond)
 
-		err = cancelFn(ctx)
+		err = cancelFn()
 		assert.NoError(t, err)
 
 		start := time.Now()
@@ -276,7 +276,7 @@ func TestRunWithCancel_WithTools(t *testing.T) {
 
 		time.Sleep(100 * time.Millisecond)
 
-		err = cancelFn(ctx, WithCancelMode(CancelAfterChatModel))
+		err = cancelFn(WithCancelMode(CancelAfterChatModel))
 		assert.NoError(t, err)
 
 		var events []*AgentEvent
@@ -342,7 +342,7 @@ func TestRunWithCancel_WithTools(t *testing.T) {
 
 		time.Sleep(100 * time.Millisecond)
 
-		err = cancelFn(ctx, WithCancelMode(CancelAfterToolCall))
+		err = cancelFn(WithCancelMode(CancelAfterToolCall))
 		assert.NoError(t, err)
 
 		var events []*AgentEvent
@@ -452,7 +452,7 @@ func TestRunWithCancel_WithCheckpoint(t *testing.T) {
 
 		<-modelStarted
 
-		err = cancelFn(ctx)
+		err = cancelFn()
 		assert.NoError(t, err)
 
 		var events []*AgentEvent
@@ -518,11 +518,8 @@ func TestCancelFuncMultipleCalls(t *testing.T) {
 
 		<-modelStarted
 
-		cancelErr := cancelFn(ctx)
+		cancelErr := cancelFn()
 		assert.NoError(t, cancelErr)
-
-		cancelErr = cancelFn(ctx)
-		assert.ErrorIs(t, cancelErr, ErrAgentFinished)
 
 		for {
 			_, ok := iter.Next()
@@ -654,7 +651,7 @@ func TestRunWithCancel_Streaming(t *testing.T) {
 
 		time.Sleep(100 * time.Millisecond)
 
-		cancelErr := cancelFn(ctx)
+		cancelErr := cancelFn()
 		assert.NoError(t, cancelErr)
 
 		start := time.Now()
@@ -726,7 +723,7 @@ func TestRunWithCancel_Streaming(t *testing.T) {
 
 		time.Sleep(100 * time.Millisecond)
 
-		cancelErr := cancelFn(ctx, WithCancelMode(CancelAfterToolCall))
+		cancelErr := cancelFn(WithCancelMode(CancelAfterToolCall))
 		assert.NoError(t, cancelErr)
 
 		var events []*AgentEvent
@@ -808,7 +805,7 @@ func TestResumeWithCancel(t *testing.T) {
 		<-modelStarted
 		atomic.AddInt32(&modelCallCount, 1)
 
-		cancelErr := cancelFn(ctx)
+		cancelErr := cancelFn()
 		assert.NoError(t, cancelErr)
 
 		var events []*AgentEvent
@@ -931,7 +928,7 @@ func TestResumeWithCancel(t *testing.T) {
 		<-firstModelStarted
 		atomic.AddInt32(&modelCallCount, 1)
 
-		cancelErr := cancelFn(ctx)
+		cancelErr := cancelFn()
 		assert.NoError(t, cancelErr)
 
 		for {
@@ -1001,7 +998,7 @@ func TestResumeWithCancel(t *testing.T) {
 
 		time.Sleep(100 * time.Millisecond)
 
-		err = resumeCancelFn(ctx)
+		err = resumeCancelFn()
 		assert.NoError(t, err)
 
 		start := time.Now()
