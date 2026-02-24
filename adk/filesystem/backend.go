@@ -78,14 +78,6 @@ type ReadRequest struct {
 	Limit int
 }
 
-type OutputMode string
-
-const (
-	FilesWithMatchesOfOutputMode OutputMode = "files_with_matches"
-	ContentOfOutputMode          OutputMode = "content"
-	CountOfOutputMode            OutputMode = "count"
-)
-
 // GrepRequest contains parameters for searching file content.
 type GrepRequest struct {
 	// ===== Search Parameters =====

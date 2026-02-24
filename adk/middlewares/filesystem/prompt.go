@@ -62,7 +62,7 @@ Assume this tool is able to read all files on the machine. If the User provides 
 
 Usage:
 - The file_path parameter must be an absolute path, not a relative path
-- By default, it reads up to 500 lines starting from the beginning of the file
+- By default, it reads up to 2000 lines starting from the beginning of the file
 - **IMPORTANT for large files and codebase exploration**: Use pagination with offset and limit parameters to avoid context overflow
 	- First scan: read_file(path, limit=100) to see file structure
 	- Read more sections: read_file(path, offset=100, limit=200) for next 200 lines
@@ -78,7 +78,7 @@ Usage:
 
 使用方法：
 - file_path 参数必须是绝对路径，不能是相对路径
-- 默认情况下，从文件开头读取最多 500 行
+- 默认情况下，从文件开头读取最多 2000 行
 - **大文件和代码库探索的重要提示**：使用 offset 和 limit 参数进行分页，以避免上下文溢出
 	- 首次扫描：read_file(path, limit=100) 查看文件结构
 	- 读取更多部分：read_file(path, offset=100, limit=200) 读取接下来的 200 行
