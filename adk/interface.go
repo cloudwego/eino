@@ -291,6 +291,9 @@ const (
 // ErrAgentFinished is returned by Cancel when the agent has already finished execution.
 var ErrAgentFinished = errors.New("agent has already finished execution")
 
+// ErrAgentNotCancellable is returned by Cancel when the agent does not support cancellation.
+var ErrAgentNotCancellable = errors.New("agent does not implement CancellableAgent interface")
+
 type cancelConfig struct {
 	Mode    CancelMode
 	Timeout *time.Duration
@@ -298,12 +301,14 @@ type cancelConfig struct {
 
 type CancelOption func(*cancelConfig)
 
+// WithCancelMode sets the cancel mode for the cancel operation.
 func WithCancelMode(mode CancelMode) CancelOption {
 	return func(config *cancelConfig) {
 		config.Mode = mode
 	}
 }
 
+// WithCancelTimeout sets a timeout duration for CancelImmediate mode.
 func WithCancelTimeout(timeout time.Duration) CancelOption {
 	return func(config *cancelConfig) {
 		config.Timeout = &timeout
@@ -312,10 +317,12 @@ func WithCancelTimeout(timeout time.Duration) CancelOption {
 
 type CancelFunc func(context.Context, ...CancelOption) error
 
-type CancellableRun interface {
+type CancellableAgent interface {
+	Agent
 	RunWithCancel(ctx context.Context, input *AgentInput, options ...AgentRunOption) (*AsyncIterator[*AgentEvent], CancelFunc)
 }
 
-type CancellableResume interface {
+type CancellableResumableAgent interface {
+	ResumableAgent
 	ResumeWithCancel(ctx context.Context, info *ResumeInfo, opts ...AgentRunOption) (*AsyncIterator[*AgentEvent], CancelFunc)
 }

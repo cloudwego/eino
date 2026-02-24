@@ -47,6 +47,7 @@ output/*
 
 # Reports (generated analysis files)
 reports/
+/todos
 
 .DS_Store
 *.log
