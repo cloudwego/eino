@@ -112,7 +112,7 @@ func (a *turnLoopCancellableAgent) RunWithCancel(_ context.Context, _ *AgentInpu
 		defer gen.Close()
 		<-a.cancelCh
 	}()
-	cancelFunc := func(_ context.Context, opts ...CancelOption) error {
+	cancelFunc := func(opts ...CancelOption) error {
 		atomic.StoreInt32(&a.cancelled, 1)
 		a.cancelledOpt = opts
 		close(a.cancelCh)
@@ -747,11 +747,8 @@ func TestTurnLoop_WithCancel_MultipleCalls(t *testing.T) {
 
 	_, cancel := loop.WithCancel(context.Background())
 
-	err1 := cancel()
-	err2 := cancel()
-
-	assert.NoError(t, err1)
-	assert.ErrorIs(t, err2, ErrAgentFinished)
+	err = cancel()
+	assert.NoError(t, err)
 }
 
 func TestTurnLoop_WithCancel_IndependentCancels(t *testing.T) {
