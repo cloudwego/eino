@@ -132,7 +132,7 @@ func TestReductionMiddlewareClear(t *testing.T) {
 				"get_weather": {
 					Backend:      backend,
 					SkipClear:    false,
-					ClearHandler: defaultClearHandler("/tmp/clear", true, "read_file"),
+					ClearHandler: defaultClearHandler("/tmp", true, "read_file"),
 				},
 			},
 		}
@@ -358,7 +358,7 @@ func TestReductionMiddlewareClear(t *testing.T) {
 				"get_weather": {
 					Backend:      backend,
 					SkipClear:    false,
-					ClearHandler: defaultClearHandler("/tmp/clear", true, "read_file"),
+					ClearHandler: defaultClearHandler("/tmp", true, "read_file"),
 				},
 			},
 		}
@@ -462,12 +462,12 @@ func TestDefaultOffloadHandler(t *testing.T) {
 		ToolResult: &schema.ToolResult{Parts: []schema.ToolOutputPart{
 			{
 				Type: schema.ToolPartTypeText,
-				Text: "<persisted-output>Tool result saved to: /tmp/mock_call_id_12345\nUse read_file to view</persisted-output>",
+				Text: "<persisted-output>Tool result saved to: /tmp/clear/mock_call_id_12345\nUse read_file to view</persisted-output>",
 			},
 		}},
 		NeedClear:       true,
 		NeedOffload:     true,
-		OffloadFilePath: "/tmp/mock_call_id_12345",
+		OffloadFilePath: "/tmp/clear/mock_call_id_12345",
 		OffloadContent:  "hello",
 	}, info)
 
