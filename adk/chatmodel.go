@@ -356,8 +356,6 @@ func NewChatModelAgent(ctx context.Context, config *ChatModelAgentConfig) (*Chat
 		genInput = config.GenModelInput
 	}
 
-
-
 	tc := config.ToolsConfig
 
 	// Tool call middleware execution order (outermost to innermost):

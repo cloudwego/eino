@@ -244,8 +244,6 @@ func (b *BaseChatModelAgentMiddleware) AfterModelRewriteState(ctx context.Contex
 	return ctx, state, nil
 }
 
-
-
 // SetRunLocalValue sets a key-value pair that persists for the duration of the current agent Run() invocation.
 // The value is scoped to this specific execution and is not shared across different Run() calls or agent instances.
 //
