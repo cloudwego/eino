@@ -398,12 +398,6 @@ func newReadFileTool(fs filesystem.Backend, desc *string) (tool.BaseTool, error)
 		return nil, err
 	}
 	return utils.InferTool(ToolNameReadFile, d, func(ctx context.Context, input readFileArgs) (string, error) {
-		if input.Offset < 0 {
-			input.Offset = 0
-		}
-		if input.Limit <= 0 {
-			input.Limit = 200
-		}
 		return fs.Read(ctx, &filesystem.ReadRequest{
 			FilePath: input.FilePath,
 			Offset:   input.Offset,
@@ -518,7 +512,7 @@ type grepArgs struct {
 
 	// Context is the number of lines to show before and after each match.
 	// Only applicable when output_mode is "content".
-	Context *int `json:"context,omitempty" jsonschema:"description=Number of lines to show before and after each match (rg -C). Requires output_mode: 'content'\\, ignored otherwise."`
+	Context *int `json:"-C,omitempty" jsonschema:"description=Number of lines to show before and after each match (rg -C). Requires output_mode: 'content'\\, ignored otherwise."`
 
 	// BeforeLines is the number of lines to show before each match.
 	// Only applicable when output_mode is "content".
