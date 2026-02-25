@@ -600,9 +600,14 @@ func defaultTruncHandler(rootDir string, truncMaxLength int) func(ctx context.Co
 
 func defaultClearHandler(rootDir string, needOffload bool, readFileToolName string) func(ctx context.Context, detail *ToolDetail) (*ClearResult, error) {
 	return func(ctx context.Context, detail *ToolDetail) (clearResult *ClearResult, err error) {
-		if len(detail.ToolResult.Parts) == 0 || detail.ToolResult.Parts[0].Type != schema.ToolPartTypeText {
-			// brutal judge
-			return nil, fmt.Errorf("default offload currently not support multimodal content")
+		if len(detail.ToolResult.Parts) == 0 {
+			return &ClearResult{NeedClear: false}, nil
+		}
+		for _, part := range detail.ToolResult.Parts {
+			if part.Type != schema.ToolPartTypeText {
+				// brutal judge
+				return nil, fmt.Errorf("default offload currently not support multimodal content type=%v", part.Type)
+			}
 		}
 
 		fileName := detail.ToolContext.CallID
