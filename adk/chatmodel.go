@@ -326,7 +326,7 @@ type ChatModelAgent struct {
 
 	exit tool.BaseTool
 
-	handlers    []handlerInfo
+	handlers    []ChatModelAgentMiddleware
 	middlewares []AgentMiddleware
 
 	modelRetryConfig *ModelRetryConfig
@@ -356,10 +356,7 @@ func NewChatModelAgent(ctx context.Context, config *ChatModelAgentConfig) (*Chat
 		genInput = config.GenModelInput
 	}
 
-	handlerInfos := make([]handlerInfo, len(config.Handlers))
-	for i, h := range config.Handlers {
-		handlerInfos[i] = newHandlerInfo(h)
-	}
+
 
 	tc := config.ToolsConfig
 
@@ -390,7 +387,7 @@ func NewChatModelAgent(ctx context.Context, config *ChatModelAgentConfig) (*Chat
 		exit:             config.Exit,
 		outputKey:        config.OutputKey,
 		maxIterations:    config.MaxIterations,
-		handlers:         handlerInfos,
+		handlers:         config.Handlers,
 		middlewares:      config.Middlewares,
 		modelRetryConfig: config.ModelRetryConfig,
 	}, nil
@@ -610,12 +607,10 @@ func (a *ChatModelAgent) applyBeforeAgent(ctx context.Context, ec *execContext) 
 	}
 
 	var err error
-	for i, info := range a.handlers {
-		if info.hasBeforeAgent {
-			ctx, runCtx, err = info.handler.BeforeAgent(ctx, runCtx)
-			if err != nil {
-				return ctx, nil, fmt.Errorf("handler[%d] (%T) BeforeAgent failed: %w", i, info.handler, err)
-			}
+	for i, handler := range a.handlers {
+		ctx, runCtx, err = handler.BeforeAgent(ctx, runCtx)
+		if err != nil {
+			return ctx, nil, fmt.Errorf("handler[%d] (%T) BeforeAgent failed: %w", i, handler, err)
 		}
 	}
 
