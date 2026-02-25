@@ -34,7 +34,7 @@ type generateEndpoint func(ctx context.Context, input []*schema.Message, opts ..
 type streamEndpoint func(ctx context.Context, input []*schema.Message, opts ...model.Option) (*schema.StreamReader[*schema.Message], error)
 
 type modelWrapperConfig struct {
-	handlers    []handlerInfo
+	handlers    []ChatModelAgentMiddleware
 	middlewares []AgentMiddleware
 	retryConfig *ModelRetryConfig
 	toolInfos   []*schema.ToolInfo
@@ -91,157 +91,143 @@ func (m *callbackInjectedModel) Stream(ctx context.Context, input []*schema.Mess
 	return wrappedStream, nil
 }
 
-func handlersToToolMiddlewares(handlers []handlerInfo) []compose.ToolMiddleware {
+func handlersToToolMiddlewares(handlers []ChatModelAgentMiddleware) []compose.ToolMiddleware {
 	var middlewares []compose.ToolMiddleware
 	for i := len(handlers) - 1; i >= 0; i-- {
-		h := handlers[i]
-		if !h.hasWrapInvokableToolCall && !h.hasWrapStreamableToolCall && !h.hasWrapEnhancedInvokableToolCall && !h.hasWrapEnhancedStreamableToolCall {
-			continue
-		}
+		handler := handlers[i]
 
 		m := compose.ToolMiddleware{}
 
-		if h.hasWrapInvokableToolCall {
-			handler := h.handler
-			m.Invokable = func(next compose.InvokableToolEndpoint) compose.InvokableToolEndpoint {
-				return func(ctx context.Context, input *compose.ToolInput) (*compose.ToolOutput, error) {
-					tCtx := &ToolContext{
-						Name:   input.Name,
-						CallID: input.CallID,
-					}
-					wrappedEndpoint, err := handler.WrapInvokableToolCall(
-						ctx,
-						func(ctx context.Context, argumentsInJSON string, opts ...tool.Option) (string, error) {
-							output, err := next(ctx, &compose.ToolInput{
-								Name:        input.Name,
-								CallID:      input.CallID,
-								Arguments:   argumentsInJSON,
-								CallOptions: opts,
-							})
-							if err != nil {
-								return "", err
-							}
-							return output.Result, nil
-						},
-						tCtx,
-					)
-					if err != nil {
-						return nil, err
-					}
-					result, err := wrappedEndpoint(ctx, input.Arguments, input.CallOptions...)
-					if err != nil {
-						return nil, err
-					}
-					return &compose.ToolOutput{Result: result}, nil
+		h := handler
+		m.Invokable = func(next compose.InvokableToolEndpoint) compose.InvokableToolEndpoint {
+			return func(ctx context.Context, input *compose.ToolInput) (*compose.ToolOutput, error) {
+				tCtx := &ToolContext{
+					Name:   input.Name,
+					CallID: input.CallID,
 				}
+				wrappedEndpoint, err := h.WrapInvokableToolCall(
+					ctx,
+					func(ctx context.Context, argumentsInJSON string, opts ...tool.Option) (string, error) {
+						output, err := next(ctx, &compose.ToolInput{
+							Name:        input.Name,
+							CallID:      input.CallID,
+							Arguments:   argumentsInJSON,
+							CallOptions: opts,
+						})
+						if err != nil {
+							return "", err
+						}
+						return output.Result, nil
+					},
+					tCtx,
+				)
+				if err != nil {
+					return nil, err
+				}
+				result, err := wrappedEndpoint(ctx, input.Arguments, input.CallOptions...)
+				if err != nil {
+					return nil, err
+				}
+				return &compose.ToolOutput{Result: result}, nil
 			}
 		}
 
-		if h.hasWrapStreamableToolCall {
-			handler := h.handler
-			m.Streamable = func(next compose.StreamableToolEndpoint) compose.StreamableToolEndpoint {
-				return func(ctx context.Context, input *compose.ToolInput) (*compose.StreamToolOutput, error) {
-					tCtx := &ToolContext{
-						Name:   input.Name,
-						CallID: input.CallID,
-					}
-					wrappedEndpoint, err := handler.WrapStreamableToolCall(
-						ctx,
-						func(ctx context.Context, argumentsInJSON string, opts ...tool.Option) (*schema.StreamReader[string], error) {
-							output, err := next(ctx, &compose.ToolInput{
-								Name:        input.Name,
-								CallID:      input.CallID,
-								Arguments:   argumentsInJSON,
-								CallOptions: opts,
-							})
-							if err != nil {
-								return nil, err
-							}
-							return output.Result, nil
-						},
-						tCtx,
-					)
-					if err != nil {
-						return nil, err
-					}
-					result, err := wrappedEndpoint(ctx, input.Arguments, input.CallOptions...)
-					if err != nil {
-						return nil, err
-					}
-					return &compose.StreamToolOutput{Result: result}, nil
+		m.Streamable = func(next compose.StreamableToolEndpoint) compose.StreamableToolEndpoint {
+			return func(ctx context.Context, input *compose.ToolInput) (*compose.StreamToolOutput, error) {
+				tCtx := &ToolContext{
+					Name:   input.Name,
+					CallID: input.CallID,
 				}
+				wrappedEndpoint, err := h.WrapStreamableToolCall(
+					ctx,
+					func(ctx context.Context, argumentsInJSON string, opts ...tool.Option) (*schema.StreamReader[string], error) {
+						output, err := next(ctx, &compose.ToolInput{
+							Name:        input.Name,
+							CallID:      input.CallID,
+							Arguments:   argumentsInJSON,
+							CallOptions: opts,
+						})
+						if err != nil {
+							return nil, err
+						}
+						return output.Result, nil
+					},
+					tCtx,
+				)
+				if err != nil {
+					return nil, err
+				}
+				result, err := wrappedEndpoint(ctx, input.Arguments, input.CallOptions...)
+				if err != nil {
+					return nil, err
+				}
+				return &compose.StreamToolOutput{Result: result}, nil
 			}
 		}
 
-		if h.hasWrapEnhancedInvokableToolCall {
-			handler := h.handler
-			m.EnhancedInvokable = func(next compose.EnhancedInvokableToolEndpoint) compose.EnhancedInvokableToolEndpoint {
-				return func(ctx context.Context, input *compose.ToolInput) (*compose.EnhancedInvokableToolOutput, error) {
-					tCtx := &ToolContext{
-						Name:   input.Name,
-						CallID: input.CallID,
-					}
-					wrappedEndpoint, err := handler.WrapEnhancedInvokableToolCall(
-						ctx,
-						func(ctx context.Context, toolArgument *schema.ToolArgument, opts ...tool.Option) (*schema.ToolResult, error) {
-							output, err := next(ctx, &compose.ToolInput{
-								Name:        input.Name,
-								CallID:      input.CallID,
-								Arguments:   toolArgument.Text,
-								CallOptions: opts,
-							})
-							if err != nil {
-								return nil, err
-							}
-							return output.Result, nil
-						},
-						tCtx,
-					)
-					if err != nil {
-						return nil, err
-					}
-					result, err := wrappedEndpoint(ctx, &schema.ToolArgument{Text: input.Arguments}, input.CallOptions...)
-					if err != nil {
-						return nil, err
-					}
-					return &compose.EnhancedInvokableToolOutput{Result: result}, nil
+		m.EnhancedInvokable = func(next compose.EnhancedInvokableToolEndpoint) compose.EnhancedInvokableToolEndpoint {
+			return func(ctx context.Context, input *compose.ToolInput) (*compose.EnhancedInvokableToolOutput, error) {
+				tCtx := &ToolContext{
+					Name:   input.Name,
+					CallID: input.CallID,
 				}
+				wrappedEndpoint, err := h.WrapEnhancedInvokableToolCall(
+					ctx,
+					func(ctx context.Context, toolArgument *schema.ToolArgument, opts ...tool.Option) (*schema.ToolResult, error) {
+						output, err := next(ctx, &compose.ToolInput{
+							Name:        input.Name,
+							CallID:      input.CallID,
+							Arguments:   toolArgument.Text,
+							CallOptions: opts,
+						})
+						if err != nil {
+							return nil, err
+						}
+						return output.Result, nil
+					},
+					tCtx,
+				)
+				if err != nil {
+					return nil, err
+				}
+				result, err := wrappedEndpoint(ctx, &schema.ToolArgument{Text: input.Arguments}, input.CallOptions...)
+				if err != nil {
+					return nil, err
+				}
+				return &compose.EnhancedInvokableToolOutput{Result: result}, nil
 			}
 		}
 
-		if h.hasWrapEnhancedStreamableToolCall {
-			handler := h.handler
-			m.EnhancedStreamable = func(next compose.EnhancedStreamableToolEndpoint) compose.EnhancedStreamableToolEndpoint {
-				return func(ctx context.Context, input *compose.ToolInput) (*compose.EnhancedStreamableToolOutput, error) {
-					tCtx := &ToolContext{
-						Name:   input.Name,
-						CallID: input.CallID,
-					}
-					wrappedEndpoint, err := handler.WrapEnhancedStreamableToolCall(
-						ctx,
-						func(ctx context.Context, toolArgument *schema.ToolArgument, opts ...tool.Option) (*schema.StreamReader[*schema.ToolResult], error) {
-							output, err := next(ctx, &compose.ToolInput{
-								Name:        input.Name,
-								CallID:      input.CallID,
-								Arguments:   toolArgument.Text,
-								CallOptions: opts,
-							})
-							if err != nil {
-								return nil, err
-							}
-							return output.Result, nil
-						},
-						tCtx,
-					)
-					if err != nil {
-						return nil, err
-					}
-					result, err := wrappedEndpoint(ctx, &schema.ToolArgument{Text: input.Arguments}, input.CallOptions...)
-					if err != nil {
-						return nil, err
-					}
-					return &compose.EnhancedStreamableToolOutput{Result: result}, nil
+		m.EnhancedStreamable = func(next compose.EnhancedStreamableToolEndpoint) compose.EnhancedStreamableToolEndpoint {
+			return func(ctx context.Context, input *compose.ToolInput) (*compose.EnhancedStreamableToolOutput, error) {
+				tCtx := &ToolContext{
+					Name:   input.Name,
+					CallID: input.CallID,
 				}
+				wrappedEndpoint, err := h.WrapEnhancedStreamableToolCall(
+					ctx,
+					func(ctx context.Context, toolArgument *schema.ToolArgument, opts ...tool.Option) (*schema.StreamReader[*schema.ToolResult], error) {
+						output, err := next(ctx, &compose.ToolInput{
+							Name:        input.Name,
+							CallID:      input.CallID,
+							Arguments:   toolArgument.Text,
+							CallOptions: opts,
+						})
+						if err != nil {
+							return nil, err
+						}
+						return output.Result, nil
+					},
+					tCtx,
+				)
+				if err != nil {
+					return nil, err
+				}
+				result, err := wrappedEndpoint(ctx, &schema.ToolArgument{Text: input.Arguments}, input.CallOptions...)
+				if err != nil {
+					return nil, err
+				}
+				return &compose.EnhancedStreamableToolOutput{Result: result}, nil
 			}
 		}
 
@@ -500,7 +486,7 @@ func (h *eventSenderToolHandler) WrapEnhancedStreamableToolCall(next compose.Enh
 type stateModelWrapper struct {
 	inner            model.BaseChatModel
 	original         model.BaseChatModel
-	handlers         []handlerInfo
+	handlers         []ChatModelAgentMiddleware
 	middlewares      []AgentMiddleware
 	toolInfos        []*schema.ToolInfo
 	modelRetryConfig *ModelRetryConfig
@@ -518,8 +504,8 @@ func (w *stateModelWrapper) GetType() string {
 }
 
 func (w *stateModelWrapper) hasUserEventSender() bool {
-	for _, info := range w.handlers {
-		if _, ok := info.handler.(*eventSenderModelWrapper); ok {
+	for _, handler := range w.handlers {
+		if _, ok := handler.(*eventSenderModelWrapper); ok {
 			return true
 		}
 	}
@@ -531,20 +517,18 @@ func (w *stateModelWrapper) wrapGenerateEndpoint(endpoint generateEndpoint) gene
 	retryConfig := w.modelRetryConfig
 
 	for i := len(w.handlers) - 1; i >= 0; i-- {
-		if w.handlers[i].hasWrapModel {
-			handler := w.handlers[i].handler
-			innerEndpoint := endpoint
-			baseToolInfos := w.toolInfos
-			endpoint = func(ctx context.Context, input []*schema.Message, opts ...model.Option) (*schema.Message, error) {
-				baseOpts := &model.Options{Tools: baseToolInfos}
-				commonOpts := model.GetCommonOptions(baseOpts, opts...)
-				mc := &ModelContext{Tools: commonOpts.Tools, ModelRetryConfig: retryConfig}
-				wrappedModel, err := handler.WrapModel(ctx, &endpointModel{generate: innerEndpoint}, mc)
-				if err != nil {
-					return nil, err
-				}
-				return wrappedModel.Generate(ctx, input, opts...)
+		handler := w.handlers[i]
+		innerEndpoint := endpoint
+		baseToolInfos := w.toolInfos
+		endpoint = func(ctx context.Context, input []*schema.Message, opts ...model.Option) (*schema.Message, error) {
+			baseOpts := &model.Options{Tools: baseToolInfos}
+			commonOpts := model.GetCommonOptions(baseOpts, opts...)
+			mc := &ModelContext{Tools: commonOpts.Tools, ModelRetryConfig: retryConfig}
+			wrappedModel, err := handler.WrapModel(ctx, &endpointModel{generate: innerEndpoint}, mc)
+			if err != nil {
+				return nil, err
 			}
+			return wrappedModel.Generate(ctx, input, opts...)
 		}
 	}
 
@@ -581,20 +565,18 @@ func (w *stateModelWrapper) wrapStreamEndpoint(endpoint streamEndpoint) streamEn
 	retryConfig := w.modelRetryConfig
 
 	for i := len(w.handlers) - 1; i >= 0; i-- {
-		if w.handlers[i].hasWrapModel {
-			handler := w.handlers[i].handler
-			innerEndpoint := endpoint
-			baseToolInfos := w.toolInfos
-			endpoint = func(ctx context.Context, input []*schema.Message, opts ...model.Option) (*schema.StreamReader[*schema.Message], error) {
-				baseOpts := &model.Options{Tools: baseToolInfos}
-				commonOpts := model.GetCommonOptions(baseOpts, opts...)
-				mc := &ModelContext{Tools: commonOpts.Tools, ModelRetryConfig: retryConfig}
-				wrappedModel, err := handler.WrapModel(ctx, &endpointModel{stream: innerEndpoint}, mc)
-				if err != nil {
-					return nil, err
-				}
-				return wrappedModel.Stream(ctx, input, opts...)
+		handler := w.handlers[i]
+		innerEndpoint := endpoint
+		baseToolInfos := w.toolInfos
+		endpoint = func(ctx context.Context, input []*schema.Message, opts ...model.Option) (*schema.StreamReader[*schema.Message], error) {
+			baseOpts := &model.Options{Tools: baseToolInfos}
+			commonOpts := model.GetCommonOptions(baseOpts, opts...)
+			mc := &ModelContext{Tools: commonOpts.Tools, ModelRetryConfig: retryConfig}
+			wrappedModel, err := handler.WrapModel(ctx, &endpointModel{stream: innerEndpoint}, mc)
+			if err != nil {
+				return nil, err
 			}
+			return wrappedModel.Stream(ctx, input, opts...)
 		}
 	}
 
@@ -646,13 +628,11 @@ func (w *stateModelWrapper) Generate(ctx context.Context, input []*schema.Messag
 	baseOpts := &model.Options{Tools: w.toolInfos}
 	commonOpts := model.GetCommonOptions(baseOpts, opts...)
 	mc := &ModelContext{Tools: commonOpts.Tools, ModelRetryConfig: w.modelRetryConfig}
-	for _, info := range w.handlers {
-		if info.hasBeforeModelRewriteState {
-			var err error
-			ctx, state, err = info.handler.BeforeModelRewriteState(ctx, state, mc)
-			if err != nil {
-				return nil, err
-			}
+	for _, handler := range w.handlers {
+		var err error
+		ctx, state, err = handler.BeforeModelRewriteState(ctx, state, mc)
+		if err != nil {
+			return nil, err
 		}
 	}
 
@@ -668,12 +648,10 @@ func (w *stateModelWrapper) Generate(ctx context.Context, input []*schema.Messag
 	}
 	state.Messages = append(state.Messages, result)
 
-	for _, info := range w.handlers {
-		if info.hasAfterModelRewriteState {
-			ctx, state, err = info.handler.AfterModelRewriteState(ctx, state, mc)
-			if err != nil {
-				return nil, err
-			}
+	for _, handler := range w.handlers {
+		ctx, state, err = handler.AfterModelRewriteState(ctx, state, mc)
+		if err != nil {
+			return nil, err
 		}
 	}
 
@@ -716,13 +694,11 @@ func (w *stateModelWrapper) Stream(ctx context.Context, input []*schema.Message,
 	baseOpts := &model.Options{Tools: w.toolInfos}
 	commonOpts := model.GetCommonOptions(baseOpts, opts...)
 	mc := &ModelContext{Tools: commonOpts.Tools, ModelRetryConfig: w.modelRetryConfig}
-	for _, info := range w.handlers {
-		if info.hasBeforeModelRewriteState {
-			var err error
-			ctx, state, err = info.handler.BeforeModelRewriteState(ctx, state, mc)
-			if err != nil {
-				return nil, err
-			}
+	for _, handler := range w.handlers {
+		var err error
+		ctx, state, err = handler.BeforeModelRewriteState(ctx, state, mc)
+		if err != nil {
+			return nil, err
 		}
 	}
 
@@ -742,12 +718,10 @@ func (w *stateModelWrapper) Stream(ctx context.Context, input []*schema.Message,
 	}
 	state.Messages = append(state.Messages, result)
 
-	for _, info := range w.handlers {
-		if info.hasAfterModelRewriteState {
-			ctx, state, err = info.handler.AfterModelRewriteState(ctx, state, mc)
-			if err != nil {
-				return nil, err
-			}
+	for _, handler := range w.handlers {
+		ctx, state, err = handler.AfterModelRewriteState(ctx, state, mc)
+		if err != nil {
+			return nil, err
 		}
 	}
 
