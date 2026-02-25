@@ -612,7 +612,7 @@ func defaultClearHandler(rootDir string, needOffload bool, readFileToolName stri
 
 		var nResult string
 		if needOffload {
-			filePath := filepath.Join(rootDir, fileName)
+			filePath := filepath.Join(rootDir, "clear", fileName)
 			nResult, err = pyfmt.Fmt(getClearWithOffloadingFmt(), map[string]any{
 				"file_path":      filePath,
 				"read_tool_name": readFileToolName,
