@@ -757,7 +757,6 @@ func (l *TurnLoopV2[T]) Wait() *TurnLoopV2Result[T] {
 }
 
 // run is the main loop that processes items from the buffer.
-// This is a placeholder implementation that will be completed in Step 4.
 func (l *TurnLoopV2[T]) run(ctx context.Context) {
 	defer l.cleanup()
 
@@ -768,6 +767,11 @@ func (l *TurnLoopV2[T]) run(ctx context.Context) {
 
 		first, ok := l.buffer.Receive()
 		if !ok {
+			return
+		}
+
+		if l.cancelSig.isCancelled() {
+			l.buffer.PushFront([]T{first})
 			return
 		}
 
@@ -782,9 +786,20 @@ func (l *TurnLoopV2[T]) run(ctx context.Context) {
 
 		l.buffer.PushFront(result.Remaining)
 
+		if l.cancelSig.isCancelled() {
+			l.buffer.PushFront(result.Consumed)
+			return
+		}
+
 		_, err = l.config.GetAgent(ctx, result.Consumed)
 		if err != nil {
+			l.buffer.PushFront(result.Consumed)
 			l.runErr = err
+			return
+		}
+
+		if l.cancelSig.isCancelled() {
+			l.buffer.PushFront(result.Consumed)
 			return
 		}
 	}

@@ -1377,3 +1377,84 @@ func TestTurnLoopV2_ConcurrentPush(t *testing.T) {
 	assert.True(t, processed > 0, "should have processed some items")
 	assert.True(t, int(processed)+unhandled <= 100, "total should not exceed pushed amount")
 }
+
+func TestTurnLoopV2_CancelAfterReceive_RecoverItem(t *testing.T) {
+	receiveStarted := make(chan struct{})
+	cancelDone := make(chan struct{})
+
+	loop := RunTurnLoopV2(context.Background(), TurnLoopV2Config[string]{
+		GenInput: func(ctx context.Context, items []string) (*GenInputResult[string], error) {
+			close(receiveStarted)
+			<-cancelDone
+			time.Sleep(50 * time.Millisecond)
+			return &GenInputResult[string]{Input: &AgentInput{}, Consumed: items}, nil
+		},
+		GetAgent: func(ctx context.Context, consumed []string) (Agent, error) {
+			return &turnLoopMockAgent{name: "test"}, nil
+		},
+	})
+
+	loop.Push("msg1")
+	<-receiveStarted
+
+	loop.Cancel()
+	close(cancelDone)
+
+	result := loop.Wait()
+	assert.NoError(t, result.Error)
+}
+
+func TestTurnLoopV2_CancelAfterGenInput_RecoverConsumed(t *testing.T) {
+	genInputDone := make(chan struct{})
+
+	loop := RunTurnLoopV2(context.Background(), TurnLoopV2Config[string]{
+		GenInput: func(ctx context.Context, items []string) (*GenInputResult[string], error) {
+			close(genInputDone)
+			time.Sleep(50 * time.Millisecond)
+			return &GenInputResult[string]{
+				Input:     &AgentInput{},
+				Consumed:  items[:1],
+				Remaining: items[1:],
+			}, nil
+		},
+		GetAgent: func(ctx context.Context, consumed []string) (Agent, error) {
+			time.Sleep(100 * time.Millisecond)
+			return &turnLoopMockAgent{name: "test"}, nil
+		},
+	})
+
+	loop.Push("msg1")
+	loop.Push("msg2")
+
+	<-genInputDone
+
+	time.Sleep(60 * time.Millisecond)
+	loop.Cancel()
+
+	result := loop.Wait()
+	assert.NoError(t, result.Error)
+}
+
+func TestTurnLoopV2_GetAgentError_RecoverConsumed(t *testing.T) {
+	agentErr := errors.New("get agent error")
+
+	loop := RunTurnLoopV2(context.Background(), TurnLoopV2Config[string]{
+		GenInput: func(ctx context.Context, items []string) (*GenInputResult[string], error) {
+			return &GenInputResult[string]{
+				Input:     &AgentInput{},
+				Consumed:  items[:1],
+				Remaining: items[1:],
+			}, nil
+		},
+		GetAgent: func(ctx context.Context, c []string) (Agent, error) {
+			return nil, agentErr
+		},
+	})
+
+	loop.Push("msg1")
+	loop.Push("msg2")
+
+	result := loop.Wait()
+	assert.ErrorIs(t, result.Error, agentErr)
+	assert.True(t, len(result.UnhandledItems) >= 1, "should recover at least the consumed item and remaining")
+}
