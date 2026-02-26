@@ -77,8 +77,8 @@ func (ch *UnboundedChan[T]) Close() {
 	}
 }
 
-// TakeAll removes and returns all buffered items atomically.
-// Returns nil if the buffer is empty.
+// TakeAll removes and returns all values from the channel atomically.
+// Returns nil if the channel is empty.
 func (ch *UnboundedChan[T]) TakeAll() []T {
 	ch.mutex.Lock()
 	defer ch.mutex.Unlock()
@@ -87,22 +87,22 @@ func (ch *UnboundedChan[T]) TakeAll() []T {
 		return nil
 	}
 
-	items := ch.buffer
+	values := ch.buffer
 	ch.buffer = nil
-	return items
+	return values
 }
 
-// PushFront adds items to the front of the buffer.
-// This is useful for recovering items that need to be reprocessed.
-// Does nothing if items is empty.
-func (ch *UnboundedChan[T]) PushFront(items []T) {
-	if len(items) == 0 {
+// PushFront adds values to the front of the channel.
+// This is useful for recovering values that need to be reprocessed.
+// Does nothing if values is empty.
+func (ch *UnboundedChan[T]) PushFront(values []T) {
+	if len(values) == 0 {
 		return
 	}
 
 	ch.mutex.Lock()
 	defer ch.mutex.Unlock()
 
-	ch.buffer = append(items, ch.buffer...)
+	ch.buffer = append(values, ch.buffer...)
 	ch.notEmpty.Signal()
 }

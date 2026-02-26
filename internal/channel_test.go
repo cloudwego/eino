@@ -223,10 +223,10 @@ func TestUnboundedChan_BlockingReceive(t *testing.T) {
 func TestUnboundedChan_TakeAll(t *testing.T) {
 	ch := NewUnboundedChan[int]()
 
-	// Test TakeAll on empty buffer
+	// Test TakeAll on empty channel
 	items := ch.TakeAll()
 	if items != nil {
-		t.Errorf("TakeAll on empty buffer should return nil, got %v", items)
+		t.Errorf("TakeAll on empty channel should return nil, got %v", items)
 	}
 
 	// Send some values
@@ -234,24 +234,24 @@ func TestUnboundedChan_TakeAll(t *testing.T) {
 	ch.Send(2)
 	ch.Send(3)
 
-	// Test TakeAll returns all items
+	// Test TakeAll returns all values
 	items = ch.TakeAll()
 	if len(items) != 3 {
-		t.Errorf("expected 3 items, got %d", len(items))
+		t.Errorf("expected 3 values, got %d", len(items))
 	}
 	if items[0] != 1 || items[1] != 2 || items[2] != 3 {
-		t.Errorf("unexpected items: %v", items)
+		t.Errorf("unexpected values: %v", items)
 	}
 
-	// Buffer should be empty now
+	// Channel should be empty now
 	if len(ch.buffer) != 0 {
-		t.Errorf("buffer should be empty after TakeAll, got %d items", len(ch.buffer))
+		t.Errorf("channel should be empty after TakeAll, got %d values", len(ch.buffer))
 	}
 
 	// TakeAll again should return nil
 	items = ch.TakeAll()
 	if items != nil {
-		t.Errorf("TakeAll on empty buffer should return nil, got %v", items)
+		t.Errorf("TakeAll on empty channel should return nil, got %v", items)
 	}
 }
 
@@ -269,35 +269,35 @@ func TestUnboundedChan_TakeAll_Partial(t *testing.T) {
 		t.Errorf("expected (1, true), got (%d, %v)", val, ok)
 	}
 
-	// TakeAll should return remaining items
+	// TakeAll should return remaining values
 	items := ch.TakeAll()
 	if len(items) != 2 {
-		t.Errorf("expected 2 items, got %d", len(items))
+		t.Errorf("expected 2 values, got %d", len(items))
 	}
 	if items[0] != 2 || items[1] != 3 {
-		t.Errorf("unexpected items: %v", items)
+		t.Errorf("unexpected values: %v", items)
 	}
 }
 
 func TestUnboundedChan_PushFront(t *testing.T) {
 	ch := NewUnboundedChan[int]()
 
-	// Test PushFront with empty items (should do nothing)
+	// Test PushFront with empty values (should do nothing)
 	ch.PushFront(nil)
 	ch.PushFront([]int{})
 	if len(ch.buffer) != 0 {
-		t.Errorf("PushFront with empty items should not add anything, got %d items", len(ch.buffer))
+		t.Errorf("PushFront with empty values should not add anything, got %d values", len(ch.buffer))
 	}
 
 	// Send some values
 	ch.Send(3)
 	ch.Send(4)
 
-	// PushFront should prepend items
+	// PushFront should prepend values
 	ch.PushFront([]int{1, 2})
 
 	if len(ch.buffer) != 4 {
-		t.Errorf("expected 4 items, got %d", len(ch.buffer))
+		t.Errorf("expected 4 values, got %d", len(ch.buffer))
 	}
 	if ch.buffer[0] != 1 || ch.buffer[1] != 2 || ch.buffer[2] != 3 || ch.buffer[3] != 4 {
 		t.Errorf("unexpected buffer: %v", ch.buffer)
@@ -314,14 +314,14 @@ func TestUnboundedChan_PushFront(t *testing.T) {
 	}
 }
 
-func TestUnboundedChan_PushFront_EmptyBuffer(t *testing.T) {
+func TestUnboundedChan_PushFront_EmptyChannel(t *testing.T) {
 	ch := NewUnboundedChan[int]()
 
-	// PushFront to empty buffer
+	// PushFront to empty channel
 	ch.PushFront([]int{1, 2, 3})
 
 	if len(ch.buffer) != 3 {
-		t.Errorf("expected 3 items, got %d", len(ch.buffer))
+		t.Errorf("expected 3 values, got %d", len(ch.buffer))
 	}
 
 	// Receive should work
@@ -406,7 +406,7 @@ func TestUnboundedChan_TakeAll_PushFront_Concurrent(t *testing.T) {
 	wg.Wait()
 	ch.Close()
 
-	// Drain remaining items
+	// Drain remaining values
 	remaining := ch.TakeAll()
 	if remaining != nil {
 		mu.Lock()
@@ -414,14 +414,15 @@ func TestUnboundedChan_TakeAll_PushFront_Concurrent(t *testing.T) {
 		mu.Unlock()
 	}
 
-	// Count total items collected
+	// Count total values collected
 	total := 0
 	for _, batch := range takeAllResults {
 		total += len(batch)
 	}
 
-	// We should have at least some items (exact count depends on timing)
-	if total == 0 {
-		t.Error("should have collected some items")
+	// We should have exactly numOps (from Send) + numOps/10 (from PushFront) values
+	expected := numOps + numOps/10
+	if total != expected {
+		t.Errorf("expected %d values, got %d", expected, total)
 	}
 }
