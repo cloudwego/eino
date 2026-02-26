@@ -126,7 +126,7 @@ type TurnLoop[T any] struct {
 
 	buffer *internal.UnboundedChan[T]
 
-	stopped atomic.Bool
+	stopped int32
 
 	done chan struct{}
 
@@ -181,7 +181,7 @@ func RunTurnLoop[T any](ctx context.Context, cfg TurnLoopConfig[T]) *TurnLoop[T]
 // This method is non-blocking and thread-safe.
 // Returns ErrTurnLoopStopped if the loop has stopped.
 func (l *TurnLoop[T]) Push(item T) (err error) {
-	if l.stopped.Load() {
+	if atomic.LoadInt32(&l.stopped) != 0 {
 		return ErrTurnLoopStopped
 	}
 
@@ -209,7 +209,7 @@ func (l *TurnLoop[T]) Cancel(opts ...TurnLoopCancelOption) {
 		l.cancelCfg = cfg
 		l.cancelSig.cancel(cfg)
 
-		l.stopped.Store(true)
+		atomic.StoreInt32(&l.stopped, 1)
 
 		l.buffer.Close()
 	})
@@ -384,7 +384,7 @@ func (l *TurnLoop[T]) runAgentAndHandleEvents(
 }
 
 func (l *TurnLoop[T]) cleanup() {
-	l.stopped.Store(true)
+	atomic.StoreInt32(&l.stopped, 1)
 
 	l.result = &TurnLoopResult[T]{
 		Error:          l.runErr,
