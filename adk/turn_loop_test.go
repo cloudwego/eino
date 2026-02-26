@@ -263,7 +263,7 @@ func TestTurnLoop_CancelWithMode(t *testing.T) {
 		},
 	})
 
-	loop.Cancel(WithTurnLoopCancelMode(CancelAfterToolCall), WithSkipCheckpoint())
+	loop.Cancel(WithTurnLoopCancelMode(CancelAfterToolCall))
 
 	result := loop.Wait()
 	assert.NoError(t, result.Error)
@@ -578,7 +578,7 @@ func TestTurnLoop_CancelOptionsArePassed(t *testing.T) {
 		},
 	})
 
-	loop.Cancel(WithTurnLoopCancelMode(CancelAfterToolCall), WithSkipCheckpoint())
+	loop.Cancel(WithTurnLoopCancelMode(CancelAfterToolCall))
 
 	result := loop.Wait()
 	assert.NoError(t, result.Error)

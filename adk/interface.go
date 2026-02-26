@@ -292,9 +292,8 @@ const (
 var ErrAgentNotCancellable = errors.New("agent does not implement CancellableAgent interface")
 
 type cancelConfig struct {
-	Mode           CancelMode
-	Timeout        *time.Duration
-	SkipCheckpoint bool
+	Mode    CancelMode
+	Timeout *time.Duration
 }
 
 type CancelOption func(*cancelConfig)

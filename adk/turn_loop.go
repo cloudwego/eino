@@ -156,13 +156,6 @@ func WithTurnLoopCancelMode(mode CancelMode) TurnLoopCancelOption {
 	}
 }
 
-// WithSkipCheckpoint skips checkpointing when canceling.
-func WithSkipCheckpoint() TurnLoopCancelOption {
-	return func(cfg *cancelConfig) {
-		cfg.SkipCheckpoint = true
-	}
-}
-
 // RunTurnLoop creates and starts a new TurnLoop.
 // The loop runs in a background goroutine and processes items pushed via Push().
 // Use Cancel() to stop the loop and Wait() to get the result.
