@@ -24,8 +24,6 @@ import (
 	"runtime/debug"
 	"strings"
 
-	"github.com/bytedance/sonic"
-
 	"github.com/cloudwego/eino/adk"
 	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/components/prompt"
@@ -90,12 +88,12 @@ func (p *defaultPlan) FirstStep() string {
 
 func (p *defaultPlan) MarshalJSON() ([]byte, error) {
 	type planTyp defaultPlan
-	return sonic.Marshal((*planTyp)(p))
+	return json.Marshal((*planTyp)(p))
 }
 
 func (p *defaultPlan) UnmarshalJSON(bytes []byte) error {
 	type planTyp defaultPlan
-	return sonic.Unmarshal(bytes, (*planTyp)(p))
+	return json.Unmarshal(bytes, (*planTyp)(p))
 }
 
 // Response represents the final response to the user.

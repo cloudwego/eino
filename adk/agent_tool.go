@@ -19,10 +19,9 @@ package adk
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
-
-	"github.com/bytedance/sonic"
 
 	"github.com/cloudwego/eino/components/tool"
 	"github.com/cloudwego/eino/compose"
@@ -142,7 +141,7 @@ func (at *agentTool) InvokableRun(ctx context.Context, argumentsInJSON string, o
 				}
 
 				req := &request{}
-				err = sonic.UnmarshalString(argumentsInJSON, req)
+				err = json.Unmarshal([]byte(argumentsInJSON), req)
 				if err != nil {
 					return "", err
 				}

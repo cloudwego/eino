@@ -20,6 +20,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/gob"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"math"
@@ -27,8 +28,6 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
-
-	"github.com/bytedance/sonic"
 
 	"github.com/cloudwego/eino/callbacks"
 	"github.com/cloudwego/eino/components/model"
@@ -383,7 +382,7 @@ func (et ExitTool) InvokableRun(ctx context.Context, argumentsInJSON string, _ .
 	}
 
 	params := &exitParams{}
-	err := sonic.UnmarshalString(argumentsInJSON, params)
+	err := json.Unmarshal([]byte(argumentsInJSON), params)
 	if err != nil {
 		return "", err
 	}
@@ -412,7 +411,7 @@ func (tta transferToAgent) InvokableRun(ctx context.Context, argumentsInJSON str
 	}
 
 	params := &transferParams{}
-	err := sonic.UnmarshalString(argumentsInJSON, params)
+	err := json.Unmarshal([]byte(argumentsInJSON), params)
 	if err != nil {
 		return "", err
 	}

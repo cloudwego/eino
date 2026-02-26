@@ -19,9 +19,8 @@ package deep
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
-
-	"github.com/bytedance/sonic"
 
 	"github.com/cloudwego/eino/adk"
 	"github.com/cloudwego/eino/components/model"
@@ -158,10 +157,11 @@ type writeTodosArguments struct {
 func newWriteTodos() (adk.AgentMiddleware, error) {
 	t, err := utils.InferTool("write_todos", writeTodosToolDescription, func(ctx context.Context, input writeTodosArguments) (output string, err error) {
 		adk.AddSessionValue(ctx, SessionKeyTodos, input.Todos)
-		todos, err := sonic.MarshalString(input.Todos)
+		todosBytes, err := json.Marshal(input.Todos)
 		if err != nil {
 			return "", err
 		}
+		todos := string(todosBytes)
 		return fmt.Sprintf("Updated todo list to %s", todos), nil
 	})
 	if err != nil {

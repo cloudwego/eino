@@ -18,10 +18,9 @@ package schema
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
-
-	"github.com/bytedance/sonic"
 )
 
 // MessageParser parses a Message into a strongly typed value.
@@ -113,12 +112,30 @@ func (p *MessageJSONParser[T]) extractData(data string) (string, error) {
 		interfaceKeys[i] = key
 	}
 
-	node, err := sonic.GetFromString(data, interfaceKeys...)
+	var root any
+	err := json.Unmarshal([]byte(data), &root)
 	if err != nil {
-		return "", fmt.Errorf("failed to get parse key path: %w", err)
+		return "", fmt.Errorf("failed to parse json data: %w", err)
 	}
 
-	bytes, err := node.MarshalJSON()
+	current := root
+	for _, key := range interfaceKeys {
+		s, ok := key.(string)
+		if !ok {
+			return "", fmt.Errorf("invalid key type in parse path")
+		}
+		m, ok := current.(map[string]any)
+		if !ok {
+			return "", fmt.Errorf("failed to get parse key path: %s is not an object", s)
+		}
+		next, ok := m[s]
+		if !ok {
+			return "", fmt.Errorf("failed to get parse key path: key %s not found", s)
+		}
+		current = next
+	}
+
+	bytes, err := json.Marshal(current)
 	if err != nil {
 		return "", fmt.Errorf("failed to marshal node: %w", err)
 	}
@@ -133,7 +150,7 @@ func (p *MessageJSONParser[T]) parse(data string) (parsed T, err error) {
 		return parsed, err
 	}
 
-	if err := sonic.UnmarshalString(parsedData, &parsed); err != nil {
+	if err := json.Unmarshal([]byte(parsedData), &parsed); err != nil {
 		return parsed, fmt.Errorf("failed to unmarshal content: %w", err)
 	}
 

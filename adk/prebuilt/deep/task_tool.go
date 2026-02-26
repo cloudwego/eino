@@ -20,10 +20,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"strings"
-
-	"github.com/bytedance/sonic"
 	"github.com/slongfield/pyfmt"
+	"strings"
 
 	"github.com/cloudwego/eino/adk"
 	"github.com/cloudwego/eino/components/model"
@@ -151,12 +149,13 @@ func (t *taskTool) InvokableRun(ctx context.Context, argumentsInJSON string, opt
 		return "", fmt.Errorf("subagent type %s not found", input.SubagentType)
 	}
 
-	params, err := sonic.MarshalString(map[string]string{
+	paramsBytes, err := json.Marshal(map[string]string{
 		"request": input.Description,
 	})
 	if err != nil {
 		return "", err
 	}
+	params := string(paramsBytes)
 
 	return a.InvokableRun(ctx, params, opts...)
 }
