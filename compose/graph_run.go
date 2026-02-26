@@ -434,6 +434,7 @@ type interruptTempInfo struct {
 	interruptBeforeNodes []string
 	interruptAfterNodes  []string
 	interruptRerunExtra  map[string]any
+	fromGraphInterrupt   bool
 
 	signals []*core.InterruptSignal
 }
@@ -442,6 +443,7 @@ func (ti *interruptTempInfo) collectCanceledInfo(canceled bool, canceledTasks, c
 	if !canceled {
 		return
 	}
+	ti.fromGraphInterrupt = true
 	if len(canceledTasks) > 0 {
 		for _, t := range canceledTasks {
 			ti.interruptRerunNodes = append(ti.interruptRerunNodes, t.nodeKey)
@@ -520,12 +522,13 @@ func (r *runner) handleInterrupt(
 	}
 
 	intInfo := &InterruptInfo{
-		State:           cp.State,
-		AfterNodes:      tempInfo.interruptAfterNodes,
-		BeforeNodes:     tempInfo.interruptBeforeNodes,
-		RerunNodes:      tempInfo.interruptRerunNodes,
-		RerunNodesExtra: tempInfo.interruptRerunExtra,
-		SubGraphs:       make(map[string]*InterruptInfo),
+		State:              cp.State,
+		AfterNodes:         tempInfo.interruptAfterNodes,
+		BeforeNodes:        tempInfo.interruptBeforeNodes,
+		RerunNodes:         tempInfo.interruptRerunNodes,
+		RerunNodesExtra:    tempInfo.interruptRerunExtra,
+		SubGraphs:          make(map[string]*InterruptInfo),
+		FromGraphInterrupt: tempInfo.fromGraphInterrupt,
 	}
 
 	var info any
@@ -650,12 +653,13 @@ func (r *runner) handleInterruptWithSubGraphAndRerunNodes(
 	}
 
 	intInfo := &InterruptInfo{
-		State:           cp.State,
-		BeforeNodes:     tempInfo.interruptBeforeNodes,
-		AfterNodes:      tempInfo.interruptAfterNodes,
-		RerunNodes:      tempInfo.interruptRerunNodes,
-		RerunNodesExtra: tempInfo.interruptRerunExtra,
-		SubGraphs:       make(map[string]*InterruptInfo),
+		State:              cp.State,
+		BeforeNodes:        tempInfo.interruptBeforeNodes,
+		AfterNodes:         tempInfo.interruptAfterNodes,
+		RerunNodes:         tempInfo.interruptRerunNodes,
+		RerunNodesExtra:    tempInfo.interruptRerunExtra,
+		SubGraphs:          make(map[string]*InterruptInfo),
+		FromGraphInterrupt: tempInfo.fromGraphInterrupt,
 	}
 
 	var info any

@@ -288,15 +288,6 @@ func buildDefaultHistoryRewriter(agentName string) HistoryRewriter {
 }
 
 func (a *flowAgent) Run(ctx context.Context, input *AgentInput, opts ...AgentRunOption) *AsyncIterator[*AgentEvent] {
-	iter, _ := a.runInternal(ctx, input, false, opts...)
-	return iter
-}
-
-func (a *flowAgent) RunWithCancel(ctx context.Context, input *AgentInput, opts ...AgentRunOption) (*AsyncIterator[*AgentEvent], CancelFunc) {
-	return a.runInternal(ctx, input, true, opts...)
-}
-
-func (a *flowAgent) runInternal(ctx context.Context, input *AgentInput, withCancel bool, opts ...AgentRunOption) (*AsyncIterator[*AgentEvent], CancelFunc) {
 	agentName := a.Name(ctx)
 
 	var runCtx *runContext
@@ -304,12 +295,16 @@ func (a *flowAgent) runInternal(ctx context.Context, input *AgentInput, withCanc
 	ctx = AppendAddressSegment(ctx, AddressSegmentAgent, agentName)
 
 	o := getCommonOptions(nil, opts...)
+	cancelCtx := o.cancelCtx
 
 	processedInput, err := a.genAgentInput(ctx, runCtx, o.skipTransferMessages)
 	if err != nil {
+		if cancelCtx != nil {
+			go cancelCtx.markError()
+		}
 		cbInput := &AgentCallbackInput{Input: input}
 		ctx = callbacks.OnStart(ctx, cbInput)
-		return wrapIterWithOnEnd(ctx, genErrorIter(err)), notCancellableFuncInternal
+		return wrapIterWithOnEnd(ctx, genErrorIter(err))
 	}
 
 	ctxForSubAgents := ctx
@@ -322,45 +317,35 @@ func (a *flowAgent) runInternal(ctx context.Context, input *AgentInput, withCanc
 	input = processedInput
 
 	if wf, ok := a.Agent.(*workflowAgent); ok {
-		return wrapIterWithOnEnd(ctx, wf.Run(ctx, input, opts...)), notCancellableFuncInternal
+		if cancelCtx != nil {
+			go cancelCtx.markCompleted()
+		}
+		return wrapIterWithOnEnd(ctx, wf.Run(ctx, input, opts...))
 	}
 
-	var aIter *AsyncIterator[*AgentEvent]
-	var cancelFn CancelFunc = notCancellableFuncInternal
-
-	ca, supportCancel := a.Agent.(CancellableAgent)
-	if withCancel && supportCancel {
-		aIter, cancelFn = ca.RunWithCancel(ctx, input, filterOptions(agentName, opts)...)
-	} else {
-		aIter = a.Agent.Run(ctx, input, filterOptions(agentName, opts)...)
-	}
+	aIter := a.Agent.Run(ctx, input, filterOptions(agentName, opts)...)
 
 	iterator, generator := NewAsyncIteratorPair[*AgentEvent]()
 
-	go a.run(ctx, ctxForSubAgents, runCtx, aIter, generator, opts...)
+	go func() {
+		if cancelCtx != nil {
+			defer cancelCtx.markCompleted()
+		}
+		a.run(ctx, ctxForSubAgents, runCtx, aIter, generator, opts...)
+	}()
 
-	return iterator, cancelFn
-}
-
-func notCancellableFuncInternal(_ ...CancelOption) error {
-	return ErrAgentNotCancellable
+	return iterator
 }
 
 func (a *flowAgent) Resume(ctx context.Context, info *ResumeInfo, opts ...AgentRunOption) *AsyncIterator[*AgentEvent] {
-	iter, _ := a.resumeInternal(ctx, info, false, opts...)
-	return iter
-}
-
-func (a *flowAgent) ResumeWithCancel(ctx context.Context, info *ResumeInfo, opts ...AgentRunOption) (*AsyncIterator[*AgentEvent], CancelFunc) {
-	return a.resumeInternal(ctx, info, true, opts...)
-}
-
-func (a *flowAgent) resumeInternal(ctx context.Context, info *ResumeInfo, withCancel bool, opts ...AgentRunOption) (*AsyncIterator[*AgentEvent], CancelFunc) {
 	agentName := a.Name(ctx)
 
 	ctx, info = buildResumeInfo(ctx, agentName, info)
 
 	ctxForSubAgents := ctx
+
+	o := getCommonOptions(nil, opts...)
+	cancelCtx := o.cancelCtx
 
 	agentType := getAgentType(a.Agent)
 	ctx = initAgentCallbacks(ctx, agentName, agentType, filterOptions(agentName, opts)...)
@@ -368,55 +353,55 @@ func (a *flowAgent) resumeInternal(ctx context.Context, info *ResumeInfo, withCa
 	ctx = callbacks.OnStart(ctx, cbInput)
 
 	if info.WasInterrupted {
-		var aIter *AsyncIterator[*AgentEvent]
-		var cancelFn CancelFunc = notCancellableFuncInternal
+		if ra, ok := a.Agent.(ResumableAgent); ok {
+			aIter := ra.Resume(ctx, info, opts...)
 
-		ca, supportCancel := a.Agent.(CancellableResumableAgent)
-		if withCancel && supportCancel {
-			aIter, cancelFn = ca.ResumeWithCancel(ctx, info, opts...)
-		} else if ra, ok := a.Agent.(ResumableAgent); ok {
-			aIter = ra.Resume(ctx, info, opts...)
-		} else {
-			return wrapIterWithOnEnd(ctx, genErrorIter(fmt.Errorf("failed to resume agent: agent '%s' is an interrupt point "+
-				"but is not a ResumableAgent", agentName))), notCancellableFuncInternal
+			if _, ok := a.Agent.(*workflowAgent); ok {
+				if cancelCtx != nil {
+					go cancelCtx.markCompleted()
+				}
+				return wrapIterWithOnEnd(ctx, aIter)
+			}
+
+			iterator, generator := NewAsyncIteratorPair[*AgentEvent]()
+			go func() {
+				if cancelCtx != nil {
+					defer cancelCtx.markCompleted()
+				}
+				a.run(ctx, ctxForSubAgents, getRunCtx(ctxForSubAgents), aIter, generator, opts...)
+			}()
+			return iterator
 		}
 
-		if _, ok := a.Agent.(*workflowAgent); ok {
-			return wrapIterWithOnEnd(ctx, aIter), cancelFn
+		if cancelCtx != nil {
+			go cancelCtx.markError()
 		}
-
-		iterator, generator := NewAsyncIteratorPair[*AgentEvent]()
-		go a.run(ctx, ctxForSubAgents, getRunCtx(ctxForSubAgents), aIter, generator, opts...)
-		return iterator, cancelFn
+		return wrapIterWithOnEnd(ctx, genErrorIter(fmt.Errorf("failed to resume agent: agent '%s' is an interrupt point "+
+			"but is not a ResumableAgent", agentName)))
 	}
 
 	nextAgentName, err := getNextResumeAgent(ctx, info)
 	if err != nil {
-		return wrapIterWithOnEnd(ctx, genErrorIter(err)), notCancellableFuncInternal
+		if cancelCtx != nil {
+			go cancelCtx.markError()
+		}
+		return wrapIterWithOnEnd(ctx, genErrorIter(err))
 	}
 
 	subAgent := a.getAgent(ctxForSubAgents, nextAgentName)
 	if subAgent == nil {
 		if len(a.subAgents) == 0 {
-			ca, supportCancel := a.Agent.(CancellableResumableAgent)
-			if withCancel && supportCancel {
-				iter, cancelFn := ca.ResumeWithCancel(ctx, info, opts...)
-				return wrapIterWithOnEnd(ctx, iter), cancelFn
-			}
 			if ra, ok := a.Agent.(ResumableAgent); ok {
-				return wrapIterWithOnEnd(ctx, ra.Resume(ctx, info, opts...)), notCancellableFuncInternal
+				return wrapIterWithOnEnd(ctx, ra.Resume(ctx, info, opts...))
 			}
 		}
-		return wrapIterWithOnEnd(ctx, genErrorIter(fmt.Errorf("failed to resume agent: agent '%s' not found from flowAgent '%s'", nextAgentName, agentName))), notCancellableFuncInternal
+		if cancelCtx != nil {
+			go cancelCtx.markError()
+		}
+		return wrapIterWithOnEnd(ctx, genErrorIter(fmt.Errorf("failed to resume agent: agent '%s' not found from flowAgent '%s'", nextAgentName, agentName)))
 	}
 
-	ca, supportCancel := ResumableAgent(subAgent).(CancellableResumableAgent)
-	if withCancel && supportCancel {
-		iter, cancelFn := ca.ResumeWithCancel(ctxForSubAgents, info, opts...)
-		return wrapIterWithOnEnd(ctx, iter), cancelFn
-	}
-
-	return wrapIterWithOnEnd(ctx, subAgent.Resume(ctxForSubAgents, info, opts...)), notCancellableFuncInternal
+	return wrapIterWithOnEnd(ctx, subAgent.Resume(ctxForSubAgents, info, opts...))
 }
 
 type DeterministicTransferConfig struct {
