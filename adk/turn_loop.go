@@ -805,7 +805,7 @@ func (l *TurnLoopV2[T]) run(ctx context.Context) {
 			return
 		}
 
-		_, err = l.config.GetAgent(ctx, result.Consumed)
+		agent, err := l.config.GetAgent(ctx, result.Consumed)
 		if err != nil {
 			l.buffer.PushFront(result.Consumed)
 			l.runErr = err
@@ -821,7 +821,101 @@ func (l *TurnLoopV2[T]) run(ctx context.Context) {
 			l.buffer.PushFront(result.Consumed)
 			return
 		}
+
+		runErr := l.runAgentAndHandleEvents(ctx, agent, result)
+		if runErr != nil {
+			l.runErr = runErr
+			return
+		}
 	}
+}
+
+// runAgentAndHandleEvents runs the agent with the given input and handles events.
+func (l *TurnLoopV2[T]) runAgentAndHandleEvents(
+	ctx context.Context,
+	agent Agent,
+	result *GenInputResult[T],
+) error {
+	var iter *AsyncIterator[*AgentEvent]
+	var agentCancelFunc CancelFunc
+
+	cps := l.config.Store
+	if cps != nil && result.CheckpointID == "" {
+		cps = nil
+	}
+
+	runOpts := result.RunOpts
+	if result.CheckpointID != "" && cps != nil {
+		runOpts = append(runOpts, WithCheckPointID(result.CheckpointID))
+	}
+
+	enableStreaming := result.Input != nil && result.Input.EnableStreaming
+	runner := NewRunner(ctx, RunnerConfig{
+		EnableStreaming: enableStreaming,
+		Agent:           agent,
+		CheckPointStore: cps,
+	})
+
+	if result.IsResume && result.CheckpointID != "" {
+		var err error
+		iter, agentCancelFunc, err = runner.ResumeWithCancel(ctx, result.CheckpointID, runOpts...)
+		if err != nil {
+			return fmt.Errorf("failed to resume agent: %w", err)
+		}
+	} else {
+		_, isAgentCancellable := agent.(CancellableAgent)
+		if isAgentCancellable {
+			iter, agentCancelFunc = runner.RunWithCancel(ctx, result.Input.Messages, runOpts...)
+		} else {
+			iter = runner.Run(ctx, result.Input.Messages, runOpts...)
+		}
+	}
+
+	handleEvents := func() error {
+		if l.config.OnAgentEvents != nil {
+			return l.config.OnAgentEvents(ctx, result.Consumed, iter)
+		}
+		for {
+			event, ok := iter.Next()
+			if !ok {
+				break
+			}
+			if event.Err != nil {
+				return event.Err
+			}
+		}
+		return nil
+	}
+
+	if agentCancelFunc != nil {
+		done := make(chan struct{})
+		var handleErr error
+
+		go func() {
+			defer func() {
+				panicErr := recover()
+				if panicErr != nil {
+					handleErr = safe.NewPanicErr(panicErr, debug.Stack())
+				}
+				close(done)
+			}()
+			handleErr = handleEvents()
+		}()
+
+		select {
+		case <-done:
+			return handleErr
+		case <-l.cancelSig.getDoneChan():
+			cfg := l.cancelSig.getConfig()
+			if cfg != nil {
+				_ = agentCancelFunc(WithCancelMode(cfg.Mode))
+			}
+			<-done
+			return handleErr
+		}
+	}
+
+	return handleEvents()
 }
 
 // cleanup prepares the final result before signaling done.

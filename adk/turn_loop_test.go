@@ -1554,3 +1554,85 @@ func TestTurnLoopV2_ContextCancelAfterGenInput_RecoverItems(t *testing.T) {
 	assert.ErrorIs(t, result.Error, context.Canceled)
 	assert.True(t, len(result.UnhandledItems) >= 1, "should recover consumed and remaining items")
 }
+
+func TestTurnLoopV2_OnAgentEventsReceivesEvents(t *testing.T) {
+	var receivedEvents []*AgentEvent
+	var receivedConsumed []string
+	var mu sync.Mutex
+
+	loop := RunTurnLoopV2(context.Background(), TurnLoopV2Config[string]{
+		GenInput: func(ctx context.Context, items []string) (*GenInputResult[string], error) {
+			return &GenInputResult[string]{
+				Input:    &AgentInput{Messages: []Message{schema.UserMessage(items[0])}},
+				Consumed: items,
+			}, nil
+		},
+		GetAgent: func(ctx context.Context, consumed []string) (Agent, error) {
+			return &turnLoopMockAgent{name: "test"}, nil
+		},
+		OnAgentEvents: func(ctx context.Context, consumed []string, events *AsyncIterator[*AgentEvent]) error {
+			mu.Lock()
+			receivedConsumed = append(receivedConsumed, consumed...)
+			mu.Unlock()
+
+			for {
+				event, ok := events.Next()
+				if !ok {
+					break
+				}
+				mu.Lock()
+				receivedEvents = append(receivedEvents, event)
+				mu.Unlock()
+			}
+			return nil
+		},
+	})
+
+	loop.Push("msg1")
+
+	time.Sleep(100 * time.Millisecond)
+
+	loop.Cancel()
+	result := loop.Wait()
+
+	assert.NoError(t, result.Error)
+
+	mu.Lock()
+	defer mu.Unlock()
+	assert.True(t, len(receivedConsumed) > 0, "should have received consumed items")
+}
+
+func TestTurnLoopV2_CancelDuringAgentExecution(t *testing.T) {
+	agentStarted := make(chan struct{})
+
+	loop := RunTurnLoopV2(context.Background(), TurnLoopV2Config[string]{
+		GenInput: func(ctx context.Context, items []string) (*GenInputResult[string], error) {
+			return &GenInputResult[string]{
+				Input:    &AgentInput{Messages: []Message{schema.UserMessage(items[0])}},
+				Consumed: items,
+			}, nil
+		},
+		GetAgent: func(ctx context.Context, consumed []string) (Agent, error) {
+			return &turnLoopMockAgent{name: "test"}, nil
+		},
+		OnAgentEvents: func(ctx context.Context, consumed []string, events *AsyncIterator[*AgentEvent]) error {
+			close(agentStarted)
+			time.Sleep(200 * time.Millisecond)
+			for {
+				_, ok := events.Next()
+				if !ok {
+					break
+				}
+			}
+			return nil
+		},
+	})
+
+	loop.Push("msg1")
+
+	<-agentStarted
+	loop.Cancel(WithV2CancelMode(CancelImmediate))
+
+	result := loop.Wait()
+	assert.NoError(t, result.Error)
+}
