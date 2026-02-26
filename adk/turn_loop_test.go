@@ -1636,3 +1636,22 @@ func TestTurnLoopV2_CancelDuringAgentExecution(t *testing.T) {
 	result := loop.Wait()
 	assert.NoError(t, result.Error)
 }
+
+func TestTurnLoopV2_CancelOptionsArePassed(t *testing.T) {
+	loop := RunTurnLoopV2(context.Background(), TurnLoopV2Config[string]{
+		GenInput: func(ctx context.Context, items []string) (*GenInputResult[string], error) {
+			return &GenInputResult[string]{
+				Input:    &AgentInput{Messages: []Message{schema.UserMessage(items[0])}},
+				Consumed: items,
+			}, nil
+		},
+		GetAgent: func(ctx context.Context, consumed []string) (Agent, error) {
+			return &turnLoopMockAgent{name: "test"}, nil
+		},
+	})
+
+	loop.Cancel(WithV2CancelMode(CancelAfterToolCall), WithV2SkipCheckpoint())
+
+	result := loop.Wait()
+	assert.NoError(t, result.Error)
+}
