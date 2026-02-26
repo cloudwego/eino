@@ -17,12 +17,16 @@
 package utils
 
 import (
-	"github.com/bytedance/sonic"
+	"encoding/json"
 )
 
 func marshalString(resp any) (string, error) {
 	if rs, ok := resp.(string); ok {
 		return rs, nil
 	}
-	return sonic.MarshalString(resp)
+	b, err := json.Marshal(resp)
+	if err != nil {
+		return "", err
+	}
+	return string(b), nil
 }

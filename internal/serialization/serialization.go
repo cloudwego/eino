@@ -20,8 +20,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"reflect"
-
-	"github.com/bytedance/sonic"
 )
 
 var m = map[string]reflect.Type{}
@@ -72,7 +70,7 @@ func (i *InternalSerializer) Marshal(v any) ([]byte, error) {
 		return nil, err
 	}
 
-	return sonic.Marshal(is)
+	return json.Marshal(is)
 }
 
 func (i *InternalSerializer) Unmarshal(data []byte, v any) error {
@@ -144,7 +142,7 @@ func (i *InternalSerializer) Unmarshal(data []byte, v any) error {
 
 func unmarshal(data []byte, t reflect.Type) (any, error) {
 	is := &internalStruct{}
-	err := sonic.Unmarshal(data, is)
+	err := json.Unmarshal(data, is)
 	if err != nil {
 		return nil, err
 	}
@@ -363,10 +361,11 @@ func internalMarshal(v any, fieldType reflect.Type) (*internalStruct, error) {
 				return nil, err
 			}
 
-			keyStr, err := sonic.MarshalString(k.Interface())
+			keyBytes, err := json.Marshal(k.Interface())
 			if err != nil {
 				return nil, fmt.Errorf("marshaling map key[%v] fail: %v", k.Interface(), err)
 			}
+			keyStr := string(keyBytes)
 			ret.MapValues[keyStr] = internalValue
 		}
 
@@ -440,7 +439,7 @@ func internalUnmarshal(v *internalStruct, typ reflect.Type) (any, error) {
 			return nil, fmt.Errorf("unknown type key: %v", v.Type)
 		}
 		pResult := reflect.New(resolvePointerNum(v.Type.PointerNum, t))
-		err := sonic.Unmarshal(v.JSONValue, pResult.Interface())
+		err := json.Unmarshal(v.JSONValue, pResult.Interface())
 		if err != nil {
 			return nil, fmt.Errorf("unmarshal type[%s] fail: %v, data: %s", t.String(), err, string(v.JSONValue))
 		}
@@ -521,7 +520,7 @@ func internalSpecificTypeUnmarshal(is *internalStruct, typ reflect.Type) (any, e
 	}
 	// simple type
 	v := reflect.New(typ)
-	err := sonic.Unmarshal(is.JSONValue, v.Interface())
+	err := json.Unmarshal(is.JSONValue, v.Interface())
 	if err != nil {
 		return nil, fmt.Errorf("unmarshal type[%s] fail: %v", typ.String(), err)
 	}
@@ -571,7 +570,7 @@ func setMapKVs(dResult reflect.Value, values map[string]*internalStruct) error {
 	t := dResult.Type()
 	for marshaledMapKey, internalValue := range values {
 		prkv := reflect.New(t.Key())
-		err := sonic.UnmarshalString(marshaledMapKey, prkv.Interface())
+		err := json.Unmarshal([]byte(marshaledMapKey), prkv.Interface())
 		if err != nil {
 			return fmt.Errorf("unmarshal map key[%v] to type[%s] fail: %v", marshaledMapKey, t.Key(), err)
 		}
