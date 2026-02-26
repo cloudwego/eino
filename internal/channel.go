@@ -76,3 +76,33 @@ func (ch *UnboundedChan[T]) Close() {
 		ch.notEmpty.Broadcast() // Wake up all waiting goroutines
 	}
 }
+
+// TakeAll removes and returns all buffered items atomically.
+// Returns nil if the buffer is empty.
+func (ch *UnboundedChan[T]) TakeAll() []T {
+	ch.mutex.Lock()
+	defer ch.mutex.Unlock()
+
+	if len(ch.buffer) == 0 {
+		return nil
+	}
+
+	items := ch.buffer
+	ch.buffer = nil
+	return items
+}
+
+// PushFront adds items to the front of the buffer.
+// This is useful for recovering items that need to be reprocessed.
+// Does nothing if items is empty.
+func (ch *UnboundedChan[T]) PushFront(items []T) {
+	if len(items) == 0 {
+		return
+	}
+
+	ch.mutex.Lock()
+	defer ch.mutex.Unlock()
+
+	ch.buffer = append(items, ch.buffer...)
+	ch.notEmpty.Signal()
+}

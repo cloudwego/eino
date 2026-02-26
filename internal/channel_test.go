@@ -219,3 +219,209 @@ func TestUnboundedChan_BlockingReceive(t *testing.T) {
 		t.Error("Receive should have unblocked")
 	}
 }
+
+func TestUnboundedChan_TakeAll(t *testing.T) {
+	ch := NewUnboundedChan[int]()
+
+	// Test TakeAll on empty buffer
+	items := ch.TakeAll()
+	if items != nil {
+		t.Errorf("TakeAll on empty buffer should return nil, got %v", items)
+	}
+
+	// Send some values
+	ch.Send(1)
+	ch.Send(2)
+	ch.Send(3)
+
+	// Test TakeAll returns all items
+	items = ch.TakeAll()
+	if len(items) != 3 {
+		t.Errorf("expected 3 items, got %d", len(items))
+	}
+	if items[0] != 1 || items[1] != 2 || items[2] != 3 {
+		t.Errorf("unexpected items: %v", items)
+	}
+
+	// Buffer should be empty now
+	if len(ch.buffer) != 0 {
+		t.Errorf("buffer should be empty after TakeAll, got %d items", len(ch.buffer))
+	}
+
+	// TakeAll again should return nil
+	items = ch.TakeAll()
+	if items != nil {
+		t.Errorf("TakeAll on empty buffer should return nil, got %v", items)
+	}
+}
+
+func TestUnboundedChan_TakeAll_Partial(t *testing.T) {
+	ch := NewUnboundedChan[int]()
+
+	// Send values
+	ch.Send(1)
+	ch.Send(2)
+	ch.Send(3)
+
+	// Receive one
+	val, ok := ch.Receive()
+	if !ok || val != 1 {
+		t.Errorf("expected (1, true), got (%d, %v)", val, ok)
+	}
+
+	// TakeAll should return remaining items
+	items := ch.TakeAll()
+	if len(items) != 2 {
+		t.Errorf("expected 2 items, got %d", len(items))
+	}
+	if items[0] != 2 || items[1] != 3 {
+		t.Errorf("unexpected items: %v", items)
+	}
+}
+
+func TestUnboundedChan_PushFront(t *testing.T) {
+	ch := NewUnboundedChan[int]()
+
+	// Test PushFront with empty items (should do nothing)
+	ch.PushFront(nil)
+	ch.PushFront([]int{})
+	if len(ch.buffer) != 0 {
+		t.Errorf("PushFront with empty items should not add anything, got %d items", len(ch.buffer))
+	}
+
+	// Send some values
+	ch.Send(3)
+	ch.Send(4)
+
+	// PushFront should prepend items
+	ch.PushFront([]int{1, 2})
+
+	if len(ch.buffer) != 4 {
+		t.Errorf("expected 4 items, got %d", len(ch.buffer))
+	}
+	if ch.buffer[0] != 1 || ch.buffer[1] != 2 || ch.buffer[2] != 3 || ch.buffer[3] != 4 {
+		t.Errorf("unexpected buffer: %v", ch.buffer)
+	}
+
+	// Receive should return in correct order
+	val, _ := ch.Receive()
+	if val != 1 {
+		t.Errorf("expected 1, got %d", val)
+	}
+	val, _ = ch.Receive()
+	if val != 2 {
+		t.Errorf("expected 2, got %d", val)
+	}
+}
+
+func TestUnboundedChan_PushFront_EmptyBuffer(t *testing.T) {
+	ch := NewUnboundedChan[int]()
+
+	// PushFront to empty buffer
+	ch.PushFront([]int{1, 2, 3})
+
+	if len(ch.buffer) != 3 {
+		t.Errorf("expected 3 items, got %d", len(ch.buffer))
+	}
+
+	// Receive should work
+	val, ok := ch.Receive()
+	if !ok || val != 1 {
+		t.Errorf("expected (1, true), got (%d, %v)", val, ok)
+	}
+}
+
+func TestUnboundedChan_PushFront_UnblocksReceive(t *testing.T) {
+	ch := NewUnboundedChan[int]()
+
+	// Start a blocking receive
+	receiveDone := make(chan int)
+	go func() {
+		val, _ := ch.Receive()
+		receiveDone <- val
+	}()
+
+	// Ensure receive is blocked
+	select {
+	case <-receiveDone:
+		t.Error("Receive should block on empty channel")
+	case <-time.After(50 * time.Millisecond):
+		// This is expected
+	}
+
+	// PushFront should unblock the receive
+	ch.PushFront([]int{42})
+
+	select {
+	case val := <-receiveDone:
+		if val != 42 {
+			t.Errorf("expected 42, got %d", val)
+		}
+	case <-time.After(50 * time.Millisecond):
+		t.Error("Receive should have unblocked after PushFront")
+	}
+}
+
+func TestUnboundedChan_TakeAll_PushFront_Concurrent(t *testing.T) {
+	ch := NewUnboundedChan[int]()
+	const numOps = 100
+
+	var wg sync.WaitGroup
+	wg.Add(3)
+
+	// Goroutine 1: Send values
+	go func() {
+		defer wg.Done()
+		for i := 0; i < numOps; i++ {
+			ch.Send(i)
+			time.Sleep(time.Microsecond)
+		}
+	}()
+
+	// Goroutine 2: TakeAll periodically
+	takeAllResults := make([][]int, 0)
+	var mu sync.Mutex
+	go func() {
+		defer wg.Done()
+		for i := 0; i < numOps/10; i++ {
+			items := ch.TakeAll()
+			if items != nil {
+				mu.Lock()
+				takeAllResults = append(takeAllResults, items)
+				mu.Unlock()
+			}
+			time.Sleep(10 * time.Microsecond)
+		}
+	}()
+
+	// Goroutine 3: PushFront periodically
+	go func() {
+		defer wg.Done()
+		for i := 0; i < numOps/10; i++ {
+			ch.PushFront([]int{-i})
+			time.Sleep(10 * time.Microsecond)
+		}
+	}()
+
+	wg.Wait()
+	ch.Close()
+
+	// Drain remaining items
+	remaining := ch.TakeAll()
+	if remaining != nil {
+		mu.Lock()
+		takeAllResults = append(takeAllResults, remaining)
+		mu.Unlock()
+	}
+
+	// Count total items collected
+	total := 0
+	for _, batch := range takeAllResults {
+		total += len(batch)
+	}
+
+	// We should have at least some items (exact count depends on timing)
+	if total == 0 {
+		t.Error("should have collected some items")
+	}
+}
