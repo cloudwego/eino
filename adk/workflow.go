@@ -350,6 +350,11 @@ func (a *workflowAgent) runLoop(ctx context.Context, generator *AsyncGenerator[*
 					break
 				}
 
+				if event.Err != nil {
+					generator.Send(event)
+					return nil
+				}
+
 				if lastActionEvent != nil {
 					generator.Send(lastActionEvent)
 					lastActionEvent = nil
