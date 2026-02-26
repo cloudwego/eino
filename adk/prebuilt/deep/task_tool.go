@@ -44,20 +44,18 @@ func newTaskToolMiddleware(
 	toolsConfig adk.ToolsConfig,
 	maxIteration int,
 	middlewares []adk.AgentMiddleware,
-) (adk.AgentMiddleware, error) {
-	t, err := newTaskTool(ctx, taskToolDescriptionGenerator, subAgents, withoutGeneralSubAgent, cm, instruction, toolsConfig, maxIteration, middlewares)
+	handlers []adk.ChatModelAgentMiddleware,
+) (adk.ChatModelAgentMiddleware, error) {
+	t, err := newTaskTool(ctx, taskToolDescriptionGenerator, subAgents, withoutGeneralSubAgent, cm, instruction, toolsConfig, maxIteration, middlewares, handlers)
 	if err != nil {
-		return adk.AgentMiddleware{}, err
+		return nil, err
 	}
 	prompt := internal.SelectPrompt(internal.I18nPrompts{
 		English: taskPrompt,
 		Chinese: taskPromptChinese,
 	})
 
-	return adk.AgentMiddleware{
-		AdditionalInstruction: prompt,
-		AdditionalTools:       []tool.BaseTool{t},
-	}, nil
+	return buildAppendPromptTool(prompt, t), nil
 }
 
 func newTaskTool(
@@ -72,6 +70,7 @@ func newTaskTool(
 	ToolsConfig adk.ToolsConfig,
 	MaxIteration int,
 	middlewares []adk.AgentMiddleware,
+	handlers []adk.ChatModelAgentMiddleware,
 ) (tool.InvokableTool, error) {
 	t := &taskTool{
 		subAgents:     map[string]tool.InvokableTool{},
@@ -96,6 +95,7 @@ func newTaskTool(
 			ToolsConfig:   ToolsConfig,
 			MaxIterations: MaxIteration,
 			Middlewares:   middlewares,
+			Handlers:      handlers,
 			GenModelInput: genModelInput,
 		})
 		if err != nil {
