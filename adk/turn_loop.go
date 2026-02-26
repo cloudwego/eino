@@ -580,3 +580,126 @@ type TurnLoopInterruptError[T any] struct {
 func (t *TurnLoopInterruptError[T]) Error() string {
 	return fmt.Sprintf("TurnLoopInterruptError[%s]: %v", t.CheckpointID, t.InterruptContexts)
 }
+
+// =============================================================================
+// TurnLoop V2 API
+// =============================================================================
+
+// TurnLoopV2Config is the configuration for creating a TurnLoopV2.
+type TurnLoopV2Config[T any] struct {
+	// GetAgent returns the Agent to run for the consumed items.
+	// The consumed slice contains items that GenInput decided to process in this turn.
+	// Required.
+	GetAgent func(ctx context.Context, consumed []T) (Agent, error)
+
+	// GenInput receives all buffered items and decides what to process.
+	// It returns which items to consume now vs keep for later turns.
+	// Required.
+	GenInput func(ctx context.Context, items []T) (*GenInputResult[T], error)
+
+	// OnAgentEvents is called to handle events emitted by the agent.
+	// The consumed slice contains items that triggered this agent execution.
+	// Optional. If not provided, events are drained silently.
+	OnAgentEvents func(ctx context.Context, consumed []T, events *AsyncIterator[*AgentEvent]) error
+
+	// Store is the checkpoint store for persistence and resume. Optional.
+	Store CheckPointStore
+}
+
+// GenInputResult contains the result of GenInput processing.
+type GenInputResult[T any] struct {
+	// Input is the agent input to execute
+	Input *AgentInput
+
+	// RunOpts are the options for this agent run
+	RunOpts []AgentRunOption
+
+	// CheckpointID for this turn (used for interrupt/resume)
+	CheckpointID string
+
+	// IsResume indicates this is a resume run (not a fresh run).
+	// When true, ResumeParams must be set.
+	IsResume bool
+
+	// ResumeParams contains checkpoint info for resuming an interrupted agent.
+	// Only used when IsResume is true.
+	// Uses existing ResumeParams from runner.go (Targets map[string]any)
+	ResumeParams *ResumeParams
+
+	// Consumed are the items that were processed (will be removed from buffer)
+	Consumed []T
+
+	// Remaining are the items to keep in buffer for next turn
+	Remaining []T
+}
+
+// TurnLoopV2Result is the result returned when TurnLoopV2 exits.
+type TurnLoopV2Result[T any] struct {
+	// Error is the error that caused the loop to exit, if any.
+	Error error
+
+	// UnhandledItems contains items that were buffered but not processed.
+	UnhandledItems []T
+}
+
+// TurnLoopV2 is a push-based event loop for agent execution.
+// Users push items via Push() and the loop processes them through the agent.
+type TurnLoopV2[T any] struct {
+	config TurnLoopV2Config[T]
+
+	// buffer holds incoming items
+	buffer *unboundedChan[T]
+
+	// stopped indicates whether the loop has stopped accepting new items
+	stopped atomic.Bool
+
+	// done is closed when run() exits
+	done chan struct{}
+
+	// result holds the final result after run() exits
+	result *TurnLoopV2Result[T]
+
+	// cancelOnce ensures Cancel() logic only runs once
+	cancelOnce sync.Once
+
+	// cancelSig signals cancellation to the running agent
+	cancelSig *turnLoopCancelSig
+
+	// cancelErr stores the error from cancellation
+	cancelErr error
+
+	// cancelCfg stores the cancel configuration
+	cancelCfg *cancelConfig
+
+	// runErr stores the error from the run loop
+	runErr error
+}
+
+// unboundedChan is a type alias for internal.UnboundedChan to avoid import cycle.
+// This will be replaced with the actual internal package import in step 3.
+type unboundedChan[T any] struct {
+	buffer   []T
+	mutex    sync.Mutex
+	notEmpty *sync.Cond
+	closed   bool
+}
+
+// ErrTurnLoopStopped is returned by Push() when the loop has stopped.
+var ErrTurnLoopStopped = errors.New("turn loop has stopped")
+
+// TurnLoopV2CancelOption is an option for Cancel().
+type TurnLoopV2CancelOption func(*cancelConfig)
+
+// WithV2CancelMode sets the cancel mode.
+func WithV2CancelMode(mode CancelMode) TurnLoopV2CancelOption {
+	return func(cfg *cancelConfig) {
+		cfg.Mode = mode
+	}
+}
+
+// WithV2SkipCheckpoint skips checkpointing when canceling.
+func WithV2SkipCheckpoint() TurnLoopV2CancelOption {
+	return func(cfg *cancelConfig) {
+		cfg.SkipCheckpoint = true
+	}
+}
