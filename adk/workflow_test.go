@@ -18,6 +18,7 @@ package adk
 
 import (
 	"context"
+	"fmt"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -1083,4 +1084,63 @@ func TestFilterOptions(t *testing.T) {
 	iter = parAgent.Run(ctx, &AgentInput{}, withValue("Agent1").DesignateAgent("Agent1"), withValue("Agent2").DesignateAgent("Agent2"))
 	_, ok = iter.Next()
 	assert.False(t, ok)
+}
+
+func TestLoopAgentWithError(t *testing.T) {
+	ctx := context.Background()
+
+	iterationCount := 0
+	agent := &myAgent{
+		name: "ErrorAgent",
+		runFn: func(ctx context.Context, input *AgentInput, options ...AgentRunOption) *AsyncIterator[*AgentEvent] {
+			iter, generator := NewAsyncIteratorPair[*AgentEvent]()
+			go func() {
+				defer generator.Close()
+				iterationCount++
+				if iterationCount == 3 {
+					generator.Send(&AgentEvent{Err: fmt.Errorf("error on iteration %d", iterationCount)})
+					return
+				}
+				generator.Send(&AgentEvent{
+					Output: &AgentOutput{
+						MessageOutput: &MessageVariant{
+							Message: schema.AssistantMessage(fmt.Sprintf("iteration %d", iterationCount), nil),
+							Role:    schema.Assistant,
+						},
+					},
+				})
+			}()
+			return iter
+		},
+	}
+
+	loopAgent, err := NewLoopAgent(ctx, &LoopAgentConfig{
+		Name:          "LoopErrorTestAgent",
+		SubAgents:     []Agent{agent},
+		MaxIterations: 10,
+	})
+	assert.NoError(t, err)
+
+	input := &AgentInput{Messages: []Message{schema.UserMessage("test")}}
+	ctx, _ = initRunCtx(ctx, loopAgent.Name(ctx), input)
+	iterator := loopAgent.Run(ctx, input)
+
+	var events []*AgentEvent
+	var errorEvent *AgentEvent
+	for {
+		event, ok := iterator.Next()
+		if !ok {
+			break
+		}
+		if event.Err != nil {
+			errorEvent = event
+		} else {
+			events = append(events, event)
+		}
+	}
+
+	assert.Equal(t, 2, len(events), "should have 2 successful iterations before error")
+	assert.NotNil(t, errorEvent, "should have received error event")
+	assert.Contains(t, errorEvent.Err.Error(), "error on iteration 3")
+	assert.Equal(t, 3, iterationCount, "loop should stop at iteration 3")
 }
