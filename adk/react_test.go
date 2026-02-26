@@ -144,7 +144,7 @@ func TestReact(t *testing.T) {
 			toolsReturnDirectly: map[string]bool{},
 		}
 
-		graph, err := newReact(ctx, config, nil)
+		graph, err := newReact(ctx, config)
 		assert.NoError(t, err)
 		assert.NotNil(t, graph)
 
@@ -153,7 +153,7 @@ func TestReact(t *testing.T) {
 		assert.NotNil(t, compiled)
 
 		// Test with a user message
-		result, err := compiled.Invoke(ctx, &reactInput{messages: []Message{
+		result, err := compiled.Invoke(ctx, &reactInput{Messages: []Message{
 			{
 				Role:    schema.User,
 				Content: "Use the test tool to say hello",
@@ -211,7 +211,7 @@ func TestReact(t *testing.T) {
 			toolsReturnDirectly: map[string]bool{info.Name: true},
 		}
 
-		graph, err := newReact(ctx, config, nil)
+		graph, err := newReact(ctx, config)
 		assert.NoError(t, err)
 		assert.NotNil(t, graph)
 
@@ -220,7 +220,7 @@ func TestReact(t *testing.T) {
 		assert.NotNil(t, compiled)
 
 		// Test with a user message when tool returns directly
-		result, err := compiled.Invoke(ctx, &reactInput{messages: []Message{
+		result, err := compiled.Invoke(ctx, &reactInput{Messages: []Message{
 			{
 				Role:    schema.User,
 				Content: "Use the test tool to say hello",
@@ -303,7 +303,7 @@ func TestReact(t *testing.T) {
 			toolsReturnDirectly: map[string]bool{},
 		}
 
-		graph, err := newReact(ctx, config, nil)
+		graph, err := newReact(ctx, config)
 		assert.NoError(t, err)
 		assert.NotNil(t, graph)
 
@@ -312,7 +312,7 @@ func TestReact(t *testing.T) {
 		assert.NotNil(t, compiled)
 
 		// Test streaming with a user message
-		outStream, err := compiled.Stream(ctx, &reactInput{messages: []Message{
+		outStream, err := compiled.Stream(ctx, &reactInput{Messages: []Message{
 			{
 				Role:    schema.User,
 				Content: "Use the test tool to say hello",
@@ -413,7 +413,7 @@ func TestReact(t *testing.T) {
 			toolsReturnDirectly: map[string]bool{streamInfo.Name: true},
 		}
 
-		graph, err := newReact(ctx, config, nil)
+		graph, err := newReact(ctx, config)
 		assert.NoError(t, err)
 		assert.NotNil(t, graph)
 
@@ -425,7 +425,7 @@ func TestReact(t *testing.T) {
 		times = 0
 
 		// Test streaming with a user message when tool returns directly
-		outStream, err := compiled.Stream(ctx, &reactInput{messages: []Message{
+		outStream, err := compiled.Stream(ctx, &reactInput{Messages: []Message{
 			{
 				Role:    schema.User,
 				Content: "Use the test tool to say hello",
@@ -502,7 +502,7 @@ func TestReact(t *testing.T) {
 			maxIterations:       6,
 		}
 
-		graph, err := newReact(ctx, config, nil)
+		graph, err := newReact(ctx, config)
 		assert.NoError(t, err)
 		assert.NotNil(t, graph)
 
@@ -511,7 +511,7 @@ func TestReact(t *testing.T) {
 		assert.NotNil(t, compiled)
 
 		// Test with a user message
-		result, err := compiled.Invoke(ctx, &reactInput{messages: []Message{
+		result, err := compiled.Invoke(ctx, &reactInput{Messages: []Message{
 			{
 				Role:    schema.User,
 				Content: "Use the test tool to say hello",
@@ -532,7 +532,7 @@ func TestReact(t *testing.T) {
 			maxIterations:       5,
 		}
 
-		graph, err = newReact(ctx, config, nil)
+		graph, err = newReact(ctx, config)
 		assert.NoError(t, err)
 		assert.NotNil(t, graph)
 
@@ -541,7 +541,7 @@ func TestReact(t *testing.T) {
 		assert.NotNil(t, compiled)
 
 		// Test with a user message
-		result, err = compiled.Invoke(ctx, &reactInput{messages: []Message{
+		result, err = compiled.Invoke(ctx, &reactInput{Messages: []Message{
 			{
 				Role:    schema.User,
 				Content: "Use the test tool to say hello",

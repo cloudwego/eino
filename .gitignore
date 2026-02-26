@@ -51,6 +51,7 @@ reports/
 
 .DS_Store
 *.log
+.claude
 CLAUDE.md
 
 # Specs directories

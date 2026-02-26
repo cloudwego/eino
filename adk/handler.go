@@ -54,6 +54,8 @@ type ModelContext struct {
 	// This is populated at request time from the agent's ModelRetryConfig.
 	// Used by EventSenderModelWrapper to wrap stream errors appropriately.
 	ModelRetryConfig *ModelRetryConfig
+
+	cancelContext *cancelContext
 }
 
 // ChatModelAgentContext contains runtime information passed to handlers before each ChatModelAgent run.
