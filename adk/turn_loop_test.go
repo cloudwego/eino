@@ -1458,3 +1458,99 @@ func TestTurnLoopV2_GetAgentError_RecoverConsumed(t *testing.T) {
 	assert.ErrorIs(t, result.Error, agentErr)
 	assert.True(t, len(result.UnhandledItems) >= 1, "should recover at least the consumed item and remaining")
 }
+
+func TestTurnLoopV2_ContextCancel(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+
+	genInputStarted := make(chan struct{})
+	genInputDone := make(chan struct{})
+
+	loop := RunTurnLoopV2(ctx, TurnLoopV2Config[string]{
+		GenInput: func(ctx context.Context, items []string) (*GenInputResult[string], error) {
+			close(genInputStarted)
+			<-genInputDone
+			return &GenInputResult[string]{Input: &AgentInput{}, Consumed: items}, nil
+		},
+		GetAgent: func(ctx context.Context, c []string) (Agent, error) {
+			return &turnLoopMockAgent{name: "test"}, nil
+		},
+	})
+
+	loop.Push("msg1")
+
+	<-genInputStarted
+	cancel()
+	close(genInputDone)
+
+	result := loop.Wait()
+	assert.ErrorIs(t, result.Error, context.Canceled)
+}
+
+func TestTurnLoopV2_ContextDeadlineExceeded(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+
+	loop := RunTurnLoopV2(ctx, TurnLoopV2Config[string]{
+		GenInput: func(ctx context.Context, items []string) (*GenInputResult[string], error) {
+			time.Sleep(100 * time.Millisecond)
+			return &GenInputResult[string]{Input: &AgentInput{}, Consumed: items}, nil
+		},
+		GetAgent: func(ctx context.Context, c []string) (Agent, error) {
+			return &turnLoopMockAgent{name: "test"}, nil
+		},
+	})
+
+	loop.Push("msg1")
+
+	result := loop.Wait()
+	assert.ErrorIs(t, result.Error, context.DeadlineExceeded)
+}
+
+func TestTurnLoopV2_ContextCancelBeforeReceive(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	loop := RunTurnLoopV2(ctx, TurnLoopV2Config[string]{
+		GenInput: func(ctx context.Context, items []string) (*GenInputResult[string], error) {
+			return &GenInputResult[string]{Input: &AgentInput{}, Consumed: items}, nil
+		},
+		GetAgent: func(ctx context.Context, c []string) (Agent, error) {
+			return &turnLoopMockAgent{name: "test"}, nil
+		},
+	})
+
+	loop.Push("msg1")
+
+	result := loop.Wait()
+	assert.ErrorIs(t, result.Error, context.Canceled)
+	assert.Len(t, result.UnhandledItems, 1)
+}
+
+func TestTurnLoopV2_ContextCancelAfterGenInput_RecoverItems(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+
+	genInputCount := 0
+	loop := RunTurnLoopV2(ctx, TurnLoopV2Config[string]{
+		GenInput: func(ctx context.Context, items []string) (*GenInputResult[string], error) {
+			genInputCount++
+			if genInputCount == 1 {
+				cancel()
+			}
+			return &GenInputResult[string]{
+				Input:     &AgentInput{},
+				Consumed:  items[:1],
+				Remaining: items[1:],
+			}, nil
+		},
+		GetAgent: func(ctx context.Context, c []string) (Agent, error) {
+			return &turnLoopMockAgent{name: "test"}, nil
+		},
+	})
+
+	loop.Push("msg1")
+	loop.Push("msg2")
+
+	result := loop.Wait()
+	assert.ErrorIs(t, result.Error, context.Canceled)
+	assert.True(t, len(result.UnhandledItems) >= 1, "should recover consumed and remaining items")
+}

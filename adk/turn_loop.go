@@ -761,6 +761,10 @@ func (l *TurnLoopV2[T]) run(ctx context.Context) {
 	defer l.cleanup()
 
 	for {
+		if err := ctx.Err(); err != nil {
+			l.runErr = err
+			return
+		}
 		if l.cancelSig.isCancelled() {
 			return
 		}
@@ -770,6 +774,11 @@ func (l *TurnLoopV2[T]) run(ctx context.Context) {
 			return
 		}
 
+		if err := ctx.Err(); err != nil {
+			l.buffer.PushFront([]T{first})
+			l.runErr = err
+			return
+		}
 		if l.cancelSig.isCancelled() {
 			l.buffer.PushFront([]T{first})
 			return
@@ -786,6 +795,11 @@ func (l *TurnLoopV2[T]) run(ctx context.Context) {
 
 		l.buffer.PushFront(result.Remaining)
 
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			l.buffer.PushFront(result.Consumed)
+			l.runErr = ctxErr
+			return
+		}
 		if l.cancelSig.isCancelled() {
 			l.buffer.PushFront(result.Consumed)
 			return
@@ -798,6 +812,11 @@ func (l *TurnLoopV2[T]) run(ctx context.Context) {
 			return
 		}
 
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			l.buffer.PushFront(result.Consumed)
+			l.runErr = ctxErr
+			return
+		}
 		if l.cancelSig.isCancelled() {
 			l.buffer.PushFront(result.Consumed)
 			return
