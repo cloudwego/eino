@@ -24,6 +24,7 @@ type options struct {
 	checkPointID         *string
 	skipTransferMessages bool
 	handlers             []callbacks.Handler
+	cancelCtx            *cancelContext
 }
 
 // AgentRunOption is the call option for adk Agent.

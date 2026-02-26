@@ -256,13 +256,14 @@ func isInterruptRerunError(err error) (info any, state any, ok bool) {
 
 // InterruptInfo aggregates interrupt metadata for composite or nested runs.
 type InterruptInfo struct {
-	State             any
-	BeforeNodes       []string
-	AfterNodes        []string
-	RerunNodes        []string
-	RerunNodesExtra   map[string]any
-	SubGraphs         map[string]*InterruptInfo
-	InterruptContexts []*InterruptCtx
+	State              any
+	BeforeNodes        []string
+	AfterNodes         []string
+	RerunNodes         []string
+	RerunNodesExtra    map[string]any
+	SubGraphs          map[string]*InterruptInfo
+	InterruptContexts  []*InterruptCtx
+	FromGraphInterrupt bool
 }
 
 func init() {
