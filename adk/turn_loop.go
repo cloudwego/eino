@@ -103,6 +103,11 @@ type GenInputResult[T any] struct {
 	// When true, CheckpointID must be set.
 	IsResume bool
 
+	// ResumeParams contains parameters for resuming an interrupted agent.
+	// Only used when IsResume is true.
+	// If nil, uses implicit "resume all" strategy.
+	ResumeParams *ResumeParams
+
 	// Consumed are the items that were processed (will be removed from buffer)
 	Consumed []T
 
@@ -316,7 +321,11 @@ func (l *TurnLoop[T]) runAgentAndHandleEvents(
 
 	if result.IsResume && result.CheckpointID != "" {
 		var err error
-		iter, agentCancelFunc, err = runner.ResumeWithCancel(ctx, result.CheckpointID, runOpts...)
+		if result.ResumeParams != nil {
+			iter, agentCancelFunc, err = runner.ResumeWithParamsAndCancel(ctx, result.CheckpointID, result.ResumeParams, runOpts...)
+		} else {
+			iter, agentCancelFunc, err = runner.ResumeWithCancel(ctx, result.CheckpointID, runOpts...)
+		}
 		if err != nil {
 			return fmt.Errorf("failed to resume agent: %w", err)
 		}
