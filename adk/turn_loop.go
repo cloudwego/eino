@@ -25,6 +25,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/cloudwego/eino/internal"
 	"github.com/cloudwego/eino/internal/safe"
 )
 
@@ -648,7 +649,7 @@ type TurnLoopV2[T any] struct {
 	config TurnLoopV2Config[T]
 
 	// buffer holds incoming items
-	buffer *unboundedChan[T]
+	buffer *internal.UnboundedChan[T]
 
 	// stopped indicates whether the loop has stopped accepting new items
 	stopped atomic.Bool
@@ -675,15 +676,6 @@ type TurnLoopV2[T any] struct {
 	runErr error
 }
 
-// unboundedChan is a type alias for internal.UnboundedChan to avoid import cycle.
-// This will be replaced with the actual internal package import in step 3.
-type unboundedChan[T any] struct {
-	buffer   []T
-	mutex    sync.Mutex
-	notEmpty *sync.Cond
-	closed   bool
-}
-
 // ErrTurnLoopStopped is returned by Push() when the loop has stopped.
 var ErrTurnLoopStopped = errors.New("turn loop has stopped")
 
@@ -702,4 +694,115 @@ func WithV2SkipCheckpoint() TurnLoopV2CancelOption {
 	return func(cfg *cancelConfig) {
 		cfg.SkipCheckpoint = true
 	}
+}
+
+// RunTurnLoopV2 creates and starts a new TurnLoopV2.
+// The loop runs in a background goroutine and processes items pushed via Push().
+// Use Cancel() to stop the loop and Wait() to get the result.
+func RunTurnLoopV2[T any](ctx context.Context, cfg TurnLoopV2Config[T]) *TurnLoopV2[T] {
+	l := &TurnLoopV2[T]{
+		config:    cfg,
+		buffer:    internal.NewUnboundedChan[T](),
+		done:      make(chan struct{}),
+		cancelSig: newTurnLoopCancelSig(),
+	}
+	go l.run(ctx)
+	return l
+}
+
+// Push adds an item to the loop's buffer for processing.
+// This method is non-blocking and thread-safe.
+// Returns ErrTurnLoopStopped if the loop has stopped.
+func (l *TurnLoopV2[T]) Push(item T) (err error) {
+	if l.stopped.Load() {
+		return ErrTurnLoopStopped
+	}
+
+	defer func() {
+		if r := recover(); r != nil {
+			err = ErrTurnLoopStopped
+		}
+	}()
+
+	l.buffer.Send(item)
+	return nil
+}
+
+// Cancel signals the loop to stop. This method is non-blocking and idempotent.
+// Use Wait() to block until the loop exits and get the result.
+func (l *TurnLoopV2[T]) Cancel(opts ...TurnLoopV2CancelOption) {
+	l.cancelOnce.Do(func() {
+		cfg := &cancelConfig{
+			Mode: CancelImmediate,
+		}
+		for _, opt := range opts {
+			opt(cfg)
+		}
+
+		l.cancelCfg = cfg
+		l.cancelSig.cancel(cfg)
+
+		l.stopped.Store(true)
+
+		l.buffer.Close()
+	})
+}
+
+// Wait blocks until the loop exits and returns the result.
+// This method is safe to call from multiple goroutines.
+// All callers will receive the same result.
+func (l *TurnLoopV2[T]) Wait() *TurnLoopV2Result[T] {
+	<-l.done
+	return l.result
+}
+
+// run is the main loop that processes items from the buffer.
+// This is a placeholder implementation that will be completed in Step 4.
+func (l *TurnLoopV2[T]) run(ctx context.Context) {
+	defer l.cleanup()
+
+	for {
+		if l.cancelSig.isCancelled() {
+			return
+		}
+
+		first, ok := l.buffer.Receive()
+		if !ok {
+			return
+		}
+
+		rest := l.buffer.TakeAll()
+		items := append([]T{first}, rest...)
+
+		result, err := l.config.GenInput(ctx, items)
+		if err != nil {
+			l.runErr = err
+			return
+		}
+
+		l.buffer.PushFront(result.Remaining)
+
+		_, err = l.config.GetAgent(ctx, result.Consumed)
+		if err != nil {
+			l.runErr = err
+			return
+		}
+	}
+}
+
+// cleanup prepares the final result before signaling done.
+func (l *TurnLoopV2[T]) cleanup() {
+	l.stopped.Store(true)
+
+	l.result = &TurnLoopV2Result[T]{
+		Error:          l.runErr,
+		UnhandledItems: l.buffer.TakeAll(),
+	}
+
+	if l.cancelErr != nil && l.result.Error == nil {
+		l.result.Error = l.cancelErr
+	}
+
+	l.buffer.Close()
+	close(l.done)
 }
