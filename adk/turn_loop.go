@@ -23,130 +23,10 @@ import (
 	"runtime/debug"
 	"sync"
 	"sync/atomic"
-	"time"
 
 	"github.com/cloudwego/eino/internal"
 	"github.com/cloudwego/eino/internal/safe"
 )
-
-// ConsumeMode specifies how a received message should be consumed
-// relative to the currently running agent.
-type ConsumeMode int
-
-const (
-	// ConsumeNonPreemptive processes the message after the current agent
-	// finishes. This is the default queued behavior.
-	ConsumeNonPreemptive ConsumeMode = iota
-	// ConsumePreemptive cancels the currently running agent (if it
-	// implements Cancellable) and processes the message immediately.
-	// If the agent does not implement Cancellable, the message is
-	// buffered and processed after the agent finishes.
-	ConsumePreemptive
-
-	ConsumePreemptiveOnTimeout
-)
-
-type consumeConfig struct {
-	Mode         ConsumeMode
-	Timeout      time.Duration
-	CancelOpts   []CancelOption
-	CheckPointID string
-}
-
-type ConsumeOption func(*consumeConfig)
-
-// WithPreemptive sets the consume mode to preemptive, which cancels the
-// currently running agent immediately.
-func WithPreemptive() ConsumeOption {
-	return func(config *consumeConfig) {
-		config.Mode = ConsumePreemptive
-	}
-}
-
-// WithPreemptiveOnTimeout sets the consume mode to preemptive with a timeout.
-// If the current agent does not complete within the timeout, it will be canceled.
-func WithPreemptiveOnTimeout(timeout time.Duration) ConsumeOption {
-	return func(config *consumeConfig) {
-		config.Mode = ConsumePreemptiveOnTimeout
-		config.Timeout = timeout
-	}
-}
-
-// WithCancelOptions appends cancel options to be used when canceling the agent.
-func WithCancelOptions(opts ...CancelOption) ConsumeOption {
-	return func(config *consumeConfig) {
-		config.CancelOpts = append(config.CancelOpts, opts...)
-	}
-}
-
-// WithConsumeCheckPointID sets the checkpoint ID for the consumed message.
-// When set, the checkpoint will be saved with this ID if an interrupt occurs.
-func WithConsumeCheckPointID(id string) ConsumeOption {
-	return func(config *consumeConfig) {
-		config.CheckPointID = id
-	}
-}
-
-type ReceiveConfig struct {
-	Timeout time.Duration
-}
-
-type MessageSource[T any] interface {
-	Receive(context.Context, ReceiveConfig) (context.Context, T, []ConsumeOption, error)
-	Front(context.Context, ReceiveConfig) (context.Context, T, []ConsumeOption, error)
-}
-
-type turnLoopRunConfig[T any] struct {
-	checkPointID string
-	item         T
-}
-
-// TurnLoopRunOption is an option for TurnLoop.Run.
-type TurnLoopRunOption[T any] func(*turnLoopRunConfig[T])
-
-// WithTurnLoopResume configures the TurnLoop to resume from a previously saved checkpoint.
-// The checkPointID identifies the checkpoint to resume from, and item is the original input
-// that triggered the interrupted execution.
-func WithTurnLoopResume[T any](checkPointID string, item T) TurnLoopRunOption[T] {
-	return func(c *turnLoopRunConfig[T]) {
-		c.checkPointID = checkPointID
-		c.item = item
-	}
-}
-
-// TurnLoopConfig is the configuration for creating a TurnLoop.
-type TurnLoopConfig[T any] struct {
-	// Source provides messages to drive the loop. Required.
-	Source MessageSource[T]
-	// GenInput converts a received message into AgentInput and optional
-	// RunOptions for the agent. Required.
-	GenInput func(ctx context.Context, item T) (*AgentInput, []AgentRunOption, error)
-	// GetAgent returns the Agent to run for a given message. Required.
-	GetAgent func(ctx context.Context, item T) (Agent, error)
-	// OnAgentEvents is called for each event emitted by the agent. Optional.
-	// The inputItem is the message that triggered the current agent turn.
-	// If not provided, the default implementation will consume all events and
-	// return any error event encountered.
-	OnAgentEvents func(ctx context.Context, inputItem T, event *AsyncIterator[*AgentEvent]) error
-	// ReceiveTimeout is the timeout passed to Source.Receive on each iteration.
-	// Zero means no timeout. Optional.
-	ReceiveTimeout time.Duration
-
-	Store CheckPointStore
-}
-
-// TurnLoop is a loop that pulls messages from a source, runs an Agent for
-// each message, and dispatches resulting events. It supports preemptive
-// cancellation when the source returns ConsumePreemptive and the current
-// agent implements Cancellable.
-type TurnLoop[T any] struct {
-	source         MessageSource[T]
-	genInput       func(ctx context.Context, item T) (*AgentInput, []AgentRunOption, error)
-	getAgent       func(ctx context.Context, item T) (Agent, error)
-	onAgentEvents  func(ctx context.Context, inputItem T, event *AsyncIterator[*AgentEvent]) error
-	receiveTimeout time.Duration
-	store          CheckPointStore
-}
 
 type turnLoopCancelSig struct {
 	done   chan struct{}
@@ -187,407 +67,8 @@ func (cs *turnLoopCancelSig) getDoneChan() <-chan struct{} {
 	return nil
 }
 
-type turnLoopCancelSigKey struct{}
-
-func withTurnLoopCancelSig(ctx context.Context, cs *turnLoopCancelSig) context.Context {
-	return context.WithValue(ctx, turnLoopCancelSigKey{}, cs)
-}
-
-func getTurnLoopCancelSig(ctx context.Context) *turnLoopCancelSig {
-	if v, ok := ctx.Value(turnLoopCancelSigKey{}).(*turnLoopCancelSig); ok {
-		return v
-	}
-	return nil
-}
-
-// ErrAgentNotCancellableInTurnLoop is returned when WithCancel context is used
-// but the Agent does not implement CancellableAgent.
-var ErrAgentNotCancellableInTurnLoop = errors.New("agent does not support cancel but WithCancel context was provided")
-
-// NewTurnLoop creates a new TurnLoop from the given configuration.
-// Source, GenInput, and GetAgent are required fields.
-func NewTurnLoop[T any](config TurnLoopConfig[T]) (*TurnLoop[T], error) {
-	if config.Source == nil {
-		return nil, fmt.Errorf("TurnLoopConfig.Source is required")
-	}
-	if config.GenInput == nil {
-		return nil, fmt.Errorf("TurnLoopConfig.GenInput is required")
-	}
-	if config.GetAgent == nil {
-		return nil, fmt.Errorf("TurnLoopConfig.GetAgent is required")
-	}
-
-	onAgentEvents := config.OnAgentEvents
-	if onAgentEvents == nil {
-		onAgentEvents = func(_ context.Context, _ T, iter *AsyncIterator[*AgentEvent]) error {
-			for {
-				event, ok := iter.Next()
-				if !ok {
-					break
-				}
-				if event.Err != nil {
-					return event.Err
-				}
-			}
-			return nil
-		}
-	}
-
-	return &TurnLoop[T]{
-		source:         config.Source,
-		genInput:       config.GenInput,
-		getAgent:       config.GetAgent,
-		onAgentEvents:  onAgentEvents,
-		receiveTimeout: config.ReceiveTimeout,
-		store:          config.Store,
-	}, nil
-}
-
-var ErrLoopExit = errors.New("loop exit")
-
-// WithCancel returns a new context and a cancel function that can be used to
-// cancel the TurnLoop's Run method externally. Each call to WithCancel creates
-// an independent cancel signal, allowing multiple concurrent Run calls with
-// separate cancel controls.
-//
-// The returned TurnLoopCancelFunc does not require a context parameter since
-// the context is already bound when WithCancel is called.
-//
-// Example:
-//
-//	ctx, cancel := turnLoop.WithCancel(context.Background())
-//	go func() {
-//	    err := turnLoop.Run(ctx)
-//	}()
-//	// Later, to cancel:
-//	cancel(adk.WithCancelMode(adk.CancelAfterToolCall))
-func (l *TurnLoop[T]) WithCancel(ctx context.Context) (context.Context, CancelFunc) {
-	cs := newTurnLoopCancelSig()
-	ctx = withTurnLoopCancelSig(ctx, cs)
-
-	var once sync.Once
-	cancelFn := func(opts ...CancelOption) error {
-		cfg := &cancelConfig{
-			Mode: CancelImmediate,
-		}
-		for _, opt := range opts {
-			opt(cfg)
-		}
-		once.Do(func() {
-			cs.cancel(cfg)
-		})
-		return nil
-	}
-
-	return ctx, cancelFn
-}
-
-// Run starts the blocking loop that continuously receives messages from the
-// source, runs the agent returned by GetAgent for each message, and dispatches
-// resulting events to OnAgentEvent. It blocks until the source returns an error
-// (including context cancellation) or a callback fails.
-//
-// If a received message has ConsumePreemptive mode and the current agent
-// implements Cancellable, the agent is canceled and the new message is processed
-// immediately. If the agent does not implement Cancellable, preemptive messages
-// are queued and processed after the current agent finishes.
-//
-// To enable external cancellation, use WithCancel to create a cancellable context:
-//
-//	ctx, cancel := turnLoop.WithCancel(context.Background())
-//	go turnLoop.Run(ctx)
-//	// Later: cancel()
-//
-// To enable checkpoint-based resumption, use WithTurnLoopResume:
-//
-//	err := turnLoop.Run(ctx, WithTurnLoopResume("session-123"))
-//
-//nolint:cyclop,funlen // This is a core method, splitting would make the logic harder to follow
-func (l *TurnLoop[T]) Run(ctx context.Context, opts ...TurnLoopRunOption[T]) error {
-	var runCfg turnLoopRunConfig[T]
-	for _, opt := range opts {
-		opt(&runCfg)
-	}
-
-	cs := getTurnLoopCancelSig(ctx)
-	toResumeFirst := false
-	if len(runCfg.checkPointID) > 0 {
-		toResumeFirst = true
-	}
-
-	for {
-		if cs != nil && cs.isCancelled() {
-			return nil
-		}
-
-		var nCtx context.Context
-		var item T
-		var checkPointID string
-		if !toResumeFirst {
-			var err error
-			var option []ConsumeOption
-			nCtx, item, option, err = l.source.Receive(ctx, ReceiveConfig{
-				Timeout: l.receiveTimeout,
-			})
-			if errors.Is(err, ErrLoopExit) {
-				return nil
-			}
-			if err != nil {
-				return fmt.Errorf("failed to receive message: %w", err)
-			}
-			o := applyConsumeOptions(option)
-			checkPointID = o.CheckPointID
-		} else {
-			nCtx = ctx
-			item = runCfg.item
-			checkPointID = runCfg.checkPointID
-		}
-
-		if len(checkPointID) > 0 && l.store == nil {
-			return fmt.Errorf("CheckPointStore is required")
-		}
-
-		input, runOpts, e := l.genInput(nCtx, item)
-		if e != nil {
-			return fmt.Errorf("failed to generate agent input: %w", e)
-		}
-
-		agent, e := l.getAgent(nCtx, item)
-		if e != nil {
-			return fmt.Errorf("failed to get agent: %w", e)
-		}
-
-		var cancelFunc CancelFunc
-		var iter *AsyncIterator[*AgentEvent]
-		_, isAgentCancellable := agent.(CancellableAgent)
-		if cs != nil && !isAgentCancellable {
-			return fmt.Errorf("%w: agent %s", ErrAgentNotCancellableInTurnLoop, agent.Name(nCtx))
-		}
-
-		if toResumeFirst {
-			var err error
-			iter, cancelFunc, err = NewRunner(nCtx, RunnerConfig{
-				EnableStreaming: input.EnableStreaming,
-				Agent:           agent,
-				CheckPointStore: l.store,
-			}).ResumeWithCancel(nCtx, checkPointID, runOpts...)
-			if err != nil {
-				return fmt.Errorf("failed to resume agent: %w", err)
-			}
-			toResumeFirst = false
-		} else if isAgentCancellable {
-			var cps CheckPointStore
-			if len(checkPointID) > 0 {
-				cps = l.store
-				runOpts = append(runOpts, WithCheckPointID(checkPointID))
-			}
-			iter, cancelFunc = NewRunner(nCtx, RunnerConfig{
-				EnableStreaming: input.EnableStreaming,
-				Agent:           agent,
-				CheckPointStore: cps,
-			}).RunWithCancel(nCtx, input.Messages, runOpts...)
-		} else {
-			var cps CheckPointStore
-			if len(checkPointID) > 0 {
-				cps = l.store
-				runOpts = append(runOpts, WithCheckPointID(checkPointID))
-			}
-			iter = NewRunner(nCtx, RunnerConfig{
-				EnableStreaming: input.EnableStreaming,
-				Agent:           agent,
-				CheckPointStore: cps,
-			}).Run(nCtx, input.Messages, runOpts...)
-		}
-
-		handleEvents := func() error {
-			return l.handleEvents(ctx, item, iter, checkPointID)
-		}
-
-		if cancelFunc != nil {
-			var handleEventErr error
-			done := make(chan struct{})
-
-			go func() {
-				defer func() {
-					panicErr := recover()
-					if panicErr != nil {
-						handleEventErr = safe.NewPanicErr(panicErr, debug.Stack())
-					}
-
-					close(done)
-				}()
-
-				handleEventErr = handleEvents()
-			}()
-
-			frontDone := make(chan struct{})
-			var frontErr error
-			var option []ConsumeOption
-			go func() {
-				defer func() {
-					panicErr := recover()
-					if panicErr != nil {
-						frontErr = safe.NewPanicErr(panicErr, debug.Stack())
-					}
-
-					close(frontDone)
-				}()
-				_, _, option, frontErr = l.source.Front(nCtx, ReceiveConfig{
-					Timeout: l.receiveTimeout,
-				})
-			}()
-
-			select {
-			case <-frontDone:
-			case <-done:
-			case <-cs.getDoneChan():
-				err := cancelAndWait(cancelFunc, cs, done)
-				if err != nil {
-					return err
-				}
-				return l.wrapHandleEventErr(handleEventErr)
-			}
-
-			if frontErr != nil {
-				<-done
-				if errors.Is(frontErr, ErrLoopExit) {
-					return nil
-				}
-				return fmt.Errorf("failed to front message: %w", frontErr)
-			}
-
-			o := applyConsumeOptions(option)
-			switch o.Mode {
-			case ConsumePreemptive:
-				err := cancelFunc(o.CancelOpts...)
-				if err != nil {
-					<-done
-					return fmt.Errorf("failed to cancel agent: %w", err)
-				}
-			case ConsumePreemptiveOnTimeout:
-				select {
-				case <-done:
-				case <-time.After(o.Timeout):
-					err := cancelFunc(o.CancelOpts...)
-					if err != nil {
-						<-done
-						return fmt.Errorf("failed to cancel agent: %w", err)
-					}
-				case <-cs.getDoneChan():
-					err := cancelAndWait(cancelFunc, cs, done)
-					if err != nil {
-						return err
-					}
-					return l.wrapHandleEventErr(handleEventErr)
-				}
-			}
-
-			select {
-			case <-done:
-			case <-cs.getDoneChan():
-				err := cancelAndWait(cancelFunc, cs, done)
-				if err != nil {
-					return err
-				}
-				return l.wrapHandleEventErr(handleEventErr)
-			}
-			if err := l.wrapHandleEventErr(handleEventErr); err != nil {
-				return err
-			}
-		} else {
-			if handleEventErr := handleEvents(); handleEventErr != nil {
-				if err := l.wrapHandleEventErr(handleEventErr); err != nil {
-					return err
-				}
-			}
-		}
-	}
-}
-
-func (l *TurnLoop[T]) wrapHandleEventErr(handleEventErr error) error {
-	if handleEventErr == nil {
-		return nil
-	}
-	if errors.Is(handleEventErr, ErrLoopExit) {
-		return nil
-	}
-	var interruptErr *TurnLoopInterruptError[T]
-	if errors.As(handleEventErr, &interruptErr) {
-		return interruptErr
-	}
-	return fmt.Errorf("failed to handle events: %w", handleEventErr)
-}
-
-func (l *TurnLoop[T]) handleEvents(ctx context.Context, item T, iter *AsyncIterator[*AgentEvent], checkPointID string) error {
-	copies := copyEventIterator(iter, 2)
-	oe := l.onAgentEvents(ctx, item, copies[0])
-	if oe != nil {
-		return oe
-	}
-	for {
-		e, ok := copies[1].Next()
-		if !ok {
-			break
-		}
-		if e.Action != nil && e.Action.Interrupted != nil {
-			return &TurnLoopInterruptError[T]{
-				Item:              item,
-				CheckpointID:      checkPointID,
-				InterruptContexts: e.Action.Interrupted.InterruptContexts,
-			}
-		}
-	}
-	return nil
-}
-
-func cancelAndWait(cf CancelFunc, cs *turnLoopCancelSig, done chan struct{}) error {
-	cfg := cs.getConfig()
-	err := cf(cancelConfigToOpts(cfg)...)
-	if err != nil {
-		<-done
-		return fmt.Errorf("failed to cancel agent: %w", err)
-	}
-	<-done
-	return nil
-}
-
-func cancelConfigToOpts(cfg *cancelConfig) []CancelOption {
-	if cfg == nil {
-		return nil
-	}
-	opts := []CancelOption{WithCancelMode(cfg.Mode)}
-	if cfg.Timeout != nil {
-		opts = append(opts, WithCancelTimeout(*cfg.Timeout))
-	}
-	return opts
-}
-
-func applyConsumeOptions(opts []ConsumeOption) *consumeConfig {
-	var config consumeConfig
-	for _, opt := range opts {
-		opt(&config)
-	}
-	return &config
-}
-
-type TurnLoopInterruptError[T any] struct {
-	Item         T
-	CheckpointID string
-	// InterruptContexts provides a structured, user-facing view of the interrupt chain.
-	// Each context represents a step in the agent hierarchy that was interrupted.
-	InterruptContexts []*InterruptCtx
-}
-
-func (t *TurnLoopInterruptError[T]) Error() string {
-	return fmt.Sprintf("TurnLoopInterruptError[%s]: %v", t.CheckpointID, t.InterruptContexts)
-}
-
-// =============================================================================
-// TurnLoop V2 API
-// =============================================================================
-
-// TurnLoopV2Config is the configuration for creating a TurnLoopV2.
-type TurnLoopV2Config[T any] struct {
+// TurnLoopConfig is the configuration for creating a TurnLoop.
+type TurnLoopConfig[T any] struct {
 	// GetAgent returns the Agent to run for the consumed items.
 	// The consumed slice contains items that GenInput decided to process in this turn.
 	// Required.
@@ -619,13 +100,8 @@ type GenInputResult[T any] struct {
 	CheckpointID string
 
 	// IsResume indicates this is a resume run (not a fresh run).
-	// When true, ResumeParams must be set.
+	// When true, CheckpointID must be set.
 	IsResume bool
-
-	// ResumeParams contains checkpoint info for resuming an interrupted agent.
-	// Only used when IsResume is true.
-	// Uses existing ResumeParams from runner.go (Targets map[string]any)
-	ResumeParams *ResumeParams
 
 	// Consumed are the items that were processed (will be removed from buffer)
 	Consumed []T
@@ -634,8 +110,8 @@ type GenInputResult[T any] struct {
 	Remaining []T
 }
 
-// TurnLoopV2Result is the result returned when TurnLoopV2 exits.
-type TurnLoopV2Result[T any] struct {
+// TurnLoopResult is the result returned when TurnLoop exits.
+type TurnLoopResult[T any] struct {
 	// Error is the error that caused the loop to exit, if any.
 	Error error
 
@@ -643,64 +119,55 @@ type TurnLoopV2Result[T any] struct {
 	UnhandledItems []T
 }
 
-// TurnLoopV2 is a push-based event loop for agent execution.
+// TurnLoop is a push-based event loop for agent execution.
 // Users push items via Push() and the loop processes them through the agent.
-type TurnLoopV2[T any] struct {
-	config TurnLoopV2Config[T]
+type TurnLoop[T any] struct {
+	config TurnLoopConfig[T]
 
-	// buffer holds incoming items
 	buffer *internal.UnboundedChan[T]
 
-	// stopped indicates whether the loop has stopped accepting new items
 	stopped atomic.Bool
 
-	// done is closed when run() exits
 	done chan struct{}
 
-	// result holds the final result after run() exits
-	result *TurnLoopV2Result[T]
+	result *TurnLoopResult[T]
 
-	// cancelOnce ensures Cancel() logic only runs once
 	cancelOnce sync.Once
 
-	// cancelSig signals cancellation to the running agent
 	cancelSig *turnLoopCancelSig
 
-	// cancelErr stores the error from cancellation
 	cancelErr error
 
-	// cancelCfg stores the cancel configuration
 	cancelCfg *cancelConfig
 
-	// runErr stores the error from the run loop
 	runErr error
 }
 
 // ErrTurnLoopStopped is returned by Push() when the loop has stopped.
 var ErrTurnLoopStopped = errors.New("turn loop has stopped")
 
-// TurnLoopV2CancelOption is an option for Cancel().
-type TurnLoopV2CancelOption func(*cancelConfig)
+// TurnLoopCancelOption is an option for Cancel().
+type TurnLoopCancelOption func(*cancelConfig)
 
-// WithV2CancelMode sets the cancel mode.
-func WithV2CancelMode(mode CancelMode) TurnLoopV2CancelOption {
+// WithTurnLoopCancelMode sets the cancel mode.
+func WithTurnLoopCancelMode(mode CancelMode) TurnLoopCancelOption {
 	return func(cfg *cancelConfig) {
 		cfg.Mode = mode
 	}
 }
 
-// WithV2SkipCheckpoint skips checkpointing when canceling.
-func WithV2SkipCheckpoint() TurnLoopV2CancelOption {
+// WithSkipCheckpoint skips checkpointing when canceling.
+func WithSkipCheckpoint() TurnLoopCancelOption {
 	return func(cfg *cancelConfig) {
 		cfg.SkipCheckpoint = true
 	}
 }
 
-// RunTurnLoopV2 creates and starts a new TurnLoopV2.
+// RunTurnLoop creates and starts a new TurnLoop.
 // The loop runs in a background goroutine and processes items pushed via Push().
 // Use Cancel() to stop the loop and Wait() to get the result.
-func RunTurnLoopV2[T any](ctx context.Context, cfg TurnLoopV2Config[T]) *TurnLoopV2[T] {
-	l := &TurnLoopV2[T]{
+func RunTurnLoop[T any](ctx context.Context, cfg TurnLoopConfig[T]) *TurnLoop[T] {
+	l := &TurnLoop[T]{
 		config:    cfg,
 		buffer:    internal.NewUnboundedChan[T](),
 		done:      make(chan struct{}),
@@ -713,7 +180,7 @@ func RunTurnLoopV2[T any](ctx context.Context, cfg TurnLoopV2Config[T]) *TurnLoo
 // Push adds an item to the loop's buffer for processing.
 // This method is non-blocking and thread-safe.
 // Returns ErrTurnLoopStopped if the loop has stopped.
-func (l *TurnLoopV2[T]) Push(item T) (err error) {
+func (l *TurnLoop[T]) Push(item T) (err error) {
 	if l.stopped.Load() {
 		return ErrTurnLoopStopped
 	}
@@ -730,7 +197,7 @@ func (l *TurnLoopV2[T]) Push(item T) (err error) {
 
 // Cancel signals the loop to stop. This method is non-blocking and idempotent.
 // Use Wait() to block until the loop exits and get the result.
-func (l *TurnLoopV2[T]) Cancel(opts ...TurnLoopV2CancelOption) {
+func (l *TurnLoop[T]) Cancel(opts ...TurnLoopCancelOption) {
 	l.cancelOnce.Do(func() {
 		cfg := &cancelConfig{
 			Mode: CancelImmediate,
@@ -751,13 +218,12 @@ func (l *TurnLoopV2[T]) Cancel(opts ...TurnLoopV2CancelOption) {
 // Wait blocks until the loop exits and returns the result.
 // This method is safe to call from multiple goroutines.
 // All callers will receive the same result.
-func (l *TurnLoopV2[T]) Wait() *TurnLoopV2Result[T] {
+func (l *TurnLoop[T]) Wait() *TurnLoopResult[T] {
 	<-l.done
 	return l.result
 }
 
-// run is the main loop that processes items from the buffer.
-func (l *TurnLoopV2[T]) run(ctx context.Context) {
+func (l *TurnLoop[T]) run(ctx context.Context) {
 	defer l.cleanup()
 
 	for {
@@ -830,8 +296,7 @@ func (l *TurnLoopV2[T]) run(ctx context.Context) {
 	}
 }
 
-// runAgentAndHandleEvents runs the agent with the given input and handles events.
-func (l *TurnLoopV2[T]) runAgentAndHandleEvents(
+func (l *TurnLoop[T]) runAgentAndHandleEvents(
 	ctx context.Context,
 	agent Agent,
 	result *GenInputResult[T],
@@ -918,11 +383,10 @@ func (l *TurnLoopV2[T]) runAgentAndHandleEvents(
 	return handleEvents()
 }
 
-// cleanup prepares the final result before signaling done.
-func (l *TurnLoopV2[T]) cleanup() {
+func (l *TurnLoop[T]) cleanup() {
 	l.stopped.Store(true)
 
-	l.result = &TurnLoopV2Result[T]{
+	l.result = &TurnLoopResult[T]{
 		Error:          l.runErr,
 		UnhandledItems: l.buffer.TakeAll(),
 	}
