@@ -23,6 +23,7 @@ import (
 	"runtime/debug"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/cloudwego/eino/internal"
 	"github.com/cloudwego/eino/internal/safe"
@@ -65,6 +66,37 @@ func (cs *turnLoopCancelSig) getDoneChan() <-chan struct{} {
 		return cs.done
 	}
 	return nil
+}
+
+type preemptSignal struct {
+	mu         sync.Mutex
+	signaled   bool
+	cancelOpts []TurnLoopCancelOption
+}
+
+func newPreemptSignal() *preemptSignal {
+	return &preemptSignal{}
+}
+
+func (s *preemptSignal) signal(opts ...TurnLoopCancelOption) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.signaled {
+		s.signaled = true
+		s.cancelOpts = opts
+	}
+}
+
+func (s *preemptSignal) check() (bool, []TurnLoopCancelOption) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.signaled {
+		opts := s.cancelOpts
+		s.signaled = false
+		s.cancelOpts = nil
+		return true, opts
+	}
+	return false, nil
 }
 
 // TurnLoopConfig is the configuration for creating a TurnLoop.
@@ -141,6 +173,8 @@ type TurnLoop[T any] struct {
 
 	cancelSig *turnLoopCancelSig
 
+	preemptSig *preemptSignal
+
 	cancelErr error
 
 	cancelCfg *cancelConfig
@@ -161,15 +195,36 @@ func WithTurnLoopCancelMode(mode CancelMode) TurnLoopCancelOption {
 	}
 }
 
+type pushConfig struct {
+	preempt    bool
+	cancelOpts []TurnLoopCancelOption
+}
+
+// PushOption is an option for Push().
+type PushOption func(*pushConfig)
+
+// WithPreempt signals that the current agent should be canceled after pushing.
+// This enables atomic "push + preempt" to avoid race conditions between
+// pushing an urgent item and triggering preemption.
+// The loop will cancel the current agent turn and continue with the next turn,
+// where GenInput will see all buffered items including the newly pushed one.
+func WithPreempt(cancelOpts ...TurnLoopCancelOption) PushOption {
+	return func(cfg *pushConfig) {
+		cfg.preempt = true
+		cfg.cancelOpts = cancelOpts
+	}
+}
+
 // RunTurnLoop creates and starts a new TurnLoop.
 // The loop runs in a background goroutine and processes items pushed via Push().
 // Use Cancel() to stop the loop and Wait() to get the result.
 func RunTurnLoop[T any](ctx context.Context, cfg TurnLoopConfig[T]) *TurnLoop[T] {
 	l := &TurnLoop[T]{
-		config:    cfg,
-		buffer:    internal.NewUnboundedChan[T](),
-		done:      make(chan struct{}),
-		cancelSig: newTurnLoopCancelSig(),
+		config:     cfg,
+		buffer:     internal.NewUnboundedChan[T](),
+		done:       make(chan struct{}),
+		cancelSig:  newTurnLoopCancelSig(),
+		preemptSig: newPreemptSignal(),
 	}
 	go l.run(ctx)
 	return l
@@ -178,7 +233,15 @@ func RunTurnLoop[T any](ctx context.Context, cfg TurnLoopConfig[T]) *TurnLoop[T]
 // Push adds an item to the loop's buffer for processing.
 // This method is non-blocking and thread-safe.
 // Returns ErrTurnLoopStopped if the loop has stopped.
-func (l *TurnLoop[T]) Push(item T) (err error) {
+//
+// Use WithPreempt() to atomically push an item and signal preemption of the current agent.
+// This is useful for urgent items that should interrupt the current processing.
+func (l *TurnLoop[T]) Push(item T, opts ...PushOption) (err error) {
+	cfg := &pushConfig{}
+	for _, opt := range opts {
+		opt(cfg)
+	}
+
 	if atomic.LoadInt32(&l.stopped) != 0 {
 		return ErrTurnLoopStopped
 	}
@@ -190,6 +253,11 @@ func (l *TurnLoop[T]) Push(item T) (err error) {
 	}()
 
 	l.buffer.Send(item)
+
+	if cfg.preempt {
+		l.preemptSig.signal(cfg.cancelOpts...)
+	}
+
 	return nil
 }
 
@@ -286,10 +354,14 @@ func (l *TurnLoop[T]) run(ctx context.Context) {
 			return
 		}
 
-		runErr := l.runAgentAndHandleEvents(ctx, agent, result)
+		preempted, runErr := l.runAgentAndHandleEvents(ctx, agent, result)
 		if runErr != nil {
 			l.runErr = runErr
 			return
+		}
+		if preempted {
+			l.buffer.PushFront(result.Consumed)
+			continue
 		}
 	}
 }
@@ -298,7 +370,7 @@ func (l *TurnLoop[T]) runAgentAndHandleEvents(
 	ctx context.Context,
 	agent Agent,
 	result *GenInputResult[T],
-) error {
+) (preempted bool, err error) {
 	var iter *AsyncIterator[*AgentEvent]
 	var agentCancelFunc CancelFunc
 
@@ -320,14 +392,13 @@ func (l *TurnLoop[T]) runAgentAndHandleEvents(
 	})
 
 	if result.IsResume && result.CheckpointID != "" {
-		var err error
 		if result.ResumeParams != nil {
 			iter, agentCancelFunc, err = runner.ResumeWithParamsAndCancel(ctx, result.CheckpointID, result.ResumeParams, runOpts...)
 		} else {
 			iter, agentCancelFunc, err = runner.ResumeWithCancel(ctx, result.CheckpointID, runOpts...)
 		}
 		if err != nil {
-			return fmt.Errorf("failed to resume agent: %w", err)
+			return false, fmt.Errorf("failed to resume agent: %w", err)
 		}
 	} else {
 		_, isAgentCancellable := agent.(CancellableAgent)
@@ -369,20 +440,43 @@ func (l *TurnLoop[T]) runAgentAndHandleEvents(
 			handleErr = handleEvents()
 		}()
 
+		preemptDone := make(chan struct{})
+		go func() {
+			for {
+				select {
+				case <-done:
+					return
+				case <-time.After(10 * time.Millisecond):
+					if preempted, opts := l.preemptSig.check(); preempted {
+						cancelCfg := &cancelConfig{Mode: CancelImmediate}
+						for _, opt := range opts {
+							opt(cancelCfg)
+						}
+						_ = agentCancelFunc(WithCancelMode(cancelCfg.Mode))
+						close(preemptDone)
+						return
+					}
+				}
+			}
+		}()
+
 		select {
 		case <-done:
-			return handleErr
+			return false, handleErr
+		case <-preemptDone:
+			<-done
+			return true, nil
 		case <-l.cancelSig.getDoneChan():
 			cfg := l.cancelSig.getConfig()
 			if cfg != nil {
 				_ = agentCancelFunc(WithCancelMode(cfg.Mode))
 			}
 			<-done
-			return handleErr
+			return false, handleErr
 		}
 	}
 
-	return handleEvents()
+	return false, handleEvents()
 }
 
 func (l *TurnLoop[T]) cleanup() {
