@@ -333,7 +333,7 @@ func TestTurnLoop_CancelWithMode(t *testing.T) {
 		},
 	})
 
-	loop.Cancel(WithTurnLoopCancelMode(CancelAfterToolCall))
+	loop.Cancel(WithCancelMode(CancelAfterToolCall))
 
 	result := loop.Wait()
 	assert.NoError(t, result.Error)
@@ -542,7 +542,7 @@ func TestTurnLoop_Preempt_WithCancelMode(t *testing.T) {
 		t.Fatal("agent did not start")
 	}
 
-	loop.Push("urgent", WithPreempt(WithTurnLoopCancelMode(CancelAfterToolCall)))
+	loop.Push("urgent", WithPreempt(WithCancelMode(CancelAfterToolCall)))
 
 	select {
 	case <-cancelFuncCalled:
@@ -896,7 +896,7 @@ func TestTurnLoop_CancelDuringAgentExecution(t *testing.T) {
 	loop.Push("msg1")
 
 	<-agentStarted
-	loop.Cancel(WithTurnLoopCancelMode(CancelImmediate))
+	loop.Cancel(WithCancelMode(CancelImmediate))
 
 	result := loop.Wait()
 	assert.NoError(t, result.Error)
@@ -915,7 +915,7 @@ func TestTurnLoop_CancelOptionsArePassed(t *testing.T) {
 		},
 	})
 
-	loop.Cancel(WithTurnLoopCancelMode(CancelAfterToolCall))
+	loop.Cancel(WithCancelMode(CancelAfterToolCall))
 
 	result := loop.Wait()
 	assert.NoError(t, result.Error)

@@ -71,14 +71,14 @@ func (cs *turnLoopCancelSig) getDoneChan() <-chan struct{} {
 type preemptSignal struct {
 	mu         sync.Mutex
 	signaled   bool
-	cancelOpts []TurnLoopCancelOption
+	cancelOpts []CancelOption
 }
 
 func newPreemptSignal() *preemptSignal {
 	return &preemptSignal{}
 }
 
-func (s *preemptSignal) signal(opts ...TurnLoopCancelOption) {
+func (s *preemptSignal) signal(opts ...CancelOption) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if !s.signaled {
@@ -87,7 +87,7 @@ func (s *preemptSignal) signal(opts ...TurnLoopCancelOption) {
 	}
 }
 
-func (s *preemptSignal) check() (bool, []TurnLoopCancelOption) {
+func (s *preemptSignal) check() (bool, []CancelOption) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.signaled {
@@ -182,22 +182,9 @@ type TurnLoop[T any] struct {
 	runErr error
 }
 
-// ErrTurnLoopStopped is returned by Push() when the loop has stopped.
-var ErrTurnLoopStopped = errors.New("turn loop has stopped")
-
-// TurnLoopCancelOption is an option for Cancel().
-type TurnLoopCancelOption func(*cancelConfig)
-
-// WithTurnLoopCancelMode sets the cancel mode.
-func WithTurnLoopCancelMode(mode CancelMode) TurnLoopCancelOption {
-	return func(cfg *cancelConfig) {
-		cfg.Mode = mode
-	}
-}
-
 type pushConfig struct {
 	preempt    bool
-	cancelOpts []TurnLoopCancelOption
+	cancelOpts []CancelOption
 }
 
 // PushOption is an option for Push().
@@ -208,7 +195,7 @@ type PushOption func(*pushConfig)
 // pushing an urgent item and triggering preemption.
 // The loop will cancel the current agent turn and continue with the next turn,
 // where GenInput will see all buffered items including the newly pushed one.
-func WithPreempt(cancelOpts ...TurnLoopCancelOption) PushOption {
+func WithPreempt(cancelOpts ...CancelOption) PushOption {
 	return func(cfg *pushConfig) {
 		cfg.preempt = true
 		cfg.cancelOpts = cancelOpts
@@ -263,7 +250,7 @@ func (l *TurnLoop[T]) Push(item T, opts ...PushOption) (ok bool) {
 
 // Cancel signals the loop to stop. This method is non-blocking and idempotent.
 // Use Wait() to block until the loop exits and get the result.
-func (l *TurnLoop[T]) Cancel(opts ...TurnLoopCancelOption) {
+func (l *TurnLoop[T]) Cancel(opts ...CancelOption) {
 	l.cancelOnce.Do(func() {
 		cfg := &cancelConfig{
 			Mode: CancelImmediate,
