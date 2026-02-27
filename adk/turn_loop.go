@@ -146,12 +146,16 @@ type GenInputResult[T any] struct {
 	Remaining []T
 }
 
-// TurnLoopResult is the result returned when TurnLoop exits.
-type TurnLoopResult[T any] struct {
-	// Error is the error that caused the loop to exit, if any.
-	Error error
+// TurnLoopExitState is returned when TurnLoop exits, containing the exit reason
+// and any items that were not processed.
+type TurnLoopExitState[T any] struct {
+	// ExitReason indicates why the loop exited.
+	// nil means clean exit (Cancel() was called and completed normally).
+	// Non-nil values include context errors, callback errors, etc.
+	ExitReason error
 
 	// UnhandledItems contains items that were buffered but not processed.
+	// This is always valid regardless of ExitReason.
 	UnhandledItems []T
 }
 
@@ -166,7 +170,7 @@ type TurnLoop[T any] struct {
 
 	done chan struct{}
 
-	result *TurnLoopResult[T]
+	result *TurnLoopExitState[T]
 
 	cancelOnce sync.Once
 
@@ -247,8 +251,10 @@ func (l *TurnLoop[T]) Push(item T, opts ...PushOption) (ok bool) {
 	return true
 }
 
-// Cancel signals the loop to stop. This method is non-blocking and idempotent.
-// Use Wait() to block until the loop exits and get the result.
+// Cancel signals the loop to stop and returns immediately (non-blocking).
+// The loop will stop at the next safe point determined by CancelMode.
+// This method is idempotent - multiple calls have no additional effect.
+// Call Wait() to block until the loop has fully exited and get the result.
 func (l *TurnLoop[T]) Cancel(opts ...CancelOption) {
 	l.cancelOnce.Do(func() {
 		cfg := &cancelConfig{
@@ -270,7 +276,7 @@ func (l *TurnLoop[T]) Cancel(opts ...CancelOption) {
 // Wait blocks until the loop exits and returns the result.
 // This method is safe to call from multiple goroutines.
 // All callers will receive the same result.
-func (l *TurnLoop[T]) Wait() *TurnLoopResult[T] {
+func (l *TurnLoop[T]) Wait() *TurnLoopExitState[T] {
 	<-l.done
 	return l.result
 }
@@ -468,13 +474,13 @@ func (l *TurnLoop[T]) runAgentAndHandleEvents(
 func (l *TurnLoop[T]) cleanup() {
 	atomic.StoreInt32(&l.stopped, 1)
 
-	l.result = &TurnLoopResult[T]{
-		Error:          l.runErr,
+	l.result = &TurnLoopExitState[T]{
+		ExitReason:     l.runErr,
 		UnhandledItems: l.buffer.TakeAll(),
 	}
 
-	if l.cancelErr != nil && l.result.Error == nil {
-		l.result.Error = l.cancelErr
+	if l.cancelErr != nil && l.result.ExitReason == nil {
+		l.result.ExitReason = l.cancelErr
 	}
 
 	l.buffer.Close()

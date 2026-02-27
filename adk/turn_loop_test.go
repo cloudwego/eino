@@ -148,7 +148,7 @@ func TestTurnLoop_RunAndPush(t *testing.T) {
 	mu.Lock()
 	defer mu.Unlock()
 
-	assert.NoError(t, result.Error)
+	assert.NoError(t, result.ExitReason)
 	assert.True(t, len(processedItems) > 0, "should have processed at least one item")
 }
 
@@ -186,7 +186,7 @@ func TestTurnLoop_CancelIsIdempotent(t *testing.T) {
 	loop.Cancel()
 
 	result := loop.Wait()
-	assert.NoError(t, result.Error)
+	assert.NoError(t, result.ExitReason)
 }
 
 func TestTurnLoop_WaitMultipleGoroutines(t *testing.T) {
@@ -202,7 +202,7 @@ func TestTurnLoop_WaitMultipleGoroutines(t *testing.T) {
 	loop.Cancel()
 
 	var wg sync.WaitGroup
-	results := make([]*TurnLoopResult[string], 3)
+	results := make([]*TurnLoopExitState[string], 3)
 
 	for i := 0; i < 3; i++ {
 		i := i
@@ -266,7 +266,7 @@ func TestTurnLoop_GenInputError(t *testing.T) {
 	loop.Push("msg1")
 
 	result := loop.Wait()
-	assert.ErrorIs(t, result.Error, genErr)
+	assert.ErrorIs(t, result.ExitReason, genErr)
 }
 
 func TestTurnLoop_GetAgentError(t *testing.T) {
@@ -284,7 +284,7 @@ func TestTurnLoop_GetAgentError(t *testing.T) {
 	loop.Push("msg1")
 
 	result := loop.Wait()
-	assert.ErrorIs(t, result.Error, agentErr)
+	assert.ErrorIs(t, result.ExitReason, agentErr)
 }
 
 func TestTurnLoop_BatchProcessing(t *testing.T) {
@@ -336,7 +336,7 @@ func TestTurnLoop_CancelWithMode(t *testing.T) {
 	loop.Cancel(WithCancelMode(CancelAfterToolCall))
 
 	result := loop.Wait()
-	assert.NoError(t, result.Error)
+	assert.NoError(t, result.ExitReason)
 }
 
 func TestTurnLoop_Preempt_CancelsCurrentAgent(t *testing.T) {
@@ -406,7 +406,7 @@ func TestTurnLoop_Preempt_CancelsCurrentAgent(t *testing.T) {
 
 	loop.Cancel()
 	result := loop.Wait()
-	assert.NoError(t, result.Error)
+	assert.NoError(t, result.ExitReason)
 	assert.GreaterOrEqual(t, atomic.LoadInt32(&genInputCalls), int32(2))
 }
 
@@ -478,7 +478,7 @@ func TestTurnLoop_Preempt_RecoverConsumedItems(t *testing.T) {
 
 	loop.Cancel()
 	result := loop.Wait()
-	assert.NoError(t, result.Error)
+	assert.NoError(t, result.ExitReason)
 
 	mu.Lock()
 	defer mu.Unlock()
@@ -552,7 +552,7 @@ func TestTurnLoop_Preempt_WithCancelMode(t *testing.T) {
 
 	loop.Cancel()
 	result := loop.Wait()
-	assert.NoError(t, result.Error)
+	assert.NoError(t, result.ExitReason)
 	cancelModeMu.Lock()
 	actualMode := firstCancelModeUsed
 	cancelModeMu.Unlock()
@@ -602,7 +602,7 @@ func TestTurnLoop_Push_WithoutPreempt_DoesNotCancel(t *testing.T) {
 
 	loop.Cancel()
 	result := loop.Wait()
-	assert.NoError(t, result.Error)
+	assert.NoError(t, result.ExitReason)
 	assert.Equal(t, 2, agentRunCount)
 }
 
@@ -666,7 +666,7 @@ func TestTurnLoop_CancelAfterReceive_RecoverItem(t *testing.T) {
 	close(cancelDone)
 
 	result := loop.Wait()
-	assert.NoError(t, result.Error)
+	assert.NoError(t, result.ExitReason)
 }
 
 func TestTurnLoop_CancelAfterGenInput_RecoverConsumed(t *testing.T) {
@@ -697,7 +697,7 @@ func TestTurnLoop_CancelAfterGenInput_RecoverConsumed(t *testing.T) {
 	loop.Cancel()
 
 	result := loop.Wait()
-	assert.NoError(t, result.Error)
+	assert.NoError(t, result.ExitReason)
 }
 
 func TestTurnLoop_GetAgentError_RecoverConsumed(t *testing.T) {
@@ -720,7 +720,7 @@ func TestTurnLoop_GetAgentError_RecoverConsumed(t *testing.T) {
 	loop.Push("msg2")
 
 	result := loop.Wait()
-	assert.ErrorIs(t, result.Error, agentErr)
+	assert.ErrorIs(t, result.ExitReason, agentErr)
 	assert.True(t, len(result.UnhandledItems) >= 1, "should recover at least the consumed item and remaining")
 }
 
@@ -748,7 +748,7 @@ func TestTurnLoop_ContextCancel(t *testing.T) {
 	close(genInputDone)
 
 	result := loop.Wait()
-	assert.ErrorIs(t, result.Error, context.Canceled)
+	assert.ErrorIs(t, result.ExitReason, context.Canceled)
 }
 
 func TestTurnLoop_ContextDeadlineExceeded(t *testing.T) {
@@ -768,7 +768,7 @@ func TestTurnLoop_ContextDeadlineExceeded(t *testing.T) {
 	loop.Push("msg1")
 
 	result := loop.Wait()
-	assert.ErrorIs(t, result.Error, context.DeadlineExceeded)
+	assert.ErrorIs(t, result.ExitReason, context.DeadlineExceeded)
 }
 
 func TestTurnLoop_ContextCancelBeforeReceive(t *testing.T) {
@@ -787,7 +787,7 @@ func TestTurnLoop_ContextCancelBeforeReceive(t *testing.T) {
 	loop.Push("msg1")
 
 	result := loop.Wait()
-	assert.ErrorIs(t, result.Error, context.Canceled)
+	assert.ErrorIs(t, result.ExitReason, context.Canceled)
 	assert.Len(t, result.UnhandledItems, 1)
 }
 
@@ -816,7 +816,7 @@ func TestTurnLoop_ContextCancelAfterGenInput_RecoverItems(t *testing.T) {
 	loop.Push("msg2")
 
 	result := loop.Wait()
-	assert.ErrorIs(t, result.Error, context.Canceled)
+	assert.ErrorIs(t, result.ExitReason, context.Canceled)
 	assert.True(t, len(result.UnhandledItems) >= 1, "should recover consumed and remaining items")
 }
 
@@ -860,7 +860,7 @@ func TestTurnLoop_OnAgentEventsReceivesEvents(t *testing.T) {
 	loop.Cancel()
 	result := loop.Wait()
 
-	assert.NoError(t, result.Error)
+	assert.NoError(t, result.ExitReason)
 
 	mu.Lock()
 	defer mu.Unlock()
@@ -899,7 +899,7 @@ func TestTurnLoop_CancelDuringAgentExecution(t *testing.T) {
 	loop.Cancel(WithCancelMode(CancelImmediate))
 
 	result := loop.Wait()
-	assert.NoError(t, result.Error)
+	assert.NoError(t, result.ExitReason)
 }
 
 func TestTurnLoop_CancelOptionsArePassed(t *testing.T) {
@@ -918,5 +918,5 @@ func TestTurnLoop_CancelOptionsArePassed(t *testing.T) {
 	loop.Cancel(WithCancelMode(CancelAfterToolCall))
 
 	result := loop.Wait()
-	assert.NoError(t, result.Error)
+	assert.NoError(t, result.ExitReason)
 }
