@@ -71,6 +71,14 @@ type ModelHub interface {
 	Get(ctx context.Context, name string) (model.ToolCallingChatModel, error)
 }
 
+// SystemPromptFunc is a function that returns a custom system prompt.
+// The toolName parameter is the name of the skill tool (default: "skill").
+type SystemPromptFunc func(ctx context.Context, toolName string) string
+
+// ToolDescriptionFunc is a function that returns a custom tool description.
+// The skills parameter contains all available skill front matters.
+type ToolDescriptionFunc func(ctx context.Context, skills []FrontMatter) string
+
 // Config is the configuration for the skill middleware.
 type Config struct {
 	// Backend is the backend for retrieving skills.
@@ -93,6 +101,15 @@ type Config struct {
 	// If nil, skills with model specification will be ignored in inline mode,
 	// or return an error in context mode.
 	ModelHub ModelHub
+
+	// CustomSystemPrompt allows customizing the system prompt injected into the agent.
+	// If nil, the default system prompt is used.
+	// The function receives the skill tool name as a parameter.
+	CustomSystemPrompt SystemPromptFunc
+	// CustomToolDescription allows customizing the tool description for the skill tool.
+	// If nil, the default tool description is used.
+	// The function receives all available skill front matters as a parameter.
+	CustomToolDescription ToolDescriptionFunc
 }
 
 // NewChatModelAgentMiddleware creates a new skill middleware handler for ChatModelAgent.
@@ -133,19 +150,26 @@ func NewChatModelAgentMiddleware(ctx context.Context, config *Config) (adk.ChatM
 		name = *config.SkillToolName
 	}
 
-	instruction, err := buildSystemPrompt(name, config.UseChinese)
-	if err != nil {
-		return nil, err
+	var instruction string
+	if config.CustomSystemPrompt != nil {
+		instruction = config.CustomSystemPrompt(ctx, name)
+	} else {
+		var err error
+		instruction, err = buildSystemPrompt(name, config.UseChinese)
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	return &skillHandler{
 		instruction: instruction,
 		tool: &skillTool{
-			b:          config.Backend,
-			toolName:   name,
-			useChinese: config.UseChinese,
-			agentHub:   config.AgentHub,
-			modelHub:   config.ModelHub,
+			b:                     config.Backend,
+			toolName:              name,
+			useChinese:            config.UseChinese,
+			agentHub:              config.AgentHub,
+			modelHub:              config.ModelHub,
+			customToolDescription: config.CustomToolDescription,
 		},
 	}, nil
 }
@@ -204,14 +228,25 @@ func New(ctx context.Context, config *Config) (adk.AgentMiddleware, error) {
 		name = *config.SkillToolName
 	}
 
-	sp, err := buildSystemPrompt(name, config.UseChinese)
-	if err != nil {
-		return adk.AgentMiddleware{}, err
+	var sp string
+	if config.CustomSystemPrompt != nil {
+		sp = config.CustomSystemPrompt(ctx, name)
+	} else {
+		var err error
+		sp, err = buildSystemPrompt(name, config.UseChinese)
+		if err != nil {
+			return adk.AgentMiddleware{}, err
+		}
 	}
 
 	return adk.AgentMiddleware{
 		AdditionalInstruction: sp,
-		AdditionalTools:       []tool.BaseTool{&skillTool{b: config.Backend, toolName: name, useChinese: config.UseChinese}},
+		AdditionalTools: []tool.BaseTool{&skillTool{
+			b:                     config.Backend,
+			toolName:              name,
+			useChinese:            config.UseChinese,
+			customToolDescription: config.CustomToolDescription,
+		}},
 	}, nil
 }
 
@@ -231,11 +266,12 @@ func buildSystemPrompt(skillToolName string, useChinese bool) (string, error) {
 }
 
 type skillTool struct {
-	b          Backend
-	toolName   string
-	useChinese bool
-	agentHub   AgentHub
-	modelHub   ModelHub
+	b                     Backend
+	toolName              string
+	useChinese            bool
+	agentHub              AgentHub
+	modelHub              ModelHub
+	customToolDescription ToolDescriptionFunc
 }
 
 type descriptionTemplateHelper struct {
@@ -248,15 +284,22 @@ func (s *skillTool) Info(ctx context.Context) (*schema.ToolInfo, error) {
 		return nil, fmt.Errorf("failed to list skills: %w", err)
 	}
 
-	desc, err := renderToolDescription(skills)
-	if err != nil {
-		return nil, fmt.Errorf("failed to render skill tool description: %w", err)
+	var fullDesc string
+	if s.customToolDescription != nil {
+		fullDesc = s.customToolDescription(ctx, skills)
+	} else {
+		desc, err := renderToolDescription(skills)
+		if err != nil {
+			return nil, fmt.Errorf("failed to render skill tool description: %w", err)
+		}
+
+		descBase := internal.SelectPrompt(internal.I18nPrompts{
+			English: toolDescriptionBase,
+			Chinese: toolDescriptionBaseChinese,
+		})
+		fullDesc = descBase + desc
 	}
 
-	descBase := internal.SelectPrompt(internal.I18nPrompts{
-		English: toolDescriptionBase,
-		Chinese: toolDescriptionBaseChinese,
-	})
 	paramDesc := internal.SelectPrompt(internal.I18nPrompts{
 		English: "The skill name (no arguments). E.g., \"pdf\" or \"xlsx\"",
 		Chinese: "Skill 名称（无需其他参数）。例如：\"pdf\" 或 \"xlsx\"",
@@ -264,7 +307,7 @@ func (s *skillTool) Info(ctx context.Context) (*schema.ToolInfo, error) {
 
 	return &schema.ToolInfo{
 		Name: s.toolName,
-		Desc: descBase + desc,
+		Desc: fullDesc,
 		ParamsOneOf: schema.NewParamsOneOfByParams(map[string]*schema.ParameterInfo{
 			"skill": {
 				Type:     schema.String,
