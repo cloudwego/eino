@@ -239,8 +239,9 @@ type TurnLoop[T any] struct {
 }
 
 type pushConfig struct {
-	preempt    bool
-	cancelOpts []CancelOption
+	preempt      bool
+	preemptDelay time.Duration
+	cancelOpts   []CancelOption
 }
 
 // PushOption is an option for Push().
@@ -255,6 +256,17 @@ func WithPreempt(cancelOpts ...CancelOption) PushOption {
 	return func(cfg *pushConfig) {
 		cfg.preempt = true
 		cfg.cancelOpts = cancelOpts
+	}
+}
+
+// WithPreemptDelay sets a delay duration before preemption takes effect.
+// When used with WithPreempt, the push will succeed immediately, but the
+// preemption signal will be delayed by the specified duration.
+// This allows the current agent to continue processing for a grace period
+// before being preempted.
+func WithPreemptDelay(delay time.Duration) PushOption {
+	return func(cfg *pushConfig) {
+		cfg.preemptDelay = delay
 	}
 }
 
@@ -295,6 +307,10 @@ func (l *TurnLoop[T]) Run(ctx context.Context) error {
 // This is useful for urgent items that should interrupt the current processing.
 // When preempt is set, Push will wait until the preempt is handled (agent cancelled or
 // no agent was running), ensuring correct preempt semantics.
+//
+// Use WithPreemptDelay() together with WithPreempt() to delay the preemption signal.
+// Push returns immediately after the item is buffered, and a goroutine is spawned
+// to signal preemption after the delay.
 func (l *TurnLoop[T]) Push(item T, opts ...PushOption) bool {
 	cfg := &pushConfig{}
 	for _, opt := range opts {
@@ -313,7 +329,18 @@ func (l *TurnLoop[T]) Push(item T, opts ...PushOption) bool {
 			return false
 		}
 
-		l.preemptSig.signal(cfg.cancelOpts...)
+		if cfg.preemptDelay > 0 {
+			go func() {
+				select {
+				case <-time.After(cfg.preemptDelay):
+					l.preemptSig.signal(cfg.cancelOpts...)
+				case <-l.done:
+					l.preemptSig.release()
+				}
+			}()
+		} else {
+			l.preemptSig.signal(cfg.cancelOpts...)
+		}
 		return true
 	}
 
@@ -408,6 +435,7 @@ func (l *TurnLoop[T]) run(ctx context.Context) {
 
 		result, err := l.config.GenInput(ctx, items)
 		if err != nil {
+			l.buffer.PushFront(items)
 			l.runErr = err
 			return
 		}

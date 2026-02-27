@@ -730,6 +730,28 @@ func TestTurnLoop_GetAgentError_RecoverConsumed(t *testing.T) {
 	assert.True(t, len(result.UnhandledItems) >= 1, "should recover at least the consumed item and remaining")
 }
 
+func TestTurnLoop_GenInputError_RecoverItems(t *testing.T) {
+	genErr := errors.New("gen input error")
+
+	loop := newAndRunTurnLoop(context.Background(), TurnLoopConfig[string]{
+		GenInput: func(ctx context.Context, items []string) (*GenInputResult[string], error) {
+			return nil, genErr
+		},
+		PrepareAgent: func(ctx context.Context, consumed []string) (Agent, error) {
+			return &turnLoopMockAgent{name: "test"}, nil
+		},
+	})
+
+	loop.Push("msg1")
+	loop.Push("msg2")
+
+	result := loop.Wait()
+	assert.ErrorIs(t, result.ExitReason, genErr)
+	assert.Len(t, result.UnhandledItems, 2, "should recover all items when GenInput fails")
+	assert.Contains(t, result.UnhandledItems, "msg1")
+	assert.Contains(t, result.UnhandledItems, "msg2")
+}
+
 func TestTurnLoop_ContextCancel(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 
