@@ -494,7 +494,7 @@ func TestTurnLoop_Preempt_WithCancelMode(t *testing.T) {
 	cancelFuncCalled := make(chan struct{})
 	agentStartedOnce := sync.Once{}
 	cancelFuncCalledOnce := sync.Once{}
-	cancelModeUsed := CancelImmediate
+	firstCancelModeUsed := CancelImmediate
 	var cancelModeMu sync.Mutex
 
 	agent := &turnLoopCancellableMockAgent{
@@ -512,11 +512,11 @@ func TestTurnLoop_Preempt_WithCancelMode(t *testing.T) {
 			for _, opt := range opts {
 				opt(cfg)
 			}
-			cancelModeUsed = cfg.Mode
-			cancelModeMu.Unlock()
 			cancelFuncCalledOnce.Do(func() {
+				firstCancelModeUsed = cfg.Mode
 				close(cancelFuncCalled)
 			})
+			cancelModeMu.Unlock()
 			return nil
 		},
 	}
@@ -554,7 +554,7 @@ func TestTurnLoop_Preempt_WithCancelMode(t *testing.T) {
 	result := loop.Wait()
 	assert.NoError(t, result.Error)
 	cancelModeMu.Lock()
-	actualMode := cancelModeUsed
+	actualMode := firstCancelModeUsed
 	cancelModeMu.Unlock()
 	assert.Equal(t, CancelAfterToolCall, actualMode)
 }

@@ -18,7 +18,6 @@ package adk
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"runtime/debug"
 	"sync"
