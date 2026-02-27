@@ -491,9 +491,9 @@ func TestTurnLoop_Preempt_RecoverConsumedItems(t *testing.T) {
 
 func TestTurnLoop_Preempt_WithCancelMode(t *testing.T) {
 	agentStarted := make(chan struct{})
-	agentCancelled := make(chan struct{})
+	cancelFuncCalled := make(chan struct{})
 	agentStartedOnce := sync.Once{}
-	agentCancelledOnce := sync.Once{}
+	cancelFuncCalledOnce := sync.Once{}
 	cancelModeUsed := CancelImmediate
 	var cancelModeMu sync.Mutex
 
@@ -504,19 +504,19 @@ func TestTurnLoop_Preempt_WithCancelMode(t *testing.T) {
 				close(agentStarted)
 			})
 			<-ctx.Done()
-			agentCancelledOnce.Do(func() {
-				close(agentCancelled)
-			})
 			return &AgentOutput{}, nil
 		},
 		cancelFunc: func(opts ...CancelOption) error {
 			cancelModeMu.Lock()
-			defer cancelModeMu.Unlock()
 			cfg := &cancelConfig{Mode: CancelImmediate}
 			for _, opt := range opts {
 				opt(cfg)
 			}
 			cancelModeUsed = cfg.Mode
+			cancelModeMu.Unlock()
+			cancelFuncCalledOnce.Do(func() {
+				close(cancelFuncCalled)
+			})
 			return nil
 		},
 	}
@@ -545,9 +545,9 @@ func TestTurnLoop_Preempt_WithCancelMode(t *testing.T) {
 	loop.Push("urgent", WithPreempt(WithTurnLoopCancelMode(CancelAfterToolCall)))
 
 	select {
-	case <-agentCancelled:
+	case <-cancelFuncCalled:
 	case <-time.After(1 * time.Second):
-		t.Fatal("agent was not cancelled")
+		t.Fatal("cancelFunc was not called by preempt")
 	}
 
 	loop.Cancel()
