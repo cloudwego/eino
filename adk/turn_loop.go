@@ -232,23 +232,23 @@ func RunTurnLoop[T any](ctx context.Context, cfg TurnLoopConfig[T]) *TurnLoop[T]
 
 // Push adds an item to the loop's buffer for processing.
 // This method is non-blocking and thread-safe.
-// Returns ErrTurnLoopStopped if the loop has stopped.
+// Returns false if the loop has stopped, true otherwise.
 //
 // Use WithPreempt() to atomically push an item and signal preemption of the current agent.
 // This is useful for urgent items that should interrupt the current processing.
-func (l *TurnLoop[T]) Push(item T, opts ...PushOption) (err error) {
+func (l *TurnLoop[T]) Push(item T, opts ...PushOption) (ok bool) {
 	cfg := &pushConfig{}
 	for _, opt := range opts {
 		opt(cfg)
 	}
 
 	if atomic.LoadInt32(&l.stopped) != 0 {
-		return ErrTurnLoopStopped
+		return false
 	}
 
 	defer func() {
 		if r := recover(); r != nil {
-			err = ErrTurnLoopStopped
+			ok = false
 		}
 	}()
 
@@ -258,7 +258,7 @@ func (l *TurnLoop[T]) Push(item T, opts ...PushOption) (err error) {
 		l.preemptSig.signal(cfg.cancelOpts...)
 	}
 
-	return nil
+	return true
 }
 
 // Cancel signals the loop to stop. This method is non-blocking and idempotent.

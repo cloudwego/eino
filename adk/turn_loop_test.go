@@ -167,8 +167,8 @@ func TestTurnLoop_PushReturnsErrorAfterCancel(t *testing.T) {
 
 	loop.Cancel()
 
-	err := loop.Push("msg1")
-	assert.ErrorIs(t, err, ErrTurnLoopStopped)
+	ok := loop.Push("msg1")
+	assert.False(t, ok)
 }
 
 func TestTurnLoop_CancelIsIdempotent(t *testing.T) {
