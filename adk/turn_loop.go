@@ -18,6 +18,7 @@ package adk
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"runtime/debug"
 	"sync"
@@ -26,6 +27,16 @@ import (
 
 	"github.com/cloudwego/eino/internal"
 	"github.com/cloudwego/eino/internal/safe"
+)
+
+var (
+	// ErrTurnLoopNotStarted is returned when Wait() is called on a TurnLoop
+	// that has not been started via Run().
+	ErrTurnLoopNotStarted = errors.New("turn loop has not been started")
+
+	// ErrTurnLoopAlreadyStarted is returned when Run() is called more than once
+	// on the same TurnLoop.
+	ErrTurnLoopAlreadyStarted = errors.New("turn loop has already been started")
 )
 
 type turnLoopCancelSig struct {
@@ -69,46 +80,84 @@ func (cs *turnLoopCancelSig) getDoneChan() <-chan struct{} {
 
 type preemptSignal struct {
 	mu         sync.Mutex
+	cond       *sync.Cond
+	paused     bool
 	signaled   bool
 	cancelOpts []CancelOption
 }
 
 func newPreemptSignal() *preemptSignal {
-	return &preemptSignal{}
+	s := &preemptSignal{}
+	s.cond = sync.NewCond(&s.mu)
+	return s
+}
+
+func (s *preemptSignal) pause() {
+	s.mu.Lock()
+	s.paused = true
+	s.mu.Unlock()
 }
 
 func (s *preemptSignal) signal(opts ...CancelOption) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if !s.signaled {
-		s.signaled = true
-		s.cancelOpts = opts
-	}
+
+	s.signaled = true
+	s.cancelOpts = opts
+	s.cond.Broadcast()
 }
 
 func (s *preemptSignal) check() (bool, []CancelOption) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
 	if s.signaled {
-		opts := s.cancelOpts
-		s.signaled = false
-		s.cancelOpts = nil
-		return true, opts
+		return true, s.cancelOpts
 	}
 	return false, nil
 }
 
+func (s *preemptSignal) waitIfPaused() (signaled bool, opts []CancelOption) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if !s.paused {
+		return false, nil
+	}
+
+	for s.paused && !s.signaled {
+		s.cond.Wait()
+	}
+
+	if s.signaled {
+		return true, s.cancelOpts
+	}
+	return false, nil
+}
+
+func (s *preemptSignal) release() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.paused = false
+	s.signaled = false
+	s.cancelOpts = nil
+	s.cond.Broadcast()
+}
+
 // TurnLoopConfig is the configuration for creating a TurnLoop.
 type TurnLoopConfig[T any] struct {
-	// GetAgent returns the Agent to run for the consumed items.
-	// The consumed slice contains items that GenInput decided to process in this turn.
-	// Required.
-	GetAgent func(ctx context.Context, consumed []T) (Agent, error)
-
 	// GenInput receives all buffered items and decides what to process.
 	// It returns which items to consume now vs keep for later turns.
 	// Required.
 	GenInput func(ctx context.Context, items []T) (*GenInputResult[T], error)
+
+	// PrepareAgent returns an Agent configured to handle the consumed items.
+	// This callback should set up the agent with appropriate system prompt,
+	// tools, and middlewares based on what items are being processed.
+	// Called once per turn with the items that GenInput decided to consume.
+	// Required.
+	PrepareAgent func(ctx context.Context, consumed []T) (Agent, error)
 
 	// OnAgentEvents is called to handle events emitted by the agent.
 	// The consumed slice contains items that triggered this agent execution.
@@ -161,12 +210,16 @@ type TurnLoopExitState[T any] struct {
 
 // TurnLoop is a push-based event loop for agent execution.
 // Users push items via Push() and the loop processes them through the agent.
+// Create with NewTurnLoop() and start with Run().
 type TurnLoop[T any] struct {
 	config TurnLoopConfig[T]
 
 	buffer *internal.UnboundedChan[T]
 
 	stopped int32
+	started int32
+
+	runOnce sync.Once
 
 	done chan struct{}
 
@@ -205,19 +258,33 @@ func WithPreempt(cancelOpts ...CancelOption) PushOption {
 	}
 }
 
-// RunTurnLoop creates and starts a new TurnLoop.
-// The loop runs in a background goroutine and processes items pushed via Push().
-// Use Cancel() to stop the loop and Wait() to get the result.
-func RunTurnLoop[T any](ctx context.Context, cfg TurnLoopConfig[T]) *TurnLoop[T] {
-	l := &TurnLoop[T]{
+// NewTurnLoop creates a new TurnLoop but does not start it.
+// Call Run() to start processing items.
+// Items can be pushed via Push() before Run() is called - they will be buffered.
+func NewTurnLoop[T any](cfg TurnLoopConfig[T]) *TurnLoop[T] {
+	return &TurnLoop[T]{
 		config:     cfg,
 		buffer:     internal.NewUnboundedChan[T](),
 		done:       make(chan struct{}),
 		cancelSig:  newTurnLoopCancelSig(),
 		preemptSig: newPreemptSignal(),
 	}
-	go l.run(ctx)
-	return l
+}
+
+// Run starts the turn loop. It returns immediately after starting the background goroutine.
+// Returns ErrTurnLoopAlreadyStarted if called more than once.
+// Items pushed via Push() before Run() will be processed once the loop starts.
+func (l *TurnLoop[T]) Run(ctx context.Context) error {
+	alreadyStarted := true
+	l.runOnce.Do(func() {
+		alreadyStarted = false
+		atomic.StoreInt32(&l.started, 1)
+		go l.run(ctx)
+	})
+	if alreadyStarted {
+		return ErrTurnLoopAlreadyStarted
+	}
+	return nil
 }
 
 // Push adds an item to the loop's buffer for processing.
@@ -226,7 +293,9 @@ func RunTurnLoop[T any](ctx context.Context, cfg TurnLoopConfig[T]) *TurnLoop[T]
 //
 // Use WithPreempt() to atomically push an item and signal preemption of the current agent.
 // This is useful for urgent items that should interrupt the current processing.
-func (l *TurnLoop[T]) Push(item T, opts ...PushOption) (ok bool) {
+// When preempt is set, Push will wait until the preempt is handled (agent cancelled or
+// no agent was running), ensuring correct preempt semantics.
+func (l *TurnLoop[T]) Push(item T, opts ...PushOption) bool {
 	cfg := &pushConfig{}
 	for _, opt := range opts {
 		opt(cfg)
@@ -236,24 +305,26 @@ func (l *TurnLoop[T]) Push(item T, opts ...PushOption) (ok bool) {
 		return false
 	}
 
-	defer func() {
-		if r := recover(); r != nil {
-			ok = false
-		}
-	}()
-
-	l.buffer.Send(item)
-
 	if cfg.preempt {
+		l.preemptSig.pause()
+
+		if !l.buffer.TrySend(item) {
+			l.preemptSig.release()
+			return false
+		}
+
 		l.preemptSig.signal(cfg.cancelOpts...)
+		return true
 	}
 
-	return true
+	return l.buffer.TrySend(item)
 }
 
 // Cancel signals the loop to stop and returns immediately (non-blocking).
 // The loop will stop at the next safe point determined by CancelMode.
 // This method is idempotent - multiple calls have no additional effect.
+// If Run() was never called, Cancel() marks the loop as stopped so future
+// Push() calls will return false, and Wait() will return immediately.
 // Call Wait() to block until the loop has fully exited and get the result.
 func (l *TurnLoop[T]) Cancel(opts ...CancelOption) {
 	l.cancelOnce.Do(func() {
@@ -270,13 +341,35 @@ func (l *TurnLoop[T]) Cancel(opts ...CancelOption) {
 		atomic.StoreInt32(&l.stopped, 1)
 
 		l.buffer.Close()
+
+		if atomic.LoadInt32(&l.started) == 0 {
+			l.result = &TurnLoopExitState[T]{
+				ExitReason:     nil,
+				UnhandledItems: nil,
+			}
+			close(l.done)
+		}
 	})
 }
 
 // Wait blocks until the loop exits and returns the result.
 // This method is safe to call from multiple goroutines.
 // All callers will receive the same result.
+// If Run() was never called and Cancel() was not called, returns immediately
+// with ExitReason = ErrTurnLoopNotStarted.
 func (l *TurnLoop[T]) Wait() *TurnLoopExitState[T] {
+	select {
+	case <-l.done:
+		return l.result
+	default:
+	}
+
+	if atomic.LoadInt32(&l.started) == 0 {
+		return &TurnLoopExitState[T]{
+			ExitReason:     ErrTurnLoopNotStarted,
+			UnhandledItems: l.buffer.TakeAll(),
+		}
+	}
 	<-l.done
 	return l.result
 }
@@ -285,10 +378,13 @@ func (l *TurnLoop[T]) run(ctx context.Context) {
 	defer l.cleanup()
 
 	for {
-		if err := ctx.Err(); err != nil {
-			l.runErr = err
+		select {
+		case <-ctx.Done():
+			l.runErr = ctx.Err()
 			return
+		default:
 		}
+
 		if l.cancelSig.isCancelled() {
 			return
 		}
@@ -298,11 +394,6 @@ func (l *TurnLoop[T]) run(ctx context.Context) {
 			return
 		}
 
-		if err := ctx.Err(); err != nil {
-			l.buffer.PushFront([]T{first})
-			l.runErr = err
-			return
-		}
 		if l.cancelSig.isCancelled() {
 			l.buffer.PushFront([]T{first})
 			return
@@ -310,6 +401,10 @@ func (l *TurnLoop[T]) run(ctx context.Context) {
 
 		rest := l.buffer.TakeAll()
 		items := append([]T{first}, rest...)
+
+		if signaled, _ := l.preemptSig.waitIfPaused(); signaled {
+			l.preemptSig.release()
+		}
 
 		result, err := l.config.GenInput(ctx, items)
 		if err != nil {
@@ -319,41 +414,30 @@ func (l *TurnLoop[T]) run(ctx context.Context) {
 
 		l.buffer.PushFront(result.Remaining)
 
-		if ctxErr := ctx.Err(); ctxErr != nil {
-			l.buffer.PushFront(result.Consumed)
-			l.runErr = ctxErr
-			return
-		}
 		if l.cancelSig.isCancelled() {
 			l.buffer.PushFront(result.Consumed)
 			return
 		}
 
-		agent, err := l.config.GetAgent(ctx, result.Consumed)
+		agent, err := l.config.PrepareAgent(ctx, result.Consumed)
 		if err != nil {
 			l.buffer.PushFront(result.Consumed)
 			l.runErr = err
 			return
 		}
 
-		if ctxErr := ctx.Err(); ctxErr != nil {
-			l.buffer.PushFront(result.Consumed)
-			l.runErr = ctxErr
-			return
-		}
 		if l.cancelSig.isCancelled() {
 			l.buffer.PushFront(result.Consumed)
 			return
 		}
 
-		preempted, runErr := l.runAgentAndHandleEvents(ctx, agent, result)
+		runErr := l.runAgentAndHandleEvents(ctx, agent, result)
+
+		l.preemptSig.release()
+
 		if runErr != nil {
 			l.runErr = runErr
 			return
-		}
-		if preempted {
-			l.buffer.PushFront(result.Consumed)
-			continue
 		}
 	}
 }
@@ -362,7 +446,7 @@ func (l *TurnLoop[T]) runAgentAndHandleEvents(
 	ctx context.Context,
 	agent Agent,
 	result *GenInputResult[T],
-) (preempted bool, err error) {
+) error {
 	var iter *AsyncIterator[*AgentEvent]
 	var agentCancelFunc CancelFunc
 
@@ -384,13 +468,14 @@ func (l *TurnLoop[T]) runAgentAndHandleEvents(
 	})
 
 	if result.IsResume && result.CheckpointID != "" {
+		var err error
 		if result.ResumeParams != nil {
 			iter, agentCancelFunc, err = runner.ResumeWithParamsAndCancel(ctx, result.CheckpointID, result.ResumeParams, runOpts...)
 		} else {
 			iter, agentCancelFunc, err = runner.ResumeWithCancel(ctx, result.CheckpointID, runOpts...)
 		}
 		if err != nil {
-			return false, fmt.Errorf("failed to resume agent: %w", err)
+			return fmt.Errorf("failed to resume agent: %w", err)
 		}
 	} else {
 		_, isAgentCancellable := agent.(CancellableAgent)
@@ -454,21 +539,21 @@ func (l *TurnLoop[T]) runAgentAndHandleEvents(
 
 		select {
 		case <-done:
-			return false, handleErr
+			return handleErr
 		case <-preemptDone:
 			<-done
-			return true, nil
+			return nil
 		case <-l.cancelSig.getDoneChan():
 			cfg := l.cancelSig.getConfig()
 			if cfg != nil {
 				_ = agentCancelFunc(WithCancelMode(cfg.Mode))
 			}
 			<-done
-			return false, handleErr
+			return handleErr
 		}
 	}
 
-	return false, handleEvents()
+	return handleEvents()
 }
 
 func (l *TurnLoop[T]) cleanup() {

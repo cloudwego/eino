@@ -433,7 +433,7 @@ func newReact(ctx context.Context, config *reactConfig, cs *cancelSig) (reactGra
 
 	if checkCancel {
 		beforeToolNode := func(ctx context.Context, input Message) (output Message, err error) {
-			if sig := checkCancelSig(cs); sig != nil && sig.Mode != CancelAfterToolCall {
+			if sig := checkCancelSig(cs); sig != nil && sig.Mode != CancelAfterToolCalls {
 				return nil, compose.Interrupt(ctx, "cancelled externally")
 			}
 

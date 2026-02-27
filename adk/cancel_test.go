@@ -293,7 +293,7 @@ func TestRunWithCancel_WithTools(t *testing.T) {
 		assert.True(t, atomic.LoadInt32(&st.callCount) >= 1, "Tool should have been called")
 	})
 
-	t.Run("CancelAfterToolCall_CompletesToolExecution", func(t *testing.T) {
+	t.Run("CancelAfterToolCalls_CompletesToolExecution", func(t *testing.T) {
 		toolStarted := make(chan struct{}, 1)
 		st := &slowToolWithSignal{
 			name:        "slow_tool",
@@ -342,7 +342,7 @@ func TestRunWithCancel_WithTools(t *testing.T) {
 
 		time.Sleep(100 * time.Millisecond)
 
-		err = cancelFn(WithCancelMode(CancelAfterToolCall))
+		err = cancelFn(WithCancelMode(CancelAfterToolCalls))
 		assert.NoError(t, err)
 
 		var events []*AgentEvent
@@ -671,7 +671,7 @@ func TestRunWithCancel_Streaming(t *testing.T) {
 		assert.True(t, hasInterrupted, "Should have interrupted event after cancel")
 	})
 
-	t.Run("CancelAfterToolCall_Streaming", func(t *testing.T) {
+	t.Run("CancelAfterToolCalls_Streaming", func(t *testing.T) {
 		toolStarted := make(chan struct{}, 1)
 		st := &slowToolWithSignal{
 			name:        "slow_tool",
@@ -723,7 +723,7 @@ func TestRunWithCancel_Streaming(t *testing.T) {
 
 		time.Sleep(100 * time.Millisecond)
 
-		cancelErr := cancelFn(WithCancelMode(CancelAfterToolCall))
+		cancelErr := cancelFn(WithCancelMode(CancelAfterToolCalls))
 		assert.NoError(t, cancelErr)
 
 		var events []*AgentEvent

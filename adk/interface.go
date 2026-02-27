@@ -274,7 +274,7 @@ type ResumableAgent interface {
 
 // CancelMode specifies when an agent should be canceled.
 // Modes can be combined with bitwise OR to cancel at multiple execution points.
-// For example, CancelAfterChatModel | CancelAfterToolCall cancels the agent
+// For example, CancelAfterChatModel | CancelAfterToolCalls cancels the agent
 // after whichever execution point is reached first.
 type CancelMode int
 
@@ -282,10 +282,11 @@ const (
 	// CancelImmediate cancels the agent immediately without waiting
 	// for any execution point.
 	CancelImmediate CancelMode = 0
-	// CancelAfterChatModel cancels the agent after a chat model call completes.
+	// CancelAfterChatModel cancels the agent after the current chat model call
+	// completes, including all streaming output.
 	CancelAfterChatModel CancelMode = 1 << iota
-	// CancelAfterToolCall cancels the agent after a tool call completes.
-	CancelAfterToolCall
+	// CancelAfterToolCalls cancels the agent after all concurrent tool calls complete.
+	CancelAfterToolCalls
 )
 
 // ErrAgentNotCancellable is returned by Cancel when the agent does not support cancellation.

@@ -46,6 +46,21 @@ func (ch *UnboundedChan[T]) Send(value T) {
 	ch.notEmpty.Signal() // Wake up one goroutine waiting to receive
 }
 
+// TrySend attempts to put an item into the channel.
+// Returns false if the channel is closed, true otherwise.
+func (ch *UnboundedChan[T]) TrySend(value T) bool {
+	ch.mutex.Lock()
+	defer ch.mutex.Unlock()
+
+	if ch.closed {
+		return false
+	}
+
+	ch.buffer = append(ch.buffer, value)
+	ch.notEmpty.Signal()
+	return true
+}
+
 // Receive gets an item from the channel (blocks if empty)
 func (ch *UnboundedChan[T]) Receive() (T, bool) {
 	ch.mutex.Lock()
