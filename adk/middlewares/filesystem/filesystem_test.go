@@ -70,7 +70,7 @@ func invokeTool(_ *testing.T, bt tool.BaseTool, input string) (string, error) {
 
 func TestLsTool(t *testing.T) {
 	backend := setupTestBackend()
-	lsTool, err := newLsTool(backend, nil)
+	lsTool, err := newLsTool(backend, nil, nil)
 	if err != nil {
 		t.Fatalf("Failed to create ls tool: %v", err)
 	}
@@ -115,7 +115,7 @@ func TestLsTool(t *testing.T) {
 
 func TestReadFileTool(t *testing.T) {
 	backend := setupTestBackend()
-	readTool, err := newReadFileTool(backend, nil)
+	readTool, err := newReadFileTool(backend, nil, nil)
 	if err != nil {
 		t.Fatalf("Failed to create read_file tool: %v", err)
 	}
@@ -174,7 +174,7 @@ func TestReadFileTool(t *testing.T) {
 
 func TestWriteFileTool(t *testing.T) {
 	backend := setupTestBackend()
-	writeTool, err := newWriteFileTool(backend, nil)
+	writeTool, err := newWriteFileTool(backend, nil, nil)
 	if err != nil {
 		t.Fatalf("Failed to create write_file tool: %v", err)
 	}
@@ -233,7 +233,7 @@ func TestWriteFileTool(t *testing.T) {
 
 func TestEditFileTool(t *testing.T) {
 	backend := setupTestBackend()
-	editTool, err := newEditFileTool(backend, nil)
+	editTool, err := newEditFileTool(backend, nil, nil)
 	if err != nil {
 		t.Fatalf("Failed to create edit_file tool: %v", err)
 	}
@@ -314,7 +314,7 @@ func TestEditFileTool(t *testing.T) {
 
 func TestGlobTool(t *testing.T) {
 	backend := setupTestBackend()
-	globTool, err := newGlobTool(backend, nil)
+	globTool, err := newGlobTool(backend, nil, nil)
 	if err != nil {
 		t.Fatalf("Failed to create glob tool: %v", err)
 	}
@@ -376,7 +376,7 @@ func TestGlobTool(t *testing.T) {
 
 func TestGrepTool(t *testing.T) {
 	backend := setupTestBackend()
-	grepTool, err := newGrepTool(backend, nil)
+	grepTool, err := newGrepTool(backend, nil, nil)
 	if err != nil {
 		t.Fatalf("Failed to create grep tool: %v", err)
 	}
@@ -500,7 +500,7 @@ func TestExecuteTool(t *testing.T) {
 			executeTool, err := newExecuteTool(&mockShellBackend{
 				Backend: backend,
 				resp:    tt.resp,
-			}, nil)
+			}, nil, nil)
 			assert.NoError(t, err)
 
 			result, err := invokeTool(t, executeTool, tt.input)
@@ -720,7 +720,7 @@ func TestGrepToolWithSortingAndPagination(t *testing.T) {
 		Content:  "match6\nmatch7\nmatch8",
 	})
 
-	grepTool, err := newGrepTool(backend, nil)
+	grepTool, err := newGrepTool(backend, nil, nil)
 	assert.NoError(t, err)
 
 	t.Run("files sorted by basename", func(t *testing.T) {
@@ -835,5 +835,165 @@ func TestApplyPagination(t *testing.T) {
 		items := []string{"a", "b", "c", "d", "e"}
 		result := applyPagination(items, 1, 0)
 		assert.Equal(t, []string{"b", "c", "d", "e"}, result)
+	})
+}
+
+func TestCustomToolNames(t *testing.T) {
+	backend := setupTestBackend()
+	ctx := context.Background()
+
+	t.Run("custom tool names applied to individual tools", func(t *testing.T) {
+		customLsName := "list_files"
+		customReadName := "read"
+		customWriteName := "write"
+		customEditName := "edit"
+		customGlobName := "find_files"
+		customGrepName := "search"
+
+		lsTool, err := newLsTool(backend, &customLsName, nil)
+		assert.NoError(t, err)
+		info, _ := lsTool.Info(ctx)
+		assert.Equal(t, "list_files", info.Name)
+
+		readTool, err := newReadFileTool(backend, &customReadName, nil)
+		assert.NoError(t, err)
+		info, _ = readTool.Info(ctx)
+		assert.Equal(t, "read", info.Name)
+
+		writeTool, err := newWriteFileTool(backend, &customWriteName, nil)
+		assert.NoError(t, err)
+		info, _ = writeTool.Info(ctx)
+		assert.Equal(t, "write", info.Name)
+
+		editTool, err := newEditFileTool(backend, &customEditName, nil)
+		assert.NoError(t, err)
+		info, _ = editTool.Info(ctx)
+		assert.Equal(t, "edit", info.Name)
+
+		globTool, err := newGlobTool(backend, &customGlobName, nil)
+		assert.NoError(t, err)
+		info, _ = globTool.Info(ctx)
+		assert.Equal(t, "find_files", info.Name)
+
+		grepTool, err := newGrepTool(backend, &customGrepName, nil)
+		assert.NoError(t, err)
+		info, _ = grepTool.Info(ctx)
+		assert.Equal(t, "search", info.Name)
+	})
+
+	t.Run("default tool names when custom names not provided", func(t *testing.T) {
+		lsTool, err := newLsTool(backend, nil, nil)
+		assert.NoError(t, err)
+		info, _ := lsTool.Info(ctx)
+		assert.Equal(t, ToolNameLs, info.Name)
+
+		readTool, err := newReadFileTool(backend, nil, nil)
+		assert.NoError(t, err)
+		info, _ = readTool.Info(ctx)
+		assert.Equal(t, ToolNameReadFile, info.Name)
+
+		writeTool, err := newWriteFileTool(backend, nil, nil)
+		assert.NoError(t, err)
+		info, _ = writeTool.Info(ctx)
+		assert.Equal(t, ToolNameWriteFile, info.Name)
+
+		editTool, err := newEditFileTool(backend, nil, nil)
+		assert.NoError(t, err)
+		info, _ = editTool.Info(ctx)
+		assert.Equal(t, ToolNameEditFile, info.Name)
+
+		globTool, err := newGlobTool(backend, nil, nil)
+		assert.NoError(t, err)
+		info, _ = globTool.Info(ctx)
+		assert.Equal(t, ToolNameGlob, info.Name)
+
+		grepTool, err := newGrepTool(backend, nil, nil)
+		assert.NoError(t, err)
+		info, _ = grepTool.Info(ctx)
+		assert.Equal(t, ToolNameGrep, info.Name)
+	})
+
+	t.Run("custom execute tool name", func(t *testing.T) {
+		customExecuteName := "run_command"
+		shellBackend := &mockShellBackend{
+			Backend: backend,
+			resp:    &filesystem.ExecuteResponse{Output: "ok"},
+		}
+
+		executeTool, err := newExecuteTool(shellBackend, &customExecuteName, nil)
+		assert.NoError(t, err)
+		info, _ := executeTool.Info(ctx)
+		assert.Equal(t, "run_command", info.Name)
+	})
+
+	t.Run("custom tool names in getFilesystemTools", func(t *testing.T) {
+		customLsName := "list_files"
+		customReadName := "read"
+		customWriteName := "write"
+		customEditName := "edit"
+		customGlobName := "find_files"
+		customGrepName := "search"
+
+		tools, err := getFilesystemTools(ctx, &MiddlewareConfig{
+			Backend:                 backend,
+			CustomLsToolName:        &customLsName,
+			CustomReadFileToolName:  &customReadName,
+			CustomWriteFileToolName: &customWriteName,
+			CustomEditFileToolName:  &customEditName,
+			CustomGlobToolName:      &customGlobName,
+			CustomGrepToolName:      &customGrepName,
+		})
+		assert.NoError(t, err)
+		assert.Len(t, tools, 6)
+
+		toolNames := make(map[string]bool)
+		for _, to := range tools {
+			info, _ := to.Info(ctx)
+			toolNames[info.Name] = true
+		}
+
+		assert.True(t, toolNames["list_files"])
+		assert.True(t, toolNames["read"])
+		assert.True(t, toolNames["write"])
+		assert.True(t, toolNames["edit"])
+		assert.True(t, toolNames["find_files"])
+		assert.True(t, toolNames["search"])
+	})
+
+	t.Run("custom tool names in middleware", func(t *testing.T) {
+		customLsName := "list_files"
+		customReadName := "read"
+
+		m, err := New(ctx, &MiddlewareConfig{
+			Backend:                backend,
+			CustomLsToolName:       &customLsName,
+			CustomReadFileToolName: &customReadName,
+		})
+		assert.NoError(t, err)
+
+		fm, ok := m.(*filesystemMiddleware)
+		assert.True(t, ok)
+
+		toolNames := make(map[string]bool)
+		for _, to := range fm.additionalTools {
+			info, _ := to.Info(ctx)
+			toolNames[info.Name] = true
+		}
+
+		assert.True(t, toolNames["list_files"])
+		assert.True(t, toolNames["read"])
+	})
+}
+
+func TestSelectToolName(t *testing.T) {
+	t.Run("returns custom name when provided", func(t *testing.T) {
+		customName := "custom_tool"
+		result := selectToolName(&customName, "default_tool")
+		assert.Equal(t, "custom_tool", result)
+	})
+
+	t.Run("returns default name when custom name is nil", func(t *testing.T) {
+		result := selectToolName(nil, "default_tool")
+		assert.Equal(t, "default_tool", result)
 	})
 }
