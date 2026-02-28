@@ -46,6 +46,21 @@ func (ch *UnboundedChan[T]) Send(value T) {
 	ch.notEmpty.Signal() // Wake up one goroutine waiting to receive
 }
 
+// TrySend attempts to put an item into the channel.
+// Returns false if the channel is closed, true otherwise.
+func (ch *UnboundedChan[T]) TrySend(value T) bool {
+	ch.mutex.Lock()
+	defer ch.mutex.Unlock()
+
+	if ch.closed {
+		return false
+	}
+
+	ch.buffer = append(ch.buffer, value)
+	ch.notEmpty.Signal()
+	return true
+}
+
 // Receive gets an item from the channel (blocks if empty)
 func (ch *UnboundedChan[T]) Receive() (T, bool) {
 	ch.mutex.Lock()
@@ -75,4 +90,34 @@ func (ch *UnboundedChan[T]) Close() {
 		ch.closed = true
 		ch.notEmpty.Broadcast() // Wake up all waiting goroutines
 	}
+}
+
+// TakeAll removes and returns all values from the channel atomically.
+// Returns nil if the channel is empty.
+func (ch *UnboundedChan[T]) TakeAll() []T {
+	ch.mutex.Lock()
+	defer ch.mutex.Unlock()
+
+	if len(ch.buffer) == 0 {
+		return nil
+	}
+
+	values := ch.buffer
+	ch.buffer = nil
+	return values
+}
+
+// PushFront adds values to the front of the channel.
+// This is useful for recovering values that need to be reprocessed.
+// Does nothing if values is empty.
+func (ch *UnboundedChan[T]) PushFront(values []T) {
+	if len(values) == 0 {
+		return
+	}
+
+	ch.mutex.Lock()
+	defer ch.mutex.Unlock()
+
+	ch.buffer = append(values, ch.buffer...)
+	ch.notEmpty.Signal()
 }

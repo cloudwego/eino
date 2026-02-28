@@ -274,7 +274,7 @@ type ResumableAgent interface {
 
 // CancelMode specifies when an agent should be canceled.
 // Modes can be combined with bitwise OR to cancel at multiple execution points.
-// For example, CancelAfterChatModel | CancelAfterToolCall cancels the agent
+// For example, CancelAfterChatModel | CancelAfterToolCalls cancels the agent
 // after whichever execution point is reached first.
 type CancelMode int
 
@@ -282,44 +282,45 @@ const (
 	// CancelImmediate cancels the agent immediately without waiting
 	// for any execution point.
 	CancelImmediate CancelMode = 0
-	// CancelAfterChatModel cancels the agent after a chat model call completes.
+	// CancelAfterChatModel cancels the agent after the current chat model call
+	// completes, including all streaming output.
 	CancelAfterChatModel CancelMode = 1 << iota
-	// CancelAfterToolCall cancels the agent after a tool call completes.
-	CancelAfterToolCall
+	// CancelAfterToolCalls cancels the agent after all concurrent tool calls complete.
+	CancelAfterToolCalls
 )
 
 // ErrAgentNotCancellable is returned by Cancel when the agent does not support cancellation.
 var ErrAgentNotCancellable = errors.New("agent does not implement CancellableAgent interface")
 
-type cancelConfig struct {
+type agentCancelConfig struct {
 	Mode    CancelMode
 	Timeout *time.Duration
 }
 
-type CancelOption func(*cancelConfig)
+type AgentCancelOption func(*agentCancelConfig)
 
-// WithCancelMode sets the cancel mode for the cancel operation.
-func WithCancelMode(mode CancelMode) CancelOption {
-	return func(config *cancelConfig) {
+// WithAgentCancelMode sets the cancel mode for the agent cancel operation.
+func WithAgentCancelMode(mode CancelMode) AgentCancelOption {
+	return func(config *agentCancelConfig) {
 		config.Mode = mode
 	}
 }
 
-// WithCancelTimeout sets a timeout duration for CancelImmediate mode.
-func WithCancelTimeout(timeout time.Duration) CancelOption {
-	return func(config *cancelConfig) {
+// WithAgentCancelTimeout sets a timeout duration for CancelImmediate mode.
+func WithAgentCancelTimeout(timeout time.Duration) AgentCancelOption {
+	return func(config *agentCancelConfig) {
 		config.Timeout = &timeout
 	}
 }
 
-type CancelFunc func(...CancelOption) error
+type AgentCancelFunc func(...AgentCancelOption) error
 
 type CancellableAgent interface {
 	Agent
-	RunWithCancel(ctx context.Context, input *AgentInput, options ...AgentRunOption) (*AsyncIterator[*AgentEvent], CancelFunc)
+	RunWithCancel(ctx context.Context, input *AgentInput, options ...AgentRunOption) (*AsyncIterator[*AgentEvent], AgentCancelFunc)
 }
 
 type CancellableResumableAgent interface {
 	ResumableAgent
-	ResumeWithCancel(ctx context.Context, info *ResumeInfo, opts ...AgentRunOption) (*AsyncIterator[*AgentEvent], CancelFunc)
+	ResumeWithCancel(ctx context.Context, info *ResumeInfo, opts ...AgentRunOption) (*AsyncIterator[*AgentEvent], AgentCancelFunc)
 }

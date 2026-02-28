@@ -433,7 +433,7 @@ func newReact(ctx context.Context, config *reactConfig, cs *cancelSig) (reactGra
 
 	if checkCancel {
 		beforeToolNode := func(ctx context.Context, input Message) (output Message, err error) {
-			if sig := checkCancelSig(cs); sig != nil && sig.Mode != CancelAfterToolCall {
+			if sig := checkCancelSig(cs); sig != nil && sig.Mode != CancelAfterToolCalls {
 				return nil, compose.Interrupt(ctx, "cancelled externally")
 			}
 
@@ -531,18 +531,18 @@ func newCancelSig() *cancelSig {
 	}
 }
 
-func (cs *cancelSig) cancel(cfg *cancelConfig) {
+func (cs *cancelSig) cancel(cfg *agentCancelConfig) {
 	cs.config.Store(cfg)
 	close(cs.done)
 }
 
-func checkCancelSig(cs *cancelSig) *cancelConfig {
+func checkCancelSig(cs *cancelSig) *agentCancelConfig {
 	if cs == nil {
 		return nil
 	}
 	select {
 	case <-cs.done:
-		return cs.config.Load().(*cancelConfig)
+		return cs.config.Load().(*agentCancelConfig)
 	default:
 		return nil
 	}
