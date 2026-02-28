@@ -448,8 +448,8 @@ func newLsTool(fs filesystem.Backend, name *string, desc *string) (tool.BaseTool
 }
 
 type readFileArgs struct {
-	// FilePath is the absolute path to the file to read.
-	FilePath string `json:"file_path" jsonschema:"description=The absolute path to the file to read"`
+	// FilePath is the path to the file to read.
+	FilePath string `json:"file_path" jsonschema:"description=The path to the file to read"`
 
 	// Offset is the line number to start reading from.
 	Offset int `json:"offset" jsonschema:"description=The line number to start reading from. Only provide if the file is too large to read at once"`
@@ -474,8 +474,8 @@ func newReadFileTool(fs filesystem.Backend, name *string, desc *string) (tool.Ba
 }
 
 type writeFileArgs struct {
-	// FilePath is the absolute path to the file to write.
-	FilePath string `json:"file_path" jsonschema:"description=The absolute path to the file to write (must be absolute\\, not relative)"`
+	// FilePath is the path to the file to write.
+	FilePath string `json:"file_path" jsonschema:"description=The path to the file to write"`
 
 	// Content is the content to write to the file.
 	Content string `json:"content" jsonschema:"description=The content to write to the file"`
@@ -500,8 +500,8 @@ func newWriteFileTool(fs filesystem.Backend, name *string, desc *string) (tool.B
 }
 
 type editFileArgs struct {
-	// FilePath is the absolute path to the file to modify.
-	FilePath string `json:"file_path" jsonschema:"description=The absolute path to the file to modify"`
+	// FilePath is the path to the file to modify.
+	FilePath string `json:"file_path" jsonschema:"description=The path to the file to modify"`
 
 	// OldString is the text to replace.
 	OldString string `json:"old_string" jsonschema:"description=The text to replace"`
