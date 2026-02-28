@@ -34,7 +34,7 @@ type turnLoopMockAgent struct {
 	name       string
 	events     []*AgentEvent
 	runFunc    func(ctx context.Context, input *AgentInput) (*AgentOutput, error)
-	cancelFunc func(opts ...CancelOption) error
+	cancelFunc func(opts ...AgentCancelOption) error
 }
 
 func (a *turnLoopMockAgent) Name(_ context.Context) string        { return a.name }
@@ -67,7 +67,7 @@ func (a *turnLoopMockAgent) Run(ctx context.Context, input *AgentInput, _ ...Age
 type turnLoopCancellableMockAgent struct {
 	name       string
 	runFunc    func(ctx context.Context, input *AgentInput) (*AgentOutput, error)
-	cancelFunc func(opts ...CancelOption) error
+	cancelFunc func(opts ...AgentCancelOption) error
 	cancelCtx  context.Context
 	cancel     context.CancelFunc
 	mu         sync.Mutex
@@ -82,9 +82,9 @@ func (a *turnLoopCancellableMockAgent) Run(ctx context.Context, input *AgentInpu
 	return a.runWithCancel(ctx, input, nil)
 }
 
-func (a *turnLoopCancellableMockAgent) RunWithCancel(ctx context.Context, input *AgentInput, _ ...AgentRunOption) (*AsyncIterator[*AgentEvent], CancelFunc) {
+func (a *turnLoopCancellableMockAgent) RunWithCancel(ctx context.Context, input *AgentInput, _ ...AgentRunOption) (*AsyncIterator[*AgentEvent], AgentCancelFunc) {
 	iter := a.runWithCancel(ctx, input, nil)
-	cancelFunc := func(opts ...CancelOption) error {
+	cancelFunc := func(opts ...AgentCancelOption) error {
 		a.mu.Lock()
 		defer a.mu.Unlock()
 		if a.cancel != nil {
@@ -146,7 +146,7 @@ func TestTurnLoop_RunAndPush(t *testing.T) {
 
 	time.Sleep(100 * time.Millisecond)
 
-	loop.Cancel()
+	loop.Stop()
 	result := loop.Wait()
 
 	mu.Lock()
@@ -169,7 +169,7 @@ func TestTurnLoop_PushReturnsErrorAfterCancel(t *testing.T) {
 		},
 	})
 
-	loop.Cancel()
+	loop.Stop()
 
 	ok := loop.Push("msg1")
 	assert.False(t, ok)
@@ -185,9 +185,9 @@ func TestTurnLoop_CancelIsIdempotent(t *testing.T) {
 		},
 	})
 
-	loop.Cancel()
-	loop.Cancel()
-	loop.Cancel()
+	loop.Stop()
+	loop.Stop()
+	loop.Stop()
 
 	result := loop.Wait()
 	assert.NoError(t, result.ExitReason)
@@ -203,7 +203,7 @@ func TestTurnLoop_WaitMultipleGoroutines(t *testing.T) {
 		},
 	})
 
-	loop.Cancel()
+	loop.Stop()
 
 	var wg sync.WaitGroup
 	results := make([]*TurnLoopExitState[string], 3)
@@ -248,7 +248,7 @@ func TestTurnLoop_UnhandledItemsOnCancel(t *testing.T) {
 
 	<-started
 
-	loop.Cancel()
+	loop.Stop()
 	close(blocked)
 
 	result := loop.Wait()
@@ -318,7 +318,7 @@ func TestTurnLoop_BatchProcessing(t *testing.T) {
 
 	time.Sleep(200 * time.Millisecond)
 
-	loop.Cancel()
+	loop.Stop()
 	loop.Wait()
 
 	mu.Lock()
@@ -337,7 +337,7 @@ func TestTurnLoop_CancelWithMode(t *testing.T) {
 		},
 	})
 
-	loop.Cancel(WithCancelMode(CancelAfterToolCalls))
+	loop.Stop(WithAgentCancel(WithAgentCancelMode(CancelAfterToolCalls)))
 
 	result := loop.Wait()
 	assert.NoError(t, result.ExitReason)
@@ -408,7 +408,7 @@ func TestTurnLoop_Preempt_CancelsCurrentAgent(t *testing.T) {
 		t.Fatal("second GenInput was not called after preempt")
 	}
 
-	loop.Cancel()
+	loop.Stop()
 	result := loop.Wait()
 	assert.NoError(t, result.ExitReason)
 	assert.GreaterOrEqual(t, atomic.LoadInt32(&genInputCalls), int32(2))
@@ -480,7 +480,7 @@ func TestTurnLoop_Preempt_DiscardsConsumedItems(t *testing.T) {
 		t.Fatal("second agent run did not complete")
 	}
 
-	loop.Cancel()
+	loop.Stop()
 	result := loop.Wait()
 	assert.NoError(t, result.ExitReason)
 
@@ -493,7 +493,7 @@ func TestTurnLoop_Preempt_DiscardsConsumedItems(t *testing.T) {
 	}
 }
 
-func TestTurnLoop_Preempt_WithCancelMode(t *testing.T) {
+func TestTurnLoop_Preempt_WithAgentCancelMode(t *testing.T) {
 	agentStarted := make(chan struct{})
 	cancelFuncCalled := make(chan struct{})
 	agentStartedOnce := sync.Once{}
@@ -510,9 +510,9 @@ func TestTurnLoop_Preempt_WithCancelMode(t *testing.T) {
 			<-ctx.Done()
 			return &AgentOutput{}, nil
 		},
-		cancelFunc: func(opts ...CancelOption) error {
+		cancelFunc: func(opts ...AgentCancelOption) error {
 			cancelModeMu.Lock()
-			cfg := &cancelConfig{Mode: CancelImmediate}
+			cfg := &agentCancelConfig{Mode: CancelImmediate}
 			for _, opt := range opts {
 				opt(cfg)
 			}
@@ -546,7 +546,7 @@ func TestTurnLoop_Preempt_WithCancelMode(t *testing.T) {
 		t.Fatal("agent did not start")
 	}
 
-	loop.Push("urgent", WithPreempt(WithCancelMode(CancelAfterToolCalls)))
+	loop.Push("urgent", WithPreempt(WithAgentCancelMode(CancelAfterToolCalls)))
 
 	select {
 	case <-cancelFuncCalled:
@@ -554,7 +554,7 @@ func TestTurnLoop_Preempt_WithCancelMode(t *testing.T) {
 		t.Fatal("cancelFunc was not called by preempt")
 	}
 
-	loop.Cancel()
+	loop.Stop()
 	result := loop.Wait()
 	assert.NoError(t, result.ExitReason)
 	cancelModeMu.Lock()
@@ -604,7 +604,7 @@ func TestTurnLoop_Push_WithoutPreempt_DoesNotCancel(t *testing.T) {
 		t.Fatal("second agent run did not complete")
 	}
 
-	loop.Cancel()
+	loop.Stop()
 	result := loop.Wait()
 	assert.NoError(t, result.ExitReason)
 	assert.Equal(t, 2, agentRunCount)
@@ -686,7 +686,7 @@ func TestTurnLoop_PreemptDelay_NoMispreemptOnNaturalCompletion(t *testing.T) {
 		t.Fatal("agent2 did not complete - may have been incorrectly preempted")
 	}
 
-	loop.Cancel()
+	loop.Stop()
 	result := loop.Wait()
 	assert.NoError(t, result.ExitReason)
 	assert.Equal(t, int32(2), atomic.LoadInt32(&agentRunCount))
@@ -719,7 +719,7 @@ func TestTurnLoop_ConcurrentPush(t *testing.T) {
 	wg.Wait()
 	time.Sleep(200 * time.Millisecond)
 
-	loop.Cancel()
+	loop.Stop()
 	result := loop.Wait()
 
 	processed := atomic.LoadInt32(&count)
@@ -748,7 +748,7 @@ func TestTurnLoop_CancelAfterReceive_RecoverItem(t *testing.T) {
 	loop.Push("msg1")
 	<-receiveStarted
 
-	loop.Cancel()
+	loop.Stop()
 	close(cancelDone)
 
 	result := loop.Wait()
@@ -780,7 +780,7 @@ func TestTurnLoop_CancelAfterGenInput_RecoverConsumed(t *testing.T) {
 	<-genInputDone
 
 	time.Sleep(60 * time.Millisecond)
-	loop.Cancel()
+	loop.Stop()
 
 	result := loop.Wait()
 	assert.NoError(t, result.ExitReason)
@@ -975,7 +975,7 @@ func TestTurnLoop_OnAgentEventsReceivesEvents(t *testing.T) {
 
 	time.Sleep(100 * time.Millisecond)
 
-	loop.Cancel()
+	loop.Stop()
 	result := loop.Wait()
 
 	assert.NoError(t, result.ExitReason)
@@ -1014,13 +1014,13 @@ func TestTurnLoop_CancelDuringAgentExecution(t *testing.T) {
 	loop.Push("msg1")
 
 	<-agentStarted
-	loop.Cancel(WithCancelMode(CancelImmediate))
+	loop.Stop(WithAgentCancel(WithAgentCancelMode(CancelImmediate)))
 
 	result := loop.Wait()
 	assert.NoError(t, result.ExitReason)
 }
 
-func TestTurnLoop_CancelOptionsArePassed(t *testing.T) {
+func TestTurnLoop_StopOptionsArePassed(t *testing.T) {
 	loop := newAndRunTurnLoop(context.Background(), TurnLoopConfig[string]{
 		GenInput: func(ctx context.Context, items []string) (*GenInputResult[string], error) {
 			return &GenInputResult[string]{
@@ -1033,7 +1033,7 @@ func TestTurnLoop_CancelOptionsArePassed(t *testing.T) {
 		},
 	})
 
-	loop.Cancel(WithCancelMode(CancelAfterToolCalls))
+	loop.Stop(WithAgentCancel(WithAgentCancelMode(CancelAfterToolCalls)))
 
 	result := loop.Wait()
 	assert.NoError(t, result.ExitReason)
@@ -1064,7 +1064,7 @@ func TestTurnLoop_RunTurnLoop(t *testing.T) {
 
 		time.Sleep(100 * time.Millisecond)
 
-		loop.Cancel()
+		loop.Stop()
 		result := loop.Wait()
 		assert.NoError(t, result.ExitReason)
 
@@ -1086,7 +1086,7 @@ func TestTurnLoop_RunTurnLoop(t *testing.T) {
 			},
 		})
 
-		loop.Cancel()
+		loop.Stop()
 
 		ok := loop.Push("after-cancel")
 		assert.False(t, ok)
@@ -1119,7 +1119,7 @@ func TestTurnLoop_RunTurnLoop(t *testing.T) {
 
 			go func() {
 				defer wg.Done()
-				loop.Cancel()
+				loop.Stop()
 			}()
 
 			wg.Wait()

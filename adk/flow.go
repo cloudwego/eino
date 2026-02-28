@@ -292,11 +292,11 @@ func (a *flowAgent) Run(ctx context.Context, input *AgentInput, opts ...AgentRun
 	return iter
 }
 
-func (a *flowAgent) RunWithCancel(ctx context.Context, input *AgentInput, opts ...AgentRunOption) (*AsyncIterator[*AgentEvent], CancelFunc) {
+func (a *flowAgent) RunWithCancel(ctx context.Context, input *AgentInput, opts ...AgentRunOption) (*AsyncIterator[*AgentEvent], AgentCancelFunc) {
 	return a.runInternal(ctx, input, true, opts...)
 }
 
-func (a *flowAgent) runInternal(ctx context.Context, input *AgentInput, withCancel bool, opts ...AgentRunOption) (*AsyncIterator[*AgentEvent], CancelFunc) {
+func (a *flowAgent) runInternal(ctx context.Context, input *AgentInput, withCancel bool, opts ...AgentRunOption) (*AsyncIterator[*AgentEvent], AgentCancelFunc) {
 	agentName := a.Name(ctx)
 
 	var runCtx *runContext
@@ -326,7 +326,7 @@ func (a *flowAgent) runInternal(ctx context.Context, input *AgentInput, withCanc
 	}
 
 	var aIter *AsyncIterator[*AgentEvent]
-	var cancelFn CancelFunc = notCancellableFuncInternal
+	var cancelFn AgentCancelFunc = notCancellableFuncInternal
 
 	ca, supportCancel := a.Agent.(CancellableAgent)
 	if withCancel && supportCancel {
@@ -342,7 +342,7 @@ func (a *flowAgent) runInternal(ctx context.Context, input *AgentInput, withCanc
 	return iterator, cancelFn
 }
 
-func notCancellableFuncInternal(_ ...CancelOption) error {
+func notCancellableFuncInternal(_ ...AgentCancelOption) error {
 	return ErrAgentNotCancellable
 }
 
@@ -351,11 +351,11 @@ func (a *flowAgent) Resume(ctx context.Context, info *ResumeInfo, opts ...AgentR
 	return iter
 }
 
-func (a *flowAgent) ResumeWithCancel(ctx context.Context, info *ResumeInfo, opts ...AgentRunOption) (*AsyncIterator[*AgentEvent], CancelFunc) {
+func (a *flowAgent) ResumeWithCancel(ctx context.Context, info *ResumeInfo, opts ...AgentRunOption) (*AsyncIterator[*AgentEvent], AgentCancelFunc) {
 	return a.resumeInternal(ctx, info, true, opts...)
 }
 
-func (a *flowAgent) resumeInternal(ctx context.Context, info *ResumeInfo, withCancel bool, opts ...AgentRunOption) (*AsyncIterator[*AgentEvent], CancelFunc) {
+func (a *flowAgent) resumeInternal(ctx context.Context, info *ResumeInfo, withCancel bool, opts ...AgentRunOption) (*AsyncIterator[*AgentEvent], AgentCancelFunc) {
 	agentName := a.Name(ctx)
 
 	ctx, info = buildResumeInfo(ctx, agentName, info)
@@ -369,7 +369,7 @@ func (a *flowAgent) resumeInternal(ctx context.Context, info *ResumeInfo, withCa
 
 	if info.WasInterrupted {
 		var aIter *AsyncIterator[*AgentEvent]
-		var cancelFn CancelFunc = notCancellableFuncInternal
+		var cancelFn AgentCancelFunc = notCancellableFuncInternal
 
 		ca, supportCancel := a.Agent.(CancellableResumableAgent)
 		if withCancel && supportCancel {

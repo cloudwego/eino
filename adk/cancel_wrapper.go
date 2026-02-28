@@ -38,7 +38,7 @@ func waitWithCancel[T any](cs *cancelSig, resultCh <-chan cancelWaitResult[T]) c
 	var timeCh <-chan time.Time
 	select {
 	case <-cs.done:
-		cfg := cs.config.Load().(*cancelConfig)
+		cfg := cs.config.Load().(*agentCancelConfig)
 		if cfg.Mode == CancelImmediate {
 			if cfg.Timeout == nil {
 				return cancelWaitResult[T]{cancelled: true}

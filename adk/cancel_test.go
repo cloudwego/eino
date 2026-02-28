@@ -129,7 +129,7 @@ func TestCancelSig(t *testing.T) {
 		cfg := checkCancelSig(cs)
 		assert.Nil(t, cfg, "Should not be cancelled initially")
 
-		cs.cancel(&cancelConfig{Mode: CancelImmediate})
+		cs.cancel(&agentCancelConfig{Mode: CancelImmediate})
 
 		cfg = checkCancelSig(cs)
 		assert.NotNil(t, cfg, "Should be cancelled after cancel()")
@@ -276,7 +276,7 @@ func TestRunWithCancel_WithTools(t *testing.T) {
 
 		time.Sleep(100 * time.Millisecond)
 
-		err = cancelFn(WithCancelMode(CancelAfterChatModel))
+		err = cancelFn(WithAgentCancelMode(CancelAfterChatModel))
 		assert.NoError(t, err)
 
 		var events []*AgentEvent
@@ -342,7 +342,7 @@ func TestRunWithCancel_WithTools(t *testing.T) {
 
 		time.Sleep(100 * time.Millisecond)
 
-		err = cancelFn(WithCancelMode(CancelAfterToolCalls))
+		err = cancelFn(WithAgentCancelMode(CancelAfterToolCalls))
 		assert.NoError(t, err)
 
 		var events []*AgentEvent
@@ -469,7 +469,7 @@ func TestRunWithCancel_WithCheckpoint(t *testing.T) {
 	})
 }
 
-func TestCancelFuncMultipleCalls(t *testing.T) {
+func TestAgentCancelFuncMultipleCalls(t *testing.T) {
 	ctx := context.Background()
 
 	t.Run("SecondCancelReturnsErrAgentFinished", func(t *testing.T) {
@@ -542,7 +542,7 @@ func TestAgentNotCancellable(t *testing.T) {
 		EnableStreaming: false,
 	})
 
-	t.Run("RunWithCancelReturnsNilCancelFunc", func(t *testing.T) {
+	t.Run("RunWithCancelReturnsNilAgentCancelFunc", func(t *testing.T) {
 		iter, cancelFn := runner.RunWithCancel(ctx, []Message{schema.UserMessage("Hello")})
 		assert.NotNil(t, iter)
 		assert.Nil(t, cancelFn)
@@ -723,7 +723,7 @@ func TestRunWithCancel_Streaming(t *testing.T) {
 
 		time.Sleep(100 * time.Millisecond)
 
-		cancelErr := cancelFn(WithCancelMode(CancelAfterToolCalls))
+		cancelErr := cancelFn(WithAgentCancelMode(CancelAfterToolCalls))
 		assert.NoError(t, cancelErr)
 
 		var events []*AgentEvent

@@ -46,7 +46,7 @@ func newTurnLoopCancelSig() *turnLoopCancelSig {
 	}
 }
 
-func (cs *turnLoopCancelSig) cancel(cfg *cancelConfig) {
+func (cs *turnLoopCancelSig) stop(cfg *stopConfig) {
 	cs.config.Store(cfg)
 	close(cs.done)
 }
@@ -60,9 +60,9 @@ func (cs *turnLoopCancelSig) isCancelled() bool {
 	}
 }
 
-func (cs *turnLoopCancelSig) getConfig() *cancelConfig {
+func (cs *turnLoopCancelSig) getConfig() *stopConfig {
 	if v := cs.config.Load(); v != nil {
-		return v.(*cancelConfig)
+		return v.(*stopConfig)
 	}
 	return nil
 }
@@ -75,11 +75,11 @@ func (cs *turnLoopCancelSig) getDoneChan() <-chan struct{} {
 }
 
 type preemptSignal struct {
-	mu         sync.Mutex
-	cond       *sync.Cond
-	paused     bool
-	signaled   bool
-	cancelOpts []CancelOption
+	mu              sync.Mutex
+	cond            *sync.Cond
+	paused          bool
+	signaled        bool
+	agentCancelOpts []AgentCancelOption
 }
 
 func newPreemptSignal() *preemptSignal {
@@ -94,7 +94,7 @@ func (s *preemptSignal) pause() {
 	s.mu.Unlock()
 }
 
-func (s *preemptSignal) signal(opts ...CancelOption) {
+func (s *preemptSignal) signal(opts ...AgentCancelOption) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -103,21 +103,21 @@ func (s *preemptSignal) signal(opts ...CancelOption) {
 	}
 
 	s.signaled = true
-	s.cancelOpts = opts
+	s.agentCancelOpts = opts
 	s.cond.Broadcast()
 }
 
-func (s *preemptSignal) check() (bool, []CancelOption) {
+func (s *preemptSignal) check() (bool, []AgentCancelOption) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	if s.signaled {
-		return true, s.cancelOpts
+		return true, s.agentCancelOpts
 	}
 	return false, nil
 }
 
-func (s *preemptSignal) waitIfPaused() (signaled bool, opts []CancelOption) {
+func (s *preemptSignal) waitIfPaused() (signaled bool, opts []AgentCancelOption) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -130,7 +130,7 @@ func (s *preemptSignal) waitIfPaused() (signaled bool, opts []CancelOption) {
 	}
 
 	if s.signaled {
-		return true, s.cancelOpts
+		return true, s.agentCancelOpts
 	}
 	return false, nil
 }
@@ -141,7 +141,7 @@ func (s *preemptSignal) release() {
 
 	s.paused = false
 	s.signaled = false
-	s.cancelOpts = nil
+	s.agentCancelOpts = nil
 	s.cond.Broadcast()
 }
 
@@ -231,17 +231,32 @@ type TurnLoop[T any] struct {
 
 	preemptSig *preemptSignal
 
-	cancelErr error
+	stopErr error
 
-	cancelCfg *cancelConfig
+	stopCfg *stopConfig
 
 	runErr error
 }
 
+type stopConfig struct {
+	agentCancelOpts []AgentCancelOption
+}
+
+// StopOption is an option for Stop().
+type StopOption func(*stopConfig)
+
+// WithAgentCancel sets the agent cancel options to use when stopping the loop.
+// These options control how the currently running agent is cancelled.
+func WithAgentCancel(opts ...AgentCancelOption) StopOption {
+	return func(cfg *stopConfig) {
+		cfg.agentCancelOpts = opts
+	}
+}
+
 type pushConfig struct {
-	preempt      bool
-	preemptDelay time.Duration
-	cancelOpts   []CancelOption
+	preempt         bool
+	preemptDelay    time.Duration
+	agentCancelOpts []AgentCancelOption
 }
 
 // PushOption is an option for Push().
@@ -252,10 +267,10 @@ type PushOption func(*pushConfig)
 // pushing an urgent item and triggering preemption.
 // The loop will cancel the current agent turn and continue with the next turn,
 // where GenInput will see all buffered items including the newly pushed one.
-func WithPreempt(cancelOpts ...CancelOption) PushOption {
+func WithPreempt(agentCancelOpts ...AgentCancelOption) PushOption {
 	return func(cfg *pushConfig) {
 		cfg.preempt = true
-		cfg.cancelOpts = cancelOpts
+		cfg.agentCancelOpts = agentCancelOpts
 	}
 }
 
@@ -319,13 +334,13 @@ func (l *TurnLoop[T]) Push(item T, opts ...PushOption) bool {
 			go func() {
 				select {
 				case <-time.After(cfg.preemptDelay):
-					l.preemptSig.signal(cfg.cancelOpts...)
+					l.preemptSig.signal(cfg.agentCancelOpts...)
 				case <-l.done:
 					l.preemptSig.release()
 				}
 			}()
 		} else {
-			l.preemptSig.signal(cfg.cancelOpts...)
+			l.preemptSig.signal(cfg.agentCancelOpts...)
 		}
 		return true
 	}
@@ -333,21 +348,20 @@ func (l *TurnLoop[T]) Push(item T, opts ...PushOption) bool {
 	return l.buffer.TrySend(item)
 }
 
-// Cancel signals the loop to stop and returns immediately (non-blocking).
-// The loop will stop at the next safe point determined by CancelMode.
+// Stop signals the loop to stop and returns immediately (non-blocking).
+// The loop will stop at the next safe point.
+// Use WithAgentCancel to control how the currently running agent is cancelled.
 // This method is idempotent - multiple calls have no additional effect.
 // Call Wait() to block until the loop has fully exited and get the result.
-func (l *TurnLoop[T]) Cancel(opts ...CancelOption) {
+func (l *TurnLoop[T]) Stop(opts ...StopOption) {
 	l.cancelOnce.Do(func() {
-		cfg := &cancelConfig{
-			Mode: CancelImmediate,
-		}
+		cfg := &stopConfig{}
 		for _, opt := range opts {
 			opt(cfg)
 		}
 
-		l.cancelCfg = cfg
-		l.cancelSig.cancel(cfg)
+		l.stopCfg = cfg
+		l.cancelSig.stop(cfg)
 
 		atomic.StoreInt32(&l.stopped, 1)
 
@@ -438,7 +452,7 @@ func (l *TurnLoop[T]) runAgentAndHandleEvents(
 	result *GenInputResult[T],
 ) error {
 	var iter *AsyncIterator[*AgentEvent]
-	var agentCancelFunc CancelFunc
+	var agentCancelFunc AgentCancelFunc
 
 	cps := l.config.Store
 	if cps != nil && result.ResumeFromCheckpointID == "" {
@@ -515,11 +529,7 @@ func (l *TurnLoop[T]) runAgentAndHandleEvents(
 					return
 				case <-time.After(10 * time.Millisecond):
 					if preempted, opts := l.preemptSig.check(); preempted {
-						cancelCfg := &cancelConfig{Mode: CancelImmediate}
-						for _, opt := range opts {
-							opt(cancelCfg)
-						}
-						_ = agentCancelFunc(WithCancelMode(cancelCfg.Mode))
+						_ = agentCancelFunc(opts...)
 						close(preemptDone)
 						return
 					}
@@ -536,7 +546,7 @@ func (l *TurnLoop[T]) runAgentAndHandleEvents(
 		case <-l.cancelSig.getDoneChan():
 			cfg := l.cancelSig.getConfig()
 			if cfg != nil {
-				_ = agentCancelFunc(WithCancelMode(cfg.Mode))
+				_ = agentCancelFunc(cfg.agentCancelOpts...)
 			}
 			<-done
 			return handleErr
@@ -554,8 +564,8 @@ func (l *TurnLoop[T]) cleanup() {
 		UnhandledItems: l.buffer.TakeAll(),
 	}
 
-	if l.cancelErr != nil && l.result.ExitReason == nil {
-		l.result.ExitReason = l.cancelErr
+	if l.stopErr != nil && l.result.ExitReason == nil {
+		l.result.ExitReason = l.stopErr
 	}
 
 	l.buffer.Close()

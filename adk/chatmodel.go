@@ -987,11 +987,11 @@ func (a *ChatModelAgent) Run(ctx context.Context, input *AgentInput, opts ...Age
 	return iter
 }
 
-func (a *ChatModelAgent) RunWithCancel(ctx context.Context, input *AgentInput, opts ...AgentRunOption) (*AsyncIterator[*AgentEvent], CancelFunc) {
+func (a *ChatModelAgent) RunWithCancel(ctx context.Context, input *AgentInput, opts ...AgentRunOption) (*AsyncIterator[*AgentEvent], AgentCancelFunc) {
 	return a.runInternal(ctx, input, true, opts...)
 }
 
-func (a *ChatModelAgent) runInternal(ctx context.Context, input *AgentInput, withCancel bool, opts ...AgentRunOption) (*AsyncIterator[*AgentEvent], CancelFunc) {
+func (a *ChatModelAgent) runInternal(ctx context.Context, input *AgentInput, withCancel bool, opts ...AgentRunOption) (*AsyncIterator[*AgentEvent], AgentCancelFunc) {
 	iterator, generator := NewAsyncIteratorPair[*AgentEvent]()
 
 	ctx, run, bc, err := a.getRunFunc(ctx)
@@ -1014,10 +1014,10 @@ func (a *ChatModelAgent) runInternal(ctx context.Context, input *AgentInput, wit
 	}
 
 	var cs *cancelSig
-	var cancelFn CancelFunc = notCancellableFuncInternal
+	var cancelFn AgentCancelFunc = notCancellableFuncInternal
 	if withCancel {
 		cs = newCancelSig()
-		cancelFn = buildCancelFunc(cs)
+		cancelFn = buildAgentCancelFunc(cs)
 	}
 
 	go func() {
@@ -1047,10 +1047,10 @@ func (a *ChatModelAgent) runInternal(ctx context.Context, input *AgentInput, wit
 	return iterator, cancelFn
 }
 
-func buildCancelFunc(cs *cancelSig) CancelFunc {
+func buildAgentCancelFunc(cs *cancelSig) AgentCancelFunc {
 	var once sync.Once
-	return func(opts ...CancelOption) error {
-		cfg := &cancelConfig{
+	return func(opts ...AgentCancelOption) error {
+		cfg := &agentCancelConfig{
 			Mode: CancelImmediate,
 		}
 		for _, opt := range opts {
@@ -1068,11 +1068,11 @@ func (a *ChatModelAgent) Resume(ctx context.Context, info *ResumeInfo, opts ...A
 	return iter
 }
 
-func (a *ChatModelAgent) ResumeWithCancel(ctx context.Context, info *ResumeInfo, opts ...AgentRunOption) (*AsyncIterator[*AgentEvent], CancelFunc) {
+func (a *ChatModelAgent) ResumeWithCancel(ctx context.Context, info *ResumeInfo, opts ...AgentRunOption) (*AsyncIterator[*AgentEvent], AgentCancelFunc) {
 	return a.resumeInternal(ctx, info, true, opts...)
 }
 
-func (a *ChatModelAgent) resumeInternal(ctx context.Context, info *ResumeInfo, withCancel bool, opts ...AgentRunOption) (*AsyncIterator[*AgentEvent], CancelFunc) {
+func (a *ChatModelAgent) resumeInternal(ctx context.Context, info *ResumeInfo, withCancel bool, opts ...AgentRunOption) (*AsyncIterator[*AgentEvent], AgentCancelFunc) {
 	iterator, generator := NewAsyncIteratorPair[*AgentEvent]()
 
 	ctx, run, bc, err := a.getRunFunc(ctx)
@@ -1131,10 +1131,10 @@ func (a *ChatModelAgent) resumeInternal(ctx context.Context, info *ResumeInfo, w
 	}
 
 	var cs *cancelSig
-	var cancelFn CancelFunc = notCancellableFuncInternal
+	var cancelFn AgentCancelFunc = notCancellableFuncInternal
 	if withCancel {
 		cs = newCancelSig()
-		cancelFn = buildCancelFunc(cs)
+		cancelFn = buildAgentCancelFunc(cs)
 	}
 
 	go func() {

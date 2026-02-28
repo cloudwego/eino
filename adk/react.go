@@ -531,18 +531,18 @@ func newCancelSig() *cancelSig {
 	}
 }
 
-func (cs *cancelSig) cancel(cfg *cancelConfig) {
+func (cs *cancelSig) cancel(cfg *agentCancelConfig) {
 	cs.config.Store(cfg)
 	close(cs.done)
 }
 
-func checkCancelSig(cs *cancelSig) *cancelConfig {
+func checkCancelSig(cs *cancelSig) *agentCancelConfig {
 	if cs == nil {
 		return nil
 	}
 	select {
 	case <-cs.done:
-		return cs.config.Load().(*cancelConfig)
+		return cs.config.Load().(*agentCancelConfig)
 	default:
 		return nil
 	}
