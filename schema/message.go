@@ -245,10 +245,10 @@ type MessageOutputReasoning struct {
 }
 
 // MessageStreamingMeta contains metadata for streaming responses.
-// It is used to track block positions when the model outputs multiple blocks in a single response.
+// It is used to track position of part when the model outputs multiple parts in a single response.
 type MessageStreamingMeta struct {
-	// Index specifies the index position of this block in the final response.
-	// This is useful for reassembling multiple reasoning/message blocks in correct order.
+	// Index specifies the index position of this part in the final response.
+	// This is useful for reassembling multiple reasoning/content parts in correct order.
 	Index int `json:"index,omitempty"`
 }
 
@@ -1488,98 +1488,166 @@ func concatAssistantMultiContent(parts []MessageOutputPart) ([]MessageOutputPart
 		return parts, nil
 	}
 
-	merged := make([]MessageOutputPart, 0, len(parts))
-	i := 0
-	for i < len(parts) {
-		currentPart := parts[i]
-		start := i
+	groups := groupOutputParts(parts)
 
-		if currentPart.Type == ChatMessagePartTypeText {
-			// --- Text Merging ---
-			// Find end of contiguous text block
-			end := start + 1
-			for end < len(parts) && parts[end].Type == ChatMessagePartTypeText {
-				end++
-			}
-
-			// If only one part, just append it
-			if end == start+1 {
-				merged = append(merged, currentPart)
-			} else {
-				// Multiple parts to merge
-				var sb strings.Builder
-				for k := start; k < end; k++ {
-					sb.WriteString(parts[k].Text)
-				}
-				mergedPart := MessageOutputPart{
-					Type: ChatMessagePartTypeText,
-					Text: sb.String(),
-				}
-				merged = append(merged, mergedPart)
-			}
-			i = end
-		} else if isBase64MessageOutputAudioPart(currentPart) {
-			// --- Audio Merging ---
-			// Find end of contiguous audio block
-			end := start + 1
-			for end < len(parts) && isBase64MessageOutputAudioPart(parts[end]) {
-				end++
-			}
-
-			// If only one part, just append it
-			if end == start+1 {
-				merged = append(merged, currentPart)
-			} else {
-				// Multiple parts to merge
-				var b64Builder strings.Builder
-				var mimeType string
-				extraList := make([]map[string]any, 0, end-start)
-
-				for k := start; k < end; k++ {
-					audioPart := parts[k].Audio
-					if audioPart.Base64Data != nil {
-						b64Builder.WriteString(*audioPart.Base64Data)
-					}
-					if mimeType == "" {
-						mimeType = audioPart.MIMEType
-					}
-					if len(audioPart.Extra) > 0 {
-						extraList = append(extraList, audioPart.Extra)
-					}
-				}
-
-				var mergedExtra map[string]any
-				var err error
-				if len(extraList) > 0 {
-					mergedExtra, err = concatExtra(extraList)
-					if err != nil {
-						return nil, fmt.Errorf("failed to concat audio extra: %w", err)
-					}
-				}
-
-				mergedB64 := b64Builder.String()
-				mergedPart := MessageOutputPart{
-					Type: ChatMessagePartTypeAudioURL,
-					Audio: &MessageOutputAudio{
-						MessagePartCommon: MessagePartCommon{
-							Base64Data: &mergedB64,
-							MIMEType:   mimeType,
-							Extra:      mergedExtra,
-						},
-					},
-				}
-				merged = append(merged, mergedPart)
-			}
-			i = end
-		} else {
-			// --- Non-mergeable part ---
-			merged = append(merged, currentPart)
-			i++
+	merged := make([]MessageOutputPart, 0, len(groups))
+	for _, group := range groups {
+		mergedPart, err := mergeOutputPartGroup(group)
+		if err != nil {
+			return nil, err
 		}
+		merged = append(merged, mergedPart)
 	}
 
 	return merged, nil
 }
+
+func groupOutputParts(parts []MessageOutputPart) [][]MessageOutputPart {
+	if len(parts) == 0 {
+		return nil
+	}
+
+	groups := make([][]MessageOutputPart, 0)
+	currentGroup := []MessageOutputPart{parts[0]}
+
+	for i := 1; i < len(parts); i++ {
+		if canMergeOutputParts(currentGroup[0], parts[i]) {
+			currentGroup = append(currentGroup, parts[i])
+		} else {
+			groups = append(groups, currentGroup)
+			currentGroup = []MessageOutputPart{parts[i]}
+		}
+	}
+	groups = append(groups, currentGroup)
+
+	return groups
+}
+
+func canMergeOutputParts(current, next MessageOutputPart) bool {
+	if current.Type != next.Type {
+		return false
+	}
+
+	if !isMergeableOutputPartType(current) {
+		return false
+	}
+
+	if current.StreamingMeta != nil && next.StreamingMeta != nil {
+		return current.StreamingMeta.Index == next.StreamingMeta.Index
+	}
+
+	return current.StreamingMeta == nil && next.StreamingMeta == nil
+}
+
+func isMergeableOutputPartType(part MessageOutputPart) bool {
+	switch part.Type {
+	case ChatMessagePartTypeText, ChatMessagePartTypeReasoning:
+		return true
+	case ChatMessagePartTypeAudioURL:
+		return isBase64MessageOutputAudioPart(part)
+	default:
+		return false
+	}
+}
+
+func mergeOutputPartGroup(group []MessageOutputPart) (MessageOutputPart, error) {
+	if len(group) == 0 {
+		return MessageOutputPart{}, nil
+	}
+
+	if len(group) == 1 {
+		return group[0], nil
+	}
+
+	first := group[0]
+	switch first.Type {
+	case ChatMessagePartTypeText:
+		return mergeTextParts(group), nil
+	case ChatMessagePartTypeReasoning:
+		return mergeReasoningParts(group), nil
+	case ChatMessagePartTypeAudioURL:
+		if isBase64MessageOutputAudioPart(first) {
+			return mergeAudioParts(group)
+		}
+	}
+
+	return first, nil
+}
+
+func mergeTextParts(group []MessageOutputPart) MessageOutputPart {
+	var sb strings.Builder
+	for _, part := range group {
+		sb.WriteString(part.Text)
+	}
+	return MessageOutputPart{
+		Type:          ChatMessagePartTypeText,
+		Text:          sb.String(),
+		StreamingMeta: group[0].StreamingMeta,
+	}
+}
+
+func mergeReasoningParts(group []MessageOutputPart) MessageOutputPart {
+	var textBuilder strings.Builder
+	var signature string
+	for _, part := range group {
+		if part.Reasoning != nil {
+			textBuilder.WriteString(part.Reasoning.Text)
+			if part.Reasoning.Signature != "" {
+				signature = part.Reasoning.Signature
+			}
+		}
+	}
+	return MessageOutputPart{
+		Type: ChatMessagePartTypeReasoning,
+		Reasoning: &MessageOutputReasoning{
+			Text:      textBuilder.String(),
+			Signature: signature,
+		},
+		StreamingMeta: group[0].StreamingMeta,
+	}
+}
+
+func mergeAudioParts(group []MessageOutputPart) (MessageOutputPart, error) {
+	var b64Builder strings.Builder
+	var mimeType string
+	extraList := make([]map[string]any, 0, len(group))
+
+	for _, part := range group {
+		audioPart := part.Audio
+		if audioPart.Base64Data != nil {
+			b64Builder.WriteString(*audioPart.Base64Data)
+		}
+		if mimeType == "" {
+			mimeType = audioPart.MIMEType
+		}
+		if len(audioPart.Extra) > 0 {
+			extraList = append(extraList, audioPart.Extra)
+		}
+	}
+
+	var mergedExtra map[string]any
+	var err error
+	if len(extraList) > 0 {
+		mergedExtra, err = concatExtra(extraList)
+		if err != nil {
+			return MessageOutputPart{}, fmt.Errorf("failed to concat audio extra: %w", err)
+		}
+	}
+
+	mergedB64 := b64Builder.String()
+	return MessageOutputPart{
+		Type: ChatMessagePartTypeAudioURL,
+		Audio: &MessageOutputAudio{
+			MessagePartCommon: MessagePartCommon{
+				Base64Data: &mergedB64,
+				MIMEType:   mimeType,
+				Extra:      mergedExtra,
+			},
+		},
+		StreamingMeta: group[0].StreamingMeta,
+	}, nil
+}
+
 func isBase64MessageOutputAudioPart(part MessageOutputPart) bool {
 	return part.Type == ChatMessagePartTypeAudioURL &&
 		part.Audio != nil &&
