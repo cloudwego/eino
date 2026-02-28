@@ -606,7 +606,7 @@ func TestNew(t *testing.T) {
 	t.Run("nil backend returns error", func(t *testing.T) {
 		_, err := New(ctx, &MiddlewareConfig{Backend: nil})
 		assert.Error(t, err)
-		assert.Contains(t, err.Error(), "backend should not be nil")
+		assert.Contains(t, err.Error(), "at least one of Backend, Shell, StreamingShell, or custom tools must be set")
 	})
 
 	t.Run("valid config with default settings", func(t *testing.T) {
@@ -738,7 +738,7 @@ func TestGrepToolWithSortingAndPagination(t *testing.T) {
 		result, err := invokeTool(t, grepTool, `{"pattern": "match", "output_mode": "files_with_matches", "offset": 1}`)
 		assert.NoError(t, err)
 		lines := strings.Split(strings.TrimSpace(result), "\n")
-		assert.Equal(t, 3, len(lines)) // 1 summary + 2 files (pagination applied)
+		assert.Equal(t, 3, len(lines))                // 1 summary + 2 files (pagination applied)
 		assert.Contains(t, lines[0], "Found 3 files") // total count before pagination
 		assert.Contains(t, lines[1], "banana.txt")
 		assert.Contains(t, lines[2], "zebra.txt")
@@ -748,7 +748,7 @@ func TestGrepToolWithSortingAndPagination(t *testing.T) {
 		result, err := invokeTool(t, grepTool, `{"pattern": "match", "output_mode": "files_with_matches", "head_limit": 2}`)
 		assert.NoError(t, err)
 		lines := strings.Split(strings.TrimSpace(result), "\n")
-		assert.Equal(t, 3, len(lines)) // 1 summary + 2 files (pagination applied)
+		assert.Equal(t, 3, len(lines))                // 1 summary + 2 files (pagination applied)
 		assert.Contains(t, lines[0], "Found 3 files") // total count before pagination
 		assert.Contains(t, lines[1], "apple.txt")
 		assert.Contains(t, lines[2], "banana.txt")
@@ -758,7 +758,7 @@ func TestGrepToolWithSortingAndPagination(t *testing.T) {
 		result, err := invokeTool(t, grepTool, `{"pattern": "match", "output_mode": "files_with_matches", "offset": 1, "head_limit": 1}`)
 		assert.NoError(t, err)
 		lines := strings.Split(strings.TrimSpace(result), "\n")
-		assert.Equal(t, 2, len(lines)) // 1 summary + 1 file (pagination applied)
+		assert.Equal(t, 2, len(lines))                // 1 summary + 1 file (pagination applied)
 		assert.Contains(t, lines[0], "Found 3 files") // total count before pagination
 		assert.Contains(t, lines[1], "banana.txt")
 	})
@@ -1001,5 +1001,236 @@ func TestSelectToolName(t *testing.T) {
 	t.Run("returns default name when custom name is nil", func(t *testing.T) {
 		result := selectToolName(nil, "default_tool")
 		assert.Equal(t, "default_tool", result)
+	})
+}
+
+func TestGetOrCreateTool(t *testing.T) {
+	backend := setupTestBackend()
+
+	t.Run("returns custom tool when provided", func(t *testing.T) {
+		customTool, err := newLsTool(backend, nil, nil)
+		assert.NoError(t, err)
+
+		result, err := getOrCreateTool(customTool, func() (tool.BaseTool, error) {
+			t.Fatal("createFunc should not be called when custom tool is provided")
+			return nil, nil
+		})
+
+		assert.NoError(t, err)
+		assert.Equal(t, customTool, result)
+	})
+
+	t.Run("calls createFunc when custom tool is nil", func(t *testing.T) {
+		expectedTool, err := newReadFileTool(backend, nil, nil)
+		assert.NoError(t, err)
+
+		createFuncCalled := false
+		result, err := getOrCreateTool(nil, func() (tool.BaseTool, error) {
+			createFuncCalled = true
+			return expectedTool, nil
+		})
+
+		assert.NoError(t, err)
+		assert.True(t, createFuncCalled, "createFunc should be called when custom tool is nil")
+		assert.Equal(t, expectedTool, result)
+	})
+
+	t.Run("returns nil when custom tool is nil and createFunc returns nil", func(t *testing.T) {
+		result, err := getOrCreateTool(nil, func() (tool.BaseTool, error) {
+			return nil, nil
+		})
+
+		assert.NoError(t, err)
+		assert.Nil(t, result)
+	})
+
+	t.Run("propagates error from createFunc", func(t *testing.T) {
+		expectedErr := assert.AnError
+
+		result, err := getOrCreateTool(nil, func() (tool.BaseTool, error) {
+			return nil, expectedErr
+		})
+
+		assert.Error(t, err)
+		assert.Equal(t, expectedErr, err)
+		assert.Nil(t, result)
+	})
+}
+
+func TestCustomTools(t *testing.T) {
+	backend := setupTestBackend()
+	ctx := context.Background()
+
+	t.Run("custom ls tool is used when provided", func(t *testing.T) {
+		customLsTool, err := newLsTool(backend, nil, nil)
+		assert.NoError(t, err)
+
+		config := &MiddlewareConfig{
+			CustomLsTool: customLsTool,
+		}
+
+		tools, err := getFilesystemTools(ctx, config)
+		assert.NoError(t, err)
+		assert.Len(t, tools, 1)
+		assert.Equal(t, customLsTool, tools[0])
+	})
+
+	t.Run("custom read file tool is used when provided", func(t *testing.T) {
+		customReadTool, err := newReadFileTool(backend, nil, nil)
+		assert.NoError(t, err)
+
+		config := &MiddlewareConfig{
+			CustomReadFileTool: customReadTool,
+		}
+
+		tools, err := getFilesystemTools(ctx, config)
+		assert.NoError(t, err)
+		assert.Len(t, tools, 1)
+		assert.Equal(t, customReadTool, tools[0])
+	})
+
+	t.Run("custom write file tool is used when provided", func(t *testing.T) {
+		customWriteTool, err := newWriteFileTool(backend, nil, nil)
+		assert.NoError(t, err)
+
+		config := &MiddlewareConfig{
+			CustomWriteFileTool: customWriteTool,
+		}
+
+		tools, err := getFilesystemTools(ctx, config)
+		assert.NoError(t, err)
+		assert.Len(t, tools, 1)
+		assert.Equal(t, customWriteTool, tools[0])
+	})
+
+	t.Run("custom edit file tool is used when provided", func(t *testing.T) {
+		customEditTool, err := newEditFileTool(backend, nil, nil)
+		assert.NoError(t, err)
+
+		config := &MiddlewareConfig{
+			CustomEditFileTool: customEditTool,
+		}
+
+		tools, err := getFilesystemTools(ctx, config)
+		assert.NoError(t, err)
+		assert.Len(t, tools, 1)
+		assert.Equal(t, customEditTool, tools[0])
+	})
+
+	t.Run("custom glob tool is used when provided", func(t *testing.T) {
+		customGlobTool, err := newGlobTool(backend, nil, nil)
+		assert.NoError(t, err)
+
+		config := &MiddlewareConfig{
+			CustomGlobTool: customGlobTool,
+		}
+
+		tools, err := getFilesystemTools(ctx, config)
+		assert.NoError(t, err)
+		assert.Len(t, tools, 1)
+		assert.Equal(t, customGlobTool, tools[0])
+	})
+
+	t.Run("custom grep tool is used when provided", func(t *testing.T) {
+		customGrepTool, err := newGrepTool(backend, nil, nil)
+		assert.NoError(t, err)
+
+		config := &MiddlewareConfig{
+			CustomGrepTool: customGrepTool,
+		}
+
+		tools, err := getFilesystemTools(ctx, config)
+		assert.NoError(t, err)
+		assert.Len(t, tools, 1)
+		assert.Equal(t, customGrepTool, tools[0])
+	})
+
+	t.Run("multiple custom tools can be used together", func(t *testing.T) {
+		customLsTool, err := newLsTool(backend, nil, nil)
+		assert.NoError(t, err)
+		customReadTool, err := newReadFileTool(backend, nil, nil)
+		assert.NoError(t, err)
+		customGlobTool, err := newGlobTool(backend, nil, nil)
+		assert.NoError(t, err)
+
+		config := &MiddlewareConfig{
+			CustomLsTool:       customLsTool,
+			CustomReadFileTool: customReadTool,
+			CustomGlobTool:     customGlobTool,
+		}
+
+		tools, err := getFilesystemTools(ctx, config)
+		assert.NoError(t, err)
+		assert.Len(t, tools, 3)
+	})
+
+	t.Run("custom tools take precedence over backend", func(t *testing.T) {
+		customLsTool, err := newLsTool(backend, nil, nil)
+		assert.NoError(t, err)
+
+		config := &MiddlewareConfig{
+			Backend:      backend,
+			CustomLsTool: customLsTool,
+		}
+
+		tools, err := getFilesystemTools(ctx, config)
+		assert.NoError(t, err)
+
+		lsToolFound := false
+		for _, t := range tools {
+			if t == customLsTool {
+				lsToolFound = true
+				break
+			}
+		}
+		assert.True(t, lsToolFound, "custom ls tool should be in the tools list")
+	})
+
+	t.Run("backend tools are created when custom tools not provided", func(t *testing.T) {
+		config := &MiddlewareConfig{
+			Backend: backend,
+		}
+
+		tools, err := getFilesystemTools(ctx, config)
+		assert.NoError(t, err)
+		assert.Greater(t, len(tools), 0, "should create backend tools when custom tools not provided")
+	})
+}
+
+func TestMiddlewareConfigWithCustomTools(t *testing.T) {
+	backend := setupTestBackend()
+	ctx := context.Background()
+
+	t.Run("New middleware accepts custom tools", func(t *testing.T) {
+		customLsTool, err := newLsTool(backend, nil, nil)
+		assert.NoError(t, err)
+
+		config := &MiddlewareConfig{
+			CustomLsTool: customLsTool,
+		}
+
+		middleware, err := New(ctx, config)
+		assert.NoError(t, err)
+		assert.NotNil(t, middleware)
+	})
+
+	t.Run("Config validation passes with only custom tools", func(t *testing.T) {
+		customLsTool, err := newLsTool(backend, nil, nil)
+		assert.NoError(t, err)
+
+		config := &MiddlewareConfig{
+			CustomLsTool: customLsTool,
+		}
+
+		err = config.Validate()
+		assert.NoError(t, err)
+	})
+
+	t.Run("Config validation fails with no backend and no custom tools", func(t *testing.T) {
+		config := &MiddlewareConfig{}
+
+		err := config.Validate()
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "at least one")
 	})
 }

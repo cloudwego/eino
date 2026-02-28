@@ -67,6 +67,35 @@ type Config struct {
 	// Mutually exclusive with Shell.
 	StreamingShell filesystem.StreamingShell
 
+	// CustomLsTool provides a custom implementation for the ls tool
+	// If set, this tool will be used instead of the default implementation
+	// optional
+	CustomLsTool tool.BaseTool
+	// CustomReadFileTool provides a custom implementation for the read_file tool
+	// If set, this tool will be used instead of the default implementation
+	// optional
+	CustomReadFileTool tool.BaseTool
+	// CustomWriteFileTool provides a custom implementation for the write_file tool
+	// If set, this tool will be used instead of the default implementation
+	// optional
+	CustomWriteFileTool tool.BaseTool
+	// CustomEditFileTool provides a custom implementation for the edit_file tool
+	// If set, this tool will be used instead of the default implementation
+	// optional
+	CustomEditFileTool tool.BaseTool
+	// CustomGlobTool provides a custom implementation for the glob tool
+	// If set, this tool will be used instead of the default implementation
+	// optional
+	CustomGlobTool tool.BaseTool
+	// CustomGrepTool provides a custom implementation for the grep tool
+	// If set, this tool will be used instead of the default implementation
+	// optional
+	CustomGrepTool tool.BaseTool
+	// CustomExecuteTool provides a custom implementation for the execute tool
+	// If set, this tool will be used instead of the default implementation
+	// optional
+	CustomExecuteTool tool.BaseTool
+
 	// WithoutLargeToolResultOffloading disables automatic offloading of large tool result to Backend
 	// optional, false(enabled) by default
 	WithoutLargeToolResultOffloading bool
@@ -130,8 +159,11 @@ func (c *Config) Validate() error {
 	if c == nil {
 		return errors.New("config should not be nil")
 	}
-	if c.Backend == nil && c.Shell == nil && c.StreamingShell == nil {
-		return errors.New("at least one of Backend, Shell, or StreamingShell must be set")
+	if c.Backend == nil && c.Shell == nil && c.StreamingShell == nil &&
+		c.CustomLsTool == nil && c.CustomReadFileTool == nil &&
+		c.CustomWriteFileTool == nil && c.CustomEditFileTool == nil &&
+		c.CustomGlobTool == nil && c.CustomGrepTool == nil && c.CustomExecuteTool == nil {
+		return errors.New("at least one of Backend, Shell, StreamingShell, or custom tools must be set")
 	}
 	if c.StreamingShell != nil && c.Shell != nil {
 		return errors.New("shell and streaming shell should not be both set")
@@ -154,6 +186,13 @@ func NewMiddleware(ctx context.Context, config *Config) (adk.AgentMiddleware, er
 		Backend:                 config.Backend,
 		Shell:                   config.Shell,
 		StreamingShell:          config.StreamingShell,
+		CustomLsTool:            config.CustomLsTool,
+		CustomReadFileTool:      config.CustomReadFileTool,
+		CustomWriteFileTool:     config.CustomWriteFileTool,
+		CustomEditFileTool:      config.CustomEditFileTool,
+		CustomGlobTool:          config.CustomGlobTool,
+		CustomGrepTool:          config.CustomGrepTool,
+		CustomExecuteTool:       config.CustomExecuteTool,
 		CustomSystemPrompt:      config.CustomSystemPrompt,
 		CustomLsToolName:        config.CustomLsToolName,
 		CustomReadFileToolName:  config.CustomReadFileToolName,
@@ -223,6 +262,35 @@ type MiddlewareConfig struct {
 	// optional, mutually exclusive with Shell
 	StreamingShell filesystem.StreamingShell
 
+	// CustomLsTool provides a custom implementation for the ls tool
+	// If set, this tool will be used instead of the default implementation
+	// optional
+	CustomLsTool tool.BaseTool
+	// CustomReadFileTool provides a custom implementation for the read_file tool
+	// If set, this tool will be used instead of the default implementation
+	// optional
+	CustomReadFileTool tool.BaseTool
+	// CustomWriteFileTool provides a custom implementation for the write_file tool
+	// If set, this tool will be used instead of the default implementation
+	// optional
+	CustomWriteFileTool tool.BaseTool
+	// CustomEditFileTool provides a custom implementation for the edit_file tool
+	// If set, this tool will be used instead of the default implementation
+	// optional
+	CustomEditFileTool tool.BaseTool
+	// CustomGlobTool provides a custom implementation for the glob tool
+	// If set, this tool will be used instead of the default implementation
+	// optional
+	CustomGlobTool tool.BaseTool
+	// CustomGrepTool provides a custom implementation for the grep tool
+	// If set, this tool will be used instead of the default implementation
+	// optional
+	CustomGrepTool tool.BaseTool
+	// CustomExecuteTool provides a custom implementation for the execute tool
+	// If set, this tool will be used instead of the default implementation
+	// optional
+	CustomExecuteTool tool.BaseTool
+
 	// CustomSystemPrompt overrides the default ToolsSystemPrompt appended to agent instruction
 	// optional, ToolsSystemPrompt by default
 	CustomSystemPrompt *string
@@ -276,8 +344,11 @@ func (c *MiddlewareConfig) Validate() error {
 	if c == nil {
 		return errors.New("config should not be nil")
 	}
-	if c.Backend == nil {
-		return errors.New("backend should not be nil")
+	if c.Backend == nil && c.Shell == nil && c.StreamingShell == nil &&
+		c.CustomLsTool == nil && c.CustomReadFileTool == nil &&
+		c.CustomWriteFileTool == nil && c.CustomEditFileTool == nil &&
+		c.CustomGlobTool == nil && c.CustomGrepTool == nil && c.CustomExecuteTool == nil {
+		return errors.New("at least one of Backend, Shell, StreamingShell, or custom tools must be set")
 	}
 	if c.StreamingShell != nil && c.Shell != nil {
 		return errors.New("shell and streaming shell should not be both set")
@@ -358,67 +429,120 @@ func (m *filesystemMiddleware) BeforeAgent(ctx context.Context, runCtx *adk.Chat
 	return ctx, &nRunCtx, nil
 }
 
-func getFilesystemTools(_ context.Context, validatedConfig *MiddlewareConfig) ([]tool.BaseTool, error) {
+func getFilesystemTools(_ context.Context, middlewareConfig *MiddlewareConfig) ([]tool.BaseTool, error) {
 	var tools []tool.BaseTool
 	var err error
 
-	if validatedConfig.StreamingShell != nil {
-		var executeTool tool.BaseTool
-		executeTool, err = newStreamingExecuteTool(validatedConfig.StreamingShell, validatedConfig.CustomExecuteToolName, validatedConfig.CustomExecuteToolDesc)
-		if err != nil {
-			return nil, err
+	executeTool, err := getOrCreateTool(middlewareConfig.CustomExecuteTool, func() (tool.BaseTool, error) {
+		if middlewareConfig.StreamingShell != nil {
+			return newStreamingExecuteTool(middlewareConfig.StreamingShell, middlewareConfig.CustomExecuteToolName, middlewareConfig.CustomExecuteToolDesc)
 		}
-		tools = append(tools, executeTool)
-	} else if validatedConfig.Shell != nil {
-		var executeTool tool.BaseTool
-		executeTool, err = newExecuteTool(validatedConfig.Shell, validatedConfig.CustomExecuteToolName, validatedConfig.CustomExecuteToolDesc)
-		if err != nil {
-			return nil, err
+		if middlewareConfig.Shell != nil {
+			return newExecuteTool(middlewareConfig.Shell, middlewareConfig.CustomExecuteToolName, middlewareConfig.CustomExecuteToolDesc)
 		}
+		return nil, nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	if executeTool != nil {
 		tools = append(tools, executeTool)
 	}
 
-	if validatedConfig.Backend == nil {
+	if middlewareConfig.Backend == nil && middlewareConfig.Shell == nil && middlewareConfig.StreamingShell == nil &&
+		middlewareConfig.CustomLsTool == nil && middlewareConfig.CustomReadFileTool == nil &&
+		middlewareConfig.CustomWriteFileTool == nil && middlewareConfig.CustomEditFileTool == nil &&
+		middlewareConfig.CustomGlobTool == nil && middlewareConfig.CustomGrepTool == nil &&
+		middlewareConfig.CustomExecuteTool == nil {
 		return tools, nil
 	}
 
-	lsTool, err := newLsTool(validatedConfig.Backend, validatedConfig.CustomLsToolName, validatedConfig.CustomLsToolDesc)
+	lsTool, err := getOrCreateTool(middlewareConfig.CustomLsTool, func() (tool.BaseTool, error) {
+		if middlewareConfig.Backend != nil {
+			return newLsTool(middlewareConfig.Backend, middlewareConfig.CustomLsToolName, middlewareConfig.CustomLsToolDesc)
+		}
+		return nil, nil
+	})
 	if err != nil {
 		return nil, err
 	}
-	tools = append(tools, lsTool)
+	if lsTool != nil {
+		tools = append(tools, lsTool)
+	}
 
-	readTool, err := newReadFileTool(validatedConfig.Backend, validatedConfig.CustomReadFileToolName, validatedConfig.CustomReadFileToolDesc)
+	readTool, err := getOrCreateTool(middlewareConfig.CustomReadFileTool, func() (tool.BaseTool, error) {
+		if middlewareConfig.Backend != nil {
+			return newReadFileTool(middlewareConfig.Backend, middlewareConfig.CustomReadFileToolName, middlewareConfig.CustomReadFileToolDesc)
+		}
+		return nil, nil
+	})
 	if err != nil {
 		return nil, err
 	}
-	tools = append(tools, readTool)
+	if readTool != nil {
+		tools = append(tools, readTool)
+	}
 
-	writeTool, err := newWriteFileTool(validatedConfig.Backend, validatedConfig.CustomWriteFileToolName, validatedConfig.CustomWriteFileToolDesc)
+	writeTool, err := getOrCreateTool(middlewareConfig.CustomWriteFileTool, func() (tool.BaseTool, error) {
+		if middlewareConfig.Backend != nil {
+			return newWriteFileTool(middlewareConfig.Backend, middlewareConfig.CustomWriteFileToolName, middlewareConfig.CustomWriteFileToolDesc)
+		}
+		return nil, nil
+	})
 	if err != nil {
 		return nil, err
 	}
-	tools = append(tools, writeTool)
+	if writeTool != nil {
+		tools = append(tools, writeTool)
+	}
 
-	editTool, err := newEditFileTool(validatedConfig.Backend, validatedConfig.CustomEditFileToolName, validatedConfig.CustomEditToolDesc)
+	editTool, err := getOrCreateTool(middlewareConfig.CustomEditFileTool, func() (tool.BaseTool, error) {
+		if middlewareConfig.Backend != nil {
+			return newEditFileTool(middlewareConfig.Backend, middlewareConfig.CustomEditFileToolName, middlewareConfig.CustomEditToolDesc)
+		}
+		return nil, nil
+	})
 	if err != nil {
 		return nil, err
 	}
-	tools = append(tools, editTool)
+	if editTool != nil {
+		tools = append(tools, editTool)
+	}
 
-	globTool, err := newGlobTool(validatedConfig.Backend, validatedConfig.CustomGlobToolName, validatedConfig.CustomGlobToolDesc)
+	globTool, err := getOrCreateTool(middlewareConfig.CustomGlobTool, func() (tool.BaseTool, error) {
+		if middlewareConfig.Backend != nil {
+			return newGlobTool(middlewareConfig.Backend, middlewareConfig.CustomGlobToolName, middlewareConfig.CustomGlobToolDesc)
+		}
+		return nil, nil
+	})
 	if err != nil {
 		return nil, err
 	}
-	tools = append(tools, globTool)
+	if globTool != nil {
+		tools = append(tools, globTool)
+	}
 
-	grepTool, err := newGrepTool(validatedConfig.Backend, validatedConfig.CustomGrepToolName, validatedConfig.CustomGrepToolDesc)
+	grepTool, err := getOrCreateTool(middlewareConfig.CustomGrepTool, func() (tool.BaseTool, error) {
+		if middlewareConfig.Backend != nil {
+			return newGrepTool(middlewareConfig.Backend, middlewareConfig.CustomGrepToolName, middlewareConfig.CustomGrepToolDesc)
+		}
+		return nil, nil
+	})
 	if err != nil {
 		return nil, err
 	}
-	tools = append(tools, grepTool)
+	if grepTool != nil {
+		tools = append(tools, grepTool)
+	}
 
 	return tools, nil
+}
+
+func getOrCreateTool(customTool tool.BaseTool, createFunc func() (tool.BaseTool, error)) (tool.BaseTool, error) {
+	if customTool != nil {
+		return customTool, nil
+	}
+	return createFunc()
 }
 
 type lsArgs struct {
