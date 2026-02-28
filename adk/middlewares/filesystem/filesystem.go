@@ -44,6 +44,9 @@ const (
 	ToolNameGlob      = "glob"
 	ToolNameGrep      = "grep"
 	ToolNameExecute   = "execute"
+
+	noFilesFound   = "No files found"
+	noMatchesFound = "No matches found"
 )
 
 // Config is the configuration for the filesystem middleware
@@ -433,6 +436,9 @@ func newLsTool(fs filesystem.Backend, name *string, desc *string) (tool.BaseTool
 		if err != nil {
 			return "", err
 		}
+		if len(infos) == 0 {
+			return noFilesFound, nil
+		}
 		paths := make([]string, 0, len(infos))
 		for _, fi := range infos {
 			paths = append(paths, fi.Path)
@@ -548,6 +554,9 @@ func newGlobTool(fs filesystem.Backend, name *string, desc *string) (tool.BaseTo
 		})
 		if err != nil {
 			return "", err
+		}
+		if len(infos) == 0 {
+			return noFilesFound, nil
 		}
 		paths := make([]string, 0, len(infos))
 		for _, fi := range infos {
@@ -808,6 +817,9 @@ func applyPagination[T any](items []T, offset, headLimit int) []T {
 }
 
 func formatFileMatches(matches []filesystem.GrepMatch, offset, headLimit int) string {
+	if len(matches) == 0 {
+		return noFilesFound
+	}
 	seen := make(map[string]bool)
 	var uniquePaths []string
 	for _, match := range matches {
@@ -816,11 +828,20 @@ func formatFileMatches(matches []filesystem.GrepMatch, offset, headLimit int) st
 			uniquePaths = append(uniquePaths, match.Path)
 		}
 	}
+	totalFiles := len(uniquePaths)
 	uniquePaths = applyPagination(uniquePaths, offset, headLimit)
-	return strings.Join(uniquePaths, "\n")
+
+	fileWord := "files"
+	if totalFiles == 1 {
+		fileWord = "file"
+	}
+	return fmt.Sprintf("Found %d %s\n%s", totalFiles, fileWord, strings.Join(uniquePaths, "\n"))
 }
 
 func formatContentMatches(matches []filesystem.GrepMatch, showLineNum bool) string {
+	if len(matches) == 0 {
+		return noMatchesFound
+	}
 	var b strings.Builder
 	for _, match := range matches {
 		b.WriteString(match.Path)
@@ -846,6 +867,23 @@ func formatCountMatches(matches []filesystem.GrepMatch, offset, headLimit int) s
 		paths = append(paths, path)
 	}
 	sort.Strings(paths)
+
+	totalOccurrences := len(matches)
+	totalFiles := len(paths)
+
+	occurrenceWord := "occurrences"
+	if totalOccurrences == 1 {
+		occurrenceWord = "occurrence"
+	}
+	fileWord := "files"
+	if totalFiles == 1 {
+		fileWord = "file"
+	}
+
+	if totalOccurrences == 0 {
+		return fmt.Sprintf("%s\n\nFound %d total %s across %d %s.", noMatchesFound, totalOccurrences, occurrenceWord, totalFiles, fileWord)
+	}
+
 	paths = applyPagination(paths, offset, headLimit)
 
 	var b strings.Builder
@@ -855,7 +893,8 @@ func formatCountMatches(matches []filesystem.GrepMatch, offset, headLimit int) s
 		b.WriteString(strconv.Itoa(countMap[path]))
 		b.WriteString("\n")
 	}
-	return strings.TrimSuffix(b.String(), "\n")
+	result := strings.TrimSuffix(b.String(), "\n")
+	return fmt.Sprintf("%s\n\nFound %d total %s across %d %s.", result, totalOccurrences, occurrenceWord, totalFiles, fileWord)
 }
 
 // selectToolDesc returns the custom description if provided, otherwise selects the appropriate

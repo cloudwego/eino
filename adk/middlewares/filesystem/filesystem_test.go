@@ -390,7 +390,7 @@ func TestGrepTool(t *testing.T) {
 		{
 			name:     "grep with count mode",
 			input:    `{"pattern": "hello", "output_mode": "count"}`,
-			expected: "/dir1/file3.txt:2\n/dir1/file4.py:1\n/file2.go:1", // 2 in file3.txt, 1 in file4.py, 1 in file2.go
+			expected: "/dir1/file3.txt:2\n/dir1/file4.py:1\n/file2.go:1\n\nFound 4 total occurrences across 3 files.", // 2 in file3.txt, 1 in file4.py, 1 in file2.go
 		},
 		{
 			name:     "grep with content mode",
@@ -405,12 +405,12 @@ func TestGrepTool(t *testing.T) {
 		{
 			name:     "grep with glob filter",
 			input:    `{"pattern": "hello", "glob": "*.txt", "output_mode": "count"}`,
-			expected: "/dir1/file3.txt:2", // only in file3.txt
+			expected: "/dir1/file3.txt:2\n\nFound 2 total occurrences across 1 file.", // only in file3.txt
 		},
 		{
 			name:     "grep with path filter",
 			input:    `{"pattern": "package", "path": "/dir2", "output_mode": "count"}`,
-			expected: "/dir2/file5.go:1", // only in dir2/file5.go
+			expected: "/dir2/file5.go:1\n\nFound 1 total occurrence across 1 file.", // only in dir2/file5.go
 		},
 	}
 
@@ -727,36 +727,40 @@ func TestGrepToolWithSortingAndPagination(t *testing.T) {
 		result, err := invokeTool(t, grepTool, `{"pattern": "match", "output_mode": "files_with_matches"}`)
 		assert.NoError(t, err)
 		lines := strings.Split(strings.TrimSpace(result), "\n")
-		assert.Equal(t, 3, len(lines))
-		assert.Contains(t, lines[0], "apple.txt")
-		assert.Contains(t, lines[1], "banana.txt")
-		assert.Contains(t, lines[2], "zebra.txt")
+		assert.Equal(t, 4, len(lines)) // 1 summary + 3 files
+		assert.Contains(t, lines[0], "Found 3 files")
+		assert.Contains(t, lines[1], "apple.txt")
+		assert.Contains(t, lines[2], "banana.txt")
+		assert.Contains(t, lines[3], "zebra.txt")
 	})
 
 	t.Run("files_with_matches with offset", func(t *testing.T) {
 		result, err := invokeTool(t, grepTool, `{"pattern": "match", "output_mode": "files_with_matches", "offset": 1}`)
 		assert.NoError(t, err)
 		lines := strings.Split(strings.TrimSpace(result), "\n")
-		assert.Equal(t, 2, len(lines))
-		assert.Contains(t, lines[0], "banana.txt")
-		assert.Contains(t, lines[1], "zebra.txt")
+		assert.Equal(t, 3, len(lines)) // 1 summary + 2 files (pagination applied)
+		assert.Contains(t, lines[0], "Found 3 files") // total count before pagination
+		assert.Contains(t, lines[1], "banana.txt")
+		assert.Contains(t, lines[2], "zebra.txt")
 	})
 
 	t.Run("files_with_matches with head_limit", func(t *testing.T) {
 		result, err := invokeTool(t, grepTool, `{"pattern": "match", "output_mode": "files_with_matches", "head_limit": 2}`)
 		assert.NoError(t, err)
 		lines := strings.Split(strings.TrimSpace(result), "\n")
-		assert.Equal(t, 2, len(lines))
-		assert.Contains(t, lines[0], "apple.txt")
-		assert.Contains(t, lines[1], "banana.txt")
+		assert.Equal(t, 3, len(lines)) // 1 summary + 2 files (pagination applied)
+		assert.Contains(t, lines[0], "Found 3 files") // total count before pagination
+		assert.Contains(t, lines[1], "apple.txt")
+		assert.Contains(t, lines[2], "banana.txt")
 	})
 
 	t.Run("files_with_matches with offset and head_limit", func(t *testing.T) {
 		result, err := invokeTool(t, grepTool, `{"pattern": "match", "output_mode": "files_with_matches", "offset": 1, "head_limit": 1}`)
 		assert.NoError(t, err)
 		lines := strings.Split(strings.TrimSpace(result), "\n")
-		assert.Equal(t, 1, len(lines))
-		assert.Contains(t, lines[0], "banana.txt")
+		assert.Equal(t, 2, len(lines)) // 1 summary + 1 file (pagination applied)
+		assert.Contains(t, lines[0], "Found 3 files") // total count before pagination
+		assert.Contains(t, lines[1], "banana.txt")
 	})
 
 	t.Run("content mode sorted and paginated", func(t *testing.T) {
@@ -778,31 +782,33 @@ func TestGrepToolWithSortingAndPagination(t *testing.T) {
 		result, err := invokeTool(t, grepTool, `{"pattern": "match", "output_mode": "count"}`)
 		assert.NoError(t, err)
 		lines := strings.Split(strings.TrimSpace(result), "\n")
-		assert.Equal(t, 3, len(lines))
+		assert.Equal(t, 5, len(lines)) // 3 file counts + 1 empty line + 1 summary line
 		assert.Contains(t, lines[0], "apple.txt:2")
 		assert.Contains(t, lines[1], "banana.txt:3")
 		assert.Contains(t, lines[2], "zebra.txt:3")
+		assert.Contains(t, lines[4], "Found 8 total occurrences across 3 files.")
 	})
 
 	t.Run("count mode with pagination", func(t *testing.T) {
 		result, err := invokeTool(t, grepTool, `{"pattern": "match", "output_mode": "count", "offset": 1, "head_limit": 1}`)
 		assert.NoError(t, err)
 		lines := strings.Split(strings.TrimSpace(result), "\n")
-		assert.Equal(t, 1, len(lines))
+		assert.Equal(t, 3, len(lines)) // 1 file count + 1 empty line + 1 summary line
 		assert.Contains(t, lines[0], "banana.txt:3")
+		assert.Contains(t, lines[2], "Found 8 total occurrences across 3 files.") // summary shows total before pagination
 	})
 
 	t.Run("offset exceeds result count", func(t *testing.T) {
 		result, err := invokeTool(t, grepTool, `{"pattern": "match", "output_mode": "files_with_matches", "offset": 100}`)
 		assert.NoError(t, err)
-		assert.Equal(t, "", result)
+		assert.Contains(t, result, "Found 3 files") // still shows total count
 	})
 
 	t.Run("negative offset treated as zero", func(t *testing.T) {
 		result, err := invokeTool(t, grepTool, `{"pattern": "match", "output_mode": "files_with_matches", "offset": -5}`)
 		assert.NoError(t, err)
 		lines := strings.Split(strings.TrimSpace(result), "\n")
-		assert.Equal(t, 3, len(lines))
+		assert.Equal(t, 4, len(lines)) // 1 summary + 3 files
 	})
 }
 
