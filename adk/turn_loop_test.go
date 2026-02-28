@@ -832,6 +832,49 @@ func TestTurnLoop_GenInputError_RecoverItems(t *testing.T) {
 	assert.Contains(t, result.UnhandledItems, "msg2")
 }
 
+func TestTurnLoop_PrepareAgentError_RecoverItemsInOrder(t *testing.T) {
+	agentErr := errors.New("prepare agent error")
+
+	loop := newAndRunTurnLoop(context.Background(), TurnLoopConfig[string]{
+		GenInput: func(ctx context.Context, items []string) (*GenInputResult[string], error) {
+			var urgent string
+			remaining := make([]string, 0, len(items))
+			for _, item := range items {
+				if item == "urgent" {
+					urgent = item
+				} else {
+					remaining = append(remaining, item)
+				}
+			}
+			if urgent != "" {
+				return &GenInputResult[string]{
+					Input:     &AgentInput{},
+					Consumed:  []string{urgent},
+					Remaining: remaining,
+				}, nil
+			}
+			return &GenInputResult[string]{
+				Input:     &AgentInput{},
+				Consumed:  items[:1],
+				Remaining: items[1:],
+			}, nil
+		},
+		PrepareAgent: func(ctx context.Context, consumed []string) (Agent, error) {
+			return nil, agentErr
+		},
+	})
+
+	loop.Push("msg1")
+	loop.Push("urgent")
+	loop.Push("msg2")
+
+	result := loop.Wait()
+	assert.ErrorIs(t, result.ExitReason, agentErr)
+	assert.Len(t, result.UnhandledItems, 3, "should recover all items")
+	assert.Equal(t, []string{"msg1", "urgent", "msg2"}, result.UnhandledItems,
+		"should preserve original push order even when GenInput selects non-prefix items")
+}
+
 func TestTurnLoop_ContextCancel(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 

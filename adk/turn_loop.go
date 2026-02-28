@@ -416,24 +416,24 @@ func (l *TurnLoop[T]) run(ctx context.Context) {
 			return
 		}
 
-		l.buffer.PushFront(result.Remaining)
-
 		if l.cancelSig.isCancelled() {
-			l.buffer.PushFront(result.Consumed)
+			l.buffer.PushFront(items)
 			return
 		}
 
 		agent, err := l.config.PrepareAgent(ctx, result.Consumed)
 		if err != nil {
-			l.buffer.PushFront(result.Consumed)
+			l.buffer.PushFront(items)
 			l.runErr = err
 			return
 		}
 
 		if l.cancelSig.isCancelled() {
-			l.buffer.PushFront(result.Consumed)
+			l.buffer.PushFront(items)
 			return
 		}
+
+		l.buffer.PushFront(result.Remaining)
 
 		runErr := l.runAgentAndHandleEvents(ctx, agent, result)
 
