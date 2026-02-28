@@ -17,7 +17,9 @@
 package adk
 
 import (
+	"bytes"
 	"context"
+	"encoding/gob"
 	"errors"
 	"io"
 
@@ -29,51 +31,218 @@ import (
 // ErrExceedMaxIterations indicates the agent reached the maximum iterations limit.
 var ErrExceedMaxIterations = errors.New("exceeds max iterations")
 
-type adkToolResultSender func(ctx context.Context, toolName, callID, result string, prePopAction *AgentAction)
-type adkStreamToolResultSender func(ctx context.Context, toolName, callID string, resultStream *schema.StreamReader[string], prePopAction *AgentAction)
-
-type toolResultSenders struct {
-	addr         Address
-	sender       adkToolResultSender
-	streamSender adkStreamToolResultSender
-}
-
-type toolResultSendersCtxKey struct{}
-
-func setToolResultSendersToCtx(ctx context.Context, addr Address, sender adkToolResultSender, streamSender adkStreamToolResultSender) context.Context {
-	return context.WithValue(ctx, toolResultSendersCtxKey{}, &toolResultSenders{
-		addr:         addr,
-		sender:       sender,
-		streamSender: streamSender,
-	})
-}
-
-func getToolResultSendersFromCtx(ctx context.Context) *toolResultSenders {
-	v := ctx.Value(toolResultSendersCtxKey{})
-	if v == nil {
-		return nil
-	}
-	return v.(*toolResultSenders)
-}
-
-func isAddressAtDepth(currentAddr, handlerAddr Address, depth int) bool {
-	expectedLen := len(handlerAddr) + depth
-	return len(currentAddr) == expectedLen && currentAddr[:len(handlerAddr)].Equals(handlerAddr)
-}
-
-// State holds agent runtime state including messages, tool actions,
-// and remaining iterations.
+// State holds agent runtime state including messages and user-extensible storage.
+//
+// Deprecated: This type will be unexported in v1.0.0. Use ChatModelAgentState
+// in HandlerMiddleware and AgentMiddleware callbacks instead. Direct use of
+// compose.ProcessState[*State] is discouraged and will stop working in v1.0.0;
+// use the handler APIs instead.
 type State struct {
 	Messages []Message
+	extra    map[string]any
 
+	// Internal fields below - do not access directly.
+	// Kept exported for backward compatibility with existing checkpoints.
 	HasReturnDirectly        bool
 	ReturnDirectlyToolCallID string
+	ToolGenActions           map[string]*AgentAction
+	AgentName                string
+	RemainingIterations      int
 
-	ToolGenActions map[string]*AgentAction
+	internals map[string]any
+}
 
-	AgentName string
+const (
+	stateKeyReturnDirectlyEvent = "_returnDirectlyEvent"
+	stateKeyRetryAttempt        = "_retryAttempt"
+)
 
-	RemainingIterations int
+func init() {
+	gob.Register(&AgentEvent{})
+	gob.Register(int(0))
+}
+
+func (s *State) getReturnDirectlyEvent() *AgentEvent {
+	if s.internals == nil {
+		return nil
+	}
+	if v, ok := s.internals[stateKeyReturnDirectlyEvent]; ok {
+		return v.(*AgentEvent)
+	}
+	return nil
+}
+
+func (s *State) setReturnDirectlyEvent(event *AgentEvent) {
+	if s.internals == nil {
+		s.internals = make(map[string]any)
+	}
+	if event == nil {
+		delete(s.internals, stateKeyReturnDirectlyEvent)
+	} else {
+		s.internals[stateKeyReturnDirectlyEvent] = event
+	}
+}
+
+func (s *State) getRetryAttempt() int {
+	if s.internals == nil {
+		return 0
+	}
+	if v, ok := s.internals[stateKeyRetryAttempt]; ok {
+		return v.(int)
+	}
+	return 0
+}
+
+func (s *State) setRetryAttempt(attempt int) {
+	if s.internals == nil {
+		s.internals = make(map[string]any)
+	}
+	s.internals[stateKeyRetryAttempt] = attempt
+}
+
+const (
+	stateKeyReturnDirectlyToolCallID = "_returnDirectlyToolCallID"
+	stateKeyToolGenActions           = "_toolGenActions"
+	stateKeyRemainingIterations      = "_remainingIterations"
+)
+
+func (s *State) getReturnDirectlyToolCallID() string {
+	if s.internals == nil {
+		return ""
+	}
+	if v, ok := s.internals[stateKeyReturnDirectlyToolCallID].(string); ok {
+		return v
+	}
+	return ""
+}
+
+func (s *State) setReturnDirectlyToolCallID(id string) {
+	if s.internals == nil {
+		s.internals = make(map[string]any)
+	}
+	s.internals[stateKeyReturnDirectlyToolCallID] = id
+	s.ReturnDirectlyToolCallID = id
+	s.HasReturnDirectly = id != ""
+}
+
+func (s *State) getToolGenActions() map[string]*AgentAction {
+	if s.internals == nil {
+		return nil
+	}
+	if v, ok := s.internals[stateKeyToolGenActions].(map[string]*AgentAction); ok {
+		return v
+	}
+	return nil
+}
+
+func (s *State) setToolGenAction(key string, action *AgentAction) {
+	if s.internals == nil {
+		s.internals = make(map[string]any)
+	}
+	actions, ok := s.internals[stateKeyToolGenActions].(map[string]*AgentAction)
+	if !ok || actions == nil {
+		actions = make(map[string]*AgentAction)
+		s.internals[stateKeyToolGenActions] = actions
+	}
+	actions[key] = action
+}
+
+func (s *State) popToolGenAction(key string) *AgentAction {
+	if s.internals == nil {
+		return nil
+	}
+	actions, ok := s.internals[stateKeyToolGenActions].(map[string]*AgentAction)
+	if !ok || actions == nil {
+		return nil
+	}
+	action := actions[key]
+	delete(actions, key)
+	return action
+}
+
+func (s *State) getRemainingIterations() int {
+	if s.internals == nil {
+		return 0
+	}
+	if v, ok := s.internals[stateKeyRemainingIterations].(int); ok {
+		return v
+	}
+	return 0
+}
+
+func (s *State) setRemainingIterations(iterations int) {
+	if s.internals == nil {
+		s.internals = make(map[string]any)
+	}
+	s.internals[stateKeyRemainingIterations] = iterations
+}
+
+func (s *State) decrementRemainingIterations() {
+	if s.internals == nil {
+		s.internals = make(map[string]any)
+	}
+	current := s.getRemainingIterations()
+	s.internals[stateKeyRemainingIterations] = current - 1
+}
+
+type stateSerialization struct {
+	Messages                 []Message
+	HasReturnDirectly        bool
+	ReturnDirectlyToolCallID string
+	ToolGenActions           map[string]*AgentAction
+	AgentName                string
+	RemainingIterations      int
+	Extra                    map[string]any
+	Internals                map[string]any
+}
+
+func (s *State) GobEncode() ([]byte, error) {
+	internals := s.internals
+	if internals == nil {
+		internals = make(map[string]any)
+	}
+	ss := &stateSerialization{
+		Messages:                 s.Messages,
+		HasReturnDirectly:        s.HasReturnDirectly,
+		ReturnDirectlyToolCallID: s.getReturnDirectlyToolCallID(),
+		ToolGenActions:           s.getToolGenActions(),
+		AgentName:                s.AgentName,
+		RemainingIterations:      s.getRemainingIterations(),
+		Extra:                    s.extra,
+		Internals:                internals,
+	}
+	buf := &bytes.Buffer{}
+	if err := gob.NewEncoder(buf).Encode(ss); err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
+}
+
+func (s *State) GobDecode(b []byte) error {
+	ss := &stateSerialization{}
+	if err := gob.NewDecoder(bytes.NewReader(b)).Decode(ss); err != nil {
+		return err
+	}
+	s.Messages = ss.Messages
+	s.extra = ss.Extra
+	s.internals = ss.Internals
+	if s.internals == nil {
+		s.internals = make(map[string]any)
+	}
+
+	s.AgentName = ss.AgentName
+	s.HasReturnDirectly = ss.HasReturnDirectly
+
+	if ss.ReturnDirectlyToolCallID != "" {
+		s.setReturnDirectlyToolCallID(ss.ReturnDirectlyToolCallID)
+	}
+	if ss.ToolGenActions != nil {
+		s.internals[stateKeyToolGenActions] = ss.ToolGenActions
+	}
+	if ss.RemainingIterations != 0 {
+		s.setRemainingIterations(ss.RemainingIterations)
+	}
+	return nil
 }
 
 // SendToolGenAction attaches an AgentAction to the next tool event emitted for the
@@ -100,97 +269,28 @@ func SendToolGenAction(ctx context.Context, toolName string, action *AgentAction
 	}
 
 	return compose.ProcessState(ctx, func(ctx context.Context, st *State) error {
-		st.ToolGenActions[key] = action
-
+		st.setToolGenAction(key, action)
 		return nil
 	})
 }
 
-func popToolGenAction(ctx context.Context, toolName string) *AgentAction {
-	toolCallID := compose.GetToolCallID(ctx)
-
-	var action *AgentAction
-	err := compose.ProcessState(ctx, func(ctx context.Context, st *State) error {
-		if len(toolCallID) > 0 {
-			if a := st.ToolGenActions[toolCallID]; a != nil {
-				action = a
-				delete(st.ToolGenActions, toolCallID)
-				return nil
-			}
-		}
-
-		if a := st.ToolGenActions[toolName]; a != nil {
-			action = a
-			delete(st.ToolGenActions, toolName)
-		}
-
-		return nil
-	})
-
-	if err != nil {
-		panic("impossible")
-	}
-
-	return action
-}
-
-func newAdkToolResultCollectorMiddleware() compose.ToolMiddleware {
-	return compose.ToolMiddleware{
-		Invokable: func(next compose.InvokableToolEndpoint) compose.InvokableToolEndpoint {
-			return func(ctx context.Context, input *compose.ToolInput) (*compose.ToolOutput, error) {
-				senders := getToolResultSendersFromCtx(ctx)
-				var sender adkToolResultSender
-				if senders != nil {
-					sender = senders.sender
-				}
-				output, err := next(ctx, input)
-				if err != nil {
-					return nil, err
-				}
-				prePopAction := popToolGenAction(ctx, input.Name)
-				if sender != nil {
-					sender(ctx, input.Name, input.CallID, output.Result, prePopAction)
-				}
-				return output, nil
-			}
-		},
-		Streamable: func(next compose.StreamableToolEndpoint) compose.StreamableToolEndpoint {
-			return func(ctx context.Context, input *compose.ToolInput) (*compose.StreamToolOutput, error) {
-				senders := getToolResultSendersFromCtx(ctx)
-				var streamSender adkStreamToolResultSender
-				if senders != nil {
-					streamSender = senders.streamSender
-				}
-				output, err := next(ctx, input)
-				if err != nil {
-					return nil, err
-				}
-				prePopAction := popToolGenAction(ctx, input.Name)
-				if streamSender != nil {
-					streams := output.Result.Copy(2)
-					streamSender(ctx, input.Name, input.CallID, streams[0], prePopAction)
-					output.Result = streams[1]
-				}
-				return output, nil
-			}
-		},
-	}
+type reactInput struct {
+	messages []Message
 }
 
 type reactConfig struct {
-	model model.ToolCallingChatModel
+	// model is the chat model used by the react graph.
+	// Tools are configured via model.WithTools call option, not the WithTools method.
+	model model.BaseChatModel
 
-	toolsConfig *compose.ToolsNodeConfig
+	toolsConfig      *compose.ToolsNodeConfig
+	modelWrapperConf *modelWrapperConfig
 
 	toolsReturnDirectly map[string]bool
 
 	agentName string
 
 	maxIterations int
-
-	beforeChatModel, afterChatModel []func(context.Context, *ChatModelAgentState) error
-
-	modelRetryConfig *ModelRetryConfig
 }
 
 func genToolInfos(ctx context.Context, config *compose.ToolsNodeConfig) ([]*schema.ToolInfo, error) {
@@ -207,64 +307,54 @@ func genToolInfos(ctx context.Context, config *compose.ToolsNodeConfig) ([]*sche
 	return toolInfos, nil
 }
 
-type reactGraph = *compose.Graph[[]Message, Message]
+type reactGraph = *compose.Graph[*reactInput, Message]
 type sToolNodeOutput = *schema.StreamReader[[]Message]
 type sGraphOutput = MessageStream
 
 func getReturnDirectlyToolCallID(ctx context.Context) (string, bool) {
 	var toolCallID string
-	var hasReturnDirectly bool
 	handler := func(_ context.Context, st *State) error {
-		toolCallID = st.ReturnDirectlyToolCallID
-		hasReturnDirectly = st.HasReturnDirectly
+		toolCallID = st.getReturnDirectlyToolCallID()
 		return nil
 	}
 
 	_ = compose.ProcessState(ctx, handler)
 
-	return toolCallID, hasReturnDirectly
+	return toolCallID, toolCallID != ""
+}
+
+func genReactState(config *reactConfig) func(ctx context.Context) *State {
+	return func(ctx context.Context) *State {
+		st := &State{
+			AgentName: config.agentName,
+		}
+		maxIter := 20
+		if config.maxIterations > 0 {
+			maxIter = config.maxIterations
+		}
+		st.setRemainingIterations(maxIter)
+		return st
+	}
 }
 
 func newReact(ctx context.Context, config *reactConfig) (reactGraph, error) {
-	genState := func(ctx context.Context) *State {
-		return &State{
-			ToolGenActions: map[string]*AgentAction{},
-			AgentName:      config.agentName,
-			RemainingIterations: func() int {
-				if config.maxIterations <= 0 {
-					return 20
-				}
-				return config.maxIterations
-			}(),
-		}
-	}
-
 	const (
+		initNode_  = "Init"
 		chatModel_ = "ChatModel"
 		toolNode_  = "ToolNode"
 	)
 
-	g := compose.NewGraph[[]Message, Message](compose.WithGenLocalState(genState))
+	g := compose.NewGraph[*reactInput, Message](compose.WithGenLocalState(genReactState(config)))
 
-	toolsInfo, err := genToolInfos(ctx, config.toolsConfig)
-	if err != nil {
-		return nil, err
+	initLambda := func(ctx context.Context, input *reactInput) ([]Message, error) {
+		return input.messages, nil
 	}
+	_ = g.AddLambdaNode(initNode_, compose.InvokableLambda(initLambda), compose.WithNodeName(initNode_))
 
-	baseModel := config.model
-	if config.modelRetryConfig != nil {
-		baseModel = newRetryChatModel(config.model, config.modelRetryConfig)
+	var wrappedModel model.BaseChatModel = config.model
+	if config.modelWrapperConf != nil {
+		wrappedModel = buildModelWrappers(config.model, config.modelWrapperConf)
 	}
-
-	chatModel, err := baseModel.WithTools(toolsInfo)
-	if err != nil {
-		return nil, err
-	}
-
-	config.toolsConfig.ToolCallMiddlewares = append(
-		[]compose.ToolMiddleware{newAdkToolResultCollectorMiddleware()},
-		config.toolsConfig.ToolCallMiddlewares...,
-	)
 
 	toolsNode, err := compose.NewToolNode(ctx, config.toolsConfig)
 	if err != nil {
@@ -272,44 +362,28 @@ func newReact(ctx context.Context, config *reactConfig) (reactGraph, error) {
 	}
 
 	modelPreHandle := func(ctx context.Context, input []Message, st *State) ([]Message, error) {
-		if st.RemainingIterations <= 0 {
+		if st.getRemainingIterations() <= 0 {
 			return nil, ErrExceedMaxIterations
 		}
-		st.RemainingIterations--
-
-		s := &ChatModelAgentState{Messages: append(st.Messages, input...)}
-		for _, b := range config.beforeChatModel {
-			err = b(ctx, s)
-			if err != nil {
-				return nil, err
-			}
-		}
-		st.Messages = s.Messages
-
-		return st.Messages, nil
+		st.decrementRemainingIterations()
+		return input, nil
 	}
-	modelPostHandle := func(ctx context.Context, input Message, st *State) (Message, error) {
-		s := &ChatModelAgentState{Messages: append(st.Messages, input)}
-		for _, a := range config.afterChatModel {
-			err = a(ctx, s)
-			if err != nil {
-				return nil, err
-			}
-		}
-		st.Messages = s.Messages
-		return st.Messages[len(st.Messages)-1], nil
-	}
-	_ = g.AddChatModelNode(chatModel_, chatModel,
-		compose.WithStatePreHandler(modelPreHandle), compose.WithStatePostHandler(modelPostHandle), compose.WithNodeName(chatModel_))
+	_ = g.AddChatModelNode(chatModel_, wrappedModel,
+		compose.WithStatePreHandler(modelPreHandle), compose.WithNodeName(chatModel_))
 
-	toolPreHandle := func(ctx context.Context, input Message, st *State) (Message, error) {
-		input = st.Messages[len(st.Messages)-1]
-		if len(config.toolsReturnDirectly) > 0 {
+	toolPreHandle := func(ctx context.Context, _ Message, st *State) (Message, error) {
+		input := st.Messages[len(st.Messages)-1]
+
+		returnDirectly := config.toolsReturnDirectly
+		if execCtx := getChatModelAgentExecCtx(ctx); execCtx != nil && len(execCtx.runtimeReturnDirectly) > 0 {
+			returnDirectly = execCtx.runtimeReturnDirectly
+		}
+
+		if len(returnDirectly) > 0 {
 			for i := range input.ToolCalls {
 				toolName := input.ToolCalls[i].Function.Name
-				if config.toolsReturnDirectly[toolName] {
-					st.ReturnDirectlyToolCallID = input.ToolCalls[i].ID
-					st.HasReturnDirectly = true
+				if _, ok := returnDirectly[toolName]; ok {
+					st.setReturnDirectlyToolCallID(input.ToolCalls[i].ID)
 				}
 			}
 		}
@@ -317,10 +391,21 @@ func newReact(ctx context.Context, config *reactConfig) (reactGraph, error) {
 		return input, nil
 	}
 
-	_ = g.AddToolsNode(toolNode_, toolsNode,
-		compose.WithStatePreHandler(toolPreHandle), compose.WithNodeName(toolNode_))
+	toolPostHandle := func(ctx context.Context, out *schema.StreamReader[[]*schema.Message], st *State) (*schema.StreamReader[[]*schema.Message], error) {
+		if event := st.getReturnDirectlyEvent(); event != nil {
+			getChatModelAgentExecCtx(ctx).send(event)
+			st.setReturnDirectlyEvent(nil)
+		}
+		return out, nil
+	}
 
-	_ = g.AddEdge(compose.START, chatModel_)
+	_ = g.AddToolsNode(toolNode_, toolsNode,
+		compose.WithStatePreHandler(toolPreHandle),
+		compose.WithStreamStatePostHandler(toolPostHandle),
+		compose.WithNodeName(toolNode_))
+
+	_ = g.AddEdge(compose.START, initNode_)
+	_ = g.AddEdge(initNode_, chatModel_)
 
 	toolCallCheck := func(ctx context.Context, sMsg MessageStream) (string, error) {
 		defer sMsg.Close()
@@ -342,9 +427,7 @@ func newReact(ctx context.Context, config *reactConfig) (reactGraph, error) {
 	branch := compose.NewStreamGraphBranch(toolCallCheck, map[string]bool{compose.END: true, toolNode_: true})
 	_ = g.AddBranch(chatModel_, branch)
 
-	if len(config.toolsReturnDirectly) == 0 {
-		_ = g.AddEdge(toolNode_, chatModel_)
-	} else {
+	if len(config.toolsReturnDirectly) > 0 {
 		const (
 			toolNodeToEndConverter = "ToolNodeToEndConverter"
 		)
@@ -384,6 +467,8 @@ func newReact(ctx context.Context, config *reactConfig) (reactGraph, error) {
 		branch = compose.NewStreamGraphBranch(checkReturnDirect,
 			map[string]bool{toolNodeToEndConverter: true, chatModel_: true})
 		_ = g.AddBranch(toolNode_, branch)
+	} else {
+		_ = g.AddEdge(toolNode_, chatModel_)
 	}
 
 	return g, nil

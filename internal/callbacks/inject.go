@@ -124,6 +124,22 @@ func OnEndHandle[T any](ctx context.Context, output T,
 	return ctx, output
 }
 
+func BuildOnEndHandleWithCopy[T any](copyFn func(T, int) []T) Handle[T] {
+	return func(ctx context.Context, output T, runInfo *RunInfo, handlers []Handler) (context.Context, T) {
+		if len(handlers) == 0 {
+			return ctx, output
+		}
+
+		copies := copyFn(output, len(handlers))
+
+		for i, handler := range handlers {
+			ctx = handler.OnEnd(ctx, runInfo, copies[i])
+		}
+
+		return ctx, output
+	}
+}
+
 func OnWithStreamHandle[S any](
 	ctx context.Context,
 	inOut S,

@@ -26,6 +26,7 @@ import (
 	"github.com/slongfield/pyfmt"
 
 	"github.com/cloudwego/eino/adk"
+	"github.com/cloudwego/eino/adk/internal"
 	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/components/tool"
 	"github.com/cloudwego/eino/schema"
@@ -37,20 +38,24 @@ func newTaskToolMiddleware(
 	subAgents []adk.Agent,
 
 	withoutGeneralSubAgent bool,
-	cm model.ToolCallingChatModel,
+	// cm is the chat model. Tools are configured via model.WithTools call option.
+	cm model.BaseChatModel,
 	instruction string,
 	toolsConfig adk.ToolsConfig,
 	maxIteration int,
 	middlewares []adk.AgentMiddleware,
-) (adk.AgentMiddleware, error) {
-	t, err := newTaskTool(ctx, taskToolDescriptionGenerator, subAgents, withoutGeneralSubAgent, cm, instruction, toolsConfig, maxIteration, middlewares)
+	handlers []adk.ChatModelAgentMiddleware,
+) (adk.ChatModelAgentMiddleware, error) {
+	t, err := newTaskTool(ctx, taskToolDescriptionGenerator, subAgents, withoutGeneralSubAgent, cm, instruction, toolsConfig, maxIteration, middlewares, handlers)
 	if err != nil {
-		return adk.AgentMiddleware{}, err
+		return nil, err
 	}
-	return adk.AgentMiddleware{
-		AdditionalInstruction: taskPrompt,
-		AdditionalTools:       []tool.BaseTool{t},
-	}, nil
+	prompt := internal.SelectPrompt(internal.I18nPrompts{
+		English: taskPrompt,
+		Chinese: taskPromptChinese,
+	})
+
+	return buildAppendPromptTool(prompt, t), nil
 }
 
 func newTaskTool(
@@ -59,11 +64,13 @@ func newTaskTool(
 	subAgents []adk.Agent,
 
 	withoutGeneralSubAgent bool,
-	Model model.ToolCallingChatModel,
+	// Model is the chat model. Tools are configured via model.WithTools call option.
+	Model model.BaseChatModel,
 	Instruction string,
 	ToolsConfig adk.ToolsConfig,
 	MaxIteration int,
 	middlewares []adk.AgentMiddleware,
+	handlers []adk.ChatModelAgentMiddleware,
 ) (tool.InvokableTool, error) {
 	t := &taskTool{
 		subAgents:     map[string]tool.InvokableTool{},
@@ -76,14 +83,19 @@ func newTaskTool(
 	}
 
 	if !withoutGeneralSubAgent {
+		agentDesc := internal.SelectPrompt(internal.I18nPrompts{
+			English: generalAgentDescription,
+			Chinese: generalAgentDescriptionChinese,
+		})
 		generalAgent, err := adk.NewChatModelAgent(ctx, &adk.ChatModelAgentConfig{
 			Name:          generalAgentName,
-			Description:   generalAgentDescription,
+			Description:   agentDesc,
 			Instruction:   Instruction,
 			Model:         Model,
 			ToolsConfig:   ToolsConfig,
 			MaxIterations: MaxIteration,
 			Middlewares:   middlewares,
+			Handlers:      handlers,
 			GenModelInput: genModelInput,
 		})
 		if err != nil {
@@ -168,7 +180,11 @@ func defaultTaskToolDescription(ctx context.Context, subAgents []adk.Agent) (str
 		desc := a.Description(ctx)
 		subAgentsDescBuilder.WriteString(fmt.Sprintf("- %s: %s\n", name, desc))
 	}
-	return pyfmt.Fmt(taskToolDescription, map[string]any{
+	toolDesc := internal.SelectPrompt(internal.I18nPrompts{
+		English: taskToolDescription,
+		Chinese: taskToolDescriptionChinese,
+	})
+	return pyfmt.Fmt(toolDesc, map[string]any{
 		"other_agents": subAgentsDescBuilder.String(),
 	})
 }

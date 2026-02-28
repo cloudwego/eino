@@ -22,18 +22,32 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"text/template"
 
 	"github.com/slongfield/pyfmt"
 
 	"github.com/cloudwego/eino/adk"
+	"github.com/cloudwego/eino/adk/internal"
+	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/components/tool"
+	"github.com/cloudwego/eino/compose"
 	"github.com/cloudwego/eino/schema"
 )
 
+type ContextMode string
+
+const (
+	ContextModeFork    ContextMode = "fork"
+	ContextModeIsolate ContextMode = "isolate"
+)
+
 type FrontMatter struct {
-	Name        string `yaml:"name"`
-	Description string `yaml:"description"`
+	Name        string      `yaml:"name"`
+	Description string      `yaml:"description"`
+	Context     ContextMode `yaml:"context"`
+	Agent       string      `yaml:"agent"`
+	Model       string      `yaml:"model"`
 }
 
 type Skill struct {
@@ -47,19 +61,160 @@ type Backend interface {
 	Get(ctx context.Context, name string) (Skill, error)
 }
 
+type AgentFactory func(ctx context.Context, m model.ToolCallingChatModel) (adk.Agent, error)
+
+type AgentHub interface {
+	Get(ctx context.Context, name string) (AgentFactory, error)
+}
+
+type ModelHub interface {
+	Get(ctx context.Context, name string) (model.ToolCallingChatModel, error)
+}
+
+// SystemPromptFunc is a function that returns a custom system prompt.
+// The toolName parameter is the name of the skill tool (default: "skill").
+type SystemPromptFunc func(ctx context.Context, toolName string) string
+
+// ToolDescriptionFunc is a function that returns a custom tool description.
+// The skills parameter contains all available skill front matters.
+type ToolDescriptionFunc func(ctx context.Context, skills []FrontMatter) string
+
 // Config is the configuration for the skill middleware.
 type Config struct {
 	// Backend is the backend for retrieving skills.
 	Backend Backend
 	// SkillToolName is the custom name for the skill tool. If nil, the default name "skill" is used.
 	SkillToolName *string
-	// UseChinese controls whether to use Chinese prompts. When set to true, Chinese prompts are used;
-	// when set to false (default), English prompts are used.
+	// Deprecated: Use adk.SetLanguage(adk.LanguageChinese) instead to enable Chinese prompts globally.
+	// This field will be removed in a future version.
 	UseChinese bool
+	// AgentHub provides agent factories for context mode (fork/isolate) execution.
+	// Required when skills use "context: fork" or "context: isolate" in frontmatter.
+	// The agent factory is retrieved by agent name (skill.Agent) from this hub.
+	// When skill.Agent is empty, AgentHub.Get is called with an empty string,
+	// allowing the hub implementation to return a default agent.
+	AgentHub AgentHub
+	// ModelHub provides model instances for skills that specify a "model" field in frontmatter.
+	// Used in two scenarios:
+	//   - With context mode (fork/isolate): The model is passed to the AgentFactory
+	//   - Without context mode (inline): The model becomes active for subsequent ChatModel requests
+	// If nil, skills with model specification will be ignored in inline mode,
+	// or return an error in context mode.
+	ModelHub ModelHub
+
+	// CustomSystemPrompt allows customizing the system prompt injected into the agent.
+	// If nil, the default system prompt is used.
+	// The function receives the skill tool name as a parameter.
+	CustomSystemPrompt SystemPromptFunc
+	// CustomToolDescription allows customizing the tool description for the skill tool.
+	// If nil, the default tool description is used.
+	// The function receives all available skill front matters as a parameter.
+	CustomToolDescription ToolDescriptionFunc
 }
+
+// NewChatModelAgentMiddleware creates a new skill middleware handler for ChatModelAgent.
+//
+// The handler provides a skill tool that allows agents to load and execute skills
+// defined in SKILL.md files. Skills can run in different modes based on their
+// frontmatter configuration:
+//
+//   - Inline mode (default): Skill content is returned directly as tool result
+//   - Fork mode (context: fork): Creates a new agent with forked message history
+//   - Isolate mode (context: isolate): Creates a new agent with isolated context
+//
+// Example usage:
+//
+//	handler, err := skill.NewChatModelAgentMiddleware(ctx, &skill.Config{
+//	    Backend:  backend,
+//	    AgentHub: myAgentHub,
+//	    ModelHub: myModelHub,
+//	})
+//	if err != nil {
+//	    return err
+//	}
+//
+//	agent, err := adk.NewChatModelAgent(ctx, &adk.ChatModelAgentConfig{
+//	    // ...
+//	    Handlers: []adk.ChatModelAgentMiddleware{handler},
+//	})
+func NewChatModelAgentMiddleware(ctx context.Context, config *Config) (adk.ChatModelAgentMiddleware, error) {
+	if config == nil {
+		return nil, fmt.Errorf("config is required")
+	}
+	if config.Backend == nil {
+		return nil, fmt.Errorf("backend is required")
+	}
+
+	name := toolName
+	if config.SkillToolName != nil {
+		name = *config.SkillToolName
+	}
+
+	var instruction string
+	if config.CustomSystemPrompt != nil {
+		instruction = config.CustomSystemPrompt(ctx, name)
+	} else {
+		var err error
+		instruction, err = buildSystemPrompt(name, config.UseChinese)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	return &skillHandler{
+		instruction: instruction,
+		tool: &skillTool{
+			b:                     config.Backend,
+			toolName:              name,
+			useChinese:            config.UseChinese,
+			agentHub:              config.AgentHub,
+			modelHub:              config.ModelHub,
+			customToolDescription: config.CustomToolDescription,
+		},
+	}, nil
+}
+
+type skillHandler struct {
+	*adk.BaseChatModelAgentMiddleware
+	instruction string
+	tool        *skillTool
+}
+
+func (h *skillHandler) BeforeAgent(ctx context.Context, runCtx *adk.ChatModelAgentContext) (context.Context, *adk.ChatModelAgentContext, error) {
+	runCtx.Instruction = runCtx.Instruction + "\n" + h.instruction
+	runCtx.Tools = append(runCtx.Tools, h.tool)
+	return ctx, runCtx, nil
+}
+
+func (h *skillHandler) WrapModel(ctx context.Context, m model.BaseChatModel, mc *adk.ModelContext) (model.BaseChatModel, error) {
+	if h.tool.modelHub == nil {
+		return m, nil
+	}
+	modelName, found, err := adk.GetRunLocalValue(ctx, activeModelKey)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get active model from run local value: %w", err)
+	}
+	if !found {
+		return m, nil
+	}
+	name, ok := modelName.(string)
+	if !ok || name == "" {
+		return m, nil
+	}
+	newModel, err := h.tool.modelHub.Get(ctx, name)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get model '%s' from ModelHub: %w", name, err)
+	}
+	return newModel, nil
+}
+
+const activeModelKey = "__skill_active_model__"
 
 // New creates a new skill middleware.
 // It provides a tool for the agent to use skills.
+//
+// Deprecated: Use NewChatModelAgentMiddleware instead. New does not support fork mode execution
+// because AgentMiddleware cannot save message history for fork mode.
 func New(ctx context.Context, config *Config) (adk.AgentMiddleware, error) {
 	if config == nil {
 		return adk.AgentMiddleware{}, fmt.Errorf("config is required")
@@ -73,26 +228,50 @@ func New(ctx context.Context, config *Config) (adk.AgentMiddleware, error) {
 		name = *config.SkillToolName
 	}
 
+	var sp string
+	if config.CustomSystemPrompt != nil {
+		sp = config.CustomSystemPrompt(ctx, name)
+	} else {
+		var err error
+		sp, err = buildSystemPrompt(name, config.UseChinese)
+		if err != nil {
+			return adk.AgentMiddleware{}, err
+		}
+	}
+
 	return adk.AgentMiddleware{
-		AdditionalInstruction: buildSystemPrompt(name, config.UseChinese),
-		AdditionalTools:       []tool.BaseTool{&skillTool{b: config.Backend, toolName: name, useChinese: config.UseChinese}},
+		AdditionalInstruction: sp,
+		AdditionalTools: []tool.BaseTool{&skillTool{
+			b:                     config.Backend,
+			toolName:              name,
+			useChinese:            config.UseChinese,
+			customToolDescription: config.CustomToolDescription,
+		}},
 	}, nil
 }
 
-func buildSystemPrompt(skillToolName string, useChinese bool) string {
-	prompt := systemPrompt
+func buildSystemPrompt(skillToolName string, useChinese bool) (string, error) {
+	var prompt string
 	if useChinese {
 		prompt = systemPromptChinese
+	} else {
+		prompt = internal.SelectPrompt(internal.I18nPrompts{
+			English: systemPrompt,
+			Chinese: systemPromptChinese,
+		})
 	}
-	return pyfmt.Must(prompt, map[string]string{
+	return pyfmt.Fmt(prompt, map[string]string{
 		"tool_name": skillToolName,
 	})
 }
 
 type skillTool struct {
-	b          Backend
-	toolName   string
-	useChinese bool
+	b                     Backend
+	toolName              string
+	useChinese            bool
+	agentHub              AgentHub
+	modelHub              ModelHub
+	customToolDescription ToolDescriptionFunc
 }
 
 type descriptionTemplateHelper struct {
@@ -105,21 +284,30 @@ func (s *skillTool) Info(ctx context.Context) (*schema.ToolInfo, error) {
 		return nil, fmt.Errorf("failed to list skills: %w", err)
 	}
 
-	desc, err := renderToolDescription(skills)
-	if err != nil {
-		return nil, fmt.Errorf("failed to render skill tool description: %w", err)
+	var fullDesc string
+	if s.customToolDescription != nil {
+		fullDesc = s.customToolDescription(ctx, skills)
+	} else {
+		desc, err := renderToolDescription(skills)
+		if err != nil {
+			return nil, fmt.Errorf("failed to render skill tool description: %w", err)
+		}
+
+		descBase := internal.SelectPrompt(internal.I18nPrompts{
+			English: toolDescriptionBase,
+			Chinese: toolDescriptionBaseChinese,
+		})
+		fullDesc = descBase + desc
 	}
 
-	descBase := toolDescriptionBase
-	paramDesc := "The skill name (no arguments). E.g., \"pdf\" or \"xlsx\""
-	if s.useChinese {
-		descBase = toolDescriptionBaseChinese
-		paramDesc = "技能名称（无需其他参数）。例如：\"pdf\" 或 \"xlsx\""
-	}
+	paramDesc := internal.SelectPrompt(internal.I18nPrompts{
+		English: "The skill name (no arguments). E.g., \"pdf\" or \"xlsx\"",
+		Chinese: "Skill 名称（无需其他参数）。例如：\"pdf\" 或 \"xlsx\"",
+	})
 
 	return &schema.ToolInfo{
 		Name: s.toolName,
-		Desc: descBase + desc,
+		Desc: fullDesc,
 		ParamsOneOf: schema.NewParamsOneOfByParams(map[string]*schema.ParameterInfo{
 			"skill": {
 				Type:     schema.String,
@@ -145,14 +333,125 @@ func (s *skillTool) InvokableRun(ctx context.Context, argumentsInJSON string, op
 		return "", fmt.Errorf("failed to get skill: %w", err)
 	}
 
-	resultFmt := toolResult
-	contentFmt := userContent
-	if s.useChinese {
-		resultFmt = toolResultChinese
-		contentFmt = userContentChinese
+	switch skill.Context {
+	case ContextModeFork:
+		return s.runAgentMode(ctx, skill, true)
+	case ContextModeIsolate:
+		return s.runAgentMode(ctx, skill, false)
+	default:
+		if skill.Model != "" {
+			s.setActiveModel(ctx, skill.Model)
+		}
+		return s.buildSkillResult(skill)
 	}
+}
+
+func (s *skillTool) setActiveModel(ctx context.Context, modelName string) {
+	_ = adk.SetRunLocalValue(ctx, activeModelKey, modelName)
+}
+
+func (s *skillTool) buildSkillResult(skill Skill) (string, error) {
+	resultFmt := internal.SelectPrompt(internal.I18nPrompts{
+		English: toolResult,
+		Chinese: toolResultChinese,
+	})
+	contentFmt := internal.SelectPrompt(internal.I18nPrompts{
+		English: userContent,
+		Chinese: userContentChinese,
+	})
 
 	return fmt.Sprintf(resultFmt, skill.Name) + fmt.Sprintf(contentFmt, skill.BaseDirectory, skill.Content), nil
+}
+
+func (s *skillTool) runAgentMode(ctx context.Context, skill Skill, forkHistory bool) (string, error) {
+	var m model.ToolCallingChatModel
+	var err error
+
+	if skill.Model != "" {
+		if s.modelHub == nil {
+			return "", fmt.Errorf("skill '%s' requires model '%s' but ModelHub is not configured", skill.Name, skill.Model)
+		}
+		m, err = s.modelHub.Get(ctx, skill.Model)
+		if err != nil {
+			return "", fmt.Errorf("failed to get model '%s' from ModelHub: %w", skill.Model, err)
+		}
+	}
+
+	if s.agentHub == nil {
+		return "", fmt.Errorf("skill '%s' requires context:%s but AgentHub is not configured", skill.Name, skill.Context)
+	}
+
+	agentFactory, err := s.agentHub.Get(ctx, skill.Agent)
+	if err != nil {
+		return "", fmt.Errorf("failed to get agent '%s' from AgentHub: %w", skill.Agent, err)
+	}
+
+	agent, err := agentFactory(ctx, m)
+	if err != nil {
+		return "", fmt.Errorf("failed to create agent for skill '%s': %w", skill.Name, err)
+	}
+
+	var messages []adk.Message
+	skillContent, err := s.buildSkillResult(skill)
+	if err != nil {
+		return "", fmt.Errorf("failed to build skill result: %w", err)
+	}
+
+	if forkHistory {
+		messages, err = s.getMessagesFromState(ctx)
+		if err != nil {
+			return "", fmt.Errorf("failed to get messages from state: %w", err)
+		}
+		toolCallID := compose.GetToolCallID(ctx)
+		messages = append(messages, schema.ToolMessage(skillContent, toolCallID))
+	} else {
+		messages = []adk.Message{schema.UserMessage(skillContent)}
+	}
+
+	input := &adk.AgentInput{
+		Messages:        messages,
+		EnableStreaming: false,
+	}
+
+	iter := agent.Run(ctx, input)
+
+	var results []string
+	for {
+		event, ok := iter.Next()
+		if !ok {
+			break
+		}
+		if event == nil || event.Output == nil || event.Output.MessageOutput == nil {
+			continue
+		}
+		msg, msgErr := event.Output.MessageOutput.GetMessage()
+		if msgErr != nil {
+			return "", fmt.Errorf("failed to get message from event: %w", msgErr)
+		}
+		if msg != nil && msg.Content != "" {
+			results = append(results, msg.Content)
+		}
+	}
+
+	resultFmt := internal.SelectPrompt(internal.I18nPrompts{
+		English: subAgentResultFormat,
+		Chinese: subAgentResultFormatChinese,
+	})
+
+	return fmt.Sprintf(resultFmt, skill.Name, strings.Join(results, "\n")), nil
+}
+
+func (s *skillTool) getMessagesFromState(ctx context.Context) ([]adk.Message, error) {
+	var messages []adk.Message
+	err := compose.ProcessState(ctx, func(_ context.Context, st *adk.State) error {
+		messages = make([]adk.Message, len(st.Messages))
+		copy(messages, st.Messages)
+		return nil
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to process state: %w", err)
+	}
+	return messages, nil
 }
 
 func renderToolDescription(matters []FrontMatter) (string, error) {

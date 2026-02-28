@@ -17,8 +17,10 @@
 package deep
 
 import (
+	"context"
 	"fmt"
 
+	"github.com/cloudwego/eino/adk"
 	"github.com/cloudwego/eino/components/tool"
 )
 
@@ -37,4 +39,27 @@ func assertAgentTool(t tool.BaseTool) (tool.InvokableTool, error) {
 		return nil, fmt.Errorf("failed to assert agent tool type: %T", t)
 	}
 	return it, nil
+}
+
+func buildAppendPromptTool(prompt string, t tool.BaseTool) adk.ChatModelAgentMiddleware {
+	return &appendPromptTool{
+		BaseChatModelAgentMiddleware: &adk.BaseChatModelAgentMiddleware{},
+		t:                            t,
+		prompt:                       prompt,
+	}
+}
+
+type appendPromptTool struct {
+	*adk.BaseChatModelAgentMiddleware
+	t      tool.BaseTool
+	prompt string
+}
+
+func (w *appendPromptTool) BeforeAgent(ctx context.Context, runCtx *adk.ChatModelAgentContext) (context.Context, *adk.ChatModelAgentContext, error) {
+	nRunCtx := *runCtx
+	nRunCtx.Instruction += w.prompt
+	if w.t != nil {
+		nRunCtx.Tools = append(nRunCtx.Tools, w.t)
+	}
+	return ctx, &nRunCtx, nil
 }

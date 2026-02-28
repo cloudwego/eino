@@ -25,18 +25,31 @@ import (
 
 // FileInfo represents basic file metadata information.
 type FileInfo struct {
-	// Path is the absolute path of the file or directory.
+	// Path is the path of the file or directory, which can be a filename, relative path, or absolute path.
 	Path string
+
+	// IsDir indicates whether the entry is a directory.
+	// true for directories, false for regular files.
+	IsDir bool
+
+	// Size is the file size in bytes.
+	// For directories, this value may be 0 or platform-dependent.
+	Size int64
+
+	// ModifiedAt is the last modification time in ISO 8601 format.
+	// Example: "2025-01-15T10:30:00Z"
+	ModifiedAt string
 }
 
 // GrepMatch represents a single pattern match result.
 type GrepMatch struct {
-	// Path is the absolute path of the file where the match occurred.
+	Content string
+
+	// Path is the file path where the match was found.
 	Path string
+
 	// Line is the 1-based line number of the match.
 	Line int
-	// Content is the full text content of the line containing the match.
-	Content string
 }
 
 // LsInfoRequest contains parameters for listing file information.
@@ -52,25 +65,35 @@ type ReadRequest struct {
 	// FilePath is the absolute path to the file to be read. Must start with '/'.
 	FilePath string
 
-	// Offset is the 0-based line number to start reading from.
-	// If negative, it is treated as 0. Defaults to 0.
+	// Offset specifies the starting line number (1-based) for reading.
+	// Line 1 is the first line of the file.
+	// Use this when the file is too large to read at once.
+	// Defaults to 1 (start from the first line).
+	// Values < 1 will be treated as 1.
 	Offset int
 
 	// Limit specifies the maximum number of lines to read.
-	// If non-positive (<= 0), a default limit is used (typically 200).
+	// Use this when the file is too large to read at once.
+	// Defaults to 2000 if not provided or non-positive (<= 0).
 	Limit int
 }
 
 // GrepRequest contains parameters for searching file content.
 type GrepRequest struct {
-	// Pattern is the literal string to search for. This is not a regular expression.
-	// The search performs an exact substring match within the file's content.
-	// For example, "TODO" will match any line containing "TODO".
+	// ===== Search Parameters =====
+
+	// Pattern is the search pattern, supports full regular expression syntax.
+	// Uses ripgrep syntax (not grep). Examples:
+	//   - "log.*Error" matches lines with "log" followed by "Error"
+	//   - "function\\s+\\w+" matches "function" followed by whitespace and word characters
+	//   - Literal braces need escaping: "interface\\{\\}" matches "interface{}"
 	Pattern string
 
 	// Path is an optional directory path to limit the search scope.
 	// If empty, the search is performed from the working directory.
 	Path string
+
+	// ===== File Filtering =====
 
 	// Glob is an optional pattern to filter the files to be searched.
 	// It filters by file path, not content. If empty, no files are filtered.
@@ -80,6 +103,31 @@ type GrepRequest struct {
 	//   - `?` matches a single character.
 	//   - `[abc]` matches one character from the set.
 	Glob string
+
+	// FileType is the file type filter, e.g., "js", "py", "rust".
+	// More efficient than Glob for standard file types.
+	FileType string
+
+	// ===== Search Options =====
+
+	// CaseInsensitive enables case insensitive search.
+	CaseInsensitive bool
+
+	// EnableMultiline enables multiline mode where patterns can span lines.
+	// Default: false (patterns match within single lines only).
+	EnableMultiline bool
+
+	// ===== Context Display (Content mode only) =====
+
+	// AfterLines shows N lines after each match.
+	// Only applicable when OutputMode is "content".
+	// Values <= 0 are treated as unset.
+	AfterLines int
+
+	// BeforeLines shows N lines before each match.
+	// Only applicable when OutputMode is "content".
+	// Values <= 0 are treated as unset.
+	BeforeLines int
 }
 
 // GlobInfoRequest contains parameters for glob pattern matching.
@@ -100,7 +148,7 @@ type GlobInfoRequest struct {
 // WriteRequest contains parameters for writing file content.
 type WriteRequest struct {
 	// FilePath is the absolute path of the file to write. Must start with '/'.
-	// The file will be created if it does not exist, or error if file exists.
+	// Creates the file if it does not exist, overwrites if it exists.
 	FilePath string
 
 	// Content is the data to be written to the file.
@@ -172,22 +220,23 @@ type Backend interface {
 	Edit(ctx context.Context, req *EditRequest) error
 }
 
+// ExecuteRequest contains parameters for executing a command.
 type ExecuteRequest struct {
-	Command string
+	Command            string // The command to execute
+	RunInBackendGround bool
 }
 
+// ExecuteResponse contains the response result of command execution.
 type ExecuteResponse struct {
-	Output    string
-	ExitCode  *int
-	Truncated bool
+	Output    string // Command output content
+	ExitCode  *int   // Command exit code
+	Truncated bool   // Whether the output was truncated
 }
 
-type ShellBackend interface {
-	Backend
+type Shell interface {
 	Execute(ctx context.Context, input *ExecuteRequest) (result *ExecuteResponse, err error)
 }
 
-type StreamingShellBackend interface {
-	Backend
+type StreamingShell interface {
 	ExecuteStreaming(ctx context.Context, input *ExecuteRequest) (result *schema.StreamReader[*ExecuteResponse], err error)
 }

@@ -14,8 +14,8 @@
  * limitations under the License.
  */
 
-// Package reduction provides middlewares to trim context and clear tool results.
-package reduction
+// Package internal provides middlewares to trim context and clear tool results.
+package internal
 
 import (
 	"context"
@@ -55,9 +55,6 @@ type ClearToolResultConfig struct {
 
 // NewClearToolResult creates a new middleware that clears old tool results
 // based on token thresholds while protecting recent messages.
-//
-// Deprecated: Use NewToolResultMiddleware instead, which combines clearing
-// and offloading strategies for better tool result management.
 func NewClearToolResult(ctx context.Context, config *ClearToolResultConfig) (adk.AgentMiddleware, error) {
 	return adk.AgentMiddleware{
 		BeforeChatModel: newClearToolResult(ctx, config),

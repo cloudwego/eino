@@ -24,8 +24,10 @@ import (
 	"github.com/bytedance/sonic"
 
 	"github.com/cloudwego/eino/adk"
+	"github.com/cloudwego/eino/adk/filesystem"
+	"github.com/cloudwego/eino/adk/internal"
+	filesystem2 "github.com/cloudwego/eino/adk/middlewares/filesystem"
 	"github.com/cloudwego/eino/components/model"
-	"github.com/cloudwego/eino/components/tool"
 	"github.com/cloudwego/eino/components/tool/utils"
 	"github.com/cloudwego/eino/schema"
 )
@@ -43,7 +45,9 @@ type Config struct {
 	Description string
 
 	// ChatModel is the model used by DeepAgent for reasoning and task execution.
-	ChatModel model.ToolCallingChatModel
+	// If the agent uses any tools, this model must support the model.WithTools call option,
+	// as that's how the agent configures the model with tool information.
+	ChatModel model.BaseChatModel
 	// Instruction contains the system prompt that guides the agent's behavior.
 	// When empty, a built-in default system prompt will be used, which includes general assistant
 	// behavior guidelines, security policies, coding style guidelines, and tool usage policies.
@@ -55,6 +59,19 @@ type Config struct {
 	// MaxIteration limits the maximum number of reasoning iterations the agent can perform.
 	MaxIteration int
 
+	// Backend provides filesystem operations used by tools and offloading.
+	// If set, filesystem tools (read_file, write_file, edit_file, glob, grep) will be registered.
+	// Optional.
+	Backend filesystem.Backend
+	// Shell provides shell command execution capability.
+	// If set, an execute tool will be registered to support shell command execution.
+	// Optional. Mutually exclusive with StreamingShell.
+	Shell filesystem.Shell
+	// StreamingShell provides streaming shell command execution capability.
+	// If set, a streaming execute tool will be registered to support streaming shell command execution.
+	// Optional. Mutually exclusive with Shell.
+	StreamingShell filesystem.StreamingShell
+
 	// WithoutWriteTodos disables the built-in write_todos tool when set to true.
 	WithoutWriteTodos bool
 	// WithoutGeneralSubAgent disables the general-purpose subagent when set to true.
@@ -64,6 +81,16 @@ type Config struct {
 	TaskToolDescriptionGenerator func(ctx context.Context, availableAgents []adk.Agent) (string, error)
 
 	Middlewares []adk.AgentMiddleware
+
+	// Handlers configures interface-based handlers for extending agent behavior.
+	// Unlike Middlewares (struct-based), Handlers allow users to:
+	//   - Add custom methods to their handler implementations
+	//   - Return modified context from handler methods
+	//   - Centralize configuration in struct fields instead of closures
+	//
+	// Handlers are processed after Middlewares, in registration order.
+	// See adk.ChatModelAgentMiddleware documentation for when to use Handlers vs Middlewares.
+	Handlers []adk.ChatModelAgentMiddleware
 
 	ModelRetryConfig *adk.ModelRetryConfig
 
@@ -76,14 +103,17 @@ type Config struct {
 // This function initializes built-in tools, creates a task tool for subagent orchestration,
 // and returns a fully configured ChatModelAgent ready for execution.
 func New(ctx context.Context, cfg *Config) (adk.ResumableAgent, error) {
-	middlewares, err := buildBuiltinAgentMiddlewares(cfg.WithoutWriteTodos)
+	handlers, err := buildBuiltinAgentMiddlewares(ctx, cfg)
 	if err != nil {
 		return nil, err
 	}
 
 	instruction := cfg.Instruction
 	if len(instruction) == 0 {
-		instruction = baseAgentInstruction
+		instruction = internal.SelectPrompt(internal.I18nPrompts{
+			English: baseAgentInstruction,
+			Chinese: baseAgentInstructionChinese,
+		})
 	}
 
 	if !cfg.WithoutGeneralSubAgent || len(cfg.SubAgents) > 0 {
@@ -97,12 +127,13 @@ func New(ctx context.Context, cfg *Config) (adk.ResumableAgent, error) {
 			instruction,
 			cfg.ToolsConfig,
 			cfg.MaxIteration,
-			append(middlewares, cfg.Middlewares...),
+			cfg.Middlewares,
+			append(handlers, cfg.Handlers...),
 		)
 		if err != nil {
 			return nil, fmt.Errorf("failed to new task tool: %w", err)
 		}
-		middlewares = append(middlewares, tt)
+		handlers = append(handlers, tt)
 	}
 
 	return adk.NewChatModelAgent(ctx, &adk.ChatModelAgentConfig{
@@ -112,7 +143,8 @@ func New(ctx context.Context, cfg *Config) (adk.ResumableAgent, error) {
 		Model:         cfg.ChatModel,
 		ToolsConfig:   cfg.ToolsConfig,
 		MaxIterations: cfg.MaxIteration,
-		Middlewares:   append(middlewares, cfg.Middlewares...),
+		Middlewares:   cfg.Middlewares,
+		Handlers:      append(handlers, cfg.Handlers...),
 
 		GenModelInput:    genModelInput,
 		ModelRetryConfig: cfg.ModelRetryConfig,
@@ -132,14 +164,26 @@ func genModelInput(ctx context.Context, instruction string, input *adk.AgentInpu
 	return msgs, nil
 }
 
-func buildBuiltinAgentMiddlewares(withoutWriteTodos bool) ([]adk.AgentMiddleware, error) {
-	var ms []adk.AgentMiddleware
-	if !withoutWriteTodos {
+func buildBuiltinAgentMiddlewares(ctx context.Context, cfg *Config) ([]adk.ChatModelAgentMiddleware, error) {
+	var ms []adk.ChatModelAgentMiddleware
+	if !cfg.WithoutWriteTodos {
 		t, err := newWriteTodos()
 		if err != nil {
 			return nil, err
 		}
 		ms = append(ms, t)
+	}
+
+	if cfg.Backend != nil || cfg.Shell != nil || cfg.StreamingShell != nil {
+		fm, err := filesystem2.New(ctx, &filesystem2.MiddlewareConfig{
+			Backend:        cfg.Backend,
+			Shell:          cfg.Shell,
+			StreamingShell: cfg.StreamingShell,
+		})
+		if err != nil {
+			return nil, err
+		}
+		ms = append(ms, fm)
 	}
 
 	return ms, nil
@@ -155,21 +199,31 @@ type writeTodosArguments struct {
 	Todos []TODO `json:"todos"`
 }
 
-func newWriteTodos() (adk.AgentMiddleware, error) {
-	t, err := utils.InferTool("write_todos", writeTodosToolDescription, func(ctx context.Context, input writeTodosArguments) (output string, err error) {
+func newWriteTodos() (adk.ChatModelAgentMiddleware, error) {
+	toolDesc := internal.SelectPrompt(internal.I18nPrompts{
+		English: writeTodosToolDescription,
+		Chinese: writeTodosToolDescriptionChinese,
+	})
+	prompt := internal.SelectPrompt(internal.I18nPrompts{
+		English: writeTodosPrompt,
+		Chinese: writeTodosPromptChinese,
+	})
+	resultMsg := internal.SelectPrompt(internal.I18nPrompts{
+		English: "Updated todo list to %s",
+		Chinese: "已更新待办列表为 %s",
+	})
+
+	t, err := utils.InferTool("write_todos", toolDesc, func(ctx context.Context, input writeTodosArguments) (output string, err error) {
 		adk.AddSessionValue(ctx, SessionKeyTodos, input.Todos)
 		todos, err := sonic.MarshalString(input.Todos)
 		if err != nil {
 			return "", err
 		}
-		return fmt.Sprintf("Updated todo list to %s", todos), nil
+		return fmt.Sprintf(resultMsg, todos), nil
 	})
 	if err != nil {
-		return adk.AgentMiddleware{}, err
+		return nil, err
 	}
 
-	return adk.AgentMiddleware{
-		AdditionalInstruction: writeTodosPrompt,
-		AdditionalTools:       []tool.BaseTool{t},
-	}, nil
+	return buildAppendPromptTool(prompt, t), nil
 }

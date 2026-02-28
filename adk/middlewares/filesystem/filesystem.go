@@ -21,25 +21,51 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"path/filepath"
 	"runtime/debug"
+	"sort"
 	"strconv"
 	"strings"
 
 	"github.com/cloudwego/eino/adk"
 	"github.com/cloudwego/eino/adk/filesystem"
+	"github.com/cloudwego/eino/adk/internal"
 	"github.com/cloudwego/eino/components/tool"
 	"github.com/cloudwego/eino/components/tool/utils"
 	"github.com/cloudwego/eino/compose"
 	"github.com/cloudwego/eino/schema"
 )
 
+const (
+	ToolNameLs        = "ls"
+	ToolNameReadFile  = "read_file"
+	ToolNameWriteFile = "write_file"
+	ToolNameEditFile  = "edit_file"
+	ToolNameGlob      = "glob"
+	ToolNameGrep      = "grep"
+	ToolNameExecute   = "execute"
+
+	noFilesFound   = "No files found"
+	noMatchesFound = "No matches found"
+)
+
 // Config is the configuration for the filesystem middleware
 type Config struct {
 	// Backend provides filesystem operations used by tools and offloading.
-	// If the Backend also implements ShellBackend, an additional execute tool
-	// will be registered to support shell command execution.
-	// required
-	Backend Backend
+	// If set, filesystem tools (read_file, write_file, edit_file, glob, grep) will be registered.
+	// At least one of Backend, Shell, or StreamingShell must be set.
+	Backend filesystem.Backend
+
+	// Shell provides shell command execution capability.
+	// If set, an execute tool will be registered to support shell command execution.
+	// At least one of Backend, Shell, or StreamingShell must be set.
+	// Mutually exclusive with StreamingShell.
+	Shell filesystem.Shell
+	// StreamingShell provides streaming shell command execution capability.
+	// If set, a streaming execute tool will be registered to support streaming shell command execution.
+	// At least one of Backend, Shell, or StreamingShell must be set.
+	// Mutually exclusive with Shell.
+	StreamingShell filesystem.StreamingShell
 
 	// WithoutLargeToolResultOffloading disables automatic offloading of large tool result to Backend
 	// optional, false(enabled) by default
@@ -54,6 +80,28 @@ type Config struct {
 	// CustomSystemPrompt overrides the default ToolsSystemPrompt appended to agent instruction
 	// optional, ToolsSystemPrompt by default
 	CustomSystemPrompt *string
+
+	// CustomLsToolName overrides the ls tool name used in tool registration
+	// optional, ToolNameLs by default
+	CustomLsToolName *string
+	// CustomReadFileToolName overrides the read_file tool name
+	// optional, ToolNameReadFile by default
+	CustomReadFileToolName *string
+	// CustomWriteFileToolName overrides the write_file tool name
+	// optional, ToolNameWriteFile by default
+	CustomWriteFileToolName *string
+	// CustomEditFileToolName overrides the edit_file tool name
+	// optional, ToolNameEditFile by default
+	CustomEditFileToolName *string
+	// CustomGlobToolName overrides the glob tool name
+	// optional, ToolNameGlob by default
+	CustomGlobToolName *string
+	// CustomGrepToolName overrides the grep tool name
+	// optional, ToolNameGrep by default
+	CustomGrepToolName *string
+	// CustomExecuteToolName overrides the execute tool name
+	// optional, ToolNameExecute by default
+	CustomExecuteToolName *string
 
 	// CustomLsToolDesc overrides the ls tool description used in tool registration
 	// optional, ListFilesToolDesc by default
@@ -82,19 +130,46 @@ func (c *Config) Validate() error {
 	if c == nil {
 		return errors.New("config should not be nil")
 	}
-	if c.Backend == nil {
-		return errors.New("backend should not be nil")
+	if c.Backend == nil && c.Shell == nil && c.StreamingShell == nil {
+		return errors.New("at least one of Backend, Shell, or StreamingShell must be set")
+	}
+	if c.StreamingShell != nil && c.Shell != nil {
+		return errors.New("shell and streaming shell should not be both set")
 	}
 	return nil
 }
 
 // NewMiddleware constructs and returns the filesystem middleware.
+//
+// Deprecated: Use New instead. New returns
+// a ChatModelAgentMiddleware which provides better context propagation through wrapper methods
+// and is the recommended approach for new code. See ChatModelAgentMiddleware documentation
+// for details on the benefits over AgentMiddleware.
 func NewMiddleware(ctx context.Context, config *Config) (adk.AgentMiddleware, error) {
 	err := config.Validate()
 	if err != nil {
 		return adk.AgentMiddleware{}, err
 	}
-	ts, err := getFilesystemTools(ctx, config)
+	ts, err := getFilesystemTools(ctx, &MiddlewareConfig{
+		Backend:                 config.Backend,
+		Shell:                   config.Shell,
+		StreamingShell:          config.StreamingShell,
+		CustomSystemPrompt:      config.CustomSystemPrompt,
+		CustomLsToolName:        config.CustomLsToolName,
+		CustomReadFileToolName:  config.CustomReadFileToolName,
+		CustomWriteFileToolName: config.CustomWriteFileToolName,
+		CustomEditFileToolName:  config.CustomEditFileToolName,
+		CustomGlobToolName:      config.CustomGlobToolName,
+		CustomGrepToolName:      config.CustomGrepToolName,
+		CustomExecuteToolName:   config.CustomExecuteToolName,
+		CustomLsToolDesc:        config.CustomLsToolDesc,
+		CustomReadFileToolDesc:  config.CustomReadFileToolDesc,
+		CustomGrepToolDesc:      config.CustomGrepToolDesc,
+		CustomGlobToolDesc:      config.CustomGlobToolDesc,
+		CustomWriteFileToolDesc: config.CustomWriteFileToolDesc,
+		CustomEditToolDesc:      config.CustomEditToolDesc,
+		CustomExecuteToolDesc:   config.CustomExecuteToolDesc,
+	})
 	if err != nil {
 		return adk.AgentMiddleware{}, err
 	}
@@ -103,11 +178,17 @@ func NewMiddleware(ctx context.Context, config *Config) (adk.AgentMiddleware, er
 	if config.CustomSystemPrompt != nil {
 		systemPrompt = *config.CustomSystemPrompt
 	} else {
-		systemPrompt = ToolsSystemPrompt
-		_, ok1 := config.Backend.(filesystem.StreamingShellBackend)
-		_, ok2 := config.Backend.(filesystem.ShellBackend)
-		if ok1 || ok2 {
-			systemPrompt += ExecuteToolsSystemPrompt
+		systemPrompt = internal.SelectPrompt(internal.I18nPrompts{
+			English: ToolsSystemPrompt,
+			Chinese: ToolsSystemPromptChinese,
+		})
+		if config.Shell != nil || config.StreamingShell != nil {
+			var executePrompt string
+			executePrompt = internal.SelectPrompt(internal.I18nPrompts{
+				English: ExecuteToolsSystemPrompt,
+				Chinese: ExecuteToolsSystemPromptChinese,
+			})
+			systemPrompt += executePrompt
 		}
 	}
 
@@ -127,60 +208,215 @@ func NewMiddleware(ctx context.Context, config *Config) (adk.AgentMiddleware, er
 	return m, nil
 }
 
-func getFilesystemTools(_ context.Context, validatedConfig *Config) ([]tool.BaseTool, error) {
-	var tools []tool.BaseTool
+// MiddlewareConfig is the configuration for the filesystem middleware
+type MiddlewareConfig struct {
+	// Backend provides filesystem operations used by tools and offloading.
+	// required
+	Backend filesystem.Backend
 
-	lsTool, err := newLsTool(validatedConfig.Backend, validatedConfig.CustomLsToolDesc)
+	// Shell provides shell command execution capability.
+	// If set, an execute tool will be registered to support shell command execution.
+	// optional, mutually exclusive with StreamingShell
+	Shell filesystem.Shell
+	// StreamingShell provides streaming shell command execution capability.
+	// If set, a streaming execute tool will be registered for real-time output.
+	// optional, mutually exclusive with Shell
+	StreamingShell filesystem.StreamingShell
+
+	// CustomSystemPrompt overrides the default ToolsSystemPrompt appended to agent instruction
+	// optional, ToolsSystemPrompt by default
+	CustomSystemPrompt *string
+
+	// CustomLsToolName overrides the ls tool name used in tool registration
+	// optional, ToolNameLs by default
+	CustomLsToolName *string
+	// CustomReadFileToolName overrides the read_file tool name
+	// optional, ToolNameReadFile by default
+	CustomReadFileToolName *string
+	// CustomWriteFileToolName overrides the write_file tool name
+	// optional, ToolNameWriteFile by default
+	CustomWriteFileToolName *string
+	// CustomEditFileToolName overrides the edit_file tool name
+	// optional, ToolNameEditFile by default
+	CustomEditFileToolName *string
+	// CustomGlobToolName overrides the glob tool name
+	// optional, ToolNameGlob by default
+	CustomGlobToolName *string
+	// CustomGrepToolName overrides the grep tool name
+	// optional, ToolNameGrep by default
+	CustomGrepToolName *string
+	// CustomExecuteToolName overrides the execute tool name
+	// optional, ToolNameExecute by default
+	CustomExecuteToolName *string
+
+	// CustomLsToolDesc overrides the ls tool description used in tool registration
+	// optional, ListFilesToolDesc by default
+	CustomLsToolDesc *string
+	// CustomReadFileToolDesc overrides the read_file tool description
+	// optional, ReadFileToolDesc by default
+	CustomReadFileToolDesc *string
+	// CustomGrepToolDesc overrides the grep tool description
+	// optional, GrepToolDesc by default
+	CustomGrepToolDesc *string
+	// CustomGlobToolDesc overrides the glob tool description
+	// optional, GlobToolDesc by default
+	CustomGlobToolDesc *string
+	// CustomWriteFileToolDesc overrides the write_file tool description
+	// optional, WriteFileToolDesc by default
+	CustomWriteFileToolDesc *string
+	// CustomEditToolDesc overrides the edit_file tool description
+	// optional, EditFileToolDesc by default
+	CustomEditToolDesc *string
+	// CustomExecuteToolDesc overrides the execute tool description
+	// optional, ExecuteToolDesc by default
+	CustomExecuteToolDesc *string
+}
+
+func (c *MiddlewareConfig) Validate() error {
+	if c == nil {
+		return errors.New("config should not be nil")
+	}
+	if c.Backend == nil {
+		return errors.New("backend should not be nil")
+	}
+	if c.StreamingShell != nil && c.Shell != nil {
+		return errors.New("shell and streaming shell should not be both set")
+	}
+	return nil
+}
+
+// New constructs and returns the filesystem middleware as a ChatModelAgentMiddleware.
+//
+// This is the recommended constructor for new code. It returns a ChatModelAgentMiddleware which provides:
+//   - Better context propagation through WrapInvokableToolCall and WrapStreamableToolCall methods
+//   - BeforeAgent hook for modifying agent instruction and tools at runtime
+//   - More flexible extension points compared to the struct-based AgentMiddleware
+//
+// The middleware provides filesystem tools (ls, read_file, write_file, edit_file, glob, grep)
+// and optionally an execute tool if the Backend implements ShellBackend or StreamingShellBackend.
+//
+// Example usage:
+//
+//	middleware, err := filesystem.New(ctx, &filesystem.Config{
+//	    Backend: myBackend,
+//	})
+//	agent, err := adk.NewChatModelAgent(ctx, &adk.ChatModelAgentConfig{
+//	    // ...
+//	    Handlers: []adk.ChatModelAgentMiddleware{middleware},
+//	})
+func New(ctx context.Context, config *MiddlewareConfig) (adk.ChatModelAgentMiddleware, error) {
+	err := config.Validate()
+	if err != nil {
+		return nil, err
+	}
+	ts, err := getFilesystemTools(ctx, config)
+	if err != nil {
+		return nil, err
+	}
+
+	var systemPrompt string
+	if config.CustomSystemPrompt != nil {
+		systemPrompt = *config.CustomSystemPrompt
+	} else {
+		systemPrompt = internal.SelectPrompt(internal.I18nPrompts{
+			English: ToolsSystemPrompt,
+			Chinese: ToolsSystemPromptChinese,
+		})
+		if config.Shell != nil || config.StreamingShell != nil {
+			executePrompt := internal.SelectPrompt(internal.I18nPrompts{
+				English: ExecuteToolsSystemPrompt,
+				Chinese: ExecuteToolsSystemPromptChinese,
+			})
+			systemPrompt += executePrompt
+		}
+	}
+
+	m := &filesystemMiddleware{
+		additionalInstruction: systemPrompt,
+		additionalTools:       ts,
+	}
+
+	return m, nil
+}
+
+type filesystemMiddleware struct {
+	adk.BaseChatModelAgentMiddleware
+	additionalInstruction string
+	additionalTools       []tool.BaseTool
+}
+
+func (m *filesystemMiddleware) BeforeAgent(ctx context.Context, runCtx *adk.ChatModelAgentContext) (context.Context, *adk.ChatModelAgentContext, error) {
+	if runCtx == nil {
+		return ctx, runCtx, nil
+	}
+
+	nRunCtx := *runCtx
+	if m.additionalInstruction != "" {
+		nRunCtx.Instruction = nRunCtx.Instruction + "\n" + m.additionalInstruction
+	}
+	nRunCtx.Tools = append(nRunCtx.Tools, m.additionalTools...)
+	return ctx, &nRunCtx, nil
+}
+
+func getFilesystemTools(_ context.Context, validatedConfig *MiddlewareConfig) ([]tool.BaseTool, error) {
+	var tools []tool.BaseTool
+	var err error
+
+	if validatedConfig.StreamingShell != nil {
+		var executeTool tool.BaseTool
+		executeTool, err = newStreamingExecuteTool(validatedConfig.StreamingShell, validatedConfig.CustomExecuteToolName, validatedConfig.CustomExecuteToolDesc)
+		if err != nil {
+			return nil, err
+		}
+		tools = append(tools, executeTool)
+	} else if validatedConfig.Shell != nil {
+		var executeTool tool.BaseTool
+		executeTool, err = newExecuteTool(validatedConfig.Shell, validatedConfig.CustomExecuteToolName, validatedConfig.CustomExecuteToolDesc)
+		if err != nil {
+			return nil, err
+		}
+		tools = append(tools, executeTool)
+	}
+
+	if validatedConfig.Backend == nil {
+		return tools, nil
+	}
+
+	lsTool, err := newLsTool(validatedConfig.Backend, validatedConfig.CustomLsToolName, validatedConfig.CustomLsToolDesc)
 	if err != nil {
 		return nil, err
 	}
 	tools = append(tools, lsTool)
 
-	readTool, err := newReadFileTool(validatedConfig.Backend, validatedConfig.CustomReadFileToolDesc)
+	readTool, err := newReadFileTool(validatedConfig.Backend, validatedConfig.CustomReadFileToolName, validatedConfig.CustomReadFileToolDesc)
 	if err != nil {
 		return nil, err
 	}
 	tools = append(tools, readTool)
 
-	writeTool, err := newWriteFileTool(validatedConfig.Backend, validatedConfig.CustomWriteFileToolDesc)
+	writeTool, err := newWriteFileTool(validatedConfig.Backend, validatedConfig.CustomWriteFileToolName, validatedConfig.CustomWriteFileToolDesc)
 	if err != nil {
 		return nil, err
 	}
 	tools = append(tools, writeTool)
 
-	editTool, err := newEditFileTool(validatedConfig.Backend, validatedConfig.CustomEditToolDesc)
+	editTool, err := newEditFileTool(validatedConfig.Backend, validatedConfig.CustomEditFileToolName, validatedConfig.CustomEditToolDesc)
 	if err != nil {
 		return nil, err
 	}
 	tools = append(tools, editTool)
 
-	globTool, err := newGlobTool(validatedConfig.Backend, validatedConfig.CustomGlobToolDesc)
+	globTool, err := newGlobTool(validatedConfig.Backend, validatedConfig.CustomGlobToolName, validatedConfig.CustomGlobToolDesc)
 	if err != nil {
 		return nil, err
 	}
 	tools = append(tools, globTool)
 
-	grepTool, err := newGrepTool(validatedConfig.Backend, validatedConfig.CustomGrepToolDesc)
+	grepTool, err := newGrepTool(validatedConfig.Backend, validatedConfig.CustomGrepToolName, validatedConfig.CustomGrepToolDesc)
 	if err != nil {
 		return nil, err
 	}
 	tools = append(tools, grepTool)
-
-	if sb, ok := validatedConfig.Backend.(filesystem.StreamingShellBackend); ok {
-		var executeTool tool.BaseTool
-		executeTool, err = newStreamingExecuteTool(sb, validatedConfig.CustomExecuteToolDesc)
-		if err != nil {
-			return nil, err
-		}
-		tools = append(tools, executeTool)
-	} else if sb, ok := validatedConfig.Backend.(filesystem.ShellBackend); ok {
-		var executeTool tool.BaseTool
-		executeTool, err = newExecuteTool(sb, validatedConfig.CustomExecuteToolDesc)
-		if err != nil {
-			return nil, err
-		}
-		tools = append(tools, executeTool)
-	}
 
 	return tools, nil
 }
@@ -189,15 +425,19 @@ type lsArgs struct {
 	Path string `json:"path"`
 }
 
-func newLsTool(fs filesystem.Backend, desc *string) (tool.BaseTool, error) {
-	d := ListFilesToolDesc
-	if desc != nil {
-		d = *desc
+func newLsTool(fs filesystem.Backend, name *string, desc *string) (tool.BaseTool, error) {
+	toolName := selectToolName(name, ToolNameLs)
+	d, err := selectToolDesc(desc, ListFilesToolDesc, ListFilesToolDescChinese)
+	if err != nil {
+		return nil, err
 	}
-	return utils.InferTool("ls", d, func(ctx context.Context, input lsArgs) (string, error) {
+	return utils.InferTool(toolName, d, func(ctx context.Context, input lsArgs) (string, error) {
 		infos, err := fs.LsInfo(ctx, &filesystem.LsInfoRequest{Path: input.Path})
 		if err != nil {
 			return "", err
+		}
+		if len(infos) == 0 {
+			return noFilesFound, nil
 		}
 		paths := make([]string, 0, len(infos))
 		for _, fi := range infos {
@@ -208,23 +448,23 @@ func newLsTool(fs filesystem.Backend, desc *string) (tool.BaseTool, error) {
 }
 
 type readFileArgs struct {
-	FilePath string `json:"file_path"`
-	Offset   int    `json:"offset"`
-	Limit    int    `json:"limit"`
+	// FilePath is the path to the file to read.
+	FilePath string `json:"file_path" jsonschema:"description=The path to the file to read"`
+
+	// Offset is the line number to start reading from.
+	Offset int `json:"offset" jsonschema:"description=The line number to start reading from. Only provide if the file is too large to read at once"`
+
+	// Limit is the number of lines to read.
+	Limit int `json:"limit" jsonschema:"description=The number of lines to read. Only provide if the file is too large to read at once."`
 }
 
-func newReadFileTool(fs filesystem.Backend, desc *string) (tool.BaseTool, error) {
-	d := ReadFileToolDesc
-	if desc != nil {
-		d = *desc
+func newReadFileTool(fs filesystem.Backend, name *string, desc *string) (tool.BaseTool, error) {
+	toolName := selectToolName(name, ToolNameReadFile)
+	d, err := selectToolDesc(desc, ReadFileToolDesc, ReadFileToolDescChinese)
+	if err != nil {
+		return nil, err
 	}
-	return utils.InferTool("read_file", d, func(ctx context.Context, input readFileArgs) (string, error) {
-		if input.Offset < 0 {
-			input.Offset = 0
-		}
-		if input.Limit <= 0 {
-			input.Limit = 200
-		}
+	return utils.InferTool(toolName, d, func(ctx context.Context, input readFileArgs) (string, error) {
 		return fs.Read(ctx, &filesystem.ReadRequest{
 			FilePath: input.FilePath,
 			Offset:   input.Offset,
@@ -234,16 +474,20 @@ func newReadFileTool(fs filesystem.Backend, desc *string) (tool.BaseTool, error)
 }
 
 type writeFileArgs struct {
-	FilePath string `json:"file_path"`
-	Content  string `json:"content"`
+	// FilePath is the path to the file to write.
+	FilePath string `json:"file_path" jsonschema:"description=The path to the file to write"`
+
+	// Content is the content to write to the file.
+	Content string `json:"content" jsonschema:"description=The content to write to the file"`
 }
 
-func newWriteFileTool(fs filesystem.Backend, desc *string) (tool.BaseTool, error) {
-	d := WriteFileToolDesc
-	if desc != nil {
-		d = *desc
+func newWriteFileTool(fs filesystem.Backend, name *string, desc *string) (tool.BaseTool, error) {
+	toolName := selectToolName(name, ToolNameWriteFile)
+	d, err := selectToolDesc(desc, WriteFileToolDesc, WriteFileToolDescChinese)
+	if err != nil {
+		return nil, err
 	}
-	return utils.InferTool("write_file", d, func(ctx context.Context, input writeFileArgs) (string, error) {
+	return utils.InferTool(toolName, d, func(ctx context.Context, input writeFileArgs) (string, error) {
 		err := fs.Write(ctx, &filesystem.WriteRequest{
 			FilePath: input.FilePath,
 			Content:  input.Content,
@@ -256,18 +500,26 @@ func newWriteFileTool(fs filesystem.Backend, desc *string) (tool.BaseTool, error
 }
 
 type editFileArgs struct {
-	FilePath   string `json:"file_path"`
-	OldString  string `json:"old_string"`
-	NewString  string `json:"new_string"`
-	ReplaceAll bool   `json:"replace_all"`
+	// FilePath is the path to the file to modify.
+	FilePath string `json:"file_path" jsonschema:"description=The path to the file to modify"`
+
+	// OldString is the text to replace.
+	OldString string `json:"old_string" jsonschema:"description=The text to replace"`
+
+	// NewString is the text to replace it with.
+	NewString string `json:"new_string" jsonschema:"description=The text to replace it with (must be different from old_string)"`
+
+	// ReplaceAll indicates whether to replace all occurrences of old_string.
+	ReplaceAll bool `json:"replace_all" jsonschema:"description=Replace all occurrences of old_string (default false),default=false"`
 }
 
-func newEditFileTool(fs filesystem.Backend, desc *string) (tool.BaseTool, error) {
-	d := EditFileToolDesc
-	if desc != nil {
-		d = *desc
+func newEditFileTool(fs filesystem.Backend, name *string, desc *string) (tool.BaseTool, error) {
+	toolName := selectToolName(name, ToolNameEditFile)
+	d, err := selectToolDesc(desc, EditFileToolDesc, EditFileToolDescChinese)
+	if err != nil {
+		return nil, err
 	}
-	return utils.InferTool("edit_file", d, func(ctx context.Context, input editFileArgs) (string, error) {
+	return utils.InferTool(toolName, d, func(ctx context.Context, input editFileArgs) (string, error) {
 		err := fs.Edit(ctx, &filesystem.EditRequest{
 			FilePath:   input.FilePath,
 			OldString:  input.OldString,
@@ -282,22 +534,29 @@ func newEditFileTool(fs filesystem.Backend, desc *string) (tool.BaseTool, error)
 }
 
 type globArgs struct {
-	Pattern string `json:"pattern"`
-	Path    string `json:"path"`
+	// Pattern is the glob pattern to match files against.
+	Pattern string `json:"pattern" jsonschema:"description=The glob pattern to match files against"`
+
+	// Path is the directory to search in.
+	Path string `json:"path" jsonschema:"description=The directory to search in. If not specified\\, the current working directory will be used. IMPORTANT: Omit this field to use the default directory. DO NOT enter 'undefined' or 'null' - simply omit it for the default behavior. Must be a valid directory path if provided."`
 }
 
-func newGlobTool(fs filesystem.Backend, desc *string) (tool.BaseTool, error) {
-	d := GlobToolDesc
-	if desc != nil {
-		d = *desc
+func newGlobTool(fs filesystem.Backend, name *string, desc *string) (tool.BaseTool, error) {
+	toolName := selectToolName(name, ToolNameGlob)
+	d, err := selectToolDesc(desc, GlobToolDesc, GlobToolDescChinese)
+	if err != nil {
+		return nil, err
 	}
-	return utils.InferTool("glob", d, func(ctx context.Context, input globArgs) (string, error) {
+	return utils.InferTool(toolName, d, func(ctx context.Context, input globArgs) (string, error) {
 		infos, err := fs.GlobInfo(ctx, &filesystem.GlobInfoRequest{
 			Pattern: input.Pattern,
 			Path:    input.Path,
 		})
 		if err != nil {
 			return "", err
+		}
+		if len(infos) == 0 {
+			return noFilesFound, nil
 		}
 		paths := make([]string, 0, len(infos))
 		for _, fi := range infos {
@@ -308,58 +567,120 @@ func newGlobTool(fs filesystem.Backend, desc *string) (tool.BaseTool, error) {
 }
 
 type grepArgs struct {
-	Pattern    string  `json:"pattern"`
-	Path       *string `json:"path,omitempty"`
-	Glob       *string `json:"glob,omitempty"`
-	OutputMode string  `json:"output_mode" jsonschema:"enum=files_with_matches,enum=content,enum=count"`
+	// Pattern is the regular expression pattern to search for in file contents.
+	Pattern string `json:"pattern" jsonschema:"description=The regular expression pattern to search for in file contents"`
+
+	// Path is the file or directory to search in. Defaults to current working directory.
+	Path *string `json:"path,omitempty" jsonschema:"description=File or directory to search in (rg PATH). Defaults to current working directory."`
+
+	// Glob is the glob pattern to filter files (e.g. "*.js", "*.{ts,tsx}").
+	Glob *string `json:"glob,omitempty" jsonschema:"description=Glob pattern to filter files (e.g. '*.js'\\, '*.{ts\\,tsx}') - maps to rg --glob"`
+
+	// OutputMode specifies the output format.
+	// "content" shows matching lines (supports context, line numbers, head_limit).
+	// "files_with_matches" shows file paths (supports head_limit).
+	// "count" shows match counts (supports head_limit).
+	// Defaults to "files_with_matches".
+	OutputMode string `json:"output_mode,omitempty" jsonschema:"description=Output mode: 'content' shows matching lines (supports -A/-B/-C context\\, -n line numbers\\, head_limit)\\, 'files_with_matches' shows file paths (supports head_limit)\\, 'count' shows match counts (supports head_limit). Defaults to 'files_with_matches'.,enum=content,enum=files_with_matches,enum=count"`
+
+	// Context is the number of lines to show before and after each match.
+	// Only applicable when output_mode is "content".
+	Context *int `json:"-C,omitempty" jsonschema:"description=Number of lines to show before and after each match (rg -C). Requires output_mode: 'content'\\, ignored otherwise."`
+
+	// BeforeLines is the number of lines to show before each match.
+	// Only applicable when output_mode is "content".
+	BeforeLines *int `json:"-B,omitempty" jsonschema:"description=Number of lines to show before each match (rg -B). Requires output_mode: 'content'\\, ignored otherwise."`
+
+	// AfterLines is the number of lines to show after each match.
+	// Only applicable when output_mode is "content".
+	AfterLines *int `json:"-A,omitempty" jsonschema:"description=Number of lines to show after each match (rg -A). Requires output_mode: 'content'\\, ignored otherwise."`
+
+	// ShowLineNumbers enables showing line numbers in output.
+	// Only applicable when output_mode is "content". Defaults to true.
+	ShowLineNumbers *bool `json:"-n,omitempty" jsonschema:"description=Show line numbers in output (rg -n). Requires output_mode: 'content'\\, ignored otherwise. Defaults to true."`
+
+	// CaseInsensitive enables case insensitive search.
+	CaseInsensitive *bool `json:"-i,omitempty" jsonschema:"description=Case insensitive search (rg -i)"`
+
+	// FileType is the file type to search (e.g., js, py, rust, go, java).
+	// More efficient than Glob for standard file types.
+	FileType *string `json:"type,omitempty" jsonschema:"description=File type to search (rg --type). Common types: js\\, py\\, rust\\, go\\, java\\, etc. More efficient than include for standard file types."`
+
+	// HeadLimit limits output to first N lines/entries.
+	// Works across all output modes. Defaults to 0 (unlimited).
+	HeadLimit *int `json:"head_limit,omitempty" jsonschema:"description=Limit output to first N lines/entries\\, equivalent to '| head -N'. Works across all output modes: content (limits output lines)\\, files_with_matches (limits file paths)\\, count (limits count entries). Defaults to 0 (unlimited)."`
+
+	// Offset skips first N lines/entries before applying HeadLimit.
+	// Works across all output modes. Defaults to 0.
+	Offset *int `json:"offset,omitempty" jsonschema:"description=Skip first N lines/entries before applying head_limit\\, equivalent to '| tail -n +N | head -N'. Works across all output modes. Defaults to 0."`
+
+	// Multiline enables multiline mode where patterns can span lines.
+	//   - true: Allows patterns to match across lines, "." matches newlines
+	//   - false: Default, matches only within single lines
+	Multiline *bool `json:"multiline,omitempty" jsonschema:"description=Enable multiline mode where . matches newlines and patterns can span lines (rg -U --multiline-dotall). Default: false."`
 }
 
-func newGrepTool(fs filesystem.Backend, desc *string) (tool.BaseTool, error) {
-	d := GrepToolDesc
-	if desc != nil {
-		d = *desc
+func newGrepTool(fs filesystem.Backend, name *string, desc *string) (tool.BaseTool, error) {
+	toolName := selectToolName(name, ToolNameGrep)
+	d, err := selectToolDesc(desc, GrepToolDesc, GrepToolDescChinese)
+	if err != nil {
+		return nil, err
 	}
-	return utils.InferTool("grep", d, func(ctx context.Context, input grepArgs) (string, error) {
-		var path, glob string
-		if input.Path != nil {
-			path = *input.Path
+	return utils.InferTool(toolName, d, func(ctx context.Context, input grepArgs) (string, error) {
+		// Extract string parameters
+		path := valueOrDefault(input.Path, "")
+		glob := valueOrDefault(input.Glob, "")
+		fileType := valueOrDefault(input.FileType, "")
+		var beforeLines, afterLines int
+
+		if input.Context != nil {
+			beforeLines = valueOrDefault(input.Context, 0)
+			afterLines = valueOrDefault(input.Context, 0)
+		} else {
+			// Extract context parameters
+			beforeLines = valueOrDefault(input.BeforeLines, 0)
+			afterLines = valueOrDefault(input.AfterLines, 0)
 		}
-		if input.Glob != nil {
-			glob = *input.Glob
-		}
+
+		// Extract boolean flags
+		caseInsensitive := valueOrDefault(input.CaseInsensitive, false)
+		enableMultiline := valueOrDefault(input.Multiline, false)
+
+		// Extract pagination parameters
+		headLimit := valueOrDefault(input.HeadLimit, 0)
+		offset := valueOrDefault(input.Offset, 0)
+
 		matches, err := fs.GrepRaw(ctx, &filesystem.GrepRequest{
-			Pattern: input.Pattern,
-			Path:    path,
-			Glob:    glob,
+			Pattern:         input.Pattern,
+			Path:            path,
+			Glob:            glob,
+			FileType:        fileType,
+			CaseInsensitive: caseInsensitive,
+			AfterLines:      afterLines,
+			BeforeLines:     beforeLines,
+			EnableMultiline: enableMultiline,
 		})
 		if err != nil {
 			return "", err
 		}
+
+		sort.SliceStable(matches, func(i, j int) bool {
+			return filepath.Base(matches[i].Path) < filepath.Base(matches[j].Path)
+		})
+
 		switch input.OutputMode {
-		case "count":
-			return strconv.Itoa(len(matches)), nil
 		case "content":
-			var b strings.Builder
-			for _, m := range matches {
-				b.WriteString(m.Path)
-				b.WriteString(":")
-				b.WriteString(strconv.Itoa(m.Line))
-				b.WriteString(":")
-				b.WriteString(m.Content)
-				b.WriteString("\n")
-			}
-			return b.String(), nil
+			matches = applyPagination(matches, offset, headLimit)
+			return formatContentMatches(matches, valueOrDefault(input.ShowLineNumbers, true)), nil
+
+		case "count":
+			return formatCountMatches(matches, offset, headLimit), nil
+
+		case "files_with_matches":
+			return formatFileMatches(matches, offset, headLimit), nil
+
 		default:
-			// default by files_with_matches
-			seen := map[string]struct{}{}
-			var files []string
-			for _, m := range matches {
-				if _, ok := seen[m.Path]; !ok {
-					files = append(files, m.Path)
-					seen[m.Path] = struct{}{}
-				}
-			}
-			return strings.Join(files, "\n"), nil
+			return formatFileMatches(matches, offset, headLimit), nil
 		}
 	})
 }
@@ -368,13 +689,13 @@ type executeArgs struct {
 	Command string `json:"command"`
 }
 
-func newExecuteTool(sb filesystem.ShellBackend, desc *string) (tool.BaseTool, error) {
-	d := ExecuteToolDesc
-	if desc != nil {
-		d = *desc
+func newExecuteTool(sb filesystem.Shell, name *string, desc *string) (tool.BaseTool, error) {
+	toolName := selectToolName(name, ToolNameExecute)
+	d, err := selectToolDesc(desc, ExecuteToolDesc, ExecuteToolDescChinese)
+	if err != nil {
+		return nil, err
 	}
-
-	return utils.InferTool("execute", d, func(ctx context.Context, input executeArgs) (string, error) {
+	return utils.InferTool(toolName, d, func(ctx context.Context, input executeArgs) (string, error) {
 		result, err := sb.Execute(ctx, &filesystem.ExecuteRequest{
 			Command: input.Command,
 		})
@@ -386,12 +707,13 @@ func newExecuteTool(sb filesystem.ShellBackend, desc *string) (tool.BaseTool, er
 	})
 }
 
-func newStreamingExecuteTool(sb filesystem.StreamingShellBackend, desc *string) (tool.BaseTool, error) {
-	d := ExecuteToolDesc
-	if desc != nil {
-		d = *desc
+func newStreamingExecuteTool(sb filesystem.StreamingShell, name *string, desc *string) (tool.BaseTool, error) {
+	toolName := selectToolName(name, ToolNameExecute)
+	d, err := selectToolDesc(desc, ExecuteToolDesc, ExecuteToolDescChinese)
+	if err != nil {
+		return nil, err
 	}
-	return utils.InferStreamTool("execute", d, func(ctx context.Context, input executeArgs) (*schema.StreamReader[string], error) {
+	return utils.InferStreamTool(toolName, d, func(ctx context.Context, input executeArgs) (*schema.StreamReader[string], error) {
 		result, err := sb.ExecuteStreaming(ctx, &filesystem.ExecuteRequest{
 			Command: input.Command,
 		})
@@ -469,4 +791,128 @@ func convExecuteResponse(response *filesystem.ExecuteResponse) string {
 		return "[Command executed successfully with no output]"
 	}
 	return result
+}
+
+// valueOrDefault returns the value pointed to by ptr, or defaultValue if ptr is nil.
+func valueOrDefault[T any](ptr *T, defaultValue T) T {
+	if ptr != nil {
+		return *ptr
+	}
+	return defaultValue
+}
+
+func applyPagination[T any](items []T, offset, headLimit int) []T {
+	if offset < 0 {
+		offset = 0
+	}
+	if offset >= len(items) {
+		return []T{}
+	}
+	items = items[offset:]
+
+	if headLimit > 0 && headLimit < len(items) {
+		items = items[:headLimit]
+	}
+	return items
+}
+
+func formatFileMatches(matches []filesystem.GrepMatch, offset, headLimit int) string {
+	if len(matches) == 0 {
+		return noFilesFound
+	}
+	seen := make(map[string]bool)
+	var uniquePaths []string
+	for _, match := range matches {
+		if !seen[match.Path] {
+			seen[match.Path] = true
+			uniquePaths = append(uniquePaths, match.Path)
+		}
+	}
+	totalFiles := len(uniquePaths)
+	uniquePaths = applyPagination(uniquePaths, offset, headLimit)
+
+	fileWord := "files"
+	if totalFiles == 1 {
+		fileWord = "file"
+	}
+	return fmt.Sprintf("Found %d %s\n%s", totalFiles, fileWord, strings.Join(uniquePaths, "\n"))
+}
+
+func formatContentMatches(matches []filesystem.GrepMatch, showLineNum bool) string {
+	if len(matches) == 0 {
+		return noMatchesFound
+	}
+	var b strings.Builder
+	for _, match := range matches {
+		b.WriteString(match.Path)
+		if showLineNum {
+			b.WriteString(":")
+			b.WriteString(strconv.Itoa(match.Line))
+		}
+		b.WriteString(":")
+		b.WriteString(match.Content)
+		b.WriteString("\n")
+	}
+	return strings.TrimSuffix(b.String(), "\n")
+}
+
+func formatCountMatches(matches []filesystem.GrepMatch, offset, headLimit int) string {
+	countMap := make(map[string]int)
+	for _, match := range matches {
+		countMap[match.Path]++
+	}
+
+	var paths []string
+	for path := range countMap {
+		paths = append(paths, path)
+	}
+	sort.Strings(paths)
+
+	totalOccurrences := len(matches)
+	totalFiles := len(paths)
+
+	occurrenceWord := "occurrences"
+	if totalOccurrences == 1 {
+		occurrenceWord = "occurrence"
+	}
+	fileWord := "files"
+	if totalFiles == 1 {
+		fileWord = "file"
+	}
+
+	if totalOccurrences == 0 {
+		return fmt.Sprintf("%s\n\nFound %d total %s across %d %s.", noMatchesFound, totalOccurrences, occurrenceWord, totalFiles, fileWord)
+	}
+
+	paths = applyPagination(paths, offset, headLimit)
+
+	var b strings.Builder
+	for _, path := range paths {
+		b.WriteString(path)
+		b.WriteString(":")
+		b.WriteString(strconv.Itoa(countMap[path]))
+		b.WriteString("\n")
+	}
+	result := strings.TrimSuffix(b.String(), "\n")
+	return fmt.Sprintf("%s\n\nFound %d total %s across %d %s.", result, totalOccurrences, occurrenceWord, totalFiles, fileWord)
+}
+
+// selectToolDesc returns the custom description if provided, otherwise selects the appropriate
+// i18n description based on the current language setting.
+func selectToolDesc(customDesc *string, defaultEnglish, defaultChinese string) (string, error) {
+	if customDesc != nil {
+		return *customDesc, nil
+	}
+	return internal.SelectPrompt(internal.I18nPrompts{
+		English: defaultEnglish,
+		Chinese: defaultChinese,
+	}), nil
+}
+
+// selectToolName returns the custom tool name if provided, otherwise returns the default name.
+func selectToolName(customName *string, defaultName string) string {
+	if customName != nil {
+		return *customName
+	}
+	return defaultName
 }

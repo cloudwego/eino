@@ -42,6 +42,12 @@ output/*
 # Trae files
 .trae
 
+# Specs files (internal documentation)
+**/specs/
+
+# Reports (generated analysis files)
+reports/
+
 .DS_Store
 *.log
 CLAUDE.md

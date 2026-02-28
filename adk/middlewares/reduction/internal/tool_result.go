@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-package reduction
+package internal
 
 import (
 	"context"

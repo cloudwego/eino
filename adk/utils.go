@@ -63,6 +63,15 @@ func copyMap[K comparable, V any](m map[K]V) map[K]V {
 	return res
 }
 
+func cloneSlice[T any](s []T) []T {
+	if s == nil {
+		return nil
+	}
+	res := make([]T, len(s))
+	copy(res, s)
+	return res
+}
+
 func concatInstructions(instructions ...string) string {
 	var sb strings.Builder
 	sb.WriteString(instructions[0])
@@ -80,7 +89,8 @@ func GenTransferMessages(_ context.Context, destAgentName string) (Message, Mess
 	toolCallID := uuid.NewString()
 	tooCall := schema.ToolCall{ID: toolCallID, Function: schema.FunctionCall{Name: TransferToAgentToolName, Arguments: destAgentName}}
 	assistantMessage := schema.AssistantMessage("", []schema.ToolCall{tooCall})
-	toolMessage := schema.ToolMessage(transferToAgentToolOutput(destAgentName), toolCallID, schema.WithToolName(TransferToAgentToolName))
+	msg := transferToAgentToolOutput(destAgentName)
+	toolMessage := schema.ToolMessage(msg, toolCallID, schema.WithToolName(TransferToAgentToolName))
 	return assistantMessage, toolMessage
 }
 

@@ -24,7 +24,9 @@ import (
 	"runtime/debug"
 	"strings"
 
+	"github.com/cloudwego/eino/callbacks"
 	"github.com/cloudwego/eino/compose"
+	icb "github.com/cloudwego/eino/internal/callbacks"
 	"github.com/cloudwego/eino/internal/safe"
 	"github.com/cloudwego/eino/schema"
 )
@@ -294,49 +296,69 @@ func (a *flowAgent) Run(ctx context.Context, input *AgentInput, opts ...AgentRun
 
 	o := getCommonOptions(nil, opts...)
 
-	input, err := a.genAgentInput(ctx, runCtx, o.skipTransferMessages)
+	processedInput, err := a.genAgentInput(ctx, runCtx, o.skipTransferMessages)
 	if err != nil {
-		return genErrorIter(err)
+		cbInput := &AgentCallbackInput{Input: input}
+		ctx = callbacks.OnStart(ctx, cbInput)
+		return wrapIterWithOnEnd(ctx, genErrorIter(err))
 	}
 
+	ctxForSubAgents := ctx
+
+	agentType := getAgentType(a.Agent)
+	ctx = initAgentCallbacks(ctx, agentName, agentType, filterOptions(agentName, opts)...)
+	cbInput := &AgentCallbackInput{Input: processedInput}
+	ctx = callbacks.OnStart(ctx, cbInput)
+
+	input = processedInput
+
 	if wf, ok := a.Agent.(*workflowAgent); ok {
-		return wf.Run(ctx, input, opts...)
+		return wrapIterWithOnEnd(ctx, wf.Run(ctx, input, opts...))
 	}
 
 	aIter := a.Agent.Run(ctx, input, filterOptions(agentName, opts)...)
 
 	iterator, generator := NewAsyncIteratorPair[*AgentEvent]()
 
-	go a.run(ctx, runCtx, aIter, generator, opts...)
+	go a.run(ctx, ctxForSubAgents, runCtx, aIter, generator, opts...)
 
 	return iterator
 }
 
 func (a *flowAgent) Resume(ctx context.Context, info *ResumeInfo, opts ...AgentRunOption) *AsyncIterator[*AgentEvent] {
-	ctx, info = buildResumeInfo(ctx, a.Name(ctx), info)
+	agentName := a.Name(ctx)
+
+	ctx, info = buildResumeInfo(ctx, agentName, info)
+
+	ctxForSubAgents := ctx
+
+	agentType := getAgentType(a.Agent)
+	ctx = initAgentCallbacks(ctx, agentName, agentType, filterOptions(agentName, opts)...)
+	cbInput := &AgentCallbackInput{ResumeInfo: info}
+	ctx = callbacks.OnStart(ctx, cbInput)
 
 	if info.WasInterrupted {
 		ra, ok := a.Agent.(ResumableAgent)
 		if !ok {
-			return genErrorIter(fmt.Errorf("failed to resume agent: agent '%s' is an interrupt point "+
-				"but is not a ResumableAgent", a.Name(ctx)))
+			return wrapIterWithOnEnd(ctx, genErrorIter(fmt.Errorf("failed to resume agent: agent '%s' is an interrupt point "+
+				"but is not a ResumableAgent", agentName)))
 		}
 		iterator, generator := NewAsyncIteratorPair[*AgentEvent]()
 
 		aIter := ra.Resume(ctx, info, opts...)
 		if _, ok := ra.(*workflowAgent); ok {
-			return aIter
+			return wrapIterWithOnEnd(ctx, aIter)
 		}
-		go a.run(ctx, getRunCtx(ctx), aIter, generator, opts...)
+		go a.run(ctx, ctxForSubAgents, getRunCtx(ctxForSubAgents), aIter, generator, opts...)
 		return iterator
 	}
 
 	nextAgentName, err := getNextResumeAgent(ctx, info)
 	if err != nil {
-		return genErrorIter(err)
+		return wrapIterWithOnEnd(ctx, genErrorIter(err))
 	}
 
-	subAgent := a.getAgent(ctx, nextAgentName)
+	subAgent := a.getAgent(ctxForSubAgents, nextAgentName)
 	if subAgent == nil {
 		// the inner agent wrapped by flowAgent may be ANY agent, including flowAgent,
 		// AgentWithDeterministicTransferTo, or any other custom agent user defined,
@@ -345,13 +367,17 @@ func (a *flowAgent) Resume(ctx context.Context, info *ResumeInfo, opts ...AgentR
 		// We need to go through these wrappers to reach the flowAgent with sub-agents.
 		if len(a.subAgents) == 0 {
 			if ra, ok := a.Agent.(ResumableAgent); ok {
-				return ra.Resume(ctx, info, opts...)
+				// Use ctx (callback-enriched) instead of ctxForSubAgents here.
+				// This is the inner agent that flowAgent wraps (e.g., supervisorContainer),
+				// not a sub-agent. The callback context from OnStart should be propagated
+				// to ensure unified tracing for container patterns.
+				return wrapIterWithOnEnd(ctx, ra.Resume(ctx, info, opts...))
 			}
 		}
-		return genErrorIter(fmt.Errorf("failed to resume agent: agent '%s' not found from flowAgent '%s'", nextAgentName, a.Name(ctx)))
+		return wrapIterWithOnEnd(ctx, genErrorIter(fmt.Errorf("failed to resume agent: agent '%s' not found from flowAgent '%s'", nextAgentName, agentName)))
 	}
 
-	return subAgent.Resume(ctx, info, opts...)
+	return wrapIterWithOnEnd(ctx, subAgent.Resume(ctxForSubAgents, info, opts...))
 }
 
 type DeterministicTransferConfig struct {
@@ -361,10 +387,17 @@ type DeterministicTransferConfig struct {
 
 func (a *flowAgent) run(
 	ctx context.Context,
+	ctxForSubAgents context.Context,
 	runCtx *runContext,
 	aIter *AsyncIterator[*AgentEvent],
 	generator *AsyncGenerator[*AgentEvent],
 	opts ...AgentRunOption) {
+
+	cbIter, cbGen := NewAsyncIteratorPair[*AgentEvent]()
+
+	cbOutput := &AgentCallbackOutput{Events: cbIter}
+	icb.On(ctx, cbOutput, icb.BuildOnEndHandleWithCopy(copyAgentCallbackOutput), callbacks.TimingOnEnd, false)
+
 	defer func() {
 		panicErr := recover()
 		if panicErr != nil {
@@ -372,6 +405,7 @@ func (a *flowAgent) run(
 			generator.Send(&AgentEvent{Err: e})
 		}
 
+		cbGen.Close()
 		generator.Close()
 	}()
 
@@ -408,6 +442,10 @@ func (a *flowAgent) run(
 		if exactRunPathMatch(runCtx.RunPath, event.RunPath) {
 			lastAction = event.Action
 		}
+		copied := copyAgentEvent(event)
+		setAutomaticClose(copied)
+		setAutomaticClose(event)
+		cbGen.Send(copied)
 		generator.Send(event)
 	}
 
@@ -427,15 +465,15 @@ func (a *flowAgent) run(
 
 	// handle transferring to another agent
 	if destName != "" {
-		agentToRun := a.getAgent(ctx, destName)
+		agentToRun := a.getAgent(ctxForSubAgents, destName)
 		if agentToRun == nil {
 			e := fmt.Errorf("transfer failed: agent '%s' not found when transferring from '%s'",
-				destName, a.Name(ctx))
+				destName, a.Name(ctxForSubAgents))
 			generator.Send(&AgentEvent{Err: e})
 			return
 		}
 
-		subAIter := agentToRun.Run(ctx, nil /*subagents get input from runCtx*/, opts...)
+		subAIter := agentToRun.Run(ctxForSubAgents, nil /*subagents get input from runCtx*/, opts...)
 		for {
 			subEvent, ok_ := subAIter.Next()
 			if !ok_ {
@@ -458,4 +496,28 @@ func exactRunPathMatch(aPath, bPath []RunStep) bool {
 		}
 	}
 	return true
+}
+
+func wrapIterWithOnEnd(ctx context.Context, iter *AsyncIterator[*AgentEvent]) *AsyncIterator[*AgentEvent] {
+	cbIter, cbGen := NewAsyncIteratorPair[*AgentEvent]()
+	cbOutput := &AgentCallbackOutput{Events: cbIter}
+	icb.On(ctx, cbOutput, icb.BuildOnEndHandleWithCopy(copyAgentCallbackOutput), callbacks.TimingOnEnd, false)
+
+	outIter, outGen := NewAsyncIteratorPair[*AgentEvent]()
+	go func() {
+		defer func() {
+			cbGen.Close()
+			outGen.Close()
+		}()
+		for {
+			event, ok := iter.Next()
+			if !ok {
+				break
+			}
+			copied := copyAgentEvent(event)
+			cbGen.Send(copied)
+			outGen.Send(event)
+		}
+	}()
+	return outIter
 }
