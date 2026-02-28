@@ -43,6 +43,7 @@ type State struct {
 
 	// Internal fields below - do not access directly.
 	// Kept exported for backward compatibility with existing checkpoints.
+	HasReturnDirectly        bool
 	ReturnDirectlyToolCallID string
 	ToolGenActions           map[string]*AgentAction
 	AgentName                string
@@ -120,6 +121,8 @@ func (s *State) setReturnDirectlyToolCallID(id string) {
 		s.internals = make(map[string]any)
 	}
 	s.internals[stateKeyReturnDirectlyToolCallID] = id
+	s.ReturnDirectlyToolCallID = id
+	s.HasReturnDirectly = id != ""
 }
 
 func (s *State) getToolGenActions() map[string]*AgentAction {
@@ -184,6 +187,7 @@ func (s *State) decrementRemainingIterations() {
 
 type stateSerialization struct {
 	Messages                 []Message
+	HasReturnDirectly        bool
 	ReturnDirectlyToolCallID string
 	ToolGenActions           map[string]*AgentAction
 	AgentName                string
@@ -199,6 +203,7 @@ func (s *State) GobEncode() ([]byte, error) {
 	}
 	ss := &stateSerialization{
 		Messages:                 s.Messages,
+		HasReturnDirectly:        s.HasReturnDirectly,
 		ReturnDirectlyToolCallID: s.getReturnDirectlyToolCallID(),
 		ToolGenActions:           s.getToolGenActions(),
 		AgentName:                s.AgentName,
@@ -226,6 +231,7 @@ func (s *State) GobDecode(b []byte) error {
 	}
 
 	s.AgentName = ss.AgentName
+	s.HasReturnDirectly = ss.HasReturnDirectly
 
 	if ss.ReturnDirectlyToolCallID != "" {
 		s.setReturnDirectlyToolCallID(ss.ReturnDirectlyToolCallID)
