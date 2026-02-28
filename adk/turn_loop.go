@@ -30,13 +30,9 @@ import (
 )
 
 var (
-	// ErrTurnLoopNotStarted is returned when Wait() is called on a TurnLoop
-	// that has not been started via Run().
-	ErrTurnLoopNotStarted = errors.New("turn loop has not been started")
-
-	// ErrTurnLoopAlreadyStarted is returned when Run() is called more than once
-	// on the same TurnLoop.
-	ErrTurnLoopAlreadyStarted = errors.New("turn loop has already been started")
+	// ErrTurnLoopAlreadyStopped is returned when Push() is called on a TurnLoop
+	// that has already stopped.
+	ErrTurnLoopAlreadyStopped = errors.New("turn loop has already stopped")
 )
 
 type turnLoopCancelSig struct {
@@ -101,6 +97,10 @@ func (s *preemptSignal) pause() {
 func (s *preemptSignal) signal(opts ...CancelOption) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
+	if !s.paused {
+		return
+	}
 
 	s.signaled = true
 	s.cancelOpts = opts
@@ -213,16 +213,13 @@ type TurnLoopExitState[T any] struct {
 
 // TurnLoop is a push-based event loop for agent execution.
 // Users push items via Push() and the loop processes them through the agent.
-// Create with NewTurnLoop() and start with Run().
+// Create and start with RunTurnLoop().
 type TurnLoop[T any] struct {
 	config TurnLoopConfig[T]
 
 	buffer *internal.UnboundedChan[T]
 
 	stopped int32
-	started int32
-
-	runOnce sync.Once
 
 	done chan struct{}
 
@@ -273,33 +270,19 @@ func WithPreemptDelay(delay time.Duration) PushOption {
 	}
 }
 
-// NewTurnLoop creates a new TurnLoop but does not start it.
-// Call Run() to start processing items.
-// Items can be pushed via Push() before Run() is called - they will be buffered.
-func NewTurnLoop[T any](cfg TurnLoopConfig[T]) *TurnLoop[T] {
-	return &TurnLoop[T]{
+// RunTurnLoop creates and starts a new TurnLoop, returning the running instance.
+// The loop starts processing immediately in a background goroutine.
+// Use Push() to add items and Wait() to block until the loop exits.
+func RunTurnLoop[T any](ctx context.Context, cfg TurnLoopConfig[T]) *TurnLoop[T] {
+	l := &TurnLoop[T]{
 		config:     cfg,
 		buffer:     internal.NewUnboundedChan[T](),
 		done:       make(chan struct{}),
 		cancelSig:  newTurnLoopCancelSig(),
 		preemptSig: newPreemptSignal(),
 	}
-}
-
-// Run starts the turn loop. It returns immediately after starting the background goroutine.
-// Returns ErrTurnLoopAlreadyStarted if called more than once.
-// Items pushed via Push() before Run() will be processed once the loop starts.
-func (l *TurnLoop[T]) Run(ctx context.Context) error {
-	alreadyStarted := true
-	l.runOnce.Do(func() {
-		alreadyStarted = false
-		atomic.StoreInt32(&l.started, 1)
-		go l.run(ctx)
-	})
-	if alreadyStarted {
-		return ErrTurnLoopAlreadyStarted
-	}
-	return nil
+	go l.run(ctx)
+	return l
 }
 
 // Push adds an item to the loop's buffer for processing.
@@ -353,8 +336,6 @@ func (l *TurnLoop[T]) Push(item T, opts ...PushOption) bool {
 // Cancel signals the loop to stop and returns immediately (non-blocking).
 // The loop will stop at the next safe point determined by CancelMode.
 // This method is idempotent - multiple calls have no additional effect.
-// If Run() was never called, Cancel() marks the loop as stopped so future
-// Push() calls will return false, and Wait() will return immediately.
 // Call Wait() to block until the loop has fully exited and get the result.
 func (l *TurnLoop[T]) Cancel(opts ...CancelOption) {
 	l.cancelOnce.Do(func() {
@@ -371,35 +352,13 @@ func (l *TurnLoop[T]) Cancel(opts ...CancelOption) {
 		atomic.StoreInt32(&l.stopped, 1)
 
 		l.buffer.Close()
-
-		if atomic.LoadInt32(&l.started) == 0 {
-			l.result = &TurnLoopExitState[T]{
-				ExitReason:     nil,
-				UnhandledItems: nil,
-			}
-			close(l.done)
-		}
 	})
 }
 
 // Wait blocks until the loop exits and returns the result.
 // This method is safe to call from multiple goroutines.
 // All callers will receive the same result.
-// If Run() was never called and Cancel() was not called, returns immediately
-// with ExitReason = ErrTurnLoopNotStarted.
 func (l *TurnLoop[T]) Wait() *TurnLoopExitState[T] {
-	select {
-	case <-l.done:
-		return l.result
-	default:
-	}
-
-	if atomic.LoadInt32(&l.started) == 0 {
-		return &TurnLoopExitState[T]{
-			ExitReason:     ErrTurnLoopNotStarted,
-			UnhandledItems: l.buffer.TakeAll(),
-		}
-	}
 	<-l.done
 	return l.result
 }

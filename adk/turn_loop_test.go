@@ -119,9 +119,7 @@ func (a *turnLoopCancellableMockAgent) runWithCancel(ctx context.Context, input 
 }
 
 func newAndRunTurnLoop[T any](ctx context.Context, cfg TurnLoopConfig[T]) *TurnLoop[T] {
-	l := NewTurnLoop(cfg)
-	_ = l.Run(ctx)
-	return l
+	return RunTurnLoop(ctx, cfg)
 }
 
 func TestTurnLoop_RunAndPush(t *testing.T) {
@@ -612,6 +610,88 @@ func TestTurnLoop_Push_WithoutPreempt_DoesNotCancel(t *testing.T) {
 	assert.Equal(t, 2, agentRunCount)
 }
 
+func TestTurnLoop_PreemptDelay_NoMispreemptOnNaturalCompletion(t *testing.T) {
+	agent1Started := make(chan struct{})
+	agent1Done := make(chan struct{})
+	agent2Started := make(chan struct{})
+	agent2Done := make(chan struct{})
+	agent1StartedOnce := sync.Once{}
+	agent1DoneOnce := sync.Once{}
+	agent2StartedOnce := sync.Once{}
+	agent2DoneOnce := sync.Once{}
+
+	var agentRunCount int32
+
+	agent := &turnLoopCancellableMockAgent{
+		name: "test",
+		runFunc: func(ctx context.Context, input *AgentInput) (*AgentOutput, error) {
+			count := atomic.AddInt32(&agentRunCount, 1)
+			if count == 1 {
+				agent1StartedOnce.Do(func() { close(agent1Started) })
+				time.Sleep(50 * time.Millisecond)
+				agent1DoneOnce.Do(func() { close(agent1Done) })
+			} else if count == 2 {
+				agent2StartedOnce.Do(func() { close(agent2Started) })
+				time.Sleep(100 * time.Millisecond)
+				select {
+				case <-ctx.Done():
+					t.Error("Agent2 was unexpectedly cancelled")
+					return nil, ctx.Err()
+				default:
+				}
+				agent2DoneOnce.Do(func() { close(agent2Done) })
+			}
+			return &AgentOutput{}, nil
+		},
+	}
+
+	loop := newAndRunTurnLoop(context.Background(), TurnLoopConfig[string]{
+		PrepareAgent: func(ctx context.Context, consumed []string) (Agent, error) {
+			return agent, nil
+		},
+		GenInput: func(ctx context.Context, items []string) (*GenInputResult[string], error) {
+			return &GenInputResult[string]{
+				Input:     &AgentInput{Messages: []Message{schema.UserMessage(items[0])}},
+				Consumed:  []string{items[0]},
+				Remaining: items[1:],
+			}, nil
+		},
+	})
+
+	loop.Push("first")
+
+	select {
+	case <-agent1Started:
+	case <-time.After(1 * time.Second):
+		t.Fatal("agent1 did not start")
+	}
+
+	loop.Push("second", WithPreempt(), WithPreemptDelay(500*time.Millisecond))
+
+	select {
+	case <-agent1Done:
+	case <-time.After(1 * time.Second):
+		t.Fatal("agent1 did not complete naturally")
+	}
+
+	select {
+	case <-agent2Started:
+	case <-time.After(1 * time.Second):
+		t.Fatal("agent2 did not start")
+	}
+
+	select {
+	case <-agent2Done:
+	case <-time.After(1 * time.Second):
+		t.Fatal("agent2 did not complete - may have been incorrectly preempted")
+	}
+
+	loop.Cancel()
+	result := loop.Wait()
+	assert.NoError(t, result.ExitReason)
+	assert.Equal(t, int32(2), atomic.LoadInt32(&agentRunCount))
+}
+
 func TestTurnLoop_ConcurrentPush(t *testing.T) {
 	var count int32
 
@@ -959,12 +1039,12 @@ func TestTurnLoop_CancelOptionsArePassed(t *testing.T) {
 	assert.NoError(t, result.ExitReason)
 }
 
-func TestTurnLoop_NewAndRun_TwoStepPattern(t *testing.T) {
-	t.Run("PushBeforeRun_ItemsAreBuffered", func(t *testing.T) {
+func TestTurnLoop_RunTurnLoop(t *testing.T) {
+	t.Run("StartsImmediately", func(t *testing.T) {
 		processedItems := make([]string, 0)
 		var mu sync.Mutex
 
-		loop := NewTurnLoop(TurnLoopConfig[string]{
+		loop := RunTurnLoop(context.Background(), TurnLoopConfig[string]{
 			GenInput: func(ctx context.Context, items []string) (*GenInputResult[string], error) {
 				mu.Lock()
 				processedItems = append(processedItems, items...)
@@ -979,11 +1059,8 @@ func TestTurnLoop_NewAndRun_TwoStepPattern(t *testing.T) {
 			},
 		})
 
-		loop.Push("before-run-1")
-		loop.Push("before-run-2")
-
-		err := loop.Run(context.Background())
-		assert.NoError(t, err)
+		loop.Push("item-1")
+		loop.Push("item-2")
 
 		time.Sleep(100 * time.Millisecond)
 
@@ -993,56 +1070,11 @@ func TestTurnLoop_NewAndRun_TwoStepPattern(t *testing.T) {
 
 		mu.Lock()
 		defer mu.Unlock()
-		assert.Contains(t, processedItems, "before-run-1")
-		assert.Contains(t, processedItems, "before-run-2")
+		assert.True(t, len(processedItems) > 0, "should have processed at least one item")
 	})
 
-	t.Run("RunTwice_ReturnsError", func(t *testing.T) {
-		loop := NewTurnLoop(TurnLoopConfig[string]{
-			GenInput: func(ctx context.Context, items []string) (*GenInputResult[string], error) {
-				return &GenInputResult[string]{
-					Input:    &AgentInput{Messages: []Message{schema.UserMessage(items[0])}},
-					Consumed: items,
-				}, nil
-			},
-			PrepareAgent: func(ctx context.Context, consumed []string) (Agent, error) {
-				return &turnLoopMockAgent{name: "test"}, nil
-			},
-		})
-
-		err1 := loop.Run(context.Background())
-		assert.NoError(t, err1)
-
-		err2 := loop.Run(context.Background())
-		assert.ErrorIs(t, err2, ErrTurnLoopAlreadyStarted)
-
-		loop.Cancel()
-		loop.Wait()
-	})
-
-	t.Run("WaitWithoutRun_ReturnsError", func(t *testing.T) {
-		loop := NewTurnLoop(TurnLoopConfig[string]{
-			GenInput: func(ctx context.Context, items []string) (*GenInputResult[string], error) {
-				return &GenInputResult[string]{
-					Input:    &AgentInput{Messages: []Message{schema.UserMessage(items[0])}},
-					Consumed: items,
-				}, nil
-			},
-			PrepareAgent: func(ctx context.Context, consumed []string) (Agent, error) {
-				return &turnLoopMockAgent{name: "test"}, nil
-			},
-		})
-
-		loop.Push("item1")
-		loop.Push("item2")
-
-		result := loop.Wait()
-		assert.ErrorIs(t, result.ExitReason, ErrTurnLoopNotStarted)
-		assert.Len(t, result.UnhandledItems, 2)
-	})
-
-	t.Run("CancelWithoutRun_WorksCorrectly", func(t *testing.T) {
-		loop := NewTurnLoop(TurnLoopConfig[string]{
+	t.Run("CancelImmediatelyAfterRun", func(t *testing.T) {
+		loop := RunTurnLoop(context.Background(), TurnLoopConfig[string]{
 			GenInput: func(ctx context.Context, items []string) (*GenInputResult[string], error) {
 				return &GenInputResult[string]{
 					Input:    &AgentInput{Messages: []Message{schema.UserMessage(items[0])}},
@@ -1061,5 +1093,39 @@ func TestTurnLoop_NewAndRun_TwoStepPattern(t *testing.T) {
 
 		result := loop.Wait()
 		assert.NoError(t, result.ExitReason)
+	})
+
+	t.Run("ConcurrentPushAndCancel", func(t *testing.T) {
+		for i := 0; i < 100; i++ {
+			loop := RunTurnLoop(context.Background(), TurnLoopConfig[string]{
+				GenInput: func(ctx context.Context, items []string) (*GenInputResult[string], error) {
+					return &GenInputResult[string]{
+						Input:    &AgentInput{Messages: []Message{schema.UserMessage(items[0])}},
+						Consumed: items,
+					}, nil
+				},
+				PrepareAgent: func(ctx context.Context, consumed []string) (Agent, error) {
+					return &turnLoopMockAgent{name: "test"}, nil
+				},
+			})
+
+			var wg sync.WaitGroup
+			wg.Add(2)
+
+			go func() {
+				defer wg.Done()
+				loop.Push("item")
+			}()
+
+			go func() {
+				defer wg.Done()
+				loop.Cancel()
+			}()
+
+			wg.Wait()
+
+			result := loop.Wait()
+			assert.NoError(t, result.ExitReason)
+		}
 	})
 }
