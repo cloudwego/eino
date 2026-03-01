@@ -201,3 +201,69 @@ func (d *Document) SparseVector() map[int]float64 {
 
 	return nil
 }
+
+// Clone creates a deep copy of the document.
+// This is useful when you need to create a copy of the document without affecting the original.
+func (d *Document) Clone() *Document {
+	if d == nil {
+		return nil
+	}
+
+	clone := &Document{
+		ID:      d.ID,
+		Content: d.Content,
+	}
+
+	if d.MetaData != nil {
+		clone.MetaData = make(map[string]any, len(d.MetaData))
+		for k, v := range d.MetaData {
+			// For simplicity, we do a shallow copy of the values.
+			// For deep copy of complex types, users can implement their own logic.
+			clone.MetaData[k] = v
+		}
+	}
+
+	return clone
+}
+
+// IsEmpty checks if the document is empty (no ID, no content, and no metadata).
+func (d *Document) IsEmpty() bool {
+	return d.ID == "" && d.Content == "" && len(d.MetaData) == 0
+}
+
+// HasMetaData checks if the document contains the specified metadata key.
+func (d *Document) HasMetaData(key string) bool {
+	if d.MetaData == nil {
+		return false
+	}
+	_, exists := d.MetaData[key]
+	return exists
+}
+
+// ClearMetaData removes all metadata from the document.
+// Returns the document itself for method chaining.
+func (d *Document) ClearMetaData() *Document {
+	d.MetaData = nil
+	return d
+}
+
+// WithMetaData sets custom metadata for the document.
+// This is a generic method for setting any metadata key-value pair.
+// Returns the document itself for method chaining.
+func (d *Document) WithMetaData(key string, value any) *Document {
+	if d.MetaData == nil {
+		d.MetaData = make(map[string]any)
+	}
+	d.MetaData[key] = value
+	return d
+}
+
+// GetMetaData retrieves custom metadata from the document.
+// Returns the value and a boolean indicating whether the key exists.
+func (d *Document) GetMetaData(key string) (any, bool) {
+	if d.MetaData == nil {
+		return nil, false
+	}
+	value, exists := d.MetaData[key]
+	return value, exists
+}
