@@ -28,3 +28,28 @@ func TestOptions(t *testing.T) {
 	assert.NotNil(t, opts.Model)
 	assert.Equal(t, *opts.Model, "test_model")
 }
+
+func TestGetImplSpecificOptions(t *testing.T) {
+	type MySpecificOptions struct {
+		Field1 string
+		Field2 int
+	}
+
+	withField1 := func(field1 string) func(o *MySpecificOptions) {
+		return func(opts *MySpecificOptions) {
+			opts.Field1 = field1
+		}
+	}
+
+	withField2 := func(field2 int) func(o *MySpecificOptions) {
+		return func(opts *MySpecificOptions) {
+			opts.Field2 = field2
+		}
+	}
+
+	opt1 := WrapImplSpecificOptFn(withField1("value1"))
+	opt2 := WrapImplSpecificOptFn(withField2(100))
+	specificOpts := GetImplSpecificOptions[MySpecificOptions](nil, opt1, opt2)
+	assert.Equal(t, "value1", specificOpts.Field1)
+	assert.Equal(t, 100, specificOpts.Field2)
+}
