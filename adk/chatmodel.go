@@ -91,6 +91,7 @@ type chatModelAgentRunOptions struct {
 	// run
 	chatModelOptions []model.Option
 	toolOptions      []tool.Option
+	toolList         []tool.BaseTool
 	agentToolOptions map[ /*tool name*/ string][]AgentRunOption // todo: map or list?
 
 	// resume
@@ -108,6 +109,13 @@ func WithChatModelOptions(opts []model.Option) AgentRunOption {
 func WithToolOptions(opts []tool.Option) AgentRunOption {
 	return WrapImplSpecificOptFn(func(t *chatModelAgentRunOptions) {
 		t.toolOptions = opts
+	})
+}
+
+// WithToolListOptions sets the runtime tool list for the chat model agent.
+func WithToolListOptions(tools []tool.BaseTool) AgentRunOption {
+	return WrapImplSpecificOptFn(func(t *chatModelAgentRunOptions) {
+		t.toolList = tools
 	})
 }
 
@@ -1043,6 +1051,9 @@ func getComposeOptions(opts []AgentRunOption) []compose.Option {
 	}
 	if len(to) > 0 {
 		co = append(co, compose.WithToolsNodeOption(compose.WithToolOption(to...)))
+	}
+	if len(o.toolList) > 0{
+		co = append(co,compose.WithToolsNodeOption(compose.WithToolList(o.toolList...)))
 	}
 	if o.historyModifier != nil {
 		co = append(co, compose.WithStateModifier(func(ctx context.Context, path compose.NodePath, state any) error {
