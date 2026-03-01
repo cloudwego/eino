@@ -56,8 +56,12 @@ type Component string
 const (
 	// ComponentOfPrompt identifies chat template components.
 	ComponentOfPrompt Component = "ChatTemplate"
+	// ComponentOfAgenticPrompt identifies agentic template components.
+	ComponentOfAgenticPrompt Component = "AgenticChatTemplate"
 	// ComponentOfChatModel identifies chat model components.
 	ComponentOfChatModel Component = "ChatModel"
+	// ComponentOfAgenticModel identifies agentic model components.
+	ComponentOfAgenticModel Component = "AgenticModel"
 	// ComponentOfEmbedding identifies embedding components.
 	ComponentOfEmbedding Component = "Embedding"
 	// ComponentOfIndexer identifies indexer components.

@@ -82,6 +82,29 @@ func TestOptions(t *testing.T) {
 		convey.So(opts.Tools, convey.ShouldNotBeNil)
 		convey.So(len(opts.Tools), convey.ShouldEqual, 0)
 	})
+
+	convey.Convey("test agentic tool choice option", t, func() {
+		var (
+			toolChoice   = schema.ToolChoiceForced
+			allowedTools = []*schema.AllowedTool{
+				{FunctionName: "agentic_tool"},
+			}
+		)
+		opts := GetCommonOptions(
+			nil,
+			WithAgenticToolChoice(&schema.AgenticToolChoice{
+				Type: toolChoice,
+				Forced: &schema.AgenticForcedToolChoice{
+					Tools: allowedTools,
+				},
+			}),
+		)
+
+		convey.So(opts.AgenticToolChoice, convey.ShouldNotBeNil)
+		convey.So(opts.AgenticToolChoice.Type, convey.ShouldEqual, toolChoice)
+		convey.So(opts.AgenticToolChoice.Forced, convey.ShouldNotBeNil)
+		convey.So(opts.AgenticToolChoice.Forced.Tools, convey.ShouldResemble, allowedTools)
+	})
 }
 
 type implOption struct {

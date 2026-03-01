@@ -70,6 +70,24 @@ func (p *Parallel) AddChatModel(outputKey string, node model.BaseChatModel, opts
 	return p.addNode(outputKey, gNode, options)
 }
 
+// AddAgenticModel adds a agentic.Model to the parallel.
+// eg.
+//
+//	model1, err := openai.NewAgenticModel(ctx, &openai.AgenticModelConfig{
+//		Model: "gpt-4o",
+//	})
+//
+//	model2, err := openai.NewAgenticModel(ctx, &openai.AgenticModelConfig{
+//		Model: "gpt-4o",
+//	})
+//
+//	p.AddAgenticModel("output_key1", model1)
+//	p.AddAgenticModel("output_key2", model2)
+func (p *Parallel) AddAgenticModel(outputKey string, node model.AgenticModel, opts ...GraphAddNodeOpt) *Parallel {
+	gNode, options := toAgenticModelNode(node, append(opts, WithOutputKey(outputKey))...)
+	return p.addNode(outputKey, gNode, options)
+}
+
 // AddChatTemplate adds a chat template to the parallel.
 // eg.
 //
@@ -84,6 +102,17 @@ func (p *Parallel) AddChatTemplate(outputKey string, node prompt.ChatTemplate, o
 	return p.addNode(outputKey, gNode, options)
 }
 
+// AddAgenticChatTemplate adds a prompt.AgenticChatTemplate to the parallel.
+// eg.
+//
+//	chatTemplate01, err := prompt.FromAgenticMessages(schema.FString, &schema.AgenticMessage{})
+//
+//	p.AddAgenticChatTemplate("output_key01", chatTemplate01)
+func (p *Parallel) AddAgenticChatTemplate(outputKey string, node prompt.AgenticChatTemplate, opts ...GraphAddNodeOpt) *Parallel {
+	gNode, options := toAgenticChatTemplateNode(node, append(opts, WithOutputKey(outputKey))...)
+	return p.addNode(outputKey, gNode, options)
+}
+
 // AddToolsNode adds a tools node to the parallel.
 // eg.
 //
@@ -94,6 +123,19 @@ func (p *Parallel) AddChatTemplate(outputKey string, node prompt.ChatTemplate, o
 //	p.AddToolsNode("output_key01", toolsNode)
 func (p *Parallel) AddToolsNode(outputKey string, node *ToolsNode, opts ...GraphAddNodeOpt) *Parallel {
 	gNode, options := toToolsNode(node, append(opts, WithOutputKey(outputKey))...)
+	return p.addNode(outputKey, gNode, options)
+}
+
+// AddAgenticToolsNode adds a tools node to the parallel.
+// eg.
+//
+//	toolsNode, err := compose.NewAgenticToolsNode(ctx, &compose.ToolsNodeConfig{
+//		Tools: []tool.BaseTool{...},
+//	})
+//
+//	p.AddAgenticToolsNode("output_key01", toolsNode)
+func (p *Parallel) AddAgenticToolsNode(outputKey string, node *AgenticToolsNode, opts ...GraphAddNodeOpt) *Parallel {
+	gNode, options := toAgenticToolsNode(node, append(opts, WithOutputKey(outputKey))...)
 	return p.addNode(outputKey, gNode, options)
 }
 
