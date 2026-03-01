@@ -461,38 +461,72 @@ func TestReact(t *testing.T) {
 		assert.NoError(t, err)
 		assert.Equal(t, result.Content, "bye")
 
-		// reset chat model times counter
-		times = 0
-		// exceed max iterations
-		config = &reactConfig{
-			model: cm,
-			toolsConfig: &compose.ToolsNodeConfig{
-				Tools: []tool.BaseTool{fakeTool},
-			},
-			toolsReturnDirectly: map[string]bool{},
-			maxIterations:       5,
-		}
+		// Force mode exceeds max iterations
+		t.Run("Force", func(t *testing.T) {
+			times = 0
+			config = &reactConfig{
+				model: cm,
+				toolsConfig: &compose.ToolsNodeConfig{
+					Tools: []tool.BaseTool{fakeTool},
+				},
+				toolsReturnDirectly: map[string]bool{},
+				maxIterations:       5,
+				earlyStoppingMethod: "force",
+			}
 
-		graph, err = newReact(ctx, config)
-		assert.NoError(t, err)
-		assert.NotNil(t, graph)
+			graph, err = newReact(ctx, config)
+			assert.NoError(t, err)
+			assert.NotNil(t, graph)
 
-		compiled, err = graph.Compile(ctx)
-		assert.NoError(t, err)
-		assert.NotNil(t, compiled)
+			compiled, err = graph.Compile(ctx)
+			assert.NoError(t, err)
+			assert.NotNil(t, compiled)
 
-		// Test with a user message
-		result, err = compiled.Invoke(ctx, []Message{
-			{
-				Role:    schema.User,
-				Content: "Use the test tool to say hello",
-			},
+			// Test with a user message
+			result, err = compiled.Invoke(ctx, []Message{
+				{
+					Role:    schema.User,
+					Content: "Use the test tool to say hello",
+				},
+			})
+			assert.Error(t, err)
+			assert.ErrorIs(t, err, ErrExceedMaxIterations)
+			assert.Nil(t, result)
 		})
-		assert.Error(t, err)
-		t.Logf("actual error: %v", err.Error())
-		assert.ErrorIs(t, err, ErrExceedMaxIterations)
 
-		assert.Contains(t, err.Error(), ErrExceedMaxIterations.Error())
+		// Generate mode uses early stop instruction
+		t.Run("Generate", func(t *testing.T) {
+			// reset chat model times counter
+			times = 0
+			config = &reactConfig{
+				model: cm,
+				toolsConfig: &compose.ToolsNodeConfig{
+					Tools: []tool.BaseTool{fakeTool},
+				},
+				toolsReturnDirectly:      map[string]bool{},
+				maxIterations:            5,
+				earlyStoppingMethod:      "generate",
+				earlyStoppingInstruction: "summarize",
+			}
+
+			graph, err = newReact(ctx, config)
+			assert.NoError(t, err)
+			assert.NotNil(t, graph)
+
+			compiled, err = graph.Compile(ctx)
+			assert.NoError(t, err)
+			assert.NotNil(t, compiled)
+
+			// Test with a user message
+			result, err = compiled.Invoke(ctx, []Message{
+				{
+					Role:    schema.User,
+					Content: "Use the test tool to say hello",
+				},
+			})
+			assert.NoError(t, err)
+			assert.Equal(t, result.Content, "bye")
+		})
 	})
 }
 
