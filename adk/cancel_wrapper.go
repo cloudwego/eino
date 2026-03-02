@@ -19,11 +19,14 @@ package adk
 import (
 	"context"
 	"io"
+	"reflect"
 	"runtime/debug"
 	"time"
 
+	"github.com/cloudwego/eino/components"
 	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/compose"
+	"github.com/cloudwego/eino/internal/generic"
 	"github.com/cloudwego/eino/internal/safe"
 	"github.com/cloudwego/eino/schema"
 )
@@ -116,6 +119,18 @@ func (c *cancelableChatModel) Stream(ctx context.Context, input []*schema.Messag
 		return nil, compose.Interrupt(ctx, "cancelled externally")
 	}
 	return res.result, res.err
+}
+
+func (c *cancelableChatModel) IsCallbacksEnabled() bool {
+	return components.IsCallbacksEnabled(c.inner)
+}
+
+func (c *cancelableChatModel) GetType() string {
+	if name, ok := components.GetType(c.inner); ok {
+		return name
+	}
+
+	return generic.ParseTypeName(reflect.ValueOf(c.inner))
 }
 
 func cancelableToolInvokable(cs *cancelSig, endpoint compose.InvokableToolEndpoint) compose.InvokableToolEndpoint {
