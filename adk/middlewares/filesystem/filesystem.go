@@ -433,6 +433,9 @@ func (m *filesystemMiddleware) BeforeAgent(ctx context.Context, runCtx *adk.Chat
 	return ctx, &nRunCtx, nil
 }
 
+// toolSpec defines a specification for creating a filesystem tool.
+// It unifies the tool creation process by encapsulating the tool configuration,
+// legacy descriptor, and the creation function.
 type toolSpec struct {
 	config     *ToolConfig
 	legacyDesc *string
@@ -531,6 +534,9 @@ func getFilesystemTools(_ context.Context, middlewareConfig *MiddlewareConfig) (
 	return tools, nil
 }
 
+// createToolFromSpec creates a tool instance based on the provided toolSpec.
+// It handles configuration merging (ToolConfig + legacy Desc), checks if the tool
+// is disabled, and prioritizes CustomTool over the default Backend-based implementation.
 func createToolFromSpec(middlewareConfig *MiddlewareConfig, spec toolSpec) (tool.BaseTool, error) {
 	mergedConfig := middlewareConfig.mergeToolConfigWithDesc(spec.config, spec.legacyDesc)
 
