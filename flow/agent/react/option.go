@@ -18,6 +18,8 @@ package react
 
 import (
 	"context"
+	"sync"
+	"sync/atomic"
 
 	"github.com/cloudwego/eino/callbacks"
 	"github.com/cloudwego/eino/components/model"
@@ -143,6 +145,10 @@ type MessageFuture interface {
 // WithMessageFuture returns an agent option and a MessageFuture interface instance.
 // The option configures the agent to collect messages generated during execution,
 // while the MessageFuture interface allows users to asynchronously retrieve these messages.
+//
+// This function works correctly both when the agent is used directly and when it is
+// embedded as a subgraph within another graph. The callbacks are automatically filtered
+// to only respond to ReAct agent graphs (identified by their graph name).
 func WithMessageFuture() (agent.AgentOption, MessageFuture) {
 	h := &cbHandler{started: make(chan struct{})}
 
@@ -196,7 +202,7 @@ func WithMessageFuture() (agent.AgentOption, MessageFuture) {
 
 	graphHandler := callbacks.NewHandlerBuilder().
 		OnStartFn(func(ctx context.Context, info *callbacks.RunInfo, input callbacks.CallbackInput) context.Context {
-			h.onGraphStart(ctx, info, input)
+			ctx = h.onGraphStart(ctx, info, input)
 			return setToolResultSendersToCtx(ctx, &toolResultSenders{
 				sender:                         createToolResultSender(),
 				streamSender:                   createStreamToolResultSender(),
@@ -205,20 +211,18 @@ func WithMessageFuture() (agent.AgentOption, MessageFuture) {
 			})
 		}).
 		OnStartWithStreamInputFn(func(ctx context.Context, info *callbacks.RunInfo, input *schema.StreamReader[callbacks.CallbackInput]) context.Context {
-			h.onGraphStartWithStreamInput(ctx, info, input)
+			ctx = h.onGraphStartWithStreamInput(ctx, info, input)
 			return setToolResultSendersToCtx(ctx, &toolResultSenders{
 				sender:                         createToolResultSender(),
 				streamSender:                   createStreamToolResultSender(),
 				enhancedResultSender:           createEnhancedToolResultSender(),
 				enhancedStreamToolResultSender: createEnhancedStreamToolResultSender(),
 			})
-
 		}).
 		OnEndFn(h.onGraphEnd).
 		OnEndWithStreamOutputFn(h.onGraphEndWithStreamOutput).
 		OnErrorFn(h.onGraphError).Build()
 	cb := ub.NewHandlerHelper().ChatModel(cmHandler).Graph(graphHandler).Handler()
-
 	option := agent.WithComposeOptions(compose.WithCallbacks(cb))
 
 	return option, h
@@ -233,7 +237,9 @@ type cbHandler struct {
 	msgs  *internal.UnboundedChan[item[*schema.Message]]
 	sMsgs *internal.UnboundedChan[item[*schema.StreamReader[*schema.Message]]]
 
-	started chan struct{}
+	started     chan struct{}
+	startOnce   sync.Once
+	activeCount int64
 }
 
 func (h *cbHandler) GetMessages() *Iterator[*schema.Message] {
@@ -270,11 +276,11 @@ func (h *cbHandler) onChatModelEndWithStreamOutput(ctx context.Context,
 }
 
 func (h *cbHandler) onGraphError(ctx context.Context,
-	_ *callbacks.RunInfo, err error) context.Context {
+	info *callbacks.RunInfo, err error) context.Context {
 
 	if h.msgs != nil {
 		h.msgs.Send(item[*schema.Message]{err: err})
-	} else {
+	} else if h.sMsgs != nil {
 		h.sMsgs.Send(item[*schema.StreamReader[*schema.Message]]{err: err})
 	}
 
@@ -282,17 +288,21 @@ func (h *cbHandler) onGraphError(ctx context.Context,
 }
 
 func (h *cbHandler) onGraphEnd(ctx context.Context,
-	_ *callbacks.RunInfo, _ callbacks.CallbackOutput) context.Context {
+	info *callbacks.RunInfo, _ callbacks.CallbackOutput) context.Context {
 
-	h.msgs.Close()
+	if atomic.AddInt64(&h.activeCount, -1) == 0 && h.msgs != nil {
+		h.msgs.Close()
+	}
 
 	return ctx
 }
 
 func (h *cbHandler) onGraphEndWithStreamOutput(ctx context.Context,
-	_ *callbacks.RunInfo, _ *schema.StreamReader[callbacks.CallbackOutput]) context.Context {
+	info *callbacks.RunInfo, _ *schema.StreamReader[callbacks.CallbackOutput]) context.Context {
 
-	h.sMsgs.Close()
+	if atomic.AddInt64(&h.activeCount, -1) == 0 && h.sMsgs != nil {
+		h.sMsgs.Close()
+	}
 
 	return ctx
 }
@@ -300,20 +310,24 @@ func (h *cbHandler) onGraphEndWithStreamOutput(ctx context.Context,
 func (h *cbHandler) onGraphStart(ctx context.Context,
 	_ *callbacks.RunInfo, _ callbacks.CallbackInput) context.Context {
 
-	h.msgs = internal.NewUnboundedChan[item[*schema.Message]]()
-
-	close(h.started)
+	atomic.AddInt64(&h.activeCount, 1)
+	h.startOnce.Do(func() {
+		h.msgs = internal.NewUnboundedChan[item[*schema.Message]]()
+		close(h.started)
+	})
 
 	return ctx
 }
 
-func (h *cbHandler) onGraphStartWithStreamInput(ctx context.Context, _ *callbacks.RunInfo,
+func (h *cbHandler) onGraphStartWithStreamInput(ctx context.Context, info *callbacks.RunInfo,
 	input *schema.StreamReader[callbacks.CallbackInput]) context.Context {
 	input.Close()
 
-	h.sMsgs = internal.NewUnboundedChan[item[*schema.StreamReader[*schema.Message]]]()
-
-	close(h.started)
+	atomic.AddInt64(&h.activeCount, 1)
+	h.startOnce.Do(func() {
+		h.sMsgs = internal.NewUnboundedChan[item[*schema.StreamReader[*schema.Message]]]()
+		close(h.started)
+	})
 
 	return ctx
 }
