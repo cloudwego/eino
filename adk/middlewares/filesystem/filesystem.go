@@ -59,15 +59,16 @@ type ToolConfig struct {
 	// optional, default tool description will be used if not set (empty string)
 	Desc string
 
-	// CustomTool provides a custom implementation for this tool
-	// If set, this custom tool will be used instead of the default implementation
+	// CustomTool provides a custom implementation for this tool.
+	// If set, this custom tool will be used instead of the default implementation associated with Backend.
+	// If not set, the default tool implementation associated with Backend will be created automatically.
 	// optional
 	CustomTool tool.BaseTool
 
-	// Disabled disables this tool
+	// Disable disables this tool
 	// If true, the tool will not be registered
 	// optional, false by default
-	Disabled bool
+	Disable bool
 }
 
 // Config is the configuration for the filesystem middleware
@@ -158,16 +159,11 @@ func (c *Config) Validate() error {
 	if c == nil {
 		return errors.New("config should not be nil")
 	}
-	if c.Backend == nil && c.Shell == nil && c.StreamingShell == nil &&
-		c.LsToolConfig == nil && c.ReadFileToolConfig == nil &&
-		c.WriteFileToolConfig == nil && c.EditFileToolConfig == nil &&
-		c.GlobToolConfig == nil && c.GrepToolConfig == nil && c.ExecuteToolConfig == nil {
-		return errors.New("at least one of Backend, Shell, StreamingShell, or tool configs must be set")
-	}
-	if c.StreamingShell != nil && c.Shell != nil {
-		return errors.New("shell and streaming shell should not be both set")
-	}
-	return nil
+	return validateConfigCore(
+		c.Backend, c.Shell, c.StreamingShell,
+		c.LsToolConfig, c.ReadFileToolConfig, c.WriteFileToolConfig,
+		c.EditFileToolConfig, c.GlobToolConfig, c.GrepToolConfig, c.ExecuteToolConfig,
+	)
 }
 
 // NewMiddleware constructs and returns the filesystem middleware.
@@ -314,13 +310,25 @@ func (c *MiddlewareConfig) Validate() error {
 	if c == nil {
 		return errors.New("config should not be nil")
 	}
-	if c.Backend == nil && c.Shell == nil && c.StreamingShell == nil &&
-		c.LsToolConfig == nil && c.ReadFileToolConfig == nil &&
-		c.WriteFileToolConfig == nil && c.EditFileToolConfig == nil &&
-		c.GlobToolConfig == nil && c.GrepToolConfig == nil && c.ExecuteToolConfig == nil {
+	return validateConfigCore(
+		c.Backend, c.Shell, c.StreamingShell,
+		c.LsToolConfig, c.ReadFileToolConfig, c.WriteFileToolConfig,
+		c.EditFileToolConfig, c.GlobToolConfig, c.GrepToolConfig, c.ExecuteToolConfig,
+	)
+}
+
+func validateConfigCore(
+	backend filesystem.Backend,
+	shell filesystem.Shell,
+	streamingShell filesystem.StreamingShell,
+	lsConfig, readConfig, writeConfig, editConfig, globConfig, grepConfig, executeConfig *ToolConfig,
+) error {
+	if backend == nil && shell == nil && streamingShell == nil &&
+		lsConfig == nil && readConfig == nil && writeConfig == nil &&
+		editConfig == nil && globConfig == nil && grepConfig == nil && executeConfig == nil {
 		return errors.New("at least one of Backend, Shell, StreamingShell, or tool configs must be set")
 	}
-	if c.StreamingShell != nil && c.Shell != nil {
+	if streamingShell != nil && shell != nil {
 		return errors.New("shell and streaming shell should not be both set")
 	}
 	return nil
@@ -425,153 +433,114 @@ func (m *filesystemMiddleware) BeforeAgent(ctx context.Context, runCtx *adk.Chat
 	return ctx, &nRunCtx, nil
 }
 
+type toolSpec struct {
+	config     *ToolConfig
+	legacyDesc *string
+	createFunc func(name, desc string) (tool.BaseTool, error)
+}
+
 func getFilesystemTools(_ context.Context, middlewareConfig *MiddlewareConfig) ([]tool.BaseTool, error) {
 	var tools []tool.BaseTool
 
-	executeToolConfig := middlewareConfig.mergeToolConfigWithDesc(
-		middlewareConfig.ExecuteToolConfig,
-		middlewareConfig.CustomExecuteToolDesc,
-	)
-
-	if !executeToolConfig.Disabled {
-		executeTool, err := getOrCreateTool(executeToolConfig.CustomTool, func() (tool.BaseTool, error) {
-			if middlewareConfig.StreamingShell != nil {
-				return newStreamingExecuteTool(middlewareConfig.StreamingShell, executeToolConfig.Name, executeToolConfig.Desc)
-			}
-			if middlewareConfig.Shell != nil {
-				return newExecuteTool(middlewareConfig.Shell, executeToolConfig.Name, executeToolConfig.Desc)
-			}
-			return nil, nil
-		})
-		if err != nil {
-			return nil, err
-		}
-		if executeTool != nil {
-			tools = append(tools, executeTool)
-		}
+	toolSpecs := []toolSpec{
+		{
+			config:     middlewareConfig.ExecuteToolConfig,
+			legacyDesc: middlewareConfig.CustomExecuteToolDesc,
+			createFunc: func(name, desc string) (tool.BaseTool, error) {
+				if middlewareConfig.StreamingShell != nil {
+					return newStreamingExecuteTool(middlewareConfig.StreamingShell, name, desc)
+				}
+				if middlewareConfig.Shell != nil {
+					return newExecuteTool(middlewareConfig.Shell, name, desc)
+				}
+				return nil, nil
+			},
+		},
+		{
+			config:     middlewareConfig.LsToolConfig,
+			legacyDesc: middlewareConfig.CustomLsToolDesc,
+			createFunc: func(name, desc string) (tool.BaseTool, error) {
+				if middlewareConfig.Backend != nil {
+					return newLsTool(middlewareConfig.Backend, name, desc)
+				}
+				return nil, nil
+			},
+		},
+		{
+			config:     middlewareConfig.ReadFileToolConfig,
+			legacyDesc: middlewareConfig.CustomReadFileToolDesc,
+			createFunc: func(name, desc string) (tool.BaseTool, error) {
+				if middlewareConfig.Backend != nil {
+					return newReadFileTool(middlewareConfig.Backend, name, desc)
+				}
+				return nil, nil
+			},
+		},
+		{
+			config:     middlewareConfig.WriteFileToolConfig,
+			legacyDesc: middlewareConfig.CustomWriteFileToolDesc,
+			createFunc: func(name, desc string) (tool.BaseTool, error) {
+				if middlewareConfig.Backend != nil {
+					return newWriteFileTool(middlewareConfig.Backend, name, desc)
+				}
+				return nil, nil
+			},
+		},
+		{
+			config:     middlewareConfig.EditFileToolConfig,
+			legacyDesc: middlewareConfig.CustomEditToolDesc,
+			createFunc: func(name, desc string) (tool.BaseTool, error) {
+				if middlewareConfig.Backend != nil {
+					return newEditFileTool(middlewareConfig.Backend, name, desc)
+				}
+				return nil, nil
+			},
+		},
+		{
+			config:     middlewareConfig.GlobToolConfig,
+			legacyDesc: middlewareConfig.CustomGlobToolDesc,
+			createFunc: func(name, desc string) (tool.BaseTool, error) {
+				if middlewareConfig.Backend != nil {
+					return newGlobTool(middlewareConfig.Backend, name, desc)
+				}
+				return nil, nil
+			},
+		},
+		{
+			config:     middlewareConfig.GrepToolConfig,
+			legacyDesc: middlewareConfig.CustomGrepToolDesc,
+			createFunc: func(name, desc string) (tool.BaseTool, error) {
+				if middlewareConfig.Backend != nil {
+					return newGrepTool(middlewareConfig.Backend, name, desc)
+				}
+				return nil, nil
+			},
+		},
 	}
 
-	lsToolConfig := middlewareConfig.mergeToolConfigWithDesc(
-		middlewareConfig.LsToolConfig,
-		middlewareConfig.CustomLsToolDesc,
-	)
-
-	if !lsToolConfig.Disabled {
-		lsTool, err := getOrCreateTool(lsToolConfig.CustomTool, func() (tool.BaseTool, error) {
-			if middlewareConfig.Backend != nil {
-				return newLsTool(middlewareConfig.Backend, lsToolConfig.Name, lsToolConfig.Desc)
-			}
-			return nil, nil
-		})
+	for _, spec := range toolSpecs {
+		t, err := createToolFromSpec(middlewareConfig, spec)
 		if err != nil {
 			return nil, err
 		}
-		if lsTool != nil {
-			tools = append(tools, lsTool)
-		}
-	}
-
-	readFileToolConfig := middlewareConfig.mergeToolConfigWithDesc(
-		middlewareConfig.ReadFileToolConfig,
-		middlewareConfig.CustomReadFileToolDesc,
-	)
-
-	if !readFileToolConfig.Disabled {
-		readTool, err := getOrCreateTool(readFileToolConfig.CustomTool, func() (tool.BaseTool, error) {
-			if middlewareConfig.Backend != nil {
-				return newReadFileTool(middlewareConfig.Backend, readFileToolConfig.Name, readFileToolConfig.Desc)
-			}
-			return nil, nil
-		})
-		if err != nil {
-			return nil, err
-		}
-		if readTool != nil {
-			tools = append(tools, readTool)
-		}
-	}
-
-	writeFileToolConfig := middlewareConfig.mergeToolConfigWithDesc(
-		middlewareConfig.WriteFileToolConfig,
-		middlewareConfig.CustomWriteFileToolDesc,
-	)
-
-	if !writeFileToolConfig.Disabled {
-		writeTool, err := getOrCreateTool(writeFileToolConfig.CustomTool, func() (tool.BaseTool, error) {
-			if middlewareConfig.Backend != nil {
-				return newWriteFileTool(middlewareConfig.Backend, writeFileToolConfig.Name, writeFileToolConfig.Desc)
-			}
-			return nil, nil
-		})
-		if err != nil {
-			return nil, err
-		}
-		if writeTool != nil {
-			tools = append(tools, writeTool)
-		}
-	}
-
-	editFileToolConfig := middlewareConfig.mergeToolConfigWithDesc(
-		middlewareConfig.EditFileToolConfig,
-		middlewareConfig.CustomEditToolDesc,
-	)
-
-	if !editFileToolConfig.Disabled {
-		editTool, err := getOrCreateTool(editFileToolConfig.CustomTool, func() (tool.BaseTool, error) {
-			if middlewareConfig.Backend != nil {
-				return newEditFileTool(middlewareConfig.Backend, editFileToolConfig.Name, editFileToolConfig.Desc)
-			}
-			return nil, nil
-		})
-		if err != nil {
-			return nil, err
-		}
-		if editTool != nil {
-			tools = append(tools, editTool)
-		}
-	}
-
-	globToolConfig := middlewareConfig.mergeToolConfigWithDesc(
-		middlewareConfig.GlobToolConfig,
-		middlewareConfig.CustomGlobToolDesc,
-	)
-
-	if !globToolConfig.Disabled {
-		globTool, err := getOrCreateTool(globToolConfig.CustomTool, func() (tool.BaseTool, error) {
-			if middlewareConfig.Backend != nil {
-				return newGlobTool(middlewareConfig.Backend, globToolConfig.Name, globToolConfig.Desc)
-			}
-			return nil, nil
-		})
-		if err != nil {
-			return nil, err
-		}
-		if globTool != nil {
-			tools = append(tools, globTool)
-		}
-	}
-
-	grepToolConfig := middlewareConfig.mergeToolConfigWithDesc(
-		middlewareConfig.GrepToolConfig,
-		middlewareConfig.CustomGrepToolDesc,
-	)
-
-	if !grepToolConfig.Disabled {
-		grepTool, err := getOrCreateTool(grepToolConfig.CustomTool, func() (tool.BaseTool, error) {
-			if middlewareConfig.Backend != nil {
-				return newGrepTool(middlewareConfig.Backend, grepToolConfig.Name, grepToolConfig.Desc)
-			}
-			return nil, nil
-		})
-		if err != nil {
-			return nil, err
-		}
-		if grepTool != nil {
-			tools = append(tools, grepTool)
+		if t != nil {
+			tools = append(tools, t)
 		}
 	}
 
 	return tools, nil
+}
+
+func createToolFromSpec(middlewareConfig *MiddlewareConfig, spec toolSpec) (tool.BaseTool, error) {
+	mergedConfig := middlewareConfig.mergeToolConfigWithDesc(spec.config, spec.legacyDesc)
+
+	if mergedConfig.Disable {
+		return nil, nil
+	}
+
+	return getOrCreateTool(mergedConfig.CustomTool, func() (tool.BaseTool, error) {
+		return spec.createFunc(mergedConfig.Name, mergedConfig.Desc)
+	})
 }
 
 func getOrCreateTool(customTool tool.BaseTool, createFunc func() (tool.BaseTool, error)) (tool.BaseTool, error) {

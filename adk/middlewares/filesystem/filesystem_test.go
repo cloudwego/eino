@@ -1309,7 +1309,7 @@ func TestToolConfig(t *testing.T) {
 		config := &MiddlewareConfig{
 			Backend: backend,
 			LsToolConfig: &ToolConfig{
-				Disabled: true,
+				Disable: true,
 			},
 		}
 
@@ -1417,5 +1417,157 @@ func TestToolConfig(t *testing.T) {
 
 		assert.True(t, toolNames["my_ls"])
 		assert.True(t, toolNames["my_read"])
+	})
+}
+
+func TestToolConfigEdgeCases(t *testing.T) {
+	backend := setupTestBackend()
+	ctx := context.Background()
+
+	t.Run("empty ToolConfig.Desc with nil legacyDesc", func(t *testing.T) {
+		config := &MiddlewareConfig{
+			Backend: backend,
+			LsToolConfig: &ToolConfig{
+				Desc: "",
+			},
+			CustomLsToolDesc: nil,
+		}
+
+		tools, err := getFilesystemTools(ctx, config)
+		assert.NoError(t, err)
+
+		var lsTool tool.BaseTool
+		for _, tool := range tools {
+			info, _ := tool.Info(ctx)
+			if info.Name == ToolNameLs {
+				lsTool = tool
+				break
+			}
+		}
+		assert.NotNil(t, lsTool, "ls tool should be created even with empty Desc")
+	})
+
+	t.Run("empty ToolConfig.Desc falls back to legacyDesc", func(t *testing.T) {
+		legacyDesc := "legacy description from pointer"
+		config := &MiddlewareConfig{
+			Backend: backend,
+			LsToolConfig: &ToolConfig{
+				Desc: "",
+			},
+			CustomLsToolDesc: &legacyDesc,
+		}
+
+		tools, err := getFilesystemTools(ctx, config)
+		assert.NoError(t, err)
+
+		var found bool
+		for _, tool := range tools {
+			info, _ := tool.Info(ctx)
+			if info.Name == ToolNameLs && info.Desc == "legacy description from pointer" {
+				found = true
+				break
+			}
+		}
+		assert.True(t, found, "empty ToolConfig.Desc should fall back to legacyDesc")
+	})
+
+	t.Run("CustomTool with Disable flag should not create tool", func(t *testing.T) {
+		customLsTool, err := newLsTool(backend, "", "")
+		assert.NoError(t, err)
+
+		config := &MiddlewareConfig{
+			Backend: backend,
+			LsToolConfig: &ToolConfig{
+				CustomTool: customLsTool,
+				Disable:    true,
+			},
+		}
+
+		tools, err := getFilesystemTools(ctx, config)
+		assert.NoError(t, err)
+
+		for _, tool := range tools {
+			info, _ := tool.Info(ctx)
+			assert.NotEqual(t, ToolNameLs, info.Name, "disabled tool should not be created even if CustomTool is set")
+		}
+	})
+
+	t.Run("multiple ToolConfig with conflicting settings", func(t *testing.T) {
+		legacyDesc := "legacy ls desc"
+		config := &MiddlewareConfig{
+			Backend: backend,
+			LsToolConfig: &ToolConfig{
+				Name:    "custom_ls",
+				Desc:    "custom desc",
+				Disable: false,
+			},
+			CustomLsToolDesc: &legacyDesc,
+			ReadFileToolConfig: &ToolConfig{
+				Disable: true,
+			},
+		}
+
+		tools, err := getFilesystemTools(ctx, config)
+		assert.NoError(t, err)
+
+		hasLsTool := false
+		hasReadTool := false
+
+		for _, tool := range tools {
+			info, _ := tool.Info(ctx)
+			if info.Name == "custom_ls" {
+				hasLsTool = true
+				assert.Equal(t, "custom desc", info.Desc, "ToolConfig.Desc should take precedence over legacy")
+			}
+			if info.Name == ToolNameReadFile {
+				hasReadTool = true
+			}
+		}
+
+		assert.True(t, hasLsTool, "ls tool should be created")
+		assert.False(t, hasReadTool, "read_file tool should be disabled")
+	})
+
+	t.Run("nil ToolConfig with nil legacyDesc creates default tool", func(t *testing.T) {
+		config := &MiddlewareConfig{
+			Backend:          backend,
+			LsToolConfig:     nil,
+			CustomLsToolDesc: nil,
+		}
+
+		tools, err := getFilesystemTools(ctx, config)
+		assert.NoError(t, err)
+
+		var lsTool tool.BaseTool
+		for _, tool := range tools {
+			info, _ := tool.Info(ctx)
+			if info.Name == ToolNameLs {
+				lsTool = tool
+				break
+			}
+		}
+		assert.NotNil(t, lsTool, "tool should be created with backend even when config is nil")
+	})
+
+	t.Run("empty Name in ToolConfig uses default name", func(t *testing.T) {
+		config := &MiddlewareConfig{
+			Backend: backend,
+			LsToolConfig: &ToolConfig{
+				Name: "",
+			},
+		}
+
+		tools, err := getFilesystemTools(ctx, config)
+		assert.NoError(t, err)
+
+		var lsTool tool.BaseTool
+		for _, tool := range tools {
+			info, _ := tool.Info(ctx)
+			if info.Name == ToolNameLs {
+				lsTool = tool
+				break
+			}
+		}
+		assert.NotNil(t, lsTool, "tool should use default name when Name is empty")
 	})
 }
