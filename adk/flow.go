@@ -313,7 +313,7 @@ func (a *flowAgent) Run(ctx context.Context, input *AgentInput, opts ...AgentRun
 	input = processedInput
 
 	if wf, ok := a.Agent.(*workflowAgent); ok {
-		return wrapIterWithOnEnd(ctx, wf.Run(ctx, input, opts...))
+		return wrapIterWithOnEnd(ctx, wf.Run(ctx, input, filterCallbackHandlersForNestedAgents(agentName, opts)...))
 	}
 
 	aIter := a.Agent.Run(ctx, input, filterOptions(agentName, opts)...)
@@ -345,10 +345,12 @@ func (a *flowAgent) Resume(ctx context.Context, info *ResumeInfo, opts ...AgentR
 		}
 		iterator, generator := NewAsyncIteratorPair[*AgentEvent]()
 
-		aIter := ra.Resume(ctx, info, opts...)
 		if _, ok := ra.(*workflowAgent); ok {
+			filteredOpts := filterCallbackHandlersForNestedAgents(agentName, opts)
+			aIter := ra.Resume(ctx, info, filteredOpts...)
 			return wrapIterWithOnEnd(ctx, aIter)
 		}
+		aIter := ra.Resume(ctx, info, opts...)
 		go a.run(ctx, ctxForSubAgents, getRunCtx(ctxForSubAgents), aIter, generator, opts...)
 		return iterator
 	}
