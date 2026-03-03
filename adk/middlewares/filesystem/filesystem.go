@@ -107,9 +107,6 @@ type Config struct {
 	// GrepToolConfig configures the grep tool
 	// optional
 	GrepToolConfig *ToolConfig
-	// ExecuteToolConfig configures the execute tool
-	// optional
-	ExecuteToolConfig *ToolConfig
 
 	// WithoutLargeToolResultOffloading disables automatic offloading of large tool result to Backend
 	// optional, false(enabled) by default
@@ -149,10 +146,6 @@ type Config struct {
 	// optional, EditFileToolDesc by default
 	// Deprecated: Use EditFileToolConfig.Desc instead
 	CustomEditToolDesc *string
-	// CustomExecuteToolDesc overrides the execute tool description
-	// optional, ExecuteToolDesc by default
-	// Deprecated: Use ExecuteToolConfig.Desc instead
-	CustomExecuteToolDesc *string
 }
 
 func (c *Config) Validate() error {
@@ -162,7 +155,7 @@ func (c *Config) Validate() error {
 	return validateConfigCore(
 		c.Backend, c.Shell, c.StreamingShell,
 		c.LsToolConfig, c.ReadFileToolConfig, c.WriteFileToolConfig,
-		c.EditFileToolConfig, c.GlobToolConfig, c.GrepToolConfig, c.ExecuteToolConfig,
+		c.EditFileToolConfig, c.GlobToolConfig, c.GrepToolConfig,
 	)
 }
 
@@ -187,7 +180,6 @@ func NewMiddleware(ctx context.Context, config *Config) (adk.AgentMiddleware, er
 		EditFileToolConfig:      config.EditFileToolConfig,
 		GlobToolConfig:          config.GlobToolConfig,
 		GrepToolConfig:          config.GrepToolConfig,
-		ExecuteToolConfig:       config.ExecuteToolConfig,
 		CustomSystemPrompt:      config.CustomSystemPrompt,
 		CustomLsToolDesc:        config.CustomLsToolDesc,
 		CustomReadFileToolDesc:  config.CustomReadFileToolDesc,
@@ -195,7 +187,6 @@ func NewMiddleware(ctx context.Context, config *Config) (adk.AgentMiddleware, er
 		CustomGlobToolDesc:      config.CustomGlobToolDesc,
 		CustomWriteFileToolDesc: config.CustomWriteFileToolDesc,
 		CustomEditToolDesc:      config.CustomEditToolDesc,
-		CustomExecuteToolDesc:   config.CustomExecuteToolDesc,
 	})
 	if err != nil {
 		return adk.AgentMiddleware{}, err
@@ -268,9 +259,6 @@ type MiddlewareConfig struct {
 	// GrepToolConfig configures the grep tool
 	// optional
 	GrepToolConfig *ToolConfig
-	// ExecuteToolConfig configures the execute tool
-	// optional
-	ExecuteToolConfig *ToolConfig
 
 	// CustomSystemPrompt overrides the default ToolsSystemPrompt appended to agent instruction
 	// optional, ToolsSystemPrompt by default
@@ -300,10 +288,6 @@ type MiddlewareConfig struct {
 	// optional, EditFileToolDesc by default
 	// Deprecated: Use EditFileToolConfig.Desc instead
 	CustomEditToolDesc *string
-	// CustomExecuteToolDesc overrides the execute tool description
-	// optional, ExecuteToolDesc by default
-	// Deprecated: Use ExecuteToolConfig.Desc instead
-	CustomExecuteToolDesc *string
 }
 
 func (c *MiddlewareConfig) Validate() error {
@@ -313,7 +297,7 @@ func (c *MiddlewareConfig) Validate() error {
 	return validateConfigCore(
 		c.Backend, c.Shell, c.StreamingShell,
 		c.LsToolConfig, c.ReadFileToolConfig, c.WriteFileToolConfig,
-		c.EditFileToolConfig, c.GlobToolConfig, c.GrepToolConfig, c.ExecuteToolConfig,
+		c.EditFileToolConfig, c.GlobToolConfig, c.GrepToolConfig,
 	)
 }
 
@@ -321,11 +305,11 @@ func validateConfigCore(
 	backend filesystem.Backend,
 	shell filesystem.Shell,
 	streamingShell filesystem.StreamingShell,
-	lsConfig, readConfig, writeConfig, editConfig, globConfig, grepConfig, executeConfig *ToolConfig,
+	lsConfig, readConfig, writeConfig, editConfig, globConfig, grepConfig *ToolConfig,
 ) error {
 	if backend == nil && shell == nil && streamingShell == nil &&
 		lsConfig == nil && readConfig == nil && writeConfig == nil &&
-		editConfig == nil && globConfig == nil && grepConfig == nil && executeConfig == nil {
+		editConfig == nil && globConfig == nil && grepConfig == nil {
 		return errors.New("at least one of Backend, Shell, StreamingShell, or tool configs must be set")
 	}
 	if streamingShell != nil && shell != nil {
@@ -447,19 +431,6 @@ func getFilesystemTools(_ context.Context, middlewareConfig *MiddlewareConfig) (
 
 	toolSpecs := []toolSpec{
 		{
-			config:     middlewareConfig.ExecuteToolConfig,
-			legacyDesc: middlewareConfig.CustomExecuteToolDesc,
-			createFunc: func(name, desc string) (tool.BaseTool, error) {
-				if middlewareConfig.StreamingShell != nil {
-					return newStreamingExecuteTool(middlewareConfig.StreamingShell, name, desc)
-				}
-				if middlewareConfig.Shell != nil {
-					return newExecuteTool(middlewareConfig.Shell, name, desc)
-				}
-				return nil, nil
-			},
-		},
-		{
 			config:     middlewareConfig.LsToolConfig,
 			legacyDesc: middlewareConfig.CustomLsToolDesc,
 			createFunc: func(name, desc string) (tool.BaseTool, error) {
@@ -529,6 +500,31 @@ func getFilesystemTools(_ context.Context, middlewareConfig *MiddlewareConfig) (
 		if t != nil {
 			tools = append(tools, t)
 		}
+	}
+
+	// Create execute tool if Shell or StreamingShell is available
+	if middlewareConfig.StreamingShell != nil {
+		executeDesc, err := selectToolDesc("", ExecuteToolDesc, ExecuteToolDescChinese)
+		if err != nil {
+			return nil, err
+		}
+
+		executeTool, err := newStreamingExecuteTool(middlewareConfig.StreamingShell, ToolNameExecute, executeDesc)
+		if err != nil {
+			return nil, err
+		}
+		tools = append(tools, executeTool)
+	} else if middlewareConfig.Shell != nil {
+		executeDesc, err := selectToolDesc("", ExecuteToolDesc, ExecuteToolDescChinese)
+		if err != nil {
+			return nil, err
+		}
+
+		executeTool, err := newExecuteTool(middlewareConfig.Shell, ToolNameExecute, executeDesc)
+		if err != nil {
+			return nil, err
+		}
+		tools = append(tools, executeTool)
 	}
 
 	return tools, nil

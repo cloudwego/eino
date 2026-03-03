@@ -1152,29 +1152,6 @@ func TestCustomTools(t *testing.T) {
 		assert.Equal(t, customGrepTool, tools[0])
 	})
 
-	t.Run("custom execute tool is used via ToolConfig", func(t *testing.T) {
-		shellBackend := &mockShellBackend{
-			Backend: backend,
-			resp: &filesystem.ExecuteResponse{
-				Output:   "test output",
-				ExitCode: ptrOf(0),
-			},
-		}
-		customExecuteTool, err := newExecuteTool(shellBackend, "", "")
-		assert.NoError(t, err)
-
-		config := &MiddlewareConfig{
-			ExecuteToolConfig: &ToolConfig{
-				CustomTool: customExecuteTool,
-			},
-		}
-
-		tools, err := getFilesystemTools(ctx, config)
-		assert.NoError(t, err)
-		assert.Len(t, tools, 1)
-		assert.Equal(t, customExecuteTool, tools[0])
-	})
-
 	t.Run("multiple custom tools can be used together", func(t *testing.T) {
 		customLsTool, err := newLsTool(backend, "", "")
 		assert.NoError(t, err)
