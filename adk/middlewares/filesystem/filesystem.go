@@ -49,6 +49,28 @@ const (
 	noMatchesFound = "No matches found"
 )
 
+// ToolConfig configures a filesystem tool
+type ToolConfig struct {
+	// Name overrides the tool name used in tool registration
+	// optional, default tool name will be used if not set (empty string)
+	Name string
+
+	// Desc overrides the tool description used in tool registration
+	// optional, default tool description will be used if not set (nil pointer)
+	Desc *string
+
+	// CustomTool provides a custom implementation for this tool.
+	// If set, this custom tool will be used instead of the default implementation associated with Backend.
+	// If not set, the default tool implementation associated with Backend will be created automatically.
+	// optional
+	CustomTool tool.BaseTool
+
+	// Disable disables this tool
+	// If true, the tool will not be registered
+	// optional, false by default
+	Disable bool
+}
+
 // Config is the configuration for the filesystem middleware
 type Config struct {
 	// Backend provides filesystem operations used by tools and offloading.
@@ -67,6 +89,25 @@ type Config struct {
 	// Mutually exclusive with Shell.
 	StreamingShell filesystem.StreamingShell
 
+	// LsToolConfig configures the ls tool
+	// optional
+	LsToolConfig *ToolConfig
+	// ReadFileToolConfig configures the read_file tool
+	// optional
+	ReadFileToolConfig *ToolConfig
+	// WriteFileToolConfig configures the write_file tool
+	// optional
+	WriteFileToolConfig *ToolConfig
+	// EditFileToolConfig configures the edit_file tool
+	// optional
+	EditFileToolConfig *ToolConfig
+	// GlobToolConfig configures the glob tool
+	// optional
+	GlobToolConfig *ToolConfig
+	// GrepToolConfig configures the grep tool
+	// optional
+	GrepToolConfig *ToolConfig
+
 	// WithoutLargeToolResultOffloading disables automatic offloading of large tool result to Backend
 	// optional, false(enabled) by default
 	WithoutLargeToolResultOffloading bool
@@ -81,62 +122,41 @@ type Config struct {
 	// optional, ToolsSystemPrompt by default
 	CustomSystemPrompt *string
 
-	// CustomLsToolName overrides the ls tool name used in tool registration
-	// optional, ToolNameLs by default
-	CustomLsToolName *string
-	// CustomReadFileToolName overrides the read_file tool name
-	// optional, ToolNameReadFile by default
-	CustomReadFileToolName *string
-	// CustomWriteFileToolName overrides the write_file tool name
-	// optional, ToolNameWriteFile by default
-	CustomWriteFileToolName *string
-	// CustomEditFileToolName overrides the edit_file tool name
-	// optional, ToolNameEditFile by default
-	CustomEditFileToolName *string
-	// CustomGlobToolName overrides the glob tool name
-	// optional, ToolNameGlob by default
-	CustomGlobToolName *string
-	// CustomGrepToolName overrides the grep tool name
-	// optional, ToolNameGrep by default
-	CustomGrepToolName *string
-	// CustomExecuteToolName overrides the execute tool name
-	// optional, ToolNameExecute by default
-	CustomExecuteToolName *string
-
 	// CustomLsToolDesc overrides the ls tool description used in tool registration
 	// optional, ListFilesToolDesc by default
+	// Deprecated: Use LsToolConfig.Desc instead
 	CustomLsToolDesc *string
 	// CustomReadFileToolDesc overrides the read_file tool description
 	// optional, ReadFileToolDesc by default
+	// Deprecated: Use ReadFileToolConfig.Desc instead
 	CustomReadFileToolDesc *string
 	// CustomGrepToolDesc overrides the grep tool description
 	// optional, GrepToolDesc by default
+	// Deprecated: Use GrepToolConfig.Desc instead
 	CustomGrepToolDesc *string
 	// CustomGlobToolDesc overrides the glob tool description
 	// optional, GlobToolDesc by default
+	// Deprecated: Use GlobToolConfig.Desc instead
 	CustomGlobToolDesc *string
 	// CustomWriteFileToolDesc overrides the write_file tool description
 	// optional, WriteFileToolDesc by default
+	// Deprecated: Use WriteFileToolConfig.Desc instead
 	CustomWriteFileToolDesc *string
 	// CustomEditToolDesc overrides the edit_file tool description
 	// optional, EditFileToolDesc by default
+	// Deprecated: Use EditFileToolConfig.Desc instead
 	CustomEditToolDesc *string
-	// CustomExecuteToolDesc overrides the execute tool description
-	// optional, ExecuteToolDesc by default
-	CustomExecuteToolDesc *string
 }
 
 func (c *Config) Validate() error {
 	if c == nil {
 		return errors.New("config should not be nil")
 	}
-	if c.Backend == nil && c.Shell == nil && c.StreamingShell == nil {
-		return errors.New("at least one of Backend, Shell, or StreamingShell must be set")
-	}
-	if c.StreamingShell != nil && c.Shell != nil {
-		return errors.New("shell and streaming shell should not be both set")
-	}
-	return nil
+	return validateConfigCore(
+		c.Backend, c.Shell, c.StreamingShell,
+		c.LsToolConfig, c.ReadFileToolConfig, c.WriteFileToolConfig,
+		c.EditFileToolConfig, c.GlobToolConfig, c.GrepToolConfig,
+	)
 }
 
 // NewMiddleware constructs and returns the filesystem middleware.
@@ -154,21 +174,19 @@ func NewMiddleware(ctx context.Context, config *Config) (adk.AgentMiddleware, er
 		Backend:                 config.Backend,
 		Shell:                   config.Shell,
 		StreamingShell:          config.StreamingShell,
+		LsToolConfig:            config.LsToolConfig,
+		ReadFileToolConfig:      config.ReadFileToolConfig,
+		WriteFileToolConfig:     config.WriteFileToolConfig,
+		EditFileToolConfig:      config.EditFileToolConfig,
+		GlobToolConfig:          config.GlobToolConfig,
+		GrepToolConfig:          config.GrepToolConfig,
 		CustomSystemPrompt:      config.CustomSystemPrompt,
-		CustomLsToolName:        config.CustomLsToolName,
-		CustomReadFileToolName:  config.CustomReadFileToolName,
-		CustomWriteFileToolName: config.CustomWriteFileToolName,
-		CustomEditFileToolName:  config.CustomEditFileToolName,
-		CustomGlobToolName:      config.CustomGlobToolName,
-		CustomGrepToolName:      config.CustomGrepToolName,
-		CustomExecuteToolName:   config.CustomExecuteToolName,
 		CustomLsToolDesc:        config.CustomLsToolDesc,
 		CustomReadFileToolDesc:  config.CustomReadFileToolDesc,
 		CustomGrepToolDesc:      config.CustomGrepToolDesc,
 		CustomGlobToolDesc:      config.CustomGlobToolDesc,
 		CustomWriteFileToolDesc: config.CustomWriteFileToolDesc,
 		CustomEditToolDesc:      config.CustomEditToolDesc,
-		CustomExecuteToolDesc:   config.CustomExecuteToolDesc,
 	})
 	if err != nil {
 		return adk.AgentMiddleware{}, err
@@ -223,66 +241,107 @@ type MiddlewareConfig struct {
 	// optional, mutually exclusive with Shell
 	StreamingShell filesystem.StreamingShell
 
+	// LsToolConfig configures the ls tool
+	// optional
+	LsToolConfig *ToolConfig
+	// ReadFileToolConfig configures the read_file tool
+	// optional
+	ReadFileToolConfig *ToolConfig
+	// WriteFileToolConfig configures the write_file tool
+	// optional
+	WriteFileToolConfig *ToolConfig
+	// EditFileToolConfig configures the edit_file tool
+	// optional
+	EditFileToolConfig *ToolConfig
+	// GlobToolConfig configures the glob tool
+	// optional
+	GlobToolConfig *ToolConfig
+	// GrepToolConfig configures the grep tool
+	// optional
+	GrepToolConfig *ToolConfig
+
 	// CustomSystemPrompt overrides the default ToolsSystemPrompt appended to agent instruction
 	// optional, ToolsSystemPrompt by default
 	CustomSystemPrompt *string
 
-	// CustomLsToolName overrides the ls tool name used in tool registration
-	// optional, ToolNameLs by default
-	CustomLsToolName *string
-	// CustomReadFileToolName overrides the read_file tool name
-	// optional, ToolNameReadFile by default
-	CustomReadFileToolName *string
-	// CustomWriteFileToolName overrides the write_file tool name
-	// optional, ToolNameWriteFile by default
-	CustomWriteFileToolName *string
-	// CustomEditFileToolName overrides the edit_file tool name
-	// optional, ToolNameEditFile by default
-	CustomEditFileToolName *string
-	// CustomGlobToolName overrides the glob tool name
-	// optional, ToolNameGlob by default
-	CustomGlobToolName *string
-	// CustomGrepToolName overrides the grep tool name
-	// optional, ToolNameGrep by default
-	CustomGrepToolName *string
-	// CustomExecuteToolName overrides the execute tool name
-	// optional, ToolNameExecute by default
-	CustomExecuteToolName *string
-
 	// CustomLsToolDesc overrides the ls tool description used in tool registration
 	// optional, ListFilesToolDesc by default
+	// Deprecated: Use LsToolConfig.Desc instead
 	CustomLsToolDesc *string
 	// CustomReadFileToolDesc overrides the read_file tool description
 	// optional, ReadFileToolDesc by default
+	// Deprecated: Use ReadFileToolConfig.Desc instead
 	CustomReadFileToolDesc *string
 	// CustomGrepToolDesc overrides the grep tool description
 	// optional, GrepToolDesc by default
+	// Deprecated: Use GrepToolConfig.Desc instead
 	CustomGrepToolDesc *string
 	// CustomGlobToolDesc overrides the glob tool description
 	// optional, GlobToolDesc by default
+	// Deprecated: Use GlobToolConfig.Desc instead
 	CustomGlobToolDesc *string
 	// CustomWriteFileToolDesc overrides the write_file tool description
 	// optional, WriteFileToolDesc by default
+	// Deprecated: Use WriteFileToolConfig.Desc instead
 	CustomWriteFileToolDesc *string
 	// CustomEditToolDesc overrides the edit_file tool description
 	// optional, EditFileToolDesc by default
+	// Deprecated: Use EditFileToolConfig.Desc instead
 	CustomEditToolDesc *string
-	// CustomExecuteToolDesc overrides the execute tool description
-	// optional, ExecuteToolDesc by default
-	CustomExecuteToolDesc *string
 }
 
 func (c *MiddlewareConfig) Validate() error {
 	if c == nil {
 		return errors.New("config should not be nil")
 	}
-	if c.Backend == nil {
-		return errors.New("backend should not be nil")
+	return validateConfigCore(
+		c.Backend, c.Shell, c.StreamingShell,
+		c.LsToolConfig, c.ReadFileToolConfig, c.WriteFileToolConfig,
+		c.EditFileToolConfig, c.GlobToolConfig, c.GrepToolConfig,
+	)
+}
+
+func validateConfigCore(
+	backend filesystem.Backend,
+	shell filesystem.Shell,
+	streamingShell filesystem.StreamingShell,
+	lsConfig, readConfig, writeConfig, editConfig, globConfig, grepConfig *ToolConfig,
+) error {
+	if backend == nil && shell == nil && streamingShell == nil &&
+		lsConfig == nil && readConfig == nil && writeConfig == nil &&
+		editConfig == nil && globConfig == nil && grepConfig == nil {
+		return errors.New("at least one of Backend, Shell, StreamingShell, or tool configs must be set")
 	}
-	if c.StreamingShell != nil && c.Shell != nil {
+	if streamingShell != nil && shell != nil {
 		return errors.New("shell and streaming shell should not be both set")
 	}
 	return nil
+}
+
+// mergeToolConfigWithDesc merges ToolConfig with legacy Desc field
+// Priority: ToolConfig.Desc > legacy Desc
+// Returns an empty ToolConfig if both are nil (to allow backend default implementation)
+func (c *MiddlewareConfig) mergeToolConfigWithDesc(
+	toolConfig *ToolConfig,
+	legacyDesc *string,
+) *ToolConfig {
+	if toolConfig == nil && legacyDesc == nil {
+		return &ToolConfig{}
+	}
+
+	if toolConfig == nil {
+		return &ToolConfig{
+			Desc: legacyDesc,
+		}
+	}
+
+	if toolConfig.Desc == nil && legacyDesc != nil {
+		merged := *toolConfig
+		merged.Desc = legacyDesc
+		return &merged
+	}
+
+	return toolConfig
 }
 
 // New constructs and returns the filesystem middleware as a ChatModelAgentMiddleware.
@@ -358,74 +417,150 @@ func (m *filesystemMiddleware) BeforeAgent(ctx context.Context, runCtx *adk.Chat
 	return ctx, &nRunCtx, nil
 }
 
-func getFilesystemTools(_ context.Context, validatedConfig *MiddlewareConfig) ([]tool.BaseTool, error) {
+// toolSpec defines a specification for creating a filesystem tool.
+// It unifies the tool creation process by encapsulating the tool configuration,
+// legacy descriptor, and the creation function.
+type toolSpec struct {
+	config     *ToolConfig
+	legacyDesc *string
+	createFunc func(name, desc string) (tool.BaseTool, error)
+}
+
+func getFilesystemTools(_ context.Context, middlewareConfig *MiddlewareConfig) ([]tool.BaseTool, error) {
 	var tools []tool.BaseTool
-	var err error
 
-	if validatedConfig.StreamingShell != nil {
-		var executeTool tool.BaseTool
-		executeTool, err = newStreamingExecuteTool(validatedConfig.StreamingShell, validatedConfig.CustomExecuteToolName, validatedConfig.CustomExecuteToolDesc)
+	toolSpecs := []toolSpec{
+		{
+			config:     middlewareConfig.LsToolConfig,
+			legacyDesc: middlewareConfig.CustomLsToolDesc,
+			createFunc: func(name, desc string) (tool.BaseTool, error) {
+				if middlewareConfig.Backend != nil {
+					return newLsTool(middlewareConfig.Backend, name, desc)
+				}
+				return nil, nil
+			},
+		},
+		{
+			config:     middlewareConfig.ReadFileToolConfig,
+			legacyDesc: middlewareConfig.CustomReadFileToolDesc,
+			createFunc: func(name, desc string) (tool.BaseTool, error) {
+				if middlewareConfig.Backend != nil {
+					return newReadFileTool(middlewareConfig.Backend, name, desc)
+				}
+				return nil, nil
+			},
+		},
+		{
+			config:     middlewareConfig.WriteFileToolConfig,
+			legacyDesc: middlewareConfig.CustomWriteFileToolDesc,
+			createFunc: func(name, desc string) (tool.BaseTool, error) {
+				if middlewareConfig.Backend != nil {
+					return newWriteFileTool(middlewareConfig.Backend, name, desc)
+				}
+				return nil, nil
+			},
+		},
+		{
+			config:     middlewareConfig.EditFileToolConfig,
+			legacyDesc: middlewareConfig.CustomEditToolDesc,
+			createFunc: func(name, desc string) (tool.BaseTool, error) {
+				if middlewareConfig.Backend != nil {
+					return newEditFileTool(middlewareConfig.Backend, name, desc)
+				}
+				return nil, nil
+			},
+		},
+		{
+			config:     middlewareConfig.GlobToolConfig,
+			legacyDesc: middlewareConfig.CustomGlobToolDesc,
+			createFunc: func(name, desc string) (tool.BaseTool, error) {
+				if middlewareConfig.Backend != nil {
+					return newGlobTool(middlewareConfig.Backend, name, desc)
+				}
+				return nil, nil
+			},
+		},
+		{
+			config:     middlewareConfig.GrepToolConfig,
+			legacyDesc: middlewareConfig.CustomGrepToolDesc,
+			createFunc: func(name, desc string) (tool.BaseTool, error) {
+				if middlewareConfig.Backend != nil {
+					return newGrepTool(middlewareConfig.Backend, name, desc)
+				}
+				return nil, nil
+			},
+		},
+	}
+
+	for _, spec := range toolSpecs {
+		t, err := createToolFromSpec(middlewareConfig, spec)
+		if err != nil {
+			return nil, err
+		}
+		if t != nil {
+			tools = append(tools, t)
+		}
+	}
+
+	// Create execute tool if Shell or StreamingShell is available
+	if middlewareConfig.StreamingShell != nil {
+		executeDesc, err := selectToolDesc("", ExecuteToolDesc, ExecuteToolDescChinese)
+		if err != nil {
+			return nil, err
+		}
+
+		executeTool, err := newStreamingExecuteTool(middlewareConfig.StreamingShell, ToolNameExecute, executeDesc)
 		if err != nil {
 			return nil, err
 		}
 		tools = append(tools, executeTool)
-	} else if validatedConfig.Shell != nil {
-		var executeTool tool.BaseTool
-		executeTool, err = newExecuteTool(validatedConfig.Shell, validatedConfig.CustomExecuteToolName, validatedConfig.CustomExecuteToolDesc)
+	} else if middlewareConfig.Shell != nil {
+		executeDesc, err := selectToolDesc("", ExecuteToolDesc, ExecuteToolDescChinese)
+		if err != nil {
+			return nil, err
+		}
+
+		executeTool, err := newExecuteTool(middlewareConfig.Shell, ToolNameExecute, executeDesc)
 		if err != nil {
 			return nil, err
 		}
 		tools = append(tools, executeTool)
 	}
-
-	if validatedConfig.Backend == nil {
-		return tools, nil
-	}
-
-	lsTool, err := newLsTool(validatedConfig.Backend, validatedConfig.CustomLsToolName, validatedConfig.CustomLsToolDesc)
-	if err != nil {
-		return nil, err
-	}
-	tools = append(tools, lsTool)
-
-	readTool, err := newReadFileTool(validatedConfig.Backend, validatedConfig.CustomReadFileToolName, validatedConfig.CustomReadFileToolDesc)
-	if err != nil {
-		return nil, err
-	}
-	tools = append(tools, readTool)
-
-	writeTool, err := newWriteFileTool(validatedConfig.Backend, validatedConfig.CustomWriteFileToolName, validatedConfig.CustomWriteFileToolDesc)
-	if err != nil {
-		return nil, err
-	}
-	tools = append(tools, writeTool)
-
-	editTool, err := newEditFileTool(validatedConfig.Backend, validatedConfig.CustomEditFileToolName, validatedConfig.CustomEditToolDesc)
-	if err != nil {
-		return nil, err
-	}
-	tools = append(tools, editTool)
-
-	globTool, err := newGlobTool(validatedConfig.Backend, validatedConfig.CustomGlobToolName, validatedConfig.CustomGlobToolDesc)
-	if err != nil {
-		return nil, err
-	}
-	tools = append(tools, globTool)
-
-	grepTool, err := newGrepTool(validatedConfig.Backend, validatedConfig.CustomGrepToolName, validatedConfig.CustomGrepToolDesc)
-	if err != nil {
-		return nil, err
-	}
-	tools = append(tools, grepTool)
 
 	return tools, nil
+}
+
+// createToolFromSpec creates a tool instance based on the provided toolSpec.
+// It handles configuration merging (ToolConfig + legacy Desc), checks if the tool
+// is disabled, and prioritizes CustomTool over the default implementation.
+func createToolFromSpec(middlewareConfig *MiddlewareConfig, spec toolSpec) (tool.BaseTool, error) {
+	mergedConfig := middlewareConfig.mergeToolConfigWithDesc(spec.config, spec.legacyDesc)
+
+	if mergedConfig.Disable {
+		return nil, nil
+	}
+
+	return getOrCreateTool(mergedConfig.CustomTool, func() (tool.BaseTool, error) {
+		desc := ""
+		if mergedConfig.Desc != nil {
+			desc = *mergedConfig.Desc
+		}
+		return spec.createFunc(mergedConfig.Name, desc)
+	})
+}
+
+func getOrCreateTool(customTool tool.BaseTool, createFunc func() (tool.BaseTool, error)) (tool.BaseTool, error) {
+	if customTool != nil {
+		return customTool, nil
+	}
+	return createFunc()
 }
 
 type lsArgs struct {
 	Path string `json:"path"`
 }
 
-func newLsTool(fs filesystem.Backend, name *string, desc *string) (tool.BaseTool, error) {
+func newLsTool(fs filesystem.Backend, name string, desc string) (tool.BaseTool, error) {
 	toolName := selectToolName(name, ToolNameLs)
 	d, err := selectToolDesc(desc, ListFilesToolDesc, ListFilesToolDescChinese)
 	if err != nil {
@@ -458,7 +593,7 @@ type readFileArgs struct {
 	Limit int `json:"limit" jsonschema:"description=The number of lines to read. Only provide if the file is too large to read at once."`
 }
 
-func newReadFileTool(fs filesystem.Backend, name *string, desc *string) (tool.BaseTool, error) {
+func newReadFileTool(fs filesystem.Backend, name string, desc string) (tool.BaseTool, error) {
 	toolName := selectToolName(name, ToolNameReadFile)
 	d, err := selectToolDesc(desc, ReadFileToolDesc, ReadFileToolDescChinese)
 	if err != nil {
@@ -481,7 +616,7 @@ type writeFileArgs struct {
 	Content string `json:"content" jsonschema:"description=The content to write to the file"`
 }
 
-func newWriteFileTool(fs filesystem.Backend, name *string, desc *string) (tool.BaseTool, error) {
+func newWriteFileTool(fs filesystem.Backend, name string, desc string) (tool.BaseTool, error) {
 	toolName := selectToolName(name, ToolNameWriteFile)
 	d, err := selectToolDesc(desc, WriteFileToolDesc, WriteFileToolDescChinese)
 	if err != nil {
@@ -513,7 +648,7 @@ type editFileArgs struct {
 	ReplaceAll bool `json:"replace_all" jsonschema:"description=Replace all occurrences of old_string (default false),default=false"`
 }
 
-func newEditFileTool(fs filesystem.Backend, name *string, desc *string) (tool.BaseTool, error) {
+func newEditFileTool(fs filesystem.Backend, name string, desc string) (tool.BaseTool, error) {
 	toolName := selectToolName(name, ToolNameEditFile)
 	d, err := selectToolDesc(desc, EditFileToolDesc, EditFileToolDescChinese)
 	if err != nil {
@@ -541,7 +676,7 @@ type globArgs struct {
 	Path string `json:"path" jsonschema:"description=The directory to search in. If not specified\\, the current working directory will be used. IMPORTANT: Omit this field to use the default directory. DO NOT enter 'undefined' or 'null' - simply omit it for the default behavior. Must be a valid directory path if provided."`
 }
 
-func newGlobTool(fs filesystem.Backend, name *string, desc *string) (tool.BaseTool, error) {
+func newGlobTool(fs filesystem.Backend, name string, desc string) (tool.BaseTool, error) {
 	toolName := selectToolName(name, ToolNameGlob)
 	d, err := selectToolDesc(desc, GlobToolDesc, GlobToolDescChinese)
 	if err != nil {
@@ -620,7 +755,7 @@ type grepArgs struct {
 	Multiline *bool `json:"multiline,omitempty" jsonschema:"description=Enable multiline mode where . matches newlines and patterns can span lines (rg -U --multiline-dotall). Default: false."`
 }
 
-func newGrepTool(fs filesystem.Backend, name *string, desc *string) (tool.BaseTool, error) {
+func newGrepTool(fs filesystem.Backend, name string, desc string) (tool.BaseTool, error) {
 	toolName := selectToolName(name, ToolNameGrep)
 	d, err := selectToolDesc(desc, GrepToolDesc, GrepToolDescChinese)
 	if err != nil {
@@ -689,7 +824,7 @@ type executeArgs struct {
 	Command string `json:"command"`
 }
 
-func newExecuteTool(sb filesystem.Shell, name *string, desc *string) (tool.BaseTool, error) {
+func newExecuteTool(sb filesystem.Shell, name string, desc string) (tool.BaseTool, error) {
 	toolName := selectToolName(name, ToolNameExecute)
 	d, err := selectToolDesc(desc, ExecuteToolDesc, ExecuteToolDescChinese)
 	if err != nil {
@@ -707,7 +842,7 @@ func newExecuteTool(sb filesystem.Shell, name *string, desc *string) (tool.BaseT
 	})
 }
 
-func newStreamingExecuteTool(sb filesystem.StreamingShell, name *string, desc *string) (tool.BaseTool, error) {
+func newStreamingExecuteTool(sb filesystem.StreamingShell, name string, desc string) (tool.BaseTool, error) {
 	toolName := selectToolName(name, ToolNameExecute)
 	d, err := selectToolDesc(desc, ExecuteToolDesc, ExecuteToolDescChinese)
 	if err != nil {
@@ -899,9 +1034,9 @@ func formatCountMatches(matches []filesystem.GrepMatch, offset, headLimit int) s
 
 // selectToolDesc returns the custom description if provided, otherwise selects the appropriate
 // i18n description based on the current language setting.
-func selectToolDesc(customDesc *string, defaultEnglish, defaultChinese string) (string, error) {
-	if customDesc != nil {
-		return *customDesc, nil
+func selectToolDesc(customDesc string, defaultEnglish, defaultChinese string) (string, error) {
+	if customDesc != "" {
+		return customDesc, nil
 	}
 	return internal.SelectPrompt(internal.I18nPrompts{
 		English: defaultEnglish,
@@ -910,9 +1045,9 @@ func selectToolDesc(customDesc *string, defaultEnglish, defaultChinese string) (
 }
 
 // selectToolName returns the custom tool name if provided, otherwise returns the default name.
-func selectToolName(customName *string, defaultName string) string {
-	if customName != nil {
-		return *customName
+func selectToolName(customName string, defaultName string) string {
+	if customName != "" {
+		return customName
 	}
 	return defaultName
 }
