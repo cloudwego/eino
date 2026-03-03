@@ -56,8 +56,8 @@ type ToolConfig struct {
 	Name string
 
 	// Desc overrides the tool description used in tool registration
-	// optional, default tool description will be used if not set (empty string)
-	Desc string
+	// optional, default tool description will be used if not set (nil pointer)
+	Desc *string
 
 	// CustomTool provides a custom implementation for this tool.
 	// If set, this custom tool will be used instead of the default implementation associated with Backend.
@@ -347,13 +347,13 @@ func (c *MiddlewareConfig) mergeToolConfigWithDesc(
 
 	if toolConfig == nil {
 		return &ToolConfig{
-			Desc: *legacyDesc,
+			Desc: legacyDesc,
 		}
 	}
 
-	if toolConfig.Desc == "" && legacyDesc != nil {
+	if toolConfig.Desc == nil && legacyDesc != nil {
 		merged := *toolConfig
-		merged.Desc = *legacyDesc
+		merged.Desc = legacyDesc
 		return &merged
 	}
 
@@ -536,7 +536,7 @@ func getFilesystemTools(_ context.Context, middlewareConfig *MiddlewareConfig) (
 
 // createToolFromSpec creates a tool instance based on the provided toolSpec.
 // It handles configuration merging (ToolConfig + legacy Desc), checks if the tool
-// is disabled, and prioritizes CustomTool over the default Backend-based implementation.
+// is disabled, and prioritizes CustomTool over the default implementation.
 func createToolFromSpec(middlewareConfig *MiddlewareConfig, spec toolSpec) (tool.BaseTool, error) {
 	mergedConfig := middlewareConfig.mergeToolConfigWithDesc(spec.config, spec.legacyDesc)
 
@@ -545,7 +545,11 @@ func createToolFromSpec(middlewareConfig *MiddlewareConfig, spec toolSpec) (tool
 	}
 
 	return getOrCreateTool(mergedConfig.CustomTool, func() (tool.BaseTool, error) {
-		return spec.createFunc(mergedConfig.Name, mergedConfig.Desc)
+		desc := ""
+		if mergedConfig.Desc != nil {
+			desc = *mergedConfig.Desc
+		}
+		return spec.createFunc(mergedConfig.Name, desc)
 	})
 }
 

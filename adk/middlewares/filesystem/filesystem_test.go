@@ -1353,7 +1353,7 @@ func TestToolConfig(t *testing.T) {
 		config := &MiddlewareConfig{
 			Backend: backend,
 			LsToolConfig: &ToolConfig{
-				Desc: customDesc,
+				Desc: &customDesc,
 			},
 			CustomLsToolDesc: &legacyDesc,
 		}
@@ -1424,11 +1424,11 @@ func TestToolConfigEdgeCases(t *testing.T) {
 	backend := setupTestBackend()
 	ctx := context.Background()
 
-	t.Run("empty ToolConfig.Desc with nil legacyDesc", func(t *testing.T) {
+	t.Run("nil ToolConfig.Desc with nil legacyDesc", func(t *testing.T) {
 		config := &MiddlewareConfig{
 			Backend: backend,
 			LsToolConfig: &ToolConfig{
-				Desc: "",
+				Desc: nil,
 			},
 			CustomLsToolDesc: nil,
 		}
@@ -1444,15 +1444,15 @@ func TestToolConfigEdgeCases(t *testing.T) {
 				break
 			}
 		}
-		assert.NotNil(t, lsTool, "ls tool should be created even with empty Desc")
+		assert.NotNil(t, lsTool, "ls tool should be created even with nil Desc")
 	})
 
-	t.Run("empty ToolConfig.Desc falls back to legacyDesc", func(t *testing.T) {
+	t.Run("nil ToolConfig.Desc falls back to legacyDesc", func(t *testing.T) {
 		legacyDesc := "legacy description from pointer"
 		config := &MiddlewareConfig{
 			Backend: backend,
 			LsToolConfig: &ToolConfig{
-				Desc: "",
+				Desc: nil,
 			},
 			CustomLsToolDesc: &legacyDesc,
 		}
@@ -1468,7 +1468,7 @@ func TestToolConfigEdgeCases(t *testing.T) {
 				break
 			}
 		}
-		assert.True(t, found, "empty ToolConfig.Desc should fall back to legacyDesc")
+		assert.True(t, found, "nil ToolConfig.Desc should fall back to legacyDesc")
 	})
 
 	t.Run("CustomTool with Disable flag should not create tool", func(t *testing.T) {
@@ -1494,11 +1494,12 @@ func TestToolConfigEdgeCases(t *testing.T) {
 
 	t.Run("multiple ToolConfig with conflicting settings", func(t *testing.T) {
 		legacyDesc := "legacy ls desc"
+		customDesc := "custom desc"
 		config := &MiddlewareConfig{
 			Backend: backend,
 			LsToolConfig: &ToolConfig{
 				Name:    "custom_ls",
-				Desc:    "custom desc",
+				Desc:    &customDesc,
 				Disable: false,
 			},
 			CustomLsToolDesc: &legacyDesc,
