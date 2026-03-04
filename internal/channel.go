@@ -46,6 +46,52 @@ func (ch *UnboundedChan[T]) Send(value T) {
 	ch.notEmpty.Signal() // Wake up one goroutine waiting to receive
 }
 
+func (ch *UnboundedChan[T]) TrySend(value T) bool {
+	ch.mutex.Lock()
+	defer ch.mutex.Unlock()
+
+	if ch.closed {
+		return false
+	}
+
+	ch.buffer = append(ch.buffer, value)
+	ch.notEmpty.Signal()
+	return true
+}
+
+func (ch *UnboundedChan[T]) PushFront(values []T) {
+	if len(values) == 0 {
+		return
+	}
+
+	ch.mutex.Lock()
+	defer ch.mutex.Unlock()
+
+	if ch.closed {
+		return
+	}
+
+	newBuf := make([]T, 0, len(values)+len(ch.buffer))
+	newBuf = append(newBuf, values...)
+	newBuf = append(newBuf, ch.buffer...)
+	ch.buffer = newBuf
+	ch.notEmpty.Signal()
+}
+
+func (ch *UnboundedChan[T]) TakeAll() []T {
+	ch.mutex.Lock()
+	defer ch.mutex.Unlock()
+
+	if len(ch.buffer) == 0 {
+		return nil
+	}
+
+	items := make([]T, len(ch.buffer))
+	copy(items, ch.buffer)
+	ch.buffer = nil
+	return items
+}
+
 // Receive gets an item from the channel (blocks if empty)
 func (ch *UnboundedChan[T]) Receive() (T, bool) {
 	ch.mutex.Lock()

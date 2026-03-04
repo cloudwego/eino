@@ -34,13 +34,12 @@ import (
 	"github.com/cloudwego/eino/components/prompt"
 	"github.com/cloudwego/eino/components/tool"
 	"github.com/cloudwego/eino/compose"
+	"github.com/cloudwego/eino/internal/core"
 	"github.com/cloudwego/eino/internal/safe"
 	"github.com/cloudwego/eino/schema"
 )
 
 var _ ResumableAgent = &ChatModelAgent{}
-var _ CancellableAgent = &ChatModelAgent{}
-var _ CancellableResumableAgent = &ChatModelAgent{}
 
 type chatModelAgentExecCtx struct {
 	runtimeReturnDirectly map[string]bool
@@ -342,7 +341,7 @@ type ChatModelAgent struct {
 }
 
 type runFunc func(ctx context.Context, input *AgentInput, generator *AsyncGenerator[*AgentEvent],
-	store *bridgeStore, instruction string, returnDirectly map[string]bool, cs *cancelSig, opts ...compose.Option)
+	store *bridgeStore, instruction string, returnDirectly map[string]bool, cancelCtx *cancelContext, opts ...compose.Option)
 
 // NewChatModelAgent constructs a chat model-backed agent with the provided config.
 func NewChatModelAgent(ctx context.Context, config *ChatModelAgentConfig) (*ChatModelAgent, error) {
@@ -577,7 +576,7 @@ func setOutputToSession(ctx context.Context, msg Message, msgStream MessageStrea
 }
 
 func errFunc(err error) runFunc {
-	return func(ctx context.Context, input *AgentInput, generator *AsyncGenerator[*AgentEvent], store *bridgeStore, _ string, _ map[string]bool, _ *cancelSig, _ ...compose.Option) {
+	return func(ctx context.Context, input *AgentInput, generator *AsyncGenerator[*AgentEvent], store *bridgeStore, _ string, _ map[string]bool, _ *cancelContext, _ ...compose.Option) {
 		generator.Send(&AgentEvent{Err: err})
 	}
 }
@@ -705,17 +704,18 @@ func (a *ChatModelAgent) buildNoToolsRunFunc(_ context.Context) runFunc {
 	}
 
 	return func(ctx context.Context, input *AgentInput, generator *AsyncGenerator[*AgentEvent],
-		store *bridgeStore, instruction string, _ map[string]bool, cs *cancelSig, opts ...compose.Option) {
+		store *bridgeStore, instruction string, _ map[string]bool, cancelCtx *cancelContext, opts ...compose.Option) {
+
+		if cancelCtx != nil {
+			defer cancelCtx.markCompleted()
+		}
 
 		wrappedModel := buildModelWrappers(a.model, &modelWrapperConfig{
 			handlers:    a.handlers,
 			middlewares: a.middlewares,
 			retryConfig: a.modelRetryConfig,
+			cancelCtx:   cancelCtx,
 		})
-
-		if cs != nil {
-			wrappedModel = wrapModelForCancelable(wrappedModel, cs)
-		}
 
 		chain := compose.NewChain[noToolsInput, Message](
 			compose.WithGenLocalState(func(ctx context.Context) (state *State) {
@@ -742,6 +742,20 @@ func (a *ChatModelAgent) buildNoToolsRunFunc(_ context.Context) runFunc {
 			generator: generator,
 		})
 
+		// Set up graph interrupt for cancel support
+		if cancelCtx != nil {
+			var interruptFn func(...compose.GraphInterruptOption)
+			ctx, interruptFn = compose.WithGraphInterrupt(ctx)
+			cancelCtx.setGraphInterruptFunc(interruptFn)
+
+			// Pre-execution cancel check
+			if cancelCtx.shouldCancel() {
+				cancelErr := cancelCtx.createCancelError()
+				generator.Send(&AgentEvent{Err: cancelErr})
+				return
+			}
+		}
+
 		in := noToolsInput{input: input, instruction: instruction}
 
 		var msg Message
@@ -766,8 +780,50 @@ func (a *ChatModelAgent) buildNoToolsRunFunc(_ context.Context) runFunc {
 
 		info, ok := compose.ExtractInterruptInfo(err)
 		if !ok {
+			if cancelCtx != nil {
+				cancelCtx.markError()
+			}
 			generator.Send(&AgentEvent{Err: err})
 			return
+		}
+
+		// Cancellation interrupt (from WithGraphInterrupt or from cancel safe-point)
+		if cancelCtx != nil && cancelCtx.shouldCancel() {
+			composeSignal := FromInterruptContexts(info.InterruptContexts)
+
+			data, existed, storeErr := store.Get(ctx, bridgeCheckpointID)
+			if storeErr != nil {
+				generator.Send(&AgentEvent{Err: fmt.Errorf("failed to get checkpoint on cancel: %w", storeErr)})
+				return
+			}
+			if !existed {
+				data = nil
+			}
+
+			cancelErr := cancelCtx.createCancelError()
+
+			adkSignal, iErr := core.Interrupt(ctx,
+				cancelErr.Info,
+				data,
+				[]*core.InterruptSignal{composeSignal},
+			)
+			if iErr != nil {
+				generator.Send(&AgentEvent{Err: iErr})
+				return
+			}
+			cancelErr.interruptSignal = adkSignal
+
+			// Signal that cancel was handled — keeps state at stateCancelling
+			// so buildCancelFunc returns nil (success).
+			cancelCtx.markCancelHandled()
+
+			generator.Send(&AgentEvent{Err: cancelErr})
+			return
+		}
+
+		// Business interrupt
+		if cancelCtx != nil {
+			cancelCtx.markInterrupted()
 		}
 
 		data, existed, sErr := store.Get(ctx, bridgeCheckpointID)
@@ -812,8 +868,26 @@ func (a *ChatModelAgent) buildReActRunFunc(_ context.Context, bc *execContext) (
 	}
 
 	return func(ctx context.Context, input *AgentInput, generator *AsyncGenerator[*AgentEvent], store *bridgeStore,
-		instruction string, returnDirectly map[string]bool, cs *cancelSig, opts ...compose.Option) {
-		g, err := newReact(ctx, conf, cs)
+		instruction string, returnDirectly map[string]bool, cancelCtx *cancelContext, opts ...compose.Option) {
+
+		if cancelCtx != nil {
+			defer cancelCtx.markCompleted()
+		}
+
+		runConf := conf
+		if cancelCtx != nil {
+			// Create a copy of reactConfig with cancelCtx
+			confCopy := *conf
+			confCopy.cancelCtx = cancelCtx
+			if confCopy.modelWrapperConf != nil {
+				mwcCopy := *confCopy.modelWrapperConf
+				mwcCopy.cancelCtx = cancelCtx
+				confCopy.modelWrapperConf = &mwcCopy
+			}
+			runConf = &confCopy
+		}
+
+		g, err := newReact(ctx, runConf)
 		if err != nil {
 			generator.Send(&AgentEvent{Err: err})
 			return
@@ -827,7 +901,7 @@ func (a *ChatModelAgent) buildReActRunFunc(_ context.Context, bc *execContext) (
 						return nil, genErr
 					}
 					return &reactInput{
-						messages: messages,
+						Messages: messages,
 					}, nil
 				}),
 			).
@@ -850,6 +924,20 @@ func (a *ChatModelAgent) buildReActRunFunc(_ context.Context, bc *execContext) (
 			runtimeReturnDirectly: returnDirectly,
 			generator:             generator,
 		})
+
+		// Set up graph interrupt for cancel support
+		if cancelCtx != nil {
+			var interruptFn func(...compose.GraphInterruptOption)
+			ctx, interruptFn = compose.WithGraphInterrupt(ctx)
+			cancelCtx.setGraphInterruptFunc(interruptFn)
+
+			// Pre-execution cancel check
+			if cancelCtx.shouldCancel() {
+				cancelErr := cancelCtx.createCancelError()
+				generator.Send(&AgentEvent{Err: cancelErr})
+				return
+			}
+		}
 
 		in := reactRunInput{
 			input:       input,
@@ -888,8 +976,50 @@ func (a *ChatModelAgent) buildReActRunFunc(_ context.Context, bc *execContext) (
 
 		info, ok := compose.ExtractInterruptInfo(err_)
 		if !ok {
+			if cancelCtx != nil {
+				cancelCtx.markError()
+			}
 			generator.Send(&AgentEvent{Err: err_})
 			return
+		}
+
+		// Cancellation interrupt (from WithGraphInterrupt or from cancel safe-point)
+		if cancelCtx != nil && cancelCtx.shouldCancel() {
+			composeSignal := FromInterruptContexts(info.InterruptContexts)
+
+			data, existed, storeErr := store.Get(ctx, bridgeCheckpointID)
+			if storeErr != nil {
+				generator.Send(&AgentEvent{Err: fmt.Errorf("failed to get checkpoint on cancel: %w", storeErr)})
+				return
+			}
+			if !existed {
+				data = nil
+			}
+
+			cancelErr := cancelCtx.createCancelError()
+
+			adkSignal, iErr := core.Interrupt(ctx,
+				cancelErr.Info,
+				data,
+				[]*core.InterruptSignal{composeSignal},
+			)
+			if iErr != nil {
+				generator.Send(&AgentEvent{Err: iErr})
+				return
+			}
+			cancelErr.interruptSignal = adkSignal
+
+			// Signal that cancel was handled — keeps state at stateCancelling
+			// so buildCancelFunc returns nil (success).
+			cancelCtx.markCancelHandled()
+
+			generator.Send(&AgentEvent{Err: cancelErr})
+			return
+		}
+
+		// Business interrupt
+		if cancelCtx != nil {
+			cancelCtx.markInterrupted()
 		}
 
 		data, existed, err := store.Get(ctx, bridgeCheckpointID)
@@ -983,15 +1113,6 @@ func (a *ChatModelAgent) getRunFunc(ctx context.Context) (context.Context, runFu
 }
 
 func (a *ChatModelAgent) Run(ctx context.Context, input *AgentInput, opts ...AgentRunOption) *AsyncIterator[*AgentEvent] {
-	iter, _ := a.runInternal(ctx, input, false, opts...)
-	return iter
-}
-
-func (a *ChatModelAgent) RunWithCancel(ctx context.Context, input *AgentInput, opts ...AgentRunOption) (*AsyncIterator[*AgentEvent], CancelFunc) {
-	return a.runInternal(ctx, input, true, opts...)
-}
-
-func (a *ChatModelAgent) runInternal(ctx context.Context, input *AgentInput, withCancel bool, opts ...AgentRunOption) (*AsyncIterator[*AgentEvent], CancelFunc) {
 	iterator, generator := NewAsyncIteratorPair[*AgentEvent]()
 
 	ctx, run, bc, err := a.getRunFunc(ctx)
@@ -1000,7 +1121,7 @@ func (a *ChatModelAgent) runInternal(ctx context.Context, input *AgentInput, wit
 			generator.Send(&AgentEvent{Err: err})
 			generator.Close()
 		}()
-		return iterator, notCancellableFuncInternal
+		return iterator
 	}
 
 	co := getComposeOptions(opts)
@@ -1013,12 +1134,9 @@ func (a *ChatModelAgent) runInternal(ctx context.Context, input *AgentInput, wit
 		}
 	}
 
-	var cs *cancelSig
-	var cancelFn CancelFunc = notCancellableFuncInternal
-	if withCancel {
-		cs = newCancelSig()
-		cancelFn = buildCancelFunc(cs)
-	}
+	// Extract cancelContext from options
+	o := getCommonOptions(nil, opts...)
+	cancelCtx := o.cancelCtx
 
 	go func() {
 		defer func() {
@@ -1041,38 +1159,13 @@ func (a *ChatModelAgent) runInternal(ctx context.Context, input *AgentInput, wit
 			returnDirectly = bc.returnDirectly
 		}
 
-		run(ctx, input, generator, newBridgeStore(), instruction, returnDirectly, cs, co...)
+		run(ctx, input, generator, newBridgeStore(), instruction, returnDirectly, cancelCtx, co...)
 	}()
 
-	return iterator, cancelFn
-}
-
-func buildCancelFunc(cs *cancelSig) CancelFunc {
-	var once sync.Once
-	return func(opts ...CancelOption) error {
-		cfg := &cancelConfig{
-			Mode: CancelImmediate,
-		}
-		for _, opt := range opts {
-			opt(cfg)
-		}
-		once.Do(func() {
-			cs.cancel(cfg)
-		})
-		return nil
-	}
+	return iterator
 }
 
 func (a *ChatModelAgent) Resume(ctx context.Context, info *ResumeInfo, opts ...AgentRunOption) *AsyncIterator[*AgentEvent] {
-	iter, _ := a.resumeInternal(ctx, info, false, opts...)
-	return iter
-}
-
-func (a *ChatModelAgent) ResumeWithCancel(ctx context.Context, info *ResumeInfo, opts ...AgentRunOption) (*AsyncIterator[*AgentEvent], CancelFunc) {
-	return a.resumeInternal(ctx, info, true, opts...)
-}
-
-func (a *ChatModelAgent) resumeInternal(ctx context.Context, info *ResumeInfo, withCancel bool, opts ...AgentRunOption) (*AsyncIterator[*AgentEvent], CancelFunc) {
 	iterator, generator := NewAsyncIteratorPair[*AgentEvent]()
 
 	ctx, run, bc, err := a.getRunFunc(ctx)
@@ -1081,7 +1174,7 @@ func (a *ChatModelAgent) resumeInternal(ctx context.Context, info *ResumeInfo, w
 			generator.Send(&AgentEvent{Err: err})
 			generator.Close()
 		}()
-		return iterator, notCancellableFuncInternal
+		return iterator
 	}
 
 	co := getComposeOptions(opts)
@@ -1094,27 +1187,22 @@ func (a *ChatModelAgent) resumeInternal(ctx context.Context, info *ResumeInfo, w
 		}
 	}
 
-	methodName := "Resume"
-	if withCancel {
-		methodName = "ResumeWithCancel"
-	}
-
 	if info.InterruptState == nil {
-		panic(fmt.Sprintf("ChatModelAgent.%s: agent '%s' was asked to resume but has no state", methodName, a.Name(ctx)))
+		panic(fmt.Sprintf("ChatModelAgent.Resume: agent '%s' was asked to resume but has no state", a.Name(ctx)))
 	}
 
 	stateByte, ok := info.InterruptState.([]byte)
 	if !ok {
-		panic(fmt.Sprintf("ChatModelAgent.%s: agent '%s' was asked to resume but has invalid interrupt state type: %T",
-			methodName, a.Name(ctx), info.InterruptState))
+		panic(fmt.Sprintf("ChatModelAgent.Resume: agent '%s' was asked to resume but has invalid interrupt state type: %T",
+			a.Name(ctx), info.InterruptState))
 	}
 
 	var historyModifier func(ctx context.Context, history []Message) []Message
 	if info.ResumeData != nil {
 		resumeData, ok := info.ResumeData.(*ChatModelAgentResumeData)
 		if !ok {
-			panic(fmt.Sprintf("ChatModelAgent.%s: agent '%s' was asked to resume but has invalid resume data type: %T",
-				methodName, a.Name(ctx), info.ResumeData))
+			panic(fmt.Sprintf("ChatModelAgent.Resume: agent '%s' was asked to resume but has invalid resume data type: %T",
+				a.Name(ctx), info.ResumeData))
 		}
 		historyModifier = resumeData.HistoryModifier
 	}
@@ -1130,12 +1218,9 @@ func (a *ChatModelAgent) resumeInternal(ctx context.Context, info *ResumeInfo, w
 		}))
 	}
 
-	var cs *cancelSig
-	var cancelFn CancelFunc = notCancellableFuncInternal
-	if withCancel {
-		cs = newCancelSig()
-		cancelFn = buildCancelFunc(cs)
-	}
+	// Extract cancelContext from options
+	o := getCommonOptions(nil, opts...)
+	cancelCtx := o.cancelCtx
 
 	go func() {
 		defer func() {
@@ -1159,10 +1244,10 @@ func (a *ChatModelAgent) resumeInternal(ctx context.Context, info *ResumeInfo, w
 		}
 
 		run(ctx, &AgentInput{EnableStreaming: info.EnableStreaming}, generator,
-			newResumeBridgeStore(stateByte), instruction, returnDirectly, cs, co...)
+			newResumeBridgeStore(stateByte), instruction, returnDirectly, cancelCtx, co...)
 	}()
 
-	return iterator, cancelFn
+	return iterator
 }
 
 func getComposeOptions(opts []AgentRunOption) []compose.Option {

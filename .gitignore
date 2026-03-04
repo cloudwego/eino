@@ -56,3 +56,6 @@ CLAUDE.md
 # Specs directories
 */specs
 /todos
+
+# Claude settings
+.claude/
