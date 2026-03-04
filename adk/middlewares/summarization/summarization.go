@@ -32,10 +32,12 @@ import (
 	"github.com/cloudwego/eino/schema"
 )
 
-type TokenCounterFunc func(ctx context.Context, input *TokenCounterInput) (int, error)
-type PrepareFunc func(ctx context.Context, originalMessages []adk.Message) ([]adk.Message, error)
-type FinalizeFunc func(ctx context.Context, originalMessages []adk.Message, summary adk.Message) ([]adk.Message, error)
-type CallbackFunc func(ctx context.Context, before, after adk.ChatModelAgentState) error
+type (
+	TokenCounterFunc  func(ctx context.Context, input *TokenCounterInput) (int, error)
+	GenModelInputFunc func(ctx context.Context, defaultSystemInstruction, userInstruction adk.Message, originalMsgs []adk.Message) ([]adk.Message, error)
+	FinalizeFunc      func(ctx context.Context, originalMessages []adk.Message, summary adk.Message) ([]adk.Message, error)
+	CallbackFunc      func(ctx context.Context, before, after adk.ChatModelAgentState) error
+)
 
 // Config defines the configuration for the summarization middleware.
 type Config struct {
@@ -63,18 +65,28 @@ type Config struct {
 	// Optional. Defaults to false.
 	EmitInternalEvents bool
 
-	// Instruction overrides the default summarization instruction.
+	// UserInstruction serves as the user-level instruction to guide the model on how to summarize the context.
+	// It is appended to the message history as a User message.
+	// If provided, it overrides the default user summarization instruction.
 	// Optional.
-	Instruction string
+	UserInstruction string
 
 	// TranscriptFilePath is the path to the file containing the full conversation history.
 	// It is appended to the summary to remind the model where to read the original context.
 	// Optional but strongly recommended.
 	TranscriptFilePath string
 
-	// Prepare is called before summary generation. The returned messages are the context to be summarized.
+	// GenModelInput allows full control over the summarization model input construction.
+	//
+	// Parameters:
+	//   - defaultSystemInstruction: System message defining the model's role
+	//   - userInstruction: User message with the task instruction
+	//   - originalMsgs: original complete message list
+	//
+	// Typical model input order: systemInstruction -> contextMessages -> userInstruction.
+	//
 	// Optional.
-	Prepare PrepareFunc
+	GenModelInput GenModelInputFunc
 
 	// Finalize is called after summary generation. The returned messages are used as the final output.
 	// Optional.
@@ -163,31 +175,24 @@ func (m *middleware) BeforeModelRewriteState(ctx context.Context, state *adk.Cha
 	}
 
 	var (
-		systemMsgs     []adk.Message
-		summarizeInput []adk.Message
+		systemMsgs  []adk.Message
+		contextMsgs []adk.Message
 	)
 
 	for _, msg := range state.Messages {
 		if msg.Role == schema.System {
 			systemMsgs = append(systemMsgs, msg)
 		} else {
-			summarizeInput = append(summarizeInput, msg)
+			contextMsgs = append(contextMsgs, msg)
 		}
 	}
 
-	if m.cfg.Prepare != nil {
-		summarizeInput, err = m.cfg.Prepare(ctx, state.Messages)
-		if err != nil {
-			return nil, nil, err
-		}
-	}
-
-	summary, err := m.summarize(ctx, summarizeInput)
+	summary, err := m.summarize(ctx, state.Messages, contextMsgs)
 	if err != nil {
 		return nil, nil, err
 	}
 
-	summary, err = m.postProcessSummary(ctx, summarizeInput, summary)
+	summary, err = m.postProcessSummary(ctx, contextMsgs, summary)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -288,36 +293,59 @@ func estimateTokenCount(text string) int {
 	return (len(text) + 3) / 4
 }
 
-func (m *middleware) summarize(ctx context.Context, msgs []adk.Message) (adk.Message, error) {
-	instruction := m.cfg.Instruction
-	if instruction == "" {
-		instruction = getSummaryInstruction()
+func (m *middleware) summarize(ctx context.Context, originMsgs, contextMsgs []adk.Message) (adk.Message, error) {
+	input, err := m.buildSummarizationModelInput(ctx, originMsgs, contextMsgs)
+	if err != nil {
+		return nil, err
 	}
-
-	input := make([]adk.Message, 0, len(msgs)+2)
-	input = append(input, &schema.Message{
-		Role:    schema.System,
-		Content: getSystemPrompt(),
-	})
-	input = append(input, msgs...)
-	input = append(input, &schema.Message{
-		Role:    schema.User,
-		Content: instruction,
-	})
 
 	resp, err := m.cfg.Model.Generate(ctx, input, m.cfg.ModelOptions...)
 	if err != nil {
 		return nil, fmt.Errorf("failed to generate summary: %w", err)
 	}
 
-	summary := &schema.Message{
-		Role:    schema.User,
-		Content: resp.Content,
+	return newSummaryMessage(resp.Content), nil
+}
+
+func (m *middleware) buildSummarizationModelInput(ctx context.Context, originMsgs, contextMsgs []adk.Message) ([]adk.Message, error) {
+	userInstruction := m.cfg.UserInstruction
+	if userInstruction == "" {
+		userInstruction = getUserSummaryInstruction()
 	}
 
-	setContentType(summary, contentTypeSummary)
+	userInstructionMsg := &schema.Message{
+		Role:    schema.User,
+		Content: userInstruction,
+	}
 
-	return summary, nil
+	sysInstructionMsg := &schema.Message{
+		Role:    schema.System,
+		Content: getSystemInstruction(),
+	}
+
+	if m.cfg.GenModelInput != nil {
+		input, err := m.cfg.GenModelInput(ctx, sysInstructionMsg, userInstructionMsg, originMsgs)
+		if err != nil {
+			return nil, fmt.Errorf("failed to generate model input: %w", err)
+		}
+		return input, nil
+	}
+
+	input := make([]adk.Message, 0, len(contextMsgs)+2)
+	input = append(input, sysInstructionMsg)
+	input = append(input, contextMsgs...)
+	input = append(input, userInstructionMsg)
+
+	return input, nil
+}
+
+func newSummaryMessage(content string) *schema.Message {
+	summary := &schema.Message{
+		Role:    schema.User,
+		Content: content,
+	}
+	setContentType(summary, contentTypeSummary)
+	return summary
 }
 
 func (m *middleware) postProcessSummary(ctx context.Context, messages []adk.Message, summary adk.Message) (adk.Message, error) {
@@ -528,6 +556,7 @@ func (c *Config) check() error {
 			return err
 		}
 	}
+
 	return nil
 }
 
