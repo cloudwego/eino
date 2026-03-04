@@ -152,11 +152,13 @@ func (c *Config) Validate() error {
 	if c == nil {
 		return errors.New("config should not be nil")
 	}
-	return validateConfigCore(
-		c.Backend, c.Shell, c.StreamingShell,
-		c.LsToolConfig, c.ReadFileToolConfig, c.WriteFileToolConfig,
-		c.EditFileToolConfig, c.GlobToolConfig, c.GrepToolConfig,
-	)
+	if c.Backend == nil {
+		return errors.New("backend should not be nil")
+	}
+	if c.StreamingShell != nil && c.Shell != nil {
+		return errors.New("shell and streaming shell should not be both set")
+	}
+	return nil
 }
 
 // NewMiddleware constructs and returns the filesystem middleware.
@@ -196,18 +198,7 @@ func NewMiddleware(ctx context.Context, config *Config) (adk.AgentMiddleware, er
 	if config.CustomSystemPrompt != nil {
 		systemPrompt = *config.CustomSystemPrompt
 	} else {
-		systemPrompt = internal.SelectPrompt(internal.I18nPrompts{
-			English: ToolsSystemPrompt,
-			Chinese: ToolsSystemPromptChinese,
-		})
-		if config.Shell != nil || config.StreamingShell != nil {
-			var executePrompt string
-			executePrompt = internal.SelectPrompt(internal.I18nPrompts{
-				English: ExecuteToolsSystemPrompt,
-				Chinese: ExecuteToolsSystemPromptChinese,
-			})
-			systemPrompt += executePrompt
-		}
+		systemPrompt = generateToolsPrompt(ts)
 	}
 
 	m := adk.AgentMiddleware{
@@ -294,25 +285,10 @@ func (c *MiddlewareConfig) Validate() error {
 	if c == nil {
 		return errors.New("config should not be nil")
 	}
-	return validateConfigCore(
-		c.Backend, c.Shell, c.StreamingShell,
-		c.LsToolConfig, c.ReadFileToolConfig, c.WriteFileToolConfig,
-		c.EditFileToolConfig, c.GlobToolConfig, c.GrepToolConfig,
-	)
-}
-
-func validateConfigCore(
-	backend filesystem.Backend,
-	shell filesystem.Shell,
-	streamingShell filesystem.StreamingShell,
-	lsConfig, readConfig, writeConfig, editConfig, globConfig, grepConfig *ToolConfig,
-) error {
-	if backend == nil && shell == nil && streamingShell == nil &&
-		lsConfig == nil && readConfig == nil && writeConfig == nil &&
-		editConfig == nil && globConfig == nil && grepConfig == nil {
-		return errors.New("at least one of Backend, Shell, StreamingShell, or tool configs must be set")
+	if c.Backend == nil {
+		return errors.New("backend should not be nil")
 	}
-	if streamingShell != nil && shell != nil {
+	if c.StreamingShell != nil && c.Shell != nil {
 		return errors.New("shell and streaming shell should not be both set")
 	}
 	return nil
@@ -377,17 +353,7 @@ func New(ctx context.Context, config *MiddlewareConfig) (adk.ChatModelAgentMiddl
 	if config.CustomSystemPrompt != nil {
 		systemPrompt = *config.CustomSystemPrompt
 	} else {
-		systemPrompt = internal.SelectPrompt(internal.I18nPrompts{
-			English: ToolsSystemPrompt,
-			Chinese: ToolsSystemPromptChinese,
-		})
-		if config.Shell != nil || config.StreamingShell != nil {
-			executePrompt := internal.SelectPrompt(internal.I18nPrompts{
-				English: ExecuteToolsSystemPrompt,
-				Chinese: ExecuteToolsSystemPromptChinese,
-			})
-			systemPrompt += executePrompt
-		}
+		systemPrompt = generateToolsPrompt(ts)
 	}
 
 	m := &filesystemMiddleware{

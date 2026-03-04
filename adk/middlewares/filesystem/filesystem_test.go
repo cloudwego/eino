@@ -26,6 +26,7 @@ import (
 	"github.com/cloudwego/eino/adk"
 	"github.com/cloudwego/eino/adk/filesystem"
 	"github.com/cloudwego/eino/components/tool"
+	"github.com/cloudwego/eino/schema"
 )
 
 // setupTestBackend creates a test backend with some initial files
@@ -527,6 +528,15 @@ func (m *mockShellBackend) Execute(ctx context.Context, req *filesystem.ExecuteR
 	return m.resp, nil
 }
 
+type mockStreamingShellBackend struct {
+	filesystem.Backend
+	resp *filesystem.ExecuteResponse
+}
+
+func (m *mockStreamingShellBackend) ExecuteStreaming(ctx context.Context, req *filesystem.ExecuteRequest) (*schema.StreamReader[*filesystem.ExecuteResponse], error) {
+	return schema.StreamReaderFromArray([]*filesystem.ExecuteResponse{m.resp}), nil
+}
+
 func TestGetFilesystemTools(t *testing.T) {
 	ctx := context.Background()
 	backend := setupTestBackend()
@@ -593,6 +603,69 @@ func TestGetFilesystemTools(t *testing.T) {
 	})
 }
 
+func TestValidateConfigCore(t *testing.T) {
+	backend := setupTestBackend()
+	shellBackend := &mockShellBackend{
+		Backend: backend,
+		resp:    &filesystem.ExecuteResponse{Output: "ok"},
+	}
+	streamingShellBackend := &mockStreamingShellBackend{
+		Backend: backend,
+		resp:    &filesystem.ExecuteResponse{Output: "ok"},
+	}
+
+	t.Run("valid config with backend only", func(t *testing.T) {
+		config := &Config{
+			Backend: backend,
+		}
+		err := config.Validate()
+		assert.NoError(t, err)
+	})
+
+	t.Run("valid config with backend and shell", func(t *testing.T) {
+		config := &Config{
+			Backend: backend,
+			Shell:   shellBackend,
+		}
+		err := config.Validate()
+		assert.NoError(t, err)
+	})
+
+	t.Run("valid config with backend and streaming shell", func(t *testing.T) {
+		config := &Config{
+			Backend:        backend,
+			StreamingShell: streamingShellBackend,
+		}
+		err := config.Validate()
+		assert.NoError(t, err)
+	})
+
+	t.Run("invalid config with nil backend", func(t *testing.T) {
+		config := &Config{}
+		err := config.Validate()
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "backend should not be nil")
+	})
+
+	t.Run("invalid config with both shell and streaming shell", func(t *testing.T) {
+		config := &Config{
+			Backend:        backend,
+			Shell:          shellBackend,
+			StreamingShell: streamingShellBackend,
+		}
+		err := config.Validate()
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "shell and streaming shell should not be both set")
+	})
+
+	t.Run("nil config", func(t *testing.T) {
+		var config *Config
+		err := config.Validate()
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "config should not be nil")
+	})
+}
+
 func TestNew(t *testing.T) {
 	ctx := context.Background()
 	backend := setupTestBackend()
@@ -606,7 +679,7 @@ func TestNew(t *testing.T) {
 	t.Run("nil backend returns error", func(t *testing.T) {
 		_, err := New(ctx, &MiddlewareConfig{Backend: nil})
 		assert.Error(t, err)
-		assert.Contains(t, err.Error(), "at least one of")
+		assert.Contains(t, err.Error(), "backend should not be nil")
 	})
 
 	t.Run("valid config with default settings", func(t *testing.T) {
@@ -616,7 +689,7 @@ func TestNew(t *testing.T) {
 
 		fm, ok := m.(*filesystemMiddleware)
 		assert.True(t, ok)
-		assert.Contains(t, fm.additionalInstruction, ToolsSystemPrompt)
+		assert.Contains(t, fm.additionalInstruction, "'ls', 'read_file', 'write_file', 'edit_file', 'glob', 'grep'")
 		assert.Len(t, fm.additionalTools, 6)
 	})
 
@@ -665,7 +738,7 @@ func TestFilesystemMiddleware_BeforeAgent(t *testing.T) {
 		assert.NotNil(t, newCtx)
 		assert.NotNil(t, newRunCtx)
 		assert.Contains(t, newRunCtx.Instruction, "Original instruction")
-		assert.Contains(t, newRunCtx.Instruction, ToolsSystemPrompt)
+		assert.Contains(t, newRunCtx.Instruction, "'ls', 'read_file', 'write_file', 'edit_file', 'glob', 'grep'")
 		assert.Len(t, newRunCtx.Tools, 6)
 	})
 
@@ -1209,48 +1282,6 @@ func TestCustomTools(t *testing.T) {
 		tools, err := getFilesystemTools(ctx, config)
 		assert.NoError(t, err)
 		assert.Greater(t, len(tools), 0, "should create backend tools when custom tools not provided")
-	})
-}
-
-func TestMiddlewareConfigWithCustomTools(t *testing.T) {
-	backend := setupTestBackend()
-	ctx := context.Background()
-
-	t.Run("New middleware accepts custom tools via ToolConfig", func(t *testing.T) {
-		customLsTool, err := newLsTool(backend, "", "")
-		assert.NoError(t, err)
-
-		config := &MiddlewareConfig{
-			LsToolConfig: &ToolConfig{
-				CustomTool: customLsTool,
-			},
-		}
-
-		middleware, err := New(ctx, config)
-		assert.NoError(t, err)
-		assert.NotNil(t, middleware)
-	})
-
-	t.Run("Config validation passes with only ToolConfig", func(t *testing.T) {
-		customLsTool, err := newLsTool(backend, "", "")
-		assert.NoError(t, err)
-
-		config := &MiddlewareConfig{
-			LsToolConfig: &ToolConfig{
-				CustomTool: customLsTool,
-			},
-		}
-
-		err = config.Validate()
-		assert.NoError(t, err)
-	})
-
-	t.Run("Config validation fails with no backend and no tool configs", func(t *testing.T) {
-		config := &MiddlewareConfig{}
-
-		err := config.Validate()
-		assert.Error(t, err)
-		assert.Contains(t, err.Error(), "at least one")
 	})
 }
 

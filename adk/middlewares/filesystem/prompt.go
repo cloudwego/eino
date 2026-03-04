@@ -18,6 +18,15 @@
 
 package filesystem
 
+import (
+	"bytes"
+	"context"
+	"html/template"
+	"strings"
+
+	"github.com/cloudwego/eino/components/tool"
+)
+
 // This file contains prompt templates and tool descriptions adapted from the DeepAgents project.
 // Original source: https://github.com/langchain-ai/deepagents
 //
@@ -273,20 +282,6 @@ All file paths must start with a '/'.
 - grep: search for text within files
 `
 
-	ToolsSystemPromptChinese = `
-# 文件系统工具 'ls', 'read_file', 'write_file', 'edit_file', 'glob', 'grep'
-
-你可以使用这些工具与文件系统交互。
-所有文件路径必须以 '/' 开头。
-
-- ls：列出目录中的文件（需要绝对路径）
-- read_file：从文件系统读取文件
-- write_file：写入文件系统中的文件
-- edit_file：编辑文件系统中的文件
-- glob：查找匹配模式的文件（例如，"**/*.py"）
-- grep：在文件中搜索文本
-`
-
 	ExecuteToolsSystemPrompt = `
 # Execute Tool 'execute'
 
@@ -296,12 +291,114 @@ Use this tool to run commands, scripts, tests, builds, and other shell operation
 - execute: run a shell command in the sandbox (returns output and exit code)
 `
 
-	ExecuteToolsSystemPromptChinese = `
-# 执行工具 'execute'
+	// Template for generating dynamic filesystem tools prompt in English
+	filesystemToolsPromptTemplate = `# Filesystem Tools {{range $i, $tool := .}}{{if $i}}, {{end}}'{{$tool.Name}}'{{end}}
 
-你可以使用 'execute' 工具在沙箱环境中运行 shell 命令。
-使用此工具运行命令、脚本、测试、构建和其他 shell 操作。
+You have access to a filesystem which you can interact with using these tools.
+All file paths must start with a '/'.
 
-- execute：在沙箱中运行 shell 命令（返回输出和退出代码）
+{{range .}}- {{.Name}}: {{.Description}}
+{{end}}`
+
+	// Template for generating dynamic execute tool prompt in English
+	executeToolPrompt = `
+# Execute Tool 'execute'
+
+You have access to an 'execute' tool for running shell commands in a sandboxed environment.
+Use this tool to run commands, scripts, tests, builds, and other shell operations.
+
+- execute: run a shell command in the sandbox (returns output and exit code)
 `
 )
+
+// toolInfo represents information about a tool for template rendering
+type toolInfo struct {
+	Name        string
+	Description string
+}
+
+// getToolDescription returns the English description for a given tool name.
+// It provides short descriptions used in system prompts.
+func getToolDescription(toolName string) string {
+	descriptions := map[string]string{
+		ToolNameLs:        "list files in a directory (requires absolute path)",
+		ToolNameReadFile:  "read a file from the filesystem",
+		ToolNameWriteFile: "write to a file in the filesystem",
+		ToolNameEditFile:  "edit a file in the filesystem",
+		ToolNameGlob:      "find files matching a pattern (e.g., \"**/*.py\")",
+		ToolNameGrep:      "search for text within files",
+		ToolNameExecute:   "run a shell command in the sandbox (returns output and exit code)",
+	}
+
+	if desc, ok := descriptions[toolName]; ok {
+		return desc
+	}
+
+	return "filesystem tool, refer to the tool's description for details"
+}
+
+// generateToolsPrompt generates system prompt based on available tools.
+// It returns the English version of the prompt.
+// If dynamic generation fails, it falls back to static prompts.
+func generateToolsPrompt(tools []tool.BaseTool) string {
+	if len(tools) == 0 {
+		return ""
+	}
+
+	// Group tools by type
+	var fileToolInfos []toolInfo
+	hasExecuteTool := false
+
+	for _, t := range tools {
+		info, err := t.Info(context.Background())
+		if err != nil {
+			continue
+		}
+
+		name := info.Name
+		description := getToolDescription(name)
+
+		// Categorize by tool name
+		if name == ToolNameExecute {
+			hasExecuteTool = true
+		} else {
+			fileToolInfos = append(fileToolInfos, toolInfo{
+				Name:        name,
+				Description: description,
+			})
+		}
+	}
+
+	var result strings.Builder
+
+	// Use English templates
+	fsTemplate := filesystemToolsPromptTemplate
+
+	// Render filesystem tools prompt
+	if len(fileToolInfos) > 0 {
+		tmpl, err := template.New("filesystemTools").Parse(fsTemplate)
+		if err != nil {
+			return fallbackToStaticPrompt(hasExecuteTool)
+		}
+		var buf bytes.Buffer
+		if err := tmpl.Execute(&buf, fileToolInfos); err != nil {
+			return fallbackToStaticPrompt(hasExecuteTool)
+		}
+		result.WriteString(buf.String())
+	}
+
+	// Render execute tool prompt
+	if hasExecuteTool {
+		result.WriteString(executeToolPrompt)
+	}
+
+	return result.String()
+}
+
+func fallbackToStaticPrompt(hasExecuteTool bool) string {
+	systemPrompt := ToolsSystemPrompt
+	if hasExecuteTool {
+		systemPrompt += ExecuteToolsSystemPrompt
+	}
+	return systemPrompt
+}
