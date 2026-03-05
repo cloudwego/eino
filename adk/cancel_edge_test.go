@@ -190,10 +190,18 @@ func TestWithCancel_BeforeExecutionStarts(t *testing.T) {
 
 	cancelOpt, cancelFn := WithCancel()
 
+	// Extract the cancelContext so we can wait for cancelChan to close,
+	// ensuring the cancel is fully registered before Run starts.
+	cc := getCommonOptions(nil, cancelOpt).cancelCtx
+
 	// Call cancel BEFORE calling agent.Run.
 	// The cancelFunc must succeed (not hang) even though execution hasn't started.
 	cancelDone := make(chan error, 1)
 	go func() { cancelDone <- cancelFn() }()
+
+	// Wait for cancelChan to close so the pre-execution check in runFunc
+	// deterministically sees shouldCancel()=true (eliminates goroutine scheduling race).
+	<-cc.cancelChan
 
 	// Now start the run — it should see shouldCancel()=true and emit CancelError immediately.
 	iter := agent.Run(ctx, &AgentInput{Messages: []Message{schema.UserMessage("hi")}}, cancelOpt)
