@@ -81,7 +81,7 @@ func init() {
 	// when decoding checkpoints created by v0.8.0 - v0.8.3
 	gob.Register(&AgentEvent{})
 	gob.Register(int(0))
-	gob.Register(&reactInput{})
+	schema.RegisterName[*reactInput]("_eino_adk_react_input")
 }
 
 func (s *State) getReturnDirectlyEvent() *AgentEvent {
