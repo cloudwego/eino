@@ -25,55 +25,6 @@ package deep
 // When using this code in your own open source project, ensure compliance with the original license requirements.
 
 const (
-	writeTodosPrompt = `
-# 'write_todos'
-You have access to the 'write_todos' tools to help you manage and plan tasks. Use these tools VERY frequently to ensure that you are tracking your tasks and giving the user visibility into your progress.
-These tools are also EXTREMELY helpful for planning tasks, and for breaking down larger complex tasks into smaller steps. If you do not use this tool when planning, you may forget to do important tasks - and that is unacceptable.
-
-It is critical that you mark todos as completed as soon as you are done with a task. Do not batch up multiple tasks before marking them as completed.
-
-IMPORTANT: Always use the 'write_todos' tool to plan and track tasks throughout the conversation.
-
-Examples:
-
-<example>
-user: Run the build and fix any type errors
-assistant: I'm going to use the 'write_todos' tool to write the following items to the todo list:
-- Run the build
-- Fix any type errors
-
-I'm now going to run the build using Bash.
-
-Looks like I found 10 type errors. I'm going to use the 'write_todos' tool to write 10 items to the todo list.
-
-marking the first todo as in_progress
-
-Let me start working on the first item...
-
-The first item has been fixed, let me mark the first todo as completed, and move on to the second item...
-..
-..
-</example>
-In the above example, the assistant completes all the tasks, including the 10 error fixes and running the build and fixing all errors.
-
-<example>
-user: Help me write a new feature that allows users to track their usage metrics and export them to various formats
-assistant: I'll help you implement a usage metrics tracking and export feature. Let me first use the 'write_todos' tool to plan this task.
-Adding the following todos to the todo list:
-1. Research existing metrics tracking in the codebase
-2. Design the metrics collection system
-3. Implement core metrics tracking functionality
-4. Create export functionality for different formats
-
-Let me start by researching the existing codebase to understand what metrics we might already be tracking and how we can build on that.
-
-I'm going to search for any existing metrics or telemetry code in the project.
-
-I've found some existing telemetry code. Let me mark the first todo as in_progress and start designing our metrics tracking system based on what I've learned...
-
-[Assistant continues implementing the feature step by step, marking todos as in_progress and completed as they go]
-</example>
-`
 	taskPrompt = `
 # 'task' (subagent spawner)
 
@@ -403,55 +354,6 @@ The assistant did not use the todo list because this is a single command executi
 When in doubt, use this tool. Being proactive with task management demonstrates attentiveness and ensures you complete all requirements successfully.
 `
 
-	writeTodosPromptChinese = `
-# 'write_todos'
-你可以使用 'write_todos' 工具来帮助你管理和规划任务。请非常频繁地使用这些工具，以确保你正在跟踪任务并让用户了解你的进度。
-这些工具对于规划任务和将较大的复杂任务分解为较小的步骤也非常有帮助。如果你在规划时不使用此工具，可能会忘记执行重要任务——这是不可接受的。
-
-在完成任务后立即将待办事项标记为已完成是至关重要的。不要在标记为已完成之前批量处理多个任务。
-
-重要：始终使用 'write_todos' 工具在整个对话过程中规划和跟踪任务。
-
-示例：
-
-<example>
-user: 运行构建并修复所有类型错误
-assistant: 我将使用 'write_todos' 工具将以下项目写入待办事项列表：
-- 运行构建
-- 修复所有类型错误
-
-我现在将使用 Bash 运行构建。
-
-看起来我发现了 10 个类型错误。我将使用 'write_todos' 工具将 10 个项目写入待办事项列表。
-
-将第一个待办事项标记为进行中
-
-让我开始处理第一个项目...
-
-第一个项目已修复，让我将第一个待办事项标记为已完成，然后继续处理第二个项目...
-..
-..
-</example>
-在上面的示例中，助手完成了所有任务，包括 10 个错误修复以及运行构建和修复所有错误。
-
-<example>
-user: 帮我编写一个新功能，允许用户跟踪他们的使用指标并将其导出为各种格式
-assistant: 我将帮助你实现使用指标跟踪和导出功能。让我首先使用 'write_todos' 工具来规划这个任务。
-将以下待办事项添加到待办事项列表：
-1. 研究代码库中现有的指标跟踪
-2. 设计指标收集系统
-3. 实现核心指标跟踪功能
-4. 为不同格式创建导出功能
-
-让我首先研究现有代码库，了解我们可能已经在跟踪哪些指标以及如何在此基础上构建。
-
-我将搜索项目中任何现有的指标或遥测代码。
-
-我找到了一些现有的遥测代码。让我将第一个待办事项标记为进行中，并根据我学到的内容开始设计我们的指标跟踪系统...
-
-[助手继续逐步实现功能，在进行过程中将待办事项标记为进行中和已完成]
-</example>
-`
 	taskPromptChinese = `
 # 'task'（子代理生成器）
 

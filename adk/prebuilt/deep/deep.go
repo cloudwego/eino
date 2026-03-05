@@ -204,10 +204,6 @@ func newWriteTodos() (adk.ChatModelAgentMiddleware, error) {
 		English: writeTodosToolDescription,
 		Chinese: writeTodosToolDescriptionChinese,
 	})
-	prompt := internal.SelectPrompt(internal.I18nPrompts{
-		English: writeTodosPrompt,
-		Chinese: writeTodosPromptChinese,
-	})
 	resultMsg := internal.SelectPrompt(internal.I18nPrompts{
 		English: "Updated todo list to %s",
 		Chinese: "已更新待办列表为 %s",
@@ -225,5 +221,5 @@ func newWriteTodos() (adk.ChatModelAgentMiddleware, error) {
 		return nil, err
 	}
 
-	return buildAppendPromptTool(prompt, t), nil
+	return buildAppendPromptTool("", t), nil
 }
