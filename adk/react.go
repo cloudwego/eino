@@ -304,9 +304,10 @@ func genReactState(config *reactConfig) func(ctx context.Context) *State {
 
 func newReact(ctx context.Context, config *reactConfig) (reactGraph, error) {
 	const (
-		initNode_  = "Init"
-		chatModel_ = "ChatModel"
-		toolNode_  = "ToolNode"
+		initNode_        = "Init"
+		chatModel_       = "ChatModel"
+		cancelCheckNode_ = "CancelCheck"
+		toolNode_        = "ToolNode"
 	)
 
 	cancelCtx := config.cancelCtx
@@ -340,16 +341,26 @@ func newReact(ctx context.Context, config *reactConfig) (reactGraph, error) {
 	_ = g.AddChatModelNode(chatModel_, wrappedModel,
 		compose.WithStatePreHandler(modelPreHandle), compose.WithNodeName(chatModel_))
 
-	toolPreHandle := func(ctx context.Context, _ Message, st *State) (Message, error) {
-		// CancelAfterChatModel safe-point: the model has finished (stream fully consumed
-		// by the branch) and the branch routed to the tool node. This pre-handler has a
-		// compose context, so compose.Interrupt saves checkpoint data.
+	// CancelAfterChatModel safe-point: dedicated node after the ChatModel.
+	// The model has finished (stream fully consumed by the branch). This node
+	// has a compose context, so compose.Interrupt saves checkpoint data.
+	cancelCheck := func(ctx context.Context, msg Message) (Message, error) {
 		if cancelCtx != nil && cancelCtx.shouldCancel() {
 			if cancelCtx.config != nil && cancelCtx.config.Mode&CancelAfterChatModel != 0 {
-				return nil, compose.Interrupt(ctx, &cancelSafePointInfo{Mode: CancelAfterChatModel})
+				return nil, compose.StatefulInterrupt(ctx, &cancelSafePointInfo{Mode: CancelAfterChatModel}, msg)
 			}
 		}
 
+		wasInterrupted, hasState, state := compose.GetInterruptState[Message](ctx)
+		if wasInterrupted && hasState {
+			msg = state
+		}
+		return msg, nil
+	}
+	_ = g.AddLambdaNode(cancelCheckNode_, compose.InvokableLambda(cancelCheck),
+		compose.WithNodeName(cancelCheckNode_))
+
+	toolPreHandle := func(ctx context.Context, _ Message, st *State) (Message, error) {
 		input := st.Messages[len(st.Messages)-1]
 
 		returnDirectly := config.toolsReturnDirectly
@@ -393,6 +404,7 @@ func newReact(ctx context.Context, config *reactConfig) (reactGraph, error) {
 
 	_ = g.AddEdge(compose.START, initNode_)
 	_ = g.AddEdge(initNode_, chatModel_)
+	_ = g.AddEdge(chatModel_, cancelCheckNode_)
 
 	toolCallCheck := func(ctx context.Context, sMsg MessageStream) (string, error) {
 		defer sMsg.Close()
@@ -412,7 +424,7 @@ func newReact(ctx context.Context, config *reactConfig) (reactGraph, error) {
 		}
 	}
 	branch := compose.NewStreamGraphBranch(toolCallCheck, map[string]bool{compose.END: true, toolNode_: true})
-	_ = g.AddBranch(chatModel_, branch)
+	_ = g.AddBranch(cancelCheckNode_, branch)
 
 	if len(config.toolsReturnDirectly) > 0 {
 		const (

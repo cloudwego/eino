@@ -125,7 +125,7 @@ func TestTurnLoop_RunAndPush(t *testing.T) {
 	var mu sync.Mutex
 
 	loop := newAndRunTurnLoop(context.Background(), TurnLoopConfig[string]{
-		GenInput: func(ctx context.Context, items []string) (*GenInputResult[string], error) {
+		GenInput: func(ctx context.Context, _ *TurnLoop[string], items []string) (*GenInputResult[string], error) {
 			mu.Lock()
 			processedItems = append(processedItems, items...)
 			mu.Unlock()
@@ -134,7 +134,7 @@ func TestTurnLoop_RunAndPush(t *testing.T) {
 				Consumed: items,
 			}, nil
 		},
-		PrepareAgent: func(ctx context.Context, consumed []string) (Agent, error) {
+		PrepareAgent: func(ctx context.Context, _ *TurnLoop[string], consumed []string) (Agent, error) {
 			return &turnLoopMockAgent{name: "test"}, nil
 		},
 	})
@@ -156,13 +156,13 @@ func TestTurnLoop_RunAndPush(t *testing.T) {
 
 func TestTurnLoop_PushReturnsErrorAfterCancel(t *testing.T) {
 	loop := newAndRunTurnLoop(context.Background(), TurnLoopConfig[string]{
-		GenInput: func(ctx context.Context, items []string) (*GenInputResult[string], error) {
+		GenInput: func(ctx context.Context, _ *TurnLoop[string], items []string) (*GenInputResult[string], error) {
 			return &GenInputResult[string]{
 				Input:    &AgentInput{},
 				Consumed: items,
 			}, nil
 		},
-		PrepareAgent: func(ctx context.Context, consumed []string) (Agent, error) {
+		PrepareAgent: func(ctx context.Context, _ *TurnLoop[string], consumed []string) (Agent, error) {
 			return &turnLoopMockAgent{name: "test"}, nil
 		},
 	})
@@ -175,10 +175,10 @@ func TestTurnLoop_PushReturnsErrorAfterCancel(t *testing.T) {
 
 func TestTurnLoop_CancelIsIdempotent(t *testing.T) {
 	loop := newAndRunTurnLoop(context.Background(), TurnLoopConfig[string]{
-		GenInput: func(ctx context.Context, items []string) (*GenInputResult[string], error) {
+		GenInput: func(ctx context.Context, _ *TurnLoop[string], items []string) (*GenInputResult[string], error) {
 			return &GenInputResult[string]{Input: &AgentInput{}, Consumed: items}, nil
 		},
-		PrepareAgent: func(ctx context.Context, consumed []string) (Agent, error) {
+		PrepareAgent: func(ctx context.Context, _ *TurnLoop[string], consumed []string) (Agent, error) {
 			return &turnLoopMockAgent{name: "test"}, nil
 		},
 	})
@@ -193,10 +193,10 @@ func TestTurnLoop_CancelIsIdempotent(t *testing.T) {
 
 func TestTurnLoop_WaitMultipleGoroutines(t *testing.T) {
 	loop := newAndRunTurnLoop(context.Background(), TurnLoopConfig[string]{
-		GenInput: func(ctx context.Context, items []string) (*GenInputResult[string], error) {
+		GenInput: func(ctx context.Context, _ *TurnLoop[string], items []string) (*GenInputResult[string], error) {
 			return &GenInputResult[string]{Input: &AgentInput{}, Consumed: items}, nil
 		},
-		PrepareAgent: func(ctx context.Context, consumed []string) (Agent, error) {
+		PrepareAgent: func(ctx context.Context, _ *TurnLoop[string], consumed []string) (Agent, error) {
 			return &turnLoopMockAgent{name: "test"}, nil
 		},
 	})
@@ -226,7 +226,7 @@ func TestTurnLoop_UnhandledItemsOnCancel(t *testing.T) {
 	blocked := make(chan struct{})
 
 	loop := newAndRunTurnLoop(context.Background(), TurnLoopConfig[string]{
-		GenInput: func(ctx context.Context, items []string) (*GenInputResult[string], error) {
+		GenInput: func(ctx context.Context, _ *TurnLoop[string], items []string) (*GenInputResult[string], error) {
 			close(started)
 			<-blocked
 			return &GenInputResult[string]{
@@ -235,7 +235,7 @@ func TestTurnLoop_UnhandledItemsOnCancel(t *testing.T) {
 				Remaining: items[1:],
 			}, nil
 		},
-		PrepareAgent: func(ctx context.Context, consumed []string) (Agent, error) {
+		PrepareAgent: func(ctx context.Context, _ *TurnLoop[string], consumed []string) (Agent, error) {
 			return &turnLoopMockAgent{name: "test"}, nil
 		},
 	})
@@ -257,10 +257,10 @@ func TestTurnLoop_GenInputError(t *testing.T) {
 	genErr := errors.New("gen input error")
 
 	loop := newAndRunTurnLoop(context.Background(), TurnLoopConfig[string]{
-		GenInput: func(ctx context.Context, items []string) (*GenInputResult[string], error) {
+		GenInput: func(ctx context.Context, _ *TurnLoop[string], items []string) (*GenInputResult[string], error) {
 			return nil, genErr
 		},
-		PrepareAgent: func(ctx context.Context, consumed []string) (Agent, error) {
+		PrepareAgent: func(ctx context.Context, _ *TurnLoop[string], consumed []string) (Agent, error) {
 			return &turnLoopMockAgent{name: "test"}, nil
 		},
 	})
@@ -275,10 +275,10 @@ func TestTurnLoop_GetAgentError(t *testing.T) {
 	agentErr := errors.New("get agent error")
 
 	loop := newAndRunTurnLoop(context.Background(), TurnLoopConfig[string]{
-		GenInput: func(ctx context.Context, items []string) (*GenInputResult[string], error) {
+		GenInput: func(ctx context.Context, _ *TurnLoop[string], items []string) (*GenInputResult[string], error) {
 			return &GenInputResult[string]{Input: &AgentInput{}, Consumed: items}, nil
 		},
-		PrepareAgent: func(ctx context.Context, consumed []string) (Agent, error) {
+		PrepareAgent: func(ctx context.Context, _ *TurnLoop[string], consumed []string) (Agent, error) {
 			return nil, agentErr
 		},
 	})
@@ -294,7 +294,7 @@ func TestTurnLoop_BatchProcessing(t *testing.T) {
 	var mu sync.Mutex
 
 	loop := newAndRunTurnLoop(context.Background(), TurnLoopConfig[string]{
-		GenInput: func(ctx context.Context, items []string) (*GenInputResult[string], error) {
+		GenInput: func(ctx context.Context, _ *TurnLoop[string], items []string) (*GenInputResult[string], error) {
 			mu.Lock()
 			batches = append(batches, items)
 			mu.Unlock()
@@ -305,7 +305,7 @@ func TestTurnLoop_BatchProcessing(t *testing.T) {
 				Remaining: items[1:],
 			}, nil
 		},
-		PrepareAgent: func(ctx context.Context, consumed []string) (Agent, error) {
+		PrepareAgent: func(ctx context.Context, _ *TurnLoop[string], consumed []string) (Agent, error) {
 			return &turnLoopMockAgent{name: "test"}, nil
 		},
 	})
@@ -327,10 +327,10 @@ func TestTurnLoop_BatchProcessing(t *testing.T) {
 
 func TestTurnLoop_CancelWithMode(t *testing.T) {
 	loop := newAndRunTurnLoop(context.Background(), TurnLoopConfig[string]{
-		GenInput: func(ctx context.Context, items []string) (*GenInputResult[string], error) {
+		GenInput: func(ctx context.Context, _ *TurnLoop[string], items []string) (*GenInputResult[string], error) {
 			return &GenInputResult[string]{Input: &AgentInput{}, Consumed: items}, nil
 		},
-		PrepareAgent: func(ctx context.Context, consumed []string) (Agent, error) {
+		PrepareAgent: func(ctx context.Context, _ *TurnLoop[string], consumed []string) (Agent, error) {
 			return &turnLoopMockAgent{name: "test"}, nil
 		},
 	})
@@ -366,10 +366,10 @@ func TestTurnLoop_Preempt_CancelsCurrentAgent(t *testing.T) {
 	secondGenInputOnce := sync.Once{}
 
 	loop := newAndRunTurnLoop(context.Background(), TurnLoopConfig[string]{
-		PrepareAgent: func(ctx context.Context, consumed []string) (Agent, error) {
+		PrepareAgent: func(ctx context.Context, _ *TurnLoop[string], consumed []string) (Agent, error) {
 			return agent, nil
 		},
-		GenInput: func(ctx context.Context, items []string) (*GenInputResult[string], error) {
+		GenInput: func(ctx context.Context, _ *TurnLoop[string], items []string) (*GenInputResult[string], error) {
 			count := atomic.AddInt32(&genInputCalls, 1)
 			if count >= 2 {
 				secondGenInputOnce.Do(func() {
@@ -446,10 +446,10 @@ func TestTurnLoop_Preempt_DiscardsConsumedItems(t *testing.T) {
 	}
 
 	loop := newAndRunTurnLoop(context.Background(), TurnLoopConfig[string]{
-		PrepareAgent: func(ctx context.Context, consumed []string) (Agent, error) {
+		PrepareAgent: func(ctx context.Context, _ *TurnLoop[string], consumed []string) (Agent, error) {
 			return agent, nil
 		},
-		GenInput: func(ctx context.Context, items []string) (*GenInputResult[string], error) {
+		GenInput: func(ctx context.Context, _ *TurnLoop[string], items []string) (*GenInputResult[string], error) {
 			mu.Lock()
 			genInputResults = append(genInputResults, items)
 			mu.Unlock()
@@ -519,10 +519,10 @@ func TestTurnLoop_Preempt_WithAgentCancelMode(t *testing.T) {
 	}
 
 	loop := newAndRunTurnLoop(context.Background(), TurnLoopConfig[string]{
-		PrepareAgent: func(ctx context.Context, consumed []string) (Agent, error) {
+		PrepareAgent: func(ctx context.Context, _ *TurnLoop[string], consumed []string) (Agent, error) {
 			return agent, nil
 		},
-		GenInput: func(ctx context.Context, items []string) (*GenInputResult[string], error) {
+		GenInput: func(ctx context.Context, _ *TurnLoop[string], items []string) (*GenInputResult[string], error) {
 			return &GenInputResult[string]{
 				Input:     &AgentInput{Messages: []Message{schema.UserMessage(items[0])}},
 				Consumed:  []string{items[0]},
@@ -575,10 +575,10 @@ func TestTurnLoop_Push_WithoutPreempt_DoesNotCancel(t *testing.T) {
 	}
 
 	loop := newAndRunTurnLoop(context.Background(), TurnLoopConfig[string]{
-		PrepareAgent: func(ctx context.Context, consumed []string) (Agent, error) {
+		PrepareAgent: func(ctx context.Context, _ *TurnLoop[string], consumed []string) (Agent, error) {
 			return agent, nil
 		},
-		GenInput: func(ctx context.Context, items []string) (*GenInputResult[string], error) {
+		GenInput: func(ctx context.Context, _ *TurnLoop[string], items []string) (*GenInputResult[string], error) {
 			return &GenInputResult[string]{
 				Input:     &AgentInput{Messages: []Message{schema.UserMessage(items[0])}},
 				Consumed:  []string{items[0]},
@@ -639,10 +639,10 @@ func TestTurnLoop_PreemptDelay_NoMispreemptOnNaturalCompletion(t *testing.T) {
 	}
 
 	loop := newAndRunTurnLoop(context.Background(), TurnLoopConfig[string]{
-		PrepareAgent: func(ctx context.Context, consumed []string) (Agent, error) {
+		PrepareAgent: func(ctx context.Context, _ *TurnLoop[string], consumed []string) (Agent, error) {
 			return agent, nil
 		},
-		GenInput: func(ctx context.Context, items []string) (*GenInputResult[string], error) {
+		GenInput: func(ctx context.Context, _ *TurnLoop[string], items []string) (*GenInputResult[string], error) {
 			return &GenInputResult[string]{
 				Input:     &AgentInput{Messages: []Message{schema.UserMessage(items[0])}},
 				Consumed:  []string{items[0]},
@@ -689,11 +689,11 @@ func TestTurnLoop_ConcurrentPush(t *testing.T) {
 	var count int32
 
 	loop := newAndRunTurnLoop(context.Background(), TurnLoopConfig[string]{
-		GenInput: func(ctx context.Context, items []string) (*GenInputResult[string], error) {
+		GenInput: func(ctx context.Context, _ *TurnLoop[string], items []string) (*GenInputResult[string], error) {
 			atomic.AddInt32(&count, int32(len(items)))
 			return &GenInputResult[string]{Input: &AgentInput{}, Consumed: items}, nil
 		},
-		PrepareAgent: func(ctx context.Context, consumed []string) (Agent, error) {
+		PrepareAgent: func(ctx context.Context, _ *TurnLoop[string], consumed []string) (Agent, error) {
 			return &turnLoopMockAgent{name: "test"}, nil
 		},
 	})
@@ -727,13 +727,13 @@ func TestTurnLoop_CancelAfterReceive_RecoverItem(t *testing.T) {
 	cancelDone := make(chan struct{})
 
 	loop := newAndRunTurnLoop(context.Background(), TurnLoopConfig[string]{
-		GenInput: func(ctx context.Context, items []string) (*GenInputResult[string], error) {
+		GenInput: func(ctx context.Context, _ *TurnLoop[string], items []string) (*GenInputResult[string], error) {
 			close(receiveStarted)
 			<-cancelDone
 			time.Sleep(50 * time.Millisecond)
 			return &GenInputResult[string]{Input: &AgentInput{}, Consumed: items}, nil
 		},
-		PrepareAgent: func(ctx context.Context, consumed []string) (Agent, error) {
+		PrepareAgent: func(ctx context.Context, _ *TurnLoop[string], consumed []string) (Agent, error) {
 			return &turnLoopMockAgent{name: "test"}, nil
 		},
 	})
@@ -752,7 +752,7 @@ func TestTurnLoop_CancelAfterGenInput_RecoverConsumed(t *testing.T) {
 	genInputDone := make(chan struct{})
 
 	loop := newAndRunTurnLoop(context.Background(), TurnLoopConfig[string]{
-		GenInput: func(ctx context.Context, items []string) (*GenInputResult[string], error) {
+		GenInput: func(ctx context.Context, _ *TurnLoop[string], items []string) (*GenInputResult[string], error) {
 			close(genInputDone)
 			time.Sleep(50 * time.Millisecond)
 			return &GenInputResult[string]{
@@ -761,7 +761,7 @@ func TestTurnLoop_CancelAfterGenInput_RecoverConsumed(t *testing.T) {
 				Remaining: items[1:],
 			}, nil
 		},
-		PrepareAgent: func(ctx context.Context, consumed []string) (Agent, error) {
+		PrepareAgent: func(ctx context.Context, _ *TurnLoop[string], consumed []string) (Agent, error) {
 			time.Sleep(100 * time.Millisecond)
 			return &turnLoopMockAgent{name: "test"}, nil
 		},
@@ -783,14 +783,14 @@ func TestTurnLoop_GetAgentError_RecoverConsumed(t *testing.T) {
 	agentErr := errors.New("get agent error")
 
 	loop := newAndRunTurnLoop(context.Background(), TurnLoopConfig[string]{
-		GenInput: func(ctx context.Context, items []string) (*GenInputResult[string], error) {
+		GenInput: func(ctx context.Context, _ *TurnLoop[string], items []string) (*GenInputResult[string], error) {
 			return &GenInputResult[string]{
 				Input:     &AgentInput{},
 				Consumed:  items[:1],
 				Remaining: items[1:],
 			}, nil
 		},
-		PrepareAgent: func(ctx context.Context, c []string) (Agent, error) {
+		PrepareAgent: func(ctx context.Context, _ *TurnLoop[string], c []string) (Agent, error) {
 			return nil, agentErr
 		},
 	})
@@ -807,10 +807,10 @@ func TestTurnLoop_GenInputError_RecoverItems(t *testing.T) {
 	genErr := errors.New("gen input error")
 
 	loop := newAndRunTurnLoop(context.Background(), TurnLoopConfig[string]{
-		GenInput: func(ctx context.Context, items []string) (*GenInputResult[string], error) {
+		GenInput: func(ctx context.Context, _ *TurnLoop[string], items []string) (*GenInputResult[string], error) {
 			return nil, genErr
 		},
-		PrepareAgent: func(ctx context.Context, consumed []string) (Agent, error) {
+		PrepareAgent: func(ctx context.Context, _ *TurnLoop[string], consumed []string) (Agent, error) {
 			return &turnLoopMockAgent{name: "test"}, nil
 		},
 	})
@@ -829,7 +829,7 @@ func TestTurnLoop_PrepareAgentError_RecoverItemsInOrder(t *testing.T) {
 	agentErr := errors.New("prepare agent error")
 
 	loop := newAndRunTurnLoop(context.Background(), TurnLoopConfig[string]{
-		GenInput: func(ctx context.Context, items []string) (*GenInputResult[string], error) {
+		GenInput: func(ctx context.Context, _ *TurnLoop[string], items []string) (*GenInputResult[string], error) {
 			var urgent string
 			remaining := make([]string, 0, len(items))
 			for _, item := range items {
@@ -852,7 +852,7 @@ func TestTurnLoop_PrepareAgentError_RecoverItemsInOrder(t *testing.T) {
 				Remaining: items[1:],
 			}, nil
 		},
-		PrepareAgent: func(ctx context.Context, consumed []string) (Agent, error) {
+		PrepareAgent: func(ctx context.Context, _ *TurnLoop[string], consumed []string) (Agent, error) {
 			return nil, agentErr
 		},
 	})
@@ -875,7 +875,7 @@ func TestTurnLoop_ContextCancel(t *testing.T) {
 	genInputDone := make(chan struct{})
 
 	loop := newAndRunTurnLoop(ctx, TurnLoopConfig[string]{
-		GenInput: func(ctx context.Context, items []string) (*GenInputResult[string], error) {
+		GenInput: func(ctx context.Context, _ *TurnLoop[string], items []string) (*GenInputResult[string], error) {
 			close(genInputStarted)
 			<-genInputDone
 			if err := ctx.Err(); err != nil {
@@ -883,7 +883,7 @@ func TestTurnLoop_ContextCancel(t *testing.T) {
 			}
 			return &GenInputResult[string]{Input: &AgentInput{}, Consumed: items}, nil
 		},
-		PrepareAgent: func(ctx context.Context, c []string) (Agent, error) {
+		PrepareAgent: func(ctx context.Context, _ *TurnLoop[string], c []string) (Agent, error) {
 			return &turnLoopMockAgent{name: "test"}, nil
 		},
 	})
@@ -903,7 +903,7 @@ func TestTurnLoop_ContextDeadlineExceeded(t *testing.T) {
 	defer cancel()
 
 	loop := newAndRunTurnLoop(ctx, TurnLoopConfig[string]{
-		GenInput: func(ctx context.Context, items []string) (*GenInputResult[string], error) {
+		GenInput: func(ctx context.Context, _ *TurnLoop[string], items []string) (*GenInputResult[string], error) {
 			select {
 			case <-time.After(100 * time.Millisecond):
 				return &GenInputResult[string]{Input: &AgentInput{}, Consumed: items}, nil
@@ -911,7 +911,7 @@ func TestTurnLoop_ContextDeadlineExceeded(t *testing.T) {
 				return nil, ctx.Err()
 			}
 		},
-		PrepareAgent: func(ctx context.Context, c []string) (Agent, error) {
+		PrepareAgent: func(ctx context.Context, _ *TurnLoop[string], c []string) (Agent, error) {
 			return &turnLoopMockAgent{name: "test"}, nil
 		},
 	})
@@ -927,10 +927,10 @@ func TestTurnLoop_ContextCancelBeforeReceive(t *testing.T) {
 	cancel()
 
 	loop := newAndRunTurnLoop(ctx, TurnLoopConfig[string]{
-		GenInput: func(ctx context.Context, items []string) (*GenInputResult[string], error) {
+		GenInput: func(ctx context.Context, _ *TurnLoop[string], items []string) (*GenInputResult[string], error) {
 			return &GenInputResult[string]{Input: &AgentInput{}, Consumed: items}, nil
 		},
-		PrepareAgent: func(ctx context.Context, c []string) (Agent, error) {
+		PrepareAgent: func(ctx context.Context, _ *TurnLoop[string], c []string) (Agent, error) {
 			return &turnLoopMockAgent{name: "test"}, nil
 		},
 	})
@@ -947,7 +947,7 @@ func TestTurnLoop_ContextCancelAfterGenInput_RecoverItems(t *testing.T) {
 
 	genInputCount := 0
 	loop := newAndRunTurnLoop(ctx, TurnLoopConfig[string]{
-		GenInput: func(ctx context.Context, items []string) (*GenInputResult[string], error) {
+		GenInput: func(ctx context.Context, _ *TurnLoop[string], items []string) (*GenInputResult[string], error) {
 			genInputCount++
 			if genInputCount == 1 {
 				cancel()
@@ -958,7 +958,7 @@ func TestTurnLoop_ContextCancelAfterGenInput_RecoverItems(t *testing.T) {
 				Remaining: items[1:],
 			}, nil
 		},
-		PrepareAgent: func(ctx context.Context, c []string) (Agent, error) {
+		PrepareAgent: func(ctx context.Context, _ *TurnLoop[string], c []string) (Agent, error) {
 			if err := ctx.Err(); err != nil {
 				return nil, err
 			}
@@ -980,16 +980,16 @@ func TestTurnLoop_OnAgentEventsReceivesEvents(t *testing.T) {
 	var mu sync.Mutex
 
 	loop := newAndRunTurnLoop(context.Background(), TurnLoopConfig[string]{
-		GenInput: func(ctx context.Context, items []string) (*GenInputResult[string], error) {
+		GenInput: func(ctx context.Context, _ *TurnLoop[string], items []string) (*GenInputResult[string], error) {
 			return &GenInputResult[string]{
 				Input:    &AgentInput{Messages: []Message{schema.UserMessage(items[0])}},
 				Consumed: items,
 			}, nil
 		},
-		PrepareAgent: func(ctx context.Context, consumed []string) (Agent, error) {
+		PrepareAgent: func(ctx context.Context, _ *TurnLoop[string], consumed []string) (Agent, error) {
 			return &turnLoopMockAgent{name: "test"}, nil
 		},
-		OnAgentEvents: func(ctx context.Context, consumed []string, events *AsyncIterator[*AgentEvent]) error {
+		OnAgentEvents: func(ctx context.Context, _ *TurnLoop[string], consumed []string, events *AsyncIterator[*AgentEvent]) error {
 			mu.Lock()
 			receivedConsumed = append(receivedConsumed, consumed...)
 			mu.Unlock()
@@ -1025,16 +1025,16 @@ func TestTurnLoop_CancelDuringAgentExecution(t *testing.T) {
 	agentStarted := make(chan struct{})
 
 	loop := newAndRunTurnLoop(context.Background(), TurnLoopConfig[string]{
-		GenInput: func(ctx context.Context, items []string) (*GenInputResult[string], error) {
+		GenInput: func(ctx context.Context, _ *TurnLoop[string], items []string) (*GenInputResult[string], error) {
 			return &GenInputResult[string]{
 				Input:    &AgentInput{Messages: []Message{schema.UserMessage(items[0])}},
 				Consumed: items,
 			}, nil
 		},
-		PrepareAgent: func(ctx context.Context, consumed []string) (Agent, error) {
+		PrepareAgent: func(ctx context.Context, _ *TurnLoop[string], consumed []string) (Agent, error) {
 			return &turnLoopMockAgent{name: "test"}, nil
 		},
-		OnAgentEvents: func(ctx context.Context, consumed []string, events *AsyncIterator[*AgentEvent]) error {
+		OnAgentEvents: func(ctx context.Context, _ *TurnLoop[string], consumed []string, events *AsyncIterator[*AgentEvent]) error {
 			close(agentStarted)
 			time.Sleep(200 * time.Millisecond)
 			for {
@@ -1058,13 +1058,13 @@ func TestTurnLoop_CancelDuringAgentExecution(t *testing.T) {
 
 func TestTurnLoop_StopOptionsArePassed(t *testing.T) {
 	loop := newAndRunTurnLoop(context.Background(), TurnLoopConfig[string]{
-		GenInput: func(ctx context.Context, items []string) (*GenInputResult[string], error) {
+		GenInput: func(ctx context.Context, _ *TurnLoop[string], items []string) (*GenInputResult[string], error) {
 			return &GenInputResult[string]{
 				Input:    &AgentInput{Messages: []Message{schema.UserMessage(items[0])}},
 				Consumed: items,
 			}, nil
 		},
-		PrepareAgent: func(ctx context.Context, consumed []string) (Agent, error) {
+		PrepareAgent: func(ctx context.Context, _ *TurnLoop[string], consumed []string) (Agent, error) {
 			return &turnLoopMockAgent{name: "test"}, nil
 		},
 	})
@@ -1081,7 +1081,7 @@ func TestTurnLoop_RunTurnLoop(t *testing.T) {
 		var mu sync.Mutex
 
 		loop := RunTurnLoop(context.Background(), TurnLoopConfig[string]{
-			GenInput: func(ctx context.Context, items []string) (*GenInputResult[string], error) {
+			GenInput: func(ctx context.Context, _ *TurnLoop[string], items []string) (*GenInputResult[string], error) {
 				mu.Lock()
 				processedItems = append(processedItems, items...)
 				mu.Unlock()
@@ -1090,7 +1090,7 @@ func TestTurnLoop_RunTurnLoop(t *testing.T) {
 					Consumed: items,
 				}, nil
 			},
-			PrepareAgent: func(ctx context.Context, consumed []string) (Agent, error) {
+			PrepareAgent: func(ctx context.Context, _ *TurnLoop[string], consumed []string) (Agent, error) {
 				return &turnLoopMockAgent{name: "test"}, nil
 			},
 		})
@@ -1111,13 +1111,13 @@ func TestTurnLoop_RunTurnLoop(t *testing.T) {
 
 	t.Run("CancelImmediatelyAfterRun", func(t *testing.T) {
 		loop := RunTurnLoop(context.Background(), TurnLoopConfig[string]{
-			GenInput: func(ctx context.Context, items []string) (*GenInputResult[string], error) {
+			GenInput: func(ctx context.Context, _ *TurnLoop[string], items []string) (*GenInputResult[string], error) {
 				return &GenInputResult[string]{
 					Input:    &AgentInput{Messages: []Message{schema.UserMessage(items[0])}},
 					Consumed: items,
 				}, nil
 			},
-			PrepareAgent: func(ctx context.Context, consumed []string) (Agent, error) {
+			PrepareAgent: func(ctx context.Context, _ *TurnLoop[string], consumed []string) (Agent, error) {
 				return &turnLoopMockAgent{name: "test"}, nil
 			},
 		})
@@ -1134,13 +1134,13 @@ func TestTurnLoop_RunTurnLoop(t *testing.T) {
 	t.Run("ConcurrentPushAndCancel", func(t *testing.T) {
 		for i := 0; i < 100; i++ {
 			loop := RunTurnLoop(context.Background(), TurnLoopConfig[string]{
-				GenInput: func(ctx context.Context, items []string) (*GenInputResult[string], error) {
+				GenInput: func(ctx context.Context, _ *TurnLoop[string], items []string) (*GenInputResult[string], error) {
 					return &GenInputResult[string]{
 						Input:    &AgentInput{Messages: []Message{schema.UserMessage(items[0])}},
 						Consumed: items,
 					}, nil
 				},
-				PrepareAgent: func(ctx context.Context, consumed []string) (Agent, error) {
+				PrepareAgent: func(ctx context.Context, _ *TurnLoop[string], consumed []string) (Agent, error) {
 					return &turnLoopMockAgent{name: "test"}, nil
 				},
 			})
