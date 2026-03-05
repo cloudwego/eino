@@ -60,8 +60,8 @@ type Config struct {
 	// allowing external observers to track the summarization process.
 	//
 	// Event Scoping:
-	//   - ActionTypeBeforeSummary: emitted before calling model to generate summary
-	//   - ActionTypeAfterSummary: emitted after summary generation completes
+	//   - ActionTypeBeforeSummarize: emitted before calling model to generate summary
+	//   - ActionTypeAfterSummarize: emitted after summary generation completes
 	// Optional. Defaults to false.
 	EmitInternalEvents bool
 
@@ -166,8 +166,8 @@ func (m *middleware) BeforeModelRewriteState(ctx context.Context, state *adk.Cha
 
 	if m.cfg.EmitInternalEvents {
 		err = m.emitEvent(ctx, &CustomizedAction{
-			Type:   ActionTypeBeforeSummary,
-			Before: &BeforeSummaryAction{Messages: state.Messages},
+			Type:   ActionTypeBeforeSummarize,
+			Before: &BeforeSummarizeAction{Messages: state.Messages},
 		})
 		if err != nil {
 			return nil, nil, err
@@ -215,8 +215,8 @@ func (m *middleware) BeforeModelRewriteState(ctx context.Context, state *adk.Cha
 
 	if m.cfg.EmitInternalEvents {
 		err = m.emitEvent(ctx, &CustomizedAction{
-			Type:  ActionTypeAfterSummary,
-			After: &AfterSummaryAction{Messages: state.Messages},
+			Type:  ActionTypeAfterSummarize,
+			After: &AfterSummarizeAction{Messages: state.Messages},
 		})
 		if err != nil {
 			return nil, nil, err

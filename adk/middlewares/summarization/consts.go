@@ -29,6 +29,6 @@ const (
 type ActionType string
 
 const (
-	ActionTypeBeforeSummary ActionType = "before_summary"
-	ActionTypeAfterSummary  ActionType = "after_summary"
+	ActionTypeBeforeSummarize ActionType = "before_summarize"
+	ActionTypeAfterSummarize  ActionType = "after_summarize"
 )
