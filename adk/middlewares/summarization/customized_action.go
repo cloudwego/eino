@@ -24,21 +24,21 @@ type CustomizedAction struct {
 	// Type is the action type.
 	Type ActionType `json:"type"`
 
-	// Before is set when Type is ActionTypeBeforeSummary.
+	// Before is set when Type is ActionTypeBeforeSummarize.
 	// Emitted after trigger condition is met, before calling model to generate summary.
-	Before *BeforeSummaryAction `json:"before,omitempty"`
+	Before *BeforeSummarizeAction `json:"before,omitempty"`
 
-	// After is set when Type is ActionTypeAfterSummary.
+	// After is set when Type is ActionTypeAfterSummarize.
 	// Emitted after summarization.
-	After *AfterSummaryAction `json:"after,omitempty"`
+	After *AfterSummarizeAction `json:"after,omitempty"`
 }
 
-type BeforeSummaryAction struct {
+type BeforeSummarizeAction struct {
 	// Messages is the original state messages before summarization.
 	Messages []adk.Message `json:"messages,omitempty"`
 }
 
-type AfterSummaryAction struct {
+type AfterSummarizeAction struct {
 	// Messages is the final state messages after summarization.
 	Messages []adk.Message `json:"messages,omitempty"`
 }
