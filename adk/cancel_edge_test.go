@@ -693,10 +693,23 @@ func TestWithCancel_Resume_SafePoint(t *testing.T) {
 		t.Fatal("model did not start in phase 2")
 	}
 
-	// Cancel after model completes.
-	go func() { close(resumeModel.unblockCh) }()
+	// Start cancel in a background goroutine (cancelFn blocks until doneChan
+	// closes).  This ensures the CAS(stateRunning→stateCancelling) happens and
+	// cancelChan is closed BEFORE we unblock the model, eliminating the race
+	// where the model completes and markCompleted() runs before the CAS.
+	cancelDone := make(chan error, 1)
+	go func() {
+		cancelDone <- cancelFn2(WithAgentCancelMode(CancelAfterChatModel))
+	}()
 
-	cancelErr := cancelFn2(WithAgentCancelMode(CancelAfterChatModel))
+	// Give cancelFn enough time to perform the atomic CAS and close cancelChan.
+	time.Sleep(50 * time.Millisecond)
+
+	// Now unblock the model.  cancelMonitoredModel.Generate will see
+	// shouldCancel()==true and return errCancelSafePoint.
+	close(resumeModel.unblockCh)
+
+	cancelErr := <-cancelDone
 	assert.NoError(t, cancelErr)
 
 	_, hasCancelError := drainEvents(resumeIter)

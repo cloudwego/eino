@@ -68,7 +68,10 @@ func WithAgentCancelMode(mode CancelMode) AgentCancelOption {
 	}
 }
 
-// WithAgentCancelTimeout sets a timeout duration for CancelImmediate mode.
+// WithAgentCancelTimeout sets a timeout for the cancel operation.
+// For CancelImmediate, the graph interrupt includes this as a deadline.
+// For safe-point modes, if the safe-point hasn't fired within this duration,
+// the cancel escalates to an immediate graph interrupt.
 func WithAgentCancelTimeout(timeout time.Duration) AgentCancelOption {
 	return func(config *agentCancelConfig) {
 		config.Timeout = &timeout
@@ -153,14 +156,14 @@ const (
 type cancelContext struct {
 	config *agentCancelConfig
 
-	cancelChan    chan struct{} // closed when cancel requested (safe-point modes)
-	immediateChan chan struct{} // closed when immediate cancel fires
-	doneChan      chan struct{} // closed when execution completes
-	doneOnce      sync.Once     // ensures doneChan is closed exactly once
+	cancelChan    chan struct{} // closed when cancel is requested (all modes, not just safe-point)
+	immediateChan chan struct{} // closed when an immediate graph interrupt fires
+	doneChan      chan struct{} // closed when execution completes (by any mark* method)
+	doneOnce      sync.Once    // ensures doneChan is closed exactly once
 
-	state         int32 // stateRunning, stateCancelling, stateCompleted, stateInterrupted, stateError
+	state         int32 // stateRunning, stateCancelling, stateCompleted, stateInterrupted, stateError, stateCancelHandled
 	interruptSent int32 // interruptNotSent, interruptGraceful, interruptImmediate
-	escalated     int32 // 1 if escalated to immediate
+	escalated     int32 // 1 if escalated from safe-point to immediate
 
 	mu                 sync.Mutex
 	graphInterruptFunc func(...compose.GraphInterruptOption)
@@ -187,8 +190,11 @@ func (cc *cancelContext) shouldCancel() bool {
 	}
 }
 
-// sendInterrupt sends the graph interrupt signal.
-// Returns true if the interrupt was successfully sent.
+// sendInterrupt sends the compose graph interrupt signal via graphInterruptFunc.
+// If immediate is true, also closes immediateChan (used by cancelMonitoredModel
+// to abort an in-progress stream). Returns false if an interrupt was already sent
+// or if graphInterruptFunc has not been set yet (the deferred fire in
+// setGraphInterruptFunc will handle that case).
 func (cc *cancelContext) sendInterrupt(immediate bool) bool {
 	target := interruptGraceful
 	if immediate {
@@ -218,7 +224,9 @@ func (cc *cancelContext) sendInterrupt(immediate bool) bool {
 	return true
 }
 
-// escalateToImmediate upgrades a safe-point cancel to an immediate cancel.
+// escalateToImmediate upgrades a safe-point cancel to an immediate graph
+// interrupt. Called by the timeout goroutine when the safe-point hasn't fired
+// within the configured duration.
 func (cc *cancelContext) escalateToImmediate() {
 	atomic.StoreInt32(&cc.escalated, 1)
 
@@ -247,9 +255,9 @@ func (cc *cancelContext) setGraphInterruptFunc(interrupt func(...compose.GraphIn
 	cc.graphInterruptFunc = interrupt
 	cc.mu.Unlock()
 
-	// If immediate cancel was already requested but couldn't fire (func wasn't set),
-	// fire now to cover the Invoke-already-running race.
-	// Re-read under mutex to avoid racing with concurrent sendInterrupt.
+	// If immediate cancel was already requested but couldn't fire because
+	// graphInterruptFunc wasn't set yet, fire now. This covers the race where
+	// cancelFn is called before the compose graph is compiled and sets the func.
 	if atomic.LoadInt32(&cc.interruptSent) == interruptImmediate {
 		cc.mu.Lock()
 		fn := cc.graphInterruptFunc
@@ -362,8 +370,9 @@ func (cc *cancelContext) buildCancelFunc(defaultOpts ...AgentCancelOption) Agent
 			if cfg.Mode == CancelImmediate {
 				cc.sendInterrupt(true)
 			} else {
-				// Safe-point mode: safe-point checks will trigger the interrupt
-				// when they detect shouldCancel() == true.
+				// Safe-point mode: cancelMonitoredModel and toolPostHandle will
+				// check shouldCancel() and return errCancelSafePoint when their
+				// safe-point condition is met. No graph interrupt is sent.
 			}
 
 			if cfg.Timeout != nil && *cfg.Timeout > 0 {

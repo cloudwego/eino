@@ -698,7 +698,7 @@ func (a *ChatModelAgent) prepareExecContext(ctx context.Context) (*execContext, 
 
 // handleRunFuncError is the common error handler for buildNoToolsRunFunc and buildReActRunFunc.
 // It handles errCancelSafePoint, compose interrupts (both cancel-triggered and business),
-// and generic errors. Returns true if the error was handled (event sent to generator).
+// and generic errors. In all cases it sends the appropriate event to the generator.
 func (a *ChatModelAgent) handleRunFuncError(
 	ctx context.Context,
 	err error,
@@ -1053,7 +1053,7 @@ func (a *ChatModelAgent) Run(ctx context.Context, input *AgentInput, opts ...Age
 	ctx, run, bc, err := a.getRunFunc(ctx)
 	if err != nil {
 		go func() {
-			// Mark cancelCtx so that cancelFunc doesn't block forever.
+			// Mark cancelCtx as errored so that cancelFunc unblocks (it waits on doneChan).
 			if cc := getCommonOptions(nil, opts...).cancelCtx; cc != nil {
 				defer cc.markError()
 			}
@@ -1112,7 +1112,7 @@ func (a *ChatModelAgent) Resume(ctx context.Context, info *ResumeInfo, opts ...A
 	ctx, run, bc, err := a.getRunFunc(ctx)
 	if err != nil {
 		go func() {
-			// Mark cancelCtx so that cancelFunc doesn't block forever.
+			// Mark cancelCtx as errored so that cancelFunc unblocks (it waits on doneChan).
 			if cc := getCommonOptions(nil, opts...).cancelCtx; cc != nil {
 				defer cc.markError()
 			}

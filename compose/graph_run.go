@@ -461,6 +461,13 @@ func (r *runner) resolveInterruptCompletedTasks(tempInfo *interruptTempInfo, com
 			if info := isSubGraphInterrupt(completedTask.err); info != nil {
 				tempInfo.subGraphInterrupts[completedTask.nodeKey] = info
 				tempInfo.signals = append(tempInfo.signals, info.signal)
+				// Propagate FromGraphInterrupt from the sub-graph to the parent.
+				// The sub-graph's task manager may have consumed the cancel
+				// channel value before the parent's, so only the sub-graph
+				// knows the interrupt was triggered by a graph-level cancel.
+				if info.Info != nil && info.Info.FromGraphInterrupt {
+					tempInfo.fromGraphInterrupt = true
+				}
 				continue
 			}
 

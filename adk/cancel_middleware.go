@@ -25,8 +25,9 @@ import (
 )
 
 // cancelMonitoredModel wraps a model with cancel monitoring.
-// Generate: delegates to inner, safe-point check at return for CancelAfterChatModel.
-// Stream: pipes stream with immediateChan select for abort.
+// Generate: delegates to inner model, then checks CancelAfterChatModel safe-point on return.
+// Stream: pipes chunks through a goroutine that selects on immediateChan for abort,
+// and checks CancelAfterChatModel safe-point when the inner stream reaches EOF.
 type cancelMonitoredModel struct {
 	inner         model.BaseChatModel
 	cancelContext *cancelContext

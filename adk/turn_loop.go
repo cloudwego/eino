@@ -202,7 +202,7 @@ type GenInputResult[T any] struct {
 // and any items that were not processed.
 type TurnLoopExitState[T any] struct {
 	// ExitReason indicates why the loop exited.
-	// nil means clean exit (Cancel() was called and completed normally).
+	// nil means clean exit (Stop() was called and completed normally).
 	// Non-nil values include context errors, callback errors, etc.
 	ExitReason error
 
@@ -349,7 +349,8 @@ func (l *TurnLoop[T]) Push(item T, opts ...PushOption) bool {
 }
 
 // Stop signals the loop to stop and returns immediately (non-blocking).
-// The loop will stop at the next safe point.
+// The loop will finish the current turn (or cancel it via WithAgentCancel options),
+// then exit without starting a new turn.
 // Use WithAgentCancel to control how the currently running agent is cancelled.
 // This method is idempotent - multiple calls have no additional effect.
 // Call Wait() to block until the loop has fully exited and get the result.
