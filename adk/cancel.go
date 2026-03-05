@@ -17,7 +17,6 @@
 package adk
 
 import (
-	"encoding/gob"
 	"errors"
 	"fmt"
 	"sync"
@@ -25,12 +24,13 @@ import (
 	"time"
 
 	"github.com/cloudwego/eino/compose"
+	"github.com/cloudwego/eino/schema"
 )
 
 func init() {
-	gob.Register(&CancelError{})
-	gob.Register(&AgentCancelInfo{})
-	gob.Register(&cancelSafePointInfo{})
+	schema.RegisterName[*CancelError]("_eino_adk_cancel_error")
+	schema.RegisterName[*AgentCancelInfo]("_eino_adk_agent_cancel_info")
+	schema.RegisterName[*cancelSafePointInfo]("_eino_adk_cancel_safe_point_info")
 }
 
 // CancelMode specifies when an agent should be canceled.
@@ -94,8 +94,11 @@ type CancelError struct {
 	Info *AgentCancelInfo
 
 	// InterruptContexts provides the interrupt contexts needed for targeted
-	// resumption via Runner.ResumeWithParams. This is always populated when a
-	// cancel is handled, regardless of the cancel mode.
+	// resumption via Runner.ResumeWithParams. Each context represents a step
+	// in the agent hierarchy that was interrupted. This is a slice because
+	// composite agents (e.g. parallel workflows) may interrupt at multiple
+	// points simultaneously, matching the shape of AgentAction.Interrupted.InterruptContexts.
+	// Use each InterruptCtx.ID as a key in ResumeParams.Targets.
 	InterruptContexts []*InterruptCtx
 
 	interruptSignal *InterruptSignal // unexported — only Runner needs it for checkpoint
@@ -153,29 +156,65 @@ func extractCancelSafePointInfo(contexts []*InterruptCtx) *cancelSafePointInfo {
 
 // WithCancel creates an AgentRunOption that enables cancellation for an agent run.
 // It returns the option to pass to Run/Resume and a cancel function.
-func WithCancel(opts ...AgentCancelOption) (AgentRunOption, AgentCancelFunc) {
+// Cancel options (mode, timeout) are passed to the returned AgentCancelFunc at call time.
+func WithCancel() (AgentRunOption, AgentCancelFunc) {
 	cc := newCancelContext()
 	opt := WrapImplSpecificOptFn(func(o *options) {
 		o.cancelCtx = cc
 	})
-	cancelFn := cc.buildCancelFunc(opts...)
+	cancelFn := cc.buildCancelFunc()
 	return opt, cancelFn
 }
 
 // cancelContext state constants (for int32 CAS).
+//
+// State transition rules:
+//
+//	stateRunning -> stateCancelling     (cancel requested by AgentCancelFunc)
+//	stateRunning -> stateCompleted      (execution finished normally)
+//	stateRunning -> stateInterrupted    (business logic interrupt, not cancel-triggered)
+//	stateRunning -> stateError          (execution failed with an error)
+//	stateCancelling -> stateCancelHandled (cancel path in runFunc emitted CancelError)
+//	stateCancelling -> stateCompleted   (execution completed before cancel took effect)
+//	stateCancelling -> stateInterrupted (business interrupt arrived during cancel)
+//	stateCancelling -> stateError       (execution errored during cancel)
+//
+// Terminal states: stateCompleted, stateInterrupted, stateError, stateCancelHandled.
 const (
-	stateRunning       int32 = 0
-	stateCancelling    int32 = 1
-	stateCompleted     int32 = 2
-	stateInterrupted   int32 = 3
-	stateError         int32 = 4
-	stateCancelHandled int32 = 5 // cancel was handled by the runFunc
+	// stateRunning is the initial state: agent is executing normally.
+	stateRunning int32 = 0
+	// stateCancelling means AgentCancelFunc has been called and cancelChan is
+	// closed, but the cancel has not yet been handled by the runFunc.
+	stateCancelling int32 = 1
+	// stateCompleted means execution finished normally (no cancel, no error).
+	stateCompleted int32 = 2
+	// stateInterrupted means execution was interrupted by business logic
+	// (e.g. a compose.Interrupt not triggered by cancellation).
+	stateInterrupted int32 = 3
+	// stateError means execution failed with a non-cancel, non-interrupt error.
+	stateError int32 = 4
+	// stateCancelHandled means the cancel was processed by the runFunc and a
+	// CancelError was emitted through the event stream. This is the success
+	// terminal state for cancellation.
+	stateCancelHandled int32 = 5
 )
 
 // interruptSent constants (for int32 CAS).
+//
+// Transition rules:
+//
+//	interruptNotSent -> interruptGraceful   (safe-point cancel: no graph interrupt sent yet)
+//	interruptNotSent -> interruptImmediate  (CancelImmediate or escalation from not-sent)
+//	interruptGraceful -> interruptImmediate (escalation: safe-point timed out)
 const (
-	interruptNotSent   int32 = 0
-	interruptGraceful  int32 = 1
+	// interruptNotSent means no compose graph interrupt has been sent.
+	interruptNotSent int32 = 0
+	// interruptGraceful means a safe-point cancel was requested; the graph
+	// interrupt will fire only when the safe-point condition is met
+	// (e.g. after chat model or tool calls complete).
+	interruptGraceful int32 = 1
+	// interruptImmediate means an immediate graph interrupt was sent with
+	// timeout=0, forcing the graph to stop as soon as possible.
 	interruptImmediate int32 = 2
 )
 
@@ -361,18 +400,13 @@ func (cc *cancelContext) createCancelError() *CancelError {
 }
 
 // buildCancelFunc builds the AgentCancelFunc for external use.
-// The defaultOpts are applied as defaults when the cancel func is called.
-func (cc *cancelContext) buildCancelFunc(defaultOpts ...AgentCancelOption) AgentCancelFunc {
+func (cc *cancelContext) buildCancelFunc() AgentCancelFunc {
 	var once sync.Once
 	var result error
 
 	return func(callOpts ...AgentCancelOption) error {
 		cfg := &agentCancelConfig{
 			Mode: CancelImmediate,
-		}
-		// Apply default options first, then call-time options
-		for _, opt := range defaultOpts {
-			opt(cfg)
 		}
 		for _, opt := range callOpts {
 			opt(cfg)
@@ -431,9 +465,7 @@ func (cc *cancelContext) buildCancelFunc(defaultOpts ...AgentCancelOption) Agent
 			case stateError:
 				result = ErrExecutionFailed
 			default:
-				// Cancel succeeded (stateCancelling or stateCancelHandled).
-				// If a safe-point mode was escalated to immediate because the
-				// timeout fired before the safe-point was reached, report timeout.
+				// stateCancelHandled: cancel was processed and CancelError was emitted.
 				if atomic.LoadInt32(&cc.escalated) == 1 && cfg.Mode != CancelImmediate {
 					result = ErrCancelTimeout
 				} else {

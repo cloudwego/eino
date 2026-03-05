@@ -331,14 +331,14 @@ func TestWithCancel_TimeoutEscalation(t *testing.T) {
 	require.NoError(t, err)
 
 	runner := NewRunner(ctx, RunnerConfig{
-		Agent:          agent,
+		Agent:           agent,
 		EnableStreaming: true, // use streaming so cancelMonitoredModel.Stream is exercised
 	})
 
 	timeout := 300 * time.Millisecond
 	// CancelAfterChatModel + timeout: safe-point can't fire (model never finishes),
 	// so after 300ms the timeout goroutine escalates to immediate.
-	cancelOpt, cancelFn := WithCancel(WithAgentCancelMode(CancelAfterChatModel), WithAgentCancelTimeout(timeout))
+	cancelOpt, cancelFn := WithCancel()
 	iter := runner.Run(ctx, []Message{schema.UserMessage("go")}, cancelOpt)
 
 	select {
@@ -349,7 +349,7 @@ func TestWithCancel_TimeoutEscalation(t *testing.T) {
 
 	// Fire cancelFn; it will wait for escalation to complete.
 	start := time.Now()
-	cancelErr := cancelFn()
+	cancelErr := cancelFn(WithAgentCancelMode(CancelAfterChatModel), WithAgentCancelTimeout(timeout))
 	elapsed := time.Since(start)
 
 	assert.ErrorIs(t, cancelErr, ErrCancelTimeout, "cancel should return ErrCancelTimeout after timeout escalation")

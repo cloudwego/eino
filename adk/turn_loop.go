@@ -382,19 +382,21 @@ func (l *TurnLoop[T]) run(ctx context.Context) {
 	defer l.cleanup()
 
 	for {
-		select {
-		case <-ctx.Done():
-			l.runErr = ctx.Err()
-			return
-		default:
-		}
-
 		if l.cancelSig.isCancelled() {
 			return
 		}
 
 		first, ok := l.buffer.Receive()
 		if !ok {
+			if err := ctx.Err(); err != nil {
+				l.runErr = err
+			}
+			return
+		}
+
+		if err := ctx.Err(); err != nil {
+			l.buffer.PushFront([]T{first})
+			l.runErr = err
 			return
 		}
 
