@@ -230,6 +230,7 @@ func TestMiddlewareBeforeModelRewriteState(t *testing.T) {
 		assert.Equal(t, schema.System, newState.Messages[0].Role)
 		assert.Equal(t, "system prompt", newState.Messages[0].Content)
 	})
+
 }
 
 func TestMiddlewareShouldSummarize(t *testing.T) {
@@ -564,13 +565,99 @@ func TestMiddlewareSummarize(t *testing.T) {
 			}).Times(1)
 
 		mw := &middleware{
+		cfg: &Config{
+			Model: cm,
+		},
+	}
+
+	testMsg := []adk.Message{schema.UserMessage("test")}
+	_, err := mw.summarize(ctx, testMsg, testMsg)
+	assert.NoError(t, err)
+	})
+
+	t.Run("uses context messages", func(t *testing.T) {
+		ctrl := gomock.NewController(t)
+		cm := mockModel.NewMockBaseChatModel(ctrl)
+		cm.EXPECT().Generate(gomock.Any(), gomock.Any(), gomock.Any()).
+			DoAndReturn(func(ctx context.Context, msgs []*schema.Message, opts ...interface{}) (*schema.Message, error) {
+				// Verify the context messages are included
+				found := false
+				for _, msg := range msgs {
+					if msg.Content == "context message" {
+						found = true
+						break
+					}
+				}
+				assert.True(t, found, "should contain context message")
+
+				return &schema.Message{
+					Role:    schema.Assistant,
+					Content: "summary",
+				}, nil
+			}).Times(1)
+
+		mw := &middleware{
 			cfg: &Config{
 				Model: cm,
 			},
 		}
 
-		_, err := mw.summarize(ctx, []adk.Message{schema.UserMessage("test")})
-		assert.NoError(t, err)
+		contextMsgs := []adk.Message{
+		schema.UserMessage("context message"),
+	}
+	_, err := mw.summarize(ctx, contextMsgs, contextMsgs)
+	assert.NoError(t, err)
+	})
+
+	t.Run("uses GenModelInput", func(t *testing.T) {
+		ctrl := gomock.NewController(t)
+		cm := mockModel.NewMockBaseChatModel(ctrl)
+
+		expectedInput := []adk.Message{
+			schema.UserMessage("custom input"),
+		}
+
+		cm.EXPECT().Generate(gomock.Any(), gomock.Any(), gomock.Any()).
+			DoAndReturn(func(ctx context.Context, msgs []*schema.Message, opts ...interface{}) (*schema.Message, error) {
+				assert.Len(t, msgs, 1)
+				assert.Equal(t, "custom input", msgs[0].Content)
+				return &schema.Message{
+					Role:    schema.Assistant,
+					Content: "summary",
+				}, nil
+			}).Times(1)
+
+		mw := &middleware{
+		cfg: &Config{
+			Model: cm,
+			GenModelInput: func(ctx context.Context, defaultSystemInstruction, userInstruction adk.Message, originalMsgs []adk.Message) ([]adk.Message, error) {
+				return expectedInput, nil
+			},
+		},
+	}
+
+	testMsg := []adk.Message{schema.UserMessage("test")}
+	_, err := mw.summarize(ctx, testMsg, testMsg)
+	assert.NoError(t, err)
+	})
+
+	t.Run("GenModelInput error", func(t *testing.T) {
+		ctrl := gomock.NewController(t)
+		cm := mockModel.NewMockBaseChatModel(ctrl)
+
+		mw := &middleware{
+		cfg: &Config{
+			Model: cm,
+			GenModelInput: func(ctx context.Context, defaultSystemInstruction, userInstruction adk.Message, originalMsgs []adk.Message) ([]adk.Message, error) {
+				return nil, errors.New("gen input error")
+			},
+		},
+	}
+
+	testMsg := []adk.Message{schema.UserMessage("test")}
+	_, err := mw.summarize(ctx, testMsg, testMsg)
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "gen input error")
 	})
 
 	t.Run("uses custom instruction", func(t *testing.T) {
@@ -588,14 +675,15 @@ func TestMiddlewareSummarize(t *testing.T) {
 			}).Times(1)
 
 		mw := &middleware{
-			cfg: &Config{
-				Model:       cm,
-				Instruction: "custom instruction",
-			},
-		}
+		cfg: &Config{
+			Model:           cm,
+			UserInstruction: "custom instruction",
+		},
+	}
 
-		_, err := mw.summarize(ctx, []adk.Message{schema.UserMessage("test")})
-		assert.NoError(t, err)
+	testMsg := []adk.Message{schema.UserMessage("test")}
+	_, err := mw.summarize(ctx, testMsg, testMsg)
+	assert.NoError(t, err)
 	})
 
 	t.Run("model generate error", func(t *testing.T) {
@@ -605,13 +693,14 @@ func TestMiddlewareSummarize(t *testing.T) {
 			Return(nil, errors.New("generate error")).Times(1)
 
 		mw := &middleware{
-			cfg: &Config{
-				Model: cm,
-			},
-		}
+		cfg: &Config{
+			Model: cm,
+		},
+	}
 
-		_, err := mw.summarize(ctx, []adk.Message{schema.UserMessage("test")})
-		assert.Error(t, err)
+	testMsg := []adk.Message{schema.UserMessage("test")}
+	_, err := mw.summarize(ctx, testMsg, testMsg)
+	assert.Error(t, err)
 	})
 }
 
