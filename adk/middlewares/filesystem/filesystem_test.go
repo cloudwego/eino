@@ -606,7 +606,7 @@ func TestNew(t *testing.T) {
 	t.Run("nil backend returns error", func(t *testing.T) {
 		_, err := New(ctx, &MiddlewareConfig{Backend: nil})
 		assert.Error(t, err)
-		assert.Contains(t, err.Error(), "at least one of")
+		assert.Contains(t, err.Error(), "backend should not be nil")
 	})
 
 	t.Run("valid config with default settings", func(t *testing.T) {
@@ -1209,48 +1209,6 @@ func TestCustomTools(t *testing.T) {
 		tools, err := getFilesystemTools(ctx, config)
 		assert.NoError(t, err)
 		assert.Greater(t, len(tools), 0, "should create backend tools when custom tools not provided")
-	})
-}
-
-func TestMiddlewareConfigWithCustomTools(t *testing.T) {
-	backend := setupTestBackend()
-	ctx := context.Background()
-
-	t.Run("New middleware accepts custom tools via ToolConfig", func(t *testing.T) {
-		customLsTool, err := newLsTool(backend, "", "")
-		assert.NoError(t, err)
-
-		config := &MiddlewareConfig{
-			LsToolConfig: &ToolConfig{
-				CustomTool: customLsTool,
-			},
-		}
-
-		middleware, err := New(ctx, config)
-		assert.NoError(t, err)
-		assert.NotNil(t, middleware)
-	})
-
-	t.Run("Config validation passes with only ToolConfig", func(t *testing.T) {
-		customLsTool, err := newLsTool(backend, "", "")
-		assert.NoError(t, err)
-
-		config := &MiddlewareConfig{
-			LsToolConfig: &ToolConfig{
-				CustomTool: customLsTool,
-			},
-		}
-
-		err = config.Validate()
-		assert.NoError(t, err)
-	})
-
-	t.Run("Config validation fails with no backend and no tool configs", func(t *testing.T) {
-		config := &MiddlewareConfig{}
-
-		err := config.Validate()
-		assert.Error(t, err)
-		assert.Contains(t, err.Error(), "at least one")
 	})
 }
 
