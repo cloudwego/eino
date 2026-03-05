@@ -19,10 +19,12 @@ package adk
 import (
 	"context"
 	"fmt"
+	"sync"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 
+	"github.com/cloudwego/eino/callbacks"
 	"github.com/cloudwego/eino/schema"
 )
 
@@ -1143,6 +1145,145 @@ func TestLoopAgentWithError(t *testing.T) {
 	assert.NotNil(t, errorEvent, "should have received error event")
 	assert.Contains(t, errorEvent.Err.Error(), "error on iteration 3")
 	assert.Equal(t, 3, iterationCount, "loop should stop at iteration 3")
+}
+
+func TestWorkflowCallbackHandlerNotDoubled(t *testing.T) {
+	ctx := context.Background()
+	store := newMyStore()
+
+	var globalCallbackCount int
+	var designatedCallbackCount int
+	var mu sync.Mutex
+
+	globalHandler := callbacks.NewHandlerBuilder().OnStartFn(
+		func(ctx context.Context, info *callbacks.RunInfo, input callbacks.CallbackInput) context.Context {
+			if info.Component == ComponentOfAgent && info.Name == "SubSubAgent" {
+				mu.Lock()
+				globalCallbackCount++
+				mu.Unlock()
+			}
+			return ctx
+		}).Build()
+
+	designatedHandler := callbacks.NewHandlerBuilder().OnStartFn(
+		func(ctx context.Context, info *callbacks.RunInfo, input callbacks.CallbackInput) context.Context {
+			if info.Component == ComponentOfAgent && info.Name == "SubSubAgent" {
+				mu.Lock()
+				designatedCallbackCount++
+				mu.Unlock()
+			}
+			return ctx
+		}).Build()
+
+	iterationCount := 0
+	shouldInterrupt := true
+	subSubAgent := &myAgent{
+		name: "SubSubAgent",
+		runFn: func(ctx context.Context, input *AgentInput, options ...AgentRunOption) *AsyncIterator[*AgentEvent] {
+			iter, generator := NewAsyncIteratorPair[*AgentEvent]()
+			go func() {
+				defer generator.Close()
+				iterationCount++
+				if shouldInterrupt && iterationCount == 2 {
+					generator.Send(Interrupt(ctx, "test_interrupt"))
+					return
+				}
+				generator.Send(&AgentEvent{
+					Output: &AgentOutput{
+						MessageOutput: &MessageVariant{
+							Message: schema.AssistantMessage(fmt.Sprintf("iteration %d", iterationCount), nil),
+							Role:    schema.Assistant,
+						},
+					},
+				})
+			}()
+			return iter
+		},
+		resumeFn: func(ctx context.Context, info *ResumeInfo, opts ...AgentRunOption) *AsyncIterator[*AgentEvent] {
+			iter, generator := NewAsyncIteratorPair[*AgentEvent]()
+			go func() {
+				defer generator.Close()
+				iterationCount++
+				generator.Send(&AgentEvent{
+					Output: &AgentOutput{
+						MessageOutput: &MessageVariant{
+							Message: schema.AssistantMessage(fmt.Sprintf("resumed iteration %d", iterationCount), nil),
+							Role:    schema.Assistant,
+						},
+					},
+				})
+			}()
+			return iter
+		},
+	}
+
+	subWorkflow, err := NewLoopAgent(ctx, &LoopAgentConfig{
+		Name:          "SubWorkflow",
+		SubAgents:     []Agent{subSubAgent},
+		MaxIterations: 2,
+	})
+	assert.NoError(t, err)
+
+	parentWorkflow, err := NewLoopAgent(ctx, &LoopAgentConfig{
+		Name:          "ParentWorkflow",
+		SubAgents:     []Agent{subWorkflow},
+		MaxIterations: 2,
+	})
+	assert.NoError(t, err)
+
+	runner := NewRunner(ctx, RunnerConfig{
+		Agent:           parentWorkflow,
+		CheckPointStore: store,
+	})
+
+	opts := []AgentRunOption{
+		WithCallbacks(globalHandler),
+		WithCallbacks(designatedHandler).DesignateAgent("ParentWorkflow", "SubSubAgent"),
+		WithCheckPointID("cp1"),
+	}
+
+	iterator := runner.Run(ctx, []Message{schema.UserMessage("test")}, opts...)
+
+	var interruptEvent *AgentEvent
+	for {
+		event, ok := iterator.Next()
+		if !ok {
+			break
+		}
+		if event.Action != nil && event.Action.Interrupted != nil {
+			interruptEvent = event
+		}
+	}
+
+	assert.NotNil(t, interruptEvent)
+	assert.Equal(t, 2, iterationCount)
+	assert.Equal(t, 2, globalCallbackCount)
+	assert.Equal(t, 2, designatedCallbackCount)
+
+	shouldInterrupt = false
+	var rootCauseID string
+	for _, intCtx := range interruptEvent.Action.Interrupted.InterruptContexts {
+		if intCtx.IsRootCause {
+			rootCauseID = intCtx.ID
+			break
+		}
+	}
+
+	resumeIter, err := runner.ResumeWithParams(ctx, "cp1", &ResumeParams{
+		Targets: map[string]any{rootCauseID: nil},
+	}, opts...)
+	assert.NoError(t, err)
+
+	for {
+		_, ok := resumeIter.Next()
+		if !ok {
+			break
+		}
+	}
+
+	assert.Equal(t, 5, iterationCount)
+	assert.Equal(t, 5, globalCallbackCount)
+	assert.Equal(t, 5, designatedCallbackCount)
 }
 
 func TestLoopAgentWithBreakLoopFollowedByMoreEvents(t *testing.T) {
