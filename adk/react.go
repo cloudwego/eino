@@ -60,7 +60,7 @@ const (
 func init() {
 	gob.Register(&AgentEvent{})
 	gob.Register(int(0))
-	gob.Register(&reactInput{})
+	schema.RegisterName[*reactInput]("_eino_adk_react_input")
 }
 
 func (s *State) getReturnDirectlyEvent() *AgentEvent {
