@@ -250,7 +250,7 @@ func TestWithCancel_AfterCompletion(t *testing.T) {
 	assert.ErrorIs(t, cancelErr, ErrExecutionCompleted)
 }
 
-// TestWithCancel_AfterBusinessInterrupt verifies cancelFn returns ErrExecutionInterrupted
+// TestWithCancel_AfterBusinessInterrupt verifies cancelFn returns ErrExecutionCompleted
 // when called after the agent has been interrupted by business logic.
 func TestWithCancel_AfterBusinessInterrupt(t *testing.T) {
 	ctx := context.Background()
@@ -288,10 +288,10 @@ func TestWithCancel_AfterBusinessInterrupt(t *testing.T) {
 	assert.True(t, gotInterrupt, "expected business interrupt event")
 
 	cancelErr := cancelFn()
-	assert.ErrorIs(t, cancelErr, ErrExecutionInterrupted)
+	assert.ErrorIs(t, cancelErr, ErrExecutionCompleted)
 }
 
-// TestWithCancel_AfterError verifies cancelFn returns ErrExecutionFailed
+// TestWithCancel_AfterError verifies cancelFn returns ErrExecutionCompleted
 // when called after the agent errors out.
 func TestWithCancel_AfterError(t *testing.T) {
 	ctx := context.Background()
@@ -315,7 +315,7 @@ func TestWithCancel_AfterError(t *testing.T) {
 	}
 
 	cancelErr := cancelFn()
-	assert.ErrorIs(t, cancelErr, ErrExecutionFailed)
+	assert.ErrorIs(t, cancelErr, ErrExecutionCompleted)
 }
 
 // TestWithCancel_TimeoutEscalation tests that WithAgentCancelTimeout causes the
@@ -607,7 +607,7 @@ func TestWithCancel_NoCheckpointStore(t *testing.T) {
 }
 
 // TestWithCancel_ModelError verifies that a model error marks the cancelCtx as
-// failed so that a subsequent cancelFn call returns ErrExecutionFailed.
+// done so that a subsequent cancelFn call returns ErrExecutionCompleted.
 func TestWithCancel_ModelError(t *testing.T) {
 	ctx := context.Background()
 
@@ -635,7 +635,7 @@ func TestWithCancel_ModelError(t *testing.T) {
 	assert.True(t, gotModelErr, "expected non-cancel error event from model failure")
 
 	cancelErr := cancelFn()
-	assert.ErrorIs(t, cancelErr, ErrExecutionFailed, "cancelFn should return ErrExecutionFailed after model error")
+	assert.ErrorIs(t, cancelErr, ErrExecutionCompleted, "cancelFn should return ErrExecutionCompleted after model error")
 }
 
 // TestWithCancel_Resume_SafePoint covers CancelAfterChatModel and
@@ -705,7 +705,7 @@ func TestWithCancel_Resume_SafePoint(t *testing.T) {
 	// Start cancel in a background goroutine (cancelFn blocks until doneChan
 	// closes).  This ensures the CAS(stateRunning→stateCancelling) happens and
 	// cancelChan is closed BEFORE we unblock the model, eliminating the race
-	// where the model completes and markCompleted() runs before the CAS.
+	// where the model completes and markDone() runs before the CAS.
 	cancelDone := make(chan error, 1)
 	go func() {
 		cancelDone <- cancelFn2(WithAgentCancelMode(CancelAfterChatModel))

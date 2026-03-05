@@ -19,6 +19,7 @@ package adk
 import (
 	"context"
 	"errors"
+	"io"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -978,5 +979,242 @@ func TestWithCancel_Resume(t *testing.T) {
 			}
 		}
 		assert.True(t, hasCancelError, "Resume should have CancelError event after cancel")
+	})
+}
+
+func TestCancelMonitoredToolHandler_StreamableToolCall(t *testing.T) {
+	t.Run("NoCancelContext_PassesThrough", func(t *testing.T) {
+		handler := &cancelMonitoredToolHandler{}
+
+		// Create a stream with some data
+		r, w := schema.Pipe[string](1)
+		go func() {
+			w.Send("chunk1", nil)
+			w.Send("chunk2", nil)
+			w.Close()
+		}()
+
+		next := func(ctx context.Context, input *compose.ToolInput) (*compose.StreamToolOutput, error) {
+			return &compose.StreamToolOutput{Result: r}, nil
+		}
+
+		wrapped := handler.WrapStreamableToolCall(next)
+		// No cancelContext in the Go context
+		output, err := wrapped(context.Background(), &compose.ToolInput{Name: "test"})
+		assert.NoError(t, err)
+
+		// Should get the original stream unchanged
+		chunk1, err := output.Result.Recv()
+		assert.NoError(t, err)
+		assert.Equal(t, "chunk1", chunk1)
+
+		chunk2, err := output.Result.Recv()
+		assert.NoError(t, err)
+		assert.Equal(t, "chunk2", chunk2)
+
+		_, err = output.Result.Recv()
+		assert.ErrorIs(t, err, io.EOF)
+	})
+
+	t.Run("WithCancelContext_NoCancel_StreamsNormally", func(t *testing.T) {
+		handler := &cancelMonitoredToolHandler{}
+		cc := newCancelContext()
+
+		r, w := schema.Pipe[string](1)
+		go func() {
+			w.Send("data1", nil)
+			w.Send("data2", nil)
+			w.Close()
+		}()
+
+		next := func(ctx context.Context, input *compose.ToolInput) (*compose.StreamToolOutput, error) {
+			return &compose.StreamToolOutput{Result: r}, nil
+		}
+
+		wrapped := handler.WrapStreamableToolCall(next)
+		ctx := withCancelContext(context.Background(), cc)
+		output, err := wrapped(ctx, &compose.ToolInput{Name: "test"})
+		assert.NoError(t, err)
+
+		chunk1, err := output.Result.Recv()
+		assert.NoError(t, err)
+		assert.Equal(t, "data1", chunk1)
+
+		chunk2, err := output.Result.Recv()
+		assert.NoError(t, err)
+		assert.Equal(t, "data2", chunk2)
+
+		_, err = output.Result.Recv()
+		assert.ErrorIs(t, err, io.EOF)
+	})
+
+	t.Run("WithCancelContext_ImmediateCancel_TerminatesStream", func(t *testing.T) {
+		handler := &cancelMonitoredToolHandler{}
+		cc := newCancelContext()
+
+		// Create a slow stream that we'll cancel mid-way
+		r, w := schema.Pipe[string](1)
+		go func() {
+			defer w.Close()
+			w.Send("chunk1", nil)
+			time.Sleep(200 * time.Millisecond)
+			w.Send("chunk2", nil)
+		}()
+
+		next := func(ctx context.Context, input *compose.ToolInput) (*compose.StreamToolOutput, error) {
+			return &compose.StreamToolOutput{Result: r}, nil
+		}
+
+		wrapped := handler.WrapStreamableToolCall(next)
+		ctx := withCancelContext(context.Background(), cc)
+		output, err := wrapped(ctx, &compose.ToolInput{Name: "test"})
+		assert.NoError(t, err)
+
+		// Read first chunk
+		chunk1, err := output.Result.Recv()
+		assert.NoError(t, err)
+		assert.Equal(t, "chunk1", chunk1)
+
+		// Fire immediate cancel
+		close(cc.immediateChan)
+
+		// Next recv should get ErrStreamCancelled
+		_, err = output.Result.Recv()
+		assert.ErrorIs(t, err, ErrStreamCancelled)
+	})
+
+	t.Run("WithCancelContext_AlreadyCancelled_TerminatesImmediately", func(t *testing.T) {
+		handler := &cancelMonitoredToolHandler{}
+		cc := newCancelContext()
+		close(cc.immediateChan) // Already cancelled
+
+		r, w := schema.Pipe[string](1)
+		go func() {
+			w.Send("should-not-see", nil)
+			w.Close()
+		}()
+
+		next := func(ctx context.Context, input *compose.ToolInput) (*compose.StreamToolOutput, error) {
+			return &compose.StreamToolOutput{Result: r}, nil
+		}
+
+		wrapped := handler.WrapStreamableToolCall(next)
+		ctx := withCancelContext(context.Background(), cc)
+		output, err := wrapped(ctx, &compose.ToolInput{Name: "test"})
+		assert.NoError(t, err)
+
+		_, err = output.Result.Recv()
+		assert.ErrorIs(t, err, ErrStreamCancelled)
+	})
+
+	t.Run("NextReturnsError_PropagatesError", func(t *testing.T) {
+		handler := &cancelMonitoredToolHandler{}
+		cc := newCancelContext()
+
+		nextErr := errors.New("tool execution failed")
+		next := func(ctx context.Context, input *compose.ToolInput) (*compose.StreamToolOutput, error) {
+			return nil, nextErr
+		}
+
+		wrapped := handler.WrapStreamableToolCall(next)
+		ctx := withCancelContext(context.Background(), cc)
+		_, err := wrapped(ctx, &compose.ToolInput{Name: "test"})
+		assert.ErrorIs(t, err, nextErr)
+	})
+}
+
+func TestCancelMonitoredToolHandler_EnhancedStreamableToolCall(t *testing.T) {
+	t.Run("NoCancelContext_PassesThrough", func(t *testing.T) {
+		handler := &cancelMonitoredToolHandler{}
+
+		tr1 := &schema.ToolResult{Parts: []schema.ToolOutputPart{{Type: schema.ToolPartTypeText, Text: "chunk1"}}}
+		r, w := schema.Pipe[*schema.ToolResult](1)
+		go func() {
+			w.Send(tr1, nil)
+			w.Close()
+		}()
+
+		next := func(ctx context.Context, input *compose.ToolInput) (*compose.EnhancedStreamableToolOutput, error) {
+			return &compose.EnhancedStreamableToolOutput{Result: r}, nil
+		}
+
+		wrapped := handler.WrapEnhancedStreamableToolCall(next)
+		output, err := wrapped(context.Background(), &compose.ToolInput{Name: "test"})
+		assert.NoError(t, err)
+
+		result, err := output.Result.Recv()
+		assert.NoError(t, err)
+		assert.Equal(t, tr1, result)
+
+		_, err = output.Result.Recv()
+		assert.ErrorIs(t, err, io.EOF)
+	})
+
+	t.Run("WithCancelContext_ImmediateCancel_TerminatesStream", func(t *testing.T) {
+		handler := &cancelMonitoredToolHandler{}
+		cc := newCancelContext()
+
+		tr1 := &schema.ToolResult{Parts: []schema.ToolOutputPart{{Type: schema.ToolPartTypeText, Text: "chunk1"}}}
+		tr2 := &schema.ToolResult{Parts: []schema.ToolOutputPart{{Type: schema.ToolPartTypeText, Text: "chunk2"}}}
+		r, w := schema.Pipe[*schema.ToolResult](1)
+		go func() {
+			defer w.Close()
+			w.Send(tr1, nil)
+			time.Sleep(200 * time.Millisecond)
+			w.Send(tr2, nil)
+		}()
+
+		next := func(ctx context.Context, input *compose.ToolInput) (*compose.EnhancedStreamableToolOutput, error) {
+			return &compose.EnhancedStreamableToolOutput{Result: r}, nil
+		}
+
+		wrapped := handler.WrapEnhancedStreamableToolCall(next)
+		ctx := withCancelContext(context.Background(), cc)
+		output, err := wrapped(ctx, &compose.ToolInput{Name: "test"})
+		assert.NoError(t, err)
+
+		result, err := output.Result.Recv()
+		assert.NoError(t, err)
+		assert.Equal(t, tr1, result)
+
+		close(cc.immediateChan)
+
+		_, err = output.Result.Recv()
+		assert.ErrorIs(t, err, ErrStreamCancelled)
+	})
+
+	t.Run("NextReturnsError_PropagatesError", func(t *testing.T) {
+		handler := &cancelMonitoredToolHandler{}
+		cc := newCancelContext()
+
+		nextErr := errors.New("enhanced tool failed")
+		next := func(ctx context.Context, input *compose.ToolInput) (*compose.EnhancedStreamableToolOutput, error) {
+			return nil, nextErr
+		}
+
+		wrapped := handler.WrapEnhancedStreamableToolCall(next)
+		ctx := withCancelContext(context.Background(), cc)
+		_, err := wrapped(ctx, &compose.ToolInput{Name: "test"})
+		assert.ErrorIs(t, err, nextErr)
+	})
+}
+
+func TestCancelContextKey(t *testing.T) {
+	t.Run("WithAndGet_RoundTrips", func(t *testing.T) {
+		cc := newCancelContext()
+		ctx := withCancelContext(context.Background(), cc)
+		got := getCancelContext(ctx)
+		assert.Equal(t, cc, got)
+	})
+
+	t.Run("Get_NoValue_ReturnsNil", func(t *testing.T) {
+		got := getCancelContext(context.Background())
+		assert.Nil(t, got)
+	})
+
+	t.Run("With_NilCancelContext_ReturnsOriginalCtx", func(t *testing.T) {
+		ctx := context.Background()
+		result := withCancelContext(ctx, nil)
+		assert.Equal(t, ctx, result)
 	})
 }

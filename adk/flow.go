@@ -345,7 +345,7 @@ func (a *flowAgent) Run(ctx context.Context, input *AgentInput, opts ...AgentRun
 	processedInput, err := a.genAgentInput(ctx, runCtx, o.skipTransferMessages)
 	if err != nil {
 		if cancelCtx != nil {
-			cancelCtx.markError()
+			cancelCtx.markDone()
 		}
 		cbInput := &AgentCallbackInput{Input: input}
 		ctx = callbacks.OnStart(ctx, cbInput)
@@ -363,7 +363,7 @@ func (a *flowAgent) Run(ctx context.Context, input *AgentInput, opts ...AgentRun
 
 	if wf, ok := a.Agent.(*workflowAgent); ok {
 		if cancelCtx != nil {
-			cancelCtx.markCompleted()
+			cancelCtx.markDone()
 		}
 		return wrapIterWithOnEnd(ctx, wf.Run(ctx, input, filterCallbackHandlersForNestedAgents(agentName, opts)...))
 	}
@@ -374,7 +374,7 @@ func (a *flowAgent) Run(ctx context.Context, input *AgentInput, opts ...AgentRun
 
 	go func() {
 		if cancelCtx != nil {
-			defer cancelCtx.markCompleted()
+			defer cancelCtx.markDone()
 		}
 		a.run(ctx, ctxForSubAgents, runCtx, aIter, generator, opts...)
 	}()
@@ -403,7 +403,7 @@ func (a *flowAgent) Resume(ctx context.Context, info *ResumeInfo, opts ...AgentR
 				filteredOpts := filterCallbackHandlersForNestedAgents(agentName, opts)
 				aIter := ra.Resume(ctx, info, filteredOpts...)
 				if cancelCtx != nil {
-					cancelCtx.markCompleted()
+					cancelCtx.markDone()
 				}
 				return wrapIterWithOnEnd(ctx, aIter)
 			}
@@ -412,7 +412,7 @@ func (a *flowAgent) Resume(ctx context.Context, info *ResumeInfo, opts ...AgentR
 			iterator, generator := NewAsyncIteratorPair[*AgentEvent]()
 			go func() {
 				if cancelCtx != nil {
-					defer cancelCtx.markCompleted()
+					defer cancelCtx.markDone()
 				}
 				a.run(ctx, ctxForSubAgents, getRunCtx(ctxForSubAgents), aIter, generator, opts...)
 			}()
@@ -420,7 +420,7 @@ func (a *flowAgent) Resume(ctx context.Context, info *ResumeInfo, opts ...AgentR
 		}
 
 		if cancelCtx != nil {
-			cancelCtx.markError()
+			cancelCtx.markDone()
 		}
 		return wrapIterWithOnEnd(ctx, genErrorIter(fmt.Errorf("failed to resume agent: agent '%s' is an interrupt point "+
 			"but is not a ResumableAgent", agentName)))
@@ -429,7 +429,7 @@ func (a *flowAgent) Resume(ctx context.Context, info *ResumeInfo, opts ...AgentR
 	nextAgentName, err := getNextResumeAgent(ctx, info)
 	if err != nil {
 		if cancelCtx != nil {
-			cancelCtx.markError()
+			cancelCtx.markDone()
 		}
 		return wrapIterWithOnEnd(ctx, genErrorIter(err))
 	}
@@ -442,7 +442,7 @@ func (a *flowAgent) Resume(ctx context.Context, info *ResumeInfo, opts ...AgentR
 			}
 		}
 		if cancelCtx != nil {
-			cancelCtx.markError()
+			cancelCtx.markDone()
 		}
 		return wrapIterWithOnEnd(ctx, genErrorIter(fmt.Errorf("failed to resume agent: agent '%s' not found from flowAgent '%s'", nextAgentName, agentName)))
 	}
