@@ -147,22 +147,25 @@ func (s *preemptSignal) release() {
 
 // TurnLoopConfig is the configuration for creating a TurnLoop.
 type TurnLoopConfig[T any] struct {
-	// GenInput receives all buffered items and decides what to process.
+	// GenInput receives the TurnLoop instance and all buffered items, and decides what to process.
 	// It returns which items to consume now vs keep for later turns.
+	// The loop parameter allows calling Push() or Stop() directly from within the callback.
 	// Required.
-	GenInput func(ctx context.Context, items []T) (*GenInputResult[T], error)
+	GenInput func(ctx context.Context, loop *TurnLoop[T], items []T) (*GenInputResult[T], error)
 
 	// PrepareAgent returns an Agent configured to handle the consumed items.
 	// This callback should set up the agent with appropriate system prompt,
 	// tools, and middlewares based on what items are being processed.
 	// Called once per turn with the items that GenInput decided to consume.
+	// The loop parameter allows calling Push() or Stop() directly from within the callback.
 	// Required.
-	PrepareAgent func(ctx context.Context, consumed []T) (Agent, error)
+	PrepareAgent func(ctx context.Context, loop *TurnLoop[T], consumed []T) (Agent, error)
 
 	// OnAgentEvents is called to handle events emitted by the agent.
 	// The consumed slice contains items that triggered this agent execution.
+	// The loop parameter allows calling Push() or Stop() directly from within the callback.
 	// Optional. If not provided, events are drained silently.
-	OnAgentEvents func(ctx context.Context, consumed []T, events *AsyncIterator[*AgentEvent]) error
+	OnAgentEvents func(ctx context.Context, loop *TurnLoop[T], consumed []T, events *AsyncIterator[*AgentEvent]) error
 
 	// Store is the checkpoint store for persistence and resume. Optional.
 	Store CheckPointStore
@@ -412,7 +415,7 @@ func (l *TurnLoop[T]) run(ctx context.Context) {
 			l.preemptSig.release()
 		}
 
-		result, err := l.config.GenInput(ctx, items)
+		result, err := l.config.GenInput(ctx, l, items)
 		if err != nil {
 			l.buffer.PushFront(items)
 			l.runErr = err
@@ -424,7 +427,7 @@ func (l *TurnLoop[T]) run(ctx context.Context) {
 			return
 		}
 
-		agent, err := l.config.PrepareAgent(ctx, result.Consumed)
+		agent, err := l.config.PrepareAgent(ctx, l, result.Consumed)
 		if err != nil {
 			l.buffer.PushFront(items)
 			l.runErr = err
@@ -492,7 +495,7 @@ func (l *TurnLoop[T]) runAgentAndHandleEvents(
 
 	handleEvents := func() error {
 		if l.config.OnAgentEvents != nil {
-			return l.config.OnAgentEvents(ctx, result.Consumed, iter)
+			return l.config.OnAgentEvents(ctx, l, result.Consumed, iter)
 		}
 		for {
 			event, ok := iter.Next()

@@ -21,6 +21,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"math/rand"
 	"testing"
 
@@ -109,7 +110,7 @@ func TestReact(t *testing.T) {
 		assert.NoError(t, err)
 		assert.NotNil(t, graph)
 
-		compiled, err := graph.Compile(ctx)
+		compiled, err := graph.Compile(ctx, compose.WithMaxRunSteps(math.MaxInt))
 		assert.NoError(t, err)
 		assert.NotNil(t, compiled)
 
@@ -176,7 +177,7 @@ func TestReact(t *testing.T) {
 		assert.NoError(t, err)
 		assert.NotNil(t, graph)
 
-		compiled, err := graph.Compile(ctx)
+		compiled, err := graph.Compile(ctx, compose.WithMaxRunSteps(math.MaxInt))
 		assert.NoError(t, err)
 		assert.NotNil(t, compiled)
 
@@ -268,7 +269,7 @@ func TestReact(t *testing.T) {
 		assert.NoError(t, err)
 		assert.NotNil(t, graph)
 
-		compiled, err := graph.Compile(ctx)
+		compiled, err := graph.Compile(ctx, compose.WithMaxRunSteps(math.MaxInt))
 		assert.NoError(t, err)
 		assert.NotNil(t, compiled)
 
@@ -378,7 +379,7 @@ func TestReact(t *testing.T) {
 		assert.NoError(t, err)
 		assert.NotNil(t, graph)
 
-		compiled, err := graph.Compile(ctx)
+		compiled, err := graph.Compile(ctx, compose.WithMaxRunSteps(math.MaxInt))
 		assert.NoError(t, err)
 		assert.NotNil(t, compiled)
 
@@ -467,7 +468,7 @@ func TestReact(t *testing.T) {
 		assert.NoError(t, err)
 		assert.NotNil(t, graph)
 
-		compiled, err := graph.Compile(ctx)
+		compiled, err := graph.Compile(ctx, compose.WithMaxRunSteps(math.MaxInt))
 		assert.NoError(t, err)
 		assert.NotNil(t, compiled)
 
@@ -497,7 +498,7 @@ func TestReact(t *testing.T) {
 		assert.NoError(t, err)
 		assert.NotNil(t, graph)
 
-		compiled, err = graph.Compile(ctx)
+		compiled, err = graph.Compile(ctx, compose.WithMaxRunSteps(math.MaxInt))
 		assert.NoError(t, err)
 		assert.NotNil(t, compiled)
 

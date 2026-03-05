@@ -806,7 +806,20 @@ func (a *ChatModelAgent) buildNoToolsRunFunc(_ context.Context) runFunc {
 				}
 				return messages, nil
 			})).
-			AppendChatModel(wrappedModel)
+			AppendChatModel(wrappedModel).
+			AppendLambda(compose.InvokableLambda(func(ctx context.Context, msg Message) (Message, error) {
+				if cancelCtx != nil && cancelCtx.shouldCancel() {
+					if cancelCtx.config != nil && cancelCtx.config.Mode&CancelAfterChatModel != 0 {
+						return nil, compose.StatefulInterrupt(ctx, &cancelSafePointInfo{Mode: CancelAfterChatModel}, msg)
+					}
+				}
+
+				wasInterrupted, hasState, state := compose.GetInterruptState[Message](ctx)
+				if wasInterrupted && hasState {
+					msg = state
+				}
+				return msg, nil
+			}))
 
 		var compileOptions []compose.GraphCompileOption
 		compileOptions = append(compileOptions,
