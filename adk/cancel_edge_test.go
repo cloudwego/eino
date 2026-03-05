@@ -311,63 +311,64 @@ func TestWithCancel_AfterError(t *testing.T) {
 }
 
 // TestWithCancel_TimeoutEscalation tests that WithAgentCancelTimeout causes the
-// cancel to escalate to immediate and sets the Escalated flag.
+// cancel to escalate to immediate when the safe-point hasn't fired yet, and
+// that the resulting CancelError has Escalated=true.
+//
+// Strategy: use CancelAfterChatModel mode. The model blocks (never completes),
+// so the safe-point can't fire naturally. After the timeout, escalateToImmediate
+// closes immediateChan which aborts the model stream via cancelMonitoredModel
+// and causes a CancelError — no compose graph-interrupt races involved.
 func TestWithCancel_TimeoutEscalation(t *testing.T) {
 	ctx := context.Background()
 
-	bt := newBlockingTool("bt")
-	// Model responds immediately with a tool call; tool blocks forever.
-	modelResp := toolCallMsg(toolCall("c1", "bt", `{"input":"x"}`))
-	fastModel := &plainResponseModel{}
-	_ = fastModel // reuse simpleChatModel pattern
-
-	modelWithToolCall := &simpleChatModel{response: modelResp}
+	blk := newBlockingChatModel(schema.AssistantMessage("hello", nil))
 
 	agent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
 		Name:        "TestAgent",
 		Description: "test",
-		Model:       modelWithToolCall,
-		ToolsConfig: ToolsConfig{
-			ToolsNodeConfig: compose.ToolsNodeConfig{Tools: []tool.BaseTool{bt}},
-		},
+		Model:       blk,
 	})
-	assert.NoError(t, err)
+	require.NoError(t, err)
+
+	runner := NewRunner(ctx, RunnerConfig{
+		Agent:          agent,
+		EnableStreaming: true, // use streaming so cancelMonitoredModel.Stream is exercised
+	})
 
 	timeout := 300 * time.Millisecond
-	cancelOpt, cancelFn := WithCancel(WithAgentCancelMode(CancelAfterToolCalls), WithAgentCancelTimeout(timeout))
-	iter := agent.Run(ctx, &AgentInput{Messages: []Message{schema.UserMessage("go")}}, cancelOpt)
+	// CancelAfterChatModel + timeout: safe-point can't fire (model never finishes),
+	// so after 300ms the timeout goroutine escalates to immediate.
+	cancelOpt, cancelFn := WithCancel(WithAgentCancelMode(CancelAfterChatModel), WithAgentCancelTimeout(timeout))
+	iter := runner.Run(ctx, []Message{schema.UserMessage("go")}, cancelOpt)
 
-	// Wait for tool to start.
 	select {
-	case <-bt.started:
+	case <-blk.started:
 	case <-time.After(5 * time.Second):
-		t.Fatal("tool did not start")
+		t.Fatal("model did not start")
 	}
 
-	// Fire cancel with safe-point mode; timeout will escalate to immediate.
+	// Fire cancelFn; it will wait for escalation to complete.
 	start := time.Now()
 	cancelErr := cancelFn()
 	elapsed := time.Since(start)
 
-	assert.NoError(t, cancelErr, "cancel should succeed (escalated)")
-	assert.True(t, elapsed < 2*time.Second, "should not wait for slow tool after timeout escalation, elapsed=%v", elapsed)
+	assert.NoError(t, cancelErr, "cancel should succeed after timeout escalation")
+	assert.True(t, elapsed >= timeout, "should wait at least the timeout duration, elapsed=%v", elapsed)
+	assert.True(t, elapsed < 3*time.Second, "should complete shortly after timeout, elapsed=%v", elapsed)
 
-	_, hasCancelError := drainEvents(iter)
-	assert.True(t, hasCancelError, "expected CancelError after timeout escalation")
-
-	// Collect last CancelError and check Escalated flag.
-	iter2 := agent.Run(ctx, &AgentInput{Messages: []Message{schema.UserMessage("go")}},
-		cancelOpt) // reuse opt to trigger pre-start cancel path (already cancelled)
+	var cancelError *CancelError
 	for {
-		e, ok := iter2.Next()
+		e, ok := iter.Next()
 		if !ok {
 			break
 		}
 		var ce *CancelError
 		if e.Err != nil && errors.As(e.Err, &ce) {
-			// Escalated should be true after timeout escalation
-			assert.True(t, ce.Info.Escalated, "CancelError should report Escalated=true")
+			cancelError = ce
 		}
+	}
+	if assert.NotNil(t, cancelError, "expected CancelError after timeout escalation") {
+		assert.True(t, cancelError.Info.Escalated, "CancelError should report Escalated=true")
 	}
 }
 
