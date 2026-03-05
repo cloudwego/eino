@@ -379,6 +379,15 @@ func newReact(ctx context.Context, config *reactConfig) (reactGraph, error) {
 		compose.WithStatePreHandler(modelPreHandle), compose.WithNodeName(chatModel_))
 
 	toolPreHandle := func(ctx context.Context, _ Message, st *State) (Message, error) {
+		// CancelAfterChatModel safe-point: the model has finished (stream fully consumed
+		// by the branch) and the branch routed to the tool node. This pre-handler has a
+		// compose context, so compose.Interrupt saves checkpoint data.
+		if cancelCtx != nil && cancelCtx.shouldCancel() {
+			if cancelCtx.config != nil && cancelCtx.config.Mode&CancelAfterChatModel != 0 {
+				return nil, compose.Interrupt(ctx, &cancelSafePointInfo{Mode: CancelAfterChatModel})
+			}
+		}
+
 		input := st.Messages[len(st.Messages)-1]
 
 		returnDirectly := config.toolsReturnDirectly
@@ -405,11 +414,10 @@ func newReact(ctx context.Context, config *reactConfig) (reactGraph, error) {
 		}
 
 		// CancelAfterToolCalls safe-point: all concurrent tool calls finished.
-		// Return errCancelSafePoint so it propagates through the react graph
-		// and is caught by the runFunc to produce a CancelError.
+		// compose.Interrupt saves checkpoint data so the cancel is fully resumable.
 		if cancelCtx != nil && cancelCtx.shouldCancel() {
 			if cancelCtx.config != nil && cancelCtx.config.Mode&CancelAfterToolCalls != 0 {
-				return nil, errCancelSafePoint
+				return nil, compose.Interrupt(ctx, &cancelSafePointInfo{Mode: CancelAfterToolCalls})
 			}
 		}
 

@@ -21,6 +21,7 @@ import (
 	"io"
 
 	"github.com/cloudwego/eino/components/model"
+	"github.com/cloudwego/eino/compose"
 	"github.com/cloudwego/eino/schema"
 )
 
@@ -47,7 +48,7 @@ func (m *cancelMonitoredModel) Generate(ctx context.Context, input []*schema.Mes
 	// Non-streaming safe-point for CancelAfterChatModel only.
 	cc := m.cancelContext
 	if cc.shouldCancel() && cc.config != nil && cc.config.Mode&CancelAfterChatModel != 0 {
-		return nil, errCancelSafePoint
+		return nil, compose.Interrupt(ctx, &cancelSafePointInfo{Mode: CancelAfterChatModel})
 	}
 
 	return result, nil
@@ -101,10 +102,6 @@ func (m *cancelMonitoredModel) Stream(ctx context.Context, input []*schema.Messa
 				}
 				if r.err != nil {
 					if r.err == io.EOF {
-						// Stream drained naturally — safe-point for CancelAfterChatModel only.
-						if cc.shouldCancel() && cc.config != nil && cc.config.Mode&CancelAfterChatModel != 0 {
-							writer.Send(nil, errCancelSafePoint)
-						}
 						return
 					}
 					writer.Send(nil, r.err)

@@ -697,8 +697,9 @@ func (a *ChatModelAgent) prepareExecContext(ctx context.Context) (*execContext, 
 }
 
 // handleRunFuncError is the common error handler for buildNoToolsRunFunc and buildReActRunFunc.
-// It handles errCancelSafePoint, compose interrupts (both cancel-triggered and business),
-// and generic errors. In all cases it sends the appropriate event to the generator.
+// It handles compose interrupts (cancel-triggered safe-point, CancelImmediate graph interrupt,
+// and business interrupts) and generic errors. In all cases it sends the appropriate event
+// to the generator.
 func (a *ChatModelAgent) handleRunFuncError(
 	ctx context.Context,
 	err error,
@@ -706,20 +707,21 @@ func (a *ChatModelAgent) handleRunFuncError(
 	store *bridgeStore,
 	generator *AsyncGenerator[*AgentEvent],
 ) {
-	// Cancel safe-point error from cancelMonitoredModel or toolPostHandle
-	if errors.Is(err, errCancelSafePoint) && cancelCtx != nil {
-		cancelCtx.markCancelHandled()
-		cancelErr := cancelCtx.createCancelError()
-		generator.Send(&AgentEvent{Err: cancelErr})
-		return
-	}
-
 	info, ok := compose.ExtractInterruptInfo(err)
 	if ok {
-		if info.FromGraphInterrupt {
-			// Cancel-triggered interrupt (CancelImmediate via WithGraphInterrupt)
-			composeSignal := FromInterruptContexts(info.InterruptContexts)
+		composeSignal := FromInterruptContexts(info.InterruptContexts)
+		isCancelTriggered := false
 
+		// Check for safe-point cancel via typed info from compose.Interrupt
+		if extractCancelSafePointInfo(info.InterruptContexts) != nil {
+			isCancelTriggered = true
+		}
+		// Check for CancelImmediate via graph interrupt
+		if info.FromGraphInterrupt && cancelCtx != nil && cancelCtx.shouldCancel() {
+			isCancelTriggered = true
+		}
+
+		if isCancelTriggered {
 			data, existed, sErr := store.Get(ctx, bridgeCheckpointID)
 			if sErr != nil {
 				generator.Send(&AgentEvent{AgentName: a.name, Err: fmt.Errorf("failed to get checkpoint on cancel: %w", sErr)})
@@ -737,6 +739,7 @@ func (a *ChatModelAgent) handleRunFuncError(
 				return
 			}
 			cancelErr.interruptSignal = evt.Action.internalInterrupted
+			cancelErr.InterruptContexts = evt.Action.Interrupted.InterruptContexts
 
 			cancelCtx.markCancelHandled()
 			generator.Send(&AgentEvent{Err: cancelErr})

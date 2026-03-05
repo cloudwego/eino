@@ -30,6 +30,7 @@ import (
 func init() {
 	gob.Register(&CancelError{})
 	gob.Register(&AgentCancelInfo{})
+	gob.Register(&cancelSafePointInfo{})
 }
 
 // CancelMode specifies when an agent should be canceled.
@@ -69,9 +70,11 @@ func WithAgentCancelMode(mode CancelMode) AgentCancelOption {
 }
 
 // WithAgentCancelTimeout sets a timeout for the cancel operation.
-// For CancelImmediate, the graph interrupt includes this as a deadline.
-// For safe-point modes, if the safe-point hasn't fired within this duration,
-// the cancel escalates to an immediate graph interrupt.
+// This only applies to safe-point modes (CancelAfterChatModel, CancelAfterToolCalls):
+// if the safe-point hasn't fired within this duration, the cancel escalates to
+// an immediate graph interrupt.
+// For CancelImmediate this timeout is ignored — the graph interrupt fires
+// immediately with timeout=0.
 func WithAgentCancelTimeout(timeout time.Duration) AgentCancelOption {
 	return func(config *agentCancelConfig) {
 		config.Timeout = &timeout
@@ -88,7 +91,13 @@ type AgentCancelInfo struct {
 // CancelError is sent via AgentEvent.Err when an agent is cancelled.
 // Use errors.As to extract it from event errors.
 type CancelError struct {
-	Info            *AgentCancelInfo
+	Info *AgentCancelInfo
+
+	// InterruptContexts provides the interrupt contexts needed for targeted
+	// resumption via Runner.ResumeWithParams. This is always populated when a
+	// cancel is handled, regardless of the cancel mode.
+	InterruptContexts []*InterruptCtx
+
 	interruptSignal *InterruptSignal // unexported — only Runner needs it for checkpoint
 }
 
@@ -118,12 +127,29 @@ var (
 
 	// ErrStreamCancelled is the error sent through the stream when CancelImmediate aborts it.
 	ErrStreamCancelled = errors.New("stream cancelled")
-
-	// errCancelSafePoint is an internal sentinel error returned from within the react graph
-	// when a safe-point cancel condition is met (CancelAfterChatModel or CancelAfterToolCalls).
-	// The runFunc catches this and converts it to a CancelError.
-	errCancelSafePoint = errors.New("cancel safe point reached")
 )
+
+// cancelSafePointInfo is the typed info passed to compose.Interrupt when a
+// safe-point cancel condition is met (CancelAfterChatModel or CancelAfterToolCalls).
+// handleRunFuncError uses type assertion on InterruptCtx.Info to distinguish
+// cancel-triggered safe-point interrupts from business interrupts.
+type cancelSafePointInfo struct {
+	Mode CancelMode
+}
+
+// extractCancelSafePointInfo looks for a *cancelSafePointInfo in the interrupt
+// contexts' Info fields. Returns nil if none is found.
+func extractCancelSafePointInfo(contexts []*InterruptCtx) *cancelSafePointInfo {
+	for _, ctx := range contexts {
+		if ctx == nil {
+			continue
+		}
+		if sp, ok := ctx.Info.(*cancelSafePointInfo); ok && ctx.IsRootCause {
+			return sp
+		}
+	}
+	return nil
+}
 
 // WithCancel creates an AgentRunOption that enables cancellation for an agent run.
 // It returns the option to pass to Run/Resume and a cancel function.
@@ -159,7 +185,7 @@ type cancelContext struct {
 	cancelChan    chan struct{} // closed when cancel is requested (all modes, not just safe-point)
 	immediateChan chan struct{} // closed when an immediate graph interrupt fires
 	doneChan      chan struct{} // closed when execution completes (by any mark* method)
-	doneOnce      sync.Once    // ensures doneChan is closed exactly once
+	doneOnce      sync.Once     // ensures doneChan is closed exactly once
 
 	state         int32 // stateRunning, stateCancelling, stateCompleted, stateInterrupted, stateError, stateCancelHandled
 	interruptSent int32 // interruptNotSent, interruptGraceful, interruptImmediate
@@ -322,6 +348,12 @@ func (cc *cancelContext) createCancelError() *CancelError {
 	}
 	if atomic.LoadInt32(&cc.escalated) == 1 {
 		info.Escalated = true
+		// Timeout is true when a safe-point mode was escalated to immediate
+		// because the safe-point didn't fire within the configured duration.
+		// For CancelImmediate the escalation flag is meaningless (already immediate).
+		if cc.config != nil && cc.config.Mode != CancelImmediate {
+			info.Timeout = true
+		}
 	}
 	return &CancelError{
 		Info: info,
@@ -370,12 +402,12 @@ func (cc *cancelContext) buildCancelFunc(defaultOpts ...AgentCancelOption) Agent
 			if cfg.Mode == CancelImmediate {
 				cc.sendInterrupt(true)
 			} else {
-				// Safe-point mode: cancelMonitoredModel and toolPostHandle will
-				// check shouldCancel() and return errCancelSafePoint when their
+				// Safe-point mode: cancelMonitoredModel and toolPreHandle/toolPostHandle will
+				// check shouldCancel() and call compose.Interrupt when their
 				// safe-point condition is met. No graph interrupt is sent.
 			}
 
-			if cfg.Timeout != nil && *cfg.Timeout > 0 {
+			if cfg.Timeout != nil && *cfg.Timeout > 0 && cfg.Mode != CancelImmediate {
 				go func() {
 					timer := time.NewTimer(*cfg.Timeout)
 					defer timer.Stop()
@@ -399,8 +431,14 @@ func (cc *cancelContext) buildCancelFunc(defaultOpts ...AgentCancelOption) Agent
 			case stateError:
 				result = ErrExecutionFailed
 			default:
-				// Cancel succeeded (stateCancelling or stateCancelHandled)
-				result = nil
+				// Cancel succeeded (stateCancelling or stateCancelHandled).
+				// If a safe-point mode was escalated to immediate because the
+				// timeout fired before the safe-point was reached, report timeout.
+				if atomic.LoadInt32(&cc.escalated) == 1 && cfg.Mode != CancelImmediate {
+					result = ErrCancelTimeout
+				} else {
+					result = nil
+				}
 			}
 		})
 

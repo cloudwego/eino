@@ -352,7 +352,7 @@ func TestWithCancel_TimeoutEscalation(t *testing.T) {
 	cancelErr := cancelFn()
 	elapsed := time.Since(start)
 
-	assert.NoError(t, cancelErr, "cancel should succeed after timeout escalation")
+	assert.ErrorIs(t, cancelErr, ErrCancelTimeout, "cancel should return ErrCancelTimeout after timeout escalation")
 	assert.True(t, elapsed >= timeout, "should wait at least the timeout duration, elapsed=%v", elapsed)
 	assert.True(t, elapsed < 3*time.Second, "should complete shortly after timeout, elapsed=%v", elapsed)
 
@@ -369,6 +369,7 @@ func TestWithCancel_TimeoutEscalation(t *testing.T) {
 	}
 	if assert.NotNil(t, cancelError, "expected CancelError after timeout escalation") {
 		assert.True(t, cancelError.Info.Escalated, "CancelError should report Escalated=true")
+		assert.True(t, cancelError.Info.Timeout, "CancelError should report Timeout=true")
 	}
 }
 
@@ -706,7 +707,7 @@ func TestWithCancel_Resume_SafePoint(t *testing.T) {
 	time.Sleep(50 * time.Millisecond)
 
 	// Now unblock the model.  cancelMonitoredModel.Generate will see
-	// shouldCancel()==true and return errCancelSafePoint.
+	// shouldCancel()==true and call compose.Interrupt with cancelSafePointInfo.
 	close(resumeModel.unblockCh)
 
 	cancelErr := <-cancelDone
@@ -729,3 +730,201 @@ func (m *interruptingChatModel) Stream(ctx context.Context, _ []*schema.Message,
 }
 
 func (m *interruptingChatModel) BindTools(_ []*schema.ToolInfo) error { return nil }
+
+// TestWithCancel_TargetedResume_CancelImmediate cancels an agent via CancelImmediate,
+// extracts InterruptContexts from the resulting CancelError, and uses them
+// for targeted resumption via Runner.ResumeWithParams.
+func TestWithCancel_TargetedResume_CancelImmediate(t *testing.T) {
+	ctx := context.Background()
+
+	blk := newBlockingChatModel(toolCallMsg(toolCall("c1", "st", `{"input":"x"}`)))
+	st := newSlowTool("st", 50*time.Millisecond, "result")
+
+	agent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+		Name:        "TestAgent",
+		Description: "test",
+		Model:       blk,
+		ToolsConfig: ToolsConfig{
+			ToolsNodeConfig: compose.ToolsNodeConfig{Tools: []tool.BaseTool{st}},
+		},
+	})
+	require.NoError(t, err)
+
+	store := newCancelTestStore()
+	runner := NewRunner(ctx, RunnerConfig{
+		Agent:           agent,
+		CheckPointStore: store,
+	})
+
+	cancelOpt, cancelFn := WithCancel()
+	iter := runner.Run(ctx, []Message{schema.UserMessage("go")}, cancelOpt, WithCheckPointID("targeted-imm-1"))
+
+	select {
+	case <-blk.started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("model did not start")
+	}
+
+	cancelErr := cancelFn() // CancelImmediate (default)
+	assert.NoError(t, cancelErr)
+
+	var cancelError *CancelError
+	for {
+		e, ok := iter.Next()
+		if !ok {
+			break
+		}
+		var ce *CancelError
+		if e.Err != nil && errors.As(e.Err, &ce) {
+			cancelError = ce
+		}
+	}
+
+	require.NotNil(t, cancelError, "expected CancelError")
+	require.NotEmpty(t, cancelError.InterruptContexts, "CancelError should have InterruptContexts for targeted resume")
+
+	// --- resume with targeted params ---
+	targets := make(map[string]any)
+	for _, ic := range cancelError.InterruptContexts {
+		targets[ic.ID] = nil
+	}
+
+	resumeModel := &plainResponseModel{text: "resumed"}
+	agent2, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+		Name:        "TestAgent",
+		Description: "test",
+		Model:       resumeModel,
+		ToolsConfig: ToolsConfig{
+			ToolsNodeConfig: compose.ToolsNodeConfig{Tools: []tool.BaseTool{st}},
+		},
+	})
+	require.NoError(t, err)
+
+	runner2 := NewRunner(ctx, RunnerConfig{
+		Agent:           agent2,
+		CheckPointStore: store,
+	})
+
+	resumeIter, err := runner2.ResumeWithParams(ctx, "targeted-imm-1", &ResumeParams{Targets: targets})
+	require.NoError(t, err)
+
+	var gotOutput bool
+	for {
+		e, ok := resumeIter.Next()
+		if !ok {
+			break
+		}
+		if e.Err != nil {
+			t.Fatalf("unexpected error during targeted resume: %v", e.Err)
+		}
+		if e.Output != nil && e.Output.MessageOutput != nil {
+			gotOutput = true
+		}
+	}
+	assert.True(t, gotOutput, "targeted resume should produce output")
+}
+
+// TestWithCancel_TargetedResume_SafePoint cancels an agent via CancelAfterChatModel
+// (safe-point) and verifies that InterruptContexts are populated on the CancelError
+// and that targeted resume via ResumeWithParams succeeds.
+// Since safe-point cancels now use compose.Interrupt, compose saves checkpoint data,
+// making the cancel fully resumable.
+func TestWithCancel_TargetedResume_SafePoint(t *testing.T) {
+	ctx := context.Background()
+
+	// The model returns a tool call so the react graph routes to toolPreHandle,
+	// which detects CancelAfterChatModel and fires compose.Interrupt.
+	blk := newBlockingChatModel(toolCallMsg(toolCall("c1", "st", `{"input":"x"}`)))
+	st := newSlowTool("st", 0, "result")
+
+	agent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+		Name:        "TestAgent",
+		Description: "test",
+		Model:       blk,
+		ToolsConfig: ToolsConfig{
+			ToolsNodeConfig: compose.ToolsNodeConfig{Tools: []tool.BaseTool{st}},
+		},
+	})
+	require.NoError(t, err)
+
+	store := newCancelTestStore()
+	runner := NewRunner(ctx, RunnerConfig{
+		Agent:           agent,
+		CheckPointStore: store,
+	})
+
+	cancelOpt, cancelFn := WithCancel()
+	iter := runner.Run(ctx, []Message{schema.UserMessage("go")}, cancelOpt, WithCheckPointID("targeted-sp-1"))
+
+	select {
+	case <-blk.started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("model did not start")
+	}
+
+	// Start cancelFn in background so the CAS happens before the model unblocks.
+	cancelDone := make(chan error, 1)
+	go func() {
+		cancelDone <- cancelFn(WithAgentCancelMode(CancelAfterChatModel))
+	}()
+	time.Sleep(50 * time.Millisecond)
+	close(blk.unblockCh)
+
+	cancelErr := <-cancelDone
+	assert.NoError(t, cancelErr)
+
+	var cancelError *CancelError
+	for {
+		e, ok := iter.Next()
+		if !ok {
+			break
+		}
+		var ce *CancelError
+		if e.Err != nil && errors.As(e.Err, &ce) {
+			cancelError = ce
+		}
+	}
+
+	require.NotNil(t, cancelError, "expected CancelError")
+	require.NotEmpty(t, cancelError.InterruptContexts, "CancelError should have InterruptContexts for targeted resume")
+
+	// --- resume with targeted params ---
+	targets := make(map[string]any)
+	for _, ic := range cancelError.InterruptContexts {
+		targets[ic.ID] = nil
+	}
+
+	resumeModel := &plainResponseModel{text: "resumed"}
+	agent2, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+		Name:        "TestAgent",
+		Description: "test",
+		Model:       resumeModel,
+		ToolsConfig: ToolsConfig{
+			ToolsNodeConfig: compose.ToolsNodeConfig{Tools: []tool.BaseTool{st}},
+		},
+	})
+	require.NoError(t, err)
+
+	runner2 := NewRunner(ctx, RunnerConfig{
+		Agent:           agent2,
+		CheckPointStore: store,
+	})
+
+	resumeIter, err := runner2.ResumeWithParams(ctx, "targeted-sp-1", &ResumeParams{Targets: targets})
+	require.NoError(t, err)
+
+	var gotOutput bool
+	for {
+		e, ok := resumeIter.Next()
+		if !ok {
+			break
+		}
+		if e.Err != nil {
+			t.Fatalf("unexpected error during targeted resume: %v", e.Err)
+		}
+		if e.Output != nil && e.Output.MessageOutput != nil {
+			gotOutput = true
+		}
+	}
+	assert.True(t, gotOutput, "targeted resume should produce output")
+}
