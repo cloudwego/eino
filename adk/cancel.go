@@ -374,7 +374,6 @@ func (cc *cancelContext) markCancelHandled() {
 	cc.doneOnce.Do(func() { close(cc.doneChan) })
 }
 
-
 // createCancelError creates a CancelError based on the current cancel state.
 func (cc *cancelContext) createCancelError() *CancelError {
 	info := &AgentCancelInfo{}
