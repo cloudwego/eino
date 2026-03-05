@@ -18,7 +18,6 @@ package adk
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"runtime/debug"
 	"sync"
@@ -29,29 +28,23 @@ import (
 	"github.com/cloudwego/eino/internal/safe"
 )
 
-var (
-	// ErrTurnLoopAlreadyStopped is returned when Push() is called on a TurnLoop
-	// that has already stopped.
-	ErrTurnLoopAlreadyStopped = errors.New("turn loop has already stopped")
-)
-
-type turnLoopCancelSig struct {
+type turnLoopStopSig struct {
 	done   chan struct{}
 	config atomic.Value
 }
 
-func newTurnLoopCancelSig() *turnLoopCancelSig {
-	return &turnLoopCancelSig{
+func newTurnLoopStopSig() *turnLoopStopSig {
+	return &turnLoopStopSig{
 		done: make(chan struct{}),
 	}
 }
 
-func (cs *turnLoopCancelSig) stop(cfg *stopConfig) {
+func (cs *turnLoopStopSig) stop(cfg *stopConfig) {
 	cs.config.Store(cfg)
 	close(cs.done)
 }
 
-func (cs *turnLoopCancelSig) isCancelled() bool {
+func (cs *turnLoopStopSig) isStopped() bool {
 	select {
 	case <-cs.done:
 		return true
@@ -60,14 +53,14 @@ func (cs *turnLoopCancelSig) isCancelled() bool {
 	}
 }
 
-func (cs *turnLoopCancelSig) getConfig() *stopConfig {
+func (cs *turnLoopStopSig) getConfig() *stopConfig {
 	if v := cs.config.Load(); v != nil {
 		return v.(*stopConfig)
 	}
 	return nil
 }
 
-func (cs *turnLoopCancelSig) getDoneChan() <-chan struct{} {
+func (cs *turnLoopStopSig) getDoneChan() <-chan struct{} {
 	if cs != nil {
 		return cs.done
 	}
@@ -164,7 +157,8 @@ type TurnLoopConfig[T any] struct {
 	// OnAgentEvents is called to handle events emitted by the agent.
 	// The consumed slice contains items that triggered this agent execution.
 	// The loop parameter allows calling Push() or Stop() directly from within the callback.
-	// Optional. If not provided, events are drained silently.
+	// Optional. If not provided, events are drained and errors (except CancelError
+	// from Stop-triggered cancellation) are returned as ExitReason.
 	OnAgentEvents func(ctx context.Context, loop *TurnLoop[T], consumed []T, events *AsyncIterator[*AgentEvent]) error
 
 	// Store is the checkpoint store for persistence and resume. Optional.
@@ -228,9 +222,9 @@ type TurnLoop[T any] struct {
 
 	result *TurnLoopExitState[T]
 
-	cancelOnce sync.Once
+	stopOnce sync.Once
 
-	cancelSig *turnLoopCancelSig
+	stopSig *turnLoopStopSig
 
 	preemptSig *preemptSignal
 
@@ -296,7 +290,7 @@ func RunTurnLoop[T any](ctx context.Context, cfg TurnLoopConfig[T]) *TurnLoop[T]
 		config:     cfg,
 		buffer:     internal.NewUnboundedChan[T](),
 		done:       make(chan struct{}),
-		cancelSig:  newTurnLoopCancelSig(),
+		stopSig:    newTurnLoopStopSig(),
 		preemptSig: newPreemptSignal(),
 	}
 	go l.run(ctx)
@@ -357,15 +351,19 @@ func (l *TurnLoop[T]) Push(item T, opts ...PushOption) bool {
 // Use WithAgentCancel to control how the currently running agent is cancelled.
 // This method is idempotent - multiple calls have no additional effect.
 // Call Wait() to block until the loop has fully exited and get the result.
+//
+// If the running agent does not support the WithCancel AgentRunOption,
+// Stop degrades to "exit the loop on entering the next iteration" — the
+// current agent turn runs to completion before the loop exits.
 func (l *TurnLoop[T]) Stop(opts ...StopOption) {
-	l.cancelOnce.Do(func() {
+	l.stopOnce.Do(func() {
 		cfg := &stopConfig{}
 		for _, opt := range opts {
 			opt(cfg)
 		}
 
 		l.stopCfg = cfg
-		l.cancelSig.stop(cfg)
+		l.stopSig.stop(cfg)
 
 		atomic.StoreInt32(&l.stopped, 1)
 
@@ -384,8 +382,18 @@ func (l *TurnLoop[T]) Wait() *TurnLoopExitState[T] {
 func (l *TurnLoop[T]) run(ctx context.Context) {
 	defer l.cleanup()
 
+	// Monitor context cancellation: close the buffer so that a blocking
+	// Receive() unblocks. The loop will then check ctx.Err() and exit.
+	go func() {
+		select {
+		case <-ctx.Done():
+			l.buffer.Close()
+		case <-l.done:
+		}
+	}()
+
 	for {
-		if l.cancelSig.isCancelled() {
+		if l.stopSig.isStopped() {
 			return
 		}
 
@@ -403,7 +411,7 @@ func (l *TurnLoop[T]) run(ctx context.Context) {
 			return
 		}
 
-		if l.cancelSig.isCancelled() {
+		if l.stopSig.isStopped() {
 			l.buffer.PushFront([]T{first})
 			return
 		}
@@ -422,7 +430,7 @@ func (l *TurnLoop[T]) run(ctx context.Context) {
 			return
 		}
 
-		if l.cancelSig.isCancelled() {
+		if l.stopSig.isStopped() {
 			l.buffer.PushFront(items)
 			return
 		}
@@ -434,7 +442,7 @@ func (l *TurnLoop[T]) run(ctx context.Context) {
 			return
 		}
 
-		if l.cancelSig.isCancelled() {
+		if l.stopSig.isStopped() {
 			l.buffer.PushFront(items)
 			return
 		}
@@ -550,10 +558,14 @@ func (l *TurnLoop[T]) runAgentAndHandleEvents(
 	case <-preemptDone:
 		<-done
 		return nil
-	case <-l.cancelSig.getDoneChan():
-		cfg := l.cancelSig.getConfig()
+	case <-l.stopSig.getDoneChan():
+		cfg := l.stopSig.getConfig()
 		if cfg != nil {
-			_ = agentCancelFunc(cfg.agentCancelOpts...)
+			// Run agentCancelFunc in a goroutine: it blocks until the agent's
+			// cancel context is marked done. The flowAgent wrapper ensures
+			// markDone() is always deferred, so this won't deadlock even if
+			// the agent doesn't explicitly support WithCancel.
+			go func() { _ = agentCancelFunc(cfg.agentCancelOpts...) }()
 		}
 		<-done
 		return handleErr

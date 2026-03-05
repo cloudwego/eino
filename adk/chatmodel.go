@@ -388,6 +388,14 @@ func NewChatModelAgent(ctx context.Context, config *ChatModelAgentConfig) (*Chat
 	)
 	tc.ToolCallMiddlewares = append(tc.ToolCallMiddlewares, collectToolMiddlewaresFromMiddlewares(config.Middlewares)...)
 
+	// Cancel monitoring middleware (innermost — wraps streamable tool calls with
+	// immediateChan monitoring, sending ErrStreamCancelled when CancelImmediate fires).
+	cancelToolHandler := &cancelMonitoredToolHandler{}
+	tc.ToolCallMiddlewares = append(tc.ToolCallMiddlewares, compose.ToolMiddleware{
+		Streamable:         cancelToolHandler.WrapStreamableToolCall,
+		EnhancedStreamable: cancelToolHandler.WrapEnhancedStreamableToolCall,
+	})
+
 	return &ChatModelAgent{
 		name:             config.Name,
 		description:      config.Description,
@@ -757,9 +765,6 @@ func (a *ChatModelAgent) handleRunFuncError(
 		}
 
 		// Business interrupt (user-initiated via compose.Interrupt)
-		if cancelCtx != nil {
-			cancelCtx.markInterrupted()
-		}
 
 		data, existed, sErr := store.Get(ctx, bridgeCheckpointID)
 		if sErr != nil {
@@ -783,9 +788,6 @@ func (a *ChatModelAgent) handleRunFuncError(
 	}
 
 	// Other error
-	if cancelCtx != nil {
-		cancelCtx.markError()
-	}
 	generator.Send(&AgentEvent{Err: err})
 }
 
@@ -797,6 +799,7 @@ func (a *ChatModelAgent) buildNoToolsRunFunc(_ context.Context) runFunc {
 
 	return func(ctx context.Context, p *runParams) {
 		cancelCtx := p.cancelCtx
+		ctx = withCancelContext(ctx, cancelCtx)
 
 		wrappedModel := buildModelWrappers(a.model, &modelWrapperConfig{
 			handlers:      a.handlers,
@@ -913,6 +916,7 @@ func (a *ChatModelAgent) buildReActRunFunc(_ context.Context, bc *execContext) (
 		if conf.modelWrapperConf != nil {
 			conf.modelWrapperConf.cancelContext = cancelCtx
 		}
+		ctx = withCancelContext(ctx, cancelCtx)
 
 		g, err := newReact(ctx, conf)
 		if err != nil {
@@ -1079,9 +1083,9 @@ func (a *ChatModelAgent) Run(ctx context.Context, input *AgentInput, opts ...Age
 	ctx, run, bc, err := a.getRunFunc(ctx)
 	if err != nil {
 		go func() {
-			// Mark cancelCtx as errored so that cancelFunc unblocks (it waits on doneChan).
+			// Mark cancelCtx as done so that cancelFunc unblocks (it waits on doneChan).
 			if cc := getCommonOptions(nil, opts...).cancelCtx; cc != nil {
-				defer cc.markError()
+				defer cc.markDone()
 			}
 			generator.Send(&AgentEvent{Err: err})
 			generator.Close()
@@ -1104,7 +1108,7 @@ func (a *ChatModelAgent) Run(ctx context.Context, input *AgentInput, opts ...Age
 
 	go func() {
 		if cancelCtx != nil {
-			defer cancelCtx.markCompleted()
+			defer cancelCtx.markDone()
 		}
 		defer func() {
 			panicErr := recover()
@@ -1146,9 +1150,9 @@ func (a *ChatModelAgent) Resume(ctx context.Context, info *ResumeInfo, opts ...A
 	ctx, run, bc, err := a.getRunFunc(ctx)
 	if err != nil {
 		go func() {
-			// Mark cancelCtx as errored so that cancelFunc unblocks (it waits on doneChan).
+			// Mark cancelCtx as done so that cancelFunc unblocks (it waits on doneChan).
 			if cc := getCommonOptions(nil, opts...).cancelCtx; cc != nil {
-				defer cc.markError()
+				defer cc.markDone()
 			}
 			generator.Send(&AgentEvent{Err: err})
 			generator.Close()
@@ -1202,7 +1206,7 @@ func (a *ChatModelAgent) Resume(ctx context.Context, info *ResumeInfo, opts ...A
 
 	go func() {
 		if cancelCtx != nil {
-			defer cancelCtx.markCompleted()
+			defer cancelCtx.markDone()
 		}
 		defer func() {
 			panicErr := recover()

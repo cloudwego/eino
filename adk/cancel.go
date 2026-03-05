@@ -122,14 +122,9 @@ var (
 	// ErrCancelTimeout is returned by AgentCancelFunc when the cancel operation timed out.
 	ErrCancelTimeout = errors.New("cancel timed out")
 
-	// ErrExecutionCompleted is returned by AgentCancelFunc when the agent has already completed.
+	// ErrExecutionCompleted is returned by AgentCancelFunc when the agent has already finished
+	// (completed, interrupted, or errored) before the cancel took effect.
 	ErrExecutionCompleted = errors.New("execution already completed")
-
-	// ErrExecutionInterrupted is returned by AgentCancelFunc when the agent was already interrupted.
-	ErrExecutionInterrupted = errors.New("execution already interrupted by business logic")
-
-	// ErrExecutionFailed is returned by AgentCancelFunc when the agent has already errored out.
-	ErrExecutionFailed = errors.New("execution already failed")
 
 	// ErrStreamCancelled is the error sent through the stream when CancelImmediate aborts it.
 	ErrStreamCancelled = errors.New("stream cancelled")
@@ -174,28 +169,26 @@ func WithCancel() (AgentRunOption, AgentCancelFunc) {
 // State transition rules:
 //
 //	stateRunning -> stateCancelling     (cancel requested by AgentCancelFunc)
-//	stateRunning -> stateCompleted      (execution finished normally)
-//	stateRunning -> stateInterrupted    (business logic interrupt, not cancel-triggered)
-//	stateRunning -> stateError          (execution failed with an error)
+//	stateRunning -> stateDone           (execution finished: completed, interrupted, or errored)
 //	stateCancelling -> stateCancelHandled (cancel path in runFunc emitted CancelError)
-//	stateCancelling -> stateCompleted   (execution completed before cancel took effect)
-//	stateCancelling -> stateInterrupted (business interrupt arrived during cancel)
-//	stateCancelling -> stateError       (execution errored during cancel)
+//	stateCancelling -> stateDone        (execution finished before cancel took effect)
 //
-// Terminal states: stateCompleted, stateInterrupted, stateError, stateCancelHandled.
+// Terminal states: stateDone, stateCancelHandled.
+//
+// Note: We intentionally do NOT distinguish between "completed", "interrupted", and "errored"
+// terminal states. End-users get the actual outcome (interrupt action, error) from AgentEvent.
+// This simplification keeps the state machine minimal — only the cancel/non-cancel distinction
+// matters for the AgentCancelFunc return value.
 const (
 	// stateRunning is the initial state: agent is executing normally.
 	stateRunning int32 = 0
 	// stateCancelling means AgentCancelFunc has been called and cancelChan is
 	// closed, but the cancel has not yet been handled by the runFunc.
 	stateCancelling int32 = 1
-	// stateCompleted means execution finished normally (no cancel, no error).
-	stateCompleted int32 = 2
-	// stateInterrupted means execution was interrupted by business logic
-	// (e.g. a compose.Interrupt not triggered by cancellation).
-	stateInterrupted int32 = 3
-	// stateError means execution failed with a non-cancel, non-interrupt error.
-	stateError int32 = 4
+	// stateDone means execution has finished through any non-cancel path:
+	// normal completion, business interrupt, or error. The specific outcome
+	// is conveyed through AgentEvent, not through the cancel state machine.
+	stateDone int32 = 2
 	// stateCancelHandled means the cancel was processed by the runFunc and a
 	// CancelError was emitted through the event stream. This is the success
 	// terminal state for cancellation.
@@ -221,6 +214,24 @@ const (
 	interruptImmediate int32 = 2
 )
 
+type cancelContextKey struct{}
+
+// withCancelContext stores a cancelContext in the Go context.
+func withCancelContext(ctx context.Context, cc *cancelContext) context.Context {
+	if cc == nil {
+		return ctx
+	}
+	return context.WithValue(ctx, cancelContextKey{}, cc)
+}
+
+// getCancelContext retrieves the cancelContext from the Go context, or nil.
+func getCancelContext(ctx context.Context) *cancelContext {
+	if v := ctx.Value(cancelContextKey{}); v != nil {
+		return v.(*cancelContext)
+	}
+	return nil
+}
+
 type cancelContext struct {
 	config *agentCancelConfig
 
@@ -229,7 +240,7 @@ type cancelContext struct {
 	doneChan      chan struct{} // closed when execution completes (by any mark* method)
 	doneOnce      sync.Once     // ensures doneChan is closed exactly once
 
-	state         int32 // stateRunning, stateCancelling, stateCompleted, stateInterrupted, stateError, stateCancelHandled
+	state         int32 // stateRunning, stateCancelling, stateDone, stateCancelHandled
 	interruptSent int32 // interruptNotSent, interruptGraceful, interruptImmediate
 	escalated     int32 // 1 if escalated from safe-point to immediate
 
@@ -336,51 +347,33 @@ func (cc *cancelContext) setGraphInterruptFunc(interrupt func(...compose.GraphIn
 	}
 }
 
-// markCompleted marks the execution as completed normally.
-func (cc *cancelContext) markCompleted() {
-	if atomic.CompareAndSwapInt32(&cc.state, stateRunning, stateCompleted) {
+// markDone marks the execution as finished through any non-cancel path
+// (normal completion, business interrupt, or error).
+// This is safe to call even if a cancel is in progress — it allows the
+// cancel func to detect that execution finished before cancel took effect.
+func (cc *cancelContext) markDone() {
+	if atomic.CompareAndSwapInt32(&cc.state, stateRunning, stateDone) {
 		cc.doneOnce.Do(func() { close(cc.doneChan) })
 		return
 	}
-	// If cancel was requested but execution completed naturally (cancel path was
+	// If cancel was requested but execution finished (cancel path was
 	// not reached, e.g. execution finished before interrupt took effect):
-	if atomic.CompareAndSwapInt32(&cc.state, stateCancelling, stateCompleted) {
+	if atomic.CompareAndSwapInt32(&cc.state, stateCancelling, stateDone) {
 		cc.doneOnce.Do(func() { close(cc.doneChan) })
 	}
-	// If state is already a terminal state (markCancelHandled/markError/markInterrupted
-	// was called), this is a no-op — doneChan was already closed.
+	// If state is already a terminal state (markCancelHandled was called),
+	// this is a no-op — doneChan was already closed.
 }
 
 // markCancelHandled signals that the cancel path in the runFunc has created
 // and sent a CancelError. Transitions state to stateCancelHandled so that:
-// 1. The deferred markCompleted() becomes a no-op (CAS from cancelling fails).
+// 1. The deferred markDone() becomes a no-op (CAS from cancelling fails).
 // 2. buildCancelFunc sees stateCancelHandled and returns nil (cancel succeeded).
 func (cc *cancelContext) markCancelHandled() {
 	atomic.CompareAndSwapInt32(&cc.state, stateCancelling, stateCancelHandled)
 	cc.doneOnce.Do(func() { close(cc.doneChan) })
 }
 
-// markInterrupted marks the execution as interrupted by business logic.
-func (cc *cancelContext) markInterrupted() {
-	if atomic.CompareAndSwapInt32(&cc.state, stateRunning, stateInterrupted) {
-		cc.doneOnce.Do(func() { close(cc.doneChan) })
-		return
-	}
-	if atomic.CompareAndSwapInt32(&cc.state, stateCancelling, stateInterrupted) {
-		cc.doneOnce.Do(func() { close(cc.doneChan) })
-	}
-}
-
-// markError marks the execution as failed with an error.
-func (cc *cancelContext) markError() {
-	if atomic.CompareAndSwapInt32(&cc.state, stateRunning, stateError) {
-		cc.doneOnce.Do(func() { close(cc.doneChan) })
-		return
-	}
-	if atomic.CompareAndSwapInt32(&cc.state, stateCancelling, stateError) {
-		cc.doneOnce.Do(func() { close(cc.doneChan) })
-	}
-}
 
 // createCancelError creates a CancelError based on the current cancel state.
 func (cc *cancelContext) createCancelError() *CancelError {
@@ -420,16 +413,8 @@ func (cc *cancelContext) buildCancelFunc() AgentCancelFunc {
 
 			// Transition to cancelling
 			if !atomic.CompareAndSwapInt32(&cc.state, stateRunning, stateCancelling) {
-				// Execution already finished
-				st := atomic.LoadInt32(&cc.state)
-				switch st {
-				case stateCompleted:
-					result = ErrExecutionCompleted
-				case stateInterrupted:
-					result = ErrExecutionInterrupted
-				case stateError:
-					result = ErrExecutionFailed
-				}
+				// Execution already finished (completed, interrupted, or errored)
+				result = ErrExecutionCompleted
 				return
 			}
 
@@ -461,12 +446,8 @@ func (cc *cancelContext) buildCancelFunc() AgentCancelFunc {
 
 			st := atomic.LoadInt32(&cc.state)
 			switch st {
-			case stateCompleted:
+			case stateDone:
 				result = ErrExecutionCompleted
-			case stateInterrupted:
-				result = ErrExecutionInterrupted
-			case stateError:
-				result = ErrExecutionFailed
 			default:
 				// stateCancelHandled: cancel was processed and CancelError was emitted.
 				if atomic.LoadInt32(&cc.escalated) == 1 && cfg.Mode != CancelImmediate {
@@ -561,4 +542,116 @@ func (m *cancelMonitoredModel) Stream(ctx context.Context, input []*schema.Messa
 	}()
 
 	return reader, nil
+}
+
+// wrapStreamWithCancelMonitoring wraps a stream with cancel monitoring.
+// When immediateChan fires (CancelImmediate or timeout escalation), the output
+// stream is terminated with ErrStreamCancelled.
+func wrapStreamWithCancelMonitoring[T any](stream *schema.StreamReader[T], cc *cancelContext) *schema.StreamReader[T] {
+	if cc == nil {
+		return stream
+	}
+
+	// Already cancelled — terminate immediately
+	select {
+	case <-cc.immediateChan:
+		stream.Close()
+		r, w := schema.Pipe[T](1)
+		var zero T
+		w.Send(zero, ErrStreamCancelled)
+		w.Close()
+		return r
+	default:
+	}
+
+	reader, writer := schema.Pipe[T](1)
+
+	go func() {
+		done := make(chan struct{})
+		defer close(done)
+		defer writer.Close()
+		defer stream.Close()
+
+		ch := make(chan recvResult[T])
+		go func() {
+			defer close(ch)
+			for {
+				chunk, recvErr := stream.Recv()
+				select {
+				case ch <- recvResult[T]{chunk, recvErr}:
+				case <-done:
+					return
+				}
+				if recvErr != nil {
+					return
+				}
+			}
+		}()
+
+		for {
+			select {
+			case <-cc.immediateChan:
+				var zero T
+				writer.Send(zero, ErrStreamCancelled)
+				return
+
+			case r, ok := <-ch:
+				if !ok {
+					return
+				}
+				if r.err != nil {
+					if r.err == io.EOF {
+						return
+					}
+					var zero T
+					writer.Send(zero, r.err)
+					return
+				}
+				if closed := writer.Send(r.data, nil); closed {
+					return
+				}
+			}
+		}
+	}()
+
+	return reader
+}
+
+// cancelMonitoredToolHandler wraps streamable tool calls with cancel monitoring.
+// When CancelImmediate fires, the tool output stream is terminated with ErrStreamCancelled.
+// This handler reads the cancelContext from the Go context via getCancelContext.
+type cancelMonitoredToolHandler struct{}
+
+func (h *cancelMonitoredToolHandler) WrapStreamableToolCall(next compose.StreamableToolEndpoint) compose.StreamableToolEndpoint {
+	return func(ctx context.Context, input *compose.ToolInput) (*compose.StreamToolOutput, error) {
+		output, err := next(ctx, input)
+		if err != nil {
+			return nil, err
+		}
+
+		cc := getCancelContext(ctx)
+		if cc == nil {
+			return output, nil
+		}
+
+		wrapped := wrapStreamWithCancelMonitoring(output.Result, cc)
+		return &compose.StreamToolOutput{Result: wrapped}, nil
+	}
+}
+
+func (h *cancelMonitoredToolHandler) WrapEnhancedStreamableToolCall(next compose.EnhancedStreamableToolEndpoint) compose.EnhancedStreamableToolEndpoint {
+	return func(ctx context.Context, input *compose.ToolInput) (*compose.EnhancedStreamableToolOutput, error) {
+		output, err := next(ctx, input)
+		if err != nil {
+			return nil, err
+		}
+
+		cc := getCancelContext(ctx)
+		if cc == nil {
+			return output, nil
+		}
+
+		wrapped := wrapStreamWithCancelMonitoring(output.Result, cc)
+		return &compose.EnhancedStreamableToolOutput{Result: wrapped}, nil
+	}
 }
