@@ -1218,3 +1218,413 @@ func TestCancelContextKey(t *testing.T) {
 		assert.Equal(t, ctx, result)
 	})
 }
+
+// -- Tests for cancel support across all agent types --
+
+// cancelTestAgent is a ChatModelAgent-based agent where the model blocks until
+// signalled, allowing tests to control exactly when to issue a cancel.
+func newCancelTestAgent(t *testing.T, name string, modelDelay time.Duration, modelStarted chan struct{}) *ChatModelAgent {
+	t.Helper()
+	slowModel := &cancelTestChatModel{
+		delay: modelDelay,
+		response: &schema.Message{
+			Role:    schema.Assistant,
+			Content: "response from " + name,
+		},
+		startedChan: modelStarted,
+		doneChan:    make(chan struct{}, 1),
+	}
+
+	agent, err := NewChatModelAgent(context.Background(), &ChatModelAgentConfig{
+		Name:        name,
+		Description: "Test agent " + name,
+		Instruction: "You are a test assistant",
+		Model:       slowModel,
+	})
+	assert.NoError(t, err)
+	return agent
+}
+
+func TestWithCancel_SequentialAgent(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("CancelImmediate_DuringSecondAgent", func(t *testing.T) {
+		// The first agent completes quickly. The second agent takes a long time.
+		// Cancel during the second agent's model call.
+		agent1Started := make(chan struct{}, 1)
+		agent2Started := make(chan struct{}, 1)
+
+		agent1 := newCancelTestAgent(t, "fast_agent", 50*time.Millisecond, agent1Started)
+		agent2 := newCancelTestAgent(t, "slow_agent", 5*time.Second, agent2Started)
+
+		seqAgent, err := NewSequentialAgent(ctx, &SequentialAgentConfig{
+			Name:        "seq_agent",
+			Description: "Sequential test",
+			SubAgents:   []Agent{agent1, agent2},
+		})
+		assert.NoError(t, err)
+
+		runner := NewRunner(ctx, RunnerConfig{
+			Agent:           seqAgent,
+			EnableStreaming: false,
+		})
+
+		cancelOpt, cancelFn := WithCancel()
+		iter := runner.Run(ctx, []Message{schema.UserMessage("test")}, cancelOpt)
+
+		// Wait for second agent to start
+		select {
+		case <-agent2Started:
+		case <-time.After(10 * time.Second):
+			t.Fatal("Second agent did not start")
+		}
+
+		time.Sleep(50 * time.Millisecond)
+
+		// Cancel should NOT return ErrExecutionCompleted (the bug before the fix)
+		err = cancelFn()
+		assert.NoError(t, err, "Cancel during second agent should succeed, not return ErrExecutionCompleted")
+
+		var events []*AgentEvent
+		hasCancelError := false
+		for {
+			event, ok := iter.Next()
+			if !ok {
+				break
+			}
+			var ce *CancelError
+			if event.Err != nil && errors.As(event.Err, &ce) {
+				hasCancelError = true
+			}
+			events = append(events, event)
+		}
+
+		assert.True(t, hasCancelError, "Should have CancelError event")
+	})
+}
+
+func TestWithCancel_LoopAgent(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("CancelImmediate_DuringIteration", func(t *testing.T) {
+		// Agent in a loop. Cancel during second iteration's model call.
+		modelStarted := make(chan struct{}, 10)
+
+		slowModel := &cancelTestChatModel{
+			delay: 3 * time.Second,
+			response: &schema.Message{
+				Role:    schema.Assistant,
+				Content: "loop response",
+			},
+			startedChan: modelStarted,
+			doneChan:    make(chan struct{}, 10),
+		}
+
+		agent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+			Name:        "loop_inner",
+			Description: "Inner loop agent",
+			Instruction: "You are a test assistant",
+			Model:       slowModel,
+		})
+		assert.NoError(t, err)
+
+		loopAgent, err := NewLoopAgent(ctx, &LoopAgentConfig{
+			Name:          "loop_agent",
+			Description:   "Loop test",
+			SubAgents:     []Agent{agent},
+			MaxIterations: 10,
+		})
+		assert.NoError(t, err)
+
+		runner := NewRunner(ctx, RunnerConfig{
+			Agent:           loopAgent,
+			EnableStreaming: false,
+		})
+
+		cancelOpt, cancelFn := WithCancel()
+		iter := runner.Run(ctx, []Message{schema.UserMessage("test")}, cancelOpt)
+
+		// Wait for first iteration's model call to start
+		select {
+		case <-modelStarted:
+		case <-time.After(10 * time.Second):
+			t.Fatal("Model did not start")
+		}
+
+		time.Sleep(50 * time.Millisecond)
+
+		// Cancel should succeed
+		err = cancelFn()
+		assert.NoError(t, err, "Cancel during loop iteration should succeed")
+
+		hasCancelError := false
+		for {
+			event, ok := iter.Next()
+			if !ok {
+				break
+			}
+			var ce *CancelError
+			if event.Err != nil && errors.As(event.Err, &ce) {
+				hasCancelError = true
+			}
+		}
+
+		assert.True(t, hasCancelError, "Should have CancelError event")
+	})
+}
+
+func TestWithCancel_ParallelAgent(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("CancelImmediate_InterruptsAllBranches", func(t *testing.T) {
+		agent1Started := make(chan struct{}, 1)
+		agent2Started := make(chan struct{}, 1)
+
+		// Both agents have long delays, so cancel should interrupt both.
+		agent1 := newCancelTestAgent(t, "par_agent1", 5*time.Second, agent1Started)
+		agent2 := newCancelTestAgent(t, "par_agent2", 5*time.Second, agent2Started)
+
+		parAgent, err := NewParallelAgent(ctx, &ParallelAgentConfig{
+			Name:        "par_agent",
+			Description: "Parallel test",
+			SubAgents:   []Agent{agent1, agent2},
+		})
+		assert.NoError(t, err)
+
+		runner := NewRunner(ctx, RunnerConfig{
+			Agent:           parAgent,
+			EnableStreaming: false,
+		})
+
+		cancelOpt, cancelFn := WithCancel()
+		iter := runner.Run(ctx, []Message{schema.UserMessage("test")}, cancelOpt)
+
+		// Wait for both agents to start
+		for i := 0; i < 2; i++ {
+			select {
+			case <-agent1Started:
+			case <-agent2Started:
+			case <-time.After(10 * time.Second):
+				t.Fatal("Parallel agents did not start")
+			}
+		}
+
+		time.Sleep(50 * time.Millisecond)
+
+		start := time.Now()
+		err = cancelFn()
+		assert.NoError(t, err, "Cancel during parallel agents should succeed")
+
+		var events []*AgentEvent
+		hasCancelError := false
+		for {
+			event, ok := iter.Next()
+			if !ok {
+				break
+			}
+			var ce *CancelError
+			if event.Err != nil && errors.As(event.Err, &ce) {
+				hasCancelError = true
+			}
+			events = append(events, event)
+		}
+		elapsed := time.Since(start)
+
+		assert.True(t, hasCancelError, "Should have CancelError event")
+		assert.True(t, elapsed < 3*time.Second, "Should complete quickly after cancel, elapsed: %v", elapsed)
+	})
+}
+
+func TestWithCancel_SupervisorAgent(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("CancelImmediate_DuringSubAgent", func(t *testing.T) {
+		// Supervisor delegates to a slow sub-agent via transfer.
+		// Cancel during the sub-agent's model call.
+		supervisorModelStarted := make(chan struct{}, 1)
+		subAgentModelStarted := make(chan struct{}, 1)
+
+		// The supervisor model returns a transfer_to_agent tool call
+		supervisorModel := &simpleChatModel{
+			response: &schema.Message{
+				Role:    schema.Assistant,
+				Content: "",
+				ToolCalls: []schema.ToolCall{
+					{
+						ID:   "call_1",
+						Type: "function",
+						Function: schema.FunctionCall{
+							Name:      TransferToAgentToolName,
+							Arguments: `{"agent_name": "slow_sub"}`,
+						},
+					},
+				},
+			},
+		}
+
+		supervisorAgent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+			Name:        "supervisor",
+			Description: "Supervisor agent",
+			Instruction: "You are a supervisor",
+			Model:       supervisorModel,
+		})
+		assert.NoError(t, err)
+
+		subAgent := newCancelTestAgent(t, "slow_sub", 5*time.Second, subAgentModelStarted)
+
+		agentWithSubAgents, err := SetSubAgents(ctx, supervisorAgent, []Agent{subAgent})
+		assert.NoError(t, err)
+
+		runner := NewRunner(ctx, RunnerConfig{
+			Agent:           agentWithSubAgents,
+			EnableStreaming: false,
+		})
+
+		cancelOpt, cancelFn := WithCancel()
+		iter := runner.Run(ctx, []Message{schema.UserMessage("test")}, cancelOpt)
+
+		// Ignore the supervisor model start, wait for the sub-agent model
+		// The supervisor model is fast (simpleChatModel), so it will start and finish quickly
+		_ = supervisorModelStarted
+		select {
+		case <-subAgentModelStarted:
+		case <-time.After(10 * time.Second):
+			t.Fatal("Sub-agent model did not start")
+		}
+
+		time.Sleep(50 * time.Millisecond)
+
+		start := time.Now()
+		err = cancelFn()
+		assert.NoError(t, err, "Cancel during sub-agent should succeed")
+
+		hasCancelError := false
+		for {
+			event, ok := iter.Next()
+			if !ok {
+				break
+			}
+			var ce *CancelError
+			if event.Err != nil && errors.As(event.Err, &ce) {
+				hasCancelError = true
+			}
+		}
+		elapsed := time.Since(start)
+
+		assert.True(t, hasCancelError, "Should have CancelError event")
+		assert.True(t, elapsed < 3*time.Second, "Should complete quickly after cancel, elapsed: %v", elapsed)
+	})
+}
+
+func TestFilterCancelOption(t *testing.T) {
+	t.Run("RemovesCancelOption", func(t *testing.T) {
+		cancelOpt, _ := WithCancel()
+		sessionOpt := WithSessionValues(map[string]any{"key": "value"})
+		opts := []AgentRunOption{cancelOpt, sessionOpt}
+
+		filtered := filterCancelOption(opts)
+		assert.Len(t, filtered, 1, "Should have removed the cancel option")
+
+		// Verify the remaining option is the session option
+		testOpt := &options{}
+		filtered[0].implSpecificOptFn.(func(*options))(testOpt)
+		assert.NotNil(t, testOpt.sessionValues)
+		assert.Nil(t, testOpt.cancelCtx)
+	})
+
+	t.Run("KeepsNonCancelOptions", func(t *testing.T) {
+		sessionOpt := WithSessionValues(map[string]any{"key": "value"})
+		callbackOpt := WithCallbacks()
+		opts := []AgentRunOption{sessionOpt, callbackOpt}
+
+		filtered := filterCancelOption(opts)
+		assert.Len(t, filtered, 2, "Should keep all non-cancel options")
+	})
+
+	t.Run("EmptyInput", func(t *testing.T) {
+		filtered := filterCancelOption(nil)
+		assert.Nil(t, filtered)
+	})
+}
+
+func TestWrapIterWithMarkDone(t *testing.T) {
+	t.Run("MarksDoneAfterDrain", func(t *testing.T) {
+		cc := newCancelContext()
+		iter, gen := NewAsyncIteratorPair[*AgentEvent]()
+
+		go func() {
+			gen.Send(&AgentEvent{AgentName: "test"})
+			gen.Close()
+		}()
+
+		wrapped := wrapIterWithMarkDone(iter, cc)
+
+		event, ok := wrapped.Next()
+		assert.True(t, ok)
+		assert.Equal(t, "test", event.AgentName)
+
+		_, ok = wrapped.Next()
+		assert.False(t, ok)
+
+		// markDone should have been called, so doneChan should be closed
+		select {
+		case <-cc.doneChan:
+			// good
+		case <-time.After(time.Second):
+			t.Fatal("doneChan was not closed after drain")
+		}
+	})
+
+	t.Run("NilCancelContext_PassesThrough", func(t *testing.T) {
+		iter, gen := NewAsyncIteratorPair[*AgentEvent]()
+		go func() {
+			gen.Send(&AgentEvent{AgentName: "test"})
+			gen.Close()
+		}()
+
+		wrapped := wrapIterWithMarkDone(iter, nil)
+		assert.Equal(t, iter, wrapped, "Should return same iter when cc is nil")
+	})
+}
+
+func TestGraphInterruptFuncs_Parallel(t *testing.T) {
+	t.Run("MultipleGraphInterruptFuncsAllCalled", func(t *testing.T) {
+		cc := newCancelContext()
+
+		var called1, called2 atomic.Int32
+		cc.setGraphInterruptFunc(func(opts ...compose.GraphInterruptOption) {
+			called1.Add(1)
+		})
+		cc.setGraphInterruptFunc(func(opts ...compose.GraphInterruptOption) {
+			called2.Add(1)
+		})
+
+		// Simulate immediate cancel
+		cc.config = &agentCancelConfig{Mode: CancelImmediate}
+		atomic.CompareAndSwapInt32(&cc.state, stateRunning, stateCancelling)
+		close(cc.cancelChan)
+		cc.sendInterrupt(true)
+
+		assert.Equal(t, int32(1), called1.Load(), "First graph interrupt func should be called")
+		assert.Equal(t, int32(1), called2.Load(), "Second graph interrupt func should be called")
+	})
+
+	t.Run("RetroactiveFire_OnSetAfterCancel", func(t *testing.T) {
+		cc := newCancelContext()
+
+		// First set up cancel state with immediate interrupt
+		cc.config = &agentCancelConfig{Mode: CancelImmediate}
+		atomic.CompareAndSwapInt32(&cc.state, stateRunning, stateCancelling)
+		close(cc.cancelChan)
+		close(cc.immediateChan)
+		atomic.StoreInt32(&cc.interruptSent, interruptImmediate)
+
+		// Now register a new function - it should be retroactively fired
+		var called atomic.Int32
+		cc.setGraphInterruptFunc(func(opts ...compose.GraphInterruptOption) {
+			called.Add(1)
+		})
+
+		assert.Equal(t, int32(1), called.Load(), "setGraphInterruptFunc should retroactively fire new func")
+	})
+}
