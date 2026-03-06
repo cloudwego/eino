@@ -34,6 +34,7 @@ func init() {
 	schema.RegisterName[*CancelError]("_eino_adk_cancel_error")
 	schema.RegisterName[*AgentCancelInfo]("_eino_adk_agent_cancel_info")
 	schema.RegisterName[*cancelSafePointInfo]("_eino_adk_cancel_safe_point_info")
+	schema.RegisterName[*StreamCancelledError]("_eino_adk_stream_cancelled_error")
 }
 
 // CancelMode specifies when an agent should be canceled.
@@ -127,8 +128,19 @@ var (
 	ErrExecutionCompleted = errors.New("execution already completed")
 
 	// ErrStreamCancelled is the error sent through the stream when CancelImmediate aborts it.
-	ErrStreamCancelled = errors.New("stream cancelled")
+	// It is a *StreamCancelledError so it can be gob-serialized during checkpoint save
+	// (when stored as agentEventWrapper.StreamErr).
+	ErrStreamCancelled error = &StreamCancelledError{}
 )
+
+// StreamCancelledError is the concrete error type for ErrStreamCancelled.
+// It is exported so that gob can serialize it during checkpoint save when the error
+// is stored in agentEventWrapper.StreamErr.
+type StreamCancelledError struct{}
+
+func (e *StreamCancelledError) Error() string {
+	return "stream cancelled"
+}
 
 // cancelSafePointInfo is the typed info passed to compose.Interrupt when a
 // safe-point cancel condition is met (CancelAfterChatModel or CancelAfterToolCalls).
