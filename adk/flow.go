@@ -549,6 +549,14 @@ func (a *flowAgent) run(
 			return
 		}
 
+		// Cancel check before transfer: the previous agent completed, so all
+		// cancel modes' safe-point conditions are met.
+		cc := getCancelContext(ctx)
+		if cc != nil && cc.shouldCancel() && cc.markCancelHandled() {
+			generator.Send(&AgentEvent{Err: cc.createCancelError()})
+			return
+		}
+
 		subAIter := agentToRun.Run(ctxForSubAgents, nil /*subagents get input from runCtx*/, opts...)
 		for {
 			subEvent, ok_ := subAIter.Next()

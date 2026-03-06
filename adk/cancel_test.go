@@ -20,6 +20,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"runtime"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -1627,4 +1628,652 @@ func TestGraphInterruptFuncs_Parallel(t *testing.T) {
 
 		assert.Equal(t, int32(1), atomic.LoadInt32(&called), "setGraphInterruptFunc should retroactively fire new func")
 	})
+}
+
+// -- Tests for transition-point cancel (cancel between sub-agents) --
+
+// gatedChatModel is a model that:
+// - Signals doneChan when Generate completes
+// - Optionally blocks on gateChan before returning (nil gateChan = no blocking)
+// - Tracks call count via callCount
+type gatedChatModel struct {
+	response  *schema.Message
+	gateChan  chan struct{} // if non-nil, blocks until closed before returning
+	doneChan  chan struct{} // signalled after Generate completes
+	callCount int32
+}
+
+func (m *gatedChatModel) Generate(ctx context.Context, input []*schema.Message, opts ...model.Option) (*schema.Message, error) {
+	atomic.AddInt32(&m.callCount, 1)
+	if m.gateChan != nil {
+		select {
+		case <-m.gateChan:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
+	select {
+	case m.doneChan <- struct{}{}:
+	default:
+	}
+	return m.response, nil
+}
+
+func (m *gatedChatModel) Stream(ctx context.Context, input []*schema.Message, opts ...model.Option) (*schema.StreamReader[*schema.Message], error) {
+	msg, err := m.Generate(ctx, input, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return schema.StreamReaderFromArray([]*schema.Message{msg}), nil
+}
+
+func (m *gatedChatModel) BindTools(tools []*schema.ToolInfo) error {
+	return nil
+}
+
+func TestCheckCancel_Sequential_BetweenSubAgents(t *testing.T) {
+	ctx := context.Background()
+
+	// Strategy: gate model1 so we can fire cancel while model1 is blocked.
+	// CancelAfterToolCalls: no graph interrupt, no noTools safe-point.
+	// After gate release, agent1 completes normally, cancel caught at transition (i=1).
+	model1 := &gatedChatModel{
+		response: &schema.Message{Role: schema.Assistant, Content: "agent1 done"},
+		gateChan: make(chan struct{}),
+		doneChan: make(chan struct{}, 1),
+	}
+	model2 := &gatedChatModel{
+		response: &schema.Message{Role: schema.Assistant, Content: "agent2 done"},
+		doneChan: make(chan struct{}, 1),
+	}
+
+	agent1, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+		Name: "agent1", Description: "first", Instruction: "test", Model: model1,
+	})
+	assert.NoError(t, err)
+
+	agent2, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+		Name: "agent2", Description: "second", Instruction: "test", Model: model2,
+	})
+	assert.NoError(t, err)
+
+	seqAgent, err := NewSequentialAgent(ctx, &SequentialAgentConfig{
+		Name: "seq", Description: "sequential test", SubAgents: []Agent{agent1, agent2},
+	})
+	assert.NoError(t, err)
+
+	store := newCancelTestStore()
+	runner := NewRunner(ctx, RunnerConfig{
+		Agent: seqAgent, EnableStreaming: false, CheckPointStore: store,
+	})
+
+	cancelOpt, cancelFn := WithCancel()
+	iter := runner.Run(ctx, []Message{schema.UserMessage("hello")}, cancelOpt, WithCheckPointID("seq-cancel-1"))
+
+	// Wait for model1 to be entered (past CMA pre-execution cancel check)
+	for atomic.LoadInt32(&model1.callCount) == 0 {
+		runtime.Gosched()
+	}
+
+	// Fire cancel in goroutine (blocks on doneChan)
+	cancelDone := make(chan error, 1)
+	go func() { cancelDone <- cancelFn(WithAgentCancelMode(CancelAfterToolCalls)) }()
+
+	// Ensure cancelChan is closed, then release model1
+	time.Sleep(50 * time.Millisecond)
+	close(model1.gateChan)
+
+	// Wait for cancel to be handled
+	select {
+	case err = <-cancelDone:
+		assert.NoError(t, err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("cancelFn did not return")
+	}
+
+	var events []*AgentEvent
+	var cancelErr *CancelError
+	for {
+		event, ok := iter.Next()
+		if !ok {
+			break
+		}
+		var ce *CancelError
+		if event.Err != nil && errors.As(event.Err, &ce) {
+			cancelErr = ce
+		}
+		events = append(events, event)
+	}
+
+	assert.NotNil(t, cancelErr, "Should have CancelError")
+	assert.NotNil(t, cancelErr.interruptSignal, "CancelError should have interruptSignal for checkpoint")
+	assert.Equal(t, int32(0), atomic.LoadInt32(&model2.callCount), "Second agent should never be invoked")
+}
+
+func TestCheckCancel_Loop_BetweenIterations(t *testing.T) {
+	ctx := context.Background()
+
+	// Strategy: gate the model. Fire cancel while model is blocked on 1st iteration.
+	// CancelAfterToolCalls: no graph interrupt. After gate release, 1st iteration completes.
+	// Loop's checkCancel at iteration 1 catches the cancel.
+	mdl := &gatedChatModel{
+		response: &schema.Message{Role: schema.Assistant, Content: "loop iter"},
+		gateChan: make(chan struct{}),
+		doneChan: make(chan struct{}, 10),
+	}
+
+	agent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+		Name: "loop_inner", Description: "inner", Instruction: "test", Model: mdl,
+	})
+	assert.NoError(t, err)
+
+	loopAgent, err := NewLoopAgent(ctx, &LoopAgentConfig{
+		Name: "loop", Description: "loop test", SubAgents: []Agent{agent}, MaxIterations: 100,
+	})
+	assert.NoError(t, err)
+
+	store := newCancelTestStore()
+	runner := NewRunner(ctx, RunnerConfig{
+		Agent: loopAgent, EnableStreaming: false, CheckPointStore: store,
+	})
+
+	cancelOpt, cancelFn := WithCancel()
+	iter := runner.Run(ctx, []Message{schema.UserMessage("hello")}, cancelOpt, WithCheckPointID("loop-cancel-1"))
+
+	// Wait for model to be entered
+	for atomic.LoadInt32(&mdl.callCount) == 0 {
+		runtime.Gosched()
+	}
+
+	// Fire cancel in goroutine (blocks on doneChan)
+	cancelDone := make(chan error, 1)
+	go func() { cancelDone <- cancelFn(WithAgentCancelMode(CancelAfterToolCalls)) }()
+
+	// Ensure cancelChan is closed, then release model
+	time.Sleep(50 * time.Millisecond)
+	close(mdl.gateChan)
+
+	select {
+	case err = <-cancelDone:
+		assert.NoError(t, err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("cancelFn did not return")
+	}
+
+	var cancelErr *CancelError
+	for {
+		event, ok := iter.Next()
+		if !ok {
+			break
+		}
+		var ce *CancelError
+		if event.Err != nil && errors.As(event.Err, &ce) {
+			cancelErr = ce
+		}
+	}
+
+	assert.NotNil(t, cancelErr, "Should have CancelError")
+	assert.NotNil(t, cancelErr.interruptSignal, "CancelError should have interruptSignal for checkpoint")
+	assert.Equal(t, int32(1), atomic.LoadInt32(&mdl.callCount), "Model should be called exactly once")
+}
+
+func TestCheckCancel_Parallel_PreSpawn(t *testing.T) {
+	ctx := context.Background()
+
+	// Cancel fires before Run is called. Neither model should be invoked.
+	model1 := &gatedChatModel{
+		response: &schema.Message{Role: schema.Assistant, Content: "par1"},
+		doneChan: make(chan struct{}, 1),
+	}
+	model2 := &gatedChatModel{
+		response: &schema.Message{Role: schema.Assistant, Content: "par2"},
+		doneChan: make(chan struct{}, 1),
+	}
+
+	agent1, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+		Name: "par1", Description: "first", Instruction: "test", Model: model1,
+	})
+	assert.NoError(t, err)
+
+	agent2, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+		Name: "par2", Description: "second", Instruction: "test", Model: model2,
+	})
+	assert.NoError(t, err)
+
+	parAgent, err := NewParallelAgent(ctx, &ParallelAgentConfig{
+		Name: "par", Description: "parallel test", SubAgents: []Agent{agent1, agent2},
+	})
+	assert.NoError(t, err)
+
+	// Fire cancel in goroutine (cancelFn blocks until handled)
+	cancelOpt, cancelFn := WithCancel()
+	cancelDone := make(chan error, 1)
+	go func() { cancelDone <- cancelFn() }()
+	// Wait for cancelChan to be closed (happens synchronously before the blocking doneChan wait)
+	time.Sleep(20 * time.Millisecond)
+
+	runner := NewRunner(ctx, RunnerConfig{
+		Agent: parAgent, EnableStreaming: false,
+	})
+
+	iter := runner.Run(ctx, []Message{schema.UserMessage("hello")}, cancelOpt)
+
+	var cancelErr *CancelError
+	for {
+		event, ok := iter.Next()
+		if !ok {
+			break
+		}
+		var ce *CancelError
+		if event.Err != nil && errors.As(event.Err, &ce) {
+			cancelErr = ce
+		}
+	}
+
+	// cancelFn should have completed
+	select {
+	case err = <-cancelDone:
+		assert.NoError(t, err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("cancelFn did not return")
+	}
+
+	assert.NotNil(t, cancelErr, "Should have CancelError")
+	assert.Equal(t, int32(0), atomic.LoadInt32(&model1.callCount), "First model should never be invoked")
+	assert.Equal(t, int32(0), atomic.LoadInt32(&model2.callCount), "Second model should never be invoked")
+}
+
+func TestCheckCancel_Transfer_BeforeTarget(t *testing.T) {
+	ctx := context.Background()
+
+	// Supervisor CMA returns a transfer action (instantly).
+	// Cancel fires after transfer action but before target runs.
+	// Target model should never be invoked.
+	supervisorModel := &simpleChatModel{
+		response: &schema.Message{
+			Role: schema.Assistant,
+			ToolCalls: []schema.ToolCall{{
+				ID: "call_1", Type: "function",
+				Function: schema.FunctionCall{
+					Name:      TransferToAgentToolName,
+					Arguments: `{"agent_name": "target"}`,
+				},
+			}},
+		},
+	}
+	targetModel := &gatedChatModel{
+		response: &schema.Message{Role: schema.Assistant, Content: "target done"},
+		doneChan: make(chan struct{}, 1),
+	}
+
+	supervisorAgent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+		Name: "supervisor", Description: "supervisor", Instruction: "test", Model: supervisorModel,
+	})
+	assert.NoError(t, err)
+
+	targetAgent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+		Name: "target", Description: "target", Instruction: "test", Model: targetModel,
+	})
+	assert.NoError(t, err)
+
+	agentWithSub, err := SetSubAgents(ctx, supervisorAgent, []Agent{targetAgent})
+	assert.NoError(t, err)
+
+	// Fire cancel in goroutine (cancelFn blocks until handled)
+	cancelOpt, cancelFn := WithCancel()
+	cancelDone := make(chan error, 1)
+	go func() { cancelDone <- cancelFn() }()
+	time.Sleep(20 * time.Millisecond)
+
+	runner := NewRunner(ctx, RunnerConfig{
+		Agent: agentWithSub, EnableStreaming: false,
+	})
+
+	iter := runner.Run(ctx, []Message{schema.UserMessage("test")}, cancelOpt)
+
+	var cancelErr *CancelError
+	for {
+		event, ok := iter.Next()
+		if !ok {
+			break
+		}
+		var ce *CancelError
+		if event.Err != nil && errors.As(event.Err, &ce) {
+			cancelErr = ce
+		}
+	}
+
+	select {
+	case err = <-cancelDone:
+		assert.NoError(t, err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("cancelFn did not return")
+	}
+
+	assert.NotNil(t, cancelErr, "Should have CancelError")
+	assert.Equal(t, int32(0), atomic.LoadInt32(&targetModel.callCount), "Target model should never be invoked")
+}
+
+func TestCheckCancel_AlreadyHandled_NoDuplicate(t *testing.T) {
+	ctx := context.Background()
+
+	// In a sequential agent, if the first CMA handles the cancel (graph interrupt),
+	// the workflow's transition check should NOT emit a duplicate CancelError.
+	// Use a slow model so cancel fires during its execution (handled by CMA).
+	modelStarted := make(chan struct{}, 1)
+	model1 := &cancelTestChatModel{
+		delay:       2 * time.Second,
+		response:    &schema.Message{Role: schema.Assistant, Content: "agent1"},
+		startedChan: modelStarted,
+		doneChan:    make(chan struct{}, 1),
+	}
+	model2 := &gatedChatModel{
+		response: &schema.Message{Role: schema.Assistant, Content: "agent2"},
+		doneChan: make(chan struct{}, 1),
+	}
+
+	agent1, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+		Name: "agent1", Description: "first", Instruction: "test", Model: model1,
+	})
+	assert.NoError(t, err)
+
+	agent2, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+		Name: "agent2", Description: "second", Instruction: "test", Model: model2,
+	})
+	assert.NoError(t, err)
+
+	seqAgent, err := NewSequentialAgent(ctx, &SequentialAgentConfig{
+		Name: "seq", Description: "sequential", SubAgents: []Agent{agent1, agent2},
+	})
+	assert.NoError(t, err)
+
+	runner := NewRunner(ctx, RunnerConfig{
+		Agent: seqAgent, EnableStreaming: false,
+	})
+
+	cancelOpt, cancelFn := WithCancel()
+	iter := runner.Run(ctx, []Message{schema.UserMessage("test")}, cancelOpt)
+
+	// Wait for model to start, then cancel during model execution
+	select {
+	case <-modelStarted:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Model did not start")
+	}
+	time.Sleep(50 * time.Millisecond)
+	err = cancelFn()
+	assert.NoError(t, err)
+
+	cancelCount := 0
+	for {
+		event, ok := iter.Next()
+		if !ok {
+			break
+		}
+		var ce *CancelError
+		if event.Err != nil && errors.As(event.Err, &ce) {
+			cancelCount++
+		}
+	}
+
+	assert.Equal(t, 1, cancelCount, "Should have exactly one CancelError, no duplicate from workflow transition")
+	assert.Equal(t, int32(0), atomic.LoadInt32(&model2.callCount), "Second agent should not run")
+}
+
+func TestCheckCancel_Sequential_CancelThenResume(t *testing.T) {
+	ctx := context.Background()
+
+	// Strategy: model1 has a gate so we can fire cancel WHILE model1 is running.
+	// CancelAfterToolCalls mode doesn't send graph interrupts or fire noTools safe-points,
+	// so agent1's compose chain completes normally after gate release.
+	// The cancel is then caught at the workflow's checkCancel transition point (i=1).
+	model1 := &gatedChatModel{
+		response: &schema.Message{Role: schema.Assistant, Content: "agent1 done"},
+		gateChan: make(chan struct{}),
+		doneChan: make(chan struct{}, 1),
+	}
+	model2 := &gatedChatModel{
+		response: &schema.Message{Role: schema.Assistant, Content: "agent2 done"},
+		doneChan: make(chan struct{}, 1),
+	}
+
+	agent1, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+		Name: "agent1", Description: "first", Instruction: "test", Model: model1,
+	})
+	assert.NoError(t, err)
+	agent2, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+		Name: "agent2", Description: "second", Instruction: "test", Model: model2,
+	})
+	assert.NoError(t, err)
+
+	seqAgent, err := NewSequentialAgent(ctx, &SequentialAgentConfig{
+		Name: "seq", Description: "seq test", SubAgents: []Agent{agent1, agent2},
+	})
+	assert.NoError(t, err)
+
+	store := newCancelTestStore()
+	checkpointID := "seq-resume-1"
+	runner := NewRunner(ctx, RunnerConfig{
+		Agent: seqAgent, EnableStreaming: false, CheckPointStore: store,
+	})
+
+	// Phase 1: Run and cancel between agents.
+	cancelOpt, cancelFn := WithCancel()
+	iter := runner.Run(ctx, []Message{schema.UserMessage("hello")}, cancelOpt, WithCheckPointID(checkpointID))
+
+	// Wait for model1.Generate to be entered (past CMA pre-execution cancel check)
+	for atomic.LoadInt32(&model1.callCount) == 0 {
+		runtime.Gosched()
+	}
+
+	// Fire cancel in goroutine (it blocks on doneChan until cancel is handled).
+	// CancelAfterToolCalls: no graph interrupt, no noTools safe-point fires.
+	cancelDone := make(chan struct{})
+	var cancelErr error
+	go func() {
+		cancelErr = cancelFn(WithAgentCancelMode(CancelAfterToolCalls))
+		close(cancelDone)
+	}()
+
+	// Ensure cancelChan is closed before releasing model1's gate.
+	time.Sleep(50 * time.Millisecond)
+
+	// Release model1 → agent1 completes normally → runSequential i=1 → checkCancel catches cancel.
+	close(model1.gateChan)
+
+	// Wait for cancel to be handled
+	select {
+	case <-cancelDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Cancel was not handled in time")
+	}
+	assert.NoError(t, cancelErr)
+
+	// Drain all events
+	var cancelEvt *CancelError
+	for {
+		event, ok := iter.Next()
+		if !ok {
+			break
+		}
+		var ce *CancelError
+		if event.Err != nil && errors.As(event.Err, &ce) {
+			cancelEvt = ce
+		}
+	}
+	assert.NotNil(t, cancelEvt, "Should have CancelError")
+	assert.NotNil(t, cancelEvt.interruptSignal, "CancelError must have interruptSignal for checkpoint persistence")
+	assert.Equal(t, int32(0), atomic.LoadInt32(&model2.callCount), "Agent2 should not start")
+
+	// Verify checkpoint was saved
+	_, cpExists, _ := store.Get(ctx, checkpointID)
+	assert.True(t, cpExists, "Checkpoint should exist after cancel")
+
+	// Phase 2: Resume from checkpoint — create fresh agents/runner to avoid data races
+	resumeModel1 := &gatedChatModel{
+		response: &schema.Message{Role: schema.Assistant, Content: "agent1 resumed"},
+		doneChan: make(chan struct{}, 1),
+	}
+	resumeModel2 := &gatedChatModel{
+		response: &schema.Message{Role: schema.Assistant, Content: "agent2 resumed"},
+		doneChan: make(chan struct{}, 1),
+	}
+
+	resumeAgent1, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+		Name: "agent1", Description: "first", Instruction: "test", Model: resumeModel1,
+	})
+	assert.NoError(t, err)
+	resumeAgent2, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+		Name: "agent2", Description: "second", Instruction: "test", Model: resumeModel2,
+	})
+	assert.NoError(t, err)
+
+	resumeSeqAgent, err := NewSequentialAgent(ctx, &SequentialAgentConfig{
+		Name: "seq", Description: "seq test", SubAgents: []Agent{resumeAgent1, resumeAgent2},
+	})
+	assert.NoError(t, err)
+
+	runner2 := NewRunner(ctx, RunnerConfig{
+		Agent: resumeSeqAgent, EnableStreaming: false, CheckPointStore: store,
+	})
+
+	resumeIter, err := runner2.Resume(ctx, checkpointID)
+	assert.NoError(t, err)
+
+	var resumeEvents []*AgentEvent
+	var resumeErrors []error
+	for {
+		event, ok := resumeIter.Next()
+		if !ok {
+			break
+		}
+		if event.Err != nil {
+			t.Logf("Sequential Resume event error: %v (type %T)", event.Err, event.Err)
+			resumeErrors = append(resumeErrors, event.Err)
+			continue
+		}
+		resumeEvents = append(resumeEvents, event)
+	}
+
+	assert.True(t, len(resumeEvents) > 0, "Resume should produce events")
+	assert.Equal(t, int32(1), atomic.LoadInt32(&resumeModel2.callCount),
+		"Agent2 model should be invoked once during resume")
+	// Agent1 should NOT be re-invoked (it already completed before cancel)
+	assert.Equal(t, int32(0), atomic.LoadInt32(&resumeModel1.callCount),
+		"Agent1 model should not be re-invoked during resume")
+}
+
+func TestCheckCancel_Loop_CancelThenResume(t *testing.T) {
+	ctx := context.Background()
+
+	// Strategy: model has a gate. Fire cancel while model is blocked on 1st iteration.
+	// CancelAfterToolCalls: no graph interrupt, no noTools safe-point.
+	// After gate release, CMA completes normally. Loop's checkCancel catches cancel at i=1.
+	mdl := &gatedChatModel{
+		response: &schema.Message{Role: schema.Assistant, Content: "loop iter"},
+		gateChan: make(chan struct{}),
+		doneChan: make(chan struct{}, 10),
+	}
+
+	agent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+		Name: "loop_inner", Description: "inner", Instruction: "test", Model: mdl,
+	})
+	assert.NoError(t, err)
+
+	loopAgent, err := NewLoopAgent(ctx, &LoopAgentConfig{
+		Name: "loop", Description: "loop test", SubAgents: []Agent{agent}, MaxIterations: 3,
+	})
+	assert.NoError(t, err)
+
+	store := newCancelTestStore()
+	checkpointID := "loop-resume-1"
+	runner := NewRunner(ctx, RunnerConfig{
+		Agent: loopAgent, EnableStreaming: false, CheckPointStore: store,
+	})
+
+	// Phase 1: Run and cancel between iterations.
+	cancelOpt, cancelFn := WithCancel()
+	iter := runner.Run(ctx, []Message{schema.UserMessage("hello")}, cancelOpt, WithCheckPointID(checkpointID))
+
+	// Wait for model to be entered (past pre-execution cancel check)
+	for atomic.LoadInt32(&mdl.callCount) == 0 {
+		runtime.Gosched()
+	}
+
+	// Fire cancel in goroutine (blocks on doneChan)
+	cancelDone := make(chan struct{})
+	var cancelErr error
+	go func() {
+		cancelErr = cancelFn(WithAgentCancelMode(CancelAfterToolCalls))
+		close(cancelDone)
+	}()
+
+	// Ensure cancelChan is closed before releasing gate
+	time.Sleep(50 * time.Millisecond)
+
+	// Release model → 1st iteration completes → loop checkCancel at i=1 catches cancel
+	close(mdl.gateChan)
+
+	select {
+	case <-cancelDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Cancel was not handled in time")
+	}
+	assert.NoError(t, cancelErr)
+
+	var cancelEvt *CancelError
+	for {
+		event, ok := iter.Next()
+		if !ok {
+			break
+		}
+		var ce *CancelError
+		if event.Err != nil && errors.As(event.Err, &ce) {
+			cancelEvt = ce
+		}
+	}
+	assert.NotNil(t, cancelEvt, "Should have CancelError")
+	assert.NotNil(t, cancelEvt.interruptSignal, "CancelError must have interruptSignal")
+	assert.Equal(t, int32(1), atomic.LoadInt32(&mdl.callCount), "Only 1 iteration should run")
+
+	// Phase 2: Resume from checkpoint — create fresh agents/runner to avoid data races
+	resumeMdl := &gatedChatModel{
+		response: &schema.Message{Role: schema.Assistant, Content: "resumed loop"},
+		doneChan: make(chan struct{}, 10),
+	}
+
+	resumeAgent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+		Name: "loop_inner", Description: "inner", Instruction: "test", Model: resumeMdl,
+	})
+	assert.NoError(t, err)
+
+	resumeLoopAgent, err := NewLoopAgent(ctx, &LoopAgentConfig{
+		Name: "loop", Description: "loop test", SubAgents: []Agent{resumeAgent}, MaxIterations: 3,
+	})
+	assert.NoError(t, err)
+
+	runner2 := NewRunner(ctx, RunnerConfig{
+		Agent: resumeLoopAgent, EnableStreaming: false, CheckPointStore: store,
+	})
+
+	resumeIter, err := runner2.Resume(ctx, checkpointID)
+	assert.NoError(t, err)
+
+	var resumeEvents []*AgentEvent
+	for {
+		event, ok := resumeIter.Next()
+		if !ok {
+			break
+		}
+		if event.Err != nil {
+			t.Logf("Resume event error: %v", event.Err)
+			continue
+		}
+		resumeEvents = append(resumeEvents, event)
+	}
+
+	assert.True(t, len(resumeEvents) > 0, "Resume should produce events")
+	// Loop should resume from iteration 1 and run remaining 2 iterations (MaxIterations=3)
+	assert.Equal(t, int32(2), atomic.LoadInt32(&resumeMdl.callCount),
+		"Should run 2 remaining iterations after resuming from iteration 1")
 }
