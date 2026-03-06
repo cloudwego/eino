@@ -244,8 +244,8 @@ type cancelContext struct {
 	interruptSent int32 // interruptNotSent, interruptGraceful, interruptImmediate
 	escalated     int32 // 1 if escalated from safe-point to immediate
 
-	mu                 sync.Mutex
-	graphInterruptFunc func(...compose.GraphInterruptOption)
+	mu                  sync.Mutex
+	graphInterruptFuncs []func(...compose.GraphInterruptOption)
 }
 
 func newCancelContext() *cancelContext {
@@ -284,21 +284,24 @@ func (cc *cancelContext) sendInterrupt(immediate bool) bool {
 	}
 
 	cc.mu.Lock()
-	fn := cc.graphInterruptFunc
+	fns := make([]func(...compose.GraphInterruptOption), len(cc.graphInterruptFuncs))
+	copy(fns, cc.graphInterruptFuncs)
 	cc.mu.Unlock()
 
 	if immediate {
 		close(cc.immediateChan)
 	}
 
-	if fn == nil {
+	if len(fns) == 0 {
 		return false
 	}
 
-	if immediate {
-		fn(compose.WithGraphInterruptTimeout(0))
-	} else {
-		fn()
+	for _, fn := range fns {
+		if immediate {
+			fn(compose.WithGraphInterruptTimeout(0))
+		} else {
+			fn()
+		}
 	}
 	return true
 }
@@ -314,10 +317,11 @@ func (cc *cancelContext) escalateToImmediate() {
 		close(cc.immediateChan)
 
 		cc.mu.Lock()
-		fn := cc.graphInterruptFunc
+		fns := make([]func(...compose.GraphInterruptOption), len(cc.graphInterruptFuncs))
+		copy(fns, cc.graphInterruptFuncs)
 		cc.mu.Unlock()
 
-		if fn != nil {
+		for _, fn := range fns {
 			fn(compose.WithGraphInterruptTimeout(0))
 		}
 		return
@@ -331,19 +335,14 @@ func (cc *cancelContext) escalateToImmediate() {
 // If an immediate cancel was already requested, fires it retroactively.
 func (cc *cancelContext) setGraphInterruptFunc(interrupt func(...compose.GraphInterruptOption)) {
 	cc.mu.Lock()
-	cc.graphInterruptFunc = interrupt
+	cc.graphInterruptFuncs = append(cc.graphInterruptFuncs, interrupt)
 	cc.mu.Unlock()
 
 	// If immediate cancel was already requested but couldn't fire because
 	// graphInterruptFunc wasn't set yet, fire now. This covers the race where
 	// cancelFn is called before the compose graph is compiled and sets the func.
 	if atomic.LoadInt32(&cc.interruptSent) == interruptImmediate {
-		cc.mu.Lock()
-		fn := cc.graphInterruptFunc
-		cc.mu.Unlock()
-		if fn != nil {
-			fn(compose.WithGraphInterruptTimeout(0))
-		}
+		interrupt(compose.WithGraphInterruptTimeout(0))
 	}
 }
 
@@ -459,6 +458,29 @@ func (cc *cancelContext) buildCancelFunc() AgentCancelFunc {
 
 		return result
 	}
+}
+
+// wrapIterWithMarkDone wraps an AsyncIterator so that markDone fires only when
+// the inner iterator is fully drained. This is used by flowAgent for the
+// workflowAgent path where the outer flowAgent owns the cancel lifecycle but
+// the workflowAgent produces the stream asynchronously.
+func wrapIterWithMarkDone(iter *AsyncIterator[*AgentEvent], cc *cancelContext) *AsyncIterator[*AgentEvent] {
+	if cc == nil {
+		return iter
+	}
+	outIter, outGen := NewAsyncIteratorPair[*AgentEvent]()
+	go func() {
+		defer cc.markDone()
+		defer outGen.Close()
+		for {
+			event, ok := iter.Next()
+			if !ok {
+				return
+			}
+			outGen.Send(event)
+		}
+	}()
+	return outIter
 }
 
 // cancelMonitoredModel wraps a model with cancel monitoring.

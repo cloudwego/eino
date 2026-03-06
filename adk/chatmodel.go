@@ -1080,12 +1080,22 @@ func (a *ChatModelAgent) getRunFunc(ctx context.Context) (context.Context, runFu
 func (a *ChatModelAgent) Run(ctx context.Context, input *AgentInput, opts ...AgentRunOption) *AsyncIterator[*AgentEvent] {
 	iterator, generator := NewAsyncIteratorPair[*AgentEvent]()
 
+	o := getCommonOptions(nil, opts...)
+	cancelCtx := o.cancelCtx
+	// The CMA owns the cancelCtx lifecycle (calls markDone) only when:
+	// 1. cancelCtx was passed via opts, AND
+	// 2. cancelCtx is NOT already in the Go context (meaning no outer flowAgent owns it)
+	cancelCtxOwned := cancelCtx != nil && getCancelContext(ctx) == nil
+	if cancelCtx == nil {
+		cancelCtx = getCancelContext(ctx)
+	}
+
 	ctx, run, bc, err := a.getRunFunc(ctx)
 	if err != nil {
 		go func() {
 			// Mark cancelCtx as done so that cancelFunc unblocks (it waits on doneChan).
-			if cc := getCommonOptions(nil, opts...).cancelCtx; cc != nil {
-				defer cc.markDone()
+			if cancelCtxOwned && cancelCtx != nil {
+				defer cancelCtx.markDone()
 			}
 			generator.Send(&AgentEvent{Err: err})
 			generator.Close()
@@ -1103,11 +1113,8 @@ func (a *ChatModelAgent) Run(ctx context.Context, input *AgentInput, opts ...Age
 		}
 	}
 
-	o := getCommonOptions(nil, opts...)
-	cancelCtx := o.cancelCtx
-
 	go func() {
-		if cancelCtx != nil {
+		if cancelCtxOwned && cancelCtx != nil {
 			defer cancelCtx.markDone()
 		}
 		defer func() {
@@ -1147,12 +1154,22 @@ func (a *ChatModelAgent) Run(ctx context.Context, input *AgentInput, opts ...Age
 func (a *ChatModelAgent) Resume(ctx context.Context, info *ResumeInfo, opts ...AgentRunOption) *AsyncIterator[*AgentEvent] {
 	iterator, generator := NewAsyncIteratorPair[*AgentEvent]()
 
+	o := getCommonOptions(nil, opts...)
+	cancelCtx := o.cancelCtx
+	// The CMA owns the cancelCtx lifecycle (calls markDone) only when:
+	// 1. cancelCtx was passed via opts, AND
+	// 2. cancelCtx is NOT already in the Go context (meaning no outer flowAgent owns it)
+	cancelCtxOwned := cancelCtx != nil && getCancelContext(ctx) == nil
+	if cancelCtx == nil {
+		cancelCtx = getCancelContext(ctx)
+	}
+
 	ctx, run, bc, err := a.getRunFunc(ctx)
 	if err != nil {
 		go func() {
 			// Mark cancelCtx as done so that cancelFunc unblocks (it waits on doneChan).
-			if cc := getCommonOptions(nil, opts...).cancelCtx; cc != nil {
-				defer cc.markDone()
+			if cancelCtxOwned && cancelCtx != nil {
+				defer cancelCtx.markDone()
 			}
 			generator.Send(&AgentEvent{Err: err})
 			generator.Close()
@@ -1201,11 +1218,8 @@ func (a *ChatModelAgent) Resume(ctx context.Context, info *ResumeInfo, opts ...A
 		}))
 	}
 
-	o := getCommonOptions(nil, opts...)
-	cancelCtx := o.cancelCtx
-
 	go func() {
-		if cancelCtx != nil {
+		if cancelCtxOwned && cancelCtx != nil {
 			defer cancelCtx.markDone()
 		}
 		defer func() {
