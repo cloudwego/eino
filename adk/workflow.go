@@ -223,7 +223,7 @@ func (a *workflowAgent) runSequential(ctx context.Context,
 				// Sub-agent was interrupted — resume it.
 				subIterator = subAgent.Resume(seqCtx, &ResumeInfo{
 					EnableStreaming: info.EnableStreaming,
-					InterruptInfo:  wfInfo.SequentialInterruptInfo,
+					InterruptInfo:   wfInfo.SequentialInterruptInfo,
 				}, opts...)
 			} else {
 				// Transition-point cancel — sub-agent never started, run fresh.
@@ -372,7 +372,7 @@ func (a *workflowAgent) runLoop(ctx context.Context, generator *AsyncGenerator[*
 					// Sub-agent was interrupted — resume it.
 					subIterator = subAgent.Resume(loopCtx, &ResumeInfo{
 						EnableStreaming: resumeInfo.EnableStreaming,
-						InterruptInfo:  wfInfo.SequentialInterruptInfo,
+						InterruptInfo:   wfInfo.SequentialInterruptInfo,
 					}, opts...)
 				} else {
 					// Transition-point cancel — sub-agent never started, run fresh.
