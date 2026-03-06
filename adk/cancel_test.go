@@ -1591,12 +1591,12 @@ func TestGraphInterruptFuncs_Parallel(t *testing.T) {
 	t.Run("MultipleGraphInterruptFuncsAllCalled", func(t *testing.T) {
 		cc := newCancelContext()
 
-		var called1, called2 atomic.Int32
+		var called1, called2 int32
 		cc.setGraphInterruptFunc(func(opts ...compose.GraphInterruptOption) {
-			called1.Add(1)
+			atomic.AddInt32(&called1, 1)
 		})
 		cc.setGraphInterruptFunc(func(opts ...compose.GraphInterruptOption) {
-			called2.Add(1)
+			atomic.AddInt32(&called2, 1)
 		})
 
 		// Simulate immediate cancel
@@ -1605,8 +1605,8 @@ func TestGraphInterruptFuncs_Parallel(t *testing.T) {
 		close(cc.cancelChan)
 		cc.sendInterrupt(true)
 
-		assert.Equal(t, int32(1), called1.Load(), "First graph interrupt func should be called")
-		assert.Equal(t, int32(1), called2.Load(), "Second graph interrupt func should be called")
+		assert.Equal(t, int32(1), atomic.LoadInt32(&called1), "First graph interrupt func should be called")
+		assert.Equal(t, int32(1), atomic.LoadInt32(&called2), "Second graph interrupt func should be called")
 	})
 
 	t.Run("RetroactiveFire_OnSetAfterCancel", func(t *testing.T) {
@@ -1620,11 +1620,11 @@ func TestGraphInterruptFuncs_Parallel(t *testing.T) {
 		atomic.StoreInt32(&cc.interruptSent, interruptImmediate)
 
 		// Now register a new function - it should be retroactively fired
-		var called atomic.Int32
+		var called int32
 		cc.setGraphInterruptFunc(func(opts ...compose.GraphInterruptOption) {
-			called.Add(1)
+			atomic.AddInt32(&called, 1)
 		})
 
-		assert.Equal(t, int32(1), called.Load(), "setGraphInterruptFunc should retroactively fire new func")
+		assert.Equal(t, int32(1), atomic.LoadInt32(&called), "setGraphInterruptFunc should retroactively fire new func")
 	})
 }
