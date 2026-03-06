@@ -18,6 +18,9 @@ package filesystem
 
 import (
 	"context"
+	"errors"
+	"fmt"
+	"io"
 	"strings"
 	"testing"
 
@@ -26,6 +29,7 @@ import (
 	"github.com/cloudwego/eino/adk"
 	"github.com/cloudwego/eino/adk/filesystem"
 	"github.com/cloudwego/eino/components/tool"
+	"github.com/cloudwego/eino/schema"
 )
 
 // setupTestBackend creates a test backend with some initial files
@@ -616,7 +620,6 @@ func TestNew(t *testing.T) {
 
 		fm, ok := m.(*filesystemMiddleware)
 		assert.True(t, ok)
-		assert.Contains(t, fm.additionalInstruction, ToolsSystemPrompt)
 		assert.Len(t, fm.additionalTools, 6)
 	})
 
@@ -665,7 +668,6 @@ func TestFilesystemMiddleware_BeforeAgent(t *testing.T) {
 		assert.NotNil(t, newCtx)
 		assert.NotNil(t, newRunCtx)
 		assert.Contains(t, newRunCtx.Instruction, "Original instruction")
-		assert.Contains(t, newRunCtx.Instruction, ToolsSystemPrompt)
 		assert.Len(t, newRunCtx.Tools, 6)
 	})
 
@@ -1506,4 +1508,710 @@ func TestToolConfigEdgeCases(t *testing.T) {
 		}
 		assert.NotNil(t, lsTool, "tool should use default name when Name is empty")
 	})
+}
+
+func TestGetFilesystemTools_DisableAllTools(t *testing.T) {
+	ctx := context.Background()
+	backend := setupTestBackend()
+
+	config := &MiddlewareConfig{
+		Backend:            backend,
+		LsToolConfig:       &ToolConfig{Disable: true},
+		ReadFileToolConfig: &ToolConfig{Disable: true},
+		WriteFileToolConfig: &ToolConfig{Disable: true},
+		EditFileToolConfig: &ToolConfig{Disable: true},
+		GlobToolConfig:     &ToolConfig{Disable: true},
+		GrepToolConfig:     &ToolConfig{Disable: true},
+	}
+
+	tools, err := getFilesystemTools(ctx, config)
+	assert.NoError(t, err)
+	assert.Len(t, tools, 0)
+}
+
+func TestGetFilesystemTools_StreamingShell(t *testing.T) {
+	ctx := context.Background()
+	backend := setupTestBackend()
+
+	t.Run("returns 7 tools with StreamingShell", func(t *testing.T) {
+		mockSS := &mockStreamingShell{}
+		tools, err := getFilesystemTools(ctx, &MiddlewareConfig{
+			Backend:        backend,
+			StreamingShell: mockSS,
+		})
+		assert.NoError(t, err)
+		assert.Len(t, tools, 7)
+
+		toolNames := make([]string, 0, len(tools))
+		for _, to := range tools {
+			info, _ := to.Info(ctx)
+			toolNames = append(toolNames, info.Name)
+		}
+		assert.Contains(t, toolNames, ToolNameExecute)
+	})
+
+	t.Run("StreamingShell takes precedence over Shell", func(t *testing.T) {
+		mockSS := &mockStreamingShell{}
+		shellBackend := &mockShellBackend{
+			Backend: backend,
+			resp:    &filesystem.ExecuteResponse{Output: "ok"},
+		}
+
+		// When both are set, Validate should fail
+		config := &MiddlewareConfig{
+			Backend:        backend,
+			Shell:          shellBackend,
+			StreamingShell: mockSS,
+		}
+		err := config.Validate()
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "shell and streaming shell should not be both set")
+	})
+}
+
+func TestGetFilesystemTools_NilBackend(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("nil backend with shell only returns execute tool", func(t *testing.T) {
+		mockSS := &mockStreamingShell{}
+		config := &MiddlewareConfig{
+			Backend:        nil,
+			StreamingShell: mockSS,
+		}
+		// Validate should fail, but getFilesystemTools itself handles nil backend gracefully
+		tools, err := getFilesystemTools(ctx, config)
+		assert.NoError(t, err)
+		// Only execute tool should be returned since backend is nil
+		assert.Len(t, tools, 1)
+
+		info, _ := tools[0].Info(ctx)
+		assert.Equal(t, ToolNameExecute, info.Name)
+	})
+
+	t.Run("nil backend with regular Shell returns execute tool", func(t *testing.T) {
+		mockShell := &mockShellBackend{
+			resp: &filesystem.ExecuteResponse{Output: "ok"},
+		}
+		config := &MiddlewareConfig{
+			Backend: nil,
+			Shell:   mockShell,
+		}
+		tools, err := getFilesystemTools(ctx, config)
+		assert.NoError(t, err)
+		assert.Len(t, tools, 1)
+
+		info, _ := tools[0].Info(ctx)
+		assert.Equal(t, ToolNameExecute, info.Name)
+	})
+
+	t.Run("nil backend and nil shell returns empty tools", func(t *testing.T) {
+		config := &MiddlewareConfig{
+			Backend: nil,
+		}
+		tools, err := getFilesystemTools(ctx, config)
+		assert.NoError(t, err)
+		assert.Len(t, tools, 0)
+	})
+}
+
+func TestGetFilesystemTools_PartialDisable(t *testing.T) {
+	ctx := context.Background()
+	backend := setupTestBackend()
+
+	config := &MiddlewareConfig{
+		Backend:            backend,
+		LsToolConfig:       &ToolConfig{Disable: true},
+		ReadFileToolConfig: &ToolConfig{Disable: true},
+	}
+
+	tools, err := getFilesystemTools(ctx, config)
+	assert.NoError(t, err)
+	assert.Len(t, tools, 4)
+
+	toolNames := make([]string, 0, len(tools))
+	for _, to := range tools {
+		info, _ := to.Info(ctx)
+		toolNames = append(toolNames, info.Name)
+	}
+	assert.NotContains(t, toolNames, ToolNameLs)
+	assert.NotContains(t, toolNames, ToolNameReadFile)
+	assert.Contains(t, toolNames, ToolNameWriteFile)
+	assert.Contains(t, toolNames, ToolNameEditFile)
+	assert.Contains(t, toolNames, ToolNameGlob)
+	assert.Contains(t, toolNames, ToolNameGrep)
+}
+
+type mockStreamingShell struct{}
+
+func (m *mockStreamingShell) ExecuteStreaming(ctx context.Context, input *filesystem.ExecuteRequest) (*schema.StreamReader[*filesystem.ExecuteResponse], error) {
+	sr, sw := schema.Pipe[*filesystem.ExecuteResponse](10)
+	go func() {
+		defer sw.Close()
+		sw.Send(&filesystem.ExecuteResponse{
+			Output:   "streaming output",
+			ExitCode: ptrOf(0),
+		}, nil)
+	}()
+	return sr, nil
+}
+
+type mockStreamingShellWithError struct{}
+
+func (m *mockStreamingShellWithError) ExecuteStreaming(ctx context.Context, input *filesystem.ExecuteRequest) (*schema.StreamReader[*filesystem.ExecuteResponse], error) {
+	return nil, fmt.Errorf("streaming shell error")
+}
+
+type mockStreamingShellWithRecvError struct{}
+
+func (m *mockStreamingShellWithRecvError) ExecuteStreaming(ctx context.Context, input *filesystem.ExecuteRequest) (*schema.StreamReader[*filesystem.ExecuteResponse], error) {
+	sr, sw := schema.Pipe[*filesystem.ExecuteResponse](10)
+	go func() {
+		defer sw.Close()
+		sw.Send(nil, fmt.Errorf("recv error during streaming"))
+	}()
+	return sr, nil
+}
+
+type mockStreamingShellWithExitCode struct {
+	exitCode int
+}
+
+func (m *mockStreamingShellWithExitCode) ExecuteStreaming(ctx context.Context, input *filesystem.ExecuteRequest) (*schema.StreamReader[*filesystem.ExecuteResponse], error) {
+	sr, sw := schema.Pipe[*filesystem.ExecuteResponse](10)
+	go func() {
+		defer sw.Close()
+		sw.Send(&filesystem.ExecuteResponse{
+			Output:   "some output",
+			ExitCode: ptrOf(m.exitCode),
+		}, nil)
+	}()
+	return sr, nil
+}
+
+type mockStreamingShellNoOutput struct{}
+
+func (m *mockStreamingShellNoOutput) ExecuteStreaming(ctx context.Context, input *filesystem.ExecuteRequest) (*schema.StreamReader[*filesystem.ExecuteResponse], error) {
+	sr, sw := schema.Pipe[*filesystem.ExecuteResponse](10)
+	go func() {
+		defer sw.Close()
+		sw.Send(&filesystem.ExecuteResponse{
+			ExitCode: ptrOf(0),
+		}, nil)
+	}()
+	return sr, nil
+}
+
+type mockStreamingShellTruncated struct{}
+
+func (m *mockStreamingShellTruncated) ExecuteStreaming(ctx context.Context, input *filesystem.ExecuteRequest) (*schema.StreamReader[*filesystem.ExecuteResponse], error) {
+	sr, sw := schema.Pipe[*filesystem.ExecuteResponse](10)
+	go func() {
+		defer sw.Close()
+		sw.Send(&filesystem.ExecuteResponse{
+			Output:    "partial",
+			Truncated: true,
+			ExitCode:  ptrOf(0),
+		}, nil)
+	}()
+	return sr, nil
+}
+
+type mockStreamingShellNilChunk struct{}
+
+func (m *mockStreamingShellNilChunk) ExecuteStreaming(ctx context.Context, input *filesystem.ExecuteRequest) (*schema.StreamReader[*filesystem.ExecuteResponse], error) {
+	sr, sw := schema.Pipe[*filesystem.ExecuteResponse](10)
+	go func() {
+		defer sw.Close()
+		sw.Send(nil, nil)
+		sw.Send(&filesystem.ExecuteResponse{
+			Output:   "after nil",
+			ExitCode: ptrOf(0),
+		}, nil)
+	}()
+	return sr, nil
+}
+
+func TestNewStreamingExecuteTool(t *testing.T) {
+	t.Run("successful streaming execution", func(t *testing.T) {
+		executeTool, err := newStreamingExecuteTool(&mockStreamingShell{}, "", "")
+		assert.NoError(t, err)
+
+		st := executeTool.(tool.StreamableTool)
+		sr, err := st.StreamableRun(context.Background(), `{"command": "echo hello"}`)
+		assert.NoError(t, err)
+		defer sr.Close()
+
+		var chunks []string
+		for {
+			chunk, recvErr := sr.Recv()
+			if recvErr == io.EOF {
+				break
+			}
+			assert.NoError(t, recvErr)
+			chunks = append(chunks, chunk)
+		}
+		assert.True(t, len(chunks) > 0)
+		result := strings.Join(chunks, "")
+		assert.Contains(t, result, "streaming output")
+	})
+
+	t.Run("streaming execution with ExecuteStreaming error", func(t *testing.T) {
+		executeTool, err := newStreamingExecuteTool(&mockStreamingShellWithError{}, "", "")
+		assert.NoError(t, err)
+
+		st := executeTool.(tool.StreamableTool)
+		_, err = st.StreamableRun(context.Background(), `{"command": "fail"}`)
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "streaming shell error")
+	})
+
+	t.Run("streaming execution with recv error", func(t *testing.T) {
+		executeTool, err := newStreamingExecuteTool(&mockStreamingShellWithRecvError{}, "", "")
+		assert.NoError(t, err)
+
+		st := executeTool.(tool.StreamableTool)
+		sr, err := st.StreamableRun(context.Background(), `{"command": "echo hello"}`)
+		assert.NoError(t, err)
+		defer sr.Close()
+
+		var gotError bool
+		for {
+			_, recvErr := sr.Recv()
+			if recvErr == io.EOF {
+				break
+			}
+			if recvErr != nil {
+				gotError = true
+				assert.Contains(t, recvErr.Error(), "recv error during streaming")
+				break
+			}
+		}
+		assert.True(t, gotError)
+	})
+
+	t.Run("streaming execution with non-zero exit code", func(t *testing.T) {
+		executeTool, err := newStreamingExecuteTool(&mockStreamingShellWithExitCode{exitCode: 1}, "", "")
+		assert.NoError(t, err)
+
+		st := executeTool.(tool.StreamableTool)
+		sr, err := st.StreamableRun(context.Background(), `{"command": "false"}`)
+		assert.NoError(t, err)
+		defer sr.Close()
+
+		var chunks []string
+		for {
+			chunk, recvErr := sr.Recv()
+			if recvErr == io.EOF {
+				break
+			}
+			assert.NoError(t, recvErr)
+			chunks = append(chunks, chunk)
+		}
+		result := strings.Join(chunks, "")
+		assert.Contains(t, result, "[Command failed with exit code 1]")
+	})
+
+	t.Run("streaming execution with zero exit code and no output", func(t *testing.T) {
+		executeTool, err := newStreamingExecuteTool(&mockStreamingShellNoOutput{}, "", "")
+		assert.NoError(t, err)
+
+		st := executeTool.(tool.StreamableTool)
+		sr, err := st.StreamableRun(context.Background(), `{"command": "true"}`)
+		assert.NoError(t, err)
+		defer sr.Close()
+
+		var chunks []string
+		for {
+			chunk, recvErr := sr.Recv()
+			if recvErr == io.EOF {
+				break
+			}
+			assert.NoError(t, recvErr)
+			chunks = append(chunks, chunk)
+		}
+		result := strings.Join(chunks, "")
+		assert.Contains(t, result, "[Command executed successfully with no output]")
+	})
+
+	t.Run("streaming execution with truncated output", func(t *testing.T) {
+		executeTool, err := newStreamingExecuteTool(&mockStreamingShellTruncated{}, "", "")
+		assert.NoError(t, err)
+
+		st := executeTool.(tool.StreamableTool)
+		sr, err := st.StreamableRun(context.Background(), `{"command": "cat largefile"}`)
+		assert.NoError(t, err)
+		defer sr.Close()
+
+		var chunks []string
+		for {
+			chunk, recvErr := sr.Recv()
+			if recvErr == io.EOF {
+				break
+			}
+			assert.NoError(t, recvErr)
+			chunks = append(chunks, chunk)
+		}
+		result := strings.Join(chunks, "")
+		assert.Contains(t, result, "partial")
+		assert.Contains(t, result, "[Output was truncated due to size limits]")
+	})
+
+	t.Run("streaming execution with nil chunk skipped", func(t *testing.T) {
+		executeTool, err := newStreamingExecuteTool(&mockStreamingShellNilChunk{}, "", "")
+		assert.NoError(t, err)
+
+		st := executeTool.(tool.StreamableTool)
+		sr, err := st.StreamableRun(context.Background(), `{"command": "echo test"}`)
+		assert.NoError(t, err)
+		defer sr.Close()
+
+		var chunks []string
+		for {
+			chunk, recvErr := sr.Recv()
+			if recvErr == io.EOF {
+				break
+			}
+			assert.NoError(t, recvErr)
+			chunks = append(chunks, chunk)
+		}
+		result := strings.Join(chunks, "")
+		assert.Contains(t, result, "after nil")
+	})
+
+	t.Run("streaming execution with custom name and desc", func(t *testing.T) {
+		executeTool, err := newStreamingExecuteTool(&mockStreamingShell{}, "custom_execute", "custom desc")
+		assert.NoError(t, err)
+
+		info, err := executeTool.Info(context.Background())
+		assert.NoError(t, err)
+		assert.Equal(t, "custom_execute", info.Name)
+		assert.Equal(t, "custom desc", info.Desc)
+	})
+}
+
+func TestNew_StreamingShell(t *testing.T) {
+	ctx := context.Background()
+	backend := setupTestBackend()
+
+	t.Run("StreamingShell adds streaming execute tool", func(t *testing.T) {
+		m, err := New(ctx, &MiddlewareConfig{
+			Backend:        backend,
+			StreamingShell: &mockStreamingShell{},
+		})
+		assert.NoError(t, err)
+
+		fm, ok := m.(*filesystemMiddleware)
+		assert.True(t, ok)
+		assert.Len(t, fm.additionalTools, 7)
+	})
+
+	t.Run("both Shell and StreamingShell returns error", func(t *testing.T) {
+		_, err := New(ctx, &MiddlewareConfig{
+			Backend:        backend,
+			Shell:          &mockShellBackend{Backend: backend, resp: &filesystem.ExecuteResponse{Output: "ok"}},
+			StreamingShell: &mockStreamingShell{},
+		})
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "shell and streaming shell should not be both set")
+	})
+}
+
+func TestNewMiddleware_Validation(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("nil config returns error", func(t *testing.T) {
+		_, err := NewMiddleware(ctx, nil)
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "config should not be nil")
+	})
+
+	t.Run("nil backend returns error", func(t *testing.T) {
+		_, err := NewMiddleware(ctx, &Config{Backend: nil})
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "backend should not be nil")
+	})
+
+	t.Run("both Shell and StreamingShell returns error", func(t *testing.T) {
+		backend := setupTestBackend()
+		_, err := NewMiddleware(ctx, &Config{
+			Backend:        backend,
+			Shell:          &mockShellBackend{Backend: backend, resp: &filesystem.ExecuteResponse{Output: "ok"}},
+			StreamingShell: &mockStreamingShell{},
+		})
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "shell and streaming shell should not be both set")
+	})
+}
+
+func TestMiddlewareConfig_Validate(t *testing.T) {
+	t.Run("nil config returns error", func(t *testing.T) {
+		var c *MiddlewareConfig
+		err := c.Validate()
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "config should not be nil")
+	})
+
+	t.Run("nil backend returns error", func(t *testing.T) {
+		c := &MiddlewareConfig{}
+		err := c.Validate()
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "backend should not be nil")
+	})
+
+	t.Run("both shells returns error", func(t *testing.T) {
+		c := &MiddlewareConfig{
+			Backend:        setupTestBackend(),
+			Shell:          &mockShellBackend{},
+			StreamingShell: &mockStreamingShell{},
+		}
+		err := c.Validate()
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "shell and streaming shell should not be both set")
+	})
+
+	t.Run("valid config passes", func(t *testing.T) {
+		c := &MiddlewareConfig{
+			Backend: setupTestBackend(),
+		}
+		err := c.Validate()
+		assert.NoError(t, err)
+	})
+}
+
+func TestNewStreamingExecuteTool_MultipleChunks(t *testing.T) {
+	mockSS := &mockStreamingShellMultiChunk{}
+	executeTool, err := newStreamingExecuteTool(mockSS, "", "")
+	assert.NoError(t, err)
+
+	st := executeTool.(tool.StreamableTool)
+	sr, err := st.StreamableRun(context.Background(), `{"command": "long-running"}`)
+	assert.NoError(t, err)
+	defer sr.Close()
+
+	var chunks []string
+	for {
+		chunk, recvErr := sr.Recv()
+		if recvErr == io.EOF {
+			break
+		}
+		assert.NoError(t, recvErr)
+		chunks = append(chunks, chunk)
+	}
+	// Should have received multiple chunks
+	assert.True(t, len(chunks) >= 3)
+	result := strings.Join(chunks, "")
+	assert.Contains(t, result, "chunk1")
+	assert.Contains(t, result, "chunk2")
+	assert.Contains(t, result, "chunk3")
+}
+
+type mockStreamingShellMultiChunk struct{}
+
+func (m *mockStreamingShellMultiChunk) ExecuteStreaming(ctx context.Context, input *filesystem.ExecuteRequest) (*schema.StreamReader[*filesystem.ExecuteResponse], error) {
+	sr, sw := schema.Pipe[*filesystem.ExecuteResponse](10)
+	go func() {
+		defer sw.Close()
+		sw.Send(&filesystem.ExecuteResponse{Output: "chunk1\n"}, nil)
+		sw.Send(&filesystem.ExecuteResponse{Output: "chunk2\n"}, nil)
+		sw.Send(&filesystem.ExecuteResponse{Output: "chunk3\n", ExitCode: ptrOf(0)}, nil)
+	}()
+	return sr, nil
+}
+
+func TestNewStreamingExecuteTool_ExitCodeOnlyInLastChunk(t *testing.T) {
+	mockSS := &mockStreamingShellExitCodeLast{exitCode: 2}
+	executeTool, err := newStreamingExecuteTool(mockSS, "", "")
+	assert.NoError(t, err)
+
+	st := executeTool.(tool.StreamableTool)
+	sr, err := st.StreamableRun(context.Background(), `{"command": "fail-at-end"}`)
+	assert.NoError(t, err)
+	defer sr.Close()
+
+	var chunks []string
+	for {
+		chunk, recvErr := sr.Recv()
+		if recvErr == io.EOF {
+			break
+		}
+		assert.NoError(t, recvErr)
+		chunks = append(chunks, chunk)
+	}
+	result := strings.Join(chunks, "")
+	assert.Contains(t, result, "output line")
+	assert.Contains(t, result, "[Command failed with exit code 2]")
+}
+
+type mockStreamingShellExitCodeLast struct {
+	exitCode int
+}
+
+func (m *mockStreamingShellExitCodeLast) ExecuteStreaming(ctx context.Context, input *filesystem.ExecuteRequest) (*schema.StreamReader[*filesystem.ExecuteResponse], error) {
+	sr, sw := schema.Pipe[*filesystem.ExecuteResponse](10)
+	go func() {
+		defer sw.Close()
+		sw.Send(&filesystem.ExecuteResponse{Output: "output line"}, nil)
+		sw.Send(&filesystem.ExecuteResponse{ExitCode: ptrOf(m.exitCode)}, nil)
+	}()
+	return sr, nil
+}
+
+func TestConvExecuteResponse_NilResponse(t *testing.T) {
+	result := convExecuteResponse(nil)
+	assert.Equal(t, "", result)
+}
+
+func TestConvExecuteResponse_NilExitCode(t *testing.T) {
+	result := convExecuteResponse(&filesystem.ExecuteResponse{
+		Output: "some output",
+	})
+	assert.Equal(t, "some output", result)
+}
+
+func TestConfig_Validate(t *testing.T) {
+	t.Run("nil config returns error", func(t *testing.T) {
+		var c *Config
+		err := c.Validate()
+		assert.Error(t, err)
+	})
+
+	t.Run("nil backend returns error", func(t *testing.T) {
+		c := &Config{}
+		err := c.Validate()
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "backend should not be nil")
+	})
+
+	t.Run("both shells returns error", func(t *testing.T) {
+		c := &Config{
+			Backend:        setupTestBackend(),
+			Shell:          &mockShellBackend{},
+			StreamingShell: &mockStreamingShell{},
+		}
+		err := c.Validate()
+		assert.Error(t, err)
+	})
+
+	t.Run("valid config passes", func(t *testing.T) {
+		c := &Config{
+			Backend: setupTestBackend(),
+		}
+		err := c.Validate()
+		assert.NoError(t, err)
+	})
+}
+
+func TestGetFilesystemTools_CustomToolWithShell(t *testing.T) {
+	ctx := context.Background()
+	backend := setupTestBackend()
+
+	t.Run("custom tool replaces default for all disabled except custom", func(t *testing.T) {
+		customLs, err := newLsTool(backend, "my_ls", "my ls desc")
+		assert.NoError(t, err)
+
+		config := &MiddlewareConfig{
+			Backend: backend,
+			LsToolConfig: &ToolConfig{
+				CustomTool: customLs,
+			},
+		}
+		tools, err := getFilesystemTools(ctx, config)
+		assert.NoError(t, err)
+
+		var found bool
+		for _, to := range tools {
+			info, _ := to.Info(ctx)
+			if info.Name == "my_ls" {
+				found = true
+				break
+			}
+		}
+		assert.True(t, found)
+	})
+}
+
+func TestMergeToolConfigWithDesc(t *testing.T) {
+	config := &MiddlewareConfig{Backend: setupTestBackend()}
+
+	t.Run("both nil returns empty ToolConfig", func(t *testing.T) {
+		result := config.mergeToolConfigWithDesc(nil, nil)
+		assert.NotNil(t, result)
+		assert.Equal(t, "", result.Name)
+		assert.Nil(t, result.Desc)
+		assert.False(t, result.Disable)
+	})
+
+	t.Run("nil toolConfig with legacyDesc", func(t *testing.T) {
+		desc := "legacy"
+		result := config.mergeToolConfigWithDesc(nil, &desc)
+		assert.NotNil(t, result)
+		assert.Equal(t, "legacy", *result.Desc)
+	})
+
+	t.Run("toolConfig with Desc overrides legacyDesc", func(t *testing.T) {
+		tcDesc := "tc desc"
+		legacyDesc := "legacy"
+		tc := &ToolConfig{Desc: &tcDesc}
+		result := config.mergeToolConfigWithDesc(tc, &legacyDesc)
+		assert.Equal(t, "tc desc", *result.Desc)
+	})
+
+	t.Run("toolConfig with nil Desc falls back to legacyDesc", func(t *testing.T) {
+		legacyDesc := "legacy"
+		tc := &ToolConfig{Name: "custom"}
+		result := config.mergeToolConfigWithDesc(tc, &legacyDesc)
+		assert.Equal(t, "legacy", *result.Desc)
+		assert.Equal(t, "custom", result.Name)
+	})
+
+	t.Run("toolConfig with nil Desc and nil legacyDesc", func(t *testing.T) {
+		tc := &ToolConfig{Name: "custom"}
+		result := config.mergeToolConfigWithDesc(tc, nil)
+		assert.Nil(t, result.Desc)
+		assert.Equal(t, "custom", result.Name)
+	})
+}
+
+func TestNewMiddleware_WithShell(t *testing.T) {
+	ctx := context.Background()
+	backend := setupTestBackend()
+
+	t.Run("Shell backend creates execute tool", func(t *testing.T) {
+		shellBackend := &mockShellBackend{
+			Backend: backend,
+			resp:    &filesystem.ExecuteResponse{Output: "ok"},
+		}
+		m, err := NewMiddleware(ctx, &Config{
+			Backend: backend,
+			Shell:   shellBackend,
+		})
+		assert.NoError(t, err)
+		assert.Len(t, m.AdditionalTools, 7)
+	})
+
+	t.Run("StreamingShell backend creates streaming execute tool", func(t *testing.T) {
+		m, err := NewMiddleware(ctx, &Config{
+			Backend:        backend,
+			StreamingShell: &mockStreamingShell{},
+		})
+		assert.NoError(t, err)
+		assert.Len(t, m.AdditionalTools, 7)
+	})
+}
+
+func TestNewExecuteTool_ShellError(t *testing.T) {
+	mockShell := &mockShellBackendWithError{}
+	executeTool, err := newExecuteTool(mockShell, "", "")
+	assert.NoError(t, err)
+
+	result, err := invokeTool(t, executeTool, `{"command": "fail"}`)
+	assert.Error(t, err)
+	assert.Equal(t, "", result)
+	assert.Contains(t, err.Error(), "shell execution error")
+}
+
+type mockShellBackendWithError struct{}
+
+func (m *mockShellBackendWithError) Execute(ctx context.Context, req *filesystem.ExecuteRequest) (*filesystem.ExecuteResponse, error) {
+	return nil, errors.New("shell execution error")
 }

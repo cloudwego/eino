@@ -197,19 +197,6 @@ func NewMiddleware(ctx context.Context, config *Config) (adk.AgentMiddleware, er
 	var systemPrompt string
 	if config.CustomSystemPrompt != nil {
 		systemPrompt = *config.CustomSystemPrompt
-	} else {
-		systemPrompt = internal.SelectPrompt(internal.I18nPrompts{
-			English: ToolsSystemPrompt,
-			Chinese: ToolsSystemPromptChinese,
-		})
-		if config.Shell != nil || config.StreamingShell != nil {
-			var executePrompt string
-			executePrompt = internal.SelectPrompt(internal.I18nPrompts{
-				English: ExecuteToolsSystemPrompt,
-				Chinese: ExecuteToolsSystemPromptChinese,
-			})
-			systemPrompt += executePrompt
-		}
 	}
 
 	m := adk.AgentMiddleware{
@@ -359,22 +346,9 @@ func New(ctx context.Context, config *MiddlewareConfig) (adk.ChatModelAgentMiddl
 	if err != nil {
 		return nil, err
 	}
-
 	var systemPrompt string
 	if config.CustomSystemPrompt != nil {
 		systemPrompt = *config.CustomSystemPrompt
-	} else {
-		systemPrompt = internal.SelectPrompt(internal.I18nPrompts{
-			English: ToolsSystemPrompt,
-			Chinese: ToolsSystemPromptChinese,
-		})
-		if config.Shell != nil || config.StreamingShell != nil {
-			executePrompt := internal.SelectPrompt(internal.I18nPrompts{
-				English: ExecuteToolsSystemPrompt,
-				Chinese: ExecuteToolsSystemPromptChinese,
-			})
-			systemPrompt += executePrompt
-		}
 	}
 
 	m := &filesystemMiddleware{
