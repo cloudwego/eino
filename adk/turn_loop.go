@@ -210,7 +210,21 @@ type TurnLoopExitState[T any] struct {
 
 // TurnLoop is a push-based event loop for agent execution.
 // Users push items via Push() and the loop processes them through the agent.
-// Create and start with RunTurnLoop().
+//
+// Create with NewTurnLoop, then start with Run:
+//
+//	loop := NewTurnLoop(cfg)
+//	// pass loop to other components, push initial items, etc.
+//	loop.Run(ctx)
+//
+// # Permissive API
+//
+// All methods are valid on a not-yet-running loop:
+//   - Push: items are buffered and will be processed once Run is called.
+//   - Stop: sets the stopped flag; a subsequent Run will exit immediately.
+//   - Wait: blocks until Run is called AND the loop exits. If Run is never
+//     called, Wait blocks forever (this is a programming error, analogous
+//     to reading from a channel that nobody writes to).
 type TurnLoop[T any] struct {
 	config TurnLoopConfig[T]
 
@@ -223,6 +237,8 @@ type TurnLoop[T any] struct {
 	result *TurnLoopExitState[T]
 
 	stopOnce sync.Once
+
+	runOnce sync.Once
 
 	stopSig *turnLoopStopSig
 
@@ -282,24 +298,34 @@ func WithPreemptDelay(delay time.Duration) PushOption {
 	}
 }
 
-// RunTurnLoop creates and starts a new TurnLoop, returning the running instance.
-// The loop starts processing immediately in a background goroutine.
-// Use Push() to add items and Wait() to block until the loop exits.
-func RunTurnLoop[T any](ctx context.Context, cfg TurnLoopConfig[T]) *TurnLoop[T] {
-	l := &TurnLoop[T]{
+// NewTurnLoop creates a new TurnLoop without starting it.
+// The returned loop accepts Push and Stop calls immediately; pushed items
+// are buffered until Run is called.
+// Call Run to start the processing goroutine.
+func NewTurnLoop[T any](cfg TurnLoopConfig[T]) *TurnLoop[T] {
+	return &TurnLoop[T]{
 		config:     cfg,
 		buffer:     internal.NewUnboundedChan[T](),
 		done:       make(chan struct{}),
 		stopSig:    newTurnLoopStopSig(),
 		preemptSig: newPreemptSignal(),
 	}
-	go l.run(ctx)
-	return l
+}
+
+// Run starts the loop's processing goroutine. It is non-blocking: the loop
+// runs in the background and results are obtained via Wait.
+// Run may be called at most once; subsequent calls are no-ops.
+func (l *TurnLoop[T]) Run(ctx context.Context) {
+	l.runOnce.Do(func() {
+		go l.run(ctx)
+	})
 }
 
 // Push adds an item to the loop's buffer for processing.
 // This method is non-blocking and thread-safe.
 // Returns false if the loop has stopped, true otherwise.
+// If the loop has not been started yet (Run not called), items are buffered
+// and will be processed once Run is called.
 //
 // Use WithPreempt() to atomically push an item and signal preemption of the current agent.
 // This is useful for urgent items that should interrupt the current processing.
@@ -352,6 +378,9 @@ func (l *TurnLoop[T]) Push(item T, opts ...PushOption) bool {
 // This method is idempotent - multiple calls have no additional effect.
 // Call Wait() to block until the loop has fully exited and get the result.
 //
+// Stop may be called before Run. In that case, the stopped flag is set and
+// a subsequent Run will exit the loop immediately.
+//
 // If the running agent does not support the WithCancel AgentRunOption,
 // Stop degrades to "exit the loop on entering the next iteration" — the
 // current agent turn runs to completion before the loop exits.
@@ -374,6 +403,9 @@ func (l *TurnLoop[T]) Stop(opts ...StopOption) {
 // Wait blocks until the loop exits and returns the result.
 // This method is safe to call from multiple goroutines.
 // All callers will receive the same result.
+//
+// Wait blocks until Run is called AND the loop exits. If Run is never called,
+// Wait blocks forever.
 func (l *TurnLoop[T]) Wait() *TurnLoopExitState[T] {
 	<-l.done
 	return l.result

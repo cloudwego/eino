@@ -117,7 +117,9 @@ func (a *turnLoopCancellableMockAgent) Run(ctx context.Context, input *AgentInpu
 }
 
 func newAndRunTurnLoop[T any](ctx context.Context, cfg TurnLoopConfig[T]) *TurnLoop[T] {
-	return RunTurnLoop(ctx, cfg)
+	l := NewTurnLoop(cfg)
+	l.Run(ctx)
+	return l
 }
 
 func TestTurnLoop_RunAndPush(t *testing.T) {
@@ -1101,97 +1103,6 @@ func TestTurnLoop_StopOptionsArePassed(t *testing.T) {
 	assert.NoError(t, result.ExitReason)
 }
 
-func TestTurnLoop_RunTurnLoop(t *testing.T) {
-	t.Run("StartsImmediately", func(t *testing.T) {
-		processedItems := make([]string, 0)
-		var mu sync.Mutex
-
-		loop := RunTurnLoop(context.Background(), TurnLoopConfig[string]{
-			GenInput: func(ctx context.Context, _ *TurnLoop[string], items []string) (*GenInputResult[string], error) {
-				mu.Lock()
-				processedItems = append(processedItems, items...)
-				mu.Unlock()
-				return &GenInputResult[string]{
-					Input:    &AgentInput{Messages: []Message{schema.UserMessage(items[0])}},
-					Consumed: items,
-				}, nil
-			},
-			PrepareAgent: func(ctx context.Context, _ *TurnLoop[string], consumed []string) (Agent, error) {
-				return &turnLoopMockAgent{name: "test"}, nil
-			},
-		})
-
-		loop.Push("item-1")
-		loop.Push("item-2")
-
-		time.Sleep(100 * time.Millisecond)
-
-		loop.Stop()
-		result := loop.Wait()
-		assert.NoError(t, result.ExitReason)
-
-		mu.Lock()
-		defer mu.Unlock()
-		assert.True(t, len(processedItems) > 0, "should have processed at least one item")
-	})
-
-	t.Run("StopImmediatelyAfterRun", func(t *testing.T) {
-		loop := RunTurnLoop(context.Background(), TurnLoopConfig[string]{
-			GenInput: func(ctx context.Context, _ *TurnLoop[string], items []string) (*GenInputResult[string], error) {
-				return &GenInputResult[string]{
-					Input:    &AgentInput{Messages: []Message{schema.UserMessage(items[0])}},
-					Consumed: items,
-				}, nil
-			},
-			PrepareAgent: func(ctx context.Context, _ *TurnLoop[string], consumed []string) (Agent, error) {
-				return &turnLoopMockAgent{name: "test"}, nil
-			},
-		})
-
-		loop.Stop()
-
-		ok := loop.Push("after-stop")
-		assert.False(t, ok)
-
-		result := loop.Wait()
-		assert.NoError(t, result.ExitReason)
-	})
-
-	t.Run("ConcurrentPushAndStop", func(t *testing.T) {
-		for i := 0; i < 100; i++ {
-			loop := RunTurnLoop(context.Background(), TurnLoopConfig[string]{
-				GenInput: func(ctx context.Context, _ *TurnLoop[string], items []string) (*GenInputResult[string], error) {
-					return &GenInputResult[string]{
-						Input:    &AgentInput{Messages: []Message{schema.UserMessage(items[0])}},
-						Consumed: items,
-					}, nil
-				},
-				PrepareAgent: func(ctx context.Context, _ *TurnLoop[string], consumed []string) (Agent, error) {
-					return &turnLoopMockAgent{name: "test"}, nil
-				},
-			})
-
-			var wg sync.WaitGroup
-			wg.Add(2)
-
-			go func() {
-				defer wg.Done()
-				_ = loop.Push("item")
-			}()
-
-			go func() {
-				defer wg.Done()
-				loop.Stop()
-			}()
-
-			wg.Wait()
-
-			result := loop.Wait()
-			assert.NoError(t, result.ExitReason)
-		}
-	})
-}
-
 func TestTurnLoop_DefaultOnAgentEvents_ErrorPropagation(t *testing.T) {
 	agentErr := errors.New("agent execution error")
 
@@ -1307,4 +1218,210 @@ func TestTurnLoop_PushFromOnAgentEvents(t *testing.T) {
 	result := loop.Wait()
 	assert.NoError(t, result.ExitReason)
 	assert.GreaterOrEqual(t, atomic.LoadInt32(&pushCount), int32(2))
+}
+
+// Tests for NewTurnLoop: the permissive API where Push, Stop, and Wait are
+// all valid on a not-yet-running loop.
+
+func TestNewTurnLoop_PushBeforeRun(t *testing.T) {
+	// Items pushed before Run are buffered and processed after Run starts.
+	var processedItems []string
+	var mu sync.Mutex
+
+	loop := NewTurnLoop(TurnLoopConfig[string]{
+		GenInput: func(ctx context.Context, _ *TurnLoop[string], items []string) (*GenInputResult[string], error) {
+			mu.Lock()
+			processedItems = append(processedItems, items...)
+			mu.Unlock()
+			return &GenInputResult[string]{
+				Input:    &AgentInput{Messages: []Message{schema.UserMessage(items[0])}},
+				Consumed: items,
+			}, nil
+		},
+		PrepareAgent: func(ctx context.Context, _ *TurnLoop[string], consumed []string) (Agent, error) {
+			return &turnLoopMockAgent{name: "test"}, nil
+		},
+	})
+
+	// Push before Run — items should be buffered.
+	assert.True(t, loop.Push("msg1"))
+	assert.True(t, loop.Push("msg2"))
+
+	loop.Run(context.Background())
+
+	time.Sleep(100 * time.Millisecond)
+
+	loop.Stop()
+	result := loop.Wait()
+
+	mu.Lock()
+	defer mu.Unlock()
+
+	assert.NoError(t, result.ExitReason)
+	assert.Contains(t, processedItems, "msg1")
+	assert.Contains(t, processedItems, "msg2")
+}
+
+func TestNewTurnLoop_StopBeforeRun(t *testing.T) {
+	// Stop before Run sets the stopped flag. When Run is called, the loop
+	// exits immediately and buffered items appear as UnhandledItems.
+	loop := NewTurnLoop(TurnLoopConfig[string]{
+		GenInput: func(ctx context.Context, _ *TurnLoop[string], items []string) (*GenInputResult[string], error) {
+			t.Fatal("GenInput should not be called")
+			return nil, nil
+		},
+		PrepareAgent: func(ctx context.Context, _ *TurnLoop[string], consumed []string) (Agent, error) {
+			t.Fatal("PrepareAgent should not be called")
+			return nil, nil
+		},
+	})
+
+	loop.Push("msg1")
+	loop.Push("msg2")
+	loop.Stop()
+
+	// Push after Stop returns false.
+	assert.False(t, loop.Push("msg3"))
+
+	loop.Run(context.Background())
+	result := loop.Wait()
+
+	assert.NoError(t, result.ExitReason)
+	assert.Equal(t, []string{"msg1", "msg2"}, result.UnhandledItems)
+}
+
+func TestNewTurnLoop_WaitBeforeRun(t *testing.T) {
+	// Wait blocks until Run is called AND the loop exits.
+	loop := NewTurnLoop(TurnLoopConfig[string]{
+		GenInput: func(ctx context.Context, _ *TurnLoop[string], items []string) (*GenInputResult[string], error) {
+			return &GenInputResult[string]{Input: &AgentInput{}, Consumed: items}, nil
+		},
+		PrepareAgent: func(ctx context.Context, _ *TurnLoop[string], consumed []string) (Agent, error) {
+			return &turnLoopMockAgent{name: "test"}, nil
+		},
+	})
+
+	waitDone := make(chan *TurnLoopExitState[string], 1)
+	go func() {
+		waitDone <- loop.Wait()
+	}()
+
+	// Wait should not return yet since Run hasn't been called.
+	select {
+	case <-waitDone:
+		t.Fatal("Wait returned before Run was called")
+	case <-time.After(50 * time.Millisecond):
+		// expected
+	}
+
+	loop.Push("msg1")
+	loop.Stop()
+	loop.Run(context.Background())
+
+	select {
+	case result := <-waitDone:
+		assert.NoError(t, result.ExitReason)
+		assert.Equal(t, []string{"msg1"}, result.UnhandledItems)
+	case <-time.After(1 * time.Second):
+		t.Fatal("Wait did not return after Run + Stop")
+	}
+}
+
+func TestNewTurnLoop_RunIsIdempotent(t *testing.T) {
+	// Calling Run multiple times is a no-op after the first call.
+	var genInputCalls int32
+
+	loop := NewTurnLoop(TurnLoopConfig[string]{
+		GenInput: func(ctx context.Context, _ *TurnLoop[string], items []string) (*GenInputResult[string], error) {
+			atomic.AddInt32(&genInputCalls, 1)
+			return &GenInputResult[string]{Input: &AgentInput{}, Consumed: items}, nil
+		},
+		PrepareAgent: func(ctx context.Context, _ *TurnLoop[string], consumed []string) (Agent, error) {
+			return &turnLoopMockAgent{name: "test"}, nil
+		},
+	})
+
+	loop.Push("msg1")
+	loop.Run(context.Background())
+	loop.Run(context.Background()) // second call is a no-op
+	loop.Run(context.Background()) // third call is a no-op
+
+	time.Sleep(100 * time.Millisecond)
+
+	loop.Stop()
+	result := loop.Wait()
+
+	assert.NoError(t, result.ExitReason)
+	// If Run spawned multiple goroutines, we'd see duplicate processing or panics.
+	// A clean exit with processed items confirms idempotency.
+	assert.True(t, atomic.LoadInt32(&genInputCalls) >= 1)
+}
+
+func TestNewTurnLoop_StopBeforeRun_ThenWait(t *testing.T) {
+	// Demonstrates the full sequence: create, push, stop, run, wait.
+	loop := NewTurnLoop(TurnLoopConfig[string]{
+		GenInput: func(ctx context.Context, _ *TurnLoop[string], items []string) (*GenInputResult[string], error) {
+			t.Fatal("GenInput should not be called after Stop")
+			return nil, nil
+		},
+		PrepareAgent: func(ctx context.Context, _ *TurnLoop[string], consumed []string) (Agent, error) {
+			t.Fatal("PrepareAgent should not be called after Stop")
+			return nil, nil
+		},
+	})
+
+	loop.Push("a")
+	loop.Push("b")
+	loop.Push("c")
+	loop.Stop()
+
+	// Run after Stop: the loop goroutine starts but exits immediately.
+	loop.Run(context.Background())
+
+	result := loop.Wait()
+	assert.NoError(t, result.ExitReason)
+	assert.Equal(t, []string{"a", "b", "c"}, result.UnhandledItems)
+}
+
+func TestNewTurnLoop_ConcurrentPushAndRun(t *testing.T) {
+	// Concurrent Push and Run should not race.
+	for i := 0; i < 100; i++ {
+		var count int32
+
+		loop := NewTurnLoop(TurnLoopConfig[string]{
+			GenInput: func(ctx context.Context, _ *TurnLoop[string], items []string) (*GenInputResult[string], error) {
+				atomic.AddInt32(&count, int32(len(items)))
+				return &GenInputResult[string]{Input: &AgentInput{}, Consumed: items}, nil
+			},
+			PrepareAgent: func(ctx context.Context, _ *TurnLoop[string], consumed []string) (Agent, error) {
+				return &turnLoopMockAgent{name: "test"}, nil
+			},
+		})
+
+		var wg sync.WaitGroup
+		wg.Add(2)
+
+		go func() {
+			defer wg.Done()
+			_ = loop.Push("item")
+		}()
+
+		go func() {
+			defer wg.Done()
+			loop.Run(context.Background())
+		}()
+
+		wg.Wait()
+
+		time.Sleep(50 * time.Millisecond)
+
+		loop.Stop()
+		result := loop.Wait()
+		assert.NoError(t, result.ExitReason)
+
+		processed := atomic.LoadInt32(&count)
+		unhandled := len(result.UnhandledItems)
+		assert.True(t, int(processed)+unhandled <= 1,
+			"total should not exceed pushed amount")
+	}
 }
