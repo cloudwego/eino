@@ -23,6 +23,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 
+	"github.com/cloudwego/eino/adk"
 	"github.com/cloudwego/eino/callbacks"
 	"github.com/cloudwego/eino/components"
 	"github.com/cloudwego/eino/components/document"
@@ -286,5 +287,127 @@ func TestNewComponentTemplate(t *testing.T) {
 		ctx = callbacks.ReuseHandlers(ctx, nil)
 		callbacks.OnStart[any](ctx, nil)
 		assert.Equal(t, 30, cnt)
+	})
+}
+
+func TestAgentCallbackHandler(t *testing.T) {
+	t.Run("Needed returns correct values", func(t *testing.T) {
+		handler := &AgentCallbackHandler{
+			OnStart: func(ctx context.Context, info *callbacks.RunInfo, input *adk.AgentCallbackInput) context.Context {
+				return ctx
+			},
+		}
+
+		ctx := context.Background()
+		info := &callbacks.RunInfo{Component: adk.ComponentOfAgent}
+
+		assert.True(t, handler.Needed(ctx, info, callbacks.TimingOnStart))
+		assert.False(t, handler.Needed(ctx, info, callbacks.TimingOnEnd))
+	})
+
+	t.Run("Needed with OnEnd set", func(t *testing.T) {
+		handler := &AgentCallbackHandler{
+			OnEnd: func(ctx context.Context, info *callbacks.RunInfo, output *adk.AgentCallbackOutput) context.Context {
+				return ctx
+			},
+		}
+
+		ctx := context.Background()
+		info := &callbacks.RunInfo{Component: adk.ComponentOfAgent}
+
+		assert.False(t, handler.Needed(ctx, info, callbacks.TimingOnStart))
+		assert.True(t, handler.Needed(ctx, info, callbacks.TimingOnEnd))
+	})
+
+	t.Run("Needed with nil handlers", func(t *testing.T) {
+		handler := &AgentCallbackHandler{}
+
+		ctx := context.Background()
+		info := &callbacks.RunInfo{Component: adk.ComponentOfAgent}
+
+		assert.False(t, handler.Needed(ctx, info, callbacks.TimingOnStart))
+		assert.False(t, handler.Needed(ctx, info, callbacks.TimingOnEnd))
+	})
+}
+
+func TestHandlerHelperWithAgent(t *testing.T) {
+	t.Run("Agent method sets handler correctly", func(t *testing.T) {
+		cnt := 0
+		tpl := NewHandlerHelper()
+		tpl.Agent(&AgentCallbackHandler{
+			OnStart: func(ctx context.Context, info *callbacks.RunInfo, input *adk.AgentCallbackInput) context.Context {
+				cnt++
+				return ctx
+			},
+			OnEnd: func(ctx context.Context, info *callbacks.RunInfo, output *adk.AgentCallbackOutput) context.Context {
+				cnt++
+				return ctx
+			},
+		})
+
+		handler := tpl.Handler()
+		ctx := context.Background()
+		ctx = callbacks.InitCallbacks(ctx, &callbacks.RunInfo{Component: adk.ComponentOfAgent}, handler)
+
+		ctx = callbacks.OnStart[any](ctx, nil)
+		assert.Equal(t, 1, cnt)
+
+		callbacks.OnEnd[any](ctx, nil)
+		assert.Equal(t, 2, cnt)
+	})
+}
+
+func TestHandlerTemplateWithAgentComponent(t *testing.T) {
+	t.Run("OnStart routes to agent handler", func(t *testing.T) {
+		called := false
+		tpl := NewHandlerHelper()
+		tpl.Agent(&AgentCallbackHandler{
+			OnStart: func(ctx context.Context, info *callbacks.RunInfo, input *adk.AgentCallbackInput) context.Context {
+				called = true
+				return ctx
+			},
+		})
+
+		handler := tpl.Handler()
+		ctx := context.Background()
+		info := &callbacks.RunInfo{Component: adk.ComponentOfAgent, Name: "TestAgent"}
+
+		handler.OnStart(ctx, info, &adk.AgentCallbackInput{})
+		assert.True(t, called)
+	})
+
+	t.Run("OnEnd routes to agent handler", func(t *testing.T) {
+		called := false
+		tpl := NewHandlerHelper()
+		tpl.Agent(&AgentCallbackHandler{
+			OnEnd: func(ctx context.Context, info *callbacks.RunInfo, output *adk.AgentCallbackOutput) context.Context {
+				called = true
+				return ctx
+			},
+		})
+
+		handler := tpl.Handler()
+		ctx := context.Background()
+		info := &callbacks.RunInfo{Component: adk.ComponentOfAgent, Name: "TestAgent"}
+
+		handler.OnEnd(ctx, info, &adk.AgentCallbackOutput{})
+		assert.True(t, called)
+	})
+
+	t.Run("Needed returns true for agent component", func(t *testing.T) {
+		tpl := NewHandlerHelper()
+		tpl.Agent(&AgentCallbackHandler{
+			OnStart: func(ctx context.Context, info *callbacks.RunInfo, input *adk.AgentCallbackInput) context.Context {
+				return ctx
+			},
+		})
+
+		handler := tpl.Handler()
+		ctx := context.Background()
+		info := &callbacks.RunInfo{Component: adk.ComponentOfAgent}
+
+		checker, ok := handler.(callbacks.TimingChecker)
+		assert.True(t, ok, "handler should implement TimingChecker")
+		assert.True(t, checker.Needed(ctx, info, callbacks.TimingOnStart))
 	})
 }

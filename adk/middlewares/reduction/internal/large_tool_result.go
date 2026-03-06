@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-package reduction
+package internal
 
 import (
 	"bufio"
@@ -28,6 +28,7 @@ import (
 	"github.com/slongfield/pyfmt"
 
 	"github.com/cloudwego/eino/adk/filesystem"
+	"github.com/cloudwego/eino/adk/internal"
 	"github.com/cloudwego/eino/compose"
 	"github.com/cloudwego/eino/schema"
 )
@@ -40,6 +41,14 @@ For example, to read the first 100 lines, you can use the '{read_file_tool_name}
 
 Here are the first 10 lines of the result:
 {content_sample}`
+
+	tooLargeToolMessageChinese = `工具结果过大，此工具调用 {tool_call_id} 的结果已保存到文件系统的以下路径：{file_path}
+你可以使用 '{read_file_tool_name}' 工具从文件系统读取结果，但请确保每次只读取部分结果。
+你可以通过在 '{read_file_tool_name}' 工具调用中指定 offset 和 limit 来实现。
+例如，要读取前 100 行，你可以使用 '{read_file_tool_name}' 工具，设置 offset=0 和 limit=100。
+
+以下是结果的前 10 行：
+{content_sample}`
 )
 
 type toolResultOffloadingConfig struct {
@@ -50,7 +59,7 @@ type toolResultOffloadingConfig struct {
 	TokenCounter     func(msg *schema.Message) int
 }
 
-func newToolResultOffloading(ctx context.Context, config *toolResultOffloadingConfig) compose.ToolMiddleware {
+func newToolResultOffloading(_ context.Context, config *toolResultOffloadingConfig) compose.ToolMiddleware {
 	offloading := &toolResultOffloading{
 		backend:       config.Backend,
 		tokenLimit:    config.TokenLimit,
@@ -131,7 +140,11 @@ func (t *toolResultOffloading) handleResult(ctx context.Context, result string, 
 		}
 
 		nResult := formatToolMessage(result)
-		nResult, err = pyfmt.Fmt(tooLargeToolMessage, map[string]any{
+		tpl := internal.SelectPrompt(internal.I18nPrompts{
+			English: tooLargeToolMessage,
+			Chinese: tooLargeToolMessageChinese,
+		})
+		nResult, err = pyfmt.Fmt(tpl, map[string]any{
 			"tool_call_id":        input.CallID,
 			"file_path":           path,
 			"content_sample":      nResult,

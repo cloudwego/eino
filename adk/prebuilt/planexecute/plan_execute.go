@@ -484,7 +484,9 @@ type GenModelInputFn func(ctx context.Context, in *ExecutionContext) ([]adk.Mess
 // ExecutorConfig provides configuration options for creating an executor agent.
 type ExecutorConfig struct {
 	// Model is the chat model used by the executor.
-	Model model.ToolCallingChatModel
+	// If the executor uses any tools, this model must support the model.WithTools call option,
+	// as that's how the executor configures the model with tool information.
+	Model model.BaseChatModel
 
 	// ToolsConfig specifies the tools available to the executor.
 	ToolsConfig adk.ToolsConfig

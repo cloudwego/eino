@@ -279,13 +279,19 @@ func getEmitGeneratorAndEnableStreaming(opts []tool.Option) (*AsyncGenerator[*Ag
 
 func getReactChatHistory(ctx context.Context, destAgentName string) ([]Message, error) {
 	var messages []Message
-	var agentName string
 	err := compose.ProcessState(ctx, func(ctx context.Context, st *State) error {
 		messages = make([]Message, len(st.Messages)-1)
 		copy(messages, st.Messages[:len(st.Messages)-1]) // remove the last assistant message, which is the tool call message
-		agentName = st.AgentName
 		return nil
 	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to get chat history from state: %w", err)
+	}
+
+	var agentName string
+	if runCtx := getRunCtx(ctx); runCtx != nil && len(runCtx.RunPath) > 0 {
+		agentName = runCtx.RunPath[len(runCtx.RunPath)-1].agentName
+	}
 
 	a, t := GenTransferMessages(ctx, destAgentName)
 	messages = append(messages, a, t)
@@ -302,7 +308,7 @@ func getReactChatHistory(ctx context.Context, destAgentName string) ([]Message, 
 		history = append(history, msg)
 	}
 
-	return history, err
+	return history, nil
 }
 
 func newInvokableAgentToolRunner(agent Agent, store compose.CheckPointStore, enableStreaming bool) *Runner {

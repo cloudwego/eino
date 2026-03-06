@@ -67,10 +67,10 @@ func TestGenModelInput(t *testing.T) {
 }
 
 func TestWriteTodos(t *testing.T) {
-	m, err := buildBuiltinAgentMiddlewares(false)
+	m, err := buildBuiltinAgentMiddlewares(context.Background(), &Config{WithoutWriteTodos: false})
 	assert.NoError(t, err)
 
-	wt := m[0].AdditionalTools[0].(tool.InvokableTool)
+	wt := m[0].(*appendPromptTool).t.(tool.InvokableTool)
 
 	todos := `[{"content":"content1","activeForm":"","status":"pending"},{"content":"content2","activeForm":"","status":"pending"}]`
 	args := fmt.Sprintf(`{"todos": %s}`, todos)
