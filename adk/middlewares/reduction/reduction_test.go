@@ -537,3 +537,345 @@ func toJson(v any) string {
 	b, _ := json.Marshal(v)
 	return string(b)
 }
+
+func TestToolResultFromMessage(t *testing.T) {
+	t.Run("test from content", func(t *testing.T) {
+		msg := schema.ToolMessage("test content", "call_123")
+		result, fromContent, err := toolResultFromMessage(msg)
+		assert.NoError(t, err)
+		assert.True(t, fromContent)
+		assert.NotNil(t, result)
+		assert.Len(t, result.Parts, 1)
+		assert.Equal(t, schema.ToolPartTypeText, result.Parts[0].Type)
+		assert.Equal(t, "test content", result.Parts[0].Text)
+	})
+
+	t.Run("test from user input multi content", func(t *testing.T) {
+		msg := schema.ToolMessage("", "call_456")
+		msg.UserInputMultiContent = []schema.MessageInputPart{
+			{
+				Type: schema.ChatMessagePartTypeText,
+				Text: "test text",
+			},
+		}
+		result, fromContent, err := toolResultFromMessage(msg)
+		assert.NoError(t, err)
+		assert.False(t, fromContent)
+		assert.NotNil(t, result)
+		assert.Len(t, result.Parts, 1)
+		assert.Equal(t, schema.ToolPartTypeText, result.Parts[0].Type)
+		assert.Equal(t, "test text", result.Parts[0].Text)
+	})
+
+	t.Run("test invalid role", func(t *testing.T) {
+		msg := schema.UserMessage("test user message")
+		_, _, err := toolResultFromMessage(msg)
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "message role")
+	})
+}
+
+func TestConvMessageInputPartToToolOutputPart(t *testing.T) {
+	t.Run("test text type", func(t *testing.T) {
+		part := schema.MessageInputPart{
+			Type: schema.ChatMessagePartTypeText,
+			Text: "test text",
+		}
+		result, err := convMessageInputPartToToolOutputPart(part)
+		assert.NoError(t, err)
+		assert.Equal(t, schema.ToolPartTypeText, result.Type)
+		assert.Equal(t, "test text", result.Text)
+	})
+
+	t.Run("test image url type", func(t *testing.T) {
+		part := schema.MessageInputPart{
+			Type:  schema.ChatMessagePartTypeImageURL,
+			Image: &schema.MessageInputImage{},
+		}
+		result, err := convMessageInputPartToToolOutputPart(part)
+		assert.NoError(t, err)
+		assert.Equal(t, schema.ToolPartTypeImage, result.Type)
+		assert.NotNil(t, result.Image)
+	})
+
+	t.Run("test audio url type", func(t *testing.T) {
+		part := schema.MessageInputPart{
+			Type:  schema.ChatMessagePartTypeAudioURL,
+			Audio: &schema.MessageInputAudio{},
+		}
+		result, err := convMessageInputPartToToolOutputPart(part)
+		assert.NoError(t, err)
+		assert.Equal(t, schema.ToolPartTypeAudio, result.Type)
+		assert.NotNil(t, result.Audio)
+	})
+
+	t.Run("test video url type", func(t *testing.T) {
+		part := schema.MessageInputPart{
+			Type:  schema.ChatMessagePartTypeVideoURL,
+			Video: &schema.MessageInputVideo{},
+		}
+		result, err := convMessageInputPartToToolOutputPart(part)
+		assert.NoError(t, err)
+		assert.Equal(t, schema.ToolPartTypeVideo, result.Type)
+		assert.NotNil(t, result.Video)
+	})
+
+	t.Run("test file url type", func(t *testing.T) {
+		part := schema.MessageInputPart{
+			Type: schema.ChatMessagePartTypeFileURL,
+			File: &schema.MessageInputFile{},
+		}
+		result, err := convMessageInputPartToToolOutputPart(part)
+		assert.NoError(t, err)
+		assert.Equal(t, schema.ToolPartTypeFile, result.Type)
+		assert.NotNil(t, result.File)
+	})
+
+	t.Run("test unknown type", func(t *testing.T) {
+		part := schema.MessageInputPart{
+			Type: "unknown_type",
+		}
+		_, err := convMessageInputPartToToolOutputPart(part)
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "unknown msg part type")
+	})
+}
+
+func TestGetSetMsgOffloadedFlag(t *testing.T) {
+	t.Run("test get offloaded flag - not set", func(t *testing.T) {
+		msg := schema.UserMessage("test")
+		assert.False(t, getMsgOffloadedFlag(msg))
+	})
+
+	t.Run("test get offloaded flag - set", func(t *testing.T) {
+		msg := schema.UserMessage("test")
+		setMsgOffloadedFlag(msg)
+		assert.True(t, getMsgOffloadedFlag(msg))
+	})
+
+	t.Run("test set offloaded flag - nil extra", func(t *testing.T) {
+		msg := schema.UserMessage("test")
+		setMsgOffloadedFlag(msg)
+		assert.True(t, getMsgOffloadedFlag(msg))
+	})
+
+	t.Run("test set offloaded flag - existing extra", func(t *testing.T) {
+		msg := schema.UserMessage("test")
+		msg.Extra = map[string]any{"existing": "value"}
+		setMsgOffloadedFlag(msg)
+		assert.True(t, getMsgOffloadedFlag(msg))
+		assert.Equal(t, "value", msg.Extra["existing"])
+	})
+}
+
+func TestGetSetMsgCachedToken(t *testing.T) {
+	t.Run("test get cached token - not set", func(t *testing.T) {
+		msg := schema.UserMessage("test")
+		tokens, ok := getMsgCachedToken(msg)
+		assert.False(t, ok)
+		assert.Equal(t, int64(0), tokens)
+	})
+
+	t.Run("test get cached token - set", func(t *testing.T) {
+		msg := schema.UserMessage("test")
+		setMsgCachedToken(msg, 100)
+		tokens, ok := getMsgCachedToken(msg)
+		assert.True(t, ok)
+		assert.Equal(t, int64(100), tokens)
+	})
+
+	t.Run("test set cached token - nil extra", func(t *testing.T) {
+		msg := schema.UserMessage("test")
+		setMsgCachedToken(msg, 200)
+		tokens, ok := getMsgCachedToken(msg)
+		assert.True(t, ok)
+		assert.Equal(t, int64(200), tokens)
+	})
+
+	t.Run("test set cached token - existing extra", func(t *testing.T) {
+		msg := schema.UserMessage("test")
+		msg.Extra = map[string]any{"existing": "value"}
+		setMsgCachedToken(msg, 300)
+		tokens, ok := getMsgCachedToken(msg)
+		assert.True(t, ok)
+		assert.Equal(t, int64(300), tokens)
+		assert.Equal(t, "value", msg.Extra["existing"])
+	})
+}
+
+func TestNewErrors(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("test nil config", func(t *testing.T) {
+		_, err := New(ctx, nil)
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "config must not be nil")
+	})
+
+	t.Run("test no backend when not skipping truncation", func(t *testing.T) {
+		config := &Config{
+			Backend:        nil,
+			SkipTruncation: false,
+		}
+		_, err := New(ctx, config)
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "backend must be set")
+	})
+}
+
+func TestGetToolConfig(t *testing.T) {
+	ctx := context.Background()
+	backend := filesystem.NewInMemoryBackend()
+
+	t.Run("test no tool config", func(t *testing.T) {
+		config := &Config{
+			Backend:        backend,
+			SkipTruncation: true,
+			SkipClear:      true,
+		}
+		mw, err := New(ctx, config)
+		assert.NoError(t, err)
+		trmw, ok := mw.(*toolReductionMiddleware)
+		assert.True(t, ok)
+
+		cfg := trmw.getToolConfig("non_existent_tool", sceneTruncation)
+		assert.NotNil(t, cfg)
+	})
+
+	t.Run("test with tool config", func(t *testing.T) {
+		config := &Config{
+			Backend:        backend,
+			SkipTruncation: true,
+			SkipClear:      true,
+			ToolConfig: map[string]*ToolReductionConfig{
+				"test_tool": {
+					SkipTruncation: true,
+					SkipClear:      true,
+				},
+			},
+		}
+		mw, err := New(ctx, config)
+		assert.NoError(t, err)
+		trmw, ok := mw.(*toolReductionMiddleware)
+		assert.True(t, ok)
+
+		cfg := trmw.getToolConfig("test_tool", sceneTruncation)
+		assert.NotNil(t, cfg)
+		assert.True(t, cfg.SkipTruncation)
+	})
+
+	t.Run("test with tool config needing default handler", func(t *testing.T) {
+		config := &Config{
+			Backend:        backend,
+			SkipTruncation: false,
+			ToolConfig: map[string]*ToolReductionConfig{
+				"test_tool": {
+					SkipTruncation: false,
+				},
+			},
+		}
+		mw, err := New(ctx, config)
+		assert.NoError(t, err)
+		trmw, ok := mw.(*toolReductionMiddleware)
+		assert.True(t, ok)
+
+		cfg := trmw.getToolConfig("test_tool", sceneTruncation)
+		assert.NotNil(t, cfg)
+		assert.NotNil(t, cfg.TruncHandler)
+	})
+}
+
+func TestCopyAndFillDefaults(t *testing.T) {
+	t.Run("test empty config", func(t *testing.T) {
+		cfg := &Config{}
+		result, err := cfg.copyAndFillDefaults()
+		assert.NoError(t, err)
+		assert.NotNil(t, result)
+		assert.Equal(t, "/tmp", result.RootDir)
+		assert.Equal(t, "read_file", result.ReadFileToolName)
+		assert.Equal(t, 50000, result.MaxLengthForTrunc)
+		assert.Equal(t, 1, result.ClearRetentionSuffixLimit)
+		assert.NotNil(t, result.TokenCounter)
+	})
+
+	t.Run("test with tool config", func(t *testing.T) {
+		cfg := &Config{
+			ToolConfig: map[string]*ToolReductionConfig{
+				"test_tool": {
+					SkipTruncation: true,
+				},
+			},
+		}
+		result, err := cfg.copyAndFillDefaults()
+		assert.NoError(t, err)
+		assert.NotNil(t, result.ToolConfig)
+		assert.True(t, result.ToolConfig["test_tool"].SkipTruncation)
+	})
+}
+
+func TestDefaultTokenCounter(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("test with nil messages", func(t *testing.T) {
+		msgs := []*schema.Message{nil}
+		tokens, err := defaultTokenCounter(ctx, msgs, nil)
+		assert.NoError(t, err)
+		assert.GreaterOrEqual(t, tokens, int64(0))
+	})
+
+	t.Run("test with tool info", func(t *testing.T) {
+		toolInfo := &schema.ToolInfo{
+			Name: "test_tool",
+			Desc: "test description",
+		}
+		tokens, err := defaultTokenCounter(ctx, nil, []*schema.ToolInfo{toolInfo})
+		assert.NoError(t, err)
+		assert.GreaterOrEqual(t, tokens, int64(0))
+	})
+}
+
+func TestDefaultClearHandler(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("test empty parts", func(t *testing.T) {
+		handler := defaultClearHandler("/tmp", true, "read_file")
+		detail := &ToolDetail{
+			ToolContext: &adk.ToolContext{
+				CallID: "test_call",
+			},
+			ToolResult: &schema.ToolResult{Parts: []schema.ToolOutputPart{}},
+		}
+		result, err := handler(ctx, detail)
+		assert.NoError(t, err)
+		assert.False(t, result.NeedClear)
+	})
+
+	t.Run("test multimodal content", func(t *testing.T) {
+		handler := defaultClearHandler("/tmp", true, "read_file")
+		detail := &ToolDetail{
+			ToolContext: &adk.ToolContext{
+				CallID: "test_call",
+			},
+			ToolResult: &schema.ToolResult{
+				Parts: []schema.ToolOutputPart{{Type: schema.ToolPartTypeImage}},
+			},
+		}
+		_, err := handler(ctx, detail)
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "not support multimodal")
+	})
+
+	t.Run("test no call id", func(t *testing.T) {
+		handler := defaultClearHandler("/tmp", true, "read_file")
+		detail := &ToolDetail{
+			ToolContext: &adk.ToolContext{},
+			ToolResult: &schema.ToolResult{
+				Parts: []schema.ToolOutputPart{{Type: schema.ToolPartTypeText, Text: "test"}},
+			},
+		}
+		result, err := handler(ctx, detail)
+		assert.NoError(t, err)
+		assert.True(t, result.NeedClear)
+		assert.NotEmpty(t, result.OffloadFilePath)
+	})
+}
