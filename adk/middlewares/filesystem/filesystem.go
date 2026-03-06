@@ -371,9 +371,6 @@ func (m *filesystemMiddleware) BeforeAgent(ctx context.Context, runCtx *adk.Chat
 	}
 
 	nRunCtx := *runCtx
-	if m.additionalInstruction != "" {
-		nRunCtx.Instruction = nRunCtx.Instruction + "\n" + m.additionalInstruction
-	}
 	nRunCtx.Tools = append(nRunCtx.Tools, m.additionalTools...)
 	return ctx, &nRunCtx, nil
 }
