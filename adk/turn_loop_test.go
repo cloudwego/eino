@@ -932,7 +932,7 @@ func TestTurnLoop_ContextCancelBeforeReceive(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	loop := newAndRunTurnLoop(ctx, TurnLoopConfig[string]{
+	loop := NewTurnLoop(TurnLoopConfig[string]{
 		GenInput: func(ctx context.Context, _ *TurnLoop[string], items []string) (*GenInputResult[string], error) {
 			return &GenInputResult[string]{Input: &AgentInput{}, Consumed: items}, nil
 		},
@@ -941,7 +941,10 @@ func TestTurnLoop_ContextCancelBeforeReceive(t *testing.T) {
 		},
 	})
 
+	// Push before Run to guarantee the item is buffered before the
+	// context-monitoring goroutine can close the buffer.
 	_ = loop.Push("msg1")
+	loop.Run(ctx)
 
 	result := loop.Wait()
 	assert.ErrorIs(t, result.ExitReason, context.Canceled)
