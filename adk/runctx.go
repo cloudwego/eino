@@ -65,8 +65,17 @@ type agentEventWrapper struct {
 type otherAgentEventWrapperForEncode agentEventWrapper
 
 func (a *agentEventWrapper) GobEncode() ([]byte, error) {
-	if a.concatenatedMessage != nil && a.Output != nil && a.Output.MessageOutput != nil && a.Output.MessageOutput.IsStreaming {
-		a.Output.MessageOutput.MessageStream = schema.StreamReaderFromArray([]Message{a.concatenatedMessage})
+	if a.Output != nil && a.Output.MessageOutput != nil && a.Output.MessageOutput.IsStreaming {
+		// Proactively consume the stream if it hasn't been consumed yet.
+		// This handles the case where the stream ends with a WillRetryError or
+		// ErrStreamCancelled — without this, MessageVariant.GobEncode would treat
+		// the non-EOF stream error as fatal and fail the checkpoint save.
+		if a.concatenatedMessage == nil && a.StreamErr == nil {
+			_, _ = getMessageFromWrappedEvent(a)
+		}
+		if a.concatenatedMessage != nil {
+			a.Output.MessageOutput.MessageStream = schema.StreamReaderFromArray([]Message{a.concatenatedMessage})
+		}
 	}
 
 	buf := &bytes.Buffer{}

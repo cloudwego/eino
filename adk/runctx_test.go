@@ -17,7 +17,10 @@
 package adk
 
 import (
+	"bytes"
 	"context"
+	"encoding/gob"
+	"errors"
 	"testing"
 	"time"
 
@@ -422,4 +425,210 @@ func TestForkJoinRunCtx(t *testing.T) {
 	eventF := newEvent("F")
 	mainRunCtx.Session.addEvent(eventF)
 	assert.Equal(t, []string{"A", "B", "C1", "D", "E", "F"}, getEventNames(mainRunCtx.Session.getEvents()), "After F")
+}
+
+// makeStreamingEventWrapper creates an agentEventWrapper with a streaming MessageOutput
+// whose stream yields the given message then terminates with streamErr (or io.EOF if nil).
+func makeStreamingEventWrapper(msg Message, streamErr error) *agentEventWrapper {
+	r, w := schema.Pipe[Message](2)
+	w.Send(msg, nil)
+	if streamErr != nil {
+		w.Send(nil, streamErr)
+	}
+	w.Close()
+
+	return &agentEventWrapper{
+		AgentEvent: &AgentEvent{
+			AgentName: "test-agent",
+			Output: &AgentOutput{
+				MessageOutput: &MessageVariant{
+					IsStreaming:   true,
+					MessageStream: r,
+					Role:          schema.Assistant,
+				},
+			},
+		},
+	}
+}
+
+func TestGobEncodeStreamErrors(t *testing.T) {
+	t.Run("WillRetryError_unconsumed_stream_fails_GobEncode", func(t *testing.T) {
+		// An agentEventWrapper whose stream yields a message then WillRetryError.
+		// Without pre-consuming (no getMessageFromWrappedEvent call), GobEncode
+		// reaches MessageVariant.GobEncode which treats non-EOF errors as fatal.
+		wrapper := makeStreamingEventWrapper(
+			schema.AssistantMessage("partial", nil),
+			&WillRetryError{ErrStr: "model error", RetryAttempt: 1},
+		)
+
+		_, err := wrapper.GobEncode()
+		assert.NoError(t, err, "GobEncode should handle WillRetryError streams gracefully")
+	})
+
+	t.Run("ErrStreamCancelled_unconsumed_stream_fails_GobEncode", func(t *testing.T) {
+		// Same scenario but with ErrStreamCancelled (*errors.errorString).
+		wrapper := makeStreamingEventWrapper(
+			schema.AssistantMessage("partial", nil),
+			ErrStreamCancelled,
+		)
+
+		_, err := wrapper.GobEncode()
+		assert.NoError(t, err, "GobEncode should handle ErrStreamCancelled streams gracefully")
+	})
+
+	t.Run("successful_stream_GobEncode_succeeds", func(t *testing.T) {
+		// Control: a clean stream (no error) should encode fine.
+		wrapper := makeStreamingEventWrapper(
+			schema.AssistantMessage("hello", nil),
+			nil, // no stream error
+		)
+
+		data, err := wrapper.GobEncode()
+		assert.NoError(t, err)
+		assert.NotEmpty(t, data)
+
+		// Verify round-trip decode works.
+		decoded := &agentEventWrapper{AgentEvent: &AgentEvent{}}
+		err = decoded.GobDecode(data)
+		assert.NoError(t, err)
+		assert.Equal(t, "test-agent", decoded.AgentName)
+	})
+
+	t.Run("preconsumed_WillRetryError_GobEncode_succeeds", func(t *testing.T) {
+		// When getMessageFromWrappedEvent is called first, WillRetryError is
+		// cached in StreamErr and the stream is replaced with an error-free array.
+		wrapper := makeStreamingEventWrapper(
+			schema.AssistantMessage("partial", nil),
+			&WillRetryError{ErrStr: "model error", RetryAttempt: 1},
+		)
+
+		_, consumeErr := getMessageFromWrappedEvent(wrapper)
+		assert.Error(t, consumeErr)
+
+		data, err := wrapper.GobEncode()
+		assert.NoError(t, err, "GobEncode should succeed after pre-consuming WillRetryError stream")
+		assert.NotEmpty(t, data)
+	})
+
+	t.Run("preconsumed_ErrStreamCancelled_GobEncode_succeeds", func(t *testing.T) {
+		// ErrStreamCancelled is a *StreamCancelledError which IS gob-registered.
+		// After getMessageFromWrappedEvent, StreamErr = ErrStreamCancelled.
+		// Since it's registered, gob encoding succeeds.
+		wrapper := makeStreamingEventWrapper(
+			schema.AssistantMessage("partial", nil),
+			ErrStreamCancelled,
+		)
+
+		_, consumeErr := getMessageFromWrappedEvent(wrapper)
+		assert.Error(t, consumeErr)
+
+		data, err := wrapper.GobEncode()
+		assert.NoError(t, err, "GobEncode should succeed; ErrStreamCancelled is gob-registered")
+		assert.NotEmpty(t, data)
+	})
+
+	t.Run("GobEncode_roundtrip_preserves_content", func(t *testing.T) {
+		// Verify that after GobEncode with a WillRetryError stream,
+		// the decoded wrapper has the partial message content and StreamErr intact.
+		wrapper := makeStreamingEventWrapper(
+			schema.AssistantMessage("partial response", nil),
+			&WillRetryError{ErrStr: "err", RetryAttempt: 1},
+		)
+
+		data, err := wrapper.GobEncode()
+		assert.NoError(t, err)
+
+		decoded := &agentEventWrapper{AgentEvent: &AgentEvent{}}
+		err = decoded.GobDecode(data)
+		assert.NoError(t, err)
+		assert.Equal(t, "test-agent", decoded.AgentName)
+		assert.True(t, decoded.Output.MessageOutput.IsStreaming)
+		// The stream should be consumable and yield the partial message.
+		msg, recvErr := decoded.Output.MessageOutput.MessageStream.Recv()
+		assert.NoError(t, recvErr)
+		assert.Contains(t, msg.Content, "partial response")
+		// StreamErr should be preserved for end-user visibility.
+		var willRetryErr *WillRetryError
+		assert.True(t, errors.As(decoded.StreamErr, &willRetryErr))
+		assert.Equal(t, "err", willRetryErr.ErrStr)
+	})
+
+	t.Run("GobEncode_roundtrip_preserves_ErrStreamCancelled", func(t *testing.T) {
+		// ErrStreamCancelled (*StreamCancelledError) is gob-registered, so
+		// StreamErr should survive encoding/decoding.
+		wrapper := makeStreamingEventWrapper(
+			schema.AssistantMessage("partial", nil),
+			ErrStreamCancelled,
+		)
+
+		data, err := wrapper.GobEncode()
+		assert.NoError(t, err)
+
+		decoded := &agentEventWrapper{AgentEvent: &AgentEvent{}}
+		err = decoded.GobDecode(data)
+		assert.NoError(t, err)
+		var streamCancelledErr *StreamCancelledError
+		assert.ErrorAs(t, decoded.StreamErr, &streamCancelledErr)
+	})
+
+	t.Run("GobEncode_idempotent", func(t *testing.T) {
+		// Calling GobEncode twice should succeed both times (stream replaced on first call).
+		wrapper := makeStreamingEventWrapper(
+			schema.AssistantMessage("hello", nil),
+			&WillRetryError{ErrStr: "err", RetryAttempt: 1},
+		)
+
+		data1, err := wrapper.GobEncode()
+		assert.NoError(t, err)
+
+		data2, err := wrapper.GobEncode()
+		assert.NoError(t, err)
+
+		// Both should decode to equivalent content.
+		d1, d2 := &agentEventWrapper{AgentEvent: &AgentEvent{}}, &agentEventWrapper{AgentEvent: &AgentEvent{}}
+		assert.NoError(t, d1.GobDecode(data1))
+		assert.NoError(t, d2.GobDecode(data2))
+		assert.Equal(t, d1.AgentName, d2.AgentName)
+	})
+
+	t.Run("GobEncode_non_streaming_unaffected", func(t *testing.T) {
+		// Non-streaming events should encode/decode as before.
+		wrapper := &agentEventWrapper{
+			AgentEvent: &AgentEvent{
+				AgentName: "non-stream-agent",
+				Output: &AgentOutput{
+					MessageOutput: &MessageVariant{
+						IsStreaming: false,
+						Message:     schema.AssistantMessage("direct", nil),
+						Role:        schema.Assistant,
+					},
+				},
+			},
+		}
+
+		data, err := wrapper.GobEncode()
+		assert.NoError(t, err)
+
+		decoded := &agentEventWrapper{AgentEvent: &AgentEvent{}}
+		assert.NoError(t, decoded.GobDecode(data))
+		assert.Equal(t, "non-stream-agent", decoded.AgentName)
+		assert.False(t, decoded.Output.MessageOutput.IsStreaming)
+	})
+
+	t.Run("GobEncode_within_runSession", func(t *testing.T) {
+		// Simulate the real scenario: a runSession with a streaming event containing
+		// WillRetryError is gob-encoded (as happens during checkpoint save).
+		wrapper := makeStreamingEventWrapper(
+			schema.AssistantMessage("checkpoint content", nil),
+			&WillRetryError{ErrStr: "retry", RetryAttempt: 1},
+		)
+
+		session := newRunSession()
+		session.Events = []*agentEventWrapper{wrapper}
+
+		// Encode the entire session (the checkpoint path).
+		var buf bytes.Buffer
+		err := gob.NewEncoder(&buf).Encode(session)
+		assert.NoError(t, err, "encoding runSession with WillRetryError stream should succeed")
+	})
 }
