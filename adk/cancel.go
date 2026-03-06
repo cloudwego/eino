@@ -269,10 +269,10 @@ func (cc *cancelContext) shouldCancel() bool {
 	}
 }
 
-// sendInterrupt sends the compose graph interrupt signal via graphInterruptFunc.
+// sendInterrupt sends the compose graph interrupt signal via graphInterruptFuncs.
 // If immediate is true, also closes immediateChan (used by cancelMonitoredModel
 // to abort an in-progress stream). Returns false if an interrupt was already sent
-// or if graphInterruptFunc has not been set yet (the deferred fire in
+// or if no graphInterruptFuncs have been registered yet (the deferred fire in
 // setGraphInterruptFunc will handle that case).
 func (cc *cancelContext) sendInterrupt(immediate bool) bool {
 	target := interruptGraceful
@@ -331,16 +331,17 @@ func (cc *cancelContext) escalateToImmediate() {
 	cc.sendInterrupt(true)
 }
 
-// setGraphInterruptFunc stores the graph interrupt function.
+// setGraphInterruptFunc appends a graph interrupt function to the list.
 // If an immediate cancel was already requested, fires it retroactively.
+// Multiple functions can be registered (e.g. one per parallel sub-agent).
 func (cc *cancelContext) setGraphInterruptFunc(interrupt func(...compose.GraphInterruptOption)) {
 	cc.mu.Lock()
 	cc.graphInterruptFuncs = append(cc.graphInterruptFuncs, interrupt)
 	cc.mu.Unlock()
 
 	// If immediate cancel was already requested but couldn't fire because
-	// graphInterruptFunc wasn't set yet, fire now. This covers the race where
-	// cancelFn is called before the compose graph is compiled and sets the func.
+	// no graphInterruptFuncs were registered yet, fire now. This covers the
+	// race where cancelFn is called before the compose graph is compiled.
 	if atomic.LoadInt32(&cc.interruptSent) == interruptImmediate {
 		interrupt(compose.WithGraphInterruptTimeout(0))
 	}
