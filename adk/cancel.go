@@ -369,9 +369,14 @@ func (cc *cancelContext) markDone() {
 // and sent a CancelError. Transitions state to stateCancelHandled so that:
 // 1. The deferred markDone() becomes a no-op (CAS from cancelling fails).
 // 2. buildCancelFunc sees stateCancelHandled and returns nil (cancel succeeded).
-func (cc *cancelContext) markCancelHandled() {
-	atomic.CompareAndSwapInt32(&cc.state, stateCancelling, stateCancelHandled)
-	cc.doneOnce.Do(func() { close(cc.doneChan) })
+// Returns true if the transition succeeded, false if cancel was already handled
+// (e.g., by a sub-agent). This prevents duplicate CancelError emission.
+func (cc *cancelContext) markCancelHandled() bool {
+	if atomic.CompareAndSwapInt32(&cc.state, stateCancelling, stateCancelHandled) {
+		cc.doneOnce.Do(func() { close(cc.doneChan) })
+		return true
+	}
+	return false
 }
 
 // createCancelError creates a CancelError based on the current cancel state.
@@ -392,6 +397,27 @@ func (cc *cancelContext) createCancelError() *CancelError {
 	return &CancelError{
 		Info: info,
 	}
+}
+
+// createCancelInterruptEvent creates a CancelError event with an InterruptSignal
+// for checkpoint persistence and resume support.
+//
+// At a transition point, no sub-agent was interrupted — the workflow itself is
+// the interrupt point. We use StatefulInterrupt (not CompositeInterrupt) because
+// there are no child interrupt signals to composite. StatefulInterrupt calls
+// core.Interrupt(ctx, info, state, nil) which sets IsRootCause=true.
+//
+// The state parameter is the workflow's position state (e.g., sequentialWorkflowState)
+// which gets stored in InterruptSignal.InterruptState.State for resume.
+func createCancelInterruptEvent(ctx context.Context, cc *cancelContext, state any) *AgentEvent {
+	cancelErr := cc.createCancelError()
+	evt := StatefulInterrupt(ctx, cancelErr.Info, state)
+	if evt.Err != nil {
+		return &AgentEvent{Err: evt.Err}
+	}
+	cancelErr.interruptSignal = evt.Action.internalInterrupted
+	cancelErr.InterruptContexts = evt.Action.Interrupted.InterruptContexts
+	return &AgentEvent{Err: cancelErr}
 }
 
 // buildCancelFunc builds the AgentCancelFunc for external use.
