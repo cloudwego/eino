@@ -295,16 +295,21 @@ func (cc *cancelContext) sendInterrupt(immediate bool) bool {
 		return false
 	}
 
-	cc.mu.Lock()
-	fns := make([]func(...compose.GraphInterruptOption), len(cc.graphInterruptFuncs))
-	copy(fns, cc.graphInterruptFuncs)
-	cc.mu.Unlock()
-
 	if immediate {
 		close(cc.immediateChan)
 	}
 
+	// Hold the lock across both the snapshot and the iteration. This prevents
+	// setGraphInterruptFunc from appending a new function and retroactively
+	// firing it between the snapshot and our iteration — which would call the
+	// same compose interrupt function twice (compose.WithGraphInterrupt returns
+	// a non-idempotent closure that panics on double-call).
+	cc.mu.Lock()
+	fns := make([]func(...compose.GraphInterruptOption), len(cc.graphInterruptFuncs))
+	copy(fns, cc.graphInterruptFuncs)
+
 	if len(fns) == 0 {
+		cc.mu.Unlock()
 		return false
 	}
 
@@ -315,6 +320,7 @@ func (cc *cancelContext) sendInterrupt(immediate bool) bool {
 			fn()
 		}
 	}
+	cc.mu.Unlock()
 	return true
 }
 
@@ -331,11 +337,10 @@ func (cc *cancelContext) escalateToImmediate() {
 		cc.mu.Lock()
 		fns := make([]func(...compose.GraphInterruptOption), len(cc.graphInterruptFuncs))
 		copy(fns, cc.graphInterruptFuncs)
-		cc.mu.Unlock()
-
 		for _, fn := range fns {
 			fn(compose.WithGraphInterruptTimeout(0))
 		}
+		cc.mu.Unlock()
 		return
 	}
 
@@ -349,14 +354,17 @@ func (cc *cancelContext) escalateToImmediate() {
 func (cc *cancelContext) setGraphInterruptFunc(interrupt func(...compose.GraphInterruptOption)) {
 	cc.mu.Lock()
 	cc.graphInterruptFuncs = append(cc.graphInterruptFuncs, interrupt)
-	cc.mu.Unlock()
 
 	// If immediate cancel was already requested but couldn't fire because
 	// no graphInterruptFuncs were registered yet, fire now. This covers the
 	// race where cancelFn is called before the compose graph is compiled.
-	if atomic.LoadInt32(&cc.interruptSent) == interruptImmediate {
+	// Holding the lock here prevents sendInterrupt from iterating the list
+	// concurrently, which would double-fire the same function.
+	shouldFire := atomic.LoadInt32(&cc.interruptSent) == interruptImmediate
+	if shouldFire {
 		interrupt(compose.WithGraphInterruptTimeout(0))
 	}
+	cc.mu.Unlock()
 }
 
 // markDone marks the execution as finished through any non-cancel path
