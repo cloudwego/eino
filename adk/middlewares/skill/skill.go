@@ -72,7 +72,7 @@ type AgentHubOptions struct {
 	Model model.ToolCallingChatModel
 }
 
-// AgentHub provides agent instances for context mode (fork/isolate) execution.
+// AgentHub provides agent instances for context mode (fork/fork_with_context) execution.
 type AgentHub interface {
 	// Get returns an Agent by name. When name is empty, implementations should return a default agent.
 	// The opts parameter carries skill-level overrides (e.g., model) resolved by the framework.
