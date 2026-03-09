@@ -38,8 +38,12 @@ import (
 type ContextMode string
 
 const (
-	ContextModeFork    ContextMode = "fork"
-	ContextModeIsolate ContextMode = "isolate"
+	// ContextModeForkWithContext forks a new agent to run the skill,
+	// carrying over the original message history from the parent agent.
+	ContextModeForkWithContext ContextMode = "fork_with_context"
+	// ContextModeFork forks a new agent to run the skill
+	// with a clean context, discarding the original message history.
+	ContextModeFork ContextMode = "fork"
 )
 
 type FrontMatter struct {
@@ -61,12 +65,21 @@ type Backend interface {
 	Get(ctx context.Context, name string) (Skill, error)
 }
 
-type AgentFactory func(ctx context.Context, m model.ToolCallingChatModel) (adk.Agent, error)
-
-type AgentHub interface {
-	Get(ctx context.Context, name string) (AgentFactory, error)
+// AgentHubOptions contains options passed to AgentHub.Get when creating an agent for skill execution.
+type AgentHubOptions struct {
+	// Model is the resolved model instance when a skill specifies a "model" field in frontmatter.
+	// nil means the skill did not specify a model override; implementations should use their default.
+	Model model.ToolCallingChatModel
 }
 
+// AgentHub provides agent instances for context mode (fork/isolate) execution.
+type AgentHub interface {
+	// Get returns an Agent by name. When name is empty, implementations should return a default agent.
+	// The opts parameter carries skill-level overrides (e.g., model) resolved by the framework.
+	Get(ctx context.Context, name string, opts *AgentHubOptions) (adk.Agent, error)
+}
+
+// ModelHub resolves model instances by name for skills that specify a "model" field in frontmatter.
 type ModelHub interface {
 	Get(ctx context.Context, name string) (model.ToolCallingChatModel, error)
 }
@@ -112,7 +125,7 @@ type Config struct {
 	CustomToolDescription ToolDescriptionFunc
 }
 
-// NewChatModelAgentMiddleware creates a new skill middleware handler for ChatModelAgent.
+// NewMiddleware creates a new skill middleware handler for ChatModelAgent.
 //
 // The handler provides a skill tool that allows agents to load and execute skills
 // defined in SKILL.md files. Skills can run in different modes based on their
@@ -124,7 +137,7 @@ type Config struct {
 //
 // Example usage:
 //
-//	handler, err := skill.NewChatModelAgentMiddleware(ctx, &skill.Config{
+//	handler, err := skill.NewMiddleware(ctx, &skill.Config{
 //	    Backend:  backend,
 //	    AgentHub: myAgentHub,
 //	    ModelHub: myModelHub,
@@ -137,7 +150,7 @@ type Config struct {
 //	    // ...
 //	    Handlers: []adk.ChatModelAgentMiddleware{handler},
 //	})
-func NewChatModelAgentMiddleware(ctx context.Context, config *Config) (adk.ChatModelAgentMiddleware, error) {
+func NewMiddleware(ctx context.Context, config *Config) (adk.ChatModelAgentMiddleware, error) {
 	if config == nil {
 		return nil, fmt.Errorf("config is required")
 	}
@@ -334,9 +347,9 @@ func (s *skillTool) InvokableRun(ctx context.Context, argumentsInJSON string, op
 	}
 
 	switch skill.Context {
-	case ContextModeFork:
+	case ContextModeForkWithContext:
 		return s.runAgentMode(ctx, skill, true)
-	case ContextModeIsolate:
+	case ContextModeFork:
 		return s.runAgentMode(ctx, skill, false)
 	default:
 		if skill.Model != "" {
@@ -364,31 +377,25 @@ func (s *skillTool) buildSkillResult(skill Skill) (string, error) {
 }
 
 func (s *skillTool) runAgentMode(ctx context.Context, skill Skill, forkHistory bool) (string, error) {
-	var m model.ToolCallingChatModel
-	var err error
-
-	if skill.Model != "" {
-		if s.modelHub == nil {
-			return "", fmt.Errorf("skill '%s' requires model '%s' but ModelHub is not configured", skill.Name, skill.Model)
-		}
-		m, err = s.modelHub.Get(ctx, skill.Model)
-		if err != nil {
-			return "", fmt.Errorf("failed to get model '%s' from ModelHub: %w", skill.Model, err)
-		}
-	}
-
 	if s.agentHub == nil {
 		return "", fmt.Errorf("skill '%s' requires context:%s but AgentHub is not configured", skill.Name, skill.Context)
 	}
 
-	agentFactory, err := s.agentHub.Get(ctx, skill.Agent)
-	if err != nil {
-		return "", fmt.Errorf("failed to get agent '%s' from AgentHub: %w", skill.Agent, err)
+	opts := &AgentHubOptions{}
+	if skill.Model != "" {
+		if s.modelHub == nil {
+			return "", fmt.Errorf("skill '%s' requires model '%s' but ModelHub is not configured", skill.Name, skill.Model)
+		}
+		m, err := s.modelHub.Get(ctx, skill.Model)
+		if err != nil {
+			return "", fmt.Errorf("failed to get model '%s' from ModelHub: %w", skill.Model, err)
+		}
+		opts.Model = m
 	}
 
-	agent, err := agentFactory(ctx, m)
+	agent, err := s.agentHub.Get(ctx, skill.Agent, opts)
 	if err != nil {
-		return "", fmt.Errorf("failed to create agent for skill '%s': %w", skill.Name, err)
+		return "", fmt.Errorf("failed to get agent '%s' from AgentHub: %w", skill.Agent, err)
 	}
 
 	var messages []adk.Message
@@ -421,13 +428,20 @@ func (s *skillTool) runAgentMode(ctx context.Context, skill Skill, forkHistory b
 		if !ok {
 			break
 		}
-		if event == nil || event.Output == nil || event.Output.MessageOutput == nil {
+
+		if event.Err != nil {
+			return "", fmt.Errorf("failed to run agent event: %w", event.Err)
+		}
+
+		if event.Output == nil || event.Output.MessageOutput == nil {
 			continue
 		}
+
 		msg, msgErr := event.Output.MessageOutput.GetMessage()
 		if msgErr != nil {
 			return "", fmt.Errorf("failed to get message from event: %w", msgErr)
 		}
+
 		if msg != nil && msg.Content != "" {
 			results = append(results, msg.Content)
 		}
