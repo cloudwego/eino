@@ -20,8 +20,10 @@ import (
 	"bytes"
 	"context"
 	"encoding/gob"
+	"errors"
 	"fmt"
 	"io"
+	"time"
 
 	"github.com/cloudwego/eino/components"
 	"github.com/cloudwego/eino/internal/core"
@@ -268,4 +270,56 @@ type ResumableAgent interface {
 	Agent
 
 	Resume(ctx context.Context, info *ResumeInfo, opts ...AgentRunOption) *AsyncIterator[*AgentEvent]
+}
+
+// CancelMode specifies when an agent should be canceled.
+// Modes can be combined with bitwise OR to cancel at multiple execution points.
+// For example, CancelAfterChatModel | CancelAfterToolCall cancels the agent
+// after whichever execution point is reached first.
+type CancelMode int
+
+const (
+	// CancelImmediate cancels the agent immediately without waiting
+	// for any execution point.
+	CancelImmediate CancelMode = 0
+	// CancelAfterChatModel cancels the agent after a chat model call completes.
+	CancelAfterChatModel CancelMode = 1 << iota
+	// CancelAfterToolCall cancels the agent after a tool call completes.
+	CancelAfterToolCall
+)
+
+// ErrAgentNotCancellable is returned by Cancel when the agent does not support cancellation.
+var ErrAgentNotCancellable = errors.New("agent does not implement CancellableAgent interface")
+
+type cancelConfig struct {
+	Mode    CancelMode
+	Timeout *time.Duration
+}
+
+type CancelOption func(*cancelConfig)
+
+// WithCancelMode sets the cancel mode for the cancel operation.
+func WithCancelMode(mode CancelMode) CancelOption {
+	return func(config *cancelConfig) {
+		config.Mode = mode
+	}
+}
+
+// WithCancelTimeout sets a timeout duration for CancelImmediate mode.
+func WithCancelTimeout(timeout time.Duration) CancelOption {
+	return func(config *cancelConfig) {
+		config.Timeout = &timeout
+	}
+}
+
+type CancelFunc func(...CancelOption) error
+
+type CancellableAgent interface {
+	Agent
+	RunWithCancel(ctx context.Context, input *AgentInput, options ...AgentRunOption) (*AsyncIterator[*AgentEvent], CancelFunc)
+}
+
+type CancellableResumableAgent interface {
+	ResumableAgent
+	ResumeWithCancel(ctx context.Context, info *ResumeInfo, opts ...AgentRunOption) (*AsyncIterator[*AgentEvent], CancelFunc)
 }
