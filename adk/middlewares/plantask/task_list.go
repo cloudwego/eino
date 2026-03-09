@@ -82,7 +82,7 @@ func listTasks(ctx context.Context, backend Backend, baseDir string) ([]*task, e
 		}
 
 		taskData := &task{}
-		err = sonic.UnmarshalString(content, taskData)
+		err = sonic.UnmarshalString(content.Content, taskData)
 		if err != nil {
 			return nil, fmt.Errorf("%s parse task file %s failed, err: %w", TaskListToolName, file.Path, err)
 		}

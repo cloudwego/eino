@@ -54,15 +54,13 @@ type GrepMatch struct {
 
 // LsInfoRequest contains parameters for listing file information.
 type LsInfoRequest struct {
-	// Path specifies the absolute directory path to list.
-	// It must be an absolute path starting with '/'.
-	// An empty string is treated as the root directory ("/").
+	// Path specifies the directory path to list.
 	Path string
 }
 
 // ReadRequest contains parameters for reading file content.
 type ReadRequest struct {
-	// FilePath is the absolute path to the file to be read. Must start with '/'.
+	// FilePath is the path to the file to be read.
 	FilePath string
 
 	// Offset specifies the starting line number (1-based) for reading.
@@ -90,7 +88,6 @@ type GrepRequest struct {
 	Pattern string
 
 	// Path is an optional directory path to limit the search scope.
-	// If empty, the search is performed from the working directory.
 	Path string
 
 	// ===== File Filtering =====
@@ -141,14 +138,12 @@ type GlobInfoRequest struct {
 	Pattern string
 
 	// Path is the base directory from which to start the search.
-	// The glob pattern is applied relative to this path. Defaults to the root directory ("/").
 	Path string
 }
 
 // WriteRequest contains parameters for writing file content.
 type WriteRequest struct {
-	// FilePath is the absolute path of the file to write. Must start with '/'.
-	// Creates the file if it does not exist, overwrites if it exists.
+	// FilePath is the path of the file to write.
 	FilePath string
 
 	// Content is the data to be written to the file.
@@ -157,7 +152,7 @@ type WriteRequest struct {
 
 // EditRequest contains parameters for editing file content.
 type EditRequest struct {
-	// FilePath is the absolute path of the file to edit. Must start with '/'.
+	// FilePath is the path of the file to edit.
 	FilePath string
 
 	// OldString is the exact string to be replaced. It must be non-empty and will be matched literally, including whitespace.
@@ -172,6 +167,10 @@ type EditRequest struct {
 	// If true, all occurrences of OldString are replaced.
 	// If false, the operation fails unless OldString appears exactly once in the file.
 	ReplaceAll bool
+}
+
+type FileContent struct {
+	Content string
 }
 
 // Backend is a pluggable, unified file backend protocol interface.
@@ -191,7 +190,7 @@ type Backend interface {
 	// Returns:
 	//   - string: The file content read
 	//   - error: Error if file does not exist or read fails
-	Read(ctx context.Context, req *ReadRequest) (string, error)
+	Read(ctx context.Context, req *ReadRequest) (*FileContent, error)
 
 	// GrepRaw searches for content matching the specified pattern in files.
 	//

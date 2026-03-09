@@ -65,9 +65,9 @@ func TestReductionMiddlewareTrunc(t *testing.T) {
 		assert.Equal(t, exp, resp)
 		content, err := backend.Read(ctx, &filesystem.ReadRequest{FilePath: "/tmp/trunc/12345"})
 		assert.NoError(t, err)
-		expOrigContent := `     1	hello worldhello worldhello worldhello worldhello worldhello worldhello worldhello worldhello worldhello world
-     2	hello worldhello worldhello worldhello worldhello worldhello worldhello worldhello world`
-		assert.Equal(t, expOrigContent, content)
+		expOrigContent := `hello worldhello worldhello worldhello worldhello worldhello worldhello worldhello worldhello worldhello world
+hello worldhello worldhello worldhello worldhello worldhello worldhello worldhello world`
+		assert.Equal(t, expOrigContent, content.Content)
 	})
 
 	t.Run("test streamable line and max length trunc", func(t *testing.T) {
@@ -100,9 +100,9 @@ func TestReductionMiddlewareTrunc(t *testing.T) {
 		assert.Equal(t, exp, s)
 		content, err := backend.Read(ctx, &filesystem.ReadRequest{FilePath: "/tmp/trunc/54321"})
 		assert.NoError(t, err)
-		expOrigContent := `     1	hello worldhello worldhello worldhello worldhello worldhello worldhello worldhello worldhello worldhello world
-     2	hello worldhello worldhello worldhello worldhello worldhello worldhello worldhello world`
-		assert.Equal(t, expOrigContent, content)
+		expOrigContent := `hello worldhello worldhello worldhello worldhello worldhello worldhello worldhello worldhello worldhello world
+hello worldhello worldhello worldhello worldhello worldhello worldhello worldhello world`
+		assert.Equal(t, expOrigContent, content.Content)
 	})
 }
 
@@ -183,8 +183,8 @@ func TestReductionMiddlewareClear(t *testing.T) {
 			FilePath: "/tmp/clear/call_987654321",
 		})
 		assert.NoError(t, err)
-		fileContent = strings.TrimPrefix(strings.TrimSpace(fileContent), "1\t")
-		assert.Equal(t, "Sunny", fileContent)
+		fileContentStr := strings.TrimPrefix(strings.TrimSpace(fileContent.Content), "1\t")
+		assert.Equal(t, "Sunny", fileContentStr)
 	})
 
 	t.Run("test default clear without offloading", func(t *testing.T) {
@@ -334,9 +334,9 @@ func TestReductionMiddlewareClear(t *testing.T) {
 			FilePath: "/tmp/call_987654321",
 		})
 		assert.NoError(t, err)
-		fileContent = strings.TrimPrefix(strings.TrimSpace(fileContent), "1\t")
+		fileContentStr := strings.TrimPrefix(strings.TrimSpace(fileContent.Content), "1\t")
 		oc := &OffloadContent{}
-		err = json.Unmarshal([]byte(fileContent), oc)
+		err = json.Unmarshal([]byte(fileContentStr), oc)
 		assert.NoError(t, err)
 		assert.Equal(t, &OffloadContent{
 			Arguments: map[string]string{
@@ -407,8 +407,8 @@ func TestReductionMiddlewareClear(t *testing.T) {
 			FilePath: "/tmp/clear/call_987654321",
 		})
 		assert.NoError(t, err)
-		fileContent = strings.TrimPrefix(strings.TrimSpace(fileContent), "1\t")
-		assert.Equal(t, "Sunny", fileContent)
+		fileContentStr := strings.TrimPrefix(strings.TrimSpace(fileContent.Content), "1\t")
+		assert.Equal(t, "Sunny", fileContentStr)
 
 		msgs = append(msgs, []*schema.Message{
 			schema.AssistantMessage("", []schema.ToolCall{
