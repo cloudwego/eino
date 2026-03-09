@@ -132,8 +132,8 @@ type Config struct {
 // frontmatter configuration:
 //
 //   - Inline mode (default): Skill content is returned directly as tool result
-//   - Fork mode (context: fork): Creates a new agent with forked message history
-//   - Isolate mode (context: isolate): Creates a new agent with isolated context
+//   - Fork mode (context: fork): Forks a new agent with a clean context, discarding message history
+//   - Fork with context mode (context: fork_with_context): Forks a new agent carrying over message history
 //
 // Example usage:
 //
@@ -148,7 +148,7 @@ type Config struct {
 //
 //	agent, err := adk.NewChatModelAgent(ctx, &adk.ChatModelAgentConfig{
 //	    // ...
-//	    Handlers: []adk.ChatModelAgentMiddleware{handler},
+//	    Middlewares: []adk.ChatModelAgentMiddleware{handler},
 //	})
 func NewMiddleware(ctx context.Context, config *Config) (adk.ChatModelAgentMiddleware, error) {
 	if config == nil {
