@@ -185,7 +185,48 @@ func rewriteMessage(msg Message, agentName string) Message {
 			agentName, msg.ToolName, msg.Content))
 	}
 
-	return schema.UserMessage(sb.String())
+	rewritten := schema.UserMessage(sb.String())
+	rewritten.MultiContent = append([]schema.ChatMessagePart(nil), msg.MultiContent...)
+	rewritten.UserInputMultiContent = append([]schema.MessageInputPart(nil), msg.UserInputMultiContent...)
+
+	// Convert AssistantGenMultiContent to UserInputMultiContent, since the role changes to User.
+	// Reasoning parts have no user input equivalent and are dropped.
+	for _, part := range msg.AssistantGenMultiContent {
+		switch part.Type {
+		case schema.ChatMessagePartTypeText:
+			rewritten.UserInputMultiContent = append(rewritten.UserInputMultiContent, schema.MessageInputPart{
+				Type:  part.Type,
+				Text:  part.Text,
+				Extra: part.Extra,
+			})
+		case schema.ChatMessagePartTypeImageURL:
+			if part.Image != nil {
+				rewritten.UserInputMultiContent = append(rewritten.UserInputMultiContent, schema.MessageInputPart{
+					Type:  part.Type,
+					Image: &schema.MessageInputImage{MessagePartCommon: part.Image.MessagePartCommon},
+					Extra: part.Extra,
+				})
+			}
+		case schema.ChatMessagePartTypeAudioURL:
+			if part.Audio != nil {
+				rewritten.UserInputMultiContent = append(rewritten.UserInputMultiContent, schema.MessageInputPart{
+					Type:  part.Type,
+					Audio: &schema.MessageInputAudio{MessagePartCommon: part.Audio.MessagePartCommon},
+					Extra: part.Extra,
+				})
+			}
+		case schema.ChatMessagePartTypeVideoURL:
+			if part.Video != nil {
+				rewritten.UserInputMultiContent = append(rewritten.UserInputMultiContent, schema.MessageInputPart{
+					Type:  part.Type,
+					Video: &schema.MessageInputVideo{MessagePartCommon: part.Video.MessagePartCommon},
+					Extra: part.Extra,
+				})
+			}
+		}
+	}
+
+	return rewritten
 }
 
 func genMsg(entry *HistoryEntry, agentName string) (Message, error) {

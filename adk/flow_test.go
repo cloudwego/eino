@@ -27,6 +27,68 @@ import (
 	"github.com/cloudwego/eino/schema"
 )
 
+func strPtr(s string) *string { return &s }
+
+func TestRewriteMessage(t *testing.T) {
+	imageCommon := schema.MessagePartCommon{URL: strPtr("http://img.example.com")}
+	audioCommon := schema.MessagePartCommon{URL: strPtr("http://audio.example.com")}
+	videoCommon := schema.MessagePartCommon{URL: strPtr("http://video.example.com")}
+
+	msg := &schema.Message{
+		Role:    schema.Assistant,
+		Content: "hello",
+		MultiContent: []schema.ChatMessagePart{
+			{Type: schema.ChatMessagePartTypeText, Text: "legacy"},
+		},
+		UserInputMultiContent: []schema.MessageInputPart{
+			{Type: schema.ChatMessagePartTypeText, Text: "pre-existing"},
+		},
+		AssistantGenMultiContent: []schema.MessageOutputPart{
+			{Type: schema.ChatMessagePartTypeText, Text: "gen-text", Extra: map[string]any{"k": "v"}},
+			{Type: schema.ChatMessagePartTypeImageURL, Image: &schema.MessageOutputImage{MessagePartCommon: imageCommon}},
+			{Type: schema.ChatMessagePartTypeAudioURL, Audio: &schema.MessageOutputAudio{MessagePartCommon: audioCommon}},
+			{Type: schema.ChatMessagePartTypeVideoURL, Video: &schema.MessageOutputVideo{MessagePartCommon: videoCommon}},
+			{Type: schema.ChatMessagePartTypeReasoning, Reasoning: &schema.MessageOutputReasoning{Text: "secret thoughts"}},
+		},
+	}
+
+	rewritten := rewriteMessage(msg, "OtherAgent")
+
+	assert.Equal(t, schema.User, rewritten.Role)
+
+	// MultiContent: copied, not shared
+	assert.Equal(t, msg.MultiContent, rewritten.MultiContent)
+	rewritten.MultiContent[0].Text = "mutated"
+	assert.Equal(t, "legacy", msg.MultiContent[0].Text)
+
+	// UserInputMultiContent: pre-existing entry copied, AssistantGenMultiContent appended (reasoning dropped)
+	assert.Len(t, rewritten.UserInputMultiContent, 5) // 1 pre-existing + 4 converted (text/image/audio/video)
+
+	// pre-existing entry is not shared
+	rewritten.UserInputMultiContent[0].Text = "mutated"
+	assert.Equal(t, "pre-existing", msg.UserInputMultiContent[0].Text)
+
+	// text conversion
+	assert.Equal(t, schema.ChatMessagePartTypeText, rewritten.UserInputMultiContent[1].Type)
+	assert.Equal(t, "gen-text", rewritten.UserInputMultiContent[1].Text)
+	assert.Equal(t, map[string]any{"k": "v"}, rewritten.UserInputMultiContent[1].Extra)
+
+	// image conversion
+	assert.Equal(t, schema.ChatMessagePartTypeImageURL, rewritten.UserInputMultiContent[2].Type)
+	assert.Equal(t, imageCommon, rewritten.UserInputMultiContent[2].Image.MessagePartCommon)
+
+	// audio conversion
+	assert.Equal(t, schema.ChatMessagePartTypeAudioURL, rewritten.UserInputMultiContent[3].Type)
+	assert.Equal(t, audioCommon, rewritten.UserInputMultiContent[3].Audio.MessagePartCommon)
+
+	// video conversion
+	assert.Equal(t, schema.ChatMessagePartTypeVideoURL, rewritten.UserInputMultiContent[4].Type)
+	assert.Equal(t, videoCommon, rewritten.UserInputMultiContent[4].Video.MessagePartCommon)
+
+	// reasoning is dropped; AssistantGenMultiContent is not set on rewritten message
+	assert.Empty(t, rewritten.AssistantGenMultiContent)
+}
+
 // TestTransferToAgent tests the TransferToAgent functionality
 func TestTransferToAgent(t *testing.T) {
 	ctx := context.Background()
