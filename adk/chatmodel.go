@@ -952,6 +952,9 @@ func (a *ChatModelAgent) getRunFunc(ctx context.Context) (context.Context, runFu
 func (a *ChatModelAgent) Run(ctx context.Context, input *AgentInput, opts ...AgentRunOption) *AsyncIterator[*AgentEvent] {
 	iterator, generator := NewAsyncIteratorPair[*AgentEvent]()
 
+	o := getCommonOptions(nil, opts...)
+	AddSessionValues(ctx, o.sessionValues)
+
 	ctx, run, bc, err := a.getRunFunc(ctx)
 	if err != nil {
 		go func() {
@@ -1000,6 +1003,9 @@ func (a *ChatModelAgent) Run(ctx context.Context, input *AgentInput, opts ...Age
 
 func (a *ChatModelAgent) Resume(ctx context.Context, info *ResumeInfo, opts ...AgentRunOption) *AsyncIterator[*AgentEvent] {
 	iterator, generator := NewAsyncIteratorPair[*AgentEvent]()
+
+	o := getCommonOptions(nil, opts...)
+	AddSessionValues(ctx, o.sessionValues)
 
 	ctx, run, bc, err := a.getRunFunc(ctx)
 	if err != nil {

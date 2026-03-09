@@ -84,6 +84,40 @@ func TestChatModelAgentRun(t *testing.T) {
 		assert.False(t, ok)
 	})
 
+	t.Run("WithSessionValuesAppliesToInstructionTemplate", func(t *testing.T) {
+		ctx := context.Background()
+
+		ctrl := gomock.NewController(t)
+		cm := mockModel.NewMockToolCallingChatModel(ctrl)
+		cm.EXPECT().Generate(gomock.Any(), gomock.Any(), gomock.Any()).
+			DoAndReturn(func(_ context.Context, msgs []*schema.Message, _ ...model.Option) (*schema.Message, error) {
+				assert.GreaterOrEqual(t, len(msgs), 2)
+				assert.Equal(t, schema.System, msgs[0].Role)
+				assert.Equal(t, "Hello alice", msgs[0].Content)
+				return schema.AssistantMessage("ok", nil), nil
+			}).
+			Times(1)
+
+		agent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+			Name:        "TestAgent",
+			Description: "Test agent for unit testing",
+			Instruction: "Hello {user}",
+			Model:       cm,
+		})
+		assert.NoError(t, err)
+
+		input := &AgentInput{Messages: []Message{schema.UserMessage("hi")}}
+		ctx, _ = initRunCtx(ctx, "TestAgent", input)
+
+		iterator := agent.Run(ctx, input, WithSessionValues(map[string]any{"user": "alice"}))
+		event, ok := iterator.Next()
+		assert.True(t, ok)
+		assert.NotNil(t, event)
+		assert.Nil(t, event.Err)
+		_, ok = iterator.Next()
+		assert.False(t, ok)
+	})
+
 	t.Run("BasicChatModelWithAgentMiddleware", func(t *testing.T) {
 		ctx := context.Background()
 
