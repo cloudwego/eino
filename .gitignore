@@ -55,3 +55,4 @@ CLAUDE.md
 # Specs directories
 */specs
 /todos
+/.claude/settings.local.json
