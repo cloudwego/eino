@@ -138,7 +138,7 @@ func TestReadFileTool(t *testing.T) {
 		{
 			name:     "read with offset",
 			input:    `{"file_path": "/file1.txt", "offset": 2, "limit": 2}`,
-			expected: "     3\tline3\n     4\tline4",
+			expected: "     2\tline2\n     3\tline3",
 		},
 		{
 			name:     "read with default limit",
@@ -230,7 +230,7 @@ func TestWriteFileTool(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to read written file: %v", err)
 	}
-	if content != "     1\tnew content" {
+	if content.Content != "new content" {
 		t.Errorf("Expected written content to be 'new content', got %q", content)
 	}
 }
@@ -255,14 +255,14 @@ func TestEditFileTool(t *testing.T) {
 			setupFile:    "/edit1.txt",
 			setupContent: "hello world\nhello again\nhello world",
 			input:        `{"file_path": "/edit1.txt", "old_string": "hello again", "new_string": "hi", "replace_all": false}`,
-			expected:     "     1\thello world\n     2\thi\n     3\thello world",
+			expected:     "hello world\nhi\nhello world",
 		},
 		{
 			name:         "replace all occurrences",
 			setupFile:    "/edit2.txt",
 			setupContent: "hello world\nhello again\nhello world",
 			input:        `{"file_path": "/edit2.txt", "old_string": "hello", "new_string": "hi", "replace_all": true}`,
-			expected:     "     1\thi world\n     2\thi again\n     3\thi world",
+			expected:     "hi world\nhi again\nhi world",
 		},
 		{
 			name:         "non-existent file",
@@ -309,8 +309,8 @@ func TestEditFileTool(t *testing.T) {
 			if err != nil {
 				t.Fatalf("edit_file tool failed: %v", err)
 			}
-			if result != tt.expected {
-				t.Errorf("Expected %q, got %q", tt.expected, result)
+			if result.Content != tt.expected {
+				t.Errorf("Expected %q, got %q", tt.expected, result.Content)
 			}
 		})
 	}
@@ -414,7 +414,7 @@ func TestGrepTool(t *testing.T) {
 		{
 			name:     "grep with path filter",
 			input:    `{"pattern": "package", "path": "/dir2", "output_mode": "count"}`,
-			expected: "/dir2/file5.go:1\n\nFound 1 total occurrence across 1 file.", // only in dir2/file5.go
+			expected: "file5.go:1\n\nFound 1 total occurrence across 1 file.", // only in dir2/file5.go
 		},
 	}
 
@@ -1515,13 +1515,13 @@ func TestGetFilesystemTools_DisableAllTools(t *testing.T) {
 	backend := setupTestBackend()
 
 	config := &MiddlewareConfig{
-		Backend:            backend,
-		LsToolConfig:       &ToolConfig{Disable: true},
-		ReadFileToolConfig: &ToolConfig{Disable: true},
+		Backend:             backend,
+		LsToolConfig:        &ToolConfig{Disable: true},
+		ReadFileToolConfig:  &ToolConfig{Disable: true},
 		WriteFileToolConfig: &ToolConfig{Disable: true},
-		EditFileToolConfig: &ToolConfig{Disable: true},
-		GlobToolConfig:     &ToolConfig{Disable: true},
-		GrepToolConfig:     &ToolConfig{Disable: true},
+		EditFileToolConfig:  &ToolConfig{Disable: true},
+		GlobToolConfig:      &ToolConfig{Disable: true},
+		GrepToolConfig:      &ToolConfig{Disable: true},
 	}
 
 	tools, err := getFilesystemTools(ctx, config)

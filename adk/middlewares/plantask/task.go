@@ -65,7 +65,7 @@ type Backend interface {
 	// LsInfo lists file information in the specified directory.
 	LsInfo(ctx context.Context, req *LsInfoRequest) ([]FileInfo, error)
 	// Read reads the content of a file.
-	Read(ctx context.Context, req *ReadRequest) (string, error)
+	Read(ctx context.Context, req *ReadRequest) (filesystem.FileContent, error)
 	// Write writes content to a file, creating it if it doesn't exist.
 	Write(ctx context.Context, req *WriteRequest) error
 	// Delete removes a file from storage.

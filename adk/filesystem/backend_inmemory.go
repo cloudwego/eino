@@ -133,7 +133,7 @@ func mustParseTime(s string) time.Time {
 }
 
 // Read reads file content with offset and limit.
-func (b *InMemoryBackend) Read(ctx context.Context, req *ReadRequest) (string, error) {
+func (b *InMemoryBackend) Read(ctx context.Context, req *ReadRequest) (FileContent, error) {
 	b.mu.RLock()
 	defer b.mu.RUnlock()
 
@@ -141,38 +141,53 @@ func (b *InMemoryBackend) Read(ctx context.Context, req *ReadRequest) (string, e
 
 	entry, exists := b.files[filePath]
 	if !exists {
-		return "", fmt.Errorf("file not found: %s", filePath)
+		return FileContent{}, fmt.Errorf("file not found: %s", filePath)
 	}
 
-	offset := req.Offset
+	// Convert 1-based offset to 0-based index; values < 1 default to line 1
+	offset := req.Offset - 1
 	if offset < 0 {
 		offset = 0
 	}
 	limit := req.Limit
 	if limit <= 0 {
-		limit = 200
+		limit = 2000
 	}
 
-	lines := strings.Split(entry.content, "\n")
-	totalLines := len(lines)
+	content := entry.content
 
-	if offset >= totalLines {
-		return "", nil
+	// Fast path: no offset, content fits within limit — return as-is
+	if offset == 0 {
+		lineCount := strings.Count(content, "\n") + 1
+		if lineCount <= limit {
+			return FileContent{Content: content}, nil
+		}
 	}
 
-	end := offset + limit
-	if end > totalLines {
-		end = totalLines
+	// Skip `offset` lines by scanning for newlines directly
+	start := 0
+	for i := 0; i < offset; i++ {
+		idx := strings.IndexByte(content[start:], '\n')
+		if idx == -1 {
+			// offset exceeds total lines
+			return FileContent{}, nil
+		}
+		start += idx + 1
 	}
 
-	sb := &strings.Builder{}
-	i := offset
-	for ; i < end-1; i++ {
-		sb.WriteString(fmt.Sprintf("%6d\t%s\n", i+1, lines[i]))
+	// Find the end position after `limit` lines
+	end := start
+	for i := 0; i < limit; i++ {
+		idx := strings.IndexByte(content[end:], '\n')
+		if idx == -1 {
+			// Reached the end of content
+			return FileContent{Content: content[start:]}, nil
+		}
+		end += idx + 1
 	}
-	sb.WriteString(fmt.Sprintf("%6d\t%s", i+1, lines[i]))
 
-	return sb.String(), nil
+	// Trim the trailing newline from the last included line
+	return FileContent{Content: content[start : end-1]}, nil
 }
 
 // GrepRaw returns matches for the given pattern.

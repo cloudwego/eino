@@ -166,7 +166,7 @@ func (t *taskUpdateTool) InvokableRun(ctx context.Context, argumentsInJSON strin
 	}
 
 	taskData := &task{}
-	err = sonic.UnmarshalString(content, taskData)
+	err = sonic.UnmarshalString(content.Content, taskData)
 	if err != nil {
 		return "", fmt.Errorf("%s parse Task #%s failed, err: %w", TaskUpdateToolName, params.TaskID, err)
 	}
@@ -341,7 +341,7 @@ func (t *taskUpdateTool) addBlockedByToTask(ctx context.Context, targetTaskID, b
 	}
 
 	targetTask := &task{}
-	if unmarshalErr := sonic.UnmarshalString(content, targetTask); unmarshalErr != nil {
+	if unmarshalErr := sonic.UnmarshalString(content.Content, targetTask); unmarshalErr != nil {
 		return fmt.Errorf("failed to parse task #%s: %w", targetTaskID, unmarshalErr)
 	}
 
@@ -368,7 +368,7 @@ func (t *taskUpdateTool) addBlocksToTask(ctx context.Context, targetTaskID, bloc
 	}
 
 	targetTask := &task{}
-	if unmarshalErr := sonic.UnmarshalString(content, targetTask); unmarshalErr != nil {
+	if unmarshalErr := sonic.UnmarshalString(content.Content, targetTask); unmarshalErr != nil {
 		return fmt.Errorf("failed to parse task #%s: %w", targetTaskID, unmarshalErr)
 	}
 

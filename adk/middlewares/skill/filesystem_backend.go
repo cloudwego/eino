@@ -121,14 +121,14 @@ func (b *filesystemBackend) list(ctx context.Context) ([]Skill, error) {
 }
 
 func (b *filesystemBackend) loadSkillFromFile(ctx context.Context, path string) (Skill, error) {
-	data, err := b.backend.Read(ctx, &filesystem.ReadRequest{
+	fileContent, err := b.backend.Read(ctx, &filesystem.ReadRequest{
 		FilePath: path,
 	})
 	if err != nil {
 		return Skill{}, fmt.Errorf("failed to read file: %w", err)
 	}
 
-	data = stripLineNumbers(data)
+	data := stripLineNumbers(fileContent.Content)
 
 	frontmatter, content, err := parseFrontmatter(data)
 	if err != nil {

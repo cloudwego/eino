@@ -558,11 +558,27 @@ func newReadFileTool(fs filesystem.Backend, name string, desc string) (tool.Base
 		return nil, err
 	}
 	return utils.InferTool(toolName, d, func(ctx context.Context, input readFileArgs) (string, error) {
-		return fs.Read(ctx, &filesystem.ReadRequest{
+		if input.Offset <= 0 {
+			input.Offset = 1
+		}
+
+		fileCt, err := fs.Read(ctx, &filesystem.ReadRequest{
 			FilePath: input.FilePath,
 			Offset:   input.Offset,
 			Limit:    input.Limit,
 		})
+		if err != nil {
+			return "", err
+		}
+
+		startLine := input.Offset
+	
+		lines := strings.Split(fileCt.Content, "\n")
+		var b strings.Builder
+		for i, line := range lines {
+			fmt.Fprintf(&b, "%6d\t%s\n", startLine+i, line)
+		}
+		return strings.TrimSuffix(b.String(), "\n"), nil
 	})
 }
 
@@ -757,6 +773,8 @@ func newGrepTool(fs filesystem.Backend, name string, desc string) (tool.BaseTool
 			return "", err
 		}
 
+		matches = toRelativePathMatches(matches, path)
+
 		sort.SliceStable(matches, func(i, j int) bool {
 			return filepath.Base(matches[i].Path) < filepath.Base(matches[j].Path)
 		})
@@ -884,6 +902,20 @@ func convExecuteResponse(response *filesystem.ExecuteResponse) string {
 		return "[Command executed successfully with no output]"
 	}
 	return result
+}
+
+// toRelativePathMatches converts match paths to relative paths when basePath is absolute.
+// If basePath is empty, ".", or relative, matches are returned unchanged.
+func toRelativePathMatches(matches []filesystem.GrepMatch, basePath string) []filesystem.GrepMatch {
+	if !filepath.IsAbs(basePath) {
+		return matches
+	}
+	for i := range matches {
+		if relPath, err := filepath.Rel(basePath, matches[i].Path); err == nil {
+			matches[i].Path = relPath
+		}
+	}
+	return matches
 }
 
 // valueOrDefault returns the value pointed to by ptr, or defaultValue if ptr is nil.

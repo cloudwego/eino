@@ -58,7 +58,7 @@ func TestTaskUpdateTool(t *testing.T) {
 	content, err := backend.Read(ctx, &ReadRequest{FilePath: filepath.Join(baseDir, "1.json")})
 	assert.NoError(t, err)
 	var updated task
-	_ = sonic.UnmarshalString(content, &updated)
+	_ = sonic.UnmarshalString(content.Content, &updated)
 	assert.Equal(t, taskStatusInProgress, updated.Status)
 
 	result, err = tool.InvokableRun(ctx, `{"taskId": "1", "subject": "New Subject", "description": "New description"}`)
@@ -67,7 +67,7 @@ func TestTaskUpdateTool(t *testing.T) {
 	assert.Contains(t, result, "description")
 
 	content, _ = backend.Read(ctx, &ReadRequest{FilePath: filepath.Join(baseDir, "1.json")})
-	_ = sonic.UnmarshalString(content, &updated)
+	_ = sonic.UnmarshalString(content.Content, &updated)
 	assert.Equal(t, "New Subject", updated.Subject)
 	assert.Equal(t, "New description", updated.Description)
 }
@@ -97,7 +97,7 @@ func TestTaskUpdateToolOwnerAndMetadata(t *testing.T) {
 
 	content, _ := backend.Read(ctx, &ReadRequest{FilePath: filepath.Join(baseDir, "1.json")})
 	var updated task
-	_ = sonic.UnmarshalString(content, &updated)
+	_ = sonic.UnmarshalString(content.Content, &updated)
 	assert.Equal(t, "agent1", updated.Owner)
 
 	result, err = tool.InvokableRun(ctx, `{"taskId": "1", "metadata": {"key1": "value1", "key2": "value2"}}`)
@@ -105,7 +105,7 @@ func TestTaskUpdateToolOwnerAndMetadata(t *testing.T) {
 	assert.Contains(t, result, "metadata")
 
 	content, _ = backend.Read(ctx, &ReadRequest{FilePath: filepath.Join(baseDir, "1.json")})
-	_ = sonic.UnmarshalString(content, &updated)
+	_ = sonic.UnmarshalString(content.Content, &updated)
 	assert.Equal(t, "value1", updated.Metadata["key1"])
 	assert.Equal(t, "value2", updated.Metadata["key2"])
 
@@ -114,7 +114,7 @@ func TestTaskUpdateToolOwnerAndMetadata(t *testing.T) {
 
 	content, _ = backend.Read(ctx, &ReadRequest{FilePath: filepath.Join(baseDir, "1.json")})
 	var updated2 task
-	_ = sonic.UnmarshalString(content, &updated2)
+	_ = sonic.UnmarshalString(content.Content, &updated2)
 	_, key1Exists := updated2.Metadata["key1"]
 	assert.False(t, key1Exists)
 	assert.Equal(t, "value2", updated2.Metadata["key2"])
@@ -179,7 +179,7 @@ func TestTaskUpdateToolBlocks(t *testing.T) {
 
 	content, _ := backend.Read(ctx, &ReadRequest{FilePath: filepath.Join(baseDir, "1.json")})
 	var updated task
-	_ = sonic.UnmarshalString(content, &updated)
+	_ = sonic.UnmarshalString(content.Content, &updated)
 	assert.Equal(t, []string{"2", "3"}, updated.Blocks)
 
 	result, err = tool.InvokableRun(ctx, `{"taskId": "1", "addBlockedBy": ["4"]}`)
@@ -187,7 +187,7 @@ func TestTaskUpdateToolBlocks(t *testing.T) {
 	assert.Contains(t, result, "blockedBy")
 
 	content, _ = backend.Read(ctx, &ReadRequest{FilePath: filepath.Join(baseDir, "1.json")})
-	_ = sonic.UnmarshalString(content, &updated)
+	_ = sonic.UnmarshalString(content.Content, &updated)
 	assert.Equal(t, []string{"4"}, updated.BlockedBy)
 }
 
@@ -324,14 +324,14 @@ func TestTaskUpdateToolBlocksDeduplication(t *testing.T) {
 
 	content, _ := backend.Read(ctx, &ReadRequest{FilePath: filepath.Join(baseDir, "1.json")})
 	var updated task
-	_ = sonic.UnmarshalString(content, &updated)
+	_ = sonic.UnmarshalString(content.Content, &updated)
 	assert.Equal(t, []string{"2", "4"}, updated.Blocks)
 
 	_, err = tool.InvokableRun(ctx, `{"taskId": "1", "addBlockedBy": ["3", "5", "5"]}`)
 	assert.NoError(t, err)
 
 	content, _ = backend.Read(ctx, &ReadRequest{FilePath: filepath.Join(baseDir, "1.json")})
-	_ = sonic.UnmarshalString(content, &updated)
+	_ = sonic.UnmarshalString(content.Content, &updated)
 	assert.Equal(t, []string{"3", "5"}, updated.BlockedBy)
 }
 
@@ -381,19 +381,19 @@ func TestTaskUpdateToolBidirectionalBlocks(t *testing.T) {
 
 	content1, _ := backend.Read(ctx, &ReadRequest{FilePath: filepath.Join(baseDir, "1.json")})
 	var updatedTask1 task
-	_ = sonic.UnmarshalString(content1, &updatedTask1)
+	_ = sonic.UnmarshalString(content1.Content, &updatedTask1)
 	assert.Equal(t, []string{"2", "3"}, updatedTask1.Blocks)
 	assert.Empty(t, updatedTask1.BlockedBy)
 
 	content2, _ := backend.Read(ctx, &ReadRequest{FilePath: filepath.Join(baseDir, "2.json")})
 	var updatedTask2 task
-	_ = sonic.UnmarshalString(content2, &updatedTask2)
+	_ = sonic.UnmarshalString(content2.Content, &updatedTask2)
 	assert.Empty(t, updatedTask2.Blocks)
 	assert.Equal(t, []string{"1"}, updatedTask2.BlockedBy)
 
 	content3, _ := backend.Read(ctx, &ReadRequest{FilePath: filepath.Join(baseDir, "3.json")})
 	var updatedTask3 task
-	_ = sonic.UnmarshalString(content3, &updatedTask3)
+	_ = sonic.UnmarshalString(content3.Content, &updatedTask3)
 	assert.Empty(t, updatedTask3.Blocks)
 	assert.Equal(t, []string{"1"}, updatedTask3.BlockedBy)
 }
@@ -444,19 +444,19 @@ func TestTaskUpdateToolBidirectionalBlockedBy(t *testing.T) {
 
 	content3, _ := backend.Read(ctx, &ReadRequest{FilePath: filepath.Join(baseDir, "3.json")})
 	var updatedTask3 task
-	_ = sonic.UnmarshalString(content3, &updatedTask3)
+	_ = sonic.UnmarshalString(content3.Content, &updatedTask3)
 	assert.Empty(t, updatedTask3.Blocks)
 	assert.Equal(t, []string{"1", "2"}, updatedTask3.BlockedBy)
 
 	content1, _ := backend.Read(ctx, &ReadRequest{FilePath: filepath.Join(baseDir, "1.json")})
 	var updatedTask1 task
-	_ = sonic.UnmarshalString(content1, &updatedTask1)
+	_ = sonic.UnmarshalString(content1.Content, &updatedTask1)
 	assert.Equal(t, []string{"3"}, updatedTask1.Blocks)
 	assert.Empty(t, updatedTask1.BlockedBy)
 
 	content2, _ := backend.Read(ctx, &ReadRequest{FilePath: filepath.Join(baseDir, "2.json")})
 	var updatedTask2 task
-	_ = sonic.UnmarshalString(content2, &updatedTask2)
+	_ = sonic.UnmarshalString(content2.Content, &updatedTask2)
 	assert.Equal(t, []string{"3"}, updatedTask2.Blocks)
 	assert.Empty(t, updatedTask2.BlockedBy)
 }
@@ -562,19 +562,19 @@ func TestTaskUpdateToolCyclicDependencyDetection(t *testing.T) {
 
 	content1, _ := backend.Read(ctx, &ReadRequest{FilePath: filepath.Join(baseDir, "1.json")})
 	var updatedTask1 task
-	_ = sonic.UnmarshalString(content1, &updatedTask1)
+	_ = sonic.UnmarshalString(content1.Content, &updatedTask1)
 	assert.Equal(t, []string{"2"}, updatedTask1.Blocks)
 	assert.Empty(t, updatedTask1.BlockedBy)
 
 	content2, _ := backend.Read(ctx, &ReadRequest{FilePath: filepath.Join(baseDir, "2.json")})
 	var updatedTask2 task
-	_ = sonic.UnmarshalString(content2, &updatedTask2)
+	_ = sonic.UnmarshalString(content2.Content, &updatedTask2)
 	assert.Equal(t, []string{"3"}, updatedTask2.Blocks)
 	assert.Equal(t, []string{"1"}, updatedTask2.BlockedBy)
 
 	content3, _ := backend.Read(ctx, &ReadRequest{FilePath: filepath.Join(baseDir, "3.json")})
 	var updatedTask3 task
-	_ = sonic.UnmarshalString(content3, &updatedTask3)
+	_ = sonic.UnmarshalString(content3.Content, &updatedTask3)
 	assert.Empty(t, updatedTask3.Blocks)
 	assert.Equal(t, []string{"2"}, updatedTask3.BlockedBy)
 }
@@ -630,14 +630,14 @@ func TestTaskUpdateToolDeleteCleansDependencies(t *testing.T) {
 	content2, err := backend.Read(ctx, &ReadRequest{FilePath: filepath.Join(baseDir, "2.json")})
 	assert.NoError(t, err)
 	var updatedTask2 task
-	_ = sonic.UnmarshalString(content2, &updatedTask2)
+	_ = sonic.UnmarshalString(content2.Content, &updatedTask2)
 	assert.Equal(t, []string{"3"}, updatedTask2.Blocks)
 	assert.Empty(t, updatedTask2.BlockedBy)
 
 	content3, err := backend.Read(ctx, &ReadRequest{FilePath: filepath.Join(baseDir, "3.json")})
 	assert.NoError(t, err)
 	var updatedTask3 task
-	_ = sonic.UnmarshalString(content3, &updatedTask3)
+	_ = sonic.UnmarshalString(content3.Content, &updatedTask3)
 	assert.Empty(t, updatedTask3.Blocks)
 	assert.Equal(t, []string{"2"}, updatedTask3.BlockedBy)
 }
@@ -734,6 +734,6 @@ func TestTaskUpdateToolNoDeleteWhenNotAllCompleted(t *testing.T) {
 
 	content1, _ := backend.Read(ctx, &ReadRequest{FilePath: filepath.Join(baseDir, "1.json")})
 	var updatedTask1 task
-	_ = sonic.UnmarshalString(content1, &updatedTask1)
+	_ = sonic.UnmarshalString(content1.Content, &updatedTask1)
 	assert.Equal(t, taskStatusCompleted, updatedTask1.Status)
 }

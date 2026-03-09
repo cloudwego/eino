@@ -174,6 +174,10 @@ type EditRequest struct {
 	ReplaceAll bool
 }
 
+type FileContent struct {
+	Content string
+}
+
 // Backend is a pluggable, unified file backend protocol interface.
 //
 // All methods use struct-based parameters to allow future extensibility
@@ -191,7 +195,7 @@ type Backend interface {
 	// Returns:
 	//   - string: The file content read
 	//   - error: Error if file does not exist or read fails
-	Read(ctx context.Context, req *ReadRequest) (string, error)
+	Read(ctx context.Context, req *ReadRequest) (FileContent, error)
 
 	// GrepRaw searches for content matching the specified pattern in files.
 	//
