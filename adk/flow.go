@@ -186,8 +186,12 @@ func rewriteMessage(msg Message, agentName string) Message {
 	}
 
 	rewritten := schema.UserMessage(sb.String())
-	rewritten.MultiContent = append([]schema.ChatMessagePart{}, msg.MultiContent...)
-	rewritten.UserInputMultiContent = append([]schema.MessageInputPart{}, msg.UserInputMultiContent...)
+	if msg.MultiContent != nil {
+		rewritten.MultiContent = append([]schema.ChatMessagePart{}, msg.MultiContent...)
+	}
+	if msg.UserInputMultiContent != nil {
+		rewritten.UserInputMultiContent = append([]schema.MessageInputPart{}, msg.UserInputMultiContent...)
+	}
 
 	// Convert AssistantGenMultiContent to UserInputMultiContent, since the role changes to User.
 	// Reasoning parts have no user input equivalent and are dropped.
