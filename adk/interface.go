@@ -23,9 +23,14 @@ import (
 	"fmt"
 	"io"
 
+	"github.com/cloudwego/eino/components"
 	"github.com/cloudwego/eino/internal/core"
 	"github.com/cloudwego/eino/schema"
 )
+
+// ComponentOfAgent is the component type identifier for ADK agents in callbacks.
+// Use this to filter callback events to only agent-related events.
+const ComponentOfAgent components.Component = "Agent"
 
 type Message = *schema.Message
 type MessageStream = *schema.StreamReader[Message]
@@ -61,12 +66,16 @@ type messageVariantSerialization struct {
 	IsStreaming   bool
 	Message       Message
 	MessageStream Message
+	Role          schema.RoleType
+	ToolName      string
 }
 
 func (mv *MessageVariant) GobEncode() ([]byte, error) {
 	s := &messageVariantSerialization{
 		IsStreaming: mv.IsStreaming,
 		Message:     mv.Message,
+		Role:        mv.Role,
+		ToolName:    mv.ToolName,
 	}
 	if mv.IsStreaming {
 		var messages []Message
@@ -102,6 +111,8 @@ func (mv *MessageVariant) GobDecode(b []byte) error {
 	}
 	mv.IsStreaming = s.IsStreaming
 	mv.Message = s.Message
+	mv.Role = s.Role
+	mv.ToolName = s.ToolName
 	if s.MessageStream != nil {
 		mv.MessageStream = schema.StreamReaderFromArray([]*schema.Message{s.MessageStream})
 	}

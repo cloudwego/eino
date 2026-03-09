@@ -148,4 +148,7 @@ Important:
 
 %s`
 	toolName = "skill"
+
+	subAgentResultFormat        = "Skill \"%s\" completed (sub-agent execution).\n\nResult:\n%s"
+	subAgentResultFormatChinese = "Skill \"%s\" 已完成（子 Agent 执行）。\n\n结果：\n%s"
 )

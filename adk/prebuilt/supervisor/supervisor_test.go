@@ -20,12 +20,15 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"go.uber.org/mock/gomock"
 
 	"github.com/cloudwego/eino/adk"
+	"github.com/cloudwego/eino/callbacks"
+	"github.com/cloudwego/eino/components"
 	"github.com/cloudwego/eino/components/tool"
 	"github.com/cloudwego/eino/compose"
 	mockAdk "github.com/cloudwego/eino/internal/mock/adk"
@@ -47,6 +50,7 @@ func TestNewSupervisor(t *testing.T) {
 	subAgent2 := mockAdk.NewMockAgent(ctrl)
 
 	supervisorAgent.EXPECT().Name(gomock.Any()).Return("SupervisorAgent").AnyTimes()
+	supervisorAgent.EXPECT().Description(gomock.Any()).Return("Supervisor agent description").AnyTimes()
 	subAgent1.EXPECT().Name(gomock.Any()).Return("SubAgent1").AnyTimes()
 	subAgent2.EXPECT().Name(gomock.Any()).Return("SubAgent2").AnyTimes()
 
@@ -500,6 +504,7 @@ func TestSupervisorExit(t *testing.T) {
 	subAgent := mockAdk.NewMockAgent(ctrl)
 
 	supervisorAgent.EXPECT().Name(gomock.Any()).Return("Supervisor").AnyTimes()
+	supervisorAgent.EXPECT().Description(gomock.Any()).Return("Supervisor description").AnyTimes()
 	subAgent.EXPECT().Name(gomock.Any()).Return("SubAgent").AnyTimes()
 
 	// 1. Supervisor transfers to SubAgent
@@ -577,7 +582,9 @@ func TestNestedSupervisorExit(t *testing.T) {
 	worker := mockAdk.NewMockAgent(ctrl)
 
 	topSupervisor.EXPECT().Name(gomock.Any()).Return("TopSupervisor").AnyTimes()
+	topSupervisor.EXPECT().Description(gomock.Any()).Return("Top supervisor description").AnyTimes()
 	midSupervisor.EXPECT().Name(gomock.Any()).Return("MidSupervisor").AnyTimes()
+	midSupervisor.EXPECT().Description(gomock.Any()).Return("Mid supervisor description").AnyTimes()
 	worker.EXPECT().Name(gomock.Any()).Return("Worker").AnyTimes()
 
 	// 1. TopSupervisor transfers to MidSupervisor
@@ -682,6 +689,7 @@ func TestChatModelAgentInternalEventsExit(t *testing.T) {
 	innerAgent := mockAdk.NewMockAgent(ctrl)
 
 	supervisorAgent.EXPECT().Name(gomock.Any()).Return("Supervisor").AnyTimes()
+	supervisorAgent.EXPECT().Description(gomock.Any()).Return("Supervisor description").AnyTimes()
 	innerAgent.EXPECT().Name(gomock.Any()).Return("InnerAgent").AnyTimes()
 	innerAgent.EXPECT().Description(gomock.Any()).Return("Inner Agent Description").AnyTimes()
 
@@ -818,4 +826,334 @@ func TestChatModelAgentInternalEventsExit(t *testing.T) {
 
 	assert.True(t, foundInnerExit, "Should have captured InnerAgent Exit event")
 	assert.True(t, foundTransferBack, "Should have found Transfer back to Supervisor (Worker should NOT be considered exited)")
+}
+
+func TestSupervisorContainerUnifiedTracing(t *testing.T) {
+	ctx := context.Background()
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	supervisorModel := mockModel.NewMockToolCallingChatModel(ctrl)
+	subAgentModel := mockModel.NewMockToolCallingChatModel(ctrl)
+
+	supervisorModel.EXPECT().WithTools(gomock.Any()).Return(supervisorModel, nil).AnyTimes()
+	subAgentModel.EXPECT().WithTools(gomock.Any()).Return(subAgentModel, nil).AnyTimes()
+
+	transferMsg := schema.AssistantMessage("", []schema.ToolCall{
+		{
+			ID:   "transfer_1",
+			Type: "function",
+			Function: schema.FunctionCall{
+				Name:      "transfer_to_agent",
+				Arguments: `{"agent_name":"SubAgent"}`,
+			},
+		},
+	})
+	supervisorModel.EXPECT().Generate(gomock.Any(), gomock.Any(), gomock.Any()).
+		Return(transferMsg, nil).Times(1)
+
+	subAgentResponse := schema.AssistantMessage("SubAgent response", nil)
+	subAgentModel.EXPECT().Generate(gomock.Any(), gomock.Any(), gomock.Any()).
+		Return(subAgentResponse, nil).Times(1)
+
+	finalResponse := schema.AssistantMessage("Final response", nil)
+	supervisorModel.EXPECT().Generate(gomock.Any(), gomock.Any(), gomock.Any()).
+		Return(finalResponse, nil).Times(1)
+
+	supervisorAgent, err := adk.NewChatModelAgent(ctx, &adk.ChatModelAgentConfig{
+		Name:        "SupervisorAgent",
+		Description: "Supervisor agent",
+		Instruction: "You are a supervisor",
+		Model:       supervisorModel,
+	})
+	assert.NoError(t, err)
+
+	subAgent, err := adk.NewChatModelAgent(ctx, &adk.ChatModelAgentConfig{
+		Name:        "SubAgent",
+		Description: "Sub agent",
+		Instruction: "You are a sub agent",
+		Model:       subAgentModel,
+	})
+	assert.NoError(t, err)
+
+	multiAgent, err := New(ctx, &Config{
+		Supervisor: supervisorAgent,
+		SubAgents:  []adk.Agent{subAgent},
+	})
+	assert.NoError(t, err)
+
+	assert.Equal(t, "SupervisorAgent", multiAgent.Name(ctx))
+
+	typer, ok := multiAgent.(components.Typer)
+	assert.True(t, ok, "Should implement components.Typer")
+	assert.Equal(t, "Supervisor", typer.GetType())
+
+	var mu sync.Mutex
+	var onStartCalls []string
+	var onEndCalls []string
+
+	handler := callbacks.NewHandlerBuilder().
+		OnStartFn(func(ctx context.Context, info *callbacks.RunInfo, input callbacks.CallbackInput) context.Context {
+			if info.Component != adk.ComponentOfAgent {
+				return ctx
+			}
+			mu.Lock()
+			onStartCalls = append(onStartCalls, info.Name+":"+info.Type)
+			mu.Unlock()
+			return ctx
+		}).
+		OnEndFn(func(ctx context.Context, info *callbacks.RunInfo, output callbacks.CallbackOutput) context.Context {
+			if info.Component != adk.ComponentOfAgent {
+				return ctx
+			}
+			mu.Lock()
+			onEndCalls = append(onEndCalls, info.Name+":"+info.Type)
+			mu.Unlock()
+			if agentOutput := adk.ConvAgentCallbackOutput(output); agentOutput != nil && agentOutput.Events != nil {
+				go func() {
+					for {
+						_, ok := agentOutput.Events.Next()
+						if !ok {
+							break
+						}
+					}
+				}()
+			}
+			return ctx
+		}).
+		Build()
+
+	runner := adk.NewRunner(ctx, adk.RunnerConfig{Agent: multiAgent})
+	iter := runner.Query(ctx, "hello", adk.WithCallbacks(handler))
+
+	for {
+		_, ok := iter.Next()
+		if !ok {
+			break
+		}
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+
+	assert.NotEmpty(t, onStartCalls, "Should have OnStart calls")
+	assert.Contains(t, onStartCalls, "SupervisorAgent:Supervisor", "Should have supervisor container OnStart with type 'Supervisor'")
+}
+
+type traceContextKey struct{}
+
+func TestSupervisorContainerUnifiedTracingOnResume(t *testing.T) {
+	ctx := context.Background()
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	supervisorModel := mockModel.NewMockToolCallingChatModel(ctrl)
+	workerModel := mockModel.NewMockToolCallingChatModel(ctrl)
+
+	supervisorModel.EXPECT().WithTools(gomock.Any()).Return(supervisorModel, nil).AnyTimes()
+	workerModel.EXPECT().WithTools(gomock.Any()).Return(workerModel, nil).AnyTimes()
+
+	paymentTool := &approvableTool{name: "process_payment", t: t}
+
+	workerToolCallMsg := schema.AssistantMessage("", []schema.ToolCall{
+		{
+			ID:   "call_payment_1",
+			Type: "function",
+			Function: schema.FunctionCall{
+				Name:      "process_payment",
+				Arguments: `{"action": "process $1000 payment"}`,
+			},
+		},
+	})
+	workerModel.EXPECT().Generate(gomock.Any(), gomock.Any(), gomock.Any()).
+		Return(workerToolCallMsg, nil).Times(1)
+
+	workerCompletionMsg := schema.AssistantMessage("Payment processed successfully", nil)
+	workerModel.EXPECT().Generate(gomock.Any(), gomock.Any(), gomock.Any()).
+		Return(workerCompletionMsg, nil).AnyTimes()
+
+	workerAgent, err := adk.NewChatModelAgent(ctx, &adk.ChatModelAgentConfig{
+		Name:        "Worker",
+		Description: "Worker agent",
+		Instruction: "You are a worker",
+		Model:       workerModel,
+		ToolsConfig: adk.ToolsConfig{
+			ToolsNodeConfig: compose.ToolsNodeConfig{
+				Tools: []tool.BaseTool{paymentTool},
+			},
+		},
+	})
+	assert.NoError(t, err)
+
+	transferMsg := schema.AssistantMessage("", []schema.ToolCall{
+		{
+			ID:   "transfer_1",
+			Type: "function",
+			Function: schema.FunctionCall{
+				Name:      "transfer_to_agent",
+				Arguments: `{"agent_name":"Worker"}`,
+			},
+		},
+	})
+	supervisorModel.EXPECT().Generate(gomock.Any(), gomock.Any(), gomock.Any()).
+		Return(transferMsg, nil).Times(1)
+
+	finalResponse := schema.AssistantMessage("Final response", nil)
+	supervisorModel.EXPECT().Generate(gomock.Any(), gomock.Any(), gomock.Any()).
+		Return(finalResponse, nil).AnyTimes()
+
+	supervisorAgent, err := adk.NewChatModelAgent(ctx, &adk.ChatModelAgentConfig{
+		Name:        "SupervisorAgent",
+		Description: "Supervisor agent",
+		Instruction: "You are a supervisor",
+		Model:       supervisorModel,
+		Exit:        &adk.ExitTool{},
+	})
+	assert.NoError(t, err)
+
+	multiAgent, err := New(ctx, &Config{
+		Supervisor: supervisorAgent,
+		SubAgents:  []adk.Agent{workerAgent},
+	})
+	assert.NoError(t, err)
+
+	store := newCheckpointStore()
+	runner := adk.NewRunner(ctx, adk.RunnerConfig{
+		Agent:           multiAgent,
+		CheckPointStore: store,
+	})
+
+	var mu sync.Mutex
+	var runOnStartCalls []string
+	var resumeOnStartCalls []string
+	var resumeParentTraceIDs []string
+
+	runHandler := callbacks.NewHandlerBuilder().
+		OnStartFn(func(ctx context.Context, info *callbacks.RunInfo, input callbacks.CallbackInput) context.Context {
+			if info.Component != adk.ComponentOfAgent {
+				return ctx
+			}
+			mu.Lock()
+			runOnStartCalls = append(runOnStartCalls, info.Name+":"+info.Type)
+			mu.Unlock()
+			return ctx
+		}).
+		OnEndFn(func(ctx context.Context, info *callbacks.RunInfo, output callbacks.CallbackOutput) context.Context {
+			if info.Component != adk.ComponentOfAgent {
+				return ctx
+			}
+			if agentOutput := adk.ConvAgentCallbackOutput(output); agentOutput != nil && agentOutput.Events != nil {
+				go func() {
+					for {
+						_, ok := agentOutput.Events.Next()
+						if !ok {
+							break
+						}
+					}
+				}()
+			}
+			return ctx
+		}).
+		Build()
+
+	checkpointID := "test-unified-tracing-resume"
+	iter := runner.Run(ctx, []adk.Message{schema.UserMessage("Process payment")}, adk.WithCallbacks(runHandler), adk.WithCheckPointID(checkpointID))
+
+	var interruptEvent *adk.AgentEvent
+	for {
+		event, ok := iter.Next()
+		if !ok {
+			break
+		}
+		if event.Action != nil && event.Action.Interrupted != nil {
+			interruptEvent = event
+			break
+		}
+	}
+
+	assert.NotNil(t, interruptEvent, "Should have interrupt event")
+
+	var toolInterruptID string
+	for _, intCtx := range interruptEvent.Action.Interrupted.InterruptContexts {
+		if intCtx.IsRootCause {
+			toolInterruptID = intCtx.ID
+			break
+		}
+	}
+	assert.NotEmpty(t, toolInterruptID, "Should have a root cause interrupt ID")
+
+	mu.Lock()
+	t.Logf("Run OnStart calls: %v", runOnStartCalls)
+	assert.Contains(t, runOnStartCalls, "SupervisorAgent:Supervisor", "Run should have supervisor container OnStart")
+	mu.Unlock()
+
+	resumeHandler := callbacks.NewHandlerBuilder().
+		OnStartFn(func(ctx context.Context, info *callbacks.RunInfo, input callbacks.CallbackInput) context.Context {
+			if info.Component != adk.ComponentOfAgent {
+				return ctx
+			}
+			mu.Lock()
+			resumeOnStartCalls = append(resumeOnStartCalls, info.Name+":"+info.Type)
+			parentID, _ := ctx.Value(traceContextKey{}).(string)
+			resumeParentTraceIDs = append(resumeParentTraceIDs, info.Name+":parent="+parentID)
+			mu.Unlock()
+			if info.Type == "Supervisor" {
+				return context.WithValue(ctx, traceContextKey{}, "supervisor-trace-id")
+			}
+			return ctx
+		}).
+		OnEndFn(func(ctx context.Context, info *callbacks.RunInfo, output callbacks.CallbackOutput) context.Context {
+			if info.Component != adk.ComponentOfAgent {
+				return ctx
+			}
+			if agentOutput := adk.ConvAgentCallbackOutput(output); agentOutput != nil && agentOutput.Events != nil {
+				go func() {
+					for {
+						_, ok := agentOutput.Events.Next()
+						if !ok {
+							break
+						}
+					}
+				}()
+			}
+			return ctx
+		}).
+		Build()
+
+	resumeIter, err := runner.ResumeWithParams(ctx, checkpointID, &adk.ResumeParams{
+		Targets: map[string]any{
+			toolInterruptID: &approvalResult{Approved: true},
+		},
+	}, adk.WithCallbacks(resumeHandler))
+	assert.NoError(t, err)
+
+	for {
+		event, ok := resumeIter.Next()
+		if !ok {
+			break
+		}
+		assert.NoError(t, event.Err)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+
+	t.Logf("Resume OnStart calls: %v", resumeOnStartCalls)
+	t.Logf("Resume parent trace IDs: %v", resumeParentTraceIDs)
+	assert.NotEmpty(t, resumeOnStartCalls, "Should have OnStart calls during resume")
+	assert.Contains(t, resumeOnStartCalls, "SupervisorAgent:Supervisor", "Resume should have supervisor container OnStart with type 'Supervisor'")
+
+	foundInnerSupervisorWithParent := false
+	for _, entry := range resumeParentTraceIDs {
+		if strings.Contains(entry, "SupervisorAgent") && !strings.Contains(entry, "parent=supervisor-trace-id") && entry != "SupervisorAgent:parent=" {
+			if strings.Contains(resumeOnStartCalls[0], "Supervisor") {
+				continue
+			}
+		}
+		if strings.Contains(entry, "parent=supervisor-trace-id") {
+			foundInnerSupervisorWithParent = true
+		}
+	}
+	assert.True(t, foundInnerSupervisorWithParent,
+		"Inner agents should have parent trace from Supervisor container during Resume. Got: %v", resumeParentTraceIDs)
 }

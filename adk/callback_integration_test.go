@@ -1,0 +1,1062 @@
+/*
+ * Copyright 2026 CloudWeGo Authors
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package adk
+
+import (
+	"context"
+	"sync"
+	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"go.uber.org/mock/gomock"
+
+	"github.com/cloudwego/eino/callbacks"
+	mockModel "github.com/cloudwego/eino/internal/mock/components/model"
+	"github.com/cloudwego/eino/schema"
+)
+
+type callbackRecorder struct {
+	mu             sync.Mutex
+	onStartCalled  bool
+	onEndCalled    bool
+	runInfo        *callbacks.RunInfo
+	inputReceived  *AgentCallbackInput
+	eventsReceived []*AgentEvent
+	eventsDone     chan struct{}
+	closeOnce      sync.Once
+}
+
+func (r *callbackRecorder) getOnStartCalled() bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.onStartCalled
+}
+
+func (r *callbackRecorder) getOnEndCalled() bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.onEndCalled
+}
+
+func (r *callbackRecorder) getEventsReceived() []*AgentEvent {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	result := make([]*AgentEvent, len(r.eventsReceived))
+	copy(result, r.eventsReceived)
+	return result
+}
+
+func newRecordingHandler(recorder *callbackRecorder) callbacks.Handler {
+	recorder.eventsDone = make(chan struct{})
+	return callbacks.NewHandlerBuilder().
+		OnStartFn(func(ctx context.Context, info *callbacks.RunInfo, input callbacks.CallbackInput) context.Context {
+			if info.Component != ComponentOfAgent {
+				return ctx
+			}
+			recorder.mu.Lock()
+			defer recorder.mu.Unlock()
+			recorder.onStartCalled = true
+			recorder.runInfo = info
+			if agentInput := ConvAgentCallbackInput(input); agentInput != nil {
+				recorder.inputReceived = agentInput
+			}
+			return ctx
+		}).
+		OnEndFn(func(ctx context.Context, info *callbacks.RunInfo, output callbacks.CallbackOutput) context.Context {
+			if info.Component != ComponentOfAgent {
+				return ctx
+			}
+			recorder.mu.Lock()
+			recorder.onEndCalled = true
+			recorder.runInfo = info
+			recorder.mu.Unlock()
+
+			if agentOutput := ConvAgentCallbackOutput(output); agentOutput != nil {
+				if agentOutput.Events != nil {
+					go func() {
+						defer recorder.closeOnce.Do(func() { close(recorder.eventsDone) })
+						for {
+							event, ok := agentOutput.Events.Next()
+							if !ok {
+								break
+							}
+							recorder.mu.Lock()
+							recorder.eventsReceived = append(recorder.eventsReceived, event)
+							recorder.mu.Unlock()
+						}
+					}()
+					return ctx
+				}
+			}
+			recorder.closeOnce.Do(func() { close(recorder.eventsDone) })
+			return ctx
+		}).
+		Build()
+}
+
+func TestCallbackOnStartInvocation(t *testing.T) {
+	ctx := context.Background()
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	cm := mockModel.NewMockToolCallingChatModel(ctrl)
+	cm.EXPECT().Generate(gomock.Any(), gomock.Any(), gomock.Any()).
+		Return(schema.AssistantMessage("test response", nil), nil).
+		Times(1)
+	cm.EXPECT().WithTools(gomock.Any()).Return(cm, nil).AnyTimes()
+
+	agent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+		Name:        "TestAgent",
+		Description: "Test agent for callback",
+		Instruction: "You are a test agent",
+		Model:       cm,
+	})
+	assert.NoError(t, err)
+
+	recorder := &callbackRecorder{}
+	handler := newRecordingHandler(recorder)
+
+	runner := NewRunner(ctx, RunnerConfig{Agent: agent})
+	iter := runner.Query(ctx, "hello", WithCallbacks(handler))
+	for {
+		_, ok := iter.Next()
+		if !ok {
+			break
+		}
+	}
+
+	<-recorder.eventsDone
+
+	assert.True(t, recorder.onStartCalled, "OnStart should be called")
+	assert.NotNil(t, recorder.inputReceived, "Input should be received")
+	assert.NotNil(t, recorder.inputReceived.Input, "AgentInput should be set")
+	assert.Len(t, recorder.inputReceived.Input.Messages, 1)
+}
+
+func TestCallbackOnEndInvocation(t *testing.T) {
+	ctx := context.Background()
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	cm := mockModel.NewMockToolCallingChatModel(ctrl)
+	cm.EXPECT().Generate(gomock.Any(), gomock.Any(), gomock.Any()).
+		Return(schema.AssistantMessage("test response", nil), nil).
+		Times(1)
+	cm.EXPECT().WithTools(gomock.Any()).Return(cm, nil).AnyTimes()
+
+	agent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+		Name:        "TestAgent",
+		Description: "Test agent for callback",
+		Instruction: "You are a test agent",
+		Model:       cm,
+	})
+	assert.NoError(t, err)
+
+	recorder := &callbackRecorder{}
+	handler := newRecordingHandler(recorder)
+
+	runner := NewRunner(ctx, RunnerConfig{Agent: agent})
+	iter := runner.Query(ctx, "hello", WithCallbacks(handler))
+	for {
+		_, ok := iter.Next()
+		if !ok {
+			break
+		}
+	}
+
+	<-recorder.eventsDone
+
+	assert.True(t, recorder.onEndCalled, "OnEnd should be called")
+	assert.NotEmpty(t, recorder.eventsReceived, "Events should be received")
+}
+
+func TestCallbackRunInfoForChatModelAgent(t *testing.T) {
+	ctx := context.Background()
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	cm := mockModel.NewMockToolCallingChatModel(ctrl)
+	cm.EXPECT().Generate(gomock.Any(), gomock.Any(), gomock.Any()).
+		Return(schema.AssistantMessage("test response", nil), nil).
+		Times(1)
+	cm.EXPECT().WithTools(gomock.Any()).Return(cm, nil).AnyTimes()
+
+	agent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+		Name:        "TestChatAgent",
+		Description: "Test chat agent",
+		Instruction: "You are a test agent",
+		Model:       cm,
+	})
+	assert.NoError(t, err)
+
+	recorder := &callbackRecorder{}
+	handler := newRecordingHandler(recorder)
+
+	runner := NewRunner(ctx, RunnerConfig{Agent: agent})
+	iter := runner.Query(ctx, "hello", WithCallbacks(handler))
+	for {
+		_, ok := iter.Next()
+		if !ok {
+			break
+		}
+	}
+
+	<-recorder.eventsDone
+
+	assert.NotNil(t, recorder.runInfo)
+	assert.Equal(t, "TestChatAgent", recorder.runInfo.Name)
+	assert.Equal(t, "ChatModel", recorder.runInfo.Type)
+	assert.Equal(t, ComponentOfAgent, recorder.runInfo.Component)
+}
+
+func TestMultipleCallbackHandlers(t *testing.T) {
+	ctx := context.Background()
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	cm := mockModel.NewMockToolCallingChatModel(ctrl)
+	cm.EXPECT().Generate(gomock.Any(), gomock.Any(), gomock.Any()).
+		Return(schema.AssistantMessage("test response", nil), nil).
+		Times(1)
+	cm.EXPECT().WithTools(gomock.Any()).Return(cm, nil).AnyTimes()
+
+	agent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+		Name:        "TestAgent",
+		Description: "Test agent",
+		Instruction: "You are a test agent",
+		Model:       cm,
+	})
+	assert.NoError(t, err)
+
+	recorder1 := &callbackRecorder{}
+	recorder2 := &callbackRecorder{}
+	handler1 := newRecordingHandler(recorder1)
+	handler2 := newRecordingHandler(recorder2)
+
+	runner := NewRunner(ctx, RunnerConfig{Agent: agent})
+	iter := runner.Query(ctx, "hello", WithCallbacks(handler1, handler2))
+	for {
+		_, ok := iter.Next()
+		if !ok {
+			break
+		}
+	}
+
+	<-recorder1.eventsDone
+	<-recorder2.eventsDone
+
+	assert.True(t, recorder1.onStartCalled, "Handler1 OnStart should be called")
+	assert.True(t, recorder2.onStartCalled, "Handler2 OnStart should be called")
+	assert.True(t, recorder1.onEndCalled, "Handler1 OnEnd should be called")
+	assert.True(t, recorder2.onEndCalled, "Handler2 OnEnd should be called")
+
+	assert.NotEmpty(t, recorder1.eventsReceived, "Handler1 should receive events")
+	assert.NotEmpty(t, recorder2.eventsReceived, "Handler2 should receive events")
+}
+
+func TestCallbackWithWorkflowAgent(t *testing.T) {
+	ctx := context.Background()
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	cm1 := mockModel.NewMockToolCallingChatModel(ctrl)
+	cm1.EXPECT().Generate(gomock.Any(), gomock.Any(), gomock.Any()).
+		Return(schema.AssistantMessage("response 1", nil), nil).
+		Times(1)
+	cm1.EXPECT().WithTools(gomock.Any()).Return(cm1, nil).AnyTimes()
+
+	cm2 := mockModel.NewMockToolCallingChatModel(ctrl)
+	cm2.EXPECT().Generate(gomock.Any(), gomock.Any(), gomock.Any()).
+		Return(schema.AssistantMessage("response 2", nil), nil).
+		Times(1)
+	cm2.EXPECT().WithTools(gomock.Any()).Return(cm2, nil).AnyTimes()
+
+	agent1, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+		Name:        "Agent1",
+		Description: "First agent",
+		Instruction: "You are agent 1",
+		Model:       cm1,
+	})
+	assert.NoError(t, err)
+
+	agent2, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+		Name:        "Agent2",
+		Description: "Second agent",
+		Instruction: "You are agent 2",
+		Model:       cm2,
+	})
+	assert.NoError(t, err)
+
+	seqAgent, err := NewSequentialAgent(ctx, &SequentialAgentConfig{
+		Name:        "SequentialAgent",
+		Description: "Sequential workflow",
+		SubAgents:   []Agent{agent1, agent2},
+	})
+	assert.NoError(t, err)
+
+	var callbackInfos []*callbacks.RunInfo
+	handler := callbacks.NewHandlerBuilder().
+		OnStartFn(func(ctx context.Context, info *callbacks.RunInfo, input callbacks.CallbackInput) context.Context {
+			if info.Component == ComponentOfAgent {
+				callbackInfos = append(callbackInfos, info)
+			}
+			return ctx
+		}).
+		Build()
+
+	runner := NewRunner(ctx, RunnerConfig{Agent: seqAgent})
+	iter := runner.Query(ctx, "hello", WithCallbacks(handler))
+	for {
+		_, ok := iter.Next()
+		if !ok {
+			break
+		}
+	}
+
+	assert.NotEmpty(t, callbackInfos, "OnStart should be called for agents")
+	foundAgent1 := false
+	foundAgent2 := false
+	for _, info := range callbackInfos {
+		if info.Name == "Agent1" && info.Type == "ChatModel" {
+			foundAgent1 = true
+		}
+		if info.Name == "Agent2" && info.Type == "ChatModel" {
+			foundAgent2 = true
+		}
+	}
+	assert.True(t, foundAgent1, "Agent1 callback should be invoked")
+	assert.True(t, foundAgent2, "Agent2 callback should be invoked")
+}
+
+func TestCallbackEventsMatchAgentOutput(t *testing.T) {
+	ctx := context.Background()
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	expectedContent := "This is the test response content"
+	cm := mockModel.NewMockToolCallingChatModel(ctrl)
+	cm.EXPECT().Generate(gomock.Any(), gomock.Any(), gomock.Any()).
+		Return(schema.AssistantMessage(expectedContent, nil), nil).
+		Times(1)
+	cm.EXPECT().WithTools(gomock.Any()).Return(cm, nil).AnyTimes()
+
+	agent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+		Name:        "TestAgent",
+		Description: "Test agent",
+		Instruction: "You are a test agent",
+		Model:       cm,
+	})
+	assert.NoError(t, err)
+
+	recorder := &callbackRecorder{}
+	handler := newRecordingHandler(recorder)
+
+	var agentEvents []*AgentEvent
+	runner := NewRunner(ctx, RunnerConfig{Agent: agent})
+	iter := runner.Query(ctx, "hello", WithCallbacks(handler))
+	for {
+		event, ok := iter.Next()
+		if !ok {
+			break
+		}
+		agentEvents = append(agentEvents, event)
+	}
+
+	<-recorder.eventsDone
+
+	assert.NotEmpty(t, agentEvents, "Agent should emit events")
+	assert.NotEmpty(t, recorder.eventsReceived, "Callback should receive events")
+
+	foundExpectedContent := false
+	for _, event := range recorder.eventsReceived {
+		if event.Output != nil && event.Output.MessageOutput != nil {
+			msg := event.Output.MessageOutput.Message
+			if msg != nil && msg.Content == expectedContent {
+				foundExpectedContent = true
+				break
+			}
+		}
+	}
+	assert.True(t, foundExpectedContent, "Callback events should contain the expected content")
+}
+
+func TestCallbackOnEndForWorkflowAgent(t *testing.T) {
+	ctx := context.Background()
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	cm1 := mockModel.NewMockToolCallingChatModel(ctrl)
+	cm1.EXPECT().Generate(gomock.Any(), gomock.Any(), gomock.Any()).
+		Return(schema.AssistantMessage("response 1", nil), nil).
+		Times(1)
+	cm1.EXPECT().WithTools(gomock.Any()).Return(cm1, nil).AnyTimes()
+
+	cm2 := mockModel.NewMockToolCallingChatModel(ctrl)
+	cm2.EXPECT().Generate(gomock.Any(), gomock.Any(), gomock.Any()).
+		Return(schema.AssistantMessage("response 2", nil), nil).
+		Times(1)
+	cm2.EXPECT().WithTools(gomock.Any()).Return(cm2, nil).AnyTimes()
+
+	agent1, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+		Name:        "Agent1",
+		Description: "First agent",
+		Instruction: "You are agent 1",
+		Model:       cm1,
+	})
+	assert.NoError(t, err)
+
+	agent2, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+		Name:        "Agent2",
+		Description: "Second agent",
+		Instruction: "You are agent 2",
+		Model:       cm2,
+	})
+	assert.NoError(t, err)
+
+	seqAgent, err := NewSequentialAgent(ctx, &SequentialAgentConfig{
+		Name:        "SequentialAgent",
+		Description: "Sequential workflow",
+		SubAgents:   []Agent{agent1, agent2},
+	})
+	assert.NoError(t, err)
+
+	recorder := &callbackRecorder{}
+	handler := newRecordingHandler(recorder)
+
+	runner := NewRunner(ctx, RunnerConfig{Agent: seqAgent})
+	iter := runner.Query(ctx, "hello", WithCallbacks(handler))
+	for {
+		_, ok := iter.Next()
+		if !ok {
+			break
+		}
+	}
+
+	<-recorder.eventsDone
+
+	assert.True(t, recorder.getOnStartCalled(), "OnStart should be called for workflow agent")
+	assert.True(t, recorder.getOnEndCalled(), "OnEnd should be called for workflow agent")
+	assert.NotEmpty(t, recorder.getEventsReceived(), "Events should be received for workflow agent")
+}
+
+type ctxKeyForTest string
+
+const testOnStartMarkerKey ctxKeyForTest = "onStartMarker"
+
+func TestSubAgentContextIsolation(t *testing.T) {
+	ctx := context.Background()
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	cm1 := mockModel.NewMockToolCallingChatModel(ctrl)
+	cm1.EXPECT().Generate(gomock.Any(), gomock.Any(), gomock.Any()).
+		Return(schema.AssistantMessage("transferring to Agent2",
+			[]schema.ToolCall{
+				{
+					ID: "transfer_1",
+					Function: schema.FunctionCall{
+						Name:      TransferToAgentToolName,
+						Arguments: `{"agent_name": "Agent2"}`,
+					},
+				},
+			}), nil).
+		Times(1)
+	cm1.EXPECT().WithTools(gomock.Any()).Return(cm1, nil).AnyTimes()
+
+	cm2 := mockModel.NewMockToolCallingChatModel(ctrl)
+	cm2.EXPECT().Generate(gomock.Any(), gomock.Any(), gomock.Any()).
+		Return(schema.AssistantMessage("final response from Agent2", nil), nil).
+		Times(1)
+	cm2.EXPECT().WithTools(gomock.Any()).Return(cm2, nil).AnyTimes()
+
+	agent1, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+		Name:        "Agent1",
+		Description: "First agent that transfers to Agent2",
+		Instruction: "You are agent 1",
+		Model:       cm1,
+	})
+	assert.NoError(t, err)
+
+	agent2, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+		Name:        "Agent2",
+		Description: "Second agent",
+		Instruction: "You are agent 2",
+		Model:       cm2,
+	})
+	assert.NoError(t, err)
+
+	agentWithSubAgents, err := SetSubAgents(ctx, agent1, []Agent{agent2})
+	assert.NoError(t, err)
+
+	runner := NewRunner(ctx, RunnerConfig{Agent: agentWithSubAgents})
+
+	var mu sync.Mutex
+	onStartContextMarkers := make(map[string][]string)
+
+	handler := callbacks.NewHandlerBuilder().
+		OnStartFn(func(ctx context.Context, info *callbacks.RunInfo, input callbacks.CallbackInput) context.Context {
+			if info.Component != ComponentOfAgent {
+				return ctx
+			}
+			mu.Lock()
+			marker, _ := ctx.Value(testOnStartMarkerKey).(string)
+			onStartContextMarkers[info.Name] = append(onStartContextMarkers[info.Name], marker)
+			mu.Unlock()
+
+			return context.WithValue(ctx, testOnStartMarkerKey, info.Name+"_marker")
+		}).
+		OnEndFn(func(ctx context.Context, info *callbacks.RunInfo, output callbacks.CallbackOutput) context.Context {
+			if info.Component != ComponentOfAgent {
+				return ctx
+			}
+			if agentOutput := ConvAgentCallbackOutput(output); agentOutput != nil && agentOutput.Events != nil {
+				go func() {
+					for {
+						_, ok := agentOutput.Events.Next()
+						if !ok {
+							break
+						}
+					}
+				}()
+			}
+			return ctx
+		}).
+		Build()
+
+	iter := runner.Query(ctx, "hello", WithCallbacks(handler))
+	for {
+		_, ok := iter.Next()
+		if !ok {
+			break
+		}
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+
+	assert.NotEmpty(t, onStartContextMarkers["Agent1"], "Agent1's OnStart should be called")
+	assert.NotEmpty(t, onStartContextMarkers["Agent2"], "Agent2's OnStart should be called")
+
+	if len(onStartContextMarkers["Agent1"]) > 0 {
+		assert.Equal(t, "", onStartContextMarkers["Agent1"][0],
+			"Agent1's OnStart should receive context without marker (initial context)")
+	}
+	if len(onStartContextMarkers["Agent2"]) > 0 {
+		assert.Equal(t, "", onStartContextMarkers["Agent2"][0],
+			"Agent2's first OnStart should NOT inherit Agent1's marker - context should be isolated")
+	}
+}
+
+func TestCallbackDesignatedToSpecificAgent(t *testing.T) {
+	ctx := context.Background()
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	cm1 := mockModel.NewMockToolCallingChatModel(ctrl)
+	cm1.EXPECT().Generate(gomock.Any(), gomock.Any(), gomock.Any()).
+		Return(schema.AssistantMessage("transferring to Agent2",
+			[]schema.ToolCall{
+				{
+					ID: "transfer_1",
+					Function: schema.FunctionCall{
+						Name:      TransferToAgentToolName,
+						Arguments: `{"agent_name": "Agent2"}`,
+					},
+				},
+			}), nil).
+		Times(1)
+	cm1.EXPECT().WithTools(gomock.Any()).Return(cm1, nil).AnyTimes()
+
+	cm2 := mockModel.NewMockToolCallingChatModel(ctrl)
+	cm2.EXPECT().Generate(gomock.Any(), gomock.Any(), gomock.Any()).
+		Return(schema.AssistantMessage("final response from Agent2", nil), nil).
+		Times(1)
+	cm2.EXPECT().WithTools(gomock.Any()).Return(cm2, nil).AnyTimes()
+
+	agent1, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+		Name:        "Agent1",
+		Description: "First agent that transfers to Agent2",
+		Instruction: "You are agent 1",
+		Model:       cm1,
+	})
+	assert.NoError(t, err)
+
+	agent2, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+		Name:        "Agent2",
+		Description: "Second agent",
+		Instruction: "You are agent 2",
+		Model:       cm2,
+	})
+	assert.NoError(t, err)
+
+	agentWithSubAgents, err := SetSubAgents(ctx, agent1, []Agent{agent2})
+	assert.NoError(t, err)
+
+	runner := NewRunner(ctx, RunnerConfig{Agent: agentWithSubAgents})
+
+	var mu sync.Mutex
+	onStartCalls := make(map[string]int)
+
+	agent2OnlyHandler := callbacks.NewHandlerBuilder().
+		OnStartFn(func(ctx context.Context, info *callbacks.RunInfo, input callbacks.CallbackInput) context.Context {
+			if info.Component != ComponentOfAgent {
+				return ctx
+			}
+			mu.Lock()
+			onStartCalls[info.Name]++
+			mu.Unlock()
+			return ctx
+		}).
+		OnEndFn(func(ctx context.Context, info *callbacks.RunInfo, output callbacks.CallbackOutput) context.Context {
+			if info.Component != ComponentOfAgent {
+				return ctx
+			}
+			if agentOutput := ConvAgentCallbackOutput(output); agentOutput != nil && agentOutput.Events != nil {
+				go func() {
+					for {
+						_, ok := agentOutput.Events.Next()
+						if !ok {
+							break
+						}
+					}
+				}()
+			}
+			return ctx
+		}).
+		Build()
+
+	iter := runner.Query(ctx, "hello", WithCallbacks(agent2OnlyHandler).DesignateAgent("Agent2"))
+	for {
+		_, ok := iter.Next()
+		if !ok {
+			break
+		}
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+
+	assert.Equal(t, 0, onStartCalls["Agent1"], "Agent1's OnStart should NOT be called when handler is designated to Agent2")
+	assert.Equal(t, 1, onStartCalls["Agent2"], "Agent2's OnStart should be called exactly once")
+}
+
+func TestCallbackDesignatedToMultipleAgents(t *testing.T) {
+	ctx := context.Background()
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	cm1 := mockModel.NewMockToolCallingChatModel(ctrl)
+	cm1.EXPECT().Generate(gomock.Any(), gomock.Any(), gomock.Any()).
+		Return(schema.AssistantMessage("transferring to Agent2",
+			[]schema.ToolCall{
+				{
+					ID: "transfer_1",
+					Function: schema.FunctionCall{
+						Name:      TransferToAgentToolName,
+						Arguments: `{"agent_name": "Agent2"}`,
+					},
+				},
+			}), nil).
+		Times(1)
+	cm1.EXPECT().WithTools(gomock.Any()).Return(cm1, nil).AnyTimes()
+
+	cm2 := mockModel.NewMockToolCallingChatModel(ctrl)
+	cm2.EXPECT().Generate(gomock.Any(), gomock.Any(), gomock.Any()).
+		Return(schema.AssistantMessage("final response from Agent2", nil), nil).
+		Times(1)
+	cm2.EXPECT().WithTools(gomock.Any()).Return(cm2, nil).AnyTimes()
+
+	agent1, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+		Name:        "Agent1",
+		Description: "First agent",
+		Instruction: "You are agent 1",
+		Model:       cm1,
+	})
+	assert.NoError(t, err)
+
+	agent2, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+		Name:        "Agent2",
+		Description: "Second agent",
+		Instruction: "You are agent 2",
+		Model:       cm2,
+	})
+	assert.NoError(t, err)
+
+	agentWithSubAgents, err := SetSubAgents(ctx, agent1, []Agent{agent2})
+	assert.NoError(t, err)
+
+	runner := NewRunner(ctx, RunnerConfig{Agent: agentWithSubAgents})
+
+	var mu sync.Mutex
+	onStartCalls := make(map[string]int)
+
+	agent1And2Handler := callbacks.NewHandlerBuilder().
+		OnStartFn(func(ctx context.Context, info *callbacks.RunInfo, input callbacks.CallbackInput) context.Context {
+			if info.Component != ComponentOfAgent {
+				return ctx
+			}
+			mu.Lock()
+			onStartCalls[info.Name]++
+			mu.Unlock()
+			return ctx
+		}).
+		OnEndFn(func(ctx context.Context, info *callbacks.RunInfo, output callbacks.CallbackOutput) context.Context {
+			if info.Component != ComponentOfAgent {
+				return ctx
+			}
+			if agentOutput := ConvAgentCallbackOutput(output); agentOutput != nil && agentOutput.Events != nil {
+				go func() {
+					for {
+						_, ok := agentOutput.Events.Next()
+						if !ok {
+							break
+						}
+					}
+				}()
+			}
+			return ctx
+		}).
+		Build()
+
+	iter := runner.Query(ctx, "hello", WithCallbacks(agent1And2Handler).DesignateAgent("Agent1", "Agent2"))
+	for {
+		_, ok := iter.Next()
+		if !ok {
+			break
+		}
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+
+	assert.Equal(t, 1, onStartCalls["Agent1"], "Agent1's OnStart should be called exactly once")
+	assert.Equal(t, 1, onStartCalls["Agent2"], "Agent2's OnStart should be called exactly once")
+}
+
+func TestCallbackDesignatedExcludesNonMatchingAgents(t *testing.T) {
+	ctx := context.Background()
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	cm1 := mockModel.NewMockToolCallingChatModel(ctrl)
+	cm1.EXPECT().Generate(gomock.Any(), gomock.Any(), gomock.Any()).
+		Return(schema.AssistantMessage("transferring to Agent2",
+			[]schema.ToolCall{
+				{
+					ID: "transfer_1",
+					Function: schema.FunctionCall{
+						Name:      TransferToAgentToolName,
+						Arguments: `{"agent_name": "Agent2"}`,
+					},
+				},
+			}), nil).
+		Times(1)
+	cm1.EXPECT().WithTools(gomock.Any()).Return(cm1, nil).AnyTimes()
+
+	cm2 := mockModel.NewMockToolCallingChatModel(ctrl)
+	cm2.EXPECT().Generate(gomock.Any(), gomock.Any(), gomock.Any()).
+		Return(schema.AssistantMessage("final response from Agent2", nil), nil).
+		Times(1)
+	cm2.EXPECT().WithTools(gomock.Any()).Return(cm2, nil).AnyTimes()
+
+	agent1, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+		Name:        "Agent1",
+		Description: "First agent",
+		Instruction: "You are agent 1",
+		Model:       cm1,
+	})
+	assert.NoError(t, err)
+
+	agent2, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+		Name:        "Agent2",
+		Description: "Second agent",
+		Instruction: "You are agent 2",
+		Model:       cm2,
+	})
+	assert.NoError(t, err)
+
+	agentWithSubAgents, err := SetSubAgents(ctx, agent1, []Agent{agent2})
+	assert.NoError(t, err)
+
+	runner := NewRunner(ctx, RunnerConfig{Agent: agentWithSubAgents})
+
+	var mu sync.Mutex
+	onStartCalls := make(map[string]int)
+
+	agent1OnlyHandler := callbacks.NewHandlerBuilder().
+		OnStartFn(func(ctx context.Context, info *callbacks.RunInfo, input callbacks.CallbackInput) context.Context {
+			if info.Component != ComponentOfAgent {
+				return ctx
+			}
+			mu.Lock()
+			onStartCalls[info.Name]++
+			mu.Unlock()
+			return ctx
+		}).
+		OnEndFn(func(ctx context.Context, info *callbacks.RunInfo, output callbacks.CallbackOutput) context.Context {
+			if info.Component != ComponentOfAgent {
+				return ctx
+			}
+			if agentOutput := ConvAgentCallbackOutput(output); agentOutput != nil && agentOutput.Events != nil {
+				go func() {
+					for {
+						_, ok := agentOutput.Events.Next()
+						if !ok {
+							break
+						}
+					}
+				}()
+			}
+			return ctx
+		}).
+		Build()
+
+	iter := runner.Query(ctx, "hello", WithCallbacks(agent1OnlyHandler).DesignateAgent("Agent1"))
+	for {
+		_, ok := iter.Next()
+		if !ok {
+			break
+		}
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+
+	assert.Equal(t, 1, onStartCalls["Agent1"], "Agent1's OnStart should be called exactly once")
+	assert.Equal(t, 0, onStartCalls["Agent2"], "Agent2's OnStart should NOT be called when handler is designated only to Agent1")
+}
+
+func TestMixedDesignatedAndGlobalCallbacks(t *testing.T) {
+	ctx := context.Background()
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	cm1 := mockModel.NewMockToolCallingChatModel(ctrl)
+	cm1.EXPECT().Generate(gomock.Any(), gomock.Any(), gomock.Any()).
+		Return(schema.AssistantMessage("transferring to Agent2",
+			[]schema.ToolCall{
+				{
+					ID: "transfer_1",
+					Function: schema.FunctionCall{
+						Name:      TransferToAgentToolName,
+						Arguments: `{"agent_name": "Agent2"}`,
+					},
+				},
+			}), nil).
+		Times(1)
+	cm1.EXPECT().WithTools(gomock.Any()).Return(cm1, nil).AnyTimes()
+
+	cm2 := mockModel.NewMockToolCallingChatModel(ctrl)
+	cm2.EXPECT().Generate(gomock.Any(), gomock.Any(), gomock.Any()).
+		Return(schema.AssistantMessage("final response from Agent2", nil), nil).
+		Times(1)
+	cm2.EXPECT().WithTools(gomock.Any()).Return(cm2, nil).AnyTimes()
+
+	agent1, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+		Name:        "Agent1",
+		Description: "First agent that transfers to Agent2",
+		Instruction: "You are agent 1",
+		Model:       cm1,
+	})
+	assert.NoError(t, err)
+
+	agent2, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+		Name:        "Agent2",
+		Description: "Second agent",
+		Instruction: "You are agent 2",
+		Model:       cm2,
+	})
+	assert.NoError(t, err)
+
+	agentWithSubAgents, err := SetSubAgents(ctx, agent1, []Agent{agent2})
+	assert.NoError(t, err)
+
+	runner := NewRunner(ctx, RunnerConfig{Agent: agentWithSubAgents})
+
+	var mu sync.Mutex
+	globalHandlerCalls := make(map[string]int)
+	agent2OnlyHandlerCalls := make(map[string]int)
+
+	globalHandler := callbacks.NewHandlerBuilder().
+		OnStartFn(func(ctx context.Context, info *callbacks.RunInfo, input callbacks.CallbackInput) context.Context {
+			if info.Component != ComponentOfAgent {
+				return ctx
+			}
+			mu.Lock()
+			globalHandlerCalls[info.Name]++
+			mu.Unlock()
+			return ctx
+		}).
+		OnEndFn(func(ctx context.Context, info *callbacks.RunInfo, output callbacks.CallbackOutput) context.Context {
+			if info.Component != ComponentOfAgent {
+				return ctx
+			}
+			if agentOutput := ConvAgentCallbackOutput(output); agentOutput != nil && agentOutput.Events != nil {
+				go func() {
+					for {
+						_, ok := agentOutput.Events.Next()
+						if !ok {
+							break
+						}
+					}
+				}()
+			}
+			return ctx
+		}).
+		Build()
+
+	agent2OnlyHandler := callbacks.NewHandlerBuilder().
+		OnStartFn(func(ctx context.Context, info *callbacks.RunInfo, input callbacks.CallbackInput) context.Context {
+			if info.Component != ComponentOfAgent {
+				return ctx
+			}
+			mu.Lock()
+			agent2OnlyHandlerCalls[info.Name]++
+			mu.Unlock()
+			return ctx
+		}).
+		OnEndFn(func(ctx context.Context, info *callbacks.RunInfo, output callbacks.CallbackOutput) context.Context {
+			if info.Component != ComponentOfAgent {
+				return ctx
+			}
+			if agentOutput := ConvAgentCallbackOutput(output); agentOutput != nil && agentOutput.Events != nil {
+				go func() {
+					for {
+						_, ok := agentOutput.Events.Next()
+						if !ok {
+							break
+						}
+					}
+				}()
+			}
+			return ctx
+		}).
+		Build()
+
+	iter := runner.Query(ctx, "hello",
+		WithCallbacks(globalHandler),
+		WithCallbacks(agent2OnlyHandler).DesignateAgent("Agent2"),
+	)
+	for {
+		_, ok := iter.Next()
+		if !ok {
+			break
+		}
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+
+	assert.Equal(t, 1, globalHandlerCalls["Agent1"], "Global handler should fire for Agent1")
+	assert.Equal(t, 1, globalHandlerCalls["Agent2"], "Global handler should fire for Agent2")
+
+	assert.Equal(t, 0, agent2OnlyHandlerCalls["Agent1"], "Agent2-only handler should NOT fire for Agent1")
+	assert.Equal(t, 1, agent2OnlyHandlerCalls["Agent2"], "Agent2-only handler should fire for Agent2")
+}
+
+func TestOnStartCalledOncePerAgentWithDesignation(t *testing.T) {
+	ctx := context.Background()
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	cm1 := mockModel.NewMockToolCallingChatModel(ctrl)
+	cm1.EXPECT().Generate(gomock.Any(), gomock.Any(), gomock.Any()).
+		Return(schema.AssistantMessage("transferring to Agent2",
+			[]schema.ToolCall{
+				{
+					ID: "transfer_1",
+					Function: schema.FunctionCall{
+						Name:      TransferToAgentToolName,
+						Arguments: `{"agent_name": "Agent2"}`,
+					},
+				},
+			}), nil).
+		Times(1)
+	cm1.EXPECT().WithTools(gomock.Any()).Return(cm1, nil).AnyTimes()
+
+	cm2 := mockModel.NewMockToolCallingChatModel(ctrl)
+	cm2.EXPECT().Generate(gomock.Any(), gomock.Any(), gomock.Any()).
+		Return(schema.AssistantMessage("final response from Agent2", nil), nil).
+		Times(1)
+	cm2.EXPECT().WithTools(gomock.Any()).Return(cm2, nil).AnyTimes()
+
+	agent1, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+		Name:        "Agent1",
+		Description: "First agent that transfers to Agent2",
+		Instruction: "You are agent 1",
+		Model:       cm1,
+	})
+	assert.NoError(t, err)
+
+	agent2, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+		Name:        "Agent2",
+		Description: "Second agent",
+		Instruction: "You are agent 2",
+		Model:       cm2,
+	})
+	assert.NoError(t, err)
+
+	agentWithSubAgents, err := SetSubAgents(ctx, agent1, []Agent{agent2})
+	assert.NoError(t, err)
+
+	runner := NewRunner(ctx, RunnerConfig{Agent: agentWithSubAgents})
+
+	var mu sync.Mutex
+	onStartCalls := make(map[string]int)
+
+	handler := callbacks.NewHandlerBuilder().
+		OnStartFn(func(ctx context.Context, info *callbacks.RunInfo, input callbacks.CallbackInput) context.Context {
+			if info.Component != ComponentOfAgent {
+				return ctx
+			}
+			mu.Lock()
+			onStartCalls[info.Name]++
+			mu.Unlock()
+			return ctx
+		}).
+		OnEndFn(func(ctx context.Context, info *callbacks.RunInfo, output callbacks.CallbackOutput) context.Context {
+			if info.Component != ComponentOfAgent {
+				return ctx
+			}
+			if agentOutput := ConvAgentCallbackOutput(output); agentOutput != nil && agentOutput.Events != nil {
+				go func() {
+					for {
+						_, ok := agentOutput.Events.Next()
+						if !ok {
+							break
+						}
+					}
+				}()
+			}
+			return ctx
+		}).
+		Build()
+
+	iter := runner.Query(ctx, "hello", WithCallbacks(handler))
+	for {
+		_, ok := iter.Next()
+		if !ok {
+			break
+		}
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+
+	assert.Equal(t, 1, onStartCalls["Agent1"], "Agent1's OnStart should be called exactly once")
+	assert.Equal(t, 1, onStartCalls["Agent2"], "Agent2's OnStart should be called exactly once")
+}

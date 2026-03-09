@@ -44,12 +44,12 @@ func (m *mockBackend) Write(ctx context.Context, req *WriteRequest) error {
 	return nil
 }
 
-func (m *mockBackend) Read(ctx context.Context, req *ReadRequest) (string, error) {
+func (m *mockBackend) Read(ctx context.Context, req *ReadRequest) (*FileContent, error) {
 	content, ok := m.files[req.FilePath]
 	if !ok {
-		return "", errors.New("file not found")
+		return nil, errors.New("file not found")
 	}
-	return content, nil
+	return &FileContent{Content: content}, nil
 }
 
 func (m *mockBackend) LsInfo(ctx context.Context, _ *LsInfoRequest) ([]FileInfo, error) {
@@ -590,8 +590,8 @@ func (f *failingBackend) Write(ctx context.Context, req *WriteRequest) error {
 	return nil
 }
 
-func (f *failingBackend) Read(ctx context.Context, req *ReadRequest) (string, error) {
-	return "", nil
+func (f *failingBackend) Read(ctx context.Context, req *ReadRequest) (*FileContent, error) {
+	return &FileContent{}, nil
 }
 
 func (f *failingBackend) LsInfo(ctx context.Context, _ *LsInfoRequest) ([]FileInfo, error) {

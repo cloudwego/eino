@@ -275,7 +275,6 @@ func TestGetReactHistory(t *testing.T) {
 				schema.ToolMessage("tool result 1", "tool call id 1", schema.WithToolName("tool1")),
 				schema.AssistantMessage("", []schema.ToolCall{{ID: "tool call id 2", Function: schema.FunctionCall{Name: "tool2", Arguments: "arguments2"}}}),
 			},
-			AgentName: "MyAgent",
 		}
 	}))
 	assert.NoError(t, g.AddLambdaNode("1", compose.InvokableLambda(func(ctx context.Context, input string) (output []Message, err error) {
@@ -285,6 +284,7 @@ func TestGetReactHistory(t *testing.T) {
 	assert.NoError(t, g.AddEdge("1", compose.END))
 
 	ctx := context.Background()
+	ctx, _ = initRunCtx(ctx, "MyAgent", nil)
 	runner, err := g.Compile(ctx)
 	assert.NoError(t, err)
 	result, err := runner.Invoke(ctx, "")
@@ -373,8 +373,7 @@ func TestAgentToolWithOptions(t *testing.T) {
 
 		g := compose.NewGraph[string, string](compose.WithGenLocalState(func(ctx context.Context) (state *State) {
 			return &State{
-				AgentName: "react-agent",
-				Messages:  append(history, schema.AssistantMessage("tool call msg", nil)),
+				Messages: append(history, schema.AssistantMessage("tool call msg", nil)),
 			}
 		}))
 
@@ -386,6 +385,7 @@ func TestAgentToolWithOptions(t *testing.T) {
 		assert.NoError(t, g.AddEdge(compose.START, "1"))
 		assert.NoError(t, g.AddEdge("1", compose.END))
 
+		ctx, _ = initRunCtx(ctx, "react-agent", nil)
 		runner, err := g.Compile(ctx)
 		assert.NoError(t, err)
 
@@ -539,8 +539,7 @@ func TestAgentToolWithOptions(t *testing.T) {
 
 		g := compose.NewGraph[string, string](compose.WithGenLocalState(func(ctx context.Context) (state *State) {
 			return &State{
-				AgentName: "react-agent",
-				Messages:  append(history, schema.AssistantMessage("tool call", nil)),
+				Messages: append(history, schema.AssistantMessage("tool call", nil)),
 			}
 		}))
 
@@ -552,6 +551,7 @@ func TestAgentToolWithOptions(t *testing.T) {
 		assert.NoError(t, g.AddEdge(compose.START, "1"))
 		assert.NoError(t, g.AddEdge("1", compose.END))
 
+		ctx, _ = initRunCtx(ctx, "react-agent", nil)
 		runner, err := g.Compile(ctx)
 		assert.NoError(t, err)
 
@@ -573,22 +573,22 @@ func TestAgentToolWithOptions(t *testing.T) {
 	})
 }
 
-type fakeTCM struct{ toolNameToCall string }
+type fakeTCM struct{}
 
-func (f *fakeTCM) Generate(ctx context.Context, input []*schema.Message, _ ...model.Option) (*schema.Message, error) {
+func (f *fakeTCM) Generate(ctx context.Context, input []*schema.Message, opts ...model.Option) (*schema.Message, error) {
+	o := model.GetCommonOptions(&model.Options{}, opts...)
 	tc := schema.ToolCall{ID: "id-1", Type: "function"}
-	tc.Function.Name = f.toolNameToCall
+	if len(o.Tools) > 0 {
+		tc.Function.Name = o.Tools[0].Name
+	}
 	tc.Function.Arguments = `{"request":"hello"}`
 	return schema.AssistantMessage("", []schema.ToolCall{tc}), nil
 }
-func (f *fakeTCM) Stream(ctx context.Context, input []*schema.Message, _ ...model.Option) (*schema.StreamReader[*schema.Message], error) {
-	msg, _ := f.Generate(ctx, input)
+func (f *fakeTCM) Stream(ctx context.Context, input []*schema.Message, opts ...model.Option) (*schema.StreamReader[*schema.Message], error) {
+	msg, _ := f.Generate(ctx, input, opts...)
 	return schema.StreamReaderFromArray([]*schema.Message{msg}), nil
 }
 func (f *fakeTCM) WithTools(tools []*schema.ToolInfo) (model.ToolCallingChatModel, error) {
-	if len(tools) > 0 {
-		f.toolNameToCall = tools[0].Name
-	}
 	return f, nil
 }
 

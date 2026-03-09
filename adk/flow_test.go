@@ -18,11 +18,13 @@ package adk
 
 import (
 	"context"
+	"sync"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"go.uber.org/mock/gomock"
 
+	"github.com/cloudwego/eino/callbacks"
 	mockModel "github.com/cloudwego/eino/internal/mock/components/model"
 	"github.com/cloudwego/eino/schema"
 )
@@ -142,4 +144,83 @@ func TestTransferToAgent(t *testing.T) {
 	// No more events
 	_, ok = iterator.Next()
 	assert.False(t, ok)
+}
+
+func TestTransferToAgentWithDesignatedCallback(t *testing.T) {
+	ctx := context.Background()
+
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	parentModel := mockModel.NewMockToolCallingChatModel(ctrl)
+	childModel := mockModel.NewMockToolCallingChatModel(ctrl)
+
+	parentModel.EXPECT().Generate(gomock.Any(), gomock.Any(), gomock.Any()).
+		Return(schema.AssistantMessage("I'll transfer this to the child agent",
+			[]schema.ToolCall{
+				{
+					ID: "tool-call-1",
+					Function: schema.FunctionCall{
+						Name:      TransferToAgentToolName,
+						Arguments: `{"agent_name": "ChildAgent"}`,
+					},
+				},
+			}), nil).
+		Times(1)
+
+	childModel.EXPECT().Generate(gomock.Any(), gomock.Any(), gomock.Any()).
+		Return(schema.AssistantMessage("Hello from child agent", nil), nil).
+		Times(1)
+
+	parentModel.EXPECT().WithTools(gomock.Any()).Return(parentModel, nil).AnyTimes()
+	childModel.EXPECT().WithTools(gomock.Any()).Return(childModel, nil).AnyTimes()
+
+	parentAgent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+		Name:        "ParentAgent",
+		Description: "Parent agent that will transfer to child",
+		Instruction: "You are a parent agent.",
+		Model:       parentModel,
+	})
+	assert.NoError(t, err)
+
+	childAgent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+		Name:        "ChildAgent",
+		Description: "Child agent that handles specific tasks",
+		Instruction: "You are a child agent.",
+		Model:       childModel,
+	})
+	assert.NoError(t, err)
+
+	flowAgent, err := SetSubAgents(ctx, parentAgent, []Agent{childAgent})
+	assert.NoError(t, err)
+
+	var childCallbackCount int
+	var mu sync.Mutex
+
+	handler := callbacks.NewHandlerBuilder().OnStartFn(
+		func(ctx context.Context, info *callbacks.RunInfo, input callbacks.CallbackInput) context.Context {
+			if info.Component == ComponentOfAgent && info.Name == "ChildAgent" {
+				mu.Lock()
+				childCallbackCount++
+				mu.Unlock()
+			}
+			return ctx
+		}).Build()
+
+	input := &AgentInput{
+		Messages: []Message{
+			schema.UserMessage("Please transfer this to the child agent"),
+		},
+	}
+	ctx, _ = initRunCtx(ctx, flowAgent.Name(ctx), input)
+	iterator := flowAgent.Run(ctx, input, WithCallbacks(handler).DesignateAgent("ChildAgent"))
+
+	for {
+		_, ok := iterator.Next()
+		if !ok {
+			break
+		}
+	}
+
+	assert.Equal(t, 1, childCallbackCount, "designated callback for ChildAgent should fire exactly once during transfer")
 }

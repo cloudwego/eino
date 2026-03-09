@@ -40,6 +40,7 @@ func TestTaskTool(t *testing.T) {
 		adk.ToolsConfig{},
 		10,
 		nil,
+		nil,
 	)
 	assert.NoError(t, err)
 
