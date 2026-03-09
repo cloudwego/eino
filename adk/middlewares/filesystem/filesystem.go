@@ -561,11 +561,31 @@ func newReadFileTool(fs filesystem.Backend, name string, desc string) (tool.Base
 		return nil, err
 	}
 	return utils.InferTool(toolName, d, func(ctx context.Context, input readFileArgs) (string, error) {
-		return fs.Read(ctx, &filesystem.ReadRequest{
+		if input.Offset <= 0 {
+			input.Offset = 1
+		}
+
+		fileCt, err := fs.Read(ctx, &filesystem.ReadRequest{
 			FilePath: input.FilePath,
 			Offset:   input.Offset,
 			Limit:    input.Limit,
 		})
+		if err != nil {
+			return "", err
+		}
+
+		startLine := input.Offset
+		lines := strings.Split(fileCt.Content, "\n")
+		var b strings.Builder
+		for i, line := range lines {
+			if i < len(lines)-1 {
+				fmt.Fprintf(&b, "%6d\t%s\n", startLine+i, line)
+			} else {
+				fmt.Fprintf(&b, "%6d\t%s", startLine+i, line)
+			}
+
+		}
+		return b.String(), nil
 	})
 }
 

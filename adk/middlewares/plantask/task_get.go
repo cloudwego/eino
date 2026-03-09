@@ -88,7 +88,7 @@ func (t *taskGetTool) InvokableRun(ctx context.Context, argumentsInJSON string, 
 	}
 
 	taskData := &task{}
-	err = sonic.UnmarshalString(content, taskData)
+	err = sonic.UnmarshalString(content.Content, taskData)
 	if err != nil {
 		return "", fmt.Errorf("%s get Task #%s failed, err: %w", TaskGetToolName, params.TaskID, err)
 	}

@@ -47,7 +47,7 @@ func TestTaskCreateTool(t *testing.T) {
 	assert.NoError(t, err)
 
 	var taskData task
-	err = sonic.UnmarshalString(content, &taskData)
+	err = sonic.UnmarshalString(content.Content, &taskData)
 	assert.NoError(t, err)
 	assert.Equal(t, "1", taskData.ID)
 	assert.Equal(t, "Test Task", taskData.Subject)
@@ -57,7 +57,7 @@ func TestTaskCreateTool(t *testing.T) {
 
 	hwContent, err := backend.Read(ctx, &ReadRequest{FilePath: filepath.Join(baseDir, highWatermarkFileName)})
 	assert.NoError(t, err)
-	assert.Equal(t, "1", hwContent)
+	assert.Equal(t, "1", hwContent.Content)
 
 	result, err = tool.InvokableRun(ctx, `{"subject": "Second Task", "description": "Second description"}`)
 	assert.NoError(t, err)
@@ -65,7 +65,7 @@ func TestTaskCreateTool(t *testing.T) {
 
 	hwContent, err = backend.Read(ctx, &ReadRequest{FilePath: filepath.Join(baseDir, highWatermarkFileName)})
 	assert.NoError(t, err)
-	assert.Equal(t, "2", hwContent)
+	assert.Equal(t, "2", hwContent.Content)
 }
 
 func TestTaskCreateToolWithMetadata(t *testing.T) {
@@ -84,7 +84,7 @@ func TestTaskCreateToolWithMetadata(t *testing.T) {
 	assert.NoError(t, err)
 
 	var taskData task
-	err = sonic.UnmarshalString(content, &taskData)
+	err = sonic.UnmarshalString(content.Content, &taskData)
 	assert.NoError(t, err)
 	assert.Equal(t, "value1", taskData.Metadata["key1"])
 	assert.Equal(t, "value2", taskData.Metadata["key2"])

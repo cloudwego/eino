@@ -29,3 +29,4 @@ type GrepRequest = filesystem.GrepRequest
 type GlobInfoRequest = filesystem.GlobInfoRequest
 type WriteRequest = filesystem.WriteRequest
 type EditRequest = filesystem.EditRequest
+type FileContent = filesystem.FileContent

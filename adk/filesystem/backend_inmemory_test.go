@@ -46,9 +46,9 @@ func TestInMemoryBackend_WriteAndRead(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Read failed: %v", err)
 	}
-	expected := "     1\tline1\n     2\tline2\n     3\tline3\n     4\tline4\n     5\tline5"
-	if content != expected {
-		t.Errorf("Read content mismatch. Expected: %q, Got: %q", expected, content)
+	expected := "line1\nline2\nline3\nline4\nline5"
+	if content.Content != expected {
+		t.Errorf("Read content mismatch. Expected: %q, Got: %q", expected, content.Content)
 	}
 
 	// Test Read - with offset and limit
@@ -60,9 +60,9 @@ func TestInMemoryBackend_WriteAndRead(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Read with offset failed: %v", err)
 	}
-	expected = "     2\tline2\n     3\tline3"
-	if content != expected {
-		t.Errorf("Read with offset content mismatch. Expected: %q, Got: %q", expected, content)
+	expected = "line1\nline2"
+	if content.Content != expected {
+		t.Errorf("Read with offset content mismatch. Expected: %q, Got: %q", expected, content.Content)
 	}
 
 	// Test Read - non-existent file
@@ -160,9 +160,9 @@ func TestInMemoryBackend_Edit(t *testing.T) {
 		FilePath: "/edit2.txt",
 		Limit:    100,
 	})
-	expected := "     1\thi world\n     2\thi again\n     3\thi world"
-	if content != expected {
-		t.Errorf("Edit (replace all) content mismatch. Expected: %q, Got: %q", expected, content)
+	expected := "hi world\nhi again\nhi world"
+	if content.Content != expected {
+		t.Errorf("Edit (replace all) content mismatch. Expected: %q, Got: %q", expected, content.Content)
 	}
 
 	// Test Edit - non-existent file
@@ -1153,9 +1153,9 @@ func TestInMemoryBackend_Read_EdgeCases(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Read failed: %v", err)
 		}
-		expected := "     1\tline1\n     2\tline2"
-		if content != expected {
-			t.Errorf("Expected: %q, Got: %q", expected, content)
+		expected := "line1\nline2"
+		if content.Content != expected {
+			t.Errorf("Expected: %q, Got: %q", expected, content.Content)
 		}
 	})
 
@@ -1168,8 +1168,8 @@ func TestInMemoryBackend_Read_EdgeCases(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Read failed: %v", err)
 		}
-		if content != "" {
-			t.Errorf("Expected empty content, got: %q", content)
+		if content.Content != "" {
+			t.Errorf("Expected empty content, got: %q", content.Content)
 		}
 	})
 
@@ -1182,7 +1182,7 @@ func TestInMemoryBackend_Read_EdgeCases(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Read failed: %v", err)
 		}
-		lines := strings.Split(content, "\n")
+		lines := strings.Split(content.Content, "\n")
 		if len(lines) != 3 {
 			t.Errorf("Expected 3 lines, got %d", len(lines))
 		}
@@ -1197,9 +1197,9 @@ func TestInMemoryBackend_Read_EdgeCases(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Read failed: %v", err)
 		}
-		lines := strings.Split(content, "\n")
-		if len(lines) != 2 {
-			t.Errorf("Expected 2 lines, got %d", len(lines))
+		lines := strings.Split(content.Content, "\n")
+		if len(lines) != 3 {
+			t.Errorf("Expected 3 lines, got %d", len(lines))
 		}
 	})
 }
@@ -1300,7 +1300,7 @@ func TestInMemoryBackend_Edit_EdgeCases(t *testing.T) {
 			FilePath: "/test.txt",
 			Limit:    100,
 		})
-		if !strings.Contains(content, "FOO") {
+		if !strings.Contains(content.Content, "FOO") {
 			t.Error("Expected content to contain 'FOO'")
 		}
 	})
@@ -1325,10 +1325,10 @@ func TestInMemoryBackend_Edit_EdgeCases(t *testing.T) {
 			FilePath: "/test.txt",
 			Limit:    100,
 		})
-		if strings.Contains(content, "foo") {
+		if strings.Contains(content.Content, "foo") {
 			t.Error("Expected all 'foo' to be replaced")
 		}
-		fooCount := strings.Count(content, "FOO")
+		fooCount := strings.Count(content.Content, "FOO")
 		if fooCount != 3 {
 			t.Errorf("Expected 3 occurrences of 'FOO', got %d", fooCount)
 		}
@@ -1364,7 +1364,7 @@ func TestInMemoryBackend_NormalizePath(t *testing.T) {
 			if err != nil {
 				t.Errorf("Failed to read normalized path %s (from %s): %v", tc.normalizedPath, tc.inputPath, err)
 			}
-			if !strings.Contains(content, "content") {
+			if !strings.Contains(content.Content, "content") {
 				t.Errorf("Content not found for normalized path %s (from %s)", tc.normalizedPath, tc.inputPath)
 			}
 		}
@@ -2211,6 +2211,149 @@ func TestInMemoryBackend_GrepRaw_ComplexScenarios(t *testing.T) {
 			if filepath.Base(match.Path) != "main.go" {
 				t.Errorf("Expected filename 'main.go', got: %s", match.Path)
 			}
+		}
+	})
+}
+
+func TestInMemoryBackend_Read_Scenarios(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("empty file returns empty content", func(t *testing.T) {
+		backend := NewInMemoryBackend()
+		backend.Write(ctx, &WriteRequest{FilePath: "/empty.txt", Content: ""})
+
+		content, err := backend.Read(ctx, &ReadRequest{FilePath: "/empty.txt"})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if content.Content != "" {
+			t.Errorf("expected empty content, got %q", content.Content)
+		}
+	})
+
+	t.Run("single-line file without newline", func(t *testing.T) {
+		backend := NewInMemoryBackend()
+		backend.Write(ctx, &WriteRequest{FilePath: "/single.txt", Content: "hello"})
+
+		content, err := backend.Read(ctx, &ReadRequest{FilePath: "/single.txt"})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if content.Content != "hello" {
+			t.Errorf("expected %q, got %q", "hello", content.Content)
+		}
+	})
+
+	t.Run("offset 0 and offset 1 both start from first line", func(t *testing.T) {
+		backend := NewInMemoryBackend()
+		backend.Write(ctx, &WriteRequest{FilePath: "/f.txt", Content: "a\nb\nc"})
+
+		c0, _ := backend.Read(ctx, &ReadRequest{FilePath: "/f.txt", Offset: 0, Limit: 1})
+		c1, _ := backend.Read(ctx, &ReadRequest{FilePath: "/f.txt", Offset: 1, Limit: 1})
+		if c0.Content != c1.Content {
+			t.Errorf("Offset=0 (%q) and Offset=1 (%q) should return the same first line", c0.Content, c1.Content)
+		}
+		if c0.Content != "a" {
+			t.Errorf("expected first line %q, got %q", "a", c0.Content)
+		}
+	})
+
+	t.Run("file with trailing newline preserves trailing empty line", func(t *testing.T) {
+		backend := NewInMemoryBackend()
+		backend.Write(ctx, &WriteRequest{FilePath: "/trail.txt", Content: "line1\nline2\n"})
+
+		content, err := backend.Read(ctx, &ReadRequest{FilePath: "/trail.txt"})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if content.Content != "line1\nline2\n" {
+			t.Errorf("expected %q, got %q", "line1\nline2\n", content.Content)
+		}
+		lines := strings.Split(content.Content, "\n")
+		if len(lines) != 3 { // ["line1", "line2", ""]
+			t.Errorf("expected 3 elements from split, got %d", len(lines))
+		}
+	})
+
+	t.Run("offset exactly at last line", func(t *testing.T) {
+		backend := NewInMemoryBackend()
+		backend.Write(ctx, &WriteRequest{FilePath: "/f.txt", Content: "a\nb\nc"})
+
+		// Offset=3 (1-based) → last line "c"
+		content, err := backend.Read(ctx, &ReadRequest{FilePath: "/f.txt", Offset: 3, Limit: 10})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if content.Content != "c" {
+			t.Errorf("expected %q, got %q", "c", content.Content)
+		}
+	})
+
+	t.Run("offset one beyond last line returns empty", func(t *testing.T) {
+		backend := NewInMemoryBackend()
+		backend.Write(ctx, &WriteRequest{FilePath: "/f.txt", Content: "a\nb\nc"})
+
+		content, err := backend.Read(ctx, &ReadRequest{FilePath: "/f.txt", Offset: 4, Limit: 10})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if content.Content != "" {
+			t.Errorf("expected empty content, got %q", content.Content)
+		}
+	})
+
+	t.Run("limit=1 reads exactly one line", func(t *testing.T) {
+		backend := NewInMemoryBackend()
+		backend.Write(ctx, &WriteRequest{FilePath: "/f.txt", Content: "a\nb\nc"})
+
+		for i, expected := range []string{"a", "b", "c"} {
+			content, err := backend.Read(ctx, &ReadRequest{FilePath: "/f.txt", Offset: i + 1, Limit: 1})
+			if err != nil {
+				t.Fatalf("line %d: unexpected error: %v", i+1, err)
+			}
+			if content.Content != expected {
+				t.Errorf("line %d: expected %q, got %q", i+1, expected, content.Content)
+			}
+		}
+	})
+
+	t.Run("sliding window reads consecutive ranges correctly", func(t *testing.T) {
+		backend := NewInMemoryBackend()
+		backend.Write(ctx, &WriteRequest{FilePath: "/f.txt", Content: "l1\nl2\nl3\nl4\nl5"})
+
+		tests := []struct {
+			offset   int
+			limit    int
+			expected string
+		}{
+			{1, 2, "l1\nl2"},
+			{2, 2, "l2\nl3"},
+			{3, 2, "l3\nl4"},
+			{4, 2, "l4\nl5"},
+			{5, 2, "l5"},
+		}
+		for _, tt := range tests {
+			content, err := backend.Read(ctx, &ReadRequest{FilePath: "/f.txt", Offset: tt.offset, Limit: tt.limit})
+			if err != nil {
+				t.Fatalf("offset=%d limit=%d: unexpected error: %v", tt.offset, tt.limit, err)
+			}
+			if content.Content != tt.expected {
+				t.Errorf("offset=%d limit=%d: expected %q, got %q", tt.offset, tt.limit, tt.expected, content.Content)
+			}
+		}
+	})
+
+	t.Run("file with only newlines", func(t *testing.T) {
+		backend := NewInMemoryBackend()
+		backend.Write(ctx, &WriteRequest{FilePath: "/newlines.txt", Content: "\n\n\n"})
+
+		content, err := backend.Read(ctx, &ReadRequest{FilePath: "/newlines.txt", Offset: 2, Limit: 1})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		// Line 2 is an empty string between two newlines
+		if content.Content != "" {
+			t.Errorf("expected empty line content, got %q", content.Content)
 		}
 	})
 }

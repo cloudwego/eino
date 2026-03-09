@@ -22,6 +22,8 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+
+	fspkg "github.com/cloudwego/eino/adk/filesystem"
 )
 
 type inMemoryBackend struct {
@@ -50,15 +52,15 @@ func (b *inMemoryBackend) LsInfo(ctx context.Context, req *LsInfoRequest) ([]Fil
 	return result, nil
 }
 
-func (b *inMemoryBackend) Read(ctx context.Context, req *ReadRequest) (string, error) {
+func (b *inMemoryBackend) Read(ctx context.Context, req *ReadRequest) (*fspkg.FileContent, error) {
 	b.mu.RLock()
 	defer b.mu.RUnlock()
 
 	content, ok := b.files[req.FilePath]
 	if !ok {
-		return "", errors.New("file not found")
+		return nil, errors.New("file not found")
 	}
-	return content, nil
+	return &fspkg.FileContent{Content: content}, nil
 }
 
 func (b *inMemoryBackend) Write(ctx context.Context, req *WriteRequest) error {

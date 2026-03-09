@@ -112,9 +112,9 @@ func (t *taskCreateTool) InvokableRun(ctx context.Context, argumentsInJSON strin
 			if readErr != nil {
 				return "", fmt.Errorf("%s read highwatermark file %s failed, err: %w", TaskCreateToolName, file.Path, readErr)
 			}
-			if content != "" {
+			if content.Content != "" {
 				var val int64
-				if _, scanErr := fmt.Sscanf(content, "%d", &val); scanErr == nil {
+				if _, scanErr := fmt.Sscanf(content.Content, "%d", &val); scanErr == nil {
 					highwatermark = val
 				}
 			}
