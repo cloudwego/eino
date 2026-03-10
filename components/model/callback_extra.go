@@ -14,7 +14,6 @@
  * limitations under the License.
  */
 
-// Package model defines callback payloads and configuration types for chat models.
 package model
 
 import (

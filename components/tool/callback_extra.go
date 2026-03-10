@@ -14,7 +14,6 @@
  * limitations under the License.
  */
 
-// Package tool defines callback inputs and outputs for tool execution.
 package tool
 
 import (
