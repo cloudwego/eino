@@ -63,12 +63,34 @@ Prioritize:
 - **Concrete examples** — short, compilable snippets showing idiomatic use
 - **Cross-references** — link related types with `[TypeName]` godoc links
 
-## Step 5 — Write the enriched comments
+## Step 5 — Resolve contradictions between code and docs
+
+**Code always wins over documentation.** Before writing any comment, check for
+contradictions between what the docs claim and what the code actually does.
+
+For every concept from the docs, verify it against the implementation:
+- Does the code enforce this constraint, or is it just a convention?
+- Does the function signature match what the docs describe?
+- Are the described defaults/behaviours reflected in the code?
+- Does the example in the docs compile against the actual API?
+
+Collect every contradiction or inconsistency you find into a list. These will be
+reported to the user at the end (Step 8). Do NOT silently pick the doc version —
+the code is ground truth. Write the godoc to match what the code does, and flag
+the discrepancy so the user can decide whether to fix the doc or the code.
+
+Examples of things to check:
+- A doc says a function returns an error on nil input, but the code does not
+- A doc says a field is required, but the code treats it as optional
+- A doc example uses a function signature that no longer exists
+- A doc describes a default value that differs from what the code initialises
+
+## Step 6 — Write the enriched comments
 
 Rules:
 - **Do not change any code** — only modify comments
 - **Preserve existing correct content** — add to it, don't replace good explanations
-- **Fix incorrect content** — if the existing comment contradicts the docs, fix it
+- **Fix incorrect content** — if existing comment contradicts the code, fix it to match the code
 - **Use Go godoc style**: complete sentences, start with the symbol name, use `//` not `/* */` except for package doc
 - **Use `#` headings** for multi-section package docs (rendered in pkg.go.dev)
 - **Use `[SymbolName]` links** for cross-references within the same package
@@ -76,7 +98,7 @@ Rules:
 - **Separate `jsonschema_description` from `jsonschema` tags** — remind in tool utility docs
 - **Naming**: `CamelCase` for GetType() values per `components.Typer` convention
 
-## Step 6 — Verify
+## Step 7 — Verify
 
 ```bash
 go build ./path/to/package/...
@@ -84,12 +106,21 @@ go build ./path/to/package/...
 
 Fix any compilation errors introduced (should be none for comment-only changes).
 
-## Step 7 — Summary
+## Step 8 — Summary
 
-Report what was changed and why, calling out:
-- Any inaccuracies in the original comments that were corrected
-- Key concepts that were missing and are now documented
-- Any questions or ambiguities that could not be resolved from the docs alone
+Report to the user:
+
+1. **Changes made** — what was added or corrected and why
+2. **Missing concepts now documented** — key concepts that had no godoc before
+3. **Contradictions found** — list every case where code and docs disagreed,
+   with the specific discrepancy and which one was used in the godoc. Format as:
+
+   | Symbol | Doc says | Code does | Godoc written as |
+   |--------|----------|-----------|-----------------|
+   | ...    | ...      | ...       | (code version)  |
+
+4. **Unresolved ambiguities** — things that could not be verified from code alone
+   and may need the author's input
 
 ## Conventions established in prior enrichment passes
 
