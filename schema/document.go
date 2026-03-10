@@ -25,7 +25,18 @@ const (
 	docMetaDataKeySparseVector = "_sparse_vector"
 )
 
-// Document is a piece of text with metadata.
+// Document is a piece of text with a metadata map. It is the shared currency
+// between Loader, Transformer, Indexer, and Retriever components.
+//
+// Metadata is an open map[string]any that lets pipeline stages attach typed
+// values to a document without creating a new struct. Well-known keys are
+// managed through typed accessor methods — Score, SubIndexes, DenseVector,
+// SparseVector, DSLInfo, ExtraInfo — so callers never need to reference the
+// raw key strings.
+//
+// Transformer implementations should preserve existing metadata and merge new
+// keys rather than replacing the map outright, so provenance information
+// accumulated by earlier stages is not lost.
 type Document struct {
 	// ID is the unique identifier of the document.
 	ID string `json:"id"`
@@ -40,8 +51,10 @@ func (d *Document) String() string {
 	return d.Content
 }
 
-// WithSubIndexes sets the sub indexes of the document.
-// can use doc.SubIndexes() to get the sub indexes, useful for search engine to use sub indexes to search.
+// WithSubIndexes sets the sub-indexes on the document metadata and returns the
+// document for chaining. Sub-indexes let an Indexer route a document into
+// multiple logical partitions of a vector store simultaneously.
+// Use [Document.SubIndexes] to retrieve them.
 func (d *Document) WithSubIndexes(indexes []string) *Document {
 	if d.MetaData == nil {
 		d.MetaData = make(map[string]any)
@@ -67,8 +80,10 @@ func (d *Document) SubIndexes() []string {
 	return nil
 }
 
-// WithScore sets the score of the document.
-// can use doc.Score() to get the score.
+// WithScore sets the relevance score on the document, typically written by a
+// Retriever after ranking results. A higher score means higher relevance.
+// Note: [retriever.WithScoreThreshold] filters by this value, not sort order.
+// Use [Document.Score] to retrieve it.
 func (d *Document) WithScore(score float64) *Document {
 	if d.MetaData == nil {
 		d.MetaData = make(map[string]any)
@@ -121,8 +136,10 @@ func (d *Document) ExtraInfo() string {
 	return ""
 }
 
-// WithDSLInfo sets the dsl info of the document.
-// can use doc.DSLInfo() to get the dsl info.
+// WithDSLInfo attaches a domain-specific-language query description to the
+// document. This is consumed by Retriever implementations that support
+// structured queries (e.g., filter expressions) alongside vector search.
+// Use [Document.DSLInfo] to retrieve it.
 func (d *Document) WithDSLInfo(dslInfo map[string]any) *Document {
 	if d.MetaData == nil {
 		d.MetaData = make(map[string]any)

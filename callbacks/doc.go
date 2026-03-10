@@ -14,84 +14,86 @@
  * limitations under the License.
  */
 
-// Package callbacks provides callback mechanisms for component execution in Eino.
+// Package callbacks provides observability hooks for component execution in Eino.
 //
-// This package allows you to inject callback handlers at different stages of component execution,
-// such as start, end, and error handling. It's particularly useful for implementing governance capabilities like logging, monitoring, and metrics collection.
+// Callbacks fire at five lifecycle timings around every component invocation:
+//   - [TimingOnStart] / [TimingOnEnd]: non-streaming input and output.
+//   - [TimingOnStartWithStreamInput] / [TimingOnEndWithStreamOutput]: streaming
+//     variants — handlers receive a copy of the stream and MUST close it.
+//   - [TimingOnError]: component returned a non-nil error (stream-internal
+//     errors are NOT reported here).
 //
-// The package provides two ways to create callback handlers:
+// # Attaching Handlers
 //
-// 1. Create a callback handler using HandlerBuilder:
+// Global handlers (observe every node in every graph):
+//
+//	callbacks.AppendGlobalHandlers(myHandler) // call once, at startup
+//
+// Per-invocation handlers (observe one graph run):
+//
+//	runnable.Invoke(ctx, input, compose.WithCallbacks(myHandler))
+//
+// Global handlers execute before per-invocation handlers.
+//
+// # Building Handlers
+//
+// Option 1 — [NewHandlerBuilder]: register raw functions for the timings you
+// need. Input/output are untyped; use the component package's ConvCallbackInput
+// helper to cast to a concrete type:
 //
 //	handler := callbacks.NewHandlerBuilder().
-//		OnStart(func(ctx context.Context, info *RunInfo, input CallbackInput) context.Context {
+//		OnStartFn(func(ctx context.Context, info *RunInfo, input CallbackInput) context.Context {
 //			// Handle component start
 //			return ctx
 //		}).
-//		OnEnd(func(ctx context.Context, info *RunInfo, output CallbackOutput) context.Context {
+//		OnEndFn(func(ctx context.Context, info *RunInfo, output CallbackOutput) context.Context {
 //			// Handle component end
 //			return ctx
 //		}).
-//		OnError(func(ctx context.Context, info *RunInfo, err error) context.Context {
+//		OnErrorFn(func(ctx context.Context, info *RunInfo, err error) context.Context {
 //			// Handle component error
 //			return ctx
 //		}).
-//		OnStartWithStreamInput(func(ctx context.Context, info *RunInfo, input *schema.StreamReader[CallbackInput]) context.Context {
+//		OnStartWithStreamInputFn(func(ctx context.Context, info *RunInfo, input *schema.StreamReader[CallbackInput]) context.Context {
+//			defer input.Close() // MUST close
 //			// Handle component start with stream input
 //			return ctx
 //		}).
-//		OnEndWithStreamOutput(func(ctx context.Context, info *RunInfo, output *schema.StreamReader[CallbackOutput]) context.Context {
+//		OnEndWithStreamOutputFn(func(ctx context.Context, info *RunInfo, output *schema.StreamReader[CallbackOutput]) context.Context {
+//			defer output.Close() // MUST close
 //			// Handle component end with stream output
 //			return ctx
 //		}).
 //		Build()
 //
-// For this way, you need to convert the callback input types by yourself, and implement the logic for different component types in one handler.
+// Option 2 — utils/callbacks.NewHandlerHelper: dispatches by component type, so
+// each handler function receives the concrete typed input/output directly:
 //
-// 2. Use [template.HandlerHelper] to create a handler:
-//
-// Package utils/callbacks provides [HandlerHelper] as a convenient way to build callback handlers
-// for different component types. It allows you to set specific handlers for each component type,
-//
-// e.g.
-//
-//	// Create handlers for specific components
-//	modelHandler := &model.CallbackHandler{
-//		OnStart: func(ctx context.Context, info *RunInfo, input *model.CallbackInput) context.Context {
-//			log.Printf("Model execution started: %s", info.ComponentName)
-//			return ctx
-//		},
-//	}
-//
-//	promptHandler := &prompt.CallbackHandler{
-//		OnEnd: func(ctx context.Context, info *RunInfo, output *prompt.CallbackOutput) context.Context {
-//			log.Printf("Prompt execution completed: %s", output.Result)
-//			return ctx
-//		},
-//	}
-//
-//	// Build the handler using HandlerHelper
 //	handler := callbacks.NewHandlerHelper().
-//		ChatModel(modelHandler).
-//		Prompt(promptHandler).
-//		Fallback(fallbackHandler).
+//		ChatModel(&model.CallbackHandler{
+//			OnStart: func(ctx context.Context, info *RunInfo, input *model.CallbackInput) context.Context {
+//				log.Printf("Model execution started: %s", info.Name)
+//				return ctx
+//			},
+//		}).
+//		Prompt(&prompt.CallbackHandler{
+//			OnEnd: func(ctx context.Context, info *RunInfo, output *prompt.CallbackOutput) context.Context {
+//				log.Printf("Prompt completed")
+//				return ctx
+//			},
+//		}).
 //		Handler()
 //
-// [HandlerHelper] supports handlers for various component types including:
-//   - Prompt components (via prompt.CallbackHandler)
-//   - Chat model components (via model.CallbackHandler)
-//   - Embedding components (via embedding.CallbackHandler)
-//   - Indexer components (via indexer.CallbackHandler)
-//   - Retriever components (via retriever.CallbackHandler)
-//   - Document loader components (via loader.CallbackHandler)
-//   - Document transformer components (via transformer.CallbackHandler)
-//   - Tool components (via tool.CallbackHandler)
-//   - Graph (via Handler)
-//   - Chain (via Handler)
-//   - Tools node (via Handler)
-//   - Lambda (via Handler)
+// # Common Pitfalls
 //
-// Use the handler with a component:
+//   - Forgetting to close stream copies: handlers for
+//     OnStartWithStreamInput / OnEndWithStreamOutput receive independent
+//     copies of the stream. Failing to close them leaks goroutines.
 //
-//	runnable.Invoke(ctx, input, compose.WithCallbacks(handler))
+//   - Thread safety of AppendGlobalHandlers: call only during initialization,
+//     never concurrently with graph execution.
+//
+//   - Stream errors are invisible to OnError: errors that occur while a
+//     consumer reads from a StreamReader are not routed through OnError. Add
+//     error checking inside the stream consumer directly.
 package callbacks

@@ -22,8 +22,35 @@ import (
 	"github.com/cloudwego/eino/schema"
 )
 
-// HandlerBuilder constructs a Handler by chaining callback functions
-// for start, end, error, and streaming aspects.
+// HandlerBuilder constructs a [Handler] by registering callback functions for
+// individual timings. Only set the timings you care about; the built handler
+// implements [TimingChecker] and returns false for unregistered timings, so
+// the framework skips those timings with no overhead.
+//
+// The input/output values are untyped (CallbackInput / CallbackOutput). To
+// work with a specific component's payload, use the component package's
+// ConvCallbackInput / ConvCallbackOutput helpers inside your function. For a
+// higher-level API that dispatches by component type automatically, see
+// utils/callbacks.NewHandlerHelper.
+//
+// Example:
+//
+//	handler := callbacks.NewHandlerBuilder().
+//	    OnStartFn(func(ctx context.Context, info *callbacks.RunInfo, input callbacks.CallbackInput) context.Context {
+//	        mi := model.ConvCallbackInput(input)
+//	        if mi != nil {
+//	            log.Printf("[%s] model start: %d messages", info.Name, len(mi.Messages))
+//	        }
+//	        return ctx
+//	    }).
+//	    OnEndFn(func(ctx context.Context, info *callbacks.RunInfo, output callbacks.CallbackOutput) context.Context {
+//	        mo := model.ConvCallbackOutput(output)
+//	        if mo != nil && mo.Message.ResponseMeta != nil {
+//	            log.Printf("[%s] tokens: %d", info.Name, mo.Message.ResponseMeta.Usage.TotalTokens)
+//	        }
+//	        return ctx
+//	    }).
+//	    Build()
 type HandlerBuilder struct {
 	onStartFn                func(ctx context.Context, info *RunInfo, input CallbackInput) context.Context
 	onEndFn                  func(ctx context.Context, info *RunInfo, output CallbackOutput) context.Context
@@ -107,7 +134,10 @@ func (hb *HandlerBuilder) OnErrorFn(
 	return hb
 }
 
-// OnStartWithStreamInputFn sets the callback function to be called.
+// OnStartWithStreamInputFn sets the callback invoked when a component receives
+// streaming input. The handler receives a [*schema.StreamReader] that is a
+// private copy; it MUST close the reader after consuming it to avoid goroutine
+// and memory leaks.
 func (hb *HandlerBuilder) OnStartWithStreamInputFn(
 	fn func(ctx context.Context, info *RunInfo, input *schema.StreamReader[CallbackInput]) context.Context) *HandlerBuilder {
 
@@ -115,7 +145,11 @@ func (hb *HandlerBuilder) OnStartWithStreamInputFn(
 	return hb
 }
 
-// OnEndWithStreamOutputFn sets the callback function to be called.
+// OnEndWithStreamOutputFn sets the callback invoked when a component produces
+// streaming output. Like OnStartWithStreamInputFn, the handler receives a
+// private copy of the stream and MUST close it after reading to prevent
+// goroutine and memory leaks. This is the right place to implement streaming
+// token-usage accounting or streaming log capture.
 func (hb *HandlerBuilder) OnEndWithStreamOutputFn(
 	fn func(ctx context.Context, info *RunInfo, output *schema.StreamReader[CallbackOutput]) context.Context) *HandlerBuilder {
 
