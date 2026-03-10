@@ -55,6 +55,25 @@
 //   - Always call Close, even when the loop ends on io.EOF, to release resources.
 //   - To give the same stream to multiple consumers, call [StreamReader.Copy].
 //
+// # Four Streaming Paradigms
+//
+// Eino components and Lambda functions are classified by their input/output
+// streaming shape. The framework automatically bridges mismatches:
+//
+//   - Invoke: non-streaming in, non-streaming out (ping-pong).
+//   - Stream: non-streaming in, StreamReader out (server-streaming). ChatModel
+//     and Tool support this.
+//   - Collect: StreamReader in, non-streaming out (client-streaming). Useful
+//     for branch conditions that decide after the first chunk.
+//   - Transform: StreamReader in, StreamReader out (bidirectional).
+//
+// When an upstream node outputs T but a downstream node only accepts
+// StreamReader[T], the framework wraps T in a single-chunk StreamReader —
+// this is called a "fake stream". It satisfies the interface but does NOT
+// reduce time-to-first-chunk. Conversely, when a downstream node only accepts
+// T but the upstream outputs StreamReader[T], the framework automatically
+// concatenates the stream into a complete T.
+//
 // Utility functions:
 //   - [StreamReaderFromArray] wraps a slice as a stream (useful in tests).
 //   - [MergeStreamReaders] fans-in multiple streams into one.
@@ -63,5 +82,5 @@
 //   - [StreamReaderWithConvert] transforms element types; return [ErrNoValue]
 //     from the convert function to skip an element.
 //
-// See https://www.cloudwego.io/docs/eino/core_modules/components/chat_model_guide/
+// See https://www.cloudwego.io/docs/eino/core_modules/chain_and_graph_orchestration/stream_programming_essentials/
 package schema

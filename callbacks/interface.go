@@ -20,22 +20,24 @@ import (
 	"github.com/cloudwego/eino/internal/callbacks"
 )
 
-// RunInfo contains metadata about the component invocation that triggered a
-// callback. It is provided to every callback hook so handlers can filter,
-// route, or annotate telemetry based on which component is running.
+// RunInfo describes the entity that triggered a callback. Always nil-check
+// before dereferencing — a component that calls OnStart without first calling
+// EnsureRunInfo or InitCallbacks will leave RunInfo absent in the context.
 //
 // Fields:
-//   - Name: human-readable display name (set via compose.WithNodeName); not
-//     guaranteed to be unique across the graph.
-//   - Type: value returned by the component's GetType() method —
-//     e.g. "OpenAIChatModel". Use this to distinguish implementations.
-//   - Component: the component category constant from [components.Component] —
-//     e.g. components.ComponentOfChatModel. Use this to distinguish component
-//     kinds without caring about the specific implementation.
+//   - Name: business-meaningful name specified by the user. For nodes in a
+//     graph this is the node name (compose.WithNodeName). For standalone
+//     components it must be set explicitly via [InitCallbacks] or
+//     [ReuseHandlers]; it is empty string if not set.
+//   - Type: implementation identity, e.g. "OpenAI". Set by the component via
+//     [components.Typer]; falls back to reflection (struct/func name) if the
+//     interface is not implemented. Empty for Graph itself.
+//   - Component: category constant, e.g. components.ComponentOfChatModel.
+//     Fixed value "Lambda" for lambdas, "Graph"/"Chain"/"Workflow" for graphs.
+//     Use this to branch on component kind without caring about implementation.
 //
-// Pitfall: RunInfo may be nil if a component implementation calls one of
-// the OnStart/OnEnd helpers (from [callbacks.EnsureRunInfo]) without first
-// ensuring the RunInfo is set. Always nil-check inside handlers.
+// Handlers should filter using RunInfo rather than assuming a fixed execution
+// order — there is no guaranteed ordering between different Handlers.
 type RunInfo = callbacks.RunInfo
 
 // CallbackInput is the value passed to OnStart and OnStartWithStreamInput
@@ -62,13 +64,24 @@ type CallbackOutput = callbacks.CallbackOutput
 // OnEndWithStreamOutput) or use [NewHandlerBuilder] to set only the timings
 // you care about.
 //
+// Each method receives the context returned by the previous timing of the
+// SAME handler, which lets a single handler pass state between its OnStart
+// and OnEnd calls via context.WithValue. There is NO guaranteed execution
+// order between DIFFERENT handlers, and the context chain does not flow
+// from one handler to the next — do not rely on handler ordering.
+//
 // Implement [TimingChecker] (the Needed method) on your handler so the
 // framework can skip timings you have not registered; this avoids unnecessary
 // stream copies and goroutine allocations on every component invocation.
 //
 // Stream handlers (OnStartWithStreamInput, OnEndWithStreamOutput) receive a
-// [*schema.StreamReader] that has already been copied; they must close their
-// copy after reading, or the underlying goroutine will leak.
+// [*schema.StreamReader] that has already been copied; they MUST close their
+// copy after reading. If any handler's copy is not closed, the original stream
+// cannot be freed, causing a goroutine/memory leak for the entire pipeline.
+//
+// Important: do NOT mutate the Input or Output values. All downstream nodes
+// and handlers share the same pointer (direct assignment, not a deep copy).
+// Mutations cause data races in concurrent graph execution.
 type Handler = callbacks.Handler
 
 // InitCallbackHandlers sets the global callback handlers.

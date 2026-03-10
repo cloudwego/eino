@@ -30,7 +30,7 @@ import (
 //	func (t *testChatModel) Generate(ctx context.Context, input []*schema.Message, opts ...model.Option) (resp *schema.Message, err error) {
 //		defer func() {
 //			if err != nil {
-//				callbacks.OnEnd(ctx, err)
+//				callbacks.OnError(ctx, err)
 //			}
 //		}()
 //
@@ -49,7 +49,6 @@ import (
 //
 //		return resp, nil
 //	}
-//
 
 // OnStart invokes the OnStart timing for all registered handlers in the
 // context. This is called by component implementations that manage their own
@@ -141,14 +140,35 @@ func EnsureRunInfo(ctx context.Context, typ string, comp components.Component) c
 	return callbacks.EnsureRunInfo(ctx, typ, comp)
 }
 
-// ReuseHandlers initializes a new context with the provided RunInfo, while using the same handlers already exist.
-// Will initialize Global callback handlers if none exist in the ctx before.
+// ReuseHandlers creates a new context that inherits all handlers already
+// present in ctx and sets a new RunInfo. Global handlers are added if ctx
+// carries none yet.
+//
+// Use this when a component calls another component internally and wants the
+// inner component's callbacks to share the same set of handlers as the outer
+// component, but with the inner component's own identity in RunInfo:
+//
+//	innerCtx := callbacks.ReuseHandlers(ctx, &callbacks.RunInfo{
+//	    Type:      "InnerChatModel",
+//	    Component: components.ComponentOfChatModel,
+//	    Name:      "inner-cm",
+//	})
 func ReuseHandlers(ctx context.Context, info *RunInfo) context.Context {
 	return callbacks.ReuseHandlers(ctx, info)
 }
 
-// InitCallbacks initializes a new context with the provided RunInfo and handlers.
-// Any previously set RunInfo and Handlers for this ctx will be overwritten.
+// InitCallbacks creates a new context with the given RunInfo and handlers,
+// completely replacing any RunInfo and handlers already in ctx.
+//
+// Use this when running a component standalone outside a Graph — the Graph
+// normally manages RunInfo injection automatically, but standalone callers must
+// set it up themselves:
+//
+//	ctx = callbacks.InitCallbacks(ctx, &callbacks.RunInfo{
+//	    Type:      myModel.GetType(),
+//	    Component: components.ComponentOfChatModel,
+//	    Name:      "my-model",
+//	}, myHandler)
 func InitCallbacks(ctx context.Context, info *RunInfo, handlers ...Handler) context.Context {
 	return callbacks.InitCallbacks(ctx, info, handlers...)
 }
