@@ -55,4 +55,7 @@ CLAUDE.md
 # Specs directories
 */specs
 /todos
-/.claude/settings.local.json
+/.claude/
+
+# Internal dev setup (not for public repo)
+/scripts/dev_setup_internal.sh
