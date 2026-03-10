@@ -18,9 +18,14 @@
 // types and callback capabilities used across Eino.
 package components
 
-// Typer get the type name of one component's implementation
-// if Typer exists, the full name of the component instance will be {Typer}{Component} by default
-// recommend using Camel Case Naming Style for Typer
+// Typer provides a human-readable type name for a component implementation.
+//
+// When implemented, the component's full display name in DevOps tooling
+// (visual debugger, IDE plugin, dashboards) becomes "{GetType()}{ComponentKind}"
+// — e.g. "OpenAIChatModel". Use CamelCase naming.
+//
+// Also used by [utils.InferTool] and similar constructors to set the display
+// name of tool instances.
 type Typer interface {
 	GetType() string
 }
@@ -34,9 +39,14 @@ func GetType(component any) (string, bool) {
 	return "", false
 }
 
-// Checker tells callback aspect status of component's implementation
-// When the Checker interface is implemented and returns true, the framework will not start the default aspect.
-// Instead, the component will decide the callback execution location and the information to be injected.
+// Checker controls whether the framework's automatic callback instrumentation
+// is active for a component.
+//
+// When IsCallbacksEnabled returns true, the framework skips its default
+// OnStart/OnEnd wrapping and trusts the component to invoke callbacks itself
+// at the correct points. Implement this when your component needs precise
+// control over callback timing or content — for example, when streaming
+// requires callbacks to fire mid-stream rather than only at completion.
 type Checker interface {
 	IsCallbacksEnabled() bool
 }

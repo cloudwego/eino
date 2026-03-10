@@ -16,12 +16,16 @@
 
 package prompt
 
-// Option is the call option for ChatTemplate component.
+// Option is a call-time option for a ChatTemplate. The built-in
+// [DefaultChatTemplate] has no common options — this type exists primarily for
+// custom ChatTemplate implementations that need per-call configuration.
 type Option struct {
 	implSpecificOptFn any
 }
 
-// WrapImplSpecificOptFn wraps the implementation specific option function.
+// WrapImplSpecificOptFn wraps an implementation-specific option function so it
+// can be passed alongside any future standard options. For use by custom
+// ChatTemplate implementors.
 func WrapImplSpecificOptFn[T any](optFn func(*T)) Option {
 	return Option{
 		implSpecificOptFn: optFn,

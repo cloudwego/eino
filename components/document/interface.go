@@ -22,21 +22,34 @@ import (
 	"github.com/cloudwego/eino/schema"
 )
 
-// Source is a document source.
-// e.g. https://www.bytedance.com/docx/xxxx, https://xxx.xxx.xxx/xx.pdf.
-// make sure the URI can be reached by service.
+// Source identifies the external location of a document.
+// URI can be a local file path or a remote URL reachable by the loader.
 type Source struct {
 	URI string
 }
 
 //go:generate  mockgen -destination ../../internal/mock/components/document/document_mock.go --package document -source interface.go
 
-// Loader is a document loader.
+// Loader reads raw content from an external source and returns it as a slice
+// of [schema.Document] values.
+//
+// The Source.URI may be a local file path or a remote URL. The loader is
+// responsible for fetching the raw bytes; actual format parsing is typically
+// delegated to a [parser.Parser] configured on the loader via
+// [WithParserOptions].
+//
+// Document metadata ([schema.Document].MetaData) should be populated with at
+// least the source URI so that downstream nodes can trace document provenance.
 type Loader interface {
 	Load(ctx context.Context, src Source, opts ...LoaderOption) ([]*schema.Document, error)
 }
 
-// Transformer is to convert documents, such as split or filter.
+// Transformer converts a slice of [schema.Document] values into another slice,
+// applying operations such as splitting, filtering, merging, or re-ranking.
+//
+// Implementations should preserve existing MetaData keys and merge rather than
+// replace when adding their own metadata. Downstream nodes (e.g. Indexer,
+// Retriever) may depend on metadata set by earlier pipeline stages.
 type Transformer interface {
 	Transform(ctx context.Context, src []*schema.Document, opts ...TransformerOption) ([]*schema.Document, error)
 }

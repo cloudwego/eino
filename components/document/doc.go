@@ -14,4 +14,28 @@
  * limitations under the License.
  */
 
+// Package document defines the Loader and Transformer component interfaces
+// for ingesting and processing documents in an eino pipeline.
+//
+// # Components
+//
+//   - [Loader]: reads raw content from an external source (file, URL, S3, …)
+//     and returns [schema.Document] values. Parsing is typically delegated to
+//     a [parser.Parser] configured on the loader.
+//   - [Transformer]: takes a slice of [schema.Document] values and transforms
+//     them — splitting, filtering, merging, re-ranking, etc.
+//
+// Concrete implementations live in eino-ext:
+//
+//	github.com/cloudwego/eino-ext/components/document/
+//
+// # Document Metadata
+//
+// [schema.Document].MetaData is the primary mechanism for carrying contextual
+// information (source URI, scores, chunk indices, embeddings) through the
+// pipeline. Transformers should preserve existing metadata and merge rather
+// than replace when adding their own keys.
+//
+// See https://www.cloudwego.io/docs/eino/core_modules/components/document_loader_guide/
+// See https://www.cloudwego.io/docs/eino/core_modules/components/document_transformer_guide/
 package document

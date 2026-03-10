@@ -22,7 +22,7 @@ type Options struct {
 	Model *string
 }
 
-// Option is the call option for Embedder component.
+// Option is a call-time option for an Embedder.
 type Option struct {
 	apply func(opts *Options)
 
@@ -61,21 +61,28 @@ func GetCommonOptions(base *Options, opts ...Option) *Options {
 	return base
 }
 
-// WrapImplSpecificOptFn is the option to wrap the implementation specific option function.
+// WrapImplSpecificOptFn wraps an implementation-specific option function so it
+// can be passed alongside standard options. For use by Embedder implementors:
+//
+//	func WithMyParam(v string) embedding.Option {
+//	    return embedding.WrapImplSpecificOptFn(func(o *MyOptions) {
+//	        o.MyParam = v
+//	    })
+//	}
 func WrapImplSpecificOptFn[T any](optFn func(*T)) Option {
 	return Option{
 		implSpecificOptFn: optFn,
 	}
 }
 
-// GetImplSpecificOptions extract the implementation specific options from Option list, optionally providing a base options with default values.
-// e.g.
+// GetImplSpecificOptions extracts implementation-specific options from opts,
+// merging them onto base. Call alongside [GetCommonOptions] inside EmbedStrings:
 //
-//	myOption := &MyOption{
-//		Field1: "default_value",
+//	func (e *MyEmbedder) EmbedStrings(ctx context.Context, texts []string, opts ...embedding.Option) ([][]float64, error) {
+//	    common := embedding.GetCommonOptions(nil, opts...)
+//	    mine  := embedding.GetImplSpecificOptions(&MyOptions{}, opts...)
+//	    // use common.Model, mine.MyParam, etc.
 //	}
-//
-//	myOption := model.GetImplSpecificOptions(myOption, opts...)
 func GetImplSpecificOptions[T any](base *T, opts ...Option) *T {
 	if base == nil {
 		base = new(T)

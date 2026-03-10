@@ -14,4 +14,31 @@
  * limitations under the License.
  */
 
+// Package embedding defines the Embedder component interface for converting
+// text into vector representations.
+//
+// # Overview
+//
+// An Embedder converts a batch of strings into dense float vectors. Semantically
+// similar texts produce vectors that are close in the vector space, making
+// embeddings the backbone of semantic search, RAG pipelines, and clustering.
+//
+// Concrete implementations (OpenAI, Ark, Ollama, …) live in eino-ext:
+//
+//	github.com/cloudwego/eino-ext/components/embedding/
+//
+// # Output Format
+//
+// [Embedder.EmbedStrings] returns `[][]float64` where:
+//   - outer index corresponds to the input text at the same position
+//   - inner slice is the embedding vector; its length (dimensions) is fixed by
+//     the model and is the same for every text
+//
+// # Consistency Requirement
+//
+// The same model must be used for both indexing and retrieval. Mixing models
+// produces vectors in different spaces — similarity scores become meaningless
+// and semantic search breaks silently.
+//
+// See https://www.cloudwego.io/docs/eino/core_modules/components/embedding_guide/
 package embedding
