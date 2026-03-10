@@ -32,7 +32,7 @@ type Options struct {
 	Embedding embedding.Embedder
 
 	// DSLInfo carries backend-specific filter/query expressions. The structure and
-// semantics are defined by the underlying store implementation.
+	// semantics are defined by the underlying store implementation.
 	DSLInfo map[string]any
 }
 
