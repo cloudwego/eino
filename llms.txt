@@ -1,0 +1,125 @@
+# Eino
+
+> Eino is a Go-based LLM application development framework by ByteDance.
+> It provides component abstractions, a graph/chain orchestration engine,
+> streaming primitives, a callback system, and an Agent Development Kit (ADK)
+> for building production-grade LLM applications.
+
+## Repositories
+
+- [eino](https://github.com/cloudwego/eino) — core framework (this repo)
+- [eino-ext](https://github.com/cloudwego/eino-ext) — component integrations (OpenAI, Ark, Ollama, Redis, S3, …)
+- [eino-examples](https://github.com/cloudwego/eino-examples) — runnable example applications
+
+## Overview & Background
+
+- [Overview](https://www.cloudwego.io/docs/eino/overview/)
+- [ByteDance Eino Practice](https://www.cloudwego.io/docs/eino/overview/bytedance_eino_practice/)
+- [Eino Open Source](https://www.cloudwego.io/docs/eino/overview/eino_open_source/)
+- [Graph or Agent — when to use which](https://www.cloudwego.io/docs/eino/overview/graph_or_agent/)
+
+## Quick Start
+
+- [Simple LLM Application](https://www.cloudwego.io/docs/eino/quick_start/simple_llm_application/)
+- [Agent with Tools](https://www.cloudwego.io/docs/eino/quick_start/agent_llm_with_tools/)
+- [Eino Cookbook](https://www.cloudwego.io/docs/eino/eino-cookbook/)
+
+## Core Concepts — Components
+
+Components are the typed building blocks of eino pipelines. Each has a defined
+interface in the core repo; implementations live in eino-ext.
+
+- [Components overview](https://www.cloudwego.io/docs/eino/core_modules/components/)
+- [ChatModel](https://www.cloudwego.io/docs/eino/core_modules/components/chat_model_guide/)
+- [ChatTemplate](https://www.cloudwego.io/docs/eino/core_modules/components/chat_template_guide/)
+- [ToolsNode](https://www.cloudwego.io/docs/eino/core_modules/components/tools_node_guide/)
+- [How to create a Tool](https://www.cloudwego.io/docs/eino/core_modules/components/tools_node_guide/how_to_create_a_tool/)
+- [Retriever](https://www.cloudwego.io/docs/eino/core_modules/components/retriever_guide/)
+- [Indexer](https://www.cloudwego.io/docs/eino/core_modules/components/indexer_guide/)
+- [Embedding](https://www.cloudwego.io/docs/eino/core_modules/components/embedding_guide/)
+- [DocumentLoader](https://www.cloudwego.io/docs/eino/core_modules/components/document_loader_guide/)
+- [DocumentParser](https://www.cloudwego.io/docs/eino/core_modules/components/document_loader_guide/document_parser_interface_guide/)
+- [DocumentTransformer](https://www.cloudwego.io/docs/eino/core_modules/components/document_transformer_guide/)
+- [Lambda](https://www.cloudwego.io/docs/eino/core_modules/components/lambda_guide/)
+- [AgenticChatModel](https://www.cloudwego.io/docs/eino/core_modules/components/agentic_chat_model_guide/)
+- [AgenticChatTemplate](https://www.cloudwego.io/docs/eino/core_modules/components/agentic_chat_template_guide/)
+- [AgenticToolsNode](https://www.cloudwego.io/docs/eino/core_modules/components/agentic_tools_node_guide/)
+
+## Core Concepts — Orchestration
+
+The orchestration layer composes components into executable pipelines.
+Chain is a linear sequence; Graph is a DAG with conditional edges;
+Workflow is a higher-level structured abstraction over Graph.
+
+- [Chain & Graph introduction](https://www.cloudwego.io/docs/eino/core_modules/chain_and_graph_orchestration/chain_graph_introduction/)
+- [Orchestration design principles](https://www.cloudwego.io/docs/eino/core_modules/chain_and_graph_orchestration/orchestration_design_principles/)
+- [Workflow orchestration framework](https://www.cloudwego.io/docs/eino/core_modules/chain_and_graph_orchestration/workflow_orchestration_framework/)
+- [Stream programming essentials](https://www.cloudwego.io/docs/eino/core_modules/chain_and_graph_orchestration/stream_programming_essentials/)
+- [Callback system](https://www.cloudwego.io/docs/eino/core_modules/chain_and_graph_orchestration/callback_manual/)
+- [CallOption capabilities](https://www.cloudwego.io/docs/eino/core_modules/chain_and_graph_orchestration/call_option_capabilities/)
+- [Checkpoint & interrupt/resume](https://www.cloudwego.io/docs/eino/core_modules/chain_and_graph_orchestration/checkpoint_interrupt/)
+
+## Core Concepts — Flow Integration
+
+- [ReAct agent](https://www.cloudwego.io/docs/eino/core_modules/flow_integration_components/react_agent_manual/)
+- [Multi-agent hosting](https://www.cloudwego.io/docs/eino/core_modules/flow_integration_components/multi_agent_hosting/)
+
+## Agent Development Kit (ADK)
+
+The ADK provides a higher-level runtime for building, composing, and deploying
+agents. It sits above the Graph layer and introduces Agent, Skill, and
+Middleware abstractions.
+
+- [ADK overview](https://www.cloudwego.io/docs/eino/core_modules/eino_adk/)
+- [Agent quickstart](https://www.cloudwego.io/docs/eino/core_modules/eino_adk/agent_quickstart/)
+- [Agent interface](https://www.cloudwego.io/docs/eino/core_modules/eino_adk/agent_interface/)
+- [Agent collaboration](https://www.cloudwego.io/docs/eino/core_modules/eino_adk/agent_collaboration/)
+- [Agent implementations](https://www.cloudwego.io/docs/eino/core_modules/eino_adk/agent_implementation/)
+  - [ChatModel agent](https://www.cloudwego.io/docs/eino/core_modules/eino_adk/agent_implementation/chat_model/)
+  - [Workflow agent](https://www.cloudwego.io/docs/eino/core_modules/eino_adk/agent_implementation/workflow/)
+  - [Supervisor agent](https://www.cloudwego.io/docs/eino/core_modules/eino_adk/agent_implementation/supervisor/)
+  - [Plan-and-execute agent](https://www.cloudwego.io/docs/eino/core_modules/eino_adk/agent_implementation/plan_execute/)
+  - [Deep agents](https://www.cloudwego.io/docs/eino/core_modules/eino_adk/agent_implementation/deepagents/)
+- [Agent extension](https://www.cloudwego.io/docs/eino/core_modules/eino_adk/agent_extension/)
+- [Human-in-the-loop (HITL)](https://www.cloudwego.io/docs/eino/core_modules/eino_adk/agent_hitl/)
+- [ADK callbacks](https://www.cloudwego.io/docs/eino/core_modules/eino_adk/adk_agent_callback/)
+- [ChatModelAgent middleware](https://www.cloudwego.io/docs/eino/core_modules/eino_adk/eino_adk_chatmodelagentmiddleware/)
+  - [Filesystem middleware](https://www.cloudwego.io/docs/eino/core_modules/eino_adk/eino_adk_chatmodelagentmiddleware/middleware_filesystem/)
+  - [Skill middleware](https://www.cloudwego.io/docs/eino/core_modules/eino_adk/eino_adk_chatmodelagentmiddleware/middleware_skill/)
+  - [Summarization middleware](https://www.cloudwego.io/docs/eino/core_modules/eino_adk/eino_adk_chatmodelagentmiddleware/middleware_summarization/)
+  - [Plan-task middleware](https://www.cloudwego.io/docs/eino/core_modules/eino_adk/eino_adk_chatmodelagentmiddleware/middleware_plantask/)
+  - [Tool-search middleware](https://www.cloudwego.io/docs/eino/core_modules/eino_adk/eino_adk_chatmodelagentmiddleware/middleware_toolsearch/)
+  - [Tool-reduction middleware](https://www.cloudwego.io/docs/eino/core_modules/eino_adk/eino_adk_chatmodelagentmiddleware/middleware_toolreduction/)
+  - [Patch-toolcalls middleware](https://www.cloudwego.io/docs/eino/core_modules/eino_adk/eino_adk_chatmodelagentmiddleware/middleware_patchtoolcalls/)
+
+## DevOps Tooling
+
+- [IDE plugin guide](https://www.cloudwego.io/docs/eino/core_modules/devops/ide_plugin_guide/)
+- [Visual orchestration plugin](https://www.cloudwego.io/docs/eino/core_modules/devops/visual_orchestration_plugin_guide/)
+- [Visual debug plugin](https://www.cloudwego.io/docs/eino/core_modules/devops/visual_debug_plugin_guide/)
+
+## Ecosystem Integrations (eino-ext)
+
+- [ChatModel integrations](https://www.cloudwego.io/docs/eino/ecosystem_integration/chat_model/)
+- [Document integrations](https://www.cloudwego.io/docs/eino/ecosystem_integration/document/)
+- [Embedding integrations](https://www.cloudwego.io/docs/eino/ecosystem_integration/embedding/)
+- [Tool integrations](https://www.cloudwego.io/docs/eino/ecosystem_integration/tool/)
+- [Callback integrations](https://www.cloudwego.io/docs/eino/ecosystem_integration/callbacks/)
+- [Indexer integrations](https://www.cloudwego.io/docs/eino/ecosystem_integration/indexer/)
+- [Retriever integrations](https://www.cloudwego.io/docs/eino/ecosystem_integration/retriever/)
+- [ChatTemplate integrations](https://www.cloudwego.io/docs/eino/ecosystem_integration/chat_template/)
+
+## Release Notes & Migration
+
+- [v0.1](https://www.cloudwego.io/docs/eino/release_notes_and_migration/v01_first_release/)
+- [v0.2](https://www.cloudwego.io/docs/eino/release_notes_and_migration/v02_second_release/)
+- [v0.3 — breaking changes](https://www.cloudwego.io/docs/eino/release_notes_and_migration/v03_tiny_break_change/)
+- [v0.4 — compose optimization](https://www.cloudwego.io/docs/eino/release_notes_and_migration/eino_v0.4._-compose_optimization/)
+- [v0.5 — ADK implementation](https://www.cloudwego.io/docs/eino/release_notes_and_migration/eino_v0.5._-adk_implementation/)
+- [v0.6 — JSON schema optimization](https://www.cloudwego.io/docs/eino/release_notes_and_migration/eino_v0.6._-jsonschema_optimization/)
+- [v0.7 — interrupt/resume refactor](https://www.cloudwego.io/docs/eino/release_notes_and_migration/eino_v0.7._-interrupt_resume_refactor/)
+- [v0.8 — ADK middlewares](https://www.cloudwego.io/docs/eino/release_notes_and_migration/eino_v0.8._-adk_middlewares/)
+
+## FAQ
+
+- [FAQ](https://www.cloudwego.io/docs/eino/faq/)
