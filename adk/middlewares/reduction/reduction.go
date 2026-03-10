@@ -652,14 +652,21 @@ func defaultClearHandler(rootDir string, needOffload bool, readFileToolName stri
 }
 
 func getMsgOffloadedFlag(msg *schema.Message) (offloaded bool) {
-	return msg.Extra != nil && msg.Extra[msgReducedFlag] != nil
+	if msg.Extra == nil {
+		return false
+	}
+	v, ok := msg.Extra[msgReducedFlag].(bool)
+	if !ok {
+		return false
+	}
+	return v
 }
 
 func setMsgOffloadedFlag(msg *schema.Message) {
 	if msg.Extra == nil {
 		msg.Extra = make(map[string]any)
 	}
-	msg.Extra[msgReducedFlag] = struct{}{}
+	msg.Extra[msgReducedFlag] = true
 }
 
 func getMsgCachedToken(msg *schema.Message) (int64, bool) {
