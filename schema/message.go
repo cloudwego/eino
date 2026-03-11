@@ -160,7 +160,7 @@ type MessagePartCommon struct {
 	// MIMEType is the mime type , eg."image/png",""audio/wav" etc.
 	MIMEType string `json:"mime_type,omitempty"`
 
-	// Extra is used to store extra information.
+	// Deprecated: Use MessageOutputPart.Extra or MessageInputPart.Extra to set additional metadata instead.
 	Extra map[string]any `json:"extra,omitempty"`
 }
 
@@ -1348,7 +1348,10 @@ func ConcatToolResults(chunks []*ToolResult) (*ToolResult, error) {
 			}
 		}
 
-		mergedChunkParts := mergeTextPartsInChunk(chunk.Parts)
+		mergedChunkParts, err := concatToolOutputParts(chunk.Parts)
+		if err != nil {
+			return nil, fmt.Errorf("failed to merge text parts in chunk %d: %w", chunkIdx, err)
+		}
 		allParts = append(allParts, mergedChunkParts...)
 	}
 
@@ -1359,44 +1362,75 @@ func ConcatToolResults(chunks []*ToolResult) (*ToolResult, error) {
 	return &ToolResult{Parts: allParts}, nil
 }
 
-func mergeTextPartsInChunk(parts []ToolOutputPart) []ToolOutputPart {
+func concatToolOutputParts(parts []ToolOutputPart) ([]ToolOutputPart, error) {
 	if len(parts) == 0 {
-		return nil
+		return nil, nil
 	}
 
-	merged := make([]ToolOutputPart, 0, len(parts))
+	groups := groupToolOutputParts(parts)
+
+	merged := make([]ToolOutputPart, 0, len(groups))
+	for _, group := range groups {
+		if len(group) == 1 {
+			merged = append(merged, group...)
+			continue
+		}
+		switch group[0].Type {
+		case ToolPartTypeText:
+			mergedPart, err := mergeToolTextParts(group)
+			if err != nil {
+				return nil, err
+			}
+			merged = append(merged, mergedPart)
+		default:
+			merged = append(merged, group...)
+		}
+	}
+
+	return merged, nil
+}
+
+func groupToolOutputParts(parts []ToolOutputPart) [][]ToolOutputPart {
+	groups := make([][]ToolOutputPart, 0)
 	i := 0
-
 	for i < len(parts) {
-		currentPart := parts[i]
-
-		if currentPart.Type == ToolPartTypeText {
+		if parts[i].Type == ToolPartTypeText {
 			end := i + 1
 			for end < len(parts) && parts[end].Type == ToolPartTypeText {
 				end++
 			}
-
-			if end == i+1 {
-				merged = append(merged, currentPart)
-			} else {
-				var sb strings.Builder
-				for k := i; k < end; k++ {
-					sb.WriteString(parts[k].Text)
-				}
-				mergedPart := ToolOutputPart{
-					Type: ToolPartTypeText,
-					Text: sb.String(),
-				}
-				merged = append(merged, mergedPart)
-			}
+			groups = append(groups, parts[i:end])
 			i = end
 		} else {
-			merged = append(merged, currentPart)
+			groups = append(groups, parts[i:i+1])
 			i++
 		}
 	}
+	return groups
+}
 
-	return merged
+func mergeToolTextParts(group []ToolOutputPart) (ToolOutputPart, error) {
+	var sb strings.Builder
+	extraList := make([]map[string]any, 0, len(group))
+	for _, part := range group {
+		sb.WriteString(part.Text)
+		if len(part.Extra) > 0 {
+			extraList = append(extraList, part.Extra)
+		}
+	}
+	var mergedExtra map[string]any
+	if len(extraList) > 0 {
+		var err error
+		mergedExtra, err = concatExtra(extraList)
+		if err != nil {
+			return ToolOutputPart{}, fmt.Errorf("failed to concat tool output text part extra: %w", err)
+		}
+	}
+	return ToolOutputPart{
+		Type:  ToolPartTypeText,
+		Text:  sb.String(),
+		Extra: mergedExtra,
+	}, nil
 }
 
 func concatToolCalls(chunks []ToolCall) ([]ToolCall, error) {
@@ -1562,9 +1596,9 @@ func mergeOutputPartGroup(group []MessageOutputPart) (MessageOutputPart, error) 
 	first := group[0]
 	switch first.Type {
 	case ChatMessagePartTypeText:
-		return mergeTextParts(group), nil
+		return mergeTextParts(group)
 	case ChatMessagePartTypeReasoning:
-		return mergeReasoningParts(group), nil
+		return mergeReasoningParts(group)
 	case ChatMessagePartTypeAudioURL:
 		if isBase64MessageOutputAudioPart(first) {
 			return mergeAudioParts(group)
@@ -1574,27 +1608,52 @@ func mergeOutputPartGroup(group []MessageOutputPart) (MessageOutputPart, error) 
 	return first, nil
 }
 
-func mergeTextParts(group []MessageOutputPart) MessageOutputPart {
+func mergeTextParts(group []MessageOutputPart) (MessageOutputPart, error) {
 	var sb strings.Builder
+	extraList := make([]map[string]any, 0, len(group))
 	for _, part := range group {
 		sb.WriteString(part.Text)
+		if len(part.Extra) > 0 {
+			extraList = append(extraList, part.Extra)
+		}
+	}
+	var mergedExtra map[string]any
+	if len(extraList) > 0 {
+		var err error
+		mergedExtra, err = concatExtra(extraList)
+		if err != nil {
+			return MessageOutputPart{}, fmt.Errorf("failed to concat text part extra: %w", err)
+		}
 	}
 	return MessageOutputPart{
 		Type:          ChatMessagePartTypeText,
 		Text:          sb.String(),
+		Extra:         mergedExtra,
 		StreamingMeta: group[0].StreamingMeta,
-	}
+	}, nil
 }
 
-func mergeReasoningParts(group []MessageOutputPart) MessageOutputPart {
+func mergeReasoningParts(group []MessageOutputPart) (MessageOutputPart, error) {
 	var textBuilder strings.Builder
 	var signature string
+	extraList := make([]map[string]any, 0, len(group))
 	for _, part := range group {
 		if part.Reasoning != nil {
 			textBuilder.WriteString(part.Reasoning.Text)
 			if part.Reasoning.Signature != "" {
 				signature = part.Reasoning.Signature
 			}
+		}
+		if len(part.Extra) > 0 {
+			extraList = append(extraList, part.Extra)
+		}
+	}
+	var mergedExtra map[string]any
+	if len(extraList) > 0 {
+		var err error
+		mergedExtra, err = concatExtra(extraList)
+		if err != nil {
+			return MessageOutputPart{}, fmt.Errorf("failed to concat reasoning part extra: %w", err)
 		}
 	}
 	return MessageOutputPart{
@@ -1603,14 +1662,16 @@ func mergeReasoningParts(group []MessageOutputPart) MessageOutputPart {
 			Text:      textBuilder.String(),
 			Signature: signature,
 		},
+		Extra:         mergedExtra,
 		StreamingMeta: group[0].StreamingMeta,
-	}
+	}, nil
 }
 
 func mergeAudioParts(group []MessageOutputPart) (MessageOutputPart, error) {
 	var b64Builder strings.Builder
 	var mimeType string
-	extraList := make([]map[string]any, 0, len(group))
+	audioExtraList := make([]map[string]any, 0, len(group))
+	partExtraList := make([]map[string]any, 0, len(group))
 
 	for _, part := range group {
 		audioPart := part.Audio
@@ -1621,16 +1682,27 @@ func mergeAudioParts(group []MessageOutputPart) (MessageOutputPart, error) {
 			mimeType = audioPart.MIMEType
 		}
 		if len(audioPart.Extra) > 0 {
-			extraList = append(extraList, audioPart.Extra)
+			audioExtraList = append(audioExtraList, audioPart.Extra)
+		}
+		if len(part.Extra) > 0 {
+			partExtraList = append(partExtraList, part.Extra)
 		}
 	}
 
-	var mergedExtra map[string]any
+	var mergedAudioExtra map[string]any
 	var err error
-	if len(extraList) > 0 {
-		mergedExtra, err = concatExtra(extraList)
+	if len(audioExtraList) > 0 {
+		mergedAudioExtra, err = concatExtra(audioExtraList)
 		if err != nil {
 			return MessageOutputPart{}, fmt.Errorf("failed to concat audio extra: %w", err)
+		}
+	}
+
+	var mergedPartExtra map[string]any
+	if len(partExtraList) > 0 {
+		mergedPartExtra, err = concatExtra(partExtraList)
+		if err != nil {
+			return MessageOutputPart{}, fmt.Errorf("failed to concat audio part extra: %w", err)
 		}
 	}
 
@@ -1641,9 +1713,10 @@ func mergeAudioParts(group []MessageOutputPart) (MessageOutputPart, error) {
 			MessagePartCommon: MessagePartCommon{
 				Base64Data: &mergedB64,
 				MIMEType:   mimeType,
-				Extra:      mergedExtra,
+				Extra:      mergedAudioExtra,
 			},
 		},
+		Extra:         mergedPartExtra,
 		StreamingMeta: group[0].StreamingMeta,
 	}, nil
 }
