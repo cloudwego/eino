@@ -123,6 +123,15 @@ func (p *Parallel) AddEmbedding(outputKey string, node embedding.Embedder, opts 
 	return p.addNode(outputKey, gNode, options)
 }
 
+// AddMultiModalEmbedding adds a multimodal embedding node to the parallel.
+// eg.
+//
+//	p.AddMultiModalEmbedding("output_key01", multiModalEmbeddingNode)
+func (p *Parallel) AddMultiModalEmbedding(outputKey string, node embedding.MultiModalEmbedder, opts ...GraphAddNodeOpt) *Parallel {
+	gNode, options := toMultiModalEmbeddingNode(node, append(opts, WithOutputKey(outputKey))...)
+	return p.addNode(outputKey, gNode, options)
+}
+
 // AddRetriever adds a retriever node to the parallel.
 // eg.
 //

@@ -243,6 +243,17 @@ func (c *Chain[I, O]) AppendEmbedding(node embedding.Embedder, opts ...GraphAddN
 	return c
 }
 
+// AppendMultiModalEmbedding adds a multimodal Embedding node to the chain.
+// e.g.
+//
+//	multiEmbedder := myimpl.NewMultiModalEmbedder(...)
+//	chain.AppendMultiModalEmbedding(multiEmbedder)
+func (c *Chain[I, O]) AppendMultiModalEmbedding(node embedding.MultiModalEmbedder, opts ...GraphAddNodeOpt) *Chain[I, O] {
+	gNode, options := toMultiModalEmbeddingNode(node, opts...)
+	c.addNode(gNode, options)
+	return c
+}
+
 // AppendRetriever add a Retriever node to the chain.
 // e.g.
 //

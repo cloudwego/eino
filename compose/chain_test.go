@@ -25,9 +25,10 @@ import (
 	"github.com/stretchr/testify/assert"
 	"go.uber.org/mock/gomock"
 
+	pkgembedding "github.com/cloudwego/eino/components/embedding"
 	"github.com/cloudwego/eino/components/prompt"
 	"github.com/cloudwego/eino/internal/mock/components/document"
-	"github.com/cloudwego/eino/internal/mock/components/embedding"
+	mockembedding "github.com/cloudwego/eino/internal/mock/components/embedding"
 	"github.com/cloudwego/eino/internal/mock/components/indexer"
 	"github.com/cloudwego/eino/internal/mock/components/model"
 	"github.com/cloudwego/eino/internal/mock/components/retriever"
@@ -380,12 +381,34 @@ func TestChainMultiNodes(t *testing.T) {
 		chain := NewChain[[]string, [][]float64]()
 
 		mockCtrl := gomock.NewController(t)
-		eb := embedding.NewMockEmbedder(mockCtrl)
+		eb := mockembedding.NewMockEmbedder(mockCtrl)
 		chain.AppendEmbedding(eb)
 
 		r, err := chain.Compile(ctx)
 		assert.NoError(t, err)
 		assert.NotNil(t, r)
+	})
+
+	t.Run("test multimodal embedding node", func(t *testing.T) {
+		chain := NewChain[[]pkgembedding.MultiModalInput, [][]float64]()
+		node := &testMultiModalEmbedder{}
+		chain.AppendMultiModalEmbedding(node)
+
+		r, err := chain.Compile(ctx)
+		assert.NoError(t, err)
+		assert.NotNil(t, r)
+
+		out, err := r.Invoke(ctx, []pkgembedding.MultiModalInput{
+			{
+				{
+					Type: schema.ChatMessagePartTypeText,
+					Text: "hello",
+				},
+			},
+		})
+		assert.NoError(t, err)
+		assert.Len(t, out, 1)
+		assert.True(t, node.called)
 	})
 
 	t.Run("test retriever Node", func(t *testing.T) {
@@ -561,7 +584,7 @@ func TestParallelMultiNodes(t *testing.T) {
 	p.AddRetriever("retriever", retriever.NewMockRetriever(gomock.NewController(t)))
 	p.AddChatModel("chatmodel", model.NewMockChatModel(gomock.NewController(t)))
 	p.AddChatTemplate("chatTemplate", prompt.FromMessages(schema.FString, schema.SystemMessage("hello")))
-	p.AddEmbedding("embedding", embedding.NewMockEmbedder(gomock.NewController(t)))
+	p.AddEmbedding("embedding", mockembedding.NewMockEmbedder(gomock.NewController(t)))
 	p.AddPassthrough("passthrough")
 	toolsNode, err := NewToolNode(ctx, &ToolsNodeConfig{})
 	assert.NoError(t, err)
@@ -589,6 +612,23 @@ func TestParallelMultiNodes(t *testing.T) {
 
 type FakeLambdaOptions struct {
 	Info string
+}
+
+type testMultiModalEmbedder struct {
+	called bool
+}
+
+func (t *testMultiModalEmbedder) EmbedStrings(ctx context.Context, texts []string, opts ...pkgembedding.Option) ([][]float64, error) {
+	return nil, fmt.Errorf("text embedding not supported in test")
+}
+
+func (t *testMultiModalEmbedder) EmbedMultiModal(ctx context.Context, inputs []pkgembedding.MultiModalInput, opts ...pkgembedding.Option) ([][]float64, error) {
+	t.called = true
+	result := make([][]float64, len(inputs))
+	for i := range result {
+		result[i] = []float64{float64(len(inputs[i]))}
+	}
+	return result, nil
 }
 
 type FakeLambdaOption func(opt *FakeLambdaOptions)

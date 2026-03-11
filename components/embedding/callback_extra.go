@@ -19,6 +19,7 @@ package embedding
 
 import (
 	"github.com/cloudwego/eino/callbacks"
+	"github.com/cloudwego/eino/schema"
 )
 
 // TokenUsage is the token usage for the embedding.
@@ -51,6 +52,8 @@ type ComponentExtra struct {
 type CallbackInput struct {
 	// Texts is the texts to be embedded.
 	Texts []string
+	// MultiModalInputs contains multimodal samples to embedded (text,images,etc.).
+	MultiModalInputs []MultiModalInput
 	// Config is the config for the embedding.
 	Config *Config
 	// Extra is the extra information for the callback.
@@ -77,6 +80,22 @@ func ConvCallbackInput(src callbacks.CallbackInput) *CallbackInput {
 	case []string:
 		return &CallbackInput{
 			Texts: t,
+		}
+	case []MultiModalInput:
+		return &CallbackInput{
+			MultiModalInputs: t,
+		}
+	case [][]schema.MessageInputPart:
+		ret := make([]MultiModalInput, len(t))
+		for i := range t {
+			ret[i] = t[i]
+		}
+		return &CallbackInput{
+			MultiModalInputs: ret,
+		}
+	case []schema.MessageInputPart:
+		return &CallbackInput{
+			MultiModalInputs: []MultiModalInput{t},
 		}
 	default:
 		return nil
