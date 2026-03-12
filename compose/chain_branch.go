@@ -207,6 +207,15 @@ func (cb *ChainBranch) AddEmbedding(key string, node embedding.Embedder, opts ..
 	return cb.addNode(key, gNode, options)
 }
 
+// AddMultiModalEmbedding adds a multimodal Embedding node to the branch.
+// eg.
+//
+//	cb.AddMultiModalEmbedding("embedding_node_key", multiModalEmbeddingNode)
+func (cb *ChainBranch) AddMultiModalEmbedding(key string, node embedding.MultiModalEmbedder, opts ...GraphAddNodeOpt) *ChainBranch {
+	gNode, options := toMultiModalEmbeddingNode(node, opts...)
+	return cb.addNode(key, gNode, options)
+}
+
 // AddRetriever adds a Retriever node to the branch.
 // eg.
 //
