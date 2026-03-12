@@ -2055,3 +2055,148 @@ func TestMessageString(t *testing.T) {
 		assert.Contains(t, result, "assistant_gen_multi_content:")
 	})
 }
+
+func TestConvToolOutputPartToMessageInputPart(t *testing.T) {
+	t.Run("text part", func(t *testing.T) {
+		toolPart := ToolOutputPart{
+			Type: ToolPartTypeText,
+			Text: "test text",
+			Extra: map[string]any{"key": "value"},
+		}
+		result, err := convToolOutputPartToMessageInputPart(toolPart)
+		assert.NoError(t, err)
+		assert.Equal(t, ChatMessagePartTypeText, result.Type)
+		assert.Equal(t, "test text", result.Text)
+		assert.Equal(t, map[string]any{"key": "value"}, result.Extra)
+	})
+
+	t.Run("image part", func(t *testing.T) {
+		url := "https://example.com/image.png"
+		toolPart := ToolOutputPart{
+			Type: ToolPartTypeImage,
+			Image: &ToolOutputImage{
+				MessagePartCommon: MessagePartCommon{
+					URL:      &url,
+					MIMEType: "image/png",
+				},
+			},
+			Extra: map[string]any{"img_key": "img_value"},
+		}
+		result, err := convToolOutputPartToMessageInputPart(toolPart)
+		assert.NoError(t, err)
+		assert.Equal(t, ChatMessagePartTypeImageURL, result.Type)
+		assert.NotNil(t, result.Image)
+		assert.Equal(t, url, *result.Image.URL)
+		assert.Equal(t, "image/png", result.Image.MIMEType)
+		assert.Equal(t, map[string]any{"img_key": "img_value"}, result.Extra)
+	})
+
+	t.Run("image part nil content", func(t *testing.T) {
+		toolPart := ToolOutputPart{
+			Type:  ToolPartTypeImage,
+			Image: nil,
+		}
+		result, err := convToolOutputPartToMessageInputPart(toolPart)
+		assert.Error(t, err)
+		assert.ErrorContains(t, err, "image content is nil")
+		assert.Equal(t, MessageInputPart{}, result)
+	})
+
+	t.Run("audio part", func(t *testing.T) {
+		base64Data := "dGVzdF9hdWRpbw=="
+		toolPart := ToolOutputPart{
+			Type: ToolPartTypeAudio,
+			Audio: &ToolOutputAudio{
+				MessagePartCommon: MessagePartCommon{
+					Base64Data: &base64Data,
+					MIMEType:   "audio/wav",
+				},
+			},
+		}
+		result, err := convToolOutputPartToMessageInputPart(toolPart)
+		assert.NoError(t, err)
+		assert.Equal(t, ChatMessagePartTypeAudioURL, result.Type)
+		assert.NotNil(t, result.Audio)
+		assert.Equal(t, base64Data, *result.Audio.Base64Data)
+		assert.Equal(t, "audio/wav", result.Audio.MIMEType)
+	})
+
+	t.Run("audio part nil content", func(t *testing.T) {
+		toolPart := ToolOutputPart{
+			Type:  ToolPartTypeAudio,
+			Audio: nil,
+		}
+		_, err := convToolOutputPartToMessageInputPart(toolPart)
+		assert.Error(t, err)
+		assert.ErrorContains(t, err, "audio content is nil")
+	})
+
+	t.Run("video part", func(t *testing.T) {
+		url := "https://example.com/video.mp4"
+		toolPart := ToolOutputPart{
+			Type: ToolPartTypeVideo,
+			Video: &ToolOutputVideo{
+				MessagePartCommon: MessagePartCommon{
+					URL:      &url,
+					MIMEType: "video/mp4",
+				},
+			},
+		}
+		result, err := convToolOutputPartToMessageInputPart(toolPart)
+		assert.NoError(t, err)
+		assert.Equal(t, ChatMessagePartTypeVideoURL, result.Type)
+		assert.NotNil(t, result.Video)
+		assert.Equal(t, url, *result.Video.URL)
+		assert.Equal(t, "video/mp4", result.Video.MIMEType)
+	})
+
+	t.Run("video part nil content", func(t *testing.T) {
+		toolPart := ToolOutputPart{
+			Type:  ToolPartTypeVideo,
+			Video: nil,
+		}
+		_, err := convToolOutputPartToMessageInputPart(toolPart)
+		assert.Error(t, err)
+		assert.ErrorContains(t, err, "video content is nil")
+	})
+
+	t.Run("file part", func(t *testing.T) {
+		url := "https://example.com/file.pdf"
+		toolPart := ToolOutputPart{
+			Type: ToolPartTypeFile,
+			File: &ToolOutputFile{
+				MessagePartCommon: MessagePartCommon{
+					URL:      &url,
+					MIMEType: "application/pdf",
+				},
+			},
+			Extra: map[string]any{"file_key": "file_value"},
+		}
+		result, err := convToolOutputPartToMessageInputPart(toolPart)
+		assert.NoError(t, err)
+		assert.Equal(t, ChatMessagePartTypeFileURL, result.Type)
+		assert.NotNil(t, result.File)
+		assert.Equal(t, url, *result.File.URL)
+		assert.Equal(t, "application/pdf", result.File.MIMEType)
+		assert.Equal(t, map[string]any{"file_key": "file_value"}, result.Extra)
+	})
+
+	t.Run("file part nil content", func(t *testing.T) {
+		toolPart := ToolOutputPart{
+			Type: ToolPartTypeFile,
+			File: nil,
+		}
+		_, err := convToolOutputPartToMessageInputPart(toolPart)
+		assert.Error(t, err)
+		assert.ErrorContains(t, err, "file content is nil")
+	})
+
+	t.Run("unknown type", func(t *testing.T) {
+		toolPart := ToolOutputPart{
+			Type: "unknown_type",
+		}
+		_, err := convToolOutputPartToMessageInputPart(toolPart)
+		assert.Error(t, err)
+		assert.ErrorContains(t, err, "unknown tool part type")
+	})
+}
