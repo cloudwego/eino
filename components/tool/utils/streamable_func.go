@@ -33,8 +33,9 @@ type StreamFunc[T, D any] func(ctx context.Context, input T) (output *schema.Str
 // OptionableStreamFunc is the function type for the streamable tool with tool option.
 type OptionableStreamFunc[T, D any] func(ctx context.Context, input T, opts ...tool.Option) (output *schema.StreamReader[D], err error)
 
-// InferStreamTool creates an StreamableTool from a given function by inferring the ToolInfo from the function's request parameters
-// End-user can pass a SchemaCustomizerFn in opts to customize the go struct tag parsing process, overriding default behavior.
+// InferStreamTool creates a [tool.StreamableTool] by inferring the parameter
+// JSON schema from type T. The function returns a [schema.StreamReader] of D
+// values which the framework serialises to a string stream.
 func InferStreamTool[T, D any](toolName, toolDesc string, s StreamFunc[T, D], opts ...Option) (tool.StreamableTool, error) {
 	ti, err := goStruct2ToolInfo[T](toolName, toolDesc, opts...)
 	if err != nil {
@@ -44,7 +45,8 @@ func InferStreamTool[T, D any](toolName, toolDesc string, s StreamFunc[T, D], op
 	return NewStreamTool(ti, s, opts...), nil
 }
 
-// InferOptionableStreamTool creates an StreamableTool from a given function by inferring the ToolInfo from the function's request parameters, with tool option.
+// InferOptionableStreamTool is like [InferStreamTool] but the function also
+// receives [tool.Option] values passed by ToolsNode at call time.
 func InferOptionableStreamTool[T, D any](toolName, toolDesc string, s OptionableStreamFunc[T, D], opts ...Option) (tool.StreamableTool, error) {
 	ti, err := goStruct2ToolInfo[T](toolName, toolDesc, opts...)
 	if err != nil {
@@ -54,8 +56,8 @@ func InferOptionableStreamTool[T, D any](toolName, toolDesc string, s Optionable
 	return newOptionableStreamTool(ti, s, opts...), nil
 }
 
-// NewStreamTool Create a streaming tool, where the input and output are both in JSON format.
-// convert: convert the stream frame to string that could be concatenated to a string.
+// NewStreamTool creates a [tool.StreamableTool] from an explicit [schema.ToolInfo]
+// and a typed streaming function.
 func NewStreamTool[T, D any](desc *schema.ToolInfo, s StreamFunc[T, D], opts ...Option) tool.StreamableTool {
 	return newOptionableStreamTool(desc,
 		func(ctx context.Context, input T, _ ...tool.Option) (output *schema.StreamReader[D], err error) {
@@ -162,8 +164,9 @@ type EnhancedStreamFunc[T any] func(ctx context.Context, input T) (output *schem
 // OptionableEnhancedStreamFunc is the function type for the enhanced streamable tool with tool option.
 type OptionableEnhancedStreamFunc[T any] func(ctx context.Context, input T, opts ...tool.Option) (output *schema.StreamReader[*schema.ToolResult], err error)
 
-// InferEnhancedStreamTool creates an EnhancedStreamableTool from a given function by inferring the ToolInfo from the function's request parameters.
-// End-user can pass a SchemaCustomizerFn in opts to customize the go struct tag parsing process, overriding default behavior.
+// InferEnhancedStreamTool creates an [tool.EnhancedStreamableTool] by inferring
+// the parameter JSON schema from type T. The function streams [schema.ToolResult]
+// values for multimodal output.
 func InferEnhancedStreamTool[T any](toolName, toolDesc string, s EnhancedStreamFunc[T], opts ...Option) (tool.EnhancedStreamableTool, error) {
 	ti, err := goStruct2ToolInfo[T](toolName, toolDesc, opts...)
 	if err != nil {
@@ -183,7 +186,8 @@ func InferOptionableEnhancedStreamTool[T any](toolName, toolDesc string, s Optio
 	return newOptionableEnhancedStreamTool(ti, s, opts...), nil
 }
 
-// NewEnhancedStreamTool Create an enhanced streaming tool, where the input is in JSON format and output is *schema.StreamReader[*schema.ToolResult].
+// NewEnhancedStreamTool creates an [tool.EnhancedStreamableTool] from an
+// explicit [schema.ToolInfo] and a typed streaming function.
 func NewEnhancedStreamTool[T any](desc *schema.ToolInfo, s EnhancedStreamFunc[T], opts ...Option) tool.EnhancedStreamableTool {
 	return newOptionableEnhancedStreamTool(desc,
 		func(ctx context.Context, input T, _ ...tool.Option) (output *schema.StreamReader[*schema.ToolResult], err error) {

@@ -20,35 +20,68 @@ import (
 	"github.com/cloudwego/eino/internal/callbacks"
 )
 
-// RunInfo contains information about the running component.
+// RunInfo describes the entity that triggered a callback. Always nil-check
+// before dereferencing — a component that calls OnStart without first calling
+// EnsureRunInfo or InitCallbacks will leave RunInfo absent in the context.
+//
+// Fields:
+//   - Name: business-meaningful name specified by the user. For nodes in a
+//     graph this is the node name (compose.WithNodeName). For standalone
+//     components it must be set explicitly via [InitCallbacks] or
+//     [ReuseHandlers]; it is empty string if not set.
+//   - Type: implementation identity, e.g. "OpenAI". Set by the component via
+//     [components.Typer]; falls back to reflection (struct/func name) if the
+//     interface is not implemented. Empty for Graph itself.
+//   - Component: category constant, e.g. components.ComponentOfChatModel.
+//     Fixed value "Lambda" for lambdas, "Graph"/"Chain"/"Workflow" for graphs.
+//     Use this to branch on component kind without caring about implementation.
+//
+// Handlers should filter using RunInfo rather than assuming a fixed execution
+// order — there is no guaranteed ordering between different Handlers.
 type RunInfo = callbacks.RunInfo
 
-// CallbackInput is the input of the callback.
-// the type of input is defined by the component.
-// using type Assert or convert func to convert the input to the right type you want.
-// e.g.
+// CallbackInput is the value passed to OnStart and OnStartWithStreamInput
+// handlers. The concrete type is defined by the component — for example,
+// ChatModel callbacks carry *model.CallbackInput. Use the component package's
+// ConvCallbackInput helper (e.g. model.ConvCallbackInput) to cast safely; it
+// returns nil if the type does not match, so you can ignore irrelevant
+// component types:
 //
-//		CallbackInput in components/model/interface.go is:
-//		type CallbackInput struct {
-//			Messages []*schema.Message
-//			Config   *Config
-//			Extra map[string]any
-//		}
-//
-//	 and provide a func of model.ConvCallbackInput() to convert CallbackInput to *model.CallbackInput
-//	 in callback handler, you can use the following code to get the input:
-//
-//		modelCallbackInput := model.ConvCallbackInput(in)
-//		if modelCallbackInput == nil {
-//			// is not a model callback input, just ignore it
-//			return
-//		}
+//	modelInput := model.ConvCallbackInput(in)
+//	if modelInput == nil {
+//	    return ctx // not a model invocation, skip
+//	}
+//	log.Printf("prompt: %v", modelInput.Messages)
 type CallbackInput = callbacks.CallbackInput
 
-// CallbackOutput is the unified callback output alias used by Eino.
+// CallbackOutput is the value passed to OnEnd and OnEndWithStreamOutput
+// handlers. Like CallbackInput, the concrete type is component-defined.
+// Use the component package's ConvCallbackOutput helper to cast safely.
 type CallbackOutput = callbacks.CallbackOutput
 
-// Handler is the unified callback handler alias used by Eino.
+// Handler is the unified callback handler interface. Implement all five
+// methods (OnStart, OnEnd, OnError, OnStartWithStreamInput,
+// OnEndWithStreamOutput) or use [NewHandlerBuilder] to set only the timings
+// you care about.
+//
+// Each method receives the context returned by the previous timing of the
+// SAME handler, which lets a single handler pass state between its OnStart
+// and OnEnd calls via context.WithValue. There is NO guaranteed execution
+// order between DIFFERENT handlers, and the context chain does not flow
+// from one handler to the next — do not rely on handler ordering.
+//
+// Implement [TimingChecker] (the Needed method) on your handler so the
+// framework can skip timings you have not registered; this avoids unnecessary
+// stream copies and goroutine allocations on every component invocation.
+//
+// Stream handlers (OnStartWithStreamInput, OnEndWithStreamOutput) receive a
+// [*schema.StreamReader] that has already been copied; they MUST close their
+// copy after reading. If any handler's copy is not closed, the original stream
+// cannot be freed, causing a goroutine/memory leak for the entire pipeline.
+//
+// Important: do NOT mutate the Input or Output values. All downstream nodes
+// and handlers share the same pointer (direct assignment, not a deep copy).
+// Mutations cause data races in concurrent graph execution.
 type Handler = callbacks.Handler
 
 // InitCallbackHandlers sets the global callback handlers.
@@ -59,29 +92,54 @@ func InitCallbackHandlers(handlers []Handler) {
 	callbacks.GlobalHandlers = handlers
 }
 
-// AppendGlobalHandlers appends the given handlers to the global callback handlers.
-// This is the preferred way to add global callback handlers as it preserves existing handlers.
-// The global callback handlers will be executed for all nodes BEFORE user-specific handlers in CallOption.
-// Note: This function is not thread-safe and should only be called during process initialization.
+// AppendGlobalHandlers appends handlers to the process-wide list of callback
+// handlers. Global handlers run before per-invocation handlers provided via
+// compose.WithCallbacks, giving them higher priority for instrumentation that
+// must observe every component invocation (e.g. distributed tracing, metrics).
+//
+// This function is NOT thread-safe. Call it once during program initialization
+// (e.g. in main or TestMain), before any graph executions begin.
+// Calling it concurrently with ongoing graph executions leads to data races.
 func AppendGlobalHandlers(handlers ...Handler) {
 	callbacks.GlobalHandlers = append(callbacks.GlobalHandlers, handlers...)
 }
 
-// CallbackTiming enumerates all the timing of callback aspects.
+// CallbackTiming enumerates the lifecycle moments at which a callback handler
+// is invoked. Implement [TimingChecker] on your handler and return false for
+// timings you do not handle, so the framework skips the overhead of stream
+// copying and goroutine spawning for those timings.
 type CallbackTiming = callbacks.CallbackTiming
 
-// CallbackTiming values enumerate the lifecycle moments when handlers run.
+// Callback timing constants.
 const (
+	// TimingOnStart fires just before the component begins processing.
+	// Receives a fully-formed input value (non-streaming).
 	TimingOnStart CallbackTiming = iota
+	// TimingOnEnd fires after the component returns a result successfully.
+	// Receives the output value. Only fires on success — not on error.
 	TimingOnEnd
+	// TimingOnError fires when the component returns a non-nil error.
+	// Stream errors (mid-stream panics) are NOT reported here; they surface
+	// as errors inside the stream reader.
 	TimingOnError
+	// TimingOnStartWithStreamInput fires when the component receives a
+	// streaming input (Collect / Transform paradigms). The handler receives a
+	// copy of the input stream and must close it after reading.
 	TimingOnStartWithStreamInput
+	// TimingOnEndWithStreamOutput fires after the component returns a
+	// streaming output (Stream / Transform paradigms). The handler receives a
+	// copy of the output stream and must close it after reading. This is
+	// typically where you implement streaming metrics or logging.
 	TimingOnEndWithStreamOutput
 )
 
-// TimingChecker checks if the handler is needed for the given callback aspect timing.
-// It's recommended for callback handlers to implement this interface, but not mandatory.
-// If a callback handler is created by using callbacks.HandlerHelper or handlerBuilder, then this interface is automatically implemented.
-// Eino's callback mechanism will try to use this interface to determine whether any handlers are needed for the given timing.
-// Also, the callback handler that is not needed for that timing will be skipped.
+// TimingChecker is an optional interface for [Handler] implementations.
+// When a handler implements Needed, the framework calls it before each
+// component invocation to decide whether to set up callback infrastructure
+// (stream copying, goroutine allocation) for that timing. Returning false
+// avoids unnecessary overhead.
+//
+// Handlers built with [NewHandlerBuilder] or
+// utils/callbacks.NewHandlerHelper automatically implement TimingChecker
+// based on which callback functions were set.
 type TimingChecker = callbacks.TimingChecker

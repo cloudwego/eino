@@ -35,8 +35,14 @@ type InvokeFunc[T, D any] func(ctx context.Context, input T) (output D, err erro
 // OptionableInvokeFunc is the function type for the tool with tool option.
 type OptionableInvokeFunc[T, D any] func(ctx context.Context, input T, opts ...tool.Option) (output D, err error)
 
-// InferTool creates an InvokableTool from a given function by inferring the ToolInfo from the function's request parameters.
-// End-user can pass a SchemaCustomizerFn in opts to customize the go struct tag parsing process, overriding default behavior.
+// InferTool creates an [tool.InvokableTool] by inferring the parameter JSON
+// schema from the fields and tags of the input type T.
+//
+// The tool automatically JSON-decodes the model's argument string into T before
+// calling fn, and JSON-encodes the D return value into the result string.
+//
+// Use [WithSchemaModifier] in opts to customise how struct tags are mapped to
+// JSON schema fields.
 func InferTool[T, D any](toolName, toolDesc string, i InvokeFunc[T, D], opts ...Option) (tool.InvokableTool, error) {
 	ti, err := goStruct2ToolInfo[T](toolName, toolDesc, opts...)
 	if err != nil {
@@ -46,7 +52,8 @@ func InferTool[T, D any](toolName, toolDesc string, i InvokeFunc[T, D], opts ...
 	return NewTool(ti, i, opts...), nil
 }
 
-// InferOptionableTool creates an InvokableTool from a given function by inferring the ToolInfo from the function's request parameters, with tool option.
+// InferOptionableTool is like [InferTool] but the function also receives
+// [tool.Option] values passed by ToolsNode at call time.
 func InferOptionableTool[T, D any](toolName, toolDesc string, i OptionableInvokeFunc[T, D], opts ...Option) (tool.InvokableTool, error) {
 	ti, err := goStruct2ToolInfo[T](toolName, toolDesc, opts...)
 	if err != nil {
@@ -62,8 +69,9 @@ type EnhancedInvokeFunc[T any] func(ctx context.Context, input T) (output *schem
 // OptionableEnhancedInvokeFunc is the function type for the enhanced tool with tool option.
 type OptionableEnhancedInvokeFunc[T any] func(ctx context.Context, input T, opts ...tool.Option) (output *schema.ToolResult, err error)
 
-// InferEnhancedTool creates an EnhancedInvokableTool from a given function by inferring the ToolInfo from the function's request parameters.
-// End-user can pass a SchemaCustomizerFn in opts to customize the go struct tag parsing process, overriding default behavior.
+// InferEnhancedTool creates an [tool.EnhancedInvokableTool] by inferring the
+// parameter JSON schema from type T. The function returns a [schema.ToolResult]
+// for multimodal output (text, images, audio, video, files).
 func InferEnhancedTool[T any](toolName, toolDesc string, i EnhancedInvokeFunc[T], opts ...Option) (tool.EnhancedInvokableTool, error) {
 	ti, err := goStruct2ToolInfo[T](toolName, toolDesc, opts...)
 	if err != nil {
@@ -83,14 +91,16 @@ func InferOptionableEnhancedTool[T any](toolName, toolDesc string, i OptionableE
 	return newOptionableEnhancedTool(ti, i, opts...), nil
 }
 
-// GoStruct2ParamsOneOf converts a go struct to a ParamsOneOf.
-// if you attempt to use ResponseFormat of some ChatModel to get StructuredOutput, you can infer the JSONSchema from the go struct.
+// GoStruct2ParamsOneOf converts a Go struct's fields and tags into a
+// [schema.ParamsOneOf] (JSON Schema 2020-12). Useful for ChatModel structured
+// output via ResponseFormat without creating a full tool.
 func GoStruct2ParamsOneOf[T any](opts ...Option) (*schema.ParamsOneOf, error) {
 	return goStruct2ParamsOneOf[T](opts...)
 }
 
-// GoStruct2ToolInfo converts a go struct to a ToolInfo.
-// if you attempt to use BindTool to make ChatModel respond StructuredOutput, you can infer the ToolInfo from the go struct.
+// GoStruct2ToolInfo converts a Go struct into a [schema.ToolInfo]. Useful for
+// binding a typed schema to a ChatModel via BindTools for structured output,
+// when you do not need a full executable tool.
 func GoStruct2ToolInfo[T any](toolName, toolDesc string, opts ...Option) (*schema.ToolInfo, error) {
 	return goStruct2ToolInfo[T](toolName, toolDesc, opts...)
 }
@@ -124,7 +134,12 @@ func goStruct2ParamsOneOf[T any](opts ...Option) (*schema.ParamsOneOf, error) {
 	return paramsOneOf, nil
 }
 
-// NewTool Create a tool, where the input and output are both in JSON format.
+// NewTool creates an [tool.InvokableTool] from an explicit [schema.ToolInfo]
+// and a typed function. Use this when the schema cannot be inferred from struct
+// tags (e.g. dynamic or complex parameter schemas).
+//
+// Note: you are responsible for keeping desc.ParamsOneOf consistent with the
+// actual fields of T — there is no compile-time check.
 func NewTool[T, D any](desc *schema.ToolInfo, i InvokeFunc[T, D], opts ...Option) tool.InvokableTool {
 	return newOptionableTool(desc, func(ctx context.Context, input T, _ ...tool.Option) (D, error) {
 		return i(ctx, input)
@@ -228,7 +243,8 @@ func snakeToCamel(s string) string {
 	return strings.Join(parts, "")
 }
 
-// NewEnhancedTool Create an enhanced tool, where the input is in JSON format and output is *schema.ToolResult.
+// NewEnhancedTool creates an [tool.EnhancedInvokableTool] from an explicit
+// [schema.ToolInfo] and a function that returns [schema.ToolResult].
 func NewEnhancedTool[T any](desc *schema.ToolInfo, i EnhancedInvokeFunc[T], opts ...Option) tool.EnhancedInvokableTool {
 	return newOptionableEnhancedTool(desc, func(ctx context.Context, input T, _ ...tool.Option) (*schema.ToolResult, error) {
 		return i(ctx, input)

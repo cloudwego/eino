@@ -14,7 +14,6 @@
  * limitations under the License.
  */
 
-// Package embedding defines callback payloads for embedding components.
 package embedding
 
 import (

@@ -23,7 +23,14 @@ import (
 	"github.com/cloudwego/eino/schema"
 )
 
-// Parser is a document parser, can be used to parse a document from a reader.
+// Parser converts raw content from an [io.Reader] into [schema.Document] values.
+//
+// Parse may return multiple documents from a single reader (e.g. a PDF with
+// per-page splitting). The reader is consumed during Parse and must not be
+// reused.
+//
+// Parsers are typically not called directly — they are configured on a
+// [document.Loader] and invoked via [document.WithParserOptions].
 type Parser interface {
 	Parse(ctx context.Context, reader io.Reader, opts ...Option) ([]*schema.Document, error)
 }

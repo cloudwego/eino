@@ -39,7 +39,10 @@ type Options struct {
 	AllowedToolNames []string
 }
 
-// Option is the call option for ChatModel component.
+// Option is a call-time option for a ChatModel. Options are immutable and
+// composable: each Option carries either a common-option setter (applied via
+// [GetCommonOptions]) or an implementation-specific setter (applied via
+// [GetImplSpecificOptions]), never both.
 type Option struct {
 	apply func(opts *Options)
 
@@ -114,14 +117,40 @@ func WithToolChoice(toolChoice schema.ToolChoice, allowedToolNames ...string) Op
 	}
 }
 
-// WrapImplSpecificOptFn is the option to wrap the implementation specific option function.
+// WrapImplSpecificOptFn wraps an implementation-specific option function into
+// an [Option] so it can be passed alongside standard options.
+//
+// This is intended for ChatModel implementors, not callers. Define a typed
+// setter for your own config struct and expose it as an Option:
+//
+//	// In your implementation package:
+//	func WithMyParam(v string) model.Option {
+//	    return model.WrapImplSpecificOptFn(func(o *MyOptions) {
+//	        o.MyParam = v
+//	    })
+//	}
+//
+// Callers can then mix standard and implementation-specific options freely:
+//
+//	model.Generate(ctx, msgs,
+//	    model.WithTemperature(0.7),
+//	    mypkg.WithMyParam("value"),
+//	)
 func WrapImplSpecificOptFn[T any](optFn func(*T)) Option {
 	return Option{
 		implSpecificOptFn: optFn,
 	}
 }
 
-// GetCommonOptions extract model Options from Option list, optionally providing a base Options with default values.
+// GetCommonOptions extracts standard [Options] from an Option list, merging
+// them onto base. If base is nil, a zero-value Options is used.
+//
+// Implementors must call this to honour options passed by callers:
+//
+//	func (m *MyModel) Generate(ctx context.Context, input []*schema.Message, opts ...model.Option) (*schema.Message, error) {
+//	    options := model.GetCommonOptions(&model.Options{Temperature: &m.defaultTemp}, opts...)
+//	    // use options.Temperature, options.Tools, etc.
+//	}
 func GetCommonOptions(base *Options, opts ...Option) *Options {
 	if base == nil {
 		base = &Options{}
@@ -137,14 +166,19 @@ func GetCommonOptions(base *Options, opts ...Option) *Options {
 	return base
 }
 
-// GetImplSpecificOptions extract the implementation specific options from Option list, optionally providing a base options with default values.
-// e.g.
+// GetImplSpecificOptions extracts implementation-specific options from an
+// Option list, merging them onto base. If base is nil, a zero-value T is used.
 //
-//	myOption := &MyOption{
-//		Field1: "default_value",
+// Call this alongside [GetCommonOptions] to support both standard and custom
+// options in your implementation:
+//
+//	type MyOptions struct { MyParam string }
+//
+//	func (m *MyModel) Generate(ctx context.Context, input []*schema.Message, opts ...model.Option) (*schema.Message, error) {
+//	    common  := model.GetCommonOptions(nil, opts...)
+//	    myOpts  := model.GetImplSpecificOptions(&MyOptions{MyParam: "default"}, opts...)
+//	    // use common.Temperature, myOpts.MyParam, etc.
 //	}
-//
-//	myOption := model.GetImplSpecificOptions(myOption, opts...)
 func GetImplSpecificOptions[T any](base *T, opts ...Option) *T {
 	if base == nil {
 		base = new(T)

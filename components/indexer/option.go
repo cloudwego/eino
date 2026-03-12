@@ -44,21 +44,20 @@ func WithEmbedding(emb embedding.Embedder) Option {
 	}
 }
 
-// Option is the call option for Indexer component.
+// Option is a call-time option for an Indexer.
 type Option struct {
 	apply func(opts *Options)
 
 	implSpecificOptFn any
 }
 
-// GetCommonOptions extract indexer Options from Option list, optionally providing a base Options with default values.
-// e.g.
+// GetCommonOptions extracts standard [Options] from opts, merging onto base.
+// Implementors must call this inside Store:
 //
-//	indexerOption := &IndexerOption{
-//		SubIndexes: []string{"default_sub_index"}, // default value
+//	func (idx *MyIndexer) Store(ctx context.Context, docs []*schema.Document, opts ...indexer.Option) ([]string, error) {
+//	    options := indexer.GetCommonOptions(nil, opts...)
+//	    // use options.Embedding to generate vectors before storage
 //	}
-//
-//	indexerOption := indexer.GetCommonOptions(indexerOption, opts...)
 func GetCommonOptions(base *Options, opts ...Option) *Options {
 	if base == nil {
 		base = &Options{}
@@ -74,21 +73,16 @@ func GetCommonOptions(base *Options, opts ...Option) *Options {
 	return base
 }
 
-// WrapImplSpecificOptFn is the option to wrap the implementation specific option function.
+// WrapImplSpecificOptFn wraps an implementation-specific option function so it
+// can be passed alongside standard options. For use by Indexer implementors.
 func WrapImplSpecificOptFn[T any](optFn func(*T)) Option {
 	return Option{
 		implSpecificOptFn: optFn,
 	}
 }
 
-// GetImplSpecificOptions extract the implementation specific options from Option list, optionally providing a base options with default values.
-// e.g.
-//
-//	myOption := &MyOption{
-//		Field1: "default_value",
-//	}
-//
-//	myOption := model.GetImplSpecificOptions(myOption, opts...)
+// GetImplSpecificOptions extracts implementation-specific options from opts,
+// merging onto base. Call alongside [GetCommonOptions] inside Store.
 func GetImplSpecificOptions[T any](base *T, opts ...Option) *T {
 	if base == nil {
 		base = new(T)

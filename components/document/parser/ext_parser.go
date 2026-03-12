@@ -14,8 +14,6 @@
  * limitations under the License.
  */
 
-// Package parser provides document parsers and helpers, including
-// a simple text parser and extension-aware parser.
 package parser
 
 import (

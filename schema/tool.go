@@ -38,24 +38,33 @@ const (
 	Boolean DataType = "boolean"
 )
 
-// ToolChoice controls how the model calls tools (if any).
+// ToolChoice controls how the model uses the tools provided to it.
+// Pass as part of the model option via [model.WithToolChoice].
 type ToolChoice string
 
 const (
-	// ToolChoiceForbidden indicates that the model should not call any tools.
+	// ToolChoiceForbidden instructs the model not to call any tools, even if
+	// tools are bound. The model responds with a plain text message instead.
 	// Corresponds to "none" in OpenAI Chat Completion.
 	ToolChoiceForbidden ToolChoice = "forbidden"
 
-	// ToolChoiceAllowed indicates that the model can choose to generate a message or call one or more tools.
+	// ToolChoiceAllowed lets the model decide: it may generate a plain message
+	// or call one or more tools. This is the default when tools are provided.
 	// Corresponds to "auto" in OpenAI Chat Completion.
 	ToolChoiceAllowed ToolChoice = "allowed"
 
-	// ToolChoiceForced indicates that the model must call one or more tools.
+	// ToolChoiceForced requires the model to call at least one tool. Use this
+	// when you want to guarantee structured output via tool calling.
 	// Corresponds to "required" in OpenAI Chat Completion.
 	ToolChoiceForced ToolChoice = "forced"
 )
 
-// ToolInfo is the information of a tool.
+// ToolInfo describes a tool that can be passed to a ChatModel via
+// [ToolCallingChatModel.WithTools] or [ChatModel.BindTools].
+//
+// Name should be concise and unique within the tool set. Desc should explain
+// when and why to use the tool; few-shot examples in Desc significantly improve
+// model accuracy. ParamsOneOf may be nil for tools that take no arguments.
 type ToolInfo struct {
 	// The unique name of the tool that clearly communicates its purpose.
 	Name string
@@ -90,11 +99,21 @@ type ParameterInfo struct {
 	Required bool
 }
 
-// ParamsOneOf is a union of the different methods user can choose which describe a tool's request parameters.
-// User must specify one and ONLY one method to describe the parameters.
-//  1. use NewParamsOneOfByParams(): an intuitive way to describe the parameters that covers most of the use-cases.
-//  2. use NewParamsOneOfByJSONSchema(): a formal way to describe the parameters that strictly adheres to JSONSchema specification.
-//     See https://json-schema.org/draft/2020-12.
+// ParamsOneOf holds a tool's parameter schema using exactly one of two
+// representations. Choose the one that best fits your needs:
+//
+//  1. [NewParamsOneOfByParams] — lightweight: describe parameters as a
+//     map[string]*[ParameterInfo]. Covers the most common cases (scalars,
+//     arrays, nested objects, enums, required flags).
+//
+//  2. [NewParamsOneOfByJSONSchema] — powerful: supply a full
+//     *jsonschema.Schema (JSON Schema 2020-12). Required when you need
+//     features not expressible via ParameterInfo, such as anyOf, oneOf, or
+//     $defs references. [utils.InferTool] generates this form automatically
+//     from Go struct tags.
+//
+// You must use exactly one constructor — setting both fields is invalid.
+// If ParamsOneOf is nil, the tool takes no input parameters.
 type ParamsOneOf struct {
 	// use NewParamsOneOfByParams to set this field
 	params map[string]*ParameterInfo

@@ -18,7 +18,20 @@ package embedding
 
 import "context"
 
-// Embedder embeds input texts into vector representations.
+// Embedder converts a batch of strings into dense vector representations.
+//
+// EmbedStrings returns one vector per input text, in the same order. The
+// vector length (dimensions) is fixed by the underlying model and identical
+// for every text in the batch.
+//
+// The returned [][]float64 maps as:
+//
+//	embeddings[i]  →  vector for texts[i]
+//	len(embeddings[i])  →  model's embedding dimension (e.g. 1536 for ada-002)
+//
+// Both [Indexer] and [Retriever] use an Embedder to convert documents and
+// queries into vectors. They must share the exact same model — mismatched
+// dimensions or model families break semantic similarity.
 //
 //go:generate  mockgen -destination ../../internal/mock/components/embedding/Embedding_mock.go --package embedding -source interface.go
 type Embedder interface {

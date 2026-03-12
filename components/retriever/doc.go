@@ -14,4 +14,33 @@
  * limitations under the License.
  */
 
+// Package retriever defines the Retriever component interface for fetching
+// relevant documents from a document store given a query.
+//
+// # Overview
+//
+// A Retriever is the read path of a RAG (Retrieval-Augmented Generation)
+// pipeline. Given a query string it returns the most relevant [schema.Document]
+// values from an underlying store (vector DB, keyword index, etc.).
+//
+// Concrete implementations (VikingDB, Milvus, Elasticsearch, …) live in
+// eino-ext:
+//
+//	github.com/cloudwego/eino-ext/components/retriever/
+//
+// # Relationship to Indexer
+//
+// [Indexer] and Retriever are complementary:
+//   - Indexer writes documents (and their vectors) to the store
+//   - Retriever reads them back
+//
+// When both use an [embedding.Embedder], it must be the same model — vector
+// dimensions must match or similarity scores will be meaningless.
+//
+// # Result Ordering
+//
+// Results are ordered by relevance score (descending). Scores and other
+// backend metadata are available via [schema.Document].MetaData.
+//
+// See https://www.cloudwego.io/docs/eino/core_modules/components/retriever_guide/
 package retriever

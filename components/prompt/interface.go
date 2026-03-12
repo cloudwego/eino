@@ -24,7 +24,21 @@ import (
 
 var _ ChatTemplate = &DefaultChatTemplate{}
 
-// ChatTemplate formats variables into a list of messages according to a prompt schema.
+// ChatTemplate formats a variables map into a list of messages for a ChatModel.
+//
+// Format substitutes the values from vs into the template's message list and
+// returns the resulting []*schema.Message. The exact substitution syntax
+// (FString, GoTemplate, Jinja2) is determined at construction time.
+//
+// Variable keys present in the template but absent from vs produce a runtime
+// error — there is no compile-time safety. Prefer consistent variable naming
+// across templates and callers.
+//
+// In a Graph or Chain, ChatTemplate typically precedes ChatModel. Use
+// compose.WithOutputKey to convert the prior node's output into the map[string]any
+// that Format expects.
+//
+// See [FromMessages] and [schema.MessagesPlaceholder] for construction helpers.
 type ChatTemplate interface {
 	Format(ctx context.Context, vs map[string]any, opts ...Option) ([]*schema.Message, error)
 }

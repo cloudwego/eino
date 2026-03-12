@@ -22,11 +22,19 @@ import (
 	"github.com/cloudwego/eino/schema"
 )
 
-// Indexer is the interface for the indexer.
-// Indexer is used to store the documents.
+// Indexer stores documents (and optionally their vector embeddings) in a
+// backend for later retrieval.
+//
+// Store accepts a batch of [schema.Document] values and returns the IDs
+// assigned to them by the backend. When [Options.Embedding] is provided,
+// the implementation generates vectors before storing — the same embedder
+// must be used by the paired [retriever.Retriever].
+//
+// Use [Options.SubIndexes] to write documents into logical sub-partitions
+// within the same store.
 //
 //go:generate  mockgen -destination ../../internal/mock/components/indexer/indexer_mock.go --package indexer -source interface.go
 type Indexer interface {
-	// Store stores the documents.
+	// Store stores the documents and returns their assigned IDs.
 	Store(ctx context.Context, docs []*schema.Document, opts ...Option) (ids []string, err error) // invoke
 }

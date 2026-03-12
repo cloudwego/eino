@@ -31,8 +31,8 @@ type Options struct {
 	// Embedding is the embedder for the retriever, which is used to embed the query for retrieval	.
 	Embedding embedding.Embedder
 
-	// DSLInfo is the dsl info for the retriever, which is used to retrieve the documents from the retriever.
-	// viking only
+	// DSLInfo carries backend-specific filter/query expressions. The structure and
+	// semantics are defined by the underlying store implementation.
 	DSLInfo map[string]any
 }
 
@@ -90,14 +90,20 @@ func WithDSLInfo(dsl map[string]any) Option {
 	}
 }
 
-// Option is the call option for Retriever component.
+// Option is a call-time option for a Retriever.
 type Option struct {
 	apply func(opts *Options)
 
 	implSpecificOptFn any
 }
 
-// GetCommonOptions extract retriever Options from Option list, optionally providing a base Options with default values.
+// GetCommonOptions extracts standard [Options] from opts, merging onto base.
+// Implementors must call this to honour caller-provided options:
+//
+//	func (r *MyRetriever) Retrieve(ctx context.Context, query string, opts ...retriever.Option) ([]*schema.Document, error) {
+//	    options := retriever.GetCommonOptions(&retriever.Options{TopK: &r.defaultTopK}, opts...)
+//	    // use options.TopK, options.ScoreThreshold, options.Embedding, etc.
+//	}
 func GetCommonOptions(base *Options, opts ...Option) *Options {
 	if base == nil {
 		base = &Options{}
@@ -112,21 +118,16 @@ func GetCommonOptions(base *Options, opts ...Option) *Options {
 	return base
 }
 
-// WrapImplSpecificOptFn is the option to wrap the implementation specific option function.
+// WrapImplSpecificOptFn wraps an implementation-specific option function so it
+// can be passed alongside standard options. For use by Retriever implementors.
 func WrapImplSpecificOptFn[T any](optFn func(*T)) Option {
 	return Option{
 		implSpecificOptFn: optFn,
 	}
 }
 
-// GetImplSpecificOptions extract the implementation specific options from Option list, optionally providing a base options with default values.
-// e.g.
-//
-//	myOption := &MyOption{
-//		Field1: "default_value",
-//	}
-//
-//	myOption := model.GetImplSpecificOptions(myOption, opts...)
+// GetImplSpecificOptions extracts implementation-specific options from opts,
+// merging onto base. Call alongside [GetCommonOptions] inside Retrieve.
 func GetImplSpecificOptions[T any](base *T, opts ...Option) *T {
 	if base == nil {
 		base = new(T)
