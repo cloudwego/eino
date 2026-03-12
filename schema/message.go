@@ -382,8 +382,9 @@ func convToolOutputPartToMessageInputPart(toolPart ToolOutputPart) (MessageInput
 	switch toolPart.Type {
 	case ToolPartTypeText:
 		return MessageInputPart{
-			Type: ChatMessagePartTypeText,
-			Text: toolPart.Text,
+			Type:  ChatMessagePartTypeText,
+			Text:  toolPart.Text,
+			Extra: toolPart.Extra,
 		}, nil
 	case ToolPartTypeImage:
 		if toolPart.Image == nil {
@@ -392,6 +393,7 @@ func convToolOutputPartToMessageInputPart(toolPart ToolOutputPart) (MessageInput
 		return MessageInputPart{
 			Type:  ChatMessagePartTypeImageURL,
 			Image: &MessageInputImage{MessagePartCommon: toolPart.Image.MessagePartCommon},
+			Extra: toolPart.Extra,
 		}, nil
 	case ToolPartTypeAudio:
 		if toolPart.Audio == nil {
@@ -400,6 +402,7 @@ func convToolOutputPartToMessageInputPart(toolPart ToolOutputPart) (MessageInput
 		return MessageInputPart{
 			Type:  ChatMessagePartTypeAudioURL,
 			Audio: &MessageInputAudio{MessagePartCommon: toolPart.Audio.MessagePartCommon},
+			Extra: toolPart.Extra,
 		}, nil
 	case ToolPartTypeVideo:
 		if toolPart.Video == nil {
@@ -408,14 +411,16 @@ func convToolOutputPartToMessageInputPart(toolPart ToolOutputPart) (MessageInput
 		return MessageInputPart{
 			Type:  ChatMessagePartTypeVideoURL,
 			Video: &MessageInputVideo{MessagePartCommon: toolPart.Video.MessagePartCommon},
+			Extra: toolPart.Extra,
 		}, nil
 	case ToolPartTypeFile:
 		if toolPart.File == nil {
 			return MessageInputPart{}, fmt.Errorf("file content is nil for tool part type %v", toolPart.Type)
 		}
 		return MessageInputPart{
-			Type: ChatMessagePartTypeFileURL,
-			File: &MessageInputFile{MessagePartCommon: toolPart.File.MessagePartCommon},
+			Type:  ChatMessagePartTypeFileURL,
+			File:  &MessageInputFile{MessagePartCommon: toolPart.File.MessagePartCommon},
+			Extra: toolPart.Extra,
 		}, nil
 	default:
 		return MessageInputPart{}, fmt.Errorf("unknown tool part type: %v", toolPart.Type)
