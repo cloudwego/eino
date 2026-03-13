@@ -310,6 +310,8 @@ const (
 
 	// ToolPartTypeFile means the part is a file url.
 	ToolPartTypeFile ToolPartType = "file"
+
+	ToolPartTypeToolSearchResult ToolPartType = "tool_search_result"
 )
 
 // ToolOutputImage represents an image in tool output.
@@ -336,6 +338,17 @@ type ToolOutputFile struct {
 	MessagePartCommon
 }
 
+type Namespace struct {
+	Name        string
+	Description string
+	Tools       []*ToolInfo
+}
+
+type ToolSearchResult struct {
+	Tools      []*ToolInfo
+	Namespaces []*Namespace
+}
+
 // ToolOutputPart represents a part of tool execution output.
 // It supports streaming scenarios through the Index field for chunk merging.
 type ToolOutputPart struct {
@@ -357,6 +370,8 @@ type ToolOutputPart struct {
 
 	// File is the file content, used when Type is ToolPartTypeFile.
 	File *ToolOutputFile `json:"file,omitempty"`
+
+	ToolSearchResult *ToolSearchResult
 
 	// Extra is used to store extra information.
 	Extra map[string]any `json:"extra,omitempty"`
@@ -685,6 +700,8 @@ type Message struct {
 
 	// ReasoningContent is the thinking process of the model, which will be included when the model returns reasoning content.
 	ReasoningContent string `json:"reasoning_content,omitempty"`
+
+	ToolSearchResult *ToolSearchResult `json:"tool_search_result,omitempty"`
 
 	// customized information for model implementation
 	Extra map[string]any `json:"extra,omitempty"`
