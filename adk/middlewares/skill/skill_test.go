@@ -202,7 +202,7 @@ type mockAgent struct {
 }
 
 func (a *mockAgent) Name(_ context.Context) string        { return "mock-agent" }
-func (a *mockAgent) Description(_ context.Context) string  { return "mock agent for testing" }
+func (a *mockAgent) Description(_ context.Context) string { return "mock agent for testing" }
 func (a *mockAgent) Run(_ context.Context, _ *adk.AgentInput, _ ...adk.AgentRunOption) *adk.AsyncIterator[*adk.AgentEvent] {
 	iter, gen := adk.NewAsyncIteratorPair[*adk.AgentEvent]()
 	go func() {
@@ -215,8 +215,8 @@ func (a *mockAgent) Run(_ context.Context, _ *adk.AgentInput, _ ...adk.AgentRunO
 }
 
 type mockAgentHub struct {
-	agents     map[string]adk.Agent
-	lastOpts   *AgentHubOptions
+	agents       map[string]adk.Agent
+	lastOpts     *AgentHubOptions
 	defaultAgent adk.Agent
 }
 
