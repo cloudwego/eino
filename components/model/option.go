@@ -28,6 +28,16 @@ type Options struct {
 	TopP *float32
 	// Tools is a list of tools the model may call.
 	Tools []*schema.ToolInfo
+	// DeferredTools is a list of tools to be registered with defer_loading=true
+	// for the model's built-in (server-side) tool search capability.
+	// These tools are sent to the model API but not loaded into context upfront —
+	// only their names and descriptions are visible to the model. The model's
+	// built-in tool search tool searches through them and loads matching ones
+	// on demand.
+	DeferredTools []*schema.ToolInfo
+
+	ToolSearchTool *schema.ToolInfo
+
 	// MaxTokens is the max number of tokens, if reached the max tokens, the model will stop generating, and mostly return a finish reason of "length".
 	MaxTokens *int
 	// Stop is the stop words for the model, which controls the stopping condition of the model.
@@ -110,6 +120,33 @@ func WithTools(tools []*schema.ToolInfo) Option {
 	return Option{
 		apply: func(opts *Options) {
 			opts.Tools = tools
+		},
+	}
+}
+
+// WithToolSearchTool is the option to register a tool search tool with the model.
+// When set, the model uses this tool to discover and load deferred tools on demand.
+// Note: The tool search tool should NOT be included in WithTools.
+func WithToolSearchTool(tool *schema.ToolInfo) Option {
+	return Option{
+		apply: func(opts *Options) {
+			opts.ToolSearchTool = tool
+		},
+	}
+}
+
+// WithDeferredTools is the option to set deferred tools for the model's
+// built-in (server-side) tool search. These tools are registered with
+// defer_loading=true so the model can discover and load them on demand
+// via its native tool search capability.
+// Note: Deferred tools should NOT be included in WithTools.
+func WithDeferredTools(tools []*schema.ToolInfo) Option {
+	if tools == nil {
+		tools = []*schema.ToolInfo{}
+	}
+	return Option{
+		apply: func(opts *Options) {
+			opts.DeferredTools = tools
 		},
 	}
 }

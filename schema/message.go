@@ -139,7 +139,6 @@ type ToolCall struct {
 	Type string `json:"type"`
 	// Function is the function call to be made.
 	Function FunctionCall `json:"function"`
-
 	// Extra is used to store extra information for the tool call.
 	Extra map[string]any `json:"extra,omitempty"`
 }
@@ -221,6 +220,9 @@ type MessageInputPart struct {
 
 	// File is the file input of the part, it's used when Type is "file_url".
 	File *MessageInputFile `json:"file,omitempty"`
+
+	// ToolSearchResult holds the result of a tool search request, containing the matched tool names and their definitions.
+	ToolSearchResult *ToolSearchResult `json:"tool_search_result,omitempty"`
 
 	// Extra is used to store extra information.
 	Extra map[string]any `json:"extra,omitempty"`
@@ -310,6 +312,9 @@ const (
 
 	// ToolPartTypeFile means the part is a file url.
 	ToolPartTypeFile ToolPartType = "file"
+
+	// ToolPartTypeToolSearchResult means the part contains tool search results.
+	ToolPartTypeToolSearchResult ToolPartType = "tool_search_result"
 )
 
 // ToolOutputImage represents an image in tool output.
@@ -336,6 +341,27 @@ type ToolOutputFile struct {
 	MessagePartCommon
 }
 
+// ToolSearchResult represents the result of a tool search operation.
+// When a model issues a tool search call, the framework searches for matching tools
+// and returns the results via this struct.
+type ToolSearchResult struct {
+	// Tools contains the full definitions of matched tools that were not previously
+	// registered. Their complete definitions are required so that the model can
+	// understand their parameters and usage.
+	Tools []*ToolInfo
+}
+
+func (t *ToolSearchResult) String() string {
+	sb := new(strings.Builder)
+	sb.WriteString("ToolSearchResult[")
+	for _, tool := range t.Tools {
+		sb.WriteString(tool.Name)
+		sb.WriteString(",")
+	}
+	sb.WriteString("]")
+	return sb.String()
+}
+
 // ToolOutputPart represents a part of tool execution output.
 // It supports streaming scenarios through the Index field for chunk merging.
 type ToolOutputPart struct {
@@ -357,6 +383,9 @@ type ToolOutputPart struct {
 
 	// File is the file content, used when Type is ToolPartTypeFile.
 	File *ToolOutputFile `json:"file,omitempty"`
+
+	// ToolSearchResult holds the tool search results, used when Type is ToolPartTypeToolSearchResult.
+	ToolSearchResult *ToolSearchResult `json:"tool_search_result,omitempty"`
 
 	// Extra is used to store extra information.
 	Extra map[string]any `json:"extra,omitempty"`
@@ -421,6 +450,14 @@ func convToolOutputPartToMessageInputPart(toolPart ToolOutputPart) (MessageInput
 			Type:  ChatMessagePartTypeFileURL,
 			File:  &MessageInputFile{MessagePartCommon: toolPart.File.MessagePartCommon},
 			Extra: toolPart.Extra,
+		}, nil
+	case ToolPartTypeToolSearchResult:
+		if toolPart.ToolSearchResult == nil {
+			return MessageInputPart{}, fmt.Errorf("tool search result is nil for tool part type %v", toolPart.Type)
+		}
+		return MessageInputPart{
+			Type:             ChatMessagePartTypeToolSearchResult,
+			ToolSearchResult: toolPart.ToolSearchResult,
 		}, nil
 	default:
 		return MessageInputPart{}, fmt.Errorf("unknown tool part type: %v", toolPart.Type)
@@ -498,6 +535,9 @@ const (
 	ChatMessagePartTypeFileURL ChatMessagePartType = "file_url"
 	// ChatMessagePartTypeReasoning means the part is a reasoning block.
 	ChatMessagePartTypeReasoning ChatMessagePartType = "reasoning"
+
+	// ChatMessagePartTypeToolSearchResult means the part contains tool search results.
+	ChatMessagePartTypeToolSearchResult ChatMessagePartType = "tool_search_result"
 )
 
 // Deprecated: This struct is deprecated as the MultiContent field is deprecated.
