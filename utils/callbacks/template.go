@@ -64,10 +64,10 @@ type HandlerHelper struct {
 	transformerHandler      *TransformerCallbackHandler
 	toolHandler             *ToolCallbackHandler
 	toolsNodeHandler        *ToolsNodeCallbackHandlers
+	agentHandler            *AgentCallbackHandler
 	agenticPromptHandler    *AgenticPromptCallbackHandler
 	agenticModelHandler     *AgenticModelCallbackHandler
 	agenticToolsNodeHandler *AgenticToolsNodeCallbackHandlers
-	agentHandler      		*AgentCallbackHandler
 	composeTemplates        map[components.Component]callbacks.Handler
 }
 
