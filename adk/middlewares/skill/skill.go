@@ -226,7 +226,7 @@ const activeModelKey = "__skill_active_model__"
 // New creates a new skill middleware.
 // It provides a tool for the agent to use skills.
 //
-// Deprecated: Use NewChatModelAgentMiddleware instead. New does not support fork mode execution
+// Deprecated: Use NewMiddleware instead. New does not support fork mode execution
 // because AgentMiddleware cannot save message history for fork mode.
 func New(ctx context.Context, config *Config) (adk.AgentMiddleware, error) {
 	if config == nil {
