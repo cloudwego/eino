@@ -18,12 +18,18 @@
 package toolsearch
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"regexp"
+	"sort"
+	"strings"
+	"text/template"
+	"unicode"
 
 	"github.com/cloudwego/eino/adk"
+	"github.com/cloudwego/eino/adk/internal"
 	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/components/tool"
 	"github.com/cloudwego/eino/schema"
@@ -41,7 +47,7 @@ type Config struct {
 // Instead of passing all tools to the model at once (which can overwhelm context limits),
 // this middleware:
 //
-//  1. Adds a "tool_search" meta-tool that accepts a regex pattern to search tool names
+//  1. Adds a "tool_search" meta-tool that accepts keyword queries to search tools
 //  2. Initially hides all dynamic tools from the model's tool list
 //  3. When the model calls tool_search, matching tools become available for subsequent calls
 //
@@ -62,14 +68,44 @@ func New(ctx context.Context, config *Config) (adk.ChatModelAgentMiddleware, err
 		return nil, fmt.Errorf("tools is required")
 	}
 
+	tpl, err := template.New("").Parse(systemReminderTpl)
+	if err != nil {
+		return nil, err
+	}
+
+	mapOfDynamicTools := make(map[string]*schema.ToolInfo, len(config.DynamicTools))
+	toolNames := make([]string, 0, len(config.DynamicTools))
+	for _, t := range config.DynamicTools {
+		info, infoErr := t.Info(ctx)
+		if infoErr != nil {
+			return nil, fmt.Errorf("failed to get dynamic tool info: %w", err)
+		}
+		toolNames = append(toolNames, info.Name)
+		mapOfDynamicTools[info.Name] = info
+	}
+
+	buf := &bytes.Buffer{}
+	err = tpl.Execute(buf, systemReminder{Tools: toolNames})
+	if err != nil {
+		return nil, fmt.Errorf("failed to format system reminder template: %w", err)
+	}
+
 	return &middleware{
-		dynamicTools: config.DynamicTools,
+		dynamicTools:      config.DynamicTools,
+		mapOfDynamicTools: mapOfDynamicTools,
+		sr:                buf.String(),
 	}, nil
+}
+
+type systemReminder struct {
+	Tools []string
 }
 
 type middleware struct {
 	adk.BaseChatModelAgentMiddleware
-	dynamicTools []tool.BaseTool
+	dynamicTools      []tool.BaseTool
+	mapOfDynamicTools map[string]*schema.ToolInfo
+	sr                string
 }
 
 func (m *middleware) BeforeAgent(ctx context.Context, runCtx *adk.ChatModelAgentContext) (context.Context, *adk.ChatModelAgentContext, error) {
@@ -78,22 +114,19 @@ func (m *middleware) BeforeAgent(ctx context.Context, runCtx *adk.ChatModelAgent
 	}
 
 	nRunCtx := *runCtx
-	toolNames, err := getToolNames(ctx, m.dynamicTools)
-	if err != nil {
-		return ctx, nil, fmt.Errorf("failed to get tool names: %w", err)
-	}
-	nRunCtx.Tools = append(nRunCtx.Tools, newToolSearchTool(toolNames))
+	nRunCtx.Tools = append(nRunCtx.Tools, newToolSearchTool(m.mapOfDynamicTools))
 	nRunCtx.Tools = append(nRunCtx.Tools, m.dynamicTools...)
 	return ctx, &nRunCtx, nil
 }
 
 func (m *middleware) WrapModel(_ context.Context, cm model.BaseChatModel, mc *adk.ModelContext) (model.BaseChatModel, error) {
-	return &wrapper{allTools: mc.Tools, cm: cm, dynamicTools: m.dynamicTools}, nil
+	return &wrapper{allTools: mc.Tools, cm: cm, dynamicTools: m.dynamicTools, reminder: m.sr}, nil
 }
 
 type wrapper struct {
 	allTools     []*schema.ToolInfo
 	dynamicTools []tool.BaseTool
+	reminder     string
 
 	cm model.BaseChatModel
 }
@@ -103,7 +136,7 @@ func (w *wrapper) Generate(ctx context.Context, input []*schema.Message, opts ..
 	if err != nil {
 		return nil, fmt.Errorf("failed to load dynamic tools: %w", err)
 	}
-	return w.cm.Generate(ctx, input, append(opts, model.WithTools(tools))...)
+	return w.cm.Generate(ctx, w.insertReminder(input), append(opts, model.WithTools(tools))...)
 }
 
 func (w *wrapper) Stream(ctx context.Context, input []*schema.Message, opts ...model.Option) (*schema.StreamReader[*schema.Message], error) {
@@ -111,29 +144,54 @@ func (w *wrapper) Stream(ctx context.Context, input []*schema.Message, opts ...m
 	if err != nil {
 		return nil, fmt.Errorf("failed to load dynamic tools: %w", err)
 	}
-	return w.cm.Stream(ctx, input, append(opts, model.WithTools(tools))...)
+	return w.cm.Stream(ctx, w.insertReminder(input), append(opts, model.WithTools(tools))...)
 }
 
-func newToolSearchTool(toolNames []string) *toolSearchTool {
-	return &toolSearchTool{toolNames: toolNames}
+func (w *wrapper) insertReminder(input []*schema.Message) []*schema.Message {
+	inserted := false
+	ret := make([]*schema.Message, 0, len(input)+1)
+	for _, m := range input {
+		if m.Role != schema.System && !inserted {
+			inserted = true
+			ret = append(ret, schema.UserMessage(w.reminder))
+		}
+		ret = append(ret, m)
+	}
+	if !inserted {
+		ret = append(ret, schema.UserMessage(w.reminder))
+	}
+	return ret
+}
+
+func newToolSearchTool(tools map[string]*schema.ToolInfo) *toolSearchTool {
+	return &toolSearchTool{tools: tools}
 }
 
 type toolSearchTool struct {
-	toolNames []string
+	tools map[string]*schema.ToolInfo
 }
 
 const (
 	toolSearchToolName = "tool_search"
+	defaultMaxResults  = 5
 )
 
-func (t *toolSearchTool) Info(ctx context.Context) (*schema.ToolInfo, error) {
+func (t *toolSearchTool) Info(_ context.Context) (*schema.ToolInfo, error) {
 	return &schema.ToolInfo{
-		Name: "tool_search",
-		Desc: "Search for tools using a regex pattern that matches tool names. Returns a list of matching tool names. Use this when you need a tool but don't have it available yet.",
+		Name: toolSearchToolName,
+		Desc: internal.SelectPrompt(internal.I18nPrompts{
+			English: toolDescription,
+			Chinese: toolDescriptionChinese,
+		}),
 		ParamsOneOf: schema.NewParamsOneOfByParams(map[string]*schema.ParameterInfo{
-			"regex_pattern": {
+			"query": {
 				Type:     schema.String,
-				Desc:     "A regex pattern to match tool names against.",
+				Desc:     "Query to find deferred tools. Use \"select:<tool_name>\" for direct selection, or keywords to search.",
+				Required: true,
+			},
+			"max_results": {
+				Type:     schema.Integer,
+				Desc:     "Maximum number of results to return (default: 5)",
 				Required: true,
 			},
 		}),
@@ -141,47 +199,253 @@ func (t *toolSearchTool) Info(ctx context.Context) (*schema.ToolInfo, error) {
 }
 
 type toolSearchArgs struct {
-	RegexPattern string `json:"regex_pattern"`
+	Query      string `json:"query"`
+	MaxResults *int   `json:"max_results,omitempty"`
 }
 
 type toolSearchResult struct {
-	SelectedTools []string `json:"selectedTools"`
+	Matches            []string `json:"matches"`
+	Query              string   `json:"query"`
+	TotalDeferredTools int      `json:"total_deferred_tools"`
 }
 
-func (t *toolSearchTool) InvokableRun(ctx context.Context, argumentsInJSON string, opts ...tool.Option) (string, error) {
+func (t *toolSearchTool) InvokableRun(_ context.Context, argumentsInJSON *schema.ToolArgument, _ ...tool.Option) (*schema.ToolResult, error) {
 	var args toolSearchArgs
-	if err := json.Unmarshal([]byte(argumentsInJSON), &args); err != nil {
-		return "", fmt.Errorf("failed to unmarshal tool search arguments: %w", err)
+	if err := json.Unmarshal([]byte(argumentsInJSON.Text), &args); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal tool search arguments: %w", err)
 	}
 
-	if args.RegexPattern == "" {
-		return "", fmt.Errorf("regex_pattern is required")
+	if args.Query == "" {
+		return nil, fmt.Errorf("query is required")
 	}
 
-	re, err := regexp.Compile(args.RegexPattern)
-	if err != nil {
-		return "", fmt.Errorf("invalid regex pattern: %w", err)
+	maxResults := defaultMaxResults
+	if args.MaxResults != nil && *args.MaxResults > 0 {
+		maxResults = *args.MaxResults
 	}
 
-	var matchedTools []string
-	for _, name := range t.toolNames {
-		if re.MatchString(name) {
-			matchedTools = append(matchedTools, name)
+	var matches []string
+
+	// Check for direct selection mode: select:tool1,tool2
+	if strings.HasPrefix(args.Query, "select:") {
+		names := strings.Split(strings.TrimPrefix(args.Query, "select:"), ",")
+		toolSet := make(map[string]bool, len(t.tools))
+		for name := range t.tools {
+			toolSet[name] = true
+		}
+		for _, name := range names {
+			name = strings.TrimSpace(name)
+			if name != "" && toolSet[name] {
+				matches = append(matches, name)
+			}
+		}
+	} else {
+		matches = t.keywordSearch(args.Query, maxResults)
+	}
+
+	ret := make([]*schema.ToolInfo, 0, len(matches))
+	for _, name := range matches {
+		ti, ok := t.tools[name]
+		if !ok {
+			continue
+		}
+		ret = append(ret, ti)
+	}
+
+	return &schema.ToolResult{Parts: []schema.ToolOutputPart{
+		{
+			Type: schema.ToolPartTypeToolSearchResult,
+			ToolSearchResult: &schema.ToolSearchResult{
+				Tools: ret,
+			},
+		},
+	}}, nil
+}
+
+func intMax(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
+}
+
+func intMin(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}
+
+// scoredTool pairs a tool name with its search score.
+type scoredTool struct {
+	name  string
+	score int
+}
+
+// keywordSearch scores all tools against the query keywords and returns the top N.
+func (t *toolSearchTool) keywordSearch(query string, maxResults int) []string {
+	keywords := parseKeywords(query)
+	if len(keywords) == 0 {
+		return nil
+	}
+
+	var scored []scoredTool
+
+	for name, tm := range t.tools {
+		//isMCP := strings.Contains(name, "__")
+		nameParts := splitToolName(name)
+		nameLower := strings.ToLower(name)
+		descLower := strings.ToLower(tm.Desc)
+
+		totalScore := 0
+		allRequiredFound := true
+
+		for _, kw := range keywords {
+			kwLower := strings.ToLower(kw.word)
+			kwScore := 0
+
+			// Score against name parts
+			for _, part := range nameParts {
+				partLower := strings.ToLower(part)
+				if partLower == kwLower {
+					// Exact part match
+					//if isMCP {
+					//	kwScore = intMax(kwScore, 12)
+					//} else {
+					kwScore = intMax(kwScore, 10)
+					//}
+				} else if strings.Contains(partLower, kwLower) {
+					// Substring part match
+					//if isMCP {
+					//	kwScore = intMax(kwScore, 6)
+					//} else {
+					kwScore = intMax(kwScore, 5)
+					//}
+				}
+			}
+
+			// Score against full name
+			if strings.Contains(nameLower, kwLower) {
+				kwScore = intMax(kwScore, 3)
+			}
+
+			// Score against description (word boundary match)
+			if descLower != "" && matchWordBoundary(descLower, kwLower) {
+				kwScore = intMax(kwScore, 2)
+			}
+
+			if kw.required && kwScore == 0 {
+				allRequiredFound = false
+				break
+			}
+
+			totalScore += kwScore
+		}
+
+		if !allRequiredFound {
+			continue
+		}
+
+		if totalScore > 0 {
+			scored = append(scored, scoredTool{name: name, score: totalScore})
 		}
 	}
 
-	result := toolSearchResult{
-		SelectedTools: matchedTools,
-	}
+	// Sort by score descending, then by name for stability
+	sort.Slice(scored, func(i, j int) bool {
+		if scored[i].score != scored[j].score {
+			return scored[i].score > scored[j].score
+		}
+		return scored[i].name < scored[j].name
+	})
 
-	output, err := json.Marshal(result)
-	if err != nil {
-		return "", fmt.Errorf("failed to marshal result: %w", err)
+	results := make([]string, 0, intMin(maxResults, len(scored)))
+	for i := 0; i < len(scored) && i < maxResults; i++ {
+		results = append(results, scored[i].name)
 	}
-
-	return string(output), nil
+	return results
 }
 
+// keyword represents a parsed search keyword.
+type keyword struct {
+	word     string
+	required bool
+}
+
+// parseKeywords splits a query string into keywords, handling the '+' required prefix.
+func parseKeywords(query string) (keywords []keyword) {
+	parts := strings.Fields(query)
+	for _, p := range parts {
+		if strings.HasPrefix(p, "+") {
+			word := strings.TrimPrefix(p, "+")
+			if word != "" {
+				keywords = append(keywords, keyword{word: word, required: true})
+			}
+		} else if p != "" {
+			keywords = append(keywords, keyword{word: p, required: false})
+		}
+	}
+	return
+}
+
+// splitToolName splits a tool name into parts by underscores, double underscores (MCP separator),
+// and camelCase boundaries.
+func splitToolName(name string) []string {
+	// First split by double underscore (MCP server__tool separator)
+	segments := strings.Split(name, "__")
+
+	var parts []string
+	for _, seg := range segments {
+		// Split each segment by single underscore
+		underscoreParts := strings.Split(seg, "_")
+		for _, up := range underscoreParts {
+			if up == "" {
+				continue
+			}
+			// Further split by camelCase
+			camelParts := splitCamelCase(up)
+			parts = append(parts, camelParts...)
+		}
+	}
+	return parts
+}
+
+// splitCamelCase splits a camelCase or PascalCase string into its constituent words.
+func splitCamelCase(s string) []string {
+	if s == "" {
+		return nil
+	}
+
+	var parts []string
+	runes := []rune(s)
+	start := 0
+
+	for i := 1; i < len(runes); i++ {
+		if unicode.IsUpper(runes[i]) && (i+1 >= len(runes) || unicode.IsLower(runes[i+1]) || unicode.IsLower(runes[i-1])) {
+			parts = append(parts, string(runes[start:i]))
+			start = i
+		}
+	}
+	parts = append(parts, string(runes[start:]))
+
+	return parts
+}
+
+// matchWordBoundary checks if keyword appears at a word boundary in text.
+// A word boundary is the start of the string, or preceded by a non-alphanumeric character.
+var wordBoundaryCache = map[string]*regexp.Regexp{}
+
+func matchWordBoundary(text, keyword string) bool {
+	pattern := `(?i)(?:^|[^a-zA-Z0-9])` + regexp.QuoteMeta(keyword)
+	re, ok := wordBoundaryCache[pattern]
+	if !ok {
+		re = regexp.MustCompile(pattern)
+		wordBoundaryCache[pattern] = re
+	}
+	return re.MatchString(text)
+}
+
+// getToolNames extracts just tool names from a slice of BaseTools (used by removeTools).
 func getToolNames(ctx context.Context, tools []tool.BaseTool) ([]string, error) {
 	ret := make([]string, 0, len(tools))
 	for _, t := range tools {
@@ -194,7 +458,7 @@ func getToolNames(ctx context.Context, tools []tool.BaseTool) ([]string, error) 
 	return ret, nil
 }
 
-func extractSelectedTools(ctx context.Context, messages []*schema.Message) ([]string, error) {
+func extractSelectedTools(_ context.Context, messages []*schema.Message) ([]string, error) {
 	var selectedTools []string
 	for _, message := range messages {
 		if message.Role != schema.Tool || message.ToolName != toolSearchToolName {
@@ -206,7 +470,7 @@ func extractSelectedTools(ctx context.Context, messages []*schema.Message) ([]st
 		if err != nil {
 			return nil, fmt.Errorf("failed to unmarshal tool search tool result: %w", err)
 		}
-		selectedTools = append(selectedTools, result.SelectedTools...)
+		selectedTools = append(selectedTools, result.Matches...)
 	}
 	return selectedTools, nil
 }
