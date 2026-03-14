@@ -45,8 +45,9 @@ func newTaskToolMiddleware(
 	maxIteration int,
 	middlewares []adk.AgentMiddleware,
 	handlers []adk.ChatModelAgentMiddleware,
+	modelFailoverConfig *adk.ModelFailoverConfig,
 ) (adk.ChatModelAgentMiddleware, error) {
-	t, err := newTaskTool(ctx, taskToolDescriptionGenerator, subAgents, withoutGeneralSubAgent, cm, instruction, toolsConfig, maxIteration, middlewares, handlers)
+	t, err := newTaskTool(ctx, taskToolDescriptionGenerator, subAgents, withoutGeneralSubAgent, cm, instruction, toolsConfig, maxIteration, middlewares, handlers, modelFailoverConfig)
 	if err != nil {
 		return nil, err
 	}
@@ -71,6 +72,7 @@ func newTaskTool(
 	MaxIteration int,
 	middlewares []adk.AgentMiddleware,
 	handlers []adk.ChatModelAgentMiddleware,
+	modelFailoverConfig *adk.ModelFailoverConfig,
 ) (tool.InvokableTool, error) {
 	t := &taskTool{
 		subAgents:     map[string]tool.InvokableTool{},
@@ -88,15 +90,16 @@ func newTaskTool(
 			Chinese: generalAgentDescriptionChinese,
 		})
 		generalAgent, err := adk.NewChatModelAgent(ctx, &adk.ChatModelAgentConfig{
-			Name:          generalAgentName,
-			Description:   agentDesc,
-			Instruction:   Instruction,
-			Model:         Model,
-			ToolsConfig:   ToolsConfig,
-			MaxIterations: MaxIteration,
-			Middlewares:   middlewares,
-			Handlers:      handlers,
-			GenModelInput: genModelInput,
+			Name:                generalAgentName,
+			Description:         agentDesc,
+			Instruction:         Instruction,
+			Model:               Model,
+			ToolsConfig:         ToolsConfig,
+			MaxIterations:       MaxIteration,
+			Middlewares:         middlewares,
+			Handlers:            handlers,
+			GenModelInput:       genModelInput,
+			ModelFailoverConfig: modelFailoverConfig,
 		})
 		if err != nil {
 			return nil, err
