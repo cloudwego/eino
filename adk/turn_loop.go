@@ -399,7 +399,7 @@ func (l *TurnLoop[T]) Run(ctx context.Context, opts ...TurnLoopRunOption[T]) err
 		}
 
 		handleEvents := func() error {
-			return l.handleEvents(ctx, item, iter, checkPointID)
+			return l.handleEvents(nCtx, item, iter, checkPointID)
 		}
 
 		if cancelFunc != nil {
