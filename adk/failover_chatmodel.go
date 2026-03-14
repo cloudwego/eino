@@ -19,6 +19,7 @@ package adk
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"log"
 
@@ -89,27 +90,36 @@ func (m *failoverProxyModel) GetType() string {
 
 // FailoverContext contains context information during failover process.
 type FailoverContext struct {
-	// FailoverAttempt is the current failover attempt number, starting from 0 for the first attempt.
+	// FailoverAttempt is the current failover attempt number, starting from 1.
 	FailoverAttempt uint
 
 	// InputMessages is the original input messages before any transformation.
 	InputMessages []*schema.Message
 
-	// LastOutputMessage is the output message from the last failed attempt (if any).
-	// For streaming, this may be a partial message already received before the stream error.
+	// LastOutputMessage is the output message from the last failed attempt.
+	// May be nil if no output was produced. For streaming, this may be a partial message
+	// already received before the stream error.
 	LastOutputMessage *schema.Message
 
-	// LastErr is the error from the last failed attempt (if any).
+	// LastErr is the error from the last failed attempt that triggered this failover.
 	LastErr error
 }
 
 // ModelFailoverConfig configures failover behavior for ChatModel.
-// When configured, each ChatModel call may be attempted multiple times with different models and/or transformed
-// input messages selected by GetFailoverModel.
+// When configured, each ChatModel call first tries the last successful model (initially the configured Model),
+// and if that fails, calls GetFailoverModel to select alternate models.
 type ModelFailoverConfig struct {
-	// MaxRetries specifies the maximum number of additional failover retries.
-	// A value of 0 means no failover will be attempted (only the initial call).
-	// A value of 2 means up to 2 failover attempts (3 total calls including the initial attempt).
+	// MaxRetries specifies the maximum number of failover attempts.
+	//
+	// When failover is triggered, GetFailoverModel will be called up to MaxRetries times
+	// (FailoverAttempt starts from 1). If GetFailoverModel returns an error, failover
+	// stops immediately and that error is returned.
+	//
+	// A value of 0 means no failover (GetFailoverModel will not be called).
+	// A value of 1 means GetFailoverModel may be called once.
+	//
+	// Note: if lastSuccessModel is set (from a previous successful call), it will be tried
+	// first before calling GetFailoverModel.
 	MaxRetries uint
 
 	// ShouldFailover determines whether to fail over to the next model when an error occurs.
@@ -122,15 +132,29 @@ type ModelFailoverConfig struct {
 	// Return true to fail over to the next model, false to stop and return the current result/error.
 	ShouldFailover func(ctx context.Context, outputMessage *schema.Message, outputErr error) bool
 
-	// GetFailoverModel selects the model to use for the current failover attempt and optionally transforms input messages.
-	// It receives the failover context containing attempt number, original input, and last result.
+	// GetFailoverModel is called when a model call fails and ShouldFailover returns true.
+	// It selects the next model to use for the failover attempt and optionally transforms input messages.
+	// It receives the failover context containing attempt number (starting from 1), original input, and last result.
 	// Return values:
 	//   - failoverModel: The model to use for this failover attempt.
-	//   - failoverModelInpMessages: The transformed input messages for the failover model. If nil, will use original input.
+	//   - failoverModelInputMessages: The transformed input messages for the failover model. If nil, will use original input.
 	//   - failoverErr: If non-nil, failover stops and this error is returned.
 	// Should not be nil when ModelFailoverConfig is set via ChatModelAgentConfig.
 	GetFailoverModel func(ctx context.Context, failoverCtx *FailoverContext) (
 		failoverModel model.BaseChatModel, failoverModelInputMessages []*schema.Message, failoverErr error)
+}
+
+func getLastSuccessModel(ctx context.Context) model.BaseChatModel {
+	if execCtx := getChatModelAgentExecCtx(ctx); execCtx != nil {
+		return execCtx.failoverLastSuccessModel
+	}
+	return nil
+}
+
+func setLastSuccessModel(ctx context.Context, m model.BaseChatModel) {
+	if execCtx := getChatModelAgentExecCtx(ctx); execCtx != nil {
+		execCtx.failoverLastSuccessModel = m
+	}
 }
 
 type failoverModelWrapper struct {
@@ -155,6 +179,7 @@ func (f *failoverModelWrapper) needFailover(ctx context.Context, outputMessage *
 }
 
 func (f *failoverModelWrapper) Generate(ctx context.Context, input []*schema.Message, opts ...model.Option) (*schema.Message, error) {
+	// Defensive: GetFailoverModel is validated non-nil at agent construction.
 	if f.config.GetFailoverModel == nil {
 		return f.inner.Generate(ctx, input, opts...)
 	}
@@ -162,7 +187,29 @@ func (f *failoverModelWrapper) Generate(ctx context.Context, input []*schema.Mes
 	var lastOutputMessage *schema.Message
 	var lastErr error
 
-	for attempt := uint(0); attempt <= f.config.MaxRetries; attempt++ {
+	// Try lastSuccessModel first if available.
+	if lastSuccess := getLastSuccessModel(ctx); lastSuccess != nil {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+
+		modelCtx := setFailoverCurrentModel(ctx, lastSuccess)
+		result, err := f.inner.Generate(modelCtx, input, opts...)
+		if err == nil {
+			return result, nil
+		}
+
+		lastOutputMessage = result
+		lastErr = err
+
+		if !f.needFailover(ctx, result, err) {
+			return result, err
+		}
+
+		log.Printf("failover ChatModel.Generate lastSuccessModel failed: %v", err)
+	}
+
+	for attempt := uint(1); attempt <= f.config.MaxRetries; attempt++ {
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
@@ -178,6 +225,9 @@ func (f *failoverModelWrapper) Generate(ctx context.Context, input []*schema.Mes
 		if err != nil {
 			return nil, err
 		}
+		if currentModel == nil {
+			return nil, fmt.Errorf("failover GetFailoverModel returned nil model at attempt %d", attempt)
+		}
 
 		if currentInput == nil {
 			currentInput = input
@@ -189,6 +239,7 @@ func (f *failoverModelWrapper) Generate(ctx context.Context, input []*schema.Mes
 		lastErr = err
 
 		if err == nil {
+			setLastSuccessModel(ctx, currentModel)
 			return result, nil
 		}
 
@@ -206,6 +257,7 @@ func (f *failoverModelWrapper) Generate(ctx context.Context, input []*schema.Mes
 
 func (f *failoverModelWrapper) Stream(ctx context.Context, input []*schema.Message, opts ...model.Option) (
 	*schema.StreamReader[*schema.Message], error) {
+	// Defensive: GetFailoverModel is validated non-nil at agent construction.
 	if f.config.GetFailoverModel == nil {
 		return f.inner.Stream(ctx, input, opts...)
 	}
@@ -213,7 +265,42 @@ func (f *failoverModelWrapper) Stream(ctx context.Context, input []*schema.Messa
 	var lastOutputMessage *schema.Message
 	var lastErr error
 
-	for attempt := uint(0); attempt <= f.config.MaxRetries; attempt++ {
+	// Try lastSuccessModel first if available.
+	if lastSuccess := getLastSuccessModel(ctx); lastSuccess != nil {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+
+		modelCtx := setFailoverCurrentModel(ctx, lastSuccess)
+		stream, err := f.inner.Stream(modelCtx, input, opts...)
+		if err != nil {
+			lastErr = err
+			if !f.needFailover(ctx, nil, err) {
+				return nil, err
+			}
+			log.Printf("failover ChatModel.Stream lastSuccessModel failed: %v", err)
+		} else {
+			copies := stream.Copy(2)
+			checkCopy := copies[0]
+			returnCopy := copies[1]
+
+			outMsg, streamErr := consumeStream(checkCopy)
+			if streamErr != nil {
+				lastOutputMessage = outMsg
+				lastErr = streamErr
+				returnCopy.Close()
+
+				if !f.needFailover(ctx, outMsg, streamErr) {
+					return nil, streamErr
+				}
+				log.Printf("failover ChatModel.Stream lastSuccessModel failed: %v", streamErr)
+			} else {
+				return returnCopy, nil
+			}
+		}
+	}
+
+	for attempt := uint(1); attempt <= f.config.MaxRetries; attempt++ {
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
@@ -228,6 +315,9 @@ func (f *failoverModelWrapper) Stream(ctx context.Context, input []*schema.Messa
 		currentModel, currentInput, err := f.config.GetFailoverModel(ctx, failoverCtx)
 		if err != nil {
 			return nil, err
+		}
+		if currentModel == nil {
+			return nil, fmt.Errorf("failover GetFailoverModel returned nil model at attempt %d", attempt)
 		}
 
 		if currentInput == nil {
@@ -286,6 +376,7 @@ func (f *failoverModelWrapper) Stream(ctx context.Context, input []*schema.Messa
 			continue
 		}
 
+		setLastSuccessModel(ctx, currentModel)
 		return returnCopy, nil
 	}
 
