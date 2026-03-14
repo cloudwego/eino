@@ -44,6 +44,9 @@ type chatModelAgentExecCtx struct {
 	runtimeReturnDirectly map[string]bool
 	generator             *AsyncGenerator[*AgentEvent]
 	cancelCtx             *cancelContext
+
+	// failoverLastSuccessModel is the last success model only used in failover middleware.
+	failoverLastSuccessModel model.BaseChatModel
 }
 
 func (e *chatModelAgentExecCtx) send(event *AgentEvent) {
@@ -260,7 +263,7 @@ type ChatModelAgentConfig struct {
 	//  4. retryModelWrapper (internal - retries on failure, if configured)
 	//  5. eventSenderModelWrapper (internal - sends model response events)
 	//  6. ChatModelAgentMiddleware.WrapModel (wrapper, first registered is outermost)
-	//  7. callbackInjectionModelWrapper (internal - injects callbacks if not enabled, skipped if failover enabled)
+	//  7. callbackInjectionModelWrapper (internal - injects callbacks if not enabled; when failover is enabled, this is handled per-model inside failoverProxyModel instead)
 	//  8. failoverProxyModel (internal - dispatches to selected failover model, if configured) / Model.Generate/Stream
 	//  9. ChatModelAgentMiddleware.AfterModelRewriteState (hook, can modify state after model call)
 	// 10. AgentMiddleware.AfterChatModel (hook, runs after model call)
@@ -336,8 +339,9 @@ type ChatModelAgentConfig struct {
 	ModelRetryConfig *ModelRetryConfig
 
 	// ModelFailoverConfig configures failover behavior for the ChatModel.
-	// When set, the agent will dynamically select models through GetFailoverModel callback.
-	// Model field is still required as it will be wrapped with failover logic.
+	// When set, the agent will first try the last successful model (initially the configured Model),
+	// and on failure, call GetFailoverModel to select alternate models.
+	// Model field is still required as it serves as the initial model.
 	// Optional. If nil, no failover will be performed.
 	ModelFailoverConfig *ModelFailoverConfig
 }
@@ -864,8 +868,9 @@ func (a *ChatModelAgent) buildNoToolsRunFunc(_ context.Context) runFunc {
 		}
 
 		ctx = withChatModelAgentExecCtx(ctx, &chatModelAgentExecCtx{
-			generator: p.generator,
-			cancelCtx: cancelCtx,
+			generator:                p.generator,
+			cancelCtx:                cancelCtx,
+			failoverLastSuccessModel: a.model,
 		})
 
 		// Pre-execution cancel check
@@ -975,9 +980,10 @@ func (a *ChatModelAgent) buildReActRunFunc(_ context.Context, bc *execContext) (
 		}
 
 		ctx = withChatModelAgentExecCtx(ctx, &chatModelAgentExecCtx{
-			runtimeReturnDirectly: p.returnDirectly,
-			generator:             p.generator,
-			cancelCtx:             cancelCtx,
+			runtimeReturnDirectly:    p.returnDirectly,
+			generator:                p.generator,
+			cancelCtx:                cancelCtx,
+			failoverLastSuccessModel: a.model,
 		})
 
 		// Pre-execution cancel check
