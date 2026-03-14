@@ -2057,3 +2057,44 @@ func TestPreprocessComposeCheckpoint_MigrateErrorIsReturned(t *testing.T) {
 	_, err := preprocessComposeCheckpoint(in)
 	assert.Error(t, err)
 }
+
+func TestNewChatModelAgent_FailoverConfigValidation(t *testing.T) {
+	ctx := context.Background()
+	cm := &fakeChatModel{
+		callbacksEnabled: true,
+		generate: func(_ context.Context, _ []*schema.Message, _ ...model.Option) (*schema.Message, error) {
+			return schema.AssistantMessage("ok", nil), nil
+		},
+		stream: func(_ context.Context, _ []*schema.Message, _ ...model.Option) (*schema.StreamReader[*schema.Message], error) {
+			return schema.StreamReaderFromArray([]*schema.Message{schema.AssistantMessage("ok", nil)}), nil
+		},
+	}
+
+	t.Run("missing GetFailoverModel", func(t *testing.T) {
+		_, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+			Name:        "TestAgent",
+			Description: "test",
+			Model:       cm,
+			ModelFailoverConfig: &ModelFailoverConfig{
+				ShouldFailover: func(context.Context, *schema.Message, error) bool { return true },
+			},
+		})
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "ModelFailoverConfig.GetFailoverModel")
+	})
+
+	t.Run("missing ShouldFailover", func(t *testing.T) {
+		_, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+			Name:        "TestAgent",
+			Description: "test",
+			Model:       cm,
+			ModelFailoverConfig: &ModelFailoverConfig{
+				GetFailoverModel: func(_ context.Context, _ *FailoverContext) (model.BaseChatModel, []*schema.Message, error) {
+					return cm, nil, nil
+				},
+			},
+		})
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "ModelFailoverConfig.ShouldFailover")
+	})
+}

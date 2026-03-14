@@ -256,13 +256,14 @@ type ChatModelAgentConfig struct {
 	// Model call lifecycle (outermost to innermost wrapper chain):
 	//  1. AgentMiddleware.BeforeChatModel (hook, runs before model call)
 	//  2. ChatModelAgentMiddleware.BeforeModelRewriteState (hook, can modify state before model call)
-	//  3. retryModelWrapper (internal - retries on failure, if configured)
-	//  4. eventSenderModelWrapper (internal - sends model response events)
-	//  5. ChatModelAgentMiddleware.WrapModel (wrapper, first registered is outermost)
-	//  6. callbackInjectionModelWrapper (internal - injects callbacks if not enabled)
-	//  7. Model.Generate/Stream
-	//  8. ChatModelAgentMiddleware.AfterModelRewriteState (hook, can modify state after model call)
-	//  9. AgentMiddleware.AfterChatModel (hook, runs after model call)
+	//  3. failoverModelWrapper (internal - failover between models, if configured)
+	//  4. retryModelWrapper (internal - retries on failure, if configured)
+	//  5. eventSenderModelWrapper (internal - sends model response events)
+	//  6. ChatModelAgentMiddleware.WrapModel (wrapper, first registered is outermost)
+	//  7. callbackInjectionModelWrapper (internal - injects callbacks if not enabled, skipped if failover enabled)
+	//  8. failoverProxyModel (internal - dispatches to selected failover model, if configured) / Model.Generate/Stream
+	//  9. ChatModelAgentMiddleware.AfterModelRewriteState (hook, can modify state after model call)
+	// 10. AgentMiddleware.AfterChatModel (hook, runs after model call)
 	//
 	// Custom Event Sender Position:
 	// By default, events are sent after all user middlewares (WrapModel) have processed the output,
@@ -333,6 +334,12 @@ type ChatModelAgentConfig struct {
 	// based on the configured policy.
 	// Optional. If nil, no retry will be performed.
 	ModelRetryConfig *ModelRetryConfig
+
+	// ModelFailoverConfig configures failover behavior for the ChatModel.
+	// When set, the agent will dynamically select models through GetFailoverModel callback.
+	// Model field is still required as it will be wrapped with failover logic.
+	// Optional. If nil, no failover will be performed.
+	ModelFailoverConfig *ModelFailoverConfig
 }
 
 type ChatModelAgent struct {
@@ -358,7 +365,8 @@ type ChatModelAgent struct {
 	handlers    []ChatModelAgentMiddleware
 	middlewares []AgentMiddleware
 
-	modelRetryConfig *ModelRetryConfig
+	modelRetryConfig    *ModelRetryConfig
+	modelFailoverConfig *ModelFailoverConfig
 
 	once   sync.Once
 	run    runFunc
@@ -388,6 +396,17 @@ func NewChatModelAgent(ctx context.Context, config *ChatModelAgentConfig) (*Chat
 	if config.Description == "" {
 		return nil, errors.New("agent 'Description' is required")
 	}
+	if config.ModelFailoverConfig != nil {
+		if config.ModelFailoverConfig.GetFailoverModel == nil {
+			return nil, errors.New("ModelFailoverConfig.GetFailoverModel is required when ModelFailoverConfig is set")
+		}
+
+		// ShouldFailover is required when ModelFailoverConfig is set
+		if config.ModelFailoverConfig.ShouldFailover == nil {
+			return nil, errors.New("ModelFailoverConfig.ShouldFailover is required when ModelFailoverConfig is set")
+		}
+	}
+
 	if config.Model == nil {
 		return nil, errors.New("agent 'Model' is required")
 	}
@@ -422,18 +441,19 @@ func NewChatModelAgent(ctx context.Context, config *ChatModelAgentConfig) (*Chat
 	})
 
 	return &ChatModelAgent{
-		name:             config.Name,
-		description:      config.Description,
-		instruction:      config.Instruction,
-		model:            config.Model,
-		toolsConfig:      tc,
-		genModelInput:    genInput,
-		exit:             config.Exit,
-		outputKey:        config.OutputKey,
-		maxIterations:    config.MaxIterations,
-		handlers:         config.Handlers,
-		middlewares:      config.Middlewares,
-		modelRetryConfig: config.ModelRetryConfig,
+		name:                config.Name,
+		description:         config.Description,
+		instruction:         config.Instruction,
+		model:               config.Model,
+		toolsConfig:         tc,
+		genModelInput:       genInput,
+		exit:                config.Exit,
+		outputKey:           config.OutputKey,
+		maxIterations:       config.MaxIterations,
+		handlers:            config.Handlers,
+		middlewares:         config.Middlewares,
+		modelRetryConfig:    config.ModelRetryConfig,
+		modelFailoverConfig: config.ModelFailoverConfig,
 	}, nil
 }
 
@@ -801,10 +821,11 @@ func (a *ChatModelAgent) buildNoToolsRunFunc(_ context.Context) runFunc {
 		ctx = withCancelContext(ctx, cancelCtx)
 
 		wrappedModel := buildModelWrappers(a.model, &modelWrapperConfig{
-			handlers:      a.handlers,
-			middlewares:   a.middlewares,
-			retryConfig:   a.modelRetryConfig,
-			cancelContext: cancelCtx,
+			handlers:       a.handlers,
+			middlewares:    a.middlewares,
+			retryConfig:    a.modelRetryConfig,
+			failoverConfig: a.modelFailoverConfig,
+			cancelContext:  cancelCtx,
 		})
 
 		chain := compose.NewChain[noToolsInput, Message](
@@ -890,10 +911,11 @@ func (a *ChatModelAgent) buildReActRunFunc(_ context.Context, bc *execContext) (
 		model:       a.model,
 		toolsConfig: &bc.toolsNodeConf,
 		modelWrapperConf: &modelWrapperConfig{
-			handlers:    a.handlers,
-			middlewares: a.middlewares,
-			retryConfig: a.modelRetryConfig,
-			toolInfos:   bc.toolInfos,
+			handlers:       a.handlers,
+			middlewares:    a.middlewares,
+			retryConfig:    a.modelRetryConfig,
+			failoverConfig: a.modelFailoverConfig,
+			toolInfos:      bc.toolInfos,
 		},
 		toolsReturnDirectly: bc.returnDirectly,
 		agentName:           a.name,

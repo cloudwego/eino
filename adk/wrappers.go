@@ -34,28 +34,35 @@ type generateEndpoint func(ctx context.Context, input []*schema.Message, opts ..
 type streamEndpoint func(ctx context.Context, input []*schema.Message, opts ...model.Option) (*schema.StreamReader[*schema.Message], error)
 
 type modelWrapperConfig struct {
-	handlers      []ChatModelAgentMiddleware
-	middlewares   []AgentMiddleware
-	retryConfig   *ModelRetryConfig
-	toolInfos     []*schema.ToolInfo
-	cancelContext *cancelContext
+	handlers       []ChatModelAgentMiddleware
+	middlewares    []AgentMiddleware
+	retryConfig    *ModelRetryConfig
+	failoverConfig *ModelFailoverConfig
+	toolInfos      []*schema.ToolInfo
+	cancelContext  *cancelContext
 }
 
 func buildModelWrappers(m model.BaseChatModel, config *modelWrapperConfig) model.BaseChatModel {
 	var wrapped model.BaseChatModel = m
 
-	if !components.IsCallbacksEnabled(m) {
+	// failoverProxyModel must be the innermost wrapper to read the selected failover model from context.
+	if config.failoverConfig != nil {
+		wrapped = &failoverProxyModel{}
+	}
+
+	if !components.IsCallbacksEnabled(wrapped) {
 		wrapped = (&callbackInjectionModelWrapper{}).WrapModel(wrapped)
 	}
 
 	wrapped = &stateModelWrapper{
-		inner:            wrapped,
-		original:         m,
-		handlers:         config.handlers,
-		middlewares:      config.middlewares,
-		toolInfos:        config.toolInfos,
-		modelRetryConfig: config.retryConfig,
-		cancelContext:    config.cancelContext,
+		inner:               wrapped,
+		original:            m,
+		handlers:            config.handlers,
+		middlewares:         config.middlewares,
+		toolInfos:           config.toolInfos,
+		modelRetryConfig:    config.retryConfig,
+		modelFailoverConfig: config.failoverConfig,
+		cancelContext:       config.cancelContext,
 	}
 
 	return wrapped
@@ -515,13 +522,14 @@ func hasUserEventSenderToolWrapper(handlers []ChatModelAgentMiddleware) bool {
 }
 
 type stateModelWrapper struct {
-	inner            model.BaseChatModel
-	original         model.BaseChatModel
-	handlers         []ChatModelAgentMiddleware
-	middlewares      []AgentMiddleware
-	toolInfos        []*schema.ToolInfo
-	modelRetryConfig *ModelRetryConfig
-	cancelContext    *cancelContext
+	inner               model.BaseChatModel
+	original            model.BaseChatModel
+	handlers            []ChatModelAgentMiddleware
+	middlewares         []AgentMiddleware
+	toolInfos           []*schema.ToolInfo
+	modelRetryConfig    *ModelRetryConfig
+	modelFailoverConfig *ModelFailoverConfig
+	cancelContext       *cancelContext
 }
 
 func (w *stateModelWrapper) IsCallbacksEnabled() bool {
@@ -590,6 +598,16 @@ func (w *stateModelWrapper) wrapGenerateEndpoint(endpoint generateEndpoint) gene
 		}
 	}
 
+	// Needs to handle failoverWrapper after retryWrapper
+	if w.modelFailoverConfig != nil {
+		config := w.modelFailoverConfig
+		innerEndpoint := endpoint
+		endpoint = func(ctx context.Context, input []*schema.Message, opts ...model.Option) (*schema.Message, error) {
+			failoverWrapper := newFailoverModelWrapper(&endpointModel{generate: innerEndpoint}, config)
+			return failoverWrapper.Generate(ctx, input, opts...)
+		}
+	}
+
 	return endpoint
 }
 
@@ -636,6 +654,16 @@ func (w *stateModelWrapper) wrapStreamEndpoint(endpoint streamEndpoint) streamEn
 		endpoint = func(ctx context.Context, input []*schema.Message, opts ...model.Option) (*schema.StreamReader[*schema.Message], error) {
 			retryWrapper := newRetryModelWrapper(&endpointModel{stream: innerEndpoint}, w.modelRetryConfig)
 			return retryWrapper.Stream(ctx, input, opts...)
+		}
+	}
+
+	// Needs to handle failoverWrapper after retryWrapper
+	if w.modelFailoverConfig != nil {
+		config := w.modelFailoverConfig
+		innerEndpoint := endpoint
+		endpoint = func(ctx context.Context, input []*schema.Message, opts ...model.Option) (*schema.StreamReader[*schema.Message], error) {
+			failoverWrapper := newFailoverModelWrapper(&endpointModel{stream: innerEndpoint}, config)
+			return failoverWrapper.Stream(ctx, input, opts...)
 		}
 	}
 
