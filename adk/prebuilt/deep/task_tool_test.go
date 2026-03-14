@@ -41,6 +41,7 @@ func TestTaskTool(t *testing.T) {
 		10,
 		nil,
 		nil,
+		nil,
 	)
 	assert.NoError(t, err)
 
