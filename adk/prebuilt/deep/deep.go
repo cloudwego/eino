@@ -93,6 +93,10 @@ type Config struct {
 	Handlers []adk.ChatModelAgentMiddleware
 
 	ModelRetryConfig *adk.ModelRetryConfig
+	// ModelFailoverConfig configures failover behavior for the ChatModel.
+	// When set, the agent will automatically fail over to alternative models on errors.
+	// This config is also propagated to the general sub-agent.
+	ModelFailoverConfig *adk.ModelFailoverConfig
 
 	// OutputKey stores the agent's response in the session.
 	// Optional. When set, stores output via AddSessionValue(ctx, outputKey, msg.Content).
@@ -129,6 +133,7 @@ func New(ctx context.Context, cfg *Config) (adk.ResumableAgent, error) {
 			cfg.MaxIteration,
 			cfg.Middlewares,
 			append(handlers, cfg.Handlers...),
+			cfg.ModelFailoverConfig,
 		)
 		if err != nil {
 			return nil, fmt.Errorf("failed to new task tool: %w", err)
@@ -146,9 +151,10 @@ func New(ctx context.Context, cfg *Config) (adk.ResumableAgent, error) {
 		Middlewares:   cfg.Middlewares,
 		Handlers:      append(handlers, cfg.Handlers...),
 
-		GenModelInput:    genModelInput,
-		ModelRetryConfig: cfg.ModelRetryConfig,
-		OutputKey:        cfg.OutputKey,
+		GenModelInput:       genModelInput,
+		ModelRetryConfig:    cfg.ModelRetryConfig,
+		ModelFailoverConfig: cfg.ModelFailoverConfig,
+		OutputKey:           cfg.OutputKey,
 	})
 }
 
