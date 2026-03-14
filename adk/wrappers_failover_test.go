@@ -96,9 +96,7 @@ func TestStateModelWrapper_Generate_WithFailover(t *testing.T) {
 			return true
 		},
 		GetFailoverModel: func(_ context.Context, failoverCtx *FailoverContext) (model.BaseChatModel, []*schema.Message, error) {
-			if failoverCtx.FailoverAttempt == 0 {
-				return m1, nil, nil
-			}
+			require.Equal(t, uint(1), failoverCtx.FailoverAttempt)
 			return m2, nil, nil
 		},
 	}
@@ -107,7 +105,10 @@ func TestStateModelWrapper_Generate_WithFailover(t *testing.T) {
 		failoverConfig: failoverCfg,
 	})
 
-	got, err := wrapped.Generate(context.Background(), []*schema.Message{schema.UserMessage("hi")})
+	ctx := withChatModelAgentExecCtx(context.Background(), &chatModelAgentExecCtx{
+		failoverLastSuccessModel: m1,
+	})
+	got, err := wrapped.Generate(ctx, []*schema.Message{schema.UserMessage("hi")})
 	require.NoError(t, err)
 	require.NotNil(t, got)
 	require.Equal(t, "ok", got.Content)
@@ -156,9 +157,7 @@ func TestStateModelWrapper_Stream_WithFailover(t *testing.T) {
 			return true
 		},
 		GetFailoverModel: func(_ context.Context, failoverCtx *FailoverContext) (model.BaseChatModel, []*schema.Message, error) {
-			if failoverCtx.FailoverAttempt == 0 {
-				return m1, nil, nil
-			}
+			require.Equal(t, uint(1), failoverCtx.FailoverAttempt)
 			return m2, nil, nil
 		},
 	}
@@ -167,7 +166,10 @@ func TestStateModelWrapper_Stream_WithFailover(t *testing.T) {
 		failoverConfig: failoverCfg,
 	})
 
-	sr, err := wrapped.Stream(context.Background(), []*schema.Message{schema.UserMessage("hi")})
+	ctx := withChatModelAgentExecCtx(context.Background(), &chatModelAgentExecCtx{
+		failoverLastSuccessModel: m1,
+	})
+	sr, err := wrapped.Stream(ctx, []*schema.Message{schema.UserMessage("hi")})
 	require.NoError(t, err)
 	msgs, err := drainMessageStream(sr)
 	require.NoError(t, err)
@@ -177,4 +179,3 @@ func TestStateModelWrapper_Stream_WithFailover(t *testing.T) {
 	require.Equal(t, int32(1), atomic.LoadInt32(&m2Calls))
 	require.Equal(t, int32(1), atomic.LoadInt32(&shouldCalls))
 }
-

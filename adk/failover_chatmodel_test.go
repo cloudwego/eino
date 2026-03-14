@@ -13,6 +13,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
 package adk
 
 import (
@@ -153,7 +154,6 @@ func TestFailoverProxyModel(t *testing.T) {
 	})
 }
 
-
 func TestFailoverModelWrapper_Generate(t *testing.T) {
 	t.Run("delegates when GetFailoverModel nil", func(t *testing.T) {
 		var called int32
@@ -212,15 +212,16 @@ func TestFailoverModelWrapper_Generate(t *testing.T) {
 				return errors.Is(err, wantErr)
 			},
 			GetFailoverModel: func(_ context.Context, failoverCtx *FailoverContext) (model.BaseChatModel, []*schema.Message, error) {
-				if failoverCtx.FailoverAttempt == 0 {
-					return m1, nil, nil
-				}
+				require.Equal(t, uint(1), failoverCtx.FailoverAttempt)
 				return m2, nil, nil
 			},
 		}
 
 		w := newFailoverModelWrapper(&failoverProxyModel{}, cfg)
-		msg, err := w.Generate(context.Background(), []*schema.Message{schema.UserMessage("hi")})
+		ctx := withChatModelAgentExecCtx(context.Background(), &chatModelAgentExecCtx{
+			failoverLastSuccessModel: m1,
+		})
+		msg, err := w.Generate(ctx, []*schema.Message{schema.UserMessage("hi")})
 		require.NoError(t, err)
 		require.Equal(t, "ok", msg.Content)
 		require.Equal(t, int32(1), atomic.LoadInt32(&m1Calls))
@@ -253,7 +254,10 @@ func TestFailoverModelWrapper_Generate(t *testing.T) {
 		}
 
 		w := newFailoverModelWrapper(&failoverProxyModel{}, cfg)
-		_, err := w.Generate(context.Background(), []*schema.Message{schema.UserMessage("hi")})
+		ctx := withChatModelAgentExecCtx(context.Background(), &chatModelAgentExecCtx{
+			failoverLastSuccessModel: m1,
+		})
+		_, err := w.Generate(ctx, []*schema.Message{schema.UserMessage("hi")})
 		require.ErrorIs(t, err, context.Canceled)
 		// ShouldFailover is called once and returns false, stopping failover
 		require.Equal(t, int32(1), atomic.LoadInt32(&shouldCalls))
@@ -285,6 +289,22 @@ func TestFailoverModelWrapper_Generate(t *testing.T) {
 		_, err := w.Generate(context.Background(), []*schema.Message{schema.UserMessage("hi")})
 		require.ErrorIs(t, err, wantErr)
 		require.Equal(t, int32(0), atomic.LoadInt32(&called))
+	})
+
+	t.Run("stops when GetFailoverModel returns nil model", func(t *testing.T) {
+		cfg := &ModelFailoverConfig{
+			MaxRetries:     1,
+			ShouldFailover: func(context.Context, *schema.Message, error) bool { return true },
+			GetFailoverModel: func(_ context.Context, _ *FailoverContext) (model.BaseChatModel, []*schema.Message, error) {
+				return nil, nil, nil
+			},
+		}
+
+		w := newFailoverModelWrapper(&failoverProxyModel{}, cfg)
+		msg, err := w.Generate(context.Background(), []*schema.Message{schema.UserMessage("hi")})
+		require.Nil(t, msg)
+		require.Error(t, err)
+		require.ErrorContains(t, err, "GetFailoverModel returned nil model")
 	})
 }
 
@@ -320,7 +340,10 @@ func TestFailoverModelWrapper_Stream(t *testing.T) {
 		}
 
 		w := newFailoverModelWrapper(&failoverProxyModel{}, cfg)
-		sr, err := w.Stream(context.Background(), []*schema.Message{in})
+		ctx := withChatModelAgentExecCtx(context.Background(), &chatModelAgentExecCtx{
+			failoverLastSuccessModel: m1,
+		})
+		sr, err := w.Stream(ctx, []*schema.Message{in})
 		require.NoError(t, err)
 		msgs, err := drainMessageStream(sr)
 		require.NoError(t, err)
@@ -364,15 +387,16 @@ func TestFailoverModelWrapper_Stream(t *testing.T) {
 				return errors.Is(err, wantErr)
 			},
 			GetFailoverModel: func(_ context.Context, failoverCtx *FailoverContext) (model.BaseChatModel, []*schema.Message, error) {
-				if failoverCtx.FailoverAttempt == 0 {
-					return m1, nil, nil
-				}
+				require.Equal(t, uint(1), failoverCtx.FailoverAttempt)
 				return m2, nil, nil
 			},
 		}
 
 		w := newFailoverModelWrapper(&failoverProxyModel{}, cfg)
-		sr, err := w.Stream(context.Background(), []*schema.Message{schema.UserMessage("hi")})
+		ctx := withChatModelAgentExecCtx(context.Background(), &chatModelAgentExecCtx{
+			failoverLastSuccessModel: m1,
+		})
+		sr, err := w.Stream(ctx, []*schema.Message{schema.UserMessage("hi")})
 		require.NoError(t, err)
 		msgs, err := drainMessageStream(sr)
 		require.NoError(t, err)
@@ -424,15 +448,16 @@ func TestFailoverModelWrapper_Stream(t *testing.T) {
 				return errors.Is(err, streamErr)
 			},
 			GetFailoverModel: func(_ context.Context, failoverCtx *FailoverContext) (model.BaseChatModel, []*schema.Message, error) {
-				if failoverCtx.FailoverAttempt == 0 {
-					return m1, nil, nil
-				}
+				require.Equal(t, uint(1), failoverCtx.FailoverAttempt)
 				return m2, nil, nil
 			},
 		}
 
 		w := newFailoverModelWrapper(&failoverProxyModel{}, cfg)
-		sr, err := w.Stream(context.Background(), []*schema.Message{schema.UserMessage("hi")})
+		ctx := withChatModelAgentExecCtx(context.Background(), &chatModelAgentExecCtx{
+			failoverLastSuccessModel: m1,
+		})
+		sr, err := w.Stream(ctx, []*schema.Message{schema.UserMessage("hi")})
 		require.NoError(t, err)
 		msgs, err := drainMessageStream(sr)
 		require.NoError(t, err)
@@ -467,7 +492,10 @@ func TestFailoverModelWrapper_Stream(t *testing.T) {
 		}
 
 		w := newFailoverModelWrapper(&failoverProxyModel{}, cfg)
-		sr, err := w.Stream(context.Background(), []*schema.Message{schema.UserMessage("hi")})
+		ctx := withChatModelAgentExecCtx(context.Background(), &chatModelAgentExecCtx{
+			failoverLastSuccessModel: m1,
+		})
+		sr, err := w.Stream(ctx, []*schema.Message{schema.UserMessage("hi")})
 		require.Nil(t, sr)
 		require.ErrorIs(t, err, streamErr)
 	})
@@ -497,7 +525,10 @@ func TestFailoverModelWrapper_Stream(t *testing.T) {
 		}
 
 		w := newFailoverModelWrapper(&failoverProxyModel{}, cfg)
-		sr, err := w.Stream(context.Background(), []*schema.Message{schema.UserMessage("hi")})
+		ctx := withChatModelAgentExecCtx(context.Background(), &chatModelAgentExecCtx{
+			failoverLastSuccessModel: m1,
+		})
+		sr, err := w.Stream(ctx, []*schema.Message{schema.UserMessage("hi")})
 		require.Nil(t, sr)
 		require.ErrorIs(t, err, context.Canceled)
 		// ShouldFailover is called once and returns false, stopping failover
@@ -533,11 +564,30 @@ func TestFailoverModelWrapper_Stream(t *testing.T) {
 		}
 
 		w := newFailoverModelWrapper(&failoverProxyModel{}, cfg)
-		sr, err := w.Stream(context.Background(), []*schema.Message{schema.UserMessage("hi")})
+		ctx := withChatModelAgentExecCtx(context.Background(), &chatModelAgentExecCtx{
+			failoverLastSuccessModel: m1,
+		})
+		sr, err := w.Stream(ctx, []*schema.Message{schema.UserMessage("hi")})
 		require.Nil(t, sr)
 		require.ErrorIs(t, err, wantErr)
 		require.Equal(t, int32(1), atomic.LoadInt32(&m1Calls))
 		require.Equal(t, int32(1), atomic.LoadInt32(&shouldCalls))
+	})
+
+	t.Run("stops when GetFailoverModel returns nil model", func(t *testing.T) {
+		cfg := &ModelFailoverConfig{
+			MaxRetries:     1,
+			ShouldFailover: func(context.Context, *schema.Message, error) bool { return true },
+			GetFailoverModel: func(_ context.Context, _ *FailoverContext) (model.BaseChatModel, []*schema.Message, error) {
+				return nil, nil, nil
+			},
+		}
+
+		w := newFailoverModelWrapper(&failoverProxyModel{}, cfg)
+		sr, err := w.Stream(context.Background(), []*schema.Message{schema.UserMessage("hi")})
+		require.Nil(t, sr)
+		require.Error(t, err)
+		require.ErrorContains(t, err, "GetFailoverModel returned nil model")
 	})
 
 	t.Run("stops when GetFailoverModel returns error", func(t *testing.T) {
@@ -610,15 +660,16 @@ func TestFailoverModelWrapper_Stream(t *testing.T) {
 				return true
 			},
 			GetFailoverModel: func(_ context.Context, failoverCtx *FailoverContext) (model.BaseChatModel, []*schema.Message, error) {
-				if failoverCtx.FailoverAttempt == 0 {
-					return m1, nil, nil
-				}
+				require.Equal(t, uint(1), failoverCtx.FailoverAttempt)
 				return m2, nil, nil
 			},
 		}
 
 		w := newFailoverModelWrapper(&failoverProxyModel{}, cfg)
-		ctx, cancel := context.WithCancel(context.Background())
+		baseCtx := withChatModelAgentExecCtx(context.Background(), &chatModelAgentExecCtx{
+			failoverLastSuccessModel: m1,
+		})
+		ctx, cancel := context.WithCancel(baseCtx)
 		type result struct {
 			sr  *schema.StreamReader[*schema.Message]
 			err error
