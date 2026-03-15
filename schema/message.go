@@ -1909,6 +1909,10 @@ func ConcatMessages(msgs []*Message) (*Message, error) {
 				if msg.ResponseMeta.Usage.PromptTokenDetails.CachedTokens > ret.ResponseMeta.Usage.PromptTokenDetails.CachedTokens {
 					ret.ResponseMeta.Usage.PromptTokenDetails.CachedTokens = msg.ResponseMeta.Usage.PromptTokenDetails.CachedTokens
 				}
+
+				if msg.ResponseMeta.Usage.CompletionTokensDetails.ReasoningTokens > ret.ResponseMeta.Usage.CompletionTokensDetails.ReasoningTokens {
+					ret.ResponseMeta.Usage.CompletionTokensDetails.ReasoningTokens = msg.ResponseMeta.Usage.CompletionTokensDetails.ReasoningTokens
+				}
 			}
 
 			if msg.ResponseMeta.LogProbs != nil {
