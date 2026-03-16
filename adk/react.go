@@ -125,25 +125,15 @@ func (s *State) setReturnDirectlyToolCallID(id string) {
 }
 
 func (s *State) getToolGenActions() map[string]*AgentAction {
-	if s.internals == nil {
-		return nil
-	}
-	if v, ok := s.internals[stateKeyToolGenActions].(map[string]*AgentAction); ok {
-		return v
-	}
-	return nil
+	return s.ToolGenActions
 }
 
 func (s *State) setToolGenAction(key string, action *AgentAction) {
-	if s.internals == nil {
-		s.internals = make(map[string]any)
+	if s.ToolGenActions == nil {
+		s.ToolGenActions = make(map[string]*AgentAction)
 	}
-	actions, ok := s.internals[stateKeyToolGenActions].(map[string]*AgentAction)
-	if !ok || actions == nil {
-		actions = make(map[string]*AgentAction)
-		s.internals[stateKeyToolGenActions] = actions
-	}
-	actions[key] = action
+
+	s.ToolGenActions[key] = action
 }
 
 func (s *State) popToolGenAction(key string) *AgentAction {
