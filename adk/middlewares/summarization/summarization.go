@@ -32,6 +32,10 @@ import (
 	"github.com/cloudwego/eino/schema"
 )
 
+func init() {
+	schema.RegisterName[*CustomizedAction]("_eino_adk_summarization_mw_customized_action")
+}
+
 type (
 	TokenCounterFunc  func(ctx context.Context, input *TokenCounterInput) (int, error)
 	GenModelInputFunc func(ctx context.Context, defaultSystemInstruction, userInstruction adk.Message, originalMsgs []adk.Message) ([]adk.Message, error)
