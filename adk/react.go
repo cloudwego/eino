@@ -339,10 +339,6 @@ func newReact(ctx context.Context, config *reactConfig) (reactGraph, error) {
 	}
 
 	modelPreHandle := func(ctx context.Context, input []Message, st *State) ([]Message, error) {
-		if _, ok := st.internals[stateKeyRemainingIterations]; ok {
-			st.setRemainingIterations(config.maxIterations)
-		}
-
 		if st.getRemainingIterations() <= 0 {
 			return nil, ErrExceedMaxIterations
 		}
