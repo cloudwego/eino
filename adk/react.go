@@ -150,28 +150,15 @@ func (s *State) popToolGenAction(key string) *AgentAction {
 }
 
 func (s *State) getRemainingIterations() int {
-	if s.internals == nil {
-		return 0
-	}
-	if v, ok := s.internals[stateKeyRemainingIterations].(int); ok {
-		return v
-	}
-	return 0
+	return s.RemainingIterations
 }
 
 func (s *State) setRemainingIterations(iterations int) {
-	if s.internals == nil {
-		s.internals = make(map[string]any)
-	}
-	s.internals[stateKeyRemainingIterations] = iterations
+	s.RemainingIterations = iterations
 }
 
 func (s *State) decrementRemainingIterations() {
-	if s.internals == nil {
-		s.internals = make(map[string]any)
-	}
-	current := s.getRemainingIterations()
-	s.internals[stateKeyRemainingIterations] = current - 1
+	s.RemainingIterations -= 1
 }
 
 //
