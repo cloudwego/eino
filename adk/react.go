@@ -17,7 +17,6 @@
 package adk
 
 import (
-	"bytes"
 	"context"
 	"encoding/gob"
 	"errors"
@@ -184,66 +183,66 @@ func (s *State) decrementRemainingIterations() {
 	current := s.getRemainingIterations()
 	s.internals[stateKeyRemainingIterations] = current - 1
 }
-
-type stateSerialization struct {
-	Messages                 []Message
-	HasReturnDirectly        bool
-	ReturnDirectlyToolCallID string
-	ToolGenActions           map[string]*AgentAction
-	AgentName                string
-	RemainingIterations      int
-	Extra                    map[string]any
-	Internals                map[string]any
-}
-
-func (s *State) GobEncode() ([]byte, error) {
-	internals := s.internals
-	if internals == nil {
-		internals = make(map[string]any)
-	}
-	ss := &stateSerialization{
-		Messages:                 s.Messages,
-		HasReturnDirectly:        s.HasReturnDirectly,
-		ReturnDirectlyToolCallID: s.getReturnDirectlyToolCallID(),
-		ToolGenActions:           s.getToolGenActions(),
-		AgentName:                s.AgentName,
-		RemainingIterations:      s.getRemainingIterations(),
-		Extra:                    s.extra,
-		Internals:                internals,
-	}
-	buf := &bytes.Buffer{}
-	if err := gob.NewEncoder(buf).Encode(ss); err != nil {
-		return nil, err
-	}
-	return buf.Bytes(), nil
-}
-
-func (s *State) GobDecode(b []byte) error {
-	ss := &stateSerialization{}
-	if err := gob.NewDecoder(bytes.NewReader(b)).Decode(ss); err != nil {
-		return err
-	}
-	s.Messages = ss.Messages
-	s.extra = ss.Extra
-	s.internals = ss.Internals
-	if s.internals == nil {
-		s.internals = make(map[string]any)
-	}
-
-	s.AgentName = ss.AgentName
-	s.HasReturnDirectly = ss.HasReturnDirectly
-
-	if ss.ReturnDirectlyToolCallID != "" {
-		s.setReturnDirectlyToolCallID(ss.ReturnDirectlyToolCallID)
-	}
-	if ss.ToolGenActions != nil {
-		s.internals[stateKeyToolGenActions] = ss.ToolGenActions
-	}
-	if ss.RemainingIterations != 0 {
-		s.setRemainingIterations(ss.RemainingIterations)
-	}
-	return nil
-}
+//
+//type stateSerialization struct {
+//	Messages                 []Message
+//	HasReturnDirectly        bool
+//	ReturnDirectlyToolCallID string
+//	ToolGenActions           map[string]*AgentAction
+//	AgentName                string
+//	RemainingIterations      int
+//	Extra                    map[string]any
+//	Internals                map[string]any
+//}
+//
+//func (s *State) GobEncode() ([]byte, error) {
+//	internals := s.internals
+//	if internals == nil {
+//		internals = make(map[string]any)
+//	}
+//	ss := &stateSerialization{
+//		Messages:                 s.Messages,
+//		HasReturnDirectly:        s.HasReturnDirectly,
+//		ReturnDirectlyToolCallID: s.getReturnDirectlyToolCallID(),
+//		ToolGenActions:           s.getToolGenActions(),
+//		AgentName:                s.AgentName,
+//		RemainingIterations:      s.getRemainingIterations(),
+//		Extra:                    s.extra,
+//		Internals:                internals,
+//	}
+//	buf := &bytes.Buffer{}
+//	if err := gob.NewEncoder(buf).Encode(ss); err != nil {
+//		return nil, err
+//	}
+//	return buf.Bytes(), nil
+//}
+//
+//func (s *State) GobDecode(b []byte) error {
+//	ss := &stateSerialization{}
+//	if err := gob.NewDecoder(bytes.NewReader(b)).Decode(ss); err != nil {
+//		return err
+//	}
+//	s.Messages = ss.Messages
+//	s.extra = ss.Extra
+//	s.internals = ss.Internals
+//	if s.internals == nil {
+//		s.internals = make(map[string]any)
+//	}
+//
+//	s.AgentName = ss.AgentName
+//	s.HasReturnDirectly = ss.HasReturnDirectly
+//
+//	if ss.ReturnDirectlyToolCallID != "" {
+//		s.setReturnDirectlyToolCallID(ss.ReturnDirectlyToolCallID)
+//	}
+//	if ss.ToolGenActions != nil {
+//		s.internals[stateKeyToolGenActions] = ss.ToolGenActions
+//	}
+//	if ss.RemainingIterations != 0 {
+//		s.setRemainingIterations(ss.RemainingIterations)
+//	}
+//	return nil
+//}
 
 // SendToolGenAction attaches an AgentAction to the next tool event emitted for the
 // current tool execution.
