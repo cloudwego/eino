@@ -249,7 +249,7 @@ func (b *BaseChatModelAgentMiddleware) AfterModelRewriteState(ctx context.Contex
 //
 // Values stored here are compatible with interrupt/resume cycles - they will be serialized and restored
 // when the agent is resumed. For custom types, you must register them using schema.RegisterName[T]()
-// in an init() function to ensure proper serialization.
+// in an init() function to ensure proper Serialization.
 //
 // This function can only be called from within a ChatModelAgentMiddleware during agent execution.
 // Returns an error if called outside of an agent execution context.
@@ -272,7 +272,7 @@ func SetRunLocalValue(ctx context.Context, key string, value any) error {
 //
 // Values stored via SetRunLocalValue are compatible with interrupt/resume cycles - they will be serialized
 // and restored when the agent is resumed. For custom types, you must register them using schema.RegisterName[T]()
-// in an init() function to ensure proper serialization.
+// in an init() function to ensure proper Serialization.
 //
 // This function can only be called from within a ChatModelAgentMiddleware during agent execution.
 // Returns the value and true if found, or nil and false if not found or if called outside of an agent execution context.

@@ -146,7 +146,7 @@ func getMessageFromWrappedEvent(e *agentEventWrapper) (Message, error) {
 			// Replace the stream with successfully received messages only (no error at the end).
 			// The error is preserved in StreamErr for users to check.
 			// We intentionally exclude the error from the new stream to ensure gob encoding
-			// compatibility, as the stream may be consumed during serialization.
+			// compatibility, as the stream may be consumed during Serialization.
 			e.AgentEvent.Output.MessageOutput.MessageStream = schema.StreamReaderFromArray(msgs)
 			return nil, err
 		}

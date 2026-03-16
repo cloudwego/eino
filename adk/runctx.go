@@ -28,7 +28,7 @@ import (
 	"github.com/cloudwego/eino/schema"
 )
 
-// runSession CheckpointSchema: persisted via serialization.RunCtx (gob).
+// runSession CheckpointSchema: persisted via Serialization.RunCtx (gob).
 type runSession struct {
 	Values    map[string]any
 	valuesMtx *sync.Mutex
@@ -38,13 +38,13 @@ type runSession struct {
 	mtx        sync.Mutex
 }
 
-// laneEvents CheckpointSchema: persisted via serialization.RunCtx (gob).
+// laneEvents CheckpointSchema: persisted via Serialization.RunCtx (gob).
 type laneEvents struct {
 	Events []*agentEventWrapper
 	Parent *laneEvents
 }
 
-// agentEventWrapper CheckpointSchema: persisted via serialization.RunCtx (gob).
+// agentEventWrapper CheckpointSchema: persisted via Serialization.RunCtx (gob).
 type agentEventWrapper struct {
 	*AgentEvent
 	mu                  sync.Mutex

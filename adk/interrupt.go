@@ -181,14 +181,14 @@ func WithCheckPointID(id string) AgentRunOption {
 }
 
 func init() {
-	schema.RegisterName[*serialization]("_eino_adk_serialization")
+	schema.RegisterName[*Serialization]("_eino_adk_serialization")
 	schema.RegisterName[*WorkflowInterruptInfo]("_eino_adk_workflow_interrupt_info")
 	schema.RegisterName[*State]("_eino_adk_react_state")
 }
 
-// serialization CheckpointSchema: root checkpoint payload (gob).
+// Serialization CheckpointSchema: root checkpoint payload (gob).
 // Any type tagged with `CheckpointSchema:` is persisted and must remain backward compatible.
-type serialization struct {
+type Serialization struct {
 	RunCtx *runContext
 	// deprecated: still keep it here for backward compatibility
 	Info                *InterruptInfo
@@ -207,7 +207,7 @@ func (r *Runner) loadCheckPoint(ctx context.Context, checkpointID string) (
 		return nil, nil, nil, fmt.Errorf("checkpoint[%s] not exist", checkpointID)
 	}
 
-	s := &serialization{}
+	s := &Serialization{}
 	err = gob.NewDecoder(bytes.NewReader(data)).Decode(s)
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("failed to decode checkpoint: %w", err)
@@ -231,7 +231,7 @@ func (r *Runner) saveCheckPoint(
 	id2Addr, id2State := core.SignalToPersistenceMaps(is)
 
 	buf := &bytes.Buffer{}
-	err := gob.NewEncoder(buf).Encode(&serialization{
+	err := gob.NewEncoder(buf).Encode(&Serialization{
 		RunCtx:              runCtx,
 		Info:                info,
 		InterruptID2Address: id2Addr,

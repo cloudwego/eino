@@ -69,12 +69,12 @@ func (e *RetryExhaustedError) Unwrap() error {
 // It allows end-users to observe retry events in real-time via AgentEvent.
 //
 // Field design rationale:
-//   - ErrStr (exported): Stores the error message string for Gob serialization during checkpointing.
+//   - ErrStr (exported): Stores the error message string for Gob Serialization during checkpointing.
 //     This ensures the error message is preserved after checkpoint restore.
 //   - err (unexported): Stores the original error for Unwrap() support at runtime.
-//     This field is intentionally unexported because Gob serialization would fail for unregistered
+//     This field is intentionally unexported because Gob Serialization would fail for unregistered
 //     concrete error types. Since end-users only need the original error when the AgentEvent first
-//     occurs (not after restoring from checkpoint), skipping serialization is acceptable.
+//     occurs (not after restoring from checkpoint), skipping Serialization is acceptable.
 //     After checkpoint restore, err will be nil and Unwrap() returns nil.
 type WillRetryError struct {
 	ErrStr       string
