@@ -183,6 +183,7 @@ func (s *State) decrementRemainingIterations() {
 	current := s.getRemainingIterations()
 	s.internals[stateKeyRemainingIterations] = current - 1
 }
+
 //
 //type stateSerialization struct {
 //	Messages                 []Message
