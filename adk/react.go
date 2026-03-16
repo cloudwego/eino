@@ -99,33 +99,13 @@ func (s *State) setRetryAttempt(attempt int) {
 	s.internals[stateKeyRetryAttempt] = attempt
 }
 
-const (
-	stateKeyReturnDirectlyToolCallID = "_returnDirectlyToolCallID"
-	stateKeyToolGenActions           = "_toolGenActions"
-	stateKeyRemainingIterations      = "_remainingIterations"
-)
-
 func (s *State) getReturnDirectlyToolCallID() string {
-	if s.internals == nil {
-		return ""
-	}
-	if v, ok := s.internals[stateKeyReturnDirectlyToolCallID].(string); ok {
-		return v
-	}
-	return ""
+	return s.ReturnDirectlyToolCallID
 }
 
 func (s *State) setReturnDirectlyToolCallID(id string) {
-	if s.internals == nil {
-		s.internals = make(map[string]any)
-	}
-	s.internals[stateKeyReturnDirectlyToolCallID] = id
 	s.ReturnDirectlyToolCallID = id
 	s.HasReturnDirectly = id != ""
-}
-
-func (s *State) getToolGenActions() map[string]*AgentAction {
-	return s.ToolGenActions
 }
 
 func (s *State) setToolGenAction(key string, action *AgentAction) {
@@ -137,15 +117,11 @@ func (s *State) setToolGenAction(key string, action *AgentAction) {
 }
 
 func (s *State) popToolGenAction(key string) *AgentAction {
-	if s.internals == nil {
+	if s.ToolGenActions == nil {
 		return nil
 	}
-	actions, ok := s.internals[stateKeyToolGenActions].(map[string]*AgentAction)
-	if !ok || actions == nil {
-		return nil
-	}
-	action := actions[key]
-	delete(actions, key)
+	action := s.ToolGenActions[key]
+	delete(s.ToolGenActions, key)
 	return action
 }
 
