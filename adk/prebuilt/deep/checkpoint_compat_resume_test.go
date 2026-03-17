@@ -328,3 +328,84 @@ func TestDeepAgentCheckpointCompat_V0_8_ResumeFromV0_8_3(t *testing.T) {
 	assert.True(t, sawAnyOutput)
 	assert.True(t, sawDeepDone)
 }
+
+func TestDeepAgentCheckpointCompat_V0_8_ResumeFromV0_8_4(t *testing.T) {
+	ctx := context.Background()
+
+	checkpointID := "checkpoint_compat_v0_8_4"
+	data := readTestdataBytes(t, "checkpoint_data_v0.8.4.bin")
+
+	store := newCompatCheckpointStore()
+	assert.NoError(t, store.Set(ctx, checkpointID, data))
+
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	interruptToolName := "interrupt_in_subagent_tool"
+	subTool := &interruptingSubAgentTool{name: interruptToolName}
+
+	deepModel := mockModel.NewMockBaseChatModel(ctrl)
+	subModel := mockModel.NewMockBaseChatModel(ctrl)
+
+	deepModel.EXPECT().Generate(gomock.Any(), gomock.Any(), gomock.Any()).
+		DoAndReturn(func(ctx context.Context, msgs []*schema.Message, opts ...model.Option) (*schema.Message, error) {
+			return schema.AssistantMessage("deep done", nil), nil
+		}).AnyTimes()
+
+	subModel.EXPECT().Generate(gomock.Any(), gomock.Any(), gomock.Any()).
+		DoAndReturn(func(ctx context.Context, msgs []*schema.Message, opts ...model.Option) (*schema.Message, error) {
+			return schema.AssistantMessage("sub done", nil), nil
+		}).AnyTimes()
+
+	subAgent, err := adk.NewChatModelAgent(ctx, &adk.ChatModelAgentConfig{
+		Name:        "sub_chatmodel_agent",
+		Description: "sub agent",
+		Model:       subModel,
+		ToolsConfig: adk.ToolsConfig{
+			ToolsNodeConfig: compose.ToolsNodeConfig{
+				Tools: []tool.BaseTool{subTool},
+			},
+		},
+		MaxIterations: 4,
+	})
+	assert.NoError(t, err)
+
+	deepAgent, err := New(ctx, &Config{
+		Name:                   "deep",
+		Description:            "deep agent",
+		ChatModel:              deepModel,
+		SubAgents:              []adk.Agent{subAgent},
+		MaxIteration:           4,
+		WithoutWriteTodos:      true,
+		WithoutGeneralSubAgent: true,
+	})
+	assert.NoError(t, err)
+
+	runner := adk.NewRunner(ctx, adk.RunnerConfig{
+		Agent:           deepAgent,
+		CheckPointStore: store,
+	})
+
+	it, err := runner.Resume(ctx, checkpointID)
+	assert.NoError(t, err)
+
+	var sawDeepDone bool
+	var sawAnyOutput bool
+	for {
+		ev, ok := it.Next()
+		if !ok {
+			break
+		}
+		assert.NoError(t, ev.Err)
+		if ev.Output != nil && ev.Output.MessageOutput != nil && ev.Output.MessageOutput.Message != nil {
+			sawAnyOutput = true
+			msg := ev.Output.MessageOutput.Message
+			if msg.Role == schema.Assistant && strings.Contains(msg.Content, "deep done") {
+				sawDeepDone = true
+			}
+		}
+	}
+
+	assert.True(t, sawAnyOutput)
+	assert.True(t, sawDeepDone)
+}
