@@ -1890,7 +1890,8 @@ func ConcatMessages(msgs []*Message) (*Message, error) {
 			userInputMultiContentParts = append(userInputMultiContentParts, msg.UserInputMultiContent...)
 		}
 		if msg.CreatedAt != nil && (ret.CreatedAt == nil || msg.CreatedAt.Before(*ret.CreatedAt)) {
-			ret.CreatedAt = msg.CreatedAt
+			t := *msg.CreatedAt
+			ret.CreatedAt = &t
 		}
 
 		if msg.ResponseMeta != nil && ret.ResponseMeta == nil {

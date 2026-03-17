@@ -2287,6 +2287,20 @@ func TestMessageCreatedAt(t *testing.T) {
 		assert.True(t, result.CreatedAt.Equal(t1))
 	})
 
+	t.Run("ConcatMessages CreatedAt is independent from input", func(t *testing.T) {
+		t1 := time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)
+
+		msgs := []*Message{
+			{Role: User, Content: "a", CreatedAt: &t1},
+		}
+
+		result, err := ConcatMessages(msgs)
+		assert.Nil(t, err)
+		assert.NotNil(t, result.CreatedAt)
+		assert.True(t, result.CreatedAt.Equal(t1))
+		assert.NotSame(t, msgs[0].CreatedAt, result.CreatedAt)
+	})
+
 	t.Run("ConcatMessages all nil CreatedAt", func(t *testing.T) {
 		msgs := []*Message{
 			{Role: User, Content: "a"},
