@@ -58,8 +58,21 @@ const (
 )
 
 func init() {
+	// Register stateCompat under v0.7's gob name so old v0.7 struct-format checkpoints decode as *stateCompat.
+	schema.RegisterName[*stateCompat]("_eino_adk_react_state")
+
+	// Register stateCompatV082 under the alias used after byte-patching v0.8.0-v0.8.2 checkpoints.
+	// The alias is the same byte-length as "_eino_adk_react_state" so raw byte replacement works.
+	schema.RegisterName[*stateCompatV082]("_eino_adk_statecompat")
+
+	// Register *State with both gob and the internal serializer.
+	// gob.Register is needed for encoding through interface fields (checkpoint.State is any).
+	// The internal serializer registration is needed for deepCopyState in compose.
+	schema.Register[*State]()
+
 	gob.Register(&AgentEvent{})
 	gob.Register(int(0))
+	gob.Register(map[string]*AgentAction{})
 }
 
 func (s *State) getReturnDirectlyEvent() *AgentEvent {
@@ -243,6 +256,109 @@ func (s *State) GobDecode(b []byte) error {
 		s.setRemainingIterations(ss.RemainingIterations)
 	}
 	return nil
+}
+
+// stateCompat mirrors the v0.7 State struct layout (exported fields only, no GobDecode).
+// Registered under the v0.7 gob name "_eino_adk_react_state" so that old v0.7 struct-format
+// checkpoint data decodes directly into this type.
+type stateCompat struct {
+	Messages                 []Message
+	HasReturnDirectly        bool
+	ReturnDirectlyToolCallID string
+	ToolGenActions           map[string]*AgentAction
+	AgentName                string
+	RemainingIterations      int
+}
+
+// stateCompatV082 handles the v0.8.0-v0.8.2 checkpoint format.
+// In those versions, *State implemented GobEncoder and was registered under
+// "_eino_adk_react_state". GobEncode serialized a stateSerialization struct
+// into opaque bytes. This type's GobDecode reads that format.
+// It is registered under "_eino_adk_statecompat" — a same-length alias used
+// only after byte-patching the checkpoint data in migrateV07Checkpoint.
+type stateCompatV082 struct {
+	Messages                 []Message
+	HasReturnDirectly        bool
+	ReturnDirectlyToolCallID string
+	ToolGenActions           map[string]*AgentAction
+	AgentName                string
+	RemainingIterations      int
+	extra                    map[string]any
+	internals                map[string]any
+}
+
+func (sc *stateCompatV082) GobDecode(b []byte) error {
+	ss := &stateSerialization{}
+	if err := gob.NewDecoder(bytes.NewReader(b)).Decode(ss); err != nil {
+		return err
+	}
+	sc.Messages = ss.Messages
+	sc.HasReturnDirectly = ss.HasReturnDirectly
+	sc.ReturnDirectlyToolCallID = ss.ReturnDirectlyToolCallID
+	sc.ToolGenActions = ss.ToolGenActions
+	sc.AgentName = ss.AgentName
+	sc.RemainingIterations = ss.RemainingIterations
+	sc.extra = ss.Extra
+	sc.internals = ss.Internals
+	return nil
+}
+
+// stateCompatToState converts a legacy *stateCompat (v0.7) to a current *State.
+func stateCompatToState(sc *stateCompat) *State {
+	s := &State{
+		Messages:                 sc.Messages,
+		HasReturnDirectly:        sc.HasReturnDirectly,
+		ReturnDirectlyToolCallID: sc.ReturnDirectlyToolCallID,
+		ToolGenActions:           sc.ToolGenActions,
+		AgentName:                sc.AgentName,
+		RemainingIterations:      sc.RemainingIterations,
+		internals:                make(map[string]any),
+	}
+	if sc.ReturnDirectlyToolCallID != "" {
+		s.internals[stateKeyReturnDirectlyToolCallID] = sc.ReturnDirectlyToolCallID
+	}
+	if sc.ToolGenActions != nil {
+		s.internals[stateKeyToolGenActions] = sc.ToolGenActions
+	}
+	if sc.RemainingIterations != 0 {
+		s.internals[stateKeyRemainingIterations] = sc.RemainingIterations
+	}
+	return s
+}
+
+// stateCompatV082ToState converts a legacy *stateCompatV082 (v0.8.0-v0.8.2) to a current *State.
+func stateCompatV082ToState(sc *stateCompatV082) *State {
+	internals := sc.internals
+	if internals == nil {
+		internals = make(map[string]any)
+	}
+	s := &State{
+		Messages:                 sc.Messages,
+		HasReturnDirectly:        sc.HasReturnDirectly,
+		ReturnDirectlyToolCallID: sc.ReturnDirectlyToolCallID,
+		ToolGenActions:           sc.ToolGenActions,
+		AgentName:                sc.AgentName,
+		RemainingIterations:      sc.RemainingIterations,
+		extra:                    sc.extra,
+		internals:                internals,
+	}
+	// Seed internals from exported fields in case internals map is sparse/missing.
+	if sc.ReturnDirectlyToolCallID != "" {
+		if _, ok := internals[stateKeyReturnDirectlyToolCallID]; !ok {
+			internals[stateKeyReturnDirectlyToolCallID] = sc.ReturnDirectlyToolCallID
+		}
+	}
+	if sc.ToolGenActions != nil {
+		if _, ok := internals[stateKeyToolGenActions]; !ok {
+			internals[stateKeyToolGenActions] = sc.ToolGenActions
+		}
+	}
+	if sc.RemainingIterations != 0 {
+		if _, ok := internals[stateKeyRemainingIterations]; !ok {
+			internals[stateKeyRemainingIterations] = sc.RemainingIterations
+		}
+	}
+	return s
 }
 
 // SendToolGenAction attaches an AgentAction to the next tool event emitted for the

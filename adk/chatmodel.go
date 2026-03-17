@@ -1030,6 +1030,10 @@ func (a *ChatModelAgent) Resume(ctx context.Context, info *ResumeInfo, opts ...A
 			a.Name(ctx), info.InterruptState))
 	}
 
+	// Migrate v0.7 checkpoint: if the compose checkpoint contains *stateCompat
+	// (v0.7 format without GobEncode), convert it to *State and re-encode.
+	stateByte = migrateV07Checkpoint(stateByte)
+
 	var historyModifier func(ctx context.Context, history []Message) []Message
 	if info.ResumeData != nil {
 		resumeData, ok := info.ResumeData.(*ChatModelAgentResumeData)
@@ -1122,4 +1126,45 @@ func (g *gobSerializer) Marshal(v any) ([]byte, error) {
 func (g *gobSerializer) Unmarshal(data []byte, v any) error {
 	buf := bytes.NewBuffer(data)
 	return gob.NewDecoder(buf).Decode(v)
+}
+
+// migrateV07Checkpoint migrates legacy compose checkpoints to the current format.
+// It handles two legacy formats:
+//   - v0.7.*: gob name "_eino_adk_react_state", struct wire format → decoded as *stateCompat
+//   - v0.8.0-v0.8.2: gob name "_eino_adk_statecompat" (already byte-patched by migrateADKCheckpoint
+//     from "_eino_adk_react_state"), opaque-bytes wire format → decoded as *stateCompatV082
+//
+// Fast path: if neither legacy name is present, skip entirely.
+func migrateV07Checkpoint(data []byte) []byte {
+	if bytes.Contains(data, []byte("_eino_adk_statecompat")) {
+		// v0.8.0-v0.8.2: already byte-patched by migrateADKCheckpoint; decode as *stateCompatV082.
+		migrated, err := compose.MigrateCheckpointState(data, &gobSerializer{}, func(state any) (any, bool, error) {
+			sc, ok := state.(*stateCompatV082)
+			if !ok {
+				return state, false, nil
+			}
+			return stateCompatV082ToState(sc), true, nil
+		})
+		if err != nil {
+			return data
+		}
+		return migrated
+	}
+
+	if bytes.Contains(data, []byte("_eino_adk_react_state")) {
+		// v0.7.*: struct wire format, decoded as *stateCompat.
+		migrated, err := compose.MigrateCheckpointState(data, &gobSerializer{}, func(state any) (any, bool, error) {
+			sc, ok := state.(*stateCompat)
+			if !ok {
+				return state, false, nil
+			}
+			return stateCompatToState(sc), true, nil
+		})
+		if err != nil {
+			return data
+		}
+		return migrated
+	}
+
+	return data
 }

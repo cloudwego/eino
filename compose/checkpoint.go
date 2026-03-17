@@ -212,6 +212,40 @@ func (c *checkPointer) set(ctx context.Context, id string, cp *checkpoint) error
 	return c.store.Set(ctx, id, data)
 }
 
+// MigrateCheckpointState decodes checkpoint bytes using the given serializer,
+// applies migrate to checkpoint.State and all nested SubGraphs' states, and re-encodes.
+// The migrate function returns (newState, changed, error). If changed is false for a given state,
+// that state is left as-is. The original bytes are returned only if nothing changed at all.
+func MigrateCheckpointState(data []byte, serializer Serializer, migrate func(state any) (any, bool, error)) ([]byte, error) {
+	cp := &checkpoint{}
+	if err := serializer.Unmarshal(data, cp); err != nil {
+		return nil, err
+	}
+	changed := migrateCheckpoint(cp, migrate)
+	if !changed {
+		return data, nil
+	}
+	return serializer.Marshal(cp)
+}
+
+// migrateCheckpoint recursively applies migrate to cp.State and all SubGraphs.
+func migrateCheckpoint(cp *checkpoint, migrate func(state any) (any, bool, error)) bool {
+	anyChanged := false
+	if cp.State != nil {
+		newState, changed, err := migrate(cp.State)
+		if err == nil && changed {
+			cp.State = newState
+			anyChanged = true
+		}
+	}
+	for _, sub := range cp.SubGraphs {
+		if migrateCheckpoint(sub, migrate) {
+			anyChanged = true
+		}
+	}
+	return anyChanged
+}
+
 // convertCheckPoint if value in checkpoint is streamReader, convert it to non-stream
 func (c *checkPointer) convertCheckPoint(cp *checkpoint, isStream bool) (err error) {
 	for _, ch := range cp.Channels {

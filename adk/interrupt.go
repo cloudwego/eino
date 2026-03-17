@@ -183,7 +183,6 @@ func WithCheckPointID(id string) AgentRunOption {
 func init() {
 	schema.RegisterName[*serialization]("_eino_adk_serialization")
 	schema.RegisterName[*WorkflowInterruptInfo]("_eino_adk_workflow_interrupt_info")
-	schema.RegisterName[*State]("_eino_adk_react_state")
 }
 
 // serialization CheckpointSchema: root checkpoint payload (gob).
@@ -207,6 +206,8 @@ func (r *Runner) loadCheckPoint(ctx context.Context, checkpointID string) (
 		return nil, nil, nil, fmt.Errorf("checkpoint[%s] not exist", checkpointID)
 	}
 
+	data = migrateADKCheckpoint(data)
+
 	s := &serialization{}
 	err = gob.NewDecoder(bytes.NewReader(data)).Decode(s)
 	if err != nil {
@@ -218,6 +219,20 @@ func (r *Runner) loadCheckPoint(ctx context.Context, checkpointID string) (
 		EnableStreaming: s.EnableStreaming,
 		InterruptInfo:   s.Info,
 	}, nil
+}
+
+// migrateADKCheckpoint patches the adk-layer checkpoint bytes to handle the
+// v0.8.0-v0.8.2 wire format for *State, which was registered under "_eino_adk_react_state"
+// with GobEncoder. The current code registers *stateCompatV082 under "_eino_adk_statecompat"
+// (same byte length) to decode the GobEncoder opaque bytes. We detect v0.8.0-v0.8.2 checkpoints
+// by the presence of "stateSerialization" in the bytes (the inner struct name written by GobEncode).
+func migrateADKCheckpoint(data []byte) []byte {
+	if !bytes.Contains(data, []byte("stateSerialization")) {
+		return data
+	}
+	return bytes.ReplaceAll(data,
+		[]byte("\x15_eino_adk_react_state"),
+		[]byte("\x15_eino_adk_statecompat"))
 }
 
 func (r *Runner) saveCheckPoint(
