@@ -1030,9 +1030,9 @@ func (a *ChatModelAgent) Resume(ctx context.Context, info *ResumeInfo, opts ...A
 			a.Name(ctx), info.InterruptState))
 	}
 
-	// Migrate v0.7 checkpoint: if the compose checkpoint contains *stateCompat
+	// Migrate v0.7 checkpoint: if the compose checkpoint contains *stateV07
 	// (v0.7 format without GobEncode), convert it to *State and re-encode.
-	stateByte = migrateV07Checkpoint(stateByte)
+	stateByte = migrateCheckpoint(stateByte)
 
 	var historyModifier func(ctx context.Context, history []Message) []Message
 	if info.ResumeData != nil {
@@ -1128,22 +1128,21 @@ func (g *gobSerializer) Unmarshal(data []byte, v any) error {
 	return gob.NewDecoder(buf).Decode(v)
 }
 
-// migrateV07Checkpoint migrates legacy compose checkpoints to the current format.
-// It handles two legacy formats:
-//   - v0.7.*: gob name "_eino_adk_react_state", struct wire format → decoded as *stateCompat
-//   - v0.8.0-v0.8.2: gob name "_eino_adk_statecompat" (already byte-patched by migrateADKCheckpoint
-//     from "_eino_adk_react_state"), opaque-bytes wire format → decoded as *stateCompatV082
+// migrateCheckpoint migrates legacy compose checkpoints to the current format.
+// It handles one legacy formats:
+//   - v0.8.0-v0.8.3: gob name "_eino_adk_statev08023" (already byte-patched by migrateCMACheckpoint
+//     from "_eino_adk_react_state"), opaque-bytes wire format → decoded as *stateV080
 //
 // Fast path: if neither legacy name is present, skip entirely.
-func migrateV07Checkpoint(data []byte) []byte {
-	if bytes.Contains(data, []byte("_eino_adk_statecompat")) {
-		// v0.8.0-v0.8.2: already byte-patched by migrateADKCheckpoint; decode as *stateCompatV082.
+func migrateCheckpoint(data []byte) []byte {
+	if bytes.Contains(data, []byte(stateGobNameV080)) {
+		// v0.8.0-v0.8.3: already byte-patched by migrateCMACheckpoint; decode as *stateV080.
 		migrated, err := compose.MigrateCheckpointState(data, &gobSerializer{}, func(state any) (any, bool, error) {
-			sc, ok := state.(*stateCompatV082)
+			sc, ok := state.(*stateV080)
 			if !ok {
 				return state, false, nil
 			}
-			return stateCompatV082ToState(sc), true, nil
+			return stateV080ToState(sc), true, nil
 		})
 		if err != nil {
 			return data
@@ -1151,14 +1150,13 @@ func migrateV07Checkpoint(data []byte) []byte {
 		return migrated
 	}
 
-	if bytes.Contains(data, []byte("_eino_adk_react_state")) {
-		// v0.7.*: struct wire format, decoded as *stateCompat.
+	if bytes.Contains(data, []byte(stateGobNameV07)) {
 		migrated, err := compose.MigrateCheckpointState(data, &gobSerializer{}, func(state any) (any, bool, error) {
-			sc, ok := state.(*stateCompat)
+			sc, ok := state.(*stateV07)
 			if !ok {
 				return state, false, nil
 			}
-			return stateCompatToState(sc), true, nil
+			return stateV07ToState(sc), true, nil
 		})
 		if err != nil {
 			return data

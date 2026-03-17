@@ -212,10 +212,22 @@ func (c *checkPointer) set(ctx context.Context, id string, cp *checkpoint) error
 	return c.store.Set(ctx, id, data)
 }
 
-// MigrateCheckpointState decodes checkpoint bytes using the given serializer,
-// applies migrate to checkpoint.State and all nested SubGraphs' states, and re-encodes.
-// The migrate function returns (newState, changed, error). If changed is false for a given state,
-// that state is left as-is. The original bytes are returned only if nothing changed at all.
+// MigrateCheckpointState is an advanced compatibility utility for checkpoint upgrades.
+//
+// It decodes checkpoint bytes using the given serializer, applies migrate to checkpoint.State and
+// all nested SubGraphs' states, then re-encodes the checkpoint.
+//
+// Typical use cases:
+//   - Resume-time migration when you changed your graph state type/schema and need to load old
+//     checkpoints without discarding them.
+//   - Framework-level backward compatibility (e.g. ADK upgrading checkpoints across versions).
+//
+// Migrate callback contract:
+//   - Returns (newState, changed, error).
+//   - If changed is false, the state is left as-is.
+//   - If error is non-nil, the state is left as-is and migration continues for other subgraphs.
+//
+// The original bytes are returned only if no state was changed anywhere in the checkpoint tree.
 func MigrateCheckpointState(data []byte, serializer Serializer, migrate func(state any) (any, bool, error)) ([]byte, error) {
 	cp := &checkpoint{}
 	if err := serializer.Unmarshal(data, cp); err != nil {

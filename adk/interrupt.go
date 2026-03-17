@@ -206,7 +206,7 @@ func (r *Runner) loadCheckPoint(ctx context.Context, checkpointID string) (
 		return nil, nil, nil, fmt.Errorf("checkpoint[%s] not exist", checkpointID)
 	}
 
-	data = migrateADKCheckpoint(data)
+	data = migrateCMACheckpoint(data)
 
 	s := &serialization{}
 	err = gob.NewDecoder(bytes.NewReader(data)).Decode(s)
@@ -221,18 +221,43 @@ func (r *Runner) loadCheckPoint(ctx context.Context, checkpointID string) (
 	}, nil
 }
 
-// migrateADKCheckpoint patches the adk-layer checkpoint bytes to handle the
-// v0.8.0-v0.8.2 wire format for *State, which was registered under "_eino_adk_react_state"
-// with GobEncoder. The current code registers *stateCompatV082 under "_eino_adk_statecompat"
-// (same byte length) to decode the GobEncoder opaque bytes. We detect v0.8.0-v0.8.2 checkpoints
-// by the presence of "stateSerialization" in the bytes (the inner struct name written by GobEncode).
-func migrateADKCheckpoint(data []byte) []byte {
-	if !bytes.Contains(data, []byte("stateSerialization")) {
+// migrateCMACheckpoint fixes a gob incompatibility when resuming old ChatModelAgent/DeepAgents checkpoints.
+//
+// Background
+//   - ADK checkpoints are gob-encoded.
+//   - Some values inside checkpoints are stored as `any`, so gob includes a concrete type name
+//     string in the wire format and uses that name to pick the local Go type to decode into.
+//
+// Problem (v0.8.0-v0.8.3 checkpoints)
+//   - In v0.8.0-v0.8.3, *State was registered under the name "_eino_adk_react_state" AND
+//     implemented GobEncode/GobDecode, so the wire format for that name is "GobEncoder payload"
+//     (opaque bytes).
+//   - In v0.7.*, the same name "_eino_adk_react_state" was used but encoded as a normal struct
+//     (no GobEncode). Gob treats these two wire formats as incompatible.
+//   - Gob only allows one local Go type per name. Today we register "_eino_adk_react_state" to
+//     a v0.7-compatible struct decoder (stateV07). If we try to decode a v0.8.0-v0.8.2
+//     checkpoint under that same name, gob fails with a "want struct; got non-struct" mismatch.
+//
+// Solution
+//   - We keep "_eino_adk_react_state" mapped to the v0.7 decoder.
+//   - For v0.8.0-v0.8.3 checkpoints only, we rewrite the on-wire name to a same-length alias
+//     "_eino_adk_state_v083_", which is registered to a GobDecoder-compatible type (stateV080).
+//   - The alias is the same length as the original, so we can safely replace the length-prefixed
+//     bytes without re-encoding the whole stream.
+func migrateCMACheckpoint(data []byte) []byte {
+	const (
+		lenPrefixedReactStateName = "\x15" + stateGobNameV07
+		lenPrefixedCompatName     = "\x15" + stateGobNameV080
+		lenPrefixedStateSerName   = "\x12stateSerialization"
+	)
+
+	// the following line checks whether the checkpoint is persisted through v0.8.0-v0.8.3
+	if !bytes.Contains(data, []byte(lenPrefixedReactStateName)) || !bytes.Contains(data, []byte(lenPrefixedStateSerName)) {
 		return data
 	}
 	return bytes.ReplaceAll(data,
-		[]byte("\x15_eino_adk_react_state"),
-		[]byte("\x15_eino_adk_statecompat"))
+		[]byte(lenPrefixedReactStateName),
+		[]byte(lenPrefixedCompatName))
 }
 
 func (r *Runner) saveCheckPoint(
