@@ -17,7 +17,9 @@
 package adk
 
 import (
+	"bytes"
 	"context"
+	"encoding/gob"
 	"errors"
 	"fmt"
 	"io"
@@ -37,6 +39,79 @@ import (
 
 type testModelWrapper struct {
 	inner model.ToolCallingChatModel
+}
+
+func TestStateGobDecode_LegacyInternalsFallback(t *testing.T) {
+	ss := &stateSerialization{
+		Internals: map[string]any{
+			stateKeyReturnDirectlyToolCallID: "tcid",
+			stateKeyRemainingIterations:      3,
+			stateKeyRetryAttempt:             7,
+			stateKeyReturnDirectlyEvent:      &AgentEvent{AgentName: "agent"},
+		},
+	}
+
+	var buf bytes.Buffer
+	err := gob.NewEncoder(&buf).Encode(ss)
+	assert.NoError(t, err)
+
+	var st State
+	assert.NoError(t, st.GobDecode(buf.Bytes()))
+
+	assert.Equal(t, "tcid", st.ReturnDirectlyToolCallID)
+	assert.True(t, st.HasReturnDirectly)
+	assert.Equal(t, 3, st.RemainingIterations)
+	assert.Equal(t, 7, st.retryAttempt)
+	assert.NotNil(t, st.returnDirectlyEvent)
+	assert.Equal(t, "agent", st.returnDirectlyEvent.AgentName)
+}
+
+func TestStateCompatConversions_V07AndV080(t *testing.T) {
+	t.Run("stateV07ToState", func(t *testing.T) {
+		s := stateV07ToState(&stateV07{
+			HasReturnDirectly:        true,
+			ReturnDirectlyToolCallID: "tcid",
+			RemainingIterations:      2,
+		})
+		assert.Equal(t, "tcid", s.ReturnDirectlyToolCallID)
+		assert.True(t, s.HasReturnDirectly)
+		assert.Equal(t, 2, s.RemainingIterations)
+	})
+
+	t.Run("stateV080GobDecodeAndToState", func(t *testing.T) {
+		ss := &stateSerialization{
+			ReturnDirectlyToolCallID: "tcid",
+			RemainingIterations:      2,
+			Internals: map[string]any{
+				stateKeyRetryAttempt:        9,
+				stateKeyReturnDirectlyEvent: &AgentEvent{AgentName: "agent"},
+			},
+		}
+
+		var buf bytes.Buffer
+		assert.NoError(t, gob.NewEncoder(&buf).Encode(ss))
+
+		var legacy stateV080
+		assert.NoError(t, legacy.GobDecode(buf.Bytes()))
+
+		s := stateV080ToState(&legacy)
+		assert.Equal(t, "tcid", s.ReturnDirectlyToolCallID)
+		assert.True(t, s.HasReturnDirectly)
+		assert.Equal(t, 2, s.RemainingIterations)
+		assert.Equal(t, 9, s.retryAttempt)
+		assert.NotNil(t, s.returnDirectlyEvent)
+		assert.Equal(t, "agent", s.returnDirectlyEvent.AgentName)
+	})
+}
+
+func TestStateGetToolGenActions(t *testing.T) {
+	st := &State{
+		ToolGenActions: map[string]*AgentAction{
+			"k": {},
+		},
+	}
+	assert.NotNil(t, st.getToolGenActions())
+	assert.Contains(t, st.getToolGenActions(), "k")
 }
 
 func (w *testModelWrapper) Generate(ctx context.Context, input []*schema.Message, opts ...model.Option) (*schema.Message, error) {

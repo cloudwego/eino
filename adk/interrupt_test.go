@@ -17,6 +17,7 @@
 package adk
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -34,6 +35,27 @@ import (
 type interruptTestToolsHandler struct {
 	*BaseChatModelAgentMiddleware
 	tools []tool.BaseTool
+}
+
+func TestMigrateCMACheckpoint(t *testing.T) {
+	t.Run("no-op when missing markers", func(t *testing.T) {
+		in := []byte("random")
+		out := migrateCMACheckpoint(append([]byte(nil), in...))
+		assert.Equal(t, in, out)
+	})
+
+	t.Run("rewrite legacy name for v0.8.0-v0.8.3", func(t *testing.T) {
+		const (
+			lenPrefixedReactStateName         = "\x15" + stateGobNameV07
+			lenPrefixedCompatName             = "\x15" + stateGobNameV080
+			lenPrefixedStateSerializationName = "\x12stateSerialization"
+		)
+
+		in := []byte(lenPrefixedReactStateName + "xxx" + lenPrefixedStateSerializationName + "yyy")
+		out := migrateCMACheckpoint(append([]byte(nil), in...))
+		assert.True(t, bytes.Contains(out, []byte(lenPrefixedCompatName)))
+		assert.False(t, bytes.Contains(out, []byte(lenPrefixedReactStateName)))
+	})
 }
 
 func (h *interruptTestToolsHandler) BeforeAgent(ctx context.Context, runCtx *ChatModelAgentContext) (context.Context, *ChatModelAgentContext, error) {
