@@ -246,13 +246,13 @@ func (r *Runner) loadCheckPoint(ctx context.Context, checkpointID string) (
 //     bytes without re-encoding the whole stream.
 func migrateCMACheckpoint(data []byte) []byte {
 	const (
-		lenPrefixedReactStateName = "\x15" + stateGobNameV07
-		lenPrefixedCompatName     = "\x15" + stateGobNameV080
-		lenPrefixedStateSerName   = "\x12stateSerialization"
+		lenPrefixedReactStateName         = "\x15" + stateGobNameV07
+		lenPrefixedCompatName             = "\x15" + stateGobNameV080
+		lenPrefixedStateSerializationName = "\x12stateSerialization"
 	)
 
 	// the following line checks whether the checkpoint is persisted through v0.8.0-v0.8.3
-	if !bytes.Contains(data, []byte(lenPrefixedReactStateName)) || !bytes.Contains(data, []byte(lenPrefixedStateSerName)) {
+	if !bytes.Contains(data, []byte(lenPrefixedReactStateName)) || !bytes.Contains(data, []byte(lenPrefixedStateSerializationName)) {
 		return data
 	}
 	return bytes.ReplaceAll(data,

@@ -1030,8 +1030,12 @@ func (a *ChatModelAgent) Resume(ctx context.Context, info *ResumeInfo, opts ...A
 			a.Name(ctx), info.InterruptState))
 	}
 
-	// Migrate v0.7 checkpoint: if the compose checkpoint contains *stateV07
-	// (v0.7 format without GobEncode), convert it to *State and re-encode.
+	// Migrate legacy checkpoints before resume.
+	// This covers both:
+	// - v0.7.*: state is stored as a struct wire type (stateV07) under the legacy name.
+	// - v0.8.0-v0.8.3: state is stored as a GobEncoder payload under the same legacy name and must
+	//   be routed to a GobDecode-compatible compat type via byte-patching.
+	// The result is re-encoded so the resume path always operates on the current *State.
 	stateByte = migrateCheckpoint(stateByte)
 
 	var historyModifier func(ctx context.Context, history []Message) []Message
