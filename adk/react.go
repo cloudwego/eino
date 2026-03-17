@@ -88,7 +88,7 @@ func init() {
 	schema.RegisterName[*stateV080](stateGobNameV080)
 	schema.RegisterName[*State](stateGobNameCurrent)
 
-	// the following two lines of registration mainly for backward compatibility 
+	// the following two lines of registration mainly for backward compatibility
 	// when decoding checkpoints created by v0.8.0 - v0.8.3
 	gob.Register(&AgentEvent{})
 	gob.Register(int(0))
