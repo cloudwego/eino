@@ -820,3 +820,54 @@ func randStr() string {
 }
 
 var callbackForTest = BuildAgentCallback(&template.ModelCallbackHandler{}, &template.ToolCallbackHandler{})
+
+func TestDefaultStreamToolCallChecker(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("text then tool calls returns true", func(t *testing.T) {
+		sr := schema.StreamReaderFromArray([]*schema.Message{
+			{Role: schema.Assistant, Content: "Let me think about this..."},
+			{Role: schema.Assistant, Content: "I'll use the tool now."},
+			schema.AssistantMessage("", []schema.ToolCall{
+				{ID: "1", Function: schema.FunctionCall{Name: "greet", Arguments: `{"name":"test"}`}},
+			}),
+		})
+		got, err := defaultStreamToolCallChecker(ctx, sr)
+		assert.NoError(t, err)
+		assert.True(t, got)
+	})
+
+	t.Run("only text returns false", func(t *testing.T) {
+		sr := schema.StreamReaderFromArray([]*schema.Message{
+			{Role: schema.Assistant, Content: "just text"},
+			{Role: schema.Assistant, Content: "more text"},
+		})
+		got, err := defaultStreamToolCallChecker(ctx, sr)
+		assert.NoError(t, err)
+		assert.False(t, got)
+	})
+
+	t.Run("tool calls first returns true", func(t *testing.T) {
+		sr := schema.StreamReaderFromArray([]*schema.Message{
+			schema.AssistantMessage("", []schema.ToolCall{
+				{ID: "1", Function: schema.FunctionCall{Name: "greet", Arguments: `{"name":"test"}`}},
+			}),
+		})
+		got, err := defaultStreamToolCallChecker(ctx, sr)
+		assert.NoError(t, err)
+		assert.True(t, got)
+	})
+
+	t.Run("empty then text then tool calls returns true", func(t *testing.T) {
+		sr := schema.StreamReaderFromArray([]*schema.Message{
+			{Role: schema.Assistant, Content: ""},
+			{Role: schema.Assistant, Content: "thinking..."},
+			schema.AssistantMessage("call tool", []schema.ToolCall{
+				{ID: "1", Function: schema.FunctionCall{Name: "greet", Arguments: `{"name":"test"}`}},
+			}),
+		})
+		got, err := defaultStreamToolCallChecker(ctx, sr)
+		assert.NoError(t, err)
+		assert.True(t, got)
+	})
+}

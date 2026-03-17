@@ -71,7 +71,7 @@ func NewMultiAgent(ctx context.Context, config *MultiAgentConfig) (*MultiAgent, 
 	}
 
 	if toolCallChecker == nil {
-		toolCallChecker = firstChunkStreamToolCallChecker
+		toolCallChecker = defaultStreamToolCallChecker
 	}
 
 	g := compose.NewGraph[[]*schema.Message, *schema.Message](
