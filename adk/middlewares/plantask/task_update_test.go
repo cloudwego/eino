@@ -19,7 +19,6 @@ package plantask
 import (
 	"context"
 	"path/filepath"
-	"sync"
 	"testing"
 
 	"github.com/bytedance/sonic"
@@ -30,7 +29,6 @@ func TestTaskUpdateTool(t *testing.T) {
 	ctx := context.Background()
 	backend := newInMemoryBackend()
 	baseDir := "/tmp/tasks"
-	lock := &sync.Mutex{}
 
 	taskData := &task{
 		ID:          "1",
@@ -43,7 +41,7 @@ func TestTaskUpdateTool(t *testing.T) {
 	taskJSON, _ := sonic.MarshalString(taskData)
 	_ = backend.Write(ctx, &WriteRequest{FilePath: filepath.Join(baseDir, "1.json"), Content: taskJSON})
 
-	tool := newTaskUpdateTool(backend, baseDir, lock)
+	tool := newTaskUpdateTool(testMiddleware(backend, baseDir))
 
 	info, err := tool.Info(ctx)
 	assert.NoError(t, err)
@@ -76,7 +74,6 @@ func TestTaskUpdateToolOwnerAndMetadata(t *testing.T) {
 	ctx := context.Background()
 	backend := newInMemoryBackend()
 	baseDir := "/tmp/tasks"
-	lock := &sync.Mutex{}
 
 	taskData := &task{
 		ID:          "1",
@@ -89,7 +86,7 @@ func TestTaskUpdateToolOwnerAndMetadata(t *testing.T) {
 	taskJSON, _ := sonic.MarshalString(taskData)
 	_ = backend.Write(ctx, &WriteRequest{FilePath: filepath.Join(baseDir, "1.json"), Content: taskJSON})
 
-	tool := newTaskUpdateTool(backend, baseDir, lock)
+	tool := newTaskUpdateTool(testMiddleware(backend, baseDir))
 
 	result, err := tool.InvokableRun(ctx, `{"taskId": "1", "owner": "agent1"}`)
 	assert.NoError(t, err)
@@ -125,7 +122,6 @@ func TestTaskUpdateToolBlocks(t *testing.T) {
 	ctx := context.Background()
 	backend := newInMemoryBackend()
 	baseDir := "/tmp/tasks"
-	lock := &sync.Mutex{}
 
 	task1 := &task{
 		ID:          "1",
@@ -171,7 +167,7 @@ func TestTaskUpdateToolBlocks(t *testing.T) {
 	task4JSON, _ := sonic.MarshalString(task4)
 	_ = backend.Write(ctx, &WriteRequest{FilePath: filepath.Join(baseDir, "4.json"), Content: task4JSON})
 
-	tool := newTaskUpdateTool(backend, baseDir, lock)
+	tool := newTaskUpdateTool(testMiddleware(backend, baseDir))
 
 	result, err := tool.InvokableRun(ctx, `{"taskId": "1", "addBlocks": ["2", "3"]}`)
 	assert.NoError(t, err)
@@ -195,7 +191,6 @@ func TestTaskUpdateToolDelete(t *testing.T) {
 	ctx := context.Background()
 	backend := newInMemoryBackend()
 	baseDir := "/tmp/tasks"
-	lock := &sync.Mutex{}
 
 	taskData := &task{
 		ID:          "1",
@@ -206,7 +201,7 @@ func TestTaskUpdateToolDelete(t *testing.T) {
 	taskJSON, _ := sonic.MarshalString(taskData)
 	_ = backend.Write(ctx, &WriteRequest{FilePath: filepath.Join(baseDir, "1.json"), Content: taskJSON})
 
-	tool := newTaskUpdateTool(backend, baseDir, lock)
+	tool := newTaskUpdateTool(testMiddleware(backend, baseDir))
 
 	result, err := tool.InvokableRun(ctx, `{"taskId": "1", "status": "deleted"}`)
 	assert.NoError(t, err)
@@ -220,9 +215,8 @@ func TestTaskUpdateToolInvalidTaskID(t *testing.T) {
 	ctx := context.Background()
 	backend := newInMemoryBackend()
 	baseDir := "/tmp/tasks"
-	lock := &sync.Mutex{}
 
-	tool := newTaskUpdateTool(backend, baseDir, lock)
+	tool := newTaskUpdateTool(testMiddleware(backend, baseDir))
 
 	_, err := tool.InvokableRun(ctx, `{"taskId": "../../../etc/passwd", "status": "in_progress"}`)
 	assert.Error(t, err)
@@ -260,7 +254,6 @@ func TestTaskUpdateToolBlocksDeduplication(t *testing.T) {
 	ctx := context.Background()
 	backend := newInMemoryBackend()
 	baseDir := "/tmp/tasks"
-	lock := &sync.Mutex{}
 
 	task1 := &task{
 		ID:          "1",
@@ -317,7 +310,7 @@ func TestTaskUpdateToolBlocksDeduplication(t *testing.T) {
 	task5JSON, _ := sonic.MarshalString(task5)
 	_ = backend.Write(ctx, &WriteRequest{FilePath: filepath.Join(baseDir, "5.json"), Content: task5JSON})
 
-	tool := newTaskUpdateTool(backend, baseDir, lock)
+	tool := newTaskUpdateTool(testMiddleware(backend, baseDir))
 
 	_, err := tool.InvokableRun(ctx, `{"taskId": "1", "addBlocks": ["2", "4", "4"]}`)
 	assert.NoError(t, err)
@@ -339,7 +332,6 @@ func TestTaskUpdateToolBidirectionalBlocks(t *testing.T) {
 	ctx := context.Background()
 	backend := newInMemoryBackend()
 	baseDir := "/tmp/tasks"
-	lock := &sync.Mutex{}
 
 	task1 := &task{
 		ID:          "1",
@@ -374,7 +366,7 @@ func TestTaskUpdateToolBidirectionalBlocks(t *testing.T) {
 	task3JSON, _ := sonic.MarshalString(task3)
 	_ = backend.Write(ctx, &WriteRequest{FilePath: filepath.Join(baseDir, "3.json"), Content: task3JSON})
 
-	tool := newTaskUpdateTool(backend, baseDir, lock)
+	tool := newTaskUpdateTool(testMiddleware(backend, baseDir))
 
 	_, err := tool.InvokableRun(ctx, `{"taskId": "1", "addBlocks": ["2", "3"]}`)
 	assert.NoError(t, err)
@@ -402,7 +394,6 @@ func TestTaskUpdateToolBidirectionalBlockedBy(t *testing.T) {
 	ctx := context.Background()
 	backend := newInMemoryBackend()
 	baseDir := "/tmp/tasks"
-	lock := &sync.Mutex{}
 
 	task1 := &task{
 		ID:          "1",
@@ -437,7 +428,7 @@ func TestTaskUpdateToolBidirectionalBlockedBy(t *testing.T) {
 	task3JSON, _ := sonic.MarshalString(task3)
 	_ = backend.Write(ctx, &WriteRequest{FilePath: filepath.Join(baseDir, "3.json"), Content: task3JSON})
 
-	tool := newTaskUpdateTool(backend, baseDir, lock)
+	tool := newTaskUpdateTool(testMiddleware(backend, baseDir))
 
 	_, err := tool.InvokableRun(ctx, `{"taskId": "3", "addBlockedBy": ["1", "2"]}`)
 	assert.NoError(t, err)
@@ -465,7 +456,6 @@ func TestTaskUpdateToolBidirectionalWithNonExistentTask(t *testing.T) {
 	ctx := context.Background()
 	backend := newInMemoryBackend()
 	baseDir := "/tmp/tasks"
-	lock := &sync.Mutex{}
 
 	task1 := &task{
 		ID:          "1",
@@ -478,7 +468,7 @@ func TestTaskUpdateToolBidirectionalWithNonExistentTask(t *testing.T) {
 	task1JSON, _ := sonic.MarshalString(task1)
 	_ = backend.Write(ctx, &WriteRequest{FilePath: filepath.Join(baseDir, "1.json"), Content: task1JSON})
 
-	tool := newTaskUpdateTool(backend, baseDir, lock)
+	tool := newTaskUpdateTool(testMiddleware(backend, baseDir))
 
 	_, err := tool.InvokableRun(ctx, `{"taskId": "1", "addBlocks": ["999"]}`)
 	assert.Error(t, err)
@@ -493,7 +483,6 @@ func TestTaskUpdateToolCyclicDependencyDetection(t *testing.T) {
 	ctx := context.Background()
 	backend := newInMemoryBackend()
 	baseDir := "/tmp/tasks"
-	lock := &sync.Mutex{}
 
 	task1 := &task{
 		ID:          "1",
@@ -528,7 +517,7 @@ func TestTaskUpdateToolCyclicDependencyDetection(t *testing.T) {
 	task3JSON, _ := sonic.MarshalString(task3)
 	_ = backend.Write(ctx, &WriteRequest{FilePath: filepath.Join(baseDir, "3.json"), Content: task3JSON})
 
-	tool := newTaskUpdateTool(backend, baseDir, lock)
+	tool := newTaskUpdateTool(testMiddleware(backend, baseDir))
 
 	_, err := tool.InvokableRun(ctx, `{"taskId": "1", "addBlocks": ["1"]}`)
 	assert.Error(t, err)
@@ -583,7 +572,6 @@ func TestTaskUpdateToolDeleteCleansDependencies(t *testing.T) {
 	ctx := context.Background()
 	backend := newInMemoryBackend()
 	baseDir := "/tmp/tasks"
-	lock := &sync.Mutex{}
 
 	task1 := &task{
 		ID:          "1",
@@ -618,7 +606,7 @@ func TestTaskUpdateToolDeleteCleansDependencies(t *testing.T) {
 	task3JSON, _ := sonic.MarshalString(task3)
 	_ = backend.Write(ctx, &WriteRequest{FilePath: filepath.Join(baseDir, "3.json"), Content: task3JSON})
 
-	tool := newTaskUpdateTool(backend, baseDir, lock)
+	tool := newTaskUpdateTool(testMiddleware(backend, baseDir))
 
 	result, err := tool.InvokableRun(ctx, `{"taskId": "1", "status": "deleted"}`)
 	assert.NoError(t, err)
@@ -646,7 +634,6 @@ func TestTaskUpdateToolAutoDeleteAllTasksWhenAllCompleted(t *testing.T) {
 	ctx := context.Background()
 	backend := newInMemoryBackend()
 	baseDir := "/tmp/tasks"
-	lock := &sync.Mutex{}
 
 	task1 := &task{
 		ID:          "1",
@@ -681,7 +668,7 @@ func TestTaskUpdateToolAutoDeleteAllTasksWhenAllCompleted(t *testing.T) {
 	task3JSON, _ := sonic.MarshalString(task3)
 	_ = backend.Write(ctx, &WriteRequest{FilePath: filepath.Join(baseDir, "3.json"), Content: task3JSON})
 
-	tool := newTaskUpdateTool(backend, baseDir, lock)
+	tool := newTaskUpdateTool(testMiddleware(backend, baseDir))
 
 	_, err := tool.InvokableRun(ctx, `{"taskId": "3", "status": "completed"}`)
 	assert.NoError(t, err)
@@ -698,7 +685,6 @@ func TestTaskUpdateToolNoDeleteWhenNotAllCompleted(t *testing.T) {
 	ctx := context.Background()
 	backend := newInMemoryBackend()
 	baseDir := "/tmp/tasks"
-	lock := &sync.Mutex{}
 
 	task1 := &task{
 		ID:          "1",
@@ -722,7 +708,7 @@ func TestTaskUpdateToolNoDeleteWhenNotAllCompleted(t *testing.T) {
 	task2JSON, _ := sonic.MarshalString(task2)
 	_ = backend.Write(ctx, &WriteRequest{FilePath: filepath.Join(baseDir, "2.json"), Content: task2JSON})
 
-	tool := newTaskUpdateTool(backend, baseDir, lock)
+	tool := newTaskUpdateTool(testMiddleware(backend, baseDir))
 
 	_, err := tool.InvokableRun(ctx, `{"taskId": "1", "status": "completed"}`)
 	assert.NoError(t, err)

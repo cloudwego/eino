@@ -22,7 +22,6 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
-	"sync"
 
 	"github.com/bytedance/sonic"
 
@@ -31,14 +30,12 @@ import (
 	"github.com/cloudwego/eino/schema"
 )
 
-func newTaskListTool(backend Backend, baseDir string, lock *sync.Mutex) *taskListTool {
-	return &taskListTool{Backend: backend, BaseDir: baseDir, lock: lock}
+func newTaskListTool(mw *middleware) *taskListTool {
+	return &taskListTool{mw: mw}
 }
 
 type taskListTool struct {
-	Backend Backend
-	BaseDir string
-	lock    *sync.Mutex
+	mw *middleware
 }
 
 func (t *taskListTool) Info(ctx context.Context) (*schema.ToolInfo, error) {
@@ -98,14 +95,38 @@ func listTasks(ctx context.Context, backend Backend, baseDir string) ([]*task, e
 	return tasks, nil
 }
 
-func (t *taskListTool) InvokableRun(ctx context.Context, argumentsInJSON string, opts ...tool.Option) (string, error) {
-	t.lock.Lock()
-	defer t.lock.Unlock()
+// filterVisibleTasks removes internal tasks (metadata._internal == true) from the list.
+// Internal tasks are automatically created by the team system when spawning teammates,
+// used for internal coordination to track teammate status (subject is agent name, status is in_progress),
+// not business tasks created by users via TaskCreate tool.
+//
+// Filtering rules:
+//   - TaskList tool call: filtered (invisible) — prevents internal tasks from interfering with normal todo management.
+//   - UI status line/todo display: filtered (invisible).
+//   - TaskUpdate (by ID): not filtered (visible) — allows system to update internal task status by ID.
+//   - TaskGet (by ID): not filtered (visible).
+//   - Underlying storage API: not filtered (visible).
+func filterVisibleTasks(tasks []*task) []*task {
+	filtered := make([]*task, 0, len(tasks))
+	for _, tk := range tasks {
+		if !isInternalTask(tk) {
+			filtered = append(filtered, tk)
+		}
+	}
+	return filtered
+}
 
-	tasks, err := listTasks(ctx, t.Backend, t.BaseDir)
+func (t *taskListTool) InvokableRun(ctx context.Context, argumentsInJSON string, opts ...tool.Option) (string, error) {
+	t.mw.taskLock.Lock()
+	defer t.mw.taskLock.Unlock()
+
+	tasks, err := listTasks(ctx, t.mw.backend, t.mw.resolveBaseDir(ctx))
 	if err != nil {
 		return "", err
 	}
+
+	// Filter out internal tasks (e.g., teammate shadow tasks)
+	tasks = filterVisibleTasks(tasks)
 
 	if len(tasks) == 0 {
 		resp := &taskOut{
@@ -156,6 +177,7 @@ const taskListToolDesc = `Use this tool to list all tasks in the task list.
 - To see what tasks are available to work on (status: 'pending', no owner, not blocked)
 - To check overall progress on the project
 - To find tasks that are blocked and need dependencies resolved
+- Before assigning tasks to teammates, to see what's available
 - After completing a task, to check for newly unblocked work or claim the next available task
 - **Prefer working on tasks in ID order** (lowest ID first) when multiple tasks are available, as earlier tasks often set up context for later ones
 
@@ -169,6 +191,15 @@ Returns a summary of each task:
 - **blockedBy**: List of open task IDs that must be resolved first (tasks with blockedBy cannot be claimed until dependencies resolve)
 
 Use TaskGet with a specific task ID to view full details including description and comments.
+
+## Teammate Workflow
+
+When working as a teammate:
+1. After completing your current task, call TaskList to find available work
+2. Look for tasks with status 'pending', no owner, and empty blockedBy
+3. **Prefer tasks in ID order** (lowest ID first) when multiple tasks are available, as earlier tasks often set up context for later ones
+4. Claim an available task using TaskUpdate (set owner to your name), or wait for leader assignment
+5. If blocked, focus on unblocking tasks or notify the team lead
 `
 
 const taskListToolDescChinese = `使用此工具列出任务列表中的所有任务。
@@ -178,6 +209,7 @@ const taskListToolDescChinese = `使用此工具列出任务列表中的所有�
 - 查看可以处理的任务（状态：'pending'，无所有者，未被阻塞）
 - 检查项目的整体进度
 - 查找被阻塞且需要解决依赖关系的任务
+- 分配任务给队友之前，查看可用的任务
 - 完成任务后，检查新解除阻塞的工作或认领下一个可用任务
 - **优先按 ID 顺序处理任务**（最小 ID 优先），当有多个任务可用时，因为较早的任务通常为后续任务建立上下文
 
@@ -191,4 +223,13 @@ const taskListToolDescChinese = `使用此工具列出任务列表中的所有�
 - **blockedBy**：必须首先解决的开放任务 ID 列表（具有 blockedBy 的任务在依赖关系解决之前无法被认领）
 
 使用 TaskGet 配合特定任务 ID 查看完整详情，包括描述和评论。
+
+## 队友工作流程
+
+作为队友工作时：
+1. 完成当前任务后，调用 TaskList 查找可用的工作
+2. 查找状态为 'pending'、无所有者且 blockedBy 为空的任务
+3. **优先按 ID 顺序处理任务**（最小 ID 优先），当有多个任务可用时，因为较早的任务通常为后续任务建立上下文
+4. 使用 TaskUpdate 认领可用任务（将 owner 设置为你的名字），或等待领导分配
+5. 如果被阻塞，专注于解除阻塞任务或通知团队领导
 `

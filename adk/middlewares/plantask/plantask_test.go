@@ -18,7 +18,6 @@ package plantask
 
 import (
 	"context"
-	"sync"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -80,16 +79,20 @@ func TestMiddlewareBeforeAgent(t *testing.T) {
 	assert.Contains(t, toolNames, "TaskList")
 }
 
+func testMiddleware(backend Backend, baseDir string) *middleware {
+	return &middleware{backend: backend, baseDir: baseDir}
+}
+
 func TestIntegration(t *testing.T) {
 	ctx := context.Background()
 	backend := newInMemoryBackend()
 	baseDir := "/tmp/tasks"
-	lock := &sync.Mutex{}
+	mw := testMiddleware(backend, baseDir)
 
-	createTool := newTaskCreateTool(backend, baseDir, lock)
-	getTool := newTaskGetTool(backend, baseDir, lock)
-	updateTool := newTaskUpdateTool(backend, baseDir, lock)
-	listTool := newTaskListTool(backend, baseDir, lock)
+	createTool := newTaskCreateTool(mw)
+	getTool := newTaskGetTool(mw)
+	updateTool := newTaskUpdateTool(mw)
+	listTool := newTaskListTool(mw)
 
 	result, err := createTool.InvokableRun(ctx, `{"subject": "Task 1", "description": "First task"}`)
 	assert.NoError(t, err)

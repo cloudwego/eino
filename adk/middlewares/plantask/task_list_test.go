@@ -19,7 +19,6 @@ package plantask
 import (
 	"context"
 	"path/filepath"
-	"sync"
 	"testing"
 
 	"github.com/bytedance/sonic"
@@ -30,9 +29,8 @@ func TestTaskListTool(t *testing.T) {
 	ctx := context.Background()
 	backend := newInMemoryBackend()
 	baseDir := "/tmp/tasks"
-	lock := &sync.Mutex{}
 
-	tool := newTaskListTool(backend, baseDir, lock)
+	tool := newTaskListTool(testMiddleware(backend, baseDir))
 
 	info, err := tool.Info(ctx)
 	assert.NoError(t, err)

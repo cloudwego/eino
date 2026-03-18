@@ -48,6 +48,10 @@ const (
 	taskStatusInProgress = "in_progress"
 	taskStatusCompleted  = "completed"
 	taskStatusDeleted    = "deleted"
+
+	// MetadataKeyInternal marks a task as system-internal (e.g., teammate shadow tasks).
+	// Internal tasks are filtered out from TaskList.
+	MetadataKeyInternal = "_internal"
 )
 
 type FileInfo = filesystem.FileInfo
@@ -55,6 +59,7 @@ type LsInfoRequest = filesystem.LsInfoRequest
 type ReadRequest = filesystem.ReadRequest
 type WriteRequest = filesystem.WriteRequest
 
+// DeleteRequest describes a file or directory deletion.
 type DeleteRequest struct {
 	FilePath string
 }
@@ -68,12 +73,23 @@ type Backend interface {
 	Read(ctx context.Context, req *ReadRequest) (string, error)
 	// Write writes content to a file, creating it if it doesn't exist.
 	Write(ctx context.Context, req *WriteRequest) error
-	// Delete removes a file from storage.
+	// Delete removes a file or directory at the given path from storage.
+	// If the path is a directory, it must be deleted along with all its contents,
+	// regardless of whether the directory is empty.
 	Delete(ctx context.Context, req *DeleteRequest) error
 }
 
 func isValidTaskID(taskID string) bool {
 	return validTaskIDRegex.MatchString(taskID)
+}
+
+// isInternalTask returns true if the task is marked as system-internal.
+func isInternalTask(t *task) bool {
+	if t.Metadata == nil {
+		return false
+	}
+	v, ok := t.Metadata[MetadataKeyInternal].(bool)
+	return ok && v
 }
 
 func appendUnique(slice []string, items ...string) []string {

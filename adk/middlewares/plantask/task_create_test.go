@@ -19,7 +19,6 @@ package plantask
 import (
 	"context"
 	"path/filepath"
-	"sync"
 	"testing"
 
 	"github.com/bytedance/sonic"
@@ -30,9 +29,8 @@ func TestTaskCreateTool(t *testing.T) {
 	ctx := context.Background()
 	backend := newInMemoryBackend()
 	baseDir := "/tmp/tasks"
-	lock := &sync.Mutex{}
 
-	tool := newTaskCreateTool(backend, baseDir, lock)
+	tool := newTaskCreateTool(testMiddleware(backend, baseDir))
 
 	info, err := tool.Info(ctx)
 	assert.NoError(t, err)
@@ -72,9 +70,8 @@ func TestTaskCreateToolWithMetadata(t *testing.T) {
 	ctx := context.Background()
 	backend := newInMemoryBackend()
 	baseDir := "/tmp/tasks"
-	lock := &sync.Mutex{}
 
-	tool := newTaskCreateTool(backend, baseDir, lock)
+	tool := newTaskCreateTool(testMiddleware(backend, baseDir))
 
 	result, err := tool.InvokableRun(ctx, `{"subject": "Task with metadata", "description": "Has metadata", "metadata": {"key1": "value1", "key2": "value2"}}`)
 	assert.NoError(t, err)

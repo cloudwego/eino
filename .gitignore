@@ -52,7 +52,11 @@ reports/
 .DS_Store
 *.log
 CLAUDE.md
-
+**/agents.local.md
+**/Agents.local.md
+**/AGENTS.local.md
+**/settings.local.json
 # Specs directories
 */specs
 /todos
+
