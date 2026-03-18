@@ -236,6 +236,47 @@ func TestMiddlewareBeforeModelRewriteState(t *testing.T) {
 func TestMiddlewareShouldSummarize(t *testing.T) {
 	ctx := context.Background()
 
+	t.Run("returns true when over messages threshold", func(t *testing.T) {
+		mw := &middleware{
+			cfg: &Config{
+				Trigger: &TriggerCondition{ContextMessages: 1},
+			},
+		}
+
+		input := &TokenCounterInput{
+			Messages: []adk.Message{
+				schema.UserMessage("msg1"),
+				schema.UserMessage("msg2"),
+			},
+		}
+
+		triggered, err := mw.shouldSummarize(ctx, input)
+		assert.NoError(t, err)
+		assert.True(t, triggered)
+	})
+
+	t.Run("returns false when under messages threshold", func(t *testing.T) {
+		mw := &middleware{
+			cfg: &Config{
+				Trigger: &TriggerCondition{
+					ContextMessages: 3,
+					ContextTokens:   1000,
+				},
+			},
+		}
+
+		input := &TokenCounterInput{
+			Messages: []adk.Message{
+				schema.UserMessage("msg1"),
+				schema.UserMessage("msg2"),
+			},
+		}
+
+		triggered, err := mw.shouldSummarize(ctx, input)
+		assert.NoError(t, err)
+		assert.False(t, triggered)
+	})
+
 	t.Run("returns true when over threshold", func(t *testing.T) {
 		mw := &middleware{
 			cfg: &Config{
@@ -498,7 +539,33 @@ func TestConfigCheck(t *testing.T) {
 		}
 		err := c.check()
 		assert.Error(t, err)
-		assert.Contains(t, err.Error(), "must be positive")
+		assert.Contains(t, err.Error(), "must be non-negative")
+	})
+
+	t.Run("invalid trigger max messages", func(t *testing.T) {
+		ctrl := gomock.NewController(t)
+		cm := mockModel.NewMockBaseChatModel(ctrl)
+
+		c := &Config{
+			Model:   cm,
+			Trigger: &TriggerCondition{ContextMessages: -1},
+		}
+		err := c.check()
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "must be non-negative")
+	})
+
+	t.Run("both trigger conditions are zero", func(t *testing.T) {
+		ctrl := gomock.NewController(t)
+		cm := mockModel.NewMockBaseChatModel(ctrl)
+
+		c := &Config{
+			Model:   cm,
+			Trigger: &TriggerCondition{ContextTokens: 0, ContextMessages: 0},
+		}
+		err := c.check()
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "must be non-negative")
 	})
 }
 
@@ -565,14 +632,14 @@ func TestMiddlewareSummarize(t *testing.T) {
 			}).Times(1)
 
 		mw := &middleware{
-		cfg: &Config{
-			Model: cm,
-		},
-	}
+			cfg: &Config{
+				Model: cm,
+			},
+		}
 
-	testMsg := []adk.Message{schema.UserMessage("test")}
-	_, err := mw.summarize(ctx, testMsg, testMsg)
-	assert.NoError(t, err)
+		testMsg := []adk.Message{schema.UserMessage("test")}
+		_, err := mw.summarize(ctx, testMsg, testMsg)
+		assert.NoError(t, err)
 	})
 
 	t.Run("uses context messages", func(t *testing.T) {
@@ -603,10 +670,10 @@ func TestMiddlewareSummarize(t *testing.T) {
 		}
 
 		contextMsgs := []adk.Message{
-		schema.UserMessage("context message"),
-	}
-	_, err := mw.summarize(ctx, contextMsgs, contextMsgs)
-	assert.NoError(t, err)
+			schema.UserMessage("context message"),
+		}
+		_, err := mw.summarize(ctx, contextMsgs, contextMsgs)
+		assert.NoError(t, err)
 	})
 
 	t.Run("uses GenModelInput", func(t *testing.T) {
@@ -628,17 +695,17 @@ func TestMiddlewareSummarize(t *testing.T) {
 			}).Times(1)
 
 		mw := &middleware{
-		cfg: &Config{
-			Model: cm,
-			GenModelInput: func(ctx context.Context, defaultSystemInstruction, userInstruction adk.Message, originalMsgs []adk.Message) ([]adk.Message, error) {
-				return expectedInput, nil
+			cfg: &Config{
+				Model: cm,
+				GenModelInput: func(ctx context.Context, defaultSystemInstruction, userInstruction adk.Message, originalMsgs []adk.Message) ([]adk.Message, error) {
+					return expectedInput, nil
+				},
 			},
-		},
-	}
+		}
 
-	testMsg := []adk.Message{schema.UserMessage("test")}
-	_, err := mw.summarize(ctx, testMsg, testMsg)
-	assert.NoError(t, err)
+		testMsg := []adk.Message{schema.UserMessage("test")}
+		_, err := mw.summarize(ctx, testMsg, testMsg)
+		assert.NoError(t, err)
 	})
 
 	t.Run("GenModelInput error", func(t *testing.T) {
@@ -646,18 +713,18 @@ func TestMiddlewareSummarize(t *testing.T) {
 		cm := mockModel.NewMockBaseChatModel(ctrl)
 
 		mw := &middleware{
-		cfg: &Config{
-			Model: cm,
-			GenModelInput: func(ctx context.Context, defaultSystemInstruction, userInstruction adk.Message, originalMsgs []adk.Message) ([]adk.Message, error) {
-				return nil, errors.New("gen input error")
+			cfg: &Config{
+				Model: cm,
+				GenModelInput: func(ctx context.Context, defaultSystemInstruction, userInstruction adk.Message, originalMsgs []adk.Message) ([]adk.Message, error) {
+					return nil, errors.New("gen input error")
+				},
 			},
-		},
-	}
+		}
 
-	testMsg := []adk.Message{schema.UserMessage("test")}
-	_, err := mw.summarize(ctx, testMsg, testMsg)
-	assert.Error(t, err)
-	assert.Contains(t, err.Error(), "gen input error")
+		testMsg := []adk.Message{schema.UserMessage("test")}
+		_, err := mw.summarize(ctx, testMsg, testMsg)
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "gen input error")
 	})
 
 	t.Run("uses custom instruction", func(t *testing.T) {
@@ -675,15 +742,15 @@ func TestMiddlewareSummarize(t *testing.T) {
 			}).Times(1)
 
 		mw := &middleware{
-		cfg: &Config{
-			Model:           cm,
-			UserInstruction: "custom instruction",
-		},
-	}
+			cfg: &Config{
+				Model:           cm,
+				UserInstruction: "custom instruction",
+			},
+		}
 
-	testMsg := []adk.Message{schema.UserMessage("test")}
-	_, err := mw.summarize(ctx, testMsg, testMsg)
-	assert.NoError(t, err)
+		testMsg := []adk.Message{schema.UserMessage("test")}
+		_, err := mw.summarize(ctx, testMsg, testMsg)
+		assert.NoError(t, err)
 	})
 
 	t.Run("model generate error", func(t *testing.T) {
@@ -693,14 +760,14 @@ func TestMiddlewareSummarize(t *testing.T) {
 			Return(nil, errors.New("generate error")).Times(1)
 
 		mw := &middleware{
-		cfg: &Config{
-			Model: cm,
-		},
-	}
+			cfg: &Config{
+				Model: cm,
+			},
+		}
 
-	testMsg := []adk.Message{schema.UserMessage("test")}
-	_, err := mw.summarize(ctx, testMsg, testMsg)
-	assert.Error(t, err)
+		testMsg := []adk.Message{schema.UserMessage("test")}
+		_, err := mw.summarize(ctx, testMsg, testMsg)
+		assert.Error(t, err)
 	})
 }
 
