@@ -1149,7 +1149,8 @@ func (g *gobSerializer) Unmarshal(data []byte, v any) error {
 //
 // Fast path: if the legacy name is not present, skip entirely.
 func preprocessComposeCheckpoint(data []byte) ([]byte, error) {
-	if bytes.Contains(data, []byte(stateGobNameV080)) {
+	const lenPrefixedCompatName = "\x15" + stateGobNameV080
+	if bytes.Contains(data, []byte(lenPrefixedCompatName)) {
 		// v0.8.0-v0.8.3: already byte-patched by preprocessADKCheckpoint; decode as *stateV080.
 		migrated, err := compose.MigrateCheckpointState(data, &gobSerializer{}, func(state any) (any, bool, error) {
 			sc, ok := state.(*stateV080)

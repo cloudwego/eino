@@ -1577,7 +1577,7 @@ func TestChatModelAgent_PrepareExecContextError(t *testing.T) {
 }
 
 func TestPreprocessComposeCheckpoint_MigrateErrorIsReturned(t *testing.T) {
-	in := []byte("prefix" + stateGobNameV080 + "suffix")
+	in := []byte("prefix\u0015" + stateGobNameV080 + "suffix")
 	_, err := preprocessComposeCheckpoint(in)
 	assert.Error(t, err)
 }
