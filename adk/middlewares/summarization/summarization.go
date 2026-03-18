@@ -115,9 +115,12 @@ type TokenCounterInput struct {
 }
 
 // TriggerCondition specifies when summarization should be activated.
+// Summarization triggers if ANY of the set conditions is met.
 type TriggerCondition struct {
 	// ContextTokens triggers summarization when total token count exceeds this threshold.
 	ContextTokens int
+	// ContextMessages triggers summarization when total messages count exceeds this threshold.
+	ContextMessages int
 }
 
 // PreserveUserMessages controls whether to preserve original user messages in the summary.
@@ -231,6 +234,11 @@ func (m *middleware) BeforeModelRewriteState(ctx context.Context, state *adk.Cha
 }
 
 func (m *middleware) shouldSummarize(ctx context.Context, input *TokenCounterInput) (bool, error) {
+	if m.cfg.Trigger != nil && m.cfg.Trigger.ContextMessages > 0 {
+		if len(input.Messages) > m.cfg.Trigger.ContextMessages {
+			return true, nil
+		}
+	}
 	tokens, err := m.countTokens(ctx, input)
 	if err != nil {
 		return false, fmt.Errorf("failed to count tokens: %w", err)
@@ -565,8 +573,14 @@ func (c *Config) check() error {
 }
 
 func (c *TriggerCondition) check() error {
-	if c.ContextTokens <= 0 {
-		return fmt.Errorf("trigger.ContextTokens must be positive")
+	if c.ContextTokens < 0 {
+		return fmt.Errorf("trigger.ContextTokens must be non-negative")
+	}
+	if c.ContextMessages < 0 {
+		return fmt.Errorf("trigger.ContextMessages must be non-negative")
+	}
+	if c.ContextTokens == 0 && c.ContextMessages == 0 {
+		return fmt.Errorf("at least one of trigger.ContextTokens or trigger.ContextMessages must be non-negative")
 	}
 	return nil
 }
