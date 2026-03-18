@@ -18,10 +18,14 @@ package compose
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"runtime/debug"
+	"strings"
 	"sync"
+
+	"github.com/bytedance/sonic"
 
 	"github.com/cloudwego/eino/callbacks"
 	"github.com/cloudwego/eino/components"
@@ -268,6 +272,8 @@ type toolsInterruptAndRerunState struct {
 
 type toolsTuple struct {
 	indexes                     map[string]int
+	realNames                   []string
+	paramInverseMaps            []map[string]string
 	meta                        []*executorMeta
 	endpoints                   []InvokableToolEndpoint
 	streamEndpoints             []StreamableToolEndpoint
@@ -277,8 +283,25 @@ type toolsTuple struct {
 
 func convTools(ctx context.Context, tools []tool.BaseTool, ms []InvokableToolMiddleware, sms []StreamableToolMiddleware,
 	ems []EnhancedInvokableToolMiddleware, esms []EnhancedStreamableToolMiddleware) (*toolsTuple, error) {
+	// Pre-collect all tool infos and real tool names for alias conflict detection
+	toolInfos := make([]*schema.ToolInfo, len(tools))
+	realToolNames := make(map[string]bool, len(tools))
+	for idx, bt := range tools {
+		tl, err := bt.Info(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("(NewToolNode) failed to get tool info at idx= %d: %w", idx, err)
+		}
+		if realToolNames[tl.Name] {
+			return nil, fmt.Errorf("duplicate tool name '%s'", tl.Name)
+		}
+		realToolNames[tl.Name] = true
+		toolInfos[idx] = tl
+	}
+
 	ret := &toolsTuple{
 		indexes:                     make(map[string]int),
+		realNames:                   make([]string, len(tools)),
+		paramInverseMaps:            make([]map[string]string, len(tools)),
 		meta:                        make([]*executorMeta, len(tools)),
 		endpoints:                   make([]InvokableToolEndpoint, len(tools)),
 		streamEndpoints:             make([]StreamableToolEndpoint, len(tools)),
@@ -286,12 +309,10 @@ func convTools(ctx context.Context, tools []tool.BaseTool, ms []InvokableToolMid
 		enhancedStreamableEndpoints: make([]EnhancedStreamableToolEndpoint, len(tools)),
 	}
 	for idx, bt := range tools {
-		tl, err := bt.Info(ctx)
-		if err != nil {
-			return nil, fmt.Errorf("(NewToolNode) failed to get tool info at idx= %d: %w", idx, err)
-		}
+		tl := toolInfos[idx]
 
 		toolName := tl.Name
+		ret.realNames[idx] = toolName
 		var (
 			st     tool.StreamableTool
 			it     tool.InvokableTool
@@ -342,7 +363,35 @@ func convTools(ctx context.Context, tools []tool.BaseTool, ms []InvokableToolMid
 			enhancedInvokable = enhancedStreamableToEnhancedInvokable(enhancedStreamable)
 		}
 
+		if prev, exists := ret.indexes[toolName]; exists {
+			return nil, fmt.Errorf("tool name '%s' conflicts with a previously registered alias (tool index %d)", toolName, prev)
+		}
 		ret.indexes[toolName] = idx
+
+		// Register name aliases
+		for _, alias := range tl.NameAliases {
+			if realToolNames[alias] {
+				return nil, fmt.Errorf("tool name alias '%s' for tool '%s' conflicts with an existing tool name", alias, toolName)
+			}
+			if _, exists := ret.indexes[alias]; exists {
+				return nil, fmt.Errorf("tool name alias '%s' conflicts with existing alias", alias)
+			}
+			ret.indexes[alias] = idx
+		}
+
+		// Build param inverse map
+		if len(tl.ParamAliases) > 0 {
+			existingParams, err := topLevelParamNames(tl.ParamsOneOf)
+			if err != nil {
+				return nil, fmt.Errorf("tool '%s': %w", toolName, err)
+			}
+			inverseMap, err := buildParamInverseMap(toolName, tl.ParamAliases, existingParams)
+			if err != nil {
+				return nil, err
+			}
+			ret.paramInverseMaps[idx] = inverseMap
+		}
+
 		ret.meta[idx] = meta
 		ret.endpoints[idx] = invokable
 		ret.streamEndpoints[idx] = streamable
@@ -350,6 +399,82 @@ func convTools(ctx context.Context, tools []tool.BaseTool, ms []InvokableToolMid
 		ret.enhancedStreamableEndpoints[idx] = enhancedStreamable
 	}
 	return ret, nil
+}
+
+func topLevelParamNames(p *schema.ParamsOneOf) (map[string]bool, error) {
+	if p == nil {
+		return nil, nil
+	}
+	sc, err := p.ToJSONSchema()
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse tool params schema: %w", err)
+	}
+	if sc == nil || sc.Properties == nil {
+		return nil, nil
+	}
+	names := make(map[string]bool, sc.Properties.Len())
+	for pair := sc.Properties.Oldest(); pair != nil; pair = pair.Next() {
+		names[pair.Key] = true
+	}
+	return names, nil
+}
+
+func buildParamInverseMap(toolName string, paramAliases map[string][]string, existingParams map[string]bool) (map[string]string, error) {
+	inverse := make(map[string]string, len(paramAliases))
+	for canonicalKey, aliases := range paramAliases {
+		if strings.Contains(canonicalKey, ".") {
+			return nil, fmt.Errorf("param alias key '%s' must not contain '.', dot-path notation is reserved for future nested alias support", canonicalKey)
+		}
+		for _, alias := range aliases {
+			if strings.Contains(alias, ".") {
+				return nil, fmt.Errorf("param alias key '%s' must not contain '.', dot-path notation is reserved for future nested alias support", alias)
+			}
+			if existingParams[alias] {
+				return nil, fmt.Errorf("param alias '%s' conflicts with existing parameter '%s' in tool '%s'", alias, alias, toolName)
+			}
+			if existing, ok := inverse[alias]; ok {
+				return nil, fmt.Errorf("param alias '%s' maps to both '%s' and '%s' in tool '%s'", alias, existing, canonicalKey, toolName)
+			}
+			inverse[alias] = canonicalKey
+		}
+	}
+	return inverse, nil
+}
+
+func remapTopLevelAliases(args string, inverseMap map[string]string) (string, error) {
+	if len(inverseMap) == 0 {
+		return args, nil
+	}
+
+	var parsed map[string]json.RawMessage
+	if err := sonic.Unmarshal([]byte(args), &parsed); err != nil {
+		return args, nil // not valid JSON object, pass through
+	}
+
+	changed := false
+	for alias, realKey := range inverseMap {
+		val, hasAlias := parsed[alias]
+		if !hasAlias {
+			continue
+		}
+		// Real key wins: if real key already present, don't overwrite
+		if _, hasReal := parsed[realKey]; hasReal {
+			continue
+		}
+		parsed[realKey] = val
+		delete(parsed, alias)
+		changed = true
+	}
+
+	if !changed {
+		return args, nil
+	}
+
+	out, err := sonic.Marshal(parsed)
+	if err != nil {
+		return "", fmt.Errorf("failed to marshal remapped args: %w", err)
+	}
+	return string(out), nil
 }
 
 func wrapToolCall(it tool.InvokableTool, middlewares []InvokableToolMiddleware, needCallback bool) InvokableToolEndpoint {
@@ -539,7 +664,8 @@ type toolCallTask struct {
 	enhancedInvokableEndpoint  EnhancedInvokableToolEndpoint
 	enhancedStreamableEndpoint EnhancedStreamableToolEndpoint
 	meta                       *executorMeta
-	name                       string
+	name                       string // real tool name
+	calledName                 string // LLM's original call name (may be alias)
 	arg                        string
 	callID                     string
 	useEnhanced                bool
@@ -571,6 +697,7 @@ func (tn *ToolsNode) genToolCallTasks(ctx context.Context, tuple *toolsTuple,
 		toolCall := input.ToolCalls[i]
 		if enhancedResult, executed := executedEnhancedTools[toolCall.ID]; executed {
 			toolCallTasks[i].name = toolCall.Function.Name
+			toolCallTasks[i].calledName = toolCall.Function.Name
 			toolCallTasks[i].arg = toolCall.Function.Arguments
 			toolCallTasks[i].callID = toolCall.ID
 			toolCallTasks[i].executed = true
@@ -584,6 +711,7 @@ func (tn *ToolsNode) genToolCallTasks(ctx context.Context, tuple *toolsTuple,
 		}
 		if result, executed := executedTools[toolCall.ID]; executed {
 			toolCallTasks[i].name = toolCall.Function.Name
+			toolCallTasks[i].calledName = toolCall.Function.Name
 			toolCallTasks[i].arg = toolCall.Function.Arguments
 			toolCallTasks[i].callID = toolCall.ID
 			toolCallTasks[i].executed = true
@@ -602,8 +730,10 @@ func (tn *ToolsNode) genToolCallTasks(ctx context.Context, tuple *toolsTuple,
 			}
 			toolCallTasks[i] = newUnknownToolTask(toolCall.Function.Name, toolCall.Function.Arguments, toolCall.ID, tn.unknownToolHandler)
 		} else {
+			realName := tuple.realNames[index]
 			toolCallTasks[i].meta = tuple.meta[index]
-			toolCallTasks[i].name = toolCall.Function.Name
+			toolCallTasks[i].name = realName
+			toolCallTasks[i].calledName = toolCall.Function.Name
 			toolCallTasks[i].callID = toolCall.ID
 
 			if tuple.enhancedInvokableEndpoints[index] != nil && tuple.enhancedStreamableEndpoints[index] != nil {
@@ -616,14 +746,23 @@ func (tn *ToolsNode) genToolCallTasks(ctx context.Context, tuple *toolsTuple,
 				toolCallTasks[i].useEnhanced = false
 			}
 
-			if tn.toolArgumentsHandler != nil {
-				arg, err := tn.toolArgumentsHandler(ctx, toolCall.Function.Name, toolCall.Function.Arguments)
+			toolCallTasks[i].arg = toolCall.Function.Arguments
+
+			// Remap param aliases before handler so handler receives converted args
+			if inverseMap := tuple.paramInverseMaps[index]; len(inverseMap) > 0 {
+				remapped, err := remapTopLevelAliases(toolCallTasks[i].arg, inverseMap)
 				if err != nil {
-					return nil, fmt.Errorf("failed to executed tool[name:%s arguments:%s] arguments handler: %w", toolCall.Function.Name, toolCall.Function.Arguments, err)
+					return nil, fmt.Errorf("failed to remap param aliases for tool '%s': %w", realName, err)
+				}
+				toolCallTasks[i].arg = remapped
+			}
+
+			if tn.toolArgumentsHandler != nil {
+				arg, err := tn.toolArgumentsHandler(ctx, realName, toolCallTasks[i].arg)
+				if err != nil {
+					return nil, fmt.Errorf("failed to execute tool[name:%s arguments:%s] arguments handler: %w", realName, toolCallTasks[i].arg, err)
 				}
 				toolCallTasks[i].arg = arg
-			} else {
-				toolCallTasks[i].arg = toolCall.Function.Arguments
 			}
 		}
 	}
@@ -649,9 +788,10 @@ func newUnknownToolTask(name, arg, callID string, unknownToolHandler func(ctx co
 			isComponentCallbackEnabled: false,
 			componentImplType:          "UnknownTool",
 		},
-		name:   name,
-		arg:    arg,
-		callID: callID,
+		name:       name,
+		calledName: name,
+		arg:        arg,
+		callID:     callID,
 	}
 }
 
@@ -866,13 +1006,13 @@ func (tn *ToolsNode) Invoke(ctx context.Context, input *schema.Message,
 
 		if len(errs) == 0 {
 			if tasks[i].useEnhanced {
-				output[i] = schema.ToolMessage("", tasks[i].callID, schema.WithToolName(tasks[i].name))
+				output[i] = schema.ToolMessage("", tasks[i].callID, schema.WithToolName(tasks[i].calledName))
 				output[i].UserInputMultiContent, err = tasks[i].enhancedOutput.ToMessageInputParts()
 				if err != nil {
 					return nil, err
 				}
 			} else {
-				output[i] = schema.ToolMessage(tasks[i].output, tasks[i].callID, schema.WithToolName(tasks[i].name))
+				output[i] = schema.ToolMessage(tasks[i].output, tasks[i].callID, schema.WithToolName(tasks[i].calledName))
 			}
 
 		}
@@ -986,7 +1126,7 @@ func (tn *ToolsNode) Stream(ctx context.Context, input *schema.Message,
 	for i := 0; i < n; i++ {
 		index := i
 		callID := tasks[i].callID
-		callName := tasks[i].name
+		callName := tasks[i].calledName
 		if tasks[i].useEnhanced {
 			cvt := func(tr *schema.ToolResult) ([]*schema.Message, error) {
 				ret := make([]*schema.Message, n)

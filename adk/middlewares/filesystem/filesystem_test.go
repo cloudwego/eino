@@ -595,6 +595,57 @@ func TestGetFilesystemTools(t *testing.T) {
 			}
 		}
 	})
+
+	t.Run("ToolConfig with NameAliases and ParamAliases", func(t *testing.T) {
+		tools, err := getFilesystemTools(ctx, &MiddlewareConfig{
+			Backend: backend,
+			LsToolConfig: &ToolConfig{
+				NameAliases:  []string{"list", "dir"},
+				ParamAliases: map[string][]string{"path": {"dir", "directory"}},
+			},
+		})
+		assert.NoError(t, err)
+		assert.Len(t, tools, 6)
+
+		// Find ls tool and verify aliases
+		for _, to := range tools {
+			info, infoErr := to.Info(ctx)
+			assert.NoError(t, infoErr)
+			if info.Name == "ls" {
+				assert.Equal(t, []string{"list", "dir"}, info.NameAliases)
+				assert.Equal(t, map[string][]string{"path": {"dir", "directory"}}, info.ParamAliases)
+				return
+			}
+		}
+		t.Fatal("ls tool not found")
+	})
+
+	t.Run("ExecuteToolConfig with NameAliases and ParamAliases", func(t *testing.T) {
+		shellBackend := &mockShellBackend{
+			Backend: backend,
+		}
+		tools, err := getFilesystemTools(ctx, &MiddlewareConfig{
+			Backend: shellBackend,
+			Shell:   shellBackend,
+			ExecuteToolConfig: &ExecuteToolConfig{
+				NameAliases:  []string{"run", "shell"},
+				ParamAliases: map[string][]string{"command": {"cmd", "script"}},
+			},
+		})
+		assert.NoError(t, err)
+		assert.Len(t, tools, 7)
+
+		for _, to := range tools {
+			info, infoErr := to.Info(ctx)
+			assert.NoError(t, infoErr)
+			if info.Name == "execute" {
+				assert.Equal(t, []string{"run", "shell"}, info.NameAliases)
+				assert.Equal(t, map[string][]string{"command": {"cmd", "script"}}, info.ParamAliases)
+				return
+			}
+		}
+		t.Fatal("execute tool not found")
+	})
 }
 
 func TestNew(t *testing.T) {
