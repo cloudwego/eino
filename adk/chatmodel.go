@@ -1036,7 +1036,14 @@ func (a *ChatModelAgent) Resume(ctx context.Context, info *ResumeInfo, opts ...A
 	// - v0.8.0-v0.8.3: state is stored as a GobEncoder payload under the same legacy name and must
 	//   be routed to a GobDecode-compatible compat type via byte-patching.
 	// The result is re-encoded so the resume path always operates on the current *State.
-	stateByte = migrateCheckpoint(stateByte)
+	stateByte, err = preprocessComposeCheckpoint(stateByte)
+	if err != nil {
+		go func() {
+			generator.Send(&AgentEvent{Err: err})
+			generator.Close()
+		}()
+		return iterator
+	}
 
 	var historyModifier func(ctx context.Context, history []Message) []Message
 	if info.ResumeData != nil {
@@ -1132,15 +1139,16 @@ func (g *gobSerializer) Unmarshal(data []byte, v any) error {
 	return gob.NewDecoder(buf).Decode(v)
 }
 
-// migrateCheckpoint migrates legacy compose checkpoints to the current format.
-// It handles one legacy formats:
-//   - v0.8.0-v0.8.3: gob name "_eino_adk_statev08023" (already byte-patched by migrateCMACheckpoint
+// preprocessComposeCheckpoint migrates legacy compose checkpoints to the current format.
+// It handles two legacy formats:
+//   - v0.8.0-v0.8.3: gob name "_eino_adk_state_v080_" (already byte-patched by preprocessADKCheckpoint
 //     from "_eino_adk_react_state"), opaque-bytes wire format → decoded as *stateV080
+//   - v0.7.*: gob name "_eino_adk_react_state", struct wire format → decoded as *stateV07
 //
 // Fast path: if neither legacy name is present, skip entirely.
-func migrateCheckpoint(data []byte) []byte {
+func preprocessComposeCheckpoint(data []byte) ([]byte, error) {
 	if bytes.Contains(data, []byte(stateGobNameV080)) {
-		// v0.8.0-v0.8.3: already byte-patched by migrateCMACheckpoint; decode as *stateV080.
+		// v0.8.0-v0.8.3: already byte-patched by preprocessADKCheckpoint; decode as *stateV080.
 		migrated, err := compose.MigrateCheckpointState(data, &gobSerializer{}, func(state any) (any, bool, error) {
 			sc, ok := state.(*stateV080)
 			if !ok {
@@ -1149,9 +1157,9 @@ func migrateCheckpoint(data []byte) []byte {
 			return stateV080ToState(sc), true, nil
 		})
 		if err != nil {
-			return data
+			return nil, fmt.Errorf("failed to migrate v0.8.0-v0.8.3 compose checkpoint: %w", err)
 		}
-		return migrated
+		return migrated, nil
 	}
 
 	if bytes.Contains(data, []byte(stateGobNameV07)) {
@@ -1163,10 +1171,10 @@ func migrateCheckpoint(data []byte) []byte {
 			return stateV07ToState(sc), true, nil
 		})
 		if err != nil {
-			return data
+			return nil, fmt.Errorf("failed to migrate v0.7 compose checkpoint: %w", err)
 		}
-		return migrated
+		return migrated, nil
 	}
 
-	return data
+	return data, nil
 }

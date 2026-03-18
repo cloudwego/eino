@@ -37,10 +37,10 @@ type interruptTestToolsHandler struct {
 	tools []tool.BaseTool
 }
 
-func TestMigrateCMACheckpoint(t *testing.T) {
+func TestPreprocessADKCheckpoint(t *testing.T) {
 	t.Run("no-op when missing markers", func(t *testing.T) {
 		in := []byte("random")
-		out := migrateCMACheckpoint(append([]byte(nil), in...))
+		out := preprocessADKCheckpoint(append([]byte(nil), in...))
 		assert.Equal(t, in, out)
 	})
 
@@ -52,7 +52,7 @@ func TestMigrateCMACheckpoint(t *testing.T) {
 		)
 
 		in := []byte(lenPrefixedReactStateName + "xxx" + lenPrefixedStateSerializationName + "yyy")
-		out := migrateCMACheckpoint(append([]byte(nil), in...))
+		out := preprocessADKCheckpoint(append([]byte(nil), in...))
 		assert.True(t, bytes.Contains(out, []byte(lenPrefixedCompatName)))
 		assert.False(t, bytes.Contains(out, []byte(lenPrefixedReactStateName)))
 	})

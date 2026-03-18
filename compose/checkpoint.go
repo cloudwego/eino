@@ -225,7 +225,7 @@ func (c *checkPointer) set(ctx context.Context, id string, cp *checkpoint) error
 // Migrate callback contract:
 //   - Returns (newState, changed, error).
 //   - If changed is false, the state is left as-is.
-//   - If error is non-nil, the state is left as-is and migration continues for other subgraphs.
+//   - If error is non-nil, migration stops and the error is returned to the caller.
 //
 // The original bytes are returned only if no state was changed anywhere in the checkpoint tree.
 func MigrateCheckpointState(data []byte, serializer Serializer, migrate func(state any) (any, bool, error)) ([]byte, error) {
@@ -233,7 +233,10 @@ func MigrateCheckpointState(data []byte, serializer Serializer, migrate func(sta
 	if err := serializer.Unmarshal(data, cp); err != nil {
 		return nil, err
 	}
-	changed := migrateCheckpoint(cp, migrate)
+	changed, err := migrateCheckpoint(cp, migrate)
+	if err != nil {
+		return nil, err
+	}
 	if !changed {
 		return data, nil
 	}
@@ -241,21 +244,28 @@ func MigrateCheckpointState(data []byte, serializer Serializer, migrate func(sta
 }
 
 // migrateCheckpoint recursively applies migrate to cp.State and all SubGraphs.
-func migrateCheckpoint(cp *checkpoint, migrate func(state any) (any, bool, error)) bool {
+func migrateCheckpoint(cp *checkpoint, migrate func(state any) (any, bool, error)) (bool, error) {
 	anyChanged := false
 	if cp.State != nil {
 		newState, changed, err := migrate(cp.State)
-		if err == nil && changed {
+		if err != nil {
+			return false, err
+		}
+		if changed {
 			cp.State = newState
 			anyChanged = true
 		}
 	}
 	for _, sub := range cp.SubGraphs {
-		if migrateCheckpoint(sub, migrate) {
+		changed, err := migrateCheckpoint(sub, migrate)
+		if err != nil {
+			return false, err
+		}
+		if changed {
 			anyChanged = true
 		}
 	}
-	return anyChanged
+	return anyChanged, nil
 }
 
 // convertCheckPoint if value in checkpoint is streamReader, convert it to non-stream

@@ -62,7 +62,7 @@ const (
 	stateGobNameV07 = "_eino_adk_react_state"
 
 	// stateGobNameV080 is a v0.8.0-v0.8.3-only alias used after byte-patching
-	// raw checkpoint bytes in migrateCMACheckpoint.
+	// raw checkpoint bytes in preprocessADKCheckpoint.
 	// It must stay the same byte length as stateGobNameV07 so the length-prefixed
 	// gob string in the stream remains valid.
 	stateGobNameV080 = "_eino_adk_state_v080_"
@@ -182,6 +182,7 @@ func (s *State) GobEncode() ([]byte, error) {
 		RetryAttempt:             s.retryAttempt,
 		ReturnDirectlyEvent:      s.returnDirectlyEvent,
 		Extra:                    s.extra,
+		// Internals omitted: only used for legacy decode fallback.
 	}
 	buf := &bytes.Buffer{}
 	if err := gob.NewEncoder(buf).Encode(ss); err != nil {
@@ -264,8 +265,8 @@ func stateV07ToState(sc *stateV07) *State {
 // In those versions, *State implemented GobEncoder and was registered under
 // "_eino_adk_react_state". GobEncode serialized a stateSerialization struct
 // into opaque bytes. This type's GobDecode reads that format.
-// It is registered under "_eino_adk_statecompat" — a same-length alias used
-// only after byte-patching the checkpoint data in migrateCheckpoint.
+// It is registered under "_eino_adk_state_v080_" — a same-length alias used
+// only after byte-patching the checkpoint data in preprocessADKCheckpoint.
 type stateV080 struct {
 	Messages                 []Message
 	HasReturnDirectly        bool
@@ -293,7 +294,7 @@ func (sc *stateV080) GobDecode(b []byte) error {
 	return nil
 }
 
-// stateV080ToState converts a legacy *stateV080 (v0.8.0-v0.8.2) to a current *State.
+// stateV080ToState converts a legacy *stateV080 (v0.8.0-v0.8.3) to a current *State.
 func stateV080ToState(sc *stateV080) *State {
 	s := &State{
 		Messages:                 sc.Messages,
