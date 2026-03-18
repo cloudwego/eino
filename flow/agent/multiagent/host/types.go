@@ -194,11 +194,6 @@ func firstChunkStreamToolCallChecker(_ context.Context, sr *schema.StreamReader[
 		if len(msg.ToolCalls) > 0 {
 			return true, nil
 		}
-
-		if len(msg.Content) == 0 { // skip empty chunks at the front
-			continue
-		}
-
-		return false, nil
+		// continue scanning all chunks until EOF or tool calls found
 	}
 }
