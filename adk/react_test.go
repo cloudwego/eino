@@ -41,50 +41,14 @@ type testModelWrapper struct {
 	inner model.ToolCallingChatModel
 }
 
-func TestStateGobDecode_LegacyInternalsFallback(t *testing.T) {
-	ss := &stateSerialization{
-		Internals: map[string]any{
-			stateKeyReturnDirectlyToolCallID: "tcid",
-			stateKeyRemainingIterations:      3,
-			stateKeyRetryAttempt:             7,
-			stateKeyReturnDirectlyEvent:      &AgentEvent{AgentName: "agent"},
-		},
-	}
-
-	var buf bytes.Buffer
-	err := gob.NewEncoder(&buf).Encode(ss)
-	assert.NoError(t, err)
-
-	var st State
-	assert.NoError(t, st.GobDecode(buf.Bytes()))
-
-	assert.Equal(t, "tcid", st.ReturnDirectlyToolCallID)
-	assert.True(t, st.HasReturnDirectly)
-	assert.Equal(t, 3, st.RemainingIterations)
-	assert.Equal(t, 7, st.retryAttempt)
-	assert.NotNil(t, st.returnDirectlyEvent)
-	assert.Equal(t, "agent", st.returnDirectlyEvent.AgentName)
-}
-
-func TestStateCompatConversions_V07AndV080(t *testing.T) {
-	t.Run("stateV07ToState", func(t *testing.T) {
-		s := stateV07ToState(&stateV07{
-			HasReturnDirectly:        true,
-			ReturnDirectlyToolCallID: "tcid",
-			RemainingIterations:      2,
-		})
-		assert.Equal(t, "tcid", s.ReturnDirectlyToolCallID)
-		assert.True(t, s.HasReturnDirectly)
-		assert.Equal(t, 2, s.RemainingIterations)
-	})
-
+func TestStateCompatConversions_V080(t *testing.T) {
 	t.Run("stateV080GobDecodeAndToState", func(t *testing.T) {
-		ss := &stateSerialization{
+		ss := &stateV080Serialization{
 			ReturnDirectlyToolCallID: "tcid",
 			RemainingIterations:      2,
 			Internals: map[string]any{
-				stateKeyRetryAttempt:        9,
-				stateKeyReturnDirectlyEvent: &AgentEvent{AgentName: "agent"},
+				"_retryAttempt":        9,
+				"_returnDirectlyEvent": &AgentEvent{AgentName: "agent"},
 			},
 		}
 
@@ -98,9 +62,9 @@ func TestStateCompatConversions_V07AndV080(t *testing.T) {
 		assert.Equal(t, "tcid", s.ReturnDirectlyToolCallID)
 		assert.True(t, s.HasReturnDirectly)
 		assert.Equal(t, 2, s.RemainingIterations)
-		assert.Equal(t, 9, s.retryAttempt)
-		assert.NotNil(t, s.returnDirectlyEvent)
-		assert.Equal(t, "agent", s.returnDirectlyEvent.AgentName)
+		assert.Equal(t, 9, s.RetryAttempt)
+		assert.NotNil(t, s.ReturnDirectlyEvent)
+		assert.Equal(t, "agent", s.ReturnDirectlyEvent.AgentName)
 	})
 }
 

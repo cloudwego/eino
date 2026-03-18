@@ -1140,12 +1140,14 @@ func (g *gobSerializer) Unmarshal(data []byte, v any) error {
 }
 
 // preprocessComposeCheckpoint migrates legacy compose checkpoints to the current format.
-// It handles two legacy formats:
-//   - v0.8.0-v0.8.3: gob name "_eino_adk_state_v080_" (already byte-patched by preprocessADKCheckpoint
+// It handles the v0.8.0-v0.8.3 format:
+//   - gob name "_eino_adk_state_v080_" (already byte-patched by preprocessADKCheckpoint
 //     from "_eino_adk_react_state"), opaque-bytes wire format → decoded as *stateV080
-//   - v0.7.*: gob name "_eino_adk_react_state", struct wire format → decoded as *stateV07
 //
-// Fast path: if neither legacy name is present, skip entirely.
+// v0.7 checkpoints need no migration — State is now a plain struct registered under the
+// same gob name, and gob handles missing fields gracefully.
+//
+// Fast path: if the legacy name is not present, skip entirely.
 func preprocessComposeCheckpoint(data []byte) ([]byte, error) {
 	if bytes.Contains(data, []byte(stateGobNameV080)) {
 		// v0.8.0-v0.8.3: already byte-patched by preprocessADKCheckpoint; decode as *stateV080.
@@ -1158,20 +1160,6 @@ func preprocessComposeCheckpoint(data []byte) ([]byte, error) {
 		})
 		if err != nil {
 			return nil, fmt.Errorf("failed to migrate v0.8.0-v0.8.3 compose checkpoint: %w", err)
-		}
-		return migrated, nil
-	}
-
-	if bytes.Contains(data, []byte(stateGobNameV07)) {
-		migrated, err := compose.MigrateCheckpointState(data, &gobSerializer{}, func(state any) (any, bool, error) {
-			sc, ok := state.(*stateV07)
-			if !ok {
-				return state, false, nil
-			}
-			return stateV07ToState(sc), true, nil
-		})
-		if err != nil {
-			return nil, fmt.Errorf("failed to migrate v0.7 compose checkpoint: %w", err)
 		}
 		return migrated, nil
 	}

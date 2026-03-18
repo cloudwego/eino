@@ -255,10 +255,10 @@ func (b *BaseChatModelAgentMiddleware) AfterModelRewriteState(ctx context.Contex
 // Returns an error if called outside of an agent execution context.
 func SetRunLocalValue(ctx context.Context, key string, value any) error {
 	err := compose.ProcessState(ctx, func(_ context.Context, st *State) error {
-		if st.extra == nil {
-			st.extra = make(map[string]any)
+		if st.Extra == nil {
+			st.Extra = make(map[string]any)
 		}
-		st.extra[key] = value
+		st.Extra[key] = value
 		return nil
 	})
 	if err != nil {
@@ -280,8 +280,8 @@ func GetRunLocalValue(ctx context.Context, key string) (any, bool, error) {
 	var val any
 	var found bool
 	err := compose.ProcessState(ctx, func(_ context.Context, st *State) error {
-		if st.extra != nil {
-			val, found = st.extra[key]
+		if st.Extra != nil {
+			val, found = st.Extra[key]
 		}
 		return nil
 	})
@@ -297,8 +297,8 @@ func GetRunLocalValue(ctx context.Context, key string) (any, bool, error) {
 // Returns an error if called outside of an agent execution context.
 func DeleteRunLocalValue(ctx context.Context, key string) error {
 	err := compose.ProcessState(ctx, func(_ context.Context, st *State) error {
-		if st.extra != nil {
-			delete(st.extra, key)
+		if st.Extra != nil {
+			delete(st.Extra, key)
 		}
 		return nil
 	})
