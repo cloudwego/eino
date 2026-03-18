@@ -39,7 +39,7 @@ var ErrExceedMaxIterations = errors.New("exceeds max iterations")
 // use the handler APIs instead.
 type State struct {
 	Messages []Message
-	extra    map[string]any
+	Extra    map[string]any
 
 	// Internal fields below - do not access directly.
 	// Kept exported for backward compatibility with existing checkpoints.
@@ -48,201 +48,163 @@ type State struct {
 	ToolGenActions           map[string]*AgentAction
 	AgentName                string
 	RemainingIterations      int
-
-	internals map[string]any
+	ReturnDirectlyEvent      *AgentEvent
+	RetryAttempt             int
 }
 
 const (
-	stateKeyReturnDirectlyEvent = "_returnDirectlyEvent"
-	stateKeyRetryAttempt        = "_retryAttempt"
+	stateGobNameV07 = "_eino_adk_react_state"
+
+	// stateGobNameV080 is a v0.8.0-v0.8.3-only alias used after byte-patching
+	// raw checkpoint bytes in preprocessADKCheckpoint.
+	// It must stay the same byte length as stateGobNameV07 so the length-prefixed
+	// gob string in the stream remains valid.
+	stateGobNameV080 = "_eino_adk_state_v080_"
 )
 
 func init() {
+	// Checkpoint compatibility notes:
+	// - ADK/compose checkpoints are gob-encoded and may store state behind `any`, so gob relies on
+	//   an on-wire type name to choose a local Go type.
+	// - Gob allows only one local Go type per name, and it treats "struct wire" and "GobEncoder wire"
+	//   as incompatible even if the name matches.
+	//
+	// This file maintains 2 epochs of *State decoding:
+	// - v0.7.* and current: "_eino_adk_react_state" + struct wire → decode into *State directly.
+	//   State's exported fields are a superset of v0.7, so gob handles missing fields gracefully.
+	// - v0.8.0-v0.8.3: "_eino_adk_react_state" + GobEncoder wire → byte-patched to stateGobNameV080,
+	//   decode into stateV080 and migrate.
+	schema.RegisterName[*State](stateGobNameV07)
+	schema.RegisterName[*stateV080](stateGobNameV080)
+
+	// the following two lines of registration mainly for backward compatibility
+	// when decoding checkpoints created by v0.8.0 - v0.8.3
 	gob.Register(&AgentEvent{})
 	gob.Register(int(0))
 }
 
 func (s *State) getReturnDirectlyEvent() *AgentEvent {
-	if s.internals == nil {
-		return nil
-	}
-	if v, ok := s.internals[stateKeyReturnDirectlyEvent]; ok {
-		return v.(*AgentEvent)
-	}
-	return nil
+	return s.ReturnDirectlyEvent
 }
 
 func (s *State) setReturnDirectlyEvent(event *AgentEvent) {
-	if s.internals == nil {
-		s.internals = make(map[string]any)
-	}
-	if event == nil {
-		delete(s.internals, stateKeyReturnDirectlyEvent)
-	} else {
-		s.internals[stateKeyReturnDirectlyEvent] = event
-	}
+	s.ReturnDirectlyEvent = event
 }
 
 func (s *State) getRetryAttempt() int {
-	if s.internals == nil {
-		return 0
-	}
-	if v, ok := s.internals[stateKeyRetryAttempt]; ok {
-		return v.(int)
-	}
-	return 0
+	return s.RetryAttempt
 }
 
 func (s *State) setRetryAttempt(attempt int) {
-	if s.internals == nil {
-		s.internals = make(map[string]any)
-	}
-	s.internals[stateKeyRetryAttempt] = attempt
+	s.RetryAttempt = attempt
 }
 
-const (
-	stateKeyReturnDirectlyToolCallID = "_returnDirectlyToolCallID"
-	stateKeyToolGenActions           = "_toolGenActions"
-	stateKeyRemainingIterations      = "_remainingIterations"
-)
-
 func (s *State) getReturnDirectlyToolCallID() string {
-	if s.internals == nil {
-		return ""
-	}
-	if v, ok := s.internals[stateKeyReturnDirectlyToolCallID].(string); ok {
-		return v
-	}
-	return ""
+	return s.ReturnDirectlyToolCallID
 }
 
 func (s *State) setReturnDirectlyToolCallID(id string) {
-	if s.internals == nil {
-		s.internals = make(map[string]any)
-	}
-	s.internals[stateKeyReturnDirectlyToolCallID] = id
 	s.ReturnDirectlyToolCallID = id
 	s.HasReturnDirectly = id != ""
 }
 
 func (s *State) getToolGenActions() map[string]*AgentAction {
-	if s.internals == nil {
-		return nil
-	}
-	if v, ok := s.internals[stateKeyToolGenActions].(map[string]*AgentAction); ok {
-		return v
-	}
-	return nil
+	return s.ToolGenActions
 }
 
 func (s *State) setToolGenAction(key string, action *AgentAction) {
-	if s.internals == nil {
-		s.internals = make(map[string]any)
+	if s.ToolGenActions == nil {
+		s.ToolGenActions = make(map[string]*AgentAction)
 	}
-	actions, ok := s.internals[stateKeyToolGenActions].(map[string]*AgentAction)
-	if !ok || actions == nil {
-		actions = make(map[string]*AgentAction)
-		s.internals[stateKeyToolGenActions] = actions
-	}
-	actions[key] = action
+	s.ToolGenActions[key] = action
 }
 
 func (s *State) popToolGenAction(key string) *AgentAction {
-	if s.internals == nil {
+	if s.ToolGenActions == nil {
 		return nil
 	}
-	actions, ok := s.internals[stateKeyToolGenActions].(map[string]*AgentAction)
-	if !ok || actions == nil {
-		return nil
-	}
-	action := actions[key]
-	delete(actions, key)
+	action := s.ToolGenActions[key]
+	delete(s.ToolGenActions, key)
 	return action
 }
 
 func (s *State) getRemainingIterations() int {
-	if s.internals == nil {
-		return 0
-	}
-	if v, ok := s.internals[stateKeyRemainingIterations].(int); ok {
-		return v
-	}
-	return 0
+	return s.RemainingIterations
 }
 
 func (s *State) setRemainingIterations(iterations int) {
-	if s.internals == nil {
-		s.internals = make(map[string]any)
-	}
-	s.internals[stateKeyRemainingIterations] = iterations
+	s.RemainingIterations = iterations
 }
 
 func (s *State) decrementRemainingIterations() {
-	if s.internals == nil {
-		s.internals = make(map[string]any)
-	}
 	current := s.getRemainingIterations()
-	s.internals[stateKeyRemainingIterations] = current - 1
+	s.RemainingIterations = current - 1
 }
 
-type stateSerialization struct {
+// stateV080 handles the v0.8.0-v0.8.3 checkpoint format.
+// In those versions, *State implemented GobEncoder and was registered under
+// "_eino_adk_react_state". GobEncode serialized a stateSerialization struct
+// into opaque bytes. This type's GobDecode reads that format.
+// It is registered under "_eino_adk_state_v080_" — a same-length alias used
+// only after byte-patching the checkpoint data in preprocessADKCheckpoint.
+type stateV080 struct {
 	Messages                 []Message
 	HasReturnDirectly        bool
 	ReturnDirectlyToolCallID string
 	ToolGenActions           map[string]*AgentAction
 	AgentName                string
 	RemainingIterations      int
+	RetryAttempt             int
+	ReturnDirectlyEvent      *AgentEvent
 	Extra                    map[string]any
 	Internals                map[string]any
 }
 
-func (s *State) GobEncode() ([]byte, error) {
-	internals := s.internals
-	if internals == nil {
-		internals = make(map[string]any)
-	}
-	ss := &stateSerialization{
-		Messages:                 s.Messages,
-		HasReturnDirectly:        s.HasReturnDirectly,
-		ReturnDirectlyToolCallID: s.getReturnDirectlyToolCallID(),
-		ToolGenActions:           s.getToolGenActions(),
-		AgentName:                s.AgentName,
-		RemainingIterations:      s.getRemainingIterations(),
-		Extra:                    s.extra,
-		Internals:                internals,
-	}
-	buf := &bytes.Buffer{}
-	if err := gob.NewEncoder(buf).Encode(ss); err != nil {
-		return nil, err
-	}
-	return buf.Bytes(), nil
-}
+// stateV080Serialization is the on-wire format that v0.8.0-v0.8.3 GobEncode produced.
+// It is only used by stateV080.GobDecode to parse those legacy opaque bytes.
+type stateV080Serialization stateV080
 
-func (s *State) GobDecode(b []byte) error {
-	ss := &stateSerialization{}
+func (sc *stateV080) GobDecode(b []byte) error {
+	ss := &stateV080Serialization{}
 	if err := gob.NewDecoder(bytes.NewReader(b)).Decode(ss); err != nil {
 		return err
 	}
-	s.Messages = ss.Messages
-	s.extra = ss.Extra
-	s.internals = ss.Internals
-	if s.internals == nil {
-		s.internals = make(map[string]any)
-	}
-
-	s.AgentName = ss.AgentName
-	s.HasReturnDirectly = ss.HasReturnDirectly
-
-	if ss.ReturnDirectlyToolCallID != "" {
-		s.setReturnDirectlyToolCallID(ss.ReturnDirectlyToolCallID)
-	}
-	if ss.ToolGenActions != nil {
-		s.internals[stateKeyToolGenActions] = ss.ToolGenActions
-	}
-	if ss.RemainingIterations != 0 {
-		s.setRemainingIterations(ss.RemainingIterations)
-	}
+	sc.Messages = ss.Messages
+	sc.HasReturnDirectly = ss.HasReturnDirectly
+	sc.ReturnDirectlyToolCallID = ss.ReturnDirectlyToolCallID
+	sc.ToolGenActions = ss.ToolGenActions
+	sc.AgentName = ss.AgentName
+	sc.RemainingIterations = ss.RemainingIterations
+	sc.Extra = ss.Extra
+	sc.Internals = ss.Internals
 	return nil
+}
+
+// stateV080ToState converts a legacy *stateV080 (v0.8.0-v0.8.3) to a current *State.
+func stateV080ToState(sc *stateV080) *State {
+	s := &State{
+		Messages:                 sc.Messages,
+		HasReturnDirectly:        sc.HasReturnDirectly,
+		ReturnDirectlyToolCallID: sc.ReturnDirectlyToolCallID,
+		ToolGenActions:           sc.ToolGenActions,
+		AgentName:                sc.AgentName,
+		RemainingIterations:      sc.RemainingIterations,
+		Extra:                    sc.Extra,
+	}
+	if sc.ReturnDirectlyToolCallID != "" {
+		s.setReturnDirectlyToolCallID(sc.ReturnDirectlyToolCallID)
+	}
+	if sc.Internals != nil && s.RetryAttempt == 0 {
+		if v, ok := sc.Internals["_retryAttempt"].(int); ok {
+			s.RetryAttempt = v
+		}
+	}
+	if sc.Internals != nil && s.ReturnDirectlyEvent == nil {
+		if v, ok := sc.Internals["_returnDirectlyEvent"].(*AgentEvent); ok {
+			s.ReturnDirectlyEvent = v
+		}
+	}
+	return s
 }
 
 // SendToolGenAction attaches an AgentAction to the next tool event emitted for the
