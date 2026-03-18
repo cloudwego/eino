@@ -38,11 +38,11 @@ func (s stubSerializer) Unmarshal(data []byte, v any) error {
 
 func TestMigrateCheckpointState_UnmarshalError(t *testing.T) {
 	in := []byte("in")
-	ser := stubSerializer{
+	codec := stubSerializer{
 		unmarshal: func(_ []byte, _ any) error { return errors.New("bad") },
 		marshal:   func(_ any) ([]byte, error) { return []byte("unused"), nil },
 	}
-	_, err := MigrateCheckpointState(in, ser, func(state any) (any, bool, error) {
+	_, err := MigrateCheckpointState(in, codec, func(state any) (any, bool, error) {
 		return state, false, nil
 	})
 	assert.Error(t, err)
@@ -51,7 +51,7 @@ func TestMigrateCheckpointState_UnmarshalError(t *testing.T) {
 func TestMigrateCheckpointState_NoChangeReturnsOriginalBytes(t *testing.T) {
 	in := []byte("in")
 	cp := &checkpoint{State: "s"}
-	ser := stubSerializer{
+	codec := stubSerializer{
 		unmarshal: func(_ []byte, v any) error {
 			*(v.(*checkpoint)) = *cp
 			return nil
@@ -60,7 +60,7 @@ func TestMigrateCheckpointState_NoChangeReturnsOriginalBytes(t *testing.T) {
 			return []byte("marshaled"), nil
 		},
 	}
-	out, err := MigrateCheckpointState(in, ser, func(state any) (any, bool, error) {
+	out, err := MigrateCheckpointState(in, codec, func(state any) (any, bool, error) {
 		return state, false, nil
 	})
 	assert.NoError(t, err)
@@ -71,7 +71,7 @@ func TestMigrateCheckpointState_ChangeTriggersMarshal(t *testing.T) {
 	in := []byte("in")
 	cp := &checkpoint{State: "s"}
 	var sawState any
-	ser := stubSerializer{
+	codec := stubSerializer{
 		unmarshal: func(_ []byte, v any) error {
 			*(v.(*checkpoint)) = *cp
 			return nil
@@ -81,7 +81,7 @@ func TestMigrateCheckpointState_ChangeTriggersMarshal(t *testing.T) {
 			return []byte("marshaled"), nil
 		},
 	}
-	out, err := MigrateCheckpointState(in, ser, func(state any) (any, bool, error) {
+	out, err := MigrateCheckpointState(in, codec, func(state any) (any, bool, error) {
 		return "s2", true, nil
 	})
 	assert.NoError(t, err)
@@ -97,7 +97,7 @@ func TestMigrateCheckpointState_MigrateErrorStops(t *testing.T) {
 			"sub": {State: "sub"},
 		},
 	}
-	ser := stubSerializer{
+	codec := stubSerializer{
 		unmarshal: func(_ []byte, v any) error {
 			*(v.(*checkpoint)) = *cp
 			return nil
@@ -106,7 +106,7 @@ func TestMigrateCheckpointState_MigrateErrorStops(t *testing.T) {
 			return []byte("marshaled"), nil
 		},
 	}
-	_, err := MigrateCheckpointState(in, ser, func(state any) (any, bool, error) {
+	_, err := MigrateCheckpointState(in, codec, func(state any) (any, bool, error) {
 		if state == "sub" {
 			return nil, false, errors.New("boom")
 		}
