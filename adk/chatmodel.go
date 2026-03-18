@@ -1030,6 +1030,21 @@ func (a *ChatModelAgent) Resume(ctx context.Context, info *ResumeInfo, opts ...A
 			a.Name(ctx), info.InterruptState))
 	}
 
+	// Migrate legacy checkpoints before resume.
+	// This covers both:
+	// - v0.7.*: state is stored as a struct wire type (stateV07) under the legacy name.
+	// - v0.8.0-v0.8.3: state is stored as a GobEncoder payload under the same legacy name and must
+	//   be routed to a GobDecode-compatible compat type via byte-patching.
+	// The result is re-encoded so the resume path always operates on the current *State.
+	stateByte, err = preprocessComposeCheckpoint(stateByte)
+	if err != nil {
+		go func() {
+			generator.Send(&AgentEvent{Err: err})
+			generator.Close()
+		}()
+		return iterator
+	}
+
 	var historyModifier func(ctx context.Context, history []Message) []Message
 	if info.ResumeData != nil {
 		resumeData, ok := info.ResumeData.(*ChatModelAgentResumeData)
@@ -1122,4 +1137,33 @@ func (g *gobSerializer) Marshal(v any) ([]byte, error) {
 func (g *gobSerializer) Unmarshal(data []byte, v any) error {
 	buf := bytes.NewBuffer(data)
 	return gob.NewDecoder(buf).Decode(v)
+}
+
+// preprocessComposeCheckpoint migrates legacy compose checkpoints to the current format.
+// It handles the v0.8.0-v0.8.3 format:
+//   - gob name "_eino_adk_state_v080_" (already byte-patched by preprocessADKCheckpoint
+//     from "_eino_adk_react_state"), opaque-bytes wire format → decoded as *stateV080
+//
+// v0.7 checkpoints need no migration — State is now a plain struct registered under the
+// same gob name, and gob handles missing fields gracefully.
+//
+// Fast path: if the legacy name is not present, skip entirely.
+func preprocessComposeCheckpoint(data []byte) ([]byte, error) {
+	const lenPrefixedCompatName = "\x15" + stateGobNameV080
+	if bytes.Contains(data, []byte(lenPrefixedCompatName)) {
+		// v0.8.0-v0.8.3: already byte-patched by preprocessADKCheckpoint; decode as *stateV080.
+		migrated, err := compose.MigrateCheckpointState(data, &gobSerializer{}, func(state any) (any, bool, error) {
+			sc, ok := state.(*stateV080)
+			if !ok {
+				return state, false, nil
+			}
+			return stateV080ToState(sc), true, nil
+		})
+		if err != nil {
+			return nil, fmt.Errorf("failed to migrate v0.8.0-v0.8.3 compose checkpoint: %w", err)
+		}
+		return migrated, nil
+	}
+
+	return data, nil
 }

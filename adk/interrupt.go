@@ -183,7 +183,6 @@ func WithCheckPointID(id string) AgentRunOption {
 func init() {
 	schema.RegisterName[*serialization]("_eino_adk_serialization")
 	schema.RegisterName[*WorkflowInterruptInfo]("_eino_adk_workflow_interrupt_info")
-	schema.RegisterName[*State]("_eino_adk_react_state")
 }
 
 // serialization CheckpointSchema: root checkpoint payload (gob).
@@ -207,6 +206,8 @@ func (r *Runner) loadCheckPoint(ctx context.Context, checkpointID string) (
 		return nil, nil, nil, fmt.Errorf("checkpoint[%s] not exist", checkpointID)
 	}
 
+	data = preprocessADKCheckpoint(data)
+
 	s := &serialization{}
 	err = gob.NewDecoder(bytes.NewReader(data)).Decode(s)
 	if err != nil {
@@ -218,6 +219,45 @@ func (r *Runner) loadCheckPoint(ctx context.Context, checkpointID string) (
 		EnableStreaming: s.EnableStreaming,
 		InterruptInfo:   s.Info,
 	}, nil
+}
+
+// preprocessADKCheckpoint fixes a gob incompatibility when resuming old ChatModelAgent/DeepAgents checkpoints.
+//
+// Background
+//   - ADK checkpoints are gob-encoded.
+//   - Some values inside checkpoints are stored as `any`, so gob includes a concrete type name
+//     string in the wire format and uses that name to pick the local Go type to decode into.
+//
+// Problem (v0.8.0-v0.8.3 checkpoints)
+//   - In v0.8.0-v0.8.3, *State was registered under the name "_eino_adk_react_state" AND
+//     implemented GobEncode/GobDecode, so the wire format for that name is "GobEncoder payload"
+//     (opaque bytes).
+//   - In v0.7.*, the same name "_eino_adk_react_state" was used but encoded as a normal struct
+//     (no GobEncode). Gob treats these two wire formats as incompatible.
+//   - Gob only allows one local Go type per name. Today we register "_eino_adk_react_state" to
+//     a v0.7-compatible struct decoder (stateV07). If we try to decode a v0.8.0-v0.8.3
+//     checkpoint under that same name, gob fails with a "want struct; got non-struct" mismatch.
+//
+// Solution
+//   - We keep "_eino_adk_react_state" mapped to the v0.7 decoder.
+//   - For v0.8.0-v0.8.3 checkpoints only, we rewrite the on-wire name to a same-length alias
+//     "_eino_adk_state_v080_", which is registered to a GobDecoder-compatible type (stateV080).
+//   - The alias is the same length as the original, so we can safely replace the length-prefixed
+//     bytes without re-encoding the whole stream.
+func preprocessADKCheckpoint(data []byte) []byte {
+	const (
+		lenPrefixedReactStateName         = "\x15" + stateGobNameV07
+		lenPrefixedCompatName             = "\x15" + stateGobNameV080
+		lenPrefixedStateSerializationName = "\x12stateSerialization"
+	)
+
+	// the following line checks whether the checkpoint is persisted through v0.8.0-v0.8.3
+	if !bytes.Contains(data, []byte(lenPrefixedReactStateName)) || !bytes.Contains(data, []byte(lenPrefixedStateSerializationName)) {
+		return data
+	}
+	return bytes.ReplaceAll(data,
+		[]byte(lenPrefixedReactStateName),
+		[]byte(lenPrefixedCompatName))
 }
 
 func (r *Runner) saveCheckPoint(

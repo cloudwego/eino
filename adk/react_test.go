@@ -17,7 +17,9 @@
 package adk
 
 import (
+	"bytes"
 	"context"
+	"encoding/gob"
 	"errors"
 	"fmt"
 	"io"
@@ -37,6 +39,43 @@ import (
 
 type testModelWrapper struct {
 	inner model.ToolCallingChatModel
+}
+
+func TestStateCompatConversions_V080(t *testing.T) {
+	t.Run("stateV080GobDecodeAndToState", func(t *testing.T) {
+		ss := &stateV080Serialization{
+			ReturnDirectlyToolCallID: "tcid",
+			RemainingIterations:      2,
+			Internals: map[string]any{
+				"_retryAttempt":        9,
+				"_returnDirectlyEvent": &AgentEvent{AgentName: "agent"},
+			},
+		}
+
+		var buf bytes.Buffer
+		assert.NoError(t, gob.NewEncoder(&buf).Encode(ss))
+
+		var legacy stateV080
+		assert.NoError(t, legacy.GobDecode(buf.Bytes()))
+
+		s := stateV080ToState(&legacy)
+		assert.Equal(t, "tcid", s.ReturnDirectlyToolCallID)
+		assert.True(t, s.HasReturnDirectly)
+		assert.Equal(t, 2, s.RemainingIterations)
+		assert.Equal(t, 9, s.RetryAttempt)
+		assert.NotNil(t, s.ReturnDirectlyEvent)
+		assert.Equal(t, "agent", s.ReturnDirectlyEvent.AgentName)
+	})
+}
+
+func TestStateGetToolGenActions(t *testing.T) {
+	st := &State{
+		ToolGenActions: map[string]*AgentAction{
+			"k": {},
+		},
+	}
+	assert.NotNil(t, st.getToolGenActions())
+	assert.Contains(t, st.getToolGenActions(), "k")
 }
 
 func (w *testModelWrapper) Generate(ctx context.Context, input []*schema.Message, opts ...model.Option) (*schema.Message, error) {
