@@ -30,14 +30,13 @@ import (
 	"github.com/cloudwego/eino/schema"
 )
 
-func newTaskUpdateTool(backend Backend, baseDir string, lock *sync.Mutex) *taskUpdateTool {
-	return &taskUpdateTool{Backend: backend, BaseDir: baseDir, lock: lock}
+func newTaskUpdateTool(mw *middleware, turnLock *sync.Mutex) *taskUpdateTool {
+	return &taskUpdateTool{mw: mw, turnLock: turnLock}
 }
 
 type taskUpdateTool struct {
-	Backend Backend
-	BaseDir string
-	lock    *sync.Mutex
+	mw       *middleware
+	turnLock *sync.Mutex
 }
 
 type taskUpdateArgs struct {
@@ -120,8 +119,9 @@ func (t *taskUpdateTool) Info(ctx context.Context) (*schema.ToolInfo, error) {
 }
 
 func (t *taskUpdateTool) InvokableRun(ctx context.Context, argumentsInJSON string, opts ...tool.Option) (string, error) {
-	t.lock.Lock()
-	defer t.lock.Unlock()
+	lock := t.mw.getLock(t.turnLock)
+	lock.Lock()
+	defer lock.Unlock()
 
 	params := &taskUpdateArgs{}
 	err := sonic.UnmarshalString(argumentsInJSON, params)
@@ -132,20 +132,16 @@ func (t *taskUpdateTool) InvokableRun(ctx context.Context, argumentsInJSON strin
 	if !isValidTaskID(params.TaskID) {
 		return "", fmt.Errorf("%s validate task ID failed, err: invalid format: %s", TaskUpdateToolName, params.TaskID)
 	}
+	if params.Status != "" && !isValidTaskStatus(params.Status) {
+		return "", fmt.Errorf("%s invalid task status: %s", TaskUpdateToolName, params.Status)
+	}
 
 	taskFileName := fmt.Sprintf("%s.json", params.TaskID)
-	taskFilePath := filepath.Join(t.BaseDir, taskFileName)
+	taskFilePath := filepath.Join(t.mw.resolveBaseDir(ctx), taskFileName)
 
 	if params.Status == taskStatusDeleted {
-		if removeErr := t.removeTaskFromDependencies(ctx, params.TaskID); removeErr != nil {
-			return "", fmt.Errorf("%s remove Task #%s from dependencies failed, err: %w", TaskUpdateToolName, params.TaskID, removeErr)
-		}
-
-		err = t.Backend.Delete(ctx, &DeleteRequest{
-			FilePath: taskFilePath,
-		})
-		if err != nil {
-			return "", fmt.Errorf("%s delete Task #%s failed, err: %w", TaskUpdateToolName, params.TaskID, err)
+		if deleteErr := deleteTaskLocked(ctx, t.mw.backend, t.mw.resolveBaseDir(ctx), params.TaskID); deleteErr != nil {
+			return "", fmt.Errorf("%s delete Task #%s failed, err: %w", TaskUpdateToolName, params.TaskID, deleteErr)
 		}
 
 		resp := &taskOut{
@@ -158,7 +154,7 @@ func (t *taskUpdateTool) InvokableRun(ctx context.Context, argumentsInJSON strin
 		return jsonResp, nil
 	}
 
-	content, err := t.Backend.Read(ctx, &ReadRequest{
+	content, err := t.mw.backend.Read(ctx, &ReadRequest{
 		FilePath: taskFilePath,
 	})
 	if err != nil {
@@ -190,7 +186,7 @@ func (t *taskUpdateTool) InvokableRun(ctx context.Context, argumentsInJSON strin
 		updatedFields = append(updatedFields, "status")
 	}
 	if len(params.AddBlocks) > 0 || len(params.AddBlockedBy) > 0 {
-		tasks, listErr := listTasks(ctx, t.Backend, t.BaseDir)
+		tasks, listErr := listTasks(ctx, t.mw.backend, t.mw.resolveBaseDir(ctx))
 		if listErr != nil {
 			return "", fmt.Errorf("%s list tasks failed, err: %w", TaskUpdateToolName, listErr)
 		}
@@ -251,18 +247,38 @@ func (t *taskUpdateTool) InvokableRun(ctx context.Context, argumentsInJSON strin
 		}
 		updatedFields = append(updatedFields, "metadata")
 	}
+	if params.Status == taskStatusCompleted {
+		dependenciesCleared, clearErr := t.clearCompletedTaskDependencies(ctx, taskData)
+		if clearErr != nil {
+			return "", fmt.Errorf("%s clear dependencies for completed Task #%s failed, err: %w", TaskUpdateToolName, params.TaskID, clearErr)
+		}
+		if dependenciesCleared {
+			updatedFields = append(updatedFields, "blocks", "blockedBy")
+		}
+	}
 
 	updatedContent, err := sonic.MarshalString(taskData)
 	if err != nil {
 		return "", fmt.Errorf("%s marshal Task #%s failed, err: %w", TaskUpdateToolName, params.TaskID, err)
 	}
 
-	err = t.Backend.Write(ctx, &WriteRequest{
+	err = t.mw.backend.Write(ctx, &WriteRequest{
 		FilePath: taskFilePath,
 		Content:  updatedContent,
 	})
 	if err != nil {
 		return "", fmt.Errorf("%s write Task #%s failed, err: %w", TaskUpdateToolName, params.TaskID, err)
+	}
+
+	// Notify assignee when owner changes.
+	if params.Owner != "" && t.mw.onTaskAssigned != nil {
+		_ = t.mw.onTaskAssigned(ctx, TaskAssignment{
+			TaskID:      params.TaskID,
+			Subject:     taskData.Subject,
+			Description: taskData.Description,
+			Owner:       params.Owner,
+			AssignedBy:  t.mw.getAgentName(ctx),
+		})
 	}
 
 	if params.Status == taskStatusCompleted {
@@ -283,59 +299,10 @@ func (t *taskUpdateTool) InvokableRun(ctx context.Context, argumentsInJSON strin
 	return jsonResp, nil
 }
 
-func (t *taskUpdateTool) removeTaskFromDependencies(ctx context.Context, deletedTaskID string) error {
-	tasks, err := listTasks(ctx, t.Backend, t.BaseDir)
-	if err != nil {
-		return err
-	}
-
-	for _, taskData := range tasks {
-		if taskData.ID == deletedTaskID {
-			continue
-		}
-
-		modified := false
-		newBlocks := make([]string, 0, len(taskData.Blocks))
-		for _, id := range taskData.Blocks {
-			if id != deletedTaskID {
-				newBlocks = append(newBlocks, id)
-			} else {
-				modified = true
-			}
-		}
-
-		newBlockedBy := make([]string, 0, len(taskData.BlockedBy))
-		for _, id := range taskData.BlockedBy {
-			if id != deletedTaskID {
-				newBlockedBy = append(newBlockedBy, id)
-			} else {
-				modified = true
-			}
-		}
-
-		if modified {
-			taskData.Blocks = newBlocks
-			taskData.BlockedBy = newBlockedBy
-
-			updatedContent, err := sonic.MarshalString(taskData)
-			if err != nil {
-				return fmt.Errorf("failed to marshal task #%s: %w", taskData.ID, err)
-			}
-
-			taskFilePath := filepath.Join(t.BaseDir, fmt.Sprintf("%s.json", taskData.ID))
-			if err := t.Backend.Write(ctx, &WriteRequest{FilePath: taskFilePath, Content: updatedContent}); err != nil {
-				return fmt.Errorf("failed to write task #%s: %w", taskData.ID, err)
-			}
-		}
-	}
-
-	return nil
-}
-
 func (t *taskUpdateTool) addBlockedByToTask(ctx context.Context, targetTaskID, blockerTaskID string) error {
-	taskFilePath := filepath.Join(t.BaseDir, fmt.Sprintf("%s.json", targetTaskID))
+	taskFilePath := filepath.Join(t.mw.resolveBaseDir(ctx), fmt.Sprintf("%s.json", targetTaskID))
 
-	content, err := t.Backend.Read(ctx, &ReadRequest{FilePath: taskFilePath})
+	content, err := t.mw.backend.Read(ctx, &ReadRequest{FilePath: taskFilePath})
 	if err != nil {
 		return fmt.Errorf("failed to read task #%s for updating blockedBy: %w", targetTaskID, err)
 	}
@@ -352,7 +319,7 @@ func (t *taskUpdateTool) addBlockedByToTask(ctx context.Context, targetTaskID, b
 		return fmt.Errorf("failed to marshal task #%s: %w", targetTaskID, err)
 	}
 
-	if err := t.Backend.Write(ctx, &WriteRequest{FilePath: taskFilePath, Content: updatedContent}); err != nil {
+	if err := t.mw.backend.Write(ctx, &WriteRequest{FilePath: taskFilePath, Content: updatedContent}); err != nil {
 		return fmt.Errorf("failed to write task #%s: %w", targetTaskID, err)
 	}
 
@@ -360,9 +327,9 @@ func (t *taskUpdateTool) addBlockedByToTask(ctx context.Context, targetTaskID, b
 }
 
 func (t *taskUpdateTool) addBlocksToTask(ctx context.Context, targetTaskID, blockedTaskID string) error {
-	taskFilePath := filepath.Join(t.BaseDir, fmt.Sprintf("%s.json", targetTaskID))
+	taskFilePath := filepath.Join(t.mw.resolveBaseDir(ctx), fmt.Sprintf("%s.json", targetTaskID))
 
-	content, err := t.Backend.Read(ctx, &ReadRequest{FilePath: taskFilePath})
+	content, err := t.mw.backend.Read(ctx, &ReadRequest{FilePath: taskFilePath})
 	if err != nil {
 		return fmt.Errorf("failed to read task #%s for updating blocks: %w", targetTaskID, err)
 	}
@@ -379,16 +346,71 @@ func (t *taskUpdateTool) addBlocksToTask(ctx context.Context, targetTaskID, bloc
 		return fmt.Errorf("failed to marshal task #%s: %w", targetTaskID, err)
 	}
 
-	if err := t.Backend.Write(ctx, &WriteRequest{FilePath: taskFilePath, Content: updatedContent}); err != nil {
+	if err := t.mw.backend.Write(ctx, &WriteRequest{FilePath: taskFilePath, Content: updatedContent}); err != nil {
 		return fmt.Errorf("failed to write task #%s: %w", targetTaskID, err)
 	}
 
 	return nil
 }
 
+func (t *taskUpdateTool) clearCompletedTaskDependencies(ctx context.Context, completedTask *task) (bool, error) {
+	tasks, err := listTasks(ctx, t.mw.backend, t.mw.resolveBaseDir(ctx))
+	if err != nil {
+		return false, err
+	}
+
+	for _, otherTask := range tasks {
+		if otherTask.ID == completedTask.ID {
+			continue
+		}
+
+		modified := false
+		newBlocks := make([]string, 0, len(otherTask.Blocks))
+		for _, id := range otherTask.Blocks {
+			if id != completedTask.ID {
+				newBlocks = append(newBlocks, id)
+			} else {
+				modified = true
+			}
+		}
+
+		newBlockedBy := make([]string, 0, len(otherTask.BlockedBy))
+		for _, id := range otherTask.BlockedBy {
+			if id != completedTask.ID {
+				newBlockedBy = append(newBlockedBy, id)
+			} else {
+				modified = true
+			}
+		}
+
+		if !modified {
+			continue
+		}
+
+		otherTask.Blocks = newBlocks
+		otherTask.BlockedBy = newBlockedBy
+
+		updatedContent, marshalErr := sonic.MarshalString(otherTask)
+		if marshalErr != nil {
+			return false, fmt.Errorf("marshal task #%s failed: %w", otherTask.ID, marshalErr)
+		}
+
+		taskFilePath := filepath.Join(t.mw.resolveBaseDir(ctx), otherTask.ID+".json")
+		if writeErr := t.mw.backend.Write(ctx, &WriteRequest{FilePath: taskFilePath, Content: updatedContent}); writeErr != nil {
+			return false, fmt.Errorf("write task #%s failed: %w", otherTask.ID, writeErr)
+		}
+	}
+
+	dependenciesCleared := len(completedTask.Blocks) > 0 || len(completedTask.BlockedBy) > 0
+	completedTask.Blocks = nil
+	completedTask.BlockedBy = nil
+
+	return dependenciesCleared, nil
+}
+
 // checkIfNeedDeleteAllTasks checks if all tasks are completed, if so, it deletes all tasks
 func (t *taskUpdateTool) checkIfNeedDeleteAllTasks(ctx context.Context) error {
-	tasks, err := listTasks(ctx, t.Backend, t.BaseDir)
+	tasks, err := listTasks(ctx, t.mw.backend, t.mw.resolveBaseDir(ctx))
 	if err != nil {
 		return err
 	}
@@ -400,8 +422,8 @@ func (t *taskUpdateTool) checkIfNeedDeleteAllTasks(ctx context.Context) error {
 	}
 
 	for _, task := range tasks {
-		err := t.Backend.Delete(ctx, &DeleteRequest{
-			FilePath: filepath.Join(t.BaseDir, task.ID+".json"),
+		err := t.mw.backend.Delete(ctx, &DeleteRequest{
+			FilePath: filepath.Join(t.mw.resolveBaseDir(ctx), task.ID+".json"),
 		})
 		if err != nil {
 			return err

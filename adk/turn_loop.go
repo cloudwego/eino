@@ -528,11 +528,16 @@ func (l *TurnLoop[T]) handleEvents(ctx context.Context, item T, iter *AsyncItera
 		if !ok {
 			break
 		}
-		if e.Action != nil && e.Action.Interrupted != nil {
-			return &TurnLoopInterruptError[T]{
-				Item:              item,
-				CheckpointID:      checkPointID,
-				InterruptContexts: e.Action.Interrupted.InterruptContexts,
+		if e.Action != nil {
+			if e.Action.Interrupted != nil {
+				return &TurnLoopInterruptError[T]{
+					Item:              item,
+					CheckpointID:      checkPointID,
+					InterruptContexts: e.Action.Interrupted.InterruptContexts,
+				}
+			}
+			if e.Action.Exit {
+				return ErrLoopExit
 			}
 		}
 	}

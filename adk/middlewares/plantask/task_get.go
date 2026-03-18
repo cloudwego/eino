@@ -30,14 +30,13 @@ import (
 	"github.com/cloudwego/eino/schema"
 )
 
-func newTaskGetTool(backend Backend, baseDir string, lock *sync.Mutex) *taskGetTool {
-	return &taskGetTool{Backend: backend, BaseDir: baseDir, lock: lock}
+func newTaskGetTool(mw *middleware, turnLock *sync.Mutex) *taskGetTool {
+	return &taskGetTool{mw: mw, turnLock: turnLock}
 }
 
 type taskGetTool struct {
-	Backend Backend
-	BaseDir string
-	lock    *sync.Mutex
+	mw       *middleware
+	turnLock *sync.Mutex
 }
 
 func (t *taskGetTool) Info(ctx context.Context) (*schema.ToolInfo, error) {
@@ -64,8 +63,9 @@ type taskGetArgs struct {
 }
 
 func (t *taskGetTool) InvokableRun(ctx context.Context, argumentsInJSON string, opts ...tool.Option) (string, error) {
-	t.lock.Lock()
-	defer t.lock.Unlock()
+	lock := t.mw.getLock(t.turnLock)
+	lock.Lock()
+	defer lock.Unlock()
 
 	params := &taskGetArgs{}
 	err := sonic.UnmarshalString(argumentsInJSON, params)
@@ -78,9 +78,9 @@ func (t *taskGetTool) InvokableRun(ctx context.Context, argumentsInJSON string, 
 	}
 
 	taskFileName := fmt.Sprintf("%s.json", params.TaskID)
-	taskFilePath := filepath.Join(t.BaseDir, taskFileName)
+	taskFilePath := filepath.Join(t.mw.resolveBaseDir(ctx), taskFileName)
 
-	content, err := t.Backend.Read(ctx, &ReadRequest{
+	content, err := t.mw.backend.Read(ctx, &ReadRequest{
 		FilePath: taskFilePath,
 	})
 	if err != nil {

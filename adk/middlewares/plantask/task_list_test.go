@@ -30,9 +30,8 @@ func TestTaskListTool(t *testing.T) {
 	ctx := context.Background()
 	backend := newInMemoryBackend()
 	baseDir := "/tmp/tasks"
-	lock := &sync.Mutex{}
 
-	tool := newTaskListTool(backend, baseDir, lock)
+	tool := newTaskListTool(testMiddleware(backend, baseDir), &sync.Mutex{})
 
 	info, err := tool.Info(ctx)
 	assert.NoError(t, err)
