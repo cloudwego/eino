@@ -860,10 +860,15 @@ func (a *ChatModelAgent) buildNoToolsRunFunc(_ context.Context) runFunc {
 
 		// Pre-execution cancel check
 		if cancelCtx != nil && cancelCtx.shouldCancel() {
-			cancelErr := cancelCtx.createCancelError()
-			cancelCtx.markCancelHandled()
-			p.generator.Send(&AgentEvent{Err: cancelErr})
-			return
+			cfg := cancelCtx.config
+			if cfg == nil || cfg.Mode == CancelImmediate || atomic.LoadInt32(&cancelCtx.escalated) == 1 {
+				cancelErr := cancelCtx.createCancelError()
+				if !cancelCtx.markCancelHandled() {
+					return
+				}
+				p.generator.Send(&AgentEvent{Err: cancelErr})
+				return
+			}
 		}
 
 		in := noToolsInput{input: p.input, instruction: p.instruction}
@@ -966,10 +971,15 @@ func (a *ChatModelAgent) buildReActRunFunc(_ context.Context, bc *execContext) (
 
 		// Pre-execution cancel check
 		if cancelCtx != nil && cancelCtx.shouldCancel() {
-			cancelErr := cancelCtx.createCancelError()
-			cancelCtx.markCancelHandled()
-			p.generator.Send(&AgentEvent{Err: cancelErr})
-			return
+			cfg := cancelCtx.config
+			if cfg == nil || cfg.Mode == CancelImmediate || atomic.LoadInt32(&cancelCtx.escalated) == 1 {
+				cancelErr := cancelCtx.createCancelError()
+				if !cancelCtx.markCancelHandled() {
+					return
+				}
+				p.generator.Send(&AgentEvent{Err: cancelErr})
+				return
+			}
 		}
 
 		in := reactRunInput{
