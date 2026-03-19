@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-package summarization
+package internal
 
 import (
 	"regexp"
@@ -22,51 +22,58 @@ import (
 	"github.com/cloudwego/eino/adk/internal"
 )
 
-var allUserMessagesTagRegex = regexp.MustCompile(`(?s)<all_user_messages>.*</all_user_messages>`)
+var AllUserMessagesTagRegex = regexp.MustCompile(`(?s)<all_user_messages>.*</all_user_messages>`)
 
-func getSystemInstruction() string {
+// GetSystemInstruction returns the system instruction for the summarization model.
+func GetSystemInstruction() string {
 	return internal.SelectPrompt(internal.I18nPrompts{
 		English: systemInstruction,
 		Chinese: systemInstructionZh,
 	})
 }
 
-func getUserSummaryInstruction() string {
+// GetUserSummaryInstruction returns the user-level summarization instruction.
+func GetUserSummaryInstruction() string {
 	return internal.SelectPrompt(internal.I18nPrompts{
 		English: userSummaryInstruction,
 		Chinese: userSummaryInstructionZh,
 	})
 }
 
-func getSummaryPreamble() string {
+// GetSummaryPreamble returns the preamble prepended to the summary.
+func GetSummaryPreamble() string {
 	return internal.SelectPrompt(internal.I18nPrompts{
 		English: summaryPreamble,
 		Chinese: summaryPreambleZh,
 	})
 }
 
-func getContinueInstruction() string {
+// GetContinueInstruction returns the instruction appended after the summary.
+func GetContinueInstruction() string {
 	return internal.SelectPrompt(internal.I18nPrompts{
 		English: continueInstruction,
 		Chinese: continueInstructionZh,
 	})
 }
 
-func getTranscriptPathInstruction() string {
+// GetTranscriptPathInstruction returns the format string for the transcript path reminder.
+func GetTranscriptPathInstruction() string {
 	return internal.SelectPrompt(internal.I18nPrompts{
 		English: transcriptPathInstruction,
 		Chinese: transcriptPathInstructionZh,
 	})
 }
 
-func getTruncatedMarkerFormat() string {
+// GetTruncatedMarkerFormat returns the format string for the truncation marker.
+func GetTruncatedMarkerFormat() string {
 	return internal.SelectPrompt(internal.I18nPrompts{
 		English: truncatedMarkerFormat,
 		Chinese: truncatedMarkerFormatZh,
 	})
 }
 
-func getUserMessagesReplacedNote() string {
+// GetUserMessagesReplacedNote returns the note indicating user messages were partially replaced.
+func GetUserMessagesReplacedNote() string {
 	return internal.SelectPrompt(internal.I18nPrompts{
 		English: userMessagesReplacedNote,
 		Chinese: userMessagesReplacedNoteZh,
@@ -300,3 +307,17 @@ const truncatedMarkerFormatZh = "…已截断 %d 个字符…"
 const userMessagesReplacedNote = "Some earlier user messages have been cleared. Below are the most recent user messages:"
 
 const userMessagesReplacedNoteZh = "部分较早的用户消息已被清除，以下是保留的最近用户消息："
+
+const SkillSectionFormat = "### Skill: %s\n\n%s"
+
+const skillPreamble = "The following skills were invoked in this session. Continue to follow these guidelines:\n\n%s"
+
+const skillPreambleZh = "以下是在本会话中调用的 Skill，请继续遵循这些指导原则：\n\n%s"
+
+// GetSkillPreamble returns the format string for the skill preservation preamble.
+func GetSkillPreamble() string {
+	return internal.SelectPrompt(internal.I18nPrompts{
+		English: skillPreamble,
+		Chinese: skillPreambleZh,
+	})
+}

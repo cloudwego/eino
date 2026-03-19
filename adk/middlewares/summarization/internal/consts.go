@@ -14,11 +14,17 @@
  * limitations under the License.
  */
 
-package summarization
-
-type ActionType string
+// Package internal contains internal constants and helpers for the summarization middleware.
+package internal
 
 const (
-	ActionTypeBeforeSummarize ActionType = "before_summarize"
-	ActionTypeAfterSummarize  ActionType = "after_summarize"
+	ExtraKeyContentType = "_eino_summarization_content_type"
 )
+
+type SummarizationContentType string
+
+const (
+	ContentTypeSummary SummarizationContentType = "summary"
+)
+
+type CtxKeySummarizeInput struct{}
