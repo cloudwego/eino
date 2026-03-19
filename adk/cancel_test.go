@@ -1604,7 +1604,7 @@ func TestGraphInterruptFuncs_Parallel(t *testing.T) {
 		cc.config = &agentCancelConfig{Mode: CancelImmediate}
 		atomic.CompareAndSwapInt32(&cc.state, stateRunning, stateCancelling)
 		close(cc.cancelChan)
-		cc.sendInterrupt(true)
+		cc.sendImmediateInterrupt()
 
 		assert.Equal(t, int32(1), atomic.LoadInt32(&called1), "First graph interrupt func should be called")
 		assert.Equal(t, int32(1), atomic.LoadInt32(&called2), "Second graph interrupt func should be called")
