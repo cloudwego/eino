@@ -56,7 +56,9 @@ type FrontMatter struct {
 // Skill represents a skill loaded from a backend.
 type Skill struct {
 	FrontMatter
-	Content       string
+	// Content is the markdown body after the frontmatter contains the skill instructions of a SKILL.md file.
+	Content string
+	// BaseDirectory is the absolute directory path where the SKILL.md file is located (e.g., "/absolute/path/to/skills/my-skill").
 	BaseDirectory string
 }
 

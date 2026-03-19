@@ -31,6 +31,10 @@ type CustomizedAction struct {
 	// After is set when Type is ActionTypeAfterSummarize.
 	// Emitted after summarization.
 	After *AfterSummarizeAction `json:"after,omitempty"`
+
+	// GenerateSummary is set when Type is ActionTypeGenerateSummary.
+	// Emitted on each summary generation attempt, including retries and failovers.
+	GenerateSummary *GenerateSummaryAction `json:"generate_summary,omitempty"`
 }
 
 type BeforeSummarizeAction struct {
@@ -41,4 +45,41 @@ type BeforeSummarizeAction struct {
 type AfterSummarizeAction struct {
 	// Messages is the final state messages after summarization.
 	Messages []adk.Message `json:"messages,omitempty"`
+}
+
+// GenerateSummaryPhase indicates which phase a model generate attempt belongs to during summarization.
+type GenerateSummaryPhase string
+
+const (
+	// GenerateSummaryPhasePrimary indicates an attempt using the primary model.
+	// Attempt=1 is the initial call; Attempt>1 indicates a retry.
+	GenerateSummaryPhasePrimary GenerateSummaryPhase = "primary"
+
+	// GenerateSummaryPhaseFailover indicates an attempt using a failover model
+	// after the primary model exhausted all retries or was deemed unrecoverable.
+	GenerateSummaryPhaseFailover GenerateSummaryPhase = "failover"
+)
+
+// GenerateSummaryAction contains details of a single model generate attempt during summarization.
+// Emitted on every attempt, whether it succeeds or fails.
+type GenerateSummaryAction struct {
+	// Attempt is the 1-based attempt number within the current phase.
+	// For primary phase, Attempt=1 is the initial call and Attempt>1 indicates retries.
+	// For failover phase, Attempt counts the failover rounds (1, 2, 3, ...).
+	Attempt int `json:"attempt"`
+
+	// Phase indicates which phase this generate attempt belongs to.
+	Phase GenerateSummaryPhase `json:"phase"`
+
+	// ModelResponse is the raw response returned by the model.
+	// It may be nil when the model call fails without returning a response.
+	ModelResponse adk.Message `json:"model_response,omitempty"`
+
+	// err is the error returned by the model call, if any. Use GetError to access it.
+	err error
+}
+
+// GetError returns the error from the model call, if any.
+func (a *GenerateSummaryAction) GetError() error {
+	return a.err
 }
