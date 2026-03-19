@@ -73,6 +73,13 @@ func getUserMessagesReplacedNote() string {
 	})
 }
 
+func getSkillPreamble() string {
+	return internal.SelectPrompt(internal.I18nPrompts{
+		English: skillPreamble,
+		Chinese: skillPreambleZh,
+	})
+}
+
 const systemInstruction = `You are a helpful AI assistant tasked with summarizing conversations.`
 
 const systemInstructionZh = `你是一个负责总结对话的 AI 助手。`
@@ -300,3 +307,9 @@ const truncatedMarkerFormatZh = "…已截断 %d 个字符…"
 const userMessagesReplacedNote = "Some earlier user messages have been cleared. Below are the most recent user messages:"
 
 const userMessagesReplacedNoteZh = "部分较早的用户消息已被清除，以下是保留的最近用户消息："
+
+const skillSectionFormat = "### Skill: %s\n\n%s"
+
+const skillPreamble = "The following skills were invoked in this session. Continue to follow these guidelines:\n\n%s"
+
+const skillPreambleZh = "以下是在本会话中调用的 Skill，请继续遵循这些指导原则：\n\n%s"

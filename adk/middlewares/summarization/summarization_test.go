@@ -569,6 +569,11 @@ func TestConfigCheck(t *testing.T) {
 	})
 }
 
+func TestPromptFunctions(t *testing.T) {
+	assert.NotEmpty(t, getUserMessagesReplacedNote())
+	assert.NotEmpty(t, getSkillPreamble())
+}
+
 func TestSetGetContentType(t *testing.T) {
 	msg := &schema.Message{
 		Role:    schema.User,
@@ -638,7 +643,7 @@ func TestMiddlewareSummarize(t *testing.T) {
 		}
 
 		testMsg := []adk.Message{schema.UserMessage("test")}
-		_, err := mw.summarize(ctx, testMsg, testMsg)
+		_, _, err := mw.summarize(ctx, testMsg, testMsg)
 		assert.NoError(t, err)
 	})
 
@@ -672,7 +677,7 @@ func TestMiddlewareSummarize(t *testing.T) {
 		contextMsgs := []adk.Message{
 			schema.UserMessage("context message"),
 		}
-		_, err := mw.summarize(ctx, contextMsgs, contextMsgs)
+		_, _, err := mw.summarize(ctx, contextMsgs, contextMsgs)
 		assert.NoError(t, err)
 	})
 
@@ -704,7 +709,7 @@ func TestMiddlewareSummarize(t *testing.T) {
 		}
 
 		testMsg := []adk.Message{schema.UserMessage("test")}
-		_, err := mw.summarize(ctx, testMsg, testMsg)
+		_, _, err := mw.summarize(ctx, testMsg, testMsg)
 		assert.NoError(t, err)
 	})
 
@@ -722,7 +727,7 @@ func TestMiddlewareSummarize(t *testing.T) {
 		}
 
 		testMsg := []adk.Message{schema.UserMessage("test")}
-		_, err := mw.summarize(ctx, testMsg, testMsg)
+		_, _, err := mw.summarize(ctx, testMsg, testMsg)
 		assert.Error(t, err)
 		assert.Contains(t, err.Error(), "gen input error")
 	})
@@ -749,7 +754,7 @@ func TestMiddlewareSummarize(t *testing.T) {
 		}
 
 		testMsg := []adk.Message{schema.UserMessage("test")}
-		_, err := mw.summarize(ctx, testMsg, testMsg)
+		_, _, err := mw.summarize(ctx, testMsg, testMsg)
 		assert.NoError(t, err)
 	})
 
@@ -766,7 +771,7 @@ func TestMiddlewareSummarize(t *testing.T) {
 		}
 
 		testMsg := []adk.Message{schema.UserMessage("test")}
-		_, err := mw.summarize(ctx, testMsg, testMsg)
+		_, _, err := mw.summarize(ctx, testMsg, testMsg)
 		assert.Error(t, err)
 	})
 }

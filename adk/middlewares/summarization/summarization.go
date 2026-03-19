@@ -43,6 +43,10 @@ type (
 	CallbackFunc      func(ctx context.Context, before, after adk.ChatModelAgentState) error
 )
 
+type ctxKeyType struct{}
+
+var ctxKeySummarizeInput = ctxKeyType{}
+
 // Config defines the configuration for the summarization middleware.
 type Config struct {
 	// Model is the chat model used to generate summaries.
@@ -66,6 +70,7 @@ type Config struct {
 	// Event Scoping:
 	//   - ActionTypeBeforeSummarize: emitted before calling model to generate summary
 	//   - ActionTypeAfterSummarize: emitted after summary generation completes
+	//
 	// Optional. Defaults to false.
 	EmitInternalEvents bool
 
@@ -135,7 +140,7 @@ type PreserveUserMessages struct {
 
 // New creates a summarization middleware that automatically summarizes conversation history
 // when trigger conditions are met.
-func New(ctx context.Context, cfg *Config) (adk.ChatModelAgentMiddleware, error) {
+func New(_ context.Context, cfg *Config) (adk.ChatModelAgentMiddleware, error) {
 	if err := cfg.check(); err != nil {
 		return nil, err
 	}
@@ -194,7 +199,7 @@ func (m *middleware) BeforeModelRewriteState(ctx context.Context, state *adk.Cha
 		}
 	}
 
-	summary, err := m.summarize(ctx, state.Messages, contextMsgs)
+	summary, ctx, err := m.summarize(ctx, state.Messages, contextMsgs)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -280,7 +285,7 @@ func (m *middleware) countTokens(ctx context.Context, input *TokenCounterInput) 
 	return defaultTokenCounter(ctx, input)
 }
 
-func defaultTokenCounter(ctx context.Context, input *TokenCounterInput) (int, error) {
+func defaultTokenCounter(_ context.Context, input *TokenCounterInput) (int, error) {
 	var totalTokens int
 	for _, msg := range input.Messages {
 		text := extractTextContent(msg)
@@ -305,18 +310,20 @@ func estimateTokenCount(text string) int {
 	return (len(text) + 3) / 4
 }
 
-func (m *middleware) summarize(ctx context.Context, originMsgs, contextMsgs []adk.Message) (adk.Message, error) {
+func (m *middleware) summarize(ctx context.Context, originMsgs, contextMsgs []adk.Message) (adk.Message, context.Context, error) {
 	input, err := m.buildSummarizationModelInput(ctx, originMsgs, contextMsgs)
 	if err != nil {
-		return nil, err
+		return nil, ctx, err
 	}
+
+	ctx = context.WithValue(ctx, ctxKeySummarizeInput, input)
 
 	resp, err := m.cfg.Model.Generate(ctx, input, m.cfg.ModelOptions...)
 	if err != nil {
-		return nil, fmt.Errorf("failed to generate summary: %w", err)
+		return nil, ctx, fmt.Errorf("failed to generate summary: %w", err)
 	}
 
-	return newSummaryMessage(resp.Content), nil
+	return newSummaryMessage(resp.Content), ctx, nil
 }
 
 func (m *middleware) buildSummarizationModelInput(ctx context.Context, originMsgs, contextMsgs []adk.Message) ([]adk.Message, error) {
@@ -376,17 +383,17 @@ func (m *middleware) postProcessSummary(ctx context.Context, messages []adk.Mess
 
 	summary.Content = appendSection(getSummaryPreamble(), summary.Content)
 
-	summary.UserInputMultiContent = []schema.MessageInputPart{
-		{
-			Type: schema.ChatMessagePartTypeText,
-			Text: summary.Content,
-		},
-		{
-			Type: schema.ChatMessagePartTypeText,
-			Text: getContinueInstruction(),
-		},
-	}
+	var inputParts []schema.MessageInputPart
 
+	inputParts = append(inputParts, schema.MessageInputPart{
+		Type: schema.ChatMessagePartTypeText,
+		Text: summary.Content,
+	}, schema.MessageInputPart{
+		Type: schema.ChatMessagePartTypeText,
+		Text: getContinueInstruction(),
+	})
+
+	summary.UserInputMultiContent = inputParts
 	summary.Content = ""
 
 	return summary, nil
@@ -574,13 +581,13 @@ func (c *Config) check() error {
 
 func (c *TriggerCondition) check() error {
 	if c.ContextTokens < 0 {
-		return fmt.Errorf("trigger.ContextTokens must be non-negative")
+		return fmt.Errorf("contextTokens must be non-negative")
 	}
 	if c.ContextMessages < 0 {
-		return fmt.Errorf("trigger.ContextMessages must be non-negative")
+		return fmt.Errorf("contextMessages must be non-negative")
 	}
 	if c.ContextTokens == 0 && c.ContextMessages == 0 {
-		return fmt.Errorf("at least one of trigger.ContextTokens or trigger.ContextMessages must be non-negative")
+		return fmt.Errorf("at least one of contextTokens or contextMessages must be non-negative")
 	}
 	return nil
 }
