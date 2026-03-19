@@ -362,6 +362,40 @@ func TestUnboundedChan_PushFront_UnblocksReceive(t *testing.T) {
 	}
 }
 
+func TestUnboundedChan_PushFront_SpareCapacity(t *testing.T) {
+	ch := NewUnboundedChan[int]()
+
+	// Pre-fill the channel so PushFront has something to append
+	ch.Send(10)
+	ch.Send(20)
+
+	// Create a slice with spare capacity: len=2, cap=10.
+	// Elements beyond len (index 2-9) must not be corrupted by PushFront.
+	src := make([]int, 3, 10)
+	src[0] = 1
+	src[1] = 2
+	src[2] = 3 // sentinel — must survive PushFront(src[:2])
+
+	ch.PushFront(src[:2])
+
+	// Verify the sentinel was NOT overwritten by the channel's existing buffer
+	if src[2] != 3 {
+		t.Errorf("PushFront corrupted caller's backing array: src[2] = %d, want 3", src[2])
+	}
+
+	// Verify channel drains correctly: [1, 2, 10, 20]
+	expected := []int{1, 2, 10, 20}
+	for i, want := range expected {
+		got, ok := ch.Receive()
+		if !ok {
+			t.Fatalf("Receive returned ok=false at index %d", i)
+		}
+		if got != want {
+			t.Errorf("index %d: got %d, want %d", i, got, want)
+		}
+	}
+}
+
 func TestUnboundedChan_TakeAll_PushFront_Concurrent(t *testing.T) {
 	ch := NewUnboundedChan[int]()
 	const numOps = 100

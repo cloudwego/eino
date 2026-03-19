@@ -759,7 +759,9 @@ func (a *ChatModelAgent) handleRunFuncError(
 			cancelErr.interruptSignal = evt.Action.internalInterrupted
 			cancelErr.InterruptContexts = evt.Action.Interrupted.InterruptContexts
 
-			cancelCtx.markCancelHandled()
+			if !cancelCtx.markCancelHandled() {
+				return
+			}
 			generator.Send(&AgentEvent{Err: cancelErr})
 			return
 		}

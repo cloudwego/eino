@@ -313,6 +313,9 @@ func (cc *cancelContext) sendInterrupt(immediate bool) bool {
 		return false
 	}
 
+	// Holding mu across iteration prevents double-fire but couples lock hold
+	// time to compose interrupt execution. If these functions ever block, this
+	// becomes a latency or deadlock risk.
 	for _, fn := range fns {
 		if immediate {
 			fn(compose.WithGraphInterruptTimeout(0))
@@ -360,6 +363,9 @@ func (cc *cancelContext) setGraphInterruptFunc(interrupt func(...compose.GraphIn
 	// race where cancelFn is called before the compose graph is compiled.
 	// Holding the lock here prevents sendInterrupt from iterating the list
 	// concurrently, which would double-fire the same function.
+	// TODO: this only checks for interruptImmediate, not interruptGraceful. If
+	// graceful interrupts ever use sendInterrupt, the deferred fire must also
+	// check interruptGraceful to avoid silently losing the interrupt.
 	shouldFire := atomic.LoadInt32(&cc.interruptSent) == interruptImmediate
 	if shouldFire {
 		interrupt(compose.WithGraphInterruptTimeout(0))
@@ -419,27 +425,6 @@ func (cc *cancelContext) createCancelError() *CancelError {
 	}
 }
 
-// createCancelInterruptEvent creates a CancelError event with an InterruptSignal
-// for checkpoint persistence and resume support.
-//
-// At a transition point, no sub-agent was interrupted — the workflow itself is
-// the interrupt point. We use StatefulInterrupt (not CompositeInterrupt) because
-// there are no child interrupt signals to composite. StatefulInterrupt calls
-// core.Interrupt(ctx, info, state, nil) which sets IsRootCause=true.
-//
-// The state parameter is the workflow's position state (e.g., sequentialWorkflowState)
-// which gets stored in InterruptSignal.InterruptState.State for resume.
-func createCancelInterruptEvent(ctx context.Context, cc *cancelContext, state any) *AgentEvent {
-	cancelErr := cc.createCancelError()
-	evt := StatefulInterrupt(ctx, cancelErr.Info, state)
-	if evt.Err != nil {
-		return &AgentEvent{Err: evt.Err}
-	}
-	cancelErr.interruptSignal = evt.Action.internalInterrupted
-	cancelErr.InterruptContexts = evt.Action.Interrupted.InterruptContexts
-	return &AgentEvent{Err: cancelErr}
-}
-
 // buildCancelFunc builds the AgentCancelFunc for external use.
 func (cc *cancelContext) buildCancelFunc() AgentCancelFunc {
 	var once sync.Once
@@ -453,7 +438,13 @@ func (cc *cancelContext) buildCancelFunc() AgentCancelFunc {
 			opt(cfg)
 		}
 
+		// TODO: sync.Once prevents escalation — a second call with a different mode
+		// (e.g., CancelImmediate after CancelAfterChatModel) is silently ignored.
+		// Consider using a mutex + started flag to allow subsequent calls to trigger
+		// escalateToImmediate() for manual escalation support.
 		once.Do(func() {
+			// Safe: all readers of cc.config first observe cancelChan being closed
+			// (via shouldCancel), which happens-after this write.
 			cc.config = cfg
 
 			// Transition to cancelling

@@ -244,8 +244,6 @@ type TurnLoop[T any] struct {
 
 	preemptSig *preemptSignal
 
-	stopErr error
-
 	stopCfg *stopConfig
 
 	runErr error
@@ -564,6 +562,8 @@ func (l *TurnLoop[T]) runAgentAndHandleEvents(
 	}()
 
 	preemptDone := make(chan struct{})
+	// TODO: replace 10ms polling with a channel-based signal (have signal() close
+	// a dedicated channel) to eliminate timer allocation churn and reduce latency.
 	go func() {
 		for {
 			select {
@@ -610,10 +610,6 @@ func (l *TurnLoop[T]) cleanup() {
 	l.result = &TurnLoopExitState[T]{
 		ExitReason:     l.runErr,
 		UnhandledItems: l.buffer.TakeAll(),
-	}
-
-	if l.stopErr != nil && l.result.ExitReason == nil {
-		l.result.ExitReason = l.stopErr
 	}
 
 	l.buffer.Close()

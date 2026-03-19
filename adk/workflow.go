@@ -120,23 +120,6 @@ func init() {
 	schema.RegisterName[*loopWorkflowState]("eino_adk_loop_workflow_state")
 }
 
-// checkCancel checks if cancel was requested and, if so, emits a CancelError
-// with proper InterruptSignal for checkpoint/resume, then returns true.
-// At transition points between sub-agents, the safe-point condition for all
-// cancel modes has been met, so no mode-specific logic is needed.
-// The state parameter is the workflow's position state for resume.
-func checkCancel(ctx context.Context, cc *cancelContext, state any,
-	generator *AsyncGenerator[*AgentEvent]) bool {
-	if cc == nil || !cc.shouldCancel() {
-		return false
-	}
-	if !cc.markCancelHandled() {
-		return false // already handled by a sub-agent
-	}
-	generator.Send(createCancelInterruptEvent(ctx, cc, state))
-	return true
-}
-
 func (a *workflowAgent) Resume(ctx context.Context, info *ResumeInfo, opts ...AgentRunOption) *AsyncIterator[*AgentEvent] {
 	iterator, generator := NewAsyncIteratorPair[*AgentEvent]()
 
@@ -210,12 +193,6 @@ func (a *workflowAgent) runSequential(ctx context.Context,
 	for i := startIdx; i < len(a.subAgents); i++ {
 		subAgent := a.subAgents[i]
 
-		// Check for cancel at transition point between sub-agents.
-		state := &sequentialWorkflowState{InterruptIndex: i}
-		if checkCancel(ctx, getCancelContext(ctx), state, generator) {
-			return nil
-		}
-
 		var subIterator *AsyncIterator[*AgentEvent]
 		if seqState != nil {
 			wfInfo, _ := info.Data.(*WorkflowInterruptInfo)
@@ -226,7 +203,6 @@ func (a *workflowAgent) runSequential(ctx context.Context,
 					InterruptInfo:   wfInfo.SequentialInterruptInfo,
 				}, opts...)
 			} else {
-				// Transition-point cancel — sub-agent never started, run fresh.
 				subIterator = subAgent.Run(seqCtx, nil, opts...)
 			}
 			seqState = nil
@@ -359,12 +335,6 @@ func (a *workflowAgent) runLoop(ctx context.Context, generator *AsyncGenerator[*
 		for j := startIdx; j < len(a.subAgents); j++ {
 			subAgent := a.subAgents[j]
 
-			// Check for cancel at transition point between sub-agents/iterations.
-			state := &loopWorkflowState{LoopIterations: i, SubAgentIndex: j}
-			if checkCancel(ctx, getCancelContext(ctx), state, generator) {
-				return nil
-			}
-
 			var subIterator *AsyncIterator[*AgentEvent]
 			if loopState != nil {
 				wfInfo, _ := resumeInfo.Data.(*WorkflowInterruptInfo)
@@ -375,7 +345,6 @@ func (a *workflowAgent) runLoop(ctx context.Context, generator *AsyncGenerator[*
 						InterruptInfo:   wfInfo.SequentialInterruptInfo,
 					}, opts...)
 				} else {
-					// Transition-point cancel — sub-agent never started, run fresh.
 					subIterator = subAgent.Run(loopCtx, nil, opts...)
 				}
 				loopState = nil // Only resume the first time.
@@ -507,24 +476,6 @@ func (a *workflowAgent) runParallel(ctx context.Context, generator *AsyncGenerat
 					childRunCtx.Session.LaneEvents.Events = append(childRunCtx.Session.LaneEvents.Events, existingEvents...)
 				}
 			}
-		}
-	}
-
-	// Check for cancel before spawning goroutines.
-	cc := getCancelContext(ctx)
-	if cc != nil && cc.shouldCancel() {
-		if cc.markCancelHandled() {
-			subAgentEvents := make(map[int][]*agentEventWrapper)
-			for i, childCtx := range childContexts {
-				childRunCtx := getRunCtx(childCtx)
-				if childRunCtx != nil && childRunCtx.Session != nil &&
-					childRunCtx.Session.LaneEvents != nil {
-					subAgentEvents[i] = childRunCtx.Session.LaneEvents.Events
-				}
-			}
-			state := &parallelWorkflowState{SubAgentEvents: subAgentEvents}
-			generator.Send(createCancelInterruptEvent(ctx, cc, state))
-			return nil
 		}
 	}
 

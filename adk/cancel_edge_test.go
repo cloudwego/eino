@@ -1161,3 +1161,81 @@ func TestWithCancel_Resume_CancelAfterChatModel_MessagePreserved(t *testing.T) {
 		// was preserved (no panic, no nil-pointer, no wrong routing).
 	})
 }
+
+// TestHandleRunFuncError_AlreadyHandled_NoDuplicate verifies that when
+// markCancelHandled() was already claimed by a sub-agent's handleRunFuncError,
+// the sequential workflow's checkCancel does not emit a second CancelError.
+//
+// Setup: sequential[cma1, cma2] with CancelAfterToolCalls. cma1 has tools,
+// cancel fires while tool is running. After tool completes, the safe-point
+// fires in cma1's handleRunFuncError (claiming markCancelHandled). The
+// sequential workflow's checkCancel at the transition point should find
+// markCancelHandled returns false and skip — producing exactly 1 CancelError.
+func TestHandleRunFuncError_AlreadyHandled_NoDuplicate(t *testing.T) {
+	ctx := context.Background()
+
+	bt := newBlockingTool("bt")
+
+	// cma1: model returns a tool call immediately, tool blocks until unblocked
+	cma1Model := newBlockingChatModel(toolCallMsg(toolCall("c1", "bt", `{"input":"x"}`)))
+	close(cma1Model.unblockCh) // model returns immediately
+
+	agent1, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+		Name: "agent1", Description: "first", Instruction: "test",
+		Model: cma1Model,
+		ToolsConfig: ToolsConfig{
+			ToolsNodeConfig: compose.ToolsNodeConfig{Tools: []tool.BaseTool{bt}},
+		},
+	})
+	require.NoError(t, err)
+
+	agent2Model := &plainResponseModel{text: "agent2-response"}
+	agent2, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+		Name: "agent2", Description: "second", Instruction: "test",
+		Model: agent2Model,
+	})
+	require.NoError(t, err)
+
+	seqAgent, err := NewSequentialAgent(ctx, &SequentialAgentConfig{
+		Name: "seq", Description: "sequential", SubAgents: []Agent{agent1, agent2},
+	})
+	require.NoError(t, err)
+
+	runner := NewRunner(ctx, RunnerConfig{
+		Agent: seqAgent, EnableStreaming: false,
+	})
+
+	cancelOpt, cancelFn := WithCancel()
+	iter := runner.Run(ctx, []Message{schema.UserMessage("test")}, cancelOpt)
+
+	// Wait for tool to start
+	select {
+	case <-bt.started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Tool did not start")
+	}
+
+	// Cancel while tool is still running (in goroutine because cancelFn blocks
+	// until execution finishes), then unblock tool so safe-point fires
+	go func() {
+		_ = cancelFn(WithAgentCancelMode(CancelAfterToolCalls))
+	}()
+
+	// Give cancel time to register, then unblock tool
+	time.Sleep(50 * time.Millisecond)
+	close(bt.unblockCh)
+
+	cancelCount := 0
+	for {
+		event, ok := iter.Next()
+		if !ok {
+			break
+		}
+		var ce *CancelError
+		if event.Err != nil && errors.As(event.Err, &ce) {
+			cancelCount++
+		}
+	}
+
+	assert.Equal(t, 1, cancelCount, "Should have exactly one CancelError, no duplicate from handleRunFuncError + checkCancel")
+}

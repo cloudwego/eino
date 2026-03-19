@@ -118,6 +118,6 @@ func (ch *UnboundedChan[T]) PushFront(values []T) {
 	ch.mutex.Lock()
 	defer ch.mutex.Unlock()
 
-	ch.buffer = append(values, ch.buffer...)
+	ch.buffer = append(append([]T{}, values...), ch.buffer...)
 	ch.notEmpty.Signal()
 }
