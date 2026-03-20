@@ -1428,3 +1428,61 @@ func TestNewTurnLoop_ConcurrentPushAndRun(t *testing.T) {
 			"total should not exceed pushed amount")
 	}
 }
+
+type turnCtxKey struct{}
+
+func TestTurnLoop_RunCtx_Propagation(t *testing.T) {
+	// Verify that GenInputResult.RunCtx is propagated to PrepareAgent,
+	// the agent run, and OnAgentEvents.
+
+	const traceVal = "trace-123"
+	var prepareCtxVal, agentCtxVal, eventsCtxVal string
+
+	cfg := TurnLoopConfig[string]{
+		GenInput: func(ctx context.Context, loop *TurnLoop[string], items []string) (*GenInputResult[string], error) {
+			// Derive a new context with per-item trace data
+			runCtx := context.WithValue(ctx, turnCtxKey{}, traceVal)
+			return &GenInputResult[string]{
+				RunCtx:   runCtx,
+				Input:    &AgentInput{Messages: []Message{schema.UserMessage(items[0])}},
+				Consumed: items,
+			}, nil
+		},
+		PrepareAgent: func(ctx context.Context, loop *TurnLoop[string], consumed []string) (Agent, error) {
+			if v, ok := ctx.Value(turnCtxKey{}).(string); ok {
+				prepareCtxVal = v
+			}
+			return &turnLoopMockAgent{
+				name: "trace-agent",
+				runFunc: func(ctx context.Context, input *AgentInput) (*AgentOutput, error) {
+					if v, ok := ctx.Value(turnCtxKey{}).(string); ok {
+						agentCtxVal = v
+					}
+					return &AgentOutput{}, nil
+				},
+			}, nil
+		},
+		OnAgentEvents: func(ctx context.Context, loop *TurnLoop[string], consumed []string, events *AsyncIterator[*AgentEvent]) error {
+			if v, ok := ctx.Value(turnCtxKey{}).(string); ok {
+				eventsCtxVal = v
+			}
+			for {
+				if _, ok := events.Next(); !ok {
+					break
+				}
+			}
+			loop.Stop()
+			return nil
+		},
+	}
+
+	loop := NewTurnLoop(cfg)
+	loop.Push("hello")
+	loop.Run(context.Background())
+	result := loop.Wait()
+
+	assert.Nil(t, result.ExitReason)
+	assert.Equal(t, traceVal, prepareCtxVal, "PrepareAgent should receive RunCtx")
+	assert.Equal(t, traceVal, agentCtxVal, "Agent run should receive RunCtx")
+	assert.Equal(t, traceVal, eventsCtxVal, "OnAgentEvents should receive RunCtx")
+}

@@ -167,6 +167,18 @@ type TurnLoopConfig[T any] struct {
 
 // GenInputResult contains the result of GenInput processing.
 type GenInputResult[T any] struct {
+	// RunCtx, if non-nil, overrides the context for this turn's execution
+	// (PrepareAgent, agent run, OnAgentEvents).
+	//
+	// Must be derived from the ctx passed to GenInput to preserve the
+	// TurnLoop's cancellation semantics and inherited values. For example:
+	//
+	//   runCtx := context.WithValue(ctx, traceKey{}, extractTraceID(items))
+	//   return &GenInputResult[T]{RunCtx: runCtx, ...}, nil
+	//
+	// If nil, the TurnLoop's context is used unchanged.
+	RunCtx context.Context
+
 	// Input is the agent input to execute
 	Input *AgentInput
 
@@ -465,7 +477,12 @@ func (l *TurnLoop[T]) run(ctx context.Context) {
 			return
 		}
 
-		agent, err := l.config.PrepareAgent(ctx, l, result.Consumed)
+		turnCtx := ctx
+		if result.RunCtx != nil {
+			turnCtx = result.RunCtx
+		}
+
+		agent, err := l.config.PrepareAgent(turnCtx, l, result.Consumed)
 		if err != nil {
 			l.buffer.PushFront(items)
 			l.runErr = err
@@ -479,7 +496,7 @@ func (l *TurnLoop[T]) run(ctx context.Context) {
 
 		l.buffer.PushFront(result.Remaining)
 
-		runErr := l.runAgentAndHandleEvents(ctx, agent, result)
+		runErr := l.runAgentAndHandleEvents(turnCtx, agent, result)
 
 		l.preemptSig.release()
 
