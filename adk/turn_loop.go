@@ -252,6 +252,12 @@ type TurnLoopExitState[T any] struct {
 	// UnhandledItems contains items that were buffered but not processed.
 	// This is always valid regardless of ExitReason.
 	UnhandledItems []T
+
+	// CanceledItems contains the items whose turn was canceled by Stop().
+	// This is set when Stop() is called during a running turn, even if it
+	// did not contribute to the final CancelError.
+	// It can be used to reconstruct GenInput/PrepareAgent inputs when resuming.
+	CanceledItems []T
 }
 
 // TurnContext provides per-turn context to the OnAgentEvents callback.
@@ -318,6 +324,8 @@ type TurnLoop[T any] struct {
 	stopCfg *stopConfig
 
 	runErr error
+
+	canceledItems []T
 }
 
 type stopConfig struct {
@@ -587,6 +595,11 @@ func (l *TurnLoop[T]) runAgentAndHandleEvents(
 	result *GenInputResult[T],
 ) error {
 	var iter *AsyncIterator[*AgentEvent]
+	defer func() {
+		if l.stopSig.isStopped() && len(l.canceledItems) == 0 {
+			l.canceledItems = append([]T(nil), result.Consumed...)
+		}
+	}()
 
 	cps := l.config.Store
 	if cps != nil && result.ResumeFromCheckpointID == "" {
@@ -729,6 +742,7 @@ func (l *TurnLoop[T]) cleanup() {
 	l.result = &TurnLoopExitState[T]{
 		ExitReason:     l.runErr,
 		UnhandledItems: l.buffer.TakeAll(),
+		CanceledItems:  l.canceledItems,
 	}
 
 	l.buffer.Close()

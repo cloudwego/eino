@@ -1351,6 +1351,7 @@ func TestTurnLoop_StopDuringAgentExecution(t *testing.T) {
 
 	result := loop.Wait()
 	assert.NoError(t, result.ExitReason)
+	assert.Equal(t, []string{"msg1"}, result.CanceledItems)
 }
 
 func TestTurnLoop_StopCheckPointIDInCancelError(t *testing.T) {
