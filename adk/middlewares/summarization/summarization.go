@@ -37,10 +37,11 @@ func init() {
 }
 
 type (
-	TokenCounterFunc  func(ctx context.Context, input *TokenCounterInput) (int, error)
-	GenModelInputFunc func(ctx context.Context, defaultSystemInstruction, userInstruction adk.Message, originalMsgs []adk.Message) ([]adk.Message, error)
-	FinalizeFunc      func(ctx context.Context, originalMessages []adk.Message, summary adk.Message) ([]adk.Message, error)
-	CallbackFunc      func(ctx context.Context, before, after adk.ChatModelAgentState) error
+	TokenCounterFunc      func(ctx context.Context, input *TokenCounterInput) (int, error)
+	GenModelInputFunc     func(ctx context.Context, defaultSystemInstruction, userInstruction adk.Message, originalMsgs []adk.Message) ([]adk.Message, error)
+	FinalizeFunc          func(ctx context.Context, originalMessages []adk.Message, summary adk.Message) ([]adk.Message, error)
+	CallbackFunc          func(ctx context.Context, before, after adk.ChatModelAgentState) error
+	UserMessageFilterFunc func(ctx context.Context, msg adk.Message) (bool, error)
 )
 
 // Config defines the configuration for the summarization middleware.
@@ -131,6 +132,11 @@ type PreserveUserMessages struct {
 	// When set, only the most recent user messages within this limit are preserved.
 	// Optional. Defaults to 1/3 of TriggerCondition.ContextTokens if not specified.
 	MaxTokens int
+
+	// Filter determines whether a specific user message should be preserved.
+	// It is called for each user message. If it returns false, the message will not be preserved.
+	// Optional.
+	Filter UserMessageFilterFunc
 }
 
 // New creates a summarization middleware that automatically summarizes conversation history
@@ -399,6 +405,15 @@ func (m *middleware) replaceUserMessagesInSummary(ctx context.Context, messages 
 			continue
 		}
 		if msg.Role == schema.User {
+			if m.cfg.PreserveUserMessages != nil && m.cfg.PreserveUserMessages.Filter != nil {
+				keep, err := m.cfg.PreserveUserMessages.Filter(ctx, msg)
+				if err != nil {
+					return "", fmt.Errorf("failed to filter user message: %w", err)
+				}
+				if !keep {
+					continue
+				}
+			}
 			userMsgs = append(userMsgs, msg)
 		}
 	}
