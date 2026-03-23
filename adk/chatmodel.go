@@ -1117,7 +1117,7 @@ func (a *ChatModelAgent) resumeInternal(ctx context.Context, info *ResumeInfo, w
 			generator.Send(&AgentEvent{Err: err})
 			generator.Close()
 		}()
-		return iterator, nil
+		return iterator, notCancellableFuncInternal
 	}
 
 	var historyModifier func(ctx context.Context, history []Message) []Message
