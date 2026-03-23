@@ -106,14 +106,17 @@ func GoStruct2ToolInfo[T any](toolName, toolDesc string, opts ...Option) (*schem
 }
 
 func goStruct2ToolInfo[T any](toolName, toolDesc string, opts ...Option) (*schema.ToolInfo, error) {
+	options := getToolOptions(opts...)
 	paramsOneOf, err := goStruct2ParamsOneOf[T](opts...)
 	if err != nil {
 		return nil, err
 	}
 	return &schema.ToolInfo{
-		Name:        toolName,
-		Desc:        toolDesc,
-		ParamsOneOf: paramsOneOf,
+		Name:         toolName,
+		Desc:         toolDesc,
+		ParamsOneOf:  paramsOneOf,
+		NameAliases:  options.nameAliases,
+		ParamAliases: options.paramAliases,
 	}, nil
 }
 

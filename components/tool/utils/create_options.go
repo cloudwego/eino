@@ -30,9 +30,11 @@ type UnmarshalArguments func(ctx context.Context, arguments string) (any, error)
 type MarshalOutput func(ctx context.Context, output any) (string, error)
 
 type toolOptions struct {
-	um         UnmarshalArguments
-	m          MarshalOutput
-	scModifier SchemaModifierFn
+	um           UnmarshalArguments
+	m            MarshalOutput
+	scModifier   SchemaModifierFn
+	nameAliases  []string
+	paramAliases map[string][]string
 }
 
 // Option is the option func for the tool.
@@ -67,6 +69,31 @@ type SchemaModifierFn func(jsonTagName string, t reflect.Type, tag reflect.Struc
 func WithSchemaModifier(modifier SchemaModifierFn) Option {
 	return func(o *toolOptions) {
 		o.scModifier = modifier
+	}
+}
+
+// WithNameAliases sets alternative names for the tool.
+// These aliases allow the tool to be invoked by any of the provided names.
+// Aliases are invisible to the model (not included in the tool list sent to the LLM).
+// Typical use case: after renaming a tool, the model may hallucinate the old name;
+// adding the old name here lets the call succeed instead of wasting a round-trip.
+func WithNameAliases(aliases ...string) Option {
+	return func(o *toolOptions) {
+		o.nameAliases = aliases
+	}
+}
+
+// WithParamAliases sets alternative names for tool parameters.
+// The map key is the original parameter name, and the value is a list of aliases for that parameter.
+// Currently only top-level parameter names are supported as keys.
+// Neither canonical keys nor alias values may contain "." (dot);
+// dot-path notation is reserved for future nested alias support.
+// Aliases are invisible to the model (not included in the parameter schema sent to the LLM).
+// Typical use case: after renaming a parameter, the model may hallucinate the old name;
+// adding the old name here lets the call succeed instead of wasting a round-trip.
+func WithParamAliases(aliases map[string][]string) Option {
+	return func(o *toolOptions) {
+		o.paramAliases = aliases
 	}
 }
 

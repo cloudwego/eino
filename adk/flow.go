@@ -422,7 +422,7 @@ func (a *flowAgent) resumeInternal(ctx context.Context, info *ResumeInfo, withCa
 		} else if ra, ok := a.Agent.(ResumableAgent); ok {
 			if _, ok := ra.(*workflowAgent); ok {
 				filteredOpts := filterCallbackHandlersForNestedAgents(agentName, opts)
-				aIter := ra.Resume(ctx, info, filteredOpts...)
+				aIter = ra.Resume(ctx, info, filteredOpts...)
 				return wrapIterWithOnEnd(ctx, aIter), cancelFn
 			}
 			aIter = ra.Resume(ctx, info, opts...)

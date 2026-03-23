@@ -59,6 +59,15 @@ type ToolConfig struct {
 	// optional, default tool description will be used if not set (nil pointer)
 	Desc *string
 
+	// NameAliases sets alternative names for the tool.
+	// optional
+	NameAliases []string
+
+	// ParamAliases sets alternative names for tool parameters.
+	// The key is the original parameter name, the value is a list of alternative names.
+	// optional
+	ParamAliases map[string][]string
+
 	// CustomTool provides a custom implementation for this tool.
 	// If set, this custom tool will be used instead of the default implementation associated with Backend.
 	// If not set, the default tool implementation associated with Backend will be created automatically.
@@ -69,6 +78,37 @@ type ToolConfig struct {
 	// If true, the tool will not be registered
 	// optional, false by default
 	Disable bool
+}
+
+type ExecuteToolConfig struct {
+	// Name overrides the tool name used in tool registration
+	// optional, default tool name will be used if not set (empty string)
+	Name string
+
+	// Desc overrides the tool description used in tool registration
+	// optional, default tool description will be used if not set (nil pointer)
+	Desc *string
+
+	// NameAliases sets alternative names for the tool.
+	// optional
+	NameAliases []string
+
+	// ParamAliases sets alternative names for tool parameters.
+	// The key is the original parameter name, the value is a list of alternative names.
+	// optional
+	ParamAliases map[string][]string
+}
+
+func (c *ExecuteToolConfig) toToolConfig() *ToolConfig {
+	if c == nil {
+		return nil
+	}
+	return &ToolConfig{
+		Name:         c.Name,
+		Desc:         c.Desc,
+		NameAliases:  c.NameAliases,
+		ParamAliases: c.ParamAliases,
+	}
 }
 
 // Config is the configuration for the filesystem middleware
@@ -107,6 +147,10 @@ type Config struct {
 	// GrepToolConfig configures the grep tool
 	// optional
 	GrepToolConfig *ToolConfig
+
+	// ExecuteToolConfig configures the execute tool
+	// optional
+	ExecuteToolConfig *ExecuteToolConfig
 
 	// WithoutLargeToolResultOffloading disables automatic offloading of large tool result to Backend
 	// optional, false(enabled) by default
@@ -182,6 +226,7 @@ func NewMiddleware(ctx context.Context, config *Config) (adk.AgentMiddleware, er
 		EditFileToolConfig:      config.EditFileToolConfig,
 		GlobToolConfig:          config.GlobToolConfig,
 		GrepToolConfig:          config.GrepToolConfig,
+		ExecuteToolConfig:       config.ExecuteToolConfig,
 		CustomSystemPrompt:      config.CustomSystemPrompt,
 		CustomLsToolDesc:        config.CustomLsToolDesc,
 		CustomReadFileToolDesc:  config.CustomReadFileToolDesc,
@@ -248,6 +293,8 @@ type MiddlewareConfig struct {
 	// GrepToolConfig configures the grep tool
 	// optional
 	GrepToolConfig *ToolConfig
+
+	ExecuteToolConfig *ExecuteToolConfig
 
 	// CustomSystemPrompt overrides the default ToolsSystemPrompt appended to agent instruction
 	// optional, ToolsSystemPrompt by default
@@ -384,7 +431,7 @@ func (m *filesystemMiddleware) BeforeAgent(ctx context.Context, runCtx *adk.Chat
 type toolSpec struct {
 	config     *ToolConfig
 	legacyDesc *string
-	createFunc func(name, desc string) (tool.BaseTool, error)
+	createFunc func(name, desc string, opts ...utils.Option) (tool.BaseTool, error)
 }
 
 func getFilesystemTools(_ context.Context, middlewareConfig *MiddlewareConfig) ([]tool.BaseTool, error) {
@@ -394,9 +441,9 @@ func getFilesystemTools(_ context.Context, middlewareConfig *MiddlewareConfig) (
 		{
 			config:     middlewareConfig.LsToolConfig,
 			legacyDesc: middlewareConfig.CustomLsToolDesc,
-			createFunc: func(name, desc string) (tool.BaseTool, error) {
+			createFunc: func(name, desc string, opts ...utils.Option) (tool.BaseTool, error) {
 				if middlewareConfig.Backend != nil {
-					return newLsTool(middlewareConfig.Backend, name, desc)
+					return newLsTool(middlewareConfig.Backend, name, desc, opts...)
 				}
 				return nil, nil
 			},
@@ -404,9 +451,9 @@ func getFilesystemTools(_ context.Context, middlewareConfig *MiddlewareConfig) (
 		{
 			config:     middlewareConfig.ReadFileToolConfig,
 			legacyDesc: middlewareConfig.CustomReadFileToolDesc,
-			createFunc: func(name, desc string) (tool.BaseTool, error) {
+			createFunc: func(name, desc string, opts ...utils.Option) (tool.BaseTool, error) {
 				if middlewareConfig.Backend != nil {
-					return newReadFileTool(middlewareConfig.Backend, name, desc)
+					return newReadFileTool(middlewareConfig.Backend, name, desc, opts...)
 				}
 				return nil, nil
 			},
@@ -414,9 +461,9 @@ func getFilesystemTools(_ context.Context, middlewareConfig *MiddlewareConfig) (
 		{
 			config:     middlewareConfig.WriteFileToolConfig,
 			legacyDesc: middlewareConfig.CustomWriteFileToolDesc,
-			createFunc: func(name, desc string) (tool.BaseTool, error) {
+			createFunc: func(name, desc string, opts ...utils.Option) (tool.BaseTool, error) {
 				if middlewareConfig.Backend != nil {
-					return newWriteFileTool(middlewareConfig.Backend, name, desc)
+					return newWriteFileTool(middlewareConfig.Backend, name, desc, opts...)
 				}
 				return nil, nil
 			},
@@ -424,9 +471,9 @@ func getFilesystemTools(_ context.Context, middlewareConfig *MiddlewareConfig) (
 		{
 			config:     middlewareConfig.EditFileToolConfig,
 			legacyDesc: middlewareConfig.CustomEditToolDesc,
-			createFunc: func(name, desc string) (tool.BaseTool, error) {
+			createFunc: func(name, desc string, opts ...utils.Option) (tool.BaseTool, error) {
 				if middlewareConfig.Backend != nil {
-					return newEditFileTool(middlewareConfig.Backend, name, desc)
+					return newEditFileTool(middlewareConfig.Backend, name, desc, opts...)
 				}
 				return nil, nil
 			},
@@ -434,9 +481,9 @@ func getFilesystemTools(_ context.Context, middlewareConfig *MiddlewareConfig) (
 		{
 			config:     middlewareConfig.GlobToolConfig,
 			legacyDesc: middlewareConfig.CustomGlobToolDesc,
-			createFunc: func(name, desc string) (tool.BaseTool, error) {
+			createFunc: func(name, desc string, opts ...utils.Option) (tool.BaseTool, error) {
 				if middlewareConfig.Backend != nil {
-					return newGlobTool(middlewareConfig.Backend, name, desc)
+					return newGlobTool(middlewareConfig.Backend, name, desc, opts...)
 				}
 				return nil, nil
 			},
@@ -444,13 +491,25 @@ func getFilesystemTools(_ context.Context, middlewareConfig *MiddlewareConfig) (
 		{
 			config:     middlewareConfig.GrepToolConfig,
 			legacyDesc: middlewareConfig.CustomGrepToolDesc,
-			createFunc: func(name, desc string) (tool.BaseTool, error) {
+			createFunc: func(name, desc string, opts ...utils.Option) (tool.BaseTool, error) {
 				if middlewareConfig.Backend != nil {
-					return newGrepTool(middlewareConfig.Backend, name, desc)
+					return newGrepTool(middlewareConfig.Backend, name, desc, opts...)
 				}
 				return nil, nil
 			},
 		},
+	}
+
+	if middlewareConfig.StreamingShell != nil || middlewareConfig.Shell != nil {
+		toolSpecs = append(toolSpecs, toolSpec{
+			config: middlewareConfig.ExecuteToolConfig.toToolConfig(),
+			createFunc: func(name, desc string, opts ...utils.Option) (tool.BaseTool, error) {
+				if middlewareConfig.StreamingShell != nil {
+					return newStreamingExecuteTool(middlewareConfig.StreamingShell, name, desc, opts...)
+				}
+				return newExecuteTool(middlewareConfig.Shell, name, desc, opts...)
+			},
+		})
 	}
 
 	for _, spec := range toolSpecs {
@@ -461,31 +520,6 @@ func getFilesystemTools(_ context.Context, middlewareConfig *MiddlewareConfig) (
 		if t != nil {
 			tools = append(tools, t)
 		}
-	}
-
-	// Create execute tool if Shell or StreamingShell is available
-	if middlewareConfig.StreamingShell != nil {
-		executeDesc, err := selectToolDesc("", ExecuteToolDesc, ExecuteToolDescChinese)
-		if err != nil {
-			return nil, err
-		}
-
-		executeTool, err := newStreamingExecuteTool(middlewareConfig.StreamingShell, ToolNameExecute, executeDesc)
-		if err != nil {
-			return nil, err
-		}
-		tools = append(tools, executeTool)
-	} else if middlewareConfig.Shell != nil {
-		executeDesc, err := selectToolDesc("", ExecuteToolDesc, ExecuteToolDescChinese)
-		if err != nil {
-			return nil, err
-		}
-
-		executeTool, err := newExecuteTool(middlewareConfig.Shell, ToolNameExecute, executeDesc)
-		if err != nil {
-			return nil, err
-		}
-		tools = append(tools, executeTool)
 	}
 
 	return tools, nil
@@ -506,7 +540,14 @@ func createToolFromSpec(middlewareConfig *MiddlewareConfig, spec toolSpec) (tool
 		if mergedConfig.Desc != nil {
 			desc = *mergedConfig.Desc
 		}
-		return spec.createFunc(mergedConfig.Name, desc)
+		var opts []utils.Option
+		if len(mergedConfig.NameAliases) > 0 {
+			opts = append(opts, utils.WithNameAliases(mergedConfig.NameAliases...))
+		}
+		if len(mergedConfig.ParamAliases) > 0 {
+			opts = append(opts, utils.WithParamAliases(mergedConfig.ParamAliases))
+		}
+		return spec.createFunc(mergedConfig.Name, desc, opts...)
 	})
 }
 
@@ -521,7 +562,7 @@ type lsArgs struct {
 	Path string `json:"path"`
 }
 
-func newLsTool(fs filesystem.Backend, name string, desc string) (tool.BaseTool, error) {
+func newLsTool(fs filesystem.Backend, name string, desc string, opts ...utils.Option) (tool.BaseTool, error) {
 	toolName := selectToolName(name, ToolNameLs)
 	d, err := selectToolDesc(desc, ListFilesToolDesc, ListFilesToolDescChinese)
 	if err != nil {
@@ -540,7 +581,7 @@ func newLsTool(fs filesystem.Backend, name string, desc string) (tool.BaseTool, 
 			paths = append(paths, fi.Path)
 		}
 		return strings.Join(paths, "\n"), nil
-	})
+	}, opts...)
 }
 
 type readFileArgs struct {
@@ -554,7 +595,7 @@ type readFileArgs struct {
 	Limit int `json:"limit" jsonschema:"description=The number of lines to read. Only provide if the file is too large to read at once."`
 }
 
-func newReadFileTool(fs filesystem.Backend, name string, desc string) (tool.BaseTool, error) {
+func newReadFileTool(fs filesystem.Backend, name string, desc string, opts ...utils.Option) (tool.BaseTool, error) {
 	toolName := selectToolName(name, ToolNameReadFile)
 	d, err := selectToolDesc(desc, ReadFileToolDesc, ReadFileToolDescChinese)
 	if err != nil {
@@ -586,7 +627,7 @@ func newReadFileTool(fs filesystem.Backend, name string, desc string) (tool.Base
 
 		}
 		return b.String(), nil
-	})
+	}, opts...)
 }
 
 type writeFileArgs struct {
@@ -597,7 +638,7 @@ type writeFileArgs struct {
 	Content string `json:"content" jsonschema:"description=The content to write to the file"`
 }
 
-func newWriteFileTool(fs filesystem.Backend, name string, desc string) (tool.BaseTool, error) {
+func newWriteFileTool(fs filesystem.Backend, name string, desc string, opts ...utils.Option) (tool.BaseTool, error) {
 	toolName := selectToolName(name, ToolNameWriteFile)
 	d, err := selectToolDesc(desc, WriteFileToolDesc, WriteFileToolDescChinese)
 	if err != nil {
@@ -612,7 +653,7 @@ func newWriteFileTool(fs filesystem.Backend, name string, desc string) (tool.Bas
 			return "", err
 		}
 		return fmt.Sprintf("Updated file %s", input.FilePath), nil
-	})
+	}, opts...)
 }
 
 type editFileArgs struct {
@@ -629,7 +670,7 @@ type editFileArgs struct {
 	ReplaceAll bool `json:"replace_all" jsonschema:"description=Replace all occurrences of old_string (default false),default=false"`
 }
 
-func newEditFileTool(fs filesystem.Backend, name string, desc string) (tool.BaseTool, error) {
+func newEditFileTool(fs filesystem.Backend, name string, desc string, opts ...utils.Option) (tool.BaseTool, error) {
 	toolName := selectToolName(name, ToolNameEditFile)
 	d, err := selectToolDesc(desc, EditFileToolDesc, EditFileToolDescChinese)
 	if err != nil {
@@ -646,7 +687,7 @@ func newEditFileTool(fs filesystem.Backend, name string, desc string) (tool.Base
 			return "", err
 		}
 		return fmt.Sprintf("Successfully replaced the string in '%s'", input.FilePath), nil
-	})
+	}, opts...)
 }
 
 type globArgs struct {
@@ -657,7 +698,7 @@ type globArgs struct {
 	Path string `json:"path" jsonschema:"description=The directory to search in. If not specified\\, the current working directory will be used. IMPORTANT: Omit this field to use the default directory. DO NOT enter 'undefined' or 'null' - simply omit it for the default behavior. Must be a valid directory path if provided."`
 }
 
-func newGlobTool(fs filesystem.Backend, name string, desc string) (tool.BaseTool, error) {
+func newGlobTool(fs filesystem.Backend, name string, desc string, opts ...utils.Option) (tool.BaseTool, error) {
 	toolName := selectToolName(name, ToolNameGlob)
 	d, err := selectToolDesc(desc, GlobToolDesc, GlobToolDescChinese)
 	if err != nil {
@@ -679,7 +720,7 @@ func newGlobTool(fs filesystem.Backend, name string, desc string) (tool.BaseTool
 			paths = append(paths, fi.Path)
 		}
 		return strings.Join(paths, "\n"), nil
-	})
+	}, opts...)
 }
 
 type grepArgs struct {
@@ -736,7 +777,7 @@ type grepArgs struct {
 	Multiline *bool `json:"multiline,omitempty" jsonschema:"description=Enable multiline mode where . matches newlines and patterns can span lines (rg -U --multiline-dotall). Default: false."`
 }
 
-func newGrepTool(fs filesystem.Backend, name string, desc string) (tool.BaseTool, error) {
+func newGrepTool(fs filesystem.Backend, name string, desc string, opts ...utils.Option) (tool.BaseTool, error) {
 	toolName := selectToolName(name, ToolNameGrep)
 	d, err := selectToolDesc(desc, GrepToolDesc, GrepToolDescChinese)
 	if err != nil {
@@ -798,14 +839,14 @@ func newGrepTool(fs filesystem.Backend, name string, desc string) (tool.BaseTool
 		default:
 			return formatFileMatches(matches, offset, headLimit), nil
 		}
-	})
+	}, opts...)
 }
 
 type executeArgs struct {
 	Command string `json:"command"`
 }
 
-func newExecuteTool(sb filesystem.Shell, name string, desc string) (tool.BaseTool, error) {
+func newExecuteTool(sb filesystem.Shell, name string, desc string, opts ...utils.Option) (tool.BaseTool, error) {
 	toolName := selectToolName(name, ToolNameExecute)
 	d, err := selectToolDesc(desc, ExecuteToolDesc, ExecuteToolDescChinese)
 	if err != nil {
@@ -820,10 +861,10 @@ func newExecuteTool(sb filesystem.Shell, name string, desc string) (tool.BaseToo
 		}
 
 		return convExecuteResponse(result), nil
-	})
+	}, opts...)
 }
 
-func newStreamingExecuteTool(sb filesystem.StreamingShell, name string, desc string) (tool.BaseTool, error) {
+func newStreamingExecuteTool(sb filesystem.StreamingShell, name string, desc string, opts ...utils.Option) (tool.BaseTool, error) {
 	toolName := selectToolName(name, ToolNameExecute)
 	d, err := selectToolDesc(desc, ExecuteToolDesc, ExecuteToolDescChinese)
 	if err != nil {
@@ -887,7 +928,7 @@ func newStreamingExecuteTool(sb filesystem.StreamingShell, name string, desc str
 		}()
 
 		return sr, nil
-	})
+	}, opts...)
 }
 
 func convExecuteResponse(response *filesystem.ExecuteResponse) string {

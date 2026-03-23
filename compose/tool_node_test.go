@@ -18,6 +18,7 @@ package compose
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"strconv"
@@ -1306,5 +1307,296 @@ func TestEnhancedToolPriority(t *testing.T) {
 		assert.NoError(t, err)
 		assert.Len(t, output, 1)
 		assert.Contains(t, output[0].UserInputMultiContent[0].Text, "enhanced result")
+	})
+}
+
+// echoArgsTool is a simple invokable tool that echoes back its arguments.
+type echoArgsTool struct {
+	info *schema.ToolInfo
+}
+
+func (t *echoArgsTool) Info(_ context.Context) (*schema.ToolInfo, error) {
+	return t.info, nil
+}
+
+func (t *echoArgsTool) InvokableRun(_ context.Context, argumentsInJSON string, _ ...tool.Option) (string, error) {
+	return argumentsInJSON, nil
+}
+
+// streamEchoArgsTool extends echoArgsTool with StreamableRun support.
+type streamEchoArgsTool struct {
+	echoArgsTool
+}
+
+func (t *streamEchoArgsTool) StreamableRun(_ context.Context, argumentsInJSON string, _ ...tool.Option) (*schema.StreamReader[string], error) {
+	r, w := schema.Pipe[string](1)
+	go func() {
+		defer w.Close()
+		_ = w.Send(argumentsInJSON, nil)
+	}()
+	return r, nil
+}
+
+func TestToolNameAliasStream(t *testing.T) {
+	ctx := context.Background()
+	toolInfo := &schema.ToolInfo{
+		Name:        "search",
+		Desc:        "search tool",
+		NameAliases: []string{"find"},
+		ParamsOneOf: schema.NewParamsOneOfByParams(map[string]*schema.ParameterInfo{
+			"query": {Type: schema.String, Desc: "search query"},
+		}),
+	}
+	echoTool := &streamEchoArgsTool{echoArgsTool{info: toolInfo}}
+
+	node, err := NewToolNode(ctx, &ToolsNodeConfig{Tools: []tool.BaseTool{echoTool}})
+	assert.NoError(t, err)
+
+	input := schema.AssistantMessage("", []schema.ToolCall{
+		{ID: "c1", Function: schema.FunctionCall{Name: "find", Arguments: `{"query":"hello"}`}},
+	})
+
+	streamReader, err := node.Stream(ctx, input)
+	assert.NoError(t, err)
+	defer streamReader.Close()
+
+	var chunks [][]*schema.Message
+	for {
+		chunk, err := streamReader.Recv()
+		if err == io.EOF {
+			break
+		}
+		assert.NoError(t, err)
+		chunks = append(chunks, chunk)
+	}
+
+	result, err := schema.ConcatMessageArray(chunks)
+	assert.NoError(t, err)
+	assert.Len(t, result, 1)
+	assert.Equal(t, "find", result[0].ToolName)
+	assert.JSONEq(t, `{"query":"hello"}`, result[0].Content)
+}
+
+func TestToolNameAlias(t *testing.T) {
+	ctx := context.Background()
+	toolInfo := &schema.ToolInfo{
+		Name:        "search",
+		Desc:        "search tool",
+		NameAliases: []string{"find", "lookup"},
+		ParamsOneOf: schema.NewParamsOneOfByParams(map[string]*schema.ParameterInfo{
+			"query": {Type: schema.String, Desc: "search query"},
+		}),
+	}
+	echoTool := &echoArgsTool{info: toolInfo}
+
+	node, err := NewToolNode(ctx, &ToolsNodeConfig{Tools: []tool.BaseTool{echoTool}})
+	assert.NoError(t, err)
+
+	input := schema.AssistantMessage("", []schema.ToolCall{
+		{ID: "c1", Function: schema.FunctionCall{Name: "find", Arguments: `{"query":"hello"}`}},
+	})
+
+	output, err := node.Invoke(ctx, input)
+	assert.NoError(t, err)
+	assert.Len(t, output, 1)
+	assert.Equal(t, "find", output[0].ToolName) // response uses LLM's original call name
+	assert.JSONEq(t, `{"query":"hello"}`, output[0].Content)
+}
+
+func TestParamAliasTopLevel(t *testing.T) {
+	ctx := context.Background()
+	toolInfo := &schema.ToolInfo{
+		Name: "search",
+		Desc: "search tool",
+		ParamAliases: map[string][]string{
+			"query": {"q", "search_term"},
+		},
+		ParamsOneOf: schema.NewParamsOneOfByParams(map[string]*schema.ParameterInfo{
+			"query": {Type: schema.String, Desc: "search query"},
+		}),
+	}
+	echoTool := &echoArgsTool{info: toolInfo}
+
+	node, err := NewToolNode(ctx, &ToolsNodeConfig{Tools: []tool.BaseTool{echoTool}})
+	assert.NoError(t, err)
+
+	input := schema.AssistantMessage("", []schema.ToolCall{
+		{ID: "c1", Function: schema.FunctionCall{Name: "search", Arguments: `{"q":"hello"}`}},
+	})
+
+	output, err := node.Invoke(ctx, input)
+	assert.NoError(t, err)
+	assert.Len(t, output, 1)
+	assert.JSONEq(t, `{"query":"hello"}`, output[0].Content)
+}
+
+func TestParamAliasRealKeyWins(t *testing.T) {
+	ctx := context.Background()
+	toolInfo := &schema.ToolInfo{
+		Name: "search",
+		Desc: "search tool",
+		ParamAliases: map[string][]string{
+			"query": {"q"},
+		},
+		ParamsOneOf: schema.NewParamsOneOfByParams(map[string]*schema.ParameterInfo{
+			"query": {Type: schema.String, Desc: "search query"},
+		}),
+	}
+	echoTool := &echoArgsTool{info: toolInfo}
+
+	node, err := NewToolNode(ctx, &ToolsNodeConfig{Tools: []tool.BaseTool{echoTool}})
+	assert.NoError(t, err)
+
+	// Both real key and alias present — real key wins, alias stays
+	input := schema.AssistantMessage("", []schema.ToolCall{
+		{ID: "c1", Function: schema.FunctionCall{Name: "search", Arguments: `{"query":"real","q":"alias"}`}},
+	})
+
+	output, err := node.Invoke(ctx, input)
+	assert.NoError(t, err)
+	assert.Len(t, output, 1)
+	// real key preserved, alias key untouched
+	var parsed map[string]string
+	err = json.Unmarshal([]byte(output[0].Content), &parsed)
+	assert.NoError(t, err)
+	assert.Equal(t, "real", parsed["query"])
+	assert.Equal(t, "alias", parsed["q"])
+}
+
+func TestNoAliasPassthrough(t *testing.T) {
+	ctx := context.Background()
+	toolInfo := &schema.ToolInfo{
+		Name: "search",
+		Desc: "search tool",
+		ParamsOneOf: schema.NewParamsOneOfByParams(map[string]*schema.ParameterInfo{
+			"query": {Type: schema.String, Desc: "search query"},
+		}),
+	}
+	echoTool := &echoArgsTool{info: toolInfo}
+
+	node, err := NewToolNode(ctx, &ToolsNodeConfig{Tools: []tool.BaseTool{echoTool}})
+	assert.NoError(t, err)
+
+	input := schema.AssistantMessage("", []schema.ToolCall{
+		{ID: "c1", Function: schema.FunctionCall{Name: "search", Arguments: `{"query":"hello"}`}},
+	})
+
+	output, err := node.Invoke(ctx, input)
+	assert.NoError(t, err)
+	assert.JSONEq(t, `{"query":"hello"}`, output[0].Content)
+}
+
+func TestToolArgumentsHandlerReceivesRemappedArgs(t *testing.T) {
+	ctx := context.Background()
+	toolInfo := &schema.ToolInfo{
+		Name:        "search",
+		Desc:        "search tool",
+		NameAliases: []string{"find"},
+		ParamAliases: map[string][]string{
+			"query": {"q"},
+		},
+		ParamsOneOf: schema.NewParamsOneOfByParams(map[string]*schema.ParameterInfo{
+			"query": {Type: schema.String, Desc: "search query"},
+		}),
+	}
+	echoTool := &echoArgsTool{info: toolInfo}
+
+	var handlerName, handlerArgs string
+	node, err := NewToolNode(ctx, &ToolsNodeConfig{
+		Tools: []tool.BaseTool{echoTool},
+		ToolArgumentsHandler: func(ctx context.Context, name, input string) (string, error) {
+			handlerName = name
+			handlerArgs = input
+			return input, nil
+		},
+	})
+	assert.NoError(t, err)
+
+	// LLM calls alias "find" with alias param "q"
+	input := schema.AssistantMessage("", []schema.ToolCall{
+		{ID: "c1", Function: schema.FunctionCall{Name: "find", Arguments: `{"q":"hello"}`}},
+	})
+
+	output, err := node.Invoke(ctx, input)
+	assert.NoError(t, err)
+	assert.Len(t, output, 1)
+
+	// Handler receives real name and already-remapped args
+	assert.Equal(t, "search", handlerName)
+	assert.JSONEq(t, `{"query":"hello"}`, handlerArgs)
+
+	// ToolMessage uses LLM's original call name
+	assert.Equal(t, "find", output[0].ToolName)
+}
+
+func TestToolNameAliasConflictWithExistingTool(t *testing.T) {
+	ctx := context.Background()
+	tool1 := &echoArgsTool{info: &schema.ToolInfo{Name: "search", Desc: "search"}}
+	tool2 := &echoArgsTool{info: &schema.ToolInfo{Name: "find", Desc: "find", NameAliases: []string{"search"}}}
+
+	_, err := NewToolNode(ctx, &ToolsNodeConfig{Tools: []tool.BaseTool{tool1, tool2}})
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "conflicts with an existing tool name")
+}
+
+func TestToolNameAliasConflictForwardReference(t *testing.T) {
+	ctx := context.Background()
+	// tool "a" has alias "c", tool "c" registered later — should detect conflict
+	tool1 := &echoArgsTool{info: &schema.ToolInfo{Name: "a", Desc: "a", NameAliases: []string{"c"}}}
+	tool2 := &echoArgsTool{info: &schema.ToolInfo{Name: "b", Desc: "b"}}
+	tool3 := &echoArgsTool{info: &schema.ToolInfo{Name: "c", Desc: "c"}}
+
+	_, err := NewToolNode(ctx, &ToolsNodeConfig{Tools: []tool.BaseTool{tool1, tool2, tool3}})
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "conflicts with an existing tool name")
+}
+
+func TestParamAliasConflictWithExistingParam(t *testing.T) {
+	ctx := context.Background()
+	toolInfo := &schema.ToolInfo{
+		Name: "search",
+		Desc: "search tool",
+		ParamAliases: map[string][]string{
+			"query": {"q"},
+		},
+		ParamsOneOf: schema.NewParamsOneOfByParams(map[string]*schema.ParameterInfo{
+			"query": {Type: schema.String, Desc: "search query"},
+			"q":     {Type: schema.String, Desc: "shorthand"},
+		}),
+	}
+	echoTool := &echoArgsTool{info: toolInfo}
+
+	_, err := NewToolNode(ctx, &ToolsNodeConfig{Tools: []tool.BaseTool{echoTool}})
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "param alias 'q' conflicts with existing parameter 'q' in tool 'search'")
+}
+
+func TestParamAliasDotNotation(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("dot in canonical key", func(t *testing.T) {
+		toolInfo := &schema.ToolInfo{
+			Name: "search",
+			Desc: "search tool",
+			ParamAliases: map[string][]string{
+				"filter.category": {"cat"},
+			},
+		}
+		_, err := NewToolNode(ctx, &ToolsNodeConfig{Tools: []tool.BaseTool{&echoArgsTool{info: toolInfo}}})
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "must not contain '.'")
+	})
+
+	t.Run("dot in alias key", func(t *testing.T) {
+		toolInfo := &schema.ToolInfo{
+			Name: "search",
+			Desc: "search tool",
+			ParamAliases: map[string][]string{
+				"category": {"filter.cat"},
+			},
+		}
+		_, err := NewToolNode(ctx, &ToolsNodeConfig{Tools: []tool.BaseTool{&echoArgsTool{info: toolInfo}}})
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "must not contain '.'")
 	})
 }

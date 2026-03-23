@@ -126,6 +126,22 @@ type ToolInfo struct {
 	// Used to tell the model how/when/why to use the tool.
 	// You can provide few-shot examples as a part of the description.
 	Desc string
+	// NameAliases contains alternative names for this tool.
+	// When the LLM calls a tool by an alias name, it will be routed to this tool transparently.
+	// Aliases are invisible to the model (not included in the tool list sent to the LLM).
+	// Typical use case: after renaming a tool, the model may hallucinate the old name;
+	// adding the old name here lets the call succeed instead of wasting a round-trip.
+	NameAliases []string
+	// ParamAliases maps canonical parameter names to their aliases (top-level only).
+	// e.g. {"query": ["q", "search_term"]} means "q" or "search_term" in LLM output
+	// will be remapped to "query" before tool invocation.
+	// Neither canonical keys nor alias values may contain "." (dot);
+	// dot-path notation is reserved for future nested alias support.
+	// Aliases are invisible to the model (not included in the parameter schema sent to the LLM).
+	// Typical use case: after renaming a parameter, the model may hallucinate the old name;
+	// adding the old name here lets the call succeed instead of wasting a round-trip.
+	ParamAliases map[string][]string
+
 	// Extra is the extra information for the tool.
 	Extra map[string]any
 
