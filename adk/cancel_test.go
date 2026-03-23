@@ -472,6 +472,7 @@ func TestWithCancel_WithCheckpoint(t *testing.T) {
 
 		var events []*AgentEvent
 		hasCancelError := false
+		var cancelErrorCheckPointID string
 		for {
 			event, ok := iter.Next()
 			if !ok {
@@ -480,12 +481,14 @@ func TestWithCancel_WithCheckpoint(t *testing.T) {
 			var ce *CancelError
 			if event.Err != nil && errors.As(event.Err, &ce) {
 				hasCancelError = true
+				cancelErrorCheckPointID = ce.CheckPointID
 				continue
 			}
 			events = append(events, event)
 		}
 
 		assert.True(t, hasCancelError, "Should have CancelError event after cancel")
+		assert.Equal(t, "cancel-1", cancelErrorCheckPointID, "CancelError should contain the checkpoint ID")
 	})
 }
 

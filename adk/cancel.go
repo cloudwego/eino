@@ -107,6 +107,11 @@ type AgentCancelInfo struct {
 type CancelError struct {
 	Info *AgentCancelInfo
 
+	// CheckPointID is the checkpoint ID associated with this cancel operation.
+	// When non-empty, the cancelled agent's state has been persisted under this ID
+	// and can be resumed via Runner.Resume or GenInputResult.ResumeFromCheckpointID.
+	CheckPointID string
+
 	// InterruptContexts provides the interrupt contexts needed for targeted
 	// resumption via Runner.ResumeWithParams. Each context represents a step
 	// in the agent hierarchy that was interrupted. This is a slice because

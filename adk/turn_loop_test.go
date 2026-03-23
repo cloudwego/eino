@@ -64,6 +64,25 @@ func (a *turnLoopMockAgent) Run(ctx context.Context, input *AgentInput, _ ...Age
 	return iter
 }
 
+type turnLoopCheckpointStore struct {
+	m  map[string][]byte
+	mu sync.Mutex
+}
+
+func (s *turnLoopCheckpointStore) Set(_ context.Context, key string, value []byte) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.m[key] = value
+	return nil
+}
+
+func (s *turnLoopCheckpointStore) Get(_ context.Context, key string) ([]byte, bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	v, ok := s.m[key]
+	return v, ok, nil
+}
+
 type turnLoopCancellableMockAgent struct {
 	name     string
 	runFunc  func(ctx context.Context, input *AgentInput) (*AgentOutput, error)
@@ -1332,6 +1351,57 @@ func TestTurnLoop_StopDuringAgentExecution(t *testing.T) {
 
 	result := loop.Wait()
 	assert.NoError(t, result.ExitReason)
+}
+
+func TestTurnLoop_StopCheckPointIDInCancelError(t *testing.T) {
+	ctx := context.Background()
+	modelStarted := make(chan struct{}, 1)
+	checkpointID := "turn-loop-cancel-ckpt-1"
+	store := &turnLoopCheckpointStore{m: make(map[string][]byte)}
+
+	slowModel := &cancelTestChatModel{
+		delay: 500 * time.Millisecond,
+		response: &schema.Message{
+			Role:    schema.Assistant,
+			Content: "Hello",
+		},
+		startedChan: modelStarted,
+		doneChan:    make(chan struct{}, 1),
+	}
+
+	agent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+		Name:        "TestAgent",
+		Description: "Test agent",
+		Instruction: "You are a test assistant",
+		Model:       slowModel,
+	})
+	assert.NoError(t, err)
+
+	loop := newAndRunTurnLoop(ctx, TurnLoopConfig[string]{
+		Store: store,
+		GenInput: func(ctx context.Context, _ *TurnLoop[string], items []string) (*GenInputResult[string], error) {
+			return &GenInputResult[string]{
+				Input:                  &AgentInput{Messages: []Message{schema.UserMessage(items[0])}},
+				Consumed:               items,
+				ResumeFromCheckpointID: checkpointID,
+			}, nil
+		},
+		PrepareAgent: func(ctx context.Context, _ *TurnLoop[string], consumed []string) (Agent, error) {
+			return agent, nil
+		},
+	})
+
+	loop.Push("msg1")
+
+	<-modelStarted
+	loop.Stop(WithAgentCancel(WithAgentCancelMode(CancelImmediate)))
+
+	result := loop.Wait()
+
+	var cancelErr *CancelError
+	if assert.True(t, errors.As(result.ExitReason, &cancelErr), "ExitReason should be a *CancelError") {
+		assert.Equal(t, checkpointID, cancelErr.CheckPointID, "CancelError should contain the checkpoint ID")
+	}
 }
 
 func TestTurnLoop_StopOptionsArePassed(t *testing.T) {

@@ -219,6 +219,7 @@ func (r *Runner) handleIter(ctx context.Context, aIter *AsyncIterator[*AgentEven
 				}
 
 				if cancelErr.interruptSignal != nil && checkPointID != nil {
+					cancelErr.CheckPointID = *checkPointID
 					cancelErr.InterruptContexts = core.ToInterruptContexts(cancelErr.interruptSignal, allowedAddressSegmentTypes)
 					err := r.saveCheckPoint(ctx, *checkPointID, &InterruptInfo{}, cancelErr.interruptSignal)
 					if err != nil {

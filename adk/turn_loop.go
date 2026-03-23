@@ -240,7 +240,11 @@ type GenInputResult[T any] struct {
 type TurnLoopExitState[T any] struct {
 	// ExitReason indicates why the loop exited.
 	// nil means clean exit (Stop() was called and completed normally).
-	// Non-nil values include context errors, callback errors, etc.
+	// Non-nil values include context errors, callback errors, *CancelError, etc.
+	// When Stop() cancels a running agent, ExitReason will be a *CancelError.
+	// If the agent was configured with a checkpoint store, the CancelError's
+	// CheckPointID field contains the checkpoint ID of the interrupted turn,
+	// which can be used to resume via TurnLoop. Use errors.As to extract it.
 	ExitReason error
 
 	// UnhandledItems contains items that were buffered but not processed.

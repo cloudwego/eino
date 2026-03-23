@@ -620,8 +620,19 @@ func TestWithCancel_NoCheckpointStore(t *testing.T) {
 	cancelErr := handle.Wait()
 	assert.NoError(t, cancelErr)
 
-	_, hasCancelError := drainEvents(iter)
-	assert.True(t, hasCancelError, "expected CancelError even without checkpoint store")
+	var ce *CancelError
+	for {
+		e, ok := iter.Next()
+		if !ok {
+			break
+		}
+		if e.Err != nil && errors.As(e.Err, &ce) {
+			break
+		}
+	}
+	if assert.NotNil(t, ce, "expected CancelError even without checkpoint store") {
+		assert.Empty(t, ce.CheckPointID, "CheckPointID should be empty without checkpoint store")
+	}
 }
 
 // TestWithCancel_ModelError verifies that a model error marks the cancelCtx as
