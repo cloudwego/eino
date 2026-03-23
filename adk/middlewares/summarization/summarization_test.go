@@ -804,6 +804,65 @@ func TestReplaceUserMessagesInSummary(t *testing.T) {
 		assert.Contains(t, result, "7. Pending Tasks:")
 	})
 
+	t.Run("filters user messages", func(t *testing.T) {
+		mw := &middleware{
+			cfg: &Config{
+				PreserveUserMessages: &PreserveUserMessages{
+					Enabled: true,
+					Filter: func(ctx context.Context, msg adk.Message) (bool, error) {
+						return msg.Content == "keep_me", nil
+					},
+				},
+			},
+		}
+
+		msgs := []adk.Message{
+			schema.UserMessage("drop_me_1"),
+			schema.AssistantMessage("response1", nil),
+			schema.UserMessage("keep_me"),
+			schema.UserMessage("drop_me_2"),
+		}
+
+		summary := `1. Primary Request:
+   test
+
+6. All user messages:
+<all_user_messages>
+    - [old message]
+</all_user_messages>
+
+7. Pending Tasks:
+   - task1`
+
+		result, err := mw.replaceUserMessagesInSummary(ctx, msgs, summary, 1000)
+		assert.NoError(t, err)
+		assert.Contains(t, result, "keep_me")
+		assert.NotContains(t, result, "drop_me_1")
+		assert.NotContains(t, result, "drop_me_2")
+		assert.NotContains(t, result, "old message")
+	})
+
+	t.Run("filter error", func(t *testing.T) {
+		mw := &middleware{
+			cfg: &Config{
+				PreserveUserMessages: &PreserveUserMessages{
+					Enabled: true,
+					Filter: func(ctx context.Context, msg adk.Message) (bool, error) {
+						return false, errors.New("filter error")
+					},
+				},
+			},
+		}
+
+		msgs := []adk.Message{
+			schema.UserMessage("msg"),
+		}
+
+		_, err := mw.replaceUserMessagesInSummary(ctx, msgs, "summary", 1000)
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "filter error")
+	})
+
 	t.Run("returns original if no matching sections", func(t *testing.T) {
 		mw := &middleware{
 			cfg: &Config{},
