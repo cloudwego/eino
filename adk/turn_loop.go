@@ -602,13 +602,15 @@ func (l *TurnLoop[T]) runAgentAndHandleEvents(
 	}()
 
 	cps := l.config.Store
-	if cps != nil && result.ResumeFromCheckpointID == "" {
-		cps = nil
-	}
-
 	runOpts := result.RunOpts
-	if result.ResumeFromCheckpointID != "" && cps != nil {
-		runOpts = append(runOpts, WithCheckPointID(result.ResumeFromCheckpointID))
+
+	if result.IsResume {
+		if result.ResumeFromCheckpointID == "" {
+			return fmt.Errorf("failed to resume agent: ResumeFromCheckpointID is empty")
+		}
+		if cps == nil {
+			return fmt.Errorf("failed to resume agent: store is nil")
+		}
 	}
 
 	cancelOpt, agentCancelFunc := WithCancel()
