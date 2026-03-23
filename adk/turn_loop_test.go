@@ -171,7 +171,7 @@ func TestTurnLoop_PushReturnsErrorAfterStop(t *testing.T) {
 
 	loop.Stop()
 
-	ok := loop.Push("msg1")
+	ok, _ := loop.Push("msg1")
 	assert.False(t, ok)
 }
 
@@ -558,6 +558,91 @@ func TestTurnLoop_Preempt_WithAgentCancelMode(t *testing.T) {
 	assert.Equal(t, CancelAfterToolCalls, actualMode)
 }
 
+func TestTurnLoop_PreemptAck_ClosesAfterCancelIsInitiated(t *testing.T) {
+	agentStarted := make(chan struct{})
+	cancelObserved := make(chan struct{})
+	agentFinishGate := make(chan struct{})
+	agentStartedOnce := sync.Once{}
+	cancelObservedOnce := sync.Once{}
+
+	agent := &turnLoopCancellableMockAgent{
+		name: "test",
+		runFunc: func(ctx context.Context, input *AgentInput) (*AgentOutput, error) {
+			agentStartedOnce.Do(func() { close(agentStarted) })
+			<-ctx.Done()
+			<-agentFinishGate
+			return &AgentOutput{}, nil
+		},
+		onCancel: func(cc *cancelContext) {
+			cancelObservedOnce.Do(func() { close(cancelObserved) })
+		},
+	}
+
+	loop := newAndRunTurnLoop(context.Background(), TurnLoopConfig[string]{
+		PrepareAgent: func(ctx context.Context, _ *TurnLoop[string], consumed []string) (Agent, error) {
+			return agent, nil
+		},
+		GenInput: func(ctx context.Context, _ *TurnLoop[string], items []string) (*GenInputResult[string], error) {
+			return &GenInputResult[string]{
+				Input:     &AgentInput{Messages: []Message{schema.UserMessage(items[0])}},
+				Consumed:  []string{items[0]},
+				Remaining: items[1:],
+			}, nil
+		},
+	})
+
+	_, _ = loop.Push("first")
+
+	select {
+	case <-agentStarted:
+	case <-time.After(1 * time.Second):
+		t.Fatal("agent did not start")
+	}
+
+	ok, ack := loop.Push("urgent", WithPreempt(WithAgentCancelMode(CancelAfterToolCalls)))
+	assert.True(t, ok)
+	assert.NotNil(t, ack)
+
+	select {
+	case <-ack:
+	case <-time.After(1 * time.Second):
+		t.Fatal("preempt ack was not closed")
+	}
+
+	select {
+	case <-cancelObserved:
+	case <-time.After(1 * time.Second):
+		t.Fatal("cancel was not initiated")
+	}
+
+	close(agentFinishGate)
+
+	loop.Stop()
+	result := loop.Wait()
+	assert.NoError(t, result.ExitReason)
+}
+
+func TestTurnLoop_PreemptAck_ClosesImmediatelyIfLoopNotStarted(t *testing.T) {
+	loop := NewTurnLoop(TurnLoopConfig[string]{
+		GenInput: func(ctx context.Context, _ *TurnLoop[string], items []string) (*GenInputResult[string], error) {
+			return &GenInputResult[string]{Input: &AgentInput{}, Consumed: items}, nil
+		},
+		PrepareAgent: func(ctx context.Context, _ *TurnLoop[string], consumed []string) (Agent, error) {
+			return &turnLoopMockAgent{name: "test"}, nil
+		},
+	})
+
+	ok, ack := loop.Push("urgent", WithPreempt())
+	assert.True(t, ok)
+	assert.NotNil(t, ack)
+
+	select {
+	case <-ack:
+	case <-time.After(1 * time.Second):
+		t.Fatal("preempt ack was not closed")
+	}
+}
+
 func TestTurnLoop_Preempt_EscalatesOnSecondPreempt(t *testing.T) {
 	agentStarted := make(chan struct{})
 	firstCancelSeen := make(chan struct{})
@@ -868,7 +953,7 @@ func TestTurnLoop_ConcurrentPush(t *testing.T) {
 		go func(i int) {
 			defer wg.Done()
 			for j := 0; j < 10; j++ {
-				_ = loop.Push(fmt.Sprintf("msg-%d-%d", i, j))
+				_, _ = loop.Push(fmt.Sprintf("msg-%d-%d", i, j))
 			}
 		}(i)
 	}
@@ -1105,7 +1190,7 @@ func TestTurnLoop_ContextCancelBeforeReceive(t *testing.T) {
 
 	// Push before Run to guarantee the item is buffered before the
 	// context-monitoring goroutine can close the buffer.
-	_ = loop.Push("msg1")
+	_, _ = loop.Push("msg1")
 	loop.Run(ctx)
 
 	result := loop.Wait()
@@ -1370,7 +1455,7 @@ func TestTurnLoop_PushFromOnAgentEvents(t *testing.T) {
 			count := atomic.AddInt32(&pushCount, 1)
 			if count == 1 {
 				// Push a follow-up item from the callback
-				_ = loop.Push("follow-up")
+				_, _ = loop.Push("follow-up")
 			} else {
 				loop.Stop()
 			}
@@ -1409,8 +1494,10 @@ func TestNewTurnLoop_PushBeforeRun(t *testing.T) {
 	})
 
 	// Push before Run — items should be buffered.
-	assert.True(t, loop.Push("msg1"))
-	assert.True(t, loop.Push("msg2"))
+	ok, _ := loop.Push("msg1")
+	assert.True(t, ok)
+	ok, _ = loop.Push("msg2")
+	assert.True(t, ok)
 
 	loop.Run(context.Background())
 
@@ -1446,7 +1533,8 @@ func TestNewTurnLoop_StopBeforeRun(t *testing.T) {
 	loop.Stop()
 
 	// Push after Stop returns false.
-	assert.False(t, loop.Push("msg3"))
+	ok, _ := loop.Push("msg3")
+	assert.False(t, ok)
 
 	loop.Run(context.Background())
 	result := loop.Wait()
@@ -1568,7 +1656,7 @@ func TestNewTurnLoop_ConcurrentPushAndRun(t *testing.T) {
 
 		go func() {
 			defer wg.Done()
-			_ = loop.Push("item")
+			_, _ = loop.Push("item")
 		}()
 
 		go func() {

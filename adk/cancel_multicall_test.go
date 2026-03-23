@@ -1,3 +1,19 @@
+/*
+ * Copyright 2026 CloudWeGo Authors
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 package adk
 
 import (
@@ -18,26 +34,8 @@ func TestAgentCancelFunc_MultiCall_EscalateToImmediate(t *testing.T) {
 	})
 	cancelFn := cc.buildCancelFunc()
 
-	err1Ch := make(chan error, 1)
-	go func() {
-		err1Ch <- cancelFn(WithAgentCancelMode(CancelAfterChatModel))
-	}()
-
-	select {
-	case <-cc.cancelChan:
-	case <-time.After(1 * time.Second):
-		t.Fatal("cancel did not start")
-	}
-
-	err2Ch := make(chan error, 1)
-	go func() {
-		err2Ch <- cancelFn(WithAgentCancelMode(CancelImmediate))
-	}()
-
-	deadline := time.Now().Add(1 * time.Second)
-	for time.Now().Before(deadline) && atomic.LoadInt32(&interruptCalls) == 0 {
-		time.Sleep(5 * time.Millisecond)
-	}
+	handle1 := cancelFn(WithAgentCancelMode(CancelAfterChatModel))
+	handle2 := cancelFn(WithAgentCancelMode(CancelImmediate))
 	assert.Equal(t, int32(1), atomic.LoadInt32(&interruptCalls))
 
 	cancelErr := cc.createCancelError()
@@ -46,116 +44,74 @@ func TestAgentCancelFunc_MultiCall_EscalateToImmediate(t *testing.T) {
 	assert.False(t, cancelErr.Info.Timeout)
 
 	assert.True(t, cc.markCancelHandled())
-
-	assert.NoError(t, <-err1Ch)
-	assert.NoError(t, <-err2Ch)
+	assert.NoError(t, handle1.Wait())
+	assert.NoError(t, handle2.Wait())
 }
 
 func TestAgentCancelFunc_MultiCall_JoinSafePointModes(t *testing.T) {
 	cc := newCancelContext()
 	cancelFn := cc.buildCancelFunc()
 
-	err1Ch := make(chan error, 1)
-	go func() {
-		err1Ch <- cancelFn(WithAgentCancelMode(CancelAfterChatModel))
-	}()
+	handle1 := cancelFn(WithAgentCancelMode(CancelAfterChatModel))
+	handle2 := cancelFn(WithAgentCancelMode(CancelAfterToolCalls))
 
-	select {
-	case <-cc.cancelChan:
-	case <-time.After(1 * time.Second):
-		t.Fatal("cancel did not start")
-	}
-
-	err2Ch := make(chan error, 1)
-	go func() {
-		err2Ch <- cancelFn(WithAgentCancelMode(CancelAfterToolCalls))
-	}()
-
-	deadline := time.Now().Add(1 * time.Second)
 	want := CancelAfterChatModel | CancelAfterToolCalls
-	for time.Now().Before(deadline) && cc.getMode() != want {
-		time.Sleep(5 * time.Millisecond)
-	}
 	assert.Equal(t, want, cc.getMode())
 
 	assert.True(t, cc.markCancelHandled())
-	assert.NoError(t, <-err1Ch)
-	assert.NoError(t, <-err2Ch)
+	assert.NoError(t, handle1.Wait())
+	assert.NoError(t, handle2.Wait())
 }
 
 func TestAgentCancelFunc_MultiCall_TimeoutDeadlineJoinUsesAbsoluteTime(t *testing.T) {
 	cc := newCancelContext()
 	cancelFn := cc.buildCancelFunc()
 
-	err1Ch := make(chan error, 1)
-	go func() {
-		err1Ch <- cancelFn(
-			WithAgentCancelMode(CancelAfterChatModel),
-			WithAgentCancelTimeout(200*time.Millisecond),
-		)
-	}()
-
-	select {
-	case <-cc.cancelChan:
-	case <-time.After(1 * time.Second):
-		t.Fatal("cancel did not start")
-	}
+	handle1 := cancelFn(
+		WithAgentCancelMode(CancelAfterChatModel),
+		WithAgentCancelTimeout(200*time.Millisecond),
+	)
 
 	firstDeadline := cc.getDeadlineUnixNano()
 	assert.NotZero(t, firstDeadline)
 
 	time.Sleep(50 * time.Millisecond)
 
-	err2Ch := make(chan error, 1)
-	go func() {
-		err2Ch <- cancelFn(
-			WithAgentCancelMode(CancelAfterToolCalls),
-			WithAgentCancelTimeout(60*time.Millisecond),
-		)
-	}()
+	handle2 := cancelFn(
+		WithAgentCancelMode(CancelAfterToolCalls),
+		WithAgentCancelTimeout(60*time.Millisecond),
+	)
 
-	deadline := time.Now().Add(1 * time.Second)
-	var secondDeadline int64
-	for time.Now().Before(deadline) {
-		secondDeadline = cc.getDeadlineUnixNano()
-		if secondDeadline != 0 && secondDeadline != firstDeadline {
-			break
-		}
-		time.Sleep(5 * time.Millisecond)
-	}
+	secondDeadline := cc.getDeadlineUnixNano()
 	assert.NotZero(t, secondDeadline)
 	assert.Less(t, secondDeadline, firstDeadline)
 
 	assert.True(t, cc.markCancelHandled())
-	assert.NoError(t, <-err1Ch)
-	assert.NoError(t, <-err2Ch)
+	assert.NoError(t, handle1.Wait())
+	assert.NoError(t, handle2.Wait())
 }
 
 func TestAgentCancelFunc_MultiCall_TimeoutEscalationReturnsErrCancelTimeout(t *testing.T) {
 	cc := newCancelContext()
 	var interruptCalls int32
+	interruptCh := make(chan struct{}, 1)
 	cc.setGraphInterruptFunc(func(opts ...compose.GraphInterruptOption) {
 		atomic.AddInt32(&interruptCalls, 1)
+		select {
+		case interruptCh <- struct{}{}:
+		default:
+		}
 	})
 	cancelFn := cc.buildCancelFunc()
-
-	errCh := make(chan error, 1)
-	go func() {
-		errCh <- cancelFn(
-			WithAgentCancelMode(CancelAfterChatModel),
-			WithAgentCancelTimeout(30*time.Millisecond),
-		)
-	}()
+	handle := cancelFn(
+		WithAgentCancelMode(CancelAfterChatModel),
+		WithAgentCancelTimeout(30*time.Millisecond),
+	)
 
 	select {
-	case <-cc.cancelChan:
+	case <-interruptCh:
 	case <-time.After(1 * time.Second):
-		t.Fatal("cancel did not start")
-	}
-
-	deadline := time.Now().Add(1 * time.Second)
-	for time.Now().Before(deadline) && atomic.LoadInt32(&interruptCalls) == 0 {
-		time.Sleep(5 * time.Millisecond)
+		t.Fatal("timeout escalation did not interrupt")
 	}
 	assert.Equal(t, int32(1), atomic.LoadInt32(&interruptCalls))
 
@@ -165,6 +121,5 @@ func TestAgentCancelFunc_MultiCall_TimeoutEscalationReturnsErrCancelTimeout(t *t
 	assert.True(t, cancelErr.Info.Timeout)
 
 	assert.True(t, cc.markCancelHandled())
-	assert.Equal(t, ErrCancelTimeout, <-errCh)
+	assert.Equal(t, ErrCancelTimeout, handle.Wait())
 }
-

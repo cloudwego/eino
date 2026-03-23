@@ -1219,7 +1219,7 @@ func (a *ChatModelAgent) Resume(ctx context.Context, info *ResumeInfo, opts ...A
 			generator.Send(&AgentEvent{Err: err})
 			generator.Close()
 		}()
-		return iterator, notCancellableFuncInternal
+		return iterator
 	}
 
 	var historyModifier func(ctx context.Context, history []Message) []Message

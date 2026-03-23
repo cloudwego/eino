@@ -1114,7 +1114,8 @@ func TestWithCancel_PlanExecute_DuringExecution(t *testing.T) {
 	time.Sleep(50 * time.Millisecond)
 
 	// Cancel should NOT return ErrExecutionCompleted
-	err = cancelFn()
+	handle := cancelFn()
+	err = handle.Wait()
 	assert.NoError(t, err, "Cancel during executor should succeed")
 
 	hasCancelError := false
@@ -1213,7 +1214,8 @@ func TestWithCancel_PlanExecute_BetweenTransitions(t *testing.T) {
 	}
 
 	start := time.Now()
-	err = cancelFn()
+	handle := cancelFn()
+	err = handle.Wait()
 	assert.NoError(t, err, "Cancel between transitions should succeed")
 
 	hasCancelError := false

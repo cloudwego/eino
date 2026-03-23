@@ -302,22 +302,19 @@ func genReactState(config *reactConfig) func(ctx context.Context) *State {
 
 func newReact(ctx context.Context, config *reactConfig) (reactGraph, error) {
 	const (
-		initNode_                       = "Init"
-		chatModel_                      = "ChatModel"
-		cancelCheckNode_                = "CancelCheck"
-		toolNode_                       = "ToolNode"
-		afterToolCallsNode_             = "AfterToolCalls"
-		afterToolCallsCancelCheckNode_  = "AfterToolCallsCancelCheck"
+		initNode_                      = "Init"
+		chatModel_                     = "ChatModel"
+		cancelCheckNode_               = "CancelCheck"
+		toolNode_                      = "ToolNode"
+		afterToolCallsNode_            = "AfterToolCalls"
+		afterToolCallsCancelCheckNode_ = "AfterToolCallsCancelCheck"
 	)
 
 	cancelCtx := config.cancelCtx
-
 	g := compose.NewGraph[*reactInput, Message](compose.WithGenLocalState(genReactState(config)))
-
-	initLambda := func(ctx context.Context, input *reactInput) ([]Message, error) {
+	_ = g.AddLambdaNode(initNode_, compose.InvokableLambda(func(ctx context.Context, input *reactInput) ([]Message, error) {
 		return input.Messages, nil
-	}
-	_ = g.AddLambdaNode(initNode_, compose.InvokableLambda(initLambda), compose.WithNodeName(initNode_))
+	}), compose.WithNodeName(initNode_))
 
 	var wrappedModel model.BaseChatModel = config.model
 	if config.modelWrapperConf != nil {
@@ -331,43 +328,37 @@ func newReact(ctx context.Context, config *reactConfig) (reactGraph, error) {
 		return nil, err
 	}
 
-	modelPreHandle := func(ctx context.Context, input []Message, st *State) ([]Message, error) {
-		if st.getRemainingIterations() <= 0 {
-			return nil, ErrExceedMaxIterations
-		}
-		st.decrementRemainingIterations()
-		return input, nil
-	}
-	_ = g.AddChatModelNode(chatModel_, wrappedModel,
-		compose.WithStatePreHandler(modelPreHandle), compose.WithNodeName(chatModel_))
+	_ = g.AddChatModelNode(chatModel_, wrappedModel, compose.WithStatePreHandler(
+		func(ctx context.Context, input []Message, st *State) ([]Message, error) {
+			if st.getRemainingIterations() <= 0 {
+				return nil, ErrExceedMaxIterations
+			}
+			st.decrementRemainingIterations()
+			return input, nil
+		}), compose.WithNodeName(chatModel_))
 
 	// CancelAfterChatModel safe-point: dedicated node after the ChatModel.
 	// The model has finished (stream fully consumed by the branch). This node
 	// has a compose context, so compose.Interrupt saves checkpoint data.
-	cancelCheck := func(ctx context.Context, msg Message) (Message, error) {
+	_ = g.AddLambdaNode(cancelCheckNode_, compose.InvokableLambda(func(ctx context.Context, msg Message) (Message, error) {
 		if cancelCtx != nil && cancelCtx.shouldCancel() {
 			if cancelCtx.getMode()&CancelAfterChatModel != 0 {
 				return nil, compose.StatefulInterrupt(ctx, &cancelSafePointInfo{Mode: CancelAfterChatModel}, msg)
 			}
 		}
-
 		wasInterrupted, hasState, state := compose.GetInterruptState[Message](ctx)
 		if wasInterrupted && hasState {
 			msg = state
 		}
 		return msg, nil
-	}
-	_ = g.AddLambdaNode(cancelCheckNode_, compose.InvokableLambda(cancelCheck),
-		compose.WithNodeName(cancelCheckNode_))
+	}), compose.WithNodeName(cancelCheckNode_))
 
 	toolPreHandle := func(ctx context.Context, _ Message, st *State) (Message, error) {
 		input := st.Messages[len(st.Messages)-1]
-
 		returnDirectly := config.toolsReturnDirectly
 		if execCtx := getChatModelAgentExecCtx(ctx); execCtx != nil && len(execCtx.runtimeReturnDirectly) > 0 {
 			returnDirectly = execCtx.runtimeReturnDirectly
 		}
-
 		if len(returnDirectly) > 0 {
 			for i := range input.ToolCalls {
 				toolName := input.ToolCalls[i].Function.Name
@@ -376,19 +367,15 @@ func newReact(ctx context.Context, config *reactConfig) (reactGraph, error) {
 				}
 			}
 		}
-
 		return input, nil
 	}
-
 	toolPostHandle := func(ctx context.Context, out *schema.StreamReader[[]*schema.Message], st *State) (*schema.StreamReader[[]*schema.Message], error) {
 		if event := st.getReturnDirectlyEvent(); event != nil {
 			getChatModelAgentExecCtx(ctx).send(event)
 			st.setReturnDirectlyEvent(nil)
 		}
-
 		return out, nil
 	}
-
 	_ = g.AddToolsNode(toolNode_, toolsNode,
 		compose.WithStatePreHandler(toolPreHandle),
 		compose.WithStreamStatePostHandler(toolPostHandle),

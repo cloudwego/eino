@@ -74,10 +74,12 @@ type preemptSignal struct {
 	signaled        bool
 	gen             uint64
 	agentCancelOpts []AgentCancelOption
+	pendingAcks     []chan struct{}
+	notify          chan struct{}
 }
 
 func newPreemptSignal() *preemptSignal {
-	s := &preemptSignal{}
+	s := &preemptSignal{notify: make(chan struct{}, 1)}
 	s.cond = sync.NewCond(&s.mu)
 	return s
 }
@@ -89,35 +91,51 @@ func (s *preemptSignal) pause() {
 }
 
 func (s *preemptSignal) signal(opts ...AgentCancelOption) {
+	s.signalWithAck(nil, opts...)
+}
+
+func (s *preemptSignal) signalWithAck(ack chan struct{}, opts ...AgentCancelOption) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	if !s.paused {
+		if ack != nil {
+			close(ack)
+		}
 		return
 	}
 
 	s.signaled = true
 	s.gen++
 	s.agentCancelOpts = opts
+	if ack != nil {
+		s.pendingAcks = append(s.pendingAcks, ack)
+	}
+	select {
+	case s.notify <- struct{}{}:
+	default:
+	}
 	s.cond.Broadcast()
 }
 
-func (s *preemptSignal) check() (bool, uint64, []AgentCancelOption) {
+func (s *preemptSignal) check() (bool, uint64, []AgentCancelOption, []chan struct{}) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	if s.signaled {
-		return true, s.gen, s.agentCancelOpts
+		acks := s.pendingAcks
+		s.pendingAcks = nil
+		return true, s.gen, s.agentCancelOpts, acks
 	}
-	return false, 0, nil
+	return false, 0, nil, nil
 }
 
-func (s *preemptSignal) waitIfPaused() (signaled bool, opts []AgentCancelOption) {
+func (s *preemptSignal) waitIfPaused() (signaled bool, opts []AgentCancelOption, acks []chan struct{}) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	if !s.paused {
-		return false, nil
+		return false, nil, nil
 	}
 
 	for s.paused && !s.signaled {
@@ -125,9 +143,11 @@ func (s *preemptSignal) waitIfPaused() (signaled bool, opts []AgentCancelOption)
 	}
 
 	if s.signaled {
-		return true, s.agentCancelOpts
+		acks = s.pendingAcks
+		s.pendingAcks = nil
+		return true, s.agentCancelOpts, acks
 	}
-	return false, nil
+	return false, nil, nil
 }
 
 func (s *preemptSignal) release() {
@@ -138,6 +158,11 @@ func (s *preemptSignal) release() {
 	s.signaled = false
 	s.gen = 0
 	s.agentCancelOpts = nil
+	s.pendingAcks = nil
+	select {
+	case <-s.notify:
+	default:
+	}
 	s.cond.Broadcast()
 }
 
@@ -246,6 +271,7 @@ type TurnLoop[T any] struct {
 	buffer *internal.UnboundedChan[T]
 
 	stopped int32
+	started int32
 
 	done chan struct{}
 
@@ -330,32 +356,36 @@ func NewTurnLoop[T any](cfg TurnLoopConfig[T]) *TurnLoop[T] {
 // Run may be called at most once; subsequent calls are no-ops.
 func (l *TurnLoop[T]) Run(ctx context.Context) {
 	l.runOnce.Do(func() {
+		atomic.StoreInt32(&l.started, 1)
 		go l.run(ctx)
 	})
 }
 
 // Push adds an item to the loop's buffer for processing.
 // This method is non-blocking and thread-safe.
-// Returns false if the loop has stopped, true otherwise.
+// Returns false if the loop has stopped, true otherwise. If a preemptive push
+// succeeds, the second return value is a channel that is closed when the loop
+// has acknowledged the preempt signal (by either initiating cancellation of the
+// current agent run or reaching a point where no cancellation is needed).
 // If the loop has not been started yet (Run not called), items are buffered
 // and will be processed once Run is called.
 //
 // Use WithPreempt() to atomically push an item and signal preemption of the current agent.
 // This is useful for urgent items that should interrupt the current processing.
-// When preempt is set, Push will wait until the preempt is handled (agent cancelled or
-// no agent was running), ensuring correct preempt semantics.
+// The returned channel may be waited on if the caller needs to ensure the preempt
+// signal has been observed.
 //
 // Use WithPreemptDelay() together with WithPreempt() to delay the preemption signal.
 // Push returns immediately after the item is buffered, and a goroutine is spawned
 // to signal preemption after the delay.
-func (l *TurnLoop[T]) Push(item T, opts ...PushOption) bool {
+func (l *TurnLoop[T]) Push(item T, opts ...PushOption) (bool, <-chan struct{}) {
 	cfg := &pushConfig{}
 	for _, opt := range opts {
 		opt(cfg)
 	}
 
 	if atomic.LoadInt32(&l.stopped) != 0 {
-		return false
+		return false, nil
 	}
 
 	if cfg.preempt {
@@ -363,25 +393,33 @@ func (l *TurnLoop[T]) Push(item T, opts ...PushOption) bool {
 
 		if !l.buffer.TrySend(item) {
 			l.preemptSig.release()
-			return false
+			return false, nil
+		}
+
+		ack := make(chan struct{})
+		if atomic.LoadInt32(&l.started) == 0 {
+			l.preemptSig.release()
+			close(ack)
+			return true, ack
 		}
 
 		if cfg.preemptDelay > 0 {
 			go func() {
 				select {
 				case <-time.After(cfg.preemptDelay):
-					l.preemptSig.signal(cfg.agentCancelOpts...)
+					l.preemptSig.signalWithAck(ack, cfg.agentCancelOpts...)
 				case <-l.done:
 					l.preemptSig.release()
+					close(ack)
 				}
 			}()
 		} else {
-			l.preemptSig.signal(cfg.agentCancelOpts...)
+			l.preemptSig.signalWithAck(ack, cfg.agentCancelOpts...)
 		}
-		return true
+		return true, ack
 	}
 
-	return l.buffer.TrySend(item)
+	return l.buffer.TrySend(item), nil
 }
 
 // Stop signals the loop to stop and returns immediately (non-blocking).
@@ -464,7 +502,10 @@ func (l *TurnLoop[T]) run(ctx context.Context) {
 		rest := l.buffer.TakeAll()
 		items := append([]T{first}, rest...)
 
-		if signaled, _ := l.preemptSig.waitIfPaused(); signaled {
+		if signaled, _, acks := l.preemptSig.waitIfPaused(); signaled {
+			for _, ack := range acks {
+				close(ack)
+			}
 			l.preemptSig.release()
 		}
 
@@ -582,16 +623,14 @@ func (l *TurnLoop[T]) runAgentAndHandleEvents(
 	}()
 
 	preemptDone := make(chan struct{})
-	// TODO: replace 10ms polling with a channel-based signal (have signal() close
-	// a dedicated channel) to eliminate timer allocation churn and reduce latency.
 	go func() {
 		var lastGen uint64
 		for {
 			select {
 			case <-done:
 				return
-			case <-time.After(10 * time.Millisecond):
-				if preempted, gen, opts := l.preemptSig.check(); preempted {
+			case <-l.preemptSig.notify:
+				if preempted, gen, opts, acks := l.preemptSig.check(); preempted {
 					if gen != lastGen {
 						if lastGen == 0 {
 							// Close preemptDone first, then call agentCancelFunc in a
@@ -602,7 +641,11 @@ func (l *TurnLoop[T]) runAgentAndHandleEvents(
 							close(preemptDone)
 						}
 						lastGen = gen
-						go func() { _ = agentCancelFunc(opts...) }()
+						handle := agentCancelFunc(opts...)
+						go func() { _ = handle.Wait() }()
+						for _, ack := range acks {
+							close(ack)
+						}
 					}
 				}
 			}
@@ -622,7 +665,8 @@ func (l *TurnLoop[T]) runAgentAndHandleEvents(
 			// cancel context is marked done. The flowAgent wrapper ensures
 			// markDone() is always deferred, so this won't deadlock even if
 			// the agent doesn't explicitly support WithCancel.
-			go func() { _ = agentCancelFunc(cfg.agentCancelOpts...) }()
+			handle := agentCancelFunc(cfg.agentCancelOpts...)
+			go func() { _ = handle.Wait() }()
 		}
 		<-done
 		return handleErr

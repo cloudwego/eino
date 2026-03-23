@@ -54,9 +54,19 @@ const (
 	CancelAfterToolCalls
 )
 
-// AgentCancelFunc is called to cancel a running agent.
-// Returns nil on success, or a sentinel error indicating the outcome.
-type AgentCancelFunc func(...AgentCancelOption) error
+// CancelHandle represents a cancel operation that can be waited on.
+type CancelHandle struct {
+	wait func() error
+}
+
+func (h *CancelHandle) Wait() error {
+	return h.wait()
+}
+
+// AgentCancelFunc is called to request cancellation of a running agent.
+// It returns after the cancel request is committed; use the returned handle's
+// Wait to block for completion and outcome.
+type AgentCancelFunc func(...AgentCancelOption) *CancelHandle
 
 type agentCancelConfig struct {
 	Mode    CancelMode
@@ -120,10 +130,10 @@ func (e *CancelError) Unwrap() error {
 
 // Sentinel errors for cancel outcomes.
 var (
-	// ErrCancelTimeout is returned by AgentCancelFunc when the cancel operation timed out.
+	// ErrCancelTimeout is returned by CancelHandle.Wait when the cancel operation timed out.
 	ErrCancelTimeout = errors.New("cancel timed out")
 
-	// ErrExecutionCompleted is returned by AgentCancelFunc when the agent has already finished
+	// ErrExecutionCompleted is returned by CancelHandle.Wait when the agent has already finished
 	// (completed, interrupted, or errored) before the cancel took effect.
 	ErrExecutionCompleted = errors.New("execution already completed")
 
@@ -479,15 +489,34 @@ func (cc *cancelContext) buildCancelFunc() AgentCancelFunc {
 		})
 	}
 
-	return func(callOpts ...AgentCancelOption) error {
+	newHandle := func(wait func() error) *CancelHandle {
+		return &CancelHandle{wait: wait}
+	}
+
+	waitForCompletion := func() error {
+		<-cc.doneChan
+
+		st := atomic.LoadInt32(&cc.state)
+		switch st {
+		case stateDone:
+			return ErrExecutionCompleted
+		default:
+			if atomic.LoadInt32(&cc.timeoutEscalated) == 1 {
+				return ErrCancelTimeout
+			}
+			return nil
+		}
+	}
+
+	return func(callOpts ...AgentCancelOption) *CancelHandle {
 		req := parseReq(callOpts...)
 
 		st := atomic.LoadInt32(&cc.state)
 		switch st {
 		case stateCancelHandled:
-			return nil
+			return newHandle(func() error { return nil })
 		case stateDone:
-			return ErrExecutionCompleted
+			return newHandle(func() error { return ErrExecutionCompleted })
 		}
 
 		var needImmediate, needTimeoutCtl bool
@@ -498,10 +527,10 @@ func (cc *cancelContext) buildCancelFunc() AgentCancelFunc {
 		switch st {
 		case stateCancelHandled:
 			cc.cancelMu.Unlock()
-			return nil
+			return newHandle(func() error { return nil })
 		case stateDone:
 			cc.cancelMu.Unlock()
-			return ErrExecutionCompleted
+			return newHandle(func() error { return ErrExecutionCompleted })
 		}
 
 		curMode := cc.getMode()
@@ -530,7 +559,7 @@ func (cc *cancelContext) buildCancelFunc() AgentCancelFunc {
 				st = atomic.LoadInt32(&cc.state)
 				if st == stateDone {
 					cc.cancelMu.Unlock()
-					return ErrExecutionCompleted
+					return newHandle(func() error { return ErrExecutionCompleted })
 				}
 			}
 			atomic.StoreInt32(&cc.startedMode, int32(curMode))
@@ -548,18 +577,7 @@ func (cc *cancelContext) buildCancelFunc() AgentCancelFunc {
 			startTimeoutController()
 		}
 
-		<-cc.doneChan
-
-		st = atomic.LoadInt32(&cc.state)
-		switch st {
-		case stateDone:
-			return ErrExecutionCompleted
-		default:
-			if atomic.LoadInt32(&cc.timeoutEscalated) == 1 {
-				return ErrCancelTimeout
-			}
-			return nil
-		}
+		return newHandle(waitForCompletion)
 	}
 }
 

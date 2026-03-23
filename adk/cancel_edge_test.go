@@ -197,7 +197,10 @@ func TestWithCancel_BeforeExecutionStarts(t *testing.T) {
 	// Call cancel BEFORE calling agent.Run.
 	// The cancelFunc must succeed (not hang) even though execution hasn't started.
 	cancelDone := make(chan error, 1)
-	go func() { cancelDone <- cancelFn() }()
+	go func() {
+		handle := cancelFn()
+		cancelDone <- handle.Wait()
+	}()
 
 	// Wait for cancelChan to close so the pre-execution check in runFunc
 	// deterministically sees shouldCancel()=true (eliminates goroutine scheduling race).
@@ -246,7 +249,8 @@ func TestWithCancel_AfterCompletion(t *testing.T) {
 		}
 	}
 
-	cancelErr := cancelFn()
+	handle := cancelFn()
+	cancelErr := handle.Wait()
 	assert.ErrorIs(t, cancelErr, ErrExecutionCompleted)
 }
 
@@ -287,7 +291,8 @@ func TestWithCancel_AfterBusinessInterrupt(t *testing.T) {
 	}
 	assert.True(t, gotInterrupt, "expected business interrupt event")
 
-	cancelErr := cancelFn()
+	handle := cancelFn()
+	cancelErr := handle.Wait()
 	assert.ErrorIs(t, cancelErr, ErrExecutionCompleted)
 }
 
@@ -314,7 +319,8 @@ func TestWithCancel_AfterError(t *testing.T) {
 		}
 	}
 
-	cancelErr := cancelFn()
+	handle := cancelFn()
+	cancelErr := handle.Wait()
 	assert.ErrorIs(t, cancelErr, ErrExecutionCompleted)
 }
 
@@ -357,7 +363,8 @@ func TestWithCancel_TimeoutEscalation(t *testing.T) {
 
 	// Fire cancelFn; it will wait for escalation to complete.
 	start := time.Now()
-	cancelErr := cancelFn(WithAgentCancelMode(CancelAfterChatModel), WithAgentCancelTimeout(timeout))
+	handle := cancelFn(WithAgentCancelMode(CancelAfterChatModel), WithAgentCancelTimeout(timeout))
+	cancelErr := handle.Wait()
 	elapsed := time.Since(start)
 
 	assert.ErrorIs(t, cancelErr, ErrCancelTimeout, "cancel should return ErrCancelTimeout after timeout escalation")
@@ -410,7 +417,10 @@ func TestWithCancel_AfterChatModel_NoTools(t *testing.T) {
 	// give it time to close cancelChan, then unblock the model so the
 	// safe-point check in cancelMonitoredModel fires on model completion.
 	cancelDone := make(chan error, 1)
-	go func() { cancelDone <- cancelFn(WithAgentCancelMode(CancelAfterChatModel)) }()
+	go func() {
+		handle := cancelFn(WithAgentCancelMode(CancelAfterChatModel))
+		cancelDone <- handle.Wait()
+	}()
 
 	// Small sleep ensures cancelChan is closed before model returns.
 	time.Sleep(20 * time.Millisecond)
@@ -455,7 +465,8 @@ func TestWithCancel_CancelImmediate_StreamAborted(t *testing.T) {
 	time.Sleep(50 * time.Millisecond)
 
 	start := time.Now()
-	cancelErr := cancelFn()
+	handle := cancelFn()
+	cancelErr := handle.Wait()
 	assert.NoError(t, cancelErr)
 	elapsed := time.Since(start)
 	assert.True(t, elapsed < 2*time.Second, "cancel should complete quickly, elapsed=%v", elapsed)
@@ -517,7 +528,10 @@ func TestWithCancel_MultipleToolsConcurrent(t *testing.T) {
 
 	// Request cancel after tool calls while both are still blocking.
 	cancelDone := make(chan error, 1)
-	go func() { cancelDone <- cancelFn(WithAgentCancelMode(CancelAfterToolCalls)) }()
+	go func() {
+		handle := cancelFn(WithAgentCancelMode(CancelAfterToolCalls))
+		cancelDone <- handle.Wait()
+	}()
 
 	// Unblock both tools — cancel should fire only after both complete.
 	time.Sleep(50 * time.Millisecond)
@@ -553,7 +567,10 @@ func TestWithCancel_GraphInterruptRaceBeforeSet(t *testing.T) {
 	cancelOpt, cancelFn := WithCancel()
 
 	// Cancel immediately before run starts.
-	go func() { _ = cancelFn() }()
+	go func() {
+		handle := cancelFn()
+		_ = handle.Wait()
+	}()
 
 	iter := agent.Run(ctx, &AgentInput{Messages: []Message{schema.UserMessage("hi")}}, cancelOpt)
 
@@ -599,7 +616,8 @@ func TestWithCancel_NoCheckpointStore(t *testing.T) {
 	}
 	time.Sleep(30 * time.Millisecond)
 
-	cancelErr := cancelFn()
+	handle := cancelFn()
+	cancelErr := handle.Wait()
 	assert.NoError(t, cancelErr)
 
 	_, hasCancelError := drainEvents(iter)
@@ -634,7 +652,8 @@ func TestWithCancel_ModelError(t *testing.T) {
 	}
 	assert.True(t, gotModelErr, "expected non-cancel error event from model failure")
 
-	cancelErr := cancelFn()
+	handle := cancelFn()
+	cancelErr := handle.Wait()
 	assert.ErrorIs(t, cancelErr, ErrExecutionCompleted, "cancelFn should return ErrExecutionCompleted after model error")
 }
 
@@ -708,7 +727,8 @@ func TestWithCancel_Resume_SafePoint(t *testing.T) {
 	// where the model completes and markDone() runs before the CAS.
 	cancelDone := make(chan error, 1)
 	go func() {
-		cancelDone <- cancelFn2(WithAgentCancelMode(CancelAfterChatModel))
+		handle := cancelFn2(WithAgentCancelMode(CancelAfterChatModel))
+		cancelDone <- handle.Wait()
 	}()
 
 	// Give cancelFn enough time to perform the atomic CAS and close cancelChan.
@@ -796,7 +816,8 @@ func TestWithCancel_TargetedResume_CancelImmediate(t *testing.T) {
 		t.Fatal("model did not start")
 	}
 
-	cancelErr := cancelFn() // CancelImmediate (default)
+	handle := cancelFn() // CancelImmediate (default)
+	cancelErr := handle.Wait()
 	assert.NoError(t, cancelErr)
 
 	var cancelError *CancelError
@@ -896,7 +917,8 @@ func TestWithCancel_TargetedResume_SafePoint(t *testing.T) {
 	// Start cancelFn in background so the CAS happens before the model unblocks.
 	cancelDone := make(chan error, 1)
 	go func() {
-		cancelDone <- cancelFn(WithAgentCancelMode(CancelAfterChatModel))
+		handle := cancelFn(WithAgentCancelMode(CancelAfterChatModel))
+		cancelDone <- handle.Wait()
 	}()
 	time.Sleep(50 * time.Millisecond)
 	close(blk.unblockCh)
@@ -1020,7 +1042,8 @@ func TestWithCancel_Resume_CancelAfterChatModel_MessagePreserved(t *testing.T) {
 
 		cancelDone := make(chan error, 1)
 		go func() {
-			cancelDone <- cancelFn1(WithAgentCancelMode(CancelAfterChatModel))
+			handle := cancelFn1(WithAgentCancelMode(CancelAfterChatModel))
+			cancelDone <- handle.Wait()
 		}()
 		time.Sleep(50 * time.Millisecond)
 		close(blk.unblockCh)
@@ -1105,7 +1128,8 @@ func TestWithCancel_Resume_CancelAfterChatModel_MessagePreserved(t *testing.T) {
 
 		cancelDone := make(chan error, 1)
 		go func() {
-			cancelDone <- cancelFn1(WithAgentCancelMode(CancelAfterChatModel))
+			handle := cancelFn1(WithAgentCancelMode(CancelAfterChatModel))
+			cancelDone <- handle.Wait()
 		}()
 		time.Sleep(50 * time.Millisecond)
 		close(blk.unblockCh)
@@ -1218,7 +1242,8 @@ func TestHandleRunFuncError_AlreadyHandled_NoDuplicate(t *testing.T) {
 	// Cancel while tool is still running (in goroutine because cancelFn blocks
 	// until execution finishes), then unblock tool so safe-point fires
 	go func() {
-		_ = cancelFn(WithAgentCancelMode(CancelAfterToolCalls))
+		handle := cancelFn(WithAgentCancelMode(CancelAfterToolCalls))
+		_ = handle.Wait()
 	}()
 
 	// Give cancel time to register, then unblock tool
