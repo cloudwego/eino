@@ -848,7 +848,6 @@ func TestWithCancel_Resume(t *testing.T) {
 
 	t.Run("Resume_ThenCancel", func(t *testing.T) {
 		firstModelStarted := make(chan struct{}, 1)
-		resumeModelStarted := make(chan struct{}, 1)
 		modelCallCount := int32(0)
 		st := newSlowTool("slow_tool", 100*time.Millisecond, "tool result")
 
@@ -910,25 +909,7 @@ func TestWithCancel_Resume(t *testing.T) {
 			}
 		}
 
-		slowModel2 := &cancelTestChatModel{
-			delay: 2 * time.Second,
-			response: &schema.Message{
-				Role:    schema.Assistant,
-				Content: "",
-				ToolCalls: []schema.ToolCall{
-					{
-						ID:   "call_1",
-						Type: "function",
-						Function: schema.FunctionCall{
-							Name:      "slow_tool",
-							Arguments: `{"input": "test"}`,
-						},
-					},
-				},
-			},
-			startedChan: resumeModelStarted,
-			doneChan:    make(chan struct{}, 1),
-		}
+		slowModel2 := newBlockingChatModel(toolCallMsg(toolCall("call_1", "slow_tool", `{"input": "test"}`)))
 
 		agent2, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
 			Name:        "TestAgent",
@@ -966,12 +947,11 @@ func TestWithCancel_Resume(t *testing.T) {
 			resumeEventsCh <- events
 		}()
 
-		<-resumeModelStarted
+		<-slowModel2.started
 		atomic.AddInt32(&modelCallCount, 1)
 
-		time.Sleep(100 * time.Millisecond)
-
 		cancelHandle := resumeCancelFn()
+		close(slowModel2.unblockCh)
 		err = cancelHandle.Wait()
 		assert.NoError(t, err)
 
