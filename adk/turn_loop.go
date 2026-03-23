@@ -183,11 +183,13 @@ type TurnLoopConfig[T any] struct {
 	PrepareAgent func(ctx context.Context, loop *TurnLoop[T], consumed []T) (Agent, error)
 
 	// OnAgentEvents is called to handle events emitted by the agent.
-	// The consumed slice contains items that triggered this agent execution.
-	// The loop parameter allows calling Push() or Stop() directly from within the callback.
+	// The TurnContext provides per-turn info and control:
+	//   - tc.Consumed: items that triggered this agent execution
+	//   - tc.Loop: allows calling Push() or Stop() directly from within the callback
+	//   - tc.Preempted / tc.Stopped: signals while processing events
 	// Optional. If not provided, events are drained and errors (except CancelError
 	// from Stop-triggered cancellation) are returned as ExitReason.
-	OnAgentEvents func(ctx context.Context, loop *TurnLoop[T], consumed []T, events *AsyncIterator[*AgentEvent]) error
+	OnAgentEvents func(ctx context.Context, tc *TurnContext[T], events *AsyncIterator[*AgentEvent]) error
 
 	// Store is the checkpoint store for persistence and resume. Optional.
 	Store CheckPointStore
@@ -250,6 +252,25 @@ type TurnLoopExitState[T any] struct {
 	// UnhandledItems contains items that were buffered but not processed.
 	// This is always valid regardless of ExitReason.
 	UnhandledItems []T
+}
+
+// TurnContext provides per-turn context to the OnAgentEvents callback.
+type TurnContext[T any] struct {
+	// Loop is the TurnLoop instance, allowing Push() or Stop() calls.
+	Loop *TurnLoop[T]
+
+	// Consumed contains items that triggered this agent execution.
+	Consumed []T
+
+	// Preempted is closed when a preempt signal fires for the current turn
+	// (via Push with WithPreempt). Remains open if no preempt occurs.
+	// Use in a select to detect preemption while processing events.
+	Preempted <-chan struct{}
+
+	// Stopped is closed when Stop() is called on the TurnLoop.
+	// Remains open if Stop() has not been called.
+	// Use in a select to detect stop while processing events.
+	Stopped <-chan struct{}
 }
 
 // TurnLoop is a push-based event loop for agent execution.
@@ -596,9 +617,17 @@ func (l *TurnLoop[T]) runAgentAndHandleEvents(
 		iter = runner.Run(ctx, result.Input.Messages, runOpts...)
 	}
 
+	preemptDone := make(chan struct{})
+
 	handleEvents := func() error {
 		if l.config.OnAgentEvents != nil {
-			return l.config.OnAgentEvents(ctx, l, result.Consumed, iter)
+			tc := &TurnContext[T]{
+				Loop:      l,
+				Consumed:  result.Consumed,
+				Preempted: preemptDone,
+				Stopped:   l.stopSig.getDoneChan(),
+			}
+			return l.config.OnAgentEvents(ctx, tc, iter)
 		}
 		for {
 			event, ok := iter.Next()
@@ -625,8 +654,6 @@ func (l *TurnLoop[T]) runAgentAndHandleEvents(
 		}()
 		handleErr = handleEvents()
 	}()
-
-	preemptDone := make(chan struct{})
 	go func() {
 		var lastGen uint64
 		for {
@@ -637,11 +664,11 @@ func (l *TurnLoop[T]) runAgentAndHandleEvents(
 				if preempted, gen, opts, acks := l.preemptSig.check(); preempted {
 					if gen != lastGen {
 						if lastGen == 0 {
-							// Close preemptDone first, then call agentCancelFunc in a
-							// separate goroutine. agentCancelFunc blocks until doneChan
-							// closes: if we called it here, preemptDone would only close
-							// after done, making the select in the caller always hit done
-							// first and return CancelError instead of nil.
+							// Close preemptDone first, then request cancellation. Waiting on the
+							// returned handle blocks until the agent run finishes: if we waited
+							// here, preemptDone would only close after done, making the select
+							// in the caller always hit done first and return CancelError instead
+							// of nil.
 							close(preemptDone)
 						}
 						lastGen = gen
@@ -665,10 +692,9 @@ func (l *TurnLoop[T]) runAgentAndHandleEvents(
 	case <-l.stopSig.getDoneChan():
 		cfg := l.stopSig.getConfig()
 		if cfg != nil {
-			// Run agentCancelFunc in a goroutine: it blocks until the agent's
-			// cancel context is marked done. The flowAgent wrapper ensures
-			// markDone() is always deferred, so this won't deadlock even if
-			// the agent doesn't explicitly support WithCancel.
+			// Wait for cancellation in a goroutine. The flowAgent wrapper ensures
+			// markDone() is always deferred, so this won't deadlock even if the
+			// agent doesn't explicitly support WithCancel.
 			handle := agentCancelFunc(cfg.agentCancelOpts...)
 			go func() { _ = handle.Wait() }()
 		}

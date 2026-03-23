@@ -1286,9 +1286,9 @@ func TestTurnLoop_OnAgentEventsReceivesEvents(t *testing.T) {
 		PrepareAgent: func(ctx context.Context, _ *TurnLoop[string], consumed []string) (Agent, error) {
 			return &turnLoopMockAgent{name: "test"}, nil
 		},
-		OnAgentEvents: func(ctx context.Context, _ *TurnLoop[string], consumed []string, events *AsyncIterator[*AgentEvent]) error {
+		OnAgentEvents: func(ctx context.Context, tc *TurnContext[string], events *AsyncIterator[*AgentEvent]) error {
 			mu.Lock()
-			receivedConsumed = append(receivedConsumed, consumed...)
+			receivedConsumed = append(receivedConsumed, tc.Consumed...)
 			mu.Unlock()
 
 			for {
@@ -1331,7 +1331,7 @@ func TestTurnLoop_StopDuringAgentExecution(t *testing.T) {
 		PrepareAgent: func(ctx context.Context, _ *TurnLoop[string], consumed []string) (Agent, error) {
 			return &turnLoopMockAgent{name: "test"}, nil
 		},
-		OnAgentEvents: func(ctx context.Context, _ *TurnLoop[string], consumed []string, events *AsyncIterator[*AgentEvent]) error {
+		OnAgentEvents: func(ctx context.Context, tc *TurnContext[string], events *AsyncIterator[*AgentEvent]) error {
 			close(agentStarted)
 			time.Sleep(200 * time.Millisecond)
 			for {
@@ -1464,7 +1464,7 @@ func TestTurnLoop_OnAgentEventsError(t *testing.T) {
 		PrepareAgent: func(ctx context.Context, _ *TurnLoop[string], consumed []string) (Agent, error) {
 			return &turnLoopMockAgent{name: "test"}, nil
 		},
-		OnAgentEvents: func(ctx context.Context, _ *TurnLoop[string], consumed []string, events *AsyncIterator[*AgentEvent]) error {
+		OnAgentEvents: func(ctx context.Context, tc *TurnContext[string], events *AsyncIterator[*AgentEvent]) error {
 			// Drain events then return error
 			for {
 				_, ok := events.Next()
@@ -1515,7 +1515,7 @@ func TestTurnLoop_PushFromOnAgentEvents(t *testing.T) {
 		PrepareAgent: func(ctx context.Context, _ *TurnLoop[string], consumed []string) (Agent, error) {
 			return &turnLoopMockAgent{name: "test"}, nil
 		},
-		OnAgentEvents: func(ctx context.Context, loop *TurnLoop[string], consumed []string, events *AsyncIterator[*AgentEvent]) error {
+		OnAgentEvents: func(ctx context.Context, tc *TurnContext[string], events *AsyncIterator[*AgentEvent]) error {
 			for {
 				_, ok := events.Next()
 				if !ok {
@@ -1525,9 +1525,9 @@ func TestTurnLoop_PushFromOnAgentEvents(t *testing.T) {
 			count := atomic.AddInt32(&pushCount, 1)
 			if count == 1 {
 				// Push a follow-up item from the callback
-				_, _ = loop.Push("follow-up")
+				_, _ = tc.Loop.Push("follow-up")
 			} else {
-				loop.Stop()
+				tc.Loop.Stop()
 			}
 			return nil
 		},
@@ -1782,7 +1782,7 @@ func TestTurnLoop_RunCtx_Propagation(t *testing.T) {
 				},
 			}, nil
 		},
-		OnAgentEvents: func(ctx context.Context, loop *TurnLoop[string], consumed []string, events *AsyncIterator[*AgentEvent]) error {
+		OnAgentEvents: func(ctx context.Context, tc *TurnContext[string], events *AsyncIterator[*AgentEvent]) error {
 			if v, ok := ctx.Value(turnCtxKey{}).(string); ok {
 				eventsCtxVal = v
 			}
@@ -1791,7 +1791,7 @@ func TestTurnLoop_RunCtx_Propagation(t *testing.T) {
 					break
 				}
 			}
-			loop.Stop()
+			tc.Loop.Stop()
 			return nil
 		},
 	}
@@ -1805,4 +1805,109 @@ func TestTurnLoop_RunCtx_Propagation(t *testing.T) {
 	assert.Equal(t, traceVal, prepareCtxVal, "PrepareAgent should receive RunCtx")
 	assert.Equal(t, traceVal, agentCtxVal, "Agent run should receive RunCtx")
 	assert.Equal(t, traceVal, eventsCtxVal, "OnAgentEvents should receive RunCtx")
+}
+
+func TestTurnLoop_TurnContext_PreemptedChannel(t *testing.T) {
+	preemptedSeen := make(chan struct{})
+	agentStarted := make(chan struct{})
+
+	loop := newAndRunTurnLoop(context.Background(), TurnLoopConfig[string]{
+		GenInput: func(ctx context.Context, _ *TurnLoop[string], items []string) (*GenInputResult[string], error) {
+			return &GenInputResult[string]{
+				Input:    &AgentInput{Messages: []Message{schema.UserMessage(items[0])}},
+				Consumed: items,
+			}, nil
+		},
+		PrepareAgent: func(ctx context.Context, _ *TurnLoop[string], consumed []string) (Agent, error) {
+			return &turnLoopCancellableMockAgent{
+				name: "slow",
+				runFunc: func(ctx context.Context, input *AgentInput) (*AgentOutput, error) {
+					<-ctx.Done()
+					return nil, ctx.Err()
+				},
+			}, nil
+		},
+		OnAgentEvents: func(ctx context.Context, tc *TurnContext[string], events *AsyncIterator[*AgentEvent]) error {
+			close(agentStarted)
+			select {
+			case <-tc.Preempted:
+				close(preemptedSeen)
+			case <-time.After(5 * time.Second):
+				t.Error("timed out waiting for Preempted channel")
+			}
+			// Drain events
+			for {
+				if _, ok := events.Next(); !ok {
+					break
+				}
+			}
+			return nil
+		},
+	})
+
+	loop.Push("msg1")
+	<-agentStarted
+	loop.Push("msg2", WithPreempt(WithAgentCancelMode(CancelImmediate)))
+
+	select {
+	case <-preemptedSeen:
+		// success
+	case <-time.After(5 * time.Second):
+		t.Fatal("preempted channel was never observed in OnAgentEvents")
+	}
+
+	loop.Stop()
+	loop.Wait()
+}
+
+func TestTurnLoop_TurnContext_StoppedChannel(t *testing.T) {
+	stoppedSeen := make(chan struct{})
+	agentStarted := make(chan struct{})
+
+	loop := newAndRunTurnLoop(context.Background(), TurnLoopConfig[string]{
+		GenInput: func(ctx context.Context, _ *TurnLoop[string], items []string) (*GenInputResult[string], error) {
+			return &GenInputResult[string]{
+				Input:    &AgentInput{Messages: []Message{schema.UserMessage(items[0])}},
+				Consumed: items,
+			}, nil
+		},
+		PrepareAgent: func(ctx context.Context, _ *TurnLoop[string], consumed []string) (Agent, error) {
+			return &turnLoopCancellableMockAgent{
+				name: "slow",
+				runFunc: func(ctx context.Context, input *AgentInput) (*AgentOutput, error) {
+					<-ctx.Done()
+					return nil, ctx.Err()
+				},
+			}, nil
+		},
+		OnAgentEvents: func(ctx context.Context, tc *TurnContext[string], events *AsyncIterator[*AgentEvent]) error {
+			close(agentStarted)
+			select {
+			case <-tc.Stopped:
+				close(stoppedSeen)
+			case <-time.After(5 * time.Second):
+				t.Error("timed out waiting for Stopped channel")
+			}
+			// Drain events
+			for {
+				if _, ok := events.Next(); !ok {
+					break
+				}
+			}
+			return nil
+		},
+	})
+
+	loop.Push("msg1")
+	<-agentStarted
+	loop.Stop(WithAgentCancel(WithAgentCancelMode(CancelImmediate)))
+
+	select {
+	case <-stoppedSeen:
+		// success
+	case <-time.After(5 * time.Second):
+		t.Fatal("stopped channel was never observed in OnAgentEvents")
+	}
+
+	loop.Wait()
 }
