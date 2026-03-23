@@ -263,12 +263,17 @@ type TurnContext[T any] struct {
 	Consumed []T
 
 	// Preempted is closed when a preempt signal fires for the current turn
-	// (via Push with WithPreempt). Remains open if no preempt occurs.
+	// (via Push with WithPreempt) and at least one preemptive Push contributed
+	// to the CancelError for the current turn.
+	// "Contributed" means the preempt's cancel options were included in the
+	// CancelError before it was finalized. Remains open if no preempt contributed.
 	// Use in a select to detect preemption while processing events.
 	Preempted <-chan struct{}
 
-	// Stopped is closed when Stop() is called on the TurnLoop.
-	// Remains open if Stop() has not been called.
+	// Stopped is closed when a Stop() call contributed to the CancelError for the
+	// current turn.
+	// "Contributed" means Stop's cancel options were included in the CancelError
+	// before it was finalized. Remains open if Stop did not contribute.
 	// Use in a select to detect stop while processing events.
 	Stopped <-chan struct{}
 }
@@ -666,9 +671,9 @@ func (l *TurnLoop[T]) runAgentAndHandleEvents(
 					if gen != lastGen {
 						firstPreempt := lastGen == 0
 						lastGen = gen
-						handle := agentCancelFunc(opts...)
+						handle, contributed := agentCancelFunc(opts...)
 						go func() { _ = handle.Wait() }()
-						if firstPreempt {
+						if firstPreempt && contributed {
 							// Close preemptDone after agentCancelFunc so observers are
 							// guaranteed that cancellation has been initiated. We must NOT
 							// wait on handle.Wait() here — that blocks until the agent run
@@ -696,10 +701,13 @@ func (l *TurnLoop[T]) runAgentAndHandleEvents(
 				// handle in a background goroutine — the flowAgent wrapper ensures
 				// markDone() is always deferred, so this won't deadlock even if
 				// the agent doesn't explicitly support WithCancel.
-				handle := agentCancelFunc(cfg.agentCancelOpts...)
+				handle, contributed := agentCancelFunc(cfg.agentCancelOpts...)
 				go func() { _ = handle.Wait() }()
+				if contributed {
+					close(stoppedDone)
+				}
+				return
 			}
-			close(stoppedDone)
 		}
 	}()
 

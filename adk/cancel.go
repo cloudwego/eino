@@ -34,7 +34,7 @@ func init() {
 	schema.RegisterName[*CancelError]("_eino_adk_cancel_error")
 	schema.RegisterName[*AgentCancelInfo]("_eino_adk_agent_cancel_info")
 	schema.RegisterName[*cancelSafePointInfo]("_eino_adk_cancel_safe_point_info")
-	schema.RegisterName[*StreamCancelledError]("_eino_adk_stream_cancelled_error")
+	schema.RegisterName[*StreamCanceledError]("_eino_adk_stream_cancelled_error")
 }
 
 // CancelMode specifies when an agent should be canceled.
@@ -66,7 +66,12 @@ func (h *CancelHandle) Wait() error {
 // AgentCancelFunc is called to request cancellation of a running agent.
 // It returns after the cancel request is committed; use the returned handle's
 // Wait to block for completion and outcome.
-type AgentCancelFunc func(...AgentCancelOption) *CancelHandle
+//
+// The returned bool reports whether this call contributed to the CancelError
+// for the current execution. "Contributed" means this call's cancel options
+// were included before cancellation was finalized. It is false when cancellation
+// was already finalized (handled or execution completed).
+type AgentCancelFunc func(...AgentCancelOption) (*CancelHandle, bool)
 
 type agentCancelConfig struct {
 	Mode    CancelMode
@@ -124,7 +129,7 @@ type CancelError struct {
 }
 
 func (e *CancelError) Error() string {
-	return fmt.Sprintf("agent cancelled: mode=%v, escalated=%v", e.Info.Mode, e.Info.Escalated)
+	return fmt.Sprintf("agent canceled: mode=%v, escalated=%v", e.Info.Mode, e.Info.Escalated)
 }
 
 // Unwrap returns nil intentionally. This prevents errors.Is from accidentally
@@ -142,19 +147,19 @@ var (
 	// (completed, interrupted, or errored) before the cancel took effect.
 	ErrExecutionCompleted = errors.New("execution already completed")
 
-	// ErrStreamCancelled is the error sent through the stream when CancelImmediate aborts it.
-	// It is a *StreamCancelledError so it can be gob-serialized during checkpoint save
+	// ErrStreamCanceled is the error sent through the stream when CancelImmediate aborts it.
+	// It is a *StreamCanceledError so it can be gob-serialized during checkpoint save
 	// (when stored as agentEventWrapper.StreamErr).
-	ErrStreamCancelled error = &StreamCancelledError{}
+	ErrStreamCanceled error = &StreamCanceledError{}
 )
 
-// StreamCancelledError is the concrete error type for ErrStreamCancelled.
+// StreamCanceledError is the concrete error type for ErrStreamCanceled.
 // It is exported so that gob can serialize it during checkpoint save when the error
 // is stored in agentEventWrapper.StreamErr.
-type StreamCancelledError struct{}
+type StreamCanceledError struct{}
 
-func (e *StreamCancelledError) Error() string {
-	return "stream cancelled"
+func (e *StreamCanceledError) Error() string {
+	return "stream canceled"
 }
 
 // cancelSafePointInfo is the typed info passed to compose.Interrupt when a
@@ -423,6 +428,14 @@ func (cc *cancelContext) createCancelError() *CancelError {
 	}
 }
 
+func (cc *cancelContext) createAndMarkCancelHandled() (*CancelError, bool) {
+	cc.cancelMu.Lock()
+	defer cc.cancelMu.Unlock()
+	cancelErr := cc.createCancelError()
+	ok := cc.markCancelHandled()
+	return cancelErr, ok
+}
+
 // buildCancelFunc builds the AgentCancelFunc for external use.
 func (cc *cancelContext) buildCancelFunc() AgentCancelFunc {
 	joinMode := func(a, b CancelMode) CancelMode {
@@ -513,15 +526,15 @@ func (cc *cancelContext) buildCancelFunc() AgentCancelFunc {
 		}
 	}
 
-	return func(callOpts ...AgentCancelOption) *CancelHandle {
+	return func(callOpts ...AgentCancelOption) (*CancelHandle, bool) {
 		req := parseReq(callOpts...)
 
 		st := atomic.LoadInt32(&cc.state)
 		switch st {
 		case stateCancelHandled:
-			return newHandle(func() error { return nil })
+			return newHandle(func() error { return nil }), false
 		case stateDone:
-			return newHandle(func() error { return ErrExecutionCompleted })
+			return newHandle(func() error { return ErrExecutionCompleted }), false
 		}
 
 		var needImmediate, needTimeoutCtl bool
@@ -532,19 +545,31 @@ func (cc *cancelContext) buildCancelFunc() AgentCancelFunc {
 		switch st {
 		case stateCancelHandled:
 			cc.cancelMu.Unlock()
-			return newHandle(func() error { return nil })
+			return newHandle(func() error { return nil }), false
 		case stateDone:
 			cc.cancelMu.Unlock()
-			return newHandle(func() error { return ErrExecutionCompleted })
+			return newHandle(func() error { return ErrExecutionCompleted }), false
 		}
 
 		curMode := cc.getMode()
 		if st == stateRunning {
+			if !atomic.CompareAndSwapInt32(&cc.state, stateRunning, stateCancelling) {
+				st = atomic.LoadInt32(&cc.state)
+				cc.cancelMu.Unlock()
+				if st == stateDone {
+					return newHandle(func() error { return ErrExecutionCompleted }), false
+				}
+				return newHandle(waitForCompletion), true
+			}
+
 			curMode = req.Mode
+			cc.setMode(curMode)
+			atomic.StoreInt32(&cc.startedMode, int32(curMode))
+			close(cc.cancelChan)
 		} else {
 			curMode = joinMode(curMode, req.Mode)
+			cc.setMode(curMode)
 		}
-		cc.setMode(curMode)
 
 		if curMode == CancelImmediate {
 			cc.setDeadlineUnixNano(0)
@@ -559,17 +584,6 @@ func (cc *cancelContext) buildCancelFunc() AgentCancelFunc {
 			needTimeoutCtl = cc.getDeadlineUnixNano() != 0
 		}
 
-		if st == stateRunning {
-			if !atomic.CompareAndSwapInt32(&cc.state, stateRunning, stateCancelling) {
-				st = atomic.LoadInt32(&cc.state)
-				if st == stateDone {
-					cc.cancelMu.Unlock()
-					return newHandle(func() error { return ErrExecutionCompleted })
-				}
-			}
-			atomic.StoreInt32(&cc.startedMode, int32(curMode))
-			close(cc.cancelChan)
-		}
 		cc.cancelMu.Unlock()
 
 		if needImmediate {
@@ -582,7 +596,7 @@ func (cc *cancelContext) buildCancelFunc() AgentCancelFunc {
 			startTimeoutController()
 		}
 
-		return newHandle(waitForCompletion)
+		return newHandle(waitForCompletion), true
 	}
 }
 
@@ -639,19 +653,19 @@ func (m *cancelMonitoredModel) Stream(ctx context.Context, input []*schema.Messa
 
 // wrapStreamWithCancelMonitoring wraps a stream with cancel monitoring.
 // When immediateChan fires (CancelImmediate or timeout escalation), the output
-// stream is terminated with ErrStreamCancelled.
+// stream is terminated with ErrStreamCanceled.
 func wrapStreamWithCancelMonitoring[T any](stream *schema.StreamReader[T], cc *cancelContext) *schema.StreamReader[T] {
 	if cc == nil {
 		return stream
 	}
 
-	// Already cancelled — terminate immediately
+	// Already canceled — terminate immediately
 	select {
 	case <-cc.immediateChan:
 		stream.Close()
 		r, w := schema.Pipe[T](1)
 		var zero T
-		w.Send(zero, ErrStreamCancelled)
+		w.Send(zero, ErrStreamCanceled)
 		w.Close()
 		return r
 	default:
@@ -685,7 +699,7 @@ func wrapStreamWithCancelMonitoring[T any](stream *schema.StreamReader[T], cc *c
 			select {
 			case <-cc.immediateChan:
 				var zero T
-				writer.Send(zero, ErrStreamCancelled)
+				writer.Send(zero, ErrStreamCanceled)
 				return
 
 			case r, ok := <-ch:
@@ -711,7 +725,7 @@ func wrapStreamWithCancelMonitoring[T any](stream *schema.StreamReader[T], cc *c
 }
 
 // cancelMonitoredToolHandler wraps streamable tool calls with cancel monitoring.
-// When CancelImmediate fires, the tool output stream is terminated with ErrStreamCancelled.
+// When CancelImmediate fires, the tool output stream is terminated with ErrStreamCanceled.
 // This handler reads the cancelContext from the Go context via getCancelContext.
 type cancelMonitoredToolHandler struct{}
 

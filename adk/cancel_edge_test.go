@@ -198,7 +198,7 @@ func TestWithCancel_BeforeExecutionStarts(t *testing.T) {
 	// The cancelFunc must succeed (not hang) even though execution hasn't started.
 	cancelDone := make(chan error, 1)
 	go func() {
-		handle := cancelFn()
+		handle, _ := cancelFn()
 		cancelDone <- handle.Wait()
 	}()
 
@@ -249,7 +249,7 @@ func TestWithCancel_AfterCompletion(t *testing.T) {
 		}
 	}
 
-	handle := cancelFn()
+	handle, _ := cancelFn()
 	cancelErr := handle.Wait()
 	assert.ErrorIs(t, cancelErr, ErrExecutionCompleted)
 }
@@ -291,7 +291,7 @@ func TestWithCancel_AfterBusinessInterrupt(t *testing.T) {
 	}
 	assert.True(t, gotInterrupt, "expected business interrupt event")
 
-	handle := cancelFn()
+	handle, _ := cancelFn()
 	cancelErr := handle.Wait()
 	assert.ErrorIs(t, cancelErr, ErrExecutionCompleted)
 }
@@ -319,7 +319,7 @@ func TestWithCancel_AfterError(t *testing.T) {
 		}
 	}
 
-	handle := cancelFn()
+	handle, _ := cancelFn()
 	cancelErr := handle.Wait()
 	assert.ErrorIs(t, cancelErr, ErrExecutionCompleted)
 }
@@ -363,7 +363,7 @@ func TestWithCancel_TimeoutEscalation(t *testing.T) {
 
 	// Fire cancelFn; it will wait for escalation to complete.
 	start := time.Now()
-	handle := cancelFn(WithAgentCancelMode(CancelAfterChatModel), WithAgentCancelTimeout(timeout))
+	handle, _ := cancelFn(WithAgentCancelMode(CancelAfterChatModel), WithAgentCancelTimeout(timeout))
 	cancelErr := handle.Wait()
 	elapsed := time.Since(start)
 
@@ -418,7 +418,7 @@ func TestWithCancel_AfterChatModel_NoTools(t *testing.T) {
 	// safe-point check in cancelMonitoredModel fires on model completion.
 	cancelDone := make(chan error, 1)
 	go func() {
-		handle := cancelFn(WithAgentCancelMode(CancelAfterChatModel))
+		handle, _ := cancelFn(WithAgentCancelMode(CancelAfterChatModel))
 		cancelDone <- handle.Wait()
 	}()
 
@@ -436,7 +436,7 @@ func TestWithCancel_AfterChatModel_NoTools(t *testing.T) {
 }
 
 // TestWithCancel_CancelImmediate_StreamAborted verifies that CancelImmediate
-// during model streaming surfaces ErrStreamCancelled and completes quickly.
+// during model streaming surfaces ErrStreamCanceled and completes quickly.
 func TestWithCancel_CancelImmediate_StreamAborted(t *testing.T) {
 	ctx := context.Background()
 
@@ -465,27 +465,27 @@ func TestWithCancel_CancelImmediate_StreamAborted(t *testing.T) {
 	time.Sleep(50 * time.Millisecond)
 
 	start := time.Now()
-	handle := cancelFn()
+	handle, _ := cancelFn()
 	cancelErr := handle.Wait()
 	assert.NoError(t, cancelErr)
 	elapsed := time.Since(start)
 	assert.True(t, elapsed < 2*time.Second, "cancel should complete quickly, elapsed=%v", elapsed)
 
-	var foundStreamCancelled bool
+	var foundStreamCanceled bool
 	for {
 		e, ok := iter.Next()
 		if !ok {
 			break
 		}
-		if e.Err != nil && errors.Is(e.Err, ErrStreamCancelled) {
-			foundStreamCancelled = true
+		if e.Err != nil && errors.Is(e.Err, ErrStreamCanceled) {
+			foundStreamCanceled = true
 		}
 		var ce *CancelError
 		if e.Err != nil && errors.As(e.Err, &ce) {
-			foundStreamCancelled = true // CancelError wraps stream abort
+			foundStreamCanceled = true // CancelError wraps stream abort
 		}
 	}
-	assert.True(t, foundStreamCancelled, "expected stream-abort error during immediate cancel")
+	assert.True(t, foundStreamCanceled, "expected stream-abort error during immediate cancel")
 }
 
 // TestWithCancel_MultipleToolsConcurrent verifies that CancelAfterToolCalls
@@ -529,7 +529,7 @@ func TestWithCancel_MultipleToolsConcurrent(t *testing.T) {
 	// Request cancel after tool calls while both are still blocking.
 	cancelDone := make(chan error, 1)
 	go func() {
-		handle := cancelFn(WithAgentCancelMode(CancelAfterToolCalls))
+		handle, _ := cancelFn(WithAgentCancelMode(CancelAfterToolCalls))
 		cancelDone <- handle.Wait()
 	}()
 
@@ -568,7 +568,7 @@ func TestWithCancel_GraphInterruptRaceBeforeSet(t *testing.T) {
 
 	// Cancel immediately before run starts.
 	go func() {
-		handle := cancelFn()
+		handle, _ := cancelFn()
 		_ = handle.Wait()
 	}()
 
@@ -616,7 +616,7 @@ func TestWithCancel_NoCheckpointStore(t *testing.T) {
 	}
 	time.Sleep(30 * time.Millisecond)
 
-	handle := cancelFn()
+	handle, _ := cancelFn()
 	cancelErr := handle.Wait()
 	assert.NoError(t, cancelErr)
 
@@ -663,7 +663,7 @@ func TestWithCancel_ModelError(t *testing.T) {
 	}
 	assert.True(t, gotModelErr, "expected non-cancel error event from model failure")
 
-	handle := cancelFn()
+	handle, _ := cancelFn()
 	cancelErr := handle.Wait()
 	assert.ErrorIs(t, cancelErr, ErrExecutionCompleted, "cancelFn should return ErrExecutionCompleted after model error")
 }
@@ -701,7 +701,7 @@ func TestWithCancel_Resume_SafePoint(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("model did not start in phase 1")
 	}
-	_ = cancelFn1()
+	_, _ = cancelFn1()
 	drainEvents(iter1)
 
 	// --- phase 2: resume, cancel after chat model ---
@@ -738,7 +738,7 @@ func TestWithCancel_Resume_SafePoint(t *testing.T) {
 	// where the model completes and markDone() runs before the CAS.
 	cancelDone := make(chan error, 1)
 	go func() {
-		handle := cancelFn2(WithAgentCancelMode(CancelAfterChatModel))
+		handle, _ := cancelFn2(WithAgentCancelMode(CancelAfterChatModel))
 		cancelDone <- handle.Wait()
 	}()
 
@@ -827,7 +827,7 @@ func TestWithCancel_TargetedResume_CancelImmediate(t *testing.T) {
 		t.Fatal("model did not start")
 	}
 
-	handle := cancelFn() // CancelImmediate (default)
+	handle, _ := cancelFn() // CancelImmediate (default)
 	cancelErr := handle.Wait()
 	assert.NoError(t, cancelErr)
 
@@ -928,7 +928,7 @@ func TestWithCancel_TargetedResume_SafePoint(t *testing.T) {
 	// Start cancelFn in background so the CAS happens before the model unblocks.
 	cancelDone := make(chan error, 1)
 	go func() {
-		handle := cancelFn(WithAgentCancelMode(CancelAfterChatModel))
+		handle, _ := cancelFn(WithAgentCancelMode(CancelAfterChatModel))
 		cancelDone <- handle.Wait()
 	}()
 	time.Sleep(50 * time.Millisecond)
@@ -1053,7 +1053,7 @@ func TestWithCancel_Resume_CancelAfterChatModel_MessagePreserved(t *testing.T) {
 
 		cancelDone := make(chan error, 1)
 		go func() {
-			handle := cancelFn1(WithAgentCancelMode(CancelAfterChatModel))
+			handle, _ := cancelFn1(WithAgentCancelMode(CancelAfterChatModel))
 			cancelDone <- handle.Wait()
 		}()
 		time.Sleep(50 * time.Millisecond)
@@ -1139,7 +1139,7 @@ func TestWithCancel_Resume_CancelAfterChatModel_MessagePreserved(t *testing.T) {
 
 		cancelDone := make(chan error, 1)
 		go func() {
-			handle := cancelFn1(WithAgentCancelMode(CancelAfterChatModel))
+			handle, _ := cancelFn1(WithAgentCancelMode(CancelAfterChatModel))
 			cancelDone <- handle.Wait()
 		}()
 		time.Sleep(50 * time.Millisecond)
@@ -1253,7 +1253,7 @@ func TestHandleRunFuncError_AlreadyHandled_NoDuplicate(t *testing.T) {
 	// Cancel while tool is still running (in goroutine because cancelFn blocks
 	// until execution finishes), then unblock tool so safe-point fires
 	go func() {
-		handle := cancelFn(WithAgentCancelMode(CancelAfterToolCalls))
+		handle, _ := cancelFn(WithAgentCancelMode(CancelAfterToolCalls))
 		_ = handle.Wait()
 	}()
 

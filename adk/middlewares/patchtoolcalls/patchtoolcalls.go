@@ -121,6 +121,6 @@ func (m *middleware) createPatchedToolMessage(ctx context.Context, tc schema.Too
 }
 
 const (
-	defaultPatchedToolMessageTemplate        = "Tool call %s with id %s was cancelled - another message came in before it could be completed."
+	defaultPatchedToolMessageTemplate        = "Tool call %s with id %s was canceled - another message came in before it could be completed."
 	defaultPatchedToolMessageTemplateChinese = "工具调用 %s（ID 为 %s）已被取消——在其完成之前收到了另一条消息。"
 )

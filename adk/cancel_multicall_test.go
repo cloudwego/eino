@@ -34,8 +34,8 @@ func TestAgentCancelFunc_MultiCall_EscalateToImmediate(t *testing.T) {
 	})
 	cancelFn := cc.buildCancelFunc()
 
-	handle1 := cancelFn(WithAgentCancelMode(CancelAfterChatModel))
-	handle2 := cancelFn(WithAgentCancelMode(CancelImmediate))
+	handle1, _ := cancelFn(WithAgentCancelMode(CancelAfterChatModel))
+	handle2, _ := cancelFn(WithAgentCancelMode(CancelImmediate))
 	assert.Equal(t, int32(1), atomic.LoadInt32(&interruptCalls))
 
 	cancelErr := cc.createCancelError()
@@ -52,8 +52,8 @@ func TestAgentCancelFunc_MultiCall_JoinSafePointModes(t *testing.T) {
 	cc := newCancelContext()
 	cancelFn := cc.buildCancelFunc()
 
-	handle1 := cancelFn(WithAgentCancelMode(CancelAfterChatModel))
-	handle2 := cancelFn(WithAgentCancelMode(CancelAfterToolCalls))
+	handle1, _ := cancelFn(WithAgentCancelMode(CancelAfterChatModel))
+	handle2, _ := cancelFn(WithAgentCancelMode(CancelAfterToolCalls))
 
 	want := CancelAfterChatModel | CancelAfterToolCalls
 	assert.Equal(t, want, cc.getMode())
@@ -67,7 +67,7 @@ func TestAgentCancelFunc_MultiCall_TimeoutDeadlineJoinUsesAbsoluteTime(t *testin
 	cc := newCancelContext()
 	cancelFn := cc.buildCancelFunc()
 
-	handle1 := cancelFn(
+	handle1, _ := cancelFn(
 		WithAgentCancelMode(CancelAfterChatModel),
 		WithAgentCancelTimeout(200*time.Millisecond),
 	)
@@ -77,7 +77,7 @@ func TestAgentCancelFunc_MultiCall_TimeoutDeadlineJoinUsesAbsoluteTime(t *testin
 
 	time.Sleep(50 * time.Millisecond)
 
-	handle2 := cancelFn(
+	handle2, _ := cancelFn(
 		WithAgentCancelMode(CancelAfterToolCalls),
 		WithAgentCancelTimeout(60*time.Millisecond),
 	)
@@ -103,7 +103,7 @@ func TestAgentCancelFunc_MultiCall_TimeoutEscalationReturnsErrCancelTimeout(t *t
 		}
 	})
 	cancelFn := cc.buildCancelFunc()
-	handle := cancelFn(
+	handle, _ := cancelFn(
 		WithAgentCancelMode(CancelAfterChatModel),
 		WithAgentCancelTimeout(30*time.Millisecond),
 	)

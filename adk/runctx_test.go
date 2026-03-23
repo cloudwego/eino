@@ -465,15 +465,15 @@ func TestGobEncodeStreamErrors(t *testing.T) {
 		assert.NoError(t, err, "GobEncode should handle WillRetryError streams gracefully")
 	})
 
-	t.Run("ErrStreamCancelled_unconsumed_stream_fails_GobEncode", func(t *testing.T) {
-		// Same scenario but with ErrStreamCancelled (*errors.errorString).
+	t.Run("ErrStreamCanceled_unconsumed_stream_fails_GobEncode", func(t *testing.T) {
+		// Same scenario but with ErrStreamCanceled (*errors.errorString).
 		wrapper := makeStreamingEventWrapper(
 			schema.AssistantMessage("partial", nil),
-			ErrStreamCancelled,
+			ErrStreamCanceled,
 		)
 
 		_, err := wrapper.GobEncode()
-		assert.NoError(t, err, "GobEncode should handle ErrStreamCancelled streams gracefully")
+		assert.NoError(t, err, "GobEncode should handle ErrStreamCanceled streams gracefully")
 	})
 
 	t.Run("successful_stream_GobEncode_succeeds", func(t *testing.T) {
@@ -510,20 +510,20 @@ func TestGobEncodeStreamErrors(t *testing.T) {
 		assert.NotEmpty(t, data)
 	})
 
-	t.Run("preconsumed_ErrStreamCancelled_GobEncode_succeeds", func(t *testing.T) {
-		// ErrStreamCancelled is a *StreamCancelledError which IS gob-registered.
-		// After getMessageFromWrappedEvent, StreamErr = ErrStreamCancelled.
+	t.Run("preconsumed_ErrStreamCanceled_GobEncode_succeeds", func(t *testing.T) {
+		// ErrStreamCanceled is a *StreamCanceledError which IS gob-registered.
+		// After getMessageFromWrappedEvent, StreamErr = ErrStreamCanceled.
 		// Since it's registered, gob encoding succeeds.
 		wrapper := makeStreamingEventWrapper(
 			schema.AssistantMessage("partial", nil),
-			ErrStreamCancelled,
+			ErrStreamCanceled,
 		)
 
 		_, consumeErr := getMessageFromWrappedEvent(wrapper)
 		assert.Error(t, consumeErr)
 
 		data, err := wrapper.GobEncode()
-		assert.NoError(t, err, "GobEncode should succeed; ErrStreamCancelled is gob-registered")
+		assert.NoError(t, err, "GobEncode should succeed; ErrStreamCanceled is gob-registered")
 		assert.NotEmpty(t, data)
 	})
 
@@ -553,12 +553,12 @@ func TestGobEncodeStreamErrors(t *testing.T) {
 		assert.Equal(t, "err", willRetryErr.ErrStr)
 	})
 
-	t.Run("GobEncode_roundtrip_preserves_ErrStreamCancelled", func(t *testing.T) {
-		// ErrStreamCancelled (*StreamCancelledError) is gob-registered, so
+	t.Run("GobEncode_roundtrip_preserves_ErrStreamCanceled", func(t *testing.T) {
+		// ErrStreamCanceled (*StreamCanceledError) is gob-registered, so
 		// StreamErr should survive encoding/decoding.
 		wrapper := makeStreamingEventWrapper(
 			schema.AssistantMessage("partial", nil),
-			ErrStreamCancelled,
+			ErrStreamCanceled,
 		)
 
 		data, err := wrapper.GobEncode()
@@ -567,8 +567,8 @@ func TestGobEncodeStreamErrors(t *testing.T) {
 		decoded := &agentEventWrapper{AgentEvent: &AgentEvent{}}
 		err = decoded.GobDecode(data)
 		assert.NoError(t, err)
-		var streamCancelledErr *StreamCancelledError
-		assert.ErrorAs(t, decoded.StreamErr, &streamCancelledErr)
+		var streamCanceledErr *StreamCanceledError
+		assert.ErrorAs(t, decoded.StreamErr, &streamCanceledErr)
 	})
 
 	t.Run("GobEncode_idempotent", func(t *testing.T) {

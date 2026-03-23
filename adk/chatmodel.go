@@ -34,6 +34,7 @@ import (
 	"github.com/cloudwego/eino/components/prompt"
 	"github.com/cloudwego/eino/components/tool"
 	"github.com/cloudwego/eino/compose"
+	"github.com/cloudwego/eino/internal/core"
 	"github.com/cloudwego/eino/internal/safe"
 	"github.com/cloudwego/eino/schema"
 )
@@ -391,7 +392,7 @@ func NewChatModelAgent(ctx context.Context, config *ChatModelAgentConfig) (*Chat
 	// Cancel monitoring middleware (innermost — close to the tool endpoint).
 	// This allows early abort of the raw tool result stream when immediateChan fires
 	// (CancelImmediate or timeout escalation), while requiring outer wrappers to
-	// propagate stream errors such as ErrStreamCancelled without swallowing them.
+	// propagate stream errors such as ErrStreamCanceled without swallowing them.
 	cancelToolHandler := &cancelMonitoredToolHandler{}
 	tc.ToolCallMiddlewares = append(tc.ToolCallMiddlewares, compose.ToolMiddleware{
 		Streamable:         cancelToolHandler.WrapStreamableToolCall,
@@ -751,19 +752,25 @@ func (a *ChatModelAgent) handleRunFuncError(
 				data = nil
 			}
 
-			cancelErr := cancelCtx.createCancelError()
-
-			evt := CompositeInterrupt(ctx, cancelErr.Info, data, composeSignal)
-			if evt.Err != nil {
-				generator.Send(&AgentEvent{Err: evt.Err})
+			var rp []RunStep
+			if rCtx := getRunCtx(ctx); rCtx != nil {
+				rp = rCtx.RunPath
+			}
+			is, isErr := core.Interrupt(ctx, nil, data, []*core.InterruptSignal{composeSignal},
+				core.WithLayerPayload(rp))
+			if isErr != nil {
+				generator.Send(&AgentEvent{Err: isErr})
 				return
 			}
-			cancelErr.interruptSignal = evt.Action.internalInterrupted
-			cancelErr.InterruptContexts = evt.Action.Interrupted.InterruptContexts
 
-			if !cancelCtx.markCancelHandled() {
+			cancelErr, ok := cancelCtx.createAndMarkCancelHandled()
+			if !ok {
 				return
 			}
+			is.InterruptInfo.Info = cancelErr.Info
+			contexts := core.ToInterruptContexts(is, allowedAddressSegmentTypes)
+			cancelErr.interruptSignal = is
+			cancelErr.InterruptContexts = contexts
 			generator.Send(&AgentEvent{Err: cancelErr})
 			return
 		}
@@ -863,8 +870,8 @@ func (a *ChatModelAgent) buildNoToolsRunFunc(_ context.Context) runFunc {
 		// Pre-execution cancel check
 		if cancelCtx != nil && cancelCtx.shouldCancel() {
 			if cancelCtx.getMode() == CancelImmediate || atomic.LoadInt32(&cancelCtx.escalated) == 1 {
-				cancelErr := cancelCtx.createCancelError()
-				if !cancelCtx.markCancelHandled() {
+				cancelErr, ok := cancelCtx.createAndMarkCancelHandled()
+				if !ok {
 					return
 				}
 				p.generator.Send(&AgentEvent{Err: cancelErr})
@@ -973,8 +980,8 @@ func (a *ChatModelAgent) buildReActRunFunc(_ context.Context, bc *execContext) (
 		// Pre-execution cancel check
 		if cancelCtx != nil && cancelCtx.shouldCancel() {
 			if cancelCtx.getMode() == CancelImmediate || atomic.LoadInt32(&cancelCtx.escalated) == 1 {
-				cancelErr := cancelCtx.createCancelError()
-				if !cancelCtx.markCancelHandled() {
+				cancelErr, ok := cancelCtx.createAndMarkCancelHandled()
+				if !ok {
 					return
 				}
 				p.generator.Send(&AgentEvent{Err: cancelErr})
