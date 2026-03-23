@@ -346,7 +346,7 @@ func newReact(ctx context.Context, config *reactConfig) (reactGraph, error) {
 	// has a compose context, so compose.Interrupt saves checkpoint data.
 	cancelCheck := func(ctx context.Context, msg Message) (Message, error) {
 		if cancelCtx != nil && cancelCtx.shouldCancel() {
-			if cancelCtx.config != nil && cancelCtx.config.Mode&CancelAfterChatModel != 0 {
+			if cancelCtx.getMode()&CancelAfterChatModel != 0 {
 				return nil, compose.StatefulInterrupt(ctx, &cancelSafePointInfo{Mode: CancelAfterChatModel}, msg)
 			}
 		}
@@ -389,7 +389,7 @@ func newReact(ctx context.Context, config *reactConfig) (reactGraph, error) {
 		// CancelAfterToolCalls safe-point: all concurrent tool calls finished.
 		// compose.Interrupt saves checkpoint data so the cancel is fully resumable.
 		if cancelCtx != nil && cancelCtx.shouldCancel() {
-			if cancelCtx.config != nil && cancelCtx.config.Mode&CancelAfterToolCalls != 0 {
+			if cancelCtx.getMode()&CancelAfterToolCalls != 0 {
 				return nil, compose.Interrupt(ctx, &cancelSafePointInfo{Mode: CancelAfterToolCalls})
 			}
 		}

@@ -513,7 +513,7 @@ func TestTurnLoop_Preempt_WithAgentCancelMode(t *testing.T) {
 		onCancel: func(cc *cancelContext) {
 			cancelModeMu.Lock()
 			cancelFuncCalledOnce.Do(func() {
-				firstCancelModeUsed = cc.config.Mode
+				firstCancelModeUsed = cc.getMode()
 				close(cancelFuncCalled)
 			})
 			cancelModeMu.Unlock()
@@ -556,6 +556,168 @@ func TestTurnLoop_Preempt_WithAgentCancelMode(t *testing.T) {
 	actualMode := firstCancelModeUsed
 	cancelModeMu.Unlock()
 	assert.Equal(t, CancelAfterToolCalls, actualMode)
+}
+
+func TestTurnLoop_Preempt_EscalatesOnSecondPreempt(t *testing.T) {
+	agentStarted := make(chan struct{})
+	firstCancelSeen := make(chan struct{})
+	agentFinishGate := make(chan struct{})
+	agentStartedOnce := sync.Once{}
+	firstCancelOnce := sync.Once{}
+
+	var ccPtr atomic.Value
+
+	agent := &turnLoopCancellableMockAgent{
+		name: "test",
+		runFunc: func(ctx context.Context, input *AgentInput) (*AgentOutput, error) {
+			agentStartedOnce.Do(func() { close(agentStarted) })
+			<-ctx.Done()
+			<-agentFinishGate
+			return &AgentOutput{}, nil
+		},
+		onCancel: func(cc *cancelContext) {
+			ccPtr.Store(cc)
+			firstCancelOnce.Do(func() { close(firstCancelSeen) })
+		},
+	}
+
+	loop := newAndRunTurnLoop(context.Background(), TurnLoopConfig[string]{
+		PrepareAgent: func(ctx context.Context, _ *TurnLoop[string], consumed []string) (Agent, error) {
+			return agent, nil
+		},
+		GenInput: func(ctx context.Context, _ *TurnLoop[string], items []string) (*GenInputResult[string], error) {
+			return &GenInputResult[string]{
+				Input:     &AgentInput{Messages: []Message{schema.UserMessage(items[0])}},
+				Consumed:  []string{items[0]},
+				Remaining: items[1:],
+			}, nil
+		},
+	})
+
+	loop.Push("first")
+	select {
+	case <-agentStarted:
+	case <-time.After(1 * time.Second):
+		t.Fatal("agent did not start")
+	}
+
+	loop.Push("urgent1", WithPreempt(WithAgentCancelMode(CancelAfterChatModel)))
+	select {
+	case <-firstCancelSeen:
+	case <-time.After(1 * time.Second):
+		t.Fatal("first preempt did not trigger cancel")
+	}
+
+	loop.Push("urgent2", WithPreempt(WithAgentCancelMode(CancelImmediate)))
+
+	deadline := time.Now().Add(1 * time.Second)
+	for time.Now().Before(deadline) {
+		v := ccPtr.Load()
+		if v == nil {
+			time.Sleep(5 * time.Millisecond)
+			continue
+		}
+		cc := v.(*cancelContext)
+		if cc.getMode() == CancelImmediate && atomic.LoadInt32(&cc.escalated) == 1 {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	v := ccPtr.Load()
+	if v == nil {
+		t.Fatal("cancel context was not captured")
+	}
+	cc := v.(*cancelContext)
+	assert.Equal(t, CancelImmediate, cc.getMode())
+	assert.Equal(t, int32(1), atomic.LoadInt32(&cc.escalated))
+
+	close(agentFinishGate)
+
+	loop.Stop()
+	result := loop.Wait()
+	assert.NoError(t, result.ExitReason)
+}
+
+func TestTurnLoop_Preempt_JoinsSafePointModesOnSecondPreempt(t *testing.T) {
+	agentStarted := make(chan struct{})
+	firstCancelSeen := make(chan struct{})
+	agentFinishGate := make(chan struct{})
+	agentStartedOnce := sync.Once{}
+	firstCancelOnce := sync.Once{}
+
+	var ccPtr atomic.Value
+
+	agent := &turnLoopCancellableMockAgent{
+		name: "test",
+		runFunc: func(ctx context.Context, input *AgentInput) (*AgentOutput, error) {
+			agentStartedOnce.Do(func() { close(agentStarted) })
+			<-ctx.Done()
+			<-agentFinishGate
+			return &AgentOutput{}, nil
+		},
+		onCancel: func(cc *cancelContext) {
+			ccPtr.Store(cc)
+			firstCancelOnce.Do(func() { close(firstCancelSeen) })
+		},
+	}
+
+	loop := newAndRunTurnLoop(context.Background(), TurnLoopConfig[string]{
+		PrepareAgent: func(ctx context.Context, _ *TurnLoop[string], consumed []string) (Agent, error) {
+			return agent, nil
+		},
+		GenInput: func(ctx context.Context, _ *TurnLoop[string], items []string) (*GenInputResult[string], error) {
+			return &GenInputResult[string]{
+				Input:     &AgentInput{Messages: []Message{schema.UserMessage(items[0])}},
+				Consumed:  []string{items[0]},
+				Remaining: items[1:],
+			}, nil
+		},
+	})
+
+	loop.Push("first")
+	select {
+	case <-agentStarted:
+	case <-time.After(1 * time.Second):
+		t.Fatal("agent did not start")
+	}
+
+	loop.Push("urgent1", WithPreempt(WithAgentCancelMode(CancelAfterChatModel)))
+	select {
+	case <-firstCancelSeen:
+	case <-time.After(1 * time.Second):
+		t.Fatal("first preempt did not trigger cancel")
+	}
+
+	loop.Push("urgent2", WithPreempt(WithAgentCancelMode(CancelAfterToolCalls)))
+
+	want := CancelAfterChatModel | CancelAfterToolCalls
+	deadline := time.Now().Add(1 * time.Second)
+	for time.Now().Before(deadline) {
+		v := ccPtr.Load()
+		if v == nil {
+			time.Sleep(5 * time.Millisecond)
+			continue
+		}
+		cc := v.(*cancelContext)
+		if cc.getMode() == want {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	v := ccPtr.Load()
+	if v == nil {
+		t.Fatal("cancel context was not captured")
+	}
+	cc := v.(*cancelContext)
+	assert.Equal(t, want, cc.getMode())
+
+	close(agentFinishGate)
+
+	loop.Stop()
+	result := loop.Wait()
+	assert.NoError(t, result.ExitReason)
 }
 
 func TestTurnLoop_Push_WithoutPreempt_DoesNotCancel(t *testing.T) {

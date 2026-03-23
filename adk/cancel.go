@@ -239,16 +239,23 @@ func getCancelContext(ctx context.Context) *cancelContext {
 }
 
 type cancelContext struct {
-	config *agentCancelConfig
+	mode int32 // atomic, CancelMode
 
 	cancelChan    chan struct{} // closed when cancel is requested (all modes, not just safe-point)
 	immediateChan chan struct{} // closed when an immediate graph interrupt fires
 	doneChan      chan struct{} // closed when execution completes (by any mark* method)
 	doneOnce      sync.Once     // ensures doneChan is closed exactly once
 
-	state         int32 // stateRunning, stateCancelling, stateDone, stateCancelHandled
-	interruptSent int32 // interruptNotSent, interruptImmediate
-	escalated     int32 // 1 if escalated from safe-point to immediate
+	state            int32 // stateRunning, stateCancelling, stateDone, stateCancelHandled
+	interruptSent    int32 // interruptNotSent, interruptImmediate
+	escalated        int32 // 1 if escalated from safe-point to immediate
+	timeoutEscalated int32 // 1 if escalation was triggered by timeout
+	startedMode      int32 // atomic, mode when state transitioned to cancelling
+	deadlineUnixNano int64 // atomic, 0 means no deadline
+
+	cancelMu      sync.Mutex
+	timeoutOnce   sync.Once
+	timeoutNotify chan struct{}
 
 	mu                  sync.Mutex
 	graphInterruptFuncs []func(...compose.GraphInterruptOption)
@@ -259,6 +266,33 @@ func newCancelContext() *cancelContext {
 		cancelChan:    make(chan struct{}),
 		immediateChan: make(chan struct{}),
 		doneChan:      make(chan struct{}),
+		timeoutNotify: make(chan struct{}, 1),
+	}
+}
+
+func (cc *cancelContext) getMode() CancelMode {
+	if cc == nil {
+		return CancelImmediate
+	}
+	return CancelMode(atomic.LoadInt32(&cc.mode))
+}
+
+func (cc *cancelContext) setMode(mode CancelMode) {
+	atomic.StoreInt32(&cc.mode, int32(mode))
+}
+
+func (cc *cancelContext) getDeadlineUnixNano() int64 {
+	return atomic.LoadInt64(&cc.deadlineUnixNano)
+}
+
+func (cc *cancelContext) setDeadlineUnixNano(v int64) {
+	atomic.StoreInt64(&cc.deadlineUnixNano, v)
+}
+
+func (cc *cancelContext) wakeTimeoutController() {
+	select {
+	case cc.timeoutNotify <- struct{}{}:
+	default:
 	}
 }
 
@@ -308,14 +342,6 @@ func (cc *cancelContext) sendImmediateInterrupt() bool {
 	}
 	cc.mu.Unlock()
 	return true
-}
-
-// escalateToImmediate upgrades a safe-point cancel to an immediate graph
-// interrupt. Called by the timeout goroutine when the safe-point hasn't fired
-// within the configured duration.
-func (cc *cancelContext) escalateToImmediate() {
-	atomic.StoreInt32(&cc.escalated, 1)
-	cc.sendImmediateInterrupt()
 }
 
 // setGraphInterruptFunc appends a graph interrupt function to the list.
@@ -372,17 +398,10 @@ func (cc *cancelContext) markCancelHandled() bool {
 // createCancelError creates a CancelError based on the current cancel state.
 func (cc *cancelContext) createCancelError() *CancelError {
 	info := &AgentCancelInfo{}
-	if cc.config != nil {
-		info.Mode = cc.config.Mode
-	}
+	info.Mode = cc.getMode()
 	if atomic.LoadInt32(&cc.escalated) == 1 {
 		info.Escalated = true
-		// Timeout is true when a safe-point mode was escalated to immediate
-		// because the safe-point didn't fire within the configured duration.
-		// For CancelImmediate the escalation flag is meaningless (already immediate).
-		if cc.config != nil && cc.config.Mode != CancelImmediate {
-			info.Timeout = true
-		}
+		info.Timeout = atomic.LoadInt32(&cc.timeoutEscalated) == 1
 	}
 	return &CancelError{
 		Info: info,
@@ -391,74 +410,156 @@ func (cc *cancelContext) createCancelError() *CancelError {
 
 // buildCancelFunc builds the AgentCancelFunc for external use.
 func (cc *cancelContext) buildCancelFunc() AgentCancelFunc {
-	var once sync.Once
-	var result error
-
-	return func(callOpts ...AgentCancelOption) error {
-		cfg := &agentCancelConfig{
-			Mode: CancelImmediate,
+	joinMode := func(a, b CancelMode) CancelMode {
+		if a == CancelImmediate || b == CancelImmediate {
+			return CancelImmediate
 		}
+		return a | b
+	}
+
+	parseReq := func(callOpts ...AgentCancelOption) *agentCancelConfig {
+		cfg := &agentCancelConfig{Mode: CancelImmediate}
 		for _, opt := range callOpts {
 			opt(cfg)
 		}
+		return cfg
+	}
 
-		// TODO: sync.Once prevents escalation — a second call with a different mode
-		// (e.g., CancelImmediate after CancelAfterChatModel) is silently ignored.
-		// Consider using a mutex + started flag to allow subsequent calls to trigger
-		// escalateToImmediate() for manual escalation support.
-		once.Do(func() {
-			// Safe: all readers of cc.config first observe cancelChan being closed
-			// (via shouldCancel), which happens-after this write.
-			cc.config = cfg
+	startTimeoutController := func() {
+		cc.timeoutOnce.Do(func() {
+			go func() {
+				for {
+					select {
+					case <-cc.doneChan:
+						return
+					default:
+					}
 
-			// Transition to cancelling
-			if !atomic.CompareAndSwapInt32(&cc.state, stateRunning, stateCancelling) {
-				// Execution already finished (completed, interrupted, or errored)
-				result = ErrExecutionCompleted
-				return
-			}
+					mode := cc.getMode()
+					if mode == CancelImmediate {
+						return
+					}
 
-			// Close cancelChan to signal safe-point listeners
-			close(cc.cancelChan)
+					deadline := cc.getDeadlineUnixNano()
+					if deadline == 0 {
+						select {
+						case <-cc.timeoutNotify:
+							continue
+						case <-cc.doneChan:
+							return
+						}
+					}
 
-			if cfg.Mode == CancelImmediate {
-				cc.sendImmediateInterrupt()
-			} else {
-				// Safe-point mode: dedicated cancel check nodes and toolPostHandle will
-				// check shouldCancel() and call compose.Interrupt when their
-				// safe-point condition is met. No graph interrupt is sent.
-			}
+					now := time.Now().UnixNano()
+					wait := time.Duration(deadline - now)
+					if wait <= 0 {
+						atomic.StoreInt32(&cc.escalated, 1)
+						atomic.StoreInt32(&cc.timeoutEscalated, 1)
+						cc.sendImmediateInterrupt()
+						return
+					}
 
-			if cfg.Timeout != nil && *cfg.Timeout > 0 && cfg.Mode != CancelImmediate {
-				go func() {
-					timer := time.NewTimer(*cfg.Timeout)
-					defer timer.Stop()
+					timer := time.NewTimer(wait)
 					select {
 					case <-timer.C:
-						cc.escalateToImmediate()
+						timer.Stop()
+						atomic.StoreInt32(&cc.escalated, 1)
+						atomic.StoreInt32(&cc.timeoutEscalated, 1)
+						cc.sendImmediateInterrupt()
+						return
+					case <-cc.timeoutNotify:
+						timer.Stop()
+						continue
 					case <-cc.doneChan:
+						timer.Stop()
+						return
 					}
-				}()
+				}
+			}()
+		})
+	}
+
+	return func(callOpts ...AgentCancelOption) error {
+		req := parseReq(callOpts...)
+
+		st := atomic.LoadInt32(&cc.state)
+		switch st {
+		case stateCancelHandled:
+			return nil
+		case stateDone:
+			return ErrExecutionCompleted
+		}
+
+		var needImmediate, needTimeoutCtl bool
+
+		cc.cancelMu.Lock()
+
+		st = atomic.LoadInt32(&cc.state)
+		switch st {
+		case stateCancelHandled:
+			cc.cancelMu.Unlock()
+			return nil
+		case stateDone:
+			cc.cancelMu.Unlock()
+			return ErrExecutionCompleted
+		}
+
+		curMode := cc.getMode()
+		if st == stateRunning {
+			curMode = req.Mode
+		} else {
+			curMode = joinMode(curMode, req.Mode)
+		}
+		cc.setMode(curMode)
+
+		if curMode == CancelImmediate {
+			cc.setDeadlineUnixNano(0)
+			needImmediate = true
+		} else if req.Timeout != nil && *req.Timeout > 0 {
+			proposed := time.Now().Add(*req.Timeout).UnixNano()
+			existing := cc.getDeadlineUnixNano()
+			if existing == 0 || proposed < existing {
+				cc.setDeadlineUnixNano(proposed)
+				cc.wakeTimeoutController()
 			}
+			needTimeoutCtl = cc.getDeadlineUnixNano() != 0
+		}
 
-			// Wait for execution to finish
-			<-cc.doneChan
-
-			st := atomic.LoadInt32(&cc.state)
-			switch st {
-			case stateDone:
-				result = ErrExecutionCompleted
-			default:
-				// stateCancelHandled: cancel was processed and CancelError was emitted.
-				if atomic.LoadInt32(&cc.escalated) == 1 && cfg.Mode != CancelImmediate {
-					result = ErrCancelTimeout
-				} else {
-					result = nil
+		if st == stateRunning {
+			if !atomic.CompareAndSwapInt32(&cc.state, stateRunning, stateCancelling) {
+				st = atomic.LoadInt32(&cc.state)
+				if st == stateDone {
+					cc.cancelMu.Unlock()
+					return ErrExecutionCompleted
 				}
 			}
-		})
+			atomic.StoreInt32(&cc.startedMode, int32(curMode))
+			close(cc.cancelChan)
+		}
+		cc.cancelMu.Unlock()
 
-		return result
+		if needImmediate {
+			if atomic.LoadInt32(&cc.startedMode) != int32(CancelImmediate) {
+				atomic.StoreInt32(&cc.escalated, 1)
+			}
+			cc.sendImmediateInterrupt()
+		}
+		if needTimeoutCtl {
+			startTimeoutController()
+		}
+
+		<-cc.doneChan
+
+		st = atomic.LoadInt32(&cc.state)
+		switch st {
+		case stateDone:
+			return ErrExecutionCompleted
+		default:
+			if atomic.LoadInt32(&cc.timeoutEscalated) == 1 {
+				return ErrCancelTimeout
+			}
+			return nil
+		}
 	}
 }
 

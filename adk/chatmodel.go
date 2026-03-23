@@ -824,7 +824,7 @@ func (a *ChatModelAgent) buildNoToolsRunFunc(_ context.Context) runFunc {
 			AppendChatModel(wrappedModel).
 			AppendLambda(compose.InvokableLambda(func(ctx context.Context, msg Message) (Message, error) {
 				if cancelCtx != nil && cancelCtx.shouldCancel() {
-					if cancelCtx.config != nil && cancelCtx.config.Mode&CancelAfterChatModel != 0 {
+					if cancelCtx.getMode()&CancelAfterChatModel != 0 {
 						return nil, compose.StatefulInterrupt(ctx, &cancelSafePointInfo{Mode: CancelAfterChatModel}, msg)
 					}
 				}
@@ -860,8 +860,7 @@ func (a *ChatModelAgent) buildNoToolsRunFunc(_ context.Context) runFunc {
 
 		// Pre-execution cancel check
 		if cancelCtx != nil && cancelCtx.shouldCancel() {
-			cfg := cancelCtx.config
-			if cfg == nil || cfg.Mode == CancelImmediate || atomic.LoadInt32(&cancelCtx.escalated) == 1 {
+			if cancelCtx.getMode() == CancelImmediate || atomic.LoadInt32(&cancelCtx.escalated) == 1 {
 				cancelErr := cancelCtx.createCancelError()
 				if !cancelCtx.markCancelHandled() {
 					return
@@ -971,8 +970,7 @@ func (a *ChatModelAgent) buildReActRunFunc(_ context.Context, bc *execContext) (
 
 		// Pre-execution cancel check
 		if cancelCtx != nil && cancelCtx.shouldCancel() {
-			cfg := cancelCtx.config
-			if cfg == nil || cfg.Mode == CancelImmediate || atomic.LoadInt32(&cancelCtx.escalated) == 1 {
+			if cancelCtx.getMode() == CancelImmediate || atomic.LoadInt32(&cancelCtx.escalated) == 1 {
 				cancelErr := cancelCtx.createCancelError()
 				if !cancelCtx.markCancelHandled() {
 					return

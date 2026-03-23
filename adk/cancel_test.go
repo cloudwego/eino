@@ -130,11 +130,11 @@ func TestCancelContext(t *testing.T) {
 		cc := newCancelContext()
 		assert.False(t, cc.shouldCancel(), "Should not be cancelled initially")
 
-		cc.config = &agentCancelConfig{Mode: CancelImmediate}
+		cc.setMode(CancelImmediate)
 		close(cc.cancelChan)
 
 		assert.True(t, cc.shouldCancel(), "Should be cancelled after close(cancelChan)")
-		assert.Equal(t, CancelImmediate, cc.config.Mode)
+		assert.Equal(t, CancelImmediate, cc.getMode())
 	})
 }
 
@@ -1601,7 +1601,7 @@ func TestGraphInterruptFuncs_Parallel(t *testing.T) {
 		})
 
 		// Simulate immediate cancel
-		cc.config = &agentCancelConfig{Mode: CancelImmediate}
+		cc.setMode(CancelImmediate)
 		atomic.CompareAndSwapInt32(&cc.state, stateRunning, stateCancelling)
 		close(cc.cancelChan)
 		cc.sendImmediateInterrupt()
@@ -1614,7 +1614,7 @@ func TestGraphInterruptFuncs_Parallel(t *testing.T) {
 		cc := newCancelContext()
 
 		// First set up cancel state with immediate interrupt
-		cc.config = &agentCancelConfig{Mode: CancelImmediate}
+		cc.setMode(CancelImmediate)
 		atomic.CompareAndSwapInt32(&cc.state, stateRunning, stateCancelling)
 		close(cc.cancelChan)
 		close(cc.immediateChan)

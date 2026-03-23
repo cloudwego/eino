@@ -72,6 +72,7 @@ type preemptSignal struct {
 	cond            *sync.Cond
 	paused          bool
 	signaled        bool
+	gen             uint64
 	agentCancelOpts []AgentCancelOption
 }
 
@@ -96,18 +97,19 @@ func (s *preemptSignal) signal(opts ...AgentCancelOption) {
 	}
 
 	s.signaled = true
+	s.gen++
 	s.agentCancelOpts = opts
 	s.cond.Broadcast()
 }
 
-func (s *preemptSignal) check() (bool, []AgentCancelOption) {
+func (s *preemptSignal) check() (bool, uint64, []AgentCancelOption) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	if s.signaled {
-		return true, s.agentCancelOpts
+		return true, s.gen, s.agentCancelOpts
 	}
-	return false, nil
+	return false, 0, nil
 }
 
 func (s *preemptSignal) waitIfPaused() (signaled bool, opts []AgentCancelOption) {
@@ -134,6 +136,7 @@ func (s *preemptSignal) release() {
 
 	s.paused = false
 	s.signaled = false
+	s.gen = 0
 	s.agentCancelOpts = nil
 	s.cond.Broadcast()
 }
@@ -582,20 +585,25 @@ func (l *TurnLoop[T]) runAgentAndHandleEvents(
 	// TODO: replace 10ms polling with a channel-based signal (have signal() close
 	// a dedicated channel) to eliminate timer allocation churn and reduce latency.
 	go func() {
+		var lastGen uint64
 		for {
 			select {
 			case <-done:
 				return
 			case <-time.After(10 * time.Millisecond):
-				if preempted, opts := l.preemptSig.check(); preempted {
-					// Close preemptDone first, then call agentCancelFunc in a
-					// separate goroutine. agentCancelFunc blocks until doneChan
-					// closes: if we called it here, preemptDone would only close
-					// after done, making the select in the caller always hit done
-					// first and return CancelError instead of nil.
-					close(preemptDone)
-					go func() { _ = agentCancelFunc(opts...) }()
-					return
+				if preempted, gen, opts := l.preemptSig.check(); preempted {
+					if gen != lastGen {
+						if lastGen == 0 {
+							// Close preemptDone first, then call agentCancelFunc in a
+							// separate goroutine. agentCancelFunc blocks until doneChan
+							// closes: if we called it here, preemptDone would only close
+							// after done, making the select in the caller always hit done
+							// first and return CancelError instead of nil.
+							close(preemptDone)
+						}
+						lastGen = gen
+						go func() { _ = agentCancelFunc(opts...) }()
+					}
 				}
 			}
 		}
