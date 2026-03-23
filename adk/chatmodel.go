@@ -388,8 +388,10 @@ func NewChatModelAgent(ctx context.Context, config *ChatModelAgentConfig) (*Chat
 	)
 	tc.ToolCallMiddlewares = append(tc.ToolCallMiddlewares, collectToolMiddlewaresFromMiddlewares(config.Middlewares)...)
 
-	// Cancel monitoring middleware (innermost — wraps streamable tool calls with
-	// immediateChan monitoring, sending ErrStreamCancelled when CancelImmediate fires).
+	// Cancel monitoring middleware (innermost — close to the tool endpoint).
+	// This allows early abort of the raw tool result stream when immediateChan fires
+	// (CancelImmediate or timeout escalation), while requiring outer wrappers to
+	// propagate stream errors such as ErrStreamCancelled without swallowing them.
 	cancelToolHandler := &cancelMonitoredToolHandler{}
 	tc.ToolCallMiddlewares = append(tc.ToolCallMiddlewares, compose.ToolMiddleware{
 		Streamable:         cancelToolHandler.WrapStreamableToolCall,

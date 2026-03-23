@@ -618,6 +618,7 @@ func (l *TurnLoop[T]) runAgentAndHandleEvents(
 	}
 
 	preemptDone := make(chan struct{})
+	stoppedDone := make(chan struct{})
 
 	handleEvents := func() error {
 		if l.config.OnAgentEvents != nil {
@@ -625,7 +626,7 @@ func (l *TurnLoop[T]) runAgentAndHandleEvents(
 				Loop:      l,
 				Consumed:  result.Consumed,
 				Preempted: preemptDone,
-				Stopped:   l.stopSig.getDoneChan(),
+				Stopped:   stoppedDone,
 			}
 			return l.config.OnAgentEvents(ctx, tc, iter)
 		}
@@ -663,23 +664,42 @@ func (l *TurnLoop[T]) runAgentAndHandleEvents(
 			case <-l.preemptSig.notify:
 				if preempted, gen, opts, acks := l.preemptSig.check(); preempted {
 					if gen != lastGen {
-						if lastGen == 0 {
-							// Close preemptDone first, then request cancellation. Waiting on the
-							// returned handle blocks until the agent run finishes: if we waited
-							// here, preemptDone would only close after done, making the select
-							// in the caller always hit done first and return CancelError instead
-							// of nil.
-							close(preemptDone)
-						}
+						firstPreempt := lastGen == 0
 						lastGen = gen
 						handle := agentCancelFunc(opts...)
 						go func() { _ = handle.Wait() }()
+						if firstPreempt {
+							// Close preemptDone after agentCancelFunc so observers are
+							// guaranteed that cancellation has been initiated. We must NOT
+							// wait on handle.Wait() here — that blocks until the agent run
+							// finishes, which would prevent preemptDone from closing before
+							// done, making the bottom select always return CancelError.
+							close(preemptDone)
+						}
 						for _, ack := range acks {
 							close(ack)
 						}
 					}
 				}
 			}
+		}
+	}()
+	go func() {
+		select {
+		case <-done:
+			return
+		case <-l.stopSig.getDoneChan():
+			cfg := l.stopSig.getConfig()
+			if cfg != nil {
+				// Initiate cancellation, then close stoppedDone so observers are
+				// guaranteed that agentCancelFunc has been called. Wait on the
+				// handle in a background goroutine — the flowAgent wrapper ensures
+				// markDone() is always deferred, so this won't deadlock even if
+				// the agent doesn't explicitly support WithCancel.
+				handle := agentCancelFunc(cfg.agentCancelOpts...)
+				go func() { _ = handle.Wait() }()
+			}
+			close(stoppedDone)
 		}
 	}()
 
@@ -689,15 +709,7 @@ func (l *TurnLoop[T]) runAgentAndHandleEvents(
 	case <-preemptDone:
 		<-done
 		return nil
-	case <-l.stopSig.getDoneChan():
-		cfg := l.stopSig.getConfig()
-		if cfg != nil {
-			// Wait for cancellation in a goroutine. The flowAgent wrapper ensures
-			// markDone() is always deferred, so this won't deadlock even if the
-			// agent doesn't explicitly support WithCancel.
-			handle := agentCancelFunc(cfg.agentCancelOpts...)
-			go func() { _ = handle.Wait() }()
-		}
+	case <-stoppedDone:
 		<-done
 		return handleErr
 	}
