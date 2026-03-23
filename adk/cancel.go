@@ -107,8 +107,8 @@ type AgentCancelInfo struct {
 	Timeout   bool
 }
 
-// CancelError is sent via AgentEvent.Err when an agent is cancelled.
-// Use errors.As to extract it from event errors.
+// CancelError is sent via AgentEvent.Err when an agent is canceled.
+// Use errors.As to match and extract *CancelError from event errors.
 type CancelError struct {
 	Info *AgentCancelInfo
 
@@ -130,12 +130,6 @@ type CancelError struct {
 
 func (e *CancelError) Error() string {
 	return fmt.Sprintf("agent canceled: mode=%v, escalated=%v", e.Info.Mode, e.Info.Escalated)
-}
-
-// Unwrap returns nil intentionally. This prevents errors.Is from accidentally
-// matching through the chain. Use errors.As to match *CancelError.
-func (e *CancelError) Unwrap() error {
-	return nil
 }
 
 // Sentinel errors for cancel outcomes.
