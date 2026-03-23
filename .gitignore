@@ -50,9 +50,11 @@ reports/
 /todos
 
 .DS_Store
-*.log
+*.log*
 .claude
 CLAUDE.md
+*.jsonl
+*.txt
 
 # Specs directories
 */specs
