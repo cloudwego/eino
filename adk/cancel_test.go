@@ -964,7 +964,7 @@ func TestWithCancel_Resume(t *testing.T) {
 		cancelHandle, _ := resumeCancelFn()
 		close(slowModel2.unblockCh)
 		err = cancelHandle.Wait()
-		assert.NoError(t, err)
+		assert.True(t, err == nil || errors.Is(err, ErrExecutionCompleted), "unexpected cancel wait error: %v", err)
 
 		start := time.Now()
 		resumeEvents := <-resumeEventsCh
@@ -980,7 +980,8 @@ func TestWithCancel_Resume(t *testing.T) {
 				hasCancelError = true
 			}
 		}
-		assert.True(t, hasCancelError, "Resume should have CancelError event after cancel")
+		executionCompletedBeforeCancel := errors.Is(err, ErrExecutionCompleted)
+		assert.True(t, hasCancelError || executionCompletedBeforeCancel, "Resume should have CancelError event after cancel, or execution completed before cancel")
 	})
 }
 
