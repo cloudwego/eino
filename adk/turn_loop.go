@@ -488,6 +488,8 @@ type turnLoopCheckpoint[T any] struct {
 	CanceledItems  []T
 }
 
+// ErrCheckpointStoreNil is returned when a checkpoint operation requires a Store
+// but none was configured in TurnLoopConfig.
 var ErrCheckpointStoreNil = errors.New("checkpoint store is nil")
 
 func generateTurnLoopCheckpointID() string {
@@ -555,6 +557,8 @@ type resumeOptions[T any] struct {
 	hasResumeItems bool
 }
 
+// TurnLoopResumeOption configures how TurnLoop.Resume behaves.
+// Use WithExternalResumeItems to supply canceled and unhandled items when ExternalTurnState is true.
 type TurnLoopResumeOption[T any] func(*resumeOptions[T])
 
 // WithExternalResumeItems provides the canceled and unhandled items for resuming when
