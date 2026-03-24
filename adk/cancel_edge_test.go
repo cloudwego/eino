@@ -39,6 +39,7 @@ type blockingChatModel struct {
 	unblockCh chan struct{}
 	response  *schema.Message
 	started   chan struct{}
+	callCount int32
 }
 
 func newBlockingChatModel(response *schema.Message) *blockingChatModel {
@@ -50,6 +51,7 @@ func newBlockingChatModel(response *schema.Message) *blockingChatModel {
 }
 
 func (m *blockingChatModel) Generate(ctx context.Context, _ []*schema.Message, _ ...model.Option) (*schema.Message, error) {
+	atomic.AddInt32(&m.callCount, 1)
 	select {
 	case m.started <- struct{}{}:
 	default:
@@ -59,6 +61,7 @@ func (m *blockingChatModel) Generate(ctx context.Context, _ []*schema.Message, _
 }
 
 func (m *blockingChatModel) Stream(ctx context.Context, _ []*schema.Message, _ ...model.Option) (*schema.StreamReader[*schema.Message], error) {
+	atomic.AddInt32(&m.callCount, 1)
 	select {
 	case m.started <- struct{}{}:
 	default:
@@ -1274,4 +1277,101 @@ func TestHandleRunFuncError_AlreadyHandled_NoDuplicate(t *testing.T) {
 	}
 
 	assert.Equal(t, 1, cancelCount, "Should have exactly one CancelError, no duplicate from handleRunFuncError + checkCancel")
+}
+
+func TestWithCancel_CancelAfterChatModel_NestedAgentTool(t *testing.T) {
+	ctx := context.Background()
+
+	// Sub-agent with blocking model that signals when it starts running
+	subAgentModel := newBlockingChatModel(&schema.Message{Role: schema.Assistant, Content: "sub-agent response"})
+	subAgentModelStarted := subAgentModel.started
+
+	subAgent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+		Name:        "sub_agent",
+		Description: "test sub agent",
+		Instruction: "you are a sub agent",
+		Model:       subAgentModel,
+	})
+	require.NoError(t, err)
+
+	// Supervisor agent that immediately transfers to the sub-agent (equivalent to DeepAgent using task tool)
+	supervisorModel := &simpleChatModel{
+		response: &schema.Message{
+			Role: schema.Assistant,
+			ToolCalls: []schema.ToolCall{{
+				ID: "call_1", Type: "function",
+				Function: schema.FunctionCall{
+					Name:      TransferToAgentToolName,
+					Arguments: `{"agent_name": "sub_agent"}`,
+				},
+			}},
+		},
+	}
+
+	supervisorAgent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+		Name:        "supervisor",
+		Description: "supervisor agent (equivalent to DeepAgent)",
+		Instruction: "you are a supervisor",
+		Model:       supervisorModel,
+	})
+	require.NoError(t, err)
+
+	// Set up sub-agents on supervisor, same as DeepAgent configuration
+	agentWithSubAgents, err := SetSubAgents(ctx, supervisorAgent, []Agent{subAgent})
+	require.NoError(t, err)
+
+	runner := NewRunner(ctx, RunnerConfig{
+		Agent:           agentWithSubAgents,
+		EnableStreaming: false,
+	})
+
+	// Set up cancel
+	cancelOpt, cancelFn := WithCancel()
+	iter := runner.Run(ctx, []Message{schema.UserMessage("test")}, cancelOpt)
+
+	// Wait for sub-agent model to start executing
+	select {
+	case <-subAgentModelStarted:
+	case <-time.After(10 * time.Second):
+		t.Fatal("Sub-agent model did not start")
+	}
+
+	time.Sleep(50 * time.Millisecond)
+
+	// Trigger CancelAfterChatModel on the TOP-LEVEL supervisor agent
+	cancelDone := make(chan error, 1)
+	go func() {
+		handle, _ := cancelFn(WithAgentCancelMode(CancelAfterChatModel))
+		cancelDone <- handle.Wait()
+	}()
+
+	// Give cancel time to register, then unblock the sub-agent's model
+	time.Sleep(100 * time.Millisecond)
+	close(subAgentModel.unblockCh)
+
+	// Wait for cancel to complete
+	cancelErr := <-cancelDone
+	assert.NoError(t, cancelErr, "Cancel operation should succeed")
+
+	// Process events to check for CancelError
+	hasCancelError := false
+	var ce *CancelError
+	for {
+		event, ok := iter.Next()
+		if !ok {
+			break
+		}
+		if event.Err != nil && errors.As(event.Err, &ce) {
+			hasCancelError = true
+		}
+	}
+
+	// Verify we got a CancelError
+	assert.True(t, hasCancelError, "Should have CancelError event")
+	assert.NotNil(t, ce, "CancelError should not be nil")
+
+	// Verify cancel mode is CancelAfterChatModel
+	assert.Equal(t, CancelAfterChatModel, ce.Info.Mode, "Cancel mode should be CancelAfterChatModel")
+
+	assert.Equal(t, int32(1), atomic.LoadInt32(&subAgentModel.callCount))
 }

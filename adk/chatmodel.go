@@ -1279,7 +1279,7 @@ func (a *ChatModelAgent) Resume(ctx context.Context, info *ResumeInfo, opts ...A
 		run(ctx, &runParams{
 			input:          &AgentInput{EnableStreaming: info.EnableStreaming},
 			generator:      generator,
-			store:          newResumeBridgeStore(stateByte),
+			store:          newResumeBridgeStore(bridgeCheckpointID, stateByte),
 			instruction:    instruction,
 			returnDirectly: returnDirectly,
 			cancelCtx:      cancelCtx,

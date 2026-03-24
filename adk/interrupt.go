@@ -22,6 +22,7 @@ import (
 	"encoding/gob"
 	"errors"
 	"fmt"
+	"sync"
 
 	"github.com/cloudwego/eino/internal/core"
 	"github.com/cloudwego/eino/schema"
@@ -287,31 +288,36 @@ func (r *Runner) saveCheckPoint(
 const bridgeCheckpointID = "adk_react_mock_key"
 
 func newBridgeStore() *bridgeStore {
-	return &bridgeStore{}
+	return &bridgeStore{data: make(map[string][]byte)}
 }
 
-func newResumeBridgeStore(data []byte) *bridgeStore {
+func newResumeBridgeStore(checkPointID string, data []byte) *bridgeStore {
 	return &bridgeStore{
-		Data:  data,
-		Valid: true,
+		data: map[string][]byte{checkPointID: data},
 	}
 }
 
 type bridgeStore struct {
-	Data  []byte
-	Valid bool
+	mu   sync.Mutex
+	data map[string][]byte
 }
 
-func (m *bridgeStore) Get(_ context.Context, _ string) ([]byte, bool, error) {
-	if m.Valid {
-		return m.Data, true, nil
+func (m *bridgeStore) Get(_ context.Context, key string) ([]byte, bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if v, ok := m.data[key]; ok {
+		return v, true, nil
 	}
 	return nil, false, nil
 }
 
-func (m *bridgeStore) Set(_ context.Context, _ string, checkPoint []byte) error {
-	m.Data = checkPoint
-	m.Valid = true
+func (m *bridgeStore) Set(_ context.Context, key string, checkPoint []byte) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.data == nil {
+		m.data = make(map[string][]byte)
+	}
+	m.data[key] = checkPoint
 	return nil
 }
 
