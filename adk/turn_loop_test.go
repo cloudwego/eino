@@ -1394,7 +1394,7 @@ func TestTurnLoop_StopCheckPointIDInCancelError(t *testing.T) {
 	store := &turnLoopCheckpointStore{m: make(map[string][]byte)}
 
 	slowModel := &cancelTestChatModel{
-		delay: 500 * time.Millisecond,
+		delayNs: int64(500 * time.Millisecond),
 		response: &schema.Message{
 			Role:    schema.Assistant,
 			Content: "Hello",
@@ -1445,7 +1445,7 @@ func TestTurnLoop_StopWithoutCheckPointIDPersists(t *testing.T) {
 	store := &turnLoopCheckpointStore{m: make(map[string][]byte)}
 
 	slowModel := &cancelTestChatModel{
-		delay: 500 * time.Millisecond,
+		delayNs: int64(500 * time.Millisecond),
 		response: &schema.Message{
 			Role:    schema.Assistant,
 			Content: "Hello",
@@ -1591,7 +1591,7 @@ func TestTurnLoop_StopDuringAgentExecution_PersistAndResume(t *testing.T) {
 	store := &turnLoopCheckpointStore{m: make(map[string][]byte)}
 
 	slowModel := &cancelTestChatModel{
-		delay: 500 * time.Millisecond,
+		delayNs: int64(500 * time.Millisecond),
 		response: &schema.Message{
 			Role:    schema.Assistant,
 			Content: "Hello",
@@ -1633,7 +1633,7 @@ func TestTurnLoop_StopDuringAgentExecution_PersistAndResume(t *testing.T) {
 	store.mu.Unlock()
 	assert.True(t, ok)
 
-	slowModel.delay = 10 * time.Millisecond
+	slowModel.setDelay(10 * time.Millisecond)
 
 	var consumed2 []string
 	var genResumeCalled bool
@@ -1682,7 +1682,7 @@ func TestTurnLoop_ExternalTurnState_StopAndResume(t *testing.T) {
 	store := &turnLoopCheckpointStore{m: make(map[string][]byte)}
 
 	slowModel := &cancelTestChatModel{
-		delay: 500 * time.Millisecond,
+		delayNs: int64(500 * time.Millisecond),
 		response: &schema.Message{
 			Role:    schema.Assistant,
 			Content: "Hello",
@@ -1720,7 +1720,7 @@ func TestTurnLoop_ExternalTurnState_StopAndResume(t *testing.T) {
 
 	assert.NotEmpty(t, exit.CheckPointID)
 
-	slowModel.delay = 10 * time.Millisecond
+	slowModel.setDelay(10 * time.Millisecond)
 
 	var consumed2 []string
 	var genResumeCalled bool

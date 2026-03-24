@@ -35,10 +35,18 @@ import (
 )
 
 type cancelTestChatModel struct {
-	delay       time.Duration
+	delayNs     int64
 	response    *schema.Message
 	startedChan chan struct{}
 	doneChan    chan struct{}
+}
+
+func (m *cancelTestChatModel) getDelay() time.Duration {
+	return time.Duration(atomic.LoadInt64(&m.delayNs))
+}
+
+func (m *cancelTestChatModel) setDelay(d time.Duration) {
+	atomic.StoreInt64(&m.delayNs, int64(d))
 }
 
 func (m *cancelTestChatModel) Generate(ctx context.Context, input []*schema.Message, opts ...model.Option) (*schema.Message, error) {
@@ -46,7 +54,7 @@ func (m *cancelTestChatModel) Generate(ctx context.Context, input []*schema.Mess
 	case m.startedChan <- struct{}{}:
 	default:
 	}
-	time.Sleep(m.delay)
+	time.Sleep(m.getDelay())
 	select {
 	case m.doneChan <- struct{}{}:
 	default:
@@ -56,7 +64,7 @@ func (m *cancelTestChatModel) Generate(ctx context.Context, input []*schema.Mess
 
 func (m *cancelTestChatModel) Stream(ctx context.Context, input []*schema.Message, opts ...model.Option) (*schema.StreamReader[*schema.Message], error) {
 	m.startedChan <- struct{}{}
-	time.Sleep(m.delay)
+	time.Sleep(m.getDelay())
 	m.doneChan <- struct{}{}
 	return schema.StreamReaderFromArray([]*schema.Message{m.response}), nil
 }
@@ -146,7 +154,7 @@ func TestWithCancel_WithTools(t *testing.T) {
 		st := newSlowTool("slow_tool", 100*time.Millisecond, "tool result")
 
 		slowModel := &cancelTestChatModel{
-			delay: 2 * time.Second,
+			delayNs: int64(2 * time.Second),
 			response: &schema.Message{
 				Role:    schema.Assistant,
 				Content: "",
@@ -422,7 +430,7 @@ func TestWithCancel_WithCheckpoint(t *testing.T) {
 		st := newSlowTool("slow_tool", 100*time.Millisecond, "tool result")
 
 		slowModel := &cancelTestChatModel{
-			delay: 500 * time.Millisecond,
+			delayNs: int64(500 * time.Millisecond),
 			response: &schema.Message{
 				Role:    schema.Assistant,
 				Content: "",
@@ -500,7 +508,7 @@ func TestAgentCancelFuncMultipleCalls(t *testing.T) {
 		st := newSlowTool("slow_tool", 100*time.Millisecond, "tool result")
 
 		slowModel := &cancelTestChatModel{
-			delay: 1 * time.Second,
+			delayNs: int64(1 * time.Second),
 			response: &schema.Message{
 				Role:    schema.Assistant,
 				Content: "",
@@ -563,7 +571,7 @@ func TestWithCancel_Streaming(t *testing.T) {
 		st := newSlowTool("slow_tool", 100*time.Millisecond, "tool result")
 
 		slowModel := &cancelTestChatModel{
-			delay: 2 * time.Second,
+			delayNs: int64(2 * time.Second),
 			response: &schema.Message{
 				Role:    schema.Assistant,
 				Content: "",
@@ -735,7 +743,7 @@ func TestWithCancel_Resume(t *testing.T) {
 		st := newSlowTool("slow_tool", 100*time.Millisecond, "tool result")
 
 		slowModel := &cancelTestChatModel{
-			delay: 500 * time.Millisecond,
+			delayNs: int64(500 * time.Millisecond),
 			response: &schema.Message{
 				Role:    schema.Assistant,
 				Content: "",
@@ -803,7 +811,7 @@ func TestWithCancel_Resume(t *testing.T) {
 
 		newModelStarted := make(chan struct{}, 1)
 		slowModel2 := &cancelTestChatModel{
-			delay: 100 * time.Millisecond,
+			delayNs: int64(100 * time.Millisecond),
 			response: &schema.Message{
 				Role:    schema.Assistant,
 				Content: "Final response after resume",
@@ -855,7 +863,7 @@ func TestWithCancel_Resume(t *testing.T) {
 		st := newSlowTool("slow_tool", 100*time.Millisecond, "tool result")
 
 		slowModel := &cancelTestChatModel{
-			delay: 500 * time.Millisecond,
+			delayNs: int64(500 * time.Millisecond),
 			response: &schema.Message{
 				Role:    schema.Assistant,
 				Content: "",
@@ -1220,7 +1228,7 @@ func TestCancelContextKey(t *testing.T) {
 func newCancelTestAgent(t *testing.T, name string, modelDelay time.Duration, modelStarted chan struct{}) *ChatModelAgent {
 	t.Helper()
 	slowModel := &cancelTestChatModel{
-		delay: modelDelay,
+		delayNs: int64(modelDelay),
 		response: &schema.Message{
 			Role:    schema.Assistant,
 			Content: "response from " + name,
@@ -1306,7 +1314,7 @@ func TestWithCancel_LoopAgent(t *testing.T) {
 		modelStarted := make(chan struct{}, 10)
 
 		slowModel := &cancelTestChatModel{
-			delay: 3 * time.Second,
+			delayNs: int64(3 * time.Second),
 			response: &schema.Message{
 				Role:    schema.Assistant,
 				Content: "loop response",
@@ -1962,7 +1970,7 @@ func TestCheckCancel_AlreadyHandled_NoDuplicate(t *testing.T) {
 	// Use a slow model so cancel fires during its execution (handled by CMA).
 	modelStarted := make(chan struct{}, 1)
 	model1 := &cancelTestChatModel{
-		delay:       2 * time.Second,
+		delayNs:     int64(2 * time.Second),
 		response:    &schema.Message{Role: schema.Assistant, Content: "agent1"},
 		startedChan: modelStarted,
 		doneChan:    make(chan struct{}, 1),

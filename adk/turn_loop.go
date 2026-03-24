@@ -958,19 +958,7 @@ func (l *TurnLoop[T]) run(ctx context.Context) {
 	}
 }
 
-func (l *TurnLoop[T]) runAgentAndHandleEvents(
-	ctx context.Context,
-	agent Agent,
-	spec *turnRunSpec[T],
-) error {
-	var iter *AsyncIterator[*AgentEvent]
-	defer func() {
-		if l.stopSig.isStopped() && len(l.canceledItems) == 0 {
-			l.canceledItems = append([]T{}, spec.consumed...)
-		}
-	}()
-
-	runOpts := spec.runOpts
+func (l *TurnLoop[T]) setupBridgeStore(spec *turnRunSpec[T], runOpts []AgentRunOption) ([]AgentRunOption, string, *bridgeStore, error) {
 	store := l.config.Store
 	o := getCommonOptions(nil, runOpts...)
 	checkPointID := ""
@@ -983,10 +971,10 @@ func (l *TurnLoop[T]) runAgentAndHandleEvents(
 	}
 	var ms *bridgeStore
 	if spec.isResume && checkPointID == "" {
-		return fmt.Errorf("resume checkpointID is empty")
+		return nil, "", nil, fmt.Errorf("resume checkpointID is empty")
 	}
 	if store == nil && spec.isResume {
-		return fmt.Errorf("failed to resume agent: %w", ErrCheckpointStoreNil)
+		return nil, "", nil, fmt.Errorf("failed to resume agent: %w", ErrCheckpointStoreNil)
 	}
 	if store != nil {
 		if checkPointID == "" {
@@ -998,14 +986,82 @@ func (l *TurnLoop[T]) runAgentAndHandleEvents(
 		}
 		if spec.isResume {
 			if len(spec.resumeBytes) == 0 {
-				return fmt.Errorf("resume checkpoint is empty")
+				return nil, "", nil, fmt.Errorf("resume checkpoint is empty")
 			}
 			ms = newResumeBridgeStore(checkPointID, spec.resumeBytes)
 		} else {
 			ms = newBridgeStore()
 		}
 	}
+	return runOpts, checkPointID, ms, nil
+}
 
+func (l *TurnLoop[T]) watchPreemptSignal(done <-chan struct{}, agentCancelFunc AgentCancelFunc, preemptDone chan struct{}) {
+	var lastGen uint64
+	for {
+		select {
+		case <-done:
+			return
+		case <-l.preemptSig.notify:
+			if preempted, gen, opts, ackList := l.preemptSig.check(); preempted {
+				if gen != lastGen {
+					firstPreempt := lastGen == 0
+					lastGen = gen
+					// CancelHandle is intentionally not awaited here: agentCancelFunc commits the cancel signal synchronously,
+					// while waiting would block until the turn finishes and can deadlock this watcher against the done signal.
+					_, contributed := agentCancelFunc(opts...)
+					if firstPreempt && contributed {
+						close(preemptDone)
+					}
+					for _, ack := range ackList {
+						close(ack)
+					}
+				}
+			}
+		}
+	}
+}
+
+func (l *TurnLoop[T]) watchStopSignal(done <-chan struct{}, agentCancelFunc AgentCancelFunc, stoppedDone chan struct{}) {
+	var lastGen uint64
+	stoppedClosed := false
+	for {
+		select {
+		case <-done:
+			return
+		case <-l.stopSig.getNotifyChan():
+			gen, opts := l.stopSig.check()
+			if gen != lastGen {
+				lastGen = gen
+				// CancelHandle is intentionally not awaited here: agentCancelFunc commits the cancel signal synchronously,
+				// while waiting would block until the turn finishes and can deadlock this watcher against the done signal.
+				_, contributed := agentCancelFunc(opts...)
+				if contributed && !stoppedClosed {
+					close(stoppedDone)
+					stoppedClosed = true
+				}
+			}
+		}
+	}
+}
+
+func (l *TurnLoop[T]) runAgentAndHandleEvents(
+	ctx context.Context,
+	agent Agent,
+	spec *turnRunSpec[T],
+) error {
+	var iter *AsyncIterator[*AgentEvent]
+	defer func() {
+		if l.stopSig.isStopped() && len(l.canceledItems) == 0 {
+			l.canceledItems = append([]T{}, spec.consumed...)
+		}
+	}()
+
+	runOpts, checkPointID, ms, err := l.setupBridgeStore(spec, spec.runOpts)
+	if err != nil {
+		return err
+	}
+	store := l.config.Store
 	cancelOpt, agentCancelFunc := WithCancel()
 	runOpts = append(runOpts, cancelOpt)
 
@@ -1059,53 +1115,8 @@ func (l *TurnLoop[T]) runAgentAndHandleEvents(
 		}()
 		handleErr = handleEvents()
 	}()
-	go func() {
-		var lastGen uint64
-		for {
-			select {
-			case <-done:
-				return
-			case <-l.preemptSig.notify:
-				if preempted, gen, opts, ackList := l.preemptSig.check(); preempted {
-					if gen != lastGen {
-						firstPreempt := lastGen == 0
-						lastGen = gen
-						// CancelHandle is intentionally not awaited here: agentCancelFunc commits the cancel signal synchronously,
-						// while waiting would block until the turn finishes and can deadlock this watcher against the done signal.
-						_, contributed := agentCancelFunc(opts...)
-						if firstPreempt && contributed {
-							close(preemptDone)
-						}
-						for _, ack := range ackList {
-							close(ack)
-						}
-					}
-				}
-			}
-		}
-	}()
-	go func() {
-		var lastGen uint64
-		stoppedClosed := false
-		for {
-			select {
-			case <-done:
-				return
-			case <-l.stopSig.getNotifyChan():
-				gen, opts := l.stopSig.check()
-				if gen != lastGen {
-					lastGen = gen
-					// CancelHandle is intentionally not awaited here: agentCancelFunc commits the cancel signal synchronously,
-					// while waiting would block until the turn finishes and can deadlock this watcher against the done signal.
-					_, contributed := agentCancelFunc(opts...)
-					if contributed && !stoppedClosed {
-						close(stoppedDone)
-						stoppedClosed = true
-					}
-				}
-			}
-		}
-	}()
+	go l.watchPreemptSignal(done, agentCancelFunc, preemptDone)
+	go l.watchStopSignal(done, agentCancelFunc, stoppedDone)
 
 	finalizeCheckpoint := func() error {
 		if store != nil && ms != nil {
