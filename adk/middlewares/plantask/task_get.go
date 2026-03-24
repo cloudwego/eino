@@ -61,8 +61,8 @@ type taskGetArgs struct {
 }
 
 func (t *taskGetTool) InvokableRun(ctx context.Context, argumentsInJSON string, opts ...tool.Option) (string, error) {
-	t.mw.taskLock.Lock()
-	defer t.mw.taskLock.Unlock()
+	t.mw.lockTasks()
+	defer t.mw.unlockTasks()
 
 	params := &taskGetArgs{}
 	err := sonic.UnmarshalString(argumentsInJSON, params)
@@ -74,8 +74,13 @@ func (t *taskGetTool) InvokableRun(ctx context.Context, argumentsInJSON string, 
 		return "", fmt.Errorf("%s validate task ID failed, err: invalid format: %s", TaskGetToolName, params.TaskID)
 	}
 
+	baseDir, err := t.mw.resolveBaseDirOrError(ctx)
+	if err != nil {
+		return "", err
+	}
+
 	taskFileName := fmt.Sprintf("%s.json", params.TaskID)
-	taskFilePath := filepath.Join(t.mw.resolveBaseDir(ctx), taskFileName)
+	taskFilePath := filepath.Join(baseDir, taskFileName)
 
 	content, err := t.mw.backend.Read(ctx, &ReadRequest{
 		FilePath: taskFilePath,

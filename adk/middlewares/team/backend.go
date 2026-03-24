@@ -93,7 +93,15 @@ func listJSONFiles(ctx context.Context, backend Backend, dir string) ([]string, 
 
 // ensureDir creates a directory at the given path.
 func ensureDir(ctx context.Context, backend Backend, dir string) error {
-	err := backend.Mkdir(ctx, dir)
+	exists, err := backend.Exists(ctx, dir)
+	if err != nil {
+		return fmt.Errorf("check dir %q exists: %w", dir, err)
+	}
+	if exists {
+		return nil
+	}
+
+	err = backend.Mkdir(ctx, dir)
 	if err != nil {
 		return fmt.Errorf("create dir %q: %w", dir, err)
 	}

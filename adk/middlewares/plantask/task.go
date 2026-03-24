@@ -19,6 +19,7 @@ package plantask
 import (
 	"context"
 	"regexp"
+	"strconv"
 
 	"github.com/cloudwego/eino/adk/middlewares/filesystem"
 )
@@ -81,6 +82,26 @@ type Backend interface {
 
 func isValidTaskID(taskID string) bool {
 	return validTaskIDRegex.MatchString(taskID)
+}
+
+func isValidTaskStatus(status string) bool {
+	switch status {
+	case taskStatusPending, taskStatusInProgress, taskStatusCompleted, taskStatusDeleted:
+		return true
+	default:
+		return false
+	}
+}
+
+func taskIDInt(taskID string) (int64, bool) {
+	if !isValidTaskID(taskID) {
+		return 0, false
+	}
+	val, err := strconv.ParseInt(taskID, 10, 64)
+	if err != nil {
+		return 0, false
+	}
+	return val, true
 }
 
 // isInternalTask returns true if the task is marked as system-internal.

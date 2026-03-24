@@ -18,13 +18,19 @@ package team
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"strings"
+
+	"github.com/cloudwego/eino/adk/middlewares/plantask"
 )
 
 func (mw *teamMiddleware) configStore() *teamConfigStore {
-	return newTeamConfigStoreFromConfig(mw.conf.TeamConfig)
+	mw.configStoreOnce.Do(func() {
+		mw.configStoreInst = newTeamConfigStoreFromConfig(mw.conf.TeamConfig)
+	})
+	return mw.configStoreInst
 }
 
 func (mw *teamMiddleware) mailbox(teamName, ownerName string) *mailbox {
@@ -41,6 +47,20 @@ func (mw *teamMiddleware) inboxPath(teamName, agentName string) string {
 
 func (mw *teamMiddleware) registerTeammateRuntime(name string, result *spawnResult) {
 	mw.teammates.Store(name, result)
+}
+
+// activeTeammateCount returns number of active teammate runtimes.
+// It does not count the leader (leader is not stored in mw.teammates).
+func (mw *teamMiddleware) activeTeammateCount() int {
+	count := 0
+	mw.teammates.Range(func(key, value any) bool {
+		name, _ := key.(string)
+		if name != "" {
+			count++
+		}
+		return true
+	})
+	return count
 }
 
 func (mw *teamMiddleware) startTeammateRunner(parentCtx context.Context,
@@ -75,6 +95,9 @@ func (mw *teamMiddleware) stopTeammateRuntime(ctx context.Context, teamName, mem
 	if mw.router != nil {
 		mw.router.UnsetMailbox(memberName)
 	}
+	if memberName != "" {
+		_ = mw.conf.TeamConfig.Backend.Delete(ctx, &DeleteRequest{FilePath: mw.inboxPath(teamName, memberName)})
+	}
 }
 
 func (mw *teamMiddleware) cleanupExitedTeammate(ctx context.Context, teamName, memberName string) {
@@ -92,7 +115,7 @@ func (mw *teamMiddleware) removeTeammate(ctx context.Context, teamName, memberNa
 	mw.stopTeammateRuntime(ctx, teamName, memberName)
 
 	unassigned, err := cm.UnassignMemberTasks(ctx, teamName, memberName)
-	if err != nil {
+	if err != nil && !errors.As(err, new(*plantask.TaskParseErrors)) {
 		return nil, fmt.Errorf("unassign tasks for %q: %w", memberName, err)
 	}
 

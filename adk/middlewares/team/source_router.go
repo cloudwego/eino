@@ -19,6 +19,7 @@ package team
 import (
 	"context"
 	"errors"
+	"log"
 	"sync"
 
 	"github.com/cloudwego/eino/adk"
@@ -33,22 +34,64 @@ import (
 type sourceRouter struct {
 	upstream     adk.MessageSource[TurnInput]
 	defaultAgent string
+	bufferLimit  int
+	dropHandler  func(agentName string, dropped int, limit int)
 
-	mu        sync.Mutex // protects buffers, closed, and mailboxes
-	readMu    sync.Mutex // serializes upstream reads (only one reader at a time)
+	mu        sync.RWMutex // protects buffers, closed, and mailboxes
+	readMu    sync.Mutex   // serializes upstream reads (only one reader at a time)
 	buffers   map[string][]TurnInput
+	dropped   map[string]int
 	mailboxes map[string]*MailboxMessageSource // dynamically attached mailboxes
 	closed    bool
 }
 
 // newSourceRouter creates a pull-based sourceRouter.
 func newSourceRouter(upstream adk.MessageSource[TurnInput], defaultAgent string) *sourceRouter {
-	return &sourceRouter{
+	r := &sourceRouter{
 		upstream:     upstream,
 		defaultAgent: defaultAgent,
 		buffers:      make(map[string][]TurnInput),
+		dropped:      make(map[string]int),
 		mailboxes:    make(map[string]*MailboxMessageSource),
 	}
+	r.dropHandler = func(agentName string, dropped int, limit int) {
+		if dropped <= 0 {
+			return
+		}
+		total := r.dropped[agentName]
+		buffered := limit + dropped
+		log.Printf("team sourceRouter: buffer overflow for agent=%s, dropping %d messages (limit=%d, buffered=%d, total_dropped=%d)", agentName, dropped, limit, buffered, total)
+	}
+	return r
+}
+
+// SetBufferLimit sets the per-agent buffer limit. Set to <= 0 for unlimited.
+func (r *sourceRouter) SetBufferLimit(limit int) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if limit <= 0 {
+		r.bufferLimit = 0
+		return
+	}
+	r.bufferLimit = limit
+	for name, buf := range r.buffers {
+		r.buffers[name] = r.trimBufferLocked(name, buf)
+	}
+}
+
+// SetDropHandler sets a callback invoked when the buffer overflows and drops messages.
+// Set to nil to disable drop notifications.
+func (r *sourceRouter) SetDropHandler(handler func(agentName string, dropped int, limit int)) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.dropHandler = handler
+}
+
+// DroppedCount returns the total dropped message count for the given agent.
+func (r *sourceRouter) DroppedCount(agentName string) int {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.dropped[agentName]
 }
 
 // SourceFor returns a MessageSource for the given agent.
@@ -83,8 +126,8 @@ func (r *sourceRouter) UnsetMailbox(agentName string) {
 
 // getMailbox returns the mailbox for the given agent, or nil if none is set.
 func (r *sourceRouter) getMailbox(agentName string) *MailboxMessageSource {
-	r.mu.Lock()
-	defer r.mu.Unlock()
+	r.mu.RLock()
+	defer r.mu.RUnlock()
 	return r.mailboxes[agentName]
 }
 
@@ -99,6 +142,24 @@ func (r *sourceRouter) enqueueForLocked(agentName string, item TurnInput) {
 		r.buffers[agentName] = nil
 	}
 	r.buffers[agentName] = append(r.buffers[agentName], item)
+	r.buffers[agentName] = r.trimBufferLocked(agentName, r.buffers[agentName])
+}
+
+func (r *sourceRouter) trimBufferLocked(agentName string, buf []TurnInput) []TurnInput {
+	if r.bufferLimit <= 0 {
+		return buf
+	}
+	if len(buf) <= r.bufferLimit {
+		return buf
+	}
+	dropped := len(buf) - r.bufferLimit
+	if dropped > 0 {
+		r.dropped[agentName] += dropped
+		if r.dropHandler != nil {
+			r.dropHandler(agentName, dropped, r.bufferLimit)
+		}
+	}
+	return buf[len(buf)-r.bufferLimit:]
 }
 
 func (r *sourceRouter) popBufferedOrClosedLocked(agentName string) (TurnInput, bool, error) {
@@ -121,6 +182,7 @@ func (r *sourceRouter) routeItemLocked(item TurnInput) {
 
 	if _, ok := r.buffers[target]; ok {
 		r.buffers[target] = append(r.buffers[target], item)
+		r.buffers[target] = r.trimBufferLocked(target, r.buffers[target])
 		return
 	}
 
@@ -234,40 +296,43 @@ type receiveResult struct {
 	err    error
 }
 
+func (s *routerAgentSource) asyncReceive(ctx context.Context,
+	source string,
+	receiveFn func(context.Context) (context.Context, TurnInput, []adk.ConsumeOption, error),
+	results chan<- receiveResult) {
+
+	safeGo(func() {
+		nCtx, item, opts, err := receiveFn(ctx)
+		results <- receiveResult{
+			source: source,
+			ctx:    nCtx,
+			item:   item,
+			opts:   opts,
+			err:    err,
+		}
+	})
+}
+
 func (s *routerAgentSource) receiveFromMailboxOrUpstream(ctx context.Context,
 	cfg adk.ReceiveConfig, mailbox *MailboxMessageSource) (context.Context, TurnInput, []adk.ConsumeOption, error) {
 
 	childCtx, cancel := context.WithCancel(ctx)
 	results := make(chan receiveResult, 2)
 
-	safeGo(func() {
-		nCtx, item, opts, err := mailbox.Receive(childCtx, cfg)
-		results <- receiveResult{
-			source: "mailbox",
-			ctx:    nCtx,
-			item:   item,
-			opts:   opts,
-			err:    err,
-		}
-	})
+	s.asyncReceive(childCtx, "mailbox", func(rc context.Context) (context.Context, TurnInput, []adk.ConsumeOption, error) {
+		return mailbox.Receive(rc, cfg)
+	}, results)
 
-	safeGo(func() {
-		nCtx, item, opts, err := s.router.receiveFor(childCtx, s.agentName)
-		results <- receiveResult{
-			source: "upstream",
-			ctx:    nCtx,
-			item:   item,
-			opts:   opts,
-			err:    err,
-		}
-	})
+	s.asyncReceive(childCtx, "upstream", func(rc context.Context) (context.Context, TurnInput, []adk.ConsumeOption, error) {
+		return s.router.receiveFor(rc, s.agentName)
+	}, results)
 
 	first := <-results
 	cancel()
 
 	safeGo(func() {
 		second := <-results
-		if second.err == nil {
+		if first.err == nil && second.err == nil {
 			second.item.TargetAgent = s.agentName
 			s.router.enqueueFor(s.agentName, second.item)
 		}

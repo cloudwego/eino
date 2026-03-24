@@ -18,6 +18,7 @@ package plantask
 
 import (
 	"context"
+	"sync"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -80,7 +81,12 @@ func TestMiddlewareBeforeAgent(t *testing.T) {
 }
 
 func testMiddleware(backend Backend, baseDir string) *middleware {
-	return &middleware{backend: backend, baseDir: baseDir}
+	return &middleware{
+		backend:     backend,
+		baseDir:     baseDir,
+		taskLock:    &sync.Mutex{},
+		autoCleanup: true,
+	}
 }
 
 func TestIntegration(t *testing.T) {

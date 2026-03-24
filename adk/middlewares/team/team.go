@@ -19,6 +19,7 @@ package team
 import (
 	"context"
 	"sync"
+	"time"
 
 	"github.com/cloudwego/eino/adk"
 	"github.com/cloudwego/eino/adk/middlewares/plantask"
@@ -37,6 +38,22 @@ type Config struct {
 	// InboxLocks is the shared lock manager for inbox file access.
 	// Initialized automatically by NewRunner if nil.
 	InboxLocks *inboxLockManager
+
+	// TaskLock is the shared lock for task operations across team members.
+	// Initialized automatically by NewRunner if nil.
+	TaskLock *sync.Mutex
+
+	// MailboxPollInterval controls how often file mailboxes are polled when idle.
+	// Default is 500ms (same as previous behavior).
+	MailboxPollInterval time.Duration
+
+	// MailboxMaxMessages limits the max number of messages per inbox file.
+	// Default is 1000 (same as previous behavior). Set to <= 0 to disable trimming.
+	MailboxMaxMessages int
+
+	// IdleNotifyInterval controls teammate idle notification cadence.
+	// Default is 2s (same as previous behavior). Set negative to disable idle notifications.
+	IdleNotifyInterval time.Duration
 }
 
 func newTeamLeadMiddleware(conf *RunnerConfig) *teamMiddleware {
@@ -68,6 +85,9 @@ type teamMiddleware struct {
 	teamName  string              // set at creation for teammates; set by TeamCreate for leader
 	router    *sourceRouter       // set by NewRunner, used by agentTool for teammate sources
 	ptMW      plantask.Middleware // plantask middleware instance, used for locked task operations
+
+	configStoreOnce sync.Once
+	configStoreInst *teamConfigStore
 }
 
 // BeforeAgent injects team tools before each agent run.

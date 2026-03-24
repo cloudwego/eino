@@ -19,6 +19,7 @@ package plantask
 import (
 	"context"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/bytedance/sonic"
@@ -55,4 +56,38 @@ func TestTaskListTool(t *testing.T) {
 	assert.Contains(t, result, "[blocked by #2]")
 	assert.Contains(t, result, "#2 ["+taskStatusInProgress+"] Task 2")
 	assert.Contains(t, result, "[owner: agent1]")
+}
+
+func TestTaskListToolSortsNumericallyAndHidesInternalTasks(t *testing.T) {
+	ctx := context.Background()
+	backend := newInMemoryBackend()
+	baseDir := "/tmp/tasks"
+
+	tool := newTaskListTool(testMiddleware(backend, baseDir))
+
+	task10 := &task{ID: "10", Subject: "Task 10", Status: taskStatusPending}
+	task10JSON, _ := sonic.MarshalString(task10)
+	_ = backend.Write(ctx, &WriteRequest{FilePath: filepath.Join(baseDir, "10.json"), Content: task10JSON})
+
+	task2 := &task{ID: "2", Subject: "Task 2", Status: taskStatusPending}
+	task2JSON, _ := sonic.MarshalString(task2)
+	_ = backend.Write(ctx, &WriteRequest{FilePath: filepath.Join(baseDir, "2.json"), Content: task2JSON})
+
+	internalTask := &task{
+		ID:      "3",
+		Subject: "Internal Task",
+		Status:  taskStatusInProgress,
+		Metadata: map[string]any{
+			MetadataKeyInternal: true,
+		},
+	}
+	internalTaskJSON, _ := sonic.MarshalString(internalTask)
+	_ = backend.Write(ctx, &WriteRequest{FilePath: filepath.Join(baseDir, "3.json"), Content: internalTaskJSON})
+
+	result, err := tool.InvokableRun(ctx, `{}`)
+	assert.NoError(t, err)
+	assert.Contains(t, result, "#2 ["+taskStatusPending+"] Task 2")
+	assert.Contains(t, result, "#10 ["+taskStatusPending+"] Task 10")
+	assert.NotContains(t, result, "Internal Task")
+	assert.Less(t, strings.Index(result, "#2 ["), strings.Index(result, "#10 ["))
 }

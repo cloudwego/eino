@@ -202,11 +202,16 @@
     },
     {
         "name": "TeamDelete",
-        "description": "# TeamDelete\n\nRemove team and task directories when the swarm work is complete.\n\nThis operation:\n- Removes the team directory (`~/.claude/teams/{team-name}/`)\n- Removes the task directory (`~/.claude/tasks/{team-name}/`)\n- Clears team context from the current session\n\n**IMPORTANT**: TeamDelete will fail if the team still has active members. Gracefully terminate teammates first, then call TeamDelete after all teammates have shut down.\n\nUse this when all teammates have finished their work and you want to clean up the team resources. The team name is automatically determined from the current session's team context.",
+        "description": "# TeamDelete\n\nRemove team and task directories when the swarm work is complete.\n\nThis operation:\n- Removes the team directory (`~/.claude/teams/{team-name}/`)\n- Removes the task directory (`~/.claude/tasks/{team-name}/`)\n- Clears team context from the current session\n\n**IMPORTANT**: TeamDelete will fail if the team still has active members. Gracefully terminate teammates first, then call TeamDelete after all teammates have shut down.\n\nIf you need to force cleanup (e.g. crashed teammates), set `force: true` to skip active checks and attempt cleanup.\n\nUse this when all teammates have finished their work and you want to clean up the team resources. The team name is automatically determined from the current session's team context.",
         "input_schema": {
             "$schema": "https://json-schema.org/draft/2020-12/schema",
             "type": "object",
-            "properties": {},
+            "properties": {
+                "force": {
+                    "type": "boolean",
+                    "description": "Force cleanup even if active teammates exist"
+                }
+            },
             "additionalProperties": false
         }
     },

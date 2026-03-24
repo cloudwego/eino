@@ -151,6 +151,13 @@ func (m *middleware) BeforeModelRewriteState(ctx context.Context, state *adk.Cha
 		return ctx, state, nil
 	}
 
+	// Team not initialized yet (resolver returns empty) — skip reminders
+	if m.taskBaseDirResolver != nil {
+		if dir := m.taskBaseDirResolver(ctx); dir == "" {
+			return ctx, state, nil
+		}
+	}
+
 	// Must have messages and TaskUpdate tool available
 	if len(state.Messages) == 0 || !hasTaskUpdateTool(mc.Tools) {
 		return ctx, state, nil
@@ -175,10 +182,14 @@ func (m *middleware) BeforeModelRewriteState(ctx context.Context, state *adk.Cha
 	})
 
 	// Try to append current task list
-	tasks, err := listTasks(ctx, m.backend, m.resolveBaseDir(ctx))
-	if err == nil {
-		tasks = filterVisibleTasks(tasks)
-		reminderText += formatTaskList(tasks)
+	m.lockTasks()
+	defer m.unlockTasks()
+	baseDir, baseDirErr := m.resolveBaseDirOrError(ctx)
+	if baseDirErr == nil {
+		tasks, err := listVisibleTasks(ctx, m.backend, baseDir)
+		if err == nil {
+			reminderText += formatTaskList(tasks)
+		}
 	}
 
 	// Inject reminder as a user message marked with _task_reminder in Extra

@@ -19,6 +19,9 @@ package team
 
 import (
 	"context"
+	"fmt"
+	"regexp"
+	"strings"
 	"sync"
 	"time"
 )
@@ -54,6 +57,7 @@ const (
 // InboxMessage matches Claude Code's inbox JSON format.
 // Each message is stored as an element in a JSON array file per agent.
 type InboxMessage struct {
+	ID        string `json:"id,omitempty"`
 	From      string `json:"from"`
 	To        string `json:"to,omitempty"`
 	Text      string `json:"text"`
@@ -171,4 +175,32 @@ func (m *inboxLockManager) ForInbox(owner string) *sync.RWMutex {
 // makeAgentID returns the agent ID in the format "name@team".
 func makeAgentID(name, teamName string) string {
 	return name + "@" + teamName
+}
+
+const maxTeamNameLength = 64
+
+var validNamePattern = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$`)
+
+func validateTeamName(teamName string) error {
+	return validateName("team_name", teamName)
+}
+
+func validateAgentName(agentName string) error {
+	return validateName("agent_name", agentName)
+}
+
+func validateName(label, value string) error {
+	if strings.TrimSpace(value) == "" {
+		return fmt.Errorf("%s is required", label)
+	}
+	if len(value) > maxTeamNameLength {
+		return fmt.Errorf("%s too long (max %d)", label, maxTeamNameLength)
+	}
+	if strings.Contains(value, "..") || strings.ContainsAny(value, `/\\`) {
+		return fmt.Errorf("%s contains invalid path characters", label)
+	}
+	if !validNamePattern.MatchString(value) {
+		return fmt.Errorf("%s must match %s", label, validNamePattern.String())
+	}
+	return nil
 }

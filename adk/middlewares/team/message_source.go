@@ -21,6 +21,8 @@ import (
 	"encoding/xml"
 	"fmt"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/bytedance/sonic"
 
@@ -43,16 +45,25 @@ type MailboxSourceConfig struct {
 	// It should handle: removing the member from team config, unassigning tasks, cancelling the teammate.
 	// Returns the notification message text for the teammate_terminated system message.
 	OnShutdownApproval func(ctx context.Context, fromName string) (string, error)
+
+	// IdleNotifyInterval controls how often idle notifications are sent when no messages arrive.
+	// Default is 2s; set negative to disable idle notifications.
+	IdleNotifyInterval time.Duration
 }
 
 // MailboxMessageSource adapts a FileMailbox to TurnLoop's MessageSource[TurnInput].
 type MailboxMessageSource struct {
-	mailbox *mailbox
-	conf    *MailboxSourceConfig
+	mailbox      *mailbox
+	conf         *MailboxSourceConfig
+	idleMu       sync.Mutex
+	lastIdleSent time.Time
 }
 
 // NewMailboxMessageSource creates a new MailboxMessageSource.
 func NewMailboxMessageSource(mailbox *mailbox, conf *MailboxSourceConfig) *MailboxMessageSource {
+	if conf != nil && conf.IdleNotifyInterval == 0 {
+		conf.IdleNotifyInterval = 2 * time.Second
+	}
 	return &MailboxMessageSource{
 		mailbox: mailbox,
 		conf:    conf,
@@ -120,7 +131,7 @@ func (s *MailboxMessageSource) tryReceive(ctx context.Context, notifyIdle bool) 
 	}
 	if len(msgs) == 0 {
 		// Teammate: send idle_notification to leader when no messages
-		if notifyIdle && s.conf.Role == teamRoleTeammate {
+		if notifyIdle && s.conf.Role == teamRoleTeammate && s.shouldNotifyIdle() {
 			_ = SendIdleNotification(ctx, s.mailbox, &idleInfo{
 				AgentName: s.conf.OwnerName,
 				Status:    "available",
@@ -132,38 +143,79 @@ func (s *MailboxMessageSource) tryReceive(ctx context.Context, notifyIdle bool) 
 	return s.consumeMessages(ctx, msgs)
 }
 
+func (s *MailboxMessageSource) shouldNotifyIdle() bool {
+	if s.conf == nil {
+		return false
+	}
+	if s.conf.IdleNotifyInterval < 0 {
+		return false
+	}
+
+	interval := s.conf.IdleNotifyInterval
+	if interval == 0 {
+		interval = 2 * time.Second
+	}
+
+	now := time.Now()
+	s.idleMu.Lock()
+	defer s.idleMu.Unlock()
+	if !s.lastIdleSent.IsZero() && now.Sub(s.lastIdleSent) < interval {
+		return false
+	}
+	s.lastIdleSent = now
+	return true
+}
+
 func (s *MailboxMessageSource) consumeMessages(ctx context.Context, msgs []InboxMessage) (TurnInput, bool, error) {
 	if len(msgs) == 0 {
 		return TurnInput{}, false, nil
 	}
 
-	if err := s.mailbox.MarkRead(ctx, msgs); err != nil {
-		return TurnInput{}, false, err
+	var (
+		err        error
+		remaining  = msgs
+		systemMsgs []InboxMessage
+		toMark     []InboxMessage
+	)
+
+	if s.conf.Role == teamRoleLeader && s.conf.OnShutdownApproval != nil {
+		remaining, systemMsgs, toMark, err = s.handleLeaderControlMessages(ctx, msgs)
+		if err != nil {
+			return TurnInput{}, false, err
+		}
+	} else {
+		toMark = msgs
 	}
 
-	var err error
-	msgs, err = s.handleLeaderControlMessages(ctx, msgs)
-	if err != nil {
-		return TurnInput{}, false, err
+	if len(toMark) > 0 {
+		if err := s.mailbox.MarkRead(ctx, toMark); err != nil {
+			return TurnInput{}, false, err
+		}
 	}
-	if len(msgs) == 0 {
+
+	if len(systemMsgs) > 0 {
+		remaining = append(systemMsgs, remaining...)
+	}
+	if len(remaining) == 0 {
 		return TurnInput{}, false, nil
 	}
 
-	return s.buildTurnInput(msgs), true, nil
+	return s.buildTurnInput(remaining), true, nil
 }
 
-func (s *MailboxMessageSource) handleLeaderControlMessages(ctx context.Context, msgs []InboxMessage) ([]InboxMessage, error) {
+func (s *MailboxMessageSource) handleLeaderControlMessages(ctx context.Context, msgs []InboxMessage) ([]InboxMessage, []InboxMessage, []InboxMessage, error) {
 	if s.conf.Role != teamRoleLeader || s.conf.OnShutdownApproval == nil {
-		return msgs, nil
+		return msgs, nil, msgs, nil
 	}
 
 	var remaining []InboxMessage
 	var systemMsgs []InboxMessage
+	var toMark []InboxMessage
 	for _, m := range msgs {
 		payload, err := decodeShutdownApproval(m.Text)
 		if err != nil || payload.Type != string(messageTypeShutdownApproved) {
 			remaining = append(remaining, m)
+			toMark = append(toMark, m)
 			continue
 		}
 
@@ -173,23 +225,30 @@ func (s *MailboxMessageSource) handleLeaderControlMessages(ctx context.Context, 
 		}
 		if fromName == "" || !payload.Approve {
 			remaining = append(remaining, m)
+			toMark = append(toMark, m)
 			continue
 		}
 
 		notifyMsg, err := s.conf.OnShutdownApproval(ctx, fromName)
 		if err != nil {
-			remaining = append(remaining, m)
+			systemMsg, buildErr := buildShutdownFailedSystemMessage(fromName, err)
+			if buildErr != nil {
+				return nil, nil, nil, buildErr
+			}
+			systemMsgs = append(systemMsgs, systemMsg)
+			toMark = append(toMark, m)
 			continue
 		}
 
 		systemMsg, err := buildTeammateTerminatedSystemMessage(notifyMsg)
 		if err != nil {
-			return nil, err
+			return nil, nil, nil, err
 		}
 		systemMsgs = append(systemMsgs, systemMsg)
+		toMark = append(toMark, m)
 	}
 
-	return append(systemMsgs, remaining...), nil
+	return remaining, systemMsgs, toMark, nil
 }
 
 func buildTeammateTerminatedSystemMessage(notifyMsg string) (InboxMessage, error) {
@@ -198,6 +257,25 @@ func buildTeammateTerminatedSystemMessage(notifyMsg string) (InboxMessage, error
 		Message: notifyMsg,
 	}
 	text, err := sonic.MarshalString(terminatedPayload)
+	if err != nil {
+		return InboxMessage{}, err
+	}
+	return InboxMessage{
+		From:      "system",
+		Text:      text,
+		Timestamp: utcNowMillis(),
+	}, nil
+}
+
+func buildShutdownFailedSystemMessage(fromName string, cause error) (InboxMessage, error) {
+	if fromName == "" {
+		fromName = "unknown"
+	}
+	text, err := sonic.MarshalString(map[string]any{
+		"type":  "shutdown_failed",
+		"from":  fromName,
+		"error": cause.Error(),
+	})
 	if err != nil {
 		return InboxMessage{}, err
 	}
@@ -247,7 +325,7 @@ func inboxMessagesToStrings(msgs []InboxMessage) []string {
 		if m.Text == "" {
 			continue
 		}
-		result = append(result, formatTeammateMessageEnvelope(m.From, m.Text, ""))
+		result = append(result, formatTeammateMessageEnvelope(m.From, m.Text, m.Summary))
 	}
 	return result
 }

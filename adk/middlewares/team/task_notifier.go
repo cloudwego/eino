@@ -18,6 +18,7 @@ package team
 
 import (
 	"context"
+	"fmt"
 	"time"
 
 	"github.com/bytedance/sonic"
@@ -42,7 +43,7 @@ func newTaskAssignedNotifier(conf *Config, teamNameFn func() string) func(ctx co
 		mb := newMailboxFromConfig(conf, teamName, senderName)
 		defer mb.Close()
 
-		text, _ := sonic.MarshalString(map[string]any{
+		text, err := sonic.MarshalString(map[string]any{
 			"type":        string(messageTypeTaskAssignment),
 			"taskId":      a.TaskID,
 			"subject":     a.Subject,
@@ -50,6 +51,9 @@ func newTaskAssignedNotifier(conf *Config, teamNameFn func() string) func(ctx co
 			"assignedBy":  senderName,
 			"timestamp":   time.Now().UTC().Format(time.RFC3339),
 		})
+		if err != nil {
+			return fmt.Errorf("marshal task assignment message: %w", err)
+		}
 
 		return mb.Send(ctx, &outboxMessage{
 			To:   a.Owner,

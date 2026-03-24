@@ -19,7 +19,10 @@ package team
 import (
 	"context"
 	"fmt"
+	"log"
 	"path/filepath"
+	"strings"
+	"sync"
 	"time"
 
 	"github.com/bytedance/sonic"
@@ -38,8 +41,14 @@ type mailboxConfig struct {
 	// PollInterval is the fallback polling interval, default 500ms.
 	PollInterval time.Duration
 
+	// MaxInboxMessages limits messages per inbox. Default is 1000. Set <= 0 to disable trimming.
+	MaxInboxMessages int
+
 	// InboxLocks is the shared lock manager for per-inbox file locking.
 	InboxLocks *inboxLockManager
+
+	// TaskLock coordinates task read/write with plantask in team mode.
+	TaskLock *sync.Mutex
 }
 
 // mailbox implements Mailbox using the filesystem backend.
@@ -64,6 +73,9 @@ func newFileMailbox(conf *mailboxConfig) *mailbox {
 	if conf.PollInterval == 0 {
 		conf.PollInterval = 500 * time.Millisecond
 	}
+	if conf.MaxInboxMessages == 0 {
+		conf.MaxInboxMessages = 1000
+	}
 
 	locks := conf.InboxLocks
 	if locks == nil {
@@ -73,17 +85,20 @@ func newFileMailbox(conf *mailboxConfig) *mailbox {
 	return &mailbox{
 		conf:        conf,
 		inboxLocks:  locks,
-		configStore: newTeamConfigStore(conf.Backend, conf.BaseDir, locks.ForInbox("__config__")),
+		configStore: newTeamConfigStore(conf.Backend, conf.BaseDir, locks.ForInbox("__config__"), conf.TaskLock),
 	}
 }
 
 func newMailboxFromConfig(conf *Config, teamName, ownerName string) *mailbox {
 	return newFileMailbox(&mailboxConfig{
-		Backend:    conf.Backend,
-		BaseDir:    conf.BaseDir,
-		TeamName:   teamName,
-		OwnerName:  ownerName,
-		InboxLocks: conf.InboxLocks,
+		Backend:          conf.Backend,
+		BaseDir:          conf.BaseDir,
+		TeamName:         teamName,
+		OwnerName:        ownerName,
+		InboxLocks:       conf.InboxLocks,
+		TaskLock:         conf.TaskLock,
+		PollInterval:     conf.MailboxPollInterval,
+		MaxInboxMessages: conf.MailboxMaxMessages,
 	})
 }
 
@@ -162,6 +177,7 @@ func (m *mailbox) sendToOne(ctx context.Context, to string, msg *outboxMessage) 
 	now := time.Now().UTC().Format("2006-01-02T15:04:05.000Z")
 
 	inboxMsg := InboxMessage{
+		ID:        generateMessageID(m.conf.OwnerName, to),
 		From:      m.conf.OwnerName,
 		To:        to,
 		Text:      msg.Text,
@@ -181,6 +197,15 @@ func (m *mailbox) sendToOne(ctx context.Context, to string, msg *outboxMessage) 
 	}
 
 	msgs = append(msgs, inboxMsg)
+	if limit := m.conf.MaxInboxMessages; limit > 0 && len(msgs) > limit {
+		var removed int
+		msgs, removed = compactInboxMessages(msgs, limit)
+		if len(msgs) > limit {
+			log.Printf("team mailbox: inbox for %s exceeds limit=%d with %d unread messages; retaining unread messages", to, limit, len(msgs)-limit)
+		} else if removed > 0 {
+			log.Printf("team mailbox: compacted inbox for %s by removing %d read messages (limit=%d)", to, removed, limit)
+		}
+	}
 
 	return m.writeInbox(ctx, to, msgs)
 }
@@ -192,19 +217,28 @@ func (m *mailbox) broadcast(ctx context.Context, msg *outboxMessage) error {
 		return fmt.Errorf("read team config for broadcast: %w", err)
 	}
 
+	var failures []string
 	for _, member := range config.Members {
 		if member.Name == m.conf.OwnerName {
 			continue
 		}
 		if err := m.sendToOne(ctx, member.Name, msg); err != nil {
-			return fmt.Errorf("broadcast to %s: %w", member.Name, err)
+			failures = append(failures, fmt.Sprintf("%s: %v", member.Name, err))
 		}
+	}
+	if len(failures) > 0 {
+		return fmt.Errorf("broadcast failures: %s", strings.Join(failures, "; "))
 	}
 	return nil
 }
 
 // ReadUnread returns all unread messages from this agent's inbox file.
+// Use write lock to avoid reading partial writes on non-atomic backends.
 func (m *mailbox) ReadUnread(ctx context.Context) ([]InboxMessage, error) {
+	lock := m.inboxLocks.ForInbox(m.conf.OwnerName)
+	lock.Lock()
+	defer lock.Unlock()
+
 	all, err := m.readInbox(ctx, m.conf.OwnerName)
 	if err != nil {
 		return nil, fmt.Errorf("read inbox: %w", err)
@@ -226,9 +260,14 @@ func (m *mailbox) MarkRead(ctx context.Context, msgs []InboxMessage) error {
 		return nil
 	}
 
-	toMark := make(map[inboxMessageKey]bool, len(msgs))
+	toMarkIDs := make(map[string]bool, len(msgs))
+	toMarkFallback := make(map[inboxMessageKey]bool, len(msgs))
 	for _, msg := range msgs {
-		toMark[mailboxMessageKey(msg)] = true
+		if msg.ID != "" {
+			toMarkIDs[msg.ID] = true
+			continue
+		}
+		toMarkFallback[mailboxMessageKey(msg)] = true
 	}
 
 	// Use per-owner lock: MarkRead modifies the owner's own inbox file.
@@ -243,7 +282,18 @@ func (m *mailbox) MarkRead(ctx context.Context, msgs []InboxMessage) error {
 
 	changed := false
 	for i := range all {
-		if !all[i].Read && toMark[mailboxMessageKey(all[i])] {
+		if all[i].Read {
+			continue
+		}
+		if all[i].ID != "" {
+			if !toMarkIDs[all[i].ID] {
+				continue
+			}
+			all[i].Read = true
+			changed = true
+			continue
+		}
+		if toMarkFallback[mailboxMessageKey(all[i])] {
 			all[i].Read = true
 			changed = true
 		}
@@ -251,6 +301,16 @@ func (m *mailbox) MarkRead(ctx context.Context, msgs []InboxMessage) error {
 
 	if !changed {
 		return nil
+	}
+
+	if limit := m.conf.MaxInboxMessages; limit > 0 && len(all) > limit {
+		var removed int
+		all, removed = compactInboxMessages(all, limit)
+		if len(all) > limit {
+			log.Printf("team mailbox: inbox for %s exceeds limit=%d with %d unread messages; retaining unread messages", m.conf.OwnerName, limit, len(all)-limit)
+		} else if removed > 0 {
+			log.Printf("team mailbox: compacted inbox for %s by removing %d read messages (limit=%d)", m.conf.OwnerName, removed, limit)
+		}
 	}
 
 	return m.writeInbox(ctx, m.conf.OwnerName, all)
@@ -264,6 +324,10 @@ func mailboxMessageKey(msg InboxMessage) inboxMessageKey {
 		summary: msg.Summary,
 		ts:      msg.Timestamp,
 	}
+}
+
+func generateMessageID(from, to string) string {
+	return fmt.Sprintf("%d-%s-%s", time.Now().UnixNano(), from, to)
 }
 
 // WaitForMessages blocks until new messages arrive or context is cancelled.
@@ -280,11 +344,18 @@ func (m *mailbox) WaitForMessages(ctx context.Context) ([]InboxMessage, error) {
 		return nil, err
 	}
 
+	interval := m.conf.PollInterval
+	if interval <= 0 {
+		interval = 500 * time.Millisecond
+	}
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
 	for {
 		select {
 		case <-ctx.Done():
 			return nil, ctx.Err()
-		case <-time.After(m.conf.PollInterval):
+		case <-ticker.C:
 			// poll filesystem for new messages
 		}
 
@@ -294,6 +365,31 @@ func (m *mailbox) WaitForMessages(ctx context.Context) ([]InboxMessage, error) {
 			return msgs, nil
 		}
 	}
+}
+
+// compactInboxMessages drops the oldest read messages to keep inbox size bounded.
+// Unread messages are never dropped.
+func compactInboxMessages(msgs []InboxMessage, max int) ([]InboxMessage, int) {
+	if max <= 0 || len(msgs) <= max {
+		return msgs, 0
+	}
+
+	drop := len(msgs) - max
+	if drop <= 0 {
+		return msgs, 0
+	}
+
+	compacted := make([]InboxMessage, 0, len(msgs)-drop)
+	removed := 0
+	for _, msg := range msgs {
+		if msg.Read && drop > 0 {
+			drop--
+			removed++
+			continue
+		}
+		compacted = append(compacted, msg)
+	}
+	return compacted, removed
 }
 
 // HasActiveTeammates checks if there are active teammates (excluding team-lead).

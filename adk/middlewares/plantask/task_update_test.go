@@ -723,3 +723,48 @@ func TestTaskUpdateToolNoDeleteWhenNotAllCompleted(t *testing.T) {
 	_ = sonic.UnmarshalString(content1, &updatedTask1)
 	assert.Equal(t, taskStatusCompleted, updatedTask1.Status)
 }
+
+func TestTaskUpdateToolRejectsInvalidStatus(t *testing.T) {
+	ctx := context.Background()
+	backend := newInMemoryBackend()
+	baseDir := "/tmp/tasks"
+
+	taskData := &task{
+		ID:          "1",
+		Subject:     "Test Task",
+		Description: "Test description",
+		Status:      taskStatusPending,
+	}
+	taskJSON, _ := sonic.MarshalString(taskData)
+	_ = backend.Write(ctx, &WriteRequest{FilePath: filepath.Join(baseDir, "1.json"), Content: taskJSON})
+
+	tool := newTaskUpdateTool(testMiddleware(backend, baseDir))
+
+	_, err := tool.InvokableRun(ctx, `{"taskId": "1", "status": "paused"}`)
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "invalid task status")
+}
+
+func TestTaskUpdateToolOwnerValidatorRejectsInvalidOwner(t *testing.T) {
+	ctx := context.Background()
+	backend := newInMemoryBackend()
+	baseDir := "/tmp/tasks"
+
+	taskData := &task{
+		ID:          "1",
+		Subject:     "Test Task",
+		Description: "Test description",
+		Status:      taskStatusPending,
+	}
+	taskJSON, _ := sonic.MarshalString(taskData)
+	_ = backend.Write(ctx, &WriteRequest{FilePath: filepath.Join(baseDir, "1.json"), Content: taskJSON})
+
+	mw := testMiddleware(backend, baseDir)
+	mw.ownerValidator = func(context.Context, string) error {
+		return assert.AnError
+	}
+	tool := newTaskUpdateTool(mw)
+
+	_, err := tool.InvokableRun(ctx, `{"taskId": "1", "owner": "agent1"}`)
+	assert.ErrorIs(t, err, assert.AnError)
+}

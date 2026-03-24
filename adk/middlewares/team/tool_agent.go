@@ -19,6 +19,7 @@ package team
 import (
 	"context"
 	"fmt"
+	"log"
 	"strings"
 	"time"
 
@@ -161,10 +162,18 @@ func (t *agentTool) runBackground(ctx context.Context, args agentToolArgs) (stri
 	if args.Name == "" {
 		args.Name = "agent"
 	}
+	if err := validateAgentName(args.Name); err != nil {
+		return "", err
+	}
 
 	teamName := t.mw.teamName
 	if args.TeamName != "" {
 		teamName = args.TeamName
+	}
+	if teamName != "" {
+		if err := validateTeamName(teamName); err != nil {
+			return "", err
+		}
 	}
 	if teamName == "" {
 		return "", fmt.Errorf("run_in_background requires an active team: %w", errTeamNotFound)
@@ -194,15 +203,9 @@ func (t *agentTool) runBackground(ctx context.Context, args agentToolArgs) (stri
 
 	// Always inject team-aware plantask middleware for teammate, removing any user-provided one.
 	defaultHandlers := []adk.ChatModelAgentMiddleware{tmMW}
-	ptMW, err := plantask.New(ctx, &plantask.Config{
-		Backend: t.mw.conf.TeamConfig.Backend,
-		BaseDir: t.mw.conf.TeamConfig.BaseDir,
-	},
-		plantask.WithTaskAssignedHook(newTaskAssignedNotifier(t.mw.conf.TeamConfig, func() string { return tmMW.teamName })),
-		plantask.WithTaskBaseDirResolver(func(_ context.Context) string {
-			return tasksDirPath(t.mw.conf.TeamConfig.BaseDir, tmMW.teamName)
-		}),
-		plantask.WithAgentNameResolver(func(_ context.Context) string { return tmMW.agentName }),
+	ptMW, err := newTeamPlantaskMiddleware(ctx, t.mw.conf,
+		func() string { return tmMW.teamName },
+		func() string { return tmMW.agentName },
 	)
 	if err != nil {
 		t.mw.cleanupFailedTeammateSpawn(ctx, teamName, args.Name)
@@ -238,14 +241,25 @@ func (t *agentTool) runBackground(ctx context.Context, args agentToolArgs) (stri
 	if len(taskDesc) > 100 {
 		taskDesc = taskDesc[:100]
 	}
-	taskID, createErr := t.mw.ptMW.CreateTask(ctx, &plantask.TaskInput{
-		Subject:     args.Name,
-		Description: taskDesc,
-		Status:      "in_progress",
-		Metadata:    map[string]any{plantask.MetadataKeyInternal: true},
-	})
-	if createErr == nil {
-		localTaskID = taskID
+	var createErr error
+	for attempt := 0; attempt < 3; attempt++ {
+		var taskID string
+		taskID, createErr = t.mw.ptMW.CreateTask(ctx, &plantask.TaskInput{
+			Subject:     args.Name,
+			Description: taskDesc,
+			Status:      "in_progress",
+			Metadata:    map[string]any{plantask.MetadataKeyInternal: true},
+		})
+		if createErr == nil {
+			localTaskID = taskID
+			break
+		}
+		if attempt < 2 {
+			time.Sleep(time.Duration(attempt+1) * 50 * time.Millisecond)
+		}
+	}
+	if createErr != nil {
+		log.Printf("team agent: failed to create _internal task for teammate=%s team=%s: %v", args.Name, teamName, createErr)
 	}
 
 	t.mw.startTeammateRunner(appCtx, teamName, args.Name, &spawnResult{

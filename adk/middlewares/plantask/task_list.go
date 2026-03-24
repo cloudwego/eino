@@ -87,12 +87,29 @@ func listTasks(ctx context.Context, backend Backend, baseDir string) ([]*task, e
 		tasks = append(tasks, taskData)
 	}
 
-	// sort tasks by ID
+	// sort tasks by numeric ID when possible
 	sort.Slice(tasks, func(i, j int) bool {
+		li, okI := taskIDInt(tasks[i].ID)
+		lj, okJ := taskIDInt(tasks[j].ID)
+		if okI && okJ {
+			return li < lj
+		}
+		if okI != okJ {
+			return okI
+		}
 		return tasks[i].ID < tasks[j].ID
 	})
 
 	return tasks, nil
+}
+
+// listVisibleTasks lists tasks and filters out internal tasks.
+func listVisibleTasks(ctx context.Context, backend Backend, baseDir string) ([]*task, error) {
+	tasks, err := listTasks(ctx, backend, baseDir)
+	if err != nil {
+		return nil, err
+	}
+	return filterVisibleTasks(tasks), nil
 }
 
 // filterVisibleTasks removes internal tasks (metadata._internal == true) from the list.
@@ -117,16 +134,18 @@ func filterVisibleTasks(tasks []*task) []*task {
 }
 
 func (t *taskListTool) InvokableRun(ctx context.Context, argumentsInJSON string, opts ...tool.Option) (string, error) {
-	t.mw.taskLock.Lock()
-	defer t.mw.taskLock.Unlock()
+	t.mw.lockTasks()
+	defer t.mw.unlockTasks()
 
-	tasks, err := listTasks(ctx, t.mw.backend, t.mw.resolveBaseDir(ctx))
+	baseDir, err := t.mw.resolveBaseDirOrError(ctx)
 	if err != nil {
 		return "", err
 	}
 
-	// Filter out internal tasks (e.g., teammate shadow tasks)
-	tasks = filterVisibleTasks(tasks)
+	tasks, err := listVisibleTasks(ctx, t.mw.backend, baseDir)
+	if err != nil {
+		return "", err
+	}
 
 	if len(tasks) == 0 {
 		resp := &taskOut{

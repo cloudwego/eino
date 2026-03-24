@@ -19,6 +19,7 @@ package team
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/bytedance/sonic"
@@ -246,6 +247,10 @@ func (t *sendMessageTool) InvokableRun(ctx context.Context, argumentsInJSON stri
 		return "", err
 	}
 
+	if args.Summary == "" && (msgType == messageTypeDM || msgType == messageTypeBroadcast) {
+		args.Summary = buildSummary(args.Content)
+	}
+
 	if validateErr := t.validateArgs(msgType, &args); validateErr != nil {
 		return "", validateErr
 	}
@@ -258,7 +263,10 @@ func (t *sendMessageTool) InvokableRun(ctx context.Context, argumentsInJSON stri
 		return "", validateErr
 	}
 
-	msg := t.buildOutboxMessage(msgType, to, &args)
+	msg, err := t.buildOutboxMessage(msgType, to, &args)
+	if err != nil {
+		return "", err
+	}
 
 	mailbox := t.mw.mailbox(teamName, t.senderName)
 	defer mailbox.Close()
@@ -350,7 +358,7 @@ func (t *sendMessageTool) resolveRecipient(msgType messageType, args *sendMessag
 }
 
 // buildOutboxMessage constructs the outbox message with properly formatted text.
-func (t *sendMessageTool) buildOutboxMessage(msgType messageType, to string, args *sendMessageArgs) *outboxMessage {
+func (t *sendMessageTool) buildOutboxMessage(msgType messageType, to string, args *sendMessageArgs) (*outboxMessage, error) {
 	msg := &outboxMessage{
 		To:   to,
 		Type: msgType,
@@ -365,19 +373,31 @@ func (t *sendMessageTool) buildOutboxMessage(msgType messageType, to string, arg
 
 	case messageTypeShutdownRequest:
 		msg.RequestID = t.shutdownRequestID(to)
-		msg.Text, _ = marshalShutdownRequest(t.senderName, msg.RequestID, args.Content)
+		text, err := marshalShutdownRequest(t.senderName, msg.RequestID, args.Content)
+		if err != nil {
+			return nil, fmt.Errorf("marshal shutdown_request: %w", err)
+		}
+		msg.Text = text
 
 	case messageTypeShutdownApproved:
-		msg.Text, _ = marshalShutdownApproval(t.senderName, args.RequestID, approved, args.Content)
+		text, err := marshalShutdownApproval(t.senderName, args.RequestID, approved, args.Content)
+		if err != nil {
+			return nil, fmt.Errorf("marshal shutdown_approved: %w", err)
+		}
+		msg.Text = text
 
 	case messageTypePlanApprovalResponse:
-		msg.Text, _ = marshalPlanApprovalResponse(t.senderName, args.RequestID, approved, args.Content)
+		text, err := marshalPlanApprovalResponse(t.senderName, args.RequestID, approved, args.Content)
+		if err != nil {
+			return nil, fmt.Errorf("marshal plan_approval_response: %w", err)
+		}
+		msg.Text = text
 
 	default:
 		msg.Text = args.Content
 	}
 
-	return msg
+	return msg, nil
 }
 
 // shutdownRequestID generates a unique ID for a shutdown request.
@@ -431,4 +451,28 @@ func (t *sendMessageTool) buildRoutingResult(target string, args *sendMessageArg
 		"summary": args.Summary,
 		"content": args.Content,
 	}
+}
+
+func buildSummary(content string) string {
+	trimmed := strings.TrimSpace(content)
+	if trimmed == "" {
+		return ""
+	}
+
+	fields := strings.Fields(trimmed)
+	if len(fields) > 10 {
+		fields = fields[:10]
+	}
+	return truncateRunes(strings.Join(fields, " "), 80)
+}
+
+func truncateRunes(value string, limit int) string {
+	if limit <= 0 || value == "" {
+		return ""
+	}
+	runes := []rune(value)
+	if len(runes) <= limit {
+		return value
+	}
+	return string(runes[:limit]) + "…"
 }

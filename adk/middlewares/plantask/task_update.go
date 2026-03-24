@@ -117,8 +117,8 @@ func (t *taskUpdateTool) Info(ctx context.Context) (*schema.ToolInfo, error) {
 }
 
 func (t *taskUpdateTool) InvokableRun(ctx context.Context, argumentsInJSON string, opts ...tool.Option) (string, error) {
-	t.mw.taskLock.Lock()
-	defer t.mw.taskLock.Unlock()
+	t.mw.lockTasks()
+	defer t.mw.unlockTasks()
 
 	params := &taskUpdateArgs{}
 	err := sonic.UnmarshalString(argumentsInJSON, params)
@@ -130,38 +130,82 @@ func (t *taskUpdateTool) InvokableRun(ctx context.Context, argumentsInJSON strin
 		return "", fmt.Errorf("%s validate task ID failed, err: invalid format: %s", TaskUpdateToolName, params.TaskID)
 	}
 
-	taskFileName := fmt.Sprintf("%s.json", params.TaskID)
-	taskFilePath := filepath.Join(t.mw.resolveBaseDir(ctx), taskFileName)
-
-	if params.Status == taskStatusDeleted {
-		if deleteErr := deleteTaskLocked(ctx, t.mw.backend, t.mw.resolveBaseDir(ctx), params.TaskID); deleteErr != nil {
-			return "", fmt.Errorf("%s delete Task #%s failed, err: %w", TaskUpdateToolName, params.TaskID, deleteErr)
-		}
-
-		resp := &taskOut{
-			Result: fmt.Sprintf("Updated task #%s deleted", params.TaskID),
-		}
-		jsonResp, marshalErr := sonic.MarshalString(resp)
-		if marshalErr != nil {
-			return "", fmt.Errorf("%s marshal taskOut failed, err: %w", TaskUpdateToolName, marshalErr)
-		}
-		return jsonResp, nil
+	baseDir, err := t.mw.resolveBaseDirOrError(ctx)
+	if err != nil {
+		return "", err
 	}
 
-	content, err := t.mw.backend.Read(ctx, &ReadRequest{
-		FilePath: taskFilePath,
-	})
+	if params.Status == taskStatusDeleted {
+		return t.handleDelete(ctx, baseDir, params)
+	}
+
+	taskFilePath := filepath.Join(baseDir, fmt.Sprintf("%s.json", params.TaskID))
+	taskData, err := t.readTask(ctx, taskFilePath, params.TaskID)
 	if err != nil {
-		return "", fmt.Errorf("%s read Task #%s failed, err: %w", TaskUpdateToolName, params.TaskID, err)
+		return "", err
+	}
+
+	updatedFields, ownerUpdated, err := t.applyUpdates(ctx, baseDir, params, taskData)
+	if err != nil {
+		return "", err
+	}
+
+	if err := t.writeTask(ctx, taskFilePath, params.TaskID, taskData); err != nil {
+		return "", err
+	}
+
+	notifyErr := t.notifyAssigneeIfNeeded(ctx, params, taskData, ownerUpdated)
+
+	if params.Status == taskStatusCompleted {
+		if checkErr := t.checkIfNeedDeleteAllTasks(ctx, baseDir); checkErr != nil {
+			return "", fmt.Errorf("%s check and delete all tasks failed, err: %w", TaskUpdateToolName, checkErr)
+		}
+	}
+
+	result := fmt.Sprintf("Updated task #%s %s", params.TaskID, strings.Join(updatedFields, ", "))
+	if notifyErr != nil {
+		result = fmt.Sprintf("%s (warning: notify assignee failed: %v)", result, notifyErr)
+	}
+	resp := &taskOut{Result: result}
+
+	jsonResp, err := sonic.MarshalString(resp)
+	if err != nil {
+		return "", fmt.Errorf("%s marshal taskOut failed, err: %w", TaskUpdateToolName, err)
+	}
+
+	return jsonResp, nil
+}
+
+func (t *taskUpdateTool) handleDelete(ctx context.Context, baseDir string, params *taskUpdateArgs) (string, error) {
+	if deleteErr := deleteTaskLocked(ctx, t.mw.backend, baseDir, params.TaskID); deleteErr != nil {
+		return "", fmt.Errorf("%s delete Task #%s failed, err: %w", TaskUpdateToolName, params.TaskID, deleteErr)
+	}
+
+	resp := &taskOut{Result: fmt.Sprintf("Updated task #%s deleted", params.TaskID)}
+	jsonResp, marshalErr := sonic.MarshalString(resp)
+	if marshalErr != nil {
+		return "", fmt.Errorf("%s marshal taskOut failed, err: %w", TaskUpdateToolName, marshalErr)
+	}
+	return jsonResp, nil
+}
+
+func (t *taskUpdateTool) readTask(ctx context.Context, taskFilePath, taskID string) (*task, error) {
+	content, err := t.mw.backend.Read(ctx, &ReadRequest{FilePath: taskFilePath})
+	if err != nil {
+		return nil, fmt.Errorf("%s read Task #%s failed, err: %w", TaskUpdateToolName, taskID, err)
 	}
 
 	taskData := &task{}
-	err = sonic.UnmarshalString(content, taskData)
-	if err != nil {
-		return "", fmt.Errorf("%s parse Task #%s failed, err: %w", TaskUpdateToolName, params.TaskID, err)
+	if err := sonic.UnmarshalString(content, taskData); err != nil {
+		return nil, fmt.Errorf("%s parse Task #%s failed, err: %w", TaskUpdateToolName, taskID, err)
 	}
+	return taskData, nil
+}
 
+func (t *taskUpdateTool) applyUpdates(ctx context.Context, baseDir string, params *taskUpdateArgs, taskData *task) ([]string, bool, error) {
 	var updatedFields []string
+	ownerUpdated := false
+	oldOwner := taskData.Owner
 
 	if params.Subject != "" {
 		taskData.Subject = params.Subject
@@ -176,57 +220,22 @@ func (t *taskUpdateTool) InvokableRun(ctx context.Context, argumentsInJSON strin
 		updatedFields = append(updatedFields, "activeForm")
 	}
 	if params.Status != "" {
+		if !isValidTaskStatus(params.Status) {
+			return nil, false, fmt.Errorf("%s invalid task status: %s", TaskUpdateToolName, params.Status)
+		}
 		taskData.Status = params.Status
 		updatedFields = append(updatedFields, "status")
 	}
-	if len(params.AddBlocks) > 0 || len(params.AddBlockedBy) > 0 {
-		tasks, listErr := listTasks(ctx, t.mw.backend, t.mw.resolveBaseDir(ctx))
-		if listErr != nil {
-			return "", fmt.Errorf("%s list tasks failed, err: %w", TaskUpdateToolName, listErr)
-		}
-		taskMap := make(map[string]*task, len(tasks))
-		for _, tk := range tasks {
-			taskMap[tk.ID] = tk
-		}
-
-		if len(params.AddBlocks) > 0 {
-			for _, blockedTaskID := range params.AddBlocks {
-				if !isValidTaskID(blockedTaskID) {
-					return "", fmt.Errorf("%s validate blocked task ID failed, err: invalid format: %s", TaskUpdateToolName, blockedTaskID)
-				}
-				if hasCyclicDependency(taskMap, params.TaskID, blockedTaskID) {
-					return "", fmt.Errorf("%s adding Task #%s to blocks of Task #%s would create a cyclic dependency", TaskUpdateToolName, blockedTaskID, params.TaskID)
-				}
-			}
-			for _, blockedTaskID := range params.AddBlocks {
-				if addErr := t.addBlockedByToTask(ctx, blockedTaskID, params.TaskID); addErr != nil {
-					return "", fmt.Errorf("%s update Task #%s blocks failed, err: %w", TaskUpdateToolName, params.TaskID, addErr)
-				}
-			}
-			taskData.Blocks = appendUnique(taskData.Blocks, params.AddBlocks...)
-			updatedFields = append(updatedFields, "blocks")
-		}
-		if len(params.AddBlockedBy) > 0 {
-			for _, blockingTaskID := range params.AddBlockedBy {
-				if !isValidTaskID(blockingTaskID) {
-					return "", fmt.Errorf("%s validate blocking task ID failed, err: invalid format: %s", TaskUpdateToolName, blockingTaskID)
-				}
-				if hasCyclicDependency(taskMap, blockingTaskID, params.TaskID) {
-					return "", fmt.Errorf("%s adding Task #%s to blockedBy of Task #%s would create a cyclic dependency", TaskUpdateToolName, blockingTaskID, params.TaskID)
-				}
-			}
-			for _, blockingTaskID := range params.AddBlockedBy {
-				if addErr := t.addBlocksToTask(ctx, blockingTaskID, params.TaskID); addErr != nil {
-					return "", fmt.Errorf("%s update Task #%s blockedBy failed, err: %w", TaskUpdateToolName, params.TaskID, addErr)
-				}
-			}
-			taskData.BlockedBy = appendUnique(taskData.BlockedBy, params.AddBlockedBy...)
-			updatedFields = append(updatedFields, "blockedBy")
-		}
+	if err := t.applyDependencyUpdates(ctx, baseDir, params, taskData, &updatedFields); err != nil {
+		return nil, false, err
 	}
-	if params.Owner != "" {
+	if params.Owner != "" && params.Owner != oldOwner {
+		if validateErr := t.mw.validateOwner(ctx, params.Owner); validateErr != nil {
+			return nil, false, validateErr
+		}
 		taskData.Owner = params.Owner
 		updatedFields = append(updatedFields, "owner")
+		ownerUpdated = true
 	}
 	if params.Metadata != nil {
 		if taskData.Metadata == nil {
@@ -242,81 +251,112 @@ func (t *taskUpdateTool) InvokableRun(ctx context.Context, argumentsInJSON strin
 		updatedFields = append(updatedFields, "metadata")
 	}
 
-	updatedContent, err := sonic.MarshalString(taskData)
-	if err != nil {
-		return "", fmt.Errorf("%s marshal Task #%s failed, err: %w", TaskUpdateToolName, params.TaskID, err)
-	}
-
-	err = t.mw.backend.Write(ctx, &WriteRequest{
-		FilePath: taskFilePath,
-		Content:  updatedContent,
-	})
-	if err != nil {
-		return "", fmt.Errorf("%s write Task #%s failed, err: %w", TaskUpdateToolName, params.TaskID, err)
-	}
-
-	// Notify assignee when owner changes.
-	if params.Owner != "" && t.mw.onTaskAssigned != nil {
-		_ = t.mw.onTaskAssigned(ctx, TaskAssignment{
-			TaskID:      params.TaskID,
-			Subject:     taskData.Subject,
-			Description: taskData.Description,
-			Owner:       params.Owner,
-			AssignedBy:  t.mw.getAgentName(ctx),
-		})
-	}
-
-	if params.Status == taskStatusCompleted {
-		if checkErr := t.checkIfNeedDeleteAllTasks(ctx); checkErr != nil {
-			return "", fmt.Errorf("%s check and delete all tasks failed, err: %w", TaskUpdateToolName, checkErr)
-		}
-	}
-
-	resp := &taskOut{
-		Result: fmt.Sprintf("Updated task #%s %s", params.TaskID, strings.Join(updatedFields, ", ")),
-	}
-
-	jsonResp, err := sonic.MarshalString(resp)
-	if err != nil {
-		return "", fmt.Errorf("%s marshal taskOut failed, err: %w", TaskUpdateToolName, err)
-	}
-
-	return jsonResp, nil
+	return updatedFields, ownerUpdated, nil
 }
 
-func (t *taskUpdateTool) addBlockedByToTask(ctx context.Context, targetTaskID, blockerTaskID string) error {
-	taskFilePath := filepath.Join(t.mw.resolveBaseDir(ctx), fmt.Sprintf("%s.json", targetTaskID))
-
-	content, err := t.mw.backend.Read(ctx, &ReadRequest{FilePath: taskFilePath})
-	if err != nil {
-		return fmt.Errorf("failed to read task #%s for updating blockedBy: %w", targetTaskID, err)
+func (t *taskUpdateTool) applyDependencyUpdates(ctx context.Context, baseDir string, params *taskUpdateArgs, taskData *task, updatedFields *[]string) error {
+	if len(params.AddBlocks) == 0 && len(params.AddBlockedBy) == 0 {
+		return nil
 	}
 
-	targetTask := &task{}
-	if unmarshalErr := sonic.UnmarshalString(content, targetTask); unmarshalErr != nil {
-		return fmt.Errorf("failed to parse task #%s: %w", targetTaskID, unmarshalErr)
+	tasks, listErr := listTasks(ctx, t.mw.backend, baseDir)
+	if listErr != nil {
+		return fmt.Errorf("%s list tasks failed, err: %w", TaskUpdateToolName, listErr)
+	}
+	taskMap := make(map[string]*task, len(tasks))
+	for _, tk := range tasks {
+		taskMap[tk.ID] = tk
 	}
 
-	targetTask.BlockedBy = appendUnique(targetTask.BlockedBy, blockerTaskID)
-
-	updatedContent, err := sonic.MarshalString(targetTask)
-	if err != nil {
-		return fmt.Errorf("failed to marshal task #%s: %w", targetTaskID, err)
+	if len(params.AddBlocks) > 0 {
+		for _, blockedTaskID := range params.AddBlocks {
+			if !isValidTaskID(blockedTaskID) {
+				return fmt.Errorf("%s validate blocked task ID failed, err: invalid format: %s", TaskUpdateToolName, blockedTaskID)
+			}
+			if hasCyclicDependency(taskMap, params.TaskID, blockedTaskID) {
+				return fmt.Errorf("%s adding Task #%s to blocks of Task #%s would create a cyclic dependency", TaskUpdateToolName, blockedTaskID, params.TaskID)
+			}
+		}
+		for _, blockedTaskID := range params.AddBlocks {
+			if addErr := t.addBlockedByToTask(ctx, baseDir, blockedTaskID, params.TaskID); addErr != nil {
+				return fmt.Errorf("%s update Task #%s blocks failed, err: %w", TaskUpdateToolName, params.TaskID, addErr)
+			}
+		}
+		taskData.Blocks = appendUnique(taskData.Blocks, params.AddBlocks...)
+		*updatedFields = append(*updatedFields, "blocks")
 	}
-
-	if err := t.mw.backend.Write(ctx, &WriteRequest{FilePath: taskFilePath, Content: updatedContent}); err != nil {
-		return fmt.Errorf("failed to write task #%s: %w", targetTaskID, err)
+	if len(params.AddBlockedBy) > 0 {
+		for _, blockingTaskID := range params.AddBlockedBy {
+			if !isValidTaskID(blockingTaskID) {
+				return fmt.Errorf("%s validate blocking task ID failed, err: invalid format: %s", TaskUpdateToolName, blockingTaskID)
+			}
+			if hasCyclicDependency(taskMap, blockingTaskID, params.TaskID) {
+				return fmt.Errorf("%s adding Task #%s to blockedBy of Task #%s would create a cyclic dependency", TaskUpdateToolName, blockingTaskID, params.TaskID)
+			}
+		}
+		for _, blockingTaskID := range params.AddBlockedBy {
+			if addErr := t.addBlocksToTask(ctx, baseDir, blockingTaskID, params.TaskID); addErr != nil {
+				return fmt.Errorf("%s update Task #%s blockedBy failed, err: %w", TaskUpdateToolName, params.TaskID, addErr)
+			}
+		}
+		taskData.BlockedBy = appendUnique(taskData.BlockedBy, params.AddBlockedBy...)
+		*updatedFields = append(*updatedFields, "blockedBy")
 	}
 
 	return nil
 }
 
-func (t *taskUpdateTool) addBlocksToTask(ctx context.Context, targetTaskID, blockedTaskID string) error {
-	taskFilePath := filepath.Join(t.mw.resolveBaseDir(ctx), fmt.Sprintf("%s.json", targetTaskID))
+func (t *taskUpdateTool) writeTask(ctx context.Context, taskFilePath, taskID string, taskData *task) error {
+	updatedContent, err := sonic.MarshalString(taskData)
+	if err != nil {
+		return fmt.Errorf("%s marshal Task #%s failed, err: %w", TaskUpdateToolName, taskID, err)
+	}
+
+	if err := t.mw.backend.Write(ctx, &WriteRequest{
+		FilePath: taskFilePath,
+		Content:  updatedContent,
+	}); err != nil {
+		return fmt.Errorf("%s write Task #%s failed, err: %w", TaskUpdateToolName, taskID, err)
+	}
+
+	return nil
+}
+
+func (t *taskUpdateTool) notifyAssigneeIfNeeded(ctx context.Context, params *taskUpdateArgs, taskData *task, ownerUpdated bool) error {
+	if !ownerUpdated || t.mw.onTaskAssigned == nil {
+		return nil
+	}
+	return t.mw.onTaskAssigned(ctx, TaskAssignment{
+		TaskID:      params.TaskID,
+		Subject:     taskData.Subject,
+		Description: taskData.Description,
+		Owner:       taskData.Owner,
+		AssignedBy:  t.mw.getAgentName(ctx),
+	})
+}
+
+func (t *taskUpdateTool) addBlockedByToTask(ctx context.Context, baseDir, targetTaskID, blockerTaskID string) error {
+	return t.updateTaskField(ctx, baseDir, targetTaskID, "blockedBy", func(targetTask *task) bool {
+		before := len(targetTask.BlockedBy)
+		targetTask.BlockedBy = appendUnique(targetTask.BlockedBy, blockerTaskID)
+		return len(targetTask.BlockedBy) != before
+	})
+}
+
+func (t *taskUpdateTool) addBlocksToTask(ctx context.Context, baseDir, targetTaskID, blockedTaskID string) error {
+	return t.updateTaskField(ctx, baseDir, targetTaskID, "blocks", func(targetTask *task) bool {
+		before := len(targetTask.Blocks)
+		targetTask.Blocks = appendUnique(targetTask.Blocks, blockedTaskID)
+		return len(targetTask.Blocks) != before
+	})
+}
+
+func (t *taskUpdateTool) updateTaskField(ctx context.Context, baseDir, targetTaskID, field string, updateFn func(targetTask *task) bool) error {
+	taskFilePath := filepath.Join(baseDir, fmt.Sprintf("%s.json", targetTaskID))
 
 	content, err := t.mw.backend.Read(ctx, &ReadRequest{FilePath: taskFilePath})
 	if err != nil {
-		return fmt.Errorf("failed to read task #%s for updating blocks: %w", targetTaskID, err)
+		return fmt.Errorf("failed to read task #%s for updating %s: %w", targetTaskID, field, err)
 	}
 
 	targetTask := &task{}
@@ -324,7 +364,9 @@ func (t *taskUpdateTool) addBlocksToTask(ctx context.Context, targetTaskID, bloc
 		return fmt.Errorf("failed to parse task #%s: %w", targetTaskID, unmarshalErr)
 	}
 
-	targetTask.Blocks = appendUnique(targetTask.Blocks, blockedTaskID)
+	if !updateFn(targetTask) {
+		return nil
+	}
 
 	updatedContent, err := sonic.MarshalString(targetTask)
 	if err != nil {
@@ -339,8 +381,11 @@ func (t *taskUpdateTool) addBlocksToTask(ctx context.Context, targetTaskID, bloc
 }
 
 // checkIfNeedDeleteAllTasks checks if all tasks are completed, if so, it deletes all tasks
-func (t *taskUpdateTool) checkIfNeedDeleteAllTasks(ctx context.Context) error {
-	tasks, err := listTasks(ctx, t.mw.backend, t.mw.resolveBaseDir(ctx))
+func (t *taskUpdateTool) checkIfNeedDeleteAllTasks(ctx context.Context, baseDir string) error {
+	if !t.mw.autoCleanup {
+		return nil
+	}
+	tasks, err := listTasks(ctx, t.mw.backend, baseDir)
 	if err != nil {
 		return err
 	}
@@ -353,7 +398,7 @@ func (t *taskUpdateTool) checkIfNeedDeleteAllTasks(ctx context.Context) error {
 
 	for _, task := range tasks {
 		err := t.mw.backend.Delete(ctx, &DeleteRequest{
-			FilePath: filepath.Join(t.mw.resolveBaseDir(ctx), task.ID+".json"),
+			FilePath: filepath.Join(baseDir, task.ID+".json"),
 		})
 		if err != nil {
 			return err
@@ -397,7 +442,7 @@ const taskUpdateToolDesc = `Use this tool to update a task in the task list.
 - **subject**: Change the task title (imperative form, e.g., "Run tests")
 - **description**: Change the task description
 - **activeForm**: Present continuous form shown in spinner when in_progress (e.g., "Running tests")
-- **owner**: Change the task owner (agent name)
+- **owner**: Change the task owner (agent name). In team mode, owner must be a valid team member
 - **metadata**: Merge metadata keys into the task (set a key to null to delete it)
 - **addBlocks**: Mark tasks that cannot start until this one completes
 - **addBlockedBy**: Mark tasks that must complete before this one can start
@@ -473,7 +518,7 @@ const taskUpdateToolDescChinese = `使用此工具更新任务列表中的任务
 - **subject**：更改任务标题（使用祈使句形式，例如"运行测试"）
 - **description**：更改任务描述
 - **activeForm**：in_progress 状态时在加载动画中显示的现在进行时形式（例如"正在运行测试"）
-- **owner**：更改任务所有者（代理名称）
+- **owner**：更改任务所有者（代理名称）。团队模式下必须是有效团队成员
 - **metadata**：将元数据键合并到任务中（将键设置为 null 可删除它）
 - **addBlocks**：标记在此任务完成之前无法开始的任务
 - **addBlockedBy**：标记必须在此任务开始之前完成的任务

@@ -86,3 +86,19 @@ func TestTaskCreateToolWithMetadata(t *testing.T) {
 	assert.Equal(t, "value1", taskData.Metadata["key1"])
 	assert.Equal(t, "value2", taskData.Metadata["key2"])
 }
+
+func TestTaskCreateToolFailsBeforeTeamInitialized(t *testing.T) {
+	ctx := context.Background()
+	backend := newInMemoryBackend()
+	baseDir := "/tmp/tasks"
+
+	mw := testMiddleware(backend, baseDir)
+	mw.taskBaseDirResolver = func(context.Context) string {
+		return ""
+	}
+	tool := newTaskCreateTool(mw)
+
+	_, err := tool.InvokableRun(ctx, `{"subject": "Test Task", "description": "Test description"}`)
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "call TeamCreate first")
+}

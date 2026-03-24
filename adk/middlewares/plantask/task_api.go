@@ -104,7 +104,7 @@ func createTaskLocked(ctx context.Context, backend Backend, baseDir string, inpu
 		return "", fmt.Errorf("CreateTask marshal task #%s failed, err: %w", taskIDStr, err)
 	}
 
-	// Write highwatermark first
+	// Write highwatermark first.
 	highwatermarkPath := filepath.Join(baseDir, highWatermarkFileName)
 	if err := backend.Write(ctx, &WriteRequest{
 		FilePath: highwatermarkPath,

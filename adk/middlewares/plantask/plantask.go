@@ -37,9 +37,9 @@ type Config struct {
 type Option func(*middleware)
 
 // WithTaskBaseDirResolver enables team mode with a custom task directory resolver.
-// When set, resolveBaseDir calls this resolver instead of using baseDir directly.
 // The resolver should return the full path to the task storage directory.
-// When nil or returning "", single-agent baseDir is used as fallback.
+// When nil, single-agent baseDir is used. When non-nil but returning "",
+// task operations fail until the team task directory becomes available.
 func WithTaskBaseDirResolver(resolver func(ctx context.Context) string) Option {
 	return func(m *middleware) {
 		m.taskBaseDirResolver = resolver
@@ -63,6 +63,17 @@ func WithTaskAssignedHook(hook func(ctx context.Context, assignment TaskAssignme
 	}
 }
 
+// WithSharedTaskLock provides a shared mutex to coordinate task operations
+// across multiple middleware instances (e.g., in team mode).
+// When nil, a private lock is used.
+func WithSharedTaskLock(lock *sync.Mutex) Option {
+	return func(m *middleware) {
+		if lock != nil {
+			m.taskLock = lock
+		}
+	}
+}
+
 // WithReminder configures task reminder injection. The interval specifies how
 // many assistant turns without TaskCreate/TaskUpdate before a reminder is
 // injected. Set to negative to disable. Default is 10.
@@ -74,6 +85,23 @@ func WithReminder(interval int, onInjected func(ctx context.Context, msg adk.Mes
 	}
 }
 
+// WithAutoCleanup controls whether completed task lists are auto-deleted.
+// Default is true. Set to false to retain completed tasks.
+func WithAutoCleanup(enabled bool) Option {
+	return func(m *middleware) {
+		m.autoCleanup = enabled
+	}
+}
+
+// WithOwnerValidator registers a callback for validating task owner updates.
+// It is called when TaskUpdate sets owner explicitly.
+// Return nil to allow the change, or an error to reject it.
+func WithOwnerValidator(validator func(ctx context.Context, owner string) error) Option {
+	return func(m *middleware) {
+		m.ownerValidator = validator
+	}
+}
+
 // TaskAssignment contains information about a task ownership change.
 type TaskAssignment struct {
 	TaskID      string
@@ -81,6 +109,24 @@ type TaskAssignment struct {
 	Description string
 	Owner       string // new owner (assignee)
 	AssignedBy  string // who set the owner (from context)
+}
+
+// TaskParseError summarizes a failed task JSON parse.
+type TaskParseError struct {
+	FilePath string
+	Err      error
+}
+
+// TaskParseErrors aggregates multiple TaskParseError values.
+type TaskParseErrors struct {
+	Items []TaskParseError
+}
+
+func (e *TaskParseErrors) Error() string {
+	if e == nil || len(e.Items) == 0 {
+		return ""
+	}
+	return fmt.Sprintf("parse %d task file(s) failed", len(e.Items))
 }
 
 // Middleware is a marker interface for identifying plantask middleware instances.
@@ -105,18 +151,28 @@ func (m *middleware) isPlantaskMiddleware() {}
 // CreateTask creates a task with proper locking. It resolves the baseDir from
 // the context (team mode) or falls back to the configured baseDir.
 func (m *middleware) CreateTask(ctx context.Context, input *TaskInput) (string, error) {
-	m.taskLock.Lock()
-	defer m.taskLock.Unlock()
+	m.lockTasks()
+	defer m.unlockTasks()
 
-	return createTaskLocked(ctx, m.backend, m.resolveBaseDir(ctx), input)
+	baseDir, err := m.resolveBaseDirOrError(ctx)
+	if err != nil {
+		return "", err
+	}
+
+	return createTaskLocked(ctx, m.backend, baseDir, input)
 }
 
 // DeleteTask deletes a task with proper locking.
 func (m *middleware) DeleteTask(ctx context.Context, taskID string) error {
-	m.taskLock.Lock()
-	defer m.taskLock.Unlock()
+	m.lockTasks()
+	defer m.unlockTasks()
 
-	return deleteTaskLocked(ctx, m.backend, m.resolveBaseDir(ctx), taskID)
+	baseDir, err := m.resolveBaseDirOrError(ctx)
+	if err != nil {
+		return err
+	}
+
+	return deleteTaskLocked(ctx, m.backend, baseDir, taskID)
 }
 
 // New creates a new plantask middleware that provides task management tools for agents.
@@ -144,6 +200,8 @@ func New(ctx context.Context, config *Config, opts ...Option) (adk.ChatModelAgen
 		backend:          config.Backend,
 		baseDir:          config.BaseDir,
 		reminderInterval: defaultReminderInterval,
+		taskLock:         &sync.Mutex{},
+		autoCleanup:      true,
 	}
 
 	for _, opt := range opts {
@@ -157,7 +215,9 @@ type middleware struct {
 	adk.BaseChatModelAgentMiddleware
 	backend  Backend
 	baseDir  string
-	taskLock sync.Mutex // protects all task read/write operations within this middleware instance
+	taskLock *sync.Mutex // protects all task read/write operations within this middleware instance
+
+	autoCleanup bool
 
 	// Task reminder config (set via WithReminder)
 	reminderInterval   int
@@ -166,20 +226,32 @@ type middleware struct {
 	// Task assignment notification (set via WithTaskAssignedHook)
 	onTaskAssigned func(ctx context.Context, assignment TaskAssignment) error
 
+	// Owner validator (set via WithOwnerValidator)
+	ownerValidator func(ctx context.Context, owner string) error
+
 	// Context resolvers (set via WithTaskBaseDirResolver / WithAgentNameResolver, nil in single-agent mode)
 	taskBaseDirResolver func(ctx context.Context) string
 	agentNameResolver   func(ctx context.Context) string
 }
 
-// resolveBaseDir returns the task storage directory at call time.
-// In team mode, the taskBaseDirResolver provides the full path.
-func (m *middleware) resolveBaseDir(ctx context.Context) string {
+// validateOwner runs the optional owner validator.
+func (m *middleware) validateOwner(ctx context.Context, owner string) error {
+	if owner == "" || m.ownerValidator == nil {
+		return nil
+	}
+	return m.ownerValidator(ctx, owner)
+}
+
+// resolveBaseDirOrError validates the baseDir in team mode to avoid writing
+// tasks into the single-agent directory before a team is initialized.
+func (m *middleware) resolveBaseDirOrError(ctx context.Context) (string, error) {
 	if m.taskBaseDirResolver != nil {
 		if dir := m.taskBaseDirResolver(ctx); dir != "" {
-			return dir
+			return dir, nil
 		}
+		return "", fmt.Errorf("team task base directory is unavailable: call TeamCreate first")
 	}
-	return m.baseDir
+	return m.baseDir, nil
 }
 
 // isTeamMode returns true if team mode is enabled.
@@ -201,8 +273,9 @@ func (m *middleware) BeforeAgent(ctx context.Context, runCtx *adk.ChatModelAgent
 	}
 
 	if !m.isTeamMode() {
-		m.taskLock = sync.Mutex{}
+		m.taskLock = &sync.Mutex{}
 	}
+
 	nRunCtx := *runCtx
 	// All tools share the same m.taskLock via the middleware reference
 	nRunCtx.Tools = append(nRunCtx.Tools,
@@ -213,4 +286,17 @@ func (m *middleware) BeforeAgent(ctx context.Context, runCtx *adk.ChatModelAgent
 	)
 
 	return ctx, &nRunCtx, nil
+}
+
+// lockTasks ensures taskLock exists and locks it.
+func (m *middleware) lockTasks() {
+	if m.taskLock == nil {
+		m.taskLock = &sync.Mutex{}
+	}
+	m.taskLock.Lock()
+}
+
+// unlockTasks unlocks taskLock.
+func (m *middleware) unlockTasks() {
+	m.taskLock.Unlock()
 }

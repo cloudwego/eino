@@ -82,8 +82,8 @@ func (t *taskCreateTool) Info(ctx context.Context) (*schema.ToolInfo, error) {
 }
 
 func (t *taskCreateTool) InvokableRun(ctx context.Context, argumentsInJSON string, opts ...tool.Option) (string, error) {
-	t.mw.taskLock.Lock()
-	defer t.mw.taskLock.Unlock()
+	t.mw.lockTasks()
+	defer t.mw.unlockTasks()
 
 	params := &taskCreateArgs{}
 	err := sonic.UnmarshalString(argumentsInJSON, params)
@@ -91,7 +91,12 @@ func (t *taskCreateTool) InvokableRun(ctx context.Context, argumentsInJSON strin
 		return "", err
 	}
 
-	taskID, err := createTaskLocked(ctx, t.mw.backend, t.mw.resolveBaseDir(ctx), &TaskInput{
+	baseDir, err := t.mw.resolveBaseDirOrError(ctx)
+	if err != nil {
+		return "", err
+	}
+
+	taskID, err := createTaskLocked(ctx, t.mw.backend, baseDir, &TaskInput{
 		Subject:     params.Subject,
 		Description: params.Description,
 		ActiveForm:  params.ActiveForm,

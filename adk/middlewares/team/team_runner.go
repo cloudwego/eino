@@ -21,6 +21,7 @@ package team
 import (
 	"context"
 	"fmt"
+	"sync"
 
 	"github.com/cloudwego/eino/adk"
 	"github.com/cloudwego/eino/adk/middlewares/plantask"
@@ -49,6 +50,14 @@ type RunnerConfig struct {
 	// per-agent conversation history — callers need not track messages themselves.
 	// Required.
 	OnAgentEvents func(ctx context.Context, inputItem TurnInput, events *adk.AsyncIterator[*adk.AgentEvent]) error
+
+	// RouterBufferLimit controls the per-agent in-memory queue size for routed messages.
+	// 0 means default; < 0 means unlimited.
+	RouterBufferLimit int
+
+	// RouterDropHandler is called when the router drops messages due to buffer overflow.
+	// If nil, the router uses the default logging handler.
+	RouterDropHandler func(agentName string, dropped int, limit int)
 }
 
 // Runner wraps the TurnLoop lifecycle with multi-agent routing
@@ -82,24 +91,27 @@ func NewRunner(ctx context.Context, conf *RunnerConfig) (*Runner, error) {
 	if conf.TeamConfig.InboxLocks == nil {
 		conf.TeamConfig.InboxLocks = newInboxLockManager()
 	}
+	if conf.TeamConfig.TaskLock == nil {
+		conf.TeamConfig.TaskLock = &sync.Mutex{}
+	}
 
 	leaderMW := newTeamLeadMiddleware(conf)
 
 	router := newSourceRouter(conf.Source, LeaderAgentName)
+	if conf.RouterBufferLimit != 0 {
+		router.SetBufferLimit(conf.RouterBufferLimit)
+	}
+	if conf.RouterDropHandler != nil {
+		router.SetDropHandler(conf.RouterDropHandler)
+	}
 	leaderMW.router = router
 
 	// Always inject team-aware plantask middleware, removing any user-provided one
 	// (which lacks team resolvers/hooks).
 	defaultHandlers := []adk.ChatModelAgentMiddleware{leaderMW}
-	ptMW, err := plantask.New(ctx, &plantask.Config{
-		Backend: conf.TeamConfig.Backend,
-		BaseDir: conf.TeamConfig.BaseDir,
-	},
-		plantask.WithTaskAssignedHook(newTaskAssignedNotifier(conf.TeamConfig, func() string { return leaderMW.teamName })),
-		plantask.WithTaskBaseDirResolver(func(_ context.Context) string {
-			return tasksDirPath(conf.TeamConfig.BaseDir, leaderMW.teamName)
-		}),
-		plantask.WithAgentNameResolver(func(_ context.Context) string { return leaderMW.agentName }),
+	ptMW, err := newTeamPlantaskMiddleware(ctx, conf,
+		func() string { return leaderMW.teamName },
+		func() string { return leaderMW.agentName },
 	)
 	if err != nil {
 		return nil, fmt.Errorf("create plantask middleware: %w", err)
@@ -165,8 +177,9 @@ func newTeammateRunner(conf *RunnerConfig, router *sourceRouter,
 	tmMailbox := newMailboxFromConfig(conf.TeamConfig, teamName, agentName)
 
 	mailboxSource := NewMailboxMessageSource(tmMailbox, &MailboxSourceConfig{
-		OwnerName: agentName,
-		Role:      teamRoleTeammate,
+		OwnerName:          agentName,
+		Role:               teamRoleTeammate,
+		IdleNotifyInterval: conf.TeamConfig.IdleNotifyInterval,
 	})
 
 	router.SetMailbox(agentName, mailboxSource)
@@ -200,4 +213,45 @@ func stripPlantaskMiddleware(handlers []adk.ChatModelAgentMiddleware) []adk.Chat
 		}
 	}
 	return result
+}
+
+func newTeamPlantaskMiddleware(ctx context.Context, conf *RunnerConfig,
+	teamNameFn func() string, agentNameFn func() string) (adk.ChatModelAgentMiddleware, error) {
+
+	if conf.TeamConfig.TaskLock == nil {
+		conf.TeamConfig.TaskLock = &sync.Mutex{}
+	}
+
+	cm := newTeamConfigStoreFromConfig(conf.TeamConfig)
+
+	return plantask.New(ctx, &plantask.Config{
+		Backend: conf.TeamConfig.Backend,
+		BaseDir: conf.TeamConfig.BaseDir,
+	},
+		plantask.WithTaskAssignedHook(newTaskAssignedNotifier(conf.TeamConfig, teamNameFn)),
+		plantask.WithTaskBaseDirResolver(func(_ context.Context) string {
+			teamName := teamNameFn()
+			if teamName == "" {
+				return ""
+			}
+			return tasksDirPath(conf.TeamConfig.BaseDir, teamName)
+		}),
+		plantask.WithAgentNameResolver(func(_ context.Context) string { return agentNameFn() }),
+		plantask.WithOwnerValidator(func(ctx context.Context, owner string) error {
+			teamName := teamNameFn()
+			if teamName == "" {
+				return fmt.Errorf("team task base directory is unavailable: call TeamCreate first")
+			}
+			exists, err := cm.HasMember(ctx, teamName, owner)
+			if err != nil {
+				return fmt.Errorf("check owner %q: %w", owner, err)
+			}
+			if !exists {
+				return fmt.Errorf("owner %q is not a member of team %q", owner, teamName)
+			}
+			return nil
+		}),
+		plantask.WithSharedTaskLock(conf.TeamConfig.TaskLock),
+		plantask.WithAutoCleanup(false),
+	)
 }
