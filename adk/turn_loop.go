@@ -1136,7 +1136,11 @@ func (l *TurnLoop[T]) runAgentAndHandleEvents(
 	case <-done:
 		if l.stopSig.isStopped() || handleErr != nil {
 			if err := finalizeCheckpoint(); err != nil {
-				handleErr = errors.Join(handleErr, err)
+				if handleErr != nil {
+					handleErr = fmt.Errorf("%w; checkpoint error: %v", handleErr, err)
+				} else {
+					handleErr = err
+				}
 			}
 		}
 		return handleErr
@@ -1146,7 +1150,11 @@ func (l *TurnLoop[T]) runAgentAndHandleEvents(
 	case <-stoppedDone:
 		<-done
 		if err := finalizeCheckpoint(); err != nil {
-			handleErr = errors.Join(handleErr, err)
+			if handleErr != nil {
+				handleErr = fmt.Errorf("%w; checkpoint error: %v", handleErr, err)
+			} else {
+				handleErr = err
+			}
 		}
 		return handleErr
 	}
@@ -1173,7 +1181,12 @@ func (l *TurnLoop[T]) cleanup(ctx context.Context) {
 		}
 		err := l.saveTurnLoopCheckpoint(ctx, checkPointID, cp)
 		if err != nil {
-			l.runErr = errors.Join(l.runErr, fmt.Errorf("failed to save turn loop checkpoint: %w", err))
+			saveErr := fmt.Errorf("failed to save turn loop checkpoint: %w", err)
+			if l.runErr != nil {
+				l.runErr = fmt.Errorf("%w; %v", l.runErr, saveErr)
+			} else {
+				l.runErr = saveErr
+			}
 		} else {
 			l.checkPointID = checkPointID
 			savedCheckPointID = checkPointID
