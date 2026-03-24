@@ -394,7 +394,7 @@ func NewChatModelAgent(ctx context.Context, config *ChatModelAgentConfig) (*Chat
 func collectToolMiddlewaresFromMiddlewares(mws []AgentMiddleware) []compose.ToolMiddleware {
 	var middlewares []compose.ToolMiddleware
 	for _, m := range mws {
-		if m.WrapToolCall.Invokable == nil && m.WrapToolCall.Streamable == nil {
+		if m.WrapToolCall.Invokable == nil && m.WrapToolCall.Streamable == nil && m.WrapToolCall.EnhancedStreamable == nil && m.WrapToolCall.EnhancedInvokable == nil {
 			continue
 		}
 		middlewares = append(middlewares, m.WrapToolCall)
