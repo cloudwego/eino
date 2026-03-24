@@ -75,6 +75,11 @@ func (b *inMemoryBackend) Delete(ctx context.Context, req *DeleteRequest) error 
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
-	delete(b.files, req.FilePath)
+	prefix := req.FilePath + "/"
+	for k := range b.files {
+		if k == req.FilePath || strings.HasPrefix(k, prefix) {
+			delete(b.files, k)
+		}
+	}
 	return nil
 }
