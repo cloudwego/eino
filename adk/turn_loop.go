@@ -34,19 +34,30 @@ import (
 )
 
 type turnLoopStopSig struct {
-	done   chan struct{}
-	config atomic.Value
+	done chan struct{}
+
+	mu              sync.Mutex
+	gen             uint64
+	agentCancelOpts []AgentCancelOption
+	notify          chan struct{}
 }
 
 func newTurnLoopStopSig() *turnLoopStopSig {
 	return &turnLoopStopSig{
-		done: make(chan struct{}),
+		done:   make(chan struct{}),
+		notify: make(chan struct{}, 1),
 	}
 }
 
-func (cs *turnLoopStopSig) stop(cfg *stopConfig) {
-	cs.config.Store(cfg)
-	close(cs.done)
+func (cs *turnLoopStopSig) signal(cfg *stopConfig) {
+	cs.mu.Lock()
+	cs.gen++
+	cs.agentCancelOpts = cfg.agentCancelOpts
+	cs.mu.Unlock()
+	select {
+	case cs.notify <- struct{}{}:
+	default:
+	}
 }
 
 func (cs *turnLoopStopSig) isStopped() bool {
@@ -58,18 +69,21 @@ func (cs *turnLoopStopSig) isStopped() bool {
 	}
 }
 
-func (cs *turnLoopStopSig) getConfig() *stopConfig {
-	if v := cs.config.Load(); v != nil {
-		return v.(*stopConfig)
+func (cs *turnLoopStopSig) closeDone() {
+	close(cs.done)
+}
+
+func (cs *turnLoopStopSig) getNotifyChan() <-chan struct{} {
+	if cs != nil {
+		return cs.notify
 	}
 	return nil
 }
 
-func (cs *turnLoopStopSig) getDoneChan() <-chan struct{} {
-	if cs != nil {
-		return cs.done
-	}
-	return nil
+func (cs *turnLoopStopSig) check() (uint64, []AgentCancelOption) {
+	cs.mu.Lock()
+	defer cs.mu.Unlock()
+	return cs.gen, append([]AgentCancelOption{}, cs.agentCancelOpts...)
 }
 
 type preemptSignal struct {
@@ -210,7 +224,7 @@ type TurnLoopConfig[T any] struct {
 	//
 	// When true, the framework only persists runner checkpoint bytes to Store.
 	// The user manages item persistence via TurnLoopExitState fields and provides
-	// them back via WithResumeItems on Resume.
+	// them back via WithExternalResumeItems on Resume.
 	ExternalTurnState bool
 
 	// Store is the checkpoint store for persistence and resume. Optional.
@@ -237,10 +251,15 @@ type GenInputResult[T any] struct {
 	// RunOpts are the options for this agent run
 	RunOpts []AgentRunOption
 
-	// Consumed are the items that were processed (will be removed from buffer)
+	// Consumed are the items selected for this turn.
+	// They are removed from the buffer and passed to PrepareAgent.
 	Consumed []T
 
-	// Remaining are the items to keep in buffer for next turn
+	// Remaining are the items to keep in the buffer for a future turn.
+	// TurnLoop pushes Remaining back into the buffer before running the agent.
+	//
+	// Items from the GenInput input slice that are in neither Consumed nor Remaining
+	// are dropped by the loop.
 	Remaining []T
 }
 
@@ -259,10 +278,15 @@ type GenResumeResult[T any] struct {
 	// ResumeParams are optional parameters for resuming an interrupted agent.
 	ResumeParams *ResumeParams
 
-	// Consumed are the items that were processed (will be removed from buffer)
+	// Consumed are the items selected for this resumed turn.
+	// They are removed from the buffer and passed to PrepareAgent.
 	Consumed []T
 
-	// Remaining are the items to keep in buffer for next turn
+	// Remaining are the items to keep in the buffer for a future turn.
+	// TurnLoop pushes Remaining back into the buffer before resuming the agent.
+	//
+	// Items from (canceledItems, unhandledItems, newItems) that are in neither Consumed
+	// nor Remaining are dropped by the loop.
 	Remaining []T
 }
 
@@ -362,6 +386,12 @@ type TurnLoopExitState[T any] struct {
 	// which can be used to resume via TurnLoop. Use errors.As to extract it.
 	ExitReason error
 
+	// CheckPointID is the checkpoint ID persisted by TurnLoop on exit.
+	// It is set when Store is configured and the loop exits due to Stop() or error.
+	// In ExternalTurnState mode, it is the runner checkpoint ID (the key used to
+	// persist runner bytes to Store).
+	// It can be used to resume via TurnLoop.Resume (in ExternalTurnState mode, resume
+	// also requires providing CanceledItems/UnhandledItems via WithExternalResumeItems).
 	CheckPointID string
 
 	// UnhandledItems contains items that were buffered but not processed.
@@ -436,8 +466,6 @@ type TurnLoop[T any] struct {
 
 	preemptSig *preemptSignal
 
-	stopCfg *stopConfig
-
 	runErr error
 
 	canceledItems []T
@@ -452,9 +480,12 @@ type TurnLoop[T any] struct {
 
 type turnLoopCheckpoint[T any] struct {
 	RunnerCheckpoint []byte
-	HasRunnerState   bool
-	UnhandledItems   []T
-	CanceledItems    []T
+	// HasRunnerState reports whether RunnerCheckpoint contains resumable runner state.
+	// It is false for "between turns" checkpoints where no agent execution was
+	// interrupted (e.g. Stop() before the first turn or between turns).
+	HasRunnerState bool
+	UnhandledItems []T
+	CanceledItems  []T
 }
 
 var ErrCheckpointStoreNil = errors.New("checkpoint store is nil")
@@ -463,7 +494,7 @@ func generateTurnLoopCheckpointID() string {
 	return uuid.NewString()
 }
 
-func marshalTurnLoopCheckpointV1[T any](c *turnLoopCheckpoint[T]) ([]byte, error) {
+func marshalTurnLoopCheckpoint[T any](c *turnLoopCheckpoint[T]) ([]byte, error) {
 	buf := new(bytes.Buffer)
 	if err := gob.NewEncoder(buf).Encode(c); err != nil {
 		return nil, err
@@ -503,7 +534,7 @@ func (l *TurnLoop[T]) saveTurnLoopCheckpoint(ctx context.Context, checkPointID s
 	if l.config.ExternalTurnState {
 		return l.config.Store.Set(ctx, checkPointID, append([]byte{}, c.RunnerCheckpoint...))
 	}
-	data, err := marshalTurnLoopCheckpointV1(c)
+	data, err := marshalTurnLoopCheckpoint(c)
 	if err != nil {
 		return err
 	}
@@ -524,9 +555,12 @@ type resumeOptions[T any] struct {
 	hasResumeItems bool
 }
 
-type ResumeOption[T any] func(*resumeOptions[T])
+type TurnLoopResumeOption[T any] func(*resumeOptions[T])
 
-func WithResumeItems[T any](canceledItems, unhandledItems []T) ResumeOption[T] {
+// WithExternalResumeItems provides the canceled and unhandled items for resuming when
+// ExternalTurnState is enabled. In framework mode (ExternalTurnState=false), TurnLoop
+// persists items in the checkpoint and Resume rejects this option.
+func WithExternalResumeItems[T any](canceledItems, unhandledItems []T) TurnLoopResumeOption[T] {
 	return func(o *resumeOptions[T]) {
 		o.canceledItems = canceledItems
 		o.unhandledItems = unhandledItems
@@ -643,7 +677,7 @@ func (l *TurnLoop[T]) Run(ctx context.Context) error {
 	return l.start(ctx)
 }
 
-func (l *TurnLoop[T]) Resume(ctx context.Context, checkPointID string, newItems []T, opts ...ResumeOption[T]) error {
+func (l *TurnLoop[T]) Resume(ctx context.Context, checkPointID string, newItems []T, opts ...TurnLoopResumeOption[T]) error {
 	if checkPointID == "" {
 		return errors.New("cannot resume TurnLoop: checkpointID is empty")
 	}
@@ -663,7 +697,7 @@ func (l *TurnLoop[T]) Resume(ctx context.Context, checkPointID string, newItems 
 		}
 	} else {
 		if ro.hasResumeItems {
-			return errors.New("cannot resume TurnLoop: resume items are only supported when ExternalTurnState is enabled")
+			return errors.New("cannot resume TurnLoop: external resume items are only supported when ExternalTurnState is enabled")
 		}
 	}
 
@@ -692,11 +726,7 @@ func (l *TurnLoop[T]) Resume(ctx context.Context, checkPointID string, newItems 
 		}
 	} else {
 		if len(canceledItems) > 0 {
-			for _, it := range canceledItems {
-				if !l.buffer.TrySend(it) {
-					return errors.New("failed to buffer canceled items: buffer closed")
-				}
-			}
+			return errors.New("failed to resume TurnLoop: checkpoint has canceled items but no runner state")
 		}
 		for _, it := range unhandledItems {
 			if !l.buffer.TrySend(it) {
@@ -780,7 +810,7 @@ func (l *TurnLoop[T]) Push(item T, opts ...PushOption) (bool, <-chan struct{}) {
 // The loop will finish the current turn (or cancel it via WithAgentCancel options),
 // then exit without starting a new turn.
 // Use WithAgentCancel to control how the currently running agent is cancelled.
-// This method is idempotent - multiple calls have no additional effect.
+// This method is idempotent - multiple calls update cancel options.
 // Call Wait() to block until the loop has fully exited and get the result.
 //
 // Stop may be called before Run. In that case, the stopped flag is set and
@@ -790,17 +820,16 @@ func (l *TurnLoop[T]) Push(item T, opts ...PushOption) (bool, <-chan struct{}) {
 // Stop degrades to "exit the loop on entering the next iteration" — the
 // current agent turn runs to completion before the loop exits.
 func (l *TurnLoop[T]) Stop(opts ...StopOption) {
+	cfg := &stopConfig{}
+	for _, opt := range opts {
+		opt(cfg)
+	}
+
+	l.stopSig.signal(cfg)
+
 	l.stopOnce.Do(func() {
-		cfg := &stopConfig{}
-		for _, opt := range opts {
-			opt(cfg)
-		}
-
-		l.stopCfg = cfg
-		l.stopSig.stop(cfg)
-
+		l.stopSig.closeDone()
 		atomic.StoreInt32(&l.stopped, 1)
-
 		l.buffer.Close()
 	})
 }
@@ -809,8 +838,8 @@ func (l *TurnLoop[T]) Stop(opts ...StopOption) {
 // This method is safe to call from multiple goroutines.
 // All callers will receive the same result.
 //
-// Wait blocks until Run is called AND the loop exits. If Run is never called,
-// Wait blocks forever.
+// Wait blocks until Run or Resume is called AND the loop exits. If neither is
+// ever called, Wait blocks forever.
 func (l *TurnLoop[T]) Wait() *TurnLoopExitState[T] {
 	<-l.done
 	return l.result
@@ -1052,19 +1081,24 @@ func (l *TurnLoop[T]) runAgentAndHandleEvents(
 		}
 	}()
 	go func() {
-		select {
-		case <-done:
-			return
-		case <-l.stopSig.getDoneChan():
-			cfg := l.stopSig.getConfig()
-			if cfg != nil {
-				// CancelHandle is intentionally not awaited here: agentCancelFunc commits the cancel signal synchronously,
-				// while waiting would block until the turn finishes and can deadlock this watcher against the done signal.
-				_, contributed := agentCancelFunc(cfg.agentCancelOpts...)
-				if contributed {
-					close(stoppedDone)
-				}
+		var lastGen uint64
+		stoppedClosed := false
+		for {
+			select {
+			case <-done:
 				return
+			case <-l.stopSig.getNotifyChan():
+				gen, opts := l.stopSig.check()
+				if gen != lastGen {
+					lastGen = gen
+					// CancelHandle is intentionally not awaited here: agentCancelFunc commits the cancel signal synchronously,
+					// while waiting would block until the turn finishes and can deadlock this watcher against the done signal.
+					_, contributed := agentCancelFunc(opts...)
+					if contributed && !stoppedClosed {
+						close(stoppedDone)
+						stoppedClosed = true
+					}
+				}
 			}
 		}
 	}()

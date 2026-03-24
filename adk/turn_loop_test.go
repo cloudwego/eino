@@ -135,6 +135,31 @@ func (a *turnLoopCancellableMockAgent) Run(ctx context.Context, input *AgentInpu
 	return iter
 }
 
+type turnLoopStopModeProbeAgent struct {
+	ccCh chan *cancelContext
+}
+
+func (a *turnLoopStopModeProbeAgent) Name(_ context.Context) string        { return "probe" }
+func (a *turnLoopStopModeProbeAgent) Description(_ context.Context) string { return "probe" }
+func (a *turnLoopStopModeProbeAgent) Run(ctx context.Context, input *AgentInput, opts ...AgentRunOption) *AsyncIterator[*AgentEvent] {
+	iter, gen := NewAsyncIteratorPair[*AgentEvent]()
+	o := getCommonOptions(nil, opts...)
+	cc := o.cancelCtx
+	a.ccCh <- cc
+	go func() {
+		defer gen.Close()
+		<-cc.cancelChan
+		for {
+			if cc.getMode() == CancelImmediate {
+				gen.Send(&AgentEvent{Err: cc.createCancelError()})
+				return
+			}
+			time.Sleep(1 * time.Millisecond)
+		}
+	}()
+	return iter
+}
+
 func mustNewTurnLoop[T any](cfg TurnLoopConfig[T]) *TurnLoop[T] {
 	l, err := NewTurnLoop(cfg)
 	if err != nil {
@@ -1557,7 +1582,7 @@ func TestTurnLoop_FrameworkMode_RejectsResumeItems(t *testing.T) {
 			return &turnLoopMockAgent{name: "test"}, nil
 		},
 	})
-	assert.Error(t, loop.Resume(ctx, "cp-1", nil, WithResumeItems[string]([]string{"a"}, []string{"b"})))
+	assert.Error(t, loop.Resume(ctx, "cp-1", nil, WithExternalResumeItems[string]([]string{"a"}, []string{"b"})))
 }
 
 func TestTurnLoop_StopDuringAgentExecution_PersistAndResume(t *testing.T) {
@@ -1731,7 +1756,7 @@ func TestTurnLoop_ExternalTurnState_StopAndResume(t *testing.T) {
 		},
 	})
 
-	assert.NoError(t, loop2.Resume(ctx, exit.CheckPointID, nil, WithResumeItems[string](exit.CanceledItems, exit.UnhandledItems)))
+	assert.NoError(t, loop2.Resume(ctx, exit.CheckPointID, nil, WithExternalResumeItems[string](exit.CanceledItems, exit.UnhandledItems)))
 	exit2 := loop2.Wait()
 	assert.NoError(t, exit2.ExitReason)
 	assert.Equal(t, []string{"msg1"}, consumed2)
@@ -1792,7 +1817,7 @@ func TestTurnLoop_ExternalTurnState_StopBetweenTurns(t *testing.T) {
 		},
 	})
 
-	assert.NoError(t, loop2.Resume(ctx, exit.CheckPointID, []string{"c"}, WithResumeItems[string](exit.CanceledItems, exit.UnhandledItems)))
+	assert.NoError(t, loop2.Resume(ctx, exit.CheckPointID, []string{"c"}, WithExternalResumeItems[string](exit.CanceledItems, exit.UnhandledItems)))
 	exit2 := loop2.Wait()
 	assert.NoError(t, exit2.ExitReason)
 
@@ -1818,6 +1843,47 @@ func TestTurnLoop_StopOptionsArePassed(t *testing.T) {
 
 	result := loop.Wait()
 	assert.NoError(t, result.ExitReason)
+}
+
+func TestTurnLoop_Stop_EscalatesCancelMode(t *testing.T) {
+	ctx := context.Background()
+	agentStarted := make(chan *cancelContext, 1)
+	probe := &turnLoopStopModeProbeAgent{ccCh: agentStarted}
+	loop := newAndRunTurnLoop(ctx, TurnLoopConfig[string]{
+		GenInput: func(ctx context.Context, _ *TurnLoop[string], items []string) (*GenInputResult[string], error) {
+			return &GenInputResult[string]{
+				Input:    &AgentInput{Messages: []Message{schema.UserMessage(items[0])}},
+				Consumed: items,
+			}, nil
+		},
+		PrepareAgent: func(ctx context.Context, _ *TurnLoop[string], consumed []string) (Agent, error) {
+			return probe, nil
+		},
+	})
+
+	loop.Push("msg1")
+	cc := <-agentStarted
+
+	loop.Stop(WithAgentCancel(WithAgentCancelMode(CancelAfterToolCalls), WithAgentCancelTimeout(10*time.Second)))
+	loop.Stop(WithAgentCancel(WithAgentCancelMode(CancelImmediate)))
+
+	deadline := time.After(1 * time.Second)
+	for {
+		if cc.getMode() == CancelImmediate {
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatal("cancel mode did not escalate to CancelImmediate")
+		default:
+		}
+		time.Sleep(1 * time.Millisecond)
+	}
+
+	exit := loop.Wait()
+	var ce *CancelError
+	assert.True(t, errors.As(exit.ExitReason, &ce))
+	assert.Equal(t, CancelImmediate, ce.Info.Mode)
 }
 
 func TestTurnLoop_DefaultOnAgentEvents_ErrorPropagation(t *testing.T) {
