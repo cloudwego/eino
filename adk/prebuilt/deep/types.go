@@ -21,13 +21,19 @@ import (
 	"fmt"
 
 	"github.com/cloudwego/eino/adk"
+	"github.com/cloudwego/eino/adk/middlewares/filesystem"
 	"github.com/cloudwego/eino/components/tool"
+	"github.com/cloudwego/eino/schema"
 )
 
 const (
 	generalAgentName = "general-purpose"
+	exploreAgentName = "explore"
+	planAgentName    = "plan"
 	taskToolName     = "task"
 )
+
+var defaultReadOnlyDisabledTools = []string{filesystem.ToolNameWriteFile, filesystem.ToolNameEditFile, taskToolName}
 
 const (
 	SessionKeyTodos = "deep_agent_session_key_todos"
@@ -61,5 +67,56 @@ func (w *appendPromptTool) BeforeAgent(ctx context.Context, runCtx *adk.ChatMode
 	if w.t != nil {
 		nRunCtx.Tools = append(nRunCtx.Tools, w.t)
 	}
+	return ctx, &nRunCtx, nil
+}
+
+type readOnlyReminderMiddleware struct {
+	*adk.BaseChatModelAgentMiddleware
+	reminder string
+}
+
+func (m *readOnlyReminderMiddleware) BeforeModelRewriteState(ctx context.Context, state *adk.ChatModelAgentState, mc *adk.ModelContext) (context.Context, *adk.ChatModelAgentState, error) {
+	lastToolIdx := -1
+	for i := len(state.Messages) - 1; i >= 0; i-- {
+		if state.Messages[i].Role == schema.Tool {
+			lastToolIdx = i
+			break
+		}
+	}
+
+	if lastToolIdx < 0 {
+		return ctx, state, nil
+	}
+
+	nState := *state
+	nState.Messages = make([]adk.Message, len(state.Messages))
+	copy(nState.Messages, state.Messages)
+
+	orig := nState.Messages[lastToolIdx]
+	patched := *orig
+	patched.Content = orig.Content + "\n\n" + m.reminder
+	nState.Messages[lastToolIdx] = &patched
+
+	return ctx, &nState, nil
+}
+
+type disableToolsMiddleware struct {
+	*adk.BaseChatModelAgentMiddleware
+	disabledTools map[string]bool
+}
+
+func (m *disableToolsMiddleware) BeforeAgent(ctx context.Context, runCtx *adk.ChatModelAgentContext) (context.Context, *adk.ChatModelAgentContext, error) {
+	nRunCtx := *runCtx
+	filtered := make([]tool.BaseTool, 0, len(nRunCtx.Tools))
+	for _, t := range nRunCtx.Tools {
+		info, err := t.Info(ctx)
+		if err != nil {
+			return ctx, runCtx, err
+		}
+		if !m.disabledTools[info.Name] {
+			filtered = append(filtered, t)
+		}
+	}
+	nRunCtx.Tools = filtered
 	return ctx, &nRunCtx, nil
 }
