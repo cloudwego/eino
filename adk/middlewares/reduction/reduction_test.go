@@ -56,7 +56,7 @@ func TestReductionMiddlewareTrunc(t *testing.T) {
 
 		mw, err := New(ctx, config)
 		assert.NoError(t, err)
-		exp := "hello worldhello worldhello worldhello worldhello worldhello worldhell<persisted-output>\nOutput too large (199). Full output saved to: /tmp/trunc/12345\nPreview (first 35):\nhello worldhello worldhello worldhe\n\nPreview (last 35):\nldhello worldhello worldhello world\n\n</persisted-output>"
+		exp := "<persisted-output>\nOutput too large (199). Full output saved to: /tmp/trunc/12345\nPreview (first 35):\nhello worldhello worldhello worldhe\n\nPreview (last 35):\nldhello worldhello worldhello world\n\n</persisted-output>"
 
 		edp, err := mw.WrapInvokableToolCall(ctx, it.InvokableRun, tCtx)
 		assert.NoError(t, err)
@@ -88,7 +88,7 @@ hello worldhello worldhello worldhello worldhello worldhello worldhello worldhel
 		}
 		mw, err := New(ctx, config)
 		assert.NoError(t, err)
-		exp := "hello worldhello worldhello worldhello worldhello worldhello worldhell<persisted-output>\nOutput too large (199). Full output saved to: /tmp/trunc/54321\nPreview (first 35):\nhello worldhello worldhello worldhe\n\nPreview (last 35):\nldhello worldhello worldhello world\n\n</persisted-output>"
+		exp := "<persisted-output>\nOutput too large (199). Full output saved to: /tmp/trunc/54321\nPreview (first 35):\nhello worldhello worldhello worldhe\n\nPreview (last 35):\nldhello worldhello worldhello world\n\n</persisted-output>"
 
 		edp, err := mw.WrapStreamableToolCall(ctx, st.StreamableRun, tCtx)
 		assert.NoError(t, err)
@@ -394,7 +394,7 @@ func TestReductionMiddlewareClear(t *testing.T) {
 				Function: schema.FunctionCall{Name: "get_weather", Arguments: `{"location": "London, UK", "unit": "c"}`},
 			},
 		}, s.Messages[2].ToolCalls)
-		assert.NotNil(t, msgs[2].Extra[msgReducedFlag])
+		assert.NotNil(t, msgs[2].Extra[msgClearedFlag])
 		assert.Equal(t, []schema.ToolCall{
 			{
 				ID:       "call_123456789",
@@ -429,7 +429,7 @@ func TestReductionMiddlewareClear(t *testing.T) {
 				Function: schema.FunctionCall{Name: "get_weather", Arguments: `{"location": "London, UK", "unit": "c"}`},
 			},
 		}, s.Messages[2].ToolCalls)
-		assert.NotNil(t, msgs[2].Extra[msgReducedFlag])
+		assert.NotNil(t, msgs[2].Extra[msgClearedFlag])
 		assert.Equal(t, []schema.ToolCall{
 			{
 				ID:       "call_123456789",
@@ -437,9 +437,169 @@ func TestReductionMiddlewareClear(t *testing.T) {
 				Function: schema.FunctionCall{Name: "get_weather", Arguments: `{"location": "London, UK", "unit": "c"}`},
 			},
 		}, s.Messages[4].ToolCalls)
-		assert.NotNil(t, msgs[4].Extra[msgReducedFlag])
+		assert.NotNil(t, msgs[4].Extra[msgClearedFlag])
 		assert.Equal(t, "<persisted-output>Tool result saved to: /tmp/clear/call_987654321\nUse read_file to view</persisted-output>", s.Messages[3].Content)
 		assert.Equal(t, "<persisted-output>Tool result saved to: /tmp/clear/call_123456789\nUse read_file to view</persisted-output>", s.Messages[5].Content)
+	})
+
+	t.Run("test ClearExcludeTools", func(t *testing.T) {
+		backend := filesystem.NewInMemoryBackend()
+		config := &Config{
+			SkipTruncation:            true,
+			TokenCounter:               defaultTokenCounter,
+			MaxTokensForClear:         20,
+			ClearRetentionSuffixLimit: 0,
+			ClearExcludeTools:         []string{"get_important_data"},
+			ToolConfig: map[string]*ToolReductionConfig{
+				"get_weather": {
+					Backend:      backend,
+					SkipClear:    false,
+					ClearHandler: defaultClearHandler("/tmp", true, "read_file"),
+				},
+				"get_important_data": {
+					Backend:      backend,
+					SkipClear:    false,
+					ClearHandler: defaultClearHandler("/tmp", true, "read_file"),
+				},
+			},
+		}
+
+		mw, err := New(ctx, config)
+		assert.NoError(t, err)
+		msgs := []adk.Message{
+			schema.SystemMessage("you are a helpful assistant"),
+			schema.UserMessage("If it's warmer than 20°C in London, set the thermostat to 20°C, otherwise set it to 18°C."),
+			schema.AssistantMessage("", []schema.ToolCall{
+				{
+					ID:       "call_987654321",
+					Type:     "function",
+					Function: schema.FunctionCall{Name: "get_weather", Arguments: `{"location": "London, UK", "unit": "c"}`},
+				},
+			}),
+			schema.ToolMessage("Sunny", "call_123456789"),
+			schema.AssistantMessage("", []schema.ToolCall{
+				{
+					ID:       "call_123456789",
+					Type:     "function",
+					Function: schema.FunctionCall{Name: "get_important_data", Arguments: `{"id": "123"}`},
+				},
+			}),
+			schema.ToolMessage("Important Data Content", "call_123456789"),
+		}
+		_, s, err := mw.BeforeModelRewriteState(ctx, &adk.ChatModelAgentState{Messages: msgs}, &adk.ModelContext{Tools: toolsInfo})
+		assert.NoError(t, err)
+		assert.Equal(t, "<persisted-output>Tool result saved to: /tmp/clear/call_987654321\nUse read_file to view</persisted-output>", s.Messages[3].Content)
+		assert.Equal(t, "Important Data Content", s.Messages[5].Content)
+		_, err = backend.Read(ctx, &filesystem.ReadRequest{
+			FilePath: "/tmp/clear/call_987654321",
+		})
+		assert.NoError(t, err)
+		_, err = backend.Read(ctx, &filesystem.ReadRequest{
+			FilePath: "/tmp/clear/call_123456789",
+		})
+		assert.Error(t, err)
+	})
+
+	t.Run("test ClearAtLeastTokens - not enough tokens cleared", func(t *testing.T) {
+		backend := filesystem.NewInMemoryBackend()
+		callCount := 0
+		config := &Config{
+			SkipTruncation:            true,
+			TokenCounter: func(_ context.Context, _ []adk.Message, _ []*schema.ToolInfo) (int64, error) {
+				callCount++
+				if callCount == 1 {
+					return 100, nil
+				}
+				return 99, nil
+			},
+			MaxTokensForClear:         50,
+			ClearRetentionSuffixLimit: 0,
+			ClearAtLeastTokens:        2,
+			ToolConfig: map[string]*ToolReductionConfig{
+				"get_weather": {
+					Backend:      backend,
+					SkipClear:    false,
+					ClearHandler: defaultClearHandler("/tmp", true, "read_file"),
+				},
+			},
+		}
+
+		mw, err := New(ctx, config)
+		assert.NoError(t, err)
+		msgs := []adk.Message{
+			schema.SystemMessage("you are a helpful assistant"),
+			schema.UserMessage("If it's warmer than 20°C in London, set the thermostat to 20°C, otherwise set it to 18°C."),
+			schema.AssistantMessage("", []schema.ToolCall{
+				{
+					ID:       "call_987654321",
+					Type:     "function",
+					Function: schema.FunctionCall{Name: "get_weather", Arguments: `{"location": "London, UK", "unit": "c"}`},
+				},
+			}),
+			schema.ToolMessage("Sunny", "call_123456789"),
+		}
+		_, s, err := mw.BeforeModelRewriteState(ctx, &adk.ChatModelAgentState{Messages: msgs}, &adk.ModelContext{Tools: toolsInfo})
+		assert.NoError(t, err)
+		assert.Equal(t, "Sunny", s.Messages[3].Content)
+		_, err = backend.Read(ctx, &filesystem.ReadRequest{
+			FilePath: "/tmp/clear/call_987654321",
+		})
+		assert.Error(t, err)
+	})
+
+	t.Run("test ClearAtLeastTokens - enough tokens cleared", func(t *testing.T) {
+		backend := filesystem.NewInMemoryBackend()
+		callCount := 0
+		config := &Config{
+			SkipTruncation:            true,
+			TokenCounter: func(_ context.Context, _ []adk.Message, _ []*schema.ToolInfo) (int64, error) {
+				callCount++
+				if callCount == 1 {
+					return 100, nil
+				}
+				return 50, nil
+			},
+			MaxTokensForClear:         50,
+			ClearRetentionSuffixLimit: 0,
+			ClearAtLeastTokens:        1,
+			ToolConfig: map[string]*ToolReductionConfig{
+				"get_weather": {
+					Backend:      backend,
+					SkipClear:    false,
+					ClearHandler: defaultClearHandler("/tmp", true, "read_file"),
+				},
+			},
+		}
+
+		mw, err := New(ctx, config)
+		assert.NoError(t, err)
+		msgs := []adk.Message{
+			schema.SystemMessage("you are a helpful assistant"),
+			schema.UserMessage("If it's warmer than 20°C in London, set the thermostat to 20°C, otherwise set it to 18°C."),
+			schema.AssistantMessage("", []schema.ToolCall{
+				{
+					ID:       "call_987654321",
+					Type:     "function",
+					Function: schema.FunctionCall{Name: "get_weather", Arguments: `{"location": "London, UK", "unit": "c"}`},
+				},
+			}),
+			schema.ToolMessage("Sunny", "call_123456789"),
+			schema.AssistantMessage("", []schema.ToolCall{
+				{
+					ID:       "call_123456789",
+					Type:     "function",
+					Function: schema.FunctionCall{Name: "get_weather", Arguments: `{"location": "London, UK", "unit": "c"}`},
+				},
+			}),
+			schema.ToolMessage("Sunny", "call_123456789"),
+		}
+		_, s, err := mw.BeforeModelRewriteState(ctx, &adk.ChatModelAgentState{Messages: msgs}, &adk.ModelContext{Tools: toolsInfo})
+		assert.NoError(t, err)
+		assert.Equal(t, "<persisted-output>Tool result saved to: /tmp/clear/call_987654321\nUse read_file to view</persisted-output>", s.Messages[3].Content)
+		_, err = backend.Read(ctx, &filesystem.ReadRequest{
+			FilePath: "/tmp/clear/call_987654321",
+		})
+		assert.NoError(t, err)
 	})
 }
 
@@ -644,61 +804,26 @@ func TestConvMessageInputPartToToolOutputPart(t *testing.T) {
 func TestGetSetMsgOffloadedFlag(t *testing.T) {
 	t.Run("test get offloaded flag - not set", func(t *testing.T) {
 		msg := schema.UserMessage("test")
-		assert.False(t, getMsgOffloadedFlag(msg))
+		assert.False(t, getMsgClearedFlag(msg))
 	})
 
 	t.Run("test get offloaded flag - set", func(t *testing.T) {
 		msg := schema.UserMessage("test")
-		setMsgOffloadedFlag(msg)
-		assert.True(t, getMsgOffloadedFlag(msg))
+		setMsgClearedFlag(msg)
+		assert.True(t, getMsgClearedFlag(msg))
 	})
 
 	t.Run("test set offloaded flag - nil extra", func(t *testing.T) {
 		msg := schema.UserMessage("test")
-		setMsgOffloadedFlag(msg)
-		assert.True(t, getMsgOffloadedFlag(msg))
+		setMsgClearedFlag(msg)
+		assert.True(t, getMsgClearedFlag(msg))
 	})
 
 	t.Run("test set offloaded flag - existing extra", func(t *testing.T) {
 		msg := schema.UserMessage("test")
 		msg.Extra = map[string]any{"existing": "value"}
-		setMsgOffloadedFlag(msg)
-		assert.True(t, getMsgOffloadedFlag(msg))
-		assert.Equal(t, "value", msg.Extra["existing"])
-	})
-}
-
-func TestGetSetMsgCachedToken(t *testing.T) {
-	t.Run("test get cached token - not set", func(t *testing.T) {
-		msg := schema.UserMessage("test")
-		tokens, ok := getMsgCachedToken(msg)
-		assert.False(t, ok)
-		assert.Equal(t, int64(0), tokens)
-	})
-
-	t.Run("test get cached token - set", func(t *testing.T) {
-		msg := schema.UserMessage("test")
-		setMsgCachedToken(msg, 100)
-		tokens, ok := getMsgCachedToken(msg)
-		assert.True(t, ok)
-		assert.Equal(t, int64(100), tokens)
-	})
-
-	t.Run("test set cached token - nil extra", func(t *testing.T) {
-		msg := schema.UserMessage("test")
-		setMsgCachedToken(msg, 200)
-		tokens, ok := getMsgCachedToken(msg)
-		assert.True(t, ok)
-		assert.Equal(t, int64(200), tokens)
-	})
-
-	t.Run("test set cached token - existing extra", func(t *testing.T) {
-		msg := schema.UserMessage("test")
-		msg.Extra = map[string]any{"existing": "value"}
-		setMsgCachedToken(msg, 300)
-		tokens, ok := getMsgCachedToken(msg)
-		assert.True(t, ok)
-		assert.Equal(t, int64(300), tokens)
+		setMsgClearedFlag(msg)
+		assert.True(t, getMsgClearedFlag(msg))
 		assert.Equal(t, "value", msg.Extra["existing"])
 	})
 }
