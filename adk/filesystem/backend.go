@@ -71,8 +71,7 @@ type ReadRequest struct {
 	Offset int
 
 	// Limit specifies the maximum number of lines to read.
-	// Use this when the file is too large to read at once.
-	// Defaults to 2000 if not provided or non-positive (<= 0).
+	// When Limit is 0 (default), the entire file content is returned.
 	Limit int
 }
 

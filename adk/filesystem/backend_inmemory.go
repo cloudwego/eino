@@ -150,11 +150,13 @@ func (b *InMemoryBackend) Read(ctx context.Context, req *ReadRequest) (*FileCont
 		offset = 0
 	}
 	limit := req.Limit
-	if limit <= 0 {
-		limit = 2000
-	}
 
 	content := entry.content
+
+	// Fast path: no offset and no limit — return as-is
+	if offset == 0 && limit <= 0 {
+		return &FileContent{Content: content}, nil
+	}
 
 	// Fast path: no offset, content fits within limit — return as-is
 	if offset == 0 {
@@ -173,6 +175,11 @@ func (b *InMemoryBackend) Read(ctx context.Context, req *ReadRequest) (*FileCont
 			return &FileContent{}, nil
 		}
 		start += idx + 1
+	}
+
+	// No limit: return everything from start
+	if limit <= 0 {
+		return &FileContent{Content: content[start:]}, nil
 	}
 
 	// Find the end position after `limit` lines
