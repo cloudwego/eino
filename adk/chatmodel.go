@@ -597,9 +597,10 @@ type execContext struct {
 	toolUpdated  bool // whether needs to pass a compose.WithToolList option to ToolsNode due to tool list change
 }
 
-func (a *ChatModelAgent) applyBeforeAgent(ctx context.Context, ec *execContext) (context.Context, *execContext, error) {
+func (a *ChatModelAgent) applyBeforeAgent(ctx context.Context, ec *execContext, agentInput *AgentInput) (context.Context, *execContext, error) {
 	runCtx := &ChatModelAgentContext{
 		Instruction:    ec.instruction,
+		AgentInput:     agentInput,
 		Tools:          cloneSlice(ec.unwrappedTools),
 		ReturnDirectly: copyMap(ec.returnDirectly),
 	}
@@ -909,7 +910,7 @@ func (a *ChatModelAgent) buildRunFunc(ctx context.Context) runFunc {
 	return a.run
 }
 
-func (a *ChatModelAgent) getRunFunc(ctx context.Context) (context.Context, runFunc, *execContext, error) {
+func (a *ChatModelAgent) getRunFunc(ctx context.Context, agentInput *AgentInput) (context.Context, runFunc, *execContext, error) {
 	defaultRun := a.buildRunFunc(ctx)
 	bc := a.exeCtx
 
@@ -927,7 +928,7 @@ func (a *ChatModelAgent) getRunFunc(ctx context.Context) (context.Context, runFu
 		return ctx, defaultRun, runtimeBC, nil
 	}
 
-	ctx, runtimeBC, err := a.applyBeforeAgent(ctx, bc)
+	ctx, runtimeBC, err := a.applyBeforeAgent(ctx, bc, agentInput)
 	if err != nil {
 		return ctx, nil, nil, err
 	}
@@ -952,7 +953,7 @@ func (a *ChatModelAgent) getRunFunc(ctx context.Context) (context.Context, runFu
 func (a *ChatModelAgent) Run(ctx context.Context, input *AgentInput, opts ...AgentRunOption) *AsyncIterator[*AgentEvent] {
 	iterator, generator := NewAsyncIteratorPair[*AgentEvent]()
 
-	ctx, run, bc, err := a.getRunFunc(ctx)
+	ctx, run, bc, err := a.getRunFunc(ctx, input)
 	if err != nil {
 		go func() {
 			generator.Send(&AgentEvent{Err: err})
@@ -1001,7 +1002,7 @@ func (a *ChatModelAgent) Run(ctx context.Context, input *AgentInput, opts ...Age
 func (a *ChatModelAgent) Resume(ctx context.Context, info *ResumeInfo, opts ...AgentRunOption) *AsyncIterator[*AgentEvent] {
 	iterator, generator := NewAsyncIteratorPair[*AgentEvent]()
 
-	ctx, run, bc, err := a.getRunFunc(ctx)
+	ctx, run, bc, err := a.getRunFunc(ctx, nil)
 	if err != nil {
 		go func() {
 			generator.Send(&AgentEvent{Err: err})

@@ -71,6 +71,8 @@ type ChatModelAgentContext struct {
 	// to be (optionally) formatted with SessionValues and converted to system message.
 	Instruction string
 
+	AgentInput *AgentInput
+
 	// Tools are the raw tools (without any wrapper or tool middleware) currently configured for the Agent execution.
 	// They includes tools passed in AgentConfig, implicit tools added by framework such as transfer / exit tools,
 	// and other tools already added by middlewares.
