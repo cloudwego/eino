@@ -1991,3 +1991,130 @@ func TestAfterToolCallsRewriteState(t *testing.T) {
 		assert.True(t, found, "Injected message should persist to the next model call")
 	})
 }
+
+func TestToolResultNotDuplicated(t *testing.T) {
+	t.Run("SecondModelCallHasNoToolResultDuplication", func(t *testing.T) {
+		ctx := context.Background()
+		ctrl := gomock.NewController(t)
+		cm := mockModel.NewMockToolCallingChatModel(ctrl)
+
+		tool1 := &namedTool{name: "mytool"}
+		cm.EXPECT().WithTools(gomock.Any()).Return(cm, nil).AnyTimes()
+
+		cm.EXPECT().Generate(gomock.Any(), gomock.Any(), gomock.Any()).
+			Return(schema.AssistantMessage("calling", []schema.ToolCall{
+				{ID: "c1", Function: schema.FunctionCall{Name: "mytool", Arguments: "{}"}},
+			}), nil).Times(1)
+
+		var capturedMsgs []*schema.Message
+		cm.EXPECT().Generate(gomock.Any(), gomock.Any(), gomock.Any()).
+			DoAndReturn(func(ctx context.Context, msgs []*schema.Message, opts ...interface{}) (*schema.Message, error) {
+				capturedMsgs = append([]*schema.Message{}, msgs...)
+				return schema.AssistantMessage("final", nil), nil
+			}).Times(1)
+
+		agent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+			Name:        "TestAgent",
+			Description: "Test agent",
+			Instruction: "You are helpful.",
+			Model:       cm,
+			ToolsConfig: ToolsConfig{
+				ToolsNodeConfig: compose.ToolsNodeConfig{
+					Tools: []tool.BaseTool{tool1},
+				},
+			},
+		})
+		assert.NoError(t, err)
+
+		iter := agent.Run(ctx, &AgentInput{Messages: []Message{schema.UserMessage("hello")}})
+		for {
+			_, ok := iter.Next()
+			if !ok {
+				break
+			}
+		}
+
+		assert.NotNil(t, capturedMsgs)
+		assert.Equal(t, 4, len(capturedMsgs),
+			"expected [system, user, assistant, tool_result], got %d messages", len(capturedMsgs))
+		assert.Equal(t, schema.System, capturedMsgs[0].Role)
+		assert.Equal(t, schema.User, capturedMsgs[1].Role)
+		assert.Equal(t, schema.Assistant, capturedMsgs[2].Role)
+		assert.Equal(t, schema.Tool, capturedMsgs[3].Role)
+
+		toolResultCount := 0
+		for _, msg := range capturedMsgs {
+			if msg.Role == schema.Tool {
+				toolResultCount++
+			}
+		}
+		assert.Equal(t, 1, toolResultCount,
+			"tool result should appear exactly once, got %d", toolResultCount)
+	})
+
+	t.Run("HandlerInjectedMessagePresentWithoutDuplication", func(t *testing.T) {
+		ctx := context.Background()
+		ctrl := gomock.NewController(t)
+		cm := mockModel.NewMockToolCallingChatModel(ctrl)
+
+		tool1 := &namedTool{name: "mytool"}
+		cm.EXPECT().WithTools(gomock.Any()).Return(cm, nil).AnyTimes()
+
+		cm.EXPECT().Generate(gomock.Any(), gomock.Any(), gomock.Any()).
+			Return(schema.AssistantMessage("calling", []schema.ToolCall{
+				{ID: "c1", Function: schema.FunctionCall{Name: "mytool", Arguments: "{}"}},
+			}), nil).Times(1)
+
+		var capturedMsgs []*schema.Message
+		cm.EXPECT().Generate(gomock.Any(), gomock.Any(), gomock.Any()).
+			DoAndReturn(func(ctx context.Context, msgs []*schema.Message, opts ...interface{}) (*schema.Message, error) {
+				capturedMsgs = append([]*schema.Message{}, msgs...)
+				return schema.AssistantMessage("final", nil), nil
+			}).Times(1)
+
+		agent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+			Name:        "TestAgent",
+			Description: "Test agent",
+			Instruction: "You are helpful.",
+			Model:       cm,
+			ToolsConfig: ToolsConfig{
+				ToolsNodeConfig: compose.ToolsNodeConfig{
+					Tools: []tool.BaseTool{tool1},
+				},
+			},
+			Handlers: []ChatModelAgentMiddleware{
+				&testAfterToolCallsHandler{fn: func(ctx context.Context, state *ChatModelAgentState, tc *ToolCallsContext) (context.Context, *ChatModelAgentState, error) {
+					state.Messages = append(state.Messages, schema.UserMessage("injected"))
+					return ctx, state, nil
+				}},
+			},
+		})
+		assert.NoError(t, err)
+
+		iter := agent.Run(ctx, &AgentInput{Messages: []Message{schema.UserMessage("hello")}})
+		for {
+			_, ok := iter.Next()
+			if !ok {
+				break
+			}
+		}
+
+		assert.NotNil(t, capturedMsgs)
+		assert.Equal(t, 5, len(capturedMsgs),
+			"expected [system, user, assistant, tool_result, injected], got %d messages", len(capturedMsgs))
+		assert.Equal(t, schema.System, capturedMsgs[0].Role)
+		assert.Equal(t, schema.User, capturedMsgs[1].Role)
+		assert.Equal(t, schema.Assistant, capturedMsgs[2].Role)
+		assert.Equal(t, schema.Tool, capturedMsgs[3].Role)
+		assert.Equal(t, "injected", capturedMsgs[4].Content)
+
+		toolResultCount := 0
+		for _, msg := range capturedMsgs {
+			if msg.Role == schema.Tool {
+				toolResultCount++
+			}
+		}
+		assert.Equal(t, 1, toolResultCount,
+			"tool result should appear exactly once, got %d", toolResultCount)
+	})
+}

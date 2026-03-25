@@ -627,7 +627,7 @@ func (w *stateModelWrapper) Generate(ctx context.Context, input []*schema.Messag
 		return nil
 	})
 
-	state := &ChatModelAgentState{Messages: append(stateMessages, input...)}
+	state := &ChatModelAgentState{Messages: stateMessages}
 
 	for _, m := range w.middlewares {
 		if m.BeforeChatModel != nil {
@@ -693,7 +693,7 @@ func (w *stateModelWrapper) Stream(ctx context.Context, input []*schema.Message,
 		return nil
 	})
 
-	state := &ChatModelAgentState{Messages: append(stateMessages, input...)}
+	state := &ChatModelAgentState{Messages: stateMessages}
 
 	for _, m := range w.middlewares {
 		if m.BeforeChatModel != nil {

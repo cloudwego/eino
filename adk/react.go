@@ -313,6 +313,10 @@ func newReact(ctx context.Context, config *reactConfig) (reactGraph, error) {
 	cancelCtx := config.cancelCtx
 	g := compose.NewGraph[*reactInput, Message](compose.WithGenLocalState(genReactState(config)))
 	_ = g.AddLambdaNode(initNode_, compose.InvokableLambda(func(ctx context.Context, input *reactInput) ([]Message, error) {
+		_ = compose.ProcessState(ctx, func(_ context.Context, st *State) error {
+			st.Messages = append(st.Messages, input.Messages...)
+			return nil
+		})
 		return input.Messages, nil
 	}), compose.WithNodeName(initNode_))
 
@@ -384,35 +388,30 @@ func newReact(ctx context.Context, config *reactConfig) (reactGraph, error) {
 	// AfterToolCalls node: calls AfterToolCallsRewriteState handlers after all tool calls complete.
 	// The graph auto-materializes the ToolsNode stream into []Message before this node.
 	afterToolCalls := func(ctx context.Context, toolResults []Message) ([]Message, error) {
-		if config.modelWrapperConf == nil || len(config.modelWrapperConf.handlers) == 0 {
-			return toolResults, nil
-		}
-
 		var stateMessages []Message
 		_ = compose.ProcessState(ctx, func(_ context.Context, st *State) error {
 			stateMessages = st.Messages
 			return nil
 		})
 
-		// Build ToolCallsContext from the assistant message (last msg before tool results).
-		assistantMsg := stateMessages[len(stateMessages)-1]
-		tc := &ToolCallsContext{}
-		for _, toolCall := range assistantMsg.ToolCalls {
-			tc.ToolCalls = append(tc.ToolCalls, ToolContext{Name: toolCall.Function.Name, CallID: toolCall.ID})
-		}
-
-		// Provide state with tool results appended for the middleware to see.
 		state := &ChatModelAgentState{Messages: append(stateMessages, toolResults...)}
 
-		for _, handler := range config.modelWrapperConf.handlers {
-			var err error
-			ctx, state, err = handler.AfterToolCallsRewriteState(ctx, state, tc)
-			if err != nil {
-				return nil, err
+		if config.modelWrapperConf != nil {
+			assistantMsg := stateMessages[len(stateMessages)-1]
+			tc := &ToolCallsContext{}
+			for _, toolCall := range assistantMsg.ToolCalls {
+				tc.ToolCalls = append(tc.ToolCalls, ToolContext{Name: toolCall.Function.Name, CallID: toolCall.ID})
+			}
+
+			for _, handler := range config.modelWrapperConf.handlers {
+				var err error
+				ctx, state, err = handler.AfterToolCallsRewriteState(ctx, state, tc)
+				if err != nil {
+					return nil, err
+				}
 			}
 		}
 
-		// Write modified state back.
 		_ = compose.ProcessState(ctx, func(_ context.Context, st *State) error {
 			st.Messages = state.Messages
 			return nil
