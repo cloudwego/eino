@@ -37,7 +37,7 @@ type testInstructionHandler struct {
 	text string
 }
 
-func (h *testInstructionHandler) BeforeAgent(ctx context.Context, runCtx *ChatModelAgentContext) (context.Context, *ChatModelAgentContext, error) {
+func (h *testInstructionHandler) BeforeAgent(ctx context.Context, runCtx *ChatModelAgentContext[*schema.Message]) (context.Context, *ChatModelAgentContext[*schema.Message], error) {
 	if runCtx.Instruction == "" {
 		runCtx.Instruction = h.text
 	} else if h.text != "" {
@@ -51,7 +51,7 @@ type testInstructionFuncHandler struct {
 	fn func(ctx context.Context, instruction string) (context.Context, string, error)
 }
 
-func (h *testInstructionFuncHandler) BeforeAgent(ctx context.Context, runCtx *ChatModelAgentContext) (context.Context, *ChatModelAgentContext, error) {
+func (h *testInstructionFuncHandler) BeforeAgent(ctx context.Context, runCtx *ChatModelAgentContext[*schema.Message]) (context.Context, *ChatModelAgentContext[*schema.Message], error) {
 	newCtx, newInstruction, err := h.fn(ctx, runCtx.Instruction)
 	if err != nil {
 		return ctx, runCtx, err
@@ -65,7 +65,7 @@ type testToolsHandler struct {
 	tools []tool.BaseTool
 }
 
-func (h *testToolsHandler) BeforeAgent(ctx context.Context, runCtx *ChatModelAgentContext) (context.Context, *ChatModelAgentContext, error) {
+func (h *testToolsHandler) BeforeAgent(ctx context.Context, runCtx *ChatModelAgentContext[*schema.Message]) (context.Context, *ChatModelAgentContext[*schema.Message], error) {
 	runCtx.Tools = append(runCtx.Tools, h.tools...)
 	return ctx, runCtx, nil
 }
@@ -75,7 +75,7 @@ type testToolsFuncHandler struct {
 	fn func(ctx context.Context, tools []tool.BaseTool, returnDirectly map[string]bool) (context.Context, []tool.BaseTool, map[string]bool, error)
 }
 
-func (h *testToolsFuncHandler) BeforeAgent(ctx context.Context, runCtx *ChatModelAgentContext) (context.Context, *ChatModelAgentContext, error) {
+func (h *testToolsFuncHandler) BeforeAgent(ctx context.Context, runCtx *ChatModelAgentContext[*schema.Message]) (context.Context, *ChatModelAgentContext[*schema.Message], error) {
 	newCtx, newTools, newReturnDirectly, err := h.fn(ctx, runCtx.Tools, runCtx.ReturnDirectly)
 	if err != nil {
 		return ctx, runCtx, err
@@ -87,10 +87,10 @@ func (h *testToolsFuncHandler) BeforeAgent(ctx context.Context, runCtx *ChatMode
 
 type testBeforeAgentHandler struct {
 	*BaseChatModelAgentMiddleware
-	fn func(ctx context.Context, runCtx *ChatModelAgentContext) (context.Context, *ChatModelAgentContext, error)
+	fn func(ctx context.Context, runCtx *ChatModelAgentContext[*schema.Message]) (context.Context, *ChatModelAgentContext[*schema.Message], error)
 }
 
-func (h *testBeforeAgentHandler) BeforeAgent(ctx context.Context, runCtx *ChatModelAgentContext) (context.Context, *ChatModelAgentContext, error) {
+func (h *testBeforeAgentHandler) BeforeAgent(ctx context.Context, runCtx *ChatModelAgentContext[*schema.Message]) (context.Context, *ChatModelAgentContext[*schema.Message], error) {
 	return h.fn(ctx, runCtx)
 }
 
@@ -894,10 +894,10 @@ func TestContextPropagation(t *testing.T) {
 			Description: "Test agent",
 			Model:       cm,
 			Handlers: []ChatModelAgentMiddleware{
-				&testBeforeAgentHandler{fn: func(ctx context.Context, runCtx *ChatModelAgentContext) (context.Context, *ChatModelAgentContext, error) {
+				&testBeforeAgentHandler{fn: func(ctx context.Context, runCtx *ChatModelAgentContext[*schema.Message]) (context.Context, *ChatModelAgentContext[*schema.Message], error) {
 					return context.WithValue(ctx, key1, "value1"), runCtx, nil
 				}},
-				&testBeforeAgentHandler{fn: func(ctx context.Context, runCtx *ChatModelAgentContext) (context.Context, *ChatModelAgentContext, error) {
+				&testBeforeAgentHandler{fn: func(ctx context.Context, runCtx *ChatModelAgentContext[*schema.Message]) (context.Context, *ChatModelAgentContext[*schema.Message], error) {
 					handler2ReceivedValue = ctx.Value(key1)
 					return ctx, runCtx, nil
 				}},
@@ -962,7 +962,7 @@ func TestHandlerErrorHandling(t *testing.T) {
 			Description: "Test agent",
 			Model:       cm,
 			Handlers: []ChatModelAgentMiddleware{
-				&testBeforeAgentHandler{fn: func(ctx context.Context, runCtx *ChatModelAgentContext) (context.Context, *ChatModelAgentContext, error) {
+				&testBeforeAgentHandler{fn: func(ctx context.Context, runCtx *ChatModelAgentContext[*schema.Message]) (context.Context, *ChatModelAgentContext[*schema.Message], error) {
 					return ctx, runCtx, assert.AnError
 				}},
 			},
@@ -1042,7 +1042,7 @@ type countingHandler struct {
 	mu               sync.Mutex
 }
 
-func (h *countingHandler) BeforeAgent(ctx context.Context, runCtx *ChatModelAgentContext) (context.Context, *ChatModelAgentContext, error) {
+func (h *countingHandler) BeforeAgent(ctx context.Context, runCtx *ChatModelAgentContext[*schema.Message]) (context.Context, *ChatModelAgentContext[*schema.Message], error) {
 	h.mu.Lock()
 	h.beforeAgentCount++
 	h.mu.Unlock()

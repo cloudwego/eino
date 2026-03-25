@@ -89,13 +89,15 @@ type ModelContext = TypedModelContext[*schema.Message]
 // Handlers can modify Instruction, Tools, and ReturnDirectly to customize agent behavior.
 //
 // This type is specific to ChatModelAgent. Other agent types may define their own context types.
-type ChatModelAgentContext struct {
+type ChatModelAgentContext[M MessageType] struct {
 	// Instruction is the current instruction for the Agent execution.
 	// It includes the instruction configured for the agent, additional instructions appended by framework
 	// and AgentMiddleware, and modifications applied by previous BeforeAgent handlers.
 	// The finalized instruction after all BeforeAgent handlers are then passed to GenModelInput,
 	// to be (optionally) formatted with SessionValues and converted to system message.
 	Instruction string
+
+	AgentInput *TypedAgentInput[M]
 
 	// Tools are the raw tools (without any wrapper or tool middleware) currently configured for the Agent execution.
 	// They includes tools passed in AgentConfig, implicit tools added by framework such as transfer / exit tools,
@@ -144,7 +146,7 @@ type ChatModelAgentContext struct {
 type TypedChatModelAgentMiddleware[M MessageType] interface {
 	// BeforeAgent is called before each agent run, allowing modification of
 	// the agent's instruction and tools configuration.
-	BeforeAgent(ctx context.Context, runCtx *ChatModelAgentContext) (context.Context, *ChatModelAgentContext, error)
+	BeforeAgent(ctx context.Context, runCtx *ChatModelAgentContext[M]) (context.Context, *ChatModelAgentContext[M], error)
 
 	// AfterAgent is called after the agent run reaches a successful terminal state.
 	// Successful terminal states are: final answer (model response with no tool calls),
@@ -301,7 +303,7 @@ func (b *TypedBaseChatModelAgentMiddleware[M]) WrapModel(_ context.Context, m mo
 	return m, nil
 }
 
-func (b *TypedBaseChatModelAgentMiddleware[M]) BeforeAgent(ctx context.Context, runCtx *ChatModelAgentContext) (context.Context, *ChatModelAgentContext, error) {
+func (b *TypedBaseChatModelAgentMiddleware[M]) BeforeAgent(ctx context.Context, runCtx *ChatModelAgentContext[M]) (context.Context, *ChatModelAgentContext[M], error) {
 	return ctx, runCtx, nil
 }
 
