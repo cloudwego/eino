@@ -828,6 +828,10 @@ func (a *ChatModelAgent) buildNoToolsRunFunc(_ context.Context) runFunc {
 				if err != nil {
 					return nil, err
 				}
+				_ = compose.ProcessState(ctx, func(_ context.Context, st *State) error {
+					st.Messages = append(st.Messages, messages...)
+					return nil
+				})
 				return messages, nil
 			})).
 			AppendChatModel(wrappedModel).
