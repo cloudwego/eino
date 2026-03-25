@@ -494,11 +494,13 @@ func (a *workflowAgent) runParallel(ctx context.Context, generator *AsyncGenerat
 			var iterator *AsyncIterator[*AgentEvent]
 
 			if _, ok := agentNames[agent.Name(ctx)]; ok {
-				// This branch was interrupted and needs to be resumed.
-				iterator = agent.Resume(childContexts[idx], &ResumeInfo{
+				childResumeInfo := &ResumeInfo{
 					EnableStreaming: resumeInfo.EnableStreaming,
-					InterruptInfo:   resumeInfo.Data.(*WorkflowInterruptInfo).ParallelInterruptInfo[idx],
-				}, opts...)
+				}
+				if wfInfo, ok := resumeInfo.Data.(*WorkflowInterruptInfo); ok && wfInfo != nil {
+					childResumeInfo.InterruptInfo = wfInfo.ParallelInterruptInfo[idx]
+				}
+				iterator = agent.Resume(childContexts[idx], childResumeInfo, opts...)
 			} else if parState != nil {
 				// We are resuming, but this child is not in the next points map.
 				// This means it finished successfully, so we don't run it.

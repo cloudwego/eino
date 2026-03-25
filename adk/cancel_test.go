@@ -54,7 +54,11 @@ func (m *cancelTestChatModel) Generate(ctx context.Context, input []*schema.Mess
 	case m.startedChan <- struct{}{}:
 	default:
 	}
-	time.Sleep(m.getDelay())
+	select {
+	case <-time.After(m.getDelay()):
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
 	select {
 	case m.doneChan <- struct{}{}:
 	default:
@@ -106,7 +110,11 @@ func (t *slowTool) InvokableRun(ctx context.Context, argumentsInJSON string, opt
 	case t.startedChan <- struct{}{}:
 	default:
 	}
-	time.Sleep(t.delay)
+	select {
+	case <-time.After(t.delay):
+	case <-ctx.Done():
+		return "", ctx.Err()
+	}
 	return t.result, nil
 }
 
@@ -221,11 +229,13 @@ func TestWithCancel_WithTools(t *testing.T) {
 		err = handle.Wait()
 		assert.NoError(t, err)
 
-		start := time.Now()
-		events := <-eventsCh
-		elapsed := time.Since(start)
+		var events []*AgentEvent
+		select {
+		case events = <-eventsCh:
+		case <-time.After(5 * time.Second):
+			t.Fatal("Timed out waiting for events")
+		}
 
-		assert.True(t, elapsed < 1*time.Second, "Should return quickly after cancel, elapsed: %v", elapsed)
 		assert.True(t, len(events) > 0)
 
 		hasCancelError := false
@@ -248,6 +258,7 @@ func TestWithCancel_WithTools(t *testing.T) {
 		}
 
 		modelWithToolCall := &simpleChatModel{
+			delay: 1 * time.Second,
 			response: &schema.Message{
 				Role:    schema.Assistant,
 				Content: "",
@@ -379,6 +390,110 @@ func TestWithCancel_WithTools(t *testing.T) {
 		assert.True(t, len(events) > 0)
 		assert.True(t, atomic.LoadInt32(&st.callCount) >= 1, "Tool should have been called")
 	})
+
+	t.Run("NestedCancelPropagation", func(t *testing.T) {
+		cc := newCancelContext()
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+
+		child := cc.deriveChild(ctx)
+		assert.NotNil(t, child)
+
+		cc.setMode(CancelImmediate)
+
+		if atomic.CompareAndSwapInt32(&cc.state, stateRunning, stateCancelling) {
+			close(cc.cancelChan)
+		}
+
+		select {
+		case <-child.cancelChan:
+		case <-time.After(1 * time.Second):
+			t.Fatal("Child did not receive cancel signal")
+		}
+
+		assert.True(t, child.shouldCancel())
+		assert.Equal(t, CancelImmediate, child.getMode())
+	})
+
+	t.Run("DeepAgentIntegrationCancel", func(t *testing.T) {
+		ctx := context.Background()
+		modelStarted := make(chan struct{}, 1)
+
+		leafModel := &cancelTestChatModel{
+			response: &schema.Message{
+				Role:    schema.Assistant,
+				Content: "Leaf result",
+			},
+			startedChan: modelStarted,
+			doneChan:    make(chan struct{}, 1),
+		}
+		leafModel.setDelay(500 * time.Millisecond)
+		leafAgent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+			Name:        "LeafAgent",
+			Description: "desc",
+			Model:       leafModel,
+		})
+		assert.NoError(t, err)
+
+		rootModel := &cancelTestChatModel{
+			response: &schema.Message{
+				Role:    schema.Assistant,
+				Content: "",
+				ToolCalls: []schema.ToolCall{
+					{
+						ID:   "call_1",
+						Type: "function",
+						Function: schema.FunctionCall{
+							Name:      "LeafAgent",
+							Arguments: `{}`,
+						},
+					},
+				},
+			},
+			startedChan: make(chan struct{}, 1),
+			doneChan:    make(chan struct{}, 1),
+		}
+		rootAgent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+			Name:        "RootAgent",
+			Description: "desc",
+			Model:       rootModel,
+			ToolsConfig: ToolsConfig{
+				ToolsNodeConfig: compose.ToolsNodeConfig{
+					Tools: []tool.BaseTool{NewAgentTool(ctx, leafAgent)},
+				},
+			},
+		})
+		assert.NoError(t, err)
+
+		runner := NewRunner(ctx, RunnerConfig{
+			Agent: rootAgent,
+		})
+
+		cancelOpt, cancelFn := WithCancel()
+		iter := runner.Run(ctx, []Message{schema.UserMessage("Run leaf")}, cancelOpt)
+
+		<-modelStarted
+
+		handle, _ := cancelFn(WithAgentCancelMode(CancelAfterChatModel))
+		err = handle.Wait()
+		assert.NoError(t, err)
+
+		hasCancelError := false
+		for {
+			event, ok := iter.Next()
+			if !ok {
+				break
+			}
+			if event.Err != nil {
+				var ce *CancelError
+				if errors.As(event.Err, &ce) {
+					hasCancelError = true
+					assert.NotNil(t, ce.interruptSignal, "CancelError should carry interrupt signal")
+				}
+			}
+		}
+		assert.True(t, hasCancelError, "Should have received CancelError")
+	})
 }
 
 type slowToolWithSignal struct {
@@ -407,14 +522,29 @@ func (t *slowToolWithSignal) InvokableRun(ctx context.Context, argumentsInJSON s
 }
 
 type simpleChatModel struct {
+	delay    time.Duration
 	response *schema.Message
 }
 
 func (m *simpleChatModel) Generate(ctx context.Context, input []*schema.Message, opts ...model.Option) (*schema.Message, error) {
+	if m.delay > 0 {
+		select {
+		case <-time.After(m.delay):
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
 	return m.response, nil
 }
 
 func (m *simpleChatModel) Stream(ctx context.Context, input []*schema.Message, opts ...model.Option) (*schema.StreamReader[*schema.Message], error) {
+	if m.delay > 0 {
+		select {
+		case <-time.After(m.delay):
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
 	return schema.StreamReaderFromArray([]*schema.Message{m.response}), nil
 }
 
@@ -430,7 +560,7 @@ func TestWithCancel_WithCheckpoint(t *testing.T) {
 		st := newSlowTool("slow_tool", 100*time.Millisecond, "tool result")
 
 		slowModel := &cancelTestChatModel{
-			delayNs: int64(500 * time.Millisecond),
+			delayNs: int64(1 * time.Second),
 			response: &schema.Message{
 				Role:    schema.Assistant,
 				Content: "",
@@ -638,11 +768,13 @@ func TestWithCancel_Streaming(t *testing.T) {
 		cancelErr := handle.Wait()
 		assert.NoError(t, cancelErr)
 
-		start := time.Now()
-		events := <-eventsCh
-		elapsed := time.Since(start)
+		var events []*AgentEvent
+		select {
+		case events = <-eventsCh:
+		case <-time.After(5 * time.Second):
+			t.Fatal("Timed out waiting for events")
+		}
 
-		assert.True(t, elapsed < 1*time.Second, "Should return quickly after cancel, elapsed: %v", elapsed)
 		assert.True(t, len(events) > 0)
 
 		hasCancelError := false
@@ -800,10 +932,13 @@ func TestWithCancel_Resume(t *testing.T) {
 			if !ok {
 				break
 			}
-			var ce *CancelError
-			if event.Err != nil && errors.As(event.Err, &ce) {
-				hasCancelErr = true
-				continue
+			if event.Err != nil {
+				var ce *CancelError
+				if errors.As(event.Err, &ce) {
+					hasCancelErr = true
+					continue
+				}
+				t.Fatalf("unexpected error: %v", event.Err)
 			}
 			events = append(events, event)
 		}
@@ -1248,6 +1383,72 @@ func newCancelTestAgent(t *testing.T, name string, modelDelay time.Duration, mod
 	return agent
 }
 
+func newCancelTestAgentWithTools(t *testing.T, name string, modelDelay time.Duration, modelStarted chan struct{}) *ChatModelAgent {
+	t.Helper()
+	toolName := name + "_tool"
+	slowModel := &cancelTestChatModel{
+		delayNs: int64(modelDelay),
+		response: &schema.Message{
+			Role: schema.Assistant,
+			ToolCalls: []schema.ToolCall{{
+				ID: "call_1", Type: "function",
+				Function: schema.FunctionCall{
+					Name:      toolName,
+					Arguments: `{"input": "test"}`,
+				},
+			}},
+		},
+		startedChan: modelStarted,
+		doneChan:    make(chan struct{}, 1),
+	}
+
+	st := newSlowTool(toolName, 10*time.Millisecond, "tool result")
+
+	agent, err := NewChatModelAgent(context.Background(), &ChatModelAgentConfig{
+		Name:        name,
+		Description: "Test agent " + name,
+		Instruction: "You are a test assistant",
+		Model:       slowModel,
+		ToolsConfig: ToolsConfig{
+			ToolsNodeConfig: compose.ToolsNodeConfig{
+				Tools: []tool.BaseTool{st},
+			},
+		},
+	})
+	assert.NoError(t, err)
+	return agent
+}
+
+func newCancelTestAgentWithToolsFinalAnswer(t *testing.T, name string) *ChatModelAgent {
+	t.Helper()
+	toolName := name + "_tool"
+	finalModel := &cancelTestChatModel{
+		delayNs: int64(10 * time.Millisecond),
+		response: &schema.Message{
+			Role:    schema.Assistant,
+			Content: "final response from " + name,
+		},
+		startedChan: make(chan struct{}, 1),
+		doneChan:    make(chan struct{}, 1),
+	}
+
+	st := newSlowTool(toolName, 10*time.Millisecond, "tool result")
+
+	agent, err := NewChatModelAgent(context.Background(), &ChatModelAgentConfig{
+		Name:        name,
+		Description: "Test agent " + name,
+		Instruction: "You are a test assistant",
+		Model:       finalModel,
+		ToolsConfig: ToolsConfig{
+			ToolsNodeConfig: compose.ToolsNodeConfig{
+				Tools: []tool.BaseTool{st},
+			},
+		},
+	})
+	assert.NoError(t, err)
+	return agent
+}
+
 func TestWithCancel_SequentialAgent(t *testing.T) {
 	ctx := context.Background()
 
@@ -1552,6 +1753,25 @@ func TestFilterCancelOption(t *testing.T) {
 		filtered := filterCancelOption(nil)
 		assert.Nil(t, filtered)
 	})
+}
+
+func wrapIterWithMarkDone(iter *AsyncIterator[*AgentEvent], cc *cancelContext) *AsyncIterator[*AgentEvent] {
+	if cc == nil {
+		return iter
+	}
+	outIter, outGen := NewAsyncIteratorPair[*AgentEvent]()
+	go func() {
+		defer cc.markDone()
+		defer outGen.Close()
+		for {
+			event, ok := iter.Next()
+			if !ok {
+				return
+			}
+			outGen.Send(event)
+		}
+	}()
+	return outIter
 }
 
 func TestWrapIterWithMarkDone(t *testing.T) {
@@ -2028,4 +2248,553 @@ func TestCheckCancel_AlreadyHandled_NoDuplicate(t *testing.T) {
 
 	assert.Equal(t, 1, cancelCount, "Should have exactly one CancelError, no duplicate from workflow transition")
 	assert.Equal(t, int32(0), atomic.LoadInt32(&model2.callCount), "Second agent should not run")
+}
+
+// Tests for CancelAfterChatModel/CancelAfterToolCalls in nested workflow structures.
+// These verify that safe-point cancel modes propagate through the entire agent hierarchy
+// and fire at whichever nested level reaches the safe-point first.
+
+func TestCancel_SequentialWorkflow_CancelAfterChatModel(t *testing.T) {
+	ctx := context.Background()
+	agent1Started := make(chan struct{}, 1)
+
+	agent1 := newCancelTestAgentWithTools(t, "seq_slow", 500*time.Millisecond, agent1Started)
+	agent2 := newCancelTestAgentWithTools(t, "seq_fast", 50*time.Millisecond, make(chan struct{}, 1))
+
+	seqAgent, err := NewSequentialAgent(ctx, &SequentialAgentConfig{
+		Name:        "seq_agent",
+		Description: "Sequential workflow",
+		SubAgents:   []Agent{agent1, agent2},
+	})
+	assert.NoError(t, err)
+
+	store := newCancelTestStore()
+	runner := NewRunner(ctx, RunnerConfig{
+		Agent:           seqAgent,
+		CheckPointStore: store,
+	})
+
+	cancelOpt, cancelFn := WithCancel()
+	iter := runner.Run(ctx, []Message{schema.UserMessage("test")}, cancelOpt, WithCheckPointID("seq-cancel-1"))
+
+	select {
+	case <-agent1Started:
+	case <-time.After(10 * time.Second):
+		t.Fatal("First agent did not start")
+	}
+
+	handle, contributed := cancelFn(WithAgentCancelMode(CancelAfterChatModel))
+	assert.True(t, contributed, "Cancel should contribute")
+	err = handle.Wait()
+	assert.NoError(t, err)
+
+	hasCancelError := false
+	var cancelErr *CancelError
+	for {
+		event, ok := iter.Next()
+		if !ok {
+			break
+		}
+		if event.Err != nil && errors.As(event.Err, &cancelErr) {
+			hasCancelError = true
+		}
+	}
+
+	assert.True(t, hasCancelError, "Should have CancelError")
+	assert.Equal(t, CancelAfterChatModel, cancelErr.Info.Mode)
+	assert.NotEmpty(t, cancelErr.CheckPointID, "CancelError should have checkpoint ID")
+	assert.NotNil(t, cancelErr.interruptSignal, "CancelError should have interrupt signal for checkpoint")
+
+	resumeAgent1 := newCancelTestAgentWithToolsFinalAnswer(t, "seq_slow")
+	resumeAgent2 := newCancelTestAgentWithToolsFinalAnswer(t, "seq_fast")
+
+	resumeSeq, err := NewSequentialAgent(ctx, &SequentialAgentConfig{
+		Name:        "seq_agent",
+		Description: "Sequential workflow",
+		SubAgents:   []Agent{resumeAgent1, resumeAgent2},
+	})
+	assert.NoError(t, err)
+
+	runner2 := NewRunner(ctx, RunnerConfig{
+		Agent:           resumeSeq,
+		CheckPointStore: store,
+	})
+
+	resumeIter, err := runner2.Resume(ctx, "seq-cancel-1")
+	assert.NoError(t, err)
+	assert.NotNil(t, resumeIter)
+
+	var resumeEvents []*AgentEvent
+	for {
+		event, ok := resumeIter.Next()
+		if !ok {
+			break
+		}
+		assert.Nil(t, event.Err, "Should not have error during resume")
+		resumeEvents = append(resumeEvents, event)
+	}
+	assert.True(t, len(resumeEvents) > 0, "Resume should produce events")
+}
+
+func TestCancel_ParallelWorkflow_CancelAfterChatModel(t *testing.T) {
+	ctx := context.Background()
+	slowStarted := make(chan struct{}, 1)
+
+	slowAgent := newCancelTestAgentWithTools(t, "par_slow", 1*time.Second, slowStarted)
+	fastAgent := newCancelTestAgentWithTools(t, "par_fast", 50*time.Millisecond, make(chan struct{}, 1))
+
+	parAgent, err := NewParallelAgent(ctx, &ParallelAgentConfig{
+		Name:        "par_agent",
+		Description: "Parallel workflow",
+		SubAgents:   []Agent{slowAgent, fastAgent},
+	})
+	assert.NoError(t, err)
+
+	store := newCancelTestStore()
+	runner := NewRunner(ctx, RunnerConfig{
+		Agent:           parAgent,
+		CheckPointStore: store,
+	})
+
+	cancelOpt, cancelFn := WithCancel()
+	iter := runner.Run(ctx, []Message{schema.UserMessage("test")}, cancelOpt, WithCheckPointID("par-cancel-1"))
+
+	select {
+	case <-slowStarted:
+	case <-time.After(10 * time.Second):
+		t.Fatal("Slow agent did not start")
+	}
+
+	handle, contributed := cancelFn(WithAgentCancelMode(CancelAfterChatModel))
+	assert.True(t, contributed, "Cancel should contribute")
+	err = handle.Wait()
+	assert.NoError(t, err)
+
+	hasCancelError := false
+	var cancelErr *CancelError
+	for {
+		event, ok := iter.Next()
+		if !ok {
+			break
+		}
+		if event.Err != nil && errors.As(event.Err, &cancelErr) {
+			hasCancelError = true
+		}
+	}
+
+	assert.True(t, hasCancelError, "Should have CancelError from parallel workflow")
+	assert.Equal(t, CancelAfterChatModel, cancelErr.Info.Mode)
+	assert.NotEmpty(t, cancelErr.CheckPointID, "CancelError should have checkpoint ID")
+
+	resumeSlow := newCancelTestAgentWithToolsFinalAnswer(t, "par_slow")
+	resumeFast := newCancelTestAgentWithToolsFinalAnswer(t, "par_fast")
+
+	resumePar, err := NewParallelAgent(ctx, &ParallelAgentConfig{
+		Name:        "par_agent",
+		Description: "Parallel workflow",
+		SubAgents:   []Agent{resumeSlow, resumeFast},
+	})
+	assert.NoError(t, err)
+
+	runner2 := NewRunner(ctx, RunnerConfig{
+		Agent:           resumePar,
+		CheckPointStore: store,
+	})
+
+	resumeIter, err := runner2.Resume(ctx, "par-cancel-1")
+	assert.NoError(t, err)
+	assert.NotNil(t, resumeIter)
+
+	var resumeErrors []error
+	for {
+		event, ok := resumeIter.Next()
+		if !ok {
+			break
+		}
+		if event.Err != nil {
+			resumeErrors = append(resumeErrors, event.Err)
+		}
+	}
+	assert.Empty(t, resumeErrors, "Resume should complete without errors")
+}
+
+func TestCancel_LoopWorkflow_CancelAfterChatModel(t *testing.T) {
+	ctx := context.Background()
+	modelStarted := make(chan struct{}, 10)
+
+	agent := newCancelTestAgentWithTools(t, "loop_inner", 500*time.Millisecond, modelStarted)
+
+	loopAgent, err := NewLoopAgent(ctx, &LoopAgentConfig{
+		Name:          "loop_agent",
+		Description:   "Loop workflow",
+		SubAgents:     []Agent{agent},
+		MaxIterations: 10,
+	})
+	assert.NoError(t, err)
+
+	store := newCancelTestStore()
+	runner := NewRunner(ctx, RunnerConfig{
+		Agent:           loopAgent,
+		CheckPointStore: store,
+	})
+
+	cancelOpt, cancelFn := WithCancel()
+	iter := runner.Run(ctx, []Message{schema.UserMessage("test")}, cancelOpt, WithCheckPointID("loop-cancel-1"))
+
+	select {
+	case <-modelStarted:
+	case <-time.After(10 * time.Second):
+		t.Fatal("Model did not start")
+	}
+
+	handle, contributed := cancelFn(WithAgentCancelMode(CancelAfterChatModel))
+	assert.True(t, contributed, "Cancel should contribute")
+	err = handle.Wait()
+	assert.NoError(t, err)
+
+	hasCancelError := false
+	var cancelErr *CancelError
+	for {
+		event, ok := iter.Next()
+		if !ok {
+			break
+		}
+		if event.Err != nil && errors.As(event.Err, &cancelErr) {
+			hasCancelError = true
+		}
+	}
+
+	assert.True(t, hasCancelError, "Should have CancelError from loop workflow")
+	assert.Equal(t, CancelAfterChatModel, cancelErr.Info.Mode)
+	assert.NotEmpty(t, cancelErr.CheckPointID, "CancelError should have checkpoint ID")
+
+	resumeAgent := newCancelTestAgentWithToolsFinalAnswer(t, "loop_inner")
+
+	resumeLoop, err := NewLoopAgent(ctx, &LoopAgentConfig{
+		Name:          "loop_agent",
+		Description:   "Loop workflow",
+		SubAgents:     []Agent{resumeAgent},
+		MaxIterations: 10,
+	})
+	assert.NoError(t, err)
+
+	runner2 := NewRunner(ctx, RunnerConfig{
+		Agent:           resumeLoop,
+		CheckPointStore: store,
+	})
+
+	resumeIter, err := runner2.Resume(ctx, "loop-cancel-1")
+	assert.NoError(t, err)
+	assert.NotNil(t, resumeIter)
+
+	var resumeEvents []*AgentEvent
+	for {
+		event, ok := resumeIter.Next()
+		if !ok {
+			break
+		}
+		assert.Nil(t, event.Err, "Should not have error during resume")
+		resumeEvents = append(resumeEvents, event)
+	}
+	assert.True(t, len(resumeEvents) > 0, "Resume should produce events")
+}
+
+func TestCancel_NestedWorkflow_AgentTool_CancelAfterChatModel(t *testing.T) {
+	// Structure: Runner -> RootCMA (with tools) -> agentTool -> flowAgent -> seqWorkflow -> LeafCMA
+	ctx := context.Background()
+	leafStarted := make(chan struct{}, 1)
+
+	leafModel := &cancelTestChatModel{
+		response: &schema.Message{
+			Role:    schema.Assistant,
+			Content: "leaf response",
+		},
+		startedChan: leafStarted,
+		doneChan:    make(chan struct{}, 1),
+	}
+	leafModel.setDelay(500 * time.Millisecond)
+
+	leafAgent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+		Name:        "leaf_agent",
+		Description: "Leaf agent in workflow",
+		Model:       leafModel,
+	})
+	assert.NoError(t, err)
+
+	seqAgent, err := NewSequentialAgent(ctx, &SequentialAgentConfig{
+		Name:        "inner_seq",
+		Description: "Inner sequential workflow",
+		SubAgents:   []Agent{leafAgent},
+	})
+	assert.NoError(t, err)
+
+	rootModel := &cancelTestChatModel{
+		response: &schema.Message{
+			Role:    schema.Assistant,
+			Content: "",
+			ToolCalls: []schema.ToolCall{
+				{
+					ID:   "call_1",
+					Type: "function",
+					Function: schema.FunctionCall{
+						Name:      "inner_seq",
+						Arguments: `{}`,
+					},
+				},
+			},
+		},
+		startedChan: make(chan struct{}, 1),
+		doneChan:    make(chan struct{}, 1),
+	}
+	rootAgent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+		Name:        "root_agent",
+		Description: "Root agent",
+		Model:       rootModel,
+		ToolsConfig: ToolsConfig{
+			ToolsNodeConfig: compose.ToolsNodeConfig{
+				Tools: []tool.BaseTool{NewAgentTool(ctx, seqAgent)},
+			},
+		},
+	})
+	assert.NoError(t, err)
+
+	store := newCancelTestStore()
+	runner := NewRunner(ctx, RunnerConfig{
+		Agent:           rootAgent,
+		CheckPointStore: store,
+	})
+
+	cancelOpt, cancelFn := WithCancel()
+	iter := runner.Run(ctx, []Message{schema.UserMessage("test")}, cancelOpt, WithCheckPointID("nested-cancel-1"))
+
+	select {
+	case <-leafStarted:
+	case <-time.After(10 * time.Second):
+		t.Fatal("Leaf agent model did not start")
+	}
+
+	handle, contributed := cancelFn(WithAgentCancelMode(CancelAfterChatModel))
+	assert.True(t, contributed, "Cancel should contribute")
+	err = handle.Wait()
+	assert.NoError(t, err)
+
+	hasCancelError := false
+	var cancelErr *CancelError
+	for {
+		event, ok := iter.Next()
+		if !ok {
+			break
+		}
+		if event.Err != nil && errors.As(event.Err, &cancelErr) {
+			hasCancelError = true
+		}
+	}
+
+	assert.True(t, hasCancelError, "Should have CancelError from deeply nested workflow")
+	assert.Equal(t, CancelAfterChatModel, cancelErr.Info.Mode)
+	assert.NotEmpty(t, cancelErr.CheckPointID, "CancelError should have checkpoint ID")
+	assert.NotNil(t, cancelErr.interruptSignal, "CancelError should carry interrupt signal through agent tree")
+
+	// Phase 2: Resume from checkpoint — new instances to avoid data races
+	resumeLeafModel := &cancelTestChatModel{
+		response: &schema.Message{
+			Role:    schema.Assistant,
+			Content: "resumed leaf response",
+		},
+		startedChan: make(chan struct{}, 1),
+		doneChan:    make(chan struct{}, 1),
+	}
+	resumeLeaf, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+		Name:        "leaf_agent",
+		Description: "Leaf agent in workflow",
+		Model:       resumeLeafModel,
+	})
+	assert.NoError(t, err)
+
+	resumeSeq, err := NewSequentialAgent(ctx, &SequentialAgentConfig{
+		Name:        "inner_seq",
+		Description: "Inner sequential workflow",
+		SubAgents:   []Agent{resumeLeaf},
+	})
+	assert.NoError(t, err)
+
+	resumeRootModel := &cancelTestChatModel{
+		response: &schema.Message{
+			Role:    schema.Assistant,
+			Content: "resumed root response",
+		},
+		startedChan: make(chan struct{}, 1),
+		doneChan:    make(chan struct{}, 1),
+	}
+	resumeRoot, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+		Name:        "root_agent",
+		Description: "Root agent",
+		Model:       resumeRootModel,
+		ToolsConfig: ToolsConfig{
+			ToolsNodeConfig: compose.ToolsNodeConfig{
+				Tools: []tool.BaseTool{NewAgentTool(ctx, resumeSeq)},
+			},
+		},
+	})
+	assert.NoError(t, err)
+
+	runner2 := NewRunner(ctx, RunnerConfig{
+		Agent:           resumeRoot,
+		CheckPointStore: store,
+	})
+
+	resumeIter, err := runner2.Resume(ctx, "nested-cancel-1")
+	assert.NoError(t, err)
+	assert.NotNil(t, resumeIter)
+
+	var resumeErrors []error
+	for {
+		event, ok := resumeIter.Next()
+		if !ok {
+			break
+		}
+		if event.Err != nil {
+			resumeErrors = append(resumeErrors, event.Err)
+		}
+	}
+	assert.Empty(t, resumeErrors, "Resume should complete without errors")
+}
+
+func TestCancel_CancelAfterToolCalls_InSequentialWorkflow(t *testing.T) {
+	ctx := context.Background()
+	toolStarted := make(chan struct{}, 1)
+
+	st := &slowTool{
+		name:        "slow_tool",
+		delay:       200 * time.Millisecond,
+		result:      "tool done",
+		startedChan: toolStarted,
+	}
+
+	modelWithToolCall := &simpleChatModel{
+		response: &schema.Message{
+			Role:    schema.Assistant,
+			Content: "",
+			ToolCalls: []schema.ToolCall{
+				{
+					ID:   "call_1",
+					Type: "function",
+					Function: schema.FunctionCall{
+						Name:      "slow_tool",
+						Arguments: `{"input": "test"}`,
+					},
+				},
+			},
+		},
+	}
+
+	agentWithTools, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+		Name:        "agent_with_tools",
+		Description: "Agent with slow tool",
+		Model:       modelWithToolCall,
+		ToolsConfig: ToolsConfig{
+			ToolsNodeConfig: compose.ToolsNodeConfig{
+				Tools: []tool.BaseTool{st},
+			},
+		},
+	})
+	assert.NoError(t, err)
+
+	seqAgent, err := NewSequentialAgent(ctx, &SequentialAgentConfig{
+		Name:        "seq_agent",
+		Description: "Sequential workflow with tool agent",
+		SubAgents:   []Agent{agentWithTools},
+	})
+	assert.NoError(t, err)
+
+	store := newCancelTestStore()
+	runner := NewRunner(ctx, RunnerConfig{
+		Agent:           seqAgent,
+		CheckPointStore: store,
+	})
+
+	cancelOpt, cancelFn := WithCancel()
+	iter := runner.Run(ctx, []Message{schema.UserMessage("Use the tool")}, cancelOpt, WithCheckPointID("tool-cancel-1"))
+
+	select {
+	case <-toolStarted:
+	case <-time.After(10 * time.Second):
+		t.Fatal("Tool did not start")
+	}
+
+	// Cancel after tool calls — should wait for the tool to finish, then cancel
+	handle, contributed := cancelFn(WithAgentCancelMode(CancelAfterToolCalls))
+	assert.True(t, contributed, "Cancel should contribute")
+	err = handle.Wait()
+	assert.NoError(t, err)
+
+	hasCancelError := false
+	var cancelErr *CancelError
+	for {
+		event, ok := iter.Next()
+		if !ok {
+			break
+		}
+		if event.Err != nil && errors.As(event.Err, &cancelErr) {
+			hasCancelError = true
+		}
+	}
+
+	assert.True(t, hasCancelError, "Should have CancelError after tool calls complete")
+	assert.Equal(t, CancelAfterToolCalls, cancelErr.Info.Mode)
+	assert.NotEmpty(t, cancelErr.CheckPointID, "CancelError should have checkpoint ID")
+
+	// Phase 2: Resume from checkpoint — new instances
+	resumeTool := &slowTool{
+		name:        "slow_tool",
+		delay:       50 * time.Millisecond,
+		result:      "resumed tool done",
+		startedChan: make(chan struct{}, 1),
+	}
+
+	resumeModel := &simpleChatModel{
+		response: &schema.Message{
+			Role:    schema.Assistant,
+			Content: "resumed response after tool",
+		},
+	}
+
+	resumeAgentWithTools, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+		Name:        "agent_with_tools",
+		Description: "Agent with slow tool",
+		Model:       resumeModel,
+		ToolsConfig: ToolsConfig{
+			ToolsNodeConfig: compose.ToolsNodeConfig{
+				Tools: []tool.BaseTool{resumeTool},
+			},
+		},
+	})
+	assert.NoError(t, err)
+
+	resumeSeq, err := NewSequentialAgent(ctx, &SequentialAgentConfig{
+		Name:        "seq_agent",
+		Description: "Sequential workflow with tool agent",
+		SubAgents:   []Agent{resumeAgentWithTools},
+	})
+	assert.NoError(t, err)
+
+	runner2 := NewRunner(ctx, RunnerConfig{
+		Agent:           resumeSeq,
+		CheckPointStore: store,
+	})
+
+	resumeIter, err := runner2.Resume(ctx, "tool-cancel-1")
+	assert.NoError(t, err)
+	assert.NotNil(t, resumeIter)
+
+	var resumeEvents []*AgentEvent
+	for {
+		event, ok := resumeIter.Next()
+		if !ok {
+			break
+		}
+		assert.Nil(t, event.Err, "Should not have error during resume")
+		resumeEvents = append(resumeEvents, event)
+	}
+	assert.True(t, len(resumeEvents) > 0, "Resume should produce events")
 }

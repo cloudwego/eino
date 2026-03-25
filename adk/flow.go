@@ -364,24 +364,18 @@ func (a *flowAgent) Run(ctx context.Context, input *AgentInput, opts ...AgentRun
 	if wf, ok := a.Agent.(*workflowAgent); ok {
 		ctx = withCancelContext(ctx, cancelCtx)
 		filteredOpts := filterCancelOption(filterCallbackHandlersForNestedAgents(agentName, opts))
-		innerIter := wf.Run(ctx, input, filteredOpts...)
-		return wrapIterWithMarkDone(wrapIterWithOnEnd(ctx, innerIter), cancelCtx)
+		iter := wf.Run(ctx, input, filteredOpts...)
+		iter = wrapIterWithCancelCtx(iter, cancelCtx)
+		return wrapIterWithOnEnd(ctx, iter)
 	}
 
 	aIter := a.Agent.Run(withCancelContext(ctx, cancelCtx), input, filterOptions(agentName, opts)...)
 
 	iterator, generator := NewAsyncIteratorPair[*AgentEvent]()
 
-	go func() {
-		if cancelCtx != nil {
-			defer cancelCtx.markDone()
-		}
-		cancelCtxApplied := withCancelContext(ctx, cancelCtx)
-		cancelCtxForSubAgents := withCancelContext(ctxForSubAgents, cancelCtx)
-		a.run(cancelCtxApplied, cancelCtxForSubAgents, runCtx, aIter, generator, filterCancelOption(opts)...)
-	}()
+	go a.run(withCancelContext(ctx, cancelCtx), withCancelContext(ctxForSubAgents, cancelCtx), runCtx, aIter, generator, filterCancelOption(opts)...)
 
-	return iterator
+	return wrapIterWithCancelCtx(iterator, cancelCtx)
 }
 
 func (a *flowAgent) Resume(ctx context.Context, info *ResumeInfo, opts ...AgentRunOption) *AsyncIterator[*AgentEvent] {
@@ -405,20 +399,15 @@ func (a *flowAgent) Resume(ctx context.Context, info *ResumeInfo, opts ...AgentR
 				ctx = withCancelContext(ctx, cancelCtx)
 				filteredOpts := filterCancelOption(filterCallbackHandlersForNestedAgents(agentName, opts))
 				aIter := ra.Resume(ctx, info, filteredOpts...)
-				return wrapIterWithMarkDone(wrapIterWithOnEnd(ctx, aIter), cancelCtx)
+				aIter = wrapIterWithCancelCtx(aIter, cancelCtx)
+				return wrapIterWithOnEnd(ctx, aIter)
 			}
+
 			aIter := ra.Resume(withCancelContext(ctx, cancelCtx), info, opts...)
 
 			iterator, generator := NewAsyncIteratorPair[*AgentEvent]()
-			go func() {
-				if cancelCtx != nil {
-					defer cancelCtx.markDone()
-				}
-				cancelCtxApplied := withCancelContext(ctx, cancelCtx)
-				cancelCtxForSubAgents := withCancelContext(ctxForSubAgents, cancelCtx)
-				a.run(cancelCtxApplied, cancelCtxForSubAgents, getRunCtx(ctxForSubAgents), aIter, generator, filterCancelOption(opts)...)
-			}()
-			return iterator
+			go a.run(withCancelContext(ctx, cancelCtx), withCancelContext(ctxForSubAgents, cancelCtx), getRunCtx(ctxForSubAgents), aIter, generator, filterCancelOption(opts)...)
+			return wrapIterWithCancelCtx(iterator, cancelCtx)
 		}
 
 		if cancelCtx != nil {
@@ -442,7 +431,7 @@ func (a *flowAgent) Resume(ctx context.Context, info *ResumeInfo, opts ...AgentR
 			if ra, ok := a.Agent.(ResumableAgent); ok {
 				ctx = withCancelContext(ctx, cancelCtx)
 				innerIter := ra.Resume(ctx, info, filterCancelOption(opts)...)
-				return wrapIterWithMarkDone(wrapIterWithOnEnd(ctx, innerIter), cancelCtx)
+				return wrapIterWithCancelCtx(wrapIterWithOnEnd(ctx, innerIter), cancelCtx)
 			}
 		}
 		if cancelCtx != nil {
@@ -453,7 +442,7 @@ func (a *flowAgent) Resume(ctx context.Context, info *ResumeInfo, opts ...AgentR
 
 	ctxForSubAgents = withCancelContext(ctxForSubAgents, cancelCtx)
 	innerIter := subAgent.Resume(ctxForSubAgents, info, filterCancelOption(opts)...)
-	return wrapIterWithMarkDone(wrapIterWithOnEnd(ctx, innerIter), cancelCtx)
+	return wrapIterWithCancelCtx(wrapIterWithOnEnd(ctx, innerIter), cancelCtx)
 }
 
 type DeterministicTransferConfig struct {

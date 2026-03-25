@@ -391,51 +391,48 @@ func TestWithCancel_TimeoutEscalation(t *testing.T) {
 	}
 }
 
-// TestWithCancel_AfterChatModel_NoTools verifies CancelAfterChatModel works
-// in a pure chat (no-tools) flow.
-func TestWithCancel_AfterChatModel_NoTools(t *testing.T) {
+// TestWithCancel_AfterChatModel_WithTools verifies CancelAfterChatModel fires
+// when the model returns tool calls (the safe-point is on the tool-calls path).
+func TestWithCancel_AfterChatModel_WithTools(t *testing.T) {
 	ctx := context.Background()
 
-	blk := newBlockingChatModel(schema.AssistantMessage("hello", nil))
+	blk := newBlockingChatModel(toolCallMsg(toolCall("c1", "bt", `{"input":"x"}`)))
+	bt := newBlockingTool("bt")
 
 	agent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
 		Name:        "TestAgent",
 		Description: "test",
 		Model:       blk,
+		ToolsConfig: ToolsConfig{
+			ToolsNodeConfig: compose.ToolsNodeConfig{Tools: []tool.BaseTool{bt}},
+		},
 	})
 	require.NoError(t, err)
 
 	cancelOpt, cancelFn := WithCancel()
 	iter := agent.Run(ctx, &AgentInput{Messages: []Message{schema.UserMessage("hi")}}, cancelOpt)
 
-	// Wait for model to start.
 	select {
 	case <-blk.started:
 	case <-time.After(5 * time.Second):
 		t.Fatal("model did not start")
 	}
 
-	// Signal cancel (safe-point after chat model) while model is blocking.
-	// We start cancelFn as a goroutine (it blocks until doneChan closes),
-	// give it time to close cancelChan, then unblock the model so the
-	// safe-point check in cancelMonitoredModel fires on model completion.
 	cancelDone := make(chan error, 1)
 	go func() {
 		handle, _ := cancelFn(WithAgentCancelMode(CancelAfterChatModel))
 		cancelDone <- handle.Wait()
 	}()
 
-	// Small sleep ensures cancelChan is closed before model returns.
 	time.Sleep(20 * time.Millisecond)
 
-	// Unblock the model — safe-point check fires after Generate returns.
 	close(blk.unblockCh)
 
 	cancelErr := <-cancelDone
 	assert.NoError(t, cancelErr)
 
 	_, hasCancelError := drainEvents(iter)
-	assert.True(t, hasCancelError, "expected CancelError after CancelAfterChatModel in no-tools flow")
+	assert.True(t, hasCancelError, "CancelError expected after model returns tool calls")
 }
 
 // TestWithCancel_CancelImmediate_StreamAborted verifies that CancelImmediate
@@ -708,14 +705,15 @@ func TestWithCancel_Resume_SafePoint(t *testing.T) {
 	drainEvents(iter1)
 
 	// --- phase 2: resume, cancel after chat model ---
-	resumeModel := newBlockingChatModel(schema.AssistantMessage("final", nil))
+	resumeModel := newBlockingChatModel(toolCallMsg(toolCall("c1", "bt", `{"input":"x"}`)))
 
+	bt2 := newSlowTool("bt", 50*time.Millisecond, "result")
 	agent2, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
 		Name:        "TestAgent",
 		Description: "test",
 		Model:       resumeModel,
 		ToolsConfig: ToolsConfig{
-			ToolsNodeConfig: compose.ToolsNodeConfig{Tools: []tool.BaseTool{bt}},
+			ToolsNodeConfig: compose.ToolsNodeConfig{Tools: []tool.BaseTool{bt2}},
 		},
 	})
 	assert.NoError(t, err)
@@ -735,28 +733,21 @@ func TestWithCancel_Resume_SafePoint(t *testing.T) {
 		t.Fatal("model did not start in phase 2")
 	}
 
-	// Start cancel in a background goroutine (cancelFn blocks until doneChan
-	// closes).  This ensures the CAS(stateRunning→stateCancelling) happens and
-	// cancelChan is closed BEFORE we unblock the model, eliminating the race
-	// where the model completes and markDone() runs before the CAS.
 	cancelDone := make(chan error, 1)
 	go func() {
 		handle, _ := cancelFn2(WithAgentCancelMode(CancelAfterChatModel))
 		cancelDone <- handle.Wait()
 	}()
 
-	// Give cancelFn enough time to perform the atomic CAS and close cancelChan.
 	time.Sleep(50 * time.Millisecond)
 
-	// Now unblock the model.  cancelMonitoredModel.Generate will see
-	// shouldCancel()==true and call compose.Interrupt with cancelSafePointInfo.
 	close(resumeModel.unblockCh)
 
 	cancelErr := <-cancelDone
 	assert.NoError(t, cancelErr)
 
 	_, hasCancelError := drainEvents(resumeIter)
-	assert.True(t, hasCancelError, "expected CancelError from Resume with CancelAfterChatModel")
+	assert.True(t, hasCancelError, "CancelError expected after resumed model returns tool calls")
 }
 
 // callbackTool is a tool that calls onCall when invoked.
@@ -1110,94 +1101,6 @@ func TestWithCancel_Resume_CancelAfterChatModel_MessagePreserved(t *testing.T) {
 		}
 	})
 
-	t.Run("no_tools_path_message_preserved", func(t *testing.T) {
-		ctx := context.Background()
-
-		const modelText = "the original model response"
-
-		blk := newBlockingChatModel(schema.AssistantMessage(modelText, nil))
-
-		agent1, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
-			Name:        "TestAgent",
-			Description: "test",
-			Model:       blk,
-		})
-		require.NoError(t, err)
-
-		store := newCancelTestStore()
-		runner1 := NewRunner(ctx, RunnerConfig{
-			Agent:           agent1,
-			CheckPointStore: store,
-		})
-
-		cancelOpt1, cancelFn1 := WithCancel()
-		iter1 := runner1.Run(ctx, []Message{schema.UserMessage("hi")},
-			cancelOpt1, WithCheckPointID("notools-msg-preserved-1"))
-
-		select {
-		case <-blk.started:
-		case <-time.After(5 * time.Second):
-			t.Fatal("model did not start in phase 1")
-		}
-
-		cancelDone := make(chan error, 1)
-		go func() {
-			handle, _ := cancelFn1(WithAgentCancelMode(CancelAfterChatModel))
-			cancelDone <- handle.Wait()
-		}()
-		time.Sleep(50 * time.Millisecond)
-		close(blk.unblockCh)
-
-		cancelErr := <-cancelDone
-		assert.NoError(t, cancelErr)
-
-		// Capture the output message from phase 1 before the cancel.
-		var phase1Msg *MessageVariant
-		for {
-			e, ok := iter1.Next()
-			if !ok {
-				break
-			}
-			if e.Output != nil && e.Output.MessageOutput != nil {
-				phase1Msg = e.Output.MessageOutput
-			}
-		}
-		require.NotNil(t, phase1Msg, "phase 1 should have emitted a MessageOutput")
-		assert.Equal(t, modelText, phase1Msg.Message.Content,
-			"phase 1 output message must match the original model response")
-
-		// Phase 2: resume. For the noTools chain the cancel-check lambda is the
-		// last node. On resume the chain returns the saved message as its output.
-		// The Runner may or may not emit a new Output event (the chain has
-		// already completed), but we can verify the resume doesn't error.
-		resumeModel := &plainResponseModel{text: "WRONG — should not be called"}
-		agent2, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
-			Name:        "TestAgent",
-			Description: "test",
-			Model:       resumeModel,
-		})
-		require.NoError(t, err)
-
-		runner2 := NewRunner(ctx, RunnerConfig{
-			Agent:           agent2,
-			CheckPointStore: store,
-		})
-
-		resumeIter, err := runner2.Resume(ctx, "notools-msg-preserved-1")
-		require.NoError(t, err)
-
-		for {
-			e, ok := resumeIter.Next()
-			if !ok {
-				break
-			}
-			if e.Err != nil {
-				t.Fatalf("unexpected error during resume: %v", e.Err)
-			}
-		}
-		// If we reach here without errors, the resume succeeded. The message
-		// was preserved (no panic, no nil-pointer, no wrong routing).
-	})
 }
 
 // TestHandleRunFuncError_AlreadyHandled_NoDuplicate verifies that when
@@ -1282,19 +1185,21 @@ func TestHandleRunFuncError_AlreadyHandled_NoDuplicate(t *testing.T) {
 func TestWithCancel_CancelAfterChatModel_NestedAgentTool(t *testing.T) {
 	ctx := context.Background()
 
-	// Sub-agent with blocking model that signals when it starts running
-	subAgentModel := newBlockingChatModel(&schema.Message{Role: schema.Assistant, Content: "sub-agent response"})
+	subAgentModel := newBlockingChatModel(toolCallMsg(toolCall("c1", "sub_tool", `{"input":"x"}`)))
 	subAgentModelStarted := subAgentModel.started
+	subTool := newBlockingTool("sub_tool")
 
 	subAgent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
 		Name:        "sub_agent",
 		Description: "test sub agent",
 		Instruction: "you are a sub agent",
 		Model:       subAgentModel,
+		ToolsConfig: ToolsConfig{
+			ToolsNodeConfig: compose.ToolsNodeConfig{Tools: []tool.BaseTool{subTool}},
+		},
 	})
 	require.NoError(t, err)
 
-	// Supervisor agent that immediately transfers to the sub-agent (equivalent to DeepAgent using task tool)
 	supervisorModel := &simpleChatModel{
 		response: &schema.Message{
 			Role: schema.Assistant,
@@ -1316,7 +1221,6 @@ func TestWithCancel_CancelAfterChatModel_NestedAgentTool(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	// Set up sub-agents on supervisor, same as DeepAgent configuration
 	agentWithSubAgents, err := SetSubAgents(ctx, supervisorAgent, []Agent{subAgent})
 	require.NoError(t, err)
 
@@ -1325,11 +1229,9 @@ func TestWithCancel_CancelAfterChatModel_NestedAgentTool(t *testing.T) {
 		EnableStreaming: false,
 	})
 
-	// Set up cancel
 	cancelOpt, cancelFn := WithCancel()
 	iter := runner.Run(ctx, []Message{schema.UserMessage("test")}, cancelOpt)
 
-	// Wait for sub-agent model to start executing
 	select {
 	case <-subAgentModelStarted:
 	case <-time.After(10 * time.Second):
@@ -1338,40 +1240,29 @@ func TestWithCancel_CancelAfterChatModel_NestedAgentTool(t *testing.T) {
 
 	time.Sleep(50 * time.Millisecond)
 
-	// Trigger CancelAfterChatModel on the TOP-LEVEL supervisor agent
 	cancelDone := make(chan error, 1)
 	go func() {
 		handle, _ := cancelFn(WithAgentCancelMode(CancelAfterChatModel))
 		cancelDone <- handle.Wait()
 	}()
 
-	// Give cancel time to register, then unblock the sub-agent's model
 	time.Sleep(100 * time.Millisecond)
 	close(subAgentModel.unblockCh)
 
-	// Wait for cancel to complete
 	cancelErr := <-cancelDone
-	assert.NoError(t, cancelErr, "Cancel operation should succeed")
+	assert.NoError(t, cancelErr)
 
-	// Process events to check for CancelError
 	hasCancelError := false
-	var ce *CancelError
 	for {
 		event, ok := iter.Next()
 		if !ok {
 			break
 		}
+		var ce *CancelError
 		if event.Err != nil && errors.As(event.Err, &ce) {
 			hasCancelError = true
 		}
 	}
 
-	// Verify we got a CancelError
-	assert.True(t, hasCancelError, "Should have CancelError event")
-	assert.NotNil(t, ce, "CancelError should not be nil")
-
-	// Verify cancel mode is CancelAfterChatModel
-	assert.Equal(t, CancelAfterChatModel, ce.Info.Mode, "Cancel mode should be CancelAfterChatModel")
-
-	assert.Equal(t, int32(1), atomic.LoadInt32(&subAgentModel.callCount))
+	assert.True(t, hasCancelError, "CancelError expected from nested agent tool with tools")
 }

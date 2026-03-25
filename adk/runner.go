@@ -90,13 +90,13 @@ func (r *Runner) Run(ctx context.Context, messages []Message,
 
 	iter := fa.Run(ctx, input, opts...)
 
-	if r.store == nil {
+	if r.store == nil && o.cancelCtx == nil {
 		return iter
 	}
 
 	niter, gen := NewAsyncIteratorPair[*AgentEvent]()
 
-	go r.handleIter(ctx, iter, gen, o.checkPointID)
+	go r.handleIter(ctx, iter, gen, o.checkPointID, o.cancelCtx)
 	return niter
 }
 
@@ -179,18 +179,18 @@ func (r *Runner) resumeInternal(ctx context.Context, checkPointID string, resume
 
 	aIter := fa.Resume(ctx, resumeInfo, opts...)
 
-	if r.store == nil {
+	if r.store == nil && o.cancelCtx == nil {
 		return aIter, nil
 	}
 
 	niter, gen := NewAsyncIteratorPair[*AgentEvent]()
 
-	go r.handleIter(ctx, aIter, gen, &checkPointID)
+	go r.handleIter(ctx, aIter, gen, &checkPointID, o.cancelCtx)
 	return niter, nil
 }
 
 func (r *Runner) handleIter(ctx context.Context, aIter *AsyncIterator[*AgentEvent],
-	gen *AsyncGenerator[*AgentEvent], checkPointID *string) {
+	gen *AsyncGenerator[*AgentEvent], checkPointID *string, cancelCtx *cancelContext) {
 	defer func() {
 		panicErr := recover()
 		if panicErr != nil {
@@ -210,25 +210,22 @@ func (r *Runner) handleIter(ctx context.Context, aIter *AsyncIterator[*AgentEven
 			break
 		}
 
-		// CancelError handling — extract interrupt signal for checkpoint, forward to consumer
 		if event.Err != nil {
 			var cancelErr *CancelError
 			if errors.As(event.Err, &cancelErr) {
-				if interruptSignal != nil {
-					panic("multiple interrupt actions should not happen in Runner")
+				if cancelCtx != nil && cancelCtx.isRoot() && cancelCtx.shouldCancel() {
+					cancelCtx.markCancelHandled()
 				}
-
 				if cancelErr.interruptSignal != nil && checkPointID != nil {
 					cancelErr.CheckPointID = *checkPointID
 					cancelErr.InterruptContexts = core.ToInterruptContexts(cancelErr.interruptSignal, allowedAddressSegmentTypes)
 					err := r.saveCheckPoint(ctx, *checkPointID, &InterruptInfo{}, cancelErr.interruptSignal)
 					if err != nil {
-						gen.Send(&AgentEvent{Err: fmt.Errorf("failed to save checkpoint: %w", err)})
+						gen.Send(&AgentEvent{Err: fmt.Errorf("failed to save checkpoint on cancel: %w", err)})
 					}
 				}
-
 				gen.Send(event)
-				break // cancel terminates the event stream
+				break
 			}
 		}
 
@@ -256,8 +253,7 @@ func (r *Runner) handleIter(ctx context.Context, aIter *AsyncIterator[*AgentEven
 			legacyData = event.Action.Interrupted.Data
 
 			if checkPointID != nil {
-				// save checkpoint first before sending interrupt event,
-				// so when end-user receives interrupt event, they can resume from this checkpoint
+				// save checkpoint first before sending interrupt event, so when end-user receives interrupt event, they can resume from this checkpoint
 				err := r.saveCheckPoint(ctx, *checkPointID, &InterruptInfo{
 					Data: legacyData,
 				}, interruptSignal)

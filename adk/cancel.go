@@ -33,7 +33,6 @@ import (
 func init() {
 	schema.RegisterName[*CancelError]("_eino_adk_cancel_error")
 	schema.RegisterName[*AgentCancelInfo]("_eino_adk_agent_cancel_info")
-	schema.RegisterName[*cancelSafePointInfo]("_eino_adk_cancel_safe_point_info")
 	schema.RegisterName[*StreamCanceledError]("_eino_adk_stream_cancelled_error")
 }
 
@@ -47,10 +46,17 @@ const (
 	// CancelImmediate cancels the agent immediately without waiting
 	// for any execution point.
 	CancelImmediate CancelMode = 0
-	// CancelAfterChatModel cancels the agent after the current chat model call
-	// completes, including all streaming output.
+	// CancelAfterChatModel cancels after the first chat model call that completes
+	// anywhere in the agent hierarchy, including nested sub-agents, agent tools,
+	// and workflow branches. The cancel mode propagates to all descendant agents;
+	// whichever ChatModel finishes first triggers the cancel. The interrupting
+	// agent emits an interrupt that bubbles up through the agent tree — parent
+	// agents do not need to reach their own ChatModel safe-point.
 	CancelAfterChatModel CancelMode = 1 << iota
-	// CancelAfterToolCalls cancels the agent after all concurrent tool calls complete.
+	// CancelAfterToolCalls cancels after the first set of concurrent tool calls
+	// that completes anywhere in the agent hierarchy. Like CancelAfterChatModel,
+	// this mode propagates to all descendants and fires at whichever level
+	// reaches the safe-point first.
 	CancelAfterToolCalls
 )
 
@@ -109,6 +115,20 @@ type AgentCancelInfo struct {
 
 // CancelError is sent via AgentEvent.Err when an agent is canceled.
 // Use errors.As to match and extract *CancelError from event errors.
+//
+// Interrupt absorption: when a cancel is active (shouldCancel() == true), ANY
+// interrupt — whether from a cancel safe-point node or from business logic
+// (e.g. compose.Interrupt in a tool) — is converted to a CancelError. The
+// cancel "absorbs" the business interrupt. This is intentional:
+//
+//   - In concurrent execution (parallel workflows, concurrent tool calls),
+//     cancel-induced and business interrupts can arrive as a single composite
+//     signal that cannot be split apart.
+//   - Even in sequential execution, treating business interrupts as CancelError
+//     during active cancel gives consistent semantics.
+//   - The business interrupt is NOT lost — the checkpoint preserves the full
+//     interrupt hierarchy. On resume (Runner.Resume), the agent re-executes
+//     the interrupting code path and the business interrupt re-fires naturally.
 type CancelError struct {
 	Info *AgentCancelInfo
 
@@ -137,8 +157,14 @@ var (
 	// ErrCancelTimeout is returned by CancelHandle.Wait when the cancel operation timed out.
 	ErrCancelTimeout = errors.New("cancel timed out")
 
-	// ErrExecutionCompleted is returned by CancelHandle.Wait when the agent has already finished
-	// (completed, interrupted, or errored) before the cancel took effect.
+	// ErrExecutionCompleted is returned by CancelHandle.Wait when the agent finished
+	// before the cancel took effect. "Finished" means the event stream was fully
+	// drained without any interrupt — normal completion or a fatal error.
+	//
+	// Note: business interrupts that occur while cancel is active are absorbed
+	// into CancelError (see CancelError doc), so they result in nil (cancel
+	// succeeded), NOT ErrExecutionCompleted. Only execution that completes with
+	// no interrupt at all produces this error.
 	ErrExecutionCompleted = errors.New("execution already completed")
 
 	// ErrStreamCanceled is the error sent through the stream when CancelImmediate aborts it.
@@ -154,28 +180,6 @@ type StreamCanceledError struct{}
 
 func (e *StreamCanceledError) Error() string {
 	return "stream canceled"
-}
-
-// cancelSafePointInfo is the typed info passed to compose.Interrupt when a
-// safe-point cancel condition is met (CancelAfterChatModel or CancelAfterToolCalls).
-// handleRunFuncError uses type assertion on InterruptCtx.Info to distinguish
-// cancel-triggered safe-point interrupts from business interrupts.
-type cancelSafePointInfo struct {
-	Mode CancelMode
-}
-
-// extractCancelSafePointInfo looks for a *cancelSafePointInfo in the interrupt
-// contexts' Info fields. Returns nil if none is found.
-func extractCancelSafePointInfo(contexts []*InterruptCtx) *cancelSafePointInfo {
-	for _, ctx := range contexts {
-		if ctx == nil {
-			continue
-		}
-		if sp, ok := ctx.Info.(*cancelSafePointInfo); ok && ctx.IsRootCause {
-			return sp
-		}
-	}
-	return nil
 }
 
 // WithCancel creates an AgentRunOption that enables cancellation for an agent run.
@@ -195,16 +199,21 @@ func WithCancel() (AgentRunOption, AgentCancelFunc) {
 // State transition rules:
 //
 //	stateRunning -> stateCancelling     (cancel requested by AgentCancelFunc)
-//	stateRunning -> stateDone           (execution finished: completed, interrupted, or errored)
-//	stateCancelling -> stateCancelHandled (cancel path in runFunc emitted CancelError)
-//	stateCancelling -> stateDone        (execution finished before cancel took effect)
+//	stateRunning -> stateDone           (execution finished without interrupt)
+//	stateCancelling -> stateCancelHandled (ANY interrupt absorbed as CancelError)
+//	stateCancelling -> stateDone        (execution finished without interrupt while cancel pending)
 //
 // Terminal states: stateDone, stateCancelHandled.
 //
-// Note: We intentionally do NOT distinguish between "completed", "interrupted", and "errored"
-// terminal states. End-users get the actual outcome (interrupt action, error) from AgentEvent.
-// This simplification keeps the state machine minimal — only the cancel/non-cancel distinction
-// matters for the AgentCancelFunc return value.
+// Note: We intentionally do NOT distinguish between "completed" and "errored"
+// terminal states. End-users get the actual outcome from AgentEvent.
+// This simplification keeps the state machine minimal — only the cancel/non-cancel
+// distinction matters for the AgentCancelFunc return value.
+//
+// Business interrupt handling: when cancel is active (stateCancelling) and any
+// interrupt arrives — cancel-induced OR business — wrapIterWithCancelCtx absorbs
+// it as a CancelError and transitions to stateCancelHandled. The business interrupt
+// data is preserved in the checkpoint for re-emission on resume.
 const (
 	// stateRunning is the initial state: agent is executing normally.
 	stateRunning int32 = 0
@@ -267,6 +276,8 @@ type cancelContext struct {
 	startedMode      int32 // atomic, mode when state transitioned to cancelling
 	deadlineUnixNano int64 // atomic, 0 means no deadline
 
+	root bool // true for the original cancelContext created by WithCancel(); false for derived children
+
 	cancelMu      sync.Mutex
 	timeoutOnce   sync.Once
 	timeoutNotify chan struct{}
@@ -281,7 +292,60 @@ func newCancelContext() *cancelContext {
 		immediateChan: make(chan struct{}),
 		doneChan:      make(chan struct{}),
 		timeoutNotify: make(chan struct{}, 1),
+		root:          true,
 	}
+}
+
+func (cc *cancelContext) isRoot() bool {
+	return cc != nil && cc.root
+}
+
+// deriveChild creates a child cancelContext that receives cancel propagation
+// from the parent. The caller MUST ensure the child's markDone() is eventually
+// called (e.g., via wrapIterWithCancelCtx's defer) or that ctx is canceled;
+// otherwise the two propagation goroutines will leak.
+func (cc *cancelContext) deriveChild(ctx context.Context) *cancelContext {
+	if cc == nil {
+		return nil
+	}
+	child := newCancelContext()
+	child.root = false
+
+	go func() {
+		select {
+		case <-cc.cancelChan:
+			child.triggerCancel(cc.getMode())
+		case <-child.doneChan:
+		case <-ctx.Done():
+		}
+	}()
+
+	go func() {
+		select {
+		case <-cc.immediateChan:
+			child.triggerImmediateCancel()
+		case <-child.doneChan:
+		case <-ctx.Done():
+		}
+	}()
+
+	return child
+}
+
+func (cc *cancelContext) triggerCancel(mode CancelMode) {
+	cc.setMode(mode)
+	if atomic.CompareAndSwapInt32(&cc.state, stateRunning, stateCancelling) {
+		close(cc.cancelChan)
+	}
+}
+
+func (cc *cancelContext) triggerImmediateCancel() {
+	atomic.StoreInt32(&cc.escalated, 1)
+	cc.setMode(CancelImmediate)
+	if atomic.CompareAndSwapInt32(&cc.state, stateRunning, stateCancelling) {
+		close(cc.cancelChan)
+	}
+	cc.sendImmediateInterrupt()
 }
 
 func (cc *cancelContext) getMode() CancelMode {
@@ -382,17 +446,13 @@ func (cc *cancelContext) setGraphInterruptFunc(interrupt func(...compose.GraphIn
 // This is safe to call even if a cancel is in progress — it allows the
 // cancel func to detect that execution finished before cancel took effect.
 func (cc *cancelContext) markDone() {
-	if atomic.CompareAndSwapInt32(&cc.state, stateRunning, stateDone) {
-		cc.doneOnce.Do(func() { close(cc.doneChan) })
+	if cc == nil {
 		return
 	}
-	// If cancel was requested but execution finished (cancel path was
-	// not reached, e.g. execution finished before interrupt took effect):
-	if atomic.CompareAndSwapInt32(&cc.state, stateCancelling, stateDone) {
+	if atomic.CompareAndSwapInt32(&cc.state, stateRunning, stateDone) ||
+		atomic.CompareAndSwapInt32(&cc.state, stateCancelling, stateDone) {
 		cc.doneOnce.Do(func() { close(cc.doneChan) })
 	}
-	// If state is already a terminal state (markCancelHandled was called),
-	// this is a no-op — doneChan was already closed.
 }
 
 // markCancelHandled signals that the cancel path in the runFunc has created
@@ -402,6 +462,9 @@ func (cc *cancelContext) markDone() {
 // Returns true if the transition succeeded, false if cancel was already handled
 // (e.g., by a sub-agent). This prevents duplicate CancelError emission.
 func (cc *cancelContext) markCancelHandled() bool {
+	if cc == nil {
+		return false
+	}
 	if atomic.CompareAndSwapInt32(&cc.state, stateCancelling, stateCancelHandled) {
 		cc.doneOnce.Do(func() { close(cc.doneChan) })
 		return true
@@ -594,27 +657,57 @@ func (cc *cancelContext) buildCancelFunc() AgentCancelFunc {
 	}
 }
 
-// wrapIterWithMarkDone wraps an AsyncIterator so that markDone fires only when
-// the inner iterator is fully drained. This is used by flowAgent for the
-// workflowAgent path where the outer flowAgent owns the cancel lifecycle but
-// the workflowAgent produces the stream asynchronously.
-func wrapIterWithMarkDone(iter *AsyncIterator[*AgentEvent], cc *cancelContext) *AsyncIterator[*AgentEvent] {
-	if cc == nil {
+// wrapIterWithCancelCtx wraps an iterator with cancel lifecycle management.
+// It calls markDone when the inner iterator is fully drained, ensuring the
+// cancelContext's doneChan is closed and propagation goroutines can exit.
+//
+// For root cancelContexts (created by WithCancel, not deriveChild), it also
+// converts interrupt ACTION events to CancelError when cancel is active.
+// This is the single point of interrupt-to-CancelError conversion in the
+// system — Runner.handleIter only enriches the resulting CancelError with
+// checkpoint metadata.
+//
+// Interrupt absorption: ALL interrupts are converted when cancel is active,
+// including business interrupts (compose.Interrupt from user code). Cancel and
+// business interrupts cannot be reliably distinguished in concurrent execution
+// (parallel workflows, concurrent tool calls) where they merge into a single
+// composite signal. The business interrupt data is preserved in the checkpoint
+// and re-fires naturally on resume.
+//
+// This conversion MUST happen in this wrapper (not deferred to Runner.handleIter)
+// because markDone runs as a defer in this goroutine — if the interrupt event
+// were passed through unconverted, markDone would transition stateCancelling→stateDone
+// before the Runner goroutine could call createAndMarkCancelHandled, causing it
+// to fail the CAS.
+func wrapIterWithCancelCtx(iter *AsyncIterator[*AgentEvent], cancelCtx *cancelContext) *AsyncIterator[*AgentEvent] {
+	if cancelCtx == nil {
 		return iter
 	}
-	outIter, outGen := NewAsyncIteratorPair[*AgentEvent]()
+	it, gen := NewAsyncIteratorPair[*AgentEvent]()
 	go func() {
-		defer cc.markDone()
-		defer outGen.Close()
+		defer cancelCtx.markDone()
+		defer gen.Close()
 		for {
 			event, ok := iter.Next()
 			if !ok {
-				return
+				break
 			}
-			outGen.Send(event)
+
+			if cancelCtx.isRoot() && event.Action != nil && event.Action.internalInterrupted != nil {
+				if cancelCtx.shouldCancel() {
+					cancelErr, ok := cancelCtx.createAndMarkCancelHandled()
+					if ok {
+						cancelErr.interruptSignal = event.Action.internalInterrupted
+						gen.Send(&AgentEvent{Err: cancelErr})
+					}
+					return
+				}
+			}
+
+			gen.Send(event)
 		}
 	}()
-	return outIter
+	return it
 }
 
 // cancelMonitoredModel wraps a model with cancel monitoring.

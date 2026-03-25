@@ -34,7 +34,6 @@ import (
 	"github.com/cloudwego/eino/components/prompt"
 	"github.com/cloudwego/eino/components/tool"
 	"github.com/cloudwego/eino/compose"
-	"github.com/cloudwego/eino/internal/core"
 	"github.com/cloudwego/eino/internal/safe"
 	"github.com/cloudwego/eino/schema"
 )
@@ -348,6 +347,7 @@ type runParams struct {
 	instruction    string
 	returnDirectly map[string]bool
 	cancelCtx      *cancelContext
+	cancelCtxOwned bool
 	composeOpts    []compose.Option
 }
 
@@ -718,64 +718,28 @@ func (a *ChatModelAgent) prepareExecContext(ctx context.Context) (*execContext, 
 }
 
 // handleRunFuncError is the common error handler for buildNoToolsRunFunc and buildReActRunFunc.
-// It handles compose interrupts (cancel-triggered safe-point, CancelImmediate graph interrupt,
-// and business interrupts) and generic errors. In all cases it sends the appropriate event
-// to the generator.
+// It handles compose interrupts (both cancel-triggered and business)
+// and generic errors, sending the appropriate event to the generator.
 func (a *ChatModelAgent) handleRunFuncError(
 	ctx context.Context,
 	err error,
 	cancelCtx *cancelContext,
+	cancelCtxOwned bool,
 	store *bridgeStore,
 	generator *AsyncGenerator[*AgentEvent],
 ) {
 	info, ok := compose.ExtractInterruptInfo(err)
 	if ok {
-		composeSignal := FromInterruptContexts(info.InterruptContexts)
-		isCancelTriggered := false
-
-		// Check for safe-point cancel via typed info from compose.Interrupt
-		if extractCancelSafePointInfo(info.InterruptContexts) != nil {
-			isCancelTriggered = true
+		if cancelCtx != nil {
+			// Note: there is a benign TOCTOU window here. Between shouldCancel()
+			// returning false and markDone() executing, a concurrent cancel could
+			// transition stateRunning→stateCancelling. markDone() then does
+			// stateCancelling→stateDone, and the cancel func receives
+			// ErrExecutionCompleted (execution finished before cancel took effect).
+			if !cancelCtx.shouldCancel() {
+				cancelCtx.markDone()
+			}
 		}
-		// Check for CancelImmediate via graph interrupt
-		if info.FromGraphInterrupt && cancelCtx != nil && cancelCtx.shouldCancel() {
-			isCancelTriggered = true
-		}
-
-		if isCancelTriggered {
-			data, existed, sErr := store.Get(ctx, bridgeCheckpointID)
-			if sErr != nil {
-				generator.Send(&AgentEvent{AgentName: a.name, Err: fmt.Errorf("failed to get checkpoint on cancel: %w", sErr)})
-				return
-			}
-			if !existed {
-				data = nil
-			}
-
-			var rp []RunStep
-			if rCtx := getRunCtx(ctx); rCtx != nil {
-				rp = rCtx.RunPath
-			}
-			is, isErr := core.Interrupt(ctx, nil, data, []*core.InterruptSignal{composeSignal},
-				core.WithLayerPayload(rp))
-			if isErr != nil {
-				generator.Send(&AgentEvent{Err: isErr})
-				return
-			}
-
-			cancelErr, ok := cancelCtx.createAndMarkCancelHandled()
-			if !ok {
-				return
-			}
-			is.InterruptInfo.Info = cancelErr.Info
-			contexts := core.ToInterruptContexts(is, allowedAddressSegmentTypes)
-			cancelErr.interruptSignal = is
-			cancelErr.InterruptContexts = contexts
-			generator.Send(&AgentEvent{Err: cancelErr})
-			return
-		}
-
-		// Business interrupt (user-initiated via compose.Interrupt)
 
 		data, existed, sErr := store.Get(ctx, bridgeCheckpointID)
 		if sErr != nil {
@@ -798,7 +762,9 @@ func (a *ChatModelAgent) handleRunFuncError(
 		return
 	}
 
-	// Other error
+	if cancelCtxOwned && cancelCtx != nil {
+		cancelCtx.markDone()
+	}
 	generator.Send(&AgentEvent{Err: err})
 }
 
@@ -834,20 +800,7 @@ func (a *ChatModelAgent) buildNoToolsRunFunc(_ context.Context) runFunc {
 				})
 				return messages, nil
 			})).
-			AppendChatModel(wrappedModel).
-			AppendLambda(compose.InvokableLambda(func(ctx context.Context, msg Message) (Message, error) {
-				if cancelCtx != nil && cancelCtx.shouldCancel() {
-					if cancelCtx.getMode()&CancelAfterChatModel != 0 {
-						return nil, compose.StatefulInterrupt(ctx, &cancelSafePointInfo{Mode: CancelAfterChatModel}, msg)
-					}
-				}
-
-				wasInterrupted, hasState, state := compose.GetInterruptState[Message](ctx)
-				if wasInterrupted && hasState {
-					msg = state
-				}
-				return msg, nil
-			}))
+			AppendChatModel(wrappedModel)
 
 		var compileOptions []compose.GraphCompileOption
 		compileOptions = append(compileOptions,
@@ -905,7 +858,7 @@ func (a *ChatModelAgent) buildNoToolsRunFunc(_ context.Context) runFunc {
 			return
 		}
 
-		a.handleRunFuncError(ctx, err, cancelCtx, p.store, p.generator)
+		a.handleRunFuncError(ctx, err, cancelCtx, p.cancelCtxOwned, p.store, p.generator)
 	}
 }
 
@@ -1028,7 +981,7 @@ func (a *ChatModelAgent) buildReActRunFunc(_ context.Context, bc *execContext) (
 			return
 		}
 
-		a.handleRunFuncError(ctx, err_, cancelCtx, p.store, p.generator)
+		a.handleRunFuncError(ctx, err_, cancelCtx, p.cancelCtxOwned, p.store, p.generator)
 	}, nil
 }
 
@@ -1105,9 +1058,6 @@ func (a *ChatModelAgent) Run(ctx context.Context, input *AgentInput, opts ...Age
 
 	o := getCommonOptions(nil, opts...)
 	cancelCtx := o.cancelCtx
-	// The CMA owns the cancelCtx lifecycle (calls markDone) only when:
-	// 1. cancelCtx was passed via opts, AND
-	// 2. cancelCtx is NOT already in the Go context (meaning no outer flowAgent owns it)
 	cancelCtxOwned := cancelCtx != nil && getCancelContext(ctx) == nil
 	if cancelCtx == nil {
 		cancelCtx = getCancelContext(ctx)
@@ -1116,11 +1066,10 @@ func (a *ChatModelAgent) Run(ctx context.Context, input *AgentInput, opts ...Age
 	ctx, run, bc, err := a.getRunFunc(ctx)
 	if err != nil {
 		go func() {
-			// Mark cancelCtx as done so that cancelFunc unblocks (it waits on doneChan).
 			if cancelCtxOwned && cancelCtx != nil {
 				defer cancelCtx.markDone()
 			}
-			generator.Send(&AgentEvent{Err: err})
+			generator.Send(&AgentEvent{Err: fmt.Errorf("ChatModelAgent getRunFunc error: %w", err)})
 			generator.Close()
 		}()
 		return iterator
@@ -1137,9 +1086,6 @@ func (a *ChatModelAgent) Run(ctx context.Context, input *AgentInput, opts ...Age
 	}
 
 	go func() {
-		if cancelCtxOwned && cancelCtx != nil {
-			defer cancelCtx.markDone()
-		}
 		defer func() {
 			panicErr := recover()
 			if panicErr != nil {
@@ -1167,10 +1113,14 @@ func (a *ChatModelAgent) Run(ctx context.Context, input *AgentInput, opts ...Age
 			instruction:    instruction,
 			returnDirectly: returnDirectly,
 			cancelCtx:      cancelCtx,
+			cancelCtxOwned: cancelCtxOwned,
 			composeOpts:    co,
 		})
 	}()
 
+	if cancelCtxOwned {
+		return wrapIterWithCancelCtx(iterator, cancelCtx)
+	}
 	return iterator
 }
 
@@ -1179,9 +1129,6 @@ func (a *ChatModelAgent) Resume(ctx context.Context, info *ResumeInfo, opts ...A
 
 	o := getCommonOptions(nil, opts...)
 	cancelCtx := o.cancelCtx
-	// The CMA owns the cancelCtx lifecycle (calls markDone) only when:
-	// 1. cancelCtx was passed via opts, AND
-	// 2. cancelCtx is NOT already in the Go context (meaning no outer flowAgent owns it)
 	cancelCtxOwned := cancelCtx != nil && getCancelContext(ctx) == nil
 	if cancelCtx == nil {
 		cancelCtx = getCancelContext(ctx)
@@ -1190,11 +1137,10 @@ func (a *ChatModelAgent) Resume(ctx context.Context, info *ResumeInfo, opts ...A
 	ctx, run, bc, err := a.getRunFunc(ctx)
 	if err != nil {
 		go func() {
-			// Mark cancelCtx as done so that cancelFunc unblocks (it waits on doneChan).
 			if cancelCtxOwned && cancelCtx != nil {
 				defer cancelCtx.markDone()
 			}
-			generator.Send(&AgentEvent{Err: err})
+			generator.Send(&AgentEvent{Err: fmt.Errorf("ChatModelAgent getRunFunc error: %w", err)})
 			generator.Close()
 		}()
 		return iterator
@@ -1208,6 +1154,10 @@ func (a *ChatModelAgent) Resume(ctx context.Context, info *ResumeInfo, opts ...A
 		if bc.toolUpdated {
 			co = append(co, compose.WithToolsNodeOption(compose.WithToolList(bc.toolsNodeConf.Tools...)))
 		}
+	}
+
+	if info == nil {
+		panic(fmt.Sprintf("ChatModelAgent.Resume: agent '%s' was asked to resume but info is nil", a.Name(ctx)))
 	}
 
 	if info.InterruptState == nil {
@@ -1257,9 +1207,6 @@ func (a *ChatModelAgent) Resume(ctx context.Context, info *ResumeInfo, opts ...A
 	}
 
 	go func() {
-		if cancelCtxOwned && cancelCtx != nil {
-			defer cancelCtx.markDone()
-		}
 		defer func() {
 			panicErr := recover()
 			if panicErr != nil {
@@ -1287,10 +1234,14 @@ func (a *ChatModelAgent) Resume(ctx context.Context, info *ResumeInfo, opts ...A
 			instruction:    instruction,
 			returnDirectly: returnDirectly,
 			cancelCtx:      cancelCtx,
+			cancelCtxOwned: cancelCtxOwned,
 			composeOpts:    co,
 		})
 	}()
 
+	if cancelCtxOwned {
+		return wrapIterWithCancelCtx(iterator, cancelCtx)
+	}
 	return iterator
 }
 

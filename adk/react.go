@@ -341,13 +341,13 @@ func newReact(ctx context.Context, config *reactConfig) (reactGraph, error) {
 			return input, nil
 		}), compose.WithNodeName(chatModel_))
 
-	// CancelAfterChatModel safe-point: dedicated node after the ChatModel.
-	// The model has finished (stream fully consumed by the branch). This node
-	// has a compose context, so compose.Interrupt saves checkpoint data.
+	// CancelAfterChatModel safe-point: on the tool-calls path, after the branch
+	// has confirmed that the model response contains tool calls (i.e. not a final
+	// answer). Skipped entirely when the model produces a final answer.
 	_ = g.AddLambdaNode(cancelCheckNode_, compose.InvokableLambda(func(ctx context.Context, msg Message) (Message, error) {
 		if cancelCtx != nil && cancelCtx.shouldCancel() {
 			if cancelCtx.getMode()&CancelAfterChatModel != 0 {
-				return nil, compose.StatefulInterrupt(ctx, &cancelSafePointInfo{Mode: CancelAfterChatModel}, msg)
+				return nil, compose.StatefulInterrupt(ctx, "CancelAfterChatModel", msg)
 			}
 		}
 		wasInterrupted, hasState, state := compose.GetInterruptState[Message](ctx)
@@ -426,7 +426,7 @@ func newReact(ctx context.Context, config *reactConfig) (reactGraph, error) {
 	afterToolCallsCancelCheck := func(ctx context.Context, toolResults []Message) ([]Message, error) {
 		if cancelCtx != nil && cancelCtx.shouldCancel() {
 			if cancelCtx.getMode()&CancelAfterToolCalls != 0 {
-				return nil, compose.Interrupt(ctx, &cancelSafePointInfo{Mode: CancelAfterToolCalls})
+				return nil, compose.Interrupt(ctx, "CancelAfterToolCalls")
 			}
 		}
 		return toolResults, nil
@@ -436,7 +436,6 @@ func newReact(ctx context.Context, config *reactConfig) (reactGraph, error) {
 
 	_ = g.AddEdge(compose.START, initNode_)
 	_ = g.AddEdge(initNode_, chatModel_)
-	_ = g.AddEdge(chatModel_, cancelCheckNode_)
 
 	toolCallCheck := func(ctx context.Context, sMsg MessageStream) (string, error) {
 		defer sMsg.Close()
@@ -451,13 +450,14 @@ func newReact(ctx context.Context, config *reactConfig) (reactGraph, error) {
 			}
 
 			if len(chunk.ToolCalls) > 0 {
-				return toolNode_, nil
+				return cancelCheckNode_, nil
 			}
 		}
 	}
-	branch := compose.NewStreamGraphBranch(toolCallCheck, map[string]bool{compose.END: true, toolNode_: true})
-	_ = g.AddBranch(cancelCheckNode_, branch)
+	branch := compose.NewStreamGraphBranch(toolCallCheck, map[string]bool{compose.END: true, cancelCheckNode_: true})
+	_ = g.AddBranch(chatModel_, branch)
 
+	_ = g.AddEdge(cancelCheckNode_, toolNode_)
 	_ = g.AddEdge(toolNode_, afterToolCallsNode_)
 	_ = g.AddEdge(afterToolCallsNode_, afterToolCallsCancelCheckNode_)
 
