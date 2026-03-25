@@ -1099,6 +1099,40 @@ func messageToolNames[M adk.MessageType](msg M) []string {
 	}
 }
 
+func projectMessagesToSchema[M adk.MessageType](msgs []M) []adk.Message {
+	out := make([]adk.Message, 0, len(msgs))
+	for _, msg := range msgs {
+		if projected := projectMessageToSchema(msg); projected != nil {
+			out = append(out, projected)
+		}
+	}
+	return out
+}
+
+func projectMessageToSchema[M adk.MessageType](msg M) adk.Message {
+	switch m := any(msg).(type) {
+	case *schema.Message:
+		return m
+	case *schema.AgenticMessage:
+		if m == nil {
+			return nil
+		}
+		text := m.String()
+		switch m.Role {
+		case schema.AgenticRoleTypeSystem:
+			return schema.SystemMessage(text)
+		case schema.AgenticRoleTypeAssistant:
+			return schema.AssistantMessage(text, messageToolCalls(msg))
+		case schema.AgenticRoleTypeUser:
+			return schema.UserMessage(text)
+		default:
+			return schema.UserMessage(text)
+		}
+	default:
+		panic("unreachable")
+	}
+}
+
 func alreadyInjected[M adk.MessageType](msgs []M) bool {
 	for _, m := range msgs {
 		if isMemoryMessage(m) {

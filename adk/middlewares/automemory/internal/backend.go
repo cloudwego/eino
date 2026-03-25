@@ -146,7 +146,7 @@ func (f *FSBackend) Read(ctx context.Context, req *adkfs.ReadRequest) (*adkfs.Fi
 		}
 		return nil, err
 	}
-	return (*adkfs.FileContent)(content), nil
+	return content, nil
 }
 
 func (f *FSBackend) Write(ctx context.Context, req *adkfs.WriteRequest) error {
