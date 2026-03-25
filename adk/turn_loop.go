@@ -190,10 +190,10 @@ type TurnLoopConfig[T any] struct {
 	GenInput func(ctx context.Context, loop *TurnLoop[T], items []T) (*GenInputResult[T], error)
 
 	// GenResume is called exactly once when starting a resumed TurnLoop run
-	// (via Resume). It receives:
+	// (via PrepareResume + Run). It receives:
 	//   - canceledItems: the items that were being processed when the prior run was canceled
 	//   - unhandledItems: items buffered but not processed when the prior run exited
-	//   - newItems: items provided to Resume
+	//   - newItems: items provided to PrepareResume
 	//
 	// It returns a GenResumeResult describing how to resume the interrupted agent turn
 	// (checkpoint ID + optional ResumeParams) and how to manipulate the buffer
@@ -224,7 +224,7 @@ type TurnLoopConfig[T any] struct {
 	//
 	// When true, the framework only persists runner checkpoint bytes to Store.
 	// The user manages item persistence via TurnLoopExitState fields and provides
-	// them back via WithExternalResumeItems on Resume.
+	// them back via WithExternalResumeItems on PrepareResume.
 	ExternalTurnState bool
 
 	// Store is the checkpoint store for persistence and resume. Optional.
@@ -390,8 +390,8 @@ type TurnLoopExitState[T any] struct {
 	// It is set when Store is configured and the loop exits due to Stop() or error.
 	// In ExternalTurnState mode, it is the runner checkpoint ID (the key used to
 	// persist runner bytes to Store).
-	// It can be used to resume via TurnLoop.Resume (in ExternalTurnState mode, resume
-	// also requires providing CanceledItems/UnhandledItems via WithExternalResumeItems).
+	// It can be used to resume via TurnLoop.PrepareResume (in ExternalTurnState mode,
+	// resume also requires providing CanceledItems/UnhandledItems via WithExternalResumeItems).
 	CheckPointID string
 
 	// UnhandledItems contains items that were buffered but not processed.
@@ -557,13 +557,13 @@ type resumeOptions[T any] struct {
 	hasResumeItems bool
 }
 
-// TurnLoopResumeOption configures how TurnLoop.Resume behaves.
+// TurnLoopResumeOption configures how TurnLoop.PrepareResume behaves.
 // Use WithExternalResumeItems to supply canceled and unhandled items when ExternalTurnState is true.
 type TurnLoopResumeOption[T any] func(*resumeOptions[T])
 
 // WithExternalResumeItems provides the canceled and unhandled items for resuming when
 // ExternalTurnState is enabled. In framework mode (ExternalTurnState=false), TurnLoop
-// persists items in the checkpoint and Resume rejects this option.
+// persists items in the checkpoint and PrepareResume rejects this option.
 func WithExternalResumeItems[T any](canceledItems, unhandledItems []T) TurnLoopResumeOption[T] {
 	return func(o *resumeOptions[T]) {
 		o.canceledItems = canceledItems
@@ -636,12 +636,14 @@ func defaultTurnLoopOnAgentEvents[T any](_ context.Context, _ *TurnContext[T], e
 // The returned loop accepts Push and Stop calls immediately; pushed items
 // are buffered until Run is called.
 // Call Run to start the processing goroutine.
-func NewTurnLoop[T any](cfg TurnLoopConfig[T]) (*TurnLoop[T], error) {
+//
+// NewTurnLoop panics if GenInput or PrepareAgent is nil.
+func NewTurnLoop[T any](cfg TurnLoopConfig[T]) *TurnLoop[T] {
 	if cfg.GenInput == nil {
-		return nil, errors.New("GenInput is required")
+		panic("adk: NewTurnLoop: GenInput is required")
 	}
 	if cfg.PrepareAgent == nil {
-		return nil, errors.New("PrepareAgent is required")
+		panic("adk: NewTurnLoop: PrepareAgent is required")
 	}
 
 	l := &TurnLoop[T]{
@@ -656,32 +658,29 @@ func NewTurnLoop[T any](cfg TurnLoopConfig[T]) (*TurnLoop[T], error) {
 	} else {
 		l.onAgentEvents = defaultTurnLoopOnAgentEvents[T]
 	}
-	return l, nil
+	return l
 }
 
-// Run starts the loop's processing goroutine. It is non-blocking: the loop
-// runs in the background and results are obtained via Wait.
-// Run may be called at most once; subsequent calls are no-ops.
-func (l *TurnLoop[T]) start(ctx context.Context) error {
-	started := false
+func (l *TurnLoop[T]) start(ctx context.Context) {
 	l.runOnce.Do(func() {
-		started = true
 		atomic.StoreInt32(&l.started, 1)
 		go l.run(ctx)
 	})
-	if !started {
-		return errors.New("cannot start TurnLoop: loop already started")
-	}
-	return nil
 }
 
 // Run starts the loop's processing goroutine. It is non-blocking: the loop
 // runs in the background and results are obtained via Wait.
-func (l *TurnLoop[T]) Run(ctx context.Context) error {
-	return l.start(ctx)
+// If PrepareResume was called beforehand, the loop resumes from the loaded
+// checkpoint; otherwise it starts fresh.
+// Calling Run more than once is a no-op: only the first call starts the loop.
+func (l *TurnLoop[T]) Run(ctx context.Context) {
+	l.start(ctx)
 }
 
-func (l *TurnLoop[T]) Resume(ctx context.Context, checkPointID string, newItems []T, opts ...TurnLoopResumeOption[T]) error {
+// PrepareResume loads and validates a checkpoint, restoring the TurnLoop's
+// internal state so that the next Run call resumes from that checkpoint.
+// Must be called before Run.
+func (l *TurnLoop[T]) PrepareResume(ctx context.Context, checkPointID string, newItems []T, opts ...TurnLoopResumeOption[T]) error {
 	if checkPointID == "" {
 		return errors.New("cannot resume TurnLoop: checkpointID is empty")
 	}
@@ -746,7 +745,7 @@ func (l *TurnLoop[T]) Resume(ctx context.Context, checkPointID string, newItems 
 
 	l.checkPointID = checkPointID
 
-	return l.start(ctx)
+	return nil
 }
 
 // Push adds an item to the loop's buffer for processing.
@@ -842,7 +841,7 @@ func (l *TurnLoop[T]) Stop(opts ...StopOption) {
 // This method is safe to call from multiple goroutines.
 // All callers will receive the same result.
 //
-// Wait blocks until Run or Resume is called AND the loop exits. If neither is
+// Wait blocks until Run is called AND the loop exits. If Run is
 // ever called, Wait blocks forever.
 func (l *TurnLoop[T]) Wait() *TurnLoopExitState[T] {
 	<-l.done
