@@ -176,6 +176,64 @@ func TestReadFileTool(t *testing.T) {
 	}
 }
 
+func TestReadFileTool_DefaultLimit(t *testing.T) {
+	// Build a file with more than 2000 lines to verify the tool layer applies the default limit
+	backend := filesystem.NewInMemoryBackend()
+	var b strings.Builder
+	totalLines := 2500
+	for i := 1; i <= totalLines; i++ {
+		if i > 1 {
+			b.WriteString("\n")
+		}
+		fmt.Fprintf(&b, "line%d", i)
+	}
+	backend.Write(context.Background(), &filesystem.WriteRequest{
+		FilePath: "/big.txt",
+		Content:  b.String(),
+	})
+
+	readTool, err := newReadFileTool(backend, "", "")
+	if err != nil {
+		t.Fatalf("Failed to create read_file tool: %v", err)
+	}
+
+	t.Run("limit=0 defaults to 2000 lines in tool layer", func(t *testing.T) {
+		result, err := invokeTool(t, readTool, `{"file_path": "/big.txt", "offset": 0, "limit": 0}`)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		lines := strings.Split(result, "\n")
+		if len(lines) != 2000 {
+			t.Errorf("expected 2000 lines, got %d", len(lines))
+		}
+	})
+
+	t.Run("explicit limit is respected", func(t *testing.T) {
+		result, err := invokeTool(t, readTool, `{"file_path": "/big.txt", "offset": 0, "limit": 10}`)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		lines := strings.Split(result, "\n")
+		if len(lines) != 10 {
+			t.Errorf("expected 10 lines, got %d", len(lines))
+		}
+	})
+
+	t.Run("backend read with limit=0 returns all lines", func(t *testing.T) {
+		content, err := backend.Read(context.Background(), &filesystem.ReadRequest{
+			FilePath: "/big.txt",
+			Limit:    0,
+		})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		lines := strings.Split(content.Content, "\n")
+		if len(lines) != totalLines {
+			t.Errorf("expected %d lines from backend, got %d", totalLines, len(lines))
+		}
+	})
+}
+
 func TestWriteFileTool(t *testing.T) {
 	backend := setupTestBackend()
 	writeTool, err := newWriteFileTool(backend, "", "")

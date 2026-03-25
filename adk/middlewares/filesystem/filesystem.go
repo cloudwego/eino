@@ -564,6 +564,9 @@ func newReadFileTool(fs filesystem.Backend, name string, desc string) (tool.Base
 		if input.Offset <= 0 {
 			input.Offset = 1
 		}
+		if input.Limit <= 0 {
+			input.Limit = 2000
+		}
 
 		fileCt, err := fs.Read(ctx, &filesystem.ReadRequest{
 			FilePath: input.FilePath,

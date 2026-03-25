@@ -20,6 +20,7 @@ import (
 	"context"
 	"fmt"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -2354,6 +2355,87 @@ func TestInMemoryBackend_Read_Scenarios(t *testing.T) {
 		// Line 2 is an empty string between two newlines
 		if content.Content != "" {
 			t.Errorf("expected empty line content, got %q", content.Content)
+		}
+	})
+}
+
+func TestInMemoryBackend_Read_NoLimit(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("limit=0 reads all lines", func(t *testing.T) {
+		backend := NewInMemoryBackend()
+		fullContent := "line1\nline2\nline3\nline4\nline5"
+		backend.Write(ctx, &WriteRequest{FilePath: "/f.txt", Content: fullContent})
+
+		content, err := backend.Read(ctx, &ReadRequest{FilePath: "/f.txt", Limit: 0})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if content.Content != fullContent {
+			t.Errorf("expected %q, got %q", fullContent, content.Content)
+		}
+	})
+
+	t.Run("negative limit reads all lines", func(t *testing.T) {
+		backend := NewInMemoryBackend()
+		fullContent := "a\nb\nc"
+		backend.Write(ctx, &WriteRequest{FilePath: "/f.txt", Content: fullContent})
+
+		content, err := backend.Read(ctx, &ReadRequest{FilePath: "/f.txt", Limit: -1})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if content.Content != fullContent {
+			t.Errorf("expected %q, got %q", fullContent, content.Content)
+		}
+	})
+
+	t.Run("limit=0 with offset reads from offset to end", func(t *testing.T) {
+		backend := NewInMemoryBackend()
+		backend.Write(ctx, &WriteRequest{FilePath: "/f.txt", Content: "a\nb\nc\nd\ne"})
+
+		content, err := backend.Read(ctx, &ReadRequest{FilePath: "/f.txt", Offset: 3, Limit: 0})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if content.Content != "c\nd\ne" {
+			t.Errorf("expected %q, got %q", "c\nd\ne", content.Content)
+		}
+	})
+
+	t.Run("limit=0 with offset beyond content returns empty", func(t *testing.T) {
+		backend := NewInMemoryBackend()
+		backend.Write(ctx, &WriteRequest{FilePath: "/f.txt", Content: "a\nb"})
+
+		content, err := backend.Read(ctx, &ReadRequest{FilePath: "/f.txt", Offset: 10, Limit: 0})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if content.Content != "" {
+			t.Errorf("expected empty content, got %q", content.Content)
+		}
+	})
+
+	t.Run("limit=0 reads file with more than 2000 lines", func(t *testing.T) {
+		backend := NewInMemoryBackend()
+		var b strings.Builder
+		totalLines := 2500
+		for i := 1; i <= totalLines; i++ {
+			if i > 1 {
+				b.WriteString("\n")
+			}
+			b.WriteString("line" + strconv.Itoa(i))
+		}
+		fullContent := b.String()
+		backend.Write(ctx, &WriteRequest{FilePath: "/big.txt", Content: fullContent})
+
+		content, err := backend.Read(ctx, &ReadRequest{FilePath: "/big.txt", Limit: 0})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if content.Content != fullContent {
+			t.Errorf("expected all %d lines, got %d lines",
+				totalLines, strings.Count(content.Content, "\n")+1)
 		}
 	})
 }
