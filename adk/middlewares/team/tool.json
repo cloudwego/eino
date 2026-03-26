@@ -1,0 +1,312 @@
+[
+    {
+        "name": "Agent",
+        "description": "Launch a new agent to handle complex, multi-step tasks autonomously.\n\nThe Agent tool launches specialized agents (subprocesses) that autonomously handle complex tasks. Each agent type has specific capabilities and tools available to it.\n\nAvailable agent types and the tools they have access to:\n- general-purpose: General-purpose agent for researching complex questions, searching for code, and executing multi-step tasks. When you are searching for a keyword or file and are not confident that you will find the right match in the first few tries use this agent to perform the search for you. (Tools: *)\n- statusline-setup: Use this agent to configure the user's Claude Code status line setting. (Tools: Read, Edit)\n- Explore: Fast agent specialized for exploring codebases. Use this when you need to quickly find files by patterns (eg. \"src/components/**/*.tsx\"), search code for keywords (eg. \"API endpoints\"), or answer questions about the codebase (eg. \"how do API endpoints work?\"). When calling this agent, specify the desired thoroughness level: \"quick\" for basic searches, \"medium\" for moderate exploration, or \"very thorough\" for comprehensive analysis across multiple locations and naming conventions. (Tools: All tools except Agent, ExitPlanMode, Edit, Write, NotebookEdit)\n- Plan: Software architect agent for designing implementation plans. Use this when you need to plan the implementation strategy for a task. Returns step-by-step plans, identifies critical files, and considers architectural trade-offs. (Tools: All tools except Agent, ExitPlanMode, Edit, Write, NotebookEdit)\n- claude-code-guide: Use this agent when the user asks questions (\"Can Claude...\", \"Does Claude...\", \"How do I...\") about: (1) Claude Code (the CLI tool) - features, hooks, slash commands, MCP servers, settings, IDE integrations, keyboard shortcuts; (2) Claude Agent SDK - building custom agents; (3) Claude API (formerly Anthropic API) - API usage, tool use, Anthropic SDK usage. **IMPORTANT:** Before spawning a new agent, check if there is already a running or recently completed claude-code-guide agent that you can resume using the \"resume\" parameter. (Tools: Glob, Grep, Read, WebFetch, WebSearch)\n\nWhen using the Agent tool, specify a subagent_type parameter to select which agent type to use. If omitted, the general-purpose agent is used.\n\nWhen NOT to use the Agent tool:\n- If you want to read a specific file path, use the Read tool or the Glob tool instead of the Agent tool, to find the match more quickly\n- If you are searching for a specific class definition like \"class Foo\", use the Glob tool instead, to find the match more quickly\n- If you are searching for code within a specific file or set of 2-3 files, use the Read tool instead of the Agent tool, to find the match more quickly\n- Other tasks that are not related to the agent descriptions above\n\n\nUsage notes:\n- Always include a short description (3-5 words) summarizing what the agent will do\n- Launch multiple agents concurrently whenever possible, to maximize performance; to do that, use a single message with multiple tool uses\n- When the agent is done, it will return a single message back to you. The result returned by the agent is not visible to the user. To show the user the result, you should send a text message back to the user with a concise summary of the result.\n- You can optionally run agents in the background using the run_in_background parameter. When an agent runs in the background, you will be automatically notified when it completes — do NOT sleep, poll, or proactively check on its progress. Continue with other work or respond to the user instead.\n- **Foreground vs background**: Use foreground (default) when you need the agent's results before you can proceed — e.g., research agents whose findings inform your next steps. Use background when you have genuinely independent work to do in parallel.\n- Agents can be resumed using the `resume` parameter by passing the agent ID from a previous invocation. When resumed, the agent continues with its full previous context preserved. When NOT resuming, each invocation starts fresh and you should provide a detailed task description with all necessary context.\n- When the agent is done, it will return a single message back to you along with its agent ID. You can use this ID to resume the agent later if needed for follow-up work.\n- Provide clear, detailed prompts so the agent can work autonomously and return exactly the information you need.\n- The agent's outputs should generally be trusted\n- Clearly tell the agent whether you expect it to write code or just to do research (search, file reads, web fetches, etc.), since it is not aware of the user's intent\n- If the agent description mentions that it should be used proactively, then you should try your best to use it without the user having to ask for it first. Use your judgement.\n- If the user specifies that they want you to run agents \"in parallel\", you MUST send a single message with multiple Agent tool use content blocks. For example, if you need to launch both a build-validator agent and a test-runner agent in parallel, send a single message with both tool calls.\n- You can optionally set `isolation: \"worktree\"` to run the agent in a temporary git worktree, giving it an isolated copy of the repository. The worktree is automatically cleaned up if the agent makes no changes; if changes are made, the worktree path and branch are returned in the result.\n\nExample usage:\n\n<example_agent_descriptions>\n\"test-runner\": use this agent after you are done writing code to run tests\n\"greeting-responder\": use this agent to respond to user greetings with a friendly joke\n</example_agent_descriptions>\n\n<example>\nuser: \"Please write a function that checks if a number is prime\"\nassistant: I'm going to use the Write tool to write the following code:\n<code>\nfunction isPrime(n) {\n  if (n <= 1) return false\n  for (let i = 2; i * i <= n; i++) {\n    if (n % i === 0) return false\n  }\n  return true\n}\n</code>\n<commentary>\nSince a significant piece of code was written and the task was completed, now use the test-runner agent to run the tests\n</commentary>\nassistant: Uses the Agent tool to launch the test-runner agent\n</example>\n\n<example>\nuser: \"Hello\"\n<commentary>\nSince the user is greeting, use the greeting-responder agent to respond with a friendly joke\n</commentary>\nassistant: \"I'm going to use the Agent tool to launch the greeting-responder agent\"\n</example>\n",
+        "input_schema": {
+            "$schema": "https://json-schema.org/draft/2020-12/schema",
+            "type": "object",
+            "properties": {
+                "description": {
+                    "description": "A short (3-5 word) description of the task",
+                    "type": "string"
+                },
+                "prompt": {
+                    "description": "The task for the agent to perform",
+                    "type": "string"
+                },
+                "subagent_type": {
+                    "description": "The type of specialized agent to use for this task",
+                    "type": "string"
+                },
+                "resume": {
+                    "description": "Optional agent ID to resume from. If provided, the agent will continue from the previous execution transcript.",
+                    "type": "string"
+                },
+                "name": {
+                    "description": "Name for the spawned agent",
+                    "type": "string"
+                },
+                "team_name": {
+                    "description": "Team name for spawning. Uses current team context if omitted.",
+                    "type": "string"
+                }
+            },
+            "required": [
+                "description",
+                "prompt"
+            ],
+            "additionalProperties": false
+        }
+    },
+    {
+        "name": "TaskCreate",
+        "description": "Use this tool to create a structured task list for your current coding session. This helps you track progress, organize complex tasks, and demonstrate thoroughness to the user.\nIt also helps the user understand the progress of the task and overall progress of their requests.\n\n## When to Use This Tool\n\nUse this tool proactively in these scenarios:\n\n- Complex multi-step tasks - When a task requires 3 or more distinct steps or actions\n- Non-trivial and complex tasks - Tasks that require careful planning or multiple operations and potentially assigned to teammates\n- Plan mode - When using plan mode, create a task list to track the work\n- User explicitly requests todo list - When the user directly asks you to use the todo list\n- User provides multiple tasks - When users provide a list of things to be done (numbered or comma-separated)\n- After receiving new instructions - Immediately capture user requirements as tasks\n- When you start working on a task - Mark it as in_progress BEFORE beginning work\n- After completing a task - Mark it as completed and add any new follow-up tasks discovered during implementation\n\n## When NOT to Use This Tool\n\nSkip using this tool when:\n- There is only a single, straightforward task\n- The task is trivial and tracking it provides no organizational benefit\n- The task can be completed in less than 3 trivial steps\n- The task is purely conversational or informational\n\nNOTE that you should not use this tool if there is only one trivial task to do. In this case you are better off just doing the task directly.\n\n## Task Fields\n\n- **subject**: A brief, actionable title in imperative form (e.g., \"Fix authentication bug in login flow\")\n- **description**: Detailed description of what needs to be done, including context and acceptance criteria\n- **activeForm** (optional): Present continuous form shown in the spinner when the task is in_progress (e.g., \"Fixing authentication bug\"). If omitted, the spinner shows the subject instead.\n\nAll tasks are created with status `pending`.\n\n## Tips\n\n- Create tasks with clear, specific subjects that describe the outcome\n- Include enough detail in the description for another agent to understand and complete the task\n- After creating tasks, use TaskUpdate to set up dependencies (blocks/blockedBy) if needed\n- New tasks are created with status 'pending' and no owner - use TaskUpdate with the `owner` parameter to assign them\n- Check TaskList first to avoid creating duplicate tasks\n",
+        "input_schema": {
+            "$schema": "https://json-schema.org/draft/2020-12/schema",
+            "type": "object",
+            "properties": {
+                "subject": {
+                    "description": "A brief title for the task",
+                    "type": "string"
+                },
+                "description": {
+                    "description": "A detailed description of what needs to be done",
+                    "type": "string"
+                },
+                "activeForm": {
+                    "description": "Present continuous form shown in spinner when in_progress (e.g., \"Running tests\")",
+                    "type": "string"
+                },
+                "metadata": {
+                    "description": "Arbitrary metadata to attach to the task",
+                    "type": "object",
+                    "propertyNames": {
+                        "type": "string"
+                    },
+                    "additionalProperties": {}
+                }
+            },
+            "required": [
+                "subject",
+                "description"
+            ],
+            "additionalProperties": false
+        }
+    },
+    {
+        "name": "TaskGet",
+        "description": "Use this tool to retrieve a task by its ID from the task list.\n\n## When to Use This Tool\n\n- When you need the full description and context before starting work on a task\n- To understand task dependencies (what it blocks, what blocks it)\n- After being assigned a task, to get complete requirements\n\n## Output\n\nReturns full task details:\n- **subject**: Task title\n- **description**: Detailed requirements and context\n- **status**: 'pending', 'in_progress', or 'completed'\n- **blocks**: Tasks waiting on this one to complete\n- **blockedBy**: Tasks that must complete before this one can start\n\n## Tips\n\n- After fetching a task, verify its blockedBy list is empty before beginning work.\n- Use TaskList to see all tasks in summary form.\n",
+        "input_schema": {
+            "$schema": "https://json-schema.org/draft/2020-12/schema",
+            "type": "object",
+            "properties": {
+                "taskId": {
+                    "description": "The ID of the task to retrieve",
+                    "type": "string"
+                }
+            },
+            "required": [
+                "taskId"
+            ],
+            "additionalProperties": false
+        }
+    },
+    {
+        "name": "TaskUpdate",
+        "description": "Use this tool to update a task in the task list.\n\n## When to Use This Tool\n\n**Mark tasks as resolved:**\n- When you have completed the work described in a task\n- When a task is no longer needed or has been superseded\n- IMPORTANT: Always mark your assigned tasks as resolved when you finish them\n- After resolving, call TaskList to find your next task\n\n- ONLY mark a task as completed when you have FULLY accomplished it\n- If you encounter errors, blockers, or cannot finish, keep the task as in_progress\n- When blocked, create a new task describing what needs to be resolved\n- Never mark a task as completed if:\n  - Tests are failing\n  - Implementation is partial\n  - You encountered unresolved errors\n  - You couldn't find necessary files or dependencies\n\n**Delete tasks:**\n- When a task is no longer relevant or was created in error\n- Setting status to `deleted` permanently removes the task\n\n**Update task details:**\n- When requirements change or become clearer\n- When establishing dependencies between tasks\n\n## Fields You Can Update\n\n- **status**: The task status (see Status Workflow below)\n- **subject**: Change the task title (imperative form, e.g., \"Run tests\")\n- **description**: Change the task description\n- **activeForm**: Present continuous form shown in spinner when in_progress (e.g., \"Running tests\")\n- **owner**: Change the task owner (agent name)\n- **metadata**: Merge metadata keys into the task (set a key to null to delete it)\n- **addBlocks**: Mark tasks that cannot start until this one completes\n- **addBlockedBy**: Mark tasks that must complete before this one can start\n\n## Status Workflow\n\nStatus progresses: `pending` → `in_progress` → `completed`\n\nUse `deleted` to permanently remove a task.\n\n## Staleness\n\nMake sure to read a task's latest state using `TaskGet` before updating it.\n\n## Examples\n\nMark task as in progress when starting work:\n```json\n{\"taskId\": \"1\", \"status\": \"in_progress\"}\n```\n\nMark task as completed after finishing work:\n```json\n{\"taskId\": \"1\", \"status\": \"completed\"}\n```\n\nDelete a task:\n```json\n{\"taskId\": \"1\", \"status\": \"deleted\"}\n```\n\nClaim a task by setting owner:\n```json\n{\"taskId\": \"1\", \"owner\": \"my-name\"}\n```\n\nSet up task dependencies:\n```json\n{\"taskId\": \"2\", \"addBlockedBy\": [\"1\"]}\n```\n",
+        "input_schema": {
+            "$schema": "https://json-schema.org/draft/2020-12/schema",
+            "type": "object",
+            "properties": {
+                "taskId": {
+                    "description": "The ID of the task to update",
+                    "type": "string"
+                },
+                "subject": {
+                    "description": "New subject for the task",
+                    "type": "string"
+                },
+                "description": {
+                    "description": "New description for the task",
+                    "type": "string"
+                },
+                "activeForm": {
+                    "description": "Present continuous form shown in spinner when in_progress (e.g., \"Running tests\")",
+                    "type": "string"
+                },
+                "status": {
+                    "description": "New status for the task",
+                    "anyOf": [
+                        {
+                            "type": "string",
+                            "enum": [
+                                "pending",
+                                "in_progress",
+                                "completed"
+                            ]
+                        },
+                        {
+                            "type": "string",
+                            "const": "deleted"
+                        }
+                    ]
+                },
+                "addBlocks": {
+                    "description": "Task IDs that this task blocks",
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                },
+                "addBlockedBy": {
+                    "description": "Task IDs that block this task",
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                },
+                "owner": {
+                    "description": "New owner for the task",
+                    "type": "string"
+                },
+                "metadata": {
+                    "description": "Metadata keys to merge into the task. Set a key to null to delete it.",
+                    "type": "object",
+                    "propertyNames": {
+                        "type": "string"
+                    },
+                    "additionalProperties": {}
+                }
+            },
+            "required": [
+                "taskId"
+            ],
+            "additionalProperties": false
+        }
+    },
+    {
+        "name": "TaskList",
+        "description": "Use this tool to list all tasks in the task list.\n\n## When to Use This Tool\n\n- To see what tasks are available to work on (status: 'pending', no owner, not blocked)\n- To check overall progress on the project\n- To find tasks that are blocked and need dependencies resolved\n- Before assigning tasks to teammates, to see what's available\n- After completing a task, to check for newly unblocked work or claim the next available task\n- **Prefer working on tasks in ID order** (lowest ID first) when multiple tasks are available, as earlier tasks often set up context for later ones\n\n## Output\n\nReturns a summary of each task:\n- **id**: Task identifier (use with TaskGet, TaskUpdate)\n- **subject**: Brief description of the task\n- **status**: 'pending', 'in_progress', or 'completed'\n- **owner**: Agent ID if assigned, empty if available\n- **blockedBy**: List of open task IDs that must be resolved first (tasks with blockedBy cannot be claimed until dependencies resolve)\n\nUse TaskGet with a specific task ID to view full details including description and comments.\n\n## Teammate Workflow\n\nWhen working as a teammate:\n1. After completing your current task, call TaskList to find available work\n2. Look for tasks with status 'pending', no owner, and empty blockedBy\n3. **Prefer tasks in ID order** (lowest ID first) when multiple tasks are available, as earlier tasks often set up context for later ones\n4. Claim an available task using TaskUpdate (set `owner` to your name), or wait for leader assignment\n5. If blocked, focus on unblocking tasks or notify the team lead\n",
+        "input_schema": {
+            "$schema": "https://json-schema.org/draft/2020-12/schema",
+            "type": "object",
+            "properties": {},
+            "additionalProperties": false
+        }
+    },
+    {
+        "name": "TeamCreate",
+        "description": "# TeamCreate\n\n## When to Use\n\nUse this tool proactively whenever:\n- The user explicitly asks to use a team, swarm, or group of agents\n- The user mentions wanting agents to work together, coordinate, or collaborate\n- A task is complex enough that it would benefit from parallel work by multiple agents (e.g., building a full-stack feature with frontend and backend work, refactoring a codebase while keeping tests passing, implementing a multi-step project with research, planning, and coding phases)\n\nWhen in doubt about whether a task warrants a team, prefer spawning a team.\n\n## Choosing Agent Types for Teammates\n\nWhen spawning teammates via the Agent tool, choose the `subagent_type` based on what tools the agent needs for its task. Each agent type has a different set of available tools — match the agent to the work:\n\n- **Read-only agents** (e.g., Explore, Plan) cannot edit or write files. Only assign them research, search, or planning tasks. Never assign them implementation work.\n- **Full-capability agents** (e.g., general-purpose) have access to all tools including file editing, writing, and bash. Use these for tasks that require making changes.\n- **Custom agents** defined in `.claude/agents/` may have their own tool restrictions. Check their descriptions to understand what they can and cannot do.\n\nAlways review the agent type descriptions and their available tools listed in the Agent tool prompt before selecting a `subagent_type` for a teammate.\n\nCreate a new team to coordinate multiple agents working on a project. Teams have a 1:1 correspondence with task lists (Team = TaskList).\n\n```\n{\n  \"team_name\": \"my-project\",\n  \"description\": \"Working on feature X\"\n}\n```\n\nThis creates:\n- A team file at `~/.claude/teams/{team-name}.json`\n- A corresponding task list directory at `~/.claude/tasks/{team-name}/`\n\n## Team Workflow\n\n1. **Create a team** with TeamCreate - this creates both the team and its task list\n2. **Create tasks** using the Task tools (TaskCreate, TaskList, etc.) - they automatically use the team's task list\n3. **Spawn teammates** using the Agent tool with `team_name` and `name` parameters to create teammates that join the team\n4. **Assign tasks** using TaskUpdate with `owner` to give tasks to idle teammates\n5. **Teammates work on assigned tasks** and mark them completed via TaskUpdate\n6. **Teammates go idle between turns** - after each turn, teammates automatically go idle and send a notification. IMPORTANT: Be patient with idle teammates! Don't comment on their idleness until it actually impacts your work.\n7. **Shutdown your team** - when the task is completed, gracefully shut down your teammates via SendMessage with type: \"shutdown_request\".\n\n## Task Ownership\n\nTasks are assigned using TaskUpdate with the `owner` parameter. Any agent can set or change task ownership via TaskUpdate.\n\n## Automatic Message Delivery\n\n**IMPORTANT**: Messages from teammates are automatically delivered to you. You do NOT need to manually check your inbox.\n\nWhen you spawn teammates:\n- They will send you messages when they complete tasks or need help\n- These messages appear automatically as new conversation turns (like user messages)\n- If you're busy (mid-turn), messages are queued and delivered when your turn ends\n- The UI shows a brief notification with the sender's name when messages are waiting\n\nMessages will be delivered automatically.\n\nWhen reporting on teammate messages, you do NOT need to quote the original message—it's already rendered to the user.\n\n## Teammate Idle State\n\nTeammates go idle after every turn—this is completely normal and expected. A teammate going idle immediately after sending you a message does NOT mean they are done or unavailable. Idle simply means they are waiting for input.\n\n- **Idle teammates can receive messages.** Sending a message to an idle teammate wakes them up and they will process it normally.\n- **Idle notifications are automatic.** The system sends an idle notification whenever a teammate's turn ends. You do not need to react to idle notifications unless you want to assign new work or send a follow-up message.\n- **Do not treat idle as an error.** A teammate sending a message and then going idle is the normal flow—they sent their message and are now waiting for a response.\n- **Peer DM visibility.** When a teammate sends a DM to another teammate, a brief summary is included in their idle notification. This gives you visibility into peer collaboration without the full message content. You do not need to respond to these summaries — they are informational.\n\n## Discovering Team Members\n\nTeammates can read the team config file to discover other team members:\n- **Team config location**: `~/.claude/teams/{team-name}/config.json`\n\nThe config file contains a `members` array with each teammate's:\n- `name`: Human-readable name (**always use this** for messaging and task assignment)\n- `agentId`: Unique identifier (for reference only - do not use for communication)\n- `agentType`: Role/type of the agent\n\n**IMPORTANT**: Always refer to teammates by their NAME (e.g., \"team-lead\", \"researcher\", \"tester\"). Names are used for:\n- `target_agent_id` when sending messages\n- Identifying task owners\n\nExample of reading team config:\n```\nUse the Read tool to read ~/.claude/teams/{team-name}/config.json\n```\n\n## Task List Coordination\n\nTeams share a task list that all teammates can access at `~/.claude/tasks/{team-name}/`.\n\nTeammates should:\n1. Check TaskList periodically, **especially after completing each task**, to find available work or see newly unblocked tasks\n2. Claim unassigned, unblocked tasks with TaskUpdate (set `owner` to your name). **Prefer tasks in ID order** (lowest ID first) when multiple tasks are available, as earlier tasks often set up context for later ones\n3. Create new tasks with `TaskCreate` when identifying additional work\n4. Mark tasks as completed with `TaskUpdate` when done, then check TaskList for next work\n5. Coordinate with other teammates by reading the task list status\n6. If all available tasks are blocked, notify the team lead or help resolve blocking tasks\n\n**IMPORTANT notes for communication with your team**:\n- Do not use terminal tools to view your team's activity; always send a message to your teammates (and remember, refer to them by name).\n- Your team cannot hear you if you do not use the SendMessage tool. Always send a message to your teammates if you are responding to them.\n- Do NOT send structured JSON status messages like `{\"type\":\"idle\",...}` or `{\"type\":\"task_completed\",...}`. Just communicate in plain text when you need to message teammates.\n- Use TaskUpdate to mark tasks completed.\n- If you are an agent in the team, the system will automatically send idle notifications to the team lead when you stop.",
+        "input_schema": {
+            "$schema": "https://json-schema.org/draft/2020-12/schema",
+            "type": "object",
+            "properties": {
+                "team_name": {
+                    "description": "Name for the new team to create.",
+                    "type": "string"
+                },
+                "description": {
+                    "description": "Team description/purpose.",
+                    "type": "string"
+                },
+                "agent_type": {
+                    "description": "Type/role of the team lead (e.g., \"researcher\", \"test-runner\"). Used for team file and inter-agent coordination.",
+                    "type": "string"
+                }
+            },
+            "required": [
+                "team_name"
+            ],
+            "additionalProperties": false
+        }
+    },
+    {
+        "name": "TeamDelete",
+        "description": "# TeamDelete\n\nRemove team and task directories when the swarm work is complete.\n\nThis operation:\n- Removes the team directory (`~/.claude/teams/{team-name}/`)\n- Removes the task directory (`~/.claude/tasks/{team-name}/`)\n- Clears team context from the current session\n\n**IMPORTANT**: TeamDelete will fail if the team still has active members. Gracefully terminate teammates first, then call TeamDelete after all teammates have shut down.\n\nUse this when all teammates have finished their work and you want to clean up the team resources. The team name is automatically determined from the current session's team context.",
+        "input_schema": {
+            "$schema": "https://json-schema.org/draft/2020-12/schema",
+            "type": "object",
+            "properties": {},
+            "additionalProperties": false
+        }
+    },
+   {
+    "name": "SendMessage",
+    "description": "# SendMessage\n\nSend a message to another agent.\n\n```json\n{\"to\": \"researcher\", \"summary\": \"assign task 1\", \"message\": \"start on task #1\"}\n```\n\n| `to` | |\n|---|---|\n| `\"researcher\"` | Teammate by name |\n| `\"*\"` | Broadcast to all teammates — expensive (linear in team size), use only when everyone genuinely needs it |\n\nYour plain text output is NOT visible to other agents — to communicate, you MUST call this tool. Messages from teammates are delivered automatically; you don't check an inbox. Refer to teammates by name, never by UUID. When relaying, don't quote the original — it's already rendered to the user.\n\n## Protocol responses (legacy)\n\nIf you receive a JSON message with `type: \"shutdown_request\"` or `type: \"plan_approval_request\"`, respond with the matching `_response` type — echo the `request_id`, set `approve` true/false:\n\n```json\n{\"to\": \"team-lead\", \"message\": {\"type\": \"shutdown_response\", \"request_id\": \"...\", \"approve\": true}}\n{\"to\": \"researcher\", \"message\": {\"type\": \"plan_approval_response\", \"request_id\": \"...\", \"approve\": false, \"feedback\": \"add error handling\"}}\n```\n\nApproving shutdown terminates your process. Rejecting plan sends the teammate back to revise. Don't originate `shutdown_request` unless asked. Don't send structured JSON status messages — use TaskUpdate.",
+    "input_schema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {
+            "to": {
+                "description": "Recipient: teammate name, or \"*\" for broadcast to all teammates",
+                "type": "string"
+            },
+            "summary": {
+                "description": "A 5-10 word summary shown as a preview in the UI (required when message is a string)",
+                "type": "string"
+            },
+            "message": {
+                "anyOf": [
+                    {
+                        "description": "Plain text message content",
+                        "type": "string"
+                    },
+                    {
+                        "anyOf": [
+                            {
+                                "type": "object",
+                                "properties": {
+                                    "type": {
+                                        "type": "string",
+                                        "const": "shutdown_request"
+                                    },
+                                    "reason": {
+                                        "type": "string"
+                                    }
+                                },
+                                "required": [
+                                    "type"
+                                ],
+                                "additionalProperties": false
+                            },
+                            {
+                                "type": "object",
+                                "properties": {
+                                    "type": {
+                                        "type": "string",
+                                        "const": "shutdown_response"
+                                    },
+                                    "request_id": {
+                                        "type": "string"
+                                    },
+                                    "approve": {
+                                        "type": "boolean"
+                                    },
+                                    "reason": {
+                                        "type": "string"
+                                    }
+                                },
+                                "required": [
+                                    "type",
+                                    "request_id",
+                                    "approve"
+                                ],
+                                "additionalProperties": false
+                            },
+                            {
+                                "type": "object",
+                                "properties": {
+                                    "type": {
+                                        "type": "string",
+                                        "const": "plan_approval_response"
+                                    },
+                                    "request_id": {
+                                        "type": "string"
+                                    },
+                                    "approve": {
+                                        "type": "boolean"
+                                    },
+                                    "feedback": {
+                                        "type": "string"
+                                    }
+                                },
+                                "required": [
+                                    "type",
+                                    "request_id",
+                                    "approve"
+                                ],
+                                "additionalProperties": false
+                            }
+                        ]
+                    }
+                ]
+            }
+        },
+        "required": [
+            "to",
+            "message"
+        ],
+        "additionalProperties": false
+    }
+}
+]
