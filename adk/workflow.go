@@ -175,7 +175,6 @@ func (a *workflowAgent) runSequential(ctx context.Context,
 
 	startIdx := 0
 
-	// seqCtx tracks the accumulated RunPath across the sequence.
 	seqCtx := ctx
 
 	// If we are resuming, find which sub-agent to start from and prepare its context.
@@ -192,6 +191,16 @@ func (a *workflowAgent) runSequential(ctx context.Context,
 
 	for i := startIdx; i < len(a.subAgents); i++ {
 		subAgent := a.subAgents[i]
+
+		// Cancel check at transition boundary between sub-agents.
+		// Transition boundaries are always safe to cancel at — no sub-agent
+		// work is in progress, so any cancel mode is honoured.
+		if cancelCtx := getCancelContext(ctx); cancelCtx != nil && cancelCtx.shouldCancel() {
+			state := &sequentialWorkflowState{InterruptIndex: i}
+			event := cancelAtTransition(ctx, "Sequential workflow cancel at transition", state)
+			generator.Send(event)
+			return nil
+		}
 
 		var subIterator *AsyncIterator[*AgentEvent]
 		if seqState != nil {
@@ -310,7 +319,6 @@ func (a *workflowAgent) runLoop(ctx context.Context, generator *AsyncGenerator[*
 	startIter := 0
 	startIdx := 0
 
-	// loopCtx tracks the accumulated RunPath across the full sequence within a single iteration.
 	loopCtx := ctx
 
 	if loopState != nil {
@@ -334,6 +342,13 @@ func (a *workflowAgent) runLoop(ctx context.Context, generator *AsyncGenerator[*
 	for i := startIter; i < a.maxIterations || a.maxIterations == 0; i++ {
 		for j := startIdx; j < len(a.subAgents); j++ {
 			subAgent := a.subAgents[j]
+
+			if cancelCtx := getCancelContext(ctx); cancelCtx != nil && cancelCtx.shouldCancel() {
+				state := &loopWorkflowState{LoopIterations: i, SubAgentIndex: j}
+				event := cancelAtTransition(ctx, "Loop workflow cancel at transition", state)
+				generator.Send(event)
+				return nil
+			}
 
 			var subIterator *AsyncIterator[*AgentEvent]
 			if loopState != nil {
@@ -479,6 +494,15 @@ func (a *workflowAgent) runParallel(ctx context.Context, generator *AsyncGenerat
 		}
 	}
 
+	// Cancel check before spawning parallel goroutines. No sub-agent work
+	// is in progress, so any cancel mode is honoured at this boundary.
+	if cancelCtx := getCancelContext(ctx); cancelCtx != nil && cancelCtx.shouldCancel() {
+		state := &parallelWorkflowState{}
+		event := cancelAtTransition(ctx, "Parallel workflow cancel before spawn", state)
+		generator.Send(event)
+		return nil
+	}
+
 	for i := range a.subAgents {
 		wg.Add(1)
 		go func(idx int, agent *flowAgent) {
@@ -561,6 +585,27 @@ func (a *workflowAgent) runParallel(ctx context.Context, generator *AsyncGenerat
 	}
 
 	return nil
+}
+
+func cancelAtTransition(ctx context.Context, info string, state any) *AgentEvent {
+	// state is the workflow checkpoint state (e.g. sequentialWorkflowState);
+	// nil for subContexts because this is a leaf interrupt with no child signals.
+	is, err := core.Interrupt(ctx, info, state, nil,
+		core.WithLayerPayload(getRunCtx(ctx).RunPath))
+	if err != nil {
+		return &AgentEvent{Err: err}
+	}
+
+	contexts := core.ToInterruptContexts(is, allowedAddressSegmentTypes)
+
+	return &AgentEvent{
+		Action: &AgentAction{
+			Interrupted: &InterruptInfo{
+				InterruptContexts: contexts,
+			},
+			internalInterrupted: is,
+		},
+	}
 }
 
 type SequentialAgentConfig struct {

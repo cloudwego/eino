@@ -19,6 +19,7 @@ package adk
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"runtime"
 	"sync"
@@ -1900,10 +1901,10 @@ func (m *gatedChatModel) BindTools(tools []*schema.ToolInfo) error {
 func TestCheckCancel_Sequential_BetweenSubAgents(t *testing.T) {
 	ctx := context.Background()
 
-	// Cancel is NOT caught at transition points. With CancelAfterToolCalls and
-	// no tools, agent1 completes, agent2 starts and also completes (no tools to
-	// trigger the safe-point). The cancel mode's condition is never satisfied,
-	// so the workflow completes normally and cancelFn returns ErrExecutionCompleted.
+	// CancelAfterToolCalls fires at transition boundaries between sub-agents.
+	// At a transition boundary, the completed sub-agent's entire execution
+	// (including any tool calls) is done, satisfying the CancelAfterToolCalls
+	// contract — even if this particular sub-agent had no tools.
 	model1 := &gatedChatModel{
 		response: &schema.Message{Role: schema.Assistant, Content: "agent1 done"},
 		gateChan: make(chan struct{}),
@@ -1936,32 +1937,16 @@ func TestCheckCancel_Sequential_BetweenSubAgents(t *testing.T) {
 	cancelOpt, cancelFn := WithCancel()
 	iter := runner.Run(ctx, []Message{schema.UserMessage("hello")}, cancelOpt)
 
-	// Wait for model1 to be entered
 	for atomic.LoadInt32(&model1.callCount) == 0 {
 		runtime.Gosched()
 	}
 
-	// Fire cancel in goroutine (blocks on doneChan)
-	cancelDone := make(chan error, 1)
-	go func() {
-		handle, _ := cancelFn(WithAgentCancelMode(CancelAfterToolCalls))
-		cancelDone <- handle.Wait()
-	}()
-
-	// Ensure cancelChan is closed, then release model1
-	time.Sleep(50 * time.Millisecond)
+	cancelCalled, result := cancelAsync(cancelFn, WithAgentCancelMode(CancelAfterToolCalls))
+	waitForChan(t, cancelCalled, "cancelFn was not called")
 	close(model1.gateChan)
 
-	select {
-	case err = <-cancelDone:
-		// CancelAfterToolCalls with no tools: cancel condition never satisfied,
-		// workflow completes normally.
-		assert.ErrorIs(t, err, ErrExecutionCompleted)
-	case <-time.After(5 * time.Second):
-		t.Fatal("cancelFn did not return")
-	}
+	assert.NoError(t, result.waitDone(t), "CancelAfterToolCalls should succeed at transition boundary")
 
-	// Drain events — no CancelError expected
 	for {
 		_, ok := iter.Next()
 		if !ok {
@@ -1969,17 +1954,17 @@ func TestCheckCancel_Sequential_BetweenSubAgents(t *testing.T) {
 		}
 	}
 
-	// Both agents complete normally since there are no tools to trigger the safe-point.
 	assert.Equal(t, int32(1), atomic.LoadInt32(&model1.callCount), "Agent1 model should be invoked")
-	assert.Equal(t, int32(1), atomic.LoadInt32(&model2.callCount), "Agent2 model should be invoked (cancel not caught without tools)")
+	assert.Equal(t, int32(0), atomic.LoadInt32(&model2.callCount),
+		"Agent2 model should NOT be invoked (CancelAfterToolCalls caught at transition)")
 }
 
 func TestCheckCancel_Loop_BetweenIterations(t *testing.T) {
 	ctx := context.Background()
 
-	// Cancel is NOT caught at iteration boundaries. With CancelAfterToolCalls and
-	// no tools, the loop continues running iterations until maxIterations or a
-	// break action. The cancel condition is never satisfied.
+	// CancelAfterToolCalls fires at loop iteration boundaries.
+	// After the first iteration completes, any tool calls it made are done,
+	// satisfying the CancelAfterToolCalls contract.
 	mdl := &gatedChatModel{
 		response: &schema.Message{Role: schema.Assistant, Content: "loop iter"},
 		gateChan: make(chan struct{}),
@@ -2003,32 +1988,16 @@ func TestCheckCancel_Loop_BetweenIterations(t *testing.T) {
 	cancelOpt, cancelFn := WithCancel()
 	iter := runner.Run(ctx, []Message{schema.UserMessage("hello")}, cancelOpt)
 
-	// Wait for model to be entered
 	for atomic.LoadInt32(&mdl.callCount) == 0 {
 		runtime.Gosched()
 	}
 
-	// Fire cancel in goroutine (waits on cancel handle)
-	cancelDone := make(chan error, 1)
-	go func() {
-		handle, _ := cancelFn(WithAgentCancelMode(CancelAfterToolCalls))
-		cancelDone <- handle.Wait()
-	}()
-
-	// Ensure cancelChan is closed, then release model (allow all iterations)
-	time.Sleep(50 * time.Millisecond)
+	cancelCalled, result := cancelAsync(cancelFn, WithAgentCancelMode(CancelAfterToolCalls))
+	waitForChan(t, cancelCalled, "cancelFn was not called")
 	close(mdl.gateChan)
 
-	select {
-	case err = <-cancelDone:
-		// CancelAfterToolCalls with no tools: condition never satisfied,
-		// loop runs all 3 iterations and completes normally.
-		assert.ErrorIs(t, err, ErrExecutionCompleted)
-	case <-time.After(5 * time.Second):
-		t.Fatal("cancelFn did not return")
-	}
+	assert.NoError(t, result.waitDone(t), "CancelAfterToolCalls should succeed at loop transition boundary")
 
-	// Drain events
 	for {
 		_, ok := iter.Next()
 		if !ok {
@@ -2036,8 +2005,8 @@ func TestCheckCancel_Loop_BetweenIterations(t *testing.T) {
 		}
 	}
 
-	// Model called for all 3 iterations since cancel mode is never satisfied.
-	assert.Equal(t, int32(3), atomic.LoadInt32(&mdl.callCount), "Model should be called for all iterations")
+	assert.Equal(t, int32(1), atomic.LoadInt32(&mdl.callCount),
+		"Model should be called once; second iteration caught at transition")
 }
 
 func TestCheckCancel_Parallel_PreSpawn(t *testing.T) {
@@ -2334,6 +2303,792 @@ func TestCancel_SequentialWorkflow_CancelAfterChatModel(t *testing.T) {
 		resumeEvents = append(resumeEvents, event)
 	}
 	assert.True(t, len(resumeEvents) > 0, "Resume should produce events")
+}
+
+// -- Tests for CancelImmediate in nested agent structures --
+
+func newTestChatModel(response *schema.Message, delay time.Duration) *cancelTestChatModel {
+	m := &cancelTestChatModel{
+		response:    response,
+		startedChan: make(chan struct{}, 1),
+		doneChan:    make(chan struct{}, 1),
+	}
+	if delay > 0 {
+		m.setDelay(delay)
+	}
+	return m
+}
+
+func newToolCallResponse(toolName string) *schema.Message {
+	return &schema.Message{
+		Role:    schema.Assistant,
+		Content: "",
+		ToolCalls: []schema.ToolCall{
+			{ID: "call_1", Type: "function", Function: schema.FunctionCall{Name: toolName, Arguments: `{}`}},
+		},
+	}
+}
+
+func newAgentWithTool(t *testing.T, ctx context.Context, name string, mdl model.BaseChatModel, subAgent Agent) (Agent, error) {
+	t.Helper()
+	return NewChatModelAgent(ctx, &ChatModelAgentConfig{
+		Name:        name,
+		Description: name,
+		Model:       mdl,
+		ToolsConfig: ToolsConfig{
+			ToolsNodeConfig: compose.ToolsNodeConfig{
+				Tools: []tool.BaseTool{NewAgentTool(ctx, subAgent)},
+			},
+		},
+	})
+}
+
+func waitForChan(t *testing.T, ch <-chan struct{}, msg string) {
+	t.Helper()
+	select {
+	case <-ch:
+	case <-time.After(10 * time.Second):
+		t.Fatal(msg)
+	}
+}
+
+func drainCancelError(t *testing.T, iter *AsyncIterator[*AgentEvent]) *CancelError {
+	t.Helper()
+	var cancelErr *CancelError
+	for {
+		event, ok := iter.Next()
+		if !ok {
+			break
+		}
+		if event.Err != nil {
+			errors.As(event.Err, &cancelErr)
+		}
+	}
+	return cancelErr
+}
+
+func drainResumeErrors(t *testing.T, iter *AsyncIterator[*AgentEvent]) []error {
+	t.Helper()
+	var errs []error
+	for {
+		event, ok := iter.Next()
+		if !ok {
+			break
+		}
+		if event.Err != nil {
+			errs = append(errs, event.Err)
+		}
+	}
+	return errs
+}
+
+type cancelResult struct {
+	err         error
+	contributed bool
+	done        chan struct{}
+}
+
+func cancelAsync(cancelFn AgentCancelFunc, opts ...AgentCancelOption) (cancelCalled chan struct{}, result *cancelResult) {
+	cancelCalled = make(chan struct{})
+	result = &cancelResult{done: make(chan struct{})}
+	go func() {
+		handle, contributed := cancelFn(opts...)
+		result.contributed = contributed
+		close(cancelCalled)
+		result.err = handle.Wait()
+		close(result.done)
+	}()
+	return
+}
+
+func (r *cancelResult) waitDone(t *testing.T) error {
+	t.Helper()
+	select {
+	case <-r.done:
+		return r.err
+	case <-time.After(10 * time.Second):
+		t.Fatal("cancel did not complete")
+		return nil
+	}
+}
+
+func TestCancelImmediate_AgentTool_PreservesChildCheckpoint(t *testing.T) {
+	ctx := context.Background()
+
+	leafModel := newTestChatModel(
+		&schema.Message{Role: schema.Assistant, Content: "leaf response"}, 2*time.Second)
+	leafAgent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+		Name: "leaf_agent", Description: "Leaf agent in agentTool", Model: leafModel,
+	})
+	assert.NoError(t, err)
+
+	seqAgent, err := NewSequentialAgent(ctx, &SequentialAgentConfig{
+		Name: "inner_seq", Description: "Inner sequential workflow", SubAgents: []Agent{leafAgent},
+	})
+	assert.NoError(t, err)
+
+	rootModel := newTestChatModel(newToolCallResponse("inner_seq"), 0)
+	rootAgent, err := newAgentWithTool(t, ctx, "root_agent", rootModel, seqAgent)
+	assert.NoError(t, err)
+
+	store := newCancelTestStore()
+	runner := NewRunner(ctx, RunnerConfig{Agent: rootAgent, CheckPointStore: store})
+
+	cancelOpt, cancelFn := WithCancel()
+	iter := runner.Run(ctx, []Message{schema.UserMessage("test")}, cancelOpt, WithCheckPointID("immediate-agent-tool-1"))
+
+	waitForChan(t, leafModel.startedChan, "Leaf agent model did not start")
+
+	handle, contributed := cancelFn()
+	assert.True(t, contributed)
+	assert.NoError(t, handle.Wait())
+
+	cancelErr := drainCancelError(t, iter)
+	assert.NotNil(t, cancelErr, "Should have CancelError from CancelImmediate through agentTool")
+	assert.NotEmpty(t, cancelErr.CheckPointID)
+	assert.NotNil(t, cancelErr.interruptSignal)
+
+	resumeLeaf, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+		Name: "leaf_agent", Description: "Leaf agent in agentTool",
+		Model: newTestChatModel(&schema.Message{Role: schema.Assistant, Content: "resumed leaf"}, 0),
+	})
+	assert.NoError(t, err)
+	resumeSeq, err := NewSequentialAgent(ctx, &SequentialAgentConfig{
+		Name: "inner_seq", Description: "Inner sequential workflow", SubAgents: []Agent{resumeLeaf},
+	})
+	assert.NoError(t, err)
+	resumeRoot, err := newAgentWithTool(t, ctx, "root_agent",
+		newTestChatModel(&schema.Message{Role: schema.Assistant, Content: "resumed root"}, 0), resumeSeq)
+	assert.NoError(t, err)
+
+	runner2 := NewRunner(ctx, RunnerConfig{Agent: resumeRoot, CheckPointStore: store})
+	resumeIter, err := runner2.Resume(ctx, "immediate-agent-tool-1")
+	assert.NoError(t, err)
+	assert.Empty(t, drainResumeErrors(t, resumeIter), "Resume should complete without errors")
+}
+
+func TestCancelImmediate_ParallelWorkflow_WithAgentTool(t *testing.T) {
+	ctx := context.Background()
+
+	leafModel := newTestChatModel(
+		&schema.Message{Role: schema.Assistant, Content: "leaf response"}, 2*time.Second)
+	leafAgent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+		Name: "leaf_agent", Description: "Leaf agent in agentTool", Model: leafModel,
+	})
+	assert.NoError(t, err)
+
+	agentWithTool, err := newAgentWithTool(t, ctx, "agent_with_tool",
+		newTestChatModel(newToolCallResponse("leaf_agent"), 0), leafAgent)
+	assert.NoError(t, err)
+
+	simpleStarted := make(chan struct{}, 1)
+	simpleAgent := newCancelTestAgent(t, "simple_agent", 2*time.Second, simpleStarted)
+
+	parAgent, err := NewParallelAgent(ctx, &ParallelAgentConfig{
+		Name: "par_agent", Description: "Parallel with agentTool and simple agent",
+		SubAgents: []Agent{agentWithTool, simpleAgent},
+	})
+	assert.NoError(t, err)
+
+	runner := NewRunner(ctx, RunnerConfig{Agent: parAgent, EnableStreaming: false})
+
+	cancelOpt, cancelFn := WithCancel()
+	iter := runner.Run(ctx, []Message{schema.UserMessage("test")}, cancelOpt)
+
+	waitForChan(t, leafModel.startedChan, "Leaf agent did not start")
+	waitForChan(t, simpleStarted, "Simple agent did not start")
+
+	start := time.Now()
+	handle, _ := cancelFn()
+	assert.NoError(t, handle.Wait())
+
+	cancelErr := drainCancelError(t, iter)
+	elapsed := time.Since(start)
+
+	assert.NotNil(t, cancelErr, "Should have CancelError from parallel with agentTool")
+	assert.True(t, elapsed < 5*time.Second, "Should complete quickly after cancel, elapsed: %v", elapsed)
+}
+
+type cancelUnawareAgent struct {
+	name     string
+	desc     string
+	delay    time.Duration
+	response string
+}
+
+type multiResponseGatedModel struct {
+	responses []*schema.Message
+	gateChan  chan struct{}
+	gateOnce  bool
+	gated     int32
+	doneChan  chan struct{}
+	callCount int32
+}
+
+func (m *multiResponseGatedModel) Generate(ctx context.Context, msgs []*schema.Message, opts ...model.Option) (*schema.Message, error) {
+	idx := atomic.AddInt32(&m.callCount, 1)
+	if m.gateChan != nil && (!m.gateOnce || atomic.CompareAndSwapInt32(&m.gated, 0, 1)) {
+		select {
+		case <-m.gateChan:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
+	if len(m.responses) == 0 {
+		return nil, fmt.Errorf("multiResponseGatedModel: no responses configured")
+	}
+	resp := m.responses[(int(idx)-1)%len(m.responses)]
+	if m.doneChan != nil {
+		select {
+		case m.doneChan <- struct{}{}:
+		default:
+		}
+	}
+	return resp, nil
+}
+
+func (m *multiResponseGatedModel) Stream(ctx context.Context, msgs []*schema.Message, opts ...model.Option) (*schema.StreamReader[*schema.Message], error) {
+	resp, err := m.Generate(ctx, msgs, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return schema.StreamReaderFromArray([]*schema.Message{resp}), nil
+}
+
+func (m *multiResponseGatedModel) BindTools(tools []*schema.ToolInfo) error { return nil }
+
+func (a *cancelUnawareAgent) Name(_ context.Context) string        { return a.name }
+func (a *cancelUnawareAgent) Description(_ context.Context) string { return a.desc }
+
+func (a *cancelUnawareAgent) Run(_ context.Context, _ *AgentInput, _ ...AgentRunOption) *AsyncIterator[*AgentEvent] {
+	iter, gen := NewAsyncIteratorPair[*AgentEvent]()
+	go func() {
+		defer gen.Close()
+		// Intentionally ignores ctx.Done() — simulates a custom agent that
+		// does not participate in the cancel protocol at all.
+		// Delay is kept short (relative to grace period) to avoid goroutine
+		// leak lasting long after the test completes.
+		time.Sleep(a.delay)
+	}()
+	return iter
+}
+
+func TestCancelImmediate_CustomAgent_GracePeriodFallback(t *testing.T) {
+	ctx := context.Background()
+
+	customAgent := &cancelUnawareAgent{
+		name: "custom_slow", desc: "A custom agent that ignores cancel",
+		delay: 5 * time.Second, response: "custom response",
+	}
+
+	rootModel := newTestChatModel(newToolCallResponse("custom_slow"), 0)
+	rootAgent, err := newAgentWithTool(t, ctx, "root_agent", rootModel, customAgent)
+	assert.NoError(t, err)
+
+	runner := NewRunner(ctx, RunnerConfig{Agent: rootAgent, EnableStreaming: false})
+
+	cancelOpt, cancelFn := WithCancel()
+	iter := runner.Run(ctx, []Message{schema.UserMessage("test")}, cancelOpt)
+
+	waitForChan(t, rootModel.startedChan, "Root model did not start")
+	waitForChan(t, rootModel.doneChan, "Root model did not finish")
+
+	start := time.Now()
+	handle, _ := cancelFn()
+	assert.NoError(t, handle.Wait())
+
+	cancelErr := drainCancelError(t, iter)
+	elapsed := time.Since(start)
+
+	assert.NotNil(t, cancelErr, "Should have CancelError (from grace period fallback)")
+	assert.True(t, elapsed < 5*time.Second,
+		"Should complete within grace period + overhead, elapsed: %v", elapsed)
+}
+
+func TestCancelImmediate_MultiLevelNesting(t *testing.T) {
+	ctx := context.Background()
+
+	innerLeafModel := newTestChatModel(
+		&schema.Message{Role: schema.Assistant, Content: "inner leaf response"}, 2*time.Second)
+	innerLeafAgent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+		Name: "inner_leaf", Description: "Innermost leaf agent", Model: innerLeafModel,
+	})
+	assert.NoError(t, err)
+
+	middleAgent, err := newAgentWithTool(t, ctx, "middle_agent",
+		newTestChatModel(newToolCallResponse("inner_leaf"), 0), innerLeafAgent)
+	assert.NoError(t, err)
+
+	rootAgent, err := newAgentWithTool(t, ctx, "root_agent",
+		newTestChatModel(newToolCallResponse("middle_agent"), 0), middleAgent)
+	assert.NoError(t, err)
+
+	store := newCancelTestStore()
+	runner := NewRunner(ctx, RunnerConfig{Agent: rootAgent, CheckPointStore: store})
+
+	cancelOpt, cancelFn := WithCancel()
+	iter := runner.Run(ctx, []Message{schema.UserMessage("test")}, cancelOpt, WithCheckPointID("multi-level-1"))
+
+	waitForChan(t, innerLeafModel.startedChan, "Inner leaf model did not start")
+
+	start := time.Now()
+	handle, contributed := cancelFn()
+	assert.True(t, contributed)
+	assert.NoError(t, handle.Wait())
+
+	cancelErr := drainCancelError(t, iter)
+	elapsed := time.Since(start)
+
+	assert.NotNil(t, cancelErr, "Should have CancelError from multi-level nesting")
+	assert.NotEmpty(t, cancelErr.CheckPointID)
+	assert.NotNil(t, cancelErr.interruptSignal)
+	assert.True(t, elapsed < 5*time.Second, "Should complete quickly, elapsed: %v", elapsed)
+
+	resumeInnerLeaf, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+		Name: "inner_leaf", Description: "Innermost leaf agent",
+		Model: newTestChatModel(&schema.Message{Role: schema.Assistant, Content: "resumed inner leaf"}, 0),
+	})
+	assert.NoError(t, err)
+	resumeMiddle, err := newAgentWithTool(t, ctx, "middle_agent",
+		newTestChatModel(&schema.Message{Role: schema.Assistant, Content: "resumed middle"}, 0), resumeInnerLeaf)
+	assert.NoError(t, err)
+	resumeRoot, err := newAgentWithTool(t, ctx, "root_agent",
+		newTestChatModel(&schema.Message{Role: schema.Assistant, Content: "resumed root"}, 0), resumeMiddle)
+	assert.NoError(t, err)
+
+	runner2 := NewRunner(ctx, RunnerConfig{Agent: resumeRoot, CheckPointStore: store})
+	resumeIter, err := runner2.Resume(ctx, "multi-level-1")
+	assert.NoError(t, err)
+	assert.Empty(t, drainResumeErrors(t, resumeIter), "Resume should complete without errors")
+}
+
+func TestCancelImmediate_SequentialTransitionBoundary(t *testing.T) {
+	ctx := context.Background()
+
+	model1 := &gatedChatModel{
+		response: &schema.Message{Role: schema.Assistant, Content: "agent1 done"},
+		gateChan: make(chan struct{}),
+		doneChan: make(chan struct{}, 1),
+	}
+	model2 := &gatedChatModel{
+		response: &schema.Message{Role: schema.Assistant, Content: "agent2 done"},
+		doneChan: make(chan struct{}, 1),
+	}
+
+	agent1, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+		Name: "agent1", Description: "first", Instruction: "test", Model: model1,
+	})
+	assert.NoError(t, err)
+
+	agent2, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+		Name: "agent2", Description: "second", Instruction: "test", Model: model2,
+	})
+	assert.NoError(t, err)
+
+	seqAgent, err := NewSequentialAgent(ctx, &SequentialAgentConfig{
+		Name: "seq", Description: "sequential test", SubAgents: []Agent{agent1, agent2},
+	})
+	assert.NoError(t, err)
+
+	runner := NewRunner(ctx, RunnerConfig{
+		Agent: seqAgent, EnableStreaming: false,
+	})
+
+	cancelOpt, cancelFn := WithCancel()
+	iter := runner.Run(ctx, []Message{schema.UserMessage("hello")}, cancelOpt)
+
+	for atomic.LoadInt32(&model1.callCount) == 0 {
+		runtime.Gosched()
+	}
+
+	cancelCalled, result := cancelAsync(cancelFn)
+	waitForChan(t, cancelCalled, "cancelFn was not called")
+	close(model1.gateChan)
+
+	assert.NoError(t, result.waitDone(t), "CancelImmediate should succeed at transition")
+
+	cancelErr := drainCancelError(t, iter)
+
+	assert.NotNil(t, cancelErr, "Should have CancelError at transition boundary")
+	assert.Equal(t, int32(1), atomic.LoadInt32(&model1.callCount), "Agent1 model should be invoked")
+	assert.Equal(t, int32(0), atomic.LoadInt32(&model2.callCount), "Agent2 model should NOT be invoked (caught at transition)")
+}
+
+func TestCancelImmediate_LoopTransitionBoundary(t *testing.T) {
+	ctx := context.Background()
+
+	mdl := &gatedChatModel{
+		response: &schema.Message{Role: schema.Assistant, Content: "loop iter"},
+		gateChan: make(chan struct{}),
+		doneChan: make(chan struct{}, 10),
+	}
+
+	agent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+		Name: "loop_inner", Description: "inner", Instruction: "test", Model: mdl,
+	})
+	assert.NoError(t, err)
+
+	loopAgent, err := NewLoopAgent(ctx, &LoopAgentConfig{
+		Name: "loop", Description: "loop test", SubAgents: []Agent{agent}, MaxIterations: 5,
+	})
+	assert.NoError(t, err)
+
+	runner := NewRunner(ctx, RunnerConfig{
+		Agent: loopAgent, EnableStreaming: false,
+	})
+
+	cancelOpt, cancelFn := WithCancel()
+	iter := runner.Run(ctx, []Message{schema.UserMessage("hello")}, cancelOpt)
+
+	for atomic.LoadInt32(&mdl.callCount) == 0 {
+		runtime.Gosched()
+	}
+
+	cancelCalled, result := cancelAsync(cancelFn)
+	waitForChan(t, cancelCalled, "cancelFn was not called")
+	close(mdl.gateChan)
+
+	assert.NoError(t, result.waitDone(t), "CancelImmediate should succeed at loop transition")
+
+	for {
+		_, ok := iter.Next()
+		if !ok {
+			break
+		}
+	}
+
+	assert.Equal(t, int32(1), atomic.LoadInt32(&mdl.callCount),
+		"Model should be called once; second iteration caught at transition")
+}
+
+func TestCancelAfterChatModel_SequentialTransitionBoundary(t *testing.T) {
+	ctx := context.Background()
+
+	model1 := &gatedChatModel{
+		response: &schema.Message{Role: schema.Assistant, Content: "agent1 done"},
+		gateChan: make(chan struct{}),
+		doneChan: make(chan struct{}, 1),
+	}
+	model2 := &gatedChatModel{
+		response: &schema.Message{Role: schema.Assistant, Content: "agent2 done"},
+		doneChan: make(chan struct{}, 1),
+	}
+
+	agent1, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+		Name: "agent1", Description: "first", Instruction: "test", Model: model1,
+	})
+	assert.NoError(t, err)
+
+	agent2, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+		Name: "agent2", Description: "second", Instruction: "test", Model: model2,
+	})
+	assert.NoError(t, err)
+
+	seqAgent, err := NewSequentialAgent(ctx, &SequentialAgentConfig{
+		Name: "seq", Description: "sequential test", SubAgents: []Agent{agent1, agent2},
+	})
+	assert.NoError(t, err)
+
+	store := newCancelTestStore()
+	runner := NewRunner(ctx, RunnerConfig{
+		Agent:           seqAgent,
+		EnableStreaming: false,
+		CheckPointStore: store,
+	})
+
+	cancelOpt, cancelFn := WithCancel()
+	iter := runner.Run(ctx, []Message{schema.UserMessage("hello")}, cancelOpt, WithCheckPointID("chatmodel-transition-1"))
+
+	for atomic.LoadInt32(&model1.callCount) == 0 {
+		runtime.Gosched()
+	}
+
+	cancelCalled, result := cancelAsync(cancelFn, WithAgentCancelMode(CancelAfterChatModel))
+	waitForChan(t, cancelCalled, "cancelFn was not called")
+	close(model1.gateChan)
+
+	assert.NoError(t, result.waitDone(t), "CancelAfterChatModel should succeed at transition boundary")
+
+	var cancelErr *CancelError
+	for {
+		event, ok := iter.Next()
+		if !ok {
+			break
+		}
+		var ce *CancelError
+		if event.Err != nil && errors.As(event.Err, &ce) {
+			cancelErr = ce
+		}
+	}
+
+	assert.NotNil(t, cancelErr, "Should have CancelError at transition boundary")
+	assert.Equal(t, CancelAfterChatModel, cancelErr.Info.Mode)
+	assert.Equal(t, int32(1), atomic.LoadInt32(&model1.callCount), "Agent1 model should be invoked")
+	assert.Equal(t, int32(0), atomic.LoadInt32(&model2.callCount),
+		"Agent2 model should NOT be invoked (CancelAfterChatModel caught at transition)")
+}
+
+func TestCancelAfterChatModel_Sequential_Agent1CompletesCancelBeforeAgent2Resume(t *testing.T) {
+	ctx := context.Background()
+
+	model1 := &gatedChatModel{
+		response: &schema.Message{Role: schema.Assistant, Content: "agent1 done"},
+		gateChan: make(chan struct{}),
+		doneChan: make(chan struct{}, 1),
+	}
+	model2 := &gatedChatModel{
+		response: &schema.Message{Role: schema.Assistant, Content: "agent2 done"},
+		doneChan: make(chan struct{}, 1),
+	}
+	model3 := &gatedChatModel{
+		response: &schema.Message{Role: schema.Assistant, Content: "agent3 done"},
+		doneChan: make(chan struct{}, 1),
+	}
+
+	agent1, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+		Name: "agent1", Description: "first", Instruction: "test", Model: model1,
+	})
+	assert.NoError(t, err)
+	agent2, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+		Name: "agent2", Description: "second", Instruction: "test", Model: model2,
+	})
+	assert.NoError(t, err)
+	agent3, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+		Name: "agent3", Description: "third", Instruction: "test", Model: model3,
+	})
+	assert.NoError(t, err)
+
+	seqAgent, err := NewSequentialAgent(ctx, &SequentialAgentConfig{
+		Name: "seq", Description: "3-agent sequential", SubAgents: []Agent{agent1, agent2, agent3},
+	})
+	assert.NoError(t, err)
+
+	store := newCancelTestStore()
+	runner := NewRunner(ctx, RunnerConfig{
+		Agent: seqAgent, CheckPointStore: store, EnableStreaming: false,
+	})
+
+	cancelOpt, cancelFn := WithCancel()
+	iter := runner.Run(ctx, []Message{schema.UserMessage("hello")}, cancelOpt,
+		WithCheckPointID("seq-transition-resume-1"))
+
+	for atomic.LoadInt32(&model1.callCount) == 0 {
+		runtime.Gosched()
+	}
+
+	cancelCalled, result := cancelAsync(cancelFn, WithAgentCancelMode(CancelAfterChatModel))
+	waitForChan(t, cancelCalled, "cancelFn was not called")
+	close(model1.gateChan)
+
+	assert.NoError(t, result.waitDone(t))
+
+	cancelErr := drainCancelError(t, iter)
+	assert.NotNil(t, cancelErr, "Should have CancelError")
+	assert.Equal(t, CancelAfterChatModel, cancelErr.Info.Mode)
+	assert.Equal(t, int32(1), atomic.LoadInt32(&model1.callCount))
+	assert.Equal(t, int32(0), atomic.LoadInt32(&model2.callCount),
+		"Agent2 should NOT run (cancel caught at transition after agent1)")
+	assert.Equal(t, int32(0), atomic.LoadInt32(&model3.callCount))
+	assert.NotEmpty(t, cancelErr.CheckPointID)
+
+	resumeModel2 := &gatedChatModel{
+		response: &schema.Message{Role: schema.Assistant, Content: "resumed agent2"},
+		doneChan: make(chan struct{}, 1),
+	}
+	resumeModel3 := &gatedChatModel{
+		response: &schema.Message{Role: schema.Assistant, Content: "resumed agent3"},
+		doneChan: make(chan struct{}, 1),
+	}
+
+	resumeAgent1, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+		Name: "agent1", Description: "first", Instruction: "test",
+		Model: &gatedChatModel{
+			response: &schema.Message{Role: schema.Assistant, Content: "should not run"},
+			doneChan: make(chan struct{}, 1),
+		},
+	})
+	assert.NoError(t, err)
+	resumeAgent2, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+		Name: "agent2", Description: "second", Instruction: "test", Model: resumeModel2,
+	})
+	assert.NoError(t, err)
+	resumeAgent3, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+		Name: "agent3", Description: "third", Instruction: "test", Model: resumeModel3,
+	})
+	assert.NoError(t, err)
+
+	resumeSeq, err := NewSequentialAgent(ctx, &SequentialAgentConfig{
+		Name: "seq", Description: "3-agent sequential",
+		SubAgents: []Agent{resumeAgent1, resumeAgent2, resumeAgent3},
+	})
+	assert.NoError(t, err)
+
+	runner2 := NewRunner(ctx, RunnerConfig{
+		Agent: resumeSeq, CheckPointStore: store, EnableStreaming: false,
+	})
+	resumeIter, err := runner2.Resume(ctx, "seq-transition-resume-1")
+	assert.NoError(t, err)
+	assert.Empty(t, drainResumeErrors(t, resumeIter), "Resume should complete without errors")
+
+	assert.Equal(t, int32(1), atomic.LoadInt32(&resumeModel2.callCount),
+		"Agent2 should run on resume")
+	assert.Equal(t, int32(1), atomic.LoadInt32(&resumeModel3.callCount),
+		"Agent3 should run on resume")
+}
+
+func TestCancelAfterToolCalls_LoopTransitionBoundary(t *testing.T) {
+	ctx := context.Background()
+
+	// Model that returns tool calls on odd calls and no tools on even calls.
+	// This completes one ReAct cycle per pair of calls:
+	//   call 1 (gated): returns tool call → tool runs → call 2: returns no tools → END
+	// The gate only blocks the very first call. After that, all calls proceed instantly.
+	mdl := &multiResponseGatedModel{
+		responses: []*schema.Message{
+			{Role: schema.Assistant, ToolCalls: []schema.ToolCall{{
+				ID: "call_1", Type: "function",
+				Function: schema.FunctionCall{Name: "loop_tool", Arguments: `{"input": "test"}`},
+			}}},
+			{Role: schema.Assistant, Content: "iteration done"},
+		},
+		gateChan: make(chan struct{}),
+		gateOnce: true,
+		doneChan: make(chan struct{}, 10),
+	}
+
+	st := &slowTool{
+		name:        "loop_tool",
+		delay:       10 * time.Millisecond,
+		result:      "tool done",
+		startedChan: make(chan struct{}, 10),
+	}
+
+	agent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+		Name: "loop_inner", Description: "inner", Instruction: "test", Model: mdl,
+		ToolsConfig: ToolsConfig{
+			ToolsNodeConfig: compose.ToolsNodeConfig{
+				Tools: []tool.BaseTool{st},
+			},
+		},
+	})
+	assert.NoError(t, err)
+
+	loopAgent, err := NewLoopAgent(ctx, &LoopAgentConfig{
+		Name: "loop", Description: "loop test", SubAgents: []Agent{agent}, MaxIterations: 10,
+	})
+	assert.NoError(t, err)
+
+	store := newCancelTestStore()
+	runner := NewRunner(ctx, RunnerConfig{Agent: loopAgent, CheckPointStore: store})
+
+	cancelOpt, cancelFn := WithCancel()
+	iter := runner.Run(ctx, []Message{schema.UserMessage("test")}, cancelOpt, WithCheckPointID("toolcalls-loop-1"))
+
+	// Wait for the model to be entered (blocked on gate)
+	for atomic.LoadInt32(&mdl.callCount) == 0 {
+		runtime.Gosched()
+	}
+
+	// Fire cancel, wait for it to be registered, then release the gate
+	cancelCalled, result := cancelAsync(cancelFn, WithAgentCancelMode(CancelAfterToolCalls))
+	waitForChan(t, cancelCalled, "cancelFn was not called")
+	close(mdl.gateChan)
+
+	// Iteration 1 completes fully (model→tool→model-no-tools→END).
+	// The CancelAfterToolCalls safe-point inside ReAct fires after tool calls,
+	// OR the transition boundary catches it before iteration 2.
+	// Note: this test doesn't deterministically distinguish which path fires —
+	// both are semantically correct for CancelAfterToolCalls. The transition-
+	// boundary code path for CancelAfterToolCalls in loops is not definitively
+	// covered here because the ReAct safe-point may handle it first.
+	assert.NoError(t, result.waitDone(t))
+
+	cancelErr := drainCancelError(t, iter)
+	assert.NotNil(t, cancelErr, "Should have CancelError from CancelAfterToolCalls in loop")
+	assert.Equal(t, CancelAfterToolCalls, cancelErr.Info.Mode)
+	assert.NotEmpty(t, cancelErr.CheckPointID)
+}
+
+func TestCancelContext_ActiveChildren_Tracking(t *testing.T) {
+	t.Run("DeriveChild_IncrementsActiveChildren", func(t *testing.T) {
+		parent := newCancelContext()
+		assert.False(t, parent.hasActiveChildren())
+
+		ctx := context.Background()
+		child := parent.deriveChild(ctx)
+		assert.True(t, parent.hasActiveChildren())
+		assert.Equal(t, int32(1), atomic.LoadInt32(&parent.activeChildren))
+
+		child.markDone()
+		time.Sleep(10 * time.Millisecond)
+		assert.False(t, parent.hasActiveChildren())
+		assert.Equal(t, int32(0), atomic.LoadInt32(&parent.activeChildren))
+	})
+
+	t.Run("MultipleChildren_AllTracked", func(t *testing.T) {
+		parent := newCancelContext()
+		ctx := context.Background()
+
+		child1 := parent.deriveChild(ctx)
+		child2 := parent.deriveChild(ctx)
+		assert.Equal(t, int32(2), atomic.LoadInt32(&parent.activeChildren))
+
+		child1.markDone()
+		time.Sleep(10 * time.Millisecond)
+		assert.Equal(t, int32(1), atomic.LoadInt32(&parent.activeChildren))
+		assert.True(t, parent.hasActiveChildren())
+
+		child2.markDone()
+		time.Sleep(10 * time.Millisecond)
+		assert.False(t, parent.hasActiveChildren())
+	})
+
+	t.Run("MarkCancelHandled_AlsoDecrementsParent", func(t *testing.T) {
+		parent := newCancelContext()
+		ctx := context.Background()
+
+		child := parent.deriveChild(ctx)
+		assert.True(t, parent.hasActiveChildren())
+
+		child.triggerCancel(CancelImmediate)
+		child.markCancelHandled()
+		time.Sleep(10 * time.Millisecond)
+		assert.False(t, parent.hasActiveChildren())
+	})
+
+	t.Run("GracePeriodWrapper_AppliesWhenChildrenActive", func(t *testing.T) {
+		parent := newCancelContext()
+		ctx := context.Background()
+
+		var receivedOpts []compose.GraphInterruptOption
+		mockInterrupt := func(opts ...compose.GraphInterruptOption) {
+			receivedOpts = opts
+		}
+
+		wrapped := parent.wrapGraphInterruptWithGracePeriod(mockInterrupt)
+
+		// No children: no options appended
+		receivedOpts = nil
+		wrapped()
+		assert.Empty(t, receivedOpts, "Should pass no extra options when no children")
+
+		// With active child: one timeout option appended
+		_ = parent.deriveChild(ctx)
+		receivedOpts = nil
+		wrapped()
+		assert.Len(t, receivedOpts, 1, "Should add exactly one timeout option when children are active")
+
+		// Caller-provided options are preserved, grace period option appended after
+		receivedOpts = nil
+		callerOpt := compose.WithGraphInterruptTimeout(0)
+		wrapped(callerOpt)
+		assert.Len(t, receivedOpts, 2,
+			"Should append timeout option after caller-provided options when children are active")
+		// Note: verifying the exact timeout value (defaultCancelImmediateGracePeriod)
+		// requires access to unexported compose.graphInterruptOptions. The integration
+		// tests (TestCancelImmediate_AgentTool_PreservesChildCheckpoint) verify the
+		// actual behavioral effect — child interrupts propagate within the grace period.
+	})
 }
 
 func TestCancel_ParallelWorkflow_CancelAfterChatModel(t *testing.T) {

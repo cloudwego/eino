@@ -37,14 +37,16 @@ func init() {
 }
 
 // CancelMode specifies when an agent should be canceled.
-// Modes can be combined with bitwise OR to cancel at multiple execution points.
+// Modes can be combined with bitwise OR to cancel at multiple safe-points.
 // For example, CancelAfterChatModel | CancelAfterToolCalls cancels the agent
-// after whichever execution point is reached first.
+// after whichever safe-point is reached first.
 type CancelMode int
 
 const (
-	// CancelImmediate cancels the agent immediately without waiting
-	// for any execution point.
+	// CancelImmediate cancels the agent as soon as the signal is received,
+	// without waiting for a ChatModel or ToolCalls safe-point. Propagates
+	// to all descendant agents via the cancel context hierarchy, including
+	// agents nested inside AgentTools and workflow sub-agents.
 	CancelImmediate CancelMode = 0
 	// CancelAfterChatModel cancels after the first chat model call that completes
 	// anywhere in the agent hierarchy, including nested sub-agents, agent tools,
@@ -243,6 +245,14 @@ const (
 	interruptImmediate int32 = 1
 )
 
+// defaultCancelImmediateGracePeriod is the time a parent's graph interrupt
+// waits when the cancelContext has active children (via deriveChild). This
+// gives child agents time to propagate their interrupt signal back through
+// the agentTool as a CompositeInterrupt. If this proves insufficient for
+// deeply nested structures or too slow for latency-sensitive use cases,
+// consider making it configurable via an AgentCancelOption.
+const defaultCancelImmediateGracePeriod = 1 * time.Second
+
 type cancelContextKey struct{}
 
 // withCancelContext stores a cancelContext in the Go context.
@@ -276,7 +286,11 @@ type cancelContext struct {
 	startedMode      int32 // atomic, mode when state transitioned to cancelling
 	deadlineUnixNano int64 // atomic, 0 means no deadline
 
-	root bool // true for the original cancelContext created by WithCancel(); false for derived children
+	root   bool           // true for the original cancelContext created by WithCancel(); false for derived children
+	parent *cancelContext // non-nil for derived children; used to decrement parent's activeChildren on markDone
+
+	activeChildren    int32 // atomic; number of derived children that haven't called markDone() yet
+	decrementedParent int32 // atomic CAS guard; ensures parent.activeChildren is decremented at most once
 
 	cancelMu      sync.Mutex
 	timeoutOnce   sync.Once
@@ -310,6 +324,8 @@ func (cc *cancelContext) deriveChild(ctx context.Context) *cancelContext {
 	}
 	child := newCancelContext()
 	child.root = false
+	child.parent = cc
+	atomic.AddInt32(&cc.activeChildren, 1)
 
 	go func() {
 		select {
@@ -452,6 +468,29 @@ func (cc *cancelContext) markDone() {
 	if atomic.CompareAndSwapInt32(&cc.state, stateRunning, stateDone) ||
 		atomic.CompareAndSwapInt32(&cc.state, stateCancelling, stateDone) {
 		cc.doneOnce.Do(func() { close(cc.doneChan) })
+		cc.detachFromParent()
+	}
+}
+
+func (cc *cancelContext) detachFromParent() {
+	if cc.parent != nil && atomic.CompareAndSwapInt32(&cc.decrementedParent, 0, 1) {
+		atomic.AddInt32(&cc.parent.activeChildren, -1)
+	}
+}
+
+func (cc *cancelContext) hasActiveChildren() bool {
+	return cc != nil && atomic.LoadInt32(&cc.activeChildren) > 0
+}
+
+func (cc *cancelContext) wrapGraphInterruptWithGracePeriod(interrupt func(...compose.GraphInterruptOption)) func(...compose.GraphInterruptOption) {
+	return func(opts ...compose.GraphInterruptOption) {
+		if cc.hasActiveChildren() {
+			newOpts := make([]compose.GraphInterruptOption, len(opts)+1)
+			copy(newOpts, opts)
+			newOpts[len(opts)] = compose.WithGraphInterruptTimeout(defaultCancelImmediateGracePeriod)
+			opts = newOpts
+		}
+		interrupt(opts...)
 	}
 }
 
@@ -467,6 +506,7 @@ func (cc *cancelContext) markCancelHandled() bool {
 	}
 	if atomic.CompareAndSwapInt32(&cc.state, stateCancelling, stateCancelHandled) {
 		cc.doneOnce.Do(func() { close(cc.doneChan) })
+		cc.detachFromParent()
 		return true
 	}
 	return false
