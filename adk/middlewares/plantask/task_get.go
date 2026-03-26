@@ -19,7 +19,6 @@ package plantask
 import (
 	"context"
 	"fmt"
-	"path/filepath"
 	"strings"
 	"sync"
 
@@ -30,14 +29,13 @@ import (
 	"github.com/cloudwego/eino/schema"
 )
 
-func newTaskGetTool(backend Backend, baseDir string, lock *sync.Mutex) *taskGetTool {
-	return &taskGetTool{Backend: backend, BaseDir: baseDir, lock: lock}
+func newTaskGetTool(mw *middleware, turnLock *sync.RWMutex) *taskGetTool {
+	return &taskGetTool{mw: mw, turnLock: turnLock}
 }
 
 type taskGetTool struct {
-	Backend Backend
-	BaseDir string
-	lock    *sync.Mutex
+	mw       *middleware
+	turnLock *sync.RWMutex
 }
 
 func (t *taskGetTool) Info(ctx context.Context) (*schema.ToolInfo, error) {
@@ -64,8 +62,9 @@ type taskGetArgs struct {
 }
 
 func (t *taskGetTool) InvokableRun(ctx context.Context, argumentsInJSON string, opts ...tool.Option) (string, error) {
-	t.lock.Lock()
-	defer t.lock.Unlock()
+	lock := t.mw.getLock(t.turnLock)
+	lock.RLock()
+	defer lock.RUnlock()
 
 	params := &taskGetArgs{}
 	err := sonic.UnmarshalString(argumentsInJSON, params)
@@ -77,20 +76,13 @@ func (t *taskGetTool) InvokableRun(ctx context.Context, argumentsInJSON string, 
 		return "", fmt.Errorf("%s validate task ID failed, err: invalid format: %s", TaskGetToolName, params.TaskID)
 	}
 
-	taskFileName := fmt.Sprintf("%s.json", params.TaskID)
-	taskFilePath := filepath.Join(t.BaseDir, taskFileName)
-
-	content, err := t.Backend.Read(ctx, &ReadRequest{
-		FilePath: taskFilePath,
-	})
+	taskData, err := readTask(ctx, t.mw.backend, t.mw.resolveBaseDir(ctx), params.TaskID)
 	if err != nil {
-		return "", fmt.Errorf("%s get Task #%s failed, err: %w", TaskGetToolName, params.TaskID, err)
+		return "", fmt.Errorf("%s %w", TaskGetToolName, err)
 	}
 
-	taskData := &task{}
-	err = sonic.UnmarshalString(content.Content, taskData)
-	if err != nil {
-		return "", fmt.Errorf("%s get Task #%s failed, err: %w", TaskGetToolName, params.TaskID, err)
+	if taskData == nil {
+		return marshalTaskResponse("Task not found")
 	}
 
 	var result strings.Builder
@@ -116,16 +108,7 @@ func (t *taskGetTool) InvokableRun(ctx context.Context, argumentsInJSON string, 
 		result.WriteString(fmt.Sprintf("Owner: %s\n", taskData.Owner))
 	}
 
-	resp := &taskOut{
-		Result: result.String(),
-	}
-
-	jsonResp, err := sonic.MarshalString(resp)
-	if err != nil {
-		return "", fmt.Errorf("%s marshal taskOut failed, err: %w", TaskGetToolName, err)
-	}
-
-	return jsonResp, nil
+	return marshalTaskResponse(result.String())
 }
 
 const TaskGetToolName = "TaskGet"

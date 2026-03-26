@@ -18,12 +18,25 @@ package plantask
 
 import (
 	"context"
+	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
 	"regexp"
+
+	"github.com/bytedance/sonic"
 
 	"github.com/cloudwego/eino/adk/middlewares/filesystem"
 )
 
 var validTaskIDRegex = regexp.MustCompile(`^\d+$`)
+
+var validTaskStatuses = map[string]struct{}{
+	taskStatusPending:    {},
+	taskStatusInProgress: {},
+	taskStatusCompleted:  {},
+	taskStatusDeleted:    {},
+}
 
 const highWatermarkFileName = ".highwatermark"
 
@@ -48,6 +61,10 @@ const (
 	taskStatusInProgress = "in_progress"
 	taskStatusCompleted  = "completed"
 	taskStatusDeleted    = "deleted"
+
+	// MetadataKeyInternal marks a task as system-internal (e.g., teammate shadow tasks).
+	// Internal tasks are filtered out from TaskList.
+	MetadataKeyInternal = "_internal"
 )
 
 type FileInfo = filesystem.FileInfo
@@ -55,6 +72,7 @@ type LsInfoRequest = filesystem.LsInfoRequest
 type ReadRequest = filesystem.ReadRequest
 type WriteRequest = filesystem.WriteRequest
 
+// DeleteRequest describes a file or directory deletion.
 type DeleteRequest struct {
 	FilePath string
 }
@@ -68,12 +86,37 @@ type Backend interface {
 	Read(ctx context.Context, req *ReadRequest) (*filesystem.FileContent, error)
 	// Write writes content to a file, creating it if it doesn't exist.
 	Write(ctx context.Context, req *WriteRequest) error
-	// Delete removes a file from storage.
+	// Delete removes a file or directory at the given path from storage.
+	// If the path is a directory, it must be deleted along with all its contents,
+	// regardless of whether the directory is empty.
 	Delete(ctx context.Context, req *DeleteRequest) error
 }
 
 func isValidTaskID(taskID string) bool {
 	return validTaskIDRegex.MatchString(taskID)
+}
+
+func isValidTaskStatus(status string) bool {
+	_, ok := validTaskStatuses[status]
+	return ok
+}
+
+// isInternalTask returns true if the task is marked as system-internal.
+func isInternalTask(t *task) bool {
+	if t.Metadata == nil {
+		return false
+	}
+	v, ok := t.Metadata[MetadataKeyInternal].(bool)
+	return ok && v
+}
+
+func containsString(slice []string, s string) bool {
+	for _, v := range slice {
+		if v == s {
+			return true
+		}
+	}
+	return false
 }
 
 func appendUnique(slice []string, items ...string) []string {
@@ -120,4 +163,53 @@ func canReach(taskMap map[string]*task, fromID, toID string, visited map[string]
 	}
 
 	return false
+}
+
+// taskFileName returns the JSON filename for a task ID, e.g. "42.json".
+func taskFileName(taskID string) string {
+	return taskID + ".json"
+}
+
+// taskFileJoin returns the full path to a task's JSON file.
+func taskFileJoin(baseDir, taskID string) string {
+	return filepath.Join(baseDir, taskFileName(taskID))
+}
+
+// readTask reads and unmarshals a single task from the backend.
+func readTask(ctx context.Context, backend Backend, baseDir, taskID string) (*task, error) {
+	content, err := backend.Read(ctx, &ReadRequest{
+		FilePath: taskFileJoin(baseDir, taskID),
+	})
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("read task #%s failed: %w", taskID, err)
+	}
+
+	t := &task{}
+	if err := sonic.UnmarshalString(content.Content, t); err != nil {
+		return nil, fmt.Errorf("parse task #%s failed: %w", taskID, err)
+	}
+	return t, nil
+}
+
+// writeTask marshals and writes a task to the backend.
+func writeTask(ctx context.Context, backend Backend, baseDir string, t *task) error {
+	data, err := sonic.MarshalString(t)
+	if err != nil {
+		return fmt.Errorf("marshal task #%s failed: %w", t.ID, err)
+	}
+	if err := backend.Write(ctx, &WriteRequest{
+		FilePath: taskFileJoin(baseDir, t.ID),
+		Content:  data,
+	}); err != nil {
+		return fmt.Errorf("write task #%s failed: %w", t.ID, err)
+	}
+	return nil
+}
+
+// marshalTaskResponse marshals a taskOut result string into the standard tool response JSON.
+func marshalTaskResponse(result string) (string, error) {
+	return sonic.MarshalString(&taskOut{Result: result})
 }
