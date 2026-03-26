@@ -32,21 +32,24 @@ import (
 	"github.com/cloudwego/eino/schema"
 )
 
-func newTaskToolMiddleware(
-	ctx context.Context,
-	taskToolDescriptionGenerator func(ctx context.Context, subAgents []adk.Agent) (string, error),
-	subAgents []adk.Agent,
+type taskToolConfig struct {
+	taskToolDescriptionGenerator func(ctx context.Context, subAgents []adk.Agent) (string, error)
+	subAgents                    []adk.Agent
 
-	withoutGeneralSubAgent bool,
-	// cm is the chat model. Tools are configured via model.WithTools call option.
-	cm model.BaseChatModel,
-	instruction string,
-	toolsConfig adk.ToolsConfig,
-	maxIteration int,
-	middlewares []adk.AgentMiddleware,
-	handlers []adk.ChatModelAgentMiddleware,
-) (adk.ChatModelAgentMiddleware, error) {
-	t, err := newTaskTool(ctx, taskToolDescriptionGenerator, subAgents, withoutGeneralSubAgent, cm, instruction, toolsConfig, maxIteration, middlewares, handlers)
+	withoutGeneralSubAgent bool
+	chatModel              model.BaseChatModel
+	instruction            string
+	toolsConfig            adk.ToolsConfig
+	maxIteration           int
+	middlewares            []adk.AgentMiddleware
+	handlers               []adk.ChatModelAgentMiddleware
+
+	explore *ExploreAgentConfig
+	plan    *PlanAgentConfig
+}
+
+func newTaskToolMiddleware(ctx context.Context, cfg *taskToolConfig) (adk.ChatModelAgentMiddleware, error) {
+	t, err := newTaskTool(ctx, cfg)
 	if err != nil {
 		return nil, err
 	}
@@ -58,31 +61,17 @@ func newTaskToolMiddleware(
 	return buildAppendPromptTool(prompt, t), nil
 }
 
-func newTaskTool(
-	ctx context.Context,
-	taskToolDescriptionGenerator func(ctx context.Context, subAgents []adk.Agent) (string, error),
-	subAgents []adk.Agent,
-
-	withoutGeneralSubAgent bool,
-	// Model is the chat model. Tools are configured via model.WithTools call option.
-	Model model.BaseChatModel,
-	Instruction string,
-	ToolsConfig adk.ToolsConfig,
-	MaxIteration int,
-	middlewares []adk.AgentMiddleware,
-	handlers []adk.ChatModelAgentMiddleware,
-) (tool.InvokableTool, error) {
+func newTaskTool(ctx context.Context, cfg *taskToolConfig) (tool.InvokableTool, error) {
 	t := &taskTool{
-		subAgents:     map[string]tool.InvokableTool{},
-		subAgentSlice: subAgents,
-		descGen:       defaultTaskToolDescription,
+		subAgents: make(map[string]tool.InvokableTool),
+		descGen:   defaultTaskToolDescription,
 	}
 
-	if taskToolDescriptionGenerator != nil {
-		t.descGen = taskToolDescriptionGenerator
+	if cfg.taskToolDescriptionGenerator != nil {
+		t.descGen = cfg.taskToolDescriptionGenerator
 	}
 
-	if !withoutGeneralSubAgent {
+	if !cfg.withoutGeneralSubAgent {
 		agentDesc := internal.SelectPrompt(internal.I18nPrompts{
 			English: generalAgentDescription,
 			Chinese: generalAgentDescriptionChinese,
@@ -90,42 +79,137 @@ func newTaskTool(
 		generalAgent, err := adk.NewChatModelAgent(ctx, &adk.ChatModelAgentConfig{
 			Name:          generalAgentName,
 			Description:   agentDesc,
-			Instruction:   Instruction,
-			Model:         Model,
-			ToolsConfig:   ToolsConfig,
-			MaxIterations: MaxIteration,
-			Middlewares:   middlewares,
-			Handlers:      handlers,
+			Instruction:   cfg.instruction,
+			Model:         cfg.chatModel,
+			ToolsConfig:   cfg.toolsConfig,
+			MaxIterations: cfg.maxIteration,
+			Middlewares:   cfg.middlewares,
+			Handlers:      cfg.handlers,
 			GenModelInput: genModelInput,
 		})
 		if err != nil {
 			return nil, err
 		}
 
-		it, err := assertAgentTool(adk.NewAgentTool(ctx, generalAgent))
-		if err != nil {
+		if err = t.addSubAgent(ctx, generalAgent); err != nil {
 			return nil, err
 		}
-		t.subAgents[generalAgent.Name(ctx)] = it
-		t.subAgentSlice = append(t.subAgentSlice, generalAgent)
 	}
 
-	for _, a := range subAgents {
-		name := a.Name(ctx)
-		it, err := assertAgentTool(adk.NewAgentTool(ctx, a))
+	if cfg.explore != nil && cfg.explore.Enable {
+		agent, err := newExploreAgent(ctx, cfg)
 		if err != nil {
+			return nil, fmt.Errorf("failed to build explore agent: %w", err)
+		}
+		if err = t.addSubAgent(ctx, agent); err != nil {
 			return nil, err
 		}
-		t.subAgents[name] = it
+	}
+
+	if cfg.plan != nil && cfg.plan.Enable {
+		agent, err := newPlanAgent(ctx, cfg)
+		if err != nil {
+			return nil, fmt.Errorf("failed to build plan agent: %w", err)
+		}
+		if err = t.addSubAgent(ctx, agent); err != nil {
+			return nil, err
+		}
+	}
+
+	for _, a := range cfg.subAgents {
+		if err := t.addSubAgent(ctx, a); err != nil {
+			return nil, err
+		}
 	}
 
 	return t, nil
+}
+
+func newReadOnlyHandlers(disabledTools []string) []adk.ChatModelAgentMiddleware {
+	if len(disabledTools) == 0 {
+		disabledTools = defaultReadOnlyDisabledTools
+	}
+	disabledSet := make(map[string]bool, len(disabledTools))
+	for _, name := range disabledTools {
+		disabledSet[name] = true
+	}
+
+	reminder := internal.SelectPrompt(internal.I18nPrompts{
+		English: readOnlyReminder,
+		Chinese: readOnlyReminderChinese,
+	})
+
+	return []adk.ChatModelAgentMiddleware{
+		&disableToolsMiddleware{
+			BaseChatModelAgentMiddleware: &adk.BaseChatModelAgentMiddleware{},
+			disabledTools:                disabledSet,
+		},
+		&readOnlyReminderMiddleware{
+			BaseChatModelAgentMiddleware: &adk.BaseChatModelAgentMiddleware{},
+			reminder:                     reminder,
+		},
+	}
+}
+
+func newExploreAgent(ctx context.Context, cfg *taskToolConfig) (adk.Agent, error) {
+	cm := cfg.explore.ChatModel
+	if cm == nil {
+		cm = cfg.chatModel
+	}
+
+	return adk.NewChatModelAgent(ctx, &adk.ChatModelAgentConfig{
+		Name: exploreAgentName,
+		Description: internal.SelectPrompt(internal.I18nPrompts{
+			English: exploreAgentDescription,
+			Chinese: exploreAgentDescriptionChinese,
+		}),
+		Instruction: internal.SelectPrompt(internal.I18nPrompts{
+			English: exploreAgentInstruction,
+			Chinese: exploreAgentInstructionChinese,
+		}),
+		Model:         cm,
+		ToolsConfig:   cfg.toolsConfig,
+		MaxIterations: cfg.maxIteration,
+		Middlewares:   cfg.middlewares,
+		Handlers:      append(cfg.handlers, newReadOnlyHandlers(cfg.explore.DisabledTools)...),
+		GenModelInput: genModelInput,
+	})
+}
+
+func newPlanAgent(ctx context.Context, cfg *taskToolConfig) (adk.Agent, error) {
+	return adk.NewChatModelAgent(ctx, &adk.ChatModelAgentConfig{
+		Name: planAgentName,
+		Description: internal.SelectPrompt(internal.I18nPrompts{
+			English: planAgentDescription,
+			Chinese: planAgentDescriptionChinese,
+		}),
+		Instruction: internal.SelectPrompt(internal.I18nPrompts{
+			English: planAgentInstruction,
+			Chinese: planAgentInstructionChinese,
+		}),
+		Model:         cfg.chatModel,
+		ToolsConfig:   cfg.toolsConfig,
+		MaxIterations: cfg.maxIteration,
+		Middlewares:   cfg.middlewares,
+		Handlers:      append(cfg.handlers, newReadOnlyHandlers(cfg.plan.DisabledTools)...),
+		GenModelInput: genModelInput,
+	})
 }
 
 type taskTool struct {
 	subAgents     map[string]tool.InvokableTool
 	subAgentSlice []adk.Agent
 	descGen       func(ctx context.Context, subAgents []adk.Agent) (string, error)
+}
+
+func (t *taskTool) addSubAgent(ctx context.Context, agent adk.Agent) error {
+	it, err := assertAgentTool(adk.NewAgentTool(ctx, agent))
+	if err != nil {
+		return err
+	}
+	t.subAgents[agent.Name(ctx)] = it
+	t.subAgentSlice = append(t.subAgentSlice, agent)
+	return nil
 }
 
 func (t *taskTool) Info(ctx context.Context) (*schema.ToolInfo, error) {

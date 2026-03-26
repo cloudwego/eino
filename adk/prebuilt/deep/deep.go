@@ -76,6 +76,10 @@ type Config struct {
 	WithoutWriteTodos bool
 	// WithoutGeneralSubAgent disables the general-purpose subagent when set to true.
 	WithoutGeneralSubAgent bool
+
+	ExploreSubAgent *ExploreAgentConfig
+	PlanSubAgent    *PlanAgentConfig
+
 	// TaskToolDescriptionGenerator allows customizing the description for the task tool.
 	// If provided, this function generates the tool description based on available subagents.
 	TaskToolDescriptionGenerator func(ctx context.Context, availableAgents []adk.Agent) (string, error)
@@ -99,6 +103,27 @@ type Config struct {
 	OutputKey string
 }
 
+type ExploreAgentConfig struct {
+	Enable bool
+
+	// ChatModel overrides the model used by the explore agent.
+	// If nil, inherits the parent agent's ChatModel.
+	// Explore tasks favor fast, lightweight models for efficient codebase navigation.
+	ChatModel model.BaseChatModel
+
+	// DisabledTools specifies tool names to exclude from this agent.
+	// default: [write_file, edit_file, task]
+	DisabledTools []string
+}
+
+type PlanAgentConfig struct {
+	Enable bool
+
+	// DisabledTools specifies tool names to exclude from this agent.
+	// default: [write_file, edit_file, task]
+	DisabledTools []string
+}
+
 // New creates a new Deep agent instance with the provided configuration.
 // This function initializes built-in tools, creates a task tool for subagent orchestration,
 // and returns a fully configured ChatModelAgent ready for execution.
@@ -116,20 +141,24 @@ func New(ctx context.Context, cfg *Config) (adk.ResumableAgent, error) {
 		})
 	}
 
-	if !cfg.WithoutGeneralSubAgent || len(cfg.SubAgents) > 0 {
-		tt, err := newTaskToolMiddleware(
-			ctx,
-			cfg.TaskToolDescriptionGenerator,
-			cfg.SubAgents,
+	hasTaskTool := !cfg.WithoutGeneralSubAgent || len(cfg.SubAgents) > 0 ||
+		(cfg.ExploreSubAgent != nil && cfg.ExploreSubAgent.Enable) ||
+		(cfg.PlanSubAgent != nil && cfg.PlanSubAgent.Enable)
 
-			cfg.WithoutGeneralSubAgent,
-			cfg.ChatModel,
-			instruction,
-			cfg.ToolsConfig,
-			cfg.MaxIteration,
-			cfg.Middlewares,
-			append(handlers, cfg.Handlers...),
-		)
+	if hasTaskTool {
+		tt, err := newTaskToolMiddleware(ctx, &taskToolConfig{
+			taskToolDescriptionGenerator: cfg.TaskToolDescriptionGenerator,
+			subAgents:                    cfg.SubAgents,
+			withoutGeneralSubAgent:       cfg.WithoutGeneralSubAgent,
+			chatModel:                    cfg.ChatModel,
+			instruction:                  instruction,
+			toolsConfig:                  cfg.ToolsConfig,
+			maxIteration:                 cfg.MaxIteration,
+			middlewares:                  cfg.Middlewares,
+			handlers:                     append(handlers, cfg.Handlers...),
+			explore:                      cfg.ExploreSubAgent,
+			plan:                         cfg.PlanSubAgent,
+		})
 		if err != nil {
 			return nil, fmt.Errorf("failed to new task tool: %w", err)
 		}

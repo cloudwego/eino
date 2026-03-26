@@ -32,15 +32,12 @@ func TestTaskTool(t *testing.T) {
 	ctx := context.Background()
 	tt, err := newTaskTool(
 		ctx,
-		nil,
-		[]adk.Agent{a1, a2},
-		true,
-		nil,
-		"",
-		adk.ToolsConfig{},
-		10,
-		nil,
-		nil,
+		&taskToolConfig{
+			subAgents:              []adk.Agent{a1, a2},
+			withoutGeneralSubAgent: true,
+			toolsConfig:            adk.ToolsConfig{},
+			maxIteration:           10,
+		},
 	)
 	assert.NoError(t, err)
 
