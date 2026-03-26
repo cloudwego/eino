@@ -27,8 +27,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/google/uuid"
-
 	"github.com/cloudwego/eino/internal"
 	"github.com/cloudwego/eino/internal/safe"
 )
@@ -297,14 +295,16 @@ type TurnLoopConfig[T any] struct {
 	// Required.
 	GenInput func(ctx context.Context, loop *TurnLoop[T], items []T) (*GenInputResult[T], error)
 
-	// GenResume is called exactly once when starting a resumed TurnLoop run
-	// (via PrepareResume + Run). It receives:
-	//   - canceledItems: the items that were being processed when the prior run was canceled
+	// GenResume is called exactly once when the TurnLoop detects a mid-turn
+	// checkpoint on startup (i.e. CheckpointID is configured and the stored
+	// checkpoint has runner state from an interrupted agent execution).
+	// It receives:
+	//   - canceledItems: the items being processed when the prior run was canceled
 	//   - unhandledItems: items buffered but not processed when the prior run exited
-	//   - newItems: items provided to PrepareResume
+	//   - newItems: items that were Push()-ed before Run() was called
 	//
-	// It returns a GenResumeResult describing how to resume the interrupted agent turn
-	// (checkpoint ID + optional ResumeParams) and how to manipulate the buffer
+	// It returns a GenResumeResult describing how to resume the interrupted agent
+	// turn (optional ResumeParams) and how to manipulate the buffer
 	// (Consumed/Remaining) before continuing.
 	GenResume func(ctx context.Context, loop *TurnLoop[T], canceledItems, unhandledItems, newItems []T) (*GenResumeResult[T], error)
 
@@ -325,18 +325,26 @@ type TurnLoopConfig[T any] struct {
 	// from Stop-triggered cancellation) are returned as ExitReason.
 	OnAgentEvents func(ctx context.Context, tc *TurnContext[T], events *AsyncIterator[*AgentEvent]) error
 
-	// ExternalTurnState controls checkpoint persistence mode.
-	//
-	// When false (default), the framework persists runner bytes and items via gob.
-	// T must be gob-encodable.
-	//
-	// When true, the framework only persists runner checkpoint bytes to Store.
-	// The user manages item persistence via TurnLoopExitState fields and provides
-	// them back via WithExternalResumeItems on PrepareResume.
-	ExternalTurnState bool
-
 	// Store is the checkpoint store for persistence and resume. Optional.
+	// When set together with CheckpointID, enables automatic checkpoint-based resume.
+	// The TurnLoop always persists both runner checkpoint bytes and item bookkeeping
+	// (CanceledItems, UnhandledItems) via gob encoding, so T must be gob-encodable
+	// when Store is used.
 	Store CheckPointStore
+
+	// CheckpointID, when set together with Store, enables automatic
+	// checkpoint-based resume. On Run(), the TurnLoop queries Store for this ID:
+	//   - If a checkpoint exists with runner state (mid-turn interrupt),
+	//     GenResume is called to plan the resume turn.
+	//   - If a checkpoint exists without runner state (between-turns),
+	//     the stored unhandled items are buffered and the loop proceeds
+	//     normally via GenInput.
+	//   - If no checkpoint exists, the loop starts fresh.
+	//
+	// On exit, if the TurnLoop saved a new checkpoint, it is saved under this
+	// same CheckpointID. On clean exit (no checkpoint saved), the existing
+	// checkpoint under CheckpointID is deleted to prevent stale resumption.
+	CheckpointID string
 }
 
 // GenInputResult contains the result of GenInput processing.
@@ -380,9 +388,6 @@ type GenResumeResult[T any] struct {
 	// RunOpts are the options for this agent resume run.
 	RunOpts []AgentRunOption
 
-	// CheckPointID is the checkpoint ID to resume from. Required.
-	CheckPointID string
-
 	// ResumeParams are optional parameters for resuming an interrupted agent.
 	ResumeParams *ResumeParams
 
@@ -402,7 +407,6 @@ type turnRunSpec[T any] struct {
 	runCtx       context.Context
 	input        *AgentInput
 	runOpts      []AgentRunOption
-	checkPointID string
 	resumeParams *ResumeParams
 	isResume     bool
 	consumed     []T
@@ -460,9 +464,6 @@ func (l *TurnLoop[T]) planTurn(
 	if resumeResult == nil {
 		return nil, errors.New("GenResumeResult is nil")
 	}
-	if resumeResult.CheckPointID == "" {
-		return nil, errors.New("GenResumeResult.CheckPointID is empty")
-	}
 	turnCtx := ctx
 	if resumeResult.RunCtx != nil {
 		turnCtx = resumeResult.RunCtx
@@ -473,7 +474,6 @@ func (l *TurnLoop[T]) planTurn(
 		spec: &turnRunSpec[T]{
 			runCtx:       resumeResult.RunCtx,
 			runOpts:      resumeResult.RunOpts,
-			checkPointID: resumeResult.CheckPointID,
 			resumeParams: resumeResult.ResumeParams,
 			isResume:     true,
 			consumed:     resumeResult.Consumed,
@@ -489,18 +489,7 @@ type TurnLoopExitState[T any] struct {
 	// nil means clean exit (Stop() was called and completed normally).
 	// Non-nil values include context errors, callback errors, *CancelError, etc.
 	// When Stop() cancels a running agent, ExitReason will be a *CancelError.
-	// If the agent was configured with a checkpoint store, the CancelError's
-	// CheckPointID field contains the checkpoint ID of the interrupted turn,
-	// which can be used to resume via TurnLoop. Use errors.As to extract it.
 	ExitReason error
-
-	// CheckPointID is the checkpoint ID persisted by TurnLoop on exit.
-	// It is set when Store is configured and the loop exits due to Stop() or error.
-	// In ExternalTurnState mode, it is the runner checkpoint ID (the key used to
-	// persist runner bytes to Store).
-	// It can be used to resume via TurnLoop.PrepareResume (in ExternalTurnState mode,
-	// resume also requires providing CanceledItems/UnhandledItems via WithExternalResumeItems).
-	CheckPointID string
 
 	// UnhandledItems contains items that were buffered but not processed.
 	// This is always valid regardless of ExitReason.
@@ -578,10 +567,11 @@ type TurnLoop[T any] struct {
 
 	canceledItems []T
 
-	checkPointID          string
 	checkPointRunnerBytes []byte
 
 	pendingResume *turnLoopPendingResume[T]
+
+	loadCheckpointID string
 
 	onAgentEvents func(ctx context.Context, tc *TurnContext[T], events *AsyncIterator[*AgentEvent]) error
 }
@@ -599,10 +589,6 @@ type turnLoopCheckpoint[T any] struct {
 // ErrCheckpointStoreNil is returned when a checkpoint operation requires a Store
 // but none was configured in TurnLoopConfig.
 var ErrCheckpointStoreNil = errors.New("checkpoint store is nil")
-
-func generateTurnLoopCheckpointID() string {
-	return uuid.NewString()
-}
 
 func marshalTurnLoopCheckpoint[T any](c *turnLoopCheckpoint[T]) ([]byte, error) {
 	buf := new(bytes.Buffer)
@@ -631,18 +617,12 @@ func (l *TurnLoop[T]) loadTurnLoopCheckpoint(ctx context.Context, checkPointID s
 	if !existed {
 		return nil, fmt.Errorf("checkpoint[%s] does not exist", checkPointID)
 	}
-	if l.config.ExternalTurnState {
-		return &turnLoopCheckpoint[T]{RunnerCheckpoint: data, HasRunnerState: len(data) > 0}, nil
-	}
 	return unmarshalTurnLoopCheckpoint[T](data)
 }
 
 func (l *TurnLoop[T]) saveTurnLoopCheckpoint(ctx context.Context, checkPointID string, c *turnLoopCheckpoint[T]) error {
 	if l.config.Store == nil {
 		return ErrCheckpointStoreNil
-	}
-	if l.config.ExternalTurnState {
-		return l.config.Store.Set(ctx, checkPointID, append([]byte{}, c.RunnerCheckpoint...))
 	}
 	data, err := marshalTurnLoopCheckpoint(c)
 	if err != nil {
@@ -651,33 +631,69 @@ func (l *TurnLoop[T]) saveTurnLoopCheckpoint(ctx context.Context, checkPointID s
 	return l.config.Store.Set(ctx, checkPointID, data)
 }
 
-type turnLoopPendingResume[T any] struct {
-	checkPointID string
-	canceled     []T
-	unhandled    []T
-	newItems     []T
-	resumeBytes  []byte
-}
-
-type resumeOptions[T any] struct {
-	canceledItems  []T
-	unhandledItems []T
-	hasResumeItems bool
-}
-
-// TurnLoopResumeOption configures how TurnLoop.PrepareResume behaves.
-// Use WithExternalResumeItems to supply canceled and unhandled items when ExternalTurnState is true.
-type TurnLoopResumeOption[T any] func(*resumeOptions[T])
-
-// WithExternalResumeItems provides the canceled and unhandled items for resuming when
-// ExternalTurnState is enabled. In framework mode (ExternalTurnState=false), TurnLoop
-// persists items in the checkpoint and PrepareResume rejects this option.
-func WithExternalResumeItems[T any](canceledItems, unhandledItems []T) TurnLoopResumeOption[T] {
-	return func(o *resumeOptions[T]) {
-		o.canceledItems = canceledItems
-		o.unhandledItems = unhandledItems
-		o.hasResumeItems = true
+func (l *TurnLoop[T]) deleteTurnLoopCheckpoint(ctx context.Context, checkPointID string) error {
+	if l.config.Store == nil {
+		return nil
 	}
+	if deleter, ok := l.config.Store.(CheckPointDeleter); ok {
+		return deleter.Delete(ctx, checkPointID)
+	}
+	return l.config.Store.Set(ctx, checkPointID, nil)
+}
+
+func (l *TurnLoop[T]) tryLoadCheckpoint(ctx context.Context) error {
+	checkPointID := l.config.CheckpointID
+	if checkPointID == "" || l.config.Store == nil {
+		return nil
+	}
+
+	l.loadCheckpointID = checkPointID
+
+	data, existed, err := l.config.Store.Get(ctx, checkPointID)
+	if err != nil {
+		return fmt.Errorf("failed to load checkpoint[%s]: %w", checkPointID, err)
+	}
+	if !existed {
+		return nil
+	}
+
+	var cp *turnLoopCheckpoint[T]
+	if len(data) == 0 {
+		return nil
+	}
+	cp, err = unmarshalTurnLoopCheckpoint[T](data)
+	if err != nil {
+		return fmt.Errorf("failed to unmarshal checkpoint[%s]: %w", checkPointID, err)
+	}
+
+	newItems := l.buffer.TakeAll()
+
+	if cp.HasRunnerState {
+		if len(cp.RunnerCheckpoint) == 0 {
+			l.buffer.PushFront(newItems)
+			return fmt.Errorf("checkpoint[%s] has runner state but bytes are empty", checkPointID)
+		}
+		l.pendingResume = &turnLoopPendingResume[T]{
+			canceled:    append([]T{}, cp.CanceledItems...),
+			unhandled:   append([]T{}, cp.UnhandledItems...),
+			newItems:    append([]T{}, newItems...),
+			resumeBytes: append([]byte{}, cp.RunnerCheckpoint...),
+		}
+	} else {
+		items := make([]T, 0, len(cp.UnhandledItems)+len(newItems))
+		items = append(items, cp.UnhandledItems...)
+		items = append(items, newItems...)
+		l.buffer.PushFront(items)
+	}
+
+	return nil
+}
+
+type turnLoopPendingResume[T any] struct {
+	canceled    []T
+	unhandled   []T
+	newItems    []T
+	resumeBytes []byte
 }
 
 type stopConfig struct {
@@ -804,82 +820,14 @@ func (l *TurnLoop[T]) start(ctx context.Context) {
 
 // Run starts the loop's processing goroutine. It is non-blocking: the loop
 // runs in the background and results are obtained via Wait.
-// If PrepareResume was called beforehand, the loop resumes from the loaded
-// checkpoint; otherwise it starts fresh.
+//
+// If CheckpointID is configured in TurnLoopConfig and a matching checkpoint
+// exists in Store, the loop automatically resumes from that checkpoint.
+// Otherwise it starts fresh with whatever items were Push()-ed.
+//
 // Calling Run more than once is a no-op: only the first call starts the loop.
 func (l *TurnLoop[T]) Run(ctx context.Context) {
 	l.start(ctx)
-}
-
-// PrepareResume loads and validates a checkpoint, restoring the TurnLoop's
-// internal state so that the next Run call resumes from that checkpoint.
-// Must be called before Run.
-func (l *TurnLoop[T]) PrepareResume(ctx context.Context, checkPointID string, newItems []T, opts ...TurnLoopResumeOption[T]) error {
-	if checkPointID == "" {
-		return errors.New("cannot resume TurnLoop: checkpointID is empty")
-	}
-	if l.config.Store == nil {
-		return fmt.Errorf("cannot resume TurnLoop: %w", ErrCheckpointStoreNil)
-	}
-
-	ro := &resumeOptions[T]{}
-	for _, opt := range opts {
-		if opt != nil {
-			opt(ro)
-		}
-	}
-	if l.config.ExternalTurnState {
-		if !ro.hasResumeItems {
-			return errors.New("cannot resume TurnLoop: ExternalTurnState is enabled but resume items are missing")
-		}
-	} else {
-		if ro.hasResumeItems {
-			return errors.New("cannot resume TurnLoop: external resume items are only supported when ExternalTurnState is enabled")
-		}
-	}
-
-	cp, err := l.loadTurnLoopCheckpoint(ctx, checkPointID)
-	if err != nil {
-		return fmt.Errorf("failed to load TurnLoop checkpoint: %w", err)
-	}
-
-	canceledItems := cp.CanceledItems
-	unhandledItems := cp.UnhandledItems
-	if l.config.ExternalTurnState {
-		canceledItems = ro.canceledItems
-		unhandledItems = ro.unhandledItems
-	}
-
-	if cp.HasRunnerState {
-		if len(cp.RunnerCheckpoint) == 0 {
-			return errors.New("failed to resume TurnLoop: checkpoint has runner state but bytes are empty")
-		}
-		l.pendingResume = &turnLoopPendingResume[T]{
-			checkPointID: checkPointID,
-			canceled:     append([]T{}, canceledItems...),
-			unhandled:    append([]T{}, unhandledItems...),
-			newItems:     append([]T{}, newItems...),
-			resumeBytes:  append([]byte{}, cp.RunnerCheckpoint...),
-		}
-	} else {
-		if len(canceledItems) > 0 {
-			return errors.New("failed to resume TurnLoop: checkpoint has canceled items but no runner state")
-		}
-		for _, it := range unhandledItems {
-			if !l.buffer.TrySend(it) {
-				return errors.New("failed to buffer unhandled items: buffer closed")
-			}
-		}
-		for _, it := range newItems {
-			if !l.buffer.TrySend(it) {
-				return errors.New("failed to buffer new items: buffer closed")
-			}
-		}
-	}
-
-	l.checkPointID = checkPointID
-
-	return nil
 }
 
 // Push adds an item to the loop's buffer for processing.
@@ -1053,6 +1001,11 @@ func (l *TurnLoop[T]) Wait() *TurnLoopExitState[T] {
 func (l *TurnLoop[T]) run(ctx context.Context) {
 	defer l.cleanup(ctx)
 
+	if err := l.tryLoadCheckpoint(ctx); err != nil {
+		l.runErr = err
+		return
+	}
+
 	// Monitor context cancellation: close the buffer so that a blocking
 	// Receive() unblocks. The loop will then check ctx.Err() and exit.
 	go func() {
@@ -1168,42 +1121,22 @@ func (l *TurnLoop[T]) run(ctx context.Context) {
 	}
 }
 
-func (l *TurnLoop[T]) setupBridgeStore(spec *turnRunSpec[T], runOpts []AgentRunOption) ([]AgentRunOption, string, *bridgeStore, error) {
+func (l *TurnLoop[T]) setupBridgeStore(spec *turnRunSpec[T], runOpts []AgentRunOption) ([]AgentRunOption, *bridgeStore, error) {
 	store := l.config.Store
-	o := getCommonOptions(nil, runOpts...)
-	checkPointID := ""
-	if o.checkPointID != nil {
-		checkPointID = *o.checkPointID
-	}
-	needAppendCheckpointOpt := o.checkPointID == nil || checkPointID == ""
-	if spec.checkPointID != "" {
-		checkPointID = spec.checkPointID
-	}
-	var ms *bridgeStore
-	if spec.isResume && checkPointID == "" {
-		return nil, "", nil, fmt.Errorf("resume checkpointID is empty")
-	}
 	if store == nil && spec.isResume {
-		return nil, "", nil, fmt.Errorf("failed to resume agent: %w", ErrCheckpointStoreNil)
+		return nil, nil, fmt.Errorf("failed to resume agent: %w", ErrCheckpointStoreNil)
 	}
-	if store != nil {
-		if checkPointID == "" {
-			checkPointID = generateTurnLoopCheckpointID()
-			needAppendCheckpointOpt = true
-		}
-		if needAppendCheckpointOpt {
-			runOpts = append(runOpts, WithCheckPointID(checkPointID))
-		}
-		if spec.isResume {
-			if len(spec.resumeBytes) == 0 {
-				return nil, "", nil, fmt.Errorf("resume checkpoint is empty")
-			}
-			ms = newResumeBridgeStore(checkPointID, spec.resumeBytes)
-		} else {
-			ms = newBridgeStore()
-		}
+	if store == nil {
+		return runOpts, nil, nil
 	}
-	return runOpts, checkPointID, ms, nil
+	runOpts = append(runOpts, WithCheckPointID(bridgeCheckpointID))
+	if spec.isResume {
+		if len(spec.resumeBytes) == 0 {
+			return nil, nil, fmt.Errorf("resume checkpoint is empty")
+		}
+		return runOpts, newResumeBridgeStore(bridgeCheckpointID, spec.resumeBytes), nil
+	}
+	return runOpts, newBridgeStore(), nil
 }
 
 // watchPreemptSignal runs for the lifetime of a single turn. It listens on the
@@ -1277,7 +1210,7 @@ func (l *TurnLoop[T]) runAgentAndHandleEvents(
 		}
 	}()
 
-	runOpts, checkPointID, ms, err := l.setupBridgeStore(spec, spec.runOpts)
+	runOpts, ms, err := l.setupBridgeStore(spec, spec.runOpts)
 	if err != nil {
 		return err
 	}
@@ -1298,9 +1231,9 @@ func (l *TurnLoop[T]) runAgentAndHandleEvents(
 	if spec.isResume {
 		var err error
 		if spec.resumeParams != nil {
-			iter, err = runner.ResumeWithParams(ctx, checkPointID, spec.resumeParams, runOpts...)
+			iter, err = runner.ResumeWithParams(ctx, bridgeCheckpointID, spec.resumeParams, runOpts...)
 		} else {
-			iter, err = runner.Resume(ctx, checkPointID, runOpts...)
+			iter, err = runner.Resume(ctx, bridgeCheckpointID, runOpts...)
 		}
 		if err != nil {
 			return fmt.Errorf("failed to resume agent: %w", err)
@@ -1342,12 +1275,11 @@ func (l *TurnLoop[T]) runAgentAndHandleEvents(
 
 	finalizeCheckpoint := func() error {
 		if store != nil && ms != nil {
-			data, ok, err := ms.Get(ctx, checkPointID)
+			data, ok, err := ms.Get(ctx, bridgeCheckpointID)
 			if err != nil {
 				return fmt.Errorf("failed to read runner checkpoint: %w", err)
 			}
 			if ok {
-				l.checkPointID = checkPointID
 				l.checkPointRunnerBytes = append([]byte{}, data...)
 			}
 		}
@@ -1405,22 +1337,16 @@ func (l *TurnLoop[T]) cleanup(ctx context.Context) {
 	atomic.StoreInt32(&l.stopped, 1)
 
 	unhandled := l.buffer.TakeAll()
-	savedCheckPointID := ""
-	shouldSaveCheckpoint := l.config.Store != nil && l.stopSig.isStopped()
+	checkpointID := l.config.CheckpointID
+	shouldSaveCheckpoint := l.config.Store != nil && checkpointID != "" && l.stopSig.isStopped()
 	if shouldSaveCheckpoint {
-		checkPointID := l.checkPointID
-		if checkPointID == "" {
-			checkPointID = generateTurnLoopCheckpointID()
-		}
 		cp := &turnLoopCheckpoint[T]{
 			RunnerCheckpoint: l.checkPointRunnerBytes,
 			HasRunnerState:   len(l.checkPointRunnerBytes) > 0,
+			UnhandledItems:   unhandled,
+			CanceledItems:    l.canceledItems,
 		}
-		if !l.config.ExternalTurnState {
-			cp.UnhandledItems = unhandled
-			cp.CanceledItems = l.canceledItems
-		}
-		err := l.saveTurnLoopCheckpoint(ctx, checkPointID, cp)
+		err := l.saveTurnLoopCheckpoint(ctx, checkpointID, cp)
 		if err != nil {
 			saveErr := fmt.Errorf("failed to save turn loop checkpoint: %w", err)
 			if l.runErr != nil {
@@ -1428,15 +1354,13 @@ func (l *TurnLoop[T]) cleanup(ctx context.Context) {
 			} else {
 				l.runErr = saveErr
 			}
-		} else {
-			l.checkPointID = checkPointID
-			savedCheckPointID = checkPointID
 		}
+	} else if l.loadCheckpointID != "" {
+		_ = l.deleteTurnLoopCheckpoint(ctx, l.loadCheckpointID)
 	}
 
 	l.result = &TurnLoopExitState[T]{
 		ExitReason:     l.runErr,
-		CheckPointID:   savedCheckPointID,
 		UnhandledItems: unhandled,
 		CanceledItems:  l.canceledItems,
 	}

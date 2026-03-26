@@ -42,6 +42,8 @@ type Runner struct {
 
 type CheckPointStore = core.CheckPointStore
 
+type CheckPointDeleter = core.CheckPointDeleter
+
 type RunnerConfig struct {
 	Agent           Agent
 	EnableStreaming bool
