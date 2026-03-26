@@ -263,6 +263,10 @@ type InterruptInfo struct {
 	RerunNodesExtra   map[string]any
 	SubGraphs         map[string]*InterruptInfo
 	InterruptContexts []*InterruptCtx
+	// FromGraphInterrupt indicates whether the interrupt was triggered by a graph-level
+	// cancel operation (e.g., via WithGraphInterrupt) rather than business logic.
+	// When true, the interrupt originated from an external cancellation request.
+	FromGraphInterrupt bool
 }
 
 func init() {

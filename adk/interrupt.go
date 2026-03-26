@@ -22,6 +22,7 @@ import (
 	"encoding/gob"
 	"errors"
 	"fmt"
+	"sync"
 
 	"github.com/cloudwego/eino/internal/core"
 	"github.com/cloudwego/eino/schema"
@@ -183,6 +184,11 @@ func WithCheckPointID(id string) AgentRunOption {
 func init() {
 	schema.RegisterName[*serialization]("_eino_adk_serialization")
 	schema.RegisterName[*WorkflowInterruptInfo]("_eino_adk_workflow_interrupt_info")
+	// Register []byte for gob: the cancel refactor routes bridge store checkpoint
+	// bytes ([]byte) through InterruptState.State (type any) inside the outer
+	// serialization struct. Gob requires concrete types behind interface fields
+	// to be registered.
+	gob.Register([]byte{})
 }
 
 // serialization CheckpointSchema: root checkpoint payload (gob).
@@ -266,6 +272,10 @@ func (r *Runner) saveCheckPoint(
 	info *InterruptInfo,
 	is *core.InterruptSignal,
 ) error {
+	if r.store == nil {
+		return nil
+	}
+
 	runCtx := getRunCtx(ctx)
 
 	id2Addr, id2State := core.SignalToPersistenceMaps(is)
@@ -287,31 +297,36 @@ func (r *Runner) saveCheckPoint(
 const bridgeCheckpointID = "adk_react_mock_key"
 
 func newBridgeStore() *bridgeStore {
-	return &bridgeStore{}
+	return &bridgeStore{data: make(map[string][]byte)}
 }
 
-func newResumeBridgeStore(data []byte) *bridgeStore {
+func newResumeBridgeStore(checkPointID string, data []byte) *bridgeStore {
 	return &bridgeStore{
-		Data:  data,
-		Valid: true,
+		data: map[string][]byte{checkPointID: data},
 	}
 }
 
 type bridgeStore struct {
-	Data  []byte
-	Valid bool
+	mu   sync.Mutex
+	data map[string][]byte
 }
 
-func (m *bridgeStore) Get(_ context.Context, _ string) ([]byte, bool, error) {
-	if m.Valid {
-		return m.Data, true, nil
+func (m *bridgeStore) Get(_ context.Context, key string) ([]byte, bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if v, ok := m.data[key]; ok {
+		return v, true, nil
 	}
 	return nil, false, nil
 }
 
-func (m *bridgeStore) Set(_ context.Context, _ string, checkPoint []byte) error {
-	m.Data = checkPoint
-	m.Valid = true
+func (m *bridgeStore) Set(_ context.Context, key string, checkPoint []byte) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.data == nil {
+		m.data = make(map[string][]byte)
+	}
+	m.data[key] = checkPoint
 	return nil
 }
 
