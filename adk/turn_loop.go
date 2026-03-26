@@ -222,10 +222,26 @@ func (s *preemptSignal) waitForPreemptOrUnhold() (preempted bool, opts []AgentCa
 	return false, nil, nil
 }
 
+// resetLocked clears all signal state and closes pending ack channels so the
+// next cycle starts clean and blocked Push callers are unblocked. Must be
+// called with s.mu held. Does NOT touch holdCount, currentTC, or currentRunCtx
+// — callers are responsible for those.
+func (s *preemptSignal) resetLocked() {
+	s.preemptRequested = false
+	s.preemptGen = 0
+	s.agentCancelOpts = nil
+	for _, ack := range s.pendingAckList {
+		close(ack)
+	}
+	s.pendingAckList = nil
+	select {
+	case <-s.notify:
+	default:
+	}
+}
+
 // unholdRunLoop drops one hold. When holdCount reaches 0, all signal state is
-// reset (preemptRequested, preemptGen, pending acks, notify channel) so the
-// next cycle starts clean. Pending ack channels are closed to unblock any
-// Push callers waiting on them.
+// reset so the next cycle starts clean.
 func (s *preemptSignal) unholdRunLoop() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -235,42 +251,7 @@ func (s *preemptSignal) unholdRunLoop() {
 		s.holdCount = 0
 	}
 	if s.holdCount == 0 {
-		s.preemptRequested = false
-		s.preemptGen = 0
-		s.agentCancelOpts = nil
-		for _, ack := range s.pendingAckList {
-			close(ack)
-		}
-		s.pendingAckList = nil
-		select {
-		case <-s.notify:
-		default:
-		}
-	}
-	s.cond.Broadcast()
-}
-
-// drainAll forcefully resets all preemptSignal state and closes any pending
-// ack channels. Called during TurnLoop cleanup to prevent ack channels from
-// leaking when the run loop exits (e.g. due to Stop) while a Push caller
-// still holds a reference.
-func (s *preemptSignal) drainAll() {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	s.holdCount = 0
-	s.preemptRequested = false
-	s.preemptGen = 0
-	s.agentCancelOpts = nil
-	s.currentTC = nil
-	s.currentRunCtx = nil
-	for _, ack := range s.pendingAckList {
-		close(ack)
-	}
-	s.pendingAckList = nil
-	select {
-	case <-s.notify:
-	default:
+		s.resetLocked()
 	}
 	s.cond.Broadcast()
 }
@@ -288,18 +269,23 @@ func (s *preemptSignal) endTurnAndUnhold() {
 		s.holdCount = 0
 	}
 	if s.holdCount == 0 {
-		s.preemptRequested = false
-		s.preemptGen = 0
-		s.agentCancelOpts = nil
-		for _, ack := range s.pendingAckList {
-			close(ack)
-		}
-		s.pendingAckList = nil
-		select {
-		case <-s.notify:
-		default:
-		}
+		s.resetLocked()
 	}
+	s.cond.Broadcast()
+}
+
+// drainAll forcefully resets all preemptSignal state and closes any pending
+// ack channels. Called during TurnLoop cleanup to prevent ack channels from
+// leaking when the run loop exits (e.g. due to Stop) while a Push caller
+// still holds a reference.
+func (s *preemptSignal) drainAll() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.holdCount = 0
+	s.currentTC = nil
+	s.currentRunCtx = nil
+	s.resetLocked()
 	s.cond.Broadcast()
 }
 
@@ -1370,8 +1356,11 @@ func (l *TurnLoop[T]) runAgentAndHandleEvents(
 
 	// Wait for the turn to end. Three outcomes:
 	//
-	// done:         Events fully handled (normal or error). Checkpoint is
-	//               saved if stopped or on error so the turn can be resumed.
+	// done:         Events fully handled (normal or error). If Stop() was
+	//               called, save checkpoint so the caller can resume later.
+	//               Also handle the select race: if preemptDone is closed
+	//               too, treat as a preempt (return nil) instead of leaking
+	//               the CancelError.
 	//
 	// preemptDone:  A preemptive Push successfully cancelled the agent.
 	//               Wait for the handleEvents goroutine to drain, then
@@ -1381,7 +1370,12 @@ func (l *TurnLoop[T]) runAgentAndHandleEvents(
 	//               caller can resume later.
 	select {
 	case <-done:
-		if l.stopSig.isStopped() || handleErr != nil {
+		select {
+		case <-preemptDone:
+			return nil
+		default:
+		}
+		if l.stopSig.isStopped() {
 			if err := finalizeCheckpoint(); err != nil {
 				if handleErr != nil {
 					handleErr = fmt.Errorf("%w; checkpoint error: %v", handleErr, err)
@@ -1412,7 +1406,7 @@ func (l *TurnLoop[T]) cleanup(ctx context.Context) {
 
 	unhandled := l.buffer.TakeAll()
 	savedCheckPointID := ""
-	shouldSaveCheckpoint := l.config.Store != nil && (l.stopSig.isStopped() || l.runErr != nil)
+	shouldSaveCheckpoint := l.config.Store != nil && l.stopSig.isStopped()
 	if shouldSaveCheckpoint {
 		checkPointID := l.checkPointID
 		if checkPointID == "" {
