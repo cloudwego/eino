@@ -1380,7 +1380,8 @@ func (l *TurnLoop[T]) cleanup(ctx context.Context) {
 
 	unhandled := l.buffer.TakeAll()
 	checkpointID := l.config.CheckpointID
-	shouldSaveCheckpoint := l.config.Store != nil && checkpointID != "" && l.stopSig.isStopped()
+	isIdle := len(l.checkPointRunnerBytes) == 0 && len(unhandled) == 0 && len(l.canceledItems) == 0
+	shouldSaveCheckpoint := l.config.Store != nil && checkpointID != "" && l.stopSig.isStopped() && !isIdle
 	if shouldSaveCheckpoint {
 		cp := &turnLoopCheckpoint[T]{
 			RunnerCheckpoint: l.checkPointRunnerBytes,
