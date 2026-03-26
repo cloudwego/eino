@@ -193,9 +193,15 @@ func writeSSEEvent(w http.ResponseWriter, event *SSEEvent) {
 type haWriterKey struct{}
 type sessionInfoKey struct{}
 
-// GetHAWriter retrieves the HAResponseWriter from the request context.
-func GetHAWriter(ctx context.Context) (*HAResponseWriter, bool) {
-	w, ok := ctx.Value(haWriterKey{}).(*HAResponseWriter)
+// HAWriter is the interface for HA-aware SSE writers.
+// Both HAResponseWriter and MCP-specific writers implement this interface.
+type HAWriter interface {
+	SendEvent(ctx context.Context, eventType string, data []byte) error
+}
+
+// GetHAWriter retrieves the HAWriter from the request context.
+func GetHAWriter(ctx context.Context) (HAWriter, bool) {
+	w, ok := ctx.Value(haWriterKey{}).(HAWriter)
 	return w, ok
 }
 
