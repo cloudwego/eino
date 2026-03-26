@@ -22,7 +22,6 @@ import (
 	"encoding/gob"
 	"errors"
 	"io"
-	"sync/atomic"
 
 	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/compose"
@@ -82,6 +81,7 @@ func init() {
 	// when decoding checkpoints created by v0.8.0 - v0.8.3
 	gob.Register(&AgentEvent{})
 	gob.Register(int(0))
+	schema.RegisterName[*reactInput]("_eino_adk_react_input")
 }
 
 func (s *State) getReturnDirectlyEvent() *AgentEvent {
@@ -238,7 +238,7 @@ func SendToolGenAction(ctx context.Context, toolName string, action *AgentAction
 }
 
 type reactInput struct {
-	messages []Message
+	Messages []Message
 }
 
 type reactConfig struct {
@@ -254,6 +254,8 @@ type reactConfig struct {
 	agentName string
 
 	maxIterations int
+
+	cancelCtx *cancelContext
 }
 
 func genToolInfos(ctx context.Context, config *compose.ToolsNodeConfig) ([]*schema.ToolInfo, error) {
@@ -271,8 +273,6 @@ func genToolInfos(ctx context.Context, config *compose.ToolsNodeConfig) ([]*sche
 }
 
 type reactGraph = *compose.Graph[*reactInput, Message]
-type sToolNodeOutput = *schema.StreamReader[[]Message]
-type sGraphOutput = MessageStream
 
 func getReturnDirectlyToolCallID(ctx context.Context) (string, bool) {
 	var toolCallID string
@@ -300,37 +300,25 @@ func genReactState(config *reactConfig) func(ctx context.Context) *State {
 	}
 }
 
-func newReact(ctx context.Context, config *reactConfig, cs *cancelSig) (reactGraph, error) {
+func newReact(ctx context.Context, config *reactConfig) (reactGraph, error) {
 	const (
-		initNode_       = "Init"
-		chatModel_      = "ChatModel"
-		beforeToolNode_ = "BeforeToolNode"
-		toolNode_       = "ToolNode"
-		afterToolNode_  = "AfterToolNode"
+		initNode_                      = "Init"
+		chatModel_                     = "ChatModel"
+		cancelCheckNode_               = "CancelCheck"
+		toolNode_                      = "ToolNode"
+		afterToolCallsNode_            = "AfterToolCalls"
+		afterToolCallsCancelCheckNode_ = "AfterToolCallsCancelCheck"
 	)
 
-	checkCancel := cs != nil
-
-	nodeNameAfterModel := func() string {
-		if checkCancel {
-			return beforeToolNode_
-		}
-		return toolNode_
-	}
-
-	nodeNameAfterTool := func() string {
-		if checkCancel {
-			return afterToolNode_
-		}
-		return chatModel_
-	}
-
+	cancelCtx := config.cancelCtx
 	g := compose.NewGraph[*reactInput, Message](compose.WithGenLocalState(genReactState(config)))
-
-	initLambda := func(ctx context.Context, input *reactInput) ([]Message, error) {
-		return input.messages, nil
-	}
-	_ = g.AddLambdaNode(initNode_, compose.InvokableLambda(initLambda), compose.WithNodeName(initNode_))
+	_ = g.AddLambdaNode(initNode_, compose.InvokableLambda(func(ctx context.Context, input *reactInput) ([]Message, error) {
+		_ = compose.ProcessState(ctx, func(_ context.Context, st *State) error {
+			st.Messages = append(st.Messages, input.Messages...)
+			return nil
+		})
+		return input.Messages, nil
+	}), compose.WithNodeName(initNode_))
 
 	var wrappedModel model.BaseChatModel = config.model
 	if config.modelWrapperConf != nil {
@@ -338,39 +326,43 @@ func newReact(ctx context.Context, config *reactConfig, cs *cancelSig) (reactGra
 	}
 
 	toolsConfig := config.toolsConfig
-	if checkCancel {
-		wrappedModel = wrapModelForCancelable(wrappedModel, cs)
-		tcMWs := make([]compose.ToolMiddleware, 0, len(toolsConfig.ToolCallMiddlewares)+1)
-		tcMWs = append(tcMWs, cancelableTool(cs))
-		tcMWs = append(tcMWs, toolsConfig.ToolCallMiddlewares...)
-		toolsConfigCopy := *toolsConfig
-		toolsConfigCopy.ToolCallMiddlewares = tcMWs
-		toolsConfig = &toolsConfigCopy
-	}
 
 	toolsNode, err := compose.NewToolNode(ctx, toolsConfig)
 	if err != nil {
 		return nil, err
 	}
 
-	modelPreHandle := func(ctx context.Context, input []Message, st *State) ([]Message, error) {
-		if st.getRemainingIterations() <= 0 {
-			return nil, ErrExceedMaxIterations
+	_ = g.AddChatModelNode(chatModel_, wrappedModel, compose.WithStatePreHandler(
+		func(ctx context.Context, input []Message, st *State) ([]Message, error) {
+			if st.getRemainingIterations() <= 0 {
+				return nil, ErrExceedMaxIterations
+			}
+			st.decrementRemainingIterations()
+			return input, nil
+		}), compose.WithNodeName(chatModel_))
+
+	// CancelAfterChatModel safe-point: on the tool-calls path, after the branch
+	// has confirmed that the model response contains tool calls (i.e. not a final
+	// answer). Skipped entirely when the model produces a final answer.
+	_ = g.AddLambdaNode(cancelCheckNode_, compose.InvokableLambda(func(ctx context.Context, msg Message) (Message, error) {
+		if cancelCtx != nil && cancelCtx.shouldCancel() {
+			if cancelCtx.getMode()&CancelAfterChatModel != 0 {
+				return nil, compose.StatefulInterrupt(ctx, "CancelAfterChatModel", msg)
+			}
 		}
-		st.decrementRemainingIterations()
-		return input, nil
-	}
-	_ = g.AddChatModelNode(chatModel_, wrappedModel,
-		compose.WithStatePreHandler(modelPreHandle), compose.WithNodeName(chatModel_))
+		wasInterrupted, hasState, state := compose.GetInterruptState[Message](ctx)
+		if wasInterrupted && hasState {
+			msg = state
+		}
+		return msg, nil
+	}), compose.WithNodeName(cancelCheckNode_))
 
 	toolPreHandle := func(ctx context.Context, _ Message, st *State) (Message, error) {
 		input := st.Messages[len(st.Messages)-1]
-
 		returnDirectly := config.toolsReturnDirectly
 		if execCtx := getChatModelAgentExecCtx(ctx); execCtx != nil && len(execCtx.runtimeReturnDirectly) > 0 {
 			returnDirectly = execCtx.runtimeReturnDirectly
 		}
-
 		if len(returnDirectly) > 0 {
 			for i := range input.ToolCalls {
 				toolName := input.ToolCalls[i].Function.Name
@@ -379,10 +371,8 @@ func newReact(ctx context.Context, config *reactConfig, cs *cancelSig) (reactGra
 				}
 			}
 		}
-
 		return input, nil
 	}
-
 	toolPostHandle := func(ctx context.Context, out *schema.StreamReader[[]*schema.Message], st *State) (*schema.StreamReader[[]*schema.Message], error) {
 		if event := st.getReturnDirectlyEvent(); event != nil {
 			getChatModelAgentExecCtx(ctx).send(event)
@@ -390,36 +380,62 @@ func newReact(ctx context.Context, config *reactConfig, cs *cancelSig) (reactGra
 		}
 		return out, nil
 	}
-
 	_ = g.AddToolsNode(toolNode_, toolsNode,
 		compose.WithStatePreHandler(toolPreHandle),
 		compose.WithStreamStatePostHandler(toolPostHandle),
 		compose.WithNodeName(toolNode_))
 
+	// AfterToolCalls node: calls AfterToolCallsRewriteState handlers after all tool calls complete.
+	// The graph auto-materializes the ToolsNode stream into []Message before this node.
+	afterToolCalls := func(ctx context.Context, toolResults []Message) ([]Message, error) {
+		var stateMessages []Message
+		_ = compose.ProcessState(ctx, func(_ context.Context, st *State) error {
+			stateMessages = st.Messages
+			return nil
+		})
+
+		state := &ChatModelAgentState{Messages: append(stateMessages, toolResults...)}
+
+		if config.modelWrapperConf != nil {
+			assistantMsg := stateMessages[len(stateMessages)-1]
+			tc := &ToolCallsContext{}
+			for _, toolCall := range assistantMsg.ToolCalls {
+				tc.ToolCalls = append(tc.ToolCalls, ToolContext{Name: toolCall.Function.Name, CallID: toolCall.ID})
+			}
+
+			for _, handler := range config.modelWrapperConf.handlers {
+				var err error
+				ctx, state, err = handler.AfterToolCallsRewriteState(ctx, state, tc)
+				if err != nil {
+					return nil, err
+				}
+			}
+		}
+
+		_ = compose.ProcessState(ctx, func(_ context.Context, st *State) error {
+			st.Messages = state.Messages
+			return nil
+		})
+
+		return toolResults, nil
+	}
+	_ = g.AddLambdaNode(afterToolCallsNode_, compose.InvokableLambda(afterToolCalls),
+		compose.WithNodeName(afterToolCallsNode_))
+
+	// AfterToolCallsCancelCheck: CancelAfterToolCalls safe-point, separated from toolPostHandle.
+	afterToolCallsCancelCheck := func(ctx context.Context, toolResults []Message) ([]Message, error) {
+		if cancelCtx != nil && cancelCtx.shouldCancel() {
+			if cancelCtx.getMode()&CancelAfterToolCalls != 0 {
+				return nil, compose.Interrupt(ctx, "CancelAfterToolCalls")
+			}
+		}
+		return toolResults, nil
+	}
+	_ = g.AddLambdaNode(afterToolCallsCancelCheckNode_, compose.InvokableLambda(afterToolCallsCancelCheck),
+		compose.WithNodeName(afterToolCallsCancelCheckNode_))
+
 	_ = g.AddEdge(compose.START, initNode_)
 	_ = g.AddEdge(initNode_, chatModel_)
-
-	if checkCancel {
-		beforeToolNode := func(ctx context.Context, input Message) (output Message, err error) {
-			if sig := checkCancelSig(cs); sig != nil && sig.Mode != CancelAfterToolCall {
-				return nil, compose.Interrupt(ctx, "cancelled externally")
-			}
-
-			return input, nil
-		}
-		_ = g.AddLambdaNode(beforeToolNode_, compose.InvokableLambda(beforeToolNode), compose.WithNodeName(beforeToolNode_))
-		g.AddEdge(beforeToolNode_, toolNode_)
-
-		afterToolNode := func(ctx context.Context, input []Message) (output []Message, err error) {
-			if sig := checkCancelSig(cs); sig != nil && sig.Mode != CancelAfterChatModel {
-				return nil, compose.Interrupt(ctx, "cancelled externally")
-			}
-
-			return input, nil
-		}
-		_ = g.AddLambdaNode(afterToolNode_, compose.InvokableLambda(afterToolNode), compose.WithNodeName(afterToolNode_))
-		g.AddEdge(afterToolNode_, chatModel_)
-	}
 
 	toolCallCheck := func(ctx context.Context, sMsg MessageStream) (string, error) {
 		defer sMsg.Close()
@@ -434,84 +450,54 @@ func newReact(ctx context.Context, config *reactConfig, cs *cancelSig) (reactGra
 			}
 
 			if len(chunk.ToolCalls) > 0 {
-				return nodeNameAfterModel(), nil
+				return cancelCheckNode_, nil
 			}
 		}
 	}
-	branch := compose.NewStreamGraphBranch(toolCallCheck, map[string]bool{compose.END: true, nodeNameAfterModel(): true})
+	branch := compose.NewStreamGraphBranch(toolCallCheck, map[string]bool{compose.END: true, cancelCheckNode_: true})
 	_ = g.AddBranch(chatModel_, branch)
+
+	_ = g.AddEdge(cancelCheckNode_, toolNode_)
+	_ = g.AddEdge(toolNode_, afterToolCallsNode_)
+	_ = g.AddEdge(afterToolCallsNode_, afterToolCallsCancelCheckNode_)
 
 	if len(config.toolsReturnDirectly) > 0 {
 		const (
 			toolNodeToEndConverter = "ToolNodeToEndConverter"
 		)
 
-		cvt := func(ctx context.Context, sToolCallMessages sToolNodeOutput) (sGraphOutput, error) {
+		cvt := func(ctx context.Context, toolResults []Message) (Message, error) {
 			id, _ := getReturnDirectlyToolCallID(ctx)
 
-			return schema.StreamReaderWithConvert(sToolCallMessages,
-				func(in []Message) (Message, error) {
+			for _, msg := range toolResults {
+				if msg != nil && msg.ToolCallID == id {
+					return msg, nil
+				}
+			}
 
-					for _, chunk := range in {
-						if chunk != nil && chunk.ToolCallID == id {
-							return chunk, nil
-						}
-					}
-
-					return nil, schema.ErrNoValue
-				}), nil
+			return nil, errors.New("return directly tool call result not found")
 		}
 
-		_ = g.AddLambdaNode(toolNodeToEndConverter, compose.TransformableLambda(cvt),
+		_ = g.AddLambdaNode(toolNodeToEndConverter, compose.InvokableLambda(cvt),
 			compose.WithNodeName(toolNodeToEndConverter))
 		_ = g.AddEdge(toolNodeToEndConverter, compose.END)
 
-		checkReturnDirect := func(ctx context.Context,
-			sToolCallMessages sToolNodeOutput) (string, error) {
-
+		checkReturnDirect := func(ctx context.Context, toolResults []Message) (string, error) {
 			_, ok := getReturnDirectlyToolCallID(ctx)
 
 			if ok {
 				return toolNodeToEndConverter, nil
 			}
 
-			return nodeNameAfterTool(), nil
+			return chatModel_, nil
 		}
 
-		branch = compose.NewStreamGraphBranch(checkReturnDirect,
-			map[string]bool{toolNodeToEndConverter: true, nodeNameAfterTool(): true})
-		_ = g.AddBranch(toolNode_, branch)
+		returnDirectBranch := compose.NewGraphBranch(checkReturnDirect,
+			map[string]bool{toolNodeToEndConverter: true, chatModel_: true})
+		_ = g.AddBranch(afterToolCallsCancelCheckNode_, returnDirectBranch)
 	} else {
-		_ = g.AddEdge(toolNode_, nodeNameAfterTool())
+		_ = g.AddEdge(afterToolCallsCancelCheckNode_, chatModel_)
 	}
 
 	return g, nil
-}
-
-type cancelSig struct {
-	done   chan struct{}
-	config atomic.Value
-}
-
-func newCancelSig() *cancelSig {
-	return &cancelSig{
-		done: make(chan struct{}),
-	}
-}
-
-func (cs *cancelSig) cancel(cfg *cancelConfig) {
-	cs.config.Store(cfg)
-	close(cs.done)
-}
-
-func checkCancelSig(cs *cancelSig) *cancelConfig {
-	if cs == nil {
-		return nil
-	}
-	select {
-	case <-cs.done:
-		return cs.config.Load().(*cancelConfig)
-	default:
-		return nil
-	}
 }

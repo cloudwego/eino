@@ -1046,3 +1046,148 @@ func TestSequentialWorkflow_NoRetryConfig_StreamError_StopsFlow(t *testing.T) {
 	assert.Equal(t, 0, len(capturingModel.capturedInputs), "Agent B should NOT be called due to error")
 	assert.Equal(t, int32(1), atomic.LoadInt32(&noRetryModel.callCount), "Model should only be called once (no retry)")
 }
+
+// failThenToolCallStreamModel is a ChatModel that:
+//   - First Stream() call: yields a partial chunk then fails with a retryable error mid-stream.
+//   - Second Stream() call (retry): yields a tool-call message (success).
+//   - Third Generate() call (after tool result): yields a final assistant message.
+//
+// This exercises the path where the eventSenderModel copies the first stream,
+// wraps its error as WillRetryError, and sends it as an event to the session.
+// The retryModelWrapper then retries, gets a clean stream with a tool call,
+// the tool interrupts, and checkpoint save needs to gob-encode the session
+// (which still contains the unconsumed WillRetryError event stream).
+type failThenToolCallStreamModel struct {
+	streamCallCount int32
+	genCallCount    int32
+}
+
+func (m *failThenToolCallStreamModel) Generate(_ context.Context, _ []*schema.Message, _ ...model.Option) (*schema.Message, error) {
+	atomic.AddInt32(&m.genCallCount, 1)
+	return schema.AssistantMessage("final answer", nil), nil
+}
+
+func (m *failThenToolCallStreamModel) Stream(_ context.Context, _ []*schema.Message, _ ...model.Option) (*schema.StreamReader[*schema.Message], error) {
+	count := atomic.AddInt32(&m.streamCallCount, 1)
+
+	sr, sw := schema.Pipe[*schema.Message](10)
+	go func() {
+		defer sw.Close()
+		if count == 1 {
+			// First call: yield a partial chunk then fail.
+			sw.Send(schema.AssistantMessage("partial", nil), nil)
+			sw.Send(nil, errRetryAble)
+			return
+		}
+		// Second call (retry): yield a tool-call message.
+		sw.Send(schema.AssistantMessage("", []schema.ToolCall{{
+			ID: "call-1",
+			Function: schema.FunctionCall{
+				Name:      "interrupt_tool",
+				Arguments: `{}`,
+			},
+		}}), nil)
+	}()
+	return sr, nil
+}
+
+func (m *failThenToolCallStreamModel) WithTools(_ []*schema.ToolInfo) (model.ToolCallingChatModel, error) {
+	return m, nil
+}
+
+// interruptToolForRetryTest is a tool that always interrupts.
+type interruptToolForRetryTest struct{}
+
+func (t *interruptToolForRetryTest) Info(_ context.Context) (*schema.ToolInfo, error) {
+	return &schema.ToolInfo{
+		Name: "interrupt_tool",
+		Desc: "tool that interrupts",
+		ParamsOneOf: schema.NewParamsOneOfByParams(map[string]*schema.ParameterInfo{
+			"input": {Type: "string"},
+		}),
+	}, nil
+}
+
+func (t *interruptToolForRetryTest) InvokableRun(ctx context.Context, _ string, _ ...tool.Option) (string, error) {
+	return "", tool.Interrupt(ctx, "interrupted by tool")
+}
+
+// TestCheckpointSave_WillRetryError_StreamNotConsumed verifies that checkpoint
+// saving succeeds when the session contains an event with an unconsumed stream
+// that ends with WillRetryError.
+//
+// Scenario:
+//  1. ChatModelAgent with retry (MaxRetries=1) and a tool that always interrupts
+//  2. Model.Stream() #1 yields "partial" then errRetryAble mid-stream
+//     → eventSenderModel copies the stream, wraps the error as WillRetryError,
+//     sends the event to the session (stream NOT consumed by anyone yet)
+//     → retryModelWrapper detects error on its copy, retries
+//  3. Model.Stream() #2 succeeds with a tool-call message
+//  4. Tool executes → interrupts
+//  5. Runner.handleIter sees the interrupt → saveCheckPoint → gob encodes runSession
+//  6. The session has the WillRetryError event with an unconsumed stream
+//     → agentEventWrapper.GobEncode proactively consumes the stream via
+//     getMessageFromWrappedEvent, so MessageVariant.GobEncode sees an error-free
+//     array and succeeds
+func TestCheckpointSave_WillRetryError_StreamNotConsumed(t *testing.T) {
+	ctx := context.Background()
+
+	mdl := &failThenToolCallStreamModel{}
+	itool := &interruptToolForRetryTest{}
+
+	agent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+		Name:        "TestAgent",
+		Description: "Agent for checkpoint stream error test",
+		Instruction: "You are a test agent.",
+		Model:       mdl,
+		ToolsConfig: ToolsConfig{
+			ToolsNodeConfig: compose.ToolsNodeConfig{
+				Tools: []tool.BaseTool{itool},
+			},
+		},
+		ModelRetryConfig: &ModelRetryConfig{
+			MaxRetries: 1,
+			IsRetryAble: func(_ context.Context, err error) bool {
+				return errors.Is(err, errRetryAble)
+			},
+			BackoffFunc: func(_ context.Context, _ int) time.Duration {
+				return time.Millisecond // fast retry for test
+			},
+		},
+	})
+	assert.NoError(t, err)
+
+	store := newMyStore()
+	runner := NewRunner(ctx, RunnerConfig{
+		Agent:           agent,
+		EnableStreaming: true,
+		CheckPointStore: store,
+	})
+
+	iter := runner.Run(ctx,
+		[]Message{schema.UserMessage("hello")},
+		WithCheckPointID("ckpt-1"),
+	)
+
+	var events []*AgentEvent
+	for {
+		event, ok := iter.Next()
+		if !ok {
+			break
+		}
+		events = append(events, event)
+
+		if event.Err != nil {
+			t.Logf("event error: %v", event.Err)
+		}
+	}
+
+	// Verify the checkpoint was saved successfully.
+	_, exists, _ := store.Get(ctx, "ckpt-1")
+	assert.True(t, exists, "checkpoint should be saved successfully; "+
+		"if this fails, the WillRetryError stream in the session caused gob encoding to fail")
+
+	// Sanity: the model should have been called twice for Stream (fail + retry).
+	assert.Equal(t, int32(2), atomic.LoadInt32(&mdl.streamCallCount),
+		"model should be called twice: first fail, then retry success")
+}

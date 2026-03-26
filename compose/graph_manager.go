@@ -496,12 +496,15 @@ func receiveWithListening(recv func() (*task, bool), cancel chan *time.Duration)
 		return p.ta, p.closed, false, false, nil
 	case timeout, ok := <-cancel:
 		if !ok {
-			// unreachable
-			break
+			// The cancel channel has been closed — this means a previous call to
+			// receiveWithListening already consumed the cancel signal (task completed
+			// at the same time as cancel, and select picked the task result). Since
+			// cancel was already issued, treat this as an immediate cancel rather than
+			// blocking forever on resultCh.
+			return nil, false, true, true, nil
 		}
 		canceled = true
 		if timeout == nil {
-			// canceled without timeout
 			break
 		}
 		timeoutCh = time.After(*timeout)
