@@ -18,9 +18,12 @@ package planexecute
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/bytedance/sonic"
 	"github.com/stretchr/testify/assert"
@@ -1001,4 +1004,233 @@ func TestPlanExecuteAgentInterruptResume(t *testing.T) {
 	assert.True(t, hasToolResponse, "Should have tool response with approved action")
 	assert.True(t, hasAssistantCompletion, "Should have assistant completion message")
 	assert.True(t, hasBreakLoop, "Should have break loop action indicating completion")
+}
+
+// slowChatModel is a ChatModel that blocks for a configurable duration.
+type slowChatModel struct {
+	delay       time.Duration
+	response    *schema.Message
+	startedChan chan struct{}
+	startedOnce sync.Once
+}
+
+func (m *slowChatModel) Generate(ctx context.Context, input []*schema.Message, opts ...model.Option) (*schema.Message, error) {
+	m.startedOnce.Do(func() {
+		close(m.startedChan)
+	})
+
+	select {
+	case <-time.After(m.delay):
+		return m.response, nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
+
+func (m *slowChatModel) Stream(ctx context.Context, input []*schema.Message, opts ...model.Option) (*schema.StreamReader[*schema.Message], error) {
+	msg, err := m.Generate(ctx, input, opts...)
+	if err != nil {
+		return nil, err
+	}
+	sr, sw := schema.Pipe[*schema.Message](1)
+	sw.Send(msg, nil)
+	sw.Close()
+	return sr, nil
+}
+
+func (m *slowChatModel) BindTools(tools []*schema.ToolInfo) error { return nil }
+func (m *slowChatModel) WithTools(tools []*schema.ToolInfo) (model.ToolCallingChatModel, error) {
+	return m, nil
+}
+
+// TestWithCancel_PlanExecute_DuringExecution verifies that cancel works
+// during the executor (ChatModelAgent) phase of the PlanExecute agent.
+func TestWithCancel_PlanExecute_DuringExecution(t *testing.T) {
+	ctx := context.Background()
+
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	// Planner: returns a plan quickly
+	mockPlanner := mockAdk.NewMockAgent(ctrl)
+	mockPlanner.EXPECT().Name(gomock.Any()).Return("planner").AnyTimes()
+	mockPlanner.EXPECT().Description(gomock.Any()).Return("a planner agent").AnyTimes()
+
+	plan := &defaultPlan{Steps: []string{"Step 1", "Step 2"}}
+	userInput := []adk.Message{schema.UserMessage("test task")}
+
+	mockPlanner.EXPECT().Run(gomock.Any(), gomock.Any(), gomock.Any()).DoAndReturn(
+		func(ctx context.Context, input *adk.AgentInput, opts ...adk.AgentRunOption) *adk.AsyncIterator[*adk.AgentEvent] {
+			iterator, generator := adk.NewAsyncIteratorPair[*adk.AgentEvent]()
+			adk.AddSessionValue(ctx, PlanSessionKey, plan)
+			adk.AddSessionValue(ctx, UserInputSessionKey, userInput)
+			planJSON, _ := sonic.MarshalString(plan)
+			msg := schema.AssistantMessage(planJSON, nil)
+			generator.Send(adk.EventFromMessage(msg, nil, schema.Assistant, ""))
+			generator.Close()
+			return iterator
+		},
+	).Times(1)
+
+	// Executor: uses a slow model that we can cancel
+	executorStarted := make(chan struct{})
+	slowModel := &slowChatModel{
+		delay:       5 * time.Second,
+		response:    schema.AssistantMessage("step result", nil),
+		startedChan: executorStarted,
+	}
+
+	executor, err := NewExecutor(ctx, &ExecutorConfig{
+		Model:         slowModel,
+		MaxIterations: 5,
+	})
+	assert.NoError(t, err)
+
+	// Replanner: should not be reached since we cancel during executor
+	mockReplanner := mockAdk.NewMockAgent(ctrl)
+	mockReplanner.EXPECT().Name(gomock.Any()).Return("replanner").AnyTimes()
+	mockReplanner.EXPECT().Description(gomock.Any()).Return("a replanner agent").AnyTimes()
+
+	agent, err := New(ctx, &Config{
+		Planner:       mockPlanner,
+		Executor:      executor,
+		Replanner:     mockReplanner,
+		MaxIterations: 5,
+	})
+	assert.NoError(t, err)
+
+	runner := adk.NewRunner(ctx, adk.RunnerConfig{Agent: agent})
+
+	cancelOpt, cancelFn := adk.WithCancel()
+	iter := runner.Run(ctx, userInput, cancelOpt)
+
+	// Wait for the executor's model to start
+	select {
+	case <-executorStarted:
+	case <-time.After(10 * time.Second):
+		t.Fatal("Executor model did not start")
+	}
+
+	time.Sleep(50 * time.Millisecond)
+
+	// Cancel should NOT return ErrExecutionCompleted
+	handle, _ := cancelFn()
+	err = handle.Wait()
+	assert.NoError(t, err, "Cancel during executor should succeed")
+
+	hasCancelError := false
+	for {
+		event, ok := iter.Next()
+		if !ok {
+			break
+		}
+		var ce *adk.CancelError
+		if event.Err != nil && errors.As(event.Err, &ce) {
+			hasCancelError = true
+		}
+	}
+
+	assert.True(t, hasCancelError, "Should have CancelError event")
+}
+
+// TestWithCancel_PlanExecute_BetweenTransitions verifies that cancel works
+// when fired between agent transitions (e.g., after planner, before executor starts).
+func TestWithCancel_PlanExecute_BetweenTransitions(t *testing.T) {
+	ctx := context.Background()
+
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	plannerDone := make(chan struct{})
+
+	// Planner: signals when done
+	mockPlanner := mockAdk.NewMockAgent(ctrl)
+	mockPlanner.EXPECT().Name(gomock.Any()).Return("planner").AnyTimes()
+	mockPlanner.EXPECT().Description(gomock.Any()).Return("a planner agent").AnyTimes()
+
+	plan := &defaultPlan{Steps: []string{"Step 1"}}
+	userInput := []adk.Message{schema.UserMessage("test task")}
+
+	mockPlanner.EXPECT().Run(gomock.Any(), gomock.Any(), gomock.Any()).DoAndReturn(
+		func(ctx context.Context, input *adk.AgentInput, opts ...adk.AgentRunOption) *adk.AsyncIterator[*adk.AgentEvent] {
+			iterator, generator := adk.NewAsyncIteratorPair[*adk.AgentEvent]()
+			go func() {
+				defer generator.Close()
+				adk.AddSessionValue(ctx, PlanSessionKey, plan)
+				adk.AddSessionValue(ctx, UserInputSessionKey, userInput)
+				planJSON, _ := sonic.MarshalString(plan)
+				msg := schema.AssistantMessage(planJSON, nil)
+				generator.Send(adk.EventFromMessage(msg, nil, schema.Assistant, ""))
+				close(plannerDone)
+			}()
+			return iterator
+		},
+	).Times(1)
+
+	// Executor: slow model to give time to observe cancel
+	executorModelStarted := make(chan struct{})
+	slowExecModel := &slowChatModel{
+		delay:       5 * time.Second,
+		response:    schema.AssistantMessage("step result", nil),
+		startedChan: executorModelStarted,
+	}
+
+	executor, err := NewExecutor(ctx, &ExecutorConfig{
+		Model:         slowExecModel,
+		MaxIterations: 5,
+	})
+	assert.NoError(t, err)
+
+	mockReplanner := mockAdk.NewMockAgent(ctrl)
+	mockReplanner.EXPECT().Name(gomock.Any()).Return("replanner").AnyTimes()
+	mockReplanner.EXPECT().Description(gomock.Any()).Return("a replanner agent").AnyTimes()
+
+	agent, err := New(ctx, &Config{
+		Planner:       mockPlanner,
+		Executor:      executor,
+		Replanner:     mockReplanner,
+		MaxIterations: 5,
+	})
+	assert.NoError(t, err)
+
+	runner := adk.NewRunner(ctx, adk.RunnerConfig{Agent: agent})
+
+	cancelOpt, cancelFn := adk.WithCancel()
+	iter := runner.Run(ctx, userInput, cancelOpt)
+
+	// Wait for planner to finish, then cancel before executor has a chance to produce output
+	select {
+	case <-plannerDone:
+	case <-time.After(10 * time.Second):
+		t.Fatal("Planner did not finish")
+	}
+
+	// Cancel after planner, during executor phase
+	// The executor is a ChatModelAgent which will handle the cancel
+	select {
+	case <-executorModelStarted:
+	case <-time.After(10 * time.Second):
+		t.Fatal("Executor model did not start")
+	}
+
+	start := time.Now()
+	handle, _ := cancelFn()
+	err = handle.Wait()
+	assert.NoError(t, err, "Cancel between transitions should succeed")
+
+	hasCancelError := false
+	for {
+		event, ok := iter.Next()
+		if !ok {
+			break
+		}
+		var ce *adk.CancelError
+		if event.Err != nil && errors.As(event.Err, &ce) {
+			hasCancelError = true
+		}
+	}
+	elapsed := time.Since(start)
+
+	assert.True(t, hasCancelError, "Should have CancelError event")
+	assert.True(t, elapsed < 3*time.Second, "Should complete quickly after cancel, elapsed: %v", elapsed)
 }
