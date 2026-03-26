@@ -434,6 +434,7 @@ type interruptTempInfo struct {
 	interruptBeforeNodes []string
 	interruptAfterNodes  []string
 	interruptRerunExtra  map[string]any
+	fromGraphInterrupt   bool
 
 	signals []*core.InterruptSignal
 }
@@ -442,6 +443,7 @@ func (ti *interruptTempInfo) collectCanceledInfo(canceled bool, canceledTasks, c
 	if !canceled {
 		return
 	}
+	ti.fromGraphInterrupt = true
 	if len(canceledTasks) > 0 {
 		for _, t := range canceledTasks {
 			ti.interruptRerunNodes = append(ti.interruptRerunNodes, t.nodeKey)
@@ -459,6 +461,13 @@ func (r *runner) resolveInterruptCompletedTasks(tempInfo *interruptTempInfo, com
 			if info := isSubGraphInterrupt(completedTask.err); info != nil {
 				tempInfo.subGraphInterrupts[completedTask.nodeKey] = info
 				tempInfo.signals = append(tempInfo.signals, info.signal)
+				// Propagate FromGraphInterrupt from the sub-graph to the parent.
+				// The sub-graph's task manager may have consumed the cancel
+				// channel value before the parent's, so only the sub-graph
+				// knows the interrupt was triggered by a graph-level cancel.
+				if info.Info != nil && info.Info.FromGraphInterrupt {
+					tempInfo.fromGraphInterrupt = true
+				}
 				continue
 			}
 
@@ -515,27 +524,27 @@ func (r *runner) handleInterrupt(
 	if r.runCtx != nil {
 		// current graph has enable state
 		if state, ok := ctx.Value(stateKey{}).(*internalState); ok {
-			cp.State = state.state
+			state.mu.Lock()
+			copiedState, err := deepCopyState(state.state)
+			state.mu.Unlock()
+			if err != nil {
+				return fmt.Errorf("failed to copy state: %w", err)
+			}
+			cp.State = copiedState
 		}
 	}
 
 	intInfo := &InterruptInfo{
-		State:           cp.State,
-		AfterNodes:      tempInfo.interruptAfterNodes,
-		BeforeNodes:     tempInfo.interruptBeforeNodes,
-		RerunNodes:      tempInfo.interruptRerunNodes,
-		RerunNodesExtra: tempInfo.interruptRerunExtra,
-		SubGraphs:       make(map[string]*InterruptInfo),
+		State:              cp.State,
+		AfterNodes:         tempInfo.interruptAfterNodes,
+		BeforeNodes:        tempInfo.interruptBeforeNodes,
+		RerunNodes:         tempInfo.interruptRerunNodes,
+		RerunNodesExtra:    tempInfo.interruptRerunExtra,
+		SubGraphs:          make(map[string]*InterruptInfo),
+		FromGraphInterrupt: tempInfo.fromGraphInterrupt,
 	}
 
-	var info any
-	if cp.State != nil {
-		copiedState, err := deepCopyState(cp.State)
-		if err != nil {
-			return fmt.Errorf("failed to copy state: %w", err)
-		}
-		info = copiedState
-	}
+	info := cp.State
 
 	is, err := core.Interrupt(ctx, info, nil, tempInfo.signals)
 	if err != nil {
@@ -581,15 +590,18 @@ func deepCopyState(state any) (any, error) {
 
 	// Create new instance of the same type
 	stateType := reflect.TypeOf(state)
-	if stateType.Kind() == reflect.Ptr {
+	isPtr := stateType.Kind() == reflect.Ptr
+	if isPtr {
 		stateType = stateType.Elem()
 	}
-	newState := reflect.New(stateType).Interface()
-
-	if err := serializer.Unmarshal(data, newState); err != nil {
+	newStatePtr := reflect.New(stateType).Interface()
+	if err := serializer.Unmarshal(data, newStatePtr); err != nil {
 		return nil, fmt.Errorf("failed to unmarshal state: %w", err)
 	}
-	return newState, nil
+	if isPtr {
+		return newStatePtr, nil
+	}
+	return reflect.ValueOf(newStatePtr).Elem().Interface(), nil
 }
 
 func (r *runner) handleInterruptWithSubGraphAndRerunNodes(
@@ -645,27 +657,27 @@ func (r *runner) handleInterruptWithSubGraphAndRerunNodes(
 	if r.runCtx != nil {
 		// current graph has enable state
 		if state, ok := ctx.Value(stateKey{}).(*internalState); ok {
-			cp.State = state.state
+			state.mu.Lock()
+			copiedState, err_ := deepCopyState(state.state)
+			state.mu.Unlock()
+			if err_ != nil {
+				return fmt.Errorf("failed to copy state: %w", err_)
+			}
+			cp.State = copiedState
 		}
 	}
 
 	intInfo := &InterruptInfo{
-		State:           cp.State,
-		BeforeNodes:     tempInfo.interruptBeforeNodes,
-		AfterNodes:      tempInfo.interruptAfterNodes,
-		RerunNodes:      tempInfo.interruptRerunNodes,
-		RerunNodesExtra: tempInfo.interruptRerunExtra,
-		SubGraphs:       make(map[string]*InterruptInfo),
+		State:              cp.State,
+		BeforeNodes:        tempInfo.interruptBeforeNodes,
+		AfterNodes:         tempInfo.interruptAfterNodes,
+		RerunNodes:         tempInfo.interruptRerunNodes,
+		RerunNodesExtra:    tempInfo.interruptRerunExtra,
+		SubGraphs:          make(map[string]*InterruptInfo),
+		FromGraphInterrupt: tempInfo.fromGraphInterrupt,
 	}
 
-	var info any
-	if cp.State != nil {
-		copiedState, err_ := deepCopyState(cp.State)
-		if err_ != nil {
-			return fmt.Errorf("failed to copy state: %w", err_)
-		}
-		info = copiedState
-	}
+	info := cp.State
 
 	is, err := core.Interrupt(ctx, info, nil, tempInfo.signals)
 	if err != nil {

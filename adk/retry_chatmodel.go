@@ -196,6 +196,11 @@ func (r *retryModelWrapper) Generate(ctx context.Context, input []*schema.Messag
 			return out, nil
 		}
 
+		// Never retry interrupt errors (e.g. cancel safe-point interrupts).
+		if _, ok := compose.ExtractInterruptInfo(err); ok {
+			return nil, err
+		}
+
 		if !isRetryAble(ctx, err) {
 			return nil, err
 		}
@@ -238,6 +243,10 @@ func (r *retryModelWrapper) Stream(ctx context.Context, input []*schema.Message,
 
 		stream, err := r.inner.Stream(ctx, input, opts...)
 		if err != nil {
+			// Never retry interrupt errors (e.g. cancel safe-point interrupts).
+			if _, ok := compose.ExtractInterruptInfo(err); ok {
+				return nil, err
+			}
 			if !isRetryAble(ctx, err) {
 				return nil, err
 			}

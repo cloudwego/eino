@@ -135,6 +135,7 @@ func getMessageFromWrappedEvent(e *agentEventWrapper) (Message, error) {
 // consumeStream drains the message stream, setting concatenatedMessage on
 // success or StreamErr on failure. The stream is always replaced with an
 // error-free, materialized version safe for gob encoding.
+// Must be called at most once (guarded by callers checking concatenatedMessage/StreamErr).
 func (e *agentEventWrapper) consumeStream() {
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -154,10 +155,6 @@ func (e *agentEventWrapper) consumeStream() {
 				break
 			}
 			e.StreamErr = err
-			// Replace the stream with successfully received messages only (no error at the end).
-			// The error is preserved in StreamErr for users to check.
-			// We intentionally exclude the error from the new stream to ensure gob encoding
-			// compatibility, as the stream may be consumed during serialization.
 			e.AgentEvent.Output.MessageOutput.MessageStream = schema.StreamReaderFromArray(msgs)
 			return
 		}
