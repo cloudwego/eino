@@ -1,0 +1,196 @@
+package team
+
+import (
+	"context"
+	"testing"
+
+	"github.com/stretchr/testify/assert"
+
+	"github.com/cloudwego/eino/adk"
+	"github.com/cloudwego/eino/components/tool"
+)
+
+func TestConfig_EnsureInit_InitializesState(t *testing.T) {
+	backend := newInMemoryBackend()
+	conf := &Config{Backend: backend, BaseDir: "/tmp/test"}
+
+	assert.Nil(t, conf.state)
+
+	conf.ensureInit()
+
+	assert.NotNil(t, conf.state)
+	assert.NotNil(t, conf.state.locks)
+	assert.NotNil(t, conf.state.cfgStore)
+}
+
+func TestConfig_EnsureInit_OnlyOnce(t *testing.T) {
+	backend := newInMemoryBackend()
+	conf := &Config{Backend: backend, BaseDir: "/tmp/test"}
+
+	conf.ensureInit()
+	firstState := conf.state
+
+	conf.ensureInit()
+	assert.Same(t, firstState, conf.state)
+}
+
+func TestConfig_Logger_ReturnsDefaultWhenNil(t *testing.T) {
+	conf := &Config{}
+
+	logger := conf.logger()
+	assert.NotNil(t, logger)
+	_, ok := logger.(defaultLogger)
+	assert.True(t, ok)
+}
+
+func TestConfig_Logger_ReturnsCustomLogger(t *testing.T) {
+	custom := nopLogger{}
+	conf := &Config{Logger: custom}
+
+	logger := conf.logger()
+	assert.NotNil(t, logger)
+	_, ok := logger.(nopLogger)
+	assert.True(t, ok)
+}
+
+func TestConfig_ConfigStore(t *testing.T) {
+	backend := newInMemoryBackend()
+	conf := &Config{Backend: backend, BaseDir: "/tmp/test"}
+	conf.ensureInit()
+
+	store := conf.configStore()
+	assert.NotNil(t, store)
+	assert.Same(t, conf.state.cfgStore, store)
+}
+
+func TestConfig_RemoveLock(t *testing.T) {
+	backend := newInMemoryBackend()
+	conf := &Config{Backend: backend, BaseDir: "/tmp/test"}
+	conf.ensureInit()
+
+	conf.state.locks.ForName("some-agent")
+	conf.removeLock("some-agent")
+}
+
+func TestConfig_RemoveLock_NilState(t *testing.T) {
+	conf := &Config{}
+	conf.removeLock("anything")
+}
+
+func TestTeamMiddleware_GetSetTeamName(t *testing.T) {
+	backend := newInMemoryBackend()
+	conf := &Config{Backend: backend, BaseDir: "/tmp/test"}
+	conf.ensureInit()
+
+	runnerConf := &RunnerConfig{
+		TeamConfig:  conf,
+		AgentConfig: &adk.ChatModelAgentConfig{Name: "test", Description: "test"},
+	}
+
+	router := newSourceRouter(LeaderAgentName, nopLogger{})
+	pumpMgr := newPumpManager(router, nopLogger{})
+	mw := newTeamLeadMiddleware(runnerConf, router, pumpMgr)
+
+	assert.Equal(t, "", mw.getTeamName())
+
+	mw.setTeamName("my-team")
+	assert.Equal(t, "my-team", mw.getTeamName())
+
+	mw.setTeamName("other-team")
+	assert.Equal(t, "other-team", mw.getTeamName())
+}
+
+func TestTeamMiddleware_BeforeAgent_NilRunCtx(t *testing.T) {
+	backend := newInMemoryBackend()
+	conf := &Config{Backend: backend, BaseDir: "/tmp/test"}
+	conf.ensureInit()
+
+	runnerConf := &RunnerConfig{
+		TeamConfig:  conf,
+		AgentConfig: &adk.ChatModelAgentConfig{Name: "test", Description: "test"},
+	}
+
+	router := newSourceRouter(LeaderAgentName, nopLogger{})
+	pumpMgr := newPumpManager(router, nopLogger{})
+	mw := newTeamLeadMiddleware(runnerConf, router, pumpMgr)
+
+	ctx := context.Background()
+	ctx, result, err := mw.BeforeAgent(ctx, nil)
+	assert.NoError(t, err)
+	assert.Nil(t, result)
+	assert.NotNil(t, ctx)
+}
+
+func TestTeamMiddleware_BeforeAgent_Leader(t *testing.T) {
+	backend := newInMemoryBackend()
+	conf := &Config{Backend: backend, BaseDir: "/tmp/test"}
+	conf.ensureInit()
+
+	runnerConf := &RunnerConfig{
+		TeamConfig:  conf,
+		AgentConfig: &adk.ChatModelAgentConfig{Name: "test", Description: "test"},
+	}
+
+	router := newSourceRouter(LeaderAgentName, nopLogger{})
+	pumpMgr := newPumpManager(router, nopLogger{})
+	mw := newTeamLeadMiddleware(runnerConf, router, pumpMgr)
+
+	ctx := context.Background()
+	runCtx := &adk.ChatModelAgentContext{Tools: []tool.BaseTool{}}
+	ctx, result, err := mw.BeforeAgent(ctx, runCtx)
+	assert.NoError(t, err)
+	assert.NotNil(t, result)
+	assert.Len(t, result.Tools, 4)
+}
+
+func TestTeamMiddleware_BeforeAgent_Teammate(t *testing.T) {
+	backend := newInMemoryBackend()
+	conf := &Config{Backend: backend, BaseDir: "/tmp/test"}
+	conf.ensureInit()
+
+	runnerConf := &RunnerConfig{
+		TeamConfig:  conf,
+		AgentConfig: &adk.ChatModelAgentConfig{Name: "test", Description: "test"},
+	}
+
+	tmMW := newTeamTeammateMiddleware(runnerConf, "worker", "myteam")
+
+	ctx := context.Background()
+	runCtx := &adk.ChatModelAgentContext{Tools: []tool.BaseTool{}}
+	ctx, result, err := tmMW.BeforeAgent(ctx, runCtx)
+	assert.NoError(t, err)
+	assert.NotNil(t, result)
+	assert.Len(t, result.Tools, 1)
+}
+
+func TestNewTeamTeammateMiddleware_SetsTeamName(t *testing.T) {
+	backend := newInMemoryBackend()
+	conf := &Config{Backend: backend, BaseDir: "/tmp/test"}
+	conf.ensureInit()
+
+	runnerConf := &RunnerConfig{
+		TeamConfig:  conf,
+		AgentConfig: &adk.ChatModelAgentConfig{Name: "test", Description: "test"},
+	}
+
+	tmMW := newTeamTeammateMiddleware(runnerConf, "worker", "myteam")
+	assert.Equal(t, "myteam", tmMW.getTeamName())
+	assert.Equal(t, "worker", tmMW.agentName)
+	assert.False(t, tmMW.isLeader)
+}
+
+func TestTeamMiddleware_Logger(t *testing.T) {
+	mw, _ := newTestTeamMiddleware()
+	assert.NotNil(t, mw.logger())
+}
+
+func TestTeamMiddleware_ShutdownAllTeammates(t *testing.T) {
+	mw, _ := newTestTeamMiddleware()
+	ctx := context.Background()
+
+	mw.setTeamName("myteam")
+	_, cancel := context.WithCancel(context.Background())
+	mw.lifecycle.registry.register("worker", &teammateHandle{Cancel: cancel})
+
+	mw.ShutdownAllTeammates(ctx, "myteam")
+}
