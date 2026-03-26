@@ -1077,12 +1077,13 @@ func (l *TurnLoop[T]) run(ctx context.Context) {
 		// Drain any pending preempt that arrived between turns. A Push caller
 		// may have called holdRunLoop + requestPreempt while the loop was
 		// between iterations; acknowledge and release before planning the
-		// next turn.
+		// next turn. Use drainAll to release all pusher holds at once —
+		// multiple concurrent Push(WithPreempt) callers each hold a ref.
 		if preempted, _, ackList := l.preemptSig.waitForPreemptOrUnhold(); preempted {
 			for _, ack := range ackList {
 				close(ack)
 			}
-			l.preemptSig.unholdRunLoop()
+			l.preemptSig.drainAll()
 		}
 
 		plan, err := l.planTurn(ctx, isResume, items, pr)
