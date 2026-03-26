@@ -867,7 +867,7 @@ func (tn *ToolsNode) Invoke(ctx context.Context, input *schema.Message,
 		if len(errs) == 0 {
 			if tasks[i].useEnhanced {
 				output[i] = schema.ToolMessage("", tasks[i].callID, schema.WithToolName(tasks[i].name))
-				output[i].UserInputMultiContent, err = tasks[i].enhancedOutput.ToMessageInputParts()
+				output[i].MultiContent, err = toolResultToChatMessageParts(tasks[i].enhancedOutput)
 				if err != nil {
 					return nil, err
 				}
@@ -991,7 +991,7 @@ func (tn *ToolsNode) Stream(ctx context.Context, input *schema.Message,
 			cvt := func(tr *schema.ToolResult) ([]*schema.Message, error) {
 				ret := make([]*schema.Message, n)
 				ret[index] = schema.ToolMessage("", callID, schema.WithToolName(callName))
-				ret[index].UserInputMultiContent, err = tr.ToMessageInputParts()
+				ret[index].MultiContent, err = toolResultToChatMessageParts(tr)
 				if err != nil {
 					return nil, err
 				}
@@ -1024,6 +1024,91 @@ func getToolsNodeOptions(opts ...ToolsNodeOption) *toolsNodeOptions {
 		opt(o)
 	}
 	return o
+}
+
+func toolResultToChatMessageParts(tr *schema.ToolResult) ([]schema.ChatMessagePart, error) {
+	if tr == nil || len(tr.Parts) == 0 {
+		return nil, nil
+	}
+	ret := make([]schema.ChatMessagePart, len(tr.Parts))
+	for i, part := range tr.Parts {
+		var err error
+		ret[i], err = convToolOutputPartToChatMessagePart(part)
+		if err != nil {
+			return nil, err
+		}
+	}
+	return ret, nil
+}
+
+func convToolOutputPartToChatMessagePart(toolPart schema.ToolOutputPart) (schema.ChatMessagePart, error) {
+	switch toolPart.Type {
+	case schema.ToolPartTypeText:
+		return schema.ChatMessagePart{
+			Type: schema.ChatMessagePartTypeText,
+			Text: toolPart.Text,
+		}, nil
+	case schema.ToolPartTypeImage:
+		if toolPart.Image == nil {
+			return schema.ChatMessagePart{}, fmt.Errorf("image content is nil for tool part type %v", toolPart.Type)
+		}
+		return schema.ChatMessagePart{
+			Type: schema.ChatMessagePartTypeImageURL,
+			ImageURL: &schema.ChatMessageImageURL{
+				URL:      resolvePartURL(toolPart.Image.MessagePartCommon),
+				MIMEType: toolPart.Image.MIMEType,
+				Extra:    toolPart.Extra,
+			},
+		}, nil
+	case schema.ToolPartTypeAudio:
+		if toolPart.Audio == nil {
+			return schema.ChatMessagePart{}, fmt.Errorf("audio content is nil for tool part type %v", toolPart.Type)
+		}
+		return schema.ChatMessagePart{
+			Type: schema.ChatMessagePartTypeAudioURL,
+			AudioURL: &schema.ChatMessageAudioURL{
+				URL:      resolvePartURL(toolPart.Audio.MessagePartCommon),
+				MIMEType: toolPart.Audio.MIMEType,
+				Extra:    toolPart.Extra,
+			},
+		}, nil
+	case schema.ToolPartTypeVideo:
+		if toolPart.Video == nil {
+			return schema.ChatMessagePart{}, fmt.Errorf("video content is nil for tool part type %v", toolPart.Type)
+		}
+		return schema.ChatMessagePart{
+			Type: schema.ChatMessagePartTypeVideoURL,
+			VideoURL: &schema.ChatMessageVideoURL{
+				URL:      resolvePartURL(toolPart.Video.MessagePartCommon),
+				MIMEType: toolPart.Video.MIMEType,
+				Extra:    toolPart.Extra,
+			},
+		}, nil
+	case schema.ToolPartTypeFile:
+		if toolPart.File == nil {
+			return schema.ChatMessagePart{}, fmt.Errorf("file content is nil for tool part type %v", toolPart.Type)
+		}
+		return schema.ChatMessagePart{
+			Type: schema.ChatMessagePartTypeFileURL,
+			FileURL: &schema.ChatMessageFileURL{
+				URL:      resolvePartURL(toolPart.File.MessagePartCommon),
+				MIMEType: toolPart.File.MIMEType,
+				Extra:    toolPart.Extra,
+			},
+		}, nil
+	default:
+		return schema.ChatMessagePart{}, fmt.Errorf("unknown tool part type: %v", toolPart.Type)
+	}
+}
+
+func resolvePartURL(media schema.MessagePartCommon) string {
+	if media.URL != nil {
+		return *media.URL
+	}
+	if media.Base64Data != nil {
+		return fmt.Sprintf("data:%s;base64,%s", media.MIMEType, *media.Base64Data)
+	}
+	return ""
 }
 
 type toolCallInfoKey struct{}
