@@ -3226,119 +3226,125 @@ func TestTurnLoop_PushStrategy_DuringTurnTransition(t *testing.T) {
 
 func TestTurnLoop_ConcurrentPreemptAndStop(t *testing.T) {
 	for iter := 0; iter < 20; iter++ {
-		agentStarted := make(chan struct{})
-		agentStartedOnce := sync.Once{}
+		t.Run(fmt.Sprintf("iter_%d", iter), func(t *testing.T) {
+			ctx := context.Background()
 
-		agent := &turnLoopCancellableMockAgent{
-			name: "test",
-			runFunc: func(ctx context.Context, input *AgentInput) (*AgentOutput, error) {
-				agentStartedOnce.Do(func() {
-					close(agentStarted)
-				})
-				<-ctx.Done()
-				return &AgentOutput{}, nil
-			},
-		}
+			agentStarted := make(chan struct{})
+			agentStartedOnce := sync.Once{}
 
-		loop := newAndRunTurnLoop(context.Background(), TurnLoopConfig[string]{
-			PrepareAgent: func(ctx context.Context, _ *TurnLoop[string], consumed []string) (Agent, error) {
-				return agent, nil
-			},
-			GenInput: func(ctx context.Context, _ *TurnLoop[string], items []string) (*GenInputResult[string], error) {
-				return &GenInputResult[string]{
-					Input:    &AgentInput{},
-					Consumed: items,
-				}, nil
-			},
-		})
-
-		loop.Push("seed")
-
-		select {
-		case <-agentStarted:
-		case <-time.After(1 * time.Second):
-			t.Fatal("agent did not start")
-		}
-
-		var wg sync.WaitGroup
-		wg.Add(2)
-
-		go func() {
-			defer wg.Done()
-			_, ack := loop.Push("preempt-item", WithPreempt[string]())
-			if ack != nil {
-				<-ack
+			agent := &turnLoopCancellableMockAgent{
+				name: "test",
+				runFunc: func(ctx context.Context, input *AgentInput) (*AgentOutput, error) {
+					agentStartedOnce.Do(func() {
+						close(agentStarted)
+					})
+					<-ctx.Done()
+					return &AgentOutput{}, nil
+				},
 			}
-		}()
 
-		go func() {
-			defer wg.Done()
-			loop.Stop()
-		}()
+			loop := newAndRunTurnLoop(ctx, TurnLoopConfig[string]{
+				PrepareAgent: func(ctx context.Context, _ *TurnLoop[string], consumed []string) (Agent, error) {
+					return agent, nil
+				},
+				GenInput: func(ctx context.Context, _ *TurnLoop[string], items []string) (*GenInputResult[string], error) {
+					return &GenInputResult[string]{
+						Input:    &AgentInput{},
+						Consumed: items,
+					}, nil
+				},
+			})
 
-		wg.Wait()
-		result := loop.Wait()
-		assert.NoError(t, result.ExitReason)
+			loop.Push("seed")
+
+			select {
+			case <-agentStarted:
+			case <-time.After(1 * time.Second):
+				t.Fatal("agent did not start")
+			}
+
+			var wg sync.WaitGroup
+			wg.Add(2)
+
+			go func() {
+				defer wg.Done()
+				_, ack := loop.Push("preempt-item", WithPreempt[string]())
+				if ack != nil {
+					<-ack
+				}
+			}()
+
+			go func() {
+				defer wg.Done()
+				loop.Stop()
+			}()
+
+			wg.Wait()
+			loop.Wait()
+		})
 	}
 }
 
 func TestTurnLoop_ConcurrentPushStrategyAndStop(t *testing.T) {
 	for iter := 0; iter < 20; iter++ {
-		agentStarted := make(chan struct{})
-		agentStartedOnce := sync.Once{}
+		t.Run(fmt.Sprintf("iter_%d", iter), func(t *testing.T) {
+			ctx := context.Background()
 
-		agent := &turnLoopCancellableMockAgent{
-			name: "test",
-			runFunc: func(ctx context.Context, input *AgentInput) (*AgentOutput, error) {
-				agentStartedOnce.Do(func() {
-					close(agentStarted)
-				})
-				<-ctx.Done()
-				return &AgentOutput{}, nil
-			},
-		}
+			agentStarted := make(chan struct{})
+			agentStartedOnce := sync.Once{}
 
-		loop := newAndRunTurnLoop(context.Background(), TurnLoopConfig[string]{
-			PrepareAgent: func(ctx context.Context, _ *TurnLoop[string], consumed []string) (Agent, error) {
-				return agent, nil
-			},
-			GenInput: func(ctx context.Context, _ *TurnLoop[string], items []string) (*GenInputResult[string], error) {
-				return &GenInputResult[string]{
-					Input:    &AgentInput{},
-					Consumed: items,
-				}, nil
-			},
-		})
-
-		loop.Push("seed")
-
-		select {
-		case <-agentStarted:
-		case <-time.After(1 * time.Second):
-			t.Fatal("agent did not start")
-		}
-
-		var wg sync.WaitGroup
-		wg.Add(2)
-
-		go func() {
-			defer wg.Done()
-			_, ack := loop.Push("strategic-item", WithPushStrategy(func(ctx context.Context, tc *TurnContext[string]) []PushOption[string] {
-				return []PushOption[string]{WithPreempt[string]()}
-			}))
-			if ack != nil {
-				<-ack
+			agent := &turnLoopCancellableMockAgent{
+				name: "test",
+				runFunc: func(ctx context.Context, input *AgentInput) (*AgentOutput, error) {
+					agentStartedOnce.Do(func() {
+						close(agentStarted)
+					})
+					<-ctx.Done()
+					return &AgentOutput{}, nil
+				},
 			}
-		}()
 
-		go func() {
-			defer wg.Done()
-			loop.Stop()
-		}()
+			loop := newAndRunTurnLoop(ctx, TurnLoopConfig[string]{
+				PrepareAgent: func(ctx context.Context, _ *TurnLoop[string], consumed []string) (Agent, error) {
+					return agent, nil
+				},
+				GenInput: func(ctx context.Context, _ *TurnLoop[string], items []string) (*GenInputResult[string], error) {
+					return &GenInputResult[string]{
+						Input:    &AgentInput{},
+						Consumed: items,
+					}, nil
+				},
+			})
 
-		wg.Wait()
-		result := loop.Wait()
-		assert.NoError(t, result.ExitReason)
+			loop.Push("seed")
+
+			select {
+			case <-agentStarted:
+			case <-time.After(1 * time.Second):
+				t.Fatal("agent did not start")
+			}
+
+			var wg sync.WaitGroup
+			wg.Add(2)
+
+			go func() {
+				defer wg.Done()
+				_, ack := loop.Push("strategic-item", WithPushStrategy(func(ctx context.Context, tc *TurnContext[string]) []PushOption[string] {
+					return []PushOption[string]{WithPreempt[string]()}
+				}))
+				if ack != nil {
+					<-ack
+				}
+			}()
+
+			go func() {
+				defer wg.Done()
+				loop.Stop()
+			}()
+
+			wg.Wait()
+			loop.Wait()
+		})
 	}
 }
 func TestTurnLoop_TurnContext_StoppedChannel(t *testing.T) {

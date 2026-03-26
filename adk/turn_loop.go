@@ -31,57 +31,84 @@ import (
 	"github.com/cloudwego/eino/internal/safe"
 )
 
-type turnLoopStopSig struct {
+// stopSignal coordinates the Stop() call with per-turn watcher goroutines.
+//
+// Lifecycle overview:
+//
+//  1. SIGNAL — Stop() calls signal() which bumps the generation counter,
+//     stores the AgentCancelOptions, and deposits a one-shot notification
+//     in the buffered notify channel.
+//
+//  2. DONE — Stop() calls closeDone() which permanently closes the done
+//     channel. This acts as a durable "stopped" flag: any current or future
+//     select on done fires immediately, ensuring that every watcher —
+//     including watchers in turns that start after Stop() but before the
+//     run loop observes isStopped() — can reliably detect the stop.
+//
+//  3. RECEIVE — The per-turn watchStopSignal goroutine selects on the done
+//     channel (the durable flag) and the notify channel (to detect mode
+//     escalation from a second Stop call). On either signal, it calls
+//     agentCancelFunc to cancel the running agent.
+//
+// The generation counter (gen) de-duplicates wakes so that the watcher only
+// acts when a new Stop() call has been made, supporting mode escalation
+// (e.g. CancelAfterToolCalls followed by CancelImmediate).
+type stopSignal struct {
+	// done is closed exactly once by closeDone(). A closed channel is
+	// readable forever, so it serves as a durable stop flag for all watchers.
 	done chan struct{}
 
 	mu              sync.Mutex
 	gen             uint64
 	agentCancelOpts []AgentCancelOption
-	notify          chan struct{}
+	// notify is a buffered(1) channel that wakes the current turn's watcher
+	// when Stop() is called. Unlike done, it supports repeated Stop() calls
+	// for cancel-mode escalation.
+	notify chan struct{}
 }
 
-func newTurnLoopStopSig() *turnLoopStopSig {
-	return &turnLoopStopSig{
+func newStopSignal() *stopSignal {
+	return &stopSignal{
 		done:   make(chan struct{}),
 		notify: make(chan struct{}, 1),
 	}
 }
 
-func (cs *turnLoopStopSig) signal(cfg *stopConfig) {
-	cs.mu.Lock()
-	cs.gen++
-	cs.agentCancelOpts = cfg.agentCancelOpts
-	cs.mu.Unlock()
+// signal records a stop request and wakes the current turn's watcher (if any).
+// The non-blocking send means the notification is silently coalesced when the
+// buffer is already full — this is safe because gen de-duplicates in the watcher.
+func (s *stopSignal) signal(cfg *stopConfig) {
+	s.mu.Lock()
+	s.gen++
+	s.agentCancelOpts = cfg.agentCancelOpts
+	s.mu.Unlock()
 	select {
-	case cs.notify <- struct{}{}:
+	case s.notify <- struct{}{}:
 	default:
 	}
 }
 
-func (cs *turnLoopStopSig) isStopped() bool {
+// isStopped returns true if closeDone() has been called.
+func (s *stopSignal) isStopped() bool {
 	select {
-	case <-cs.done:
+	case <-s.done:
 		return true
 	default:
 		return false
 	}
 }
 
-func (cs *turnLoopStopSig) closeDone() {
-	close(cs.done)
+// closeDone permanently marks the stop as committed. All current and future
+// selects on s.done will fire immediately after this call.
+func (s *stopSignal) closeDone() {
+	close(s.done)
 }
 
-func (cs *turnLoopStopSig) getNotifyChan() <-chan struct{} {
-	if cs != nil {
-		return cs.notify
-	}
-	return nil
-}
-
-func (cs *turnLoopStopSig) check() (uint64, []AgentCancelOption) {
-	cs.mu.Lock()
-	defer cs.mu.Unlock()
-	return cs.gen, append([]AgentCancelOption{}, cs.agentCancelOpts...)
+// check returns the current generation and a snapshot of the cancel options.
+func (s *stopSignal) check() (uint64, []AgentCancelOption) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.gen, append([]AgentCancelOption{}, s.agentCancelOpts...)
 }
 
 // preemptSignal coordinates preemption between Push callers and the run loop.
@@ -178,6 +205,7 @@ func (s *preemptSignal) requestPreempt(ack chan struct{}, opts ...AgentCancelOpt
 	case s.notify <- struct{}{}:
 	default:
 	}
+
 	s.cond.Broadcast()
 }
 
@@ -559,7 +587,7 @@ type TurnLoop[T any] struct {
 
 	runOnce sync.Once
 
-	stopSig *turnLoopStopSig
+	stopSig *stopSignal
 
 	preemptSig *preemptSignal
 
@@ -604,20 +632,6 @@ func unmarshalTurnLoopCheckpoint[T any](data []byte) (*turnLoopCheckpoint[T], er
 		return nil, err
 	}
 	return &c, nil
-}
-
-func (l *TurnLoop[T]) loadTurnLoopCheckpoint(ctx context.Context, checkPointID string) (*turnLoopCheckpoint[T], error) {
-	if l.config.Store == nil {
-		return nil, ErrCheckpointStoreNil
-	}
-	data, existed, err := l.config.Store.Get(ctx, checkPointID)
-	if err != nil {
-		return nil, err
-	}
-	if !existed {
-		return nil, fmt.Errorf("checkpoint[%s] does not exist", checkPointID)
-	}
-	return unmarshalTurnLoopCheckpoint[T](data)
 }
 
 func (l *TurnLoop[T]) saveTurnLoopCheckpoint(ctx context.Context, checkPointID string, c *turnLoopCheckpoint[T]) error {
@@ -800,7 +814,7 @@ func NewTurnLoop[T any](cfg TurnLoopConfig[T]) *TurnLoop[T] {
 		config:     cfg,
 		buffer:     internal.NewUnboundedChan[T](),
 		done:       make(chan struct{}),
-		stopSig:    newTurnLoopStopSig(),
+		stopSig:    newStopSignal(),
 		preemptSig: newPreemptSignal(),
 	}
 	if cfg.OnAgentEvents != nil {
@@ -1175,6 +1189,23 @@ func (l *TurnLoop[T]) watchPreemptSignal(done <-chan struct{}, agentCancelFunc A
 	}
 }
 
+// watchStopSignal runs for the lifetime of a single turn. It selects on two
+// channels from stopSignal:
+//
+//   - done (permanently closed after Stop): the durable stop flag. Fires
+//     immediately for any watcher, even those in turns started after
+//     Stop() but before the run loop observed isStopped(). This eliminates
+//     the race where a previous turn's watcher consumed the one-shot notify,
+//     leaving the current turn unable to detect the stop.
+//
+//   - notify (one-shot, buffered 1): fires when a new Stop() call is made,
+//     enabling cancel-mode escalation (e.g. CancelAfterToolCalls → CancelImmediate).
+//     The generation counter de-duplicates wakes, analogous to preemptGen in
+//     watchPreemptSignal.
+//
+// On the first cancel that actually contributed (i.e. the cancel was accepted
+// before the CancelError was finalized), stoppedDone is closed to wake
+// runAgentAndHandleEvents's select.
 func (l *TurnLoop[T]) watchStopSignal(done <-chan struct{}, agentCancelFunc AgentCancelFunc, stoppedDone chan struct{}) {
 	var lastGen uint64
 	stoppedClosed := false
@@ -1182,18 +1213,28 @@ func (l *TurnLoop[T]) watchStopSignal(done <-chan struct{}, agentCancelFunc Agen
 		select {
 		case <-done:
 			return
-		case <-l.stopSig.getNotifyChan():
+		case <-l.stopSig.notify:
 			gen, opts := l.stopSig.check()
 			if gen != lastGen {
 				lastGen = gen
-				// CancelHandle is intentionally not awaited here: agentCancelFunc commits the cancel signal synchronously,
-				// while waiting would block until the turn finishes and can deadlock this watcher against the done signal.
+				// CancelHandle is intentionally not awaited here: agentCancelFunc
+				// commits the cancel signal synchronously, while waiting would block
+				// until the turn finishes and can deadlock this watcher against done.
 				_, contributed := agentCancelFunc(opts...)
 				if contributed && !stoppedClosed {
 					close(stoppedDone)
 					stoppedClosed = true
 				}
 			}
+		case <-l.stopSig.done:
+			_, opts := l.stopSig.check()
+			_, contributed := agentCancelFunc(opts...)
+			if contributed && !stoppedClosed {
+				close(stoppedDone)
+				stoppedClosed = true
+			}
+			<-done
+			return
 		}
 	}
 }
