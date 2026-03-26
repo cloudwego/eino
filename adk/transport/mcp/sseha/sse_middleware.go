@@ -27,7 +27,7 @@ import (
 	"time"
 )
 
-// MCPMiddleware implements the MCP protocol over SSE transport.
+// HAMiddleware implements the MCP protocol over SSE transport with HA support.
 //
 // MCP uses a dual-channel communication pattern:
 //  1. GET /sse - Establishes SSE connection, receives 'endpoint' event with session_id
@@ -36,7 +36,15 @@ import (
 //
 // This implementation follows the MCP specification for SSE transport:
 // - https://spec.modelcontextprotocol.io/specification/basic/transports/
-type MCPMiddleware struct {
+//
+// Usage:
+//
+//	manager, _ := sseha.NewSessionManager(config)
+//	manager.Start(ctx)
+//
+//	ha := sseha.NewHAMiddleware(manager)
+//	http.Handle("/", ha.Handler(myMCPHandler))
+type HAMiddleware struct {
 	manager     *SessionManager
 	eventSeqGen int64
 
@@ -44,6 +52,7 @@ type MCPMiddleware struct {
 	sessions sync.Map // map[string]*mcpSession
 }
 
+// mcpSession tracks an active MCP SSE connection.
 type mcpSession struct {
 	sessionInfo *SessionInfo
 	eventChan   chan *SSEEvent
@@ -51,9 +60,9 @@ type mcpSession struct {
 	mu          sync.Mutex
 }
 
-// NewMCPMiddleware creates a new MCP protocol middleware.
-func NewMCPMiddleware(manager *SessionManager) *MCPMiddleware {
-	return &MCPMiddleware{
+// NewHAMiddleware creates a new HA middleware for MCP protocol.
+func NewHAMiddleware(manager *SessionManager) *HAMiddleware {
+	return &HAMiddleware{
 		manager: manager,
 	}
 }
@@ -64,14 +73,14 @@ func NewMCPMiddleware(manager *SessionManager) *MCPMiddleware {
 //   - POST /messages -> JSON-RPC request endpoint
 //
 // Other paths are passed to the next handler.
-func (m *MCPMiddleware) Handler(next http.Handler) http.Handler {
+func (mw *HAMiddleware) Handler(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		path := r.URL.Path
 		switch {
 		case r.Method == http.MethodGet && path == "/sse":
-			m.handleSSEConnect(w, r)
+			mw.handleSSEConnect(w, r)
 		case r.Method == http.MethodPost && (path == "/messages" || strings.HasPrefix(path, "/messages")):
-			m.handleMessage(w, r, next)
+			mw.handleMessage(w, r, next)
 		default:
 			// Pass through to next handler for other paths
 			if next != nil {
@@ -85,7 +94,7 @@ func (m *MCPMiddleware) Handler(next http.Handler) http.Handler {
 
 // handleSSEConnect handles GET /sse requests.
 // It establishes an SSE connection and sends the 'endpoint' event.
-func (m *MCPMiddleware) handleSSEConnect(w http.ResponseWriter, r *http.Request) {
+func (mw *HAMiddleware) handleSSEConnect(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
 	// Check for reconnection with Last-Event-ID
@@ -97,14 +106,14 @@ func (m *MCPMiddleware) handleSSEConnect(w http.ResponseWriter, r *http.Request)
 
 	if sessionID != "" && lastEventID != "" {
 		// Reconnection scenario - replay events
-		events, err := m.manager.HandleReconnection(ctx, sessionID, lastEventID)
+		events, err := mw.manager.HandleReconnection(ctx, sessionID, lastEventID)
 		if err != nil {
 			http.Error(w, fmt.Sprintf("reconnection failed: %v", err), http.StatusBadRequest)
 			return
 		}
 		replayEvents = events
 
-		info, err := m.manager.Store().GetSession(ctx, sessionID)
+		info, err := mw.manager.Store().GetSession(ctx, sessionID)
 		if err != nil || info == nil {
 			http.Error(w, "session not found", http.StatusNotFound)
 			return
@@ -114,7 +123,7 @@ func (m *MCPMiddleware) handleSSEConnect(w http.ResponseWriter, r *http.Request)
 		// New session
 		sessionID = generateSessionID()
 		metadata := extractMetadata(r)
-		info, err := m.manager.CreateSession(ctx, sessionID, metadata)
+		info, err := mw.manager.CreateSession(ctx, sessionID, metadata)
 		if err != nil {
 			http.Error(w, fmt.Sprintf("failed to create session: %v", err), http.StatusInternalServerError)
 			return
@@ -142,9 +151,9 @@ func (m *MCPMiddleware) handleSSEConnect(w http.ResponseWriter, r *http.Request)
 
 	sessCtx, cancel := context.WithCancel(ctx)
 	sess.cancelFunc = cancel
-	m.sessions.Store(sessionID, sess)
+	mw.sessions.Store(sessionID, sess)
 	defer func() {
-		m.sessions.Delete(sessionID)
+		mw.sessions.Delete(sessionID)
 		close(sess.eventChan)
 	}()
 
@@ -176,7 +185,7 @@ func (m *MCPMiddleware) handleSSEConnect(w http.ResponseWriter, r *http.Request)
 
 		case <-r.Context().Done():
 			// Client disconnected
-			_ = m.manager.SuspendSession(context.Background(), sessionID)
+			_ = mw.manager.SuspendSession(context.Background(), sessionID)
 			return
 
 		case event := <-sess.eventChan:
@@ -194,7 +203,7 @@ func (m *MCPMiddleware) handleSSEConnect(w http.ResponseWriter, r *http.Request)
 // handleMessage handles POST /messages?session_id=xxx requests.
 // It receives JSON-RPC requests and routes them through the handler,
 // then sends responses via the SSE connection.
-func (m *MCPMiddleware) handleMessage(w http.ResponseWriter, r *http.Request, handler http.Handler) {
+func (mw *HAMiddleware) handleMessage(w http.ResponseWriter, r *http.Request, handler http.Handler) {
 	ctx := r.Context()
 
 	// Extract session_id from query
@@ -205,7 +214,7 @@ func (m *MCPMiddleware) handleMessage(w http.ResponseWriter, r *http.Request, ha
 	}
 
 	// Find the session
-	sessI, ok := m.sessions.Load(sessionID)
+	sessI, ok := mw.sessions.Load(sessionID)
 	if !ok {
 		// Session not found - might need to reconnect
 		http.Error(w, "session not found, reconnect via GET /sse", http.StatusNotFound)
@@ -228,7 +237,12 @@ func (m *MCPMiddleware) handleMessage(w http.ResponseWriter, r *http.Request, ha
 	}
 
 	// Inject HA writer into context that sends events via the session channel
-	haWriter := newMCPHAWriter(sess, &m.eventSeqGen, m.manager, m.manager.NodeID())
+	haWriter := &mcpHAWriter{
+		session:      sess,
+		seqGen:       &mw.eventSeqGen,
+		manager:      mw.manager,
+		sourceNodeID: mw.manager.NodeID(),
+	}
 
 	haCtx := context.WithValue(ctx, haWriterKey{}, haWriter)
 	haCtx = context.WithValue(haCtx, sessionInfoKey{}, sess.sessionInfo)
@@ -245,8 +259,8 @@ func (m *MCPMiddleware) handleMessage(w http.ResponseWriter, r *http.Request, ha
 }
 
 // SendEventToSession sends an event to a specific session's SSE connection.
-func (m *MCPMiddleware) SendEventToSession(sessionID string, event *SSEEvent) error {
-	sessI, ok := m.sessions.Load(sessionID)
+func (mw *HAMiddleware) SendEventToSession(sessionID string, event *SSEEvent) error {
+	sessI, ok := mw.sessions.Load(sessionID)
 	if !ok {
 		return fmt.Errorf("session %s not found", sessionID)
 	}
@@ -260,30 +274,17 @@ func (m *MCPMiddleware) SendEventToSession(sessionID string, event *SSEEvent) er
 	}
 }
 
-// mcpHAWriter wraps HAResponseWriter for MCP protocol.
+// mcpHAWriter implements HAWriter for MCP protocol.
 type mcpHAWriter struct {
-	*HAResponseWriter // Embed the original HAResponseWriter
-	session           *mcpSession
+	session      *mcpSession
+	seqGen       *int64
+	manager      *SessionManager
+	sourceNodeID string
 }
 
-// newMCPHAWriter creates a new MCP HA writer.
-func newMCPHAWriter(sess *mcpSession, seqGen *int64, manager *SessionManager, nodeID string) *mcpHAWriter {
-	base := &HAResponseWriter{
-		flusher:   nil, // MCP uses channel, not direct flusher
-		manager:   manager,
-		sessionID: sess.sessionInfo.SessionID,
-		seqGen:    seqGen,
-	}
-	return &mcpHAWriter{
-		HAResponseWriter: base,
-		session:          sess,
-	}
-}
-
-// SendEvent overrides HAResponseWriter.SendEvent to use MCP channel.
+// SendEvent sends an SSE event via the session's event channel.
 func (w *mcpHAWriter) SendEvent(ctx context.Context, eventType string, data []byte) error {
-	// Generate event ID
-	seq := atomicAddInt64(w.seqGen, 1)
+	seq := atomic.AddInt64(w.seqGen, 1)
 	eventID := fmt.Sprintf("%d", seq)
 
 	event := &SSEEvent{
@@ -291,7 +292,7 @@ func (w *mcpHAWriter) SendEvent(ctx context.Context, eventType string, data []by
 		EventID:      eventID,
 		EventType:    eventType,
 		Data:         data,
-		SourceNodeID: w.manager.NodeID(),
+		SourceNodeID: w.sourceNodeID,
 		Timestamp:    time.Now(),
 	}
 
@@ -307,18 +308,72 @@ func (w *mcpHAWriter) SendEvent(ctx context.Context, eventType string, data []by
 	}
 }
 
-// Helper function for atomic int64 increment
-func atomicAddInt64(ptr *int64, delta int64) int64 {
-	return atomic.AddInt64(ptr, delta)
+// writeSSEEvent formats and writes an SSE event to the response.
+func writeSSEEvent(w http.ResponseWriter, event *SSEEvent) {
+	if event.EventID != "" {
+		fmt.Fprintf(w, "id: %s\n", event.EventID)
+	}
+	if event.EventType != "" {
+		fmt.Fprintf(w, "event: %s\n", event.EventType)
+	}
+	fmt.Fprintf(w, "data: %s\n\n", string(event.Data))
 }
 
-// requestBodyKey is the context key for request body.
+// Context keys for accessing HA objects from within handlers.
+type haWriterKey struct{}
+type sessionInfoKey struct{}
 type requestBodyKey struct{}
+
+// HAWriter is the interface for HA-aware SSE writers.
+type HAWriter interface {
+	SendEvent(ctx context.Context, eventType string, data []byte) error
+}
+
+// GetHAWriter retrieves the HAWriter from the request context.
+func GetHAWriter(ctx context.Context) (HAWriter, bool) {
+	w, ok := ctx.Value(haWriterKey{}).(HAWriter)
+	return w, ok
+}
+
+// GetSessionInfo retrieves the current SessionInfo from the request context.
+func GetSessionInfo(ctx context.Context) (*SessionInfo, bool) {
+	info, ok := ctx.Value(sessionInfoKey{}).(*SessionInfo)
+	return info, ok
+}
 
 // GetRequestBody retrieves the request body from the context.
 func GetRequestBody(ctx context.Context) []byte {
 	body, _ := ctx.Value(requestBodyKey{}).([]byte)
 	return body
+}
+
+// extractMetadata pulls session hints from the request headers/query.
+func extractMetadata(r *http.Request) map[string]string {
+	metadata := make(map[string]string)
+
+	// Partition hint from query parameter
+	if partition := r.URL.Query().Get("partition"); partition != "" {
+		metadata["partition"] = partition
+	}
+
+	// Affinity hint from header
+	if affinity := r.Header.Get("X-SSE-Affinity"); affinity != "" {
+		metadata["affinity"] = affinity
+	}
+
+	// Client ID for tracking
+	if clientID := r.Header.Get("X-Client-ID"); clientID != "" {
+		metadata["client_id"] = clientID
+	}
+
+	return metadata
+}
+
+// generateSessionID creates a unique session ID.
+// The ID encodes a partition hint for session affinity (SEP-2001 §2.2).
+func generateSessionID() string {
+	now := time.Now()
+	return fmt.Sprintf("sse_%d_%d", now.UnixNano(), now.UnixNano()%1000)
 }
 
 // responseRecorder is a simple response recorder for internal use.

@@ -302,8 +302,8 @@ func TestMCPProtocol_BasicHandshake(t *testing.T) {
 	}
 	defer func() { _ = manager.Close(ctx) }()
 
-	// Create MCP handler that follows MCP protocol
-	mw := sseha.NewMCPMiddleware(manager)
+	// Create HA middleware that follows MCP protocol
+	mw := sseha.NewHAMiddleware(manager)
 
 	// Handler receives JSON-RPC requests via POST /messages
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -468,7 +468,7 @@ func TestMCPProtocol_ToolInvocation(t *testing.T) {
 	_ = manager.Start(ctx)
 	defer func() { _ = manager.Close(ctx) }()
 
-	mw := sseha.NewMCPMiddleware(manager)
+	mw := sseha.NewHAMiddleware(manager)
 
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body := sseha.GetRequestBody(r.Context())
@@ -591,7 +591,7 @@ func TestMCPProtocol_ReconnectWithLastEventID(t *testing.T) {
 	_ = manager.Start(ctx)
 	defer func() { _ = manager.Close(ctx) }()
 
-	mw := sseha.NewMCPMiddleware(manager)
+	mw := sseha.NewHAMiddleware(manager)
 
 	var requestCount int
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
