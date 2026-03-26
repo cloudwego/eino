@@ -408,18 +408,15 @@ func (cc *cancelContext) shouldCancel() bool {
 // Returns false if an interrupt was already sent or if no graphInterruptFuncs have been
 // registered yet (the deferred fire in setGraphInterruptFunc will handle that case).
 func (cc *cancelContext) sendImmediateInterrupt() bool {
+	cc.mu.Lock()
+
 	if !atomic.CompareAndSwapInt32(&cc.interruptSent, interruptNotSent, interruptImmediate) {
+		cc.mu.Unlock()
 		return false
 	}
 
 	close(cc.immediateChan)
 
-	// Hold the lock across both the snapshot and the iteration. This prevents
-	// setGraphInterruptFunc from appending a new function and retroactively
-	// firing it between the snapshot and our iteration — which would call the
-	// same compose interrupt function twice (compose.WithGraphInterrupt returns
-	// a non-idempotent closure that panics on double-call).
-	cc.mu.Lock()
 	fns := make([]func(...compose.GraphInterruptOption), len(cc.graphInterruptFuncs))
 	copy(fns, cc.graphInterruptFuncs)
 
@@ -428,9 +425,6 @@ func (cc *cancelContext) sendImmediateInterrupt() bool {
 		return false
 	}
 
-	// Holding mu across iteration prevents double-fire but couples lock hold
-	// time to compose interrupt execution. If these functions ever block, this
-	// becomes a latency or deadlock risk.
 	for _, fn := range fns {
 		fn(compose.WithGraphInterruptTimeout(0))
 	}
@@ -441,15 +435,15 @@ func (cc *cancelContext) sendImmediateInterrupt() bool {
 // setGraphInterruptFunc appends a graph interrupt function to the list.
 // If an immediate cancel was already requested, fires it retroactively.
 // Multiple functions can be registered (e.g. one per parallel sub-agent).
+//
+// Both this method and sendImmediateInterrupt hold cc.mu across the entire
+// check-and-fire sequence, ensuring each interrupt function is called exactly
+// once (compose.WithGraphInterrupt returns a non-idempotent closure that panics
+// on double-call).
 func (cc *cancelContext) setGraphInterruptFunc(interrupt func(...compose.GraphInterruptOption)) {
 	cc.mu.Lock()
 	cc.graphInterruptFuncs = append(cc.graphInterruptFuncs, interrupt)
 
-	// If immediate cancel was already requested but couldn't fire because
-	// no graphInterruptFuncs were registered yet, fire now. This covers the
-	// race where cancelFn is called before the compose graph is compiled.
-	// Holding the lock here prevents sendInterrupt from iterating the list
-	// concurrently, which would double-fire the same function.
 	shouldFire := atomic.LoadInt32(&cc.interruptSent) == interruptImmediate
 	if shouldFire {
 		interrupt(compose.WithGraphInterruptTimeout(0))
