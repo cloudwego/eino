@@ -1269,6 +1269,17 @@ func (l *TurnLoop[T]) runAgentAndHandleEvents(
 		CheckPointStore: ms,
 	})
 
+	preemptDone := make(chan struct{})
+	stoppedDone := make(chan struct{})
+
+	tc := &TurnContext[T]{
+		Loop:      l,
+		Consumed:  spec.consumed,
+		Preempted: preemptDone,
+		Stopped:   stoppedDone,
+	}
+	l.preemptSig.setTurn(ctx, tc)
+
 	if spec.isResume {
 		var err error
 		if spec.resumeParams != nil {
@@ -1282,17 +1293,6 @@ func (l *TurnLoop[T]) runAgentAndHandleEvents(
 	} else {
 		iter = runner.Run(ctx, spec.input.Messages, runOpts...)
 	}
-
-	preemptDone := make(chan struct{})
-	stoppedDone := make(chan struct{})
-
-	tc := &TurnContext[T]{
-		Loop:      l,
-		Consumed:  spec.consumed,
-		Preempted: preemptDone,
-		Stopped:   stoppedDone,
-	}
-	l.preemptSig.setTurn(ctx, tc)
 
 	handleEvents := func() error {
 		return l.onAgentEvents(ctx, tc, iter)
