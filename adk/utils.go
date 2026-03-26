@@ -124,16 +124,28 @@ func getMessageFromWrappedEvent(e *agentEventWrapper) (Message, error) {
 		return nil, e.StreamErr
 	}
 
+	e.consumeStream()
+
+	if e.StreamErr != nil {
+		return nil, e.StreamErr
+	}
+	return e.concatenatedMessage, nil
+}
+
+// consumeStream drains the message stream, setting concatenatedMessage on
+// success or StreamErr on failure. The stream is always replaced with an
+// error-free, materialized version safe for gob encoding.
+// Must be called at most once (guarded by callers checking concatenatedMessage/StreamErr).
+func (e *agentEventWrapper) consumeStream() {
 	e.mu.Lock()
 	defer e.mu.Unlock()
+
 	if e.concatenatedMessage != nil {
-		return e.concatenatedMessage, nil
+		return
 	}
 
-	var (
-		msgs []Message
-		s    = e.AgentEvent.Output.MessageOutput.MessageStream
-	)
+	s := e.AgentEvent.Output.MessageOutput.MessageStream
+	var msgs []Message
 
 	defer s.Close()
 	for {
@@ -143,19 +155,16 @@ func getMessageFromWrappedEvent(e *agentEventWrapper) (Message, error) {
 				break
 			}
 			e.StreamErr = err
-			// Replace the stream with successfully received messages only (no error at the end).
-			// The error is preserved in StreamErr for users to check.
-			// We intentionally exclude the error from the new stream to ensure gob encoding
-			// compatibility, as the stream may be consumed during serialization.
 			e.AgentEvent.Output.MessageOutput.MessageStream = schema.StreamReaderFromArray(msgs)
-			return nil, err
+			return
 		}
-
 		msgs = append(msgs, msg)
 	}
 
 	if len(msgs) == 0 {
-		return nil, errors.New("no messages in MessageVariant.MessageStream")
+		e.StreamErr = errors.New("no messages in MessageVariant.MessageStream")
+		e.AgentEvent.Output.MessageOutput.MessageStream = schema.StreamReaderFromArray(msgs)
+		return
 	}
 
 	if len(msgs) == 1 {
@@ -166,11 +175,11 @@ func getMessageFromWrappedEvent(e *agentEventWrapper) (Message, error) {
 		if err != nil {
 			e.StreamErr = err
 			e.AgentEvent.Output.MessageOutput.MessageStream = schema.StreamReaderFromArray(msgs)
-			return nil, err
+			return
 		}
 	}
 
-	return e.concatenatedMessage, nil
+	e.AgentEvent.Output.MessageOutput.MessageStream = schema.StreamReaderFromArray([]Message{e.concatenatedMessage})
 }
 
 // copyAgentEvent copies an AgentEvent.

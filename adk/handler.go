@@ -44,6 +44,12 @@ type ToolContext struct {
 	CallID string
 }
 
+// ToolCallsContext contains metadata about the tool calls that just completed.
+type ToolCallsContext struct {
+	// ToolCalls contains the tool call metadata from the model's response.
+	ToolCalls []ToolContext
+}
+
 // ModelContext contains context information passed to WrapModel.
 type ModelContext struct {
 	// Tools contains the current tool list configured for the agent.
@@ -54,6 +60,8 @@ type ModelContext struct {
 	// This is populated at request time from the agent's ModelRetryConfig.
 	// Used by EventSenderModelWrapper to wrap stream errors appropriately.
 	ModelRetryConfig *ModelRetryConfig
+
+	cancelContext *cancelContext
 }
 
 // ChatModelAgentContext contains runtime information passed to handlers before each ChatModelAgent run.
@@ -134,6 +142,14 @@ type ChatModelAgentMiddleware interface {
 	// The ModelContext struct provides read-only access to:
 	//   - Tools: the current tool list that was sent to the model
 	AfterModelRewriteState(ctx context.Context, state *ChatModelAgentState, mc *ModelContext) (context.Context, *ChatModelAgentState, error)
+
+	// AfterToolCallsRewriteState is called after all concurrent tool calls in an iteration complete.
+	// The input state includes all messages up to and including the tool call results.
+	// The returned state is persisted to the agent's internal state.
+	//
+	// The ToolCallsContext provides metadata about the tool calls that just completed,
+	// derived from the assistant message's ToolCalls field.
+	AfterToolCallsRewriteState(ctx context.Context, state *ChatModelAgentState, tc *ToolCallsContext) (context.Context, *ChatModelAgentState, error)
 
 	// WrapInvokableToolCall wraps a tool's synchronous execution with custom behavior.
 	// Return the input endpoint unchanged and nil error if no wrapping is needed.
@@ -241,6 +257,10 @@ func (b *BaseChatModelAgentMiddleware) BeforeModelRewriteState(ctx context.Conte
 }
 
 func (b *BaseChatModelAgentMiddleware) AfterModelRewriteState(ctx context.Context, state *ChatModelAgentState, mc *ModelContext) (context.Context, *ChatModelAgentState, error) {
+	return ctx, state, nil
+}
+
+func (b *BaseChatModelAgentMiddleware) AfterToolCallsRewriteState(ctx context.Context, state *ChatModelAgentState, tc *ToolCallsContext) (context.Context, *ChatModelAgentState, error) {
 	return ctx, state, nil
 }
 
