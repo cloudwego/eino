@@ -250,6 +250,31 @@ func (s *preemptSignal) unholdRunLoop() {
 	s.cond.Broadcast()
 }
 
+// drainAll forcefully resets all preemptSignal state and closes any pending
+// ack channels. Called during TurnLoop cleanup to prevent ack channels from
+// leaking when the run loop exits (e.g. due to Stop) while a Push caller
+// still holds a reference.
+func (s *preemptSignal) drainAll() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.holdCount = 0
+	s.preemptRequested = false
+	s.preemptGen = 0
+	s.agentCancelOpts = nil
+	s.currentTC = nil
+	s.currentRunCtx = nil
+	for _, ack := range s.pendingAckList {
+		close(ack)
+	}
+	s.pendingAckList = nil
+	select {
+	case <-s.notify:
+	default:
+	}
+	s.cond.Broadcast()
+}
+
 // endTurnAndUnhold is called by the run loop after runAgentAndHandleEvents
 // returns. It clears the current turn context and drops the run loop's hold.
 func (s *preemptSignal) endTurnAndUnhold() {
@@ -1422,6 +1447,7 @@ func (l *TurnLoop[T]) cleanup(ctx context.Context) {
 		CanceledItems:  l.canceledItems,
 	}
 
+	l.preemptSig.drainAll()
 	l.buffer.Close()
 	close(l.done)
 }
