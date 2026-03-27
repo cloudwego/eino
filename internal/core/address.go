@@ -281,7 +281,12 @@ func PopulateInterruptState(ctx context.Context, id2Addr map[string]Address,
 		for id, addr := range id2Addr {
 			rInfo.id2Addr[id] = addr
 		}
-		rInfo.id2State = id2State
+		if rInfo.id2State == nil {
+			rInfo.id2State = make(map[string]InterruptState)
+		}
+		for id, state := range id2State {
+			rInfo.id2State[id] = state
+		}
 	} else {
 		rInfo = &globalResumeInfo{
 			id2Addr:           id2Addr,
