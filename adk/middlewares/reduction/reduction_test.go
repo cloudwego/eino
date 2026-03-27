@@ -56,7 +56,7 @@ func TestReductionMiddlewareTrunc(t *testing.T) {
 
 		mw, err := New(ctx, config)
 		assert.NoError(t, err)
-		exp := "hello worldhello worldhello worldhello worldhello worldhello worldhell<persisted-output>\nOutput too large (199). Full output saved to: /tmp/trunc/12345\nPreview (first 35):\nhello worldhello worldhello worldhe\n\nPreview (last 35):\nldhello worldhello worldhello world\n\n</persisted-output>"
+		exp := "<persisted-output>\nOutput too large (199). Full output saved to: /tmp/trunc/12345\nPreview (first 35):\nhello worldhello worldhello worldhe\n\nPreview (last 35):\nldhello worldhello worldhello world\n\n</persisted-output>"
 
 		edp, err := mw.WrapInvokableToolCall(ctx, it.InvokableRun, tCtx)
 		assert.NoError(t, err)
@@ -88,7 +88,7 @@ hello worldhello worldhello worldhello worldhello worldhello worldhello worldhel
 		}
 		mw, err := New(ctx, config)
 		assert.NoError(t, err)
-		exp := "hello worldhello worldhello worldhello worldhello worldhello worldhell<persisted-output>\nOutput too large (199). Full output saved to: /tmp/trunc/54321\nPreview (first 35):\nhello worldhello worldhello worldhe\n\nPreview (last 35):\nldhello worldhello worldhello world\n\n</persisted-output>"
+		exp := "<persisted-output>\nOutput too large (199). Full output saved to: /tmp/trunc/54321\nPreview (first 35):\nhello worldhello worldhello worldhe\n\nPreview (last 35):\nldhello worldhello worldhello world\n\n</persisted-output>"
 
 		edp, err := mw.WrapStreamableToolCall(ctx, st.StreamableRun, tCtx)
 		assert.NoError(t, err)
