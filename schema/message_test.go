@@ -18,14 +18,24 @@ package schema
 
 import (
 	"context"
+	"encoding/json"
 	"reflect"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 
 	"github.com/cloudwego/eino/internal/generic"
 )
+
+func clearCreatedAt(slices ...[]*Message) {
+	for _, msgs := range slices {
+		for _, m := range msgs {
+			m.CreatedAt = nil
+		}
+	}
+}
 
 func TestMessageTemplate(t *testing.T) {
 	pyFmtMessage := UserMessage("input: {question}")
@@ -37,12 +47,15 @@ func TestMessageTemplate(t *testing.T) {
 
 	ms, err := pyFmtMessage.Format(ctx, map[string]any{"question": question}, FString)
 	assert.Nil(t, err)
+	clearCreatedAt(expected, ms)
 	assert.True(t, reflect.DeepEqual(expected, ms))
 	ms, err = jinja2Message.Format(ctx, map[string]any{"question": question}, Jinja2)
 	assert.Nil(t, err)
+	clearCreatedAt(expected, ms)
 	assert.True(t, reflect.DeepEqual(expected, ms))
 	ms, err = goTemplateMessage.Format(ctx, map[string]any{"question": question}, GoTemplate)
 	assert.Nil(t, err)
+	clearCreatedAt(expected, ms)
 	assert.True(t, reflect.DeepEqual(expected, ms))
 
 	mp := MessagesPlaceholder("chat_history", false)
@@ -2207,5 +2220,95 @@ func TestConvToolOutputPartToMessageInputPart(t *testing.T) {
 		_, err := convToolOutputPartToMessageInputPart(toolPart)
 		assert.Error(t, err)
 		assert.ErrorContains(t, err, "unknown tool part type")
+	})
+}
+
+func TestMessageCreatedAt(t *testing.T) {
+	t.Run("constructors set CreatedAt", func(t *testing.T) {
+		before := time.Now()
+
+		user := UserMessage("hello")
+		assistant := AssistantMessage("hi", nil)
+		system := SystemMessage("you are helpful")
+		tool := ToolMessage("result", "call-1")
+
+		after := time.Now()
+
+		for _, msg := range []*Message{user, assistant, system, tool} {
+			assert.NotNil(t, msg.CreatedAt)
+			assert.False(t, msg.CreatedAt.Before(before))
+			assert.False(t, msg.CreatedAt.After(after))
+		}
+	})
+
+	t.Run("json marshal includes CreatedAt when set", func(t *testing.T) {
+		msg := UserMessage("hello")
+		data, err := json.Marshal(msg)
+		assert.Nil(t, err)
+		assert.Contains(t, string(data), "created_at")
+	})
+
+	t.Run("json marshal omits CreatedAt when nil", func(t *testing.T) {
+		msg := &Message{Role: User, Content: "hello"}
+		data, err := json.Marshal(msg)
+		assert.Nil(t, err)
+		assert.NotContains(t, string(data), "created_at")
+	})
+
+	t.Run("ConcatMessages uses earliest CreatedAt", func(t *testing.T) {
+		t1 := time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)
+		t2 := time.Date(2025, 1, 2, 0, 0, 0, 0, time.UTC)
+		t3 := time.Date(2025, 1, 3, 0, 0, 0, 0, time.UTC)
+
+		msgs := []*Message{
+			{Role: User, Content: "a", CreatedAt: &t2},
+			{Role: User, Content: "b", CreatedAt: &t1},
+			{Role: User, Content: "c", CreatedAt: &t3},
+		}
+
+		result, err := ConcatMessages(msgs)
+		assert.Nil(t, err)
+		assert.NotNil(t, result.CreatedAt)
+		assert.True(t, result.CreatedAt.Equal(t1))
+	})
+
+	t.Run("ConcatMessages handles nil CreatedAt", func(t *testing.T) {
+		t1 := time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)
+
+		msgs := []*Message{
+			{Role: User, Content: "a"},
+			{Role: User, Content: "b", CreatedAt: &t1},
+			{Role: User, Content: "c"},
+		}
+
+		result, err := ConcatMessages(msgs)
+		assert.Nil(t, err)
+		assert.NotNil(t, result.CreatedAt)
+		assert.True(t, result.CreatedAt.Equal(t1))
+	})
+
+	t.Run("ConcatMessages CreatedAt is independent from input", func(t *testing.T) {
+		t1 := time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)
+
+		msgs := []*Message{
+			{Role: User, Content: "a", CreatedAt: &t1},
+		}
+
+		result, err := ConcatMessages(msgs)
+		assert.Nil(t, err)
+		assert.NotNil(t, result.CreatedAt)
+		assert.True(t, result.CreatedAt.Equal(t1))
+		assert.NotSame(t, msgs[0].CreatedAt, result.CreatedAt)
+	})
+
+	t.Run("ConcatMessages all nil CreatedAt", func(t *testing.T) {
+		msgs := []*Message{
+			{Role: User, Content: "a"},
+			{Role: User, Content: "b"},
+		}
+
+		result, err := ConcatMessages(msgs)
+		assert.Nil(t, err)
+		assert.Nil(t, result.CreatedAt)
 	})
 }
