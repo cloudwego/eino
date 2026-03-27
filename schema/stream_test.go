@@ -504,6 +504,54 @@ func TestStreamReaderWithConvert(t *testing.T) {
 	assert.Equal(t, cntA, 2)
 }
 
+func TestStreamReaderWithConvert_ErrWrapperContinue(t *testing.T) {
+	s := newStream[int](5)
+
+	s.send(1, nil)
+	s.send(0, fmt.Errorf("transient error 1"))
+	s.send(2, nil)
+	s.send(0, fmt.Errorf("transient error 2"))
+	s.send(3, nil)
+	s.closeSend()
+
+	wrapperCalls := 0
+	sr := StreamReaderWithConvert[int, int](s.asReader(), func(v int) (int, error) {
+		return v, nil
+	}, WithErrWrapper(func(err error) error {
+		wrapperCalls++
+		return nil
+	}))
+
+	var results []int
+	for {
+		v, err := sr.Recv()
+		if err == io.EOF {
+			break
+		}
+		assert.NoError(t, err)
+		results = append(results, v)
+	}
+
+	assert.Equal(t, []int{1, 2, 3}, results)
+	assert.Equal(t, 2, wrapperCalls)
+
+	s2 := newStream[int](3)
+	s2.send(0, fmt.Errorf("skip me"))
+	s2.send(42, nil)
+	s2.closeSend()
+
+	sr2 := StreamReaderWithConvert[int, int](s2.asReader(), func(v int) (int, error) {
+		return v, nil
+	}, WithErrWrapper(func(err error) error {
+		return ErrNoValue
+	}))
+
+	v, err := sr2.Recv()
+	assert.NoError(t, err)
+	assert.Equal(t, 42, v)
+	sr2.Close()
+}
+
 func TestArrayStreamCombined(t *testing.T) {
 	asr := &StreamReader[int]{
 		typ: readerTypeArray,
