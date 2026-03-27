@@ -18,6 +18,7 @@ package react
 
 import (
 	"context"
+	"io"
 	"sync"
 	"testing"
 
@@ -27,6 +28,7 @@ import (
 	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/components/tool"
 	"github.com/cloudwego/eino/compose"
+	"github.com/cloudwego/eino/flow/agent"
 	mockModel "github.com/cloudwego/eino/internal/mock/components/model"
 	"github.com/cloudwego/eino/schema"
 )
@@ -700,4 +702,687 @@ func TestMessageFuture_ToolResultMiddleware_EmitsFinalResult(t *testing.T) {
 			assert.Equal(t, "final response", allMsgs[2].Content)
 		}
 	})
+}
+
+func TestWithMessageFuture_NestedGraph(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("agent in nested graph", func(t *testing.T) {
+		ctrl := gomock.NewController(t)
+		cm := mockModel.NewMockToolCallingChatModel(ctrl)
+		fakeTool := &fakeToolGreetForTest{}
+
+		info, err := fakeTool.Info(ctx)
+		assert.NoError(t, err)
+
+		cm.EXPECT().Generate(gomock.Any(), gomock.Any(), gomock.Any()).
+			Return(schema.AssistantMessage("",
+				[]schema.ToolCall{
+					{
+						ID: "tool-call-1",
+						Function: schema.FunctionCall{
+							Name:      info.Name,
+							Arguments: `{"name": "test user"}`,
+						},
+					},
+				}), nil).
+			Times(1)
+		cm.EXPECT().Generate(gomock.Any(), gomock.Any(), gomock.Any()).
+			Return(schema.AssistantMessage("final response", nil), nil).
+			Times(1)
+		cm.EXPECT().WithTools(gomock.Any()).Return(cm, nil).AnyTimes()
+
+		a, err := NewAgent(ctx, &AgentConfig{
+			ToolCallingModel: cm,
+			ToolsConfig: compose.ToolsNodeConfig{
+				Tools: []tool.BaseTool{fakeTool},
+			},
+			MaxStep: 3,
+		})
+		assert.Nil(t, err)
+
+		agentGraph, agentGraphOpts := a.ExportGraph()
+
+		parentGraph := compose.NewGraph[[]*schema.Message, *schema.Message]()
+		err = parentGraph.AddGraphNode("agent", agentGraph, agentGraphOpts...)
+		assert.NoError(t, err)
+		err = parentGraph.AddEdge(compose.START, "agent")
+		assert.NoError(t, err)
+		err = parentGraph.AddEdge("agent", compose.END)
+		assert.NoError(t, err)
+
+		runnable, err := parentGraph.Compile(ctx)
+		assert.NoError(t, err)
+
+		option, future := WithMessageFuture()
+
+		response, err := runnable.Invoke(ctx, []*schema.Message{
+			schema.UserMessage("use the greet tool"),
+		}, agent.GetComposeOptions(option)...)
+		assert.Nil(t, err)
+		assert.Equal(t, "final response", response.Content)
+
+		iter := future.GetMessages()
+
+		msg1, hasNext, err := iter.Next()
+		assert.Nil(t, err)
+		assert.True(t, hasNext)
+		assert.Equal(t, schema.Assistant, msg1.Role)
+		assert.Equal(t, 1, len(msg1.ToolCalls))
+
+		msg2, hasNext, err := iter.Next()
+		assert.Nil(t, err)
+		assert.True(t, hasNext)
+		assert.Equal(t, schema.Tool, msg2.Role)
+
+		msg3, hasNext, err := iter.Next()
+		assert.Nil(t, err)
+		assert.True(t, hasNext)
+		assert.Equal(t, "final response", msg3.Content)
+
+		_, hasNext, err = iter.Next()
+		assert.Nil(t, err)
+		assert.False(t, hasNext)
+	})
+
+	t.Run("agent in deeply nested graph", func(t *testing.T) {
+		ctrl := gomock.NewController(t)
+		cm := mockModel.NewMockToolCallingChatModel(ctrl)
+		fakeTool := &fakeToolGreetForTest{}
+
+		info, err := fakeTool.Info(ctx)
+		assert.NoError(t, err)
+
+		cm.EXPECT().Generate(gomock.Any(), gomock.Any(), gomock.Any()).
+			Return(schema.AssistantMessage("",
+				[]schema.ToolCall{
+					{
+						ID: "tool-call-1",
+						Function: schema.FunctionCall{
+							Name:      info.Name,
+							Arguments: `{"name": "test user"}`,
+						},
+					},
+				}), nil).
+			Times(1)
+		cm.EXPECT().Generate(gomock.Any(), gomock.Any(), gomock.Any()).
+			Return(schema.AssistantMessage("final response", nil), nil).
+			Times(1)
+		cm.EXPECT().WithTools(gomock.Any()).Return(cm, nil).AnyTimes()
+
+		a, err := NewAgent(ctx, &AgentConfig{
+			ToolCallingModel: cm,
+			ToolsConfig: compose.ToolsNodeConfig{
+				Tools: []tool.BaseTool{fakeTool},
+			},
+			MaxStep: 3,
+		})
+		assert.Nil(t, err)
+
+		agentGraph, agentGraphOpts := a.ExportGraph()
+
+		childGraph := compose.NewGraph[[]*schema.Message, *schema.Message]()
+		err = childGraph.AddGraphNode("agent", agentGraph, agentGraphOpts...)
+		assert.NoError(t, err)
+		err = childGraph.AddEdge(compose.START, "agent")
+		assert.NoError(t, err)
+		err = childGraph.AddEdge("agent", compose.END)
+		assert.NoError(t, err)
+
+		parentGraph := compose.NewGraph[[]*schema.Message, *schema.Message]()
+		err = parentGraph.AddGraphNode("child", childGraph)
+		assert.NoError(t, err)
+		err = parentGraph.AddEdge(compose.START, "child")
+		assert.NoError(t, err)
+		err = parentGraph.AddEdge("child", compose.END)
+		assert.NoError(t, err)
+
+		runnable, err := parentGraph.Compile(ctx)
+		assert.NoError(t, err)
+
+		option, future := WithMessageFuture()
+
+		response, err := runnable.Invoke(ctx, []*schema.Message{
+			schema.UserMessage("use the greet tool"),
+		}, agent.GetComposeOptions(option)...)
+		assert.Nil(t, err)
+		assert.Equal(t, "final response", response.Content)
+
+		iter := future.GetMessages()
+
+		msg1, hasNext, err := iter.Next()
+		assert.Nil(t, err)
+		assert.True(t, hasNext)
+		assert.Equal(t, schema.Assistant, msg1.Role)
+		assert.Equal(t, 1, len(msg1.ToolCalls))
+
+		msg2, hasNext, err := iter.Next()
+		assert.Nil(t, err)
+		assert.True(t, hasNext)
+		assert.Equal(t, schema.Tool, msg2.Role)
+
+		msg3, hasNext, err := iter.Next()
+		assert.Nil(t, err)
+		assert.True(t, hasNext)
+		assert.Equal(t, "final response", msg3.Content)
+
+		_, hasNext, err = iter.Next()
+		assert.Nil(t, err)
+		assert.False(t, hasNext)
+	})
+
+	t.Run("agent in nested graph with streaming", func(t *testing.T) {
+		ctrl := gomock.NewController(t)
+		cm := mockModel.NewMockToolCallingChatModel(ctrl)
+		fakeTool := &fakeToolGreetForTest{}
+
+		info, err := fakeTool.Info(ctx)
+		assert.NoError(t, err)
+
+		cm.EXPECT().Stream(gomock.Any(), gomock.Any(), gomock.Any()).
+			DoAndReturn(func(ctx context.Context, input []*schema.Message, opts ...model.Option) (*schema.StreamReader[*schema.Message], error) {
+				return schema.StreamReaderFromArray([]*schema.Message{
+					schema.AssistantMessage("",
+						[]schema.ToolCall{
+							{
+								ID: "tool-call-1",
+								Function: schema.FunctionCall{
+									Name:      info.Name,
+									Arguments: `{"name": "stream user"}`,
+								},
+							},
+						}),
+				}), nil
+			}).
+			Times(1)
+		cm.EXPECT().Stream(gomock.Any(), gomock.Any(), gomock.Any()).
+			DoAndReturn(func(ctx context.Context, input []*schema.Message, opts ...model.Option) (*schema.StreamReader[*schema.Message], error) {
+				return schema.StreamReaderFromArray([]*schema.Message{
+					schema.AssistantMessage("streaming", nil),
+					schema.AssistantMessage(" final", nil),
+					schema.AssistantMessage(" response", nil),
+				}), nil
+			}).
+			Times(1)
+		cm.EXPECT().WithTools(gomock.Any()).Return(cm, nil).AnyTimes()
+
+		a, err := NewAgent(ctx, &AgentConfig{
+			ToolCallingModel: cm,
+			ToolsConfig: compose.ToolsNodeConfig{
+				Tools: []tool.BaseTool{fakeTool},
+			},
+			MaxStep: 3,
+		})
+		assert.Nil(t, err)
+
+		agentGraph, agentGraphOpts := a.ExportGraph()
+
+		parentGraph := compose.NewGraph[[]*schema.Message, *schema.Message]()
+		err = parentGraph.AddGraphNode("agent", agentGraph, agentGraphOpts...)
+		assert.NoError(t, err)
+		err = parentGraph.AddEdge(compose.START, "agent")
+		assert.NoError(t, err)
+		err = parentGraph.AddEdge("agent", compose.END)
+		assert.NoError(t, err)
+
+		runnable, err := parentGraph.Compile(ctx)
+		assert.NoError(t, err)
+
+		option, future := WithMessageFuture()
+
+		streamReader, err := runnable.Stream(ctx, []*schema.Message{
+			schema.UserMessage("use the greet tool"),
+		}, agent.GetComposeOptions(option)...)
+		assert.Nil(t, err)
+
+		var finalContent string
+		for {
+			chunk, err := streamReader.Recv()
+			if err == io.EOF {
+				break
+			}
+			assert.Nil(t, err)
+			finalContent += chunk.Content
+		}
+		assert.Contains(t, finalContent, "final")
+
+		siter := future.GetMessageStreams()
+
+		stream1, hasNext, err := siter.Next()
+		assert.Nil(t, err)
+		assert.True(t, hasNext)
+		msg1, err := concatStreamMsg(stream1)
+		assert.Nil(t, err)
+		assert.Equal(t, schema.Assistant, msg1.Role)
+		assert.Equal(t, 1, len(msg1.ToolCalls))
+
+		stream2, hasNext, err := siter.Next()
+		assert.Nil(t, err)
+		assert.True(t, hasNext)
+		msg2, err := concatStreamMsg(stream2)
+		assert.Nil(t, err)
+		assert.Equal(t, schema.Tool, msg2.Role)
+
+		stream3, hasNext, err := siter.Next()
+		assert.Nil(t, err)
+		assert.True(t, hasNext)
+		msg3, err := concatStreamMsg(stream3)
+		assert.Nil(t, err)
+		assert.Contains(t, msg3.Content, "final")
+
+		_, hasNext, err = siter.Next()
+		assert.Nil(t, err)
+		assert.False(t, hasNext)
+	})
+
+	t.Run("agent with multiple tool calls in nested graph", func(t *testing.T) {
+		ctrl := gomock.NewController(t)
+		cm := mockModel.NewMockToolCallingChatModel(ctrl)
+		fakeTool := &fakeToolGreetForTest{}
+
+		info, err := fakeTool.Info(ctx)
+		assert.NoError(t, err)
+
+		cm.EXPECT().Generate(gomock.Any(), gomock.Any(), gomock.Any()).
+			Return(schema.AssistantMessage("",
+				[]schema.ToolCall{
+					{
+						ID: "tool-call-1",
+						Function: schema.FunctionCall{
+							Name:      info.Name,
+							Arguments: `{"name": "user1"}`,
+						},
+					},
+					{
+						ID: "tool-call-2",
+						Function: schema.FunctionCall{
+							Name:      info.Name,
+							Arguments: `{"name": "user2"}`,
+						},
+					},
+				}), nil).
+			Times(1)
+		cm.EXPECT().Generate(gomock.Any(), gomock.Any(), gomock.Any()).
+			Return(schema.AssistantMessage("greeted both users", nil), nil).
+			Times(1)
+		cm.EXPECT().WithTools(gomock.Any()).Return(cm, nil).AnyTimes()
+
+		a, err := NewAgent(ctx, &AgentConfig{
+			ToolCallingModel: cm,
+			ToolsConfig: compose.ToolsNodeConfig{
+				Tools: []tool.BaseTool{fakeTool},
+			},
+			MaxStep: 3,
+		})
+		assert.Nil(t, err)
+
+		agentGraph, agentGraphOpts := a.ExportGraph()
+
+		parentGraph := compose.NewGraph[[]*schema.Message, *schema.Message]()
+		err = parentGraph.AddGraphNode("agent", agentGraph, agentGraphOpts...)
+		assert.NoError(t, err)
+		err = parentGraph.AddEdge(compose.START, "agent")
+		assert.NoError(t, err)
+		err = parentGraph.AddEdge("agent", compose.END)
+		assert.NoError(t, err)
+
+		runnable, err := parentGraph.Compile(ctx)
+		assert.NoError(t, err)
+
+		option, future := WithMessageFuture()
+
+		response, err := runnable.Invoke(ctx, []*schema.Message{
+			schema.UserMessage("greet multiple users"),
+		}, agent.GetComposeOptions(option)...)
+		assert.Nil(t, err)
+		assert.Equal(t, "greeted both users", response.Content)
+
+		iter := future.GetMessages()
+
+		msg1, hasNext, err := iter.Next()
+		assert.Nil(t, err)
+		assert.True(t, hasNext)
+		assert.Equal(t, schema.Assistant, msg1.Role)
+		assert.Equal(t, 2, len(msg1.ToolCalls))
+
+		msg2, hasNext, err := iter.Next()
+		assert.Nil(t, err)
+		assert.True(t, hasNext)
+		assert.Equal(t, schema.Tool, msg2.Role)
+
+		msg3, hasNext, err := iter.Next()
+		assert.Nil(t, err)
+		assert.True(t, hasNext)
+		assert.Equal(t, schema.Tool, msg3.Role)
+
+		msg4, hasNext, err := iter.Next()
+		assert.Nil(t, err)
+		assert.True(t, hasNext)
+		assert.Equal(t, "greeted both users", msg4.Content)
+
+		_, hasNext, err = iter.Next()
+		assert.Nil(t, err)
+		assert.False(t, hasNext)
+	})
+
+	t.Run("direct agent invoke vs nested graph - same behavior", func(t *testing.T) {
+		ctrl := gomock.NewController(t)
+		fakeTool := &fakeToolGreetForTest{}
+
+		info, err := fakeTool.Info(ctx)
+		assert.NoError(t, err)
+
+		cm1 := mockModel.NewMockToolCallingChatModel(ctrl)
+		cm1.EXPECT().Generate(gomock.Any(), gomock.Any(), gomock.Any()).
+			Return(schema.AssistantMessage("",
+				[]schema.ToolCall{
+					{
+						ID: "tool-call-1",
+						Function: schema.FunctionCall{
+							Name:      info.Name,
+							Arguments: `{"name": "test"}`,
+						},
+					},
+				}), nil).
+			Times(1)
+		cm1.EXPECT().Generate(gomock.Any(), gomock.Any(), gomock.Any()).
+			Return(schema.AssistantMessage("done", nil), nil).
+			Times(1)
+		cm1.EXPECT().WithTools(gomock.Any()).Return(cm1, nil).AnyTimes()
+
+		a1, err := NewAgent(ctx, &AgentConfig{
+			ToolCallingModel: cm1,
+			ToolsConfig: compose.ToolsNodeConfig{
+				Tools: []tool.BaseTool{fakeTool},
+			},
+			MaxStep: 3,
+		})
+		assert.Nil(t, err)
+
+		option1, future1 := WithMessageFuture()
+		_, err = a1.Generate(ctx, []*schema.Message{
+			schema.UserMessage("test direct"),
+		}, option1)
+		assert.Nil(t, err)
+
+		directMsgs := collectAllMessages(future1.GetMessages())
+
+		cm2 := mockModel.NewMockToolCallingChatModel(ctrl)
+		cm2.EXPECT().Generate(gomock.Any(), gomock.Any(), gomock.Any()).
+			Return(schema.AssistantMessage("",
+				[]schema.ToolCall{
+					{
+						ID: "tool-call-1",
+						Function: schema.FunctionCall{
+							Name:      info.Name,
+							Arguments: `{"name": "test"}`,
+						},
+					},
+				}), nil).
+			Times(1)
+		cm2.EXPECT().Generate(gomock.Any(), gomock.Any(), gomock.Any()).
+			Return(schema.AssistantMessage("done", nil), nil).
+			Times(1)
+		cm2.EXPECT().WithTools(gomock.Any()).Return(cm2, nil).AnyTimes()
+
+		a2, err := NewAgent(ctx, &AgentConfig{
+			ToolCallingModel: cm2,
+			ToolsConfig: compose.ToolsNodeConfig{
+				Tools: []tool.BaseTool{fakeTool},
+			},
+			MaxStep: 3,
+		})
+		assert.Nil(t, err)
+
+		agentGraph, agentGraphOpts := a2.ExportGraph()
+
+		parentGraph := compose.NewGraph[[]*schema.Message, *schema.Message]()
+		err = parentGraph.AddGraphNode("agent", agentGraph, agentGraphOpts...)
+		assert.NoError(t, err)
+		err = parentGraph.AddEdge(compose.START, "agent")
+		assert.NoError(t, err)
+		err = parentGraph.AddEdge("agent", compose.END)
+		assert.NoError(t, err)
+
+		runnable, err := parentGraph.Compile(ctx)
+		assert.NoError(t, err)
+
+		option2, future2 := WithMessageFuture()
+		_, err = runnable.Invoke(ctx, []*schema.Message{
+			schema.UserMessage("test nested"),
+		}, agent.GetComposeOptions(option2)...)
+		assert.Nil(t, err)
+
+		nestedMsgs := collectAllMessages(future2.GetMessages())
+
+		assert.Equal(t, len(directMsgs), len(nestedMsgs), "should have same number of messages")
+		for i := range directMsgs {
+			assert.Equal(t, directMsgs[i].Role, nestedMsgs[i].Role, "message %d role should match", i)
+		}
+	})
+
+	t.Run("multiple react agents in graph - agent calls tool that invokes another agent", func(t *testing.T) {
+		ctrl := gomock.NewController(t)
+
+		cm1 := mockModel.NewMockToolCallingChatModel(ctrl)
+		cm2 := mockModel.NewMockToolCallingChatModel(ctrl)
+
+		cm2.EXPECT().WithTools(gomock.Any()).Return(cm2, nil).AnyTimes()
+		cm2.EXPECT().Generate(gomock.Any(), gomock.Any(), gomock.Any()).
+			Return(schema.AssistantMessage("inner agent response", nil), nil).
+			Times(1)
+
+		innerAgent, err := NewAgent(ctx, &AgentConfig{
+			ToolCallingModel: cm2,
+			ToolsConfig: compose.ToolsNodeConfig{
+				Tools: []tool.BaseTool{&fakeToolGreetForTest{}},
+			},
+			MaxStep: 3,
+		})
+		assert.Nil(t, err)
+
+		innerAgentTool := &agentAsTool{
+			agent: innerAgent,
+			name:  "inner_agent",
+			desc:  "An inner agent that can greet users",
+		}
+
+		cm1.EXPECT().WithTools(gomock.Any()).Return(cm1, nil).AnyTimes()
+		cm1.EXPECT().Generate(gomock.Any(), gomock.Any(), gomock.Any()).
+			Return(schema.AssistantMessage("",
+				[]schema.ToolCall{
+					{
+						ID: "tool-call-1",
+						Function: schema.FunctionCall{
+							Name:      "inner_agent",
+							Arguments: `{"query": "hello"}`,
+						},
+					},
+				}), nil).
+			Times(1)
+		cm1.EXPECT().Generate(gomock.Any(), gomock.Any(), gomock.Any()).
+			Return(schema.AssistantMessage("outer agent final response", nil), nil).
+			Times(1)
+
+		outerAgent, err := NewAgent(ctx, &AgentConfig{
+			ToolCallingModel: cm1,
+			ToolsConfig: compose.ToolsNodeConfig{
+				Tools: []tool.BaseTool{innerAgentTool},
+			},
+			MaxStep: 3,
+		})
+		assert.Nil(t, err)
+
+		option, future := WithMessageFuture()
+
+		response, err := outerAgent.Generate(ctx, []*schema.Message{
+			schema.UserMessage("use the inner agent"),
+		}, option)
+		assert.Nil(t, err)
+		assert.Equal(t, "outer agent final response", response.Content)
+
+		allMsgs := collectAllMessages(future.GetMessages())
+
+		assert.GreaterOrEqual(t, len(allMsgs), 3, "should have at least 3 messages")
+
+		hasOuterToolCall := false
+		hasInnerResponse := false
+		hasOuterFinalResponse := false
+		for _, msg := range allMsgs {
+			if msg.Role == schema.Assistant && len(msg.ToolCalls) > 0 {
+				hasOuterToolCall = true
+			}
+			if msg.Content == "inner agent response" {
+				hasInnerResponse = true
+			}
+			if msg.Content == "outer agent final response" {
+				hasOuterFinalResponse = true
+			}
+		}
+		assert.True(t, hasOuterToolCall, "should have outer agent tool call")
+		assert.True(t, hasInnerResponse, "should have inner agent response")
+		assert.True(t, hasOuterFinalResponse, "should have outer agent final response")
+	})
+
+	t.Run("two sequential react agents in same graph", func(t *testing.T) {
+		ctrl := gomock.NewController(t)
+
+		cm1 := mockModel.NewMockToolCallingChatModel(ctrl)
+		cm1.EXPECT().WithTools(gomock.Any()).Return(cm1, nil).AnyTimes()
+		cm1.EXPECT().Generate(gomock.Any(), gomock.Any(), gomock.Any()).
+			Return(schema.AssistantMessage("agent1 response", nil), nil).
+			Times(1)
+
+		cm2 := mockModel.NewMockToolCallingChatModel(ctrl)
+		cm2.EXPECT().WithTools(gomock.Any()).Return(cm2, nil).AnyTimes()
+		cm2.EXPECT().Generate(gomock.Any(), gomock.Any(), gomock.Any()).
+			Return(schema.AssistantMessage("agent2 response", nil), nil).
+			Times(1)
+
+		agent1, err := NewAgent(ctx, &AgentConfig{
+			ToolCallingModel: cm1,
+			ToolsConfig: compose.ToolsNodeConfig{
+				Tools: []tool.BaseTool{&fakeToolGreetForTest{}},
+			},
+			MaxStep: 3,
+		})
+		assert.Nil(t, err)
+
+		agent2, err := NewAgent(ctx, &AgentConfig{
+			ToolCallingModel: cm2,
+			ToolsConfig: compose.ToolsNodeConfig{
+				Tools: []tool.BaseTool{&fakeToolGreetForTest{}},
+			},
+			MaxStep: 3,
+		})
+		assert.Nil(t, err)
+
+		agent1Graph, agent1Opts := agent1.ExportGraph()
+		agent2Graph, agent2Opts := agent2.ExportGraph()
+
+		parentGraph := compose.NewGraph[[]*schema.Message, *schema.Message]()
+		err = parentGraph.AddGraphNode("agent1", agent1Graph, agent1Opts...)
+		assert.NoError(t, err)
+
+		err = parentGraph.AddLambdaNode("transform", compose.InvokableLambda(func(ctx context.Context, msg *schema.Message) ([]*schema.Message, error) {
+			return []*schema.Message{schema.UserMessage("agent2 input: " + msg.Content)}, nil
+		}))
+		assert.NoError(t, err)
+
+		err = parentGraph.AddGraphNode("agent2", agent2Graph, agent2Opts...)
+		assert.NoError(t, err)
+
+		err = parentGraph.AddEdge(compose.START, "agent1")
+		assert.NoError(t, err)
+		err = parentGraph.AddEdge("agent1", "transform")
+		assert.NoError(t, err)
+		err = parentGraph.AddEdge("transform", "agent2")
+		assert.NoError(t, err)
+		err = parentGraph.AddEdge("agent2", compose.END)
+		assert.NoError(t, err)
+
+		runnable, err := parentGraph.Compile(ctx)
+		assert.NoError(t, err)
+
+		option, future := WithMessageFuture()
+
+		response, err := runnable.Invoke(ctx, []*schema.Message{
+			schema.UserMessage("hello"),
+		}, agent.GetComposeOptions(option)...)
+		assert.Nil(t, err)
+		assert.Equal(t, "agent2 response", response.Content)
+
+		allMsgs := collectAllMessages(future.GetMessages())
+		assert.Equal(t, 2, len(allMsgs))
+
+		responseContents := make(map[string]bool)
+		for _, msg := range allMsgs {
+			responseContents[msg.Content] = true
+		}
+		assert.True(t, responseContents["agent1 response"])
+		assert.True(t, responseContents["agent2 response"])
+	})
+}
+
+type agentAsTool struct {
+	agent *Agent
+	name  string
+	desc  string
+}
+
+func (a *agentAsTool) Info(ctx context.Context) (*schema.ToolInfo, error) {
+	return &schema.ToolInfo{
+		Name: a.name,
+		Desc: a.desc,
+		ParamsOneOf: schema.NewParamsOneOfByParams(map[string]*schema.ParameterInfo{
+			"query": {
+				Type: "string",
+				Desc: "The query to send to the inner agent",
+			},
+		}),
+	}, nil
+}
+
+func (a *agentAsTool) InvokableRun(ctx context.Context, argumentsInJSON string, opts ...tool.Option) (string, error) {
+	response, err := a.agent.Generate(ctx, []*schema.Message{
+		schema.UserMessage(argumentsInJSON),
+	})
+	if err != nil {
+		return "", err
+	}
+	return response.Content, nil
+}
+
+func collectAllMessages(iter *Iterator[*schema.Message]) []*schema.Message {
+	var msgs []*schema.Message
+	for {
+		msg, hasNext, err := iter.Next()
+		if err != nil || !hasNext {
+			break
+		}
+		msgs = append(msgs, msg)
+	}
+	return msgs
+}
+
+func concatStreamMsg(sr *schema.StreamReader[*schema.Message]) (*schema.Message, error) {
+	var result *schema.Message
+	for {
+		chunk, err := sr.Recv()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return nil, err
+		}
+		if result == nil {
+			result = chunk
+		} else {
+			result.Content += chunk.Content
+			if len(chunk.ToolCalls) > 0 {
+				result.ToolCalls = append(result.ToolCalls, chunk.ToolCalls...)
+			}
+		}
+	}
+	return result, nil
 }
