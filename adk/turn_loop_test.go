@@ -1484,6 +1484,34 @@ func TestTurnLoop_StopWithoutCheckpointIDDoesNotPersist(t *testing.T) {
 	assert.Empty(t, store.m, "no checkpoint should be saved when CheckpointID is not configured")
 }
 
+func TestTurnLoop_StopWhileIdle_SkipsCheckpoint(t *testing.T) {
+	ctx := context.Background()
+	store := &deletableCheckpointStore{
+		turnLoopCheckpointStore: turnLoopCheckpointStore{m: make(map[string][]byte)},
+	}
+	cpID := "idle-session"
+
+	loop := newAndRunTurnLoop(ctx, TurnLoopConfig[string]{
+		Store:        store,
+		CheckpointID: cpID,
+		GenInput: func(ctx context.Context, _ *TurnLoop[string], items []string) (*GenInputResult[string], error) {
+			return &GenInputResult[string]{Input: &AgentInput{}, Consumed: items}, nil
+		},
+		PrepareAgent: func(ctx context.Context, _ *TurnLoop[string], consumed []string) (Agent, error) {
+			return &turnLoopMockAgent{name: "test"}, nil
+		},
+	})
+
+	loop.Stop()
+	exit := loop.Wait()
+	assert.NoError(t, exit.ExitReason)
+
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	_, exists := store.m[cpID]
+	assert.False(t, exists, "no checkpoint should be saved when TurnLoop is idle")
+}
+
 func TestTurnLoop_StopBetweenTurnsAndResume(t *testing.T) {
 	ctx := context.Background()
 	store := &turnLoopCheckpointStore{m: make(map[string][]byte)}
