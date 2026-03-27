@@ -610,8 +610,9 @@ type ConvertOption func(*convertOptions)
 // WithErrWrapper wraps non-EOF errors from the underlying stream reader during
 // conversion by StreamReaderWithConvert. Errors returned by the convert function
 // itself are not wrapped.
-// If the wrapper returns nil or ErrNoValue, the errored chunk is skipped and
-// the next chunk is read.
+// If the wrapper returns nil, the errored chunk is skipped and the next chunk
+// is read. If the wrapper returns a non-nil error, that error is surfaced to
+// the caller.
 func WithErrWrapper(wrapper func(error) error) ConvertOption {
 	return func(o *convertOptions) {
 		o.ErrWrapper = wrapper
@@ -658,7 +659,7 @@ func (srw *streamReaderWithConvert[T]) recv() (T, error) {
 			}
 			if srw.errWrapper != nil {
 				err = srw.errWrapper(err)
-				if err != nil && !errors.Is(err, ErrNoValue) {
+				if err != nil {
 					return t, err
 				}
 

@@ -543,7 +543,7 @@ func TestStreamReaderWithConvert_ErrWrapperContinue(t *testing.T) {
 	sr2 := StreamReaderWithConvert[int, int](s2.asReader(), func(v int) (int, error) {
 		return v, nil
 	}, WithErrWrapper(func(err error) error {
-		return ErrNoValue
+		return nil
 	}))
 
 	v, err := sr2.Recv()
