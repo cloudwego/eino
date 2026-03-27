@@ -607,9 +607,11 @@ type convertOptions struct {
 
 type ConvertOption func(*convertOptions)
 
-// WithErrWrapper wraps the first error encountered in a stream reader during conversion by StreamReaderWithConvert.
-// The error returned by the convert function will not be wrapped.
-// If the returned err is nil or is ErrNoValue, the stream chunk will be ignored
+// WithErrWrapper wraps non-EOF errors from the underlying stream reader during
+// conversion by StreamReaderWithConvert. Errors returned by the convert function
+// itself are not wrapped.
+// If the wrapper returns nil or ErrNoValue, the errored chunk is skipped and
+// the next chunk is read.
 func WithErrWrapper(wrapper func(error) error) ConvertOption {
 	return func(o *convertOptions) {
 		o.ErrWrapper = wrapper
