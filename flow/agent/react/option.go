@@ -143,8 +143,13 @@ type MessageFuture interface {
 // WithMessageFuture returns an agent option and a MessageFuture interface instance.
 // The option configures the agent to collect messages generated during execution,
 // while the MessageFuture interface allows users to asynchronously retrieve these messages.
+//
+// This function works correctly both when the agent is used directly and when it is
+// embedded as a subgraph within another graph. Graph callbacks are filtered using
+// the address in the context: only callbacks whose address contains a runnable segment
+// matching the agent's configured graph name are processed.
 func WithMessageFuture() (agent.AgentOption, MessageFuture) {
-	h := &cbHandler{started: make(chan struct{})}
+	h := &cbHandler{started: make(chan struct{}), graphName: GraphName}
 
 	cmHandler := &ub.ModelCallbackHandler{
 		OnEnd:                 h.onChatModelEnd,
@@ -196,7 +201,7 @@ func WithMessageFuture() (agent.AgentOption, MessageFuture) {
 
 	graphHandler := callbacks.NewHandlerBuilder().
 		OnStartFn(func(ctx context.Context, info *callbacks.RunInfo, input callbacks.CallbackInput) context.Context {
-			h.onGraphStart(ctx, info, input)
+			ctx = h.onGraphStart(ctx, info, input)
 			return setToolResultSendersToCtx(ctx, &toolResultSenders{
 				sender:                         createToolResultSender(),
 				streamSender:                   createStreamToolResultSender(),
@@ -205,20 +210,18 @@ func WithMessageFuture() (agent.AgentOption, MessageFuture) {
 			})
 		}).
 		OnStartWithStreamInputFn(func(ctx context.Context, info *callbacks.RunInfo, input *schema.StreamReader[callbacks.CallbackInput]) context.Context {
-			h.onGraphStartWithStreamInput(ctx, info, input)
+			ctx = h.onGraphStartWithStreamInput(ctx, info, input)
 			return setToolResultSendersToCtx(ctx, &toolResultSenders{
 				sender:                         createToolResultSender(),
 				streamSender:                   createStreamToolResultSender(),
 				enhancedResultSender:           createEnhancedToolResultSender(),
 				enhancedStreamToolResultSender: createEnhancedStreamToolResultSender(),
 			})
-
 		}).
 		OnEndFn(h.onGraphEnd).
 		OnEndWithStreamOutputFn(h.onGraphEndWithStreamOutput).
 		OnErrorFn(h.onGraphError).Build()
 	cb := ub.NewHandlerHelper().ChatModel(cmHandler).Graph(graphHandler).Handler()
-
 	option := agent.WithComposeOptions(compose.WithCallbacks(cb))
 
 	return option, h
@@ -230,6 +233,11 @@ type item[T any] struct {
 }
 
 type cbHandler struct {
+	graphName string
+
+	ownAddress compose.Address
+	ownClaimed bool
+
 	msgs  *internal.UnboundedChan[item[*schema.Message]]
 	sMsgs *internal.UnboundedChan[item[*schema.StreamReader[*schema.Message]]]
 
@@ -246,6 +254,34 @@ func (h *cbHandler) GetMessageStreams() *Iterator[*schema.StreamReader[*schema.M
 	<-h.started
 
 	return &Iterator[*schema.StreamReader[*schema.Message]]{ch: h.sMsgs}
+}
+
+// isOwnGraph reports whether the callback is being invoked for the React agent's own graph.
+//
+// After the first onGraphStart call records h.ownAddress, subsequent calls compare the
+// current context address against that exact recorded address. This handles nested React
+// agents correctly: each cbHandler instance records its own unique full address path, so
+// two React agents at different nesting depths (e.g., an outer agent whose tool invokes
+// another React agent) will never interfere with each other even if they share the same
+// graph name.
+func (h *cbHandler) isOwnGraph(ctx context.Context) bool {
+	if !h.ownClaimed {
+		return false
+	}
+	return compose.GetCurrentAddress(ctx).Equals(h.ownAddress)
+}
+
+// claimOwnership is called exclusively from onGraphStart / onGraphStartWithStreamInput
+// to record this handler's address on first invocation. It returns true if the handler
+// has not yet been initialised, records the current address, and returns false on all
+// subsequent calls.
+func (h *cbHandler) claimOwnership(ctx context.Context) bool {
+	if h.ownClaimed {
+		return false
+	}
+	h.ownAddress = compose.GetCurrentAddress(ctx)
+	h.ownClaimed = true
+	return true
 }
 
 func (h *cbHandler) onChatModelEnd(ctx context.Context,
@@ -272,9 +308,13 @@ func (h *cbHandler) onChatModelEndWithStreamOutput(ctx context.Context,
 func (h *cbHandler) onGraphError(ctx context.Context,
 	_ *callbacks.RunInfo, err error) context.Context {
 
+	if !h.isOwnGraph(ctx) {
+		return ctx
+	}
+
 	if h.msgs != nil {
 		h.msgs.Send(item[*schema.Message]{err: err})
-	} else {
+	} else if h.sMsgs != nil {
 		h.sMsgs.Send(item[*schema.StreamReader[*schema.Message]]{err: err})
 	}
 
@@ -284,7 +324,13 @@ func (h *cbHandler) onGraphError(ctx context.Context,
 func (h *cbHandler) onGraphEnd(ctx context.Context,
 	_ *callbacks.RunInfo, _ callbacks.CallbackOutput) context.Context {
 
-	h.msgs.Close()
+	if !h.isOwnGraph(ctx) {
+		return ctx
+	}
+
+	if h.msgs != nil {
+		h.msgs.Close()
+	}
 
 	return ctx
 }
@@ -292,7 +338,13 @@ func (h *cbHandler) onGraphEnd(ctx context.Context,
 func (h *cbHandler) onGraphEndWithStreamOutput(ctx context.Context,
 	_ *callbacks.RunInfo, _ *schema.StreamReader[callbacks.CallbackOutput]) context.Context {
 
-	h.sMsgs.Close()
+	if !h.isOwnGraph(ctx) {
+		return ctx
+	}
+
+	if h.sMsgs != nil {
+		h.sMsgs.Close()
+	}
 
 	return ctx
 }
@@ -300,8 +352,11 @@ func (h *cbHandler) onGraphEndWithStreamOutput(ctx context.Context,
 func (h *cbHandler) onGraphStart(ctx context.Context,
 	_ *callbacks.RunInfo, _ callbacks.CallbackInput) context.Context {
 
-	h.msgs = internal.NewUnboundedChan[item[*schema.Message]]()
+	if !h.claimOwnership(ctx) {
+		return ctx
+	}
 
+	h.msgs = internal.NewUnboundedChan[item[*schema.Message]]()
 	close(h.started)
 
 	return ctx
@@ -311,8 +366,11 @@ func (h *cbHandler) onGraphStartWithStreamInput(ctx context.Context, _ *callback
 	input *schema.StreamReader[callbacks.CallbackInput]) context.Context {
 	input.Close()
 
-	h.sMsgs = internal.NewUnboundedChan[item[*schema.StreamReader[*schema.Message]]]()
+	if !h.claimOwnership(ctx) {
+		return ctx
+	}
 
+	h.sMsgs = internal.NewUnboundedChan[item[*schema.StreamReader[*schema.Message]]]()
 	close(h.started)
 
 	return ctx
