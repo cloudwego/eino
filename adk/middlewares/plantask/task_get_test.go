@@ -30,7 +30,6 @@ func TestTaskGetTool(t *testing.T) {
 	ctx := context.Background()
 	backend := newInMemoryBackend()
 	baseDir := "/tmp/tasks"
-	lock := &sync.Mutex{}
 
 	taskData := &task{
 		ID:          "1",
@@ -43,7 +42,7 @@ func TestTaskGetTool(t *testing.T) {
 	taskJSON, _ := sonic.MarshalString(taskData)
 	_ = backend.Write(ctx, &WriteRequest{FilePath: filepath.Join(baseDir, "1.json"), Content: taskJSON})
 
-	tool := newTaskGetTool(backend, baseDir, lock)
+	tool := newTaskGetTool(testMiddleware(backend, baseDir), &sync.Mutex{})
 
 	info, err := tool.Info(ctx)
 	assert.NoError(t, err)
@@ -66,9 +65,8 @@ func TestTaskGetToolInvalidTaskID(t *testing.T) {
 	ctx := context.Background()
 	backend := newInMemoryBackend()
 	baseDir := "/tmp/tasks"
-	lock := &sync.Mutex{}
 
-	tool := newTaskGetTool(backend, baseDir, lock)
+	tool := newTaskGetTool(testMiddleware(backend, baseDir), &sync.Mutex{})
 
 	_, err := tool.InvokableRun(ctx, `{"taskId": "../../../etc/passwd"}`)
 	assert.Error(t, err)
@@ -77,4 +75,37 @@ func TestTaskGetToolInvalidTaskID(t *testing.T) {
 	_, err = tool.InvokableRun(ctx, `{"taskId": "abc"}`)
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "validate task ID failed")
+}
+
+func TestTaskGetToolWithOwner(t *testing.T) {
+	ctx := context.Background()
+	backend := newInMemoryBackend()
+	baseDir := "/tmp/tasks"
+
+	taskData := &task{
+		ID:          "1",
+		Subject:     "Owned Task",
+		Description: "Task with owner",
+		Status:      taskStatusInProgress,
+		Owner:       "agent1",
+	}
+	taskJSON, _ := sonic.MarshalString(taskData)
+	_ = backend.Write(ctx, &WriteRequest{FilePath: filepath.Join(baseDir, "1.json"), Content: taskJSON})
+
+	tool := newTaskGetTool(testMiddleware(backend, baseDir), &sync.Mutex{})
+
+	result, err := tool.InvokableRun(ctx, `{"taskId": "1"}`)
+	assert.NoError(t, err)
+	assert.Contains(t, result, "Owner: agent1")
+}
+
+func TestTaskGetToolInvalidJSON(t *testing.T) {
+	ctx := context.Background()
+	backend := newInMemoryBackend()
+	baseDir := "/tmp/tasks"
+
+	tool := newTaskGetTool(testMiddleware(backend, baseDir), &sync.Mutex{})
+
+	_, err := tool.InvokableRun(ctx, `{invalid`)
+	assert.Error(t, err)
 }
