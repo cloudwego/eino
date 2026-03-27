@@ -1574,6 +1574,26 @@ func TestRunLocalValueFunctions(t *testing.T) {
 		assert.Nil(t, capturedValue, "Non-existent key should return nil value")
 	})
 
+	t.Run("RunLocalValueGobEncodabilityCheck", func(t *testing.T) {
+		type unregisteredType struct {
+			Data string
+		}
+
+		// unregistered custom struct should fail
+		err := checkGobEncodability("key", unregisteredType{Data: "hello"})
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "not gob-serializable")
+		assert.Contains(t, err.Error(), "schema.RegisterName")
+		assert.Contains(t, err.Error(), "context.WithValue")
+		assert.Contains(t, err.Error(), "unregisteredType")
+
+		// primitives should succeed
+		assert.NoError(t, checkGobEncodability("key", "hello"))
+		assert.NoError(t, checkGobEncodability("key", 42))
+		assert.NoError(t, checkGobEncodability("key", true))
+		assert.NoError(t, checkGobEncodability("key", 3.14))
+	})
+
 	t.Run("RunLocalValueOutsideContext", func(t *testing.T) {
 		ctx := context.Background()
 

@@ -18,7 +18,10 @@ package adk
 
 import (
 	"context"
+	"encoding/gob"
 	"fmt"
+	"io"
+	"reflect"
 
 	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/components/tool"
@@ -274,6 +277,10 @@ func (b *BaseChatModelAgentMiddleware) AfterToolCallsRewriteState(ctx context.Co
 // This function can only be called from within a ChatModelAgentMiddleware during agent execution.
 // Returns an error if called outside of an agent execution context.
 func SetRunLocalValue(ctx context.Context, key string, value any) error {
+	if err := checkGobEncodability(key, value); err != nil {
+		return err
+	}
+
 	err := compose.ProcessState(ctx, func(_ context.Context, st *State) error {
 		if st.Extra == nil {
 			st.Extra = make(map[string]any)
@@ -284,6 +291,7 @@ func SetRunLocalValue(ctx context.Context, key string, value any) error {
 	if err != nil {
 		return fmt.Errorf("SetRunLocalValue failed: must be called within a ChatModelAgent Run() or Resume() execution context: %w", err)
 	}
+
 	return nil
 }
 
@@ -340,5 +348,29 @@ func SendEvent(ctx context.Context, event *AgentEvent) error {
 		return fmt.Errorf("SendEvent failed: must be called within a ChatModelAgent Run() or Resume() execution context")
 	}
 	execCtx.generator.Send(event)
+	return nil
+}
+
+// checkGobEncodability probes whether the value can be gob-encoded as part of
+// a map[string]any, which is exactly how State.Extra is serialized during
+// checkpoint. This catches unregistered types early at Set time, rather than
+// letting them fail at checkpoint/resume time with a confusing error.
+func checkGobEncodability(key string, value any) error {
+	probe := map[string]any{key: value}
+	if err := gob.NewEncoder(io.Discard).Encode(probe); err != nil {
+		typeName := reflect.TypeOf(value).String()
+		return fmt.Errorf("SetRunLocalValue: the value (type %s) for key %q is not gob-serializable, "+
+			"which means it will fail when the agent checkpoint is saved or resumed.\n\n"+
+			"To fix this, register the type in an init() function in your package:\n\n"+
+			"  func init() {\n"+
+			"      schema.RegisterName[%s](\"a_unique_name_for_this_type\")\n"+
+			"  }\n\n"+
+			"This is required because agent state (including values set via SetRunLocalValue) is "+
+			"persisted using gob encoding for interrupt/resume support. All concrete types stored "+
+			"in interface-typed fields (like map[string]any) must be registered with gob.\n\n"+
+			"If this value does not need to survive interrupt/resume, store it on the context instead, "+
+			"for example via context.WithValue, so you don't need gob registration.\n\n"+
+			"Underlying error: %w", typeName, key, typeName, err)
+	}
 	return nil
 }
