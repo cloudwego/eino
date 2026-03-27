@@ -17,6 +17,8 @@
 package schema
 
 import (
+	"bytes"
+	"encoding/gob"
 	"encoding/json"
 	"testing"
 
@@ -132,4 +134,50 @@ func TestParamsOneOfToJSONSchema(t *testing.T) {
 		})
 
 	})
+}
+
+func TestToolInfoSerialization(t *testing.T) {
+	ti1 := &ToolInfo{
+		ParamsOneOf: NewParamsOneOfByParams(map[string]*ParameterInfo{
+			"a": {
+				Type: String,
+				Desc: "desc",
+			},
+		}),
+	}
+	ti2 := &ToolInfo{
+		ParamsOneOf: NewParamsOneOfByJSONSchema(&jsonschema.Schema{
+			Type: "string",
+		}),
+	}
+
+	// json
+	b, err := json.Marshal(ti1)
+	assert.NoError(t, err)
+	result := &ToolInfo{}
+	err = json.Unmarshal(b, result)
+	assert.NoError(t, err)
+	assert.Equal(t, ti1, result)
+	b, err = json.Marshal(ti2)
+	assert.NoError(t, err)
+	result = &ToolInfo{}
+	err = json.Unmarshal(b, result)
+	assert.NoError(t, err)
+	assert.Equal(t, ti2, result)
+
+	// gob
+	buf := new(bytes.Buffer)
+	err = gob.NewEncoder(buf).Encode(ti1)
+	assert.NoError(t, err)
+	result = &ToolInfo{}
+	err = gob.NewDecoder(buf).Decode(result)
+	assert.NoError(t, err)
+	assert.Equal(t, ti1, result)
+	buf = new(bytes.Buffer)
+	err = gob.NewEncoder(buf).Encode(ti2)
+	assert.NoError(t, err)
+	result = &ToolInfo{}
+	err = gob.NewDecoder(buf).Decode(result)
+	assert.NoError(t, err)
+	assert.Equal(t, ti2, result)
 }
