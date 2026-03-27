@@ -14,7 +14,6 @@
  * limitations under the License.
  */
 
-// Package skill provides the skill middleware, types, and a local filesystem backend.
 package skill
 
 import (
@@ -22,10 +21,13 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"sort"
 	"strings"
 	"text/template"
 
+	"github.com/eino-contrib/jsonschema"
 	"github.com/slongfield/pyfmt"
+	orderedmap "github.com/wk8/go-ordered-map/v2"
 
 	"github.com/cloudwego/eino/adk"
 	"github.com/cloudwego/eino/adk/internal"
@@ -35,17 +37,19 @@ import (
 	"github.com/cloudwego/eino/schema"
 )
 
+// ContextMode defines the execution mode of a skill
 type ContextMode string
 
 const (
-	// ContextModeForkWithContext forks a new agent to run the skill,
-	// carrying over the original message history from the parent agent.
-	ContextModeForkWithContext ContextMode = "fork_with_context"
-	// ContextModeFork forks a new agent to run the skill
-	// with a clean context, discarding the original message history.
+	// ContextModeInline is the default mode, skill content is returned directly to the current agent
+	ContextModeInline ContextMode = ""
+	// ContextModeFork creates a new sub-agent without parent history
 	ContextModeFork ContextMode = "fork"
+	// ContextModeForkWithContext creates a new sub-agent with parent history
+	ContextModeForkWithContext ContextMode = "fork_with_context"
 )
 
+// FrontMatter defines the YAML frontmatter schema parsed from a SKILL.md file.
 type FrontMatter struct {
 	Name        string      `yaml:"name"`
 	Description string      `yaml:"description"`
@@ -54,12 +58,14 @@ type FrontMatter struct {
 	Model       string      `yaml:"model"`
 }
 
+// Skill represents a skill loaded from a backend.
 type Skill struct {
 	FrontMatter
 	Content       string
 	BaseDirectory string
 }
 
+// Backend loads skills and provides metadata for tool description rendering.
 type Backend interface {
 	List(ctx context.Context) ([]FrontMatter, error)
 	Get(ctx context.Context, name string) (Skill, error)
@@ -92,6 +98,46 @@ type SystemPromptFunc func(ctx context.Context, toolName string) string
 // The skills parameter contains all available skill front matters.
 type ToolDescriptionFunc func(ctx context.Context, skills []FrontMatter) string
 
+// ForkMessageInput contains input data for CustomForkMessages.
+type ForkMessageInput struct {
+	Skill        Skill
+	RawArguments string
+	SkillContent string
+	History      []adk.Message
+	ToolCallID   string
+}
+
+// ForkResultInput contains input data for CustomForkResultPrompts.
+type ForkResultInput struct {
+	Skill        Skill
+	RawArguments string
+	Results      []string
+}
+
+// ForkMessagesFunc customizes the message list passed to sub-agents in fork modes.
+type ForkMessagesFunc func(ctx context.Context, in ForkMessageInput) ([]adk.Message, error)
+
+// ForkResultPromptsFunc customizes the final aggregated result returned from sub-agent execution.
+type ForkResultPromptsFunc func(ctx context.Context, in ForkResultInput) (adk.I18nPrompts, error)
+
+// SkillContentInput contains input data for CustomToolParamsHandler.SkillContentFunc.
+type SkillContentInput struct {
+	Skill        Skill
+	RawArguments string
+}
+
+// CustomToolParamsHandler allows extending the tool schema and generating customized skill content.
+type CustomToolParamsHandler struct {
+	// AdditionToolParamsFunc appends extra tool parameters to the default schema.
+	// It can also override the default "skill" parameter's description.
+	// optional
+	AdditionToolParamsFunc func(ctx context.Context) *schema.ParamsOneOf
+	// SkillContentFunc customizes the skill content generated for this invocation.
+	// RawArguments contains the original tool call arguments in JSON form.
+	// required when CustomToolParamsHandler is set
+	SkillContentFunc func(ctx context.Context, in SkillContentInput) (adk.I18nPrompts, error)
+}
+
 // Config is the configuration for the skill middleware.
 type Config struct {
 	// Backend is the backend for retrieving skills.
@@ -101,15 +147,15 @@ type Config struct {
 	// Deprecated: Use adk.SetLanguage(adk.LanguageChinese) instead to enable Chinese prompts globally.
 	// This field will be removed in a future version.
 	UseChinese bool
-	// AgentHub provides agent factories for context mode (fork/isolate) execution.
-	// Required when skills use "context: fork" or "context: isolate" in frontmatter.
+	// AgentHub provides agent instances for context mode (fork/fork_with_context) execution.
+	// Required when skills use "context: fork" or "context: fork_with_context" in frontmatter.
 	// The agent factory is retrieved by agent name (skill.Agent) from this hub.
 	// When skill.Agent is empty, AgentHub.Get is called with an empty string,
 	// allowing the hub implementation to return a default agent.
 	AgentHub AgentHub
 	// ModelHub provides model instances for skills that specify a "model" field in frontmatter.
 	// Used in two scenarios:
-	//   - With context mode (fork/isolate): The model is passed to the AgentFactory
+	//   - With context mode (fork/fork_with_context): The model is passed to the AgentHub
 	//   - Without context mode (inline): The model becomes active for subsequent ChatModel requests
 	// If nil, skills with model specification will be ignored in inline mode,
 	// or return an error in context mode.
@@ -123,6 +169,22 @@ type Config struct {
 	// If nil, the default tool description is used.
 	// The function receives all available skill front matters as a parameter.
 	CustomToolDescription ToolDescriptionFunc
+
+	// CustomToolParamsHandler configures custom tool parameters and skill content rendering.
+	// When set, SkillContentFunc must be non-nil.
+	// optional
+	CustomToolParamsHandler *CustomToolParamsHandler
+
+	// CustomForkMessages customizes the messages passed to the forked sub-agent.
+	// When nil, fork_with_context appends the resolved skill content as a ToolMessage to history,
+	// and fork passes the resolved skill content as a single UserMessage.
+	// optional
+	CustomForkMessages ForkMessagesFunc
+	// CustomForkResultPrompts customizes the final text returned from the forked sub-agent results.
+	// When nil, assistant message contents emitted by the sub-agent are concatenated and returned
+	// in a default formatted string.
+	// optional
+	CustomForkResultPrompts ForkResultPromptsFunc
 }
 
 // NewMiddleware creates a new skill middleware handler for ChatModelAgent.
@@ -157,6 +219,11 @@ func NewMiddleware(ctx context.Context, config *Config) (adk.ChatModelAgentMiddl
 	if config.Backend == nil {
 		return nil, fmt.Errorf("backend is required")
 	}
+	if config.CustomToolParamsHandler != nil {
+		if config.CustomToolParamsHandler.SkillContentFunc == nil {
+			return nil, fmt.Errorf("custom tool params handler is incomplete")
+		}
+	}
 
 	name := toolName
 	if config.SkillToolName != nil {
@@ -177,12 +244,15 @@ func NewMiddleware(ctx context.Context, config *Config) (adk.ChatModelAgentMiddl
 	return &skillHandler{
 		instruction: instruction,
 		tool: &skillTool{
-			b:                     config.Backend,
-			toolName:              name,
-			useChinese:            config.UseChinese,
-			agentHub:              config.AgentHub,
-			modelHub:              config.ModelHub,
-			customToolDescription: config.CustomToolDescription,
+			b:                       config.Backend,
+			toolName:                name,
+			useChinese:              config.UseChinese,
+			agentHub:                config.AgentHub,
+			modelHub:                config.ModelHub,
+			customToolDescription:   config.CustomToolDescription,
+			customToolParamsHandler: config.CustomToolParamsHandler,
+			customForkMessages:      config.CustomForkMessages,
+			customForkResult:        config.CustomForkResultPrompts,
 		},
 	}, nil
 }
@@ -235,6 +305,11 @@ func New(ctx context.Context, config *Config) (adk.AgentMiddleware, error) {
 	if config.Backend == nil {
 		return adk.AgentMiddleware{}, fmt.Errorf("backend is required")
 	}
+	if config.CustomToolParamsHandler != nil {
+		if config.CustomToolParamsHandler.SkillContentFunc == nil {
+			return adk.AgentMiddleware{}, fmt.Errorf("custom tool params handler is incomplete")
+		}
+	}
 
 	name := toolName
 	if config.SkillToolName != nil {
@@ -255,10 +330,13 @@ func New(ctx context.Context, config *Config) (adk.AgentMiddleware, error) {
 	return adk.AgentMiddleware{
 		AdditionalInstruction: sp,
 		AdditionalTools: []tool.BaseTool{&skillTool{
-			b:                     config.Backend,
-			toolName:              name,
-			useChinese:            config.UseChinese,
-			customToolDescription: config.CustomToolDescription,
+			b:                       config.Backend,
+			toolName:                name,
+			useChinese:              config.UseChinese,
+			customToolDescription:   config.CustomToolDescription,
+			customToolParamsHandler: config.CustomToolParamsHandler,
+			customForkMessages:      config.CustomForkMessages,
+			customForkResult:        config.CustomForkResultPrompts,
 		}},
 	}, nil
 }
@@ -279,12 +357,15 @@ func buildSystemPrompt(skillToolName string, useChinese bool) (string, error) {
 }
 
 type skillTool struct {
-	b                     Backend
-	toolName              string
-	useChinese            bool
-	agentHub              AgentHub
-	modelHub              ModelHub
-	customToolDescription ToolDescriptionFunc
+	b                       Backend
+	toolName                string
+	useChinese              bool
+	agentHub                AgentHub
+	modelHub                ModelHub
+	customToolDescription   ToolDescriptionFunc
+	customToolParamsHandler *CustomToolParamsHandler
+	customForkMessages      ForkMessagesFunc
+	customForkResult        ForkResultPromptsFunc
 }
 
 type descriptionTemplateHelper struct {
@@ -313,21 +394,10 @@ func (s *skillTool) Info(ctx context.Context) (*schema.ToolInfo, error) {
 		fullDesc = descBase + desc
 	}
 
-	paramDesc := internal.SelectPrompt(internal.I18nPrompts{
-		English: "The skill name (no arguments). E.g., \"pdf\" or \"xlsx\"",
-		Chinese: "Skill 名称（无需其他参数）。例如：\"pdf\" 或 \"xlsx\"",
-	})
-
 	return &schema.ToolInfo{
-		Name: s.toolName,
-		Desc: fullDesc,
-		ParamsOneOf: schema.NewParamsOneOfByParams(map[string]*schema.ParameterInfo{
-			"skill": {
-				Type:     schema.String,
-				Desc:     paramDesc,
-				Required: true,
-			},
-		}),
+		Name:        s.toolName,
+		Desc:        fullDesc,
+		ParamsOneOf: s.buildParamsOneOf(ctx),
 	}, nil
 }
 
@@ -348,14 +418,14 @@ func (s *skillTool) InvokableRun(ctx context.Context, argumentsInJSON string, op
 
 	switch skill.Context {
 	case ContextModeForkWithContext:
-		return s.runAgentMode(ctx, skill, true)
+		return s.runAgentMode(ctx, skill, true, argumentsInJSON)
 	case ContextModeFork:
-		return s.runAgentMode(ctx, skill, false)
+		return s.runAgentMode(ctx, skill, false, argumentsInJSON)
 	default:
 		if skill.Model != "" {
 			s.setActiveModel(ctx, skill.Model)
 		}
-		return s.buildSkillResult(skill)
+		return s.buildSkillResult(ctx, skill, argumentsInJSON)
 	}
 }
 
@@ -363,7 +433,89 @@ func (s *skillTool) setActiveModel(ctx context.Context, modelName string) {
 	_ = adk.SetRunLocalValue(ctx, activeModelKey, modelName)
 }
 
-func (s *skillTool) buildSkillResult(skill Skill) (string, error) {
+func defaultToolParams() map[string]*schema.ParameterInfo {
+	skillParamDesc := internal.SelectPrompt(internal.I18nPrompts{
+		English: "The skill name (no arguments). E.g., \"pdf\" or \"xlsx\"",
+		Chinese: "Skill 名称（无需其他参数）。例如：\"pdf\" 或 \"xlsx\"",
+	})
+	return map[string]*schema.ParameterInfo{
+		"skill": {
+			Type:     schema.String,
+			Desc:     skillParamDesc,
+			Required: true,
+		},
+	}
+}
+
+func (s *skillTool) buildParamsOneOf(ctx context.Context) *schema.ParamsOneOf {
+	base := schema.NewParamsOneOfByParams(defaultToolParams())
+	if s.customToolParamsHandler == nil || s.customToolParamsHandler.AdditionToolParamsFunc == nil {
+		return base
+	}
+
+	custom := s.customToolParamsHandler.AdditionToolParamsFunc(ctx)
+	if custom == nil {
+		return base
+	}
+
+	js, err := custom.ToJSONSchema()
+	if err != nil || js == nil {
+		return base
+	}
+	if js.Properties == nil {
+		js.Properties = orderedmap.New[string, *jsonschema.Schema]()
+	}
+
+	desc := internal.SelectPrompt(internal.I18nPrompts{
+		English: "The skill name (no arguments). E.g., \"pdf\" or \"xlsx\"",
+		Chinese: "Skill 名称（无需其他参数）。例如：\"pdf\" 或 \"xlsx\"",
+	})
+	if skillSchema, ok := js.Properties.Get("skill"); ok && skillSchema != nil && skillSchema.Description != "" {
+		desc = skillSchema.Description
+	}
+
+	js.Properties.Set("skill", &jsonschema.Schema{
+		Type:        string(schema.String),
+		Description: desc,
+	})
+
+	js.Required = append(js.Required, "skill")
+	js.Required = uniqStrings(js.Required)
+
+	return schema.NewParamsOneOfByJSONSchema(js)
+}
+
+func uniqStrings(in []string) []string {
+	if len(in) == 0 {
+		return in
+	}
+	sort.Strings(in)
+	out := in[:0]
+	var last string
+	for i, s := range in {
+		if i == 0 || s != last {
+			out = append(out, s)
+			last = s
+		}
+	}
+	return out
+}
+
+func (s *skillTool) buildSkillResult(ctx context.Context, skill Skill, rawArguments string) (string, error) {
+	if s.customToolParamsHandler == nil {
+		return s.defaultSkillContent(skill), nil
+	}
+	prompts, err := s.customToolParamsHandler.SkillContentFunc(ctx, SkillContentInput{
+		Skill:        skill,
+		RawArguments: rawArguments,
+	})
+	if err != nil {
+		return "", fmt.Errorf("failed to build skill result: %w", err)
+	}
+	return internal.SelectPrompt(prompts), nil
+}
+
+func (s *skillTool) defaultSkillContent(skill Skill) string {
 	resultFmt := internal.SelectPrompt(internal.I18nPrompts{
 		English: toolResult,
 		Chinese: toolResultChinese,
@@ -373,10 +525,10 @@ func (s *skillTool) buildSkillResult(skill Skill) (string, error) {
 		Chinese: userContentChinese,
 	})
 
-	return fmt.Sprintf(resultFmt, skill.Name) + fmt.Sprintf(contentFmt, skill.BaseDirectory, skill.Content), nil
+	return fmt.Sprintf(resultFmt, skill.Name) + fmt.Sprintf(contentFmt, skill.BaseDirectory, skill.Content)
 }
 
-func (s *skillTool) runAgentMode(ctx context.Context, skill Skill, forkHistory bool) (string, error) {
+func (s *skillTool) runAgentMode(ctx context.Context, skill Skill, forkHistory bool, rawArguments string) (string, error) {
 	if s.agentHub == nil {
 		return "", fmt.Errorf("skill '%s' requires context:%s but AgentHub is not configured", skill.Name, skill.Context)
 	}
@@ -399,20 +551,38 @@ func (s *skillTool) runAgentMode(ctx context.Context, skill Skill, forkHistory b
 	}
 
 	var messages []adk.Message
-	skillContent, err := s.buildSkillResult(skill)
+	skillContent, err := s.buildSkillResult(ctx, skill, rawArguments)
 	if err != nil {
 		return "", fmt.Errorf("failed to build skill result: %w", err)
 	}
 
+	var history []adk.Message
+	var toolCallID string
 	if forkHistory {
-		messages, err = s.getMessagesFromState(ctx)
+		history, err = s.getMessagesFromState(ctx)
 		if err != nil {
 			return "", fmt.Errorf("failed to get messages from state: %w", err)
 		}
-		toolCallID := compose.GetToolCallID(ctx)
-		messages = append(messages, schema.ToolMessage(skillContent, toolCallID))
+		toolCallID = compose.GetToolCallID(ctx)
+	}
+
+	if s.customForkMessages != nil {
+		messages, err = s.customForkMessages(ctx, ForkMessageInput{
+			Skill:        skill,
+			RawArguments: rawArguments,
+			SkillContent: skillContent,
+			History:      history,
+			ToolCallID:   toolCallID,
+		})
+		if err != nil {
+			return "", fmt.Errorf("failed to build fork messages: %w", err)
+		}
 	} else {
-		messages = []adk.Message{schema.UserMessage(skillContent)}
+		if forkHistory {
+			messages = append(history, schema.ToolMessage(skillContent, toolCallID))
+		} else {
+			messages = []adk.Message{schema.UserMessage(skillContent)}
+		}
 	}
 
 	input := &adk.AgentInput{
@@ -445,6 +615,18 @@ func (s *skillTool) runAgentMode(ctx context.Context, skill Skill, forkHistory b
 		if msg != nil && msg.Content != "" {
 			results = append(results, msg.Content)
 		}
+	}
+
+	if s.customForkResult != nil {
+		prompts, err := s.customForkResult(ctx, ForkResultInput{
+			Skill:        skill,
+			RawArguments: rawArguments,
+			Results:      results,
+		})
+		if err != nil {
+			return "", err
+		}
+		return internal.SelectPrompt(prompts), nil
 	}
 
 	resultFmt := internal.SelectPrompt(internal.I18nPrompts{
