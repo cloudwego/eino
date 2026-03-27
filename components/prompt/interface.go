@@ -23,6 +23,7 @@ import (
 )
 
 var _ ChatTemplate = &DefaultChatTemplate{}
+var _ AgenticChatTemplate = &DefaultAgenticChatTemplate{}
 
 // ChatTemplate formats a variables map into a list of messages for a ChatModel.
 //
@@ -41,4 +42,9 @@ var _ ChatTemplate = &DefaultChatTemplate{}
 // See [FromMessages] and [schema.MessagesPlaceholder] for construction helpers.
 type ChatTemplate interface {
 	Format(ctx context.Context, vs map[string]any, opts ...Option) ([]*schema.Message, error)
+}
+
+// AgenticChatTemplate formats variables into a list of agentic messages according to a prompt schema.
+type AgenticChatTemplate interface {
+	Format(ctx context.Context, vs map[string]any, opts ...Option) ([]*schema.AgenticMessage, error)
 }
