@@ -235,8 +235,8 @@ type item[T any] struct {
 type cbHandler struct {
 	graphName string
 
-	ownAddress  compose.Address
-	ownClaimed  bool
+	ownAddress compose.Address
+	ownClaimed bool
 
 	msgs  *internal.UnboundedChan[item[*schema.Message]]
 	sMsgs *internal.UnboundedChan[item[*schema.StreamReader[*schema.Message]]]
