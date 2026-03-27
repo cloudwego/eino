@@ -659,6 +659,8 @@ func (srw *streamReaderWithConvert[T]) recv() (T, error) {
 				if err != nil && !errors.Is(err, ErrNoValue) {
 					return t, err
 				}
+
+				continue
 			}
 
 			return t, err
