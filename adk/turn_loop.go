@@ -1228,14 +1228,31 @@ func (l *TurnLoop[T]) watchStopSignal(done <-chan struct{}, agentCancelFunc Agen
 				}
 			}
 		case <-l.stopSig.done:
-			_, opts := l.stopSig.check()
-			_, contributed := agentCancelFunc(opts...)
-			if contributed && !stoppedClosed {
-				close(stoppedDone)
-				stoppedClosed = true
+			gen, opts := l.stopSig.check()
+			if gen != lastGen {
+				lastGen = gen
+				_, contributed := agentCancelFunc(opts...)
+				if contributed && !stoppedClosed {
+					close(stoppedDone)
+					stoppedClosed = true
+				}
 			}
-			<-done
-			return
+			for {
+				select {
+				case <-done:
+					return
+				case <-l.stopSig.notify:
+					gen, opts := l.stopSig.check()
+					if gen != lastGen {
+						lastGen = gen
+						_, contributed := agentCancelFunc(opts...)
+						if contributed && !stoppedClosed {
+							close(stoppedDone)
+							stoppedClosed = true
+						}
+					}
+				}
+			}
 		}
 	}
 }
@@ -1380,7 +1397,8 @@ func (l *TurnLoop[T]) cleanup(ctx context.Context) {
 
 	unhandled := l.buffer.TakeAll()
 	checkpointID := l.config.CheckpointID
-	shouldSaveCheckpoint := l.config.Store != nil && checkpointID != "" && l.stopSig.isStopped()
+	isIdle := len(l.checkPointRunnerBytes) == 0 && len(unhandled) == 0 && len(l.canceledItems) == 0
+	shouldSaveCheckpoint := l.config.Store != nil && checkpointID != "" && l.stopSig.isStopped() && !isIdle
 	if shouldSaveCheckpoint {
 		cp := &turnLoopCheckpoint[T]{
 			RunnerCheckpoint: l.checkPointRunnerBytes,
