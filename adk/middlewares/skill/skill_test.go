@@ -25,6 +25,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/eino-contrib/jsonschema"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -226,6 +227,75 @@ func TestBuildParamsOneOf_CustomParams(t *testing.T) {
 	assert.True(t, ok)
 
 	assert.Equal(t, []string{"foo", "skill"}, js.Required)
+}
+
+func TestBuildParamsOneOf_CustomParamsNilFallsBackToDefault(t *testing.T) {
+	ctx := context.Background()
+	st := &skillTool{
+		customToolParamsHandler: &CustomToolParamsHandler{
+			AdditionToolParamsFunc: func(context.Context) *schema.ParamsOneOf {
+				return nil
+			},
+			SkillContentFunc: func(context.Context, SkillContentInput) (adk.I18nPrompts, error) {
+				return adk.I18nPrompts{English: "x", Chinese: "x"}, nil
+			},
+		},
+	}
+
+	oneOf := st.buildParamsOneOf(ctx)
+	js, err := oneOf.ToJSONSchema()
+	require.NoError(t, err)
+	require.NotNil(t, js)
+	require.NotNil(t, js.Properties)
+	_, ok := js.Properties.Get("skill")
+	require.True(t, ok)
+	assert.Contains(t, js.Required, "skill")
+}
+
+func TestBuildParamsOneOf_JSONSchemaNilFallsBackToDefault(t *testing.T) {
+	ctx := context.Background()
+	st := &skillTool{
+		customToolParamsHandler: &CustomToolParamsHandler{
+			AdditionToolParamsFunc: func(context.Context) *schema.ParamsOneOf {
+				return schema.NewParamsOneOfByJSONSchema(nil)
+			},
+			SkillContentFunc: func(context.Context, SkillContentInput) (adk.I18nPrompts, error) {
+				return adk.I18nPrompts{English: "x", Chinese: "x"}, nil
+			},
+		},
+	}
+
+	oneOf := st.buildParamsOneOf(ctx)
+	js, err := oneOf.ToJSONSchema()
+	require.NoError(t, err)
+	require.NotNil(t, js)
+	require.NotNil(t, js.Properties)
+	_, ok := js.Properties.Get("skill")
+	require.True(t, ok)
+	assert.Contains(t, js.Required, "skill")
+}
+
+func TestBuildParamsOneOf_JSONSchemaWithoutPropertiesIsHandled(t *testing.T) {
+	ctx := context.Background()
+	st := &skillTool{
+		customToolParamsHandler: &CustomToolParamsHandler{
+			AdditionToolParamsFunc: func(context.Context) *schema.ParamsOneOf {
+				return schema.NewParamsOneOfByJSONSchema(&jsonschema.Schema{Type: string(schema.Object)})
+			},
+			SkillContentFunc: func(context.Context, SkillContentInput) (adk.I18nPrompts, error) {
+				return adk.I18nPrompts{English: "x", Chinese: "x"}, nil
+			},
+		},
+	}
+
+	oneOf := st.buildParamsOneOf(ctx)
+	js, err := oneOf.ToJSONSchema()
+	require.NoError(t, err)
+	require.NotNil(t, js)
+	require.NotNil(t, js.Properties)
+	_, ok := js.Properties.Get("skill")
+	require.True(t, ok)
+	assert.Contains(t, js.Required, "skill")
 }
 
 // --- Mock types for NewMiddleware tests ---
@@ -502,6 +572,219 @@ func TestWrapModel_SwitchesModelWhenRunLocalIsSet(t *testing.T) {
 	assert.Equal(t, 1, other.calls)
 }
 
+func TestWrapModel_OutsideAgentContextReturnsError(t *testing.T) {
+	ctx := context.Background()
+
+	base := &fakeToolCallingModel{id: "base"}
+	other := &fakeToolCallingModel{id: "other"}
+
+	handler, err := NewMiddleware(ctx, &Config{
+		Backend:  &inMemoryBackend{m: []Skill{}},
+		ModelHub: &mockModelHub{models: map[string]model.ToolCallingChatModel{"other": other}},
+	})
+	require.NoError(t, err)
+
+	h := handler.(*skillHandler)
+	_, err = h.WrapModel(ctx, base, &adk.ModelContext{})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "failed to get active model from run local value")
+}
+
+func TestWrapModel_IgnoresNonStringRunLocalValue(t *testing.T) {
+	ctx := context.Background()
+
+	base := &fakeToolCallingModel{id: "base"}
+	other := &fakeToolCallingModel{id: "other"}
+
+	handler, err := NewMiddleware(ctx, &Config{
+		Backend:  &inMemoryBackend{m: []Skill{}},
+		ModelHub: &mockModelHub{models: map[string]model.ToolCallingChatModel{"other": other}},
+	})
+	require.NoError(t, err)
+
+	agent, err := adk.NewChatModelAgent(ctx, &adk.ChatModelAgentConfig{
+		Name:        "t",
+		Description: "t",
+		Model:       base,
+		Handlers: []adk.ChatModelAgentMiddleware{
+			&runLocalSetterHandler{key: activeModelKey, val: 123},
+			handler,
+		},
+		MaxIterations: 1,
+	})
+	require.NoError(t, err)
+
+	iter := agent.Run(ctx, &adk.AgentInput{Messages: []adk.Message{schema.UserMessage("hi")}})
+	var last string
+	for {
+		ev, ok := iter.Next()
+		if !ok {
+			break
+		}
+		require.NoError(t, ev.Err)
+		if ev.Output == nil || ev.Output.MessageOutput == nil {
+			continue
+		}
+		msg, err := ev.Output.MessageOutput.GetMessage()
+		require.NoError(t, err)
+		if msg != nil {
+			last = msg.Content
+		}
+	}
+
+	assert.Equal(t, "base", last)
+	assert.Equal(t, 1, base.calls)
+	assert.Equal(t, 0, other.calls)
+}
+
+func TestWrapModel_ModelHubGetError(t *testing.T) {
+	ctx := context.Background()
+
+	base := &fakeToolCallingModel{id: "base"}
+
+	handler, err := NewMiddleware(ctx, &Config{
+		Backend:  &inMemoryBackend{m: []Skill{}},
+		ModelHub: &mockModelHub{models: map[string]model.ToolCallingChatModel{}},
+	})
+	require.NoError(t, err)
+
+	agent, err := adk.NewChatModelAgent(ctx, &adk.ChatModelAgentConfig{
+		Name:        "t",
+		Description: "t",
+		Model:       base,
+		Handlers: []adk.ChatModelAgentMiddleware{
+			&runLocalSetterHandler{key: activeModelKey, val: "missing"},
+			handler,
+		},
+		MaxIterations: 1,
+	})
+	require.NoError(t, err)
+
+	iter := agent.Run(ctx, &adk.AgentInput{Messages: []adk.Message{schema.UserMessage("hi")}})
+	var gotErr error
+	for {
+		ev, ok := iter.Next()
+		if !ok {
+			break
+		}
+		if ev.Err != nil {
+			gotErr = ev.Err
+			break
+		}
+	}
+	require.Error(t, gotErr)
+	assert.Contains(t, gotErr.Error(), "failed to get model")
+	assert.Equal(t, 0, base.calls)
+}
+
+func TestWrapModel_ModelHubNilKeepsBase(t *testing.T) {
+	ctx := context.Background()
+
+	base := &fakeToolCallingModel{id: "base"}
+	handler, err := NewMiddleware(ctx, &Config{
+		Backend: &inMemoryBackend{m: []Skill{}},
+	})
+	require.NoError(t, err)
+
+	h := handler.(*skillHandler)
+	m, err := h.WrapModel(ctx, base, &adk.ModelContext{})
+	require.NoError(t, err)
+	assert.Equal(t, base, m)
+}
+
+func TestWrapModel_RunLocalNotFoundKeepsBase(t *testing.T) {
+	ctx := context.Background()
+
+	base := &fakeToolCallingModel{id: "base"}
+	other := &fakeToolCallingModel{id: "other"}
+
+	handler, err := NewMiddleware(ctx, &Config{
+		Backend:  &inMemoryBackend{m: []Skill{}},
+		ModelHub: &mockModelHub{models: map[string]model.ToolCallingChatModel{"other": other}},
+	})
+	require.NoError(t, err)
+
+	agent, err := adk.NewChatModelAgent(ctx, &adk.ChatModelAgentConfig{
+		Name:        "t",
+		Description: "t",
+		Model:       base,
+		Handlers: []adk.ChatModelAgentMiddleware{
+			handler,
+		},
+		MaxIterations: 1,
+	})
+	require.NoError(t, err)
+
+	iter := agent.Run(ctx, &adk.AgentInput{Messages: []adk.Message{schema.UserMessage("hi")}})
+	var last string
+	for {
+		ev, ok := iter.Next()
+		if !ok {
+			break
+		}
+		require.NoError(t, ev.Err)
+		if ev.Output == nil || ev.Output.MessageOutput == nil {
+			continue
+		}
+		msg, err := ev.Output.MessageOutput.GetMessage()
+		require.NoError(t, err)
+		if msg != nil {
+			last = msg.Content
+		}
+	}
+
+	assert.Equal(t, "base", last)
+	assert.Equal(t, 1, base.calls)
+	assert.Equal(t, 0, other.calls)
+}
+
+func TestWrapModel_IgnoresEmptyStringRunLocalValue(t *testing.T) {
+	ctx := context.Background()
+
+	base := &fakeToolCallingModel{id: "base"}
+	other := &fakeToolCallingModel{id: "other"}
+
+	handler, err := NewMiddleware(ctx, &Config{
+		Backend:  &inMemoryBackend{m: []Skill{}},
+		ModelHub: &mockModelHub{models: map[string]model.ToolCallingChatModel{"other": other}},
+	})
+	require.NoError(t, err)
+
+	agent, err := adk.NewChatModelAgent(ctx, &adk.ChatModelAgentConfig{
+		Name:        "t",
+		Description: "t",
+		Model:       base,
+		Handlers: []adk.ChatModelAgentMiddleware{
+			&runLocalSetterHandler{key: activeModelKey, val: ""},
+			handler,
+		},
+		MaxIterations: 1,
+	})
+	require.NoError(t, err)
+
+	iter := agent.Run(ctx, &adk.AgentInput{Messages: []adk.Message{schema.UserMessage("hi")}})
+	var last string
+	for {
+		ev, ok := iter.Next()
+		if !ok {
+			break
+		}
+		require.NoError(t, ev.Err)
+		if ev.Output == nil || ev.Output.MessageOutput == nil {
+			continue
+		}
+		msg, err := ev.Output.MessageOutput.GetMessage()
+		require.NoError(t, err)
+		if msg != nil {
+			last = msg.Content
+		}
+	}
+
+	assert.Equal(t, "base", last)
+	assert.Equal(t, 1, base.calls)
+	assert.Equal(t, 0, other.calls)
+}
+
 func TestGetMessagesFromState_InAgentContext(t *testing.T) {
 	ctx := context.Background()
 
@@ -716,6 +999,32 @@ func TestInvokableRun_InlineMode(t *testing.T) {
 		result, err := st.InvokableRun(ctx, `{"skill":"pdf","task":"t","x":1}`)
 		assert.NoError(t, err)
 		assert.Equal(t, "decoded", result)
+	})
+
+	t.Run("custom skill content returns error", func(t *testing.T) {
+		st := &skillTool{
+			b: &inMemoryBackend{m: []Skill{
+				{
+					FrontMatter:   FrontMatter{Name: "pdf", Description: "PDF processing"},
+					Content:       "Process PDF files here",
+					BaseDirectory: "/skills/pdf",
+				},
+			}},
+			toolName: "skill",
+			customToolParamsHandler: &CustomToolParamsHandler{
+				AdditionToolParamsFunc: func(_ context.Context) *schema.ParamsOneOf {
+					return schema.NewParamsOneOfByParams(map[string]*schema.ParameterInfo{
+						"skill": {Type: schema.String, Desc: "custom", Required: false},
+					})
+				},
+				SkillContentFunc: func(context.Context, SkillContentInput) (adk.I18nPrompts, error) {
+					return adk.I18nPrompts{}, errors.New("boom")
+				},
+			},
+		}
+		_, err := st.InvokableRun(ctx, `{"skill":"pdf"}`)
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "failed to build skill result")
 	})
 }
 
@@ -949,6 +1258,27 @@ func TestInvokableRun_AgentMode(t *testing.T) {
 		assert.Contains(t, result, "s1")
 	})
 
+	t.Run("agent event error returns error", func(t *testing.T) {
+		agent := &mockAgent{
+			events: []*adk.AgentEvent{
+				{Err: errors.New("boom")},
+			},
+		}
+		hub := &mockAgentHub{defaultAgent: agent}
+
+		st := &skillTool{
+			b: &inMemoryBackend{m: []Skill{
+				{FrontMatter: FrontMatter{Name: "s1", Context: ContextModeFork}, Content: "c1", BaseDirectory: "/d"},
+			}},
+			toolName: "skill",
+			agentHub: hub,
+		}
+
+		_, err := st.InvokableRun(ctx, `{"skill": "s1"}`)
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "failed to run agent event")
+	})
+
 	t.Run("custom fork messages is used", func(t *testing.T) {
 		agent := &mockAgent{
 			events: []*adk.AgentEvent{
@@ -982,6 +1312,36 @@ func TestInvokableRun_AgentMode(t *testing.T) {
 		require.Len(t, agent.lastIn.Messages, 1)
 		msg := agent.lastIn.Messages[0]
 		assert.Equal(t, "custom", msg.Content)
+	})
+
+	t.Run("custom fork messages returns error", func(t *testing.T) {
+		agent := &mockAgent{
+			events: []*adk.AgentEvent{
+				{
+					Output: &adk.AgentOutput{
+						MessageOutput: &adk.MessageVariant{
+							Message: schema.AssistantMessage("ok", nil),
+						},
+					},
+				},
+			},
+		}
+		hub := &mockAgentHub{defaultAgent: agent}
+
+		st := &skillTool{
+			b: &inMemoryBackend{m: []Skill{
+				{FrontMatter: FrontMatter{Name: "s1", Context: ContextModeFork}, Content: "c1", BaseDirectory: "/d"},
+			}},
+			toolName: "skill",
+			agentHub: hub,
+			customForkMessages: func(context.Context, ForkMessageInput) ([]adk.Message, error) {
+				return nil, errors.New("build msg fail")
+			},
+		}
+
+		_, err := st.InvokableRun(ctx, `{"skill": "s1"}`)
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "failed to build fork messages")
 	})
 
 	t.Run("custom fork result prompts from results is used", func(t *testing.T) {
@@ -1021,5 +1381,35 @@ func TestInvokableRun_AgentMode(t *testing.T) {
 		result, err := st.InvokableRun(ctx, `{"skill": "s1"}`)
 		assert.NoError(t, err)
 		assert.Equal(t, "E:p1,p2", result)
+	})
+
+	t.Run("custom fork result prompts returns error", func(t *testing.T) {
+		agent := &mockAgent{
+			events: []*adk.AgentEvent{
+				{
+					Output: &adk.AgentOutput{
+						MessageOutput: &adk.MessageVariant{
+							Message: schema.AssistantMessage("p1", nil),
+						},
+					},
+				},
+			},
+		}
+		hub := &mockAgentHub{defaultAgent: agent}
+
+		st := &skillTool{
+			b: &inMemoryBackend{m: []Skill{
+				{FrontMatter: FrontMatter{Name: "s1", Context: ContextModeFork}, Content: "c1", BaseDirectory: "/d"},
+			}},
+			toolName: "skill",
+			agentHub: hub,
+			customForkResult: func(context.Context, ForkResultInput) (adk.I18nPrompts, error) {
+				return adk.I18nPrompts{}, errors.New("format fail")
+			},
+		}
+
+		_, err := st.InvokableRun(ctx, `{"skill": "s1"}`)
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "format fail")
 	})
 }
