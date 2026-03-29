@@ -65,6 +65,7 @@ type HandlerHelper struct {
 	toolHandler             *ToolCallbackHandler
 	toolsNodeHandler        *ToolsNodeCallbackHandlers
 	agentHandler            *AgentCallbackHandler
+	agenticHandler          *AgenticCallbackHandler
 	agenticPromptHandler    *AgenticPromptCallbackHandler
 	agenticModelHandler     *AgenticModelCallbackHandler
 	agenticToolsNodeHandler *AgenticToolsNodeCallbackHandlers
@@ -154,6 +155,12 @@ func (c *HandlerHelper) Agent(handler *AgentCallbackHandler) *HandlerHelper {
 	return c
 }
 
+// Agentic sets the agentic callback handler for the handler helper, which will be called when an agentic agent is executed.
+func (c *HandlerHelper) Agentic(handler *AgenticCallbackHandler) *HandlerHelper {
+	c.agenticHandler = handler
+	return c
+}
+
 // Graph sets the graph handler for the handler helper, which will be called when the graph is executed.
 func (c *HandlerHelper) Graph(handler callbacks.Handler) *HandlerHelper {
 	c.composeTemplates[compose.ComponentOfGraph] = handler
@@ -206,6 +213,8 @@ func (c *handlerTemplate) OnStart(ctx context.Context, info *callbacks.RunInfo, 
 		return c.agenticToolsNodeHandler.OnStart(ctx, info, convAgenticToolsNodeCallbackInput(input))
 	case adk.ComponentOfAgent:
 		return c.agentHandler.OnStart(ctx, info, adk.ConvAgentCallbackInput(input))
+	case adk.ComponentOfAgentic:
+		return c.agenticHandler.OnStart(ctx, info, adk.ConvAgenticCallbackInput(input))
 	case compose.ComponentOfGraph,
 		compose.ComponentOfChain,
 		compose.ComponentOfLambda:
@@ -245,6 +254,8 @@ func (c *handlerTemplate) OnEnd(ctx context.Context, info *callbacks.RunInfo, ou
 		return c.agenticToolsNodeHandler.OnEnd(ctx, info, convAgenticToolsNodeCallbackOutput(output))
 	case adk.ComponentOfAgent:
 		return c.agentHandler.OnEnd(ctx, info, adk.ConvAgentCallbackOutput(output))
+	case adk.ComponentOfAgentic:
+		return c.agenticHandler.OnEnd(ctx, info, adk.ConvAgenticCallbackOutput(output))
 	case compose.ComponentOfGraph,
 		compose.ComponentOfChain,
 		compose.ComponentOfLambda:
@@ -402,6 +413,10 @@ func (c *handlerTemplate) Needed(ctx context.Context, info *callbacks.RunInfo, t
 		}
 	case adk.ComponentOfAgent:
 		if c.agentHandler != nil && c.agentHandler.Needed(ctx, info, timing) {
+			return true
+		}
+	case adk.ComponentOfAgentic:
+		if c.agenticHandler != nil && c.agenticHandler.Needed(ctx, info, timing) {
 			return true
 		}
 	case compose.ComponentOfGraph,
@@ -644,12 +659,38 @@ func convToolsNodeCallbackOutput(src callbacks.CallbackInput) []*schema.Message 
 	}
 }
 
+// AgentCallbackHandler handles callbacks for agents using *schema.Message.
+// Use ComponentOfAgent to filter callback events to agent-related events.
 type AgentCallbackHandler struct {
+	// OnStart is called when an agent run begins. Return a modified context to propagate values.
 	OnStart func(ctx context.Context, info *callbacks.RunInfo, input *adk.AgentCallbackInput) context.Context
-	OnEnd   func(ctx context.Context, info *callbacks.RunInfo, output *adk.AgentCallbackOutput) context.Context
+	// OnEnd is called when an agent run completes. The output's Events iterator should be
+	// consumed asynchronously to avoid blocking.
+	OnEnd func(ctx context.Context, info *callbacks.RunInfo, output *adk.AgentCallbackOutput) context.Context
 }
 
 func (ch *AgentCallbackHandler) Needed(ctx context.Context, info *callbacks.RunInfo, timing callbacks.CallbackTiming) bool {
+	switch timing {
+	case callbacks.TimingOnStart:
+		return ch.OnStart != nil
+	case callbacks.TimingOnEnd:
+		return ch.OnEnd != nil
+	default:
+		return false
+	}
+}
+
+// AgenticCallbackHandler handles callbacks for agentic agents using *schema.AgenticMessage.
+// Use ComponentOfAgentic to filter callback events to agentic-agent-related events.
+type AgenticCallbackHandler struct {
+	// OnStart is called when an agentic agent run begins. Return a modified context to propagate values.
+	OnStart func(ctx context.Context, info *callbacks.RunInfo, input *adk.AgenticCallbackInput) context.Context
+	// OnEnd is called when an agentic agent run completes. The output's Events iterator should be
+	// consumed asynchronously to avoid blocking.
+	OnEnd func(ctx context.Context, info *callbacks.RunInfo, output *adk.AgenticCallbackOutput) context.Context
+}
+
+func (ch *AgenticCallbackHandler) Needed(ctx context.Context, info *callbacks.RunInfo, timing callbacks.CallbackTiming) bool {
 	switch timing {
 	case callbacks.TimingOnStart:
 		return ch.OnStart != nil

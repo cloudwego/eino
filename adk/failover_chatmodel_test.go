@@ -104,19 +104,21 @@ func TestFailoverCurrentModelContext(t *testing.T) {
 				return schema.StreamReaderFromArray([]*schema.Message{schema.AssistantMessage("ok", nil)}), nil
 			},
 		}
-		ctx = setFailoverCurrentModel(ctx, m)
-		got := getFailoverCurrentModel(ctx)
-		require.NotNil(t, got)
-		require.Same(t, m, got.model)
+		ctx = typedSetFailoverCurrentModel[*schema.Message](ctx, m)
+		got, ok := typedGetFailoverCurrentModel[*schema.Message](ctx)
+		require.True(t, ok)
+		require.Same(t, m, got)
 	})
 
 	t.Run("wrong type", func(t *testing.T) {
 		ctx := context.WithValue(context.Background(), failoverCurrentModelKey{}, "bad")
-		require.Nil(t, getFailoverCurrentModel(ctx))
+		_, ok := typedGetFailoverCurrentModel[*schema.Message](ctx)
+		require.False(t, ok)
 	})
 
 	t.Run("missing", func(t *testing.T) {
-		require.Nil(t, getFailoverCurrentModel(context.Background()))
+		_, ok := typedGetFailoverCurrentModel[*schema.Message](context.Background())
+		require.False(t, ok)
 	})
 }
 
@@ -145,7 +147,7 @@ func TestFailoverProxyModel(t *testing.T) {
 				return schema.StreamReaderFromArray([]*schema.Message{schema.AssistantMessage("routed", nil)}), nil
 			},
 		}
-		ctx := setFailoverCurrentModel(context.Background(), target)
+		ctx := typedSetFailoverCurrentModel[*schema.Message](context.Background(), target)
 		p := &failoverProxyModel{}
 		msg, err := p.Generate(ctx, []*schema.Message{schema.UserMessage("hi")})
 		require.NoError(t, err)
@@ -167,7 +169,7 @@ func TestFailoverModelWrapper_Generate(t *testing.T) {
 				return schema.StreamReaderFromArray([]*schema.Message{schema.AssistantMessage("inner", nil)}), nil
 			},
 		}
-		w := newFailoverModelWrapper(inner, &ModelFailoverConfig{
+		w := newTypedFailoverModelWrapper[*schema.Message](inner, &ModelFailoverConfig{
 			MaxRetries:       2,
 			ShouldFailover:   func(context.Context, *schema.Message, error) bool { return true },
 			GetFailoverModel: nil,
@@ -217,8 +219,8 @@ func TestFailoverModelWrapper_Generate(t *testing.T) {
 			},
 		}
 
-		w := newFailoverModelWrapper(&failoverProxyModel{}, cfg)
-		ctx := withChatModelAgentExecCtx(context.Background(), &chatModelAgentExecCtx{
+		w := newTypedFailoverModelWrapper[*schema.Message](&failoverProxyModel{}, cfg)
+		ctx := withTypedChatModelAgentExecCtx[*schema.Message](context.Background(), &chatModelAgentExecCtx{
 			failoverLastSuccessModel: m1,
 		})
 		msg, err := w.Generate(ctx, []*schema.Message{schema.UserMessage("hi")})
@@ -253,8 +255,8 @@ func TestFailoverModelWrapper_Generate(t *testing.T) {
 			},
 		}
 
-		w := newFailoverModelWrapper(&failoverProxyModel{}, cfg)
-		ctx := withChatModelAgentExecCtx(context.Background(), &chatModelAgentExecCtx{
+		w := newTypedFailoverModelWrapper[*schema.Message](&failoverProxyModel{}, cfg)
+		ctx := withTypedChatModelAgentExecCtx[*schema.Message](context.Background(), &chatModelAgentExecCtx{
 			failoverLastSuccessModel: m1,
 		})
 		_, err := w.Generate(ctx, []*schema.Message{schema.UserMessage("hi")})
@@ -285,7 +287,7 @@ func TestFailoverModelWrapper_Generate(t *testing.T) {
 			},
 		}
 
-		w := newFailoverModelWrapper(inner, cfg)
+		w := newTypedFailoverModelWrapper[*schema.Message](inner, cfg)
 		_, err := w.Generate(context.Background(), []*schema.Message{schema.UserMessage("hi")})
 		require.ErrorIs(t, err, wantErr)
 		require.Equal(t, int32(0), atomic.LoadInt32(&called))
@@ -300,7 +302,7 @@ func TestFailoverModelWrapper_Generate(t *testing.T) {
 			},
 		}
 
-		w := newFailoverModelWrapper(&failoverProxyModel{}, cfg)
+		w := newTypedFailoverModelWrapper[*schema.Message](&failoverProxyModel{}, cfg)
 		msg, err := w.Generate(context.Background(), []*schema.Message{schema.UserMessage("hi")})
 		require.Nil(t, msg)
 		require.Error(t, err)
@@ -339,8 +341,8 @@ func TestFailoverModelWrapper_Stream(t *testing.T) {
 			},
 		}
 
-		w := newFailoverModelWrapper(&failoverProxyModel{}, cfg)
-		ctx := withChatModelAgentExecCtx(context.Background(), &chatModelAgentExecCtx{
+		w := newTypedFailoverModelWrapper[*schema.Message](&failoverProxyModel{}, cfg)
+		ctx := withTypedChatModelAgentExecCtx[*schema.Message](context.Background(), &chatModelAgentExecCtx{
 			failoverLastSuccessModel: m1,
 		})
 		sr, err := w.Stream(ctx, []*schema.Message{in})
@@ -392,8 +394,8 @@ func TestFailoverModelWrapper_Stream(t *testing.T) {
 			},
 		}
 
-		w := newFailoverModelWrapper(&failoverProxyModel{}, cfg)
-		ctx := withChatModelAgentExecCtx(context.Background(), &chatModelAgentExecCtx{
+		w := newTypedFailoverModelWrapper[*schema.Message](&failoverProxyModel{}, cfg)
+		ctx := withTypedChatModelAgentExecCtx[*schema.Message](context.Background(), &chatModelAgentExecCtx{
 			failoverLastSuccessModel: m1,
 		})
 		sr, err := w.Stream(ctx, []*schema.Message{schema.UserMessage("hi")})
@@ -453,8 +455,8 @@ func TestFailoverModelWrapper_Stream(t *testing.T) {
 			},
 		}
 
-		w := newFailoverModelWrapper(&failoverProxyModel{}, cfg)
-		ctx := withChatModelAgentExecCtx(context.Background(), &chatModelAgentExecCtx{
+		w := newTypedFailoverModelWrapper[*schema.Message](&failoverProxyModel{}, cfg)
+		ctx := withTypedChatModelAgentExecCtx[*schema.Message](context.Background(), &chatModelAgentExecCtx{
 			failoverLastSuccessModel: m1,
 		})
 		sr, err := w.Stream(ctx, []*schema.Message{schema.UserMessage("hi")})
@@ -491,8 +493,8 @@ func TestFailoverModelWrapper_Stream(t *testing.T) {
 			},
 		}
 
-		w := newFailoverModelWrapper(&failoverProxyModel{}, cfg)
-		ctx := withChatModelAgentExecCtx(context.Background(), &chatModelAgentExecCtx{
+		w := newTypedFailoverModelWrapper[*schema.Message](&failoverProxyModel{}, cfg)
+		ctx := withTypedChatModelAgentExecCtx[*schema.Message](context.Background(), &chatModelAgentExecCtx{
 			failoverLastSuccessModel: m1,
 		})
 		sr, err := w.Stream(ctx, []*schema.Message{schema.UserMessage("hi")})
@@ -524,8 +526,8 @@ func TestFailoverModelWrapper_Stream(t *testing.T) {
 			},
 		}
 
-		w := newFailoverModelWrapper(&failoverProxyModel{}, cfg)
-		ctx := withChatModelAgentExecCtx(context.Background(), &chatModelAgentExecCtx{
+		w := newTypedFailoverModelWrapper[*schema.Message](&failoverProxyModel{}, cfg)
+		ctx := withTypedChatModelAgentExecCtx[*schema.Message](context.Background(), &chatModelAgentExecCtx{
 			failoverLastSuccessModel: m1,
 		})
 		sr, err := w.Stream(ctx, []*schema.Message{schema.UserMessage("hi")})
@@ -563,8 +565,8 @@ func TestFailoverModelWrapper_Stream(t *testing.T) {
 			},
 		}
 
-		w := newFailoverModelWrapper(&failoverProxyModel{}, cfg)
-		ctx := withChatModelAgentExecCtx(context.Background(), &chatModelAgentExecCtx{
+		w := newTypedFailoverModelWrapper[*schema.Message](&failoverProxyModel{}, cfg)
+		ctx := withTypedChatModelAgentExecCtx[*schema.Message](context.Background(), &chatModelAgentExecCtx{
 			failoverLastSuccessModel: m1,
 		})
 		sr, err := w.Stream(ctx, []*schema.Message{schema.UserMessage("hi")})
@@ -583,7 +585,7 @@ func TestFailoverModelWrapper_Stream(t *testing.T) {
 			},
 		}
 
-		w := newFailoverModelWrapper(&failoverProxyModel{}, cfg)
+		w := newTypedFailoverModelWrapper[*schema.Message](&failoverProxyModel{}, cfg)
 		sr, err := w.Stream(context.Background(), []*schema.Message{schema.UserMessage("hi")})
 		require.Nil(t, sr)
 		require.Error(t, err)
@@ -612,7 +614,7 @@ func TestFailoverModelWrapper_Stream(t *testing.T) {
 			},
 		}
 
-		w := newFailoverModelWrapper(inner, cfg)
+		w := newTypedFailoverModelWrapper[*schema.Message](inner, cfg)
 		sr, err := w.Stream(context.Background(), []*schema.Message{schema.UserMessage("hi")})
 		require.Nil(t, sr)
 		require.ErrorIs(t, err, wantErr)
@@ -665,8 +667,8 @@ func TestFailoverModelWrapper_Stream(t *testing.T) {
 			},
 		}
 
-		w := newFailoverModelWrapper(&failoverProxyModel{}, cfg)
-		baseCtx := withChatModelAgentExecCtx(context.Background(), &chatModelAgentExecCtx{
+		w := newTypedFailoverModelWrapper[*schema.Message](&failoverProxyModel{}, cfg)
+		baseCtx := withTypedChatModelAgentExecCtx[*schema.Message](context.Background(), &chatModelAgentExecCtx{
 			failoverLastSuccessModel: m1,
 		})
 		ctx, cancel := context.WithCancel(baseCtx)

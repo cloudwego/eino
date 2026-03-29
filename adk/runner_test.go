@@ -21,6 +21,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/cloudwego/eino/schema"
 )
@@ -260,4 +261,51 @@ func TestRunner_Query_WithStreaming(t *testing.T) {
 	// Verify that the iterator is now closed
 	_, ok = iterator.Next()
 	assert.False(t, ok)
+}
+
+func TestResumeWithMissingCheckpoint(t *testing.T) {
+	ctx := context.Background()
+
+	agent := &myAgenticAgent{
+		name: "resume-agent",
+		runFn: func(ctx context.Context, input *TypedAgentInput[*schema.AgenticMessage], options ...AgentRunOption) *AsyncIterator[*TypedAgentEvent[*schema.AgenticMessage]] {
+			iter, gen := NewAsyncIteratorPair[*TypedAgentEvent[*schema.AgenticMessage]]()
+			go func() {
+				defer gen.Close()
+				gen.Send(&TypedAgentEvent[*schema.AgenticMessage]{
+					Output: &TypedAgentOutput[*schema.AgenticMessage]{
+						MessageOutput: &TypedMessageVariant[*schema.AgenticMessage]{
+							Message: agenticMsg("ok"),
+						},
+					},
+				})
+			}()
+			return iter
+		},
+	}
+
+	store := newMyStore()
+	runner := NewTypedRunner[*schema.AgenticMessage](TypedRunnerConfig[*schema.AgenticMessage]{
+		Agent:           agent,
+		CheckPointStore: store,
+	})
+
+	require.NotPanics(t, func() {
+		iter, err := runner.ResumeWithParams(ctx, "nonexistent-checkpoint", &ResumeParams{
+			Targets: map[string]any{"fake-id": nil},
+		})
+		if err != nil {
+			t.Logf("Got expected error: %v", err)
+			return
+		}
+		for {
+			event, ok := iter.Next()
+			if !ok {
+				break
+			}
+			if event.Err != nil {
+				t.Logf("Got error event: %v", event.Err)
+			}
+		}
+	}, "ResumeWithParams with nonexistent checkpoint should not panic")
 }
