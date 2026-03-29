@@ -45,7 +45,7 @@ When transferring: OUTPUT ONLY THE FUNCTION CALL`
 	agentDescriptionTplChinese = "\n- Agent 名字: %s\n  Agent 描述: %s"
 )
 
-func genTransferToAgentInstruction(ctx context.Context, agents []Agent) string {
+func genTransferToAgentInstruction[M MessageType](ctx context.Context, agents []TypedAgent[M]) string {
 	tpl := internal.SelectPrompt(internal.I18nPrompts{
 		English: agentDescriptionTpl,
 		Chinese: agentDescriptionTplChinese,

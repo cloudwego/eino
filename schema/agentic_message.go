@@ -17,7 +17,9 @@
 package schema
 
 import (
+	"bytes"
 	"context"
+	"encoding/gob"
 	"encoding/json"
 	"fmt"
 	"reflect"
@@ -390,6 +392,47 @@ type MCPListToolsItem struct {
 
 	// InputSchema is the JSON schema that describes the tool input parameters.
 	InputSchema *jsonschema.Schema `json:"input_schema,omitempty"`
+}
+
+type mcpListToolsItemGob struct {
+	Name            string
+	Description     string
+	InputSchemaJSON []byte
+}
+
+func (m *MCPListToolsItem) GobEncode() ([]byte, error) {
+	g := mcpListToolsItemGob{
+		Name:        m.Name,
+		Description: m.Description,
+	}
+	if m.InputSchema != nil {
+		b, err := json.Marshal(m.InputSchema)
+		if err != nil {
+			return nil, fmt.Errorf("failed to marshal MCPListToolsItem.InputSchema: %w", err)
+		}
+		g.InputSchemaJSON = b
+	}
+	var buf bytes.Buffer
+	if err := gob.NewEncoder(&buf).Encode(&g); err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
+}
+
+func (m *MCPListToolsItem) GobDecode(data []byte) error {
+	var g mcpListToolsItemGob
+	if err := gob.NewDecoder(bytes.NewReader(data)).Decode(&g); err != nil {
+		return err
+	}
+	m.Name = g.Name
+	m.Description = g.Description
+	if len(g.InputSchemaJSON) > 0 {
+		m.InputSchema = &jsonschema.Schema{}
+		if err := json.Unmarshal(g.InputSchemaJSON, m.InputSchema); err != nil {
+			return fmt.Errorf("failed to unmarshal MCPListToolsItem.InputSchema: %w", err)
+		}
+	}
+	return nil
 }
 
 type MCPToolApprovalRequest struct {

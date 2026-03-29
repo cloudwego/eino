@@ -22,7 +22,19 @@ import (
 	"github.com/cloudwego/eino/schema"
 )
 
-// BaseChatModel defines the core interface for all chat model implementations.
+// BaseModel is the generic base model interface parameterized by message type M.
+// It exposes two modes of interaction:
+//   - [BaseModel.Generate]: blocks until the model returns a complete response.
+//   - [BaseModel.Stream]: returns a [schema.StreamReader] that yields message
+//     chunks incrementally as the model generates them.
+type BaseModel[M any] interface {
+	Generate(ctx context.Context, input []M, opts ...Option) (M, error)
+	Stream(ctx context.Context, input []M, opts ...Option) (*schema.StreamReader[M], error)
+}
+
+// BaseChatModel is a backward-compatible type alias for BaseModel specialized
+// with *schema.Message. All existing code using model.BaseChatModel continues
+// to work without modification.
 //
 // It exposes two modes of interaction:
 //   - [BaseChatModel.Generate]: blocks until the model returns a complete response.
@@ -49,12 +61,8 @@ import (
 // Note: a [schema.StreamReader] can only be read once. If multiple consumers
 // need the stream, it must be copied before reading.
 //
-//go:generate  mockgen -destination ../../internal/mock/components/model/ChatModel_mock.go --package model -source interface.go
-type BaseChatModel interface {
-	Generate(ctx context.Context, input []*schema.Message, opts ...Option) (*schema.Message, error)
-	Stream(ctx context.Context, input []*schema.Message, opts ...Option) (
-		*schema.StreamReader[*schema.Message], error)
-}
+//go:generate  mockgen -destination ../../internal/mock/components/model/ChatModel_mock.go --package model github.com/cloudwego/eino/components/model BaseChatModel,ChatModel,ToolCallingChatModel
+type BaseChatModel = BaseModel[*schema.Message]
 
 // Deprecated: Use [ToolCallingChatModel] instead.
 //
@@ -85,19 +93,11 @@ type ChatModel interface {
 type ToolCallingChatModel interface {
 	BaseChatModel
 
-	// WithTools returns a new ToolCallingChatModel instance with the specified tools bound.
-	// This method does not modify the current instance, making it safer for concurrent use.
 	WithTools(tools []*schema.ToolInfo) (ToolCallingChatModel, error)
 }
 
-// AgenticModel defines the interface for agentic models that support AgenticMessage.
-// It provides methods for generating complete and streaming outputs, and supports
-// tool calling via the WithTools method.
-type AgenticModel interface {
-	Generate(ctx context.Context, input []*schema.AgenticMessage, opts ...Option) (*schema.AgenticMessage, error)
-	Stream(ctx context.Context, input []*schema.AgenticMessage, opts ...Option) (*schema.StreamReader[*schema.AgenticMessage], error)
-
-	// WithTools returns a new Model instance with the specified tools bound.
-	// This method does not modify the current instance, making it safer for concurrent use.
-	WithTools(tools []*schema.ToolInfo) (AgenticModel, error)
-}
+// AgenticModel is a type alias for BaseModel specialized with
+// *schema.AgenticMessage. Unlike ToolCallingChatModel, agentic models do NOT
+// expose a WithTools method; tools are passed at request time via the
+// model.WithTools option, consistent with how ChatModelAgent binds tools.
+type AgenticModel = BaseModel[*schema.AgenticMessage]

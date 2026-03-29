@@ -54,11 +54,8 @@ type InterruptInfo struct {
 	InterruptContexts []*InterruptCtx
 }
 
-// Interrupt creates a basic interrupt action.
-// This is used when an agent needs to pause its execution to request external input or intervention,
-// but does not need to save any internal state to be restored upon resumption.
-// The `info` parameter is user-facing data that describes the reason for the interrupt.
-func Interrupt(ctx context.Context, info any) *AgentEvent {
+// TypedInterrupt creates a typed interrupt event that pauses execution to request external input.
+func TypedInterrupt[M MessageType](ctx context.Context, info any) *TypedAgentEvent[M] {
 	var rp []RunStep
 	rCtx := getRunCtx(ctx)
 	if rCtx != nil {
@@ -68,12 +65,46 @@ func Interrupt(ctx context.Context, info any) *AgentEvent {
 	is, err := core.Interrupt(ctx, info, nil, nil,
 		core.WithLayerPayload(rp))
 	if err != nil {
-		return &AgentEvent{Err: err}
+		return &TypedAgentEvent[M]{Err: err}
 	}
 
 	contexts := core.ToInterruptContexts(is, allowedAddressSegmentTypes)
 
-	return &AgentEvent{
+	return &TypedAgentEvent[M]{
+		Action: &AgentAction{
+			Interrupted: &InterruptInfo{
+				InterruptContexts: contexts,
+			},
+			internalInterrupted: is,
+		},
+	}
+}
+
+// Interrupt creates a basic interrupt action.
+// This is used when an agent needs to pause its execution to request external input or intervention,
+// but does not need to save any internal state to be restored upon resumption.
+// The `info` parameter is user-facing data that describes the reason for the interrupt.
+func Interrupt(ctx context.Context, info any) *AgentEvent {
+	return TypedInterrupt[*schema.Message](ctx, info)
+}
+
+// TypedStatefulInterrupt creates a typed interrupt event that also saves the agent's internal state.
+func TypedStatefulInterrupt[M MessageType](ctx context.Context, info any, state any) *TypedAgentEvent[M] {
+	var rp []RunStep
+	rCtx := getRunCtx(ctx)
+	if rCtx != nil {
+		rp = rCtx.RunPath
+	}
+
+	is, err := core.Interrupt(ctx, info, state, nil,
+		core.WithLayerPayload(rp))
+	if err != nil {
+		return &TypedAgentEvent[M]{Err: err}
+	}
+
+	contexts := core.ToInterruptContexts(is, allowedAddressSegmentTypes)
+
+	return &TypedAgentEvent[M]{
 		Action: &AgentAction{
 			Interrupted: &InterruptInfo{
 				InterruptContexts: contexts,
@@ -88,38 +119,12 @@ func Interrupt(ctx context.Context, info any) *AgentEvent {
 // The `info` parameter is user-facing data describing the interrupt.
 // The `state` parameter is the agent's internal state object, which will be serialized and stored.
 func StatefulInterrupt(ctx context.Context, info any, state any) *AgentEvent {
-	var rp []RunStep
-	rCtx := getRunCtx(ctx)
-	if rCtx != nil {
-		rp = rCtx.RunPath
-	}
-
-	is, err := core.Interrupt(ctx, info, state, nil,
-		core.WithLayerPayload(rp))
-	if err != nil {
-		return &AgentEvent{Err: err}
-	}
-
-	contexts := core.ToInterruptContexts(is, allowedAddressSegmentTypes)
-
-	return &AgentEvent{
-		Action: &AgentAction{
-			Interrupted: &InterruptInfo{
-				InterruptContexts: contexts,
-			},
-			internalInterrupted: is,
-		},
-	}
+	return TypedStatefulInterrupt[*schema.Message](ctx, info, state)
 }
 
-// CompositeInterrupt creates an interrupt action for a workflow agent.
-// It combines the interrupts from one or more of its sub-agents into a single, cohesive interrupt.
-// This is used by workflow agents (like Sequential, Parallel, or Loop) to propagate interrupts from their children.
-// The `info` parameter is user-facing data describing the workflow's own reason for interrupting.
-// The `state` parameter is the workflow agent's own state (e.g., the index of the sub-agent that was interrupted).
-// The `subInterruptSignals` is a variadic list of the InterruptSignal objects from the interrupted sub-agents.
-func CompositeInterrupt(ctx context.Context, info any, state any,
-	subInterruptSignals ...*InterruptSignal) *AgentEvent {
+// TypedCompositeInterrupt creates a typed interrupt event that aggregates sub-interrupt signals.
+func TypedCompositeInterrupt[M MessageType](ctx context.Context, info any, state any,
+	subInterruptSignals ...*InterruptSignal) *TypedAgentEvent[M] {
 	var rp []RunStep
 	rCtx := getRunCtx(ctx)
 	if rCtx != nil {
@@ -129,12 +134,12 @@ func CompositeInterrupt(ctx context.Context, info any, state any,
 	is, err := core.Interrupt(ctx, info, state, subInterruptSignals,
 		core.WithLayerPayload(rp))
 	if err != nil {
-		return &AgentEvent{Err: err}
+		return &TypedAgentEvent[M]{Err: err}
 	}
 
 	contexts := core.ToInterruptContexts(is, allowedAddressSegmentTypes)
 
-	return &AgentEvent{
+	return &TypedAgentEvent[M]{
 		Action: &AgentAction{
 			Interrupted: &InterruptInfo{
 				InterruptContexts: contexts,
@@ -142,6 +147,12 @@ func CompositeInterrupt(ctx context.Context, info any, state any,
 			internalInterrupted: is,
 		},
 	}
+}
+
+// CompositeInterrupt creates an interrupt event that aggregates sub-interrupt signals.
+func CompositeInterrupt(ctx context.Context, info any, state any,
+	subInterruptSignals ...*InterruptSignal) *AgentEvent {
+	return TypedCompositeInterrupt[*schema.Message](ctx, info, state, subInterruptSignals...)
 }
 
 // Address represents the unique, hierarchical address of a component within an execution.
@@ -202,9 +213,9 @@ type serialization struct {
 	InterruptID2State   map[string]core.InterruptState
 }
 
-func (r *Runner) loadCheckPoint(ctx context.Context, checkpointID string) (
+func runnerLoadCheckPointImpl(store CheckPointStore, ctx context.Context, checkpointID string) (
 	context.Context, *runContext, *ResumeInfo, error) {
-	data, existed, err := r.store.Get(ctx, checkpointID)
+	data, existed, err := store.Get(ctx, checkpointID)
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("failed to get checkpoint from store: %w", err)
 	}
@@ -266,13 +277,15 @@ func preprocessADKCheckpoint(data []byte) []byte {
 		[]byte(lenPrefixedCompatName))
 }
 
-func (r *Runner) saveCheckPoint(
+func runnerSaveCheckPointImpl(
+	enableStreaming bool,
+	store CheckPointStore,
 	ctx context.Context,
 	key string,
 	info *InterruptInfo,
 	is *core.InterruptSignal,
 ) error {
-	if r.store == nil {
+	if store == nil {
 		return nil
 	}
 
@@ -286,12 +299,12 @@ func (r *Runner) saveCheckPoint(
 		Info:                info,
 		InterruptID2Address: id2Addr,
 		InterruptID2State:   id2State,
-		EnableStreaming:     r.enableStreaming,
+		EnableStreaming:     enableStreaming,
 	})
 	if err != nil {
 		return fmt.Errorf("failed to encode checkpoint: %w", err)
 	}
-	return r.store.Set(ctx, key, buf.Bytes())
+	return store.Set(ctx, key, buf.Bytes())
 }
 
 const bridgeCheckpointID = "adk_react_mock_key"

@@ -31,14 +31,14 @@ import (
 // ErrExceedMaxIterations indicates the agent reached the maximum iterations limit.
 var ErrExceedMaxIterations = errors.New("exceeds max iterations")
 
-// State holds agent runtime state including messages and user-extensible storage.
+// TypedState holds agent runtime state including messages and user-extensible storage.
 //
 // Deprecated: This type will be unexported in v1.0.0. Use ChatModelAgentState
 // in HandlerMiddleware and AgentMiddleware callbacks instead. Direct use of
 // compose.ProcessState[*State] is discouraged and will stop working in v1.0.0;
 // use the handler APIs instead.
-type State struct {
-	Messages []Message
+type TypedState[M MessageType] struct {
+	Messages []M
 	Extra    map[string]any
 
 	// Internal fields below - do not access directly.
@@ -48,9 +48,13 @@ type State struct {
 	ToolGenActions           map[string]*AgentAction
 	AgentName                string
 	RemainingIterations      int
-	ReturnDirectlyEvent      *AgentEvent
+	ReturnDirectlyEvent      *TypedAgentEvent[M]
 	RetryAttempt             int
 }
+
+type State = TypedState[*schema.Message]
+
+type agenticState = TypedState[*schema.AgenticMessage]
 
 const (
 	stateGobNameV07 = "_eino_adk_react_state"
@@ -77,50 +81,57 @@ func init() {
 	schema.RegisterName[*State](stateGobNameV07)
 	schema.RegisterName[*stateV080](stateGobNameV080)
 
-	// the following two lines of registration mainly for backward compatibility
-	// when decoding checkpoints created by v0.8.0 - v0.8.3
+	schema.RegisterName[*TypedState[*schema.AgenticMessage]]("_eino_adk_agentic_state")
+	schema.RegisterName[*TypedAgentEvent[*schema.AgenticMessage]]("_eino_adk_agentic_event")
+
 	gob.Register(&AgentEvent{})
 	gob.Register(int(0))
+	gob.Register(&AgentInput{})
+	gob.Register(&TypedAgentInput[*schema.AgenticMessage]{})
+	gob.Register(&typedAgentEventWrapper[*schema.AgenticMessage]{})
+	gob.Register(&[]*typedAgentEventWrapper[*schema.AgenticMessage]{})
+	gob.Register(&typedLaneEventsOf[*schema.AgenticMessage]{})
+	gob.Register(map[int][]*typedAgentEventWrapper[*schema.AgenticMessage]{})
 	schema.RegisterName[*reactInput]("_eino_adk_react_input")
 }
 
-func (s *State) getReturnDirectlyEvent() *AgentEvent {
+func (s *TypedState[M]) getReturnDirectlyEvent() *TypedAgentEvent[M] {
 	return s.ReturnDirectlyEvent
 }
 
-func (s *State) setReturnDirectlyEvent(event *AgentEvent) {
+func (s *TypedState[M]) setReturnDirectlyEvent(event *TypedAgentEvent[M]) {
 	s.ReturnDirectlyEvent = event
 }
 
-func (s *State) getRetryAttempt() int {
+func (s *TypedState[M]) getRetryAttempt() int {
 	return s.RetryAttempt
 }
 
-func (s *State) setRetryAttempt(attempt int) {
+func (s *TypedState[M]) setRetryAttempt(attempt int) {
 	s.RetryAttempt = attempt
 }
 
-func (s *State) getReturnDirectlyToolCallID() string {
+func (s *TypedState[M]) getReturnDirectlyToolCallID() string {
 	return s.ReturnDirectlyToolCallID
 }
 
-func (s *State) setReturnDirectlyToolCallID(id string) {
+func (s *TypedState[M]) setReturnDirectlyToolCallID(id string) {
 	s.ReturnDirectlyToolCallID = id
 	s.HasReturnDirectly = id != ""
 }
 
-func (s *State) getToolGenActions() map[string]*AgentAction {
+func (s *TypedState[M]) getToolGenActions() map[string]*AgentAction {
 	return s.ToolGenActions
 }
 
-func (s *State) setToolGenAction(key string, action *AgentAction) {
+func (s *TypedState[M]) setToolGenAction(key string, action *AgentAction) {
 	if s.ToolGenActions == nil {
 		s.ToolGenActions = make(map[string]*AgentAction)
 	}
 	s.ToolGenActions[key] = action
 }
 
-func (s *State) popToolGenAction(key string) *AgentAction {
+func (s *TypedState[M]) popToolGenAction(key string) *AgentAction {
 	if s.ToolGenActions == nil {
 		return nil
 	}
@@ -129,15 +140,15 @@ func (s *State) popToolGenAction(key string) *AgentAction {
 	return action
 }
 
-func (s *State) getRemainingIterations() int {
+func (s *TypedState[M]) getRemainingIterations() int {
 	return s.RemainingIterations
 }
 
-func (s *State) setRemainingIterations(iterations int) {
+func (s *TypedState[M]) setRemainingIterations(iterations int) {
 	s.RemainingIterations = iterations
 }
 
-func (s *State) decrementRemainingIterations() {
+func (s *TypedState[M]) decrementRemainingIterations() {
 	current := s.getRemainingIterations()
 	s.RemainingIterations = current - 1
 }
@@ -241,13 +252,11 @@ type reactInput struct {
 	Messages []Message
 }
 
-type reactConfig struct {
-	// model is the chat model used by the react graph.
-	// Tools are configured via model.WithTools call option, not the WithTools method.
-	model model.BaseChatModel
+type typedReactConfig[M MessageType] struct {
+	model model.BaseModel[M]
 
 	toolsConfig      *compose.ToolsNodeConfig
-	modelWrapperConf *modelWrapperConfig
+	modelWrapperConf *typedModelWrapperConfig[M]
 
 	toolsReturnDirectly map[string]bool
 
@@ -257,6 +266,8 @@ type reactConfig struct {
 
 	cancelCtx *cancelContext
 }
+
+type reactConfig = typedReactConfig[*schema.Message]
 
 func genToolInfos(ctx context.Context, config *compose.ToolsNodeConfig) ([]*schema.ToolInfo, error) {
 	toolInfos := make([]*schema.ToolInfo, 0, len(config.Tools))
