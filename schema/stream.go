@@ -86,9 +86,13 @@ func GetSourceName(err error) (string, bool) {
 //	}
 //
 //	defer sr.Close()
-//	for chunk, err := sr.Recv() {
+//	for {
+//		chunk, err := sr.Recv()
 //		if errors.Is(err, io.EOF) {
 //			break
+//		}
+//		if err != nil {
+//			panic(err)
 //		}
 //		fmt.Println(chunk)
 //	}
@@ -178,11 +182,14 @@ type StreamReader[T any] struct {
 // Recv receives a value from the stream.
 // eg.
 //
-//	for chunk, err := sr.Recv() {
+//	for {
+//		chunk, err := sr.Recv()
 //		if errors.Is(err, io.EOF) {
 //			break
 //		}
 //		if err != nil {
+//			panic(err)
+//		}
 //		fmt.Println(chunk)
 //	}
 func (sr *StreamReader[T]) Recv() (T, error) {
@@ -209,9 +216,13 @@ func (sr *StreamReader[T]) Recv() (T, error) {
 //
 //	defer sr.Close()
 //
-//	for chunk, err := sr.Recv() {
+//	for {
+//		chunk, err := sr.Recv()
 //		if errors.Is(err, io.EOF) {
 //			break
+//		}
+//		if err != nil {
+//			panic(err)
 //		}
 //		fmt.Println(chunk)
 //	}
@@ -437,7 +448,14 @@ func (s *stream[T]) closeRecv() {
 //	sr := schema.StreamReaderFromArray([]int{1, 2, 3})
 //	defer sr.Close()
 //
-//	for chunk, err := sr.Recv() {
+//	for {
+//		chunk, err := sr.Recv()
+//		if errors.Is(err, io.EOF) {
+//			break
+//		}
+//		if err != nil {
+//			panic(err)
+//		}
 //		fmt.Println(chunk)
 //	}
 func StreamReaderFromArray[T any](arr []T) *StreamReader[T] {
