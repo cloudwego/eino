@@ -446,7 +446,7 @@ func TestReductionMiddlewareClear(t *testing.T) {
 		backend := filesystem.NewInMemoryBackend()
 		config := &Config{
 			SkipTruncation:            true,
-			TokenCounter:               defaultTokenCounter,
+			TokenCounter:              defaultTokenCounter,
 			MaxTokensForClear:         20,
 			ClearRetentionSuffixLimit: 0,
 			ClearExcludeTools:         []string{"get_important_data"},
@@ -476,7 +476,7 @@ func TestReductionMiddlewareClear(t *testing.T) {
 					Function: schema.FunctionCall{Name: "get_weather", Arguments: `{"location": "London, UK", "unit": "c"}`},
 				},
 			}),
-			schema.ToolMessage("Sunny", "call_123456789"),
+			schema.ToolMessage("Sunny", "call_987654321"),
 			schema.AssistantMessage("", []schema.ToolCall{
 				{
 					ID:       "call_123456789",
@@ -485,38 +485,56 @@ func TestReductionMiddlewareClear(t *testing.T) {
 				},
 			}),
 			schema.ToolMessage("Important Data Content", "call_123456789"),
+			schema.AssistantMessage("", []schema.ToolCall{
+				{
+					ID:       "call_999",
+					Type:     "function",
+					Function: schema.FunctionCall{Name: "get_weather", Arguments: `{"location": "London, UK", "unit": "c"}`},
+				},
+			}),
+			schema.ToolMessage("Sunny", "call_999"),
 		}
 		_, s, err := mw.BeforeModelRewriteState(ctx, &adk.ChatModelAgentState{Messages: msgs}, &adk.ModelContext{Tools: toolsInfo})
 		assert.NoError(t, err)
 		assert.Equal(t, "<persisted-output>Tool result saved to: /tmp/clear/call_987654321\nUse read_file to view</persisted-output>", s.Messages[3].Content)
 		assert.Equal(t, "Important Data Content", s.Messages[5].Content)
-		_, err = backend.Read(ctx, &filesystem.ReadRequest{
+		b, err := backend.Read(ctx, &filesystem.ReadRequest{
 			FilePath: "/tmp/clear/call_987654321",
 		})
 		assert.NoError(t, err)
-		_, err = backend.Read(ctx, &filesystem.ReadRequest{
+		assert.Equal(t, "Sunny", b.Content)
+		b, err = backend.Read(ctx, &filesystem.ReadRequest{
 			FilePath: "/tmp/clear/call_123456789",
 		})
 		assert.Error(t, err)
+		assert.Equal(t, "file not found: /tmp/clear/call_123456789", err.Error())
 	})
 
 	t.Run("test ClearAtLeastTokens - not enough tokens cleared", func(t *testing.T) {
 		backend := filesystem.NewInMemoryBackend()
-		callCount := 0
 		config := &Config{
-			SkipTruncation:            true,
-			TokenCounter: func(_ context.Context, _ []adk.Message, _ []*schema.ToolInfo) (int64, error) {
-				callCount++
-				if callCount == 1 {
-					return 100, nil
+			SkipTruncation: true,
+			TokenCounter: func(_ context.Context, msgs []adk.Message, _ []*schema.ToolInfo) (int64, error) {
+				var size int
+				for _, msg := range msgs {
+					size += len(msg.Content)
+					for _, tc := range msg.ToolCalls {
+						size += len(tc.Function.Name)
+						size += len(tc.Function.Arguments)
+					}
 				}
-				return 99, nil
+				return int64(size), nil
 			},
 			MaxTokensForClear:         50,
-			ClearRetentionSuffixLimit: 0,
-			ClearAtLeastTokens:        2,
+			ClearRetentionSuffixLimit: 1,
+			ClearAtLeastTokens:        100,
 			ToolConfig: map[string]*ToolReductionConfig{
 				"get_weather": {
+					Backend:      backend,
+					SkipClear:    false,
+					ClearHandler: defaultClearHandler("/tmp", true, "read_file"),
+				},
+				"get_important_data": {
 					Backend:      backend,
 					SkipClear:    false,
 					ClearHandler: defaultClearHandler("/tmp", true, "read_file"),
@@ -536,11 +554,28 @@ func TestReductionMiddlewareClear(t *testing.T) {
 					Function: schema.FunctionCall{Name: "get_weather", Arguments: `{"location": "London, UK", "unit": "c"}`},
 				},
 			}),
-			schema.ToolMessage("Sunny", "call_123456789"),
+			schema.ToolMessage("Sunny Sunny Sunny Sunny Sunny Sunny Sunny Sunny Sunny Sunny Sunny Sunny Sunny", "call_123456789"),
+			schema.AssistantMessage("", []schema.ToolCall{
+				{
+					ID:       "call_123456789",
+					Type:     "function",
+					Function: schema.FunctionCall{Name: "get_important_data", Arguments: `{"id": "123"}`},
+				},
+			}),
+			schema.ToolMessage("Important Data Content, qweqweqweqweqweqweqweqweqweqweqweqweqweqweqweqweqweqweqweqweqweqweqweqweqweqweqweqweqweqweqweqweqweqweqweqweqweqweqweqweqweqweqweqweqwe", "call_123456789"),
+			schema.AssistantMessage("", []schema.ToolCall{
+				{
+					ID:       "call_999",
+					Type:     "function",
+					Function: schema.FunctionCall{Name: "get_weather", Arguments: `{"location": "London, UK", "unit": "c"}`},
+				},
+			}),
+			schema.ToolMessage("Sunny", "call_999"),
 		}
 		_, s, err := mw.BeforeModelRewriteState(ctx, &adk.ChatModelAgentState{Messages: msgs}, &adk.ModelContext{Tools: toolsInfo})
 		assert.NoError(t, err)
-		assert.Equal(t, "Sunny", s.Messages[3].Content)
+		assert.Equal(t, "Sunny Sunny Sunny Sunny Sunny Sunny Sunny Sunny Sunny Sunny Sunny Sunny Sunny", s.Messages[3].Content)
+		assert.Equal(t, "Important Data Content, qweqweqweqweqweqweqweqweqweqweqweqweqweqweqweqweqweqweqweqweqweqweqweqweqweqweqweqweqweqweqweqweqweqweqweqweqweqweqweqweqweqweqweqweqwe", s.Messages[5].Content)
 		_, err = backend.Read(ctx, &filesystem.ReadRequest{
 			FilePath: "/tmp/clear/call_987654321",
 		})
@@ -549,21 +584,29 @@ func TestReductionMiddlewareClear(t *testing.T) {
 
 	t.Run("test ClearAtLeastTokens - enough tokens cleared", func(t *testing.T) {
 		backend := filesystem.NewInMemoryBackend()
-		callCount := 0
 		config := &Config{
-			SkipTruncation:            true,
-			TokenCounter: func(_ context.Context, _ []adk.Message, _ []*schema.ToolInfo) (int64, error) {
-				callCount++
-				if callCount == 1 {
-					return 100, nil
+			SkipTruncation: true,
+			TokenCounter: func(_ context.Context, msgs []adk.Message, _ []*schema.ToolInfo) (int64, error) {
+				var size int
+				for _, msg := range msgs {
+					size += len(msg.Content)
+					for _, tc := range msg.ToolCalls {
+						size += len(tc.Function.Name)
+						size += len(tc.Function.Arguments)
+					}
 				}
-				return 50, nil
+				return int64(size), nil
 			},
 			MaxTokensForClear:         50,
-			ClearRetentionSuffixLimit: 0,
-			ClearAtLeastTokens:        1,
+			ClearRetentionSuffixLimit: 1,
+			ClearAtLeastTokens:        10,
 			ToolConfig: map[string]*ToolReductionConfig{
 				"get_weather": {
+					Backend:      backend,
+					SkipClear:    false,
+					ClearHandler: defaultClearHandler("/tmp", true, "read_file"),
+				},
+				"get_important_data": {
 					Backend:      backend,
 					SkipClear:    false,
 					ClearHandler: defaultClearHandler("/tmp", true, "read_file"),
@@ -583,15 +626,23 @@ func TestReductionMiddlewareClear(t *testing.T) {
 					Function: schema.FunctionCall{Name: "get_weather", Arguments: `{"location": "London, UK", "unit": "c"}`},
 				},
 			}),
-			schema.ToolMessage("Sunny", "call_123456789"),
+			schema.ToolMessage("Sunny Sunny Sunny Sunny Sunny Sunny Sunny Sunny Sunny Sunny Sunny Sunny Sunny", "call_123456789"),
 			schema.AssistantMessage("", []schema.ToolCall{
 				{
 					ID:       "call_123456789",
 					Type:     "function",
+					Function: schema.FunctionCall{Name: "get_important_data", Arguments: `{"id": "123"}`},
+				},
+			}),
+			schema.ToolMessage("Important Data Content, qweqweqweqweqweqweqweqweqweqweqweqweqweqweqweqweqweqweqweqweqweqweqweqweqweqweqweqweqweqweqweqweqweqweqweqweqweqweqweqweqweqweqweqweqwe", "call_123456789"),
+			schema.AssistantMessage("", []schema.ToolCall{
+				{
+					ID:       "call_999",
+					Type:     "function",
 					Function: schema.FunctionCall{Name: "get_weather", Arguments: `{"location": "London, UK", "unit": "c"}`},
 				},
 			}),
-			schema.ToolMessage("Sunny", "call_123456789"),
+			schema.ToolMessage("Sunny", "call_999"),
 		}
 		_, s, err := mw.BeforeModelRewriteState(ctx, &adk.ChatModelAgentState{Messages: msgs}, &adk.ModelContext{Tools: toolsInfo})
 		assert.NoError(t, err)
@@ -600,6 +651,183 @@ func TestReductionMiddlewareClear(t *testing.T) {
 			FilePath: "/tmp/clear/call_987654321",
 		})
 		assert.NoError(t, err)
+		assert.Equal(t, "<persisted-output>Tool result saved to: /tmp/clear/call_123456789\nUse read_file to view</persisted-output>", s.Messages[5].Content)
+		_, err = backend.Read(ctx, &filesystem.ReadRequest{
+			FilePath: "/tmp/clear/call_987654321",
+		})
+		assert.NoError(t, err)
+	})
+}
+
+func TestGetJointToolResult(t *testing.T) {
+	t.Run("test with ToolResult", func(t *testing.T) {
+		detail := &ToolDetail{
+			ToolResult: &schema.ToolResult{Parts: []schema.ToolOutputPart{{Type: schema.ToolPartTypeText, Text: "hello world"}}},
+		}
+		toolOutputParts, needProcess, err := getJointToolResult(detail)
+		assert.NoError(t, err)
+		assert.True(t, needProcess)
+		assert.Len(t, toolOutputParts, 1)
+		assert.Equal(t, schema.ToolPartTypeText, toolOutputParts[0].Type)
+		assert.Equal(t, "hello world", toolOutputParts[0].Text)
+	})
+
+	t.Run("test with multiple ToolResult parts", func(t *testing.T) {
+		detail := &ToolDetail{
+			ToolResult: &schema.ToolResult{Parts: []schema.ToolOutputPart{
+				{Type: schema.ToolPartTypeText, Text: "hello "},
+				{Type: schema.ToolPartTypeText, Text: "world"},
+			}},
+		}
+		toolOutputParts, needProcess, err := getJointToolResult(detail)
+		assert.NoError(t, err)
+		assert.True(t, needProcess)
+		assert.Len(t, toolOutputParts, 2)
+		assert.Equal(t, schema.ToolPartTypeText, toolOutputParts[0].Type)
+		assert.Equal(t, "hello ", toolOutputParts[0].Text)
+		assert.Equal(t, schema.ToolPartTypeText, toolOutputParts[1].Type)
+		assert.Equal(t, "world", toolOutputParts[1].Text)
+	})
+
+	t.Run("test with empty ToolResult parts", func(t *testing.T) {
+		detail := &ToolDetail{
+			ToolResult: &schema.ToolResult{Parts: []schema.ToolOutputPart{}},
+		}
+		toolOutputParts, needProcess, err := getJointToolResult(detail)
+		assert.NoError(t, err)
+		assert.False(t, needProcess)
+		assert.Nil(t, toolOutputParts)
+	})
+
+	t.Run("test with ToolResult multimodal", func(t *testing.T) {
+		detail := &ToolDetail{
+			ToolResult: &schema.ToolResult{Parts: []schema.ToolOutputPart{{Type: schema.ToolPartTypeImage, Text: "https://example.com/image.png"}}},
+		}
+		toolOutputParts, needProcess, err := getJointToolResult(detail)
+		assert.NoError(t, err)
+		assert.True(t, needProcess)
+		assert.Len(t, toolOutputParts, 1)
+		assert.Equal(t, schema.ToolPartTypeImage, toolOutputParts[0].Type)
+		assert.Equal(t, "https://example.com/image.png", toolOutputParts[0].Text)
+	})
+
+	t.Run("test with StreamToolResult", func(t *testing.T) {
+		sr, sw := schema.Pipe[*schema.ToolResult](10)
+		go func() {
+			sw.Send(&schema.ToolResult{Parts: []schema.ToolOutputPart{{Type: schema.ToolPartTypeText, Text: "hello "}}}, nil)
+			sw.Send(&schema.ToolResult{Parts: []schema.ToolOutputPart{{Type: schema.ToolPartTypeText, Text: "world"}}}, nil)
+			sw.Close()
+		}()
+
+		detail := &ToolDetail{
+			StreamToolResult: sr,
+		}
+		toolOutputParts, needProcess, err := getJointToolResult(detail)
+		assert.NoError(t, err)
+		assert.True(t, needProcess)
+		assert.Len(t, toolOutputParts, 1)
+		assert.Equal(t, schema.ToolPartTypeText, toolOutputParts[0].Type)
+		assert.Equal(t, "hello world", toolOutputParts[0].Text)
+	})
+
+	t.Run("test with StreamToolResult error", func(t *testing.T) {
+		sr, sw := schema.Pipe[*schema.ToolResult](10)
+		go func() {
+			sw.Send(nil, fmt.Errorf("stream error"))
+			sw.Close()
+		}()
+
+		detail := &ToolDetail{
+			StreamToolResult: sr,
+		}
+		toolOutputParts, needProcess, err := getJointToolResult(detail)
+		assert.NoError(t, err)
+		assert.False(t, needProcess)
+		assert.Nil(t, toolOutputParts)
+	})
+
+	t.Run("test with both ToolResult and StreamToolResult nil (should error)", func(t *testing.T) {
+		detail := &ToolDetail{}
+		toolOutputParts, needProcess, err := getJointToolResult(detail)
+		assert.Error(t, err)
+		assert.False(t, needProcess)
+		assert.Nil(t, toolOutputParts)
+	})
+}
+
+func TestDefaultTruncHandlerWithStreamToolResult(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("test short stream result no trunc", func(t *testing.T) {
+		sr, sw := schema.Pipe[*schema.ToolResult](10)
+		go func() {
+			sw.Send(&schema.ToolResult{Parts: []schema.ToolOutputPart{{Type: schema.ToolPartTypeText, Text: "short text"}}}, nil)
+			sw.Close()
+		}()
+
+		detail := &ToolDetail{
+			ToolContext: &adk.ToolContext{
+				Name:   "test",
+				CallID: "call_id",
+			},
+			ToolArgument:     &schema.ToolArgument{Text: "{}"},
+			StreamToolResult: sr,
+		}
+
+		fn := defaultTruncHandler("/tmp", 100)
+		result, err := fn(ctx, detail)
+		assert.NoError(t, err)
+		assert.False(t, result.NeedTrunc)
+	})
+
+	t.Run("test long stream result need trunc", func(t *testing.T) {
+		sr, sw := schema.Pipe[*schema.ToolResult](10)
+		go func() {
+			sw.Send(&schema.ToolResult{Parts: []schema.ToolOutputPart{{Type: schema.ToolPartTypeText, Text: strings.Repeat("hello world", 20)}}}, nil)
+			sw.Close()
+		}()
+
+		detail := &ToolDetail{
+			ToolContext: &adk.ToolContext{
+				Name:   "test",
+				CallID: "call_id",
+			},
+			ToolArgument:     &schema.ToolArgument{Text: "{}"},
+			StreamToolResult: sr,
+		}
+
+		fn := defaultTruncHandler("/tmp", 100)
+		result, err := fn(ctx, detail)
+		assert.NoError(t, err)
+		assert.True(t, result.NeedTrunc)
+	})
+}
+
+func TestDefaultClearHandlerWithStreamToolResult(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("test with stream result need offload", func(t *testing.T) {
+		sr, sw := schema.Pipe[*schema.ToolResult](10)
+		go func() {
+			sw.Send(&schema.ToolResult{Parts: []schema.ToolOutputPart{{Type: schema.ToolPartTypeText, Text: "streaming content"}}}, nil)
+			sw.Close()
+		}()
+
+		detail := &ToolDetail{
+			ToolContext: &adk.ToolContext{
+				Name:   "test",
+				CallID: "stream_call_id",
+			},
+			ToolArgument:     &schema.ToolArgument{Text: "{}"},
+			StreamToolResult: sr,
+		}
+
+		fn := defaultClearHandler("/tmp", true, "read_file")
+		result, err := fn(ctx, detail)
+		assert.NoError(t, err)
+		assert.True(t, result.NeedClear)
+		assert.True(t, result.NeedOffload)
+		assert.Equal(t, "streaming content", result.OffloadContent)
 	})
 }
 
@@ -985,9 +1213,9 @@ func TestDefaultClearHandler(t *testing.T) {
 				Parts: []schema.ToolOutputPart{{Type: schema.ToolPartTypeImage}},
 			},
 		}
-		_, err := handler(ctx, detail)
-		assert.Error(t, err)
-		assert.Contains(t, err.Error(), "not support multimodal")
+		result, err := handler(ctx, detail)
+		assert.NoError(t, err)
+		assert.Equal(t, detail.ToolResult, result.ToolResult)
 	})
 
 	t.Run("test no call id", func(t *testing.T) {
@@ -1002,5 +1230,225 @@ func TestDefaultClearHandler(t *testing.T) {
 		assert.NoError(t, err)
 		assert.True(t, result.NeedClear)
 		assert.NotEmpty(t, result.OffloadFilePath)
+	})
+}
+
+func TestStringifyToolOutputParts(t *testing.T) {
+	t.Run("test empty parts", func(t *testing.T) {
+		result := stringifyToolOutputParts([]schema.ToolOutputPart{})
+		assert.Equal(t, "", result)
+	})
+
+	t.Run("test single text part", func(t *testing.T) {
+		result := stringifyToolOutputParts([]schema.ToolOutputPart{
+			{Type: schema.ToolPartTypeText, Text: "hello world"},
+		})
+		assert.Equal(t, "hello world", result)
+	})
+
+	t.Run("test multiple text parts", func(t *testing.T) {
+		result := stringifyToolOutputParts([]schema.ToolOutputPart{
+			{Type: schema.ToolPartTypeText, Text: "hello "},
+			{Type: schema.ToolPartTypeText, Text: "world"},
+		})
+		expected := `[
+	{
+		"type": "text",
+		"text": "hello "
+	},
+	{
+		"type": "text",
+		"text": "world"
+	}
+]`
+		assert.JSONEq(t, expected, result)
+	})
+
+	t.Run("test with image part", func(t *testing.T) {
+		result := stringifyToolOutputParts([]schema.ToolOutputPart{
+			{Type: schema.ToolPartTypeImage, Text: "https://example.com/image.png"},
+		})
+		expected := `[
+	{
+		"type": "image",
+		"text": "https://example.com/image.png"
+	}
+]`
+		assert.JSONEq(t, expected, result)
+	})
+
+	t.Run("test mixed parts", func(t *testing.T) {
+		result := stringifyToolOutputParts([]schema.ToolOutputPart{
+			{Type: schema.ToolPartTypeText, Text: "hello world"},
+			{Type: schema.ToolPartTypeImage, Text: "https://example.com/image.png"},
+		})
+		expected := `[
+	{
+		"type": "text",
+		"text": "hello world"
+	},
+	{
+		"type": "image",
+		"text": "https://example.com/image.png"
+	}
+]`
+		assert.JSONEq(t, expected, result)
+	})
+}
+
+func TestClampPrefixToUTF8Boundary(t *testing.T) {
+	t.Run("test n <= 0", func(t *testing.T) {
+		result := clampPrefixToUTF8Boundary("hello world", 0)
+		assert.Equal(t, "", result)
+
+		result = clampPrefixToUTF8Boundary("hello world", -5)
+		assert.Equal(t, "", result)
+	})
+
+	t.Run("test n >= len(s)", func(t *testing.T) {
+		result := clampPrefixToUTF8Boundary("hello", 10)
+		assert.Equal(t, "hello", result)
+	})
+
+	t.Run("test ASCII string at rune boundary", func(t *testing.T) {
+		result := clampPrefixToUTF8Boundary("hello world", 5)
+		assert.Equal(t, "hello", result)
+	})
+
+	t.Run("test ASCII string not at rune boundary (should not happen)", func(t *testing.T) {
+		result := clampPrefixToUTF8Boundary("world", 3)
+		assert.Equal(t, "wor", result)
+	})
+
+	t.Run("test multi-byte UTF-8 characters at boundary", func(t *testing.T) {
+		s := "你好世界"
+		result := clampPrefixToUTF8Boundary(s, 3)
+		assert.Equal(t, "你", result)
+	})
+
+	t.Run("test multi-byte UTF-8 characters not at boundary", func(t *testing.T) {
+		s := "你好世界"
+		result := clampPrefixToUTF8Boundary(s, 2)
+		assert.Equal(t, "", result)
+
+		result = clampPrefixToUTF8Boundary(s, 4)
+		assert.Equal(t, "你", result)
+	})
+
+	t.Run("test mixed ASCII and multi-byte characters", func(t *testing.T) {
+		s := "hello你好world"
+		result := clampPrefixToUTF8Boundary(s, 5+3)
+		assert.Equal(t, "hello你", result)
+
+		result = clampPrefixToUTF8Boundary(s, 5+4)
+		assert.Equal(t, "hello你", result)
+
+		result = clampPrefixToUTF8Boundary(s, 5+6)
+		assert.Equal(t, "hello你好", result)
+	})
+}
+
+func TestClampSuffixToUTF8Boundary(t *testing.T) {
+	t.Run("test n <= 0", func(t *testing.T) {
+		result := clampSuffixToUTF8Boundary("hello world", 0)
+		assert.Equal(t, "", result)
+
+		result = clampSuffixToUTF8Boundary("hello world", -5)
+		assert.Equal(t, "", result)
+	})
+
+	t.Run("test n >= len(s)", func(t *testing.T) {
+		result := clampSuffixToUTF8Boundary("hello", 10)
+		assert.Equal(t, "hello", result)
+	})
+
+	t.Run("test ASCII string at rune boundary", func(t *testing.T) {
+		result := clampSuffixToUTF8Boundary("hello world", 5)
+		assert.Equal(t, "world", result)
+	})
+
+	t.Run("test ASCII string not at rune boundary (should not happen)", func(t *testing.T) {
+		result := clampSuffixToUTF8Boundary("hello", 3)
+		assert.Equal(t, "llo", result)
+	})
+
+	t.Run("test multi-byte UTF-8 characters at boundary", func(t *testing.T) {
+		s := "你好世界"
+		assert.Equal(t, 12, len(s))
+		result := clampSuffixToUTF8Boundary(s, 3)
+		assert.Equal(t, "界", result)
+	})
+
+	t.Run("test multi-byte UTF-8 characters not at boundary", func(t *testing.T) {
+		s := "你好世界"
+		result := clampSuffixToUTF8Boundary(s, 2)
+		assert.Equal(t, "", result)
+
+		result = clampSuffixToUTF8Boundary(s, 4)
+		assert.Equal(t, "界", result)
+
+		result = clampSuffixToUTF8Boundary(s, 6)
+		assert.Equal(t, "世界", result)
+	})
+
+	t.Run("test mixed ASCII and multi-byte characters", func(t *testing.T) {
+		s := "hello你好world"
+		result := clampSuffixToUTF8Boundary(s, 5+3)
+		assert.Equal(t, "好world", result)
+
+		result = clampSuffixToUTF8Boundary(s, 5+4)
+		assert.Equal(t, "好world", result)
+
+		result = clampSuffixToUTF8Boundary(s, 5+6)
+		assert.Equal(t, "你好world", result)
+	})
+}
+
+func TestGetMsgClearedFlag(t *testing.T) {
+	t.Run("test non-bool value in extra", func(t *testing.T) {
+		msg := schema.UserMessage("test")
+		msg.Extra = map[string]any{msgClearedFlag: "not a bool"}
+		flag := getMsgClearedFlag(msg)
+		assert.False(t, flag)
+	})
+}
+
+func TestCopyMessages(t *testing.T) {
+	t.Run("test empty messages", func(t *testing.T) {
+		result := copyMessages(nil)
+		assert.Len(t, result, 0)
+
+		result = copyMessages([]*schema.Message{})
+		assert.Len(t, result, 0)
+	})
+
+	t.Run("test message with tool calls and extra", func(t *testing.T) {
+		msg := schema.AssistantMessage("", []schema.ToolCall{
+			{
+				ID:       "call_123",
+				Type:     "function",
+				Function: schema.FunctionCall{Name: "test_func", Arguments: `{"key": "value"}`},
+			},
+		})
+		msg.Extra = map[string]any{"test_key": "test_value"}
+		msg.UserInputMultiContent = []schema.MessageInputPart{
+			{Type: schema.ChatMessagePartTypeText, Text: "test text"},
+		}
+		msg.MultiContent = []schema.ChatMessagePart{
+			{Type: schema.ChatMessagePartTypeText, Text: "multi content"},
+		}
+		msg.AssistantGenMultiContent = []schema.MessageOutputPart{
+			{Type: schema.ChatMessagePartTypeText, Text: "assistant gen"},
+		}
+
+		result := copyMessages([]*schema.Message{msg})
+		assert.Len(t, result, 1)
+		assert.NotEqual(t, &msg, result[0])
+		assert.Len(t, result[0].ToolCalls, 1)
+		assert.Equal(t, "call_123", result[0].ToolCalls[0].ID)
+		assert.Equal(t, "test_value", result[0].Extra["test_key"])
+		assert.Len(t, result[0].UserInputMultiContent, 1)
+		assert.Len(t, result[0].MultiContent, 1)
+		assert.Len(t, result[0].AssistantGenMultiContent, 1)
 	})
 }
