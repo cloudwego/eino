@@ -135,8 +135,11 @@ type ToolDetail struct {
 	// ToolArgument contains the arguments passed to the tool.
 	ToolArgument *schema.ToolArgument
 
-	// ToolResult contains the output returned by the tool.
+	// ToolResult contains the output returned by the invokable tool.
 	ToolResult *schema.ToolResult
+
+	// StreamToolResult contains the output returned by the streamable tool.
+	StreamToolResult *schema.StreamReader[*schema.ToolResult]
 }
 
 type TruncResult struct {
@@ -351,35 +354,19 @@ func (t *toolReductionMiddleware) WrapStreamableToolCall(_ context.Context, endp
 			return nil, err
 		}
 
-		var chunks []string
 		readers := output.Copy(2)
 		output = readers[0]
 		origResp := readers[1]
 		defer output.Close()
 
-		for {
-			var recvErr error
-			chunk, recvErr := output.Recv()
-			if recvErr != nil {
-				if recvErr != io.EOF {
-					return origResp, nil
-				}
-				break
-			}
-			chunks = append(chunks, chunk)
-		}
-
-		result := strings.Join(chunks, "")
 		detail := &ToolDetail{
 			ToolContext: tCtx,
 			ToolArgument: &schema.ToolArgument{
 				Text: argumentsInJSON,
 			},
-			ToolResult: &schema.ToolResult{
-				Parts: []schema.ToolOutputPart{
-					{Type: schema.ToolPartTypeText, Text: result},
-				},
-			},
+			StreamToolResult: schema.StreamReaderWithConvert(output, func(t string) (*schema.ToolResult, error) {
+				return &schema.ToolResult{Parts: []schema.ToolOutputPart{{Type: schema.ToolPartTypeText, Text: t}}}, nil
+			}),
 		}
 		truncResult, err := cfg.TruncHandler(ctx, detail)
 		if err != nil {
@@ -451,12 +438,16 @@ func (t *toolReductionMiddleware) BeforeModelRewriteState(ctx context.Context, s
 
 	var (
 		offloadStash       []*offloadStashItem
-		editTarget         = state.Messages
+		editTarget         []*schema.Message
 		clearAtLeastTokens = t.config.ClearAtLeastTokens
 	)
 
 	if clearAtLeastTokens > 0 {
-		editTarget = append(state.Messages[:start], copyMessages(state.Messages[start:end])...)
+		editTarget = append(editTarget, state.Messages[:start]...)
+		editTarget = append(editTarget, copyMessages(state.Messages[start:end])...)
+		editTarget = append(editTarget, state.Messages[end:]...)
+	} else {
+		editTarget = state.Messages
 	}
 
 	// recursively handle
@@ -658,8 +649,11 @@ func defaultTokenCounter(_ context.Context, msgs []*schema.Message, tools []*sch
 
 func defaultTruncHandler(rootDir string, truncMaxLength int) func(ctx context.Context, detail *ToolDetail) (truncResult *TruncResult, err error) {
 	return func(ctx context.Context, detail *ToolDetail) (offloadInfo *TruncResult, err error) {
-		resultText := detail.ToolResult.Parts[0].Text
-		if len(resultText) <= truncMaxLength {
+		resultText, needProcess, err := getJointToolResult(detail)
+		if err != nil {
+			return nil, err
+		}
+		if !needProcess || len(resultText) <= truncMaxLength {
 			return &TruncResult{NeedTrunc: false}, nil
 		}
 
@@ -692,14 +686,12 @@ func defaultTruncHandler(rootDir string, truncMaxLength int) func(ctx context.Co
 
 func defaultClearHandler(rootDir string, needOffload bool, readFileToolName string) func(ctx context.Context, detail *ToolDetail) (*ClearResult, error) {
 	return func(ctx context.Context, detail *ToolDetail) (clearResult *ClearResult, err error) {
-		if len(detail.ToolResult.Parts) == 0 {
-			return &ClearResult{NeedClear: false}, nil
+		resultText, needProcess, err := getJointToolResult(detail)
+		if err != nil {
+			return nil, err
 		}
-		for _, part := range detail.ToolResult.Parts {
-			if part.Type != schema.ToolPartTypeText {
-				// brutal judge
-				return nil, fmt.Errorf("default offload currently not support multimodal content type=%v", part.Type)
-			}
+		if !needProcess {
+			return &ClearResult{NeedClear: false}, nil
 		}
 
 		fileName := detail.ToolContext.CallID
@@ -722,7 +714,7 @@ func defaultClearHandler(rootDir string, needOffload bool, readFileToolName stri
 				NeedClear:       true,
 				NeedOffload:     true,
 				OffloadFilePath: filePath,
-				OffloadContent:  detail.ToolResult.Parts[0].Text,
+				OffloadContent:  resultText,
 			}
 		} else {
 			nResult = getClearWithoutOffloadingFmt()
@@ -741,6 +733,50 @@ func defaultClearHandler(rootDir string, needOffload bool, readFileToolName stri
 
 		return clearResult, nil
 	}
+}
+
+func getJointToolResult(toolDetail *ToolDetail) (resultText string, needProcess bool, err error) {
+	if toolDetail.ToolResult == nil && toolDetail.StreamToolResult == nil {
+		return "", false, fmt.Errorf("ToolResult and StreamToolResult are both nil")
+	}
+
+	var chunks []string
+
+	if toolDetail.ToolResult != nil {
+		for _, part := range toolDetail.ToolResult.Parts {
+			if part.Type != schema.ToolPartTypeText {
+				// default trunc / clear handler not support multi-modal content
+				return "", false, fmt.Errorf("reduction middleware default handler not support multimodal content type=%v", part.Type)
+			}
+			chunks = append(chunks, part.Text)
+			needProcess = true
+		}
+	} else {
+		for {
+			toolResultChunk, recvErr := toolDetail.StreamToolResult.Recv()
+			if recvErr != nil {
+				if recvErr == io.EOF {
+					break
+				}
+				// return original stream reader, not sending recvErr
+				return "", false, nil
+			}
+			if toolResultChunk == nil {
+				return "", false, fmt.Errorf("StreamToolResult chunk is nil")
+			}
+			for _, part := range toolResultChunk.Parts {
+				if part.Type != schema.ToolPartTypeText {
+					// default trunc / clear handler not support multi-modal content
+					return "", false, fmt.Errorf("reduction middleware default handler not support multimodal content type=%v", part.Type)
+				}
+				chunks = append(chunks, part.Text)
+				needProcess = true
+			}
+		}
+	}
+
+	// needProcess would be false if len(ToolResult.Parts) == 0
+	return strings.Join(chunks, ""), needProcess, nil
 }
 
 func getMsgClearedFlag(msg *schema.Message) (offloaded bool) {

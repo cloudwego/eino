@@ -446,7 +446,7 @@ func TestReductionMiddlewareClear(t *testing.T) {
 		backend := filesystem.NewInMemoryBackend()
 		config := &Config{
 			SkipTruncation:            true,
-			TokenCounter:               defaultTokenCounter,
+			TokenCounter:              defaultTokenCounter,
 			MaxTokensForClear:         20,
 			ClearRetentionSuffixLimit: 0,
 			ClearExcludeTools:         []string{"get_important_data"},
@@ -476,7 +476,7 @@ func TestReductionMiddlewareClear(t *testing.T) {
 					Function: schema.FunctionCall{Name: "get_weather", Arguments: `{"location": "London, UK", "unit": "c"}`},
 				},
 			}),
-			schema.ToolMessage("Sunny", "call_123456789"),
+			schema.ToolMessage("Sunny", "call_987654321"),
 			schema.AssistantMessage("", []schema.ToolCall{
 				{
 					ID:       "call_123456789",
@@ -485,38 +485,56 @@ func TestReductionMiddlewareClear(t *testing.T) {
 				},
 			}),
 			schema.ToolMessage("Important Data Content", "call_123456789"),
+			schema.AssistantMessage("", []schema.ToolCall{
+				{
+					ID:       "call_999",
+					Type:     "function",
+					Function: schema.FunctionCall{Name: "get_weather", Arguments: `{"location": "London, UK", "unit": "c"}`},
+				},
+			}),
+			schema.ToolMessage("Sunny", "call_999"),
 		}
 		_, s, err := mw.BeforeModelRewriteState(ctx, &adk.ChatModelAgentState{Messages: msgs}, &adk.ModelContext{Tools: toolsInfo})
 		assert.NoError(t, err)
 		assert.Equal(t, "<persisted-output>Tool result saved to: /tmp/clear/call_987654321\nUse read_file to view</persisted-output>", s.Messages[3].Content)
 		assert.Equal(t, "Important Data Content", s.Messages[5].Content)
-		_, err = backend.Read(ctx, &filesystem.ReadRequest{
+		b, err := backend.Read(ctx, &filesystem.ReadRequest{
 			FilePath: "/tmp/clear/call_987654321",
 		})
 		assert.NoError(t, err)
-		_, err = backend.Read(ctx, &filesystem.ReadRequest{
+		assert.Equal(t, "Sunny", b.Content)
+		b, err = backend.Read(ctx, &filesystem.ReadRequest{
 			FilePath: "/tmp/clear/call_123456789",
 		})
 		assert.Error(t, err)
+		assert.Equal(t, "file not found: /tmp/clear/call_123456789", err.Error())
 	})
 
 	t.Run("test ClearAtLeastTokens - not enough tokens cleared", func(t *testing.T) {
 		backend := filesystem.NewInMemoryBackend()
-		callCount := 0
 		config := &Config{
-			SkipTruncation:            true,
-			TokenCounter: func(_ context.Context, _ []adk.Message, _ []*schema.ToolInfo) (int64, error) {
-				callCount++
-				if callCount == 1 {
-					return 100, nil
+			SkipTruncation: true,
+			TokenCounter: func(_ context.Context, msgs []adk.Message, _ []*schema.ToolInfo) (int64, error) {
+				var size int
+				for _, msg := range msgs {
+					size += len(msg.Content)
+					for _, tc := range msg.ToolCalls {
+						size += len(tc.Function.Name)
+						size += len(tc.Function.Arguments)
+					}
 				}
-				return 99, nil
+				return int64(size), nil
 			},
 			MaxTokensForClear:         50,
-			ClearRetentionSuffixLimit: 0,
-			ClearAtLeastTokens:        2,
+			ClearRetentionSuffixLimit: 1,
+			ClearAtLeastTokens:        100,
 			ToolConfig: map[string]*ToolReductionConfig{
 				"get_weather": {
+					Backend:      backend,
+					SkipClear:    false,
+					ClearHandler: defaultClearHandler("/tmp", true, "read_file"),
+				},
+				"get_important_data": {
 					Backend:      backend,
 					SkipClear:    false,
 					ClearHandler: defaultClearHandler("/tmp", true, "read_file"),
@@ -536,11 +554,28 @@ func TestReductionMiddlewareClear(t *testing.T) {
 					Function: schema.FunctionCall{Name: "get_weather", Arguments: `{"location": "London, UK", "unit": "c"}`},
 				},
 			}),
-			schema.ToolMessage("Sunny", "call_123456789"),
+			schema.ToolMessage("Sunny Sunny Sunny Sunny Sunny Sunny Sunny Sunny Sunny Sunny Sunny Sunny Sunny", "call_123456789"),
+			schema.AssistantMessage("", []schema.ToolCall{
+				{
+					ID:       "call_123456789",
+					Type:     "function",
+					Function: schema.FunctionCall{Name: "get_important_data", Arguments: `{"id": "123"}`},
+				},
+			}),
+			schema.ToolMessage("Important Data Content, qweqweqweqweqweqweqweqweqweqweqweqweqweqweqweqweqweqweqweqweqweqweqweqweqweqweqweqweqweqweqweqweqweqweqweqweqweqweqweqweqweqweqweqweqwe", "call_123456789"),
+			schema.AssistantMessage("", []schema.ToolCall{
+				{
+					ID:       "call_999",
+					Type:     "function",
+					Function: schema.FunctionCall{Name: "get_weather", Arguments: `{"location": "London, UK", "unit": "c"}`},
+				},
+			}),
+			schema.ToolMessage("Sunny", "call_999"),
 		}
 		_, s, err := mw.BeforeModelRewriteState(ctx, &adk.ChatModelAgentState{Messages: msgs}, &adk.ModelContext{Tools: toolsInfo})
 		assert.NoError(t, err)
-		assert.Equal(t, "Sunny", s.Messages[3].Content)
+		assert.Equal(t, "Sunny Sunny Sunny Sunny Sunny Sunny Sunny Sunny Sunny Sunny Sunny Sunny Sunny", s.Messages[3].Content)
+		assert.Equal(t, "Important Data Content, qweqweqweqweqweqweqweqweqweqweqweqweqweqweqweqweqweqweqweqweqweqweqweqweqweqweqweqweqweqweqweqweqweqweqweqweqweqweqweqweqweqweqweqweqwe", s.Messages[5].Content)
 		_, err = backend.Read(ctx, &filesystem.ReadRequest{
 			FilePath: "/tmp/clear/call_987654321",
 		})
@@ -549,21 +584,29 @@ func TestReductionMiddlewareClear(t *testing.T) {
 
 	t.Run("test ClearAtLeastTokens - enough tokens cleared", func(t *testing.T) {
 		backend := filesystem.NewInMemoryBackend()
-		callCount := 0
 		config := &Config{
-			SkipTruncation:            true,
-			TokenCounter: func(_ context.Context, _ []adk.Message, _ []*schema.ToolInfo) (int64, error) {
-				callCount++
-				if callCount == 1 {
-					return 100, nil
+			SkipTruncation: true,
+			TokenCounter: func(_ context.Context, msgs []adk.Message, _ []*schema.ToolInfo) (int64, error) {
+				var size int
+				for _, msg := range msgs {
+					size += len(msg.Content)
+					for _, tc := range msg.ToolCalls {
+						size += len(tc.Function.Name)
+						size += len(tc.Function.Arguments)
+					}
 				}
-				return 50, nil
+				return int64(size), nil
 			},
 			MaxTokensForClear:         50,
-			ClearRetentionSuffixLimit: 0,
-			ClearAtLeastTokens:        1,
+			ClearRetentionSuffixLimit: 1,
+			ClearAtLeastTokens:        10,
 			ToolConfig: map[string]*ToolReductionConfig{
 				"get_weather": {
+					Backend:      backend,
+					SkipClear:    false,
+					ClearHandler: defaultClearHandler("/tmp", true, "read_file"),
+				},
+				"get_important_data": {
 					Backend:      backend,
 					SkipClear:    false,
 					ClearHandler: defaultClearHandler("/tmp", true, "read_file"),
@@ -583,15 +626,23 @@ func TestReductionMiddlewareClear(t *testing.T) {
 					Function: schema.FunctionCall{Name: "get_weather", Arguments: `{"location": "London, UK", "unit": "c"}`},
 				},
 			}),
-			schema.ToolMessage("Sunny", "call_123456789"),
+			schema.ToolMessage("Sunny Sunny Sunny Sunny Sunny Sunny Sunny Sunny Sunny Sunny Sunny Sunny Sunny", "call_123456789"),
 			schema.AssistantMessage("", []schema.ToolCall{
 				{
 					ID:       "call_123456789",
 					Type:     "function",
+					Function: schema.FunctionCall{Name: "get_important_data", Arguments: `{"id": "123"}`},
+				},
+			}),
+			schema.ToolMessage("Important Data Content, qweqweqweqweqweqweqweqweqweqweqweqweqweqweqweqweqweqweqweqweqweqweqweqweqweqweqweqweqweqweqweqweqweqweqweqweqweqweqweqweqweqweqweqweqwe", "call_123456789"),
+			schema.AssistantMessage("", []schema.ToolCall{
+				{
+					ID:       "call_999",
+					Type:     "function",
 					Function: schema.FunctionCall{Name: "get_weather", Arguments: `{"location": "London, UK", "unit": "c"}`},
 				},
 			}),
-			schema.ToolMessage("Sunny", "call_123456789"),
+			schema.ToolMessage("Sunny", "call_999"),
 		}
 		_, s, err := mw.BeforeModelRewriteState(ctx, &adk.ChatModelAgentState{Messages: msgs}, &adk.ModelContext{Tools: toolsInfo})
 		assert.NoError(t, err)
@@ -600,6 +651,173 @@ func TestReductionMiddlewareClear(t *testing.T) {
 			FilePath: "/tmp/clear/call_987654321",
 		})
 		assert.NoError(t, err)
+		assert.Equal(t, "<persisted-output>Tool result saved to: /tmp/clear/call_123456789\nUse read_file to view</persisted-output>", s.Messages[5].Content)
+		_, err = backend.Read(ctx, &filesystem.ReadRequest{
+			FilePath: "/tmp/clear/call_987654321",
+		})
+		assert.NoError(t, err)
+	})
+}
+
+func TestGetJointToolResult(t *testing.T) {
+	t.Run("test with ToolResult", func(t *testing.T) {
+		detail := &ToolDetail{
+			ToolResult: &schema.ToolResult{Parts: []schema.ToolOutputPart{{Type: schema.ToolPartTypeText, Text: "hello world"}}},
+		}
+		resultText, needProcess, err := getJointToolResult(detail)
+		assert.NoError(t, err)
+		assert.True(t, needProcess)
+		assert.Equal(t, "hello world", resultText)
+	})
+
+	t.Run("test with multiple ToolResult parts", func(t *testing.T) {
+		detail := &ToolDetail{
+			ToolResult: &schema.ToolResult{Parts: []schema.ToolOutputPart{
+				{Type: schema.ToolPartTypeText, Text: "hello "},
+				{Type: schema.ToolPartTypeText, Text: "world"},
+			}},
+		}
+		resultText, needProcess, err := getJointToolResult(detail)
+		assert.NoError(t, err)
+		assert.True(t, needProcess)
+		assert.Equal(t, "hello world", resultText)
+	})
+
+	t.Run("test with empty ToolResult parts", func(t *testing.T) {
+		detail := &ToolDetail{
+			ToolResult: &schema.ToolResult{Parts: []schema.ToolOutputPart{}},
+		}
+		resultText, needProcess, err := getJointToolResult(detail)
+		assert.NoError(t, err)
+		assert.False(t, needProcess)
+		assert.Equal(t, "", resultText)
+	})
+
+	t.Run("test with ToolResult multimodal (should error)", func(t *testing.T) {
+		detail := &ToolDetail{
+			ToolResult: &schema.ToolResult{Parts: []schema.ToolOutputPart{{Type: schema.ToolPartTypeImage, Text: "https://example.com/image.png"}}},
+		}
+		resultText, needProcess, err := getJointToolResult(detail)
+		assert.Error(t, err)
+		assert.False(t, needProcess)
+		assert.Equal(t, "", resultText)
+	})
+
+	t.Run("test with StreamToolResult", func(t *testing.T) {
+		sr, sw := schema.Pipe[*schema.ToolResult](10)
+		go func() {
+			sw.Send(&schema.ToolResult{Parts: []schema.ToolOutputPart{{Type: schema.ToolPartTypeText, Text: "hello "}}}, nil)
+			sw.Send(&schema.ToolResult{Parts: []schema.ToolOutputPart{{Type: schema.ToolPartTypeText, Text: "world"}}}, nil)
+			sw.Close()
+		}()
+
+		detail := &ToolDetail{
+			StreamToolResult: sr,
+		}
+		resultText, needProcess, err := getJointToolResult(detail)
+		assert.NoError(t, err)
+		assert.True(t, needProcess)
+		assert.Equal(t, "hello world", resultText)
+	})
+
+	t.Run("test with StreamToolResult error", func(t *testing.T) {
+		sr, sw := schema.Pipe[*schema.ToolResult](10)
+		go func() {
+			sw.Send(nil, fmt.Errorf("stream error"))
+			sw.Close()
+		}()
+
+		detail := &ToolDetail{
+			StreamToolResult: sr,
+		}
+		resultText, needProcess, err := getJointToolResult(detail)
+		assert.NoError(t, err)
+		assert.False(t, needProcess)
+		assert.Equal(t, "", resultText)
+	})
+
+	t.Run("test with both ToolResult and StreamToolResult nil (should error)", func(t *testing.T) {
+		detail := &ToolDetail{}
+		resultText, needProcess, err := getJointToolResult(detail)
+		assert.Error(t, err)
+		assert.False(t, needProcess)
+		assert.Equal(t, "", resultText)
+	})
+}
+
+func TestDefaultTruncHandlerWithStreamToolResult(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("test short stream result no trunc", func(t *testing.T) {
+		sr, sw := schema.Pipe[*schema.ToolResult](10)
+		go func() {
+			sw.Send(&schema.ToolResult{Parts: []schema.ToolOutputPart{{Type: schema.ToolPartTypeText, Text: "short text"}}}, nil)
+			sw.Close()
+		}()
+
+		detail := &ToolDetail{
+			ToolContext: &adk.ToolContext{
+				Name:   "test",
+				CallID: "call_id",
+			},
+			ToolArgument:     &schema.ToolArgument{Text: "{}"},
+			StreamToolResult: sr,
+		}
+
+		fn := defaultTruncHandler("/tmp", 100)
+		result, err := fn(ctx, detail)
+		assert.NoError(t, err)
+		assert.False(t, result.NeedTrunc)
+	})
+
+	t.Run("test long stream result need trunc", func(t *testing.T) {
+		sr, sw := schema.Pipe[*schema.ToolResult](10)
+		go func() {
+			sw.Send(&schema.ToolResult{Parts: []schema.ToolOutputPart{{Type: schema.ToolPartTypeText, Text: strings.Repeat("hello world", 20)}}}, nil)
+			sw.Close()
+		}()
+
+		detail := &ToolDetail{
+			ToolContext: &adk.ToolContext{
+				Name:   "test",
+				CallID: "call_id",
+			},
+			ToolArgument:     &schema.ToolArgument{Text: "{}"},
+			StreamToolResult: sr,
+		}
+
+		fn := defaultTruncHandler("/tmp", 100)
+		result, err := fn(ctx, detail)
+		assert.NoError(t, err)
+		assert.True(t, result.NeedTrunc)
+	})
+}
+
+func TestDefaultClearHandlerWithStreamToolResult(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("test with stream result need offload", func(t *testing.T) {
+		sr, sw := schema.Pipe[*schema.ToolResult](10)
+		go func() {
+			sw.Send(&schema.ToolResult{Parts: []schema.ToolOutputPart{{Type: schema.ToolPartTypeText, Text: "streaming content"}}}, nil)
+			sw.Close()
+		}()
+
+		detail := &ToolDetail{
+			ToolContext: &adk.ToolContext{
+				Name:   "test",
+				CallID: "stream_call_id",
+			},
+			ToolArgument:     &schema.ToolArgument{Text: "{}"},
+			StreamToolResult: sr,
+		}
+
+		fn := defaultClearHandler("/tmp", true, "read_file")
+		result, err := fn(ctx, detail)
+		assert.NoError(t, err)
+		assert.True(t, result.NeedClear)
+		assert.True(t, result.NeedOffload)
+		assert.Equal(t, "streaming content", result.OffloadContent)
 	})
 }
 
