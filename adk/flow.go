@@ -490,7 +490,9 @@ func (a *typedFlowAgent[M]) Run(ctx context.Context, input *TypedAgentInput[M], 
 			ctx = callbacks.OnStart(ctx, cbInput)
 			return any(wrapIterWithOnEnd(ctx, genErrorIter(err))).(*AsyncIterator[*TypedAgentEvent[M]])
 		}
-		return typedErrorIter[M](err)
+		cbInput := &AgenticAgentCallbackInput{Input: any(input).(*TypedAgentInput[*schema.AgenticMessage])}
+		ctx = callbacks.OnStart(ctx, cbInput)
+		return any(wrapAgenticIterWithOnEnd(ctx, genAgenticErrorIter(err))).(*AsyncIterator[*TypedAgentEvent[M]])
 	}
 
 	ctxForSubAgents := ctx
@@ -500,6 +502,11 @@ func (a *typedFlowAgent[M]) Run(ctx context.Context, input *TypedAgentInput[M], 
 		agentType := getTypedAgentType(a.TypedAgent)
 		ctx = initAgentCallbacks(ctx, agentName, agentType, filterOptions(agentName, opts)...)
 		cbInput := &AgentCallbackInput{Input: any(processedInput).(*AgentInput)}
+		ctx = callbacks.OnStart(ctx, cbInput)
+	} else {
+		agentType := getTypedAgentType(a.TypedAgent)
+		ctx = initAgenticAgentCallbacks(ctx, agentName, agentType, filterOptions(agentName, opts)...)
+		cbInput := &AgenticAgentCallbackInput{Input: any(processedInput).(*TypedAgentInput[*schema.AgenticMessage])}
 		ctx = callbacks.OnStart(ctx, cbInput)
 	}
 
@@ -537,6 +544,11 @@ func (a *typedFlowAgent[M]) Resume(ctx context.Context, info *ResumeInfo, opts .
 		agentType := getTypedAgentType(a.TypedAgent)
 		ctx = initAgentCallbacks(ctx, agentName, agentType, filterOptions(agentName, opts)...)
 		cbInput := &AgentCallbackInput{ResumeInfo: info}
+		ctx = callbacks.OnStart(ctx, cbInput)
+	} else {
+		agentType := getTypedAgentType(a.TypedAgent)
+		ctx = initAgenticAgentCallbacks(ctx, agentName, agentType, filterOptions(agentName, opts)...)
+		cbInput := &AgenticAgentCallbackInput{ResumeInfo: info}
 		ctx = callbacks.OnStart(ctx, cbInput)
 	}
 
@@ -614,11 +626,17 @@ func (a *typedFlowAgent[M]) run(
 	}
 
 	var cbGen *AsyncGenerator[*AgentEvent]
+	var agenticCbGen *AsyncGenerator[*TypedAgentEvent[*schema.AgenticMessage]]
 	if isMessageType {
 		var cbIter *AsyncIterator[*AgentEvent]
 		cbIter, cbGen = NewAsyncIteratorPair[*AgentEvent]()
 		cbOutput := &AgentCallbackOutput{Events: cbIter}
 		icb.On(ctx, cbOutput, icb.BuildOnEndHandleWithCopy(copyAgentCallbackOutput), callbacks.TimingOnEnd, false)
+	} else {
+		var agenticCbIter *AsyncIterator[*TypedAgentEvent[*schema.AgenticMessage]]
+		agenticCbIter, agenticCbGen = NewAsyncIteratorPair[*TypedAgentEvent[*schema.AgenticMessage]]()
+		cbOutput := &AgenticAgentCallbackOutput{Events: agenticCbIter}
+		icb.On(ctx, cbOutput, icb.BuildOnEndHandleWithCopy(copyAgenticAgentCallbackOutput), callbacks.TimingOnEnd, false)
 	}
 
 	defer func() {
@@ -630,6 +648,9 @@ func (a *typedFlowAgent[M]) run(
 
 		if cbGen != nil {
 			cbGen.Close()
+		}
+		if agenticCbGen != nil {
+			agenticCbGen.Close()
 		}
 		generator.Close()
 	}()
@@ -659,6 +680,12 @@ func (a *typedFlowAgent[M]) run(
 			typedSetAutomaticClose(msgCopied)
 			typedSetAutomaticClose(event)
 			cbGen.Send(any(msgCopied).(*AgentEvent))
+			generator.Send(event)
+		} else if agenticCbGen != nil {
+			agenticCopied := copyTypedAgentEvent(event)
+			typedSetAutomaticClose(agenticCopied)
+			typedSetAutomaticClose(event)
+			agenticCbGen.Send(any(agenticCopied).(*TypedAgentEvent[*schema.AgenticMessage]))
 			generator.Send(event)
 		} else {
 			typedSetAutomaticClose(event)
@@ -744,5 +771,37 @@ func typedWrapIterWithOnEnd[M MessageType](ctx context.Context, iter *AsyncItera
 		msgIter := any(iter).(*AsyncIterator[*AgentEvent])
 		return any(wrapIterWithOnEnd(ctx, msgIter)).(*AsyncIterator[*TypedAgentEvent[M]])
 	}
+	agenticIter := any(iter).(*AsyncIterator[*TypedAgentEvent[*schema.AgenticMessage]])
+	return any(wrapAgenticIterWithOnEnd(ctx, agenticIter)).(*AsyncIterator[*TypedAgentEvent[M]])
+}
+
+func wrapAgenticIterWithOnEnd(ctx context.Context, iter *AsyncIterator[*TypedAgentEvent[*schema.AgenticMessage]]) *AsyncIterator[*TypedAgentEvent[*schema.AgenticMessage]] {
+	cbIter, cbGen := NewAsyncIteratorPair[*TypedAgentEvent[*schema.AgenticMessage]]()
+	cbOutput := &AgenticAgentCallbackOutput{Events: cbIter}
+	icb.On(ctx, cbOutput, icb.BuildOnEndHandleWithCopy(copyAgenticAgentCallbackOutput), callbacks.TimingOnEnd, false)
+
+	outIter, outGen := NewAsyncIteratorPair[*TypedAgentEvent[*schema.AgenticMessage]]()
+	go func() {
+		defer func() {
+			cbGen.Close()
+			outGen.Close()
+		}()
+		for {
+			event, ok := iter.Next()
+			if !ok {
+				break
+			}
+			copied := copyAgenticAgentEvent(event)
+			cbGen.Send(copied)
+			outGen.Send(event)
+		}
+	}()
+	return outIter
+}
+
+func genAgenticErrorIter(err error) *AsyncIterator[*TypedAgentEvent[*schema.AgenticMessage]] {
+	iter, gen := NewAsyncIteratorPair[*TypedAgentEvent[*schema.AgenticMessage]]()
+	gen.Send(&TypedAgentEvent[*schema.AgenticMessage]{Err: err})
+	gen.Close()
 	return iter
 }

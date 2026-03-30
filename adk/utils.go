@@ -284,6 +284,10 @@ func copyAgentEvent(ae *AgentEvent) *AgentEvent {
 	return copyTypedAgentEvent(ae)
 }
 
+func copyAgenticAgentEvent(ae *TypedAgentEvent[*schema.AgenticMessage]) *TypedAgentEvent[*schema.AgenticMessage] {
+	return copyTypedAgentEvent(ae)
+}
+
 // TypedGetMessage extracts the message from a TypedAgentEvent, concatenating a stream if present.
 func TypedGetMessage[M MessageType](e *TypedAgentEvent[M]) (M, *TypedAgentEvent[M], error) {
 	var zero M
