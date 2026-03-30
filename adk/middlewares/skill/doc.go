@@ -35,10 +35,10 @@
 //
 // Extension points
 //
-//   - CustomToolParamsHandler allows extending the tool schema and generating custom skill content
-//     based on raw tool arguments.
-//   - CustomForkMessages allows customizing the message list passed to the sub-agent in fork modes.
-//   - CustomForkResultPrompts allows customizing how sub-agent outputs are formatted back to the caller.
+//   - CustomToolParams customizes the tool parameter schema.
+//   - BuildContent customizes how skill content is generated from raw tool arguments.
+//   - BuildForkMessages customizes the initial messages passed to the sub-agent in fork modes.
+//   - FormatForkResult customizes how sub-agent outputs are formatted back to the caller.
 //
 // # Filesystem backend
 //

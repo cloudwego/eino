@@ -186,30 +186,29 @@ func TestBuildParamsOneOf_CustomParams(t *testing.T) {
 	ctx := context.Background()
 
 	st := &skillTool{
-		customToolParamsHandler: &CustomToolParamsHandler{
-			AdditionToolParamsFunc: func(context.Context) *schema.ParamsOneOf {
-				return schema.NewParamsOneOfByParams(map[string]*schema.ParameterInfo{
-					"foo": {
-						Type:     schema.String,
-						Desc:     "foo desc",
-						Required: true,
-					},
-					"bar": {
-						Type:     schema.Integer,
-						Desc:     "bar desc",
-						Required: false,
-					},
-					"skill": {
-						Type:     schema.String,
-						Desc:     "custom skill desc",
-						Required: false,
-					},
-				})
-			},
+		customToolParams: func(context.Context, *schema.ParamsOneOf) (*schema.ParamsOneOf, error) {
+			return schema.NewParamsOneOfByParams(map[string]*schema.ParameterInfo{
+				"foo": {
+					Type:     schema.String,
+					Desc:     "foo desc",
+					Required: true,
+				},
+				"bar": {
+					Type:     schema.Integer,
+					Desc:     "bar desc",
+					Required: false,
+				},
+				"skill": {
+					Type:     schema.String,
+					Desc:     "custom skill desc",
+					Required: false,
+				},
+			}), nil
 		},
 	}
 
-	oneOf := st.buildParamsOneOf(ctx)
+	oneOf, err := st.buildParamsOneOf(ctx)
+	require.NoError(t, err)
 	js, err := oneOf.ToJSONSchema()
 	require.NoError(t, err)
 	require.NotNil(t, js)
@@ -232,17 +231,13 @@ func TestBuildParamsOneOf_CustomParams(t *testing.T) {
 func TestBuildParamsOneOf_CustomParamsNilFallsBackToDefault(t *testing.T) {
 	ctx := context.Background()
 	st := &skillTool{
-		customToolParamsHandler: &CustomToolParamsHandler{
-			AdditionToolParamsFunc: func(context.Context) *schema.ParamsOneOf {
-				return nil
-			},
-			SkillContentFunc: func(context.Context, SkillContentInput) (adk.I18nPrompts, error) {
-				return adk.I18nPrompts{English: "x", Chinese: "x"}, nil
-			},
+		customToolParams: func(context.Context, *schema.ParamsOneOf) (*schema.ParamsOneOf, error) {
+			return nil, nil
 		},
 	}
 
-	oneOf := st.buildParamsOneOf(ctx)
+	oneOf, err := st.buildParamsOneOf(ctx)
+	require.NoError(t, err)
 	js, err := oneOf.ToJSONSchema()
 	require.NoError(t, err)
 	require.NotNil(t, js)
@@ -255,17 +250,13 @@ func TestBuildParamsOneOf_CustomParamsNilFallsBackToDefault(t *testing.T) {
 func TestBuildParamsOneOf_JSONSchemaNilFallsBackToDefault(t *testing.T) {
 	ctx := context.Background()
 	st := &skillTool{
-		customToolParamsHandler: &CustomToolParamsHandler{
-			AdditionToolParamsFunc: func(context.Context) *schema.ParamsOneOf {
-				return schema.NewParamsOneOfByJSONSchema(nil)
-			},
-			SkillContentFunc: func(context.Context, SkillContentInput) (adk.I18nPrompts, error) {
-				return adk.I18nPrompts{English: "x", Chinese: "x"}, nil
-			},
+		customToolParams: func(context.Context, *schema.ParamsOneOf) (*schema.ParamsOneOf, error) {
+			return schema.NewParamsOneOfByJSONSchema(nil), nil
 		},
 	}
 
-	oneOf := st.buildParamsOneOf(ctx)
+	oneOf, err := st.buildParamsOneOf(ctx)
+	require.NoError(t, err)
 	js, err := oneOf.ToJSONSchema()
 	require.NoError(t, err)
 	require.NotNil(t, js)
@@ -278,17 +269,13 @@ func TestBuildParamsOneOf_JSONSchemaNilFallsBackToDefault(t *testing.T) {
 func TestBuildParamsOneOf_JSONSchemaWithoutPropertiesIsHandled(t *testing.T) {
 	ctx := context.Background()
 	st := &skillTool{
-		customToolParamsHandler: &CustomToolParamsHandler{
-			AdditionToolParamsFunc: func(context.Context) *schema.ParamsOneOf {
-				return schema.NewParamsOneOfByJSONSchema(&jsonschema.Schema{Type: string(schema.Object)})
-			},
-			SkillContentFunc: func(context.Context, SkillContentInput) (adk.I18nPrompts, error) {
-				return adk.I18nPrompts{English: "x", Chinese: "x"}, nil
-			},
+		customToolParams: func(context.Context, *schema.ParamsOneOf) (*schema.ParamsOneOf, error) {
+			return schema.NewParamsOneOfByJSONSchema(&jsonschema.Schema{Type: string(schema.Object)}), nil
 		},
 	}
 
-	oneOf := st.buildParamsOneOf(ctx)
+	oneOf, err := st.buildParamsOneOf(ctx)
+	require.NoError(t, err)
 	js, err := oneOf.ToJSONSchema()
 	require.NoError(t, err)
 	require.NotNil(t, js)
@@ -431,21 +418,19 @@ func TestNewMiddleware(t *testing.T) {
 		assert.Contains(t, err.Error(), "backend is required")
 	})
 
-	t.Run("custom tool params requires decoder", func(t *testing.T) {
+	t.Run("custom tool params error surfaces in Info", func(t *testing.T) {
 		backend := &inMemoryBackend{m: []Skill{}}
 		handler, err := NewMiddleware(ctx, &Config{
 			Backend: backend,
-			CustomToolParamsHandler: &CustomToolParamsHandler{
-				AdditionToolParamsFunc: func(_ context.Context) *schema.ParamsOneOf {
-					return schema.NewParamsOneOfByParams(map[string]*schema.ParameterInfo{
-						"skill": {Type: schema.String, Desc: "custom", Required: false},
-					})
-				},
+			CustomToolParams: func(context.Context, *schema.ParamsOneOf) (*schema.ParamsOneOf, error) {
+				return nil, errors.New("bad params")
 			},
 		})
-		assert.Nil(t, handler)
-		assert.Error(t, err)
-		assert.Contains(t, err.Error(), "incomplete")
+		require.NoError(t, err)
+		h := handler.(*skillHandler)
+		_, err = h.tool.Info(ctx)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "bad params")
 	})
 
 	t.Run("valid config succeeds", func(t *testing.T) {
@@ -852,16 +837,11 @@ func TestSkillToolInfo(t *testing.T) {
 				{FrontMatter: FrontMatter{Name: "alpha", Description: "desc-alpha"}},
 			}},
 			toolName: "skill",
-			customToolParamsHandler: &CustomToolParamsHandler{
-				AdditionToolParamsFunc: func(_ context.Context) *schema.ParamsOneOf {
-					return schema.NewParamsOneOfByParams(map[string]*schema.ParameterInfo{
-						"foo":   {Type: schema.String, Desc: "foo-desc", Required: true},
-						"skill": {Type: schema.String, Desc: "custom-skill-desc", Required: false},
-					})
-				},
-				SkillContentFunc: func(_ context.Context, _ SkillContentInput) (adk.I18nPrompts, error) {
-					return adk.I18nPrompts{English: "x", Chinese: "x"}, nil
-				},
+			customToolParams: func(_ context.Context, _ *schema.ParamsOneOf) (*schema.ParamsOneOf, error) {
+				return schema.NewParamsOneOfByParams(map[string]*schema.ParameterInfo{
+					"foo":   {Type: schema.String, Desc: "foo-desc", Required: true},
+					"skill": {Type: schema.String, Desc: "custom-skill-desc", Required: false},
+				}), nil
 			},
 		}
 		info, err := st.Info(ctx)
@@ -945,18 +925,11 @@ func TestInvokableRun_InlineMode(t *testing.T) {
 				},
 			}},
 			toolName: "skill",
-			customToolParamsHandler: &CustomToolParamsHandler{
-				AdditionToolParamsFunc: func(_ context.Context) *schema.ParamsOneOf {
-					return schema.NewParamsOneOfByParams(map[string]*schema.ParameterInfo{
-						"skill": {Type: schema.String, Desc: "custom", Required: false},
-					})
-				},
-				SkillContentFunc: func(_ context.Context, in SkillContentInput) (adk.I18nPrompts, error) {
-					var raw map[string]any
-					require.NoError(t, json.Unmarshal([]byte(in.RawArguments), &raw))
-					assert.Equal(t, "pdf", raw["skill"])
-					return adk.I18nPrompts{English: "custom-content", Chinese: "custom-content-cn"}, nil
-				},
+			buildContent: func(_ context.Context, _ Skill, rawArgs string) (adk.I18nPrompts, error) {
+				var raw map[string]any
+				require.NoError(t, json.Unmarshal([]byte(rawArgs), &raw))
+				assert.Equal(t, "pdf", raw["skill"])
+				return adk.I18nPrompts{English: "custom-content", Chinese: "custom-content-cn"}, nil
 			},
 		}
 		result, err := st.InvokableRun(ctx, `{"skill":"pdf"}`)
@@ -974,26 +947,24 @@ func TestInvokableRun_InlineMode(t *testing.T) {
 				},
 			}},
 			toolName: "skill",
-			customToolParamsHandler: &CustomToolParamsHandler{
-				AdditionToolParamsFunc: func(_ context.Context) *schema.ParamsOneOf {
-					return schema.NewParamsOneOfByParams(map[string]*schema.ParameterInfo{
-						"skill": {Type: schema.String, Desc: "custom", Required: false},
-						"task":  {Type: schema.String, Desc: "custom", Required: false},
-						"x":     {Type: schema.Integer, Desc: "custom", Required: false},
-					})
-				},
-				SkillContentFunc: func(_ context.Context, in SkillContentInput) (adk.I18nPrompts, error) {
-					var raw struct {
-						Skill string `json:"skill"`
-						Task  string `json:"task"`
-						X     int    `json:"x"`
-					}
-					require.NoError(t, json.Unmarshal([]byte(in.RawArguments), &raw))
-					assert.Equal(t, "pdf", raw.Skill)
-					assert.Equal(t, "t", raw.Task)
-					assert.Equal(t, 1, raw.X)
-					return adk.I18nPrompts{English: "decoded", Chinese: "decoded-cn"}, nil
-				},
+			customToolParams: func(_ context.Context, _ *schema.ParamsOneOf) (*schema.ParamsOneOf, error) {
+				return schema.NewParamsOneOfByParams(map[string]*schema.ParameterInfo{
+					"skill": {Type: schema.String, Desc: "custom", Required: false},
+					"task":  {Type: schema.String, Desc: "custom", Required: false},
+					"x":     {Type: schema.Integer, Desc: "custom", Required: false},
+				}), nil
+			},
+			buildContent: func(_ context.Context, _ Skill, rawArgs string) (adk.I18nPrompts, error) {
+				var raw struct {
+					Skill string `json:"skill"`
+					Task  string `json:"task"`
+					X     int    `json:"x"`
+				}
+				require.NoError(t, json.Unmarshal([]byte(rawArgs), &raw))
+				assert.Equal(t, "pdf", raw.Skill)
+				assert.Equal(t, "t", raw.Task)
+				assert.Equal(t, 1, raw.X)
+				return adk.I18nPrompts{English: "decoded", Chinese: "decoded-cn"}, nil
 			},
 		}
 		result, err := st.InvokableRun(ctx, `{"skill":"pdf","task":"t","x":1}`)
@@ -1011,15 +982,8 @@ func TestInvokableRun_InlineMode(t *testing.T) {
 				},
 			}},
 			toolName: "skill",
-			customToolParamsHandler: &CustomToolParamsHandler{
-				AdditionToolParamsFunc: func(_ context.Context) *schema.ParamsOneOf {
-					return schema.NewParamsOneOfByParams(map[string]*schema.ParameterInfo{
-						"skill": {Type: schema.String, Desc: "custom", Required: false},
-					})
-				},
-				SkillContentFunc: func(context.Context, SkillContentInput) (adk.I18nPrompts, error) {
-					return adk.I18nPrompts{}, errors.New("boom")
-				},
+			buildContent: func(context.Context, Skill, string) (adk.I18nPrompts, error) {
+				return adk.I18nPrompts{}, errors.New("boom")
 			},
 		}
 		_, err := st.InvokableRun(ctx, `{"skill":"pdf"}`)
@@ -1299,8 +1263,8 @@ func TestInvokableRun_AgentMode(t *testing.T) {
 			}},
 			toolName: "skill",
 			agentHub: hub,
-			customForkMessages: func(_ context.Context, in ForkMessageInput) ([]adk.Message, error) {
-				assert.Equal(t, ContextModeFork, in.Skill.Context)
+			buildForkMessages: func(_ context.Context, in SubAgentInput) ([]adk.Message, error) {
+				assert.Equal(t, ContextModeFork, in.Mode)
 				assert.Equal(t, "s1", in.Skill.Name)
 				return []adk.Message{schema.UserMessage("custom")}, nil
 			},
@@ -1334,7 +1298,7 @@ func TestInvokableRun_AgentMode(t *testing.T) {
 			}},
 			toolName: "skill",
 			agentHub: hub,
-			customForkMessages: func(context.Context, ForkMessageInput) ([]adk.Message, error) {
+			buildForkMessages: func(context.Context, SubAgentInput) ([]adk.Message, error) {
 				return nil, errors.New("build msg fail")
 			},
 		}
@@ -1371,8 +1335,8 @@ func TestInvokableRun_AgentMode(t *testing.T) {
 			}},
 			toolName: "skill",
 			agentHub: hub,
-			customForkResult: func(_ context.Context, in ForkResultInput) (adk.I18nPrompts, error) {
-				assert.Equal(t, ContextModeFork, in.Skill.Context)
+			formatForkResult: func(_ context.Context, in SubAgentOutput) (adk.I18nPrompts, error) {
+				assert.Equal(t, ContextModeFork, in.Mode)
 				assert.Equal(t, []string{"p1", "p2"}, in.Results)
 				return adk.I18nPrompts{English: "E:" + strings.Join(in.Results, ","), Chinese: "C"}, nil
 			},
@@ -1403,7 +1367,7 @@ func TestInvokableRun_AgentMode(t *testing.T) {
 			}},
 			toolName: "skill",
 			agentHub: hub,
-			customForkResult: func(context.Context, ForkResultInput) (adk.I18nPrompts, error) {
+			formatForkResult: func(context.Context, SubAgentOutput) (adk.I18nPrompts, error) {
 				return adk.I18nPrompts{}, errors.New("format fail")
 			},
 		}
