@@ -18,6 +18,7 @@ package reduction
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"path/filepath"
@@ -135,8 +136,11 @@ type ToolDetail struct {
 	// ToolArgument contains the arguments passed to the tool.
 	ToolArgument *schema.ToolArgument
 
-	// ToolResult contains the output returned by the tool.
+	// ToolResult contains the output returned by the invokable tool.
 	ToolResult *schema.ToolResult
+
+	// StreamToolResult contains the output returned by the streamable tool.
+	StreamToolResult *schema.StreamReader[*schema.ToolResult]
 }
 
 type TruncResult struct {
@@ -351,35 +355,19 @@ func (t *toolReductionMiddleware) WrapStreamableToolCall(_ context.Context, endp
 			return nil, err
 		}
 
-		var chunks []string
 		readers := output.Copy(2)
 		output = readers[0]
 		origResp := readers[1]
 		defer output.Close()
 
-		for {
-			var recvErr error
-			chunk, recvErr := output.Recv()
-			if recvErr != nil {
-				if recvErr != io.EOF {
-					return origResp, nil
-				}
-				break
-			}
-			chunks = append(chunks, chunk)
-		}
-
-		result := strings.Join(chunks, "")
 		detail := &ToolDetail{
 			ToolContext: tCtx,
 			ToolArgument: &schema.ToolArgument{
 				Text: argumentsInJSON,
 			},
-			ToolResult: &schema.ToolResult{
-				Parts: []schema.ToolOutputPart{
-					{Type: schema.ToolPartTypeText, Text: result},
-				},
-			},
+			StreamToolResult: schema.StreamReaderWithConvert(output, func(t string) (*schema.ToolResult, error) {
+				return &schema.ToolResult{Parts: []schema.ToolOutputPart{{Type: schema.ToolPartTypeText, Text: t}}}, nil
+			}),
 		}
 		truncResult, err := cfg.TruncHandler(ctx, detail)
 		if err != nil {
@@ -451,12 +439,16 @@ func (t *toolReductionMiddleware) BeforeModelRewriteState(ctx context.Context, s
 
 	var (
 		offloadStash       []*offloadStashItem
-		editTarget         = state.Messages
+		editTarget         []*schema.Message
 		clearAtLeastTokens = t.config.ClearAtLeastTokens
 	)
 
 	if clearAtLeastTokens > 0 {
-		editTarget = append(state.Messages[:start], copyMessages(state.Messages[start:end])...)
+		editTarget = append(editTarget, state.Messages[:start]...)
+		editTarget = append(editTarget, copyMessages(state.Messages[start:end])...)
+		editTarget = append(editTarget, state.Messages[end:]...)
+	} else {
+		editTarget = state.Messages
 	}
 
 	// recursively handle
@@ -638,6 +630,26 @@ func defaultTokenCounter(_ context.Context, msgs []*schema.Message, tools []*sch
 			}
 		}
 
+		for _, mc := range msg.UserInputMultiContent {
+			switch mc.Type {
+			case schema.ChatMessagePartTypeText:
+				sb.WriteString(mc.Text)
+				sb.WriteString("\n")
+			default:
+				// do nothing for multi-modal content
+			}
+		}
+
+		for _, mc := range msg.AssistantGenMultiContent {
+			switch mc.Type {
+			case schema.ChatMessagePartTypeText:
+				sb.WriteString(mc.Text)
+				sb.WriteString("\n")
+			default:
+				// do nothing for multi-modal content
+			}
+		}
+
 		n := int64(len(sb.String()) / 4)
 		tokens += n
 	}
@@ -658,48 +670,73 @@ func defaultTokenCounter(_ context.Context, msgs []*schema.Message, tools []*sch
 
 func defaultTruncHandler(rootDir string, truncMaxLength int) func(ctx context.Context, detail *ToolDetail) (truncResult *TruncResult, err error) {
 	return func(ctx context.Context, detail *ToolDetail) (offloadInfo *TruncResult, err error) {
-		resultText := detail.ToolResult.Parts[0].Text
-		if len(resultText) <= truncMaxLength {
-			return &TruncResult{NeedTrunc: false}, nil
-		}
-
-		filePath := filepath.Join(rootDir, "trunc", detail.ToolContext.CallID)
-		previewSize := truncMaxLength / 2
-		truncNotify, err := pyfmt.Fmt(getTruncFmt(), map[string]any{
-			"original_size": len(resultText),
-			"file_path":     filePath,
-			"preview_size":  previewSize,
-			"preview_first": resultText[:previewSize],
-			"preview_last":  resultText[len(resultText)-previewSize:],
-		})
+		resultParts, needProcess, err := getJointToolResult(detail)
 		if err != nil {
 			return nil, err
 		}
+		if !needProcess {
+			return &TruncResult{NeedTrunc: false}, nil
+		}
+
+		fullLength, textPartsCnt := 0, 0
+		for _, part := range resultParts {
+			if part.Type == schema.ToolPartTypeText {
+				fullLength += len([]rune(part.Text))
+				textPartsCnt++
+			}
+		}
+		if textPartsCnt == 0 || fullLength <= truncMaxLength {
+			return &TruncResult{NeedTrunc: false}, nil
+		}
+
+		fileName := detail.ToolContext.CallID
+		if fileName == "" {
+			fileName = uuid.NewString()
+		}
+		var (
+			offloadContent  = stringifyToolOutputParts(resultParts)
+			filePath        = filepath.Join(rootDir, "trunc", fileName)
+			truncPartLength = truncMaxLength / textPartsCnt
+			previewSize     = truncPartLength / 2
+		)
+
+		for i, part := range resultParts {
+			text := []rune(part.Text)
+			if part.Type != schema.ToolPartTypeText ||
+				len(text) < truncPartLength {
+				continue
+			}
+			truncNotify, fmtErr := pyfmt.Fmt(getTruncFmt(), map[string]any{
+				"original_size": len(part.Text),
+				"file_path":     filePath,
+				"preview_size":  previewSize,
+				"preview_first": string(text[:previewSize]),
+				"preview_last":  string(text[len(part.Text)-previewSize:]),
+			})
+			if err != nil {
+				return nil, fmtErr
+			}
+			resultParts[i].Text = truncNotify
+		}
 
 		return &TruncResult{
-			ToolResult: &schema.ToolResult{
-				Parts: []schema.ToolOutputPart{
-					{Type: schema.ToolPartTypeText, Text: truncNotify},
-				},
-			},
 			NeedTrunc:       true,
+			ToolResult:      &schema.ToolResult{Parts: resultParts},
 			NeedOffload:     true,
 			OffloadFilePath: filePath,
-			OffloadContent:  resultText,
+			OffloadContent:  offloadContent,
 		}, nil
 	}
 }
 
 func defaultClearHandler(rootDir string, needOffload bool, readFileToolName string) func(ctx context.Context, detail *ToolDetail) (*ClearResult, error) {
 	return func(ctx context.Context, detail *ToolDetail) (clearResult *ClearResult, err error) {
-		if len(detail.ToolResult.Parts) == 0 {
-			return &ClearResult{NeedClear: false}, nil
+		resultParts, needProcess, err := getJointToolResult(detail)
+		if err != nil {
+			return nil, err
 		}
-		for _, part := range detail.ToolResult.Parts {
-			if part.Type != schema.ToolPartTypeText {
-				// brutal judge
-				return nil, fmt.Errorf("default offload currently not support multimodal content type=%v", part.Type)
-			}
+		if !needProcess {
+			return &ClearResult{NeedClear: false}, nil
 		}
 
 		fileName := detail.ToolContext.CallID
@@ -707,39 +744,93 @@ func defaultClearHandler(rootDir string, needOffload bool, readFileToolName stri
 			fileName = uuid.NewString()
 		}
 
-		var nResult string
 		if needOffload {
 			filePath := filepath.Join(rootDir, "clear", fileName)
-			nResult, err = pyfmt.Fmt(getClearWithOffloadingFmt(), map[string]any{
+			textPlaceHolder, fmtErr := pyfmt.Fmt(getClearWithOffloadingFmt(), map[string]any{
 				"file_path":      filePath,
 				"read_tool_name": readFileToolName,
 			})
-			if err != nil {
-				return nil, err
+			if fmtErr != nil {
+				return nil, fmtErr
+			}
+
+			offloadContent := stringifyToolOutputParts(resultParts)
+			for i, part := range resultParts {
+				if part.Type != schema.ToolPartTypeText {
+					continue
+				}
+				resultParts[i].Text = textPlaceHolder
 			}
 			clearResult = &ClearResult{
-				ToolArgument:    detail.ToolArgument,
 				NeedClear:       true,
+				ToolArgument:    detail.ToolArgument,
+				ToolResult:      &schema.ToolResult{Parts: resultParts},
 				NeedOffload:     true,
 				OffloadFilePath: filePath,
-				OffloadContent:  detail.ToolResult.Parts[0].Text,
+				OffloadContent:  offloadContent,
 			}
 		} else {
-			nResult = getClearWithoutOffloadingFmt()
+			textPlaceHolder := getClearWithoutOffloadingFmt()
+			for i, part := range resultParts {
+				if part.Type != schema.ToolPartTypeText {
+					continue
+				}
+				resultParts[i].Text = textPlaceHolder
+			}
 			clearResult = &ClearResult{
-				ToolArgument: detail.ToolArgument,
 				NeedClear:    true,
+				ToolArgument: detail.ToolArgument,
+				ToolResult:   &schema.ToolResult{Parts: resultParts},
 				NeedOffload:  false,
 			}
 		}
 
-		clearResult.ToolResult = &schema.ToolResult{
-			Parts: []schema.ToolOutputPart{
-				{Type: schema.ToolPartTypeText, Text: nResult},
-			},
-		}
-
 		return clearResult, nil
+	}
+}
+
+func getJointToolResult(toolDetail *ToolDetail) (toolOutputParts []schema.ToolOutputPart, needProcess bool, err error) {
+	if toolDetail.ToolResult == nil && toolDetail.StreamToolResult == nil {
+		return nil, false, fmt.Errorf("ToolResult and StreamToolResult are both nil")
+	}
+
+	if toolDetail.ToolResult != nil {
+		toolOutputParts = toolDetail.ToolResult.Parts
+	} else {
+		var toolResultChunks []*schema.ToolResult
+		for {
+			toolResultChunk, recvErr := toolDetail.StreamToolResult.Recv()
+			if recvErr != nil {
+				if recvErr == io.EOF {
+					break
+				}
+				// return original stream reader, not sending recvErr
+				return nil, false, nil
+			}
+			toolResultChunks = append(toolResultChunks, toolResultChunk)
+		}
+		toolResult, concatErr := schema.ConcatToolResults(toolResultChunks)
+		if concatErr != nil {
+			return nil, false, concatErr
+		}
+		toolOutputParts = toolResult.Parts
+	}
+
+	if len(toolOutputParts) == 0 {
+		return nil, false, nil
+	}
+
+	return toolOutputParts, true, nil
+}
+
+func stringifyToolOutputParts(toolOutputParts []schema.ToolOutputPart) string {
+	if len(toolOutputParts) == 0 {
+		return ""
+	} else if len(toolOutputParts) == 1 && toolOutputParts[0].Type == schema.ToolPartTypeText {
+		return toolOutputParts[0].Text
+	} else {
+		b, _ := json.MarshalIndent(toolOutputParts, "", "\t")
+		return string(b)
 	}
 }
 
@@ -765,18 +856,18 @@ func toolResultFromMessage(msg *schema.Message) (result *schema.ToolResult, from
 	if msg.Role != schema.Tool {
 		return nil, false, fmt.Errorf("message role %s is not a tool", msg.Role)
 	}
-	if msg.Content != "" {
-		return &schema.ToolResult{Parts: []schema.ToolOutputPart{{Type: schema.ToolPartTypeText, Text: msg.Content}}}, true, nil
-	}
-	result = &schema.ToolResult{Parts: make([]schema.ToolOutputPart, 0, len(msg.UserInputMultiContent))}
-	for _, part := range msg.UserInputMultiContent {
-		top, convErr := convMessageInputPartToToolOutputPart(part)
-		if convErr != nil {
-			return nil, false, convErr
+	if len(msg.UserInputMultiContent) > 0 {
+		result = &schema.ToolResult{Parts: make([]schema.ToolOutputPart, 0, len(msg.UserInputMultiContent))}
+		for _, part := range msg.UserInputMultiContent {
+			top, convErr := convMessageInputPartToToolOutputPart(part)
+			if convErr != nil {
+				return nil, false, convErr
+			}
+			result.Parts = append(result.Parts, top)
 		}
-		result.Parts = append(result.Parts, top)
+		return result, false, nil
 	}
-	return result, false, nil
+	return &schema.ToolResult{Parts: []schema.ToolOutputPart{{Type: schema.ToolPartTypeText, Text: msg.Content}}}, true, nil
 }
 
 func convMessageInputPartToToolOutputPart(msgPart schema.MessageInputPart) (schema.ToolOutputPart, error) {
