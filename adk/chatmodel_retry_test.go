@@ -62,7 +62,7 @@ func TestChatModelAgentRetry_NoTools_DirectError_Generate(t *testing.T) {
 		Model:       cm,
 		ModelRetryConfig: &ModelRetryConfig{
 			MaxRetries:  3,
-			IsRetryAble: func(ctx context.Context, err error) bool { return errors.Is(err, errRetryAble) },
+			IsRetryAble: func(ctx context.Context, msg *schema.Message, err error) bool { return errors.Is(err, errRetryAble) },
 		},
 	})
 	assert.NoError(t, err)
@@ -110,7 +110,7 @@ func TestChatModelAgentRetry_NoTools_DirectError_Stream(t *testing.T) {
 		Model:       cm,
 		ModelRetryConfig: &ModelRetryConfig{
 			MaxRetries:  3,
-			IsRetryAble: func(ctx context.Context, err error) bool { return errors.Is(err, errRetryAble) },
+			IsRetryAble: func(ctx context.Context, msg *schema.Message, err error) bool { return errors.Is(err, errRetryAble) },
 		},
 	})
 	assert.NoError(t, err)
@@ -191,7 +191,7 @@ func TestChatModelAgentRetry_StreamError(t *testing.T) {
 			Model:       m,
 			ModelRetryConfig: &ModelRetryConfig{
 				MaxRetries:  3,
-				IsRetryAble: func(ctx context.Context, err error) bool { return errors.Is(err, errRetryAble) },
+				IsRetryAble: func(ctx context.Context, msg *schema.Message, err error) bool { return errors.Is(err, errRetryAble) },
 			},
 			ToolsConfig: ToolsConfig{
 				ToolsNodeConfig: compose.ToolsNodeConfig{
@@ -265,7 +265,7 @@ func TestChatModelAgentRetry_StreamError(t *testing.T) {
 			Model:       m,
 			ModelRetryConfig: &ModelRetryConfig{
 				MaxRetries:  3,
-				IsRetryAble: func(ctx context.Context, err error) bool { return errors.Is(err, errRetryAble) },
+				IsRetryAble: func(ctx context.Context, msg *schema.Message, err error) bool { return errors.Is(err, errRetryAble) },
 			},
 		}
 
@@ -351,7 +351,7 @@ func TestChatModelAgentRetry_WithTools_DirectError_Generate(t *testing.T) {
 		},
 		ModelRetryConfig: &ModelRetryConfig{
 			MaxRetries:  3,
-			IsRetryAble: func(ctx context.Context, err error) bool { return errors.Is(err, errRetryAble) },
+			IsRetryAble: func(ctx context.Context, msg *schema.Message, err error) bool { return errors.Is(err, errRetryAble) },
 		},
 	})
 	assert.NoError(t, err)
@@ -390,7 +390,7 @@ func TestChatModelAgentRetry_NonRetryableError(t *testing.T) {
 		Model:       cm,
 		ModelRetryConfig: &ModelRetryConfig{
 			MaxRetries:  3,
-			IsRetryAble: func(ctx context.Context, err error) bool { return errors.Is(err, errRetryAble) },
+			IsRetryAble: func(ctx context.Context, msg *schema.Message, err error) bool { return errors.Is(err, errRetryAble) },
 		},
 	})
 	assert.NoError(t, err)
@@ -447,7 +447,7 @@ func TestChatModelAgentRetry_MaxRetriesExhausted(t *testing.T) {
 		Model:       cm,
 		ModelRetryConfig: &ModelRetryConfig{
 			MaxRetries:  3,
-			IsRetryAble: func(ctx context.Context, err error) bool { return errors.Is(err, errRetryAble) },
+			IsRetryAble: func(ctx context.Context, msg *schema.Message, err error) bool { return errors.Is(err, errRetryAble) },
 		},
 	})
 	assert.NoError(t, err)
@@ -495,7 +495,7 @@ func TestChatModelAgentRetry_BackoffFunction(t *testing.T) {
 		Model:       cm,
 		ModelRetryConfig: &ModelRetryConfig{
 			MaxRetries:  3,
-			IsRetryAble: func(ctx context.Context, err error) bool { return errors.Is(err, errRetryAble) },
+			IsRetryAble: func(ctx context.Context, msg *schema.Message, err error) bool { return errors.Is(err, errRetryAble) },
 			BackoffFunc: func(ctx context.Context, attempt int) time.Duration {
 				backoffCalls = append(backoffCalls, attempt)
 				return time.Millisecond
@@ -577,7 +577,7 @@ func TestChatModelAgentRetry_WithTools_NonRetryAbleStreamError(t *testing.T) {
 		},
 		ModelRetryConfig: &ModelRetryConfig{
 			MaxRetries:  3,
-			IsRetryAble: func(ctx context.Context, err error) bool { return errors.Is(err, errRetryAble) },
+			IsRetryAble: func(ctx context.Context, msg *schema.Message, err error) bool { return errors.Is(err, errRetryAble) },
 		},
 	})
 	assert.NoError(t, err)
@@ -633,7 +633,7 @@ func TestChatModelAgentRetry_NoTools_NonRetryAbleStreamError(t *testing.T) {
 		Model:       m,
 		ModelRetryConfig: &ModelRetryConfig{
 			MaxRetries:  3,
-			IsRetryAble: func(ctx context.Context, err error) bool { return errors.Is(err, errRetryAble) },
+			IsRetryAble: func(ctx context.Context, msg *schema.Message, err error) bool { return errors.Is(err, errRetryAble) },
 		},
 	})
 	assert.NoError(t, err)
@@ -806,7 +806,7 @@ func TestSequentialWorkflow_RetryAbleStreamError_SuccessfulRetry(t *testing.T) {
 		Model:       retryModel,
 		ModelRetryConfig: &ModelRetryConfig{
 			MaxRetries:  3,
-			IsRetryAble: func(ctx context.Context, err error) bool { return errors.Is(err, errRetryAble) },
+			IsRetryAble: func(ctx context.Context, msg *schema.Message, err error) bool { return errors.Is(err, errRetryAble) },
 		},
 	})
 	assert.NoError(t, err)
@@ -914,7 +914,7 @@ func TestSequentialWorkflow_NonRetryAbleStreamError_StopsFlow(t *testing.T) {
 		Model:       nonRetryModel,
 		ModelRetryConfig: &ModelRetryConfig{
 			MaxRetries:  3,
-			IsRetryAble: func(ctx context.Context, err error) bool { return errors.Is(err, errRetryAble) },
+			IsRetryAble: func(ctx context.Context, msg *schema.Message, err error) bool { return errors.Is(err, errRetryAble) },
 		},
 	})
 	assert.NoError(t, err)
@@ -1045,4 +1045,303 @@ func TestSequentialWorkflow_NoRetryConfig_StreamError_StopsFlow(t *testing.T) {
 	assert.True(t, errors.Is(finalErrEvent.Err, errRetryAble), "Final error should be the original error")
 	assert.Equal(t, 0, len(capturingModel.capturedInputs), "Agent B should NOT be called due to error")
 	assert.Equal(t, int32(1), atomic.LoadInt32(&noRetryModel.callCount), "Model should only be called once (no retry)")
+}
+
+// emptyContentBaseChatModel implements model.BaseChatModel for testing message-based retry.
+type emptyContentBaseChatModel struct {
+	callCount int32
+	threshold int32
+}
+
+func (m *emptyContentBaseChatModel) Generate(_ context.Context, _ []*schema.Message, _ ...model.Option) (*schema.Message, error) {
+	count := atomic.AddInt32(&m.callCount, 1)
+	if count <= m.threshold {
+		return &schema.Message{Role: schema.Assistant, Content: ""}, nil
+	}
+	return schema.AssistantMessage("Valid response", nil), nil
+}
+
+func (m *emptyContentBaseChatModel) Stream(_ context.Context, _ []*schema.Message, _ ...model.Option) (*schema.StreamReader[*schema.Message], error) {
+	count := atomic.AddInt32(&m.callCount, 1)
+	if count <= m.threshold {
+		return schema.StreamReaderFromArray([]*schema.Message{
+			{Role: schema.Assistant, Content: ""},
+		}), nil
+	}
+	return schema.StreamReaderFromArray([]*schema.Message{
+		schema.AssistantMessage("Valid response", nil),
+	}), nil
+}
+
+type badFinishReasonBaseChatModel struct {
+	callCount int32
+	threshold int32
+}
+
+func (m *badFinishReasonBaseChatModel) Generate(_ context.Context, _ []*schema.Message, _ ...model.Option) (*schema.Message, error) {
+	count := atomic.AddInt32(&m.callCount, 1)
+	if count <= m.threshold {
+		return &schema.Message{
+			Role:    schema.Assistant,
+			Content: "partial",
+			ResponseMeta: &schema.ResponseMeta{
+				FinishReason: "length",
+			},
+		}, nil
+	}
+	return &schema.Message{
+		Role:    schema.Assistant,
+		Content: "Complete response",
+		ResponseMeta: &schema.ResponseMeta{
+			FinishReason: "stop",
+		},
+	}, nil
+}
+
+func (m *badFinishReasonBaseChatModel) Stream(_ context.Context, _ []*schema.Message, _ ...model.Option) (*schema.StreamReader[*schema.Message], error) {
+	count := atomic.AddInt32(&m.callCount, 1)
+	if count <= m.threshold {
+		return schema.StreamReaderFromArray([]*schema.Message{
+			{Role: schema.Assistant, Content: "partial", ResponseMeta: &schema.ResponseMeta{FinishReason: "length"}},
+		}), nil
+	}
+	return schema.StreamReaderFromArray([]*schema.Message{
+		{Role: schema.Assistant, Content: "Complete response", ResponseMeta: &schema.ResponseMeta{FinishReason: "stop"}},
+	}), nil
+}
+
+func TestRetryModelWrapper_EmptyContent_Generate(t *testing.T) {
+	ctx := context.Background()
+	m := &emptyContentBaseChatModel{threshold: 2}
+
+	wrapper := newRetryModelWrapper(m, &ModelRetryConfig{
+		MaxRetries: 3,
+		IsRetryAble: func(_ context.Context, msg *schema.Message, err error) bool {
+			if err != nil {
+				return true
+			}
+			return msg != nil && msg.Content == ""
+		},
+		BackoffFunc: func(_ context.Context, _ int) time.Duration { return time.Millisecond },
+	})
+
+	out, err := wrapper.Generate(ctx, nil)
+	assert.NoError(t, err)
+	assert.NotNil(t, out)
+	assert.Equal(t, "Valid response", out.Content)
+	assert.Equal(t, int32(3), atomic.LoadInt32(&m.callCount))
+}
+
+func TestRetryModelWrapper_EmptyContent_Stream(t *testing.T) {
+	ctx := context.Background()
+	m := &emptyContentBaseChatModel{threshold: 1}
+
+	wrapper := newRetryModelWrapper(m, &ModelRetryConfig{
+		MaxRetries: 3,
+		IsRetryAble: func(_ context.Context, msg *schema.Message, err error) bool {
+			if err != nil {
+				return true
+			}
+			return msg != nil && msg.Content == ""
+		},
+		BackoffFunc: func(_ context.Context, _ int) time.Duration { return time.Millisecond },
+	})
+
+	sr, err := wrapper.Stream(ctx, nil)
+	assert.NoError(t, err)
+	assert.NotNil(t, sr)
+
+	var chunks []*schema.Message
+	for {
+		msg, recvErr := sr.Recv()
+		if recvErr == io.EOF {
+			break
+		}
+		assert.NoError(t, recvErr)
+		chunks = append(chunks, msg)
+	}
+	assert.True(t, len(chunks) > 0)
+	assert.Equal(t, "Valid response", chunks[0].Content)
+	assert.Equal(t, int32(2), atomic.LoadInt32(&m.callCount))
+}
+
+func TestRetryModelWrapper_BadFinishReason_Generate(t *testing.T) {
+	ctx := context.Background()
+	m := &badFinishReasonBaseChatModel{threshold: 2}
+
+	wrapper := newRetryModelWrapper(m, &ModelRetryConfig{
+		MaxRetries: 3,
+		IsRetryAble: func(_ context.Context, msg *schema.Message, err error) bool {
+			if err != nil {
+				return true
+			}
+			if msg != nil && msg.ResponseMeta != nil && msg.ResponseMeta.FinishReason != "stop" {
+				return true
+			}
+			return false
+		},
+		BackoffFunc: func(_ context.Context, _ int) time.Duration { return time.Millisecond },
+	})
+
+	out, err := wrapper.Generate(ctx, nil)
+	assert.NoError(t, err)
+	assert.NotNil(t, out)
+	assert.Equal(t, "Complete response", out.Content)
+	assert.Equal(t, "stop", out.ResponseMeta.FinishReason)
+	assert.Equal(t, int32(3), atomic.LoadInt32(&m.callCount))
+}
+
+func TestRetryModelWrapper_BadFinishReason_Stream(t *testing.T) {
+	ctx := context.Background()
+	m := &badFinishReasonBaseChatModel{threshold: 1}
+
+	wrapper := newRetryModelWrapper(m, &ModelRetryConfig{
+		MaxRetries: 3,
+		IsRetryAble: func(_ context.Context, msg *schema.Message, err error) bool {
+			if err != nil {
+				return true
+			}
+			if msg != nil && msg.ResponseMeta != nil && msg.ResponseMeta.FinishReason != "stop" {
+				return true
+			}
+			return false
+		},
+		BackoffFunc: func(_ context.Context, _ int) time.Duration { return time.Millisecond },
+	})
+
+	sr, err := wrapper.Stream(ctx, nil)
+	assert.NoError(t, err)
+	assert.NotNil(t, sr)
+
+	var chunks []*schema.Message
+	for {
+		msg, recvErr := sr.Recv()
+		if recvErr == io.EOF {
+			break
+		}
+		assert.NoError(t, recvErr)
+		chunks = append(chunks, msg)
+	}
+	assert.True(t, len(chunks) > 0)
+	assert.Equal(t, "Complete response", chunks[0].Content)
+	assert.Equal(t, "stop", chunks[0].ResponseMeta.FinishReason)
+	assert.Equal(t, int32(2), atomic.LoadInt32(&m.callCount))
+}
+
+func TestRetryModelWrapper_MessageRetry_Exhausted(t *testing.T) {
+	ctx := context.Background()
+	m := &emptyContentBaseChatModel{threshold: 100}
+
+	wrapper := newRetryModelWrapper(m, &ModelRetryConfig{
+		MaxRetries: 2,
+		IsRetryAble: func(_ context.Context, msg *schema.Message, err error) bool {
+			if err != nil {
+				return true
+			}
+			return msg != nil && msg.Content == ""
+		},
+		BackoffFunc: func(_ context.Context, _ int) time.Duration { return time.Millisecond },
+	})
+
+	out, err := wrapper.Generate(ctx, nil)
+	assert.NotNil(t, out)
+	assert.NotNil(t, err)
+	assert.True(t, errors.Is(err, ErrExceedMaxRetries))
+
+	var retryErr *RetryExhaustedError
+	assert.True(t, errors.As(err, &retryErr))
+	assert.Nil(t, retryErr.LastErr)
+	assert.NotNil(t, retryErr.LastMessage)
+	assert.Equal(t, "", retryErr.LastMessage.Content)
+	assert.Equal(t, 2, retryErr.TotalRetries)
+	assert.Equal(t, int32(3), atomic.LoadInt32(&m.callCount))
+}
+
+func TestRetryModelWrapper_MessageRetry_StreamExhausted(t *testing.T) {
+	ctx := context.Background()
+	m := &emptyContentBaseChatModel{threshold: 100}
+
+	wrapper := newRetryModelWrapper(m, &ModelRetryConfig{
+		MaxRetries: 2,
+		IsRetryAble: func(_ context.Context, msg *schema.Message, err error) bool {
+			if err != nil {
+				return true
+			}
+			return msg != nil && msg.Content == ""
+		},
+		BackoffFunc: func(_ context.Context, _ int) time.Duration { return time.Millisecond },
+	})
+
+	sr, err := wrapper.Stream(ctx, nil)
+	assert.Nil(t, sr)
+	assert.NotNil(t, err)
+	assert.True(t, errors.Is(err, ErrExceedMaxRetries))
+
+	var retryErr *RetryExhaustedError
+	assert.True(t, errors.As(err, &retryErr))
+	assert.Nil(t, retryErr.LastErr)
+	assert.NotNil(t, retryErr.LastMessage)
+	assert.Equal(t, "", retryErr.LastMessage.Content)
+	assert.Equal(t, int32(3), atomic.LoadInt32(&m.callCount))
+}
+
+func TestRetryExhaustedError_UnsatisfactoryMessage(t *testing.T) {
+	err := &RetryExhaustedError{
+		LastErr:      nil,
+		LastMessage:  &schema.Message{Content: ""},
+		TotalRetries: 3,
+	}
+	assert.Contains(t, err.Error(), "unsatisfactory")
+	assert.True(t, errors.Is(err, ErrExceedMaxRetries))
+}
+
+func TestRetryModelWrapper_MixedErrorAndMessageRetry(t *testing.T) {
+	ctx := context.Background()
+	var callCount int32
+
+	m := &endpointModel{
+		generate: func(_ context.Context, _ []*schema.Message, _ ...model.Option) (*schema.Message, error) {
+			count := atomic.AddInt32(&callCount, 1)
+			switch count {
+			case 1:
+				return nil, errRetryAble
+			case 2:
+				return &schema.Message{Role: schema.Assistant, Content: ""}, nil
+			default:
+				return schema.AssistantMessage("Final success", nil), nil
+			}
+		},
+	}
+
+	wrapper := newRetryModelWrapper(m, &ModelRetryConfig{
+		MaxRetries: 5,
+		IsRetryAble: func(_ context.Context, msg *schema.Message, err error) bool {
+			if err != nil {
+				return errors.Is(err, errRetryAble)
+			}
+			return msg != nil && msg.Content == ""
+		},
+		BackoffFunc: func(_ context.Context, _ int) time.Duration { return time.Millisecond },
+	})
+
+	out, err := wrapper.Generate(ctx, nil)
+	assert.NoError(t, err)
+	assert.NotNil(t, out)
+	assert.Equal(t, "Final success", out.Content)
+	assert.Equal(t, int32(3), atomic.LoadInt32(&callCount))
+}
+
+func TestRetryModelWrapper_DefaultIsRetryAble_IgnoresSuccessfulMessage(t *testing.T) {
+	ctx := context.Background()
+	m := &emptyContentBaseChatModel{threshold: 100}
+
+	wrapper := newRetryModelWrapper(m, &ModelRetryConfig{
+		MaxRetries: 3,
+	})
+
+	out, err := wrapper.Generate(ctx, nil)
+	assert.NoError(t, err)
+	assert.NotNil(t, out)
+	assert.Equal(t, "", out.Content)
+	assert.Equal(t, int32(1), atomic.LoadInt32(&m.callCount))
 }

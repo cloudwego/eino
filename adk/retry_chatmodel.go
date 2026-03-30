@@ -38,25 +38,36 @@ var (
 	//       // handle max retries exceeded
 	//   }
 	//
-	// Use errors.As to extract the underlying RetryExhaustedError for the last error details:
+	// Use errors.As to extract the underlying RetryExhaustedError for details:
 	//
 	//   var retryErr *adk.RetryExhaustedError
 	//   if errors.As(err, &retryErr) {
-	//       fmt.Printf("last error was: %v\n", retryErr.LastErr)
+	//       if retryErr.LastErr != nil {
+	//           fmt.Printf("last error was: %v\n", retryErr.LastErr)
+	//       }
+	//       if retryErr.LastMessage != nil {
+	//           fmt.Printf("last unsatisfactory response: %s\n", retryErr.LastMessage.Content)
+	//       }
 	//   }
 	ErrExceedMaxRetries = errors.New("exceeds max retries")
 )
 
 // RetryExhaustedError is returned when all retry attempts have been exhausted.
 // It wraps the last error that occurred during retry attempts.
+// When retries are triggered by unsatisfactory responses (not errors),
+// LastErr may be nil and LastMessage contains the last model output.
 type RetryExhaustedError struct {
 	LastErr      error
+	LastMessage  *schema.Message
 	TotalRetries int
 }
 
 func (e *RetryExhaustedError) Error() string {
 	if e.LastErr != nil {
 		return fmt.Sprintf("exceeds max retries: last error: %v", e.LastErr)
+	}
+	if e.LastMessage != nil {
+		return "exceeds max retries: last response was unsatisfactory"
 	}
 	return "exceeds max retries"
 }
@@ -102,11 +113,15 @@ type ModelRetryConfig struct {
 	// A value of 3 means up to 3 retry attempts (4 total calls including the initial attempt).
 	MaxRetries int
 
-	// IsRetryAble is a function that determines whether an error should trigger a retry.
-	// If nil, all errors are considered retry-able.
-	// Return true if the error is transient and the operation should be retried.
-	// Return false if the error is permanent and should be propagated immediately.
-	IsRetryAble func(ctx context.Context, err error) bool
+	// IsRetryAble determines whether the model call should be retried.
+	// It receives the model's output message and the error (either may be nil).
+	//
+	// When err != nil: a call error occurred; msg is nil.
+	// When err == nil: the call succeeded; msg is the model output. Return true
+	// to retry based on the response content (e.g. empty content, unexpected finish_reason).
+	//
+	// If nil, all errors are retried and successful responses are never retried.
+	IsRetryAble func(ctx context.Context, msg *schema.Message, err error) bool
 
 	// BackoffFunc calculates the delay before the next retry attempt.
 	// The attempt parameter starts at 1 for the first retry.
@@ -116,7 +131,7 @@ type ModelRetryConfig struct {
 	BackoffFunc func(ctx context.Context, attempt int) time.Duration
 }
 
-func defaultIsRetryAble(_ context.Context, err error) bool {
+func defaultIsRetryAble(_ context.Context, _ *schema.Message, err error) bool {
 	return err != nil
 }
 
@@ -141,9 +156,9 @@ func defaultBackoff(_ context.Context, attempt int) time.Duration {
 	return delay + jitter
 }
 
-func genErrWrapper(ctx context.Context, maxRetries, attempt int, isRetryAbleFunc func(ctx context.Context, err error) bool) func(error) error {
+func genErrWrapper(ctx context.Context, maxRetries, attempt int, isRetryAbleFunc func(ctx context.Context, msg *schema.Message, err error) bool) func(error) error {
 	return func(err error) error {
-		isRetryAble := isRetryAbleFunc == nil || isRetryAbleFunc(ctx, err)
+		isRetryAble := isRetryAbleFunc == nil || isRetryAbleFunc(ctx, nil, err)
 		hasRetriesLeft := attempt < maxRetries
 
 		if isRetryAble && hasRetriesLeft {
@@ -153,16 +168,25 @@ func genErrWrapper(ctx context.Context, maxRetries, attempt int, isRetryAbleFunc
 	}
 }
 
-func consumeStreamForError(stream *schema.StreamReader[*schema.Message]) error {
+func consumeStreamForMessage(stream *schema.StreamReader[*schema.Message]) (*schema.Message, error) {
 	defer stream.Close()
+	var chunks []*schema.Message
 	for {
-		_, err := stream.Recv()
+		msg, err := stream.Recv()
 		if err == io.EOF {
-			return nil
+			if len(chunks) == 0 {
+				return nil, nil
+			}
+			assembled, concatErr := schema.ConcatMessages(chunks)
+			if concatErr != nil {
+				return nil, concatErr
+			}
+			return assembled, nil
 		}
 		if err != nil {
-			return err
+			return nil, err
 		}
+		chunks = append(chunks, msg)
 	}
 }
 
@@ -190,24 +214,34 @@ func (r *retryModelWrapper) Generate(ctx context.Context, input []*schema.Messag
 	}
 
 	var lastErr error
+	var lastMessage *schema.Message
 	for attempt := 0; attempt <= r.config.MaxRetries; attempt++ {
 		out, err := r.inner.Generate(ctx, input, opts...)
 		if err == nil {
-			return out, nil
+			if !isRetryAble(ctx, out, nil) {
+				return out, nil
+			}
+			lastMessage = out
+			lastErr = nil
+		} else {
+			if !isRetryAble(ctx, nil, err) {
+				return nil, err
+			}
+			lastErr = err
+			lastMessage = nil
 		}
 
-		if !isRetryAble(ctx, err) {
-			return nil, err
-		}
-
-		lastErr = err
 		if attempt < r.config.MaxRetries {
-			log.Printf("retrying ChatModel.Generate (attempt %d/%d): %v", attempt+1, r.config.MaxRetries, err)
+			if err != nil {
+				log.Printf("retrying ChatModel.Generate (attempt %d/%d): %v", attempt+1, r.config.MaxRetries, err)
+			} else {
+				log.Printf("retrying ChatModel.Generate (attempt %d/%d): unsatisfactory response", attempt+1, r.config.MaxRetries)
+			}
 			time.Sleep(backoffFunc(ctx, attempt+1))
 		}
 	}
 
-	return nil, &RetryExhaustedError{LastErr: lastErr, TotalRetries: r.config.MaxRetries}
+	return lastMessage, &RetryExhaustedError{LastErr: lastErr, LastMessage: lastMessage, TotalRetries: r.config.MaxRetries}
 }
 
 func (r *retryModelWrapper) Stream(ctx context.Context, input []*schema.Message, opts ...model.Option) (
@@ -230,6 +264,7 @@ func (r *retryModelWrapper) Stream(ctx context.Context, input []*schema.Message,
 	}()
 
 	var lastErr error
+	var lastMessage *schema.Message
 	for attempt := 0; attempt <= r.config.MaxRetries; attempt++ {
 		_ = compose.ProcessState(ctx, func(_ context.Context, st *State) error {
 			st.setRetryAttempt(attempt)
@@ -238,10 +273,11 @@ func (r *retryModelWrapper) Stream(ctx context.Context, input []*schema.Message,
 
 		stream, err := r.inner.Stream(ctx, input, opts...)
 		if err != nil {
-			if !isRetryAble(ctx, err) {
+			if !isRetryAble(ctx, nil, err) {
 				return nil, err
 			}
 			lastErr = err
+			lastMessage = nil
 			if attempt < r.config.MaxRetries {
 				log.Printf("retrying ChatModel.Stream (attempt %d/%d): %v", attempt+1, r.config.MaxRetries, err)
 				time.Sleep(backoffFunc(ctx, attempt+1))
@@ -253,22 +289,33 @@ func (r *retryModelWrapper) Stream(ctx context.Context, input []*schema.Message,
 		checkCopy := copies[0]
 		returnCopy := copies[1]
 
-		streamErr := consumeStreamForError(checkCopy)
-		if streamErr == nil {
+		assembledMsg, streamErr := consumeStreamForMessage(checkCopy)
+		if streamErr != nil {
+			returnCopy.Close()
+			if !isRetryAble(ctx, nil, streamErr) {
+				return nil, streamErr
+			}
+			lastErr = streamErr
+			lastMessage = nil
+			if attempt < r.config.MaxRetries {
+				log.Printf("retrying ChatModel.Stream (attempt %d/%d): %v", attempt+1, r.config.MaxRetries, streamErr)
+				time.Sleep(backoffFunc(ctx, attempt+1))
+			}
+			continue
+		}
+
+		if !isRetryAble(ctx, assembledMsg, nil) {
 			return returnCopy, nil
 		}
 
 		returnCopy.Close()
-		if !isRetryAble(ctx, streamErr) {
-			return nil, streamErr
-		}
-
-		lastErr = streamErr
+		lastMessage = assembledMsg
+		lastErr = nil
 		if attempt < r.config.MaxRetries {
-			log.Printf("retrying ChatModel.Stream (attempt %d/%d): %v", attempt+1, r.config.MaxRetries, streamErr)
+			log.Printf("retrying ChatModel.Stream (attempt %d/%d): unsatisfactory response", attempt+1, r.config.MaxRetries)
 			time.Sleep(backoffFunc(ctx, attempt+1))
 		}
 	}
 
-	return nil, &RetryExhaustedError{LastErr: lastErr, TotalRetries: r.config.MaxRetries}
+	return nil, &RetryExhaustedError{LastErr: lastErr, LastMessage: lastMessage, TotalRetries: r.config.MaxRetries}
 }
