@@ -1129,48 +1129,64 @@ func (a *TypedChatModelAgent[M]) buildMessageReActRunFunc(ctx context.Context, b
 	}, nil
 }
 
-// buildAgenticReActRunFunc builds a single-shot chain for agentic models.
-// Despite the "ReAct" name (for symmetry with buildMessageReActRunFunc), this does
-// NOT build an iterative tool-calling loop. Agentic models handle tool execution
-// internally within their Generate/Stream methods, so the ADK only needs a single
-// model invocation with tools bound via WithTools.
-func (a *TypedChatModelAgent[M]) buildAgenticReActRunFunc(_ context.Context, bc *execContext) (typedRunFunc[M], error) {
+type agenticReactRunInput struct {
+	input       *TypedAgentInput[*schema.AgenticMessage]
+	instruction string
+}
+
+func (a *TypedChatModelAgent[M]) buildAgenticReActRunFunc(ctx context.Context, bc *execContext) (typedRunFunc[M], error) {
+	agenticModel := any(a.model).(model.AgenticModel)
+	agenticHandlers := any(a.handlers).([]TypedChatModelAgentMiddleware[*schema.AgenticMessage])
+	genModelInputFn := any(a.genModelInput).(TypedGenModelInput[*schema.AgenticMessage])
+	agenticConf := &agenticReactConfig{
+		model:       agenticModel,
+		toolsConfig: &bc.toolsNodeConf,
+		modelWrapperConf: &typedModelWrapperConfig[*schema.AgenticMessage]{
+			handlers:    agenticHandlers,
+			middlewares: a.middlewares,
+			retryConfig: a.modelRetryConfig,
+			toolInfos:   bc.toolInfos,
+		},
+		toolsReturnDirectly: bc.returnDirectly,
+		agentName:           a.name,
+		maxIterations:       a.maxIterations,
+	}
+
 	return func(ctx context.Context, p *typedRunParams[M]) {
-		cancelCtx := p.cancelCtx
+		ap := any(p).(*typedRunParams[*schema.AgenticMessage])
+		cancelCtx := ap.cancelCtx
+		agenticConf.cancelCtx = cancelCtx
+		if agenticConf.modelWrapperConf != nil {
+			agenticConf.modelWrapperConf.cancelContext = cancelCtx
+		}
 		ctx = withCancelContext(ctx, cancelCtx)
 
-		wrappedModel := buildModelWrappers(a.model, &typedModelWrapperConfig[M]{
-			handlers:      a.handlers,
-			middlewares:   a.middlewares,
-			retryConfig:   a.modelRetryConfig,
-			toolInfos:     bc.toolInfos,
-			cancelContext: cancelCtx,
-		})
+		g, err := newAgenticReact(ctx, agenticConf)
+		if err != nil {
+			ap.generator.Send(&TypedAgentEvent[*schema.AgenticMessage]{Err: err})
+			return
+		}
 
-		chain := compose.NewChain[typedNoToolsInput[M], M](
-			compose.WithGenLocalState(func(ctx context.Context) (state *TypedState[M]) {
-				return &TypedState[M]{}
-			}))
-
-		chain.AppendLambda(compose.InvokableLambda(func(ctx context.Context, in typedNoToolsInput[M]) ([]M, error) {
-			messages, err := a.genModelInput(ctx, in.instruction, in.input)
-			if err != nil {
-				return nil, err
-			}
-			_ = compose.ProcessState(ctx, func(_ context.Context, st *TypedState[M]) error {
-				st.Messages = append(st.Messages, messages...)
-				return nil
-			})
-			return messages, nil
-		}))
-
-		appendModelToChain(chain, wrappedModel)
+		chain := compose.NewChain[agenticReactRunInput, *schema.AgenticMessage]().
+			AppendLambda(
+				compose.InvokableLambda(func(ctx context.Context, in agenticReactRunInput) (*agenticReactInput, error) {
+					messages, genErr := genModelInputFn(ctx, in.instruction, in.input)
+					if genErr != nil {
+						return nil, genErr
+					}
+					return &agenticReactInput{
+						Messages: messages,
+					}, nil
+				}),
+			).
+			AppendGraph(g, compose.WithNodeName("ReAct"), compose.WithGraphCompileOptions(compose.WithMaxRunSteps(math.MaxInt)))
 
 		var compileOptions []compose.GraphCompileOption
 		compileOptions = append(compileOptions,
 			compose.WithGraphName(a.name),
-			compose.WithCheckPointStore(p.store),
-			compose.WithSerializer(&gobSerializer{}))
+			compose.WithCheckPointStore(ap.store),
+			compose.WithSerializer(&gobSerializer{}),
+			compose.WithMaxRunSteps(math.MaxInt))
 
 		if cancelCtx != nil {
 			var interrupt func(...compose.GraphInterruptOption)
@@ -1178,15 +1194,15 @@ func (a *TypedChatModelAgent[M]) buildAgenticReActRunFunc(_ context.Context, bc 
 			cancelCtx.setGraphInterruptFunc(cancelCtx.wrapGraphInterruptWithGracePeriod(interrupt))
 		}
 
-		r, err := chain.Compile(ctx, compileOptions...)
-		if err != nil {
-			p.generator.Send(&TypedAgentEvent[M]{Err: err})
+		runnable, err_ := chain.Compile(ctx, compileOptions...)
+		if err_ != nil {
+			ap.generator.Send(&TypedAgentEvent[*schema.AgenticMessage]{Err: err_})
 			return
 		}
 
-		ctx = withTypedChatModelAgentExecCtx(ctx, &typedChatModelAgentExecCtx[M]{
-			runtimeReturnDirectly: p.returnDirectly,
-			generator:             p.generator,
+		ctx = withTypedChatModelAgentExecCtx(ctx, &typedChatModelAgentExecCtx[*schema.AgenticMessage]{
+			runtimeReturnDirectly: ap.returnDirectly,
+			generator:             ap.generator,
 		})
 
 		if cancelCtx != nil && cancelCtx.shouldCancel() {
@@ -1195,34 +1211,41 @@ func (a *TypedChatModelAgent[M]) buildAgenticReActRunFunc(_ context.Context, bc 
 				if !ok {
 					return
 				}
-				p.generator.Send(&TypedAgentEvent[M]{Err: cancelErr})
+				ap.generator.Send(&TypedAgentEvent[*schema.AgenticMessage]{Err: cancelErr})
 				return
 			}
 		}
 
-		in := typedNoToolsInput[M]{input: p.input, instruction: p.instruction}
+		in := agenticReactRunInput{input: ap.input, instruction: ap.instruction}
 
-		var msg M
-		var msgStream *schema.StreamReader[M]
-		if p.input.EnableStreaming {
-			msgStream, err = r.Stream(ctx, in, p.composeOpts...)
-		} else {
-			msg, err = r.Invoke(ctx, in, p.composeOpts...)
+		var runOpts []compose.Option
+		runOpts = append(runOpts, ap.composeOpts...)
+		if ap.input.EnableStreaming {
+			runOpts = append(runOpts, compose.WithToolsNodeOption(compose.WithToolOption(withAgentToolEnableStreaming(true))))
 		}
 
-		if err == nil {
+		var msg *schema.AgenticMessage
+		var msgStream *schema.StreamReader[*schema.AgenticMessage]
+		if ap.input.EnableStreaming {
+			msgStream, err_ = runnable.Stream(ctx, in, runOpts...)
+		} else {
+			msg, err_ = runnable.Invoke(ctx, in, runOpts...)
+		}
+
+		if err_ == nil {
 			if a.outputKey != "" {
-				err = setOutputToSession(ctx, msg, msgStream, a.outputKey)
-				if err != nil {
-					p.generator.Send(&TypedAgentEvent[M]{Err: err})
+				err_ = setOutputToSession(ctx, msg, msgStream, a.outputKey)
+				if err_ != nil {
+					ap.generator.Send(&TypedAgentEvent[*schema.AgenticMessage]{Err: err_})
 				}
 			} else if msgStream != nil {
 				msgStream.Close()
 			}
+
 			return
 		}
 
-		a.handleRunFuncError(ctx, err, cancelCtx, p.cancelCtxOwned, p.store, p.generator)
+		a.handleRunFuncError(ctx, err_, cancelCtx, ap.cancelCtxOwned, ap.store, p.generator)
 	}, nil
 }
 

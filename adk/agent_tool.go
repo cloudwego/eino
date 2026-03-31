@@ -225,19 +225,7 @@ func (at *typedAgentTool[M]) InvokableRun(ctx context.Context, argumentsInJSON s
 					gen.Send(msgEvent)
 					event = any(tmp).(*TypedAgentEvent[M])
 				} else {
-					forwardEvent, extractedMsg, err := convertToAgentEvent(event)
-					if err != nil {
-						return "", fmt.Errorf("failed to convert agentic event for parent agent: %w", err)
-					}
-					gen.Send(forwardEvent)
-					// convertToAgentEvent consumed the stream (if streaming).
-					// Replace the event's MessageOutput with the materialized message
-					// so the final text extraction at the end of the loop works.
-					if event.Output != nil && event.Output.MessageOutput != nil {
-						event.Output.MessageOutput.Message = extractedMsg
-						event.Output.MessageOutput.MessageStream = nil
-						event.Output.MessageOutput.IsStreaming = false
-					}
+					return "", fmt.Errorf("cross-message-type agent tools are not supported: cannot use an AgenticMessage agent as a tool of a Message agent")
 				}
 			}
 		}
@@ -362,34 +350,6 @@ func getReactChatHistory(ctx context.Context, destAgentName string) ([]Message, 
 	}
 
 	return history, nil
-}
-
-func convertToAgentEvent[M MessageType](event *TypedAgentEvent[M]) (*AgentEvent, M, error) {
-	ae := &AgentEvent{
-		AgentName: event.AgentName,
-		RunPath:   event.RunPath,
-		Action:    event.Action,
-		Err:       event.Err,
-	}
-	var extractedMsg M
-	if event.Output != nil {
-		ae.Output = &AgentOutput{
-			CustomizedOutput: event.Output.CustomizedOutput,
-		}
-		if mv := event.Output.MessageOutput; mv != nil {
-			msg, err := mv.GetMessage()
-			if err != nil {
-				return nil, extractedMsg, fmt.Errorf("failed to materialize message from generic event: %w", err)
-			}
-			extractedMsg = msg
-			ae.Output.MessageOutput = &MessageVariant{
-				Message:  &schema.Message{Content: extractTextContent(msg)},
-				Role:     mv.Role,
-				ToolName: mv.ToolName,
-			}
-		}
-	}
-	return ae, extractedMsg, nil
 }
 
 func newTypedUserMessages[M MessageType](text string) []M {
