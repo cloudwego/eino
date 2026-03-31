@@ -1524,6 +1524,466 @@ func TestChatModelAgentRetry_RetryOnErrorHelper(t *testing.T) {
 	assert.Equal(t, int32(2), atomic.LoadInt32(&callCount))
 }
 
+func TestRetryExhaustedError_ErrorString_WithLastResp(t *testing.T) {
+	msg := schema.AssistantMessage("partial output", nil)
+	e := &RetryExhaustedError{LastResp: msg, TotalRetries: 3}
+	assert.Equal(t, "exceeds max retries: last response rejected by ShouldRetry", e.Error())
+
+	e2 := &RetryExhaustedError{TotalRetries: 3}
+	assert.Equal(t, "exceeds max retries", e2.Error())
+
+	e3 := &RetryExhaustedError{LastErr: errRetryAble, TotalRetries: 3}
+	assert.Contains(t, e3.Error(), "retry-able error")
+}
+
+func TestEffectiveShouldRetryError(t *testing.T) {
+	t.Run("with ShouldRetry set", func(t *testing.T) {
+		config := &ModelRetryConfig{
+			ShouldRetry: func(ctx context.Context, resp *schema.Message, err error) bool {
+				return err != nil && err.Error() == "specific error"
+			},
+		}
+		fn := effectiveShouldRetryError(config)
+		assert.True(t, fn(context.Background(), errors.New("specific error")))
+		assert.False(t, fn(context.Background(), errors.New("other error")))
+	})
+
+	t.Run("with IsRetryAble set", func(t *testing.T) {
+		config := &ModelRetryConfig{
+			IsRetryAble: func(ctx context.Context, err error) bool {
+				return errors.Is(err, errRetryAble)
+			},
+		}
+		fn := effectiveShouldRetryError(config)
+		assert.True(t, fn(context.Background(), errRetryAble))
+		assert.False(t, fn(context.Background(), errors.New("other")))
+	})
+
+	t.Run("default", func(t *testing.T) {
+		config := &ModelRetryConfig{}
+		fn := effectiveShouldRetryError(config)
+		assert.True(t, fn(context.Background(), errors.New("any error")))
+		assert.False(t, fn(context.Background(), nil))
+	})
+}
+
+func TestDefaultBackoff_EdgeCases(t *testing.T) {
+	ctx := context.Background()
+
+	d := defaultBackoff(ctx, 0)
+	assert.Equal(t, 100*time.Millisecond, d)
+
+	d = defaultBackoff(ctx, -1)
+	assert.Equal(t, 100*time.Millisecond, d)
+
+	d = defaultBackoff(ctx, 8)
+	assert.True(t, d >= 10*time.Second, "attempt 8 should hit max delay")
+	assert.True(t, d <= 15*time.Second, "attempt 8 should not exceed max+jitter")
+
+	d = defaultBackoff(ctx, 7)
+	assert.True(t, d <= 15*time.Second)
+}
+
+func TestRetryWrapper_Generate_ModifyInputError(t *testing.T) {
+	modifyErr := errors.New("modify input failed")
+	m := &finishReasonModel{
+		generateFn: func(input []*schema.Message) (*schema.Message, error) {
+			msg := schema.AssistantMessage("bad", nil)
+			msg.ResponseMeta = &schema.ResponseMeta{FinishReason: "length"}
+			return msg, nil
+		},
+	}
+
+	wrapper := newRetryModelWrapper(m, &ModelRetryConfig{
+		MaxRetries: 2,
+		ShouldRetry: func(ctx context.Context, resp *schema.Message, err error) bool {
+			if err != nil {
+				return true
+			}
+			return resp.ResponseMeta != nil && resp.ResponseMeta.FinishReason == "length"
+		},
+		ModifyInput: func(ctx context.Context, input []*schema.Message, resp *schema.Message, err error) ([]*schema.Message, error) {
+			return nil, modifyErr
+		},
+		BackoffFunc: func(_ context.Context, _ int) time.Duration { return 0 },
+	})
+
+	_, err := wrapper.Generate(context.Background(), []*schema.Message{schema.UserMessage("hi")})
+	assert.ErrorIs(t, err, modifyErr)
+}
+
+func TestRetryWrapper_Generate_ModifyInputError_OnError(t *testing.T) {
+	modifyErr := errors.New("modify input failed on error")
+	m := &finishReasonModel{
+		generateFn: func(input []*schema.Message) (*schema.Message, error) {
+			return nil, errRetryAble
+		},
+	}
+
+	wrapper := newRetryModelWrapper(m, &ModelRetryConfig{
+		MaxRetries: 2,
+		ShouldRetry: func(ctx context.Context, resp *schema.Message, err error) bool {
+			return err != nil
+		},
+		ModifyInput: func(ctx context.Context, input []*schema.Message, resp *schema.Message, err error) ([]*schema.Message, error) {
+			return nil, modifyErr
+		},
+		BackoffFunc: func(_ context.Context, _ int) time.Duration { return 0 },
+	})
+
+	_, err := wrapper.Generate(context.Background(), []*schema.Message{schema.UserMessage("hi")})
+	assert.ErrorIs(t, err, modifyErr)
+}
+
+func TestRetryWrapper_Stream_ModifyInput_OnDirectError(t *testing.T) {
+	ctx := context.Background()
+
+	var callCount int32
+	m := &finishReasonModel{
+		streamFn: func(input []*schema.Message) (*schema.StreamReader[*schema.Message], error) {
+			count := atomic.AddInt32(&callCount, 1)
+			if count < 2 {
+				return nil, errRetryAble
+			}
+			return schema.StreamReaderFromArray([]*schema.Message{
+				schema.AssistantMessage("ok", nil),
+			}), nil
+		},
+	}
+
+	var modifyCalled bool
+	wrapper := newRetryModelWrapper(m, &ModelRetryConfig{
+		MaxRetries: 2,
+		ShouldRetry: func(ctx context.Context, resp *schema.Message, err error) bool {
+			return err != nil
+		},
+		ModifyInput: func(ctx context.Context, input []*schema.Message, resp *schema.Message, err error) ([]*schema.Message, error) {
+			modifyCalled = true
+			assert.Nil(t, resp)
+			assert.NotNil(t, err)
+			return append(input, schema.UserMessage("retry hint")), nil
+		},
+		BackoffFunc: func(_ context.Context, _ int) time.Duration { return 0 },
+	})
+
+	stream, err := wrapper.Stream(ctx, []*schema.Message{schema.UserMessage("hi")})
+	assert.NoError(t, err)
+	assert.True(t, modifyCalled)
+
+	msg, concatErr := schema.ConcatMessageStream(stream)
+	assert.NoError(t, concatErr)
+	assert.Equal(t, "ok", msg.Content)
+}
+
+func TestRetryWrapper_Stream_ModifyInputError_OnDirectError(t *testing.T) {
+	ctx := context.Background()
+
+	modifyErr := errors.New("modify failed")
+	m := &finishReasonModel{
+		streamFn: func(input []*schema.Message) (*schema.StreamReader[*schema.Message], error) {
+			return nil, errRetryAble
+		},
+	}
+
+	wrapper := newRetryModelWrapper(m, &ModelRetryConfig{
+		MaxRetries: 2,
+		ShouldRetry: func(ctx context.Context, resp *schema.Message, err error) bool {
+			return err != nil
+		},
+		ModifyInput: func(ctx context.Context, input []*schema.Message, resp *schema.Message, err error) ([]*schema.Message, error) {
+			return nil, modifyErr
+		},
+		BackoffFunc: func(_ context.Context, _ int) time.Duration { return 0 },
+	})
+
+	_, err := wrapper.Stream(ctx, []*schema.Message{schema.UserMessage("hi")})
+	assert.ErrorIs(t, err, modifyErr)
+}
+
+func TestRetryWrapper_Stream_ShouldRetry_ConcatError_WithModifyInput(t *testing.T) {
+	ctx := context.Background()
+
+	streamErr := errors.New("mid-stream error")
+	var callCount int32
+	m := &finishReasonModel{
+		streamFn: func(input []*schema.Message) (*schema.StreamReader[*schema.Message], error) {
+			count := atomic.AddInt32(&callCount, 1)
+			sr, sw := schema.Pipe[*schema.Message](10)
+			go func() {
+				defer sw.Close()
+				if count < 2 {
+					sw.Send(schema.AssistantMessage("partial", nil), nil)
+					sw.Send(nil, streamErr)
+					return
+				}
+				msg := schema.AssistantMessage("ok", nil)
+				msg.ResponseMeta = &schema.ResponseMeta{FinishReason: "stop"}
+				sw.Send(msg, nil)
+			}()
+			return sr, nil
+		},
+	}
+
+	var modifyCalled bool
+	wrapper := newRetryModelWrapper(m, &ModelRetryConfig{
+		MaxRetries: 2,
+		ShouldRetry: func(ctx context.Context, resp *schema.Message, err error) bool {
+			return err != nil || (resp.ResponseMeta != nil && resp.ResponseMeta.FinishReason != "stop")
+		},
+		ModifyInput: func(ctx context.Context, input []*schema.Message, resp *schema.Message, err error) ([]*schema.Message, error) {
+			modifyCalled = true
+			assert.Nil(t, resp)
+			assert.NotNil(t, err)
+			return input, nil
+		},
+		BackoffFunc: func(_ context.Context, _ int) time.Duration { return 0 },
+	})
+
+	stream, err := wrapper.Stream(ctx, []*schema.Message{schema.UserMessage("hi")})
+	assert.NoError(t, err)
+	assert.True(t, modifyCalled)
+
+	msg, concatErr := schema.ConcatMessageStream(stream)
+	assert.NoError(t, concatErr)
+	assert.Equal(t, "ok", msg.Content)
+}
+
+func TestRetryWrapper_Stream_ShouldRetry_ConcatError_ModifyInputError(t *testing.T) {
+	ctx := context.Background()
+
+	streamErr := errors.New("mid-stream error")
+	modifyErr := errors.New("modify failed on concat error")
+	m := &finishReasonModel{
+		streamFn: func(input []*schema.Message) (*schema.StreamReader[*schema.Message], error) {
+			sr, sw := schema.Pipe[*schema.Message](10)
+			go func() {
+				defer sw.Close()
+				sw.Send(nil, streamErr)
+			}()
+			return sr, nil
+		},
+	}
+
+	wrapper := newRetryModelWrapper(m, &ModelRetryConfig{
+		MaxRetries: 2,
+		ShouldRetry: func(ctx context.Context, resp *schema.Message, err error) bool {
+			return err != nil
+		},
+		ModifyInput: func(ctx context.Context, input []*schema.Message, resp *schema.Message, err error) ([]*schema.Message, error) {
+			return nil, modifyErr
+		},
+		BackoffFunc: func(_ context.Context, _ int) time.Duration { return 0 },
+	})
+
+	_, err := wrapper.Stream(ctx, []*schema.Message{schema.UserMessage("hi")})
+	assert.ErrorIs(t, err, modifyErr)
+}
+
+func TestRetryWrapper_Stream_ShouldRetry_ResponseRetry_WithModifyInput(t *testing.T) {
+	ctx := context.Background()
+
+	var callCount int32
+	m := &finishReasonModel{
+		streamFn: func(input []*schema.Message) (*schema.StreamReader[*schema.Message], error) {
+			count := atomic.AddInt32(&callCount, 1)
+			if count < 2 {
+				msg := schema.AssistantMessage("partial", nil)
+				msg.ResponseMeta = &schema.ResponseMeta{FinishReason: "length"}
+				return schema.StreamReaderFromArray([]*schema.Message{msg}), nil
+			}
+			msg := schema.AssistantMessage("done", nil)
+			msg.ResponseMeta = &schema.ResponseMeta{FinishReason: "stop"}
+			return schema.StreamReaderFromArray([]*schema.Message{msg}), nil
+		},
+	}
+
+	var modifyInputs [][]*schema.Message
+	wrapper := newRetryModelWrapper(m, &ModelRetryConfig{
+		MaxRetries: 3,
+		ShouldRetry: func(ctx context.Context, resp *schema.Message, err error) bool {
+			if err != nil {
+				return true
+			}
+			return resp.ResponseMeta != nil && resp.ResponseMeta.FinishReason == "length"
+		},
+		ModifyInput: func(ctx context.Context, input []*schema.Message, resp *schema.Message, err error) ([]*schema.Message, error) {
+			modifyInputs = append(modifyInputs, input)
+			assert.NotNil(t, resp)
+			assert.Nil(t, err)
+			return append(input, resp, schema.UserMessage("continue")), nil
+		},
+		BackoffFunc: func(_ context.Context, _ int) time.Duration { return 0 },
+	})
+
+	stream, err := wrapper.Stream(ctx, []*schema.Message{schema.UserMessage("hi")})
+	assert.NoError(t, err)
+
+	msg, concatErr := schema.ConcatMessageStream(stream)
+	assert.NoError(t, concatErr)
+	assert.Equal(t, "done", msg.Content)
+	assert.Equal(t, 1, len(modifyInputs))
+}
+
+func TestRetryWrapper_Stream_ShouldRetry_ResponseRetry_ModifyInputError(t *testing.T) {
+	ctx := context.Background()
+
+	modifyErr := errors.New("modify failed on response")
+	m := &finishReasonModel{
+		streamFn: func(input []*schema.Message) (*schema.StreamReader[*schema.Message], error) {
+			msg := schema.AssistantMessage("partial", nil)
+			msg.ResponseMeta = &schema.ResponseMeta{FinishReason: "length"}
+			return schema.StreamReaderFromArray([]*schema.Message{msg}), nil
+		},
+	}
+
+	wrapper := newRetryModelWrapper(m, &ModelRetryConfig{
+		MaxRetries: 2,
+		ShouldRetry: func(ctx context.Context, resp *schema.Message, err error) bool {
+			if err != nil {
+				return true
+			}
+			return resp.ResponseMeta != nil && resp.ResponseMeta.FinishReason == "length"
+		},
+		ModifyInput: func(ctx context.Context, input []*schema.Message, resp *schema.Message, err error) ([]*schema.Message, error) {
+			return nil, modifyErr
+		},
+		BackoffFunc: func(_ context.Context, _ int) time.Duration { return 0 },
+	})
+
+	_, err := wrapper.Stream(ctx, []*schema.Message{schema.UserMessage("hi")})
+	assert.ErrorIs(t, err, modifyErr)
+}
+
+func TestRetryWrapper_Stream_ErrorOnly_WithModifyInput(t *testing.T) {
+	ctx := context.Background()
+
+	midStreamErr := errors.New("mid-stream error")
+	var callCount int32
+	m := &finishReasonModel{
+		streamFn: func(input []*schema.Message) (*schema.StreamReader[*schema.Message], error) {
+			count := atomic.AddInt32(&callCount, 1)
+			sr, sw := schema.Pipe[*schema.Message](10)
+			go func() {
+				defer sw.Close()
+				if count < 2 {
+					sw.Send(schema.AssistantMessage("chunk1", nil), nil)
+					sw.Send(nil, midStreamErr)
+					return
+				}
+				sw.Send(schema.AssistantMessage("success", nil), nil)
+			}()
+			return sr, nil
+		},
+	}
+
+	var modifyCalled bool
+	wrapper := newRetryModelWrapper(m, &ModelRetryConfig{
+		MaxRetries: 2,
+		ModifyInput: func(ctx context.Context, input []*schema.Message, resp *schema.Message, err error) ([]*schema.Message, error) {
+			modifyCalled = true
+			assert.Nil(t, resp)
+			assert.NotNil(t, err)
+			return input, nil
+		},
+		BackoffFunc: func(_ context.Context, _ int) time.Duration { return 0 },
+	})
+
+	stream, err := wrapper.Stream(ctx, []*schema.Message{schema.UserMessage("hi")})
+	assert.NoError(t, err)
+	assert.True(t, modifyCalled)
+
+	msg, concatErr := schema.ConcatMessageStream(stream)
+	assert.NoError(t, concatErr)
+	assert.Equal(t, "success", msg.Content)
+}
+
+func TestRetryWrapper_Stream_ErrorOnly_ModifyInputError(t *testing.T) {
+	ctx := context.Background()
+
+	midStreamErr := errors.New("mid-stream error")
+	modifyErr := errors.New("modify failed")
+	m := &finishReasonModel{
+		streamFn: func(input []*schema.Message) (*schema.StreamReader[*schema.Message], error) {
+			sr, sw := schema.Pipe[*schema.Message](10)
+			go func() {
+				defer sw.Close()
+				sw.Send(nil, midStreamErr)
+			}()
+			return sr, nil
+		},
+	}
+
+	wrapper := newRetryModelWrapper(m, &ModelRetryConfig{
+		MaxRetries: 2,
+		ModifyInput: func(ctx context.Context, input []*schema.Message, resp *schema.Message, err error) ([]*schema.Message, error) {
+			return nil, modifyErr
+		},
+		BackoffFunc: func(_ context.Context, _ int) time.Duration { return 0 },
+	})
+
+	_, err := wrapper.Stream(ctx, []*schema.Message{schema.UserMessage("hi")})
+	assert.ErrorIs(t, err, modifyErr)
+}
+
+func TestRetryWrapper_Stream_ShouldRetry_Exhausted_WithLastResp(t *testing.T) {
+	ctx := context.Background()
+
+	m := &finishReasonModel{
+		streamFn: func(input []*schema.Message) (*schema.StreamReader[*schema.Message], error) {
+			msg := schema.AssistantMessage("always partial", nil)
+			msg.ResponseMeta = &schema.ResponseMeta{FinishReason: "length"}
+			return schema.StreamReaderFromArray([]*schema.Message{msg}), nil
+		},
+	}
+
+	wrapper := newRetryModelWrapper(m, &ModelRetryConfig{
+		MaxRetries: 1,
+		ShouldRetry: func(ctx context.Context, resp *schema.Message, err error) bool {
+			if err != nil {
+				return true
+			}
+			return resp.ResponseMeta != nil && resp.ResponseMeta.FinishReason == "length"
+		},
+		BackoffFunc: func(_ context.Context, _ int) time.Duration { return 0 },
+	})
+
+	_, err := wrapper.Stream(ctx, []*schema.Message{schema.UserMessage("hi")})
+	assert.Error(t, err)
+
+	var retryErr *RetryExhaustedError
+	assert.True(t, errors.As(err, &retryErr))
+	assert.Nil(t, retryErr.LastErr)
+	assert.NotNil(t, retryErr.LastResp)
+	assert.Equal(t, "always partial", retryErr.LastResp.Content)
+}
+
+func TestRetryWrapper_Stream_ShouldRetry_NonRetryableConcatError(t *testing.T) {
+	ctx := context.Background()
+
+	nonRetryableErr := errors.New("non-retryable mid-stream error")
+	m := &finishReasonModel{
+		streamFn: func(input []*schema.Message) (*schema.StreamReader[*schema.Message], error) {
+			sr, sw := schema.Pipe[*schema.Message](10)
+			go func() {
+				defer sw.Close()
+				sw.Send(nil, nonRetryableErr)
+			}()
+			return sr, nil
+		},
+	}
+
+	wrapper := newRetryModelWrapper(m, &ModelRetryConfig{
+		MaxRetries: 2,
+		ShouldRetry: func(ctx context.Context, resp *schema.Message, err error) bool {
+			return false
+		},
+		BackoffFunc: func(_ context.Context, _ int) time.Duration { return 0 },
+	})
+
+	_, err := wrapper.Stream(ctx, []*schema.Message{schema.UserMessage("hi")})
+	assert.ErrorIs(t, err, nonRetryableErr)
+}
+
 type finishReasonModel struct {
 	generateFn func(input []*schema.Message) (*schema.Message, error)
 	streamFn   func(input []*schema.Message) (*schema.StreamReader[*schema.Message], error)
