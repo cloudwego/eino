@@ -378,6 +378,8 @@ type eventSenderToolWrapper struct {
 
 func (*eventSenderToolWrapper) isEventSenderToolWrapper() {}
 
+type eventSenderToolWrapperMarker interface{ isEventSenderToolWrapper() }
+
 // NewEventSenderToolWrapper returns a ChatModelAgentMiddleware that sends tool result events.
 // By default, the framework places this before all user middlewares (outermost), so events
 // reflect the fully processed tool output. To control exactly where events are emitted,
@@ -531,8 +533,7 @@ func (w *eventSenderToolWrapper) WrapEnhancedStreamableToolCall(_ context.Contex
 
 func hasUserEventSenderToolWrapper[M MessageType](handlers []TypedChatModelAgentMiddleware[M]) bool {
 	for _, handler := range handlers {
-		type marker interface{ isEventSenderToolWrapper() }
-		if _, ok := any(handler).(marker); ok {
+		if _, ok := any(handler).(eventSenderToolWrapperMarker); ok {
 			return true
 		}
 	}

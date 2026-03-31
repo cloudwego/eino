@@ -293,8 +293,6 @@ func (c *handlerTemplate) OnError(ctx context.Context, info *callbacks.RunInfo, 
 		return c.toolsNodeHandler.OnError(ctx, info, err)
 	case compose.ComponentOfAgenticToolsNode:
 		return c.agenticToolsNodeHandler.OnError(ctx, info, err)
-	case adk.ComponentOfAgenticAgent:
-		return c.agenticAgentHandler.OnError(ctx, info, err)
 	case compose.ComponentOfGraph,
 		compose.ComponentOfChain,
 		compose.ComponentOfLambda:
@@ -681,7 +679,6 @@ func (ch *AgentCallbackHandler) Needed(ctx context.Context, info *callbacks.RunI
 type AgenticAgentCallbackHandler struct {
 	OnStart func(ctx context.Context, info *callbacks.RunInfo, input *adk.AgenticAgentCallbackInput) context.Context
 	OnEnd   func(ctx context.Context, info *callbacks.RunInfo, output *adk.AgenticAgentCallbackOutput) context.Context
-	OnError func(ctx context.Context, info *callbacks.RunInfo, err error) context.Context
 }
 
 func (ch *AgenticAgentCallbackHandler) Needed(ctx context.Context, info *callbacks.RunInfo, timing callbacks.CallbackTiming) bool {
@@ -690,8 +687,6 @@ func (ch *AgenticAgentCallbackHandler) Needed(ctx context.Context, info *callbac
 		return ch.OnStart != nil
 	case callbacks.TimingOnEnd:
 		return ch.OnEnd != nil
-	case callbacks.TimingOnError:
-		return ch.OnError != nil
 	default:
 		return false
 	}
