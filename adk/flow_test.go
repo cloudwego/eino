@@ -208,6 +208,107 @@ func TestTransferToAgent(t *testing.T) {
 	assert.False(t, ok)
 }
 
+func TestResumeNonResumableWrapperError(t *testing.T) {
+	ctx := context.Background()
+
+	interruptingAgent := &nonResumableFlowTestAgent{
+		name: "inner",
+		runFn: func(ctx context.Context, input *AgentInput, options ...AgentRunOption) *AsyncIterator[*AgentEvent] {
+			iter, gen := NewAsyncIteratorPair[*AgentEvent]()
+			go func() {
+				defer gen.Close()
+				gen.Send(Interrupt(ctx, "please confirm"))
+			}()
+			return iter
+		},
+	}
+
+	innerFlowAgent := toFlowAgent(ctx, interruptingAgent)
+
+	wrapper := &nonResumableFlowTestAgent{
+		name: "wrapper",
+		runFn: func(ctx context.Context, input *AgentInput, options ...AgentRunOption) *AsyncIterator[*AgentEvent] {
+			return innerFlowAgent.Run(ctx, input, options...)
+		},
+	}
+
+	store := &flowTestStore{m: map[string][]byte{}}
+	runner := NewRunner(ctx, RunnerConfig{
+		Agent:           wrapper,
+		EnableStreaming: true,
+		CheckPointStore: store,
+	})
+
+	iter := runner.Run(ctx, []Message{schema.UserMessage("test")}, WithCheckPointID("cp1"))
+
+	var interruptID string
+	for {
+		ev, ok := iter.Next()
+		if !ok {
+			break
+		}
+		if ev.Action != nil && ev.Action.Interrupted != nil {
+			for _, intCtx := range ev.Action.Interrupted.InterruptContexts {
+				if intCtx.IsRootCause {
+					interruptID = intCtx.ID
+				}
+			}
+		}
+	}
+	assert.NotEmpty(t, interruptID, "should have an interrupt ID")
+
+	resumeIter, err := runner.ResumeWithParams(ctx, "cp1", &ResumeParams{
+		Targets: map[string]any{interruptID: nil},
+	})
+	assert.NoError(t, err)
+
+	var resumeErr error
+	for {
+		ev, ok := resumeIter.Next()
+		if !ok {
+			break
+		}
+		if ev.Err != nil {
+			resumeErr = ev.Err
+		}
+	}
+
+	assert.Error(t, resumeErr)
+	assert.Contains(t, resumeErr.Error(), "does not implement ResumableAgent interface")
+	assert.Contains(t, resumeErr.Error(), "custom agent wrapper must implement the ResumableAgent interface")
+}
+
+type nonResumableFlowTestAgent struct {
+	name  string
+	runFn func(ctx context.Context, input *AgentInput, options ...AgentRunOption) *AsyncIterator[*AgentEvent]
+}
+
+func (a *nonResumableFlowTestAgent) Name(_ context.Context) string {
+	return a.name
+}
+
+func (a *nonResumableFlowTestAgent) Description(_ context.Context) string {
+	return a.name + " description"
+}
+
+func (a *nonResumableFlowTestAgent) Run(ctx context.Context, input *AgentInput, options ...AgentRunOption) *AsyncIterator[*AgentEvent] {
+	return a.runFn(ctx, input, options...)
+}
+
+type flowTestStore struct {
+	m map[string][]byte
+}
+
+func (s *flowTestStore) Set(_ context.Context, key string, value []byte) error {
+	s.m[key] = value
+	return nil
+}
+
+func (s *flowTestStore) Get(_ context.Context, key string) ([]byte, bool, error) {
+	v, ok := s.m[key]
+	return v, ok, nil
+}
+
 func TestTransferToAgentWithDesignatedCallback(t *testing.T) {
 	ctx := context.Background()
 
