@@ -159,6 +159,12 @@ func (at *typedAgentTool[M]) InvokableRun(ctx context.Context, argumentsInJSON s
 					return "", histErr
 				}
 				input = any(msgInput).([]M)
+			case *schema.AgenticMessage:
+				agenticInput, histErr := getAgenticReactChatHistory(ctx, at.agent.Name(ctx))
+				if histErr != nil {
+					return "", histErr
+				}
+				input = any(agenticInput).([]M)
 			default:
 				return "", fmt.Errorf("fullChatHistoryAsInput is only supported for *schema.Message agents")
 			}
@@ -344,6 +350,40 @@ func getReactChatHistory(ctx context.Context, destAgentName string) ([]Message, 
 
 		if msg.Role == schema.Assistant || msg.Role == schema.Tool {
 			msg = rewriteMessage(msg, agentName)
+		}
+
+		history = append(history, msg)
+	}
+
+	return history, nil
+}
+
+func getAgenticReactChatHistory(ctx context.Context, destAgentName string) ([]*schema.AgenticMessage, error) {
+	var messages []*schema.AgenticMessage
+	err := compose.ProcessState(ctx, func(ctx context.Context, st *TypedState[*schema.AgenticMessage]) error {
+		messages = make([]*schema.AgenticMessage, len(st.Messages)-1)
+		copy(messages, st.Messages[:len(st.Messages)-1])
+		return nil
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to get agentic chat history from state: %w", err)
+	}
+
+	var agentName string
+	if runCtx := getRunCtx(ctx); runCtx != nil && len(runCtx.RunPath) > 0 {
+		agentName = runCtx.RunPath[len(runCtx.RunPath)-1].agentName
+	}
+
+	a, t := genAgenticTransferMessages(destAgentName)
+	messages = append(messages, a, t)
+	history := make([]*schema.AgenticMessage, 0, len(messages))
+	for _, msg := range messages {
+		if msg.Role == schema.AgenticRoleTypeSystem {
+			continue
+		}
+
+		if msg.Role == schema.AgenticRoleTypeAssistant || msg.Role == schema.AgenticRoleTypeUser {
+			msg = rewriteAgenticMessage(msg, agentName)
 		}
 
 		history = append(history, msg)

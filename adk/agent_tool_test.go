@@ -298,6 +298,55 @@ func TestGetReactHistory(t *testing.T) {
 	}, result)
 }
 
+func TestGetAgenticReactHistory(t *testing.T) {
+	g := compose.NewGraph[string, []*schema.AgenticMessage](compose.WithGenLocalState(func(ctx context.Context) (state *TypedState[*schema.AgenticMessage]) {
+		return &TypedState[*schema.AgenticMessage]{
+			Messages: []*schema.AgenticMessage{
+				schema.UserAgenticMessage("user query"),
+				{
+					Role: schema.AgenticRoleTypeAssistant,
+					ContentBlocks: []*schema.ContentBlock{
+						schema.NewContentBlock(&schema.FunctionToolCall{
+							CallID:    "tool call id 1",
+							Name:      "tool1",
+							Arguments: "arguments1",
+						}),
+					},
+				},
+				schema.FunctionToolResultAgenticMessage("tool call id 1", "tool1", "tool result 1"),
+				{
+					Role: schema.AgenticRoleTypeAssistant,
+					ContentBlocks: []*schema.ContentBlock{
+						schema.NewContentBlock(&schema.FunctionToolCall{
+							CallID:    "tool call id 2",
+							Name:      "tool2",
+							Arguments: "arguments2",
+						}),
+					},
+				},
+			},
+		}
+	}))
+	assert.NoError(t, g.AddLambdaNode("1", compose.InvokableLambda(func(ctx context.Context, input string) (output []*schema.AgenticMessage, err error) {
+		return getAgenticReactChatHistory(ctx, "DestAgentName")
+	})))
+	assert.NoError(t, g.AddEdge(compose.START, "1"))
+	assert.NoError(t, g.AddEdge("1", compose.END))
+
+	ctx := context.Background()
+	ctx, _ = initRunCtx(ctx, "MyAgent", nil)
+	runner, err := g.Compile(ctx)
+	assert.NoError(t, err)
+	result, err := runner.Invoke(ctx, "")
+	assert.NoError(t, err)
+	assert.Len(t, result, 5)
+	assert.Equal(t, schema.AgenticRoleTypeUser, result[0].Role)
+	assert.Equal(t, schema.AgenticRoleTypeUser, result[1].Role)
+	assert.Equal(t, schema.AgenticRoleTypeUser, result[2].Role)
+	assert.Equal(t, schema.AgenticRoleTypeUser, result[3].Role)
+	assert.Equal(t, schema.AgenticRoleTypeUser, result[4].Role)
+}
+
 // mockAgentWithInputCapture implements the Agent interface for testing and captures the input it receives
 type mockAgentWithInputCapture struct {
 	name          string
