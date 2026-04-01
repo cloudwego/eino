@@ -1085,3 +1085,600 @@ func (m *contentModifyingModelWrapper) Stream(ctx context.Context, input []*sche
 	result.Content = m.newContent
 	return schema.StreamReaderFromArray([]*schema.Message{result}), nil
 }
+
+type mockToolCallingModel struct {
+	mu            sync.Mutex
+	generateCalls int
+	toolCallName  string
+}
+
+func (m *mockToolCallingModel) Generate(_ context.Context, _ []*schema.Message, _ ...model.Option) (*schema.Message, error) {
+	m.mu.Lock()
+	m.generateCalls++
+	calls := m.generateCalls
+	m.mu.Unlock()
+	if calls == 1 {
+		return schema.AssistantMessage("calling tool", []schema.ToolCall{
+			{ID: "tc-1", Function: schema.FunctionCall{Name: m.toolCallName, Arguments: `{"input":"test"}`}},
+		}), nil
+	}
+	return schema.AssistantMessage("done", nil), nil
+}
+
+func (m *mockToolCallingModel) Stream(ctx context.Context, input []*schema.Message, opts ...model.Option) (*schema.StreamReader[*schema.Message], error) {
+	msg, err := m.Generate(ctx, input, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return schema.StreamReaderFromArray([]*schema.Message{msg}), nil
+}
+
+func (m *mockToolCallingModel) WithTools(_ []*schema.ToolInfo) (model.ToolCallingChatModel, error) {
+	return m, nil
+}
+
+type invokableTestTool struct {
+	name   string
+	result string
+}
+
+func (t *invokableTestTool) Info(_ context.Context) (*schema.ToolInfo, error) {
+	return &schema.ToolInfo{
+		Name: t.name,
+		Desc: "test tool",
+		ParamsOneOf: schema.NewParamsOneOfByParams(map[string]*schema.ParameterInfo{
+			"input": {Desc: "input", Required: true, Type: schema.String},
+		}),
+	}, nil
+}
+
+func (t *invokableTestTool) InvokableRun(_ context.Context, _ string, _ ...tool.Option) (string, error) {
+	return t.result, nil
+}
+
+type streamableTestTool struct {
+	name   string
+	result string
+}
+
+func (t *streamableTestTool) Info(_ context.Context) (*schema.ToolInfo, error) {
+	return &schema.ToolInfo{
+		Name: t.name,
+		Desc: "test tool",
+		ParamsOneOf: schema.NewParamsOneOfByParams(map[string]*schema.ParameterInfo{
+			"input": {Desc: "input", Required: true, Type: schema.String},
+		}),
+	}, nil
+}
+
+func (t *streamableTestTool) StreamableRun(_ context.Context, _ string, _ ...tool.Option) (*schema.StreamReader[string], error) {
+	return schema.StreamReaderFromArray([]string{t.result}), nil
+}
+
+type enhancedInvokableTestTool struct {
+	name   string
+	result string
+}
+
+func (t *enhancedInvokableTestTool) Info(_ context.Context) (*schema.ToolInfo, error) {
+	return &schema.ToolInfo{
+		Name: t.name,
+		Desc: "test tool",
+		ParamsOneOf: schema.NewParamsOneOfByParams(map[string]*schema.ParameterInfo{
+			"input": {Desc: "input", Required: true, Type: schema.String},
+		}),
+	}, nil
+}
+
+func (t *enhancedInvokableTestTool) InvokableRun(_ context.Context, _ *schema.ToolArgument, _ ...tool.Option) (*schema.ToolResult, error) {
+	return &schema.ToolResult{
+		Parts: []schema.ToolOutputPart{{Type: schema.ToolPartTypeText, Text: t.result}},
+	}, nil
+}
+
+type enhancedStreamableTestTool struct {
+	name   string
+	result string
+}
+
+func (t *enhancedStreamableTestTool) Info(_ context.Context) (*schema.ToolInfo, error) {
+	return &schema.ToolInfo{
+		Name: t.name,
+		Desc: "test tool",
+		ParamsOneOf: schema.NewParamsOneOfByParams(map[string]*schema.ParameterInfo{
+			"input": {Desc: "input", Required: true, Type: schema.String},
+		}),
+	}, nil
+}
+
+func (t *enhancedStreamableTestTool) StreamableRun(_ context.Context, _ *schema.ToolArgument, _ ...tool.Option) (*schema.StreamReader[*schema.ToolResult], error) {
+	return schema.StreamReaderFromArray([]*schema.ToolResult{
+		{Parts: []schema.ToolOutputPart{{Type: schema.ToolPartTypeText, Text: t.result}}},
+	}), nil
+}
+
+type invokableResultModifier struct {
+	*BaseChatModelAgentMiddleware
+	modifiedResult string
+}
+
+func (h *invokableResultModifier) WrapInvokableToolCall(_ context.Context, endpoint InvokableToolCallEndpoint, _ *ToolContext) (InvokableToolCallEndpoint, error) {
+	return func(ctx context.Context, argumentsInJSON string, opts ...tool.Option) (string, error) {
+		_, err := endpoint(ctx, argumentsInJSON, opts...)
+		if err != nil {
+			return "", err
+		}
+		return h.modifiedResult, nil
+	}, nil
+}
+
+type streamableResultModifier struct {
+	*BaseChatModelAgentMiddleware
+	modifiedResult string
+}
+
+func (h *streamableResultModifier) WrapStreamableToolCall(_ context.Context, endpoint StreamableToolCallEndpoint, _ *ToolContext) (StreamableToolCallEndpoint, error) {
+	return func(ctx context.Context, argumentsInJSON string, opts ...tool.Option) (*schema.StreamReader[string], error) {
+		sr, err := endpoint(ctx, argumentsInJSON, opts...)
+		if err != nil {
+			return nil, err
+		}
+		sr.Close()
+		return schema.StreamReaderFromArray([]string{h.modifiedResult}), nil
+	}, nil
+}
+
+type enhancedInvokableResultModifier struct {
+	*BaseChatModelAgentMiddleware
+	modifiedResult string
+}
+
+func (h *enhancedInvokableResultModifier) WrapEnhancedInvokableToolCall(_ context.Context, endpoint EnhancedInvokableToolCallEndpoint, _ *ToolContext) (EnhancedInvokableToolCallEndpoint, error) {
+	return func(ctx context.Context, toolArgument *schema.ToolArgument, opts ...tool.Option) (*schema.ToolResult, error) {
+		_, err := endpoint(ctx, toolArgument, opts...)
+		if err != nil {
+			return nil, err
+		}
+		return &schema.ToolResult{
+			Parts: []schema.ToolOutputPart{{Type: schema.ToolPartTypeText, Text: h.modifiedResult}},
+		}, nil
+	}, nil
+}
+
+type enhancedStreamableResultModifier struct {
+	*BaseChatModelAgentMiddleware
+	modifiedResult string
+}
+
+func (h *enhancedStreamableResultModifier) WrapEnhancedStreamableToolCall(_ context.Context, endpoint EnhancedStreamableToolCallEndpoint, _ *ToolContext) (EnhancedStreamableToolCallEndpoint, error) {
+	return func(ctx context.Context, toolArgument *schema.ToolArgument, opts ...tool.Option) (*schema.StreamReader[*schema.ToolResult], error) {
+		sr, err := endpoint(ctx, toolArgument, opts...)
+		if err != nil {
+			return nil, err
+		}
+		sr.Close()
+		return schema.StreamReaderFromArray([]*schema.ToolResult{
+			{Parts: []schema.ToolOutputPart{{Type: schema.ToolPartTypeText, Text: h.modifiedResult}}},
+		}), nil
+	}, nil
+}
+
+func collectToolEvents(it *AsyncIterator[*AgentEvent]) []*AgentEvent {
+	var toolEvents []*AgentEvent
+	for {
+		ev, ok := it.Next()
+		if !ok {
+			break
+		}
+		if ev.Output == nil || ev.Output.MessageOutput == nil {
+			continue
+		}
+		mo := ev.Output.MessageOutput
+		if mo.Message != nil && mo.Message.Role == schema.Tool {
+			toolEvents = append(toolEvents, ev)
+			continue
+		}
+		if mo.IsStreaming && mo.Role == schema.Tool && mo.MessageStream != nil {
+			toolEvents = append(toolEvents, ev)
+		}
+	}
+	return toolEvents
+}
+
+func collectToolContent(events []*AgentEvent) []string {
+	var contents []string
+	for _, ev := range events {
+		mo := ev.Output.MessageOutput
+		if !mo.IsStreaming && mo.Message != nil {
+			if mo.Message.Content != "" {
+				contents = append(contents, mo.Message.Content)
+			} else if len(mo.Message.UserInputMultiContent) > 0 {
+				for _, part := range mo.Message.UserInputMultiContent {
+					if part.Text != "" {
+						contents = append(contents, part.Text)
+					}
+				}
+			}
+			continue
+		}
+		if mo.IsStreaming && mo.MessageStream != nil {
+			var msgs []*schema.Message
+			for {
+				msg, err := mo.MessageStream.Recv()
+				if err != nil {
+					break
+				}
+				msgs = append(msgs, msg)
+			}
+			if len(msgs) > 0 {
+				concated, err := schema.ConcatMessages(msgs)
+				if err == nil {
+					if concated.Content != "" {
+						contents = append(contents, concated.Content)
+					} else if len(concated.UserInputMultiContent) > 0 {
+						for _, part := range concated.UserInputMultiContent {
+							if part.Text != "" {
+								contents = append(contents, part.Text)
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+	return contents
+}
+
+func TestEventSenderToolHandler(t *testing.T) {
+	t.Run("Invokable", func(t *testing.T) {
+		t.Run("DefaultSendsEvent", func(t *testing.T) {
+			ctx := context.Background()
+			testTool := &invokableTestTool{name: "test_tool", result: "invokable_output"}
+			mockModel := &mockToolCallingModel{toolCallName: "test_tool"}
+
+			agent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+				Name:        "TestAgent",
+				Description: "Test agent",
+				Model:       mockModel,
+				ToolsConfig: ToolsConfig{
+					ToolsNodeConfig: compose.ToolsNodeConfig{
+						Tools: []tool.BaseTool{testTool},
+					},
+				},
+			})
+			assert.NoError(t, err)
+
+			r := NewRunner(ctx, RunnerConfig{Agent: agent, EnableStreaming: false})
+			it := r.Run(ctx, []Message{schema.UserMessage("test")})
+
+			toolEvents := collectToolEvents(it)
+			assert.Equal(t, 1, len(toolEvents))
+			contents := collectToolContent(toolEvents)
+			assert.Contains(t, contents, "invokable_output")
+		})
+
+		t.Run("UserConfiguredSkipsDefault", func(t *testing.T) {
+			ctx := context.Background()
+			testTool := &invokableTestTool{name: "test_tool", result: "invokable_output"}
+			mockModel := &mockToolCallingModel{toolCallName: "test_tool"}
+
+			agent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+				Name:        "TestAgent",
+				Description: "Test agent",
+				Model:       mockModel,
+				ToolsConfig: ToolsConfig{
+					ToolsNodeConfig: compose.ToolsNodeConfig{
+						Tools: []tool.BaseTool{testTool},
+					},
+				},
+				Handlers: []ChatModelAgentMiddleware{NewEventSenderToolWrapper()},
+			})
+			assert.NoError(t, err)
+
+			r := NewRunner(ctx, RunnerConfig{Agent: agent, EnableStreaming: false})
+			it := r.Run(ctx, []Message{schema.UserMessage("test")})
+
+			toolEvents := collectToolEvents(it)
+			assert.Equal(t, 1, len(toolEvents))
+		})
+
+		t.Run("InnermostGetsOriginalOutput", func(t *testing.T) {
+			ctx := context.Background()
+			originalResult := "original_invokable_output"
+			modifiedResult := "modified_invokable_output"
+			testTool := &invokableTestTool{name: "test_tool", result: originalResult}
+			mockModel := &mockToolCallingModel{toolCallName: "test_tool"}
+
+			agent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+				Name:        "TestAgent",
+				Description: "Test agent",
+				Model:       mockModel,
+				ToolsConfig: ToolsConfig{
+					ToolsNodeConfig: compose.ToolsNodeConfig{
+						Tools: []tool.BaseTool{testTool},
+					},
+				},
+				Handlers: []ChatModelAgentMiddleware{
+					NewEventSenderToolWrapper(),
+					&invokableResultModifier{
+						BaseChatModelAgentMiddleware: &BaseChatModelAgentMiddleware{},
+						modifiedResult:              modifiedResult,
+					},
+				},
+			})
+			assert.NoError(t, err)
+
+			r := NewRunner(ctx, RunnerConfig{Agent: agent, EnableStreaming: false})
+			it := r.Run(ctx, []Message{schema.UserMessage("test")})
+
+			toolEvents := collectToolEvents(it)
+			assert.GreaterOrEqual(t, len(toolEvents), 1)
+			contents := collectToolContent(toolEvents)
+			assert.Contains(t, contents, originalResult)
+		})
+	})
+
+	t.Run("Streamable", func(t *testing.T) {
+		t.Run("DefaultSendsEvent", func(t *testing.T) {
+			ctx := context.Background()
+			testTool := &streamableTestTool{name: "test_tool", result: "streamable_output"}
+			mockModel := &mockToolCallingModel{toolCallName: "test_tool"}
+
+			agent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+				Name:        "TestAgent",
+				Description: "Test agent",
+				Model:       mockModel,
+				ToolsConfig: ToolsConfig{
+					ToolsNodeConfig: compose.ToolsNodeConfig{
+						Tools: []tool.BaseTool{testTool},
+					},
+				},
+			})
+			assert.NoError(t, err)
+
+			r := NewRunner(ctx, RunnerConfig{Agent: agent, EnableStreaming: true})
+			it := r.Run(ctx, []Message{schema.UserMessage("test")})
+
+			toolEvents := collectToolEvents(it)
+			assert.Equal(t, 1, len(toolEvents))
+			contents := collectToolContent(toolEvents)
+			assert.Contains(t, contents, "streamable_output")
+		})
+
+		t.Run("UserConfiguredSkipsDefault", func(t *testing.T) {
+			ctx := context.Background()
+			testTool := &streamableTestTool{name: "test_tool", result: "streamable_output"}
+			mockModel := &mockToolCallingModel{toolCallName: "test_tool"}
+
+			agent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+				Name:        "TestAgent",
+				Description: "Test agent",
+				Model:       mockModel,
+				ToolsConfig: ToolsConfig{
+					ToolsNodeConfig: compose.ToolsNodeConfig{
+						Tools: []tool.BaseTool{testTool},
+					},
+				},
+				Handlers: []ChatModelAgentMiddleware{NewEventSenderToolWrapper()},
+			})
+			assert.NoError(t, err)
+
+			r := NewRunner(ctx, RunnerConfig{Agent: agent, EnableStreaming: true})
+			it := r.Run(ctx, []Message{schema.UserMessage("test")})
+
+			toolEvents := collectToolEvents(it)
+			assert.Equal(t, 1, len(toolEvents))
+		})
+
+		t.Run("InnermostGetsOriginalOutput", func(t *testing.T) {
+			ctx := context.Background()
+			originalResult := "original_streamable_output"
+			modifiedResult := "modified_streamable_output"
+			testTool := &streamableTestTool{name: "test_tool", result: originalResult}
+			mockModel := &mockToolCallingModel{toolCallName: "test_tool"}
+
+			agent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+				Name:        "TestAgent",
+				Description: "Test agent",
+				Model:       mockModel,
+				ToolsConfig: ToolsConfig{
+					ToolsNodeConfig: compose.ToolsNodeConfig{
+						Tools: []tool.BaseTool{testTool},
+					},
+				},
+				Handlers: []ChatModelAgentMiddleware{
+					NewEventSenderToolWrapper(),
+					&streamableResultModifier{
+						BaseChatModelAgentMiddleware: &BaseChatModelAgentMiddleware{},
+						modifiedResult:              modifiedResult,
+					},
+				},
+			})
+			assert.NoError(t, err)
+
+			r := NewRunner(ctx, RunnerConfig{Agent: agent, EnableStreaming: true})
+			it := r.Run(ctx, []Message{schema.UserMessage("test")})
+
+			toolEvents := collectToolEvents(it)
+			assert.GreaterOrEqual(t, len(toolEvents), 1)
+			contents := collectToolContent(toolEvents)
+			assert.Contains(t, contents, originalResult)
+		})
+	})
+
+	t.Run("EnhancedInvokable", func(t *testing.T) {
+		t.Run("DefaultSendsEvent", func(t *testing.T) {
+			ctx := context.Background()
+			testTool := &enhancedInvokableTestTool{name: "test_tool", result: "enhanced_invokable_output"}
+			mockModel := &mockToolCallingModel{toolCallName: "test_tool"}
+
+			agent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+				Name:        "TestAgent",
+				Description: "Test agent",
+				Model:       mockModel,
+				ToolsConfig: ToolsConfig{
+					ToolsNodeConfig: compose.ToolsNodeConfig{
+						Tools: []tool.BaseTool{testTool},
+					},
+				},
+			})
+			assert.NoError(t, err)
+
+			r := NewRunner(ctx, RunnerConfig{Agent: agent, EnableStreaming: false})
+			it := r.Run(ctx, []Message{schema.UserMessage("test")})
+
+			toolEvents := collectToolEvents(it)
+			assert.Equal(t, 1, len(toolEvents))
+			contents := collectToolContent(toolEvents)
+			assert.Contains(t, contents, "enhanced_invokable_output")
+		})
+
+		t.Run("UserConfiguredSkipsDefault", func(t *testing.T) {
+			ctx := context.Background()
+			testTool := &enhancedInvokableTestTool{name: "test_tool", result: "enhanced_invokable_output"}
+			mockModel := &mockToolCallingModel{toolCallName: "test_tool"}
+
+			agent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+				Name:        "TestAgent",
+				Description: "Test agent",
+				Model:       mockModel,
+				ToolsConfig: ToolsConfig{
+					ToolsNodeConfig: compose.ToolsNodeConfig{
+						Tools: []tool.BaseTool{testTool},
+					},
+				},
+				Handlers: []ChatModelAgentMiddleware{NewEventSenderToolWrapper()},
+			})
+			assert.NoError(t, err)
+
+			r := NewRunner(ctx, RunnerConfig{Agent: agent, EnableStreaming: false})
+			it := r.Run(ctx, []Message{schema.UserMessage("test")})
+
+			toolEvents := collectToolEvents(it)
+			assert.Equal(t, 1, len(toolEvents))
+		})
+
+		t.Run("InnermostGetsOriginalOutput", func(t *testing.T) {
+			ctx := context.Background()
+			originalResult := "original_enhanced_invokable_output"
+			modifiedResult := "modified_enhanced_invokable_output"
+			testTool := &enhancedInvokableTestTool{name: "test_tool", result: originalResult}
+			mockModel := &mockToolCallingModel{toolCallName: "test_tool"}
+
+			agent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+				Name:        "TestAgent",
+				Description: "Test agent",
+				Model:       mockModel,
+				ToolsConfig: ToolsConfig{
+					ToolsNodeConfig: compose.ToolsNodeConfig{
+						Tools: []tool.BaseTool{testTool},
+					},
+				},
+				Handlers: []ChatModelAgentMiddleware{
+					NewEventSenderToolWrapper(),
+					&enhancedInvokableResultModifier{
+						BaseChatModelAgentMiddleware: &BaseChatModelAgentMiddleware{},
+						modifiedResult:              modifiedResult,
+					},
+				},
+			})
+			assert.NoError(t, err)
+
+			r := NewRunner(ctx, RunnerConfig{Agent: agent, EnableStreaming: false})
+			it := r.Run(ctx, []Message{schema.UserMessage("test")})
+
+			toolEvents := collectToolEvents(it)
+			assert.GreaterOrEqual(t, len(toolEvents), 1)
+			contents := collectToolContent(toolEvents)
+			assert.Contains(t, contents, originalResult)
+		})
+	})
+
+	t.Run("EnhancedStreamable", func(t *testing.T) {
+		t.Run("DefaultSendsEvent", func(t *testing.T) {
+			ctx := context.Background()
+			testTool := &enhancedStreamableTestTool{name: "test_tool", result: "enhanced_streamable_output"}
+			mockModel := &mockToolCallingModel{toolCallName: "test_tool"}
+
+			agent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+				Name:        "TestAgent",
+				Description: "Test agent",
+				Model:       mockModel,
+				ToolsConfig: ToolsConfig{
+					ToolsNodeConfig: compose.ToolsNodeConfig{
+						Tools: []tool.BaseTool{testTool},
+					},
+				},
+			})
+			assert.NoError(t, err)
+
+			r := NewRunner(ctx, RunnerConfig{Agent: agent, EnableStreaming: true})
+			it := r.Run(ctx, []Message{schema.UserMessage("test")})
+
+			toolEvents := collectToolEvents(it)
+			assert.Equal(t, 1, len(toolEvents))
+			contents := collectToolContent(toolEvents)
+			assert.Contains(t, contents, "enhanced_streamable_output")
+		})
+
+		t.Run("UserConfiguredSkipsDefault", func(t *testing.T) {
+			ctx := context.Background()
+			testTool := &enhancedStreamableTestTool{name: "test_tool", result: "enhanced_streamable_output"}
+			mockModel := &mockToolCallingModel{toolCallName: "test_tool"}
+
+			agent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+				Name:        "TestAgent",
+				Description: "Test agent",
+				Model:       mockModel,
+				ToolsConfig: ToolsConfig{
+					ToolsNodeConfig: compose.ToolsNodeConfig{
+						Tools: []tool.BaseTool{testTool},
+					},
+				},
+				Handlers: []ChatModelAgentMiddleware{NewEventSenderToolWrapper()},
+			})
+			assert.NoError(t, err)
+
+			r := NewRunner(ctx, RunnerConfig{Agent: agent, EnableStreaming: true})
+			it := r.Run(ctx, []Message{schema.UserMessage("test")})
+
+			toolEvents := collectToolEvents(it)
+			assert.Equal(t, 1, len(toolEvents))
+		})
+
+		t.Run("InnermostGetsOriginalOutput", func(t *testing.T) {
+			ctx := context.Background()
+			originalResult := "original_enhanced_streamable_output"
+			modifiedResult := "modified_enhanced_streamable_output"
+			testTool := &enhancedStreamableTestTool{name: "test_tool", result: originalResult}
+			mockModel := &mockToolCallingModel{toolCallName: "test_tool"}
+
+			agent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+				Name:        "TestAgent",
+				Description: "Test agent",
+				Model:       mockModel,
+				ToolsConfig: ToolsConfig{
+					ToolsNodeConfig: compose.ToolsNodeConfig{
+						Tools: []tool.BaseTool{testTool},
+					},
+				},
+				Handlers: []ChatModelAgentMiddleware{
+					NewEventSenderToolWrapper(),
+					&enhancedStreamableResultModifier{
+						BaseChatModelAgentMiddleware: &BaseChatModelAgentMiddleware{},
+						modifiedResult:              modifiedResult,
+					},
+				},
+			})
+			assert.NoError(t, err)
+
+			r := NewRunner(ctx, RunnerConfig{Agent: agent, EnableStreaming: true})
+			it := r.Run(ctx, []Message{schema.UserMessage("test")})
+
+			toolEvents := collectToolEvents(it)
+			assert.GreaterOrEqual(t, len(toolEvents), 1)
+			contents := collectToolContent(toolEvents)
+			assert.Contains(t, contents, originalResult)
+		})
+	})
+}

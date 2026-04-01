@@ -350,20 +350,33 @@ func popToolGenAction(ctx context.Context, toolName string) *AgentAction {
 	return action
 }
 
-type eventSenderToolHandler struct{}
+type eventSenderToolWrapper struct {
+	*BaseChatModelAgentMiddleware
+}
 
-func (h *eventSenderToolHandler) WrapInvokableToolCall(next compose.InvokableToolEndpoint) compose.InvokableToolEndpoint {
-	return func(ctx context.Context, input *compose.ToolInput) (*compose.ToolOutput, error) {
-		output, err := next(ctx, input)
+// NewEventSenderToolWrapper returns a ChatModelAgentMiddleware that sends tool result events.
+// By default, the framework places this before all user middlewares (outermost), so events
+// reflect the fully processed tool output. To control exactly where events are emitted,
+// include this in ChatModelAgentConfig.Handlers at the desired position.
+// When detected in Handlers, the framework skips the default event sender to avoid duplicates.
+func NewEventSenderToolWrapper() ChatModelAgentMiddleware {
+	return &eventSenderToolWrapper{
+		BaseChatModelAgentMiddleware: &BaseChatModelAgentMiddleware{},
+	}
+}
+
+func (w *eventSenderToolWrapper) WrapInvokableToolCall(_ context.Context, endpoint InvokableToolCallEndpoint, tCtx *ToolContext) (InvokableToolCallEndpoint, error) {
+	return func(ctx context.Context, argumentsInJSON string, opts ...tool.Option) (string, error) {
+		result, err := endpoint(ctx, argumentsInJSON, opts...)
 		if err != nil {
-			return nil, err
+			return "", err
 		}
 
-		toolName := input.Name
-		callID := input.CallID
+		toolName := tCtx.Name
+		callID := tCtx.CallID
 
 		prePopAction := popToolGenAction(ctx, toolName)
-		msg := schema.ToolMessage(output.Result, callID, schema.WithToolName(toolName))
+		msg := schema.ToolMessage(result, callID, schema.WithToolName(toolName))
 		event := EventFromMessage(msg, nil, schema.Tool, toolName)
 		if prePopAction != nil {
 			event.Action = prePopAction
@@ -379,22 +392,22 @@ func (h *eventSenderToolHandler) WrapInvokableToolCall(next compose.InvokableToo
 			return nil
 		})
 
-		return output, nil
-	}
+		return result, nil
+	}, nil
 }
 
-func (h *eventSenderToolHandler) WrapStreamableToolCall(next compose.StreamableToolEndpoint) compose.StreamableToolEndpoint {
-	return func(ctx context.Context, input *compose.ToolInput) (*compose.StreamToolOutput, error) {
-		output, err := next(ctx, input)
+func (w *eventSenderToolWrapper) WrapStreamableToolCall(_ context.Context, endpoint StreamableToolCallEndpoint, tCtx *ToolContext) (StreamableToolCallEndpoint, error) {
+	return func(ctx context.Context, argumentsInJSON string, opts ...tool.Option) (*schema.StreamReader[string], error) {
+		result, err := endpoint(ctx, argumentsInJSON, opts...)
 		if err != nil {
 			return nil, err
 		}
 
-		toolName := input.Name
-		callID := input.CallID
+		toolName := tCtx.Name
+		callID := tCtx.CallID
 
 		prePopAction := popToolGenAction(ctx, toolName)
-		streams := output.Result.Copy(2)
+		streams := result.Copy(2)
 
 		cvt := func(in string) (Message, error) {
 			return schema.ToolMessage(in, callID, schema.WithToolName(toolName)), nil
@@ -413,23 +426,23 @@ func (h *eventSenderToolHandler) WrapStreamableToolCall(next compose.StreamableT
 			return nil
 		})
 
-		return &compose.StreamToolOutput{Result: streams[1]}, nil
-	}
+		return streams[1], nil
+	}, nil
 }
 
-func (h *eventSenderToolHandler) WrapEnhancedInvokableToolCall(next compose.EnhancedInvokableToolEndpoint) compose.EnhancedInvokableToolEndpoint {
-	return func(ctx context.Context, input *compose.ToolInput) (*compose.EnhancedInvokableToolOutput, error) {
-		output, err := next(ctx, input)
+func (w *eventSenderToolWrapper) WrapEnhancedInvokableToolCall(_ context.Context, endpoint EnhancedInvokableToolCallEndpoint, tCtx *ToolContext) (EnhancedInvokableToolCallEndpoint, error) {
+	return func(ctx context.Context, toolArgument *schema.ToolArgument, opts ...tool.Option) (*schema.ToolResult, error) {
+		result, err := endpoint(ctx, toolArgument, opts...)
 		if err != nil {
 			return nil, err
 		}
 
-		toolName := input.Name
-		callID := input.CallID
+		toolName := tCtx.Name
+		callID := tCtx.CallID
 
 		prePopAction := popToolGenAction(ctx, toolName)
 		msg := schema.ToolMessage("", callID, schema.WithToolName(toolName))
-		msg.UserInputMultiContent, err = output.Result.ToMessageInputParts()
+		msg.UserInputMultiContent, err = result.ToMessageInputParts()
 		if err != nil {
 			return nil, err
 		}
@@ -448,22 +461,22 @@ func (h *eventSenderToolHandler) WrapEnhancedInvokableToolCall(next compose.Enha
 			return nil
 		})
 
-		return output, nil
-	}
+		return result, nil
+	}, nil
 }
 
-func (h *eventSenderToolHandler) WrapEnhancedStreamableToolCall(next compose.EnhancedStreamableToolEndpoint) compose.EnhancedStreamableToolEndpoint {
-	return func(ctx context.Context, input *compose.ToolInput) (*compose.EnhancedStreamableToolOutput, error) {
-		output, err := next(ctx, input)
+func (w *eventSenderToolWrapper) WrapEnhancedStreamableToolCall(_ context.Context, endpoint EnhancedStreamableToolCallEndpoint, tCtx *ToolContext) (EnhancedStreamableToolCallEndpoint, error) {
+	return func(ctx context.Context, toolArgument *schema.ToolArgument, opts ...tool.Option) (*schema.StreamReader[*schema.ToolResult], error) {
+		result, err := endpoint(ctx, toolArgument, opts...)
 		if err != nil {
 			return nil, err
 		}
 
-		toolName := input.Name
-		callID := input.CallID
+		toolName := tCtx.Name
+		callID := tCtx.CallID
 
 		prePopAction := popToolGenAction(ctx, toolName)
-		streams := output.Result.Copy(2)
+		streams := result.Copy(2)
 
 		cvt := func(in *schema.ToolResult) (Message, error) {
 			msg := schema.ToolMessage("", callID, schema.WithToolName(toolName))
@@ -488,8 +501,17 @@ func (h *eventSenderToolHandler) WrapEnhancedStreamableToolCall(next compose.Enh
 			return nil
 		})
 
-		return &compose.EnhancedStreamableToolOutput{Result: streams[1]}, nil
+		return streams[1], nil
+	}, nil
+}
+
+func hasUserEventSenderToolWrapper(handlers []ChatModelAgentMiddleware) bool {
+	for _, handler := range handlers {
+		if _, ok := handler.(*eventSenderToolWrapper); ok {
+			return true
+		}
 	}
+	return false
 }
 
 type stateModelWrapper struct {

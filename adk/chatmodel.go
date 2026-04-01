@@ -283,12 +283,34 @@ type ChatModelAgentConfig struct {
 	// the default event sender to avoid duplicate events.
 	//
 	// Tool call lifecycle (outermost to innermost):
-	//  1. eventSenderToolHandler (internal ToolMiddleware - sends tool result events after all processing)
+	//  1. eventSenderToolWrapper (internal ToolMiddleware - sends tool result events after all processing)
 	//  2. ToolsConfig.ToolCallMiddlewares (ToolMiddleware)
 	//  3. AgentMiddleware.WrapToolCall (ToolMiddleware)
 	//  4. ChatModelAgentMiddleware.WrapToolCall (wrapper, first registered is outermost)
 	//  5. callbackInjectedToolCall (internal - injects callbacks if tool doesn't handle them)
 	//  6. Tool.InvokableRun/StreamableRun
+	//
+	// Custom Tool Event Sender Position:
+	// By default, tool result events are emitted by an internal event sender placed before
+	// all user middlewares (outermost), so events reflect the fully processed tool output.
+	// To control exactly where in the handler chain tool events are emitted, pass
+	// NewEventSenderToolWrapper() as one of the Handlers. Its position determines which
+	// middlewares' effects are visible in the emitted event:
+	//
+	//   agent, _ := adk.NewChatModelAgent(ctx, &adk.ChatModelAgentConfig{
+	//       Handlers: []adk.ChatModelAgentMiddleware{
+	//           loggingHandler,                      // Outermost: sees event-sender output
+	//           adk.NewEventSenderToolWrapper(),     // Events reflect output from handlers below
+	//           sanitizationHandler,                 // Innermost: runs first, modifies tool output
+	//       },
+	//   })
+	//
+	// Handler order: first registered is outermost. So [A, B, C] wraps as A(B(C(tool))).
+	// The event sender captures tool output in post-processing, so its position controls
+	// which handlers' modifications are included in the emitted events.
+	//
+	// When NewEventSenderToolWrapper is detected in Handlers, the framework skips
+	// the default event sender to avoid duplicate events.
 	//
 	// Tool List Modification:
 	//
@@ -371,20 +393,15 @@ func NewChatModelAgent(ctx context.Context, config *ChatModelAgentConfig) (*Chat
 	tc := config.ToolsConfig
 
 	// Tool call middleware execution order (outermost to innermost):
-	// 1. eventSenderToolHandler (internal - sends tool result events after all modifications)
+	// 1. eventSenderToolWrapper (internal - sends tool result events after all modifications)
 	// 2. User-provided ToolsConfig.ToolCallMiddlewares (original order preserved)
 	// 3. Middlewares' WrapToolCall (in registration order)
 	// 4. ChatModelAgentMiddleware.WrapToolCall (in registration order)
 	// 5. callbackInjectedToolCall (internal - injects callbacks if tool doesn't handle them)
-	eventSender := &eventSenderToolHandler{}
-	tc.ToolCallMiddlewares = append(
-		[]compose.ToolMiddleware{{Invokable: eventSender.WrapInvokableToolCall,
-			Streamable:         eventSender.WrapStreamableToolCall,
-			EnhancedInvokable:  eventSender.WrapEnhancedInvokableToolCall,
-			EnhancedStreamable: eventSender.WrapEnhancedStreamableToolCall,
-		}},
-		tc.ToolCallMiddlewares...,
-	)
+	if !hasUserEventSenderToolWrapper(config.Handlers) {
+		defaultToolEventSender := handlersToToolMiddlewares([]ChatModelAgentMiddleware{NewEventSenderToolWrapper()})
+		tc.ToolCallMiddlewares = append(defaultToolEventSender, tc.ToolCallMiddlewares...)
+	}
 	tc.ToolCallMiddlewares = append(tc.ToolCallMiddlewares, collectToolMiddlewaresFromMiddlewares(config.Middlewares)...)
 
 	// Cancel monitoring middleware (innermost — close to the tool endpoint).
