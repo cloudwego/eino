@@ -284,7 +284,7 @@ func copyAgentEvent(ae *AgentEvent) *AgentEvent {
 	return copyTypedAgentEvent(ae)
 }
 
-func copyAgenticAgentEvent(ae *TypedAgentEvent[*schema.AgenticMessage]) *TypedAgentEvent[*schema.AgenticMessage] {
+func copyAgenticEvent(ae *TypedAgentEvent[*schema.AgenticMessage]) *TypedAgentEvent[*schema.AgenticMessage] {
 	return copyTypedAgentEvent(ae)
 }
 

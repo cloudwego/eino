@@ -65,7 +65,7 @@ type HandlerHelper struct {
 	toolHandler             *ToolCallbackHandler
 	toolsNodeHandler        *ToolsNodeCallbackHandlers
 	agentHandler            *AgentCallbackHandler
-	agenticAgentHandler     *AgenticAgentCallbackHandler
+	agenticHandler          *AgenticCallbackHandler
 	agenticPromptHandler    *AgenticPromptCallbackHandler
 	agenticModelHandler     *AgenticModelCallbackHandler
 	agenticToolsNodeHandler *AgenticToolsNodeCallbackHandlers
@@ -155,9 +155,9 @@ func (c *HandlerHelper) Agent(handler *AgentCallbackHandler) *HandlerHelper {
 	return c
 }
 
-// AgenticAgent sets the agentic agent handler for the handler helper, which will be called when an agentic agent is executed.
-func (c *HandlerHelper) AgenticAgent(handler *AgenticAgentCallbackHandler) *HandlerHelper {
-	c.agenticAgentHandler = handler
+// Agentic sets the agentic callback handler for the handler helper, which will be called when an agentic agent is executed.
+func (c *HandlerHelper) Agentic(handler *AgenticCallbackHandler) *HandlerHelper {
+	c.agenticHandler = handler
 	return c
 }
 
@@ -214,7 +214,7 @@ func (c *handlerTemplate) OnStart(ctx context.Context, info *callbacks.RunInfo, 
 	case adk.ComponentOfAgent:
 		return c.agentHandler.OnStart(ctx, info, adk.ConvAgentCallbackInput(input))
 	case adk.ComponentOfAgenticAgent:
-		return c.agenticAgentHandler.OnStart(ctx, info, adk.ConvAgenticAgentCallbackInput(input))
+		return c.agenticHandler.OnStart(ctx, info, adk.ConvAgenticCallbackInput(input))
 	case compose.ComponentOfGraph,
 		compose.ComponentOfChain,
 		compose.ComponentOfLambda:
@@ -255,7 +255,7 @@ func (c *handlerTemplate) OnEnd(ctx context.Context, info *callbacks.RunInfo, ou
 	case adk.ComponentOfAgent:
 		return c.agentHandler.OnEnd(ctx, info, adk.ConvAgentCallbackOutput(output))
 	case adk.ComponentOfAgenticAgent:
-		return c.agenticAgentHandler.OnEnd(ctx, info, adk.ConvAgenticAgentCallbackOutput(output))
+		return c.agenticHandler.OnEnd(ctx, info, adk.ConvAgenticCallbackOutput(output))
 	case compose.ComponentOfGraph,
 		compose.ComponentOfChain,
 		compose.ComponentOfLambda:
@@ -416,7 +416,7 @@ func (c *handlerTemplate) Needed(ctx context.Context, info *callbacks.RunInfo, t
 			return true
 		}
 	case adk.ComponentOfAgenticAgent:
-		if c.agenticAgentHandler != nil && c.agenticAgentHandler.Needed(ctx, info, timing) {
+		if c.agenticHandler != nil && c.agenticHandler.Needed(ctx, info, timing) {
 			return true
 		}
 	case compose.ComponentOfGraph,
@@ -675,13 +675,13 @@ func (ch *AgentCallbackHandler) Needed(ctx context.Context, info *callbacks.RunI
 	}
 }
 
-// AgenticAgentCallbackHandler handles callbacks for agentic agents using *schema.AgenticMessage.
-type AgenticAgentCallbackHandler struct {
-	OnStart func(ctx context.Context, info *callbacks.RunInfo, input *adk.AgenticAgentCallbackInput) context.Context
-	OnEnd   func(ctx context.Context, info *callbacks.RunInfo, output *adk.AgenticAgentCallbackOutput) context.Context
+// AgenticCallbackHandler handles callbacks for agentic agents using *schema.AgenticMessage.
+type AgenticCallbackHandler struct {
+	OnStart func(ctx context.Context, info *callbacks.RunInfo, input *adk.AgenticCallbackInput) context.Context
+	OnEnd   func(ctx context.Context, info *callbacks.RunInfo, output *adk.AgenticCallbackOutput) context.Context
 }
 
-func (ch *AgenticAgentCallbackHandler) Needed(ctx context.Context, info *callbacks.RunInfo, timing callbacks.CallbackTiming) bool {
+func (ch *AgenticCallbackHandler) Needed(ctx context.Context, info *callbacks.RunInfo, timing callbacks.CallbackTiming) bool {
 	switch timing {
 	case callbacks.TimingOnStart:
 		return ch.OnStart != nil

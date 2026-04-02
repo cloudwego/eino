@@ -33,7 +33,7 @@ type agenticCallbackRecorder struct {
 	onStartCalled  bool
 	onEndCalled    bool
 	runInfo        *callbacks.RunInfo
-	inputReceived  *AgenticAgentCallbackInput
+	inputReceived  *AgenticCallbackInput
 	eventsReceived []*TypedAgentEvent[*schema.AgenticMessage]
 	eventsDone     chan struct{}
 	closeOnce      sync.Once
@@ -70,7 +70,7 @@ func newAgenticRecordingHandler(recorder *agenticCallbackRecorder) callbacks.Han
 			defer recorder.mu.Unlock()
 			recorder.onStartCalled = true
 			recorder.runInfo = info
-			if agentInput := ConvAgenticAgentCallbackInput(input); agentInput != nil {
+			if agentInput := ConvAgenticCallbackInput(input); agentInput != nil {
 				recorder.inputReceived = agentInput
 			}
 			return ctx
@@ -84,7 +84,7 @@ func newAgenticRecordingHandler(recorder *agenticCallbackRecorder) callbacks.Han
 			recorder.runInfo = info
 			recorder.mu.Unlock()
 
-			if agentOutput := ConvAgenticAgentCallbackOutput(output); agentOutput != nil {
+			if agentOutput := ConvAgenticCallbackOutput(output); agentOutput != nil {
 				if agentOutput.Events != nil {
 					go func() {
 						defer recorder.closeOnce.Do(func() { close(recorder.eventsDone) })

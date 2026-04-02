@@ -309,9 +309,9 @@ func TestCopyAgenticEventIterator(t *testing.T) {
 	})
 }
 
-func TestCopyAgenticAgentCallbackOutput(t *testing.T) {
+func TestCopyAgenticCallbackOutput(t *testing.T) {
 	t.Run("nil output", func(t *testing.T) {
-		result := copyAgenticAgentCallbackOutput(nil, 3)
+		result := copyAgenticCallbackOutput(nil, 3)
 		assert.Len(t, result, 3)
 		for _, r := range result {
 			assert.Nil(t, r)
@@ -319,8 +319,8 @@ func TestCopyAgenticAgentCallbackOutput(t *testing.T) {
 	})
 
 	t.Run("output with nil Events", func(t *testing.T) {
-		out := &AgenticAgentCallbackOutput{Events: nil}
-		result := copyAgenticAgentCallbackOutput(out, 3)
+		out := &AgenticCallbackOutput{Events: nil}
+		result := copyAgenticCallbackOutput(out, 3)
 		assert.Len(t, result, 3)
 		for _, r := range result {
 			assert.Equal(t, out, r)
@@ -334,8 +334,8 @@ func TestCopyAgenticAgentCallbackOutput(t *testing.T) {
 			gen.Close()
 		}()
 
-		out := &AgenticAgentCallbackOutput{Events: iter}
-		result := copyAgenticAgentCallbackOutput(out, 2)
+		out := &AgenticCallbackOutput{Events: iter}
+		result := copyAgenticCallbackOutput(out, 2)
 		assert.Len(t, result, 2)
 
 		for i, r := range result {
@@ -345,43 +345,43 @@ func TestCopyAgenticAgentCallbackOutput(t *testing.T) {
 	})
 }
 
-func TestConvAgenticAgentCallbackInput(t *testing.T) {
-	t.Run("valid AgenticAgentCallbackInput", func(t *testing.T) {
-		input := &AgenticAgentCallbackInput{
+func TestConvAgenticCallbackInput(t *testing.T) {
+	t.Run("valid AgenticCallbackInput", func(t *testing.T) {
+		input := &AgenticCallbackInput{
 			Input: &TypedAgentInput[*schema.AgenticMessage]{
 				Messages: []*schema.AgenticMessage{schema.UserAgenticMessage("test")},
 			},
 		}
-		result := ConvAgenticAgentCallbackInput(input)
+		result := ConvAgenticCallbackInput(input)
 		assert.Equal(t, input, result)
 	})
 
 	t.Run("invalid type returns nil", func(t *testing.T) {
-		result := ConvAgenticAgentCallbackInput("invalid")
+		result := ConvAgenticCallbackInput("invalid")
 		assert.Nil(t, result)
 	})
 
 	t.Run("nil returns nil", func(t *testing.T) {
-		result := ConvAgenticAgentCallbackInput(nil)
+		result := ConvAgenticCallbackInput(nil)
 		assert.Nil(t, result)
 	})
 }
 
-func TestConvAgenticAgentCallbackOutput(t *testing.T) {
-	t.Run("valid AgenticAgentCallbackOutput", func(t *testing.T) {
+func TestConvAgenticCallbackOutput(t *testing.T) {
+	t.Run("valid AgenticCallbackOutput", func(t *testing.T) {
 		iter, _ := NewAsyncIteratorPair[*TypedAgentEvent[*schema.AgenticMessage]]()
-		output := &AgenticAgentCallbackOutput{Events: iter}
-		result := ConvAgenticAgentCallbackOutput(output)
+		output := &AgenticCallbackOutput{Events: iter}
+		result := ConvAgenticCallbackOutput(output)
 		assert.Equal(t, output, result)
 	})
 
 	t.Run("invalid type returns nil", func(t *testing.T) {
-		result := ConvAgenticAgentCallbackOutput("invalid")
+		result := ConvAgenticCallbackOutput("invalid")
 		assert.Nil(t, result)
 	})
 
 	t.Run("nil returns nil", func(t *testing.T) {
-		result := ConvAgenticAgentCallbackOutput(nil)
+		result := ConvAgenticCallbackOutput(nil)
 		assert.Nil(t, result)
 	})
 }

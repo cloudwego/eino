@@ -135,32 +135,32 @@ func getAgentType(agent Agent) string {
 	return ""
 }
 
-// AgenticAgentCallbackInput represents the input passed to agentic agent callbacks during OnStart.
-// Use ConvAgenticAgentCallbackInput to safely convert from callbacks.CallbackInput.
-type AgenticAgentCallbackInput struct {
+// AgenticCallbackInput represents the input passed to agentic agent callbacks during OnStart.
+// Use ConvAgenticCallbackInput to safely convert from callbacks.CallbackInput.
+type AgenticCallbackInput struct {
 	Input      *TypedAgentInput[*schema.AgenticMessage]
 	ResumeInfo *ResumeInfo
 }
 
-// AgenticAgentCallbackOutput represents the output passed to agentic agent callbacks during OnEnd.
-// Use ConvAgenticAgentCallbackOutput to safely convert from callbacks.CallbackOutput.
-type AgenticAgentCallbackOutput struct {
+// AgenticCallbackOutput represents the output passed to agentic agent callbacks during OnEnd.
+// Use ConvAgenticCallbackOutput to safely convert from callbacks.CallbackOutput.
+type AgenticCallbackOutput struct {
 	Events *AsyncIterator[*TypedAgentEvent[*schema.AgenticMessage]]
 }
 
-// ConvAgenticAgentCallbackInput converts a callbacks.CallbackInput to *AgenticAgentCallbackInput.
+// ConvAgenticCallbackInput converts a callbacks.CallbackInput to *AgenticCallbackInput.
 // Returns nil if the input is not of the expected type.
-func ConvAgenticAgentCallbackInput(input callbacks.CallbackInput) *AgenticAgentCallbackInput {
-	if v, ok := input.(*AgenticAgentCallbackInput); ok {
+func ConvAgenticCallbackInput(input callbacks.CallbackInput) *AgenticCallbackInput {
+	if v, ok := input.(*AgenticCallbackInput); ok {
 		return v
 	}
 	return nil
 }
 
-// ConvAgenticAgentCallbackOutput converts a callbacks.CallbackOutput to *AgenticAgentCallbackOutput.
+// ConvAgenticCallbackOutput converts a callbacks.CallbackOutput to *AgenticCallbackOutput.
 // Returns nil if the output is not of the expected type.
-func ConvAgenticAgentCallbackOutput(output callbacks.CallbackOutput) *AgenticAgentCallbackOutput {
-	if v, ok := output.(*AgenticAgentCallbackOutput); ok {
+func ConvAgenticCallbackOutput(output callbacks.CallbackOutput) *AgenticCallbackOutput {
+	if v, ok := output.(*AgenticCallbackOutput); ok {
 		return v
 	}
 	return nil
@@ -193,7 +193,7 @@ func copyAgenticEventIterator(iter *AsyncIterator[*TypedAgentEvent[*schema.Agent
 				break
 			}
 			for i := 0; i < n-1; i++ {
-				generators[i].Send(copyAgenticAgentEvent(event))
+				generators[i].Send(copyAgenticEvent(event))
 			}
 			generators[n-1].Send(event)
 		}
@@ -202,23 +202,23 @@ func copyAgenticEventIterator(iter *AsyncIterator[*TypedAgentEvent[*schema.Agent
 	return iterators
 }
 
-func copyAgenticAgentCallbackOutput(out *AgenticAgentCallbackOutput, n int) []*AgenticAgentCallbackOutput {
+func copyAgenticCallbackOutput(out *AgenticCallbackOutput, n int) []*AgenticCallbackOutput {
 	if out == nil || out.Events == nil {
-		result := make([]*AgenticAgentCallbackOutput, n)
+		result := make([]*AgenticCallbackOutput, n)
 		for i := 0; i < n; i++ {
 			result[i] = out
 		}
 		return result
 	}
 	iters := copyAgenticEventIterator(out.Events, n)
-	result := make([]*AgenticAgentCallbackOutput, n)
+	result := make([]*AgenticCallbackOutput, n)
 	for i, iter := range iters {
-		result[i] = &AgenticAgentCallbackOutput{Events: iter}
+		result[i] = &AgenticCallbackOutput{Events: iter}
 	}
 	return result
 }
 
-func initAgenticAgentCallbacks(ctx context.Context, agentName, agentType string, opts ...AgentRunOption) context.Context {
+func initAgenticCallbacks(ctx context.Context, agentName, agentType string, opts ...AgentRunOption) context.Context {
 	ri := &callbacks.RunInfo{
 		Name:      agentName,
 		Type:      agentType,
