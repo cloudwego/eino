@@ -403,6 +403,22 @@ func (cc *cancelContext) shouldCancel() bool {
 	}
 }
 
+// isImmediateCancelled returns true if an immediate graph interrupt has been
+// fired (CancelImmediate or timeout escalation). This is stronger than
+// shouldCancel: it means the compose graph is being torn down right now and
+// orphaned goroutines should not attempt to send events.
+func (cc *cancelContext) isImmediateCancelled() bool {
+	if cc == nil {
+		return false
+	}
+	select {
+	case <-cc.immediateChan:
+		return true
+	default:
+		return false
+	}
+}
+
 // sendImmediateInterrupt sends the compose graph interrupt signal via graphInterruptFuncs.
 // Also closes immediateChan (used by cancelMonitoredModel to abort an in-progress stream).
 // Returns false if an interrupt was already sent or if no graphInterruptFuncs have been
