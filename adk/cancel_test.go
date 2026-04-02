@@ -2339,6 +2339,69 @@ func TestCancelImmediate_OrphanedToolGoroutine_NoPanic(t *testing.T) {
 		}, "send after generator.Close must not panic even without cancelCtx (trySend safety net)")
 	})
 
+	t.Run("unit_send_nil_execCtx", func(t *testing.T) {
+		var execCtx *chatModelAgentExecCtx
+		assert.NotPanics(t, func() {
+			execCtx.send(&AgentEvent{AgentName: "test"})
+		}, "send on nil execCtx must not panic")
+	})
+
+	t.Run("unit_send_nil_generator", func(t *testing.T) {
+		execCtx := &chatModelAgentExecCtx{}
+		assert.NotPanics(t, func() {
+			execCtx.send(&AgentEvent{AgentName: "test"})
+		}, "send with nil generator must not panic")
+	})
+
+	t.Run("unit_isImmediateCancelled_nil_cancelContext", func(t *testing.T) {
+		var cc *cancelContext
+		assert.False(t, cc.isImmediateCancelled(), "nil cancelContext should return false")
+	})
+
+	t.Run("unit_trySend_race_window", func(t *testing.T) {
+		_, gen := NewAsyncIteratorPair[*AgentEvent]()
+		cc := newCancelContext()
+
+		gen.Close()
+
+		execCtx := &chatModelAgentExecCtx{
+			generator: gen,
+			cancelCtx: cc,
+		}
+
+		assert.NotPanics(t, func() {
+			execCtx.send(&AgentEvent{AgentName: "test"})
+		}, "trySend must handle the case where isImmediateCancelled is false but generator is closed")
+	})
+
+	t.Run("unit_SendEvent_after_close", func(t *testing.T) {
+		_, gen := NewAsyncIteratorPair[*AgentEvent]()
+
+		cc := newCancelContext()
+		cc.setMode(CancelImmediate)
+		close(cc.cancelChan)
+		close(cc.immediateChan)
+
+		gen.Close()
+
+		execCtx := &chatModelAgentExecCtx{
+			generator: gen,
+			cancelCtx: cc,
+		}
+
+		ctx := withChatModelAgentExecCtx(context.Background(), execCtx)
+
+		assert.NotPanics(t, func() {
+			err := SendEvent(ctx, &AgentEvent{AgentName: "test"})
+			assert.NoError(t, err)
+		}, "SendEvent after generator.Close must not panic")
+	})
+
+	t.Run("unit_SendEvent_no_execCtx", func(t *testing.T) {
+		err := SendEvent(context.Background(), &AgentEvent{AgentName: "test"})
+		assert.Error(t, err, "SendEvent without execCtx should return error")
+	})
+
 	t.Run("integration_cancel_escalation_orphans_tool", func(t *testing.T) {
 		ctx := context.Background()
 
