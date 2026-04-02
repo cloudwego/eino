@@ -437,23 +437,6 @@ func NewChatModelAgent(ctx context.Context, config *ChatModelAgentConfig) (*Chat
 	return NewTypedChatModelAgent[*schema.Message](ctx, config)
 }
 
-// NewChatModelAgentFrom is a convenience constructor that creates a TypedChatModelAgent from the given model and config.
-func NewChatModelAgentFrom[M MessageType](ctx context.Context, mdl model.BaseModel[M], conf *ChatModelAgentConfig) (*TypedChatModelAgent[M], error) {
-	typedConf := &TypedChatModelAgentConfig[M]{
-		Name:             conf.Name,
-		Description:      conf.Description,
-		Instruction:      conf.Instruction,
-		Model:            mdl,
-		ToolsConfig:      conf.ToolsConfig,
-		Exit:             conf.Exit,
-		OutputKey:        conf.OutputKey,
-		MaxIterations:    conf.MaxIterations,
-		Middlewares:      conf.Middlewares,
-		ModelRetryConfig: conf.ModelRetryConfig,
-	}
-	return NewTypedChatModelAgent[M](ctx, typedConf)
-}
-
 // NewTypedChatModelAgent creates a new TypedChatModelAgent with the given config.
 func NewTypedChatModelAgent[M MessageType](ctx context.Context, config *TypedChatModelAgentConfig[M]) (*TypedChatModelAgent[M], error) {
 	if config.Name == "" {
@@ -912,8 +895,8 @@ func (a *TypedChatModelAgent[M]) buildNoToolsRunFunc(_ context.Context) (typedRu
 		})
 
 		chain := compose.NewChain[typedNoToolsInput[M], M](
-			compose.WithGenLocalState(func(ctx context.Context) (state *TypedState[M]) {
-				return &TypedState[M]{}
+			compose.WithGenLocalState(func(ctx context.Context) (state *typedState[M]) {
+				return &typedState[M]{}
 			}))
 
 		chain.AppendLambda(compose.InvokableLambda(func(ctx context.Context, in typedNoToolsInput[M]) ([]M, error) {
@@ -921,7 +904,7 @@ func (a *TypedChatModelAgent[M]) buildNoToolsRunFunc(_ context.Context) (typedRu
 			if err != nil {
 				return nil, err
 			}
-			_ = compose.ProcessState(ctx, func(_ context.Context, st *TypedState[M]) error {
+			_ = compose.ProcessState(ctx, func(_ context.Context, st *typedState[M]) error {
 				st.Messages = append(st.Messages, messages...)
 				return nil
 			})

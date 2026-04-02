@@ -276,12 +276,12 @@ func (b *TypedBaseChatModelAgentMiddleware[M]) AfterToolCallsRewriteState(ctx co
 func processTypedState(ctx context.Context, fn func(extra map[string]any) map[string]any) error {
 	runCtx := getRunCtx(ctx)
 	if runCtx != nil && runCtx.TypedRootInput != nil {
-		return compose.ProcessState(ctx, func(_ context.Context, st *TypedState[*schema.AgenticMessage]) error {
+		return compose.ProcessState(ctx, func(_ context.Context, st *typedState[*schema.AgenticMessage]) error {
 			st.Extra = fn(st.Extra)
 			return nil
 		})
 	}
-	return compose.ProcessState(ctx, func(_ context.Context, st *TypedState[*schema.Message]) error {
+	return compose.ProcessState(ctx, func(_ context.Context, st *typedState[*schema.Message]) error {
 		st.Extra = fn(st.Extra)
 		return nil
 	})

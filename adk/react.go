@@ -31,13 +31,7 @@ import (
 // ErrExceedMaxIterations indicates the agent reached the maximum iterations limit.
 var ErrExceedMaxIterations = errors.New("exceeds max iterations")
 
-// TypedState holds agent runtime state including messages and user-extensible storage.
-//
-// Deprecated: This type will be unexported in v1.0.0. Use ChatModelAgentState
-// in HandlerMiddleware and AgentMiddleware callbacks instead. Direct use of
-// compose.ProcessState[*State] is discouraged and will stop working in v1.0.0;
-// use the handler APIs instead.
-type TypedState[M MessageType] struct {
+type typedState[M MessageType] struct {
 	Messages []M
 	Extra    map[string]any
 
@@ -52,9 +46,9 @@ type TypedState[M MessageType] struct {
 	RetryAttempt             int
 }
 
-type State = TypedState[*schema.Message]
+type State = typedState[*schema.Message]
 
-type agenticState = TypedState[*schema.AgenticMessage]
+type agenticState = typedState[*schema.AgenticMessage]
 
 const (
 	stateGobNameV07 = "_eino_adk_react_state"
@@ -81,7 +75,7 @@ func init() {
 	schema.RegisterName[*State](stateGobNameV07)
 	schema.RegisterName[*stateV080](stateGobNameV080)
 
-	schema.RegisterName[*TypedState[*schema.AgenticMessage]]("_eino_adk_agentic_state")
+	schema.RegisterName[*typedState[*schema.AgenticMessage]]("_eino_adk_agentic_state")
 	schema.RegisterName[*TypedAgentEvent[*schema.AgenticMessage]]("_eino_adk_agentic_event")
 
 	gob.Register(&AgentEvent{})
@@ -98,43 +92,43 @@ func init() {
 	schema.RegisterName[*agenticReactInput]("_eino_adk_agentic_react_input")
 }
 
-func (s *TypedState[M]) getReturnDirectlyEvent() *TypedAgentEvent[M] {
+func (s *typedState[M]) getReturnDirectlyEvent() *TypedAgentEvent[M] {
 	return s.ReturnDirectlyEvent
 }
 
-func (s *TypedState[M]) setReturnDirectlyEvent(event *TypedAgentEvent[M]) {
+func (s *typedState[M]) setReturnDirectlyEvent(event *TypedAgentEvent[M]) {
 	s.ReturnDirectlyEvent = event
 }
 
-func (s *TypedState[M]) getRetryAttempt() int {
+func (s *typedState[M]) getRetryAttempt() int {
 	return s.RetryAttempt
 }
 
-func (s *TypedState[M]) setRetryAttempt(attempt int) {
+func (s *typedState[M]) setRetryAttempt(attempt int) {
 	s.RetryAttempt = attempt
 }
 
-func (s *TypedState[M]) getReturnDirectlyToolCallID() string {
+func (s *typedState[M]) getReturnDirectlyToolCallID() string {
 	return s.ReturnDirectlyToolCallID
 }
 
-func (s *TypedState[M]) setReturnDirectlyToolCallID(id string) {
+func (s *typedState[M]) setReturnDirectlyToolCallID(id string) {
 	s.ReturnDirectlyToolCallID = id
 	s.HasReturnDirectly = id != ""
 }
 
-func (s *TypedState[M]) getToolGenActions() map[string]*AgentAction {
+func (s *typedState[M]) getToolGenActions() map[string]*AgentAction {
 	return s.ToolGenActions
 }
 
-func (s *TypedState[M]) setToolGenAction(key string, action *AgentAction) {
+func (s *typedState[M]) setToolGenAction(key string, action *AgentAction) {
 	if s.ToolGenActions == nil {
 		s.ToolGenActions = make(map[string]*AgentAction)
 	}
 	s.ToolGenActions[key] = action
 }
 
-func (s *TypedState[M]) popToolGenAction(key string) *AgentAction {
+func (s *typedState[M]) popToolGenAction(key string) *AgentAction {
 	if s.ToolGenActions == nil {
 		return nil
 	}
@@ -143,15 +137,15 @@ func (s *TypedState[M]) popToolGenAction(key string) *AgentAction {
 	return action
 }
 
-func (s *TypedState[M]) getRemainingIterations() int {
+func (s *typedState[M]) getRemainingIterations() int {
 	return s.RemainingIterations
 }
 
-func (s *TypedState[M]) setRemainingIterations(iterations int) {
+func (s *typedState[M]) setRemainingIterations(iterations int) {
 	s.RemainingIterations = iterations
 }
 
-func (s *TypedState[M]) decrementRemainingIterations() {
+func (s *typedState[M]) decrementRemainingIterations() {
 	current := s.getRemainingIterations()
 	s.RemainingIterations = current - 1
 }

@@ -226,7 +226,7 @@ func (r *typedRetryModelWrapper[M]) Stream(ctx context.Context, input []M, opts 
 	}
 
 	defer func() {
-		_ = compose.ProcessState(ctx, func(_ context.Context, st *TypedState[M]) error {
+		_ = compose.ProcessState(ctx, func(_ context.Context, st *typedState[M]) error {
 			st.setRetryAttempt(0)
 			return nil
 		})
@@ -234,7 +234,7 @@ func (r *typedRetryModelWrapper[M]) Stream(ctx context.Context, input []M, opts 
 
 	var lastErr error
 	for attempt := 0; attempt <= r.config.MaxRetries; attempt++ {
-		_ = compose.ProcessState(ctx, func(_ context.Context, st *TypedState[M]) error {
+		_ = compose.ProcessState(ctx, func(_ context.Context, st *typedState[M]) error {
 			st.setRetryAttempt(attempt)
 			return nil
 		})

@@ -308,7 +308,7 @@ func (m *typedEventSenderModel[M]) Stream(ctx context.Context, input []M, opts .
 	}
 
 	var retryAttempt int
-	_ = compose.ProcessState(ctx, func(_ context.Context, st *TypedState[M]) error {
+	_ = compose.ProcessState(ctx, func(_ context.Context, st *typedState[M]) error {
 		retryAttempt = st.getRetryAttempt()
 		return nil
 	})
@@ -350,7 +350,7 @@ func typedPopToolGenAction[M MessageType](ctx context.Context, toolName string) 
 	toolCallID := compose.GetToolCallID(ctx)
 
 	var action *AgentAction
-	_ = compose.ProcessState(ctx, func(ctx context.Context, st *TypedState[M]) error {
+	_ = compose.ProcessState(ctx, func(ctx context.Context, st *typedState[M]) error {
 		if len(toolCallID) > 0 {
 			if a := st.popToolGenAction(toolCallID); a != nil {
 				action = a
@@ -678,7 +678,7 @@ func (w *typedStateModelWrapper[M]) wrapStreamEndpoint(endpoint typedStreamEndpo
 
 func (w *typedStateModelWrapper[M]) Generate(ctx context.Context, input []M, opts ...model.Option) (M, error) {
 	var stateMessages []M
-	_ = compose.ProcessState(ctx, func(_ context.Context, st *TypedState[M]) error {
+	_ = compose.ProcessState(ctx, func(_ context.Context, st *typedState[M]) error {
 		stateMessages = st.Messages
 		return nil
 	})
@@ -717,7 +717,7 @@ func (w *typedStateModelWrapper[M]) Generate(ctx context.Context, input []M, opt
 		}
 	}
 
-	_ = compose.ProcessState(ctx, func(_ context.Context, st *TypedState[M]) error {
+	_ = compose.ProcessState(ctx, func(_ context.Context, st *typedState[M]) error {
 		st.Messages = state.Messages
 		return nil
 	})
@@ -758,7 +758,7 @@ func (w *typedStateModelWrapper[M]) Generate(ctx context.Context, input []M, opt
 		}
 	}
 
-	_ = compose.ProcessState(ctx, func(_ context.Context, st *TypedState[M]) error {
+	_ = compose.ProcessState(ctx, func(_ context.Context, st *typedState[M]) error {
 		st.Messages = state.Messages
 		return nil
 	})
@@ -772,7 +772,7 @@ func (w *typedStateModelWrapper[M]) Generate(ctx context.Context, input []M, opt
 
 func (w *typedStateModelWrapper[M]) Stream(ctx context.Context, input []M, opts ...model.Option) (*schema.StreamReader[M], error) {
 	var stateMessages []M
-	_ = compose.ProcessState(ctx, func(_ context.Context, st *TypedState[M]) error {
+	_ = compose.ProcessState(ctx, func(_ context.Context, st *typedState[M]) error {
 		stateMessages = st.Messages
 		return nil
 	})
@@ -808,7 +808,7 @@ func (w *typedStateModelWrapper[M]) Stream(ctx context.Context, input []M, opts 
 		}
 	}
 
-	_ = compose.ProcessState(ctx, func(_ context.Context, st *TypedState[M]) error {
+	_ = compose.ProcessState(ctx, func(_ context.Context, st *typedState[M]) error {
 		st.Messages = state.Messages
 		return nil
 	})
@@ -849,7 +849,7 @@ func (w *typedStateModelWrapper[M]) Stream(ctx context.Context, input []M, opts 
 		}
 	}
 
-	_ = compose.ProcessState(ctx, func(_ context.Context, st *TypedState[M]) error {
+	_ = compose.ProcessState(ctx, func(_ context.Context, st *typedState[M]) error {
 		st.Messages = state.Messages
 		return nil
 	})

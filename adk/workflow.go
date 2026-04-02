@@ -755,18 +755,3 @@ func NewLoopAgent(ctx context.Context, config *LoopAgentConfig) (ResumableAgent,
 func NewTypedLoopAgent[M MessageType](ctx context.Context, config *TypedLoopAgentConfig[M]) (TypedResumableAgent[M], error) {
 	return newTypedWorkflowAgent[M](ctx, config.Name, config.Description, config.SubAgents, workflowAgentModeLoop, config.MaxIterations)
 }
-
-// NewSequentialAgentFrom is a convenience constructor that creates a TypedSequentialAgent from the given sub-agents.
-func NewSequentialAgentFrom[M MessageType](ctx context.Context, subAgents []TypedAgent[M], conf *SequentialAgentConfig) (TypedResumableAgent[M], error) {
-	return newTypedWorkflowAgent[M](ctx, conf.Name, conf.Description, subAgents, workflowAgentModeSequential, 0)
-}
-
-// NewParallelAgentFrom is a convenience constructor that creates a TypedParallelAgent from the given sub-agents.
-func NewParallelAgentFrom[M MessageType](ctx context.Context, subAgents []TypedAgent[M], conf *ParallelAgentConfig) (TypedResumableAgent[M], error) {
-	return newTypedWorkflowAgent[M](ctx, conf.Name, conf.Description, subAgents, workflowAgentModeParallel, 0)
-}
-
-// NewLoopAgentFrom is a convenience constructor that creates a TypedLoopAgent from the given sub-agents.
-func NewLoopAgentFrom[M MessageType](ctx context.Context, subAgents []TypedAgent[M], conf *LoopAgentConfig) (TypedResumableAgent[M], error) {
-	return newTypedWorkflowAgent[M](ctx, conf.Name, conf.Description, subAgents, workflowAgentModeLoop, conf.MaxIterations)
-}

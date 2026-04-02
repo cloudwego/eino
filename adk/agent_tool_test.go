@@ -299,8 +299,8 @@ func TestGetReactHistory(t *testing.T) {
 }
 
 func TestGetAgenticReactHistory(t *testing.T) {
-	g := compose.NewGraph[string, []*schema.AgenticMessage](compose.WithGenLocalState(func(ctx context.Context) (state *TypedState[*schema.AgenticMessage]) {
-		return &TypedState[*schema.AgenticMessage]{
+	g := compose.NewGraph[string, []*schema.AgenticMessage](compose.WithGenLocalState(func(ctx context.Context) (state *typedState[*schema.AgenticMessage]) {
+		return &typedState[*schema.AgenticMessage]{
 			Messages: []*schema.AgenticMessage{
 				schema.UserAgenticMessage("user query"),
 				{

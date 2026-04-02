@@ -273,7 +273,7 @@ func TestAgenticReact_Stream(t *testing.T) {
 
 	agent := newAgenticAgent(t, ctx, mdl, []tool.BaseTool{&agenticEchoTool{name: "echo"}})
 	runner := NewTypedRunner[*schema.AgenticMessage](TypedRunnerConfig[*schema.AgenticMessage]{
-		Agent:          agent,
+		Agent:           agent,
 		EnableStreaming: true,
 	})
 

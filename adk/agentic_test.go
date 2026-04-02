@@ -1479,15 +1479,16 @@ func TestCascadingFrom_NewChatModelAgentFrom(t *testing.T) {
 		},
 	}
 
-	agent, err := NewChatModelAgentFrom(ctx, model.BaseModel[*schema.AgenticMessage](m), &ChatModelAgentConfig{
+	agent, err := NewTypedChatModelAgent[*schema.AgenticMessage](ctx, &TypedChatModelAgentConfig[*schema.AgenticMessage]{
 		Name:        "FromAgent",
 		Description: "Test cascading constructor",
 		Instruction: "Be helpful.",
+		Model:       m,
 	})
 	assert.NoError(t, err)
 	assert.Equal(t, "FromAgent", agent.Name(ctx))
 
-	runner := NewRunnerFrom(TypedAgent[*schema.AgenticMessage](agent))
+	runner := NewTypedRunner(TypedRunnerConfig[*schema.AgenticMessage]{Agent: agent})
 
 	iter := runner.Run(ctx, []*schema.AgenticMessage{
 		schema.UserAgenticMessage("Hello"),
@@ -1516,15 +1517,17 @@ func TestCascadingFrom_SetSubAgentsOf(t *testing.T) {
 		},
 	}
 
-	parent, err := NewChatModelAgentFrom(ctx, model.BaseModel[*schema.AgenticMessage](m), &ChatModelAgentConfig{
+	parent, err := NewTypedChatModelAgent[*schema.AgenticMessage](ctx, &TypedChatModelAgentConfig[*schema.AgenticMessage]{
 		Name:        "Parent",
 		Description: "Parent agent",
+		Model:       m,
 	})
 	assert.NoError(t, err)
 
-	child, err := NewChatModelAgentFrom(ctx, model.BaseModel[*schema.AgenticMessage](m), &ChatModelAgentConfig{
+	child, err := NewTypedChatModelAgent[*schema.AgenticMessage](ctx, &TypedChatModelAgentConfig[*schema.AgenticMessage]{
 		Name:        "Child",
 		Description: "Child agent",
+		Model:       m,
 	})
 	assert.NoError(t, err)
 
@@ -1552,9 +1555,10 @@ func TestCascadingFrom_WorkflowAgents(t *testing.T) {
 	makeSubs := func(names ...string) []TypedAgent[*schema.AgenticMessage] {
 		var agents []TypedAgent[*schema.AgenticMessage]
 		for _, name := range names {
-			a, err := NewChatModelAgentFrom(ctx, model.BaseModel[*schema.AgenticMessage](newModel()), &ChatModelAgentConfig{
+			a, err := NewTypedChatModelAgent[*schema.AgenticMessage](ctx, &TypedChatModelAgentConfig[*schema.AgenticMessage]{
 				Name:        name,
 				Description: name + " agent",
+				Model:       newModel(),
 			})
 			assert.NoError(t, err)
 			agents = append(agents, a)
@@ -1563,27 +1567,30 @@ func TestCascadingFrom_WorkflowAgents(t *testing.T) {
 	}
 
 	t.Run("SequentialFrom", func(t *testing.T) {
-		seq, err := NewSequentialAgentFrom(ctx, makeSubs("S1", "S2"), &SequentialAgentConfig{
+		seq, err := NewTypedSequentialAgent(ctx, &TypedSequentialAgentConfig[*schema.AgenticMessage]{
 			Name:        "SeqFrom",
 			Description: "Sequential from",
+			SubAgents:   makeSubs("S1", "S2"),
 		})
 		assert.NoError(t, err)
 		assert.NotNil(t, seq)
 	})
 
 	t.Run("ParallelFrom", func(t *testing.T) {
-		par, err := NewParallelAgentFrom(ctx, makeSubs("P1", "P2"), &ParallelAgentConfig{
+		par, err := NewTypedParallelAgent(ctx, &TypedParallelAgentConfig[*schema.AgenticMessage]{
 			Name:        "ParFrom",
 			Description: "Parallel from",
+			SubAgents:   makeSubs("P1", "P2"),
 		})
 		assert.NoError(t, err)
 		assert.NotNil(t, par)
 	})
 
 	t.Run("LoopFrom", func(t *testing.T) {
-		loop, err := NewLoopAgentFrom(ctx, makeSubs("L1", "L2"), &LoopAgentConfig{
+		loop, err := NewTypedLoopAgent(ctx, &TypedLoopAgentConfig[*schema.AgenticMessage]{
 			Name:          "LoopFrom",
 			Description:   "Loop from",
+			SubAgents:     makeSubs("L1", "L2"),
 			MaxIterations: 5,
 		})
 		assert.NoError(t, err)
@@ -1605,9 +1612,10 @@ func TestCascadingTyped_NewTypedAgentTool(t *testing.T) {
 		},
 	}
 
-	agent, err := NewChatModelAgentFrom(ctx, model.BaseModel[*schema.AgenticMessage](m), &ChatModelAgentConfig{
+	agent, err := NewTypedChatModelAgent[*schema.AgenticMessage](ctx, &TypedChatModelAgentConfig[*schema.AgenticMessage]{
 		Name:        "ToolAgent",
 		Description: "Agent wrapped as tool",
+		Model:       m,
 	})
 	assert.NoError(t, err)
 

@@ -360,7 +360,7 @@ func getReactChatHistory(ctx context.Context, destAgentName string) ([]Message, 
 
 func getAgenticReactChatHistory(ctx context.Context, destAgentName string) ([]*schema.AgenticMessage, error) {
 	var messages []*schema.AgenticMessage
-	err := compose.ProcessState(ctx, func(ctx context.Context, st *TypedState[*schema.AgenticMessage]) error {
+	err := compose.ProcessState(ctx, func(ctx context.Context, st *typedState[*schema.AgenticMessage]) error {
 		messages = make([]*schema.AgenticMessage, len(st.Messages)-1)
 		copy(messages, st.Messages[:len(st.Messages)-1])
 		return nil

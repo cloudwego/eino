@@ -101,11 +101,6 @@ func NewTypedRunner[M MessageType](conf TypedRunnerConfig[M]) *TypedRunner[M] {
 	}
 }
 
-// NewRunnerFrom is a convenience constructor that creates a TypedRunner from the given TypedAgent.
-func NewRunnerFrom[M MessageType](agent TypedAgent[M]) *TypedRunner[M] {
-	return NewTypedRunner[M](TypedRunnerConfig[M]{Agent: agent})
-}
-
 func (r *TypedRunner[M]) Run(ctx context.Context, messages []M,
 	opts ...AgentRunOption) *AsyncIterator[*TypedAgentEvent[M]] {
 	return typedRunnerRunImpl(r.a, r.enableStreaming, r.store, ctx, messages, opts...)
