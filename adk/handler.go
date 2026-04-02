@@ -347,7 +347,7 @@ func SendEvent(ctx context.Context, event *AgentEvent) error {
 	if execCtx == nil || execCtx.generator == nil {
 		return fmt.Errorf("SendEvent failed: must be called within a ChatModelAgent Run() or Resume() execution context")
 	}
-	execCtx.generator.Send(event)
+	execCtx.send(event)
 	return nil
 }
 
