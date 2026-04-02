@@ -32,35 +32,35 @@ import (
 // Use this to filter callback events to only agent-related events.
 const ComponentOfAgent components.Component = "Agent"
 
+// ComponentOfAgenticAgent is the component type identifier for ADK agents
+// that use *schema.AgenticMessage in callbacks.
+const ComponentOfAgenticAgent components.Component = "AgenticAgent"
+
+// MessageType is the type constraint for message types used in ADK.
+type MessageType interface {
+	*schema.Message | *schema.AgenticMessage
+}
+
 type Message = *schema.Message
 type MessageStream = *schema.StreamReader[Message]
 
-type MessageVariant struct {
+type TypedMessageVariant[M MessageType] struct {
 	IsStreaming bool
 
-	Message       Message
-	MessageStream MessageStream
-	// message role: Assistant or Tool
-	Role schema.RoleType
-	// only used when Role is Tool
-	ToolName string
+	Message       M
+	MessageStream *schema.StreamReader[M]
+	Role          schema.RoleType
+	ToolName      string
 }
 
-// EventFromMessage wraps a message or stream into an AgentEvent with role metadata.
-func EventFromMessage(msg Message, msgStream MessageStream,
-	role schema.RoleType, toolName string) *AgentEvent {
-	return &AgentEvent{
-		Output: &AgentOutput{
-			MessageOutput: &MessageVariant{
-				IsStreaming:   msgStream != nil,
-				Message:       msg,
-				MessageStream: msgStream,
-				Role:          role,
-				ToolName:      toolName,
-			},
-		},
+func (mv *TypedMessageVariant[M]) GetMessage() (M, error) {
+	if mv.IsStreaming {
+		return concatMessageStream(mv.MessageStream)
 	}
+	return mv.Message, nil
 }
+
+type MessageVariant = TypedMessageVariant[*schema.Message]
 
 type messageVariantSerialization struct {
 	IsStreaming   bool
@@ -70,7 +70,35 @@ type messageVariantSerialization struct {
 	ToolName      string
 }
 
-func (mv *MessageVariant) GobEncode() ([]byte, error) {
+type agenticMessageVariantSerialization struct {
+	IsStreaming   bool
+	Message       *schema.AgenticMessage
+	MessageStream *schema.AgenticMessage
+	Role          schema.RoleType
+	ToolName      string
+}
+
+func (mv *TypedMessageVariant[M]) GobEncode() ([]byte, error) {
+	if mvMsg, ok := any(mv).(*TypedMessageVariant[*schema.Message]); ok {
+		return gobEncodeMessageVariant(mvMsg)
+	}
+	if mvAgentic, ok := any(mv).(*TypedMessageVariant[*schema.AgenticMessage]); ok {
+		return gobEncodeAgenticMessageVariant(mvAgentic)
+	}
+	return nil, fmt.Errorf("gob encoding not supported for this message type")
+}
+
+func (mv *TypedMessageVariant[M]) GobDecode(b []byte) error {
+	if mvMsg, ok := any(mv).(*TypedMessageVariant[*schema.Message]); ok {
+		return gobDecodeMessageVariant(mvMsg, b)
+	}
+	if mvAgentic, ok := any(mv).(*TypedMessageVariant[*schema.AgenticMessage]); ok {
+		return gobDecodeAgenticMessageVariant(mvAgentic, b)
+	}
+	return fmt.Errorf("gob decoding not supported for this message type")
+}
+
+func gobEncodeMessageVariant(mv *TypedMessageVariant[*schema.Message]) ([]byte, error) {
 	s := &messageVariantSerialization{
 		IsStreaming: mv.IsStreaming,
 		Message:     mv.Message,
@@ -103,7 +131,7 @@ func (mv *MessageVariant) GobEncode() ([]byte, error) {
 	return buf.Bytes(), nil
 }
 
-func (mv *MessageVariant) GobDecode(b []byte) error {
+func gobDecodeMessageVariant(mv *TypedMessageVariant[*schema.Message], b []byte) error {
 	s := &messageVariantSerialization{}
 	err := gob.NewDecoder(bytes.NewReader(b)).Decode(s)
 	if err != nil {
@@ -119,30 +147,88 @@ func (mv *MessageVariant) GobDecode(b []byte) error {
 	return nil
 }
 
-func (mv *MessageVariant) GetMessage() (Message, error) {
-	var message Message
-	if mv.IsStreaming {
-		var err error
-		message, err = schema.ConcatMessageStream(mv.MessageStream)
-		if err != nil {
-			return nil, err
-		}
-	} else {
-		message = mv.Message
+func gobEncodeAgenticMessageVariant(mv *TypedMessageVariant[*schema.AgenticMessage]) ([]byte, error) {
+	s := &agenticMessageVariantSerialization{
+		IsStreaming: mv.IsStreaming,
+		Message:     mv.Message,
+		Role:        mv.Role,
+		ToolName:    mv.ToolName,
 	}
+	if mv.IsStreaming {
+		var messages []*schema.AgenticMessage
+		for {
+			frame, err := mv.MessageStream.Recv()
+			if err == io.EOF {
+				break
+			}
+			if err != nil {
+				return nil, fmt.Errorf("error receiving agentic message stream: %w", err)
+			}
+			messages = append(messages, frame)
+		}
+		m, err := schema.ConcatAgenticMessages(messages)
+		if err != nil {
+			return nil, fmt.Errorf("failed to encode agentic message: cannot concat message stream: %w", err)
+		}
+		s.MessageStream = m
+	}
+	buf := &bytes.Buffer{}
+	err := gob.NewEncoder(buf).Encode(s)
+	if err != nil {
+		return nil, fmt.Errorf("failed to gob encode agentic message variant: %w", err)
+	}
+	return buf.Bytes(), nil
+}
 
-	return message, nil
+func gobDecodeAgenticMessageVariant(mv *TypedMessageVariant[*schema.AgenticMessage], b []byte) error {
+	s := &agenticMessageVariantSerialization{}
+	err := gob.NewDecoder(bytes.NewReader(b)).Decode(s)
+	if err != nil {
+		return fmt.Errorf("failed to decode agentic message variant: %w", err)
+	}
+	mv.IsStreaming = s.IsStreaming
+	mv.Message = s.Message
+	mv.Role = s.Role
+	mv.ToolName = s.ToolName
+	if s.MessageStream != nil {
+		mv.MessageStream = schema.StreamReaderFromArray([]*schema.AgenticMessage{s.MessageStream})
+	}
+	return nil
+}
+
+// TypedEventFromMessage creates a TypedAgentEvent containing the given message and optional stream.
+func TypedEventFromMessage[M MessageType](msg M, msgStream *schema.StreamReader[M],
+	role schema.RoleType, toolName string) *TypedAgentEvent[M] {
+	return &TypedAgentEvent[M]{
+		Output: &TypedAgentOutput[M]{
+			MessageOutput: &TypedMessageVariant[M]{
+				IsStreaming:   msgStream != nil,
+				Message:       msg,
+				MessageStream: msgStream,
+				Role:          role,
+				ToolName:      toolName,
+			},
+		},
+	}
+}
+
+// EventFromMessage creates an AgentEvent containing the given message and optional stream.
+func EventFromMessage(msg Message, msgStream *schema.StreamReader[Message],
+	role schema.RoleType, toolName string) *AgentEvent {
+	return TypedEventFromMessage(msg, msgStream, role, toolName)
 }
 
 type TransferToAgentAction struct {
 	DestAgentName string
 }
 
-type AgentOutput struct {
-	MessageOutput *MessageVariant
+type TypedAgentOutput[M MessageType] struct {
+	MessageOutput *TypedMessageVariant[M]
 
 	CustomizedOutput any
 }
+
+type AgentOutput = TypedAgentOutput[*schema.Message]
 
 // NewTransferToAgentAction creates an action to transfer to the specified agent.
 func NewTransferToAgentAction(destAgentName string) *AgentAction {
@@ -220,8 +306,9 @@ type runStepSerialization struct {
 	AgentName string
 }
 
-// AgentEvent CheckpointSchema: persisted via serialization.RunCtx (gob).
-type AgentEvent struct {
+// TypedAgentEvent represents a single event emitted during agent execution.
+// CheckpointSchema: persisted via serialization.RunCtx (gob).
+type TypedAgentEvent[M MessageType] struct {
 	AgentName string
 
 	// RunPath represents the execution path from root agent to the current event source.
@@ -231,20 +318,30 @@ type AgentEvent struct {
 	// - agentTool prepends parent RunPath when forwarding events from nested agents
 	RunPath []RunStep
 
-	Output *AgentOutput
+	Output *TypedAgentOutput[M]
 
 	Action *AgentAction
 
 	Err error
 }
 
-type AgentInput struct {
-	Messages        []Message
+// AgentEvent is the default event type using *schema.Message.
+type AgentEvent = TypedAgentEvent[*schema.Message]
+
+type TypedAgentInput[M MessageType] struct {
+	Messages        []M
 	EnableStreaming bool
 }
 
-//go:generate  mockgen -destination ../internal/mock/adk/Agent_mock.go --package adk -source interface.go
-type Agent interface {
+type AgentInput = TypedAgentInput[*schema.Message]
+
+// TypedAgent is the base agent interface parameterized by message type.
+//
+// For M = *schema.Message, the full ADK feature set is supported (multi-agent
+// orchestration, cancel monitoring, retry, flowAgent).
+// For M = *schema.AgenticMessage, single-agent execution works but cancel
+// monitoring on the model stream and retry are not yet wired.
+type TypedAgent[M MessageType] interface {
 	Name(ctx context.Context) string
 	Description(ctx context.Context) string
 
@@ -254,18 +351,57 @@ type Agent interface {
 	// the MessageStream MUST be exclusive and safe to be received directly.
 	// NOTE: it's recommended to use SetAutomaticClose() on the MessageStream of AgentEvents emitted by AsyncIterator,
 	// so that even the events are not processed, the MessageStream can still be closed.
-	Run(ctx context.Context, input *AgentInput, options ...AgentRunOption) *AsyncIterator[*AgentEvent]
+	Run(ctx context.Context, input *TypedAgentInput[M], options ...AgentRunOption) *AsyncIterator[*TypedAgentEvent[M]]
 }
 
-type OnSubAgents interface {
-	OnSetSubAgents(ctx context.Context, subAgents []Agent) error
-	OnSetAsSubAgent(ctx context.Context, parent Agent) error
+//go:generate  mockgen -destination ../internal/mock/adk/Agent_mock.go --package adk github.com/cloudwego/eino/adk Agent,ResumableAgent
+type Agent = TypedAgent[*schema.Message]
+
+type TypedOnSubAgents[M MessageType] interface {
+	OnSetSubAgents(ctx context.Context, subAgents []TypedAgent[M]) error
+	OnSetAsSubAgent(ctx context.Context, parent TypedAgent[M]) error
 
 	OnDisallowTransferToParent(ctx context.Context) error
 }
 
-type ResumableAgent interface {
-	Agent
+// OnSubAgents is the concrete *schema.Message variant.
+type OnSubAgents = TypedOnSubAgents[*schema.Message]
 
-	Resume(ctx context.Context, info *ResumeInfo, opts ...AgentRunOption) *AsyncIterator[*AgentEvent]
+type TypedResumableAgent[M MessageType] interface {
+	TypedAgent[M]
+
+	Resume(ctx context.Context, info *ResumeInfo, opts ...AgentRunOption) *AsyncIterator[*TypedAgentEvent[M]]
+}
+
+type ResumableAgent = TypedResumableAgent[*schema.Message]
+
+func concatMessageStream[M MessageType](stream *schema.StreamReader[M]) (M, error) {
+	var zero M
+	switch s := any(stream).(type) {
+	case *schema.StreamReader[*schema.Message]:
+		result, err := schema.ConcatMessageStream(s)
+		if err != nil {
+			return zero, err
+		}
+		return any(result).(M), nil
+	case *schema.StreamReader[*schema.AgenticMessage]:
+		var msgs []*schema.AgenticMessage
+		for {
+			frame, err := s.Recv()
+			if err == io.EOF {
+				break
+			}
+			if err != nil {
+				return zero, err
+			}
+			msgs = append(msgs, frame)
+		}
+		result, err := schema.ConcatAgenticMessages(msgs)
+		if err != nil {
+			return zero, err
+		}
+		return any(result).(M), nil
+	default:
+		return zero, fmt.Errorf("unsupported message type for stream concatenation")
+	}
 }

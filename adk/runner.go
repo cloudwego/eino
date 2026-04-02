@@ -28,28 +28,54 @@ import (
 	"github.com/cloudwego/eino/schema"
 )
 
-// Runner is the primary entry point for executing an Agent.
-// It manages the agent's lifecycle, including starting, resuming, and checkpointing.
-type Runner struct {
-	// a is the agent to be executed.
-	a Agent
-	// enableStreaming dictates whether the execution should be in streaming mode.
-	enableStreaming bool
-	// store is the checkpoint store used to persist agent state upon interruption.
-	// If nil, checkpointing is disabled.
-	store CheckPointStore
+func errorIterator[M MessageType](err error) *AsyncIterator[*TypedAgentEvent[M]] {
+	iter, gen := NewAsyncIteratorPair[*TypedAgentEvent[M]]()
+	gen.Send(&TypedAgentEvent[M]{Err: err})
+	gen.Close()
+	return iter
 }
+
+func newUserMessage[M MessageType](query string) (M, error) {
+	var zero M
+	switch any(zero).(type) {
+	case *schema.Message:
+		return any(schema.UserMessage(query)).(M), nil
+	case *schema.AgenticMessage:
+		return any(schema.UserAgenticMessage(query)).(M), nil
+	default:
+		return zero, fmt.Errorf("unsupported message type %T", zero)
+	}
+}
+
+// TypedRunner is the primary entry point for executing an Agent.
+// It manages the agent's lifecycle, including starting, resuming, and checkpointing.
+//
+// For M = *schema.Message, execution goes through the full flowAgent pipeline
+// (multi-agent orchestration, message rewriting, etc.).
+// For other M types (e.g. *schema.AgenticMessage), the agent is called directly
+// without flowAgent wrapping.
+type TypedRunner[M MessageType] struct {
+	a               TypedAgent[M]
+	enableStreaming bool
+	store           CheckPointStore
+}
+
+// Runner is the default runner type using *schema.Message.
+type Runner = TypedRunner[*schema.Message]
 
 type CheckPointStore = core.CheckPointStore
 
 type CheckPointDeleter = core.CheckPointDeleter
 
-type RunnerConfig struct {
-	Agent           Agent
+type TypedRunnerConfig[M MessageType] struct {
+	Agent           TypedAgent[M]
 	EnableStreaming bool
 
 	CheckPointStore CheckPointStore
 }
+
+// RunnerConfig is the default runner config type using *schema.Message.
+type RunnerConfig = TypedRunnerConfig[*schema.Message]
 
 // ResumeParams contains all parameters needed to resume an execution.
 // This struct provides an extensible way to pass resume parameters without
@@ -61,52 +87,33 @@ type ResumeParams struct {
 	// Future extensible fields can be added here without breaking changes
 }
 
-// NewRunner creates a Runner that executes an Agent with optional streaming
-// and checkpoint persistence.
+// NewRunner creates a new Runner with the given config.
 func NewRunner(_ context.Context, conf RunnerConfig) *Runner {
-	return &Runner{
+	return NewTypedRunner[*schema.Message](conf)
+}
+
+// NewTypedRunner creates a new TypedRunner with the given config.
+func NewTypedRunner[M MessageType](conf TypedRunnerConfig[M]) *TypedRunner[M] {
+	return &TypedRunner[M]{
 		enableStreaming: conf.EnableStreaming,
 		a:               conf.Agent,
 		store:           conf.CheckPointStore,
 	}
 }
 
-// Run starts a new execution of the agent with a given set of messages.
-// It returns an iterator that yields agent events as they occur.
-// If the Runner was configured with a CheckPointStore, it will automatically save the agent's state
-// upon interruption.
-func (r *Runner) Run(ctx context.Context, messages []Message,
-	opts ...AgentRunOption) *AsyncIterator[*AgentEvent] {
-	o := getCommonOptions(nil, opts...)
-
-	fa := toFlowAgent(ctx, r.a)
-
-	input := &AgentInput{
-		Messages:        messages,
-		EnableStreaming: r.enableStreaming,
-	}
-
-	ctx = ctxWithNewRunCtx(ctx, input, o.sharedParentSession)
-
-	AddSessionValues(ctx, o.sessionValues)
-
-	iter := fa.Run(ctx, input, opts...)
-
-	if r.store == nil && o.cancelCtx == nil {
-		return iter
-	}
-
-	niter, gen := NewAsyncIteratorPair[*AgentEvent]()
-
-	go r.handleIter(ctx, iter, gen, o.checkPointID, o.cancelCtx)
-	return niter
+func (r *TypedRunner[M]) Run(ctx context.Context, messages []M,
+	opts ...AgentRunOption) *AsyncIterator[*TypedAgentEvent[M]] {
+	return typedRunnerRunImpl(r.a, r.enableStreaming, r.store, ctx, messages, opts...)
 }
 
 // Query is a convenience method that starts a new execution with a single user query string.
-func (r *Runner) Query(ctx context.Context,
-	query string, opts ...AgentRunOption) *AsyncIterator[*AgentEvent] {
-
-	return r.Run(ctx, []Message{schema.UserMessage(query)}, opts...)
+func (r *TypedRunner[M]) Query(ctx context.Context,
+	query string, opts ...AgentRunOption) *AsyncIterator[*TypedAgentEvent[M]] {
+	msgs, err := newUserMessage[M](query)
+	if err != nil {
+		return errorIterator[M](err)
+	}
+	return r.Run(ctx, []M{msgs}, opts...)
 }
 
 // Resume continues an interrupted execution from a checkpoint, using an "Implicit Resume All" strategy.
@@ -116,8 +123,8 @@ func (r *Runner) Query(ctx context.Context,
 // When using this method, all interrupted agents will receive `isResumeFlow = false` when they
 // call `GetResumeContext`, as no specific agent was targeted. This is suitable for the "Simple Confirmation"
 // pattern where an agent only needs to know `wasInterrupted` is true to continue.
-func (r *Runner) Resume(ctx context.Context, checkPointID string, opts ...AgentRunOption) (
-	*AsyncIterator[*AgentEvent], error) {
+func (r *TypedRunner[M]) Resume(ctx context.Context, checkPointID string, opts ...AgentRunOption) (
+	*AsyncIterator[*TypedAgentEvent[M]], error) {
 	return r.resumeInternal(ctx, checkPointID, nil, opts...)
 }
 
@@ -139,17 +146,58 @@ func (r *Runner) Resume(ctx context.Context, checkPointID string, opts ...AgentR
 //     execution. They act as conduits, allowing the resume signal to flow to their children. They will
 //     naturally re-interrupt if one of their interrupted children re-interrupts, as they receive the
 //     new `CompositeInterrupt` signal from them.
-func (r *Runner) ResumeWithParams(ctx context.Context, checkPointID string, params *ResumeParams, opts ...AgentRunOption) (*AsyncIterator[*AgentEvent], error) {
+func (r *TypedRunner[M]) ResumeWithParams(ctx context.Context, checkPointID string, params *ResumeParams, opts ...AgentRunOption) (*AsyncIterator[*TypedAgentEvent[M]], error) {
 	return r.resumeInternal(ctx, checkPointID, params.Targets, opts...)
 }
 
-func (r *Runner) resumeInternal(ctx context.Context, checkPointID string, resumeData map[string]any,
-	opts ...AgentRunOption) (*AsyncIterator[*AgentEvent], error) {
-	if r.store == nil {
+func (r *TypedRunner[M]) resumeInternal(ctx context.Context, checkPointID string, resumeData map[string]any,
+	opts ...AgentRunOption) (*AsyncIterator[*TypedAgentEvent[M]], error) {
+	return typedRunnerResumeInternalImpl(r.a, r.enableStreaming, r.store, ctx, checkPointID, resumeData, opts...)
+}
+
+func typedRunnerRunImpl[M MessageType](a TypedAgent[M], enableStreaming bool, store CheckPointStore, ctx context.Context, messages []M, opts ...AgentRunOption) *AsyncIterator[*TypedAgentEvent[M]] {
+	o := getCommonOptions(nil, opts...)
+
+	fa := toTypedFlowAgent(ctx, a)
+	if store != nil {
+		fa.checkPointStore = store
+	}
+
+	input := &TypedAgentInput[M]{
+		Messages:        messages,
+		EnableStreaming: enableStreaming,
+	}
+
+	ctx = ctxWithNewTypedRunCtx(ctx, input, o.sharedParentSession)
+
+	AddSessionValues(ctx, o.sessionValues)
+
+	iter := fa.Run(ctx, input, opts...)
+
+	if store == nil && o.cancelCtx == nil {
+		return iter
+	}
+
+	niter, gen := NewAsyncIteratorPair[*TypedAgentEvent[M]]()
+
+	go typedRunnerHandleIterImpl(enableStreaming, store, ctx, iter, gen, o.checkPointID, o.cancelCtx)
+	return niter
+}
+
+func typedRunnerResumeInternalImpl[M MessageType](a TypedAgent[M], enableStreaming bool, store CheckPointStore, ctx context.Context, checkPointID string, resumeData map[string]any, //nolint:revive // argument-limit
+	opts ...AgentRunOption) (*AsyncIterator[*TypedAgentEvent[M]], error) {
+	if store == nil {
 		return nil, fmt.Errorf("failed to resume: store is nil")
 	}
 
-	ctx, runCtx, resumeInfo, err := r.loadCheckPoint(ctx, checkPointID)
+	fa := toTypedFlowAgent(ctx, a)
+
+	ra, ok := TypedAgent[M](fa).(TypedResumableAgent[M])
+	if !ok {
+		return nil, fmt.Errorf("agent %T does not support resume", a)
+	}
+
+	ctx, runCtx, resumeInfo, err := runnerLoadCheckPointImpl(store, ctx, checkPointID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to load from checkpoint: %w", err)
 	}
@@ -177,27 +225,21 @@ func (r *Runner) resumeInternal(ctx context.Context, checkPointID string, resume
 		ctx = core.BatchResumeWithData(ctx, resumeData)
 	}
 
-	fa := toFlowAgent(ctx, r.a)
+	aIter := ra.Resume(ctx, resumeInfo, opts...)
 
-	aIter := fa.Resume(ctx, resumeInfo, opts...)
+	niter, gen := NewAsyncIteratorPair[*TypedAgentEvent[M]]()
 
-	if r.store == nil && o.cancelCtx == nil {
-		return aIter, nil
-	}
-
-	niter, gen := NewAsyncIteratorPair[*AgentEvent]()
-
-	go r.handleIter(ctx, aIter, gen, &checkPointID, o.cancelCtx)
+	go typedRunnerHandleIterImpl(enableStreaming, store, ctx, aIter, gen, &checkPointID, o.cancelCtx)
 	return niter, nil
 }
 
-func (r *Runner) handleIter(ctx context.Context, aIter *AsyncIterator[*AgentEvent],
-	gen *AsyncGenerator[*AgentEvent], checkPointID *string, cancelCtx *cancelContext) {
+func typedRunnerHandleIterImpl[M MessageType](enableStreaming bool, store CheckPointStore, ctx context.Context, aIter *AsyncIterator[*TypedAgentEvent[M]], //nolint:revive // argument-limit
+	gen *AsyncGenerator[*TypedAgentEvent[M]], checkPointID *string, cancelCtx *cancelContext) {
 	defer func() {
 		panicErr := recover()
 		if panicErr != nil {
 			e := safe.NewPanicErr(panicErr, debug.Stack())
-			gen.Send(&AgentEvent{Err: e})
+			gen.Send(&TypedAgentEvent[M]{Err: e})
 		}
 
 		gen.Close()
@@ -221,9 +263,9 @@ func (r *Runner) handleIter(ctx context.Context, aIter *AsyncIterator[*AgentEven
 				if cancelErr.interruptSignal != nil && checkPointID != nil {
 					cancelErr.CheckPointID = *checkPointID
 					cancelErr.InterruptContexts = core.ToInterruptContexts(cancelErr.interruptSignal, allowedAddressSegmentTypes)
-					err := r.saveCheckPoint(ctx, *checkPointID, &InterruptInfo{}, cancelErr.interruptSignal)
+					err := runnerSaveCheckPointImpl(enableStreaming, store, ctx, *checkPointID, &InterruptInfo{}, cancelErr.interruptSignal)
 					if err != nil {
-						gen.Send(&AgentEvent{Err: fmt.Errorf("failed to save checkpoint on cancel: %w", err)})
+						gen.Send(&TypedAgentEvent[M]{Err: fmt.Errorf("failed to save checkpoint on cancel: %w", err)})
 					}
 				}
 				gen.Send(event)
@@ -233,14 +275,11 @@ func (r *Runner) handleIter(ctx context.Context, aIter *AsyncIterator[*AgentEven
 
 		if event.Action != nil && event.Action.internalInterrupted != nil {
 			if interruptSignal != nil {
-				// even if multiple interrupt happens, they should be merged into one
-				// action by CompositeInterrupt, so here in Runner we must assume at most
-				// one interrupt action happens
 				panic("multiple interrupt actions should not happen in Runner")
 			}
 			interruptSignal = event.Action.internalInterrupted
 			interruptContexts := core.ToInterruptContexts(interruptSignal, allowedAddressSegmentTypes)
-			event = &AgentEvent{
+			event = &TypedAgentEvent[M]{
 				AgentName: event.AgentName,
 				RunPath:   event.RunPath,
 				Output:    event.Output,
@@ -255,12 +294,11 @@ func (r *Runner) handleIter(ctx context.Context, aIter *AsyncIterator[*AgentEven
 			legacyData = event.Action.Interrupted.Data
 
 			if checkPointID != nil {
-				// save checkpoint first before sending interrupt event, so when end-user receives interrupt event, they can resume from this checkpoint
-				err := r.saveCheckPoint(ctx, *checkPointID, &InterruptInfo{
+				err := runnerSaveCheckPointImpl(enableStreaming, store, ctx, *checkPointID, &InterruptInfo{
 					Data: legacyData,
 				}, interruptSignal)
 				if err != nil {
-					gen.Send(&AgentEvent{Err: fmt.Errorf("failed to save checkpoint: %w", err)})
+					gen.Send(&TypedAgentEvent[M]{Err: fmt.Errorf("failed to save checkpoint: %w", err)})
 				}
 			}
 		}

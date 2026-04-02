@@ -31,30 +31,36 @@ import (
 	"github.com/cloudwego/eino/schema"
 )
 
-type HistoryEntry struct {
+type TypedHistoryEntry[M MessageType] struct {
 	IsUserInput bool
 	AgentName   string
-	Message     Message
+	Message     M
 }
 
-type HistoryRewriter func(ctx context.Context, entries []*HistoryEntry) ([]Message, error)
+type HistoryEntry = TypedHistoryEntry[*schema.Message]
 
-type flowAgent struct {
-	Agent
+type TypedHistoryRewriter[M MessageType] func(ctx context.Context, entries []*TypedHistoryEntry[M]) ([]M, error)
 
-	subAgents   []*flowAgent
-	parentAgent *flowAgent
+type HistoryRewriter = TypedHistoryRewriter[*schema.Message]
+
+type typedFlowAgent[M MessageType] struct {
+	TypedAgent[M]
+
+	subAgents   []*typedFlowAgent[M]
+	parentAgent *typedFlowAgent[M]
 
 	disallowTransferToParent bool
-	historyRewriter          HistoryRewriter
+	historyRewriter          TypedHistoryRewriter[M]
 
 	checkPointStore compose.CheckPointStore
 }
 
-func (a *flowAgent) deepCopy() *flowAgent {
-	ret := &flowAgent{
-		Agent:                    a.Agent,
-		subAgents:                make([]*flowAgent, 0, len(a.subAgents)),
+type flowAgent = typedFlowAgent[*schema.Message]
+
+func (a *typedFlowAgent[M]) deepCopy() *typedFlowAgent[M] {
+	ret := &typedFlowAgent[M]{
+		TypedAgent:               a.TypedAgent,
+		subAgents:                make([]*typedFlowAgent[M], 0, len(a.subAgents)),
 		parentAgent:              a.parentAgent,
 		disallowTransferToParent: a.disallowTransferToParent,
 		historyRewriter:          a.historyRewriter,
@@ -72,27 +78,39 @@ func SetSubAgents(ctx context.Context, agent Agent, subAgents []Agent) (Resumabl
 	return setSubAgents(ctx, agent, subAgents)
 }
 
-type AgentOption func(options *flowAgent)
+type TypedAgentOption[M MessageType] func(options *typedFlowAgent[M])
+
+type AgentOption = TypedAgentOption[*schema.Message]
 
 // WithDisallowTransferToParent prevents a sub-agent from transferring to its parent.
 func WithDisallowTransferToParent() AgentOption {
-	return func(fa *flowAgent) {
+	return TypedWithDisallowTransferToParent[*schema.Message]()
+}
+
+// TypedWithDisallowTransferToParent prevents a typed sub-agent from transferring to its parent.
+func TypedWithDisallowTransferToParent[M MessageType]() TypedAgentOption[M] {
+	return func(fa *typedFlowAgent[M]) {
 		fa.disallowTransferToParent = true
 	}
 }
 
 // WithHistoryRewriter sets a rewriter to transform conversation history.
 func WithHistoryRewriter(h HistoryRewriter) AgentOption {
-	return func(fa *flowAgent) {
+	return TypedWithHistoryRewriter[*schema.Message](h)
+}
+
+// TypedWithHistoryRewriter sets a typed rewriter to transform conversation history.
+func TypedWithHistoryRewriter[M MessageType](h TypedHistoryRewriter[M]) TypedAgentOption[M] {
+	return func(fa *typedFlowAgent[M]) {
 		fa.historyRewriter = h
 	}
 }
 
-func toFlowAgent(ctx context.Context, agent Agent, opts ...AgentOption) *flowAgent {
-	var fa *flowAgent
+func toTypedFlowAgent[M MessageType](ctx context.Context, agent TypedAgent[M], opts ...TypedAgentOption[M]) *typedFlowAgent[M] {
+	var fa *typedFlowAgent[M]
 	var ok bool
-	if fa, ok = agent.(*flowAgent); !ok {
-		fa = &flowAgent{Agent: agent}
+	if fa, ok = agent.(*typedFlowAgent[M]); !ok {
+		fa = &typedFlowAgent[M]{TypedAgent: agent}
 	} else {
 		fa = fa.deepCopy()
 	}
@@ -101,10 +119,14 @@ func toFlowAgent(ctx context.Context, agent Agent, opts ...AgentOption) *flowAge
 	}
 
 	if fa.historyRewriter == nil {
-		fa.historyRewriter = buildDefaultHistoryRewriter(agent.Name(ctx))
+		fa.historyRewriter = buildTypedDefaultHistoryRewriter[M](agent.Name(ctx))
 	}
 
 	return fa
+}
+
+func toFlowAgent(ctx context.Context, agent Agent, opts ...AgentOption) *flowAgent {
+	return toTypedFlowAgent(ctx, agent, opts...)
 }
 
 // AgentWithOptions wraps an agent with flow-specific options and returns it.
@@ -112,14 +134,19 @@ func AgentWithOptions(ctx context.Context, agent Agent, opts ...AgentOption) Age
 	return toFlowAgent(ctx, agent, opts...)
 }
 
-func setSubAgents(ctx context.Context, agent Agent, subAgents []Agent) (*flowAgent, error) {
-	fa := toFlowAgent(ctx, agent)
+// TypedSetSubAgents sets the sub-agents for a typed agent and returns the resulting TypedResumableAgent.
+func TypedSetSubAgents[M MessageType](ctx context.Context, agent TypedAgent[M], subAgents []TypedAgent[M]) (TypedResumableAgent[M], error) {
+	return typedSetSubAgents(ctx, agent, subAgents)
+}
+
+func typedSetSubAgents[M MessageType](ctx context.Context, agent TypedAgent[M], subAgents []TypedAgent[M]) (*typedFlowAgent[M], error) {
+	fa := toTypedFlowAgent(ctx, agent)
 
 	if len(fa.subAgents) > 0 {
 		return nil, errors.New("agent's sub-agents has already been set")
 	}
 
-	if onAgent, ok_ := fa.Agent.(OnSubAgents); ok_ {
+	if onAgent, ok_ := fa.TypedAgent.(TypedOnSubAgents[M]); ok_ {
 		err := onAgent.OnSetSubAgents(ctx, subAgents)
 		if err != nil {
 			return nil, err
@@ -127,14 +154,14 @@ func setSubAgents(ctx context.Context, agent Agent, subAgents []Agent) (*flowAge
 	}
 
 	for _, s := range subAgents {
-		fsa := toFlowAgent(ctx, s)
+		fsa := toTypedFlowAgent(ctx, s)
 
 		if fsa.parentAgent != nil {
 			return nil, errors.New("agent has already been set as a sub-agent of another agent")
 		}
 
 		fsa.parentAgent = fa
-		if onAgent, ok__ := fsa.Agent.(OnSubAgents); ok__ {
+		if onAgent, ok__ := fsa.TypedAgent.(TypedOnSubAgents[M]); ok__ {
 			err := onAgent.OnSetAsSubAgent(ctx, agent)
 			if err != nil {
 				return nil, err
@@ -154,7 +181,11 @@ func setSubAgents(ctx context.Context, agent Agent, subAgents []Agent) (*flowAge
 	return fa, nil
 }
 
-func (a *flowAgent) getAgent(ctx context.Context, name string) *flowAgent {
+func setSubAgents(ctx context.Context, agent Agent, subAgents []Agent) (*flowAgent, error) {
+	return typedSetSubAgents(ctx, agent, subAgents)
+}
+
+func (a *typedFlowAgent[M]) getAgent(ctx context.Context, name string) *typedFlowAgent[M] {
 	for _, subAgent := range a.subAgents {
 		if subAgent.Name(ctx) == name {
 			return subAgent
@@ -235,53 +266,148 @@ func rewriteMessage(msg Message, agentName string) Message {
 	return rewritten
 }
 
-func genMsg(entry *HistoryEntry, agentName string) (Message, error) {
-	msg := entry.Message
-	if entry.AgentName != agentName {
-		msg = rewriteMessage(msg, entry.AgentName)
+func rewriteAgenticMessage(msg *schema.AgenticMessage, agentName string) *schema.AgenticMessage {
+	var sb strings.Builder
+	sb.WriteString("For context:")
+
+	if msg.Role == schema.AgenticRoleTypeAssistant {
+		for _, block := range msg.ContentBlocks {
+			if block == nil {
+				continue
+			}
+			if block.Type == schema.ContentBlockTypeAssistantGenText && block.AssistantGenText != nil {
+				sb.WriteString(fmt.Sprintf(" [%s] said: %s.", agentName, block.AssistantGenText.Text))
+			}
+			if block.Type == schema.ContentBlockTypeFunctionToolCall && block.FunctionToolCall != nil {
+				sb.WriteString(fmt.Sprintf(" [%s] called tool: `%s` with arguments: %s.",
+					agentName, block.FunctionToolCall.Name, block.FunctionToolCall.Arguments))
+			}
+		}
+	} else if msg.Role == schema.AgenticRoleTypeUser {
+		for _, block := range msg.ContentBlocks {
+			if block == nil {
+				continue
+			}
+			if block.Type == schema.ContentBlockTypeFunctionToolResult && block.FunctionToolResult != nil {
+				sb.WriteString(fmt.Sprintf(" [%s] `%s` tool returned result: %s.",
+					agentName, block.FunctionToolResult.Name, block.FunctionToolResult.Result))
+			}
+		}
 	}
 
+	rewritten := schema.UserAgenticMessage(sb.String())
+
+	for _, block := range msg.ContentBlocks {
+		if block == nil {
+			continue
+		}
+		switch block.Type {
+		case schema.ContentBlockTypeUserInputText,
+			schema.ContentBlockTypeUserInputImage,
+			schema.ContentBlockTypeUserInputAudio,
+			schema.ContentBlockTypeUserInputVideo,
+			schema.ContentBlockTypeUserInputFile:
+			copied := *block
+			rewritten.ContentBlocks = append(rewritten.ContentBlocks, &copied)
+		}
+	}
+
+	return rewritten
+}
+
+func typedRewriteMessage[M MessageType](msg M, agentName string) M {
+	switch v := any(msg).(type) {
+	case *schema.Message:
+		return any(rewriteMessage(v, agentName)).(M)
+	case *schema.AgenticMessage:
+		return any(rewriteAgenticMessage(v, agentName)).(M)
+	default:
+		return msg
+	}
+}
+
+func typedGenMsg[M MessageType](entry *TypedHistoryEntry[M], agentName string) (M, error) {
+	msg := entry.Message
+	if entry.AgentName != agentName {
+		msg = typedRewriteMessage(msg, entry.AgentName)
+	}
 	return msg, nil
 }
 
-func (ai *AgentInput) deepCopy() *AgentInput {
-	copied := &AgentInput{
-		Messages:        make([]Message, len(ai.Messages)),
+func typedDeepCopyAgentInput[M MessageType](ai *TypedAgentInput[M]) *TypedAgentInput[M] {
+	copied := &TypedAgentInput[M]{
+		Messages:        make([]M, len(ai.Messages)),
 		EnableStreaming: ai.EnableStreaming,
 	}
-
 	copy(copied.Messages, ai.Messages)
-
 	return copied
 }
 
-func (a *flowAgent) genAgentInput(ctx context.Context, runCtx *runContext, skipTransferMessages bool) (*AgentInput, error) {
-	input := runCtx.RootInput.deepCopy()
+func isToolResultEvent[M MessageType](event *typedAgentEventWrapper[M]) bool {
+	var zero M
+	switch any(zero).(type) {
+	case *schema.Message:
+		e := any(event.event).(*AgentEvent)
+		return e.Output != nil &&
+			e.Output.MessageOutput != nil &&
+			e.Output.MessageOutput.Role == schema.Tool
+	case *schema.AgenticMessage:
+		e := any(event.event).(*TypedAgentEvent[*schema.AgenticMessage])
+		if e.Output == nil || e.Output.MessageOutput == nil {
+			return false
+		}
+		mv := e.Output.MessageOutput
+		var msg *schema.AgenticMessage
+		if mv.IsStreaming {
+			return false
+		}
+		msg = mv.Message
+		if msg == nil {
+			return false
+		}
+		for _, block := range msg.ContentBlocks {
+			if block != nil && block.Type == schema.ContentBlockTypeFunctionToolResult {
+				return true
+			}
+		}
+		return false
+	default:
+		return false
+	}
+}
 
-	events := runCtx.Session.getEvents()
-	historyEntries := make([]*HistoryEntry, 0)
+func (a *typedFlowAgent[M]) genAgentInput(ctx context.Context, runCtx *runContext, skipTransferMessages bool) (*TypedAgentInput[M], error) {
+	var input *TypedAgentInput[M]
+	var zero M
+	if _, ok := any(zero).(*schema.Message); ok {
+		input = typedDeepCopyAgentInput(any(runCtx.RootInput).(*TypedAgentInput[M]))
+	} else {
+		if ri, ok := runCtx.TypedRootInput.(*TypedAgentInput[M]); ok {
+			input = typedDeepCopyAgentInput(ri)
+		} else {
+			input = &TypedAgentInput[M]{}
+		}
+	}
+
+	events := getTypedEvents[M](runCtx.Session)
+	historyEntries := make([]*TypedHistoryEntry[M], 0)
 
 	for _, m := range input.Messages {
-		historyEntries = append(historyEntries, &HistoryEntry{
+		historyEntries = append(historyEntries, &TypedHistoryEntry[M]{
 			IsUserInput: true,
 			Message:     m,
 		})
 	}
 
 	for _, event := range events {
-		if skipTransferMessages && event.Action != nil && event.Action.TransferToAgent != nil {
-			// If skipTransferMessages is true and the event contain transfer action, the message in this event won't be appended to history entries.
-			if event.Output != nil &&
-				event.Output.MessageOutput != nil &&
-				event.Output.MessageOutput.Role == schema.Tool &&
-				len(historyEntries) > 0 {
-				// If the skipped message's role is Tool, remove the previous history entry as it's also a transfer message(from ChatModelAgent and GenTransferMessages).
+		if skipTransferMessages && event.event.Action != nil && event.event.Action.TransferToAgent != nil {
+			if isToolResultEvent(event) && len(historyEntries) > 0 {
 				historyEntries = historyEntries[:len(historyEntries)-1]
 			}
 			continue
 		}
 
-		msg, err := getMessageFromWrappedEvent(event)
+		msg, err := getMessageFromTypedWrappedEvent(event)
 		if err != nil {
 			var retryErr *WillRetryError
 			if errors.As(err, &retryErr) {
@@ -291,12 +417,12 @@ func (a *flowAgent) genAgentInput(ctx context.Context, runCtx *runContext, skipT
 			return nil, err
 		}
 
-		if msg == nil {
+		if any(msg) == any(zero) {
 			continue
 		}
 
-		historyEntries = append(historyEntries, &HistoryEntry{
-			AgentName: event.AgentName,
+		historyEntries = append(historyEntries, &TypedHistoryEntry[M]{
+			AgentName: event.event.AgentName,
 			Message:   msg,
 		})
 	}
@@ -310,20 +436,21 @@ func (a *flowAgent) genAgentInput(ctx context.Context, runCtx *runContext, skipT
 	return input, nil
 }
 
-func buildDefaultHistoryRewriter(agentName string) HistoryRewriter {
-	return func(ctx context.Context, entries []*HistoryEntry) ([]Message, error) {
-		messages := make([]Message, 0, len(entries))
+func buildTypedDefaultHistoryRewriter[M MessageType](agentName string) TypedHistoryRewriter[M] {
+	return func(ctx context.Context, entries []*TypedHistoryEntry[M]) ([]M, error) {
+		messages := make([]M, 0, len(entries))
 		var err error
 		for _, entry := range entries {
 			msg := entry.Message
 			if !entry.IsUserInput {
-				msg, err = genMsg(entry, agentName)
+				msg, err = typedGenMsg(entry, agentName)
 				if err != nil {
 					return nil, fmt.Errorf("gen agent input failed: %w", err)
 				}
 			}
 
-			if msg != nil {
+			var zero M
+			if any(msg) != any(zero) {
 				messages = append(messages, msg)
 			}
 		}
@@ -332,11 +459,21 @@ func buildDefaultHistoryRewriter(agentName string) HistoryRewriter {
 	}
 }
 
-func (a *flowAgent) Run(ctx context.Context, input *AgentInput, opts ...AgentRunOption) *AsyncIterator[*AgentEvent] {
+func getTypedAgentType[M MessageType](agent TypedAgent[M]) string {
+	if msgAgent, ok := any(agent).(Agent); ok {
+		return getAgentType(msgAgent)
+	}
+	if typer, ok := any(agent).(interface{ GetType() string }); ok {
+		return typer.GetType()
+	}
+	return ""
+}
+
+func (a *typedFlowAgent[M]) Run(ctx context.Context, input *TypedAgentInput[M], opts ...AgentRunOption) *AsyncIterator[*TypedAgentEvent[M]] {
 	agentName := a.Name(ctx)
 
 	var runCtx *runContext
-	ctx, runCtx = initRunCtx(ctx, agentName, input)
+	ctx, runCtx = initTypedRunCtx(ctx, agentName, input)
 	ctx = AppendAddressSegment(ctx, AddressSegmentAgent, agentName)
 
 	o := getCommonOptions(nil, opts...)
@@ -347,38 +484,52 @@ func (a *flowAgent) Run(ctx context.Context, input *AgentInput, opts ...AgentRun
 		if cancelCtx != nil {
 			cancelCtx.markDone()
 		}
-		cbInput := &AgentCallbackInput{Input: input}
+		var zero M
+		if _, ok := any(zero).(*schema.Message); ok {
+			cbInput := &AgentCallbackInput{Input: any(input).(*AgentInput)}
+			ctx = callbacks.OnStart(ctx, cbInput)
+			return any(wrapIterWithOnEnd(ctx, genErrorIter(err))).(*AsyncIterator[*TypedAgentEvent[M]])
+		}
+		cbInput := &AgenticCallbackInput{Input: any(input).(*TypedAgentInput[*schema.AgenticMessage])}
 		ctx = callbacks.OnStart(ctx, cbInput)
-		return wrapIterWithOnEnd(ctx, genErrorIter(err))
+		return any(wrapAgenticIterWithOnEnd(ctx, genAgenticErrorIter(err))).(*AsyncIterator[*TypedAgentEvent[M]])
 	}
 
 	ctxForSubAgents := ctx
 
-	agentType := getAgentType(a.Agent)
-	ctx = initAgentCallbacks(ctx, agentName, agentType, filterOptions(agentName, opts)...)
-	cbInput := &AgentCallbackInput{Input: processedInput}
-	ctx = callbacks.OnStart(ctx, cbInput)
+	var zero M
+	if _, ok := any(zero).(*schema.Message); ok {
+		agentType := getTypedAgentType(a.TypedAgent)
+		ctx = initAgentCallbacks(ctx, agentName, agentType, filterOptions(agentName, opts)...)
+		cbInput := &AgentCallbackInput{Input: any(processedInput).(*AgentInput)}
+		ctx = callbacks.OnStart(ctx, cbInput)
+	} else {
+		agentType := getTypedAgentType(a.TypedAgent)
+		ctx = initAgenticCallbacks(ctx, agentName, agentType, filterOptions(agentName, opts)...)
+		cbInput := &AgenticCallbackInput{Input: any(processedInput).(*TypedAgentInput[*schema.AgenticMessage])}
+		ctx = callbacks.OnStart(ctx, cbInput)
+	}
 
 	input = processedInput
 
-	if wf, ok := a.Agent.(*workflowAgent); ok {
+	if wf, ok := a.TypedAgent.(*typedWorkflowAgent[M]); ok {
 		ctx = withCancelContext(ctx, cancelCtx)
 		filteredOpts := filterCancelOption(filterCallbackHandlersForNestedAgents(agentName, opts))
 		iter := wf.Run(ctx, input, filteredOpts...)
 		iter = wrapIterWithCancelCtx(iter, cancelCtx)
-		return wrapIterWithOnEnd(ctx, iter)
+		return typedWrapIterWithOnEnd(ctx, iter)
 	}
 
-	aIter := a.Agent.Run(withCancelContext(ctx, cancelCtx), input, filterOptions(agentName, opts)...)
+	aIter := a.TypedAgent.Run(withCancelContext(ctx, cancelCtx), input, filterOptions(agentName, opts)...)
 
-	iterator, generator := NewAsyncIteratorPair[*AgentEvent]()
+	iterator, generator := NewAsyncIteratorPair[*TypedAgentEvent[M]]()
 
 	go a.run(withCancelContext(ctx, cancelCtx), withCancelContext(ctxForSubAgents, cancelCtx), runCtx, aIter, generator, filterCancelOption(opts)...)
 
 	return wrapIterWithCancelCtx(iterator, cancelCtx)
 }
 
-func (a *flowAgent) Resume(ctx context.Context, info *ResumeInfo, opts ...AgentRunOption) *AsyncIterator[*AgentEvent] {
+func (a *typedFlowAgent[M]) Resume(ctx context.Context, info *ResumeInfo, opts ...AgentRunOption) *AsyncIterator[*TypedAgentEvent[M]] {
 	agentName := a.Name(ctx)
 
 	ctx, info = buildResumeInfo(ctx, agentName, info)
@@ -388,24 +539,32 @@ func (a *flowAgent) Resume(ctx context.Context, info *ResumeInfo, opts ...AgentR
 	o := getCommonOptions(nil, opts...)
 	cancelCtx := o.cancelCtx
 
-	agentType := getAgentType(a.Agent)
-	ctx = initAgentCallbacks(ctx, agentName, agentType, filterOptions(agentName, opts)...)
-	cbInput := &AgentCallbackInput{ResumeInfo: info}
-	ctx = callbacks.OnStart(ctx, cbInput)
+	var zero M
+	if _, ok := any(zero).(*schema.Message); ok {
+		agentType := getTypedAgentType(a.TypedAgent)
+		ctx = initAgentCallbacks(ctx, agentName, agentType, filterOptions(agentName, opts)...)
+		cbInput := &AgentCallbackInput{ResumeInfo: info}
+		ctx = callbacks.OnStart(ctx, cbInput)
+	} else {
+		agentType := getTypedAgentType(a.TypedAgent)
+		ctx = initAgenticCallbacks(ctx, agentName, agentType, filterOptions(agentName, opts)...)
+		cbInput := &AgenticCallbackInput{ResumeInfo: info}
+		ctx = callbacks.OnStart(ctx, cbInput)
+	}
 
 	if info.WasInterrupted {
-		if ra, ok := a.Agent.(ResumableAgent); ok {
-			if _, ok := ra.(*workflowAgent); ok {
+		if ra, ok := a.TypedAgent.(TypedResumableAgent[M]); ok {
+			if _, ok := ra.(*typedWorkflowAgent[M]); ok {
 				ctx = withCancelContext(ctx, cancelCtx)
 				filteredOpts := filterCancelOption(filterCallbackHandlersForNestedAgents(agentName, opts))
 				aIter := ra.Resume(ctx, info, filteredOpts...)
 				aIter = wrapIterWithCancelCtx(aIter, cancelCtx)
-				return wrapIterWithOnEnd(ctx, aIter)
+				return typedWrapIterWithOnEnd(ctx, aIter)
 			}
 
 			aIter := ra.Resume(withCancelContext(ctx, cancelCtx), info, opts...)
 
-			iterator, generator := NewAsyncIteratorPair[*AgentEvent]()
+			iterator, generator := NewAsyncIteratorPair[*TypedAgentEvent[M]]()
 			go a.run(withCancelContext(ctx, cancelCtx), withCancelContext(ctxForSubAgents, cancelCtx), getRunCtx(ctxForSubAgents), aIter, generator, filterCancelOption(opts)...)
 			return wrapIterWithCancelCtx(iterator, cancelCtx)
 		}
@@ -413,7 +572,7 @@ func (a *flowAgent) Resume(ctx context.Context, info *ResumeInfo, opts ...AgentR
 		if cancelCtx != nil {
 			cancelCtx.markDone()
 		}
-		return wrapIterWithOnEnd(ctx, genErrorIter(fmt.Errorf("failed to resume agent: agent '%s' is an interrupt point "+
+		return typedWrapIterWithOnEnd(ctx, typedErrorIter[M](fmt.Errorf("failed to resume agent: agent '%s' is an interrupt point "+
 			"but is not a ResumableAgent", agentName)))
 	}
 
@@ -422,55 +581,77 @@ func (a *flowAgent) Resume(ctx context.Context, info *ResumeInfo, opts ...AgentR
 		if cancelCtx != nil {
 			cancelCtx.markDone()
 		}
-		return wrapIterWithOnEnd(ctx, genErrorIter(err))
+		return typedWrapIterWithOnEnd(ctx, typedErrorIter[M](err))
 	}
 
 	subAgent := a.getAgent(ctxForSubAgents, nextAgentName)
 	if subAgent == nil {
 		if len(a.subAgents) == 0 {
-			if ra, ok := a.Agent.(ResumableAgent); ok {
+			if ra, ok := a.TypedAgent.(TypedResumableAgent[M]); ok {
 				ctx = withCancelContext(ctx, cancelCtx)
 				innerIter := ra.Resume(ctx, info, filterCancelOption(opts)...)
-				return wrapIterWithCancelCtx(wrapIterWithOnEnd(ctx, innerIter), cancelCtx)
+				return wrapIterWithCancelCtx(typedWrapIterWithOnEnd(ctx, innerIter), cancelCtx)
 			}
 		}
 		if cancelCtx != nil {
 			cancelCtx.markDone()
 		}
-		return wrapIterWithOnEnd(ctx, genErrorIter(fmt.Errorf("failed to resume agent: agent '%s' not found from flowAgent '%s'", nextAgentName, agentName)))
+		return typedWrapIterWithOnEnd(ctx, typedErrorIter[M](fmt.Errorf("failed to resume agent: agent '%s' not found from flowAgent '%s'", nextAgentName, agentName)))
 	}
 
 	ctxForSubAgents = withCancelContext(ctxForSubAgents, cancelCtx)
 	innerIter := subAgent.Resume(ctxForSubAgents, info, filterCancelOption(opts)...)
-	return wrapIterWithCancelCtx(wrapIterWithOnEnd(ctx, innerIter), cancelCtx)
+	return wrapIterWithCancelCtx(typedWrapIterWithOnEnd(ctx, innerIter), cancelCtx)
 }
 
-type DeterministicTransferConfig struct {
-	Agent        Agent
+type TypedDeterministicTransferConfig[M MessageType] struct {
+	Agent        TypedAgent[M]
 	ToAgentNames []string
 }
 
-func (a *flowAgent) run(
+type DeterministicTransferConfig = TypedDeterministicTransferConfig[*schema.Message]
+
+func (a *typedFlowAgent[M]) run(
 	ctx context.Context,
 	ctxForSubAgents context.Context,
 	runCtx *runContext,
-	aIter *AsyncIterator[*AgentEvent],
-	generator *AsyncGenerator[*AgentEvent],
+	aIter *AsyncIterator[*TypedAgentEvent[M]],
+	generator *AsyncGenerator[*TypedAgentEvent[M]],
 	opts ...AgentRunOption) {
 
-	cbIter, cbGen := NewAsyncIteratorPair[*AgentEvent]()
+	var zero M
+	isMessageType := false
+	if _, ok := any(zero).(*schema.Message); ok {
+		isMessageType = true
+	}
 
-	cbOutput := &AgentCallbackOutput{Events: cbIter}
-	icb.On(ctx, cbOutput, icb.BuildOnEndHandleWithCopy(copyAgentCallbackOutput), callbacks.TimingOnEnd, false)
+	var cbGen *AsyncGenerator[*AgentEvent]
+	var agenticCbGen *AsyncGenerator[*TypedAgentEvent[*schema.AgenticMessage]]
+	if isMessageType {
+		var cbIter *AsyncIterator[*AgentEvent]
+		cbIter, cbGen = NewAsyncIteratorPair[*AgentEvent]()
+		cbOutput := &AgentCallbackOutput{Events: cbIter}
+		icb.On(ctx, cbOutput, icb.BuildOnEndHandleWithCopy(copyAgentCallbackOutput), callbacks.TimingOnEnd, false)
+	} else {
+		var agenticCbIter *AsyncIterator[*TypedAgentEvent[*schema.AgenticMessage]]
+		agenticCbIter, agenticCbGen = NewAsyncIteratorPair[*TypedAgentEvent[*schema.AgenticMessage]]()
+		cbOutput := &AgenticCallbackOutput{Events: agenticCbIter}
+		icb.On(ctx, cbOutput, icb.BuildOnEndHandleWithCopy(copyAgenticCallbackOutput), callbacks.TimingOnEnd, false)
+	}
 
 	defer func() {
 		panicErr := recover()
 		if panicErr != nil {
 			e := safe.NewPanicErr(panicErr, debug.Stack())
-			generator.Send(&AgentEvent{Err: e})
+			generator.Send(&TypedAgentEvent[M]{Err: e})
 		}
 
-		cbGen.Close()
+		if cbGen != nil {
+			cbGen.Close()
+		}
+		if agenticCbGen != nil {
+			agenticCbGen.Close()
+		}
 		generator.Close()
 	}()
 
@@ -481,37 +662,35 @@ func (a *flowAgent) run(
 			break
 		}
 
-		// RunPath ownership: the eino framework sets RunPath exactly once.
-		// If event.RunPath is already set (e.g., by agentTool), we don't modify it.
-		// If event.RunPath is nil/empty, we set it to the current runCtx.RunPath.
-		// This ensures RunPath is set exactly once and not duplicated.
 		if len(event.RunPath) == 0 {
 			event.AgentName = a.Name(ctx)
 			event.RunPath = runCtx.RunPath
 		}
-		// Recording policy: exact RunPath match (non-interrupt) indicates events belonging to this agent execution.
-		// This prevents parent recording of child/tool-internal emissions.
 		if (event.Action == nil || event.Action.Interrupted == nil) && exactRunPathMatch(runCtx.RunPath, event.RunPath) {
-			// copy the event so that the copied event's stream is exclusive for any potential consumer
-			// copy before adding to session because once added to session it's stream could be consumed by genAgentInput at any time
-			// interrupt action are not added to session, because ALL information contained in it
-			// is either presented to end-user, or made available to agents through other means
-			copied := copyAgentEvent(event)
-			setAutomaticClose(copied)
-			setAutomaticClose(event)
-			runCtx.Session.addEvent(copied)
+			copied := copyTypedAgentEvent(event)
+			typedSetAutomaticClose(copied)
+			typedSetAutomaticClose(event)
+			addTypedEvent(runCtx.Session, copied)
 		}
-		// Action gating uses exact run-path match as well:
-		// only actions originating from this agent execution (not child/tool runs)
-		// should influence parent control flow (exit/transfer/interrupt).
 		if exactRunPathMatch(runCtx.RunPath, event.RunPath) {
 			lastAction = event.Action
 		}
-		copied := copyAgentEvent(event)
-		setAutomaticClose(copied)
-		setAutomaticClose(event)
-		cbGen.Send(copied)
-		generator.Send(event)
+		if isMessageType && cbGen != nil {
+			msgCopied := copyTypedAgentEvent(event)
+			typedSetAutomaticClose(msgCopied)
+			typedSetAutomaticClose(event)
+			cbGen.Send(any(msgCopied).(*AgentEvent))
+			generator.Send(event)
+		} else if agenticCbGen != nil {
+			agenticCopied := copyTypedAgentEvent(event)
+			typedSetAutomaticClose(agenticCopied)
+			typedSetAutomaticClose(event)
+			agenticCbGen.Send(any(agenticCopied).(*TypedAgentEvent[*schema.AgenticMessage]))
+			generator.Send(event)
+		} else {
+			typedSetAutomaticClose(event)
+			generator.Send(event)
+		}
 	}
 
 	var destName string
@@ -528,24 +707,23 @@ func (a *flowAgent) run(
 		}
 	}
 
-	// handle transferring to another agent
 	if destName != "" {
 		agentToRun := a.getAgent(ctxForSubAgents, destName)
 		if agentToRun == nil {
 			e := fmt.Errorf("transfer failed: agent '%s' not found when transferring from '%s'",
 				destName, a.Name(ctxForSubAgents))
-			generator.Send(&AgentEvent{Err: e})
+			generator.Send(&TypedAgentEvent[M]{Err: e})
 			return
 		}
 
-		subAIter := agentToRun.Run(ctxForSubAgents, nil /*subagents get input from runCtx*/, opts...)
+		subAIter := agentToRun.Run(ctxForSubAgents, nil, opts...)
 		for {
 			subEvent, ok_ := subAIter.Next()
 			if !ok_ {
 				break
 			}
 
-			setAutomaticClose(subEvent)
+			typedSetAutomaticClose(subEvent)
 			generator.Send(subEvent)
 		}
 	}
@@ -585,4 +763,45 @@ func wrapIterWithOnEnd(ctx context.Context, iter *AsyncIterator[*AgentEvent]) *A
 		}
 	}()
 	return outIter
+}
+
+func typedWrapIterWithOnEnd[M MessageType](ctx context.Context, iter *AsyncIterator[*TypedAgentEvent[M]]) *AsyncIterator[*TypedAgentEvent[M]] {
+	var zero M
+	if _, ok := any(zero).(*schema.Message); ok {
+		msgIter := any(iter).(*AsyncIterator[*AgentEvent])
+		return any(wrapIterWithOnEnd(ctx, msgIter)).(*AsyncIterator[*TypedAgentEvent[M]])
+	}
+	agenticIter := any(iter).(*AsyncIterator[*TypedAgentEvent[*schema.AgenticMessage]])
+	return any(wrapAgenticIterWithOnEnd(ctx, agenticIter)).(*AsyncIterator[*TypedAgentEvent[M]])
+}
+
+func wrapAgenticIterWithOnEnd(ctx context.Context, iter *AsyncIterator[*TypedAgentEvent[*schema.AgenticMessage]]) *AsyncIterator[*TypedAgentEvent[*schema.AgenticMessage]] {
+	cbIter, cbGen := NewAsyncIteratorPair[*TypedAgentEvent[*schema.AgenticMessage]]()
+	cbOutput := &AgenticCallbackOutput{Events: cbIter}
+	icb.On(ctx, cbOutput, icb.BuildOnEndHandleWithCopy(copyAgenticCallbackOutput), callbacks.TimingOnEnd, false)
+
+	outIter, outGen := NewAsyncIteratorPair[*TypedAgentEvent[*schema.AgenticMessage]]()
+	go func() {
+		defer func() {
+			cbGen.Close()
+			outGen.Close()
+		}()
+		for {
+			event, ok := iter.Next()
+			if !ok {
+				break
+			}
+			copied := copyAgenticEvent(event)
+			cbGen.Send(copied)
+			outGen.Send(event)
+		}
+	}()
+	return outIter
+}
+
+func genAgenticErrorIter(err error) *AsyncIterator[*TypedAgentEvent[*schema.AgenticMessage]] {
+	iter, gen := NewAsyncIteratorPair[*TypedAgentEvent[*schema.AgenticMessage]]()
+	gen.Send(&TypedAgentEvent[*schema.AgenticMessage]{Err: err})
+	gen.Close()
+	return iter
 }

@@ -713,11 +713,11 @@ func (cc *cancelContext) buildCancelFunc() AgentCancelFunc {
 // were passed through unconverted, markDone would transition stateCancelling→stateDone
 // before the Runner goroutine could call createAndMarkCancelHandled, causing it
 // to fail the CAS.
-func wrapIterWithCancelCtx(iter *AsyncIterator[*AgentEvent], cancelCtx *cancelContext) *AsyncIterator[*AgentEvent] {
+func wrapIterWithCancelCtx[M MessageType](iter *AsyncIterator[*TypedAgentEvent[M]], cancelCtx *cancelContext) *AsyncIterator[*TypedAgentEvent[M]] {
 	if cancelCtx == nil {
 		return iter
 	}
-	it, gen := NewAsyncIteratorPair[*AgentEvent]()
+	it, gen := NewAsyncIteratorPair[*TypedAgentEvent[M]]()
 	go func() {
 		defer cancelCtx.markDone()
 		defer gen.Close()
@@ -732,7 +732,7 @@ func wrapIterWithCancelCtx(iter *AsyncIterator[*AgentEvent], cancelCtx *cancelCo
 					cancelErr, ok := cancelCtx.createAndMarkCancelHandled()
 					if ok {
 						cancelErr.interruptSignal = event.Action.internalInterrupted
-						gen.Send(&AgentEvent{Err: cancelErr})
+						gen.Send(&TypedAgentEvent[M]{Err: cancelErr})
 					}
 					return
 				}
@@ -744,13 +744,8 @@ func wrapIterWithCancelCtx(iter *AsyncIterator[*AgentEvent], cancelCtx *cancelCo
 	return it
 }
 
-// cancelMonitoredModel wraps a model with cancel monitoring.
-// Generate: pure delegate to the inner model (CancelAfterChatModel is handled
-// by a dedicated node after the ChatModel in the compose graph).
-// Stream: pipes chunks through a goroutine that selects on immediateChan for
-// CancelImmediate abort.
-type cancelMonitoredModel struct {
-	inner         model.BaseChatModel
+type typedCancelMonitoredModel[M MessageType] struct {
+	inner         model.BaseModel[M]
 	cancelContext *cancelContext
 }
 
@@ -759,11 +754,11 @@ type recvResult[T any] struct {
 	err  error
 }
 
-func (m *cancelMonitoredModel) Generate(ctx context.Context, input []*schema.Message, opts ...model.Option) (*schema.Message, error) {
+func (m *typedCancelMonitoredModel[M]) Generate(ctx context.Context, input []M, opts ...model.Option) (M, error) {
 	return m.inner.Generate(ctx, input, opts...)
 }
 
-func (m *cancelMonitoredModel) Stream(ctx context.Context, input []*schema.Message, opts ...model.Option) (*schema.StreamReader[*schema.Message], error) {
+func (m *typedCancelMonitoredModel[M]) Stream(ctx context.Context, input []M, opts ...model.Option) (*schema.StreamReader[M], error) {
 	stream, err := m.inner.Stream(ctx, input, opts...)
 	if err != nil {
 		return nil, err

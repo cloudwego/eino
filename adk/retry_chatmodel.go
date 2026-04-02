@@ -153,7 +153,7 @@ func genErrWrapper(ctx context.Context, maxRetries, attempt int, isRetryAbleFunc
 	}
 }
 
-func consumeStreamForError(stream *schema.StreamReader[*schema.Message]) error {
+func consumeStreamForError[M any](stream *schema.StreamReader[M]) error {
 	defer stream.Close()
 	for {
 		_, err := stream.Recv()
@@ -166,20 +166,16 @@ func consumeStreamForError(stream *schema.StreamReader[*schema.Message]) error {
 	}
 }
 
-// retryModelWrapper wraps a BaseChatModel with retry logic.
-// This is used inside the model wrapper chain, positioned between eventSenderModelWrapper
-// and stateModelWrapper, so that retry only affects the inner chain (event sending, user wrappers,
-// callback injection) without re-running state management (BeforeModelRewriteState/AfterModelRewriteState).
-type retryModelWrapper struct {
-	inner  model.BaseChatModel
+type typedRetryModelWrapper[M MessageType] struct {
+	inner  model.BaseModel[M]
 	config *ModelRetryConfig
 }
 
-func newRetryModelWrapper(inner model.BaseChatModel, config *ModelRetryConfig) *retryModelWrapper {
-	return &retryModelWrapper{inner: inner, config: config}
+func newTypedRetryModelWrapper[M MessageType](inner model.BaseModel[M], config *ModelRetryConfig) *typedRetryModelWrapper[M] {
+	return &typedRetryModelWrapper[M]{inner: inner, config: config}
 }
 
-func (r *retryModelWrapper) Generate(ctx context.Context, input []*schema.Message, opts ...model.Option) (*schema.Message, error) {
+func (r *typedRetryModelWrapper[M]) Generate(ctx context.Context, input []M, opts ...model.Option) (M, error) {
 	isRetryAble := r.config.IsRetryAble
 	if isRetryAble == nil {
 		isRetryAble = defaultIsRetryAble
@@ -196,27 +192,29 @@ func (r *retryModelWrapper) Generate(ctx context.Context, input []*schema.Messag
 			return out, nil
 		}
 
-		// Never retry interrupt errors (e.g. cancel safe-point interrupts).
 		if _, ok := compose.ExtractInterruptInfo(err); ok {
-			return nil, err
+			var zero M
+			return zero, err
 		}
 
 		if !isRetryAble(ctx, err) {
-			return nil, err
+			var zero M
+			return zero, err
 		}
 
 		lastErr = err
 		if attempt < r.config.MaxRetries {
-			log.Printf("retrying ChatModel.Generate (attempt %d/%d): %v", attempt+1, r.config.MaxRetries, err)
+			log.Printf("retrying Model.Generate (attempt %d/%d): %v", attempt+1, r.config.MaxRetries, err)
 			time.Sleep(backoffFunc(ctx, attempt+1))
 		}
 	}
 
-	return nil, &RetryExhaustedError{LastErr: lastErr, TotalRetries: r.config.MaxRetries}
+	var zero M
+	return zero, &RetryExhaustedError{LastErr: lastErr, TotalRetries: r.config.MaxRetries}
 }
 
-func (r *retryModelWrapper) Stream(ctx context.Context, input []*schema.Message, opts ...model.Option) (
-	*schema.StreamReader[*schema.Message], error) {
+func (r *typedRetryModelWrapper[M]) Stream(ctx context.Context, input []M, opts ...model.Option) (
+	*schema.StreamReader[M], error) {
 
 	isRetryAble := r.config.IsRetryAble
 	if isRetryAble == nil {
@@ -228,7 +226,7 @@ func (r *retryModelWrapper) Stream(ctx context.Context, input []*schema.Message,
 	}
 
 	defer func() {
-		_ = compose.ProcessState(ctx, func(_ context.Context, st *State) error {
+		_ = compose.ProcessState(ctx, func(_ context.Context, st *typedState[M]) error {
 			st.setRetryAttempt(0)
 			return nil
 		})
@@ -236,14 +234,13 @@ func (r *retryModelWrapper) Stream(ctx context.Context, input []*schema.Message,
 
 	var lastErr error
 	for attempt := 0; attempt <= r.config.MaxRetries; attempt++ {
-		_ = compose.ProcessState(ctx, func(_ context.Context, st *State) error {
+		_ = compose.ProcessState(ctx, func(_ context.Context, st *typedState[M]) error {
 			st.setRetryAttempt(attempt)
 			return nil
 		})
 
 		stream, err := r.inner.Stream(ctx, input, opts...)
 		if err != nil {
-			// Never retry interrupt errors (e.g. cancel safe-point interrupts).
 			if _, ok := compose.ExtractInterruptInfo(err); ok {
 				return nil, err
 			}
@@ -252,7 +249,7 @@ func (r *retryModelWrapper) Stream(ctx context.Context, input []*schema.Message,
 			}
 			lastErr = err
 			if attempt < r.config.MaxRetries {
-				log.Printf("retrying ChatModel.Stream (attempt %d/%d): %v", attempt+1, r.config.MaxRetries, err)
+				log.Printf("retrying Model.Stream (attempt %d/%d): %v", attempt+1, r.config.MaxRetries, err)
 				time.Sleep(backoffFunc(ctx, attempt+1))
 			}
 			continue
@@ -262,7 +259,7 @@ func (r *retryModelWrapper) Stream(ctx context.Context, input []*schema.Message,
 		checkCopy := copies[0]
 		returnCopy := copies[1]
 
-		streamErr := consumeStreamForError(checkCopy)
+		streamErr := consumeStreamForError[M](checkCopy)
 		if streamErr == nil {
 			return returnCopy, nil
 		}
@@ -274,7 +271,7 @@ func (r *retryModelWrapper) Stream(ctx context.Context, input []*schema.Message,
 
 		lastErr = streamErr
 		if attempt < r.config.MaxRetries {
-			log.Printf("retrying ChatModel.Stream (attempt %d/%d): %v", attempt+1, r.config.MaxRetries, streamErr)
+			log.Printf("retrying Model.Stream (attempt %d/%d): %v", attempt+1, r.config.MaxRetries, streamErr)
 			time.Sleep(backoffFunc(ctx, attempt+1))
 		}
 	}

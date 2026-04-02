@@ -90,12 +90,12 @@ type ChatModelAgentContext struct {
 	ReturnDirectly map[string]bool
 }
 
-// ChatModelAgentMiddleware defines the interface for customizing ChatModelAgent behavior.
+// TypedChatModelAgentMiddleware defines the interface for customizing TypedChatModelAgent behavior.
 //
-// IMPORTANT: This interface is specifically designed for ChatModelAgent and agents built
+// IMPORTANT: This interface is specifically designed for TypedChatModelAgent and agents built
 // on top of it (e.g., DeepAgent).
 //
-// Why ChatModelAgentMiddleware instead of AgentMiddleware?
+// Why TypedChatModelAgentMiddleware instead of AgentMiddleware?
 //
 // AgentMiddleware is a struct type, which has inherent limitations:
 //   - Struct types are closed: users cannot add new methods to extend functionality
@@ -104,22 +104,22 @@ type ChatModelAgentContext struct {
 //     call those methods (config.Middlewares is []AgentMiddleware, not a user type)
 //   - Callbacks in AgentMiddleware only return error, cannot return modified context
 //
-// ChatModelAgentMiddleware is an interface type, which is open for extension:
+// TypedChatModelAgentMiddleware is an interface type, which is open for extension:
 //   - Users can implement custom handlers with arbitrary internal state and methods
 //   - Hook methods return (context.Context, ..., error) for direct context propagation
 //   - Wrapper methods (WrapToolCall, WrapModel) enable context propagation through the
 //     wrapped endpoint chain: wrappers can pass modified context to the next wrapper
 //   - Configuration is centralized in struct fields rather than scattered in closures
 //
-// ChatModelAgentMiddleware vs AgentMiddleware:
+// TypedChatModelAgentMiddleware vs AgentMiddleware:
 //   - Use AgentMiddleware for simple, static additions (extra instruction/tools)
-//   - Use ChatModelAgentMiddleware for dynamic behavior, context modification, or call wrapping
+//   - Use TypedChatModelAgentMiddleware for dynamic behavior, context modification, or call wrapping
 //   - AgentMiddleware is kept for backward compatibility with existing users
 //   - Both can be used together; see AgentMiddleware documentation for execution order
 //
-// Use *BaseChatModelAgentMiddleware as an embedded struct to provide default no-op
+// Use *TypedBaseChatModelAgentMiddleware as an embedded struct to provide default no-op
 // implementations for all methods.
-type ChatModelAgentMiddleware interface {
+type TypedChatModelAgentMiddleware[M MessageType] interface {
 	// BeforeAgent is called before each agent run, allowing modification of
 	// the agent's instruction and tools configuration.
 	BeforeAgent(ctx context.Context, runCtx *ChatModelAgentContext) (context.Context, *ChatModelAgentContext, error)
@@ -133,7 +133,7 @@ type ChatModelAgentMiddleware interface {
 	//
 	// The ModelContext struct provides read-only access to:
 	//   - Tools: the current tool list that will be sent to the model
-	BeforeModelRewriteState(ctx context.Context, state *ChatModelAgentState, mc *ModelContext) (context.Context, *ChatModelAgentState, error)
+	BeforeModelRewriteState(ctx context.Context, state *TypedChatModelAgentState[M], mc *ModelContext) (context.Context, *TypedChatModelAgentState[M], error)
 
 	// AfterModelRewriteState is called after each model invocation.
 	// The input state includes the model's response as the last message.
@@ -144,7 +144,7 @@ type ChatModelAgentMiddleware interface {
 	//
 	// The ModelContext struct provides read-only access to:
 	//   - Tools: the current tool list that was sent to the model
-	AfterModelRewriteState(ctx context.Context, state *ChatModelAgentState, mc *ModelContext) (context.Context, *ChatModelAgentState, error)
+	AfterModelRewriteState(ctx context.Context, state *TypedChatModelAgentState[M], mc *ModelContext) (context.Context, *TypedChatModelAgentState[M], error)
 
 	// AfterToolCallsRewriteState is called after all concurrent tool calls in an iteration complete.
 	// The input state includes all messages up to and including the tool call results.
@@ -152,7 +152,7 @@ type ChatModelAgentMiddleware interface {
 	//
 	// The ToolCallsContext provides metadata about the tool calls that just completed,
 	// derived from the assistant message's ToolCalls field.
-	AfterToolCallsRewriteState(ctx context.Context, state *ChatModelAgentState, tc *ToolCallsContext) (context.Context, *ChatModelAgentState, error)
+	AfterToolCallsRewriteState(ctx context.Context, state *TypedChatModelAgentState[M], tc *ToolCallsContext) (context.Context, *TypedChatModelAgentState[M], error)
 
 	// WrapInvokableToolCall wraps a tool's synchronous execution with custom behavior.
 	// Return the input endpoint unchanged and nil error if no wrapping is needed.
@@ -206,14 +206,20 @@ type ChatModelAgentMiddleware interface {
 	// Return the input model unchanged and nil error if no wrapping is needed.
 	//
 	// This method is called at request time when the model is about to be invoked.
-	// Note: The parameter is BaseChatModel (not ToolCallingChatModel) because wrappers
+	// Note: The parameter is model.BaseModel[M] (not ToolCallingChatModel) because wrappers
 	// only need to intercept Generate/Stream calls. Tool binding (WithTools) is handled
 	// separately by the framework and does not flow through user wrappers.
 	//
 	// The mc parameter contains the current tool configuration:
 	//   - Tools: The tool infos that will be sent to the model
-	WrapModel(ctx context.Context, m model.BaseChatModel, mc *ModelContext) (model.BaseChatModel, error)
+	WrapModel(ctx context.Context, m model.BaseModel[M], mc *ModelContext) (model.BaseModel[M], error)
 }
+
+// ChatModelAgentMiddleware is the default middleware type using *schema.Message.
+// See TypedChatModelAgentMiddleware for full documentation.
+type ChatModelAgentMiddleware = TypedChatModelAgentMiddleware[*schema.Message]
+
+type TypedBaseChatModelAgentMiddleware[M MessageType] struct{}
 
 // BaseChatModelAgentMiddleware provides default no-op implementations for ChatModelAgentMiddleware.
 // Embed *BaseChatModelAgentMiddleware in custom handlers to only override the methods you need.
@@ -229,42 +235,56 @@ type ChatModelAgentMiddleware interface {
 //		// custom logic
 //		return ctx, state, nil
 //	}
-type BaseChatModelAgentMiddleware struct{}
+type BaseChatModelAgentMiddleware = TypedBaseChatModelAgentMiddleware[*schema.Message]
 
-func (b *BaseChatModelAgentMiddleware) WrapInvokableToolCall(_ context.Context, endpoint InvokableToolCallEndpoint, _ *ToolContext) (InvokableToolCallEndpoint, error) {
+func (b *TypedBaseChatModelAgentMiddleware[M]) WrapInvokableToolCall(_ context.Context, endpoint InvokableToolCallEndpoint, _ *ToolContext) (InvokableToolCallEndpoint, error) {
 	return endpoint, nil
 }
 
-func (b *BaseChatModelAgentMiddleware) WrapStreamableToolCall(_ context.Context, endpoint StreamableToolCallEndpoint, _ *ToolContext) (StreamableToolCallEndpoint, error) {
+func (b *TypedBaseChatModelAgentMiddleware[M]) WrapStreamableToolCall(_ context.Context, endpoint StreamableToolCallEndpoint, _ *ToolContext) (StreamableToolCallEndpoint, error) {
 	return endpoint, nil
 }
 
-func (b *BaseChatModelAgentMiddleware) WrapEnhancedInvokableToolCall(_ context.Context, endpoint EnhancedInvokableToolCallEndpoint, _ *ToolContext) (EnhancedInvokableToolCallEndpoint, error) {
+func (b *TypedBaseChatModelAgentMiddleware[M]) WrapEnhancedInvokableToolCall(_ context.Context, endpoint EnhancedInvokableToolCallEndpoint, _ *ToolContext) (EnhancedInvokableToolCallEndpoint, error) {
 	return endpoint, nil
 }
 
-func (b *BaseChatModelAgentMiddleware) WrapEnhancedStreamableToolCall(_ context.Context, endpoint EnhancedStreamableToolCallEndpoint, _ *ToolContext) (EnhancedStreamableToolCallEndpoint, error) {
+func (b *TypedBaseChatModelAgentMiddleware[M]) WrapEnhancedStreamableToolCall(_ context.Context, endpoint EnhancedStreamableToolCallEndpoint, _ *ToolContext) (EnhancedStreamableToolCallEndpoint, error) {
 	return endpoint, nil
 }
 
-func (b *BaseChatModelAgentMiddleware) WrapModel(_ context.Context, m model.BaseChatModel, _ *ModelContext) (model.BaseChatModel, error) {
+func (b *TypedBaseChatModelAgentMiddleware[M]) WrapModel(_ context.Context, m model.BaseModel[M], _ *ModelContext) (model.BaseModel[M], error) {
 	return m, nil
 }
 
-func (b *BaseChatModelAgentMiddleware) BeforeAgent(ctx context.Context, runCtx *ChatModelAgentContext) (context.Context, *ChatModelAgentContext, error) {
+func (b *TypedBaseChatModelAgentMiddleware[M]) BeforeAgent(ctx context.Context, runCtx *ChatModelAgentContext) (context.Context, *ChatModelAgentContext, error) {
 	return ctx, runCtx, nil
 }
 
-func (b *BaseChatModelAgentMiddleware) BeforeModelRewriteState(ctx context.Context, state *ChatModelAgentState, mc *ModelContext) (context.Context, *ChatModelAgentState, error) {
+func (b *TypedBaseChatModelAgentMiddleware[M]) BeforeModelRewriteState(ctx context.Context, state *TypedChatModelAgentState[M], mc *ModelContext) (context.Context, *TypedChatModelAgentState[M], error) {
 	return ctx, state, nil
 }
 
-func (b *BaseChatModelAgentMiddleware) AfterModelRewriteState(ctx context.Context, state *ChatModelAgentState, mc *ModelContext) (context.Context, *ChatModelAgentState, error) {
+func (b *TypedBaseChatModelAgentMiddleware[M]) AfterModelRewriteState(ctx context.Context, state *TypedChatModelAgentState[M], mc *ModelContext) (context.Context, *TypedChatModelAgentState[M], error) {
 	return ctx, state, nil
 }
 
-func (b *BaseChatModelAgentMiddleware) AfterToolCallsRewriteState(ctx context.Context, state *ChatModelAgentState, tc *ToolCallsContext) (context.Context, *ChatModelAgentState, error) {
+func (b *TypedBaseChatModelAgentMiddleware[M]) AfterToolCallsRewriteState(ctx context.Context, state *TypedChatModelAgentState[M], tc *ToolCallsContext) (context.Context, *TypedChatModelAgentState[M], error) {
 	return ctx, state, nil
+}
+
+func processTypedState(ctx context.Context, fn func(extra map[string]any) map[string]any) error {
+	runCtx := getRunCtx(ctx)
+	if runCtx != nil && runCtx.TypedRootInput != nil {
+		return compose.ProcessState(ctx, func(_ context.Context, st *typedState[*schema.AgenticMessage]) error {
+			st.Extra = fn(st.Extra)
+			return nil
+		})
+	}
+	return compose.ProcessState(ctx, func(_ context.Context, st *typedState[*schema.Message]) error {
+		st.Extra = fn(st.Extra)
+		return nil
+	})
 }
 
 // SetRunLocalValue sets a key-value pair that persists for the duration of the current agent Run() invocation.
@@ -281,12 +301,12 @@ func SetRunLocalValue(ctx context.Context, key string, value any) error {
 		return err
 	}
 
-	err := compose.ProcessState(ctx, func(_ context.Context, st *State) error {
-		if st.Extra == nil {
-			st.Extra = make(map[string]any)
+	err := processTypedState(ctx, func(extra map[string]any) map[string]any {
+		if extra == nil {
+			extra = make(map[string]any)
 		}
-		st.Extra[key] = value
-		return nil
+		extra[key] = value
+		return extra
 	})
 	if err != nil {
 		return fmt.Errorf("SetRunLocalValue failed: must be called within a ChatModelAgent Run() or Resume() execution context: %w", err)
@@ -307,11 +327,11 @@ func SetRunLocalValue(ctx context.Context, key string, value any) error {
 func GetRunLocalValue(ctx context.Context, key string) (any, bool, error) {
 	var val any
 	var found bool
-	err := compose.ProcessState(ctx, func(_ context.Context, st *State) error {
-		if st.Extra != nil {
-			val, found = st.Extra[key]
+	err := processTypedState(ctx, func(extra map[string]any) map[string]any {
+		if extra != nil {
+			val, found = extra[key]
 		}
-		return nil
+		return extra
 	})
 	if err != nil {
 		return nil, false, fmt.Errorf("GetRunLocalValue failed: must be called within a ChatModelAgent Run() or Resume() execution context: %w", err)
@@ -324,15 +344,30 @@ func GetRunLocalValue(ctx context.Context, key string) (any, bool, error) {
 // This function can only be called from within a ChatModelAgentMiddleware during agent execution.
 // Returns an error if called outside of an agent execution context.
 func DeleteRunLocalValue(ctx context.Context, key string) error {
-	err := compose.ProcessState(ctx, func(_ context.Context, st *State) error {
-		if st.Extra != nil {
-			delete(st.Extra, key)
+	err := processTypedState(ctx, func(extra map[string]any) map[string]any {
+		if extra != nil {
+			delete(extra, key)
 		}
-		return nil
+		return extra
 	})
 	if err != nil {
 		return fmt.Errorf("DeleteRunLocalValue failed: must be called within a ChatModelAgent Run() or Resume() execution context: %w", err)
 	}
+	return nil
+}
+
+// TypedSendEvent sends a custom TypedAgentEvent to the event stream during agent execution.
+// This allows TypedChatModelAgentMiddleware implementations to emit custom events that will be
+// received by the caller iterating over the agent's event stream.
+//
+// This function can only be called from within a TypedChatModelAgentMiddleware during agent execution.
+// Returns an error if called outside of an agent execution context.
+func TypedSendEvent[M MessageType](ctx context.Context, event *TypedAgentEvent[M]) error {
+	execCtx := getTypedChatModelAgentExecCtx[M](ctx)
+	if execCtx == nil || execCtx.generator == nil {
+		return fmt.Errorf("TypedSendEvent failed: must be called within a ChatModelAgent Run() or Resume() execution context")
+	}
+	execCtx.generator.Send(event)
 	return nil
 }
 
@@ -343,12 +378,7 @@ func DeleteRunLocalValue(ctx context.Context, key string) error {
 // This function can only be called from within a ChatModelAgentMiddleware during agent execution.
 // Returns an error if called outside of an agent execution context.
 func SendEvent(ctx context.Context, event *AgentEvent) error {
-	execCtx := getChatModelAgentExecCtx(ctx)
-	if execCtx == nil || execCtx.generator == nil {
-		return fmt.Errorf("SendEvent failed: must be called within a ChatModelAgent Run() or Resume() execution context")
-	}
-	execCtx.generator.Send(event)
-	return nil
+	return TypedSendEvent[*schema.Message](ctx, event)
 }
 
 // checkGobEncodability probes whether the value can be gob-encoded as part of

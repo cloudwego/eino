@@ -1020,8 +1020,8 @@ func TestWorkflowAgentUnsupportedMode(t *testing.T) {
 	agent := &workflowAgent{
 		name:        "UnsupportedModeAgent",
 		description: "Agent with unsupported mode",
-		subAgents:   []*flowAgent{},
-		mode:        workflowAgentMode(999), // Invalid mode
+		subAgents:   []Agent{},
+		mode:        workflowAgentMode(999),
 	}
 
 	// Run the agent and expect error

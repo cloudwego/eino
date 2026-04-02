@@ -20,10 +20,14 @@ import (
 	"bytes"
 	"context"
 	"encoding/gob"
+	"errors"
 	"fmt"
+	"io"
 	"sort"
 	"sync"
 	"time"
+
+	"github.com/cloudwego/eino/schema"
 )
 
 // runSession CheckpointSchema: persisted via serialization.RunCtx (gob).
@@ -34,6 +38,9 @@ type runSession struct {
 	Events     []*agentEventWrapper
 	LaneEvents *laneEvents
 	mtx        sync.Mutex
+
+	TypedEvents     any
+	TypedLaneEvents any
 }
 
 // laneEvents CheckpointSchema: persisted via serialization.RunCtx (gob).
@@ -58,6 +65,105 @@ type agentEventWrapper struct {
 	// unless retry is configured for the agent generating this stream, in which case
 	// this StreamErr will be of type WillRetryError (indicating retry is pending).
 	StreamErr error
+}
+
+type typedAgentEventWrapper[M MessageType] struct {
+	event               *TypedAgentEvent[M]
+	mu                  sync.Mutex
+	concatenatedMessage M
+	TS                  int64
+	StreamErr           error
+}
+
+type typedLaneEventsOf[M MessageType] struct {
+	Events []*typedAgentEventWrapper[M]
+	Parent *typedLaneEventsOf[M]
+}
+
+func (g *typedLaneEventsOf[M]) len() int { return len(g.Events) }
+
+// typedAgentEventWrapperForGob is a gob-serializable representation of typedAgentEventWrapper.
+// We encode the event and TS separately to avoid the sync.Mutex and non-exported fields.
+type typedAgentEventWrapperForGob[M MessageType] struct {
+	Event *TypedAgentEvent[M]
+	TS    int64
+}
+
+func (e *typedAgentEventWrapper[M]) GobEncode() ([]byte, error) {
+	if e.event != nil && e.event.Output != nil && e.event.Output.MessageOutput != nil && e.event.Output.MessageOutput.IsStreaming {
+		// Materialize the stream before encoding.
+		var zero M
+		if any(e.concatenatedMessage) == any(zero) && e.StreamErr == nil {
+			e.consumeStream()
+		}
+	}
+
+	buf := &bytes.Buffer{}
+	err := gob.NewEncoder(buf).Encode(&typedAgentEventWrapperForGob[M]{
+		Event: e.event,
+		TS:    e.TS,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to gob encode generic agent event wrapper: %w", err)
+	}
+	return buf.Bytes(), nil
+}
+
+func (e *typedAgentEventWrapper[M]) GobDecode(b []byte) error {
+	g := &typedAgentEventWrapperForGob[M]{}
+	if err := gob.NewDecoder(bytes.NewReader(b)).Decode(g); err != nil {
+		return fmt.Errorf("failed to gob decode generic agent event wrapper: %w", err)
+	}
+	e.event = g.Event
+	e.TS = g.TS
+	return nil
+}
+
+func (e *typedAgentEventWrapper[M]) consumeStream() {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	var zero M
+	if any(e.concatenatedMessage) != any(zero) {
+		return
+	}
+
+	s := e.event.Output.MessageOutput.MessageStream
+	var msgs []M
+
+	defer s.Close()
+	for {
+		msg, err := s.Recv()
+		if err != nil {
+			if err == io.EOF {
+				break
+			}
+			e.StreamErr = err
+			e.event.Output.MessageOutput.MessageStream = schema.StreamReaderFromArray(msgs)
+			return
+		}
+		msgs = append(msgs, msg)
+	}
+
+	if len(msgs) == 0 {
+		e.StreamErr = errors.New("no messages in typedAgentEventWrapper.MessageStream")
+		e.event.Output.MessageOutput.MessageStream = schema.StreamReaderFromArray(msgs)
+		return
+	}
+
+	if len(msgs) == 1 {
+		e.concatenatedMessage = msgs[0]
+	} else {
+		var err error
+		e.concatenatedMessage, err = concatMessageStream(schema.StreamReaderFromArray(msgs))
+		if err != nil {
+			e.StreamErr = err
+			e.event.Output.MessageOutput.MessageStream = schema.StreamReaderFromArray(msgs)
+			return
+		}
+	}
+
+	e.event.Output.MessageOutput.MessageStream = schema.StreamReaderFromArray([]M{e.concatenatedMessage})
 }
 
 type otherAgentEventWrapperForEncode agentEventWrapper
@@ -184,6 +290,88 @@ func (rs *runSession) getEvents() []*agentEventWrapper {
 	return finalEvents
 }
 
+func addTypedEvent[M MessageType](session *runSession, event *TypedAgentEvent[M]) {
+	var zero M
+	if _, ok := any(zero).(*schema.Message); ok {
+		session.addEvent(any(event).(*AgentEvent))
+		return
+	}
+	wrapper := &typedAgentEventWrapper[M]{event: event, TS: time.Now().UnixNano()}
+	if laneStore, ok := session.TypedLaneEvents.(*typedLaneEventsOf[M]); ok && laneStore != nil {
+		laneStore.Events = append(laneStore.Events, wrapper)
+		return
+	}
+	store, _ := session.TypedEvents.(*[]*typedAgentEventWrapper[M])
+	if store == nil {
+		s := make([]*typedAgentEventWrapper[M], 0)
+		store = &s
+		session.TypedEvents = store
+	}
+	session.mtx.Lock()
+	*store = append(*store, wrapper)
+	session.mtx.Unlock()
+}
+
+func getTypedEvents[M MessageType](session *runSession) []*typedAgentEventWrapper[M] {
+	var zero M
+	if _, ok := any(zero).(*schema.Message); ok {
+		events := session.getEvents()
+		result := make([]*typedAgentEventWrapper[M], 0, len(events))
+		for _, e := range events {
+			w := &typedAgentEventWrapper[M]{
+				event:     any(e.AgentEvent).(*TypedAgentEvent[M]),
+				TS:        e.TS,
+				StreamErr: e.StreamErr,
+			}
+			if e.concatenatedMessage != nil {
+				w.concatenatedMessage = any(e.concatenatedMessage).(M)
+			}
+			result = append(result, w)
+		}
+		return result
+	}
+
+	store, _ := session.TypedEvents.(*[]*typedAgentEventWrapper[M])
+
+	if session.TypedLaneEvents == nil {
+		if store == nil {
+			return nil
+		}
+		session.mtx.Lock()
+		result := make([]*typedAgentEventWrapper[M], len(*store))
+		copy(result, *store)
+		session.mtx.Unlock()
+		return result
+	}
+
+	var committed []*typedAgentEventWrapper[M]
+	if store != nil {
+		session.mtx.Lock()
+		committed = make([]*typedAgentEventWrapper[M], len(*store))
+		copy(committed, *store)
+		session.mtx.Unlock()
+	}
+
+	var laneSlices [][]*typedAgentEventWrapper[M]
+	totalLaneSize := 0
+	for lane, ok := session.TypedLaneEvents.(*typedLaneEventsOf[M]); ok && lane != nil; lane, ok = any(lane.Parent).(*typedLaneEventsOf[M]) {
+		if len(lane.Events) > 0 {
+			laneSlices = append(laneSlices, lane.Events)
+			totalLaneSize += len(lane.Events)
+		}
+		if lane.Parent == nil {
+			break
+		}
+	}
+
+	result := make([]*typedAgentEventWrapper[M], 0, len(committed)+totalLaneSize)
+	result = append(result, committed...)
+	for i := len(laneSlices) - 1; i >= 0; i-- {
+		result = append(result, laneSlices[i]...)
+	}
+	return result
+}
+
 func (rs *runSession) getValues() map[string]any {
 	rs.valuesMtx.Lock()
 	values := make(map[string]any, len(rs.Values))
@@ -221,6 +409,8 @@ type runContext struct {
 	RootInput *AgentInput
 	RunPath   []RunStep
 
+	TypedRootInput any
+
 	Session *runSession
 }
 
@@ -230,9 +420,10 @@ func (rc *runContext) isRoot() bool {
 
 func (rc *runContext) deepCopy() *runContext {
 	copied := &runContext{
-		RootInput: rc.RootInput,
-		RunPath:   make([]RunStep, len(rc.RunPath)),
-		Session:   rc.Session,
+		RootInput:      rc.RootInput,
+		TypedRootInput: rc.TypedRootInput,
+		RunPath:        make([]RunStep, len(rc.RunPath)),
+		Session:        rc.Session,
 	}
 
 	copy(copied.RunPath, rc.RunPath)
@@ -270,6 +461,27 @@ func initRunCtx(ctx context.Context, agentName string, input *AgentInput) (conte
 	return setRunCtx(ctx, runCtx), runCtx
 }
 
+func initTypedRunCtx[M MessageType](ctx context.Context, agentName string, input *TypedAgentInput[M]) (context.Context, *runContext) {
+	runCtx := getRunCtx(ctx)
+	if runCtx != nil {
+		runCtx = runCtx.deepCopy()
+	} else {
+		runCtx = &runContext{Session: newRunSession()}
+	}
+
+	runCtx.RunPath = append(runCtx.RunPath, RunStep{agentName: agentName})
+	if runCtx.isRoot() && input != nil {
+		var zero M
+		if _, ok := any(zero).(*schema.Message); ok {
+			runCtx.RootInput = any(input).(*AgentInput)
+		} else {
+			runCtx.TypedRootInput = input
+		}
+	}
+
+	return setRunCtx(ctx, runCtx), runCtx
+}
+
 func joinRunCtxs(parentCtx context.Context, childCtxs ...context.Context) {
 	switch len(childCtxs) {
 	case 0:
@@ -291,6 +503,71 @@ func joinRunCtxs(parentCtx context.Context, childCtxs ...context.Context) {
 
 	// 3. Commit the sorted events to the parent.
 	commitEvents(parentCtx, newEvents)
+}
+
+func joinTypedRunCtxs[M MessageType](parentCtx context.Context, childCtxs ...context.Context) {
+	var zero M
+	if _, ok := any(zero).(*schema.Message); ok {
+		joinRunCtxs(parentCtx, childCtxs...)
+		return
+	}
+	switch len(childCtxs) {
+	case 0:
+		return
+	case 1:
+		newEvents := unwindLaneEvents(childCtxs...)
+		commitEvents(parentCtx, newEvents)
+		newTypedEvents := unwindTypedLaneEvents[M](childCtxs...)
+		commitTypedEvents[M](parentCtx, newTypedEvents)
+		return
+	}
+	newEvents := unwindLaneEvents(childCtxs...)
+	sort.Slice(newEvents, func(i, j int) bool {
+		return newEvents[i].TS < newEvents[j].TS
+	})
+	commitEvents(parentCtx, newEvents)
+
+	newTypedEvents := unwindTypedLaneEvents[M](childCtxs...)
+	sort.Slice(newTypedEvents, func(i, j int) bool {
+		return newTypedEvents[i].TS < newTypedEvents[j].TS
+	})
+	commitTypedEvents[M](parentCtx, newTypedEvents)
+}
+
+func unwindTypedLaneEvents[M MessageType](ctxs ...context.Context) []*typedAgentEventWrapper[M] {
+	var allNewEvents []*typedAgentEventWrapper[M]
+	for _, ctx := range ctxs {
+		runCtx := getRunCtx(ctx)
+		if runCtx != nil && runCtx.Session != nil {
+			if gl, ok := runCtx.Session.TypedLaneEvents.(*typedLaneEventsOf[M]); ok && gl != nil {
+				allNewEvents = append(allNewEvents, gl.Events...)
+			}
+		}
+	}
+	return allNewEvents
+}
+
+func commitTypedEvents[M MessageType](ctx context.Context, newEvents []*typedAgentEventWrapper[M]) {
+	if len(newEvents) == 0 {
+		return
+	}
+	runCtx := getRunCtx(ctx)
+	if runCtx == nil || runCtx.Session == nil {
+		return
+	}
+	if gl, ok := runCtx.Session.TypedLaneEvents.(*typedLaneEventsOf[M]); ok && gl != nil {
+		gl.Events = append(gl.Events, newEvents...)
+	} else {
+		store, _ := runCtx.Session.TypedEvents.(*[]*typedAgentEventWrapper[M])
+		if store == nil {
+			s := make([]*typedAgentEventWrapper[M], 0)
+			store = &s
+			runCtx.Session.TypedEvents = store
+		}
+		runCtx.Session.mtx.Lock()
+		*store = append(*store, newEvents...)
+		runCtx.Session.mtx.Unlock()
+	}
 }
 
 // commitEvents appends a slice of new events to the correct parent lane or main event log.
@@ -357,6 +634,43 @@ func forkRunCtx(ctx context.Context) context.Context {
 	return setRunCtx(ctx, childRunCtx)
 }
 
+func forkTypedRunCtx[M MessageType](ctx context.Context) context.Context {
+	var zero M
+	if _, ok := any(zero).(*schema.Message); ok {
+		return forkRunCtx(ctx)
+	}
+	parentRunCtx := getRunCtx(ctx)
+	if parentRunCtx == nil || parentRunCtx.Session == nil {
+		return ctx
+	}
+	childSession := &runSession{
+		Events:      parentRunCtx.Session.Events,
+		TypedEvents: parentRunCtx.Session.TypedEvents,
+		Values:      parentRunCtx.Session.Values,
+		valuesMtx:   parentRunCtx.Session.valuesMtx,
+	}
+	childSession.LaneEvents = &laneEvents{
+		Parent: parentRunCtx.Session.LaneEvents,
+		Events: make([]*agentEventWrapper, 0),
+	}
+	var parentTypedLane *typedLaneEventsOf[M]
+	if gl, ok := parentRunCtx.Session.TypedLaneEvents.(*typedLaneEventsOf[M]); ok {
+		parentTypedLane = gl
+	}
+	childSession.TypedLaneEvents = &typedLaneEventsOf[M]{
+		Parent: parentTypedLane,
+		Events: make([]*typedAgentEventWrapper[M], 0),
+	}
+	childRunCtx := &runContext{
+		RootInput:      parentRunCtx.RootInput,
+		TypedRootInput: parentRunCtx.TypedRootInput,
+		RunPath:        make([]RunStep, len(parentRunCtx.RunPath)),
+		Session:        childSession,
+	}
+	copy(childRunCtx.RunPath, parentRunCtx.RunPath)
+	return setRunCtx(ctx, childRunCtx)
+}
+
 // updateRunPathOnly creates a new context with an updated RunPath, but does NOT modify the Address.
 // This is used by sequential workflows to accumulate execution history for LLM context,
 // without incorrectly chaining the static addresses of peer agents.
@@ -384,7 +698,7 @@ func ClearRunCtx(ctx context.Context) context.Context {
 	return context.WithValue(ctx, runCtxKey{}, nil)
 }
 
-func ctxWithNewRunCtx(ctx context.Context, input *AgentInput, sharedParentSession bool) context.Context {
+func ctxWithNewTypedRunCtx[M MessageType](ctx context.Context, input *TypedAgentInput[M], sharedParentSession bool) context.Context {
 	var session *runSession
 	if sharedParentSession {
 		if parentSession := getSession(ctx); parentSession != nil {
@@ -397,7 +711,14 @@ func ctxWithNewRunCtx(ctx context.Context, input *AgentInput, sharedParentSessio
 	if session == nil {
 		session = newRunSession()
 	}
-	return setRunCtx(ctx, &runContext{Session: session, RootInput: input})
+	var zero M
+	rc := &runContext{Session: session}
+	if _, ok := any(zero).(*schema.Message); ok {
+		rc.RootInput = any(input).(*AgentInput)
+	} else {
+		rc.TypedRootInput = input
+	}
+	return setRunCtx(ctx, rc)
 }
 
 func getSession(ctx context.Context) *runSession {

@@ -22,6 +22,7 @@ import (
 	"github.com/cloudwego/eino/callbacks"
 	"github.com/cloudwego/eino/components"
 	icb "github.com/cloudwego/eino/internal/callbacks"
+	"github.com/cloudwego/eino/schema"
 )
 
 // AgentCallbackInput represents the input passed to agent callbacks during OnStart.
@@ -132,4 +133,101 @@ func getAgentType(agent Agent) string {
 		return typer.GetType()
 	}
 	return ""
+}
+
+// AgenticCallbackInput represents the input passed to agentic agent callbacks during OnStart.
+// Use ConvAgenticCallbackInput to safely convert from callbacks.CallbackInput.
+type AgenticCallbackInput struct {
+	Input      *TypedAgentInput[*schema.AgenticMessage]
+	ResumeInfo *ResumeInfo
+}
+
+// AgenticCallbackOutput represents the output passed to agentic agent callbacks during OnEnd.
+// Use ConvAgenticCallbackOutput to safely convert from callbacks.CallbackOutput.
+type AgenticCallbackOutput struct {
+	Events *AsyncIterator[*TypedAgentEvent[*schema.AgenticMessage]]
+}
+
+// ConvAgenticCallbackInput converts a callbacks.CallbackInput to *AgenticCallbackInput.
+// Returns nil if the input is not of the expected type.
+func ConvAgenticCallbackInput(input callbacks.CallbackInput) *AgenticCallbackInput {
+	if v, ok := input.(*AgenticCallbackInput); ok {
+		return v
+	}
+	return nil
+}
+
+// ConvAgenticCallbackOutput converts a callbacks.CallbackOutput to *AgenticCallbackOutput.
+// Returns nil if the output is not of the expected type.
+func ConvAgenticCallbackOutput(output callbacks.CallbackOutput) *AgenticCallbackOutput {
+	if v, ok := output.(*AgenticCallbackOutput); ok {
+		return v
+	}
+	return nil
+}
+
+func copyAgenticEventIterator(iter *AsyncIterator[*TypedAgentEvent[*schema.AgenticMessage]], n int) []*AsyncIterator[*TypedAgentEvent[*schema.AgenticMessage]] {
+	if n <= 0 {
+		return nil
+	}
+	if n == 1 {
+		return []*AsyncIterator[*TypedAgentEvent[*schema.AgenticMessage]]{iter}
+	}
+
+	iterators := make([]*AsyncIterator[*TypedAgentEvent[*schema.AgenticMessage]], n)
+	generators := make([]*AsyncGenerator[*TypedAgentEvent[*schema.AgenticMessage]], n)
+	for i := 0; i < n; i++ {
+		iterators[i], generators[i] = NewAsyncIteratorPair[*TypedAgentEvent[*schema.AgenticMessage]]()
+	}
+
+	go func() {
+		defer func() {
+			for _, g := range generators {
+				g.Close()
+			}
+		}()
+
+		for {
+			event, ok := iter.Next()
+			if !ok {
+				break
+			}
+			for i := 0; i < n-1; i++ {
+				generators[i].Send(copyAgenticEvent(event))
+			}
+			generators[n-1].Send(event)
+		}
+	}()
+
+	return iterators
+}
+
+func copyAgenticCallbackOutput(out *AgenticCallbackOutput, n int) []*AgenticCallbackOutput {
+	if out == nil || out.Events == nil {
+		result := make([]*AgenticCallbackOutput, n)
+		for i := 0; i < n; i++ {
+			result[i] = out
+		}
+		return result
+	}
+	iters := copyAgenticEventIterator(out.Events, n)
+	result := make([]*AgenticCallbackOutput, n)
+	for i, iter := range iters {
+		result[i] = &AgenticCallbackOutput{Events: iter}
+	}
+	return result
+}
+
+func initAgenticCallbacks(ctx context.Context, agentName, agentType string, opts ...AgentRunOption) context.Context {
+	ri := &callbacks.RunInfo{
+		Name:      agentName,
+		Type:      agentType,
+		Component: ComponentOfAgenticAgent,
+	}
+
+	o := getCommonOptions(nil, opts...)
+	if len(o.handlers) == 0 {
+		return icb.ReuseHandlers(ctx, ri)
+	}
+	return icb.AppendHandlers(ctx, ri, o.handlers...)
 }

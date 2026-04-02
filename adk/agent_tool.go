@@ -99,14 +99,34 @@ func NewAgentTool(_ context.Context, agent Agent, options ...AgentToolOption) to
 	}
 }
 
-type agentTool struct {
-	agent Agent
+// NewTypedAgentTool creates a new agent tool that wraps a TypedAgent as a tool.BaseTool.
+func NewTypedAgentTool[M MessageType](_ context.Context, agent TypedAgent[M], options ...AgentToolOption) tool.BaseTool {
+	opts := &AgentToolOptions{}
+	for _, opt := range options {
+		opt(opts)
+	}
+
+	return &typedAgentTool[M]{
+		agent:                  agent,
+		fullChatHistoryAsInput: opts.fullChatHistoryAsInput,
+		inputSchema:            opts.agentInputSchema,
+	}
+}
+
+type typedAgentTool[M MessageType] struct {
+	agent TypedAgent[M]
 
 	fullChatHistoryAsInput bool
 	inputSchema            *schema.ParamsOneOf
 }
 
-func (at *agentTool) Info(ctx context.Context) (*schema.ToolInfo, error) {
+type agentTool = typedAgentTool[*schema.Message]
+
+type agentToolRequest struct {
+	Request string `json:"request"`
+}
+
+func (at *typedAgentTool[M]) Info(ctx context.Context) (*schema.ToolInfo, error) {
 	param := at.inputSchema
 	if param == nil {
 		param = defaultAgentToolParam
@@ -119,41 +139,49 @@ func (at *agentTool) Info(ctx context.Context) (*schema.ToolInfo, error) {
 	}, nil
 }
 
-func (at *agentTool) InvokableRun(ctx context.Context, argumentsInJSON string, opts ...tool.Option) (string, error) {
+func (at *typedAgentTool[M]) InvokableRun(ctx context.Context, argumentsInJSON string, opts ...tool.Option) (string, error) {
 	gen, enableStreaming := getEmitGeneratorAndEnableStreaming(opts)
 	var ms *bridgeStore
-	var iter *AsyncIterator[*AgentEvent]
+	var iter *AsyncIterator[*TypedAgentEvent[M]]
 	var err error
 
 	wasInterrupted, hasState, state := tool.GetInterruptState[[]byte](ctx)
 	if !wasInterrupted {
 		ms = newBridgeStore()
-		var input []Message
+
+		var input []M
 		if at.fullChatHistoryAsInput {
-			input, err = getReactChatHistory(ctx, at.agent.Name(ctx))
-			if err != nil {
-				return "", err
+			var zero M
+			switch any(zero).(type) {
+			case *schema.Message:
+				msgInput, histErr := getReactChatHistory(ctx, at.agent.Name(ctx))
+				if histErr != nil {
+					return "", histErr
+				}
+				input = any(msgInput).([]M)
+			case *schema.AgenticMessage:
+				agenticInput, histErr := getAgenticReactChatHistory(ctx, at.agent.Name(ctx))
+				if histErr != nil {
+					return "", histErr
+				}
+				input = any(agenticInput).([]M)
+			default:
+				return "", fmt.Errorf("fullChatHistoryAsInput is only supported for *schema.Message agents")
 			}
 		} else {
 			if at.inputSchema == nil {
-				// default input schema
-				type request struct {
-					Request string `json:"request"`
-				}
-
-				req := &request{}
+				req := &agentToolRequest{}
 				err = sonic.UnmarshalString(argumentsInJSON, req)
 				if err != nil {
 					return "", err
 				}
 				argumentsInJSON = req.Request
 			}
-			input = []Message{
-				schema.UserMessage(argumentsInJSON),
-			}
+			input = newTypedUserMessages[M](argumentsInJSON)
 		}
 
-		iter = newInvokableAgentToolRunner(at.agent, ms, enableStreaming).Run(ctx, input,
+		runner := newTypedInvokableAgentToolRunner[M](at.agent, ms, enableStreaming)
+		iter = runner.Run(ctx, input,
 			append(extractAndDeriveCancelCtx(ctx, at.agent.Name(ctx), opts), WithCheckPointID(bridgeCheckpointID), withSharedParentSession())...)
 	} else {
 		if !hasState {
@@ -165,14 +193,14 @@ func (at *agentTool) InvokableRun(ctx context.Context, argumentsInJSON string, o
 		agentOpts := extractAndDeriveCancelCtx(ctx, at.agent.Name(ctx), opts)
 		agentOpts = append(agentOpts, withSharedParentSession())
 
-		iter, err = newInvokableAgentToolRunner(at.agent, ms, enableStreaming).
-			Resume(ctx, bridgeCheckpointID, agentOpts...)
+		runner := newTypedInvokableAgentToolRunner[M](at.agent, ms, enableStreaming)
+		iter, err = runner.Resume(ctx, bridgeCheckpointID, agentOpts...)
 		if err != nil {
 			return "", err
 		}
 	}
 
-	var lastEvent *AgentEvent
+	var lastEvent *TypedAgentEvent[M]
 	for {
 		event, ok := iter.Next()
 		if !ok {
@@ -198,9 +226,13 @@ func (at *agentTool) InvokableRun(ctx context.Context, argumentsInJSON string, o
 					rp = append(rp, event.RunPath...)
 					event.RunPath = rp
 				}
-				tmp := copyAgentEvent(event)
-				gen.Send(event)
-				event = tmp
+				if msgEvent, ok := any(event).(*AgentEvent); ok {
+					tmp := copyAgentEvent(msgEvent)
+					gen.Send(msgEvent)
+					event = any(tmp).(*TypedAgentEvent[M])
+				} else {
+					return "", fmt.Errorf("cross-message-type agent tools are not supported: cannot use an AgenticMessage agent as a tool of a Message agent")
+				}
 			}
 		}
 
@@ -231,7 +263,7 @@ func (at *agentTool) InvokableRun(ctx context.Context, argumentsInJSON string, o
 			if err != nil {
 				return "", err
 			}
-			ret = msg.Content
+			ret = extractTextContent(msg)
 		}
 	}
 
@@ -326,8 +358,54 @@ func getReactChatHistory(ctx context.Context, destAgentName string) ([]Message, 
 	return history, nil
 }
 
-func newInvokableAgentToolRunner(agent Agent, store compose.CheckPointStore, enableStreaming bool) *Runner {
-	return &Runner{
+func getAgenticReactChatHistory(ctx context.Context, destAgentName string) ([]*schema.AgenticMessage, error) {
+	var messages []*schema.AgenticMessage
+	err := compose.ProcessState(ctx, func(ctx context.Context, st *typedState[*schema.AgenticMessage]) error {
+		messages = make([]*schema.AgenticMessage, len(st.Messages)-1)
+		copy(messages, st.Messages[:len(st.Messages)-1])
+		return nil
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to get agentic chat history from state: %w", err)
+	}
+
+	var agentName string
+	if runCtx := getRunCtx(ctx); runCtx != nil && len(runCtx.RunPath) > 0 {
+		agentName = runCtx.RunPath[len(runCtx.RunPath)-1].agentName
+	}
+
+	a, t := genAgenticTransferMessages(destAgentName)
+	messages = append(messages, a, t)
+	history := make([]*schema.AgenticMessage, 0, len(messages))
+	for _, msg := range messages {
+		if msg.Role == schema.AgenticRoleTypeSystem {
+			continue
+		}
+
+		if msg.Role == schema.AgenticRoleTypeAssistant || msg.Role == schema.AgenticRoleTypeUser {
+			msg = rewriteAgenticMessage(msg, agentName)
+		}
+
+		history = append(history, msg)
+	}
+
+	return history, nil
+}
+
+func newTypedUserMessages[M MessageType](text string) []M {
+	var zero M
+	switch any(zero).(type) {
+	case *schema.Message:
+		return any([]Message{schema.UserMessage(text)}).([]M)
+	case *schema.AgenticMessage:
+		return any([]*schema.AgenticMessage{schema.UserAgenticMessage(text)}).([]M)
+	default:
+		return nil
+	}
+}
+
+func newTypedInvokableAgentToolRunner[M MessageType](agent TypedAgent[M], store compose.CheckPointStore, enableStreaming bool) *TypedRunner[M] {
+	return &TypedRunner[M]{
 		a:               agent,
 		enableStreaming: enableStreaming,
 		store:           store,
