@@ -420,8 +420,11 @@ func (a *flowAgent) Resume(ctx context.Context, info *ResumeInfo, opts ...AgentR
 				// to ensure unified tracing for container patterns.
 				return wrapIterWithOnEnd(ctx, ra.Resume(ctx, info, opts...))
 			}
+			return wrapIterWithOnEnd(ctx, genErrorIter(fmt.Errorf(
+				"failed to resume agent: agent '%s' (type %T) has no sub-agents and does not implement ResumableAgent interface. "+
+					"To support resume, your custom agent wrapper must implement the ResumableAgent interface", agentName, a.Agent)))
 		}
-		return wrapIterWithOnEnd(ctx, genErrorIter(fmt.Errorf("failed to resume agent: agent '%s' not found from flowAgent '%s'", nextAgentName, agentName)))
+		return wrapIterWithOnEnd(ctx, genErrorIter(fmt.Errorf("failed to resume agent: sub-agent '%s' not found in agent '%s'", nextAgentName, agentName)))
 	}
 
 	return wrapIterWithOnEnd(ctx, subAgent.Resume(ctxForSubAgents, info, opts...))
