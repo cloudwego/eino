@@ -43,12 +43,17 @@ var _ ResumableAgent = &ChatModelAgent{}
 type chatModelAgentExecCtx struct {
 	runtimeReturnDirectly map[string]bool
 	generator             *AsyncGenerator[*AgentEvent]
+	cancelCtx             *cancelContext
 }
 
 func (e *chatModelAgentExecCtx) send(event *AgentEvent) {
-	if e != nil && e.generator != nil {
-		e.generator.Send(event)
+	if e == nil || e.generator == nil {
+		return
 	}
+	if e.cancelCtx != nil && e.cancelCtx.isImmediateCancelled() {
+		return
+	}
+	e.generator.trySend(event)
 }
 
 type chatModelAgentExecCtxKey struct{}
@@ -837,6 +842,7 @@ func (a *ChatModelAgent) buildNoToolsRunFunc(_ context.Context) runFunc {
 
 		ctx = withChatModelAgentExecCtx(ctx, &chatModelAgentExecCtx{
 			generator: p.generator,
+			cancelCtx: cancelCtx,
 		})
 
 		// Pre-execution cancel check
@@ -947,6 +953,7 @@ func (a *ChatModelAgent) buildReActRunFunc(_ context.Context, bc *execContext) (
 		ctx = withChatModelAgentExecCtx(ctx, &chatModelAgentExecCtx{
 			runtimeReturnDirectly: p.returnDirectly,
 			generator:             p.generator,
+			cancelCtx:             cancelCtx,
 		})
 
 		// Pre-execution cancel check

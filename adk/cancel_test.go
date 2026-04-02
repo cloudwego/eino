@@ -2305,6 +2305,192 @@ func TestCancel_SequentialWorkflow_CancelAfterChatModel(t *testing.T) {
 	assert.True(t, len(resumeEvents) > 0, "Resume should produce events")
 }
 
+func TestCancelImmediate_OrphanedToolGoroutine_NoPanic(t *testing.T) {
+	t.Run("unit_send_after_close", func(t *testing.T) {
+		_, gen := NewAsyncIteratorPair[*AgentEvent]()
+
+		cc := newCancelContext()
+		cc.setMode(CancelImmediate)
+		close(cc.cancelChan)
+		close(cc.immediateChan)
+
+		gen.Close()
+
+		execCtx := &chatModelAgentExecCtx{
+			generator: gen,
+			cancelCtx: cc,
+		}
+
+		assert.NotPanics(t, func() {
+			execCtx.send(&AgentEvent{AgentName: "test"})
+		}, "send after generator.Close must not panic")
+	})
+
+	t.Run("unit_send_after_close_without_cancel_ctx", func(t *testing.T) {
+		_, gen := NewAsyncIteratorPair[*AgentEvent]()
+		gen.Close()
+
+		execCtx := &chatModelAgentExecCtx{
+			generator: gen,
+		}
+
+		assert.NotPanics(t, func() {
+			execCtx.send(&AgentEvent{AgentName: "test"})
+		}, "send after generator.Close must not panic even without cancelCtx (trySend safety net)")
+	})
+
+	t.Run("unit_send_nil_execCtx", func(t *testing.T) {
+		var execCtx *chatModelAgentExecCtx
+		assert.NotPanics(t, func() {
+			execCtx.send(&AgentEvent{AgentName: "test"})
+		}, "send on nil execCtx must not panic")
+	})
+
+	t.Run("unit_send_nil_generator", func(t *testing.T) {
+		execCtx := &chatModelAgentExecCtx{}
+		assert.NotPanics(t, func() {
+			execCtx.send(&AgentEvent{AgentName: "test"})
+		}, "send with nil generator must not panic")
+	})
+
+	t.Run("unit_isImmediateCancelled_nil_cancelContext", func(t *testing.T) {
+		var cc *cancelContext
+		assert.False(t, cc.isImmediateCancelled(), "nil cancelContext should return false")
+	})
+
+	t.Run("unit_trySend_race_window", func(t *testing.T) {
+		_, gen := NewAsyncIteratorPair[*AgentEvent]()
+		cc := newCancelContext()
+
+		gen.Close()
+
+		execCtx := &chatModelAgentExecCtx{
+			generator: gen,
+			cancelCtx: cc,
+		}
+
+		assert.NotPanics(t, func() {
+			execCtx.send(&AgentEvent{AgentName: "test"})
+		}, "trySend must handle the case where isImmediateCancelled is false but generator is closed")
+	})
+
+	t.Run("unit_SendEvent_after_close", func(t *testing.T) {
+		_, gen := NewAsyncIteratorPair[*AgentEvent]()
+
+		cc := newCancelContext()
+		cc.setMode(CancelImmediate)
+		close(cc.cancelChan)
+		close(cc.immediateChan)
+
+		gen.Close()
+
+		execCtx := &chatModelAgentExecCtx{
+			generator: gen,
+			cancelCtx: cc,
+		}
+
+		ctx := withChatModelAgentExecCtx(context.Background(), execCtx)
+
+		assert.NotPanics(t, func() {
+			err := SendEvent(ctx, &AgentEvent{AgentName: "test"})
+			assert.NoError(t, err)
+		}, "SendEvent after generator.Close must not panic")
+	})
+
+	t.Run("unit_SendEvent_no_execCtx", func(t *testing.T) {
+		err := SendEvent(context.Background(), &AgentEvent{AgentName: "test"})
+		assert.Error(t, err, "SendEvent without execCtx should return error")
+	})
+
+	t.Run("integration_cancel_escalation_orphans_tool", func(t *testing.T) {
+		ctx := context.Background()
+
+		toolStarted := make(chan struct{}, 1)
+		toolDone := make(chan struct{}, 1)
+		st := &slowToolWithSignal{
+			name:        "orphan_tool",
+			delay:       2 * time.Second,
+			result:      "tool result",
+			startedChan: toolStarted,
+		}
+
+		mdl := &simpleChatModel{
+			response: &schema.Message{
+				Role:    schema.Assistant,
+				Content: "",
+				ToolCalls: []schema.ToolCall{
+					{
+						ID:   "call_orphan_1",
+						Type: "function",
+						Function: schema.FunctionCall{
+							Name:      "orphan_tool",
+							Arguments: `{"input": "test"}`,
+						},
+					},
+				},
+			},
+		}
+
+		agent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+			Name:        "OrphanTestAgent",
+			Description: "Test agent for orphaned tool goroutine panic",
+			Model:       mdl,
+			ToolsConfig: ToolsConfig{
+				ToolsNodeConfig: compose.ToolsNodeConfig{
+					Tools: []tool.BaseTool{st},
+				},
+			},
+		})
+		assert.NoError(t, err)
+
+		cancelOpt, cancelFn := WithCancel()
+		iter := agent.Run(ctx, &AgentInput{
+			Messages: []Message{schema.UserMessage("Use the tool")},
+		}, cancelOpt)
+		assert.NotNil(t, iter)
+
+		select {
+		case <-toolStarted:
+		case <-time.After(10 * time.Second):
+			t.Fatal("Tool did not start")
+		}
+
+		timeout := 50 * time.Millisecond
+		handle, contributed := cancelFn(
+			WithAgentCancelMode(CancelAfterChatModel),
+			WithAgentCancelTimeout(timeout),
+		)
+		assert.True(t, contributed, "Cancel should contribute")
+
+		err = handle.Wait()
+		assert.True(t, err == nil || errors.Is(err, ErrCancelTimeout),
+			"handle.Wait should return nil or ErrCancelTimeout, got: %v", err)
+
+		for {
+			_, ok := iter.Next()
+			if !ok {
+				break
+			}
+		}
+
+		go func() {
+			time.Sleep(3 * time.Second)
+			select {
+			case toolDone <- struct{}{}:
+			default:
+			}
+		}()
+
+		runtime.Gosched()
+		time.Sleep(3 * time.Second)
+
+		select {
+		case <-toolDone:
+		default:
+		}
+	})
+}
+
 // -- Tests for CancelImmediate in nested agent structures --
 
 func newTestChatModel(response *schema.Message, delay time.Duration) *cancelTestChatModel {
