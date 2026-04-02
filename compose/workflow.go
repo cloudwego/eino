@@ -113,6 +113,15 @@ func (wf *Workflow[I, O]) AddEmbeddingNode(key string, embedding embedding.Embed
 	return wf.initNode(key)
 }
 
+// AddMultiModalEmbeddingNode adds a multimodal embedding node and returns it.
+// e.g.
+//
+//	wf.AddMultiModalEmbeddingNode("embedding_node_key", multiModalEmbeddingNode)
+func (wf *Workflow[I, O]) AddMultiModalEmbeddingNode(key string, embedding embedding.MultiModalEmbedder, opts ...GraphAddNodeOpt) *WorkflowNode {
+	_ = wf.g.AddMultiModalEmbeddingNode(key, embedding, opts...)
+	return wf.initNode(key)
+}
+
 // AddIndexerNode adds an indexer node to the workflow and returns it.
 func (wf *Workflow[I, O]) AddIndexerNode(key string, indexer indexer.Indexer, opts ...GraphAddNodeOpt) *WorkflowNode {
 	_ = wf.g.AddIndexerNode(key, indexer, opts...)
