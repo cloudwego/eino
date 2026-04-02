@@ -19,9 +19,11 @@ package adk
 import (
 	"context"
 	"errors"
+	"io"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/cloudwego/eino/callbacks"
 	"github.com/cloudwego/eino/components/model"
@@ -1665,4 +1667,653 @@ func TestCascadingTyped_TypedEventFromMessage(t *testing.T) {
 	assert.NotNil(t, event.Output.MessageOutput)
 	assert.Equal(t, msg, event.Output.MessageOutput.Message)
 	assert.Equal(t, schema.RoleType(schema.Assistant), event.Output.MessageOutput.Role)
+}
+
+func TestCoverage_FlowAgent_ResumeNotResumable(t *testing.T) {
+	ctx := context.Background()
+
+	agent := &mockAgenticAgent{
+		name:        "non-resumable",
+		description: "cannot resume",
+		responses: []*TypedAgentEvent[*schema.AgenticMessage]{
+			{Output: &TypedAgentOutput[*schema.AgenticMessage]{
+				MessageOutput: &TypedMessageVariant[*schema.AgenticMessage]{
+					Message: agenticMsg("done"),
+				},
+			}},
+		},
+	}
+
+	fa := toTypedFlowAgent[*schema.AgenticMessage](ctx, agent)
+
+	info := &ResumeInfo{WasInterrupted: true}
+	iter := fa.Resume(ctx, info)
+
+	var foundErr bool
+	for {
+		event, ok := iter.Next()
+		if !ok {
+			break
+		}
+		if event.Err != nil {
+			foundErr = true
+		}
+	}
+	assert.True(t, foundErr, "should get error for non-resumable agent")
+}
+
+func TestCoverage_GenAgenticErrorIter(t *testing.T) {
+	testErr := errors.New("test agentic error")
+	iter := genAgenticErrorIter(testErr)
+
+	event, ok := iter.Next()
+	require.True(t, ok)
+	assert.Equal(t, testErr, event.Err)
+
+	_, ok = iter.Next()
+	assert.False(t, ok)
+}
+
+func TestCoverage_TypedSendTransferEvents_Agentic(t *testing.T) {
+	iter, gen := NewAsyncIteratorPair[*TypedAgentEvent[*schema.AgenticMessage]]()
+	go func() {
+		typedSendTransferEvents(gen, []string{"agent-b", "agent-c"})
+		gen.Close()
+	}()
+
+	var events []*TypedAgentEvent[*schema.AgenticMessage]
+	for {
+		event, ok := iter.Next()
+		if !ok {
+			break
+		}
+		events = append(events, event)
+	}
+
+	require.Len(t, events, 4)
+	assert.NotNil(t, events[0].Output)
+	assert.NotNil(t, events[1].Action)
+	assert.Equal(t, "agent-b", events[1].Action.TransferToAgent.DestAgentName)
+	assert.NotNil(t, events[2].Output)
+	assert.NotNil(t, events[3].Action)
+	assert.Equal(t, "agent-c", events[3].Action.TransferToAgent.DestAgentName)
+}
+
+func TestCoverage_ChatModelAgent_OnSetSubAgents_FrozenError(t *testing.T) {
+	ctx := context.Background()
+
+	m := &mockAgenticModel{
+		generateFn: func(_ context.Context, _ []*schema.AgenticMessage, _ ...model.Option) (*schema.AgenticMessage, error) {
+			return agenticMsg("done"), nil
+		},
+	}
+
+	agent, err := NewTypedChatModelAgent[*schema.AgenticMessage](ctx, &TypedChatModelAgentConfig[*schema.AgenticMessage]{
+		Name:        "freeze-test",
+		Description: "frozen test agent",
+		Model:       m,
+	})
+	require.NoError(t, err)
+
+	input := &TypedAgentInput[*schema.AgenticMessage]{
+		Messages: []*schema.AgenticMessage{schema.UserAgenticMessage("Hi")},
+	}
+	iter := agent.Run(ctx, input)
+	for {
+		_, ok := iter.Next()
+		if !ok {
+			break
+		}
+	}
+
+	err = agent.OnSetSubAgents(ctx, []TypedAgent[*schema.AgenticMessage]{
+		&mockAgenticAgent{name: "late-child"},
+	})
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "frozen")
+}
+
+func TestCoverage_ChatModelAgent_OnSetAsSubAgent_FrozenError(t *testing.T) {
+	ctx := context.Background()
+
+	m := &mockAgenticModel{
+		generateFn: func(_ context.Context, _ []*schema.AgenticMessage, _ ...model.Option) (*schema.AgenticMessage, error) {
+			return agenticMsg("done"), nil
+		},
+	}
+
+	agent, err := NewTypedChatModelAgent[*schema.AgenticMessage](ctx, &TypedChatModelAgentConfig[*schema.AgenticMessage]{
+		Name:        "freeze-child",
+		Description: "frozen child agent",
+		Model:       m,
+	})
+	require.NoError(t, err)
+
+	input := &TypedAgentInput[*schema.AgenticMessage]{
+		Messages: []*schema.AgenticMessage{schema.UserAgenticMessage("Hi")},
+	}
+	iter := agent.Run(ctx, input)
+	for {
+		_, ok := iter.Next()
+		if !ok {
+			break
+		}
+	}
+
+	err = agent.OnSetAsSubAgent(ctx, &mockAgenticAgent{name: "parent"})
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "frozen")
+}
+
+func TestCoverage_ChatModelAgent_OnSetAsSubAgent_DuplicateError(t *testing.T) {
+	ctx := context.Background()
+
+	m := &mockAgenticModel{
+		generateFn: func(_ context.Context, _ []*schema.AgenticMessage, _ ...model.Option) (*schema.AgenticMessage, error) {
+			return agenticMsg("done"), nil
+		},
+	}
+
+	agent, err := NewTypedChatModelAgent[*schema.AgenticMessage](ctx, &TypedChatModelAgentConfig[*schema.AgenticMessage]{
+		Name:        "dup-child",
+		Description: "duplicate child agent",
+		Model:       m,
+	})
+	require.NoError(t, err)
+
+	err = agent.OnSetAsSubAgent(ctx, &mockAgenticAgent{name: "parent1"})
+	assert.NoError(t, err)
+
+	err = agent.OnSetAsSubAgent(ctx, &mockAgenticAgent{name: "parent2"})
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "already been set as a sub-agent")
+}
+
+func TestCoverage_ChatModelAgent_OnDisallowTransferToParent_FrozenError(t *testing.T) {
+	ctx := context.Background()
+
+	m := &mockAgenticModel{
+		generateFn: func(_ context.Context, _ []*schema.AgenticMessage, _ ...model.Option) (*schema.AgenticMessage, error) {
+			return agenticMsg("done"), nil
+		},
+	}
+
+	agent, err := NewTypedChatModelAgent[*schema.AgenticMessage](ctx, &TypedChatModelAgentConfig[*schema.AgenticMessage]{
+		Name:        "disallow-test",
+		Description: "disallow transfer test",
+		Model:       m,
+	})
+	require.NoError(t, err)
+
+	input := &TypedAgentInput[*schema.AgenticMessage]{
+		Messages: []*schema.AgenticMessage{schema.UserAgenticMessage("Hi")},
+	}
+	iter := agent.Run(ctx, input)
+	for {
+		_, ok := iter.Next()
+		if !ok {
+			break
+		}
+	}
+
+	err = agent.OnDisallowTransferToParent(ctx)
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "frozen")
+}
+
+func TestCoverage_TypedGetMessage_AgenticNonStreaming(t *testing.T) {
+	msg := agenticMsg("hello")
+	event := &TypedAgentEvent[*schema.AgenticMessage]{
+		Output: &TypedAgentOutput[*schema.AgenticMessage]{
+			MessageOutput: &TypedMessageVariant[*schema.AgenticMessage]{
+				Message: msg,
+			},
+		},
+	}
+
+	result, retEvent, err := TypedGetMessage(event)
+	assert.NoError(t, err)
+	assert.Equal(t, msg, result)
+	assert.Equal(t, event, retEvent)
+}
+
+func TestCoverage_TypedGetMessage_AgenticStreaming(t *testing.T) {
+	r, w := schema.Pipe[*schema.AgenticMessage](2)
+	go func() {
+		defer w.Close()
+		w.Send(&schema.AgenticMessage{
+			Role: schema.AgenticRoleTypeAssistant,
+			ContentBlocks: []*schema.ContentBlock{
+				schema.NewContentBlock(&schema.AssistantGenText{Text: "Hello "}),
+			},
+		}, nil)
+		w.Send(&schema.AgenticMessage{
+			Role: schema.AgenticRoleTypeAssistant,
+			ContentBlocks: []*schema.ContentBlock{
+				schema.NewContentBlock(&schema.AssistantGenText{Text: "world"}),
+			},
+		}, nil)
+	}()
+
+	event := &TypedAgentEvent[*schema.AgenticMessage]{
+		Output: &TypedAgentOutput[*schema.AgenticMessage]{
+			MessageOutput: &TypedMessageVariant[*schema.AgenticMessage]{
+				IsStreaming:   true,
+				MessageStream: r,
+			},
+		},
+	}
+
+	result, retEvent, err := TypedGetMessage(event)
+	assert.NoError(t, err)
+	assert.NotNil(t, result)
+	assert.NotNil(t, retEvent)
+	assert.NotNil(t, retEvent.Output.MessageOutput.MessageStream)
+}
+
+func TestCoverage_TypedGetMessage_NilOutput(t *testing.T) {
+	event := &TypedAgentEvent[*schema.AgenticMessage]{}
+
+	result, retEvent, err := TypedGetMessage(event)
+	assert.NoError(t, err)
+	assert.Nil(t, result)
+	assert.Equal(t, event, retEvent)
+}
+
+func TestCoverage_GetMessage_NonStreaming(t *testing.T) {
+	msg := schema.AssistantMessage("hello", nil)
+	event := &AgentEvent{
+		Output: &AgentOutput{
+			MessageOutput: &MessageVariant{
+				Message: msg,
+			},
+		},
+	}
+
+	result, retEvent, err := GetMessage(event)
+	assert.NoError(t, err)
+	assert.Equal(t, msg, result)
+	assert.Equal(t, event, retEvent)
+}
+
+func TestCoverage_GetMessage_Streaming(t *testing.T) {
+	r, w := schema.Pipe[*schema.Message](2)
+	go func() {
+		defer w.Close()
+		w.Send(schema.AssistantMessage("Hello ", nil), nil)
+		w.Send(schema.AssistantMessage("world", nil), nil)
+	}()
+
+	event := &AgentEvent{
+		Output: &AgentOutput{
+			MessageOutput: &MessageVariant{
+				IsStreaming:   true,
+				MessageStream: r,
+			},
+		},
+	}
+
+	result, retEvent, err := GetMessage(event)
+	assert.NoError(t, err)
+	assert.NotNil(t, result)
+	assert.NotNil(t, retEvent)
+}
+
+func TestCoverage_NewTypedAgentTool_Agentic(t *testing.T) {
+	ctx := context.Background()
+
+	m := &mockAgenticModel{
+		generateFn: func(_ context.Context, _ []*schema.AgenticMessage, _ ...model.Option) (*schema.AgenticMessage, error) {
+			return agenticMsg("tool response"), nil
+		},
+	}
+
+	agent, err := NewTypedChatModelAgent[*schema.AgenticMessage](ctx, &TypedChatModelAgentConfig[*schema.AgenticMessage]{
+		Name:        "tool-agent",
+		Description: "agent wrapped as tool",
+		Model:       m,
+	})
+	require.NoError(t, err)
+
+	agentTool := NewTypedAgentTool[*schema.AgenticMessage](ctx, agent)
+
+	info, err := agentTool.Info(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, "tool-agent", info.Name)
+
+	result, err := agentTool.(tool.InvokableTool).InvokableRun(ctx, `{"request":"test"}`)
+	require.NoError(t, err)
+	assert.Contains(t, result, "tool response")
+}
+
+func TestCoverage_RewriteAgenticMessage(t *testing.T) {
+	t.Run("AssistantMessage", func(t *testing.T) {
+		msg := &schema.AgenticMessage{
+			Role: schema.AgenticRoleTypeAssistant,
+			ContentBlocks: []*schema.ContentBlock{
+				schema.NewContentBlock(&schema.AssistantGenText{Text: "I said hello"}),
+				{
+					Type:             schema.ContentBlockTypeFunctionToolCall,
+					FunctionToolCall: &schema.FunctionToolCall{Name: "search", Arguments: `{"q":"test"}`},
+				},
+				nil,
+			},
+		}
+		rewritten := rewriteAgenticMessage(msg, "AgentA")
+		assert.Equal(t, schema.AgenticRoleTypeUser, rewritten.Role)
+		assert.Contains(t, rewritten.ContentBlocks[0].UserInputText.Text, "AgentA")
+		assert.Contains(t, rewritten.ContentBlocks[0].UserInputText.Text, "I said hello")
+		assert.Contains(t, rewritten.ContentBlocks[0].UserInputText.Text, "search")
+	})
+
+	t.Run("UserToolResultMessage", func(t *testing.T) {
+		msg := &schema.AgenticMessage{
+			Role: schema.AgenticRoleTypeUser,
+			ContentBlocks: []*schema.ContentBlock{
+				{
+					Type: schema.ContentBlockTypeFunctionToolResult,
+					FunctionToolResult: &schema.FunctionToolResult{
+						Name:   "search",
+						Result: "found it",
+					},
+				},
+				nil,
+			},
+		}
+		rewritten := rewriteAgenticMessage(msg, "AgentB")
+		assert.Equal(t, schema.AgenticRoleTypeUser, rewritten.Role)
+		assert.Contains(t, rewritten.ContentBlocks[0].UserInputText.Text, "AgentB")
+		assert.Contains(t, rewritten.ContentBlocks[0].UserInputText.Text, "found it")
+	})
+
+	t.Run("PreserveUserInputBlocks", func(t *testing.T) {
+		msg := &schema.AgenticMessage{
+			Role: schema.AgenticRoleTypeAssistant,
+			ContentBlocks: []*schema.ContentBlock{
+				schema.NewContentBlock(&schema.AssistantGenText{Text: "text"}),
+				{Type: schema.ContentBlockTypeUserInputText, UserInputText: &schema.UserInputText{Text: "user text"}},
+				{Type: schema.ContentBlockTypeUserInputImage, UserInputImage: &schema.UserInputImage{}},
+			},
+		}
+		rewritten := rewriteAgenticMessage(msg, "AgentC")
+		assert.True(t, len(rewritten.ContentBlocks) >= 3)
+	})
+}
+
+func TestCoverage_FlowAgent_WorkflowSubAgent(t *testing.T) {
+	ctx := context.Background()
+
+	step1 := &mockAgenticAgent{
+		name:        "step1",
+		description: "step 1",
+		responses: []*TypedAgentEvent[*schema.AgenticMessage]{
+			{
+				AgentName: "step1",
+				Output: &TypedAgentOutput[*schema.AgenticMessage]{
+					MessageOutput: &TypedMessageVariant[*schema.AgenticMessage]{
+						Message: agenticMsg("step1 done"),
+					},
+				},
+			},
+		},
+	}
+
+	step2 := &mockAgenticAgent{
+		name:        "step2",
+		description: "step 2",
+		responses: []*TypedAgentEvent[*schema.AgenticMessage]{
+			{
+				AgentName: "step2",
+				Output: &TypedAgentOutput[*schema.AgenticMessage]{
+					MessageOutput: &TypedMessageVariant[*schema.AgenticMessage]{
+						Message: agenticMsg("step2 done"),
+					},
+				},
+			},
+		},
+	}
+
+	seqAgent, err := NewTypedSequentialAgent[*schema.AgenticMessage](ctx, &TypedSequentialAgentConfig[*schema.AgenticMessage]{
+		Name:      "seq",
+		SubAgents: []TypedAgent[*schema.AgenticMessage]{step1, step2},
+	})
+	require.NoError(t, err)
+
+	runner := NewTypedRunner[*schema.AgenticMessage](TypedRunnerConfig[*schema.AgenticMessage]{
+		Agent: seqAgent,
+	})
+
+	iter := runner.Run(ctx, []*schema.AgenticMessage{
+		schema.UserAgenticMessage("start seq"),
+	})
+
+	var events []*TypedAgentEvent[*schema.AgenticMessage]
+	for {
+		event, ok := iter.Next()
+		if !ok {
+			break
+		}
+		events = append(events, event)
+	}
+
+	require.NotEmpty(t, events)
+}
+
+func TestCoverage_CopyAgenticEvent(t *testing.T) {
+	original := &TypedAgentEvent[*schema.AgenticMessage]{
+		AgentName: "agent1",
+		RunPath:   []RunStep{{agentName: "root"}, {agentName: "agent1"}},
+		Output: &TypedAgentOutput[*schema.AgenticMessage]{
+			MessageOutput: &TypedMessageVariant[*schema.AgenticMessage]{
+				Message: agenticMsg("hello"),
+			},
+		},
+		Action: &AgentAction{
+			TransferToAgent: &TransferToAgentAction{DestAgentName: "agent2"},
+		},
+	}
+
+	copied := copyAgenticEvent(original)
+	assert.Equal(t, original.AgentName, copied.AgentName)
+	assert.Equal(t, len(original.RunPath), len(copied.RunPath))
+	assert.Equal(t, original.Action, copied.Action)
+
+	copied.RunPath[0].agentName = "mutated"
+	assert.NotEqual(t, original.RunPath[0].agentName, copied.RunPath[0].agentName)
+}
+
+func TestCoverage_GenAgenticTransferMessages(t *testing.T) {
+	aMsg, tMsg := genAgenticTransferMessages("target-agent")
+	require.NotNil(t, aMsg)
+	require.NotNil(t, tMsg)
+
+	assert.Equal(t, schema.AgenticRoleTypeAssistant, aMsg.Role)
+	assert.Equal(t, schema.AgenticRoleTypeUser, tMsg.Role)
+
+	var hasToolCall bool
+	for _, block := range aMsg.ContentBlocks {
+		if block.Type == schema.ContentBlockTypeFunctionToolCall {
+			hasToolCall = true
+			assert.Equal(t, TransferToAgentToolName, block.FunctionToolCall.Name)
+		}
+	}
+	assert.True(t, hasToolCall)
+
+	var hasToolResult bool
+	for _, block := range tMsg.ContentBlocks {
+		if block.Type == schema.ContentBlockTypeFunctionToolResult {
+			hasToolResult = true
+			assert.Equal(t, TransferToAgentToolName, block.FunctionToolResult.Name)
+			assert.Contains(t, block.FunctionToolResult.Result, "target-agent")
+		}
+	}
+	assert.True(t, hasToolResult)
+}
+
+func TestCoverage_FlowAgent_HistoryRewriter(t *testing.T) {
+	ctx := context.Background()
+
+	var receivedMessages []*schema.AgenticMessage
+	m := &mockAgenticModel{
+		generateFn: func(_ context.Context, input []*schema.AgenticMessage, _ ...model.Option) (*schema.AgenticMessage, error) {
+			receivedMessages = input
+			return agenticMsg("done"), nil
+		},
+	}
+
+	agent, err := NewTypedChatModelAgent[*schema.AgenticMessage](ctx, &TypedChatModelAgentConfig[*schema.AgenticMessage]{
+		Name:        "rewriter-agent",
+		Description: "agent with history rewriter",
+		Model:       m,
+	})
+	require.NoError(t, err)
+
+	histRewriter := TypedHistoryRewriter[*schema.AgenticMessage](func(_ context.Context, entries []*TypedHistoryEntry[*schema.AgenticMessage]) ([]*schema.AgenticMessage, error) {
+		var msgs []*schema.AgenticMessage
+		for _, e := range entries {
+			msgs = append(msgs, e.Message)
+		}
+		msgs = append(msgs, schema.UserAgenticMessage("injected by rewriter"))
+		return msgs, nil
+	})
+
+	fa := toTypedFlowAgent[*schema.AgenticMessage](ctx, agent, TypedWithHistoryRewriter[*schema.AgenticMessage](histRewriter))
+
+	input := &TypedAgentInput[*schema.AgenticMessage]{
+		Messages: []*schema.AgenticMessage{schema.UserAgenticMessage("original")},
+	}
+	iter := fa.Run(ctx, input)
+
+	for {
+		_, ok := iter.Next()
+		if !ok {
+			break
+		}
+	}
+
+	found := false
+	for _, msg := range receivedMessages {
+		for _, b := range msg.ContentBlocks {
+			if b.UserInputText != nil && b.UserInputText.Text == "injected by rewriter" {
+				found = true
+			}
+		}
+	}
+	assert.True(t, found, "history rewriter should inject messages")
+}
+
+func TestCoverage_ChatModelAgent_ModelGenerateError(t *testing.T) {
+	ctx := context.Background()
+
+	testErr := errors.New("model generate failed")
+	m := &mockAgenticModel{
+		generateFn: func(_ context.Context, _ []*schema.AgenticMessage, _ ...model.Option) (*schema.AgenticMessage, error) {
+			return nil, testErr
+		},
+	}
+
+	agent, err := NewTypedChatModelAgent[*schema.AgenticMessage](ctx, &TypedChatModelAgentConfig[*schema.AgenticMessage]{
+		Name:        "error-model-agent",
+		Description: "tests model generate error",
+		Model:       m,
+	})
+	require.NoError(t, err)
+
+	runner := NewTypedRunner[*schema.AgenticMessage](TypedRunnerConfig[*schema.AgenticMessage]{
+		Agent: agent,
+	})
+
+	iter := runner.Query(ctx, "trigger error")
+
+	var foundErr bool
+	for {
+		event, ok := iter.Next()
+		if !ok {
+			break
+		}
+		if event.Err != nil {
+			foundErr = true
+		}
+	}
+	assert.True(t, foundErr, "should propagate model error")
+}
+
+func TestCoverage_NewTypedUserMessages(t *testing.T) {
+	t.Run("Message", func(t *testing.T) {
+		msgs := newTypedUserMessages[*schema.Message]("hello")
+		require.Len(t, msgs, 1)
+		assert.Equal(t, schema.User, msgs[0].Role)
+		assert.Equal(t, "hello", msgs[0].Content)
+	})
+
+	t.Run("AgenticMessage", func(t *testing.T) {
+		msgs := newTypedUserMessages[*schema.AgenticMessage]("hello")
+		require.Len(t, msgs, 1)
+		assert.Equal(t, schema.AgenticRoleTypeUser, msgs[0].Role)
+	})
+}
+
+func TestCoverage_TypedEndpointModel_NilEndpoints(t *testing.T) {
+	ctx := context.Background()
+
+	m := &typedEndpointModel[*schema.AgenticMessage]{}
+
+	_, err := m.Generate(ctx, nil)
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "generate endpoint not set")
+
+	_, err = m.Stream(ctx, nil)
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "stream endpoint not set")
+}
+
+func TestCoverage_TypedEndpointModel_WithEndpoints(t *testing.T) {
+	ctx := context.Background()
+
+	expected := agenticMsg("generated")
+	m := &typedEndpointModel[*schema.AgenticMessage]{
+		generate: func(_ context.Context, _ []*schema.AgenticMessage, _ ...model.Option) (*schema.AgenticMessage, error) {
+			return expected, nil
+		},
+		stream: func(_ context.Context, _ []*schema.AgenticMessage, _ ...model.Option) (*schema.StreamReader[*schema.AgenticMessage], error) {
+			r, w := schema.Pipe[*schema.AgenticMessage](1)
+			go func() {
+				defer w.Close()
+				w.Send(expected, nil)
+			}()
+			return r, nil
+		},
+	}
+
+	result, err := m.Generate(ctx, nil)
+	assert.NoError(t, err)
+	assert.Equal(t, expected, result)
+
+	stream, err := m.Stream(ctx, nil)
+	assert.NoError(t, err)
+	assert.NotNil(t, stream)
+	msg, err := stream.Recv()
+	assert.NoError(t, err)
+	assert.Equal(t, expected, msg)
+	_, err = stream.Recv()
+	assert.Equal(t, io.EOF, err)
+}
+
+func TestCoverage_SetAutomaticClose(t *testing.T) {
+	r, w := schema.Pipe[*schema.AgenticMessage](1)
+	go func() {
+		defer w.Close()
+		w.Send(agenticMsg("data"), nil)
+	}()
+
+	event := &TypedAgentEvent[*schema.AgenticMessage]{
+		Output: &TypedAgentOutput[*schema.AgenticMessage]{
+			MessageOutput: &TypedMessageVariant[*schema.AgenticMessage]{
+				IsStreaming:   true,
+				MessageStream: r,
+			},
+		},
+	}
+
+	typedSetAutomaticClose(event)
 }

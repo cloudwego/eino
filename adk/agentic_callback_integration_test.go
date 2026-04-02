@@ -22,6 +22,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/cloudwego/eino/callbacks"
 	"github.com/cloudwego/eino/components/model"
@@ -378,4 +379,133 @@ func TestAgenticCallbackWithSequentialWorkflow(t *testing.T) {
 	}
 	assert.True(t, foundAgent1, "Agent1 callback should be invoked")
 	assert.True(t, foundAgent2, "Agent2 callback should be invoked")
+}
+
+func TestCoverage_FlowAgent_RunWithCallbacksAndSubAgents(t *testing.T) {
+	ctx := context.Background()
+
+	child := &mockAgenticAgent{
+		name:        "child",
+		description: "child agent",
+		responses: []*TypedAgentEvent[*schema.AgenticMessage]{
+			{
+				AgentName: "child",
+				Output: &TypedAgentOutput[*schema.AgenticMessage]{
+					MessageOutput: &TypedMessageVariant[*schema.AgenticMessage]{
+						Message: agenticMsg("child response"),
+					},
+				},
+			},
+		},
+	}
+
+	m := &mockAgenticModel{
+		generateFn: func(_ context.Context, _ []*schema.AgenticMessage, _ ...model.Option) (*schema.AgenticMessage, error) {
+			return agenticMsg("parent response"), nil
+		},
+	}
+
+	parent, err := NewTypedChatModelAgent[*schema.AgenticMessage](ctx, &TypedChatModelAgentConfig[*schema.AgenticMessage]{
+		Name:        "parent",
+		Description: "parent agent",
+		Instruction: "You are helpful.",
+		Model:       m,
+	})
+	require.NoError(t, err)
+
+	ra, err := TypedSetSubAgents[*schema.AgenticMessage](ctx, parent, []TypedAgent[*schema.AgenticMessage]{child})
+	require.NoError(t, err)
+	require.NotNil(t, ra)
+
+	var onStartCalled, onEndCalled bool
+	handler := callbacks.NewHandlerBuilder().
+		OnStartFn(func(ctx context.Context, info *callbacks.RunInfo, input callbacks.CallbackInput) context.Context {
+			if info.Component != ComponentOfAgenticAgent {
+				return ctx
+			}
+			onStartCalled = true
+			if agentInput := ConvAgenticCallbackInput(input); agentInput != nil {
+				assert.NotNil(t, agentInput.Input)
+			}
+			return ctx
+		}).
+		OnEndFn(func(ctx context.Context, info *callbacks.RunInfo, output callbacks.CallbackOutput) context.Context {
+			if info.Component != ComponentOfAgenticAgent {
+				return ctx
+			}
+			onEndCalled = true
+			return ctx
+		}).
+		Build()
+
+	runner := NewTypedRunner[*schema.AgenticMessage](TypedRunnerConfig[*schema.AgenticMessage]{
+		Agent: ra,
+	})
+
+	iter := runner.Run(ctx, []*schema.AgenticMessage{
+		schema.UserAgenticMessage("Hi"),
+	}, WithCallbacks(handler))
+
+	var events []*TypedAgentEvent[*schema.AgenticMessage]
+	for {
+		event, ok := iter.Next()
+		if !ok {
+			break
+		}
+		events = append(events, event)
+	}
+
+	require.NotEmpty(t, events)
+	assert.True(t, onStartCalled, "agentic OnStart callback should fire")
+	assert.True(t, onEndCalled, "agentic OnEnd callback should fire")
+}
+
+func TestCoverage_WrapAgenticIterWithOnEnd(t *testing.T) {
+	ctx := context.Background()
+
+	var onEndCalled bool
+	handler := callbacks.NewHandlerBuilder().
+		OnStartFn(func(ctx context.Context, info *callbacks.RunInfo, input callbacks.CallbackInput) context.Context {
+			return ctx
+		}).
+		OnEndFn(func(ctx context.Context, info *callbacks.RunInfo, output callbacks.CallbackOutput) context.Context {
+			if info.Component == ComponentOfAgenticAgent {
+				onEndCalled = true
+			}
+			return ctx
+		}).
+		Build()
+
+	ctx = initAgenticCallbacks(ctx, "test-agent", "ChatModel",
+		WithCallbacks(handler))
+
+	cbInput := &AgenticCallbackInput{
+		Input: &TypedAgentInput[*schema.AgenticMessage]{
+			Messages: []*schema.AgenticMessage{schema.UserAgenticMessage("Hi")},
+		},
+	}
+	ctx = callbacks.OnStart(ctx, cbInput)
+
+	origIter, origGen := NewAsyncIteratorPair[*TypedAgentEvent[*schema.AgenticMessage]]()
+	go func() {
+		defer origGen.Close()
+		origGen.Send(&TypedAgentEvent[*schema.AgenticMessage]{
+			Output: &TypedAgentOutput[*schema.AgenticMessage]{
+				MessageOutput: &TypedMessageVariant[*schema.AgenticMessage]{
+					Message: agenticMsg("done"),
+				},
+			},
+		})
+	}()
+
+	wrappedIter := wrapAgenticIterWithOnEnd(ctx, origIter)
+
+	for {
+		_, ok := wrappedIter.Next()
+		if !ok {
+			break
+		}
+	}
+
+	assert.True(t, onEndCalled, "OnEnd callback should have been called")
 }

@@ -21,6 +21,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/cloudwego/eino/schema"
 )
@@ -730,4 +731,251 @@ func TestDeterministicTransferNonResumableAgent(t *testing.T) {
 	}
 
 	assert.True(t, sawTransfer, "should see transfer event")
+}
+
+type dtAgenticTestAgent struct {
+	name     string
+	runFn    func(ctx context.Context, input *TypedAgentInput[*schema.AgenticMessage], options ...AgentRunOption) *AsyncIterator[*TypedAgentEvent[*schema.AgenticMessage]]
+	resumeFn func(ctx context.Context, info *ResumeInfo, opts ...AgentRunOption) *AsyncIterator[*TypedAgentEvent[*schema.AgenticMessage]]
+}
+
+func (a *dtAgenticTestAgent) Name(_ context.Context) string        { return a.name }
+func (a *dtAgenticTestAgent) Description(_ context.Context) string { return a.name + " desc" }
+func (a *dtAgenticTestAgent) Run(ctx context.Context, input *TypedAgentInput[*schema.AgenticMessage], opts ...AgentRunOption) *AsyncIterator[*TypedAgentEvent[*schema.AgenticMessage]] {
+	return a.runFn(ctx, input, opts...)
+}
+func (a *dtAgenticTestAgent) Resume(ctx context.Context, info *ResumeInfo, opts ...AgentRunOption) *AsyncIterator[*TypedAgentEvent[*schema.AgenticMessage]] {
+	if a.resumeFn != nil {
+		return a.resumeFn(ctx, info, opts...)
+	}
+	return a.runFn(ctx, &TypedAgentInput[*schema.AgenticMessage]{}, opts...)
+}
+
+func TestCoverage_DeterministicTransfer_GetType_Agentic(t *testing.T) {
+	ctx := context.Background()
+
+	agent := &mockAgenticAgent{
+		name:        "typed-agent",
+		description: "typed desc",
+	}
+
+	wrapped := TypedAgentWithDeterministicTransferTo(ctx, &TypedDeterministicTransferConfig[*schema.AgenticMessage]{
+		Agent:        agent,
+		ToAgentNames: []string{"dest"},
+	})
+
+	typer, ok := wrapped.(interface{ GetType() string })
+	require.True(t, ok)
+	assert.Equal(t, "DeterministicTransfer", typer.GetType())
+
+	namer, ok := wrapped.(interface {
+		Name(context.Context) string
+	})
+	require.True(t, ok)
+	assert.Equal(t, "typed-agent", namer.Name(ctx))
+
+	descr, ok := wrapped.(interface {
+		Description(context.Context) string
+	})
+	require.True(t, ok)
+	assert.Equal(t, "typed desc", descr.Description(ctx))
+}
+
+func TestCoverage_DeterministicTransfer_AgenticFlowAgent_InterruptResume(t *testing.T) {
+	ctx := context.Background()
+	store := newDTTestStore()
+
+	var runCount int
+
+	innerAgent := &dtAgenticTestAgent{
+		name: "inner",
+		runFn: func(ctx context.Context, _ *TypedAgentInput[*schema.AgenticMessage], _ ...AgentRunOption) *AsyncIterator[*TypedAgentEvent[*schema.AgenticMessage]] {
+			runCount++
+			iter, gen := NewAsyncIteratorPair[*TypedAgentEvent[*schema.AgenticMessage]]()
+			go func() {
+				defer gen.Close()
+				gen.Send(&TypedAgentEvent[*schema.AgenticMessage]{
+					AgentName: "inner",
+					Output: &TypedAgentOutput[*schema.AgenticMessage]{
+						MessageOutput: &TypedMessageVariant[*schema.AgenticMessage]{
+							Message: agenticMsg("before interrupt"),
+						},
+					},
+				})
+				intEvent := TypedInterrupt[*schema.AgenticMessage](ctx, "need_approval")
+				gen.Send(intEvent)
+			}()
+			return iter
+		},
+		resumeFn: func(ctx context.Context, info *ResumeInfo, _ ...AgentRunOption) *AsyncIterator[*TypedAgentEvent[*schema.AgenticMessage]] {
+			runCount++
+			iter, gen := NewAsyncIteratorPair[*TypedAgentEvent[*schema.AgenticMessage]]()
+			go func() {
+				defer gen.Close()
+				gen.Send(&TypedAgentEvent[*schema.AgenticMessage]{
+					AgentName: "inner",
+					Output: &TypedAgentOutput[*schema.AgenticMessage]{
+						MessageOutput: &TypedMessageVariant[*schema.AgenticMessage]{
+							Message: agenticMsg("after resume"),
+						},
+					},
+				})
+			}()
+			return iter
+		},
+	}
+
+	innerFlowAgent := toTypedFlowAgent[*schema.AgenticMessage](ctx, innerAgent)
+
+	wrapped := TypedAgentWithDeterministicTransferTo(ctx, &TypedDeterministicTransferConfig[*schema.AgenticMessage]{
+		Agent:        innerFlowAgent,
+		ToAgentNames: []string{"next_agent"},
+	})
+
+	outerAgent := &dtAgenticTestAgent{
+		name: "outer",
+		runFn: func(ctx context.Context, input *TypedAgentInput[*schema.AgenticMessage], options ...AgentRunOption) *AsyncIterator[*TypedAgentEvent[*schema.AgenticMessage]] {
+			return wrapped.Run(ctx, input, options...)
+		},
+		resumeFn: func(ctx context.Context, info *ResumeInfo, opts ...AgentRunOption) *AsyncIterator[*TypedAgentEvent[*schema.AgenticMessage]] {
+			ra := wrapped.(TypedResumableAgent[*schema.AgenticMessage])
+			return ra.Resume(ctx, info, opts...)
+		},
+	}
+
+	outerFlowAgent := toTypedFlowAgent[*schema.AgenticMessage](ctx, outerAgent)
+
+	runner := NewTypedRunner[*schema.AgenticMessage](TypedRunnerConfig[*schema.AgenticMessage]{
+		Agent:           outerFlowAgent,
+		EnableStreaming: true,
+		CheckPointStore: store,
+	})
+
+	iter := runner.Run(ctx, []*schema.AgenticMessage{
+		schema.UserAgenticMessage("test"),
+	}, WithCheckPointID("cp1"))
+
+	var events []*TypedAgentEvent[*schema.AgenticMessage]
+	var interrupted bool
+	var interruptEvent *TypedAgentEvent[*schema.AgenticMessage]
+	for {
+		ev, ok := iter.Next()
+		if !ok {
+			break
+		}
+		events = append(events, ev)
+		if ev.Action != nil && ev.Action.Interrupted != nil {
+			interrupted = true
+			interruptEvent = ev
+		}
+	}
+
+	assert.Equal(t, 1, runCount)
+	assert.True(t, interrupted, "should have interrupted")
+	require.NotNil(t, interruptEvent)
+
+	_, exists, err := store.Get(ctx, "cp1")
+	assert.NoError(t, err)
+	assert.True(t, exists, "checkpoint should have been saved")
+
+	var rootCauseID string
+	for _, intCtx := range interruptEvent.Action.Interrupted.InterruptContexts {
+		if intCtx.IsRootCause {
+			rootCauseID = intCtx.ID
+			break
+		}
+	}
+	assert.NotEmpty(t, rootCauseID)
+
+	resumeIter, err := runner.ResumeWithParams(ctx, "cp1", &ResumeParams{
+		Targets: map[string]any{rootCauseID: nil},
+	})
+	assert.NoError(t, err)
+
+	var resumeEvents []*TypedAgentEvent[*schema.AgenticMessage]
+	var hasTransfer bool
+	for {
+		ev, ok := resumeIter.Next()
+		if !ok {
+			break
+		}
+		if ev.Action != nil && ev.Action.TransferToAgent != nil {
+			hasTransfer = true
+		}
+		resumeEvents = append(resumeEvents, ev)
+	}
+
+	assert.Equal(t, 2, runCount)
+	assert.NotEmpty(t, resumeEvents)
+	assert.True(t, hasTransfer, "should have transfer action after resume")
+}
+
+func TestCoverage_DeterministicTransfer_AgenticNonFlowAgent(t *testing.T) {
+	ctx := context.Background()
+
+	agent := &mockAgenticAgent{
+		name:        "simple",
+		description: "simple agent",
+		responses: []*TypedAgentEvent[*schema.AgenticMessage]{
+			{
+				AgentName: "simple",
+				Output: &TypedAgentOutput[*schema.AgenticMessage]{
+					MessageOutput: &TypedMessageVariant[*schema.AgenticMessage]{
+						Message: agenticMsg("hello"),
+					},
+				},
+			},
+		},
+	}
+
+	wrapped := TypedAgentWithDeterministicTransferTo(ctx, &TypedDeterministicTransferConfig[*schema.AgenticMessage]{
+		Agent:        agent,
+		ToAgentNames: []string{"agent-b"},
+	})
+
+	input := &TypedAgentInput[*schema.AgenticMessage]{
+		Messages: []*schema.AgenticMessage{schema.UserAgenticMessage("test")},
+	}
+	iter := wrapped.Run(ctx, input)
+
+	var events []*TypedAgentEvent[*schema.AgenticMessage]
+	for {
+		ev, ok := iter.Next()
+		if !ok {
+			break
+		}
+		events = append(events, ev)
+	}
+
+	require.Len(t, events, 3)
+	assert.NotNil(t, events[0].Output)
+	assert.NotNil(t, events[2].Action)
+	assert.Equal(t, "agent-b", events[2].Action.TransferToAgent.DestAgentName)
+}
+
+func TestCoverage_ResumableDeterministicTransfer_Agentic_GetType(t *testing.T) {
+	ctx := context.Background()
+
+	agent := &myAgenticAgent{
+		name: "resumable-inner",
+		runFn: func(_ context.Context, _ *TypedAgentInput[*schema.AgenticMessage], _ ...AgentRunOption) *AsyncIterator[*TypedAgentEvent[*schema.AgenticMessage]] {
+			iter, gen := NewAsyncIteratorPair[*TypedAgentEvent[*schema.AgenticMessage]]()
+			gen.Close()
+			return iter
+		},
+		resumeFn: func(_ context.Context, _ *ResumeInfo, _ ...AgentRunOption) *AsyncIterator[*TypedAgentEvent[*schema.AgenticMessage]] {
+			iter, gen := NewAsyncIteratorPair[*TypedAgentEvent[*schema.AgenticMessage]]()
+			gen.Close()
+			return iter
+		},
+	}
+
+	wrapped := TypedAgentWithDeterministicTransferTo(ctx, &TypedDeterministicTransferConfig[*schema.AgenticMessage]{
+		Agent:        agent,
+		ToAgentNames: []string{"dest"},
+	})
+
+	typer, ok := wrapped.(interface{ GetType() string })
+	require.True(t, ok)
+	assert.Equal(t, "DeterministicTransfer", typer.GetType())
 }

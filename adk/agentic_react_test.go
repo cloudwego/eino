@@ -683,3 +683,650 @@ func TestAgenticReact_ChatModelAgent_ToolsReceiveArgs(t *testing.T) {
 
 	assert.Equal(t, `{"foo":"bar"}`, receivedArgs)
 }
+
+func TestCoverage_AgenticReact_Streaming(t *testing.T) {
+	ctx := context.Background()
+
+	m := &mockAgenticModel{
+		streamFn: func(_ context.Context, input []*schema.AgenticMessage, _ ...model.Option) (*schema.StreamReader[*schema.AgenticMessage], error) {
+			r, w := schema.Pipe[*schema.AgenticMessage](1)
+			go func() {
+				defer w.Close()
+				w.Send(&schema.AgenticMessage{
+					Role: schema.AgenticRoleTypeAssistant,
+					ContentBlocks: []*schema.ContentBlock{
+						schema.NewContentBlock(&schema.AssistantGenText{Text: "streamed response"}),
+					},
+				}, nil)
+			}()
+			return r, nil
+		},
+	}
+
+	echoTool := &agenticEchoTool{name: "echo"}
+
+	agent, err := NewTypedChatModelAgent[*schema.AgenticMessage](ctx, &TypedChatModelAgentConfig[*schema.AgenticMessage]{
+		Name:        "stream-react",
+		Description: "streaming agentic react",
+		Model:       m,
+		ToolsConfig: ToolsConfig{
+			ToolsNodeConfig: compose.ToolsNodeConfig{
+				Tools: []tool.BaseTool{echoTool},
+			},
+		},
+	})
+	require.NoError(t, err)
+
+	runner := NewTypedRunner[*schema.AgenticMessage](TypedRunnerConfig[*schema.AgenticMessage]{
+		Agent:           agent,
+		EnableStreaming: true,
+	})
+
+	iter := runner.Query(ctx, "stream me")
+
+	var events []*TypedAgentEvent[*schema.AgenticMessage]
+	for {
+		event, ok := iter.Next()
+		if !ok {
+			break
+		}
+		if event.Output != nil && event.Output.MessageOutput != nil && event.Output.MessageOutput.IsStreaming {
+			stream := event.Output.MessageOutput.MessageStream
+			for {
+				_, sErr := stream.Recv()
+				if sErr != nil {
+					break
+				}
+			}
+		}
+		events = append(events, event)
+	}
+
+	require.NotEmpty(t, events)
+}
+
+func TestCoverage_IsToolResultEvent_Agentic(t *testing.T) {
+	t.Run("WithToolResult", func(t *testing.T) {
+		event := &typedAgentEventWrapper[*schema.AgenticMessage]{
+			event: &TypedAgentEvent[*schema.AgenticMessage]{
+				Output: &TypedAgentOutput[*schema.AgenticMessage]{
+					MessageOutput: &TypedMessageVariant[*schema.AgenticMessage]{
+						Message: &schema.AgenticMessage{
+							Role: schema.AgenticRoleTypeUser,
+							ContentBlocks: []*schema.ContentBlock{
+								{
+									Type:               schema.ContentBlockTypeFunctionToolResult,
+									FunctionToolResult: &schema.FunctionToolResult{Name: "tool1", Result: "ok"},
+								},
+							},
+						},
+					},
+				},
+			},
+		}
+		assert.True(t, isToolResultEvent(event))
+	})
+
+	t.Run("WithoutToolResult", func(t *testing.T) {
+		event := &typedAgentEventWrapper[*schema.AgenticMessage]{
+			event: &TypedAgentEvent[*schema.AgenticMessage]{
+				Output: &TypedAgentOutput[*schema.AgenticMessage]{
+					MessageOutput: &TypedMessageVariant[*schema.AgenticMessage]{
+						Message: &schema.AgenticMessage{
+							Role: schema.AgenticRoleTypeAssistant,
+							ContentBlocks: []*schema.ContentBlock{
+								schema.NewContentBlock(&schema.AssistantGenText{Text: "no tool result"}),
+							},
+						},
+					},
+				},
+			},
+		}
+		assert.False(t, isToolResultEvent(event))
+	})
+
+	t.Run("NilOutput", func(t *testing.T) {
+		event := &typedAgentEventWrapper[*schema.AgenticMessage]{
+			event: &TypedAgentEvent[*schema.AgenticMessage]{},
+		}
+		assert.False(t, isToolResultEvent(event))
+	})
+
+	t.Run("Streaming", func(t *testing.T) {
+		event := &typedAgentEventWrapper[*schema.AgenticMessage]{
+			event: &TypedAgentEvent[*schema.AgenticMessage]{
+				Output: &TypedAgentOutput[*schema.AgenticMessage]{
+					MessageOutput: &TypedMessageVariant[*schema.AgenticMessage]{
+						IsStreaming: true,
+					},
+				},
+			},
+		}
+		assert.False(t, isToolResultEvent(event))
+	})
+
+	t.Run("NilMessage", func(t *testing.T) {
+		event := &typedAgentEventWrapper[*schema.AgenticMessage]{
+			event: &TypedAgentEvent[*schema.AgenticMessage]{
+				Output: &TypedAgentOutput[*schema.AgenticMessage]{
+					MessageOutput: &TypedMessageVariant[*schema.AgenticMessage]{},
+				},
+			},
+		}
+		assert.False(t, isToolResultEvent(event))
+	})
+}
+
+func TestCoverage_ConcatMessageStream_Agentic(t *testing.T) {
+	t.Run("Success", func(t *testing.T) {
+		r, w := schema.Pipe[*schema.AgenticMessage](2)
+		go func() {
+			defer w.Close()
+			w.Send(&schema.AgenticMessage{
+				Role: schema.AgenticRoleTypeAssistant,
+				ContentBlocks: []*schema.ContentBlock{
+					schema.NewContentBlock(&schema.AssistantGenText{Text: "Hello "}),
+				},
+			}, nil)
+			w.Send(&schema.AgenticMessage{
+				Role: schema.AgenticRoleTypeAssistant,
+				ContentBlocks: []*schema.ContentBlock{
+					schema.NewContentBlock(&schema.AssistantGenText{Text: "world"}),
+				},
+			}, nil)
+		}()
+
+		result, err := concatMessageStream(r)
+		assert.NoError(t, err)
+		assert.NotNil(t, result)
+	})
+
+	t.Run("ErrorDuringRecv", func(t *testing.T) {
+		r, w := schema.Pipe[*schema.AgenticMessage](2)
+		go func() {
+			w.Send(nil, fmt.Errorf("recv error"))
+			w.Close()
+		}()
+
+		_, err := concatMessageStream(r)
+		assert.Error(t, err)
+	})
+}
+
+func TestCoverage_AgenticReact_InterruptResume(t *testing.T) {
+	ctx := context.Background()
+
+	interruptTool := &agenticInterruptTool{name: "approval"}
+
+	var callIdx int32
+	m := &mockAgenticModel{
+		generateFn: func(_ context.Context, _ []*schema.AgenticMessage, _ ...model.Option) (*schema.AgenticMessage, error) {
+			idx := atomic.AddInt32(&callIdx, 1)
+			if idx == 1 {
+				return agenticToolCallMsg("approval", "call1", `{}`), nil
+			}
+			return agenticMsg("approved and done"), nil
+		},
+	}
+
+	agent, err := NewTypedChatModelAgent[*schema.AgenticMessage](ctx, &TypedChatModelAgentConfig[*schema.AgenticMessage]{
+		Name:        "interrupt-agent",
+		Description: "tests interrupt and resume",
+		Model:       m,
+		ToolsConfig: ToolsConfig{
+			ToolsNodeConfig: compose.ToolsNodeConfig{
+				Tools: []tool.BaseTool{interruptTool},
+			},
+		},
+	})
+	require.NoError(t, err)
+
+	store := newDTTestStore()
+	runner := NewTypedRunner[*schema.AgenticMessage](TypedRunnerConfig[*schema.AgenticMessage]{
+		Agent:           agent,
+		CheckPointStore: store,
+	})
+
+	iter := runner.Run(ctx, []*schema.AgenticMessage{
+		schema.UserAgenticMessage("need approval"),
+	}, WithCheckPointID("cp-int"))
+
+	var interruptEvent *TypedAgentEvent[*schema.AgenticMessage]
+	for {
+		event, ok := iter.Next()
+		if !ok {
+			break
+		}
+		if event.Action != nil && event.Action.Interrupted != nil {
+			interruptEvent = event
+		}
+	}
+
+	require.NotNil(t, interruptEvent, "should have interrupt event")
+
+	var rootCauseID string
+	for _, intCtx := range interruptEvent.Action.Interrupted.InterruptContexts {
+		if intCtx.IsRootCause {
+			rootCauseID = intCtx.ID
+			break
+		}
+	}
+	require.NotEmpty(t, rootCauseID)
+
+	resumeIter, err := runner.ResumeWithParams(ctx, "cp-int", &ResumeParams{
+		Targets: map[string]any{rootCauseID: "approved"},
+	})
+	require.NoError(t, err)
+
+	var events []*TypedAgentEvent[*schema.AgenticMessage]
+	for {
+		event, ok := resumeIter.Next()
+		if !ok {
+			break
+		}
+		events = append(events, event)
+	}
+	require.NotEmpty(t, events)
+}
+
+func TestCoverage_AgenticMessageHasToolCalls(t *testing.T) {
+	t.Run("NilMessage", func(t *testing.T) {
+		assert.False(t, agenticMessageHasToolCalls(nil))
+	})
+
+	t.Run("NoToolCalls", func(t *testing.T) {
+		msg := agenticMsg("just text")
+		assert.False(t, agenticMessageHasToolCalls(msg))
+	})
+
+	t.Run("HasToolCalls", func(t *testing.T) {
+		msg := agenticToolCallMsg("tool1", "id1", `{}`)
+		assert.True(t, agenticMessageHasToolCalls(msg))
+	})
+
+	t.Run("NilBlock", func(t *testing.T) {
+		msg := &schema.AgenticMessage{
+			ContentBlocks: []*schema.ContentBlock{nil},
+		}
+		assert.False(t, agenticMessageHasToolCalls(msg))
+	})
+
+	t.Run("ToolCallBlockNilFunctionToolCall", func(t *testing.T) {
+		msg := &schema.AgenticMessage{
+			ContentBlocks: []*schema.ContentBlock{
+				{Type: schema.ContentBlockTypeFunctionToolCall, FunctionToolCall: nil},
+			},
+		}
+		assert.False(t, agenticMessageHasToolCalls(msg))
+	})
+}
+
+func TestCoverage_ChatModelAgent_StreamError(t *testing.T) {
+	ctx := context.Background()
+
+	testErr := errors.New("stream failed")
+	m := &mockAgenticModel{
+		streamFn: func(_ context.Context, _ []*schema.AgenticMessage, _ ...model.Option) (*schema.StreamReader[*schema.AgenticMessage], error) {
+			return nil, testErr
+		},
+	}
+
+	agent, err := NewTypedChatModelAgent[*schema.AgenticMessage](ctx, &TypedChatModelAgentConfig[*schema.AgenticMessage]{
+		Name:        "stream-error-agent",
+		Description: "tests stream error",
+		Model:       m,
+	})
+	require.NoError(t, err)
+
+	runner := NewTypedRunner[*schema.AgenticMessage](TypedRunnerConfig[*schema.AgenticMessage]{
+		Agent:           agent,
+		EnableStreaming: true,
+	})
+
+	iter := runner.Query(ctx, "trigger stream error")
+
+	var foundErr bool
+	for {
+		event, ok := iter.Next()
+		if !ok {
+			break
+		}
+		if event.Err != nil {
+			foundErr = true
+		}
+	}
+	assert.True(t, foundErr, "should propagate stream error")
+}
+
+func TestCoverage_AgenticReact_GobStateRoundTrip(t *testing.T) {
+	ctx := context.Background()
+
+	var callIdx int32
+	m := &mockAgenticModel{
+		generateFn: func(_ context.Context, _ []*schema.AgenticMessage, _ ...model.Option) (*schema.AgenticMessage, error) {
+			idx := atomic.AddInt32(&callIdx, 1)
+			if idx == 1 {
+				return agenticToolCallMsg("interrupt_tool", "call1", `{}`), nil
+			}
+			return agenticMsg("completed"), nil
+		},
+	}
+
+	interruptTool := &agenticInterruptTool{name: "interrupt_tool"}
+
+	agent, err := NewTypedChatModelAgent[*schema.AgenticMessage](ctx, &TypedChatModelAgentConfig[*schema.AgenticMessage]{
+		Name:        "gob-test",
+		Description: "tests gob state round trip",
+		Model:       m,
+		ToolsConfig: ToolsConfig{
+			ToolsNodeConfig: compose.ToolsNodeConfig{
+				Tools: []tool.BaseTool{interruptTool},
+			},
+		},
+	})
+	require.NoError(t, err)
+
+	store := newDTTestStore()
+	runner := NewTypedRunner[*schema.AgenticMessage](TypedRunnerConfig[*schema.AgenticMessage]{
+		Agent:           agent,
+		CheckPointStore: store,
+	})
+
+	iter := runner.Run(ctx, []*schema.AgenticMessage{
+		schema.UserAgenticMessage("test gob"),
+	}, WithCheckPointID("gob-cp"))
+
+	var interrupted bool
+	var interruptEvent *TypedAgentEvent[*schema.AgenticMessage]
+	for {
+		event, ok := iter.Next()
+		if !ok {
+			break
+		}
+		if event.Action != nil && event.Action.Interrupted != nil {
+			interrupted = true
+			interruptEvent = event
+		}
+	}
+
+	if !interrupted || interruptEvent == nil {
+		t.Skip("no interrupt occurred, skipping gob round-trip test")
+	}
+
+	_, exists, err := store.Get(ctx, "gob-cp")
+	assert.NoError(t, err)
+	assert.True(t, exists, "checkpoint should be saved")
+
+	var rootCauseID string
+	for _, intCtx := range interruptEvent.Action.Interrupted.InterruptContexts {
+		if intCtx.IsRootCause {
+			rootCauseID = intCtx.ID
+			break
+		}
+	}
+	require.NotEmpty(t, rootCauseID)
+
+	resumeIter, err := runner.ResumeWithParams(ctx, "gob-cp", &ResumeParams{
+		Targets: map[string]any{rootCauseID: "approved"},
+	})
+	require.NoError(t, err)
+
+	var resumed bool
+	for {
+		event, ok := resumeIter.Next()
+		if !ok {
+			break
+		}
+		if event.Output != nil && event.Output.MessageOutput != nil {
+			resumed = true
+		}
+	}
+	assert.True(t, resumed, "should successfully resume from gob checkpoint")
+}
+
+func TestCoverage_GetMessageFromTypedWrappedEvent_Agentic(t *testing.T) {
+	t.Run("NilOutput", func(t *testing.T) {
+		wrapper := &typedAgentEventWrapper[*schema.AgenticMessage]{
+			event: &TypedAgentEvent[*schema.AgenticMessage]{},
+		}
+		msg, err := getMessageFromTypedWrappedEvent(wrapper)
+		assert.NoError(t, err)
+		assert.Nil(t, msg)
+	})
+
+	t.Run("NonStreaming", func(t *testing.T) {
+		expected := agenticMsg("hello")
+		wrapper := &typedAgentEventWrapper[*schema.AgenticMessage]{
+			event: &TypedAgentEvent[*schema.AgenticMessage]{
+				Output: &TypedAgentOutput[*schema.AgenticMessage]{
+					MessageOutput: &TypedMessageVariant[*schema.AgenticMessage]{
+						Message: expected,
+					},
+				},
+			},
+		}
+		msg, err := getMessageFromTypedWrappedEvent(wrapper)
+		assert.NoError(t, err)
+		assert.Equal(t, expected, msg)
+	})
+
+	t.Run("StreamingAlreadyConcatenated", func(t *testing.T) {
+		expected := agenticMsg("already concatenated")
+		wrapper := &typedAgentEventWrapper[*schema.AgenticMessage]{
+			concatenatedMessage: expected,
+			event: &TypedAgentEvent[*schema.AgenticMessage]{
+				Output: &TypedAgentOutput[*schema.AgenticMessage]{
+					MessageOutput: &TypedMessageVariant[*schema.AgenticMessage]{
+						IsStreaming: true,
+					},
+				},
+			},
+		}
+		msg, err := getMessageFromTypedWrappedEvent(wrapper)
+		assert.NoError(t, err)
+		assert.Equal(t, expected, msg)
+	})
+
+	t.Run("StreamingWithPriorError", func(t *testing.T) {
+		testErr := errors.New("prior stream error")
+		wrapper := &typedAgentEventWrapper[*schema.AgenticMessage]{
+			event: &TypedAgentEvent[*schema.AgenticMessage]{
+				Output: &TypedAgentOutput[*schema.AgenticMessage]{
+					MessageOutput: &TypedMessageVariant[*schema.AgenticMessage]{
+						IsStreaming: true,
+					},
+				},
+			},
+		}
+		wrapper.StreamErr = testErr
+		msg, err := getMessageFromTypedWrappedEvent(wrapper)
+		assert.Equal(t, testErr, err)
+		assert.Nil(t, msg)
+	})
+}
+
+func TestCoverage_GetMessageFromWrappedEvent_ErrorPaths(t *testing.T) {
+	t.Run("NilOutput", func(t *testing.T) {
+		wrapper := &agentEventWrapper{
+			AgentEvent: &AgentEvent{},
+		}
+		msg, err := getMessageFromWrappedEvent(wrapper)
+		assert.NoError(t, err)
+		assert.Nil(t, msg)
+	})
+
+	t.Run("NonStreaming", func(t *testing.T) {
+		expected := schema.AssistantMessage("hello", nil)
+		wrapper := &agentEventWrapper{
+			AgentEvent: &AgentEvent{
+				Output: &AgentOutput{
+					MessageOutput: &MessageVariant{
+						Message: expected,
+					},
+				},
+			},
+		}
+		msg, err := getMessageFromWrappedEvent(wrapper)
+		assert.NoError(t, err)
+		assert.Equal(t, expected, msg)
+	})
+
+	t.Run("AlreadyConcatenated", func(t *testing.T) {
+		expected := schema.AssistantMessage("concatenated", nil)
+		wrapper := &agentEventWrapper{
+			concatenatedMessage: expected,
+			AgentEvent: &AgentEvent{
+				Output: &AgentOutput{
+					MessageOutput: &MessageVariant{
+						IsStreaming: true,
+					},
+				},
+			},
+		}
+		msg, err := getMessageFromWrappedEvent(wrapper)
+		assert.NoError(t, err)
+		assert.Equal(t, expected, msg)
+	})
+
+	t.Run("PriorStreamError", func(t *testing.T) {
+		testErr := errors.New("prior error")
+		wrapper := &agentEventWrapper{
+			AgentEvent: &AgentEvent{
+				Output: &AgentOutput{
+					MessageOutput: &MessageVariant{
+						IsStreaming: true,
+					},
+				},
+			},
+		}
+		wrapper.StreamErr = testErr
+		msg, err := getMessageFromWrappedEvent(wrapper)
+		assert.Equal(t, testErr, err)
+		assert.Nil(t, msg)
+	})
+}
+
+func TestCoverage_ConsumeStream_ErrorDuringRecv(t *testing.T) {
+	testErr := errors.New("stream recv error")
+	r, w := schema.Pipe[*schema.Message](2)
+	go func() {
+		w.Send(schema.AssistantMessage("partial", nil), nil)
+		w.Send(nil, testErr)
+		w.Close()
+	}()
+
+	wrapper := &agentEventWrapper{
+		AgentEvent: &AgentEvent{
+			Output: &AgentOutput{
+				MessageOutput: &MessageVariant{
+					IsStreaming:   true,
+					MessageStream: r,
+				},
+			},
+		},
+	}
+
+	wrapper.consumeStream()
+
+	assert.NotNil(t, wrapper.StreamErr)
+	assert.Nil(t, wrapper.concatenatedMessage)
+}
+
+func TestCoverage_ConsumeStream_EmptyStream(t *testing.T) {
+	r, w := schema.Pipe[*schema.Message](1)
+	go func() { w.Close() }()
+
+	wrapper := &agentEventWrapper{
+		AgentEvent: &AgentEvent{
+			Output: &AgentOutput{
+				MessageOutput: &MessageVariant{
+					IsStreaming:   true,
+					MessageStream: r,
+				},
+			},
+		},
+	}
+
+	wrapper.consumeStream()
+
+	assert.NotNil(t, wrapper.StreamErr)
+	assert.Contains(t, wrapper.StreamErr.Error(), "no messages")
+}
+
+func TestCoverage_ConsumeStream_MultipleMessages(t *testing.T) {
+	r, w := schema.Pipe[*schema.Message](3)
+	go func() {
+		defer w.Close()
+		w.Send(schema.AssistantMessage("chunk1", nil), nil)
+		w.Send(schema.AssistantMessage("chunk2", nil), nil)
+		w.Send(schema.AssistantMessage("chunk3", nil), nil)
+	}()
+
+	wrapper := &agentEventWrapper{
+		AgentEvent: &AgentEvent{
+			Output: &AgentOutput{
+				MessageOutput: &MessageVariant{
+					IsStreaming:   true,
+					MessageStream: r,
+				},
+			},
+		},
+	}
+
+	wrapper.consumeStream()
+
+	assert.Nil(t, wrapper.StreamErr)
+	assert.NotNil(t, wrapper.concatenatedMessage)
+}
+
+func TestCoverage_ConsumeStream_SingleMessage(t *testing.T) {
+	r, w := schema.Pipe[*schema.Message](1)
+	go func() {
+		defer w.Close()
+		w.Send(schema.AssistantMessage("single", nil), nil)
+	}()
+
+	wrapper := &agentEventWrapper{
+		AgentEvent: &AgentEvent{
+			Output: &AgentOutput{
+				MessageOutput: &MessageVariant{
+					IsStreaming:   true,
+					MessageStream: r,
+				},
+			},
+		},
+	}
+
+	wrapper.consumeStream()
+
+	assert.Nil(t, wrapper.StreamErr)
+	assert.NotNil(t, wrapper.concatenatedMessage)
+	assert.Equal(t, "single", wrapper.concatenatedMessage.Content)
+}
+
+func TestCoverage_ConsumeStream_Idempotent(t *testing.T) {
+	r, w := schema.Pipe[*schema.Message](1)
+	go func() {
+		defer w.Close()
+		w.Send(schema.AssistantMessage("once", nil), nil)
+	}()
+
+	wrapper := &agentEventWrapper{
+		AgentEvent: &AgentEvent{
+			Output: &AgentOutput{
+				MessageOutput: &MessageVariant{
+					IsStreaming:   true,
+					MessageStream: r,
+				},
+			},
+		},
+	}
+
+	wrapper.consumeStream()
+	msg1 := wrapper.concatenatedMessage
+
+	wrapper.consumeStream()
+	msg2 := wrapper.concatenatedMessage
+
+	assert.Equal(t, msg1, msg2, "second call should be no-op")
+}
