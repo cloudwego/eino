@@ -44,6 +44,10 @@ func (ag *AsyncGenerator[T]) Send(v T) {
 	ag.ch.Send(v)
 }
 
+func (ag *AsyncGenerator[T]) trySend(v T) bool {
+	return ag.ch.TrySend(v)
+}
+
 func (ag *AsyncGenerator[T]) Close() {
 	ag.ch.Close()
 }
