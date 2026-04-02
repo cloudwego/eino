@@ -238,8 +238,53 @@ func handlersToToolMiddlewares(handlers []ChatModelAgentMiddleware) []compose.To
 	return middlewares
 }
 
+type sendEventOptions struct {
+	shouldSend func(*AgentEvent) bool
+}
+
+// SendEventOption configures the behavior of event sender wrappers
+// (NewEventSenderModelWrapper and NewEventSenderToolWrapper).
+type SendEventOption func(*sendEventOptions)
+
+// WithShouldSendEvent sets a predicate that controls whether an event should be sent.
+// The predicate receives a copy of the fully constructed AgentEvent before it is dispatched.
+// Return true to send the event, false to suppress it.
+//
+// The predicate receives a defensive copy of the event, so it is safe to inspect any field
+// including streaming MessageStream without affecting the original event delivered to the
+// Runner consumer. For streaming events, the copy's MessageStream is an independent fork
+// of the original stream.
+//
+// For model events, the AgentEvent.Output.MessageOutput will have Role=schema.Assistant.
+// For tool events, the AgentEvent.Output.MessageOutput will have Role=schema.Tool and
+// ToolName set to the tool's name.
+//
+// If not set, all events are sent (default behavior).
+func WithShouldSendEvent(fn func(event *AgentEvent) bool) SendEventOption {
+	return func(o *sendEventOptions) {
+		o.shouldSend = fn
+	}
+}
+
+func getSendEventOptions(opts []SendEventOption) *sendEventOptions {
+	o := &sendEventOptions{}
+	for _, opt := range opts {
+		opt(o)
+	}
+	return o
+}
+
+func (o *sendEventOptions) checkShouldSend(event *AgentEvent) bool {
+	if o == nil || o.shouldSend == nil {
+		return true
+	}
+	eventCopy := copyAgentEvent(event)
+	return o.shouldSend(eventCopy)
+}
+
 type eventSenderModelWrapper struct {
 	*BaseChatModelAgentMiddleware
+	opts *sendEventOptions
 }
 
 // NewEventSenderModelWrapper returns a ChatModelAgentMiddleware that sends model response events.
@@ -247,9 +292,16 @@ type eventSenderModelWrapper struct {
 // modified messages. To send events with original (unmodified) output, pass this as a Handler
 // after the modifying middleware (placing it innermost in the wrapper chain).
 // When detected in Handlers, the framework skips the default event sender to avoid duplicates.
-func NewEventSenderModelWrapper() ChatModelAgentMiddleware {
+//
+// Use WithShouldSendEvent to control which events are sent:
+//
+//	adk.NewEventSenderModelWrapper(adk.WithShouldSendEvent(func(event *adk.AgentEvent) bool {
+//	    return true // send all events (default)
+//	}))
+func NewEventSenderModelWrapper(opts ...SendEventOption) ChatModelAgentMiddleware {
 	return &eventSenderModelWrapper{
 		BaseChatModelAgentMiddleware: &BaseChatModelAgentMiddleware{},
+		opts:                         getSendEventOptions(opts),
 	}
 }
 
@@ -265,12 +317,13 @@ func (w *eventSenderModelWrapper) WrapModel(_ context.Context, m model.BaseChatM
 	if mc != nil {
 		retryConfig = mc.ModelRetryConfig
 	}
-	return &eventSenderModel{inner: inner, modelRetryConfig: retryConfig}, nil
+	return &eventSenderModel{inner: inner, modelRetryConfig: retryConfig, opts: w.opts}, nil
 }
 
 type eventSenderModel struct {
 	inner            model.BaseChatModel
 	modelRetryConfig *ModelRetryConfig
+	opts             *sendEventOptions
 }
 
 func (m *eventSenderModel) Generate(ctx context.Context, input []*schema.Message, opts ...model.Option) (*schema.Message, error) {
@@ -286,7 +339,9 @@ func (m *eventSenderModel) Generate(ctx context.Context, input []*schema.Message
 
 	msgCopy := *result
 	event := EventFromMessage(&msgCopy, nil, schema.Assistant, "")
-	execCtx.send(event)
+	if m.opts.checkShouldSend(event) {
+		execCtx.send(event)
+	}
 
 	return result, nil
 }
@@ -323,7 +378,9 @@ func (m *eventSenderModel) Stream(ctx context.Context, input []*schema.Message, 
 	}
 
 	event := EventFromMessage(nil, eventStream, schema.Assistant, "")
-	execCtx.send(event)
+	if m.opts.checkShouldSend(event) {
+		execCtx.send(event)
+	}
 
 	return streams[1], nil
 }
@@ -352,6 +409,7 @@ func popToolGenAction(ctx context.Context, toolName string) *AgentAction {
 
 type eventSenderToolWrapper struct {
 	*BaseChatModelAgentMiddleware
+	opts *sendEventOptions
 }
 
 // NewEventSenderToolWrapper returns a ChatModelAgentMiddleware that sends tool result events.
@@ -359,9 +417,19 @@ type eventSenderToolWrapper struct {
 // reflect the fully processed tool output. To control exactly where events are emitted,
 // include this in ChatModelAgentConfig.Handlers at the desired position.
 // When detected in Handlers, the framework skips the default event sender to avoid duplicates.
-func NewEventSenderToolWrapper() ChatModelAgentMiddleware {
+//
+// Use WithShouldSendEvent to control which events are sent:
+//
+//	adk.NewEventSenderToolWrapper(adk.WithShouldSendEvent(func(event *adk.AgentEvent) bool {
+//	    if event.Output != nil && event.Output.MessageOutput != nil {
+//	        return event.Output.MessageOutput.ToolName != "internal_helper"
+//	    }
+//	    return true
+//	}))
+func NewEventSenderToolWrapper(opts ...SendEventOption) ChatModelAgentMiddleware {
 	return &eventSenderToolWrapper{
 		BaseChatModelAgentMiddleware: &BaseChatModelAgentMiddleware{},
+		opts:                         getSendEventOptions(opts),
 	}
 }
 
@@ -386,7 +454,7 @@ func (w *eventSenderToolWrapper) WrapInvokableToolCall(_ context.Context, endpoi
 		_ = compose.ProcessState(ctx, func(_ context.Context, st *State) error {
 			if st.getReturnDirectlyToolCallID() == callID {
 				st.setReturnDirectlyEvent(event)
-			} else {
+			} else if w.opts.checkShouldSend(event) {
 				execCtx.send(event)
 			}
 			return nil
@@ -420,7 +488,7 @@ func (w *eventSenderToolWrapper) WrapStreamableToolCall(_ context.Context, endpo
 		_ = compose.ProcessState(ctx, func(_ context.Context, st *State) error {
 			if st.getReturnDirectlyToolCallID() == callID {
 				st.setReturnDirectlyEvent(event)
-			} else {
+			} else if w.opts.checkShouldSend(event) {
 				execCtx.send(event)
 			}
 			return nil
@@ -455,7 +523,7 @@ func (w *eventSenderToolWrapper) WrapEnhancedInvokableToolCall(_ context.Context
 		_ = compose.ProcessState(ctx, func(_ context.Context, st *State) error {
 			if st.getReturnDirectlyToolCallID() == callID {
 				st.setReturnDirectlyEvent(event)
-			} else {
+			} else if w.opts.checkShouldSend(event) {
 				execCtx.send(event)
 			}
 			return nil
@@ -495,7 +563,7 @@ func (w *eventSenderToolWrapper) WrapEnhancedStreamableToolCall(_ context.Contex
 		_ = compose.ProcessState(ctx, func(_ context.Context, st *State) error {
 			if st.getReturnDirectlyToolCallID() == callID {
 				st.setReturnDirectlyEvent(event)
-			} else {
+			} else if w.opts.checkShouldSend(event) {
 				execCtx.send(event)
 			}
 			return nil

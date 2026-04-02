@@ -1402,7 +1402,7 @@ func TestEventSenderToolHandler(t *testing.T) {
 					NewEventSenderToolWrapper(),
 					&invokableResultModifier{
 						BaseChatModelAgentMiddleware: &BaseChatModelAgentMiddleware{},
-						modifiedResult:              modifiedResult,
+						modifiedResult:               modifiedResult,
 					},
 				},
 			})
@@ -1490,7 +1490,7 @@ func TestEventSenderToolHandler(t *testing.T) {
 					NewEventSenderToolWrapper(),
 					&streamableResultModifier{
 						BaseChatModelAgentMiddleware: &BaseChatModelAgentMiddleware{},
-						modifiedResult:              modifiedResult,
+						modifiedResult:               modifiedResult,
 					},
 				},
 			})
@@ -1578,7 +1578,7 @@ func TestEventSenderToolHandler(t *testing.T) {
 					NewEventSenderToolWrapper(),
 					&enhancedInvokableResultModifier{
 						BaseChatModelAgentMiddleware: &BaseChatModelAgentMiddleware{},
-						modifiedResult:              modifiedResult,
+						modifiedResult:               modifiedResult,
 					},
 				},
 			})
@@ -1666,7 +1666,7 @@ func TestEventSenderToolHandler(t *testing.T) {
 					NewEventSenderToolWrapper(),
 					&enhancedStreamableResultModifier{
 						BaseChatModelAgentMiddleware: &BaseChatModelAgentMiddleware{},
-						modifiedResult:              modifiedResult,
+						modifiedResult:               modifiedResult,
 					},
 				},
 			})
@@ -1679,6 +1679,293 @@ func TestEventSenderToolHandler(t *testing.T) {
 			assert.GreaterOrEqual(t, len(toolEvents), 1)
 			contents := collectToolContent(toolEvents)
 			assert.Contains(t, contents, originalResult)
+		})
+	})
+}
+
+func TestWithShouldSendEvent(t *testing.T) {
+	t.Run("ModelWrapper", func(t *testing.T) {
+		t.Run("SuppressAllModelEvents", func(t *testing.T) {
+			ctx := context.Background()
+			mockModel := &mockStreamingModel{
+				chunks: []*schema.Message{schema.AssistantMessage("Hello", nil)},
+			}
+
+			agent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+				Name:        "TestAgent",
+				Description: "Test agent",
+				Model:       mockModel,
+				Handlers: []ChatModelAgentMiddleware{
+					NewEventSenderModelWrapper(WithShouldSendEvent(func(event *AgentEvent) bool {
+						return false
+					})),
+				},
+			})
+			assert.NoError(t, err)
+
+			r := NewRunner(ctx, RunnerConfig{Agent: agent, EnableStreaming: false})
+			iter := r.Run(ctx, []Message{schema.UserMessage("test")})
+
+			var assistantEvents []*AgentEvent
+			for {
+				event, ok := iter.Next()
+				if !ok {
+					break
+				}
+				if event.Output != nil && event.Output.MessageOutput != nil &&
+					event.Output.MessageOutput.Role == schema.Assistant {
+					assistantEvents = append(assistantEvents, event)
+				}
+			}
+			assert.Equal(t, 0, len(assistantEvents), "All model events should be suppressed")
+		})
+
+		t.Run("SuppressStreamingModelEvents", func(t *testing.T) {
+			ctx := context.Background()
+			mockModel := &mockStreamingModel{
+				chunks: []*schema.Message{
+					schema.AssistantMessage("Hello ", nil),
+					schema.AssistantMessage("World", nil),
+				},
+			}
+
+			agent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+				Name:        "TestAgent",
+				Description: "Test agent",
+				Model:       mockModel,
+				Handlers: []ChatModelAgentMiddleware{
+					NewEventSenderModelWrapper(WithShouldSendEvent(func(event *AgentEvent) bool {
+						return false
+					})),
+				},
+			})
+			assert.NoError(t, err)
+
+			r := NewRunner(ctx, RunnerConfig{Agent: agent, EnableStreaming: true})
+			iter := r.Run(ctx, []Message{schema.UserMessage("test")})
+
+			var assistantEvents []*AgentEvent
+			for {
+				event, ok := iter.Next()
+				if !ok {
+					break
+				}
+				if event.Output != nil && event.Output.MessageOutput != nil &&
+					event.Output.MessageOutput.Role == schema.Assistant {
+					assistantEvents = append(assistantEvents, event)
+				}
+			}
+			assert.Equal(t, 0, len(assistantEvents), "All streaming model events should be suppressed")
+		})
+
+		t.Run("DefaultOptionsAllowAllEvents", func(t *testing.T) {
+			ctx := context.Background()
+			mockModel := &mockStreamingModel{
+				chunks: []*schema.Message{schema.AssistantMessage("Hello", nil)},
+			}
+
+			agent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+				Name:        "TestAgent",
+				Description: "Test agent",
+				Model:       mockModel,
+				Handlers: []ChatModelAgentMiddleware{
+					NewEventSenderModelWrapper(),
+				},
+			})
+			assert.NoError(t, err)
+
+			r := NewRunner(ctx, RunnerConfig{Agent: agent, EnableStreaming: false})
+			iter := r.Run(ctx, []Message{schema.UserMessage("test")})
+
+			var assistantEvents []*AgentEvent
+			for {
+				event, ok := iter.Next()
+				if !ok {
+					break
+				}
+				if event.Output != nil && event.Output.MessageOutput != nil &&
+					event.Output.MessageOutput.Role == schema.Assistant {
+					assistantEvents = append(assistantEvents, event)
+				}
+			}
+			assert.GreaterOrEqual(t, len(assistantEvents), 1, "Default options should allow all events")
+		})
+	})
+
+	t.Run("ToolWrapper", func(t *testing.T) {
+		t.Run("SuppressAllToolEvents", func(t *testing.T) {
+			ctx := context.Background()
+			testTool := &invokableTestTool{name: "test_tool", result: "output"}
+			mockModel := &mockToolCallingModel{toolCallName: "test_tool"}
+
+			agent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+				Name:        "TestAgent",
+				Description: "Test agent",
+				Model:       mockModel,
+				ToolsConfig: ToolsConfig{
+					ToolsNodeConfig: compose.ToolsNodeConfig{
+						Tools: []tool.BaseTool{testTool},
+					},
+				},
+				Handlers: []ChatModelAgentMiddleware{
+					NewEventSenderToolWrapper(WithShouldSendEvent(func(event *AgentEvent) bool {
+						return false
+					})),
+				},
+			})
+			assert.NoError(t, err)
+
+			r := NewRunner(ctx, RunnerConfig{Agent: agent, EnableStreaming: false})
+			it := r.Run(ctx, []Message{schema.UserMessage("test")})
+
+			toolEvents := collectToolEvents(it)
+			assert.Equal(t, 0, len(toolEvents), "All tool events should be suppressed")
+		})
+
+		t.Run("FilterByToolName", func(t *testing.T) {
+			ctx := context.Background()
+			testTool := &invokableTestTool{name: "secret_tool", result: "secret_output"}
+			mockModel := &mockToolCallingModel{toolCallName: "secret_tool"}
+
+			agent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+				Name:        "TestAgent",
+				Description: "Test agent",
+				Model:       mockModel,
+				ToolsConfig: ToolsConfig{
+					ToolsNodeConfig: compose.ToolsNodeConfig{
+						Tools: []tool.BaseTool{testTool},
+					},
+				},
+				Handlers: []ChatModelAgentMiddleware{
+					NewEventSenderToolWrapper(WithShouldSendEvent(func(event *AgentEvent) bool {
+						if event.Output != nil && event.Output.MessageOutput != nil {
+							return event.Output.MessageOutput.ToolName != "secret_tool"
+						}
+						return true
+					})),
+				},
+			})
+			assert.NoError(t, err)
+
+			r := NewRunner(ctx, RunnerConfig{Agent: agent, EnableStreaming: false})
+			it := r.Run(ctx, []Message{schema.UserMessage("test")})
+
+			toolEvents := collectToolEvents(it)
+			assert.Equal(t, 0, len(toolEvents), "Events for secret_tool should be suppressed")
+		})
+
+		t.Run("StreamableToolSuppressed", func(t *testing.T) {
+			ctx := context.Background()
+			testTool := &streamableTestTool{name: "test_tool", result: "streamable_output"}
+			mockModel := &mockToolCallingModel{toolCallName: "test_tool"}
+
+			agent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+				Name:        "TestAgent",
+				Description: "Test agent",
+				Model:       mockModel,
+				ToolsConfig: ToolsConfig{
+					ToolsNodeConfig: compose.ToolsNodeConfig{
+						Tools: []tool.BaseTool{testTool},
+					},
+				},
+				Handlers: []ChatModelAgentMiddleware{
+					NewEventSenderToolWrapper(WithShouldSendEvent(func(event *AgentEvent) bool {
+						return false
+					})),
+				},
+			})
+			assert.NoError(t, err)
+
+			r := NewRunner(ctx, RunnerConfig{Agent: agent, EnableStreaming: true})
+			it := r.Run(ctx, []Message{schema.UserMessage("test")})
+
+			toolEvents := collectToolEvents(it)
+			assert.Equal(t, 0, len(toolEvents), "Streaming tool events should be suppressed")
+		})
+
+		t.Run("EnhancedInvokableToolSuppressed", func(t *testing.T) {
+			ctx := context.Background()
+			testTool := &enhancedInvokableTestTool{name: "test_tool", result: "enhanced_output"}
+			mockModel := &mockToolCallingModel{toolCallName: "test_tool"}
+
+			agent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+				Name:        "TestAgent",
+				Description: "Test agent",
+				Model:       mockModel,
+				ToolsConfig: ToolsConfig{
+					ToolsNodeConfig: compose.ToolsNodeConfig{
+						Tools: []tool.BaseTool{testTool},
+					},
+				},
+				Handlers: []ChatModelAgentMiddleware{
+					NewEventSenderToolWrapper(WithShouldSendEvent(func(event *AgentEvent) bool {
+						return false
+					})),
+				},
+			})
+			assert.NoError(t, err)
+
+			r := NewRunner(ctx, RunnerConfig{Agent: agent, EnableStreaming: false})
+			it := r.Run(ctx, []Message{schema.UserMessage("test")})
+
+			toolEvents := collectToolEvents(it)
+			assert.Equal(t, 0, len(toolEvents), "Enhanced invokable tool events should be suppressed")
+		})
+
+		t.Run("EnhancedStreamableToolSuppressed", func(t *testing.T) {
+			ctx := context.Background()
+			testTool := &enhancedStreamableTestTool{name: "test_tool", result: "enhanced_stream_output"}
+			mockModel := &mockToolCallingModel{toolCallName: "test_tool"}
+
+			agent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+				Name:        "TestAgent",
+				Description: "Test agent",
+				Model:       mockModel,
+				ToolsConfig: ToolsConfig{
+					ToolsNodeConfig: compose.ToolsNodeConfig{
+						Tools: []tool.BaseTool{testTool},
+					},
+				},
+				Handlers: []ChatModelAgentMiddleware{
+					NewEventSenderToolWrapper(WithShouldSendEvent(func(event *AgentEvent) bool {
+						return false
+					})),
+				},
+			})
+			assert.NoError(t, err)
+
+			r := NewRunner(ctx, RunnerConfig{Agent: agent, EnableStreaming: true})
+			it := r.Run(ctx, []Message{schema.UserMessage("test")})
+
+			toolEvents := collectToolEvents(it)
+			assert.Equal(t, 0, len(toolEvents), "Enhanced streamable tool events should be suppressed")
+		})
+
+		t.Run("DefaultOptionsAllowAllToolEvents", func(t *testing.T) {
+			ctx := context.Background()
+			testTool := &invokableTestTool{name: "test_tool", result: "output"}
+			mockModel := &mockToolCallingModel{toolCallName: "test_tool"}
+
+			agent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+				Name:        "TestAgent",
+				Description: "Test agent",
+				Model:       mockModel,
+				ToolsConfig: ToolsConfig{
+					ToolsNodeConfig: compose.ToolsNodeConfig{
+						Tools: []tool.BaseTool{testTool},
+					},
+				},
+				Handlers: []ChatModelAgentMiddleware{
+					NewEventSenderToolWrapper(),
+				},
+			})
+			assert.NoError(t, err)
+
+			r := NewRunner(ctx, RunnerConfig{Agent: agent, EnableStreaming: false})
+			it := r.Run(ctx, []Message{schema.UserMessage("test")})
+
+			toolEvents := collectToolEvents(it)
+			assert.Equal(t, 1, len(toolEvents), "Default options should allow all tool events")
 		})
 	})
 }

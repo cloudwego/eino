@@ -283,6 +283,16 @@ type ChatModelAgentConfig struct {
 	// When EventSenderModelWrapper is detected in Handlers, the framework skips
 	// the default event sender to avoid duplicate events.
 	//
+	// Event Filtering:
+	// Both NewEventSenderModelWrapper and NewEventSenderToolWrapper accept
+	// WithShouldSendEvent to selectively suppress events. The predicate receives
+	// a defensive copy of the event (stream included), so it is safe to inspect
+	// any field without breaking the original:
+	//
+	//   adk.NewEventSenderToolWrapper(adk.WithShouldSendEvent(func(event *adk.AgentEvent) bool {
+	//       return event.Output.MessageOutput.ToolName != "internal_helper"
+	//   }))
+	//
 	// Tool call lifecycle (outermost to innermost):
 	//  1. eventSenderToolWrapper (internal ToolMiddleware - sends tool result events after all processing)
 	//  2. ToolsConfig.ToolCallMiddlewares (ToolMiddleware)
