@@ -17,6 +17,9 @@
 package schema
 
 import (
+	"bytes"
+	"encoding/gob"
+	"encoding/json"
 	"sort"
 
 	"github.com/eino-contrib/jsonschema"
@@ -135,6 +138,104 @@ type ToolInfo struct {
 	//  - use jsonschema: schema.NewParamsOneOfByJSONSchema(jsonschema)
 	// If is nil, signals that the tool does not need any input parameter
 	*ParamsOneOf
+}
+
+type toolInfoForJSON struct {
+	Name           string                    `json:"name,omitempty"`
+	Desc           string                    `json:"desc,omitempty"`
+	Extra          map[string]any            `json:"extra,omitempty"`
+	HasParamsOneOf bool                      `json:"has_params_one_of,omitempty"`
+	Params         map[string]*ParameterInfo `json:"params,omitempty"`
+	JSONSchema     *jsonschema.Schema        `json:"json_schema,omitempty"`
+}
+
+type toolInfoForGob struct {
+	Name           string
+	Desc           string
+	Extra          map[string]any
+	HasParamsOneOf bool
+	Params         map[string]*ParameterInfo
+	JSONSchema     *string
+}
+
+func (t *ToolInfo) MarshalJSON() ([]byte, error) {
+	tmp := &toolInfoForJSON{
+		Name:  t.Name,
+		Desc:  t.Desc,
+		Extra: t.Extra,
+	}
+	if t.ParamsOneOf != nil {
+		tmp.HasParamsOneOf = true
+		tmp.Params = t.ParamsOneOf.params
+		tmp.JSONSchema = t.ParamsOneOf.jsonschema
+	}
+	return json.Marshal(tmp)
+}
+
+func (t *ToolInfo) UnmarshalJSON(data []byte) error {
+	tmp := &toolInfoForJSON{}
+	if err := json.Unmarshal(data, tmp); err != nil {
+		return err
+	}
+	t.Name = tmp.Name
+	t.Desc = tmp.Desc
+	t.Extra = tmp.Extra
+	if tmp.HasParamsOneOf {
+		t.ParamsOneOf = &ParamsOneOf{
+			params:     tmp.Params,
+			jsonschema: tmp.JSONSchema,
+		}
+	}
+	return nil
+}
+
+func (t *ToolInfo) GobEncode() ([]byte, error) {
+	tmp := &toolInfoForGob{
+		Name:  t.Name,
+		Desc:  t.Desc,
+		Extra: t.Extra,
+	}
+	if t.ParamsOneOf != nil {
+		tmp.HasParamsOneOf = true
+		tmp.Params = t.ParamsOneOf.params
+		if t.ParamsOneOf.jsonschema != nil {
+			b, err := json.Marshal(t.ParamsOneOf.jsonschema)
+			if err != nil {
+				return nil, err
+			}
+			str := string(b)
+			tmp.JSONSchema = &str
+		}
+	}
+	buf := new(bytes.Buffer)
+	if err := gob.NewEncoder(buf).Encode(tmp); err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
+}
+
+func (t *ToolInfo) GobDecode(b []byte) error {
+	tmp := &toolInfoForGob{}
+	if err := gob.NewDecoder(bytes.NewBuffer(b)).Decode(tmp); err != nil {
+		return err
+	}
+	t.Name = tmp.Name
+	t.Desc = tmp.Desc
+	t.Extra = tmp.Extra
+	if !tmp.HasParamsOneOf {
+		return nil
+	}
+	t.ParamsOneOf = &ParamsOneOf{
+		params: tmp.Params,
+	}
+	if tmp.JSONSchema != nil {
+		s := &jsonschema.Schema{}
+		if err := json.Unmarshal([]byte(*tmp.JSONSchema), s); err != nil {
+			return err
+		}
+		t.ParamsOneOf.jsonschema = s
+	}
+	return nil
 }
 
 // ParameterInfo is the information of a parameter.
