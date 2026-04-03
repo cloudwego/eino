@@ -64,6 +64,12 @@ type ModelContext struct {
 	// Used by EventSenderModelWrapper to wrap stream errors appropriately.
 	ModelRetryConfig *ModelRetryConfig
 
+	// ModelFailoverConfig contains the failover configuration for the model.
+	// This is populated at request time from the agent's ModelFailoverConfig.
+	// Used by EventSenderModelWrapper to wrap stream errors so that failed failover
+	// attempts are skipped (not treated as fatal) by the flow event processor.
+	ModelFailoverConfig *ModelFailoverConfig
+
 	cancelContext *cancelContext
 }
 
