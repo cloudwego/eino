@@ -47,6 +47,22 @@ func getFailoverCurrentModel(ctx context.Context) *failoverCurrentModel {
 	return nil
 }
 
+type failoverHasMoreAttemptsKey struct{}
+
+// withFailoverHasMoreAttempts sets a flag in context indicating whether additional failover
+// attempts remain after the current one. This is read by buildErrWrapper to decide whether
+// stream errors should be wrapped as WillRetryError.
+func withFailoverHasMoreAttempts(ctx context.Context, hasMore bool) context.Context {
+	return context.WithValue(ctx, failoverHasMoreAttemptsKey{}, hasMore)
+}
+
+// getFailoverHasMoreAttempts returns true if the current failover attempt has more attempts
+// after it, false otherwise (including when no failover context is present).
+func getFailoverHasMoreAttempts(ctx context.Context) bool {
+	v, _ := ctx.Value(failoverHasMoreAttemptsKey{}).(bool)
+	return v
+}
+
 type failoverProxyModel struct {
 }
 
@@ -102,6 +118,10 @@ type FailoverContext struct {
 	LastOutputMessage *schema.Message
 
 	// LastErr is the error from the last failed attempt that triggered this failover.
+	//
+	// Note: When ModelRetryConfig is also configured, LastErr will be a *RetryExhaustedError
+	// (if retries were exhausted) rather than the original model error. The original error
+	// can be retrieved via RetryExhaustedError.LastErr.
 	LastErr error
 }
 
@@ -125,6 +145,16 @@ type ModelFailoverConfig struct {
 	// ShouldFailover determines whether to fail over to the next model when an error occurs.
 	// It receives the output message (may be nil if no output is available) and the error (non-nil on failure).
 	// For streaming errors, outputMessage can carry a partial message accumulated before the error.
+	//
+	// Note: When ModelRetryConfig is also configured, outputErr will be a *RetryExhaustedError
+	// (if retries were exhausted) rather than the original model error. Use errors.As to extract
+	// the RetryExhaustedError and access RetryExhaustedError.LastErr for the original error:
+	//
+	//   var retryErr *adk.RetryExhaustedError
+	//   if errors.As(outputErr, &retryErr) {
+	//       // retryErr.LastErr contains the original model error
+	//   }
+	//
 	// Note: When the context itself is cancelled (ctx.Err() != nil), failover will stop immediately
 	// regardless of this function. However, if the model returns context.Canceled or context.DeadlineExceeded
 	// as an error while the context is still active, this function will still be called.
@@ -194,6 +224,7 @@ func (f *failoverModelWrapper) Generate(ctx context.Context, input []*schema.Mes
 		}
 
 		modelCtx := setFailoverCurrentModel(ctx, lastSuccess)
+		modelCtx = withFailoverHasMoreAttempts(modelCtx, f.config.MaxRetries > 0)
 		result, err := f.inner.Generate(modelCtx, input, opts...)
 		if err == nil {
 			return result, nil
@@ -234,6 +265,7 @@ func (f *failoverModelWrapper) Generate(ctx context.Context, input []*schema.Mes
 		}
 
 		modelCtx := setFailoverCurrentModel(ctx, currentModel)
+		modelCtx = withFailoverHasMoreAttempts(modelCtx, attempt < f.config.MaxRetries)
 		result, err := f.inner.Generate(modelCtx, currentInput, opts...)
 		lastOutputMessage = result
 		lastErr = err
@@ -272,6 +304,7 @@ func (f *failoverModelWrapper) Stream(ctx context.Context, input []*schema.Messa
 		}
 
 		modelCtx := setFailoverCurrentModel(ctx, lastSuccess)
+		modelCtx = withFailoverHasMoreAttempts(modelCtx, f.config.MaxRetries > 0)
 		stream, err := f.inner.Stream(modelCtx, input, opts...)
 		if err != nil {
 			lastErr = err
@@ -325,6 +358,7 @@ func (f *failoverModelWrapper) Stream(ctx context.Context, input []*schema.Messa
 		}
 
 		modelCtx := setFailoverCurrentModel(ctx, currentModel)
+		modelCtx = withFailoverHasMoreAttempts(modelCtx, attempt < f.config.MaxRetries)
 		stream, err := f.inner.Stream(modelCtx, currentInput, opts...)
 		if err != nil {
 			lastErr = err
