@@ -25,6 +25,7 @@ import (
 	"strings"
 	"sync"
 	"text/template"
+	"time"
 
 	"github.com/nikolalohinski/gonja"
 	"github.com/nikolalohinski/gonja/config"
@@ -684,6 +685,9 @@ type Message struct {
 
 	// customized information for model implementation
 	Extra map[string]any `json:"extra,omitempty"`
+
+	// CreatedAt is the timestamp when the message was created.
+	CreatedAt *time.Time `json:"created_at,omitempty"`
 }
 
 // TokenUsage Represents the token usage of chat model request.
@@ -1256,11 +1260,14 @@ func formatChatMessagePart(part ChatMessagePart) string {
 	}
 }
 
+func ptrTime(t time.Time) *time.Time { return &t }
+
 // SystemMessage represents a message with Role "system".
 func SystemMessage(content string) *Message {
 	return &Message{
-		Role:    System,
-		Content: content,
+		Role:      System,
+		Content:   content,
+		CreatedAt: ptrTime(time.Now()),
 	}
 }
 
@@ -1270,16 +1277,17 @@ func AssistantMessage(content string, toolCalls []ToolCall) *Message {
 		Role:      Assistant,
 		Content:   content,
 		ToolCalls: toolCalls,
+		CreatedAt: ptrTime(time.Now()),
 	}
 }
 
 // UserMessage represents a message with Role "user".
 func UserMessage(content string) *Message {
 	return &Message{
-		Role:    User,
-		Content: content,
+		Role:      User,
+		Content:   content,
+		CreatedAt: ptrTime(time.Now()),
 	}
-
 }
 
 type toolMessageOptions struct {
@@ -1307,6 +1315,7 @@ func ToolMessage(content string, toolCallID string, opts ...ToolMessageOption) *
 		Content:    content,
 		ToolCallID: toolCallID,
 		ToolName:   o.toolName,
+		CreatedAt:  ptrTime(time.Now()),
 	}
 }
 
@@ -1880,6 +1889,11 @@ func ConcatMessages(msgs []*Message) (*Message, error) {
 		if len(msg.UserInputMultiContent) > 0 {
 			userInputMultiContentParts = append(userInputMultiContentParts, msg.UserInputMultiContent...)
 		}
+		if msg.CreatedAt != nil && (ret.CreatedAt == nil || msg.CreatedAt.Before(*ret.CreatedAt)) {
+			t := *msg.CreatedAt
+			ret.CreatedAt = &t
+		}
+
 		if msg.ResponseMeta != nil && ret.ResponseMeta == nil {
 			ret.ResponseMeta = &ResponseMeta{}
 		}
