@@ -51,8 +51,7 @@ Use {read_tool_name} to view</persisted-output>`
 )
 
 const (
-	msgReducedFlag   = "_reduction_mw_processed"
-	msgReducedTokens = "_reduction_mw_tokens"
+	msgClearedFlag = "_reduction_mw_processed"
 )
 
 func getTruncFmt() string {

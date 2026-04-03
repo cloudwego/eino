@@ -1345,6 +1345,7 @@ func ConcatToolResults(chunks []*ToolResult) (*ToolResult, error) {
 
 		for _, part := range chunk.Parts {
 			if part.Type != ToolPartTypeText {
+				// This restricts non-text modal content only appear once.
 				if prevChunkIdx, exists := nonTextPartTypes[part.Type]; exists {
 					return nil, fmt.Errorf("conflicting %s parts found in chunk %d and chunk %d: "+
 						"non-text modality parts cannot appear in multiple chunks", part.Type, prevChunkIdx, chunkIdx)
@@ -1353,18 +1354,15 @@ func ConcatToolResults(chunks []*ToolResult) (*ToolResult, error) {
 			}
 		}
 
-		mergedChunkParts, err := concatToolOutputParts(chunk.Parts)
-		if err != nil {
-			return nil, fmt.Errorf("failed to merge text parts in chunk %d: %w", chunkIdx, err)
-		}
-		allParts = append(allParts, mergedChunkParts...)
+		allParts = append(allParts, chunk.Parts...)
 	}
 
-	if len(allParts) == 0 {
-		return &ToolResult{}, nil
+	mergedChunkParts, err := concatToolOutputParts(allParts)
+	if err != nil {
+		return nil, fmt.Errorf("failed to merge parts: %w", err)
 	}
 
-	return &ToolResult{Parts: allParts}, nil
+	return &ToolResult{Parts: mergedChunkParts}, nil
 }
 
 func concatToolOutputParts(parts []ToolOutputPart) ([]ToolOutputPart, error) {

@@ -18,6 +18,7 @@ package reduction
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"path/filepath"
@@ -80,13 +81,23 @@ type Config struct {
 	TokenCounter func(ctx context.Context, msg []adk.Message, tools []*schema.ToolInfo) (int64, error)
 
 	// MaxTokensForClear is the maximum number of tokens allowed in the conversation before clearing is attempted.
-	// Required. Default is 30000.
+	// Required. Default is 160000.
 	MaxTokensForClear int64
 
 	// ClearRetentionSuffixLimit is the number of most recent messages to retain without clearing.
 	// This ensures the model has some immediate context.
 	// Optional. Default is 1.
 	ClearRetentionSuffixLimit int
+
+	// ClearAtLeastTokens ensures a minimum number of tokens is cleared each time the strategy activates.
+	// If the strategy couldn't clear at least the specified amount, clear phase will not be applied.
+	// This helps determine if context clearing is worth breaking your prompt cache.
+	// Optional. Default is 0.
+	ClearAtLeastTokens int64
+
+	// ClearExcludeTools is list of tool names whose tool uses and results should never be cleared.
+	// Optional. Default is nil.
+	ClearExcludeTools []string
 
 	// ClearPostProcess is clear post process handler.
 	// Optional.
@@ -125,8 +136,11 @@ type ToolDetail struct {
 	// ToolArgument contains the arguments passed to the tool.
 	ToolArgument *schema.ToolArgument
 
-	// ToolResult contains the output returned by the tool.
+	// ToolResult contains the output returned by the invokable tool.
 	ToolResult *schema.ToolResult
+
+	// StreamToolResult contains the output returned by the streamable tool.
+	StreamToolResult *schema.StreamReader[*schema.ToolResult]
 }
 
 type TruncResult struct {
@@ -187,6 +201,8 @@ func (t *Config) copyAndFillDefaults() (*Config, error) {
 		TokenCounter:              t.TokenCounter,
 		MaxTokensForClear:         t.MaxTokensForClear,
 		ClearRetentionSuffixLimit: t.ClearRetentionSuffixLimit,
+		ClearAtLeastTokens:        t.ClearAtLeastTokens,
+		ClearExcludeTools:         t.ClearExcludeTools,
 		ClearPostProcess:          t.ClearPostProcess,
 	}
 	if cfg.TokenCounter == nil {
@@ -203,6 +219,9 @@ func (t *Config) copyAndFillDefaults() (*Config, error) {
 	}
 	if cfg.MaxLengthForTrunc == 0 {
 		cfg.MaxLengthForTrunc = 50000
+	}
+	if cfg.MaxTokensForClear == 0 {
+		cfg.MaxTokensForClear = 160000
 	}
 	if t.ToolConfig != nil {
 		cfg.ToolConfig = make(map[string]*ToolReductionConfig, len(t.ToolConfig))
@@ -246,10 +265,15 @@ func New(_ context.Context, config *Config) (adk.ChatModelAgentMiddleware, error
 	if !defaultReductionConfig.SkipClear {
 		defaultReductionConfig.ClearHandler = defaultClearHandler(config.RootDir, config.Backend != nil, config.ReadFileToolName)
 	}
+	excludeClearTools := make(map[string]struct{}, len(config.ClearExcludeTools))
+	for _, toolName := range config.ClearExcludeTools {
+		excludeClearTools[toolName] = struct{}{}
+	}
 
 	return &toolReductionMiddleware{
-		config:        config,
-		defaultConfig: defaultReductionConfig,
+		config:            config,
+		defaultConfig:     defaultReductionConfig,
+		excludeClearTools: excludeClearTools,
 	}, nil
 }
 
@@ -258,6 +282,8 @@ type toolReductionMiddleware struct {
 
 	config        *Config
 	defaultConfig *ToolReductionConfig
+
+	excludeClearTools map[string]struct{}
 }
 
 func (t *toolReductionMiddleware) getToolConfig(toolName string, sc scene) *ToolReductionConfig {
@@ -329,35 +355,19 @@ func (t *toolReductionMiddleware) WrapStreamableToolCall(_ context.Context, endp
 			return nil, err
 		}
 
-		var chunks []string
 		readers := output.Copy(2)
 		output = readers[0]
 		origResp := readers[1]
 		defer output.Close()
 
-		for {
-			var recvErr error
-			chunk, recvErr := output.Recv()
-			if recvErr != nil {
-				if recvErr != io.EOF {
-					return origResp, nil
-				}
-				break
-			}
-			chunks = append(chunks, chunk)
-		}
-
-		result := strings.Join(chunks, "")
 		detail := &ToolDetail{
 			ToolContext: tCtx,
 			ToolArgument: &schema.ToolArgument{
 				Text: argumentsInJSON,
 			},
-			ToolResult: &schema.ToolResult{
-				Parts: []schema.ToolOutputPart{
-					{Type: schema.ToolPartTypeText, Text: result},
-				},
-			},
+			StreamToolResult: schema.StreamReaderWithConvert(output, func(t string) (*schema.ToolResult, error) {
+				return &schema.ToolResult{Parts: []schema.ToolOutputPart{{Type: schema.ToolPartTypeText, Text: t}}}, nil
+			}),
 		}
 		truncResult, err := cfg.TruncHandler(ctx, detail)
 		if err != nil {
@@ -408,7 +418,7 @@ func (t *toolReductionMiddleware) BeforeModelRewriteState(ctx context.Context, s
 	)
 	for ; start < len(state.Messages); start++ {
 		msg := state.Messages[start]
-		if msg.Role == schema.Assistant && !getMsgOffloadedFlag(msg) {
+		if msg.Role == schema.Assistant && !getMsgClearedFlag(msg) {
 			break
 		}
 	}
@@ -427,28 +437,39 @@ func (t *toolReductionMiddleware) BeforeModelRewriteState(ctx context.Context, s
 		return ctx, state, nil
 	}
 
+	var (
+		offloadStash       []*offloadStashItem
+		editTarget         []*schema.Message
+		clearAtLeastTokens = t.config.ClearAtLeastTokens
+	)
+
+	if clearAtLeastTokens > 0 {
+		editTarget = append(editTarget, state.Messages[:start]...)
+		editTarget = append(editTarget, copyMessages(state.Messages[start:end])...)
+		editTarget = append(editTarget, state.Messages[end:]...)
+	} else {
+		editTarget = state.Messages
+	}
+
 	// recursively handle
-	tcMsgIndex := start
+	toolCallMsgIndex := start
 
-	for tcMsgIndex < end {
-		tcMsg := state.Messages[tcMsgIndex]
-		if tcMsg.Role == schema.Assistant && len(tcMsg.ToolCalls) > 0 {
-			trMsgEnd := tcMsgIndex + 1 + len(tcMsg.ToolCalls)
-			if trMsgEnd > len(state.Messages) {
-				trMsgEnd = len(state.Messages)
-			}
-
-			j := tcMsgIndex
-			for tcIndex, toolCall := range tcMsg.ToolCalls {
-				j++
-				if j >= end {
+	for toolCallMsgIndex < end {
+		toolCallMsg := editTarget[toolCallMsgIndex]
+		if toolCallMsg.Role == schema.Assistant && len(toolCallMsg.ToolCalls) > 0 {
+			toolMsgIndex := toolCallMsgIndex
+			for tooCallOffset, toolCall := range toolCallMsg.ToolCalls {
+				toolMsgIndex++
+				if toolMsgIndex >= end {
 					break
 				}
-				resultMsg := state.Messages[j]
+				resultMsg := editTarget[toolMsgIndex]
 				if resultMsg.Role != schema.Tool { // unexpected
 					break
 				}
-
+				if _, found := t.excludeClearTools[toolCall.Function.Name]; found {
+					continue
+				}
 				cfg := t.getToolConfig(toolCall.Function.Name, sceneClear)
 				if cfg == nil || cfg.ClearHandler == nil {
 					continue
@@ -481,16 +502,23 @@ func (t *toolReductionMiddleware) BeforeModelRewriteState(ctx context.Context, s
 					if cfg.Backend == nil {
 						return ctx, state, fmt.Errorf("clear: no backend for offload")
 					}
-					writeErr := cfg.Backend.Write(ctx, &filesystem.WriteRequest{
-						FilePath: offloadInfo.OffloadFilePath,
-						Content:  offloadInfo.OffloadContent,
-					})
-					if writeErr != nil {
-						return ctx, state, writeErr
+					if clearAtLeastTokens > 0 { // delay clear offloading
+						offloadStash = append(offloadStash, &offloadStashItem{
+							config:      cfg,
+							offloadInfo: offloadInfo,
+						})
+					} else { // instant clear offloading
+						writeErr := cfg.Backend.Write(ctx, &filesystem.WriteRequest{
+							FilePath: offloadInfo.OffloadFilePath,
+							Content:  offloadInfo.OffloadContent,
+						})
+						if writeErr != nil {
+							return ctx, state, writeErr
+						}
 					}
 				}
 
-				tcMsg.ToolCalls[tcIndex].Function.Arguments = offloadInfo.ToolArgument.Text
+				toolCallMsg.ToolCalls[tooCallOffset].Function.Arguments = offloadInfo.ToolArgument.Text
 				if fromContent {
 					if len(offloadInfo.ToolResult.Parts) > 0 {
 						resultMsg.Content = offloadInfo.ToolResult.Parts[0].Text
@@ -505,9 +533,31 @@ func (t *toolReductionMiddleware) BeforeModelRewriteState(ctx context.Context, s
 			}
 
 			// set dedup flag
-			setMsgOffloadedFlag(tcMsg)
+			setMsgClearedFlag(toolCallMsg)
 		}
-		tcMsgIndex++
+		toolCallMsgIndex++
+	}
+
+	if clearAtLeastTokens > 0 {
+		estimatedTokensAfterClear, err := t.config.TokenCounter(ctx, editTarget, mc.Tools)
+		if err != nil {
+			return ctx, state, err
+		}
+		tokensCleared := estimatedTokens - estimatedTokensAfterClear
+		if tokensCleared < clearAtLeastTokens {
+			// clear not applied, post process won't apply as well.
+			return ctx, state, nil
+		}
+		for _, item := range offloadStash {
+			writeErr := item.config.Backend.Write(ctx, &filesystem.WriteRequest{
+				FilePath: item.offloadInfo.OffloadFilePath,
+				Content:  item.offloadInfo.OffloadContent,
+			})
+			if writeErr != nil {
+				return ctx, state, writeErr
+			}
+		}
+		state.Messages = editTarget // replace original state messages
 	}
 
 	if t.config.ClearPostProcess != nil {
@@ -517,16 +567,51 @@ func (t *toolReductionMiddleware) BeforeModelRewriteState(ctx context.Context, s
 	return ctx, state, nil
 }
 
+type offloadStashItem struct {
+	config      *ToolReductionConfig
+	offloadInfo *ClearResult
+}
+
+func copyMessages(msgs []*schema.Message) []*schema.Message {
+	resp := make([]*schema.Message, len(msgs))
+	for i, msg := range msgs {
+		copied := &schema.Message{
+			Role:                     msg.Role,
+			Content:                  msg.Content,
+			MultiContent:             msg.MultiContent,
+			UserInputMultiContent:    msg.UserInputMultiContent,
+			AssistantGenMultiContent: msg.AssistantGenMultiContent,
+			Name:                     msg.Name,
+			ToolCalls:                nil,
+			ToolCallID:               msg.ToolCallID,
+			ToolName:                 msg.ToolName,
+			ResponseMeta:             msg.ResponseMeta,
+			ReasoningContent:         msg.ReasoningContent,
+			Extra:                    nil,
+		}
+		if msg.ToolCalls != nil {
+			copied.ToolCalls = make([]schema.ToolCall, 0, len(msg.ToolCalls))
+			for _, tc := range msg.ToolCalls {
+				copied.ToolCalls = append(copied.ToolCalls, tc)
+			}
+		}
+		if msg.Extra != nil {
+			copied.Extra = make(map[string]any, len(msg.Extra))
+			for k, v := range msg.Extra {
+				copied.Extra[k] = v
+			}
+		}
+		resp[i] = copied
+	}
+	return resp
+}
+
 // defaultTokenCounter estimates tokens, which treats one token as ~4 characters of text for common English text.
 // github.com/tiktoken-go/tokenizer is highly recommended to replace it.
 func defaultTokenCounter(_ context.Context, msgs []*schema.Message, tools []*schema.ToolInfo) (int64, error) {
 	var tokens int64
 	for _, msg := range msgs {
 		if msg == nil {
-			continue
-		}
-		if cached, ok := getMsgCachedToken(msg); ok {
-			tokens += cached
 			continue
 		}
 
@@ -545,8 +630,27 @@ func defaultTokenCounter(_ context.Context, msgs []*schema.Message, tools []*sch
 			}
 		}
 
+		for _, mc := range msg.UserInputMultiContent {
+			switch mc.Type {
+			case schema.ChatMessagePartTypeText:
+				sb.WriteString(mc.Text)
+				sb.WriteString("\n")
+			default:
+				// do nothing for multi-modal content
+			}
+		}
+
+		for _, mc := range msg.AssistantGenMultiContent {
+			switch mc.Type {
+			case schema.ChatMessagePartTypeText:
+				sb.WriteString(mc.Text)
+				sb.WriteString("\n")
+			default:
+				// do nothing for multi-modal content
+			}
+		}
+
 		n := int64(len(sb.String()) / 4)
-		setMsgCachedToken(msg, n)
 		tokens += n
 	}
 
@@ -566,48 +670,73 @@ func defaultTokenCounter(_ context.Context, msgs []*schema.Message, tools []*sch
 
 func defaultTruncHandler(rootDir string, truncMaxLength int) func(ctx context.Context, detail *ToolDetail) (truncResult *TruncResult, err error) {
 	return func(ctx context.Context, detail *ToolDetail) (offloadInfo *TruncResult, err error) {
-		resultText := detail.ToolResult.Parts[0].Text
-		if len(resultText) <= truncMaxLength {
-			return &TruncResult{NeedTrunc: false}, nil
-		}
-
-		filePath := filepath.Join(rootDir, "trunc", detail.ToolContext.CallID)
-		previewSize := truncMaxLength / 2
-		truncNotify, err := pyfmt.Fmt(getTruncFmt(), map[string]any{
-			"original_size": len(resultText),
-			"file_path":     filePath,
-			"preview_size":  previewSize,
-			"preview_first": resultText[:previewSize],
-			"preview_last":  resultText[len(resultText)-previewSize:],
-		})
+		resultParts, needProcess, err := getJointToolResult(detail)
 		if err != nil {
 			return nil, err
 		}
+		if !needProcess {
+			return &TruncResult{NeedTrunc: false}, nil
+		}
+
+		fullLength, textPartsCnt := 0, 0
+		for _, part := range resultParts {
+			if part.Type == schema.ToolPartTypeText {
+				fullLength += len([]rune(part.Text))
+				textPartsCnt++
+			}
+		}
+		if textPartsCnt == 0 || fullLength <= truncMaxLength {
+			return &TruncResult{NeedTrunc: false}, nil
+		}
+
+		fileName := detail.ToolContext.CallID
+		if fileName == "" {
+			fileName = uuid.NewString()
+		}
+		var (
+			offloadContent  = stringifyToolOutputParts(resultParts)
+			filePath        = filepath.Join(rootDir, "trunc", fileName)
+			truncPartLength = truncMaxLength / textPartsCnt
+			previewSize     = truncPartLength / 2
+		)
+
+		for i, part := range resultParts {
+			text := []rune(part.Text)
+			if part.Type != schema.ToolPartTypeText ||
+				len(text) < truncPartLength {
+				continue
+			}
+			truncNotify, fmtErr := pyfmt.Fmt(getTruncFmt(), map[string]any{
+				"original_size": len(part.Text),
+				"file_path":     filePath,
+				"preview_size":  previewSize,
+				"preview_first": string(text[:previewSize]),
+				"preview_last":  string(text[len(part.Text)-previewSize:]),
+			})
+			if err != nil {
+				return nil, fmtErr
+			}
+			resultParts[i].Text = truncNotify
+		}
 
 		return &TruncResult{
-			ToolResult: &schema.ToolResult{
-				Parts: []schema.ToolOutputPart{
-					{Type: schema.ToolPartTypeText, Text: resultText[:truncMaxLength] + truncNotify},
-				},
-			},
 			NeedTrunc:       true,
+			ToolResult:      &schema.ToolResult{Parts: resultParts},
 			NeedOffload:     true,
 			OffloadFilePath: filePath,
-			OffloadContent:  resultText,
+			OffloadContent:  offloadContent,
 		}, nil
 	}
 }
 
 func defaultClearHandler(rootDir string, needOffload bool, readFileToolName string) func(ctx context.Context, detail *ToolDetail) (*ClearResult, error) {
 	return func(ctx context.Context, detail *ToolDetail) (clearResult *ClearResult, err error) {
-		if len(detail.ToolResult.Parts) == 0 {
-			return &ClearResult{NeedClear: false}, nil
+		resultParts, needProcess, err := getJointToolResult(detail)
+		if err != nil {
+			return nil, err
 		}
-		for _, part := range detail.ToolResult.Parts {
-			if part.Type != schema.ToolPartTypeText {
-				// brutal judge
-				return nil, fmt.Errorf("default offload currently not support multimodal content type=%v", part.Type)
-			}
+		if !needProcess {
+			return &ClearResult{NeedClear: false}, nil
 		}
 
 		fileName := detail.ToolContext.CallID
@@ -615,91 +744,130 @@ func defaultClearHandler(rootDir string, needOffload bool, readFileToolName stri
 			fileName = uuid.NewString()
 		}
 
-		var nResult string
 		if needOffload {
 			filePath := filepath.Join(rootDir, "clear", fileName)
-			nResult, err = pyfmt.Fmt(getClearWithOffloadingFmt(), map[string]any{
+			textPlaceHolder, fmtErr := pyfmt.Fmt(getClearWithOffloadingFmt(), map[string]any{
 				"file_path":      filePath,
 				"read_tool_name": readFileToolName,
 			})
-			if err != nil {
-				return nil, err
+			if fmtErr != nil {
+				return nil, fmtErr
+			}
+
+			offloadContent := stringifyToolOutputParts(resultParts)
+			for i, part := range resultParts {
+				if part.Type != schema.ToolPartTypeText {
+					continue
+				}
+				resultParts[i].Text = textPlaceHolder
 			}
 			clearResult = &ClearResult{
-				ToolArgument:    detail.ToolArgument,
 				NeedClear:       true,
+				ToolArgument:    detail.ToolArgument,
+				ToolResult:      &schema.ToolResult{Parts: resultParts},
 				NeedOffload:     true,
 				OffloadFilePath: filePath,
-				OffloadContent:  detail.ToolResult.Parts[0].Text,
+				OffloadContent:  offloadContent,
 			}
 		} else {
-			nResult = getClearWithoutOffloadingFmt()
+			textPlaceHolder := getClearWithoutOffloadingFmt()
+			for i, part := range resultParts {
+				if part.Type != schema.ToolPartTypeText {
+					continue
+				}
+				resultParts[i].Text = textPlaceHolder
+			}
 			clearResult = &ClearResult{
-				ToolArgument: detail.ToolArgument,
 				NeedClear:    true,
+				ToolArgument: detail.ToolArgument,
+				ToolResult:   &schema.ToolResult{Parts: resultParts},
 				NeedOffload:  false,
 			}
-		}
-
-		clearResult.ToolResult = &schema.ToolResult{
-			Parts: []schema.ToolOutputPart{
-				{Type: schema.ToolPartTypeText, Text: nResult},
-			},
 		}
 
 		return clearResult, nil
 	}
 }
 
-func getMsgOffloadedFlag(msg *schema.Message) (offloaded bool) {
+func getJointToolResult(toolDetail *ToolDetail) (toolOutputParts []schema.ToolOutputPart, needProcess bool, err error) {
+	if toolDetail.ToolResult == nil && toolDetail.StreamToolResult == nil {
+		return nil, false, fmt.Errorf("ToolResult and StreamToolResult are both nil")
+	}
+
+	if toolDetail.ToolResult != nil {
+		toolOutputParts = toolDetail.ToolResult.Parts
+	} else {
+		var toolResultChunks []*schema.ToolResult
+		for {
+			toolResultChunk, recvErr := toolDetail.StreamToolResult.Recv()
+			if recvErr != nil {
+				if recvErr == io.EOF {
+					break
+				}
+				// return original stream reader, not sending recvErr
+				return nil, false, nil
+			}
+			toolResultChunks = append(toolResultChunks, toolResultChunk)
+		}
+		toolResult, concatErr := schema.ConcatToolResults(toolResultChunks)
+		if concatErr != nil {
+			return nil, false, concatErr
+		}
+		toolOutputParts = toolResult.Parts
+	}
+
+	if len(toolOutputParts) == 0 {
+		return nil, false, nil
+	}
+
+	return toolOutputParts, true, nil
+}
+
+func stringifyToolOutputParts(toolOutputParts []schema.ToolOutputPart) string {
+	if len(toolOutputParts) == 0 {
+		return ""
+	} else if len(toolOutputParts) == 1 && toolOutputParts[0].Type == schema.ToolPartTypeText {
+		return toolOutputParts[0].Text
+	} else {
+		b, _ := json.MarshalIndent(toolOutputParts, "", "\t")
+		return string(b)
+	}
+}
+
+func getMsgClearedFlag(msg *schema.Message) (offloaded bool) {
 	if msg.Extra == nil {
 		return false
 	}
-	v, ok := msg.Extra[msgReducedFlag].(bool)
+	v, ok := msg.Extra[msgClearedFlag].(bool)
 	if !ok {
 		return false
 	}
 	return v
 }
 
-func setMsgOffloadedFlag(msg *schema.Message) {
+func setMsgClearedFlag(msg *schema.Message) {
 	if msg.Extra == nil {
 		msg.Extra = make(map[string]any)
 	}
-	msg.Extra[msgReducedFlag] = true
-}
-
-func getMsgCachedToken(msg *schema.Message) (int64, bool) {
-	if msg.Extra == nil {
-		return 0, false
-	}
-	tokens, ok := msg.Extra[msgReducedTokens].(int64)
-	return tokens, ok
-}
-
-func setMsgCachedToken(msg *schema.Message, tokens int64) {
-	if msg.Extra == nil {
-		msg.Extra = make(map[string]any)
-	}
-	msg.Extra[msgReducedTokens] = tokens
+	msg.Extra[msgClearedFlag] = true
 }
 
 func toolResultFromMessage(msg *schema.Message) (result *schema.ToolResult, fromContent bool, err error) {
 	if msg.Role != schema.Tool {
 		return nil, false, fmt.Errorf("message role %s is not a tool", msg.Role)
 	}
-	if msg.Content != "" {
-		return &schema.ToolResult{Parts: []schema.ToolOutputPart{{Type: schema.ToolPartTypeText, Text: msg.Content}}}, true, nil
-	}
-	result = &schema.ToolResult{Parts: make([]schema.ToolOutputPart, 0, len(msg.UserInputMultiContent))}
-	for _, part := range msg.UserInputMultiContent {
-		top, convErr := convMessageInputPartToToolOutputPart(part)
-		if convErr != nil {
-			return nil, false, convErr
+	if len(msg.UserInputMultiContent) > 0 {
+		result = &schema.ToolResult{Parts: make([]schema.ToolOutputPart, 0, len(msg.UserInputMultiContent))}
+		for _, part := range msg.UserInputMultiContent {
+			top, convErr := convMessageInputPartToToolOutputPart(part)
+			if convErr != nil {
+				return nil, false, convErr
+			}
+			result.Parts = append(result.Parts, top)
 		}
-		result.Parts = append(result.Parts, top)
+		return result, false, nil
 	}
-	return result, false, nil
+	return &schema.ToolResult{Parts: []schema.ToolOutputPart{{Type: schema.ToolPartTypeText, Text: msg.Content}}}, true, nil
 }
 
 func convMessageInputPartToToolOutputPart(msgPart schema.MessageInputPart) (schema.ToolOutputPart, error) {
