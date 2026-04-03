@@ -315,7 +315,7 @@ func (m *eventSenderModel) Stream(ctx context.Context, input []*schema.Message, 
 	if m.modelRetryConfig != nil {
 		convertOpts := []schema.ConvertOption{
 			schema.WithErrWrapper(genErrWrapper(ctx, m.modelRetryConfig.MaxRetries,
-				retryAttempt, m.modelRetryConfig.IsRetryAble)),
+				retryAttempt, effectiveShouldRetryError(m.modelRetryConfig))),
 		}
 		eventStream = schema.StreamReaderWithConvert(streams[0],
 			func(msg *schema.Message) (*schema.Message, error) { return msg, nil },
