@@ -80,7 +80,7 @@ type Config struct {
 	TokenCounter func(ctx context.Context, msg []adk.Message, tools []*schema.ToolInfo) (int64, error)
 
 	// MaxTokensForClear is the maximum number of tokens allowed in the conversation before clearing is attempted.
-	// Required. Default is 30000.
+	// Required. Default is 160000.
 	MaxTokensForClear int64
 
 	// ClearRetentionSuffixLimit is the number of most recent messages to retain without clearing.
@@ -203,6 +203,9 @@ func (t *Config) copyAndFillDefaults() (*Config, error) {
 	}
 	if cfg.MaxLengthForTrunc == 0 {
 		cfg.MaxLengthForTrunc = 50000
+	}
+	if cfg.MaxTokensForClear == 0 {
+		cfg.MaxTokensForClear = 160000
 	}
 	if t.ToolConfig != nil {
 		cfg.ToolConfig = make(map[string]*ToolReductionConfig, len(t.ToolConfig))
@@ -587,7 +590,7 @@ func defaultTruncHandler(rootDir string, truncMaxLength int) func(ctx context.Co
 		return &TruncResult{
 			ToolResult: &schema.ToolResult{
 				Parts: []schema.ToolOutputPart{
-					{Type: schema.ToolPartTypeText, Text: resultText[:truncMaxLength] + truncNotify},
+					{Type: schema.ToolPartTypeText, Text: truncNotify},
 				},
 			},
 			NeedTrunc:       true,
