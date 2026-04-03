@@ -33,7 +33,7 @@
 //   - fork: runs the skill with a new sub-agent without parent message history
 //   - fork_with_context: runs the skill with a new sub-agent carrying parent message history
 //
-// Extension points
+// # Extension points
 //
 //   - CustomToolParams customizes the tool parameter schema.
 //   - BuildContent customizes how skill content is generated from raw tool arguments.

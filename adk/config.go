@@ -20,7 +20,6 @@ import "github.com/cloudwego/eino/adk/internal"
 
 // Language represents the language setting for the ADK built-in prompts.
 type Language = internal.Language
-type I18nPrompts = internal.I18nPrompts
 
 const (
 	// LanguageEnglish represents English language.

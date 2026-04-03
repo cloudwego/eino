@@ -21,13 +21,10 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"sort"
 	"strings"
 	"text/template"
 
-	"github.com/eino-contrib/jsonschema"
 	"github.com/slongfield/pyfmt"
-	orderedmap "github.com/wk8/go-ordered-map/v2"
 
 	"github.com/cloudwego/eino/adk"
 	"github.com/cloudwego/eino/adk/internal"
@@ -152,12 +149,12 @@ type Config struct {
 	// CustomToolParams customizes tool parameters for the skill tool.
 	// defaults is the default schema with only the required "skill" field.
 	// optional
-	CustomToolParams func(ctx context.Context, defaults *schema.ParamsOneOf) (*schema.ParamsOneOf, error)
+	CustomToolParams func(ctx context.Context, defaults map[string]*schema.ParameterInfo) (map[string]*schema.ParameterInfo, error)
 
 	// BuildContent customizes the skill content generated for this invocation.
 	// rawArgs contains the original tool call arguments in JSON form.
 	// optional
-	BuildContent func(ctx context.Context, skill Skill, rawArgs string) (adk.I18nPrompts, error)
+	BuildContent func(ctx context.Context, skill Skill, rawArgs string) (string, error)
 
 	// BuildForkMessages customizes the messages passed to the forked sub-agent.
 	// When nil, fork uses [UserMessage(skillContent)] and fork_with_context uses
@@ -169,7 +166,7 @@ type Config struct {
 	// When nil, assistant message contents emitted by the sub-agent are concatenated and returned
 	// in a default formatted string.
 	// optional
-	FormatForkResult func(ctx context.Context, in SubAgentOutput) (adk.I18nPrompts, error)
+	FormatForkResult func(ctx context.Context, in SubAgentOutput) (string, error)
 }
 
 // NewMiddleware creates a new skill middleware handler for ChatModelAgent.
@@ -195,7 +192,7 @@ type Config struct {
 //
 //	agent, err := adk.NewChatModelAgent(ctx, &adk.ChatModelAgentConfig{
 //	    // ...
-//	    Middlewares: []adk.ChatModelAgentMiddleware{handler},
+//	    Handlers: []adk.ChatModelAgentMiddleware{handler},
 //	})
 func NewMiddleware(ctx context.Context, config *Config) (adk.ChatModelAgentMiddleware, error) {
 	if config == nil {
@@ -306,12 +303,10 @@ func New(ctx context.Context, config *Config) (adk.AgentMiddleware, error) {
 	return adk.AgentMiddleware{
 		AdditionalInstruction: sp,
 		AdditionalTools: []tool.BaseTool{&skillTool{
-			b:                config.Backend,
-			toolName:         name,
-			useChinese:       config.UseChinese,
-			customToolDesc:   config.CustomToolDescription,
-			customToolParams: config.CustomToolParams,
-			buildContent:     config.BuildContent,
+			b:              config.Backend,
+			toolName:       name,
+			useChinese:     config.UseChinese,
+			customToolDesc: config.CustomToolDescription,
 		}},
 	}, nil
 }
@@ -341,11 +336,11 @@ type skillTool struct {
 
 	customToolDesc ToolDescriptionFunc
 
-	customToolParams func(ctx context.Context, defaults *schema.ParamsOneOf) (*schema.ParamsOneOf, error)
-	buildContent     func(ctx context.Context, skill Skill, rawArgs string) (adk.I18nPrompts, error)
+	customToolParams func(ctx context.Context, defaults map[string]*schema.ParameterInfo) (map[string]*schema.ParameterInfo, error)
+	buildContent     func(ctx context.Context, skill Skill, rawArgs string) (string, error)
 
 	buildForkMessages func(ctx context.Context, in SubAgentInput) ([]adk.Message, error)
-	formatForkResult  func(ctx context.Context, in SubAgentOutput) (adk.I18nPrompts, error)
+	formatForkResult  func(ctx context.Context, in SubAgentOutput) (string, error)
 }
 
 type descriptionTemplateHelper struct {
@@ -376,7 +371,7 @@ func (s *skillTool) Info(ctx context.Context) (*schema.ToolInfo, error) {
 
 	oneOf, err := s.buildParamsOneOf(ctx)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to build skill tool params: %w", err)
 	}
 
 	return &schema.ToolInfo{
@@ -433,71 +428,39 @@ func defaultToolParams() map[string]*schema.ParameterInfo {
 }
 
 func (s *skillTool) buildParamsOneOf(ctx context.Context) (*schema.ParamsOneOf, error) {
-	base := schema.NewParamsOneOfByParams(defaultToolParams())
+	defaults := defaultToolParams()
 	if s.customToolParams == nil {
-		return base, nil
+		return schema.NewParamsOneOfByParams(defaults), nil
 	}
 
-	custom, err := s.customToolParams(ctx, base)
+	params, err := s.customToolParams(ctx, defaults)
 	if err != nil {
 		return nil, err
 	}
-	if custom == nil {
-		return base, nil
+	if params == nil {
+		params = defaults
 	}
 
-	js, err := custom.ToJSONSchema()
-	if err != nil || js == nil {
-		return base, nil
-	}
-	if js.Properties == nil {
-		js.Properties = orderedmap.New[string, *jsonschema.Schema]()
+	if _, ok := params["skill"]; !ok {
+		params["skill"] = defaults["skill"]
 	}
 
-	desc := internal.SelectPrompt(internal.I18nPrompts{
-		English: "The skill name (no arguments). E.g., \"pdf\" or \"xlsx\"",
-		Chinese: "Skill 名称（无需其他参数）。例如：\"pdf\" 或 \"xlsx\"",
-	})
-	if skillSchema, ok := js.Properties.Get("skill"); ok && skillSchema != nil && skillSchema.Description != "" {
-		desc = skillSchema.Description
+	if p := params["skill"]; p != nil {
+		p.Required = true
 	}
 
-	js.Properties.Set("skill", &jsonschema.Schema{
-		Type:        string(schema.String),
-		Description: desc,
-	})
-
-	js.Required = append(js.Required, "skill")
-	js.Required = uniqStrings(js.Required)
-
-	return schema.NewParamsOneOfByJSONSchema(js), nil
-}
-
-func uniqStrings(in []string) []string {
-	if len(in) == 0 {
-		return in
-	}
-	sort.Strings(in)
-	out := in[:0]
-	var last string
-	for i, s := range in {
-		if i == 0 || s != last {
-			out = append(out, s)
-			last = s
-		}
-	}
-	return out
+	return schema.NewParamsOneOfByParams(params), nil
 }
 
 func (s *skillTool) buildSkillResult(ctx context.Context, skill Skill, rawArguments string) (string, error) {
 	if s.buildContent == nil {
 		return s.defaultSkillContent(skill), nil
 	}
-	prompts, err := s.buildContent(ctx, skill, rawArguments)
+	content, err := s.buildContent(ctx, skill, rawArguments)
 	if err != nil {
 		return "", fmt.Errorf("failed to build skill result: %w", err)
 	}
-	return internal.SelectPrompt(prompts), nil
+	return content, nil
 }
 
 func (s *skillTool) defaultSkillContent(skill Skill) string {
@@ -608,7 +571,7 @@ func (s *skillTool) runAgentMode(ctx context.Context, skill Skill, forkHistory b
 	}
 
 	if s.formatForkResult != nil {
-		prompts, err := s.formatForkResult(ctx, SubAgentOutput{
+		out, err := s.formatForkResult(ctx, SubAgentOutput{
 			Skill:        skill,
 			Mode:         skill.Context,
 			RawArguments: rawArguments,
@@ -616,9 +579,9 @@ func (s *skillTool) runAgentMode(ctx context.Context, skill Skill, forkHistory b
 			Results:      results,
 		})
 		if err != nil {
-			return "", err
+			return "", fmt.Errorf("failed to format fork result: %w", err)
 		}
-		return internal.SelectPrompt(prompts), nil
+		return out, nil
 	}
 
 	resultFmt := internal.SelectPrompt(internal.I18nPrompts{
