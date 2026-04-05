@@ -106,8 +106,9 @@ func (t *taskCreateTool) InvokableRun(ctx context.Context, argumentsInJSON strin
 	for _, file := range files {
 		fileName := filepath.Base(file.Path)
 		if fileName == highWatermarkFileName {
+			filePath := resolveListedFilePath(t.BaseDir, file.Path)
 			content, readErr := t.Backend.Read(ctx, &ReadRequest{
-				FilePath: file.Path,
+				FilePath: filePath,
 			})
 			if readErr != nil {
 				return "", fmt.Errorf("%s read highwatermark file %s failed, err: %w", TaskCreateToolName, file.Path, readErr)
