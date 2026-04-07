@@ -4076,3 +4076,262 @@ func TestTurnLoop_DeleteWithoutCheckPointDeleter_NoOp(t *testing.T) {
 	assert.True(t, exists, "checkpoint should still exist without CheckPointDeleter")
 	assert.NotNil(t, v, "checkpoint should not be set to nil")
 }
+
+func TestTurnLoop_StopWithSkipCheckpoint(t *testing.T) {
+	ctx := context.Background()
+	store := &turnLoopCheckpointStore{m: make(map[string][]byte)}
+	cpID := "skip-cp-session"
+
+	loop := NewTurnLoop(TurnLoopConfig[string]{
+		Store:        store,
+		CheckpointID: cpID,
+		GenInput: func(ctx context.Context, _ *TurnLoop[string], items []string) (*GenInputResult[string], error) {
+			return &GenInputResult[string]{Input: &AgentInput{}, Consumed: items}, nil
+		},
+		PrepareAgent: func(ctx context.Context, _ *TurnLoop[string], consumed []string) (Agent, error) {
+			return &turnLoopMockAgent{name: "test"}, nil
+		},
+	})
+
+	loop.Push("a")
+	loop.Push("b")
+	loop.Stop(WithSkipCheckpoint())
+	loop.Run(ctx)
+
+	exit := loop.Wait()
+	assert.NoError(t, exit.ExitReason)
+	assert.False(t, exit.Checkpointed, "checkpoint should be skipped when WithSkipCheckpoint is used")
+
+	store.mu.Lock()
+	_, exists := store.m[cpID]
+	store.mu.Unlock()
+	assert.False(t, exists, "no checkpoint should be saved when WithSkipCheckpoint is used")
+}
+
+func TestTurnLoop_StopWithSkipCheckpoint_DeletesStaleCheckpoint(t *testing.T) {
+	ctx := context.Background()
+	store := &deletableCheckpointStore{
+		turnLoopCheckpointStore: turnLoopCheckpointStore{m: make(map[string][]byte)},
+	}
+	cpID := "skip-stale-session"
+
+	loop1 := NewTurnLoop(TurnLoopConfig[string]{
+		Store:        store,
+		CheckpointID: cpID,
+		GenInput: func(ctx context.Context, _ *TurnLoop[string], items []string) (*GenInputResult[string], error) {
+			return &GenInputResult[string]{Input: &AgentInput{}, Consumed: items}, nil
+		},
+		PrepareAgent: func(ctx context.Context, _ *TurnLoop[string], consumed []string) (Agent, error) {
+			return &turnLoopMockAgent{name: "test"}, nil
+		},
+	})
+	loop1.Push("a")
+	loop1.Stop()
+	loop1.Run(ctx)
+	exit1 := loop1.Wait()
+	assert.True(t, exit1.Checkpointed)
+
+	store.mu.Lock()
+	_, exists := store.m[cpID]
+	store.mu.Unlock()
+	assert.True(t, exists, "first loop should save checkpoint")
+
+	loop2 := NewTurnLoop(TurnLoopConfig[string]{
+		Store:        store,
+		CheckpointID: cpID,
+		GenInput: func(ctx context.Context, _ *TurnLoop[string], items []string) (*GenInputResult[string], error) {
+			return &GenInputResult[string]{Input: &AgentInput{}, Consumed: items}, nil
+		},
+		PrepareAgent: func(ctx context.Context, _ *TurnLoop[string], consumed []string) (Agent, error) {
+			return &turnLoopMockAgent{name: "test"}, nil
+		},
+	})
+	loop2.Push("b")
+	loop2.Stop(WithSkipCheckpoint())
+	loop2.Run(ctx)
+	exit2 := loop2.Wait()
+	assert.False(t, exit2.Checkpointed, "second loop should skip checkpoint")
+
+	store.mu.Lock()
+	deleteCalled := store.deleteCalled
+	store.mu.Unlock()
+	assert.True(t, deleteCalled, "stale checkpoint should be deleted when SkipCheckpoint is used")
+}
+
+func TestTurnLoop_StopWithStopCause(t *testing.T) {
+	ctx := context.Background()
+	cause := "user session timeout"
+
+	loop := newAndRunTurnLoop(ctx, TurnLoopConfig[string]{
+		GenInput: func(ctx context.Context, _ *TurnLoop[string], items []string) (*GenInputResult[string], error) {
+			return &GenInputResult[string]{Input: &AgentInput{}, Consumed: items}, nil
+		},
+		PrepareAgent: func(ctx context.Context, _ *TurnLoop[string], consumed []string) (Agent, error) {
+			return &turnLoopMockAgent{name: "test"}, nil
+		},
+	})
+
+	loop.Push("a")
+	loop.Stop(WithStopCause(cause))
+
+	exit := loop.Wait()
+	assert.Equal(t, cause, exit.StopCause)
+}
+
+func TestTurnLoop_StopCause_EmptyWhenNoStop(t *testing.T) {
+	ctx := context.Background()
+
+	loop := newAndRunTurnLoop(ctx, TurnLoopConfig[string]{
+		GenInput: func(ctx context.Context, _ *TurnLoop[string], items []string) (*GenInputResult[string], error) {
+			return &GenInputResult[string]{Input: &AgentInput{}, Consumed: items}, nil
+		},
+		PrepareAgent: func(ctx context.Context, _ *TurnLoop[string], consumed []string) (Agent, error) {
+			return &turnLoopMockAgent{name: "test"}, nil
+		},
+	})
+
+	loop.Stop()
+	exit := loop.Wait()
+	assert.Empty(t, exit.StopCause)
+}
+
+func TestTurnLoop_StopCause_InTurnContext(t *testing.T) {
+	cause := "business shutdown"
+	gotCause := make(chan string, 1)
+	agentStarted := make(chan struct{})
+
+	loop := newAndRunTurnLoop(context.Background(), TurnLoopConfig[string]{
+		GenInput: func(ctx context.Context, _ *TurnLoop[string], items []string) (*GenInputResult[string], error) {
+			return &GenInputResult[string]{
+				Input:    &AgentInput{Messages: []Message{schema.UserMessage(items[0])}},
+				Consumed: items,
+			}, nil
+		},
+		PrepareAgent: func(ctx context.Context, _ *TurnLoop[string], consumed []string) (Agent, error) {
+			return &turnLoopCancellableMockAgent{
+				name: "slow",
+				runFunc: func(ctx context.Context, input *AgentInput) (*AgentOutput, error) {
+					<-ctx.Done()
+					return nil, ctx.Err()
+				},
+			}, nil
+		},
+		OnAgentEvents: func(ctx context.Context, tc *TurnContext[string], events *AsyncIterator[*AgentEvent]) error {
+			close(agentStarted)
+			select {
+			case <-tc.Stopped:
+				gotCause <- tc.StopCause()
+			case <-time.After(5 * time.Second):
+				t.Error("timed out waiting for Stopped channel")
+			}
+			for {
+				if _, ok := events.Next(); !ok {
+					break
+				}
+			}
+			return nil
+		},
+	})
+
+	loop.Push("msg1")
+	<-agentStarted
+	loop.Stop(WithAgentCancel(WithAgentCancelMode(CancelImmediate)), WithStopCause(cause))
+
+	select {
+	case c := <-gotCause:
+		assert.Equal(t, cause, c)
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for StopCause in TurnContext")
+	}
+
+	exit := loop.Wait()
+	assert.Equal(t, cause, exit.StopCause)
+}
+
+func TestTurnLoop_StopCause_FirstNonEmptyWins(t *testing.T) {
+	agentStarted := make(chan struct{})
+
+	loop := newAndRunTurnLoop(context.Background(), TurnLoopConfig[string]{
+		GenInput: func(ctx context.Context, _ *TurnLoop[string], items []string) (*GenInputResult[string], error) {
+			return &GenInputResult[string]{
+				Input:    &AgentInput{Messages: []Message{schema.UserMessage(items[0])}},
+				Consumed: items,
+			}, nil
+		},
+		PrepareAgent: func(ctx context.Context, _ *TurnLoop[string], consumed []string) (Agent, error) {
+			return &turnLoopCancellableMockAgent{
+				name: "slow",
+				runFunc: func(ctx context.Context, input *AgentInput) (*AgentOutput, error) {
+					<-ctx.Done()
+					return nil, ctx.Err()
+				},
+			}, nil
+		},
+		OnAgentEvents: func(ctx context.Context, tc *TurnContext[string], events *AsyncIterator[*AgentEvent]) error {
+			close(agentStarted)
+			for {
+				if _, ok := events.Next(); !ok {
+					break
+				}
+			}
+			return nil
+		},
+	})
+
+	loop.Push("msg1")
+	<-agentStarted
+	loop.Stop(WithAgentCancel(WithAgentCancelMode(CancelAfterToolCalls)), WithStopCause("first cause"))
+	loop.Stop(WithAgentCancel(WithAgentCancelMode(CancelImmediate)), WithStopCause("second cause"))
+
+	exit := loop.Wait()
+	assert.Equal(t, "first cause", exit.StopCause, "first non-empty StopCause should win")
+}
+
+func TestTurnLoop_SkipCheckpoint_Sticky(t *testing.T) {
+	agentStarted := make(chan struct{})
+
+	store := &turnLoopCheckpointStore{m: make(map[string][]byte)}
+	cpID := "sticky-skip-session"
+
+	loop := newAndRunTurnLoop(context.Background(), TurnLoopConfig[string]{
+		Store:        store,
+		CheckpointID: cpID,
+		GenInput: func(ctx context.Context, _ *TurnLoop[string], items []string) (*GenInputResult[string], error) {
+			return &GenInputResult[string]{
+				Input:    &AgentInput{Messages: []Message{schema.UserMessage(items[0])}},
+				Consumed: items,
+			}, nil
+		},
+		PrepareAgent: func(ctx context.Context, _ *TurnLoop[string], consumed []string) (Agent, error) {
+			return &turnLoopCancellableMockAgent{
+				name: "slow",
+				runFunc: func(ctx context.Context, input *AgentInput) (*AgentOutput, error) {
+					<-ctx.Done()
+					return nil, ctx.Err()
+				},
+			}, nil
+		},
+		OnAgentEvents: func(ctx context.Context, tc *TurnContext[string], events *AsyncIterator[*AgentEvent]) error {
+			close(agentStarted)
+			for {
+				if _, ok := events.Next(); !ok {
+					break
+				}
+			}
+			return nil
+		},
+	})
+
+	loop.Push("msg1")
+	<-agentStarted
+	loop.Stop(WithAgentCancel(WithAgentCancelMode(CancelAfterToolCalls)), WithSkipCheckpoint())
+	loop.Stop(WithAgentCancel(WithAgentCancelMode(CancelImmediate)))
+
+	exit := loop.Wait()
+	assert.False(t, exit.Checkpointed, "SkipCheckpoint should be sticky across multiple Stop calls")
+
+	store.mu.Lock()
+	_, exists := store.m[cpID]
+	store.mu.Unlock()
+	assert.False(t, exists, "no checkpoint should be saved when SkipCheckpoint was set in any Stop call")
+}

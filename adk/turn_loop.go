@@ -61,6 +61,8 @@ type stopSignal struct {
 	mu              sync.Mutex
 	gen             uint64
 	agentCancelOpts []AgentCancelOption
+	skipCheckpoint  bool
+	stopCause       string
 	// notify is a buffered(1) channel that wakes the current turn's watcher
 	// when Stop() is called. Unlike done, it supports repeated Stop() calls
 	// for cancel-mode escalation.
@@ -81,6 +83,12 @@ func (s *stopSignal) signal(cfg *stopConfig) {
 	s.mu.Lock()
 	s.gen++
 	s.agentCancelOpts = cfg.agentCancelOpts
+	if cfg.skipCheckpoint {
+		s.skipCheckpoint = true
+	}
+	if cfg.stopCause != "" && s.stopCause == "" {
+		s.stopCause = cfg.stopCause
+	}
 	s.mu.Unlock()
 	select {
 	case s.notify <- struct{}{}:
@@ -109,6 +117,18 @@ func (s *stopSignal) check() (uint64, []AgentCancelOption) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.gen, append([]AgentCancelOption{}, s.agentCancelOpts...)
+}
+
+func (s *stopSignal) isSkipCheckpoint() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.skipCheckpoint
+}
+
+func (s *stopSignal) getStopCause() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.stopCause
 }
 
 // preemptSignal coordinates preemption between Push callers and the run loop.
@@ -531,6 +551,10 @@ type TurnLoopExitState[T any] struct {
 	// It can be used to reconstruct GenInput/PrepareAgent inputs when resuming.
 	CanceledItems []T
 
+	// StopCause is the business-supplied reason passed via WithStopCause.
+	// Empty if Stop was not called or no cause was provided.
+	StopCause string
+
 	// Checkpointed indicates whether a checkpoint save was attempted during cleanup.
 	// True only when Store is configured, CheckpointID is set, Stop() was called,
 	// and the loop was not idle at exit time.
@@ -577,6 +601,11 @@ type TurnContext[T any] struct {
 	// before it was finalized. Remains open if Stop did not contribute.
 	// Use in a select to detect stop while processing events.
 	Stopped <-chan struct{}
+
+	// StopCause returns the business-supplied reason from WithStopCause.
+	// This value is only meaningful after the Stopped channel is closed.
+	// Before that, it returns an empty string.
+	StopCause func() string
 }
 
 // TurnLoop is a push-based event loop for agent execution.
@@ -750,6 +779,8 @@ type turnLoopPendingResume[T any] struct {
 
 type stopConfig struct {
 	agentCancelOpts []AgentCancelOption
+	skipCheckpoint  bool
+	stopCause       string
 }
 
 // StopOption is an option for Stop().
@@ -760,6 +791,25 @@ type StopOption func(*stopConfig)
 func WithAgentCancel(opts ...AgentCancelOption) StopOption {
 	return func(cfg *stopConfig) {
 		cfg.agentCancelOpts = opts
+	}
+}
+
+// WithSkipCheckpoint tells the TurnLoop not to persist a checkpoint for this
+// Stop call. Use this when the caller does not intend to resume in the future.
+// The flag is sticky: once any Stop() call sets it, subsequent calls cannot undo it.
+func WithSkipCheckpoint() StopOption {
+	return func(cfg *stopConfig) {
+		cfg.skipCheckpoint = true
+	}
+}
+
+// WithStopCause attaches a business-supplied reason string to this Stop call.
+// The cause is surfaced in TurnLoopExitState.StopCause and, after the Stopped
+// channel closes, via TurnContext.StopCause().
+// If multiple Stop() calls provide a cause, the first non-empty value wins.
+func WithStopCause(cause string) StopOption {
+	return func(cfg *stopConfig) {
+		cfg.stopCause = cause
 	}
 }
 
@@ -1348,6 +1398,7 @@ func (l *TurnLoop[T]) runAgentAndHandleEvents(
 		Consumed:  spec.consumed,
 		Preempted: preemptDone,
 		Stopped:   stoppedDone,
+		StopCause: l.stopSig.getStopCause,
 	}
 	l.preemptSig.setTurn(ctx, tc)
 
@@ -1458,7 +1509,7 @@ func (l *TurnLoop[T]) cleanup(ctx context.Context) {
 	// We consider the exit Stop-caused if runErr is nil (clean stop between
 	// turns) or a *CancelError (Stop canceled a running agent).
 	exitCausedByStop := l.runErr == nil || errors.As(l.runErr, new(*CancelError))
-	shouldSaveCheckpoint := l.config.Store != nil && checkpointID != "" && l.stopSig.isStopped() && exitCausedByStop && !isIdle
+	shouldSaveCheckpoint := l.config.Store != nil && checkpointID != "" && l.stopSig.isStopped() && exitCausedByStop && !isIdle && !l.stopSig.isSkipCheckpoint()
 
 	var checkpointed bool
 	var checkpointErr error
@@ -1483,6 +1534,7 @@ func (l *TurnLoop[T]) cleanup(ctx context.Context) {
 		ExitReason:     l.runErr,
 		UnhandledItems: unhandled,
 		CanceledItems:  l.canceledItems,
+		StopCause:      l.stopSig.getStopCause(),
 		Checkpointed:   checkpointed,
 		CheckpointErr:  checkpointErr,
 		TakeLateItems: func() []T {
