@@ -357,9 +357,9 @@ func (s *skillTool) Info(ctx context.Context) (*schema.ToolInfo, error) {
 	if s.customToolDesc != nil {
 		fullDesc = s.customToolDesc(ctx, skills)
 	} else {
-		desc, err := renderToolDescription(skills)
-		if err != nil {
-			return nil, fmt.Errorf("failed to render skill tool description: %w", err)
+		desc, renderErr := renderToolDescription(skills)
+		if renderErr != nil {
+			return nil, fmt.Errorf("failed to render skill tool description: %w", renderErr)
 		}
 
 		descBase := internal.SelectPrompt(internal.I18nPrompts{
