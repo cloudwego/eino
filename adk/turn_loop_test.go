@@ -4287,6 +4287,61 @@ func TestTurnLoop_StopCause_FirstNonEmptyWins(t *testing.T) {
 	assert.Equal(t, "first cause", exit.StopCause, "first non-empty StopCause should win")
 }
 
+func TestTurnLoop_StopBeforeRun_PushThenStop(t *testing.T) {
+	loop := NewTurnLoop(TurnLoopConfig[string]{
+		GenInput: func(ctx context.Context, _ *TurnLoop[string], items []string) (*GenInputResult[string], error) {
+			t.Fatal("GenInput should not be called when Stop is called before Run")
+			return nil, nil
+		},
+		PrepareAgent: func(ctx context.Context, _ *TurnLoop[string], consumed []string) (Agent, error) {
+			t.Fatal("PrepareAgent should not be called when Stop is called before Run")
+			return nil, nil
+		},
+	})
+
+	ok, _ := loop.Push("item1")
+	assert.True(t, ok)
+	ok, _ = loop.Push("item2")
+	assert.True(t, ok)
+
+	loop.Stop()
+	loop.Run(context.Background())
+	result := loop.Wait()
+
+	assert.NoError(t, result.ExitReason)
+	assert.Equal(t, []string{"item1", "item2"}, result.UnhandledItems)
+	assert.Empty(t, result.CanceledItems)
+	assert.Empty(t, result.TakeLateItems())
+}
+
+func TestTurnLoop_StopBeforeRun_StopThenPush(t *testing.T) {
+	loop := NewTurnLoop(TurnLoopConfig[string]{
+		GenInput: func(ctx context.Context, _ *TurnLoop[string], items []string) (*GenInputResult[string], error) {
+			t.Fatal("GenInput should not be called when Stop is called before Run")
+			return nil, nil
+		},
+		PrepareAgent: func(ctx context.Context, _ *TurnLoop[string], consumed []string) (Agent, error) {
+			t.Fatal("PrepareAgent should not be called when Stop is called before Run")
+			return nil, nil
+		},
+	})
+
+	loop.Stop()
+
+	ok, _ := loop.Push("item1")
+	assert.False(t, ok)
+	ok, _ = loop.Push("item2")
+	assert.False(t, ok)
+
+	loop.Run(context.Background())
+	result := loop.Wait()
+
+	assert.NoError(t, result.ExitReason)
+	assert.Empty(t, result.UnhandledItems)
+	assert.Empty(t, result.CanceledItems)
+	assert.Equal(t, []string{"item1", "item2"}, result.TakeLateItems())
+}
+
 func TestTurnLoop_SkipCheckpoint_Sticky(t *testing.T) {
 	agentStarted := make(chan struct{})
 

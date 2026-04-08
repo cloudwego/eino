@@ -1080,7 +1080,7 @@ func (l *TurnLoop[T]) pushWithConfig(item T, cfg *pushConfig[T]) (bool, <-chan s
 // The loop will finish the current turn (or cancel it via WithAgentCancel options),
 // then exit without starting a new turn.
 // Use WithAgentCancel to control how the currently running agent is cancelled.
-// This method is idempotent - multiple calls update cancel options.
+// This method may be called multiple times; subsequent calls update cancel options.
 // Call Wait() to block until the loop has fully exited and get the result.
 //
 // Stop may be called before Run. In that case, the stopped flag is set and
@@ -1109,7 +1109,7 @@ func (l *TurnLoop[T]) Stop(opts ...StopOption) {
 // All callers will receive the same result.
 //
 // Wait blocks until Run is called AND the loop exits. If Run is
-// ever called, Wait blocks forever.
+// never called, Wait blocks forever.
 func (l *TurnLoop[T]) Wait() *TurnLoopExitState[T] {
 	<-l.done
 	return l.result
