@@ -92,6 +92,18 @@ func TestAgentTool_Info(t *testing.T) {
 	assert.NotNil(t, info.ParamsOneOf)
 }
 
+func TestAgentTool_Info_EmptyName(t *testing.T) {
+	agentTool_ := NewAgentTool(context.Background(), newMockAgentForTool("", "desc", nil))
+	_, err := agentTool_.Info(context.Background())
+	assert.ErrorContains(t, err, "non-empty Name")
+}
+
+func TestAgentTool_Info_EmptyDescription(t *testing.T) {
+	agentTool_ := NewAgentTool(context.Background(), newMockAgentForTool("name", "", nil))
+	_, err := agentTool_.Info(context.Background())
+	assert.ErrorContains(t, err, "non-empty Description")
+}
+
 func TestAgentTool_SharedParentSessionValues(t *testing.T) {
 	ctx := context.Background()
 
