@@ -61,6 +61,8 @@ type stopSignal struct {
 	mu              sync.Mutex
 	gen             uint64
 	agentCancelOpts []AgentCancelOption
+	skipCheckpoint  bool
+	stopCause       string
 	// notify is a buffered(1) channel that wakes the current turn's watcher
 	// when Stop() is called. Unlike done, it supports repeated Stop() calls
 	// for cancel-mode escalation.
@@ -81,6 +83,12 @@ func (s *stopSignal) signal(cfg *stopConfig) {
 	s.mu.Lock()
 	s.gen++
 	s.agentCancelOpts = cfg.agentCancelOpts
+	if cfg.skipCheckpoint {
+		s.skipCheckpoint = true
+	}
+	if cfg.stopCause != "" && s.stopCause == "" {
+		s.stopCause = cfg.stopCause
+	}
 	s.mu.Unlock()
 	select {
 	case s.notify <- struct{}{}:
@@ -109,6 +117,18 @@ func (s *stopSignal) check() (uint64, []AgentCancelOption) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.gen, append([]AgentCancelOption{}, s.agentCancelOpts...)
+}
+
+func (s *stopSignal) isSkipCheckpoint() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.skipCheckpoint
+}
+
+func (s *stopSignal) getStopCause() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.stopCause
 }
 
 // preemptSignal coordinates preemption between Push callers and the run loop.
@@ -517,9 +537,11 @@ type TurnLoopExitState[T any] struct {
 	// nil means clean exit (Stop() was called and completed normally).
 	// Non-nil values include context errors, callback errors, *CancelError, etc.
 	// When Stop() cancels a running agent, ExitReason will be a *CancelError.
+	// This never contains checkpoint errors — see CheckpointErr for those.
 	ExitReason error
 
 	// UnhandledItems contains items that were buffered but not processed.
+	// These are items for which Push returned true but were never consumed by a turn.
 	// This is always valid regardless of ExitReason.
 	UnhandledItems []T
 
@@ -528,6 +550,33 @@ type TurnLoopExitState[T any] struct {
 	// did not contribute to the final CancelError.
 	// It can be used to reconstruct GenInput/PrepareAgent inputs when resuming.
 	CanceledItems []T
+
+	// StopCause is the business-supplied reason passed via WithStopCause.
+	// Empty if Stop was not called or no cause was provided.
+	StopCause string
+
+	// Checkpointed indicates whether a checkpoint save was attempted during cleanup.
+	// True only when Store is configured, CheckpointID is set, Stop() was called,
+	// and the loop was not idle at exit time.
+	Checkpointed bool
+
+	// CheckpointErr is the error from checkpoint save, if any.
+	// nil when Checkpointed is false (no attempt was made) or when the save succeeded.
+	CheckpointErr error
+
+	// TakeLateItems returns items that were pushed after the loop stopped
+	// (i.e., Push returned false for these items). These items are NOT included
+	// in the checkpoint.
+	//
+	// This function is idempotent: the first call computes and caches the result;
+	// subsequent calls return the same slice.
+	//
+	// After TakeLateItems is called, any subsequent Push() will panic. This
+	// seals the late buffer and prevents items from being silently lost.
+	//
+	// It is safe to call TakeLateItems from any goroutine after Wait() returns.
+	// If TakeLateItems is never called, late items are simply garbage collected.
+	TakeLateItems func() []T
 }
 
 // TurnContext provides per-turn context to the OnAgentEvents callback.
@@ -552,6 +601,11 @@ type TurnContext[T any] struct {
 	// before it was finalized. Remains open if Stop did not contribute.
 	// Use in a select to detect stop while processing events.
 	Stopped <-chan struct{}
+
+	// StopCause returns the business-supplied reason from WithStopCause.
+	// This value is only meaningful after the Stopped channel is closed.
+	// Before that, it returns an empty string.
+	StopCause func() string
 }
 
 // TurnLoop is a push-based event loop for agent execution.
@@ -602,6 +656,19 @@ type TurnLoop[T any] struct {
 	loadCheckpointID string
 
 	onAgentEvents func(ctx context.Context, tc *TurnContext[T], events *AsyncIterator[*AgentEvent]) error
+
+	lateMu     sync.Mutex
+	lateItems  []T
+	lateSealed bool
+}
+
+func (l *TurnLoop[T]) appendLate(item T) {
+	l.lateMu.Lock()
+	defer l.lateMu.Unlock()
+	if l.lateSealed {
+		panic("TurnLoop: Push called after TakeLateItems")
+	}
+	l.lateItems = append(l.lateItems, item)
 }
 
 type turnLoopCheckpoint[T any] struct {
@@ -652,7 +719,7 @@ func (l *TurnLoop[T]) deleteTurnLoopCheckpoint(ctx context.Context, checkPointID
 	if deleter, ok := l.config.Store.(CheckPointDeleter); ok {
 		return deleter.Delete(ctx, checkPointID)
 	}
-	return l.config.Store.Set(ctx, checkPointID, nil)
+	return nil
 }
 
 func (l *TurnLoop[T]) tryLoadCheckpoint(ctx context.Context) error {
@@ -712,6 +779,8 @@ type turnLoopPendingResume[T any] struct {
 
 type stopConfig struct {
 	agentCancelOpts []AgentCancelOption
+	skipCheckpoint  bool
+	stopCause       string
 }
 
 // StopOption is an option for Stop().
@@ -722,6 +791,25 @@ type StopOption func(*stopConfig)
 func WithAgentCancel(opts ...AgentCancelOption) StopOption {
 	return func(cfg *stopConfig) {
 		cfg.agentCancelOpts = opts
+	}
+}
+
+// WithSkipCheckpoint tells the TurnLoop not to persist a checkpoint for this
+// Stop call. Use this when the caller does not intend to resume in the future.
+// The flag is sticky: once any Stop() call sets it, subsequent calls cannot undo it.
+func WithSkipCheckpoint() StopOption {
+	return func(cfg *stopConfig) {
+		cfg.skipCheckpoint = true
+	}
+}
+
+// WithStopCause attaches a business-supplied reason string to this Stop call.
+// The cause is surfaced in TurnLoopExitState.StopCause and, after the Stopped
+// channel closes, via TurnContext.StopCause().
+// If multiple Stop() calls provide a cause, the first non-empty value wins.
+func WithStopCause(cause string) StopOption {
+	return func(cfg *stopConfig) {
+		cfg.stopCause = cause
 	}
 }
 
@@ -852,6 +940,9 @@ func (l *TurnLoop[T]) Run(ctx context.Context) {
 // current agent run or reaching a point where no cancellation is needed).
 // If the loop has not been started yet (Run not called), items are buffered
 // and will be processed once Run is called.
+// After Wait() returns, failed pushes can be recovered via TurnLoopExitState.TakeLateItems().
+// Once TakeLateItems() has been called, any subsequent push that would become a
+// late item will panic instead of being silently dropped.
 //
 // Use WithPreempt() to atomically push an item and signal preemption of the current agent.
 // This is useful for urgent items that should interrupt the current processing.
@@ -898,16 +989,22 @@ func (l *TurnLoop[T]) pushWithStrategy(item T, cfg *pushConfig[T]) (bool, <-chan
 
 	if !cfg.preempt {
 		l.preemptSig.unholdRunLoop()
-		return l.buffer.TrySend(item), nil
+		if !l.buffer.TrySend(item) {
+			l.appendLate(item)
+			return false, nil
+		}
+		return true, nil
 	}
 
 	if atomic.LoadInt32(&l.stopped) != 0 {
 		l.preemptSig.unholdRunLoop()
+		l.appendLate(item)
 		return false, nil
 	}
 
 	if !l.buffer.TrySend(item) {
 		l.preemptSig.unholdRunLoop()
+		l.appendLate(item)
 		return false, nil
 	}
 
@@ -936,6 +1033,7 @@ func (l *TurnLoop[T]) pushWithStrategy(item T, cfg *pushConfig[T]) (bool, <-chan
 
 func (l *TurnLoop[T]) pushWithConfig(item T, cfg *pushConfig[T]) (bool, <-chan struct{}) {
 	if atomic.LoadInt32(&l.stopped) != 0 {
+		l.appendLate(item)
 		return false, nil
 	}
 
@@ -944,6 +1042,7 @@ func (l *TurnLoop[T]) pushWithConfig(item T, cfg *pushConfig[T]) (bool, <-chan s
 
 		if !l.buffer.TrySend(item) {
 			l.preemptSig.unholdRunLoop()
+			l.appendLate(item)
 			return false, nil
 		}
 
@@ -970,7 +1069,11 @@ func (l *TurnLoop[T]) pushWithConfig(item T, cfg *pushConfig[T]) (bool, <-chan s
 		return true, ack
 	}
 
-	return l.buffer.TrySend(item), nil
+	if !l.buffer.TrySend(item) {
+		l.appendLate(item)
+		return false, nil
+	}
+	return true, nil
 }
 
 // Stop signals the loop to stop and returns immediately (non-blocking).
@@ -1295,6 +1398,7 @@ func (l *TurnLoop[T]) runAgentAndHandleEvents(
 		Consumed:  spec.consumed,
 		Preempted: preemptDone,
 		Stopped:   stoppedDone,
+		StopCause: l.stopSig.getStopCause,
 	}
 	l.preemptSig.setTurn(ctx, tc)
 
@@ -1398,7 +1502,18 @@ func (l *TurnLoop[T]) cleanup(ctx context.Context) {
 	unhandled := l.buffer.TakeAll()
 	checkpointID := l.config.CheckpointID
 	isIdle := len(l.checkPointRunnerBytes) == 0 && len(unhandled) == 0 && len(l.canceledItems) == 0
-	shouldSaveCheckpoint := l.config.Store != nil && checkpointID != "" && l.stopSig.isStopped() && !isIdle
+
+	// Only save checkpoint when the loop exited due to an explicit Stop().
+	// If Stop() was called but a callback error happened concurrently,
+	// the state may be inconsistent — don't checkpoint in that case.
+	// We consider the exit Stop-caused if runErr is nil (clean stop between
+	// turns) or a *CancelError (Stop canceled a running agent).
+	exitCausedByStop := l.runErr == nil || errors.As(l.runErr, new(*CancelError))
+	shouldSaveCheckpoint := l.config.Store != nil && checkpointID != "" && l.stopSig.isStopped() && exitCausedByStop && !isIdle && !l.stopSig.isSkipCheckpoint()
+
+	var checkpointed bool
+	var checkpointErr error
+
 	if shouldSaveCheckpoint {
 		cp := &turnLoopCheckpoint[T]{
 			RunnerCheckpoint: l.checkPointRunnerBytes,
@@ -1406,23 +1521,31 @@ func (l *TurnLoop[T]) cleanup(ctx context.Context) {
 			UnhandledItems:   unhandled,
 			CanceledItems:    l.canceledItems,
 		}
-		err := l.saveTurnLoopCheckpoint(ctx, checkpointID, cp)
-		if err != nil {
-			saveErr := fmt.Errorf("failed to save turn loop checkpoint: %w", err)
-			if l.runErr != nil {
-				l.runErr = fmt.Errorf("%w; %v", l.runErr, saveErr)
-			} else {
-				l.runErr = saveErr
-			}
-		}
+		checkpointed = true
+		checkpointErr = l.saveTurnLoopCheckpoint(ctx, checkpointID, cp)
 	} else if l.loadCheckpointID != "" {
 		_ = l.deleteTurnLoopCheckpoint(ctx, l.loadCheckpointID)
 	}
+
+	var takeLateOnce sync.Once
+	var takeLateResult []T
 
 	l.result = &TurnLoopExitState[T]{
 		ExitReason:     l.runErr,
 		UnhandledItems: unhandled,
 		CanceledItems:  l.canceledItems,
+		StopCause:      l.stopSig.getStopCause(),
+		Checkpointed:   checkpointed,
+		CheckpointErr:  checkpointErr,
+		TakeLateItems: func() []T {
+			takeLateOnce.Do(func() {
+				l.lateMu.Lock()
+				takeLateResult = append([]T{}, l.lateItems...)
+				l.lateSealed = true
+				l.lateMu.Unlock()
+			})
+			return takeLateResult
+		},
 	}
 
 	l.preemptSig.drainAll()
