@@ -194,9 +194,13 @@ type AgentMiddleware struct {
 
 type ChatModelAgentConfig struct {
 	// Name of the agent. Better be unique across all agents.
+	// Optional. If empty, the agent can still run standalone but cannot be used as
+	// a sub-agent tool via NewAgentTool (which requires a non-empty Name).
 	Name string
 	// Description of the agent's capabilities.
 	// Helps other agents determine whether to transfer tasks to this agent.
+	// Optional. If empty, the agent can still run standalone but cannot be used as
+	// a sub-agent tool via NewAgentTool (which requires a non-empty Description).
 	Description string
 	// Instruction used as the system prompt for this agent.
 	// Optional. If empty, no system prompt will be used.
@@ -341,12 +345,6 @@ type runFunc func(ctx context.Context, input *AgentInput, generator *AsyncGenera
 
 // NewChatModelAgent constructs a chat model-backed agent with the provided config.
 func NewChatModelAgent(ctx context.Context, config *ChatModelAgentConfig) (*ChatModelAgent, error) {
-	if config.Name == "" {
-		return nil, errors.New("agent 'Name' is required")
-	}
-	if config.Description == "" {
-		return nil, errors.New("agent 'Description' is required")
-	}
 	if config.Model == nil {
 		return nil, errors.New("agent 'Model' is required")
 	}

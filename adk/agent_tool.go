@@ -68,6 +68,10 @@ func withAgentToolEnableStreaming(enabled bool) tool.Option {
 
 // NewAgentTool creates a tool that wraps an agent for invocation.
 //
+// The agent must have a non-empty Name and Description, as they are used as
+// the tool's name and description respectively. This is validated when Info()
+// is called during tool setup.
+//
 // Event Streaming:
 // When EmitInternalEvents is enabled in ToolsConfig, the agent tool will emit AgentEvent
 // from the inner agent to the parent agent's AsyncGenerator, allowing real-time streaming
@@ -107,14 +111,23 @@ type agentTool struct {
 }
 
 func (at *agentTool) Info(ctx context.Context) (*schema.ToolInfo, error) {
+	name := at.agent.Name(ctx)
+	if name == "" {
+		return nil, errors.New("agent tool requires a non-empty Name")
+	}
+	desc := at.agent.Description(ctx)
+	if desc == "" {
+		return nil, errors.New("agent tool requires a non-empty Description")
+	}
+
 	param := at.inputSchema
 	if param == nil {
 		param = defaultAgentToolParam
 	}
 
 	return &schema.ToolInfo{
-		Name:        at.agent.Name(ctx),
-		Desc:        at.agent.Description(ctx),
+		Name:        name,
+		Desc:        desc,
 		ParamsOneOf: param,
 	}, nil
 }
