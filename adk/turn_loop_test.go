@@ -1853,7 +1853,9 @@ func TestTurnLoop_CheckpointSaveError_ReturnsError(t *testing.T) {
 	loop.Stop(WithAgentCancel(WithAgentCancelMode(CancelImmediate)))
 	exit := loop.Wait()
 	assert.Error(t, exit.ExitReason)
-	assert.Contains(t, exit.ExitReason.Error(), "write failed")
+	assert.True(t, exit.Checkpointed)
+	assert.Error(t, exit.CheckpointErr)
+	assert.Contains(t, exit.CheckpointErr.Error(), "write failed")
 }
 
 func TestTurnLoop_StaleCheckpointDeletion_OnCleanResume(t *testing.T) {
@@ -1916,7 +1918,7 @@ func TestTurnLoop_StaleCheckpointDeletion_OnCleanResume(t *testing.T) {
 
 func TestTurnLoop_StaleCheckpointDeletion_ContextCancel(t *testing.T) {
 	ctx := context.Background()
-	store := &turnLoopCheckpointStore{m: make(map[string][]byte)}
+	store := &deletableCheckpointStore{turnLoopCheckpointStore: turnLoopCheckpointStore{m: make(map[string][]byte)}}
 	cpID := "delete-on-cancel"
 
 	loop1 := NewTurnLoop(TurnLoopConfig[string]{
@@ -1968,11 +1970,10 @@ func TestTurnLoop_StaleCheckpointDeletion_ContextCancel(t *testing.T) {
 	assert.ErrorIs(t, exit2.ExitReason, context.Canceled)
 
 	store.mu.Lock()
-	v, exists := store.m[cpID]
+	_, exists = store.m[cpID]
+	deleteCalled := store.deleteCalled
 	store.mu.Unlock()
-	deletedViaNil := exists && v == nil
-	deletedViaAbsence := !exists
-	assert.True(t, deletedViaNil || deletedViaAbsence, "stale checkpoint should be deleted when loop exits via context cancellation")
+	assert.True(t, deleteCalled && !exists, "stale checkpoint should be deleted when loop exits via context cancellation")
 }
 
 type deletableCheckpointStore struct {
@@ -2325,10 +2326,11 @@ func TestTurnLoop_CheckpointSaveError_MergesWithExistingError(t *testing.T) {
 	loop.Stop(WithAgentCancel(WithAgentCancelMode(CancelImmediate)))
 	exit := loop.Wait()
 	assert.Error(t, exit.ExitReason)
-	errStr := exit.ExitReason.Error()
-	assert.Contains(t, errStr, "disk full")
 	var ce *CancelError
-	assert.True(t, errors.As(exit.ExitReason, &ce), "should wrap original CancelError")
+	assert.True(t, errors.As(exit.ExitReason, &ce), "ExitReason should be CancelError, not merged with checkpoint error")
+	assert.True(t, exit.Checkpointed)
+	assert.Error(t, exit.CheckpointErr)
+	assert.Contains(t, exit.CheckpointErr.Error(), "disk full")
 }
 
 func TestTurnLoop_ResumeWithParams(t *testing.T) {
@@ -3747,4 +3749,589 @@ func TestTurnLoop_PushStrategy_ConsumedInspection(t *testing.T) {
 
 	loop.Stop()
 	loop.Wait()
+}
+
+func TestTurnLoop_PushAfterStop_BufferedAsLateItems(t *testing.T) {
+	ctx := context.Background()
+	processed := make(chan string, 10)
+
+	loop := newAndRunTurnLoop(ctx, TurnLoopConfig[string]{
+		GenInput: func(ctx context.Context, _ *TurnLoop[string], items []string) (*GenInputResult[string], error) {
+			return &GenInputResult[string]{
+				Input:    &AgentInput{Messages: []Message{schema.UserMessage(items[0])}},
+				Consumed: items,
+			}, nil
+		},
+		PrepareAgent: func(ctx context.Context, _ *TurnLoop[string], consumed []string) (Agent, error) {
+			return &turnLoopMockAgent{name: "test"}, nil
+		},
+		OnAgentEvents: func(ctx context.Context, tc *TurnContext[string], events *AsyncIterator[*AgentEvent]) error {
+			for {
+				if _, ok := events.Next(); !ok {
+					break
+				}
+			}
+			processed <- tc.Consumed[0]
+			return nil
+		},
+	})
+
+	loop.Push("msg1")
+	<-processed
+	loop.Stop()
+	result := loop.Wait()
+
+	// Push after stop — should be buffered as late items
+	ok1, _ := loop.Push("late1")
+	ok2, _ := loop.Push("late2")
+	ok3, _ := loop.Push("late3")
+	assert.False(t, ok1)
+	assert.False(t, ok2)
+	assert.False(t, ok3)
+
+	late := result.TakeLateItems()
+	assert.Equal(t, []string{"late1", "late2", "late3"}, late)
+}
+
+func TestTurnLoop_TakeLateItems_Idempotent(t *testing.T) {
+	ctx := context.Background()
+
+	loop := NewTurnLoop(TurnLoopConfig[string]{
+		GenInput: func(ctx context.Context, _ *TurnLoop[string], items []string) (*GenInputResult[string], error) {
+			return &GenInputResult[string]{Input: &AgentInput{}, Consumed: items}, nil
+		},
+		PrepareAgent: func(ctx context.Context, _ *TurnLoop[string], consumed []string) (Agent, error) {
+			return &turnLoopMockAgent{name: "test"}, nil
+		},
+	})
+	loop.Push("a")
+	loop.Stop()
+	loop.Run(ctx)
+	result := loop.Wait()
+
+	loop.Push("late1")
+
+	first := result.TakeLateItems()
+	second := result.TakeLateItems()
+	third := result.TakeLateItems()
+
+	assert.Equal(t, []string{"late1"}, first)
+	assert.Equal(t, first, second, "subsequent calls should return the same slice")
+	assert.Equal(t, first, third, "subsequent calls should return the same slice")
+}
+
+func TestTurnLoop_PushAfterTakeLateItems_Panics(t *testing.T) {
+	ctx := context.Background()
+
+	loop := NewTurnLoop(TurnLoopConfig[string]{
+		GenInput: func(ctx context.Context, _ *TurnLoop[string], items []string) (*GenInputResult[string], error) {
+			return &GenInputResult[string]{Input: &AgentInput{}, Consumed: items}, nil
+		},
+		PrepareAgent: func(ctx context.Context, _ *TurnLoop[string], consumed []string) (Agent, error) {
+			return &turnLoopMockAgent{name: "test"}, nil
+		},
+	})
+	loop.Push("a")
+	loop.Stop()
+	loop.Run(ctx)
+	result := loop.Wait()
+
+	result.TakeLateItems()
+
+	assert.PanicsWithValue(t, "TurnLoop: Push called after TakeLateItems", func() {
+		loop.Push("too-late")
+	})
+}
+
+func TestTurnLoop_TakeLateItems_NeverCalled_NoImpact(t *testing.T) {
+	ctx := context.Background()
+
+	loop := NewTurnLoop(TurnLoopConfig[string]{
+		GenInput: func(ctx context.Context, _ *TurnLoop[string], items []string) (*GenInputResult[string], error) {
+			return &GenInputResult[string]{Input: &AgentInput{}, Consumed: items}, nil
+		},
+		PrepareAgent: func(ctx context.Context, _ *TurnLoop[string], consumed []string) (Agent, error) {
+			return &turnLoopMockAgent{name: "test"}, nil
+		},
+	})
+	loop.Push("a")
+	loop.Push("b")
+	loop.Stop()
+	loop.Run(ctx)
+	result := loop.Wait()
+
+	// Don't call TakeLateItems — verify UnhandledItems works normally
+	assert.Contains(t, result.UnhandledItems, "b")
+	assert.Nil(t, result.ExitReason)
+}
+
+func TestTurnLoop_CheckpointErr_SeparateFromExitReason(t *testing.T) {
+	ctx := context.Background()
+	saveStore := &errorCheckpointStore{setErr: fmt.Errorf("storage unavailable")}
+
+	loop := NewTurnLoop(TurnLoopConfig[string]{
+		Store:        saveStore,
+		CheckpointID: "cp-separate-err",
+		GenInput: func(ctx context.Context, _ *TurnLoop[string], items []string) (*GenInputResult[string], error) {
+			return &GenInputResult[string]{Input: &AgentInput{}, Consumed: items}, nil
+		},
+		PrepareAgent: func(ctx context.Context, _ *TurnLoop[string], consumed []string) (Agent, error) {
+			return &turnLoopMockAgent{name: "test"}, nil
+		},
+	})
+	loop.Push("a")
+	loop.Stop()
+	loop.Run(ctx)
+	result := loop.Wait()
+
+	// ExitReason should be nil (clean stop), checkpoint error should be separate
+	assert.Nil(t, result.ExitReason)
+	assert.True(t, result.Checkpointed)
+	assert.Error(t, result.CheckpointErr)
+	assert.Contains(t, result.CheckpointErr.Error(), "storage unavailable")
+}
+
+func TestTurnLoop_Checkpointed_FalseWhenNoStore(t *testing.T) {
+	ctx := context.Background()
+
+	loop := NewTurnLoop(TurnLoopConfig[string]{
+		GenInput: func(ctx context.Context, _ *TurnLoop[string], items []string) (*GenInputResult[string], error) {
+			return &GenInputResult[string]{Input: &AgentInput{}, Consumed: items}, nil
+		},
+		PrepareAgent: func(ctx context.Context, _ *TurnLoop[string], consumed []string) (Agent, error) {
+			return &turnLoopMockAgent{name: "test"}, nil
+		},
+	})
+	loop.Push("a")
+	loop.Stop()
+	loop.Run(ctx)
+	result := loop.Wait()
+
+	assert.False(t, result.Checkpointed)
+	assert.Nil(t, result.CheckpointErr)
+}
+
+func TestTurnLoop_Checkpointed_FalseOnErrorExit(t *testing.T) {
+	ctx := context.Background()
+	store := &turnLoopCheckpointStore{m: make(map[string][]byte)}
+	genInputErr := errors.New("gen input failed")
+
+	firstTurnDone := make(chan struct{})
+	var callCount int32
+	loop := newAndRunTurnLoop(ctx, TurnLoopConfig[string]{
+		Store:        store,
+		CheckpointID: "cp-err-exit",
+		GenInput: func(ctx context.Context, _ *TurnLoop[string], items []string) (*GenInputResult[string], error) {
+			n := atomic.AddInt32(&callCount, 1)
+			if n > 1 {
+				return nil, genInputErr
+			}
+			return &GenInputResult[string]{Input: &AgentInput{}, Consumed: items}, nil
+		},
+		PrepareAgent: func(ctx context.Context, _ *TurnLoop[string], consumed []string) (Agent, error) {
+			return &turnLoopMockAgent{name: "test"}, nil
+		},
+		OnAgentEvents: func(ctx context.Context, tc *TurnContext[string], events *AsyncIterator[*AgentEvent]) error {
+			for {
+				if _, ok := events.Next(); !ok {
+					break
+				}
+			}
+			close(firstTurnDone)
+			return nil
+		},
+	})
+	loop.Push("msg1")
+	<-firstTurnDone
+	loop.Push("msg2")
+	result := loop.Wait()
+
+	// Loop exited from error, not Stop() — checkpoint should not be saved
+	assert.ErrorIs(t, result.ExitReason, genInputErr)
+	assert.False(t, result.Checkpointed)
+	assert.Nil(t, result.CheckpointErr)
+}
+
+func TestTurnLoop_StopConcurrentWithCallbackError_NoCheckpoint(t *testing.T) {
+	ctx := context.Background()
+	store := &turnLoopCheckpointStore{m: make(map[string][]byte)}
+	cpID := "stop-concurrent-err"
+
+	prepareErr := errors.New("prepare agent failed")
+	firstTurnDone := make(chan struct{})
+	stopCalled := make(chan struct{})
+	var prepareCount int32
+
+	loop := newAndRunTurnLoop(ctx, TurnLoopConfig[string]{
+		Store:        store,
+		CheckpointID: cpID,
+		GenInput: func(ctx context.Context, _ *TurnLoop[string], items []string) (*GenInputResult[string], error) {
+			return &GenInputResult[string]{
+				Input:    &AgentInput{Messages: []Message{schema.UserMessage(items[0])}},
+				Consumed: items,
+			}, nil
+		},
+		PrepareAgent: func(ctx context.Context, _ *TurnLoop[string], consumed []string) (Agent, error) {
+			n := atomic.AddInt32(&prepareCount, 1)
+			if n > 1 {
+				// Wait until Stop() has been called so stopSig.isStopped() is true
+				<-stopCalled
+				return nil, prepareErr
+			}
+			return &turnLoopMockAgent{name: "test"}, nil
+		},
+		OnAgentEvents: func(ctx context.Context, tc *TurnContext[string], events *AsyncIterator[*AgentEvent]) error {
+			for {
+				if _, ok := events.Next(); !ok {
+					break
+				}
+			}
+			close(firstTurnDone)
+			return nil
+		},
+	})
+
+	loop.Push("msg1")
+	<-firstTurnDone
+	loop.Push("msg2")
+
+	// Call Stop() and signal PrepareAgent to proceed with error
+	go func() {
+		loop.Stop()
+		close(stopCalled)
+	}()
+
+	result := loop.Wait()
+
+	// The loop may exit via Stop (clean) or via PrepareAgent error.
+	// If it exited via PrepareAgent error with Stop also called:
+	// checkpoint should NOT be saved.
+	if result.ExitReason != nil && !errors.As(result.ExitReason, new(*CancelError)) {
+		assert.ErrorIs(t, result.ExitReason, prepareErr)
+		assert.False(t, result.Checkpointed, "should not checkpoint when exit is caused by callback error")
+	}
+	// If Stop won the race, that's fine — checkpoint may or may not be saved
+	// depending on idle state. The test is about the error path.
+}
+
+func TestTurnLoop_DeleteWithoutCheckPointDeleter_NoOp(t *testing.T) {
+	ctx := context.Background()
+	store := &turnLoopCheckpointStore{m: make(map[string][]byte)}
+	cpID := "no-deleter"
+
+	// First loop: save a checkpoint
+	loop1 := NewTurnLoop(TurnLoopConfig[string]{
+		Store:        store,
+		CheckpointID: cpID,
+		GenInput: func(ctx context.Context, _ *TurnLoop[string], items []string) (*GenInputResult[string], error) {
+			return &GenInputResult[string]{Input: &AgentInput{}, Consumed: items}, nil
+		},
+		PrepareAgent: func(ctx context.Context, _ *TurnLoop[string], consumed []string) (Agent, error) {
+			return &turnLoopMockAgent{name: "test"}, nil
+		},
+	})
+	loop1.Push("a")
+	loop1.Stop()
+	loop1.Run(ctx)
+	loop1.Wait()
+
+	store.mu.Lock()
+	_, exists := store.m[cpID]
+	store.mu.Unlock()
+	assert.True(t, exists, "checkpoint should be saved")
+
+	// Second loop: exit via context cancel — should try to delete but store
+	// doesn't implement CheckPointDeleter, so checkpoint persists (no-op)
+	ctx2, cancel2 := context.WithCancel(ctx)
+	loop2 := NewTurnLoop(TurnLoopConfig[string]{
+		Store:        store,
+		CheckpointID: cpID,
+		GenInput: func(ctx context.Context, _ *TurnLoop[string], items []string) (*GenInputResult[string], error) {
+			return &GenInputResult[string]{
+				Input:    &AgentInput{Messages: []Message{schema.UserMessage(items[0])}},
+				Consumed: items,
+			}, nil
+		},
+		PrepareAgent: func(ctx context.Context, _ *TurnLoop[string], consumed []string) (Agent, error) {
+			return &turnLoopMockAgent{name: "test"}, nil
+		},
+		OnAgentEvents: func(ctx context.Context, tc *TurnContext[string], events *AsyncIterator[*AgentEvent]) error {
+			for {
+				if _, ok := events.Next(); !ok {
+					break
+				}
+			}
+			cancel2()
+			return nil
+		},
+	})
+	loop2.Push("b")
+	loop2.Run(ctx2)
+	loop2.Wait()
+
+	// Without CheckPointDeleter, the stale checkpoint should NOT be deleted
+	store.mu.Lock()
+	v, exists := store.m[cpID]
+	store.mu.Unlock()
+	assert.True(t, exists, "checkpoint should still exist without CheckPointDeleter")
+	assert.NotNil(t, v, "checkpoint should not be set to nil")
+}
+
+func TestTurnLoop_StopWithSkipCheckpoint(t *testing.T) {
+	ctx := context.Background()
+	store := &turnLoopCheckpointStore{m: make(map[string][]byte)}
+	cpID := "skip-cp-session"
+
+	loop := NewTurnLoop(TurnLoopConfig[string]{
+		Store:        store,
+		CheckpointID: cpID,
+		GenInput: func(ctx context.Context, _ *TurnLoop[string], items []string) (*GenInputResult[string], error) {
+			return &GenInputResult[string]{Input: &AgentInput{}, Consumed: items}, nil
+		},
+		PrepareAgent: func(ctx context.Context, _ *TurnLoop[string], consumed []string) (Agent, error) {
+			return &turnLoopMockAgent{name: "test"}, nil
+		},
+	})
+
+	loop.Push("a")
+	loop.Push("b")
+	loop.Stop(WithSkipCheckpoint())
+	loop.Run(ctx)
+
+	exit := loop.Wait()
+	assert.NoError(t, exit.ExitReason)
+	assert.False(t, exit.Checkpointed, "checkpoint should be skipped when WithSkipCheckpoint is used")
+
+	store.mu.Lock()
+	_, exists := store.m[cpID]
+	store.mu.Unlock()
+	assert.False(t, exists, "no checkpoint should be saved when WithSkipCheckpoint is used")
+}
+
+func TestTurnLoop_StopWithSkipCheckpoint_DeletesStaleCheckpoint(t *testing.T) {
+	ctx := context.Background()
+	store := &deletableCheckpointStore{
+		turnLoopCheckpointStore: turnLoopCheckpointStore{m: make(map[string][]byte)},
+	}
+	cpID := "skip-stale-session"
+
+	loop1 := NewTurnLoop(TurnLoopConfig[string]{
+		Store:        store,
+		CheckpointID: cpID,
+		GenInput: func(ctx context.Context, _ *TurnLoop[string], items []string) (*GenInputResult[string], error) {
+			return &GenInputResult[string]{Input: &AgentInput{}, Consumed: items}, nil
+		},
+		PrepareAgent: func(ctx context.Context, _ *TurnLoop[string], consumed []string) (Agent, error) {
+			return &turnLoopMockAgent{name: "test"}, nil
+		},
+	})
+	loop1.Push("a")
+	loop1.Stop()
+	loop1.Run(ctx)
+	exit1 := loop1.Wait()
+	assert.True(t, exit1.Checkpointed)
+
+	store.mu.Lock()
+	_, exists := store.m[cpID]
+	store.mu.Unlock()
+	assert.True(t, exists, "first loop should save checkpoint")
+
+	loop2 := NewTurnLoop(TurnLoopConfig[string]{
+		Store:        store,
+		CheckpointID: cpID,
+		GenInput: func(ctx context.Context, _ *TurnLoop[string], items []string) (*GenInputResult[string], error) {
+			return &GenInputResult[string]{Input: &AgentInput{}, Consumed: items}, nil
+		},
+		PrepareAgent: func(ctx context.Context, _ *TurnLoop[string], consumed []string) (Agent, error) {
+			return &turnLoopMockAgent{name: "test"}, nil
+		},
+	})
+	loop2.Push("b")
+	loop2.Stop(WithSkipCheckpoint())
+	loop2.Run(ctx)
+	exit2 := loop2.Wait()
+	assert.False(t, exit2.Checkpointed, "second loop should skip checkpoint")
+
+	store.mu.Lock()
+	deleteCalled := store.deleteCalled
+	store.mu.Unlock()
+	assert.True(t, deleteCalled, "stale checkpoint should be deleted when SkipCheckpoint is used")
+}
+
+func TestTurnLoop_StopWithStopCause(t *testing.T) {
+	ctx := context.Background()
+	cause := "user session timeout"
+
+	loop := newAndRunTurnLoop(ctx, TurnLoopConfig[string]{
+		GenInput: func(ctx context.Context, _ *TurnLoop[string], items []string) (*GenInputResult[string], error) {
+			return &GenInputResult[string]{Input: &AgentInput{}, Consumed: items}, nil
+		},
+		PrepareAgent: func(ctx context.Context, _ *TurnLoop[string], consumed []string) (Agent, error) {
+			return &turnLoopMockAgent{name: "test"}, nil
+		},
+	})
+
+	loop.Push("a")
+	loop.Stop(WithStopCause(cause))
+
+	exit := loop.Wait()
+	assert.Equal(t, cause, exit.StopCause)
+}
+
+func TestTurnLoop_StopCause_EmptyWhenNoStop(t *testing.T) {
+	ctx := context.Background()
+
+	loop := newAndRunTurnLoop(ctx, TurnLoopConfig[string]{
+		GenInput: func(ctx context.Context, _ *TurnLoop[string], items []string) (*GenInputResult[string], error) {
+			return &GenInputResult[string]{Input: &AgentInput{}, Consumed: items}, nil
+		},
+		PrepareAgent: func(ctx context.Context, _ *TurnLoop[string], consumed []string) (Agent, error) {
+			return &turnLoopMockAgent{name: "test"}, nil
+		},
+	})
+
+	loop.Stop()
+	exit := loop.Wait()
+	assert.Empty(t, exit.StopCause)
+}
+
+func TestTurnLoop_StopCause_InTurnContext(t *testing.T) {
+	cause := "business shutdown"
+	gotCause := make(chan string, 1)
+	agentStarted := make(chan struct{})
+
+	loop := newAndRunTurnLoop(context.Background(), TurnLoopConfig[string]{
+		GenInput: func(ctx context.Context, _ *TurnLoop[string], items []string) (*GenInputResult[string], error) {
+			return &GenInputResult[string]{
+				Input:    &AgentInput{Messages: []Message{schema.UserMessage(items[0])}},
+				Consumed: items,
+			}, nil
+		},
+		PrepareAgent: func(ctx context.Context, _ *TurnLoop[string], consumed []string) (Agent, error) {
+			return &turnLoopCancellableMockAgent{
+				name: "slow",
+				runFunc: func(ctx context.Context, input *AgentInput) (*AgentOutput, error) {
+					<-ctx.Done()
+					return nil, ctx.Err()
+				},
+			}, nil
+		},
+		OnAgentEvents: func(ctx context.Context, tc *TurnContext[string], events *AsyncIterator[*AgentEvent]) error {
+			close(agentStarted)
+			select {
+			case <-tc.Stopped:
+				gotCause <- tc.StopCause()
+			case <-time.After(5 * time.Second):
+				t.Error("timed out waiting for Stopped channel")
+			}
+			for {
+				if _, ok := events.Next(); !ok {
+					break
+				}
+			}
+			return nil
+		},
+	})
+
+	loop.Push("msg1")
+	<-agentStarted
+	loop.Stop(WithAgentCancel(WithAgentCancelMode(CancelImmediate)), WithStopCause(cause))
+
+	select {
+	case c := <-gotCause:
+		assert.Equal(t, cause, c)
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for StopCause in TurnContext")
+	}
+
+	exit := loop.Wait()
+	assert.Equal(t, cause, exit.StopCause)
+}
+
+func TestTurnLoop_StopCause_FirstNonEmptyWins(t *testing.T) {
+	agentStarted := make(chan struct{})
+
+	loop := newAndRunTurnLoop(context.Background(), TurnLoopConfig[string]{
+		GenInput: func(ctx context.Context, _ *TurnLoop[string], items []string) (*GenInputResult[string], error) {
+			return &GenInputResult[string]{
+				Input:    &AgentInput{Messages: []Message{schema.UserMessage(items[0])}},
+				Consumed: items,
+			}, nil
+		},
+		PrepareAgent: func(ctx context.Context, _ *TurnLoop[string], consumed []string) (Agent, error) {
+			return &turnLoopCancellableMockAgent{
+				name: "slow",
+				runFunc: func(ctx context.Context, input *AgentInput) (*AgentOutput, error) {
+					<-ctx.Done()
+					return nil, ctx.Err()
+				},
+			}, nil
+		},
+		OnAgentEvents: func(ctx context.Context, tc *TurnContext[string], events *AsyncIterator[*AgentEvent]) error {
+			close(agentStarted)
+			for {
+				if _, ok := events.Next(); !ok {
+					break
+				}
+			}
+			return nil
+		},
+	})
+
+	loop.Push("msg1")
+	<-agentStarted
+	loop.Stop(WithAgentCancel(WithAgentCancelMode(CancelAfterToolCalls)), WithStopCause("first cause"))
+	loop.Stop(WithAgentCancel(WithAgentCancelMode(CancelImmediate)), WithStopCause("second cause"))
+
+	exit := loop.Wait()
+	assert.Equal(t, "first cause", exit.StopCause, "first non-empty StopCause should win")
+}
+
+func TestTurnLoop_SkipCheckpoint_Sticky(t *testing.T) {
+	agentStarted := make(chan struct{})
+
+	store := &turnLoopCheckpointStore{m: make(map[string][]byte)}
+	cpID := "sticky-skip-session"
+
+	loop := newAndRunTurnLoop(context.Background(), TurnLoopConfig[string]{
+		Store:        store,
+		CheckpointID: cpID,
+		GenInput: func(ctx context.Context, _ *TurnLoop[string], items []string) (*GenInputResult[string], error) {
+			return &GenInputResult[string]{
+				Input:    &AgentInput{Messages: []Message{schema.UserMessage(items[0])}},
+				Consumed: items,
+			}, nil
+		},
+		PrepareAgent: func(ctx context.Context, _ *TurnLoop[string], consumed []string) (Agent, error) {
+			return &turnLoopCancellableMockAgent{
+				name: "slow",
+				runFunc: func(ctx context.Context, input *AgentInput) (*AgentOutput, error) {
+					<-ctx.Done()
+					return nil, ctx.Err()
+				},
+			}, nil
+		},
+		OnAgentEvents: func(ctx context.Context, tc *TurnContext[string], events *AsyncIterator[*AgentEvent]) error {
+			close(agentStarted)
+			for {
+				if _, ok := events.Next(); !ok {
+					break
+				}
+			}
+			return nil
+		},
+	})
+
+	loop.Push("msg1")
+	<-agentStarted
+	loop.Stop(WithAgentCancel(WithAgentCancelMode(CancelAfterToolCalls)), WithSkipCheckpoint())
+	loop.Stop(WithAgentCancel(WithAgentCancelMode(CancelImmediate)))
+
+	exit := loop.Wait()
+	assert.False(t, exit.Checkpointed, "SkipCheckpoint should be sticky across multiple Stop calls")
+
+	store.mu.Lock()
+	_, exists := store.m[cpID]
+	store.mu.Unlock()
+	assert.False(t, exists, "no checkpoint should be saved when SkipCheckpoint was set in any Stop call")
 }
