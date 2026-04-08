@@ -18,10 +18,15 @@ package compose
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"runtime/debug"
+	"sort"
+	"strings"
 	"sync"
+
+	"github.com/bytedance/sonic"
 
 	"github.com/cloudwego/eino/callbacks"
 	"github.com/cloudwego/eino/components"
@@ -33,6 +38,8 @@ import (
 type toolsNodeOptions struct {
 	ToolOptions []tool.Option
 	ToolList    []tool.BaseTool
+
+	ToolAliases map[string]ToolAliasConfig
 }
 
 // ToolsNodeOption is the option func type for ToolsNode.
@@ -52,6 +59,15 @@ func WithToolList(tool ...tool.BaseTool) ToolsNodeOption {
 	}
 }
 
+// WithToolAliases sets the tool aliases for the ToolsNode call option.
+// When used with WithToolList, it overrides the global alias configuration for the dynamic tool list.
+// When used alone (without WithToolList), it replaces the global alias configuration while keeping the original tool list.
+func WithToolAliases(toolAliases map[string]ToolAliasConfig) ToolsNodeOption {
+	return func(o *toolsNodeOptions) {
+		o.ToolAliases = toolAliases
+	}
+}
+
 // ToolsNode represents a node capable of executing tools within a graph.
 // The Graph Node interface is defined as follows:
 //
@@ -62,6 +78,7 @@ func WithToolList(tool ...tool.BaseTool) ToolsNodeOption {
 // Output: An array of ToolMessage where the order of elements corresponds to the order of ToolCalls in the input
 type ToolsNode struct {
 	tuple                             *toolsTuple
+	tools                             []tool.BaseTool
 	unknownToolHandler                func(ctx context.Context, name, input string) (string, error)
 	executeSequentially               bool
 	toolArgumentsHandler              func(ctx context.Context, name, input string) (string, error)
@@ -69,6 +86,7 @@ type ToolsNode struct {
 	streamToolCallMiddlewares         []StreamableToolMiddleware
 	enhancedToolCallMiddlewares       []EnhancedInvokableToolMiddleware
 	enhancedStreamToolCallMiddlewares []EnhancedStreamableToolMiddleware
+	toolAliasConfigs                  map[string]ToolAliasConfig
 }
 
 // ToolInput represents the input parameters for a tool call execution.
@@ -150,10 +168,29 @@ type ToolMiddleware struct {
 	EnhancedStreamable EnhancedStreamableToolMiddleware
 }
 
+// ToolAliasConfig configures name and argument aliases for a single tool.
+type ToolAliasConfig struct {
+	// NameAliases are alternative names for this tool.
+	// If the model returns any of these names, it will be resolved to the canonical tool name.
+	NameAliases []string
+
+	// ArgumentsAliases maps canonical argument keys to their alias lists.
+	// key=canonical, value=[]alias. Applied to top-level JSON keys before tool execution.
+	// Example: {"query": ["q", "search_term"], "limit": ["max_results", "count"]}
+	ArgumentsAliases map[string][]string
+}
+
 // ToolsNodeConfig is the config for ToolsNode.
 type ToolsNodeConfig struct {
 	// Tools specify the list of tools can be called which are BaseTool but must implement InvokableTool or StreamableTool.
 	Tools []tool.BaseTool
+
+	// ToolAliases configures name and argument aliases for tools.
+	// Key is the canonical tool name, value defines its aliases.
+	// This field is optional. When provided, tool name aliases will be resolved during tool dispatch,
+	// and argument aliases will be remapped before ToolArgumentsHandler (if configured) and tool execution.
+	// Execution order: ArgumentsAliases remapping → ToolArgumentsHandler → tool execution
+	ToolAliases map[string]ToolAliasConfig
 
 	// UnknownToolsHandler handles tool calls for non-existent tools when LLM hallucinates.
 	// This field is optional. When not set, calling a non-existent tool will result in an error.
@@ -219,13 +256,22 @@ func NewToolNode(ctx context.Context, conf *ToolsNodeConfig) (*ToolsNode, error)
 		}
 	}
 
-	tuple, err := convTools(ctx, conf.Tools, middlewares, streamMiddlewares, enhancedInvokableMiddlewares, enhancedStreamableMiddlewares)
+	params := convToolsParams{
+		tools:        conf.Tools,
+		aliasConfigs: conf.ToolAliases,
+	}
+	params.middlewares.invokable = middlewares
+	params.middlewares.streamable = streamMiddlewares
+	params.middlewares.enhancedInvokable = enhancedInvokableMiddlewares
+	params.middlewares.enhancedStreamable = enhancedStreamableMiddlewares
+	tuple, err := convTools(ctx, params)
 	if err != nil {
 		return nil, err
 	}
 
 	return &ToolsNode{
 		tuple:                             tuple,
+		tools:                             conf.Tools,
 		unknownToolHandler:                conf.UnknownToolsHandler,
 		executeSequentially:               conf.ExecuteSequentially,
 		toolArgumentsHandler:              conf.ToolArgumentsHandler,
@@ -233,6 +279,7 @@ func NewToolNode(ctx context.Context, conf *ToolsNodeConfig) (*ToolsNode, error)
 		streamToolCallMiddlewares:         streamMiddlewares,
 		enhancedToolCallMiddlewares:       enhancedInvokableMiddlewares,
 		enhancedStreamToolCallMiddlewares: enhancedStreamableMiddlewares,
+		toolAliasConfigs:                  conf.ToolAliases,
 	}, nil
 }
 
@@ -273,19 +320,184 @@ type toolsTuple struct {
 	streamEndpoints             []StreamableToolEndpoint
 	enhancedInvokableEndpoints  []EnhancedInvokableToolEndpoint
 	enhancedStreamableEndpoints []EnhancedStreamableToolEndpoint
+	// argsAliasMap stores reverse argument alias mappings for each tool.
+	// key: canonical tool name, value: map[aliasKey]canonicalKey (alias → canonical direction)
+	argsAliasMap map[string]map[string]string
+	// canonicalNames stores the canonical name for each tool index
+	canonicalNames []string
+	// toolInfos stores the ToolInfo for each tool index, used for alias validation
+	toolInfos []*schema.ToolInfo
 }
 
-func convTools(ctx context.Context, tools []tool.BaseTool, ms []InvokableToolMiddleware, sms []StreamableToolMiddleware,
-	ems []EnhancedInvokableToolMiddleware, esms []EnhancedStreamableToolMiddleware) (*toolsTuple, error) {
+// remapArgs replaces alias keys in the JSON arguments string with canonical keys.
+// aliasMap: alias → canonical mapping
+func remapArgs(args string, aliasMap map[string]string) (string, error) {
+	if len(aliasMap) == 0 {
+		return args, nil
+	}
+
+	trimmed := strings.TrimSpace(args)
+	if trimmed == "" || trimmed[0] != '{' {
+		return args, nil
+	}
+
+	var m map[string]json.RawMessage
+	if err := sonic.Unmarshal([]byte(args), &m); err != nil {
+		return args, nil
+	}
+
+	changed := false
+	for alias, canonical := range aliasMap {
+		if v, ok := m[alias]; ok {
+			// Only replace if canonical key doesn't exist.
+			// If both alias and canonical are present (e.g. {"q":"a","query":"b"}),
+			// the alias key is kept as-is and passed through as an unknown field.
+			if _, exists := m[canonical]; !exists {
+				m[canonical] = v
+				delete(m, alias)
+				changed = true
+			}
+		}
+	}
+
+	if !changed {
+		return args, nil
+	}
+
+	b, err := sonic.Marshal(m)
+	return string(b), err
+}
+
+type convToolsParams struct {
+	tools       []tool.BaseTool
+	middlewares struct {
+		invokable          []InvokableToolMiddleware
+		streamable         []StreamableToolMiddleware
+		enhancedInvokable  []EnhancedInvokableToolMiddleware
+		enhancedStreamable []EnhancedStreamableToolMiddleware
+	}
+	aliasConfigs map[string]ToolAliasConfig
+}
+
+func (t *toolsTuple) applyAliasConfigs(aliasConfigs map[string]ToolAliasConfig) error {
+	t.argsAliasMap = make(map[string]map[string]string)
+
+	sortedToolNames := make([]string, 0, len(aliasConfigs))
+	for toolName := range aliasConfigs {
+		sortedToolNames = append(sortedToolNames, toolName)
+	}
+	sort.Strings(sortedToolNames)
+
+	for _, toolName := range sortedToolNames {
+		aliasConfig := aliasConfigs[toolName]
+		var (
+			toolIdx int
+			exists  bool
+		)
+		if toolIdx, exists = t.indexes[toolName]; !exists {
+			continue
+		}
+
+		if err := t.applyNameAliases(toolName, toolIdx, aliasConfig.NameAliases); err != nil {
+			return err
+		}
+
+		if err := t.applyArgsAliases(toolName, toolIdx, aliasConfig.ArgumentsAliases); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+// applyNameAliases validates and registers name aliases for a single tool into the indexes map.
+func (t *toolsTuple) applyNameAliases(toolName string, toolIdx int, nameAliases []string) error {
+	for _, alias := range nameAliases {
+		if strings.TrimSpace(alias) == "" {
+			return fmt.Errorf("tool '%s' has empty name alias", toolName)
+		}
+		if existingIdx, conflict := t.indexes[alias]; conflict {
+			if existingIdx != toolIdx {
+				conflictToolName := t.canonicalNames[existingIdx]
+				if alias == conflictToolName {
+					return fmt.Errorf("tool '%s': name alias '%s' conflicts with existing tool's canonical name", toolName, alias)
+				}
+				return fmt.Errorf("tool '%s': name alias '%s' conflicts with an alias already registered for tool '%s'", toolName, alias, conflictToolName)
+			}
+			continue
+		}
+		t.indexes[alias] = toolIdx
+	}
+	return nil
+}
+
+// applyArgsAliases validates argument aliases against the tool schema and builds a reverse alias map for a single tool.
+func (t *toolsTuple) applyArgsAliases(toolName string, toolIdx int, argumentsAliases map[string][]string) error {
+	if len(argumentsAliases) == 0 {
+		return nil
+	}
+
+	schemaKeys := make(map[string]bool)
+	if info := t.toolInfos[toolIdx]; info != nil && info.ParamsOneOf != nil {
+		js, err := info.ParamsOneOf.ToJSONSchema()
+		if err != nil {
+			return fmt.Errorf("tool '%s': failed to parse JSON schema for alias validation: %w", toolName, err)
+		}
+		if js != nil && js.Properties != nil {
+			for pair := js.Properties.Oldest(); pair != nil; pair = pair.Next() {
+				schemaKeys[pair.Key] = true
+			}
+		}
+	}
+
+	reverseMap := make(map[string]string)
+	sortedCanonicals := make([]string, 0, len(argumentsAliases))
+	for canonical := range argumentsAliases {
+		sortedCanonicals = append(sortedCanonicals, canonical)
+	}
+	sort.Strings(sortedCanonicals)
+
+	for _, canonical := range sortedCanonicals {
+		aliases := argumentsAliases[canonical]
+		if strings.TrimSpace(canonical) == "" {
+			return fmt.Errorf("tool '%s' has empty canonical argument key", toolName)
+		}
+		if strings.Contains(canonical, ".") {
+			return fmt.Errorf("tool '%s' has unsupported '.' in canonical argument key '%s': nested field matching is not yet supported",
+				toolName, canonical)
+		}
+		for _, alias := range aliases {
+			if strings.TrimSpace(alias) == "" {
+				return fmt.Errorf("tool '%s' has empty argument alias for canonical key '%s'", toolName, canonical)
+			}
+			if schemaKeys[alias] {
+				return fmt.Errorf("tool '%s' has arg alias '%s' that conflicts with existing schema property '%s'",
+					toolName, alias, alias)
+			}
+			if existingCanonical, conflict := reverseMap[alias]; conflict {
+				return fmt.Errorf("tool '%s' has conflicting arg alias '%s' mapped to both '%s' and '%s'",
+					toolName, alias, existingCanonical, canonical)
+			}
+			reverseMap[alias] = canonical
+		}
+	}
+	t.argsAliasMap[toolName] = reverseMap
+
+	return nil
+}
+
+func convTools(ctx context.Context, params convToolsParams) (*toolsTuple, error) {
 	ret := &toolsTuple{
 		indexes:                     make(map[string]int),
-		meta:                        make([]*executorMeta, len(tools)),
-		endpoints:                   make([]InvokableToolEndpoint, len(tools)),
-		streamEndpoints:             make([]StreamableToolEndpoint, len(tools)),
-		enhancedInvokableEndpoints:  make([]EnhancedInvokableToolEndpoint, len(tools)),
-		enhancedStreamableEndpoints: make([]EnhancedStreamableToolEndpoint, len(tools)),
+		meta:                        make([]*executorMeta, len(params.tools)),
+		endpoints:                   make([]InvokableToolEndpoint, len(params.tools)),
+		streamEndpoints:             make([]StreamableToolEndpoint, len(params.tools)),
+		enhancedInvokableEndpoints:  make([]EnhancedInvokableToolEndpoint, len(params.tools)),
+		enhancedStreamableEndpoints: make([]EnhancedStreamableToolEndpoint, len(params.tools)),
+		canonicalNames:              make([]string, len(params.tools)),
+		toolInfos:                   make([]*schema.ToolInfo, len(params.tools)),
 	}
-	for idx, bt := range tools {
+	for idx, bt := range params.tools {
 		tl, err := bt.Info(ctx)
 		if err != nil {
 			return nil, fmt.Errorf("(NewToolNode) failed to get tool info at idx= %d: %w", idx, err)
@@ -310,19 +522,19 @@ func convTools(ctx context.Context, tools []tool.BaseTool, ms []InvokableToolMid
 		meta = parseExecutorInfoFromComponent(components.ComponentOfTool, bt)
 
 		if st, ok = bt.(tool.StreamableTool); ok {
-			streamable = wrapStreamToolCall(st, sms, !meta.isComponentCallbackEnabled)
+			streamable = wrapStreamToolCall(st, params.middlewares.streamable, !meta.isComponentCallbackEnabled)
 		}
 
 		if it, ok = bt.(tool.InvokableTool); ok {
-			invokable = wrapToolCall(it, ms, !meta.isComponentCallbackEnabled)
+			invokable = wrapToolCall(it, params.middlewares.invokable, !meta.isComponentCallbackEnabled)
 		}
 
 		if eiTool, ok = bt.(tool.EnhancedInvokableTool); ok {
-			enhancedInvokable = wrapEnhancedInvokableToolCall(eiTool, ems, !meta.isComponentCallbackEnabled)
+			enhancedInvokable = wrapEnhancedInvokableToolCall(eiTool, params.middlewares.enhancedInvokable, !meta.isComponentCallbackEnabled)
 		}
 
 		if esTool, ok = bt.(tool.EnhancedStreamableTool); ok {
-			enhancedStreamable = wrapEnhancedStreamableToolCall(esTool, esms, !meta.isComponentCallbackEnabled)
+			enhancedStreamable = wrapEnhancedStreamableToolCall(esTool, params.middlewares.enhancedStreamable, !meta.isComponentCallbackEnabled)
 		}
 
 		if st == nil && it == nil && eiTool == nil && esTool == nil {
@@ -348,7 +560,16 @@ func convTools(ctx context.Context, tools []tool.BaseTool, ms []InvokableToolMid
 		ret.streamEndpoints[idx] = streamable
 		ret.enhancedInvokableEndpoints[idx] = enhancedInvokable
 		ret.enhancedStreamableEndpoints[idx] = enhancedStreamable
+		ret.canonicalNames[idx] = toolName
+		ret.toolInfos[idx] = tl
 	}
+
+	if len(params.aliasConfigs) > 0 {
+		if err := ret.applyAliasConfigs(params.aliasConfigs); err != nil {
+			return nil, err
+		}
+	}
+
 	return ret, nil
 }
 
@@ -616,14 +837,27 @@ func (tn *ToolsNode) genToolCallTasks(ctx context.Context, tuple *toolsTuple,
 				toolCallTasks[i].useEnhanced = false
 			}
 
-			if tn.toolArgumentsHandler != nil {
-				arg, err := tn.toolArgumentsHandler(ctx, toolCall.Function.Name, toolCall.Function.Arguments)
+			// Get canonical tool name for looking up argument aliases
+			canonicalToolName := tuple.canonicalNames[index]
+
+			// Process argument aliases remapping
+			args := toolCall.Function.Arguments
+			if aliasMap, hasAliases := tuple.argsAliasMap[canonicalToolName]; hasAliases {
+				remappedArgs, err := remapArgs(args, aliasMap)
 				if err != nil {
-					return nil, fmt.Errorf("failed to executed tool[name:%s arguments:%s] arguments handler: %w", toolCall.Function.Name, toolCall.Function.Arguments, err)
+					return nil, fmt.Errorf("failed to remap args for tool[name:%s]: %w", canonicalToolName, err)
+				}
+				args = remappedArgs
+			}
+
+			if tn.toolArgumentsHandler != nil {
+				arg, err := tn.toolArgumentsHandler(ctx, canonicalToolName, args)
+				if err != nil {
+					return nil, fmt.Errorf("failed to executed tool[name:%s arguments:%s] arguments handler: %w", toolCall.Function.Name, args, err)
 				}
 				toolCallTasks[i].arg = arg
 			} else {
-				toolCallTasks[i].arg = toolCall.Function.Arguments
+				toolCallTasks[i].arg = args
 			}
 		}
 	}
@@ -782,6 +1016,31 @@ func parallelRunToolCall(ctx context.Context,
 	wg.Wait()
 }
 
+// buildTupleFromOpts rebuilds a toolsTuple when call options override tools or aliases.
+func (tn *ToolsNode) buildTupleFromOpts(ctx context.Context, opt *toolsNodeOptions) (*toolsTuple, error) {
+	tools := opt.ToolList
+	if tools == nil {
+		tools = tn.tools
+	}
+	aliasConfigs := opt.ToolAliases
+	if aliasConfigs == nil {
+		aliasConfigs = tn.toolAliasConfigs
+	}
+	p := convToolsParams{
+		tools:        tools,
+		aliasConfigs: aliasConfigs,
+	}
+	p.middlewares.invokable = tn.toolCallMiddlewares
+	p.middlewares.streamable = tn.streamToolCallMiddlewares
+	p.middlewares.enhancedInvokable = tn.enhancedToolCallMiddlewares
+	p.middlewares.enhancedStreamable = tn.enhancedStreamToolCallMiddlewares
+	tuple, err := convTools(ctx, p)
+	if err != nil {
+		return nil, fmt.Errorf("failed to convert tool list from call option: %w", err)
+	}
+	return tuple, nil
+}
+
 // Invoke calls the tools and collects the results of invokable tools.
 // it's parallel if there are multiple tool calls in the input message.
 func (tn *ToolsNode) Invoke(ctx context.Context, input *schema.Message,
@@ -789,11 +1048,11 @@ func (tn *ToolsNode) Invoke(ctx context.Context, input *schema.Message,
 
 	opt := getToolsNodeOptions(opts...)
 	tuple := tn.tuple
-	if opt.ToolList != nil {
+	if opt.ToolList != nil || opt.ToolAliases != nil {
 		var err error
-		tuple, err = convTools(ctx, opt.ToolList, tn.toolCallMiddlewares, tn.streamToolCallMiddlewares, tn.enhancedToolCallMiddlewares, tn.enhancedStreamToolCallMiddlewares)
+		tuple, err = tn.buildTupleFromOpts(ctx, opt)
 		if err != nil {
-			return nil, fmt.Errorf("failed to convert tool list from call option: %w", err)
+			return nil, err
 		}
 	}
 
@@ -891,11 +1150,11 @@ func (tn *ToolsNode) Stream(ctx context.Context, input *schema.Message,
 
 	opt := getToolsNodeOptions(opts...)
 	tuple := tn.tuple
-	if opt.ToolList != nil {
+	if opt.ToolList != nil || opt.ToolAliases != nil {
 		var err error
-		tuple, err = convTools(ctx, opt.ToolList, tn.toolCallMiddlewares, tn.streamToolCallMiddlewares, tn.enhancedToolCallMiddlewares, tn.enhancedStreamToolCallMiddlewares)
+		tuple, err = tn.buildTupleFromOpts(ctx, opt)
 		if err != nil {
-			return nil, fmt.Errorf("failed to convert tool list from call option: %w", err)
+			return nil, err
 		}
 	}
 
