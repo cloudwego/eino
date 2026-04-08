@@ -20,6 +20,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"strings"
 	"testing"
 
@@ -103,6 +104,47 @@ hello worldhello worldhello worldhello worldhello worldhello worldhello worldhel
 		expOrigContent := `hello worldhello worldhello worldhello worldhello worldhello worldhello worldhello worldhello worldhello world
 hello worldhello worldhello worldhello worldhello worldhello worldhello worldhello world`
 		assert.Equal(t, expOrigContent, content.Content)
+	})
+
+	t.Run("test streamable line and bypass error", func(t *testing.T) {
+		stWithErr := mockStreamableToolWithError()
+		tCtx := &adk.ToolContext{
+			Name:   "mock_streamable_tool",
+			CallID: "54321",
+		}
+		backend := filesystem.NewInMemoryBackend()
+		config := &Config{
+			SkipTruncation: true,
+			ToolConfig: map[string]*ToolReductionConfig{
+				"mock_streamable_tool": {
+					Backend:        backend,
+					SkipTruncation: false,
+					TruncHandler:   defaultTruncHandler("/tmp", 70),
+				},
+			},
+		}
+		mw, err := New(ctx, config)
+		assert.NoError(t, err)
+		edp, err := mw.WrapStreamableToolCall(ctx, stWithErr.StreamableRun, tCtx)
+		assert.NoError(t, err)
+		resp, err := edp(ctx, `{"value":"asd"}`)
+		assert.NoError(t, err)
+		cnt := 0
+		gotError := false
+		for {
+			_, err := resp.Recv()
+			if err != nil {
+				if err == io.EOF {
+					break
+				}
+				assert.Equal(t, fmt.Errorf("mock error"), err)
+				gotError = true
+				break
+			}
+			cnt++
+		}
+		assert.True(t, gotError)
+		assert.Equal(t, 10, cnt)
 	})
 }
 
@@ -886,6 +928,25 @@ func mockStreamableTool() tool.StreamableTool {
 		for _, part := range splitStrings(s3, 10) {
 			sw.Send(part, nil)
 		}
+		sw.Close()
+		return sr, nil
+	})
+	return t
+}
+
+func mockStreamableToolWithError() tool.StreamableTool {
+	type ContentContainer struct {
+		Value string `json:"value"`
+	}
+	s1 := strings.Repeat("hello world", 10) + "\n"
+	s2 := strings.Repeat("hello world", 8)
+	s3 := s1 + s2
+	t, _ := utils.InferStreamTool("mock_streamable_tool", "test desc", func(ctx context.Context, input ContentContainer) (output *schema.StreamReader[string], err error) {
+		sr, sw := schema.Pipe[string](11)
+		for _, part := range splitStrings(s3, 10) {
+			sw.Send(part, nil)
+		}
+		sw.Send("", fmt.Errorf("mock error"))
 		sw.Close()
 		return sr, nil
 	})

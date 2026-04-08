@@ -148,9 +148,13 @@ type TruncResult struct {
 	// NeedTrunc indicates whether the tool result should be truncated.
 	NeedTrunc bool
 
-	// ToolResult contains the result returned by the tool after trunc
-	// Required when NeedTrunc is true.
+	// ToolResult contains the result returned by the invokable tool after trunc.
+	// Required when NeedTrunc is true and ToolDetail.ToolResult is not nil.
 	ToolResult *schema.ToolResult
+
+	// StreamToolResult contains the output returned by the streamable tool after trunc.
+	// Required when NeedTrunc is true and ToolDetail.StreamToolResult is not nil.
+	StreamToolResult *schema.StreamReader[*schema.ToolResult]
 
 	// NeedOffload indicates whether the tool result should be offloaded.
 	NeedOffload bool
@@ -390,7 +394,14 @@ func (t *toolReductionMiddleware) WrapStreamableToolCall(_ context.Context, endp
 				return nil, err
 			}
 		}
-		return schema.StreamReaderFromArray([]string{truncResult.ToolResult.Parts[0].Text}), nil
+
+		sr := schema.StreamReaderWithConvert(truncResult.StreamToolResult, func(t *schema.ToolResult) (string, error) {
+			if t == nil || len(t.Parts) == 0 {
+				return "", nil
+			}
+			return t.Parts[0].Text, nil
+		})
+		return sr, nil
 	}, nil
 }
 
@@ -669,8 +680,31 @@ func defaultTokenCounter(_ context.Context, msgs []*schema.Message, tools []*sch
 	return tokens, nil
 }
 
+// defaultTruncHandler applies the same truncation strategy to both non-streaming
+// and streaming tool outputs.
+//
+// Processing steps:
+//  1. Read and join tool output into a complete result:
+//     - Non-streaming: use ToolResult directly.
+//     - Streaming: consume the whole StreamToolResult, then concat all chunks.
+//  2. If output is empty or total text length does not exceed truncMaxLength,
+//     return NeedTrunc=false.
+//  3. If exceeded, replace oversized text parts with truncation notices and
+//     offload the full original content.
+//
+// Streaming-specific behavior:
+//   - Truncation is not incremental. The handler waits until the entire stream is read
+//     before deciding and producing output.
+//   - If stream Recv() returns a non-EOF error, getJointToolResult treats it as
+//     "skip processing" (needProcess=false, err=nil), so this handler returns
+//     NeedTrunc=false and does not propagate that recv error.
+//   - When truncation is applied to a streaming tool result, output is re-emitted as a
+//     buffered single-result stream (not original chunk-by-chunk streaming semantics).
+//
+// If a tool requires strict incremental streaming behavior, provide a custom TruncHandler for that tool.
 func defaultTruncHandler(rootDir string, truncMaxLength int) func(ctx context.Context, detail *ToolDetail) (truncResult *TruncResult, err error) {
 	return func(ctx context.Context, detail *ToolDetail) (offloadInfo *TruncResult, err error) {
+		isStreamResult := detail.StreamToolResult != nil
 		resultParts, needProcess, err := getJointToolResult(detail)
 		if err != nil {
 			return nil, err
@@ -720,13 +754,21 @@ func defaultTruncHandler(rootDir string, truncMaxLength int) func(ctx context.Co
 			resultParts[i].Text = truncNotify
 		}
 
-		return &TruncResult{
+		tr := &TruncResult{
 			NeedTrunc:       true,
-			ToolResult:      &schema.ToolResult{Parts: resultParts},
 			NeedOffload:     true,
 			OffloadFilePath: filePath,
 			OffloadContent:  offloadContent,
-		}, nil
+		}
+		if !isStreamResult {
+			tr.ToolResult = &schema.ToolResult{Parts: resultParts}
+		} else {
+			sr, sw := schema.Pipe[*schema.ToolResult](1)
+			sw.Send(&schema.ToolResult{Parts: resultParts}, nil)
+			sw.Close()
+			tr.StreamToolResult = sr
+		}
+		return tr, nil
 	}
 }
 
