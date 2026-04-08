@@ -400,6 +400,7 @@ func TestWithCancel_WithTools(t *testing.T) {
 		child := cc.deriveChild(ctx)
 		assert.NotNil(t, child)
 
+		cc.setRecursive(true)
 		cc.setMode(CancelImmediate)
 
 		if atomic.CompareAndSwapInt32(&cc.state, stateRunning, stateCancelling) {
@@ -475,7 +476,7 @@ func TestWithCancel_WithTools(t *testing.T) {
 
 		<-modelStarted
 
-		handle, _ := cancelFn(WithAgentCancelMode(CancelAfterChatModel))
+		handle, _ := cancelFn(WithAgentCancelMode(CancelAfterChatModel), WithRecursive())
 		err = handle.Wait()
 		assert.NoError(t, err)
 
@@ -2625,7 +2626,7 @@ func TestCancelImmediate_AgentTool_PreservesChildCheckpoint(t *testing.T) {
 
 	waitForChan(t, leafModel.startedChan, "Leaf agent model did not start")
 
-	handle, contributed := cancelFn()
+	handle, contributed := cancelFn(WithRecursive())
 	assert.True(t, contributed)
 	assert.NoError(t, handle.Wait())
 
@@ -3253,23 +3254,27 @@ func TestCancelContext_ActiveChildren_Tracking(t *testing.T) {
 
 		wrapped := parent.wrapGraphInterruptWithGracePeriod(mockInterrupt)
 
-		// No children: no options appended
 		receivedOpts = nil
 		wrapped()
 		assert.Empty(t, receivedOpts, "Should pass no extra options when no children")
 
-		// With active child: one timeout option appended
 		_ = parent.deriveChild(ctx)
+
 		receivedOpts = nil
 		wrapped()
-		assert.Len(t, receivedOpts, 1, "Should add exactly one timeout option when children are active")
+		assert.Empty(t, receivedOpts, "Should pass no extra options when children are active but not recursive")
 
-		// Caller-provided options are preserved, grace period option appended after
+		parent.setRecursive(true)
+
+		receivedOpts = nil
+		wrapped()
+		assert.Len(t, receivedOpts, 1, "Should add exactly one timeout option when children are active and recursive")
+
 		receivedOpts = nil
 		callerOpt := compose.WithGraphInterruptTimeout(0)
 		wrapped(callerOpt)
 		assert.Len(t, receivedOpts, 2,
-			"Should append timeout option after caller-provided options when children are active")
+			"Should append timeout option after caller-provided options when children are active and recursive")
 		// Note: verifying the exact timeout value (defaultCancelImmediateGracePeriod)
 		// requires access to unexported compose.graphInterruptOptions. The integration
 		// tests (TestCancelImmediate_AgentTool_PreservesChildCheckpoint) verify the
@@ -3514,7 +3519,7 @@ func TestCancel_NestedWorkflow_AgentTool_CancelAfterChatModel(t *testing.T) {
 		t.Fatal("Leaf agent model did not start")
 	}
 
-	handle, contributed := cancelFn(WithAgentCancelMode(CancelAfterChatModel))
+	handle, contributed := cancelFn(WithAgentCancelMode(CancelAfterChatModel), WithRecursive())
 	assert.True(t, contributed, "Cancel should contribute")
 	err = handle.Wait()
 	assert.NoError(t, err)

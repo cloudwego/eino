@@ -44,21 +44,21 @@ type CancelMode int
 
 const (
 	// CancelImmediate cancels the agent as soon as the signal is received,
-	// without waiting for a ChatModel or ToolCalls safe-point. Propagates
-	// to all descendant agents via the cancel context hierarchy, including
-	// agents nested inside AgentTools and workflow sub-agents.
+	// without waiting for a ChatModel or ToolCalls safe-point.
+	// By default, only the root agent is interrupted; descendant agents inside
+	// AgentTools are torn down via context cancellation as a side effect.
+	// Use WithRecursive to propagate explicit immediate-cancel signals to
+	// descendants for clean teardown with grace period.
 	CancelImmediate CancelMode = 0
-	// CancelAfterChatModel cancels after the first chat model call that completes
-	// anywhere in the agent hierarchy, including nested sub-agents, agent tools,
-	// and workflow branches. The cancel mode propagates to all descendant agents;
-	// whichever ChatModel finishes first triggers the cancel. The interrupting
-	// agent emits an interrupt that bubbles up through the agent tree — parent
-	// agents do not need to reach their own ChatModel safe-point.
+	// CancelAfterChatModel cancels after the root agent's next chat model call
+	// completes. By default, only the root agent checks this safe-point;
+	// nested sub-agents inside AgentTools are unaware of the cancel.
+	// Use WithRecursive to propagate the cancel to all descendants — whichever
+	// ChatModel finishes first triggers the cancel.
 	CancelAfterChatModel CancelMode = 1 << iota
-	// CancelAfterToolCalls cancels after the first set of concurrent tool calls
-	// that completes anywhere in the agent hierarchy. Like CancelAfterChatModel,
-	// this mode propagates to all descendants and fires at whichever level
-	// reaches the safe-point first.
+	// CancelAfterToolCalls cancels after the root agent's next set of concurrent
+	// tool calls completes. By default, only the root agent checks this safe-point.
+	// Use WithRecursive to propagate to all descendants.
 	CancelAfterToolCalls
 )
 
@@ -92,8 +92,9 @@ func (h *CancelHandle) Wait() error {
 type AgentCancelFunc func(...AgentCancelOption) (*CancelHandle, bool)
 
 type agentCancelConfig struct {
-	Mode    CancelMode
-	Timeout *time.Duration
+	Mode      CancelMode
+	Recursive bool
+	Timeout   *time.Duration
 }
 
 // AgentCancelOption configures cancel behavior.
@@ -115,6 +116,21 @@ func WithAgentCancelMode(mode CancelMode) AgentCancelOption {
 func WithAgentCancelTimeout(timeout time.Duration) AgentCancelOption {
 	return func(config *agentCancelConfig) {
 		config.Timeout = &timeout
+	}
+}
+
+// WithRecursive opts into recursive cancel propagation. By default, cancel
+// modes only affect the root agent; descendant agents inside AgentTools are
+// not notified. WithRecursive makes the cancel propagate to all descendants:
+//   - CancelAfterChatModel / CancelAfterToolCalls: descendants check their own safe-points.
+//   - CancelImmediate: descendants receive explicit immediate-cancel signals for
+//     clean teardown; the root uses a grace period to collect child interrupts.
+//
+// Once any cancel call includes WithRecursive, the flag stays set for the
+// entire cancel lifecycle (monotonic escalation).
+func WithRecursive() AgentCancelOption {
+	return func(config *agentCancelConfig) {
+		config.Recursive = true
 	}
 }
 
@@ -296,6 +312,9 @@ type cancelContext struct {
 	startedMode      int32 // atomic, mode when state transitioned to cancelling
 	deadlineUnixNano int64 // atomic, 0 means no deadline
 
+	recursive     int32         // atomic; 1 if cancel should propagate to descendant agents via deriveChild
+	recursiveChan chan struct{} // closed when recursive transitions from 0 to 1
+
 	root   bool           // true for the original cancelContext created by WithCancel(); false for derived children
 	parent *cancelContext // non-nil for derived children; used to decrement parent's activeChildren on markDone
 
@@ -316,12 +335,23 @@ func newCancelContext() *cancelContext {
 		immediateChan: make(chan struct{}),
 		doneChan:      make(chan struct{}),
 		timeoutNotify: make(chan struct{}, 1),
+		recursiveChan: make(chan struct{}),
 		root:          true,
 	}
 }
 
 func (cc *cancelContext) isRoot() bool {
 	return cc != nil && cc.root
+}
+
+func (cc *cancelContext) isRecursive() bool {
+	return cc != nil && atomic.LoadInt32(&cc.recursive) == 1
+}
+
+func (cc *cancelContext) setRecursive(v bool) {
+	if v && atomic.CompareAndSwapInt32(&cc.recursive, 0, 1) {
+		close(cc.recursiveChan)
+	}
 }
 
 // deriveChild creates a child cancelContext that receives cancel propagation
@@ -340,7 +370,18 @@ func (cc *cancelContext) deriveChild(ctx context.Context) *cancelContext {
 	go func() {
 		select {
 		case <-cc.cancelChan:
-			child.triggerCancel(cc.getMode())
+			if cc.isRecursive() {
+				child.setRecursive(true)
+				child.triggerCancel(cc.getMode())
+				return
+			}
+			select {
+			case <-cc.recursiveChan:
+				child.setRecursive(true)
+				child.triggerCancel(cc.getMode())
+			case <-child.doneChan:
+			case <-ctx.Done():
+			}
 		case <-child.doneChan:
 		case <-ctx.Done():
 		}
@@ -349,7 +390,18 @@ func (cc *cancelContext) deriveChild(ctx context.Context) *cancelContext {
 	go func() {
 		select {
 		case <-cc.immediateChan:
-			child.triggerImmediateCancel()
+			if cc.isRecursive() {
+				child.setRecursive(true)
+				child.triggerImmediateCancel()
+				return
+			}
+			select {
+			case <-cc.recursiveChan:
+				child.setRecursive(true)
+				child.triggerImmediateCancel()
+			case <-child.doneChan:
+			case <-ctx.Done():
+			}
 		case <-child.doneChan:
 		case <-ctx.Done():
 		}
@@ -504,7 +556,7 @@ func (cc *cancelContext) hasActiveChildren() bool {
 
 func (cc *cancelContext) wrapGraphInterruptWithGracePeriod(interrupt func(...compose.GraphInterruptOption)) func(...compose.GraphInterruptOption) {
 	return func(opts ...compose.GraphInterruptOption) {
-		if cc.hasActiveChildren() {
+		if cc.isRecursive() && cc.hasActiveChildren() {
 			newOpts := make([]compose.GraphInterruptOption, len(opts)+1)
 			copy(newOpts, opts)
 			newOpts[len(opts)] = compose.WithGraphInterruptTimeout(defaultCancelImmediateGracePeriod)
@@ -682,10 +734,14 @@ func (cc *cancelContext) buildCancelFunc() AgentCancelFunc {
 			curMode = req.Mode
 			cc.setMode(curMode)
 			atomic.StoreInt32(&cc.startedMode, int32(curMode))
+			cc.setRecursive(req.Recursive)
 			close(cc.cancelChan)
 		} else {
 			curMode = joinMode(curMode, req.Mode)
 			cc.setMode(curMode)
+			if req.Recursive {
+				cc.setRecursive(true)
+			}
 		}
 
 		if curMode == CancelImmediate {
