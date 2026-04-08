@@ -262,6 +262,8 @@ type typedReactConfig[M MessageType] struct {
 	maxIterations int
 
 	cancelCtx *cancelContext
+
+	eagerExecution bool
 }
 
 type reactConfig = typedReactConfig[*schema.Message]
@@ -308,6 +310,76 @@ func genReactState(config *reactConfig) func(ctx context.Context) *State {
 	}
 }
 
+type toolExecutionProviderFunc = func(ctx context.Context, input *schema.Message) (
+	map[string]*schema.StreamReader[string], map[string]*schema.StreamReader[*schema.ToolResult], error,
+)
+
+func newEagerCoordHolderWithProvider(eagerExecution bool) (*eagerCoordHolder, toolExecutionProviderFunc) {
+	if !eagerExecution {
+		return nil, nil
+	}
+	holder := &eagerCoordHolder{}
+	provider := func(ctx context.Context, input *schema.Message) (
+		map[string]*schema.StreamReader[string], map[string]*schema.StreamReader[*schema.ToolResult], error,
+	) {
+		coord := holder.Load()
+		if coord == nil {
+			return nil, nil, nil
+		}
+		coord.waitDone(ctx)
+		return coord.collectResults()
+	}
+	return holder, provider
+}
+
+func wireEagerToolExec[M MessageType](
+	coordPtr *eagerCoordHolder,
+	toolsNode *compose.ToolsNode,
+	toolNodeKey string,
+	executeSequentially bool,
+	wrapperConf *typedModelWrapperConfig[M],
+) {
+	if coordPtr == nil {
+		return
+	}
+	wrapperConf.eagerToolExec = &eagerToolExecutorMiddleware[M]{
+		toolsNode:           toolsNode,
+		toolNodeKey:         toolNodeKey,
+		coordPtr:            coordPtr,
+		executeSequentially: executeSequentially,
+	}
+}
+
+func buildToolHandlers(config *reactConfig) (
+	func(context.Context, Message, *State) (Message, error),
+	func(context.Context, *schema.StreamReader[[]*schema.Message], *State) (*schema.StreamReader[[]*schema.Message], error),
+) {
+	preHandle := func(ctx context.Context, _ Message, st *State) (Message, error) {
+		input := st.Messages[len(st.Messages)-1]
+		returnDirectly := config.toolsReturnDirectly
+		if execCtx := getChatModelAgentExecCtx(ctx); execCtx != nil && len(execCtx.runtimeReturnDirectly) > 0 {
+			returnDirectly = execCtx.runtimeReturnDirectly
+		}
+		if len(returnDirectly) > 0 {
+			for i := range input.ToolCalls {
+				toolName := input.ToolCalls[i].Function.Name
+				if _, ok := returnDirectly[toolName]; ok {
+					st.setReturnDirectlyToolCallID(input.ToolCalls[i].ID)
+				}
+			}
+		}
+		return input, nil
+	}
+	postHandle := func(ctx context.Context, out *schema.StreamReader[[]*schema.Message], st *State) (*schema.StreamReader[[]*schema.Message], error) {
+		if event := st.getReturnDirectlyEvent(); event != nil {
+			getChatModelAgentExecCtx(ctx).send(event)
+			st.setReturnDirectlyEvent(nil)
+		}
+		return out, nil
+	}
+	return preHandle, postHandle
+}
+
 func newReact(ctx context.Context, config *reactConfig) (reactGraph, error) {
 	const (
 		initNode_                      = "Init"
@@ -329,15 +401,23 @@ func newReact(ctx context.Context, config *reactConfig) (reactGraph, error) {
 	}), compose.WithNodeName(initNode_))
 
 	var wrappedModel model.BaseChatModel = config.model
-	if config.modelWrapperConf != nil {
-		wrappedModel = buildModelWrappers(config.model, config.modelWrapperConf)
-	}
 
 	toolsConfig := config.toolsConfig
 
 	toolsNode, err := compose.NewToolNode(ctx, toolsConfig)
 	if err != nil {
 		return nil, err
+	}
+
+	eagerCoordPtr, eagerProvider := newEagerCoordHolderWithProvider(config.eagerExecution)
+	if eagerProvider != nil {
+		compose.InternalSetToolExecutionProvider(toolsNode, eagerProvider)
+	}
+
+	wireEagerToolExec(eagerCoordPtr, toolsNode, toolNode_, config.toolsConfig.ExecuteSequentially, config.modelWrapperConf)
+
+	if config.modelWrapperConf != nil {
+		wrappedModel = buildModelWrappers(config.model, config.modelWrapperConf)
 	}
 
 	_ = g.AddChatModelNode(chatModel_, wrappedModel, compose.WithStatePreHandler(
@@ -365,29 +445,7 @@ func newReact(ctx context.Context, config *reactConfig) (reactGraph, error) {
 		return msg, nil
 	}), compose.WithNodeName(cancelCheckNode_))
 
-	toolPreHandle := func(ctx context.Context, _ Message, st *State) (Message, error) {
-		input := st.Messages[len(st.Messages)-1]
-		returnDirectly := config.toolsReturnDirectly
-		if execCtx := getChatModelAgentExecCtx(ctx); execCtx != nil && len(execCtx.runtimeReturnDirectly) > 0 {
-			returnDirectly = execCtx.runtimeReturnDirectly
-		}
-		if len(returnDirectly) > 0 {
-			for i := range input.ToolCalls {
-				toolName := input.ToolCalls[i].Function.Name
-				if _, ok := returnDirectly[toolName]; ok {
-					st.setReturnDirectlyToolCallID(input.ToolCalls[i].ID)
-				}
-			}
-		}
-		return input, nil
-	}
-	toolPostHandle := func(ctx context.Context, out *schema.StreamReader[[]*schema.Message], st *State) (*schema.StreamReader[[]*schema.Message], error) {
-		if event := st.getReturnDirectlyEvent(); event != nil {
-			getChatModelAgentExecCtx(ctx).send(event)
-			st.setReturnDirectlyEvent(nil)
-		}
-		return out, nil
-	}
+	toolPreHandle, toolPostHandle := buildToolHandlers(config)
 	_ = g.AddToolsNode(toolNode_, toolsNode,
 		compose.WithStatePreHandler(toolPreHandle),
 		compose.WithStreamStatePostHandler(toolPostHandle),
@@ -575,13 +633,27 @@ func newAgenticReact(ctx context.Context, config *agenticReactConfig) (agenticRe
 	}), compose.WithNodeName(initNode_))
 
 	var wrappedModel model.AgenticModel = config.model
-	if config.modelWrapperConf != nil {
-		wrappedModel = buildModelWrappers(config.model, config.modelWrapperConf)
-	}
 
 	toolsNode, err := compose.NewAgenticToolsNode(ctx, config.toolsConfig)
 	if err != nil {
 		return nil, err
+	}
+
+	eagerCoordPtr, eagerProvider := newEagerCoordHolderWithProvider(config.eagerExecution)
+	if eagerProvider != nil {
+		compose.InternalSetAgenticToolExecutionProvider(toolsNode, eagerProvider)
+	}
+
+	if config.eagerExecution {
+		eagerToolsNode, eagerErr := compose.NewToolNode(ctx, config.toolsConfig)
+		if eagerErr != nil {
+			return nil, eagerErr
+		}
+		wireEagerToolExec[*schema.AgenticMessage](eagerCoordPtr, eagerToolsNode, toolNode_, config.toolsConfig.ExecuteSequentially, config.modelWrapperConf)
+	}
+
+	if config.modelWrapperConf != nil {
+		wrappedModel = buildModelWrappers(config.model, config.modelWrapperConf)
 	}
 
 	_ = g.AddAgenticModelNode(chatModel_, wrappedModel, compose.WithStatePreHandler(

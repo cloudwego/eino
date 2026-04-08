@@ -39,6 +39,7 @@ type typedModelWrapperConfig[M MessageType] struct {
 	retryConfig   *ModelRetryConfig
 	toolInfos     []*schema.ToolInfo
 	cancelContext *cancelContext
+	eagerToolExec *eagerToolExecutorMiddleware[M]
 }
 
 type modelWrapperConfig = typedModelWrapperConfig[*schema.Message]
@@ -62,6 +63,7 @@ func buildModelWrappersImpl[M MessageType](m model.BaseModel[M], config *typedMo
 		toolInfos:        config.toolInfos,
 		modelRetryConfig: config.retryConfig,
 		cancelContext:    config.cancelContext,
+		eagerToolExec:    config.eagerToolExec,
 	}
 
 	return wrapped
@@ -548,6 +550,7 @@ type typedStateModelWrapper[M MessageType] struct {
 	toolInfos        []*schema.ToolInfo
 	modelRetryConfig *ModelRetryConfig
 	cancelContext    *cancelContext
+	eagerToolExec    *eagerToolExecutorMiddleware[M]
 }
 
 type stateModelWrapper = typedStateModelWrapper[*schema.Message]
@@ -662,6 +665,22 @@ func (w *typedStateModelWrapper[M]) wrapStreamEndpoint(endpoint typedStreamEndpo
 				return nil, err
 			}
 			return wrappedModel.Stream(ctx, input, opts...)
+		}
+	}
+
+	if w.eagerToolExec != nil {
+		innerEndpoint := endpoint
+		eager := w.eagerToolExec
+		endpoint = func(ctx context.Context, input []M, opts ...model.Option) (*schema.StreamReader[M], error) {
+			stream, err := innerEndpoint(ctx, input, opts...)
+			if err != nil {
+				return nil, err
+			}
+			copies := stream.Copy(2)
+			coord := newEagerCoord()
+			eager.coordPtr.Store(coord)
+			go eager.runEager(ctx, copies[1], coord)
+			return copies[0], nil
 		}
 	}
 

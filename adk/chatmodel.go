@@ -134,6 +134,14 @@ type ToolsConfig struct {
 	//   - Interrupted: Propagated via CompositeInterrupt to allow proper interrupt/resume
 	//   - Exit, TransferToAgent, BreakLoop: Ignored outside the agent tool
 	EmitInternalEvents bool
+
+	// EagerExecution enables speculative tool execution during model streaming.
+	// When true, tools begin executing as soon as their JSON arguments are complete
+	// in the model's output stream, rather than waiting for the full response.
+	// This reduces end-to-end latency when the model produces multiple tool calls.
+	// The eager executor honors model retry (aborts on stream errors), cancel
+	// (aborts on StreamCanceledError), and interrupt (defers to ToolsNode for resume).
+	EagerExecution bool
 }
 
 type TypedGenModelInput[M MessageType] func(ctx context.Context, instruction string, input *TypedAgentInput[M]) ([]M, error)
@@ -718,6 +726,8 @@ type execContext struct {
 
 	rebuildGraph bool // whether needs to instantiate a new graph because of topology changes due to tool modifications
 	toolUpdated  bool // whether needs to pass a compose.WithToolList option to ToolsNode due to tool list change
+
+	eagerExecution bool
 }
 
 func (a *TypedChatModelAgent[M]) applyBeforeAgent(ctx context.Context, ec *execContext) (context.Context, *execContext, error) {
@@ -745,6 +755,7 @@ func (a *TypedChatModelAgent[M]) applyBeforeAgent(ctx context.Context, ec *execC
 		toolUpdated:    true,
 		rebuildGraph: (len(ec.toolsNodeConf.Tools) == 0 && len(runCtx.Tools) > 0) ||
 			(len(ec.returnDirectly) == 0 && len(runCtx.ReturnDirectly) > 0),
+		eagerExecution: ec.eagerExecution,
 	}
 
 	toolInfos, err := genToolInfos(ctx, &runtimeEC.toolsNodeConf)
@@ -813,6 +824,7 @@ func (a *TypedChatModelAgent[M]) prepareExecContext(ctx context.Context) (*execC
 		returnDirectly: returnDirectly,
 		toolInfos:      toolInfos,
 		unwrappedTools: unwrappedTools,
+		eagerExecution: a.toolsConfig.EagerExecution,
 	}, nil
 }
 
@@ -1007,6 +1019,7 @@ func (a *TypedChatModelAgent[M]) buildMessageReActRunFunc(ctx context.Context, b
 		toolsReturnDirectly: bc.returnDirectly,
 		agentName:           a.name,
 		maxIterations:       a.maxIterations,
+		eagerExecution:      bc.eagerExecution,
 	}
 
 	return func(ctx context.Context, p *typedRunParams[M]) {
@@ -1281,6 +1294,7 @@ func (a *TypedChatModelAgent[M]) getRunFunc(ctx context.Context) (context.Contex
 			toolsNodeConf:  bc.toolsNodeConf,
 			returnDirectly: bc.returnDirectly,
 			toolInfos:      bc.toolInfos,
+			eagerExecution: bc.eagerExecution,
 		}
 		return ctx, defaultRun, runtimeBC, nil
 	}

@@ -315,6 +315,97 @@ func TestToolsNode(t *testing.T) {
 	})
 }
 
+func TestInternalStreamSingleToolCall(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("basic invocation", func(t *testing.T) {
+		tl := &mockInvokableTool{
+			info: &schema.ToolInfo{
+				Name: "test_tool",
+				Desc: "test tool",
+				ParamsOneOf: schema.NewParamsOneOfByParams(map[string]*schema.ParameterInfo{
+					"input": {Type: "string", Desc: "input"},
+				}),
+			},
+			result: "hello-result",
+		}
+
+		tn, err := NewToolNode(ctx, &ToolsNodeConfig{
+			Tools: []tool.BaseTool{tl},
+		})
+		assert.NoError(t, err)
+
+		sr, _, useEnhanced, err := InternalStreamSingleToolCall(tn, ctx, schema.ToolCall{
+			ID:       "call-1",
+			Function: schema.FunctionCall{Name: "test_tool", Arguments: `{"input":"test"}`},
+		})
+		assert.NoError(t, err)
+		assert.False(t, useEnhanced)
+		assert.NotNil(t, sr)
+		chunk, recvErr := sr.Recv()
+		assert.NoError(t, recvErr)
+		assert.Equal(t, "hello-result", chunk)
+	})
+
+	t.Run("unknown tool", func(t *testing.T) {
+		tl := &mockInvokableTool{
+			info: &schema.ToolInfo{
+				Name: "known_tool",
+				Desc: "known",
+				ParamsOneOf: schema.NewParamsOneOfByParams(map[string]*schema.ParameterInfo{
+					"input": {Type: "string", Desc: "input"},
+				}),
+			},
+			result: "ok",
+		}
+
+		tn, err := NewToolNode(ctx, &ToolsNodeConfig{
+			Tools: []tool.BaseTool{tl},
+		})
+		assert.NoError(t, err)
+
+		_, _, _, err = InternalStreamSingleToolCall(tn, ctx, schema.ToolCall{
+			ID:       "call-1",
+			Function: schema.FunctionCall{Name: "nonexistent", Arguments: `{}`},
+		})
+		assert.Error(t, err)
+	})
+
+	t.Run("empty tool call returns error", func(t *testing.T) {
+		tl := &mockInvokableTool{
+			info: &schema.ToolInfo{
+				Name: "test_tool",
+				Desc: "test tool",
+				ParamsOneOf: schema.NewParamsOneOfByParams(map[string]*schema.ParameterInfo{
+					"input": {Type: "string", Desc: "input"},
+				}),
+			},
+			result: "ok",
+		}
+
+		tn, err := NewToolNode(ctx, &ToolsNodeConfig{
+			Tools: []tool.BaseTool{tl},
+		})
+		assert.NoError(t, err)
+
+		_, _, _, err = InternalStreamSingleToolCall(tn, ctx, schema.ToolCall{})
+		assert.Error(t, err)
+	})
+}
+
+type mockInvokableTool struct {
+	info   *schema.ToolInfo
+	result string
+}
+
+func (t *mockInvokableTool) Info(_ context.Context) (*schema.ToolInfo, error) {
+	return t.info, nil
+}
+
+func (t *mockInvokableTool) InvokableRun(_ context.Context, _ string, _ ...tool.Option) (string, error) {
+	return t.result, nil
+}
+
 type userCompanyRequest struct {
 	Name  string `json:"name"`
 	Email string `json:"email"`
@@ -1307,4 +1398,432 @@ func TestEnhancedToolPriority(t *testing.T) {
 		assert.Len(t, output, 1)
 		assert.Contains(t, output[0].UserInputMultiContent[0].Text, "enhanced result")
 	})
+}
+
+func TestToolsNode_InvokeWithToolExecutionProvider(t *testing.T) {
+	ctx := context.Background()
+
+	tl := &mockInvokableTool{
+		info: &schema.ToolInfo{
+			Name: "tool1",
+			Desc: "test",
+			ParamsOneOf: schema.NewParamsOneOfByParams(map[string]*schema.ParameterInfo{
+				"input": {Type: "string", Desc: "input"},
+			}),
+		},
+		result: "should-not-be-called",
+	}
+
+	tn, err := NewToolNode(ctx, &ToolsNodeConfig{
+		Tools: []tool.BaseTool{tl},
+	})
+	assert.NoError(t, err)
+
+	InternalSetToolExecutionProvider(tn, func(ctx context.Context, input *schema.Message) (map[string]*schema.StreamReader[string], map[string]*schema.StreamReader[*schema.ToolResult], error) {
+		return map[string]*schema.StreamReader[string]{
+			"call-1": schema.StreamReaderFromArray([]string{"eager-result"}),
+		}, nil, nil
+	})
+
+	input := schema.AssistantMessage("", []schema.ToolCall{
+		{ID: "call-1", Function: schema.FunctionCall{Name: "tool1", Arguments: `{"input":"test"}`}},
+	})
+
+	output, err := tn.Invoke(ctx, input)
+	assert.NoError(t, err)
+	assert.Len(t, output, 1)
+	assert.Equal(t, "call-1", output[0].ToolCallID)
+	assert.Equal(t, "eager-result", output[0].Content)
+}
+
+func TestToolsNode_StreamWithToolExecutionProvider(t *testing.T) {
+	ctx := context.Background()
+
+	tl := &mockInvokableTool{
+		info: &schema.ToolInfo{
+			Name: "tool1",
+			Desc: "test",
+			ParamsOneOf: schema.NewParamsOneOfByParams(map[string]*schema.ParameterInfo{
+				"input": {Type: "string", Desc: "input"},
+			}),
+		},
+		result: "should-not-be-called",
+	}
+
+	tn, err := NewToolNode(ctx, &ToolsNodeConfig{
+		Tools: []tool.BaseTool{tl},
+	})
+	assert.NoError(t, err)
+
+	InternalSetToolExecutionProvider(tn, func(ctx context.Context, input *schema.Message) (map[string]*schema.StreamReader[string], map[string]*schema.StreamReader[*schema.ToolResult], error) {
+		return map[string]*schema.StreamReader[string]{
+			"call-1": schema.StreamReaderFromArray([]string{"stream-", "eager"}),
+		}, nil, nil
+	})
+
+	input := schema.AssistantMessage("", []schema.ToolCall{
+		{ID: "call-1", Function: schema.FunctionCall{Name: "tool1", Arguments: `{"input":"test"}`}},
+	})
+
+	sr, err := tn.Stream(ctx, input)
+	assert.NoError(t, err)
+
+	var contents []string
+	for {
+		chunk, recvErr := sr.Recv()
+		if recvErr == io.EOF {
+			break
+		}
+		assert.NoError(t, recvErr)
+		for _, m := range chunk {
+			if m != nil {
+				contents = append(contents, m.Content)
+			}
+		}
+	}
+	assert.Equal(t, []string{"stream-", "eager"}, contents)
+}
+
+func TestToolsNode_InvokeWithEnhancedToolExecutionProvider(t *testing.T) {
+	ctx := context.Background()
+
+	eiTool := &enhancedInvokableTool{
+		info: &schema.ToolInfo{
+			Name: "etool",
+			Desc: "enhanced",
+		},
+		fn: func(ctx context.Context, input *schema.ToolArgument) (*schema.ToolResult, error) {
+			return &schema.ToolResult{
+				Parts: []schema.ToolOutputPart{{Type: schema.ToolPartTypeText, Text: "should-not-call"}},
+			}, nil
+		},
+	}
+
+	tn, err := NewToolNode(ctx, &ToolsNodeConfig{
+		Tools: []tool.BaseTool{eiTool},
+	})
+	assert.NoError(t, err)
+
+	InternalSetToolExecutionProvider(tn, func(ctx context.Context, input *schema.Message) (map[string]*schema.StreamReader[string], map[string]*schema.StreamReader[*schema.ToolResult], error) {
+		return nil, map[string]*schema.StreamReader[*schema.ToolResult]{
+			"call-1": schema.StreamReaderFromArray([]*schema.ToolResult{
+				{Parts: []schema.ToolOutputPart{{Type: schema.ToolPartTypeText, Text: "eager-enhanced"}}},
+			}),
+		}, nil
+	})
+
+	input := schema.AssistantMessage("", []schema.ToolCall{
+		{ID: "call-1", Function: schema.FunctionCall{Name: "etool", Arguments: `test`}},
+	})
+
+	output, err := tn.Invoke(ctx, input)
+	assert.NoError(t, err)
+	assert.Len(t, output, 1)
+	assert.Equal(t, "call-1", output[0].ToolCallID)
+	assert.Contains(t, output[0].UserInputMultiContent[0].Text, "eager-enhanced")
+}
+
+func TestToolsNode_StreamWithEnhancedToolExecutionProvider(t *testing.T) {
+	ctx := context.Background()
+
+	eiTool := &enhancedInvokableTool{
+		info: &schema.ToolInfo{
+			Name: "etool",
+			Desc: "enhanced",
+		},
+		fn: func(ctx context.Context, input *schema.ToolArgument) (*schema.ToolResult, error) {
+			return &schema.ToolResult{
+				Parts: []schema.ToolOutputPart{{Type: schema.ToolPartTypeText, Text: "should-not-call"}},
+			}, nil
+		},
+	}
+
+	tn, err := NewToolNode(ctx, &ToolsNodeConfig{
+		Tools: []tool.BaseTool{eiTool},
+	})
+	assert.NoError(t, err)
+
+	InternalSetToolExecutionProvider(tn, func(ctx context.Context, input *schema.Message) (map[string]*schema.StreamReader[string], map[string]*schema.StreamReader[*schema.ToolResult], error) {
+		return nil, map[string]*schema.StreamReader[*schema.ToolResult]{
+			"call-1": schema.StreamReaderFromArray([]*schema.ToolResult{
+				{Parts: []schema.ToolOutputPart{{Type: schema.ToolPartTypeText, Text: "streamed-enhanced"}}},
+			}),
+		}, nil
+	})
+
+	input := schema.AssistantMessage("", []schema.ToolCall{
+		{ID: "call-1", Function: schema.FunctionCall{Name: "etool", Arguments: `test`}},
+	})
+
+	sr, err := tn.Stream(ctx, input)
+	assert.NoError(t, err)
+
+	var gotParts []string
+	for {
+		chunk, recvErr := sr.Recv()
+		if recvErr == io.EOF {
+			break
+		}
+		assert.NoError(t, recvErr)
+		for _, m := range chunk {
+			if m != nil && len(m.UserInputMultiContent) > 0 {
+				gotParts = append(gotParts, m.UserInputMultiContent[0].Text)
+			}
+		}
+	}
+	assert.Contains(t, gotParts, "streamed-enhanced")
+}
+
+func TestToolsNode_ProviderError(t *testing.T) {
+	ctx := context.Background()
+
+	tl := &mockInvokableTool{
+		info: &schema.ToolInfo{
+			Name: "tool1",
+			Desc: "test",
+			ParamsOneOf: schema.NewParamsOneOfByParams(map[string]*schema.ParameterInfo{
+				"input": {Type: "string", Desc: "input"},
+			}),
+		},
+		result: "ok",
+	}
+
+	tn, err := NewToolNode(ctx, &ToolsNodeConfig{
+		Tools: []tool.BaseTool{tl},
+	})
+	assert.NoError(t, err)
+
+	InternalSetToolExecutionProvider(tn, func(ctx context.Context, input *schema.Message) (map[string]*schema.StreamReader[string], map[string]*schema.StreamReader[*schema.ToolResult], error) {
+		return nil, nil, fmt.Errorf("provider failed")
+	})
+
+	input := schema.AssistantMessage("", []schema.ToolCall{
+		{ID: "call-1", Function: schema.FunctionCall{Name: "tool1", Arguments: `{"input":"test"}`}},
+	})
+
+	_, err = tn.Invoke(ctx, input)
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "provider failed")
+
+	_, err = tn.Stream(ctx, input)
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "provider failed")
+}
+
+func TestInternalSetAgenticToolExecutionProvider(t *testing.T) {
+	ctx := context.Background()
+
+	tl := &mockInvokableTool{
+		info: &schema.ToolInfo{
+			Name: "tool1",
+			Desc: "test",
+			ParamsOneOf: schema.NewParamsOneOfByParams(map[string]*schema.ParameterInfo{
+				"input": {Type: "string", Desc: "input"},
+			}),
+		},
+		result: "fallback",
+	}
+
+	atn, err := NewAgenticToolsNode(ctx, &ToolsNodeConfig{
+		Tools: []tool.BaseTool{tl},
+	})
+	assert.NoError(t, err)
+
+	var providerCalled bool
+	InternalSetAgenticToolExecutionProvider(atn, func(ctx context.Context, input *schema.Message) (map[string]*schema.StreamReader[string], map[string]*schema.StreamReader[*schema.ToolResult], error) {
+		providerCalled = true
+		return map[string]*schema.StreamReader[string]{
+			"call-1": schema.StreamReaderFromArray([]string{"from-provider"}),
+		}, nil, nil
+	})
+
+	input := &schema.AgenticMessage{
+		ContentBlocks: []*schema.ContentBlock{
+			{
+				Type: schema.ContentBlockTypeFunctionToolCall,
+				FunctionToolCall: &schema.FunctionToolCall{
+					CallID:    "call-1",
+					Name:      "tool1",
+					Arguments: `{"input":"test"}`,
+				},
+			},
+		},
+	}
+
+	output, err := atn.Invoke(ctx, input)
+	assert.NoError(t, err)
+	assert.True(t, providerCalled)
+	assert.Len(t, output, 1)
+}
+
+func TestToolsNode_SequentialInvoke(t *testing.T) {
+	ctx := context.Background()
+
+	tl1 := &mockInvokableTool{
+		info: &schema.ToolInfo{
+			Name: "tool1",
+			Desc: "test1",
+			ParamsOneOf: schema.NewParamsOneOfByParams(map[string]*schema.ParameterInfo{
+				"input": {Type: "string", Desc: "input"},
+			}),
+		},
+		result: "result1",
+	}
+	tl2 := &mockInvokableTool{
+		info: &schema.ToolInfo{
+			Name: "tool2",
+			Desc: "test2",
+			ParamsOneOf: schema.NewParamsOneOfByParams(map[string]*schema.ParameterInfo{
+				"input": {Type: "string", Desc: "input"},
+			}),
+		},
+		result: "result2",
+	}
+
+	tn, err := NewToolNode(ctx, &ToolsNodeConfig{
+		Tools:               []tool.BaseTool{tl1, tl2},
+		ExecuteSequentially: true,
+	})
+	assert.NoError(t, err)
+
+	input := schema.AssistantMessage("", []schema.ToolCall{
+		{ID: "call-1", Function: schema.FunctionCall{Name: "tool1", Arguments: `{"input":"a"}`}},
+		{ID: "call-2", Function: schema.FunctionCall{Name: "tool2", Arguments: `{"input":"b"}`}},
+	})
+
+	output, err := tn.Invoke(ctx, input)
+	assert.NoError(t, err)
+	assert.Len(t, output, 2)
+	assert.Equal(t, "result1", output[0].Content)
+	assert.Equal(t, "result2", output[1].Content)
+}
+
+func TestToolsNode_SequentialStream(t *testing.T) {
+	ctx := context.Background()
+
+	tl1 := &mockInvokableTool{
+		info: &schema.ToolInfo{
+			Name: "tool1",
+			Desc: "test1",
+			ParamsOneOf: schema.NewParamsOneOfByParams(map[string]*schema.ParameterInfo{
+				"input": {Type: "string", Desc: "input"},
+			}),
+		},
+		result: "result1",
+	}
+	tl2 := &mockInvokableTool{
+		info: &schema.ToolInfo{
+			Name: "tool2",
+			Desc: "test2",
+			ParamsOneOf: schema.NewParamsOneOfByParams(map[string]*schema.ParameterInfo{
+				"input": {Type: "string", Desc: "input"},
+			}),
+		},
+		result: "result2",
+	}
+
+	tn, err := NewToolNode(ctx, &ToolsNodeConfig{
+		Tools:               []tool.BaseTool{tl1, tl2},
+		ExecuteSequentially: true,
+	})
+	assert.NoError(t, err)
+
+	input := schema.AssistantMessage("", []schema.ToolCall{
+		{ID: "call-1", Function: schema.FunctionCall{Name: "tool1", Arguments: `{"input":"a"}`}},
+		{ID: "call-2", Function: schema.FunctionCall{Name: "tool2", Arguments: `{"input":"b"}`}},
+	})
+
+	sr, err := tn.Stream(ctx, input)
+	assert.NoError(t, err)
+
+	results := make(map[string]string)
+	for {
+		chunk, recvErr := sr.Recv()
+		if recvErr == io.EOF {
+			break
+		}
+		assert.NoError(t, recvErr)
+		for _, m := range chunk {
+			if m != nil && m.Content != "" {
+				results[m.ToolCallID] = m.Content
+			}
+		}
+	}
+	assert.Equal(t, "result1", results["call-1"])
+	assert.Equal(t, "result2", results["call-2"])
+}
+
+func TestToolsNode_MixedPreExecutedAndFresh(t *testing.T) {
+	ctx := context.Background()
+
+	tl1 := &mockInvokableTool{
+		info: &schema.ToolInfo{
+			Name: "tool1",
+			Desc: "test1",
+			ParamsOneOf: schema.NewParamsOneOfByParams(map[string]*schema.ParameterInfo{
+				"input": {Type: "string", Desc: "input"},
+			}),
+		},
+		result: "fresh-result",
+	}
+
+	tn, err := NewToolNode(ctx, &ToolsNodeConfig{
+		Tools: []tool.BaseTool{tl1},
+	})
+	assert.NoError(t, err)
+
+	InternalSetToolExecutionProvider(tn, func(ctx context.Context, input *schema.Message) (map[string]*schema.StreamReader[string], map[string]*schema.StreamReader[*schema.ToolResult], error) {
+		return map[string]*schema.StreamReader[string]{
+			"call-1": schema.StreamReaderFromArray([]string{"pre-executed"}),
+		}, nil, nil
+	})
+
+	input := schema.AssistantMessage("", []schema.ToolCall{
+		{ID: "call-1", Function: schema.FunctionCall{Name: "tool1", Arguments: `{"input":"a"}`}},
+		{ID: "call-2", Function: schema.FunctionCall{Name: "tool1", Arguments: `{"input":"b"}`}},
+	})
+
+	output, err := tn.Invoke(ctx, input)
+	assert.NoError(t, err)
+	assert.Len(t, output, 2)
+	assert.Equal(t, "pre-executed", output[0].Content)
+	assert.Equal(t, "fresh-result", output[1].Content)
+}
+
+func TestToolsNode_SequentialWithPreExecuted(t *testing.T) {
+	ctx := context.Background()
+
+	tl1 := &mockInvokableTool{
+		info: &schema.ToolInfo{
+			Name: "tool1",
+			Desc: "test1",
+			ParamsOneOf: schema.NewParamsOneOfByParams(map[string]*schema.ParameterInfo{
+				"input": {Type: "string", Desc: "input"},
+			}),
+		},
+		result: "fresh",
+	}
+
+	tn, err := NewToolNode(ctx, &ToolsNodeConfig{
+		Tools:               []tool.BaseTool{tl1},
+		ExecuteSequentially: true,
+	})
+	assert.NoError(t, err)
+
+	InternalSetToolExecutionProvider(tn, func(ctx context.Context, input *schema.Message) (map[string]*schema.StreamReader[string], map[string]*schema.StreamReader[*schema.ToolResult], error) {
+		return map[string]*schema.StreamReader[string]{
+			"call-1": schema.StreamReaderFromArray([]string{"pre-exec"}),
+		}, nil, nil
+	})
+
+	input := schema.AssistantMessage("", []schema.ToolCall{
+		{ID: "call-1", Function: schema.FunctionCall{Name: "tool1", Arguments: `{"input":"a"}`}},
+		{ID: "call-2", Function: schema.FunctionCall{Name: "tool1", Arguments: `{"input":"b"}`}},
+	})
+
+	output, err := tn.Invoke(ctx, input)
+	assert.NoError(t, err)
+	assert.Len(t, output, 2)
+	assert.Equal(t, "pre-exec", output[0].Content)
+	assert.Equal(t, "fresh", output[1].Content)
 }
