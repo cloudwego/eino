@@ -67,6 +67,16 @@ type CancelHandle struct {
 	wait func() error
 }
 
+// Wait blocks until the cancel request reaches a terminal outcome.
+//
+// It reports the result of the cancel operation itself, not the agent's final
+// business error:
+//   - nil: cancellation succeeded, including the case where a business interrupt
+//     was absorbed into CancelError while cancellation was active
+//   - ErrCancelTimeout: the requested safe-point cancellation timed out and was
+//     escalated to immediate cancellation
+//   - ErrExecutionCompleted: the execution finished before cancellation took effect,
+//     meaning the stream drained to completion without any interrupt
 func (h *CancelHandle) Wait() error {
 	return h.wait()
 }
