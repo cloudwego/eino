@@ -79,7 +79,10 @@ func (e *RetryExhaustedError) Unwrap() error {
 type WillRetryError struct {
 	ErrStr       string
 	RetryAttempt int
-	err          error
+	// OutputMessage is the model's output message from the attempt that triggered the retry, if any.
+	// May be nil if the model returned an error without producing a message.
+	OutputMessage *schema.Message
+	err           error
 }
 
 func (e *WillRetryError) Error() string {
@@ -94,6 +97,85 @@ func init() {
 	schema.RegisterName[*WillRetryError]("eino_adk_chatmodel_will_retry_error")
 }
 
+// RetryContext contains context information passed to ModelRetryConfig.ShouldRetry
+// during a retry decision.
+type RetryContext struct {
+	// RetryAttempt is the current retry attempt number (1-based).
+	// For the first retry decision (after the initial call), this is 1.
+	RetryAttempt int
+
+	// InputMessages is the input messages that were sent to the model for the current attempt.
+	InputMessages []*schema.Message
+
+	// Options is the model options that were used for the current attempt.
+	Options []model.Option
+
+	// OutputMessage is the output message from the model, if any.
+	// This is non-nil when the model returned a message successfully.
+	// For streaming, this is the fully concatenated message.
+	// May be nil if the model returned an error without producing a message.
+	OutputMessage *schema.Message
+
+	// Err is the error from the model call, if any.
+	// May be nil if the model produced a message without error.
+	Err error
+}
+
+// RetryDecision represents the decision made by ModelRetryConfig.ShouldRetry.
+type RetryDecision struct {
+	// ShouldRetry indicates whether the model call should be retried.
+	// If false, the model output (or error) is accepted as-is, unless RewriteError is set.
+	ShouldRetry bool
+
+	// RewriteError, when non-nil, overrides the return value of the model call with this error.
+	// The agent run will fail with this error.
+	//
+	// This is useful for two scenarios:
+	//   - When the model returns a "seemingly correct" message (no error) that actually
+	//     contains unrecoverable issues. RewriteError converts the successful output
+	//     into a fatal error.
+	//   - When the model returns an error, but you want to replace it with a different,
+	//     more descriptive error (e.g., adding context or wrapping).
+	//
+	// When ShouldRetry is true, RewriteError is ignored.
+	// When ShouldRetry is false and RewriteError is non-nil, the model call returns
+	// RewriteError regardless of whether the original call had an error or a message.
+	RewriteError error
+
+	// ModifiedInputMessages, when non-nil, replaces the input messages for the next retry.
+	//
+	// This enables advanced recovery strategies like context compression or message trimming.
+	// Only used when ShouldRetry is true. Ignored when ShouldRetry is false.
+	ModifiedInputMessages []*schema.Message
+
+	// PersistModifiedInputMessages controls whether ModifiedInputMessages are written
+	// back to the agent's State, affecting subsequent model calls in the agent loop
+	// (not just the next retry attempt).
+	//
+	// When true, the modified messages are persisted to State via compose.ProcessState.
+	// When false (default), the modified messages are only used for the next retry attempt
+	// within this retry cycle.
+	//
+	// Only used when ShouldRetry is true and ModifiedInputMessages is non-nil.
+	PersistModifiedInputMessages bool
+
+	// ModifiedOptions, when non-nil, provides additional model options for the next retry.
+	// These options are appended to the existing options, taking precedence.
+	//
+	// This enables adjustments like increasing MaxTokens for the retry attempt.
+	// Only used when ShouldRetry is true. Ignored when ShouldRetry is false.
+	ModifiedOptions []model.Option
+
+	// Backoff specifies the duration to wait before the next retry attempt.
+	// If zero, the default backoff function (from ModelRetryConfig.BackoffFunc or the
+	// built-in exponential backoff) is used.
+	//
+	// This allows the ShouldRetry callback to dynamically control retry timing based on
+	// the specific error or problematic message encountered.
+	// Only used when ShouldRetry is true. Ignored when ShouldRetry is false.
+	Backoff time.Duration
+}
+
 // ModelRetryConfig configures retry behavior for the ChatModel node.
 // It defines how the agent should handle transient failures when calling the ChatModel.
 type ModelRetryConfig struct {
@@ -102,14 +184,23 @@ type ModelRetryConfig struct {
 	// A value of 3 means up to 3 retry attempts (4 total calls including the initial attempt).
 	MaxRetries int
 
-	// IsRetryAble is a function that determines whether an error should trigger a retry.
-	// If nil, all errors are considered retry-able.
-	// Return true if the error is transient and the operation should be retried.
-	// Return false if the error is permanent and should be propagated immediately.
+	// ShouldRetry determines how to handle a model call result.
+	// It receives context information about the current attempt including the output message
+	// and/or error, and returns a decision on whether to retry, what to modify, etc.
+	//
+	// If nil, defaults to retrying on any non-nil error (backward compatible with IsRetryAble).
+	//
+	// Note: When ShouldRetry is set, IsRetryAble is ignored.
+	ShouldRetry func(ctx context.Context, retryCtx *RetryContext) *RetryDecision
+
+	// Deprecated: Use ShouldRetry instead for richer retry control including message
+	// inspection, input modification, and option adjustment. When ShouldRetry is set,
+	// IsRetryAble is ignored.
 	IsRetryAble func(ctx context.Context, err error) bool
 
 	// BackoffFunc calculates the delay before the next retry attempt.
 	// The attempt parameter starts at 1 for the first retry.
+	// Used as the default when RetryDecision.Backoff is zero.
 	// If nil, a default exponential backoff with jitter is used:
 	// base delay 100ms, exponentially increasing up to 10s max,
 	// with random jitter (0-50% of delay) to prevent thundering herd.
@@ -180,6 +271,13 @@ func newRetryModelWrapper(inner model.BaseChatModel, config *ModelRetryConfig) *
 }
 
 func (r *retryModelWrapper) Generate(ctx context.Context, input []*schema.Message, opts ...model.Option) (*schema.Message, error) {
+	if r.config.ShouldRetry != nil {
+		return r.generateWithShouldRetry(ctx, input, opts...)
+	}
+	return r.generateLegacy(ctx, input, opts...)
+}
+
+func (r *retryModelWrapper) generateLegacy(ctx context.Context, input []*schema.Message, opts ...model.Option) (*schema.Message, error) {
 	isRetryAble := r.config.IsRetryAble
 	if isRetryAble == nil {
 		isRetryAble = defaultIsRetryAble
@@ -215,7 +313,241 @@ func (r *retryModelWrapper) Generate(ctx context.Context, input []*schema.Messag
 	return nil, &RetryExhaustedError{LastErr: lastErr, TotalRetries: r.config.MaxRetries}
 }
 
+func (r *retryModelWrapper) generateWithShouldRetry(ctx context.Context, input []*schema.Message, opts ...model.Option) (*schema.Message, error) {
+	backoffFunc := r.config.BackoffFunc
+	if backoffFunc == nil {
+		backoffFunc = defaultBackoff
+	}
+
+	currentInput := input
+	currentOpts := opts
+	var lastErr error
+
+	for attempt := 0; attempt <= r.config.MaxRetries; attempt++ {
+		out, err := r.inner.Generate(ctx, currentInput, currentOpts...)
+
+		if err != nil {
+			if _, ok := compose.ExtractInterruptInfo(err); ok {
+				return nil, err
+			}
+		}
+
+		retryCtx := &RetryContext{
+			RetryAttempt:  attempt + 1,
+			InputMessages: currentInput,
+			Options:       currentOpts,
+			OutputMessage: out,
+			Err:           err,
+		}
+		decision := r.config.ShouldRetry(ctx, retryCtx)
+
+		if !decision.ShouldRetry {
+			if decision.RewriteError != nil {
+				return nil, decision.RewriteError
+			}
+			if err != nil {
+				return nil, err
+			}
+			return out, nil
+		}
+
+		lastErr = err
+		if lastErr == nil {
+			lastErr = fmt.Errorf("model output rejected by ShouldRetry at attempt %d", attempt+1)
+		}
+
+		if attempt >= r.config.MaxRetries {
+			break
+		}
+
+		if decision.ModifiedInputMessages != nil {
+			currentInput = decision.ModifiedInputMessages
+			if decision.PersistModifiedInputMessages {
+				modifiedInput := currentInput
+				_ = compose.ProcessState(ctx, func(_ context.Context, st *State) error {
+					st.Messages = modifiedInput
+					return nil
+				})
+			}
+		}
+
+		if decision.ModifiedOptions != nil {
+			cloned := make([]model.Option, len(currentOpts), len(currentOpts)+len(decision.ModifiedOptions))
+			copy(cloned, currentOpts)
+			currentOpts = append(cloned, decision.ModifiedOptions...)
+		}
+
+		delay := decision.Backoff
+		if delay == 0 {
+			delay = backoffFunc(ctx, attempt+1)
+		}
+
+		log.Printf("retrying ChatModel.Generate (attempt %d/%d): %v", attempt+1, r.config.MaxRetries, lastErr)
+		time.Sleep(delay)
+	}
+
+	return nil, &RetryExhaustedError{LastErr: lastErr, TotalRetries: r.config.MaxRetries}
+}
+
+func consumeStreamForMessage(stream *schema.StreamReader[*schema.Message]) (*schema.Message, error) {
+	defer stream.Close()
+	var chunks []*schema.Message
+	for {
+		chunk, err := stream.Recv()
+		if err == io.EOF {
+			if len(chunks) == 0 {
+				return nil, nil
+			}
+			msg, concatErr := schema.ConcatMessages(chunks)
+			return msg, concatErr
+		}
+		if err != nil {
+			if len(chunks) == 0 {
+				return nil, err
+			}
+			msg, _ := schema.ConcatMessages(chunks)
+			return msg, err
+		}
+		chunks = append(chunks, chunk)
+	}
+}
+
+func (r *retryModelWrapper) streamWithShouldRetry(ctx context.Context, input []*schema.Message, opts ...model.Option) (
+	*schema.StreamReader[*schema.Message], error) {
+
+	backoffFunc := r.config.BackoffFunc
+	if backoffFunc == nil {
+		backoffFunc = defaultBackoff
+	}
+
+	defer func() {
+		_ = compose.ProcessState(ctx, func(_ context.Context, st *State) error {
+			st.setRetryAttempt(0)
+			return nil
+		})
+	}()
+
+	currentInput := input
+	currentOpts := opts
+	var lastErr error
+
+	for attempt := 0; attempt <= r.config.MaxRetries; attempt++ {
+		_ = compose.ProcessState(ctx, func(_ context.Context, st *State) error {
+			st.setRetryAttempt(attempt)
+			return nil
+		})
+
+		stream, err := r.inner.Stream(ctx, currentInput, currentOpts...)
+		if err != nil {
+			if _, ok := compose.ExtractInterruptInfo(err); ok {
+				return nil, err
+			}
+
+			retryCtx := &RetryContext{
+				RetryAttempt:  attempt + 1,
+				InputMessages: currentInput,
+				Options:       currentOpts,
+				Err:           err,
+			}
+			decision := r.config.ShouldRetry(ctx, retryCtx)
+
+			if !decision.ShouldRetry {
+				if decision.RewriteError != nil {
+					return nil, decision.RewriteError
+				}
+				return nil, err
+			}
+
+			lastErr = err
+			if attempt < r.config.MaxRetries {
+				r.applyDecisionForRetry(&currentInput, &currentOpts, ctx, decision)
+				delay := decision.Backoff
+				if delay == 0 {
+					delay = backoffFunc(ctx, attempt+1)
+				}
+				log.Printf("retrying ChatModel.Stream (attempt %d/%d): %v", attempt+1, r.config.MaxRetries, err)
+				time.Sleep(delay)
+			}
+			continue
+		}
+
+		copies := stream.Copy(2)
+		checkCopy := copies[0]
+		returnCopy := copies[1]
+
+		msg, streamErr := consumeStreamForMessage(checkCopy)
+
+		retryCtx := &RetryContext{
+			RetryAttempt:  attempt + 1,
+			InputMessages: currentInput,
+			Options:       currentOpts,
+			OutputMessage: msg,
+			Err:           streamErr,
+		}
+		decision := r.config.ShouldRetry(ctx, retryCtx)
+
+		if !decision.ShouldRetry {
+			if decision.RewriteError != nil {
+				returnCopy.Close()
+				return nil, decision.RewriteError
+			}
+			if streamErr != nil {
+				returnCopy.Close()
+				return nil, streamErr
+			}
+			return returnCopy, nil
+		}
+
+		returnCopy.Close()
+
+		lastErr = streamErr
+		if lastErr == nil {
+			lastErr = fmt.Errorf("model output rejected by ShouldRetry at attempt %d", attempt+1)
+		}
+
+		if attempt < r.config.MaxRetries {
+			r.applyDecisionForRetry(&currentInput, &currentOpts, ctx, decision)
+			delay := decision.Backoff
+			if delay == 0 {
+				delay = backoffFunc(ctx, attempt+1)
+			}
+			log.Printf("retrying ChatModel.Stream (attempt %d/%d): %v", attempt+1, r.config.MaxRetries, lastErr)
+			time.Sleep(delay)
+		}
+	}
+
+	return nil, &RetryExhaustedError{LastErr: lastErr, TotalRetries: r.config.MaxRetries}
+}
+
+func (r *retryModelWrapper) applyDecisionForRetry(currentInput *[]*schema.Message, currentOpts *[]model.Option, ctx context.Context, decision *RetryDecision) {
+	if decision.ModifiedInputMessages != nil {
+		*currentInput = decision.ModifiedInputMessages
+		if decision.PersistModifiedInputMessages {
+			modifiedInput := *currentInput
+			_ = compose.ProcessState(ctx, func(_ context.Context, st *State) error {
+				st.Messages = modifiedInput
+				return nil
+			})
+		}
+	}
+
+	if decision.ModifiedOptions != nil {
+		cloned := make([]model.Option, len(*currentOpts), len(*currentOpts)+len(decision.ModifiedOptions))
+		copy(cloned, *currentOpts)
+		*currentOpts = append(cloned, decision.ModifiedOptions...)
+	}
+}
+
 func (r *retryModelWrapper) Stream(ctx context.Context, input []*schema.Message, opts ...model.Option) (
+	*schema.StreamReader[*schema.Message], error) {
+
+	if r.config.ShouldRetry != nil {
+		return r.streamWithShouldRetry(ctx, input, opts...)
+	}
+	return r.streamLegacy(ctx, input, opts...)
+}
+
+func (r *retryModelWrapper) streamLegacy(ctx context.Context, input []*schema.Message, opts ...model.Option) (
 	*schema.StreamReader[*schema.Message], error) {
 
 	isRetryAble := r.config.IsRetryAble

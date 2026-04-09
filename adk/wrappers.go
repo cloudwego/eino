@@ -346,7 +346,16 @@ func (m *eventSenderModel) buildErrWrapper(ctx context.Context) func(error) erro
 
 	var retryWrapper func(error) error
 	if m.modelRetryConfig != nil {
-		retryWrapper = genErrWrapper(ctx, m.modelRetryConfig.MaxRetries, retryAttempt, m.modelRetryConfig.IsRetryAble)
+		if m.modelRetryConfig.ShouldRetry != nil {
+			hasRetriesLeft := retryAttempt < m.modelRetryConfig.MaxRetries
+			if hasRetriesLeft {
+				retryWrapper = func(err error) error {
+					return &WillRetryError{ErrStr: err.Error(), RetryAttempt: retryAttempt, err: err}
+				}
+			}
+		} else {
+			retryWrapper = genErrWrapper(ctx, m.modelRetryConfig.MaxRetries, retryAttempt, m.modelRetryConfig.IsRetryAble)
+		}
 	}
 
 	hasFailover := m.modelFailoverConfig != nil
@@ -753,6 +762,14 @@ func (w *stateModelWrapper) Generate(ctx context.Context, input []*schema.Messag
 	if err != nil {
 		return nil, err
 	}
+
+	if w.modelRetryConfig != nil && w.modelRetryConfig.ShouldRetry != nil {
+		_ = compose.ProcessState(ctx, func(_ context.Context, st *State) error {
+			state.Messages = st.Messages
+			return nil
+		})
+	}
+
 	state.Messages = append(state.Messages, result)
 
 	for _, handler := range w.handlers {
@@ -823,6 +840,14 @@ func (w *stateModelWrapper) Stream(ctx context.Context, input []*schema.Message,
 	if err != nil {
 		return nil, err
 	}
+
+	if w.modelRetryConfig != nil && w.modelRetryConfig.ShouldRetry != nil {
+		_ = compose.ProcessState(ctx, func(_ context.Context, st *State) error {
+			state.Messages = st.Messages
+			return nil
+		})
+	}
+
 	state.Messages = append(state.Messages, result)
 
 	for _, handler := range w.handlers {
