@@ -41,6 +41,7 @@ const (
 	ContentBlockTypeUserInputAudio          ContentBlockType = "user_input_audio"
 	ContentBlockTypeUserInputVideo          ContentBlockType = "user_input_video"
 	ContentBlockTypeUserInputFile           ContentBlockType = "user_input_file"
+	ContentBlockTypeToolSearchResult        ContentBlockType = "tool_search_result"
 	ContentBlockTypeAssistantGenText        ContentBlockType = "assistant_gen_text"
 	ContentBlockTypeAssistantGenImage       ContentBlockType = "assistant_gen_image"
 	ContentBlockTypeAssistantGenAudio       ContentBlockType = "assistant_gen_audio"
@@ -133,6 +134,11 @@ type ContentBlock struct {
 
 	// FunctionToolResult contains the result returned from a user-defined tool call.
 	FunctionToolResult *FunctionToolResult `json:"function_tool_result,omitempty"`
+
+	// ToolSearchFunctionToolResult contains the result of a client-side custom tool search tool call.
+	// It carries the full definitions of newly discovered tools so that the model can
+	// recognize which tools have been added and are now available for invocation.
+	ToolSearchFunctionToolResult *ToolSearchFunctionToolResult `json:"tool_search_function_tool_result,omitempty"`
 
 	// ServerToolCall contains the invocation details for a provider built-in tool executed on the model server.
 	ServerToolCall *ServerToolCall `json:"server_tool_call,omitempty"`
@@ -300,6 +306,28 @@ type FunctionToolResult struct {
 	Result string `json:"result,omitempty"`
 }
 
+// ToolSearchFunctionToolResult represents the result of a client-side custom tool search
+// function tool call. Unlike a regular FunctionToolResult, this carries a ToolSearchResult
+// containing the full definitions of newly discovered tools, so the model can recognize
+// which tools have been added and are now available for invocation.
+type ToolSearchFunctionToolResult struct {
+	// CallID is the unique identifier for the tool call.
+	CallID string `json:"call_id,omitempty"`
+
+	// Name specifies the function tool invoked.
+	Name string `json:"name"`
+
+	// Result is the function tool result returned by the user
+	Result *ToolSearchResult `json:"result,omitempty"`
+}
+
+func (t *ToolSearchFunctionToolResult) String() string {
+	if t.Result != nil {
+		return t.Result.String()
+	}
+	return ""
+}
+
 type ServerToolCall struct {
 	// Name specifies the server-side tool invoked.
 	// Supplied by the model server (e.g., `web_search` for OpenAI, `googleSearch` for Gemini).
@@ -461,7 +489,7 @@ type assistantGenVariant interface {
 }
 
 type functionToolCallVariant interface {
-	FunctionToolCall | FunctionToolResult
+	FunctionToolCall | FunctionToolResult | ToolSearchFunctionToolResult
 }
 
 type serverToolCallVariant interface {
@@ -487,6 +515,8 @@ func NewContentBlock[T contentBlockVariant](content *T) *ContentBlock {
 		return &ContentBlock{Type: ContentBlockTypeUserInputVideo, UserInputVideo: b}
 	case *UserInputFile:
 		return &ContentBlock{Type: ContentBlockTypeUserInputFile, UserInputFile: b}
+	case *ToolSearchFunctionToolResult:
+		return &ContentBlock{Type: ContentBlockTypeToolSearchResult, ToolSearchFunctionToolResult: b}
 	case *AssistantGenText:
 		return &ContentBlock{Type: ContentBlockTypeAssistantGenText, AssistantGenText: b}
 	case *AssistantGenImage:
@@ -1028,6 +1058,11 @@ func concatChunksOfSameContentBlock(blocks []*ContentBlock) (*ContentBlock, erro
 			func(b *ContentBlock) *UserInputFile { return b.UserInputFile },
 			concatUserInputFiles)
 
+	case ContentBlockTypeToolSearchResult:
+		return concatContentBlockHelper(blocks, blockType,
+			func(b *ContentBlock) *ToolSearchFunctionToolResult { return b.ToolSearchFunctionToolResult },
+			concatToolSearchFunctionToolResult)
+
 	case ContentBlockTypeAssistantGenText:
 		return concatContentBlockHelper(blocks, blockType,
 			func(b *ContentBlock) *AssistantGenText { return b.AssistantGenText },
@@ -1225,6 +1260,16 @@ func concatUserInputFiles(files []*UserInputFile) (*UserInputFile, error) {
 		return files[0], nil
 	}
 	return nil, fmt.Errorf("cannot concat multiple user input files")
+}
+
+func concatToolSearchFunctionToolResult(results []*ToolSearchFunctionToolResult) (*ToolSearchFunctionToolResult, error) {
+	if len(results) == 0 {
+		return nil, fmt.Errorf("no tool search results found")
+	}
+	if len(results) == 1 {
+		return results[0], nil
+	}
+	return nil, fmt.Errorf("cannot concat multiple tool search results")
 }
 
 func concatAssistantGenTexts(texts []*AssistantGenText) (ret *AssistantGenText, err error) {
@@ -1772,6 +1817,7 @@ func (m *AgenticMessage) String() string {
 }
 
 // String returns the string representation of ContentBlock.
+// nolint
 func (b *ContentBlock) String() string {
 	sb := &strings.Builder{}
 	sb.WriteString(fmt.Sprintf("type: %s\n", b.Type))
@@ -1800,6 +1846,10 @@ func (b *ContentBlock) String() string {
 	case ContentBlockTypeUserInputFile:
 		if b.UserInputFile != nil {
 			sb.WriteString(b.UserInputFile.String())
+		}
+	case ContentBlockTypeToolSearchResult:
+		if b.ToolSearchFunctionToolResult != nil {
+			sb.WriteString(b.ToolSearchFunctionToolResult.String())
 		}
 	case ContentBlockTypeAssistantGenText:
 		if b.AssistantGenText != nil {
