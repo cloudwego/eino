@@ -787,7 +787,7 @@ type turnLoopPendingResume[T any] struct {
 	resumeBytes []byte
 }
 
-// SafePoint describes where a preemption or graceful stop may pause the agent.
+// SafePoint describes where a preemption may pause the agent.
 // Values can be combined with bitwise OR to accept multiple safe points.
 type SafePoint int
 
