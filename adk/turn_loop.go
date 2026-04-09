@@ -369,6 +369,16 @@ type TurnLoopConfig[T any] struct {
 	//   - tc.Consumed: items that triggered this agent execution
 	//   - tc.Loop: allows calling Push() or Stop() directly from within the callback
 	//   - tc.Preempted / tc.Stopped: signals while processing events
+	//
+	// Error handling: the returned error is only used when the callback itself
+	// wants to abort the TurnLoop. The TurnLoop already captures CancelError
+	// from the event stream when the turn is stopped or preempted, so the
+	// callback should NOT propagate CancelError. In practice, return a non-nil
+	// error only for callback-internal failures that should terminate the loop;
+	// return nil when the current agent is canceled by an external Stop or
+	// Preempt (Preempt cancels the current agent but the loop continues with
+	// the next turn).
+	//
 	// Optional. If not provided, events are drained and errors (except CancelError
 	// from Stop-triggered cancellation) are returned as ExitReason.
 	OnAgentEvents func(ctx context.Context, tc *TurnContext[T], events *AsyncIterator[*AgentEvent]) error
