@@ -34,28 +34,35 @@ type generateEndpoint func(ctx context.Context, input []*schema.Message, opts ..
 type streamEndpoint func(ctx context.Context, input []*schema.Message, opts ...model.Option) (*schema.StreamReader[*schema.Message], error)
 
 type modelWrapperConfig struct {
-	handlers      []ChatModelAgentMiddleware
-	middlewares   []AgentMiddleware
-	retryConfig   *ModelRetryConfig
-	toolInfos     []*schema.ToolInfo
-	cancelContext *cancelContext
+	handlers       []ChatModelAgentMiddleware
+	middlewares    []AgentMiddleware
+	retryConfig    *ModelRetryConfig
+	failoverConfig *ModelFailoverConfig
+	toolInfos      []*schema.ToolInfo
+	cancelContext  *cancelContext
 }
 
 func buildModelWrappers(m model.BaseChatModel, config *modelWrapperConfig) model.BaseChatModel {
 	var wrapped model.BaseChatModel = m
 
-	if !components.IsCallbacksEnabled(m) {
+	// failoverProxyModel must be the innermost wrapper to read the selected failover model from context.
+	if config.failoverConfig != nil {
+		wrapped = &failoverProxyModel{}
+	}
+
+	if !components.IsCallbacksEnabled(wrapped) {
 		wrapped = (&callbackInjectionModelWrapper{}).WrapModel(wrapped)
 	}
 
 	wrapped = &stateModelWrapper{
-		inner:            wrapped,
-		original:         m,
-		handlers:         config.handlers,
-		middlewares:      config.middlewares,
-		toolInfos:        config.toolInfos,
-		modelRetryConfig: config.retryConfig,
-		cancelContext:    config.cancelContext,
+		inner:               wrapped,
+		original:            m,
+		handlers:            config.handlers,
+		middlewares:         config.middlewares,
+		toolInfos:           config.toolInfos,
+		modelRetryConfig:    config.retryConfig,
+		modelFailoverConfig: config.failoverConfig,
+		cancelContext:       config.cancelContext,
 	}
 
 	return wrapped
@@ -265,12 +272,17 @@ func (w *eventSenderModelWrapper) WrapModel(_ context.Context, m model.BaseChatM
 	if mc != nil {
 		retryConfig = mc.ModelRetryConfig
 	}
-	return &eventSenderModel{inner: inner, modelRetryConfig: retryConfig}, nil
+	var failoverConfig *ModelFailoverConfig
+	if mc != nil {
+		failoverConfig = mc.ModelFailoverConfig
+	}
+	return &eventSenderModel{inner: inner, modelRetryConfig: retryConfig, modelFailoverConfig: failoverConfig}, nil
 }
 
 type eventSenderModel struct {
-	inner            model.BaseChatModel
-	modelRetryConfig *ModelRetryConfig
+	inner               model.BaseChatModel
+	modelRetryConfig    *ModelRetryConfig
+	modelFailoverConfig *ModelFailoverConfig
 }
 
 func (m *eventSenderModel) Generate(ctx context.Context, input []*schema.Message, opts ...model.Option) (*schema.Message, error) {
@@ -303,19 +315,12 @@ func (m *eventSenderModel) Stream(ctx context.Context, input []*schema.Message, 
 		return nil, errors.New("generator is nil when sending event in Stream: ensure agent state is properly initialized")
 	}
 
-	var retryAttempt int
-	_ = compose.ProcessState(ctx, func(_ context.Context, st *State) error {
-		retryAttempt = st.getRetryAttempt()
-		return nil
-	})
-
 	streams := result.Copy(2)
 
 	eventStream := streams[0]
-	if m.modelRetryConfig != nil {
+	if errWrapper := m.buildErrWrapper(ctx); errWrapper != nil {
 		convertOpts := []schema.ConvertOption{
-			schema.WithErrWrapper(genErrWrapper(ctx, m.modelRetryConfig.MaxRetries,
-				retryAttempt, m.modelRetryConfig.IsRetryAble)),
+			schema.WithErrWrapper(errWrapper),
 		}
 		eventStream = schema.StreamReaderWithConvert(streams[0],
 			func(msg *schema.Message) (*schema.Message, error) { return msg, nil },
@@ -326,6 +331,51 @@ func (m *eventSenderModel) Stream(ctx context.Context, input []*schema.Message, 
 	execCtx.send(event)
 
 	return streams[1], nil
+}
+
+// buildErrWrapper constructs an error wrapper function for event streams.
+// It wraps stream errors as WillRetryError when retry or failover is configured,
+// so that flow.go:genAgentInput() can skip events from failed attempts instead of
+// treating them as fatal errors.
+func (m *eventSenderModel) buildErrWrapper(ctx context.Context) func(error) error {
+	var retryAttempt int
+	_ = compose.ProcessState(ctx, func(_ context.Context, st *State) error {
+		retryAttempt = st.getRetryAttempt()
+		return nil
+	})
+
+	var retryWrapper func(error) error
+	if m.modelRetryConfig != nil {
+		retryWrapper = genErrWrapper(ctx, m.modelRetryConfig.MaxRetries, retryAttempt, m.modelRetryConfig.IsRetryAble)
+	}
+
+	hasFailover := m.modelFailoverConfig != nil
+	// failoverHasMoreAttempts is set by failoverModelWrapper before each inner call.
+	// It is true when additional failover attempts remain after the current one,
+	// meaning stream errors should be wrapped as WillRetryError so the flow layer
+	// skips them. On the final attempt it is false, so the error propagates normally.
+	failoverHasMore := getFailoverHasMoreAttempts(ctx)
+
+	if retryWrapper == nil && !(hasFailover && failoverHasMore) {
+		return nil
+	}
+
+	return func(err error) error {
+		// If retry is configured and will retry this error, use the retry wrapper's WillRetryError.
+		if retryWrapper != nil {
+			wrapped := retryWrapper(err)
+			if _, ok := wrapped.(*WillRetryError); ok {
+				return wrapped
+			}
+		}
+		// Retry won't handle this error (either exhausted or not configured), but
+		// failover still has more attempts remaining. Wrap it as WillRetryError so
+		// the flow layer skips this event from the failed attempt.
+		if hasFailover && failoverHasMore {
+			return &WillRetryError{ErrStr: err.Error(), err: err}
+		}
+		return err
+	}
 }
 
 func popToolGenAction(ctx context.Context, toolName string) *AgentAction {
@@ -515,13 +565,14 @@ func hasUserEventSenderToolWrapper(handlers []ChatModelAgentMiddleware) bool {
 }
 
 type stateModelWrapper struct {
-	inner            model.BaseChatModel
-	original         model.BaseChatModel
-	handlers         []ChatModelAgentMiddleware
-	middlewares      []AgentMiddleware
-	toolInfos        []*schema.ToolInfo
-	modelRetryConfig *ModelRetryConfig
-	cancelContext    *cancelContext
+	inner               model.BaseChatModel
+	original            model.BaseChatModel
+	handlers            []ChatModelAgentMiddleware
+	middlewares         []AgentMiddleware
+	toolInfos           []*schema.ToolInfo
+	modelRetryConfig    *ModelRetryConfig
+	modelFailoverConfig *ModelFailoverConfig
+	cancelContext       *cancelContext
 }
 
 func (w *stateModelWrapper) IsCallbacksEnabled() bool {
@@ -547,6 +598,7 @@ func (w *stateModelWrapper) hasUserEventSender() bool {
 func (w *stateModelWrapper) wrapGenerateEndpoint(endpoint generateEndpoint) generateEndpoint {
 	hasUserEventSender := w.hasUserEventSender()
 	retryConfig := w.modelRetryConfig
+	failoverConfig := w.modelFailoverConfig
 	cc := w.cancelContext
 
 	for i := len(w.handlers) - 1; i >= 0; i-- {
@@ -573,7 +625,7 @@ func (w *stateModelWrapper) wrapGenerateEndpoint(endpoint generateEndpoint) gene
 			if execCtx == nil || execCtx.generator == nil {
 				return innerEndpoint(ctx, input, opts...)
 			}
-			mc := &ModelContext{ModelRetryConfig: retryConfig, cancelContext: cc}
+			mc := &ModelContext{ModelRetryConfig: retryConfig, ModelFailoverConfig: failoverConfig, cancelContext: cc}
 			wrappedModel, err := eventSender.WrapModel(ctx, &endpointModel{generate: innerEndpoint}, mc)
 			if err != nil {
 				return nil, err
@@ -590,12 +642,23 @@ func (w *stateModelWrapper) wrapGenerateEndpoint(endpoint generateEndpoint) gene
 		}
 	}
 
+	// Needs to handle failoverWrapper after retryWrapper
+	if w.modelFailoverConfig != nil {
+		config := w.modelFailoverConfig
+		innerEndpoint := endpoint
+		endpoint = func(ctx context.Context, input []*schema.Message, opts ...model.Option) (*schema.Message, error) {
+			failoverWrapper := newFailoverModelWrapper(&endpointModel{generate: innerEndpoint}, config)
+			return failoverWrapper.Generate(ctx, input, opts...)
+		}
+	}
+
 	return endpoint
 }
 
 func (w *stateModelWrapper) wrapStreamEndpoint(endpoint streamEndpoint) streamEndpoint {
 	hasUserEventSender := w.hasUserEventSender()
 	retryConfig := w.modelRetryConfig
+	failoverConfig := w.modelFailoverConfig
 	cc := w.cancelContext
 
 	for i := len(w.handlers) - 1; i >= 0; i-- {
@@ -622,7 +685,7 @@ func (w *stateModelWrapper) wrapStreamEndpoint(endpoint streamEndpoint) streamEn
 			if execCtx == nil || execCtx.generator == nil {
 				return innerEndpoint(ctx, input, opts...)
 			}
-			mc := &ModelContext{ModelRetryConfig: retryConfig, cancelContext: cc}
+			mc := &ModelContext{ModelRetryConfig: retryConfig, ModelFailoverConfig: failoverConfig, cancelContext: cc}
 			wrappedModel, err := eventSender.WrapModel(ctx, &endpointModel{stream: innerEndpoint}, mc)
 			if err != nil {
 				return nil, err
@@ -636,6 +699,16 @@ func (w *stateModelWrapper) wrapStreamEndpoint(endpoint streamEndpoint) streamEn
 		endpoint = func(ctx context.Context, input []*schema.Message, opts ...model.Option) (*schema.StreamReader[*schema.Message], error) {
 			retryWrapper := newRetryModelWrapper(&endpointModel{stream: innerEndpoint}, w.modelRetryConfig)
 			return retryWrapper.Stream(ctx, input, opts...)
+		}
+	}
+
+	// Needs to handle failoverWrapper after retryWrapper
+	if w.modelFailoverConfig != nil {
+		config := w.modelFailoverConfig
+		innerEndpoint := endpoint
+		endpoint = func(ctx context.Context, input []*schema.Message, opts ...model.Option) (*schema.StreamReader[*schema.Message], error) {
+			failoverWrapper := newFailoverModelWrapper(&endpointModel{stream: innerEndpoint}, config)
+			return failoverWrapper.Stream(ctx, input, opts...)
 		}
 	}
 
