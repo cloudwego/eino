@@ -588,8 +588,8 @@ type TurnContext[T any] struct {
 	Consumed []T
 
 	// Preempted is closed when a preempt signal fires for the current turn
-	// (via Push with WithPreempt) and at least one preemptive Push contributed
-	// to the CancelError for the current turn.
+	// (via Push with WithPreempt/WithPreemptTimeout) and at least one
+	// preemptive Push contributed to the CancelError for the current turn.
 	// "Contributed" means the preempt's cancel options were included in the
 	// CancelError before it was finalized. Remains open if no preempt contributed.
 	// Use in a select to detect preemption while processing events.
@@ -777,6 +777,32 @@ type turnLoopPendingResume[T any] struct {
 	resumeBytes []byte
 }
 
+// SafePoint describes where a preemption or graceful stop may pause the agent.
+// Values can be combined with bitwise OR to accept multiple safe points.
+type SafePoint int
+
+const (
+	// AfterToolCalls allows the agent to finish the current tool-call round
+	// before yielding.
+	AfterToolCalls SafePoint = 1 << iota
+	// AfterChatModelCall allows the agent to finish the current chat-model
+	// call before yielding.
+	AfterChatModelCall
+	// AnySafePoint is shorthand for AfterToolCalls | AfterChatModelCall.
+	AnySafePoint = AfterToolCalls | AfterChatModelCall
+)
+
+func (sp SafePoint) toCancelMode() CancelMode {
+	var mode CancelMode
+	if sp&AfterToolCalls != 0 {
+		mode |= CancelAfterToolCalls
+	}
+	if sp&AfterChatModelCall != 0 {
+		mode |= CancelAfterChatModel
+	}
+	return mode
+}
+
 type stopConfig struct {
 	agentCancelOpts []AgentCancelOption
 	skipCheckpoint  bool
@@ -786,11 +812,35 @@ type stopConfig struct {
 // StopOption is an option for Stop().
 type StopOption func(*stopConfig)
 
-// WithAgentCancel sets the agent cancel options to use when stopping the loop.
-// These options control how the currently running agent is cancelled.
-func WithAgentCancel(opts ...AgentCancelOption) StopOption {
+// WithGraceful requests a graceful stop that waits at the nearest safe point
+// (after tool calls or after a chat-model call) and propagates recursively to
+// nested agents. It does not impose a time limit; use WithGracefulTimeout to
+// add a grace period after which the stop escalates to immediate cancellation.
+//
+// WithGraceful and WithGracefulTimeout are mutually exclusive; if both are
+// passed to the same Stop call, the last one wins.
+func WithGraceful() StopOption {
 	return func(cfg *stopConfig) {
-		cfg.agentCancelOpts = opts
+		cfg.agentCancelOpts = []AgentCancelOption{
+			WithAgentCancelMode(CancelAfterChatModel | CancelAfterToolCalls),
+			WithRecursive(),
+		}
+	}
+}
+
+// WithGracefulTimeout is like WithGraceful but adds a grace period.
+// If the agent has not reached a safe point within gracePeriod, the stop
+// escalates to immediate cancellation.
+//
+// WithGraceful and WithGracefulTimeout are mutually exclusive; if both are
+// passed to the same Stop call, the last one wins.
+func WithGracefulTimeout(gracePeriod time.Duration) StopOption {
+	return func(cfg *stopConfig) {
+		cfg.agentCancelOpts = []AgentCancelOption{
+			WithAgentCancelMode(CancelAfterChatModel | CancelAfterToolCalls),
+			WithRecursive(),
+			WithAgentCancelTimeout(gracePeriod),
+		}
 	}
 }
 
@@ -823,23 +873,55 @@ type pushConfig[T any] struct {
 // PushOption is an option for Push().
 type PushOption[T any] func(*pushConfig[T])
 
-// WithPreempt signals that the current agent should be canceled after pushing.
-// This enables atomic "push + preempt" to avoid race conditions between
-// pushing an urgent item and triggering preemption.
-// The loop will cancel the current agent turn and continue with the next turn,
-// where GenInput will see all buffered items including the newly pushed one.
-func WithPreempt[T any](agentCancelOpts ...AgentCancelOption) PushOption[T] {
+// WithPreempt signals that the current agent should be canceled after pushing,
+// waiting at the specified safePoint before yielding. The loop will cancel the
+// current agent turn and continue with the next turn, where GenInput will see
+// all buffered items including the newly pushed one.
+// Use WithPreemptTimeout to add a timeout that escalates to immediate cancel.
+//
+// Unlike WithGraceful, preemption does not propagate recursively to nested
+// agents; it only affects the root agent's turn. Nested agents are torn down
+// via normal context cancellation as a side effect.
+//
+// WithPreempt and WithPreemptTimeout are mutually exclusive; if both are
+// passed to the same Push call, the last one wins.
+//
+// safePoint must not be zero; passing SafePoint(0) panics.
+func WithPreempt[T any](safePoint SafePoint) PushOption[T] {
+	if safePoint == 0 {
+		panic("adk: SafePoint must not be zero; use AfterToolCalls, AfterChatModelCall, or AnySafePoint")
+	}
 	return func(cfg *pushConfig[T]) {
 		cfg.preempt = true
-		cfg.agentCancelOpts = agentCancelOpts
+		cfg.agentCancelOpts = []AgentCancelOption{
+			WithAgentCancelMode(safePoint.toCancelMode()),
+		}
+	}
+}
+
+// WithPreemptTimeout is like WithPreempt but adds a timeout. If the agent has
+// not reached the safe point within timeout, the preemption escalates to
+// immediate cancellation.
+//
+// safePoint must not be zero; passing SafePoint(0) panics.
+func WithPreemptTimeout[T any](safePoint SafePoint, timeout time.Duration) PushOption[T] {
+	if safePoint == 0 {
+		panic("adk: SafePoint must not be zero; use AfterToolCalls, AfterChatModelCall, or AnySafePoint")
+	}
+	return func(cfg *pushConfig[T]) {
+		cfg.preempt = true
+		cfg.agentCancelOpts = []AgentCancelOption{
+			WithAgentCancelMode(safePoint.toCancelMode()),
+			WithAgentCancelTimeout(timeout),
+		}
 	}
 }
 
 // WithPreemptDelay sets a delay duration before preemption takes effect.
-// When used with WithPreempt, the push will succeed immediately, but the
-// preemption signal will be delayed by the specified duration.
-// This allows the current agent to continue processing for a grace period
-// before being preempted.
+// When used with WithPreempt or WithPreemptTimeout, the push will succeed
+// immediately, but the preemption signal will be delayed by the specified
+// duration. This allows the current agent to continue processing for a grace
+// period before being preempted.
 func WithPreemptDelay[T any](delay time.Duration) PushOption[T] {
 	return func(cfg *pushConfig[T]) {
 		cfg.preemptDelay = delay
@@ -861,7 +943,7 @@ func WithPreemptDelay[T any](delay time.Duration) PushOption[T] {
 //	        return nil // between turns, plain push
 //	    }
 //	    if isLowPriority(tc.Consumed) {
-//	        return []PushOption[MyItem]{WithPreempt[MyItem]()}
+//	        return []PushOption[MyItem]{WithPreempt[MyItem](AnySafePoint)}
 //	    }
 //	    return nil // don't preempt high-priority work
 //	}))
@@ -944,12 +1026,14 @@ func (l *TurnLoop[T]) Run(ctx context.Context) {
 // Once TakeLateItems() has been called, any subsequent push that would become a
 // late item will panic instead of being silently dropped.
 //
-// Use WithPreempt() to atomically push an item and signal preemption of the current agent.
-// This is useful for urgent items that should interrupt the current processing.
+// Use WithPreempt() or WithPreemptTimeout() to atomically push an item and signal
+// preemption of the current agent. This is useful for urgent items that should
+// interrupt the current processing.
 // The returned channel may be waited on if the caller needs to ensure the preempt
 // signal has been observed.
 //
-// Use WithPreemptDelay() together with WithPreempt() to delay the preemption signal.
+// Use WithPreemptDelay() together with WithPreempt()/WithPreemptTimeout() to delay
+// the preemption signal.
 // Push returns immediately after the item is buffered, and a goroutine is spawned
 // to signal preemption after the delay.
 func (l *TurnLoop[T]) Push(item T, opts ...PushOption[T]) (bool, <-chan struct{}) {
@@ -1077,9 +1161,9 @@ func (l *TurnLoop[T]) pushWithConfig(item T, cfg *pushConfig[T]) (bool, <-chan s
 }
 
 // Stop signals the loop to stop and returns immediately (non-blocking).
-// The loop will finish the current turn (or cancel it via WithAgentCancel options),
+// The loop will finish the current turn (or cancel it via WithGraceful/WithGracefulTimeout),
 // then exit without starting a new turn.
-// Use WithAgentCancel to control how the currently running agent is cancelled.
+// Without options, Stop triggers an immediate cancel of the current agent turn.
 // This method may be called multiple times; subsequent calls update cancel options.
 // Call Wait() to block until the loop has fully exited and get the result.
 //
