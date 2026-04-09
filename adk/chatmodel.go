@@ -398,12 +398,6 @@ type runFunc func(ctx context.Context, p *runParams)
 
 // NewChatModelAgent constructs a chat model-backed agent with the provided config.
 func NewChatModelAgent(ctx context.Context, config *ChatModelAgentConfig) (*ChatModelAgent, error) {
-	if config.Name == "" {
-		return nil, errors.New("agent 'Name' is required")
-	}
-	if config.Description == "" {
-		return nil, errors.New("agent 'Description' is required")
-	}
 	if config.ModelFailoverConfig != nil {
 		if config.ModelFailoverConfig.GetFailoverModel == nil {
 			return nil, errors.New("ModelFailoverConfig.GetFailoverModel is required when ModelFailoverConfig is set")
