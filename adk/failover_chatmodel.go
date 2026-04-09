@@ -73,13 +73,8 @@ func (m *failoverProxyModel) prepareCallbacks(ctx context.Context) (context.Cont
 		return nil, nil, errors.New("failover current model not found in context")
 	}
 
-	ri := &callbacks.RunInfo{
-		Component: components.ComponentOfChatModel,
-	}
-	if typ, ok := components.GetType(current.model); ok {
-		ri.Type = typ
-	}
-	ctx = callbacks.ReuseHandlers(ctx, ri)
+	typ, _ := components.GetType(current.model)
+	ctx = callbacks.EnsureRunInfo(ctx, typ, components.ComponentOfChatModel)
 
 	target := current.model
 	if !components.IsCallbacksEnabled(target) {
@@ -90,14 +85,14 @@ func (m *failoverProxyModel) prepareCallbacks(ctx context.Context) (context.Cont
 }
 
 func (m *failoverProxyModel) Generate(ctx context.Context, input []*schema.Message, opts ...model.Option) (*schema.Message, error) {
-	ctx, target, err := m.prepareCallbacks(ctx)
+	nCtx, target, err := m.prepareCallbacks(ctx)
 	if err != nil {
 		return nil, err
 	}
 
 	ctx = callbacks.OnStart(ctx, input)
 
-	result, err := target.Generate(ctx, input, opts...)
+	result, err := target.Generate(nCtx, input, opts...)
 	if err != nil {
 		callbacks.OnError(ctx, err)
 		return result, err
@@ -109,14 +104,14 @@ func (m *failoverProxyModel) Generate(ctx context.Context, input []*schema.Messa
 }
 
 func (m *failoverProxyModel) Stream(ctx context.Context, input []*schema.Message, opts ...model.Option) (*schema.StreamReader[*schema.Message], error) {
-	ctx, target, err := m.prepareCallbacks(ctx)
+	nCtx, target, err := m.prepareCallbacks(ctx)
 	if err != nil {
 		return nil, err
 	}
 
 	ctx = callbacks.OnStart(ctx, input)
 
-	result, err := target.Stream(ctx, input, opts...)
+	result, err := target.Stream(nCtx, input, opts...)
 	if err != nil {
 		callbacks.OnError(ctx, err)
 		return nil, err
