@@ -100,7 +100,7 @@ func (m *failoverProxyModel) Generate(ctx context.Context, input []*schema.Messa
 	result, err := target.Generate(ctx, input, opts...)
 	if err != nil {
 		callbacks.OnError(ctx, err)
-		return nil, err
+		return result, err
 	}
 
 	callbacks.OnEnd(ctx, result)
