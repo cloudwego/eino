@@ -21,7 +21,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
 	"math/rand"
 	"time"
 
@@ -114,6 +113,13 @@ type ModelRetryConfig struct {
 	// base delay 100ms, exponentially increasing up to 10s max,
 	// with random jitter (0-50% of delay) to prevent thundering herd.
 	BackoffFunc func(ctx context.Context, attempt int) time.Duration
+
+	// Logger is used to log retry events.
+	// If nil, retry events are silently dropped to avoid interfering
+	// with user terminal output.
+	Logger interface {
+		Printf(format string, v ...any)
+	}
 }
 
 func defaultIsRetryAble(_ context.Context, err error) bool {
@@ -175,6 +181,12 @@ type retryModelWrapper struct {
 	config *ModelRetryConfig
 }
 
+func (r *retryModelWrapper) logf(format string, v ...any) {
+	if r.config.Logger != nil {
+		r.config.Logger.Printf(format, v...)
+	}
+}
+
 func newRetryModelWrapper(inner model.BaseChatModel, config *ModelRetryConfig) *retryModelWrapper {
 	return &retryModelWrapper{inner: inner, config: config}
 }
@@ -202,7 +214,7 @@ func (r *retryModelWrapper) Generate(ctx context.Context, input []*schema.Messag
 
 		lastErr = err
 		if attempt < r.config.MaxRetries {
-			log.Printf("retrying ChatModel.Generate (attempt %d/%d): %v", attempt+1, r.config.MaxRetries, err)
+			r.logf("retrying ChatModel.Generate (attempt %d/%d): %v", attempt+1, r.config.MaxRetries, err)
 			time.Sleep(backoffFunc(ctx, attempt+1))
 		}
 	}
@@ -243,7 +255,7 @@ func (r *retryModelWrapper) Stream(ctx context.Context, input []*schema.Message,
 			}
 			lastErr = err
 			if attempt < r.config.MaxRetries {
-				log.Printf("retrying ChatModel.Stream (attempt %d/%d): %v", attempt+1, r.config.MaxRetries, err)
+				r.logf("retrying ChatModel.Stream (attempt %d/%d): %v", attempt+1, r.config.MaxRetries, err)
 				time.Sleep(backoffFunc(ctx, attempt+1))
 			}
 			continue
@@ -265,7 +277,7 @@ func (r *retryModelWrapper) Stream(ctx context.Context, input []*schema.Message,
 
 		lastErr = streamErr
 		if attempt < r.config.MaxRetries {
-			log.Printf("retrying ChatModel.Stream (attempt %d/%d): %v", attempt+1, r.config.MaxRetries, streamErr)
+			r.logf("retrying ChatModel.Stream (attempt %d/%d): %v", attempt+1, r.config.MaxRetries, streamErr)
 			time.Sleep(backoffFunc(ctx, attempt+1))
 		}
 	}
