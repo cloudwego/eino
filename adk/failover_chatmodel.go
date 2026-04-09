@@ -23,6 +23,7 @@ import (
 	"io"
 	"log"
 
+	"github.com/cloudwego/eino/callbacks"
 	"github.com/cloudwego/eino/components"
 	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/schema"
@@ -66,34 +67,63 @@ func getFailoverHasMoreAttempts(ctx context.Context) bool {
 type failoverProxyModel struct {
 }
 
-func (m *failoverProxyModel) Generate(ctx context.Context, input []*schema.Message, opts ...model.Option) (*schema.Message, error) {
+func (m *failoverProxyModel) prepareCallbacks(ctx context.Context) (context.Context, model.BaseChatModel, error) {
 	current := getFailoverCurrentModel(ctx)
 	if current == nil || current.model == nil {
-		return nil, errors.New("failover current model not found in context")
+		return nil, nil, errors.New("failover current model not found in context")
 	}
 
+	ri := &callbacks.RunInfo{
+		Component: components.ComponentOfChatModel,
+	}
+	if typ, ok := components.GetType(current.model); ok {
+		ri.Type = typ
+	}
+	ctx = callbacks.ReuseHandlers(ctx, ri)
+
 	target := current.model
-	// Callbacks must be injected here per selected model to avoid missing or duplicate callbacks when failover
-	// switches between models with different callback capabilities.
 	if !components.IsCallbacksEnabled(target) {
 		target = (&callbackInjectionModelWrapper{}).WrapModel(target)
 	}
-	return target.Generate(ctx, input, opts...)
+
+	return ctx, target, nil
+}
+
+func (m *failoverProxyModel) Generate(ctx context.Context, input []*schema.Message, opts ...model.Option) (*schema.Message, error) {
+	ctx, target, err := m.prepareCallbacks(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	ctx = callbacks.OnStart(ctx, input)
+
+	result, err := target.Generate(ctx, input, opts...)
+	if err != nil {
+		callbacks.OnError(ctx, err)
+		return nil, err
+	}
+
+	callbacks.OnEnd(ctx, result)
+
+	return result, nil
 }
 
 func (m *failoverProxyModel) Stream(ctx context.Context, input []*schema.Message, opts ...model.Option) (*schema.StreamReader[*schema.Message], error) {
-	current := getFailoverCurrentModel(ctx)
-	if current == nil || current.model == nil {
-		return nil, errors.New("failover current model not found in context")
+	ctx, target, err := m.prepareCallbacks(ctx)
+	if err != nil {
+		return nil, err
 	}
 
-	target := current.model
-	// Callbacks must be injected here per selected model to avoid missing or duplicate callbacks when failover
-	// switches between models with different callback capabilities.
-	if !components.IsCallbacksEnabled(target) {
-		target = (&callbackInjectionModelWrapper{}).WrapModel(target)
+	ctx = callbacks.OnStart(ctx, input)
+
+	result, err := target.Stream(ctx, input, opts...)
+	if err != nil {
+		callbacks.OnError(ctx, err)
+		return nil, err
 	}
-	return target.Stream(ctx, input, opts...)
+
+	_, wrappedStream := callbacks.OnEndWithStreamOutput(ctx, result)
+	return wrappedStream, nil
 }
 
 func (m *failoverProxyModel) IsCallbacksEnabled() bool {
