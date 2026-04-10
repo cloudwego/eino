@@ -788,18 +788,22 @@ type turnLoopPendingResume[T any] struct {
 }
 
 // SafePoint describes where a preemption may pause the agent.
-// Values can be combined with bitwise OR to accept multiple safe points.
+// It is a bitmask: values can be combined with bitwise OR to accept multiple
+// safe points (e.g. AfterToolCalls | AfterChatModel). Internally, SafePoint
+// is translated to CancelMode via toCancelMode(); the two types represent the
+// same concept at different API layers — SafePoint is the user-facing
+// simplification, CancelMode is the internal cancel primitive.
 type SafePoint int
 
 const (
 	// AfterToolCalls allows the agent to finish the current tool-call round
 	// before yielding.
 	AfterToolCalls SafePoint = 1 << iota
-	// AfterChatModelCall allows the agent to finish the current chat-model
+	// AfterChatModel allows the agent to finish the current chat-model
 	// call before yielding.
-	AfterChatModelCall
-	// AnySafePoint is shorthand for AfterToolCalls | AfterChatModelCall.
-	AnySafePoint = AfterToolCalls | AfterChatModelCall
+	AfterChatModel
+	// AnySafePoint is shorthand for AfterToolCalls | AfterChatModel.
+	AnySafePoint = AfterToolCalls | AfterChatModel
 )
 
 func (sp SafePoint) toCancelMode() CancelMode {
@@ -807,7 +811,7 @@ func (sp SafePoint) toCancelMode() CancelMode {
 	if sp&AfterToolCalls != 0 {
 		mode |= CancelAfterToolCalls
 	}
-	if sp&AfterChatModelCall != 0 {
+	if sp&AfterChatModel != 0 {
 		mode |= CancelAfterChatModel
 	}
 	return mode
@@ -842,9 +846,14 @@ func WithGraceful() StopOption {
 // If the agent has not reached a safe point within gracePeriod, the stop
 // escalates to immediate cancellation.
 //
+// gracePeriod must be positive; passing a zero or negative duration panics.
+//
 // WithGraceful and WithGracefulTimeout are mutually exclusive; if both are
 // passed to the same Stop call, the last one wins.
 func WithGracefulTimeout(gracePeriod time.Duration) StopOption {
+	if gracePeriod <= 0 {
+		panic("adk: WithGracefulTimeout: gracePeriod must be positive")
+	}
 	return func(cfg *stopConfig) {
 		cfg.agentCancelOpts = []AgentCancelOption{
 			WithAgentCancelMode(CancelAfterChatModel | CancelAfterToolCalls),
@@ -899,7 +908,7 @@ type PushOption[T any] func(*pushConfig[T])
 // safePoint must not be zero; passing SafePoint(0) panics.
 func WithPreempt[T any](safePoint SafePoint) PushOption[T] {
 	if safePoint == 0 {
-		panic("adk: SafePoint must not be zero; use AfterToolCalls, AfterChatModelCall, or AnySafePoint")
+		panic("adk: SafePoint must not be zero; use AfterToolCalls, AfterChatModel, or AnySafePoint")
 	}
 	return func(cfg *pushConfig[T]) {
 		cfg.preempt = true
@@ -916,7 +925,7 @@ func WithPreempt[T any](safePoint SafePoint) PushOption[T] {
 // safePoint must not be zero; passing SafePoint(0) panics.
 func WithPreemptTimeout[T any](safePoint SafePoint, timeout time.Duration) PushOption[T] {
 	if safePoint == 0 {
-		panic("adk: SafePoint must not be zero; use AfterToolCalls, AfterChatModelCall, or AnySafePoint")
+		panic("adk: SafePoint must not be zero; use AfterToolCalls, AfterChatModel, or AnySafePoint")
 	}
 	return func(cfg *pushConfig[T]) {
 		cfg.preempt = true
@@ -1174,6 +1183,9 @@ func (l *TurnLoop[T]) pushWithConfig(item T, cfg *pushConfig[T]) (bool, <-chan s
 // The loop will finish the current turn (or cancel it via WithGraceful/WithGracefulTimeout),
 // then exit without starting a new turn.
 // Without options, Stop triggers an immediate cancel of the current agent turn.
+// The immediate cancel affects only the root agent; nested agents inside
+// AgentTools are torn down via context cancellation as a side effect.
+// Use WithGraceful() for recursive propagation to all descendants.
 // This method may be called multiple times; subsequent calls update cancel options.
 // Call Wait() to block until the loop has fully exited and get the result.
 //

@@ -348,6 +348,8 @@ func (cc *cancelContext) isRecursive() bool {
 	return cc != nil && atomic.LoadInt32(&cc.recursive) == 1
 }
 
+// setRecursive(false) is a no-op; recursive is monotonically escalating:
+// once set to true, it cannot be reverted.
 func (cc *cancelContext) setRecursive(v bool) {
 	if v && atomic.CompareAndSwapInt32(&cc.recursive, 0, 1) {
 		close(cc.recursiveChan)
@@ -367,6 +369,14 @@ func (cc *cancelContext) deriveChild(ctx context.Context) *cancelContext {
 	child.parent = cc
 	atomic.AddInt32(&cc.activeChildren, 1)
 
+	// Each goroutine below propagates one signal class (cancel / immediate) to
+	// the child. The pattern is a two-phase select:
+	//   Phase 1: wait for the parent signal (or child/ctx completion).
+	//   Phase 2: if the signal fired but recursive mode is not active yet,
+	//            enter a second select waiting for either recursive escalation
+	//            (recursiveChan) or child/ctx completion. This ensures
+	//            non-recursive cancels leave children unaware, while a late
+	//            escalation to recursive still propagates.
 	go func() {
 		select {
 		case <-cc.cancelChan:
@@ -556,6 +566,9 @@ func (cc *cancelContext) hasActiveChildren() bool {
 
 func (cc *cancelContext) wrapGraphInterruptWithGracePeriod(interrupt func(...compose.GraphInterruptOption)) func(...compose.GraphInterruptOption) {
 	return func(opts ...compose.GraphInterruptOption) {
+		// Grace period only applies in recursive mode: in shallow mode,
+		// children are unaware of the cancel and don't need time to propagate
+		// their interrupt signals back.
 		if cc.isRecursive() && cc.hasActiveChildren() {
 			newOpts := make([]compose.GraphInterruptOption, len(opts)+1)
 			copy(newOpts, opts)
@@ -737,6 +750,9 @@ func (cc *cancelContext) buildCancelFunc() AgentCancelFunc {
 			cc.setRecursive(req.Recursive)
 			close(cc.cancelChan)
 		} else {
+			// Recursive is monotonic: once set, cannot be unset. The first
+			// cancel call uses the bool directly; subsequent calls only
+			// escalate (false → true) — setRecursive(false) is a no-op.
 			curMode = joinMode(curMode, req.Mode)
 			cc.setMode(curMode)
 			if req.Recursive {

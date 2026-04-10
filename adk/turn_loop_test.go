@@ -730,7 +730,7 @@ func TestTurnLoop_Preempt_EscalatesOnSecondPreempt(t *testing.T) {
 		t.Fatal("agent did not start")
 	}
 
-	loop.Push("urgent1", WithPreempt[string](AfterChatModelCall))
+	loop.Push("urgent1", WithPreempt[string](AfterChatModel))
 	select {
 	case <-firstCancelSeen:
 	case <-time.After(1 * time.Second):
@@ -812,7 +812,7 @@ func TestTurnLoop_Preempt_JoinsSafePointModesOnSecondPreempt(t *testing.T) {
 		t.Fatal("agent did not start")
 	}
 
-	loop.Push("urgent1", WithPreempt[string](AfterChatModelCall))
+	loop.Push("urgent1", WithPreempt[string](AfterChatModel))
 	select {
 	case <-firstCancelSeen:
 	case <-time.After(1 * time.Second):
