@@ -42,8 +42,9 @@ var errNonRetryAble = errors.New("non-retry-able error")
 var instantBackoff = func(_ context.Context, _ int) time.Duration { return time.Millisecond }
 
 type agentEvent struct {
-	Err    error
-	Output *AgentOutput
+	Err           error
+	Output        *AgentOutput
+	StreamContent string
 }
 
 func drainAgentEvents(t *testing.T, iterator *AsyncIterator[*AgentEvent]) []agentEvent {
@@ -66,19 +67,25 @@ func drainStreamingAgentEvents(t *testing.T, iterator *AsyncIterator[*AgentEvent
 		if !ok {
 			break
 		}
-		events = append(events, agentEvent{Err: event.Err, Output: event.Output})
+		ae := agentEvent{Err: event.Err, Output: event.Output}
 		if event.Output != nil && event.Output.MessageOutput != nil {
 			mo := event.Output.MessageOutput
 			if mo.IsStreaming && mo.MessageStream != nil {
+				var chunks []string
 				for {
-					_, recvErr := mo.MessageStream.Recv()
+					msg, recvErr := mo.MessageStream.Recv()
 					if recvErr != nil {
 						streamTermErrs = append(streamTermErrs, recvErr)
 						break
 					}
+					if msg != nil {
+						chunks = append(chunks, msg.Content)
+					}
 				}
+				ae.StreamContent = strings.Join(chunks, "")
 			}
 		}
+		events = append(events, ae)
 	}
 	return events, streamTermErrs
 }
@@ -1265,31 +1272,14 @@ func TestChatModelAgentRetry_ShouldRetry_RejectMessage_Stream(t *testing.T) {
 	}
 	iterator := agent.Run(ctx, input)
 
+	events, _ := drainStreamingAgentEvents(t, iterator)
 	var foundGoodContent bool
-	for {
-		event, ok := iterator.Next()
-		if !ok {
-			break
-		}
-		if event.Output != nil && event.Output.MessageOutput != nil {
-			mo := event.Output.MessageOutput
-			if mo.Message != nil && strings.Contains(mo.Message.Content, "good stream content") {
-				foundGoodContent = true
-			}
-			if mo.IsStreaming && mo.MessageStream != nil {
-				for {
-					msg, err := mo.MessageStream.Recv()
-					if err != nil {
-						break
-					}
-					if strings.Contains(msg.Content, "good stream content") {
-						foundGoodContent = true
-					}
-				}
-			}
+	for _, e := range events {
+		if e.StreamContent == "good stream content" {
+			foundGoodContent = true
 		}
 	}
-	assert.True(t, foundGoodContent, "should have received good stream content")
+	require.True(t, foundGoodContent, "should have received good stream content")
 	assert.Equal(t, int32(2), atomic.LoadInt32(&callCount))
 }
 
@@ -1347,14 +1337,12 @@ func TestShouldRetry_Generate(t *testing.T) {
 		assert.Len(t, capturedContexts, 2, "ShouldRetry should be called twice")
 
 		assert.Equal(t, 1, capturedContexts[0].RetryAttempt)
-		assert.NotNil(t, capturedContexts[0].InputMessages)
-		assert.NotNil(t, capturedContexts[0].Options)
-		assert.NotNil(t, capturedContexts[0].OutputMessage)
+		assert.Len(t, capturedContexts[0].InputMessages, 2)
+		assert.True(t, len(capturedContexts[0].Options) > 0, "should have default options")
 		assert.Equal(t, "bad", capturedContexts[0].OutputMessage.Content)
 		assert.Nil(t, capturedContexts[0].Err)
 
 		assert.Equal(t, 2, capturedContexts[1].RetryAttempt)
-		assert.NotNil(t, capturedContexts[1].OutputMessage)
 		assert.Equal(t, "good", capturedContexts[1].OutputMessage.Content)
 		assert.Nil(t, capturedContexts[1].Err)
 	})
@@ -1710,22 +1698,19 @@ func TestShouldRetry_Generate(t *testing.T) {
 		}
 		iterator := agent.Run(ctx, input)
 
+		events := drainAgentEvents(t, iterator)
 		var msgEventCount int
 		var foundExhaustedErr bool
-		for {
-			event, ok := iterator.Next()
-			if !ok {
-				break
-			}
-			if event.Output != nil && event.Output.MessageOutput != nil {
+		for _, e := range events {
+			if e.Output != nil && e.Output.MessageOutput != nil {
 				msgEventCount++
 			}
-			if event.Err != nil && errors.Is(event.Err, ErrExceedMaxRetries) {
+			if e.Err != nil && errors.Is(e.Err, ErrExceedMaxRetries) {
 				foundExhaustedErr = true
 			}
 		}
 		assert.Equal(t, 0, msgEventCount, "no message events should be emitted when all are rejected")
-		assert.True(t, foundExhaustedErr, "final event should have RetryExhaustedError")
+		require.True(t, foundExhaustedErr, "final event should have RetryExhaustedError")
 	})
 
 	t.Run("SuppressFlag_Accepted_FirstAttempt", func(t *testing.T) {
@@ -1770,6 +1755,59 @@ func TestShouldRetry_Generate(t *testing.T) {
 		}
 		assert.Equal(t, 1, len(msgEvents), "should have exactly 1 event")
 		assert.Equal(t, "perfect", msgEvents[0].Output.MessageOutput.Message.Content)
+	})
+
+	t.Run("ContextCanceled_DuringSleep", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		ctrl := gomock.NewController(t)
+		defer ctrl.Finish()
+
+		cm := mockModel.NewMockToolCallingChatModel(ctrl)
+
+		var callCount int32
+		cm.EXPECT().Generate(gomock.Any(), gomock.Any(), gomock.Any()).
+			DoAndReturn(func(ctx context.Context, input []*schema.Message, opts ...model.Option) (*schema.Message, error) {
+				atomic.AddInt32(&callCount, 1)
+				return nil, errors.New("transient")
+			}).Times(1)
+
+		agent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+			Name:        "ContextCancelDuringSleep",
+			Description: "Test context cancellation during backoff sleep",
+			Instruction: "You are a helpful assistant.",
+			Model:       cm,
+			ModelRetryConfig: &ModelRetryConfig{
+				MaxRetries: 5,
+				ShouldRetry: func(ctx context.Context, retryCtx *RetryContext) *RetryDecision {
+					return &RetryDecision{ShouldRetry: true}
+				},
+				BackoffFunc: func(_ context.Context, _ int) time.Duration { return 10 * time.Second },
+			},
+		})
+		require.NoError(t, err)
+
+		go func() {
+			time.Sleep(50 * time.Millisecond)
+			cancel()
+		}()
+
+		start := time.Now()
+		iterator := agent.Run(ctx, &AgentInput{
+			Messages: []Message{schema.UserMessage("Hello")},
+		})
+		events := drainAgentEvents(t, iterator)
+		elapsed := time.Since(start)
+
+		require.True(t, elapsed < 2*time.Second, "should not block for full backoff; elapsed: %v", elapsed)
+		assert.Equal(t, int32(1), atomic.LoadInt32(&callCount))
+
+		var foundCtxErr bool
+		for _, e := range events {
+			if e.Err != nil && errors.Is(e.Err, context.Canceled) {
+				foundCtxErr = true
+			}
+		}
+		require.True(t, foundCtxErr, "should have received context.Canceled error")
 	})
 }
 
@@ -1821,28 +1859,14 @@ func TestShouldRetry_Stream(t *testing.T) {
 		}
 		iterator := agent.Run(ctx, input)
 
+		events, _ := drainStreamingAgentEvents(t, iterator)
 		var foundContent bool
-		for {
-			event, ok := iterator.Next()
-			if !ok {
-				break
-			}
-			if event.Output != nil && event.Output.MessageOutput != nil {
-				mo := event.Output.MessageOutput
-				if mo.IsStreaming && mo.MessageStream != nil {
-					for {
-						msg, err := mo.MessageStream.Recv()
-						if err != nil {
-							break
-						}
-						if strings.Contains(msg.Content, "recovered stream") {
-							foundContent = true
-						}
-					}
-				}
+		for _, e := range events {
+			if e.StreamContent == "recovered stream" {
+				foundContent = true
 			}
 		}
-		assert.True(t, foundContent, "should have received recovered stream content after error retry")
+		require.True(t, foundContent, "should have received recovered stream content after error retry")
 		assert.Equal(t, int32(2), atomic.LoadInt32(&callCount))
 	})
 
@@ -2092,29 +2116,15 @@ func TestShouldRetry_Stream(t *testing.T) {
 		}
 		iterator := agent.Run(ctx, input)
 
+		events, _ := drainStreamingAgentEvents(t, iterator)
 		var foundGood bool
-		for {
-			event, ok := iterator.Next()
-			if !ok {
-				break
-			}
-			if event.Output != nil && event.Output.MessageOutput != nil {
-				mo := event.Output.MessageOutput
-				if mo.IsStreaming && mo.MessageStream != nil {
-					for {
-						msg, err := mo.MessageStream.Recv()
-						if err != nil {
-							break
-						}
-						if strings.Contains(msg.Content, "good response") {
-							foundGood = true
-						}
-					}
-				}
+		for _, e := range events {
+			if e.StreamContent == "good response" {
+				foundGood = true
 			}
 		}
 
-		assert.True(t, foundGood, "should have received good response after retry with modified inputs")
+		require.True(t, foundGood, "should have received good response after retry with modified inputs")
 		assert.Equal(t, int32(2), atomic.LoadInt32(&callCount))
 		assert.Equal(t, 2, len(capturedInputs))
 		assert.Equal(t, "compressed instruction", capturedInputs[1][0].Content, "second call should use modified input")
@@ -2363,36 +2373,77 @@ func TestShouldRetry_Stream(t *testing.T) {
 		}
 		iterator := agent.Run(ctx, input)
 
+		events, streamTermErrs := drainStreamingAgentEvents(t, iterator)
 		var willRetryCount int
 		var foundExhaustedErr bool
-		for {
-			event, ok := iterator.Next()
-			if !ok {
-				break
+		for _, e := range events {
+			if e.Err != nil && errors.Is(e.Err, ErrExceedMaxRetries) {
+				foundExhaustedErr = true
 			}
-			if event.Err != nil {
-				if errors.Is(event.Err, ErrExceedMaxRetries) {
-					foundExhaustedErr = true
-				}
-			}
-			if event.Output != nil && event.Output.MessageOutput != nil {
-				mo := event.Output.MessageOutput
-				if mo.IsStreaming && mo.MessageStream != nil {
-					for {
-						_, recvErr := mo.MessageStream.Recv()
-						if recvErr != nil {
-							var willRetryErr *WillRetryError
-							if errors.As(recvErr, &willRetryErr) {
-								willRetryCount++
-							}
-							break
-						}
-					}
-				}
+		}
+		for _, termErr := range streamTermErrs {
+			var willRetryErr *WillRetryError
+			if errors.As(termErr, &willRetryErr) {
+				willRetryCount++
 			}
 		}
 		assert.Equal(t, 3, willRetryCount, "all 3 stream events should end with WillRetryError")
-		assert.True(t, foundExhaustedErr, "final error should be RetryExhaustedError")
+		require.True(t, foundExhaustedErr, "final error should be RetryExhaustedError")
+	})
+
+	t.Run("ShouldRetry_Panics_VerdictStillSent", func(t *testing.T) {
+		ctx := context.Background()
+		ctrl := gomock.NewController(t)
+		defer ctrl.Finish()
+
+		cm := mockModel.NewMockToolCallingChatModel(ctrl)
+
+		cm.EXPECT().Stream(gomock.Any(), gomock.Any(), gomock.Any()).
+			DoAndReturn(func(ctx context.Context, input []*schema.Message, opts ...model.Option) (*schema.StreamReader[*schema.Message], error) {
+				return schema.StreamReaderFromArray([]*schema.Message{schema.AssistantMessage("trigger panic", nil)}), nil
+			}).Times(1)
+
+		agent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+			Name:        "ShouldRetryPanicsAgent",
+			Description: "Test that ShouldRetry panic sends verdict signal and does not deadlock",
+			Instruction: "You are a helpful assistant.",
+			Model:       cm,
+			ModelRetryConfig: &ModelRetryConfig{
+				MaxRetries: 1,
+				ShouldRetry: func(ctx context.Context, retryCtx *RetryContext) *RetryDecision {
+					panic("deliberate panic in ShouldRetry")
+				},
+				BackoffFunc: instantBackoff,
+			},
+		})
+		require.NoError(t, err)
+
+		input := &AgentInput{
+			Messages:        []Message{schema.UserMessage("Hello")},
+			EnableStreaming: true,
+		}
+
+		done := make(chan struct{})
+		var events []agentEvent
+		go func() {
+			defer close(done)
+			iterator := agent.Run(ctx, input)
+			events = drainAgentEvents(t, iterator)
+		}()
+
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			t.Fatal("test deadlocked — verdict signal was not sent after ShouldRetry panic")
+		}
+		require.NotEmpty(t, events)
+		var foundPanicErr bool
+		for _, e := range events {
+			if e.Err != nil && strings.Contains(e.Err.Error(), "panic") {
+				foundPanicErr = true
+			}
+		}
+		assert.True(t, foundPanicErr, "should have received a panic error event")
 	})
 }
 

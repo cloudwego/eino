@@ -29,32 +29,37 @@ import (
 	"github.com/cloudwego/eino/schema"
 )
 
+func newFakeChatModel(
+	gen func(context.Context, []*schema.Message, ...model.Option) (*schema.Message, error),
+	stream func(context.Context, []*schema.Message, ...model.Option) (*schema.StreamReader[*schema.Message], error),
+) *fakeChatModel {
+	if gen == nil {
+		gen = func(context.Context, []*schema.Message, ...model.Option) (*schema.Message, error) {
+			return nil, errors.New("unused")
+		}
+	}
+	if stream == nil {
+		stream = func(context.Context, []*schema.Message, ...model.Option) (*schema.StreamReader[*schema.Message], error) {
+			return nil, errors.New("unused")
+		}
+	}
+	return &fakeChatModel{callbacksEnabled: true, generate: gen, stream: stream}
+}
+
 func TestRetryThenFailover(t *testing.T) {
 	t.Run("Generate_RetryExhaustedTriggersFailover", func(t *testing.T) {
 		modelErr := errors.New("model error")
 		var m1Calls int32
 		var m2Calls int32
 
-		m1 := &fakeChatModel{
-			callbacksEnabled: true,
-			generate: func(_ context.Context, _ []*schema.Message, _ ...model.Option) (*schema.Message, error) {
-				atomic.AddInt32(&m1Calls, 1)
-				return nil, modelErr
-			},
-			stream: func(_ context.Context, _ []*schema.Message, _ ...model.Option) (*schema.StreamReader[*schema.Message], error) {
-				return nil, errors.New("unused")
-			},
-		}
-		m2 := &fakeChatModel{
-			callbacksEnabled: true,
-			generate: func(_ context.Context, _ []*schema.Message, _ ...model.Option) (*schema.Message, error) {
-				atomic.AddInt32(&m2Calls, 1)
-				return schema.AssistantMessage("ok from m2", nil), nil
-			},
-			stream: func(_ context.Context, _ []*schema.Message, _ ...model.Option) (*schema.StreamReader[*schema.Message], error) {
-				return nil, errors.New("unused")
-			},
-		}
+		m1 := newFakeChatModel(func(_ context.Context, _ []*schema.Message, _ ...model.Option) (*schema.Message, error) {
+			atomic.AddInt32(&m1Calls, 1)
+			return nil, modelErr
+		}, nil)
+		m2 := newFakeChatModel(func(_ context.Context, _ []*schema.Message, _ ...model.Option) (*schema.Message, error) {
+			atomic.AddInt32(&m2Calls, 1)
+			return schema.AssistantMessage("ok from m2", nil), nil
+		}, nil)
 
 		retryCfg := &ModelRetryConfig{
 			MaxRetries:  2,
@@ -96,26 +101,14 @@ func TestRetryThenFailover(t *testing.T) {
 		var m1Calls int32
 		var m2Calls int32
 
-		m1 := &fakeChatModel{
-			callbacksEnabled: true,
-			generate: func(_ context.Context, _ []*schema.Message, _ ...model.Option) (*schema.Message, error) {
-				atomic.AddInt32(&m1Calls, 1)
-				return nil, modelErr
-			},
-			stream: func(_ context.Context, _ []*schema.Message, _ ...model.Option) (*schema.StreamReader[*schema.Message], error) {
-				return nil, errors.New("unused")
-			},
-		}
-		m2 := &fakeChatModel{
-			callbacksEnabled: true,
-			generate: func(_ context.Context, _ []*schema.Message, _ ...model.Option) (*schema.Message, error) {
-				atomic.AddInt32(&m2Calls, 1)
-				return nil, modelErr
-			},
-			stream: func(_ context.Context, _ []*schema.Message, _ ...model.Option) (*schema.StreamReader[*schema.Message], error) {
-				return nil, errors.New("unused")
-			},
-		}
+		m1 := newFakeChatModel(func(_ context.Context, _ []*schema.Message, _ ...model.Option) (*schema.Message, error) {
+			atomic.AddInt32(&m1Calls, 1)
+			return nil, modelErr
+		}, nil)
+		m2 := newFakeChatModel(func(_ context.Context, _ []*schema.Message, _ ...model.Option) (*schema.Message, error) {
+			atomic.AddInt32(&m2Calls, 1)
+			return nil, modelErr
+		}, nil)
 
 		retryCfg := &ModelRetryConfig{
 			MaxRetries:  1,
@@ -158,19 +151,13 @@ func TestRetryThenFailover(t *testing.T) {
 		var m1Calls int32
 		var failoverCalled int32
 
-		m1 := &fakeChatModel{
-			callbacksEnabled: true,
-			generate: func(_ context.Context, _ []*schema.Message, _ ...model.Option) (*schema.Message, error) {
-				n := atomic.AddInt32(&m1Calls, 1)
-				if n == 1 {
-					return nil, errors.New("transient error")
-				}
-				return schema.AssistantMessage("ok on retry", nil), nil
-			},
-			stream: func(_ context.Context, _ []*schema.Message, _ ...model.Option) (*schema.StreamReader[*schema.Message], error) {
-				return nil, errors.New("unused")
-			},
-		}
+		m1 := newFakeChatModel(func(_ context.Context, _ []*schema.Message, _ ...model.Option) (*schema.Message, error) {
+			n := atomic.AddInt32(&m1Calls, 1)
+			if n == 1 {
+				return nil, errors.New("transient error")
+			}
+			return schema.AssistantMessage("ok on retry", nil), nil
+		}, nil)
 
 		retryCfg := &ModelRetryConfig{
 			MaxRetries:  2,
@@ -213,26 +200,14 @@ func TestRetryThenFailover(t *testing.T) {
 		var m1Calls int32
 		var m2Calls int32
 
-		m1 := &fakeChatModel{
-			callbacksEnabled: true,
-			generate: func(_ context.Context, _ []*schema.Message, _ ...model.Option) (*schema.Message, error) {
-				atomic.AddInt32(&m1Calls, 1)
-				return nil, nonRetryableErr
-			},
-			stream: func(_ context.Context, _ []*schema.Message, _ ...model.Option) (*schema.StreamReader[*schema.Message], error) {
-				return nil, errors.New("unused")
-			},
-		}
-		m2 := &fakeChatModel{
-			callbacksEnabled: true,
-			generate: func(_ context.Context, _ []*schema.Message, _ ...model.Option) (*schema.Message, error) {
-				atomic.AddInt32(&m2Calls, 1)
-				return schema.AssistantMessage("ok from m2", nil), nil
-			},
-			stream: func(_ context.Context, _ []*schema.Message, _ ...model.Option) (*schema.StreamReader[*schema.Message], error) {
-				return nil, errors.New("unused")
-			},
-		}
+		m1 := newFakeChatModel(func(_ context.Context, _ []*schema.Message, _ ...model.Option) (*schema.Message, error) {
+			atomic.AddInt32(&m1Calls, 1)
+			return nil, nonRetryableErr
+		}, nil)
+		m2 := newFakeChatModel(func(_ context.Context, _ []*schema.Message, _ ...model.Option) (*schema.Message, error) {
+			atomic.AddInt32(&m2Calls, 1)
+			return schema.AssistantMessage("ok from m2", nil), nil
+		}, nil)
 
 		retryCfg := &ModelRetryConfig{
 			MaxRetries: 3,
@@ -275,28 +250,16 @@ func TestRetryThenFailover(t *testing.T) {
 		var m1Calls int32
 		var m2Calls int32
 
-		m1 := &fakeChatModel{
-			callbacksEnabled: true,
-			generate: func(_ context.Context, _ []*schema.Message, _ ...model.Option) (*schema.Message, error) {
-				return nil, errors.New("unused")
-			},
-			stream: func(_ context.Context, _ []*schema.Message, _ ...model.Option) (*schema.StreamReader[*schema.Message], error) {
-				atomic.AddInt32(&m1Calls, 1)
-				return streamWithMidError([]*schema.Message{
-					schema.AssistantMessage("partial", nil),
-				}, streamErr), nil
-			},
-		}
-		m2 := &fakeChatModel{
-			callbacksEnabled: true,
-			generate: func(_ context.Context, _ []*schema.Message, _ ...model.Option) (*schema.Message, error) {
-				return nil, errors.New("unused")
-			},
-			stream: func(_ context.Context, _ []*schema.Message, _ ...model.Option) (*schema.StreamReader[*schema.Message], error) {
-				atomic.AddInt32(&m2Calls, 1)
-				return schema.StreamReaderFromArray([]*schema.Message{schema.AssistantMessage("ok from m2", nil)}), nil
-			},
-		}
+		m1 := newFakeChatModel(nil, func(_ context.Context, _ []*schema.Message, _ ...model.Option) (*schema.StreamReader[*schema.Message], error) {
+			atomic.AddInt32(&m1Calls, 1)
+			return streamWithMidError([]*schema.Message{
+				schema.AssistantMessage("partial", nil),
+			}, streamErr), nil
+		})
+		m2 := newFakeChatModel(nil, func(_ context.Context, _ []*schema.Message, _ ...model.Option) (*schema.StreamReader[*schema.Message], error) {
+			atomic.AddInt32(&m2Calls, 1)
+			return schema.StreamReaderFromArray([]*schema.Message{schema.AssistantMessage("ok from m2", nil)}), nil
+		})
 
 		retryCfg := &ModelRetryConfig{
 			MaxRetries:  1,
@@ -340,30 +303,18 @@ func TestRetryThenFailover(t *testing.T) {
 		var m1Calls int32
 		var m2Calls int32
 
-		m1 := &fakeChatModel{
-			callbacksEnabled: true,
-			generate: func(_ context.Context, _ []*schema.Message, _ ...model.Option) (*schema.Message, error) {
-				return nil, errors.New("unused")
-			},
-			stream: func(_ context.Context, _ []*schema.Message, _ ...model.Option) (*schema.StreamReader[*schema.Message], error) {
-				atomic.AddInt32(&m1Calls, 1)
-				return streamWithMidError([]*schema.Message{
-					schema.AssistantMessage("p", nil),
-				}, streamErr), nil
-			},
-		}
-		m2 := &fakeChatModel{
-			callbacksEnabled: true,
-			generate: func(_ context.Context, _ []*schema.Message, _ ...model.Option) (*schema.Message, error) {
-				return nil, errors.New("unused")
-			},
-			stream: func(_ context.Context, _ []*schema.Message, _ ...model.Option) (*schema.StreamReader[*schema.Message], error) {
-				atomic.AddInt32(&m2Calls, 1)
-				return streamWithMidError([]*schema.Message{
-					schema.AssistantMessage("p", nil),
-				}, streamErr), nil
-			},
-		}
+		m1 := newFakeChatModel(nil, func(_ context.Context, _ []*schema.Message, _ ...model.Option) (*schema.StreamReader[*schema.Message], error) {
+			atomic.AddInt32(&m1Calls, 1)
+			return streamWithMidError([]*schema.Message{
+				schema.AssistantMessage("p", nil),
+			}, streamErr), nil
+		})
+		m2 := newFakeChatModel(nil, func(_ context.Context, _ []*schema.Message, _ ...model.Option) (*schema.StreamReader[*schema.Message], error) {
+			atomic.AddInt32(&m2Calls, 1)
+			return streamWithMidError([]*schema.Message{
+				schema.AssistantMessage("p", nil),
+			}, streamErr), nil
+		})
 
 		retryCfg := &ModelRetryConfig{
 			MaxRetries:  1,
@@ -405,26 +356,14 @@ func TestRetryThenFailover(t *testing.T) {
 		var m1Calls int32
 		var m2Calls int32
 
-		m1 := &fakeChatModel{
-			callbacksEnabled: true,
-			generate: func(_ context.Context, _ []*schema.Message, _ ...model.Option) (*schema.Message, error) {
-				return nil, errors.New("unused")
-			},
-			stream: func(_ context.Context, _ []*schema.Message, _ ...model.Option) (*schema.StreamReader[*schema.Message], error) {
-				atomic.AddInt32(&m1Calls, 1)
-				return schema.StreamReaderFromArray([]*schema.Message{schema.AssistantMessage("bad from m1", nil)}), nil
-			},
-		}
-		m2 := &fakeChatModel{
-			callbacksEnabled: true,
-			generate: func(_ context.Context, _ []*schema.Message, _ ...model.Option) (*schema.Message, error) {
-				return nil, errors.New("unused")
-			},
-			stream: func(_ context.Context, _ []*schema.Message, _ ...model.Option) (*schema.StreamReader[*schema.Message], error) {
-				atomic.AddInt32(&m2Calls, 1)
-				return schema.StreamReaderFromArray([]*schema.Message{schema.AssistantMessage("good from m2", nil)}), nil
-			},
-		}
+		m1 := newFakeChatModel(nil, func(_ context.Context, _ []*schema.Message, _ ...model.Option) (*schema.StreamReader[*schema.Message], error) {
+			atomic.AddInt32(&m1Calls, 1)
+			return schema.StreamReaderFromArray([]*schema.Message{schema.AssistantMessage("bad from m1", nil)}), nil
+		})
+		m2 := newFakeChatModel(nil, func(_ context.Context, _ []*schema.Message, _ ...model.Option) (*schema.StreamReader[*schema.Message], error) {
+			atomic.AddInt32(&m2Calls, 1)
+			return schema.StreamReaderFromArray([]*schema.Message{schema.AssistantMessage("good from m2", nil)}), nil
+		})
 
 		retryCfg := &ModelRetryConfig{
 			MaxRetries: 1,
@@ -469,26 +408,14 @@ func TestRetryThenFailover(t *testing.T) {
 		var m1Calls int32
 		var m2Calls int32
 
-		m1 := &fakeChatModel{
-			callbacksEnabled: true,
-			generate: func(_ context.Context, _ []*schema.Message, _ ...model.Option) (*schema.Message, error) {
-				atomic.AddInt32(&m1Calls, 1)
-				return schema.AssistantMessage("bad from m1", nil), nil
-			},
-			stream: func(_ context.Context, _ []*schema.Message, _ ...model.Option) (*schema.StreamReader[*schema.Message], error) {
-				return nil, errors.New("unused")
-			},
-		}
-		m2 := &fakeChatModel{
-			callbacksEnabled: true,
-			generate: func(_ context.Context, _ []*schema.Message, _ ...model.Option) (*schema.Message, error) {
-				atomic.AddInt32(&m2Calls, 1)
-				return schema.AssistantMessage("good from m2", nil), nil
-			},
-			stream: func(_ context.Context, _ []*schema.Message, _ ...model.Option) (*schema.StreamReader[*schema.Message], error) {
-				return nil, errors.New("unused")
-			},
-		}
+		m1 := newFakeChatModel(func(_ context.Context, _ []*schema.Message, _ ...model.Option) (*schema.Message, error) {
+			atomic.AddInt32(&m1Calls, 1)
+			return schema.AssistantMessage("bad from m1", nil), nil
+		}, nil)
+		m2 := newFakeChatModel(func(_ context.Context, _ []*schema.Message, _ ...model.Option) (*schema.Message, error) {
+			atomic.AddInt32(&m2Calls, 1)
+			return schema.AssistantMessage("good from m2", nil), nil
+		}, nil)
 
 		retryCfg := &ModelRetryConfig{
 			MaxRetries: 1,
@@ -525,6 +452,90 @@ func TestRetryThenFailover(t *testing.T) {
 		require.Equal(t, int32(2), atomic.LoadInt32(&m1Calls))
 		require.Equal(t, int32(1), atomic.LoadInt32(&m2Calls))
 	})
+
+	t.Run("Stream_GetFailoverModelReturnsNilModel", func(t *testing.T) {
+		streamErr := errors.New("m1 always fails")
+		var m1Calls int32
+
+		m1 := newFakeChatModel(nil, func(_ context.Context, _ []*schema.Message, _ ...model.Option) (*schema.StreamReader[*schema.Message], error) {
+			atomic.AddInt32(&m1Calls, 1)
+			return nil, streamErr
+		})
+
+		retryCfg := &ModelRetryConfig{
+			MaxRetries:  0,
+			IsRetryAble: func(_ context.Context, err error) bool { return false },
+			BackoffFunc: func(_ context.Context, _ int) time.Duration { return 0 },
+		}
+
+		failoverCfg := &ModelFailoverConfig{
+			MaxRetries: 1,
+			ShouldFailover: func(_ context.Context, _ *schema.Message, err error) bool {
+				return err != nil
+			},
+			GetFailoverModel: func(_ context.Context, _ *FailoverContext) (model.BaseChatModel, []*schema.Message, error) {
+				return nil, nil, nil
+			},
+		}
+
+		wrapped := buildModelWrappers(m1, &modelWrapperConfig{
+			retryConfig:    retryCfg,
+			failoverConfig: failoverCfg,
+		})
+
+		ctx := withChatModelAgentExecCtx(context.Background(), &chatModelAgentExecCtx{
+			failoverLastSuccessModel: m1,
+		})
+		_, err := wrapped.Stream(ctx, []*schema.Message{schema.UserMessage("hi")})
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "returned nil model at attempt")
+		require.Equal(t, int32(1), atomic.LoadInt32(&m1Calls))
+	})
+
+	t.Run("Stream_ContextCanceledDuringFailover", func(t *testing.T) {
+		streamErr := errors.New("m1 fails")
+		var m1Calls int32
+		var failoverModelCalled int32
+
+		m1 := newFakeChatModel(nil, func(_ context.Context, _ []*schema.Message, _ ...model.Option) (*schema.StreamReader[*schema.Message], error) {
+			atomic.AddInt32(&m1Calls, 1)
+			return nil, streamErr
+		})
+
+		ctx, cancel := context.WithCancel(context.Background())
+
+		retryCfg := &ModelRetryConfig{
+			MaxRetries:  0,
+			IsRetryAble: func(_ context.Context, err error) bool { return false },
+			BackoffFunc: func(_ context.Context, _ int) time.Duration { return 0 },
+		}
+
+		failoverCfg := &ModelFailoverConfig{
+			MaxRetries: 3,
+			ShouldFailover: func(_ context.Context, _ *schema.Message, err error) bool {
+				cancel()
+				return err != nil
+			},
+			GetFailoverModel: func(_ context.Context, _ *FailoverContext) (model.BaseChatModel, []*schema.Message, error) {
+				atomic.AddInt32(&failoverModelCalled, 1)
+				return nil, nil, nil
+			},
+		}
+
+		wrapped := buildModelWrappers(m1, &modelWrapperConfig{
+			retryConfig:    retryCfg,
+			failoverConfig: failoverCfg,
+		})
+
+		ctx = withChatModelAgentExecCtx(ctx, &chatModelAgentExecCtx{
+			failoverLastSuccessModel: m1,
+		})
+		_, err := wrapped.Stream(ctx, []*schema.Message{schema.UserMessage("hi")})
+		require.Error(t, err)
+		require.ErrorIs(t, err, context.Canceled)
+		require.Equal(t, int32(1), atomic.LoadInt32(&m1Calls))
+		require.Equal(t, int32(0), atomic.LoadInt32(&failoverModelCalled))
+	})
 }
 
 func TestErrStreamCanceled_Failover(t *testing.T) {
@@ -532,18 +543,12 @@ func TestErrStreamCanceled_Failover(t *testing.T) {
 		var m1Calls int32
 		var failoverCalled int32
 
-		m1 := &fakeChatModel{
-			callbacksEnabled: true,
-			generate: func(_ context.Context, _ []*schema.Message, _ ...model.Option) (*schema.Message, error) {
-				return nil, errors.New("unused")
-			},
-			stream: func(_ context.Context, _ []*schema.Message, _ ...model.Option) (*schema.StreamReader[*schema.Message], error) {
-				atomic.AddInt32(&m1Calls, 1)
-				return streamWithMidError([]*schema.Message{
-					schema.AssistantMessage("partial", nil),
-				}, ErrStreamCanceled), nil
-			},
-		}
+		m1 := newFakeChatModel(nil, func(_ context.Context, _ []*schema.Message, _ ...model.Option) (*schema.StreamReader[*schema.Message], error) {
+			atomic.AddInt32(&m1Calls, 1)
+			return streamWithMidError([]*schema.Message{
+				schema.AssistantMessage("partial", nil),
+			}, ErrStreamCanceled), nil
+		})
 
 		failoverCfg := &ModelFailoverConfig{
 			MaxRetries: 2,
@@ -575,16 +580,10 @@ func TestErrStreamCanceled_Failover(t *testing.T) {
 		var m1Calls int32
 		var failoverCalled int32
 
-		m1 := &fakeChatModel{
-			callbacksEnabled: true,
-			generate: func(_ context.Context, _ []*schema.Message, _ ...model.Option) (*schema.Message, error) {
-				atomic.AddInt32(&m1Calls, 1)
-				return nil, ErrStreamCanceled
-			},
-			stream: func(_ context.Context, _ []*schema.Message, _ ...model.Option) (*schema.StreamReader[*schema.Message], error) {
-				return nil, errors.New("unused")
-			},
-		}
+		m1 := newFakeChatModel(func(_ context.Context, _ []*schema.Message, _ ...model.Option) (*schema.Message, error) {
+			atomic.AddInt32(&m1Calls, 1)
+			return nil, ErrStreamCanceled
+		}, nil)
 
 		failoverCfg := &ModelFailoverConfig{
 			MaxRetries: 2,
