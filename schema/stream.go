@@ -599,6 +599,8 @@ type streamReaderWithConvert[T any] struct {
 	convert func(any) (T, error)
 
 	errWrapper func(error) error
+	onEOF      func() (T, error)
+	eofDone    bool
 }
 
 func newStreamReaderWithConvert[T any](origin iStreamReader, convert func(any) (T, error), opts ...ConvertOption) *StreamReader[T] {
@@ -613,6 +615,22 @@ func newStreamReaderWithConvert[T any](origin iStreamReader, convert func(any) (
 		errWrapper: opt.ErrWrapper,
 	}
 
+	if opt.OnEOF != nil {
+		typedOnEOF := opt.OnEOF
+		srw.onEOF = func() (T, error) {
+			v, err := typedOnEOF()
+			if err != nil {
+				var t T
+				return t, err
+			}
+			if v == nil {
+				var t T
+				return t, nil
+			}
+			return v.(T), nil
+		}
+	}
+
 	return &StreamReader[T]{
 		typ: readerTypeWithConvert,
 		srw: srw,
@@ -621,6 +639,7 @@ func newStreamReaderWithConvert[T any](origin iStreamReader, convert func(any) (
 
 type convertOptions struct {
 	ErrWrapper func(error) error
+	OnEOF      func() (any, error)
 }
 
 type ConvertOption func(*convertOptions)
@@ -634,6 +653,12 @@ type ConvertOption func(*convertOptions)
 func WithErrWrapper(wrapper func(error) error) ConvertOption {
 	return func(o *convertOptions) {
 		o.ErrWrapper = wrapper
+	}
+}
+
+func WithOnEOF(fn func() (any, error)) ConvertOption {
+	return func(o *convertOptions) {
+		o.OnEOF = fn
 	}
 }
 
@@ -673,7 +698,14 @@ func (srw *streamReaderWithConvert[T]) recv() (T, error) {
 		if err != nil {
 			var t T
 			if err == io.EOF {
-				return t, err
+				if srw.onEOF != nil && !srw.eofDone {
+					srw.eofDone = true
+					val, onEOFErr := srw.onEOF()
+					if onEOFErr != io.EOF {
+						return val, onEOFErr
+					}
+				}
+				return t, io.EOF
 			}
 			if srw.errWrapper != nil {
 				err = srw.errWrapper(err)

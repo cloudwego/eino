@@ -258,6 +258,10 @@ func (f *failoverModelWrapper) Generate(ctx context.Context, input []*schema.Mes
 		lastOutputMessage = result
 		lastErr = err
 
+		if errors.Is(err, ErrStreamCanceled) {
+			return result, err
+		}
+
 		if !f.needFailover(ctx, result, err) {
 			return result, err
 		}
@@ -300,6 +304,10 @@ func (f *failoverModelWrapper) Generate(ctx context.Context, input []*schema.Mes
 			return result, nil
 		}
 
+		if errors.Is(err, ErrStreamCanceled) {
+			return result, err
+		}
+
 		if !f.needFailover(ctx, result, err) {
 			return result, err
 		}
@@ -333,6 +341,9 @@ func (f *failoverModelWrapper) Stream(ctx context.Context, input []*schema.Messa
 		stream, err := f.inner.Stream(modelCtx, input, opts...)
 		if err != nil {
 			lastErr = err
+			if errors.Is(err, ErrStreamCanceled) {
+				return nil, err
+			}
 			if !f.needFailover(ctx, nil, err) {
 				return nil, err
 			}
@@ -347,6 +358,10 @@ func (f *failoverModelWrapper) Stream(ctx context.Context, input []*schema.Messa
 				lastOutputMessage = outMsg
 				lastErr = streamErr
 				returnCopy.Close()
+
+				if errors.Is(streamErr, ErrStreamCanceled) {
+					return nil, streamErr
+				}
 
 				if !f.needFailover(ctx, outMsg, streamErr) {
 					return nil, streamErr
@@ -389,6 +404,10 @@ func (f *failoverModelWrapper) Stream(ctx context.Context, input []*schema.Messa
 			lastErr = err
 			lastOutputMessage = nil
 
+			if errors.Is(err, ErrStreamCanceled) {
+				return nil, err
+			}
+
 			if !f.needFailover(ctx, nil, err) {
 				return nil, err
 			}
@@ -399,22 +418,6 @@ func (f *failoverModelWrapper) Stream(ctx context.Context, input []*schema.Messa
 			continue
 		}
 
-		// The stream returned by f.inner.Stream is already Copy'd by the inner eventSender layer: one
-		// copy is forwarded to the client in real time via events. Therefore consuming a copy here does
-		// NOT block client-side streaming.
-		//
-		// We Copy the stream into two readers:
-		//   - checkCopy: consumed synchronously to surface mid-stream errors and decide whether to fail over.
-		//   - returnCopy: returned to the caller (stateModelWrapper), which also consumes synchronously to
-		//     build state (AfterModelRewriteState), so waiting here adds no extra latency.
-		//
-		// If checkCopy errors and failover is allowed, we close returnCopy and retry with the next model.
-		// Otherwise we return returnCopy.
-		//
-		// NOTE on duplicate events during failover: when a retry happens, events from the failed attempt
-		// may already have been emitted to the client, and the retry will emit a new stream. Client-side
-		// handlers are expected to handle multiple rounds (e.g., reset on retry or deduplicate by attempt
-		// metadata).
 		copies := stream.Copy(2)
 		checkCopy := copies[0]
 		returnCopy := copies[1]
@@ -424,6 +427,10 @@ func (f *failoverModelWrapper) Stream(ctx context.Context, input []*schema.Messa
 			lastOutputMessage = outMsg
 			lastErr = streamErr
 			returnCopy.Close()
+
+			if errors.Is(streamErr, ErrStreamCanceled) {
+				return nil, streamErr
+			}
 
 			if !f.needFailover(ctx, outMsg, streamErr) {
 				return nil, streamErr

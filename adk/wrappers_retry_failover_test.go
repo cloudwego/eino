@@ -156,6 +156,215 @@ func TestRetryThenFailover_Generate_AllExhausted(t *testing.T) {
 	require.Equal(t, int32(2), atomic.LoadInt32(&m2Calls))
 }
 
+func TestErrStreamCanceled_Failover_NeverFailedOver(t *testing.T) {
+	var m1Calls int32
+	var failoverCalled int32
+
+	m1 := &fakeChatModel{
+		callbacksEnabled: true,
+		generate: func(_ context.Context, _ []*schema.Message, _ ...model.Option) (*schema.Message, error) {
+			return nil, errors.New("unused")
+		},
+		stream: func(_ context.Context, _ []*schema.Message, _ ...model.Option) (*schema.StreamReader[*schema.Message], error) {
+			atomic.AddInt32(&m1Calls, 1)
+			return streamWithMidError([]*schema.Message{
+				schema.AssistantMessage("partial", nil),
+			}, ErrStreamCanceled), nil
+		},
+	}
+
+	failoverCfg := &ModelFailoverConfig{
+		MaxRetries: 2,
+		ShouldFailover: func(_ context.Context, _ *schema.Message, err error) bool {
+			atomic.AddInt32(&failoverCalled, 1)
+			return true
+		},
+		GetFailoverModel: func(_ context.Context, _ *FailoverContext) (model.BaseChatModel, []*schema.Message, error) {
+			t.Fatal("GetFailoverModel should not be called for ErrStreamCanceled")
+			return nil, nil, nil
+		},
+	}
+
+	wrapped := buildModelWrappers(m1, &modelWrapperConfig{
+		failoverConfig: failoverCfg,
+	})
+
+	ctx := withChatModelAgentExecCtx(context.Background(), &chatModelAgentExecCtx{
+		failoverLastSuccessModel: m1,
+	})
+	_, err := wrapped.Stream(ctx, []*schema.Message{schema.UserMessage("hi")})
+	require.Error(t, err)
+	require.True(t, errors.Is(err, ErrStreamCanceled))
+	require.Equal(t, int32(1), atomic.LoadInt32(&m1Calls))
+	require.Equal(t, int32(0), atomic.LoadInt32(&failoverCalled))
+}
+
+func TestErrStreamCanceled_Generate_Failover_NeverFailedOver(t *testing.T) {
+	var m1Calls int32
+	var failoverCalled int32
+
+	m1 := &fakeChatModel{
+		callbacksEnabled: true,
+		generate: func(_ context.Context, _ []*schema.Message, _ ...model.Option) (*schema.Message, error) {
+			atomic.AddInt32(&m1Calls, 1)
+			return nil, ErrStreamCanceled
+		},
+		stream: func(_ context.Context, _ []*schema.Message, _ ...model.Option) (*schema.StreamReader[*schema.Message], error) {
+			return nil, errors.New("unused")
+		},
+	}
+
+	failoverCfg := &ModelFailoverConfig{
+		MaxRetries: 2,
+		ShouldFailover: func(_ context.Context, _ *schema.Message, err error) bool {
+			atomic.AddInt32(&failoverCalled, 1)
+			return true
+		},
+		GetFailoverModel: func(_ context.Context, _ *FailoverContext) (model.BaseChatModel, []*schema.Message, error) {
+			t.Fatal("GetFailoverModel should not be called for ErrStreamCanceled")
+			return nil, nil, nil
+		},
+	}
+
+	wrapped := buildModelWrappers(m1, &modelWrapperConfig{
+		failoverConfig: failoverCfg,
+	})
+
+	ctx := withChatModelAgentExecCtx(context.Background(), &chatModelAgentExecCtx{
+		failoverLastSuccessModel: m1,
+	})
+	_, err := wrapped.Generate(ctx, []*schema.Message{schema.UserMessage("hi")})
+	require.Error(t, err)
+	require.True(t, errors.Is(err, ErrStreamCanceled))
+	require.Equal(t, int32(1), atomic.LoadInt32(&m1Calls))
+	require.Equal(t, int32(0), atomic.LoadInt32(&failoverCalled))
+}
+
+func TestShouldRetry_Stream_RetryExhausted_TriggersFailover(t *testing.T) {
+	var m1Calls int32
+	var m2Calls int32
+
+	m1 := &fakeChatModel{
+		callbacksEnabled: true,
+		generate: func(_ context.Context, _ []*schema.Message, _ ...model.Option) (*schema.Message, error) {
+			return nil, errors.New("unused")
+		},
+		stream: func(_ context.Context, _ []*schema.Message, _ ...model.Option) (*schema.StreamReader[*schema.Message], error) {
+			atomic.AddInt32(&m1Calls, 1)
+			return schema.StreamReaderFromArray([]*schema.Message{schema.AssistantMessage("bad from m1", nil)}), nil
+		},
+	}
+	m2 := &fakeChatModel{
+		callbacksEnabled: true,
+		generate: func(_ context.Context, _ []*schema.Message, _ ...model.Option) (*schema.Message, error) {
+			return nil, errors.New("unused")
+		},
+		stream: func(_ context.Context, _ []*schema.Message, _ ...model.Option) (*schema.StreamReader[*schema.Message], error) {
+			atomic.AddInt32(&m2Calls, 1)
+			return schema.StreamReaderFromArray([]*schema.Message{schema.AssistantMessage("good from m2", nil)}), nil
+		},
+	}
+
+	retryCfg := &ModelRetryConfig{
+		MaxRetries: 1,
+		ShouldRetry: func(_ context.Context, retryCtx *RetryContext) *RetryDecision {
+			if retryCtx.OutputMessage != nil && retryCtx.OutputMessage.Content == "bad from m1" {
+				return &RetryDecision{ShouldRetry: true}
+			}
+			return &RetryDecision{ShouldRetry: false}
+		},
+		BackoffFunc: func(_ context.Context, _ int) time.Duration { return 0 },
+	}
+
+	failoverCfg := &ModelFailoverConfig{
+		MaxRetries: 1,
+		ShouldFailover: func(_ context.Context, _ *schema.Message, err error) bool {
+			return err != nil
+		},
+		GetFailoverModel: func(_ context.Context, _ *FailoverContext) (model.BaseChatModel, []*schema.Message, error) {
+			return m2, nil, nil
+		},
+	}
+
+	wrapped := buildModelWrappers(m1, &modelWrapperConfig{
+		retryConfig:    retryCfg,
+		failoverConfig: failoverCfg,
+	})
+
+	ctx := withChatModelAgentExecCtx(context.Background(), &chatModelAgentExecCtx{
+		failoverLastSuccessModel: m1,
+	})
+	sr, err := wrapped.Stream(ctx, []*schema.Message{schema.UserMessage("hi")})
+	require.NoError(t, err)
+	msgs, err := drainMessageStream(sr)
+	require.NoError(t, err)
+	require.Len(t, msgs, 1)
+	require.Equal(t, "good from m2", msgs[0].Content)
+	require.Equal(t, int32(2), atomic.LoadInt32(&m1Calls))
+	require.Equal(t, int32(1), atomic.LoadInt32(&m2Calls))
+}
+
+func TestShouldRetry_Generate_RetryExhausted_TriggersFailover(t *testing.T) {
+	var m1Calls int32
+	var m2Calls int32
+
+	m1 := &fakeChatModel{
+		callbacksEnabled: true,
+		generate: func(_ context.Context, _ []*schema.Message, _ ...model.Option) (*schema.Message, error) {
+			atomic.AddInt32(&m1Calls, 1)
+			return schema.AssistantMessage("bad from m1", nil), nil
+		},
+		stream: func(_ context.Context, _ []*schema.Message, _ ...model.Option) (*schema.StreamReader[*schema.Message], error) {
+			return nil, errors.New("unused")
+		},
+	}
+	m2 := &fakeChatModel{
+		callbacksEnabled: true,
+		generate: func(_ context.Context, _ []*schema.Message, _ ...model.Option) (*schema.Message, error) {
+			atomic.AddInt32(&m2Calls, 1)
+			return schema.AssistantMessage("good from m2", nil), nil
+		},
+		stream: func(_ context.Context, _ []*schema.Message, _ ...model.Option) (*schema.StreamReader[*schema.Message], error) {
+			return nil, errors.New("unused")
+		},
+	}
+
+	retryCfg := &ModelRetryConfig{
+		MaxRetries: 1,
+		ShouldRetry: func(_ context.Context, retryCtx *RetryContext) *RetryDecision {
+			if retryCtx.OutputMessage != nil && retryCtx.OutputMessage.Content == "bad from m1" {
+				return &RetryDecision{ShouldRetry: true}
+			}
+			return &RetryDecision{ShouldRetry: false}
+		},
+		BackoffFunc: func(_ context.Context, _ int) time.Duration { return 0 },
+	}
+
+	failoverCfg := &ModelFailoverConfig{
+		MaxRetries: 1,
+		ShouldFailover: func(_ context.Context, _ *schema.Message, err error) bool {
+			return err != nil
+		},
+		GetFailoverModel: func(_ context.Context, _ *FailoverContext) (model.BaseChatModel, []*schema.Message, error) {
+			return m2, nil, nil
+		},
+	}
+
+	wrapped := buildModelWrappers(m1, &modelWrapperConfig{
+		retryConfig:    retryCfg,
+		failoverConfig: failoverCfg,
+	})
+
+	ctx := withChatModelAgentExecCtx(context.Background(), &chatModelAgentExecCtx{
+		failoverLastSuccessModel: m1,
+	})
+	msg, err := wrapped.Generate(ctx, []*schema.Message{schema.UserMessage("hi")})
+	require.NoError(t, err)
+	require.Equal(t, "good from m2", msg.Content)
+	require.Equal(t, int32(2), atomic.LoadInt32(&m1Calls))
+	require.Equal(t, int32(1), atomic.LoadInt32(&m2Calls))
+}
+
 // TestRetryThenFailover_Stream_RetryExhaustedTriggersFailover tests stream path:
 // m1 stream always errors mid-way, retry exhausted, failover to m2 which succeeds.
 func TestRetryThenFailover_Stream_RetryExhaustedTriggersFailover(t *testing.T) {

@@ -19,6 +19,7 @@ package adk
 import (
 	"context"
 	"errors"
+	"io"
 	"reflect"
 
 	"github.com/cloudwego/eino/callbacks"
@@ -292,6 +293,9 @@ func (m *eventSenderModel) Generate(ctx context.Context, input []*schema.Message
 	}
 
 	execCtx := getChatModelAgentExecCtx(ctx)
+	if execCtx != nil && execCtx.suppressEventSend {
+		return result, nil
+	}
 	if execCtx == nil || execCtx.generator == nil {
 		return nil, errors.New("generator is nil when sending event in Generate: ensure agent state is properly initialized")
 	}
@@ -318,10 +322,7 @@ func (m *eventSenderModel) Stream(ctx context.Context, input []*schema.Message, 
 	streams := result.Copy(2)
 
 	eventStream := streams[0]
-	if errWrapper := m.buildErrWrapper(ctx); errWrapper != nil {
-		convertOpts := []schema.ConvertOption{
-			schema.WithErrWrapper(errWrapper),
-		}
+	if convertOpts := m.buildStreamConvertOptions(ctx); len(convertOpts) > 0 {
 		eventStream = schema.StreamReaderWithConvert(streams[0],
 			func(msg *schema.Message) (*schema.Message, error) { return msg, nil },
 			convertOpts...)
@@ -333,58 +334,89 @@ func (m *eventSenderModel) Stream(ctx context.Context, input []*schema.Message, 
 	return streams[1], nil
 }
 
-// buildErrWrapper constructs an error wrapper function for event streams.
-// It wraps stream errors as WillRetryError when retry or failover is configured,
-// so that flow.go:genAgentInput() can skip events from failed attempts instead of
-// treating them as fatal errors.
-func (m *eventSenderModel) buildErrWrapper(ctx context.Context) func(error) error {
+func (m *eventSenderModel) buildStreamConvertOptions(ctx context.Context) []schema.ConvertOption {
 	var retryAttempt int
 	_ = compose.ProcessState(ctx, func(_ context.Context, st *State) error {
 		retryAttempt = st.getRetryAttempt()
 		return nil
 	})
 
+	wrapWithCancelGuard := func(inner func(error) error) func(error) error {
+		return func(err error) error {
+			if errors.Is(err, ErrStreamCanceled) {
+				return err
+			}
+			return inner(err)
+		}
+	}
+
+	var opts []schema.ConvertOption
+
 	var retryWrapper func(error) error
 	if m.modelRetryConfig != nil {
 		if m.modelRetryConfig.ShouldRetry != nil {
-			hasRetriesLeft := retryAttempt < m.modelRetryConfig.MaxRetries
-			if hasRetriesLeft {
-				retryWrapper = func(err error) error {
-					return &WillRetryError{ErrStr: err.Error(), RetryAttempt: retryAttempt, err: err}
-				}
+			execCtx := getChatModelAgentExecCtx(ctx)
+			signal := (*retryVerdictSignal)(nil)
+			if execCtx != nil {
+				signal = execCtx.retryVerdictSignal
+			}
+			if signal != nil {
+				retryWrapper = wrapWithCancelGuard(func(err error) error {
+					verdict := <-signal.ch
+					if verdict.WillRetry {
+						return &WillRetryError{
+							ErrStr:       err.Error(),
+							RetryAttempt: verdict.RetryAttempt,
+							err:          err,
+						}
+					}
+					return err
+				})
+
+				opts = append(opts, schema.WithOnEOF(func() (any, error) {
+					verdict := <-signal.ch
+					if verdict.WillRetry {
+						return nil, &WillRetryError{
+							ErrStr:       verdict.Err.Error(),
+							RetryAttempt: verdict.RetryAttempt,
+							err:          verdict.Err,
+						}
+					}
+					return nil, io.EOF
+				}))
 			}
 		} else {
-			retryWrapper = genErrWrapper(ctx, m.modelRetryConfig.MaxRetries, retryAttempt, m.modelRetryConfig.IsRetryAble)
+			retryWrapper = wrapWithCancelGuard(
+				genErrWrapper(ctx, m.modelRetryConfig.MaxRetries, retryAttempt, m.modelRetryConfig.IsRetryAble),
+			)
 		}
 	}
 
 	hasFailover := m.modelFailoverConfig != nil
-	// failoverHasMoreAttempts is set by failoverModelWrapper before each inner call.
-	// It is true when additional failover attempts remain after the current one,
-	// meaning stream errors should be wrapped as WillRetryError so the flow layer
-	// skips them. On the final attempt it is false, so the error propagates normally.
 	failoverHasMore := getFailoverHasMoreAttempts(ctx)
 
 	if retryWrapper == nil && !(hasFailover && failoverHasMore) {
-		return nil
+		return opts
 	}
 
-	return func(err error) error {
-		// If retry is configured and will retry this error, use the retry wrapper's WillRetryError.
+	combinedErrWrapper := func(err error) error {
 		if retryWrapper != nil {
 			wrapped := retryWrapper(err)
 			if _, ok := wrapped.(*WillRetryError); ok {
 				return wrapped
 			}
 		}
-		// Retry won't handle this error (either exhausted or not configured), but
-		// failover still has more attempts remaining. Wrap it as WillRetryError so
-		// the flow layer skips this event from the failed attempt.
 		if hasFailover && failoverHasMore {
+			if errors.Is(err, ErrStreamCanceled) {
+				return err
+			}
 			return &WillRetryError{ErrStr: err.Error(), err: err}
 		}
 		return err
 	}
+	opts = append(opts, schema.WithErrWrapper(combinedErrWrapper))
+
+	return opts
 }
 
 func popToolGenAction(ctx context.Context, toolName string) *AgentAction {

@@ -45,8 +45,10 @@ type chatModelAgentExecCtx struct {
 	generator             *AsyncGenerator[*AgentEvent]
 	cancelCtx             *cancelContext
 
-	// failoverLastSuccessModel is the last success model only used in failover middleware.
 	failoverLastSuccessModel model.BaseChatModel
+
+	suppressEventSend  bool
+	retryVerdictSignal *retryVerdictSignal
 }
 
 func (e *chatModelAgentExecCtx) send(event *AgentEvent) {
