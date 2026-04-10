@@ -26,6 +26,7 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/cloudwego/eino/schema"
 )
@@ -166,6 +167,42 @@ func newAndRunTurnLoop[T any](ctx context.Context, cfg TurnLoopConfig[T]) *TurnL
 	return l
 }
 
+func newPreemptTestLoop(t *testing.T, agent *turnLoopCancellableMockAgent) *TurnLoop[string] {
+	t.Helper()
+
+	agentStarted := make(chan struct{})
+	agentStartedOnce := sync.Once{}
+
+	originalRunFunc := agent.runFunc
+	agent.runFunc = func(ctx context.Context, input *AgentInput) (*AgentOutput, error) {
+		agentStartedOnce.Do(func() { close(agentStarted) })
+		return originalRunFunc(ctx, input)
+	}
+
+	loop := newAndRunTurnLoop(context.Background(), TurnLoopConfig[string]{
+		PrepareAgent: func(ctx context.Context, _ *TurnLoop[string], consumed []string) (Agent, error) {
+			return agent, nil
+		},
+		GenInput: func(ctx context.Context, _ *TurnLoop[string], items []string) (*GenInputResult[string], error) {
+			return &GenInputResult[string]{
+				Input:     &AgentInput{Messages: []Message{schema.UserMessage(items[0])}},
+				Consumed:  []string{items[0]},
+				Remaining: items[1:],
+			}, nil
+		},
+	})
+
+	loop.Push("first")
+
+	select {
+	case <-agentStarted:
+	case <-time.After(1 * time.Second):
+		t.Fatal("agent did not start")
+	}
+
+	return loop
+}
+
 func TestTurnLoop_RunAndPush(t *testing.T) {
 	processedItems := make([]string, 0)
 	var mu sync.Mutex
@@ -197,7 +234,7 @@ func TestTurnLoop_RunAndPush(t *testing.T) {
 	defer mu.Unlock()
 
 	assert.NoError(t, result.ExitReason)
-	assert.True(t, len(processedItems) > 0, "should have processed at least one item")
+	assert.NotEmpty(t, processedItems, "should have processed at least one item")
 }
 
 func TestTurnLoop_PushReturnsErrorAfterStop(t *testing.T) {
@@ -296,7 +333,7 @@ func TestTurnLoop_UnhandledItemsOnStop(t *testing.T) {
 	close(blocked)
 
 	result := loop.Wait()
-	assert.True(t, len(result.UnhandledItems) >= 0, "should return unhandled items")
+	assert.NotEmpty(t, result.UnhandledItems, "should return unhandled items")
 }
 
 func TestTurnLoop_GenInputError(t *testing.T) {
@@ -368,7 +405,7 @@ func TestTurnLoop_BatchProcessing(t *testing.T) {
 	mu.Lock()
 	defer mu.Unlock()
 
-	assert.True(t, len(batches) > 0, "should have processed at least one batch")
+	assert.NotEmpty(t, batches, "should have processed at least one batch")
 }
 
 func TestTurnLoop_StopWithMode(t *testing.T) {
@@ -530,17 +567,13 @@ func TestTurnLoop_Preempt_DiscardsConsumedItems(t *testing.T) {
 
 	mu.Lock()
 	defer mu.Unlock()
-	assert.GreaterOrEqual(t, len(genInputResults), 2)
-	if len(genInputResults) >= 2 {
-		assert.NotContains(t, genInputResults[1], "first")
-		assert.Contains(t, genInputResults[1], "urgent")
-	}
+	require.GreaterOrEqual(t, len(genInputResults), 2)
+	assert.NotContains(t, genInputResults[1], "first")
+	assert.Contains(t, genInputResults[1], "urgent")
 }
 
 func TestTurnLoop_Preempt_WithAgentCancelMode(t *testing.T) {
-	agentStarted := make(chan struct{})
 	cancelFuncCalled := make(chan struct{})
-	agentStartedOnce := sync.Once{}
 	cancelFuncCalledOnce := sync.Once{}
 	firstCancelModeUsed := CancelImmediate
 	var cancelModeMu sync.Mutex
@@ -548,9 +581,6 @@ func TestTurnLoop_Preempt_WithAgentCancelMode(t *testing.T) {
 	agent := &turnLoopCancellableMockAgent{
 		name: "test",
 		runFunc: func(ctx context.Context, input *AgentInput) (*AgentOutput, error) {
-			agentStartedOnce.Do(func() {
-				close(agentStarted)
-			})
 			<-ctx.Done()
 			return &AgentOutput{}, nil
 		},
@@ -564,26 +594,7 @@ func TestTurnLoop_Preempt_WithAgentCancelMode(t *testing.T) {
 		},
 	}
 
-	loop := newAndRunTurnLoop(context.Background(), TurnLoopConfig[string]{
-		PrepareAgent: func(ctx context.Context, _ *TurnLoop[string], consumed []string) (Agent, error) {
-			return agent, nil
-		},
-		GenInput: func(ctx context.Context, _ *TurnLoop[string], items []string) (*GenInputResult[string], error) {
-			return &GenInputResult[string]{
-				Input:     &AgentInput{Messages: []Message{schema.UserMessage(items[0])}},
-				Consumed:  []string{items[0]},
-				Remaining: items[1:],
-			}, nil
-		},
-	})
-
-	loop.Push("first")
-
-	select {
-	case <-agentStarted:
-	case <-time.After(1 * time.Second):
-		t.Fatal("agent did not start")
-	}
+	loop := newPreemptTestLoop(t, agent)
 
 	loop.Push("urgent", WithPreempt[string](AfterToolCalls))
 
@@ -603,16 +614,13 @@ func TestTurnLoop_Preempt_WithAgentCancelMode(t *testing.T) {
 }
 
 func TestTurnLoop_PreemptAck_ClosesAfterCancelIsInitiated(t *testing.T) {
-	agentStarted := make(chan struct{})
 	cancelObserved := make(chan struct{})
 	agentFinishGate := make(chan struct{})
-	agentStartedOnce := sync.Once{}
 	cancelObservedOnce := sync.Once{}
 
 	agent := &turnLoopCancellableMockAgent{
 		name: "test",
 		runFunc: func(ctx context.Context, input *AgentInput) (*AgentOutput, error) {
-			agentStartedOnce.Do(func() { close(agentStarted) })
 			<-ctx.Done()
 			<-agentFinishGate
 			return &AgentOutput{}, nil
@@ -622,26 +630,7 @@ func TestTurnLoop_PreemptAck_ClosesAfterCancelIsInitiated(t *testing.T) {
 		},
 	}
 
-	loop := newAndRunTurnLoop(context.Background(), TurnLoopConfig[string]{
-		PrepareAgent: func(ctx context.Context, _ *TurnLoop[string], consumed []string) (Agent, error) {
-			return agent, nil
-		},
-		GenInput: func(ctx context.Context, _ *TurnLoop[string], items []string) (*GenInputResult[string], error) {
-			return &GenInputResult[string]{
-				Input:     &AgentInput{Messages: []Message{schema.UserMessage(items[0])}},
-				Consumed:  []string{items[0]},
-				Remaining: items[1:],
-			}, nil
-		},
-	})
-
-	_, _ = loop.Push("first")
-
-	select {
-	case <-agentStarted:
-	case <-time.After(1 * time.Second):
-		t.Fatal("agent did not start")
-	}
+	loop := newPreemptTestLoop(t, agent)
 
 	ok, ack := loop.Push("urgent", WithPreempt[string](AfterToolCalls))
 	assert.True(t, ok)
@@ -688,10 +677,8 @@ func TestTurnLoop_PreemptAck_ClosesImmediatelyIfLoopNotStarted(t *testing.T) {
 }
 
 func TestTurnLoop_Preempt_EscalatesOnSecondPreempt(t *testing.T) {
-	agentStarted := make(chan struct{})
 	firstCancelSeen := make(chan struct{})
 	agentFinishGate := make(chan struct{})
-	agentStartedOnce := sync.Once{}
 	firstCancelOnce := sync.Once{}
 
 	var ccPtr atomic.Value
@@ -699,7 +686,6 @@ func TestTurnLoop_Preempt_EscalatesOnSecondPreempt(t *testing.T) {
 	agent := &turnLoopCancellableMockAgent{
 		name: "test",
 		runFunc: func(ctx context.Context, input *AgentInput) (*AgentOutput, error) {
-			agentStartedOnce.Do(func() { close(agentStarted) })
 			<-ctx.Done()
 			<-agentFinishGate
 			return &AgentOutput{}, nil
@@ -710,25 +696,7 @@ func TestTurnLoop_Preempt_EscalatesOnSecondPreempt(t *testing.T) {
 		},
 	}
 
-	loop := newAndRunTurnLoop(context.Background(), TurnLoopConfig[string]{
-		PrepareAgent: func(ctx context.Context, _ *TurnLoop[string], consumed []string) (Agent, error) {
-			return agent, nil
-		},
-		GenInput: func(ctx context.Context, _ *TurnLoop[string], items []string) (*GenInputResult[string], error) {
-			return &GenInputResult[string]{
-				Input:     &AgentInput{Messages: []Message{schema.UserMessage(items[0])}},
-				Consumed:  []string{items[0]},
-				Remaining: items[1:],
-			}, nil
-		},
-	})
-
-	loop.Push("first")
-	select {
-	case <-agentStarted:
-	case <-time.After(1 * time.Second):
-		t.Fatal("agent did not start")
-	}
+	loop := newPreemptTestLoop(t, agent)
 
 	loop.Push("urgent1", WithPreempt[string](AfterChatModel))
 	select {
@@ -770,10 +738,8 @@ func TestTurnLoop_Preempt_EscalatesOnSecondPreempt(t *testing.T) {
 }
 
 func TestTurnLoop_Preempt_JoinsSafePointModesOnSecondPreempt(t *testing.T) {
-	agentStarted := make(chan struct{})
 	firstCancelSeen := make(chan struct{})
 	agentFinishGate := make(chan struct{})
-	agentStartedOnce := sync.Once{}
 	firstCancelOnce := sync.Once{}
 
 	var ccPtr atomic.Value
@@ -781,7 +747,6 @@ func TestTurnLoop_Preempt_JoinsSafePointModesOnSecondPreempt(t *testing.T) {
 	agent := &turnLoopCancellableMockAgent{
 		name: "test",
 		runFunc: func(ctx context.Context, input *AgentInput) (*AgentOutput, error) {
-			agentStartedOnce.Do(func() { close(agentStarted) })
 			<-ctx.Done()
 			<-agentFinishGate
 			return &AgentOutput{}, nil
@@ -792,25 +757,7 @@ func TestTurnLoop_Preempt_JoinsSafePointModesOnSecondPreempt(t *testing.T) {
 		},
 	}
 
-	loop := newAndRunTurnLoop(context.Background(), TurnLoopConfig[string]{
-		PrepareAgent: func(ctx context.Context, _ *TurnLoop[string], consumed []string) (Agent, error) {
-			return agent, nil
-		},
-		GenInput: func(ctx context.Context, _ *TurnLoop[string], items []string) (*GenInputResult[string], error) {
-			return &GenInputResult[string]{
-				Input:     &AgentInput{Messages: []Message{schema.UserMessage(items[0])}},
-				Consumed:  []string{items[0]},
-				Remaining: items[1:],
-			}, nil
-		},
-	})
-
-	loop.Push("first")
-	select {
-	case <-agentStarted:
-	case <-time.After(1 * time.Second):
-		t.Fatal("agent did not start")
-	}
+	loop := newPreemptTestLoop(t, agent)
 
 	loop.Push("urgent1", WithPreempt[string](AfterChatModel))
 	select {
@@ -1094,7 +1041,7 @@ func TestTurnLoop_GetAgentError_RecoverConsumed(t *testing.T) {
 
 	result := loop.Wait()
 	assert.ErrorIs(t, result.ExitReason, agentErr)
-	assert.True(t, len(result.UnhandledItems) >= 1, "should recover at least the consumed item and remaining")
+	assert.NotEmpty(t, result.UnhandledItems, "should recover at least the consumed item and remaining")
 }
 
 func TestTurnLoop_GenInputError_RecoverItems(t *testing.T) {
@@ -1294,7 +1241,7 @@ func TestTurnLoop_ContextCancelAfterGenInput_RecoverItems(t *testing.T) {
 
 	result := loop.Wait()
 	assert.ErrorIs(t, result.ExitReason, context.Canceled)
-	assert.True(t, len(result.UnhandledItems) >= 1, "should recover consumed and remaining items")
+	assert.NotEmpty(t, result.UnhandledItems, "should recover consumed and remaining items")
 }
 
 func TestTurnLoop_OnAgentEventsReceivesEvents(t *testing.T) {
@@ -1341,7 +1288,7 @@ func TestTurnLoop_OnAgentEventsReceivesEvents(t *testing.T) {
 
 	mu.Lock()
 	defer mu.Unlock()
-	assert.True(t, len(receivedConsumed) > 0, "should have received consumed items")
+	assert.NotEmpty(t, receivedConsumed, "should have received consumed items")
 }
 
 func TestTurnLoop_StopDuringAgentExecution(t *testing.T) {
@@ -2414,25 +2361,6 @@ func TestTurnLoop_ResumeWithParams(t *testing.T) {
 	_ = exit2
 }
 
-func TestTurnLoop_StopOptionsArePassed(t *testing.T) {
-	loop := newAndRunTurnLoop(context.Background(), TurnLoopConfig[string]{
-		GenInput: func(ctx context.Context, _ *TurnLoop[string], items []string) (*GenInputResult[string], error) {
-			return &GenInputResult[string]{
-				Input:    &AgentInput{Messages: []Message{schema.UserMessage(items[0])}},
-				Consumed: items,
-			}, nil
-		},
-		PrepareAgent: func(ctx context.Context, _ *TurnLoop[string], consumed []string) (Agent, error) {
-			return &turnLoopMockAgent{name: "test"}, nil
-		},
-	})
-
-	loop.Stop(WithGraceful())
-
-	result := loop.Wait()
-	assert.NoError(t, result.ExitReason)
-}
-
 func TestTurnLoop_Stop_EscalatesCancelMode(t *testing.T) {
 	ctx := context.Background()
 	agentStarted := make(chan *cancelContext, 1)
@@ -2588,7 +2516,7 @@ func TestTurnLoop_PushFromOnAgentEvents(t *testing.T) {
 
 	result := loop.Wait()
 	assert.NoError(t, result.ExitReason)
-	assert.GreaterOrEqual(t, atomic.LoadInt32(&pushCount), int32(2))
+	assert.Equal(t, int32(2), atomic.LoadInt32(&pushCount))
 }
 
 // Tests for NewTurnLoop: the permissive API where Push, Stop, and Wait are
@@ -4390,4 +4318,46 @@ func TestTurnLoop_SkipCheckpoint_Sticky(t *testing.T) {
 	_, exists := store.m[cpID]
 	store.mu.Unlock()
 	assert.False(t, exists, "no checkpoint should be saved when SkipCheckpoint was set in any Stop call")
+}
+
+func TestWithGracefulTimeout_NonPositive_Panics(t *testing.T) {
+	assert.PanicsWithValue(t, "adk: WithGracefulTimeout: gracePeriod must be positive",
+		func() { WithGracefulTimeout(0) })
+	assert.PanicsWithValue(t, "adk: WithGracefulTimeout: gracePeriod must be positive",
+		func() { WithGracefulTimeout(-1 * time.Second) })
+}
+
+func TestWithPreempt_ZeroSafePoint_Panics(t *testing.T) {
+	assert.PanicsWithValue(t, "adk: SafePoint must not be zero; use AfterToolCalls, AfterChatModel, or AnySafePoint",
+		func() { WithPreempt[string](SafePoint(0)) })
+}
+
+func TestWithPreemptTimeout_ZeroSafePoint_Panics(t *testing.T) {
+	assert.PanicsWithValue(t, "adk: SafePoint must not be zero; use AfterToolCalls, AfterChatModel, or AnySafePoint",
+		func() { WithPreemptTimeout[string](SafePoint(0), time.Second) })
+}
+
+func TestSafePoint_ToCancelMode(t *testing.T) {
+	assert.Equal(t, CancelAfterToolCalls, AfterToolCalls.toCancelMode())
+	assert.Equal(t, CancelAfterChatModel, AfterChatModel.toCancelMode())
+	assert.Equal(t, CancelAfterToolCalls|CancelAfterChatModel, AnySafePoint.toCancelMode())
+}
+
+func TestNewTurnLoop_NilGenInput_Panics(t *testing.T) {
+	assert.PanicsWithValue(t, "adk: NewTurnLoop: GenInput is required", func() {
+		NewTurnLoop(TurnLoopConfig[string]{PrepareAgent: func(ctx context.Context, _ *TurnLoop[string], consumed []string) (Agent, error) { return nil, nil }})
+	})
+}
+
+func TestNewTurnLoop_NilPrepareAgent_Panics(t *testing.T) {
+	assert.PanicsWithValue(t, "adk: NewTurnLoop: PrepareAgent is required", func() {
+		NewTurnLoop(TurnLoopConfig[string]{GenInput: func(ctx context.Context, _ *TurnLoop[string], items []string) (*GenInputResult[string], error) {
+			return nil, nil
+		}})
+	})
+}
+
+func TestDeriveChild_NilParent_ReturnsNil(t *testing.T) {
+	var cc *cancelContext
+	assert.Nil(t, cc.deriveChild(context.Background()))
 }

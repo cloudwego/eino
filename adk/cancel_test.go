@@ -142,6 +142,51 @@ func (s *cancelTestStore) Get(_ context.Context, key string) ([]byte, bool, erro
 	return v, ok, nil
 }
 
+func assertHasCancelError(t *testing.T, events []*AgentEvent) {
+	t.Helper()
+	for _, e := range events {
+		var ce *CancelError
+		if e.Err != nil && errors.As(e.Err, &ce) {
+			return
+		}
+	}
+	t.Fatal("expected CancelError in events")
+}
+
+func drainAndAssertCancelError(t *testing.T, iter *AsyncIterator[*AgentEvent]) {
+	t.Helper()
+	for {
+		event, ok := iter.Next()
+		if !ok {
+			break
+		}
+		var ce *CancelError
+		if event.Err != nil && errors.As(event.Err, &ce) {
+			return
+		}
+	}
+	t.Fatal("expected CancelError in event stream")
+}
+
+func drainEventsAndAssertCancelError(t *testing.T, iter *AsyncIterator[*AgentEvent]) []*AgentEvent {
+	t.Helper()
+	var events []*AgentEvent
+	hasCancelError := false
+	for {
+		event, ok := iter.Next()
+		if !ok {
+			break
+		}
+		var ce *CancelError
+		if event.Err != nil && errors.As(event.Err, &ce) {
+			hasCancelError = true
+		}
+		events = append(events, event)
+	}
+	assert.True(t, hasCancelError, "expected CancelError in event stream")
+	return events
+}
+
 func TestCancelContext(t *testing.T) {
 	t.Run("BasicCancelContext", func(t *testing.T) {
 		cc := newCancelContext()
@@ -237,16 +282,9 @@ func TestWithCancel_WithTools(t *testing.T) {
 			t.Fatal("Timed out waiting for events")
 		}
 
-		assert.True(t, len(events) > 0)
+		assert.NotEmpty(t, events)
 
-		hasCancelError := false
-		for _, e := range events {
-			var cancelErr *CancelError
-			if e.Err != nil && errors.As(e.Err, &cancelErr) {
-				hasCancelError = true
-			}
-		}
-		assert.True(t, hasCancelError, "Should have CancelError event after cancel")
+		assertHasCancelError(t, events)
 	})
 
 	t.Run("CancelAfterChatModel_DuringToolCall", func(t *testing.T) {
@@ -317,7 +355,7 @@ func TestWithCancel_WithTools(t *testing.T) {
 			events = append(events, event)
 		}
 
-		assert.True(t, len(events) > 0)
+		assert.NotEmpty(t, events)
 		assert.True(t, atomic.LoadInt32(&st.callCount) >= 1, "Tool should have been called")
 	})
 
@@ -388,7 +426,7 @@ func TestWithCancel_WithTools(t *testing.T) {
 			events = append(events, event)
 		}
 
-		assert.True(t, len(events) > 0)
+		assert.NotEmpty(t, events)
 		assert.True(t, atomic.LoadInt32(&st.callCount) >= 1, "Tool should have been called")
 	})
 
@@ -777,16 +815,9 @@ func TestWithCancel_Streaming(t *testing.T) {
 			t.Fatal("Timed out waiting for events")
 		}
 
-		assert.True(t, len(events) > 0)
+		assert.NotEmpty(t, events)
 
-		hasCancelError := false
-		for _, e := range events {
-			var ce *CancelError
-			if e.Err != nil && errors.As(e.Err, &ce) {
-				hasCancelError = true
-			}
-		}
-		assert.True(t, hasCancelError, "Should have CancelError event after cancel")
+		assertHasCancelError(t, events)
 	})
 
 	t.Run("CancelAfterToolCalls_Streaming", func(t *testing.T) {
@@ -859,7 +890,7 @@ func TestWithCancel_Streaming(t *testing.T) {
 			events = append(events, event)
 		}
 
-		assert.True(t, len(events) > 0)
+		assert.NotEmpty(t, events)
 		assert.True(t, atomic.LoadInt32(&st.callCount) >= 1, "Tool should have been called")
 	})
 }
@@ -991,7 +1022,7 @@ func TestWithCancel_Resume(t *testing.T) {
 			resumeEvents = append(resumeEvents, event)
 		}
 
-		assert.True(t, len(resumeEvents) > 0, "Resume should produce events")
+		assert.NotEmpty(t, resumeEvents, "Resume should produce events")
 	})
 
 	t.Run("Resume_ThenCancel", func(t *testing.T) {
@@ -1108,7 +1139,7 @@ func TestWithCancel_Resume(t *testing.T) {
 		elapsed := time.Since(start)
 
 		assert.True(t, elapsed < 1*time.Second, "Resume should return quickly after cancel, elapsed: %v", elapsed)
-		assert.True(t, len(resumeEvents) > 0)
+		assert.NotEmpty(t, resumeEvents)
 
 		hasCancelError := false
 		for _, e := range resumeEvents {
@@ -1492,21 +1523,7 @@ func TestWithCancel_SequentialAgent(t *testing.T) {
 		err = handle.Wait()
 		assert.NoError(t, err, "Cancel during second agent should succeed, not return ErrExecutionCompleted")
 
-		var events []*AgentEvent
-		hasCancelError := false
-		for {
-			event, ok := iter.Next()
-			if !ok {
-				break
-			}
-			var ce *CancelError
-			if event.Err != nil && errors.As(event.Err, &ce) {
-				hasCancelError = true
-			}
-			events = append(events, event)
-		}
-
-		assert.True(t, hasCancelError, "Should have CancelError event")
+		drainEventsAndAssertCancelError(t, iter)
 	})
 }
 
@@ -1565,19 +1582,7 @@ func TestWithCancel_LoopAgent(t *testing.T) {
 		err = handle.Wait()
 		assert.NoError(t, err, "Cancel during loop iteration should succeed")
 
-		hasCancelError := false
-		for {
-			event, ok := iter.Next()
-			if !ok {
-				break
-			}
-			var ce *CancelError
-			if event.Err != nil && errors.As(event.Err, &ce) {
-				hasCancelError = true
-			}
-		}
-
-		assert.True(t, hasCancelError, "Should have CancelError event")
+		drainAndAssertCancelError(t, iter)
 	})
 }
 
@@ -1624,22 +1629,10 @@ func TestWithCancel_ParallelAgent(t *testing.T) {
 		err = handle.Wait()
 		assert.NoError(t, err, "Cancel during parallel agents should succeed")
 
-		var events []*AgentEvent
-		hasCancelError := false
-		for {
-			event, ok := iter.Next()
-			if !ok {
-				break
-			}
-			var ce *CancelError
-			if event.Err != nil && errors.As(event.Err, &ce) {
-				hasCancelError = true
-			}
-			events = append(events, event)
-		}
+		events := drainEventsAndAssertCancelError(t, iter)
 		elapsed := time.Since(start)
 
-		assert.True(t, hasCancelError, "Should have CancelError event")
+		_ = events
 		assert.True(t, elapsed < 3*time.Second, "Should complete quickly after cancel, elapsed: %v", elapsed)
 	})
 }
@@ -1708,20 +1701,9 @@ func TestWithCancel_SupervisorAgent(t *testing.T) {
 		err = handle.Wait()
 		assert.NoError(t, err, "Cancel during sub-agent should succeed")
 
-		hasCancelError := false
-		for {
-			event, ok := iter.Next()
-			if !ok {
-				break
-			}
-			var ce *CancelError
-			if event.Err != nil && errors.As(event.Err, &ce) {
-				hasCancelError = true
-			}
-		}
+		drainAndAssertCancelError(t, iter)
 		elapsed := time.Since(start)
 
-		assert.True(t, hasCancelError, "Should have CancelError event")
 		assert.True(t, elapsed < 3*time.Second, "Should complete quickly after cancel, elapsed: %v", elapsed)
 	})
 }
@@ -2303,7 +2285,7 @@ func TestCancel_SequentialWorkflow_CancelAfterChatModel(t *testing.T) {
 		assert.Nil(t, event.Err, "Should not have error during resume")
 		resumeEvents = append(resumeEvents, event)
 	}
-	assert.True(t, len(resumeEvents) > 0, "Resume should produce events")
+	assert.NotEmpty(t, resumeEvents, "Resume should produce events")
 }
 
 func TestCancelImmediate_OrphanedToolGoroutine_NoPanic(t *testing.T) {
@@ -3442,7 +3424,7 @@ func TestCancel_LoopWorkflow_CancelAfterChatModel(t *testing.T) {
 		assert.Nil(t, event.Err, "Should not have error during resume")
 		resumeEvents = append(resumeEvents, event)
 	}
-	assert.True(t, len(resumeEvents) > 0, "Resume should produce events")
+	assert.NotEmpty(t, resumeEvents, "Resume should produce events")
 }
 
 func TestCancel_NestedWorkflow_AgentTool_CancelAfterChatModel(t *testing.T) {
@@ -3742,5 +3724,5 @@ func TestCancel_CancelAfterToolCalls_InSequentialWorkflow(t *testing.T) {
 		assert.Nil(t, event.Err, "Should not have error during resume")
 		resumeEvents = append(resumeEvents, event)
 	}
-	assert.True(t, len(resumeEvents) > 0, "Resume should produce events")
+	assert.NotEmpty(t, resumeEvents, "Resume should produce events")
 }

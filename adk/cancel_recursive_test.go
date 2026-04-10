@@ -28,314 +28,368 @@ import (
 	"github.com/cloudwego/eino/compose"
 )
 
-func TestDeriveChild_Shallow_DoesNotPropagateSafePoint(t *testing.T) {
-	parent := newCancelContext()
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	child := parent.deriveChild(ctx)
-	defer child.markDone()
-
-	parent.triggerCancel(CancelAfterChatModel)
-
-	time.Sleep(200 * time.Millisecond)
-	assert.False(t, child.shouldCancel())
-}
-
-func TestDeriveChild_Recursive_PropagatesSafePoint(t *testing.T) {
-	parent := newCancelContext()
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	child := parent.deriveChild(ctx)
-	defer child.markDone()
-
-	parent.setRecursive(true)
-	parent.triggerCancel(CancelAfterChatModel)
-
+func assertNotClosedWithin(t *testing.T, ch <-chan struct{}, d time.Duration) {
+	t.Helper()
 	select {
-	case <-child.cancelChan:
-	case <-time.After(1 * time.Second):
-		t.Fatal("child did not receive cancel within 1s")
+	case <-ch:
+		t.Fatal("channel was closed but should not have been")
+	case <-time.After(d):
 	}
-	assert.True(t, child.shouldCancel())
 }
 
-func TestDeriveChild_Shallow_ImmediateDoesNotPropagate(t *testing.T) {
-	parent := newCancelContext()
+func setupParentChild(t *testing.T) (parent, child *cancelContext, cleanup func()) {
+	parent = newCancelContext()
 	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	child := parent.deriveChild(ctx)
-	defer child.markDone()
-
-	parent.triggerImmediateCancel()
-
-	time.Sleep(200 * time.Millisecond)
-	assert.False(t, child.isImmediateCancelled())
-}
-
-func TestDeriveChild_Recursive_ImmediatePropagates(t *testing.T) {
-	parent := newCancelContext()
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	child := parent.deriveChild(ctx)
-	defer child.markDone()
-
-	parent.setRecursive(true)
-	parent.triggerImmediateCancel()
-
-	select {
-	case <-child.immediateChan:
-	case <-time.After(1 * time.Second):
-		t.Fatal("child did not receive immediate cancel within 1s")
-	}
-	assert.True(t, child.isImmediateCancelled())
-}
-
-func TestRecursiveCancel_EscalateFromNonRecursive(t *testing.T) {
-	parent := newCancelContext()
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	child := parent.deriveChild(ctx)
-	defer child.markDone()
-
-	parent.triggerCancel(CancelAfterChatModel)
-
-	time.Sleep(200 * time.Millisecond)
-	assert.False(t, child.shouldCancel())
-
-	parent.setRecursive(true)
-
-	select {
-	case <-child.cancelChan:
-	case <-time.After(1 * time.Second):
-		t.Fatal("child did not receive cancel after escalation within 1s")
-	}
-	assert.True(t, child.shouldCancel())
-}
-
-func TestRecursiveCancel_EscalateImmediate(t *testing.T) {
-	parent := newCancelContext()
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	child := parent.deriveChild(ctx)
-	defer child.markDone()
-
-	parent.triggerImmediateCancel()
-
-	time.Sleep(200 * time.Millisecond)
-	assert.False(t, child.isImmediateCancelled())
-
-	parent.setRecursive(true)
-
-	select {
-	case <-child.immediateChan:
-	case <-time.After(1 * time.Second):
-		t.Fatal("child did not receive immediate cancel after escalation within 1s")
-	}
-	assert.True(t, child.isImmediateCancelled())
-}
-
-func TestRecursive_Grandchild_Propagation(t *testing.T) {
-	a := newCancelContext()
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	b := a.deriveChild(ctx)
-	defer b.markDone()
-	c := b.deriveChild(ctx)
-	defer c.markDone()
-
-	a.setRecursive(true)
-	a.triggerCancel(CancelAfterChatModel)
-
-	select {
-	case <-b.cancelChan:
-	case <-time.After(1 * time.Second):
-		t.Fatal("B did not receive cancel within 1s")
-	}
-
-	select {
-	case <-c.cancelChan:
-	case <-time.After(1 * time.Second):
-		t.Fatal("C did not receive cancel within 1s")
-	}
-
-	assert.True(t, b.shouldCancel())
-	assert.True(t, c.shouldCancel())
-}
-
-func TestShallow_Grandchild_NoPropagation(t *testing.T) {
-	a := newCancelContext()
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	b := a.deriveChild(ctx)
-	defer b.markDone()
-	c := b.deriveChild(ctx)
-	defer c.markDone()
-
-	a.triggerCancel(CancelAfterChatModel)
-
-	time.Sleep(200 * time.Millisecond)
-	assert.False(t, b.shouldCancel())
-	assert.False(t, c.shouldCancel())
-}
-
-func TestRace_SetRecursiveConcurrentWithCancelChan(t *testing.T) {
-	for i := 0; i < 100; i++ {
-		parent := newCancelContext()
-		ctx, cancel := context.WithCancel(context.Background())
-
-		child := parent.deriveChild(ctx)
-
-		var wg sync.WaitGroup
-		wg.Add(2)
-
-		go func() {
-			defer wg.Done()
-			parent.setRecursive(true)
-		}()
-
-		go func() {
-			defer wg.Done()
-			parent.triggerCancel(CancelAfterChatModel)
-		}()
-
-		wg.Wait()
-
-		select {
-		case <-child.cancelChan:
-		case <-time.After(1 * time.Second):
-			t.Fatalf("iteration %d: child did not receive cancel within 1s", i)
-		}
-
-		assert.True(t, child.shouldCancel())
+	child = parent.deriveChild(ctx)
+	cleanup = func() {
 		child.markDone()
 		cancel()
 	}
+	t.Cleanup(cleanup)
+	return parent, child, cleanup
 }
 
-func TestRace_ChildCompletesBeforeEscalation(t *testing.T) {
-	parent := newCancelContext()
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+func TestDeriveChild(t *testing.T) {
+	t.Run("Shallow", func(t *testing.T) {
+		t.Run("DoesNotPropagateSafePoint", func(t *testing.T) {
+			parent, child, _ := setupParentChild(t)
 
-	child := parent.deriveChild(ctx)
+			parent.triggerCancel(CancelAfterChatModel)
 
-	parent.triggerCancel(CancelAfterChatModel)
-	time.Sleep(50 * time.Millisecond)
+			assertNotClosedWithin(t, child.cancelChan, 50*time.Millisecond)
+		})
 
-	child.markDone()
-	time.Sleep(50 * time.Millisecond)
+		t.Run("ImmediateDoesNotPropagate", func(t *testing.T) {
+			parent, child, _ := setupParentChild(t)
 
-	parent.setRecursive(true)
-	time.Sleep(200 * time.Millisecond)
+			parent.triggerImmediateCancel()
 
-	assert.False(t, child.shouldCancel())
+			assertNotClosedWithin(t, child.immediateChan, 50*time.Millisecond)
+		})
+
+		t.Run("GrandchildNoPropagation", func(t *testing.T) {
+			a := newCancelContext()
+			ctx, cancel := context.WithCancel(context.Background())
+
+			b := a.deriveChild(ctx)
+			c := b.deriveChild(ctx)
+			t.Cleanup(func() {
+				c.markDone()
+				b.markDone()
+				cancel()
+			})
+
+			a.triggerCancel(CancelAfterChatModel)
+
+			assertNotClosedWithin(t, b.cancelChan, 50*time.Millisecond)
+			assertNotClosedWithin(t, c.cancelChan, 50*time.Millisecond)
+		})
+
+		t.Run("NeverRecursive_GoroutineCleanup", func(t *testing.T) {
+			runtime.GC()
+			time.Sleep(50 * time.Millisecond)
+			before := runtime.NumGoroutine()
+
+			parent := newCancelContext()
+			ctx, cancel := context.WithCancel(context.Background())
+
+			child := parent.deriveChild(ctx)
+
+			parent.triggerCancel(CancelAfterChatModel)
+			time.Sleep(100 * time.Millisecond)
+
+			child.markDone()
+			cancel()
+
+			time.Sleep(200 * time.Millisecond)
+			runtime.GC()
+			time.Sleep(50 * time.Millisecond)
+			after := runtime.NumGoroutine()
+
+			assert.InDelta(t, before, after, 5, "goroutine leak detected: before=%d after=%d", before, after)
+		})
+	})
+
+	t.Run("Recursive", func(t *testing.T) {
+		t.Run("PropagatesSafePoint", func(t *testing.T) {
+			parent, child, _ := setupParentChild(t)
+
+			parent.setRecursive(true)
+			parent.triggerCancel(CancelAfterChatModel)
+
+			select {
+			case <-child.cancelChan:
+			case <-time.After(1 * time.Second):
+				t.Fatal("child did not receive cancel within 1s")
+			}
+			assert.True(t, child.shouldCancel())
+		})
+
+		t.Run("ImmediatePropagates", func(t *testing.T) {
+			parent, child, _ := setupParentChild(t)
+
+			parent.setRecursive(true)
+			parent.triggerImmediateCancel()
+
+			select {
+			case <-child.immediateChan:
+			case <-time.After(1 * time.Second):
+				t.Fatal("child did not receive immediate cancel within 1s")
+			}
+			assert.True(t, child.isImmediateCancelled())
+		})
+
+		t.Run("GrandchildPropagation", func(t *testing.T) {
+			a := newCancelContext()
+			ctx, cancel := context.WithCancel(context.Background())
+
+			b := a.deriveChild(ctx)
+			c := b.deriveChild(ctx)
+			t.Cleanup(func() {
+				c.markDone()
+				b.markDone()
+				cancel()
+			})
+
+			a.setRecursive(true)
+			a.triggerCancel(CancelAfterChatModel)
+
+			select {
+			case <-b.cancelChan:
+			case <-time.After(1 * time.Second):
+				t.Fatal("B did not receive cancel within 1s")
+			}
+
+			select {
+			case <-c.cancelChan:
+			case <-time.After(1 * time.Second):
+				t.Fatal("C did not receive cancel within 1s")
+			}
+
+			assert.True(t, b.shouldCancel())
+			assert.True(t, c.shouldCancel())
+		})
+
+		t.Run("SetBeforeCancel", func(t *testing.T) {
+			parent, child, _ := setupParentChild(t)
+
+			parent.setRecursive(true)
+
+			parent.triggerCancel(CancelAfterChatModel)
+
+			select {
+			case <-child.cancelChan:
+			case <-time.After(1 * time.Second):
+				t.Fatal("child did not receive cancel within 1s")
+			}
+			assert.True(t, child.shouldCancel())
+		})
+
+		t.Run("AfterRecursiveAndCancelAlreadySet", func(t *testing.T) {
+			parent := newCancelContext()
+			ctx, cancel := context.WithCancel(context.Background())
+
+			parent.setRecursive(true)
+			parent.triggerCancel(CancelAfterChatModel)
+
+			child := parent.deriveChild(ctx)
+			t.Cleanup(func() {
+				child.markDone()
+				cancel()
+			})
+
+			select {
+			case <-child.cancelChan:
+			case <-time.After(1 * time.Second):
+				t.Fatal("child did not immediately receive cancel")
+			}
+			assert.True(t, child.shouldCancel())
+		})
+	})
+
+	t.Run("Escalation", func(t *testing.T) {
+		t.Run("EscalateFromNonRecursive", func(t *testing.T) {
+			parent, child, _ := setupParentChild(t)
+
+			parent.triggerCancel(CancelAfterChatModel)
+
+			assertNotClosedWithin(t, child.cancelChan, 50*time.Millisecond)
+
+			parent.setRecursive(true)
+
+			select {
+			case <-child.cancelChan:
+			case <-time.After(1 * time.Second):
+				t.Fatal("child did not receive cancel after escalation within 1s")
+			}
+			assert.True(t, child.shouldCancel())
+		})
+
+		t.Run("EscalateImmediate", func(t *testing.T) {
+			parent, child, _ := setupParentChild(t)
+
+			parent.triggerImmediateCancel()
+
+			assertNotClosedWithin(t, child.immediateChan, 50*time.Millisecond)
+
+			parent.setRecursive(true)
+
+			select {
+			case <-child.immediateChan:
+			case <-time.After(1 * time.Second):
+				t.Fatal("child did not receive immediate cancel after escalation within 1s")
+			}
+			assert.True(t, child.isImmediateCancelled())
+		})
+	})
 }
 
-func TestRace_MultipleChildren_PartialCompletion(t *testing.T) {
-	parent := newCancelContext()
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+func TestDeriveChild_Race(t *testing.T) {
+	t.Run("SetRecursiveConcurrentWithCancelChan", func(t *testing.T) {
+		for i := 0; i < 100; i++ {
+			parent := newCancelContext()
+			ctx, cancel := context.WithCancel(context.Background())
 
-	child1 := parent.deriveChild(ctx)
-	child2 := parent.deriveChild(ctx)
+			child := parent.deriveChild(ctx)
 
-	parent.triggerCancel(CancelAfterChatModel)
-	time.Sleep(50 * time.Millisecond)
+			var wg sync.WaitGroup
+			wg.Add(2)
 
-	child1.markDone()
-	time.Sleep(50 * time.Millisecond)
+			go func() {
+				defer wg.Done()
+				parent.setRecursive(true)
+			}()
 
-	parent.setRecursive(true)
+			go func() {
+				defer wg.Done()
+				parent.triggerCancel(CancelAfterChatModel)
+			}()
 
-	select {
-	case <-child2.cancelChan:
-	case <-time.After(1 * time.Second):
-		t.Fatal("running child did not receive cancel within 1s")
-	}
+			wg.Wait()
 
-	assert.True(t, child2.shouldCancel())
-	assert.False(t, child1.shouldCancel())
-	child2.markDone()
-}
+			select {
+			case <-child.cancelChan:
+			case <-time.After(1 * time.Second):
+				t.Fatalf("iteration %d: child did not receive cancel within 1s", i)
+			}
 
-func TestRace_ContextCancelConcurrentWithRecursive(t *testing.T) {
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
+			assert.True(t, child.shouldCancel())
+			child.markDone()
+			cancel()
+		}
+	})
 
+	t.Run("ChildCompletesBeforeEscalation", func(t *testing.T) {
 		parent := newCancelContext()
 		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
 
 		child := parent.deriveChild(ctx)
 
 		parent.triggerCancel(CancelAfterChatModel)
+		time.Sleep(50 * time.Millisecond)
+
+		child.markDone()
+		time.Sleep(50 * time.Millisecond)
+
+		parent.setRecursive(true)
+
+		assertNotClosedWithin(t, child.cancelChan, 50*time.Millisecond)
+	})
+
+	t.Run("MultipleChildren_PartialCompletion", func(t *testing.T) {
+		parent := newCancelContext()
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+
+		child1 := parent.deriveChild(ctx)
+		child2 := parent.deriveChild(ctx)
+
+		parent.triggerCancel(CancelAfterChatModel)
+		time.Sleep(50 * time.Millisecond)
+
+		child1.markDone()
+		time.Sleep(50 * time.Millisecond)
+
+		parent.setRecursive(true)
+
+		select {
+		case <-child2.cancelChan:
+		case <-time.After(1 * time.Second):
+			t.Fatal("running child did not receive cancel within 1s")
+		}
+
+		assert.True(t, child2.shouldCancel())
+		assert.False(t, child1.shouldCancel())
+		child2.markDone()
+	})
+
+	t.Run("ContextCancelConcurrentWithRecursive", func(t *testing.T) {
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+
+			parent := newCancelContext()
+			ctx, cancel := context.WithCancel(context.Background())
+
+			child := parent.deriveChild(ctx)
+
+			parent.triggerCancel(CancelAfterChatModel)
+
+			var wg sync.WaitGroup
+			wg.Add(2)
+
+			go func() {
+				defer wg.Done()
+				cancel()
+			}()
+
+			go func() {
+				defer wg.Done()
+				parent.setRecursive(true)
+			}()
+
+			wg.Wait()
+			child.markDone()
+		}()
+
+		select {
+		case <-done:
+		case <-time.After(1 * time.Second):
+			t.Fatal("deadlock detected")
+		}
+	})
+
+	t.Run("ConcurrentSetRecursive", func(t *testing.T) {
+		parent := newCancelContext()
 
 		var wg sync.WaitGroup
-		wg.Add(2)
+		for i := 0; i < 10; i++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				parent.setRecursive(true)
+			}()
+		}
 
+		done := make(chan struct{})
 		go func() {
-			defer wg.Done()
-			cancel()
+			wg.Wait()
+			close(done)
 		}()
 
-		go func() {
-			defer wg.Done()
-			parent.setRecursive(true)
-		}()
+		select {
+		case <-done:
+		case <-time.After(1 * time.Second):
+			t.Fatal("deadlock or panic in concurrent setRecursive")
+		}
 
-		wg.Wait()
-		child.markDone()
-	}()
-
-	select {
-	case <-done:
-	case <-time.After(1 * time.Second):
-		t.Fatal("deadlock detected")
-	}
-}
-
-func TestRace_ConcurrentSetRecursive(t *testing.T) {
-	parent := newCancelContext()
-
-	var wg sync.WaitGroup
-	for i := 0; i < 10; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			parent.setRecursive(true)
-		}()
-	}
-
-	done := make(chan struct{})
-	go func() {
-		wg.Wait()
-		close(done)
-	}()
-
-	select {
-	case <-done:
-	case <-time.After(1 * time.Second):
-		t.Fatal("deadlock or panic in concurrent setRecursive")
-	}
-
-	assert.True(t, parent.isRecursive())
+		assert.True(t, parent.isRecursive())
+	})
 }
 
 func TestGracePeriod_OnlyWhenRecursive(t *testing.T) {
-	parent := newCancelContext()
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	child := parent.deriveChild(ctx)
-	defer child.markDone()
+	parent, _, _ := setupParentChild(t)
 
 	var nonRecursiveOptCount int
 	wrappedNonRecursive := parent.wrapGraphInterruptWithGracePeriod(func(opts ...compose.GraphInterruptOption) {
@@ -352,67 +406,4 @@ func TestGracePeriod_OnlyWhenRecursive(t *testing.T) {
 	})
 	wrappedRecursive()
 	assert.Equal(t, 1, recursiveOptCount)
-}
-
-func TestDeriveChild_NeverRecursive_GoroutineCleanup(t *testing.T) {
-	runtime.GC()
-	time.Sleep(50 * time.Millisecond)
-	before := runtime.NumGoroutine()
-
-	parent := newCancelContext()
-	ctx, cancel := context.WithCancel(context.Background())
-
-	child := parent.deriveChild(ctx)
-
-	parent.triggerCancel(CancelAfterChatModel)
-	time.Sleep(100 * time.Millisecond)
-
-	child.markDone()
-	cancel()
-
-	time.Sleep(200 * time.Millisecond)
-	runtime.GC()
-	time.Sleep(50 * time.Millisecond)
-	after := runtime.NumGoroutine()
-
-	assert.InDelta(t, before, after, 5, "goroutine leak detected: before=%d after=%d", before, after)
-}
-
-func TestDeriveChild_AfterRecursiveAndCancelAlreadySet(t *testing.T) {
-	parent := newCancelContext()
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	parent.setRecursive(true)
-	parent.triggerCancel(CancelAfterChatModel)
-
-	child := parent.deriveChild(ctx)
-	defer child.markDone()
-
-	select {
-	case <-child.cancelChan:
-	case <-time.After(1 * time.Second):
-		t.Fatal("child did not immediately receive cancel")
-	}
-	assert.True(t, child.shouldCancel())
-}
-
-func TestRecursive_SetBeforeCancel(t *testing.T) {
-	parent := newCancelContext()
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	child := parent.deriveChild(ctx)
-	defer child.markDone()
-
-	parent.setRecursive(true)
-
-	parent.triggerCancel(CancelAfterChatModel)
-
-	select {
-	case <-child.cancelChan:
-	case <-time.After(1 * time.Second):
-		t.Fatal("child did not receive cancel within 1s")
-	}
-	assert.True(t, child.shouldCancel())
 }
