@@ -369,9 +369,9 @@ func TestRetryThenFailover(t *testing.T) {
 			MaxRetries: 1,
 			ShouldRetry: func(_ context.Context, retryCtx *RetryContext) *RetryDecision {
 				if retryCtx.OutputMessage != nil && retryCtx.OutputMessage.Content == "bad from m1" {
-					return &RetryDecision{ShouldRetry: true}
+					return &RetryDecision{Retry: true}
 				}
-				return &RetryDecision{ShouldRetry: false}
+				return &RetryDecision{Retry: false}
 			},
 			BackoffFunc: func(_ context.Context, _ int) time.Duration { return 0 },
 		}
@@ -421,9 +421,9 @@ func TestRetryThenFailover(t *testing.T) {
 			MaxRetries: 1,
 			ShouldRetry: func(_ context.Context, retryCtx *RetryContext) *RetryDecision {
 				if retryCtx.OutputMessage != nil && retryCtx.OutputMessage.Content == "bad from m1" {
-					return &RetryDecision{ShouldRetry: true}
+					return &RetryDecision{Retry: true}
 				}
-				return &RetryDecision{ShouldRetry: false}
+				return &RetryDecision{Retry: false}
 			},
 			BackoffFunc: func(_ context.Context, _ int) time.Duration { return 0 },
 		}

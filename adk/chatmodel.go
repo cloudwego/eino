@@ -47,6 +47,9 @@ type chatModelAgentExecCtx struct {
 
 	failoverLastSuccessModel model.BaseChatModel
 
+	// suppressEventSend prevents eventSenderModel from emitting AgentEvents for the current
+	// Generate call. Set to true before each rejected retry attempt and reset to false after.
+	// Invariant: any code path that emits model output events MUST check this flag.
 	suppressEventSend  bool
 	retryVerdictSignal *retryVerdictSignal
 }

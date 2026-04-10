@@ -127,9 +127,9 @@ type RetryContext struct {
 
 // RetryDecision represents the decision made by ModelRetryConfig.ShouldRetry.
 type RetryDecision struct {
-	// ShouldRetry indicates whether the model call should be retried.
+	// Retry indicates whether the model call should be retried.
 	// If false, the model output (or error) is accepted as-is, unless RewriteError is set.
-	ShouldRetry bool
+	Retry bool
 
 	// RewriteError, when non-nil, overrides the return value of the model call with this error.
 	// The agent run will fail with this error.
@@ -141,15 +141,15 @@ type RetryDecision struct {
 	//   - When the model returns an error, but you want to replace it with a different,
 	//     more descriptive error (e.g., adding context or wrapping).
 	//
-	// When ShouldRetry is true, RewriteError is ignored.
-	// When ShouldRetry is false and RewriteError is non-nil, the model call returns
+	// When Retry is true, RewriteError is ignored.
+	// When Retry is false and RewriteError is non-nil, the model call returns
 	// RewriteError regardless of whether the original call had an error or a message.
 	RewriteError error
 
 	// ModifiedInputMessages, when non-nil, replaces the input messages for the next retry.
 	//
 	// This enables advanced recovery strategies like context compression or message trimming.
-	// Only used when ShouldRetry is true. Ignored when ShouldRetry is false.
+	// Only used when Retry is true. Ignored when Retry is false.
 	ModifiedInputMessages []*schema.Message
 
 	// PersistModifiedInputMessages controls whether ModifiedInputMessages are written
@@ -160,7 +160,7 @@ type RetryDecision struct {
 	// When false (default), the modified messages are only used for the next retry attempt
 	// within this retry cycle.
 	//
-	// Only used when ShouldRetry is true and ModifiedInputMessages is non-nil.
+	// Only used when Retry is true and ModifiedInputMessages is non-nil.
 	PersistModifiedInputMessages bool
 
 	// ModifiedOptions, when non-nil, provides additional model options for the next retry.
@@ -170,7 +170,7 @@ type RetryDecision struct {
 	// Note: options accumulate across retries. If ShouldRetry returns ModifiedOptions on every
 	// attempt, each set is appended to the previous ones. Only the last value for each option
 	// key takes effect, but earlier values remain in the slice.
-	// Only used when ShouldRetry is true. Ignored when ShouldRetry is false.
+	// Only used when Retry is true. Ignored when Retry is false.
 	ModifiedOptions []model.Option
 
 	// Backoff specifies the duration to wait before the next retry attempt.
@@ -179,7 +179,7 @@ type RetryDecision struct {
 	//
 	// This allows the ShouldRetry callback to dynamically control retry timing based on
 	// the specific error or problematic message encountered.
-	// Only used when ShouldRetry is true. Ignored when ShouldRetry is false.
+	// Only used when Retry is true. Ignored when Retry is false.
 	Backoff time.Duration
 }
 
@@ -194,7 +194,7 @@ type ModelRetryConfig struct {
 	// ShouldRetry determines how to handle a model call result.
 	// It receives context information about the current attempt including the output message
 	// and/or error, and returns a decision on whether to retry, what to modify, etc.
-	// Returning nil is treated as &RetryDecision{ShouldRetry: false} (accept as-is).
+	// Returning nil is treated as &RetryDecision{Retry: false} (accept as-is).
 	//
 	// If nil, defaults to retrying on any non-nil error (backward compatible with IsRetryAble).
 	//
@@ -396,7 +396,7 @@ func (r *retryModelWrapper) generateWithShouldRetry(ctx context.Context, input [
 			decision = &RetryDecision{}
 		}
 
-		if !decision.ShouldRetry {
+		if !decision.Retry {
 			if decision.RewriteError != nil {
 				return nil, decision.RewriteError
 			}
@@ -493,6 +493,9 @@ func (r *retryModelWrapper) streamWithShouldRetry(ctx context.Context, input []*
 	var lastErr error
 	var curSignal *retryVerdictSignal
 
+	// Panic recovery for verdict signal: if ShouldRetry panics, the onEOF/errWrapper closures in
+	// buildStreamConvertOptions will block forever on signal.ch, causing a goroutine leak. This
+	// defer ensures a verdict is always sent, even on panic, before re-panicking.
 	defer func() {
 		if p := recover(); p != nil {
 			if curSignal != nil {
@@ -540,7 +543,7 @@ func (r *retryModelWrapper) streamWithShouldRetry(ctx context.Context, input []*
 				decision = &RetryDecision{}
 			}
 
-			if !decision.ShouldRetry {
+			if !decision.Retry {
 				if decision.RewriteError != nil {
 					return nil, decision.RewriteError
 				}
@@ -562,6 +565,11 @@ func (r *retryModelWrapper) streamWithShouldRetry(ctx context.Context, input []*
 			continue
 		}
 
+		// Split the stream: checkCopy is consumed synchronously here to build the complete
+		// message for ShouldRetry inspection; returnCopy is returned to the caller and may
+		// already be consumed downstream in parallel. The verdict signal bridges the two:
+		// once ShouldRetry decides, the signal tells returnCopy's errWrapper/onEOF whether
+		// to pass through normally or inject a WillRetryError.
 		copies := stream.Copy(2)
 		checkCopy := copies[0]
 		returnCopy := copies[1]
@@ -586,7 +594,7 @@ func (r *retryModelWrapper) streamWithShouldRetry(ctx context.Context, input []*
 			decision = &RetryDecision{}
 		}
 
-		if !decision.ShouldRetry {
+		if !decision.Retry {
 			signal.ch <- retryVerdict{WillRetry: false}
 
 			if decision.RewriteError != nil {

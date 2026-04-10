@@ -1254,12 +1254,12 @@ func TestChatModelAgentRetry_ShouldRetry_RejectMessage_Stream(t *testing.T) {
 			MaxRetries: 3,
 			ShouldRetry: func(ctx context.Context, retryCtx *RetryContext) *RetryDecision {
 				if retryCtx.Err != nil {
-					return &RetryDecision{ShouldRetry: true}
+					return &RetryDecision{Retry: true}
 				}
 				if retryCtx.OutputMessage != nil && strings.Contains(retryCtx.OutputMessage.Content, "bad") {
-					return &RetryDecision{ShouldRetry: true}
+					return &RetryDecision{Retry: true}
 				}
-				return &RetryDecision{ShouldRetry: false}
+				return &RetryDecision{Retry: false}
 			},
 			BackoffFunc: instantBackoff,
 		},
@@ -1312,9 +1312,9 @@ func TestShouldRetry_Generate(t *testing.T) {
 				ShouldRetry: func(ctx context.Context, retryCtx *RetryContext) *RetryDecision {
 					capturedContexts = append(capturedContexts, retryCtx)
 					if retryCtx.OutputMessage != nil && retryCtx.OutputMessage.Content == "bad" {
-						return &RetryDecision{ShouldRetry: true}
+						return &RetryDecision{Retry: true}
 					}
-					return &RetryDecision{ShouldRetry: false}
+					return &RetryDecision{Retry: false}
 				},
 				BackoffFunc: instantBackoff,
 			},
@@ -1369,11 +1369,11 @@ func TestShouldRetry_Generate(t *testing.T) {
 				ShouldRetry: func(ctx context.Context, retryCtx *RetryContext) *RetryDecision {
 					if retryCtx.OutputMessage != nil && strings.Contains(retryCtx.OutputMessage.Content, "unrecoverable") {
 						return &RetryDecision{
-							ShouldRetry:  false,
+							Retry:  false,
 							RewriteError: fatalErr,
 						}
 					}
-					return &RetryDecision{ShouldRetry: false}
+					return &RetryDecision{Retry: false}
 				},
 				BackoffFunc: instantBackoff,
 			},
@@ -1419,11 +1419,11 @@ func TestShouldRetry_Generate(t *testing.T) {
 				ShouldRetry: func(ctx context.Context, retryCtx *RetryContext) *RetryDecision {
 					if retryCtx.Err != nil {
 						return &RetryDecision{
-							ShouldRetry:  false,
+							Retry:  false,
 							RewriteError: wrappedErr,
 						}
 					}
-					return &RetryDecision{ShouldRetry: false}
+					return &RetryDecision{Retry: false}
 				},
 				BackoffFunc: instantBackoff,
 			},
@@ -1475,11 +1475,11 @@ func TestShouldRetry_Generate(t *testing.T) {
 				ShouldRetry: func(ctx context.Context, retryCtx *RetryContext) *RetryDecision {
 					if retryCtx.Err != nil {
 						return &RetryDecision{
-							ShouldRetry:     true,
+							Retry:     true,
 							ModifiedOptions: []model.Option{model.WithMaxTokens(8192)},
 						}
 					}
-					return &RetryDecision{ShouldRetry: false}
+					return &RetryDecision{Retry: false}
 				},
 				BackoffFunc: instantBackoff,
 			},
@@ -1531,7 +1531,7 @@ func TestShouldRetry_Generate(t *testing.T) {
 				ShouldRetry: func(ctx context.Context, retryCtx *RetryContext) *RetryDecision {
 					if retryCtx.Err != nil {
 						return &RetryDecision{
-							ShouldRetry: true,
+							Retry: true,
 							ModifiedInputMessages: []*schema.Message{
 								schema.SystemMessage("compressed instruction"),
 								schema.UserMessage("Hello"),
@@ -1539,7 +1539,7 @@ func TestShouldRetry_Generate(t *testing.T) {
 							PersistModifiedInputMessages: false,
 						}
 					}
-					return &RetryDecision{ShouldRetry: false}
+					return &RetryDecision{Retry: false}
 				},
 				BackoffFunc: instantBackoff,
 			},
@@ -1589,11 +1589,11 @@ func TestShouldRetry_Generate(t *testing.T) {
 				ShouldRetry: func(ctx context.Context, retryCtx *RetryContext) *RetryDecision {
 					if retryCtx.Err != nil {
 						return &RetryDecision{
-							ShouldRetry: true,
+							Retry: true,
 							Backoff:     customBackoff,
 						}
 					}
-					return &RetryDecision{ShouldRetry: false}
+					return &RetryDecision{Retry: false}
 				},
 			},
 		})
@@ -1640,9 +1640,9 @@ func TestShouldRetry_Generate(t *testing.T) {
 				MaxRetries: 1,
 				ShouldRetry: func(ctx context.Context, retryCtx *RetryContext) *RetryDecision {
 					if retryCtx.OutputMessage != nil && retryCtx.OutputMessage.Content == "bad" {
-						return &RetryDecision{ShouldRetry: true}
+						return &RetryDecision{Retry: true}
 					}
-					return &RetryDecision{ShouldRetry: false}
+					return &RetryDecision{Retry: false}
 				},
 				BackoffFunc: instantBackoff,
 			},
@@ -1686,7 +1686,7 @@ func TestShouldRetry_Generate(t *testing.T) {
 			ModelRetryConfig: &ModelRetryConfig{
 				MaxRetries: 2,
 				ShouldRetry: func(ctx context.Context, retryCtx *RetryContext) *RetryDecision {
-					return &RetryDecision{ShouldRetry: true}
+					return &RetryDecision{Retry: true}
 				},
 				BackoffFunc: instantBackoff,
 			},
@@ -1731,7 +1731,7 @@ func TestShouldRetry_Generate(t *testing.T) {
 			ModelRetryConfig: &ModelRetryConfig{
 				MaxRetries: 2,
 				ShouldRetry: func(ctx context.Context, retryCtx *RetryContext) *RetryDecision {
-					return &RetryDecision{ShouldRetry: false}
+					return &RetryDecision{Retry: false}
 				},
 				BackoffFunc: instantBackoff,
 			},
@@ -1779,7 +1779,7 @@ func TestShouldRetry_Generate(t *testing.T) {
 			ModelRetryConfig: &ModelRetryConfig{
 				MaxRetries: 5,
 				ShouldRetry: func(ctx context.Context, retryCtx *RetryContext) *RetryDecision {
-					return &RetryDecision{ShouldRetry: true}
+					return &RetryDecision{Retry: true}
 				},
 				BackoffFunc: func(_ context.Context, _ int) time.Duration { return 10 * time.Second },
 			},
@@ -1844,9 +1844,9 @@ func TestShouldRetry_Stream(t *testing.T) {
 				MaxRetries: 3,
 				ShouldRetry: func(ctx context.Context, retryCtx *RetryContext) *RetryDecision {
 					if retryCtx.Err != nil {
-						return &RetryDecision{ShouldRetry: true}
+						return &RetryDecision{Retry: true}
 					}
-					return &RetryDecision{ShouldRetry: false}
+					return &RetryDecision{Retry: false}
 				},
 				BackoffFunc: instantBackoff,
 			},
@@ -1893,11 +1893,11 @@ func TestShouldRetry_Stream(t *testing.T) {
 				ShouldRetry: func(ctx context.Context, retryCtx *RetryContext) *RetryDecision {
 					if retryCtx.Err != nil && strings.Contains(retryCtx.Err.Error(), "overloaded") {
 						return &RetryDecision{
-							ShouldRetry:  false,
+							Retry:  false,
 							RewriteError: fatalErr,
 						}
 					}
-					return &RetryDecision{ShouldRetry: false}
+					return &RetryDecision{Retry: false}
 				},
 				BackoffFunc: instantBackoff,
 			},
@@ -1950,11 +1950,11 @@ func TestShouldRetry_Stream(t *testing.T) {
 				ShouldRetry: func(ctx context.Context, retryCtx *RetryContext) *RetryDecision {
 					if retryCtx.OutputMessage != nil && strings.Contains(retryCtx.OutputMessage.Content, "hallucinated") {
 						return &RetryDecision{
-							ShouldRetry:  false,
+							Retry:  false,
 							RewriteError: fatalErr,
 						}
 					}
-					return &RetryDecision{ShouldRetry: false}
+					return &RetryDecision{Retry: false}
 				},
 				BackoffFunc: instantBackoff,
 			},
@@ -2014,9 +2014,9 @@ func TestShouldRetry_Stream(t *testing.T) {
 				ShouldRetry: func(ctx context.Context, retryCtx *RetryContext) *RetryDecision {
 					capturedContexts = append(capturedContexts, retryCtx)
 					if retryCtx.Err != nil {
-						return &RetryDecision{ShouldRetry: true}
+						return &RetryDecision{Retry: true}
 					}
-					return &RetryDecision{ShouldRetry: false}
+					return &RetryDecision{Retry: false}
 				},
 				BackoffFunc: instantBackoff,
 			},
@@ -2094,7 +2094,7 @@ func TestShouldRetry_Stream(t *testing.T) {
 				ShouldRetry: func(ctx context.Context, retryCtx *RetryContext) *RetryDecision {
 					if retryCtx.OutputMessage != nil && strings.Contains(retryCtx.OutputMessage.Content, "too long") {
 						return &RetryDecision{
-							ShouldRetry: true,
+							Retry: true,
 							ModifiedInputMessages: []*schema.Message{
 								schema.SystemMessage("compressed instruction"),
 								schema.UserMessage("summarized history"),
@@ -2103,7 +2103,7 @@ func TestShouldRetry_Stream(t *testing.T) {
 							ModifiedOptions:              []model.Option{model.WithMaxTokens(16384)},
 						}
 					}
-					return &RetryDecision{ShouldRetry: false}
+					return &RetryDecision{Retry: false}
 				},
 				BackoffFunc: instantBackoff,
 			},
@@ -2158,9 +2158,9 @@ func TestShouldRetry_Stream(t *testing.T) {
 				MaxRetries: 1,
 				ShouldRetry: func(ctx context.Context, retryCtx *RetryContext) *RetryDecision {
 					if retryCtx.OutputMessage != nil && retryCtx.OutputMessage.Content == "bad" {
-						return &RetryDecision{ShouldRetry: true}
+						return &RetryDecision{Retry: true}
 					}
-					return &RetryDecision{ShouldRetry: false}
+					return &RetryDecision{Retry: false}
 				},
 				BackoffFunc: instantBackoff,
 			},
@@ -2237,9 +2237,9 @@ func TestShouldRetry_Stream(t *testing.T) {
 				MaxRetries: 1,
 				ShouldRetry: func(ctx context.Context, retryCtx *RetryContext) *RetryDecision {
 					if retryCtx.Err != nil {
-						return &RetryDecision{ShouldRetry: true}
+						return &RetryDecision{Retry: true}
 					}
-					return &RetryDecision{ShouldRetry: false}
+					return &RetryDecision{Retry: false}
 				},
 				BackoffFunc: instantBackoff,
 			},
@@ -2302,7 +2302,7 @@ func TestShouldRetry_Stream(t *testing.T) {
 			ModelRetryConfig: &ModelRetryConfig{
 				MaxRetries: 2,
 				ShouldRetry: func(ctx context.Context, retryCtx *RetryContext) *RetryDecision {
-					return &RetryDecision{ShouldRetry: false}
+					return &RetryDecision{Retry: false}
 				},
 				BackoffFunc: instantBackoff,
 			},
@@ -2360,7 +2360,7 @@ func TestShouldRetry_Stream(t *testing.T) {
 			ModelRetryConfig: &ModelRetryConfig{
 				MaxRetries: 2,
 				ShouldRetry: func(ctx context.Context, retryCtx *RetryContext) *RetryDecision {
-					return &RetryDecision{ShouldRetry: true}
+					return &RetryDecision{Retry: true}
 				},
 				BackoffFunc: instantBackoff,
 			},
@@ -2475,7 +2475,7 @@ func TestErrStreamCanceled(t *testing.T) {
 				MaxRetries: 3,
 				ShouldRetry: func(ctx context.Context, retryCtx *RetryContext) *RetryDecision {
 					atomic.AddInt32(&shouldRetryCalled, 1)
-					return &RetryDecision{ShouldRetry: true}
+					return &RetryDecision{Retry: true}
 				},
 				BackoffFunc: instantBackoff,
 			},
@@ -2588,7 +2588,7 @@ func TestErrStreamCanceled(t *testing.T) {
 				MaxRetries: 3,
 				ShouldRetry: func(ctx context.Context, retryCtx *RetryContext) *RetryDecision {
 					atomic.AddInt32(&shouldRetryCalled, 1)
-					return &RetryDecision{ShouldRetry: true}
+					return &RetryDecision{Retry: true}
 				},
 				BackoffFunc: instantBackoff,
 			},

@@ -334,6 +334,23 @@ func (m *eventSenderModel) Stream(ctx context.Context, input []*schema.Message, 
 	return streams[1], nil
 }
 
+// buildStreamConvertOptions constructs ConvertOption hooks that gate stream termination behind
+// the retry verdict signal protocol.
+//
+// Verdict signal lifecycle:
+//   - streamWithShouldRetry creates a new retryVerdictSignal per retry attempt, stores it in
+//     execCtx.retryVerdictSignal, and sends exactly one retryVerdict after ShouldRetry decides.
+//   - The closures below capture a *retryVerdictSignal that is nil at closure-creation time; they
+//     read the live value from execCtx.retryVerdictSignal, which is set before each model call.
+//
+// Two hooks cooperate to cover all stream termination paths:
+//   - WithErrWrapper intercepts mid-stream errors. It blocks on the verdict channel to decide
+//     whether to wrap the error as WillRetryError (rejected attempt) or pass it through (accepted).
+//   - WithOnEOF intercepts clean EOF (successful stream). It blocks on the verdict channel to
+//     either inject a WillRetryError (rejected) or pass through io.EOF (accepted).
+//
+// Exactly one of the two hooks fires per stream: errWrapper for error termination, onEOF for
+// clean EOF. Both read from the same buffered(1) verdict channel, ensuring no deadlock.
 func (m *eventSenderModel) buildStreamConvertOptions(ctx context.Context) []schema.ConvertOption {
 	var retryAttempt int
 	_ = compose.ProcessState(ctx, func(_ context.Context, st *State) error {
@@ -797,6 +814,9 @@ func (w *stateModelWrapper) Generate(ctx context.Context, input []*schema.Messag
 		return nil, err
 	}
 
+	// Re-read State.Messages after Generate completes: when ShouldRetry uses
+	// PersistModifiedInputMessages, applyDecisionForRetry writes modified messages to State.
+	// We must pick up those changes before appending the model result.
 	if w.modelRetryConfig != nil && w.modelRetryConfig.ShouldRetry != nil {
 		_ = compose.ProcessState(ctx, func(_ context.Context, st *State) error {
 			state.Messages = st.Messages
@@ -875,6 +895,7 @@ func (w *stateModelWrapper) Stream(ctx context.Context, input []*schema.Message,
 		return nil, err
 	}
 
+	// Re-read State.Messages after Stream completes: same rationale as in Generate above.
 	if w.modelRetryConfig != nil && w.modelRetryConfig.ShouldRetry != nil {
 		_ = compose.ProcessState(ctx, func(_ context.Context, st *State) error {
 			state.Messages = st.Messages
