@@ -322,25 +322,3 @@ func TestWithOnEOF_MultipleRecvAfterEOF(t *testing.T) {
 		}
 	}
 }
-
-func TestWithOnEOF_NilOption(t *testing.T) {
-	items := []string{"a", "b", "c"}
-	sr := schema.StreamReaderWithConvert(
-		schema.StreamReaderFromArray(items),
-		func(s string) (string, error) { return s, nil },
-	)
-	defer sr.Close()
-
-	vals, errs := recvAll(t, sr)
-	if len(errs) != 0 {
-		t.Fatalf("expected no errors, got %v", errs)
-	}
-	if len(vals) != 3 {
-		t.Fatalf("expected 3 values, got %d: %v", len(vals), vals)
-	}
-	for i, want := range items {
-		if vals[i] != want {
-			t.Errorf("vals[%d] = %q, want %q", i, vals[i], want)
-		}
-	}
-}

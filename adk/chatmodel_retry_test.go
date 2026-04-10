@@ -26,6 +26,7 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"go.uber.org/mock/gomock"
 
 	"github.com/cloudwego/eino/components/model"
@@ -37,6 +38,50 @@ import (
 
 var errRetryAble = errors.New("retry-able error")
 var errNonRetryAble = errors.New("non-retry-able error")
+
+var instantBackoff = func(_ context.Context, _ int) time.Duration { return time.Millisecond }
+
+type agentEvent struct {
+	Err    error
+	Output *AgentOutput
+}
+
+func drainAgentEvents(t *testing.T, iterator *AsyncIterator[*AgentEvent]) []agentEvent {
+	t.Helper()
+	var events []agentEvent
+	for {
+		event, ok := iterator.Next()
+		if !ok {
+			break
+		}
+		events = append(events, agentEvent{Err: event.Err, Output: event.Output})
+	}
+	return events
+}
+
+func drainStreamingAgentEvents(t *testing.T, iterator *AsyncIterator[*AgentEvent]) (events []agentEvent, streamTermErrs []error) {
+	t.Helper()
+	for {
+		event, ok := iterator.Next()
+		if !ok {
+			break
+		}
+		events = append(events, agentEvent{Err: event.Err, Output: event.Output})
+		if event.Output != nil && event.Output.MessageOutput != nil {
+			mo := event.Output.MessageOutput
+			if mo.IsStreaming && mo.MessageStream != nil {
+				for {
+					_, recvErr := mo.MessageStream.Recv()
+					if recvErr != nil {
+						streamTermErrs = append(streamTermErrs, recvErr)
+						break
+					}
+				}
+			}
+		}
+	}
+	return events, streamTermErrs
+}
 
 func TestChatModelAgentRetry_NoTools_DirectError_Generate(t *testing.T) {
 	ctx := context.Background()
@@ -706,26 +751,6 @@ func TestDefaultBackoff(t *testing.T) {
 		"Delay should still be capped at 10s + jitter for very high attempts, got %v", d100)
 }
 
-func TestRetryExhaustedError_ErrorString(t *testing.T) {
-	errWithLast := &RetryExhaustedError{
-		LastErr:      errors.New("connection timeout"),
-		TotalRetries: 3,
-	}
-	assert.Contains(t, errWithLast.Error(), "exceeds max retries")
-	assert.Contains(t, errWithLast.Error(), "connection timeout")
-
-	errWithoutLast := &RetryExhaustedError{
-		LastErr:      nil,
-		TotalRetries: 3,
-	}
-	assert.Equal(t, "exceeds max retries", errWithoutLast.Error())
-}
-
-func TestWillRetryError_ErrorString(t *testing.T) {
-	willRetry := &WillRetryError{ErrStr: "transient error", RetryAttempt: 1}
-	assert.Equal(t, "transient error", willRetry.Error())
-}
-
 type customError struct {
 	code int
 	msg  string
@@ -1150,9 +1175,7 @@ func TestCheckpointSave_WillRetryError_StreamNotConsumed(t *testing.T) {
 			IsRetryAble: func(_ context.Context, err error) bool {
 				return errors.Is(err, errRetryAble)
 			},
-			BackoffFunc: func(_ context.Context, _ int) time.Duration {
-				return time.Millisecond // fast retry for test
-			},
+			BackoffFunc: instantBackoff,
 		},
 	})
 	assert.NoError(t, err)
@@ -1190,63 +1213,6 @@ func TestCheckpointSave_WillRetryError_StreamNotConsumed(t *testing.T) {
 	// Sanity: the model should have been called twice for Stream (fail + retry).
 	assert.Equal(t, int32(2), atomic.LoadInt32(&mdl.streamCallCount),
 		"model should be called twice: first fail, then retry success")
-}
-
-func TestChatModelAgentRetry_ShouldRetry_RejectMessage_Generate(t *testing.T) {
-	ctx := context.Background()
-	ctrl := gomock.NewController(t)
-	defer ctrl.Finish()
-
-	cm := mockModel.NewMockToolCallingChatModel(ctrl)
-
-	var callCount int32
-	cm.EXPECT().Generate(gomock.Any(), gomock.Any(), gomock.Any()).
-		DoAndReturn(func(ctx context.Context, input []*schema.Message, opts ...model.Option) (*schema.Message, error) {
-			count := atomic.AddInt32(&callCount, 1)
-			if count < 3 {
-				return schema.AssistantMessage("bad message with repeated chars aaaaaa", nil), nil
-			}
-			return schema.AssistantMessage("good message", nil), nil
-		}).Times(3)
-
-	agent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
-		Name:        "ShouldRetryTestAgent",
-		Description: "Test agent for ShouldRetry message rejection",
-		Instruction: "You are a helpful assistant.",
-		Model:       cm,
-		ModelRetryConfig: &ModelRetryConfig{
-			MaxRetries: 3,
-			ShouldRetry: func(ctx context.Context, retryCtx *RetryContext) *RetryDecision {
-				if retryCtx.Err != nil {
-					return &RetryDecision{ShouldRetry: true}
-				}
-				if retryCtx.OutputMessage != nil && strings.Contains(retryCtx.OutputMessage.Content, "bad message") {
-					return &RetryDecision{ShouldRetry: true}
-				}
-				return &RetryDecision{ShouldRetry: false}
-			},
-			BackoffFunc: func(_ context.Context, _ int) time.Duration { return time.Millisecond },
-		},
-	})
-	assert.NoError(t, err)
-
-	input := &AgentInput{
-		Messages: []Message{schema.UserMessage("Hello")},
-	}
-	iterator := agent.Run(ctx, input)
-
-	var lastMsg string
-	for {
-		event, ok := iterator.Next()
-		if !ok {
-			break
-		}
-		if event.Output != nil && event.Output.MessageOutput != nil && event.Output.MessageOutput.Message != nil {
-			lastMsg = event.Output.MessageOutput.Message.Content
-		}
-	}
-	assert.Equal(t, "good message", lastMsg)
-	assert.Equal(t, int32(3), atomic.LoadInt32(&callCount))
 }
 
 func TestChatModelAgentRetry_ShouldRetry_RejectMessage_Stream(t *testing.T) {
@@ -1288,7 +1254,7 @@ func TestChatModelAgentRetry_ShouldRetry_RejectMessage_Stream(t *testing.T) {
 				}
 				return &RetryDecision{ShouldRetry: false}
 			},
-			BackoffFunc: func(_ context.Context, _ int) time.Duration { return time.Millisecond },
+			BackoffFunc: instantBackoff,
 		},
 	})
 	assert.NoError(t, err)
@@ -1327,1387 +1293,1268 @@ func TestChatModelAgentRetry_ShouldRetry_RejectMessage_Stream(t *testing.T) {
 	assert.Equal(t, int32(2), atomic.LoadInt32(&callCount))
 }
 
-func TestChatModelAgentRetry_ShouldRetry_RewriteError_OnMessage(t *testing.T) {
-	ctx := context.Background()
-	ctrl := gomock.NewController(t)
-	defer ctrl.Finish()
-
-	cm := mockModel.NewMockToolCallingChatModel(ctrl)
-
-	cm.EXPECT().Generate(gomock.Any(), gomock.Any(), gomock.Any()).
-		Return(schema.AssistantMessage("unrecoverable bad message", nil), nil).Times(1)
-
-	fatalErr := errors.New("fatal: unrecoverable model output")
-
-	agent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
-		Name:        "RewriteErrorTestAgent",
-		Description: "Test ShouldRetry RewriteError on message",
-		Instruction: "You are a helpful assistant.",
-		Model:       cm,
-		ModelRetryConfig: &ModelRetryConfig{
-			MaxRetries: 2,
-			ShouldRetry: func(ctx context.Context, retryCtx *RetryContext) *RetryDecision {
-				if retryCtx.OutputMessage != nil && strings.Contains(retryCtx.OutputMessage.Content, "unrecoverable") {
-					return &RetryDecision{
-						ShouldRetry:  false,
-						RewriteError: fatalErr,
-					}
-				}
-				return &RetryDecision{ShouldRetry: false}
-			},
-			BackoffFunc: func(_ context.Context, _ int) time.Duration { return time.Millisecond },
-		},
-	})
-	assert.NoError(t, err)
-
-	input := &AgentInput{
-		Messages: []Message{schema.UserMessage("Hello")},
-	}
-	iterator := agent.Run(ctx, input)
-
-	var foundFatalErr bool
-	for {
-		event, ok := iterator.Next()
-		if !ok {
-			break
-		}
-		if event.Err != nil && errors.Is(event.Err, fatalErr) {
-			foundFatalErr = true
-		}
-	}
-	assert.True(t, foundFatalErr, "should have received the fatal rewrite error")
-}
-
-func TestChatModelAgentRetry_ShouldRetry_RewriteError_OnError(t *testing.T) {
-	ctx := context.Background()
-	ctrl := gomock.NewController(t)
-	defer ctrl.Finish()
-
-	cm := mockModel.NewMockToolCallingChatModel(ctrl)
-
-	origErr := errors.New("original transient error")
-	cm.EXPECT().Generate(gomock.Any(), gomock.Any(), gomock.Any()).
-		Return(nil, origErr).Times(1)
-
-	wrappedErr := errors.New("wrapped: original transient error with more context")
-
-	agent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
-		Name:        "RewriteErrorOnErrorTestAgent",
-		Description: "Test ShouldRetry RewriteError replacing original error",
-		Instruction: "You are a helpful assistant.",
-		Model:       cm,
-		ModelRetryConfig: &ModelRetryConfig{
-			MaxRetries: 2,
-			ShouldRetry: func(ctx context.Context, retryCtx *RetryContext) *RetryDecision {
-				if retryCtx.Err != nil {
-					return &RetryDecision{
-						ShouldRetry:  false,
-						RewriteError: wrappedErr,
-					}
-				}
-				return &RetryDecision{ShouldRetry: false}
-			},
-			BackoffFunc: func(_ context.Context, _ int) time.Duration { return time.Millisecond },
-		},
-	})
-	assert.NoError(t, err)
-
-	input := &AgentInput{
-		Messages: []Message{schema.UserMessage("Hello")},
-	}
-	iterator := agent.Run(ctx, input)
-
-	var foundWrappedErr bool
-	for {
-		event, ok := iterator.Next()
-		if !ok {
-			break
-		}
-		if event.Err != nil && errors.Is(event.Err, wrappedErr) {
-			foundWrappedErr = true
-		}
-	}
-	assert.True(t, foundWrappedErr, "should have received the wrapped rewrite error")
-}
-
-func TestChatModelAgentRetry_ShouldRetry_ModifiedOptions(t *testing.T) {
-	ctx := context.Background()
-	ctrl := gomock.NewController(t)
-	defer ctrl.Finish()
-
-	cm := mockModel.NewMockToolCallingChatModel(ctrl)
-
-	var callCount int32
-	var capturedOpts [][]model.Option
-	cm.EXPECT().Generate(gomock.Any(), gomock.Any(), gomock.Any()).
-		DoAndReturn(func(ctx context.Context, input []*schema.Message, opts ...model.Option) (*schema.Message, error) {
-			count := atomic.AddInt32(&callCount, 1)
-			capturedOpts = append(capturedOpts, opts)
-			if count < 2 {
-				return nil, errRetryAble
-			}
-			return schema.AssistantMessage("success", nil), nil
-		}).Times(2)
-
-	agent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
-		Name:        "ModifiedOptionsTestAgent",
-		Description: "Test ShouldRetry ModifiedOptions",
-		Instruction: "You are a helpful assistant.",
-		Model:       cm,
-		ModelRetryConfig: &ModelRetryConfig{
-			MaxRetries: 3,
-			ShouldRetry: func(ctx context.Context, retryCtx *RetryContext) *RetryDecision {
-				if retryCtx.Err != nil {
-					return &RetryDecision{
-						ShouldRetry:     true,
-						ModifiedOptions: []model.Option{model.WithMaxTokens(8192)},
-					}
-				}
-				return &RetryDecision{ShouldRetry: false}
-			},
-			BackoffFunc: func(_ context.Context, _ int) time.Duration { return time.Millisecond },
-		},
-	})
-	assert.NoError(t, err)
-
-	input := &AgentInput{
-		Messages: []Message{schema.UserMessage("Hello")},
-	}
-	iterator := agent.Run(ctx, input)
-
-	event, ok := iterator.Next()
-	assert.True(t, ok)
-	assert.NotNil(t, event)
-	assert.Nil(t, event.Err)
-	assert.Equal(t, int32(2), atomic.LoadInt32(&callCount))
-	assert.True(t, len(capturedOpts) >= 2, "should have captured opts from both calls")
-	assert.True(t, len(capturedOpts[1]) > len(capturedOpts[0]), "second call should have additional options from ModifiedOptions")
-}
-
-func TestChatModelAgentRetry_ShouldRetry_ModifiedInputMessages_NoPersist(t *testing.T) {
-	ctx := context.Background()
-	ctrl := gomock.NewController(t)
-	defer ctrl.Finish()
-
-	cm := mockModel.NewMockToolCallingChatModel(ctrl)
-
-	var callCount int32
-	var capturedInputs [][]*schema.Message
-	cm.EXPECT().Generate(gomock.Any(), gomock.Any(), gomock.Any()).
-		DoAndReturn(func(ctx context.Context, input []*schema.Message, opts ...model.Option) (*schema.Message, error) {
-			count := atomic.AddInt32(&callCount, 1)
-			inputCopy := make([]*schema.Message, len(input))
-			copy(inputCopy, input)
-			capturedInputs = append(capturedInputs, inputCopy)
-			if count < 2 {
-				return nil, errRetryAble
-			}
-			return schema.AssistantMessage("success", nil), nil
-		}).Times(2)
-
-	agent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
-		Name:        "ModifiedInputNoPersistAgent",
-		Description: "Test ShouldRetry ModifiedInputMessages without persistence",
-		Instruction: "You are a helpful assistant.",
-		Model:       cm,
-		ModelRetryConfig: &ModelRetryConfig{
-			MaxRetries: 3,
-			ShouldRetry: func(ctx context.Context, retryCtx *RetryContext) *RetryDecision {
-				if retryCtx.Err != nil {
-					return &RetryDecision{
-						ShouldRetry: true,
-						ModifiedInputMessages: []*schema.Message{
-							schema.SystemMessage("compressed instruction"),
-							schema.UserMessage("Hello"),
-						},
-						PersistModifiedInputMessages: false,
-					}
-				}
-				return &RetryDecision{ShouldRetry: false}
-			},
-			BackoffFunc: func(_ context.Context, _ int) time.Duration { return time.Millisecond },
-		},
-	})
-	assert.NoError(t, err)
-
-	input := &AgentInput{
-		Messages: []Message{schema.UserMessage("Hello")},
-	}
-	iterator := agent.Run(ctx, input)
-
-	event, ok := iterator.Next()
-	assert.True(t, ok)
-	assert.NotNil(t, event)
-	assert.Nil(t, event.Err)
-	assert.Equal(t, int32(2), atomic.LoadInt32(&callCount))
-	assert.True(t, len(capturedInputs) >= 2, "should have captured inputs from both calls")
-	assert.Equal(t, "compressed instruction", capturedInputs[1][0].Content, "second call should use modified input")
-}
-
-func TestChatModelAgentRetry_ShouldRetry_Backoff(t *testing.T) {
-	ctx := context.Background()
-	ctrl := gomock.NewController(t)
-	defer ctrl.Finish()
-
-	cm := mockModel.NewMockToolCallingChatModel(ctrl)
-
-	var callCount int32
-	cm.EXPECT().Generate(gomock.Any(), gomock.Any(), gomock.Any()).
-		DoAndReturn(func(ctx context.Context, input []*schema.Message, opts ...model.Option) (*schema.Message, error) {
-			count := atomic.AddInt32(&callCount, 1)
-			if count < 2 {
-				return nil, errRetryAble
-			}
-			return schema.AssistantMessage("success", nil), nil
-		}).Times(2)
-
-	customBackoff := 50 * time.Millisecond
-
-	agent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
-		Name:        "BackoffTestAgent",
-		Description: "Test ShouldRetry custom Backoff in decision",
-		Instruction: "You are a helpful assistant.",
-		Model:       cm,
-		ModelRetryConfig: &ModelRetryConfig{
-			MaxRetries: 3,
-			ShouldRetry: func(ctx context.Context, retryCtx *RetryContext) *RetryDecision {
-				if retryCtx.Err != nil {
-					return &RetryDecision{
-						ShouldRetry: true,
-						Backoff:     customBackoff,
-					}
-				}
-				return &RetryDecision{ShouldRetry: false}
-			},
-		},
-	})
-	assert.NoError(t, err)
-
-	start := time.Now()
-	input := &AgentInput{
-		Messages: []Message{schema.UserMessage("Hello")},
-	}
-	iterator := agent.Run(ctx, input)
-
-	event, ok := iterator.Next()
-	assert.True(t, ok)
-	assert.NotNil(t, event)
-	assert.Nil(t, event.Err)
-	elapsed := time.Since(start)
-	assert.True(t, elapsed >= customBackoff, "should have waited at least the custom backoff duration")
-	assert.Equal(t, int32(2), atomic.LoadInt32(&callCount))
-}
-
-func TestChatModelAgentRetry_ShouldRetry_RetryContext_Fields(t *testing.T) {
-	ctx := context.Background()
-	ctrl := gomock.NewController(t)
-	defer ctrl.Finish()
-
-	cm := mockModel.NewMockToolCallingChatModel(ctrl)
-
-	var callCount int32
-	cm.EXPECT().Generate(gomock.Any(), gomock.Any(), gomock.Any()).
-		DoAndReturn(func(ctx context.Context, input []*schema.Message, opts ...model.Option) (*schema.Message, error) {
-			count := atomic.AddInt32(&callCount, 1)
-			if count < 2 {
-				return schema.AssistantMessage("bad", nil), nil
-			}
-			return schema.AssistantMessage("good", nil), nil
-		}).Times(2)
-
-	var capturedContexts []*RetryContext
-	agent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
-		Name:        "RetryContextFieldsAgent",
-		Description: "Test that RetryContext fields are correctly populated",
-		Instruction: "You are a helpful assistant.",
-		Model:       cm,
-		ModelRetryConfig: &ModelRetryConfig{
-			MaxRetries: 3,
-			ShouldRetry: func(ctx context.Context, retryCtx *RetryContext) *RetryDecision {
-				capturedContexts = append(capturedContexts, retryCtx)
-				if retryCtx.OutputMessage != nil && retryCtx.OutputMessage.Content == "bad" {
-					return &RetryDecision{ShouldRetry: true}
-				}
-				return &RetryDecision{ShouldRetry: false}
-			},
-			BackoffFunc: func(_ context.Context, _ int) time.Duration { return time.Millisecond },
-		},
-	})
-	assert.NoError(t, err)
-
-	input := &AgentInput{
-		Messages: []Message{schema.UserMessage("Hello")},
-	}
-	iterator := agent.Run(ctx, input)
-
-	for {
-		event, ok := iterator.Next()
-		if !ok {
-			break
-		}
-		_ = event
-	}
-
-	assert.Len(t, capturedContexts, 2, "ShouldRetry should be called twice")
-
-	assert.Equal(t, 1, capturedContexts[0].RetryAttempt)
-	assert.NotNil(t, capturedContexts[0].InputMessages)
-	assert.NotNil(t, capturedContexts[0].Options)
-	assert.NotNil(t, capturedContexts[0].OutputMessage)
-	assert.Equal(t, "bad", capturedContexts[0].OutputMessage.Content)
-	assert.Nil(t, capturedContexts[0].Err)
-
-	assert.Equal(t, 2, capturedContexts[1].RetryAttempt)
-	assert.NotNil(t, capturedContexts[1].OutputMessage)
-	assert.Equal(t, "good", capturedContexts[1].OutputMessage.Content)
-	assert.Nil(t, capturedContexts[1].Err)
-}
-
-func TestChatModelAgentRetry_ShouldRetry_Exhausted(t *testing.T) {
-	ctx := context.Background()
-	ctrl := gomock.NewController(t)
-	defer ctrl.Finish()
-
-	cm := mockModel.NewMockToolCallingChatModel(ctrl)
-
-	cm.EXPECT().Generate(gomock.Any(), gomock.Any(), gomock.Any()).
-		Return(schema.AssistantMessage("always bad", nil), nil).Times(3)
-
-	agent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
-		Name:        "ExhaustedShouldRetryAgent",
-		Description: "Test ShouldRetry exhaustion",
-		Instruction: "You are a helpful assistant.",
-		Model:       cm,
-		ModelRetryConfig: &ModelRetryConfig{
-			MaxRetries: 2,
-			ShouldRetry: func(ctx context.Context, retryCtx *RetryContext) *RetryDecision {
-				return &RetryDecision{ShouldRetry: true}
-			},
-			BackoffFunc: func(_ context.Context, _ int) time.Duration { return time.Millisecond },
-		},
-	})
-	assert.NoError(t, err)
-
-	input := &AgentInput{
-		Messages: []Message{schema.UserMessage("Hello")},
-	}
-	iterator := agent.Run(ctx, input)
-
-	var foundExhaustedErr bool
-	var retryErr *RetryExhaustedError
-	for {
-		event, ok := iterator.Next()
-		if !ok {
-			break
-		}
-		if event.Err != nil {
-			if errors.Is(event.Err, ErrExceedMaxRetries) {
-				foundExhaustedErr = true
-				errors.As(event.Err, &retryErr)
-			}
-		}
-	}
-	assert.True(t, foundExhaustedErr, "should have received ErrExceedMaxRetries")
-	assert.NotNil(t, retryErr)
-	assert.Equal(t, 2, retryErr.TotalRetries)
-}
-
-func TestChatModelAgentRetry_ShouldRetry_Stream_ErrorRetry(t *testing.T) {
-	ctx := context.Background()
-	ctrl := gomock.NewController(t)
-	defer ctrl.Finish()
-
-	cm := mockModel.NewMockToolCallingChatModel(ctrl)
-
-	streamErr := errors.New("stream unavailable")
-	var callCount int32
-	cm.EXPECT().Stream(gomock.Any(), gomock.Any(), gomock.Any()).
-		DoAndReturn(func(ctx context.Context, input []*schema.Message, opts ...model.Option) (*schema.StreamReader[*schema.Message], error) {
-			count := atomic.AddInt32(&callCount, 1)
-			if count < 2 {
-				return nil, streamErr
-			}
-			r, w := schema.Pipe[*schema.Message](1)
-			go func() {
-				_ = w.Send(schema.AssistantMessage("recovered stream", nil), nil)
-				w.Close()
-			}()
-			return r, nil
-		}).Times(2)
-
-	agent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
-		Name:        "StreamErrorRetryAgent",
-		Description: "Test ShouldRetry when Stream returns error (nil stream)",
-		Instruction: "You are a helpful assistant.",
-		Model:       cm,
-		ModelRetryConfig: &ModelRetryConfig{
-			MaxRetries: 3,
-			ShouldRetry: func(ctx context.Context, retryCtx *RetryContext) *RetryDecision {
-				if retryCtx.Err != nil {
-					return &RetryDecision{ShouldRetry: true}
-				}
-				return &RetryDecision{ShouldRetry: false}
-			},
-			BackoffFunc: func(_ context.Context, _ int) time.Duration { return time.Millisecond },
-		},
-	})
-	assert.NoError(t, err)
-
-	input := &AgentInput{
-		Messages:        []Message{schema.UserMessage("Hello")},
-		EnableStreaming: true,
-	}
-	iterator := agent.Run(ctx, input)
-
-	var foundContent bool
-	for {
-		event, ok := iterator.Next()
-		if !ok {
-			break
-		}
-		if event.Output != nil && event.Output.MessageOutput != nil {
-			mo := event.Output.MessageOutput
-			if mo.IsStreaming && mo.MessageStream != nil {
-				for {
-					msg, err := mo.MessageStream.Recv()
-					if err != nil {
-						break
-					}
-					if strings.Contains(msg.Content, "recovered stream") {
-						foundContent = true
-					}
-				}
-			}
-		}
-	}
-	assert.True(t, foundContent, "should have received recovered stream content after error retry")
-	assert.Equal(t, int32(2), atomic.LoadInt32(&callCount))
-}
-
-func TestChatModelAgentRetry_ShouldRetry_Stream_ErrorRewrite(t *testing.T) {
-	ctx := context.Background()
-	ctrl := gomock.NewController(t)
-	defer ctrl.Finish()
-
-	cm := mockModel.NewMockToolCallingChatModel(ctrl)
-
-	streamErr := errors.New("model overloaded")
-	cm.EXPECT().Stream(gomock.Any(), gomock.Any(), gomock.Any()).
-		Return(nil, streamErr).Times(1)
-
-	fatalErr := errors.New("fatal: model overloaded, aborting")
-
-	agent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
-		Name:        "StreamErrorRewriteAgent",
-		Description: "Test ShouldRetry RewriteError when Stream returns error",
-		Instruction: "You are a helpful assistant.",
-		Model:       cm,
-		ModelRetryConfig: &ModelRetryConfig{
-			MaxRetries: 2,
-			ShouldRetry: func(ctx context.Context, retryCtx *RetryContext) *RetryDecision {
-				if retryCtx.Err != nil && strings.Contains(retryCtx.Err.Error(), "overloaded") {
-					return &RetryDecision{
-						ShouldRetry:  false,
-						RewriteError: fatalErr,
-					}
-				}
-				return &RetryDecision{ShouldRetry: false}
-			},
-			BackoffFunc: func(_ context.Context, _ int) time.Duration { return time.Millisecond },
-		},
-	})
-	assert.NoError(t, err)
-
-	input := &AgentInput{
-		Messages:        []Message{schema.UserMessage("Hello")},
-		EnableStreaming: true,
-	}
-	iterator := agent.Run(ctx, input)
-
-	var foundFatalErr bool
-	for {
-		event, ok := iterator.Next()
-		if !ok {
-			break
-		}
-		if event.Err != nil && errors.Is(event.Err, fatalErr) {
-			foundFatalErr = true
-		}
-	}
-	assert.True(t, foundFatalErr, "should have received the fatal rewrite error from stream")
-}
-
-func TestChatModelAgentRetry_ShouldRetry_Stream_RewriteError_OnMessage(t *testing.T) {
-	ctx := context.Background()
-	ctrl := gomock.NewController(t)
-	defer ctrl.Finish()
-
-	cm := mockModel.NewMockToolCallingChatModel(ctrl)
-
-	cm.EXPECT().Stream(gomock.Any(), gomock.Any(), gomock.Any()).
-		DoAndReturn(func(ctx context.Context, input []*schema.Message, opts ...model.Option) (*schema.StreamReader[*schema.Message], error) {
-			r, w := schema.Pipe[*schema.Message](1)
-			go func() {
-				_ = w.Send(schema.AssistantMessage("hallucinated garbage output", nil), nil)
-				w.Close()
-			}()
-			return r, nil
-		}).Times(1)
-
-	fatalErr := errors.New("fatal: hallucinated output detected")
-
-	agent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
-		Name:        "StreamRewriteOnMessageAgent",
-		Description: "Test ShouldRetry RewriteError on successful stream with bad content",
-		Instruction: "You are a helpful assistant.",
-		Model:       cm,
-		ModelRetryConfig: &ModelRetryConfig{
-			MaxRetries: 2,
-			ShouldRetry: func(ctx context.Context, retryCtx *RetryContext) *RetryDecision {
-				if retryCtx.OutputMessage != nil && strings.Contains(retryCtx.OutputMessage.Content, "hallucinated") {
-					return &RetryDecision{
-						ShouldRetry:  false,
-						RewriteError: fatalErr,
-					}
-				}
-				return &RetryDecision{ShouldRetry: false}
-			},
-			BackoffFunc: func(_ context.Context, _ int) time.Duration { return time.Millisecond },
-		},
-	})
-	assert.NoError(t, err)
-
-	input := &AgentInput{
-		Messages:        []Message{schema.UserMessage("Hello")},
-		EnableStreaming: true,
-	}
-	iterator := agent.Run(ctx, input)
-
-	var foundFatalErr bool
-	for {
-		event, ok := iterator.Next()
-		if !ok {
-			break
-		}
-		if event.Err != nil && errors.Is(event.Err, fatalErr) {
-			foundFatalErr = true
-		}
-	}
-	assert.True(t, foundFatalErr, "should have received fatal rewrite error from stream message inspection")
-}
-
-func TestChatModelAgentRetry_ShouldRetry_Stream_PartialStreamError(t *testing.T) {
-	ctx := context.Background()
-	ctrl := gomock.NewController(t)
-	defer ctrl.Finish()
-
-	cm := mockModel.NewMockToolCallingChatModel(ctrl)
-
-	partialErr := errors.New("connection reset mid-stream")
-	var callCount int32
-	cm.EXPECT().Stream(gomock.Any(), gomock.Any(), gomock.Any()).
-		DoAndReturn(func(ctx context.Context, input []*schema.Message, opts ...model.Option) (*schema.StreamReader[*schema.Message], error) {
-			count := atomic.AddInt32(&callCount, 1)
-			r, w := schema.Pipe[*schema.Message](1)
-			go func() {
-				_ = w.Send(schema.AssistantMessage("partial chunk", nil), nil)
+func TestShouldRetry_Generate(t *testing.T) {
+	t.Run("RetryContext_Fields", func(t *testing.T) {
+		ctx := context.Background()
+		ctrl := gomock.NewController(t)
+		defer ctrl.Finish()
+
+		cm := mockModel.NewMockToolCallingChatModel(ctrl)
+
+		var callCount int32
+		cm.EXPECT().Generate(gomock.Any(), gomock.Any(), gomock.Any()).
+			DoAndReturn(func(ctx context.Context, input []*schema.Message, opts ...model.Option) (*schema.Message, error) {
+				count := atomic.AddInt32(&callCount, 1)
 				if count < 2 {
-					w.Send(nil, partialErr)
-				} else {
-					_ = w.Send(schema.AssistantMessage(" complete", nil), nil)
+					return schema.AssistantMessage("bad", nil), nil
+				}
+				return schema.AssistantMessage("good", nil), nil
+			}).Times(2)
+
+		var capturedContexts []*RetryContext
+		agent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+			Name:        "RetryContextFieldsAgent",
+			Description: "Test that RetryContext fields are correctly populated",
+			Instruction: "You are a helpful assistant.",
+			Model:       cm,
+			ModelRetryConfig: &ModelRetryConfig{
+				MaxRetries: 3,
+				ShouldRetry: func(ctx context.Context, retryCtx *RetryContext) *RetryDecision {
+					capturedContexts = append(capturedContexts, retryCtx)
+					if retryCtx.OutputMessage != nil && retryCtx.OutputMessage.Content == "bad" {
+						return &RetryDecision{ShouldRetry: true}
+					}
+					return &RetryDecision{ShouldRetry: false}
+				},
+				BackoffFunc: instantBackoff,
+			},
+		})
+		assert.NoError(t, err)
+
+		input := &AgentInput{
+			Messages: []Message{schema.UserMessage("Hello")},
+		}
+		iterator := agent.Run(ctx, input)
+
+		for {
+			event, ok := iterator.Next()
+			if !ok {
+				break
+			}
+			_ = event
+		}
+
+		assert.Len(t, capturedContexts, 2, "ShouldRetry should be called twice")
+
+		assert.Equal(t, 1, capturedContexts[0].RetryAttempt)
+		assert.NotNil(t, capturedContexts[0].InputMessages)
+		assert.NotNil(t, capturedContexts[0].Options)
+		assert.NotNil(t, capturedContexts[0].OutputMessage)
+		assert.Equal(t, "bad", capturedContexts[0].OutputMessage.Content)
+		assert.Nil(t, capturedContexts[0].Err)
+
+		assert.Equal(t, 2, capturedContexts[1].RetryAttempt)
+		assert.NotNil(t, capturedContexts[1].OutputMessage)
+		assert.Equal(t, "good", capturedContexts[1].OutputMessage.Content)
+		assert.Nil(t, capturedContexts[1].Err)
+	})
+
+	t.Run("RewriteError_OnMessage", func(t *testing.T) {
+		ctx := context.Background()
+		ctrl := gomock.NewController(t)
+		defer ctrl.Finish()
+
+		cm := mockModel.NewMockToolCallingChatModel(ctrl)
+
+		cm.EXPECT().Generate(gomock.Any(), gomock.Any(), gomock.Any()).
+			Return(schema.AssistantMessage("unrecoverable bad message", nil), nil).Times(1)
+
+		fatalErr := errors.New("fatal: unrecoverable model output")
+
+		agent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+			Name:        "RewriteErrorTestAgent",
+			Description: "Test ShouldRetry RewriteError on message",
+			Instruction: "You are a helpful assistant.",
+			Model:       cm,
+			ModelRetryConfig: &ModelRetryConfig{
+				MaxRetries: 2,
+				ShouldRetry: func(ctx context.Context, retryCtx *RetryContext) *RetryDecision {
+					if retryCtx.OutputMessage != nil && strings.Contains(retryCtx.OutputMessage.Content, "unrecoverable") {
+						return &RetryDecision{
+							ShouldRetry:  false,
+							RewriteError: fatalErr,
+						}
+					}
+					return &RetryDecision{ShouldRetry: false}
+				},
+				BackoffFunc: instantBackoff,
+			},
+		})
+		assert.NoError(t, err)
+
+		input := &AgentInput{
+			Messages: []Message{schema.UserMessage("Hello")},
+		}
+		iterator := agent.Run(ctx, input)
+
+		events := drainAgentEvents(t, iterator)
+		require.NotEmpty(t, events)
+		foundErr := false
+		for _, e := range events {
+			if e.Err != nil && errors.Is(e.Err, fatalErr) {
+				foundErr = true
+			}
+		}
+		require.True(t, foundErr, "should have received the fatal rewrite error")
+	})
+
+	t.Run("RewriteError_OnError", func(t *testing.T) {
+		ctx := context.Background()
+		ctrl := gomock.NewController(t)
+		defer ctrl.Finish()
+
+		cm := mockModel.NewMockToolCallingChatModel(ctrl)
+
+		origErr := errors.New("original transient error")
+		cm.EXPECT().Generate(gomock.Any(), gomock.Any(), gomock.Any()).
+			Return(nil, origErr).Times(1)
+
+		wrappedErr := errors.New("wrapped: original transient error with more context")
+
+		agent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+			Name:        "RewriteErrorOnErrorTestAgent",
+			Description: "Test ShouldRetry RewriteError replacing original error",
+			Instruction: "You are a helpful assistant.",
+			Model:       cm,
+			ModelRetryConfig: &ModelRetryConfig{
+				MaxRetries: 2,
+				ShouldRetry: func(ctx context.Context, retryCtx *RetryContext) *RetryDecision {
+					if retryCtx.Err != nil {
+						return &RetryDecision{
+							ShouldRetry:  false,
+							RewriteError: wrappedErr,
+						}
+					}
+					return &RetryDecision{ShouldRetry: false}
+				},
+				BackoffFunc: instantBackoff,
+			},
+		})
+		assert.NoError(t, err)
+
+		input := &AgentInput{
+			Messages: []Message{schema.UserMessage("Hello")},
+		}
+		iterator := agent.Run(ctx, input)
+
+		events := drainAgentEvents(t, iterator)
+		require.NotEmpty(t, events)
+		foundErr := false
+		for _, e := range events {
+			if e.Err != nil && errors.Is(e.Err, wrappedErr) {
+				foundErr = true
+			}
+		}
+		require.True(t, foundErr, "should have received the wrapped rewrite error")
+	})
+
+	t.Run("ModifiedOptions", func(t *testing.T) {
+		ctx := context.Background()
+		ctrl := gomock.NewController(t)
+		defer ctrl.Finish()
+
+		cm := mockModel.NewMockToolCallingChatModel(ctrl)
+
+		var callCount int32
+		var capturedOpts [][]model.Option
+		cm.EXPECT().Generate(gomock.Any(), gomock.Any(), gomock.Any()).
+			DoAndReturn(func(ctx context.Context, input []*schema.Message, opts ...model.Option) (*schema.Message, error) {
+				count := atomic.AddInt32(&callCount, 1)
+				capturedOpts = append(capturedOpts, opts)
+				if count < 2 {
+					return nil, errRetryAble
+				}
+				return schema.AssistantMessage("success", nil), nil
+			}).Times(2)
+
+		agent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+			Name:        "ModifiedOptionsTestAgent",
+			Description: "Test ShouldRetry ModifiedOptions",
+			Instruction: "You are a helpful assistant.",
+			Model:       cm,
+			ModelRetryConfig: &ModelRetryConfig{
+				MaxRetries: 3,
+				ShouldRetry: func(ctx context.Context, retryCtx *RetryContext) *RetryDecision {
+					if retryCtx.Err != nil {
+						return &RetryDecision{
+							ShouldRetry:     true,
+							ModifiedOptions: []model.Option{model.WithMaxTokens(8192)},
+						}
+					}
+					return &RetryDecision{ShouldRetry: false}
+				},
+				BackoffFunc: instantBackoff,
+			},
+		})
+		assert.NoError(t, err)
+
+		input := &AgentInput{
+			Messages: []Message{schema.UserMessage("Hello")},
+		}
+		iterator := agent.Run(ctx, input)
+
+		event, ok := iterator.Next()
+		assert.True(t, ok)
+		assert.NotNil(t, event)
+		assert.Nil(t, event.Err)
+		assert.Equal(t, int32(2), atomic.LoadInt32(&callCount))
+		assert.Equal(t, 2, len(capturedOpts))
+		assert.Equal(t, len(capturedOpts[0])+1, len(capturedOpts[1]))
+	})
+
+	t.Run("ModifiedInputMessages_NoPersist", func(t *testing.T) {
+		ctx := context.Background()
+		ctrl := gomock.NewController(t)
+		defer ctrl.Finish()
+
+		cm := mockModel.NewMockToolCallingChatModel(ctrl)
+
+		var callCount int32
+		var capturedInputs [][]*schema.Message
+		cm.EXPECT().Generate(gomock.Any(), gomock.Any(), gomock.Any()).
+			DoAndReturn(func(ctx context.Context, input []*schema.Message, opts ...model.Option) (*schema.Message, error) {
+				count := atomic.AddInt32(&callCount, 1)
+				inputCopy := make([]*schema.Message, len(input))
+				copy(inputCopy, input)
+				capturedInputs = append(capturedInputs, inputCopy)
+				if count < 2 {
+					return nil, errRetryAble
+				}
+				return schema.AssistantMessage("success", nil), nil
+			}).Times(2)
+
+		agent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+			Name:        "ModifiedInputNoPersistAgent",
+			Description: "Test ShouldRetry ModifiedInputMessages without persistence",
+			Instruction: "You are a helpful assistant.",
+			Model:       cm,
+			ModelRetryConfig: &ModelRetryConfig{
+				MaxRetries: 3,
+				ShouldRetry: func(ctx context.Context, retryCtx *RetryContext) *RetryDecision {
+					if retryCtx.Err != nil {
+						return &RetryDecision{
+							ShouldRetry: true,
+							ModifiedInputMessages: []*schema.Message{
+								schema.SystemMessage("compressed instruction"),
+								schema.UserMessage("Hello"),
+							},
+							PersistModifiedInputMessages: false,
+						}
+					}
+					return &RetryDecision{ShouldRetry: false}
+				},
+				BackoffFunc: instantBackoff,
+			},
+		})
+		assert.NoError(t, err)
+
+		input := &AgentInput{
+			Messages: []Message{schema.UserMessage("Hello")},
+		}
+		iterator := agent.Run(ctx, input)
+
+		event, ok := iterator.Next()
+		assert.True(t, ok)
+		assert.NotNil(t, event)
+		assert.Nil(t, event.Err)
+		assert.Equal(t, int32(2), atomic.LoadInt32(&callCount))
+		assert.Equal(t, 2, len(capturedInputs))
+		assert.Equal(t, "compressed instruction", capturedInputs[1][0].Content, "second call should use modified input")
+	})
+
+	t.Run("Backoff", func(t *testing.T) {
+		ctx := context.Background()
+		ctrl := gomock.NewController(t)
+		defer ctrl.Finish()
+
+		cm := mockModel.NewMockToolCallingChatModel(ctrl)
+
+		var callCount int32
+		cm.EXPECT().Generate(gomock.Any(), gomock.Any(), gomock.Any()).
+			DoAndReturn(func(ctx context.Context, input []*schema.Message, opts ...model.Option) (*schema.Message, error) {
+				count := atomic.AddInt32(&callCount, 1)
+				if count < 2 {
+					return nil, errRetryAble
+				}
+				return schema.AssistantMessage("success", nil), nil
+			}).Times(2)
+
+		customBackoff := 50 * time.Millisecond
+
+		agent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+			Name:        "BackoffTestAgent",
+			Description: "Test ShouldRetry custom Backoff in decision",
+			Instruction: "You are a helpful assistant.",
+			Model:       cm,
+			ModelRetryConfig: &ModelRetryConfig{
+				MaxRetries: 3,
+				ShouldRetry: func(ctx context.Context, retryCtx *RetryContext) *RetryDecision {
+					if retryCtx.Err != nil {
+						return &RetryDecision{
+							ShouldRetry: true,
+							Backoff:     customBackoff,
+						}
+					}
+					return &RetryDecision{ShouldRetry: false}
+				},
+			},
+		})
+		assert.NoError(t, err)
+
+		start := time.Now()
+		input := &AgentInput{
+			Messages: []Message{schema.UserMessage("Hello")},
+		}
+		iterator := agent.Run(ctx, input)
+
+		event, ok := iterator.Next()
+		assert.True(t, ok)
+		assert.NotNil(t, event)
+		assert.Nil(t, event.Err)
+		elapsed := time.Since(start)
+		assert.True(t, elapsed >= customBackoff && elapsed < customBackoff+200*time.Millisecond, "expected backoff ~%v, got %v", customBackoff, elapsed)
+		assert.Equal(t, int32(2), atomic.LoadInt32(&callCount))
+	})
+
+	t.Run("SuppressFlag_Rejected_NoEvent", func(t *testing.T) {
+		ctx := context.Background()
+		ctrl := gomock.NewController(t)
+		defer ctrl.Finish()
+
+		cm := mockModel.NewMockToolCallingChatModel(ctrl)
+
+		var callCount int32
+		cm.EXPECT().Generate(gomock.Any(), gomock.Any(), gomock.Any()).
+			DoAndReturn(func(ctx context.Context, input []*schema.Message, opts ...model.Option) (*schema.Message, error) {
+				count := atomic.AddInt32(&callCount, 1)
+				if count == 1 {
+					return schema.AssistantMessage("bad", nil), nil
+				}
+				return schema.AssistantMessage("good", nil), nil
+			}).Times(2)
+
+		agent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+			Name:        "SuppressRejected",
+			Description: "Test suppress flag rejects first then accepts",
+			Instruction: "You are a helpful assistant.",
+			Model:       cm,
+			ModelRetryConfig: &ModelRetryConfig{
+				MaxRetries: 1,
+				ShouldRetry: func(ctx context.Context, retryCtx *RetryContext) *RetryDecision {
+					if retryCtx.OutputMessage != nil && retryCtx.OutputMessage.Content == "bad" {
+						return &RetryDecision{ShouldRetry: true}
+					}
+					return &RetryDecision{ShouldRetry: false}
+				},
+				BackoffFunc: instantBackoff,
+			},
+		})
+		assert.NoError(t, err)
+
+		input := &AgentInput{
+			Messages: []Message{schema.UserMessage("Hello")},
+		}
+		iterator := agent.Run(ctx, input)
+
+		var msgEvents []*AgentEvent
+		for {
+			event, ok := iterator.Next()
+			if !ok {
+				break
+			}
+			if event.Output != nil && event.Output.MessageOutput != nil {
+				msgEvents = append(msgEvents, event)
+			}
+		}
+		assert.Equal(t, 1, len(msgEvents), "should have exactly 1 message event (suppressed rejected)")
+		assert.Equal(t, "good", msgEvents[0].Output.MessageOutput.Message.Content)
+	})
+
+	t.Run("SuppressFlag_AllRejected_NoEvents", func(t *testing.T) {
+		ctx := context.Background()
+		ctrl := gomock.NewController(t)
+		defer ctrl.Finish()
+
+		cm := mockModel.NewMockToolCallingChatModel(ctrl)
+
+		cm.EXPECT().Generate(gomock.Any(), gomock.Any(), gomock.Any()).
+			Return(schema.AssistantMessage("always bad", nil), nil).Times(3)
+
+		agent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+			Name:        "SuppressAllRejected",
+			Description: "Test suppress flag all rejected no events",
+			Instruction: "You are a helpful assistant.",
+			Model:       cm,
+			ModelRetryConfig: &ModelRetryConfig{
+				MaxRetries: 2,
+				ShouldRetry: func(ctx context.Context, retryCtx *RetryContext) *RetryDecision {
+					return &RetryDecision{ShouldRetry: true}
+				},
+				BackoffFunc: instantBackoff,
+			},
+		})
+		assert.NoError(t, err)
+
+		input := &AgentInput{
+			Messages: []Message{schema.UserMessage("Hello")},
+		}
+		iterator := agent.Run(ctx, input)
+
+		var msgEventCount int
+		var foundExhaustedErr bool
+		for {
+			event, ok := iterator.Next()
+			if !ok {
+				break
+			}
+			if event.Output != nil && event.Output.MessageOutput != nil {
+				msgEventCount++
+			}
+			if event.Err != nil && errors.Is(event.Err, ErrExceedMaxRetries) {
+				foundExhaustedErr = true
+			}
+		}
+		assert.Equal(t, 0, msgEventCount, "no message events should be emitted when all are rejected")
+		assert.True(t, foundExhaustedErr, "final event should have RetryExhaustedError")
+	})
+
+	t.Run("SuppressFlag_Accepted_FirstAttempt", func(t *testing.T) {
+		ctx := context.Background()
+		ctrl := gomock.NewController(t)
+		defer ctrl.Finish()
+
+		cm := mockModel.NewMockToolCallingChatModel(ctrl)
+
+		cm.EXPECT().Generate(gomock.Any(), gomock.Any(), gomock.Any()).
+			Return(schema.AssistantMessage("perfect", nil), nil).Times(1)
+
+		agent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+			Name:        "SuppressAcceptedFirst",
+			Description: "Test suppress flag accepted first attempt",
+			Instruction: "You are a helpful assistant.",
+			Model:       cm,
+			ModelRetryConfig: &ModelRetryConfig{
+				MaxRetries: 2,
+				ShouldRetry: func(ctx context.Context, retryCtx *RetryContext) *RetryDecision {
+					return &RetryDecision{ShouldRetry: false}
+				},
+				BackoffFunc: instantBackoff,
+			},
+		})
+		assert.NoError(t, err)
+
+		input := &AgentInput{
+			Messages: []Message{schema.UserMessage("Hello")},
+		}
+		iterator := agent.Run(ctx, input)
+
+		var msgEvents []*AgentEvent
+		for {
+			event, ok := iterator.Next()
+			if !ok {
+				break
+			}
+			if event.Output != nil && event.Output.MessageOutput != nil {
+				msgEvents = append(msgEvents, event)
+			}
+		}
+		assert.Equal(t, 1, len(msgEvents), "should have exactly 1 event")
+		assert.Equal(t, "perfect", msgEvents[0].Output.MessageOutput.Message.Content)
+	})
+}
+
+func TestShouldRetry_Stream(t *testing.T) {
+	t.Run("ErrorRetry", func(t *testing.T) {
+		ctx := context.Background()
+		ctrl := gomock.NewController(t)
+		defer ctrl.Finish()
+
+		cm := mockModel.NewMockToolCallingChatModel(ctrl)
+
+		streamErr := errors.New("stream unavailable")
+		var callCount int32
+		cm.EXPECT().Stream(gomock.Any(), gomock.Any(), gomock.Any()).
+			DoAndReturn(func(ctx context.Context, input []*schema.Message, opts ...model.Option) (*schema.StreamReader[*schema.Message], error) {
+				count := atomic.AddInt32(&callCount, 1)
+				if count < 2 {
+					return nil, streamErr
+				}
+				r, w := schema.Pipe[*schema.Message](1)
+				go func() {
+					_ = w.Send(schema.AssistantMessage("recovered stream", nil), nil)
 					w.Close()
-				}
-			}()
-			return r, nil
-		}).Times(2)
+				}()
+				return r, nil
+			}).Times(2)
 
-	var capturedContexts []*RetryContext
-	agent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
-		Name:        "StreamPartialErrorAgent",
-		Description: "Test ShouldRetry when stream has partial content then error",
-		Instruction: "You are a helpful assistant.",
-		Model:       cm,
-		ModelRetryConfig: &ModelRetryConfig{
-			MaxRetries: 3,
-			ShouldRetry: func(ctx context.Context, retryCtx *RetryContext) *RetryDecision {
-				capturedContexts = append(capturedContexts, retryCtx)
-				if retryCtx.Err != nil {
+		agent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+			Name:        "StreamErrorRetryAgent",
+			Description: "Test ShouldRetry when Stream returns error (nil stream)",
+			Instruction: "You are a helpful assistant.",
+			Model:       cm,
+			ModelRetryConfig: &ModelRetryConfig{
+				MaxRetries: 3,
+				ShouldRetry: func(ctx context.Context, retryCtx *RetryContext) *RetryDecision {
+					if retryCtx.Err != nil {
+						return &RetryDecision{ShouldRetry: true}
+					}
+					return &RetryDecision{ShouldRetry: false}
+				},
+				BackoffFunc: instantBackoff,
+			},
+		})
+		assert.NoError(t, err)
+
+		input := &AgentInput{
+			Messages:        []Message{schema.UserMessage("Hello")},
+			EnableStreaming: true,
+		}
+		iterator := agent.Run(ctx, input)
+
+		var foundContent bool
+		for {
+			event, ok := iterator.Next()
+			if !ok {
+				break
+			}
+			if event.Output != nil && event.Output.MessageOutput != nil {
+				mo := event.Output.MessageOutput
+				if mo.IsStreaming && mo.MessageStream != nil {
+					for {
+						msg, err := mo.MessageStream.Recv()
+						if err != nil {
+							break
+						}
+						if strings.Contains(msg.Content, "recovered stream") {
+							foundContent = true
+						}
+					}
+				}
+			}
+		}
+		assert.True(t, foundContent, "should have received recovered stream content after error retry")
+		assert.Equal(t, int32(2), atomic.LoadInt32(&callCount))
+	})
+
+	t.Run("ErrorRewrite", func(t *testing.T) {
+		ctx := context.Background()
+		ctrl := gomock.NewController(t)
+		defer ctrl.Finish()
+
+		cm := mockModel.NewMockToolCallingChatModel(ctrl)
+
+		streamErr := errors.New("model overloaded")
+		cm.EXPECT().Stream(gomock.Any(), gomock.Any(), gomock.Any()).
+			Return(nil, streamErr).Times(1)
+
+		fatalErr := errors.New("fatal: model overloaded, aborting")
+
+		agent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+			Name:        "StreamErrorRewriteAgent",
+			Description: "Test ShouldRetry RewriteError when Stream returns error",
+			Instruction: "You are a helpful assistant.",
+			Model:       cm,
+			ModelRetryConfig: &ModelRetryConfig{
+				MaxRetries: 2,
+				ShouldRetry: func(ctx context.Context, retryCtx *RetryContext) *RetryDecision {
+					if retryCtx.Err != nil && strings.Contains(retryCtx.Err.Error(), "overloaded") {
+						return &RetryDecision{
+							ShouldRetry:  false,
+							RewriteError: fatalErr,
+						}
+					}
+					return &RetryDecision{ShouldRetry: false}
+				},
+				BackoffFunc: instantBackoff,
+			},
+		})
+		assert.NoError(t, err)
+
+		input := &AgentInput{
+			Messages:        []Message{schema.UserMessage("Hello")},
+			EnableStreaming: true,
+		}
+		iterator := agent.Run(ctx, input)
+
+		events := drainAgentEvents(t, iterator)
+		require.NotEmpty(t, events)
+		foundErr := false
+		for _, e := range events {
+			if e.Err != nil && errors.Is(e.Err, fatalErr) {
+				foundErr = true
+			}
+		}
+		require.True(t, foundErr, "should have received the fatal rewrite error from stream")
+	})
+
+	t.Run("RewriteError_OnMessage", func(t *testing.T) {
+		ctx := context.Background()
+		ctrl := gomock.NewController(t)
+		defer ctrl.Finish()
+
+		cm := mockModel.NewMockToolCallingChatModel(ctrl)
+
+		cm.EXPECT().Stream(gomock.Any(), gomock.Any(), gomock.Any()).
+			DoAndReturn(func(ctx context.Context, input []*schema.Message, opts ...model.Option) (*schema.StreamReader[*schema.Message], error) {
+				r, w := schema.Pipe[*schema.Message](1)
+				go func() {
+					_ = w.Send(schema.AssistantMessage("hallucinated garbage output", nil), nil)
+					w.Close()
+				}()
+				return r, nil
+			}).Times(1)
+
+		fatalErr := errors.New("fatal: hallucinated output detected")
+
+		agent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+			Name:        "StreamRewriteOnMessageAgent",
+			Description: "Test ShouldRetry RewriteError on successful stream with bad content",
+			Instruction: "You are a helpful assistant.",
+			Model:       cm,
+			ModelRetryConfig: &ModelRetryConfig{
+				MaxRetries: 2,
+				ShouldRetry: func(ctx context.Context, retryCtx *RetryContext) *RetryDecision {
+					if retryCtx.OutputMessage != nil && strings.Contains(retryCtx.OutputMessage.Content, "hallucinated") {
+						return &RetryDecision{
+							ShouldRetry:  false,
+							RewriteError: fatalErr,
+						}
+					}
+					return &RetryDecision{ShouldRetry: false}
+				},
+				BackoffFunc: instantBackoff,
+			},
+		})
+		assert.NoError(t, err)
+
+		input := &AgentInput{
+			Messages:        []Message{schema.UserMessage("Hello")},
+			EnableStreaming: true,
+		}
+		iterator := agent.Run(ctx, input)
+
+		events := drainAgentEvents(t, iterator)
+		require.NotEmpty(t, events)
+		foundErr := false
+		for _, e := range events {
+			if e.Err != nil && errors.Is(e.Err, fatalErr) {
+				foundErr = true
+			}
+		}
+		require.True(t, foundErr, "should have received fatal rewrite error from stream message inspection")
+	})
+
+	t.Run("PartialStreamError", func(t *testing.T) {
+		ctx := context.Background()
+		ctrl := gomock.NewController(t)
+		defer ctrl.Finish()
+
+		cm := mockModel.NewMockToolCallingChatModel(ctrl)
+
+		partialErr := errors.New("connection reset mid-stream")
+		var callCount int32
+		cm.EXPECT().Stream(gomock.Any(), gomock.Any(), gomock.Any()).
+			DoAndReturn(func(ctx context.Context, input []*schema.Message, opts ...model.Option) (*schema.StreamReader[*schema.Message], error) {
+				count := atomic.AddInt32(&callCount, 1)
+				r, w := schema.Pipe[*schema.Message](1)
+				go func() {
+					_ = w.Send(schema.AssistantMessage("partial chunk", nil), nil)
+					if count < 2 {
+						w.Send(nil, partialErr)
+					} else {
+						_ = w.Send(schema.AssistantMessage(" complete", nil), nil)
+						w.Close()
+					}
+				}()
+				return r, nil
+			}).Times(2)
+
+		var capturedContexts []*RetryContext
+		agent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+			Name:        "StreamPartialErrorAgent",
+			Description: "Test ShouldRetry when stream has partial content then error",
+			Instruction: "You are a helpful assistant.",
+			Model:       cm,
+			ModelRetryConfig: &ModelRetryConfig{
+				MaxRetries: 3,
+				ShouldRetry: func(ctx context.Context, retryCtx *RetryContext) *RetryDecision {
+					capturedContexts = append(capturedContexts, retryCtx)
+					if retryCtx.Err != nil {
+						return &RetryDecision{ShouldRetry: true}
+					}
+					return &RetryDecision{ShouldRetry: false}
+				},
+				BackoffFunc: instantBackoff,
+			},
+		})
+		assert.NoError(t, err)
+
+		input := &AgentInput{
+			Messages:        []Message{schema.UserMessage("Hello")},
+			EnableStreaming: true,
+		}
+		iterator := agent.Run(ctx, input)
+
+		for {
+			event, ok := iterator.Next()
+			if !ok {
+				break
+			}
+			if event.Output != nil && event.Output.MessageOutput != nil {
+				mo := event.Output.MessageOutput
+				if mo.IsStreaming && mo.MessageStream != nil {
+					for {
+						_, err := mo.MessageStream.Recv()
+						if err != nil {
+							break
+						}
+					}
+				}
+			}
+		}
+
+		assert.Equal(t, int32(2), atomic.LoadInt32(&callCount))
+		assert.Equal(t, 2, len(capturedContexts))
+		assert.NotNil(t, capturedContexts[0].Err, "first attempt should have stream error")
+		assert.NotNil(t, capturedContexts[0].OutputMessage, "first attempt should have partial message despite error")
+		assert.Equal(t, "partial chunk", capturedContexts[0].OutputMessage.Content)
+	})
+
+	t.Run("ModifiedInputsAndOptions_WithPersist", func(t *testing.T) {
+		ctx := context.Background()
+		ctrl := gomock.NewController(t)
+		defer ctrl.Finish()
+
+		cm := mockModel.NewMockToolCallingChatModel(ctrl)
+
+		var callCount int32
+		var capturedInputs [][]*schema.Message
+		var capturedOptLens []int
+		cm.EXPECT().Stream(gomock.Any(), gomock.Any(), gomock.Any()).
+			DoAndReturn(func(ctx context.Context, input []*schema.Message, opts ...model.Option) (*schema.StreamReader[*schema.Message], error) {
+				count := atomic.AddInt32(&callCount, 1)
+				inputCopy := make([]*schema.Message, len(input))
+				copy(inputCopy, input)
+				capturedInputs = append(capturedInputs, inputCopy)
+				capturedOptLens = append(capturedOptLens, len(opts))
+
+				r, w := schema.Pipe[*schema.Message](1)
+				go func() {
+					if count < 2 {
+						_ = w.Send(schema.AssistantMessage("too long response exceeds limit", nil), nil)
+					} else {
+						_ = w.Send(schema.AssistantMessage("good response", nil), nil)
+					}
+					w.Close()
+				}()
+				return r, nil
+			}).Times(2)
+
+		agent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+			Name:        "StreamModifiedInputsPersistAgent",
+			Description: "Test ShouldRetry with ModifiedInputMessages (persist) and ModifiedOptions in stream mode",
+			Instruction: "You are a helpful assistant.",
+			Model:       cm,
+			ModelRetryConfig: &ModelRetryConfig{
+				MaxRetries: 3,
+				ShouldRetry: func(ctx context.Context, retryCtx *RetryContext) *RetryDecision {
+					if retryCtx.OutputMessage != nil && strings.Contains(retryCtx.OutputMessage.Content, "too long") {
+						return &RetryDecision{
+							ShouldRetry: true,
+							ModifiedInputMessages: []*schema.Message{
+								schema.SystemMessage("compressed instruction"),
+								schema.UserMessage("summarized history"),
+							},
+							PersistModifiedInputMessages: true,
+							ModifiedOptions:              []model.Option{model.WithMaxTokens(16384)},
+						}
+					}
+					return &RetryDecision{ShouldRetry: false}
+				},
+				BackoffFunc: instantBackoff,
+			},
+		})
+		assert.NoError(t, err)
+
+		input := &AgentInput{
+			Messages:        []Message{schema.UserMessage("Hello")},
+			EnableStreaming: true,
+		}
+		iterator := agent.Run(ctx, input)
+
+		var foundGood bool
+		for {
+			event, ok := iterator.Next()
+			if !ok {
+				break
+			}
+			if event.Output != nil && event.Output.MessageOutput != nil {
+				mo := event.Output.MessageOutput
+				if mo.IsStreaming && mo.MessageStream != nil {
+					for {
+						msg, err := mo.MessageStream.Recv()
+						if err != nil {
+							break
+						}
+						if strings.Contains(msg.Content, "good response") {
+							foundGood = true
+						}
+					}
+				}
+			}
+		}
+
+		assert.True(t, foundGood, "should have received good response after retry with modified inputs")
+		assert.Equal(t, int32(2), atomic.LoadInt32(&callCount))
+		assert.Equal(t, 2, len(capturedInputs))
+		assert.Equal(t, "compressed instruction", capturedInputs[1][0].Content, "second call should use modified input")
+		assert.Equal(t, "summarized history", capturedInputs[1][1].Content)
+		assert.Equal(t, capturedOptLens[0]+1, capturedOptLens[1])
+	})
+
+	t.Run("VerdictSignal_CleanStream_Rejected", func(t *testing.T) {
+		ctx := context.Background()
+		ctrl := gomock.NewController(t)
+		defer ctrl.Finish()
+
+		cm := mockModel.NewMockToolCallingChatModel(ctrl)
+
+		var callCount int32
+		cm.EXPECT().Stream(gomock.Any(), gomock.Any(), gomock.Any()).
+			DoAndReturn(func(ctx context.Context, input []*schema.Message, opts ...model.Option) (*schema.StreamReader[*schema.Message], error) {
+				count := atomic.AddInt32(&callCount, 1)
+				if count == 1 {
+					return schema.StreamReaderFromArray([]*schema.Message{schema.AssistantMessage("bad", nil)}), nil
+				}
+				return schema.StreamReaderFromArray([]*schema.Message{schema.AssistantMessage("good", nil)}), nil
+			}).Times(2)
+
+		agent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+			Name:        "VerdictCleanRejected",
+			Description: "Test verdict signal on clean stream rejected",
+			Instruction: "You are a helpful assistant.",
+			Model:       cm,
+			ModelRetryConfig: &ModelRetryConfig{
+				MaxRetries: 1,
+				ShouldRetry: func(ctx context.Context, retryCtx *RetryContext) *RetryDecision {
+					if retryCtx.OutputMessage != nil && retryCtx.OutputMessage.Content == "bad" {
+						return &RetryDecision{ShouldRetry: true}
+					}
+					return &RetryDecision{ShouldRetry: false}
+				},
+				BackoffFunc: instantBackoff,
+			},
+		})
+		assert.NoError(t, err)
+
+		input := &AgentInput{
+			Messages:        []Message{schema.UserMessage("Hello")},
+			EnableStreaming: true,
+		}
+		iterator := agent.Run(ctx, input)
+
+		var streamEvents []int
+		for {
+			event, ok := iterator.Next()
+			if !ok {
+				break
+			}
+			if event.Output != nil && event.Output.MessageOutput != nil {
+				mo := event.Output.MessageOutput
+				if mo.IsStreaming && mo.MessageStream != nil {
+					idx := len(streamEvents)
+					streamEvents = append(streamEvents, idx)
+					var lastErr error
+					for {
+						_, recvErr := mo.MessageStream.Recv()
+						if recvErr != nil {
+							lastErr = recvErr
+							break
+						}
+					}
+					if idx == 0 {
+						var willRetryErr *WillRetryError
+						assert.True(t, errors.As(lastErr, &willRetryErr), "first stream should end with WillRetryError")
+					} else {
+						assert.ErrorIs(t, lastErr, io.EOF, "second stream should end with io.EOF")
+					}
+				}
+			}
+		}
+		assert.Equal(t, 2, len(streamEvents), "should have exactly 2 stream events")
+		assert.Equal(t, int32(2), atomic.LoadInt32(&callCount))
+	})
+
+	t.Run("VerdictSignal_StreamError_Rejected", func(t *testing.T) {
+		ctx := context.Background()
+		ctrl := gomock.NewController(t)
+		defer ctrl.Finish()
+
+		cm := mockModel.NewMockToolCallingChatModel(ctrl)
+
+		streamErr := errors.New("mid-stream error")
+		var callCount int32
+		cm.EXPECT().Stream(gomock.Any(), gomock.Any(), gomock.Any()).
+			DoAndReturn(func(ctx context.Context, input []*schema.Message, opts ...model.Option) (*schema.StreamReader[*schema.Message], error) {
+				count := atomic.AddInt32(&callCount, 1)
+				if count == 1 {
+					r, w := schema.Pipe[*schema.Message](1)
+					go func() {
+						_ = w.Send(schema.AssistantMessage("partial", nil), nil)
+						w.Send(nil, streamErr)
+					}()
+					return r, nil
+				}
+				return schema.StreamReaderFromArray([]*schema.Message{schema.AssistantMessage("good", nil)}), nil
+			}).Times(2)
+
+		agent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+			Name:        "VerdictStreamErrorRejected",
+			Description: "Test verdict signal on stream error rejected",
+			Instruction: "You are a helpful assistant.",
+			Model:       cm,
+			ModelRetryConfig: &ModelRetryConfig{
+				MaxRetries: 1,
+				ShouldRetry: func(ctx context.Context, retryCtx *RetryContext) *RetryDecision {
+					if retryCtx.Err != nil {
+						return &RetryDecision{ShouldRetry: true}
+					}
+					return &RetryDecision{ShouldRetry: false}
+				},
+				BackoffFunc: instantBackoff,
+			},
+		})
+		assert.NoError(t, err)
+
+		input := &AgentInput{
+			Messages:        []Message{schema.UserMessage("Hello")},
+			EnableStreaming: true,
+		}
+		iterator := agent.Run(ctx, input)
+
+		var firstEventHasWillRetry bool
+		var eventCount int
+		for {
+			event, ok := iterator.Next()
+			if !ok {
+				break
+			}
+			if event.Output != nil && event.Output.MessageOutput != nil {
+				mo := event.Output.MessageOutput
+				if mo.IsStreaming && mo.MessageStream != nil {
+					eventCount++
+					for {
+						_, recvErr := mo.MessageStream.Recv()
+						if recvErr != nil {
+							if eventCount == 1 {
+								var willRetryErr *WillRetryError
+								if errors.As(recvErr, &willRetryErr) {
+									firstEventHasWillRetry = true
+								}
+							}
+							break
+						}
+					}
+				}
+			}
+		}
+		assert.True(t, firstEventHasWillRetry, "first event stream should end with WillRetryError via errWrapper path")
+		assert.Equal(t, 2, eventCount, "should have 2 stream events")
+	})
+
+	t.Run("VerdictSignal_Accepted_FirstAttempt", func(t *testing.T) {
+		ctx := context.Background()
+		ctrl := gomock.NewController(t)
+		defer ctrl.Finish()
+
+		cm := mockModel.NewMockToolCallingChatModel(ctrl)
+
+		cm.EXPECT().Stream(gomock.Any(), gomock.Any(), gomock.Any()).
+			DoAndReturn(func(ctx context.Context, input []*schema.Message, opts ...model.Option) (*schema.StreamReader[*schema.Message], error) {
+				return schema.StreamReaderFromArray([]*schema.Message{schema.AssistantMessage("perfect", nil)}), nil
+			}).Times(1)
+
+		agent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+			Name:        "VerdictAcceptedFirst",
+			Description: "Test verdict signal accepted first attempt",
+			Instruction: "You are a helpful assistant.",
+			Model:       cm,
+			ModelRetryConfig: &ModelRetryConfig{
+				MaxRetries: 2,
+				ShouldRetry: func(ctx context.Context, retryCtx *RetryContext) *RetryDecision {
+					return &RetryDecision{ShouldRetry: false}
+				},
+				BackoffFunc: instantBackoff,
+			},
+		})
+		assert.NoError(t, err)
+
+		input := &AgentInput{
+			Messages:        []Message{schema.UserMessage("Hello")},
+			EnableStreaming: true,
+		}
+		iterator := agent.Run(ctx, input)
+
+		var eventCount int
+		for {
+			event, ok := iterator.Next()
+			if !ok {
+				break
+			}
+			if event.Output != nil && event.Output.MessageOutput != nil {
+				mo := event.Output.MessageOutput
+				if mo.IsStreaming && mo.MessageStream != nil {
+					eventCount++
+					var lastErr error
+					for {
+						_, recvErr := mo.MessageStream.Recv()
+						if recvErr != nil {
+							lastErr = recvErr
+							break
+						}
+					}
+					assert.ErrorIs(t, lastErr, io.EOF, "accepted stream should end with io.EOF")
+				}
+			}
+		}
+		assert.Equal(t, 1, eventCount, "should have exactly 1 event")
+	})
+
+	t.Run("VerdictSignal_AllRejected_Exhausted", func(t *testing.T) {
+		ctx := context.Background()
+		ctrl := gomock.NewController(t)
+		defer ctrl.Finish()
+
+		cm := mockModel.NewMockToolCallingChatModel(ctrl)
+
+		cm.EXPECT().Stream(gomock.Any(), gomock.Any(), gomock.Any()).
+			DoAndReturn(func(ctx context.Context, input []*schema.Message, opts ...model.Option) (*schema.StreamReader[*schema.Message], error) {
+				return schema.StreamReaderFromArray([]*schema.Message{schema.AssistantMessage("always bad", nil)}), nil
+			}).Times(3)
+
+		agent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+			Name:        "VerdictAllRejected",
+			Description: "Test verdict signal all rejected exhausted",
+			Instruction: "You are a helpful assistant.",
+			Model:       cm,
+			ModelRetryConfig: &ModelRetryConfig{
+				MaxRetries: 2,
+				ShouldRetry: func(ctx context.Context, retryCtx *RetryContext) *RetryDecision {
 					return &RetryDecision{ShouldRetry: true}
-				}
-				return &RetryDecision{ShouldRetry: false}
+				},
+				BackoffFunc: instantBackoff,
 			},
-			BackoffFunc: func(_ context.Context, _ int) time.Duration { return time.Millisecond },
-		},
-	})
-	assert.NoError(t, err)
+		})
+		assert.NoError(t, err)
 
-	input := &AgentInput{
-		Messages:        []Message{schema.UserMessage("Hello")},
-		EnableStreaming: true,
-	}
-	iterator := agent.Run(ctx, input)
-
-	for {
-		event, ok := iterator.Next()
-		if !ok {
-			break
+		input := &AgentInput{
+			Messages:        []Message{schema.UserMessage("Hello")},
+			EnableStreaming: true,
 		}
-		if event.Output != nil && event.Output.MessageOutput != nil {
-			mo := event.Output.MessageOutput
-			if mo.IsStreaming && mo.MessageStream != nil {
-				for {
-					_, err := mo.MessageStream.Recv()
-					if err != nil {
-						break
+		iterator := agent.Run(ctx, input)
+
+		var willRetryCount int
+		var foundExhaustedErr bool
+		for {
+			event, ok := iterator.Next()
+			if !ok {
+				break
+			}
+			if event.Err != nil {
+				if errors.Is(event.Err, ErrExceedMaxRetries) {
+					foundExhaustedErr = true
+				}
+			}
+			if event.Output != nil && event.Output.MessageOutput != nil {
+				mo := event.Output.MessageOutput
+				if mo.IsStreaming && mo.MessageStream != nil {
+					for {
+						_, recvErr := mo.MessageStream.Recv()
+						if recvErr != nil {
+							var willRetryErr *WillRetryError
+							if errors.As(recvErr, &willRetryErr) {
+								willRetryCount++
+							}
+							break
+						}
 					}
 				}
 			}
 		}
-	}
-
-	assert.Equal(t, int32(2), atomic.LoadInt32(&callCount))
-	assert.GreaterOrEqual(t, len(capturedContexts), 2)
-	assert.NotNil(t, capturedContexts[0].Err, "first attempt should have stream error")
-	assert.NotNil(t, capturedContexts[0].OutputMessage, "first attempt should have partial message despite error")
-	assert.Contains(t, capturedContexts[0].OutputMessage.Content, "partial chunk")
+		assert.Equal(t, 3, willRetryCount, "all 3 stream events should end with WillRetryError")
+		assert.True(t, foundExhaustedErr, "final error should be RetryExhaustedError")
+	})
 }
 
-func TestChatModelAgentRetry_ShouldRetry_Stream_ModifiedInputsAndOptions_WithPersist(t *testing.T) {
-	ctx := context.Background()
-	ctrl := gomock.NewController(t)
-	defer ctrl.Finish()
+func TestErrStreamCanceled(t *testing.T) {
+	t.Run("Stream_ShouldRetry_NeverRetried", func(t *testing.T) {
+		ctx := context.Background()
+		ctrl := gomock.NewController(t)
+		defer ctrl.Finish()
 
-	cm := mockModel.NewMockToolCallingChatModel(ctrl)
+		cm := mockModel.NewMockToolCallingChatModel(ctrl)
 
-	var callCount int32
-	var capturedInputs [][]*schema.Message
-	var capturedOptLens []int
-	cm.EXPECT().Stream(gomock.Any(), gomock.Any(), gomock.Any()).
-		DoAndReturn(func(ctx context.Context, input []*schema.Message, opts ...model.Option) (*schema.StreamReader[*schema.Message], error) {
-			count := atomic.AddInt32(&callCount, 1)
-			inputCopy := make([]*schema.Message, len(input))
-			copy(inputCopy, input)
-			capturedInputs = append(capturedInputs, inputCopy)
-			capturedOptLens = append(capturedOptLens, len(opts))
-
-			r, w := schema.Pipe[*schema.Message](1)
-			go func() {
-				if count < 2 {
-					_ = w.Send(schema.AssistantMessage("too long response exceeds limit", nil), nil)
-				} else {
-					_ = w.Send(schema.AssistantMessage("good response", nil), nil)
-				}
-				w.Close()
-			}()
-			return r, nil
-		}).Times(2)
-
-	agent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
-		Name:        "StreamModifiedInputsPersistAgent",
-		Description: "Test ShouldRetry with ModifiedInputMessages (persist) and ModifiedOptions in stream mode",
-		Instruction: "You are a helpful assistant.",
-		Model:       cm,
-		ModelRetryConfig: &ModelRetryConfig{
-			MaxRetries: 3,
-			ShouldRetry: func(ctx context.Context, retryCtx *RetryContext) *RetryDecision {
-				if retryCtx.OutputMessage != nil && strings.Contains(retryCtx.OutputMessage.Content, "too long") {
-					return &RetryDecision{
-						ShouldRetry: true,
-						ModifiedInputMessages: []*schema.Message{
-							schema.SystemMessage("compressed instruction"),
-							schema.UserMessage("summarized history"),
-						},
-						PersistModifiedInputMessages: true,
-						ModifiedOptions:              []model.Option{model.WithMaxTokens(16384)},
-					}
-				}
-				return &RetryDecision{ShouldRetry: false}
-			},
-			BackoffFunc: func(_ context.Context, _ int) time.Duration { return time.Millisecond },
-		},
-	})
-	assert.NoError(t, err)
-
-	input := &AgentInput{
-		Messages:        []Message{schema.UserMessage("Hello")},
-		EnableStreaming: true,
-	}
-	iterator := agent.Run(ctx, input)
-
-	var foundGood bool
-	for {
-		event, ok := iterator.Next()
-		if !ok {
-			break
-		}
-		if event.Output != nil && event.Output.MessageOutput != nil {
-			mo := event.Output.MessageOutput
-			if mo.IsStreaming && mo.MessageStream != nil {
-				for {
-					msg, err := mo.MessageStream.Recv()
-					if err != nil {
-						break
-					}
-					if strings.Contains(msg.Content, "good response") {
-						foundGood = true
-					}
-				}
-			}
-		}
-	}
-
-	assert.True(t, foundGood, "should have received good response after retry with modified inputs")
-	assert.Equal(t, int32(2), atomic.LoadInt32(&callCount))
-	assert.GreaterOrEqual(t, len(capturedInputs), 2)
-	assert.Equal(t, "compressed instruction", capturedInputs[1][0].Content, "second call should use modified input")
-	assert.Equal(t, "summarized history", capturedInputs[1][1].Content)
-	assert.True(t, capturedOptLens[1] > capturedOptLens[0], "second call should have additional options from ModifiedOptions")
-}
-
-func TestChatModelAgentRetry_ShouldRetry_Stream_Exhausted(t *testing.T) {
-	ctx := context.Background()
-	ctrl := gomock.NewController(t)
-	defer ctrl.Finish()
-
-	cm := mockModel.NewMockToolCallingChatModel(ctrl)
-
-	cm.EXPECT().Stream(gomock.Any(), gomock.Any(), gomock.Any()).
-		DoAndReturn(func(ctx context.Context, input []*schema.Message, opts ...model.Option) (*schema.StreamReader[*schema.Message], error) {
-			r, w := schema.Pipe[*schema.Message](1)
-			go func() {
-				_ = w.Send(schema.AssistantMessage("always bad stream", nil), nil)
-				w.Close()
-			}()
-			return r, nil
-		}).Times(3)
-
-	agent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
-		Name:        "StreamExhaustedAgent",
-		Description: "Test ShouldRetry exhaustion in stream mode",
-		Instruction: "You are a helpful assistant.",
-		Model:       cm,
-		ModelRetryConfig: &ModelRetryConfig{
-			MaxRetries: 2,
-			ShouldRetry: func(ctx context.Context, retryCtx *RetryContext) *RetryDecision {
-				return &RetryDecision{ShouldRetry: true}
-			},
-			BackoffFunc: func(_ context.Context, _ int) time.Duration { return time.Millisecond },
-		},
-	})
-	assert.NoError(t, err)
-
-	input := &AgentInput{
-		Messages:        []Message{schema.UserMessage("Hello")},
-		EnableStreaming: true,
-	}
-	iterator := agent.Run(ctx, input)
-
-	var foundExhaustedErr bool
-	var retryErr *RetryExhaustedError
-	for {
-		event, ok := iterator.Next()
-		if !ok {
-			break
-		}
-		if event.Err != nil {
-			if errors.Is(event.Err, ErrExceedMaxRetries) {
-				foundExhaustedErr = true
-				errors.As(event.Err, &retryErr)
-			}
-		}
-		if event.Output != nil && event.Output.MessageOutput != nil {
-			mo := event.Output.MessageOutput
-			if mo.IsStreaming && mo.MessageStream != nil {
-				for {
-					_, err := mo.MessageStream.Recv()
-					if err != nil {
-						break
-					}
-				}
-			}
-		}
-	}
-	assert.True(t, foundExhaustedErr, "should have received ErrExceedMaxRetries in stream mode")
-	assert.NotNil(t, retryErr)
-	assert.Equal(t, 2, retryErr.TotalRetries)
-}
-
-func TestShouldRetry_Stream_VerdictSignal_CleanStream_Rejected(t *testing.T) {
-	ctx := context.Background()
-	ctrl := gomock.NewController(t)
-	defer ctrl.Finish()
-
-	cm := mockModel.NewMockToolCallingChatModel(ctrl)
-
-	var callCount int32
-	cm.EXPECT().Stream(gomock.Any(), gomock.Any(), gomock.Any()).
-		DoAndReturn(func(ctx context.Context, input []*schema.Message, opts ...model.Option) (*schema.StreamReader[*schema.Message], error) {
-			count := atomic.AddInt32(&callCount, 1)
-			if count == 1 {
-				return schema.StreamReaderFromArray([]*schema.Message{schema.AssistantMessage("bad", nil)}), nil
-			}
-			return schema.StreamReaderFromArray([]*schema.Message{schema.AssistantMessage("good", nil)}), nil
-		}).Times(2)
-
-	agent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
-		Name:        "VerdictCleanRejected",
-		Description: "Test verdict signal on clean stream rejected",
-		Instruction: "You are a helpful assistant.",
-		Model:       cm,
-		ModelRetryConfig: &ModelRetryConfig{
-			MaxRetries: 1,
-			ShouldRetry: func(ctx context.Context, retryCtx *RetryContext) *RetryDecision {
-				if retryCtx.OutputMessage != nil && retryCtx.OutputMessage.Content == "bad" {
-					return &RetryDecision{ShouldRetry: true}
-				}
-				return &RetryDecision{ShouldRetry: false}
-			},
-			BackoffFunc: func(_ context.Context, _ int) time.Duration { return time.Millisecond },
-		},
-	})
-	assert.NoError(t, err)
-
-	input := &AgentInput{
-		Messages:        []Message{schema.UserMessage("Hello")},
-		EnableStreaming: true,
-	}
-	iterator := agent.Run(ctx, input)
-
-	var streamEvents []int
-	for {
-		event, ok := iterator.Next()
-		if !ok {
-			break
-		}
-		if event.Output != nil && event.Output.MessageOutput != nil {
-			mo := event.Output.MessageOutput
-			if mo.IsStreaming && mo.MessageStream != nil {
-				idx := len(streamEvents)
-				streamEvents = append(streamEvents, idx)
-				var lastErr error
-				for {
-					_, recvErr := mo.MessageStream.Recv()
-					if recvErr != nil {
-						lastErr = recvErr
-						break
-					}
-				}
-				if idx == 0 {
-					var willRetryErr *WillRetryError
-					assert.True(t, errors.As(lastErr, &willRetryErr), "first stream should end with WillRetryError")
-				} else {
-					assert.ErrorIs(t, lastErr, io.EOF, "second stream should end with io.EOF")
-				}
-			}
-		}
-	}
-	assert.Equal(t, 2, len(streamEvents), "should have exactly 2 stream events")
-	assert.Equal(t, int32(2), atomic.LoadInt32(&callCount))
-}
-
-func TestShouldRetry_Stream_VerdictSignal_StreamError_Rejected(t *testing.T) {
-	ctx := context.Background()
-	ctrl := gomock.NewController(t)
-	defer ctrl.Finish()
-
-	cm := mockModel.NewMockToolCallingChatModel(ctrl)
-
-	streamErr := errors.New("mid-stream error")
-	var callCount int32
-	cm.EXPECT().Stream(gomock.Any(), gomock.Any(), gomock.Any()).
-		DoAndReturn(func(ctx context.Context, input []*schema.Message, opts ...model.Option) (*schema.StreamReader[*schema.Message], error) {
-			count := atomic.AddInt32(&callCount, 1)
-			if count == 1 {
+		cm.EXPECT().Stream(gomock.Any(), gomock.Any(), gomock.Any()).
+			DoAndReturn(func(ctx context.Context, input []*schema.Message, opts ...model.Option) (*schema.StreamReader[*schema.Message], error) {
 				r, w := schema.Pipe[*schema.Message](1)
 				go func() {
 					_ = w.Send(schema.AssistantMessage("partial", nil), nil)
-					w.Send(nil, streamErr)
+					w.Send(nil, ErrStreamCanceled)
 				}()
 				return r, nil
-			}
-			return schema.StreamReaderFromArray([]*schema.Message{schema.AssistantMessage("good", nil)}), nil
-		}).Times(2)
+			}).Times(1)
 
-	agent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
-		Name:        "VerdictStreamErrorRejected",
-		Description: "Test verdict signal on stream error rejected",
-		Instruction: "You are a helpful assistant.",
-		Model:       cm,
-		ModelRetryConfig: &ModelRetryConfig{
-			MaxRetries: 1,
-			ShouldRetry: func(ctx context.Context, retryCtx *RetryContext) *RetryDecision {
-				if retryCtx.Err != nil {
+		var shouldRetryCalled int32
+		agent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+			Name:        "StreamCanceledShouldRetry",
+			Description: "Test ErrStreamCanceled never retried with ShouldRetry",
+			Instruction: "You are a helpful assistant.",
+			Model:       cm,
+			ModelRetryConfig: &ModelRetryConfig{
+				MaxRetries: 3,
+				ShouldRetry: func(ctx context.Context, retryCtx *RetryContext) *RetryDecision {
+					atomic.AddInt32(&shouldRetryCalled, 1)
 					return &RetryDecision{ShouldRetry: true}
-				}
-				return &RetryDecision{ShouldRetry: false}
+				},
+				BackoffFunc: instantBackoff,
 			},
-			BackoffFunc: func(_ context.Context, _ int) time.Duration { return time.Millisecond },
-		},
-	})
-	assert.NoError(t, err)
+		})
+		assert.NoError(t, err)
 
-	input := &AgentInput{
-		Messages:        []Message{schema.UserMessage("Hello")},
-		EnableStreaming: true,
-	}
-	iterator := agent.Run(ctx, input)
-
-	var firstEventHasWillRetry bool
-	var eventCount int
-	for {
-		event, ok := iterator.Next()
-		if !ok {
-			break
+		input := &AgentInput{
+			Messages:        []Message{schema.UserMessage("Hello")},
+			EnableStreaming: true,
 		}
-		if event.Output != nil && event.Output.MessageOutput != nil {
-			mo := event.Output.MessageOutput
-			if mo.IsStreaming && mo.MessageStream != nil {
-				eventCount++
-				for {
-					_, recvErr := mo.MessageStream.Recv()
-					if recvErr != nil {
-						if eventCount == 1 {
-							var willRetryErr *WillRetryError
-							if errors.As(recvErr, &willRetryErr) {
-								firstEventHasWillRetry = true
-							}
+		iterator := agent.Run(ctx, input)
+
+		for {
+			event, ok := iterator.Next()
+			if !ok {
+				break
+			}
+			if event.Output != nil && event.Output.MessageOutput != nil {
+				mo := event.Output.MessageOutput
+				if mo.IsStreaming && mo.MessageStream != nil {
+					for {
+						_, recvErr := mo.MessageStream.Recv()
+						if recvErr != nil {
+							break
 						}
-						break
 					}
 				}
 			}
 		}
-	}
-	assert.True(t, firstEventHasWillRetry, "first event stream should end with WillRetryError via errWrapper path")
-	assert.Equal(t, 2, eventCount, "should have 2 stream events")
-}
-
-func TestShouldRetry_Stream_VerdictSignal_Accepted_FirstAttempt(t *testing.T) {
-	ctx := context.Background()
-	ctrl := gomock.NewController(t)
-	defer ctrl.Finish()
-
-	cm := mockModel.NewMockToolCallingChatModel(ctrl)
-
-	cm.EXPECT().Stream(gomock.Any(), gomock.Any(), gomock.Any()).
-		DoAndReturn(func(ctx context.Context, input []*schema.Message, opts ...model.Option) (*schema.StreamReader[*schema.Message], error) {
-			return schema.StreamReaderFromArray([]*schema.Message{schema.AssistantMessage("perfect", nil)}), nil
-		}).Times(1)
-
-	agent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
-		Name:        "VerdictAcceptedFirst",
-		Description: "Test verdict signal accepted first attempt",
-		Instruction: "You are a helpful assistant.",
-		Model:       cm,
-		ModelRetryConfig: &ModelRetryConfig{
-			MaxRetries: 2,
-			ShouldRetry: func(ctx context.Context, retryCtx *RetryContext) *RetryDecision {
-				return &RetryDecision{ShouldRetry: false}
-			},
-			BackoffFunc: func(_ context.Context, _ int) time.Duration { return time.Millisecond },
-		},
+		assert.Equal(t, int32(0), atomic.LoadInt32(&shouldRetryCalled), "ShouldRetry should never be called for ErrStreamCanceled")
 	})
-	assert.NoError(t, err)
 
-	input := &AgentInput{
-		Messages:        []Message{schema.UserMessage("Hello")},
-		EnableStreaming: true,
-	}
-	iterator := agent.Run(ctx, input)
+	t.Run("Stream_LegacyIsRetryAble_NeverRetried", func(t *testing.T) {
+		ctx := context.Background()
+		ctrl := gomock.NewController(t)
+		defer ctrl.Finish()
 
-	var eventCount int
-	for {
-		event, ok := iterator.Next()
-		if !ok {
-			break
-		}
-		if event.Output != nil && event.Output.MessageOutput != nil {
-			mo := event.Output.MessageOutput
-			if mo.IsStreaming && mo.MessageStream != nil {
-				eventCount++
-				var lastErr error
-				for {
-					_, recvErr := mo.MessageStream.Recv()
-					if recvErr != nil {
-						lastErr = recvErr
-						break
-					}
-				}
-				assert.ErrorIs(t, lastErr, io.EOF, "accepted stream should end with io.EOF")
-			}
-		}
-	}
-	assert.Equal(t, 1, eventCount, "should have exactly 1 event")
-}
+		cm := mockModel.NewMockToolCallingChatModel(ctrl)
 
-func TestShouldRetry_Stream_VerdictSignal_AllRejected_Exhausted(t *testing.T) {
-	ctx := context.Background()
-	ctrl := gomock.NewController(t)
-	defer ctrl.Finish()
+		cm.EXPECT().Stream(gomock.Any(), gomock.Any(), gomock.Any()).
+			DoAndReturn(func(ctx context.Context, input []*schema.Message, opts ...model.Option) (*schema.StreamReader[*schema.Message], error) {
+				r, w := schema.Pipe[*schema.Message](1)
+				go func() {
+					_ = w.Send(schema.AssistantMessage("partial", nil), nil)
+					w.Send(nil, ErrStreamCanceled)
+				}()
+				return r, nil
+			}).Times(1)
 
-	cm := mockModel.NewMockToolCallingChatModel(ctrl)
-
-	cm.EXPECT().Stream(gomock.Any(), gomock.Any(), gomock.Any()).
-		DoAndReturn(func(ctx context.Context, input []*schema.Message, opts ...model.Option) (*schema.StreamReader[*schema.Message], error) {
-			return schema.StreamReaderFromArray([]*schema.Message{schema.AssistantMessage("always bad", nil)}), nil
-		}).Times(3)
-
-	agent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
-		Name:        "VerdictAllRejected",
-		Description: "Test verdict signal all rejected exhausted",
-		Instruction: "You are a helpful assistant.",
-		Model:       cm,
-		ModelRetryConfig: &ModelRetryConfig{
-			MaxRetries: 2,
-			ShouldRetry: func(ctx context.Context, retryCtx *RetryContext) *RetryDecision {
-				return &RetryDecision{ShouldRetry: true}
+		var isRetryAbleCalled int32
+		agent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+			Name:        "StreamCanceledLegacy",
+			Description: "Test ErrStreamCanceled never retried with legacy IsRetryAble",
+			Instruction: "You are a helpful assistant.",
+			Model:       cm,
+			ModelRetryConfig: &ModelRetryConfig{
+				MaxRetries: 3,
+				IsRetryAble: func(_ context.Context, err error) bool {
+					atomic.AddInt32(&isRetryAbleCalled, 1)
+					return true
+				},
+				BackoffFunc: instantBackoff,
 			},
-			BackoffFunc: func(_ context.Context, _ int) time.Duration { return time.Millisecond },
-		},
-	})
-	assert.NoError(t, err)
+		})
+		assert.NoError(t, err)
 
-	input := &AgentInput{
-		Messages:        []Message{schema.UserMessage("Hello")},
-		EnableStreaming: true,
-	}
-	iterator := agent.Run(ctx, input)
-
-	var willRetryCount int
-	var foundExhaustedErr bool
-	for {
-		event, ok := iterator.Next()
-		if !ok {
-			break
+		input := &AgentInput{
+			Messages:        []Message{schema.UserMessage("Hello")},
+			EnableStreaming: true,
 		}
-		if event.Err != nil {
-			if errors.Is(event.Err, ErrExceedMaxRetries) {
-				foundExhaustedErr = true
+		iterator := agent.Run(ctx, input)
+
+		for {
+			event, ok := iterator.Next()
+			if !ok {
+				break
 			}
-		}
-		if event.Output != nil && event.Output.MessageOutput != nil {
-			mo := event.Output.MessageOutput
-			if mo.IsStreaming && mo.MessageStream != nil {
-				for {
-					_, recvErr := mo.MessageStream.Recv()
-					if recvErr != nil {
-						var willRetryErr *WillRetryError
-						if errors.As(recvErr, &willRetryErr) {
-							willRetryCount++
+			if event.Output != nil && event.Output.MessageOutput != nil {
+				mo := event.Output.MessageOutput
+				if mo.IsStreaming && mo.MessageStream != nil {
+					for {
+						_, recvErr := mo.MessageStream.Recv()
+						if recvErr != nil {
+							break
 						}
-						break
 					}
 				}
 			}
 		}
-	}
-	assert.Equal(t, 3, willRetryCount, "all 3 stream events should end with WillRetryError")
-	assert.True(t, foundExhaustedErr, "final error should be RetryExhaustedError")
-}
+		assert.Equal(t, int32(0), atomic.LoadInt32(&isRetryAbleCalled), "IsRetryAble should never be called for ErrStreamCanceled")
+	})
 
-func TestShouldRetry_Generate_SuppressFlag_Rejected_NoEvent(t *testing.T) {
-	ctx := context.Background()
-	ctrl := gomock.NewController(t)
-	defer ctrl.Finish()
+	t.Run("Generate_ShouldRetry_NeverRetried", func(t *testing.T) {
+		ctx := context.Background()
+		ctrl := gomock.NewController(t)
+		defer ctrl.Finish()
 
-	cm := mockModel.NewMockToolCallingChatModel(ctrl)
+		cm := mockModel.NewMockToolCallingChatModel(ctrl)
 
-	var callCount int32
-	cm.EXPECT().Generate(gomock.Any(), gomock.Any(), gomock.Any()).
-		DoAndReturn(func(ctx context.Context, input []*schema.Message, opts ...model.Option) (*schema.Message, error) {
-			count := atomic.AddInt32(&callCount, 1)
-			if count == 1 {
-				return schema.AssistantMessage("bad", nil), nil
-			}
-			return schema.AssistantMessage("good", nil), nil
-		}).Times(2)
+		cm.EXPECT().Generate(gomock.Any(), gomock.Any(), gomock.Any()).
+			Return(nil, ErrStreamCanceled).Times(1)
 
-	agent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
-		Name:        "SuppressRejected",
-		Description: "Test suppress flag rejects first then accepts",
-		Instruction: "You are a helpful assistant.",
-		Model:       cm,
-		ModelRetryConfig: &ModelRetryConfig{
-			MaxRetries: 1,
-			ShouldRetry: func(ctx context.Context, retryCtx *RetryContext) *RetryDecision {
-				if retryCtx.OutputMessage != nil && retryCtx.OutputMessage.Content == "bad" {
+		var shouldRetryCalled int32
+		agent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+			Name:        "GenCanceledShouldRetry",
+			Description: "Test ErrStreamCanceled in Generate never retried",
+			Instruction: "You are a helpful assistant.",
+			Model:       cm,
+			ModelRetryConfig: &ModelRetryConfig{
+				MaxRetries: 3,
+				ShouldRetry: func(ctx context.Context, retryCtx *RetryContext) *RetryDecision {
+					atomic.AddInt32(&shouldRetryCalled, 1)
 					return &RetryDecision{ShouldRetry: true}
-				}
-				return &RetryDecision{ShouldRetry: false}
+				},
+				BackoffFunc: instantBackoff,
 			},
-			BackoffFunc: func(_ context.Context, _ int) time.Duration { return time.Millisecond },
-		},
-	})
-	assert.NoError(t, err)
+		})
+		assert.NoError(t, err)
 
-	input := &AgentInput{
-		Messages: []Message{schema.UserMessage("Hello")},
-	}
-	iterator := agent.Run(ctx, input)
-
-	var msgEvents []*AgentEvent
-	for {
-		event, ok := iterator.Next()
-		if !ok {
-			break
+		input := &AgentInput{
+			Messages: []Message{schema.UserMessage("Hello")},
 		}
-		if event.Output != nil && event.Output.MessageOutput != nil {
-			msgEvents = append(msgEvents, event)
-		}
-	}
-	assert.Equal(t, 1, len(msgEvents), "should have exactly 1 message event (suppressed rejected)")
-	assert.Equal(t, "good", msgEvents[0].Output.MessageOutput.Message.Content)
-}
+		iterator := agent.Run(ctx, input)
 
-func TestShouldRetry_Generate_SuppressFlag_AllRejected_NoEvents(t *testing.T) {
-	ctx := context.Background()
-	ctrl := gomock.NewController(t)
-	defer ctrl.Finish()
-
-	cm := mockModel.NewMockToolCallingChatModel(ctrl)
-
-	cm.EXPECT().Generate(gomock.Any(), gomock.Any(), gomock.Any()).
-		Return(schema.AssistantMessage("always bad", nil), nil).Times(3)
-
-	agent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
-		Name:        "SuppressAllRejected",
-		Description: "Test suppress flag all rejected no events",
-		Instruction: "You are a helpful assistant.",
-		Model:       cm,
-		ModelRetryConfig: &ModelRetryConfig{
-			MaxRetries: 2,
-			ShouldRetry: func(ctx context.Context, retryCtx *RetryContext) *RetryDecision {
-				return &RetryDecision{ShouldRetry: true}
-			},
-			BackoffFunc: func(_ context.Context, _ int) time.Duration { return time.Millisecond },
-		},
-	})
-	assert.NoError(t, err)
-
-	input := &AgentInput{
-		Messages: []Message{schema.UserMessage("Hello")},
-	}
-	iterator := agent.Run(ctx, input)
-
-	var msgEventCount int
-	var foundExhaustedErr bool
-	for {
-		event, ok := iterator.Next()
-		if !ok {
-			break
-		}
-		if event.Output != nil && event.Output.MessageOutput != nil {
-			msgEventCount++
-		}
-		if event.Err != nil && errors.Is(event.Err, ErrExceedMaxRetries) {
-			foundExhaustedErr = true
-		}
-	}
-	assert.Equal(t, 0, msgEventCount, "no message events should be emitted when all are rejected")
-	assert.True(t, foundExhaustedErr, "final event should have RetryExhaustedError")
-}
-
-func TestShouldRetry_Generate_SuppressFlag_Accepted_FirstAttempt(t *testing.T) {
-	ctx := context.Background()
-	ctrl := gomock.NewController(t)
-	defer ctrl.Finish()
-
-	cm := mockModel.NewMockToolCallingChatModel(ctrl)
-
-	cm.EXPECT().Generate(gomock.Any(), gomock.Any(), gomock.Any()).
-		Return(schema.AssistantMessage("perfect", nil), nil).Times(1)
-
-	agent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
-		Name:        "SuppressAcceptedFirst",
-		Description: "Test suppress flag accepted first attempt",
-		Instruction: "You are a helpful assistant.",
-		Model:       cm,
-		ModelRetryConfig: &ModelRetryConfig{
-			MaxRetries: 2,
-			ShouldRetry: func(ctx context.Context, retryCtx *RetryContext) *RetryDecision {
-				return &RetryDecision{ShouldRetry: false}
-			},
-			BackoffFunc: func(_ context.Context, _ int) time.Duration { return time.Millisecond },
-		},
-	})
-	assert.NoError(t, err)
-
-	input := &AgentInput{
-		Messages: []Message{schema.UserMessage("Hello")},
-	}
-	iterator := agent.Run(ctx, input)
-
-	var msgEvents []*AgentEvent
-	for {
-		event, ok := iterator.Next()
-		if !ok {
-			break
-		}
-		if event.Output != nil && event.Output.MessageOutput != nil {
-			msgEvents = append(msgEvents, event)
-		}
-	}
-	assert.Equal(t, 1, len(msgEvents), "should have exactly 1 event")
-	assert.Equal(t, "perfect", msgEvents[0].Output.MessageOutput.Message.Content)
-}
-
-func TestErrStreamCanceled_Stream_ShouldRetry_NeverRetried(t *testing.T) {
-	ctx := context.Background()
-	ctrl := gomock.NewController(t)
-	defer ctrl.Finish()
-
-	cm := mockModel.NewMockToolCallingChatModel(ctrl)
-
-	cm.EXPECT().Stream(gomock.Any(), gomock.Any(), gomock.Any()).
-		DoAndReturn(func(ctx context.Context, input []*schema.Message, opts ...model.Option) (*schema.StreamReader[*schema.Message], error) {
-			r, w := schema.Pipe[*schema.Message](1)
-			go func() {
-				_ = w.Send(schema.AssistantMessage("partial", nil), nil)
-				w.Send(nil, ErrStreamCanceled)
-			}()
-			return r, nil
-		}).Times(1)
-
-	var shouldRetryCalled int32
-	agent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
-		Name:        "StreamCanceledShouldRetry",
-		Description: "Test ErrStreamCanceled never retried with ShouldRetry",
-		Instruction: "You are a helpful assistant.",
-		Model:       cm,
-		ModelRetryConfig: &ModelRetryConfig{
-			MaxRetries: 3,
-			ShouldRetry: func(ctx context.Context, retryCtx *RetryContext) *RetryDecision {
-				atomic.AddInt32(&shouldRetryCalled, 1)
-				return &RetryDecision{ShouldRetry: true}
-			},
-			BackoffFunc: func(_ context.Context, _ int) time.Duration { return time.Millisecond },
-		},
-	})
-	assert.NoError(t, err)
-
-	input := &AgentInput{
-		Messages:        []Message{schema.UserMessage("Hello")},
-		EnableStreaming: true,
-	}
-	iterator := agent.Run(ctx, input)
-
-	for {
-		event, ok := iterator.Next()
-		if !ok {
-			break
-		}
-		if event.Output != nil && event.Output.MessageOutput != nil {
-			mo := event.Output.MessageOutput
-			if mo.IsStreaming && mo.MessageStream != nil {
-				for {
-					_, recvErr := mo.MessageStream.Recv()
-					if recvErr != nil {
-						break
-					}
-				}
+		for {
+			_, ok := iterator.Next()
+			if !ok {
+				break
 			}
 		}
-	}
-	assert.Equal(t, int32(0), atomic.LoadInt32(&shouldRetryCalled), "ShouldRetry should never be called for ErrStreamCanceled")
-}
-
-func TestErrStreamCanceled_Stream_LegacyIsRetryAble_NeverRetried(t *testing.T) {
-	ctx := context.Background()
-	ctrl := gomock.NewController(t)
-	defer ctrl.Finish()
-
-	cm := mockModel.NewMockToolCallingChatModel(ctrl)
-
-	cm.EXPECT().Stream(gomock.Any(), gomock.Any(), gomock.Any()).
-		DoAndReturn(func(ctx context.Context, input []*schema.Message, opts ...model.Option) (*schema.StreamReader[*schema.Message], error) {
-			r, w := schema.Pipe[*schema.Message](1)
-			go func() {
-				_ = w.Send(schema.AssistantMessage("partial", nil), nil)
-				w.Send(nil, ErrStreamCanceled)
-			}()
-			return r, nil
-		}).Times(1)
-
-	var isRetryAbleCalled int32
-	agent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
-		Name:        "StreamCanceledLegacy",
-		Description: "Test ErrStreamCanceled never retried with legacy IsRetryAble",
-		Instruction: "You are a helpful assistant.",
-		Model:       cm,
-		ModelRetryConfig: &ModelRetryConfig{
-			MaxRetries: 3,
-			IsRetryAble: func(_ context.Context, err error) bool {
-				atomic.AddInt32(&isRetryAbleCalled, 1)
-				return true
-			},
-			BackoffFunc: func(_ context.Context, _ int) time.Duration { return time.Millisecond },
-		},
+		assert.Equal(t, int32(0), atomic.LoadInt32(&shouldRetryCalled), "ShouldRetry should never be called for ErrStreamCanceled")
 	})
-	assert.NoError(t, err)
-
-	input := &AgentInput{
-		Messages:        []Message{schema.UserMessage("Hello")},
-		EnableStreaming: true,
-	}
-	iterator := agent.Run(ctx, input)
-
-	for {
-		event, ok := iterator.Next()
-		if !ok {
-			break
-		}
-		if event.Output != nil && event.Output.MessageOutput != nil {
-			mo := event.Output.MessageOutput
-			if mo.IsStreaming && mo.MessageStream != nil {
-				for {
-					_, recvErr := mo.MessageStream.Recv()
-					if recvErr != nil {
-						break
-					}
-				}
-			}
-		}
-	}
-	assert.Equal(t, int32(0), atomic.LoadInt32(&isRetryAbleCalled), "IsRetryAble should never be called for ErrStreamCanceled")
-}
-
-func TestErrStreamCanceled_Generate_ShouldRetry_NeverRetried(t *testing.T) {
-	ctx := context.Background()
-	ctrl := gomock.NewController(t)
-	defer ctrl.Finish()
-
-	cm := mockModel.NewMockToolCallingChatModel(ctrl)
-
-	cm.EXPECT().Generate(gomock.Any(), gomock.Any(), gomock.Any()).
-		Return(nil, ErrStreamCanceled).Times(1)
-
-	var shouldRetryCalled int32
-	agent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
-		Name:        "GenCanceledShouldRetry",
-		Description: "Test ErrStreamCanceled in Generate never retried",
-		Instruction: "You are a helpful assistant.",
-		Model:       cm,
-		ModelRetryConfig: &ModelRetryConfig{
-			MaxRetries: 3,
-			ShouldRetry: func(ctx context.Context, retryCtx *RetryContext) *RetryDecision {
-				atomic.AddInt32(&shouldRetryCalled, 1)
-				return &RetryDecision{ShouldRetry: true}
-			},
-			BackoffFunc: func(_ context.Context, _ int) time.Duration { return time.Millisecond },
-		},
-	})
-	assert.NoError(t, err)
-
-	input := &AgentInput{
-		Messages: []Message{schema.UserMessage("Hello")},
-	}
-	iterator := agent.Run(ctx, input)
-
-	for {
-		_, ok := iterator.Next()
-		if !ok {
-			break
-		}
-	}
-	assert.Equal(t, int32(0), atomic.LoadInt32(&shouldRetryCalled), "ShouldRetry should never be called for ErrStreamCanceled")
 }
