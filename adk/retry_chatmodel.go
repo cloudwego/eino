@@ -99,6 +99,13 @@ func init() {
 
 // RetryContext contains context information passed to ModelRetryConfig.ShouldRetry
 // during a retry decision.
+//
+// State combinations for OutputMessage and Err:
+//
+//	OutputMessage != nil, Err == nil  → successful call; inspect message quality
+//	OutputMessage == nil, Err != nil  → failed call (Generate error or Stream() error)
+//	OutputMessage != nil, Err != nil  → partial stream (chunks received before mid-stream error)
+//	OutputMessage == nil, Err == nil  → empty stream (zero chunks before EOF)
 type RetryContext struct {
 	// RetryAttempt is the current retry attempt number (1-based).
 	// For the first retry decision (after the initial call), this is 1.
