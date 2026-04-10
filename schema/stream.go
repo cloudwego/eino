@@ -656,6 +656,11 @@ func WithErrWrapper(wrapper func(error) error) ConvertOption {
 	}
 }
 
+// WithOnEOF registers a callback that fires once when the stream reaches EOF.
+// The callback can inject an error or a value before the final io.EOF is returned.
+// If the callback returns (nil, io.EOF), the stream ends normally.
+// If it returns a non-EOF error, that error is delivered first, then subsequent Recv returns io.EOF.
+// If it returns a non-nil value with nil error, that value is delivered first, then io.EOF.
 func WithOnEOF(fn func() (any, error)) ConvertOption {
 	return func(o *convertOptions) {
 		o.OnEOF = fn
