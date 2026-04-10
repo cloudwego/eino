@@ -24,6 +24,7 @@ type UnboundedChan[T any] struct {
 	mutex    sync.Mutex // Mutex to protect buffer access
 	notEmpty *sync.Cond // Condition variable to wait for data
 	closed   bool       // Indicates if the channel has been closed
+	woken    bool       // Set by Wakeup to break a blocked Receive
 }
 
 // NewUnboundedChan initializes and returns an UnboundedChan
@@ -61,17 +62,20 @@ func (ch *UnboundedChan[T]) TrySend(value T) bool {
 	return true
 }
 
-// Receive gets an item from the channel (blocks if empty)
+// Receive gets an item from the channel (blocks if empty).
+// Returns (value, true) if an item was received.
+// Returns (zero, false) if the channel was closed or woken up with no data.
 func (ch *UnboundedChan[T]) Receive() (T, bool) {
 	ch.mutex.Lock()
 	defer ch.mutex.Unlock()
 
-	for len(ch.buffer) == 0 && !ch.closed {
-		ch.notEmpty.Wait() // Wait until data is available
+	for len(ch.buffer) == 0 && !ch.closed && !ch.woken {
+		ch.notEmpty.Wait()
 	}
 
+	ch.woken = false
+
 	if len(ch.buffer) == 0 {
-		// Channel is closed and empty
 		var zero T
 		return zero, false
 	}
@@ -88,8 +92,26 @@ func (ch *UnboundedChan[T]) Close() {
 
 	if !ch.closed {
 		ch.closed = true
-		ch.notEmpty.Broadcast() // Wake up all waiting goroutines
+		ch.notEmpty.Broadcast()
 	}
+}
+
+// Wakeup unblocks a pending Receive call without adding data or closing the
+// channel. If Receive is blocked, it returns (zero, false). If no Receive is
+// pending, the next Receive call returns immediately with (zero, false) once.
+func (ch *UnboundedChan[T]) Wakeup() {
+	ch.mutex.Lock()
+	defer ch.mutex.Unlock()
+
+	ch.woken = true
+	ch.notEmpty.Broadcast()
+}
+
+func (ch *UnboundedChan[T]) ClearWakeup() {
+	ch.mutex.Lock()
+	defer ch.mutex.Unlock()
+
+	ch.woken = false
 }
 
 // TakeAll removes and returns all values from the channel atomically.

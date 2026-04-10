@@ -1258,6 +1258,7 @@ func (l *TurnLoop[T]) Stop(opts ...StopOption) {
 	l.stopSig.signal(cfg)
 
 	if cfg.idleFor > 0 {
+		l.buffer.Wakeup()
 		return
 	}
 	l.commitStop()
@@ -1324,6 +1325,7 @@ func (l *TurnLoop[T]) run(ctx context.Context) {
 			var ok bool
 
 			if idleFor := l.stopSig.getIdleFor(); idleFor > 0 {
+				l.buffer.ClearWakeup()
 				idleTimer := time.NewTimer(idleFor)
 				cancelIdle := make(chan struct{})
 				go func() {
@@ -1340,6 +1342,9 @@ func (l *TurnLoop[T]) run(ctx context.Context) {
 				close(cancelIdle)
 			} else {
 				first, ok = l.buffer.Receive()
+				if !ok && l.stopSig.getIdleFor() > 0 {
+					continue
+				}
 			}
 
 			if !ok {
