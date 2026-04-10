@@ -2381,7 +2381,7 @@ func TestTurnLoop_Stop_EscalatesCancelMode(t *testing.T) {
 	cc := <-agentStarted
 
 	loop.Stop(WithGracefulTimeout(10 * time.Second))
-	loop.Stop()
+	loop.Stop(WithImmediate())
 
 	deadline := time.After(1 * time.Second)
 	for {
@@ -4360,4 +4360,176 @@ func TestNewTurnLoop_NilPrepareAgent_Panics(t *testing.T) {
 func TestDeriveChild_NilParent_ReturnsNil(t *testing.T) {
 	var cc *cancelContext
 	assert.Nil(t, cc.deriveChild(context.Background()))
+}
+
+func TestUntilIdleFor(t *testing.T) {
+	t.Run("FiresAfterIdleDuration", func(t *testing.T) {
+		turnDone := make(chan struct{})
+		loop := newAndRunTurnLoop(context.Background(), TurnLoopConfig[string]{
+			GenInput: func(ctx context.Context, _ *TurnLoop[string], items []string) (*GenInputResult[string], error) {
+				return &GenInputResult[string]{
+					Input:    &AgentInput{Messages: []Message{schema.UserMessage(items[0])}},
+					Consumed: items,
+				}, nil
+			},
+			PrepareAgent: func(ctx context.Context, _ *TurnLoop[string], consumed []string) (Agent, error) {
+				return &turnLoopMockAgent{
+					name: "test",
+					runFunc: func(ctx context.Context, input *AgentInput) (*AgentOutput, error) {
+						close(turnDone)
+						return &AgentOutput{}, nil
+					},
+				}, nil
+			},
+		})
+
+		loop.Push("msg1")
+		<-turnDone
+
+		loop.Stop(UntilIdleFor(50 * time.Millisecond))
+
+		done := make(chan struct{})
+		go func() {
+			loop.Wait()
+			close(done)
+		}()
+
+		select {
+		case <-done:
+		case <-time.After(2 * time.Second):
+			t.Fatal("loop did not exit after idle timeout")
+		}
+	})
+
+	t.Run("ResetsOnPush", func(t *testing.T) {
+		turnCount := int32(0)
+		turnDone := make(chan struct{}, 10)
+		loop := newAndRunTurnLoop(context.Background(), TurnLoopConfig[string]{
+			GenInput: func(ctx context.Context, _ *TurnLoop[string], items []string) (*GenInputResult[string], error) {
+				return &GenInputResult[string]{
+					Input:    &AgentInput{Messages: []Message{schema.UserMessage(items[0])}},
+					Consumed: items,
+				}, nil
+			},
+			PrepareAgent: func(ctx context.Context, _ *TurnLoop[string], consumed []string) (Agent, error) {
+				return &turnLoopMockAgent{
+					name: "test",
+					runFunc: func(ctx context.Context, input *AgentInput) (*AgentOutput, error) {
+						atomic.AddInt32(&turnCount, 1)
+						turnDone <- struct{}{}
+						return &AgentOutput{}, nil
+					},
+				}, nil
+			},
+		})
+
+		loop.Push("msg1")
+		<-turnDone
+
+		loop.Stop(UntilIdleFor(200 * time.Millisecond))
+
+		time.Sleep(100 * time.Millisecond)
+		loop.Push("msg2")
+		<-turnDone
+
+		done := make(chan struct{})
+		go func() {
+			loop.Wait()
+			close(done)
+		}()
+
+		select {
+		case <-done:
+		case <-time.After(2 * time.Second):
+			t.Fatal("loop did not exit after idle timeout")
+		}
+
+		assert.Equal(t, int32(2), atomic.LoadInt32(&turnCount))
+	})
+
+	t.Run("EscalatedByStopWithImmediate", func(t *testing.T) {
+		agentStarted := make(chan *cancelContext, 1)
+		probe := &turnLoopStopModeProbeAgent{ccCh: agentStarted}
+		loop := newAndRunTurnLoop(context.Background(), TurnLoopConfig[string]{
+			GenInput: func(ctx context.Context, _ *TurnLoop[string], items []string) (*GenInputResult[string], error) {
+				return &GenInputResult[string]{
+					Input:    &AgentInput{Messages: []Message{schema.UserMessage(items[0])}},
+					Consumed: items,
+				}, nil
+			},
+			PrepareAgent: func(ctx context.Context, _ *TurnLoop[string], consumed []string) (Agent, error) {
+				return probe, nil
+			},
+		})
+
+		loop.Push("msg1")
+		cc := <-agentStarted
+
+		loop.Stop(UntilIdleFor(10 * time.Minute))
+		loop.Stop(WithImmediate())
+
+		deadline := time.After(2 * time.Second)
+		for {
+			if cc.getMode() == CancelImmediate {
+				break
+			}
+			select {
+			case <-deadline:
+				t.Fatal("cancel mode did not escalate to CancelImmediate")
+			default:
+			}
+			time.Sleep(1 * time.Millisecond)
+		}
+
+		exit := loop.Wait()
+		var ce *CancelError
+		assert.True(t, errors.As(exit.ExitReason, &ce))
+		assert.Equal(t, CancelImmediate, ce.Info.Mode)
+	})
+
+	t.Run("EscalatedByStopWithGraceful", func(t *testing.T) {
+		agentStarted := make(chan struct{})
+		agentDone := make(chan struct{})
+		loop := newAndRunTurnLoop(context.Background(), TurnLoopConfig[string]{
+			GenInput: func(ctx context.Context, _ *TurnLoop[string], items []string) (*GenInputResult[string], error) {
+				return &GenInputResult[string]{
+					Input:    &AgentInput{Messages: []Message{schema.UserMessage(items[0])}},
+					Consumed: items,
+				}, nil
+			},
+			PrepareAgent: func(ctx context.Context, _ *TurnLoop[string], consumed []string) (Agent, error) {
+				return &turnLoopCancellableMockAgent{
+					name: "test",
+					runFunc: func(ctx context.Context, input *AgentInput) (*AgentOutput, error) {
+						close(agentStarted)
+						<-ctx.Done()
+						close(agentDone)
+						return nil, ctx.Err()
+					},
+				}, nil
+			},
+		})
+
+		loop.Push("msg1")
+		<-agentStarted
+
+		loop.Stop(UntilIdleFor(10 * time.Minute))
+		loop.Stop(WithGracefulTimeout(50 * time.Millisecond))
+
+		select {
+		case <-agentDone:
+		case <-time.After(2 * time.Second):
+			t.Fatal("agent was not cancelled")
+		}
+
+		exit := loop.Wait()
+		assert.Error(t, exit.ExitReason)
+	})
+}
+
+func TestUntilIdleFor_NonPositive_Panics(t *testing.T) {
+	assert.PanicsWithValue(t, "adk: UntilIdleFor: duration must be positive",
+		func() { UntilIdleFor(0) })
+	assert.PanicsWithValue(t, "adk: UntilIdleFor: duration must be positive",
+		func() { UntilIdleFor(-1 * time.Second) })
 }

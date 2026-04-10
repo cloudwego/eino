@@ -54,8 +54,6 @@ import (
 // acts when a new Stop() call has been made, supporting mode escalation
 // (e.g. CancelAfterToolCalls followed by CancelImmediate).
 type stopSignal struct {
-	// done is closed exactly once by closeDone(). A closed channel is
-	// readable forever, so it serves as a durable stop flag for all watchers.
 	done chan struct{}
 
 	mu              sync.Mutex
@@ -63,10 +61,8 @@ type stopSignal struct {
 	agentCancelOpts []AgentCancelOption
 	skipCheckpoint  bool
 	stopCause       string
-	// notify is a buffered(1) channel that wakes the current turn's watcher
-	// when Stop() is called. Unlike done, it supports repeated Stop() calls
-	// for cancel-mode escalation.
-	notify chan struct{}
+	idleFor         time.Duration
+	notify          chan struct{}
 }
 
 func newStopSignal() *stopSignal {
@@ -82,12 +78,17 @@ func newStopSignal() *stopSignal {
 func (s *stopSignal) signal(cfg *stopConfig) {
 	s.mu.Lock()
 	s.gen++
-	s.agentCancelOpts = cfg.agentCancelOpts
+	if cfg.agentCancelOpts != nil {
+		s.agentCancelOpts = cfg.agentCancelOpts
+	}
 	if cfg.skipCheckpoint {
 		s.skipCheckpoint = true
 	}
 	if cfg.stopCause != "" && s.stopCause == "" {
 		s.stopCause = cfg.stopCause
+	}
+	if cfg.idleFor > 0 && s.idleFor == 0 {
+		s.idleFor = cfg.idleFor
 	}
 	s.mu.Unlock()
 	select {
@@ -129,6 +130,12 @@ func (s *stopSignal) getStopCause() string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.stopCause
+}
+
+func (s *stopSignal) getIdleFor() time.Duration {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.idleFor
 }
 
 // preemptSignal coordinates preemption between Push callers and the run loop.
@@ -544,9 +551,11 @@ func (l *TurnLoop[T]) planTurn(
 // and any items that were not processed.
 type TurnLoopExitState[T any] struct {
 	// ExitReason indicates why the loop exited.
-	// nil means clean exit (Stop() was called and completed normally).
+	// nil means clean exit (Stop() was called without cancel options, or the
+	// agent completed normally before Stop took effect).
 	// Non-nil values include context errors, callback errors, *CancelError, etc.
-	// When Stop() cancels a running agent, ExitReason will be a *CancelError.
+	// When Stop(WithImmediate()) or Stop(WithGraceful()) cancels a running
+	// agent, ExitReason will be a *CancelError.
 	// This never contains checkpoint errors — see CheckpointErr for those.
 	ExitReason error
 
@@ -555,8 +564,9 @@ type TurnLoopExitState[T any] struct {
 	// This is always valid regardless of ExitReason.
 	UnhandledItems []T
 
-	// CanceledItems contains the items whose turn was canceled by Stop().
-	// This is set when Stop() is called during a running turn, even if it
+	// CanceledItems contains the items whose turn was canceled by Stop
+	// with a cancel option (WithImmediate, WithGraceful, WithGracefulTimeout).
+	// This is set when the stop signal cancels a running turn, even if it
 	// did not contribute to the final CancelError.
 	// It can be used to reconstruct GenInput/PrepareAgent inputs when resuming.
 	CanceledItems []T
@@ -821,6 +831,7 @@ type stopConfig struct {
 	agentCancelOpts []AgentCancelOption
 	skipCheckpoint  bool
 	stopCause       string
+	idleFor         time.Duration
 }
 
 // StopOption is an option for Stop().
@@ -839,6 +850,18 @@ func WithGraceful() StopOption {
 			WithAgentCancelMode(CancelAfterChatModel | CancelAfterToolCalls),
 			WithRecursive(),
 		}
+	}
+}
+
+// WithImmediate requests an immediate cancel of the running agent turn.
+// The cancel affects only the root agent; nested agents inside AgentTools
+// are torn down via context cancellation as a side effect.
+//
+// This is the most aggressive stop mode and should only be used when the
+// caller needs to interrupt the agent without waiting for a safe point.
+func WithImmediate() StopOption {
+	return func(cfg *stopConfig) {
+		cfg.agentCancelOpts = []AgentCancelOption{}
 	}
 }
 
@@ -879,6 +902,30 @@ func WithSkipCheckpoint() StopOption {
 func WithStopCause(cause string) StopOption {
 	return func(cfg *stopConfig) {
 		cfg.stopCause = cause
+	}
+}
+
+// UntilIdleFor defers the stop until the TurnLoop has been continuously idle
+// (blocked between turns with no pending items) for at least the given
+// duration. Each time a new item arrives the timer resets from zero.
+//
+// This is useful when business code monitors agent activity externally and
+// wants to shut down the loop once there has been no work for a while, without
+// racing with concurrent Push calls.
+//
+// UntilIdleFor is combinable with other StopOptions in the same call.
+// For example, Stop(UntilIdleFor(30*time.Second), WithGraceful()) means
+// "after 30 s of idle, stop gracefully". If another Stop call is made
+// without UntilIdleFor (e.g. Stop(WithImmediate())), it commits the stop
+// immediately, bypassing the idle wait.
+//
+// duration must be positive; passing a zero or negative value panics.
+func UntilIdleFor(duration time.Duration) StopOption {
+	if duration <= 0 {
+		panic("adk: UntilIdleFor: duration must be positive")
+	}
+	return func(cfg *stopConfig) {
+		cfg.idleFor = duration
 	}
 }
 
@@ -1180,21 +1227,28 @@ func (l *TurnLoop[T]) pushWithConfig(item T, cfg *pushConfig[T]) (bool, <-chan s
 }
 
 // Stop signals the loop to stop and returns immediately (non-blocking).
-// The loop will finish the current turn (or cancel it via WithGraceful/WithGracefulTimeout),
-// then exit without starting a new turn.
-// Without options, Stop triggers an immediate cancel of the current agent turn.
-// The immediate cancel affects only the root agent; nested agents inside
-// AgentTools are torn down via context cancellation as a side effect.
-// Use WithGraceful() for recursive propagation to all descendants.
+// Without options, the current agent turn runs to completion and the loop
+// exits at the turn boundary without starting a new turn. ExitReason is nil.
+//
+// Use WithImmediate() to cancel the running agent turn immediately.
+// Use WithGraceful() to cancel at the nearest safe point with recursive
+// propagation to nested agents.
+// Use WithGracefulTimeout() for safe-point cancel with an escalation deadline.
+// Use UntilIdleFor() to defer the stop until the loop has been idle for a
+// given duration; the stop commits automatically once the idle timer fires.
+//
 // This method may be called multiple times; subsequent calls update cancel options.
+// A non-UntilIdleFor call commits the stop immediately, even if a prior
+// UntilIdleFor is still pending.
 // Call Wait() to block until the loop has fully exited and get the result.
 //
 // Stop may be called before Run. In that case, the stopped flag is set and
 // a subsequent Run will exit the loop immediately.
 //
 // If the running agent does not support the WithCancel AgentRunOption,
-// Stop degrades to "exit the loop on entering the next iteration" — the
-// current agent turn runs to completion before the loop exits.
+// all cancel-related options (WithImmediate, WithGraceful, WithGracefulTimeout)
+// degrade to "exit the loop on entering the next iteration" — the current
+// agent turn runs to completion before the loop exits.
 func (l *TurnLoop[T]) Stop(opts ...StopOption) {
 	cfg := &stopConfig{}
 	for _, opt := range opts {
@@ -1203,6 +1257,13 @@ func (l *TurnLoop[T]) Stop(opts ...StopOption) {
 
 	l.stopSig.signal(cfg)
 
+	if cfg.idleFor > 0 {
+		return
+	}
+	l.commitStop()
+}
+
+func (l *TurnLoop[T]) commitStop() {
 	l.stopOnce.Do(func() {
 		l.stopSig.closeDone()
 		atomic.StoreInt32(&l.stopped, 1)
@@ -1259,7 +1320,28 @@ func (l *TurnLoop[T]) run(ctx context.Context) {
 			pushBack = append(pushBack, pr.unhandled...)
 			pushBack = append(pushBack, pr.newItems...)
 		} else {
-			first, ok := l.buffer.Receive()
+			var first T
+			var ok bool
+
+			if idleFor := l.stopSig.getIdleFor(); idleFor > 0 {
+				idleTimer := time.NewTimer(idleFor)
+				cancelIdle := make(chan struct{})
+				go func() {
+					select {
+					case <-idleTimer.C:
+						l.commitStop()
+					case <-cancelIdle:
+					}
+				}()
+
+				first, ok = l.buffer.Receive()
+
+				idleTimer.Stop()
+				close(cancelIdle)
+			} else {
+				first, ok = l.buffer.Receive()
+			}
+
 			if !ok {
 				if err := ctx.Err(); err != nil {
 					l.runErr = err
@@ -1419,47 +1501,36 @@ func (l *TurnLoop[T]) watchPreemptSignal(done <-chan struct{}, agentCancelFunc A
 func (l *TurnLoop[T]) watchStopSignal(done <-chan struct{}, agentCancelFunc AgentCancelFunc, stoppedDone chan struct{}) {
 	var lastGen uint64
 	stoppedClosed := false
+
+	tryCancel := func(gen uint64, opts []AgentCancelOption) {
+		if gen == lastGen {
+			return
+		}
+		lastGen = gen
+		if opts == nil {
+			return
+		}
+		_, contributed := agentCancelFunc(opts...)
+		if contributed && !stoppedClosed {
+			close(stoppedDone)
+			stoppedClosed = true
+		}
+	}
+
 	for {
 		select {
 		case <-done:
 			return
 		case <-l.stopSig.notify:
-			gen, opts := l.stopSig.check()
-			if gen != lastGen {
-				lastGen = gen
-				// CancelHandle is intentionally not awaited here: agentCancelFunc
-				// commits the cancel signal synchronously, while waiting would block
-				// until the turn finishes and can deadlock this watcher against done.
-				_, contributed := agentCancelFunc(opts...)
-				if contributed && !stoppedClosed {
-					close(stoppedDone)
-					stoppedClosed = true
-				}
-			}
+			tryCancel(l.stopSig.check())
 		case <-l.stopSig.done:
-			gen, opts := l.stopSig.check()
-			if gen != lastGen {
-				lastGen = gen
-				_, contributed := agentCancelFunc(opts...)
-				if contributed && !stoppedClosed {
-					close(stoppedDone)
-					stoppedClosed = true
-				}
-			}
+			tryCancel(l.stopSig.check())
 			for {
 				select {
 				case <-done:
 					return
 				case <-l.stopSig.notify:
-					gen, opts := l.stopSig.check()
-					if gen != lastGen {
-						lastGen = gen
-						_, contributed := agentCancelFunc(opts...)
-						if contributed && !stoppedClosed {
-							close(stoppedDone)
-							stoppedClosed = true
-						}
-					}
+					tryCancel(l.stopSig.check())
 				}
 			}
 		}
