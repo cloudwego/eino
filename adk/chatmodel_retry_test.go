@@ -2193,8 +2193,8 @@ func TestShouldRetry_Stream_VerdictSignal_CleanStream_Rejected(t *testing.T) {
 					}
 				}
 				if idx == 0 {
-					var wre *WillRetryError
-					assert.True(t, errors.As(lastErr, &wre), "first stream should end with WillRetryError")
+					var willRetryErr *WillRetryError
+					assert.True(t, errors.As(lastErr, &willRetryErr), "first stream should end with WillRetryError")
 				} else {
 					assert.ErrorIs(t, lastErr, io.EOF, "second stream should end with io.EOF")
 				}
@@ -2267,8 +2267,8 @@ func TestShouldRetry_Stream_VerdictSignal_StreamError_Rejected(t *testing.T) {
 					_, recvErr := mo.MessageStream.Recv()
 					if recvErr != nil {
 						if eventCount == 1 {
-							var wre *WillRetryError
-							if errors.As(recvErr, &wre) {
+							var willRetryErr *WillRetryError
+							if errors.As(recvErr, &willRetryErr) {
 								firstEventHasWillRetry = true
 							}
 						}
@@ -2391,8 +2391,8 @@ func TestShouldRetry_Stream_VerdictSignal_AllRejected_Exhausted(t *testing.T) {
 				for {
 					_, recvErr := mo.MessageStream.Recv()
 					if recvErr != nil {
-						var wre *WillRetryError
-						if errors.As(recvErr, &wre) {
+						var willRetryErr *WillRetryError
+						if errors.As(recvErr, &willRetryErr) {
 							willRetryCount++
 						}
 						break

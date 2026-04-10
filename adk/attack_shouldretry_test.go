@@ -297,10 +297,10 @@ func TestAttack_Generate_MissingRetryAttemptStateUpdate(t *testing.T) {
 	var willRetryEvents int
 	for _, e := range events {
 		if e.Err != nil {
-			var wre *WillRetryError
-			if errors.As(e.Err, &wre) {
+			var willRetryErr *WillRetryError
+			if errors.As(e.Err, &willRetryErr) {
 				willRetryEvents++
-				t.Logf("WillRetryError event: attempt=%d, err=%s", wre.RetryAttempt, wre.ErrStr)
+				t.Logf("WillRetryError event: attempt=%d, err=%s", willRetryErr.RetryAttempt, willRetryErr.ErrStr)
 			}
 		}
 	}
@@ -728,16 +728,16 @@ func TestAttack_WillRetryError_OutputMessage_NotPopulated(t *testing.T) {
 			break
 		}
 		if event.Err != nil {
-			var wre *WillRetryError
-			if errors.As(event.Err, &wre) {
-				willRetryEvents = append(willRetryEvents, wre)
+			var willRetryErr *WillRetryError
+			if errors.As(event.Err, &willRetryErr) {
+				willRetryEvents = append(willRetryEvents, willRetryErr)
 			}
 		}
 	}
 
-	for i, wre := range willRetryEvents {
-		t.Logf("WillRetryError[%d]: OutputMessage=%v, ErrStr=%s", i, wre.OutputMessage, wre.ErrStr)
-		if wre.OutputMessage == nil {
+	for i, willRetryErr := range willRetryEvents {
+		t.Logf("WillRetryError[%d]: OutputMessage=%v, ErrStr=%s", i, willRetryErr.OutputMessage, willRetryErr.ErrStr)
+		if willRetryErr.OutputMessage == nil {
 			t.Logf("  DESIGN CONCERN: OutputMessage is nil — the rejected message content is lost in the event. " +
 				"Users observing WillRetryError cannot see what was rejected.")
 		}
@@ -1337,8 +1337,8 @@ func TestEdge_EmptyStream_ShouldRetry_Verdict(t *testing.T) {
 				for {
 					_, recvErr := mo.MessageStream.Recv()
 					if recvErr != nil {
-						var wre *WillRetryError
-						if errors.As(recvErr, &wre) {
+						var willRetryErr *WillRetryError
+						if errors.As(recvErr, &willRetryErr) {
 							willRetryOnEmpty = true
 						}
 						break
