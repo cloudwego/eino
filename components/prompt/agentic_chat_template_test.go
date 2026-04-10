@@ -21,9 +21,10 @@ import (
 	"errors"
 	"testing"
 
+	"github.com/stretchr/testify/assert"
+
 	"github.com/cloudwego/eino/callbacks"
 	"github.com/cloudwego/eino/schema"
-	"github.com/stretchr/testify/assert"
 )
 
 type mockAgenticTemplate struct {
