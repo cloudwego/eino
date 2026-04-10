@@ -76,6 +76,10 @@ type Config struct {
 	// Required. Default is 50000.
 	MaxLengthForTrunc int
 
+	// TruncExcludeTools is list of tool names whose tool results should never be truncated.
+	// Optional. Default is nil.
+	TruncExcludeTools []string
+
 	// TokenCounter is used to count the number of tokens in the conversation messages.
 	// It is used to determine when to trigger clearing based on token usage, and token usage after clearing.
 	// Required.
@@ -203,6 +207,7 @@ func (t *Config) copyAndFillDefaults() (*Config, error) {
 		ReadFileToolName:          t.ReadFileToolName,
 		RootDir:                   t.RootDir,
 		MaxLengthForTrunc:         t.MaxLengthForTrunc,
+		TruncExcludeTools:         t.TruncExcludeTools,
 		TokenCounter:              t.TokenCounter,
 		MaxTokensForClear:         t.MaxTokensForClear,
 		ClearRetentionSuffixLimit: t.ClearRetentionSuffixLimit,
@@ -270,6 +275,10 @@ func New(_ context.Context, config *Config) (adk.ChatModelAgentMiddleware, error
 	if !defaultReductionConfig.SkipClear {
 		defaultReductionConfig.ClearHandler = defaultClearHandler(config.RootDir, config.Backend != nil, config.ReadFileToolName)
 	}
+	excludeTruncTools := make(map[string]struct{}, len(config.TruncExcludeTools))
+	for _, toolName := range config.TruncExcludeTools {
+		excludeTruncTools[toolName] = struct{}{}
+	}
 	excludeClearTools := make(map[string]struct{}, len(config.ClearExcludeTools))
 	for _, toolName := range config.ClearExcludeTools {
 		excludeClearTools[toolName] = struct{}{}
@@ -278,6 +287,7 @@ func New(_ context.Context, config *Config) (adk.ChatModelAgentMiddleware, error
 	return &toolReductionMiddleware{
 		config:            config,
 		defaultConfig:     defaultReductionConfig,
+		excludeTruncTools: excludeTruncTools,
 		excludeClearTools: excludeClearTools,
 	}, nil
 }
@@ -288,6 +298,7 @@ type toolReductionMiddleware struct {
 	config        *Config
 	defaultConfig *ToolReductionConfig
 
+	excludeTruncTools map[string]struct{}
 	excludeClearTools map[string]struct{}
 }
 
@@ -307,6 +318,9 @@ func (t *toolReductionMiddleware) getToolConfig(toolName string, sc scene) *Tool
 func (t *toolReductionMiddleware) WrapInvokableToolCall(_ context.Context, endpoint adk.InvokableToolCallEndpoint, tCtx *adk.ToolContext) (adk.InvokableToolCallEndpoint, error) {
 	cfg := t.getToolConfig(tCtx.Name, sceneTruncation)
 	if cfg == nil || cfg.TruncHandler == nil {
+		return endpoint, nil
+	}
+	if _, excluded := t.excludeTruncTools[tCtx.Name]; excluded {
 		return endpoint, nil
 	}
 
@@ -353,6 +367,9 @@ func (t *toolReductionMiddleware) WrapStreamableToolCall(_ context.Context, endp
 	if cfg == nil || cfg.TruncHandler == nil {
 		return endpoint, nil
 	}
+	if _, excluded := t.excludeTruncTools[tCtx.Name]; excluded {
+		return endpoint, nil
+	}
 
 	return func(ctx context.Context, argumentsInJSON string, opts ...tool.Option) (*schema.StreamReader[string], error) {
 		output, err := endpoint(ctx, argumentsInJSON, opts...)
@@ -363,7 +380,6 @@ func (t *toolReductionMiddleware) WrapStreamableToolCall(_ context.Context, endp
 		readers := output.Copy(2)
 		output = readers[0]
 		origResp := readers[1]
-		defer output.Close()
 
 		detail := &ToolDetail{
 			ToolContext: tCtx,

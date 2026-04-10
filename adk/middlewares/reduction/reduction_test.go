@@ -146,6 +146,116 @@ hello worldhello worldhello worldhello worldhello worldhello worldhello worldhel
 		assert.True(t, gotError)
 		assert.Equal(t, 10, cnt)
 	})
+
+	t.Run("test TruncExcludeTools with invokable tool", func(t *testing.T) {
+		tCtx := &adk.ToolContext{
+			Name:   "important_tool",
+			CallID: "12345",
+		}
+		backend := filesystem.NewInMemoryBackend()
+		config := &Config{
+			Backend:           backend,
+			TruncExcludeTools: []string{"important_tool"},
+			MaxLengthForTrunc: 70,
+		}
+
+		mw, err := New(ctx, config)
+		assert.NoError(t, err)
+
+		edp, err := mw.WrapInvokableToolCall(ctx, it.InvokableRun, tCtx)
+		assert.NoError(t, err)
+
+		resp, err := edp(ctx, `{"value":"asd"}`)
+		assert.NoError(t, err)
+
+		expOrigContent := `hello worldhello worldhello worldhello worldhello worldhello worldhello worldhello worldhello worldhello world
+hello worldhello worldhello worldhello worldhello worldhello worldhello worldhello world`
+		assert.Equal(t, expOrigContent, resp)
+
+		_, err = backend.Read(ctx, &filesystem.ReadRequest{FilePath: "/tmp/trunc/12345"})
+		assert.Error(t, err)
+	})
+
+	t.Run("test TruncExcludeTools with streamable tool", func(t *testing.T) {
+		tCtx := &adk.ToolContext{
+			Name:   "important_stream_tool",
+			CallID: "54321",
+		}
+		backend := filesystem.NewInMemoryBackend()
+		config := &Config{
+			Backend:           backend,
+			TruncExcludeTools: []string{"important_stream_tool"},
+			MaxLengthForTrunc: 70,
+		}
+
+		mw, err := New(ctx, config)
+		assert.NoError(t, err)
+
+		edp, err := mw.WrapStreamableToolCall(ctx, st.StreamableRun, tCtx)
+		assert.NoError(t, err)
+
+		resp, err := edp(ctx, `{"value":"asd"}`)
+		assert.NoError(t, err)
+
+		var fullOutput strings.Builder
+		for {
+			chunk, recvErr := resp.Recv()
+			if recvErr != nil {
+				if recvErr == io.EOF {
+					break
+				}
+				assert.Fail(t, "unexpected error", recvErr)
+			}
+			fullOutput.WriteString(chunk)
+		}
+		resp.Close()
+
+		expOrigContent := `hello worldhello worldhello worldhello worldhello worldhello worldhello worldhello worldhello worldhello world
+hello worldhello worldhello worldhello worldhello worldhello worldhello worldhello world`
+		assert.Equal(t, expOrigContent, fullOutput.String())
+
+		_, err = backend.Read(ctx, &filesystem.ReadRequest{FilePath: "/tmp/trunc/54321"})
+		assert.Error(t, err)
+	})
+
+	t.Run("test mixed tools with TruncExcludeTools", func(t *testing.T) {
+		excludedToolCtx := &adk.ToolContext{
+			Name:   "excluded_tool",
+			CallID: "excluded_123",
+		}
+		normalToolCtx := &adk.ToolContext{
+			Name:   "normal_tool",
+			CallID: "normal_456",
+		}
+		backend := filesystem.NewInMemoryBackend()
+		config := &Config{
+			Backend:           backend,
+			TruncExcludeTools: []string{"excluded_tool"},
+			MaxLengthForTrunc: 70,
+		}
+
+		mw, err := New(ctx, config)
+		assert.NoError(t, err)
+
+		excludedEdp, err := mw.WrapInvokableToolCall(ctx, it.InvokableRun, excludedToolCtx)
+		assert.NoError(t, err)
+		excludedResp, err := excludedEdp(ctx, `{"value":"asd"}`)
+		assert.NoError(t, err)
+		expOrigContent := `hello worldhello worldhello worldhello worldhello worldhello worldhello worldhello worldhello worldhello world
+hello worldhello worldhello worldhello worldhello worldhello worldhello worldhello world`
+		assert.Equal(t, expOrigContent, excludedResp)
+
+		normalEdp, err := mw.WrapInvokableToolCall(ctx, it.InvokableRun, normalToolCtx)
+		assert.NoError(t, err)
+		normalResp, err := normalEdp(ctx, `{"value":"asd"}`)
+		assert.NoError(t, err)
+		assert.NotEqual(t, expOrigContent, normalResp)
+		assert.Contains(t, normalResp, "persisted-output")
+
+		content, err := backend.Read(ctx, &filesystem.ReadRequest{FilePath: "/tmp/trunc/normal_456"})
+		assert.NoError(t, err)
+		assert.Equal(t, expOrigContent, content.Content)
+	})
 }
 
 func TestReductionMiddlewareClear(t *testing.T) {
