@@ -18,11 +18,13 @@ package adk
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"go.uber.org/mock/gomock"
 
 	"github.com/cloudwego/eino/components/model"
@@ -2096,5 +2098,320 @@ func TestNewChatModelAgent_FailoverConfigValidation(t *testing.T) {
 		})
 		assert.Error(t, err)
 		assert.Contains(t, err.Error(), "ModelFailoverConfig.ShouldFailover")
+	})
+}
+
+// aliasCaptureTool captures the raw arguments JSON received by the tool.
+type aliasCaptureTool struct {
+	name         string
+	params       map[string]*schema.ParameterInfo
+	receivedArgs string
+}
+
+func (t *aliasCaptureTool) Info(_ context.Context) (*schema.ToolInfo, error) {
+	return &schema.ToolInfo{
+		Name:        t.name,
+		Desc:        t.name + " tool",
+		ParamsOneOf: schema.NewParamsOneOfByParams(t.params),
+	}, nil
+}
+
+func (t *aliasCaptureTool) InvokableRun(_ context.Context, argumentsInJSON string, _ ...tool.Option) (string, error) {
+	t.receivedArgs = argumentsInJSON
+	return "ok", nil
+}
+
+func TestToolAliasesPropagation(t *testing.T) {
+	t.Run("prepareExecContext_propagates_ToolAliases", func(t *testing.T) {
+		ctx := context.Background()
+		ctrl := gomock.NewController(t)
+
+		captureTool := &aliasCaptureTool{
+			name: "grep",
+			params: map[string]*schema.ParameterInfo{
+				"pattern": {Type: schema.String, Desc: "regex pattern"},
+				"path":    {Type: schema.String, Desc: "search path"},
+			},
+		}
+
+		cm := mockModel.NewMockToolCallingChatModel(ctrl)
+		generateCount := 0
+		cm.EXPECT().Generate(gomock.Any(), gomock.Any(), gomock.Any()).
+			DoAndReturn(func(ctx context.Context, msgs []*schema.Message, opts ...model.Option) (*schema.Message, error) {
+				generateCount++
+				if generateCount == 1 {
+					return &schema.Message{
+						Role: schema.Assistant,
+						ToolCalls: []schema.ToolCall{
+							{
+								ID: "call_1",
+								Function: schema.FunctionCall{
+									Name:      "grep",
+									Arguments: `{"grep_content": "TODO", "path": "/src"}`,
+								},
+							},
+						},
+					}, nil
+				}
+				return schema.AssistantMessage("done", nil), nil
+			}).AnyTimes()
+		cm.EXPECT().WithTools(gomock.Any()).Return(cm, nil).AnyTimes()
+
+		agent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+			Name:        "test",
+			Instruction: "test",
+			Model:       cm,
+			ToolsConfig: ToolsConfig{
+				ToolsNodeConfig: compose.ToolsNodeConfig{
+					Tools: []tool.BaseTool{captureTool},
+					ToolAliases: map[string]compose.ToolAliasConfig{
+						"grep": {
+							ArgumentsAliases: map[string][]string{
+								"pattern": {"grep_content"},
+							},
+						},
+					},
+				},
+			},
+		})
+		require.NoError(t, err)
+
+		iter := agent.Run(ctx, &AgentInput{Messages: []Message{schema.UserMessage("search for TODOs")}})
+		for {
+			_, ok := iter.Next()
+			if !ok {
+				break
+			}
+		}
+
+		require.NotEmpty(t, captureTool.receivedArgs, "tool should have been called")
+		var args map[string]any
+		err = json.Unmarshal([]byte(captureTool.receivedArgs), &args)
+		require.NoError(t, err)
+		assert.Equal(t, "TODO", args["pattern"], "alias 'grep_content' should be remapped to 'pattern'")
+		assert.NotContains(t, args, "grep_content", "alias key should not be present after remapping")
+		assert.Equal(t, "/src", args["path"])
+	})
+
+	t.Run("applyBeforeAgent_preserves_ToolAliases_when_handler_modifies_tools", func(t *testing.T) {
+		ctx := context.Background()
+		ctrl := gomock.NewController(t)
+
+		captureTool := &aliasCaptureTool{
+			name: "grep",
+			params: map[string]*schema.ParameterInfo{
+				"pattern": {Type: schema.String, Desc: "regex pattern"},
+			},
+		}
+
+		extraTool := &aliasCaptureTool{
+			name: "extra_tool",
+			params: map[string]*schema.ParameterInfo{
+				"input": {Type: schema.String},
+			},
+		}
+
+		cm := mockModel.NewMockToolCallingChatModel(ctrl)
+		generateCount := 0
+		cm.EXPECT().Generate(gomock.Any(), gomock.Any(), gomock.Any()).
+			DoAndReturn(func(ctx context.Context, msgs []*schema.Message, opts ...model.Option) (*schema.Message, error) {
+				generateCount++
+				if generateCount == 1 {
+					return &schema.Message{
+						Role: schema.Assistant,
+						ToolCalls: []schema.ToolCall{
+							{
+								ID: "call_1",
+								Function: schema.FunctionCall{
+									Name:      "grep",
+									Arguments: `{"grep_content": "FIXME"}`,
+								},
+							},
+						},
+					}, nil
+				}
+				return schema.AssistantMessage("done", nil), nil
+			}).AnyTimes()
+		cm.EXPECT().WithTools(gomock.Any()).Return(cm, nil).AnyTimes()
+
+		handler := &testToolsHandler{
+			BaseChatModelAgentMiddleware: &BaseChatModelAgentMiddleware{},
+			tools:                        []tool.BaseTool{extraTool},
+		}
+
+		agent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+			Name:        "test",
+			Instruction: "test",
+			Model:       cm,
+			ToolsConfig: ToolsConfig{
+				ToolsNodeConfig: compose.ToolsNodeConfig{
+					Tools: []tool.BaseTool{captureTool},
+					ToolAliases: map[string]compose.ToolAliasConfig{
+						"grep": {
+							ArgumentsAliases: map[string][]string{
+								"pattern": {"grep_content"},
+							},
+						},
+					},
+				},
+			},
+			Handlers: []ChatModelAgentMiddleware{handler},
+		})
+		require.NoError(t, err)
+
+		iter := agent.Run(ctx, &AgentInput{Messages: []Message{schema.UserMessage("search for FIXMEs")}})
+		for {
+			_, ok := iter.Next()
+			if !ok {
+				break
+			}
+		}
+
+		require.NotEmpty(t, captureTool.receivedArgs, "tool should have been called")
+		var args map[string]any
+		err = json.Unmarshal([]byte(captureTool.receivedArgs), &args)
+		require.NoError(t, err)
+		assert.Equal(t, "FIXME", args["pattern"], "alias 'grep_content' should be remapped to 'pattern' even after handler rebuild")
+		assert.NotContains(t, args, "grep_content", "alias key should not be present after remapping")
+	})
+
+	t.Run("name_alias_propagated_through_prepareExecContext", func(t *testing.T) {
+		ctx := context.Background()
+		ctrl := gomock.NewController(t)
+
+		captureTool := &aliasCaptureTool{
+			name: "grep",
+			params: map[string]*schema.ParameterInfo{
+				"pattern": {Type: schema.String},
+			},
+		}
+
+		cm := mockModel.NewMockToolCallingChatModel(ctrl)
+		generateCount := 0
+		cm.EXPECT().Generate(gomock.Any(), gomock.Any(), gomock.Any()).
+			DoAndReturn(func(ctx context.Context, msgs []*schema.Message, opts ...model.Option) (*schema.Message, error) {
+				generateCount++
+				if generateCount == 1 {
+					return &schema.Message{
+						Role: schema.Assistant,
+						ToolCalls: []schema.ToolCall{
+							{
+								ID: "call_1",
+								Function: schema.FunctionCall{
+									Name:      "search_content",
+									Arguments: `{"pattern": "TODO"}`,
+								},
+							},
+						},
+					}, nil
+				}
+				return schema.AssistantMessage("done", nil), nil
+			}).AnyTimes()
+		cm.EXPECT().WithTools(gomock.Any()).Return(cm, nil).AnyTimes()
+
+		agent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+			Name:        "test",
+			Instruction: "test",
+			Model:       cm,
+			ToolsConfig: ToolsConfig{
+				ToolsNodeConfig: compose.ToolsNodeConfig{
+					Tools: []tool.BaseTool{captureTool},
+					ToolAliases: map[string]compose.ToolAliasConfig{
+						"grep": {
+							NameAliases: []string{"search_content"},
+						},
+					},
+				},
+			},
+		})
+		require.NoError(t, err)
+
+		iter := agent.Run(ctx, &AgentInput{Messages: []Message{schema.UserMessage("search")}})
+		for {
+			_, ok := iter.Next()
+			if !ok {
+				break
+			}
+		}
+
+		require.NotEmpty(t, captureTool.receivedArgs, "tool should have been called via name alias 'search_content'")
+		var args map[string]any
+		err = json.Unmarshal([]byte(captureTool.receivedArgs), &args)
+		require.NoError(t, err)
+		assert.Equal(t, "TODO", args["pattern"])
+	})
+
+	t.Run("handler_adds_tool_matching_preexisting_ToolAliases_with_no_initial_tools", func(t *testing.T) {
+		ctx := context.Background()
+		ctrl := gomock.NewController(t)
+
+		captureTool := &aliasCaptureTool{
+			name: "grep",
+			params: map[string]*schema.ParameterInfo{
+				"pattern": {Type: schema.String, Desc: "regex pattern"},
+			},
+		}
+
+		cm := mockModel.NewMockToolCallingChatModel(ctrl)
+		generateCount := 0
+		cm.EXPECT().Generate(gomock.Any(), gomock.Any(), gomock.Any()).
+			DoAndReturn(func(ctx context.Context, msgs []*schema.Message, opts ...model.Option) (*schema.Message, error) {
+				generateCount++
+				if generateCount == 1 {
+					return &schema.Message{
+						Role: schema.Assistant,
+						ToolCalls: []schema.ToolCall{
+							{
+								ID: "call_1",
+								Function: schema.FunctionCall{
+									Name:      "grep",
+									Arguments: `{"grep_content": "BUG"}`,
+								},
+							},
+						},
+					}, nil
+				}
+				return schema.AssistantMessage("done", nil), nil
+			}).AnyTimes()
+		cm.EXPECT().WithTools(gomock.Any()).Return(cm, nil).AnyTimes()
+
+		handler := &testToolsHandler{
+			BaseChatModelAgentMiddleware: &BaseChatModelAgentMiddleware{},
+			tools:                        []tool.BaseTool{captureTool},
+		}
+
+		agent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+			Name:        "test",
+			Instruction: "test",
+			Model:       cm,
+			ToolsConfig: ToolsConfig{
+				ToolsNodeConfig: compose.ToolsNodeConfig{
+					ToolAliases: map[string]compose.ToolAliasConfig{
+						"grep": {
+							ArgumentsAliases: map[string][]string{
+								"pattern": {"grep_content"},
+							},
+						},
+					},
+				},
+			},
+			Handlers: []ChatModelAgentMiddleware{handler},
+		})
+		require.NoError(t, err)
+
+		iter := agent.Run(ctx, &AgentInput{Messages: []Message{schema.UserMessage("find bugs")}})
+		for {
+			_, ok := iter.Next()
+			if !ok {
+				break
+			}
+		}
+
+		require.NotEmpty(t, captureTool.receivedArgs, "tool added by handler should have been called")
+		var args map[string]any
+		err = json.Unmarshal([]byte(captureTool.receivedArgs), &args)
+		require.NoError(t, err)
+		assert.Equal(t, "BUG", args["pattern"], "alias 'grep_content' should be remapped to 'pattern' for handler-added tool")
+		assert.NotContains(t, args, "grep_content")
 	})
 }
