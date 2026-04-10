@@ -365,9 +365,10 @@ func (m *eventSenderModel) buildStreamConvertOptions(ctx context.Context) []sche
 					verdict := <-signal.ch
 					if verdict.WillRetry {
 						return &WillRetryError{
-							ErrStr:       err.Error(),
-							RetryAttempt: verdict.RetryAttempt,
-							err:          err,
+							ErrStr:        err.Error(),
+							RetryAttempt:  verdict.RetryAttempt,
+							OutputMessage: verdict.OutputMessage,
+							err:           err,
 						}
 					}
 					return err
@@ -377,9 +378,10 @@ func (m *eventSenderModel) buildStreamConvertOptions(ctx context.Context) []sche
 					verdict := <-signal.ch
 					if verdict.WillRetry {
 						return nil, &WillRetryError{
-							ErrStr:       verdict.Err.Error(),
-							RetryAttempt: verdict.RetryAttempt,
-							err:          verdict.Err,
+							ErrStr:        verdict.Err.Error(),
+							RetryAttempt:  verdict.RetryAttempt,
+							OutputMessage: verdict.OutputMessage,
+							err:           verdict.Err,
 						}
 					}
 					return nil, io.EOF

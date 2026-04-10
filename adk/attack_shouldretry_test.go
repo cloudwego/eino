@@ -1101,6 +1101,857 @@ func TestAttack_StreamReturnCopyContainsData(t *testing.T) {
 	assert.Equal(t, "chunk3", returnChunks[2])
 }
 
+// ============================================================================
+// Round 2 Attack Tests — targeting the new event signaling architecture
+// (retryVerdictSignal, suppressEventSend, WithOnEOF, ErrStreamCanceled)
+// ============================================================================
+
+// Attack Test 19: Nil RetryDecision in Stream ERROR path (regression)
+//
+// Bug: The author added nil guards for RetryDecision in generateWithShouldRetry (line 395)
+// and in the stream success path (line 568), but MISSED the stream error path (line 524).
+// When inner.Stream returns (nil, error) and ShouldRetry returns nil, it will panic.
+//
+// Impact: Same as the original nil-panic bug, but only triggered when:
+// (1) ShouldRetry is set, (2) the model's Stream() returns an error, AND
+// (3) ShouldRetry returns nil. This is a partial fix regression.
+func TestAttack_NilRetryDecision_StreamErrorPath(t *testing.T) {
+	ctx := context.Background()
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	cm := mockModel.NewMockToolCallingChatModel(ctrl)
+
+	streamErr := errors.New("model unavailable")
+	cm.EXPECT().Stream(gomock.Any(), gomock.Any(), gomock.Any()).
+		Return(nil, streamErr).Times(1)
+
+	agent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+		Name:        "NilDecisionStreamErrorAgent",
+		Description: "Test nil RetryDecision when Stream returns error",
+		Instruction: "You are a helpful assistant.",
+		Model:       cm,
+		ModelRetryConfig: &ModelRetryConfig{
+			MaxRetries: 1,
+			ShouldRetry: func(ctx context.Context, retryCtx *RetryContext) *RetryDecision {
+				return nil
+			},
+			BackoffFunc: func(_ context.Context, _ int) time.Duration { return time.Millisecond },
+		},
+	})
+	assert.NoError(t, err)
+
+	done := make(chan struct{})
+	var foundPanicErr bool
+	go func() {
+		defer close(done)
+		input := &AgentInput{
+			Messages:        []Message{schema.UserMessage("Hello")},
+			EnableStreaming: true,
+		}
+		iterator := agent.Run(ctx, input)
+		for {
+			event, ok := iterator.Next()
+			if !ok {
+				break
+			}
+			if event.Err != nil {
+				errMsg := event.Err.Error()
+				if strings.Contains(errMsg, "panic") || strings.Contains(errMsg, "nil pointer") ||
+					strings.Contains(errMsg, "runtime error") {
+					foundPanicErr = true
+				}
+			}
+			if event.Output != nil && event.Output.MessageOutput != nil {
+				mo := event.Output.MessageOutput
+				if mo.IsStreaming && mo.MessageStream != nil {
+					for {
+						_, recvErr := mo.MessageStream.Recv()
+						if recvErr != nil {
+							break
+						}
+					}
+				}
+			}
+		}
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("test deadlocked")
+	}
+
+	if foundPanicErr {
+		t.Errorf("CONFIRMED BUG (REGRESSION): nil RetryDecision in stream error path causes panic. " +
+			"Nil guard was added at line 568 (stream success path) but missed at line 524 (stream error path).")
+	}
+}
+
+// Attack Test 20: suppressEventSend — verify rejected Generate events are NOT emitted
+//
+// The new architecture uses suppressEventSend=true during retry to prevent the
+// eventSenderModel from emitting events for rejected attempts. Verify that only
+// the final accepted message's event is emitted.
+func TestAttack_SuppressEventSend_OnlyFinalEventEmitted(t *testing.T) {
+	ctx := context.Background()
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	cm := mockModel.NewMockToolCallingChatModel(ctrl)
+
+	var callCount int32
+	cm.EXPECT().Generate(gomock.Any(), gomock.Any(), gomock.Any()).
+		DoAndReturn(func(ctx context.Context, input []*schema.Message, opts ...model.Option) (*schema.Message, error) {
+			count := atomic.AddInt32(&callCount, 1)
+			if count <= 2 {
+				return schema.AssistantMessage("rejected_"+string(rune('0'+count)), nil), nil
+			}
+			return schema.AssistantMessage("accepted", nil), nil
+		}).Times(3)
+
+	agent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+		Name:        "SuppressEventAgent",
+		Description: "Test suppressEventSend during Generate retry",
+		Instruction: "You are a helpful assistant.",
+		Model:       cm,
+		ModelRetryConfig: &ModelRetryConfig{
+			MaxRetries: 3,
+			ShouldRetry: func(ctx context.Context, retryCtx *RetryContext) *RetryDecision {
+				if retryCtx.OutputMessage != nil && strings.Contains(retryCtx.OutputMessage.Content, "rejected") {
+					return &RetryDecision{ShouldRetry: true}
+				}
+				return &RetryDecision{ShouldRetry: false}
+			},
+			BackoffFunc: func(_ context.Context, _ int) time.Duration { return time.Millisecond },
+		},
+	})
+	assert.NoError(t, err)
+
+	input := &AgentInput{
+		Messages: []Message{schema.UserMessage("Hello")},
+	}
+	iterator := agent.Run(ctx, input)
+
+	var messageEvents []string
+	for {
+		event, ok := iterator.Next()
+		if !ok {
+			break
+		}
+		if event.Output != nil && event.Output.MessageOutput != nil && event.Output.MessageOutput.Message != nil {
+			messageEvents = append(messageEvents, event.Output.MessageOutput.Message.Content)
+		}
+	}
+
+	assert.Equal(t, int32(3), atomic.LoadInt32(&callCount))
+	assert.Equal(t, 1, len(messageEvents), "only 1 message event should be emitted (the accepted one)")
+	assert.Equal(t, "accepted", messageEvents[0], "the emitted event should be the accepted message")
+}
+
+// Attack Test 21: Stream verdict signal — WillRetryError injected into event stream
+//
+// When ShouldRetry rejects a stream message, the verdict signal triggers the
+// WithOnEOF callback to inject a WillRetryError. Verify the user's event stream
+// receives the WillRetryError with correct retry attempt info.
+//
+// FINDING: WillRetryError.OutputMessage is NOT populated in the stream verdict path.
+// The retryVerdict struct and WithOnEOF callback do not carry the rejected message.
+func TestAttack_StreamVerdict_WillRetryErrorInjected(t *testing.T) {
+	ctx := context.Background()
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	cm := mockModel.NewMockToolCallingChatModel(ctrl)
+
+	var callCount int32
+	cm.EXPECT().Stream(gomock.Any(), gomock.Any(), gomock.Any()).
+		DoAndReturn(func(ctx context.Context, input []*schema.Message, opts ...model.Option) (*schema.StreamReader[*schema.Message], error) {
+			count := atomic.AddInt32(&callCount, 1)
+			if count == 1 {
+				return schema.StreamReaderFromArray([]*schema.Message{schema.AssistantMessage("bad output", nil)}), nil
+			}
+			return schema.StreamReaderFromArray([]*schema.Message{schema.AssistantMessage("good output", nil)}), nil
+		}).Times(2)
+
+	agent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+		Name:        "StreamVerdictWillRetryAgent",
+		Description: "Test WillRetryError injection via verdict signal",
+		Instruction: "You are a helpful assistant.",
+		Model:       cm,
+		ModelRetryConfig: &ModelRetryConfig{
+			MaxRetries: 1,
+			ShouldRetry: func(ctx context.Context, retryCtx *RetryContext) *RetryDecision {
+				if retryCtx.OutputMessage != nil && retryCtx.OutputMessage.Content == "bad output" {
+					return &RetryDecision{ShouldRetry: true}
+				}
+				return &RetryDecision{ShouldRetry: false}
+			},
+			BackoffFunc: func(_ context.Context, _ int) time.Duration { return time.Millisecond },
+		},
+	})
+	assert.NoError(t, err)
+
+	input := &AgentInput{
+		Messages:        []Message{schema.UserMessage("Hello")},
+		EnableStreaming: true,
+	}
+	iterator := agent.Run(ctx, input)
+
+	var willRetryErrors []*WillRetryError
+	for {
+		event, ok := iterator.Next()
+		if !ok {
+			break
+		}
+		if event.Output != nil && event.Output.MessageOutput != nil {
+			mo := event.Output.MessageOutput
+			if mo.IsStreaming && mo.MessageStream != nil {
+				for {
+					_, recvErr := mo.MessageStream.Recv()
+					if recvErr != nil {
+						var willRetryErr *WillRetryError
+						if errors.As(recvErr, &willRetryErr) {
+							willRetryErrors = append(willRetryErrors, willRetryErr)
+						}
+						break
+					}
+				}
+			}
+		}
+	}
+
+	assert.Equal(t, int32(2), atomic.LoadInt32(&callCount))
+	assert.Equal(t, 1, len(willRetryErrors),
+		"should have exactly 1 WillRetryError injected from the rejected stream")
+	if len(willRetryErrors) > 0 {
+		assert.Equal(t, 0, willRetryErrors[0].RetryAttempt,
+			"RetryAttempt should be 0 (attempt index) for the first rejection")
+		if willRetryErrors[0].OutputMessage == nil {
+			t.Log("DESIGN CONCERN: WillRetryError.OutputMessage is nil in stream verdict path. " +
+				"The retryVerdict struct does not carry the rejected message. Users observing " +
+				"WillRetryError in streams cannot see what content was rejected.")
+		}
+	}
+}
+
+// Attack Test 22: Generate verdict — verify WillRetryError event flow when message rejected
+//
+// In the new architecture, generateWithShouldRetry uses suppressEventSend to prevent
+// intermediate message events. However, it does NOT emit WillRetryError events for
+// rejected attempts (unlike the stream path which uses verdict signals).
+//
+// FINDING: Generate path completely suppresses WillRetryError events when ShouldRetry
+// rejects a message. Only the final accepted message event is emitted.
+func TestAttack_GenerateVerdict_WillRetryErrorWithOutputMessage(t *testing.T) {
+	ctx := context.Background()
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	cm := mockModel.NewMockToolCallingChatModel(ctrl)
+
+	var callCount int32
+	cm.EXPECT().Generate(gomock.Any(), gomock.Any(), gomock.Any()).
+		DoAndReturn(func(ctx context.Context, input []*schema.Message, opts ...model.Option) (*schema.Message, error) {
+			count := atomic.AddInt32(&callCount, 1)
+			if count == 1 {
+				return schema.AssistantMessage("hallucinated response", nil), nil
+			}
+			return schema.AssistantMessage("clean response", nil), nil
+		}).Times(2)
+
+	agent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+		Name:        "GenerateVerdictAgent",
+		Description: "Test Generate WillRetryError with OutputMessage",
+		Instruction: "You are a helpful assistant.",
+		Model:       cm,
+		ModelRetryConfig: &ModelRetryConfig{
+			MaxRetries: 1,
+			ShouldRetry: func(ctx context.Context, retryCtx *RetryContext) *RetryDecision {
+				if retryCtx.OutputMessage != nil && strings.Contains(retryCtx.OutputMessage.Content, "hallucinated") {
+					return &RetryDecision{ShouldRetry: true}
+				}
+				return &RetryDecision{ShouldRetry: false}
+			},
+			BackoffFunc: func(_ context.Context, _ int) time.Duration { return time.Millisecond },
+		},
+	})
+	assert.NoError(t, err)
+
+	input := &AgentInput{
+		Messages: []Message{schema.UserMessage("Hello")},
+	}
+	iterator := agent.Run(ctx, input)
+
+	var willRetryErrors []*WillRetryError
+	var messageEvents []string
+	for {
+		event, ok := iterator.Next()
+		if !ok {
+			break
+		}
+		if event.Err != nil {
+			var willRetryErr *WillRetryError
+			if errors.As(event.Err, &willRetryErr) {
+				willRetryErrors = append(willRetryErrors, willRetryErr)
+			}
+		}
+		if event.Output != nil && event.Output.MessageOutput != nil && event.Output.MessageOutput.Message != nil {
+			messageEvents = append(messageEvents, event.Output.MessageOutput.Message.Content)
+		}
+	}
+
+	assert.Equal(t, int32(2), atomic.LoadInt32(&callCount))
+	assert.Equal(t, 1, len(messageEvents), "only accepted message event should be emitted")
+	assert.Equal(t, "clean response", messageEvents[0])
+
+	t.Logf("WillRetryError events: %d", len(willRetryErrors))
+	if len(willRetryErrors) == 0 {
+		t.Log("DESIGN CONCERN: Generate path with ShouldRetry does not emit WillRetryError events " +
+			"when a message is rejected. The suppressEventSend flag prevents ALL events during retry, " +
+			"but no WillRetryError is manually emitted afterward. This means observers (callbacks, " +
+			"event handlers) cannot detect that a message was rejected in Generate mode. " +
+			"Compare with Stream path which uses verdict signals to inject WillRetryError into the stream.")
+	}
+}
+
+// Attack Test 23: contextAwareSleep actually exits early on cancellation
+//
+// Verify the new contextAwareSleep method respects context cancellation and returns
+// within a reasonable time, not blocking for the full backoff duration.
+func TestAttack_ContextAwareSleep_ExitsEarly(t *testing.T) {
+	ctx := context.Background()
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	cm := mockModel.NewMockToolCallingChatModel(ctrl)
+
+	var callCount int32
+	cm.EXPECT().Generate(gomock.Any(), gomock.Any(), gomock.Any()).
+		DoAndReturn(func(ctx context.Context, input []*schema.Message, opts ...model.Option) (*schema.Message, error) {
+			atomic.AddInt32(&callCount, 1)
+			return nil, errRetryAble
+		}).AnyTimes()
+
+	cancelCtx, cancel := context.WithCancel(ctx)
+
+	agent, err := NewChatModelAgent(cancelCtx, &ChatModelAgentConfig{
+		Name:        "ContextAwareSleepAgent",
+		Description: "Test contextAwareSleep exits early",
+		Instruction: "You are a helpful assistant.",
+		Model:       cm,
+		ModelRetryConfig: &ModelRetryConfig{
+			MaxRetries: 50,
+			ShouldRetry: func(ctx context.Context, retryCtx *RetryContext) *RetryDecision {
+				if retryCtx.Err != nil {
+					return &RetryDecision{
+						ShouldRetry: true,
+						Backoff:     2 * time.Second,
+					}
+				}
+				return &RetryDecision{ShouldRetry: false}
+			},
+		},
+	})
+	assert.NoError(t, err)
+
+	input := &AgentInput{
+		Messages: []Message{schema.UserMessage("Hello")},
+	}
+	iterator := agent.Run(cancelCtx, input)
+
+	go func() {
+		time.Sleep(200 * time.Millisecond)
+		cancel()
+	}()
+
+	start := time.Now()
+	for {
+		_, ok := iterator.Next()
+		if !ok {
+			break
+		}
+	}
+	elapsed := time.Since(start)
+
+	calls := atomic.LoadInt32(&callCount)
+	assert.True(t, elapsed < 3*time.Second,
+		"should exit well before full backoff*maxRetries. Elapsed: %v, calls: %d", elapsed, calls)
+	t.Logf("Elapsed: %v, Calls: %d (with 2s backoff and 50 retries, old code would take 100s)", elapsed, calls)
+}
+
+// Attack Test 24: Stream verdict signal channel — never deadlocks on exhaustion
+//
+// When all stream retries are exhausted, the last verdict signal needs to be written.
+// Verify the channel write doesn't deadlock even on the final attempt.
+func TestAttack_StreamVerdictSignal_NoDeadlockOnExhaustion(t *testing.T) {
+	ctx := context.Background()
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	cm := mockModel.NewMockToolCallingChatModel(ctrl)
+
+	cm.EXPECT().Stream(gomock.Any(), gomock.Any(), gomock.Any()).
+		DoAndReturn(func(ctx context.Context, input []*schema.Message, opts ...model.Option) (*schema.StreamReader[*schema.Message], error) {
+			return schema.StreamReaderFromArray([]*schema.Message{schema.AssistantMessage("always bad", nil)}), nil
+		}).Times(3)
+
+	agent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+		Name:        "VerdictExhaustionAgent",
+		Description: "Test verdict signal on retry exhaustion",
+		Instruction: "You are a helpful assistant.",
+		Model:       cm,
+		ModelRetryConfig: &ModelRetryConfig{
+			MaxRetries: 2,
+			ShouldRetry: func(ctx context.Context, retryCtx *RetryContext) *RetryDecision {
+				return &RetryDecision{ShouldRetry: true}
+			},
+			BackoffFunc: func(_ context.Context, _ int) time.Duration { return time.Millisecond },
+		},
+	})
+	assert.NoError(t, err)
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		input := &AgentInput{
+			Messages:        []Message{schema.UserMessage("Hello")},
+			EnableStreaming: true,
+		}
+		iterator := agent.Run(ctx, input)
+		for {
+			event, ok := iterator.Next()
+			if !ok {
+				break
+			}
+			if event.Output != nil && event.Output.MessageOutput != nil {
+				mo := event.Output.MessageOutput
+				if mo.IsStreaming && mo.MessageStream != nil {
+					for {
+						_, recvErr := mo.MessageStream.Recv()
+						if recvErr != nil {
+							break
+						}
+					}
+				}
+			}
+		}
+	}()
+
+	select {
+	case <-done:
+		t.Log("No deadlock — verdict signal correctly handled on exhaustion")
+	case <-time.After(10 * time.Second):
+		t.Fatal("CONFIRMED BUG: deadlock on retry exhaustion — verdict signal channel blocked")
+	}
+}
+
+// Attack Test 25: Generate path with error → ShouldRetry returns retry →
+// verify WillRetryError event behavior
+//
+// FINDING: Same as Test 22 — Generate path with suppressEventSend does not emit
+// WillRetryError events for error retries either.
+func TestAttack_Generate_ErrorRetry_WillRetryEventEmitted(t *testing.T) {
+	ctx := context.Background()
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	cm := mockModel.NewMockToolCallingChatModel(ctrl)
+
+	var callCount int32
+	cm.EXPECT().Generate(gomock.Any(), gomock.Any(), gomock.Any()).
+		DoAndReturn(func(ctx context.Context, input []*schema.Message, opts ...model.Option) (*schema.Message, error) {
+			count := atomic.AddInt32(&callCount, 1)
+			if count == 1 {
+				return nil, errRetryAble
+			}
+			return schema.AssistantMessage("recovered", nil), nil
+		}).Times(2)
+
+	agent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+		Name:        "GenerateErrorRetryAgent",
+		Description: "Test WillRetryError event on Generate error retry",
+		Instruction: "You are a helpful assistant.",
+		Model:       cm,
+		ModelRetryConfig: &ModelRetryConfig{
+			MaxRetries: 2,
+			ShouldRetry: func(ctx context.Context, retryCtx *RetryContext) *RetryDecision {
+				if retryCtx.Err != nil {
+					return &RetryDecision{ShouldRetry: true}
+				}
+				return &RetryDecision{ShouldRetry: false}
+			},
+			BackoffFunc: func(_ context.Context, _ int) time.Duration { return time.Millisecond },
+		},
+	})
+	assert.NoError(t, err)
+
+	input := &AgentInput{
+		Messages: []Message{schema.UserMessage("Hello")},
+	}
+	iterator := agent.Run(ctx, input)
+
+	var willRetryErrors []*WillRetryError
+	var messageEvents []string
+	for {
+		event, ok := iterator.Next()
+		if !ok {
+			break
+		}
+		if event.Err != nil {
+			var willRetryErr *WillRetryError
+			if errors.As(event.Err, &willRetryErr) {
+				willRetryErrors = append(willRetryErrors, willRetryErr)
+			}
+		}
+		if event.Output != nil && event.Output.MessageOutput != nil && event.Output.MessageOutput.Message != nil {
+			messageEvents = append(messageEvents, event.Output.MessageOutput.Message.Content)
+		}
+	}
+
+	assert.Equal(t, int32(2), atomic.LoadInt32(&callCount))
+	assert.Equal(t, 1, len(messageEvents))
+	assert.Equal(t, "recovered", messageEvents[0])
+
+	t.Logf("WillRetryError events for error retry: %d", len(willRetryErrors))
+	if len(willRetryErrors) == 0 {
+		t.Log("DESIGN CONCERN: Generate path with ShouldRetry does not emit WillRetryError " +
+			"events for error retries either. Event observers cannot track retry progress in Generate mode.")
+	}
+}
+
+// ============================================================================
+// Round 3 Attack Tests — targeting residual bugs after author's second update
+// ============================================================================
+
+// Attack Test 26: Generate path nil-deref on manual event emission when out==nil
+//
+// Bug: When Generate returns (nil, nil) and ShouldRetry accepts (ShouldRetry=false),
+// the code at retry_chatmodel.go:407 does `msgCopy := *out` which panics because
+// out is nil. The `err != nil` guard at line 403 only catches the error case,
+// leaving the nil-output-no-error case unguarded.
+//
+// Impact: Any model that returns (nil, nil) from Generate — which is unusual but
+// possible (e.g., a broken mock, or a model wrapper that swallows errors) — will
+// cause an unrecoverable panic in the agent runtime.
+func TestAttack_GenerateNilOutput_ManualEventEmission_Panic(t *testing.T) {
+	ctx := context.Background()
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	cm := mockModel.NewMockToolCallingChatModel(ctrl)
+	cm.EXPECT().Generate(gomock.Any(), gomock.Any(), gomock.Any()).
+		Return(nil, nil).Times(1)
+
+	agent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+		Name:        "NilOutputAgent",
+		Description: "Test nil output with nil error in Generate",
+		Instruction: "You are a helpful assistant.",
+		Model:       cm,
+		ModelRetryConfig: &ModelRetryConfig{
+			MaxRetries: 1,
+			ShouldRetry: func(ctx context.Context, retryCtx *RetryContext) *RetryDecision {
+				return &RetryDecision{ShouldRetry: false}
+			},
+			BackoffFunc: func(_ context.Context, _ int) time.Duration { return time.Millisecond },
+		},
+	})
+	assert.NoError(t, err)
+
+	done := make(chan struct{})
+	var foundPanicErr bool
+	go func() {
+		defer close(done)
+		input := &AgentInput{
+			Messages: []Message{schema.UserMessage("Hello")},
+		}
+		iterator := agent.Run(ctx, input)
+		for {
+			event, ok := iterator.Next()
+			if !ok {
+				break
+			}
+			if event.Err != nil {
+				errMsg := event.Err.Error()
+				if strings.Contains(errMsg, "panic") || strings.Contains(errMsg, "nil pointer") ||
+					strings.Contains(errMsg, "runtime error") || strings.Contains(errMsg, "invalid memory") {
+					foundPanicErr = true
+				}
+			}
+		}
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("test deadlocked")
+	}
+
+	if foundPanicErr {
+		t.Errorf("CONFIRMED BUG: Generate returns (nil, nil) → ShouldRetry accepts → " +
+			"manual event emission at line 407 panics on `msgCopy := *out` because out is nil. " +
+			"Add a nil guard: `if out != nil { ... }` before dereferencing.")
+	}
+}
+
+// Attack Test 27: Legacy stream path still uses time.Sleep (not contextAwareSleep)
+//
+// Consistency issue: The author added contextAwareSleep for generateWithShouldRetry
+// and streamWithShouldRetry, but streamLegacy at lines 683 and 708 still uses
+// time.Sleep(backoffFunc(...)). This means context cancellation during backoff
+// is not respected in the legacy path.
+func TestAttack_LegacyStreamPath_StillBlockingSleep(t *testing.T) {
+	ctx := context.Background()
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	cm := mockModel.NewMockToolCallingChatModel(ctrl)
+
+	var callCount int32
+	cm.EXPECT().Stream(gomock.Any(), gomock.Any(), gomock.Any()).
+		DoAndReturn(func(ctx context.Context, input []*schema.Message, opts ...model.Option) (*schema.StreamReader[*schema.Message], error) {
+			atomic.AddInt32(&callCount, 1)
+			return nil, errRetryAble
+		}).AnyTimes()
+
+	cancelCtx, cancel := context.WithCancel(ctx)
+
+	agent, err := NewChatModelAgent(cancelCtx, &ChatModelAgentConfig{
+		Name:        "LegacySleepAgent",
+		Description: "Test legacy stream path blocking sleep",
+		Instruction: "You are a helpful assistant.",
+		Model:       cm,
+		ModelRetryConfig: &ModelRetryConfig{
+			MaxRetries: 10,
+			BackoffFunc: func(_ context.Context, _ int) time.Duration {
+				return 500 * time.Millisecond
+			},
+		},
+	})
+	assert.NoError(t, err)
+
+	input := &AgentInput{
+		Messages:        []Message{schema.UserMessage("Hello")},
+		EnableStreaming: true,
+	}
+	iterator := agent.Run(cancelCtx, input)
+
+	go func() {
+		time.Sleep(100 * time.Millisecond)
+		cancel()
+	}()
+
+	start := time.Now()
+	for {
+		_, ok := iterator.Next()
+		if !ok {
+			break
+		}
+	}
+	elapsed := time.Since(start)
+
+	t.Logf("Legacy stream path: elapsed=%v, calls=%d", elapsed, atomic.LoadInt32(&callCount))
+	if elapsed > 2*time.Second {
+		t.Logf("DESIGN CONCERN: Legacy stream path (IsRetryAble-based) still uses time.Sleep, " +
+			"not contextAwareSleep. Context cancellation during backoff is not respected. " +
+			"Consider migrating to contextAwareSleep for consistency.")
+	}
+}
+
+// Attack Test 28: Verdict signal channel leak when retry panics between stream creation and verdict send
+//
+// If the retry logic panics after creating the signal but before sending a verdict
+// (e.g., in consumeStreamForMessage or ShouldRetry callback), the WithOnEOF and
+// WithErrWrapper callbacks in wrappers.go will block forever on `<-signal.ch`.
+// This tests that the event stream consumer doesn't deadlock in this scenario.
+func TestAttack_VerdictSignal_PanicBeforeVerdictSend(t *testing.T) {
+	ctx := context.Background()
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	cm := mockModel.NewMockToolCallingChatModel(ctrl)
+
+	cm.EXPECT().Stream(gomock.Any(), gomock.Any(), gomock.Any()).
+		DoAndReturn(func(ctx context.Context, input []*schema.Message, opts ...model.Option) (*schema.StreamReader[*schema.Message], error) {
+			return schema.StreamReaderFromArray([]*schema.Message{schema.AssistantMessage("ok", nil)}), nil
+		}).Times(1)
+
+	agent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+		Name:        "PanicVerdictAgent",
+		Description: "Test verdict signal behavior when ShouldRetry panics",
+		Instruction: "You are a helpful assistant.",
+		Model:       cm,
+		ModelRetryConfig: &ModelRetryConfig{
+			MaxRetries: 1,
+			ShouldRetry: func(ctx context.Context, retryCtx *RetryContext) *RetryDecision {
+				panic("ShouldRetry callback panicked!")
+			},
+			BackoffFunc: func(_ context.Context, _ int) time.Duration { return time.Millisecond },
+		},
+	})
+	assert.NoError(t, err)
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		input := &AgentInput{
+			Messages:        []Message{schema.UserMessage("Hello")},
+			EnableStreaming: true,
+		}
+		iterator := agent.Run(ctx, input)
+		for {
+			event, ok := iterator.Next()
+			if !ok {
+				break
+			}
+			if event.Output != nil && event.Output.MessageOutput != nil {
+				mo := event.Output.MessageOutput
+				if mo.IsStreaming && mo.MessageStream != nil {
+					for {
+						_, recvErr := mo.MessageStream.Recv()
+						if recvErr != nil {
+							break
+						}
+					}
+				}
+			}
+		}
+	}()
+
+	select {
+	case <-done:
+		t.Log("No deadlock — panic in ShouldRetry was handled without verdict signal deadlock")
+	case <-time.After(10 * time.Second):
+		t.Fatal("CONFIRMED BUG: deadlock — ShouldRetry panic leaves verdict signal unsent, " +
+			"WithOnEOF/WithErrWrapper blocks forever on <-signal.ch")
+	}
+}
+
+// Attack Test 29: WithOnEOF drops value when callback returns (non-nil, io.EOF)
+//
+// In schema/stream.go:recv(), when onEOF returns (val, io.EOF), the condition
+// `onEOFErr != io.EOF` is false, so we skip the return and fall through to
+// `return t, io.EOF`. The returned val is silently dropped.
+//
+// This tests the primitive directly, not through the ADK.
+func TestAttack_OnEOF_DropsValueWhenReturnedWithEOF(t *testing.T) {
+	r, w := schema.Pipe[*schema.Message](1)
+	go func() {
+		_ = w.Send(schema.AssistantMessage("chunk", nil), nil)
+		w.Close()
+	}()
+
+	sentinel := schema.AssistantMessage("injected-by-oneof", nil)
+	onEOFCalled := false
+	converted := schema.StreamReaderWithConvert(r,
+		func(msg *schema.Message) (*schema.Message, error) { return msg, nil },
+		schema.WithOnEOF(func() (any, error) {
+			onEOFCalled = true
+			return sentinel, io.EOF
+		}),
+	)
+
+	var chunks []*schema.Message
+	for {
+		msg, err := converted.Recv()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		chunks = append(chunks, msg)
+	}
+
+	assert.True(t, onEOFCalled, "onEOF should have been called")
+	assert.Equal(t, 1, len(chunks), "should only receive the original chunk — the onEOF value "+
+		"returned with io.EOF is silently dropped. This is correct behavior for the current contract "+
+		"(io.EOF means 'end normally'), but callers must be aware that returning a value with io.EOF "+
+		"will NOT deliver that value.")
+	assert.Equal(t, "chunk", chunks[0].Content)
+}
+
+// Attack Test 30: Stream error path — decision.RewriteError with nil decision guard missing
+//
+// Closely related to Test 19. When the stream error path gets a nil decision
+// (which panics at line 526), even if we add a nil guard, we should verify
+// that RewriteError is properly handled in the error path.
+// This test ensures that when ShouldRetry returns ShouldRetry=false with RewriteError
+// on a stream init error, the RewriteError replaces the original error.
+func TestAttack_StreamErrorPath_RewriteError(t *testing.T) {
+	ctx := context.Background()
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	cm := mockModel.NewMockToolCallingChatModel(ctrl)
+
+	streamErr := errors.New("connection refused")
+	rewriteErr := errors.New("service unavailable: please retry later")
+	cm.EXPECT().Stream(gomock.Any(), gomock.Any(), gomock.Any()).
+		Return(nil, streamErr).Times(1)
+
+	agent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+		Name:        "StreamErrorRewriteAgent",
+		Description: "Test RewriteError in stream error path",
+		Instruction: "You are a helpful assistant.",
+		Model:       cm,
+		ModelRetryConfig: &ModelRetryConfig{
+			MaxRetries: 1,
+			ShouldRetry: func(ctx context.Context, retryCtx *RetryContext) *RetryDecision {
+				if retryCtx.Err != nil {
+					return &RetryDecision{
+						ShouldRetry:  false,
+						RewriteError: rewriteErr,
+					}
+				}
+				return &RetryDecision{ShouldRetry: false}
+			},
+			BackoffFunc: func(_ context.Context, _ int) time.Duration { return time.Millisecond },
+		},
+	})
+	assert.NoError(t, err)
+
+	done := make(chan struct{})
+	var foundRewriteErr bool
+	go func() {
+		defer close(done)
+		input := &AgentInput{
+			Messages:        []Message{schema.UserMessage("Hello")},
+			EnableStreaming: true,
+		}
+		iterator := agent.Run(ctx, input)
+		for {
+			event, ok := iterator.Next()
+			if !ok {
+				break
+			}
+			if event.Err != nil && errors.Is(event.Err, rewriteErr) {
+				foundRewriteErr = true
+			}
+			if event.Output != nil && event.Output.MessageOutput != nil {
+				mo := event.Output.MessageOutput
+				if mo.IsStreaming && mo.MessageStream != nil {
+					for {
+						_, recvErr := mo.MessageStream.Recv()
+						if recvErr != nil {
+							break
+						}
+					}
+				}
+			}
+		}
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("test deadlocked")
+	}
+
+	assert.True(t, foundRewriteErr,
+		"stream error path should return the RewriteError, not the original stream init error")
+}
+
 func TestRace_VerdictSignal_ConcurrentEventConsumer(t *testing.T) {
 	ctx := context.Background()
 	ctrl := gomock.NewController(t)

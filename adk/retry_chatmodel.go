@@ -81,9 +81,6 @@ type WillRetryError struct {
 	RetryAttempt int
 	// OutputMessage is the model's output message from the attempt that triggered the retry, if any.
 	// May be nil if the model returned an error without producing a message.
-	// Note: in the ShouldRetry path, this field is currently not populated on WillRetryError
-	// events emitted to the event stream, because the event sender layer does not have access
-	// to the retry decision. It is only populated in RetryContext passed to ShouldRetry itself.
 	OutputMessage *schema.Message
 	err           error
 }
@@ -276,9 +273,10 @@ type retryVerdictSignal struct {
 }
 
 type retryVerdict struct {
-	WillRetry    bool
-	RetryAttempt int
-	Err          error
+	WillRetry     bool
+	RetryAttempt  int
+	Err           error
+	OutputMessage *schema.Message
 }
 
 // retryModelWrapper wraps a BaseChatModel with retry logic.
@@ -334,7 +332,9 @@ func (r *retryModelWrapper) generateLegacy(ctx context.Context, input []*schema.
 		lastErr = err
 		if attempt < r.config.MaxRetries {
 			log.Printf("retrying ChatModel.Generate (attempt %d/%d): %v", attempt+1, r.config.MaxRetries, err)
-			time.Sleep(backoffFunc(ctx, attempt+1))
+			if err := r.contextAwareSleep(ctx, backoffFunc(ctx, attempt+1)); err != nil {
+				return nil, err
+			}
 		}
 	}
 
@@ -403,7 +403,7 @@ func (r *retryModelWrapper) generateWithShouldRetry(ctx context.Context, input [
 			if err != nil {
 				return nil, err
 			}
-			if execCtx != nil && execCtx.generator != nil {
+			if execCtx != nil && execCtx.generator != nil && out != nil {
 				msgCopy := *out
 				event := EventFromMessage(&msgCopy, nil, schema.Assistant, "")
 				execCtx.send(event)
@@ -491,6 +491,19 @@ func (r *retryModelWrapper) streamWithShouldRetry(ctx context.Context, input []*
 	currentInput := input
 	currentOpts := opts
 	var lastErr error
+	var curSignal *retryVerdictSignal
+
+	defer func() {
+		if p := recover(); p != nil {
+			if curSignal != nil {
+				select {
+				case curSignal.ch <- retryVerdict{WillRetry: false, Err: fmt.Errorf("panic: %v", p)}:
+				default:
+				}
+			}
+			panic(p)
+		}
+	}()
 
 	for attempt := 0; attempt <= r.config.MaxRetries; attempt++ {
 		_ = compose.ProcessState(ctx, func(_ context.Context, st *State) error {
@@ -499,6 +512,7 @@ func (r *retryModelWrapper) streamWithShouldRetry(ctx context.Context, input []*
 		})
 
 		signal := &retryVerdictSignal{ch: make(chan retryVerdict, 1)}
+		curSignal = signal
 		if execCtx != nil {
 			execCtx.retryVerdictSignal = signal
 		}
@@ -522,6 +536,9 @@ func (r *retryModelWrapper) streamWithShouldRetry(ctx context.Context, input []*
 				Err:           err,
 			}
 			decision := r.config.ShouldRetry(ctx, retryCtx)
+			if decision == nil {
+				decision = &RetryDecision{}
+			}
 
 			if !decision.ShouldRetry {
 				if decision.RewriteError != nil {
@@ -588,9 +605,10 @@ func (r *retryModelWrapper) streamWithShouldRetry(ctx context.Context, input []*
 			verdictErr = fmt.Errorf("model output rejected by ShouldRetry at attempt %d", attempt+1)
 		}
 		signal.ch <- retryVerdict{
-			WillRetry:    true,
-			RetryAttempt: attempt,
-			Err:          verdictErr,
+			WillRetry:     true,
+			RetryAttempt:  attempt,
+			Err:           verdictErr,
+			OutputMessage: msg,
 		}
 		returnCopy.Close()
 
@@ -680,7 +698,9 @@ func (r *retryModelWrapper) streamLegacy(ctx context.Context, input []*schema.Me
 			lastErr = err
 			if attempt < r.config.MaxRetries {
 				log.Printf("retrying ChatModel.Stream (attempt %d/%d): %v", attempt+1, r.config.MaxRetries, err)
-				time.Sleep(backoffFunc(ctx, attempt+1))
+				if err := r.contextAwareSleep(ctx, backoffFunc(ctx, attempt+1)); err != nil {
+					return nil, err
+				}
 			}
 			continue
 		}
@@ -705,7 +725,9 @@ func (r *retryModelWrapper) streamLegacy(ctx context.Context, input []*schema.Me
 		lastErr = streamErr
 		if attempt < r.config.MaxRetries {
 			log.Printf("retrying ChatModel.Stream (attempt %d/%d): %v", attempt+1, r.config.MaxRetries, streamErr)
-			time.Sleep(backoffFunc(ctx, attempt+1))
+			if err := r.contextAwareSleep(ctx, backoffFunc(ctx, attempt+1)); err != nil {
+				return nil, err
+			}
 		}
 	}
 
