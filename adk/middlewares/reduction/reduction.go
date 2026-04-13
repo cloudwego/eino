@@ -119,6 +119,15 @@ type Config struct {
 	// Optional. Default is nil.
 	ClearExcludeTools []string
 
+	// ClearMessageRewriter is a pre-process handler before clearing specific tool call and tool response pairs.
+	// You can rewrite tool call and tool messages extracted as parameters and return a rearranged message slice.
+	// This can be useful when you want to remove some tool calls (e.g., write_file / edit_file) and rewrite them
+	// as a user message (e.g. <system-reminder>).
+	// Returned messages will replace the original tool call and tool messages and will count towards ClearAtLeastTokens.
+	// If returned messagesAfterRewrite is nil, tool call and tool messages will be removed.
+	// Optional. Default is nil, which means no rewrite.
+	ClearMessageRewriter func(ctx context.Context, toolCallMsg adk.Message, toolResponseMsgs []adk.Message) (messagesAfterRewrite []adk.Message, err error)
+
 	// ClearPostProcess is clear post process handler.
 	// Optional.
 	ClearPostProcess func(ctx context.Context, state *adk.ChatModelAgentState) context.Context
@@ -232,6 +241,7 @@ func (t *Config) copyAndFillDefaults() (*Config, error) {
 		ClearRetentionSuffixLimit: t.ClearRetentionSuffixLimit,
 		ClearAtLeastTokens:        t.ClearAtLeastTokens,
 		ClearExcludeTools:         t.ClearExcludeTools,
+		ClearMessageRewriter:      t.ClearMessageRewriter,
 		ClearPostProcess:          t.ClearPostProcess,
 	}
 	if cfg.TokenCounter == nil {
@@ -591,19 +601,15 @@ func (t *toolReductionMiddleware) BeforeModelRewriteState(ctx context.Context, s
 	if start >= end {
 		return ctx, state, nil
 	}
-
 	var (
-		offloadStash       []*offloadStashItem
 		editTarget         []*schema.Message
 		clearAtLeastTokens = t.config.ClearAtLeastTokens
+		offloadStash       []*offloadStashItem
 	)
 
-	if clearAtLeastTokens > 0 {
-		editTarget = append(editTarget, state.Messages[:start]...)
-		editTarget = append(editTarget, copyMessages(state.Messages[start:end])...)
-		editTarget = append(editTarget, state.Messages[end:]...)
-	} else {
-		editTarget = state.Messages
+	editTarget, end, err = t.applyClearRewrite(ctx, state, start, end, clearAtLeastTokens)
+	if err != nil {
+		return ctx, state, err
 	}
 
 	// recursively handle
@@ -712,14 +718,80 @@ func (t *toolReductionMiddleware) BeforeModelRewriteState(ctx context.Context, s
 				return ctx, state, writeErr
 			}
 		}
-		state.Messages = editTarget // replace original state messages
 	}
+
+	state.Messages = editTarget // replace original state messages
 
 	if t.config.ClearPostProcess != nil {
 		ctx = t.config.ClearPostProcess(ctx, state)
 	}
 
 	return ctx, state, nil
+}
+
+func (t *toolReductionMiddleware) applyClearRewrite(ctx context.Context, state *adk.ChatModelAgentState, start, end int, clearAtLeastTokens int64) (
+	[]*schema.Message, int, error) {
+	var (
+		editTarget      []*schema.Message
+		needProcessPart []*schema.Message
+	)
+
+	editTarget = append(editTarget, state.Messages[:start]...)
+
+	if clearAtLeastTokens > 0 {
+		needProcessPart = copyMessages(state.Messages[start:end])
+	} else {
+		needProcessPart = state.Messages[start:end]
+	}
+
+	if t.config.ClearMessageRewriter != nil {
+		var (
+			rewritten  []*schema.Message
+			origLength = len(needProcessPart)
+		)
+		for i := 0; i < len(needProcessPart); {
+			msg := needProcessPart[i]
+			switch msg.Role {
+			case schema.System, schema.User:
+				rewritten = append(rewritten, msg)
+				i++
+			case schema.Tool:
+				i++
+			case schema.Assistant:
+				if len(msg.ToolCalls) == 0 {
+					rewritten = append(rewritten, msg)
+					i++
+					continue
+				}
+				var (
+					toolResponseMessages []adk.Message
+					trStart, trEnd       = i + 1, i + len(msg.ToolCalls) + 1
+				)
+				if trStart >= trEnd || trStart >= len(needProcessPart) || trEnd > len(needProcessPart) {
+					toolResponseMessages = nil
+				} else {
+					toolResponseMessages = needProcessPart[trStart:trEnd]
+				}
+
+				rewrittenMessages, rewriteErr := t.config.ClearMessageRewriter(ctx, msg, toolResponseMessages)
+				if rewriteErr != nil {
+					return nil, 0, rewriteErr
+				}
+				rewritten = append(rewritten, rewrittenMessages...)
+				i = trEnd
+			default: // unexpected
+				return nil, 0, fmt.Errorf("[applyClearRewrite] unexpected message role: %v", msg.Role)
+			}
+		}
+		editTarget = append(editTarget, rewritten...)
+		editTarget = append(editTarget, state.Messages[end:]...)
+		end = end - origLength + len(rewritten)
+	} else {
+		editTarget = append(editTarget, needProcessPart...)
+		editTarget = append(editTarget, state.Messages[end:]...)
+	}
+
+	return editTarget, end, nil
 }
 
 type offloadStashItem struct {

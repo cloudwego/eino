@@ -2261,3 +2261,491 @@ func TestReductionMiddlewareEnhancedTrunc(t *testing.T) {
 		assert.EqualError(t, err, "truncation: no backend for offload")
 	})
 }
+
+func TestClearRewriteMessagesHandler(t *testing.T) {
+	ctx := context.Background()
+	it := mockInvokableTool()
+	st := mockStreamableTool()
+	tools := []tool.BaseTool{it, st}
+	var toolsInfo []*schema.ToolInfo
+	for _, bt := range tools {
+		ti, _ := bt.Info(ctx)
+		toolsInfo = append(toolsInfo, ti)
+	}
+
+	tokenCounter := func(_ context.Context, msgs []adk.Message, _ []*schema.ToolInfo) (int64, error) {
+		return int64(1000), nil
+	}
+
+	t.Run("test all tools hit - rewrite to system reminder", func(t *testing.T) {
+		config := &Config{
+			SkipTruncation:     true,
+			TokenCounter:       tokenCounter,
+			MaxTokensForClear:  10,
+			ClearAtLeastTokens: 0,
+			ClearMessageRewriter: func(ctx context.Context, assistantMessage adk.Message, toolResponses []adk.Message) (messagesAfterRewrite []adk.Message, err error) {
+				return []adk.Message{
+					schema.UserMessage("<system-reminder>write_file and edit_file executed successfully</system-reminder>"),
+				}, nil
+			},
+		}
+
+		mw, err := New(ctx, config)
+		assert.NoError(t, err)
+		_, s, err := mw.BeforeModelRewriteState(ctx, &adk.ChatModelAgentState{
+			Messages: []adk.Message{
+				schema.SystemMessage("you are a helpful assistant"),
+				schema.UserMessage("user request"),
+				schema.AssistantMessage("", []schema.ToolCall{
+					{
+						ID:       "call_1",
+						Type:     "function",
+						Function: schema.FunctionCall{Name: "write_file", Arguments: `{"file": "test.txt", "content": "hello"}`},
+					},
+					{
+						ID:       "call_2",
+						Type:     "function",
+						Function: schema.FunctionCall{Name: "edit_file", Arguments: `{"file": "test.txt", "changes": "add"}`},
+					},
+				}),
+				schema.ToolMessage("write success", "call_1"),
+				schema.ToolMessage("edit success", "call_2"),
+				schema.AssistantMessage("done", nil),
+				schema.AssistantMessage("", []schema.ToolCall{{ID: "dummy", Type: "function", Function: schema.FunctionCall{Name: "dummy_tool"}}}),
+			},
+		}, &adk.ModelContext{
+			Tools: toolsInfo,
+		})
+		assert.NoError(t, err)
+		assert.Len(t, s.Messages, 5)
+		assert.Equal(t, schema.User, s.Messages[2].Role)
+		assert.Equal(t, "<system-reminder>write_file and edit_file executed successfully</system-reminder>", s.Messages[2].Content)
+		assert.Equal(t, schema.Assistant, s.Messages[3].Role)
+		assert.Equal(t, "done", s.Messages[3].Content)
+	})
+
+	t.Run("test remove tool call and tool responses", func(t *testing.T) {
+		config := &Config{
+			SkipTruncation:     true,
+			TokenCounter:       tokenCounter,
+			MaxTokensForClear:  10,
+			ClearAtLeastTokens: 0,
+			ClearMessageRewriter: func(ctx context.Context, assistantMessage adk.Message, toolResponses []adk.Message) (messagesAfterRewrite []adk.Message, err error) {
+				return []adk.Message{}, nil
+			},
+		}
+
+		mw, err := New(ctx, config)
+		assert.NoError(t, err)
+		_, s, err := mw.BeforeModelRewriteState(ctx, &adk.ChatModelAgentState{
+			Messages: []adk.Message{
+				schema.SystemMessage("you are a helpful assistant"),
+				schema.UserMessage("user request"),
+				schema.AssistantMessage("", []schema.ToolCall{
+					{
+						ID:       "call_1",
+						Type:     "function",
+						Function: schema.FunctionCall{Name: "write_file", Arguments: `{"file": "test.txt", "content": "hello"}`},
+					},
+					{
+						ID:       "call_2",
+						Type:     "function",
+						Function: schema.FunctionCall{Name: "edit_file", Arguments: `{"file": "test.txt", "changes": "add"}`},
+					},
+				}),
+				schema.ToolMessage("write success", "call_1"),
+				schema.ToolMessage("edit success", "call_2"),
+				schema.AssistantMessage("", []schema.ToolCall{{ID: "dummy", Type: "function", Function: schema.FunctionCall{Name: "dummy_tool"}}}),
+				schema.ToolMessage("dummy dummy", "dummy"),
+				schema.AssistantMessage("done", nil),
+			},
+		}, &adk.ModelContext{
+			Tools: toolsInfo,
+		})
+		assert.NoError(t, err)
+		assert.Len(t, s.Messages, 5)
+		assert.Equal(t, schema.Assistant, s.Messages[2].Role)
+		assert.Equal(t, schema.Tool, s.Messages[3].Role)
+		assert.Equal(t, "dummy dummy", s.Messages[3].Content)
+		assert.Equal(t, schema.Assistant, s.Messages[4].Role)
+		assert.Equal(t, "done", s.Messages[4].Content)
+	})
+
+	t.Run("test partial tools hit - keep unhit tools and rewrite hit ones", func(t *testing.T) {
+		config := &Config{
+			SkipTruncation:     true,
+			TokenCounter:       tokenCounter,
+			MaxTokensForClear:  10,
+			ClearAtLeastTokens: 0,
+			ClearExcludeTools:  []string{"get_weather"},
+			ClearMessageRewriter: func(ctx context.Context, assistantMessage adk.Message, toolResponses []adk.Message) (messagesAfterRewrite []adk.Message, err error) {
+				hitToolIDs := map[string]bool{"call_1": true}
+
+				newToolCalls := make([]schema.ToolCall, 0)
+				newToolResponses := make([]adk.Message, 0)
+
+				for i, tc := range assistantMessage.ToolCalls {
+					if !hitToolIDs[tc.ID] {
+						newToolCalls = append(newToolCalls, tc)
+						if i < len(toolResponses) {
+							newToolResponses = append(newToolResponses, toolResponses[i])
+						}
+					}
+				}
+
+				result := []adk.Message{
+					schema.UserMessage("<system-reminder>write_file executed successfully</system-reminder>"),
+				}
+				if len(newToolCalls) > 0 {
+					result = append(result, schema.AssistantMessage("", newToolCalls))
+					result = append(result, newToolResponses...)
+				}
+				return result, nil
+			},
+		}
+
+		mw, err := New(ctx, config)
+		assert.NoError(t, err)
+		_, s, err := mw.BeforeModelRewriteState(ctx, &adk.ChatModelAgentState{
+			Messages: []adk.Message{
+				schema.SystemMessage("you are a helpful assistant"),
+				schema.UserMessage("user request"),
+				schema.AssistantMessage("", []schema.ToolCall{
+					{
+						ID:       "call_1",
+						Type:     "function",
+						Function: schema.FunctionCall{Name: "write_file", Arguments: `{"file": "test.txt", "content": "hello"}`},
+					},
+					{
+						ID:       "call_2",
+						Type:     "function",
+						Function: schema.FunctionCall{Name: "get_weather", Arguments: `{"location": "London"}`},
+					},
+				}),
+				schema.ToolMessage("write success", "call_1"),
+				schema.ToolMessage("sunny", "call_2"),
+				schema.AssistantMessage("", []schema.ToolCall{{ID: "dummy", Type: "function", Function: schema.FunctionCall{Name: "dummy_tool"}}}),
+			},
+		}, &adk.ModelContext{
+			Tools: toolsInfo,
+		})
+		assert.NoError(t, err)
+		assert.Len(t, s.Messages, 6)
+		assert.Equal(t, schema.User, s.Messages[2].Role)
+		assert.Equal(t, "<system-reminder>write_file executed successfully</system-reminder>", s.Messages[2].Content)
+		assert.Equal(t, schema.Assistant, s.Messages[3].Role)
+		assert.Len(t, s.Messages[3].ToolCalls, 1)
+		assert.Equal(t, "call_2", s.Messages[3].ToolCalls[0].ID)
+		assert.Equal(t, schema.Tool, s.Messages[4].Role)
+		assert.Equal(t, "sunny", s.Messages[4].Content)
+	})
+
+	t.Run("test mixed messages with system/user before", func(t *testing.T) {
+		config := &Config{
+			SkipTruncation:     true,
+			TokenCounter:       tokenCounter,
+			MaxTokensForClear:  10,
+			ClearAtLeastTokens: 0,
+			ClearMessageRewriter: func(ctx context.Context, assistantMessage adk.Message, toolResponses []adk.Message) (messagesAfterRewrite []adk.Message, err error) {
+				return []adk.Message{
+					schema.UserMessage("<system-reminder>tool executed</system-reminder>"),
+				}, nil
+			},
+		}
+
+		mw, err := New(ctx, config)
+		assert.NoError(t, err)
+		_, s, err := mw.BeforeModelRewriteState(ctx, &adk.ChatModelAgentState{
+			Messages: []adk.Message{
+				schema.SystemMessage("you are a helpful assistant"),
+				schema.UserMessage("first request"),
+				schema.AssistantMessage("", []schema.ToolCall{
+					{
+						ID:       "call_1",
+						Type:     "function",
+						Function: schema.FunctionCall{Name: "write_file", Arguments: `{"file": "test.txt"}`},
+					},
+				}),
+				schema.ToolMessage("success", "call_1"),
+				schema.UserMessage("second request"),
+				schema.AssistantMessage("", []schema.ToolCall{{ID: "dummy", Type: "function", Function: schema.FunctionCall{Name: "dummy_tool"}}}),
+			},
+		}, &adk.ModelContext{
+			Tools: toolsInfo,
+		})
+		assert.NoError(t, err)
+		assert.Len(t, s.Messages, 5)
+		assert.Equal(t, schema.System, s.Messages[0].Role)
+		assert.Equal(t, schema.User, s.Messages[1].Role)
+		assert.Equal(t, schema.User, s.Messages[2].Role)
+		assert.Equal(t, "<system-reminder>tool executed</system-reminder>", s.Messages[2].Content)
+		assert.Equal(t, schema.User, s.Messages[3].Role)
+	})
+
+	t.Run("test mixed messages with system/user before", func(t *testing.T) {
+		config := &Config{
+			SkipTruncation:     true,
+			TokenCounter:       tokenCounter,
+			MaxTokensForClear:  10,
+			ClearAtLeastTokens: 0,
+			ClearMessageRewriter: func(ctx context.Context, assistantMessage adk.Message, toolResponses []adk.Message) (messagesAfterRewrite []adk.Message, err error) {
+				return []adk.Message{
+					schema.UserMessage("<system-reminder>tool executed</system-reminder>"),
+				}, nil
+			},
+		}
+
+		mw, err := New(ctx, config)
+		assert.NoError(t, err)
+		_, s, err := mw.BeforeModelRewriteState(ctx, &adk.ChatModelAgentState{
+			Messages: []adk.Message{
+				schema.SystemMessage("you are a helpful assistant"),
+				schema.UserMessage("first request"),
+				schema.AssistantMessage("", []schema.ToolCall{
+					{
+						ID:       "call_1",
+						Type:     "function",
+						Function: schema.FunctionCall{Name: "write_file", Arguments: `{"file": "test.txt"}`},
+					},
+				}),
+				schema.ToolMessage("success", "call_1"),
+				schema.UserMessage("second request"),
+				schema.AssistantMessage("", []schema.ToolCall{{ID: "dummy", Type: "function", Function: schema.FunctionCall{Name: "dummy_tool"}}}),
+			},
+		}, &adk.ModelContext{
+			Tools: toolsInfo,
+		})
+		assert.NoError(t, err)
+		assert.Len(t, s.Messages, 5)
+		assert.Equal(t, schema.System, s.Messages[0].Role)
+		assert.Equal(t, schema.User, s.Messages[1].Role)
+		assert.Equal(t, schema.User, s.Messages[2].Role)
+		assert.Equal(t, "<system-reminder>tool executed</system-reminder>", s.Messages[2].Content)
+		assert.Equal(t, schema.User, s.Messages[3].Role)
+	})
+
+	t.Run("test assistant message without tool calls - keep as is", func(t *testing.T) {
+		handlerCalled := false
+		config := &Config{
+			SkipTruncation:     true,
+			TokenCounter:       tokenCounter,
+			MaxTokensForClear:  10,
+			ClearAtLeastTokens: 0,
+			ClearMessageRewriter: func(ctx context.Context, assistantMessage adk.Message, toolResponses []adk.Message) (messagesAfterRewrite []adk.Message, err error) {
+				handlerCalled = true
+				return nil, nil
+			},
+		}
+
+		mw, err := New(ctx, config)
+		assert.NoError(t, err)
+		_, s, err := mw.BeforeModelRewriteState(ctx, &adk.ChatModelAgentState{
+			Messages: []adk.Message{
+				schema.SystemMessage("you are a helpful assistant"),
+				schema.UserMessage("user request"),
+				schema.AssistantMessage("regular response without tools", nil),
+				schema.AssistantMessage("", []schema.ToolCall{{ID: "dummy", Type: "function", Function: schema.FunctionCall{Name: "dummy_tool"}}}),
+			},
+		}, &adk.ModelContext{
+			Tools: toolsInfo,
+		})
+		assert.NoError(t, err)
+		assert.False(t, handlerCalled)
+		assert.Len(t, s.Messages, 4)
+		assert.Equal(t, schema.Assistant, s.Messages[2].Role)
+		assert.Equal(t, "regular response without tools", s.Messages[2].Content)
+	})
+
+	t.Run("test clear not meeting threshold - should keep original messages", func(t *testing.T) {
+		originalTokenCount := int64(1000)
+		rewrittenTokenCount := int64(999)
+		callCount := 0
+
+		config := &Config{
+			SkipTruncation: true,
+			TokenCounter: func(_ context.Context, msgs []adk.Message, _ []*schema.ToolInfo) (int64, error) {
+				callCount++
+				if callCount == 1 {
+					return originalTokenCount, nil
+				}
+				return rewrittenTokenCount, nil
+			},
+			MaxTokensForClear:  10,
+			ClearAtLeastTokens: 10,
+			ClearMessageRewriter: func(ctx context.Context, assistantMessage adk.Message, toolResponses []adk.Message) (messagesAfterRewrite []adk.Message, err error) {
+				return []adk.Message{
+					schema.UserMessage("<system-reminder>tool executed</system-reminder>"),
+				}, nil
+			},
+		}
+
+		originalMessages := []adk.Message{
+			schema.SystemMessage("you are a helpful assistant"),
+			schema.UserMessage("user request"),
+			schema.AssistantMessage("", []schema.ToolCall{
+				{
+					ID:       "call_1",
+					Type:     "function",
+					Function: schema.FunctionCall{Name: "write_file", Arguments: `{"file": "test.txt"}`},
+				},
+			}),
+			schema.ToolMessage("success", "call_1"),
+			schema.AssistantMessage("", []schema.ToolCall{{ID: "dummy", Type: "function", Function: schema.FunctionCall{Name: "dummy_tool"}}}),
+		}
+
+		mw, err := New(ctx, config)
+		assert.NoError(t, err)
+		_, s, err := mw.BeforeModelRewriteState(ctx, &adk.ChatModelAgentState{
+			Messages: originalMessages,
+		}, &adk.ModelContext{
+			Tools: toolsInfo,
+		})
+		assert.NoError(t, err)
+		assert.Len(t, s.Messages, len(originalMessages))
+		for i := range originalMessages {
+			assert.Equal(t, originalMessages[i].Role, s.Messages[i].Role)
+			assert.Equal(t, originalMessages[i].Content, s.Messages[i].Content)
+		}
+	})
+
+	t.Run("test applyClearRewrite with default role", func(t *testing.T) {
+		config := &Config{
+			SkipTruncation:     true,
+			TokenCounter:       tokenCounter,
+			MaxTokensForClear:  10,
+			ClearAtLeastTokens: 0,
+			ClearMessageRewriter: func(ctx context.Context, assistantMessage adk.Message, toolResponses []adk.Message) (messagesAfterRewrite []adk.Message, err error) {
+				return []adk.Message{}, nil
+			},
+		}
+
+		mw, err := New(ctx, config)
+		assert.NoError(t, err)
+
+		unknownRoleMsg := &schema.Message{
+			Role:    "unknown_role",
+			Content: "unknown",
+		}
+
+		_, s, err := mw.BeforeModelRewriteState(ctx, &adk.ChatModelAgentState{
+			Messages: []adk.Message{
+				schema.SystemMessage("you are a helpful assistant"),
+				schema.UserMessage("user request"),
+				unknownRoleMsg,
+				schema.AssistantMessage("", []schema.ToolCall{{ID: "dummy", Type: "function", Function: schema.FunctionCall{Name: "dummy_tool"}}}),
+			},
+		}, &adk.ModelContext{
+			Tools: toolsInfo,
+		})
+		assert.NoError(t, err)
+		assert.NotNil(t, s)
+	})
+
+	t.Run("test applyClearRewrite with rewrite error", func(t *testing.T) {
+		expectedErr := fmt.Errorf("rewrite error")
+		config := &Config{
+			SkipTruncation:     true,
+			TokenCounter:       tokenCounter,
+			MaxTokensForClear:  10,
+			ClearAtLeastTokens: 0,
+			ClearMessageRewriter: func(ctx context.Context, assistantMessage adk.Message, toolResponses []adk.Message) (messagesAfterRewrite []adk.Message, err error) {
+				return nil, expectedErr
+			},
+		}
+
+		mw, err := New(ctx, config)
+		assert.NoError(t, err)
+
+		_, _, err = mw.BeforeModelRewriteState(ctx, &adk.ChatModelAgentState{
+			Messages: []adk.Message{
+				schema.SystemMessage("you are a helpful assistant"),
+				schema.UserMessage("user request"),
+				schema.AssistantMessage("", []schema.ToolCall{
+					{
+						ID:       "call_1",
+						Type:     "function",
+						Function: schema.FunctionCall{Name: "write_file", Arguments: `{"file": "test.txt"}`},
+					},
+				}),
+				schema.ToolMessage("success", "call_1"),
+				schema.AssistantMessage("", []schema.ToolCall{{ID: "dummy", Type: "function", Function: schema.FunctionCall{Name: "dummy_tool"}}}),
+			},
+		}, &adk.ModelContext{
+			Tools: toolsInfo,
+		})
+		assert.Error(t, err)
+		assert.Equal(t, expectedErr, err)
+	})
+
+	t.Run("test applyClearRewrite with missing tool responses", func(t *testing.T) {
+		config := &Config{
+			SkipTruncation:     true,
+			TokenCounter:       tokenCounter,
+			MaxTokensForClear:  10,
+			ClearAtLeastTokens: 0,
+			ClearMessageRewriter: func(ctx context.Context, assistantMessage adk.Message, toolResponses []adk.Message) (messagesAfterRewrite []adk.Message, err error) {
+				assert.Nil(t, toolResponses)
+				return []adk.Message{
+					schema.UserMessage("<system-reminder>tool executed</system-reminder>"),
+				}, nil
+			},
+		}
+
+		mw, err := New(ctx, config)
+		assert.NoError(t, err)
+		_, s, err := mw.BeforeModelRewriteState(ctx, &adk.ChatModelAgentState{
+			Messages: []adk.Message{
+				schema.SystemMessage("you are a helpful assistant"),
+				schema.UserMessage("user request"),
+				schema.AssistantMessage("", []schema.ToolCall{
+					{
+						ID:       "call_1",
+						Type:     "function",
+						Function: schema.FunctionCall{Name: "write_file", Arguments: `{"file": "test.txt"}`},
+					},
+				}),
+				schema.AssistantMessage("", []schema.ToolCall{{ID: "dummy", Type: "function", Function: schema.FunctionCall{Name: "dummy_tool"}}}),
+			},
+		}, &adk.ModelContext{
+			Tools: toolsInfo,
+		})
+		assert.NoError(t, err)
+		assert.NotNil(t, s)
+	})
+
+	t.Run("test applyClearRewrite with clearAtLeastTokens > 0", func(t *testing.T) {
+		config := &Config{
+			SkipTruncation:     true,
+			TokenCounter:       tokenCounter,
+			MaxTokensForClear:  10,
+			ClearAtLeastTokens: 10,
+			ClearMessageRewriter: func(ctx context.Context, assistantMessage adk.Message, toolResponses []adk.Message) (messagesAfterRewrite []adk.Message, err error) {
+				return []adk.Message{
+					schema.UserMessage("<system-reminder>tool executed</system-reminder>"),
+				}, nil
+			},
+		}
+
+		mw, err := New(ctx, config)
+		assert.NoError(t, err)
+		_, s, err := mw.BeforeModelRewriteState(ctx, &adk.ChatModelAgentState{
+			Messages: []adk.Message{
+				schema.SystemMessage("you are a helpful assistant"),
+				schema.UserMessage("user request"),
+				schema.AssistantMessage("", []schema.ToolCall{
+					{
+						ID:       "call_1",
+						Type:     "function",
+						Function: schema.FunctionCall{Name: "write_file", Arguments: `{"file": "test.txt"}`},
+					},
+				}),
+				schema.ToolMessage("success", "call_1"),
+				schema.AssistantMessage("", []schema.ToolCall{{ID: "dummy", Type: "function", Function: schema.FunctionCall{Name: "dummy_tool"}}}),
+			},
+		}, &adk.ModelContext{
+			Tools: toolsInfo,
+		})
+		assert.NoError(t, err)
+		assert.NotNil(t, s)
+	})
+}
