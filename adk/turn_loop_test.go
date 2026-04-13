@@ -2398,7 +2398,7 @@ func TestTurnLoop_Stop_EscalatesCancelMode(t *testing.T) {
 
 	exit := loop.Wait()
 	var ce *CancelError
-	assert.True(t, errors.As(exit.ExitReason, &ce))
+	require.True(t, errors.As(exit.ExitReason, &ce))
 	assert.Equal(t, CancelImmediate, ce.Info.Mode)
 }
 
@@ -4587,7 +4587,7 @@ func TestUntilIdleFor(t *testing.T) {
 
 		exit := loop.Wait()
 		var ce *CancelError
-		assert.True(t, errors.As(exit.ExitReason, &ce))
+		require.True(t, errors.As(exit.ExitReason, &ce))
 		assert.Equal(t, CancelImmediate, ce.Info.Mode)
 	})
 
