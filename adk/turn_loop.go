@@ -1256,16 +1256,17 @@ func (l *TurnLoop[T]) pushWithConfig(item T, cfg *pushConfig[T]) (bool, <-chan s
 // Without options, the current agent turn runs to completion and the loop
 // exits at the turn boundary without starting a new turn. ExitReason is nil.
 //
-// Use WithImmediate() to cancel the running agent turn immediately.
+// Use WithImmediate() to abort the running agent turn immediately.
 // Use WithGraceful() to cancel at the nearest safe point with recursive
 // propagation to nested agents.
 // Use WithGracefulTimeout() for safe-point cancel with an escalation deadline.
-// Use UntilIdleFor() to defer the stop until the loop has been idle for a
-// given duration; the stop commits automatically once the idle timer fires.
+// Use UntilIdleFor() to defer the stop until the loop has been continuously
+// idle for a given duration; the loop shuts down automatically once the idle
+// timer fires.
 //
 // This method may be called multiple times; subsequent calls update cancel options.
-// A non-UntilIdleFor call commits the stop immediately, even if a prior
-// UntilIdleFor is still pending.
+// A Stop() call without UntilIdleFor shuts down the loop immediately, even if
+// a prior UntilIdleFor is still waiting.
 // Call Wait() to block until the loop has fully exited and get the result.
 //
 // Stop may be called before Run. In that case, the stopped flag is set and
