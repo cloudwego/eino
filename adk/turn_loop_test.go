@@ -3358,6 +3358,110 @@ func TestTurnLoop_TurnContext_StoppedChannel(t *testing.T) {
 	loop.Wait()
 }
 
+func TestTurnLoop_TurnContext_BothPreemptedAndStopped(t *testing.T) {
+	t.Run("PreemptThenStop_OnlyPreemptContributes", func(t *testing.T) {
+		preemptedSeen := make(chan struct{})
+		agentStarted := make(chan struct{})
+
+		loop := newAndRunTurnLoop(context.Background(), TurnLoopConfig[string]{
+			GenInput: func(ctx context.Context, _ *TurnLoop[string], items []string) (*GenInputResult[string], error) {
+				return &GenInputResult[string]{
+					Input:    &AgentInput{Messages: []Message{schema.UserMessage(items[0])}},
+					Consumed: items,
+				}, nil
+			},
+			PrepareAgent: func(ctx context.Context, _ *TurnLoop[string], consumed []string) (Agent, error) {
+				return &turnLoopCancellableMockAgent{
+					name: "slow",
+					runFunc: func(ctx context.Context, input *AgentInput) (*AgentOutput, error) {
+						<-ctx.Done()
+						return nil, ctx.Err()
+					},
+				}, nil
+			},
+			OnAgentEvents: func(ctx context.Context, tc *TurnContext[string], events *AsyncIterator[*AgentEvent]) error {
+				close(agentStarted)
+				select {
+				case <-tc.Preempted:
+					close(preemptedSeen)
+				case <-time.After(5 * time.Second):
+					t.Error("timed out waiting for Preempted")
+				}
+				for {
+					if _, ok := events.Next(); !ok {
+						break
+					}
+				}
+				return nil
+			},
+		})
+
+		loop.Push("msg1")
+		<-agentStarted
+		loop.Push("msg2", WithPreemptTimeout[string](AnySafePoint, time.Millisecond))
+
+		select {
+		case <-preemptedSeen:
+		case <-time.After(5 * time.Second):
+			t.Fatal("Preempted channel was never closed")
+		}
+
+		loop.Stop(WithImmediate())
+		loop.Wait()
+	})
+
+	t.Run("StopThenPreempt_OnlyStopContributes", func(t *testing.T) {
+		stoppedSeen := make(chan struct{})
+		agentStarted := make(chan struct{})
+
+		loop := newAndRunTurnLoop(context.Background(), TurnLoopConfig[string]{
+			GenInput: func(ctx context.Context, _ *TurnLoop[string], items []string) (*GenInputResult[string], error) {
+				return &GenInputResult[string]{
+					Input:    &AgentInput{Messages: []Message{schema.UserMessage(items[0])}},
+					Consumed: items,
+				}, nil
+			},
+			PrepareAgent: func(ctx context.Context, _ *TurnLoop[string], consumed []string) (Agent, error) {
+				return &turnLoopCancellableMockAgent{
+					name: "slow",
+					runFunc: func(ctx context.Context, input *AgentInput) (*AgentOutput, error) {
+						<-ctx.Done()
+						return nil, ctx.Err()
+					},
+				}, nil
+			},
+			OnAgentEvents: func(ctx context.Context, tc *TurnContext[string], events *AsyncIterator[*AgentEvent]) error {
+				close(agentStarted)
+				select {
+				case <-tc.Stopped:
+					close(stoppedSeen)
+				case <-time.After(5 * time.Second):
+					t.Error("timed out waiting for Stopped")
+				}
+				for {
+					if _, ok := events.Next(); !ok {
+						break
+					}
+				}
+				return nil
+			},
+		})
+
+		loop.Push("msg1")
+		<-agentStarted
+		loop.Stop(WithImmediate())
+
+		select {
+		case <-stoppedSeen:
+		case <-time.After(5 * time.Second):
+			t.Fatal("Stopped channel was never closed")
+		}
+
+		loop.Push("msg2", WithPreemptTimeout[string](AnySafePoint, time.Millisecond))
+		loop.Wait()
+	})
+}
+
 func TestTurnLoop_PushStrategy_DuringTurn(t *testing.T) {
 	agentStarted := make(chan struct{})
 	agentStartedOnce := sync.Once{}
