@@ -872,12 +872,12 @@ func WithGraceful() StopOption {
 	}
 }
 
-// WithImmediate requests an immediate cancel of the running agent turn.
-// The cancel affects only the root agent; nested agents inside AgentTools
-// are torn down via context cancellation as a side effect.
+// WithImmediate aborts the running agent turn as soon as possible.
+// The agent's context is cancelled immediately without waiting for any
+// safe point. Nested agents inside AgentTools are torn down as a side effect.
 //
-// This is the most aggressive stop mode and should only be used when the
-// caller needs to interrupt the agent without waiting for a safe point.
+// This is the most aggressive stop mode — typically used when the caller
+// wants to shut down the TurnLoop with no intention of resuming.
 func WithImmediate() StopOption {
 	return func(cfg *stopConfig) {
 		cfg.agentCancelOpts = []AgentCancelOption{}
