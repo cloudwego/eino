@@ -56,8 +56,12 @@ import (
 type stopSignal struct {
 	done chan struct{}
 
-	mu              sync.Mutex
-	gen             uint64
+	mu  sync.Mutex
+	gen uint64
+	// agentCancelOpts controls how the stop interacts with the running agent:
+	//   nil       → no cancel; the turn runs to completion (bare Stop)
+	//   empty     → CancelImmediate (WithImmediate)
+	//   non-empty → cancel with specific modes (WithGraceful, WithGracefulTimeout)
 	agentCancelOpts []AgentCancelOption
 	skipCheckpoint  bool
 	stopCause       string
@@ -919,6 +923,10 @@ func WithStopCause(cause string) StopOption {
 // without UntilIdleFor (e.g. Stop(WithImmediate())), it commits the stop
 // immediately, bypassing the idle wait.
 //
+// Only the first UntilIdleFor duration takes effect; subsequent calls with
+// a different duration are ignored. A non-UntilIdleFor Stop always commits
+// immediately regardless of any pending idle timer.
+//
 // duration must be positive; passing a zero or negative value panics.
 func UntilIdleFor(duration time.Duration) StopOption {
 	if duration <= 0 {
@@ -1328,6 +1336,9 @@ func (l *TurnLoop[T]) run(ctx context.Context) {
 				l.buffer.ClearWakeup()
 				idleTimer := time.NewTimer(idleFor)
 				cancelIdle := make(chan struct{})
+				// When the idle timer fires, commitStop closes the buffer via
+				// buffer.Close(), which broadcasts to unblock the pending
+				// Receive() call below.
 				go func() {
 					select {
 					case <-idleTimer.C:
