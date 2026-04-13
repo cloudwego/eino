@@ -1594,3 +1594,325 @@ func TestHelperBranches(t *testing.T) {
 		assert.Contains(t, []string{userMessagesReplacedNote, userMessagesReplacedNoteZh}, note)
 	})
 }
+
+func TestSummarizeMessages(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("basic summarization", func(t *testing.T) {
+		ctrl := gomock.NewController(t)
+		cm := mockModel.NewMockBaseChatModel(ctrl)
+		cm.EXPECT().Generate(gomock.Any(), gomock.Any(), gomock.Any()).
+			Return(&schema.Message{
+				Role:    schema.Assistant,
+				Content: "Summary content",
+			}, nil).Times(1)
+
+		cfg := &Config{
+			Model: cm,
+		}
+
+		messages := []adk.Message{
+			schema.SystemMessage("You are a helpful assistant"),
+			schema.UserMessage(strings.Repeat("a", 100)),
+			schema.AssistantMessage(strings.Repeat("b", 100), nil),
+		}
+
+		output, err := SummarizeMessages(ctx, cfg, messages)
+		assert.NoError(t, err)
+		assert.NotNil(t, output)
+		assert.NotNil(t, output.ModelResponse)
+		assert.Equal(t, "Summary content", output.ModelResponse.Content)
+		assert.NotEmpty(t, output.FinalizedMessages)
+		assert.Equal(t, schema.System, output.FinalizedMessages[0].Role)
+	})
+
+	t.Run("model error propagates", func(t *testing.T) {
+		ctrl := gomock.NewController(t)
+		cm := mockModel.NewMockBaseChatModel(ctrl)
+		cm.EXPECT().Generate(gomock.Any(), gomock.Any(), gomock.Any()).
+			Return(nil, fmt.Errorf("model error")).Times(1)
+
+		cfg := &Config{
+			Model: cm,
+		}
+
+		messages := []adk.Message{
+			schema.UserMessage("hello"),
+		}
+
+		output, err := SummarizeMessages(ctx, cfg, messages)
+		assert.Error(t, err)
+		assert.Nil(t, output)
+	})
+
+	t.Run("retry works in sync call", func(t *testing.T) {
+		ctrl := gomock.NewController(t)
+		cm := mockModel.NewMockBaseChatModel(ctrl)
+
+		callCount := 0
+		cm.EXPECT().Generate(gomock.Any(), gomock.Any(), gomock.Any()).
+			DoAndReturn(func(ctx context.Context, msgs []*schema.Message, opts ...any) (*schema.Message, error) {
+				callCount++
+				if callCount == 1 {
+					return nil, fmt.Errorf("transient error")
+				}
+				return &schema.Message{
+					Role:    schema.Assistant,
+					Content: "Summary after retry",
+				}, nil
+			}).Times(2)
+
+		cfg := &Config{
+			Model: cm,
+			Retry: &RetryConfig{
+				MaxRetries:  intPtr(2),
+				BackoffFunc: func(_ context.Context, _ int, _ adk.Message, _ error) time.Duration { return 0 },
+			},
+		}
+
+		messages := []adk.Message{
+			schema.UserMessage("hello"),
+		}
+
+		output, err := SummarizeMessages(ctx, cfg, messages)
+		assert.NoError(t, err)
+		assert.NotNil(t, output)
+		assert.Equal(t, "Summary after retry", output.ModelResponse.Content)
+		assert.Equal(t, 2, callCount)
+	})
+
+	t.Run("failover works in sync call", func(t *testing.T) {
+		ctrl := gomock.NewController(t)
+		primary := mockModel.NewMockBaseChatModel(ctrl)
+		failover := mockModel.NewMockBaseChatModel(ctrl)
+
+		primary.EXPECT().Generate(gomock.Any(), gomock.Any(), gomock.Any()).
+			Return(nil, fmt.Errorf("primary error")).Times(1)
+		failover.EXPECT().Generate(gomock.Any(), gomock.Any(), gomock.Any()).
+			Return(&schema.Message{
+				Role:    schema.Assistant,
+				Content: "Summary from failover",
+			}, nil).Times(1)
+
+		cfg := &Config{
+			Model: primary,
+			Failover: &FailoverConfig{
+				GetFailoverModel: func(ctx context.Context, failoverCtx *FailoverContext) (model.BaseChatModel, []*schema.Message, error) {
+					return failover, []*schema.Message{schema.UserMessage("failover input")}, nil
+				},
+			},
+		}
+
+		messages := []adk.Message{
+			schema.UserMessage("hello"),
+		}
+
+		output, err := SummarizeMessages(ctx, cfg, messages)
+		assert.NoError(t, err)
+		assert.NotNil(t, output)
+		assert.Equal(t, "Summary from failover", output.ModelResponse.Content)
+	})
+
+	t.Run("callback is invoked", func(t *testing.T) {
+		ctrl := gomock.NewController(t)
+		cm := mockModel.NewMockBaseChatModel(ctrl)
+		cm.EXPECT().Generate(gomock.Any(), gomock.Any(), gomock.Any()).
+			Return(&schema.Message{
+				Role:    schema.Assistant,
+				Content: "Summary",
+			}, nil).Times(1)
+
+		callbackCalled := false
+		cfg := &Config{
+			Model: cm,
+			Callback: func(ctx context.Context, before, after adk.ChatModelAgentState) error {
+				callbackCalled = true
+				assert.Len(t, before.Messages, 1)
+				assert.NotEmpty(t, after.Messages)
+				return nil
+			},
+		}
+
+		messages := []adk.Message{
+			schema.UserMessage("hello"),
+		}
+
+		output, err := SummarizeMessages(ctx, cfg, messages)
+		assert.NoError(t, err)
+		assert.NotNil(t, output)
+		assert.True(t, callbackCalled)
+	})
+
+	t.Run("custom finalize is used", func(t *testing.T) {
+		ctrl := gomock.NewController(t)
+		cm := mockModel.NewMockBaseChatModel(ctrl)
+		cm.EXPECT().Generate(gomock.Any(), gomock.Any(), gomock.Any()).
+			Return(&schema.Message{
+				Role:    schema.Assistant,
+				Content: "Summary",
+			}, nil).Times(1)
+
+		cfg := &Config{
+			Model: cm,
+			Finalize: func(ctx context.Context, originalMessages []adk.Message, summary adk.Message) ([]adk.Message, error) {
+				return []adk.Message{
+					schema.SystemMessage("custom system"),
+					summary,
+				}, nil
+			},
+		}
+
+		messages := []adk.Message{
+			schema.UserMessage("hello"),
+		}
+
+		output, err := SummarizeMessages(ctx, cfg, messages)
+		assert.NoError(t, err)
+		assert.NotNil(t, output)
+		assert.Len(t, output.FinalizedMessages, 2)
+		assert.Equal(t, schema.System, output.FinalizedMessages[0].Role)
+		assert.Equal(t, "custom system", output.FinalizedMessages[0].Content)
+	})
+
+	t.Run("errors when EmitInternalEvents is true", func(t *testing.T) {
+		ctrl := gomock.NewController(t)
+		cm := mockModel.NewMockBaseChatModel(ctrl)
+
+		cfg := &Config{
+			Model:              cm,
+			EmitInternalEvents: true,
+		}
+
+		output, err := SummarizeMessages(ctx, cfg, []adk.Message{schema.UserMessage("hello")})
+		assert.Error(t, err)
+		assert.Nil(t, output)
+		assert.Contains(t, err.Error(), "emitInternalEvents")
+	})
+
+	t.Run("errors when Trigger is set", func(t *testing.T) {
+		ctrl := gomock.NewController(t)
+		cm := mockModel.NewMockBaseChatModel(ctrl)
+
+		cfg := &Config{
+			Model:   cm,
+			Trigger: &TriggerCondition{ContextTokens: 1000},
+		}
+
+		output, err := SummarizeMessages(ctx, cfg, []adk.Message{schema.UserMessage("hello")})
+		assert.Error(t, err)
+		assert.Nil(t, output)
+		assert.Contains(t, err.Error(), "trigger")
+	})
+
+	t.Run("nil model returns config check error", func(t *testing.T) {
+		cfg := &Config{}
+
+		output, err := SummarizeMessages(ctx, cfg, []adk.Message{schema.UserMessage("hello")})
+		assert.Error(t, err)
+		assert.Nil(t, output)
+		assert.Contains(t, err.Error(), "model is required")
+	})
+
+	t.Run("callback error propagates", func(t *testing.T) {
+		ctrl := gomock.NewController(t)
+		cm := mockModel.NewMockBaseChatModel(ctrl)
+		cm.EXPECT().Generate(gomock.Any(), gomock.Any(), gomock.Any()).
+			Return(&schema.Message{
+				Role:    schema.Assistant,
+				Content: "Summary",
+			}, nil).Times(1)
+
+		cfg := &Config{
+			Model: cm,
+			Callback: func(ctx context.Context, before, after adk.ChatModelAgentState) error {
+				return fmt.Errorf("callback error")
+			},
+		}
+
+		output, err := SummarizeMessages(ctx, cfg, []adk.Message{schema.UserMessage("hello")})
+		assert.Error(t, err)
+		assert.Nil(t, output)
+		assert.Contains(t, err.Error(), "callback error")
+	})
+
+	t.Run("finalize error propagates", func(t *testing.T) {
+		ctrl := gomock.NewController(t)
+		cm := mockModel.NewMockBaseChatModel(ctrl)
+		cm.EXPECT().Generate(gomock.Any(), gomock.Any(), gomock.Any()).
+			Return(&schema.Message{
+				Role:    schema.Assistant,
+				Content: "Summary",
+			}, nil).Times(1)
+
+		cfg := &Config{
+			Model: cm,
+			Finalize: func(ctx context.Context, originalMessages []adk.Message, summary adk.Message) ([]adk.Message, error) {
+				return nil, fmt.Errorf("finalize error")
+			},
+		}
+
+		output, err := SummarizeMessages(ctx, cfg, []adk.Message{schema.UserMessage("hello")})
+		assert.Error(t, err)
+		assert.Nil(t, output)
+		assert.Contains(t, err.Error(), "finalize error")
+	})
+
+	t.Run("preserves system messages", func(t *testing.T) {
+		ctrl := gomock.NewController(t)
+		cm := mockModel.NewMockBaseChatModel(ctrl)
+		cm.EXPECT().Generate(gomock.Any(), gomock.Any(), gomock.Any()).
+			Return(&schema.Message{
+				Role:    schema.Assistant,
+				Content: "Summary",
+			}, nil).Times(1)
+
+		cfg := &Config{
+			Model: cm,
+		}
+
+		messages := []adk.Message{
+			schema.SystemMessage("System 1"),
+			schema.SystemMessage("System 2"),
+			schema.UserMessage(strings.Repeat("a", 100)),
+		}
+
+		output, err := SummarizeMessages(ctx, cfg, messages)
+		assert.NoError(t, err)
+		assert.NotNil(t, output)
+		assert.Len(t, output.FinalizedMessages, 3)
+		assert.Equal(t, schema.System, output.FinalizedMessages[0].Role)
+		assert.Equal(t, "System 1", output.FinalizedMessages[0].Content)
+		assert.Equal(t, schema.System, output.FinalizedMessages[1].Role)
+		assert.Equal(t, "System 2", output.FinalizedMessages[1].Content)
+	})
+
+	t.Run("custom token counter is used", func(t *testing.T) {
+		ctrl := gomock.NewController(t)
+		cm := mockModel.NewMockBaseChatModel(ctrl)
+		cm.EXPECT().Generate(gomock.Any(), gomock.Any(), gomock.Any()).
+			Return(&schema.Message{
+				Role:    schema.Assistant,
+				Content: "Summary\n<all_user_messages>\n    - old\n</all_user_messages>",
+			}, nil).Times(1)
+
+		tokenCounterCalled := false
+		cfg := &Config{
+			Model: cm,
+			TokenCounter: func(ctx context.Context, input *TokenCounterInput) (int, error) {
+				tokenCounterCalled = true
+				return 42, nil
+			},
+		}
+
+		messages := []adk.Message{
+			schema.UserMessage("msg1"),
+			schema.AssistantMessage("resp", nil),
+			schema.UserMessage("msg2"),
+		}
+
+		output, err := SummarizeMessages(ctx, cfg, messages)
+		assert.NoError(t, err)
+		assert.NotNil(t, output)
+		assert.True(t, tokenCounterCalled)
+	})
+}

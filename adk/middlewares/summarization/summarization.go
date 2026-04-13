@@ -266,6 +266,57 @@ type middleware struct {
 	cfg *Config
 }
 
+// SummarizeOutput contains the output of a synchronous Summarize call.
+type SummarizeOutput struct {
+	// FinalizedMessages is the message list after summarization,
+	// ready to be used as the new conversation history.
+	FinalizedMessages []adk.Message
+
+	// ModelResponse is the raw response from the summarization model.
+	ModelResponse adk.Message
+}
+
+// SummarizeMessages performs synchronous summarization of the given messages.
+// EmitInternalEvents and Trigger are not supported and will return an error if set.
+func SummarizeMessages(ctx context.Context, cfg *Config, messages []adk.Message) (*SummarizeOutput, error) {
+	if cfg.EmitInternalEvents {
+		return nil, fmt.Errorf("emitInternalEvents is not supported in synchronous summarization")
+	}
+	if cfg.Trigger != nil {
+		return nil, fmt.Errorf("trigger is not supported in synchronous summarization")
+	}
+	if err := cfg.check(); err != nil {
+		return nil, err
+	}
+
+	m := &middleware{cfg: cfg}
+
+	rawSummary, modelInput, err := m.summarize(ctx, messages)
+	if err != nil {
+		return nil, err
+	}
+
+	ctx = context.WithValue(ctx, ctxKeyModelInput{}, modelInput)
+
+	_, finalMsgs, err := m.finalizeSummary(ctx, messages, rawSummary)
+	if err != nil {
+		return nil, err
+	}
+
+	if m.cfg.Callback != nil {
+		beforeState := adk.ChatModelAgentState{Messages: messages}
+		afterState := adk.ChatModelAgentState{Messages: finalMsgs}
+		if err = m.cfg.Callback(ctx, beforeState, afterState); err != nil {
+			return nil, err
+		}
+	}
+
+	return &SummarizeOutput{
+		FinalizedMessages: finalMsgs,
+		ModelResponse:     rawSummary,
+	}, nil
+}
+
 func (m *middleware) BeforeModelRewriteState(ctx context.Context, state *adk.ChatModelAgentState,
 	mtx *adk.ModelContext) (context.Context, *adk.ChatModelAgentState, error) {
 
