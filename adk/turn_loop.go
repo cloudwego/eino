@@ -571,10 +571,10 @@ type TurnLoopExitState[T any] struct {
 	// This is always valid regardless of ExitReason.
 	UnhandledItems []T
 
-	// CanceledItems contains the items whose turn was canceled by Stop
-	// with a cancel option (WithImmediate, WithGraceful, WithGracefulTimeout).
-	// This is set when the stop signal cancels a running turn, even if it
-	// did not contribute to the final CancelError.
+	// CanceledItems contains the items whose turn was in progress when Stop
+	// with a cancel option (WithImmediate, WithGraceful, WithGracefulTimeout)
+	// was called. These items are recorded even if the agent finished normally
+	// before the cancel took effect (i.e. ExitReason is nil, not *CancelError).
 	// It can be used to reconstruct GenInput/PrepareAgent inputs when resuming.
 	CanceledItems []T
 
