@@ -815,11 +815,13 @@ type turnLoopPendingResume[T any] struct {
 // safe points (e.g. AfterToolCalls | AfterChatModel). Internally, SafePoint
 // is translated to CancelMode via toCancelMode().
 //
-// SafePoint is used only in the preemption API (WithPreempt/WithPreemptTimeout)
-// and maps to graceful cancel modes (CancelAfterToolCalls, CancelAfterChatModel).
-// CancelImmediate has no SafePoint equivalent because immediate cancellation is
-// expressed through different APIs: WithImmediate() for Stop, or automatic
-// timeout escalation for WithPreemptTimeout.
+// SafePoint is used only in the preemption API (WithPreempt/WithPreemptTimeout).
+// A key design constraint: preemption always targets a safe point — the user's
+// intent is to cancel at a well-defined boundary, never to abort immediately.
+// Immediate cancellation is only reachable as an automatic timeout escalation
+// (via WithPreemptTimeout), not as a direct user choice. This is why SafePoint
+// has no "immediate" value and why WithPreempt requires a non-zero SafePoint
+// (panics otherwise).
 type SafePoint int
 
 const (
