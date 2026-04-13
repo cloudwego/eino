@@ -935,12 +935,12 @@ func WithStopCause(cause string) StopOption {
 // UntilIdleFor is combinable with other StopOptions in the same call.
 // For example, Stop(UntilIdleFor(30*time.Second), WithGraceful()) means
 // "after 30 s of idle, stop gracefully". If another Stop call is made
-// without UntilIdleFor (e.g. Stop(WithImmediate())), it commits the stop
+// without UntilIdleFor (e.g. Stop(WithImmediate())), the loop shuts down
 // immediately, bypassing the idle wait.
 //
 // Only the first UntilIdleFor duration takes effect; subsequent calls with
-// a different duration are ignored. A non-UntilIdleFor Stop always commits
-// immediately regardless of any pending idle timer.
+// a different duration are ignored. A Stop() call without UntilIdleFor always
+// shuts down the loop immediately regardless of any pending idle timer.
 //
 // duration must be positive; passing a zero or negative value panics.
 func UntilIdleFor(duration time.Duration) StopOption {
