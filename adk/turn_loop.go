@@ -813,9 +813,13 @@ type turnLoopPendingResume[T any] struct {
 // SafePoint describes at which boundary the agent may be cancelled.
 // It is a bitmask: values can be combined with bitwise OR to accept multiple
 // safe points (e.g. AfterToolCalls | AfterChatModel). Internally, SafePoint
-// is translated to CancelMode via toCancelMode(); the two types represent the
-// same concept at different API layers — SafePoint is the user-facing
-// simplification, CancelMode is the internal cancel primitive.
+// is translated to CancelMode via toCancelMode().
+//
+// SafePoint is used only in the preemption API (WithPreempt/WithPreemptTimeout)
+// and maps to graceful cancel modes (CancelAfterToolCalls, CancelAfterChatModel).
+// CancelImmediate has no SafePoint equivalent because immediate cancellation is
+// expressed through different APIs: WithImmediate() for Stop, or automatic
+// timeout escalation for WithPreemptTimeout.
 type SafePoint int
 
 const (
