@@ -24,7 +24,6 @@ type UnboundedChan[T any] struct {
 	mutex    sync.Mutex // Mutex to protect buffer access
 	notEmpty *sync.Cond // Condition variable to wait for data
 	closed   bool       // Indicates if the channel has been closed
-	woken    bool       // Set by Wakeup to break a blocked Receive
 }
 
 // NewUnboundedChan initializes and returns an UnboundedChan
@@ -64,16 +63,14 @@ func (ch *UnboundedChan[T]) TrySend(value T) bool {
 
 // Receive gets an item from the channel (blocks if empty).
 // Returns (value, true) if an item was received.
-// Returns (zero, false) if the channel was closed or woken up with no data.
+// Returns (zero, false) if the channel was closed with no data remaining.
 func (ch *UnboundedChan[T]) Receive() (T, bool) {
 	ch.mutex.Lock()
 	defer ch.mutex.Unlock()
 
-	for len(ch.buffer) == 0 && !ch.closed && !ch.woken {
+	for len(ch.buffer) == 0 && !ch.closed {
 		ch.notEmpty.Wait()
 	}
-
-	ch.woken = false
 
 	if len(ch.buffer) == 0 {
 		var zero T
@@ -94,53 +91,4 @@ func (ch *UnboundedChan[T]) Close() {
 		ch.closed = true
 		ch.notEmpty.Broadcast()
 	}
-}
-
-// Wakeup unblocks a pending Receive call without adding data or closing the
-// channel. If Receive is blocked, it returns (zero, false). If no Receive is
-// pending, the next Receive call returns immediately with (zero, false) once.
-func (ch *UnboundedChan[T]) Wakeup() {
-	ch.mutex.Lock()
-	defer ch.mutex.Unlock()
-
-	ch.woken = true
-	ch.notEmpty.Broadcast()
-}
-
-// ClearWakeup resets the wakeup flag so that Receive blocks normally again.
-func (ch *UnboundedChan[T]) ClearWakeup() {
-	ch.mutex.Lock()
-	defer ch.mutex.Unlock()
-
-	ch.woken = false
-}
-
-// TakeAll removes and returns all values from the channel atomically.
-// Returns nil if the channel is empty.
-func (ch *UnboundedChan[T]) TakeAll() []T {
-	ch.mutex.Lock()
-	defer ch.mutex.Unlock()
-
-	if len(ch.buffer) == 0 {
-		return nil
-	}
-
-	values := ch.buffer
-	ch.buffer = nil
-	return values
-}
-
-// PushFront adds values to the front of the channel.
-// This is useful for recovering values that need to be reprocessed.
-// Does nothing if values is empty.
-func (ch *UnboundedChan[T]) PushFront(values []T) {
-	if len(values) == 0 {
-		return
-	}
-
-	ch.mutex.Lock()
-	defer ch.mutex.Unlock()
-
-	ch.buffer = append(append([]T{}, values...), ch.buffer...)
-	ch.notEmpty.Signal()
 }

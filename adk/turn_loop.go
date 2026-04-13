@@ -27,7 +27,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/cloudwego/eino/internal"
 	"github.com/cloudwego/eino/internal/safe"
 )
 
@@ -661,7 +660,7 @@ type TurnContext[T any] struct {
 type TurnLoop[T any] struct {
 	config TurnLoopConfig[T]
 
-	buffer *internal.UnboundedChan[T]
+	buffer *turnBuffer[T]
 
 	stopped int32
 	started int32
@@ -1074,7 +1073,7 @@ func NewTurnLoop[T any](cfg TurnLoopConfig[T]) *TurnLoop[T] {
 
 	l := &TurnLoop[T]{
 		config:     cfg,
-		buffer:     internal.NewUnboundedChan[T](),
+		buffer:     newTurnBuffer[T](),
 		done:       make(chan struct{}),
 		stopSig:    newStopSignal(),
 		preemptSig: newPreemptSignal(),
