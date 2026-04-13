@@ -1353,6 +1353,7 @@ func (l *TurnLoop[T]) run(ctx context.Context) {
 				close(cancelIdle)
 			} else {
 				first, ok = l.buffer.Receive()
+				// Woken up by Stop(UntilIdleFor); re-enter loop to start the idle timer.
 				if !ok && l.stopSig.getIdleFor() > 0 {
 					continue
 				}

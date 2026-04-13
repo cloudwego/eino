@@ -107,6 +107,7 @@ func (ch *UnboundedChan[T]) Wakeup() {
 	ch.notEmpty.Broadcast()
 }
 
+// ClearWakeup resets the wakeup flag so that Receive blocks normally again.
 func (ch *UnboundedChan[T]) ClearWakeup() {
 	ch.mutex.Lock()
 	defer ch.mutex.Unlock()
