@@ -620,6 +620,10 @@ type TurnContext[T any] struct {
 	// "Contributed" means the preempt's cancel options were included in the
 	// CancelError before it was finalized. Remains open if no preempt contributed.
 	// Use in a select to detect preemption while processing events.
+	//
+	// Both Preempted and Stopped may be closed within the same turn if both
+	// signals arrive while the agent is still being cancelled. Whichever
+	// arrives after the cancel is fully handled will not contribute.
 	Preempted <-chan struct{}
 
 	// Stopped is closed when a Stop() call contributed to the CancelError for the
@@ -627,6 +631,8 @@ type TurnContext[T any] struct {
 	// "Contributed" means Stop's cancel options were included in the CancelError
 	// before it was finalized. Remains open if Stop did not contribute.
 	// Use in a select to detect stop while processing events.
+	//
+	// See Preempted for the relationship between the two channels.
 	Stopped <-chan struct{}
 
 	// StopCause returns the business-supplied reason from WithStopCause.
