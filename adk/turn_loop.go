@@ -804,7 +804,7 @@ type turnLoopPendingResume[T any] struct {
 	resumeBytes []byte
 }
 
-// SafePoint describes where a preemption may pause the agent.
+// SafePoint describes at which boundary the agent may be cancelled.
 // It is a bitmask: values can be combined with bitwise OR to accept multiple
 // safe points (e.g. AfterToolCalls | AfterChatModel). Internally, SafePoint
 // is translated to CancelMode via toCancelMode(); the two types represent the
@@ -814,10 +814,10 @@ type SafePoint int
 
 const (
 	// AfterToolCalls allows the agent to finish the current tool-call round
-	// before yielding.
+	// before being cancelled.
 	AfterToolCalls SafePoint = 1 << iota
 	// AfterChatModel allows the agent to finish the current chat-model
-	// call before yielding.
+	// call before being cancelled.
 	AfterChatModel
 	// AnySafePoint is shorthand for AfterToolCalls | AfterChatModel.
 	AnySafePoint = AfterToolCalls | AfterChatModel
