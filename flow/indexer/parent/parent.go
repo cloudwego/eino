@@ -96,6 +96,9 @@ func NewIndexer(ctx context.Context, config *Config) (indexer.Indexer, error) {
 	if config.SubIDGenerator == nil {
 		return nil, fmt.Errorf("sub id generator is empty")
 	}
+	if config.ParentIDKey == "" {
+		return nil, fmt.Errorf("[NewIndexer] parentIDKey is required")
+	}
 
 	return &parentIndexer{
 		indexer:        config.Indexer,
