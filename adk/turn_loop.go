@@ -962,15 +962,18 @@ type pushConfig[T any] struct {
 // PushOption is an option for Push().
 type PushOption[T any] func(*pushConfig[T])
 
-// WithPreempt signals that the current agent should be canceled after pushing,
-// waiting at the specified safePoint before yielding. The loop will cancel the
-// current agent turn and continue with the next turn, where GenInput will see
-// all buffered items including the newly pushed one.
-// Use WithPreemptTimeout to add a timeout that escalates to immediate cancel.
+// WithPreempt signals that the current agent turn should be cancelled at the
+// specified safePoint after pushing the new item. The loop cancels the current
+// turn and starts a new one, where GenInput will see all buffered items
+// including the newly pushed one.
+// Use WithPreemptTimeout to add a timeout that escalates to immediate abort.
 //
-// Unlike WithGraceful, preemption does not propagate recursively to nested
-// agents; it only affects the root agent's turn. Nested agents are torn down
-// via normal context cancellation as a side effect.
+// Because safe points fire at turn-level boundaries (after the chat model
+// returns or after all tool calls complete), no nested agent is running at
+// the moment of cancellation — nested agents within AgentTools have either
+// not started yet (AfterChatModel) or already finished (AfterToolCalls).
+// If the preemption escalates to immediate via WithPreemptTimeout, any
+// in-flight nested agent is torn down through Go context cancellation.
 //
 // WithPreempt and WithPreemptTimeout are mutually exclusive; if both are
 // passed to the same Push call, the last one wins.
