@@ -571,10 +571,10 @@ type TurnLoopExitState[T any] struct {
 	// This is always valid regardless of ExitReason.
 	UnhandledItems []T
 
-	// CanceledItems contains the items whose turn was in progress when Stop
-	// with a cancel option (WithImmediate, WithGraceful, WithGracefulTimeout)
-	// was called. These items are recorded even if the agent finished normally
-	// before the cancel took effect (i.e. ExitReason is nil, not *CancelError).
+	// CanceledItems contains the items whose turn was actually interrupted
+	// by a cancel (Stop with WithImmediate, WithGraceful, or WithGracefulTimeout).
+	// Only populated when ExitReason is a *CancelError — if the agent finishes
+	// normally before the cancel takes effect, CanceledItems is empty.
 	// It can be used to reconstruct GenInput/PrepareAgent inputs when resuming.
 	CanceledItems []T
 
@@ -1441,6 +1441,9 @@ func (l *TurnLoop[T]) run(ctx context.Context) {
 		l.preemptSig.endTurnAndUnhold()
 
 		if runErr != nil {
+			if errors.As(runErr, new(*CancelError)) && len(l.canceledItems) == 0 {
+				l.canceledItems = append([]T{}, plan.spec.consumed...)
+			}
 			l.runErr = runErr
 			return
 		}
@@ -1563,11 +1566,6 @@ func (l *TurnLoop[T]) runAgentAndHandleEvents(
 	spec *turnRunSpec[T],
 ) error {
 	var iter *AsyncIterator[*AgentEvent]
-	defer func() {
-		if l.stopSig.isStopped() && len(l.canceledItems) == 0 {
-			l.canceledItems = append([]T{}, spec.consumed...)
-		}
-	}()
 
 	runOpts, ms, err := l.setupBridgeStore(spec, spec.runOpts)
 	if err != nil {
