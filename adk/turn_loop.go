@@ -82,6 +82,9 @@ func newStopSignal() *stopSignal {
 func (s *stopSignal) signal(cfg *stopConfig) {
 	s.mu.Lock()
 	s.gen++
+	// Only overwrite when the caller explicitly provides cancel options.
+	// A bare Stop() leaves cfg.agentCancelOpts nil (no cancel intent), which
+	// must not de-escalate a previously set cancel policy.
 	if cfg.agentCancelOpts != nil {
 		s.agentCancelOpts = cfg.agentCancelOpts
 	}
