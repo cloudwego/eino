@@ -1242,7 +1242,7 @@ func TestWithCancel_CancelAfterChatModel_NestedAgentTool(t *testing.T) {
 
 	cancelDone := make(chan error, 1)
 	go func() {
-		handle, _ := cancelFn(WithAgentCancelMode(CancelAfterChatModel))
+		handle, _ := cancelFn(WithAgentCancelMode(CancelAfterChatModel), WithRecursive())
 		cancelDone <- handle.Wait()
 	}()
 
