@@ -1402,7 +1402,7 @@ func TestEventSenderToolHandler(t *testing.T) {
 					NewEventSenderToolWrapper(),
 					&invokableResultModifier{
 						BaseChatModelAgentMiddleware: &BaseChatModelAgentMiddleware{},
-						modifiedResult:              modifiedResult,
+						modifiedResult:               modifiedResult,
 					},
 				},
 			})
@@ -1490,7 +1490,7 @@ func TestEventSenderToolHandler(t *testing.T) {
 					NewEventSenderToolWrapper(),
 					&streamableResultModifier{
 						BaseChatModelAgentMiddleware: &BaseChatModelAgentMiddleware{},
-						modifiedResult:              modifiedResult,
+						modifiedResult:               modifiedResult,
 					},
 				},
 			})
@@ -1578,7 +1578,7 @@ func TestEventSenderToolHandler(t *testing.T) {
 					NewEventSenderToolWrapper(),
 					&enhancedInvokableResultModifier{
 						BaseChatModelAgentMiddleware: &BaseChatModelAgentMiddleware{},
-						modifiedResult:              modifiedResult,
+						modifiedResult:               modifiedResult,
 					},
 				},
 			})
@@ -1666,7 +1666,7 @@ func TestEventSenderToolHandler(t *testing.T) {
 					NewEventSenderToolWrapper(),
 					&enhancedStreamableResultModifier{
 						BaseChatModelAgentMiddleware: &BaseChatModelAgentMiddleware{},
-						modifiedResult:              modifiedResult,
+						modifiedResult:               modifiedResult,
 					},
 				},
 			})
