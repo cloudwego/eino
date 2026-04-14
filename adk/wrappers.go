@@ -21,6 +21,7 @@ import (
 	"errors"
 	"io"
 	"reflect"
+	"sync"
 
 	"github.com/cloudwego/eino/callbacks"
 	"github.com/cloudwego/eino/components"
@@ -344,13 +345,15 @@ func (m *eventSenderModel) Stream(ctx context.Context, input []*schema.Message, 
 //     read the live value from execCtx.retryVerdictSignal, which is set before each model call.
 //
 // Two hooks cooperate to cover all stream termination paths:
-//   - WithErrWrapper intercepts mid-stream errors. It blocks on the verdict channel to decide
+//   - WithErrWrapper intercepts mid-stream errors. It blocks on the verdict to decide
 //     whether to wrap the error as WillRetryError (rejected attempt) or pass it through (accepted).
-//   - WithOnEOF intercepts clean EOF (successful stream). It blocks on the verdict channel to
+//   - WithOnEOF intercepts clean EOF (successful stream). It blocks on the verdict to
 //     either inject a WillRetryError (rejected) or pass through io.EOF (accepted).
 //
-// Exactly one of the two hooks fires per stream: errWrapper for error termination, onEOF for
-// clean EOF. Both read from the same buffered(1) verdict channel, ensuring no deadlock.
+// Both hooks share a sync.Once-guarded reader so the verdict channel is read at most once.
+// This prevents a goroutine leak when a mid-stream error is followed by EOF: errWrapper fires
+// first (caching the verdict), and onEOF reuses the cached value instead of blocking on a
+// drained channel.
 func (m *eventSenderModel) buildStreamConvertOptions(ctx context.Context) []schema.ConvertOption {
 	var retryAttempt int
 	_ = compose.ProcessState(ctx, func(_ context.Context, st *State) error {
@@ -378,8 +381,19 @@ func (m *eventSenderModel) buildStreamConvertOptions(ctx context.Context) []sche
 				signal = execCtx.retryVerdictSignal
 			}
 			if signal != nil {
+				var (
+					verdictOnce   sync.Once
+					cachedVerdict retryVerdict
+				)
+				readVerdict := func() retryVerdict {
+					verdictOnce.Do(func() {
+						cachedVerdict = <-signal.ch
+					})
+					return cachedVerdict
+				}
+
 				retryWrapper = wrapWithCancelGuard(func(err error) error {
-					verdict := <-signal.ch
+					verdict := readVerdict()
 					if verdict.WillRetry {
 						return &WillRetryError{
 							ErrStr:        err.Error(),
@@ -392,7 +406,7 @@ func (m *eventSenderModel) buildStreamConvertOptions(ctx context.Context) []sche
 				})
 
 				opts = append(opts, schema.WithOnEOF(func() (any, error) {
-					verdict := <-signal.ch
+					verdict := readVerdict()
 					if verdict.WillRetry {
 						return nil, &WillRetryError{
 							ErrStr:        verdict.Err.Error(),

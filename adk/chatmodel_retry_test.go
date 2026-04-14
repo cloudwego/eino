@@ -1475,7 +1475,7 @@ func TestShouldRetry_Generate(t *testing.T) {
 				ShouldRetry: func(ctx context.Context, retryCtx *RetryContext) *RetryDecision {
 					if retryCtx.Err != nil {
 						return &RetryDecision{
-							Retry:           true,
+							Retry:             true,
 							AdditionalOptions: []model.Option{model.WithMaxTokens(8192)},
 						}
 					}
@@ -2100,7 +2100,7 @@ func TestShouldRetry_Stream(t *testing.T) {
 								schema.UserMessage("summarized history"),
 							},
 							PersistModifiedInputMessages: true,
-							AdditionalOptions:              []model.Option{model.WithMaxTokens(16384)},
+							AdditionalOptions:            []model.Option{model.WithMaxTokens(16384)},
 						}
 					}
 					return &RetryDecision{Retry: false}
@@ -2776,7 +2776,7 @@ func TestAttack_ShouldRetry_OptionsAccumulateAcrossRetries(t *testing.T) {
 			ShouldRetry: func(ctx context.Context, retryCtx *RetryContext) *RetryDecision {
 				if retryCtx.Err != nil {
 					return &RetryDecision{
-						Retry:           true,
+						Retry:             true,
 						AdditionalOptions: []model.Option{model.WithMaxTokens(100 * retryCtx.RetryAttempt)},
 					}
 				}
@@ -3009,4 +3009,77 @@ func TestAttack_ShouldRetry_ConcatMessagesFails_EmptyStream(t *testing.T) {
 	require.NotNil(t, capturedCtx)
 	assert.Nil(t, capturedCtx.OutputMessage, "empty stream should have nil OutputMessage")
 	assert.Nil(t, capturedCtx.Err, "empty stream should have nil Err")
+}
+
+func TestAttack_ShouldRetry_Stream_MidStreamError_VerdictDoubleRead(t *testing.T) {
+	ctx := context.Background()
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	cm := mockModel.NewMockToolCallingChatModel(ctrl)
+
+	midStreamErr := errors.New("mid-stream transient error")
+
+	cm.EXPECT().Stream(gomock.Any(), gomock.Any(), gomock.Any()).
+		DoAndReturn(func(ctx context.Context, input []*schema.Message, opts ...model.Option) (*schema.StreamReader[*schema.Message], error) {
+			r, w := schema.Pipe[*schema.Message](1)
+			go func() {
+				defer w.Close()
+				_ = w.Send(schema.AssistantMessage("chunk1", nil), nil)
+				_ = w.Send(nil, midStreamErr)
+			}()
+			return r, nil
+		}).Times(2)
+
+	agent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+		Name:        "DoubleReadBugAgent",
+		Description: "Reproduces signal.ch double-read when event stream hits mid-stream error then EOF",
+		Instruction: "You are a helpful assistant.",
+		Model:       cm,
+		ModelRetryConfig: &ModelRetryConfig{
+			MaxRetries: 1,
+			ShouldRetry: func(ctx context.Context, retryCtx *RetryContext) *RetryDecision {
+				if retryCtx.Err != nil {
+					return &RetryDecision{Retry: true}
+				}
+				return &RetryDecision{Retry: false}
+			},
+			BackoffFunc: instantBackoff,
+		},
+	})
+	require.NoError(t, err)
+
+	input := &AgentInput{
+		Messages:        []Message{schema.UserMessage("Hello")},
+		EnableStreaming: true,
+	}
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		iterator := agent.Run(ctx, input)
+		for {
+			event, ok := iterator.Next()
+			if !ok {
+				break
+			}
+			if event.Output != nil && event.Output.MessageOutput != nil {
+				mo := event.Output.MessageOutput
+				if mo.IsStreaming && mo.MessageStream != nil {
+					for {
+						_, recvErr := mo.MessageStream.Recv()
+						if recvErr == io.EOF {
+							break
+						}
+					}
+				}
+			}
+		}
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("goroutine leak: onEOF blocked on signal.ch after errWrapper already drained the verdict")
+	}
 }

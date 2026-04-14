@@ -532,6 +532,12 @@ func (r *retryModelWrapper) streamWithShouldRetry(ctx context.Context, input []*
 
 		stream, err := r.inner.Stream(ctx, currentInput, currentOpts...)
 		if err != nil {
+			// Defensive no-op: when Stream() returns an error, no stream exists, so
+			// eventSenderModel never creates the StreamReaderWithConvert hooks that would
+			// read from signal.ch. This send has no consumer — it merely fills the
+			// buffered(1) slot so the panic-recovery defer (select/default) won't block
+			// if a later panic tries to send a second verdict. The signal is discarded
+			// when the next iteration creates a new one.
 			signal.ch <- retryVerdict{WillRetry: false}
 
 			if _, ok := compose.ExtractInterruptInfo(err); ok {
