@@ -412,6 +412,10 @@ func (m *eventSenderModel) buildStreamConvertOptions(ctx context.Context) []sche
 	}
 
 	hasFailover := m.modelFailoverConfig != nil
+	// failoverHasMoreAttempts is set by failoverModelWrapper before each inner call.
+	// It is true when additional failover attempts remain after the current one,
+	// meaning stream errors should be wrapped as WillRetryError so the flow layer
+	// skips them. On the final attempt it is false, so the error propagates normally.
 	failoverHasMore := getFailoverHasMoreAttempts(ctx)
 
 	if retryWrapper == nil && !(hasFailover && failoverHasMore) {
@@ -419,12 +423,16 @@ func (m *eventSenderModel) buildStreamConvertOptions(ctx context.Context) []sche
 	}
 
 	combinedErrWrapper := func(err error) error {
+		// If retry is configured and will retry this error, use the retry wrapper's WillRetryError.
 		if retryWrapper != nil {
 			wrapped := retryWrapper(err)
 			if _, ok := wrapped.(*WillRetryError); ok {
 				return wrapped
 			}
 		}
+		// Retry won't handle this error (either exhausted or not configured), but
+		// failover still has more attempts remaining. Wrap it as WillRetryError so
+		// the flow layer skips this event from the failed attempt.
 		if hasFailover && failoverHasMore {
 			if errors.Is(err, ErrStreamCanceled) {
 				return err

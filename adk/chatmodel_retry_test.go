@@ -1446,7 +1446,7 @@ func TestShouldRetry_Generate(t *testing.T) {
 		require.True(t, foundErr, "should have received the wrapped rewrite error")
 	})
 
-	t.Run("ModifiedOptions", func(t *testing.T) {
+	t.Run("AdditionalOptions", func(t *testing.T) {
 		ctx := context.Background()
 		ctrl := gomock.NewController(t)
 		defer ctrl.Finish()
@@ -1466,8 +1466,8 @@ func TestShouldRetry_Generate(t *testing.T) {
 			}).Times(2)
 
 		agent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
-			Name:        "ModifiedOptionsTestAgent",
-			Description: "Test ShouldRetry ModifiedOptions",
+			Name:        "AdditionalOptionsTestAgent",
+			Description: "Test ShouldRetry AdditionalOptions",
 			Instruction: "You are a helpful assistant.",
 			Model:       cm,
 			ModelRetryConfig: &ModelRetryConfig{
@@ -1476,7 +1476,7 @@ func TestShouldRetry_Generate(t *testing.T) {
 					if retryCtx.Err != nil {
 						return &RetryDecision{
 							Retry:           true,
-							ModifiedOptions: []model.Option{model.WithMaxTokens(8192)},
+							AdditionalOptions: []model.Option{model.WithMaxTokens(8192)},
 						}
 					}
 					return &RetryDecision{Retry: false}
@@ -2086,7 +2086,7 @@ func TestShouldRetry_Stream(t *testing.T) {
 
 		agent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
 			Name:        "StreamModifiedInputsPersistAgent",
-			Description: "Test ShouldRetry with ModifiedInputMessages (persist) and ModifiedOptions in stream mode",
+			Description: "Test ShouldRetry with ModifiedInputMessages (persist) and AdditionalOptions in stream mode",
 			Instruction: "You are a helpful assistant.",
 			Model:       cm,
 			ModelRetryConfig: &ModelRetryConfig{
@@ -2100,7 +2100,7 @@ func TestShouldRetry_Stream(t *testing.T) {
 								schema.UserMessage("summarized history"),
 							},
 							PersistModifiedInputMessages: true,
-							ModifiedOptions:              []model.Option{model.WithMaxTokens(16384)},
+							AdditionalOptions:              []model.Option{model.WithMaxTokens(16384)},
 						}
 					}
 					return &RetryDecision{Retry: false}
@@ -2777,7 +2777,7 @@ func TestAttack_ShouldRetry_OptionsAccumulateAcrossRetries(t *testing.T) {
 				if retryCtx.Err != nil {
 					return &RetryDecision{
 						Retry:           true,
-						ModifiedOptions: []model.Option{model.WithMaxTokens(100 * retryCtx.RetryAttempt)},
+						AdditionalOptions: []model.Option{model.WithMaxTokens(100 * retryCtx.RetryAttempt)},
 					}
 				}
 				return &RetryDecision{Retry: false}
@@ -2792,9 +2792,9 @@ func TestAttack_ShouldRetry_OptionsAccumulateAcrossRetries(t *testing.T) {
 
 	require.Len(t, capturedOpts, 3)
 	assert.True(t, len(capturedOpts[1]) > len(capturedOpts[0]),
-		"second call should have more options than first (accumulated ModifiedOptions)")
+		"second call should have more options than first (accumulated AdditionalOptions)")
 	assert.True(t, len(capturedOpts[2]) > len(capturedOpts[1]),
-		"third call should have more options than second (accumulated ModifiedOptions)")
+		"third call should have more options than second (accumulated AdditionalOptions)")
 }
 
 func TestAttack_ShouldRetry_Stream_NilDecisionAccepts(t *testing.T) {

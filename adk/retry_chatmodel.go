@@ -21,7 +21,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
 	"math/rand"
 	"time"
 
@@ -120,8 +119,9 @@ type RetryContext struct {
 	// OutputMessage is the output message from the model, if any.
 	// This is non-nil when the model returned a message successfully.
 	// For streaming, this is the fully concatenated message (the entire stream is consumed
-	// before ShouldRetry is called, which means streaming latency benefits are deferred
-	// until the decision is made).
+	// before ShouldRetry is called).
+	// For streaming with mid-stream errors, this is the partial concatenation of chunks
+	// received before the error occurred.
 	// May be nil if the model returned an error without producing a message, or if the
 	// stream was empty (zero chunks before EOF).
 	OutputMessage *schema.Message
@@ -160,25 +160,27 @@ type RetryDecision struct {
 	ModifiedInputMessages []*schema.Message
 
 	// PersistModifiedInputMessages controls whether ModifiedInputMessages are written
-	// back to the agent's State, affecting subsequent model calls in the agent loop
-	// (not just the next retry attempt).
+	// back to the agent's conversation history, affecting subsequent model calls in
+	// the agent loop (not just the next retry attempt).
 	//
-	// When true, the modified messages are persisted to State via compose.ProcessState.
+	// When true, the modified messages replace the current conversation history.
 	// When false (default), the modified messages are only used for the next retry attempt
 	// within this retry cycle.
 	//
 	// Only used when Retry is true and ModifiedInputMessages is non-nil.
 	PersistModifiedInputMessages bool
 
-	// ModifiedOptions, when non-nil, provides additional model options for the next retry.
+	// AdditionalOptions, when non-nil, provides additional model options for the next retry.
 	// These options are appended to the existing options, taking precedence via last-wins semantics.
 	//
 	// This enables adjustments like increasing MaxTokens for the retry attempt.
-	// Note: options accumulate across retries. If ShouldRetry returns ModifiedOptions on every
-	// attempt, each set is appended to the previous ones. Only the last value for each option
-	// key takes effect, but earlier values remain in the slice.
+	// Note: options accumulate across retries within a single retry cycle. If ShouldRetry
+	// returns AdditionalOptions on every attempt, each set is appended to the previous ones.
+	// Only the last value for each option key takes effect, but earlier values remain in the slice.
+	// AdditionalOptions are scoped to the current retry cycle and do not persist to subsequent
+	// agent iterations — each new model call in the agent loop starts with the original options.
 	// Only used when Retry is true. Ignored when Retry is false.
-	ModifiedOptions []model.Option
+	AdditionalOptions []model.Option
 
 	// Backoff specifies the duration to wait before the next retry attempt.
 	// If zero, the default backoff function (from ModelRetryConfig.BackoffFunc or the
@@ -206,9 +208,9 @@ type ModelRetryConfig struct {
 	// If nil, defaults to retrying on any non-nil error (backward compatible with IsRetryAble).
 	//
 	// Note: When ShouldRetry is set, IsRetryAble is ignored.
-	// Note: In streaming mode, the entire stream is consumed before ShouldRetry is called,
-	// so streaming latency benefits are deferred. For large responses, this means the full
-	// response is buffered in memory before the retry decision is made.
+	// Note: In streaming mode, the entire stream is consumed before ShouldRetry is called.
+	// The event stream is sent to the client in real time regardless; only the retry
+	// decision is deferred until the full response is available.
 	ShouldRetry func(ctx context.Context, retryCtx *RetryContext) *RetryDecision
 
 	// Deprecated: Use ShouldRetry instead for richer retry control including message
@@ -338,7 +340,6 @@ func (r *retryModelWrapper) generateLegacy(ctx context.Context, input []*schema.
 
 		lastErr = err
 		if attempt < r.config.MaxRetries {
-			log.Printf("retrying ChatModel.Generate (attempt %d/%d): %v", attempt+1, r.config.MaxRetries, err)
 			if err := r.contextAwareSleep(ctx, backoffFunc(ctx, attempt+1)); err != nil {
 				return nil, err
 			}
@@ -373,6 +374,9 @@ func (r *retryModelWrapper) generateWithShouldRetry(ctx context.Context, input [
 			return nil
 		})
 
+		// Suppress event sending during Generate: the ShouldRetry callback must decide whether
+		// to accept or reject the result before any event is emitted. If accepted, the event
+		// is sent explicitly below (lines after decision check). If rejected, no event leaks.
 		if execCtx != nil {
 			execCtx.suppressEventSend = true
 		}
@@ -434,7 +438,6 @@ func (r *retryModelWrapper) generateWithShouldRetry(ctx context.Context, input [
 			delay = backoffFunc(ctx, attempt+1)
 		}
 
-		log.Printf("retrying ChatModel.Generate (attempt %d/%d): %v", attempt+1, r.config.MaxRetries, lastErr)
 		if err := r.contextAwareSleep(ctx, delay); err != nil {
 			return nil, err
 		}
@@ -564,7 +567,6 @@ func (r *retryModelWrapper) streamWithShouldRetry(ctx context.Context, input []*
 				if delay == 0 {
 					delay = backoffFunc(ctx, attempt+1)
 				}
-				log.Printf("retrying ChatModel.Stream (attempt %d/%d): %v", attempt+1, r.config.MaxRetries, err)
 				if err := r.contextAwareSleep(ctx, delay); err != nil {
 					return nil, err
 				}
@@ -635,7 +637,6 @@ func (r *retryModelWrapper) streamWithShouldRetry(ctx context.Context, input []*
 			if delay == 0 {
 				delay = backoffFunc(ctx, attempt+1)
 			}
-			log.Printf("retrying ChatModel.Stream (attempt %d/%d): %v", attempt+1, r.config.MaxRetries, lastErr)
 			if err := r.contextAwareSleep(ctx, delay); err != nil {
 				return nil, err
 			}
@@ -657,10 +658,10 @@ func (r *retryModelWrapper) applyDecisionForRetry(currentInput *[]*schema.Messag
 		}
 	}
 
-	if decision.ModifiedOptions != nil {
-		cloned := make([]model.Option, len(*currentOpts), len(*currentOpts)+len(decision.ModifiedOptions))
+	if decision.AdditionalOptions != nil {
+		cloned := make([]model.Option, len(*currentOpts), len(*currentOpts)+len(decision.AdditionalOptions))
 		copy(cloned, *currentOpts)
-		*currentOpts = append(cloned, decision.ModifiedOptions...)
+		*currentOpts = append(cloned, decision.AdditionalOptions...)
 	}
 }
 
@@ -712,7 +713,6 @@ func (r *retryModelWrapper) streamLegacy(ctx context.Context, input []*schema.Me
 			}
 			lastErr = err
 			if attempt < r.config.MaxRetries {
-				log.Printf("retrying ChatModel.Stream (attempt %d/%d): %v", attempt+1, r.config.MaxRetries, err)
 				if err := r.contextAwareSleep(ctx, backoffFunc(ctx, attempt+1)); err != nil {
 					return nil, err
 				}
@@ -739,7 +739,6 @@ func (r *retryModelWrapper) streamLegacy(ctx context.Context, input []*schema.Me
 
 		lastErr = streamErr
 		if attempt < r.config.MaxRetries {
-			log.Printf("retrying ChatModel.Stream (attempt %d/%d): %v", attempt+1, r.config.MaxRetries, streamErr)
 			if err := r.contextAwareSleep(ctx, backoffFunc(ctx, attempt+1)); err != nil {
 				return nil, err
 			}
