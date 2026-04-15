@@ -527,12 +527,12 @@ func (r *runner) handleInterrupt(
 	}
 
 	intInfo := &InterruptInfo{
-		State:              cp.State,
-		AfterNodes:         tempInfo.interruptAfterNodes,
-		BeforeNodes:        tempInfo.interruptBeforeNodes,
-		RerunNodes:         tempInfo.interruptRerunNodes,
-		RerunNodesExtra:    tempInfo.interruptRerunExtra,
-		SubGraphs:          make(map[string]*InterruptInfo),
+		State:           cp.State,
+		AfterNodes:      tempInfo.interruptAfterNodes,
+		BeforeNodes:     tempInfo.interruptBeforeNodes,
+		RerunNodes:      tempInfo.interruptRerunNodes,
+		RerunNodesExtra: tempInfo.interruptRerunExtra,
+		SubGraphs:       make(map[string]*InterruptInfo),
 	}
 
 	info := cp.State
@@ -659,12 +659,12 @@ func (r *runner) handleInterruptWithSubGraphAndRerunNodes(
 	}
 
 	intInfo := &InterruptInfo{
-		State:              cp.State,
-		BeforeNodes:        tempInfo.interruptBeforeNodes,
-		AfterNodes:         tempInfo.interruptAfterNodes,
-		RerunNodes:         tempInfo.interruptRerunNodes,
-		RerunNodesExtra:    tempInfo.interruptRerunExtra,
-		SubGraphs:          make(map[string]*InterruptInfo),
+		State:           cp.State,
+		BeforeNodes:     tempInfo.interruptBeforeNodes,
+		AfterNodes:      tempInfo.interruptAfterNodes,
+		RerunNodes:      tempInfo.interruptRerunNodes,
+		RerunNodesExtra: tempInfo.interruptRerunExtra,
+		SubGraphs:       make(map[string]*InterruptInfo),
 	}
 
 	info := cp.State
