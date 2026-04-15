@@ -229,6 +229,12 @@ func (f *failoverModelWrapper) needFailover(ctx context.Context, outputMessage *
 		return false
 	}
 
+	// ErrStreamCanceled means the caller voluntarily abandoned the stream;
+	// never retry or fail over in this case.
+	if errors.Is(outputErr, ErrStreamCanceled) {
+		return false
+	}
+
 	// ShouldFailover is validated at agent construction; nil here indicates a programmer error.
 	return f.config.ShouldFailover(ctx, outputMessage, outputErr)
 }

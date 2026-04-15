@@ -19,7 +19,9 @@ package adk
 import (
 	"context"
 	"errors"
+	"io"
 	"reflect"
+	"sync"
 
 	"github.com/cloudwego/eino/callbacks"
 	"github.com/cloudwego/eino/components"
@@ -292,6 +294,9 @@ func (m *eventSenderModel) Generate(ctx context.Context, input []*schema.Message
 	}
 
 	execCtx := getChatModelAgentExecCtx(ctx)
+	if execCtx != nil && execCtx.suppressEventSend {
+		return result, nil
+	}
 	if execCtx == nil || execCtx.generator == nil {
 		return nil, errors.New("generator is nil when sending event in Generate: ensure agent state is properly initialized")
 	}
@@ -318,10 +323,7 @@ func (m *eventSenderModel) Stream(ctx context.Context, input []*schema.Message, 
 	streams := result.Copy(2)
 
 	eventStream := streams[0]
-	if errWrapper := m.buildErrWrapper(ctx); errWrapper != nil {
-		convertOpts := []schema.ConvertOption{
-			schema.WithErrWrapper(errWrapper),
-		}
+	if convertOpts := m.buildStreamConvertOptions(ctx); len(convertOpts) > 0 {
 		eventStream = schema.StreamReaderWithConvert(streams[0],
 			func(msg *schema.Message) (*schema.Message, error) { return msg, nil },
 			convertOpts...)
@@ -333,20 +335,94 @@ func (m *eventSenderModel) Stream(ctx context.Context, input []*schema.Message, 
 	return streams[1], nil
 }
 
-// buildErrWrapper constructs an error wrapper function for event streams.
-// It wraps stream errors as WillRetryError when retry or failover is configured,
-// so that flow.go:genAgentInput() can skip events from failed attempts instead of
-// treating them as fatal errors.
-func (m *eventSenderModel) buildErrWrapper(ctx context.Context) func(error) error {
+// buildStreamConvertOptions constructs ConvertOption hooks that gate stream termination behind
+// the retry verdict signal protocol.
+//
+// Verdict signal lifecycle:
+//   - streamWithShouldRetry creates a new retryVerdictSignal per retry attempt, stores it in
+//     execCtx.retryVerdictSignal, and sends exactly one retryVerdict after ShouldRetry decides.
+//   - The closures below capture a *retryVerdictSignal that is nil at closure-creation time; they
+//     read the live value from execCtx.retryVerdictSignal, which is set before each model call.
+//
+// Two hooks cooperate to cover all stream termination paths:
+//   - WithErrWrapper intercepts mid-stream errors. It blocks on the verdict to decide
+//     whether to wrap the error as WillRetryError (rejected attempt) or pass it through (accepted).
+//   - WithOnEOF intercepts clean EOF (successful stream). It blocks on the verdict to
+//     either inject a WillRetryError (rejected) or pass through io.EOF (accepted).
+//
+// Both hooks share a sync.Once-guarded reader so the verdict channel is read at most once.
+// This prevents a goroutine leak when a mid-stream error is followed by EOF: errWrapper fires
+// first (caching the verdict), and onEOF reuses the cached value instead of blocking on a
+// drained channel.
+func (m *eventSenderModel) buildStreamConvertOptions(ctx context.Context) []schema.ConvertOption {
 	var retryAttempt int
 	_ = compose.ProcessState(ctx, func(_ context.Context, st *State) error {
 		retryAttempt = st.getRetryAttempt()
 		return nil
 	})
 
+	wrapWithCancelGuard := func(inner func(error) error) func(error) error {
+		return func(err error) error {
+			if errors.Is(err, ErrStreamCanceled) {
+				return err
+			}
+			return inner(err)
+		}
+	}
+
+	var opts []schema.ConvertOption
+
 	var retryWrapper func(error) error
 	if m.modelRetryConfig != nil {
-		retryWrapper = genErrWrapper(ctx, m.modelRetryConfig.MaxRetries, retryAttempt, m.modelRetryConfig.IsRetryAble)
+		if m.modelRetryConfig.ShouldRetry != nil {
+			execCtx := getChatModelAgentExecCtx(ctx)
+			signal := (*retryVerdictSignal)(nil)
+			if execCtx != nil {
+				signal = execCtx.retryVerdictSignal
+			}
+			if signal != nil {
+				var (
+					verdictOnce   sync.Once
+					cachedVerdict retryVerdict
+				)
+				readVerdict := func() retryVerdict {
+					verdictOnce.Do(func() {
+						cachedVerdict = <-signal.ch
+					})
+					return cachedVerdict
+				}
+
+				retryWrapper = wrapWithCancelGuard(func(err error) error {
+					verdict := readVerdict()
+					if verdict.WillRetry {
+						return &WillRetryError{
+							ErrStr:        err.Error(),
+							RetryAttempt:  verdict.RetryAttempt,
+							OutputMessage: verdict.OutputMessage,
+							err:           err,
+						}
+					}
+					return err
+				})
+
+				opts = append(opts, schema.WithOnEOF(func() (any, error) {
+					verdict := readVerdict()
+					if verdict.WillRetry {
+						return nil, &WillRetryError{
+							ErrStr:        verdict.Err.Error(),
+							RetryAttempt:  verdict.RetryAttempt,
+							OutputMessage: verdict.OutputMessage,
+							err:           verdict.Err,
+						}
+					}
+					return nil, io.EOF
+				}))
+			}
+		} else {
+			retryWrapper = wrapWithCancelGuard(
+				genErrWrapper(ctx, m.modelRetryConfig.MaxRetries, retryAttempt, m.modelRetryConfig.IsRetryAble),
+			)
+		}
 	}
 
 	hasFailover := m.modelFailoverConfig != nil
@@ -357,10 +433,10 @@ func (m *eventSenderModel) buildErrWrapper(ctx context.Context) func(error) erro
 	failoverHasMore := getFailoverHasMoreAttempts(ctx)
 
 	if retryWrapper == nil && !(hasFailover && failoverHasMore) {
-		return nil
+		return opts
 	}
 
-	return func(err error) error {
+	combinedErrWrapper := func(err error) error {
 		// If retry is configured and will retry this error, use the retry wrapper's WillRetryError.
 		if retryWrapper != nil {
 			wrapped := retryWrapper(err)
@@ -372,10 +448,16 @@ func (m *eventSenderModel) buildErrWrapper(ctx context.Context) func(error) erro
 		// failover still has more attempts remaining. Wrap it as WillRetryError so
 		// the flow layer skips this event from the failed attempt.
 		if hasFailover && failoverHasMore {
+			if errors.Is(err, ErrStreamCanceled) {
+				return err
+			}
 			return &WillRetryError{ErrStr: err.Error(), err: err}
 		}
 		return err
 	}
+	opts = append(opts, schema.WithErrWrapper(combinedErrWrapper))
+
+	return opts
 }
 
 func popToolGenAction(ctx context.Context, toolName string) *AgentAction {
@@ -753,6 +835,17 @@ func (w *stateModelWrapper) Generate(ctx context.Context, input []*schema.Messag
 	if err != nil {
 		return nil, err
 	}
+
+	// Re-read State.Messages after Generate completes: when ShouldRetry uses
+	// PersistModifiedInputMessages, applyDecisionForRetry writes modified messages to State.
+	// We must pick up those changes before appending the model result.
+	if w.modelRetryConfig != nil && w.modelRetryConfig.ShouldRetry != nil {
+		_ = compose.ProcessState(ctx, func(_ context.Context, st *State) error {
+			state.Messages = st.Messages
+			return nil
+		})
+	}
+
 	state.Messages = append(state.Messages, result)
 
 	for _, handler := range w.handlers {
@@ -823,6 +916,15 @@ func (w *stateModelWrapper) Stream(ctx context.Context, input []*schema.Message,
 	if err != nil {
 		return nil, err
 	}
+
+	// Re-read State.Messages after Stream completes: same rationale as in Generate above.
+	if w.modelRetryConfig != nil && w.modelRetryConfig.ShouldRetry != nil {
+		_ = compose.ProcessState(ctx, func(_ context.Context, st *State) error {
+			state.Messages = st.Messages
+			return nil
+		})
+	}
+
 	state.Messages = append(state.Messages, result)
 
 	for _, handler := range w.handlers {
