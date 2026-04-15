@@ -157,7 +157,12 @@ func (a *workflowAgent) Resume(ctx context.Context, info *ResumeInfo, opts ...Ag
 	return iterator
 }
 
-// WorkflowInterruptInfo CheckpointSchema: persisted via InterruptInfo.Data (gob).
+// WorkflowInterruptInfo stores interrupt information for workflow agents.
+// CheckpointSchema: persisted via InterruptInfo.Data (gob).
+//
+// NOT RECOMMENDED: Workflow agents are built on agent transfer with full context sharing,
+// which has not proven to be more effective empirically. Consider using
+// ChatModelAgent with AgentTool or DeepAgent instead for most multi-agent scenarios.
 type WorkflowInterruptInfo struct {
 	OrigInput *AgentInput
 
@@ -303,6 +308,10 @@ type BreakLoopAction struct {
 
 // NewBreakLoopAction creates a new BreakLoopAction, signaling a request
 // to terminate the current loop.
+//
+// NOT RECOMMENDED: Workflow agents are built on agent transfer with full context sharing,
+// which has not proven to be more effective empirically. Consider using
+// ChatModelAgent with AgentTool or DeepAgent instead for most multi-agent scenarios.
 func NewBreakLoopAction(agentName string) *AgentAction {
 	return &AgentAction{BreakLoop: &BreakLoopAction{
 		From: agentName,
@@ -608,18 +617,33 @@ func cancelAtTransition(ctx context.Context, info string, state any) *AgentEvent
 	}
 }
 
+// SequentialAgentConfig is the configuration for NewSequentialAgent.
+//
+// NOT RECOMMENDED: Workflow agents are built on agent transfer with full context sharing,
+// which has not proven to be more effective empirically. Consider using
+// ChatModelAgent with AgentTool or DeepAgent instead for most multi-agent scenarios.
 type SequentialAgentConfig struct {
 	Name        string
 	Description string
 	SubAgents   []Agent
 }
 
+// ParallelAgentConfig is the configuration for NewParallelAgent.
+//
+// NOT RECOMMENDED: Workflow agents are built on agent transfer with full context sharing,
+// which has not proven to be more effective empirically. Consider using
+// ChatModelAgent with AgentTool or DeepAgent instead for most multi-agent scenarios.
 type ParallelAgentConfig struct {
 	Name        string
 	Description string
 	SubAgents   []Agent
 }
 
+// LoopAgentConfig is the configuration for NewLoopAgent.
+//
+// NOT RECOMMENDED: Workflow agents are built on agent transfer with full context sharing,
+// which has not proven to be more effective empirically. Consider using
+// ChatModelAgent with AgentTool or DeepAgent instead for most multi-agent scenarios.
 type LoopAgentConfig struct {
 	Name        string
 	Description string
@@ -655,16 +679,28 @@ func newWorkflowAgent(ctx context.Context, name, desc string,
 }
 
 // NewSequentialAgent creates an agent that runs sub-agents sequentially.
+//
+// NOT RECOMMENDED: Workflow agents are built on agent transfer with full context sharing,
+// which has not proven to be more effective empirically. Consider using
+// ChatModelAgent with AgentTool or DeepAgent instead for most multi-agent scenarios.
 func NewSequentialAgent(ctx context.Context, config *SequentialAgentConfig) (ResumableAgent, error) {
 	return newWorkflowAgent(ctx, config.Name, config.Description, config.SubAgents, workflowAgentModeSequential, 0)
 }
 
 // NewParallelAgent creates an agent that runs sub-agents in parallel.
+//
+// NOT RECOMMENDED: Workflow agents are built on agent transfer with full context sharing,
+// which has not proven to be more effective empirically. Consider using
+// ChatModelAgent with AgentTool or DeepAgent instead for most multi-agent scenarios.
 func NewParallelAgent(ctx context.Context, config *ParallelAgentConfig) (ResumableAgent, error) {
 	return newWorkflowAgent(ctx, config.Name, config.Description, config.SubAgents, workflowAgentModeParallel, 0)
 }
 
 // NewLoopAgent creates an agent that loops over sub-agents with a max iteration limit.
+//
+// NOT RECOMMENDED: Workflow agents are built on agent transfer with full context sharing,
+// which has not proven to be more effective empirically. Consider using
+// ChatModelAgent with AgentTool or DeepAgent instead for most multi-agent scenarios.
 func NewLoopAgent(ctx context.Context, config *LoopAgentConfig) (ResumableAgent, error) {
 	return newWorkflowAgent(ctx, config.Name, config.Description, config.SubAgents, workflowAgentModeLoop, config.MaxIterations)
 }

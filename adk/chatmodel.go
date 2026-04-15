@@ -238,10 +238,18 @@ type ChatModelAgentConfig struct {
 	// Exit defines the tool used to terminate the agent process.
 	// Optional. If nil, no Exit Action will be generated.
 	// You can use the provided 'ExitTool' implementation directly.
+	//
+	// NOT RECOMMENDED: Agent transfer with full context sharing between agents has not proven
+	// to be more effective empirically. Consider using ChatModelAgent with AgentTool
+	// or DeepAgent instead for most multi-agent scenarios.
 	Exit tool.BaseTool
 
 	// OutputKey stores the agent's response in the session.
 	// Optional. When set, stores output via AddSessionValue(ctx, outputKey, msg.Content).
+	//
+	// NOT RECOMMENDED: Agent transfer with full context sharing between agents has not proven
+	// to be more effective empirically. Consider using ChatModelAgent with AgentTool
+	// or DeepAgent instead for most multi-agent scenarios.
 	OutputKey string
 
 	// MaxIterations defines the upper limit of ChatModel generation cycles.
@@ -584,6 +592,11 @@ func (a *ChatModelAgent) GetType() string {
 	return "ChatModel"
 }
 
+// OnSetSubAgents implements OnSubAgents.
+//
+// NOT RECOMMENDED: Agent transfer with full context sharing between agents has not proven
+// to be more effective empirically. Consider using ChatModelAgent with AgentTool
+// or DeepAgent instead for most multi-agent scenarios.
 func (a *ChatModelAgent) OnSetSubAgents(_ context.Context, subAgents []Agent) error {
 	if atomic.LoadUint32(&a.frozen) == 1 {
 		return errors.New("agent has been frozen after run")
@@ -597,6 +610,11 @@ func (a *ChatModelAgent) OnSetSubAgents(_ context.Context, subAgents []Agent) er
 	return nil
 }
 
+// OnSetAsSubAgent implements OnSubAgents.
+//
+// NOT RECOMMENDED: Agent transfer with full context sharing between agents has not proven
+// to be more effective empirically. Consider using ChatModelAgent with AgentTool
+// or DeepAgent instead for most multi-agent scenarios.
 func (a *ChatModelAgent) OnSetAsSubAgent(_ context.Context, parent Agent) error {
 	if atomic.LoadUint32(&a.frozen) == 1 {
 		return errors.New("agent has been frozen after run")
@@ -610,6 +628,11 @@ func (a *ChatModelAgent) OnSetAsSubAgent(_ context.Context, parent Agent) error 
 	return nil
 }
 
+// OnDisallowTransferToParent implements OnSubAgents.
+//
+// NOT RECOMMENDED: Agent transfer with full context sharing between agents has not proven
+// to be more effective empirically. Consider using ChatModelAgent with AgentTool
+// or DeepAgent instead for most multi-agent scenarios.
 func (a *ChatModelAgent) OnDisallowTransferToParent(_ context.Context) error {
 	if atomic.LoadUint32(&a.frozen) == 1 {
 		return errors.New("agent has been frozen after run")
