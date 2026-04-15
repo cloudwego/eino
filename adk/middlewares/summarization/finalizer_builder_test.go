@@ -19,7 +19,9 @@ package summarization
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/stretchr/testify/assert"
 
@@ -211,6 +213,24 @@ func TestPreserveSkillsConfigCheck(t *testing.T) {
 		c := &PreserveSkillsConfig{}
 		err := c.check()
 		assert.NoError(t, err)
+	})
+
+	t.Run("negative max tokens per skill", func(t *testing.T) {
+		c := &PreserveSkillsConfig{
+			MaxTokensPerSkill: ptr(-1),
+		}
+		err := c.check()
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "MaxTokensPerSkill must be non-negative")
+	})
+
+	t.Run("negative skills token budget", func(t *testing.T) {
+		c := &PreserveSkillsConfig{
+			SkillsTokenBudget: ptr(-1),
+		}
+		err := c.check()
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "SkillsTokenBudget must be non-negative")
 	})
 }
 
@@ -433,5 +453,129 @@ func TestBuildPreservedSkillsText(t *testing.T) {
 		assert.NotContains(t, text, "c1")
 		assert.NotContains(t, text, "skill2")
 		assert.NotContains(t, text, "c2")
+	})
+
+	t.Run("per skill token limit truncates large skills", func(t *testing.T) {
+		// estimateTokenCount = (len+3)/4
+		// "short" = 5 chars → 2 tokens
+		// strings.Repeat("x", 100) = 100 chars → 25 tokens
+		largeContent := strings.Repeat("x", 100)
+		messages := []adk.Message{
+			{
+				Role: schema.Assistant,
+				ToolCalls: []schema.ToolCall{
+					{ID: "call_1", Function: schema.FunctionCall{Name: "load_skill", Arguments: `{"skill": "small"}`}},
+					{ID: "call_2", Function: schema.FunctionCall{Name: "load_skill", Arguments: `{"skill": "large"}`}},
+				},
+			},
+			{Role: schema.Tool, ToolCallID: "call_1", Content: "short"},
+			{Role: schema.Tool, ToolCallID: "call_2", Content: largeContent},
+		}
+
+		// MaxTokensPerSkill=10: "short"→2 tokens (ok), largeContent→25 tokens (truncated)
+		text, err := buildPreservedSkillsText(ctx, messages, &PreserveSkillsConfig{
+			MaxSkills:         ptr(10),
+			MaxTokensPerSkill: ptr(10),
+			SkillToolName:     "load_skill",
+		})
+		assert.NoError(t, err)
+		// small skill preserved as-is
+		assert.Contains(t, text, "small")
+		assert.Contains(t, text, "short")
+		// large skill is truncated, not dropped — name still present, full content gone
+		assert.Contains(t, text, "large")
+		assert.NotContains(t, text, largeContent)
+		assert.Contains(t, text, "skill content truncated for compaction")
+	})
+
+	t.Run("total token budget drops excess skills", func(t *testing.T) {
+		// Each content is 40 chars → (40+3)/4 = 10 tokens
+		content := strings.Repeat("a", 40)
+		messages := []adk.Message{
+			{
+				Role: schema.Assistant,
+				ToolCalls: []schema.ToolCall{
+					{ID: "call_1", Function: schema.FunctionCall{Name: "load_skill", Arguments: `{"skill": "skill1"}`}},
+					{ID: "call_2", Function: schema.FunctionCall{Name: "load_skill", Arguments: `{"skill": "skill2"}`}},
+					{ID: "call_3", Function: schema.FunctionCall{Name: "load_skill", Arguments: `{"skill": "skill3"}`}},
+				},
+			},
+			{Role: schema.Tool, ToolCallID: "call_1", Content: content},
+			{Role: schema.Tool, ToolCallID: "call_2", Content: content},
+			{Role: schema.Tool, ToolCallID: "call_3", Content: content},
+		}
+
+		// Budget=15: skill3=10 tokens fits, skill2=10 tokens → 10+10=20 > 15, stop.
+		text, err := buildPreservedSkillsText(ctx, messages, &PreserveSkillsConfig{
+			MaxSkills:         ptr(10),
+			SkillsTokenBudget: ptr(15),
+			SkillToolName:     "load_skill",
+		})
+		assert.NoError(t, err)
+		assert.Contains(t, text, "skill3")
+		assert.NotContains(t, text, "skill1")
+		assert.NotContains(t, text, "skill2")
+	})
+
+	t.Run("token budget and per-skill limit combined", func(t *testing.T) {
+		// s1: 16 chars → 4 tokens
+		// s2: 200 chars → 50 tokens (exceeds per-skill limit of 20, gets truncated)
+		// s3: 24 chars → 6 tokens
+		// s4: 24 chars → 6 tokens
+		messages := []adk.Message{
+			{
+				Role: schema.Assistant,
+				ToolCalls: []schema.ToolCall{
+					{ID: "call_1", Function: schema.FunctionCall{Name: "load_skill", Arguments: `{"skill": "s1"}`}},
+					{ID: "call_2", Function: schema.FunctionCall{Name: "load_skill", Arguments: `{"skill": "s2"}`}},
+					{ID: "call_3", Function: schema.FunctionCall{Name: "load_skill", Arguments: `{"skill": "s3"}`}},
+					{ID: "call_4", Function: schema.FunctionCall{Name: "load_skill", Arguments: `{"skill": "s4"}`}},
+				},
+			},
+			{Role: schema.Tool, ToolCallID: "call_1", Content: strings.Repeat("a", 16)},
+			{Role: schema.Tool, ToolCallID: "call_2", Content: strings.Repeat("b", 200)},
+			{Role: schema.Tool, ToolCallID: "call_3", Content: strings.Repeat("c", 24)},
+			{Role: schema.Tool, ToolCallID: "call_4", Content: strings.Repeat("d", 24)},
+		}
+
+		// Per-skill limit: 20 (s2 with 50 tokens is truncated to 20)
+		// Budget: 30 (from most recent: s4=6, s3=6, s2=20, total=32 > 30, so s2 cannot fit)
+		// Result: s4 and s3 preserved
+		text, err := buildPreservedSkillsText(ctx, messages, &PreserveSkillsConfig{
+			MaxSkills:         ptr(10),
+			MaxTokensPerSkill: ptr(20),
+			SkillsTokenBudget: ptr(30),
+			SkillToolName:     "load_skill",
+		})
+		assert.NoError(t, err)
+		assert.Contains(t, text, "s3")
+		assert.Contains(t, text, "s4")
+		assert.NotContains(t, text, "\"s1\"")
+		assert.NotContains(t, text, "\"s2\"")
+	})
+
+	t.Run("truncated skill content preserves only prefix", func(t *testing.T) {
+		// Use a long content and generous maxTokens so the prefix is clearly visible.
+		content := strings.Repeat("abcdefghij", 100) // 1000 bytes → 250 tokens
+		// maxTokens=125 → targetBytes = 500, minus ~101 marker bytes → ~399 prefix bytes
+		truncated := truncateSkillContent(content, 125)
+		assert.True(t, strings.HasPrefix(truncated, "abcdefghij")) // prefix preserved
+		assert.Contains(t, truncated, "skill content truncated for compaction")
+		assert.NotEqual(t, content, truncated)
+		// Ends with marker, not with original content suffix
+		assert.True(t, strings.HasSuffix(truncated, "]"))
+		// No suffix from original content
+		assert.False(t, strings.HasSuffix(truncated, "abcdefghij]"))
+	})
+
+	t.Run("truncated multibyte content does not produce invalid utf8", func(t *testing.T) {
+		// Each Chinese char is 3 bytes. 334 chars = 1002 bytes → 251 tokens
+		content := strings.Repeat("中", 334)
+		// maxTokens=125 → targetBytes=500, minus marker ~101 bytes → ~399 bytes
+		// 399 / 3 = 133 full Chinese chars, no partial rune
+		truncated := truncateSkillContent(content, 125)
+		assert.True(t, utf8.ValidString(truncated))
+		assert.True(t, strings.HasPrefix(truncated, "中中中"))
+		assert.Contains(t, truncated, "skill content truncated for compaction")
 	})
 }

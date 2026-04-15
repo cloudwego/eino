@@ -296,9 +296,9 @@ func SummarizeMessages(ctx context.Context, cfg *Config, messages []adk.Message)
 		return nil, err
 	}
 
-	ctx = context.WithValue(ctx, ctxKeyModelInput{}, modelInput)
+	finalizeCtx := context.WithValue(ctx, ctxKeyModelInput{}, modelInput)
 
-	_, finalMsgs, err := m.finalizeSummary(ctx, messages, rawSummary)
+	_, finalMsgs, err := m.finalizeSummary(finalizeCtx, messages, rawSummary)
 	if err != nil {
 		return nil, err
 	}
@@ -355,10 +355,10 @@ func (m *middleware) BeforeModelRewriteState(ctx context.Context, state *adk.Cha
 		return nil, nil, err
 	}
 
-	ctx = context.WithValue(ctx, ctxKeyModelInput{}, modelInput)
+	finalizeCtx := context.WithValue(ctx, ctxKeyModelInput{}, modelInput)
 
 	var finalMsgs []adk.Message
-	ctx, finalMsgs, err = m.finalizeSummary(ctx, beforeState.Messages, rawSummary)
+	_, finalMsgs, err = m.finalizeSummary(finalizeCtx, beforeState.Messages, rawSummary)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -501,6 +501,10 @@ func defaultTokenCounter(_ context.Context, input *TokenCounterInput) (int, erro
 
 func estimateTokenCount(text string) int {
 	return (len(text) + 3) / 4
+}
+
+func estimateTokenBytes(tokens int) int {
+	return tokens * 4
 }
 
 func (m *middleware) summarize(ctx context.Context, originalMsgs []adk.Message) (adk.Message, []adk.Message, error) {

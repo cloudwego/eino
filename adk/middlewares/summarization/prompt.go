@@ -327,3 +327,14 @@ func getSkillPreamble() string {
 		Chinese: skillPreambleZh,
 	})
 }
+
+const skillTruncationMarker = "\n\n[... skill content truncated for compaction; use Read on the skill path if you need the full text]"
+
+const skillTruncationMarkerZh = "\n\n[... skill 内容已在压缩时截断，如需完整内容请通过 Read 读取 skill 对应的文件路径]"
+
+func getSkillTruncationMarker() string {
+	return internal.SelectPrompt(internal.I18nPrompts{
+		English: skillTruncationMarker,
+		Chinese: skillTruncationMarkerZh,
+	})
+}

@@ -20,6 +20,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/bytedance/sonic"
 
@@ -97,16 +98,30 @@ func (b *FinalizerBuilder) Build() (FinalizeFunc, error) {
 }
 
 type PreserveSkillsConfig struct {
+	// SkillToolName is the tool name used for loading skills.
+	// Must match the tool name configured in the ADK skill middleware.
+	// Optional. Defaults to "skill".
+	SkillToolName string
+
 	// MaxSkills limits the maximum number of skills to preserve.
 	// = 0 means do not preserve any skills (disabled).
 	// > 0 means preserve up to this many most recent skills.
 	// Optional. Defaults to 5.
 	MaxSkills *int
 
-	// SkillToolName is the tool name used for loading skills.
-	// Must match the tool name configured in the ADK skill middleware.
-	// Optional. Defaults to "skill".
-	SkillToolName string
+	// MaxTokensPerSkill limits the maximum token count for a single preserved skill.
+	// Skills exceeding this limit are truncated, with the truncated portion replaced
+	// by a short marker text (e.g. "[... skill content truncated ...]").
+	// Note: if this value is set smaller than the token count of the marker text itself,
+	// the skill will contain only the marker text with no original content preserved.
+	// Optional. Defaults to 5000.
+	MaxTokensPerSkill *int
+
+	// SkillsTokenBudget limits the total token count for all preserved skills combined.
+	// Skills are preserved from most recent to oldest; once the budget is exhausted,
+	// remaining skills are dropped.
+	// Optional. Defaults to 25000.
+	SkillsTokenBudget *int
 }
 
 // PreserveSkills extracts skill contents loaded by the ADK skill middleware
@@ -149,6 +164,12 @@ func (c *PreserveSkillsConfig) check() error {
 	if c.MaxSkills != nil && *c.MaxSkills < 0 {
 		return fmt.Errorf("MaxSkills must be non-negative")
 	}
+	if c.MaxTokensPerSkill != nil && *c.MaxTokensPerSkill < 0 {
+		return fmt.Errorf("MaxTokensPerSkill must be non-negative")
+	}
+	if c.SkillsTokenBudget != nil && *c.SkillsTokenBudget < 0 {
+		return fmt.Errorf("SkillsTokenBudget must be non-negative")
+	}
 	return nil
 }
 
@@ -158,7 +179,11 @@ type skillInfo struct {
 }
 
 func buildPreservedSkillsText(_ context.Context, messages []adk.Message, config *PreserveSkillsConfig) (string, error) {
-	const defaultSkillTool = "skill"
+	const (
+		defaultSkillTool         = "skill"
+		defaultMaxTokensPerSkill = 5000
+		defaultSkillsTokenBudget = 25000
+	)
 
 	if config == nil {
 		config = &PreserveSkillsConfig{}
@@ -177,6 +202,16 @@ func buildPreservedSkillsText(_ context.Context, messages []adk.Message, config 
 		skillTool = config.SkillToolName
 	}
 
+	maxTokensPerSkill := defaultMaxTokensPerSkill
+	if config.MaxTokensPerSkill != nil {
+		maxTokensPerSkill = *config.MaxTokensPerSkill
+	}
+
+	skillsTokenBudget := defaultSkillsTokenBudget
+	if config.SkillsTokenBudget != nil {
+		skillsTokenBudget = *config.SkillsTokenBudget
+	}
+
 	var skills []*skillInfo
 	argsMap := make(map[string]string)
 
@@ -188,6 +223,7 @@ func buildPreservedSkillsText(_ context.Context, messages []adk.Message, config 
 					argsMap[tc.ID] = tc.Function.Arguments
 				}
 			}
+
 		case schema.Tool:
 			arguments, ok := argsMap[msg.ToolCallID]
 			if !ok {
@@ -231,8 +267,39 @@ func buildPreservedSkillsText(_ context.Context, messages []adk.Message, config 
 		skills = skills[len(skills)-maxSkills:]
 	}
 
+	totalTokens := 0
+	var budgetedSkills []*skillInfo
+	for i := len(skills) - 1; i >= 0; i-- {
+		skill := skills[i]
+		tokens := estimateTokenCount(skill.Content)
+
+		if tokens > maxTokensPerSkill {
+			skill = &skillInfo{
+				Name:    skill.Name,
+				Content: truncateSkillContent(skill.Content, maxTokensPerSkill),
+			}
+			tokens = maxTokensPerSkill
+		}
+
+		if totalTokens+tokens > skillsTokenBudget {
+			break
+		}
+
+		totalTokens += tokens
+		budgetedSkills = append(budgetedSkills, skill)
+	}
+
+	if len(budgetedSkills) == 0 {
+		return "", nil
+	}
+
+	// Reverse to restore chronological order.
+	for i, j := 0, len(budgetedSkills)-1; i < j; i, j = i+1, j-1 {
+		budgetedSkills[i], budgetedSkills[j] = budgetedSkills[j], budgetedSkills[i]
+	}
+
 	var parts []string
-	for _, skill := range skills {
+	for _, skill := range budgetedSkills {
 		parts = append(parts, fmt.Sprintf(skillSectionFormat, skill.Name, skill.Content))
 	}
 
@@ -241,4 +308,34 @@ func buildPreservedSkillsText(_ context.Context, messages []adk.Message, config 
 	skillsText = fmt.Sprintf("<system-reminder>\n%s"+"\n</system-reminder>", skillsText)
 
 	return skillsText, nil
+}
+
+// truncateSkillContent truncates skill content to fit within maxTokens.
+// It keeps the first portion of the content and appends a truncation marker
+// (e.g. "[... skill content truncated ...]") to indicate the omission.
+// If maxTokens is smaller than the marker itself, only the marker is returned.
+func truncateSkillContent(content string, maxTokens int) string {
+	if len(content) == 0 {
+		return content
+	}
+
+	if estimateTokenCount(content) <= maxTokens {
+		return content
+	}
+
+	marker := getSkillTruncationMarker()
+	targetBytes := estimateTokenBytes(maxTokens) - len(marker)
+	if targetBytes < 0 {
+		targetBytes = 0
+	}
+	if targetBytes > len(content) {
+		targetBytes = len(content)
+	}
+
+	// Back up to a valid UTF-8 rune boundary.
+	for targetBytes > 0 && targetBytes < len(content) && !utf8.RuneStart(content[targetBytes]) {
+		targetBytes--
+	}
+
+	return content[:targetBytes] + marker
 }
