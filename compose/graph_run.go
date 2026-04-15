@@ -434,7 +434,6 @@ type interruptTempInfo struct {
 	interruptBeforeNodes []string
 	interruptAfterNodes  []string
 	interruptRerunExtra  map[string]any
-	fromGraphInterrupt   bool
 
 	signals []*core.InterruptSignal
 }
@@ -443,7 +442,7 @@ func (ti *interruptTempInfo) collectCanceledInfo(canceled bool, canceledTasks, c
 	if !canceled {
 		return
 	}
-	ti.fromGraphInterrupt = true
+
 	if len(canceledTasks) > 0 {
 		for _, t := range canceledTasks {
 			ti.interruptRerunNodes = append(ti.interruptRerunNodes, t.nodeKey)
@@ -461,13 +460,6 @@ func (r *runner) resolveInterruptCompletedTasks(tempInfo *interruptTempInfo, com
 			if info := isSubGraphInterrupt(completedTask.err); info != nil {
 				tempInfo.subGraphInterrupts[completedTask.nodeKey] = info
 				tempInfo.signals = append(tempInfo.signals, info.signal)
-				// Propagate FromGraphInterrupt from the sub-graph to the parent.
-				// The sub-graph's task manager may have consumed the cancel
-				// channel value before the parent's, so only the sub-graph
-				// knows the interrupt was triggered by a graph-level cancel.
-				if info.Info != nil && info.Info.FromGraphInterrupt {
-					tempInfo.fromGraphInterrupt = true
-				}
 				continue
 			}
 
@@ -541,7 +533,6 @@ func (r *runner) handleInterrupt(
 		RerunNodes:         tempInfo.interruptRerunNodes,
 		RerunNodesExtra:    tempInfo.interruptRerunExtra,
 		SubGraphs:          make(map[string]*InterruptInfo),
-		FromGraphInterrupt: tempInfo.fromGraphInterrupt,
 	}
 
 	info := cp.State
@@ -674,7 +665,6 @@ func (r *runner) handleInterruptWithSubGraphAndRerunNodes(
 		RerunNodes:         tempInfo.interruptRerunNodes,
 		RerunNodesExtra:    tempInfo.interruptRerunExtra,
 		SubGraphs:          make(map[string]*InterruptInfo),
-		FromGraphInterrupt: tempInfo.fromGraphInterrupt,
 	}
 
 	info := cp.State
