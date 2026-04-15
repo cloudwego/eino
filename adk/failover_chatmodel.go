@@ -229,6 +229,12 @@ func (f *failoverModelWrapper) needFailover(ctx context.Context, outputMessage *
 		return false
 	}
 
+	// ErrStreamCanceled means the caller voluntarily abandoned the stream;
+	// never retry or fail over in this case.
+	if errors.Is(outputErr, ErrStreamCanceled) {
+		return false
+	}
+
 	// ShouldFailover is validated at agent construction; nil here indicates a programmer error.
 	return f.config.ShouldFailover(ctx, outputMessage, outputErr)
 }
@@ -257,10 +263,6 @@ func (f *failoverModelWrapper) Generate(ctx context.Context, input []*schema.Mes
 
 		lastOutputMessage = result
 		lastErr = err
-
-		if errors.Is(err, ErrStreamCanceled) {
-			return result, err
-		}
 
 		if !f.needFailover(ctx, result, err) {
 			return result, err
@@ -304,10 +306,6 @@ func (f *failoverModelWrapper) Generate(ctx context.Context, input []*schema.Mes
 			return result, nil
 		}
 
-		if errors.Is(err, ErrStreamCanceled) {
-			return result, err
-		}
-
 		if !f.needFailover(ctx, result, err) {
 			return result, err
 		}
@@ -341,9 +339,6 @@ func (f *failoverModelWrapper) Stream(ctx context.Context, input []*schema.Messa
 		stream, err := f.inner.Stream(modelCtx, input, opts...)
 		if err != nil {
 			lastErr = err
-			if errors.Is(err, ErrStreamCanceled) {
-				return nil, err
-			}
 			if !f.needFailover(ctx, nil, err) {
 				return nil, err
 			}
@@ -358,10 +353,6 @@ func (f *failoverModelWrapper) Stream(ctx context.Context, input []*schema.Messa
 				lastOutputMessage = outMsg
 				lastErr = streamErr
 				returnCopy.Close()
-
-				if errors.Is(streamErr, ErrStreamCanceled) {
-					return nil, streamErr
-				}
 
 				if !f.needFailover(ctx, outMsg, streamErr) {
 					return nil, streamErr
@@ -404,10 +395,6 @@ func (f *failoverModelWrapper) Stream(ctx context.Context, input []*schema.Messa
 			lastErr = err
 			lastOutputMessage = nil
 
-			if errors.Is(err, ErrStreamCanceled) {
-				return nil, err
-			}
-
 			if !f.needFailover(ctx, nil, err) {
 				return nil, err
 			}
@@ -443,10 +430,6 @@ func (f *failoverModelWrapper) Stream(ctx context.Context, input []*schema.Messa
 			lastOutputMessage = outMsg
 			lastErr = streamErr
 			returnCopy.Close()
-
-			if errors.Is(streamErr, ErrStreamCanceled) {
-				return nil, streamErr
-			}
 
 			if !f.needFailover(ctx, outMsg, streamErr) {
 				return nil, streamErr
