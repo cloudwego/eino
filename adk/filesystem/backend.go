@@ -75,6 +75,15 @@ type ReadRequest struct {
 	Limit int
 }
 
+// MultiModalReadRequest extends ReadRequest with parameters only applicable
+// to MultiModalReader implementations (e.g. PDF page ranges).
+type MultiModalReadRequest struct {
+	ReadRequest
+
+	// Pages specifies the page range for PDF files (e.g. "1-5", "3", "10-20").
+	Pages string
+}
+
 // GrepRequest contains parameters for searching file content.
 type GrepRequest struct {
 	// ===== Search Parameters =====
@@ -168,8 +177,63 @@ type EditRequest struct {
 	ReplaceAll bool
 }
 
+// FileContentPartType defines the type of a multimodal file content part.
+type FileContentPartType string
+
+const (
+	// FileContentPartTypeImage represents an image part (e.g. PNG, JPG).
+	FileContentPartTypeImage FileContentPartType = "image"
+	// FileContentPartTypePDF represents a file part (e.g. PDF).
+	FileContentPartTypePDF FileContentPartType = "pdf"
+)
+
+// FileContentPart represents a multimodal part of file content.
+// Data holds raw bytes; encoding (e.g. base64) is handled by the consumer.
+type FileContentPart struct {
+	// Type is the kind of content this part represents.
+	// Required.
+	Type FileContentPartType
+
+	// MIMEType is the MIME type of the content (e.g. "image/png", "application/pdf").
+	// Required.
+	MIMEType string
+
+	// Data is the raw binary content.
+	// Required.
+	Data []byte
+}
+
+// FileContent holds the result of a Read operation.
 type FileContent struct {
+	// Content holds the plain text content of the file.
 	Content string
+}
+
+// MultiFileContent holds the result of a MultiModalRead operation.
+//
+// FileContent and Parts are mutually exclusive (one-of):
+//   - Set FileContent for plain text results (same as a normal Read).
+//   - Set Parts for multimodal results (images, PDFs, etc.).
+//
+// When Parts is non-empty, FileContent is ignored.
+type MultiFileContent struct {
+	*FileContent
+
+	// Parts holds multimodal output parts (e.g. image, PDF).
+	Parts []FileContentPart
+}
+
+// MultiModalReader is an optional extension interface for Backend.
+// Backends that implement this interface support multimodal file reading,
+// returning structured parts (images, PDFs) instead of plain text.
+//
+// For large file handling, there are two approaches to control output size:
+//   - Implement size control within MultiModalRead (e.g. reject files exceeding a threshold,
+//     downsample images, or limit PDF page counts at the backend level).
+//   - Use ToolMiddleware's EnhancedInvokable to customize result transformation,
+//     or use the built-in reduction middleware with configurable policies.
+type MultiModalReader interface {
+	MultiModalRead(ctx context.Context, req *MultiModalReadRequest) (*MultiFileContent, error)
 }
 
 // Backend is a pluggable, unified file backend protocol interface.

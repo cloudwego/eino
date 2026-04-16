@@ -18,6 +18,7 @@ package filesystem
 
 import (
 	"context"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"io"
@@ -289,7 +290,7 @@ func TestWriteFileTool(t *testing.T) {
 		t.Fatalf("Failed to read written file: %v", err)
 	}
 	if content.Content != "new content" {
-		t.Errorf("Expected written content to be 'new content', got %q", content)
+		t.Errorf("Expected written content to be 'new content', got %q", content.Content)
 	}
 }
 
@@ -2272,4 +2273,342 @@ type mockShellBackendWithError struct{}
 
 func (m *mockShellBackendWithError) Execute(ctx context.Context, req *filesystem.ExecuteRequest) (*filesystem.ExecuteResponse, error) {
 	return nil, errors.New("shell execution error")
+}
+
+// multiModalBackend wraps InMemoryBackend and implements MultiModalReader for testing.
+type multiModalBackend struct {
+	*filesystem.InMemoryBackend
+	multiModalReadFunc func(ctx context.Context, req *filesystem.MultiModalReadRequest) (*filesystem.MultiFileContent, error)
+}
+
+func (b *multiModalBackend) MultiModalRead(ctx context.Context, req *filesystem.MultiModalReadRequest) (*filesystem.MultiFileContent, error) {
+	return b.multiModalReadFunc(ctx, req)
+}
+
+func TestMultiModalReadFileTool_TextOnly(t *testing.T) {
+	base := setupTestBackend()
+	eb := &multiModalBackend{
+		InMemoryBackend: base,
+		multiModalReadFunc: func(ctx context.Context, req *filesystem.MultiModalReadRequest) (*filesystem.MultiFileContent, error) {
+			ct, err := base.Read(ctx, &req.ReadRequest)
+			if err != nil {
+				return nil, err
+			}
+			return &filesystem.MultiFileContent{
+				FileContent: ct,
+			}, nil
+		},
+	}
+
+	mmTool, err := newMultiModalReadFileTool(eb, "", "")
+	assert.NoError(t, err)
+
+	result, err := mmTool.(tool.EnhancedInvokableTool).InvokableRun(
+		context.Background(), &schema.ToolArgument{Text: `{"file_path": "/file1.txt", "offset": 0, "limit": 100}`})
+	assert.NoError(t, err)
+	assert.NotNil(t, result)
+	assert.Len(t, result.Parts, 1)
+	assert.Equal(t, schema.ToolPartTypeText, result.Parts[0].Type)
+	assert.Contains(t, result.Parts[0].Text, "line1")
+	assert.Contains(t, result.Parts[0].Text, "line5")
+}
+
+func TestMultiModalReadFileTool_Multimodal(t *testing.T) {
+	base := setupTestBackend()
+	imgData := []byte("rawimagedata")
+	eb := &multiModalBackend{
+		InMemoryBackend: base,
+		multiModalReadFunc: func(ctx context.Context, req *filesystem.MultiModalReadRequest) (*filesystem.MultiFileContent, error) {
+			return &filesystem.MultiFileContent{
+				Parts: []filesystem.FileContentPart{
+					{
+						Type:     filesystem.FileContentPartTypeImage,
+						MIMEType: "image/png",
+						Data:     imgData,
+					},
+				},
+			}, nil
+		},
+	}
+
+	mmTool, err := newMultiModalReadFileTool(eb, "", "")
+	assert.NoError(t, err)
+
+	result, err := mmTool.(tool.EnhancedInvokableTool).InvokableRun(
+		context.Background(), &schema.ToolArgument{Text: `{"file_path": "/image.png", "offset": 0, "limit": 100}`})
+	assert.NoError(t, err)
+	assert.NotNil(t, result)
+	assert.Len(t, result.Parts, 1)
+	assert.Equal(t, schema.ToolPartTypeImage, result.Parts[0].Type)
+
+	// Verify base64 encoding correctness
+	assert.NotNil(t, result.Parts[0].Image)
+	assert.Equal(t, "image/png", result.Parts[0].Image.MIMEType)
+	assert.Equal(t, base64.StdEncoding.EncodeToString(imgData), *result.Parts[0].Image.Base64Data)
+}
+
+func TestMultiModalReadFileTool_FileType(t *testing.T) {
+	base := setupTestBackend()
+	pdfData := []byte("fakepdfcontent")
+	eb := &multiModalBackend{
+		InMemoryBackend: base,
+		multiModalReadFunc: func(ctx context.Context, req *filesystem.MultiModalReadRequest) (*filesystem.MultiFileContent, error) {
+			return &filesystem.MultiFileContent{
+				Parts: []filesystem.FileContentPart{
+					{
+						Type:     filesystem.FileContentPartTypePDF,
+						MIMEType: "application/pdf",
+						Data:     pdfData,
+					},
+				},
+			}, nil
+		},
+	}
+
+	mmTool, err := newMultiModalReadFileTool(eb, "", "")
+	assert.NoError(t, err)
+
+	result, err := mmTool.(tool.EnhancedInvokableTool).InvokableRun(
+		context.Background(), &schema.ToolArgument{Text: `{"file_path": "/doc.pdf", "offset": 0, "limit": 100}`})
+	assert.NoError(t, err)
+	assert.Len(t, result.Parts, 1)
+	assert.Equal(t, schema.ToolPartTypeFile, result.Parts[0].Type)
+	assert.NotNil(t, result.Parts[0].File)
+	assert.Equal(t, "application/pdf", result.Parts[0].File.MIMEType)
+	assert.Equal(t, base64.StdEncoding.EncodeToString(pdfData), *result.Parts[0].File.Base64Data)
+}
+
+func TestMultiModalReadFileTool_UnsupportedPartType(t *testing.T) {
+	base := setupTestBackend()
+	eb := &multiModalBackend{
+		InMemoryBackend: base,
+		multiModalReadFunc: func(ctx context.Context, req *filesystem.MultiModalReadRequest) (*filesystem.MultiFileContent, error) {
+			return &filesystem.MultiFileContent{
+				Parts: []filesystem.FileContentPart{
+					{
+						Type:     filesystem.FileContentPartType("unknown"),
+						MIMEType: "application/octet-stream",
+						Data:     []byte("data"),
+					},
+				},
+			}, nil
+		},
+	}
+
+	mmTool, err := newMultiModalReadFileTool(eb, "", "")
+	assert.NoError(t, err)
+
+	_, err = mmTool.(tool.EnhancedInvokableTool).InvokableRun(
+		context.Background(), &schema.ToolArgument{Text: `{"file_path": "/file.bin", "offset": 0, "limit": 100}`})
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "unsupported FileContentPartType")
+}
+
+func TestMultiModalReadFileTool_PagesPassThrough(t *testing.T) {
+	base := setupTestBackend()
+	var capturedPages string
+	eb := &multiModalBackend{
+		InMemoryBackend: base,
+		multiModalReadFunc: func(ctx context.Context, req *filesystem.MultiModalReadRequest) (*filesystem.MultiFileContent, error) {
+			capturedPages = req.Pages
+			return &filesystem.MultiFileContent{FileContent: &filesystem.FileContent{Content: "page content"}}, nil
+		},
+	}
+
+	mmTool, err := newMultiModalReadFileTool(eb, "", "")
+	assert.NoError(t, err)
+
+	_, err = mmTool.(tool.EnhancedInvokableTool).InvokableRun(
+		context.Background(), &schema.ToolArgument{Text: `{"file_path": "/doc.pdf", "pages": "1-5"}`})
+	assert.NoError(t, err)
+	assert.Equal(t, "1-5", capturedPages)
+}
+
+func TestMultiModalReadFileTool_BackendNotMultiModalReader(t *testing.T) {
+	base := setupTestBackend()
+	_, err := newMultiModalReadFileTool(base, "", "")
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "MultiModalReader")
+}
+
+func TestUseMultiModalRead_Routing(t *testing.T) {
+	base := setupTestBackend()
+	eb := &multiModalBackend{
+		InMemoryBackend: base,
+		multiModalReadFunc: func(ctx context.Context, req *filesystem.MultiModalReadRequest) (*filesystem.MultiFileContent, error) {
+			ct, err := base.Read(ctx, &req.ReadRequest)
+			if err != nil {
+				return nil, err
+			}
+			return &filesystem.MultiFileContent{FileContent: ct}, nil
+		},
+	}
+
+	// UseMultiModalRead=false should create standard tool
+	tools, err := getFilesystemTools(context.Background(), &MiddlewareConfig{
+		Backend:           base,
+		UseMultiModalRead: false,
+	})
+	assert.NoError(t, err)
+	for _, tl := range tools {
+		info, _ := tl.Info(context.Background())
+		if info != nil && info.Name == ToolNameReadFile {
+			_, isEnhanced := tl.(tool.EnhancedInvokableTool)
+			assert.False(t, isEnhanced, "should be standard InvokableTool when UseMultiModalRead=false")
+		}
+	}
+
+	// UseMultiModalRead=true with enhanced backend should create enhanced tool
+	tools2, err := getFilesystemTools(context.Background(), &MiddlewareConfig{
+		Backend:           eb,
+		UseMultiModalRead: true,
+	})
+	assert.NoError(t, err)
+	for _, tl := range tools2 {
+		info, _ := tl.Info(context.Background())
+		if info != nil && info.Name == ToolNameReadFile {
+			_, isEnhanced := tl.(tool.EnhancedInvokableTool)
+			assert.True(t, isEnhanced, "should be EnhancedInvokableTool when UseMultiModalRead=true")
+		}
+	}
+}
+
+// TestMultiModalReadFileTool_SchemaContainsAllFields verifies that the JSON schema
+// exposed to the LLM includes both the embedded readFileArgs fields (file_path,
+// offset, limit) and the enhanced-only "pages" field. Guards against the
+// jsonschema library failing to flatten an unexported anonymous embedded struct.
+func TestMultiModalReadFileTool_SchemaContainsAllFields(t *testing.T) {
+	base := setupTestBackend()
+	eb := &multiModalBackend{
+		InMemoryBackend: base,
+		multiModalReadFunc: func(ctx context.Context, req *filesystem.MultiModalReadRequest) (*filesystem.MultiFileContent, error) {
+			ct, err := base.Read(ctx, &req.ReadRequest)
+			if err != nil {
+				return nil, err
+			}
+			return &filesystem.MultiFileContent{FileContent: ct}, nil
+		},
+	}
+
+	mmTool, err := newMultiModalReadFileTool(eb, "", "")
+	assert.NoError(t, err)
+
+	info, err := mmTool.Info(context.Background())
+	assert.NoError(t, err)
+	assert.NotNil(t, info)
+
+	js, err := info.ParamsOneOf.ToJSONSchema()
+	assert.NoError(t, err)
+	assert.NotNil(t, js)
+	assert.NotNil(t, js.Properties, "schema should have properties")
+
+	for _, field := range []string{"file_path", "offset", "limit", "pages"} {
+		_, ok := js.Properties.Get(field)
+		assert.True(t, ok, "expected JSON schema to contain field %q, schema=%+v", field, js.Properties)
+	}
+}
+
+// TestMultiModalReadFileTool_CustomDescNoSuffix verifies that when a custom desc is
+// provided, the multimodal suffix is NOT appended (user's desc replaces default).
+func TestMultiModalReadFileTool_CustomDescNoSuffix(t *testing.T) {
+	base := setupTestBackend()
+	eb := &multiModalBackend{
+		InMemoryBackend: base,
+		multiModalReadFunc: func(ctx context.Context, req *filesystem.MultiModalReadRequest) (*filesystem.MultiFileContent, error) {
+			ct, err := base.Read(ctx, &req.ReadRequest)
+			if err != nil {
+				return nil, err
+			}
+			return &filesystem.MultiFileContent{FileContent: ct}, nil
+		},
+	}
+
+	customDesc := "my custom read tool description"
+	mmTool, err := newMultiModalReadFileTool(eb, "", customDesc)
+	assert.NoError(t, err)
+
+	info, err := mmTool.Info(context.Background())
+	assert.NoError(t, err)
+	assert.Equal(t, customDesc, info.Desc, "custom desc should not be augmented with multimodal suffix")
+
+	// With empty desc (fallback to default), suffix should be appended.
+	defaultTool, err := newMultiModalReadFileTool(eb, "", "")
+	assert.NoError(t, err)
+	defaultInfo, err := defaultTool.Info(context.Background())
+	assert.NoError(t, err)
+	assert.Contains(t, defaultInfo.Desc, "multimodal", "default desc should include multimodal suffix")
+}
+
+// TestMultiModalReadFileTool_EmptyPartDataError verifies that a FileContentPart
+// with empty Data fails explicitly rather than silently encoding to an empty
+// base64 string.
+func TestMultiModalReadFileTool_EmptyPartDataError(t *testing.T) {
+	base := setupTestBackend()
+	eb := &multiModalBackend{
+		InMemoryBackend: base,
+		multiModalReadFunc: func(ctx context.Context, req *filesystem.MultiModalReadRequest) (*filesystem.MultiFileContent, error) {
+			return &filesystem.MultiFileContent{
+				Parts: []filesystem.FileContentPart{
+					{Type: filesystem.FileContentPartTypeImage, MIMEType: "image/png", Data: nil},
+				},
+			}, nil
+		},
+	}
+
+	mmTool, err := newMultiModalReadFileTool(eb, "", "")
+	assert.NoError(t, err)
+
+	_, err = mmTool.(tool.EnhancedInvokableTool).InvokableRun(
+		context.Background(), &schema.ToolArgument{Text: `{"file_path": "/x"}`})
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "empty")
+}
+
+// nilReadBackend wraps InMemoryBackend but returns nil, nil from Read.
+type nilReadBackend struct {
+	*filesystem.InMemoryBackend
+}
+
+func (b *nilReadBackend) Read(_ context.Context, _ *filesystem.ReadRequest) (*filesystem.FileContent, error) {
+	return nil, nil
+}
+
+// TestReadFileTool_NilResult verifies that newReadFileTool does not panic when
+// Backend.Read returns nil, and emits a human-readable fallback message instead.
+func TestReadFileTool_NilResult(t *testing.T) {
+	base := setupTestBackend()
+	backend := &nilReadBackend{InMemoryBackend: base}
+
+	readTool, err := newReadFileTool(backend, "", "")
+	assert.NoError(t, err)
+
+	out, err := invokeTool(t, readTool, `{"file_path": "/missing.txt"}`)
+	assert.NoError(t, err)
+	assert.Contains(t, out, "No content found at path")
+	assert.Contains(t, out, "/missing.txt")
+}
+
+// TestMultiModalReadFileTool_NilResult verifies that newMultiModalReadFileTool
+// does not panic when MultiModalRead returns nil, and returns a text part with
+// a human-readable fallback message.
+func TestMultiModalReadFileTool_NilResult(t *testing.T) {
+	base := setupTestBackend()
+	eb := &multiModalBackend{
+		InMemoryBackend: base,
+		multiModalReadFunc: func(ctx context.Context, req *filesystem.MultiModalReadRequest) (*filesystem.MultiFileContent, error) {
+			return nil, nil
+		},
+	}
+
+	mmTool, err := newMultiModalReadFileTool(eb, "", "")
+	assert.NoError(t, err)
+
+	result, err := mmTool.(tool.EnhancedInvokableTool).InvokableRun(
+		context.Background(), &schema.ToolArgument{Text: `{"file_path": "/missing.txt"}`})
+	assert.NoError(t, err)
+	assert.NotNil(t, result)
+	assert.Len(t, result.Parts, 1)
+	assert.Equal(t, schema.ToolPartTypeText, result.Parts[0].Type)
+	assert.Contains(t, result.Parts[0].Text, "No content found at path")
+	assert.Contains(t, result.Parts[0].Text, "/missing.txt")
 }
