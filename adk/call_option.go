@@ -56,6 +56,10 @@ func WithSessionValues(v map[string]any) AgentRunOption {
 }
 
 // WithSkipTransferMessages disables forwarding transfer messages during execution.
+//
+// NOT RECOMMENDED: Agent transfer with full context sharing between agents has not proven
+// to be more effective empirically. Consider using ChatModelAgent with AgentTool
+// or DeepAgent instead for most multi-agent scenarios.
 func WithSkipTransferMessages() AgentRunOption {
 	return WrapImplSpecificOptFn(func(t *options) {
 		t.skipTransferMessages = true

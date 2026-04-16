@@ -89,6 +89,10 @@ func concatInstructions(instructions ...string) string {
 
 // GenTransferMessages generates assistant and tool messages to instruct a
 // transfer-to-agent tool call targeting the destination agent.
+//
+// NOT RECOMMENDED: Agent transfer with full context sharing between agents has not proven
+// to be more effective empirically. Consider using ChatModelAgent with AgentTool
+// or DeepAgent instead for most multi-agent scenarios.
 func GenTransferMessages(_ context.Context, destAgentName string) (Message, Message) {
 	toolCallID := uuid.NewString()
 	tooCall := schema.ToolCall{ID: toolCallID, Function: schema.FunctionCall{Name: TransferToAgentToolName, Arguments: destAgentName}}
