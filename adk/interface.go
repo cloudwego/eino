@@ -134,6 +134,11 @@ func (mv *MessageVariant) GetMessage() (Message, error) {
 	return message, nil
 }
 
+// TransferToAgentAction represents a transfer-to-agent action.
+//
+// NOT RECOMMENDED: Agent transfer with full context sharing between agents has not proven
+// to be more effective empirically. Consider using ChatModelAgent with AgentTool
+// or DeepAgent instead for most multi-agent scenarios.
 type TransferToAgentAction struct {
 	DestAgentName string
 }
@@ -145,11 +150,19 @@ type AgentOutput struct {
 }
 
 // NewTransferToAgentAction creates an action to transfer to the specified agent.
+//
+// NOT RECOMMENDED: Agent transfer with full context sharing between agents has not proven
+// to be more effective empirically. Consider using ChatModelAgent with AgentTool
+// or DeepAgent instead for most multi-agent scenarios.
 func NewTransferToAgentAction(destAgentName string) *AgentAction {
 	return &AgentAction{TransferToAgent: &TransferToAgentAction{DestAgentName: destAgentName}}
 }
 
 // NewExitAction creates an action that signals the agent to exit.
+//
+// NOT RECOMMENDED: Agent transfer with full context sharing between agents has not proven
+// to be more effective empirically. Consider using ChatModelAgent with AgentTool
+// or DeepAgent instead for most multi-agent scenarios.
 func NewExitAction() *AgentAction {
 	return &AgentAction{Exit: true}
 }
@@ -179,7 +192,12 @@ type AgentAction struct {
 	internalInterrupted *core.InterruptSignal
 }
 
-// RunStep CheckpointSchema: persisted via serialization.RunCtx (gob).
+// RunStep represents a step in the agent execution path.
+// CheckpointSchema: persisted via serialization.RunCtx (gob).
+//
+// NOT RECOMMENDED: RunStep is mainly relevant for agent transfer and workflow agents,
+// which have not proven to be more effective empirically. Consider using ChatModelAgent
+// with AgentTool or DeepAgent instead for most multi-agent scenarios.
 type RunStep struct {
 	agentName string
 }
@@ -225,10 +243,11 @@ type AgentEvent struct {
 	AgentName string
 
 	// RunPath represents the execution path from root agent to the current event source.
-	// This field is managed entirely by the eino framework and cannot be set by end-users
-	// because RunStep's fields are unexported. The framework sets RunPath exactly once:
-	// - flowAgent sets it when the event has no RunPath (len == 0)
-	// - agentTool prepends parent RunPath when forwarding events from nested agents
+	// This field is managed entirely by the framework and cannot be set by end-users.
+	//
+	// NOT RECOMMENDED: RunPath is mainly relevant for agent transfer and workflow agents,
+	// which have not proven to be more effective empirically. For ChatModelAgent with
+	// AgentTool or DeepAgent, RunPath is trivial. Consider those patterns instead.
 	RunPath []RunStep
 
 	Output *AgentOutput
@@ -257,6 +276,11 @@ type Agent interface {
 	Run(ctx context.Context, input *AgentInput, options ...AgentRunOption) *AsyncIterator[*AgentEvent]
 }
 
+// OnSubAgents is the interface for agents that support sub-agent registration and transfer.
+//
+// NOT RECOMMENDED: Agent transfer with full context sharing between agents has not proven
+// to be more effective empirically. Consider using ChatModelAgent with AgentTool
+// or DeepAgent instead for most multi-agent scenarios.
 type OnSubAgents interface {
 	OnSetSubAgents(ctx context.Context, subAgents []Agent) error
 	OnSetAsSubAgent(ctx context.Context, parent Agent) error

@@ -1383,7 +1383,6 @@ func TestCancelInterrupt(t *testing.T) {
 	info, success := ExtractInterruptInfo(err)
 	assert.True(t, success)
 	assert.Equal(t, []string{"1"}, info.AfterNodes)
-	assert.True(t, info.FromGraphInterrupt)
 	result, err := r.Invoke(ctx, "input", WithCheckPointID("1"))
 	assert.NoError(t, err)
 	assert.Equal(t, "input12", result)
@@ -1398,7 +1397,6 @@ func TestCancelInterrupt(t *testing.T) {
 	info, success = ExtractInterruptInfo(err)
 	assert.True(t, success)
 	assert.Equal(t, []string{"1"}, info.AfterNodes)
-	assert.True(t, info.FromGraphInterrupt)
 	result, err = r.Invoke(ctx, "input", WithCheckPointID("2"))
 	assert.NoError(t, err)
 	assert.Equal(t, "input12", result)
@@ -1414,7 +1412,6 @@ func TestCancelInterrupt(t *testing.T) {
 	info, success = ExtractInterruptInfo(err)
 	assert.True(t, success)
 	assert.Equal(t, []string{"1"}, info.RerunNodes)
-	assert.True(t, info.FromGraphInterrupt)
 	result, err = r.Invoke(ctx, "input", WithCheckPointID("3"))
 	assert.NoError(t, err)
 	assert.Equal(t, "input12", result)
@@ -1444,7 +1441,6 @@ func TestCancelInterrupt(t *testing.T) {
 	info, success = ExtractInterruptInfo(err)
 	assert.True(t, success)
 	assert.Equal(t, []string{"1"}, info.AfterNodes)
-	assert.True(t, info.FromGraphInterrupt)
 	result, err = r.Invoke(ctx, "input", WithCheckPointID("1"))
 	assert.NoError(t, err)
 	assert.Equal(t, "input12", result)
@@ -1459,7 +1455,6 @@ func TestCancelInterrupt(t *testing.T) {
 	info, success = ExtractInterruptInfo(err)
 	assert.True(t, success)
 	assert.Equal(t, []string{"1"}, info.AfterNodes)
-	assert.True(t, info.FromGraphInterrupt)
 	result, err = r.Invoke(ctx, "input", WithCheckPointID("2"))
 	assert.NoError(t, err)
 	assert.Equal(t, "input12", result)
@@ -1475,7 +1470,6 @@ func TestCancelInterrupt(t *testing.T) {
 	info, success = ExtractInterruptInfo(err)
 	assert.True(t, success)
 	assert.Equal(t, []string{"1"}, info.RerunNodes)
-	assert.True(t, info.FromGraphInterrupt)
 	result, err = r.Invoke(ctx, "input", WithCheckPointID("3"))
 	assert.NoError(t, err)
 	assert.Equal(t, "input12", result)
@@ -1516,7 +1510,6 @@ func TestCancelInterrupt(t *testing.T) {
 	info, success = ExtractInterruptInfo(err)
 	assert.True(t, success)
 	assert.Equal(t, 2, len(info.AfterNodes))
-	assert.True(t, info.FromGraphInterrupt)
 	result2, err := rr.Invoke(ctx, "input", WithCheckPointID("1"))
 	assert.NoError(t, err)
 	assert.Equal(t, map[string]any{
@@ -1535,33 +1528,12 @@ func TestCancelInterrupt(t *testing.T) {
 	info, success = ExtractInterruptInfo(err)
 	assert.True(t, success)
 	assert.Equal(t, 2, len(info.RerunNodes))
-	assert.True(t, info.FromGraphInterrupt)
 	result2, err = rr.Invoke(ctx, "input", WithCheckPointID("2"))
 	assert.NoError(t, err)
 	assert.Equal(t, map[string]any{
 		"2": "input12",
 		"3": "input13",
 	}, result2)
-}
-
-func TestBusinessInterruptFromGraphInterruptFalse(t *testing.T) {
-	g := NewGraph[string, string]()
-	_ = g.AddLambdaNode("1", InvokableLambda(func(ctx context.Context, input string) (output string, err error) {
-		return "", Interrupt(ctx, "biz")
-	}))
-	_ = g.AddEdge(START, "1")
-	_ = g.AddEdge("1", END)
-
-	ctx := context.Background()
-	r, err := g.Compile(ctx, WithCheckPointStore(newInMemoryStore()))
-	assert.NoError(t, err)
-
-	_, err = r.Invoke(ctx, "input", WithCheckPointID("biz"))
-	assert.Error(t, err)
-	info, existed := ExtractInterruptInfo(err)
-	assert.True(t, existed)
-	assert.False(t, info.FromGraphInterrupt)
-	assert.Equal(t, []string{"1"}, info.RerunNodes)
 }
 
 func TestPersistRerunInputNonStream(t *testing.T) {

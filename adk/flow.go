@@ -68,6 +68,10 @@ func (a *flowAgent) deepCopy() *flowAgent {
 }
 
 // SetSubAgents sets sub-agents for the given agent and returns the updated agent.
+//
+// NOT RECOMMENDED: Agent transfer with full context sharing between agents has not proven
+// to be more effective empirically. Consider using ChatModelAgent with AgentTool
+// or DeepAgent instead for most multi-agent scenarios.
 func SetSubAgents(ctx context.Context, agent Agent, subAgents []Agent) (ResumableAgent, error) {
 	return setSubAgents(ctx, agent, subAgents)
 }
@@ -75,13 +79,22 @@ func SetSubAgents(ctx context.Context, agent Agent, subAgents []Agent) (Resumabl
 type AgentOption func(options *flowAgent)
 
 // WithDisallowTransferToParent prevents a sub-agent from transferring to its parent.
+//
+// NOT RECOMMENDED: Agent transfer with full context sharing between agents has not proven
+// to be more effective empirically. Consider using ChatModelAgent with AgentTool
+// or DeepAgent instead for most multi-agent scenarios.
 func WithDisallowTransferToParent() AgentOption {
 	return func(fa *flowAgent) {
 		fa.disallowTransferToParent = true
 	}
 }
 
-// WithHistoryRewriter sets a rewriter to transform conversation history.
+// WithHistoryRewriter sets a rewriter to transform conversation history
+// during agent transfers.
+//
+// NOT RECOMMENDED: Agent transfer with full context sharing between agents has not proven
+// to be more effective empirically. Consider using ChatModelAgent with AgentTool
+// or DeepAgent instead for most multi-agent scenarios.
 func WithHistoryRewriter(h HistoryRewriter) AgentOption {
 	return func(fa *flowAgent) {
 		fa.historyRewriter = h
@@ -108,6 +121,10 @@ func toFlowAgent(ctx context.Context, agent Agent, opts ...AgentOption) *flowAge
 }
 
 // AgentWithOptions wraps an agent with flow-specific options and returns it.
+//
+// NOT RECOMMENDED: Agent transfer with full context sharing between agents has not proven
+// to be more effective empirically. Consider using ChatModelAgent with AgentTool
+// or DeepAgent instead for most multi-agent scenarios.
 func AgentWithOptions(ctx context.Context, agent Agent, opts ...AgentOption) Agent {
 	return toFlowAgent(ctx, agent, opts...)
 }
@@ -448,6 +465,11 @@ func (a *flowAgent) Resume(ctx context.Context, info *ResumeInfo, opts ...AgentR
 	return wrapIterWithCancelCtx(wrapIterWithOnEnd(ctx, innerIter), cancelCtx)
 }
 
+// DeterministicTransferConfig is the configuration for AgentWithDeterministicTransferTo.
+//
+// NOT RECOMMENDED: Agent transfer with full context sharing between agents has not proven
+// to be more effective empirically. Consider using ChatModelAgent with AgentTool
+// or DeepAgent instead for most multi-agent scenarios.
 type DeterministicTransferConfig struct {
 	Agent        Agent
 	ToAgentNames []string
