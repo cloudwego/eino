@@ -835,10 +835,6 @@ func NewReplanner(_ context.Context, cfg *ReplannerConfig) (adk.Agent, error) {
 }
 
 // Config provides configuration options for creating a plan-execute-replan agent.
-//
-// NOT RECOMMENDED: Plan-execute is built on agent transfer with full context sharing,
-// which has not proven to be more effective empirically. Consider using
-// ChatModelAgent with AgentTool or DeepAgent instead for most multi-agent scenarios.
 type Config struct {
 	// Planner specifies the agent that generates the plan.
 	// You can use provided NewPlanner to create a planner agent.
@@ -863,10 +859,6 @@ type Config struct {
 // 2. Execution: Execute the first step of the plan
 // 3. Replanning: Evaluate progress and either complete the task or revise the plan
 // This approach enables complex problem-solving through iterative refinement.
-//
-// NOT RECOMMENDED: Plan-execute is built on agent transfer with full context sharing,
-// which has not proven to be more effective empirically. Consider using
-// ChatModelAgent with AgentTool or DeepAgent instead for most multi-agent scenarios.
 func New(ctx context.Context, cfg *Config) (adk.ResumableAgent, error) {
 	maxIterations := cfg.MaxIterations
 	if maxIterations <= 0 {
