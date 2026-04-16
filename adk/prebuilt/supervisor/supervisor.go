@@ -37,6 +37,11 @@ import (
 	"github.com/cloudwego/eino/adk"
 )
 
+// Config is the configuration for creating a supervisor-based multi-agent system.
+//
+// NOT RECOMMENDED: Supervisor is built on agent transfer with full context sharing,
+// which has not proven to be more effective empirically. Consider using
+// ChatModelAgent with AgentTool or DeepAgent instead for most multi-agent scenarios.
 type Config struct {
 	// Supervisor specifies the agent that will act as the supervisor, coordinating and managing the sub-agents.
 	Supervisor adk.Agent
@@ -89,6 +94,10 @@ func (s *supervisorContainer) Resume(ctx context.Context, info *adk.ResumeInfo, 
 // When used with Runner and callbacks, all agents within the supervisor structure will
 // share the same trace root, making it easy to observe the entire multi-agent execution
 // as a single logical unit.
+//
+// NOT RECOMMENDED: Supervisor is built on agent transfer with full context sharing,
+// which has not proven to be more effective empirically. Consider using
+// ChatModelAgent with AgentTool or DeepAgent instead for most multi-agent scenarios.
 func New(ctx context.Context, conf *Config) (adk.ResumableAgent, error) {
 	subAgents := make([]adk.Agent, 0, len(conf.SubAgents))
 	supervisorName := conf.Supervisor.Name(ctx)
