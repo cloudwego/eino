@@ -58,7 +58,8 @@ type stopSignal struct {
 	mu  sync.Mutex
 	gen uint64
 	// agentCancelOpts controls how the stop interacts with the running agent:
-	//   nil       → no cancel; the turn runs to completion (bare Stop)
+	//   nil       → no cancel intent; the turn runs to completion
+	//             (bare Stop, or UntilIdleFor without cancel opts)
 	//   empty     → CancelImmediate (WithImmediate)
 	//   non-empty → cancel with specific modes (WithGraceful, WithGracefulTimeout)
 	agentCancelOpts []AgentCancelOption
@@ -120,9 +121,15 @@ func (s *stopSignal) closeDone() {
 }
 
 // check returns the current generation and a snapshot of the cancel options.
+// Returns nil opts when no cancel intent has been set (e.g. UntilIdleFor without
+// WithGraceful/WithImmediate), preserving the nil vs empty-slice distinction
+// that tryCancel relies on.
 func (s *stopSignal) check() (uint64, []AgentCancelOption) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.agentCancelOpts == nil {
+		return s.gen, nil
+	}
 	return s.gen, append([]AgentCancelOption{}, s.agentCancelOpts...)
 }
 
@@ -931,15 +938,23 @@ func WithStopCause(cause string) StopOption {
 // wants to shut down the loop once there has been no work for a while, without
 // racing with concurrent Push calls.
 //
-// UntilIdleFor is combinable with other StopOptions in the same call.
-// For example, Stop(UntilIdleFor(30*time.Second), WithGraceful()) means
-// "after 30 s of idle, stop gracefully". If another Stop call is made
-// without UntilIdleFor (e.g. Stop(WithImmediate())), the loop shuts down
-// immediately, bypassing the idle wait.
+// UntilIdleFor does not impact a running agent. It only takes effect when the
+// loop is idle between turns. Cancel options (WithImmediate, WithGraceful,
+// WithGracefulTimeout) in the same Stop call are silently ignored — they are
+// meaningless alongside UntilIdleFor.
+//
+// To escalate after a prior UntilIdleFor, issue a separate Stop call:
+//
+//	loop.Stop(UntilIdleFor(30 * time.Second))  // wait for idle
+//	// ... later, if you need to abort immediately:
+//	loop.Stop(WithImmediate())                 // overrides the idle wait
 //
 // Only the first UntilIdleFor duration takes effect; subsequent calls with
 // a different duration are ignored. A Stop() call without UntilIdleFor always
 // shuts down the loop immediately regardless of any pending idle timer.
+//
+// UntilIdleFor is combinable with non-cancel StopOptions (WithSkipCheckpoint,
+// WithStopCause) in the same call.
 //
 // duration must be positive; passing a zero or negative value panics.
 func UntilIdleFor(duration time.Duration) StopOption {
@@ -1281,6 +1296,14 @@ func (l *TurnLoop[T]) Stop(opts ...StopOption) {
 		opt(cfg)
 	}
 
+	// UntilIdleFor is incompatible with cancel options (WithImmediate,
+	// WithGraceful, WithGracefulTimeout) in the same call. Cancel opts only
+	// make sense for an immediate or escalated stop; UntilIdleFor defers the
+	// stop until idle, and must not impact a running agent. Drop them silently.
+	if cfg.idleFor > 0 {
+		cfg.agentCancelOpts = nil
+	}
+
 	l.stopSig.signal(cfg)
 
 	if cfg.idleFor > 0 {
@@ -1545,7 +1568,7 @@ func (l *TurnLoop[T]) watchStopSignal(done <-chan struct{}, agentCancelFunc Agen
 			return
 		}
 		lastGen = gen
-		if opts == nil {
+		if opts == nil { // no cancel intent; see stopSignal.agentCancelOpts
 			return
 		}
 		_, contributed := agentCancelFunc(opts...)

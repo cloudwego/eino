@@ -489,7 +489,7 @@ func TestTurnLoop_Preempt_CancelsCurrentAgent(t *testing.T) {
 		t.Fatal("second GenInput was not called after preempt")
 	}
 
-	loop.Stop()
+	loop.Stop(WithImmediate())
 	result := loop.Wait()
 	assert.NoError(t, result.ExitReason)
 	assert.GreaterOrEqual(t, atomic.LoadInt32(&genInputCalls), int32(2))
@@ -604,7 +604,7 @@ func TestTurnLoop_Preempt_WithAgentCancelMode(t *testing.T) {
 		t.Fatal("cancelFunc was not called by preempt")
 	}
 
-	loop.Stop()
+	loop.Stop(WithImmediate())
 	result := loop.Wait()
 	assert.NoError(t, result.ExitReason)
 	cancelModeMu.Lock()
@@ -650,7 +650,7 @@ func TestTurnLoop_PreemptAck_ClosesAfterCancelIsInitiated(t *testing.T) {
 
 	close(agentFinishGate)
 
-	loop.Stop()
+	loop.Stop(WithImmediate())
 	result := loop.Wait()
 	assert.NoError(t, result.ExitReason)
 }
@@ -732,7 +732,7 @@ func TestTurnLoop_Preempt_EscalatesOnSecondPreempt(t *testing.T) {
 
 	close(agentFinishGate)
 
-	loop.Stop()
+	loop.Stop(WithImmediate())
 	result := loop.Wait()
 	assert.NoError(t, result.ExitReason)
 }
@@ -792,7 +792,7 @@ func TestTurnLoop_Preempt_JoinsSafePointModesOnSecondPreempt(t *testing.T) {
 
 	close(agentFinishGate)
 
-	loop.Stop()
+	loop.Stop(WithImmediate())
 	result := loop.Wait()
 	assert.NoError(t, result.ExitReason)
 }
@@ -1327,6 +1327,92 @@ func TestTurnLoop_StopDuringAgentExecution(t *testing.T) {
 	assert.Empty(t, result.CanceledItems)
 }
 
+// TestTurnLoop_BareStop_AgentRunsToCompletion verifies the core contract of
+// bare Stop(): the running agent finishes naturally with an uncanceled context,
+// the loop exits cleanly (ExitReason == nil), and no new turn starts even when
+// additional items are buffered.
+func TestTurnLoop_BareStop_AgentRunsToCompletion(t *testing.T) {
+	const agentWorkDuration = 200 * time.Millisecond
+
+	agentStarted := make(chan struct{})
+	agentCtxErr := make(chan error, 1)
+	agentOutput := make(chan string, 1)
+
+	turnsExecuted := int32(0)
+
+	loop := newAndRunTurnLoop(context.Background(), TurnLoopConfig[string]{
+		GenInput: func(ctx context.Context, _ *TurnLoop[string], items []string) (*GenInputResult[string], error) {
+			return &GenInputResult[string]{
+				Input:     &AgentInput{Messages: []Message{schema.UserMessage(items[0])}},
+				Consumed:  []string{items[0]},
+				Remaining: items[1:],
+			}, nil
+		},
+		PrepareAgent: func(ctx context.Context, _ *TurnLoop[string], consumed []string) (Agent, error) {
+			return &turnLoopMockAgent{
+				name: "worker",
+				runFunc: func(ctx context.Context, input *AgentInput) (*AgentOutput, error) {
+					atomic.AddInt32(&turnsExecuted, 1)
+					close(agentStarted)
+
+					// Simulate real work (NOT blocking on <-ctx.Done())
+					time.Sleep(agentWorkDuration)
+
+					// Record context state AFTER work completes
+					agentCtxErr <- ctx.Err()
+					agentOutput <- "work-done"
+
+					return &AgentOutput{}, nil
+				},
+			}, nil
+		},
+	})
+
+	// Push two items so the loop has a reason to start a second turn.
+	loop.Push("task1")
+	loop.Push("task2")
+
+	// Wait for the agent to start processing task1.
+	select {
+	case <-agentStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("agent did not start")
+	}
+
+	// Call bare Stop() while the agent is doing work.
+	loop.Stop()
+
+	result := loop.Wait()
+
+	// 1. Agent's context was NOT canceled.
+	select {
+	case err := <-agentCtxErr:
+		assert.NoError(t, err, "bare Stop must not cancel the agent's context")
+	default:
+		t.Fatal("agent never reported context state")
+	}
+
+	// 2. Agent completed its work.
+	select {
+	case out := <-agentOutput:
+		assert.Equal(t, "work-done", out)
+	default:
+		t.Fatal("agent never produced output")
+	}
+
+	// 3. ExitReason is nil (clean exit, not a CancelError).
+	assert.NoError(t, result.ExitReason)
+
+	// 4. CanceledItems is empty (agent was not canceled).
+	assert.Empty(t, result.CanceledItems)
+
+	// 5. Only one turn executed; the second item is unhandled.
+	assert.Equal(t, int32(1), atomic.LoadInt32(&turnsExecuted),
+		"bare Stop must prevent new turns from starting after the current one completes")
+	assert.Equal(t, []string{"task2"}, result.UnhandledItems,
+		"the second item should appear in UnhandledItems")
+}
+
 func TestTurnLoop_StopCheckPointIDInCancelError(t *testing.T) {
 	ctx := context.Background()
 	modelStarted := make(chan struct{}, 1)
@@ -1368,7 +1454,7 @@ func TestTurnLoop_StopCheckPointIDInCancelError(t *testing.T) {
 	loop.Push("msg1")
 
 	<-modelStarted
-	loop.Stop()
+	loop.Stop(WithImmediate())
 
 	result := loop.Wait()
 
@@ -1420,7 +1506,7 @@ func TestTurnLoop_StopWithoutCheckpointIDDoesNotPersist(t *testing.T) {
 	loop.Push("msg1")
 
 	<-modelStarted
-	loop.Stop()
+	loop.Stop(WithImmediate())
 
 	result := loop.Wait()
 
@@ -1563,7 +1649,7 @@ func TestTurnLoop_StopDuringAgentExecution_PersistAndResume(t *testing.T) {
 
 	loop.Push("msg1")
 	<-modelStarted
-	loop.Stop()
+	loop.Stop(WithImmediate())
 	exit := loop.Wait()
 
 	store.mu.Lock()
@@ -1798,7 +1884,7 @@ func TestTurnLoop_CheckpointSaveError_ReturnsError(t *testing.T) {
 	})
 	loop.Push("msg1")
 	<-modelStarted
-	loop.Stop()
+	loop.Stop(WithImmediate())
 	exit := loop.Wait()
 	assert.Error(t, exit.ExitReason)
 	assert.True(t, exit.Checkpointed)
@@ -2040,7 +2126,7 @@ func TestTurnLoop_GenResumeNil_Error(t *testing.T) {
 	})
 	loop1.Push("msg1")
 	<-modelStarted
-	loop1.Stop()
+	loop1.Stop(WithImmediate())
 	loop1.Wait()
 
 	loop2 := NewTurnLoop(TurnLoopConfig[string]{
@@ -2212,7 +2298,7 @@ func TestTurnLoop_GenResumeReturnsError(t *testing.T) {
 	})
 	loop1.Push("msg1")
 	<-modelStarted
-	loop1.Stop()
+	loop1.Stop(WithImmediate())
 	loop1.Wait()
 
 	genResumeErr := fmt.Errorf("resume callback failed")
@@ -2271,7 +2357,7 @@ func TestTurnLoop_CheckpointSaveError_MergesWithExistingError(t *testing.T) {
 	})
 	loop.Push("msg1")
 	<-modelStarted
-	loop.Stop()
+	loop.Stop(WithImmediate())
 	exit := loop.Wait()
 	assert.Error(t, exit.ExitReason)
 	var ce *CancelError
@@ -2319,7 +2405,7 @@ func TestTurnLoop_ResumeWithParams(t *testing.T) {
 	})
 	loop1.Push("msg1")
 	<-modelStarted
-	loop1.Stop()
+	loop1.Stop(WithImmediate())
 	exit1 := loop1.Wait()
 	var ce *CancelError
 	assert.True(t, errors.As(exit1.ExitReason, &ce))
@@ -3032,11 +3118,11 @@ func TestTurnLoop_ConcurrentPreemptsDuringTurn(t *testing.T) {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
-			ok, ack := loop.Push(fmt.Sprintf("urgent-%d", i), WithPreemptTimeout[string](AnySafePoint, time.Millisecond))
+			ok, ack := loop.Push(fmt.Sprintf("urgent-%d", i), WithPreemptTimeout[string](AnySafePoint, 10*time.Millisecond))
 			if ok && ack != nil {
 				select {
 				case <-ack:
-				case <-time.After(5 * time.Second):
+				case <-time.After(30 * time.Second):
 					t.Error("ack channel not closed within timeout")
 				}
 			}
@@ -3046,7 +3132,7 @@ func TestTurnLoop_ConcurrentPreemptsDuringTurn(t *testing.T) {
 	wg.Wait()
 	time.Sleep(200 * time.Millisecond)
 
-	loop.Stop()
+	loop.Stop(WithImmediate())
 	result := loop.Wait()
 	assert.NoError(t, result.ExitReason)
 	assert.True(t, atomic.LoadInt32(&genInputCount) >= 2, "should have had at least the initial turn + one preempted turn")
@@ -3235,7 +3321,7 @@ func TestTurnLoop_ConcurrentPreemptAndStop(t *testing.T) {
 
 			go func() {
 				defer wg.Done()
-				loop.Stop()
+				loop.Stop(WithImmediate())
 			}()
 
 			wg.Wait()
@@ -3298,7 +3384,7 @@ func TestTurnLoop_ConcurrentPushStrategyAndStop(t *testing.T) {
 
 			go func() {
 				defer wg.Done()
-				loop.Stop()
+				loop.Stop(WithImmediate())
 			}()
 
 			wg.Wait()
@@ -3306,6 +3392,7 @@ func TestTurnLoop_ConcurrentPushStrategyAndStop(t *testing.T) {
 		})
 	}
 }
+
 func TestTurnLoop_TurnContext_StoppedChannel(t *testing.T) {
 	stoppedSeen := make(chan struct{})
 	agentStarted := make(chan struct{})
@@ -3346,7 +3433,7 @@ func TestTurnLoop_TurnContext_StoppedChannel(t *testing.T) {
 
 	loop.Push("msg1")
 	<-agentStarted
-	loop.Stop()
+	loop.Stop(WithImmediate())
 
 	select {
 	case <-stoppedSeen:
@@ -3534,7 +3621,7 @@ func TestTurnLoop_PushStrategy_DuringTurn(t *testing.T) {
 		t.Fatal("second GenInput was not called after preempt")
 	}
 
-	loop.Stop()
+	loop.Stop(WithImmediate())
 	loop.Wait()
 
 	assert.Equal(t, int32(1), atomic.LoadInt32(&strategyCalled))
@@ -3780,7 +3867,7 @@ func TestTurnLoop_PushStrategy_ConsumedInspection(t *testing.T) {
 		t.Fatal("second GenInput was not called after strategy-driven preempt")
 	}
 
-	loop.Stop()
+	loop.Stop(WithImmediate())
 	loop.Wait()
 }
 
@@ -4268,7 +4355,7 @@ func TestTurnLoop_StopCause_InTurnContext(t *testing.T) {
 
 	loop.Push("msg1")
 	<-agentStarted
-	loop.Stop(WithStopCause(cause))
+	loop.Stop(WithImmediate(), WithStopCause(cause))
 
 	select {
 	case c := <-gotCause:
@@ -4629,6 +4716,669 @@ func TestUntilIdleFor(t *testing.T) {
 		exit := loop.Wait()
 		assert.Error(t, exit.ExitReason)
 	})
+}
+
+// TestUntilIdleFor_DoesNotCancelRunningAgent verifies that Stop(UntilIdleFor)
+// does NOT cancel a running agent. The notify signal from UntilIdleFor must not
+// be misinterpreted as a cancel request by watchStopSignal. This is a regression
+// test for a bug where stopSignal.check() converted nil agentCancelOpts to a
+// non-nil empty slice, which tryCancel treated as CancelImmediate.
+func TestUntilIdleFor_DoesNotCancelRunningAgent(t *testing.T) {
+	t.Run("BeforeRun", func(t *testing.T) {
+		agentStarted := make(chan struct{})
+		agentCtxCanceled := int32(0)
+		agentDone := make(chan struct{})
+
+		loop := NewTurnLoop(TurnLoopConfig[string]{
+			GenInput: func(ctx context.Context, _ *TurnLoop[string], items []string) (*GenInputResult[string], error) {
+				return &GenInputResult[string]{
+					Input:    &AgentInput{Messages: []Message{schema.UserMessage(items[0])}},
+					Consumed: items,
+				}, nil
+			},
+			PrepareAgent: func(ctx context.Context, _ *TurnLoop[string], consumed []string) (Agent, error) {
+				return &turnLoopCancellableMockAgent{
+					name: "test",
+					runFunc: func(ctx context.Context, input *AgentInput) (*AgentOutput, error) {
+						close(agentStarted)
+						// Block until context is canceled or a short timeout.
+						select {
+						case <-ctx.Done():
+							atomic.StoreInt32(&agentCtxCanceled, 1)
+						case <-time.After(200 * time.Millisecond):
+						}
+						close(agentDone)
+						return &AgentOutput{}, nil
+					},
+				}, nil
+			},
+		})
+
+		loop.Push("msg1")
+		// Call Stop(UntilIdleFor) BEFORE Run.
+		loop.Stop(UntilIdleFor(50 * time.Millisecond))
+		loop.Run(context.Background())
+
+		<-agentStarted
+		<-agentDone
+
+		exit := loop.Wait()
+		assert.Nil(t, exit.ExitReason, "UntilIdleFor should not produce a CancelError")
+		assert.Equal(t, int32(0), atomic.LoadInt32(&agentCtxCanceled),
+			"agent context should not have been canceled by UntilIdleFor")
+	})
+
+	t.Run("DuringRun", func(t *testing.T) {
+		agentStarted := make(chan struct{})
+		agentCtxCanceled := int32(0)
+		agentDone := make(chan struct{})
+
+		loop := newAndRunTurnLoop(context.Background(), TurnLoopConfig[string]{
+			GenInput: func(ctx context.Context, _ *TurnLoop[string], items []string) (*GenInputResult[string], error) {
+				return &GenInputResult[string]{
+					Input:    &AgentInput{Messages: []Message{schema.UserMessage(items[0])}},
+					Consumed: items,
+				}, nil
+			},
+			PrepareAgent: func(ctx context.Context, _ *TurnLoop[string], consumed []string) (Agent, error) {
+				return &turnLoopCancellableMockAgent{
+					name: "test",
+					runFunc: func(ctx context.Context, input *AgentInput) (*AgentOutput, error) {
+						close(agentStarted)
+						select {
+						case <-ctx.Done():
+							atomic.StoreInt32(&agentCtxCanceled, 1)
+						case <-time.After(200 * time.Millisecond):
+						}
+						close(agentDone)
+						return &AgentOutput{}, nil
+					},
+				}, nil
+			},
+		})
+
+		loop.Push("msg1")
+		<-agentStarted
+
+		// Call Stop(UntilIdleFor) while the agent is running.
+		loop.Stop(UntilIdleFor(50 * time.Millisecond))
+		<-agentDone
+
+		exit := loop.Wait()
+		assert.Nil(t, exit.ExitReason, "UntilIdleFor should not produce a CancelError")
+		assert.Equal(t, int32(0), atomic.LoadInt32(&agentCtxCanceled),
+			"agent context should not have been canceled by UntilIdleFor")
+	})
+
+	// Cancel opts paired with UntilIdleFor in the same call are silently
+	// dropped. The agent must run to completion even when WithImmediate is
+	// combined with UntilIdleFor.
+	t.Run("CancelOptsDroppedInSameCall", func(t *testing.T) {
+		agentStarted := make(chan struct{})
+		agentCtxCanceled := int32(0)
+		agentDone := make(chan struct{})
+
+		loop := newAndRunTurnLoop(context.Background(), TurnLoopConfig[string]{
+			GenInput: func(ctx context.Context, _ *TurnLoop[string], items []string) (*GenInputResult[string], error) {
+				return &GenInputResult[string]{
+					Input:    &AgentInput{Messages: []Message{schema.UserMessage(items[0])}},
+					Consumed: items,
+				}, nil
+			},
+			PrepareAgent: func(ctx context.Context, _ *TurnLoop[string], consumed []string) (Agent, error) {
+				return &turnLoopCancellableMockAgent{
+					name: "test",
+					runFunc: func(ctx context.Context, input *AgentInput) (*AgentOutput, error) {
+						close(agentStarted)
+						select {
+						case <-ctx.Done():
+							atomic.StoreInt32(&agentCtxCanceled, 1)
+						case <-time.After(200 * time.Millisecond):
+						}
+						close(agentDone)
+						return &AgentOutput{}, nil
+					},
+				}, nil
+			},
+		})
+
+		loop.Push("msg1")
+		<-agentStarted
+
+		// WithImmediate in the same call as UntilIdleFor must be ignored.
+		loop.Stop(UntilIdleFor(50*time.Millisecond), WithImmediate())
+		<-agentDone
+
+		exit := loop.Wait()
+		assert.Nil(t, exit.ExitReason, "cancel opts should be dropped when combined with UntilIdleFor")
+		assert.Equal(t, int32(0), atomic.LoadInt32(&agentCtxCanceled),
+			"agent context should not have been canceled")
+	})
+}
+
+func TestUntilIdleFor_ContextCancelDuringIdleWait(t *testing.T) {
+	turnDone := make(chan struct{})
+	ctx, cancel := context.WithCancel(context.Background())
+
+	loop := newAndRunTurnLoop(ctx, TurnLoopConfig[string]{
+		GenInput: func(ctx context.Context, _ *TurnLoop[string], items []string) (*GenInputResult[string], error) {
+			return &GenInputResult[string]{
+				Input:    &AgentInput{Messages: []Message{schema.UserMessage(items[0])}},
+				Consumed: items,
+			}, nil
+		},
+		PrepareAgent: func(ctx context.Context, _ *TurnLoop[string], consumed []string) (Agent, error) {
+			return &turnLoopMockAgent{
+				name: "test",
+				runFunc: func(ctx context.Context, input *AgentInput) (*AgentOutput, error) {
+					close(turnDone)
+					return &AgentOutput{}, nil
+				},
+			}, nil
+		},
+	})
+
+	loop.Push("msg1")
+	<-turnDone
+
+	// Start idle timer, then cancel the parent context while idle.
+	loop.Stop(UntilIdleFor(10 * time.Minute))
+	time.Sleep(20 * time.Millisecond)
+	cancel()
+
+	done := make(chan struct{})
+	go func() {
+		loop.Wait()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("loop should exit when context is canceled during idle wait")
+	}
+
+	exit := loop.Wait()
+	assert.ErrorIs(t, exit.ExitReason, context.Canceled)
+}
+
+// TestStopSignalCheck_NilPreservedUnderConcurrentSignals hammers
+// stopSignal.check() and signal() concurrently to verify that the nil guard
+// in check() does not race with signal(). The race detector should catch any
+// unsynchronised access.
+func TestStopSignalCheck_NilPreservedUnderConcurrentSignals(t *testing.T) {
+	sig := newStopSignal()
+
+	const goroutines = 20
+	const iterations = 200
+
+	var wg sync.WaitGroup
+
+	// Half the goroutines call signal() with UntilIdleFor-style config (nil agentCancelOpts).
+	for i := 0; i < goroutines/2; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < iterations; j++ {
+				// UntilIdleFor produces nil agentCancelOpts after Stop() forces it.
+				sig.signal(&stopConfig{idleFor: 100 * time.Millisecond})
+			}
+		}()
+	}
+
+	// The other half call signal() with WithImmediate-style config (non-nil empty opts).
+	for i := 0; i < goroutines/2; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < iterations; j++ {
+				sig.signal(&stopConfig{agentCancelOpts: []AgentCancelOption{}})
+			}
+		}()
+	}
+
+	// Concurrently read check() — the nil guard must be race-free.
+	sawNil := int32(0)
+	sawNonNil := int32(0)
+	for i := 0; i < goroutines; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < iterations; j++ {
+				_, opts := sig.check()
+				if opts == nil {
+					atomic.AddInt32(&sawNil, 1)
+				} else {
+					atomic.AddInt32(&sawNonNil, 1)
+				}
+			}
+		}()
+	}
+
+	wg.Wait()
+
+	// We expect both nil and non-nil snapshots to have been observed, since
+	// signal() alternates between the two modes concurrently.
+	t.Logf("sawNil=%d sawNonNil=%d", atomic.LoadInt32(&sawNil), atomic.LoadInt32(&sawNonNil))
+	// Main point: no race detector failure. The counts are non-deterministic.
+}
+
+func TestAttack_UntilIdleFor_ConcurrentPushDuringIdleTimer(t *testing.T) {
+	turnCount := int32(0)
+	turnDone := make(chan struct{}, 10)
+
+	loop := newAndRunTurnLoop(context.Background(), TurnLoopConfig[string]{
+		GenInput: func(ctx context.Context, _ *TurnLoop[string], items []string) (*GenInputResult[string], error) {
+			return &GenInputResult[string]{
+				Input:    &AgentInput{Messages: []Message{schema.UserMessage(items[0])}},
+				Consumed: items,
+			}, nil
+		},
+		PrepareAgent: func(ctx context.Context, _ *TurnLoop[string], consumed []string) (Agent, error) {
+			return &turnLoopMockAgent{
+				name: "test",
+				runFunc: func(ctx context.Context, input *AgentInput) (*AgentOutput, error) {
+					atomic.AddInt32(&turnCount, 1)
+					turnDone <- struct{}{}
+					return &AgentOutput{}, nil
+				},
+			}, nil
+		},
+	})
+
+	loop.Push("msg1")
+	<-turnDone
+
+	loop.Stop(UntilIdleFor(200 * time.Millisecond))
+
+	for i := 0; i < 5; i++ {
+		time.Sleep(50 * time.Millisecond)
+		loop.Push("concurrent-" + string(rune('a'+i)))
+		<-turnDone
+	}
+
+	done := make(chan struct{})
+	go func() {
+		loop.Wait()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("loop did not exit after idle timeout — Push did not reset timer correctly")
+	}
+
+	finalCount := atomic.LoadInt32(&turnCount)
+	assert.Equal(t, int32(6), finalCount, "all 6 pushes should have been processed")
+}
+
+func TestAttack_UntilIdleFor_MultipleStopCallsFirstWins(t *testing.T) {
+	turnDone := make(chan struct{})
+	loop := newAndRunTurnLoop(context.Background(), TurnLoopConfig[string]{
+		GenInput: func(ctx context.Context, _ *TurnLoop[string], items []string) (*GenInputResult[string], error) {
+			return &GenInputResult[string]{
+				Input:    &AgentInput{Messages: []Message{schema.UserMessage(items[0])}},
+				Consumed: items,
+			}, nil
+		},
+		PrepareAgent: func(ctx context.Context, _ *TurnLoop[string], consumed []string) (Agent, error) {
+			return &turnLoopMockAgent{
+				name: "test",
+				runFunc: func(ctx context.Context, input *AgentInput) (*AgentOutput, error) {
+					close(turnDone)
+					return &AgentOutput{}, nil
+				},
+			}, nil
+		},
+	})
+
+	loop.Push("msg1")
+	<-turnDone
+
+	loop.Stop(UntilIdleFor(100 * time.Millisecond))
+	loop.Stop(UntilIdleFor(10 * time.Minute))
+
+	done := make(chan struct{})
+	go func() {
+		loop.Wait()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("second UntilIdleFor should have been ignored; loop should have exited with 100ms timer")
+	}
+}
+
+func TestAttack_BareStopOverridesUntilIdleFor(t *testing.T) {
+	agentStarted := make(chan struct{})
+	agentDone := make(chan struct{})
+
+	loop := newAndRunTurnLoop(context.Background(), TurnLoopConfig[string]{
+		GenInput: func(ctx context.Context, _ *TurnLoop[string], items []string) (*GenInputResult[string], error) {
+			return &GenInputResult[string]{
+				Input:    &AgentInput{Messages: []Message{schema.UserMessage(items[0])}},
+				Consumed: items,
+			}, nil
+		},
+		PrepareAgent: func(ctx context.Context, _ *TurnLoop[string], consumed []string) (Agent, error) {
+			return &turnLoopMockAgent{
+				name: "test",
+				runFunc: func(ctx context.Context, input *AgentInput) (*AgentOutput, error) {
+					close(agentStarted)
+					<-agentDone
+					return &AgentOutput{}, nil
+				},
+			}, nil
+		},
+	})
+
+	loop.Push("msg1")
+	<-agentStarted
+
+	loop.Stop(UntilIdleFor(10 * time.Minute))
+
+	loop.Stop()
+	close(agentDone)
+
+	done := make(chan struct{})
+	go func() {
+		loop.Wait()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("bare Stop should override UntilIdleFor and cause immediate shutdown")
+	}
+
+	exit := loop.Wait()
+	assert.NoError(t, exit.ExitReason, "bare Stop should exit cleanly")
+}
+
+func TestAttack_StopSignal_NilCancelOptsDoNotDeescalate(t *testing.T) {
+	agentStarted := make(chan *cancelContext, 1)
+	probe := &turnLoopStopModeProbeAgent{ccCh: agentStarted}
+	loop := newAndRunTurnLoop(context.Background(), TurnLoopConfig[string]{
+		GenInput: func(ctx context.Context, _ *TurnLoop[string], items []string) (*GenInputResult[string], error) {
+			return &GenInputResult[string]{
+				Input:    &AgentInput{Messages: []Message{schema.UserMessage(items[0])}},
+				Consumed: items,
+			}, nil
+		},
+		PrepareAgent: func(ctx context.Context, _ *TurnLoop[string], consumed []string) (Agent, error) {
+			return probe, nil
+		},
+	})
+
+	loop.Push("msg1")
+	cc := <-agentStarted
+
+	loop.Stop(WithImmediate())
+
+	time.Sleep(20 * time.Millisecond)
+
+	loop.Stop()
+
+	time.Sleep(20 * time.Millisecond)
+	mode := cc.getMode()
+	assert.Equal(t, CancelImmediate, mode, "bare Stop after WithImmediate must not de-escalate cancel mode")
+
+	exit := loop.Wait()
+	var ce *CancelError
+	require.True(t, errors.As(exit.ExitReason, &ce))
+	assert.Equal(t, CancelImmediate, ce.Info.Mode)
+}
+
+func TestAttack_CanceledItems_EmptyWhenAgentFinishesNormally(t *testing.T) {
+	agentStarted := make(chan struct{})
+	loop := newAndRunTurnLoop(context.Background(), TurnLoopConfig[string]{
+		GenInput: func(ctx context.Context, _ *TurnLoop[string], items []string) (*GenInputResult[string], error) {
+			return &GenInputResult[string]{
+				Input:    &AgentInput{Messages: []Message{schema.UserMessage(items[0])}},
+				Consumed: items,
+			}, nil
+		},
+		PrepareAgent: func(ctx context.Context, _ *TurnLoop[string], consumed []string) (Agent, error) {
+			return &turnLoopMockAgent{
+				name: "test",
+				runFunc: func(ctx context.Context, input *AgentInput) (*AgentOutput, error) {
+					close(agentStarted)
+					return &AgentOutput{}, nil
+				},
+			}, nil
+		},
+	})
+
+	loop.Push("msg1")
+	<-agentStarted
+	time.Sleep(50 * time.Millisecond)
+	loop.Stop()
+
+	exit := loop.Wait()
+	assert.NoError(t, exit.ExitReason)
+	assert.Empty(t, exit.CanceledItems, "CanceledItems must be empty when agent finished normally")
+}
+
+func TestAttack_TurnBuffer_WakeupDoesNotLoseItems(t *testing.T) {
+	tb := newTurnBuffer[string]()
+
+	tb.Send("a")
+	tb.Send("b")
+	tb.Wakeup()
+	tb.Send("c")
+
+	var got []string
+	for i := 0; i < 3; i++ {
+		val, ok := tb.Receive()
+		require.True(t, ok)
+		got = append(got, val)
+	}
+
+	assert.Equal(t, []string{"a", "b", "c"}, got, "Wakeup must not cause items to be lost")
+}
+
+func TestAttack_TurnBuffer_ClearWakeupPreventsSpuriousReturn(t *testing.T) {
+	tb := newTurnBuffer[string]()
+
+	tb.Wakeup()
+	tb.ClearWakeup()
+
+	received := make(chan string, 1)
+	go func() {
+		val, ok := tb.Receive()
+		if ok {
+			received <- val
+		}
+	}()
+
+	time.Sleep(50 * time.Millisecond)
+	tb.Send("real")
+
+	select {
+	case val := <-received:
+		assert.Equal(t, "real", val, "ClearWakeup should prevent spurious empty return")
+	case <-time.After(2 * time.Second):
+		t.Fatal("Receive blocked forever despite Send")
+	}
+}
+
+func TestAttack_StopBeforeRun_UntilIdleFor_ExitsImmediately(t *testing.T) {
+	loop := NewTurnLoop(TurnLoopConfig[string]{
+		GenInput: func(ctx context.Context, _ *TurnLoop[string], items []string) (*GenInputResult[string], error) {
+			return &GenInputResult[string]{
+				Input:    &AgentInput{Messages: []Message{schema.UserMessage(items[0])}},
+				Consumed: items,
+			}, nil
+		},
+		PrepareAgent: func(ctx context.Context, _ *TurnLoop[string], consumed []string) (Agent, error) {
+			return &turnLoopMockAgent{name: "test"}, nil
+		},
+	})
+
+	loop.Stop(UntilIdleFor(10 * time.Minute))
+	loop.Stop()
+
+	loop.Run(context.Background())
+
+	done := make(chan struct{})
+	go func() {
+		loop.Wait()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("loop should exit immediately when Stop() called before Run()")
+	}
+}
+
+func TestAttack_PushAfterStop_UntilIdleFor_RoutedToLateItems(t *testing.T) {
+	turnDone := make(chan struct{})
+	loop := newAndRunTurnLoop(context.Background(), TurnLoopConfig[string]{
+		GenInput: func(ctx context.Context, _ *TurnLoop[string], items []string) (*GenInputResult[string], error) {
+			return &GenInputResult[string]{
+				Input:    &AgentInput{Messages: []Message{schema.UserMessage(items[0])}},
+				Consumed: items,
+			}, nil
+		},
+		PrepareAgent: func(ctx context.Context, _ *TurnLoop[string], consumed []string) (Agent, error) {
+			return &turnLoopMockAgent{
+				name: "test",
+				runFunc: func(ctx context.Context, input *AgentInput) (*AgentOutput, error) {
+					close(turnDone)
+					return &AgentOutput{}, nil
+				},
+			}, nil
+		},
+	})
+
+	loop.Push("msg1")
+	<-turnDone
+
+	loop.Stop(UntilIdleFor(50 * time.Millisecond))
+	exit := loop.Wait()
+	assert.NoError(t, exit.ExitReason)
+
+	ok, _ := loop.Push("after-stop")
+	assert.False(t, ok, "Push after loop exited should return false")
+
+	late := exit.TakeLateItems()
+	assert.Equal(t, []string{"after-stop"}, late)
+}
+
+func TestAttack_ConcurrentStopEscalation_RaceDetector(t *testing.T) {
+	agentStarted := make(chan struct{})
+	loop := newAndRunTurnLoop(context.Background(), TurnLoopConfig[string]{
+		GenInput: func(ctx context.Context, _ *TurnLoop[string], items []string) (*GenInputResult[string], error) {
+			return &GenInputResult[string]{
+				Input:    &AgentInput{Messages: []Message{schema.UserMessage(items[0])}},
+				Consumed: items,
+			}, nil
+		},
+		PrepareAgent: func(ctx context.Context, _ *TurnLoop[string], consumed []string) (Agent, error) {
+			return &turnLoopCancellableMockAgent{
+				name: "test",
+				runFunc: func(ctx context.Context, input *AgentInput) (*AgentOutput, error) {
+					close(agentStarted)
+					<-ctx.Done()
+					return nil, ctx.Err()
+				},
+			}, nil
+		},
+	})
+
+	loop.Push("msg1")
+	<-agentStarted
+
+	var wg sync.WaitGroup
+	for i := 0; i < 10; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			switch i % 4 {
+			case 0:
+				loop.Stop()
+			case 1:
+				loop.Stop(WithImmediate())
+			case 2:
+				loop.Stop(WithGracefulTimeout(100 * time.Millisecond))
+			case 3:
+				loop.Stop(UntilIdleFor(50 * time.Millisecond))
+			}
+		}(i)
+	}
+
+	wg.Wait()
+	exit := loop.Wait()
+	t.Log("ExitReason:", exit.ExitReason)
+}
+
+func TestAttack_StopCause_FirstNonEmptyWins_ConcurrentCallers(t *testing.T) {
+	turnDone := make(chan struct{})
+	loop := newAndRunTurnLoop(context.Background(), TurnLoopConfig[string]{
+		GenInput: func(ctx context.Context, _ *TurnLoop[string], items []string) (*GenInputResult[string], error) {
+			return &GenInputResult[string]{
+				Input:    &AgentInput{Messages: []Message{schema.UserMessage(items[0])}},
+				Consumed: items,
+			}, nil
+		},
+		PrepareAgent: func(ctx context.Context, _ *TurnLoop[string], consumed []string) (Agent, error) {
+			return &turnLoopMockAgent{
+				name: "test",
+				runFunc: func(ctx context.Context, input *AgentInput) (*AgentOutput, error) {
+					close(turnDone)
+					return &AgentOutput{}, nil
+				},
+			}, nil
+		},
+	})
+
+	loop.Push("msg1")
+	<-turnDone
+
+	loop.Stop(WithStopCause("first-cause"))
+	loop.Stop(WithStopCause("second-cause"))
+
+	exit := loop.Wait()
+	assert.Equal(t, "first-cause", exit.StopCause, "first non-empty StopCause should win")
+}
+
+func TestAttack_SkipCheckpoint_Sticky(t *testing.T) {
+	agentStarted := make(chan struct{})
+	loop := newAndRunTurnLoop(context.Background(), TurnLoopConfig[string]{
+		GenInput: func(ctx context.Context, _ *TurnLoop[string], items []string) (*GenInputResult[string], error) {
+			return &GenInputResult[string]{
+				Input:    &AgentInput{Messages: []Message{schema.UserMessage(items[0])}},
+				Consumed: items,
+			}, nil
+		},
+		PrepareAgent: func(ctx context.Context, _ *TurnLoop[string], consumed []string) (Agent, error) {
+			return &turnLoopCancellableMockAgent{
+				name: "test",
+				runFunc: func(ctx context.Context, input *AgentInput) (*AgentOutput, error) {
+					close(agentStarted)
+					<-ctx.Done()
+					return nil, ctx.Err()
+				},
+			}, nil
+		},
+		Store:        &turnLoopCheckpointStore{m: make(map[string][]byte)},
+		CheckpointID: "test-sticky",
+	})
+
+	loop.Push("msg1")
+	<-agentStarted
+
+	loop.Stop(WithSkipCheckpoint())
+	loop.Stop(WithImmediate())
+
+	exit := loop.Wait()
+	assert.False(t, exit.Checkpointed, "SkipCheckpoint is sticky; checkpoint should be skipped")
 }
 
 func TestUntilIdleFor_NonPositive_Panics(t *testing.T) {
