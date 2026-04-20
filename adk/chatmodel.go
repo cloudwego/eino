@@ -193,8 +193,7 @@ func newDefaultGenModelInput[M messageType]() TypedGenModelInput[M] {
 			return msgs, nil
 		})).(TypedGenModelInput[M])
 	default:
-		// unreachable given messageType constraint
-		return nil
+		panic("unreachable: unknown messageType")
 	}
 }
 

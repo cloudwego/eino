@@ -496,6 +496,6 @@ func concatMessageStream[M messageType](stream *schema.StreamReader[M]) (M, erro
 		}
 		return any(result).(M), nil
 	default:
-		return zero, fmt.Errorf("unsupported message type for stream concatenation")
+		panic("unreachable: unknown messageType")
 	}
 }

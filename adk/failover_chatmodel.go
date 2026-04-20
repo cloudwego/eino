@@ -528,6 +528,6 @@ func typedConsumeStream[M messageType](stream *schema.StreamReader[M]) (M, error
 		}
 		return zero, nil
 	default:
-		return zero, fmt.Errorf("unsupported message type for stream consumption")
+		panic("unreachable: unknown messageType")
 	}
 }
