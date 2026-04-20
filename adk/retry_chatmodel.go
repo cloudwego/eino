@@ -21,7 +21,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
 	"math/rand"
 	"time"
 
@@ -202,7 +201,6 @@ func (r *retryModelWrapper) Generate(ctx context.Context, input []*schema.Messag
 
 		lastErr = err
 		if attempt < r.config.MaxRetries {
-			log.Printf("retrying ChatModel.Generate (attempt %d/%d): %v", attempt+1, r.config.MaxRetries, err)
 			time.Sleep(backoffFunc(ctx, attempt+1))
 		}
 	}
@@ -243,7 +241,6 @@ func (r *retryModelWrapper) Stream(ctx context.Context, input []*schema.Message,
 			}
 			lastErr = err
 			if attempt < r.config.MaxRetries {
-				log.Printf("retrying ChatModel.Stream (attempt %d/%d): %v", attempt+1, r.config.MaxRetries, err)
 				time.Sleep(backoffFunc(ctx, attempt+1))
 			}
 			continue
@@ -265,7 +262,6 @@ func (r *retryModelWrapper) Stream(ctx context.Context, input []*schema.Message,
 
 		lastErr = streamErr
 		if attempt < r.config.MaxRetries {
-			log.Printf("retrying ChatModel.Stream (attempt %d/%d): %v", attempt+1, r.config.MaxRetries, streamErr)
 			time.Sleep(backoffFunc(ctx, attempt+1))
 		}
 	}
