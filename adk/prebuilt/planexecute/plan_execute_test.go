@@ -1113,7 +1113,7 @@ func TestWithCancel_PlanExecute_DuringExecution(t *testing.T) {
 
 	time.Sleep(50 * time.Millisecond)
 
-	// Cancel should NOT return ErrExecutionCompleted
+	// Cancel should NOT return ErrExecutionEnded
 	handle, _ := cancelFn()
 	err = handle.Wait()
 	assert.NoError(t, err, "Cancel during executor should succeed")

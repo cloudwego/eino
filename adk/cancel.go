@@ -56,8 +56,8 @@ const (
 	// Use WithRecursive to propagate the cancel to all descendants — whichever
 	// ChatModel finishes first triggers the cancel.
 	CancelAfterChatModel CancelMode = 1 << iota
-	// CancelAfterToolCalls cancels after the root agent's next set of concurrent
-	// tool calls completes. By default, only the root agent checks this safe-point.
+	// CancelAfterToolCalls cancels after the root agent's next set of tool calls
+	// completes. By default, only the root agent checks this safe-point.
 	// Use WithRecursive to propagate to all descendants.
 	CancelAfterToolCalls
 )
@@ -75,7 +75,7 @@ type CancelHandle struct {
 //     was absorbed into CancelError while cancellation was active
 //   - ErrCancelTimeout: the requested safe-point cancellation timed out and was
 //     escalated to immediate cancellation
-//   - ErrExecutionCompleted: the execution finished before cancellation took effect,
+//   - ErrExecutionEnded: the execution ended before cancellation took effect,
 //     meaning the stream drained to completion without any interrupt
 func (h *CancelHandle) Wait() error {
 	return h.wait()
@@ -110,9 +110,9 @@ func WithAgentCancelMode(mode CancelMode) AgentCancelOption {
 // WithAgentCancelTimeout sets a timeout for the cancel operation.
 // This only applies to safe-point modes (CancelAfterChatModel, CancelAfterToolCalls):
 // if the safe-point hasn't fired within this duration, the cancel escalates to
-// an immediate graph interrupt.
-// For CancelImmediate this timeout is ignored — the graph interrupt fires
-// immediately with timeout=0.
+// CancelImmediate. The escalated cancel still saves a checkpoint, so the execution
+// can be resumed via Runner.Resume or Runner.ResumeWithParams.
+// For CancelImmediate this timeout is ignored — the cancel fires immediately.
 func WithAgentCancelTimeout(timeout time.Duration) AgentCancelOption {
 	return func(config *agentCancelConfig) {
 		config.Timeout = &timeout
@@ -125,6 +125,11 @@ func WithAgentCancelTimeout(timeout time.Duration) AgentCancelOption {
 //   - CancelAfterChatModel / CancelAfterToolCalls: descendants check their own safe-points.
 //   - CancelImmediate: descendants receive explicit immediate-cancel signals for
 //     clean teardown; the root uses a grace period to collect child interrupts.
+//
+// With recursive cancellation, each descendant agent also triggers cancellation
+// and cascades its interrupt information upward. The root agent ultimately
+// produces a complete checkpoint that includes descendant checkpoints, enabling
+// resumption from the exact point where each descendant was interrupted.
 //
 // Once any cancel call includes WithRecursive, the flag stays set for the
 // entire cancel lifecycle (monotonic escalation).
@@ -146,7 +151,7 @@ type AgentCancelInfo struct {
 //
 // Interrupt absorption: when a cancel is active (shouldCancel() == true), ANY
 // interrupt — whether from a cancel safe-point node or from business logic
-// (e.g. compose.Interrupt in a tool) — is converted to a CancelError. The
+// (e.g. tool.Interrupt in a tool) — is converted to a CancelError. The
 // cancel "absorbs" the business interrupt. This is intentional:
 //
 //   - In concurrent execution (parallel workflows, concurrent tool calls),
@@ -155,15 +160,11 @@ type AgentCancelInfo struct {
 //   - Even in sequential execution, treating business interrupts as CancelError
 //     during active cancel gives consistent semantics.
 //   - The business interrupt is NOT lost — the checkpoint preserves the full
-//     interrupt hierarchy. On resume (Runner.Resume), the agent re-executes
-//     the interrupting code path and the business interrupt re-fires naturally.
+//     interrupt hierarchy. On resume (Runner.Resume or Runner.ResumeWithParams),
+//     the agent re-executes the interrupting code path and the business
+//     interrupt re-fires naturally.
 type CancelError struct {
 	Info *AgentCancelInfo
-
-	// CheckPointID is the checkpoint ID associated with this cancel operation.
-	// When non-empty, the cancelled agent's state has been persisted under this ID
-	// and can be resumed via Runner.Resume or GenInputResult.ResumeFromCheckpointID.
-	CheckPointID string
 
 	// InterruptContexts provides the interrupt contexts needed for targeted
 	// resumption via Runner.ResumeWithParams. Each context represents a step
@@ -185,15 +186,15 @@ var (
 	// ErrCancelTimeout is returned by CancelHandle.Wait when the cancel operation timed out.
 	ErrCancelTimeout = errors.New("cancel timed out")
 
-	// ErrExecutionCompleted is returned by CancelHandle.Wait when the agent finished
-	// before the cancel took effect. "Finished" means the event stream was fully
+	// ErrExecutionEnded is returned by CancelHandle.Wait when the agent ended
+	// before the cancel took effect. "Ended" means the event stream was fully
 	// drained without any interrupt — normal completion or a fatal error.
 	//
 	// Note: business interrupts that occur while cancel is active are absorbed
 	// into CancelError (see CancelError doc), so they result in nil (cancel
-	// succeeded), NOT ErrExecutionCompleted. Only execution that completes with
+	// succeeded), NOT ErrExecutionEnded. Only execution that completes with
 	// no interrupt at all produces this error.
-	ErrExecutionCompleted = errors.New("execution already completed")
+	ErrExecutionEnded = errors.New("execution already ended")
 
 	// ErrStreamCanceled is the error sent through the stream when CancelImmediate aborts it.
 	// It is a *StreamCanceledError so it can be gob-serialized during checkpoint save
@@ -699,7 +700,7 @@ func (cc *cancelContext) buildCancelFunc() AgentCancelFunc {
 		st := atomic.LoadInt32(&cc.state)
 		switch st {
 		case stateDone:
-			return ErrExecutionCompleted
+			return ErrExecutionEnded
 		default:
 			if atomic.LoadInt32(&cc.timeoutEscalated) == 1 {
 				return ErrCancelTimeout
@@ -716,7 +717,7 @@ func (cc *cancelContext) buildCancelFunc() AgentCancelFunc {
 		case stateCancelHandled:
 			return newHandle(func() error { return nil }), false
 		case stateDone:
-			return newHandle(func() error { return ErrExecutionCompleted }), false
+			return newHandle(func() error { return ErrExecutionEnded }), false
 		}
 
 		var needImmediate, needTimeoutCtl bool
@@ -730,7 +731,7 @@ func (cc *cancelContext) buildCancelFunc() AgentCancelFunc {
 			return newHandle(func() error { return nil }), false
 		case stateDone:
 			cc.cancelMu.Unlock()
-			return newHandle(func() error { return ErrExecutionCompleted }), false
+			return newHandle(func() error { return ErrExecutionEnded }), false
 		}
 
 		curMode := cc.getMode()
@@ -739,7 +740,7 @@ func (cc *cancelContext) buildCancelFunc() AgentCancelFunc {
 				st = atomic.LoadInt32(&cc.state)
 				cc.cancelMu.Unlock()
 				if st == stateDone {
-					return newHandle(func() error { return ErrExecutionCompleted }), false
+					return newHandle(func() error { return ErrExecutionEnded }), false
 				}
 				return newHandle(waitForCompletion), true
 			}

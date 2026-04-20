@@ -1887,7 +1887,7 @@ func TestTurnLoop_CheckpointSaveError_ReturnsError(t *testing.T) {
 	loop.Stop(WithImmediate())
 	exit := loop.Wait()
 	assert.Error(t, exit.ExitReason)
-	assert.True(t, exit.Checkpointed)
+	assert.True(t, exit.CheckpointAttempted)
 	assert.Error(t, exit.CheckpointErr)
 	assert.Contains(t, exit.CheckpointErr.Error(), "write failed")
 }
@@ -2362,7 +2362,7 @@ func TestTurnLoop_CheckpointSaveError_MergesWithExistingError(t *testing.T) {
 	assert.Error(t, exit.ExitReason)
 	var ce *CancelError
 	assert.True(t, errors.As(exit.ExitReason, &ce), "ExitReason should be CancelError, not merged with checkpoint error")
-	assert.True(t, exit.Checkpointed)
+	assert.True(t, exit.CheckpointAttempted)
 	assert.Error(t, exit.CheckpointErr)
 	assert.Contains(t, exit.CheckpointErr.Error(), "disk full")
 }
@@ -4006,12 +4006,12 @@ func TestTurnLoop_CheckpointErr_SeparateFromExitReason(t *testing.T) {
 
 	// ExitReason should be nil (clean stop), checkpoint error should be separate
 	assert.Nil(t, result.ExitReason)
-	assert.True(t, result.Checkpointed)
+	assert.True(t, result.CheckpointAttempted)
 	assert.Error(t, result.CheckpointErr)
 	assert.Contains(t, result.CheckpointErr.Error(), "storage unavailable")
 }
 
-func TestTurnLoop_Checkpointed_FalseWhenNoStore(t *testing.T) {
+func TestTurnLoop_CheckpointAttempted_FalseWhenNoStore(t *testing.T) {
 	ctx := context.Background()
 
 	loop := NewTurnLoop(TurnLoopConfig[string]{
@@ -4027,11 +4027,11 @@ func TestTurnLoop_Checkpointed_FalseWhenNoStore(t *testing.T) {
 	loop.Run(ctx)
 	result := loop.Wait()
 
-	assert.False(t, result.Checkpointed)
+	assert.False(t, result.CheckpointAttempted)
 	assert.Nil(t, result.CheckpointErr)
 }
 
-func TestTurnLoop_Checkpointed_FalseOnErrorExit(t *testing.T) {
+func TestTurnLoop_CheckpointAttempted_FalseOnErrorExit(t *testing.T) {
 	ctx := context.Background()
 	store := &turnLoopCheckpointStore{m: make(map[string][]byte)}
 	genInputErr := errors.New("gen input failed")
@@ -4068,7 +4068,7 @@ func TestTurnLoop_Checkpointed_FalseOnErrorExit(t *testing.T) {
 
 	// Loop exited from error, not Stop() — checkpoint should not be saved
 	assert.ErrorIs(t, result.ExitReason, genInputErr)
-	assert.False(t, result.Checkpointed)
+	assert.False(t, result.CheckpointAttempted)
 	assert.Nil(t, result.CheckpointErr)
 }
 
@@ -4128,7 +4128,7 @@ func TestTurnLoop_StopConcurrentWithCallbackError_NoCheckpoint(t *testing.T) {
 	// checkpoint should NOT be saved.
 	if result.ExitReason != nil && !errors.As(result.ExitReason, new(*CancelError)) {
 		assert.ErrorIs(t, result.ExitReason, prepareErr)
-		assert.False(t, result.Checkpointed, "should not checkpoint when exit is caused by callback error")
+		assert.False(t, result.CheckpointAttempted, "should not checkpoint when exit is caused by callback error")
 	}
 	// If Stop won the race, that's fine — checkpoint may or may not be saved
 	// depending on idle state. The test is about the error path.
@@ -4220,7 +4220,7 @@ func TestTurnLoop_StopWithSkipCheckpoint(t *testing.T) {
 
 	exit := loop.Wait()
 	assert.NoError(t, exit.ExitReason)
-	assert.False(t, exit.Checkpointed, "checkpoint should be skipped when WithSkipCheckpoint is used")
+	assert.False(t, exit.CheckpointAttempted, "checkpoint should be skipped when WithSkipCheckpoint is used")
 
 	store.mu.Lock()
 	_, exists := store.m[cpID]
@@ -4249,7 +4249,7 @@ func TestTurnLoop_StopWithSkipCheckpoint_DeletesStaleCheckpoint(t *testing.T) {
 	loop1.Stop()
 	loop1.Run(ctx)
 	exit1 := loop1.Wait()
-	assert.True(t, exit1.Checkpointed)
+	assert.True(t, exit1.CheckpointAttempted)
 
 	store.mu.Lock()
 	_, exists := store.m[cpID]
@@ -4270,7 +4270,7 @@ func TestTurnLoop_StopWithSkipCheckpoint_DeletesStaleCheckpoint(t *testing.T) {
 	loop2.Stop(WithSkipCheckpoint())
 	loop2.Run(ctx)
 	exit2 := loop2.Wait()
-	assert.False(t, exit2.Checkpointed, "second loop should skip checkpoint")
+	assert.False(t, exit2.CheckpointAttempted, "second loop should skip checkpoint")
 
 	store.mu.Lock()
 	deleteCalled := store.deleteCalled
@@ -4503,7 +4503,7 @@ func TestTurnLoop_SkipCheckpoint_Sticky(t *testing.T) {
 	loop.Stop()
 
 	exit := loop.Wait()
-	assert.False(t, exit.Checkpointed, "SkipCheckpoint should be sticky across multiple Stop calls")
+	assert.False(t, exit.CheckpointAttempted, "SkipCheckpoint should be sticky across multiple Stop calls")
 
 	store.mu.Lock()
 	_, exists := store.m[cpID]
@@ -5378,7 +5378,133 @@ func TestAttack_SkipCheckpoint_Sticky(t *testing.T) {
 	loop.Stop(WithImmediate())
 
 	exit := loop.Wait()
-	assert.False(t, exit.Checkpointed, "SkipCheckpoint is sticky; checkpoint should be skipped")
+	assert.False(t, exit.CheckpointAttempted, "SkipCheckpoint is sticky; checkpoint should be skipped")
+}
+
+// turnLoopNestedProbeAgent simulates an agent with a nested sub-agent
+// by deriving a child cancelContext. This allows tests to verify that
+// TurnLoop's Stop/Push options correctly propagate recursive cancellation.
+//
+// IMPORTANT: child.markDone() is NOT called by the probe. The test MUST
+// call it (e.g. via t.Cleanup) after verifying propagation to avoid a
+// race between markDone closing child.doneChan and the deriveChild
+// goroutines propagating the cancel signal.
+type turnLoopNestedProbeAgent struct {
+	parentCCCh chan *cancelContext
+	childCCCh  chan *cancelContext
+}
+
+func (a *turnLoopNestedProbeAgent) Name(_ context.Context) string        { return "nested-probe" }
+func (a *turnLoopNestedProbeAgent) Description(_ context.Context) string { return "nested-probe" }
+func (a *turnLoopNestedProbeAgent) Run(ctx context.Context, _ *AgentInput, opts ...AgentRunOption) *AsyncIterator[*AgentEvent] {
+	iter, gen := NewAsyncIteratorPair[*AgentEvent]()
+	o := getCommonOptions(nil, opts...)
+	cc := o.cancelCtx
+
+	child := cc.deriveChild(ctx)
+	a.parentCCCh <- cc
+	a.childCCCh <- child
+
+	go func() {
+		defer gen.Close()
+		<-cc.cancelChan
+		for {
+			if cc.getMode() == CancelImmediate {
+				gen.Send(&AgentEvent{Err: cc.createCancelError()})
+				return
+			}
+			time.Sleep(1 * time.Millisecond)
+		}
+	}()
+	return iter
+}
+
+func TestTurnLoop_Stop_WithImmediate_RecursivePropagation(t *testing.T) {
+	parentCCCh := make(chan *cancelContext, 1)
+	childCCCh := make(chan *cancelContext, 1)
+	probe := &turnLoopNestedProbeAgent{parentCCCh: parentCCCh, childCCCh: childCCCh}
+
+	loop := newAndRunTurnLoop(context.Background(), TurnLoopConfig[string]{
+		GenInput: func(ctx context.Context, _ *TurnLoop[string], items []string) (*GenInputResult[string], error) {
+			return &GenInputResult[string]{
+				Input:    &AgentInput{Messages: []Message{schema.UserMessage(items[0])}},
+				Consumed: items,
+			}, nil
+		},
+		PrepareAgent: func(ctx context.Context, _ *TurnLoop[string], consumed []string) (Agent, error) {
+			return probe, nil
+		},
+	})
+
+	loop.Push("msg1")
+	cc := <-parentCCCh
+	child := <-childCCCh
+	t.Cleanup(func() { child.markDone() })
+
+	loop.Stop(WithImmediate())
+
+	// Child should receive the cancel signal via recursive propagation.
+	select {
+	case <-child.cancelChan:
+	case <-time.After(2 * time.Second):
+		t.Fatal("child did not receive cancel via recursive propagation")
+	}
+
+	// Child should also receive the immediate cancel signal.
+	select {
+	case <-child.immediateChan:
+	case <-time.After(2 * time.Second):
+		t.Fatal("child did not receive immediate cancel via recursive propagation")
+	}
+
+	assert.True(t, cc.isRecursive(), "WithImmediate should set recursive on parent")
+	assert.True(t, child.shouldCancel(), "child should be cancelled")
+	assert.True(t, child.isImmediateCancelled(), "child should have received immediate cancel")
+
+	exit := loop.Wait()
+	var ce *CancelError
+	require.True(t, errors.As(exit.ExitReason, &ce))
+	assert.Equal(t, CancelImmediate, ce.Info.Mode)
+}
+
+func TestTurnLoop_Push_WithPreemptTimeout_RecursivePropagation(t *testing.T) {
+	parentCCCh := make(chan *cancelContext, 2)
+	childCCCh := make(chan *cancelContext, 2)
+	probe := &turnLoopNestedProbeAgent{parentCCCh: parentCCCh, childCCCh: childCCCh}
+
+	loop := newAndRunTurnLoop(context.Background(), TurnLoopConfig[string]{
+		GenInput: func(ctx context.Context, _ *TurnLoop[string], items []string) (*GenInputResult[string], error) {
+			return &GenInputResult[string]{
+				Input:    &AgentInput{Messages: []Message{schema.UserMessage(items[0])}},
+				Consumed: items,
+			}, nil
+		},
+		PrepareAgent: func(ctx context.Context, _ *TurnLoop[string], consumed []string) (Agent, error) {
+			return probe, nil
+		},
+	})
+
+	loop.Push("first")
+	cc := <-parentCCCh
+	child := <-childCCCh
+	t.Cleanup(func() { child.markDone() })
+
+	// Preempt with a very short timeout so it escalates to CancelImmediate quickly.
+	loop.Push("urgent", WithPreemptTimeout[string](AfterChatModel, 10*time.Millisecond))
+
+	// After timeout escalation, child should receive the immediate cancel
+	// via recursive propagation.
+	select {
+	case <-child.immediateChan:
+	case <-time.After(2 * time.Second):
+		t.Fatal("child did not receive immediate cancel after preempt timeout escalation")
+	}
+
+	assert.True(t, cc.isRecursive(), "WithPreemptTimeout should set recursive on parent")
+	assert.True(t, child.isImmediateCancelled(), "child should have received immediate cancel")
+
+	loop.Stop(WithImmediate())
+	loop.Wait()
 }
 
 func TestUntilIdleFor_NonPositive_Panics(t *testing.T) {
@@ -5386,4 +5512,19 @@ func TestUntilIdleFor_NonPositive_Panics(t *testing.T) {
 		func() { UntilIdleFor(0) })
 	assert.PanicsWithValue(t, "adk: UntilIdleFor: duration must be positive",
 		func() { UntilIdleFor(-1 * time.Second) })
+}
+
+func TestSaveTurnLoopCheckpoint_NilStore(t *testing.T) {
+	l := &TurnLoop[string]{config: TurnLoopConfig[string]{Store: nil}}
+	err := l.saveTurnLoopCheckpoint(context.Background(), "cp-1", &turnLoopCheckpoint[string]{})
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "checkpoint store is nil")
+}
+
+func TestSetupBridgeStore_NilStore_Resume(t *testing.T) {
+	l := &TurnLoop[string]{config: TurnLoopConfig[string]{Store: nil}}
+	spec := &turnRunSpec[string]{isResume: true}
+	_, _, err := l.setupBridgeStore(spec, nil)
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "checkpoint store is nil")
 }
