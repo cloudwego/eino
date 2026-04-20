@@ -650,7 +650,6 @@ func TestWithCancel_WithCheckpoint(t *testing.T) {
 
 		var events []*AgentEvent
 		hasCancelError := false
-		var cancelErrorCheckPointID string
 		for {
 			event, ok := iter.Next()
 			if !ok {
@@ -659,14 +658,12 @@ func TestWithCancel_WithCheckpoint(t *testing.T) {
 			var ce *CancelError
 			if event.Err != nil && errors.As(event.Err, &ce) {
 				hasCancelError = true
-				cancelErrorCheckPointID = ce.CheckPointID
 				continue
 			}
 			events = append(events, event)
 		}
 
 		assert.True(t, hasCancelError, "Should have CancelError event after cancel")
-		assert.Equal(t, "cancel-1", cancelErrorCheckPointID, "CancelError should contain the checkpoint ID")
 	})
 }
 
@@ -1132,7 +1129,7 @@ func TestWithCancel_Resume(t *testing.T) {
 		cancelHandle, _ := resumeCancelFn()
 		close(slowModel2.unblockCh)
 		err = cancelHandle.Wait()
-		assert.True(t, err == nil || errors.Is(err, ErrExecutionCompleted), "unexpected cancel wait error: %v", err)
+		assert.True(t, err == nil || errors.Is(err, ErrExecutionEnded), "unexpected cancel wait error: %v", err)
 
 		start := time.Now()
 		resumeEvents := <-resumeEventsCh
@@ -1148,7 +1145,7 @@ func TestWithCancel_Resume(t *testing.T) {
 				hasCancelError = true
 			}
 		}
-		executionCompletedBeforeCancel := errors.Is(err, ErrExecutionCompleted)
+		executionCompletedBeforeCancel := errors.Is(err, ErrExecutionEnded)
 		assert.True(t, hasCancelError || executionCompletedBeforeCancel, "Resume should have CancelError event after cancel, or execution completed before cancel")
 	})
 }
@@ -1518,10 +1515,10 @@ func TestWithCancel_SequentialAgent(t *testing.T) {
 
 		time.Sleep(50 * time.Millisecond)
 
-		// Cancel should NOT return ErrExecutionCompleted (the bug before the fix)
+		// Cancel should NOT return ErrExecutionEnded (the bug before the fix)
 		handle, _ := cancelFn()
 		err = handle.Wait()
-		assert.NoError(t, err, "Cancel during second agent should succeed, not return ErrExecutionCompleted")
+		assert.NoError(t, err, "Cancel during second agent should succeed, not return ErrExecutionEnded")
 
 		drainEventsAndAssertCancelError(t, iter)
 	})
@@ -2254,7 +2251,6 @@ func TestCancel_SequentialWorkflow_CancelAfterChatModel(t *testing.T) {
 
 	assert.True(t, hasCancelError, "Should have CancelError")
 	assert.Equal(t, CancelAfterChatModel, cancelErr.Info.Mode)
-	assert.NotEmpty(t, cancelErr.CheckPointID, "CancelError should have checkpoint ID")
 	assert.NotNil(t, cancelErr.interruptSignal, "CancelError should have interrupt signal for checkpoint")
 
 	resumeAgent1 := newCancelTestAgentWithToolsFinalAnswer(t, "seq_slow")
@@ -2614,7 +2610,6 @@ func TestCancelImmediate_AgentTool_PreservesChildCheckpoint(t *testing.T) {
 
 	cancelErr := drainCancelError(t, iter)
 	assert.NotNil(t, cancelErr, "Should have CancelError from CancelImmediate through agentTool")
-	assert.NotEmpty(t, cancelErr.CheckPointID)
 	assert.NotNil(t, cancelErr.interruptSignal)
 
 	resumeLeaf, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
@@ -2809,7 +2804,6 @@ func TestCancelImmediate_MultiLevelNesting(t *testing.T) {
 	elapsed := time.Since(start)
 
 	assert.NotNil(t, cancelErr, "Should have CancelError from multi-level nesting")
-	assert.NotEmpty(t, cancelErr.CheckPointID)
 	assert.NotNil(t, cancelErr.interruptSignal)
 	assert.True(t, elapsed < 5*time.Second, "Should complete quickly, elapsed: %v", elapsed)
 
@@ -3058,7 +3052,6 @@ func TestCancelAfterChatModel_Sequential_Agent1CompletesCancelBeforeAgent2Resume
 	assert.Equal(t, int32(0), atomic.LoadInt32(&model2.callCount),
 		"Agent2 should NOT run (cancel caught at transition after agent1)")
 	assert.Equal(t, int32(0), atomic.LoadInt32(&model3.callCount))
-	assert.NotEmpty(t, cancelErr.CheckPointID)
 
 	resumeModel2 := &gatedChatModel{
 		response: &schema.Message{Role: schema.Assistant, Content: "resumed agent2"},
@@ -3175,7 +3168,6 @@ func TestCancelAfterToolCalls_LoopTransitionBoundary(t *testing.T) {
 	cancelErr := drainCancelError(t, iter)
 	assert.NotNil(t, cancelErr, "Should have CancelError from CancelAfterToolCalls in loop")
 	assert.Equal(t, CancelAfterToolCalls, cancelErr.Info.Mode)
-	assert.NotEmpty(t, cancelErr.CheckPointID)
 }
 
 func TestCancelContext_ActiveChildren_Tracking(t *testing.T) {
@@ -3312,7 +3304,6 @@ func TestCancel_ParallelWorkflow_CancelAfterChatModel(t *testing.T) {
 
 	assert.True(t, hasCancelError, "Should have CancelError from parallel workflow")
 	assert.Equal(t, CancelAfterChatModel, cancelErr.Info.Mode)
-	assert.NotEmpty(t, cancelErr.CheckPointID, "CancelError should have checkpoint ID")
 
 	resumeSlow := newCancelTestAgentWithToolsFinalAnswer(t, "par_slow")
 	resumeFast := newCancelTestAgentWithToolsFinalAnswer(t, "par_fast")
@@ -3394,7 +3385,6 @@ func TestCancel_LoopWorkflow_CancelAfterChatModel(t *testing.T) {
 
 	assert.True(t, hasCancelError, "Should have CancelError from loop workflow")
 	assert.Equal(t, CancelAfterChatModel, cancelErr.Info.Mode)
-	assert.NotEmpty(t, cancelErr.CheckPointID, "CancelError should have checkpoint ID")
 
 	resumeAgent := newCancelTestAgentWithToolsFinalAnswer(t, "loop_inner")
 
@@ -3520,7 +3510,6 @@ func TestCancel_NestedWorkflow_AgentTool_CancelAfterChatModel(t *testing.T) {
 
 	assert.True(t, hasCancelError, "Should have CancelError from deeply nested workflow")
 	assert.Equal(t, CancelAfterChatModel, cancelErr.Info.Mode)
-	assert.NotEmpty(t, cancelErr.CheckPointID, "CancelError should have checkpoint ID")
 	assert.NotNil(t, cancelErr.interruptSignal, "CancelError should carry interrupt signal through agent tree")
 
 	// Phase 2: Resume from checkpoint — new instances to avoid data races
@@ -3670,7 +3659,6 @@ func TestCancel_CancelAfterToolCalls_InSequentialWorkflow(t *testing.T) {
 
 	assert.True(t, hasCancelError, "Should have CancelError after tool calls complete")
 	assert.Equal(t, CancelAfterToolCalls, cancelErr.Info.Mode)
-	assert.NotEmpty(t, cancelErr.CheckPointID, "CancelError should have checkpoint ID")
 
 	// Phase 2: Resume from checkpoint — new instances
 	resumeTool := &slowTool{
