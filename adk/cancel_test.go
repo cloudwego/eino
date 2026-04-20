@@ -3714,3 +3714,149 @@ func TestCancel_CancelAfterToolCalls_InSequentialWorkflow(t *testing.T) {
 	}
 	assert.NotEmpty(t, resumeEvents, "Resume should produce events")
 }
+
+// TestCancel_SafePointNeverFires_ErrExecutionEnded verifies the waitForCompletion
+// path where a safe-point cancel is submitted while the agent is running, but
+// the agent finishes without hitting the requested safe-point (e.g.
+// CancelAfterToolCalls on an agent with no tool calls). The cancel CAS succeeds
+// (stateRunning → stateCancelling), but the agent completes normally (markDone →
+// stateDone), so waitForCompletion returns ErrExecutionEnded.
+func TestCancel_SafePointNeverFires_ErrExecutionEnded(t *testing.T) {
+	ctx := context.Background()
+
+	gate := make(chan struct{})
+	done := make(chan struct{}, 1)
+
+	m := &gatedChatModel{
+		gateChan: gate,
+		doneChan: done,
+		response: &schema.Message{
+			Role:    schema.Assistant,
+			Content: "Final answer, no tool calls",
+		},
+	}
+
+	agent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+		Name:        "NoToolAgent",
+		Description: "Agent with no tools",
+		Instruction: "You are a test assistant",
+		Model:       m,
+	})
+	assert.NoError(t, err)
+
+	runner := NewRunner(ctx, RunnerConfig{
+		Agent: agent,
+	})
+
+	cancelOpt, cancelFn := WithCancel()
+	iter := runner.Run(ctx, []Message{schema.UserMessage("hello")}, cancelOpt)
+
+	// Wait a moment for the agent to enter Generate and block on gateChan.
+	runtime.Gosched()
+	time.Sleep(50 * time.Millisecond)
+
+	// Submit a safe-point cancel for tool calls. The agent has no tools,
+	// so this safe-point will never fire.
+	handle, submitted := cancelFn(WithAgentCancelMode(CancelAfterToolCalls))
+	assert.True(t, submitted)
+
+	// Let the model complete. The agent finishes without hitting the tool
+	// calls safe-point → markDone → stateDone → waitForCompletion returns
+	// ErrExecutionEnded.
+	close(gate)
+
+	waitErr := handle.Wait()
+	assert.ErrorIs(t, waitErr, ErrExecutionEnded)
+
+	for {
+		_, ok := iter.Next()
+		if !ok {
+			break
+		}
+	}
+}
+
+// TestBuildCancelFunc_StateDoneUnderLock exercises the race-condition path
+// in buildCancelFunc where the state transitions to stateDone between the
+// lockless check and the locked check (cancel.go L732-734).
+func TestBuildCancelFunc_StateDoneUnderLock(t *testing.T) {
+	cc := newCancelContext()
+	cancelFn := cc.buildCancelFunc()
+
+	// Hold cancelMu so the cancel func blocks when it tries to acquire the lock.
+	cc.cancelMu.Lock()
+
+	type result struct {
+		handle *CancelHandle
+		ok     bool
+	}
+	ch := make(chan result, 1)
+
+	go func() {
+		h, ok := cancelFn(WithAgentCancelMode(CancelAfterToolCalls))
+		ch <- result{h, ok}
+	}()
+
+	// Give the goroutine time to reach the Lock() call.
+	runtime.Gosched()
+	time.Sleep(20 * time.Millisecond)
+
+	// Transition to stateDone while the cancel goroutine is blocked on the lock.
+	cc.markDone()
+
+	// Release the lock. The cancel func resumes and finds stateDone.
+	cc.cancelMu.Unlock()
+
+	r := <-ch
+	assert.False(t, r.ok, "cancel should not be accepted when execution already done")
+	assert.ErrorIs(t, r.handle.Wait(), ErrExecutionEnded)
+}
+
+// TestBuildCancelFunc_CASFailStateDone exercises the race-condition path
+// in buildCancelFunc where the CAS on stateRunning→stateCancelling fails
+// because markDone transitioned stateRunning→stateDone concurrently
+// (cancel.go L742-743).
+func TestBuildCancelFunc_CASFailStateDone(t *testing.T) {
+	// Exercises cancel.go L742-743: CAS(stateRunning→stateCancelling) fails
+	// because markDone transitions stateRunning→stateDone concurrently.
+	//
+	// The window between the state check (L738) and CAS (L739) is extremely
+	// tight. We maximize the chance by having the cancel goroutine block on
+	// cancelMu, then racing markDone with the lock release.
+	hit := false
+	for i := 0; i < 100000 && !hit; i++ {
+		cc := newCancelContext()
+		cancelFn := cc.buildCancelFunc()
+
+		// Hold cancelMu so the cancel goroutine blocks at L725.
+		cc.cancelMu.Lock()
+
+		cancelDone := make(chan struct{})
+		var h *CancelHandle
+		var ok bool
+
+		go func() {
+			defer close(cancelDone)
+			h, ok = cancelFn(WithAgentCancelMode(CancelAfterToolCalls))
+		}()
+
+		// Let the cancel goroutine reach the Lock() call.
+		runtime.Gosched()
+
+		// Release lock and fire markDone concurrently. The cancel goroutine
+		// will acquire the lock and race with markDone on the CAS.
+		go cc.markDone()
+		cc.cancelMu.Unlock()
+
+		<-cancelDone
+
+		if !ok && errors.Is(h.Wait(), ErrExecutionEnded) {
+			hit = true
+		}
+	}
+	if hit {
+		t.Log("Successfully hit CAS-fail → stateDone path")
+	} else {
+		t.Log("CAS race path not triggered (L743 remains a theoretical race edge)")
+	}
+}

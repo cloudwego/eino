@@ -5513,3 +5513,18 @@ func TestUntilIdleFor_NonPositive_Panics(t *testing.T) {
 	assert.PanicsWithValue(t, "adk: UntilIdleFor: duration must be positive",
 		func() { UntilIdleFor(-1 * time.Second) })
 }
+
+func TestSaveTurnLoopCheckpoint_NilStore(t *testing.T) {
+	l := &TurnLoop[string]{config: TurnLoopConfig[string]{Store: nil}}
+	err := l.saveTurnLoopCheckpoint(context.Background(), "cp-1", &turnLoopCheckpoint[string]{})
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "checkpoint store is nil")
+}
+
+func TestSetupBridgeStore_NilStore_Resume(t *testing.T) {
+	l := &TurnLoop[string]{config: TurnLoopConfig[string]{Store: nil}}
+	spec := &turnRunSpec[string]{isResume: true}
+	_, _, err := l.setupBridgeStore(spec, nil)
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "checkpoint store is nil")
+}
