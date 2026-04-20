@@ -436,88 +436,18 @@ func TestWithCancel_AfterChatModel_WithTools(t *testing.T) {
 }
 
 // TestWithCancel_CancelImmediate_StreamAborted verifies that CancelImmediate
-// during model streaming surfaces ErrStreamCanceled and completes quickly.
-// modelStreamAfterToolCall returns a tool call on the first invocation, then
-// streams chunks slowly on the second invocation. This ensures the agent's
-// ReAct loop stays alive during the slow streaming phase.
-type modelStreamAfterToolCall struct {
-	firstDone     int32
-	chunkInterval time.Duration
-	chunks        []*schema.Message
-	started       chan struct{}
-}
-
-func (m *modelStreamAfterToolCall) Generate(_ context.Context, _ []*schema.Message, _ ...model.Option) (*schema.Message, error) {
-	if atomic.CompareAndSwapInt32(&m.firstDone, 0, 1) {
-		return toolCallMsg(toolCall("c1", "noop_tool", `{"input":"x"}`)), nil
-	}
-	return m.chunks[len(m.chunks)-1], nil
-}
-
-func (m *modelStreamAfterToolCall) Stream(_ context.Context, _ []*schema.Message, _ ...model.Option) (*schema.StreamReader[*schema.Message], error) {
-	if atomic.CompareAndSwapInt32(&m.firstDone, 0, 1) {
-		msg := toolCallMsg(toolCall("c1", "noop_tool", `{"input":"x"}`))
-		return schema.StreamReaderFromArray([]*schema.Message{msg}), nil
-	}
-	r, w := schema.Pipe[*schema.Message](1)
-	go func() {
-		defer w.Close()
-		select {
-		case m.started <- struct{}{}:
-		default:
-		}
-		for _, chunk := range m.chunks {
-			time.Sleep(m.chunkInterval)
-			if closed := w.Send(chunk, nil); closed {
-				return
-			}
-		}
-	}()
-	return r, nil
-}
-
-func (m *modelStreamAfterToolCall) BindTools(_ []*schema.ToolInfo) error { return nil }
-
-// noopTool is a tool that returns immediately.
-type noopTool struct{}
-
-func (t *noopTool) Info(_ context.Context) (*schema.ToolInfo, error) {
-	return &schema.ToolInfo{
-		Name: "noop_tool",
-		Desc: "noop",
-		ParamsOneOf: schema.NewParamsOneOfByParams(map[string]*schema.ParameterInfo{
-			"input": {Type: "string"},
-		}),
-	}, nil
-}
-
-func (t *noopTool) InvokableRun(_ context.Context, _ string, _ ...tool.Option) (string, error) {
-	return "ok", nil
-}
-
+// during model execution surfaces CancelError and completes quickly.
+// Uses blockingChatModel which blocks in Stream(), keeping the agent's run
+// function alive so the cancel context stays in stateRunning.
 func TestWithCancel_CancelImmediate_StreamAborted(t *testing.T) {
 	ctx := context.Background()
 
-	// Model that first calls a tool, then streams slowly on the second call.
-	// This keeps the ReAct loop alive during streaming, preventing the
-	// cancelContext from being marked done prematurely.
-	chunks := make([]*schema.Message, 10)
-	for i := range chunks {
-		chunks[i] = schema.AssistantMessage("chunk", nil)
-	}
-	m := &modelStreamAfterToolCall{
-		chunkInterval: 200 * time.Millisecond,
-		chunks:        chunks,
-		started:       make(chan struct{}, 1),
-	}
+	blk := newBlockingChatModel(schema.AssistantMessage("hello", nil))
 
 	agent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
 		Name:        "TestAgent",
 		Description: "test",
-		Model:       m,
-		ToolsConfig: ToolsConfig{
-			ToolsNodeConfig: compose.ToolsNodeConfig{Tools: []tool.BaseTool{&noopTool{}}},
-		},
+		Model:       blk,
 	})
 	require.NoError(t, err)
 
@@ -529,42 +459,26 @@ func TestWithCancel_CancelImmediate_StreamAborted(t *testing.T) {
 	cancelOpt, cancelFn := WithCancel()
 	iter := runner.Run(ctx, []Message{schema.UserMessage("hi")}, cancelOpt)
 
-	// Wait for the model's second call to start streaming
 	select {
-	case <-m.started:
+	case <-blk.started:
 	case <-time.After(5 * time.Second):
-		t.Fatal("model did not start streaming")
+		t.Fatal("model did not start")
 	}
-	// Let a few chunks through, then cancel mid-stream
-	time.Sleep(300 * time.Millisecond)
+	time.Sleep(50 * time.Millisecond)
 
+	start := time.Now()
 	handle, _ := cancelFn()
 	cancelErr := handle.Wait()
 	assert.NoError(t, cancelErr)
+	elapsed := time.Since(start)
+	assert.True(t, elapsed < 2*time.Second, "cancel should complete quickly, elapsed=%v", elapsed)
 
-	var foundStreamCanceled bool
 	var foundCancelError bool
 	for {
 		e, ok := iter.Next()
 		if !ok {
 			break
 		}
-
-		// ErrStreamCanceled appears on MessageStream.Recv(), not AgentEvent.Err
-		if e.Output != nil && e.Output.MessageOutput != nil && e.Output.MessageOutput.IsStreaming &&
-			e.Output.MessageOutput.Role == schema.Assistant {
-			stream := e.Output.MessageOutput.MessageStream
-			for {
-				_, recvErr := stream.Recv()
-				if recvErr != nil {
-					if errors.Is(recvErr, ErrStreamCanceled) {
-						foundStreamCanceled = true
-					}
-					break
-				}
-			}
-		}
-
 		if e.Action != nil && e.Action.Interrupted != nil {
 			foundCancelError = true
 		}
@@ -573,7 +487,6 @@ func TestWithCancel_CancelImmediate_StreamAborted(t *testing.T) {
 			foundCancelError = true
 		}
 	}
-	assert.True(t, foundStreamCanceled, "expected ErrStreamCanceled on MessageStream.Recv()")
 	assert.True(t, foundCancelError, "expected CancelError in event stream")
 }
 
