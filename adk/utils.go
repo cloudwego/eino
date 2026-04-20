@@ -120,6 +120,10 @@ func getMessageFromWrappedEvent(e *agentEventWrapper) (Message, error) {
 		return e.concatenatedMessage, nil
 	}
 
+	// StreamErr is checked after concatenatedMessage because once the stream
+	// is successfully consumed, the concatenated result is always valid even
+	// if a prior call had set StreamErr (defensive). This order also matches
+	// alpha/09 to minimize future rebase conflicts.
 	if e.StreamErr != nil {
 		return nil, e.StreamErr
 	}
@@ -166,6 +170,8 @@ func (e *agentEventWrapper) consumeStream() {
 
 	if len(msgs) == 0 {
 		e.StreamErr = errors.New("no messages in MessageVariant.MessageStream")
+		// Replace the stream even when empty so that MessageVariant.GobEncode
+		// won't attempt to Recv() from the original (possibly broken) stream.
 		e.AgentEvent.Output.MessageOutput.MessageStream = schema.StreamReaderFromArray(msgs)
 		return
 	}
