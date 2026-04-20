@@ -22,6 +22,7 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -2031,4 +2032,116 @@ func TestReturnDirectlyEventSentAfterResume(t *testing.T) {
 		}
 	}
 	assert.True(t, hasDynamicToolAfterResume, "Dynamic tool should be in tool list after resume (bc.toolUpdated path)")
+}
+
+// streamErrorThenToolCallModel simulates a model that:
+// - On the first Stream call: emits several good chunks then an error (triggering retry)
+// - On the second Stream call (retry): returns a tool call message (success)
+type streamErrorThenToolCallModel struct {
+	callCount    int32
+	toolCallName string
+}
+
+func (m *streamErrorThenToolCallModel) Generate(_ context.Context, _ []*schema.Message, _ ...model.Option) (*schema.Message, error) {
+	return schema.AssistantMessage("final answer", nil), nil
+}
+
+func (m *streamErrorThenToolCallModel) Stream(_ context.Context, _ []*schema.Message, _ ...model.Option) (*schema.StreamReader[*schema.Message], error) {
+	count := atomic.AddInt32(&m.callCount, 1)
+
+	sr, sw := schema.Pipe[*schema.Message](10)
+	go func() {
+		defer sw.Close()
+		if count == 1 {
+			// First call: emit good chunks then error
+			sw.Send(schema.AssistantMessage("chunk1", nil), nil)
+			sw.Send(schema.AssistantMessage("chunk2", nil), nil)
+			sw.Send(schema.AssistantMessage("chunk3", nil), nil)
+			sw.Send(nil, errRetryAble)
+			return
+		}
+		// Second call (retry): return tool call
+		sw.Send(schema.AssistantMessage("", []schema.ToolCall{{
+			ID:       "call-1",
+			Function: schema.FunctionCall{Name: m.toolCallName, Arguments: "{}"},
+		}}), nil)
+	}()
+	return sr, nil
+}
+
+func (m *streamErrorThenToolCallModel) WithTools(_ []*schema.ToolInfo) (model.ToolCallingChatModel, error) {
+	return m, nil
+}
+
+// TestStreamRetryThenToolInterruptCheckpoint reproduces a bug where:
+//  1. ChatModelAgent with ModelRetryConfig.MaxRetries = 2
+//  2. First model Stream call emits good chunks then a retryable error
+//  3. Retry succeeds, model returns a tool call
+//  4. The tool triggers an interrupt, causing the Runner to save a checkpoint
+//  5. The checkpoint save fails because the first (failed) model call's stream event
+//     is in the session, and when MessageVariant.GobEncode consumes the stream,
+//     it hits the error chunk and returns an encoding error.
+func TestStreamRetryThenToolInterruptCheckpoint(t *testing.T) {
+	ctx := context.Background()
+
+	interruptToolName := "interrupt_tool"
+	mdl := &streamErrorThenToolCallModel{toolCallName: interruptToolName}
+
+	interruptTool := &interruptingTool{name: interruptToolName}
+
+	agent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+		Name:        "RetryInterruptAgent",
+		Description: "Agent that retries model then tool interrupts",
+		Instruction: "You are a test agent.",
+		Model:       mdl,
+		ModelRetryConfig: &ModelRetryConfig{
+			MaxRetries:  2,
+			IsRetryAble: func(ctx context.Context, err error) bool { return errors.Is(err, errRetryAble) },
+		},
+		ToolsConfig: ToolsConfig{
+			ToolsNodeConfig: compose.ToolsNodeConfig{
+				Tools: []tool.BaseTool{interruptTool},
+			},
+		},
+	})
+	assert.NoError(t, err)
+
+	store := newMyStore()
+	runner := NewRunner(ctx, RunnerConfig{
+		Agent:           agent,
+		EnableStreaming: true,
+		CheckPointStore: store,
+	})
+
+	iter := runner.Run(ctx, []Message{schema.UserMessage("test query")}, WithCheckPointID("retry_interrupt_ckpt"))
+
+	var events []*AgentEvent
+	var checkpointErr error
+	for {
+		event, ok := iter.Next()
+		if !ok {
+			break
+		}
+		events = append(events, event)
+		if event.Err != nil {
+			checkpointErr = event.Err
+			t.Logf("event error: %v", event.Err)
+		}
+	}
+
+	// The bug: checkpoint save fails because the failed stream's error chunk
+	// is encountered during gob encoding of the session events.
+	// If the bug is fixed, checkpointErr should be nil and we should see an interrupt event.
+	assert.NoError(t, checkpointErr, "checkpoint save should not fail due to failed stream's error in session")
+
+	var hasInterrupt bool
+	for _, event := range events {
+		if event.Action != nil && event.Action.Interrupted != nil {
+			hasInterrupt = true
+		}
+	}
+	assert.True(t, hasInterrupt, "should receive an interrupt event from the tool")
+
+	// Verify the model was called twice (first call errored, second succeeded)
+	assert.Equal(t, int32(2), atomic.LoadInt32(&mdl.callCount), "model should be called exactly twice (1 failure + 1 retry)")
 }

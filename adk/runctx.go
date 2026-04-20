@@ -24,8 +24,6 @@ import (
 	"sort"
 	"sync"
 	"time"
-
-	"github.com/cloudwego/eino/schema"
 )
 
 // runSession CheckpointSchema: persisted via serialization.RunCtx (gob).
@@ -65,8 +63,14 @@ type agentEventWrapper struct {
 type otherAgentEventWrapperForEncode agentEventWrapper
 
 func (a *agentEventWrapper) GobEncode() ([]byte, error) {
-	if a.concatenatedMessage != nil && a.Output != nil && a.Output.MessageOutput != nil && a.Output.MessageOutput.IsStreaming {
-		a.Output.MessageOutput.MessageStream = schema.StreamReaderFromArray([]Message{a.concatenatedMessage})
+	if a.Output != nil && a.Output.MessageOutput != nil && a.Output.MessageOutput.IsStreaming {
+		// Materialize the stream before encoding. An unconsumed stream that
+		// ends with a non-EOF error (WillRetryError, ErrStreamCanceled) would
+		// cause MessageVariant.GobEncode to fail. consumeStream replaces the
+		// stream with an error-free, materialized version.
+		if a.concatenatedMessage == nil && a.StreamErr == nil {
+			a.consumeStream()
+		}
 	}
 
 	buf := &bytes.Buffer{}
