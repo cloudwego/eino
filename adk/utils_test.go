@@ -403,3 +403,53 @@ func TestAgentEventWrapper_GobEncoding_WithStreamSuccess(t *testing.T) {
 	assert.Equal(t, int64(67890), decoded.TS)
 	assert.Empty(t, decoded.StreamErr)
 }
+
+func TestConsumeStream_EdgeCases(t *testing.T) {
+	t.Run("double call is no-op", func(t *testing.T) {
+		sr, sw := schema.Pipe[Message](10)
+		go func() {
+			defer sw.Close()
+			sw.Send(schema.AssistantMessage("msg1", nil), nil)
+		}()
+
+		wrapper := &agentEventWrapper{
+			AgentEvent: &AgentEvent{
+				Output: &AgentOutput{
+					MessageOutput: &MessageVariant{
+						IsStreaming:   true,
+						MessageStream: sr,
+					},
+				},
+			},
+		}
+
+		wrapper.consumeStream()
+		assert.NotNil(t, wrapper.concatenatedMessage)
+		assert.Equal(t, "msg1", wrapper.concatenatedMessage.Content)
+
+		// Second call should be a no-op
+		wrapper.consumeStream()
+		assert.Equal(t, "msg1", wrapper.concatenatedMessage.Content)
+	})
+
+	t.Run("empty stream sets StreamErr", func(t *testing.T) {
+		sr, sw := schema.Pipe[Message](10)
+		sw.Close() // immediately close => EOF with 0 messages
+
+		wrapper := &agentEventWrapper{
+			AgentEvent: &AgentEvent{
+				Output: &AgentOutput{
+					MessageOutput: &MessageVariant{
+						IsStreaming:   true,
+						MessageStream: sr,
+					},
+				},
+			},
+		}
+
+		wrapper.consumeStream()
+		assert.Nil(t, wrapper.concatenatedMessage)
+		assert.Error(t, wrapper.StreamErr)
+		assert.Contains(t, wrapper.StreamErr.Error(), "no messages")
+	})
+}
