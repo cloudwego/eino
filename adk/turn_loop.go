@@ -728,8 +728,6 @@ type turnLoopCheckpoint[T any] struct {
 	CanceledItems  []T
 }
 
-
-
 func marshalTurnLoopCheckpoint[T any](c *turnLoopCheckpoint[T]) ([]byte, error) {
 	buf := new(bytes.Buffer)
 	if err := gob.NewEncoder(buf).Encode(c); err != nil {
@@ -1780,12 +1778,12 @@ func (l *TurnLoop[T]) cleanup(ctx context.Context) {
 	var takeLateResult []T
 
 	l.result = &TurnLoopExitState[T]{
-		ExitReason:     l.runErr,
-		UnhandledItems: unhandled,
-		CanceledItems:  l.canceledItems,
-		StopCause:      l.stopSig.getStopCause(),
-		CheckpointAttempted:   checkpointed,
-		CheckpointErr:  checkpointErr,
+		ExitReason:          l.runErr,
+		UnhandledItems:      unhandled,
+		CanceledItems:       l.canceledItems,
+		StopCause:           l.stopSig.getStopCause(),
+		CheckpointAttempted: checkpointed,
+		CheckpointErr:       checkpointErr,
 		TakeLateItems: func() []T {
 			takeLateOnce.Do(func() {
 				l.lateMu.Lock()
