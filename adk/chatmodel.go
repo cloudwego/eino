@@ -812,7 +812,7 @@ func (a *ChatModelAgent) handleRunFuncError(
 			// returning false and markDone() executing, a concurrent cancel could
 			// transition stateRunning→stateCancelling. markDone() then does
 			// stateCancelling→stateDone, and the cancel func receives
-			// ErrExecutionCompleted (execution finished before cancel took effect).
+			// ErrExecutionEnded (execution finished before cancel took effect).
 			if !cancelCtx.shouldCancel() {
 				cancelCtx.markDone()
 			}
