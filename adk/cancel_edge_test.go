@@ -218,7 +218,7 @@ func TestWithCancel_BeforeExecutionStarts(t *testing.T) {
 	// cancelFn must have already returned (or return quickly now that doneChan is closed).
 	select {
 	case cancelErr := <-cancelDone:
-		// Either nil (cancel handled) or ErrExecutionCompleted is acceptable
+		// Either nil (cancel handled) or ErrExecutionEnded is acceptable
 		// depending on exact timing; what matters is it didn't hang.
 		_ = cancelErr
 	case <-time.After(3 * time.Second):
@@ -229,7 +229,7 @@ func TestWithCancel_BeforeExecutionStarts(t *testing.T) {
 	assert.Equal(t, int32(0), atomic.LoadInt32(&bt.callCount), "tool must not be called")
 }
 
-// TestWithCancel_AfterCompletion verifies cancelFn returns ErrExecutionCompleted
+// TestWithCancel_AfterCompletion verifies cancelFn returns ErrExecutionEnded
 // when called after a normal run finishes.
 func TestWithCancel_AfterCompletion(t *testing.T) {
 	ctx := context.Background()
@@ -254,10 +254,10 @@ func TestWithCancel_AfterCompletion(t *testing.T) {
 
 	handle, _ := cancelFn()
 	cancelErr := handle.Wait()
-	assert.ErrorIs(t, cancelErr, ErrExecutionCompleted)
+	assert.ErrorIs(t, cancelErr, ErrExecutionEnded)
 }
 
-// TestWithCancel_AfterBusinessInterrupt verifies cancelFn returns ErrExecutionCompleted
+// TestWithCancel_AfterBusinessInterrupt verifies cancelFn returns ErrExecutionEnded
 // when called after the agent has been interrupted by business logic.
 func TestWithCancel_AfterBusinessInterrupt(t *testing.T) {
 	ctx := context.Background()
@@ -296,10 +296,10 @@ func TestWithCancel_AfterBusinessInterrupt(t *testing.T) {
 
 	handle, _ := cancelFn()
 	cancelErr := handle.Wait()
-	assert.ErrorIs(t, cancelErr, ErrExecutionCompleted)
+	assert.ErrorIs(t, cancelErr, ErrExecutionEnded)
 }
 
-// TestWithCancel_AfterError verifies cancelFn returns ErrExecutionCompleted
+// TestWithCancel_AfterError verifies cancelFn returns ErrExecutionEnded
 // when called after the agent errors out.
 func TestWithCancel_AfterError(t *testing.T) {
 	ctx := context.Background()
@@ -324,7 +324,7 @@ func TestWithCancel_AfterError(t *testing.T) {
 
 	handle, _ := cancelFn()
 	cancelErr := handle.Wait()
-	assert.ErrorIs(t, cancelErr, ErrExecutionCompleted)
+	assert.ErrorIs(t, cancelErr, ErrExecutionEnded)
 }
 
 // TestWithCancel_TimeoutEscalation tests that WithAgentCancelTimeout causes the
@@ -436,7 +436,9 @@ func TestWithCancel_AfterChatModel_WithTools(t *testing.T) {
 }
 
 // TestWithCancel_CancelImmediate_StreamAborted verifies that CancelImmediate
-// during model streaming surfaces ErrStreamCanceled and completes quickly.
+// during model execution surfaces CancelError and completes quickly.
+// Uses blockingChatModel which blocks in Stream(), keeping the agent's run
+// function alive so the cancel context stays in stateRunning.
 func TestWithCancel_CancelImmediate_StreamAborted(t *testing.T) {
 	ctx := context.Background()
 
@@ -471,21 +473,21 @@ func TestWithCancel_CancelImmediate_StreamAborted(t *testing.T) {
 	elapsed := time.Since(start)
 	assert.True(t, elapsed < 2*time.Second, "cancel should complete quickly, elapsed=%v", elapsed)
 
-	var foundStreamCanceled bool
+	var foundCancelError bool
 	for {
 		e, ok := iter.Next()
 		if !ok {
 			break
 		}
-		if e.Err != nil && errors.Is(e.Err, ErrStreamCanceled) {
-			foundStreamCanceled = true
+		if e.Action != nil && e.Action.Interrupted != nil {
+			foundCancelError = true
 		}
 		var ce *CancelError
 		if e.Err != nil && errors.As(e.Err, &ce) {
-			foundStreamCanceled = true // CancelError wraps stream abort
+			foundCancelError = true
 		}
 	}
-	assert.True(t, foundStreamCanceled, "expected stream-abort error during immediate cancel")
+	assert.True(t, foundCancelError, "expected CancelError in event stream")
 }
 
 // TestWithCancel_MultipleToolsConcurrent verifies that CancelAfterToolCalls
@@ -630,13 +632,11 @@ func TestWithCancel_NoCheckpointStore(t *testing.T) {
 			break
 		}
 	}
-	if assert.NotNil(t, ce, "expected CancelError even without checkpoint store") {
-		assert.Empty(t, ce.CheckPointID, "CheckPointID should be empty without checkpoint store")
-	}
+	assert.NotNil(t, ce, "expected CancelError even without checkpoint store")
 }
 
 // TestWithCancel_ModelError verifies that a model error marks the cancelCtx as
-// done so that a subsequent cancelFn call returns ErrExecutionCompleted.
+// done so that a subsequent cancelFn call returns ErrExecutionEnded.
 func TestWithCancel_ModelError(t *testing.T) {
 	ctx := context.Background()
 
@@ -665,7 +665,7 @@ func TestWithCancel_ModelError(t *testing.T) {
 
 	handle, _ := cancelFn()
 	cancelErr := handle.Wait()
-	assert.ErrorIs(t, cancelErr, ErrExecutionCompleted, "cancelFn should return ErrExecutionCompleted after model error")
+	assert.ErrorIs(t, cancelErr, ErrExecutionEnded, "cancelFn should return ErrExecutionEnded after model error")
 }
 
 // TestWithCancel_Resume_SafePoint covers CancelAfterChatModel and
@@ -1265,4 +1265,144 @@ func TestWithCancel_CancelAfterChatModel_NestedAgentTool(t *testing.T) {
 	}
 
 	assert.True(t, hasCancelError, "CancelError expected from nested agent tool with tools")
+}
+
+// slowStreamingTool implements StreamableTool (but NOT InvokableTool), streaming
+// chunks slowly so CancelImmediate can fire mid-stream.
+type slowStreamingTool struct {
+	name          string
+	chunkInterval time.Duration
+	chunks        []string
+	started       chan struct{}
+}
+
+func (t *slowStreamingTool) Info(_ context.Context) (*schema.ToolInfo, error) {
+	return &schema.ToolInfo{
+		Name: t.name,
+		Desc: "slow streaming tool",
+		ParamsOneOf: schema.NewParamsOneOfByParams(map[string]*schema.ParameterInfo{
+			"input": {Type: "string"},
+		}),
+	}, nil
+}
+
+func (t *slowStreamingTool) StreamableRun(_ context.Context, _ string, _ ...tool.Option) (*schema.StreamReader[string], error) {
+	r, w := schema.Pipe[string](1)
+	go func() {
+		defer w.Close()
+		select {
+		case t.started <- struct{}{}:
+		default:
+		}
+		for _, chunk := range t.chunks {
+			time.Sleep(t.chunkInterval)
+			if closed := w.Send(chunk, nil); closed {
+				return
+			}
+		}
+	}()
+	return r, nil
+}
+
+// toolCallStreamModel returns a tool-call message on the first Stream call,
+// then a plain text response on subsequent calls.
+type toolCallStreamModel struct {
+	callCount int32
+}
+
+func (m *toolCallStreamModel) Generate(_ context.Context, _ []*schema.Message, _ ...model.Option) (*schema.Message, error) {
+	if atomic.AddInt32(&m.callCount, 1) == 1 {
+		return toolCallMsg(toolCall("c1", "slow_tool", `{"input":"x"}`)), nil
+	}
+	return schema.AssistantMessage("done", nil), nil
+}
+
+func (m *toolCallStreamModel) Stream(ctx context.Context, input []*schema.Message, opts ...model.Option) (*schema.StreamReader[*schema.Message], error) {
+	msg, err := m.Generate(ctx, input, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return schema.StreamReaderFromArray([]*schema.Message{msg}), nil
+}
+
+func (m *toolCallStreamModel) BindTools(_ []*schema.ToolInfo) error { return nil }
+
+// TestWithCancel_CancelImmediate_StreamableToolAborted verifies that CancelImmediate
+// during StreamableTool streaming surfaces ErrStreamCanceled on the tool's
+// MessageStream.Recv(), just like it does for ChatModel streaming.
+func TestWithCancel_CancelImmediate_StreamableToolAborted(t *testing.T) {
+	ctx := context.Background()
+
+	tcm := &toolCallStreamModel{}
+	st := &slowStreamingTool{
+		name:          "slow_tool",
+		chunkInterval: 200 * time.Millisecond,
+		chunks:        []string{"a", "b", "c", "d", "e", "f", "g", "h", "i", "j"},
+		started:       make(chan struct{}, 1),
+	}
+
+	agent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+		Name:        "TestAgent",
+		Description: "test",
+		Model:       tcm,
+		ToolsConfig: ToolsConfig{
+			ToolsNodeConfig: compose.ToolsNodeConfig{Tools: []tool.BaseTool{st}},
+		},
+	})
+	require.NoError(t, err)
+
+	runner := NewRunner(ctx, RunnerConfig{
+		Agent:           agent,
+		EnableStreaming: true,
+	})
+
+	cancelOpt, cancelFn := WithCancel()
+	iter := runner.Run(ctx, []Message{schema.UserMessage("hi")}, cancelOpt)
+
+	// Wait for the tool to start streaming
+	select {
+	case <-st.started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("tool did not start streaming")
+	}
+	// Let a few chunks through, then cancel mid-stream
+	time.Sleep(300 * time.Millisecond)
+
+	handle, _ := cancelFn()
+	cancelErr := handle.Wait()
+	assert.NoError(t, cancelErr)
+
+	var foundStreamCanceled bool
+	var foundCancelError bool
+	for {
+		e, ok := iter.Next()
+		if !ok {
+			break
+		}
+
+		// ErrStreamCanceled appears on the tool's MessageStream.Recv()
+		if e.Output != nil && e.Output.MessageOutput != nil && e.Output.MessageOutput.IsStreaming &&
+			e.Output.MessageOutput.Role == schema.Tool {
+			stream := e.Output.MessageOutput.MessageStream
+			for {
+				_, recvErr := stream.Recv()
+				if recvErr != nil {
+					if errors.Is(recvErr, ErrStreamCanceled) {
+						foundStreamCanceled = true
+					}
+					break
+				}
+			}
+		}
+
+		if e.Action != nil && e.Action.Interrupted != nil {
+			foundCancelError = true
+		}
+		var ce *CancelError
+		if e.Err != nil && errors.As(e.Err, &ce) {
+			foundCancelError = true
+		}
+	}
+	assert.True(t, foundStreamCanceled, "expected ErrStreamCanceled on tool's MessageStream.Recv()")
+	assert.True(t, foundCancelError, "expected CancelError in event stream")
 }

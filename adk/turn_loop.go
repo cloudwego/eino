@@ -363,9 +363,13 @@ type TurnLoopConfig[T any] struct {
 	// Required.
 	GenInput func(ctx context.Context, loop *TurnLoop[T], items []T) (*GenInputResult[T], error)
 
-	// GenResume is called exactly once when the TurnLoop detects a mid-turn
-	// checkpoint on startup (i.e. CheckpointID is configured and the stored
-	// checkpoint has runner state from an interrupted agent execution).
+	// GenResume is called at most once during Run(). When CheckpointID is
+	// configured, Run() queries Store for the checkpoint:
+	//   - If the checkpoint contains runner state (i.e. an agent was interrupted
+	//     mid-turn), Run() calls GenResume to plan a resume turn.
+	//   - Otherwise (no checkpoint, or between-turns checkpoint), GenResume is
+	//     never called and the loop proceeds via GenInput.
+	//
 	// It receives:
 	//   - canceledItems: the items being processed when the prior run was canceled
 	//   - unhandledItems: items buffered but not processed when the prior run exited
@@ -391,16 +395,16 @@ type TurnLoopConfig[T any] struct {
 	//   - tc.Preempted / tc.Stopped: signals while processing events
 	//
 	// Error handling: the returned error is only used when the callback itself
-	// wants to abort the TurnLoop. The TurnLoop already captures CancelError
-	// from the event stream when the turn is stopped or preempted, so the
-	// callback should NOT propagate CancelError. In practice, return a non-nil
-	// error only for callback-internal failures that should terminate the loop;
-	// return nil when the current agent is canceled by an external Stop or
-	// Preempt (Preempt cancels the current agent but the loop continues with
-	// the next turn).
+	// wants to abort the TurnLoop. The callback should NEVER propagate
+	// CancelError — the framework handles it automatically:
+	//   - Stop: the framework propagates CancelError as ExitReason, loop exits.
+	//   - Preempt: the framework does not propagate CancelError; if the callback
+	//     also returns nil, the loop continues with the next turn.
+	// In practice, return a non-nil error only for callback-internal failures
+	// that should terminate the loop.
 	//
-	// Optional. If not provided, events are drained and errors (except CancelError
-	// from Stop-triggered cancellation) are returned as ExitReason.
+	// Optional. If not provided, events are drained and the first error
+	// (including CancelError from Stop) is returned as ExitReason.
 	OnAgentEvents func(ctx context.Context, tc *TurnContext[T], events *AsyncIterator[*AgentEvent]) error
 
 	// Store is the checkpoint store for persistence and resume. Optional.
@@ -442,7 +446,9 @@ type GenInputResult[T any] struct {
 	// Input is the agent input to execute
 	Input *AgentInput
 
-	// RunOpts are the options for this agent run
+	// RunOpts are the options for this agent run.
+	// Note: do not pass WithCheckPointID here; the TurnLoop automatically
+	// injects the checkpointID into the Runner.
 	RunOpts []AgentRunOption
 
 	// Consumed are the items selected for this turn.
@@ -464,6 +470,8 @@ type GenResumeResult[T any] struct {
 	RunCtx context.Context
 
 	// RunOpts are the options for this agent resume run.
+	// Note: do not pass WithCheckPointID here; the TurnLoop automatically
+	// injects the checkpointID into the Runner.
 	RunOpts []AgentRunOption
 
 	// ResumeParams are optional parameters for resuming an interrupted agent.
@@ -581,20 +589,20 @@ type TurnLoopExitState[T any] struct {
 	// by a cancel (Stop with WithImmediate, WithGraceful, or WithGracefulTimeout).
 	// Only populated when ExitReason is a *CancelError — if the agent finishes
 	// normally before the cancel takes effect, CanceledItems is empty.
-	// It can be used to reconstruct GenInput/PrepareAgent inputs when resuming.
+	// On resume, these are passed to GenResume's CanceledItems parameter.
 	CanceledItems []T
 
 	// StopCause is the business-supplied reason passed via WithStopCause.
 	// Empty if Stop was not called or no cause was provided.
 	StopCause string
 
-	// Checkpointed indicates whether a checkpoint save was attempted during cleanup.
+	// CheckpointAttempted indicates whether a checkpoint save was attempted when the loop exited.
 	// True only when Store is configured, CheckpointID is set, Stop() was called,
-	// and the loop was not idle at exit time.
-	Checkpointed bool
+	// the loop was not idle at exit time, and WithSkipCheckpoint was not used.
+	CheckpointAttempted bool
 
 	// CheckpointErr is the error from checkpoint save, if any.
-	// nil when Checkpointed is false (no attempt was made) or when the save succeeded.
+	// nil when CheckpointAttempted is false (no attempt was made) or when the save succeeded.
 	CheckpointErr error
 
 	// TakeLateItems returns items that were pushed after the loop stopped
@@ -604,8 +612,8 @@ type TurnLoopExitState[T any] struct {
 	// This function is idempotent: the first call computes and caches the result;
 	// subsequent calls return the same slice.
 	//
-	// After TakeLateItems is called, any subsequent Push() will panic. This
-	// seals the late buffer and prevents items from being silently lost.
+	// After TakeLateItems is called, any subsequent Push() will panic to
+	// prevent items from being silently lost.
 	//
 	// It is safe to call TakeLateItems from any goroutine after Wait() returns.
 	// If TakeLateItems is never called, late items are simply garbage collected.
@@ -720,10 +728,6 @@ type turnLoopCheckpoint[T any] struct {
 	CanceledItems  []T
 }
 
-// ErrCheckpointStoreNil is returned when a checkpoint operation requires a Store
-// but none was configured in TurnLoopConfig.
-var ErrCheckpointStoreNil = errors.New("checkpoint store is nil")
-
 func marshalTurnLoopCheckpoint[T any](c *turnLoopCheckpoint[T]) ([]byte, error) {
 	buf := new(bytes.Buffer)
 	if err := gob.NewEncoder(buf).Encode(c); err != nil {
@@ -742,7 +746,7 @@ func unmarshalTurnLoopCheckpoint[T any](data []byte) (*turnLoopCheckpoint[T], er
 
 func (l *TurnLoop[T]) saveTurnLoopCheckpoint(ctx context.Context, checkPointID string, c *turnLoopCheckpoint[T]) error {
 	if l.config.Store == nil {
-		return ErrCheckpointStoreNil
+		return errors.New("checkpoint store is nil")
 	}
 	data, err := marshalTurnLoopCheckpoint(c)
 	if err != nil {
@@ -831,14 +835,14 @@ type turnLoopPendingResume[T any] struct {
 type SafePoint int
 
 const (
-	// AfterToolCalls allows the agent to finish the current tool-call round
-	// before being cancelled.
-	AfterToolCalls SafePoint = 1 << iota
 	// AfterChatModel allows the agent to finish the current chat-model
 	// call before being cancelled.
-	AfterChatModel
-	// AnySafePoint is shorthand for AfterToolCalls | AfterChatModel.
-	AnySafePoint = AfterToolCalls | AfterChatModel
+	AfterChatModel SafePoint = 1 << iota
+	// AfterToolCalls allows the agent to finish the current tool-call round
+	// before being cancelled.
+	AfterToolCalls
+	// AnySafePoint is shorthand for AfterChatModel | AfterToolCalls.
+	AnySafePoint = AfterChatModel | AfterToolCalls
 )
 
 func (sp SafePoint) toCancelMode() CancelMode {
@@ -879,14 +883,17 @@ func WithGraceful() StopOption {
 }
 
 // WithImmediate aborts the running agent turn as soon as possible.
-// The agent's context is cancelled immediately without waiting for any
-// safe point. Nested agents inside AgentTools are torn down as a side effect.
+// The agent is cancelled immediately without waiting for any safe point.
+// Nested agents inside AgentTools will also receive the cancel signal
+// and be torn down.
 //
 // This is the most aggressive stop mode — typically used when the caller
 // wants to shut down the TurnLoop with no intention of resuming.
 func WithImmediate() StopOption {
 	return func(cfg *stopConfig) {
-		cfg.agentCancelOpts = []AgentCancelOption{}
+		cfg.agentCancelOpts = []AgentCancelOption{
+			WithRecursive(),
+		}
 	}
 }
 
@@ -986,8 +993,9 @@ type PushOption[T any] func(*pushConfig[T])
 // returns or after all tool calls complete), no nested agent is running at
 // the moment of cancellation — nested agents within AgentTools have either
 // not started yet (AfterChatModel) or already finished (AfterToolCalls).
-// If the preemption escalates to immediate via WithPreemptTimeout, any
-// in-flight nested agent is torn down through Go context cancellation.
+// Note: WithPreempt does NOT include WithRecursive (no escalation path exists).
+// WithPreemptTimeout DOES include WithRecursive so that on timeout escalation,
+// nested agents are properly torn down.
 //
 // WithPreempt and WithPreemptTimeout are mutually exclusive; if both are
 // passed to the same Push call, the last one wins.
@@ -1007,7 +1015,8 @@ func WithPreempt[T any](safePoint SafePoint) PushOption[T] {
 
 // WithPreemptTimeout is like WithPreempt but adds a timeout. If the agent has
 // not reached the safe point within timeout, the preemption escalates to
-// immediate cancellation.
+// immediate cancellation. On escalation, nested agents inside AgentTools will
+// also receive the cancel signal and be torn down.
 //
 // safePoint must not be zero; passing SafePoint(0) panics.
 func WithPreemptTimeout[T any](safePoint SafePoint, timeout time.Duration) PushOption[T] {
@@ -1019,6 +1028,7 @@ func WithPreemptTimeout[T any](safePoint SafePoint, timeout time.Duration) PushO
 		cfg.agentCancelOpts = []AgentCancelOption{
 			WithAgentCancelMode(safePoint.toCancelMode()),
 			WithAgentCancelTimeout(timeout),
+			WithRecursive(),
 		}
 	}
 }
@@ -1123,9 +1133,13 @@ func (l *TurnLoop[T]) Run(ctx context.Context) {
 // Push adds an item to the loop's buffer for processing.
 // This method is non-blocking and thread-safe.
 // Returns false if the loop has stopped, true otherwise. If a preemptive push
-// succeeds, the second return value is a channel that is closed when the loop
-// has acknowledged the preempt signal (by either initiating cancellation of the
-// current agent run or reaching a point where no cancellation is needed).
+// succeeds, the second return value is a channel that callers can wait on to
+// confirm the preempt signal has been received and the cancel request submitted
+// — i.e., the current turn is guaranteed to be preempted. Specifically:
+//   - If an agent is running: the channel closes after TurnLoop submits cancel.
+//   - If no agent is running (loop idle or not yet started): the channel closes
+//     immediately (nothing to cancel).
+//
 // If the loop has not been started yet (Run not called), items are buffered
 // and will be processed once Run is called.
 // After Wait() returns, failed pushes can be recovered via TurnLoopExitState.TakeLateItems().
@@ -1491,7 +1505,7 @@ func (l *TurnLoop[T]) run(ctx context.Context) {
 func (l *TurnLoop[T]) setupBridgeStore(spec *turnRunSpec[T], runOpts []AgentRunOption) ([]AgentRunOption, *bridgeStore, error) {
 	store := l.config.Store
 	if store == nil && spec.isResume {
-		return nil, nil, fmt.Errorf("failed to resume agent: %w", ErrCheckpointStoreNil)
+		return nil, nil, fmt.Errorf("failed to resume agent: checkpoint store is nil")
 	}
 	if store == nil {
 		return runOpts, nil, nil
@@ -1764,12 +1778,12 @@ func (l *TurnLoop[T]) cleanup(ctx context.Context) {
 	var takeLateResult []T
 
 	l.result = &TurnLoopExitState[T]{
-		ExitReason:     l.runErr,
-		UnhandledItems: unhandled,
-		CanceledItems:  l.canceledItems,
-		StopCause:      l.stopSig.getStopCause(),
-		Checkpointed:   checkpointed,
-		CheckpointErr:  checkpointErr,
+		ExitReason:          l.runErr,
+		UnhandledItems:      unhandled,
+		CanceledItems:       l.canceledItems,
+		StopCause:           l.stopSig.getStopCause(),
+		CheckpointAttempted: checkpointed,
+		CheckpointErr:       checkpointErr,
 		TakeLateItems: func() []T {
 			takeLateOnce.Do(func() {
 				l.lateMu.Lock()
