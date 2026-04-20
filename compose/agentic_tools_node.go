@@ -41,7 +41,7 @@ type AgenticToolsNode struct {
 	inner *ToolsNode
 }
 
-func (a *AgenticToolsNode) Invoke(ctx context.Context, input *schema.AgenticMessage, opts ...ToolsNodeOption) ([]*schema.AgenticMessage, error) {
+func (a *AgenticToolsNode) Invoke(ctx context.Context, input *schema.AgenticMessage, opts ...ToolsNodeOption) (*schema.AgenticMessage, error) {
 	result, err := a.inner.Invoke(ctx, agenticMessageToToolCallMessage(input), opts...)
 	if err != nil {
 		return nil, err
@@ -50,7 +50,7 @@ func (a *AgenticToolsNode) Invoke(ctx context.Context, input *schema.AgenticMess
 }
 
 func (a *AgenticToolsNode) Stream(ctx context.Context, input *schema.AgenticMessage,
-	opts ...ToolsNodeOption) (*schema.StreamReader[[]*schema.AgenticMessage], error) {
+	opts ...ToolsNodeOption) (*schema.StreamReader[*schema.AgenticMessage], error) {
 	result, err := a.inner.Stream(ctx, agenticMessageToToolCallMessage(input), opts...)
 	if err != nil {
 		return nil, err
@@ -79,7 +79,7 @@ func agenticMessageToToolCallMessage(input *schema.AgenticMessage) *schema.Messa
 	}
 }
 
-func toolMessageToAgenticMessage(input []*schema.Message) []*schema.AgenticMessage {
+func toolMessageToAgenticMessage(input []*schema.Message) *schema.AgenticMessage {
 	var results []*schema.ContentBlock
 	for _, m := range input {
 		results = append(results, &schema.ContentBlock{
@@ -92,14 +92,14 @@ func toolMessageToAgenticMessage(input []*schema.Message) []*schema.AgenticMessa
 			Extra: m.Extra,
 		})
 	}
-	return []*schema.AgenticMessage{{
+	return &schema.AgenticMessage{
 		Role:          schema.AgenticRoleTypeUser,
 		ContentBlocks: results,
-	}}
+	}
 }
 
-func streamToolMessageToAgenticMessage(input *schema.StreamReader[[]*schema.Message]) *schema.StreamReader[[]*schema.AgenticMessage] {
-	return schema.StreamReaderWithConvert(input, func(t []*schema.Message) ([]*schema.AgenticMessage, error) {
+func streamToolMessageToAgenticMessage(input *schema.StreamReader[[]*schema.Message]) *schema.StreamReader[*schema.AgenticMessage] {
+	return schema.StreamReaderWithConvert(input, func(t []*schema.Message) (*schema.AgenticMessage, error) {
 		var results []*schema.ContentBlock
 		for i, m := range t {
 			if m == nil {
@@ -116,10 +116,10 @@ func streamToolMessageToAgenticMessage(input *schema.StreamReader[[]*schema.Mess
 				Extra:         m.Extra,
 			})
 		}
-		return []*schema.AgenticMessage{{
+		return &schema.AgenticMessage{
 			Role:          schema.AgenticRoleTypeUser,
 			ContentBlocks: results,
-		}}, nil
+		}, nil
 	})
 }
 

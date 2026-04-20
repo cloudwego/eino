@@ -104,8 +104,7 @@ func TestToolMessageToAgenticMessage(t *testing.T) {
 		},
 	}
 	ret := toolMessageToAgenticMessage(input)
-	assert.Equal(t, 1, len(ret))
-	assert.Equal(t, schema.AgenticRoleTypeUser, ret[0].Role)
+	assert.Equal(t, schema.AgenticRoleTypeUser, ret.Role)
 	assert.Equal(t, []*schema.ContentBlock{
 		{
 			Type: schema.ContentBlockTypeFunctionToolResult,
@@ -131,7 +130,7 @@ func TestToolMessageToAgenticMessage(t *testing.T) {
 				Result: "content3",
 			},
 		},
-	}, ret[0].ContentBlocks)
+	}, ret.ContentBlocks)
 }
 
 func TestStreamToolMessageToAgenticMessage(t *testing.T) {
@@ -185,7 +184,7 @@ func TestStreamToolMessageToAgenticMessage(t *testing.T) {
 		},
 	})
 	ret := streamToolMessageToAgenticMessage(input)
-	var chunks [][]*schema.AgenticMessage
+	var chunks []*schema.AgenticMessage
 	for {
 		chunk, err := ret.Recv()
 		if err == io.EOF {
@@ -194,39 +193,37 @@ func TestStreamToolMessageToAgenticMessage(t *testing.T) {
 		assert.NoError(t, err)
 		chunks = append(chunks, chunk)
 	}
-	result, err := schema.ConcatAgenticMessagesArray(chunks)
+	result, err := schema.ConcatAgenticMessages(chunks)
 	assert.NoError(t, err)
 
 	actualStr, err := sonic.MarshalString(result)
 	assert.NoError(t, err)
 
-	expected := []*schema.AgenticMessage{
-		{
-			Role: schema.AgenticRoleTypeUser,
-			ContentBlocks: []*schema.ContentBlock{
-				{
-					Type: schema.ContentBlockTypeFunctionToolResult,
-					FunctionToolResult: &schema.FunctionToolResult{
-						CallID: "1",
-						Name:   "name1",
-						Result: "content1-1",
-					},
+	expected := &schema.AgenticMessage{
+		Role: schema.AgenticRoleTypeUser,
+		ContentBlocks: []*schema.ContentBlock{
+			{
+				Type: schema.ContentBlockTypeFunctionToolResult,
+				FunctionToolResult: &schema.FunctionToolResult{
+					CallID: "1",
+					Name:   "name1",
+					Result: "content1-1",
 				},
-				{
-					Type: schema.ContentBlockTypeFunctionToolResult,
-					FunctionToolResult: &schema.FunctionToolResult{
-						CallID: "2",
-						Name:   "name2",
-						Result: "content2-1content2-2",
-					},
+			},
+			{
+				Type: schema.ContentBlockTypeFunctionToolResult,
+				FunctionToolResult: &schema.FunctionToolResult{
+					CallID: "2",
+					Name:   "name2",
+					Result: "content2-1content2-2",
 				},
-				{
-					Type: schema.ContentBlockTypeFunctionToolResult,
-					FunctionToolResult: &schema.FunctionToolResult{
-						CallID: "3",
-						Name:   "name3",
-						Result: "content3-1content3-2",
-					},
+			},
+			{
+				Type: schema.ContentBlockTypeFunctionToolResult,
+				FunctionToolResult: &schema.FunctionToolResult{
+					CallID: "3",
+					Name:   "name3",
+					Result: "content3-1content3-2",
 				},
 			},
 		},

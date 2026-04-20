@@ -180,11 +180,11 @@ func TestNewComponentTemplate(t *testing.T) {
 					cnt++
 					return ctx
 				},
-				OnEnd: func(ctx context.Context, info *callbacks.RunInfo, input []*schema.AgenticMessage) context.Context {
+				OnEnd: func(ctx context.Context, info *callbacks.RunInfo, input *schema.AgenticMessage) context.Context {
 					cnt++
 					return ctx
 				},
-				OnEndWithStreamOutput: func(ctx context.Context, info *callbacks.RunInfo, output *schema.StreamReader[[]*schema.AgenticMessage]) context.Context {
+				OnEndWithStreamOutput: func(ctx context.Context, info *callbacks.RunInfo, output *schema.StreamReader[*schema.AgenticMessage]) context.Context {
 					output.Close()
 					cnt++
 					return ctx
@@ -323,11 +323,11 @@ func TestNewComponentTemplate(t *testing.T) {
 				cnt++
 				return ctx
 			},
-			OnEnd: func(ctx context.Context, info *callbacks.RunInfo, input []*schema.AgenticMessage) context.Context {
+			OnEnd: func(ctx context.Context, info *callbacks.RunInfo, input *schema.AgenticMessage) context.Context {
 				cnt++
 				return ctx
 			},
-			OnEndWithStreamOutput: func(ctx context.Context, info *callbacks.RunInfo, output *schema.StreamReader[[]*schema.AgenticMessage]) context.Context {
+			OnEndWithStreamOutput: func(ctx context.Context, info *callbacks.RunInfo, output *schema.StreamReader[*schema.AgenticMessage]) context.Context {
 				output.Close()
 				cnt++
 				return ctx
@@ -448,7 +448,7 @@ func TestNewComponentTemplate(t *testing.T) {
 					}
 					return ctx
 				},
-				OnEnd: func(ctx context.Context, info *callbacks.RunInfo, input []*schema.AgenticMessage) context.Context {
+				OnEnd: func(ctx context.Context, info *callbacks.RunInfo, input *schema.AgenticMessage) context.Context {
 					if input == nil {
 						cnt++
 					}

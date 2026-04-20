@@ -331,7 +331,7 @@ func (c *handlerTemplate) OnEndWithStreamOutput(ctx context.Context, info *callb
 			}))
 	case compose.ComponentOfAgenticToolsNode:
 		return c.agenticToolsNodeHandler.OnEndWithStreamOutput(ctx, info,
-			schema.StreamReaderWithConvert(output, func(item callbacks.CallbackOutput) ([]*schema.AgenticMessage, error) {
+			schema.StreamReaderWithConvert(output, func(item callbacks.CallbackOutput) (*schema.AgenticMessage, error) {
 				return convAgenticToolsNodeCallbackOutput(item), nil
 			}))
 	case compose.ComponentOfGraph,
@@ -712,8 +712,8 @@ func (ch *AgenticModelCallbackHandler) Needed(ctx context.Context, runInfo *call
 // lifecycle events.
 type AgenticToolsNodeCallbackHandlers struct {
 	OnStart               func(ctx context.Context, info *callbacks.RunInfo, input *schema.AgenticMessage) context.Context
-	OnEnd                 func(ctx context.Context, info *callbacks.RunInfo, input []*schema.AgenticMessage) context.Context
-	OnEndWithStreamOutput func(ctx context.Context, info *callbacks.RunInfo, output *schema.StreamReader[[]*schema.AgenticMessage]) context.Context
+	OnEnd                 func(ctx context.Context, info *callbacks.RunInfo, input *schema.AgenticMessage) context.Context
+	OnEndWithStreamOutput func(ctx context.Context, info *callbacks.RunInfo, output *schema.StreamReader[*schema.AgenticMessage]) context.Context
 	OnError               func(ctx context.Context, info *callbacks.RunInfo, err error) context.Context
 }
 
@@ -742,9 +742,9 @@ func convAgenticToolsNodeCallbackInput(src callbacks.CallbackInput) *schema.Agen
 	}
 }
 
-func convAgenticToolsNodeCallbackOutput(src callbacks.CallbackInput) []*schema.AgenticMessage {
+func convAgenticToolsNodeCallbackOutput(src callbacks.CallbackInput) *schema.AgenticMessage {
 	switch t := src.(type) {
-	case []*schema.AgenticMessage:
+	case *schema.AgenticMessage:
 		return t
 	default:
 		return nil
