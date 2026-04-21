@@ -22,6 +22,7 @@ import (
 	"sync/atomic"
 	"testing"
 
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/cloudwego/eino/components/model"
@@ -47,7 +48,7 @@ func TestBuildModelWrappers_FailoverProxyInner(t *testing.T) {
 		},
 	}
 
-	wrapped := buildModelWrappers(base, &modelWrapperConfig{
+	wrapped := buildModelWrappers[*schema.Message](base, &modelWrapperConfig{
 		failoverConfig: failoverCfg,
 	})
 
@@ -101,11 +102,11 @@ func TestStateModelWrapper_Generate_WithFailover(t *testing.T) {
 		},
 	}
 
-	wrapped := buildModelWrappers(m1, &modelWrapperConfig{
+	wrapped := buildModelWrappers[*schema.Message](m1, &modelWrapperConfig{
 		failoverConfig: failoverCfg,
 	})
 
-	ctx := withChatModelAgentExecCtx(context.Background(), &chatModelAgentExecCtx{
+	ctx := withTypedChatModelAgentExecCtx[*schema.Message](context.Background(), &chatModelAgentExecCtx{
 		failoverLastSuccessModel: m1,
 	})
 	got, err := wrapped.Generate(ctx, []*schema.Message{schema.UserMessage("hi")})
@@ -162,11 +163,11 @@ func TestStateModelWrapper_Stream_WithFailover(t *testing.T) {
 		},
 	}
 
-	wrapped := buildModelWrappers(m1, &modelWrapperConfig{
+	wrapped := buildModelWrappers[*schema.Message](m1, &modelWrapperConfig{
 		failoverConfig: failoverCfg,
 	})
 
-	ctx := withChatModelAgentExecCtx(context.Background(), &chatModelAgentExecCtx{
+	ctx := withTypedChatModelAgentExecCtx[*schema.Message](context.Background(), &chatModelAgentExecCtx{
 		failoverLastSuccessModel: m1,
 	})
 	sr, err := wrapped.Stream(ctx, []*schema.Message{schema.UserMessage("hi")})
@@ -178,4 +179,37 @@ func TestStateModelWrapper_Stream_WithFailover(t *testing.T) {
 	require.Equal(t, int32(1), atomic.LoadInt32(&m1Calls))
 	require.Equal(t, int32(1), atomic.LoadInt32(&m2Calls))
 	require.Equal(t, int32(1), atomic.LoadInt32(&shouldCalls))
+}
+
+func TestFailoverAcceptsAgenticAgent(t *testing.T) {
+	ctx := context.Background()
+
+	m := &mockAgenticModel{
+		generateFn: func(ctx context.Context, input []*schema.AgenticMessage, opts ...model.Option) (*schema.AgenticMessage, error) {
+			return agenticMsg("ok"), nil
+		},
+	}
+
+	fallbackModel := &mockChatModelForAttack{
+		generateFn: func(ctx context.Context, input []*schema.Message, opts ...model.Option) (*schema.Message, error) {
+			return schema.AssistantMessage("fallback", nil), nil
+		},
+	}
+
+	agent, err := NewTypedChatModelAgent[*schema.AgenticMessage](ctx, &TypedChatModelAgentConfig[*schema.AgenticMessage]{
+		Name:        "FailoverAgent",
+		Description: "Agent with failover config",
+		Model:       m,
+		ModelFailoverConfig: &ModelFailoverConfig{
+			MaxRetries: 1,
+			ShouldFailover: func(ctx context.Context, outputMessage *schema.Message, outputErr error) bool {
+				return true
+			},
+			GetFailoverModel: func(ctx context.Context, failoverCtx *FailoverContext) (model.BaseChatModel, []*schema.Message, error) {
+				return fallbackModel, nil, nil
+			},
+		},
+	})
+	require.NoError(t, err)
+	assert.NotNil(t, agent)
 }

@@ -22,12 +22,13 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/cloudwego/eino/callbacks"
 	"github.com/cloudwego/eino/schema"
 )
 
-func TestCopyEventIterator(t *testing.T) {
+func TestCopyTypedEventIterator(t *testing.T) {
 	t.Run("n=0 returns nil", func(t *testing.T) {
 		iter, gen := NewAsyncIteratorPair[*AgentEvent]()
 		go func() {
@@ -35,7 +36,7 @@ func TestCopyEventIterator(t *testing.T) {
 			gen.Close()
 		}()
 
-		result := copyEventIterator(iter, 0)
+		result := copyTypedEventIterator(iter, 0)
 		assert.Nil(t, result)
 	})
 
@@ -46,7 +47,7 @@ func TestCopyEventIterator(t *testing.T) {
 			gen.Close()
 		}()
 
-		result := copyEventIterator(iter, 1)
+		result := copyTypedEventIterator(iter, 1)
 		assert.Len(t, result, 1)
 		assert.Equal(t, iter, result[0])
 	})
@@ -66,7 +67,7 @@ func TestCopyEventIterator(t *testing.T) {
 		}()
 
 		n := 3
-		copies := copyEventIterator(iter, n)
+		copies := copyTypedEventIterator(iter, n)
 		assert.Len(t, copies, n)
 
 		var wg sync.WaitGroup
@@ -127,7 +128,7 @@ func TestCopyAgentCallbackOutput(t *testing.T) {
 		assert.Len(t, result, 2)
 
 		for i, r := range result {
-			assert.NotNil(t, r, "result[%d] should not be nil", i)
+			require.NotNil(t, r, "result[%d] should not be nil", i)
 			assert.NotNil(t, r.Events, "result[%d].Events should not be nil", i)
 		}
 	})
@@ -233,4 +234,155 @@ func TestWithMultipleCallbacksOption(t *testing.T) {
 	opts := getCommonOptions(nil, opt)
 
 	assert.Len(t, opts.handlers, 2)
+}
+
+func TestCopyTypedEventIteratorAgentic(t *testing.T) {
+	t.Run("n=0 returns nil", func(t *testing.T) {
+		iter, gen := NewAsyncIteratorPair[*TypedAgentEvent[*schema.AgenticMessage]]()
+		go func() {
+			gen.Send(&TypedAgentEvent[*schema.AgenticMessage]{AgentName: "test"})
+			gen.Close()
+		}()
+
+		result := copyTypedEventIterator(iter, 0)
+		assert.Nil(t, result)
+	})
+
+	t.Run("n=1 returns original iterator", func(t *testing.T) {
+		iter, gen := NewAsyncIteratorPair[*TypedAgentEvent[*schema.AgenticMessage]]()
+		go func() {
+			gen.Send(&TypedAgentEvent[*schema.AgenticMessage]{AgentName: "test"})
+			gen.Close()
+		}()
+
+		result := copyTypedEventIterator(iter, 1)
+		assert.Len(t, result, 1)
+		assert.Equal(t, iter, result[0])
+	})
+
+	t.Run("n>1 creates n independent copies", func(t *testing.T) {
+		iter, gen := NewAsyncIteratorPair[*TypedAgentEvent[*schema.AgenticMessage]]()
+		events := []*TypedAgentEvent[*schema.AgenticMessage]{
+			{AgentName: "agent1", Output: &TypedAgentOutput[*schema.AgenticMessage]{
+				MessageOutput: &TypedMessageVariant[*schema.AgenticMessage]{Message: agenticMsg("msg1")},
+			}},
+			{AgentName: "agent2", Output: &TypedAgentOutput[*schema.AgenticMessage]{
+				MessageOutput: &TypedMessageVariant[*schema.AgenticMessage]{Message: agenticMsg("msg2")},
+			}},
+		}
+
+		go func() {
+			for _, e := range events {
+				gen.Send(e)
+			}
+			gen.Close()
+		}()
+
+		n := 3
+		copies := copyTypedEventIterator(iter, n)
+		assert.Len(t, copies, n)
+
+		var wg sync.WaitGroup
+		receivedEvents := make([][]*TypedAgentEvent[*schema.AgenticMessage], n)
+
+		for i := 0; i < n; i++ {
+			wg.Add(1)
+			go func(idx int) {
+				defer wg.Done()
+				for {
+					event, ok := copies[idx].Next()
+					if !ok {
+						break
+					}
+					receivedEvents[idx] = append(receivedEvents[idx], event)
+				}
+			}(i)
+		}
+
+		wg.Wait()
+
+		for i := 0; i < n; i++ {
+			assert.Len(t, receivedEvents[i], len(events), "iterator %d should receive all events", i)
+			for j, e := range receivedEvents[i] {
+				assert.Equal(t, events[j].AgentName, e.AgentName)
+			}
+		}
+	})
+}
+
+func TestCopyTypedCallbackOutput(t *testing.T) {
+	t.Run("nil output", func(t *testing.T) {
+		result := copyTypedCallbackOutput[*schema.AgenticMessage](nil, 3)
+		assert.Len(t, result, 3)
+		for _, r := range result {
+			assert.Nil(t, r)
+		}
+	})
+
+	t.Run("output with nil Events", func(t *testing.T) {
+		out := &TypedAgentCallbackOutput[*schema.AgenticMessage]{Events: nil}
+		result := copyTypedCallbackOutput(out, 3)
+		assert.Len(t, result, 3)
+		for _, r := range result {
+			assert.Equal(t, out, r)
+		}
+	})
+
+	t.Run("valid output with events", func(t *testing.T) {
+		iter, gen := NewAsyncIteratorPair[*TypedAgentEvent[*schema.AgenticMessage]]()
+		go func() {
+			gen.Send(&TypedAgentEvent[*schema.AgenticMessage]{AgentName: "test"})
+			gen.Close()
+		}()
+
+		out := &TypedAgentCallbackOutput[*schema.AgenticMessage]{Events: iter}
+		result := copyTypedCallbackOutput(out, 2)
+		assert.Len(t, result, 2)
+
+		for i, r := range result {
+			require.NotNil(t, r, "result[%d] should not be nil", i)
+			assert.NotNil(t, r.Events, "result[%d].Events should not be nil", i)
+		}
+	})
+}
+
+func TestConvTypedCallbackInput(t *testing.T) {
+	t.Run("valid TypedAgentCallbackInput", func(t *testing.T) {
+		input := &TypedAgentCallbackInput[*schema.AgenticMessage]{
+			Input: &TypedAgentInput[*schema.AgenticMessage]{
+				Messages: []*schema.AgenticMessage{schema.UserAgenticMessage("test")},
+			},
+		}
+		result := ConvTypedCallbackInput[*schema.AgenticMessage](input)
+		assert.Equal(t, input, result)
+	})
+
+	t.Run("invalid type returns nil", func(t *testing.T) {
+		result := ConvTypedCallbackInput[*schema.AgenticMessage]("invalid")
+		assert.Nil(t, result)
+	})
+
+	t.Run("nil returns nil", func(t *testing.T) {
+		result := ConvTypedCallbackInput[*schema.AgenticMessage](nil)
+		assert.Nil(t, result)
+	})
+}
+
+func TestConvTypedCallbackOutput(t *testing.T) {
+	t.Run("valid TypedAgentCallbackOutput", func(t *testing.T) {
+		iter, _ := NewAsyncIteratorPair[*TypedAgentEvent[*schema.AgenticMessage]]()
+		output := &TypedAgentCallbackOutput[*schema.AgenticMessage]{Events: iter}
+		result := ConvTypedCallbackOutput[*schema.AgenticMessage](output)
+		assert.Equal(t, output, result)
+	})
+
+	t.Run("invalid type returns nil", func(t *testing.T) {
+		result := ConvTypedCallbackOutput[*schema.AgenticMessage]("invalid")
+		assert.Nil(t, result)
+	})
+
+	t.Run("nil returns nil", func(t *testing.T) {
+		result := ConvTypedCallbackOutput[*schema.AgenticMessage](nil)
+		assert.Nil(t, result)
+	})
 }
