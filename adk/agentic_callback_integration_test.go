@@ -34,7 +34,7 @@ type agenticCallbackRecorder struct {
 	onStartCalled  bool
 	onEndCalled    bool
 	runInfo        *callbacks.RunInfo
-	inputReceived  *AgenticCallbackInput
+	inputReceived  *TypedAgentCallbackInput[*schema.AgenticMessage]
 	eventsReceived []*TypedAgentEvent[*schema.AgenticMessage]
 	eventsDone     chan struct{}
 	closeOnce      sync.Once
@@ -64,20 +64,20 @@ func newAgenticRecordingHandler(recorder *agenticCallbackRecorder) callbacks.Han
 	recorder.eventsDone = make(chan struct{})
 	return callbacks.NewHandlerBuilder().
 		OnStartFn(func(ctx context.Context, info *callbacks.RunInfo, input callbacks.CallbackInput) context.Context {
-			if info.Component != ComponentOfAgentic {
+			if info.Component != ComponentOfAgenticAgent {
 				return ctx
 			}
 			recorder.mu.Lock()
 			defer recorder.mu.Unlock()
 			recorder.onStartCalled = true
 			recorder.runInfo = info
-			if agentInput := ConvAgenticCallbackInput(input); agentInput != nil {
+			if agentInput := ConvTypedCallbackInput[*schema.AgenticMessage](input); agentInput != nil {
 				recorder.inputReceived = agentInput
 			}
 			return ctx
 		}).
 		OnEndFn(func(ctx context.Context, info *callbacks.RunInfo, output callbacks.CallbackOutput) context.Context {
-			if info.Component != ComponentOfAgentic {
+			if info.Component != ComponentOfAgenticAgent {
 				return ctx
 			}
 			recorder.mu.Lock()
@@ -85,7 +85,7 @@ func newAgenticRecordingHandler(recorder *agenticCallbackRecorder) callbacks.Han
 			recorder.runInfo = info
 			recorder.mu.Unlock()
 
-			if agentOutput := ConvAgenticCallbackOutput(output); agentOutput != nil {
+			if agentOutput := ConvTypedCallbackOutput[*schema.AgenticMessage](output); agentOutput != nil {
 				if agentOutput.Events != nil {
 					go func() {
 						defer recorder.closeOnce.Do(func() { close(recorder.eventsDone) })
@@ -158,7 +158,7 @@ func TestAgenticCallback(t *testing.T) {
 	t.Run("RunInfo_Fields", func(t *testing.T) {
 		require.NotNil(t, recorder.runInfo)
 		assert.Equal(t, "TestChatAgent", recorder.runInfo.Name)
-		assert.Equal(t, ComponentOfAgentic, recorder.runInfo.Component)
+		assert.Equal(t, ComponentOfAgenticAgent, recorder.runInfo.Component)
 	})
 
 	t.Run("Events_MatchAgentOutput", func(t *testing.T) {
@@ -226,7 +226,7 @@ func TestCoverage_WrapAgenticIterWithOnEnd(t *testing.T) {
 			return ctx
 		}).
 		OnEndFn(func(ctx context.Context, info *callbacks.RunInfo, output callbacks.CallbackOutput) context.Context {
-			if info.Component == ComponentOfAgentic {
+			if info.Component == ComponentOfAgenticAgent {
 				onEndCalled = true
 			}
 			return ctx
@@ -236,7 +236,7 @@ func TestCoverage_WrapAgenticIterWithOnEnd(t *testing.T) {
 	ctx = initAgenticCallbacks(ctx, "test-agent", "ChatModel",
 		WithCallbacks(handler))
 
-	cbInput := &AgenticCallbackInput{
+	cbInput := &TypedAgentCallbackInput[*schema.AgenticMessage]{
 		Input: &TypedAgentInput[*schema.AgenticMessage]{
 			Messages: []*schema.AgenticMessage{schema.UserAgenticMessage("Hi")},
 		},

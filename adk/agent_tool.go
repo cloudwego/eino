@@ -231,7 +231,7 @@ func (at *typedAgentTool[M]) InvokableRun(ctx context.Context, argumentsInJSON s
 					event.RunPath = rp
 				}
 				if msgEvent, ok := any(event).(*AgentEvent); ok {
-					tmp := copyAgentEvent(msgEvent)
+					tmp := copyTypedAgentEvent(msgEvent)
 					gen.Send(msgEvent)
 					event = any(tmp).(*TypedAgentEvent[M])
 				} else {

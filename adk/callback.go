@@ -22,7 +22,6 @@ import (
 	"github.com/cloudwego/eino/callbacks"
 	"github.com/cloudwego/eino/components"
 	icb "github.com/cloudwego/eino/internal/callbacks"
-	"github.com/cloudwego/eino/schema"
 )
 
 // AgentCallbackInput represents the input passed to agent callbacks during OnStart.
@@ -44,18 +43,18 @@ type AgentCallbackOutput struct {
 	Events *AsyncIterator[*AgentEvent]
 }
 
-func copyEventIterator(iter *AsyncIterator[*AgentEvent], n int) []*AsyncIterator[*AgentEvent] {
+func copyTypedEventIterator[M messageType](iter *AsyncIterator[*TypedAgentEvent[M]], n int) []*AsyncIterator[*TypedAgentEvent[M]] {
 	if n <= 0 {
 		return nil
 	}
 	if n == 1 {
-		return []*AsyncIterator[*AgentEvent]{iter}
+		return []*AsyncIterator[*TypedAgentEvent[M]]{iter}
 	}
 
-	iterators := make([]*AsyncIterator[*AgentEvent], n)
-	generators := make([]*AsyncGenerator[*AgentEvent], n)
+	iterators := make([]*AsyncIterator[*TypedAgentEvent[M]], n)
+	generators := make([]*AsyncGenerator[*TypedAgentEvent[M]], n)
 	for i := 0; i < n; i++ {
-		iterators[i], generators[i] = NewAsyncIteratorPair[*AgentEvent]()
+		iterators[i], generators[i] = NewAsyncIteratorPair[*TypedAgentEvent[M]]()
 	}
 
 	go func() {
@@ -71,7 +70,7 @@ func copyEventIterator(iter *AsyncIterator[*AgentEvent], n int) []*AsyncIterator
 				break
 			}
 			for i := 0; i < n-1; i++ {
-				generators[i].Send(copyAgentEvent(event))
+				generators[i].Send(copyTypedAgentEvent(event))
 			}
 			generators[n-1].Send(event)
 		}
@@ -88,7 +87,7 @@ func copyAgentCallbackOutput(out *AgentCallbackOutput, n int) []*AgentCallbackOu
 		}
 		return result
 	}
-	iters := copyEventIterator(out.Events, n)
+	iters := copyTypedEventIterator(out.Events, n)
 	result := make([]*AgentCallbackOutput, n)
 	for i, iter := range iters {
 		result[i] = &AgentCallbackOutput{Events: iter}
@@ -135,91 +134,55 @@ func getAgentType(agent Agent) string {
 	return ""
 }
 
-// AgenticCallbackInput represents the input passed to agentic agent callbacks during OnStart.
-// Use ConvAgenticCallbackInput to safely convert from callbacks.CallbackInput.
-type AgenticCallbackInput struct {
+// TypedAgentCallbackInput represents the input passed to typed agent callbacks during OnStart.
+// Use ConvTypedCallbackInput to safely convert from callbacks.CallbackInput.
+type TypedAgentCallbackInput[M messageType] struct {
 	// Input contains the agent input for a new run. Nil when resuming.
-	Input *TypedAgentInput[*schema.AgenticMessage]
+	Input *TypedAgentInput[M]
 	// ResumeInfo contains resume information when resuming from an interrupt. Nil for new runs.
 	ResumeInfo *ResumeInfo
 }
 
-// AgenticCallbackOutput represents the output passed to agentic agent callbacks during OnEnd.
-// Use ConvAgenticCallbackOutput to safely convert from callbacks.CallbackOutput.
+// TypedAgentCallbackOutput represents the output passed to typed agent callbacks during OnEnd.
+// Use ConvTypedCallbackOutput to safely convert from callbacks.CallbackOutput.
 //
 // Important: The Events iterator should be consumed asynchronously to avoid blocking
 // the agent execution. Each callback handler receives an independent copy of the iterator.
-type AgenticCallbackOutput struct {
-	// Events provides a stream of agentic agent events. Each handler receives its own copy.
-	Events *AsyncIterator[*TypedAgentEvent[*schema.AgenticMessage]]
+type TypedAgentCallbackOutput[M messageType] struct {
+	// Events provides a stream of agent events. Each handler receives its own copy.
+	Events *AsyncIterator[*TypedAgentEvent[M]]
 }
 
-// ConvAgenticCallbackInput converts a callbacks.CallbackInput to *AgenticCallbackInput.
+// ConvTypedCallbackInput converts a callbacks.CallbackInput to *TypedAgentCallbackInput[M].
 // Returns nil if the input is not of the expected type.
-func ConvAgenticCallbackInput(input callbacks.CallbackInput) *AgenticCallbackInput {
-	if v, ok := input.(*AgenticCallbackInput); ok {
+func ConvTypedCallbackInput[M messageType](input callbacks.CallbackInput) *TypedAgentCallbackInput[M] {
+	if v, ok := input.(*TypedAgentCallbackInput[M]); ok {
 		return v
 	}
 	return nil
 }
 
-// ConvAgenticCallbackOutput converts a callbacks.CallbackOutput to *AgenticCallbackOutput.
+// ConvTypedCallbackOutput converts a callbacks.CallbackOutput to *TypedAgentCallbackOutput[M].
 // Returns nil if the output is not of the expected type.
-func ConvAgenticCallbackOutput(output callbacks.CallbackOutput) *AgenticCallbackOutput {
-	if v, ok := output.(*AgenticCallbackOutput); ok {
+func ConvTypedCallbackOutput[M messageType](output callbacks.CallbackOutput) *TypedAgentCallbackOutput[M] {
+	if v, ok := output.(*TypedAgentCallbackOutput[M]); ok {
 		return v
 	}
 	return nil
 }
 
-func copyAgenticEventIterator(iter *AsyncIterator[*TypedAgentEvent[*schema.AgenticMessage]], n int) []*AsyncIterator[*TypedAgentEvent[*schema.AgenticMessage]] {
-	if n <= 0 {
-		return nil
-	}
-	if n == 1 {
-		return []*AsyncIterator[*TypedAgentEvent[*schema.AgenticMessage]]{iter}
-	}
-
-	iterators := make([]*AsyncIterator[*TypedAgentEvent[*schema.AgenticMessage]], n)
-	generators := make([]*AsyncGenerator[*TypedAgentEvent[*schema.AgenticMessage]], n)
-	for i := 0; i < n; i++ {
-		iterators[i], generators[i] = NewAsyncIteratorPair[*TypedAgentEvent[*schema.AgenticMessage]]()
-	}
-
-	go func() {
-		defer func() {
-			for _, g := range generators {
-				g.Close()
-			}
-		}()
-
-		for {
-			event, ok := iter.Next()
-			if !ok {
-				break
-			}
-			for i := 0; i < n-1; i++ {
-				generators[i].Send(copyAgenticEvent(event))
-			}
-			generators[n-1].Send(event)
-		}
-	}()
-
-	return iterators
-}
-
-func copyAgenticCallbackOutput(out *AgenticCallbackOutput, n int) []*AgenticCallbackOutput {
+func copyTypedCallbackOutput[M messageType](out *TypedAgentCallbackOutput[M], n int) []*TypedAgentCallbackOutput[M] {
 	if out == nil || out.Events == nil {
-		result := make([]*AgenticCallbackOutput, n)
+		result := make([]*TypedAgentCallbackOutput[M], n)
 		for i := 0; i < n; i++ {
 			result[i] = out
 		}
 		return result
 	}
-	iters := copyAgenticEventIterator(out.Events, n)
-	result := make([]*AgenticCallbackOutput, n)
+	iters := copyTypedEventIterator(out.Events, n)
+	result := make([]*TypedAgentCallbackOutput[M], n)
 	for i, iter := range iters {
-		result[i] = &AgenticCallbackOutput{Events: iter}
+		result[i] = &TypedAgentCallbackOutput[M]{Events: iter}
 	}
 	return result
 }
@@ -228,7 +191,7 @@ func initAgenticCallbacks(ctx context.Context, agentName, agentType string, opts
 	ri := &callbacks.RunInfo{
 		Name:      agentName,
 		Type:      agentType,
-		Component: ComponentOfAgentic,
+		Component: ComponentOfAgenticAgent,
 	}
 
 	o := getCommonOptions(nil, opts...)

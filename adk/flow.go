@@ -521,7 +521,7 @@ func (a *flowAgent) run(
 			// copy before adding to session because once added to session it's stream could be consumed by genAgentInput at any time
 			// interrupt action are not added to session, because ALL information contained in it
 			// is either presented to end-user, or made available to agents through other means
-			copied := copyAgentEvent(event)
+			copied := copyTypedAgentEvent(event)
 			setAutomaticClose(copied)
 			setAutomaticClose(event)
 			runCtx.Session.addEvent(copied)
@@ -532,7 +532,7 @@ func (a *flowAgent) run(
 		if exactRunPathMatch(runCtx.RunPath, event.RunPath) {
 			lastAction = event.Action
 		}
-		copied := copyAgentEvent(event)
+		copied := copyTypedAgentEvent(event)
 		setAutomaticClose(copied)
 		setAutomaticClose(event)
 		cbGen.Send(copied)
@@ -604,7 +604,7 @@ func wrapIterWithOnEnd(ctx context.Context, iter *AsyncIterator[*AgentEvent]) *A
 			if !ok {
 				break
 			}
-			copied := copyAgentEvent(event)
+			copied := copyTypedAgentEvent(event)
 			cbGen.Send(copied)
 			outGen.Send(event)
 		}
@@ -659,7 +659,7 @@ func (a *typedFlowAgent[M]) Run(ctx context.Context, input *TypedAgentInput[M], 
 
 	agentType := getTypedAgentType(a.TypedAgent)
 	ctx = initAgenticCallbacks(ctx, agentName, agentType, filterOptions(agentName, opts)...)
-	cbInput := &AgenticCallbackInput{Input: any(input).(*TypedAgentInput[*schema.AgenticMessage])}
+	cbInput := &TypedAgentCallbackInput[*schema.AgenticMessage]{Input: any(input).(*TypedAgentInput[*schema.AgenticMessage])}
 	ctx = callbacks.OnStart(ctx, cbInput)
 
 	aIter := a.TypedAgent.Run(withCancelContext(ctx, cancelCtx), input, filterOptions(agentName, opts)...)
@@ -683,7 +683,7 @@ func (a *typedFlowAgent[M]) Resume(ctx context.Context, info *ResumeInfo, opts .
 
 	agentType := getTypedAgentType(a.TypedAgent)
 	ctx = initAgenticCallbacks(ctx, agentName, agentType, filterOptions(agentName, opts)...)
-	cbInput := &AgenticCallbackInput{ResumeInfo: info}
+	cbInput := &TypedAgentCallbackInput[*schema.AgenticMessage]{ResumeInfo: info}
 	ctx = callbacks.OnStart(ctx, cbInput)
 
 	if info.WasInterrupted {
@@ -729,8 +729,8 @@ func (a *typedFlowAgent[M]) run(
 	_ ...AgentRunOption) {
 
 	agenticCbIter, agenticCbGen := NewAsyncIteratorPair[*TypedAgentEvent[*schema.AgenticMessage]]()
-	cbOutput := &AgenticCallbackOutput{Events: agenticCbIter}
-	icb.On(ctx, cbOutput, icb.BuildOnEndHandleWithCopy(copyAgenticCallbackOutput), callbacks.TimingOnEnd, false)
+	cbOutput := &TypedAgentCallbackOutput[*schema.AgenticMessage]{Events: agenticCbIter}
+	icb.On(ctx, cbOutput, icb.BuildOnEndHandleWithCopy(copyTypedCallbackOutput[*schema.AgenticMessage]), callbacks.TimingOnEnd, false)
 
 	defer func() {
 		panicErr := recover()
@@ -770,8 +770,8 @@ func (a *typedFlowAgent[M]) run(
 
 func wrapAgenticIterWithOnEnd(ctx context.Context, iter *AsyncIterator[*TypedAgentEvent[*schema.AgenticMessage]]) *AsyncIterator[*TypedAgentEvent[*schema.AgenticMessage]] {
 	cbIter, cbGen := NewAsyncIteratorPair[*TypedAgentEvent[*schema.AgenticMessage]]()
-	cbOutput := &AgenticCallbackOutput{Events: cbIter}
-	icb.On(ctx, cbOutput, icb.BuildOnEndHandleWithCopy(copyAgenticCallbackOutput), callbacks.TimingOnEnd, false)
+	cbOutput := &TypedAgentCallbackOutput[*schema.AgenticMessage]{Events: cbIter}
+	icb.On(ctx, cbOutput, icb.BuildOnEndHandleWithCopy(copyTypedCallbackOutput[*schema.AgenticMessage]), callbacks.TimingOnEnd, false)
 
 	outIter, outGen := NewAsyncIteratorPair[*TypedAgentEvent[*schema.AgenticMessage]]()
 	go func() {
@@ -784,7 +784,7 @@ func wrapAgenticIterWithOnEnd(ctx context.Context, iter *AsyncIterator[*TypedAge
 			if !ok {
 				break
 			}
-			copied := copyAgenticEvent(event)
+			copied := copyTypedAgentEvent(event)
 			cbGen.Send(copied)
 			outGen.Send(event)
 		}

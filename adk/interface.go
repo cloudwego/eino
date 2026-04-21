@@ -32,9 +32,9 @@ import (
 // Use this to filter callback events to only agent-related events.
 const ComponentOfAgent components.Component = "Agent"
 
-// ComponentOfAgentic is the component type identifier for ADK agents
+// ComponentOfAgenticAgent is the component type identifier for ADK agents
 // that use *schema.AgenticMessage in callbacks.
-const ComponentOfAgentic components.Component = "AgenticAgent"
+const ComponentOfAgenticAgent components.Component = "AgenticAgent"
 
 // messageType is the sealed type constraint for message types used in ADK.
 // Only *schema.Message and *schema.AgenticMessage satisfy this constraint.
