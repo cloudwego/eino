@@ -625,7 +625,7 @@ func TestCoverage_AgenticReact_Streaming(t *testing.T) {
 	}
 
 	require.NotEmpty(t, events)
-	assertAgenticEventZeroRoleTool(t, events)
+	assertAgenticEventRoleFields(t, events)
 }
 
 func TestCoverage_ConcatMessageStream_Agentic(t *testing.T) {

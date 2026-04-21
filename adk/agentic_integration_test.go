@@ -91,7 +91,7 @@ func TestAgenticIntegration_ChatModelSingleShot(t *testing.T) {
 	}
 
 	require.Len(t, events, 1)
-	assertAgenticEventZeroRoleTool(t, events)
+	assertAgenticEventRoleFields(t, events)
 	lastEvent := events[len(events)-1]
 	require.Nil(t, lastEvent.Err)
 	require.NotNil(t, lastEvent.Output)
@@ -373,7 +373,7 @@ func TestAgenticIntegration_AgentTool(t *testing.T) {
 	}
 
 	require.NotEmpty(t, events)
-	assertAgenticEventZeroRoleTool(t, events)
+	assertAgenticEventRoleFields(t, events)
 	lastEvent := events[len(events)-1]
 	assert.Nil(t, lastEvent.Err)
 	assert.NotNil(t, lastEvent.Output)

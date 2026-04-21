@@ -880,21 +880,21 @@ func TestCascadingTyped_EventFromAgenticMessage(t *testing.T) {
 		},
 	}
 
-	event := EventFromAgenticMessage(msg, nil)
+	event := EventFromAgenticMessage(msg, nil, schema.AgenticRoleTypeAssistant)
 	require.NotNil(t, event)
 	require.NotNil(t, event.Output)
 	require.NotNil(t, event.Output.MessageOutput)
 	assert.Equal(t, msg, event.Output.MessageOutput.Message)
 	assert.False(t, event.Output.MessageOutput.IsStreaming)
 	assert.Equal(t, schema.RoleType(""), event.Output.MessageOutput.Role)
+	assert.Equal(t, schema.AgenticRoleTypeAssistant, event.Output.MessageOutput.AgenticRole)
 	assert.Empty(t, event.Output.MessageOutput.ToolName)
 }
 
-// assertAgenticEventZeroRoleTool asserts that all AgenticMessage events in the
-// list have zero-valued Role and ToolName fields. This constrains the invariant
-// that *schema.AgenticMessage events never carry these *schema.Message-specific
-// metadata fields.
-func assertAgenticEventZeroRoleTool(t *testing.T, events []*TypedAgentEvent[*schema.AgenticMessage]) {
+// assertAgenticEventRoleFields asserts that all AgenticMessage events in the
+// list have zero-valued Role and ToolName fields (which are *schema.Message-only),
+// and that AgenticRole is populated with a non-zero value.
+func assertAgenticEventRoleFields(t *testing.T, events []*TypedAgentEvent[*schema.AgenticMessage]) {
 	t.Helper()
 	for i, event := range events {
 		if event.Output == nil || event.Output.MessageOutput == nil {
@@ -903,6 +903,7 @@ func assertAgenticEventZeroRoleTool(t *testing.T, events []*TypedAgentEvent[*sch
 		mo := event.Output.MessageOutput
 		assert.Equal(t, schema.RoleType(""), mo.Role, "event[%d]: AgenticMessage must have zero Role", i)
 		assert.Empty(t, mo.ToolName, "event[%d]: AgenticMessage must have empty ToolName", i)
+		assert.NotEmpty(t, mo.AgenticRole, "event[%d]: AgenticMessage must have non-zero AgenticRole", i)
 	}
 }
 

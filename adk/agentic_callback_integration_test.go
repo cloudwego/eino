@@ -141,7 +141,7 @@ func TestAgenticCallback(t *testing.T) {
 	}
 
 	<-recorder.eventsDone
-	assertAgenticEventZeroRoleTool(t, agentEvents)
+	assertAgenticEventRoleFields(t, agentEvents)
 
 	t.Run("OnStart_Invocation", func(t *testing.T) {
 		assert.True(t, recorder.getOnStartCalled(), "OnStart should be called")

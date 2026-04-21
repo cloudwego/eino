@@ -80,8 +80,14 @@ type TypedMessageVariant[M messageType] struct {
 	// Only meaningful for *schema.Message events:
 	//   - schema.Assistant: the event carries model output (generation or stream).
 	//   - schema.Tool: the event carries a tool execution result.
-	// Always zero-valued for *schema.AgenticMessage events.
+	// Always zero-valued for *schema.AgenticMessage events; use AgenticRole instead.
 	Role schema.RoleType
+
+	// AgenticRole indicates the role of the agentic message (assistant, user, system).
+	// Only meaningful for *schema.AgenticMessage events.
+	// In streaming mode, this is available before consuming the stream.
+	// Always zero-valued for *schema.Message events; use Role instead.
+	AgenticRole schema.AgenticRoleType
 
 	// ToolName is the name of the tool that produced this event.
 	// Only meaningful for *schema.Message events: non-empty when Role == schema.Tool.
@@ -113,6 +119,7 @@ type agenticMessageVariantSerialization struct {
 	Message       *schema.AgenticMessage
 	MessageStream *schema.AgenticMessage
 	Role          schema.RoleType
+	AgenticRole   schema.AgenticRoleType
 	ToolName      string
 }
 
@@ -190,6 +197,7 @@ func gobEncodeAgenticMessageVariant(mv *TypedMessageVariant[*schema.AgenticMessa
 		IsStreaming: mv.IsStreaming,
 		Message:     mv.Message,
 		Role:        mv.Role,
+		AgenticRole: mv.AgenticRole,
 		ToolName:    mv.ToolName,
 	}
 	if mv.IsStreaming {
@@ -227,6 +235,7 @@ func gobDecodeAgenticMessageVariant(mv *TypedMessageVariant[*schema.AgenticMessa
 	mv.IsStreaming = s.IsStreaming
 	mv.Message = s.Message
 	mv.Role = s.Role
+	mv.AgenticRole = s.AgenticRole
 	mv.ToolName = s.ToolName
 	if s.MessageStream != nil {
 		mv.MessageStream = schema.StreamReaderFromArray([]*schema.AgenticMessage{s.MessageStream})
@@ -252,14 +261,19 @@ func typedEventFromMessage[M messageType](msg M, msgStream *schema.StreamReader[
 
 // typedModelOutputEvent creates a model-output event for the generic path.
 // For *schema.Message, Role is set to schema.Assistant.
-// For *schema.AgenticMessage, Role and ToolName are left zero-valued.
+// For *schema.AgenticMessage, AgenticRole is set to schema.AgenticRoleTypeAssistant.
 func typedModelOutputEvent[M messageType](msg M, msgStream *schema.StreamReader[M]) *TypedAgentEvent[M] {
 	var role schema.RoleType
+	var agenticRole schema.AgenticRoleType
 	var zero M
 	if _, ok := any(zero).(*schema.Message); ok {
 		role = schema.Assistant
+	} else {
+		agenticRole = schema.AgenticRoleTypeAssistant
 	}
-	return typedEventFromMessage(msg, msgStream, role, "")
+	event := typedEventFromMessage(msg, msgStream, role, "")
+	event.Output.MessageOutput.AgenticRole = agenticRole
+	return event
 }
 
 // EventFromMessage creates an AgentEvent containing the given message and optional stream.
@@ -278,13 +292,17 @@ func EventFromMessage(msg Message, msgStream *schema.StreamReader[Message],
 // Unlike EventFromMessage, it does not require role or toolName parameters because
 // AgenticMessage carries tool results as ContentBlocks within the message itself,
 // and does not support agent transfer.
-func EventFromAgenticMessage(msg AgenticMessage, msgStream AgenticMessageStream) *TypedAgentEvent[AgenticMessage] {
+//
+// agenticRole identifies the role of the message (e.g. schema.AgenticRoleTypeAssistant).
+// In streaming mode, the role is available on the event before consuming the stream.
+func EventFromAgenticMessage(msg AgenticMessage, msgStream AgenticMessageStream, agenticRole schema.AgenticRoleType) *TypedAgentEvent[AgenticMessage] {
 	return &TypedAgentEvent[AgenticMessage]{
 		Output: &TypedAgentOutput[AgenticMessage]{
 			MessageOutput: &TypedMessageVariant[AgenticMessage]{
 				IsStreaming:   msgStream != nil,
 				Message:       msg,
 				MessageStream: msgStream,
+				AgenticRole:   agenticRole,
 			},
 		},
 	}
