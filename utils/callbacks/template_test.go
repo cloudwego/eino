@@ -684,9 +684,9 @@ func TestHandlerTemplateWithAgentComponent(t *testing.T) {
 	})
 }
 
-func TestAgenticCallbackHandler(t *testing.T) {
+func TestAgenticAgentCallbackHandler(t *testing.T) {
 	t.Run("Needed returns correct values", func(t *testing.T) {
-		handler := &AgenticCallbackHandler{
+		handler := &AgenticAgentCallbackHandler{
 			OnStart: func(ctx context.Context, info *callbacks.RunInfo, input *adk.TypedAgentCallbackInput[*schema.AgenticMessage]) context.Context {
 				return ctx
 			},
@@ -700,7 +700,7 @@ func TestAgenticCallbackHandler(t *testing.T) {
 	})
 
 	t.Run("Needed with OnEnd set", func(t *testing.T) {
-		handler := &AgenticCallbackHandler{
+		handler := &AgenticAgentCallbackHandler{
 			OnEnd: func(ctx context.Context, info *callbacks.RunInfo, output *adk.TypedAgentCallbackOutput[*schema.AgenticMessage]) context.Context {
 				return ctx
 			},
@@ -714,7 +714,7 @@ func TestAgenticCallbackHandler(t *testing.T) {
 	})
 
 	t.Run("Needed with nil handlers", func(t *testing.T) {
-		handler := &AgenticCallbackHandler{}
+		handler := &AgenticAgentCallbackHandler{}
 
 		ctx := context.Background()
 		info := &callbacks.RunInfo{Component: adk.ComponentOfAgenticAgent}
@@ -728,7 +728,7 @@ func TestHandlerHelperWithAgenticAgent(t *testing.T) {
 	t.Run("AgenticAgent method sets handler correctly", func(t *testing.T) {
 		cnt := 0
 		tpl := NewHandlerHelper()
-		tpl.Agentic(&AgenticCallbackHandler{
+		tpl.AgenticAgent(&AgenticAgentCallbackHandler{
 			OnStart: func(ctx context.Context, info *callbacks.RunInfo, input *adk.TypedAgentCallbackInput[*schema.AgenticMessage]) context.Context {
 				cnt++
 				return ctx
@@ -755,7 +755,7 @@ func TestHandlerTemplateWithAgenticAgentComponent(t *testing.T) {
 	t.Run("OnStart routes to agentic agent handler", func(t *testing.T) {
 		called := false
 		tpl := NewHandlerHelper()
-		tpl.Agentic(&AgenticCallbackHandler{
+		tpl.AgenticAgent(&AgenticAgentCallbackHandler{
 			OnStart: func(ctx context.Context, info *callbacks.RunInfo, input *adk.TypedAgentCallbackInput[*schema.AgenticMessage]) context.Context {
 				called = true
 				return ctx
@@ -773,7 +773,7 @@ func TestHandlerTemplateWithAgenticAgentComponent(t *testing.T) {
 	t.Run("OnEnd routes to agentic agent handler", func(t *testing.T) {
 		called := false
 		tpl := NewHandlerHelper()
-		tpl.Agentic(&AgenticCallbackHandler{
+		tpl.AgenticAgent(&AgenticAgentCallbackHandler{
 			OnEnd: func(ctx context.Context, info *callbacks.RunInfo, output *adk.TypedAgentCallbackOutput[*schema.AgenticMessage]) context.Context {
 				called = true
 				return ctx
@@ -790,7 +790,7 @@ func TestHandlerTemplateWithAgenticAgentComponent(t *testing.T) {
 
 	t.Run("Needed returns true for agentic agent component", func(t *testing.T) {
 		tpl := NewHandlerHelper()
-		tpl.Agentic(&AgenticCallbackHandler{
+		tpl.AgenticAgent(&AgenticAgentCallbackHandler{
 			OnStart: func(ctx context.Context, info *callbacks.RunInfo, input *adk.TypedAgentCallbackInput[*schema.AgenticMessage]) context.Context {
 				return ctx
 			},
