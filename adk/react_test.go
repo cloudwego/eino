@@ -29,6 +29,7 @@ import (
 
 	"github.com/bytedance/sonic"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"go.uber.org/mock/gomock"
 
 	"github.com/cloudwego/eino/components/model"
@@ -641,4 +642,31 @@ func randStrForTest() string {
 		b[i] = seeds[rand.Intn(len(seeds))]
 	}
 	return string(b)
+}
+
+func TestReactHistory_EmptyMessages(t *testing.T) {
+	g := compose.NewGraph[string, []Message](compose.WithGenLocalState(func(ctx context.Context) (state *State) {
+		return &State{
+			Messages: []Message{},
+		}
+	}))
+	require.NoError(t, g.AddLambdaNode("1", compose.InvokableLambda(func(ctx context.Context, input string) (output []Message, err error) {
+		return getReactChatHistory(ctx, "DestAgent")
+	})))
+	require.NoError(t, g.AddEdge(compose.START, "1"))
+	require.NoError(t, g.AddEdge("1", compose.END))
+
+	ctx := context.Background()
+	ctx, _ = initRunCtx(ctx, "MyAgent", nil)
+	runner, err := g.Compile(ctx)
+	require.NoError(t, err)
+
+	require.NotPanics(t, func() {
+		result, err := runner.Invoke(ctx, "")
+		if err != nil {
+			t.Logf("Got error (acceptable): %v", err)
+			return
+		}
+		t.Logf("Got %d messages", len(result))
+	}, "BUG: getReactChatHistory should not panic with empty Messages slice")
 }

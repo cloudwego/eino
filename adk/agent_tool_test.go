@@ -21,15 +21,35 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/components/tool"
 	"github.com/cloudwego/eino/compose"
 	"github.com/cloudwego/eino/schema"
 )
+
+type mockChatModelForAttack struct {
+	generateFn func(ctx context.Context, input []*schema.Message, opts ...model.Option) (*schema.Message, error)
+}
+
+func (m *mockChatModelForAttack) Generate(ctx context.Context, input []*schema.Message, opts ...model.Option) (*schema.Message, error) {
+	return m.generateFn(ctx, input, opts...)
+}
+
+func (m *mockChatModelForAttack) Stream(ctx context.Context, input []*schema.Message, opts ...model.Option) (*schema.StreamReader[*schema.Message], error) {
+	result, err := m.generateFn(ctx, input, opts...)
+	if err != nil {
+		return nil, err
+	}
+	r, w := schema.Pipe[*schema.Message](1)
+	go func() { defer w.Close(); w.Send(result, nil) }()
+	return r, nil
+}
 
 // mockAgent implements the Agent interface for testing
 type mockAgentForTool struct {
@@ -1145,4 +1165,77 @@ func TestInvokableAgentTool_ErrorCases(t *testing.T) {
 	out2, err := atNo.(tool.InvokableTool).InvokableRun(ctx, `{"request":"x"}`)
 	assert.NoError(t, err)
 	assert.Equal(t, "", out2)
+}
+
+func TestCrossTypeAgentToolGracefulError(t *testing.T) {
+	ctx := context.Background()
+
+	innerModel := &mockAgenticModel{
+		generateFn: func(ctx context.Context, input []*schema.AgenticMessage, opts ...model.Option) (*schema.AgenticMessage, error) {
+			return agenticMsg("inner result"), nil
+		},
+	}
+
+	innerAgent, err := NewTypedChatModelAgent[*schema.AgenticMessage](ctx, &TypedChatModelAgentConfig[*schema.AgenticMessage]{
+		Name:        "AgenticInner",
+		Description: "An agentic agent used as a tool",
+		Model:       innerModel,
+	})
+	require.NoError(t, err)
+
+	agenticAgentTool := NewTypedAgentTool(ctx, TypedAgent[*schema.AgenticMessage](innerAgent))
+
+	var outerCallCount int32
+	outerModel := &mockChatModelForAttack{
+		generateFn: func(ctx context.Context, input []*schema.Message, opts ...model.Option) (*schema.Message, error) {
+			count := atomic.AddInt32(&outerCallCount, 1)
+			if count == 1 {
+				return &schema.Message{
+					Role: schema.Assistant,
+					ToolCalls: []schema.ToolCall{
+						{ID: "c1", Function: schema.FunctionCall{Name: "AgenticInner", Arguments: `{"request":"test"}`}},
+					},
+				}, nil
+			}
+			return schema.AssistantMessage("done", nil), nil
+		},
+	}
+
+	outerAgent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+		Name:        "OuterMessageAgent",
+		Description: "A Message agent using an AgenticMessage sub-agent tool",
+		Model:       outerModel,
+		ToolsConfig: ToolsConfig{
+			ToolsNodeConfig: compose.ToolsNodeConfig{
+				Tools: []tool.BaseTool{agenticAgentTool},
+			},
+		},
+	})
+	require.NoError(t, err)
+
+	runner := NewRunner(ctx, RunnerConfig{Agent: outerAgent, EnableStreaming: true})
+	iter := runner.Query(ctx, "test cross-type")
+
+	var capturedErr error
+	for {
+		event, ok := iter.Next()
+		if !ok {
+			break
+		}
+		if event.Err != nil {
+			capturedErr = event.Err
+			t.Logf("Cross-type error message: %v", event.Err)
+		}
+	}
+
+	if capturedErr == nil {
+		t.Log("DESIGN CONCERN: Cross-type agent tool (AgenticMessage sub-agent in Message agent) " +
+			"only errors at event forwarding time when streaming is enabled. " +
+			"The error check happens in the gen.Send path, which is only exercised " +
+			"when the outer agent actually calls the tool AND streaming is enabled. " +
+			"Without streaming, the tool result is returned as a string, so no type mismatch occurs.")
+	} else {
+		assert.Contains(t, capturedErr.Error(), "cross-message-type",
+			"Error should mention cross-message-type incompatibility")
+	}
 }

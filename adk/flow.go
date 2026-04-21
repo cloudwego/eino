@@ -261,7 +261,7 @@ func genMsg(entry *HistoryEntry, agentName string) (Message, error) {
 	return msg, nil
 }
 
-func (ai *AgentInput) deepCopy() *AgentInput {
+func deepCopyAgentInput(ai *AgentInput) *AgentInput {
 	copied := &AgentInput{
 		Messages:        make([]Message, len(ai.Messages)),
 		EnableStreaming: ai.EnableStreaming,
@@ -273,7 +273,7 @@ func (ai *AgentInput) deepCopy() *AgentInput {
 }
 
 func (a *flowAgent) genAgentInput(ctx context.Context, runCtx *runContext, skipTransferMessages bool) (*AgentInput, error) {
-	input := runCtx.RootInput.deepCopy()
+	input := deepCopyAgentInput(runCtx.RootInput)
 
 	events := runCtx.Session.getEvents()
 	historyEntries := make([]*HistoryEntry, 0)
@@ -521,7 +521,7 @@ func (a *flowAgent) run(
 			// copy before adding to session because once added to session it's stream could be consumed by genAgentInput at any time
 			// interrupt action are not added to session, because ALL information contained in it
 			// is either presented to end-user, or made available to agents through other means
-			copied := copyAgentEvent(event)
+			copied := copyTypedAgentEvent(event)
 			setAutomaticClose(copied)
 			setAutomaticClose(event)
 			runCtx.Session.addEvent(copied)
@@ -532,7 +532,7 @@ func (a *flowAgent) run(
 		if exactRunPathMatch(runCtx.RunPath, event.RunPath) {
 			lastAction = event.Action
 		}
-		copied := copyAgentEvent(event)
+		copied := copyTypedAgentEvent(event)
 		setAutomaticClose(copied)
 		setAutomaticClose(event)
 		cbGen.Send(copied)
@@ -604,10 +604,206 @@ func wrapIterWithOnEnd(ctx context.Context, iter *AsyncIterator[*AgentEvent]) *A
 			if !ok {
 				break
 			}
-			copied := copyAgentEvent(event)
+			copied := copyTypedAgentEvent(event)
 			cbGen.Send(copied)
 			outGen.Send(event)
 		}
 	}()
 	return outIter
+}
+
+// ---------------------------------------------------------------------------
+// Typed wrapper for the agentic path (TypedAgent[*schema.AgenticMessage]).
+//
+// typedFlowAgent is a minimal wrapper used exclusively by TypedRunner and
+// AgentTool to execute a TypedAgent[*schema.AgenticMessage]. It handles
+// callbacks, event recording, and run-path tracking. Transfer, sub-agent
+// orchestration, and history rewriting are handled solely by the concrete
+// flowAgent (the *schema.Message path).
+// ---------------------------------------------------------------------------
+
+type typedFlowAgent[M messageType] struct {
+	TypedAgent[M]
+
+	checkPointStore compose.CheckPointStore
+}
+
+func toTypedFlowAgent[M messageType](agent TypedAgent[M]) *typedFlowAgent[M] {
+	if fa, ok := agent.(*typedFlowAgent[M]); ok {
+		return fa
+	}
+	return &typedFlowAgent[M]{TypedAgent: agent}
+}
+
+func getTypedAgentType[M messageType](agent TypedAgent[M]) string {
+	if msgAgent, ok := any(agent).(Agent); ok {
+		return getAgentType(msgAgent)
+	}
+	if typer, ok := any(agent).(interface{ GetType() string }); ok {
+		return typer.GetType()
+	}
+	return ""
+}
+
+func (a *typedFlowAgent[M]) Run(ctx context.Context, input *TypedAgentInput[M], opts ...AgentRunOption) *AsyncIterator[*TypedAgentEvent[M]] {
+	agentName := a.Name(ctx)
+
+	var runCtx *runContext
+	ctx, runCtx = initTypedRunCtx(ctx, agentName, input)
+	ctx = AppendAddressSegment(ctx, AddressSegmentAgent, agentName)
+
+	o := getCommonOptions(nil, opts...)
+	cancelCtx := o.cancelCtx
+
+	ctxForSubAgents := ctx
+
+	agentType := getTypedAgentType(a.TypedAgent)
+	ctx = initAgenticCallbacks(ctx, agentName, agentType, filterOptions(agentName, opts)...)
+	cbInput := &TypedAgentCallbackInput[*schema.AgenticMessage]{Input: any(input).(*TypedAgentInput[*schema.AgenticMessage])}
+	ctx = callbacks.OnStart(ctx, cbInput)
+
+	aIter := a.TypedAgent.Run(withCancelContext(ctx, cancelCtx), input, filterOptions(agentName, opts)...)
+
+	iterator, generator := NewAsyncIteratorPair[*TypedAgentEvent[M]]()
+
+	go a.run(withCancelContext(ctx, cancelCtx), withCancelContext(ctxForSubAgents, cancelCtx), runCtx, aIter, generator, filterCancelOption(opts)...)
+
+	return wrapIterWithCancelCtx(iterator, cancelCtx)
+}
+
+func (a *typedFlowAgent[M]) Resume(ctx context.Context, info *ResumeInfo, opts ...AgentRunOption) *AsyncIterator[*TypedAgentEvent[M]] {
+	agentName := a.Name(ctx)
+
+	ctx, info = buildResumeInfo(ctx, agentName, info)
+
+	ctxForSubAgents := ctx
+
+	o := getCommonOptions(nil, opts...)
+	cancelCtx := o.cancelCtx
+
+	agentType := getTypedAgentType(a.TypedAgent)
+	ctx = initAgenticCallbacks(ctx, agentName, agentType, filterOptions(agentName, opts)...)
+	cbInput := &TypedAgentCallbackInput[*schema.AgenticMessage]{ResumeInfo: info}
+	ctx = callbacks.OnStart(ctx, cbInput)
+
+	if info.WasInterrupted {
+		if ra, ok := a.TypedAgent.(TypedResumableAgent[M]); ok {
+			aIter := ra.Resume(withCancelContext(ctx, cancelCtx), info, opts...)
+
+			iterator, generator := NewAsyncIteratorPair[*TypedAgentEvent[M]]()
+			go a.run(withCancelContext(ctx, cancelCtx), withCancelContext(ctxForSubAgents, cancelCtx), getRunCtx(ctxForSubAgents), aIter, generator, filterCancelOption(opts)...)
+			return wrapIterWithCancelCtx(iterator, cancelCtx)
+		}
+
+		if cancelCtx != nil {
+			cancelCtx.markDone()
+		}
+		return typedErrorIterWithOnEnd[M](ctx, fmt.Errorf("failed to resume agent: agent '%s' is an interrupt point "+
+			"but is not a ResumableAgent", agentName))
+	}
+
+	_, err := getNextResumeAgent(ctx, info)
+	if err != nil {
+		if cancelCtx != nil {
+			cancelCtx.markDone()
+		}
+		return typedErrorIterWithOnEnd[M](ctx, err)
+	}
+
+	if ra, ok := a.TypedAgent.(TypedResumableAgent[M]); ok {
+		ctx = withCancelContext(ctx, cancelCtx)
+		innerIter := ra.Resume(ctx, info, filterCancelOption(opts)...)
+		return wrapIterWithCancelCtx(typedWrapIterWithOnEnd[M](ctx, innerIter), cancelCtx)
+	}
+	return typedErrorIterWithOnEnd[M](ctx, fmt.Errorf(
+		"failed to resume agent: agent '%s' (type %T) does not implement ResumableAgent interface. "+
+			"To support resume, your custom agent wrapper must implement the ResumableAgent interface", agentName, a.TypedAgent))
+}
+
+func (a *typedFlowAgent[M]) run(
+	ctx context.Context,
+	_ context.Context,
+	runCtx *runContext,
+	aIter *AsyncIterator[*TypedAgentEvent[M]],
+	generator *AsyncGenerator[*TypedAgentEvent[M]],
+	_ ...AgentRunOption) {
+
+	agenticCbIter, agenticCbGen := NewAsyncIteratorPair[*TypedAgentEvent[*schema.AgenticMessage]]()
+	cbOutput := &TypedAgentCallbackOutput[*schema.AgenticMessage]{Events: agenticCbIter}
+	icb.On(ctx, cbOutput, icb.BuildOnEndHandleWithCopy(copyTypedCallbackOutput[*schema.AgenticMessage]), callbacks.TimingOnEnd, false)
+
+	defer func() {
+		panicErr := recover()
+		if panicErr != nil {
+			e := safe.NewPanicErr(panicErr, debug.Stack())
+			generator.Send(&TypedAgentEvent[M]{Err: e})
+		}
+
+		agenticCbGen.Close()
+		generator.Close()
+	}()
+
+	for {
+		event, ok := aIter.Next()
+		if !ok {
+			break
+		}
+
+		if len(event.RunPath) == 0 {
+			event.AgentName = a.Name(ctx)
+			event.RunPath = runCtx.RunPath
+		}
+		if (event.Action == nil || event.Action.Interrupted == nil) && exactRunPathMatch(runCtx.RunPath, event.RunPath) {
+			copied := copyTypedAgentEvent(event)
+			typedSetAutomaticClose(copied)
+			typedSetAutomaticClose(event)
+			addTypedEvent(runCtx.Session, copied)
+		}
+
+		agenticCopied := copyTypedAgentEvent(event)
+		typedSetAutomaticClose(agenticCopied)
+		typedSetAutomaticClose(event)
+		agenticCbGen.Send(any(agenticCopied).(*TypedAgentEvent[*schema.AgenticMessage]))
+		generator.Send(event)
+	}
+}
+
+func wrapAgenticIterWithOnEnd(ctx context.Context, iter *AsyncIterator[*TypedAgentEvent[*schema.AgenticMessage]]) *AsyncIterator[*TypedAgentEvent[*schema.AgenticMessage]] {
+	cbIter, cbGen := NewAsyncIteratorPair[*TypedAgentEvent[*schema.AgenticMessage]]()
+	cbOutput := &TypedAgentCallbackOutput[*schema.AgenticMessage]{Events: cbIter}
+	icb.On(ctx, cbOutput, icb.BuildOnEndHandleWithCopy(copyTypedCallbackOutput[*schema.AgenticMessage]), callbacks.TimingOnEnd, false)
+
+	outIter, outGen := NewAsyncIteratorPair[*TypedAgentEvent[*schema.AgenticMessage]]()
+	go func() {
+		defer func() {
+			cbGen.Close()
+			outGen.Close()
+		}()
+		for {
+			event, ok := iter.Next()
+			if !ok {
+				break
+			}
+			copied := copyTypedAgentEvent(event)
+			cbGen.Send(copied)
+			outGen.Send(event)
+		}
+	}()
+	return outIter
+}
+
+func genAgenticErrorIter(err error) *AsyncIterator[*TypedAgentEvent[*schema.AgenticMessage]] {
+	iter, gen := NewAsyncIteratorPair[*TypedAgentEvent[*schema.AgenticMessage]]()
+	gen.Send(&TypedAgentEvent[*schema.AgenticMessage]{Err: err})
+	gen.Close()
+	return iter
+}
+
+func typedWrapIterWithOnEnd[M messageType](ctx context.Context, iter *AsyncIterator[*TypedAgentEvent[M]]) *AsyncIterator[*TypedAgentEvent[M]] {
+	agenticIter := any(iter).(*AsyncIterator[*TypedAgentEvent[*schema.AgenticMessage]])
+	return any(wrapAgenticIterWithOnEnd(ctx, agenticIter)).(*AsyncIterator[*TypedAgentEvent[M]])
+}
+
+func typedErrorIterWithOnEnd[M messageType](ctx context.Context, err error) *AsyncIterator[*TypedAgentEvent[M]] {
+	return typedWrapIterWithOnEnd[M](ctx, typedErrorIter[M](err))
 }

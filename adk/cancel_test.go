@@ -2368,7 +2368,7 @@ func TestCancelImmediate_OrphanedToolGoroutine_NoPanic(t *testing.T) {
 			cancelCtx: cc,
 		}
 
-		ctx := withChatModelAgentExecCtx(context.Background(), execCtx)
+		ctx := withTypedChatModelAgentExecCtx[*schema.Message](context.Background(), execCtx)
 
 		assert.NotPanics(t, func() {
 			err := SendEvent(ctx, &AgentEvent{AgentName: "test"})

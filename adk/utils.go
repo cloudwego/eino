@@ -102,8 +102,7 @@ func GenTransferMessages(_ context.Context, destAgentName string) (Message, Mess
 	return assistantMessage, toolMessage
 }
 
-// set automatic close for event's message stream
-func setAutomaticClose(e *AgentEvent) {
+func typedSetAutomaticClose[M messageType](e *TypedAgentEvent[M]) {
 	if e.Output == nil || e.Output.MessageOutput == nil || !e.Output.MessageOutput.IsStreaming {
 		return
 	}
@@ -111,10 +110,41 @@ func setAutomaticClose(e *AgentEvent) {
 	e.Output.MessageOutput.MessageStream.SetAutomaticClose()
 }
 
+// set automatic close for event's message stream
+func setAutomaticClose(e *AgentEvent) {
+	typedSetAutomaticClose(e)
+}
+
 // getMessageFromWrappedEvent extracts the message from an AgentEvent.
 // If the stream contains an error chunk, this function returns (nil, err) and
 // sets StreamErr to prevent re-consumption. The nil message ensures that
 // failed stream responses are not included in subsequent agents' context windows.
+func getMessageFromTypedWrappedEvent[M messageType](e *typedAgentEventWrapper[M]) (M, error) {
+	var zero M
+	if e.event.Output == nil || e.event.Output.MessageOutput == nil {
+		return zero, nil
+	}
+
+	if !e.event.Output.MessageOutput.IsStreaming {
+		return e.event.Output.MessageOutput.Message, nil
+	}
+
+	if e.StreamErr != nil {
+		return zero, e.StreamErr
+	}
+
+	if !isNilMessage(e.concatenatedMessage) {
+		return e.concatenatedMessage, nil
+	}
+
+	e.consumeStream()
+
+	if e.StreamErr != nil {
+		return zero, e.StreamErr
+	}
+	return e.concatenatedMessage, nil
+}
+
 func getMessageFromWrappedEvent(e *agentEventWrapper) (Message, error) {
 	if e.AgentEvent.Output == nil || e.AgentEvent.Output.MessageOutput == nil {
 		return nil, nil
@@ -194,21 +224,21 @@ func (e *agentEventWrapper) consumeStream() {
 	e.AgentEvent.Output.MessageOutput.MessageStream = schema.StreamReaderFromArray([]Message{e.concatenatedMessage})
 }
 
-// copyAgentEvent copies an AgentEvent.
+// copyTypedAgentEvent copies a TypedAgentEvent.
 // If the MessageVariant is streaming, the MessageStream will be copied.
 // RunPath will be deep copied.
-// The result of Copy will be a new AgentEvent that is:
-// - safe to set fields of AgentEvent
+// The result of Copy will be a new TypedAgentEvent that is:
+// - safe to set fields of TypedAgentEvent
 // - safe to extend RunPath
 // - safe to receive from MessageStream
-// NOTE: even if the AgentEvent is copied, it's still not recommended to modify
+// NOTE: even if the event is copied, it's still not recommended to modify
 // the Message itself or Chunks of the MessageStream, as they are not copied.
 // NOTE: if you have CustomizedOutput or CustomizedAction, they are NOT copied.
-func copyAgentEvent(ae *AgentEvent) *AgentEvent {
+func copyTypedAgentEvent[M messageType](ae *TypedAgentEvent[M]) *TypedAgentEvent[M] {
 	rp := make([]RunStep, len(ae.RunPath))
 	copy(rp, ae.RunPath)
 
-	copied := &AgentEvent{
+	copied := &TypedAgentEvent[M]{
 		AgentName: ae.AgentName,
 		RunPath:   rp,
 		Action:    ae.Action,
@@ -219,7 +249,7 @@ func copyAgentEvent(ae *AgentEvent) *AgentEvent {
 		return copied
 	}
 
-	copied.Output = &AgentOutput{
+	copied.Output = &TypedAgentOutput[M]{
 		CustomizedOutput: ae.Output.CustomizedOutput,
 	}
 
@@ -228,7 +258,7 @@ func copyAgentEvent(ae *AgentEvent) *AgentEvent {
 		return copied
 	}
 
-	copied.Output.MessageOutput = &MessageVariant{
+	copied.Output.MessageOutput = &TypedMessageVariant[M]{
 		IsStreaming: mv.IsStreaming,
 		Role:        mv.Role,
 		ToolName:    mv.ToolName,
@@ -244,11 +274,11 @@ func copyAgentEvent(ae *AgentEvent) *AgentEvent {
 	return copied
 }
 
-// GetMessage extracts the Message from an AgentEvent. For streaming output,
-// it duplicates the stream and concatenates it into a single Message.
-func GetMessage(e *AgentEvent) (Message, *AgentEvent, error) {
+// TypedGetMessage extracts the message from a TypedAgentEvent, concatenating a stream if present.
+func TypedGetMessage[M messageType](e *TypedAgentEvent[M]) (M, *TypedAgentEvent[M], error) {
+	var zero M
 	if e.Output == nil || e.Output.MessageOutput == nil {
-		return nil, e, nil
+		return zero, e, nil
 	}
 
 	msgOutput := e.Output.MessageOutput
@@ -256,7 +286,7 @@ func GetMessage(e *AgentEvent) (Message, *AgentEvent, error) {
 		ss := msgOutput.MessageStream.Copy(2)
 		e.Output.MessageOutput.MessageStream = ss[0]
 
-		msg, err := schema.ConcatMessageStream(ss[1])
+		msg, err := concatMessageStream(ss[1])
 
 		return msg, e, err
 	}
@@ -264,9 +294,19 @@ func GetMessage(e *AgentEvent) (Message, *AgentEvent, error) {
 	return msgOutput.Message, e, nil
 }
 
-func genErrorIter(err error) *AsyncIterator[*AgentEvent] {
-	iterator, generator := NewAsyncIteratorPair[*AgentEvent]()
-	generator.Send(&AgentEvent{Err: err})
+// GetMessage extracts the Message from an AgentEvent. For streaming output,
+// it duplicates the stream and concatenates it into a single Message.
+func GetMessage(e *AgentEvent) (Message, *AgentEvent, error) {
+	return TypedGetMessage(e)
+}
+
+func typedErrorIter[M messageType](err error) *AsyncIterator[*TypedAgentEvent[M]] {
+	iterator, generator := NewAsyncIteratorPair[*TypedAgentEvent[M]]()
+	generator.Send(&TypedAgentEvent[M]{Err: err})
 	generator.Close()
 	return iterator
+}
+
+func genErrorIter(err error) *AsyncIterator[*AgentEvent] {
+	return typedErrorIter[*schema.Message](err)
 }
