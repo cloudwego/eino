@@ -89,6 +89,15 @@ Usage:
 - 如果你读取的文件存在但内容为空，你将收到系统提醒警告而不是文件内容
 - 在编辑文件之前，你应该始终确保已读取该文件`
 
+	// EnhancedReadFileDescSuffix is appended to ReadFileToolDesc when using MultiModalReadFileTool.
+	EnhancedReadFileDescSuffix = `
+- This tool supports reading image files (e.g., PNG, JPG, etc.). When reading an image file, the contents are presented visually, as the underlying model is a multimodal LLM.
+- This tool can read PDF files (.pdf). For large PDFs (more than 10 pages), you MUST provide the pages parameter to read specific page ranges (e.g., pages: "1-5"). Reading a large PDF without the pages parameter will fail. Maximum 20 pages per request.`
+
+	EnhancedReadFileDescSuffixChinese = `
+- 此工具支持读取图片文件（如 PNG、JPG 等）。读取图片文件时，内容将以视觉方式呈现，因为底层模型是多模态 LLM。
+- 此工具可以读取 PDF 文件（.pdf）。对于大型 PDF（超过 10 页），你必须提供 pages 参数来指定页面范围（例如 pages: "1-5"）。不提供 pages 参数读取大型 PDF 将会失败。每次请求最多 20 页。`
+
 	EditFileToolDesc = `Performs exact string replacements in files.
 
 Usage:
