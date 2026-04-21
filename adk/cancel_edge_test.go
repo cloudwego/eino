@@ -1336,7 +1336,7 @@ func TestWithCancel_CancelImmediate_StreamableToolAborted(t *testing.T) {
 	tcm := &toolCallStreamModel{}
 	st := &slowStreamingTool{
 		name:          "slow_tool",
-		chunkInterval: 200 * time.Millisecond,
+		chunkInterval: 100 * time.Millisecond,
 		chunks:        []string{"a", "b", "c", "d", "e", "f", "g", "h", "i", "j"},
 		started:       make(chan struct{}, 1),
 	}
@@ -1366,7 +1366,7 @@ func TestWithCancel_CancelImmediate_StreamableToolAborted(t *testing.T) {
 		t.Fatal("tool did not start streaming")
 	}
 	// Let a few chunks through, then cancel mid-stream
-	time.Sleep(300 * time.Millisecond)
+	time.Sleep(500 * time.Millisecond)
 
 	handle, _ := cancelFn()
 	cancelErr := handle.Wait()

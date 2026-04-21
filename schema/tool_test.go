@@ -25,6 +25,7 @@ import (
 	"github.com/eino-contrib/jsonschema"
 	"github.com/smartystreets/goconvey/convey"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestParamsOneOfToJSONSchema(t *testing.T) {
@@ -180,4 +181,41 @@ func TestToolInfoSerialization(t *testing.T) {
 	err = gob.NewDecoder(buf).Decode(result)
 	assert.NoError(t, err)
 	assert.Equal(t, ti2, result)
+}
+
+func TestMCPToolResult_NilErrorCode(t *testing.T) {
+	result := &MCPToolResult{
+		CallID: "test-call",
+		Name:   "test-tool",
+		Result: "some result",
+		Error: &MCPToolCallError{
+			Code:    nil,
+			Message: "something went wrong",
+		},
+	}
+
+	require.NotPanics(t, func() {
+		s := result.String()
+		t.Logf("String output: %s", s)
+		assert.Contains(t, s, "something went wrong")
+	}, "BUG: MCPToolResult.String() should not panic when Error.Code is nil")
+}
+
+func TestMCPToolResult_WithErrorCode(t *testing.T) {
+	code := int64(500)
+	result := &MCPToolResult{
+		CallID: "test-call",
+		Name:   "test-tool",
+		Result: "",
+		Error: &MCPToolCallError{
+			Code:    &code,
+			Message: "internal server error",
+		},
+	}
+
+	require.NotPanics(t, func() {
+		s := result.String()
+		assert.Contains(t, s, "500")
+		assert.Contains(t, s, "internal server error")
+	})
 }

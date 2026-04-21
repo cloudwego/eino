@@ -17,13 +17,16 @@
 package schema
 
 import (
+	"bytes"
 	"context"
+	"encoding/gob"
 	"encoding/json"
 	"fmt"
 	"reflect"
 	"sort"
 	"strings"
 
+	"github.com/bytedance/sonic"
 	"github.com/eino-contrib/jsonschema"
 
 	"github.com/cloudwego/eino/internal"
@@ -418,6 +421,47 @@ type MCPListToolsItem struct {
 
 	// InputSchema is the JSON schema that describes the tool input parameters.
 	InputSchema *jsonschema.Schema `json:"input_schema,omitempty"`
+}
+
+type mcpListToolsItemGob struct {
+	Name            string
+	Description     string
+	InputSchemaJSON []byte
+}
+
+func (m *MCPListToolsItem) GobEncode() ([]byte, error) {
+	g := mcpListToolsItemGob{
+		Name:        m.Name,
+		Description: m.Description,
+	}
+	if m.InputSchema != nil {
+		b, err := json.Marshal(m.InputSchema)
+		if err != nil {
+			return nil, fmt.Errorf("failed to marshal MCPListToolsItem.InputSchema: %w", err)
+		}
+		g.InputSchemaJSON = b
+	}
+	var buf bytes.Buffer
+	if err := gob.NewEncoder(&buf).Encode(&g); err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
+}
+
+func (m *MCPListToolsItem) GobDecode(data []byte) error {
+	var g mcpListToolsItemGob
+	if err := gob.NewDecoder(bytes.NewReader(data)).Decode(&g); err != nil {
+		return err
+	}
+	m.Name = g.Name
+	m.Description = g.Description
+	if len(g.InputSchemaJSON) > 0 {
+		m.InputSchema = &jsonschema.Schema{}
+		if err := sonic.Unmarshal(g.InputSchemaJSON, m.InputSchema); err != nil {
+			return fmt.Errorf("failed to unmarshal MCPListToolsItem.InputSchema: %w", err)
+		}
+	}
+	return nil
 }
 
 type MCPToolApprovalRequest struct {
@@ -1335,7 +1379,6 @@ func concatAssistantGenTexts(texts []*AssistantGenText) (ret *AssistantGenText, 
 		if err != nil {
 			return nil, err
 		}
-		ret.Extension = extensions.Interface()
 	}
 
 	if len(openaiExtensions) > 0 {
@@ -2029,7 +2072,11 @@ func (m *MCPToolResult) String() string {
 	sb.WriteString(fmt.Sprintf("      name: %s\n", m.Name))
 	sb.WriteString(fmt.Sprintf("      result: %s\n", m.Result))
 	if m.Error != nil {
-		sb.WriteString(fmt.Sprintf("      error: [%d] %s\n", *m.Error.Code, m.Error.Message))
+		if m.Error.Code != nil {
+			sb.WriteString(fmt.Sprintf("      error: [%d] %s\n", *m.Error.Code, m.Error.Message))
+		} else {
+			sb.WriteString(fmt.Sprintf("      error: %s\n", m.Error.Message))
+		}
 	}
 	return sb.String()
 }

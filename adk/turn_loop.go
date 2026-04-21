@@ -356,12 +356,12 @@ func (s *preemptSignal) drainAll() {
 }
 
 // TurnLoopConfig is the configuration for creating a TurnLoop.
-type TurnLoopConfig[T any] struct {
+type TurnLoopConfig[T any, M messageType] struct {
 	// GenInput receives the TurnLoop instance and all buffered items, and decides what to process.
 	// It returns which items to consume now vs keep for later turns.
 	// The loop parameter allows calling Push() or Stop() directly from within the callback.
 	// Required.
-	GenInput func(ctx context.Context, loop *TurnLoop[T], items []T) (*GenInputResult[T], error)
+	GenInput func(ctx context.Context, loop *TurnLoop[T, M], items []T) (*GenInputResult[T, M], error)
 
 	// GenResume is called at most once during Run(). When CheckpointID is
 	// configured, Run() queries Store for the checkpoint:
@@ -378,7 +378,7 @@ type TurnLoopConfig[T any] struct {
 	// It returns a GenResumeResult describing how to resume the interrupted agent
 	// turn (optional ResumeParams) and how to manipulate the buffer
 	// (Consumed/Remaining) before continuing.
-	GenResume func(ctx context.Context, loop *TurnLoop[T], canceledItems, unhandledItems, newItems []T) (*GenResumeResult[T], error)
+	GenResume func(ctx context.Context, loop *TurnLoop[T, M], canceledItems, unhandledItems, newItems []T) (*GenResumeResult[T, M], error)
 
 	// PrepareAgent returns an Agent configured to handle the consumed items.
 	// This callback should set up the agent with appropriate system prompt,
@@ -386,7 +386,7 @@ type TurnLoopConfig[T any] struct {
 	// Called once per turn with the items that GenInput decided to consume.
 	// The loop parameter allows calling Push() or Stop() directly from within the callback.
 	// Required.
-	PrepareAgent func(ctx context.Context, loop *TurnLoop[T], consumed []T) (Agent, error)
+	PrepareAgent func(ctx context.Context, loop *TurnLoop[T, M], consumed []T) (TypedAgent[M], error)
 
 	// OnAgentEvents is called to handle events emitted by the agent.
 	// The TurnContext provides per-turn info and control:
@@ -405,7 +405,7 @@ type TurnLoopConfig[T any] struct {
 	//
 	// Optional. If not provided, events are drained and the first error
 	// (including CancelError from Stop) is returned as ExitReason.
-	OnAgentEvents func(ctx context.Context, tc *TurnContext[T], events *AsyncIterator[*AgentEvent]) error
+	OnAgentEvents func(ctx context.Context, tc *TurnContext[T, M], events *AsyncIterator[*TypedAgentEvent[M]]) error
 
 	// Store is the checkpoint store for persistence and resume. Optional.
 	// When set together with CheckpointID, enables automatic checkpoint-based resume.
@@ -430,7 +430,7 @@ type TurnLoopConfig[T any] struct {
 }
 
 // GenInputResult contains the result of GenInput processing.
-type GenInputResult[T any] struct {
+type GenInputResult[T any, M messageType] struct {
 	// RunCtx, if non-nil, overrides the context for this turn's execution
 	// (PrepareAgent, agent run, OnAgentEvents).
 	//
@@ -444,7 +444,7 @@ type GenInputResult[T any] struct {
 	RunCtx context.Context
 
 	// Input is the agent input to execute
-	Input *AgentInput
+	Input *TypedAgentInput[M]
 
 	// RunOpts are the options for this agent run.
 	// Note: do not pass WithCheckPointID here; the TurnLoop automatically
@@ -464,7 +464,7 @@ type GenInputResult[T any] struct {
 }
 
 // GenResumeResult contains the result of GenResume processing.
-type GenResumeResult[T any] struct {
+type GenResumeResult[T any, M messageType] struct {
 	// RunCtx, if non-nil, overrides the context for this resumed turn's execution
 	// (PrepareAgent, agent resume, OnAgentEvents).
 	RunCtx context.Context
@@ -489,9 +489,9 @@ type GenResumeResult[T any] struct {
 	Remaining []T
 }
 
-type turnRunSpec[T any] struct {
+type turnRunSpec[T any, M messageType] struct {
 	runCtx       context.Context
-	input        *AgentInput
+	input        *TypedAgentInput[M]
 	runOpts      []AgentRunOption
 	resumeParams *ResumeParams
 	isResume     bool
@@ -499,18 +499,18 @@ type turnRunSpec[T any] struct {
 	resumeBytes  []byte
 }
 
-type turnPlan[T any] struct {
+type turnPlan[T any, M messageType] struct {
 	turnCtx   context.Context
 	remaining []T
-	spec      *turnRunSpec[T]
+	spec      *turnRunSpec[T, M]
 }
 
-func (l *TurnLoop[T]) planTurn(
+func (l *TurnLoop[T, M]) planTurn(
 	ctx context.Context,
 	isResume bool,
 	items []T,
 	pr *turnLoopPendingResume[T],
-) (*turnPlan[T], error) {
+) (*turnPlan[T, M], error) {
 	if !isResume {
 		result, err := l.config.GenInput(ctx, l, items)
 		if err != nil {
@@ -526,10 +526,10 @@ func (l *TurnLoop[T]) planTurn(
 		if result.RunCtx != nil {
 			turnCtx = result.RunCtx
 		}
-		return &turnPlan[T]{
+		return &turnPlan[T, M]{
 			turnCtx:   turnCtx,
 			remaining: result.Remaining,
-			spec: &turnRunSpec[T]{
+			spec: &turnRunSpec[T, M]{
 				runCtx:   result.RunCtx,
 				input:    result.Input,
 				runOpts:  result.RunOpts,
@@ -554,10 +554,10 @@ func (l *TurnLoop[T]) planTurn(
 	if resumeResult.RunCtx != nil {
 		turnCtx = resumeResult.RunCtx
 	}
-	return &turnPlan[T]{
+	return &turnPlan[T, M]{
 		turnCtx:   turnCtx,
 		remaining: resumeResult.Remaining,
-		spec: &turnRunSpec[T]{
+		spec: &turnRunSpec[T, M]{
 			runCtx:       resumeResult.RunCtx,
 			runOpts:      resumeResult.RunOpts,
 			resumeParams: resumeResult.ResumeParams,
@@ -570,7 +570,7 @@ func (l *TurnLoop[T]) planTurn(
 
 // TurnLoopExitState is returned when TurnLoop exits, containing the exit reason
 // and any items that were not processed.
-type TurnLoopExitState[T any] struct {
+type TurnLoopExitState[T any, M messageType] struct {
 	// ExitReason indicates why the loop exited.
 	// nil means clean exit (Stop() was called without cancel options, or the
 	// agent completed normally before Stop took effect).
@@ -621,9 +621,9 @@ type TurnLoopExitState[T any] struct {
 }
 
 // TurnContext provides per-turn context to the OnAgentEvents callback.
-type TurnContext[T any] struct {
+type TurnContext[T any, M messageType] struct {
 	// Loop is the TurnLoop instance, allowing Push() or Stop() calls.
-	Loop *TurnLoop[T]
+	Loop *TurnLoop[T, M]
 
 	// Consumed contains items that triggered this agent execution.
 	Consumed []T
@@ -672,8 +672,8 @@ type TurnContext[T any] struct {
 //   - Wait: blocks until Run is called AND the loop exits. If Run is never
 //     called, Wait blocks forever (this is a programming error, analogous
 //     to reading from a channel that nobody writes to).
-type TurnLoop[T any] struct {
-	config TurnLoopConfig[T]
+type TurnLoop[T any, M messageType] struct {
+	config TurnLoopConfig[T, M]
 
 	buffer *turnBuffer[T]
 
@@ -682,7 +682,7 @@ type TurnLoop[T any] struct {
 
 	done chan struct{}
 
-	result *TurnLoopExitState[T]
+	result *TurnLoopExitState[T, M]
 
 	stopOnce sync.Once
 
@@ -702,14 +702,14 @@ type TurnLoop[T any] struct {
 
 	loadCheckpointID string
 
-	onAgentEvents func(ctx context.Context, tc *TurnContext[T], events *AsyncIterator[*AgentEvent]) error
+	onAgentEvents func(ctx context.Context, tc *TurnContext[T, M], events *AsyncIterator[*TypedAgentEvent[M]]) error
 
 	lateMu     sync.Mutex
 	lateItems  []T
 	lateSealed bool
 }
 
-func (l *TurnLoop[T]) appendLate(item T) {
+func (l *TurnLoop[T, M]) appendLate(item T) {
 	l.lateMu.Lock()
 	defer l.lateMu.Unlock()
 	if l.lateSealed {
@@ -744,7 +744,7 @@ func unmarshalTurnLoopCheckpoint[T any](data []byte) (*turnLoopCheckpoint[T], er
 	return &c, nil
 }
 
-func (l *TurnLoop[T]) saveTurnLoopCheckpoint(ctx context.Context, checkPointID string, c *turnLoopCheckpoint[T]) error {
+func (l *TurnLoop[T, M]) saveTurnLoopCheckpoint(ctx context.Context, checkPointID string, c *turnLoopCheckpoint[T]) error {
 	if l.config.Store == nil {
 		return errors.New("checkpoint store is nil")
 	}
@@ -755,7 +755,7 @@ func (l *TurnLoop[T]) saveTurnLoopCheckpoint(ctx context.Context, checkPointID s
 	return l.config.Store.Set(ctx, checkPointID, data)
 }
 
-func (l *TurnLoop[T]) deleteTurnLoopCheckpoint(ctx context.Context, checkPointID string) error {
+func (l *TurnLoop[T, M]) deleteTurnLoopCheckpoint(ctx context.Context, checkPointID string) error {
 	if l.config.Store == nil {
 		return nil
 	}
@@ -765,7 +765,7 @@ func (l *TurnLoop[T]) deleteTurnLoopCheckpoint(ctx context.Context, checkPointID
 	return nil
 }
 
-func (l *TurnLoop[T]) tryLoadCheckpoint(ctx context.Context) error {
+func (l *TurnLoop[T, M]) tryLoadCheckpoint(ctx context.Context) error {
 	checkPointID := l.config.CheckpointID
 	if checkPointID == "" || l.config.Store == nil {
 		return nil
@@ -973,15 +973,15 @@ func UntilIdleFor(duration time.Duration) StopOption {
 	}
 }
 
-type pushConfig[T any] struct {
+type pushConfig[T any, M messageType] struct {
 	preempt         bool
 	preemptDelay    time.Duration
 	agentCancelOpts []AgentCancelOption
-	pushStrategy    func(context.Context, *TurnContext[T]) []PushOption[T]
+	pushStrategy    func(context.Context, *TurnContext[T, M]) []PushOption[T, M]
 }
 
 // PushOption is an option for Push().
-type PushOption[T any] func(*pushConfig[T])
+type PushOption[T any, M messageType] func(*pushConfig[T, M])
 
 // WithPreempt signals that the current agent turn should be cancelled at the
 // specified safePoint after pushing the new item. The loop cancels the current
@@ -1001,11 +1001,11 @@ type PushOption[T any] func(*pushConfig[T])
 // passed to the same Push call, the last one wins.
 //
 // safePoint must not be zero; passing SafePoint(0) panics.
-func WithPreempt[T any](safePoint SafePoint) PushOption[T] {
+func WithPreempt[T any, M messageType](safePoint SafePoint) PushOption[T, M] {
 	if safePoint == 0 {
 		panic("adk: SafePoint must not be zero; use AfterToolCalls, AfterChatModel, or AnySafePoint")
 	}
-	return func(cfg *pushConfig[T]) {
+	return func(cfg *pushConfig[T, M]) {
 		cfg.preempt = true
 		cfg.agentCancelOpts = []AgentCancelOption{
 			WithAgentCancelMode(safePoint.toCancelMode()),
@@ -1019,11 +1019,11 @@ func WithPreempt[T any](safePoint SafePoint) PushOption[T] {
 // also receive the cancel signal and be torn down.
 //
 // safePoint must not be zero; passing SafePoint(0) panics.
-func WithPreemptTimeout[T any](safePoint SafePoint, timeout time.Duration) PushOption[T] {
+func WithPreemptTimeout[T any, M messageType](safePoint SafePoint, timeout time.Duration) PushOption[T, M] {
 	if safePoint == 0 {
 		panic("adk: SafePoint must not be zero; use AfterToolCalls, AfterChatModel, or AnySafePoint")
 	}
-	return func(cfg *pushConfig[T]) {
+	return func(cfg *pushConfig[T, M]) {
 		cfg.preempt = true
 		cfg.agentCancelOpts = []AgentCancelOption{
 			WithAgentCancelMode(safePoint.toCancelMode()),
@@ -1038,8 +1038,8 @@ func WithPreemptTimeout[T any](safePoint SafePoint, timeout time.Duration) PushO
 // immediately, but the preemption signal will be delayed by the specified
 // duration. This allows the current agent to continue processing for a grace
 // period before being preempted.
-func WithPreemptDelay[T any](delay time.Duration) PushOption[T] {
-	return func(cfg *pushConfig[T]) {
+func WithPreemptDelay[T any, M messageType](delay time.Duration) PushOption[T, M] {
+	return func(cfg *pushConfig[T, M]) {
 		cfg.preemptDelay = delay
 	}
 }
@@ -1054,22 +1054,22 @@ func WithPreemptDelay[T any](delay time.Duration) PushOption[T] {
 //
 // Example: preempt only if the current turn is processing low-priority items:
 //
-//	loop.Push(urgentItem, WithPushStrategy(func(ctx context.Context, tc *TurnContext[MyItem]) []PushOption[MyItem] {
+//	loop.Push(urgentItem, WithPushStrategy(func(ctx context.Context, tc *TurnContext[MyItem, *schema.Message]) []PushOption[MyItem, *schema.Message] {
 //	    if tc == nil {
 //	        return nil // between turns, plain push
 //	    }
 //	    if isLowPriority(tc.Consumed) {
-//	        return []PushOption[MyItem]{WithPreempt[MyItem](AnySafePoint)}
+//	        return []PushOption[MyItem, *schema.Message]{WithPreempt[MyItem, *schema.Message](AnySafePoint)}
 //	    }
 //	    return nil // don't preempt high-priority work
 //	}))
-func WithPushStrategy[T any](fn func(ctx context.Context, tc *TurnContext[T]) []PushOption[T]) PushOption[T] {
-	return func(cfg *pushConfig[T]) {
+func WithPushStrategy[T any, M messageType](fn func(ctx context.Context, tc *TurnContext[T, M]) []PushOption[T, M]) PushOption[T, M] {
+	return func(cfg *pushConfig[T, M]) {
 		cfg.pushStrategy = fn
 	}
 }
 
-func defaultTurnLoopOnAgentEvents[T any](_ context.Context, _ *TurnContext[T], events *AsyncIterator[*AgentEvent]) error {
+func defaultTurnLoopOnAgentEvents[T any, M messageType](_ context.Context, _ *TurnContext[T, M], events *AsyncIterator[*TypedAgentEvent[M]]) error {
 	for {
 		event, ok := events.Next()
 		if !ok {
@@ -1088,7 +1088,7 @@ func defaultTurnLoopOnAgentEvents[T any](_ context.Context, _ *TurnContext[T], e
 // Call Run to start the processing goroutine.
 //
 // NewTurnLoop panics if GenInput or PrepareAgent is nil.
-func NewTurnLoop[T any](cfg TurnLoopConfig[T]) *TurnLoop[T] {
+func NewTurnLoop[T any, M messageType](cfg TurnLoopConfig[T, M]) *TurnLoop[T, M] {
 	if cfg.GenInput == nil {
 		panic("adk: NewTurnLoop: GenInput is required")
 	}
@@ -1096,7 +1096,7 @@ func NewTurnLoop[T any](cfg TurnLoopConfig[T]) *TurnLoop[T] {
 		panic("adk: NewTurnLoop: PrepareAgent is required")
 	}
 
-	l := &TurnLoop[T]{
+	l := &TurnLoop[T, M]{
 		config:     cfg,
 		buffer:     newTurnBuffer[T](),
 		done:       make(chan struct{}),
@@ -1106,12 +1106,12 @@ func NewTurnLoop[T any](cfg TurnLoopConfig[T]) *TurnLoop[T] {
 	if cfg.OnAgentEvents != nil {
 		l.onAgentEvents = cfg.OnAgentEvents
 	} else {
-		l.onAgentEvents = defaultTurnLoopOnAgentEvents[T]
+		l.onAgentEvents = defaultTurnLoopOnAgentEvents[T, M]
 	}
 	return l
 }
 
-func (l *TurnLoop[T]) start(ctx context.Context) {
+func (l *TurnLoop[T, M]) start(ctx context.Context) {
 	l.runOnce.Do(func() {
 		atomic.StoreInt32(&l.started, 1)
 		go l.run(ctx)
@@ -1126,7 +1126,7 @@ func (l *TurnLoop[T]) start(ctx context.Context) {
 // Otherwise it starts fresh with whatever items were Push()-ed.
 //
 // Calling Run more than once is a no-op: only the first call starts the loop.
-func (l *TurnLoop[T]) Run(ctx context.Context) {
+func (l *TurnLoop[T, M]) Run(ctx context.Context) {
 	l.start(ctx)
 }
 
@@ -1156,8 +1156,8 @@ func (l *TurnLoop[T]) Run(ctx context.Context) {
 // the preemption signal.
 // Push returns immediately after the item is buffered, and a goroutine is spawned
 // to signal preemption after the delay.
-func (l *TurnLoop[T]) Push(item T, opts ...PushOption[T]) (bool, <-chan struct{}) {
-	cfg := &pushConfig[T]{}
+func (l *TurnLoop[T, M]) Push(item T, opts ...PushOption[T, M]) (bool, <-chan struct{}) {
+	cfg := &pushConfig[T, M]{}
 	for _, opt := range opts {
 		opt(cfg)
 	}
@@ -1173,19 +1173,19 @@ func (l *TurnLoop[T]) Push(item T, opts ...PushOption[T]) (bool, <-chan struct{}
 // then calls the strategy callback with a guaranteed-stable TurnContext. If the
 // strategy returns preempt options, the hold is kept and a preempt is requested;
 // otherwise the hold is released and the item is buffered as a plain push.
-func (l *TurnLoop[T]) pushWithStrategy(item T, cfg *pushConfig[T]) (bool, <-chan struct{}) {
+func (l *TurnLoop[T, M]) pushWithStrategy(item T, cfg *pushConfig[T, M]) (bool, <-chan struct{}) {
 	strategy := cfg.pushStrategy
 
 	runCtx, tcAny := l.preemptSig.holdAndGetTurn()
 	if runCtx == nil {
 		runCtx = context.Background()
 	}
-	var tc *TurnContext[T]
+	var tc *TurnContext[T, M]
 	if tcAny != nil {
-		tc = tcAny.(*TurnContext[T])
+		tc = tcAny.(*TurnContext[T, M])
 	}
 	realOpts := strategy(runCtx, tc)
-	cfg = &pushConfig[T]{}
+	cfg = &pushConfig[T, M]{}
 	for _, opt := range realOpts {
 		opt(cfg)
 	}
@@ -1235,7 +1235,7 @@ func (l *TurnLoop[T]) pushWithStrategy(item T, cfg *pushConfig[T]) (bool, <-chan
 	return true, ack
 }
 
-func (l *TurnLoop[T]) pushWithConfig(item T, cfg *pushConfig[T]) (bool, <-chan struct{}) {
+func (l *TurnLoop[T, M]) pushWithConfig(item T, cfg *pushConfig[T, M]) (bool, <-chan struct{}) {
 	if atomic.LoadInt32(&l.stopped) != 0 {
 		l.appendLate(item)
 		return false, nil
@@ -1304,7 +1304,7 @@ func (l *TurnLoop[T]) pushWithConfig(item T, cfg *pushConfig[T]) (bool, <-chan s
 // all cancel-related options (WithImmediate, WithGraceful, WithGracefulTimeout)
 // degrade to "exit the loop on entering the next iteration" — the current
 // agent turn runs to completion before the loop exits.
-func (l *TurnLoop[T]) Stop(opts ...StopOption) {
+func (l *TurnLoop[T, M]) Stop(opts ...StopOption) {
 	cfg := &stopConfig{}
 	for _, opt := range opts {
 		opt(cfg)
@@ -1327,7 +1327,7 @@ func (l *TurnLoop[T]) Stop(opts ...StopOption) {
 	l.commitStop()
 }
 
-func (l *TurnLoop[T]) commitStop() {
+func (l *TurnLoop[T, M]) commitStop() {
 	l.stopOnce.Do(func() {
 		l.stopSig.closeDone()
 		atomic.StoreInt32(&l.stopped, 1)
@@ -1341,12 +1341,12 @@ func (l *TurnLoop[T]) commitStop() {
 //
 // Wait blocks until Run is called AND the loop exits. If Run is
 // never called, Wait blocks forever.
-func (l *TurnLoop[T]) Wait() *TurnLoopExitState[T] {
+func (l *TurnLoop[T, M]) Wait() *TurnLoopExitState[T, M] {
 	<-l.done
 	return l.result
 }
 
-func (l *TurnLoop[T]) run(ctx context.Context) {
+func (l *TurnLoop[T, M]) run(ctx context.Context) {
 	defer l.cleanup(ctx)
 
 	if err := l.tryLoadCheckpoint(ctx); err != nil {
@@ -1502,7 +1502,7 @@ func (l *TurnLoop[T]) run(ctx context.Context) {
 	}
 }
 
-func (l *TurnLoop[T]) setupBridgeStore(spec *turnRunSpec[T], runOpts []AgentRunOption) ([]AgentRunOption, *bridgeStore, error) {
+func (l *TurnLoop[T, M]) setupBridgeStore(spec *turnRunSpec[T, M], runOpts []AgentRunOption) ([]AgentRunOption, *bridgeStore, error) {
 	store := l.config.Store
 	if store == nil && spec.isResume {
 		return nil, nil, fmt.Errorf("failed to resume agent: checkpoint store is nil")
@@ -1530,7 +1530,7 @@ func (l *TurnLoop[T]) setupBridgeStore(spec *turnRunSpec[T], runOpts []AgentRunO
 // On the first preempt whose cancel actually contributed (i.e. the cancel options
 // were accepted before the CancelError was finalized), preemptDone is closed to
 // wake runAgentAndHandleEvents's select.
-func (l *TurnLoop[T]) watchPreemptSignal(done <-chan struct{}, agentCancelFunc AgentCancelFunc, preemptDone chan struct{}) {
+func (l *TurnLoop[T, M]) watchPreemptSignal(done <-chan struct{}, agentCancelFunc AgentCancelFunc, preemptDone chan struct{}) {
 	var lastGen uint64
 	for {
 		select {
@@ -1573,7 +1573,7 @@ func (l *TurnLoop[T]) watchPreemptSignal(done <-chan struct{}, agentCancelFunc A
 // On the first cancel that actually contributed (i.e. the cancel was accepted
 // before the CancelError was finalized), stoppedDone is closed to wake
 // runAgentAndHandleEvents's select.
-func (l *TurnLoop[T]) watchStopSignal(done <-chan struct{}, agentCancelFunc AgentCancelFunc, stoppedDone chan struct{}) {
+func (l *TurnLoop[T, M]) watchStopSignal(done <-chan struct{}, agentCancelFunc AgentCancelFunc, stoppedDone chan struct{}) {
 	var lastGen uint64
 	stoppedClosed := false
 
@@ -1612,12 +1612,12 @@ func (l *TurnLoop[T]) watchStopSignal(done <-chan struct{}, agentCancelFunc Agen
 	}
 }
 
-func (l *TurnLoop[T]) runAgentAndHandleEvents(
+func (l *TurnLoop[T, M]) runAgentAndHandleEvents(
 	ctx context.Context,
-	agent Agent,
-	spec *turnRunSpec[T],
+	agent TypedAgent[M],
+	spec *turnRunSpec[T, M],
 ) error {
-	var iter *AsyncIterator[*AgentEvent]
+	var iter *AsyncIterator[*TypedAgentEvent[M]]
 
 	runOpts, ms, err := l.setupBridgeStore(spec, spec.runOpts)
 	if err != nil {
@@ -1631,7 +1631,7 @@ func (l *TurnLoop[T]) runAgentAndHandleEvents(
 	if spec.input != nil {
 		enableStreaming = spec.input.EnableStreaming
 	}
-	runner := NewRunner(ctx, RunnerConfig{
+	runner := NewTypedRunner[M](TypedRunnerConfig[M]{
 		EnableStreaming: enableStreaming,
 		Agent:           agent,
 		CheckPointStore: ms,
@@ -1640,7 +1640,7 @@ func (l *TurnLoop[T]) runAgentAndHandleEvents(
 	preemptDone := make(chan struct{})
 	stoppedDone := make(chan struct{})
 
-	tc := &TurnContext[T]{
+	tc := &TurnContext[T, M]{
 		Loop:      l,
 		Consumed:  spec.consumed,
 		Preempted: preemptDone,
@@ -1743,7 +1743,7 @@ func (l *TurnLoop[T]) runAgentAndHandleEvents(
 	}
 }
 
-func (l *TurnLoop[T]) cleanup(ctx context.Context) {
+func (l *TurnLoop[T, M]) cleanup(ctx context.Context) {
 	atomic.StoreInt32(&l.stopped, 1)
 
 	unhandled := l.buffer.TakeAll()
@@ -1777,7 +1777,7 @@ func (l *TurnLoop[T]) cleanup(ctx context.Context) {
 	var takeLateOnce sync.Once
 	var takeLateResult []T
 
-	l.result = &TurnLoopExitState[T]{
+	l.result = &TurnLoopExitState[T, M]{
 		ExitReason:          l.runErr,
 		UnhandledItems:      unhandled,
 		CanceledItems:       l.canceledItems,
