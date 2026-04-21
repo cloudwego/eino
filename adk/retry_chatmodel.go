@@ -312,7 +312,7 @@ func (r *typedRetryModelWrapper[M]) Generate(ctx context.Context, input []M, opt
 	return r.generateLegacy(ctx, input, opts...)
 }
 
-func (r *typedRetryModelWrapper[M]) generateLegacy(ctx context.Context, input []M, opts ...model.Option) (M, error) {
+func (r *typedRetryModelWrapper[M]) generateLegacy(ctx context.Context, input []M, opts ...model.Option) (zero M, _ error) {
 	isRetryAble := r.config.IsRetryAble
 	if isRetryAble == nil {
 		isRetryAble = defaultIsRetryAble
@@ -330,30 +330,25 @@ func (r *typedRetryModelWrapper[M]) generateLegacy(ctx context.Context, input []
 		}
 
 		if _, ok := compose.ExtractInterruptInfo(err); ok {
-			var zero M
 			return zero, err
 		}
 
 		if errors.Is(err, ErrStreamCanceled) {
-			var zero M
 			return zero, err
 		}
 
 		if !isRetryAble(ctx, err) {
-			var zero M
 			return zero, err
 		}
 
 		lastErr = err
 		if attempt < r.config.MaxRetries {
 			if err := r.contextAwareSleep(ctx, backoffFunc(ctx, attempt+1)); err != nil {
-				var zero M
 				return zero, err
 			}
 		}
 	}
 
-	var zero M
 	return zero, &RetryExhaustedError{LastErr: lastErr, TotalRetries: r.config.MaxRetries}
 }
 
@@ -439,7 +434,7 @@ func generateWithShouldRetry(r *typedRetryModelWrapper[*schema.Message], ctx con
 			break
 		}
 
-		applyDecisionForRetry(r, &currentInput, &currentOpts, ctx, decision)
+		applyDecisionForRetry(&currentInput, &currentOpts, ctx, decision)
 
 		delay := decision.Backoff
 		if delay == 0 {
@@ -576,7 +571,7 @@ func streamWithShouldRetry(r *typedRetryModelWrapper[*schema.Message], ctx conte
 
 			lastErr = err
 			if attempt < r.config.MaxRetries {
-				applyDecisionForRetry(r, &currentInput, &currentOpts, ctx, decision)
+				applyDecisionForRetry(&currentInput, &currentOpts, ctx, decision)
 				delay := decision.Backoff
 				if delay == 0 {
 					delay = backoffFunc(ctx, attempt+1)
@@ -646,7 +641,7 @@ func streamWithShouldRetry(r *typedRetryModelWrapper[*schema.Message], ctx conte
 		lastErr = verdictErr
 
 		if attempt < r.config.MaxRetries {
-			applyDecisionForRetry(r, &currentInput, &currentOpts, ctx, decision)
+			applyDecisionForRetry(&currentInput, &currentOpts, ctx, decision)
 			delay := decision.Backoff
 			if delay == 0 {
 				delay = backoffFunc(ctx, attempt+1)
@@ -660,7 +655,7 @@ func streamWithShouldRetry(r *typedRetryModelWrapper[*schema.Message], ctx conte
 	return nil, &RetryExhaustedError{LastErr: lastErr, TotalRetries: r.config.MaxRetries}
 }
 
-func applyDecisionForRetry(r *typedRetryModelWrapper[*schema.Message], currentInput *[]*schema.Message, currentOpts *[]model.Option, ctx context.Context, decision *RetryDecision) {
+func applyDecisionForRetry(currentInput *[]*schema.Message, currentOpts *[]model.Option, ctx context.Context, decision *RetryDecision) {
 	if decision.ModifiedInputMessages != nil {
 		*currentInput = decision.ModifiedInputMessages
 		if decision.PersistModifiedInputMessages {

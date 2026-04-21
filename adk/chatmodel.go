@@ -713,7 +713,7 @@ func extractTextContent[M messageType](msg M) string {
 				texts = append(texts, block.AssistantGenText.Text)
 			}
 		}
-		return strings.Join(texts, "")
+		return strings.Join(texts, "\n")
 	default:
 		return ""
 	}
@@ -950,10 +950,12 @@ func (a *TypedChatModelAgent[M]) buildNoToolsRunFunc(_ context.Context) (typedRu
 			if err != nil {
 				return nil, err
 			}
-			_ = compose.ProcessState(ctx, func(_ context.Context, st *typedState[M]) error {
+			if err := compose.ProcessState(ctx, func(_ context.Context, st *typedState[M]) error {
 				st.Messages = append(st.Messages, messages...)
 				return nil
-			})
+			}); err != nil {
+				return nil, err
+			}
 			return messages, nil
 		}))
 

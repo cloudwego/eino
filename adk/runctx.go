@@ -87,8 +87,7 @@ type typedAgentEventWrapperForGob[M messageType] struct {
 func (e *typedAgentEventWrapper[M]) GobEncode() ([]byte, error) {
 	if e.event != nil && e.event.Output != nil && e.event.Output.MessageOutput != nil && e.event.Output.MessageOutput.IsStreaming {
 		// Materialize the stream before encoding.
-		var zero M
-		if any(e.concatenatedMessage) == any(zero) && e.StreamErr == nil {
+		if isNilMessage(e.concatenatedMessage) && e.StreamErr == nil {
 			e.consumeStream()
 		}
 	}
@@ -127,8 +126,7 @@ func (e *typedAgentEventWrapper[M]) consumeStream() {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 
-	var zero M
-	if any(e.concatenatedMessage) != any(zero) {
+	if !isNilMessage(e.concatenatedMessage) {
 		return
 	}
 
@@ -396,7 +394,7 @@ type runContext struct {
 	RootInput *AgentInput
 	RunPath   []RunStep
 
-	TypedRootInput any
+	AgenticRootInput any
 
 	Session *runSession
 }
@@ -407,10 +405,10 @@ func (rc *runContext) isRoot() bool {
 
 func (rc *runContext) deepCopy() *runContext {
 	copied := &runContext{
-		RootInput:      rc.RootInput,
-		TypedRootInput: rc.TypedRootInput,
-		RunPath:        make([]RunStep, len(rc.RunPath)),
-		Session:        rc.Session,
+		RootInput:        rc.RootInput,
+		AgenticRootInput: rc.AgenticRootInput,
+		RunPath:          make([]RunStep, len(rc.RunPath)),
+		Session:          rc.Session,
 	}
 
 	copy(copied.RunPath, rc.RunPath)
@@ -462,7 +460,7 @@ func initTypedRunCtx[M messageType](ctx context.Context, agentName string, input
 		if _, ok := any(zero).(*schema.Message); ok {
 			runCtx.RootInput = any(input).(*AgentInput)
 		} else {
-			runCtx.TypedRootInput = input
+			runCtx.AgenticRootInput = input
 		}
 	}
 
@@ -601,7 +599,7 @@ func ctxWithNewTypedRunCtx[M messageType](ctx context.Context, input *TypedAgent
 	if _, ok := any(zero).(*schema.Message); ok {
 		rc.RootInput = any(input).(*AgentInput)
 	} else {
-		rc.TypedRootInput = input
+		rc.AgenticRootInput = input
 	}
 	return setRunCtx(ctx, rc)
 }

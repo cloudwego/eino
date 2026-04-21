@@ -129,12 +129,12 @@ func getMessageFromTypedWrappedEvent[M messageType](e *typedAgentEventWrapper[M]
 		return e.event.Output.MessageOutput.Message, nil
 	}
 
-	if any(e.concatenatedMessage) != any(zero) {
-		return e.concatenatedMessage, nil
-	}
-
 	if e.StreamErr != nil {
 		return zero, e.StreamErr
+	}
+
+	if !isNilMessage(e.concatenatedMessage) {
+		return e.concatenatedMessage, nil
 	}
 
 	e.consumeStream()
