@@ -5426,14 +5426,14 @@ func TestTurnLoop_Stop_WithImmediate_RecursivePropagation(t *testing.T) {
 	childCCCh := make(chan *cancelContext, 1)
 	probe := &turnLoopNestedProbeAgent{parentCCCh: parentCCCh, childCCCh: childCCCh}
 
-	loop := newAndRunTurnLoop(context.Background(), TurnLoopConfig[string]{
-		GenInput: func(ctx context.Context, _ *TurnLoop[string], items []string) (*GenInputResult[string], error) {
-			return &GenInputResult[string]{
+	loop := newAndRunTurnLoop(context.Background(), TurnLoopConfig[string, *schema.Message]{
+		GenInput: func(ctx context.Context, _ *TurnLoop[string, *schema.Message], items []string) (*GenInputResult[string, *schema.Message], error) {
+			return &GenInputResult[string, *schema.Message]{
 				Input:    &AgentInput{Messages: []Message{schema.UserMessage(items[0])}},
 				Consumed: items,
 			}, nil
 		},
-		PrepareAgent: func(ctx context.Context, _ *TurnLoop[string], consumed []string) (Agent, error) {
+		PrepareAgent: func(ctx context.Context, _ *TurnLoop[string, *schema.Message], consumed []string) (Agent, error) {
 			return probe, nil
 		},
 	})
@@ -5474,14 +5474,14 @@ func TestTurnLoop_Push_WithPreemptTimeout_RecursivePropagation(t *testing.T) {
 	childCCCh := make(chan *cancelContext, 2)
 	probe := &turnLoopNestedProbeAgent{parentCCCh: parentCCCh, childCCCh: childCCCh}
 
-	loop := newAndRunTurnLoop(context.Background(), TurnLoopConfig[string]{
-		GenInput: func(ctx context.Context, _ *TurnLoop[string], items []string) (*GenInputResult[string], error) {
-			return &GenInputResult[string]{
+	loop := newAndRunTurnLoop(context.Background(), TurnLoopConfig[string, *schema.Message]{
+		GenInput: func(ctx context.Context, _ *TurnLoop[string, *schema.Message], items []string) (*GenInputResult[string, *schema.Message], error) {
+			return &GenInputResult[string, *schema.Message]{
 				Input:    &AgentInput{Messages: []Message{schema.UserMessage(items[0])}},
 				Consumed: items,
 			}, nil
 		},
-		PrepareAgent: func(ctx context.Context, _ *TurnLoop[string], consumed []string) (Agent, error) {
+		PrepareAgent: func(ctx context.Context, _ *TurnLoop[string, *schema.Message], consumed []string) (Agent, error) {
 			return probe, nil
 		},
 	})
@@ -5492,7 +5492,7 @@ func TestTurnLoop_Push_WithPreemptTimeout_RecursivePropagation(t *testing.T) {
 	t.Cleanup(func() { child.markDone() })
 
 	// Preempt with a very short timeout so it escalates to CancelImmediate quickly.
-	loop.Push("urgent", WithPreemptTimeout[string](AfterChatModel, 10*time.Millisecond))
+	loop.Push("urgent", WithPreemptTimeout[string, *schema.Message](AfterChatModel, 10*time.Millisecond))
 
 	// After timeout escalation, child should receive the immediate cancel
 	// via recursive propagation.
@@ -5517,15 +5517,15 @@ func TestUntilIdleFor_NonPositive_Panics(t *testing.T) {
 }
 
 func TestSaveTurnLoopCheckpoint_NilStore(t *testing.T) {
-	l := &TurnLoop[string]{config: TurnLoopConfig[string]{Store: nil}}
+	l := &TurnLoop[string, *schema.Message]{config: TurnLoopConfig[string, *schema.Message]{Store: nil}}
 	err := l.saveTurnLoopCheckpoint(context.Background(), "cp-1", &turnLoopCheckpoint[string]{})
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "checkpoint store is nil")
 }
 
 func TestSetupBridgeStore_NilStore_Resume(t *testing.T) {
-	l := &TurnLoop[string]{config: TurnLoopConfig[string]{Store: nil}}
-	spec := &turnRunSpec[string]{isResume: true}
+	l := &TurnLoop[string, *schema.Message]{config: TurnLoopConfig[string, *schema.Message]{Store: nil}}
+	spec := &turnRunSpec[string, *schema.Message]{isResume: true}
 	_, _, err := l.setupBridgeStore(spec, nil)
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "checkpoint store is nil")
