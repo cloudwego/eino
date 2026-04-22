@@ -144,6 +144,7 @@ func (m *middleware) BeforeAgent(ctx context.Context, runCtx *adk.ChatModelAgent
 }
 
 const toolSearchInitializedKey = "__toolsearch_initialized__"
+const toolSearchReminderExtraKey = "__toolsearch_reminder__"
 
 func (m *middleware) isInitialized(ctx context.Context) bool {
 	val, ok, err := adk.GetRunLocalValue(ctx, toolSearchInitializedKey)
@@ -161,7 +162,7 @@ func (m *middleware) markInitialized(ctx context.Context) {
 func (m *middleware) ensureReminder(msgs []*schema.Message) []*schema.Message {
 	for _, msg := range msgs {
 		if msg.Extra != nil {
-			if v, ok := msg.Extra["__toolsearch_reminder__"]; ok {
+			if v, ok := msg.Extra[toolSearchReminderExtraKey]; ok {
 				if b, _ := v.(bool); b {
 					return msgs
 				}
@@ -175,14 +176,14 @@ func (m *middleware) ensureReminder(msgs []*schema.Message) []*schema.Message {
 		if msg.Role != schema.System && !inserted {
 			inserted = true
 			reminder := schema.UserMessage(m.sr)
-			reminder.Extra = map[string]any{"__toolsearch_reminder__": true}
+			reminder.Extra = map[string]any{toolSearchReminderExtraKey: true}
 			result = append(result, reminder)
 		}
 		result = append(result, msg)
 	}
 	if !inserted {
 		reminder := schema.UserMessage(m.sr)
-		reminder.Extra = map[string]any{"__toolsearch_reminder__": true}
+		reminder.Extra = map[string]any{toolSearchReminderExtraKey: true}
 		result = append(result, reminder)
 	}
 	return result
@@ -233,17 +234,20 @@ func (m *middleware) BeforeModelRewriteState(ctx context.Context, state *adk.Cha
 		m.markInitialized(ctx)
 
 		if m.useModelToolSearch {
-			// Mode 2: extract dynamic tools into DeferredToolInfos, strip from ToolInfos, remove tool_search
+			// Model-native search: move dynamic tools to DeferredToolInfos for server-side retrieval,
+			// keep only static tools in ToolInfos, and remove the tool_search tool (the model handles search itself).
 			state.DeferredToolInfos = m.extractDynamicTools(state.ToolInfos)
 			state.ToolInfos = m.stripDynamicTools(state.ToolInfos)
 			state.ToolInfos = removeTool(state.ToolInfos, toolSearchToolName)
 		} else {
-			// Mode 1: strip dynamic tools from ToolInfos (keep tool_search)
+			// Client-side search: hide dynamic tools initially; they become visible
+			// only after the model calls tool_search and forward selection adds them back.
 			state.ToolInfos = m.stripDynamicTools(state.ToolInfos)
 		}
 	}
 
-	// Forward selection (Mode 1 only): add tools selected via tool_search results
+	// Forward selection (client-side search only): scan tool_search results in the
+	// conversation history and add the selected dynamic tools back to ToolInfos.
 	if !m.useModelToolSearch {
 		existing := toolNameSet(state.ToolInfos)
 		for _, msg := range state.Messages {

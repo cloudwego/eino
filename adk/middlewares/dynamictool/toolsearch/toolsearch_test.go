@@ -451,7 +451,7 @@ func TestEnsureReminder(t *testing.T) {
 		assert.Equal(t, schema.System, got[0].Role)
 		assert.Equal(t, schema.User, got[1].Role)
 		assert.Equal(t, "<reminder>", got[1].Content)
-		assert.Equal(t, true, got[1].Extra["__toolsearch_reminder__"])
+		assert.Equal(t, true, got[1].Extra[toolSearchReminderExtraKey])
 		assert.Equal(t, schema.User, got[2].Role)
 		assert.Equal(t, "hi", got[2].Content)
 	})
@@ -488,7 +488,7 @@ func TestEnsureReminder(t *testing.T) {
 
 	t.Run("idempotent: does not insert twice", func(t *testing.T) {
 		input := []*schema.Message{
-			{Role: schema.User, Content: "<reminder>", Extra: map[string]any{"__toolsearch_reminder__": true}},
+			{Role: schema.User, Content: "<reminder>", Extra: map[string]any{toolSearchReminderExtraKey: true}},
 			{Role: schema.User, Content: "hi"},
 		}
 		got := m.ensureReminder(input)
@@ -592,15 +592,7 @@ func TestBeforeModelRewriteState_Mode1_Initialization(t *testing.T) {
 	assert.Nil(t, state.DeferredToolInfos, "Mode 1 should not populate DeferredToolInfos")
 
 	// Verify reminder was inserted.
-	hasReminder := false
-	for _, msg := range state.Messages {
-		if msg.Extra != nil {
-			if v, _ := msg.Extra["__toolsearch_reminder__"].(bool); v {
-				hasReminder = true
-			}
-		}
-	}
-	assert.True(t, hasReminder, "reminder should be inserted")
+	assert.Equal(t, 1, countReminders(state.Messages), "reminder should be inserted")
 }
 
 func TestBeforeModelRewriteState_Mode1_ForwardSelection(t *testing.T) {
@@ -623,7 +615,7 @@ func TestBeforeModelRewriteState_Mode1_ForwardSelection(t *testing.T) {
 	state := &adk.ChatModelAgentState{
 		Messages: []*schema.Message{
 			{Role: schema.System, Content: "sys"},
-			{Role: schema.User, Content: "hello", Extra: map[string]any{"__toolsearch_reminder__": true}},
+			{Role: schema.User, Content: "hello", Extra: map[string]any{toolSearchReminderExtraKey: true}},
 			schema.AssistantMessage("", []schema.ToolCall{
 				{ID: "tc1", Function: schema.FunctionCall{Name: toolSearchToolName, Arguments: `{"query":"select:dynamic_tool_a"}`}},
 			}),
@@ -724,7 +716,7 @@ func TestBeforeModelRewriteState_ReminderReinsertAfterRemoval(t *testing.T) {
 	for _, msg := range state.Messages {
 		isReminder := false
 		if msg.Extra != nil {
-			if v, ok := msg.Extra["__toolsearch_reminder__"].(bool); ok && v {
+			if v, ok := msg.Extra[toolSearchReminderExtraKey].(bool); ok && v {
 				isReminder = true
 			}
 		}
@@ -747,10 +739,290 @@ func countReminders(msgs []*schema.Message) int {
 	count := 0
 	for _, msg := range msgs {
 		if msg.Extra != nil {
-			if v, _ := msg.Extra["__toolsearch_reminder__"].(bool); v {
+			if v, _ := msg.Extra[toolSearchReminderExtraKey].(bool); v {
 				count++
 			}
 		}
 	}
 	return count
+}
+
+// ---------------------------------------------------------------------------
+// Edge-case tests for BeforeModelRewriteState
+// ---------------------------------------------------------------------------
+
+func TestBeforeModelRewriteState_Mode1_MultipleToolSearchResultsAcrossTurns(t *testing.T) {
+	ctx := context.Background()
+
+	dynamicA := &simpleTool{name: "dynamic_tool_a", desc: "Dynamic tool A"}
+	dynamicB := &simpleTool{name: "dynamic_tool_b", desc: "Dynamic tool B"}
+	dynamicC := &simpleTool{name: "dynamic_tool_c", desc: "Dynamic tool C"}
+
+	mw, err := New(ctx, &Config{
+		DynamicTools:       []tool.BaseTool{dynamicA, dynamicB, dynamicC},
+		UseModelToolSearch: false,
+	})
+	require.NoError(t, err)
+
+	m := mw.(*middleware)
+
+	// Build two separate tool_search result messages, each selecting a different tool.
+	resultA, _ := json.Marshal(toolSearchResult{Matches: []string{"dynamic_tool_a"}})
+	resultB, _ := json.Marshal(toolSearchResult{Matches: []string{"dynamic_tool_b"}})
+
+	state := &adk.ChatModelAgentState{
+		Messages: []*schema.Message{
+			{Role: schema.System, Content: "sys"},
+			{Role: schema.User, Content: "reminder", Extra: map[string]any{toolSearchReminderExtraKey: true}},
+			schema.AssistantMessage("", []schema.ToolCall{
+				{ID: "tc1", Function: schema.FunctionCall{Name: toolSearchToolName, Arguments: `{"query":"select:dynamic_tool_a"}`}},
+			}),
+			{Role: schema.Tool, ToolName: toolSearchToolName, Content: string(resultA)},
+			schema.AssistantMessage("", []schema.ToolCall{
+				{ID: "tc2", Function: schema.FunctionCall{Name: toolSearchToolName, Arguments: `{"query":"select:dynamic_tool_b"}`}},
+			}),
+			{Role: schema.Tool, ToolName: toolSearchToolName, Content: string(resultB)},
+		},
+		ToolInfos: []*schema.ToolInfo{
+			ti("static_tool", "Static tool"),
+			getToolSearchToolInfo(),
+		},
+	}
+
+	_, state, err = m.BeforeModelRewriteState(ctx, state, nil)
+	require.NoError(t, err)
+
+	names := toolNames(state.ToolInfos)
+	assert.Contains(t, names, "dynamic_tool_a", "dynamic_tool_a should be added from first tool_search result")
+	assert.Contains(t, names, "dynamic_tool_b", "dynamic_tool_b should be added from second tool_search result")
+	assert.NotContains(t, names, "dynamic_tool_c", "dynamic_tool_c was never selected")
+	assert.Contains(t, names, "static_tool", "static_tool should remain")
+	assert.Contains(t, names, "tool_search", "tool_search should remain")
+}
+
+func TestBeforeModelRewriteState_Mode1_MalformedJSONInToolSearchResult(t *testing.T) {
+	ctx := context.Background()
+
+	dynamicA := &simpleTool{name: "dynamic_tool_a", desc: "Dynamic tool A"}
+
+	mw, err := New(ctx, &Config{
+		DynamicTools:       []tool.BaseTool{dynamicA},
+		UseModelToolSearch: false,
+	})
+	require.NoError(t, err)
+
+	m := mw.(*middleware)
+
+	state := &adk.ChatModelAgentState{
+		Messages: []*schema.Message{
+			{Role: schema.System, Content: "sys"},
+			{Role: schema.User, Content: "reminder", Extra: map[string]any{toolSearchReminderExtraKey: true}},
+			schema.AssistantMessage("", []schema.ToolCall{
+				{ID: "tc1", Function: schema.FunctionCall{Name: toolSearchToolName, Arguments: `{"query":"select:dynamic_tool_a"}`}},
+			}),
+			{Role: schema.Tool, ToolName: toolSearchToolName, Content: `{invalid json!!!`},
+		},
+		ToolInfos: []*schema.ToolInfo{
+			ti("static_tool", "Static tool"),
+			getToolSearchToolInfo(),
+		},
+	}
+
+	_, state, err = m.BeforeModelRewriteState(ctx, state, nil)
+	require.NoError(t, err, "malformed JSON in tool_search result should not cause an error")
+
+	names := toolNames(state.ToolInfos)
+	assert.NotContains(t, names, "dynamic_tool_a", "malformed JSON result should be skipped")
+	assert.Contains(t, names, "static_tool")
+	assert.Contains(t, names, "tool_search")
+}
+
+func TestBeforeModelRewriteState_Mode1_NonExistentToolInForwardSelection(t *testing.T) {
+	ctx := context.Background()
+
+	dynamicA := &simpleTool{name: "dynamic_tool_a", desc: "Dynamic tool A"}
+
+	mw, err := New(ctx, &Config{
+		DynamicTools:       []tool.BaseTool{dynamicA},
+		UseModelToolSearch: false,
+	})
+	require.NoError(t, err)
+
+	m := mw.(*middleware)
+
+	resultJSON, _ := json.Marshal(toolSearchResult{Matches: []string{"nonexistent_tool", "dynamic_tool_a"}})
+
+	state := &adk.ChatModelAgentState{
+		Messages: []*schema.Message{
+			{Role: schema.User, Content: "reminder", Extra: map[string]any{toolSearchReminderExtraKey: true}},
+			schema.AssistantMessage("", []schema.ToolCall{
+				{ID: "tc1", Function: schema.FunctionCall{Name: toolSearchToolName, Arguments: `{"query":"select:nonexistent_tool,dynamic_tool_a"}`}},
+			}),
+			{Role: schema.Tool, ToolName: toolSearchToolName, Content: string(resultJSON)},
+		},
+		ToolInfos: []*schema.ToolInfo{
+			ti("static_tool", "Static tool"),
+			getToolSearchToolInfo(),
+		},
+	}
+
+	_, state, err = m.BeforeModelRewriteState(ctx, state, nil)
+	require.NoError(t, err, "nonexistent tool in forward selection should not cause an error")
+
+	names := toolNames(state.ToolInfos)
+	assert.Contains(t, names, "dynamic_tool_a", "valid tool should be added")
+	assert.NotContains(t, names, "nonexistent_tool", "nonexistent tool should be silently ignored")
+}
+
+func TestBeforeModelRewriteState_Mode2_EmptyToolInfos(t *testing.T) {
+	ctx := context.Background()
+
+	dynamicA := &simpleTool{name: "dynamic_tool_a", desc: "Dynamic tool A"}
+
+	mw, err := New(ctx, &Config{
+		DynamicTools:       []tool.BaseTool{dynamicA},
+		UseModelToolSearch: true,
+	})
+	require.NoError(t, err)
+
+	m := mw.(*middleware)
+
+	state := &adk.ChatModelAgentState{
+		Messages: []*schema.Message{
+			{Role: schema.User, Content: "hello"},
+		},
+		ToolInfos: []*schema.ToolInfo{}, // empty, not nil
+	}
+
+	_, state, err = m.BeforeModelRewriteState(ctx, state, nil)
+	require.NoError(t, err, "empty ToolInfos should not cause an error")
+
+	assert.Empty(t, state.ToolInfos, "ToolInfos should be empty")
+	assert.Empty(t, state.DeferredToolInfos, "DeferredToolInfos should be empty when no dynamic tools found in ToolInfos")
+}
+
+func TestBeforeModelRewriteState_Mode1_DoubleInitWithoutComposeContext(t *testing.T) {
+	ctx := context.Background()
+
+	dynamicA := &simpleTool{name: "dynamic_tool_a", desc: "Dynamic tool A"}
+	dynamicB := &simpleTool{name: "dynamic_tool_b", desc: "Dynamic tool B"}
+
+	mw, err := New(ctx, &Config{
+		DynamicTools:       []tool.BaseTool{dynamicA, dynamicB},
+		UseModelToolSearch: false,
+	})
+	require.NoError(t, err)
+
+	m := mw.(*middleware)
+
+	resultJSON, _ := json.Marshal(toolSearchResult{Matches: []string{"dynamic_tool_a"}})
+
+	state := &adk.ChatModelAgentState{
+		Messages: []*schema.Message{
+			{Role: schema.User, Content: "reminder", Extra: map[string]any{toolSearchReminderExtraKey: true}},
+			schema.AssistantMessage("", []schema.ToolCall{
+				{ID: "tc1", Function: schema.FunctionCall{Name: toolSearchToolName, Arguments: `{"query":"select:dynamic_tool_a"}`}},
+			}),
+			{Role: schema.Tool, ToolName: toolSearchToolName, Content: string(resultJSON)},
+		},
+		ToolInfos: []*schema.ToolInfo{
+			ti("static_tool", "Static tool"),
+			getToolSearchToolInfo(),
+			ti("dynamic_tool_a", "Dynamic tool A"),
+		},
+	}
+
+	// First call: init runs (strips dynamic_tool_a), then forward selection re-adds it.
+	_, state, err = m.BeforeModelRewriteState(ctx, state, nil)
+	require.NoError(t, err)
+
+	names := toolNames(state.ToolInfos)
+	assert.Contains(t, names, "dynamic_tool_a",
+		"forward selection should re-add dynamic_tool_a even after init re-strips it")
+	assert.Contains(t, names, "static_tool")
+	assert.Contains(t, names, "tool_search")
+
+	// Second call: init runs AGAIN (no compose ctx), verify behavior is stable.
+	_, state2, err := m.BeforeModelRewriteState(ctx, state, nil)
+	require.NoError(t, err)
+
+	names2 := toolNames(state2.ToolInfos)
+	assert.Contains(t, names2, "dynamic_tool_a",
+		"second call should also have dynamic_tool_a re-added by forward selection")
+}
+
+func TestBeforeModelRewriteState_ToolInfosSliceMutation(t *testing.T) {
+	ctx := context.Background()
+
+	dynamicA := &simpleTool{name: "dynamic_tool_a", desc: "Dynamic tool A"}
+
+	mw, err := New(ctx, &Config{
+		DynamicTools:       []tool.BaseTool{dynamicA},
+		UseModelToolSearch: false,
+	})
+	require.NoError(t, err)
+
+	m := mw.(*middleware)
+
+	// Create ToolInfos with excess capacity so append could mutate in place.
+	originalToolInfos := make([]*schema.ToolInfo, 2, 10)
+	originalToolInfos[0] = ti("static_tool", "Static tool")
+	originalToolInfos[1] = getToolSearchToolInfo()
+
+	originalLen := len(originalToolInfos)
+
+	resultJSON, _ := json.Marshal(toolSearchResult{Matches: []string{"dynamic_tool_a"}})
+
+	state := &adk.ChatModelAgentState{
+		Messages: []*schema.Message{
+			{Role: schema.User, Content: "reminder", Extra: map[string]any{toolSearchReminderExtraKey: true}},
+			schema.AssistantMessage("", []schema.ToolCall{
+				{ID: "tc1", Function: schema.FunctionCall{Name: toolSearchToolName, Arguments: `{"query":"select:dynamic_tool_a"}`}},
+			}),
+			{Role: schema.Tool, ToolName: toolSearchToolName, Content: string(resultJSON)},
+		},
+		ToolInfos: originalToolInfos,
+	}
+
+	_, newState, err := m.BeforeModelRewriteState(ctx, state, nil)
+	require.NoError(t, err)
+
+	newNames := toolNames(newState.ToolInfos)
+	assert.Contains(t, newNames, "dynamic_tool_a")
+	assert.Equal(t, originalLen, len(originalToolInfos),
+		"original ToolInfos slice length should not be mutated by the middleware")
+}
+
+// ---------------------------------------------------------------------------
+// modelToolSearchTool (Mode 2) tests
+// ---------------------------------------------------------------------------
+
+func TestModelToolSearchTool(t *testing.T) {
+	ctx := context.Background()
+
+	tools := makeToolMap(
+		ti("alpha", "Alpha tool description"),
+		ti("beta", "Beta tool description"),
+	)
+	mts := &modelToolSearchTool{tools: tools}
+
+	// Info should return the standard tool_search tool info.
+	info, err := mts.Info(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, toolSearchToolName, info.Name)
+
+	// InvokableRun with a valid query selecting "alpha".
+	arg := &schema.ToolArgument{Text: searchJSON("select:alpha", nil)}
+	result, err := mts.InvokableRun(ctx, arg)
+	require.NoError(t, err)
+	require.Len(t, result.Parts, 1)
+	assert.Equal(t, schema.ToolPartTypeToolSearchResult, result.Parts[0].Type)
+	require.NotNil(t, result.Parts[0].ToolSearchResult)
+	assert.Len(t, result.Parts[0].ToolSearchResult.Tools, 1)
+	assert.Equal(t, "alpha", result.Parts[0].ToolSearchResult.Tools[0].Name)
+
+	// InvokableRun with an empty query should return error.
+	argEmpty := &schema.ToolArgument{Text: `{"query":""}`}
+	_, err = mts.InvokableRun(ctx, argEmpty)
+	assert.Error(t, err)
 }
