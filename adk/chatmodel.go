@@ -202,6 +202,14 @@ func newDefaultGenModelInput[M messageType]() TypedGenModelInput[M] {
 type TypedChatModelAgentState[M messageType] struct {
 	// Messages contains all messages in the current conversation session.
 	Messages []M
+
+	// ToolInfos contains the tools visible to the model (emitted as model.WithTools).
+	// BeforeModelRewriteState handlers should read and modify this field instead of ModelContext.Tools.
+	ToolInfos []*schema.ToolInfo
+
+	// DeferredToolInfos contains tools for native server-side search (emitted as model.WithDeferredTools).
+	// Only used when UseModelToolSearch is true. Nil otherwise.
+	DeferredToolInfos []*schema.ToolInfo
 }
 
 // ChatModelAgentState is the default state type using *schema.Message.
@@ -756,6 +764,8 @@ type execContext struct {
 	toolInfos      []*schema.ToolInfo
 	unwrappedTools []tool.BaseTool
 
+	toolSearchTool *schema.ToolInfo // set by BeforeAgent when UseModelToolSearch is true
+
 	rebuildGraph bool // whether needs to instantiate a new graph because of topology changes due to tool modifications
 	toolUpdated  bool // whether needs to pass a compose.WithToolList option to ToolsNode due to tool list change
 }
@@ -786,6 +796,7 @@ func (a *TypedChatModelAgent[M]) applyBeforeAgent(ctx context.Context, ec *execC
 			ToolAliases:          ec.toolsNodeConf.ToolAliases,
 		},
 		returnDirectly: runCtx.ReturnDirectly,
+		toolSearchTool: runCtx.ToolSearchTool,
 		toolUpdated:    true,
 		rebuildGraph: (len(ec.toolsNodeConf.Tools) == 0 && len(runCtx.Tools) > 0) ||
 			(len(ec.returnDirectly) == 0 && len(runCtx.ReturnDirectly) > 0),
@@ -1393,6 +1404,9 @@ func (a *TypedChatModelAgent[M]) Run(ctx context.Context, input *TypedAgentInput
 
 	if bc != nil {
 		co = append(co, compose.WithChatModelOption(model.WithTools(bc.toolInfos)))
+		if bc.toolSearchTool != nil {
+			co = append(co, compose.WithChatModelOption(model.WithToolSearchTool(bc.toolSearchTool)))
+		}
 		if bc.toolUpdated {
 			co = append(co, compose.WithToolsNodeOption(compose.WithToolList(bc.toolsNodeConf.Tools...)))
 		}
@@ -1464,6 +1478,9 @@ func (a *TypedChatModelAgent[M]) Resume(ctx context.Context, info *ResumeInfo, o
 
 	if bc != nil {
 		co = append(co, compose.WithChatModelOption(model.WithTools(bc.toolInfos)))
+		if bc.toolSearchTool != nil {
+			co = append(co, compose.WithChatModelOption(model.WithToolSearchTool(bc.toolSearchTool)))
+		}
 		if bc.toolUpdated {
 			co = append(co, compose.WithToolsNodeOption(compose.WithToolList(bc.toolsNodeConf.Tools...)))
 		}

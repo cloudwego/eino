@@ -834,13 +834,35 @@ func (w *typedStateModelWrapper[M]) wrapStreamEndpoint(endpoint typedStreamEndpo
 }
 
 func (w *typedStateModelWrapper[M]) Generate(ctx context.Context, input []M, opts ...model.Option) (M, error) {
-	var stateMessages []M
+	var (
+		stateMessages          []M
+		stateToolInfos         []*schema.ToolInfo
+		stateDeferredToolInfos []*schema.ToolInfo
+	)
 	_ = compose.ProcessState(ctx, func(_ context.Context, st *typedState[M]) error {
 		stateMessages = st.Messages
+		stateToolInfos = st.ToolInfos
+		stateDeferredToolInfos = st.DeferredToolInfos
 		return nil
 	})
 
-	state := &TypedChatModelAgentState[M]{Messages: stateMessages}
+	// Backfill: old checkpoints or fresh starts have nil ToolInfos.
+	// Use compose-level tools from opts (which always reflects the latest bc.toolInfos)
+	// rather than w.toolInfos (which may be stale if the graph was reused).
+	if stateToolInfos == nil {
+		composeLevelOpts := model.GetCommonOptions(&model.Options{}, opts...)
+		if composeLevelOpts.Tools != nil {
+			stateToolInfos = composeLevelOpts.Tools
+		} else {
+			stateToolInfos = w.toolInfos
+		}
+	}
+
+	state := &TypedChatModelAgentState[M]{
+		Messages:          stateMessages,
+		ToolInfos:         stateToolInfos,
+		DeferredToolInfos: stateDeferredToolInfos,
+	}
 
 	if msgState, ok := any(state).(*ChatModelAgentState); ok {
 		for _, m := range w.middlewares {
@@ -865,13 +887,26 @@ func (w *typedStateModelWrapper[M]) Generate(ctx context.Context, input []M, opt
 		}
 	}
 
+	// Persist state (including tool infos) after BeforeModelRewriteState.
 	_ = compose.ProcessState(ctx, func(_ context.Context, st *typedState[M]) error {
 		st.Messages = state.Messages
+		st.ToolInfos = state.ToolInfos
+		st.DeferredToolInfos = state.DeferredToolInfos
 		return nil
 	})
 
+	// Derive model options from state. Append after caller opts so state takes precedence
+	// (model.GetCommonOptions applies left-to-right, last wins).
+	// Use explicit copy to avoid mutating the caller's opts slice.
+	derivedOpts := make([]model.Option, len(opts), len(opts)+2)
+	copy(derivedOpts, opts)
+	derivedOpts = append(derivedOpts, model.WithTools(state.ToolInfos))
+	if state.DeferredToolInfos != nil {
+		derivedOpts = append(derivedOpts, model.WithDeferredTools(state.DeferredToolInfos))
+	}
+
 	wrappedEndpoint := w.wrapGenerateEndpoint(w.inner.Generate)
-	result, err := wrappedEndpoint(ctx, state.Messages, opts...)
+	result, err := wrappedEndpoint(ctx, state.Messages, derivedOpts...)
 	if err != nil {
 		var zero M
 		return zero, err
@@ -908,8 +943,11 @@ func (w *typedStateModelWrapper[M]) Generate(ctx context.Context, input []M, opt
 		}
 	}
 
+	// Persist state (including tool infos) after AfterModelRewriteState.
 	_ = compose.ProcessState(ctx, func(_ context.Context, st *typedState[M]) error {
 		st.Messages = state.Messages
+		st.ToolInfos = state.ToolInfos
+		st.DeferredToolInfos = state.DeferredToolInfos
 		return nil
 	})
 
@@ -921,13 +959,35 @@ func (w *typedStateModelWrapper[M]) Generate(ctx context.Context, input []M, opt
 }
 
 func (w *typedStateModelWrapper[M]) Stream(ctx context.Context, input []M, opts ...model.Option) (*schema.StreamReader[M], error) {
-	var stateMessages []M
+	var (
+		stateMessages          []M
+		stateToolInfos         []*schema.ToolInfo
+		stateDeferredToolInfos []*schema.ToolInfo
+	)
 	_ = compose.ProcessState(ctx, func(_ context.Context, st *typedState[M]) error {
 		stateMessages = st.Messages
+		stateToolInfos = st.ToolInfos
+		stateDeferredToolInfos = st.DeferredToolInfos
 		return nil
 	})
 
-	state := &TypedChatModelAgentState[M]{Messages: stateMessages}
+	// Backfill: old checkpoints or fresh starts have nil ToolInfos.
+	// Use compose-level tools from opts (which always reflects the latest bc.toolInfos)
+	// rather than w.toolInfos (which may be stale if the graph was reused).
+	if stateToolInfos == nil {
+		composeLevelOpts := model.GetCommonOptions(&model.Options{}, opts...)
+		if composeLevelOpts.Tools != nil {
+			stateToolInfos = composeLevelOpts.Tools
+		} else {
+			stateToolInfos = w.toolInfos
+		}
+	}
+
+	state := &TypedChatModelAgentState[M]{
+		Messages:          stateMessages,
+		ToolInfos:         stateToolInfos,
+		DeferredToolInfos: stateDeferredToolInfos,
+	}
 
 	if msgState, ok := any(state).(*ChatModelAgentState); ok {
 		for _, m := range w.middlewares {
@@ -950,13 +1010,26 @@ func (w *typedStateModelWrapper[M]) Stream(ctx context.Context, input []M, opts 
 		}
 	}
 
+	// Persist state (including tool infos) after BeforeModelRewriteState.
 	_ = compose.ProcessState(ctx, func(_ context.Context, st *typedState[M]) error {
 		st.Messages = state.Messages
+		st.ToolInfos = state.ToolInfos
+		st.DeferredToolInfos = state.DeferredToolInfos
 		return nil
 	})
 
+	// Derive model options from state. Append after caller opts so state takes precedence
+	// (model.GetCommonOptions applies left-to-right, last wins).
+	// Use explicit copy to avoid mutating the caller's opts slice.
+	derivedOpts := make([]model.Option, len(opts), len(opts)+2)
+	copy(derivedOpts, opts)
+	derivedOpts = append(derivedOpts, model.WithTools(state.ToolInfos))
+	if state.DeferredToolInfos != nil {
+		derivedOpts = append(derivedOpts, model.WithDeferredTools(state.DeferredToolInfos))
+	}
+
 	wrappedEndpoint := w.wrapStreamEndpoint(w.inner.Stream)
-	stream, err := wrappedEndpoint(ctx, state.Messages, opts...)
+	stream, err := wrappedEndpoint(ctx, state.Messages, derivedOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -992,8 +1065,11 @@ func (w *typedStateModelWrapper[M]) Stream(ctx context.Context, input []M, opts 
 		}
 	}
 
+	// Persist state (including tool infos) after AfterModelRewriteState.
 	_ = compose.ProcessState(ctx, func(_ context.Context, st *typedState[M]) error {
 		st.Messages = state.Messages
+		st.ToolInfos = state.ToolInfos
+		st.DeferredToolInfos = state.DeferredToolInfos
 		return nil
 	})
 

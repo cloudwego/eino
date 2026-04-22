@@ -57,6 +57,10 @@ type ToolCallsContext struct {
 type ModelContext struct {
 	// Tools contains the current tool list configured for the agent.
 	// This is populated at request time with the tools that will be sent to the model.
+	//
+	// Deprecated: Use TypedChatModelAgentState.ToolInfos in BeforeModelRewriteState instead.
+	// ModelContext.Tools remains populated for backward compatibility with existing WrapModel handlers,
+	// but new code should read and modify state.ToolInfos which is the source of truth for the model call.
 	Tools []*schema.ToolInfo
 
 	// ModelRetryConfig contains the retry configuration for the model.
@@ -94,6 +98,11 @@ type ChatModelAgentContext struct {
 	// This is based on the return directly map configured for the agent, plus any modifications
 	// by previous BeforeAgent handlers.
 	ReturnDirectly map[string]bool
+
+	// ToolSearchTool is the tool info for the model's native tool search capability.
+	// Set by toolsearch middleware in BeforeAgent when UseModelToolSearch is true.
+	// The framework wires this into model.WithToolSearchTool at Run/Resume time.
+	ToolSearchTool *schema.ToolInfo
 }
 
 // TypedChatModelAgentMiddleware defines the interface for customizing TypedChatModelAgent behavior.

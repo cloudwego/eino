@@ -430,7 +430,7 @@ func (t *toolReductionMiddleware) BeforeModelRewriteState(ctx context.Context, s
 	)
 
 	// init msg tokens
-	estimatedTokens, err = t.config.TokenCounter(ctx, state.Messages, mc.Tools)
+	estimatedTokens, err = t.config.TokenCounter(ctx, state.Messages, state.ToolInfos)
 	if err != nil {
 		return ctx, state, err
 	}
@@ -567,7 +567,7 @@ func (t *toolReductionMiddleware) BeforeModelRewriteState(ctx context.Context, s
 	}
 
 	if clearAtLeastTokens > 0 {
-		estimatedTokensAfterClear, err := t.config.TokenCounter(ctx, editTarget, mc.Tools)
+		estimatedTokensAfterClear, err := t.config.TokenCounter(ctx, editTarget, state.ToolInfos)
 		if err != nil {
 			return ctx, state, err
 		}
