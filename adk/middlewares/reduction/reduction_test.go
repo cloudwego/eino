@@ -19,6 +19,7 @@ package reduction
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"strings"
@@ -32,6 +33,26 @@ import (
 	"github.com/cloudwego/eino/components/tool/utils"
 	"github.com/cloudwego/eino/schema"
 )
+
+func testTruncOffloadPath(root string) func(context.Context, *ToolDetail) (string, error) {
+	return func(_ context.Context, detail *ToolDetail) (string, error) {
+		callID := "generated"
+		if detail != nil && detail.ToolContext != nil && detail.ToolContext.CallID != "" {
+			callID = detail.ToolContext.CallID
+		}
+		return fmt.Sprintf("%s/trunc/%s", root, callID), nil
+	}
+}
+
+func testClearOffloadPath(root string) func(context.Context, *ToolDetail) (string, error) {
+	return func(_ context.Context, detail *ToolDetail) (string, error) {
+		callID := "generated"
+		if detail != nil && detail.ToolContext != nil && detail.ToolContext.CallID != "" {
+			callID = detail.ToolContext.CallID
+		}
+		return fmt.Sprintf("%s/clear/%s", root, callID), nil
+	}
+}
 
 func TestReductionMiddlewareTrunc(t *testing.T) {
 	ctx := context.Background()
@@ -50,7 +71,7 @@ func TestReductionMiddlewareTrunc(t *testing.T) {
 				"mock_invokable_tool": {
 					Backend:        backend,
 					SkipTruncation: false,
-					TruncHandler:   defaultTruncHandler("/tmp", 70),
+					TruncHandler:   defaultTruncHandler(testTruncOffloadPath("/tmp"), 70),
 				},
 			},
 		}
@@ -83,7 +104,7 @@ hello worldhello worldhello worldhello worldhello worldhello worldhello worldhel
 				"mock_streamable_tool": {
 					Backend:        backend,
 					SkipTruncation: false,
-					TruncHandler:   defaultTruncHandler("/tmp", 70),
+					TruncHandler:   defaultTruncHandler(testTruncOffloadPath("/tmp"), 70),
 				},
 			},
 		}
@@ -119,7 +140,7 @@ hello worldhello worldhello worldhello worldhello worldhello worldhello worldhel
 				"mock_streamable_tool": {
 					Backend:        backend,
 					SkipTruncation: false,
-					TruncHandler:   defaultTruncHandler("/tmp", 70),
+					TruncHandler:   defaultTruncHandler(testTruncOffloadPath("/tmp"), 70),
 				},
 			},
 		}
@@ -256,6 +277,36 @@ hello worldhello worldhello worldhello worldhello worldhello worldhello worldhel
 		assert.NoError(t, err)
 		assert.Equal(t, expOrigContent, content.Content)
 	})
+
+	t.Run("test GenTruncOffloadFilePath used by default trunc handler", func(t *testing.T) {
+		tCtx := &adk.ToolContext{
+			Name:   "mock_invokable_tool",
+			CallID: "custom_123",
+		}
+		backend := filesystem.NewInMemoryBackend()
+		config := &Config{
+			Backend:           backend,
+			MaxLengthForTrunc: 70,
+			RootDir:           "/tmp/ignored",
+			GenTruncOffloadFilePath: func(_ context.Context, detail *ToolDetail) (string, error) {
+				assert.Equal(t, "custom_123", detail.ToolContext.CallID)
+				return "/custom/trunc/custom_123", nil
+			},
+		}
+
+		mw, err := New(ctx, config)
+		assert.NoError(t, err)
+
+		edp, err := mw.WrapInvokableToolCall(ctx, it.InvokableRun, tCtx)
+		assert.NoError(t, err)
+
+		resp, err := edp(ctx, `{"value":"asd"}`)
+		assert.NoError(t, err)
+		assert.Contains(t, resp, "/custom/trunc/custom_123")
+
+		_, err = backend.Read(ctx, &filesystem.ReadRequest{FilePath: "/custom/trunc/custom_123"})
+		assert.NoError(t, err)
+	})
 }
 
 func TestReductionMiddlewareClear(t *testing.T) {
@@ -284,7 +335,7 @@ func TestReductionMiddlewareClear(t *testing.T) {
 				"get_weather": {
 					Backend:      backend,
 					SkipClear:    false,
-					ClearHandler: defaultClearHandler("/tmp", true, "read_file"),
+					ClearHandler: defaultClearHandler(testClearOffloadPath("/tmp"), true, "read_file"),
 				},
 			},
 		}
@@ -339,6 +390,49 @@ func TestReductionMiddlewareClear(t *testing.T) {
 		assert.Equal(t, "Sunny", fileContentStr)
 	})
 
+	t.Run("test GenClearOffloadFilePath used by default clear handler", func(t *testing.T) {
+		backend := filesystem.NewInMemoryBackend()
+		config := &Config{
+			Backend:                   backend,
+			SkipTruncation:            true,
+			TokenCounter:              func(context.Context, []adk.Message, []*schema.ToolInfo) (int64, error) { return 100, nil },
+			MaxTokensForClear:         20,
+			ClearRetentionSuffixLimit: 1,
+			RootDir:                   "/tmp/ignored",
+			GenClearOffloadFilePath: func(_ context.Context, detail *ToolDetail) (string, error) {
+				return "/custom/clear/" + detail.ToolContext.CallID, nil
+			},
+		}
+
+		mw, err := New(ctx, config)
+		assert.NoError(t, err)
+
+		_, s, err := mw.BeforeModelRewriteState(ctx, &adk.ChatModelAgentState{
+			Messages: []adk.Message{
+				schema.SystemMessage("you are a helpful assistant"),
+				schema.UserMessage("trigger clear"),
+				schema.AssistantMessage("", []schema.ToolCall{
+					{ID: "call_a", Type: "function", Function: schema.FunctionCall{Name: "get_weather", Arguments: `{}`}},
+				}),
+				schema.ToolMessage("Sunny", "call_a"),
+				schema.AssistantMessage("", []schema.ToolCall{
+					{ID: "call_b", Type: "function", Function: schema.FunctionCall{Name: "get_weather", Arguments: `{}`}},
+				}),
+				schema.ToolMessage("Sunny", "call_b"),
+			},
+		}, &adk.ModelContext{Tools: toolsInfo})
+		assert.NoError(t, err)
+
+		assert.Equal(t, "<persisted-output>Tool result saved to: /custom/clear/call_a\nUse read_file to view</persisted-output>", s.Messages[3].Content)
+
+		fileContent, err := backend.Read(ctx, &filesystem.ReadRequest{
+			FilePath: "/custom/clear/call_a",
+		})
+		assert.NoError(t, err)
+		fileContentStr := strings.TrimPrefix(strings.TrimSpace(fileContent.Content), "1\t")
+		assert.Equal(t, "Sunny", fileContentStr)
+	})
+
 	t.Run("test default clear without offloading", func(t *testing.T) {
 		config := &Config{
 			SkipTruncation:            true,
@@ -348,7 +442,7 @@ func TestReductionMiddlewareClear(t *testing.T) {
 			ToolConfig: map[string]*ToolReductionConfig{
 				"get_weather": {
 					SkipClear:    false,
-					ClearHandler: defaultClearHandler("", false, ""),
+					ClearHandler: defaultClearHandler(testClearOffloadPath(""), false, ""),
 				},
 			},
 		}
@@ -510,7 +604,7 @@ func TestReductionMiddlewareClear(t *testing.T) {
 				"get_weather": {
 					Backend:      backend,
 					SkipClear:    false,
-					ClearHandler: defaultClearHandler("/tmp", true, "read_file"),
+					ClearHandler: defaultClearHandler(testClearOffloadPath("/tmp"), true, "read_file"),
 				},
 			},
 		}
@@ -606,12 +700,12 @@ func TestReductionMiddlewareClear(t *testing.T) {
 				"get_weather": {
 					Backend:      backend,
 					SkipClear:    false,
-					ClearHandler: defaultClearHandler("/tmp", true, "read_file"),
+					ClearHandler: defaultClearHandler(testClearOffloadPath("/tmp"), true, "read_file"),
 				},
 				"get_important_data": {
 					Backend:      backend,
 					SkipClear:    false,
-					ClearHandler: defaultClearHandler("/tmp", true, "read_file"),
+					ClearHandler: defaultClearHandler(testClearOffloadPath("/tmp"), true, "read_file"),
 				},
 			},
 		}
@@ -684,12 +778,12 @@ func TestReductionMiddlewareClear(t *testing.T) {
 				"get_weather": {
 					Backend:      backend,
 					SkipClear:    false,
-					ClearHandler: defaultClearHandler("/tmp", true, "read_file"),
+					ClearHandler: defaultClearHandler(testClearOffloadPath("/tmp"), true, "read_file"),
 				},
 				"get_important_data": {
 					Backend:      backend,
 					SkipClear:    false,
-					ClearHandler: defaultClearHandler("/tmp", true, "read_file"),
+					ClearHandler: defaultClearHandler(testClearOffloadPath("/tmp"), true, "read_file"),
 				},
 			},
 		}
@@ -756,12 +850,12 @@ func TestReductionMiddlewareClear(t *testing.T) {
 				"get_weather": {
 					Backend:      backend,
 					SkipClear:    false,
-					ClearHandler: defaultClearHandler("/tmp", true, "read_file"),
+					ClearHandler: defaultClearHandler(testClearOffloadPath("/tmp"), true, "read_file"),
 				},
 				"get_important_data": {
 					Backend:      backend,
 					SkipClear:    false,
-					ClearHandler: defaultClearHandler("/tmp", true, "read_file"),
+					ClearHandler: defaultClearHandler(testClearOffloadPath("/tmp"), true, "read_file"),
 				},
 			},
 		}
@@ -926,7 +1020,7 @@ func TestDefaultTruncHandlerWithStreamToolResult(t *testing.T) {
 			StreamToolResult: sr,
 		}
 
-		fn := defaultTruncHandler("/tmp", 100)
+		fn := defaultTruncHandler(testTruncOffloadPath("/tmp"), 100)
 		result, err := fn(ctx, detail)
 		assert.NoError(t, err)
 		assert.False(t, result.NeedTrunc)
@@ -948,10 +1042,30 @@ func TestDefaultTruncHandlerWithStreamToolResult(t *testing.T) {
 			StreamToolResult: sr,
 		}
 
-		fn := defaultTruncHandler("/tmp", 100)
+		fn := defaultTruncHandler(testTruncOffloadPath("/tmp"), 100)
 		result, err := fn(ctx, detail)
 		assert.NoError(t, err)
 		assert.True(t, result.NeedTrunc)
+	})
+
+	t.Run("test gen offload file path error", func(t *testing.T) {
+		detail := &ToolDetail{
+			ToolContext: &adk.ToolContext{
+				Name:   "test",
+				CallID: "call_id",
+			},
+			ToolArgument: &schema.ToolArgument{Text: "{}"},
+			ToolResult: &schema.ToolResult{
+				Parts: []schema.ToolOutputPart{{Type: schema.ToolPartTypeText, Text: strings.Repeat("x", 1000)}},
+			},
+		}
+
+		fn := defaultTruncHandler(func(context.Context, *ToolDetail) (string, error) {
+			return "", fmt.Errorf("gen path error")
+		}, 10)
+		_, err := fn(ctx, detail)
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "gen path error")
 	})
 }
 
@@ -974,12 +1088,31 @@ func TestDefaultClearHandlerWithStreamToolResult(t *testing.T) {
 			StreamToolResult: sr,
 		}
 
-		fn := defaultClearHandler("/tmp", true, "read_file")
+		fn := defaultClearHandler(testClearOffloadPath("/tmp"), true, "read_file")
 		result, err := fn(ctx, detail)
 		assert.NoError(t, err)
 		assert.True(t, result.NeedClear)
 		assert.True(t, result.NeedOffload)
 		assert.Equal(t, "streaming content", result.OffloadContent)
+	})
+
+	t.Run("test gen offload file path error", func(t *testing.T) {
+		detail := &ToolDetail{
+			ToolContext: &adk.ToolContext{
+				Name:   "test",
+				CallID: "call_id",
+			},
+			ToolArgument: &schema.ToolArgument{Text: "{}"},
+			ToolResult: &schema.ToolResult{
+				Parts: []schema.ToolOutputPart{{Type: schema.ToolPartTypeText, Text: "content"}},
+			},
+		}
+		fn := defaultClearHandler(func(context.Context, *ToolDetail) (string, error) {
+			return "", fmt.Errorf("gen path error")
+		}, true, "read_file")
+		_, err := fn(ctx, detail)
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "gen path error")
 	})
 }
 
@@ -994,7 +1127,7 @@ func TestDefaultOffloadHandler(t *testing.T) {
 		ToolResult:   &schema.ToolResult{Parts: []schema.ToolOutputPart{{Type: schema.ToolPartTypeText, Text: "hello"}}},
 	}
 
-	fn := defaultClearHandler("/tmp", true, "read_file")
+	fn := defaultClearHandler(testClearOffloadPath("/tmp"), true, "read_file")
 	info, err := fn(ctx, detail)
 	assert.NoError(t, err)
 	assert.Equal(t, &ClearResult{
@@ -1320,6 +1453,40 @@ func TestCopyAndFillDefaults(t *testing.T) {
 		assert.Equal(t, 50000, result.MaxLengthForTrunc)
 		assert.Equal(t, 1, result.ClearRetentionSuffixLimit)
 		assert.NotNil(t, result.TokenCounter)
+		assert.NotNil(t, result.GenTruncOffloadFilePath)
+		assert.NotNil(t, result.GenClearOffloadFilePath)
+
+		truncPath, err := result.GenTruncOffloadFilePath(context.Background(), &ToolDetail{
+			ToolContext: &adk.ToolContext{CallID: "call_1"},
+		})
+		assert.NoError(t, err)
+		assert.Equal(t, "/tmp/trunc/call_1", truncPath)
+
+		clearPath, err := result.GenClearOffloadFilePath(context.Background(), &ToolDetail{
+			ToolContext: &adk.ToolContext{CallID: "call_1"},
+		})
+		assert.NoError(t, err)
+		assert.Equal(t, "/tmp/clear/call_1", clearPath)
+	})
+
+	t.Run("test default offload path generators create uuid when CallID is empty", func(t *testing.T) {
+		cfg := &Config{}
+		result, err := cfg.copyAndFillDefaults()
+		assert.NoError(t, err)
+
+		truncPath, err := result.GenTruncOffloadFilePath(context.Background(), &ToolDetail{
+			ToolContext: &adk.ToolContext{CallID: ""},
+		})
+		assert.NoError(t, err)
+		assert.True(t, strings.HasPrefix(truncPath, "/tmp/trunc/"))
+		assert.NotEqual(t, "/tmp/trunc/", truncPath)
+
+		clearPath, err := result.GenClearOffloadFilePath(context.Background(), &ToolDetail{
+			ToolContext: &adk.ToolContext{CallID: ""},
+		})
+		assert.NoError(t, err)
+		assert.True(t, strings.HasPrefix(clearPath, "/tmp/clear/"))
+		assert.NotEqual(t, "/tmp/clear/", clearPath)
 	})
 
 	t.Run("test with tool config", func(t *testing.T) {
@@ -1334,6 +1501,26 @@ func TestCopyAndFillDefaults(t *testing.T) {
 		assert.NoError(t, err)
 		assert.NotNil(t, result.ToolConfig)
 		assert.True(t, result.ToolConfig["test_tool"].SkipTruncation)
+	})
+
+	t.Run("test custom offload path generators preserved", func(t *testing.T) {
+		cfg := &Config{
+			RootDir: "/tmp/ignored",
+			GenTruncOffloadFilePath: func(_ context.Context, detail *ToolDetail) (string, error) {
+				return "/custom/trunc/" + detail.ToolContext.CallID, nil
+			},
+			GenClearOffloadFilePath: func(_ context.Context, detail *ToolDetail) (string, error) {
+				return "/custom/clear/" + detail.ToolContext.CallID, nil
+			},
+		}
+		result, err := cfg.copyAndFillDefaults()
+		assert.NoError(t, err)
+
+		filePath, err := result.GenClearOffloadFilePath(context.Background(), &ToolDetail{
+			ToolContext: &adk.ToolContext{CallID: "call_custom"},
+		})
+		assert.NoError(t, err)
+		assert.Equal(t, "/custom/clear/call_custom", filePath)
 	})
 }
 
@@ -1362,7 +1549,7 @@ func TestDefaultClearHandler(t *testing.T) {
 	ctx := context.Background()
 
 	t.Run("test empty parts", func(t *testing.T) {
-		handler := defaultClearHandler("/tmp", true, "read_file")
+		handler := defaultClearHandler(testClearOffloadPath("/tmp"), true, "read_file")
 		detail := &ToolDetail{
 			ToolContext: &adk.ToolContext{
 				CallID: "test_call",
@@ -1375,7 +1562,7 @@ func TestDefaultClearHandler(t *testing.T) {
 	})
 
 	t.Run("test multimodal content", func(t *testing.T) {
-		handler := defaultClearHandler("/tmp", true, "read_file")
+		handler := defaultClearHandler(testClearOffloadPath("/tmp"), true, "read_file")
 		detail := &ToolDetail{
 			ToolContext: &adk.ToolContext{
 				CallID: "test_call",
@@ -1390,7 +1577,7 @@ func TestDefaultClearHandler(t *testing.T) {
 	})
 
 	t.Run("test no call id", func(t *testing.T) {
-		handler := defaultClearHandler("/tmp", true, "read_file")
+		handler := defaultClearHandler(testClearOffloadPath("/tmp"), true, "read_file")
 		detail := &ToolDetail{
 			ToolContext: &adk.ToolContext{},
 			ToolResult: &schema.ToolResult{
@@ -1400,7 +1587,7 @@ func TestDefaultClearHandler(t *testing.T) {
 		result, err := handler(ctx, detail)
 		assert.NoError(t, err)
 		assert.True(t, result.NeedClear)
-		assert.NotEmpty(t, result.OffloadFilePath)
+		assert.Equal(t, "/tmp/clear/generated", result.OffloadFilePath)
 	})
 }
 
@@ -1621,5 +1808,456 @@ func TestCopyMessages(t *testing.T) {
 		assert.Len(t, result[0].UserInputMultiContent, 1)
 		assert.Len(t, result[0].MultiContent, 1)
 		assert.Len(t, result[0].AssistantGenMultiContent, 1)
+	})
+}
+
+func TestReductionMiddlewareEnhancedTrunc(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("enhanced invokable - passthrough when truncation skipped", func(t *testing.T) {
+		backend := filesystem.NewInMemoryBackend()
+		config := &Config{
+			Backend:        backend,
+			SkipTruncation: true,
+		}
+		mw, err := New(ctx, config)
+		assert.NoError(t, err)
+
+		tCtx := &adk.ToolContext{Name: "enh_tool", CallID: "cid"}
+		toolArg := &schema.ToolArgument{Text: `{"k":"v"}`}
+
+		called := 0
+		endpoint := func(_ context.Context, ta *schema.ToolArgument, _ ...tool.Option) (*schema.ToolResult, error) {
+			called++
+			assert.Same(t, toolArg, ta)
+			return &schema.ToolResult{Parts: []schema.ToolOutputPart{{Type: schema.ToolPartTypeText, Text: "ok"}}}, nil
+		}
+
+		wrapped, err := mw.WrapEnhancedInvokableToolCall(ctx, endpoint, tCtx)
+		assert.NoError(t, err)
+		got, err := wrapped(ctx, toolArg)
+		assert.NoError(t, err)
+		assert.Equal(t, 1, called)
+		assert.Equal(t, "ok", got.Parts[0].Text)
+	})
+
+	t.Run("enhanced invokable - excluded tool bypasses truncation", func(t *testing.T) {
+		backend := filesystem.NewInMemoryBackend()
+		config := &Config{
+			Backend:           backend,
+			TruncExcludeTools: []string{"enh_tool"},
+			ToolConfig: map[string]*ToolReductionConfig{
+				"enh_tool": {
+					Backend:        backend,
+					SkipTruncation: false,
+					TruncHandler: func(_ context.Context, _ *ToolDetail) (*TruncResult, error) {
+						t.Fatalf("trunc handler should not be called when tool is excluded")
+						return nil, nil
+					},
+				},
+			},
+		}
+		mw, err := New(ctx, config)
+		assert.NoError(t, err)
+
+		tCtx := &adk.ToolContext{Name: "enh_tool", CallID: "cid"}
+		toolArg := &schema.ToolArgument{Text: `{"k":"v"}`}
+		endpoint := func(_ context.Context, _ *schema.ToolArgument, _ ...tool.Option) (*schema.ToolResult, error) {
+			return &schema.ToolResult{Parts: []schema.ToolOutputPart{{Type: schema.ToolPartTypeText, Text: "orig"}}}, nil
+		}
+
+		wrapped, err := mw.WrapEnhancedInvokableToolCall(ctx, endpoint, tCtx)
+		assert.NoError(t, err)
+		got, err := wrapped(ctx, toolArg)
+		assert.NoError(t, err)
+		assert.Equal(t, "orig", got.Parts[0].Text)
+	})
+
+	t.Run("enhanced invokable - endpoint error returned", func(t *testing.T) {
+		backend := filesystem.NewInMemoryBackend()
+		wantErr := errors.New("endpoint error")
+
+		config := &Config{
+			Backend: backend,
+			ToolConfig: map[string]*ToolReductionConfig{
+				"enh_tool": {
+					Backend:        backend,
+					SkipTruncation: false,
+					TruncHandler: func(_ context.Context, _ *ToolDetail) (*TruncResult, error) {
+						t.Fatalf("trunc handler should not be called on endpoint error")
+						return nil, nil
+					},
+				},
+			},
+		}
+		mw, err := New(ctx, config)
+		assert.NoError(t, err)
+
+		tCtx := &adk.ToolContext{Name: "enh_tool", CallID: "cid"}
+		toolArg := &schema.ToolArgument{Text: `{"k":"v"}`}
+		endpoint := func(_ context.Context, _ *schema.ToolArgument, _ ...tool.Option) (*schema.ToolResult, error) {
+			return nil, wantErr
+		}
+
+		wrapped, err := mw.WrapEnhancedInvokableToolCall(ctx, endpoint, tCtx)
+		assert.NoError(t, err)
+		_, err = wrapped(ctx, toolArg)
+		assert.Equal(t, wantErr, err)
+	})
+
+	t.Run("enhanced invokable - trunc handler error returned", func(t *testing.T) {
+		backend := filesystem.NewInMemoryBackend()
+		wantErr := errors.New("handler error")
+		config := &Config{
+			Backend: backend,
+			ToolConfig: map[string]*ToolReductionConfig{
+				"enh_tool": {
+					Backend:        backend,
+					SkipTruncation: false,
+					TruncHandler: func(_ context.Context, _ *ToolDetail) (*TruncResult, error) {
+						return nil, wantErr
+					},
+				},
+			},
+		}
+		mw, err := New(ctx, config)
+		assert.NoError(t, err)
+
+		tCtx := &adk.ToolContext{Name: "enh_tool", CallID: "cid"}
+		toolArg := &schema.ToolArgument{Text: `{"k":"v"}`}
+		endpoint := func(_ context.Context, _ *schema.ToolArgument, _ ...tool.Option) (*schema.ToolResult, error) {
+			return &schema.ToolResult{Parts: []schema.ToolOutputPart{{Type: schema.ToolPartTypeText, Text: "orig"}}}, nil
+		}
+
+		wrapped, err := mw.WrapEnhancedInvokableToolCall(ctx, endpoint, tCtx)
+		assert.NoError(t, err)
+		_, err = wrapped(ctx, toolArg)
+		assert.Equal(t, wantErr, err)
+	})
+
+	t.Run("enhanced invokable - no trunc returns original result", func(t *testing.T) {
+		backend := filesystem.NewInMemoryBackend()
+		config := &Config{
+			Backend: backend,
+			ToolConfig: map[string]*ToolReductionConfig{
+				"enh_tool": {
+					Backend:        backend,
+					SkipTruncation: false,
+					TruncHandler: func(_ context.Context, detail *ToolDetail) (*TruncResult, error) {
+						assert.NotNil(t, detail.ToolResult)
+						assert.Equal(t, "orig", detail.ToolResult.Parts[0].Text)
+						return &TruncResult{NeedTrunc: false}, nil
+					},
+				},
+			},
+		}
+		mw, err := New(ctx, config)
+		assert.NoError(t, err)
+
+		tCtx := &adk.ToolContext{Name: "enh_tool", CallID: "cid"}
+		toolArg := &schema.ToolArgument{Text: `{"k":"v"}`}
+		endpoint := func(_ context.Context, _ *schema.ToolArgument, _ ...tool.Option) (*schema.ToolResult, error) {
+			return &schema.ToolResult{Parts: []schema.ToolOutputPart{{Type: schema.ToolPartTypeText, Text: "orig"}}}, nil
+		}
+
+		wrapped, err := mw.WrapEnhancedInvokableToolCall(ctx, endpoint, tCtx)
+		assert.NoError(t, err)
+		got, err := wrapped(ctx, toolArg)
+		assert.NoError(t, err)
+		assert.Equal(t, "orig", got.Parts[0].Text)
+	})
+
+	t.Run("enhanced invokable - offload without backend returns error", func(t *testing.T) {
+		// config.Backend must be non-nil to pass New(), but the per-tool cfg.Backend is nil.
+		configBackend := filesystem.NewInMemoryBackend()
+		config := &Config{
+			Backend: configBackend,
+			ToolConfig: map[string]*ToolReductionConfig{
+				"enh_tool": {
+					Backend:        nil,
+					SkipTruncation: false,
+					TruncHandler: func(_ context.Context, _ *ToolDetail) (*TruncResult, error) {
+						return &TruncResult{
+							NeedTrunc:       true,
+							NeedOffload:     true,
+							OffloadFilePath: "/tmp/trunc/cid",
+							OffloadContent:  "big",
+							ToolResult:      &schema.ToolResult{Parts: []schema.ToolOutputPart{{Type: schema.ToolPartTypeText, Text: "trunc"}}},
+						}, nil
+					},
+				},
+			},
+		}
+		mw, err := New(ctx, config)
+		assert.NoError(t, err)
+
+		tCtx := &adk.ToolContext{Name: "enh_tool", CallID: "cid"}
+		toolArg := &schema.ToolArgument{Text: `{"k":"v"}`}
+		endpoint := func(_ context.Context, _ *schema.ToolArgument, _ ...tool.Option) (*schema.ToolResult, error) {
+			return &schema.ToolResult{Parts: []schema.ToolOutputPart{{Type: schema.ToolPartTypeText, Text: "orig"}}}, nil
+		}
+
+		wrapped, err := mw.WrapEnhancedInvokableToolCall(ctx, endpoint, tCtx)
+		assert.NoError(t, err)
+		_, err = wrapped(ctx, toolArg)
+		assert.EqualError(t, err, "truncation: no backend for offload")
+	})
+
+	t.Run("enhanced invokable - trunc + offload writes and returns trunc result", func(t *testing.T) {
+		backend := filesystem.NewInMemoryBackend()
+		config := &Config{
+			Backend: backend,
+			ToolConfig: map[string]*ToolReductionConfig{
+				"enh_tool": {
+					Backend:        backend,
+					SkipTruncation: false,
+					TruncHandler: func(_ context.Context, detail *ToolDetail) (*TruncResult, error) {
+						assert.NotNil(t, detail.ToolContext)
+						assert.NotNil(t, detail.ToolArgument)
+						assert.NotNil(t, detail.ToolResult)
+						return &TruncResult{
+							NeedTrunc:       true,
+							NeedOffload:     true,
+							OffloadFilePath: "/tmp/trunc/cid",
+							OffloadContent:  "full content",
+							ToolResult:      &schema.ToolResult{Parts: []schema.ToolOutputPart{{Type: schema.ToolPartTypeText, Text: "truncated"}}},
+						}, nil
+					},
+				},
+			},
+		}
+		mw, err := New(ctx, config)
+		assert.NoError(t, err)
+
+		tCtx := &adk.ToolContext{Name: "enh_tool", CallID: "cid"}
+		toolArg := &schema.ToolArgument{Text: `{"k":"v"}`}
+		endpoint := func(_ context.Context, ta *schema.ToolArgument, _ ...tool.Option) (*schema.ToolResult, error) {
+			assert.Same(t, toolArg, ta)
+			return &schema.ToolResult{Parts: []schema.ToolOutputPart{{Type: schema.ToolPartTypeText, Text: "orig"}}}, nil
+		}
+
+		wrapped, err := mw.WrapEnhancedInvokableToolCall(ctx, endpoint, tCtx)
+		assert.NoError(t, err)
+		got, err := wrapped(ctx, toolArg)
+		assert.NoError(t, err)
+		assert.Equal(t, "truncated", got.Parts[0].Text)
+
+		content, err := backend.Read(ctx, &filesystem.ReadRequest{FilePath: "/tmp/trunc/cid"})
+		assert.NoError(t, err)
+		assert.Equal(t, "full content", content.Content)
+	})
+
+	t.Run("enhanced streamable - no trunc returns original stream (Copy semantics)", func(t *testing.T) {
+		backend := filesystem.NewInMemoryBackend()
+		config := &Config{
+			Backend: backend,
+			ToolConfig: map[string]*ToolReductionConfig{
+				"enh_stream_tool": {
+					Backend:        backend,
+					SkipTruncation: false,
+					TruncHandler: func(_ context.Context, detail *ToolDetail) (*TruncResult, error) {
+						// Consume the "analysis" copy; the returned reader should still have the full stream.
+						parts, needProcess, err := getJointToolResult(detail)
+						assert.NoError(t, err)
+						assert.True(t, needProcess)
+						assert.Len(t, parts, 1)
+						assert.Equal(t, "hello world", parts[0].Text)
+						return &TruncResult{NeedTrunc: false}, nil
+					},
+				},
+			},
+		}
+		mw, err := New(ctx, config)
+		assert.NoError(t, err)
+
+		tCtx := &adk.ToolContext{Name: "enh_stream_tool", CallID: "scid"}
+		toolArg := &schema.ToolArgument{Text: `{"k":"v"}`}
+		endpoint := func(_ context.Context, _ *schema.ToolArgument, _ ...tool.Option) (*schema.StreamReader[*schema.ToolResult], error) {
+			sr, sw := schema.Pipe[*schema.ToolResult](4)
+			go func() {
+				sw.Send(&schema.ToolResult{Parts: []schema.ToolOutputPart{{Type: schema.ToolPartTypeText, Text: "hello "}}}, nil)
+				sw.Send(&schema.ToolResult{Parts: []schema.ToolOutputPart{{Type: schema.ToolPartTypeText, Text: "world"}}}, nil)
+				sw.Close()
+			}()
+			return sr, nil
+		}
+
+		wrapped, err := mw.WrapEnhancedStreamableToolCall(ctx, endpoint, tCtx)
+		assert.NoError(t, err)
+		resp, err := wrapped(ctx, toolArg)
+		assert.NoError(t, err)
+		defer resp.Close()
+
+		var chunks []*schema.ToolResult
+		for {
+			tr, recvErr := resp.Recv()
+			if recvErr != nil {
+				assert.Equal(t, io.EOF, recvErr)
+				break
+			}
+			chunks = append(chunks, tr)
+		}
+		joined, err := schema.ConcatToolResults(chunks)
+		assert.NoError(t, err)
+		assert.Equal(t, "hello world", joined.Parts[0].Text)
+	})
+
+	t.Run("enhanced streamable - trunc + offload writes and returns trunc stream", func(t *testing.T) {
+		backend := filesystem.NewInMemoryBackend()
+		config := &Config{
+			Backend: backend,
+			ToolConfig: map[string]*ToolReductionConfig{
+				"enh_stream_tool": {
+					Backend:        backend,
+					SkipTruncation: false,
+					TruncHandler: func(_ context.Context, _ *ToolDetail) (*TruncResult, error) {
+						sr, sw := schema.Pipe[*schema.ToolResult](1)
+						sw.Send(&schema.ToolResult{Parts: []schema.ToolOutputPart{{Type: schema.ToolPartTypeText, Text: "truncated"}}}, nil)
+						sw.Close()
+						return &TruncResult{
+							NeedTrunc:        true,
+							NeedOffload:      true,
+							OffloadFilePath:  "/tmp/trunc/scid",
+							OffloadContent:   "full content",
+							StreamToolResult: sr,
+						}, nil
+					},
+				},
+			},
+		}
+		mw, err := New(ctx, config)
+		assert.NoError(t, err)
+
+		tCtx := &adk.ToolContext{Name: "enh_stream_tool", CallID: "scid"}
+		toolArg := &schema.ToolArgument{Text: `{"k":"v"}`}
+		endpoint := func(_ context.Context, _ *schema.ToolArgument, _ ...tool.Option) (*schema.StreamReader[*schema.ToolResult], error) {
+			sr, sw := schema.Pipe[*schema.ToolResult](2)
+			sw.Send(&schema.ToolResult{Parts: []schema.ToolOutputPart{{Type: schema.ToolPartTypeText, Text: "orig"}}}, nil)
+			sw.Close()
+			return sr, nil
+		}
+
+		wrapped, err := mw.WrapEnhancedStreamableToolCall(ctx, endpoint, tCtx)
+		assert.NoError(t, err)
+		resp, err := wrapped(ctx, toolArg)
+		assert.NoError(t, err)
+		defer resp.Close()
+
+		tr, err := resp.Recv()
+		assert.NoError(t, err)
+		assert.Equal(t, "truncated", tr.Parts[0].Text)
+
+		_, err = resp.Recv()
+		assert.Equal(t, io.EOF, err)
+
+		content, err := backend.Read(ctx, &filesystem.ReadRequest{FilePath: "/tmp/trunc/scid"})
+		assert.NoError(t, err)
+		assert.Equal(t, "full content", content.Content)
+	})
+
+	t.Run("enhanced streamable - endpoint error returned", func(t *testing.T) {
+		backend := filesystem.NewInMemoryBackend()
+		wantErr := errors.New("endpoint error")
+		config := &Config{
+			Backend: backend,
+			ToolConfig: map[string]*ToolReductionConfig{
+				"enh_stream_tool": {
+					Backend:        backend,
+					SkipTruncation: false,
+					TruncHandler: func(_ context.Context, _ *ToolDetail) (*TruncResult, error) {
+						t.Fatalf("trunc handler should not be called on endpoint error")
+						return nil, nil
+					},
+				},
+			},
+		}
+		mw, err := New(ctx, config)
+		assert.NoError(t, err)
+
+		tCtx := &adk.ToolContext{Name: "enh_stream_tool", CallID: "scid"}
+		toolArg := &schema.ToolArgument{Text: `{"k":"v"}`}
+		endpoint := func(_ context.Context, _ *schema.ToolArgument, _ ...tool.Option) (*schema.StreamReader[*schema.ToolResult], error) {
+			return nil, wantErr
+		}
+
+		wrapped, err := mw.WrapEnhancedStreamableToolCall(ctx, endpoint, tCtx)
+		assert.NoError(t, err)
+		_, err = wrapped(ctx, toolArg)
+		assert.Equal(t, wantErr, err)
+	})
+
+	t.Run("enhanced streamable - trunc handler error returned", func(t *testing.T) {
+		backend := filesystem.NewInMemoryBackend()
+		wantErr := errors.New("handler error")
+		config := &Config{
+			Backend: backend,
+			ToolConfig: map[string]*ToolReductionConfig{
+				"enh_stream_tool": {
+					Backend:        backend,
+					SkipTruncation: false,
+					TruncHandler: func(_ context.Context, _ *ToolDetail) (*TruncResult, error) {
+						return nil, wantErr
+					},
+				},
+			},
+		}
+		mw, err := New(ctx, config)
+		assert.NoError(t, err)
+
+		tCtx := &adk.ToolContext{Name: "enh_stream_tool", CallID: "scid"}
+		toolArg := &schema.ToolArgument{Text: `{"k":"v"}`}
+		endpoint := func(_ context.Context, _ *schema.ToolArgument, _ ...tool.Option) (*schema.StreamReader[*schema.ToolResult], error) {
+			sr, sw := schema.Pipe[*schema.ToolResult](1)
+			sw.Send(&schema.ToolResult{Parts: []schema.ToolOutputPart{{Type: schema.ToolPartTypeText, Text: "orig"}}}, nil)
+			sw.Close()
+			return sr, nil
+		}
+
+		wrapped, err := mw.WrapEnhancedStreamableToolCall(ctx, endpoint, tCtx)
+		assert.NoError(t, err)
+		_, err = wrapped(ctx, toolArg)
+		assert.Equal(t, wantErr, err)
+	})
+
+	t.Run("enhanced streamable - offload without backend returns error", func(t *testing.T) {
+		// config.Backend must be non-nil to pass New(), but the per-tool cfg.Backend is nil.
+		configBackend := filesystem.NewInMemoryBackend()
+		config := &Config{
+			Backend: configBackend,
+			ToolConfig: map[string]*ToolReductionConfig{
+				"enh_stream_tool": {
+					Backend:        nil,
+					SkipTruncation: false,
+					TruncHandler: func(_ context.Context, _ *ToolDetail) (*TruncResult, error) {
+						sr, sw := schema.Pipe[*schema.ToolResult](1)
+						sw.Send(&schema.ToolResult{Parts: []schema.ToolOutputPart{{Type: schema.ToolPartTypeText, Text: "truncated"}}}, nil)
+						sw.Close()
+						return &TruncResult{
+							NeedTrunc:        true,
+							NeedOffload:      true,
+							OffloadFilePath:  "/tmp/trunc/scid",
+							OffloadContent:   "full content",
+							StreamToolResult: sr,
+						}, nil
+					},
+				},
+			},
+		}
+		mw, err := New(ctx, config)
+		assert.NoError(t, err)
+
+		tCtx := &adk.ToolContext{Name: "enh_stream_tool", CallID: "scid"}
+		toolArg := &schema.ToolArgument{Text: `{"k":"v"}`}
+		endpoint := func(_ context.Context, _ *schema.ToolArgument, _ ...tool.Option) (*schema.StreamReader[*schema.ToolResult], error) {
+			sr, sw := schema.Pipe[*schema.ToolResult](1)
+			sw.Send(&schema.ToolResult{Parts: []schema.ToolOutputPart{{Type: schema.ToolPartTypeText, Text: "orig"}}}, nil)
+			sw.Close()
+			return sr, nil
+		}
+
+		wrapped, err := mw.WrapEnhancedStreamableToolCall(ctx, endpoint, tCtx)
+		assert.NoError(t, err)
+		_, err = wrapped(ctx, toolArg)
+		assert.EqualError(t, err, "truncation: no backend for offload")
 	})
 }
