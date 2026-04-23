@@ -387,6 +387,7 @@ func generateWithShouldRetry[M messageType](r *typedRetryModelWrapper[M], ctx co
 	currentInput := input
 	currentOpts := opts
 	var lastErr error
+	var zero M
 
 	defer func() {
 		_ = compose.ProcessState(ctx, func(_ context.Context, st *typedState[M]) error {
@@ -414,12 +415,10 @@ func generateWithShouldRetry[M messageType](r *typedRetryModelWrapper[M], ctx co
 
 		if err != nil {
 			if _, ok := compose.ExtractInterruptInfo(err); ok {
-				var zero M
 				return zero, err
 			}
 
 			if errors.Is(err, ErrStreamCanceled) {
-				var zero M
 				return zero, err
 			}
 		}
@@ -438,11 +437,9 @@ func generateWithShouldRetry[M messageType](r *typedRetryModelWrapper[M], ctx co
 
 		if !decision.Retry {
 			if decision.RewriteError != nil {
-				var zero M
 				return zero, decision.RewriteError
 			}
 			if err != nil {
-				var zero M
 				return zero, err
 			}
 			if execCtx != nil && execCtx.generator != nil && out != nil {
@@ -469,12 +466,10 @@ func generateWithShouldRetry[M messageType](r *typedRetryModelWrapper[M], ctx co
 		}
 
 		if err := r.contextAwareSleep(ctx, delay); err != nil {
-			var zero M
 			return zero, err
 		}
 	}
 
-	var zero M
 	return zero, &RetryExhaustedError{LastErr: lastErr, TotalRetries: r.config.MaxRetries}
 }
 
