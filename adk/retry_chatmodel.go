@@ -75,9 +75,13 @@ func (e *RetryExhaustedError) Unwrap() error {
 //     concrete error types. Since end-users only need the original error when the AgentEvent first
 //     occurs (not after restoring from checkpoint), skipping serialization is acceptable.
 //     After checkpoint restore, err will be nil and Unwrap() returns nil.
+//   - rejectReason (unexported): Stores a user-defined value set by the ShouldRetry callback
+//     via RetryDecision.RejectReason. This is runtime-only observability data — after checkpoint
+//     restore it will be nil. Unexported to avoid Gob serialization of arbitrary types.
 type WillRetryError struct {
 	ErrStr       string
 	RetryAttempt int
+	rejectReason any
 	err          error
 }
 
@@ -87,6 +91,12 @@ func (e *WillRetryError) Error() string {
 
 func (e *WillRetryError) Unwrap() error {
 	return e.err
+}
+
+// RejectReason returns the user-defined rejection reason set by the ShouldRetry callback
+// via RetryDecision.RejectReason. Returns nil if not set or after checkpoint restore.
+func (e *WillRetryError) RejectReason() any {
+	return e.rejectReason
 }
 
 func init() {
@@ -190,6 +200,18 @@ type TypedRetryDecision[M messageType] struct {
 	// the specific error or problematic message encountered.
 	// Only used when Retry is true. Ignored when Retry is false.
 	Backoff time.Duration
+
+	// RejectReason is an optional user-defined value describing why the output was rejected.
+	// When Retry is true and the rejected stream/message is observed downstream via
+	// AgentEvent, this value is attached to the WillRetryError emitted to the event stream.
+	// Consumers can retrieve it via WillRetryError.RejectReason().
+	//
+	// The ShouldRetry callback has full access to the model output (via retryCtx.OutputMessage)
+	// and error (via retryCtx.Err), so it can distill whatever information it wants into
+	// RejectReason — a string, a struct, the output message itself, or nil.
+	//
+	// Only used when Retry is true. Ignored when Retry is false.
+	RejectReason any
 }
 
 // RetryDecision is the default retry decision type using *schema.Message.
@@ -291,6 +313,7 @@ type retryVerdict struct {
 	WillRetry    bool
 	RetryAttempt int
 	Err          error
+	RejectReason any
 }
 
 // retryModelWrapper wraps a BaseChatModel with retry logic.
@@ -617,6 +640,7 @@ func streamWithShouldRetry[M messageType](r *typedRetryModelWrapper[M], ctx cont
 			WillRetry:    true,
 			RetryAttempt: attempt,
 			Err:          verdictErr,
+			RejectReason: decision.RejectReason,
 		}
 		returnCopy.Close()
 

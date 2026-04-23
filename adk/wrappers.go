@@ -402,6 +402,7 @@ func (m *typedEventSenderModel[M]) buildStreamConvertOptions(ctx context.Context
 						return &WillRetryError{
 							ErrStr:       err.Error(),
 							RetryAttempt: verdict.RetryAttempt,
+							rejectReason: verdict.RejectReason,
 							err:          err,
 						}
 					}
@@ -414,6 +415,7 @@ func (m *typedEventSenderModel[M]) buildStreamConvertOptions(ctx context.Context
 						return nil, &WillRetryError{
 							ErrStr:       verdict.Err.Error(),
 							RetryAttempt: verdict.RetryAttempt,
+							rejectReason: verdict.RejectReason,
 							err:          verdict.Err,
 						}
 					}

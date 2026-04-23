@@ -3083,3 +3083,134 @@ func TestAttack_ShouldRetry_Stream_MidStreamError_VerdictDoubleRead(t *testing.T
 		t.Fatal("goroutine leak: onEOF blocked on signal.ch after errWrapper already drained the verdict")
 	}
 }
+
+type rejectReasonTestModel struct {
+	streamFn func(ctx context.Context, input []*schema.Message, opts ...model.Option) (*schema.StreamReader[*schema.Message], error)
+}
+
+func (m *rejectReasonTestModel) Generate(_ context.Context, _ []*schema.Message, _ ...model.Option) (*schema.Message, error) {
+	return schema.AssistantMessage("generated", nil), nil
+}
+
+func (m *rejectReasonTestModel) Stream(ctx context.Context, input []*schema.Message, opts ...model.Option) (*schema.StreamReader[*schema.Message], error) {
+	return m.streamFn(ctx, input, opts...)
+}
+
+func TestRejectReason_StreamPath(t *testing.T) {
+	ctx := context.Background()
+
+	type rejectInfo struct {
+		Reason  string
+		Attempt int
+	}
+
+	streamErr := errors.New("bad output")
+	var streamCallCount int32
+
+	m := &rejectReasonTestModel{
+		streamFn: func(_ context.Context, _ []*schema.Message, _ ...model.Option) (*schema.StreamReader[*schema.Message], error) {
+			n := atomic.AddInt32(&streamCallCount, 1)
+			if n == 1 {
+				return streamWithMidError(
+					[]*schema.Message{schema.AssistantMessage("rejected chunk", nil)},
+					streamErr,
+				), nil
+			}
+			sr, sw := schema.Pipe[*schema.Message](1)
+			go func() {
+				defer sw.Close()
+				sw.Send(schema.AssistantMessage("accepted", nil), nil)
+			}()
+			return sr, nil
+		},
+	}
+
+	agent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+		Name:        "reject-reason-agent",
+		Description: "test reject reason",
+		Instruction: "test",
+		Model:       m,
+		ModelRetryConfig: &ModelRetryConfig{
+			MaxRetries: 1,
+			ShouldRetry: func(_ context.Context, retryCtx *RetryContext) *RetryDecision {
+				if retryCtx.Err != nil {
+					return &RetryDecision{
+						Retry: true,
+						RejectReason: rejectInfo{
+							Reason:  "output quality too low",
+							Attempt: retryCtx.RetryAttempt,
+						},
+					}
+				}
+				return nil
+			},
+			BackoffFunc: func(_ context.Context, _ int) time.Duration { return time.Millisecond },
+		},
+	})
+	require.NoError(t, err)
+
+	input := &AgentInput{
+		Messages:       []Message{schema.UserMessage("hello")},
+		EnableStreaming: true,
+	}
+	ctx, _ = initRunCtx(ctx, agent.Name(ctx), input)
+	iter := agent.Run(ctx, input)
+
+	var capturedRejectReasons []any
+	var finalContent string
+	for {
+		ev, ok := iter.Next()
+		if !ok {
+			break
+		}
+		if ev.Err != nil {
+			continue
+		}
+		if ev.Output != nil && ev.Output.MessageOutput != nil && ev.Output.MessageOutput.IsStreaming {
+			sr := ev.Output.MessageOutput.MessageStream
+			for {
+				chunk, recvErr := sr.Recv()
+				if recvErr != nil {
+					var willRetry *WillRetryError
+					if errors.As(recvErr, &willRetry) {
+						capturedRejectReasons = append(capturedRejectReasons, willRetry.RejectReason())
+					}
+					break
+				}
+				if chunk != nil {
+					finalContent = chunk.Content
+				}
+			}
+		}
+	}
+
+	assert.Contains(t, finalContent, "accepted")
+	require.NotEmpty(t, capturedRejectReasons, "should have at least one WillRetryError with RejectReason from stream Recv()")
+	for _, reason := range capturedRejectReasons {
+		require.NotNil(t, reason)
+		ri, ok := reason.(rejectInfo)
+		require.True(t, ok, "RejectReason should be rejectInfo type, got %T", reason)
+		assert.Equal(t, "output quality too low", ri.Reason)
+		assert.Equal(t, 1, ri.Attempt)
+	}
+}
+
+func TestWillRetryError_RejectReason(t *testing.T) {
+	t.Run("nil when not set", func(t *testing.T) {
+		wre := &WillRetryError{ErrStr: "test", RetryAttempt: 1, err: errors.New("test")}
+		assert.Nil(t, wre.RejectReason(), "RejectReason should be nil when not set")
+	})
+
+	t.Run("returns value when set", func(t *testing.T) {
+		reason := map[string]string{"key": "value"}
+		wre := &WillRetryError{
+			ErrStr:       "rejected",
+			RetryAttempt: 2,
+			rejectReason: reason,
+			err:          errors.New("inner"),
+		}
+		assert.Equal(t, reason, wre.RejectReason())
+		assert.Equal(t, "rejected", wre.Error())
+		assert.Equal(t, 2, wre.RetryAttempt)
+	})
+}
