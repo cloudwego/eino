@@ -23,26 +23,12 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/cloudwego/eino/adk"
 	"github.com/cloudwego/eino/adk/filesystem"
-	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/schema"
 )
 
 // --- test helpers ---
-
-type mockModel struct {
-	lastInput []*schema.Message
-}
-
-func (m *mockModel) Generate(_ context.Context, input []*schema.Message, _ ...model.Option) (*schema.Message, error) {
-	m.lastInput = input
-	return &schema.Message{Role: schema.Assistant, Content: "ok"}, nil
-}
-
-func (m *mockModel) Stream(_ context.Context, input []*schema.Message, _ ...model.Option) (*schema.StreamReader[*schema.Message], error) {
-	m.lastInput = input
-	return nil, nil
-}
 
 type memBackend struct {
 	files map[string]string
@@ -121,31 +107,28 @@ func TestMiddleware_BasicInjection(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	mock := &mockModel{}
-	wrapped, err := mw.WrapModel(ctx, mock, nil)
+	userMsg := &schema.Message{Role: schema.User, Content: "hello"}
+	state := &adk.ChatModelAgentState{Messages: []*schema.Message{userMsg}}
+
+	_, state, err = mw.BeforeModelRewriteState(ctx, state, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	userMsg := &schema.Message{Role: schema.User, Content: "hello"}
-	if _, err = wrapped.Generate(ctx, []*schema.Message{userMsg}); err != nil {
-		t.Fatal(err)
+	if len(state.Messages) != 2 {
+		t.Fatalf("expected 2 messages, got %d", len(state.Messages))
 	}
-
-	if len(mock.lastInput) != 2 {
-		t.Fatalf("expected 2 messages, got %d", len(mock.lastInput))
+	if state.Messages[0].Role != schema.User {
+		t.Fatalf("expected first message role User, got %s", state.Messages[0].Role)
 	}
-	if mock.lastInput[0].Role != schema.User {
-		t.Fatalf("expected first message role User, got %s", mock.lastInput[0].Role)
+	if !strings.Contains(state.Messages[0].Content, "You are a helpful assistant.") {
+		t.Fatalf("expected agent.md content in first message, got %q", state.Messages[0].Content)
 	}
-	if !strings.Contains(mock.lastInput[0].Content, "You are a helpful assistant.") {
-		t.Fatalf("expected agent.md content in first message, got %q", mock.lastInput[0].Content)
+	if !strings.Contains(state.Messages[0].Content, "<system-reminder>") {
+		t.Fatalf("expected system-reminder tag, got %q", state.Messages[0].Content)
 	}
-	if !strings.Contains(mock.lastInput[0].Content, "<system-reminder>") {
-		t.Fatalf("expected system-reminder tag, got %q", mock.lastInput[0].Content)
-	}
-	if mock.lastInput[1].Content != "hello" {
-		t.Fatalf("expected original message preserved, got %q", mock.lastInput[1].Content)
+	if state.Messages[1].Content != "hello" {
+		t.Fatalf("expected original message preserved, got %q", state.Messages[1].Content)
 	}
 }
 
@@ -160,17 +143,13 @@ func TestMiddleware_MultipleFiles(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	mock := &mockModel{}
-	wrapped, err := mw.WrapModel(ctx, mock, nil)
+	state := &adk.ChatModelAgentState{Messages: []*schema.Message{{Role: schema.User, Content: "hi"}}}
+	_, state, err = mw.BeforeModelRewriteState(ctx, state, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	if _, err = wrapped.Generate(ctx, []*schema.Message{{Role: schema.User, Content: "hi"}}); err != nil {
-		t.Fatal(err)
-	}
-
-	content := mock.lastInput[0].Content
+	content := state.Messages[0].Content
 	idxA := strings.Index(content, "instruction A")
 	idxB := strings.Index(content, "instruction B")
 	if idxA < 0 || idxB < 0 {
@@ -192,17 +171,13 @@ func TestMiddleware_ImportResolution(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	mock := &mockModel{}
-	wrapped, err := mw.WrapModel(ctx, mock, nil)
+	state := &adk.ChatModelAgentState{Messages: []*schema.Message{{Role: schema.User, Content: "hi"}}}
+	_, state, err = mw.BeforeModelRewriteState(ctx, state, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	if _, err = wrapped.Generate(ctx, []*schema.Message{{Role: schema.User, Content: "hi"}}); err != nil {
-		t.Fatal(err)
-	}
-
-	content := mock.lastInput[0].Content
+	content := state.Messages[0].Content
 	// Original text should be preserved with @path intact.
 	if !strings.Contains(content, "main instructions") {
 		t.Fatalf("should contain original text, got %q", content)
@@ -234,17 +209,13 @@ func TestMiddleware_RecursiveImport(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	mock := &mockModel{}
-	wrapped, err := mw.WrapModel(ctx, mock, nil)
+	state := &adk.ChatModelAgentState{Messages: []*schema.Message{{Role: schema.User, Content: "hi"}}}
+	_, state, err = mw.BeforeModelRewriteState(ctx, state, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	if _, err = wrapped.Generate(ctx, []*schema.Message{{Role: schema.User, Content: "hi"}}); err != nil {
-		t.Fatal(err)
-	}
-
-	content := mock.lastInput[0].Content
+	content := state.Messages[0].Content
 	// All three files should appear as separate sections.
 	for _, section := range []string{"Contents of /a.md", "Contents of /b.md", "Contents of /c.md"} {
 		if !strings.Contains(content, section) {
@@ -283,19 +254,14 @@ func TestMiddleware_MaxImportDepth(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	mock := &mockModel{}
-	wrapped, err := mw.WrapModel(ctx, mock, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-
 	// Import failure at depth > 5 is logged, not returned as error.
-	_, err = wrapped.Generate(ctx, []*schema.Message{{Role: schema.User, Content: "hi"}})
+	state := &adk.ChatModelAgentState{Messages: []*schema.Message{{Role: schema.User, Content: "hi"}}}
+	_, state, err = mw.BeforeModelRewriteState(ctx, state, nil)
 	if err != nil {
 		t.Fatalf("expected no error (depth exceeded is logged), got %v", err)
 	}
 	// Levels 0-5 should be present as sections; level 6 fails silently.
-	content := mock.lastInput[0].Content
+	content := state.Messages[0].Content
 	for i := 0; i <= 5; i++ {
 		want := fmt.Sprintf("Contents of /level%d.md", i)
 		if !strings.Contains(content, want) {
@@ -318,19 +284,14 @@ func TestMiddleware_CircularImport(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	mock := &mockModel{}
-	wrapped, err := mw.WrapModel(ctx, mock, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-
 	// Circular import failure is logged, not returned as error.
-	_, err = wrapped.Generate(ctx, []*schema.Message{{Role: schema.User, Content: "hi"}})
+	state := &adk.ChatModelAgentState{Messages: []*schema.Message{{Role: schema.User, Content: "hi"}}}
+	_, state, err = mw.BeforeModelRewriteState(ctx, state, nil)
 	if err != nil {
 		t.Fatalf("expected no error (circular import is logged), got %v", err)
 	}
 	// /a.md and /b.md should both be present; the circular ref from b->a is skipped.
-	content := mock.lastInput[0].Content
+	content := state.Messages[0].Content
 	if !strings.Contains(content, "Contents of /a.md") {
 		t.Fatalf("expected /a.md section, got %q", content)
 	}
@@ -354,17 +315,13 @@ func TestMiddleware_MaxBytesLimit(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	mock := &mockModel{}
-	wrapped, err := mw.WrapModel(ctx, mock, nil)
+	state := &adk.ChatModelAgentState{Messages: []*schema.Message{{Role: schema.User, Content: "hi"}}}
+	_, state, err = mw.BeforeModelRewriteState(ctx, state, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	if _, err = wrapped.Generate(ctx, []*schema.Message{{Role: schema.User, Content: "hi"}}); err != nil {
-		t.Fatal(err)
-	}
-
-	content := mock.lastInput[0].Content
+	content := state.Messages[0].Content
 	if !strings.Contains(content, "AAAA") {
 		t.Fatal("first file should be included")
 	}
@@ -373,7 +330,7 @@ func TestMiddleware_MaxBytesLimit(t *testing.T) {
 	}
 }
 
-func TestMiddleware_NotPersistedInState(t *testing.T) {
+func TestMiddleware_InjectedInState(t *testing.T) {
 	b := newMemBackend()
 	b.set("/agent.md", "agent instructions")
 
@@ -383,25 +340,29 @@ func TestMiddleware_NotPersistedInState(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	mock := &mockModel{}
-	wrapped, err := mw.WrapModel(ctx, mock, nil)
+	originalMsgs := []*schema.Message{{Role: schema.User, Content: "hello"}}
+	state := &adk.ChatModelAgentState{Messages: originalMsgs}
+	_, newState, err := mw.BeforeModelRewriteState(ctx, state, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	originalMsgs := []*schema.Message{{Role: schema.User, Content: "hello"}}
-	if _, err = wrapped.Generate(ctx, originalMsgs); err != nil {
-		t.Fatal(err)
-	}
-
+	// The original slice should not be modified (new slice is returned).
 	if len(originalMsgs) != 1 {
-		t.Fatalf("original messages should not be modified, got %d messages", len(originalMsgs))
+		t.Fatalf("original messages slice should not be modified, got %d messages", len(originalMsgs))
 	}
 	if originalMsgs[0].Content != "hello" {
 		t.Fatalf("original message should be unchanged, got %q", originalMsgs[0].Content)
 	}
-	if len(mock.lastInput) != 2 {
-		t.Fatalf("model should receive 2 messages, got %d", len(mock.lastInput))
+	// The returned state should have the injected message.
+	if len(newState.Messages) != 2 {
+		t.Fatalf("new state should have 2 messages (injected + original), got %d", len(newState.Messages))
+	}
+	if !strings.Contains(newState.Messages[0].Content, "agent instructions") {
+		t.Fatalf("expected agentmd content in first message, got %q", newState.Messages[0].Content)
+	}
+	if newState.Messages[1].Content != "hello" {
+		t.Fatalf("expected original user message preserved, got %q", newState.Messages[1].Content)
 	}
 }
 
@@ -416,17 +377,13 @@ func TestMiddleware_AbsoluteImportPath(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	mock := &mockModel{}
-	wrapped, err := mw.WrapModel(ctx, mock, nil)
+	state := &adk.ChatModelAgentState{Messages: []*schema.Message{{Role: schema.User, Content: "hi"}}}
+	_, state, err = mw.BeforeModelRewriteState(ctx, state, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	if _, err = wrapped.Generate(ctx, []*schema.Message{{Role: schema.User, Content: "hi"}}); err != nil {
-		t.Fatal(err)
-	}
-
-	content := mock.lastInput[0].Content
+	content := state.Messages[0].Content
 	// @path preserved in original text.
 	if !strings.Contains(content, "@/shared/imported.md") {
 		t.Fatalf("@import reference should be preserved, got %q", content)
@@ -452,17 +409,13 @@ func TestMiddleware_ImportAsSeparateSection(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	mock := &mockModel{}
-	wrapped, err := mw.WrapModel(ctx, mock, nil)
+	state := &adk.ChatModelAgentState{Messages: []*schema.Message{{Role: schema.User, Content: "hi"}}}
+	_, state, err = mw.BeforeModelRewriteState(ctx, state, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	if _, err = wrapped.Generate(ctx, []*schema.Message{{Role: schema.User, Content: "hi"}}); err != nil {
-		t.Fatal(err)
-	}
-
-	content := mock.lastInput[0].Content
+	content := state.Messages[0].Content
 	// Original text preserved with @paths intact.
 	if !strings.Contains(content, "Please read @sub/rules.md and also @sub/style.md for guidance.") {
 		t.Fatalf("original text with @paths should be preserved, got %q", content)
@@ -921,32 +874,6 @@ func TestLoader_AtSignInNormalText(t *testing.T) {
 	}
 }
 
-func TestMiddleware_Stream(t *testing.T) {
-	b := newMemBackend()
-	b.set("/agent.md", "stream test")
-
-	ctx := context.Background()
-	mw, err := New(ctx, &Config{Backend: b, AgentsMDFiles: []string{"/agent.md"}})
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	mock := &mockModel{}
-	wrapped, err := mw.WrapModel(ctx, mock, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	_, _ = wrapped.Stream(ctx, []*schema.Message{{Role: schema.User, Content: "hi"}})
-
-	if len(mock.lastInput) != 2 {
-		t.Fatalf("expected 2 messages for stream, got %d", len(mock.lastInput))
-	}
-	if !strings.Contains(mock.lastInput[0].Content, "stream test") {
-		t.Fatalf("expected agent.md content in stream input, got %q", mock.lastInput[0].Content)
-	}
-}
-
 func TestLoader_MaxBytesWithImports(t *testing.T) {
 	// Two top-level files that both import the same shared file.
 	// Budget should account for imported file bytes.
@@ -997,40 +924,10 @@ func TestMiddleware_GenerateError(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	mock := &mockModel{}
-	wrapped, err := mw.WrapModel(ctx, mock, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	_, err = wrapped.Generate(ctx, []*schema.Message{{Role: schema.User, Content: "hi"}})
+	state := &adk.ChatModelAgentState{Messages: []*schema.Message{{Role: schema.User, Content: "hi"}}}
+	_, _, err = mw.BeforeModelRewriteState(ctx, state, nil)
 	if err == nil {
 		t.Fatal("expected error when backend read fails with non-ErrNotExist")
-	}
-	if !strings.Contains(err.Error(), "failed to load agent files") {
-		t.Fatalf("unexpected error: %v", err)
-	}
-}
-
-func TestMiddleware_StreamError(t *testing.T) {
-	// Non-ErrNotExist errors (e.g. permission denied) should propagate.
-	b := &errBackend{}
-
-	ctx := context.Background()
-	mw, err := New(ctx, &Config{Backend: b, AgentsMDFiles: []string{"/file.md"}})
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	mock := &mockModel{}
-	wrapped, err := mw.WrapModel(ctx, mock, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	_, err = wrapped.Stream(ctx, []*schema.Message{{Role: schema.User, Content: "hi"}})
-	if err == nil {
-		t.Fatal("expected error when backend read fails with non-ErrNotExist for stream")
 	}
 	if !strings.Contains(err.Error(), "failed to load agent files") {
 		t.Fatalf("unexpected error: %v", err)
@@ -1102,7 +999,7 @@ func TestFormatContent_Empty(t *testing.T) {
 
 func TestMiddleware_AllFilesEmpty(t *testing.T) {
 	// When all agent files have empty content, loader returns "" and
-	// prependAgentMD returns the original input unchanged.
+	// BeforeModelRewriteState returns the original state unchanged.
 	b := newMemBackend()
 	b.set("/agent.md", "")
 
@@ -1112,22 +1009,18 @@ func TestMiddleware_AllFilesEmpty(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	mock := &mockModel{}
-	wrapped, err := mw.WrapModel(ctx, mock, nil)
+	userMsg := []*schema.Message{{Role: schema.User, Content: "hello"}}
+	state := &adk.ChatModelAgentState{Messages: userMsg}
+	_, state, err = mw.BeforeModelRewriteState(ctx, state, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-
-	userMsg := []*schema.Message{{Role: schema.User, Content: "hello"}}
-	if _, err = wrapped.Generate(ctx, userMsg); err != nil {
-		t.Fatal(err)
-	}
 	// Empty file produces no agentmd content, so original messages pass through unchanged.
-	if len(mock.lastInput) != 1 {
-		t.Fatalf("expected 1 message (no agentmd prepended), got %d", len(mock.lastInput))
+	if len(state.Messages) != 1 {
+		t.Fatalf("expected 1 message (no agentmd prepended), got %d", len(state.Messages))
 	}
-	if mock.lastInput[0].Content != "hello" {
-		t.Fatalf("expected original message unchanged, got %q", mock.lastInput[0].Content)
+	if state.Messages[0].Content != "hello" {
+		t.Fatalf("expected original message unchanged, got %q", state.Messages[0].Content)
 	}
 }
 
@@ -1260,7 +1153,7 @@ func TestLoader_OnLoadWarningCallback(t *testing.T) {
 	}
 }
 
-func TestMiddleware_MissingFile_Generate(t *testing.T) {
+func TestMiddleware_MissingFile(t *testing.T) {
 	b := newMemBackend()
 	// /missing.md not set — will fail to read
 
@@ -1273,48 +1166,15 @@ func TestMiddleware_MissingFile_Generate(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	mock := &mockModel{}
-	wrapped, err := mw.WrapModel(ctx, mock, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-
 	userMsg := []*schema.Message{{Role: schema.User, Content: "hello"}}
-	_, err = wrapped.Generate(ctx, userMsg)
+	state := &adk.ChatModelAgentState{Messages: userMsg}
+	_, state, err = mw.BeforeModelRewriteState(ctx, state, nil)
 	if err != nil {
 		t.Fatalf("expected no error for missing file, got %v", err)
 	}
 	// No agent.md content, so original messages should be passed through unchanged.
-	if len(mock.lastInput) != 1 {
-		t.Fatalf("expected 1 message (no agentmd prepended), got %d", len(mock.lastInput))
-	}
-}
-
-func TestMiddleware_MissingFile_Stream(t *testing.T) {
-	b := newMemBackend()
-
-	ctx := context.Background()
-	mw, err := New(ctx, &Config{
-		Backend:       b,
-		AgentsMDFiles: []string{"/missing.md"},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	mock := &mockModel{}
-	wrapped, err := mw.WrapModel(ctx, mock, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	userMsg := []*schema.Message{{Role: schema.User, Content: "hello"}}
-	_, err = wrapped.Stream(ctx, userMsg)
-	if err != nil {
-		t.Fatalf("expected no error for missing file, got %v", err)
-	}
-	if len(mock.lastInput) != 1 {
-		t.Fatalf("expected 1 message (no agentmd prepended), got %d", len(mock.lastInput))
+	if len(state.Messages) != 1 {
+		t.Fatalf("expected 1 message (no agentmd prepended), got %d", len(state.Messages))
 	}
 }
 
@@ -1328,35 +1188,31 @@ func TestMiddleware_InsertBeforeFirstUserMessage(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	mock := &mockModel{}
-	wrapped, err := mw.WrapModel(ctx, mock, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-
 	// Input has a System message before the User message.
 	input := []*schema.Message{
 		{Role: schema.System, Content: "system prompt"},
 		{Role: schema.User, Content: "hello"},
 	}
-	if _, err = wrapped.Generate(ctx, input); err != nil {
+	state := &adk.ChatModelAgentState{Messages: input}
+	_, state, err = mw.BeforeModelRewriteState(ctx, state, nil)
+	if err != nil {
 		t.Fatal(err)
 	}
 
-	if len(mock.lastInput) != 3 {
-		t.Fatalf("expected 3 messages, got %d", len(mock.lastInput))
+	if len(state.Messages) != 3 {
+		t.Fatalf("expected 3 messages, got %d", len(state.Messages))
 	}
-	if mock.lastInput[0].Role != schema.System {
-		t.Fatalf("expected first message role System, got %s", mock.lastInput[0].Role)
+	if state.Messages[0].Role != schema.System {
+		t.Fatalf("expected first message role System, got %s", state.Messages[0].Role)
 	}
-	if mock.lastInput[0].Content != "system prompt" {
-		t.Fatalf("expected system prompt preserved, got %q", mock.lastInput[0].Content)
+	if state.Messages[0].Content != "system prompt" {
+		t.Fatalf("expected system prompt preserved, got %q", state.Messages[0].Content)
 	}
-	if mock.lastInput[1].Role != schema.User || !strings.Contains(mock.lastInput[1].Content, "agent instructions") {
-		t.Fatalf("expected agentmd message before user message, got role=%s content=%q", mock.lastInput[1].Role, mock.lastInput[1].Content)
+	if state.Messages[1].Role != schema.User || !strings.Contains(state.Messages[1].Content, "agent instructions") {
+		t.Fatalf("expected agentmd message before user message, got role=%s content=%q", state.Messages[1].Role, state.Messages[1].Content)
 	}
-	if mock.lastInput[2].Role != schema.User || mock.lastInput[2].Content != "hello" {
-		t.Fatalf("expected original user message at index 2, got role=%s content=%q", mock.lastInput[2].Role, mock.lastInput[2].Content)
+	if state.Messages[2].Role != schema.User || state.Messages[2].Content != "hello" {
+		t.Fatalf("expected original user message at index 2, got role=%s content=%q", state.Messages[2].Role, state.Messages[2].Content)
 	}
 }
 
@@ -1370,32 +1226,28 @@ func TestMiddleware_InsertWithNoUserMessage(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	mock := &mockModel{}
-	wrapped, err := mw.WrapModel(ctx, mock, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-
 	// Input has no User message at all.
 	input := []*schema.Message{
 		{Role: schema.System, Content: "system prompt"},
 		{Role: schema.Assistant, Content: "assistant reply"},
 	}
-	if _, err = wrapped.Generate(ctx, input); err != nil {
+	state := &adk.ChatModelAgentState{Messages: input}
+	_, state, err = mw.BeforeModelRewriteState(ctx, state, nil)
+	if err != nil {
 		t.Fatal(err)
 	}
 
-	if len(mock.lastInput) != 3 {
-		t.Fatalf("expected 3 messages, got %d", len(mock.lastInput))
+	if len(state.Messages) != 3 {
+		t.Fatalf("expected 3 messages, got %d", len(state.Messages))
 	}
-	if mock.lastInput[0].Role != schema.System {
-		t.Fatalf("expected System at index 0, got %s", mock.lastInput[0].Role)
+	if state.Messages[0].Role != schema.System {
+		t.Fatalf("expected System at index 0, got %s", state.Messages[0].Role)
 	}
-	if mock.lastInput[1].Role != schema.Assistant {
-		t.Fatalf("expected Assistant at index 1, got %s", mock.lastInput[1].Role)
+	if state.Messages[1].Role != schema.Assistant {
+		t.Fatalf("expected Assistant at index 1, got %s", state.Messages[1].Role)
 	}
-	if mock.lastInput[2].Role != schema.User || !strings.Contains(mock.lastInput[2].Content, "agent instructions") {
-		t.Fatalf("expected agentmd appended at end, got role=%s content=%q", mock.lastInput[2].Role, mock.lastInput[2].Content)
+	if state.Messages[2].Role != schema.User || !strings.Contains(state.Messages[2].Content, "agent instructions") {
+		t.Fatalf("expected agentmd appended at end, got role=%s content=%q", state.Messages[2].Role, state.Messages[2].Content)
 	}
 }
 
@@ -1416,5 +1268,75 @@ func TestLoader_ImportIOError(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "I/O error") {
 		t.Fatalf("expected I/O error, got: %v", err)
+	}
+}
+
+func TestMiddleware_Idempotency(t *testing.T) {
+	// Calling BeforeModelRewriteState twice should NOT duplicate the agentsmd message.
+	// The marker in msg.Extra[agentsMDExtraKey] prevents re-injection.
+	b := newMemBackend()
+	b.set("/agent.md", "agent instructions")
+
+	ctx := context.Background()
+	mw, err := New(ctx, &Config{Backend: b, AgentsMDFiles: []string{"/agent.md"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	state := &adk.ChatModelAgentState{Messages: []*schema.Message{{Role: schema.User, Content: "hello"}}}
+	_, state, err = mw.BeforeModelRewriteState(ctx, state, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(state.Messages) != 2 {
+		t.Fatalf("expected 2 messages after first call, got %d", len(state.Messages))
+	}
+
+	// Call again with the same state (which now contains the marker message).
+	_, state, err = mw.BeforeModelRewriteState(ctx, state, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(state.Messages) != 2 {
+		t.Fatalf("expected 2 messages after second call (idempotent), got %d", len(state.Messages))
+	}
+	if !strings.Contains(state.Messages[0].Content, "agent instructions") {
+		t.Fatalf("expected agentmd content preserved, got %q", state.Messages[0].Content)
+	}
+}
+
+func TestMiddleware_ReinsertAfterRemoval(t *testing.T) {
+	// If the marker message is removed from state.Messages, calling
+	// BeforeModelRewriteState should re-insert it.
+	b := newMemBackend()
+	b.set("/agent.md", "agent instructions")
+
+	ctx := context.Background()
+	mw, err := New(ctx, &Config{Backend: b, AgentsMDFiles: []string{"/agent.md"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	state := &adk.ChatModelAgentState{Messages: []*schema.Message{{Role: schema.User, Content: "hello"}}}
+	_, state, err = mw.BeforeModelRewriteState(ctx, state, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(state.Messages) != 2 {
+		t.Fatalf("expected 2 messages after first call, got %d", len(state.Messages))
+	}
+
+	// Simulate removal of the marker message (e.g., by summarization).
+	// Keep only the original user message.
+	state = &adk.ChatModelAgentState{Messages: []*schema.Message{{Role: schema.User, Content: "hello"}}}
+	_, state, err = mw.BeforeModelRewriteState(ctx, state, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(state.Messages) != 2 {
+		t.Fatalf("expected 2 messages after re-insert, got %d", len(state.Messages))
+	}
+	if !strings.Contains(state.Messages[0].Content, "agent instructions") {
+		t.Fatalf("expected agentmd content re-inserted, got %q", state.Messages[0].Content)
 	}
 }

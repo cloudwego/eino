@@ -29,7 +29,6 @@ import (
 
 	"github.com/cloudwego/eino/adk"
 	"github.com/cloudwego/eino/adk/internal"
-	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/components/tool"
 	"github.com/cloudwego/eino/schema"
 )
@@ -138,66 +137,140 @@ func (m *middleware) BeforeAgent(ctx context.Context, runCtx *adk.ChatModelAgent
 	copy(nRunCtx.Tools, runCtx.Tools)
 	nRunCtx.Tools = append(nRunCtx.Tools, newToolSearchTool(m.mapOfDynamicTools, m.useModelToolSearch))
 	nRunCtx.Tools = append(nRunCtx.Tools, m.dynamicTools...)
+	if m.useModelToolSearch {
+		nRunCtx.ToolSearchTool = getToolSearchToolInfo()
+	}
 	return ctx, &nRunCtx, nil
 }
 
-func (m *middleware) WrapModel(_ context.Context, cm model.BaseChatModel, mc *adk.ModelContext) (model.BaseChatModel, error) {
-	return &wrapper{
-		allTools:           mc.Tools,
-		cm:                 cm,
-		dynamicToolInfos:   m.dynamicToolInfos,
-		reminder:           m.sr,
-		useModelToolSearch: m.useModelToolSearch,
-	}, nil
-}
+const toolSearchInitializedKey = "__toolsearch_initialized__"
+const toolSearchReminderExtraKey = "__toolsearch_reminder__"
 
-type wrapper struct {
-	allTools           []*schema.ToolInfo
-	dynamicToolInfos   []*schema.ToolInfo
-	reminder           string
-	useModelToolSearch bool
-
-	cm model.BaseChatModel
-}
-
-func (w *wrapper) Generate(ctx context.Context, input []*schema.Message, opts ...model.Option) (*schema.Message, error) {
-	toolsOpts, err := w.resolveTools(ctx, input)
-	if err != nil {
-		return nil, fmt.Errorf("failed to load dynamic tools: %w", err)
+func (m *middleware) isInitialized(ctx context.Context) bool {
+	val, ok, err := adk.GetRunLocalValue(ctx, toolSearchInitializedKey)
+	if err != nil || !ok {
+		return false
 	}
-	return w.cm.Generate(ctx, w.insertReminder(input), append(opts, toolsOpts...)...)
+	b, _ := val.(bool)
+	return b
 }
 
-func (w *wrapper) Stream(ctx context.Context, input []*schema.Message, opts ...model.Option) (*schema.StreamReader[*schema.Message], error) {
-	toolsOpts, err := w.resolveTools(ctx, input)
-	if err != nil {
-		return nil, fmt.Errorf("failed to load dynamic tools: %w", err)
-	}
-	return w.cm.Stream(ctx, w.insertReminder(input), append(opts, toolsOpts...)...)
+func (m *middleware) markInitialized(ctx context.Context) {
+	_ = adk.SetRunLocalValue(ctx, toolSearchInitializedKey, true)
 }
 
-func (w *wrapper) resolveTools(ctx context.Context, input []*schema.Message) ([]model.Option, error) {
-	if w.useModelToolSearch {
-		// Model handles tool search natively; remove all dynamic tools from the list.
-		return calculateTools(ctx, w.allTools, w.dynamicToolInfos, nil, w.useModelToolSearch)
-	}
-	return calculateTools(ctx, w.allTools, w.dynamicToolInfos, input, w.useModelToolSearch)
-}
-
-func (w *wrapper) insertReminder(input []*schema.Message) []*schema.Message {
-	inserted := false
-	ret := make([]*schema.Message, 0, len(input)+1)
-	for _, m := range input {
-		if m.Role != schema.System && !inserted {
-			inserted = true
-			ret = append(ret, schema.UserMessage(w.reminder))
+func (m *middleware) ensureReminder(msgs []*schema.Message) []*schema.Message {
+	for _, msg := range msgs {
+		if msg.Extra != nil {
+			if v, ok := msg.Extra[toolSearchReminderExtraKey]; ok {
+				if b, _ := v.(bool); b {
+					return msgs
+				}
+			}
 		}
-		ret = append(ret, m)
+	}
+
+	result := make([]*schema.Message, 0, len(msgs)+1)
+	inserted := false
+	for _, msg := range msgs {
+		if msg.Role != schema.System && !inserted {
+			inserted = true
+			reminder := schema.UserMessage(m.sr)
+			reminder.Extra = map[string]any{toolSearchReminderExtraKey: true}
+			result = append(result, reminder)
+		}
+		result = append(result, msg)
 	}
 	if !inserted {
-		ret = append(ret, schema.UserMessage(w.reminder))
+		reminder := schema.UserMessage(m.sr)
+		reminder.Extra = map[string]any{toolSearchReminderExtraKey: true}
+		result = append(result, reminder)
 	}
-	return ret
+	return result
+}
+
+func (m *middleware) extractDynamicTools(tools []*schema.ToolInfo) []*schema.ToolInfo {
+	var result []*schema.ToolInfo
+	for _, t := range tools {
+		if _, ok := m.mapOfDynamicTools[t.Name]; ok {
+			result = append(result, t)
+		}
+	}
+	return result
+}
+
+func (m *middleware) stripDynamicTools(tools []*schema.ToolInfo) []*schema.ToolInfo {
+	var result []*schema.ToolInfo
+	for _, t := range tools {
+		if _, ok := m.mapOfDynamicTools[t.Name]; !ok {
+			result = append(result, t)
+		}
+	}
+	return result
+}
+
+func removeTool(tools []*schema.ToolInfo, name string) []*schema.ToolInfo {
+	var result []*schema.ToolInfo
+	for _, t := range tools {
+		if t.Name != name {
+			result = append(result, t)
+		}
+	}
+	return result
+}
+
+func toolNameSet(tools []*schema.ToolInfo) map[string]bool {
+	m := make(map[string]bool, len(tools))
+	for _, t := range tools {
+		m[t.Name] = true
+	}
+	return m
+}
+
+func (m *middleware) BeforeModelRewriteState(ctx context.Context, state *adk.ChatModelAgentState, mc *adk.ModelContext) (context.Context, *adk.ChatModelAgentState, error) {
+	state.Messages = m.ensureReminder(state.Messages)
+
+	if !m.isInitialized(ctx) {
+		m.markInitialized(ctx)
+
+		if m.useModelToolSearch {
+			// Model-native search: move dynamic tools to DeferredToolInfos for server-side retrieval,
+			// keep only static tools in ToolInfos, and remove the tool_search tool (the model handles search itself).
+			state.DeferredToolInfos = m.extractDynamicTools(state.ToolInfos)
+			state.ToolInfos = m.stripDynamicTools(state.ToolInfos)
+			state.ToolInfos = removeTool(state.ToolInfos, toolSearchToolName)
+		} else {
+			// Client-side search: hide dynamic tools initially; they become visible
+			// only after the model calls tool_search and forward selection adds them back.
+			state.ToolInfos = m.stripDynamicTools(state.ToolInfos)
+		}
+	}
+
+	// Forward selection (client-side search only): scan tool_search results in the
+	// conversation history and add the selected dynamic tools back to ToolInfos.
+	if !m.useModelToolSearch {
+		existing := toolNameSet(state.ToolInfos)
+		for _, msg := range state.Messages {
+			if msg.Role != schema.Tool || msg.ToolName != toolSearchToolName {
+				continue
+			}
+			var result toolSearchResult
+			if err := json.Unmarshal([]byte(msg.Content), &result); err != nil {
+				continue
+			}
+			for _, name := range result.Matches {
+				if existing[name] {
+					continue
+				}
+				if info, ok := m.mapOfDynamicTools[name]; ok {
+					state.ToolInfos = append(state.ToolInfos, info)
+					existing[name] = true
+				}
+			}
+		}
+	}
+
+	return ctx, state, nil
 }
 
 func newToolSearchTool(tools map[string]*schema.ToolInfo, useModelToolSearch bool) tool.BaseTool {
@@ -500,73 +573,4 @@ func splitCamelCase(s string) []string {
 	parts = append(parts, string(runes[start:]))
 
 	return parts
-}
-
-// getToolNames extracts just tool names from a slice of BaseTools (used by calculateTools).
-func getToolNames(tools []*schema.ToolInfo) []string {
-	ret := make([]string, 0, len(tools))
-	for _, t := range tools {
-		ret = append(ret, t.Name)
-	}
-	return ret
-}
-
-func extractSelectedTools(_ context.Context, messages []*schema.Message) ([]string, error) {
-	var selectedTools []string
-	for _, message := range messages {
-		if message.Role != schema.Tool || message.ToolName != toolSearchToolName {
-			continue
-		}
-
-		result := &toolSearchResult{}
-		err := json.Unmarshal([]byte(message.Content), result)
-		if err != nil {
-			return nil, fmt.Errorf("failed to unmarshal tool search tool result: %w", err)
-		}
-		selectedTools = append(selectedTools, result.Matches...)
-	}
-	return selectedTools, nil
-}
-
-func invertSelect[T comparable](all []T, selected []T) map[T]struct{} {
-	selectedSet := make(map[T]struct{}, len(selected))
-	for _, s := range selected {
-		selectedSet[s] = struct{}{}
-	}
-
-	result := make(map[T]struct{})
-	for _, item := range all {
-		if _, ok := selectedSet[item]; !ok {
-			result[item] = struct{}{}
-		}
-	}
-	return result
-}
-
-func calculateTools(ctx context.Context, all []*schema.ToolInfo, dynamicTools []*schema.ToolInfo, messages []*schema.Message, useModelToolSearch bool) ([]model.Option, error) {
-	var err error
-	var ret []model.Option
-	var selectedToolNames []string
-	if !useModelToolSearch {
-		selectedToolNames, err = extractSelectedTools(ctx, messages)
-		if err != nil {
-			return nil, err
-		}
-	}
-	dynamicToolNames := getToolNames(dynamicTools)
-	if useModelToolSearch {
-		// if useModelToolSearch, register tool search tool by WithToolSearchTool
-		dynamicToolNames = append(dynamicToolNames, toolSearchToolName)
-		ret = append(ret, model.WithToolSearchTool(getToolSearchToolInfo()))
-	}
-	removeMap := invertSelect(dynamicToolNames, selectedToolNames)
-	tools := make([]*schema.ToolInfo, 0, len(all)-len(dynamicTools))
-	for _, info := range all {
-		if _, ok := removeMap[info.Name]; ok {
-			continue
-		}
-		tools = append(tools, info)
-	}
-	ret = append(ret, model.WithTools(tools))
-	return ret, nil
 }

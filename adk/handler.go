@@ -57,6 +57,10 @@ type ToolCallsContext struct {
 type ModelContext struct {
 	// Tools contains the current tool list configured for the agent.
 	// This is populated at request time with the tools that will be sent to the model.
+	//
+	// Deprecated: Use TypedChatModelAgentState.ToolInfos in BeforeModelRewriteState instead.
+	// ModelContext.Tools remains populated for backward compatibility with existing WrapModel handlers,
+	// but new code should read and modify state.ToolInfos which is the source of truth for the model call.
 	Tools []*schema.ToolInfo
 
 	// ModelRetryConfig contains the retry configuration for the model.
@@ -94,6 +98,10 @@ type ChatModelAgentContext struct {
 	// This is based on the return directly map configured for the agent, plus any modifications
 	// by previous BeforeAgent handlers.
 	ReturnDirectly map[string]bool
+
+	// ToolSearchTool is the tool info for the model's native tool search capability.
+	// When set by a BeforeAgent handler, the framework passes it to the model via model.WithToolSearchTool.
+	ToolSearchTool *schema.ToolInfo
 }
 
 // TypedChatModelAgentMiddleware defines the interface for customizing TypedChatModelAgent behavior.
@@ -136,9 +144,11 @@ type TypedChatModelAgentMiddleware[M messageType] interface {
 	//
 	// The ChatModelAgentState struct provides access to:
 	//   - Messages: the conversation history
+	//   - ToolInfos: the tool list that will be sent to the model (modifiable)
+	//   - DeferredToolInfos: tools for server-side search (modifiable, nil if unused)
 	//
-	// The ModelContext struct provides read-only access to:
-	//   - Tools: the current tool list that will be sent to the model
+	// This is the recommended place to modify messages and tools before a model call.
+	// Changes here are persisted in state and reflected in subsequent iterations.
 	BeforeModelRewriteState(ctx context.Context, state *TypedChatModelAgentState[M], mc *ModelContext) (context.Context, *TypedChatModelAgentState[M], error)
 
 	// AfterModelRewriteState is called after each model invocation.
@@ -147,9 +157,8 @@ type TypedChatModelAgentMiddleware[M messageType] interface {
 	//
 	// The ChatModelAgentState struct provides access to:
 	//   - Messages: the conversation history including the model's response
-	//
-	// The ModelContext struct provides read-only access to:
-	//   - Tools: the current tool list that was sent to the model
+	//   - ToolInfos: the tool list that was sent to the model
+	//   - DeferredToolInfos: tools for server-side search (nil if unused)
 	AfterModelRewriteState(ctx context.Context, state *TypedChatModelAgentState[M], mc *ModelContext) (context.Context, *TypedChatModelAgentState[M], error)
 
 	// AfterToolCallsRewriteState is called after all concurrent tool calls in an iteration complete.
@@ -208,7 +217,7 @@ type TypedChatModelAgentMiddleware[M messageType] interface {
 	//   - CallID: The unique identifier for this specific tool call
 	WrapEnhancedStreamableToolCall(ctx context.Context, endpoint EnhancedStreamableToolCallEndpoint, tCtx *ToolContext) (EnhancedStreamableToolCallEndpoint, error)
 
-	// WrapModel wraps a chat model with custom behavior.
+	// WrapModel wraps a chat model with custom behavior around the actual model call.
 	// Return the input model unchanged and nil error if no wrapping is needed.
 	//
 	// This method is called at request time when the model is about to be invoked.
@@ -216,8 +225,21 @@ type TypedChatModelAgentMiddleware[M messageType] interface {
 	// only need to intercept Generate/Stream calls. Tool binding (WithTools) is handled
 	// separately by the framework and does not flow through user wrappers.
 	//
-	// The mc parameter contains the current tool configuration:
-	//   - Tools: The tool infos that will be sent to the model
+	// Recommended use cases (behavior around the model call itself):
+	//   - Model call retry logic
+	//   - Model failover (switching to a backup model)
+	//   - Sending events (e.g. streaming progress)
+	//   - Processing or transforming the response stream
+	//   - Changing call configurations (temperature, top_p, etc.)
+	//
+	// Discouraged use cases (use BeforeModelRewriteState instead):
+	//   - Modifying input messages: changes here are NOT persisted in state, only
+	//     affect a single model call, and break prompt cache across iterations.
+	//   - Modifying the tool list: use state.ToolInfos / state.DeferredToolInfos in
+	//     BeforeModelRewriteState, which is the source of truth for tool configuration.
+	//
+	// The mc parameter provides read-only context about the current model call:
+	//   - Tools: The tool infos that will be sent to the model (Deprecated: read state.ToolInfos instead)
 	WrapModel(ctx context.Context, m model.BaseModel[M], mc *ModelContext) (model.BaseModel[M], error)
 }
 
