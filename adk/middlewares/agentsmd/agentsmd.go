@@ -25,7 +25,6 @@ import (
 	"fmt"
 
 	"github.com/cloudwego/eino/adk"
-	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/schema"
 )
 
@@ -78,92 +77,77 @@ type middleware struct {
 	loader *loaderConfig
 }
 
-// WrapModel returns a proxy model that prepends Agents.md content to the input
-// messages on every Generate/Stream call. The injected message is never written
-// back to ChatModelAgentState, so summarization and reduction middlewares are
-// unaffected.
-func (m *middleware) WrapModel(_ context.Context, cm model.BaseChatModel, _ *adk.ModelContext) (model.BaseChatModel, error) {
-	return &agentMDModel{
-		inner:  cm,
-		loader: m.loader,
-	}, nil
-}
-
-// agentMDModel wraps a BaseChatModel to prepend Agents.md content to input.
-type agentMDModel struct {
-	inner  model.BaseChatModel
-	loader *loaderConfig
-}
-
-func (m *agentMDModel) Generate(ctx context.Context, input []*schema.Message, opts ...model.Option) (*schema.Message, error) {
-	messages, err := m.prependAgentMD(ctx, input)
-	if err != nil {
-		return nil, err
-	}
-	return m.inner.Generate(ctx, messages, opts...)
-}
-
-func (m *agentMDModel) Stream(ctx context.Context, input []*schema.Message, opts ...model.Option) (*schema.StreamReader[*schema.Message], error) {
-	messages, err := m.prependAgentMD(ctx, input)
-	if err != nil {
-		return nil, err
-	}
-	return m.inner.Stream(ctx, messages, opts...)
-}
-
 const agentsMDCacheKey = "__agentsmd_content_cache__"
+const agentsMDExtraKey = "__agentsmd_content__"
 
-// prependAgentMD loads the current Agents.md content and inserts it before the
-// first User role message. If all configured agent files are empty (or skipped),
-// the original input is returned unchanged.
-// The loaded content is cached in RunLocalValue for the duration of the agent Run().
-func (m *agentMDModel) prependAgentMD(ctx context.Context, input []*schema.Message) ([]*schema.Message, error) {
-	var content string
+// BeforeModelRewriteState injects Agents.md content as a User message before
+// the first User message in the conversation. The injected message is tagged
+// with an Extra key so that repeated invocations are idempotent.
+func (m *middleware) BeforeModelRewriteState(ctx context.Context, state *adk.ChatModelAgentState, mc *adk.ModelContext) (context.Context, *adk.ChatModelAgentState, error) {
+	// Idempotent: if we already injected, return early.
+	for _, msg := range state.Messages {
+		if msg.Extra != nil {
+			if _, ok := msg.Extra[agentsMDExtraKey]; ok {
+				return ctx, state, nil
+			}
+		}
+	}
 
-	// Try to get cached content from RunLocalValue.
+	content, err := m.loadContent(ctx)
+	if err != nil {
+		return ctx, nil, err
+	}
+	if content == "" {
+		return ctx, state, nil
+	}
+
+	msg := schema.UserMessage(fmt.Sprintf("<system-reminder>\n%s\n</system-reminder>", content))
+	msg.Extra = map[string]any{agentsMDExtraKey: true}
+
+	nState := *state
+	nState.Messages = insertBeforeFirstUser(state.Messages, msg)
+	return ctx, &nState, nil
+}
+
+// loadContent retrieves the Agents.md content, using a per-Run cache to avoid
+// reloading on every model call within the same Run().
+func (m *middleware) loadContent(ctx context.Context) (string, error) {
 	if cached, found, err := adk.GetRunLocalValue(ctx, agentsMDCacheKey); err == nil && found {
 		if s, ok := cached.(string); ok {
-			content = s
+			return s, nil
 		}
 	}
 
-	if content == "" {
-		var err error
-		content, err = m.loader.load(ctx)
-		if err != nil {
-			return nil, fmt.Errorf("[agentsmd]: failed to load agent files: %w", err)
-		}
-		// Cache the loaded content for subsequent model calls in this Run().
-		if content != "" {
-			_ = adk.SetRunLocalValue(ctx, agentsMDCacheKey, content)
-		}
-	}
-	if content == "" {
-		return input, nil
+	content, err := m.loader.load(ctx)
+	if err != nil {
+		return "", fmt.Errorf("[agentsmd]: failed to load agent files: %w", err)
 	}
 
-	agentMDMsg := &schema.Message{
-		Role:    schema.User,
-		Content: content,
+	if content != "" {
+		_ = adk.SetRunLocalValue(ctx, agentsMDCacheKey, content)
 	}
 
-	// Insert agentMDMsg before the first User role message.
-	messages := make([]*schema.Message, 0, len(input)+1)
+	return content, nil
+}
+
+// insertBeforeFirstUser inserts newMsg before the first User role message.
+// If no User message is found, newMsg is appended at the end.
+func insertBeforeFirstUser(msgs []*schema.Message, newMsg *schema.Message) []*schema.Message {
+	result := make([]*schema.Message, 0, len(msgs)+1)
 	inserted := false
-	for i, msg := range input {
+	for i, msg := range msgs {
 		if !inserted && msg.Role == schema.User {
-			messages = append(messages, agentMDMsg)
-			messages = append(messages, input[i:]...)
+			result = append(result, newMsg)
+			result = append(result, msgs[i:]...)
 			inserted = true
 			break
 		}
-		messages = append(messages, msg)
+		result = append(result, msg)
 	}
 	if !inserted {
-		// No User message found; append at the end as fallback.
-		messages = append(messages, agentMDMsg)
+		result = append(result, newMsg)
 	}
-	return messages, nil
+	return result
 }
 
 func (c *Config) validate() error {

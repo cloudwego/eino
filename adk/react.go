@@ -35,6 +35,14 @@ type typedState[M messageType] struct {
 	Messages []M
 	Extra    map[string]any
 
+	// ToolInfos contains the tool definitions passed to the model via model.WithTools.
+	// Managed by the framework and modifiable by BeforeModelRewriteState handlers.
+	ToolInfos []*schema.ToolInfo
+
+	// DeferredToolInfos contains tool definitions for server-side deferred retrieval,
+	// passed to the model via model.WithDeferredTools. Nil when not in use.
+	DeferredToolInfos []*schema.ToolInfo
+
 	// Internal fields below - do not access directly.
 	// Kept exported for backward compatibility with existing checkpoints.
 	HasReturnDirectly        bool
