@@ -202,6 +202,17 @@ func newDefaultGenModelInput[M messageType]() TypedGenModelInput[M] {
 type TypedChatModelAgentState[M messageType] struct {
 	// Messages contains all messages in the current conversation session.
 	Messages []M
+
+	// ToolInfos contains the tool definitions passed to the model via model.WithTools.
+	// BeforeModelRewriteState handlers can read and modify this field to control which tools
+	// the model sees on each call.
+	ToolInfos []*schema.ToolInfo
+
+	// DeferredToolInfos contains tool definitions for server-side deferred retrieval,
+	// passed to the model via model.WithDeferredTools. These tools are not included in the
+	// immediate tool list but can be discovered by the model through its native search capability.
+	// Nil when not in use.
+	DeferredToolInfos []*schema.ToolInfo
 }
 
 // ChatModelAgentState is the default state type using *schema.Message.
@@ -375,11 +386,13 @@ type TypedChatModelAgentConfig[M messageType] struct {
 	//     both the tool info list passed to ChatModel AND the actual tools available for
 	//     execution. Changes persist for the entire agent run.
 	//
-	//  2. In WrapModel: Create a model wrapper that modifies the tool info list per model
-	//     request using model.WithTools(toolInfos). This ONLY affects the tool info list
-	//     passed to ChatModel, NOT the actual tools available for execution. Use this for
-	//     dynamic tool filtering/selection based on conversation context. The modification
-	//     is scoped to this model request only.
+	//  2. In BeforeModelRewriteState: Modify state.ToolInfos and state.DeferredToolInfos directly.
+	//     This affects the tool info list passed to ChatModel for this and all subsequent model
+	//     calls (changes are persisted in state). This is the recommended approach for dynamic
+	//     tool filtering/selection based on conversation context.
+	//
+	// Modifying tools in WrapModel (e.g. via model.WithTools) is discouraged: changes there
+	// are NOT persisted in state, only affect a single model call, and break prompt cache.
 	Handlers []TypedChatModelAgentMiddleware[M]
 
 	// ModelRetryConfig configures retry behavior for the ChatModel.
@@ -756,6 +769,8 @@ type execContext struct {
 	toolInfos      []*schema.ToolInfo
 	unwrappedTools []tool.BaseTool
 
+	toolSearchTool *schema.ToolInfo // set by BeforeAgent when the model supports native tool search
+
 	rebuildGraph bool // whether needs to instantiate a new graph because of topology changes due to tool modifications
 	toolUpdated  bool // whether needs to pass a compose.WithToolList option to ToolsNode due to tool list change
 }
@@ -786,6 +801,7 @@ func (a *TypedChatModelAgent[M]) applyBeforeAgent(ctx context.Context, ec *execC
 			ToolAliases:          ec.toolsNodeConf.ToolAliases,
 		},
 		returnDirectly: runCtx.ReturnDirectly,
+		toolSearchTool: runCtx.ToolSearchTool,
 		toolUpdated:    true,
 		rebuildGraph: (len(ec.toolsNodeConf.Tools) == 0 && len(runCtx.Tools) > 0) ||
 			(len(ec.returnDirectly) == 0 && len(runCtx.ReturnDirectly) > 0),
@@ -1393,6 +1409,9 @@ func (a *TypedChatModelAgent[M]) Run(ctx context.Context, input *TypedAgentInput
 
 	if bc != nil {
 		co = append(co, compose.WithChatModelOption(model.WithTools(bc.toolInfos)))
+		if bc.toolSearchTool != nil {
+			co = append(co, compose.WithChatModelOption(model.WithToolSearchTool(bc.toolSearchTool)))
+		}
 		if bc.toolUpdated {
 			co = append(co, compose.WithToolsNodeOption(compose.WithToolList(bc.toolsNodeConf.Tools...)))
 		}
@@ -1464,6 +1483,9 @@ func (a *TypedChatModelAgent[M]) Resume(ctx context.Context, info *ResumeInfo, o
 
 	if bc != nil {
 		co = append(co, compose.WithChatModelOption(model.WithTools(bc.toolInfos)))
+		if bc.toolSearchTool != nil {
+			co = append(co, compose.WithChatModelOption(model.WithToolSearchTool(bc.toolSearchTool)))
+		}
 		if bc.toolUpdated {
 			co = append(co, compose.WithToolsNodeOption(compose.WithToolList(bc.toolsNodeConf.Tools...)))
 		}
