@@ -3197,20 +3197,20 @@ func TestRejectReason_StreamPath(t *testing.T) {
 
 func TestWillRetryError_RejectReason(t *testing.T) {
 	t.Run("nil when not set", func(t *testing.T) {
-		wre := &WillRetryError{ErrStr: "test", RetryAttempt: 1, err: errors.New("test")}
-		assert.Nil(t, wre.RejectReason(), "RejectReason should be nil when not set")
+		wrErr := &WillRetryError{ErrStr: "test", RetryAttempt: 1, err: errors.New("test")}
+		assert.Nil(t, wrErr.RejectReason(), "RejectReason should be nil when not set")
 	})
 
 	t.Run("returns value when set", func(t *testing.T) {
 		reason := map[string]string{"key": "value"}
-		wre := &WillRetryError{
+		wrErr := &WillRetryError{
 			ErrStr:       "rejected",
 			RetryAttempt: 2,
 			rejectReason: reason,
 			err:          errors.New("inner"),
 		}
-		assert.Equal(t, reason, wre.RejectReason())
-		assert.Equal(t, "rejected", wre.Error())
-		assert.Equal(t, 2, wre.RetryAttempt)
+		assert.Equal(t, reason, wrErr.RejectReason())
+		assert.Equal(t, "rejected", wrErr.Error())
+		assert.Equal(t, 2, wrErr.RetryAttempt)
 	})
 }
