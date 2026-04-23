@@ -481,12 +481,29 @@ func copyMessage[M MessageType](msg M) M {
 }
 
 // typedEnsureMessageID assigns a UUID v4 message ID in Extra if the message doesn't have one.
+// It creates a new Extra map (copying existing entries) to avoid mutating a potentially shared map.
 func typedEnsureMessageID[M MessageType](msg M) {
 	switch v := any(msg).(type) {
 	case *schema.Message:
-		v.Extra = internal.EnsureMessageID(v.Extra)
+		if internal.GetMessageID(v.Extra) != "" {
+			return
+		}
+		newExtra := make(map[string]any, len(v.Extra)+1)
+		for k, val := range v.Extra {
+			newExtra[k] = val
+		}
+		newExtra[internal.EinoMsgIDKey] = uuid.NewString()
+		v.Extra = newExtra
 	case *schema.AgenticMessage:
-		v.Extra = internal.EnsureMessageID(v.Extra)
+		if internal.GetMessageID(v.Extra) != "" {
+			return
+		}
+		newExtra := make(map[string]any, len(v.Extra)+1)
+		for k, val := range v.Extra {
+			newExtra[k] = val
+		}
+		newExtra[internal.EinoMsgIDKey] = uuid.NewString()
+		v.Extra = newExtra
 	}
 }
 
@@ -509,13 +526,6 @@ func typedGetMessageID[M MessageType](msg M) string {
 		return internal.GetMessageID(v.Extra)
 	default:
 		return ""
-	}
-}
-
-// typedEnsureMessageIDs assigns IDs to all messages in a slice that don't have one.
-func typedEnsureMessageIDs[M MessageType](msgs []M) {
-	for _, msg := range msgs {
-		typedEnsureMessageID(msg)
 	}
 }
 
@@ -769,6 +779,7 @@ func (w *typedStateModelWrapper[M]) hasUserEventSender() bool {
 func (w *typedStateModelWrapper[M]) wrapGenerateEndpoint(endpoint typedGenerateEndpoint[M]) typedGenerateEndpoint[M] {
 	// === ID Assignment layer (innermost, framework-controlled) ===
 	// Ensures model output has a message ID before any WrapModel handler or event sender sees it.
+	// Copies the result to avoid mutating a potentially shared pointer returned by the model.
 	{
 		realInner := endpoint
 		endpoint = func(ctx context.Context, input []M, opts ...model.Option) (M, error) {
@@ -776,7 +787,10 @@ func (w *typedStateModelWrapper[M]) wrapGenerateEndpoint(endpoint typedGenerateE
 			if err != nil {
 				return result, err
 			}
-			typedEnsureMessageID(result)
+			if typedGetMessageID(result) == "" {
+				result = copyMessage(result)
+				typedEnsureMessageID(result)
+			}
 			return result, nil
 		}
 	}
@@ -942,10 +956,6 @@ func (w *typedStateModelWrapper[M]) Generate(ctx context.Context, input []M, opt
 		return nil
 	})
 
-	// Fallback: ensure all messages have IDs before BeforeModelRewriteState.
-	// Covers user input messages and any middleware-created messages that missed EnsureMessageID.
-	typedEnsureMessageIDs(stateMessages)
-
 	// Backfill: old checkpoints or fresh starts have nil ToolInfos.
 	// Use compose-level tools from opts (which always reflects the latest bc.toolInfos)
 	// rather than w.toolInfos (which may be stale if the graph was reused).
@@ -1070,9 +1080,6 @@ func (w *typedStateModelWrapper[M]) Stream(ctx context.Context, input []M, opts 
 		stateDeferredToolInfos = st.DeferredToolInfos
 		return nil
 	})
-
-	// Fallback: ensure all messages have IDs before BeforeModelRewriteState.
-	typedEnsureMessageIDs(stateMessages)
 
 	// Backfill: old checkpoints or fresh starts have nil ToolInfos.
 	// Use compose-level tools from opts (which always reflects the latest bc.toolInfos)

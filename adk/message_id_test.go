@@ -35,8 +35,20 @@ import (
 )
 
 func isValidUUID(s string) bool {
-	// UUID v4 format: 8-4-4-4-12 = 36 chars with dashes
-	return len(s) == 36
+	// UUID v4 format: xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx (8-4-4-4-12 = 36 chars)
+	if len(s) != 36 {
+		return false
+	}
+	for i, c := range s {
+		if i == 8 || i == 13 || i == 18 || i == 23 {
+			if c != '-' {
+				return false
+			}
+		} else if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')) {
+			return false
+		}
+	}
+	return true
 }
 
 // collectEvents drains all events from the iterator (non-streaming).
@@ -388,8 +400,9 @@ func (w *idCheckModelWrapper) Stream(ctx context.Context, input []*schema.Messag
 	return w.inner.Stream(ctx, input, opts...)
 }
 
-// Scenario 7: User input messages get fallback IDs
-func TestMessageID_UserInputFallbackID(t *testing.T) {
+// Scenario 7: User input messages do NOT get automatic IDs (they are external, not framework-created).
+// Only framework-created messages (model output, tool results, TypedSendEvent) get auto-assigned IDs.
+func TestMessageID_UserInputNoAutoID(t *testing.T) {
 	ctx := context.Background()
 	ctrl := gomock.NewController(t)
 	defer ctrl.Finish()
@@ -399,7 +412,7 @@ func TestMessageID_UserInputFallbackID(t *testing.T) {
 	var stateMessagesBeforeModel []*schema.Message
 	cm.EXPECT().Generate(gomock.Any(), gomock.Any(), gomock.Any()).
 		DoAndReturn(func(ctx context.Context, input []*schema.Message, opts ...model.Option) (*schema.Message, error) {
-			// Capture input messages — these should already have IDs (from fallback)
+			// Capture input messages
 			stateMessagesBeforeModel = make([]*schema.Message, len(input))
 			copy(stateMessagesBeforeModel, input)
 			return schema.AssistantMessage("response", nil), nil
@@ -420,14 +433,13 @@ func TestMessageID_UserInputFallbackID(t *testing.T) {
 	require.Len(t, events, 1)
 	require.Nil(t, events[0].Err)
 
-	// The model received input messages — all should have IDs from fallback assignment.
-	// Input includes: system instruction + user message (at minimum)
+	// User input messages should NOT have auto-assigned IDs.
+	// Framework only assigns IDs to messages it creates (model output, tool results, SendEvent).
 	require.NotEmpty(t, stateMessagesBeforeModel)
 
 	for i, msg := range stateMessagesBeforeModel {
 		msgID := GetMessageID(msg)
-		assert.NotEmpty(t, msgID, "input message[%d] (role=%s) should have fallback ID", i, msg.Role)
-		assert.True(t, isValidUUID(msgID), "input message[%d] ID should be valid UUID, got: %s", i, msgID)
+		assert.Empty(t, msgID, "input message[%d] (role=%s) should NOT have auto-assigned ID", i, msg.Role)
 	}
 }
 
@@ -518,4 +530,134 @@ func TestMessageID_SendEvent_PointerIdentity(t *testing.T) {
 	assert.Equal(t, middlewareMsgID, middlewareEventMsgID,
 		"event message ID (%s) should match the middleware message ID (%s)",
 		middlewareEventMsgID, middlewareMsgID)
+}
+
+func TestAttack_ConcatCorruptsIDIfMultipleChunksCarryIt(t *testing.T) {
+	id := "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+	msgs := []*schema.Message{
+		{Role: schema.Assistant, Content: "chunk1", Extra: map[string]any{internal.EinoMsgIDKey: id}},
+		{Role: schema.Assistant, Content: "chunk2", Extra: map[string]any{internal.EinoMsgIDKey: id}},
+		{Role: schema.Assistant, Content: "chunk3", Extra: map[string]any{internal.EinoMsgIDKey: id}},
+	}
+	concatenated, err := schema.ConcatMessages(msgs)
+	require.NoError(t, err)
+
+	resultID := internal.GetMessageID(concatenated.Extra)
+	// ConcatMessages string-concatenates duplicate Extra keys, corrupting the ID
+	assert.NotEqual(t, id, resultID, "ConcatMessages should corrupt the ID when multiple chunks carry it")
+	assert.NotEqual(t, 36, len(resultID), "corrupted ID should not be 36 chars")
+	assert.Equal(t, "chunk1chunk2chunk3", concatenated.Content)
+}
+
+func TestAttack_ConcatPreservesIDIfOnlyFirstChunkHasIt(t *testing.T) {
+	id := "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+	msgs := []*schema.Message{
+		{Role: schema.Assistant, Content: "chunk1", Extra: map[string]any{internal.EinoMsgIDKey: id}},
+		{Role: schema.Assistant, Content: "chunk2"},
+		{Role: schema.Assistant, Content: "chunk3"},
+	}
+	concatenated, err := schema.ConcatMessages(msgs)
+	require.NoError(t, err)
+
+	resultID := internal.GetMessageID(concatenated.Extra)
+	assert.Equal(t, id, resultID, "ID should be preserved when only first chunk carries it")
+	assert.Equal(t, "chunk1chunk2chunk3", concatenated.Content)
+}
+
+func TestAttack_EnsureMessageIDIdempotentUnderRapidCalls(t *testing.T) {
+	msg := schema.AssistantMessage("test", nil)
+	EnsureMessageID(msg)
+	firstID := GetMessageID(msg)
+	require.NotEmpty(t, firstID)
+
+	for i := 0; i < 100; i++ {
+		EnsureMessageID(msg)
+		assert.Equal(t, firstID, GetMessageID(msg), "iteration %d: ID should not change after first assignment", i)
+	}
+}
+
+func TestAttack_NilMessagePanics(t *testing.T) {
+	assert.Panics(t, func() {
+		GetMessageID(nil)
+	}, "GetMessageID on nil *Message should panic (nil pointer dereference on .Extra)")
+}
+
+func TestAttack_StreamIDUniquePerCall(t *testing.T) {
+	ctx := context.Background()
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	cm := mockModel.NewMockToolCallingChatModel(ctrl)
+	cm.EXPECT().Stream(gomock.Any(), gomock.Any(), gomock.Any()).
+		DoAndReturn(func(ctx context.Context, msgs []*schema.Message, opts ...model.Option) (*schema.StreamReader[*schema.Message], error) {
+			return schema.StreamReaderFromArray([]*schema.Message{
+				schema.AssistantMessage("a", nil),
+				schema.AssistantMessage("b", nil),
+			}), nil
+		}).
+		Times(2)
+
+	agent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+		Name:        "TestAttack",
+		Instruction: "test",
+		Model:       cm,
+	})
+	require.NoError(t, err)
+
+	getStreamID := func() string {
+		iter := agent.Run(ctx, &AgentInput{
+			Messages:        []Message{schema.UserMessage("hi")},
+			EnableStreaming: true,
+		})
+		event, ok := iter.Next()
+		require.True(t, ok)
+		require.Nil(t, event.Err)
+		require.NotNil(t, event.Output.MessageOutput)
+		require.True(t, event.Output.MessageOutput.IsStreaming)
+		stream := event.Output.MessageOutput.MessageStream
+		require.NotNil(t, stream)
+
+		msg, err := stream.Recv()
+		require.NoError(t, err)
+		id := GetMessageID(msg)
+		// Drain remaining
+		for {
+			_, err := stream.Recv()
+			if err != nil {
+				break
+			}
+		}
+		// Drain iter
+		for {
+			_, ok := iter.Next()
+			if !ok {
+				break
+			}
+		}
+		return id
+	}
+
+	id1 := getStreamID()
+	id2 := getStreamID()
+	assert.NotEmpty(t, id1)
+	assert.NotEmpty(t, id2)
+	assert.NotEqual(t, id1, id2, "each stream call should get a unique message ID")
+}
+
+func TestAttack_WrongExtraTypeDoesNotPanic(t *testing.T) {
+	msg := &schema.Message{
+		Role:    schema.Assistant,
+		Content: "test",
+		Extra:   map[string]any{internal.EinoMsgIDKey: 42},
+	}
+	assert.NotPanics(t, func() {
+		id := GetMessageID(msg)
+		assert.Empty(t, id, "wrong type should return empty, not panic")
+	})
+
+	// EnsureMessageID should overwrite the wrong type
+	EnsureMessageID(msg)
+	id := GetMessageID(msg)
+	assert.NotEmpty(t, id)
+	assert.True(t, isValidUUID(id))
 }
