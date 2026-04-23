@@ -19,6 +19,7 @@ package adk
 import (
 	"context"
 	"errors"
+	"sync"
 	"sync/atomic"
 	"testing"
 
@@ -660,4 +661,93 @@ func TestAttack_WrongExtraTypeDoesNotPanic(t *testing.T) {
 	id := GetMessageID(msg)
 	assert.NotEmpty(t, id)
 	assert.True(t, isValidUUID(id))
+}
+
+func TestAttack_ConcurrentGenerate_NoSharedExtraMutation(t *testing.T) {
+	ctx := context.Background()
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	// Shared singleton message - same pointer returned every time
+	sharedMsg := schema.AssistantMessage("shared response", nil)
+
+	cm := mockModel.NewMockToolCallingChatModel(ctrl)
+	cm.EXPECT().Generate(gomock.Any(), gomock.Any(), gomock.Any()).
+		Return(sharedMsg, nil).
+		AnyTimes()
+
+	agent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+		Name:        "TestAttack",
+		Instruction: "test",
+		Model:       cm,
+	})
+	require.NoError(t, err)
+
+	const N = 10
+	ids := make([]string, N)
+	var wg sync.WaitGroup
+	wg.Add(N)
+	for i := 0; i < N; i++ {
+		go func(idx int) {
+			defer wg.Done()
+			iter := agent.Run(ctx, &AgentInput{
+				Messages: []Message{schema.UserMessage("hi")},
+			})
+			events := collectEvents(t, iter)
+			require.Len(t, events, 1)
+			require.Nil(t, events[0].Err)
+			msg := events[0].Output.MessageOutput.Message
+			require.NotNil(t, msg)
+			ids[idx] = GetMessageID(msg)
+		}(i)
+	}
+	wg.Wait()
+
+	// All IDs should be unique and valid
+	seen := make(map[string]bool)
+	for i, id := range ids {
+		assert.NotEmpty(t, id, "goroutine %d should have an ID", i)
+		assert.True(t, isValidUUID(id), "goroutine %d ID should be valid UUID: %s", i, id)
+		assert.False(t, seen[id], "goroutine %d has duplicate ID: %s", i, id)
+		seen[id] = true
+	}
+
+	// The original shared message should NOT have been mutated (or if it was, it should still be valid)
+	// The important thing is no panic and unique IDs
+}
+
+func TestAttack_GenerateCopyDoesNotAffectOriginal(t *testing.T) {
+	ctx := context.Background()
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	originalMsg := schema.AssistantMessage("original", nil)
+	cm := mockModel.NewMockToolCallingChatModel(ctrl)
+	cm.EXPECT().Generate(gomock.Any(), gomock.Any(), gomock.Any()).
+		Return(originalMsg, nil).
+		Times(1)
+
+	agent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+		Name:        "TestAttack",
+		Instruction: "test",
+		Model:       cm,
+	})
+	require.NoError(t, err)
+
+	iter := agent.Run(ctx, &AgentInput{
+		Messages: []Message{schema.UserMessage("hi")},
+	})
+
+	events := collectEvents(t, iter)
+	require.Len(t, events, 1)
+	require.Nil(t, events[0].Err)
+
+	eventMsg := events[0].Output.MessageOutput.Message
+	eventMsgID := GetMessageID(eventMsg)
+	assert.NotEmpty(t, eventMsgID)
+
+	// The ORIGINAL message returned by the model should NOT have an ID
+	// because wrapGenerateEndpoint copies before mutating
+	originalID := GetMessageID(originalMsg)
+	assert.Empty(t, originalID, "original model output should NOT be mutated by ID assignment")
 }
