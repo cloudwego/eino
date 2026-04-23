@@ -23,6 +23,9 @@ import (
 	"reflect"
 	"sync"
 
+	"github.com/google/uuid"
+
+	"github.com/cloudwego/eino/adk/internal"
 	"github.com/cloudwego/eino/callbacks"
 	"github.com/cloudwego/eino/components"
 	"github.com/cloudwego/eino/components/model"
@@ -477,6 +480,45 @@ func copyMessage[M MessageType](msg M) M {
 	}
 }
 
+// typedEnsureMessageID assigns a UUID v4 message ID in Extra if the message doesn't have one.
+func typedEnsureMessageID[M MessageType](msg M) {
+	switch v := any(msg).(type) {
+	case *schema.Message:
+		v.Extra = internal.EnsureMessageID(v.Extra)
+	case *schema.AgenticMessage:
+		v.Extra = internal.EnsureMessageID(v.Extra)
+	}
+}
+
+// typedSetMessageID sets a specific message ID in Extra.
+func typedSetMessageID[M MessageType](msg M, id string) {
+	switch v := any(msg).(type) {
+	case *schema.Message:
+		v.Extra = internal.SetMessageID(v.Extra, id)
+	case *schema.AgenticMessage:
+		v.Extra = internal.SetMessageID(v.Extra, id)
+	}
+}
+
+// typedGetMessageID returns the message ID from Extra, or "".
+func typedGetMessageID[M MessageType](msg M) string {
+	switch v := any(msg).(type) {
+	case *schema.Message:
+		return internal.GetMessageID(v.Extra)
+	case *schema.AgenticMessage:
+		return internal.GetMessageID(v.Extra)
+	default:
+		return ""
+	}
+}
+
+// typedEnsureMessageIDs assigns IDs to all messages in a slice that don't have one.
+func typedEnsureMessageIDs[M MessageType](msgs []M) {
+	for _, msg := range msgs {
+		typedEnsureMessageID(msg)
+	}
+}
+
 func typedPopToolGenAction[M MessageType](ctx context.Context, toolName string) *AgentAction {
 	toolCallID := compose.GetToolCallID(ctx)
 
@@ -539,6 +581,7 @@ func (w *eventSenderToolWrapper) WrapInvokableToolCall(_ context.Context, endpoi
 
 		prePopAction := popToolGenAction(ctx, toolName)
 		msg := schema.ToolMessage(result, callID, schema.WithToolName(toolName))
+		msg.Extra = internal.EnsureMessageID(msg.Extra)
 		event := EventFromMessage(msg, nil, schema.Tool, toolName)
 		if prePopAction != nil {
 			event.Action = prePopAction
@@ -571,8 +614,15 @@ func (w *eventSenderToolWrapper) WrapStreamableToolCall(_ context.Context, endpo
 		prePopAction := popToolGenAction(ctx, toolName)
 		streams := result.Copy(2)
 
+		toolMsgID := uuid.NewString()
+		first := true
 		cvt := func(in string) (Message, error) {
-			return schema.ToolMessage(in, callID, schema.WithToolName(toolName)), nil
+			msg := schema.ToolMessage(in, callID, schema.WithToolName(toolName))
+			if first {
+				first = false
+				msg.Extra = internal.SetMessageID(msg.Extra, toolMsgID)
+			}
+			return msg, nil
 		}
 		msgStream := schema.StreamReaderWithConvert(streams[0], cvt)
 		event := EventFromMessage(nil, msgStream, schema.Tool, toolName)
@@ -608,6 +658,7 @@ func (w *eventSenderToolWrapper) WrapEnhancedInvokableToolCall(_ context.Context
 		if err != nil {
 			return nil, err
 		}
+		msg.Extra = internal.EnsureMessageID(msg.Extra)
 		event := EventFromMessage(msg, nil, schema.Tool, toolName)
 		if prePopAction != nil {
 			event.Action = prePopAction
@@ -640,12 +691,18 @@ func (w *eventSenderToolWrapper) WrapEnhancedStreamableToolCall(_ context.Contex
 		prePopAction := popToolGenAction(ctx, toolName)
 		streams := result.Copy(2)
 
+		toolMsgID := uuid.NewString()
+		first := true
 		cvt := func(in *schema.ToolResult) (Message, error) {
 			msg := schema.ToolMessage("", callID, schema.WithToolName(toolName))
 			var cvtErr error
 			msg.UserInputMultiContent, cvtErr = in.ToMessageInputParts()
 			if cvtErr != nil {
 				return nil, cvtErr
+			}
+			if first {
+				first = false
+				msg.Extra = internal.SetMessageID(msg.Extra, toolMsgID)
 			}
 			return msg, nil
 		}
@@ -710,6 +767,20 @@ func (w *typedStateModelWrapper[M]) hasUserEventSender() bool {
 }
 
 func (w *typedStateModelWrapper[M]) wrapGenerateEndpoint(endpoint typedGenerateEndpoint[M]) typedGenerateEndpoint[M] {
+	// === ID Assignment layer (innermost, framework-controlled) ===
+	// Ensures model output has a message ID before any WrapModel handler or event sender sees it.
+	{
+		realInner := endpoint
+		endpoint = func(ctx context.Context, input []M, opts ...model.Option) (M, error) {
+			result, err := realInner(ctx, input, opts...)
+			if err != nil {
+				return result, err
+			}
+			typedEnsureMessageID(result)
+			return result, nil
+		}
+	}
+
 	hasUserEventSender := w.hasUserEventSender()
 	retryConfig := w.modelRetryConfig
 	failoverConfig := w.modelFailoverConfig
@@ -773,6 +844,31 @@ func (w *typedStateModelWrapper[M]) wrapGenerateEndpoint(endpoint typedGenerateE
 }
 
 func (w *typedStateModelWrapper[M]) wrapStreamEndpoint(endpoint typedStreamEndpoint[M]) typedStreamEndpoint[M] {
+	// === ID Assignment layer (innermost, framework-controlled) ===
+	// Pre-allocates a UUID and injects it into the first chunk only.
+	// Only the first chunk carries the ID in Extra to avoid concatStrings corruption
+	// during ConcatMessages (which string-concatenates duplicate Extra keys).
+	{
+		realInner := endpoint
+		endpoint = func(ctx context.Context, input []M, opts ...model.Option) (*schema.StreamReader[M], error) {
+			reader, err := realInner(ctx, input, opts...)
+			if err != nil {
+				return nil, err
+			}
+			msgID := uuid.NewString()
+			first := true
+			return schema.StreamReaderWithConvert(reader, func(msg M) (M, error) {
+				if first {
+					first = false
+					if typedGetMessageID(msg) == "" {
+						typedSetMessageID(msg, msgID)
+					}
+				}
+				return msg, nil
+			}), nil
+		}
+	}
+
 	hasUserEventSender := w.hasUserEventSender()
 	retryConfig := w.modelRetryConfig
 	failoverConfig := w.modelFailoverConfig
@@ -845,6 +941,10 @@ func (w *typedStateModelWrapper[M]) Generate(ctx context.Context, input []M, opt
 		stateDeferredToolInfos = st.DeferredToolInfos
 		return nil
 	})
+
+	// Fallback: ensure all messages have IDs before BeforeModelRewriteState.
+	// Covers user input messages and any middleware-created messages that missed EnsureMessageID.
+	typedEnsureMessageIDs(stateMessages)
 
 	// Backfill: old checkpoints or fresh starts have nil ToolInfos.
 	// Use compose-level tools from opts (which always reflects the latest bc.toolInfos)
@@ -970,6 +1070,9 @@ func (w *typedStateModelWrapper[M]) Stream(ctx context.Context, input []M, opts 
 		stateDeferredToolInfos = st.DeferredToolInfos
 		return nil
 	})
+
+	// Fallback: ensure all messages have IDs before BeforeModelRewriteState.
+	typedEnsureMessageIDs(stateMessages)
 
 	// Backfill: old checkpoints or fresh starts have nil ToolInfos.
 	// Use compose-level tools from opts (which always reflects the latest bc.toolInfos)

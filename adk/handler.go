@@ -386,6 +386,16 @@ func TypedSendEvent[M MessageType](ctx context.Context, event *TypedAgentEvent[M
 	if execCtx == nil || execCtx.generator == nil {
 		return fmt.Errorf("TypedSendEvent failed: must be called within a ChatModelAgent Run() or Resume() execution context")
 	}
+
+	// Auto-assign message ID if the event carries a non-streaming message without one.
+	// This exploits pointer identity: if the middleware wrote the same *Message to both
+	// State.Messages and this event, mutating via this pointer synchronizes both paths.
+	if event.Output != nil && event.Output.MessageOutput != nil {
+		if msg := event.Output.MessageOutput.Message; msg != nil {
+			typedEnsureMessageID(msg)
+		}
+	}
+
 	execCtx.send(event)
 	return nil
 }
