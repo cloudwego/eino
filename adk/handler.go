@@ -53,8 +53,8 @@ type ToolCallsContext struct {
 	ToolCalls []ToolContext
 }
 
-// ModelContext contains context information passed to WrapModel.
-type ModelContext struct {
+// TypedModelContext contains context information passed to WrapModel.
+type TypedModelContext[M messageType] struct {
 	// Tools contains the current tool list configured for the agent.
 	// This is populated at request time with the tools that will be sent to the model.
 	//
@@ -66,16 +66,19 @@ type ModelContext struct {
 	// ModelRetryConfig contains the retry configuration for the model.
 	// This is populated at request time from the agent's ModelRetryConfig.
 	// Used by EventSenderModelWrapper to wrap stream errors appropriately.
-	ModelRetryConfig *ModelRetryConfig
+	ModelRetryConfig *TypedModelRetryConfig[M]
 
 	// ModelFailoverConfig contains the failover configuration for the model.
 	// This is populated at request time from the agent's ModelFailoverConfig.
 	// Used by EventSenderModelWrapper to wrap stream errors so that failed failover
 	// attempts are skipped (not treated as fatal) by the flow event processor.
-	ModelFailoverConfig *ModelFailoverConfig
+	ModelFailoverConfig *TypedModelFailoverConfig[M]
 
 	cancelContext *cancelContext
 }
+
+// ModelContext is the default model context type using *schema.Message.
+type ModelContext = TypedModelContext[*schema.Message]
 
 // ChatModelAgentContext contains runtime information passed to handlers before each ChatModelAgent run.
 // Handlers can modify Instruction, Tools, and ReturnDirectly to customize agent behavior.
@@ -149,7 +152,7 @@ type TypedChatModelAgentMiddleware[M messageType] interface {
 	//
 	// This is the recommended place to modify messages and tools before a model call.
 	// Changes here are persisted in state and reflected in subsequent iterations.
-	BeforeModelRewriteState(ctx context.Context, state *TypedChatModelAgentState[M], mc *ModelContext) (context.Context, *TypedChatModelAgentState[M], error)
+	BeforeModelRewriteState(ctx context.Context, state *TypedChatModelAgentState[M], mc *TypedModelContext[M]) (context.Context, *TypedChatModelAgentState[M], error)
 
 	// AfterModelRewriteState is called after each model invocation.
 	// The input state includes the model's response as the last message.
@@ -159,7 +162,7 @@ type TypedChatModelAgentMiddleware[M messageType] interface {
 	//   - Messages: the conversation history including the model's response
 	//   - ToolInfos: the tool list that was sent to the model
 	//   - DeferredToolInfos: tools for server-side search (nil if unused)
-	AfterModelRewriteState(ctx context.Context, state *TypedChatModelAgentState[M], mc *ModelContext) (context.Context, *TypedChatModelAgentState[M], error)
+	AfterModelRewriteState(ctx context.Context, state *TypedChatModelAgentState[M], mc *TypedModelContext[M]) (context.Context, *TypedChatModelAgentState[M], error)
 
 	// WrapInvokableToolCall wraps a tool's synchronous execution with custom behavior.
 	// Return the input endpoint unchanged and nil error if no wrapping is needed.
@@ -232,7 +235,7 @@ type TypedChatModelAgentMiddleware[M messageType] interface {
 	//
 	// The mc parameter provides read-only context about the current model call:
 	//   - Tools: The tool infos that will be sent to the model (Deprecated: read state.ToolInfos instead)
-	WrapModel(ctx context.Context, m model.BaseModel[M], mc *ModelContext) (model.BaseModel[M], error)
+	WrapModel(ctx context.Context, m model.BaseModel[M], mc *TypedModelContext[M]) (model.BaseModel[M], error)
 }
 
 // ChatModelAgentMiddleware is the default middleware type using *schema.Message.
@@ -273,7 +276,7 @@ func (b *TypedBaseChatModelAgentMiddleware[M]) WrapEnhancedStreamableToolCall(_ 
 	return endpoint, nil
 }
 
-func (b *TypedBaseChatModelAgentMiddleware[M]) WrapModel(_ context.Context, m model.BaseModel[M], _ *ModelContext) (model.BaseModel[M], error) {
+func (b *TypedBaseChatModelAgentMiddleware[M]) WrapModel(_ context.Context, m model.BaseModel[M], _ *TypedModelContext[M]) (model.BaseModel[M], error) {
 	return m, nil
 }
 
@@ -281,11 +284,11 @@ func (b *TypedBaseChatModelAgentMiddleware[M]) BeforeAgent(ctx context.Context, 
 	return ctx, runCtx, nil
 }
 
-func (b *TypedBaseChatModelAgentMiddleware[M]) BeforeModelRewriteState(ctx context.Context, state *TypedChatModelAgentState[M], mc *ModelContext) (context.Context, *TypedChatModelAgentState[M], error) {
+func (b *TypedBaseChatModelAgentMiddleware[M]) BeforeModelRewriteState(ctx context.Context, state *TypedChatModelAgentState[M], mc *TypedModelContext[M]) (context.Context, *TypedChatModelAgentState[M], error) {
 	return ctx, state, nil
 }
 
-func (b *TypedBaseChatModelAgentMiddleware[M]) AfterModelRewriteState(ctx context.Context, state *TypedChatModelAgentState[M], mc *ModelContext) (context.Context, *TypedChatModelAgentState[M], error) {
+func (b *TypedBaseChatModelAgentMiddleware[M]) AfterModelRewriteState(ctx context.Context, state *TypedChatModelAgentState[M], mc *TypedModelContext[M]) (context.Context, *TypedChatModelAgentState[M], error) {
 	return ctx, state, nil
 }
 

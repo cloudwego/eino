@@ -414,14 +414,14 @@ type TypedChatModelAgentConfig[M messageType] struct {
 	// When set, the agent will automatically retry failed ChatModel calls
 	// based on the configured policy.
 	// Optional. If nil, no retry will be performed.
-	ModelRetryConfig *ModelRetryConfig
+	ModelRetryConfig *TypedModelRetryConfig[M]
 
 	// ModelFailoverConfig configures failover behavior for the ChatModel.
 	// When set, the agent will first try the last successful model (initially the configured Model),
 	// and on failure, call GetFailoverModel to select alternate models.
 	// Model field is still required as it serves as the initial model.
 	// Optional. If nil, no failover will be performed.
-	ModelFailoverConfig *ModelFailoverConfig
+	ModelFailoverConfig *TypedModelFailoverConfig[M]
 }
 
 type ChatModelAgentConfig = TypedChatModelAgentConfig[*schema.Message]
@@ -455,8 +455,8 @@ type TypedChatModelAgent[M messageType] struct {
 	handlers    []TypedChatModelAgentMiddleware[M]
 	middlewares []AgentMiddleware
 
-	modelRetryConfig    *ModelRetryConfig
-	modelFailoverConfig *ModelFailoverConfig
+	modelRetryConfig    *TypedModelRetryConfig[M]
+	modelFailoverConfig *TypedModelFailoverConfig[M]
 
 	once   sync.Once
 	run    typedRunFunc[M]
@@ -1085,8 +1085,8 @@ func (a *TypedChatModelAgent[M]) buildMessageReActRunFunc(ctx context.Context, b
 		modelWrapperConf: &modelWrapperConfig{
 			handlers:       msgHandlers,
 			middlewares:    a.middlewares,
-			retryConfig:    a.modelRetryConfig,
-			failoverConfig: a.modelFailoverConfig,
+			retryConfig:    any(a.modelRetryConfig).(*ModelRetryConfig),
+			failoverConfig: any(a.modelFailoverConfig).(*ModelFailoverConfig),
 			toolInfos:      bc.toolInfos,
 		},
 		toolsReturnDirectly: bc.returnDirectly,
@@ -1216,7 +1216,7 @@ func (a *TypedChatModelAgent[M]) buildAgenticReActRunFunc(ctx context.Context, b
 		modelWrapperConf: &typedModelWrapperConfig[*schema.AgenticMessage]{
 			handlers:    agenticHandlers,
 			middlewares: a.middlewares,
-			retryConfig: a.modelRetryConfig,
+			retryConfig: any(a.modelRetryConfig).(*TypedModelRetryConfig[*schema.AgenticMessage]),
 			toolInfos:   bc.toolInfos,
 		},
 		toolsReturnDirectly: bc.returnDirectly,

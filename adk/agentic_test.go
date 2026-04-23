@@ -55,18 +55,18 @@ func (m *mockAgenticModel) Stream(ctx context.Context, input []*schema.AgenticMe
 
 type testAgenticMiddleware struct {
 	*TypedBaseChatModelAgentMiddleware[*schema.AgenticMessage]
-	beforeFn func(context.Context, *TypedChatModelAgentState[*schema.AgenticMessage], *ModelContext) (context.Context, *TypedChatModelAgentState[*schema.AgenticMessage], error)
-	afterFn  func(context.Context, *TypedChatModelAgentState[*schema.AgenticMessage], *ModelContext) (context.Context, *TypedChatModelAgentState[*schema.AgenticMessage], error)
+	beforeFn func(context.Context, *TypedChatModelAgentState[*schema.AgenticMessage], *TypedModelContext[*schema.AgenticMessage]) (context.Context, *TypedChatModelAgentState[*schema.AgenticMessage], error)
+	afterFn  func(context.Context, *TypedChatModelAgentState[*schema.AgenticMessage], *TypedModelContext[*schema.AgenticMessage]) (context.Context, *TypedChatModelAgentState[*schema.AgenticMessage], error)
 }
 
-func (m *testAgenticMiddleware) BeforeModelRewriteState(ctx context.Context, state *TypedChatModelAgentState[*schema.AgenticMessage], mc *ModelContext) (context.Context, *TypedChatModelAgentState[*schema.AgenticMessage], error) {
+func (m *testAgenticMiddleware) BeforeModelRewriteState(ctx context.Context, state *TypedChatModelAgentState[*schema.AgenticMessage], mc *TypedModelContext[*schema.AgenticMessage]) (context.Context, *TypedChatModelAgentState[*schema.AgenticMessage], error) {
 	if m.beforeFn != nil {
 		return m.beforeFn(ctx, state, mc)
 	}
 	return ctx, state, nil
 }
 
-func (m *testAgenticMiddleware) AfterModelRewriteState(ctx context.Context, state *TypedChatModelAgentState[*schema.AgenticMessage], mc *ModelContext) (context.Context, *TypedChatModelAgentState[*schema.AgenticMessage], error) {
+func (m *testAgenticMiddleware) AfterModelRewriteState(ctx context.Context, state *TypedChatModelAgentState[*schema.AgenticMessage], mc *TypedModelContext[*schema.AgenticMessage]) (context.Context, *TypedChatModelAgentState[*schema.AgenticMessage], error) {
 	if m.afterFn != nil {
 		return m.afterFn(ctx, state, mc)
 	}
@@ -399,11 +399,11 @@ func TestAgenticChatModelAgentRun_WithMiddleware(t *testing.T) {
 	afterModelExecuted := false
 
 	mw := &testAgenticMiddleware{
-		beforeFn: func(ctx context.Context, state *TypedChatModelAgentState[*schema.AgenticMessage], mc *ModelContext) (context.Context, *TypedChatModelAgentState[*schema.AgenticMessage], error) {
+		beforeFn: func(ctx context.Context, state *TypedChatModelAgentState[*schema.AgenticMessage], mc *TypedModelContext[*schema.AgenticMessage]) (context.Context, *TypedChatModelAgentState[*schema.AgenticMessage], error) {
 			state.Messages = append(state.Messages, schema.UserAgenticMessage("extra"))
 			return ctx, state, nil
 		},
-		afterFn: func(ctx context.Context, state *TypedChatModelAgentState[*schema.AgenticMessage], mc *ModelContext) (context.Context, *TypedChatModelAgentState[*schema.AgenticMessage], error) {
+		afterFn: func(ctx context.Context, state *TypedChatModelAgentState[*schema.AgenticMessage], mc *TypedModelContext[*schema.AgenticMessage]) (context.Context, *TypedChatModelAgentState[*schema.AgenticMessage], error) {
 			assert.Len(t, state.Messages, 4)
 			afterModelExecuted = true
 			return ctx, state, nil
@@ -455,7 +455,7 @@ func TestAgenticAfterModel_NoTools_ModifyDoesNotAffectEvent(t *testing.T) {
 		Model:       m,
 		Handlers: []TypedChatModelAgentMiddleware[*schema.AgenticMessage]{
 			&testAgenticMiddleware{
-				afterFn: func(ctx context.Context, state *TypedChatModelAgentState[*schema.AgenticMessage], mc *ModelContext) (context.Context, *TypedChatModelAgentState[*schema.AgenticMessage], error) {
+				afterFn: func(ctx context.Context, state *TypedChatModelAgentState[*schema.AgenticMessage], mc *TypedModelContext[*schema.AgenticMessage]) (context.Context, *TypedChatModelAgentState[*schema.AgenticMessage], error) {
 					capturedMessages = make([]*schema.AgenticMessage, len(state.Messages))
 					copy(capturedMessages, state.Messages)
 					state.Messages = append(state.Messages, agenticAssistantMessage("appended content"))

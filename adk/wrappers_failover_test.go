@@ -190,9 +190,9 @@ func TestFailoverAcceptsAgenticAgent(t *testing.T) {
 		},
 	}
 
-	fallbackModel := &mockChatModelForAttack{
-		generateFn: func(ctx context.Context, input []*schema.Message, opts ...model.Option) (*schema.Message, error) {
-			return schema.AssistantMessage("fallback", nil), nil
+	fallbackModel := &mockAgenticModel{
+		generateFn: func(ctx context.Context, input []*schema.AgenticMessage, opts ...model.Option) (*schema.AgenticMessage, error) {
+			return agenticMsg("fallback"), nil
 		},
 	}
 
@@ -200,12 +200,12 @@ func TestFailoverAcceptsAgenticAgent(t *testing.T) {
 		Name:        "FailoverAgent",
 		Description: "Agent with failover config",
 		Model:       m,
-		ModelFailoverConfig: &ModelFailoverConfig{
+		ModelFailoverConfig: &TypedModelFailoverConfig[*schema.AgenticMessage]{
 			MaxRetries: 1,
-			ShouldFailover: func(ctx context.Context, outputMessage *schema.Message, outputErr error) bool {
+			ShouldFailover: func(ctx context.Context, outputMessage *schema.AgenticMessage, outputErr error) bool {
 				return true
 			},
-			GetFailoverModel: func(ctx context.Context, failoverCtx *FailoverContext) (model.BaseChatModel, []*schema.Message, error) {
+			GetFailoverModel: func(ctx context.Context, failoverCtx *TypedFailoverContext[*schema.AgenticMessage]) (model.BaseModel[*schema.AgenticMessage], []*schema.AgenticMessage, error) {
 				return fallbackModel, nil, nil
 			},
 		},
