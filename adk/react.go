@@ -402,37 +402,20 @@ func newReact(ctx context.Context, config *reactConfig) (reactGraph, error) {
 		compose.WithStreamStatePostHandler(toolPostHandle),
 		compose.WithNodeName(toolNode_))
 
-	// AfterToolCalls node: calls AfterToolCallsRewriteState handlers after all tool calls complete.
+	// AfterToolCalls node: persists tool results to state and fires the after-tool-calls hook.
 	// The graph auto-materializes the ToolsNode stream into []Message before this node.
 	afterToolCalls := func(ctx context.Context, toolResults []Message) ([]Message, error) {
-		var stateMessages []Message
 		_ = compose.ProcessState(ctx, func(_ context.Context, st *State) error {
-			stateMessages = st.Messages
+			st.Messages = append(st.Messages, toolResults...)
 			return nil
 		})
 
-		state := &ChatModelAgentState{Messages: append(stateMessages, toolResults...)}
-
-		if config.modelWrapperConf != nil {
-			assistantMsg := stateMessages[len(stateMessages)-1]
-			tc := &ToolCallsContext{}
-			for _, toolCall := range assistantMsg.ToolCalls {
-				tc.ToolCalls = append(tc.ToolCalls, ToolContext{Name: toolCall.Function.Name, CallID: toolCall.ID})
-			}
-
-			for _, handler := range config.modelWrapperConf.handlers {
-				var err error
-				ctx, state, err = handler.AfterToolCallsRewriteState(ctx, state, tc)
-				if err != nil {
-					return nil, err
-				}
+		execCtx := getTypedChatModelAgentExecCtx[Message](ctx)
+		if execCtx != nil && execCtx.afterToolCallsHook != nil {
+			if err := execCtx.afterToolCallsHook(ctx); err != nil {
+				return nil, err
 			}
 		}
-
-		_ = compose.ProcessState(ctx, func(_ context.Context, st *State) error {
-			st.Messages = state.Messages
-			return nil
-		})
 
 		return toolResults, nil
 	}

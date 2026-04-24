@@ -161,14 +161,6 @@ type TypedChatModelAgentMiddleware[M messageType] interface {
 	//   - DeferredToolInfos: tools for server-side search (nil if unused)
 	AfterModelRewriteState(ctx context.Context, state *TypedChatModelAgentState[M], mc *ModelContext) (context.Context, *TypedChatModelAgentState[M], error)
 
-	// AfterToolCallsRewriteState is called after all concurrent tool calls in an iteration complete.
-	// The input state includes all messages up to and including the tool call results.
-	// The returned state is persisted to the agent's internal state.
-	//
-	// The ToolCallsContext provides metadata about the tool calls that just completed,
-	// derived from the assistant message's ToolCalls field.
-	AfterToolCallsRewriteState(ctx context.Context, state *TypedChatModelAgentState[M], tc *ToolCallsContext) (context.Context, *TypedChatModelAgentState[M], error)
-
 	// WrapInvokableToolCall wraps a tool's synchronous execution with custom behavior.
 	// Return the input endpoint unchanged and nil error if no wrapping is needed.
 	//
@@ -294,10 +286,6 @@ func (b *TypedBaseChatModelAgentMiddleware[M]) BeforeModelRewriteState(ctx conte
 }
 
 func (b *TypedBaseChatModelAgentMiddleware[M]) AfterModelRewriteState(ctx context.Context, state *TypedChatModelAgentState[M], mc *ModelContext) (context.Context, *TypedChatModelAgentState[M], error) {
-	return ctx, state, nil
-}
-
-func (b *TypedBaseChatModelAgentMiddleware[M]) AfterToolCallsRewriteState(ctx context.Context, state *TypedChatModelAgentState[M], tc *ToolCallsContext) (context.Context, *TypedChatModelAgentState[M], error) {
 	return ctx, state, nil
 }
 
