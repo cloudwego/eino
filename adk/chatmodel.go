@@ -54,6 +54,8 @@ type typedChatModelAgentExecCtx[M messageType] struct {
 	// Invariant: any code path that emits model output events MUST check this flag.
 	suppressEventSend  bool
 	retryVerdictSignal *retryVerdictSignal
+
+	afterToolCallsHook func(ctx context.Context) error
 }
 
 func (e *typedChatModelAgentExecCtx[M]) send(event *TypedAgentEvent[M]) {
@@ -87,6 +89,8 @@ type chatModelAgentRunOptions struct {
 	agentToolOptions map[string][]AgentRunOption
 
 	historyModifier func(context.Context, []Message) []Message
+
+	afterToolCallsHook func(ctx context.Context) error
 }
 
 // WithChatModelOptions sets options for the underlying chat model.
@@ -115,6 +119,17 @@ func WithAgentToolRunOptions(opts map[string][]AgentRunOption) AgentRunOption {
 func WithHistoryModifier(f func(context.Context, []Message) []Message) AgentRunOption {
 	return WrapImplSpecificOptFn(func(t *chatModelAgentRunOptions) {
 		t.historyModifier = f
+	})
+}
+
+// WithAfterToolCallsHook registers a per-run hook that fires synchronously after
+// all tool calls in a react iteration complete, before the next ChatModel call.
+//
+// This is suitable for TurnLoop Push+Preempt patterns where the pushed item
+// must be visible to the next turn's GenInput.
+func WithAfterToolCallsHook(fn func(ctx context.Context) error) AgentRunOption {
+	return WrapImplSpecificOptFn(func(t *chatModelAgentRunOptions) {
+		t.afterToolCallsHook = fn
 	})
 }
 
@@ -461,6 +476,8 @@ type typedRunParams[M messageType] struct {
 	cancelCtx      *cancelContext
 	cancelCtxOwned bool
 	composeOpts    []compose.Option
+
+	afterToolCallsHook func(ctx context.Context) error
 }
 
 type typedRunFunc[M messageType] func(ctx context.Context, p *typedRunParams[M])
@@ -1130,6 +1147,7 @@ func (a *TypedChatModelAgent[M]) buildMessageReActRunFunc(ctx context.Context, b
 			generator:                mp.generator,
 			cancelCtx:                cancelCtx,
 			failoverLastSuccessModel: msgModel,
+			afterToolCallsHook:       mp.afterToolCallsHook,
 		})
 
 		// Pre-execution cancel check
@@ -1406,6 +1424,7 @@ func (a *TypedChatModelAgent[M]) Run(ctx context.Context, input *TypedAgentInput
 
 	co := getComposeOptions(opts)
 	co = append(co, compose.WithCheckPointID(bridgeCheckpointID))
+	runOps := GetImplSpecificOptions[chatModelAgentRunOptions](nil, opts...)
 
 	if bc != nil {
 		co = append(co, compose.WithChatModelOption(model.WithTools(bc.toolInfos)))
@@ -1439,14 +1458,15 @@ func (a *TypedChatModelAgent[M]) Run(ctx context.Context, input *TypedAgentInput
 		}
 
 		run(ctx, &typedRunParams[M]{
-			input:          input,
-			generator:      generator,
-			store:          newBridgeStore(),
-			instruction:    instruction,
-			returnDirectly: returnDirectly,
-			cancelCtx:      cancelCtx,
-			cancelCtxOwned: cancelCtxOwned,
-			composeOpts:    co,
+			input:              input,
+			generator:          generator,
+			store:              newBridgeStore(),
+			instruction:        instruction,
+			returnDirectly:     returnDirectly,
+			cancelCtx:          cancelCtx,
+			cancelCtxOwned:     cancelCtxOwned,
+			composeOpts:        co,
+			afterToolCallsHook: runOps.afterToolCallsHook,
 		})
 	}()
 
@@ -1480,6 +1500,7 @@ func (a *TypedChatModelAgent[M]) Resume(ctx context.Context, info *ResumeInfo, o
 
 	co := getComposeOptions(opts)
 	co = append(co, compose.WithCheckPointID(bridgeCheckpointID))
+	resumeRunOps := GetImplSpecificOptions[chatModelAgentRunOptions](nil, opts...)
 
 	if bc != nil {
 		co = append(co, compose.WithChatModelOption(model.WithTools(bc.toolInfos)))
@@ -1563,14 +1584,15 @@ func (a *TypedChatModelAgent[M]) Resume(ctx context.Context, info *ResumeInfo, o
 		}
 
 		run(ctx, &typedRunParams[M]{
-			input:          &TypedAgentInput[M]{EnableStreaming: info.EnableStreaming},
-			generator:      generator,
-			store:          newResumeBridgeStore(bridgeCheckpointID, stateByte),
-			instruction:    instruction,
-			returnDirectly: returnDirectly,
-			cancelCtx:      cancelCtx,
-			cancelCtxOwned: cancelCtxOwned,
-			composeOpts:    co,
+			input:              &TypedAgentInput[M]{EnableStreaming: info.EnableStreaming},
+			generator:          generator,
+			store:              newResumeBridgeStore(bridgeCheckpointID, stateByte),
+			instruction:        instruction,
+			returnDirectly:     returnDirectly,
+			cancelCtx:          cancelCtx,
+			cancelCtxOwned:     cancelCtxOwned,
+			composeOpts:        co,
+			afterToolCallsHook: resumeRunOps.afterToolCallsHook,
 		})
 	}()
 
