@@ -480,33 +480,6 @@ func copyMessage[M MessageType](msg M) M {
 	}
 }
 
-// typedEnsureMessageID assigns a UUID v4 message ID in Extra if the message doesn't have one.
-// It creates a new Extra map (copying existing entries) to avoid mutating a potentially shared map.
-func typedEnsureMessageID[M MessageType](msg M) {
-	switch v := any(msg).(type) {
-	case *schema.Message:
-		if internal.GetMessageID(v.Extra) != "" {
-			return
-		}
-		newExtra := make(map[string]any, len(v.Extra)+1)
-		for k, val := range v.Extra {
-			newExtra[k] = val
-		}
-		newExtra[internal.EinoMsgIDKey] = uuid.NewString()
-		v.Extra = newExtra
-	case *schema.AgenticMessage:
-		if internal.GetMessageID(v.Extra) != "" {
-			return
-		}
-		newExtra := make(map[string]any, len(v.Extra)+1)
-		for k, val := range v.Extra {
-			newExtra[k] = val
-		}
-		newExtra[internal.EinoMsgIDKey] = uuid.NewString()
-		v.Extra = newExtra
-	}
-}
-
 // typedSetMessageID sets a specific message ID in Extra.
 func typedSetMessageID[M MessageType](msg M, id string) {
 	switch v := any(msg).(type) {
@@ -517,8 +490,8 @@ func typedSetMessageID[M MessageType](msg M, id string) {
 	}
 }
 
-// typedGetMessageID returns the message ID from Extra, or "".
-func typedGetMessageID[M MessageType](msg M) string {
+// GetMessageID returns the eino-internal message ID from the given message, or "".
+func GetMessageID[M MessageType](msg M) string {
 	switch v := any(msg).(type) {
 	case *schema.Message:
 		return internal.GetMessageID(v.Extra)
@@ -526,6 +499,18 @@ func typedGetMessageID[M MessageType](msg M) string {
 		return internal.GetMessageID(v.Extra)
 	default:
 		return ""
+	}
+}
+
+// EnsureMessageID assigns a UUID v4 message ID if the message doesn't have one.
+// Idempotent: if ID already set, no-op.
+// Middleware authors should call this before SendEvent if they create messages.
+func EnsureMessageID[M MessageType](msg M) {
+	switch v := any(msg).(type) {
+	case *schema.Message:
+		v.Extra = internal.EnsureMessageID(v.Extra)
+	case *schema.AgenticMessage:
+		v.Extra = internal.EnsureMessageID(v.Extra)
 	}
 }
 
@@ -591,7 +576,8 @@ func (w *eventSenderToolWrapper) WrapInvokableToolCall(_ context.Context, endpoi
 
 		prePopAction := popToolGenAction(ctx, toolName)
 		msg := schema.ToolMessage(result, callID, schema.WithToolName(toolName))
-		msg.Extra = internal.EnsureMessageID(msg.Extra)
+		toolMsgID := uuid.NewString()
+		msg.Extra = internal.SetMessageID(msg.Extra, toolMsgID)
 		event := EventFromMessage(msg, nil, schema.Tool, toolName)
 		if prePopAction != nil {
 			event.Action = prePopAction
@@ -599,6 +585,7 @@ func (w *eventSenderToolWrapper) WrapInvokableToolCall(_ context.Context, endpoi
 
 		execCtx := getTypedChatModelAgentExecCtx[*schema.Message](ctx)
 		_ = compose.ProcessState(ctx, func(_ context.Context, st *State) error {
+			st.setToolMsgID(toolName, callID, toolMsgID)
 			if st.getReturnDirectlyToolCallID() == callID {
 				st.setReturnDirectlyEvent(event)
 			} else {
@@ -640,6 +627,7 @@ func (w *eventSenderToolWrapper) WrapStreamableToolCall(_ context.Context, endpo
 
 		execCtx := getTypedChatModelAgentExecCtx[*schema.Message](ctx)
 		_ = compose.ProcessState(ctx, func(_ context.Context, st *State) error {
+			st.setToolMsgID(toolName, callID, toolMsgID)
 			if st.getReturnDirectlyToolCallID() == callID {
 				st.setReturnDirectlyEvent(event)
 			} else {
@@ -668,7 +656,8 @@ func (w *eventSenderToolWrapper) WrapEnhancedInvokableToolCall(_ context.Context
 		if err != nil {
 			return nil, err
 		}
-		msg.Extra = internal.EnsureMessageID(msg.Extra)
+		toolMsgID := uuid.NewString()
+		msg.Extra = internal.SetMessageID(msg.Extra, toolMsgID)
 		event := EventFromMessage(msg, nil, schema.Tool, toolName)
 		if prePopAction != nil {
 			event.Action = prePopAction
@@ -676,6 +665,7 @@ func (w *eventSenderToolWrapper) WrapEnhancedInvokableToolCall(_ context.Context
 
 		execCtx := getTypedChatModelAgentExecCtx[*schema.Message](ctx)
 		_ = compose.ProcessState(ctx, func(_ context.Context, st *State) error {
+			st.setToolMsgID(toolName, callID, toolMsgID)
 			if st.getReturnDirectlyToolCallID() == callID {
 				st.setReturnDirectlyEvent(event)
 			} else {
@@ -722,6 +712,7 @@ func (w *eventSenderToolWrapper) WrapEnhancedStreamableToolCall(_ context.Contex
 
 		execCtx := getTypedChatModelAgentExecCtx[*schema.Message](ctx)
 		_ = compose.ProcessState(ctx, func(_ context.Context, st *State) error {
+			st.setToolMsgID(toolName, callID, toolMsgID)
 			if st.getReturnDirectlyToolCallID() == callID {
 				st.setReturnDirectlyEvent(event)
 			} else {
@@ -787,9 +778,9 @@ func (w *typedStateModelWrapper[M]) wrapGenerateEndpoint(endpoint typedGenerateE
 			if err != nil {
 				return result, err
 			}
-			if typedGetMessageID(result) == "" {
+			if GetMessageID(result) == "" {
 				result = copyMessage(result)
-				typedEnsureMessageID(result)
+				EnsureMessageID(result)
 			}
 			return result, nil
 		}
@@ -874,7 +865,7 @@ func (w *typedStateModelWrapper[M]) wrapStreamEndpoint(endpoint typedStreamEndpo
 			return schema.StreamReaderWithConvert(reader, func(msg M) (M, error) {
 				if first {
 					first = false
-					if typedGetMessageID(msg) == "" {
+					if GetMessageID(msg) == "" {
 						typedSetMessageID(msg, msgID)
 					}
 				}

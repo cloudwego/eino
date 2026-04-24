@@ -242,6 +242,9 @@ func TestMessageID_ToolMessagesHaveID(t *testing.T) {
 		}).AnyTimes()
 	cm.EXPECT().WithTools(gomock.Any()).Return(cm, nil).AnyTimes()
 
+	// Capture tool result messages from state via BeforeChatModel on the 2nd model call.
+	var toolMsgIDInState string
+	beforeModelCount := 0
 	agent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
 		Name:        "TestMsgID",
 		Instruction: "test",
@@ -249,6 +252,22 @@ func TestMessageID_ToolMessagesHaveID(t *testing.T) {
 		ToolsConfig: ToolsConfig{
 			ToolsNodeConfig: compose.ToolsNodeConfig{
 				Tools: []tool.BaseTool{fakeTool},
+			},
+		},
+		Middlewares: []AgentMiddleware{
+			{
+				BeforeChatModel: func(ctx context.Context, state *ChatModelAgentState) error {
+					beforeModelCount++
+					if beforeModelCount == 2 {
+						// 2nd model call: state.Messages contains tool result messages
+						for _, m := range state.Messages {
+							if m.Role == schema.Tool && m.ToolCallID == "tc-1" {
+								toolMsgIDInState = GetMessageID(m)
+							}
+						}
+					}
+					return nil
+				},
 			},
 		},
 	})
@@ -282,6 +301,11 @@ func TestMessageID_ToolMessagesHaveID(t *testing.T) {
 		require.NotNil(t, msg)
 		assert.NotEmpty(t, GetMessageID(msg), "event[%d] should have a message ID", i)
 	}
+
+	// The tool message in state should share the same ID as the event tool message.
+	assert.NotEmpty(t, toolMsgIDInState, "tool message in state should have an ID")
+	assert.Equal(t, toolMsgID, toolMsgIDInState,
+		"tool event msg ID (%s) and state msg ID (%s) must match", toolMsgID, toolMsgIDInState)
 }
 
 // Scenario 5: Retry — only surviving result has an ID
@@ -579,7 +603,7 @@ func TestAttack_EnsureMessageIDIdempotentUnderRapidCalls(t *testing.T) {
 
 func TestAttack_NilMessagePanics(t *testing.T) {
 	assert.Panics(t, func() {
-		GetMessageID(nil)
+		GetMessageID[*schema.Message](nil)
 	}, "GetMessageID on nil *Message should panic (nil pointer dereference on .Extra)")
 }
 
@@ -750,4 +774,183 @@ func TestAttack_GenerateCopyDoesNotAffectOriginal(t *testing.T) {
 	// because wrapGenerateEndpoint copies before mutating
 	originalID := GetMessageID(originalMsg)
 	assert.Empty(t, originalID, "original model output should NOT be mutated by ID assignment")
+}
+
+// ============================================================
+// AgenticMessage Integration Tests
+// ============================================================
+
+// TestMessageID_AgenticGenerate verifies that AgenticMessage-typed agents
+// get message IDs assigned on Generate output, covering the *schema.AgenticMessage
+// branches in EnsureMessageID, GetMessageID, and copyMessage.
+func TestMessageID_AgenticGenerate(t *testing.T) {
+	ctx := context.Background()
+
+	agenticResponse := &schema.AgenticMessage{
+		Role: schema.AgenticRoleTypeAssistant,
+		ContentBlocks: []*schema.ContentBlock{
+			schema.NewContentBlock(&schema.AssistantGenText{Text: "agentic response"}),
+		},
+	}
+
+	m := &mockAgenticModel{
+		generateFn: func(ctx context.Context, input []*schema.AgenticMessage, opts ...model.Option) (*schema.AgenticMessage, error) {
+			return agenticResponse, nil
+		},
+	}
+
+	agent, err := NewTypedChatModelAgent[*schema.AgenticMessage](ctx, &TypedChatModelAgentConfig[*schema.AgenticMessage]{
+		Name:        "AgenticMsgID",
+		Instruction: "test",
+		Model:       m,
+	})
+	require.NoError(t, err)
+
+	iter := agent.Run(ctx, &TypedAgentInput[*schema.AgenticMessage]{
+		Messages: []*schema.AgenticMessage{schema.UserAgenticMessage("hi")},
+	})
+
+	event, ok := iter.Next()
+	require.True(t, ok)
+	require.Nil(t, event.Err)
+	require.NotNil(t, event.Output)
+	require.NotNil(t, event.Output.MessageOutput)
+
+	msg := event.Output.MessageOutput.Message
+	require.NotNil(t, msg)
+
+	// Verify via the AgenticMessage-specific public API
+	msgID := GetMessageID(msg)
+	assert.NotEmpty(t, msgID, "agentic model output should have message ID")
+	assert.True(t, isValidUUID(msgID), "agentic message ID should be valid UUID: %s", msgID)
+
+	// Original message should NOT be mutated (copyMessage for AgenticMessage branch)
+	originalID := GetMessageID(agenticResponse)
+	assert.Empty(t, originalID, "original agentic model output should NOT be mutated")
+
+	// Drain iterator
+	for {
+		_, ok := iter.Next()
+		if !ok {
+			break
+		}
+	}
+}
+
+// TestMessageID_AgenticStream verifies first-chunk-only ID injection for AgenticMessage streams.
+func TestMessageID_AgenticStream(t *testing.T) {
+	ctx := context.Background()
+
+	m := &mockAgenticModel{
+		generateFn: func(ctx context.Context, input []*schema.AgenticMessage, opts ...model.Option) (*schema.AgenticMessage, error) {
+			return nil, errors.New("should not be called")
+		},
+		streamFn: func(ctx context.Context, input []*schema.AgenticMessage, opts ...model.Option) (*schema.StreamReader[*schema.AgenticMessage], error) {
+			r, w := schema.Pipe[*schema.AgenticMessage](3)
+			go func() {
+				defer w.Close()
+				for i := 0; i < 3; i++ {
+					w.Send(&schema.AgenticMessage{
+						Role: schema.AgenticRoleTypeAssistant,
+						ContentBlocks: []*schema.ContentBlock{
+							schema.NewContentBlock(&schema.AssistantGenText{Text: "chunk"}),
+						},
+					}, nil)
+				}
+			}()
+			return r, nil
+		},
+	}
+
+	agent, err := NewTypedChatModelAgent[*schema.AgenticMessage](ctx, &TypedChatModelAgentConfig[*schema.AgenticMessage]{
+		Name:        "AgenticStreamMsgID",
+		Instruction: "test",
+		Model:       m,
+	})
+	require.NoError(t, err)
+
+	iter := agent.Run(ctx, &TypedAgentInput[*schema.AgenticMessage]{
+		Messages:        []*schema.AgenticMessage{schema.UserAgenticMessage("hi")},
+		EnableStreaming: true,
+	})
+
+	event, ok := iter.Next()
+	require.True(t, ok)
+	require.Nil(t, event.Err)
+	require.NotNil(t, event.Output)
+	require.NotNil(t, event.Output.MessageOutput)
+	require.True(t, event.Output.MessageOutput.IsStreaming)
+
+	stream := event.Output.MessageOutput.MessageStream
+	require.NotNil(t, stream)
+
+	var streamMsgID string
+	for {
+		chunk, err := stream.Recv()
+		if err != nil {
+			break
+		}
+		chunkID := GetMessageID(chunk)
+		if streamMsgID == "" && chunkID != "" {
+			streamMsgID = chunkID
+		} else if chunkID != "" {
+			// Subsequent chunks should not have ID (first-chunk-only)
+			t.Errorf("expected only first chunk to have ID, got ID on later chunk: %s", chunkID)
+		}
+	}
+
+	// Drain remaining events
+	for {
+		_, ok := iter.Next()
+		if !ok {
+			break
+		}
+	}
+
+	assert.NotEmpty(t, streamMsgID, "first stream chunk should have message ID")
+	assert.True(t, isValidUUID(streamMsgID), "stream message ID should be valid UUID: %s", streamMsgID)
+}
+
+// TestMessageID_AgenticPublicAPIHelpers tests the batch helpers and ensures
+// the AgenticMessage public API variants work correctly.
+func TestMessageID_AgenticPublicAPIHelpers(t *testing.T) {
+	t.Run("EnsureMessageID_idempotent", func(t *testing.T) {
+		msg := &schema.AgenticMessage{
+			Role: schema.AgenticRoleTypeAssistant,
+			ContentBlocks: []*schema.ContentBlock{
+				schema.NewContentBlock(&schema.AssistantGenText{Text: "test"}),
+			},
+		}
+		assert.Empty(t, GetMessageID(msg))
+
+		EnsureMessageID(msg)
+		id1 := GetMessageID(msg)
+		assert.NotEmpty(t, id1)
+		assert.True(t, isValidUUID(id1))
+
+		// Idempotent: second call should not change the ID
+		EnsureMessageID(msg)
+		id2 := GetMessageID(msg)
+		assert.Equal(t, id1, id2)
+	})
+
+	t.Run("EnsureMessageIDs_batch", func(t *testing.T) {
+		msgs := []*schema.AgenticMessage{
+			{Role: schema.AgenticRoleTypeAssistant},
+			{Role: schema.AgenticRoleTypeUser},
+			{Role: schema.AgenticRoleTypeAssistant},
+		}
+		for _, msg := range msgs {
+			EnsureMessageID(msg)
+		}
+
+		seen := make(map[string]bool)
+		for i, msg := range msgs {
+			id := GetMessageID(msg)
+			assert.NotEmpty(t, id, "msg[%d] should have ID", i)
+			assert.True(t, isValidUUID(id), "msg[%d] ID should be valid UUID: %s", i, id)
+			assert.False(t, seen[id], "msg[%d] has duplicate ID: %s", i, id)
+			seen[id] = true
+		}
+	})
 }
