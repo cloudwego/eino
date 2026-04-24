@@ -634,13 +634,39 @@ func formatLineNumbers(content string, startLine int) string {
 	return b.String()
 }
 
+const maxPagesPerRequest = 20
+
+func validatePages(pages string) error {
+	parts := strings.SplitN(pages, "-", 2)
+	start, err := strconv.Atoi(parts[0])
+	if err != nil || start < 1 {
+		return fmt.Errorf("invalid pages parameter %q: expected format like \"3\" or \"1-10\"", pages)
+	}
+	if len(parts) == 1 {
+		return nil
+	}
+	if parts[1] == "" {
+		return fmt.Errorf("invalid pages parameter %q: expected format like \"3\" or \"1-10\"", pages)
+	}
+	end, err := strconv.Atoi(parts[1])
+	if err != nil || end < 1 {
+		return fmt.Errorf("invalid pages parameter %q: expected format like \"3\" or \"1-10\"", pages)
+	}
+	if end < start {
+		return fmt.Errorf("invalid pages parameter %q: end page must be >= start page", pages)
+	}
+	if end-start+1 > maxPagesPerRequest {
+		return fmt.Errorf("invalid pages parameter %q: range exceeds maximum of %d pages per request", pages, maxPagesPerRequest)
+	}
+	return nil
+}
+
 func newMultiModalReadFileTool(fs filesystem.Backend, name string, desc string) (tool.BaseTool, error) {
 	er, ok := fs.(filesystem.MultiModalReader)
 	if !ok {
 		return nil, fmt.Errorf("UseMultiModalRead is enabled, but backend (type %T) does not implement filesystem.MultiModalReader interface. "+
 			"Either implement the MultiModalReader interface on your backend, or set UseMultiModalRead to false", fs)
 	}
-
 	toolName := selectToolName(name, ToolNameReadFile)
 	d, err := selectToolDesc(desc, ReadFileToolDesc, ReadFileToolDescChinese)
 	if err != nil {
@@ -662,6 +688,14 @@ func newMultiModalReadFileTool(fs filesystem.Backend, name string, desc string) 
 		}
 		if input.Limit <= 0 {
 			input.Limit = 2000
+		}
+
+		if input.Pages != "" {
+			if err := validatePages(input.Pages); err != nil {
+				return &schema.ToolResult{
+					Parts: []schema.ToolOutputPart{{Type: schema.ToolPartTypeText, Text: err.Error()}},
+				}, nil
+			}
 		}
 
 		fileCt, err := er.MultiModalRead(ctx, &filesystem.MultiModalReadRequest{
