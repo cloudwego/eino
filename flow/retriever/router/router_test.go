@@ -20,6 +20,7 @@ import (
 	"context"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/cloudwego/eino/callbacks"
@@ -52,6 +53,20 @@ func (m *mockRetriever) Retrieve(ctx context.Context, query string, opts ...retr
 
 func (m *mockRetriever) GetType() string {
 	return "Mock"
+}
+
+type recordingRetriever struct {
+	name   string
+	mu     *sync.Mutex
+	called map[string]int
+}
+
+func (r *recordingRetriever) Retrieve(ctx context.Context, query string, opts ...retriever.Option) ([]*schema.Document, error) {
+	r.mu.Lock()
+	r.called[r.name]++
+	r.mu.Unlock()
+
+	return []*schema.Document{{ID: r.name}}, nil
 }
 
 func TestRouterRetriever(t *testing.T) {
@@ -108,6 +123,35 @@ func TestRouterRetriever(t *testing.T) {
 	}
 	if len(result) != 2 {
 		t.Fatal("expected 2 results")
+	}
+}
+
+func TestRouterRetrieverDefaultRouter(t *testing.T) {
+	ctx := context.Background()
+	mu := &sync.Mutex{}
+	called := map[string]int{}
+	r, err := NewRetriever(ctx, &Config{
+		Retrievers: map[string]retriever.Retriever{
+			"1": &recordingRetriever{name: "1", mu: mu, called: called},
+			"2": &recordingRetriever{name: "2", mu: mu, called: called},
+			"3": &recordingRetriever{name: "3", mu: mu, called: called},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := r.Retrieve(ctx, "query")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result) != 3 {
+		t.Fatalf("expected 3 results, got %d", len(result))
+	}
+	for _, name := range []string{"1", "2", "3"} {
+		if called[name] != 1 {
+			t.Fatalf("expected retriever %s to be called once, got %d", name, called[name])
+		}
 	}
 }
 
