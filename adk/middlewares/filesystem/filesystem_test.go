@@ -2612,3 +2612,36 @@ func TestMultiModalReadFileTool_NilResult(t *testing.T) {
 	assert.Contains(t, result.Parts[0].Text, "No content found at path")
 	assert.Contains(t, result.Parts[0].Text, "/missing.txt")
 }
+
+func TestValidatePages(t *testing.T) {
+	tests := []struct {
+		name    string
+		pages   string
+		wantErr string
+	}{
+		{name: "single page", pages: "3"},
+		{name: "valid range", pages: "1-10"},
+		{name: "same start end", pages: "1-1"},
+		{name: "max 20 pages", pages: "1-20"},
+		{name: "trailing dash", pages: "1-", wantErr: "expected format"},
+		{name: "leading dash", pages: "-5", wantErr: "expected format"},
+		{name: "non-numeric", pages: "abc", wantErr: "expected format"},
+		{name: "non-numeric end", pages: "1-abc", wantErr: "expected format"},
+		{name: "zero start", pages: "0-5", wantErr: "expected format"},
+		{name: "zero end", pages: "1-0", wantErr: "expected format"},
+		{name: "end less than start", pages: "10-5", wantErr: "end page must be >= start page"},
+		{name: "exceeds max pages", pages: "1-21", wantErr: "range exceeds maximum of 20"},
+		{name: "large range", pages: "1-30", wantErr: "range exceeds maximum of 20"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := validatePages(tt.pages)
+			if tt.wantErr == "" {
+				assert.NoError(t, err)
+			} else {
+				assert.ErrorContains(t, err, tt.wantErr)
+			}
+		})
+	}
+}
