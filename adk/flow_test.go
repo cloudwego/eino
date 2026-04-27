@@ -54,7 +54,7 @@ func TestRewriteMessage(t *testing.T) {
 		},
 	}
 
-	rewritten := rewriteMessage(msg, "OtherAgent")
+	rewritten := rewriteMessage(msg, "OtherAgent", false)
 
 	assert.Equal(t, schema.User, rewritten.Role)
 
@@ -89,6 +89,75 @@ func TestRewriteMessage(t *testing.T) {
 
 	// reasoning is dropped; AssistantGenMultiContent is not set on rewritten message
 	assert.Empty(t, rewritten.AssistantGenMultiContent)
+}
+
+func TestRewriteMessageWithReasoningPreservation(t *testing.T) {
+	imageCommon := schema.MessagePartCommon{URL: strPtr("http://img.example.com")}
+
+	msg := &schema.Message{
+		Role:             schema.Assistant,
+		Content:          "hello",
+		ReasoningContent: "initial reasoning",
+		AssistantGenMultiContent: []schema.MessageOutputPart{
+			{Type: schema.ChatMessagePartTypeText, Text: "gen-text"},
+			{Type: schema.ChatMessagePartTypeImageURL, Image: &schema.MessageOutputImage{MessagePartCommon: imageCommon}},
+			{Type: schema.ChatMessagePartTypeReasoning, Reasoning: &schema.MessageOutputReasoning{
+				Text:      "deep thoughts about the problem",
+				Signature: "sig_abc123",
+			}},
+			{Type: schema.ChatMessagePartTypeReasoning, Reasoning: &schema.MessageOutputReasoning{
+				Text: "more analysis",
+			}},
+		},
+	}
+
+	// Test with preserveReasoning = true
+	rewritten := rewriteMessage(msg, "OtherAgent", true)
+
+	assert.Equal(t, schema.User, rewritten.Role)
+
+	// Reasoning content should be preserved and merged
+	expectedReasoning := "initial reasoning\ndeep thoughts about the problem\nmore analysis"
+	assert.Equal(t, expectedReasoning, rewritten.ReasoningContent)
+
+	// UserInputMultiContent should have text and image (not reasoning parts)
+	assert.Len(t, rewritten.UserInputMultiContent, 2) // text + image only
+
+	// Verify text conversion
+	assert.Equal(t, schema.ChatMessagePartTypeText, rewritten.UserInputMultiContent[0].Type)
+	assert.Equal(t, "gen-text", rewritten.UserInputMultiContent[0].Text)
+
+	// Verify image conversion
+	assert.Equal(t, schema.ChatMessagePartTypeImageURL, rewritten.UserInputMultiContent[1].Type)
+	assert.Equal(t, imageCommon, rewritten.UserInputMultiContent[1].Image.MessagePartCommon)
+
+	// AssistantGenMultiContent should not be set on rewritten message
+	assert.Empty(t, rewritten.AssistantGenMultiContent)
+}
+
+func TestRewriteMessageWithoutInitialReasoning(t *testing.T) {
+	msg := &schema.Message{
+		Role:    schema.Assistant,
+		Content: "hello",
+		AssistantGenMultiContent: []schema.MessageOutputPart{
+			{Type: schema.ChatMessagePartTypeText, Text: "gen-text"},
+			{Type: schema.ChatMessagePartTypeReasoning, Reasoning: &schema.MessageOutputReasoning{
+				Text: "only reasoning from parts",
+			}},
+		},
+	}
+
+	// Test with preserveReasoning = true
+	rewritten := rewriteMessage(msg, "OtherAgent", true)
+
+	assert.Equal(t, schema.User, rewritten.Role)
+
+	// Reasoning content should only contain the part from AssistantGenMultiContent
+	assert.Equal(t, "only reasoning from parts", rewritten.ReasoningContent)
+
+	// UserInputMultiContent should have only text
+	assert.Len(t, rewritten.UserInputMultiContent, 1)
+	assert.Equal(t, "gen-text", rewritten.UserInputMultiContent[0].Text)
 }
 
 // TestTransferToAgent tests the TransferToAgent functionality

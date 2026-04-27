@@ -315,7 +315,10 @@ func getReactChatHistory(ctx context.Context, destAgentName string) ([]Message, 
 		}
 
 		if msg.Role == schema.Assistant || msg.Role == schema.Tool {
-			msg = rewriteMessage(msg, agentName)
+			// For agent tool context, we default to not preserving reasoning
+			// to maintain backward compatibility. Users should use WithPreserveReasoning()
+			// option when setting up flow agents if reasoning preservation is needed.
+			msg = rewriteMessage(msg, agentName, false)
 		}
 
 		history = append(history, msg)

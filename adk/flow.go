@@ -47,6 +47,7 @@ type flowAgent struct {
 
 	disallowTransferToParent bool
 	historyRewriter          HistoryRewriter
+	preserveReasoning        bool
 
 	checkPointStore compose.CheckPointStore
 }
@@ -58,6 +59,7 @@ func (a *flowAgent) deepCopy() *flowAgent {
 		parentAgent:              a.parentAgent,
 		disallowTransferToParent: a.disallowTransferToParent,
 		historyRewriter:          a.historyRewriter,
+		preserveReasoning:        a.preserveReasoning,
 		checkPointStore:          a.checkPointStore,
 	}
 
@@ -88,6 +90,17 @@ func WithHistoryRewriter(h HistoryRewriter) AgentOption {
 	}
 }
 
+// WithPreserveReasoning enables preservation of reasoning content during message rewriting.
+// When enabled, reasoning content from AssistantGenMultiContent will be preserved in the
+// message's ReasoningContent field when messages are converted between agents.
+// This is required for models operating in "thinking mode" that need reasoning context
+// to be passed back in subsequent API calls.
+func WithPreserveReasoning() AgentOption {
+	return func(fa *flowAgent) {
+		fa.preserveReasoning = true
+	}
+}
+
 func toFlowAgent(ctx context.Context, agent Agent, opts ...AgentOption) *flowAgent {
 	var fa *flowAgent
 	var ok bool
@@ -101,7 +114,7 @@ func toFlowAgent(ctx context.Context, agent Agent, opts ...AgentOption) *flowAge
 	}
 
 	if fa.historyRewriter == nil {
-		fa.historyRewriter = buildDefaultHistoryRewriter(agent.Name(ctx))
+		fa.historyRewriter = buildDefaultHistoryRewriter(agent.Name(ctx), fa.preserveReasoning)
 	}
 
 	return fa
@@ -168,7 +181,7 @@ func (a *flowAgent) getAgent(ctx context.Context, name string) *flowAgent {
 	return nil
 }
 
-func rewriteMessage(msg Message, agentName string) Message {
+func rewriteMessage(msg Message, agentName string, preserveReasoning bool) Message {
 	var sb strings.Builder
 	sb.WriteString("For context:")
 	if msg.Role == schema.Assistant {
@@ -195,8 +208,32 @@ func rewriteMessage(msg Message, agentName string) Message {
 		rewritten.UserInputMultiContent = append([]schema.MessageInputPart{}, msg.UserInputMultiContent...)
 	}
 
+	// Preserve reasoning content if enabled
+	if preserveReasoning {
+		// Start with existing ReasoningContent
+		var reasoningBuilder strings.Builder
+		if msg.ReasoningContent != "" {
+			reasoningBuilder.WriteString(msg.ReasoningContent)
+		}
+
+		// Extract reasoning from AssistantGenMultiContent
+		for _, part := range msg.AssistantGenMultiContent {
+			if part.Type == schema.ChatMessagePartTypeReasoning && part.Reasoning != nil {
+				if reasoningBuilder.Len() > 0 {
+					reasoningBuilder.WriteString("\n")
+				}
+				reasoningBuilder.WriteString(part.Reasoning.Text)
+			}
+		}
+
+		if reasoningBuilder.Len() > 0 {
+			rewritten.ReasoningContent = reasoningBuilder.String()
+		}
+	}
+
 	// Convert AssistantGenMultiContent to UserInputMultiContent, since the role changes to User.
-	// Reasoning parts have no user input equivalent and are dropped.
+	// Reasoning parts have no user input equivalent and are dropped from multi-content,
+	// but are preserved in ReasoningContent field if preserveReasoning is enabled.
 	for _, part := range msg.AssistantGenMultiContent {
 		switch part.Type {
 		case schema.ChatMessagePartTypeText:
@@ -235,10 +272,10 @@ func rewriteMessage(msg Message, agentName string) Message {
 	return rewritten
 }
 
-func genMsg(entry *HistoryEntry, agentName string) (Message, error) {
+func genMsg(entry *HistoryEntry, agentName string, preserveReasoning bool) (Message, error) {
 	msg := entry.Message
 	if entry.AgentName != agentName {
-		msg = rewriteMessage(msg, entry.AgentName)
+		msg = rewriteMessage(msg, entry.AgentName, preserveReasoning)
 	}
 
 	return msg, nil
@@ -310,14 +347,14 @@ func (a *flowAgent) genAgentInput(ctx context.Context, runCtx *runContext, skipT
 	return input, nil
 }
 
-func buildDefaultHistoryRewriter(agentName string) HistoryRewriter {
+func buildDefaultHistoryRewriter(agentName string, preserveReasoning bool) HistoryRewriter {
 	return func(ctx context.Context, entries []*HistoryEntry) ([]Message, error) {
 		messages := make([]Message, 0, len(entries))
 		var err error
 		for _, entry := range entries {
 			msg := entry.Message
 			if !entry.IsUserInput {
-				msg, err = genMsg(entry, agentName)
+				msg, err = genMsg(entry, agentName, preserveReasoning)
 				if err != nil {
 					return nil, fmt.Errorf("gen agent input failed: %w", err)
 				}
