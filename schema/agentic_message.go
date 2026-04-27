@@ -298,6 +298,40 @@ type FunctionToolCall struct {
 	Arguments string `json:"arguments,omitempty"`
 }
 
+// FunctionToolResultBlock represents a single content block within a multimodal
+// function tool result. Exactly one of the media fields should be set.
+type FunctionToolResultBlock struct {
+	// Text contains the text content of the block.
+	Text *UserInputText `json:"text,omitempty"`
+	// Image contains the image content of the block.
+	Image *UserInputImage `json:"image,omitempty"`
+	// Audio contains the audio content of the block.
+	Audio *UserInputAudio `json:"audio,omitempty"`
+	// Video contains the video content of the block.
+	Video *UserInputVideo `json:"video,omitempty"`
+	// File contains the file content of the block.
+	File *UserInputFile `json:"file,omitempty"`
+	// Extra holds additional metadata for model-specific or custom extensions.
+	Extra map[string]any `json:"extra,omitempty"`
+}
+
+func (b *FunctionToolResultBlock) String() string {
+	switch {
+	case b.Text != nil:
+		return b.Text.String()
+	case b.Image != nil:
+		return b.Image.String()
+	case b.Audio != nil:
+		return b.Audio.String()
+	case b.Video != nil:
+		return b.Video.String()
+	case b.File != nil:
+		return b.File.String()
+	default:
+		return "unknown\n"
+	}
+}
+
 type FunctionToolResult struct {
 	// CallID is the unique identifier for the tool call.
 	CallID string `json:"call_id,omitempty"`
@@ -305,8 +339,10 @@ type FunctionToolResult struct {
 	// Name specifies the function tool invoked.
 	Name string `json:"name"`
 
-	// Result is the function tool result returned by the user
-	Result string `json:"result,omitempty"`
+	// Blocks holds the content of the function tool result.
+	// All results, whether text-only or multimodal (text, image, audio, video, file),
+	// are uniformly represented as content blocks.
+	Blocks []*FunctionToolResultBlock `json:"blocks,omitempty"`
 }
 
 // ToolSearchFunctionToolResult represents the result of a client-side custom tool search
@@ -507,14 +543,14 @@ func UserAgenticMessage(text string) *AgenticMessage {
 }
 
 // FunctionToolResultAgenticMessage represents a function tool result message with AgenticRoleType "user".
-func FunctionToolResultAgenticMessage(callID, name, result string) *AgenticMessage {
+func FunctionToolResultAgenticMessage(callID, name string, blocks []*FunctionToolResultBlock) *AgenticMessage {
 	return &AgenticMessage{
 		Role: AgenticRoleTypeUser,
 		ContentBlocks: []*ContentBlock{
 			NewContentBlock(&FunctionToolResult{
 				CallID: callID,
 				Name:   name,
-				Result: result,
+				Blocks: blocks,
 			}),
 		},
 	}
@@ -1557,7 +1593,7 @@ func concatFunctionToolResults(results []*FunctionToolResult) (*FunctionToolResu
 			return nil, fmt.Errorf("expected tool name '%s' for function tool result, but got '%s'", ret.Name, r.Name)
 		}
 
-		ret.Result += r.Result
+		ret.Blocks = append(ret.Blocks, r.Blocks...)
 	}
 
 	return ret, nil
@@ -2029,7 +2065,15 @@ func (f *FunctionToolResult) String() string {
 	sb := &strings.Builder{}
 	sb.WriteString(fmt.Sprintf("      call_id: %s\n", f.CallID))
 	sb.WriteString(fmt.Sprintf("      name: %s\n", f.Name))
-	sb.WriteString(fmt.Sprintf("      result: %s\n", f.Result))
+	if len(f.Blocks) > 0 {
+		sb.WriteString(fmt.Sprintf("      blocks: (%d blocks)\n", len(f.Blocks)))
+		for i, block := range f.Blocks {
+			if block == nil {
+				continue
+			}
+			sb.WriteString(fmt.Sprintf("        [%d] %s", i, block.String()))
+		}
+	}
 	return sb.String()
 }
 
