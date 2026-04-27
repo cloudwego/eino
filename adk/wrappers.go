@@ -55,7 +55,7 @@ func buildModelWrappers[M MessageType](m model.BaseModel[M], config *typedModelW
 }
 
 func buildModelWrappersImpl[M MessageType](m model.BaseModel[M], config *typedModelWrapperConfig[M]) model.BaseModel[M] {
-	var wrapped model.BaseModel[M] = m
+	var wrapped = m
 
 	if config.failoverConfig != nil {
 		wrapped = &typedFailoverProxyModel[M]{}
@@ -448,7 +448,7 @@ func (m *typedEventSenderModel[M]) buildStreamConvertOptions(ctx context.Context
 		// If retry is configured and will retry this error, use the retry wrapper's WillRetryError.
 		if retryWrapper != nil {
 			wrapped := retryWrapper(err)
-			if _, ok := wrapped.(*WillRetryError); ok {
+			if errors.As(wrapped, new(*WillRetryError)) {
 				return wrapped
 			}
 		}
@@ -537,11 +537,7 @@ func typedPopToolGenAction[M MessageType](ctx context.Context, toolName string) 
 	return action
 }
 
-func popToolGenAction(ctx context.Context, toolName string) *AgentAction {
-	return typedPopToolGenAction[*schema.Message](ctx, toolName)
-}
-
-type typedEventSenderToolWrapper[M messageType] struct {
+type typedEventSenderToolWrapper[M MessageType] struct {
 	*TypedBaseChatModelAgentMiddleware[M]
 }
 
@@ -594,7 +590,7 @@ func textToFunctionToolResultBlocks(text string) []*schema.FunctionToolResultBlo
 
 // typedToolInvokeEvent constructs the tool result event for the invoke path,
 // dispatching on M to create the correct message and event types.
-func typedToolInvokeEvent[M messageType](callID, toolName, result, toolMsgID string) *TypedAgentEvent[M] {
+func typedToolInvokeEvent[M MessageType](callID, toolName, result, toolMsgID string) *TypedAgentEvent[M] {
 	var zero M
 	switch any(zero).(type) {
 	case *schema.Message:
@@ -614,7 +610,7 @@ func typedToolInvokeEvent[M messageType](callID, toolName, result, toolMsgID str
 
 // typedToolStreamEvent constructs the tool result event for the stream path,
 // dispatching on M to create the correct message stream and event types.
-func typedToolStreamEvent[M messageType](callID, toolName, toolMsgID string, stream *schema.StreamReader[string]) *TypedAgentEvent[M] {
+func typedToolStreamEvent[M MessageType](callID, toolName, toolMsgID string, stream *schema.StreamReader[string]) *TypedAgentEvent[M] {
 	var zero M
 	switch any(zero).(type) {
 	case *schema.Message:
@@ -651,7 +647,7 @@ func typedToolStreamEvent[M messageType](callID, toolName, toolMsgID string, str
 // typedToolEnhancedInvokeEvent constructs the tool result event for the enhanced invoke path.
 // For *schema.Message it builds a multimodal tool message; for *schema.AgenticMessage it
 // uses the string content of the result (AgenticToolsNode only uses the string path).
-func typedToolEnhancedInvokeEvent[M messageType](callID, toolName, toolMsgID string, result *schema.ToolResult) (*TypedAgentEvent[M], error) {
+func typedToolEnhancedInvokeEvent[M MessageType](callID, toolName, toolMsgID string, result *schema.ToolResult) (*TypedAgentEvent[M], error) {
 	var zero M
 	switch any(zero).(type) {
 	case *schema.Message:
@@ -677,7 +673,7 @@ func typedToolEnhancedInvokeEvent[M messageType](callID, toolName, toolMsgID str
 // typedToolEnhancedStreamEvent constructs the tool result event for the enhanced stream path.
 // For *schema.Message it builds multimodal tool messages; for *schema.AgenticMessage it
 // uses the string content of each chunk.
-func typedToolEnhancedStreamEvent[M messageType](callID, toolName, toolMsgID string, stream *schema.StreamReader[*schema.ToolResult]) *TypedAgentEvent[M] {
+func typedToolEnhancedStreamEvent[M MessageType](callID, toolName, toolMsgID string, stream *schema.StreamReader[*schema.ToolResult]) *TypedAgentEvent[M] {
 	var zero M
 	switch any(zero).(type) {
 	case *schema.Message:
@@ -1060,7 +1056,7 @@ func (w *typedStateModelWrapper[M]) wrapStreamEndpoint(endpoint typedStreamEndpo
 	return endpoint
 }
 
-func (w *typedStateModelWrapper[M]) Generate(ctx context.Context, input []M, opts ...model.Option) (M, error) {
+func (w *typedStateModelWrapper[M]) Generate(ctx context.Context, _ []M, opts ...model.Option) (M, error) {
 	var (
 		stateMessages          []M
 		stateToolInfos         []*schema.ToolInfo
@@ -1185,7 +1181,7 @@ func (w *typedStateModelWrapper[M]) Generate(ctx context.Context, input []M, opt
 	return state.Messages[len(state.Messages)-1], nil
 }
 
-func (w *typedStateModelWrapper[M]) Stream(ctx context.Context, input []M, opts ...model.Option) (*schema.StreamReader[M], error) {
+func (w *typedStateModelWrapper[M]) Stream(ctx context.Context, _ []M, opts ...model.Option) (*schema.StreamReader[M], error) {
 	var (
 		stateMessages          []M
 		stateToolInfos         []*schema.ToolInfo

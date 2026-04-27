@@ -804,7 +804,7 @@ func extractToolIdentifiers(msg *schema.AgenticMessage) (toolName, callID string
 // reorderToolResults reorders tool results to match the order their events were emitted.
 // If eventOrder is empty (old checkpoint, custom event sender), the original order is preserved.
 // The ReturnDirectly tool result is always placed last (its event is emitted last).
-func reorderToolResults[M messageType](results []M, eventOrder []string, returnDirectlyCallID string, getCallID func(M) string) []M {
+func reorderToolResults[M MessageType](results []M, eventOrder []string, returnDirectlyCallID string, getCallID func(M) string) []M {
 	if len(eventOrder) == 0 {
 		return results
 	}

@@ -468,8 +468,11 @@ func TestMessageID_UserInputNoAutoID(t *testing.T) {
 	}
 }
 
-// Scenario 8: Middleware SendEvent auto-assigns ID, pointer identity ensures state consistency
-func TestMessageID_SendEvent_PointerIdentity(t *testing.T) {
+// Scenario 8: Middleware must call EnsureMessageID before SendEvent; pointer identity ensures state consistency
+// TestMessageID_SendEvent_MiddlewareMustEnsureID verifies that TypedSendEvent is a pure
+// transport and does NOT auto-assign message IDs. Middleware authors must call
+// EnsureMessageID themselves before sending.
+func TestMessageID_SendEvent_MiddlewareMustEnsureID(t *testing.T) {
 	ctx := context.Background()
 	ctrl := gomock.NewController(t)
 	defer ctrl.Finish()
@@ -493,17 +496,21 @@ func TestMessageID_SendEvent_PointerIdentity(t *testing.T) {
 					// Middleware creates a new message and writes the SAME pointer to both state and event
 					middlewareMsg = schema.AssistantMessage("middleware injected", nil)
 
+					// Middleware is responsible for assigning the ID before sending
+					EnsureMessageID(middlewareMsg)
+
 					// Write to state
 					state.Messages = append(state.Messages, middlewareMsg)
 
-					// Send as event — TypedSendEvent should auto-assign ID
+					// Send as event — TypedSendEvent does NOT auto-assign ID
 					event := EventFromMessage(middlewareMsg, nil, schema.Assistant, "")
 					err := SendEvent(ctx, event)
 					if err != nil {
 						return err
 					}
 
-					// After SendEvent, check if the state copy (same pointer) also has the ID
+					// Because we called EnsureMessageID on the shared pointer,
+					// the state copy also has the ID (pointer identity)
 					stateMsgIDAfterSendEvent = internal.GetMessageID(middlewareMsg.Extra)
 
 					return nil
@@ -529,10 +536,10 @@ func TestMessageID_SendEvent_PointerIdentity(t *testing.T) {
 	// We expect at least 2 events: model response + middleware injected message
 	require.GreaterOrEqual(t, len(allEvents), 2)
 
-	// The middleware message pointer should have an ID (assigned by SendEvent)
+	// The middleware message pointer should have an ID (assigned by middleware via EnsureMessageID)
 	require.NotNil(t, middlewareMsg)
 	middlewareMsgID := GetMessageID(middlewareMsg)
-	assert.NotEmpty(t, middlewareMsgID, "SendEvent should have auto-assigned an ID to the middleware message")
+	assert.NotEmpty(t, middlewareMsgID, "middleware should have assigned an ID via EnsureMessageID")
 	assert.True(t, isValidUUID(middlewareMsgID))
 
 	// The ID captured right after SendEvent (via pointer identity) should be the same
@@ -953,4 +960,213 @@ func TestMessageID_AgenticPublicAPIHelpers(t *testing.T) {
 			seen[id] = true
 		}
 	})
+}
+
+// --- Adversarial attack tests for message ID system ---
+
+// TestAttack_ReorderToolResults_DuplicateCallID tests that when reorderToolResults
+// encounters duplicate callIDs in the results slice, the map-overwrite semantics
+// don't cause data loss or panics.
+func TestAttack_ReorderToolResults_DuplicateCallID(t *testing.T) {
+	results := []*schema.Message{
+		{Role: schema.Tool, ToolCallID: "call-1", ToolName: "toolA", Content: "first"},
+		{Role: schema.Tool, ToolCallID: "call-1", ToolName: "toolA", Content: "second"},
+		{Role: schema.Tool, ToolCallID: "call-2", ToolName: "toolB", Content: "third"},
+	}
+	eventOrder := []string{"call-1", "call-2"}
+
+	ordered := reorderToolResults(results, eventOrder, "", func(m *schema.Message) string {
+		return m.ToolCallID
+	})
+
+	// Should not panic, should produce 2 results (call-1 overwritten to "second", call-2 "third")
+	require.Len(t, ordered, 2)
+	assert.Equal(t, "second", ordered[0].Content, "duplicate callID should keep last value")
+	assert.Equal(t, "call-1", ordered[0].ToolCallID)
+	assert.Equal(t, "third", ordered[1].Content)
+	assert.Equal(t, "call-2", ordered[1].ToolCallID)
+}
+
+// TestAttack_ReorderToolResults_MissingFromEventOrder tests that results not found
+// in eventOrder are still included (appended at end).
+func TestAttack_ReorderToolResults_MissingFromEventOrder(t *testing.T) {
+	results := []*schema.Message{
+		{Role: schema.Tool, ToolCallID: "call-1", ToolName: "toolA", Content: "A"},
+		{Role: schema.Tool, ToolCallID: "call-2", ToolName: "toolB", Content: "B"},
+		{Role: schema.Tool, ToolCallID: "call-3", ToolName: "toolC", Content: "C"},
+	}
+	// eventOrder only knows about call-2; call-1 and call-3 are "orphans"
+	eventOrder := []string{"call-2"}
+
+	ordered := reorderToolResults(results, eventOrder, "", func(m *schema.Message) string {
+		return m.ToolCallID
+	})
+
+	require.Len(t, ordered, 3)
+	// First should be call-2 (from eventOrder)
+	assert.Equal(t, "call-2", ordered[0].ToolCallID)
+	// Remaining in arbitrary map iteration order, but all present
+	remaining := map[string]bool{ordered[1].ToolCallID: true, ordered[2].ToolCallID: true}
+	assert.True(t, remaining["call-1"])
+	assert.True(t, remaining["call-3"])
+}
+
+// TestAttack_ReorderToolResults_ReturnDirectlyCallID tests that the returnDirectly
+// item is placed after eventOrder items but before orphans.
+func TestAttack_ReorderToolResults_ReturnDirectlyCallID(t *testing.T) {
+	results := []*schema.Message{
+		{Role: schema.Tool, ToolCallID: "call-1", ToolName: "toolA", Content: "A"},
+		{Role: schema.Tool, ToolCallID: "rd-1", ToolName: "toolRD", Content: "RD"},
+		{Role: schema.Tool, ToolCallID: "call-2", ToolName: "toolB", Content: "B"},
+	}
+	eventOrder := []string{"call-1", "call-2"}
+
+	ordered := reorderToolResults(results, eventOrder, "rd-1", func(m *schema.Message) string {
+		return m.ToolCallID
+	})
+
+	require.Len(t, ordered, 3)
+	// eventOrder items first
+	assert.Equal(t, "call-1", ordered[0].ToolCallID)
+	assert.Equal(t, "call-2", ordered[1].ToolCallID)
+	// returnDirectly item last
+	assert.Equal(t, "rd-1", ordered[2].ToolCallID)
+}
+
+// TestAttack_PopToolMsgID_DoublePop tests that calling popToolMsgID twice for the
+// same key returns "" on second call.
+func TestAttack_PopToolMsgID_DoublePop(t *testing.T) {
+	st := &State{}
+	st.setToolMsgID("myTool", "call-1", "uuid-abc")
+
+	// First pop returns the ID
+	id1 := st.popToolMsgID("myTool", "call-1")
+	assert.Equal(t, "uuid-abc", id1)
+
+	// Second pop returns empty
+	id2 := st.popToolMsgID("myTool", "call-1")
+	assert.Empty(t, id2, "double-pop should return empty")
+
+	// Inner map should be cleaned up
+	assert.Nil(t, st.ToolMsgIDs["myTool"], "inner map should be removed when empty")
+}
+
+// namedFakeToolForTest is a variant of fakeToolForTest with a configurable name.
+type namedFakeToolForTest struct {
+	name string
+}
+
+func (t *namedFakeToolForTest) Info(_ context.Context) (*schema.ToolInfo, error) {
+	return &schema.ToolInfo{
+		Name: t.name,
+		Desc: t.name + " tool for testing",
+		ParamsOneOf: schema.NewParamsOneOfByParams(
+			map[string]*schema.ParameterInfo{
+				"name": {
+					Desc:     "user name for testing",
+					Required: true,
+					Type:     schema.String,
+				},
+			}),
+	}, nil
+}
+
+func (t *namedFakeToolForTest) InvokableRun(_ context.Context, argumentsInJSON string, _ ...tool.Option) (string, error) {
+	return `{"say": "ok"}`, nil
+}
+
+// TestAttack_ToolMsgIDConsistency_MultipleTools is an integration test: when an agent
+// has multiple tools called in one turn, verify that EACH tool's event message ID
+// matches its corresponding state message ID.
+func TestAttack_ToolMsgIDConsistency_MultipleTools(t *testing.T) {
+	ctx := context.Background()
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	tool1 := &namedFakeToolForTest{name: "greet"}
+	tool2 := &namedFakeToolForTest{name: "farewell"}
+
+	info1, err := tool1.Info(ctx)
+	require.NoError(t, err)
+	info2, err := tool2.Info(ctx)
+	require.NoError(t, err)
+
+	var generateCount int
+	cm := mockModel.NewMockToolCallingChatModel(ctrl)
+	cm.EXPECT().Generate(gomock.Any(), gomock.Any(), gomock.Any()).
+		DoAndReturn(func(ctx context.Context, msgs []*schema.Message, opts ...model.Option) (*schema.Message, error) {
+			generateCount++
+			if generateCount == 1 {
+				return schema.AssistantMessage("calling tools", []schema.ToolCall{
+					{ID: "tc-1", Function: schema.FunctionCall{Name: info1.Name, Arguments: `{"name": "alice"}`}},
+					{ID: "tc-2", Function: schema.FunctionCall{Name: info2.Name, Arguments: `{"name": "bob"}`}},
+				}), nil
+			}
+			return schema.AssistantMessage("done", nil), nil
+		}).AnyTimes()
+	cm.EXPECT().WithTools(gomock.Any()).Return(cm, nil).AnyTimes()
+
+	// Capture state message IDs
+	var stateMsgIDs map[string]string // callID -> msgID
+	beforeModelCount := 0
+	agent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+		Name:        "TestMultiTool",
+		Instruction: "test",
+		Model:       cm,
+		ToolsConfig: ToolsConfig{
+			ToolsNodeConfig: compose.ToolsNodeConfig{
+				Tools: []tool.BaseTool{tool1, tool2},
+			},
+		},
+		Middlewares: []AgentMiddleware{
+			{
+				BeforeChatModel: func(ctx context.Context, state *ChatModelAgentState) error {
+					beforeModelCount++
+					if beforeModelCount == 2 {
+						stateMsgIDs = make(map[string]string)
+						for _, m := range state.Messages {
+							if m.Role == schema.Tool {
+								stateMsgIDs[m.ToolCallID] = GetMessageID(m)
+							}
+						}
+					}
+					return nil
+				},
+			},
+		},
+	})
+	require.NoError(t, err)
+
+	iter := agent.Run(ctx, &AgentInput{
+		Messages: []Message{schema.UserMessage("use tools")},
+	})
+
+	events := collectEvents(t, iter)
+	// Expect: model(tool_calls) + tool1(result) + tool2(result) + model(final) = 4 events
+	require.GreaterOrEqual(t, len(events), 4)
+
+	// Collect tool event IDs
+	eventMsgIDs := make(map[string]string) // callID -> msgID
+	for _, ev := range events {
+		if ev.Err != nil {
+			continue
+		}
+		if ev.Output != nil && ev.Output.MessageOutput != nil {
+			msg := ev.Output.MessageOutput.Message
+			if msg != nil && msg.Role == schema.Tool {
+				eventMsgIDs[msg.ToolCallID] = GetMessageID(msg)
+			}
+		}
+	}
+
+	// Each tool call should have an ID in both event and state, and they must match
+	require.NotEmpty(t, stateMsgIDs, "state should have tool message IDs")
+	for callID, stateID := range stateMsgIDs {
+		assert.NotEmpty(t, stateID, "state msg for %s should have ID", callID)
+		assert.True(t, isValidUUID(stateID), "state msg ID should be UUID: %s", stateID)
+		eventID, ok := eventMsgIDs[callID]
+		assert.True(t, ok, "event should have msg for callID %s", callID)
+		assert.Equal(t, stateID, eventID,
+			"event and state msg IDs for callID %s must match: event=%s state=%s", callID, eventID, stateID)
+	}
 }
