@@ -104,7 +104,7 @@ func NewAgentTool(_ context.Context, agent Agent, options ...AgentToolOption) to
 }
 
 // NewTypedAgentTool creates a new agent tool that wraps a TypedAgent as a tool.BaseTool.
-func NewTypedAgentTool[M messageType](_ context.Context, agent TypedAgent[M], options ...AgentToolOption) tool.BaseTool {
+func NewTypedAgentTool[M MessageType](_ context.Context, agent TypedAgent[M], options ...AgentToolOption) tool.BaseTool {
 	opts := &AgentToolOptions{}
 	for _, opt := range options {
 		opt(opts)
@@ -117,7 +117,7 @@ func NewTypedAgentTool[M messageType](_ context.Context, agent TypedAgent[M], op
 	}
 }
 
-type typedAgentTool[M messageType] struct {
+type typedAgentTool[M MessageType] struct {
 	agent TypedAgent[M]
 
 	fullChatHistoryAsInput bool
@@ -374,7 +374,7 @@ func getReactChatHistory(ctx context.Context, destAgentName string) ([]Message, 
 	return history, nil
 }
 
-func newTypedUserMessages[M messageType](text string) []M {
+func newTypedUserMessages[M MessageType](text string) []M {
 	var zero M
 	switch any(zero).(type) {
 	case *schema.Message:
@@ -386,7 +386,7 @@ func newTypedUserMessages[M messageType](text string) []M {
 	}
 }
 
-func newTypedInvokableAgentToolRunner[M messageType](agent TypedAgent[M], store compose.CheckPointStore, enableStreaming bool) *TypedRunner[M] {
+func newTypedInvokableAgentToolRunner[M MessageType](agent TypedAgent[M], store compose.CheckPointStore, enableStreaming bool) *TypedRunner[M] {
 	return &TypedRunner[M]{
 		a:               agent,
 		enableStreaming: enableStreaming,

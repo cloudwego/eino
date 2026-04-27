@@ -22,19 +22,12 @@ import (
 
 	"github.com/cloudwego/eino/adk"
 	"github.com/cloudwego/eino/components/tool"
-	"github.com/cloudwego/eino/schema"
 )
 
 const (
 	generalAgentName = "general-purpose"
 	taskToolName     = "task"
 )
-
-// messageType is the sealed type constraint for message types in the deep package.
-// This mirrors the unexported constraint in the adk package.
-type messageType interface {
-	*schema.Message | *schema.AgenticMessage
-}
 
 const (
 	SessionKeyTodos = "deep_agent_session_key_todos"
@@ -48,7 +41,7 @@ func assertAgentTool(t tool.BaseTool) (tool.InvokableTool, error) {
 	return it, nil
 }
 
-func typedBuildAppendPromptTool[M messageType](prompt string, t tool.BaseTool) adk.TypedChatModelAgentMiddleware[M] {
+func typedBuildAppendPromptTool[M adk.MessageType](prompt string, t tool.BaseTool) adk.TypedChatModelAgentMiddleware[M] {
 	return &typedAppendPromptTool[M]{
 		TypedBaseChatModelAgentMiddleware: &adk.TypedBaseChatModelAgentMiddleware[M]{},
 		t:                                 t,
@@ -56,17 +49,11 @@ func typedBuildAppendPromptTool[M messageType](prompt string, t tool.BaseTool) a
 	}
 }
 
-func buildAppendPromptTool(prompt string, t tool.BaseTool) adk.ChatModelAgentMiddleware {
-	return typedBuildAppendPromptTool[*schema.Message](prompt, t)
-}
-
-type typedAppendPromptTool[M messageType] struct {
+type typedAppendPromptTool[M adk.MessageType] struct {
 	*adk.TypedBaseChatModelAgentMiddleware[M]
 	t      tool.BaseTool
 	prompt string
 }
-
-type appendPromptTool = typedAppendPromptTool[*schema.Message]
 
 func (w *typedAppendPromptTool[M]) BeforeAgent(ctx context.Context, runCtx *adk.ChatModelAgentContext) (context.Context, *adk.ChatModelAgentContext, error) {
 	nRunCtx := *runCtx
@@ -75,42 +62,4 @@ func (w *typedAppendPromptTool[M]) BeforeAgent(ctx context.Context, runCtx *adk.
 		nRunCtx.Tools = append(nRunCtx.Tools, w.t)
 	}
 	return ctx, &nRunCtx, nil
-}
-
-type middlewareAdapter[M messageType] struct {
-	*adk.TypedBaseChatModelAgentMiddleware[M]
-	inner adk.ChatModelAgentMiddleware
-}
-
-func (a *middlewareAdapter[M]) BeforeAgent(ctx context.Context, runCtx *adk.ChatModelAgentContext) (context.Context, *adk.ChatModelAgentContext, error) {
-	return a.inner.BeforeAgent(ctx, runCtx)
-}
-
-func (a *middlewareAdapter[M]) WrapInvokableToolCall(ctx context.Context, endpoint adk.InvokableToolCallEndpoint, tCtx *adk.ToolContext) (adk.InvokableToolCallEndpoint, error) {
-	return a.inner.WrapInvokableToolCall(ctx, endpoint, tCtx)
-}
-
-func (a *middlewareAdapter[M]) WrapStreamableToolCall(ctx context.Context, endpoint adk.StreamableToolCallEndpoint, tCtx *adk.ToolContext) (adk.StreamableToolCallEndpoint, error) {
-	return a.inner.WrapStreamableToolCall(ctx, endpoint, tCtx)
-}
-
-func (a *middlewareAdapter[M]) WrapEnhancedInvokableToolCall(ctx context.Context, endpoint adk.EnhancedInvokableToolCallEndpoint, tCtx *adk.ToolContext) (adk.EnhancedInvokableToolCallEndpoint, error) {
-	return a.inner.WrapEnhancedInvokableToolCall(ctx, endpoint, tCtx)
-}
-
-func (a *middlewareAdapter[M]) WrapEnhancedStreamableToolCall(ctx context.Context, endpoint adk.EnhancedStreamableToolCallEndpoint, tCtx *adk.ToolContext) (adk.EnhancedStreamableToolCallEndpoint, error) {
-	return a.inner.WrapEnhancedStreamableToolCall(ctx, endpoint, tCtx)
-}
-
-func adaptMiddleware[M messageType](m adk.ChatModelAgentMiddleware) adk.TypedChatModelAgentMiddleware[M] {
-	var zero M
-	switch any(zero).(type) {
-	case *schema.Message:
-		return any(m).(adk.TypedChatModelAgentMiddleware[M])
-	default:
-		return &middlewareAdapter[M]{
-			TypedBaseChatModelAgentMiddleware: &adk.TypedBaseChatModelAgentMiddleware[M]{},
-			inner:                             m,
-		}
-	}
 }

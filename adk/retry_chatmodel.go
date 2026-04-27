@@ -112,7 +112,7 @@ func init() {
 //	OutputMessage == nil, Err != nil  → failed call (Generate error or Stream() error)
 //	OutputMessage != nil, Err != nil  → partial stream (chunks received before mid-stream error)
 //	OutputMessage == nil, Err == nil  → empty stream (zero chunks before EOF)
-type TypedRetryContext[M messageType] struct {
+type TypedRetryContext[M MessageType] struct {
 	// RetryAttempt is the current retry attempt number (1-based).
 	// For the first retry decision (after the initial call), this is 1.
 	RetryAttempt int
@@ -143,7 +143,7 @@ type TypedRetryContext[M messageType] struct {
 type RetryContext = TypedRetryContext[*schema.Message]
 
 // TypedRetryDecision represents the decision made by TypedModelRetryConfig.ShouldRetry.
-type TypedRetryDecision[M messageType] struct {
+type TypedRetryDecision[M MessageType] struct {
 	// Retry indicates whether the model call should be retried.
 	// If false, the model output (or error) is accepted as-is, unless RewriteError is set.
 	Retry bool
@@ -219,7 +219,7 @@ type RetryDecision = TypedRetryDecision[*schema.Message]
 
 // TypedModelRetryConfig configures retry behavior for the ChatModel node.
 // It defines how the agent should handle transient failures when calling the ChatModel.
-type TypedModelRetryConfig[M messageType] struct {
+type TypedModelRetryConfig[M MessageType] struct {
 	// MaxRetries specifies the maximum number of retry attempts.
 	// A value of 0 means no retries will be attempted.
 	// A value of 3 means up to 3 retry attempts (4 total calls including the initial attempt).
@@ -320,12 +320,12 @@ type retryVerdict struct {
 // This is used inside the model wrapper chain, positioned between eventSenderModelWrapper
 // and stateModelWrapper, so that retry only affects the inner chain (event sending, user wrappers,
 // callback injection) without re-running state management (BeforeModelRewriteState/AfterModelRewriteState).
-type typedRetryModelWrapper[M messageType] struct {
+type typedRetryModelWrapper[M MessageType] struct {
 	inner  model.BaseModel[M]
 	config *TypedModelRetryConfig[M]
 }
 
-func newTypedRetryModelWrapper[M messageType](inner model.BaseModel[M], config *TypedModelRetryConfig[M]) *typedRetryModelWrapper[M] {
+func newTypedRetryModelWrapper[M MessageType](inner model.BaseModel[M], config *TypedModelRetryConfig[M]) *typedRetryModelWrapper[M] {
 	return &typedRetryModelWrapper[M]{inner: inner, config: config}
 }
 
@@ -376,7 +376,7 @@ func (r *typedRetryModelWrapper[M]) generateLegacy(ctx context.Context, input []
 	return zero, &RetryExhaustedError{LastErr: lastErr, TotalRetries: r.config.MaxRetries}
 }
 
-func generateWithShouldRetry[M messageType](r *typedRetryModelWrapper[M], ctx context.Context, input []M, opts ...model.Option) (M, error) {
+func generateWithShouldRetry[M MessageType](r *typedRetryModelWrapper[M], ctx context.Context, input []M, opts ...model.Option) (M, error) {
 	backoffFunc := r.config.BackoffFunc
 	if backoffFunc == nil {
 		backoffFunc = defaultBackoff
@@ -485,7 +485,7 @@ func (r *typedRetryModelWrapper[M]) contextAwareSleep(ctx context.Context, delay
 	}
 }
 
-func streamWithShouldRetry[M messageType](r *typedRetryModelWrapper[M], ctx context.Context, input []M, opts ...model.Option) (
+func streamWithShouldRetry[M MessageType](r *typedRetryModelWrapper[M], ctx context.Context, input []M, opts ...model.Option) (
 	*schema.StreamReader[M], error) {
 
 	backoffFunc := r.config.BackoffFunc
@@ -656,7 +656,7 @@ func streamWithShouldRetry[M messageType](r *typedRetryModelWrapper[M], ctx cont
 	return nil, &RetryExhaustedError{LastErr: lastErr, TotalRetries: r.config.MaxRetries}
 }
 
-func applyDecisionForRetry[M messageType](currentInput *[]M, currentOpts *[]model.Option, ctx context.Context, decision *TypedRetryDecision[M]) {
+func applyDecisionForRetry[M MessageType](currentInput *[]M, currentOpts *[]model.Option, ctx context.Context, decision *TypedRetryDecision[M]) {
 	if decision.ModifiedInputMessages != nil {
 		*currentInput = decision.ModifiedInputMessages
 		if decision.PersistModifiedInputMessages {

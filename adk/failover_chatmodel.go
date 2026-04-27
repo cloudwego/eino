@@ -31,11 +31,11 @@ import (
 
 type failoverCurrentModelKey struct{}
 
-func typedSetFailoverCurrentModel[M messageType](ctx context.Context, currentModel model.BaseModel[M]) context.Context {
+func typedSetFailoverCurrentModel[M MessageType](ctx context.Context, currentModel model.BaseModel[M]) context.Context {
 	return context.WithValue(ctx, failoverCurrentModelKey{}, currentModel)
 }
 
-func typedGetFailoverCurrentModel[M messageType](ctx context.Context) (model.BaseModel[M], bool) {
+func typedGetFailoverCurrentModel[M MessageType](ctx context.Context) (model.BaseModel[M], bool) {
 	m, ok := ctx.Value(failoverCurrentModelKey{}).(model.BaseModel[M])
 	return m, ok
 }
@@ -56,7 +56,7 @@ func getFailoverHasMoreAttempts(ctx context.Context) bool {
 	return v
 }
 
-type typedFailoverProxyModel[M messageType] struct {
+type typedFailoverProxyModel[M MessageType] struct {
 }
 
 func (m *typedFailoverProxyModel[M]) prepareCallbacks(ctx context.Context) (context.Context, model.BaseModel[M], error) {
@@ -124,7 +124,7 @@ func (m *typedFailoverProxyModel[M]) GetType() string {
 type failoverProxyModel = typedFailoverProxyModel[*schema.Message]
 
 // TypedFailoverContext contains context information during failover process.
-type TypedFailoverContext[M messageType] struct {
+type TypedFailoverContext[M MessageType] struct {
 	// FailoverAttempt is the current failover attempt number, starting from 1.
 	FailoverAttempt uint
 
@@ -150,7 +150,7 @@ type FailoverContext = TypedFailoverContext[*schema.Message]
 // TypedModelFailoverConfig configures failover behavior for ChatModel.
 // When configured, each ChatModel call first tries the last successful model (initially the configured Model),
 // and if that fails, calls GetFailoverModel to select alternate models.
-type TypedModelFailoverConfig[M messageType] struct {
+type TypedModelFailoverConfig[M MessageType] struct {
 	// MaxRetries specifies the maximum number of failover attempts.
 	//
 	// When failover is triggered, GetFailoverModel will be called up to MaxRetries times
@@ -194,7 +194,7 @@ type TypedModelFailoverConfig[M messageType] struct {
 // ModelFailoverConfig is the default failover config type using *schema.Message.
 type ModelFailoverConfig = TypedModelFailoverConfig[*schema.Message]
 
-func typedGetFailoverLastSuccessModel[M messageType](ctx context.Context) model.BaseModel[M] {
+func typedGetFailoverLastSuccessModel[M MessageType](ctx context.Context) model.BaseModel[M] {
 	execCtx := getTypedChatModelAgentExecCtx[M](ctx)
 	if execCtx == nil {
 		return nil
@@ -202,20 +202,20 @@ func typedGetFailoverLastSuccessModel[M messageType](ctx context.Context) model.
 	return execCtx.failoverLastSuccessModel
 }
 
-func typedSetFailoverLastSuccessModel[M messageType](ctx context.Context, m model.BaseModel[M]) {
+func typedSetFailoverLastSuccessModel[M MessageType](ctx context.Context, m model.BaseModel[M]) {
 	if execCtx := getTypedChatModelAgentExecCtx[M](ctx); execCtx != nil {
 		execCtx.failoverLastSuccessModel = m
 	}
 }
 
-type typedFailoverModelWrapper[M messageType] struct {
+type typedFailoverModelWrapper[M MessageType] struct {
 	config *TypedModelFailoverConfig[M]
 	inner  model.BaseModel[M]
 }
 
 type failoverModelWrapper = typedFailoverModelWrapper[*schema.Message]
 
-func newTypedFailoverModelWrapper[M messageType](inner model.BaseModel[M], config *TypedModelFailoverConfig[M]) *typedFailoverModelWrapper[M] {
+func newTypedFailoverModelWrapper[M MessageType](inner model.BaseModel[M], config *TypedModelFailoverConfig[M]) *typedFailoverModelWrapper[M] {
 	return &typedFailoverModelWrapper[M]{
 		config: config,
 		inner:  inner,
@@ -463,7 +463,7 @@ func (f *typedFailoverModelWrapper[M]) Stream(ctx context.Context, input []M, op
 	return nil, lastErr
 }
 
-func typedConsumeStream[M messageType](stream *schema.StreamReader[M]) (M, error) {
+func typedConsumeStream[M MessageType](stream *schema.StreamReader[M]) (M, error) {
 	var zero M
 	defer stream.Close()
 
@@ -476,9 +476,6 @@ func typedConsumeStream[M messageType](stream *schema.StreamReader[M]) (M, error
 				break
 			}
 			if err != nil {
-				if len(chunks) == 0 {
-					return zero, err
-				}
 				msg, _ := schema.ConcatMessages(chunks)
 				if msg != nil {
 					return any(msg).(M), err
@@ -486,9 +483,6 @@ func typedConsumeStream[M messageType](stream *schema.StreamReader[M]) (M, error
 				return zero, err
 			}
 			chunks = append(chunks, chunk)
-		}
-		if len(chunks) == 0 {
-			return zero, nil
 		}
 		msg, _ := schema.ConcatMessages(chunks)
 		if msg != nil {
@@ -503,9 +497,6 @@ func typedConsumeStream[M messageType](stream *schema.StreamReader[M]) (M, error
 				break
 			}
 			if err != nil {
-				if len(chunks) == 0 {
-					return zero, err
-				}
 				msg, _ := schema.ConcatAgenticMessages(chunks)
 				if msg != nil {
 					return any(msg).(M), err
@@ -514,15 +505,12 @@ func typedConsumeStream[M messageType](stream *schema.StreamReader[M]) (M, error
 			}
 			chunks = append(chunks, chunk)
 		}
-		if len(chunks) == 0 {
-			return zero, nil
-		}
 		msg, _ := schema.ConcatAgenticMessages(chunks)
 		if msg != nil {
 			return any(msg).(M), nil
 		}
 		return zero, nil
 	default:
-		panic("unreachable: unknown messageType")
+		panic("unreachable: unknown MessageType")
 	}
 }

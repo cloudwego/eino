@@ -677,7 +677,7 @@ func TestNew(t *testing.T) {
 		assert.NoError(t, err)
 		assert.NotNil(t, m)
 
-		fm, ok := m.(*filesystemMiddleware)
+		fm, ok := m.(*typedFilesystemMiddleware[*schema.Message])
 		assert.True(t, ok)
 		assert.Len(t, fm.additionalTools, 6)
 	})
@@ -690,7 +690,7 @@ func TestNew(t *testing.T) {
 		})
 		assert.NoError(t, err)
 
-		fm, ok := m.(*filesystemMiddleware)
+		fm, ok := m.(*typedFilesystemMiddleware[*schema.Message])
 		assert.True(t, ok)
 		assert.Equal(t, customPrompt, fm.additionalInstruction)
 	})
@@ -703,7 +703,7 @@ func TestNew(t *testing.T) {
 		m, err := New(ctx, &MiddlewareConfig{Backend: shellBackend, Shell: shellBackend})
 		assert.NoError(t, err)
 
-		fm, ok := m.(*filesystemMiddleware)
+		fm, ok := m.(*typedFilesystemMiddleware[*schema.Message])
 		assert.True(t, ok)
 		assert.Len(t, fm.additionalTools, 7)
 	})
@@ -1033,7 +1033,7 @@ func TestCustomToolNames(t *testing.T) {
 		})
 		assert.NoError(t, err)
 
-		fm, ok := m.(*filesystemMiddleware)
+		fm, ok := m.(*typedFilesystemMiddleware[*schema.Message])
 		assert.True(t, ok)
 
 		toolNames := make(map[string]bool)
@@ -1959,7 +1959,7 @@ func TestNew_StreamingShell(t *testing.T) {
 		})
 		assert.NoError(t, err)
 
-		fm, ok := m.(*filesystemMiddleware)
+		fm, ok := m.(*typedFilesystemMiddleware[*schema.Message])
 		assert.True(t, ok)
 		assert.Len(t, fm.additionalTools, 7)
 	})

@@ -31,7 +31,7 @@ import (
 // ErrExceedMaxIterations indicates the agent reached the maximum iterations limit.
 var ErrExceedMaxIterations = errors.New("exceeds max iterations")
 
-type typedState[M messageType] struct {
+type typedState[M MessageType] struct {
 	Messages []M
 	Extra    map[string]any
 
@@ -258,7 +258,7 @@ type reactInput struct {
 	Messages []Message
 }
 
-type typedReactConfig[M messageType] struct {
+type typedReactConfig[M MessageType] struct {
 	model model.BaseModel[M]
 
 	toolsConfig      *compose.ToolsNodeConfig

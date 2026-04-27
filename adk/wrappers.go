@@ -32,10 +32,10 @@ import (
 	"github.com/cloudwego/eino/schema"
 )
 
-type typedGenerateEndpoint[M messageType] func(ctx context.Context, input []M, opts ...model.Option) (M, error)
-type typedStreamEndpoint[M messageType] func(ctx context.Context, input []M, opts ...model.Option) (*schema.StreamReader[M], error)
+type typedGenerateEndpoint[M MessageType] func(ctx context.Context, input []M, opts ...model.Option) (M, error)
+type typedStreamEndpoint[M MessageType] func(ctx context.Context, input []M, opts ...model.Option) (*schema.StreamReader[M], error)
 
-type typedModelWrapperConfig[M messageType] struct {
+type typedModelWrapperConfig[M MessageType] struct {
 	handlers       []TypedChatModelAgentMiddleware[M]
 	middlewares    []AgentMiddleware
 	retryConfig    *TypedModelRetryConfig[M]
@@ -46,11 +46,11 @@ type typedModelWrapperConfig[M messageType] struct {
 
 type modelWrapperConfig = typedModelWrapperConfig[*schema.Message]
 
-func buildModelWrappers[M messageType](m model.BaseModel[M], config *typedModelWrapperConfig[M]) model.BaseModel[M] {
+func buildModelWrappers[M MessageType](m model.BaseModel[M], config *typedModelWrapperConfig[M]) model.BaseModel[M] {
 	return buildModelWrappersImpl(m, config)
 }
 
-func buildModelWrappersImpl[M messageType](m model.BaseModel[M], config *typedModelWrapperConfig[M]) model.BaseModel[M] {
+func buildModelWrappersImpl[M MessageType](m model.BaseModel[M], config *typedModelWrapperConfig[M]) model.BaseModel[M] {
 	var wrapped model.BaseModel[M] = m
 
 	if config.failoverConfig != nil {
@@ -75,13 +75,13 @@ func buildModelWrappersImpl[M messageType](m model.BaseModel[M], config *typedMo
 	return wrapped
 }
 
-type typedCallbackInjectionModelWrapper[M messageType] struct{}
+type typedCallbackInjectionModelWrapper[M MessageType] struct{}
 
 func (w typedCallbackInjectionModelWrapper[M]) wrapModel(m model.BaseModel[M]) model.BaseModel[M] {
 	return &typedCallbackInjectedModel[M]{inner: m}
 }
 
-type typedCallbackInjectedModel[M messageType] struct {
+type typedCallbackInjectedModel[M MessageType] struct {
 	inner model.BaseModel[M]
 }
 
@@ -108,7 +108,7 @@ func (m *typedCallbackInjectedModel[M]) Stream(ctx context.Context, input []M, o
 	return wrappedStream, nil
 }
 
-func handlersToToolMiddlewares[M messageType](handlers []TypedChatModelAgentMiddleware[M]) []compose.ToolMiddleware {
+func handlersToToolMiddlewares[M MessageType](handlers []TypedChatModelAgentMiddleware[M]) []compose.ToolMiddleware {
 	var middlewares []compose.ToolMiddleware
 	for i := len(handlers) - 1; i >= 0; i-- {
 		handler := handlers[i]
@@ -253,7 +253,7 @@ func handlersToToolMiddlewares[M messageType](handlers []TypedChatModelAgentMidd
 	return middlewares
 }
 
-type typedEventSenderModelWrapper[M messageType] struct {
+type typedEventSenderModelWrapper[M MessageType] struct {
 	*TypedBaseChatModelAgentMiddleware[M]
 }
 
@@ -283,7 +283,7 @@ func (w *typedEventSenderModelWrapper[M]) WrapModel(_ context.Context, m model.B
 	return &typedEventSenderModel[M]{inner: inner, modelRetryConfig: retryConfig, modelFailoverConfig: failoverConfig}, nil
 }
 
-type typedEventSenderModel[M messageType] struct {
+type typedEventSenderModel[M MessageType] struct {
 	inner               model.BaseModel[M]
 	modelRetryConfig    *TypedModelRetryConfig[M]
 	modelFailoverConfig *TypedModelFailoverConfig[M]
@@ -464,7 +464,7 @@ func (m *typedEventSenderModel[M]) buildStreamConvertOptions(ctx context.Context
 	return opts
 }
 
-func copyMessage[M messageType](msg M) M {
+func copyMessage[M MessageType](msg M) M {
 	switch v := any(msg).(type) {
 	case *schema.Message:
 		cp := *v
@@ -477,7 +477,7 @@ func copyMessage[M messageType](msg M) M {
 	}
 }
 
-func typedPopToolGenAction[M messageType](ctx context.Context, toolName string) *AgentAction {
+func typedPopToolGenAction[M MessageType](ctx context.Context, toolName string) *AgentAction {
 	toolCallID := compose.GetToolCallID(ctx)
 
 	var action *AgentAction
@@ -667,7 +667,7 @@ func (w *eventSenderToolWrapper) WrapEnhancedStreamableToolCall(_ context.Contex
 	}, nil
 }
 
-func hasUserEventSenderToolWrapper[M messageType](handlers []TypedChatModelAgentMiddleware[M]) bool {
+func hasUserEventSenderToolWrapper[M MessageType](handlers []TypedChatModelAgentMiddleware[M]) bool {
 	for _, handler := range handlers {
 		if _, ok := any(handler).(eventSenderToolWrapperMarker); ok {
 			return true
@@ -676,7 +676,7 @@ func hasUserEventSenderToolWrapper[M messageType](handlers []TypedChatModelAgent
 	return false
 }
 
-type typedStateModelWrapper[M messageType] struct {
+type typedStateModelWrapper[M MessageType] struct {
 	inner               model.BaseModel[M]
 	original            model.BaseModel[M]
 	handlers            []TypedChatModelAgentMiddleware[M]
@@ -1079,7 +1079,7 @@ func (w *typedStateModelWrapper[M]) Stream(ctx context.Context, input []M, opts 
 	return schema.StreamReaderFromArray([]M{state.Messages[len(state.Messages)-1]}), nil
 }
 
-type typedEndpointModel[M messageType] struct {
+type typedEndpointModel[M MessageType] struct {
 	generate typedGenerateEndpoint[M]
 	stream   typedStreamEndpoint[M]
 }

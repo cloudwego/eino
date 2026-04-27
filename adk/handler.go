@@ -54,7 +54,7 @@ type ToolCallsContext struct {
 }
 
 // TypedModelContext contains context information passed to WrapModel.
-type TypedModelContext[M messageType] struct {
+type TypedModelContext[M MessageType] struct {
 	// Tools contains the current tool list configured for the agent.
 	// This is populated at request time with the tools that will be sent to the model.
 	//
@@ -136,7 +136,7 @@ type ChatModelAgentContext struct {
 //
 // Use *TypedBaseChatModelAgentMiddleware as an embedded struct to provide default no-op
 // implementations for all methods.
-type TypedChatModelAgentMiddleware[M messageType] interface {
+type TypedChatModelAgentMiddleware[M MessageType] interface {
 	// BeforeAgent is called before each agent run, allowing modification of
 	// the agent's instruction and tools configuration.
 	BeforeAgent(ctx context.Context, runCtx *ChatModelAgentContext) (context.Context, *ChatModelAgentContext, error)
@@ -242,7 +242,7 @@ type TypedChatModelAgentMiddleware[M messageType] interface {
 // See TypedChatModelAgentMiddleware for full documentation.
 type ChatModelAgentMiddleware = TypedChatModelAgentMiddleware[*schema.Message]
 
-type TypedBaseChatModelAgentMiddleware[M messageType] struct{}
+type TypedBaseChatModelAgentMiddleware[M MessageType] struct{}
 
 // BaseChatModelAgentMiddleware provides default no-op implementations for ChatModelAgentMiddleware.
 // Embed *BaseChatModelAgentMiddleware in custom handlers to only override the methods you need.
@@ -381,7 +381,7 @@ func DeleteRunLocalValue(ctx context.Context, key string) error {
 //
 // This function can only be called from within a TypedChatModelAgentMiddleware during agent execution.
 // Returns an error if called outside of an agent execution context.
-func TypedSendEvent[M messageType](ctx context.Context, event *TypedAgentEvent[M]) error {
+func TypedSendEvent[M MessageType](ctx context.Context, event *TypedAgentEvent[M]) error {
 	execCtx := getTypedChatModelAgentExecCtx[M](ctx)
 	if execCtx == nil || execCtx.generator == nil {
 		return fmt.Errorf("TypedSendEvent failed: must be called within a ChatModelAgent Run() or Resume() execution context")

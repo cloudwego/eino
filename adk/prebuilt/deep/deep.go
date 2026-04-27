@@ -41,7 +41,7 @@ func init() {
 // An Agentic DeepAgent (M = *schema.AgenticMessage) only supports Agentic sub-agents,
 // and a standard DeepAgent (M = *schema.Message) only supports standard sub-agents.
 // This is enforced by the type system through the SubAgents field.
-type TypedConfig[M messageType] struct {
+type TypedConfig[M adk.MessageType] struct {
 	// Name is the identifier for the Deep agent.
 	Name string
 	// Description provides a brief explanation of the agent's purpose.
@@ -113,8 +113,8 @@ type Config = TypedConfig[*schema.Message]
 // NewTyped creates a new typed Deep agent instance with the provided configuration.
 // This function initializes built-in tools, creates a task tool for subagent orchestration,
 // and returns a fully configured TypedChatModelAgent ready for execution.
-func NewTyped[M messageType](ctx context.Context, cfg *TypedConfig[M]) (adk.TypedResumableAgent[M], error) {
-	handlers, err := buildTypedBuiltinAgentMiddlewares[M](ctx, cfg)
+func NewTyped[M adk.MessageType](ctx context.Context, cfg *TypedConfig[M]) (adk.TypedResumableAgent[M], error) {
+	handlers, err := buildTypedBuiltinAgentMiddlewares(ctx, cfg)
 	if err != nil {
 		return nil, err
 	}
@@ -172,7 +172,7 @@ func New(ctx context.Context, cfg *Config) (adk.ResumableAgent, error) {
 	return NewTyped[*schema.Message](ctx, cfg)
 }
 
-func typedGenModelInput[M messageType](ctx context.Context, instruction string, input *adk.TypedAgentInput[M]) ([]M, error) {
+func typedGenModelInput[M adk.MessageType](_ context.Context, instruction string, input *adk.TypedAgentInput[M]) ([]M, error) {
 	var zero M
 	switch any(zero).(type) {
 	case *schema.Message:
@@ -206,11 +206,7 @@ func typedGenModelInput[M messageType](ctx context.Context, instruction string, 
 	panic("unreachable")
 }
 
-func genModelInput(ctx context.Context, instruction string, input *adk.AgentInput) ([]*schema.Message, error) {
-	return typedGenModelInput[*schema.Message](ctx, instruction, input)
-}
-
-func buildTypedBuiltinAgentMiddlewares[M messageType](ctx context.Context, cfg *TypedConfig[M]) ([]adk.TypedChatModelAgentMiddleware[M], error) {
+func buildTypedBuiltinAgentMiddlewares[M adk.MessageType](ctx context.Context, cfg *TypedConfig[M]) ([]adk.TypedChatModelAgentMiddleware[M], error) {
 	var ms []adk.TypedChatModelAgentMiddleware[M]
 	if !cfg.WithoutWriteTodos {
 		t, err := typedNewWriteTodos[M]()
@@ -221,7 +217,7 @@ func buildTypedBuiltinAgentMiddlewares[M messageType](ctx context.Context, cfg *
 	}
 
 	if cfg.Backend != nil || cfg.Shell != nil || cfg.StreamingShell != nil {
-		fm, err := filesystem2.New(ctx, &filesystem2.MiddlewareConfig{
+		fm, err := filesystem2.NewTyped[M](ctx, &filesystem2.MiddlewareConfig{
 			Backend:        cfg.Backend,
 			Shell:          cfg.Shell,
 			StreamingShell: cfg.StreamingShell,
@@ -229,14 +225,10 @@ func buildTypedBuiltinAgentMiddlewares[M messageType](ctx context.Context, cfg *
 		if err != nil {
 			return nil, err
 		}
-		ms = append(ms, adaptMiddleware[M](fm))
+		ms = append(ms, fm)
 	}
 
 	return ms, nil
-}
-
-func buildBuiltinAgentMiddlewares(ctx context.Context, cfg *Config) ([]adk.ChatModelAgentMiddleware, error) {
-	return buildTypedBuiltinAgentMiddlewares[*schema.Message](ctx, cfg)
 }
 
 type TODO struct {
@@ -249,7 +241,7 @@ type writeTodosArguments struct {
 	Todos []TODO `json:"todos"`
 }
 
-func typedNewWriteTodos[M messageType]() (adk.TypedChatModelAgentMiddleware[M], error) {
+func typedNewWriteTodos[M adk.MessageType]() (adk.TypedChatModelAgentMiddleware[M], error) {
 	toolDesc := internal.SelectPrompt(internal.I18nPrompts{
 		English: writeTodosToolDescription,
 		Chinese: writeTodosToolDescriptionChinese,
@@ -272,8 +264,4 @@ func typedNewWriteTodos[M messageType]() (adk.TypedChatModelAgentMiddleware[M], 
 	}
 
 	return typedBuildAppendPromptTool[M]("", t), nil
-}
-
-func newWriteTodos() (adk.ChatModelAgentMiddleware, error) {
-	return typedNewWriteTodos[*schema.Message]()
 }

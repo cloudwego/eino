@@ -341,6 +341,38 @@ func (c *MiddlewareConfig) mergeToolConfigWithDesc(
 	return toolConfig
 }
 
+// NewTyped constructs and returns the filesystem middleware as a TypedChatModelAgentMiddleware[M].
+//
+// This is the generic constructor that supports both *schema.Message and *schema.AgenticMessage.
+// It returns a TypedChatModelAgentMiddleware[M] which provides:
+//   - Better context propagation through WrapInvokableToolCall and WrapStreamableToolCall methods
+//   - BeforeAgent hook for modifying agent instruction and tools at runtime
+//   - More flexible extension points compared to the struct-based AgentMiddleware
+//
+// The middleware provides filesystem tools (ls, read_file, write_file, edit_file, glob, grep)
+// and optionally an execute tool if the Backend implements ShellBackend or StreamingShellBackend.
+func NewTyped[M adk.MessageType](ctx context.Context, config *MiddlewareConfig) (adk.TypedChatModelAgentMiddleware[M], error) {
+	err := config.Validate()
+	if err != nil {
+		return nil, err
+	}
+	ts, err := getFilesystemTools(ctx, config)
+	if err != nil {
+		return nil, err
+	}
+	var systemPrompt string
+	if config.CustomSystemPrompt != nil {
+		systemPrompt = *config.CustomSystemPrompt
+	}
+
+	m := &typedFilesystemMiddleware[M]{
+		additionalInstruction: systemPrompt,
+		additionalTools:       ts,
+	}
+
+	return m, nil
+}
+
 // New constructs and returns the filesystem middleware as a ChatModelAgentMiddleware.
 //
 // This is the recommended constructor for new code. It returns a ChatModelAgentMiddleware which provides:
@@ -361,34 +393,16 @@ func (c *MiddlewareConfig) mergeToolConfigWithDesc(
 //	    Handlers: []adk.ChatModelAgentMiddleware{middleware},
 //	})
 func New(ctx context.Context, config *MiddlewareConfig) (adk.ChatModelAgentMiddleware, error) {
-	err := config.Validate()
-	if err != nil {
-		return nil, err
-	}
-	ts, err := getFilesystemTools(ctx, config)
-	if err != nil {
-		return nil, err
-	}
-	var systemPrompt string
-	if config.CustomSystemPrompt != nil {
-		systemPrompt = *config.CustomSystemPrompt
-	}
-
-	m := &filesystemMiddleware{
-		additionalInstruction: systemPrompt,
-		additionalTools:       ts,
-	}
-
-	return m, nil
+	return NewTyped[*schema.Message](ctx, config)
 }
 
-type filesystemMiddleware struct {
-	adk.BaseChatModelAgentMiddleware
+type typedFilesystemMiddleware[M adk.MessageType] struct {
+	*adk.TypedBaseChatModelAgentMiddleware[M]
 	additionalInstruction string
 	additionalTools       []tool.BaseTool
 }
 
-func (m *filesystemMiddleware) BeforeAgent(ctx context.Context, runCtx *adk.ChatModelAgentContext) (context.Context, *adk.ChatModelAgentContext, error) {
+func (m *typedFilesystemMiddleware[M]) BeforeAgent(ctx context.Context, runCtx *adk.ChatModelAgentContext) (context.Context, *adk.ChatModelAgentContext, error) {
 	if runCtx == nil {
 		return ctx, runCtx, nil
 	}

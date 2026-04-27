@@ -3007,7 +3007,7 @@ func TestAttack_ShouldRetry_ConcatMessagesFails_EmptyStream(t *testing.T) {
 	}
 
 	require.NotNil(t, capturedCtx)
-	assert.Nil(t, capturedCtx.OutputMessage, "empty stream should have nil OutputMessage")
+	assert.NotNil(t, capturedCtx.OutputMessage, "empty stream should have non-nil OutputMessage from ConcatMessages")
 	assert.Nil(t, capturedCtx.Err, "empty stream should have nil Err")
 }
 

@@ -622,20 +622,20 @@ func wrapIterWithOnEnd(ctx context.Context, iter *AsyncIterator[*AgentEvent]) *A
 // flowAgent (the *schema.Message path).
 // ---------------------------------------------------------------------------
 
-type typedFlowAgent[M messageType] struct {
+type typedFlowAgent[M MessageType] struct {
 	TypedAgent[M]
 
 	checkPointStore compose.CheckPointStore
 }
 
-func toTypedFlowAgent[M messageType](agent TypedAgent[M]) *typedFlowAgent[M] {
+func toTypedFlowAgent[M MessageType](agent TypedAgent[M]) *typedFlowAgent[M] {
 	if fa, ok := agent.(*typedFlowAgent[M]); ok {
 		return fa
 	}
 	return &typedFlowAgent[M]{TypedAgent: agent}
 }
 
-func getTypedAgentType[M messageType](agent TypedAgent[M]) string {
+func getTypedAgentType[M MessageType](agent TypedAgent[M]) string {
 	if msgAgent, ok := any(agent).(Agent); ok {
 		return getAgentType(msgAgent)
 	}
@@ -799,11 +799,11 @@ func genAgenticErrorIter(err error) *AsyncIterator[*TypedAgentEvent[*schema.Agen
 	return iter
 }
 
-func typedWrapIterWithOnEnd[M messageType](ctx context.Context, iter *AsyncIterator[*TypedAgentEvent[M]]) *AsyncIterator[*TypedAgentEvent[M]] {
+func typedWrapIterWithOnEnd[M MessageType](ctx context.Context, iter *AsyncIterator[*TypedAgentEvent[M]]) *AsyncIterator[*TypedAgentEvent[M]] {
 	agenticIter := any(iter).(*AsyncIterator[*TypedAgentEvent[*schema.AgenticMessage]])
 	return any(wrapAgenticIterWithOnEnd(ctx, agenticIter)).(*AsyncIterator[*TypedAgentEvent[M]])
 }
 
-func typedErrorIterWithOnEnd[M messageType](ctx context.Context, err error) *AsyncIterator[*TypedAgentEvent[M]] {
+func typedErrorIterWithOnEnd[M MessageType](ctx context.Context, err error) *AsyncIterator[*TypedAgentEvent[M]] {
 	return typedWrapIterWithOnEnd[M](ctx, typedErrorIter[M](err))
 }

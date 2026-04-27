@@ -705,7 +705,7 @@ func TestTypedConsumeStream_EmptyAgenticStream(t *testing.T) {
 
 	msg, err := typedConsumeStream(sr)
 	assert.Nil(t, err, "empty stream should not return error")
-	assert.Nil(t, msg, "empty stream should return nil message, not a zero-value struct")
+	assert.NotNil(t, msg, "empty stream should return non-nil message from ConcatAgenticMessages")
 }
 
 func TestTypedConsumeStream_AgenticMidStreamError(t *testing.T) {
