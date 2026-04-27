@@ -789,6 +789,8 @@ func newAgenticReact(ctx context.Context, config *agenticReactConfig) (agenticRe
 
 // extractToolIdentifiers extracts the tool name and call ID from an AgenticMessage
 // that contains a FunctionToolResult content block.
+// Assumes one tool result per message, which is guaranteed by AgenticToolsNode
+// (see compose.toolMessageToAgenticMessage).
 func extractToolIdentifiers(msg *schema.AgenticMessage) (toolName, callID string) {
 	if msg == nil {
 		return "", ""
