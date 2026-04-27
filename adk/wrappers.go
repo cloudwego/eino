@@ -93,8 +93,10 @@ func (m *callbackInjectedModel) Stream(ctx context.Context, input []*schema.Mess
 
 func handlersToToolMiddlewares(handlers []ChatModelAgentMiddleware) []compose.ToolMiddleware {
 	var middlewares []compose.ToolMiddleware
-	for i := len(handlers) - 1; i >= 0; i-- {
-		handler := handlers[i]
+	// Forward iteration: compose.wrapToolCall applies middlewares in reverse order
+	// (len-1 down to 0), so keeping the original handler order here means
+	// handlers[0] ends up outermost — matching the model wrapping convention.
+	for _, handler := range handlers {
 
 		m := compose.ToolMiddleware{}
 

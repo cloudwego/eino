@@ -615,7 +615,7 @@ func TestToolCallWrapperHandlers(t *testing.T) {
 			}
 		}
 
-		assert.Equal(t, []string{"wrapper2-before", "wrapper1-before", "wrapper1-after", "wrapper2-after"}, callOrder)
+		assert.Equal(t, []string{"wrapper1-before", "wrapper2-before", "wrapper2-after", "wrapper1-after"}, callOrder)
 	})
 
 	t.Run("StreamingToolWrappersPipeline", func(t *testing.T) {
@@ -702,7 +702,7 @@ func TestToolCallWrapperHandlers(t *testing.T) {
 		}
 
 		assert.True(t, hasStreamingToolResult, "Should have streaming tool result")
-		assert.Equal(t, []string{"wrapper2-stream-before", "wrapper1-stream-before", "wrapper1-stream-after", "wrapper2-stream-after"}, callOrder,
+		assert.Equal(t, []string{"wrapper1-stream-before", "wrapper2-stream-before", "wrapper2-stream-after", "wrapper1-stream-after"}, callOrder,
 			"Streaming wrappers should be called in correct order")
 	})
 

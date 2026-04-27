@@ -207,22 +207,22 @@ func TestHandlersToToolMiddlewaresEnhanced(t *testing.T) {
 		invokableEndpoint := func(ctx context.Context, input *compose.ToolInput) (*compose.ToolOutput, error) {
 			return &compose.ToolOutput{Result: "test"}, nil
 		}
-		_, _ = middlewares[3].Invokable(invokableEndpoint)(context.Background(), &compose.ToolInput{Name: "test", CallID: "1", Arguments: "{}"})
+		_, _ = middlewares[0].Invokable(invokableEndpoint)(context.Background(), &compose.ToolInput{Name: "test", CallID: "1", Arguments: "{}"})
 
 		streamableEndpoint := func(ctx context.Context, input *compose.ToolInput) (*compose.StreamToolOutput, error) {
 			return &compose.StreamToolOutput{Result: schema.StreamReaderFromArray([]string{"test"})}, nil
 		}
-		_, _ = middlewares[2].Streamable(streamableEndpoint)(context.Background(), &compose.ToolInput{Name: "test", CallID: "1", Arguments: "{}"})
+		_, _ = middlewares[1].Streamable(streamableEndpoint)(context.Background(), &compose.ToolInput{Name: "test", CallID: "1", Arguments: "{}"})
 
 		enhancedInvokableEndpoint := func(ctx context.Context, input *compose.ToolInput) (*compose.EnhancedInvokableToolOutput, error) {
 			return &compose.EnhancedInvokableToolOutput{Result: &schema.ToolResult{}}, nil
 		}
-		_, _ = middlewares[1].EnhancedInvokable(enhancedInvokableEndpoint)(context.Background(), &compose.ToolInput{Name: "test", CallID: "1", Arguments: "{}"})
+		_, _ = middlewares[2].EnhancedInvokable(enhancedInvokableEndpoint)(context.Background(), &compose.ToolInput{Name: "test", CallID: "1", Arguments: "{}"})
 
 		enhancedStreamableEndpoint := func(ctx context.Context, input *compose.ToolInput) (*compose.EnhancedStreamableToolOutput, error) {
 			return &compose.EnhancedStreamableToolOutput{Result: schema.StreamReaderFromArray([]*schema.ToolResult{{}})}, nil
 		}
-		_, _ = middlewares[0].EnhancedStreamable(enhancedStreamableEndpoint)(context.Background(), &compose.ToolInput{Name: "test", CallID: "1", Arguments: "{}"})
+		_, _ = middlewares[3].EnhancedStreamable(enhancedStreamableEndpoint)(context.Background(), &compose.ToolInput{Name: "test", CallID: "1", Arguments: "{}"})
 
 		assert.True(t, invokableCalled)
 		assert.True(t, streamableCalled)
@@ -339,7 +339,7 @@ func TestHandlersToToolMiddlewaresEnhanced(t *testing.T) {
 		wrapped := middlewares[0].EnhancedInvokable(middlewares[1].EnhancedInvokable(mockEndpoint))
 		_, err := wrapped(context.Background(), &compose.ToolInput{Name: "test", CallID: "1", Arguments: "{}"})
 		assert.NoError(t, err)
-		assert.Equal(t, []string{"handler2-before", "handler1-before", "handler1-after", "handler2-after"}, executionOrder)
+		assert.Equal(t, []string{"handler1-before", "handler2-before", "handler2-after", "handler1-after"}, executionOrder)
 	})
 
 	t.Run("MultipleEnhancedStreamableWrappers", func(t *testing.T) {
@@ -389,7 +389,7 @@ func TestHandlersToToolMiddlewaresEnhanced(t *testing.T) {
 		wrapped := middlewares[0].EnhancedStreamable(middlewares[1].EnhancedStreamable(mockEndpoint))
 		_, err := wrapped(context.Background(), &compose.ToolInput{Name: "test", CallID: "1", Arguments: "{}"})
 		assert.NoError(t, err)
-		assert.Equal(t, []string{"handler2-before", "handler1-before", "handler1-after", "handler2-after"}, executionOrder)
+		assert.Equal(t, []string{"handler1-before", "handler2-before", "handler2-after", "handler1-after"}, executionOrder)
 	})
 }
 
