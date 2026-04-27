@@ -497,7 +497,9 @@ func TestConcatAgenticMessages(t *testing.T) {
 						FunctionToolResult: &FunctionToolResult{
 							CallID: "call_123",
 							Name:   "get_weather",
-							Result: `{"temp`,
+							Blocks: []*FunctionToolResultBlock{
+								{Text: &UserInputText{Text: `{"temp`}},
+							},
 						},
 						StreamingMeta: &StreamingMeta{Index: 0},
 					},
@@ -509,7 +511,9 @@ func TestConcatAgenticMessages(t *testing.T) {
 					{
 						Type: ContentBlockTypeFunctionToolResult,
 						FunctionToolResult: &FunctionToolResult{
-							Result: `":72}`,
+							Blocks: []*FunctionToolResultBlock{
+								{Text: &UserInputText{Text: `":72}`}},
+							},
 						},
 						StreamingMeta: &StreamingMeta{Index: 0},
 					},
@@ -522,7 +526,9 @@ func TestConcatAgenticMessages(t *testing.T) {
 		assert.Len(t, result.ContentBlocks, 1)
 		assert.Equal(t, "call_123", result.ContentBlocks[0].FunctionToolResult.CallID)
 		assert.Equal(t, "get_weather", result.ContentBlocks[0].FunctionToolResult.Name)
-		assert.Equal(t, `{"temp":72}`, result.ContentBlocks[0].FunctionToolResult.Result)
+		assert.Equal(t, 2, len(result.ContentBlocks[0].FunctionToolResult.Blocks))
+		assert.Equal(t, `{"temp`, result.ContentBlocks[0].FunctionToolResult.Blocks[0].Text.Text)
+		assert.Equal(t, `":72}`, result.ContentBlocks[0].FunctionToolResult.Blocks[1].Text.Text)
 	})
 
 	t.Run("concat server tool call", func(t *testing.T) {
@@ -1299,7 +1305,9 @@ func TestAgenticMessageString(t *testing.T) {
 				FunctionToolResult: &FunctionToolResult{
 					CallID: "call_weather_123",
 					Name:   "get_current_weather",
-					Result: `{"temperature":72,"condition":"sunny","humidity":45,"wind_speed":8}`,
+					Blocks: []*FunctionToolResultBlock{
+						{Text: &UserInputText{Text: `{"temperature":72,"condition":"sunny","humidity":45,"wind_speed":8}`}},
+					},
 				},
 			},
 			{
@@ -1429,7 +1437,8 @@ Finally, I'll format the response in a user-friendly way with temperature and co
   [11] type: function_tool_result
       call_id: call_weather_123
       name: get_current_weather
-      result: {"temperature":72,"condition":"sunny","humidity":45,"wind_speed":8}
+      blocks: (1 blocks)
+        [0]       text: {"temperature":72,"condition":"sunny","humidity":45,"wind_speed":8}
   [12] type: server_tool_call
       name: server_tool
       call_id: call_1
@@ -1548,13 +1557,33 @@ func TestUserAgenticMessage(t *testing.T) {
 
 func TestFunctionToolResultAgenticMessage(t *testing.T) {
 	t.Run("basic", func(t *testing.T) {
-		msg := FunctionToolResultAgenticMessage("call_1", "tool_name", "result_str")
+		blocks := []*FunctionToolResultBlock{
+			{Text: &UserInputText{Text: "result_str"}},
+		}
+		msg := FunctionToolResultAgenticMessage("call_1", "tool_name", blocks)
 		assert.Equal(t, AgenticRoleTypeUser, msg.Role)
 		assert.Len(t, msg.ContentBlocks, 1)
 		assert.Equal(t, ContentBlockTypeFunctionToolResult, msg.ContentBlocks[0].Type)
 		assert.Equal(t, "call_1", msg.ContentBlocks[0].FunctionToolResult.CallID)
 		assert.Equal(t, "tool_name", msg.ContentBlocks[0].FunctionToolResult.Name)
-		assert.Equal(t, "result_str", msg.ContentBlocks[0].FunctionToolResult.Result)
+		assert.Len(t, msg.ContentBlocks[0].FunctionToolResult.Blocks, 1)
+		assert.Equal(t, "result_str", msg.ContentBlocks[0].FunctionToolResult.Blocks[0].Text.Text)
+	})
+
+	t.Run("multimodal", func(t *testing.T) {
+		blocks := []*FunctionToolResultBlock{
+			{Text: &UserInputText{Text: "description"}},
+			{Image: &UserInputImage{URL: "https://example.com/img.png"}},
+		}
+		msg := FunctionToolResultAgenticMessage("call_2", "vision_tool", blocks)
+		assert.Equal(t, AgenticRoleTypeUser, msg.Role)
+		assert.Len(t, msg.ContentBlocks, 1)
+		ftr := msg.ContentBlocks[0].FunctionToolResult
+		assert.Equal(t, "call_2", ftr.CallID)
+		assert.Equal(t, "vision_tool", ftr.Name)
+		assert.Len(t, ftr.Blocks, 2)
+		assert.Equal(t, "description", ftr.Blocks[0].Text.Text)
+		assert.Equal(t, "https://example.com/img.png", ftr.Blocks[1].Image.URL)
 	})
 }
 
