@@ -1366,6 +1366,7 @@ func (l *TurnLoop[T, M]) run(ctx context.Context) {
 
 	for {
 		if l.stopSig.isStopped() {
+			fmt.Fprintf(os.Stderr, "[DEBUG] exit: isStopped at top of loop, runErr=%v\n", l.runErr)
 			return
 		}
 

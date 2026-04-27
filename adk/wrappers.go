@@ -21,7 +21,6 @@ import (
 	"errors"
 	"io"
 	"reflect"
-	"strings"
 	"sync"
 
 	"github.com/google/uuid"
@@ -563,21 +562,6 @@ func NewEventSenderToolWrapper() ChatModelAgentMiddleware {
 	}
 }
 
-// toolResultText extracts the concatenated text content from a ToolResult.
-// Used for the AgenticMessage path where only string content is needed.
-func toolResultText(tr *schema.ToolResult) string {
-	if tr == nil {
-		return ""
-	}
-	texts := make([]string, 0, len(tr.Parts))
-	for _, p := range tr.Parts {
-		if p.Type == schema.ToolPartTypeText {
-			texts = append(texts, p.Text)
-		}
-	}
-	return strings.Join(texts, "")
-}
-
 // textToFunctionToolResultBlocks wraps a plain text string into FunctionToolResultBlocks.
 func textToFunctionToolResultBlocks(text string) []*schema.FunctionToolResultBlock {
 	if text == "" {
@@ -586,6 +570,81 @@ func textToFunctionToolResultBlocks(text string) []*schema.FunctionToolResultBlo
 	return []*schema.FunctionToolResultBlock{
 		{Text: &schema.UserInputText{Text: text}},
 	}
+}
+
+// toolResultToBlocks converts a ToolResult's multimodal parts into FunctionToolResultBlocks.
+// This preserves all media types (text, image, audio, video, file), unlike toolResultText
+// which only extracts text.
+func toolResultToBlocks(tr *schema.ToolResult) []*schema.FunctionToolResultBlock {
+	if tr == nil || len(tr.Parts) == 0 {
+		return nil
+	}
+	blocks := make([]*schema.FunctionToolResultBlock, 0, len(tr.Parts))
+	for _, p := range tr.Parts {
+		var block *schema.FunctionToolResultBlock
+		switch p.Type {
+		case schema.ToolPartTypeText:
+			block = &schema.FunctionToolResultBlock{
+				Text:  &schema.UserInputText{Text: p.Text},
+				Extra: p.Extra,
+			}
+		case schema.ToolPartTypeImage:
+			if p.Image != nil {
+				block = &schema.FunctionToolResultBlock{
+					Image: &schema.UserInputImage{
+						URL:        derefString(p.Image.URL),
+						Base64Data: derefString(p.Image.Base64Data),
+						MIMEType:   p.Image.MIMEType,
+					},
+					Extra: p.Extra,
+				}
+			}
+		case schema.ToolPartTypeAudio:
+			if p.Audio != nil {
+				block = &schema.FunctionToolResultBlock{
+					Audio: &schema.UserInputAudio{
+						URL:        derefString(p.Audio.URL),
+						Base64Data: derefString(p.Audio.Base64Data),
+						MIMEType:   p.Audio.MIMEType,
+					},
+					Extra: p.Extra,
+				}
+			}
+		case schema.ToolPartTypeVideo:
+			if p.Video != nil {
+				block = &schema.FunctionToolResultBlock{
+					Video: &schema.UserInputVideo{
+						URL:        derefString(p.Video.URL),
+						Base64Data: derefString(p.Video.Base64Data),
+						MIMEType:   p.Video.MIMEType,
+					},
+					Extra: p.Extra,
+				}
+			}
+		case schema.ToolPartTypeFile:
+			if p.File != nil {
+				block = &schema.FunctionToolResultBlock{
+					File: &schema.UserInputFile{
+						URL:        derefString(p.File.URL),
+						Base64Data: derefString(p.File.Base64Data),
+						MIMEType:   p.File.MIMEType,
+					},
+					Extra: p.Extra,
+				}
+			}
+		}
+		if block != nil {
+			blocks = append(blocks, block)
+		}
+	}
+	return blocks
+}
+
+func derefString(s *string) string {
+	if s == nil {
+		return ""
+	}
+	return *s
 }
 
 // typedToolInvokeEvent constructs the tool result event for the invoke path,
@@ -661,7 +720,7 @@ func typedToolEnhancedInvokeEvent[M MessageType](callID, toolName, toolMsgID str
 		event := EventFromMessage(msg, nil, schema.Tool, toolName)
 		return any(event).(*TypedAgentEvent[M]), nil
 	case *schema.AgenticMessage:
-		msg := schema.FunctionToolResultAgenticMessage(callID, toolName, textToFunctionToolResultBlocks(toolResultText(result)))
+		msg := schema.FunctionToolResultAgenticMessage(callID, toolName, toolResultToBlocks(result))
 		msg.Extra = internal.SetMessageID(msg.Extra, toolMsgID)
 		event := EventFromAgenticMessage(msg, nil, schema.AgenticRoleTypeUser)
 		return any(event).(*TypedAgentEvent[M]), nil
@@ -672,7 +731,7 @@ func typedToolEnhancedInvokeEvent[M MessageType](callID, toolName, toolMsgID str
 
 // typedToolEnhancedStreamEvent constructs the tool result event for the enhanced stream path.
 // For *schema.Message it builds multimodal tool messages; for *schema.AgenticMessage it
-// uses the string content of each chunk.
+// converts each chunk's multimodal parts into FunctionToolResultBlocks.
 func typedToolEnhancedStreamEvent[M MessageType](callID, toolName, toolMsgID string, stream *schema.StreamReader[*schema.ToolResult]) *TypedAgentEvent[M] {
 	var zero M
 	switch any(zero).(type) {
@@ -697,7 +756,7 @@ func typedToolEnhancedStreamEvent[M MessageType](callID, toolName, toolMsgID str
 	case *schema.AgenticMessage:
 		first := true
 		cvt := func(in *schema.ToolResult) (*schema.AgenticMessage, error) {
-			msg := schema.FunctionToolResultAgenticMessage(callID, toolName, textToFunctionToolResultBlocks(toolResultText(in)))
+			msg := schema.FunctionToolResultAgenticMessage(callID, toolName, toolResultToBlocks(in))
 			if first {
 				first = false
 				msg.Extra = internal.SetMessageID(msg.Extra, toolMsgID)
