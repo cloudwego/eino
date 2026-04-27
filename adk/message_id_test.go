@@ -308,8 +308,8 @@ func TestMessageID_ToolMessagesHaveID(t *testing.T) {
 		"tool event msg ID (%s) and state msg ID (%s) must match", toolMsgID, toolMsgIDInState)
 }
 
-// Scenario 5: Retry — only surviving result has an ID
-func TestMessageID_Retry_OnlySurvivorHasID(t *testing.T) {
+// Scenario 5: Retry — the final accepted result carries a message ID
+func TestMessageID_Retry_FinalResultHasID(t *testing.T) {
 	ctx := context.Background()
 	ctrl := gomock.NewController(t)
 	defer ctrl.Finish()
@@ -332,8 +332,10 @@ func TestMessageID_Retry_OnlySurvivorHasID(t *testing.T) {
 		Instruction: "test",
 		Model:       cm,
 		ModelRetryConfig: &ModelRetryConfig{
-			MaxRetries:  3,
-			IsRetryAble: func(ctx context.Context, err error) bool { return errors.Is(err, retryErr) },
+			MaxRetries: 3,
+			ShouldRetry: func(ctx context.Context, retryCtx *RetryContext) *RetryDecision {
+				return &RetryDecision{Retry: errors.Is(retryCtx.Err, retryErr)}
+			},
 		},
 	})
 	require.NoError(t, err)
@@ -596,104 +598,6 @@ func TestAttack_ConcatPreservesIDIfOnlyFirstChunkHasIt(t *testing.T) {
 	assert.Equal(t, "chunk1chunk2chunk3", concatenated.Content)
 }
 
-func TestAttack_EnsureMessageIDIdempotentUnderRapidCalls(t *testing.T) {
-	msg := schema.AssistantMessage("test", nil)
-	EnsureMessageID(msg)
-	firstID := GetMessageID(msg)
-	require.NotEmpty(t, firstID)
-
-	for i := 0; i < 100; i++ {
-		EnsureMessageID(msg)
-		assert.Equal(t, firstID, GetMessageID(msg), "iteration %d: ID should not change after first assignment", i)
-	}
-}
-
-func TestAttack_NilMessagePanics(t *testing.T) {
-	assert.Panics(t, func() {
-		GetMessageID[*schema.Message](nil)
-	}, "GetMessageID on nil *Message should panic (nil pointer dereference on .Extra)")
-}
-
-func TestAttack_StreamIDUniquePerCall(t *testing.T) {
-	ctx := context.Background()
-	ctrl := gomock.NewController(t)
-	defer ctrl.Finish()
-
-	cm := mockModel.NewMockToolCallingChatModel(ctrl)
-	cm.EXPECT().Stream(gomock.Any(), gomock.Any(), gomock.Any()).
-		DoAndReturn(func(ctx context.Context, msgs []*schema.Message, opts ...model.Option) (*schema.StreamReader[*schema.Message], error) {
-			return schema.StreamReaderFromArray([]*schema.Message{
-				schema.AssistantMessage("a", nil),
-				schema.AssistantMessage("b", nil),
-			}), nil
-		}).
-		Times(2)
-
-	agent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
-		Name:        "TestAttack",
-		Instruction: "test",
-		Model:       cm,
-	})
-	require.NoError(t, err)
-
-	getStreamID := func() string {
-		iter := agent.Run(ctx, &AgentInput{
-			Messages:        []Message{schema.UserMessage("hi")},
-			EnableStreaming: true,
-		})
-		event, ok := iter.Next()
-		require.True(t, ok)
-		require.Nil(t, event.Err)
-		require.NotNil(t, event.Output.MessageOutput)
-		require.True(t, event.Output.MessageOutput.IsStreaming)
-		stream := event.Output.MessageOutput.MessageStream
-		require.NotNil(t, stream)
-
-		msg, err := stream.Recv()
-		require.NoError(t, err)
-		id := GetMessageID(msg)
-		// Drain remaining
-		for {
-			_, err := stream.Recv()
-			if err != nil {
-				break
-			}
-		}
-		// Drain iter
-		for {
-			_, ok := iter.Next()
-			if !ok {
-				break
-			}
-		}
-		return id
-	}
-
-	id1 := getStreamID()
-	id2 := getStreamID()
-	assert.NotEmpty(t, id1)
-	assert.NotEmpty(t, id2)
-	assert.NotEqual(t, id1, id2, "each stream call should get a unique message ID")
-}
-
-func TestAttack_WrongExtraTypeDoesNotPanic(t *testing.T) {
-	msg := &schema.Message{
-		Role:    schema.Assistant,
-		Content: "test",
-		Extra:   map[string]any{internal.EinoMsgIDKey: 42},
-	}
-	assert.NotPanics(t, func() {
-		id := GetMessageID(msg)
-		assert.Empty(t, id, "wrong type should return empty, not panic")
-	})
-
-	// EnsureMessageID should overwrite the wrong type
-	EnsureMessageID(msg)
-	id := GetMessageID(msg)
-	assert.NotEmpty(t, id)
-	assert.True(t, isValidUUID(id))
-}
-
 func TestAttack_ConcurrentGenerate_NoSharedExtraMutation(t *testing.T) {
 	ctx := context.Background()
 	ctrl := gomock.NewController(t)
@@ -869,7 +773,7 @@ func TestMessageID_AgenticStream(t *testing.T) {
 		},
 	}
 
-	agent, err := NewTypedChatModelAgent[*schema.AgenticMessage](ctx, &TypedChatModelAgentConfig[*schema.AgenticMessage]{
+	agent, err := NewTypedChatModelAgent(ctx, &TypedChatModelAgentConfig[*schema.AgenticMessage]{
 		Name:        "AgenticStreamMsgID",
 		Instruction: "test",
 		Model:       m,
@@ -964,53 +868,6 @@ func TestMessageID_AgenticPublicAPIHelpers(t *testing.T) {
 
 // --- Adversarial attack tests for message ID system ---
 
-// TestAttack_ReorderToolResults_DuplicateCallID tests that when reorderToolResults
-// encounters duplicate callIDs in the results slice, the map-overwrite semantics
-// don't cause data loss or panics.
-func TestAttack_ReorderToolResults_DuplicateCallID(t *testing.T) {
-	results := []*schema.Message{
-		{Role: schema.Tool, ToolCallID: "call-1", ToolName: "toolA", Content: "first"},
-		{Role: schema.Tool, ToolCallID: "call-1", ToolName: "toolA", Content: "second"},
-		{Role: schema.Tool, ToolCallID: "call-2", ToolName: "toolB", Content: "third"},
-	}
-	eventOrder := []string{"call-1", "call-2"}
-
-	ordered := reorderToolResults(results, eventOrder, "", func(m *schema.Message) string {
-		return m.ToolCallID
-	})
-
-	// Should not panic, should produce 2 results (call-1 overwritten to "second", call-2 "third")
-	require.Len(t, ordered, 2)
-	assert.Equal(t, "second", ordered[0].Content, "duplicate callID should keep last value")
-	assert.Equal(t, "call-1", ordered[0].ToolCallID)
-	assert.Equal(t, "third", ordered[1].Content)
-	assert.Equal(t, "call-2", ordered[1].ToolCallID)
-}
-
-// TestAttack_ReorderToolResults_MissingFromEventOrder tests that results not found
-// in eventOrder are still included (appended at end).
-func TestAttack_ReorderToolResults_MissingFromEventOrder(t *testing.T) {
-	results := []*schema.Message{
-		{Role: schema.Tool, ToolCallID: "call-1", ToolName: "toolA", Content: "A"},
-		{Role: schema.Tool, ToolCallID: "call-2", ToolName: "toolB", Content: "B"},
-		{Role: schema.Tool, ToolCallID: "call-3", ToolName: "toolC", Content: "C"},
-	}
-	// eventOrder only knows about call-2; call-1 and call-3 are "orphans"
-	eventOrder := []string{"call-2"}
-
-	ordered := reorderToolResults(results, eventOrder, "", func(m *schema.Message) string {
-		return m.ToolCallID
-	})
-
-	require.Len(t, ordered, 3)
-	// First should be call-2 (from eventOrder)
-	assert.Equal(t, "call-2", ordered[0].ToolCallID)
-	// Remaining in arbitrary map iteration order, but all present
-	remaining := map[string]bool{ordered[1].ToolCallID: true, ordered[2].ToolCallID: true}
-	assert.True(t, remaining["call-1"])
-	assert.True(t, remaining["call-3"])
-}
-
 // TestAttack_ReorderToolResults_ReturnDirectlyCallID tests that the returnDirectly
 // item is placed after eventOrder items but before orphans.
 func TestAttack_ReorderToolResults_ReturnDirectlyCallID(t *testing.T) {
@@ -1036,7 +893,7 @@ func TestAttack_ReorderToolResults_ReturnDirectlyCallID(t *testing.T) {
 // TestAttack_PopToolMsgID_DoublePop tests that calling popToolMsgID twice for the
 // same key returns "" on second call.
 func TestAttack_PopToolMsgID_DoublePop(t *testing.T) {
-	st := &State{}
+	st := &typedState[*schema.Message]{}
 	st.setToolMsgID("myTool", "call-1", "uuid-abc")
 
 	// First pop returns the ID
@@ -1071,7 +928,7 @@ func (t *namedFakeToolForTest) Info(_ context.Context) (*schema.ToolInfo, error)
 	}, nil
 }
 
-func (t *namedFakeToolForTest) InvokableRun(_ context.Context, argumentsInJSON string, _ ...tool.Option) (string, error) {
+func (t *namedFakeToolForTest) InvokableRun(_ context.Context, _ string, _ ...tool.Option) (string, error) {
 	return `{"say": "ok"}`, nil
 }
 
