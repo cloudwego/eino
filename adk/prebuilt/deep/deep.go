@@ -37,8 +37,11 @@ func init() {
 	schema.RegisterName[[]TODO]("_eino_adk_prebuilt_deep_todo_slice")
 }
 
-// Config defines the configuration for creating a DeepAgent.
-type Config struct {
+// TypedConfig defines the configuration for creating a DeepAgent parameterized by message type.
+// An Agentic DeepAgent (M = *schema.AgenticMessage) only supports Agentic sub-agents,
+// and a standard DeepAgent (M = *schema.Message) only supports standard sub-agents.
+// This is enforced by the type system through the SubAgents field.
+type TypedConfig[M messageType] struct {
 	// Name is the identifier for the Deep agent.
 	Name string
 	// Description provides a brief explanation of the agent's purpose.
@@ -47,13 +50,14 @@ type Config struct {
 	// ChatModel is the model used by DeepAgent for reasoning and task execution.
 	// If the agent uses any tools, this model must support the model.WithTools call option,
 	// as that's how the agent configures the model with tool information.
-	ChatModel model.BaseChatModel
+	ChatModel model.BaseModel[M]
 	// Instruction contains the system prompt that guides the agent's behavior.
 	// When empty, a built-in default system prompt will be used, which includes general assistant
 	// behavior guidelines, security policies, coding style guidelines, and tool usage policies.
 	Instruction string
 	// SubAgents are specialized agents that can be invoked by the agent.
-	SubAgents []adk.Agent
+	// For M = *schema.AgenticMessage, only agentic sub-agents are accepted.
+	SubAgents []adk.TypedAgent[M]
 	// ToolsConfig provides the tools and tool-calling configurations available for the agent to invoke.
 	ToolsConfig adk.ToolsConfig
 	// MaxIteration limits the maximum number of reasoning iterations the agent can perform.
@@ -78,7 +82,7 @@ type Config struct {
 	WithoutGeneralSubAgent bool
 	// TaskToolDescriptionGenerator allows customizing the description for the task tool.
 	// If provided, this function generates the tool description based on available subagents.
-	TaskToolDescriptionGenerator func(ctx context.Context, availableAgents []adk.Agent) (string, error)
+	TaskToolDescriptionGenerator func(ctx context.Context, availableAgents []adk.TypedAgent[M]) (string, error)
 
 	Middlewares []adk.AgentMiddleware
 
@@ -90,24 +94,27 @@ type Config struct {
 	//
 	// Handlers are processed after Middlewares, in registration order.
 	// See adk.ChatModelAgentMiddleware documentation for when to use Handlers vs Middlewares.
-	Handlers []adk.ChatModelAgentMiddleware
+	Handlers []adk.TypedChatModelAgentMiddleware[M]
 
-	ModelRetryConfig *adk.ModelRetryConfig
+	ModelRetryConfig *adk.TypedModelRetryConfig[M]
 	// ModelFailoverConfig configures failover behavior for the ChatModel.
 	// When set, the agent will automatically fail over to alternative models on errors.
 	// This config is also propagated to the general sub-agent.
-	ModelFailoverConfig *adk.ModelFailoverConfig
+	ModelFailoverConfig *adk.TypedModelFailoverConfig[M]
 
 	// OutputKey stores the agent's response in the session.
 	// Optional. When set, stores output via AddSessionValue(ctx, outputKey, msg.Content).
 	OutputKey string
 }
 
-// New creates a new Deep agent instance with the provided configuration.
+// Config defines the configuration for creating a standard DeepAgent.
+type Config = TypedConfig[*schema.Message]
+
+// NewTyped creates a new typed Deep agent instance with the provided configuration.
 // This function initializes built-in tools, creates a task tool for subagent orchestration,
-// and returns a fully configured ChatModelAgent ready for execution.
-func New(ctx context.Context, cfg *Config) (adk.ResumableAgent, error) {
-	handlers, err := buildBuiltinAgentMiddlewares(ctx, cfg)
+// and returns a fully configured TypedChatModelAgent ready for execution.
+func NewTyped[M messageType](ctx context.Context, cfg *TypedConfig[M]) (adk.TypedResumableAgent[M], error) {
+	handlers, err := buildTypedBuiltinAgentMiddlewares[M](ctx, cfg)
 	if err != nil {
 		return nil, err
 	}
@@ -121,7 +128,7 @@ func New(ctx context.Context, cfg *Config) (adk.ResumableAgent, error) {
 	}
 
 	if !cfg.WithoutGeneralSubAgent || len(cfg.SubAgents) > 0 {
-		tt, err := newTaskToolMiddleware(
+		tt, err := typedTaskToolMiddleware(
 			ctx,
 			cfg.TaskToolDescriptionGenerator,
 			cfg.SubAgents,
@@ -141,7 +148,7 @@ func New(ctx context.Context, cfg *Config) (adk.ResumableAgent, error) {
 		handlers = append(handlers, tt)
 	}
 
-	return adk.NewChatModelAgent(ctx, &adk.ChatModelAgentConfig{
+	return adk.NewTypedChatModelAgent[M](ctx, &adk.TypedChatModelAgentConfig[M]{
 		Name:          cfg.Name,
 		Description:   cfg.Description,
 		Instruction:   instruction,
@@ -151,29 +158,62 @@ func New(ctx context.Context, cfg *Config) (adk.ResumableAgent, error) {
 		Middlewares:   cfg.Middlewares,
 		Handlers:      append(handlers, cfg.Handlers...),
 
-		GenModelInput:       genModelInput,
+		GenModelInput:       typedGenModelInput[M],
 		ModelRetryConfig:    cfg.ModelRetryConfig,
 		ModelFailoverConfig: cfg.ModelFailoverConfig,
 		OutputKey:           cfg.OutputKey,
 	})
 }
 
-func genModelInput(ctx context.Context, instruction string, input *adk.AgentInput) ([]*schema.Message, error) {
-	msgs := make([]*schema.Message, 0, len(input.Messages)+1)
-
-	if instruction != "" {
-		msgs = append(msgs, schema.SystemMessage(instruction))
-	}
-
-	msgs = append(msgs, input.Messages...)
-
-	return msgs, nil
+// New creates a new Deep agent instance with the provided configuration.
+// This function initializes built-in tools, creates a task tool for subagent orchestration,
+// and returns a fully configured ChatModelAgent ready for execution.
+func New(ctx context.Context, cfg *Config) (adk.ResumableAgent, error) {
+	return NewTyped[*schema.Message](ctx, cfg)
 }
 
-func buildBuiltinAgentMiddlewares(ctx context.Context, cfg *Config) ([]adk.ChatModelAgentMiddleware, error) {
-	var ms []adk.ChatModelAgentMiddleware
+func typedGenModelInput[M messageType](ctx context.Context, instruction string, input *adk.TypedAgentInput[M]) ([]M, error) {
+	var zero M
+	switch any(zero).(type) {
+	case *schema.Message:
+		msgs := make([]*schema.Message, 0, len(input.Messages)+1)
+		if instruction != "" {
+			msgs = append(msgs, schema.SystemMessage(instruction))
+		}
+		// Type assertion is safe here because M = *schema.Message.
+		for _, m := range input.Messages {
+			msgs = append(msgs, any(m).(*schema.Message))
+		}
+		result := make([]M, len(msgs))
+		for i, m := range msgs {
+			result[i] = any(m).(M)
+		}
+		return result, nil
+	case *schema.AgenticMessage:
+		msgs := make([]*schema.AgenticMessage, 0, len(input.Messages)+1)
+		if instruction != "" {
+			msgs = append(msgs, schema.SystemAgenticMessage(instruction))
+		}
+		for _, m := range input.Messages {
+			msgs = append(msgs, any(m).(*schema.AgenticMessage))
+		}
+		result := make([]M, len(msgs))
+		for i, m := range msgs {
+			result[i] = any(m).(M)
+		}
+		return result, nil
+	}
+	panic("unreachable")
+}
+
+func genModelInput(ctx context.Context, instruction string, input *adk.AgentInput) ([]*schema.Message, error) {
+	return typedGenModelInput[*schema.Message](ctx, instruction, input)
+}
+
+func buildTypedBuiltinAgentMiddlewares[M messageType](ctx context.Context, cfg *TypedConfig[M]) ([]adk.TypedChatModelAgentMiddleware[M], error) {
+	var ms []adk.TypedChatModelAgentMiddleware[M]
 	if !cfg.WithoutWriteTodos {
-		t, err := newWriteTodos()
+		t, err := typedNewWriteTodos[M]()
 		if err != nil {
 			return nil, err
 		}
@@ -189,10 +229,14 @@ func buildBuiltinAgentMiddlewares(ctx context.Context, cfg *Config) ([]adk.ChatM
 		if err != nil {
 			return nil, err
 		}
-		ms = append(ms, fm)
+		ms = append(ms, adaptMiddleware[M](fm))
 	}
 
 	return ms, nil
+}
+
+func buildBuiltinAgentMiddlewares(ctx context.Context, cfg *Config) ([]adk.ChatModelAgentMiddleware, error) {
+	return buildTypedBuiltinAgentMiddlewares[*schema.Message](ctx, cfg)
 }
 
 type TODO struct {
@@ -205,7 +249,7 @@ type writeTodosArguments struct {
 	Todos []TODO `json:"todos"`
 }
 
-func newWriteTodos() (adk.ChatModelAgentMiddleware, error) {
+func typedNewWriteTodos[M messageType]() (adk.TypedChatModelAgentMiddleware[M], error) {
 	toolDesc := internal.SelectPrompt(internal.I18nPrompts{
 		English: writeTodosToolDescription,
 		Chinese: writeTodosToolDescriptionChinese,
@@ -227,5 +271,9 @@ func newWriteTodos() (adk.ChatModelAgentMiddleware, error) {
 		return nil, err
 	}
 
-	return buildAppendPromptTool("", t), nil
+	return typedBuildAppendPromptTool[M]("", t), nil
+}
+
+func newWriteTodos() (adk.ChatModelAgentMiddleware, error) {
+	return typedNewWriteTodos[*schema.Message]()
 }
