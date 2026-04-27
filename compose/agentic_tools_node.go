@@ -82,14 +82,21 @@ func agenticMessageToToolCallMessage(input *schema.AgenticMessage) *schema.Messa
 func toolMessageToAgenticMessage(input []*schema.Message) []*schema.AgenticMessage {
 	var results []*schema.ContentBlock
 	for _, m := range input {
+		ftr := &schema.FunctionToolResult{
+			CallID: m.ToolCallID,
+			Name:   m.ToolName,
+		}
+		if len(m.UserInputMultiContent) > 0 {
+			ftr.Blocks = messageInputPartsToFunctionToolBlocks(m.UserInputMultiContent)
+		} else if m.Content != "" {
+			ftr.Blocks = []*schema.FunctionToolResultBlock{
+				{Text: &schema.UserInputText{Text: m.Content}},
+			}
+		}
 		results = append(results, &schema.ContentBlock{
-			Type: schema.ContentBlockTypeFunctionToolResult,
-			FunctionToolResult: &schema.FunctionToolResult{
-				CallID: m.ToolCallID,
-				Name:   m.ToolName,
-				Result: m.Content,
-			},
-			Extra: m.Extra,
+			Type:               schema.ContentBlockTypeFunctionToolResult,
+			FunctionToolResult: ftr,
+			Extra:              m.Extra,
 		})
 	}
 	return []*schema.AgenticMessage{{
@@ -105,15 +112,22 @@ func streamToolMessageToAgenticMessage(input *schema.StreamReader[[]*schema.Mess
 			if m == nil {
 				continue
 			}
+			ftr := &schema.FunctionToolResult{
+				CallID: m.ToolCallID,
+				Name:   m.ToolName,
+			}
+			if len(m.UserInputMultiContent) > 0 {
+				ftr.Blocks = messageInputPartsToFunctionToolBlocks(m.UserInputMultiContent)
+			} else if m.Content != "" {
+				ftr.Blocks = []*schema.FunctionToolResultBlock{
+					{Text: &schema.UserInputText{Text: m.Content}},
+				}
+			}
 			results = append(results, &schema.ContentBlock{
-				Type: schema.ContentBlockTypeFunctionToolResult,
-				FunctionToolResult: &schema.FunctionToolResult{
-					CallID: m.ToolCallID,
-					Name:   m.ToolName,
-					Result: m.Content,
-				},
-				StreamingMeta: &schema.StreamingMeta{Index: i},
-				Extra:         m.Extra,
+				Type:               schema.ContentBlockTypeFunctionToolResult,
+				FunctionToolResult: ftr,
+				StreamingMeta:      &schema.StreamingMeta{Index: i},
+				Extra:              m.Extra,
 			})
 		}
 		return []*schema.AgenticMessage{{
@@ -121,6 +135,77 @@ func streamToolMessageToAgenticMessage(input *schema.StreamReader[[]*schema.Mess
 			ContentBlocks: results,
 		}}, nil
 	})
+}
+
+func messageInputPartsToFunctionToolBlocks(parts []schema.MessageInputPart) []*schema.FunctionToolResultBlock {
+	blocks := make([]*schema.FunctionToolResultBlock, 0, len(parts))
+	for _, p := range parts {
+		var block *schema.FunctionToolResultBlock
+		switch p.Type {
+		case schema.ChatMessagePartTypeText:
+			block = &schema.FunctionToolResultBlock{
+				Text:  &schema.UserInputText{Text: p.Text},
+				Extra: p.Extra,
+			}
+		case schema.ChatMessagePartTypeImageURL:
+			if p.Image != nil {
+				block = &schema.FunctionToolResultBlock{
+					Image: &schema.UserInputImage{
+						URL:        derefString(p.Image.URL),
+						Base64Data: derefString(p.Image.Base64Data),
+						MIMEType:   p.Image.MIMEType,
+						Detail:     p.Image.Detail,
+					},
+					Extra: p.Extra,
+				}
+			}
+		case schema.ChatMessagePartTypeAudioURL:
+			if p.Audio != nil {
+				block = &schema.FunctionToolResultBlock{
+					Audio: &schema.UserInputAudio{
+						URL:        derefString(p.Audio.URL),
+						Base64Data: derefString(p.Audio.Base64Data),
+						MIMEType:   p.Audio.MIMEType,
+					},
+					Extra: p.Extra,
+				}
+			}
+		case schema.ChatMessagePartTypeVideoURL:
+			if p.Video != nil {
+				block = &schema.FunctionToolResultBlock{
+					Video: &schema.UserInputVideo{
+						URL:        derefString(p.Video.URL),
+						Base64Data: derefString(p.Video.Base64Data),
+						MIMEType:   p.Video.MIMEType,
+					},
+					Extra: p.Extra,
+				}
+			}
+		case schema.ChatMessagePartTypeFileURL:
+			if p.File != nil {
+				block = &schema.FunctionToolResultBlock{
+					File: &schema.UserInputFile{
+						URL:        derefString(p.File.URL),
+						Base64Data: derefString(p.File.Base64Data),
+						Name:       p.File.Name,
+						MIMEType:   p.File.MIMEType,
+					},
+					Extra: p.Extra,
+				}
+			}
+		}
+		if block != nil {
+			blocks = append(blocks, block)
+		}
+	}
+	return blocks
+}
+
+func derefString(s *string) string {
+	if s == nil {
+		return ""
+	}
+	return *s
 }
 
 func (a *AgenticToolsNode) GetType() string { return "" }
