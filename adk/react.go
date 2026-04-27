@@ -54,6 +54,7 @@ type typedState[M MessageType] struct {
 	ReturnDirectlyEvent      *TypedAgentEvent[M]
 	RetryAttempt             int
 	ToolMsgIDs               map[string]map[string]string // toolName → callID → eino message ID
+	ToolEventOrder           []string                     // callIDs in the order their events were sent
 }
 
 // State is the internal state of the ChatModelAgent.
@@ -94,7 +95,7 @@ func init() {
 
 	// backward compatibility when decoding checkpoints created by v0.8.0 - v0.8.3
 	gob.Register(&AgentEvent{})
-	gob.Register(int(0))
+	gob.Register(0)
 
 	schema.RegisterName[*TypedAgentInput[*schema.AgenticMessage]]("_eino_adk_agentic_agent_input")
 	schema.RegisterName[*typedAgentEventWrapper[*schema.AgenticMessage]]("_eino_adk_agentic_event_wrapper")
@@ -367,7 +368,7 @@ func newReact(ctx context.Context, config *reactConfig) (reactGraph, error) {
 		return input.Messages, nil
 	}), compose.WithNodeName(initNode_))
 
-	var wrappedModel model.BaseChatModel = config.model
+	var wrappedModel = config.model
 	if config.modelWrapperConf != nil {
 		wrappedModel = buildModelWrappers(config.model, config.modelWrapperConf)
 	}
@@ -440,8 +441,13 @@ func newReact(ctx context.Context, config *reactConfig) (reactGraph, error) {
 		// Here we pop them and set them on the compose-created tool result messages
 		// so that state messages share the same IDs as their corresponding event messages.
 		// If no stored ID is found (old checkpoint, custom event sender), generate a fresh one.
+		// Messages are reordered to match the event emission order (for prompt cache consistency).
 		_ = compose.ProcessState(ctx, func(_ context.Context, st *State) error {
-			for _, msg := range toolResults {
+			ordered := reorderToolResults(toolResults, st.ToolEventOrder, st.getReturnDirectlyToolCallID(), func(msg Message) string {
+				return msg.ToolCallID
+			})
+			st.ToolEventOrder = nil
+			for _, msg := range ordered {
 				if id := st.popToolMsgID(msg.ToolName, msg.ToolCallID); id != "" {
 					msg.Extra = internal.SetMessageID(msg.Extra, id)
 				} else {
@@ -608,7 +614,7 @@ func newAgenticReact(ctx context.Context, config *agenticReactConfig) (agenticRe
 		return input.Messages, nil
 	}), compose.WithNodeName(initNode_))
 
-	var wrappedModel model.AgenticModel = config.model
+	var wrappedModel = config.model
 	if config.modelWrapperConf != nil {
 		wrappedModel = buildModelWrappers(config.model, config.modelWrapperConf)
 	}
@@ -672,9 +678,33 @@ func newAgenticReact(ctx context.Context, config *agenticReactConfig) (agenticRe
 
 	afterToolCalls := func(ctx context.Context, toolResults []*schema.AgenticMessage) ([]*schema.AgenticMessage, error) {
 		_ = compose.ProcessState(ctx, func(_ context.Context, st *agenticState) error {
-			st.Messages = append(st.Messages, toolResults...)
+			ordered := reorderToolResults(toolResults, st.ToolEventOrder, st.getReturnDirectlyToolCallID(), func(msg *schema.AgenticMessage) string {
+				_, callID := extractToolIdentifiers(msg)
+				return callID
+			})
+			st.ToolEventOrder = nil
+			for _, msg := range ordered {
+				if msg == nil {
+					continue
+				}
+				toolName, callID := extractToolIdentifiers(msg)
+				if id := st.popToolMsgID(toolName, callID); id != "" {
+					msg.Extra = internal.SetMessageID(msg.Extra, id)
+				} else {
+					msg.Extra = internal.EnsureMessageID(msg.Extra)
+				}
+				st.Messages = append(st.Messages, msg)
+			}
 			return nil
 		})
+
+		execCtx := getTypedChatModelAgentExecCtx[*schema.AgenticMessage](ctx)
+		if execCtx != nil && execCtx.afterToolCallsHook != nil {
+			if err := execCtx.afterToolCallsHook(ctx); err != nil {
+				return nil, err
+			}
+		}
+
 		return toolResults, nil
 	}
 	_ = g.AddLambdaNode(afterToolCallsNode_, compose.InvokableLambda(afterToolCalls),
@@ -727,11 +757,9 @@ func newAgenticReact(ctx context.Context, config *agenticReactConfig) (agenticRe
 				if msg == nil {
 					continue
 				}
-				for _, block := range msg.ContentBlocks {
-					if block != nil && block.Type == schema.ContentBlockTypeFunctionToolResult &&
-						block.FunctionToolResult != nil && block.FunctionToolResult.CallID == id {
-						return msg, nil
-					}
+				_, callID := extractToolIdentifiers(msg)
+				if callID == id {
+					return msg, nil
 				}
 			}
 			return nil, errors.New("return directly tool call result not found")
@@ -757,4 +785,50 @@ func newAgenticReact(ctx context.Context, config *agenticReactConfig) (agenticRe
 	}
 
 	return g, nil
+}
+
+// extractToolIdentifiers extracts the tool name and call ID from an AgenticMessage
+// that contains a FunctionToolResult content block.
+func extractToolIdentifiers(msg *schema.AgenticMessage) (toolName, callID string) {
+	if msg == nil {
+		return "", ""
+	}
+	for _, block := range msg.ContentBlocks {
+		if block != nil && block.Type == schema.ContentBlockTypeFunctionToolResult && block.FunctionToolResult != nil {
+			return block.FunctionToolResult.Name, block.FunctionToolResult.CallID
+		}
+	}
+	return "", ""
+}
+
+// reorderToolResults reorders tool results to match the order their events were emitted.
+// If eventOrder is empty (old checkpoint, custom event sender), the original order is preserved.
+// The ReturnDirectly tool result is always placed last (its event is emitted last).
+func reorderToolResults[M messageType](results []M, eventOrder []string, returnDirectlyCallID string, getCallID func(M) string) []M {
+	if len(eventOrder) == 0 {
+		return results
+	}
+	byCallID := make(map[string]M, len(results))
+	for _, r := range results {
+		if id := getCallID(r); id != "" {
+			byCallID[id] = r
+		}
+	}
+	ordered := make([]M, 0, len(results))
+	for _, callID := range eventOrder {
+		if r, ok := byCallID[callID]; ok {
+			ordered = append(ordered, r)
+			delete(byCallID, callID)
+		}
+	}
+	if returnDirectlyCallID != "" {
+		if r, ok := byCallID[returnDirectlyCallID]; ok {
+			ordered = append(ordered, r)
+			delete(byCallID, returnDirectlyCallID)
+		}
+	}
+	for _, r := range byCallID {
+		ordered = append(ordered, r)
+	}
+	return ordered
 }

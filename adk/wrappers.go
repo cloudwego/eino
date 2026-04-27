@@ -21,6 +21,7 @@ import (
 	"errors"
 	"io"
 	"reflect"
+	"strings"
 	"sync"
 
 	"github.com/google/uuid"
@@ -540,11 +541,13 @@ func popToolGenAction(ctx context.Context, toolName string) *AgentAction {
 	return typedPopToolGenAction[*schema.Message](ctx, toolName)
 }
 
-type eventSenderToolWrapper struct {
-	*BaseChatModelAgentMiddleware
+type typedEventSenderToolWrapper[M messageType] struct {
+	*TypedBaseChatModelAgentMiddleware[M]
 }
 
-func (*eventSenderToolWrapper) isEventSenderToolWrapper() {}
+type eventSenderToolWrapper = typedEventSenderToolWrapper[*schema.Message]
+
+func (*typedEventSenderToolWrapper[M]) isEventSenderToolWrapper() {}
 
 // eventSenderToolWrapperMarker enables cross-type detection of eventSenderToolWrapper
 // in generic contexts. hasUserEventSenderToolWrapper[M] receives
@@ -560,58 +563,61 @@ type eventSenderToolWrapperMarker interface{ isEventSenderToolWrapper() }
 // When detected in Handlers, the framework skips the default event sender to avoid duplicates.
 func NewEventSenderToolWrapper() ChatModelAgentMiddleware {
 	return &eventSenderToolWrapper{
-		BaseChatModelAgentMiddleware: &BaseChatModelAgentMiddleware{},
+		TypedBaseChatModelAgentMiddleware: &TypedBaseChatModelAgentMiddleware[*schema.Message]{},
 	}
 }
 
-func (w *eventSenderToolWrapper) WrapInvokableToolCall(_ context.Context, endpoint InvokableToolCallEndpoint, tCtx *ToolContext) (InvokableToolCallEndpoint, error) {
-	return func(ctx context.Context, argumentsInJSON string, opts ...tool.Option) (string, error) {
-		result, err := endpoint(ctx, argumentsInJSON, opts...)
-		if err != nil {
-			return "", err
+// toolResultText extracts the concatenated text content from a ToolResult.
+// Used for the AgenticMessage path where only string content is needed.
+func toolResultText(tr *schema.ToolResult) string {
+	if tr == nil {
+		return ""
+	}
+	texts := make([]string, 0, len(tr.Parts))
+	for _, p := range tr.Parts {
+		if p.Type == schema.ToolPartTypeText {
+			texts = append(texts, p.Text)
 		}
-
-		toolName := tCtx.Name
-		callID := tCtx.CallID
-
-		prePopAction := popToolGenAction(ctx, toolName)
-		msg := schema.ToolMessage(result, callID, schema.WithToolName(toolName))
-		toolMsgID := uuid.NewString()
-		msg.Extra = internal.SetMessageID(msg.Extra, toolMsgID)
-		event := EventFromMessage(msg, nil, schema.Tool, toolName)
-		if prePopAction != nil {
-			event.Action = prePopAction
-		}
-
-		execCtx := getTypedChatModelAgentExecCtx[*schema.Message](ctx)
-		_ = compose.ProcessState(ctx, func(_ context.Context, st *State) error {
-			st.setToolMsgID(toolName, callID, toolMsgID)
-			if st.getReturnDirectlyToolCallID() == callID {
-				st.setReturnDirectlyEvent(event)
-			} else {
-				execCtx.send(event)
-			}
-			return nil
-		})
-
-		return result, nil
-	}, nil
+	}
+	return strings.Join(texts, "")
 }
 
-func (w *eventSenderToolWrapper) WrapStreamableToolCall(_ context.Context, endpoint StreamableToolCallEndpoint, tCtx *ToolContext) (StreamableToolCallEndpoint, error) {
-	return func(ctx context.Context, argumentsInJSON string, opts ...tool.Option) (*schema.StreamReader[string], error) {
-		result, err := endpoint(ctx, argumentsInJSON, opts...)
-		if err != nil {
-			return nil, err
-		}
+// textToFunctionToolResultBlocks wraps a plain text string into FunctionToolResultBlocks.
+func textToFunctionToolResultBlocks(text string) []*schema.FunctionToolResultBlock {
+	if text == "" {
+		return nil
+	}
+	return []*schema.FunctionToolResultBlock{
+		{Text: &schema.UserInputText{Text: text}},
+	}
+}
 
-		toolName := tCtx.Name
-		callID := tCtx.CallID
+// typedToolInvokeEvent constructs the tool result event for the invoke path,
+// dispatching on M to create the correct message and event types.
+func typedToolInvokeEvent[M messageType](callID, toolName, result, toolMsgID string) *TypedAgentEvent[M] {
+	var zero M
+	switch any(zero).(type) {
+	case *schema.Message:
+		msg := schema.ToolMessage(result, callID, schema.WithToolName(toolName))
+		msg.Extra = internal.SetMessageID(msg.Extra, toolMsgID)
+		event := EventFromMessage(msg, nil, schema.Tool, toolName)
+		return any(event).(*TypedAgentEvent[M])
+	case *schema.AgenticMessage:
+		msg := schema.FunctionToolResultAgenticMessage(callID, toolName, textToFunctionToolResultBlocks(result))
+		msg.Extra = internal.SetMessageID(msg.Extra, toolMsgID)
+		event := EventFromAgenticMessage(msg, nil, schema.AgenticRoleTypeUser)
+		return any(event).(*TypedAgentEvent[M])
+	default:
+		return nil
+	}
+}
 
-		prePopAction := popToolGenAction(ctx, toolName)
-		streams := result.Copy(2)
-
-		toolMsgID := uuid.NewString()
+// typedToolStreamEvent constructs the tool result event for the stream path,
+// dispatching on M to create the correct message stream and event types.
+func typedToolStreamEvent[M messageType](callID, toolName, toolMsgID string, stream *schema.StreamReader[string]) *TypedAgentEvent[M] {
+	var zero M
+	switch any(zero).(type) {
+	case *schema.Message:
 		first := true
 		cvt := func(in string) (Message, error) {
 			msg := schema.ToolMessage(in, callID, schema.WithToolName(toolName))
@@ -621,77 +627,60 @@ func (w *eventSenderToolWrapper) WrapStreamableToolCall(_ context.Context, endpo
 			}
 			return msg, nil
 		}
-		msgStream := schema.StreamReaderWithConvert(streams[0], cvt)
+		msgStream := schema.StreamReaderWithConvert(stream, cvt)
 		event := EventFromMessage(nil, msgStream, schema.Tool, toolName)
-		event.Action = prePopAction
-
-		execCtx := getTypedChatModelAgentExecCtx[*schema.Message](ctx)
-		_ = compose.ProcessState(ctx, func(_ context.Context, st *State) error {
-			st.setToolMsgID(toolName, callID, toolMsgID)
-			if st.getReturnDirectlyToolCallID() == callID {
-				st.setReturnDirectlyEvent(event)
-			} else {
-				execCtx.send(event)
+		return any(event).(*TypedAgentEvent[M])
+	case *schema.AgenticMessage:
+		first := true
+		cvt := func(in string) (*schema.AgenticMessage, error) {
+			msg := schema.FunctionToolResultAgenticMessage(callID, toolName, textToFunctionToolResultBlocks(in))
+			if first {
+				first = false
+				msg.Extra = internal.SetMessageID(msg.Extra, toolMsgID)
 			}
-			return nil
-		})
-
-		return streams[1], nil
-	}, nil
+			return msg, nil
+		}
+		msgStream := schema.StreamReaderWithConvert(stream, cvt)
+		event := EventFromAgenticMessage(nil, msgStream, schema.AgenticRoleTypeUser)
+		return any(event).(*TypedAgentEvent[M])
+	default:
+		return nil
+	}
 }
 
-func (w *eventSenderToolWrapper) WrapEnhancedInvokableToolCall(_ context.Context, endpoint EnhancedInvokableToolCallEndpoint, tCtx *ToolContext) (EnhancedInvokableToolCallEndpoint, error) {
-	return func(ctx context.Context, toolArgument *schema.ToolArgument, opts ...tool.Option) (*schema.ToolResult, error) {
-		result, err := endpoint(ctx, toolArgument, opts...)
-		if err != nil {
-			return nil, err
-		}
-
-		toolName := tCtx.Name
-		callID := tCtx.CallID
-
-		prePopAction := popToolGenAction(ctx, toolName)
+// typedToolEnhancedInvokeEvent constructs the tool result event for the enhanced invoke path.
+// For *schema.Message it builds a multimodal tool message; for *schema.AgenticMessage it
+// uses the string content of the result (AgenticToolsNode only uses the string path).
+func typedToolEnhancedInvokeEvent[M messageType](callID, toolName, toolMsgID string, result *schema.ToolResult) (*TypedAgentEvent[M], error) {
+	var zero M
+	switch any(zero).(type) {
+	case *schema.Message:
 		msg := schema.ToolMessage("", callID, schema.WithToolName(toolName))
+		var err error
 		msg.UserInputMultiContent, err = result.ToMessageInputParts()
 		if err != nil {
 			return nil, err
 		}
-		toolMsgID := uuid.NewString()
 		msg.Extra = internal.SetMessageID(msg.Extra, toolMsgID)
 		event := EventFromMessage(msg, nil, schema.Tool, toolName)
-		if prePopAction != nil {
-			event.Action = prePopAction
-		}
-
-		execCtx := getTypedChatModelAgentExecCtx[*schema.Message](ctx)
-		_ = compose.ProcessState(ctx, func(_ context.Context, st *State) error {
-			st.setToolMsgID(toolName, callID, toolMsgID)
-			if st.getReturnDirectlyToolCallID() == callID {
-				st.setReturnDirectlyEvent(event)
-			} else {
-				execCtx.send(event)
-			}
-			return nil
-		})
-
-		return result, nil
-	}, nil
+		return any(event).(*TypedAgentEvent[M]), nil
+	case *schema.AgenticMessage:
+		msg := schema.FunctionToolResultAgenticMessage(callID, toolName, textToFunctionToolResultBlocks(toolResultText(result)))
+		msg.Extra = internal.SetMessageID(msg.Extra, toolMsgID)
+		event := EventFromAgenticMessage(msg, nil, schema.AgenticRoleTypeUser)
+		return any(event).(*TypedAgentEvent[M]), nil
+	default:
+		return nil, nil
+	}
 }
 
-func (w *eventSenderToolWrapper) WrapEnhancedStreamableToolCall(_ context.Context, endpoint EnhancedStreamableToolCallEndpoint, tCtx *ToolContext) (EnhancedStreamableToolCallEndpoint, error) {
-	return func(ctx context.Context, toolArgument *schema.ToolArgument, opts ...tool.Option) (*schema.StreamReader[*schema.ToolResult], error) {
-		result, err := endpoint(ctx, toolArgument, opts...)
-		if err != nil {
-			return nil, err
-		}
-
-		toolName := tCtx.Name
-		callID := tCtx.CallID
-
-		prePopAction := popToolGenAction(ctx, toolName)
-		streams := result.Copy(2)
-
-		toolMsgID := uuid.NewString()
+// typedToolEnhancedStreamEvent constructs the tool result event for the enhanced stream path.
+// For *schema.Message it builds multimodal tool messages; for *schema.AgenticMessage it
+// uses the string content of each chunk.
+func typedToolEnhancedStreamEvent[M messageType](callID, toolName, toolMsgID string, stream *schema.StreamReader[*schema.ToolResult]) *TypedAgentEvent[M] {
+	var zero M
+	switch any(zero).(type) {
+	case *schema.Message:
 		first := true
 		cvt := func(in *schema.ToolResult) (Message, error) {
 			msg := schema.ToolMessage("", callID, schema.WithToolName(toolName))
@@ -706,17 +695,154 @@ func (w *eventSenderToolWrapper) WrapEnhancedStreamableToolCall(_ context.Contex
 			}
 			return msg, nil
 		}
-		msgStream := schema.StreamReaderWithConvert(streams[0], cvt)
+		msgStream := schema.StreamReaderWithConvert(stream, cvt)
 		event := EventFromMessage(nil, msgStream, schema.Tool, toolName)
-		event.Action = prePopAction
+		return any(event).(*TypedAgentEvent[M])
+	case *schema.AgenticMessage:
+		first := true
+		cvt := func(in *schema.ToolResult) (*schema.AgenticMessage, error) {
+			msg := schema.FunctionToolResultAgenticMessage(callID, toolName, textToFunctionToolResultBlocks(toolResultText(in)))
+			if first {
+				first = false
+				msg.Extra = internal.SetMessageID(msg.Extra, toolMsgID)
+			}
+			return msg, nil
+		}
+		msgStream := schema.StreamReaderWithConvert(stream, cvt)
+		event := EventFromAgenticMessage(nil, msgStream, schema.AgenticRoleTypeUser)
+		return any(event).(*TypedAgentEvent[M])
+	default:
+		return nil
+	}
+}
 
-		execCtx := getTypedChatModelAgentExecCtx[*schema.Message](ctx)
-		_ = compose.ProcessState(ctx, func(_ context.Context, st *State) error {
+func (w *typedEventSenderToolWrapper[M]) WrapInvokableToolCall(_ context.Context, endpoint InvokableToolCallEndpoint, tCtx *ToolContext) (InvokableToolCallEndpoint, error) {
+	return func(ctx context.Context, argumentsInJSON string, opts ...tool.Option) (string, error) {
+		result, err := endpoint(ctx, argumentsInJSON, opts...)
+		if err != nil {
+			return "", err
+		}
+
+		toolName := tCtx.Name
+		callID := tCtx.CallID
+
+		prePopAction := typedPopToolGenAction[M](ctx, toolName)
+		toolMsgID := uuid.NewString()
+		event := typedToolInvokeEvent[M](callID, toolName, result, toolMsgID)
+		if prePopAction != nil {
+			event.Action = prePopAction
+		}
+
+		execCtx := getTypedChatModelAgentExecCtx[M](ctx)
+		_ = compose.ProcessState(ctx, func(_ context.Context, st *typedState[M]) error {
 			st.setToolMsgID(toolName, callID, toolMsgID)
 			if st.getReturnDirectlyToolCallID() == callID {
 				st.setReturnDirectlyEvent(event)
 			} else {
 				execCtx.send(event)
+				st.ToolEventOrder = append(st.ToolEventOrder, callID)
+			}
+			return nil
+		})
+
+		return result, nil
+	}, nil
+}
+
+func (w *typedEventSenderToolWrapper[M]) WrapStreamableToolCall(_ context.Context, endpoint StreamableToolCallEndpoint, tCtx *ToolContext) (StreamableToolCallEndpoint, error) {
+	return func(ctx context.Context, argumentsInJSON string, opts ...tool.Option) (*schema.StreamReader[string], error) {
+		result, err := endpoint(ctx, argumentsInJSON, opts...)
+		if err != nil {
+			return nil, err
+		}
+
+		toolName := tCtx.Name
+		callID := tCtx.CallID
+
+		prePopAction := typedPopToolGenAction[M](ctx, toolName)
+		streams := result.Copy(2)
+
+		toolMsgID := uuid.NewString()
+		event := typedToolStreamEvent[M](callID, toolName, toolMsgID, streams[0])
+		event.Action = prePopAction
+
+		execCtx := getTypedChatModelAgentExecCtx[M](ctx)
+		_ = compose.ProcessState(ctx, func(_ context.Context, st *typedState[M]) error {
+			st.setToolMsgID(toolName, callID, toolMsgID)
+			if st.getReturnDirectlyToolCallID() == callID {
+				st.setReturnDirectlyEvent(event)
+			} else {
+				execCtx.send(event)
+				st.ToolEventOrder = append(st.ToolEventOrder, callID)
+			}
+			return nil
+		})
+
+		return streams[1], nil
+	}, nil
+}
+
+func (w *typedEventSenderToolWrapper[M]) WrapEnhancedInvokableToolCall(_ context.Context, endpoint EnhancedInvokableToolCallEndpoint, tCtx *ToolContext) (EnhancedInvokableToolCallEndpoint, error) {
+	return func(ctx context.Context, toolArgument *schema.ToolArgument, opts ...tool.Option) (*schema.ToolResult, error) {
+		result, err := endpoint(ctx, toolArgument, opts...)
+		if err != nil {
+			return nil, err
+		}
+
+		toolName := tCtx.Name
+		callID := tCtx.CallID
+
+		prePopAction := typedPopToolGenAction[M](ctx, toolName)
+		toolMsgID := uuid.NewString()
+		event, eventErr := typedToolEnhancedInvokeEvent[M](callID, toolName, toolMsgID, result)
+		if eventErr != nil {
+			return nil, eventErr
+		}
+		if prePopAction != nil {
+			event.Action = prePopAction
+		}
+
+		execCtx := getTypedChatModelAgentExecCtx[M](ctx)
+		_ = compose.ProcessState(ctx, func(_ context.Context, st *typedState[M]) error {
+			st.setToolMsgID(toolName, callID, toolMsgID)
+			if st.getReturnDirectlyToolCallID() == callID {
+				st.setReturnDirectlyEvent(event)
+			} else {
+				execCtx.send(event)
+				st.ToolEventOrder = append(st.ToolEventOrder, callID)
+			}
+			return nil
+		})
+
+		return result, nil
+	}, nil
+}
+
+func (w *typedEventSenderToolWrapper[M]) WrapEnhancedStreamableToolCall(_ context.Context, endpoint EnhancedStreamableToolCallEndpoint, tCtx *ToolContext) (EnhancedStreamableToolCallEndpoint, error) {
+	return func(ctx context.Context, toolArgument *schema.ToolArgument, opts ...tool.Option) (*schema.StreamReader[*schema.ToolResult], error) {
+		result, err := endpoint(ctx, toolArgument, opts...)
+		if err != nil {
+			return nil, err
+		}
+
+		toolName := tCtx.Name
+		callID := tCtx.CallID
+
+		prePopAction := typedPopToolGenAction[M](ctx, toolName)
+		streams := result.Copy(2)
+
+		toolMsgID := uuid.NewString()
+		event := typedToolEnhancedStreamEvent[M](callID, toolName, toolMsgID, streams[0])
+		event.Action = prePopAction
+
+		execCtx := getTypedChatModelAgentExecCtx[M](ctx)
+		_ = compose.ProcessState(ctx, func(_ context.Context, st *typedState[M]) error {
+			st.setToolMsgID(toolName, callID, toolMsgID)
+			if st.getReturnDirectlyToolCallID() == callID {
+				st.setReturnDirectlyEvent(event)
+			} else {
+				execCtx.send(event)
+				st.ToolEventOrder = append(st.ToolEventOrder, callID)
 			}
 			return nil
 		})

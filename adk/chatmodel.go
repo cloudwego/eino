@@ -1275,6 +1275,8 @@ func (a *TypedChatModelAgent[M]) buildAgenticReActRunFunc(ctx context.Context, b
 		ctx = withTypedChatModelAgentExecCtx(ctx, &typedChatModelAgentExecCtx[*schema.AgenticMessage]{
 			runtimeReturnDirectly: ap.returnDirectly,
 			generator:             ap.generator,
+			cancelCtx:             cancelCtx,
+			afterToolCallsHook:    ap.afterToolCallsHook,
 		})
 
 		// Pre-execution cancel check
