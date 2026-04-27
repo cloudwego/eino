@@ -827,8 +827,12 @@ func reorderToolResults[M MessageType](results []M, eventOrder []string, returnD
 			delete(byCallID, returnDirectlyCallID)
 		}
 	}
-	for _, r := range byCallID {
-		ordered = append(ordered, r)
+	// Append any remaining results not in eventOrder, preserving original input order
+	// to avoid non-deterministic map iteration.
+	for _, r := range results {
+		if _, ok := byCallID[getCallID(r)]; ok {
+			ordered = append(ordered, r)
+		}
 	}
 	return ordered
 }

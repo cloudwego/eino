@@ -137,7 +137,6 @@ type ToolsConfig struct {
 	compose.ToolsNodeConfig
 
 	// ReturnDirectly specifies tools that cause the agent to return immediately when called.
-	// If multiple listed tools are called simultaneously, only the first one triggers the return.
 	// The map keys are tool names indicate whether the tool should trigger immediate return.
 	ReturnDirectly map[string]bool
 
