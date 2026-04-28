@@ -1027,3 +1027,118 @@ func TestAttack_ToolMsgIDConsistency_MultipleTools(t *testing.T) {
 			"event and state msg IDs for callID %s must match: event=%s state=%s", callID, eventID, stateID)
 	}
 }
+
+// TestAttack_ReorderToolResults_EmptyEventOrder verifies that when eventOrder is
+// empty (e.g., old checkpoint restore), the original input order is preserved.
+func TestAttack_ReorderToolResults_EmptyEventOrder(t *testing.T) {
+	results := []*schema.Message{
+		{Role: schema.Tool, ToolCallID: "call-3", ToolName: "toolC", Content: "C"},
+		{Role: schema.Tool, ToolCallID: "call-1", ToolName: "toolA", Content: "A"},
+		{Role: schema.Tool, ToolCallID: "call-2", ToolName: "toolB", Content: "B"},
+	}
+
+	ordered := reorderToolResults(results, nil, "", func(m *schema.Message) string {
+		return m.ToolCallID
+	})
+
+	require.Len(t, ordered, 3)
+	assert.Equal(t, "call-3", ordered[0].ToolCallID, "original input order [0]")
+	assert.Equal(t, "call-1", ordered[1].ToolCallID, "original input order [1]")
+	assert.Equal(t, "call-2", ordered[2].ToolCallID, "original input order [2]")
+
+	// Also verify with explicit empty slice (not nil)
+	ordered2 := reorderToolResults(results, []string{}, "", func(m *schema.Message) string {
+		return m.ToolCallID
+	})
+	require.Len(t, ordered2, 3)
+	assert.Equal(t, "call-3", ordered2[0].ToolCallID)
+	assert.Equal(t, "call-1", ordered2[1].ToolCallID)
+	assert.Equal(t, "call-2", ordered2[2].ToolCallID)
+}
+
+// TestAttack_ToolResultToBlocks_EdgeCases verifies toolResultToBlocks handles
+// nil ToolResult, empty Parts, and Parts with nil media fields.
+func TestAttack_ToolResultToBlocks_EdgeCases(t *testing.T) {
+	t.Run("nil ToolResult", func(t *testing.T) {
+		blocks := toolResultToBlocks(nil)
+		assert.Nil(t, blocks, "nil ToolResult should produce nil blocks")
+	})
+
+	t.Run("empty Parts", func(t *testing.T) {
+		tr := &schema.ToolResult{Parts: []schema.ToolOutputPart{}}
+		blocks := toolResultToBlocks(tr)
+		assert.Nil(t, blocks, "empty Parts should produce nil blocks")
+	})
+
+	t.Run("text part with empty text", func(t *testing.T) {
+		tr := &schema.ToolResult{Parts: []schema.ToolOutputPart{
+			{Type: schema.ToolPartTypeText, Text: ""},
+		}}
+		blocks := toolResultToBlocks(tr)
+		require.Len(t, blocks, 1)
+		assert.NotNil(t, blocks[0].Text)
+		assert.Equal(t, "", blocks[0].Text.Text)
+	})
+
+	t.Run("image part with nil Image field", func(t *testing.T) {
+		tr := &schema.ToolResult{Parts: []schema.ToolOutputPart{
+			{Type: schema.ToolPartTypeImage, Image: nil},
+		}}
+		blocks := toolResultToBlocks(tr)
+		assert.Empty(t, blocks)
+	})
+
+	t.Run("audio part with nil Audio field", func(t *testing.T) {
+		tr := &schema.ToolResult{Parts: []schema.ToolOutputPart{
+			{Type: schema.ToolPartTypeAudio, Audio: nil},
+		}}
+		blocks := toolResultToBlocks(tr)
+		assert.Empty(t, blocks)
+	})
+
+	t.Run("video part with nil Video field", func(t *testing.T) {
+		tr := &schema.ToolResult{Parts: []schema.ToolOutputPart{
+			{Type: schema.ToolPartTypeVideo, Video: nil},
+		}}
+		blocks := toolResultToBlocks(tr)
+		assert.Empty(t, blocks)
+	})
+
+	t.Run("file part with nil File field", func(t *testing.T) {
+		tr := &schema.ToolResult{Parts: []schema.ToolOutputPart{
+			{Type: schema.ToolPartTypeFile, File: nil},
+		}}
+		blocks := toolResultToBlocks(tr)
+		assert.Empty(t, blocks)
+	})
+
+	t.Run("mixed: valid text + nil image + valid text", func(t *testing.T) {
+		tr := &schema.ToolResult{Parts: []schema.ToolOutputPart{
+			{Type: schema.ToolPartTypeText, Text: "hello"},
+			{Type: schema.ToolPartTypeImage, Image: nil},
+			{Type: schema.ToolPartTypeText, Text: "world"},
+		}}
+		blocks := toolResultToBlocks(tr)
+		require.Len(t, blocks, 2)
+		assert.Equal(t, "hello", blocks[0].Text.Text)
+		assert.Equal(t, "world", blocks[1].Text.Text)
+	})
+
+	t.Run("image part with nil URL pointers", func(t *testing.T) {
+		tr := &schema.ToolResult{Parts: []schema.ToolOutputPart{
+			{Type: schema.ToolPartTypeImage, Image: &schema.ToolOutputImage{
+				MessagePartCommon: schema.MessagePartCommon{
+					URL:        nil,
+					Base64Data: nil,
+					MIMEType:   "image/png",
+				},
+			}},
+		}}
+		blocks := toolResultToBlocks(tr)
+		require.Len(t, blocks, 1)
+		assert.NotNil(t, blocks[0].Image)
+		assert.Equal(t, "", blocks[0].Image.URL, "nil URL pointer should deref to empty string")
+		assert.Equal(t, "", blocks[0].Image.Base64Data)
+		assert.Equal(t, "image/png", blocks[0].Image.MIMEType)
+	})
+}
