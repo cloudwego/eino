@@ -32,25 +32,25 @@ import (
 	"github.com/cloudwego/eino/schema"
 )
 
-type typedGenerateEndpoint[M messageType] func(ctx context.Context, input []M, opts ...model.Option) (M, error)
-type typedStreamEndpoint[M messageType] func(ctx context.Context, input []M, opts ...model.Option) (*schema.StreamReader[M], error)
+type typedGenerateEndpoint[M MessageType] func(ctx context.Context, input []M, opts ...model.Option) (M, error)
+type typedStreamEndpoint[M MessageType] func(ctx context.Context, input []M, opts ...model.Option) (*schema.StreamReader[M], error)
 
-type typedModelWrapperConfig[M messageType] struct {
+type typedModelWrapperConfig[M MessageType] struct {
 	handlers       []TypedChatModelAgentMiddleware[M]
 	middlewares    []AgentMiddleware
-	retryConfig    *ModelRetryConfig
-	failoverConfig *ModelFailoverConfig
+	retryConfig    *TypedModelRetryConfig[M]
+	failoverConfig *ModelFailoverConfig[M]
 	toolInfos      []*schema.ToolInfo
 	cancelContext  *cancelContext
 }
 
 type modelWrapperConfig = typedModelWrapperConfig[*schema.Message]
 
-func buildModelWrappers[M messageType](m model.BaseModel[M], config *typedModelWrapperConfig[M]) model.BaseModel[M] {
+func buildModelWrappers[M MessageType](m model.BaseModel[M], config *typedModelWrapperConfig[M]) model.BaseModel[M] {
 	return buildModelWrappersImpl(m, config)
 }
 
-func buildModelWrappersImpl[M messageType](m model.BaseModel[M], config *typedModelWrapperConfig[M]) model.BaseModel[M] {
+func buildModelWrappersImpl[M MessageType](m model.BaseModel[M], config *typedModelWrapperConfig[M]) model.BaseModel[M] {
 	var wrapped model.BaseModel[M] = m
 
 	if config.failoverConfig != nil {
@@ -75,13 +75,13 @@ func buildModelWrappersImpl[M messageType](m model.BaseModel[M], config *typedMo
 	return wrapped
 }
 
-type typedCallbackInjectionModelWrapper[M messageType] struct{}
+type typedCallbackInjectionModelWrapper[M MessageType] struct{}
 
 func (w typedCallbackInjectionModelWrapper[M]) wrapModel(m model.BaseModel[M]) model.BaseModel[M] {
 	return &typedCallbackInjectedModel[M]{inner: m}
 }
 
-type typedCallbackInjectedModel[M messageType] struct {
+type typedCallbackInjectedModel[M MessageType] struct {
 	inner model.BaseModel[M]
 }
 
@@ -108,7 +108,7 @@ func (m *typedCallbackInjectedModel[M]) Stream(ctx context.Context, input []M, o
 	return wrappedStream, nil
 }
 
-func handlersToToolMiddlewares[M messageType](handlers []TypedChatModelAgentMiddleware[M]) []compose.ToolMiddleware {
+func handlersToToolMiddlewares[M MessageType](handlers []TypedChatModelAgentMiddleware[M]) []compose.ToolMiddleware {
 	var middlewares []compose.ToolMiddleware
 	// Forward iteration: compose.wrapToolCall applies middlewares in reverse order
 	// (len-1 down to 0), so keeping the original handler order here means
@@ -255,7 +255,7 @@ func handlersToToolMiddlewares[M messageType](handlers []TypedChatModelAgentMidd
 	return middlewares
 }
 
-type typedEventSenderModelWrapper[M messageType] struct {
+type typedEventSenderModelWrapper[M MessageType] struct {
 	*TypedBaseChatModelAgentMiddleware[M]
 }
 
@@ -266,7 +266,7 @@ func NewEventSenderModelWrapper() ChatModelAgentMiddleware {
 	}
 }
 
-func (w *typedEventSenderModelWrapper[M]) WrapModel(_ context.Context, m model.BaseModel[M], mc *ModelContext) (model.BaseModel[M], error) {
+func (w *typedEventSenderModelWrapper[M]) WrapModel(_ context.Context, m model.BaseModel[M], mc *TypedModelContext[M]) (model.BaseModel[M], error) {
 	inner := m
 	if mc != nil && mc.cancelContext != nil {
 		inner = &typedCancelMonitoredModel[M]{
@@ -274,21 +274,21 @@ func (w *typedEventSenderModelWrapper[M]) WrapModel(_ context.Context, m model.B
 			cancelContext: mc.cancelContext,
 		}
 	}
-	var retryConfig *ModelRetryConfig
+	var retryConfig *TypedModelRetryConfig[M]
 	if mc != nil {
 		retryConfig = mc.ModelRetryConfig
 	}
-	var failoverConfig *ModelFailoverConfig
+	var failoverConfig *ModelFailoverConfig[M]
 	if mc != nil {
 		failoverConfig = mc.ModelFailoverConfig
 	}
 	return &typedEventSenderModel[M]{inner: inner, modelRetryConfig: retryConfig, modelFailoverConfig: failoverConfig}, nil
 }
 
-type typedEventSenderModel[M messageType] struct {
+type typedEventSenderModel[M MessageType] struct {
 	inner               model.BaseModel[M]
-	modelRetryConfig    *ModelRetryConfig
-	modelFailoverConfig *ModelFailoverConfig
+	modelRetryConfig    *TypedModelRetryConfig[M]
+	modelFailoverConfig *ModelFailoverConfig[M]
 }
 
 func (m *typedEventSenderModel[M]) Generate(ctx context.Context, input []M, opts ...model.Option) (M, error) {
@@ -381,7 +381,7 @@ func (m *typedEventSenderModel[M]) buildStreamConvertOptions(ctx context.Context
 	var retryWrapper func(error) error
 	if m.modelRetryConfig != nil {
 		if m.modelRetryConfig.ShouldRetry != nil {
-			execCtx := getTypedChatModelAgentExecCtx[*schema.Message](ctx)
+			execCtx := getTypedChatModelAgentExecCtx[M](ctx)
 			signal := (*retryVerdictSignal)(nil)
 			if execCtx != nil {
 				signal = execCtx.retryVerdictSignal
@@ -402,10 +402,10 @@ func (m *typedEventSenderModel[M]) buildStreamConvertOptions(ctx context.Context
 					verdict := readVerdict()
 					if verdict.WillRetry {
 						return &WillRetryError{
-							ErrStr:        err.Error(),
-							RetryAttempt:  verdict.RetryAttempt,
-							OutputMessage: verdict.OutputMessage,
-							err:           err,
+							ErrStr:       err.Error(),
+							RetryAttempt: verdict.RetryAttempt,
+							rejectReason: verdict.RejectReason,
+							err:          err,
 						}
 					}
 					return err
@@ -415,10 +415,10 @@ func (m *typedEventSenderModel[M]) buildStreamConvertOptions(ctx context.Context
 					verdict := readVerdict()
 					if verdict.WillRetry {
 						return nil, &WillRetryError{
-							ErrStr:        verdict.Err.Error(),
-							RetryAttempt:  verdict.RetryAttempt,
-							OutputMessage: verdict.OutputMessage,
-							err:           verdict.Err,
+							ErrStr:       verdict.Err.Error(),
+							RetryAttempt: verdict.RetryAttempt,
+							rejectReason: verdict.RejectReason,
+							err:          verdict.Err,
 						}
 					}
 					return nil, io.EOF
@@ -466,7 +466,7 @@ func (m *typedEventSenderModel[M]) buildStreamConvertOptions(ctx context.Context
 	return opts
 }
 
-func copyMessage[M messageType](msg M) M {
+func copyMessage[M MessageType](msg M) M {
 	switch v := any(msg).(type) {
 	case *schema.Message:
 		cp := *v
@@ -479,7 +479,7 @@ func copyMessage[M messageType](msg M) M {
 	}
 }
 
-func typedPopToolGenAction[M messageType](ctx context.Context, toolName string) *AgentAction {
+func typedPopToolGenAction[M MessageType](ctx context.Context, toolName string) *AgentAction {
 	toolCallID := compose.GetToolCallID(ctx)
 
 	var action *AgentAction
@@ -669,7 +669,7 @@ func (w *eventSenderToolWrapper) WrapEnhancedStreamableToolCall(_ context.Contex
 	}, nil
 }
 
-func hasUserEventSenderToolWrapper[M messageType](handlers []TypedChatModelAgentMiddleware[M]) bool {
+func hasUserEventSenderToolWrapper[M MessageType](handlers []TypedChatModelAgentMiddleware[M]) bool {
 	for _, handler := range handlers {
 		if _, ok := any(handler).(eventSenderToolWrapperMarker); ok {
 			return true
@@ -678,14 +678,14 @@ func hasUserEventSenderToolWrapper[M messageType](handlers []TypedChatModelAgent
 	return false
 }
 
-type typedStateModelWrapper[M messageType] struct {
+type typedStateModelWrapper[M MessageType] struct {
 	inner               model.BaseModel[M]
 	original            model.BaseModel[M]
 	handlers            []TypedChatModelAgentMiddleware[M]
 	middlewares         []AgentMiddleware
 	toolInfos           []*schema.ToolInfo
-	modelRetryConfig    *ModelRetryConfig
-	modelFailoverConfig *ModelFailoverConfig
+	modelRetryConfig    *TypedModelRetryConfig[M]
+	modelFailoverConfig *ModelFailoverConfig[M]
 	cancelContext       *cancelContext
 }
 
@@ -724,7 +724,7 @@ func (w *typedStateModelWrapper[M]) wrapGenerateEndpoint(endpoint typedGenerateE
 		endpoint = func(ctx context.Context, input []M, opts ...model.Option) (M, error) {
 			baseOpts := &model.Options{Tools: baseToolInfos}
 			commonOpts := model.GetCommonOptions(baseOpts, opts...)
-			mc := &ModelContext{Tools: commonOpts.Tools, ModelRetryConfig: retryConfig, cancelContext: cc}
+			mc := &TypedModelContext[M]{Tools: commonOpts.Tools, ModelRetryConfig: retryConfig, cancelContext: cc}
 			wrappedModel, err := handler.WrapModel(ctx, &typedEndpointModel[M]{generate: innerEndpoint}, mc)
 			if err != nil {
 				var zero M
@@ -744,7 +744,7 @@ func (w *typedStateModelWrapper[M]) wrapGenerateEndpoint(endpoint typedGenerateE
 			if execCtx == nil || execCtx.generator == nil {
 				return innerEndpoint(ctx, input, opts...)
 			}
-			mc := &ModelContext{ModelRetryConfig: retryConfig, ModelFailoverConfig: failoverConfig, cancelContext: cc}
+			mc := &TypedModelContext[M]{ModelRetryConfig: retryConfig, ModelFailoverConfig: failoverConfig, cancelContext: cc}
 			wrappedModel, err := eventSender.WrapModel(ctx, &typedEndpointModel[M]{generate: innerEndpoint}, mc)
 			if err != nil {
 				var zero M
@@ -766,7 +766,7 @@ func (w *typedStateModelWrapper[M]) wrapGenerateEndpoint(endpoint typedGenerateE
 		config := w.modelFailoverConfig
 		innerEndpoint := endpoint
 		endpoint = func(ctx context.Context, input []M, opts ...model.Option) (M, error) {
-			failoverWrapper := newTypedFailoverModelWrapper[M](&typedEndpointModel[M]{generate: innerEndpoint}, config)
+			failoverWrapper := newFailoverModelWrapper[M](&typedEndpointModel[M]{generate: innerEndpoint}, config)
 			return failoverWrapper.Generate(ctx, input, opts...)
 		}
 	}
@@ -787,7 +787,7 @@ func (w *typedStateModelWrapper[M]) wrapStreamEndpoint(endpoint typedStreamEndpo
 		endpoint = func(ctx context.Context, input []M, opts ...model.Option) (*schema.StreamReader[M], error) {
 			baseOpts := &model.Options{Tools: baseToolInfos}
 			commonOpts := model.GetCommonOptions(baseOpts, opts...)
-			mc := &ModelContext{Tools: commonOpts.Tools, ModelRetryConfig: retryConfig, cancelContext: cc}
+			mc := &TypedModelContext[M]{Tools: commonOpts.Tools, ModelRetryConfig: retryConfig, cancelContext: cc}
 			wrappedModel, err := handler.WrapModel(ctx, &typedEndpointModel[M]{stream: innerEndpoint}, mc)
 			if err != nil {
 				return nil, err
@@ -806,7 +806,7 @@ func (w *typedStateModelWrapper[M]) wrapStreamEndpoint(endpoint typedStreamEndpo
 			if execCtx == nil || execCtx.generator == nil {
 				return innerEndpoint(ctx, input, opts...)
 			}
-			mc := &ModelContext{ModelRetryConfig: retryConfig, ModelFailoverConfig: failoverConfig, cancelContext: cc}
+			mc := &TypedModelContext[M]{ModelRetryConfig: retryConfig, ModelFailoverConfig: failoverConfig, cancelContext: cc}
 			wrappedModel, err := eventSender.WrapModel(ctx, &typedEndpointModel[M]{stream: innerEndpoint}, mc)
 			if err != nil {
 				return nil, err
@@ -827,7 +827,7 @@ func (w *typedStateModelWrapper[M]) wrapStreamEndpoint(endpoint typedStreamEndpo
 		config := w.modelFailoverConfig
 		innerEndpoint := endpoint
 		endpoint = func(ctx context.Context, input []M, opts ...model.Option) (*schema.StreamReader[M], error) {
-			failoverWrapper := newTypedFailoverModelWrapper[M](&typedEndpointModel[M]{stream: innerEndpoint}, config)
+			failoverWrapper := newFailoverModelWrapper[M](&typedEndpointModel[M]{stream: innerEndpoint}, config)
 			return failoverWrapper.Stream(ctx, input, opts...)
 		}
 	}
@@ -879,7 +879,7 @@ func (w *typedStateModelWrapper[M]) Generate(ctx context.Context, input []M, opt
 
 	baseOpts := &model.Options{Tools: w.toolInfos}
 	commonOpts := model.GetCommonOptions(baseOpts, opts...)
-	mc := &ModelContext{Tools: commonOpts.Tools, ModelRetryConfig: w.modelRetryConfig, cancelContext: w.cancelContext}
+	mc := &TypedModelContext[M]{Tools: commonOpts.Tools, ModelRetryConfig: w.modelRetryConfig, cancelContext: w.cancelContext}
 	for _, handler := range w.handlers {
 		var err error
 		ctx, state, err = handler.BeforeModelRewriteState(ctx, state, mc)
@@ -1003,7 +1003,7 @@ func (w *typedStateModelWrapper[M]) Stream(ctx context.Context, input []M, opts 
 
 	baseOpts := &model.Options{Tools: w.toolInfos}
 	commonOpts := model.GetCommonOptions(baseOpts, opts...)
-	mc := &ModelContext{Tools: commonOpts.Tools, ModelRetryConfig: w.modelRetryConfig, cancelContext: w.cancelContext}
+	mc := &TypedModelContext[M]{Tools: commonOpts.Tools, ModelRetryConfig: w.modelRetryConfig, cancelContext: w.cancelContext}
 	for _, handler := range w.handlers {
 		var err error
 		ctx, state, err = handler.BeforeModelRewriteState(ctx, state, mc)
@@ -1081,7 +1081,7 @@ func (w *typedStateModelWrapper[M]) Stream(ctx context.Context, input []M, opts 
 	return schema.StreamReaderFromArray([]M{state.Messages[len(state.Messages)-1]}), nil
 }
 
-type typedEndpointModel[M messageType] struct {
+type typedEndpointModel[M MessageType] struct {
 	generate typedGenerateEndpoint[M]
 	stream   typedStreamEndpoint[M]
 }

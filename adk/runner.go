@@ -28,14 +28,14 @@ import (
 	"github.com/cloudwego/eino/schema"
 )
 
-func errorIterator[M messageType](err error) *AsyncIterator[*TypedAgentEvent[M]] {
+func errorIterator[M MessageType](err error) *AsyncIterator[*TypedAgentEvent[M]] {
 	iter, gen := NewAsyncIteratorPair[*TypedAgentEvent[M]]()
 	gen.Send(&TypedAgentEvent[M]{Err: err})
 	gen.Close()
 	return iter
 }
 
-func newUserMessage[M messageType](query string) (M, error) {
+func newUserMessage[M MessageType](query string) (M, error) {
 	var zero M
 	switch any(zero).(type) {
 	case *schema.Message:
@@ -52,7 +52,7 @@ func newUserMessage[M messageType](query string) (M, error) {
 //
 // Execution always goes through the flowAgent pipeline, which handles
 // multi-agent orchestration, callbacks, agent naming, run paths, and cancellation.
-type TypedRunner[M messageType] struct {
+type TypedRunner[M MessageType] struct {
 	a               TypedAgent[M]
 	enableStreaming bool
 	store           CheckPointStore
@@ -65,7 +65,7 @@ type CheckPointStore = core.CheckPointStore
 
 type CheckPointDeleter = core.CheckPointDeleter
 
-type TypedRunnerConfig[M messageType] struct {
+type TypedRunnerConfig[M MessageType] struct {
 	Agent           TypedAgent[M]
 	EnableStreaming bool
 
@@ -91,7 +91,7 @@ func NewRunner(_ context.Context, conf RunnerConfig) *Runner {
 }
 
 // NewTypedRunner creates a new TypedRunner with the given config.
-func NewTypedRunner[M messageType](conf TypedRunnerConfig[M]) *TypedRunner[M] {
+func NewTypedRunner[M MessageType](conf TypedRunnerConfig[M]) *TypedRunner[M] {
 	return &TypedRunner[M]{
 		enableStreaming: conf.EnableStreaming,
 		a:               conf.Agent,
@@ -153,7 +153,7 @@ func (r *TypedRunner[M]) resumeInternal(ctx context.Context, checkPointID string
 	return typedRunnerResumeInternalImpl(r.a, r.enableStreaming, r.store, ctx, checkPointID, resumeData, opts...)
 }
 
-func typedRunnerRunImpl[M messageType](a TypedAgent[M], enableStreaming bool, store CheckPointStore, ctx context.Context, messages []M, opts ...AgentRunOption) *AsyncIterator[*TypedAgentEvent[M]] {
+func typedRunnerRunImpl[M MessageType](a TypedAgent[M], enableStreaming bool, store CheckPointStore, ctx context.Context, messages []M, opts ...AgentRunOption) *AsyncIterator[*TypedAgentEvent[M]] {
 	o := getCommonOptions(nil, opts...)
 
 	input := &TypedAgentInput[M]{
@@ -202,7 +202,7 @@ func typedRunnerRunImpl[M messageType](a TypedAgent[M], enableStreaming bool, st
 	return niter
 }
 
-func typedRunnerResumeInternalImpl[M messageType](a TypedAgent[M], enableStreaming bool, store CheckPointStore, ctx context.Context, checkPointID string, resumeData map[string]any, //nolint:revive // argument-limit
+func typedRunnerResumeInternalImpl[M MessageType](a TypedAgent[M], enableStreaming bool, store CheckPointStore, ctx context.Context, checkPointID string, resumeData map[string]any, //nolint:revive // argument-limit
 	opts ...AgentRunOption) (*AsyncIterator[*TypedAgentEvent[M]], error) {
 	if store == nil {
 		return nil, fmt.Errorf("failed to resume: store is nil")
@@ -262,7 +262,7 @@ func typedRunnerResumeInternalImpl[M messageType](a TypedAgent[M], enableStreami
 	return niter, nil
 }
 
-func typedRunnerHandleIterImpl[M messageType](enableStreaming bool, store CheckPointStore, ctx context.Context, aIter *AsyncIterator[*TypedAgentEvent[M]], //nolint:revive // argument-limit
+func typedRunnerHandleIterImpl[M MessageType](enableStreaming bool, store CheckPointStore, ctx context.Context, aIter *AsyncIterator[*TypedAgentEvent[M]], //nolint:revive // argument-limit
 	gen *AsyncGenerator[*TypedAgentEvent[M]], checkPointID *string, cancelCtx *cancelContext) {
 	defer func() {
 		panicErr := recover()

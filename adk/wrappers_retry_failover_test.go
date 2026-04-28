@@ -67,12 +67,12 @@ func TestRetryThenFailover(t *testing.T) {
 			BackoffFunc: func(_ context.Context, _ int) time.Duration { return 0 },
 		}
 
-		failoverCfg := &ModelFailoverConfig{
+		failoverCfg := &ModelFailoverConfig[*schema.Message]{
 			MaxRetries: 1,
 			ShouldFailover: func(_ context.Context, _ *schema.Message, err error) bool {
 				return err != nil
 			},
-			GetFailoverModel: func(_ context.Context, fc *FailoverContext) (model.BaseChatModel, []*schema.Message, error) {
+			GetFailoverModel: func(_ context.Context, fc *FailoverContext[*schema.Message]) (model.BaseChatModel, []*schema.Message, error) {
 				require.NotNil(t, fc.LastErr)
 				return m2, nil, nil
 			},
@@ -116,12 +116,12 @@ func TestRetryThenFailover(t *testing.T) {
 			BackoffFunc: func(_ context.Context, _ int) time.Duration { return 0 },
 		}
 
-		failoverCfg := &ModelFailoverConfig{
+		failoverCfg := &ModelFailoverConfig[*schema.Message]{
 			MaxRetries: 1,
 			ShouldFailover: func(_ context.Context, _ *schema.Message, err error) bool {
 				return err != nil
 			},
-			GetFailoverModel: func(_ context.Context, _ *FailoverContext) (model.BaseChatModel, []*schema.Message, error) {
+			GetFailoverModel: func(_ context.Context, _ *FailoverContext[*schema.Message]) (model.BaseChatModel, []*schema.Message, error) {
 				return m2, nil, nil
 			},
 		}
@@ -165,13 +165,13 @@ func TestRetryThenFailover(t *testing.T) {
 			BackoffFunc: func(_ context.Context, _ int) time.Duration { return 0 },
 		}
 
-		failoverCfg := &ModelFailoverConfig{
+		failoverCfg := &ModelFailoverConfig[*schema.Message]{
 			MaxRetries: 1,
 			ShouldFailover: func(_ context.Context, _ *schema.Message, err error) bool {
 				atomic.AddInt32(&failoverCalled, 1)
 				return true
 			},
-			GetFailoverModel: func(_ context.Context, _ *FailoverContext) (model.BaseChatModel, []*schema.Message, error) {
+			GetFailoverModel: func(_ context.Context, _ *FailoverContext[*schema.Message]) (model.BaseChatModel, []*schema.Message, error) {
 				t.Fatal("GetFailoverModel should not be called when retry succeeds")
 				return nil, nil, nil
 			},
@@ -218,12 +218,12 @@ func TestRetryThenFailover(t *testing.T) {
 			BackoffFunc: func(_ context.Context, _ int) time.Duration { return 0 },
 		}
 
-		failoverCfg := &ModelFailoverConfig{
+		failoverCfg := &ModelFailoverConfig[*schema.Message]{
 			MaxRetries: 1,
 			ShouldFailover: func(_ context.Context, _ *schema.Message, err error) bool {
 				return err != nil
 			},
-			GetFailoverModel: func(_ context.Context, _ *FailoverContext) (model.BaseChatModel, []*schema.Message, error) {
+			GetFailoverModel: func(_ context.Context, _ *FailoverContext[*schema.Message]) (model.BaseChatModel, []*schema.Message, error) {
 				return m2, nil, nil
 			},
 		}
@@ -267,12 +267,12 @@ func TestRetryThenFailover(t *testing.T) {
 			BackoffFunc: func(_ context.Context, _ int) time.Duration { return 0 },
 		}
 
-		failoverCfg := &ModelFailoverConfig{
+		failoverCfg := &ModelFailoverConfig[*schema.Message]{
 			MaxRetries: 1,
 			ShouldFailover: func(_ context.Context, _ *schema.Message, err error) bool {
 				return err != nil
 			},
-			GetFailoverModel: func(_ context.Context, fc *FailoverContext) (model.BaseChatModel, []*schema.Message, error) {
+			GetFailoverModel: func(_ context.Context, fc *FailoverContext[*schema.Message]) (model.BaseChatModel, []*schema.Message, error) {
 				require.NotNil(t, fc.LastErr)
 				return m2, nil, nil
 			},
@@ -322,12 +322,12 @@ func TestRetryThenFailover(t *testing.T) {
 			BackoffFunc: func(_ context.Context, _ int) time.Duration { return 0 },
 		}
 
-		failoverCfg := &ModelFailoverConfig{
+		failoverCfg := &ModelFailoverConfig[*schema.Message]{
 			MaxRetries: 1,
 			ShouldFailover: func(_ context.Context, _ *schema.Message, err error) bool {
 				return err != nil
 			},
-			GetFailoverModel: func(_ context.Context, _ *FailoverContext) (model.BaseChatModel, []*schema.Message, error) {
+			GetFailoverModel: func(_ context.Context, _ *FailoverContext[*schema.Message]) (model.BaseChatModel, []*schema.Message, error) {
 				return m2, nil, nil
 			},
 		}
@@ -376,12 +376,12 @@ func TestRetryThenFailover(t *testing.T) {
 			BackoffFunc: func(_ context.Context, _ int) time.Duration { return 0 },
 		}
 
-		failoverCfg := &ModelFailoverConfig{
+		failoverCfg := &ModelFailoverConfig[*schema.Message]{
 			MaxRetries: 1,
 			ShouldFailover: func(_ context.Context, _ *schema.Message, err error) bool {
 				return err != nil
 			},
-			GetFailoverModel: func(_ context.Context, _ *FailoverContext) (model.BaseChatModel, []*schema.Message, error) {
+			GetFailoverModel: func(_ context.Context, _ *FailoverContext[*schema.Message]) (model.BaseChatModel, []*schema.Message, error) {
 				return m2, nil, nil
 			},
 		}
@@ -428,12 +428,12 @@ func TestRetryThenFailover(t *testing.T) {
 			BackoffFunc: func(_ context.Context, _ int) time.Duration { return 0 },
 		}
 
-		failoverCfg := &ModelFailoverConfig{
+		failoverCfg := &ModelFailoverConfig[*schema.Message]{
 			MaxRetries: 1,
 			ShouldFailover: func(_ context.Context, _ *schema.Message, err error) bool {
 				return err != nil
 			},
-			GetFailoverModel: func(_ context.Context, _ *FailoverContext) (model.BaseChatModel, []*schema.Message, error) {
+			GetFailoverModel: func(_ context.Context, _ *FailoverContext[*schema.Message]) (model.BaseChatModel, []*schema.Message, error) {
 				return m2, nil, nil
 			},
 		}
@@ -468,12 +468,12 @@ func TestRetryThenFailover(t *testing.T) {
 			BackoffFunc: func(_ context.Context, _ int) time.Duration { return 0 },
 		}
 
-		failoverCfg := &ModelFailoverConfig{
+		failoverCfg := &ModelFailoverConfig[*schema.Message]{
 			MaxRetries: 1,
 			ShouldFailover: func(_ context.Context, _ *schema.Message, err error) bool {
 				return err != nil
 			},
-			GetFailoverModel: func(_ context.Context, _ *FailoverContext) (model.BaseChatModel, []*schema.Message, error) {
+			GetFailoverModel: func(_ context.Context, _ *FailoverContext[*schema.Message]) (model.BaseChatModel, []*schema.Message, error) {
 				return nil, nil, nil
 			},
 		}
@@ -510,13 +510,13 @@ func TestRetryThenFailover(t *testing.T) {
 			BackoffFunc: func(_ context.Context, _ int) time.Duration { return 0 },
 		}
 
-		failoverCfg := &ModelFailoverConfig{
+		failoverCfg := &ModelFailoverConfig[*schema.Message]{
 			MaxRetries: 3,
 			ShouldFailover: func(_ context.Context, _ *schema.Message, err error) bool {
 				cancel()
 				return err != nil
 			},
-			GetFailoverModel: func(_ context.Context, _ *FailoverContext) (model.BaseChatModel, []*schema.Message, error) {
+			GetFailoverModel: func(_ context.Context, _ *FailoverContext[*schema.Message]) (model.BaseChatModel, []*schema.Message, error) {
 				atomic.AddInt32(&failoverModelCalled, 1)
 				return nil, nil, nil
 			},
@@ -550,13 +550,13 @@ func TestErrStreamCanceled_Failover(t *testing.T) {
 			}, ErrStreamCanceled), nil
 		})
 
-		failoverCfg := &ModelFailoverConfig{
+		failoverCfg := &ModelFailoverConfig[*schema.Message]{
 			MaxRetries: 2,
 			ShouldFailover: func(_ context.Context, _ *schema.Message, err error) bool {
 				atomic.AddInt32(&failoverCalled, 1)
 				return true
 			},
-			GetFailoverModel: func(_ context.Context, _ *FailoverContext) (model.BaseChatModel, []*schema.Message, error) {
+			GetFailoverModel: func(_ context.Context, _ *FailoverContext[*schema.Message]) (model.BaseChatModel, []*schema.Message, error) {
 				t.Fatal("GetFailoverModel should not be called for ErrStreamCanceled")
 				return nil, nil, nil
 			},
@@ -585,13 +585,13 @@ func TestErrStreamCanceled_Failover(t *testing.T) {
 			return nil, ErrStreamCanceled
 		}, nil)
 
-		failoverCfg := &ModelFailoverConfig{
+		failoverCfg := &ModelFailoverConfig[*schema.Message]{
 			MaxRetries: 2,
 			ShouldFailover: func(_ context.Context, _ *schema.Message, err error) bool {
 				atomic.AddInt32(&failoverCalled, 1)
 				return true
 			},
-			GetFailoverModel: func(_ context.Context, _ *FailoverContext) (model.BaseChatModel, []*schema.Message, error) {
+			GetFailoverModel: func(_ context.Context, _ *FailoverContext[*schema.Message]) (model.BaseChatModel, []*schema.Message, error) {
 				t.Fatal("GetFailoverModel should not be called for ErrStreamCanceled")
 				return nil, nil, nil
 			},

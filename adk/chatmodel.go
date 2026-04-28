@@ -42,7 +42,7 @@ import (
 var _ ResumableAgent = &TypedChatModelAgent[*schema.Message]{}
 var _ TypedResumableAgent[*schema.AgenticMessage] = &TypedChatModelAgent[*schema.AgenticMessage]{}
 
-type typedChatModelAgentExecCtx[M messageType] struct {
+type typedChatModelAgentExecCtx[M MessageType] struct {
 	runtimeReturnDirectly map[string]bool
 	generator             *AsyncGenerator[*TypedAgentEvent[M]]
 	cancelCtx             *cancelContext
@@ -70,13 +70,13 @@ func (e *typedChatModelAgentExecCtx[M]) send(event *TypedAgentEvent[M]) {
 
 type chatModelAgentExecCtx = typedChatModelAgentExecCtx[*schema.Message]
 
-type typedChatModelAgentExecCtxKey[M messageType] struct{}
+type typedChatModelAgentExecCtxKey[M MessageType] struct{}
 
-func withTypedChatModelAgentExecCtx[M messageType](ctx context.Context, execCtx *typedChatModelAgentExecCtx[M]) context.Context {
+func withTypedChatModelAgentExecCtx[M MessageType](ctx context.Context, execCtx *typedChatModelAgentExecCtx[M]) context.Context {
 	return context.WithValue(ctx, typedChatModelAgentExecCtxKey[M]{}, execCtx)
 }
 
-func getTypedChatModelAgentExecCtx[M messageType](ctx context.Context) *typedChatModelAgentExecCtx[M] {
+func getTypedChatModelAgentExecCtx[M MessageType](ctx context.Context) *typedChatModelAgentExecCtx[M] {
 	if v := ctx.Value(typedChatModelAgentExecCtxKey[M]{}); v != nil {
 		return v.(*typedChatModelAgentExecCtx[M])
 	}
@@ -160,7 +160,7 @@ type ToolsConfig struct {
 // messages ([]M). This is the primary customization point for controlling what the model sees.
 // The default implementation prepends a system message (if instruction is non-empty),
 // followed by the user's input messages.
-type TypedGenModelInput[M messageType] func(ctx context.Context, instruction string, input *TypedAgentInput[M]) ([]M, error)
+type TypedGenModelInput[M MessageType] func(ctx context.Context, instruction string, input *TypedAgentInput[M]) ([]M, error)
 
 // GenModelInput transforms agent instructions and input into a format suitable for the model.
 type GenModelInput = TypedGenModelInput[*schema.Message]
@@ -193,7 +193,7 @@ func defaultGenModelInput(ctx context.Context, instruction string, input *AgentI
 	return msgs, nil
 }
 
-func newDefaultGenModelInput[M messageType]() TypedGenModelInput[M] {
+func newDefaultGenModelInput[M MessageType]() TypedGenModelInput[M] {
 	var zero M
 	switch any(zero).(type) {
 	case *schema.Message:
@@ -208,13 +208,13 @@ func newDefaultGenModelInput[M messageType]() TypedGenModelInput[M] {
 			return msgs, nil
 		})).(TypedGenModelInput[M])
 	default:
-		panic("unreachable: unknown messageType")
+		panic("unreachable: unknown MessageType")
 	}
 }
 
 // TypedChatModelAgentState represents the state of a chat model agent during conversation.
 // This is the primary state type for both TypedChatModelAgentMiddleware and AgentMiddleware callbacks.
-type TypedChatModelAgentState[M messageType] struct {
+type TypedChatModelAgentState[M MessageType] struct {
 	// Messages contains all messages in the current conversation session.
 	Messages []M
 
@@ -266,7 +266,7 @@ type AgentMiddleware struct {
 }
 
 // TypedChatModelAgentConfig is the generic configuration for ChatModelAgent.
-type TypedChatModelAgentConfig[M messageType] struct {
+type TypedChatModelAgentConfig[M MessageType] struct {
 	// Name of the agent. Better be unique across all agents.
 	// Optional. If empty, the agent can still run standalone but cannot be used as
 	// a sub-agent tool via NewAgentTool (which requires a non-empty Name).
@@ -414,14 +414,14 @@ type TypedChatModelAgentConfig[M messageType] struct {
 	// When set, the agent will automatically retry failed ChatModel calls
 	// based on the configured policy.
 	// Optional. If nil, no retry will be performed.
-	ModelRetryConfig *ModelRetryConfig
+	ModelRetryConfig *TypedModelRetryConfig[M]
 
 	// ModelFailoverConfig configures failover behavior for the ChatModel.
 	// When set, the agent will first try the last successful model (initially the configured Model),
 	// and on failure, call GetFailoverModel to select alternate models.
 	// Model field is still required as it serves as the initial model.
 	// Optional. If nil, no failover will be performed.
-	ModelFailoverConfig *ModelFailoverConfig
+	ModelFailoverConfig *ModelFailoverConfig[M]
 }
 
 type ChatModelAgentConfig = TypedChatModelAgentConfig[*schema.Message]
@@ -432,7 +432,7 @@ type ChatModelAgentConfig = TypedChatModelAgentConfig[*schema.Message]
 // For M = *schema.AgenticMessage, a single-shot chain is used since agentic models
 // handle tool calling internally. Cancel monitoring and retry on the model stream
 // are not yet supported for agentic models.
-type TypedChatModelAgent[M messageType] struct {
+type TypedChatModelAgent[M MessageType] struct {
 	name        string
 	description string
 	instruction string
@@ -455,8 +455,8 @@ type TypedChatModelAgent[M messageType] struct {
 	handlers    []TypedChatModelAgentMiddleware[M]
 	middlewares []AgentMiddleware
 
-	modelRetryConfig    *ModelRetryConfig
-	modelFailoverConfig *ModelFailoverConfig
+	modelRetryConfig    *TypedModelRetryConfig[M]
+	modelFailoverConfig *ModelFailoverConfig[M]
 
 	once   sync.Once
 	run    typedRunFunc[M]
@@ -467,7 +467,7 @@ type TypedChatModelAgent[M messageType] struct {
 type ChatModelAgent = TypedChatModelAgent[*schema.Message]
 
 // typedRunParams holds the parameters for a typedRunFunc invocation.
-type typedRunParams[M messageType] struct {
+type typedRunParams[M MessageType] struct {
 	input          *TypedAgentInput[M]
 	generator      *AsyncGenerator[*TypedAgentEvent[M]]
 	store          *bridgeStore
@@ -480,7 +480,7 @@ type typedRunParams[M messageType] struct {
 	afterToolCallsHook func(ctx context.Context) error
 }
 
-type typedRunFunc[M messageType] func(ctx context.Context, p *typedRunParams[M])
+type typedRunFunc[M MessageType] func(ctx context.Context, p *typedRunParams[M])
 
 // NewChatModelAgent creates a new ChatModelAgent with the given config.
 func NewChatModelAgent(ctx context.Context, config *ChatModelAgentConfig) (*ChatModelAgent, error) {
@@ -488,7 +488,7 @@ func NewChatModelAgent(ctx context.Context, config *ChatModelAgentConfig) (*Chat
 }
 
 // NewTypedChatModelAgent creates a new TypedChatModelAgent with the given config.
-func NewTypedChatModelAgent[M messageType](ctx context.Context, config *TypedChatModelAgentConfig[M]) (*TypedChatModelAgent[M], error) {
+func NewTypedChatModelAgent[M MessageType](ctx context.Context, config *TypedChatModelAgentConfig[M]) (*TypedChatModelAgent[M], error) {
 	if config.ModelFailoverConfig != nil {
 		if config.ModelFailoverConfig.GetFailoverModel == nil {
 			return nil, errors.New("ModelFailoverConfig.GetFailoverModel is required when ModelFailoverConfig is set")
@@ -732,7 +732,7 @@ func init() {
 	schema.RegisterName[*ChatModelAgentInterruptInfo]("_eino_adk_chat_model_agent_interrupt_info")
 }
 
-func extractTextContent[M messageType](msg M) string {
+func extractTextContent[M MessageType](msg M) string {
 	switch v := any(msg).(type) {
 	case *schema.Message:
 		return v.Content
@@ -749,7 +749,7 @@ func extractTextContent[M messageType](msg M) string {
 	}
 }
 
-func setOutputToSession[M messageType](ctx context.Context, msg M, msgStream *schema.StreamReader[M], outputKey string) error {
+func setOutputToSession[M MessageType](ctx context.Context, msg M, msgStream *schema.StreamReader[M], outputKey string) error {
 	if !isNilMessage(msg) {
 		AddSessionValue(ctx, outputKey, extractTextContent(msg))
 		return nil
@@ -764,7 +764,7 @@ func setOutputToSession[M messageType](ctx context.Context, msg M, msgStream *sc
 	return nil
 }
 
-func typedErrFunc[M messageType](err error) typedRunFunc[M] {
+func typedErrFunc[M MessageType](err error) typedRunFunc[M] {
 	return func(ctx context.Context, p *typedRunParams[M]) {
 		p.generator.Send(&TypedAgentEvent[M]{Err: err})
 	}
@@ -938,12 +938,12 @@ func (a *TypedChatModelAgent[M]) handleRunFuncError(
 	generator.Send(&TypedAgentEvent[M]{Err: err})
 }
 
-type typedNoToolsInput[M messageType] struct {
+type typedNoToolsInput[M MessageType] struct {
 	input       *TypedAgentInput[M]
 	instruction string
 }
 
-func appendModelToChain[I, O any, M messageType](chain *compose.Chain[I, O], m model.BaseModel[M]) {
+func appendModelToChain[I, O any, M MessageType](chain *compose.Chain[I, O], m model.BaseModel[M]) {
 	var zero M
 	switch any(zero).(type) {
 	case *schema.Message:
@@ -1078,8 +1078,8 @@ func (a *TypedChatModelAgent[M]) buildMessageReActRunFunc(ctx context.Context, b
 		modelWrapperConf: &modelWrapperConfig{
 			handlers:       msgHandlers,
 			middlewares:    a.middlewares,
-			retryConfig:    a.modelRetryConfig,
-			failoverConfig: a.modelFailoverConfig,
+			retryConfig:    any(a.modelRetryConfig).(*ModelRetryConfig),
+			failoverConfig: any(a.modelFailoverConfig).(*ModelFailoverConfig[*schema.Message]),
 			toolInfos:      bc.toolInfos,
 		},
 		toolsReturnDirectly: bc.returnDirectly,
@@ -1209,7 +1209,7 @@ func (a *TypedChatModelAgent[M]) buildAgenticReActRunFunc(ctx context.Context, b
 		modelWrapperConf: &typedModelWrapperConfig[*schema.AgenticMessage]{
 			handlers:    agenticHandlers,
 			middlewares: a.middlewares,
-			retryConfig: a.modelRetryConfig,
+			retryConfig: any(a.modelRetryConfig).(*TypedModelRetryConfig[*schema.AgenticMessage]),
 			toolInfos:   bc.toolInfos,
 		},
 		toolsReturnDirectly: bc.returnDirectly,

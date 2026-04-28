@@ -40,10 +40,10 @@ func TestBuildModelWrappers_FailoverProxyInner(t *testing.T) {
 		},
 	}
 
-	failoverCfg := &ModelFailoverConfig{
+	failoverCfg := &ModelFailoverConfig[*schema.Message]{
 		MaxRetries:     0,
 		ShouldFailover: func(context.Context, *schema.Message, error) bool { return false },
-		GetFailoverModel: func(_ context.Context, _ *FailoverContext) (model.BaseChatModel, []*schema.Message, error) {
+		GetFailoverModel: func(_ context.Context, _ *FailoverContext[*schema.Message]) (model.BaseChatModel, []*schema.Message, error) {
 			return base, nil, nil
 		},
 	}
@@ -87,7 +87,7 @@ func TestStateModelWrapper_Generate_WithFailover(t *testing.T) {
 		},
 	}
 
-	failoverCfg := &ModelFailoverConfig{
+	failoverCfg := &ModelFailoverConfig[*schema.Message]{
 		MaxRetries: 1,
 		ShouldFailover: func(_ context.Context, out *schema.Message, err error) bool {
 			atomic.AddInt32(&shouldCalls, 1)
@@ -96,7 +96,7 @@ func TestStateModelWrapper_Generate_WithFailover(t *testing.T) {
 			require.Equal(t, "partial", out.Content)
 			return true
 		},
-		GetFailoverModel: func(_ context.Context, failoverCtx *FailoverContext) (model.BaseChatModel, []*schema.Message, error) {
+		GetFailoverModel: func(_ context.Context, failoverCtx *FailoverContext[*schema.Message]) (model.BaseChatModel, []*schema.Message, error) {
 			require.Equal(t, uint(1), failoverCtx.FailoverAttempt)
 			return m2, nil, nil
 		},
@@ -148,7 +148,7 @@ func TestStateModelWrapper_Stream_WithFailover(t *testing.T) {
 		},
 	}
 
-	failoverCfg := &ModelFailoverConfig{
+	failoverCfg := &ModelFailoverConfig[*schema.Message]{
 		MaxRetries: 1,
 		ShouldFailover: func(_ context.Context, out *schema.Message, err error) bool {
 			atomic.AddInt32(&shouldCalls, 1)
@@ -157,7 +157,7 @@ func TestStateModelWrapper_Stream_WithFailover(t *testing.T) {
 			require.Equal(t, "p1p2", out.Content)
 			return true
 		},
-		GetFailoverModel: func(_ context.Context, failoverCtx *FailoverContext) (model.BaseChatModel, []*schema.Message, error) {
+		GetFailoverModel: func(_ context.Context, failoverCtx *FailoverContext[*schema.Message]) (model.BaseChatModel, []*schema.Message, error) {
 			require.Equal(t, uint(1), failoverCtx.FailoverAttempt)
 			return m2, nil, nil
 		},
@@ -190,9 +190,9 @@ func TestFailoverAcceptsAgenticAgent(t *testing.T) {
 		},
 	}
 
-	fallbackModel := &mockChatModelForAttack{
-		generateFn: func(ctx context.Context, input []*schema.Message, opts ...model.Option) (*schema.Message, error) {
-			return schema.AssistantMessage("fallback", nil), nil
+	fallbackModel := &mockAgenticModel{
+		generateFn: func(ctx context.Context, input []*schema.AgenticMessage, opts ...model.Option) (*schema.AgenticMessage, error) {
+			return agenticMsg("fallback"), nil
 		},
 	}
 
@@ -200,12 +200,12 @@ func TestFailoverAcceptsAgenticAgent(t *testing.T) {
 		Name:        "FailoverAgent",
 		Description: "Agent with failover config",
 		Model:       m,
-		ModelFailoverConfig: &ModelFailoverConfig{
+		ModelFailoverConfig: &ModelFailoverConfig[*schema.AgenticMessage]{
 			MaxRetries: 1,
-			ShouldFailover: func(ctx context.Context, outputMessage *schema.Message, outputErr error) bool {
+			ShouldFailover: func(ctx context.Context, outputMessage *schema.AgenticMessage, outputErr error) bool {
 				return true
 			},
-			GetFailoverModel: func(ctx context.Context, failoverCtx *FailoverContext) (model.BaseChatModel, []*schema.Message, error) {
+			GetFailoverModel: func(ctx context.Context, failoverCtx *FailoverContext[*schema.AgenticMessage]) (model.BaseModel[*schema.AgenticMessage], []*schema.AgenticMessage, error) {
 				return fallbackModel, nil, nil
 			},
 		},
