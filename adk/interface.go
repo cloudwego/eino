@@ -58,6 +58,13 @@ func isNilMessage[M MessageType](msg M) bool {
 	return any(msg) == any(zero)
 }
 
+// IsNilMessage checks whether a generic message value is nil.
+// Direct `msg == nil` does not compile for generic pointer types in Go;
+// the canonical workaround is to compare through the `any` interface.
+func IsNilMessage[M MessageType](msg M) bool {
+	return isNilMessage(msg)
+}
+
 // TypedMessageVariant represents a message output from an agent event.
 // It carries either a complete message or a streaming reader, along with
 // metadata describing the event's origin.

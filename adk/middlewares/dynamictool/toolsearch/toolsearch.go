@@ -49,26 +49,10 @@ type Config struct {
 	UseModelToolSearch bool
 }
 
-// New constructs and returns the tool search middleware.
+// NewTyped constructs and returns the generic tool search middleware.
 //
-// The tool search middleware enables dynamic tool selection for agents with large tool libraries.
-// Instead of passing all tools to the model at once (which can overwhelm context limits),
-// this middleware:
-//
-//  1. Adds a "tool_search" meta-tool that accepts keyword queries to search tools
-//  2. Initially hides all dynamic tools from the model's tool list
-//  3. When the model calls tool_search, matching tools become available for subsequent calls
-//
-// Example usage:
-//
-//	middleware, _ := toolsearch.New(ctx, &toolsearch.Config{
-//	    DynamicTools: []tool.BaseTool{weatherTool, stockTool, currencyTool, ...},
-//	})
-//	agent, _ := adk.NewChatModelAgent(ctx, &adk.ChatModelAgentConfig{
-//	    // ...
-//	    Handlers: []adk.ChatModelAgentMiddleware{middleware},
-//	})
-func New(ctx context.Context, config *Config) (adk.ChatModelAgentMiddleware, error) {
+// This is the generic constructor that supports both *schema.Message and *schema.AgenticMessage.
+func NewTyped[M adk.MessageType](ctx context.Context, config *Config) (adk.TypedChatModelAgentMiddleware[M], error) {
 	if config == nil {
 		return nil, fmt.Errorf("config is required")
 	}
@@ -105,7 +89,7 @@ func New(ctx context.Context, config *Config) (adk.ChatModelAgentMiddleware, err
 		return nil, fmt.Errorf("failed to format system reminder template: %w", err)
 	}
 
-	return &middleware{
+	return &typedMiddleware[M]{
 		dynamicTools:       config.DynamicTools,
 		mapOfDynamicTools:  mapOfDynamicTools,
 		dynamicToolInfos:   dynamicToolInfos,
@@ -114,12 +98,35 @@ func New(ctx context.Context, config *Config) (adk.ChatModelAgentMiddleware, err
 	}, nil
 }
 
+// New constructs and returns the tool search middleware.
+//
+// The tool search middleware enables dynamic tool selection for agents with large tool libraries.
+// Instead of passing all tools to the model at once (which can overwhelm context limits),
+// this middleware:
+//
+//  1. Adds a "tool_search" meta-tool that accepts keyword queries to search tools
+//  2. Initially hides all dynamic tools from the model's tool list
+//  3. When the model calls tool_search, matching tools become available for subsequent calls
+//
+// Example usage:
+//
+//	middleware, _ := toolsearch.New(ctx, &toolsearch.Config{
+//	    DynamicTools: []tool.BaseTool{weatherTool, stockTool, currencyTool, ...},
+//	})
+//	agent, _ := adk.NewChatModelAgent(ctx, &adk.ChatModelAgentConfig{
+//	    // ...
+//	    Handlers: []adk.ChatModelAgentMiddleware{middleware},
+//	})
+func New(ctx context.Context, config *Config) (adk.ChatModelAgentMiddleware, error) {
+	return NewTyped[*schema.Message](ctx, config)
+}
+
 type systemReminder struct {
 	Tools []string
 }
 
-type middleware struct {
-	adk.BaseChatModelAgentMiddleware
+type typedMiddleware[M adk.MessageType] struct {
+	*adk.TypedBaseChatModelAgentMiddleware[M]
 	dynamicTools       []tool.BaseTool
 	mapOfDynamicTools  map[string]*schema.ToolInfo
 	dynamicToolInfos   []*schema.ToolInfo
@@ -127,7 +134,7 @@ type middleware struct {
 	sr                 string
 }
 
-func (m *middleware) BeforeAgent(ctx context.Context, runCtx *adk.ChatModelAgentContext) (context.Context, *adk.ChatModelAgentContext, error) {
+func (m *typedMiddleware[M]) BeforeAgent(ctx context.Context, runCtx *adk.ChatModelAgentContext) (context.Context, *adk.ChatModelAgentContext, error) {
 	if runCtx == nil {
 		return ctx, runCtx, nil
 	}
@@ -146,7 +153,7 @@ func (m *middleware) BeforeAgent(ctx context.Context, runCtx *adk.ChatModelAgent
 const toolSearchInitializedKey = "__toolsearch_initialized__"
 const toolSearchReminderExtraKey = "__toolsearch_reminder__"
 
-func (m *middleware) isInitialized(ctx context.Context) bool {
+func (m *typedMiddleware[M]) isInitialized(ctx context.Context) bool {
 	val, ok, err := adk.GetRunLocalValue(ctx, toolSearchInitializedKey)
 	if err != nil || !ok {
 		return false
@@ -155,21 +162,51 @@ func (m *middleware) isInitialized(ctx context.Context) bool {
 	return b
 }
 
-func (m *middleware) markInitialized(ctx context.Context) {
+func (m *typedMiddleware[M]) markInitialized(ctx context.Context) {
 	_ = adk.SetRunLocalValue(ctx, toolSearchInitializedKey, true)
 }
 
-func (m *middleware) ensureReminder(msgs []*schema.Message) []*schema.Message {
+func (m *typedMiddleware[M]) ensureReminder(msgs []M) []M {
 	for _, msg := range msgs {
-		if msg.Extra != nil {
-			if v, ok := msg.Extra[toolSearchReminderExtraKey]; ok {
-				if b, _ := v.(bool); b {
-					return msgs
+		if hasToolSearchReminderExtra(msg) {
+			return msgs
+		}
+	}
+
+	var zero M
+	switch any(zero).(type) {
+	case *schema.Message:
+		return any(m.ensureReminderMessage(any(msgs).([]*schema.Message))).([]M)
+	case *schema.AgenticMessage:
+		return any(m.ensureReminderAgenticMessage(any(msgs).([]*schema.AgenticMessage))).([]M)
+	default:
+		panic("unreachable: unknown MessageType")
+	}
+}
+
+func hasToolSearchReminderExtra[M adk.MessageType](msg M) bool {
+	switch v := any(msg).(type) {
+	case *schema.Message:
+		if v.Extra != nil {
+			if b, ok := v.Extra[toolSearchReminderExtraKey]; ok {
+				if bVal, _ := b.(bool); bVal {
+					return true
+				}
+			}
+		}
+	case *schema.AgenticMessage:
+		if v.Extra != nil {
+			if b, ok := v.Extra[toolSearchReminderExtraKey]; ok {
+				if bVal, _ := b.(bool); bVal {
+					return true
 				}
 			}
 		}
 	}
+	return false
+}
 
+func (m *typedMiddleware[M]) ensureReminderMessage(msgs []*schema.Message) []*schema.Message {
 	result := make([]*schema.Message, 0, len(msgs)+1)
 	inserted := false
 	for _, msg := range msgs {
@@ -189,7 +226,27 @@ func (m *middleware) ensureReminder(msgs []*schema.Message) []*schema.Message {
 	return result
 }
 
-func (m *middleware) extractDynamicTools(tools []*schema.ToolInfo) []*schema.ToolInfo {
+func (m *typedMiddleware[M]) ensureReminderAgenticMessage(msgs []*schema.AgenticMessage) []*schema.AgenticMessage {
+	result := make([]*schema.AgenticMessage, 0, len(msgs)+1)
+	inserted := false
+	for _, msg := range msgs {
+		if msg.Role != schema.AgenticRoleTypeSystem && !inserted {
+			inserted = true
+			reminder := schema.UserAgenticMessage(m.sr)
+			reminder.Extra = map[string]any{toolSearchReminderExtraKey: true}
+			result = append(result, reminder)
+		}
+		result = append(result, msg)
+	}
+	if !inserted {
+		reminder := schema.UserAgenticMessage(m.sr)
+		reminder.Extra = map[string]any{toolSearchReminderExtraKey: true}
+		result = append(result, reminder)
+	}
+	return result
+}
+
+func (m *typedMiddleware[M]) extractDynamicTools(tools []*schema.ToolInfo) []*schema.ToolInfo {
 	var result []*schema.ToolInfo
 	for _, t := range tools {
 		if _, ok := m.mapOfDynamicTools[t.Name]; ok {
@@ -199,7 +256,7 @@ func (m *middleware) extractDynamicTools(tools []*schema.ToolInfo) []*schema.Too
 	return result
 }
 
-func (m *middleware) stripDynamicTools(tools []*schema.ToolInfo) []*schema.ToolInfo {
+func (m *typedMiddleware[M]) stripDynamicTools(tools []*schema.ToolInfo) []*schema.ToolInfo {
 	var result []*schema.ToolInfo
 	for _, t := range tools {
 		if _, ok := m.mapOfDynamicTools[t.Name]; !ok {
@@ -227,7 +284,7 @@ func toolNameSet(tools []*schema.ToolInfo) map[string]bool {
 	return m
 }
 
-func (m *middleware) BeforeModelRewriteState(ctx context.Context, state *adk.ChatModelAgentState, mc *adk.ModelContext) (context.Context, *adk.ChatModelAgentState, error) {
+func (m *typedMiddleware[M]) BeforeModelRewriteState(ctx context.Context, state *adk.TypedChatModelAgentState[M], mc *adk.TypedModelContext[M]) (context.Context, *adk.TypedChatModelAgentState[M], error) {
 	state.Messages = m.ensureReminder(state.Messages)
 
 	if !m.isInitialized(ctx) {
@@ -251,11 +308,12 @@ func (m *middleware) BeforeModelRewriteState(ctx context.Context, state *adk.Cha
 	if !m.useModelToolSearch {
 		existing := toolNameSet(state.ToolInfos)
 		for _, msg := range state.Messages {
-			if msg.Role != schema.Tool || msg.ToolName != toolSearchToolName {
+			content, ok := extractToolSearchResult(msg, toolSearchToolName)
+			if !ok {
 				continue
 			}
 			var result toolSearchResult
-			if err := json.Unmarshal([]byte(msg.Content), &result); err != nil {
+			if err := json.Unmarshal([]byte(content), &result); err != nil {
 				continue
 			}
 			for _, name := range result.Matches {
@@ -271,6 +329,29 @@ func (m *middleware) BeforeModelRewriteState(ctx context.Context, state *adk.Cha
 	}
 
 	return ctx, state, nil
+}
+
+// extractToolSearchResult checks if the given message is a tool result from the tool_search tool,
+// and if so returns the content string. Returns ("", false) if not a matching tool result.
+func extractToolSearchResult[M adk.MessageType](msg M, toolName string) (string, bool) {
+	switch v := any(msg).(type) {
+	case *schema.Message:
+		if v.Role == schema.Tool && v.ToolName == toolName {
+			return v.Content, true
+		}
+	case *schema.AgenticMessage:
+		for _, block := range v.ContentBlocks {
+			if block != nil && block.Type == schema.ContentBlockTypeFunctionToolResult &&
+				block.FunctionToolResult != nil && block.FunctionToolResult.Name == toolName {
+				for _, b := range block.FunctionToolResult.Blocks {
+					if b != nil && b.Text != nil {
+						return b.Text.Text, true
+					}
+				}
+			}
+		}
+	}
+	return "", false
 }
 
 func newToolSearchTool(tools map[string]*schema.ToolInfo, useModelToolSearch bool) tool.BaseTool {

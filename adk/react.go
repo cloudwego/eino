@@ -64,6 +64,12 @@ type State = typedState[*schema.Message]
 
 type agenticState = typedState[*schema.AgenticMessage]
 
+// AgenticState is the internal state of the agentic ChatModelAgent.
+//
+// Exported only for checkpoint backward compatibility and for generic middleware
+// that needs to access state via compose.ProcessState. Do not use it directly.
+type AgenticState = typedState[*schema.AgenticMessage]
+
 const (
 	stateGobNameV07 = "_eino_adk_react_state"
 

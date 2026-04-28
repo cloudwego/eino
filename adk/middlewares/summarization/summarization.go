@@ -38,19 +38,25 @@ func init() {
 	schema.RegisterName[*CustomizedAction]("_eino_adk_summarization_mw_customized_action")
 }
 
-type (
-	TokenCounterFunc      func(ctx context.Context, input *TokenCounterInput) (int, error)
-	GenModelInputFunc     func(ctx context.Context, sysInstruction, userInstruction adk.Message, originalMsgs []adk.Message) ([]adk.Message, error)
-	GetFailoverModelFunc  func(ctx context.Context, failoverCtx *FailoverContext) (failoverModel model.BaseChatModel, failoverModelInputMsgs []*schema.Message, failoverErr error)
-	FinalizeFunc          func(ctx context.Context, originalMessages []adk.Message, summary adk.Message) ([]adk.Message, error)
-	CallbackFunc          func(ctx context.Context, before, after adk.ChatModelAgentState) error
-	UserMessageFilterFunc func(ctx context.Context, msg adk.Message) (bool, error)
-)
+type TypedTokenCounterFunc[M adk.MessageType] func(ctx context.Context, input *TypedTokenCounterInput[M]) (int, error)
+type TypedGenModelInputFunc[M adk.MessageType] func(ctx context.Context, sysInstruction, userInstruction M, originalMsgs []M) ([]M, error)
+type TypedGetFailoverModelFunc[M adk.MessageType] func(ctx context.Context, failoverCtx *TypedFailoverContext[M]) (failoverModel model.BaseModel[M], failoverModelInputMsgs []M, failoverErr error)
+type TypedFinalizeFunc[M adk.MessageType] func(ctx context.Context, originalMessages []M, summary M) ([]M, error)
+type TypedCallbackFunc[M adk.MessageType] func(ctx context.Context, before, after adk.TypedChatModelAgentState[M]) error
+type TypedUserMessageFilterFunc[M adk.MessageType] func(ctx context.Context, msg M) (bool, error)
 
-// Config defines the configuration for the summarization middleware.
-type Config struct {
+type TokenCounterFunc = TypedTokenCounterFunc[*schema.Message]
+type GenModelInputFunc = TypedGenModelInputFunc[*schema.Message]
+type GetFailoverModelFunc = TypedGetFailoverModelFunc[*schema.Message]
+type FinalizeFunc = TypedFinalizeFunc[*schema.Message]
+type CallbackFunc = TypedCallbackFunc[*schema.Message]
+type UserMessageFilterFunc = TypedUserMessageFilterFunc[*schema.Message]
+
+// TypedConfig defines the configuration for the summarization middleware,
+// generic over message type M.
+type TypedConfig[M adk.MessageType] struct {
 	// Model is the chat model used to generate summaries.
-	Model model.BaseChatModel
+	Model model.BaseModel[M]
 
 	// ModelOptions specifies options passed to the model when generating summaries.
 	// Optional.
@@ -65,7 +71,7 @@ type Config struct {
 	//   - int: the total token count.
 	//
 	// Optional. Defaults to a simple estimator (~4 chars/token).
-	TokenCounter TokenCounterFunc
+	TokenCounter TypedTokenCounterFunc[M]
 
 	// Trigger specifies the conditions that activate summarization.
 	// Optional. Defaults to triggering when total tokens exceed 190k.
@@ -102,12 +108,12 @@ type Config struct {
 	//   - originalMsgs: original complete message list.
 	//
 	// Returns:
-	//   - []adk.Message: the constructed model input messages.
+	//   - []M: the constructed model input messages.
 	//
 	// Typical model input order: systemInstruction -> contextMessages -> userInstruction.
 	//
 	// Optional.
-	GenModelInput GenModelInputFunc
+	GenModelInput TypedGenModelInputFunc[M]
 
 	// Finalize is called after summary generation. The returned messages are used as the final output.
 	//
@@ -116,10 +122,10 @@ type Config struct {
 	//   - summary: the generated summary message (post-processed).
 	//
 	// Returns:
-	//   - []adk.Message: the new conversation history to replace the original messages.
+	//   - []M: the new conversation history to replace the original messages.
 	//
 	// Optional.
-	Finalize FinalizeFunc
+	Finalize TypedFinalizeFunc[M]
 
 	// Callback is called after Finalize, before exiting the middleware.
 	// Read-only, do not modify state.
@@ -129,31 +135,37 @@ type Config struct {
 	//   - after: the agent state after summarization.
 	//
 	// Optional.
-	Callback CallbackFunc
+	Callback TypedCallbackFunc[M]
 
 	// PreserveUserMessages controls whether to preserve original user messages in the summary.
 	// When enabled, replaces the <all_user_messages> section in the model-generated summary
 	// with recent original user messages from the conversation.
 	// When disabled, the model-generated content is kept unchanged.
 	// Optional. Enabled by default.
-	PreserveUserMessages *PreserveUserMessages
+	PreserveUserMessages *TypedPreserveUserMessages[M]
 
 	// Retry configures retry behavior for summary generation on the primary model.
 	// Optional. Defaults to no retries.
-	Retry *RetryConfig
+	Retry *TypedRetryConfig[M]
 
 	// Failover configures fallback behavior when summary generation on the primary model fails.
 	// Optional.
-	Failover *FailoverConfig
+	Failover *TypedFailoverConfig[M]
 }
 
-// TokenCounterInput is the input for TokenCounterFunc.
-type TokenCounterInput struct {
+// Config is a backward-compatible alias for TypedConfig specialized with *schema.Message.
+type Config = TypedConfig[*schema.Message]
+
+// TypedTokenCounterInput is the input for TypedTokenCounterFunc.
+type TypedTokenCounterInput[M adk.MessageType] struct {
 	// Messages is the list of messages to count tokens for.
-	Messages []adk.Message
+	Messages []M
 	// Tools is the list of tools to count tokens for.
 	Tools []*schema.ToolInfo
 }
+
+// TokenCounterInput is a backward-compatible alias for TypedTokenCounterInput specialized with *schema.Message.
+type TokenCounterInput = TypedTokenCounterInput[*schema.Message]
 
 // TriggerCondition specifies when summarization should be activated.
 // Summarization triggers if ANY of the set conditions is met.
@@ -164,8 +176,8 @@ type TriggerCondition struct {
 	ContextMessages int
 }
 
-// PreserveUserMessages controls whether to preserve original user messages in the summary.
-type PreserveUserMessages struct {
+// TypedPreserveUserMessages controls whether to preserve original user messages in the summary.
+type TypedPreserveUserMessages[M adk.MessageType] struct {
 	Enabled bool
 
 	// MaxTokens limits the maximum token count for preserved user messages.
@@ -176,10 +188,13 @@ type PreserveUserMessages struct {
 	// Filter determines whether a specific user message should be preserved.
 	// It is called for each user message. If it returns false, the message will not be preserved.
 	// Optional.
-	Filter UserMessageFilterFunc
+	Filter TypedUserMessageFilterFunc[M]
 }
 
-type RetryConfig struct {
+// PreserveUserMessages is a backward-compatible alias for TypedPreserveUserMessages specialized with *schema.Message.
+type PreserveUserMessages = TypedPreserveUserMessages[*schema.Message]
+
+type TypedRetryConfig[M adk.MessageType] struct {
 	// MaxRetries specifies the maximum number of retry attempts.
 	// Optional. Defaults to 3.
 	MaxRetries *int
@@ -187,15 +202,18 @@ type RetryConfig struct {
 	// ShouldRetry determines whether a failed summary generation attempt should be retried.
 	// It is called after each failed attempt with the model response and error.
 	// Optional. Defaults to retrying when err is non-nil.
-	ShouldRetry func(ctx context.Context, resp adk.Message, err error) bool
+	ShouldRetry func(ctx context.Context, resp M, err error) bool
 
 	// BackoffFunc calculates the delay before the next retry attempt.
 	// The attempt parameter starts at 1 for the first retry.
 	// Optional. Defaults to a default exponential backoff with jitter.
-	BackoffFunc func(ctx context.Context, attempt int, resp adk.Message, err error) time.Duration
+	BackoffFunc func(ctx context.Context, attempt int, resp M, err error) time.Duration
 }
 
-type FailoverConfig struct {
+// RetryConfig is a backward-compatible alias for TypedRetryConfig specialized with *schema.Message.
+type RetryConfig = TypedRetryConfig[*schema.Message]
+
+type TypedFailoverConfig[M adk.MessageType] struct {
 	// MaxRetries specifies the maximum number of failover attempts.
 	// Optional. Defaults to 3.
 	MaxRetries *int
@@ -203,12 +221,12 @@ type FailoverConfig struct {
 	// ShouldFailover determines whether another failover attempt should be made.
 	// It is called after each failover attempt with the model response and error.
 	// Optional. Defaults to failing over when err is non-nil.
-	ShouldFailover func(ctx context.Context, resp adk.Message, err error) bool
+	ShouldFailover func(ctx context.Context, resp M, err error) bool
 
 	// BackoffFunc calculates the delay before the next failover attempt.
 	// The attempt parameter starts at 1 for the first failover attempt.
 	// Optional. Defaults to a default exponential backoff with jitter.
-	BackoffFunc func(ctx context.Context, attempt int, resp adk.Message, err error) time.Duration
+	BackoffFunc func(ctx context.Context, attempt int, resp M, err error) time.Duration
 
 	// GetFailoverModel selects the model and input messages for the current failover attempt.
 	//
@@ -224,68 +242,86 @@ type FailoverConfig struct {
 	//   - When provided, it must return a non-nil model and a non-empty input message list.
 	//
 	// Optional. Defaults to reusing the primary model with the default input messages.
-	GetFailoverModel GetFailoverModelFunc
+	GetFailoverModel TypedGetFailoverModelFunc[M]
 }
 
-// FailoverContext contains the state for a failover attempt.
-type FailoverContext struct {
+// FailoverConfig is a backward-compatible alias for TypedFailoverConfig specialized with *schema.Message.
+type FailoverConfig = TypedFailoverConfig[*schema.Message]
+
+// TypedFailoverContext contains the state for a failover attempt.
+type TypedFailoverContext[M adk.MessageType] struct {
 	// Attempt is the current failover attempt number, starting at 1.
 	Attempt int
 
 	// SystemInstruction is the system instruction used for summary generation.
 	// It is set internally by the middleware and is not configurable.
-	SystemInstruction adk.Message
+	SystemInstruction M
 
 	// UserInstruction is the user instruction used for summary generation.
-	UserInstruction adk.Message
+	UserInstruction M
 
 	// OriginalMessages is the full original conversation before summarization.
-	OriginalMessages []adk.Message
+	OriginalMessages []M
 
 	// LastModelResponse is the response returned by the previous attempt, if any.
-	LastModelResponse *schema.Message
+	LastModelResponse M
 
 	// LastErr is the error returned by the previous attempt, if any.
 	LastErr error
 }
 
-// New creates a summarization middleware that automatically summarizes conversation history
-// when trigger conditions are met.
-func New(_ context.Context, cfg *Config) (adk.ChatModelAgentMiddleware, error) {
+// FailoverContext is a backward-compatible alias for TypedFailoverContext specialized with *schema.Message.
+type FailoverContext = TypedFailoverContext[*schema.Message]
+
+// NewTyped creates a generic summarization middleware that automatically summarizes
+// conversation history when trigger conditions are met.
+//
+// This is the generic constructor that supports both *schema.Message and *schema.AgenticMessage.
+func NewTyped[M adk.MessageType](_ context.Context, cfg *TypedConfig[M]) (adk.TypedChatModelAgentMiddleware[M], error) {
 	if err := cfg.check(); err != nil {
 		return nil, err
 	}
-	return &middleware{
-		cfg:                          cfg,
-		BaseChatModelAgentMiddleware: &adk.BaseChatModelAgentMiddleware{},
-	}, nil
+	mw := &typedMiddleware[M]{
+		cfg:                               cfg,
+		TypedBaseChatModelAgentMiddleware: &adk.TypedBaseChatModelAgentMiddleware[M]{},
+	}
+	return mw, nil
 }
 
-type middleware struct {
-	*adk.BaseChatModelAgentMiddleware
-	cfg *Config
+// New creates a summarization middleware that automatically summarizes conversation history
+// when trigger conditions are met.
+func New(ctx context.Context, cfg *Config) (adk.ChatModelAgentMiddleware, error) {
+	return NewTyped[*schema.Message](ctx, cfg)
 }
 
-// SummarizeOutput contains the output of a synchronous Summarize call.
+type typedMiddleware[M adk.MessageType] struct {
+	*adk.TypedBaseChatModelAgentMiddleware[M]
+	cfg *TypedConfig[M]
+}
+
+// TypedSummarizeOutput contains the output of a synchronous Summarize call.
 //
 // Deprecated: See SummarizeMessages.
-type SummarizeOutput struct {
+type TypedSummarizeOutput[M adk.MessageType] struct {
 	// FinalizedMessages is the message list after summarization,
 	// ready to be used as the new conversation history.
-	FinalizedMessages []adk.Message
+	FinalizedMessages []M
 
 	// ModelResponse is the raw response from the summarization model.
-	ModelResponse adk.Message
+	ModelResponse M
 }
 
-// SummarizeMessages performs synchronous summarization of the given messages.
+// SummarizeOutput is a backward-compatible alias for TypedSummarizeOutput specialized with *schema.Message.
+type SummarizeOutput = TypedSummarizeOutput[*schema.Message]
+
+// TypedSummarizeMessages performs synchronous summarization of the given messages.
 // EmitInternalEvents and Trigger are not supported and will return an error if set.
 //
 // Deprecated: Use the summarization middleware (created via New) within a dedicated summarization
 // agent instead. In practice, summarization often requires preprocessing by other middlewares
 // (e.g., message reduction, tool call patching), which is naturally supported by composing
 // middlewares in an agent pipeline.
-func SummarizeMessages(ctx context.Context, cfg *Config, messages []adk.Message) (*SummarizeOutput, error) {
+func TypedSummarizeMessages[M adk.MessageType](ctx context.Context, cfg *TypedConfig[M], messages []M) (*TypedSummarizeOutput[M], error) {
 	if cfg.EmitInternalEvents {
 		return nil, fmt.Errorf("emitInternalEvents is not supported in synchronous summarization")
 	}
@@ -296,7 +332,7 @@ func SummarizeMessages(ctx context.Context, cfg *Config, messages []adk.Message)
 		return nil, err
 	}
 
-	m := &middleware{cfg: cfg}
+	m := &typedMiddleware[M]{cfg: cfg}
 
 	rawSummary, modelInput, err := m.summarize(ctx, messages)
 	if err != nil {
@@ -311,28 +347,34 @@ func SummarizeMessages(ctx context.Context, cfg *Config, messages []adk.Message)
 	}
 
 	if m.cfg.Callback != nil {
-		beforeState := adk.ChatModelAgentState{Messages: messages}
-		afterState := adk.ChatModelAgentState{Messages: finalMsgs}
+		beforeState := adk.TypedChatModelAgentState[M]{Messages: messages}
+		afterState := adk.TypedChatModelAgentState[M]{Messages: finalMsgs}
 		if err = m.cfg.Callback(ctx, beforeState, afterState); err != nil {
 			return nil, err
 		}
 	}
 
-	return &SummarizeOutput{
+	return &TypedSummarizeOutput[M]{
 		FinalizedMessages: finalMsgs,
 		ModelResponse:     rawSummary,
 	}, nil
 }
 
-func (m *middleware) BeforeModelRewriteState(ctx context.Context, state *adk.ChatModelAgentState,
-	mtx *adk.ModelContext) (context.Context, *adk.ChatModelAgentState, error) {
+// SummarizeMessages performs synchronous summarization of the given messages.
+// EmitInternalEvents and Trigger are not supported and will return an error if set.
+func SummarizeMessages(ctx context.Context, cfg *Config, messages []adk.Message) (*SummarizeOutput, error) {
+	return TypedSummarizeMessages[*schema.Message](ctx, cfg, messages)
+}
+
+func (m *typedMiddleware[M]) BeforeModelRewriteState(ctx context.Context, state *adk.TypedChatModelAgentState[M],
+	mtx *adk.TypedModelContext[M]) (context.Context, *adk.TypedChatModelAgentState[M], error) {
 
 	var tools []*schema.ToolInfo
 	if mtx != nil {
 		tools = mtx.Tools
 	}
 
-	triggered, err := m.shouldSummarize(ctx, &TokenCounterInput{
+	triggered, err := m.shouldSummarize(ctx, &TypedTokenCounterInput[M]{
 		Messages: state.Messages,
 		Tools:    tools,
 	})
@@ -349,7 +391,7 @@ func (m *middleware) BeforeModelRewriteState(ctx context.Context, state *adk.Cha
 		err = m.emitEvent(ctx, &CustomizedAction{
 			Type: ActionTypeBeforeSummarize,
 			Before: &BeforeSummarizeAction{
-				Messages: beforeState.Messages,
+				Messages: typedMsgsToLegacy(beforeState.Messages),
 			},
 		})
 		if err != nil {
@@ -364,7 +406,7 @@ func (m *middleware) BeforeModelRewriteState(ctx context.Context, state *adk.Cha
 
 	finalizeCtx := context.WithValue(ctx, ctxKeyModelInput{}, modelInput)
 
-	var finalMsgs []adk.Message
+	var finalMsgs []M
 	_, finalMsgs, err = m.finalizeSummary(finalizeCtx, beforeState.Messages, rawSummary)
 	if err != nil {
 		return nil, nil, err
@@ -384,7 +426,7 @@ func (m *middleware) BeforeModelRewriteState(ctx context.Context, state *adk.Cha
 		err = m.emitEvent(ctx, &CustomizedAction{
 			Type: ActionTypeAfterSummarize,
 			After: &AfterSummarizeAction{
-				Messages: afterState.Messages,
+				Messages: typedMsgsToLegacy(afterState.Messages),
 			},
 		})
 		if err != nil {
@@ -395,30 +437,33 @@ func (m *middleware) BeforeModelRewriteState(ctx context.Context, state *adk.Cha
 	return ctx, &afterState, nil
 }
 
-func (m *middleware) finalizeSummary(ctx context.Context, originalMsgs []adk.Message,
-	rawSummary adk.Message) (context.Context, []adk.Message, error) {
+func (m *typedMiddleware[M]) finalizeSummary(ctx context.Context, originalMsgs []M,
+	rawSummary M) (context.Context, []M, error) {
 
 	systemMsgs, contextMsgs := m.splitSystemAndContextMsgs(originalMsgs)
 
-	summary, err := m.postProcessSummary(ctx, contextMsgs, newSummaryMessage(rawSummary.Content))
+	rawContent := getTextContent[M](rawSummary)
+	summary := newTypedSummaryMessage[M](rawContent)
+
+	processed, err := m.postProcessSummary(ctx, contextMsgs, summary)
 	if err != nil {
 		return nil, nil, err
 	}
 
-	var finalMsgs []adk.Message
+	var finalMsgs []M
 	if m.cfg.Finalize != nil {
-		finalMsgs, err = m.cfg.Finalize(ctx, originalMsgs, summary)
+		finalMsgs, err = m.cfg.Finalize(ctx, originalMsgs, processed)
 		if err != nil {
 			return nil, nil, err
 		}
 	} else {
-		finalMsgs = append(systemMsgs, summary)
+		finalMsgs = append(systemMsgs, processed)
 	}
 
 	return ctx, finalMsgs, nil
 }
 
-func (m *middleware) shouldSummarize(ctx context.Context, input *TokenCounterInput) (bool, error) {
+func (m *typedMiddleware[M]) shouldSummarize(ctx context.Context, input *TypedTokenCounterInput[M]) (bool, error) {
 	if m.cfg.Trigger != nil && m.cfg.Trigger.ContextMessages > 0 {
 		if len(input.Messages) > m.cfg.Trigger.ContextMessages {
 			return true, nil
@@ -431,7 +476,7 @@ func (m *middleware) shouldSummarize(ctx context.Context, input *TokenCounterInp
 	return tokens > m.getTriggerContextTokens(), nil
 }
 
-func (m *middleware) getTriggerContextTokens() int {
+func (m *typedMiddleware[M]) getTriggerContextTokens() int {
 	const defaultTriggerContextTokens = 170000
 	if m.cfg.Trigger != nil {
 		return m.cfg.Trigger.ContextTokens
@@ -439,14 +484,14 @@ func (m *middleware) getTriggerContextTokens() int {
 	return defaultTriggerContextTokens
 }
 
-func (m *middleware) getUserMessageContextTokens() int {
+func (m *typedMiddleware[M]) getUserMessageContextTokens() int {
 	if m.cfg.PreserveUserMessages != nil && m.cfg.PreserveUserMessages.MaxTokens > 0 {
 		return m.cfg.PreserveUserMessages.MaxTokens
 	}
 	return m.getTriggerContextTokens() / 3
 }
 
-func (m *middleware) emitEvent(ctx context.Context, action *CustomizedAction) error {
+func (m *typedMiddleware[M]) emitEvent(ctx context.Context, action *CustomizedAction) error {
 	err := adk.SendEvent(ctx, &adk.AgentEvent{
 		Action: &adk.AgentAction{
 			CustomizedAction: action,
@@ -458,8 +503,8 @@ func (m *middleware) emitEvent(ctx context.Context, action *CustomizedAction) er
 	return nil
 }
 
-func (m *middleware) emitGenerateSummaryEvent(ctx context.Context, attempt int, phase GenerateSummaryPhase,
-	resp adk.Message, err error) error {
+func (m *typedMiddleware[M]) emitGenerateSummaryEvent(ctx context.Context, attempt int, phase GenerateSummaryPhase,
+	resp M, err error) error {
 
 	if !m.cfg.EmitInternalEvents {
 		return nil
@@ -468,7 +513,7 @@ func (m *middleware) emitGenerateSummaryEvent(ctx context.Context, attempt int, 
 	action := &GenerateSummaryAction{
 		Attempt:       attempt,
 		Phase:         phase,
-		ModelResponse: resp,
+		ModelResponse: typedMsgToLegacy(resp),
 		err:           err,
 	}
 
@@ -478,17 +523,17 @@ func (m *middleware) emitGenerateSummaryEvent(ctx context.Context, attempt int, 
 	})
 }
 
-func (m *middleware) countTokens(ctx context.Context, input *TokenCounterInput) (int, error) {
+func (m *typedMiddleware[M]) countTokens(ctx context.Context, input *TypedTokenCounterInput[M]) (int, error) {
 	if m.cfg.TokenCounter != nil {
 		return m.cfg.TokenCounter(ctx, input)
 	}
-	return defaultTokenCounter(ctx, input)
+	return defaultTypedTokenCounter[M](ctx, input)
 }
 
-func defaultTokenCounter(_ context.Context, input *TokenCounterInput) (int, error) {
+func defaultTypedTokenCounter[M adk.MessageType](_ context.Context, input *TypedTokenCounterInput[M]) (int, error) {
 	var totalTokens int
 	for _, msg := range input.Messages {
-		text := extractTextContent(msg)
+		text := getTextContent[M](msg)
 		totalTokens += estimateTokenCount(text)
 	}
 
@@ -499,11 +544,15 @@ func defaultTokenCounter(_ context.Context, input *TokenCounterInput) (int, erro
 		if err != nil {
 			return 0, fmt.Errorf("failed to marshal tool info: %w", err)
 		}
-
 		totalTokens += estimateTokenCount(text)
 	}
 
 	return totalTokens, nil
+}
+
+// defaultTokenCounter is kept for backward compatibility with external callers.
+func defaultTokenCounter(_ context.Context, input *TokenCounterInput) (int, error) {
+	return defaultTypedTokenCounter[*schema.Message](nil, input)
 }
 
 func estimateTokenCount(text string) int {
@@ -514,31 +563,34 @@ func estimateTokenBytes(tokens int) int {
 	return tokens * 4
 }
 
-func (m *middleware) summarize(ctx context.Context, originalMsgs []adk.Message) (adk.Message, []adk.Message, error) {
+func (m *typedMiddleware[M]) summarize(ctx context.Context, originalMsgs []M) (M, []M, error) {
 	_, contextMsgs := m.splitSystemAndContextMsgs(originalMsgs)
 
 	modelInput, err := m.buildSummarizationModelInput(ctx, originalMsgs, contextMsgs)
 	if err != nil {
-		return nil, nil, err
+		var zero M
+		return zero, nil, err
 	}
 
 	rawSummary, err := m.generateWithRetry(ctx, m.cfg.Model, modelInput, m.cfg.ModelOptions, m.cfg.Retry)
-	if shouldFailover(ctx, m.cfg.Failover, rawSummary, err) {
+	if typedShouldFailover[M](ctx, m.cfg.Failover, rawSummary, err) {
 		rawSummary, modelInput, err = m.runFailover(ctx, originalMsgs, modelInput, rawSummary, err)
 		if err != nil {
-			return nil, nil, err
+			var zero M
+			return zero, nil, err
 		}
 	} else if err != nil {
-		return nil, nil, fmt.Errorf("failed to generate summary: %w", err)
+		var zero M
+		return zero, nil, fmt.Errorf("failed to generate summary: %w", err)
 	}
 
 	return rawSummary, modelInput, nil
 }
 
-func (m *middleware) splitSystemAndContextMsgs(msgs []adk.Message) ([]adk.Message, []adk.Message) {
-	var systemMsgs []adk.Message
+func (m *typedMiddleware[M]) splitSystemAndContextMsgs(msgs []M) ([]M, []M) {
+	var systemMsgs []M
 	for _, msg := range msgs {
-		if msg.Role == schema.System {
+		if isSystemRole[M](msg) {
 			systemMsgs = append(systemMsgs, msg)
 		} else {
 			break
@@ -548,8 +600,8 @@ func (m *middleware) splitSystemAndContextMsgs(msgs []adk.Message) ([]adk.Messag
 	return systemMsgs, contextMsgs
 }
 
-func (m *middleware) runFailover(ctx context.Context, originalMsgs, defaultInput []adk.Message, lastResp adk.Message,
-	lastErr error) (adk.Message, []adk.Message, error) {
+func (m *typedMiddleware[M]) runFailover(ctx context.Context, originalMsgs, defaultInput []M, lastResp M,
+	lastErr error) (M, []M, error) {
 
 	const defaultMaxRetries = 3
 
@@ -562,7 +614,7 @@ func (m *middleware) runFailover(ctx context.Context, originalMsgs, defaultInput
 
 	backoff := m.cfg.Failover.BackoffFunc
 	if backoff == nil {
-		backoff = defaultBackoffFunc
+		backoff = defaultTypedBackoffFunc[M]
 	}
 
 	modelInput := defaultInput
@@ -572,7 +624,7 @@ func (m *middleware) runFailover(ctx context.Context, originalMsgs, defaultInput
 	}
 
 	for attempt := 1; ; attempt++ {
-		fctx := &FailoverContext{
+		fctx := &TypedFailoverContext[M]{
 			Attempt:           attempt,
 			SystemInstruction: sysInstruction,
 			UserInstruction:   userInstruction,
@@ -583,35 +635,40 @@ func (m *middleware) runFailover(ctx context.Context, originalMsgs, defaultInput
 
 		failoverModel, nextInput, failoverErr := m.getFailoverModel(ctx, fctx, defaultInput)
 		if failoverErr != nil {
-			lastResp = nil
+			var zero M
+			lastResp = zero
 			lastErr = failoverErr
-			if emitErr := m.emitGenerateSummaryEvent(ctx, attempt, GenerateSummaryPhaseFailover, nil, failoverErr); emitErr != nil {
-				return nil, nil, emitErr
+			if emitErr := m.emitGenerateSummaryEvent(ctx, attempt, GenerateSummaryPhaseFailover, zero, failoverErr); emitErr != nil {
+				var zeroM M
+				return zeroM, nil, emitErr
 			}
 		} else {
 			modelInput = nextInput
 			lastResp, lastErr = m.generateAndEmit(ctx, failoverModel, modelInput, m.cfg.ModelOptions, attempt, GenerateSummaryPhaseFailover)
 		}
 
-		if !shouldFailover(ctx, m.cfg.Failover, lastResp, lastErr) {
+		if !typedShouldFailover[M](ctx, m.cfg.Failover, lastResp, lastErr) {
 			return lastResp, modelInput, lastErr
 		}
 		if attempt == maxRetries {
 			if lastErr != nil {
-				return nil, nil, fmt.Errorf("exceeds max failover attempts: %w", lastErr)
+				var zero M
+				return zero, nil, fmt.Errorf("exceeds max failover attempts: %w", lastErr)
 			}
-			return nil, nil, fmt.Errorf("exceeds max failover attempts")
+			var zero M
+			return zero, nil, fmt.Errorf("exceeds max failover attempts")
 		}
 
 		select {
 		case <-time.After(backoff(ctx, attempt, lastResp, lastErr)):
 		case <-ctx.Done():
-			return nil, nil, ctx.Err()
+			var zero M
+			return zero, nil, ctx.Err()
 		}
 	}
 }
 
-func (m *middleware) getFailoverModel(ctx context.Context, failoverCtx *FailoverContext, defaultInput []adk.Message) (model.BaseChatModel, []adk.Message, error) {
+func (m *typedMiddleware[M]) getFailoverModel(ctx context.Context, failoverCtx *TypedFailoverContext[M], defaultInput []M) (model.BaseModel[M], []M, error) {
 	if m.cfg.Failover == nil {
 		return nil, nil, fmt.Errorf("failover config is required")
 	}
@@ -634,7 +691,7 @@ func (m *middleware) getFailoverModel(ctx context.Context, failoverCtx *Failover
 	return failoverModel, nextModelInput, nil
 }
 
-func (m *middleware) buildSummarizationModelInput(ctx context.Context, originMsgs, contextMsgs []adk.Message) ([]adk.Message, error) {
+func (m *typedMiddleware[M]) buildSummarizationModelInput(ctx context.Context, originMsgs, contextMsgs []M) ([]M, error) {
 	sysInstruction, userInstruction := m.getModelInstructions()
 
 	if m.cfg.GenModelInput != nil {
@@ -645,7 +702,7 @@ func (m *middleware) buildSummarizationModelInput(ctx context.Context, originMsg
 		return input, nil
 	}
 
-	input := make([]adk.Message, 0, len(contextMsgs)+2)
+	input := make([]M, 0, len(contextMsgs)+2)
 	input = append(input, sysInstruction)
 	input = append(input, contextMsgs...)
 	input = append(input, userInstruction)
@@ -653,74 +710,48 @@ func (m *middleware) buildSummarizationModelInput(ctx context.Context, originMsg
 	return input, nil
 }
 
-func (m *middleware) getModelInstructions() (adk.Message, adk.Message) {
+func (m *typedMiddleware[M]) getModelInstructions() (M, M) {
 	userInstruction := m.cfg.UserInstruction
 	if userInstruction == "" {
 		userInstruction = getUserSummaryInstruction()
 	}
 
-	userInstructionMsg := &schema.Message{
-		Role:    schema.User,
-		Content: userInstruction,
-	}
-
-	sysInstructionMsg := &schema.Message{
-		Role:    schema.System,
-		Content: getSystemInstruction(),
-	}
-
-	return sysInstructionMsg, userInstructionMsg
+	return makeSystemMsg[M](getSystemInstruction()), makeUserMsg[M](userInstruction)
 }
 
-func newSummaryMessage(content string) *schema.Message {
-	summary := &schema.Message{
-		Role:    schema.User,
-		Content: content,
-	}
-	setContentType(summary, contentTypeSummary)
-	return summary
-}
+func (m *typedMiddleware[M]) postProcessSummary(ctx context.Context, contextMsgs []M, summary M) (M, error) {
+	content := getTextContent[M](summary)
 
-func (m *middleware) postProcessSummary(ctx context.Context, contextMsgs []adk.Message, summary adk.Message) (adk.Message, error) {
 	if m.cfg.PreserveUserMessages == nil || m.cfg.PreserveUserMessages.Enabled {
 		maxUserMsgTokens := m.getUserMessageContextTokens()
-		content, err := m.replaceUserMessagesInSummary(ctx, contextMsgs, summary.Content, maxUserMsgTokens)
+		var err error
+		content, err = m.replaceUserMessagesInSummary(ctx, contextMsgs, content, maxUserMsgTokens)
 		if err != nil {
-			return nil, fmt.Errorf("failed to replace user messages in summary: %w", err)
+			var zero M
+			return zero, fmt.Errorf("failed to replace user messages in summary: %w", err)
 		}
-		summary.Content = content
 	}
 
 	if path := m.cfg.TranscriptFilePath; path != "" {
-		summary.Content = appendSection(summary.Content, fmt.Sprintf(getTranscriptPathInstruction(), path))
+		content = appendSection(content, fmt.Sprintf(getTranscriptPathInstruction(), path))
 	}
 
-	summary.Content = appendSection(getSummaryPreamble(), summary.Content)
+	content = appendSection(getSummaryPreamble(), content)
 
-	var inputParts []schema.MessageInputPart
+	result := setMsgTextContent[M](summary, content)
+	result = setMsgMultipartContent[M](result, content, getContinueInstruction())
 
-	inputParts = append(inputParts, schema.MessageInputPart{
-		Type: schema.ChatMessagePartTypeText,
-		Text: summary.Content,
-	}, schema.MessageInputPart{
-		Type: schema.ChatMessagePartTypeText,
-		Text: getContinueInstruction(),
-	})
-
-	summary.UserInputMultiContent = inputParts
-	summary.Content = ""
-
-	return summary, nil
+	return result, nil
 }
 
-func (m *middleware) replaceUserMessagesInSummary(ctx context.Context, contextMsgs []adk.Message, summary string, contextTokens int) (string, error) {
-	var userMsgs []adk.Message
+func (m *typedMiddleware[M]) replaceUserMessagesInSummary(ctx context.Context, contextMsgs []M, summary string, contextTokens int) (string, error) {
+	var userMsgs []M
 	var hasUserMsgsBeforeFilter bool
 	for _, msg := range contextMsgs {
-		if typ, ok := getContentType(msg); ok && typ == contentTypeSummary {
+		if typedGetContentType[M](msg) == contentTypeSummary {
 			continue
 		}
-		if msg.Role == schema.User {
+		if isUserRole[M](msg) {
 			hasUserMsgsBeforeFilter = true
 			if m.cfg.PreserveUserMessages != nil && m.cfg.PreserveUserMessages.Filter != nil {
 				keep, err := m.cfg.PreserveUserMessages.Filter(ctx, msg)
@@ -739,7 +770,7 @@ func (m *middleware) replaceUserMessagesInSummary(ctx context.Context, contextMs
 		return summary, nil
 	}
 
-	var selected []adk.Message
+	var selected []M
 	if len(userMsgs) == 1 {
 		selected = userMsgs
 	} else {
@@ -747,8 +778,8 @@ func (m *middleware) replaceUserMessagesInSummary(ctx context.Context, contextMs
 		for i := len(userMsgs) - 1; i >= 0; i-- {
 			msg := userMsgs[i]
 
-			tokens, err := m.countTokens(ctx, &TokenCounterInput{
-				Messages: []adk.Message{msg},
+			tokens, err := m.countTokens(ctx, &TypedTokenCounterInput[M]{
+				Messages: []M{msg},
 			})
 			if err != nil {
 				return "", fmt.Errorf("failed to count tokens: %w", err)
@@ -761,8 +792,9 @@ func (m *middleware) replaceUserMessagesInSummary(ctx context.Context, contextMs
 				continue
 			}
 
-			trimmedMsg := defaultTrimUserMessage(msg, remaining)
-			if trimmedMsg != nil {
+			trimmedMsg := defaultTypedTrimUserMessage[M](msg, remaining)
+			var zero M
+			if any(trimmedMsg) != any(zero) {
 				selected = append(selected, trimmedMsg)
 			}
 
@@ -776,7 +808,7 @@ func (m *middleware) replaceUserMessagesInSummary(ctx context.Context, contextMs
 
 	var msgLines []string
 	for _, msg := range selected {
-		text := extractTextContent(msg)
+		text := getTextContent[M](msg)
 		if text != "" {
 			msgLines = append(msgLines, "    - "+text)
 		}
@@ -818,25 +850,101 @@ func appendSection(base, section string) string {
 	return base + "\n\n" + section
 }
 
+func (m *typedMiddleware[M]) generateAndEmit(ctx context.Context, chatModel model.BaseModel[M], input []M,
+	opts []model.Option, attempt int, phase GenerateSummaryPhase) (M, error) {
+
+	resp, err := chatModel.Generate(ctx, input, opts...)
+	if emitErr := m.emitGenerateSummaryEvent(ctx, attempt, phase, resp, err); emitErr != nil {
+		var zero M
+		return zero, emitErr
+	}
+	return resp, err
+}
+
+func (m *typedMiddleware[M]) generateWithRetry(ctx context.Context, chatModel model.BaseModel[M], input []M,
+	opts []model.Option, retryCfg *TypedRetryConfig[M]) (M, error) {
+
+	const defaultMaxRetries = 3
+
+	if retryCfg == nil {
+		return m.generateAndEmit(ctx, chatModel, input, opts, 1, GenerateSummaryPhasePrimary)
+	}
+
+	shouldRetry := retryCfg.ShouldRetry
+	if shouldRetry == nil {
+		shouldRetry = defaultTypedShouldRetry[M]
+	}
+	backoffFunc := retryCfg.BackoffFunc
+	if backoffFunc == nil {
+		backoffFunc = defaultTypedBackoffFunc[M]
+	}
+
+	maxRetries := defaultMaxRetries
+	if retryCfg.MaxRetries != nil {
+		maxRetries = *retryCfg.MaxRetries
+	}
+	totalAttempts := maxRetries + 1
+
+	var (
+		lastModelResp M
+		lastErr       error
+	)
+	for attempt := 1; attempt <= totalAttempts; attempt++ {
+		resp, err := m.generateAndEmit(ctx, chatModel, input, opts, attempt, GenerateSummaryPhasePrimary)
+		if !shouldRetry(ctx, resp, err) {
+			return resp, err
+		}
+
+		lastModelResp = resp
+		lastErr = err
+		if attempt < totalAttempts {
+			select {
+			case <-time.After(backoffFunc(ctx, attempt, resp, err)):
+			case <-ctx.Done():
+				var zero M
+				return zero, ctx.Err()
+			}
+		}
+	}
+
+	if maxRetries > 0 {
+		return lastModelResp, fmt.Errorf("exceeds max retries: %w", lastErr)
+	}
+
+	return lastModelResp, lastErr
+}
+
+// newSummaryMessage is kept for backward compatibility with external callers.
+func newSummaryMessage(content string) *schema.Message {
+	return newTypedSummaryMessage[*schema.Message](content)
+}
+
+// extractTextContent is kept for backward compatibility with external callers.
+func extractTextContent(msg adk.Message) string {
+	if msg == nil {
+		return ""
+	}
+
+	var sb strings.Builder
+	for _, part := range msg.UserInputMultiContent {
+		if part.Type == schema.ChatMessagePartTypeText && part.Text != "" {
+			if sb.Len() > 0 {
+				sb.WriteString("\n")
+			}
+			sb.WriteString(part.Text)
+		}
+	}
+
+	if sb.Len() > 0 {
+		return sb.String()
+	}
+
+	return msg.Content
+}
+
+// defaultTrimUserMessage is kept for backward compatibility with external callers.
 func defaultTrimUserMessage(msg adk.Message, remainingTokens int) adk.Message {
-	if remainingTokens <= 0 {
-		return nil
-	}
-
-	textContent := extractTextContent(msg)
-	if len(textContent) == 0 {
-		return nil
-	}
-
-	trimmed := truncateTextByChars(textContent)
-	if trimmed == "" {
-		return nil
-	}
-
-	return &schema.Message{
-		Role:    schema.User,
-		Content: trimmed,
-	}
+	return defaultTypedTrimUserMessage[*schema.Message](msg, remainingTokens)
 }
 
 func truncateTextByChars(text string) string {
@@ -863,29 +971,7 @@ func truncateTextByChars(text string) string {
 	return prefix + marker + suffix
 }
 
-func extractTextContent(msg adk.Message) string {
-	if msg == nil {
-		return ""
-	}
-
-	var sb strings.Builder
-	for _, part := range msg.UserInputMultiContent {
-		if part.Type == schema.ChatMessagePartTypeText && part.Text != "" {
-			if sb.Len() > 0 {
-				sb.WriteString("\n")
-			}
-			sb.WriteString(part.Text)
-		}
-	}
-
-	if sb.Len() > 0 {
-		return sb.String()
-	}
-
-	return msg.Content
-}
-
-func (c *Config) check() error {
+func (c *TypedConfig[M]) check() error {
 	if c == nil {
 		return fmt.Errorf("config is required")
 	}
@@ -910,14 +996,14 @@ func (c *Config) check() error {
 	return nil
 }
 
-func (c *RetryConfig) check() error {
+func (c *TypedRetryConfig[M]) check() error {
 	if c.MaxRetries != nil && *c.MaxRetries < 0 {
 		return fmt.Errorf("retry.MaxRetries must be non-negative")
 	}
 	return nil
 }
 
-func (c *FailoverConfig) check() error {
+func (c *TypedFailoverConfig[M]) check() error {
 	if c.MaxRetries != nil && *c.MaxRetries < 0 {
 		return fmt.Errorf("failover.MaxRetries must be non-negative")
 	}
@@ -937,10 +1023,12 @@ func (c *TriggerCondition) check() error {
 	return nil
 }
 
+// setContentType is kept for backward compatibility with external callers.
 func setContentType(msg adk.Message, ct summarizationContentType) {
 	setExtra(msg, extraKeyContentType, string(ct))
 }
 
+// getContentType is kept for backward compatibility with external callers.
 func getContentType(msg adk.Message) (summarizationContentType, bool) {
 	ct, ok := getExtra[string](msg, extraKeyContentType)
 	if !ok {
@@ -949,6 +1037,7 @@ func getContentType(msg adk.Message) (summarizationContentType, bool) {
 	return summarizationContentType(ct), true
 }
 
+// setExtra is kept for backward compatibility with external callers.
 func setExtra(msg adk.Message, key string, value any) {
 	if msg.Extra == nil {
 		msg.Extra = make(map[string]any)
@@ -956,6 +1045,7 @@ func setExtra(msg adk.Message, key string, value any) {
 	msg.Extra[key] = value
 }
 
+// getExtra is kept for backward compatibility with external callers.
 func getExtra[T any](msg adk.Message, key string) (T, bool) {
 	var zero T
 	if msg == nil || msg.Extra == nil {
@@ -968,7 +1058,136 @@ func getExtra[T any](msg adk.Message, key string) (T, bool) {
 	return v, true
 }
 
+// shouldFailover is kept for backward compatibility with external callers.
 func shouldFailover(ctx context.Context, cfg *FailoverConfig, resp adk.Message, err error) bool {
+	return typedShouldFailover[*schema.Message](ctx, cfg, resp, err)
+}
+
+func defaultShouldRetry(_ context.Context, _ adk.Message, err error) bool {
+	return err != nil
+}
+
+func defaultBackoffFunc(_ context.Context, attempt int, _ adk.Message, _ error) time.Duration {
+	return defaultBackoffDuration(attempt)
+}
+
+// ============================================================================
+// Generic helper functions
+// ============================================================================
+
+func isSystemRole[M adk.MessageType](msg M) bool {
+	switch m := any(msg).(type) {
+	case *schema.Message:
+		return m.Role == schema.System
+	case *schema.AgenticMessage:
+		return m.Role == schema.AgenticRoleTypeSystem
+	}
+	panic("unreachable")
+}
+
+func isUserRole[M adk.MessageType](msg M) bool {
+	switch m := any(msg).(type) {
+	case *schema.Message:
+		return m.Role == schema.User
+	case *schema.AgenticMessage:
+		return m.Role == schema.AgenticRoleTypeUser
+	}
+	panic("unreachable")
+}
+
+func getTextContent[M adk.MessageType](msg M) string {
+	switch m := any(msg).(type) {
+	case *schema.Message:
+		if m == nil {
+			return ""
+		}
+		return extractTextContent(m)
+	case *schema.AgenticMessage:
+		if m == nil {
+			return ""
+		}
+		var parts []string
+		for _, block := range m.ContentBlocks {
+			if block == nil {
+				continue
+			}
+			if block.UserInputText != nil {
+				parts = append(parts, block.UserInputText.Text)
+			} else if block.AssistantGenText != nil {
+				parts = append(parts, block.AssistantGenText.Text)
+			}
+		}
+		return strings.Join(parts, "")
+	}
+	panic("unreachable")
+}
+
+func getMsgExtra[M adk.MessageType](msg M) map[string]any {
+	switch m := any(msg).(type) {
+	case *schema.Message:
+		return m.Extra
+	case *schema.AgenticMessage:
+		return m.Extra
+	}
+	panic("unreachable")
+}
+
+func setMsgExtra[M adk.MessageType](msg M, key string, value any) {
+	switch m := any(msg).(type) {
+	case *schema.Message:
+		if m.Extra == nil {
+			m.Extra = map[string]any{}
+		}
+		m.Extra[key] = value
+	case *schema.AgenticMessage:
+		if m.Extra == nil {
+			m.Extra = map[string]any{}
+		}
+		m.Extra[key] = value
+	}
+}
+
+func makeSystemMsg[M adk.MessageType](text string) M {
+	var zero M
+	switch any(zero).(type) {
+	case *schema.Message:
+		return any(schema.SystemMessage(text)).(M)
+	case *schema.AgenticMessage:
+		return any(schema.SystemAgenticMessage(text)).(M)
+	}
+	panic("unreachable")
+}
+
+func makeUserMsg[M adk.MessageType](text string) M {
+	var zero M
+	switch any(zero).(type) {
+	case *schema.Message:
+		return any(schema.UserMessage(text)).(M)
+	case *schema.AgenticMessage:
+		return any(schema.UserAgenticMessage(text)).(M)
+	}
+	panic("unreachable")
+}
+
+func newTypedSummaryMessage[M adk.MessageType](content string) M {
+	msg := makeUserMsg[M](content)
+	setMsgExtra[M](msg, extraKeyContentType, string(contentTypeSummary))
+	return msg
+}
+
+func typedGetContentType[M adk.MessageType](msg M) summarizationContentType {
+	extra := getMsgExtra[M](msg)
+	if extra == nil {
+		return ""
+	}
+	ct, ok := extra[extraKeyContentType].(string)
+	if !ok {
+		return ""
+	}
+	return summarizationContentType(ct)
+}
+
+func typedShouldFailover[M adk.MessageType](ctx context.Context, cfg *TypedFailoverConfig[M], resp M, err error) bool {
 	if cfg == nil {
 		return false
 	}
@@ -978,73 +1197,15 @@ func shouldFailover(ctx context.Context, cfg *FailoverConfig, resp adk.Message, 
 	return cfg.ShouldFailover(ctx, resp, err)
 }
 
-func (m *middleware) generateAndEmit(ctx context.Context, chatModel model.BaseChatModel, input []adk.Message,
-	opts []model.Option, attempt int, phase GenerateSummaryPhase) (adk.Message, error) {
-
-	resp, err := chatModel.Generate(ctx, input, opts...)
-	if emitErr := m.emitGenerateSummaryEvent(ctx, attempt, phase, resp, err); emitErr != nil {
-		return nil, emitErr
-	}
-	return resp, err
-}
-
-func (m *middleware) generateWithRetry(ctx context.Context, chatModel model.BaseChatModel, input []adk.Message,
-	opts []model.Option, retryCfg *RetryConfig) (adk.Message, error) {
-
-	const defaultMaxRetries = 3
-
-	if retryCfg == nil {
-		return m.generateAndEmit(ctx, chatModel, input, opts, 1, GenerateSummaryPhasePrimary)
-	}
-
-	shouldRetry := retryCfg.ShouldRetry
-	if shouldRetry == nil {
-		shouldRetry = defaultShouldRetry
-	}
-	backoffFunc := retryCfg.BackoffFunc
-	if backoffFunc == nil {
-		backoffFunc = defaultBackoffFunc
-	}
-
-	maxRetries := defaultMaxRetries
-	if retryCfg.MaxRetries != nil {
-		maxRetries = *retryCfg.MaxRetries
-	}
-	totalAttempts := maxRetries + 1
-
-	var (
-		lastModelResp adk.Message
-		lastErr       error
-	)
-	for attempt := 1; attempt <= totalAttempts; attempt++ {
-		resp, err := m.generateAndEmit(ctx, chatModel, input, opts, attempt, GenerateSummaryPhasePrimary)
-		if !shouldRetry(ctx, resp, err) {
-			return resp, err
-		}
-
-		lastModelResp = resp
-		lastErr = err
-		if attempt < totalAttempts {
-			select {
-			case <-time.After(backoffFunc(ctx, attempt, resp, err)):
-			case <-ctx.Done():
-				return nil, ctx.Err()
-			}
-		}
-	}
-
-	if maxRetries > 0 {
-		return lastModelResp, fmt.Errorf("exceeds max retries: %w", lastErr)
-	}
-
-	return lastModelResp, lastErr
-}
-
-func defaultShouldRetry(_ context.Context, _ adk.Message, err error) bool {
+func defaultTypedShouldRetry[M adk.MessageType](_ context.Context, _ M, err error) bool {
 	return err != nil
 }
 
-func defaultBackoffFunc(_ context.Context, attempt int, _ adk.Message, _ error) time.Duration {
+func defaultTypedBackoffFunc[M adk.MessageType](_ context.Context, attempt int, _ M, _ error) time.Duration {
+	return defaultBackoffDuration(attempt)
+}
+
+func defaultBackoffDuration(attempt int) time.Duration {
 	const (
 		baseDelay = time.Second
 		maxDelay  = 10 * time.Second
@@ -1066,4 +1227,97 @@ func defaultBackoffFunc(_ context.Context, attempt int, _ adk.Message, _ error) 
 	jitter := time.Duration(rand.Int63n(int64(delay / 2)))
 
 	return delay + jitter
+}
+
+func defaultTypedTrimUserMessage[M adk.MessageType](msg M, remainingTokens int) M {
+	var zero M
+	if remainingTokens <= 0 {
+		return zero
+	}
+
+	textContent := getTextContent[M](msg)
+	if len(textContent) == 0 {
+		return zero
+	}
+
+	trimmed := truncateTextByChars(textContent)
+	if trimmed == "" {
+		return zero
+	}
+
+	return makeUserMsg[M](trimmed)
+}
+
+// setMsgTextContent sets the text content on a message.
+func setMsgTextContent[M adk.MessageType](msg M, content string) M {
+	switch m := any(msg).(type) {
+	case *schema.Message:
+		m.Content = content
+		return any(m).(M)
+	case *schema.AgenticMessage:
+		m.ContentBlocks = []*schema.ContentBlock{
+			schema.NewContentBlock(&schema.UserInputText{Text: content}),
+		}
+		return any(m).(M)
+	}
+	panic("unreachable")
+}
+
+// setMsgMultipartContent builds the final summary multipart structure.
+// For *schema.Message, it uses UserInputMultiContent and clears Content.
+// For *schema.AgenticMessage, it sets ContentBlocks with multiple UserInputText blocks.
+func setMsgMultipartContent[M adk.MessageType](msg M, summaryContent, continueInstruction string) M {
+	switch m := any(msg).(type) {
+	case *schema.Message:
+		m.UserInputMultiContent = []schema.MessageInputPart{
+			{
+				Type: schema.ChatMessagePartTypeText,
+				Text: summaryContent,
+			},
+			{
+				Type: schema.ChatMessagePartTypeText,
+				Text: continueInstruction,
+			},
+		}
+		m.Content = ""
+		return any(m).(M)
+	case *schema.AgenticMessage:
+		m.ContentBlocks = []*schema.ContentBlock{
+			schema.NewContentBlock(&schema.UserInputText{Text: summaryContent}),
+			schema.NewContentBlock(&schema.UserInputText{Text: continueInstruction}),
+		}
+		return any(m).(M)
+	}
+	panic("unreachable")
+}
+
+// typedMsgToLegacy converts a typed message to adk.Message for event emission.
+// Returns nil for AgenticMessage or nil input.
+func typedMsgToLegacy[M adk.MessageType](msg M) adk.Message {
+	switch m := any(msg).(type) {
+	case *schema.Message:
+		return m
+	case *schema.AgenticMessage:
+		// Events use adk.Message; for AgenticMessage, return nil.
+		_ = m
+		return nil
+	}
+	return nil
+}
+
+// typedMsgsToLegacy converts typed messages to []adk.Message for event emission.
+// For *schema.Message, it returns the same slice. For *schema.AgenticMessage, returns nil.
+func typedMsgsToLegacy[M adk.MessageType](msgs []M) []adk.Message {
+	var zero M
+	switch any(zero).(type) {
+	case *schema.Message:
+		result := make([]adk.Message, len(msgs))
+		for i, msg := range msgs {
+			result[i] = any(msg).(*schema.Message)
+		}
+		return result
+	case *schema.AgenticMessage:
+		return nil
+	}
+	return nil
 }
