@@ -557,8 +557,16 @@ type eventSenderToolWrapperMarker interface{ isEventSenderToolWrapper() }
 // include this in ChatModelAgentConfig.Handlers at the desired position.
 // When detected in Handlers, the framework skips the default event sender to avoid duplicates.
 func NewEventSenderToolWrapper() ChatModelAgentMiddleware {
-	return &eventSenderToolWrapper{
-		TypedBaseChatModelAgentMiddleware: &TypedBaseChatModelAgentMiddleware[*schema.Message]{},
+	return newTypedEventSenderToolWrapper[*schema.Message]()
+}
+
+// newTypedEventSenderToolWrapper creates a typed event sender wrapper for the given message type.
+// This is used internally to ensure the default event sender matches the agent's message type
+// (e.g. *schema.AgenticMessage agents need an AgenticMessage-typed wrapper so that
+// compose.ProcessState can access the correct state type).
+func newTypedEventSenderToolWrapper[M MessageType]() *typedEventSenderToolWrapper[M] {
+	return &typedEventSenderToolWrapper[M]{
+		TypedBaseChatModelAgentMiddleware: &TypedBaseChatModelAgentMiddleware[M]{},
 	}
 }
 

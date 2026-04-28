@@ -20,9 +20,11 @@ import (
 	"context"
 	"errors"
 	"sync"
+	"sync/atomic"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/components/tool"
@@ -1681,4 +1683,331 @@ func TestEventSenderToolHandler(t *testing.T) {
 			assert.Contains(t, contents, originalResult)
 		})
 	})
+}
+
+// mockAgenticToolCallingModel is a model.BaseModel[*schema.AgenticMessage] that
+// returns a tool call on the first Generate, then a final answer on the second.
+type mockAgenticToolCallingModel struct {
+	toolCallName string
+	callCount    int32
+}
+
+func (m *mockAgenticToolCallingModel) Generate(_ context.Context, _ []*schema.AgenticMessage, _ ...model.Option) (*schema.AgenticMessage, error) {
+	idx := atomic.AddInt32(&m.callCount, 1)
+	if idx == 1 {
+		return agenticToolCallMsg(m.toolCallName, "tc-1", `{"input":"test"}`), nil
+	}
+	return agenticMsg("done"), nil
+}
+
+func (m *mockAgenticToolCallingModel) Stream(ctx context.Context, input []*schema.AgenticMessage, opts ...model.Option) (*schema.StreamReader[*schema.AgenticMessage], error) {
+	msg, err := m.Generate(ctx, input, opts...)
+	if err != nil {
+		return nil, err
+	}
+	r, w := schema.Pipe[*schema.AgenticMessage](1)
+	go func() { defer w.Close(); w.Send(msg, nil) }()
+	return r, nil
+}
+
+// collectAgenticToolEvents filters tool result events from the agentic iterator.
+// Agentic tool results have AgenticRole == AgenticRoleTypeUser and contain
+// FunctionToolResult content blocks.
+func collectAgenticToolEvents(it *AsyncIterator[*agenticAgentEvent]) []*agenticAgentEvent {
+	var toolEvents []*agenticAgentEvent
+	for {
+		ev, ok := it.Next()
+		if !ok {
+			break
+		}
+		if ev.Output == nil || ev.Output.MessageOutput == nil {
+			continue
+		}
+		mo := ev.Output.MessageOutput
+		if mo.AgenticRole == schema.AgenticRoleTypeUser {
+			toolEvents = append(toolEvents, ev)
+		}
+	}
+	return toolEvents
+}
+
+// collectAgenticToolContent extracts text from agentic tool result events.
+func collectAgenticToolContent(events []*agenticAgentEvent) []string {
+	var contents []string
+	for _, ev := range events {
+		mo := ev.Output.MessageOutput
+		if !mo.IsStreaming && mo.Message != nil {
+			for _, cb := range mo.Message.ContentBlocks {
+				if cb.FunctionToolResult != nil {
+					for _, b := range cb.FunctionToolResult.Blocks {
+						if b.Text != nil {
+							contents = append(contents, b.Text.Text)
+						}
+					}
+				}
+			}
+			continue
+		}
+		if mo.IsStreaming && mo.MessageStream != nil {
+			for {
+				msg, err := mo.MessageStream.Recv()
+				if err != nil {
+					break
+				}
+				for _, cb := range msg.ContentBlocks {
+					if cb.FunctionToolResult != nil {
+						for _, b := range cb.FunctionToolResult.Blocks {
+							if b.Text != nil {
+								contents = append(contents, b.Text.Text)
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+	return contents
+}
+
+func newAgenticEventSenderToolWrapper() TypedChatModelAgentMiddleware[*schema.AgenticMessage] {
+	return &typedEventSenderToolWrapper[*schema.AgenticMessage]{
+		TypedBaseChatModelAgentMiddleware: &TypedBaseChatModelAgentMiddleware[*schema.AgenticMessage]{},
+	}
+}
+
+// TestAgenticEventSenderToolHandler exercises the *schema.AgenticMessage branches
+// in typedToolInvokeEvent, typedToolStreamEvent, typedToolEnhancedInvokeEvent,
+// typedToolEnhancedStreamEvent, plus the helpers textToFunctionToolResultBlocks,
+// toolResultToBlocks, and derefString.
+func TestAgenticEventSenderToolHandler(t *testing.T) {
+	t.Run("Invokable", func(t *testing.T) {
+		ctx := context.Background()
+		testTool := &invokableTestTool{name: "test_tool", result: "invokable_output"}
+		mdl := &mockAgenticToolCallingModel{toolCallName: "test_tool"}
+
+		agent, err := NewTypedChatModelAgent[*schema.AgenticMessage](ctx, &TypedChatModelAgentConfig[*schema.AgenticMessage]{
+			Name:        "TestAgent",
+			Description: "test",
+			Model:       mdl,
+			ToolsConfig: ToolsConfig{
+				ToolsNodeConfig: compose.ToolsNodeConfig{Tools: []tool.BaseTool{testTool}},
+			},
+			Handlers: []TypedChatModelAgentMiddleware[*schema.AgenticMessage]{newAgenticEventSenderToolWrapper()},
+		})
+		require.NoError(t, err)
+
+		r := NewTypedRunner[*schema.AgenticMessage](TypedRunnerConfig[*schema.AgenticMessage]{Agent: agent, EnableStreaming: false})
+		it := r.Query(ctx, "test")
+
+		toolEvents := collectAgenticToolEvents(it)
+		assert.Equal(t, 1, len(toolEvents))
+		contents := collectAgenticToolContent(toolEvents)
+		assert.Contains(t, contents, "invokable_output")
+	})
+
+	t.Run("Streamable", func(t *testing.T) {
+		ctx := context.Background()
+		testTool := &streamableTestTool{name: "test_tool", result: "streamable_output"}
+		mdl := &mockAgenticToolCallingModel{toolCallName: "test_tool"}
+
+		agent, err := NewTypedChatModelAgent[*schema.AgenticMessage](ctx, &TypedChatModelAgentConfig[*schema.AgenticMessage]{
+			Name:        "TestAgent",
+			Description: "test",
+			Model:       mdl,
+			ToolsConfig: ToolsConfig{
+				ToolsNodeConfig: compose.ToolsNodeConfig{Tools: []tool.BaseTool{testTool}},
+			},
+			Handlers: []TypedChatModelAgentMiddleware[*schema.AgenticMessage]{newAgenticEventSenderToolWrapper()},
+		})
+		require.NoError(t, err)
+
+		r := NewTypedRunner[*schema.AgenticMessage](TypedRunnerConfig[*schema.AgenticMessage]{Agent: agent, EnableStreaming: true})
+		it := r.Query(ctx, "test")
+
+		toolEvents := collectAgenticToolEvents(it)
+		assert.Equal(t, 1, len(toolEvents))
+		contents := collectAgenticToolContent(toolEvents)
+		assert.Contains(t, contents, "streamable_output")
+	})
+
+	t.Run("EnhancedInvokable", func(t *testing.T) {
+		ctx := context.Background()
+		testTool := &enhancedInvokableTestTool{name: "test_tool", result: "enhanced_output"}
+		mdl := &mockAgenticToolCallingModel{toolCallName: "test_tool"}
+
+		agent, err := NewTypedChatModelAgent[*schema.AgenticMessage](ctx, &TypedChatModelAgentConfig[*schema.AgenticMessage]{
+			Name:        "TestAgent",
+			Description: "test",
+			Model:       mdl,
+			ToolsConfig: ToolsConfig{
+				ToolsNodeConfig: compose.ToolsNodeConfig{Tools: []tool.BaseTool{testTool}},
+			},
+			Handlers: []TypedChatModelAgentMiddleware[*schema.AgenticMessage]{newAgenticEventSenderToolWrapper()},
+		})
+		require.NoError(t, err)
+
+		r := NewTypedRunner[*schema.AgenticMessage](TypedRunnerConfig[*schema.AgenticMessage]{Agent: agent, EnableStreaming: false})
+		it := r.Query(ctx, "test")
+
+		toolEvents := collectAgenticToolEvents(it)
+		assert.Equal(t, 1, len(toolEvents))
+		contents := collectAgenticToolContent(toolEvents)
+		assert.Contains(t, contents, "enhanced_output")
+	})
+
+	t.Run("EnhancedStreamable", func(t *testing.T) {
+		ctx := context.Background()
+		testTool := &enhancedStreamableTestTool{name: "test_tool", result: "enhanced_stream_output"}
+		mdl := &mockAgenticToolCallingModel{toolCallName: "test_tool"}
+
+		agent, err := NewTypedChatModelAgent[*schema.AgenticMessage](ctx, &TypedChatModelAgentConfig[*schema.AgenticMessage]{
+			Name:        "TestAgent",
+			Description: "test",
+			Model:       mdl,
+			ToolsConfig: ToolsConfig{
+				ToolsNodeConfig: compose.ToolsNodeConfig{Tools: []tool.BaseTool{testTool}},
+			},
+			Handlers: []TypedChatModelAgentMiddleware[*schema.AgenticMessage]{newAgenticEventSenderToolWrapper()},
+		})
+		require.NoError(t, err)
+
+		r := NewTypedRunner[*schema.AgenticMessage](TypedRunnerConfig[*schema.AgenticMessage]{Agent: agent, EnableStreaming: true})
+		it := r.Query(ctx, "test")
+
+		toolEvents := collectAgenticToolEvents(it)
+		assert.Equal(t, 1, len(toolEvents))
+		contents := collectAgenticToolContent(toolEvents)
+		assert.Contains(t, contents, "enhanced_stream_output")
+	})
+
+	t.Run("EnhancedInvokableMultimodal", func(t *testing.T) {
+		ctx := context.Background()
+		imgURL := "https://example.com/img.png"
+		testTool := &multimodalEnhancedInvokableTestTool{
+			name: "test_tool",
+			result: &schema.ToolResult{
+				Parts: []schema.ToolOutputPart{
+					{Type: schema.ToolPartTypeText, Text: "caption"},
+					{Type: schema.ToolPartTypeImage, Image: &schema.ToolOutputImage{MessagePartCommon: schema.MessagePartCommon{URL: &imgURL}}},
+				},
+			},
+		}
+		mdl := &mockAgenticToolCallingModel{toolCallName: "test_tool"}
+
+		agent, err := NewTypedChatModelAgent[*schema.AgenticMessage](ctx, &TypedChatModelAgentConfig[*schema.AgenticMessage]{
+			Name:        "TestAgent",
+			Description: "test",
+			Model:       mdl,
+			ToolsConfig: ToolsConfig{
+				ToolsNodeConfig: compose.ToolsNodeConfig{Tools: []tool.BaseTool{testTool}},
+			},
+			Handlers: []TypedChatModelAgentMiddleware[*schema.AgenticMessage]{newAgenticEventSenderToolWrapper()},
+		})
+		require.NoError(t, err)
+
+		r := NewTypedRunner[*schema.AgenticMessage](TypedRunnerConfig[*schema.AgenticMessage]{Agent: agent, EnableStreaming: false})
+		it := r.Query(ctx, "test")
+
+		toolEvents := collectAgenticToolEvents(it)
+		require.Equal(t, 1, len(toolEvents))
+
+		// Verify multimodal content
+		msg := toolEvents[0].Output.MessageOutput.Message
+		require.NotNil(t, msg)
+		require.Len(t, msg.ContentBlocks, 1)
+		ftr := msg.ContentBlocks[0].FunctionToolResult
+		require.NotNil(t, ftr)
+		require.Len(t, ftr.Blocks, 2)
+		assert.Equal(t, "caption", ftr.Blocks[0].Text.Text)
+		assert.Equal(t, "https://example.com/img.png", ftr.Blocks[1].Image.URL)
+	})
+
+	t.Run("EnhancedStreamableMultimodal", func(t *testing.T) {
+		ctx := context.Background()
+		audioURL := "https://example.com/audio.mp3"
+		testTool := &multimodalEnhancedStreamableTestTool{
+			name: "test_tool",
+			result: &schema.ToolResult{
+				Parts: []schema.ToolOutputPart{
+					{Type: schema.ToolPartTypeText, Text: "transcript"},
+					{Type: schema.ToolPartTypeAudio, Audio: &schema.ToolOutputAudio{MessagePartCommon: schema.MessagePartCommon{URL: &audioURL}}},
+				},
+			},
+		}
+		mdl := &mockAgenticToolCallingModel{toolCallName: "test_tool"}
+
+		agent, err := NewTypedChatModelAgent[*schema.AgenticMessage](ctx, &TypedChatModelAgentConfig[*schema.AgenticMessage]{
+			Name:        "TestAgent",
+			Description: "test",
+			Model:       mdl,
+			ToolsConfig: ToolsConfig{
+				ToolsNodeConfig: compose.ToolsNodeConfig{Tools: []tool.BaseTool{testTool}},
+			},
+			Handlers: []TypedChatModelAgentMiddleware[*schema.AgenticMessage]{newAgenticEventSenderToolWrapper()},
+		})
+		require.NoError(t, err)
+
+		r := NewTypedRunner[*schema.AgenticMessage](TypedRunnerConfig[*schema.AgenticMessage]{Agent: agent, EnableStreaming: true})
+		it := r.Query(ctx, "test")
+
+		toolEvents := collectAgenticToolEvents(it)
+		require.Equal(t, 1, len(toolEvents))
+
+		// Drain the stream and verify multimodal content
+		mo := toolEvents[0].Output.MessageOutput
+		require.True(t, mo.IsStreaming)
+		var allBlocks []*schema.FunctionToolResultBlock
+		for {
+			msg, err := mo.MessageStream.Recv()
+			if err != nil {
+				break
+			}
+			for _, cb := range msg.ContentBlocks {
+				if cb.FunctionToolResult != nil {
+					allBlocks = append(allBlocks, cb.FunctionToolResult.Blocks...)
+				}
+			}
+		}
+		require.Len(t, allBlocks, 2)
+		assert.Equal(t, "transcript", allBlocks[0].Text.Text)
+		assert.Equal(t, "https://example.com/audio.mp3", allBlocks[1].Audio.URL)
+	})
+}
+
+// multimodalEnhancedInvokableTestTool returns a pre-built multimodal ToolResult.
+type multimodalEnhancedInvokableTestTool struct {
+	name   string
+	result *schema.ToolResult
+}
+
+func (t *multimodalEnhancedInvokableTestTool) Info(_ context.Context) (*schema.ToolInfo, error) {
+	return &schema.ToolInfo{
+		Name: t.name, Desc: "multimodal test tool",
+		ParamsOneOf: schema.NewParamsOneOfByParams(map[string]*schema.ParameterInfo{
+			"input": {Desc: "input", Required: true, Type: schema.String},
+		}),
+	}, nil
+}
+
+func (t *multimodalEnhancedInvokableTestTool) InvokableRun(_ context.Context, _ *schema.ToolArgument, _ ...tool.Option) (*schema.ToolResult, error) {
+	return t.result, nil
+}
+
+// multimodalEnhancedStreamableTestTool returns a pre-built multimodal ToolResult as a stream.
+type multimodalEnhancedStreamableTestTool struct {
+	name   string
+	result *schema.ToolResult
+}
+
+func (t *multimodalEnhancedStreamableTestTool) Info(_ context.Context) (*schema.ToolInfo, error) {
+	return &schema.ToolInfo{
+		Name: t.name, Desc: "multimodal streaming test tool",
+		ParamsOneOf: schema.NewParamsOneOfByParams(map[string]*schema.ParameterInfo{
+			"input": {Desc: "input", Required: true, Type: schema.String},
+		}),
+	}, nil
+}
+
+func (t *multimodalEnhancedStreamableTestTool) StreamableRun(_ context.Context, _ *schema.ToolArgument, _ ...tool.Option) (*schema.StreamReader[*schema.ToolResult], error) {
+	return schema.StreamReaderFromArray([]*schema.ToolResult{t.result}), nil
 }

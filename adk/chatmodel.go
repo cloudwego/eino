@@ -519,7 +519,7 @@ func NewTypedChatModelAgent[M MessageType](ctx context.Context, config *TypedCha
 	// 4. ChatModelAgentMiddleware.WrapToolCall (in registration order)
 	// 5. callbackInjectedToolCall (internal - injects callbacks if tool doesn't handle them)
 	if !hasUserEventSenderToolWrapper(config.Handlers) {
-		defaultToolEventSender := handlersToToolMiddlewares([]ChatModelAgentMiddleware{NewEventSenderToolWrapper()})
+		defaultToolEventSender := handlersToToolMiddlewares([]TypedChatModelAgentMiddleware[M]{newTypedEventSenderToolWrapper[M]()})
 		tc.ToolCallMiddlewares = append(defaultToolEventSender, tc.ToolCallMiddlewares...)
 	}
 	tc.ToolCallMiddlewares = append(tc.ToolCallMiddlewares, collectToolMiddlewaresFromMiddlewares(config.Middlewares)...)
