@@ -141,6 +141,22 @@ type TypedChatModelAgentMiddleware[M MessageType] interface {
 	// the agent's instruction and tools configuration.
 	BeforeAgent(ctx context.Context, runCtx *ChatModelAgentContext) (context.Context, *ChatModelAgentContext, error)
 
+	// AfterAgent is called after the agent run reaches a successful terminal state.
+	// Successful terminal states are: final answer (model response with no tool calls),
+	// and return-directly tool result.
+	//
+	// AfterAgent is NOT called when the agent terminates with an error (e.g.,
+	// ErrExceedMaxIterations, context cancellation, model errors).
+	//
+	// The state parameter contains the final conversation state, including all messages
+	// from the completed run.
+	//
+	// AfterAgent handlers are called in the same order as BeforeAgent handlers
+	// (first registered = first called). Consistent with all other middleware hooks,
+	// if any handler returns an error, subsequent handlers are NOT called (fail-fast)
+	// and the error is sent to the event stream.
+	AfterAgent(ctx context.Context, state *TypedChatModelAgentState[M]) (context.Context, error)
+
 	// BeforeModelRewriteState is called before each model invocation.
 	// The returned state is persisted to the agent's internal state and passed to the model.
 	// The returned context is propagated to the model call and subsequent handlers.
@@ -282,6 +298,10 @@ func (b *TypedBaseChatModelAgentMiddleware[M]) WrapModel(_ context.Context, m mo
 
 func (b *TypedBaseChatModelAgentMiddleware[M]) BeforeAgent(ctx context.Context, runCtx *ChatModelAgentContext) (context.Context, *ChatModelAgentContext, error) {
 	return ctx, runCtx, nil
+}
+
+func (b *TypedBaseChatModelAgentMiddleware[M]) AfterAgent(ctx context.Context, state *TypedChatModelAgentState[M]) (context.Context, error) {
+	return ctx, nil
 }
 
 func (b *TypedBaseChatModelAgentMiddleware[M]) BeforeModelRewriteState(ctx context.Context, state *TypedChatModelAgentState[M], mc *TypedModelContext[M]) (context.Context, *TypedChatModelAgentState[M], error) {
