@@ -100,7 +100,7 @@ type TypedConfig[M adk.MessageType] struct {
 	// ModelFailoverConfig configures failover behavior for the ChatModel.
 	// When set, the agent will automatically fail over to alternative models on errors.
 	// This config is also propagated to the general sub-agent.
-	ModelFailoverConfig *adk.TypedModelFailoverConfig[M]
+	ModelFailoverConfig *adk.ModelFailoverConfig[M]
 
 	// OutputKey stores the agent's response in the session.
 	// Optional. When set, stores output via AddSessionValue(ctx, outputKey, msg.Content).

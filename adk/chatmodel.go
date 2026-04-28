@@ -421,7 +421,7 @@ type TypedChatModelAgentConfig[M MessageType] struct {
 	// and on failure, call GetFailoverModel to select alternate models.
 	// Model field is still required as it serves as the initial model.
 	// Optional. If nil, no failover will be performed.
-	ModelFailoverConfig *TypedModelFailoverConfig[M]
+	ModelFailoverConfig *ModelFailoverConfig[M]
 }
 
 type ChatModelAgentConfig = TypedChatModelAgentConfig[*schema.Message]
@@ -456,7 +456,7 @@ type TypedChatModelAgent[M MessageType] struct {
 	middlewares []AgentMiddleware
 
 	modelRetryConfig    *TypedModelRetryConfig[M]
-	modelFailoverConfig *TypedModelFailoverConfig[M]
+	modelFailoverConfig *ModelFailoverConfig[M]
 
 	once   sync.Once
 	run    typedRunFunc[M]
@@ -1086,7 +1086,7 @@ func (a *TypedChatModelAgent[M]) buildMessageReActRunFunc(ctx context.Context, b
 			handlers:       msgHandlers,
 			middlewares:    a.middlewares,
 			retryConfig:    any(a.modelRetryConfig).(*ModelRetryConfig),
-			failoverConfig: any(a.modelFailoverConfig).(*ModelFailoverConfig),
+			failoverConfig: any(a.modelFailoverConfig).(*ModelFailoverConfig[*schema.Message]),
 			toolInfos:      bc.toolInfos,
 		},
 		toolsReturnDirectly: bc.returnDirectly,

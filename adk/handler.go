@@ -72,7 +72,7 @@ type TypedModelContext[M MessageType] struct {
 	// This is populated at request time from the agent's ModelFailoverConfig.
 	// Used by EventSenderModelWrapper to wrap stream errors so that failed failover
 	// attempts are skipped (not treated as fatal) by the flow event processor.
-	ModelFailoverConfig *TypedModelFailoverConfig[M]
+	ModelFailoverConfig *ModelFailoverConfig[M]
 
 	cancelContext *cancelContext
 }

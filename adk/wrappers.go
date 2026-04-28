@@ -39,7 +39,7 @@ type typedModelWrapperConfig[M MessageType] struct {
 	handlers       []TypedChatModelAgentMiddleware[M]
 	middlewares    []AgentMiddleware
 	retryConfig    *TypedModelRetryConfig[M]
-	failoverConfig *TypedModelFailoverConfig[M]
+	failoverConfig *ModelFailoverConfig[M]
 	toolInfos      []*schema.ToolInfo
 	cancelContext  *cancelContext
 }
@@ -276,7 +276,7 @@ func (w *typedEventSenderModelWrapper[M]) WrapModel(_ context.Context, m model.B
 	if mc != nil {
 		retryConfig = mc.ModelRetryConfig
 	}
-	var failoverConfig *TypedModelFailoverConfig[M]
+	var failoverConfig *ModelFailoverConfig[M]
 	if mc != nil {
 		failoverConfig = mc.ModelFailoverConfig
 	}
@@ -286,7 +286,7 @@ func (w *typedEventSenderModelWrapper[M]) WrapModel(_ context.Context, m model.B
 type typedEventSenderModel[M MessageType] struct {
 	inner               model.BaseModel[M]
 	modelRetryConfig    *TypedModelRetryConfig[M]
-	modelFailoverConfig *TypedModelFailoverConfig[M]
+	modelFailoverConfig *ModelFailoverConfig[M]
 }
 
 func (m *typedEventSenderModel[M]) Generate(ctx context.Context, input []M, opts ...model.Option) (M, error) {
@@ -683,7 +683,7 @@ type typedStateModelWrapper[M MessageType] struct {
 	middlewares         []AgentMiddleware
 	toolInfos           []*schema.ToolInfo
 	modelRetryConfig    *TypedModelRetryConfig[M]
-	modelFailoverConfig *TypedModelFailoverConfig[M]
+	modelFailoverConfig *ModelFailoverConfig[M]
 	cancelContext       *cancelContext
 }
 
@@ -764,7 +764,7 @@ func (w *typedStateModelWrapper[M]) wrapGenerateEndpoint(endpoint typedGenerateE
 		config := w.modelFailoverConfig
 		innerEndpoint := endpoint
 		endpoint = func(ctx context.Context, input []M, opts ...model.Option) (M, error) {
-			failoverWrapper := newTypedFailoverModelWrapper[M](&typedEndpointModel[M]{generate: innerEndpoint}, config)
+			failoverWrapper := newFailoverModelWrapper[M](&typedEndpointModel[M]{generate: innerEndpoint}, config)
 			return failoverWrapper.Generate(ctx, input, opts...)
 		}
 	}
@@ -825,7 +825,7 @@ func (w *typedStateModelWrapper[M]) wrapStreamEndpoint(endpoint typedStreamEndpo
 		config := w.modelFailoverConfig
 		innerEndpoint := endpoint
 		endpoint = func(ctx context.Context, input []M, opts ...model.Option) (*schema.StreamReader[M], error) {
-			failoverWrapper := newTypedFailoverModelWrapper[M](&typedEndpointModel[M]{stream: innerEndpoint}, config)
+			failoverWrapper := newFailoverModelWrapper[M](&typedEndpointModel[M]{stream: innerEndpoint}, config)
 			return failoverWrapper.Stream(ctx, input, opts...)
 		}
 	}

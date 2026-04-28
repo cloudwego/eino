@@ -1567,12 +1567,12 @@ func TestAgenticFailoverGenerate(t *testing.T) {
 		Name:        "failover-gen-agent",
 		Description: "test failover generate",
 		Model:       m1,
-		ModelFailoverConfig: &TypedModelFailoverConfig[*schema.AgenticMessage]{
+		ModelFailoverConfig: &ModelFailoverConfig[*schema.AgenticMessage]{
 			MaxRetries: 1,
 			ShouldFailover: func(_ context.Context, _ *schema.AgenticMessage, err error) bool {
 				return err != nil
 			},
-			GetFailoverModel: func(_ context.Context, failoverCtx *TypedFailoverContext[*schema.AgenticMessage]) (model.BaseModel[*schema.AgenticMessage], []*schema.AgenticMessage, error) {
+			GetFailoverModel: func(_ context.Context, failoverCtx *FailoverContext[*schema.AgenticMessage]) (model.BaseModel[*schema.AgenticMessage], []*schema.AgenticMessage, error) {
 				assert.Equal(t, uint(1), failoverCtx.FailoverAttempt)
 				assert.Nil(t, failoverCtx.LastOutputMessage, "LastOutputMessage should be nil when Generate returns error")
 				assert.ErrorIs(t, failoverCtx.LastErr, m1Err)
@@ -1625,12 +1625,12 @@ func TestAgenticFailoverStream_MidStreamError(t *testing.T) {
 		Name:        "failover-stream-agent",
 		Description: "test failover stream",
 		Model:       m1,
-		ModelFailoverConfig: &TypedModelFailoverConfig[*schema.AgenticMessage]{
+		ModelFailoverConfig: &ModelFailoverConfig[*schema.AgenticMessage]{
 			MaxRetries: 1,
 			ShouldFailover: func(_ context.Context, _ *schema.AgenticMessage, err error) bool {
 				return err != nil
 			},
-			GetFailoverModel: func(_ context.Context, failoverCtx *TypedFailoverContext[*schema.AgenticMessage]) (model.BaseModel[*schema.AgenticMessage], []*schema.AgenticMessage, error) {
+			GetFailoverModel: func(_ context.Context, failoverCtx *FailoverContext[*schema.AgenticMessage]) (model.BaseModel[*schema.AgenticMessage], []*schema.AgenticMessage, error) {
 				capturedLastOutput = failoverCtx.LastOutputMessage
 				return m2, nil, nil
 			},

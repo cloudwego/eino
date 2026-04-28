@@ -123,8 +123,8 @@ func (m *typedFailoverProxyModel[M]) GetType() string {
 
 type failoverProxyModel = typedFailoverProxyModel[*schema.Message]
 
-// TypedFailoverContext contains context information during failover process.
-type TypedFailoverContext[M MessageType] struct {
+// FailoverContext contains context information during failover process.
+type FailoverContext[M MessageType] struct {
 	// FailoverAttempt is the current failover attempt number, starting from 1.
 	FailoverAttempt uint
 
@@ -144,13 +144,10 @@ type TypedFailoverContext[M MessageType] struct {
 	LastErr error
 }
 
-// FailoverContext is the default failover context type using *schema.Message.
-type FailoverContext = TypedFailoverContext[*schema.Message]
-
-// TypedModelFailoverConfig configures failover behavior for ChatModel.
+// ModelFailoverConfig configures failover behavior for ChatModel.
 // When configured, each ChatModel call first tries the last successful model (initially the configured Model),
 // and if that fails, calls GetFailoverModel to select alternate models.
-type TypedModelFailoverConfig[M MessageType] struct {
+type ModelFailoverConfig[M MessageType] struct {
 	// MaxRetries specifies the maximum number of failover attempts.
 	//
 	// When failover is triggered, GetFailoverModel will be called up to MaxRetries times
@@ -187,12 +184,9 @@ type TypedModelFailoverConfig[M MessageType] struct {
 	//   - failoverModelInputMessages: The transformed input messages for the failover model. If nil, will use original input.
 	//   - failoverErr: If non-nil, failover stops and this error is returned.
 	// Should not be nil when ModelFailoverConfig is set via ChatModelAgentConfig.
-	GetFailoverModel func(ctx context.Context, failoverCtx *TypedFailoverContext[M]) (
+	GetFailoverModel func(ctx context.Context, failoverCtx *FailoverContext[M]) (
 		failoverModel model.BaseModel[M], failoverModelInputMessages []M, failoverErr error)
 }
-
-// ModelFailoverConfig is the default failover config type using *schema.Message.
-type ModelFailoverConfig = TypedModelFailoverConfig[*schema.Message]
 
 func typedGetFailoverLastSuccessModel[M MessageType](ctx context.Context) model.BaseModel[M] {
 	execCtx := getTypedChatModelAgentExecCtx[M](ctx)
@@ -208,21 +202,19 @@ func typedSetFailoverLastSuccessModel[M MessageType](ctx context.Context, m mode
 	}
 }
 
-type typedFailoverModelWrapper[M MessageType] struct {
-	config *TypedModelFailoverConfig[M]
+type failoverModelWrapper[M MessageType] struct {
+	config *ModelFailoverConfig[M]
 	inner  model.BaseModel[M]
 }
 
-type failoverModelWrapper = typedFailoverModelWrapper[*schema.Message]
-
-func newTypedFailoverModelWrapper[M MessageType](inner model.BaseModel[M], config *TypedModelFailoverConfig[M]) *typedFailoverModelWrapper[M] {
-	return &typedFailoverModelWrapper[M]{
+func newFailoverModelWrapper[M MessageType](inner model.BaseModel[M], config *ModelFailoverConfig[M]) *failoverModelWrapper[M] {
+	return &failoverModelWrapper[M]{
 		config: config,
 		inner:  inner,
 	}
 }
 
-func (f *typedFailoverModelWrapper[M]) needFailover(ctx context.Context, outputMessage M, outputErr error) bool {
+func (f *failoverModelWrapper[M]) needFailover(ctx context.Context, outputMessage M, outputErr error) bool {
 	if ctx.Err() != nil {
 		return false
 	}
@@ -237,7 +229,7 @@ func (f *typedFailoverModelWrapper[M]) needFailover(ctx context.Context, outputM
 	return f.config.ShouldFailover(ctx, outputMessage, outputErr)
 }
 
-func (f *typedFailoverModelWrapper[M]) getFailoverModel(ctx context.Context, failoverCtx *TypedFailoverContext[M]) (model.BaseModel[M], []M, error) {
+func (f *failoverModelWrapper[M]) getFailoverModel(ctx context.Context, failoverCtx *FailoverContext[M]) (model.BaseModel[M], []M, error) {
 	currentModel, msgs, err := f.config.GetFailoverModel(ctx, failoverCtx)
 	if err != nil {
 		return nil, nil, err
@@ -248,7 +240,7 @@ func (f *typedFailoverModelWrapper[M]) getFailoverModel(ctx context.Context, fai
 	return currentModel, msgs, nil
 }
 
-func (f *typedFailoverModelWrapper[M]) Generate(ctx context.Context, input []M, opts ...model.Option) (M, error) {
+func (f *failoverModelWrapper[M]) Generate(ctx context.Context, input []M, opts ...model.Option) (M, error) {
 	// Defensive: GetFailoverModel is validated non-nil at agent construction.
 	if f.config.GetFailoverModel == nil {
 		return f.inner.Generate(ctx, input, opts...)
@@ -287,7 +279,7 @@ func (f *typedFailoverModelWrapper[M]) Generate(ctx context.Context, input []M, 
 			return zero, err
 		}
 
-		failoverCtx := &TypedFailoverContext[M]{
+		failoverCtx := &FailoverContext[M]{
 			FailoverAttempt:   attempt,
 			InputMessages:     input,
 			LastOutputMessage: lastOutputMessage,
@@ -331,7 +323,7 @@ func (f *typedFailoverModelWrapper[M]) Generate(ctx context.Context, input []M, 
 	return lastOutputMessage, lastErr
 }
 
-func (f *typedFailoverModelWrapper[M]) Stream(ctx context.Context, input []M, opts ...model.Option) (
+func (f *failoverModelWrapper[M]) Stream(ctx context.Context, input []M, opts ...model.Option) (
 	*schema.StreamReader[M], error) {
 	// Defensive: GetFailoverModel is validated non-nil at agent construction.
 	if f.config.GetFailoverModel == nil {
@@ -383,7 +375,7 @@ func (f *typedFailoverModelWrapper[M]) Stream(ctx context.Context, input []M, op
 			return nil, err
 		}
 
-		failoverCtx := &TypedFailoverContext[M]{
+		failoverCtx := &FailoverContext[M]{
 			FailoverAttempt:   attempt,
 			InputMessages:     input,
 			LastOutputMessage: lastOutputMessage,
