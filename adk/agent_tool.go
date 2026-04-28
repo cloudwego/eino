@@ -104,7 +104,7 @@ func NewAgentTool(_ context.Context, agent Agent, options ...AgentToolOption) to
 }
 
 // NewTypedAgentTool creates a new agent tool that wraps a TypedAgent as a tool.BaseTool.
-func NewTypedAgentTool[M messageType](_ context.Context, agent TypedAgent[M], options ...AgentToolOption) tool.BaseTool {
+func NewTypedAgentTool[M MessageType](_ context.Context, agent TypedAgent[M], options ...AgentToolOption) tool.BaseTool {
 	opts := &AgentToolOptions{}
 	for _, opt := range options {
 		opt(opts)
@@ -117,7 +117,7 @@ func NewTypedAgentTool[M messageType](_ context.Context, agent TypedAgent[M], op
 	}
 }
 
-type typedAgentTool[M messageType] struct {
+type typedAgentTool[M MessageType] struct {
 	agent TypedAgent[M]
 
 	fullChatHistoryAsInput bool
@@ -165,6 +165,11 @@ func (at *typedAgentTool[M]) InvokableRun(ctx context.Context, argumentsInJSON s
 		if at.fullChatHistoryAsInput {
 			var zero M
 			if _, ok := any(zero).(*schema.Message); !ok {
+				// fullChatHistoryAsInput is only supported for *schema.Message agents and will not
+				// be extended to *schema.AgenticMessage. The chat history format and role semantics
+				// differ fundamentally between Message and AgenticMessage, and the history rewriting
+				// logic (role attribution, system message filtering, transfer messages) is specific
+				// to the Message model.
 				return "", fmt.Errorf("fullChatHistoryAsInput is only supported for *schema.Message agents")
 			}
 			msgInput, histErr := getReactChatHistory(ctx, at.agent.Name(ctx))
@@ -235,6 +240,10 @@ func (at *typedAgentTool[M]) InvokableRun(ctx context.Context, argumentsInJSON s
 					gen.Send(msgEvent)
 					event = any(tmp).(*TypedAgentEvent[M])
 				} else {
+					// Cross-message-type agent tools are not supported and will not be supported.
+					// An AgenticMessage agent cannot be used as a tool within a Message agent's
+					// event stream. The agent tool still executes correctly and returns its text
+					// result; only real-time event streaming to the parent is blocked.
 					return "", fmt.Errorf("cross-message-type agent tools are not supported: cannot use an AgenticMessage agent as a tool of a Message agent")
 				}
 			}
@@ -365,7 +374,7 @@ func getReactChatHistory(ctx context.Context, destAgentName string) ([]Message, 
 	return history, nil
 }
 
-func newTypedUserMessages[M messageType](text string) []M {
+func newTypedUserMessages[M MessageType](text string) []M {
 	var zero M
 	switch any(zero).(type) {
 	case *schema.Message:
@@ -377,7 +386,7 @@ func newTypedUserMessages[M messageType](text string) []M {
 	}
 }
 
-func newTypedInvokableAgentToolRunner[M messageType](agent TypedAgent[M], store compose.CheckPointStore, enableStreaming bool) *TypedRunner[M] {
+func newTypedInvokableAgentToolRunner[M MessageType](agent TypedAgent[M], store compose.CheckPointStore, enableStreaming bool) *TypedRunner[M] {
 	return &TypedRunner[M]{
 		a:               agent,
 		enableStreaming: enableStreaming,

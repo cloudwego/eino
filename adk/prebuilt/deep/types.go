@@ -41,21 +41,21 @@ func assertAgentTool(t tool.BaseTool) (tool.InvokableTool, error) {
 	return it, nil
 }
 
-func buildAppendPromptTool(prompt string, t tool.BaseTool) adk.ChatModelAgentMiddleware {
-	return &appendPromptTool{
-		BaseChatModelAgentMiddleware: &adk.BaseChatModelAgentMiddleware{},
-		t:                            t,
-		prompt:                       prompt,
+func typedBuildAppendPromptTool[M adk.MessageType](prompt string, t tool.BaseTool) adk.TypedChatModelAgentMiddleware[M] {
+	return &typedAppendPromptTool[M]{
+		TypedBaseChatModelAgentMiddleware: &adk.TypedBaseChatModelAgentMiddleware[M]{},
+		t:                                 t,
+		prompt:                            prompt,
 	}
 }
 
-type appendPromptTool struct {
-	*adk.BaseChatModelAgentMiddleware
+type typedAppendPromptTool[M adk.MessageType] struct {
+	*adk.TypedBaseChatModelAgentMiddleware[M]
 	t      tool.BaseTool
 	prompt string
 }
 
-func (w *appendPromptTool) BeforeAgent(ctx context.Context, runCtx *adk.ChatModelAgentContext) (context.Context, *adk.ChatModelAgentContext, error) {
+func (w *typedAppendPromptTool[M]) BeforeAgent(ctx context.Context, runCtx *adk.ChatModelAgentContext) (context.Context, *adk.ChatModelAgentContext, error) {
 	nRunCtx := *runCtx
 	nRunCtx.Instruction += w.prompt
 	if w.t != nil {

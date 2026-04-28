@@ -75,13 +75,14 @@ func (e *RetryExhaustedError) Unwrap() error {
 //     concrete error types. Since end-users only need the original error when the AgentEvent first
 //     occurs (not after restoring from checkpoint), skipping serialization is acceptable.
 //     After checkpoint restore, err will be nil and Unwrap() returns nil.
+//   - rejectReason (unexported): Stores a user-defined value set by the ShouldRetry callback
+//     via RetryDecision.RejectReason. This is runtime-only observability data — after checkpoint
+//     restore it will be nil. Unexported to avoid Gob serialization of arbitrary types.
 type WillRetryError struct {
 	ErrStr       string
 	RetryAttempt int
-	// OutputMessage is the model's output message from the attempt that triggered the retry, if any.
-	// May be nil if the model returned an error without producing a message.
-	OutputMessage *schema.Message
-	err           error
+	rejectReason any
+	err          error
 }
 
 func (e *WillRetryError) Error() string {
@@ -92,11 +93,17 @@ func (e *WillRetryError) Unwrap() error {
 	return e.err
 }
 
+// RejectReason returns the user-defined rejection reason set by the ShouldRetry callback
+// via RetryDecision.RejectReason. Returns nil if not set or after checkpoint restore.
+func (e *WillRetryError) RejectReason() any {
+	return e.rejectReason
+}
+
 func init() {
 	schema.RegisterName[*WillRetryError]("eino_adk_chatmodel_will_retry_error")
 }
 
-// RetryContext contains context information passed to ModelRetryConfig.ShouldRetry
+// TypedRetryContext contains context information passed to TypedModelRetryConfig.ShouldRetry
 // during a retry decision.
 //
 // State combinations for OutputMessage and Err:
@@ -105,13 +112,13 @@ func init() {
 //	OutputMessage == nil, Err != nil  → failed call (Generate error or Stream() error)
 //	OutputMessage != nil, Err != nil  → partial stream (chunks received before mid-stream error)
 //	OutputMessage == nil, Err == nil  → empty stream (zero chunks before EOF)
-type RetryContext struct {
+type TypedRetryContext[M MessageType] struct {
 	// RetryAttempt is the current retry attempt number (1-based).
 	// For the first retry decision (after the initial call), this is 1.
 	RetryAttempt int
 
 	// InputMessages is the input messages that were sent to the model for the current attempt.
-	InputMessages []*schema.Message
+	InputMessages []M
 
 	// Options is the model options that were used for the current attempt.
 	Options []model.Option
@@ -124,7 +131,7 @@ type RetryContext struct {
 	// received before the error occurred.
 	// May be nil if the model returned an error without producing a message, or if the
 	// stream was empty (zero chunks before EOF).
-	OutputMessage *schema.Message
+	OutputMessage M
 
 	// Err is the error from the model call, if any.
 	// May be nil if the model produced a message without error.
@@ -132,8 +139,11 @@ type RetryContext struct {
 	Err error
 }
 
-// RetryDecision represents the decision made by ModelRetryConfig.ShouldRetry.
-type RetryDecision struct {
+// RetryContext is the default retry context type using *schema.Message.
+type RetryContext = TypedRetryContext[*schema.Message]
+
+// TypedRetryDecision represents the decision made by TypedModelRetryConfig.ShouldRetry.
+type TypedRetryDecision[M MessageType] struct {
 	// Retry indicates whether the model call should be retried.
 	// If false, the model output (or error) is accepted as-is, unless RewriteError is set.
 	Retry bool
@@ -157,7 +167,7 @@ type RetryDecision struct {
 	//
 	// This enables advanced recovery strategies like context compression or message trimming.
 	// Only used when Retry is true. Ignored when Retry is false.
-	ModifiedInputMessages []*schema.Message
+	ModifiedInputMessages []M
 
 	// PersistModifiedInputMessages controls whether ModifiedInputMessages are written
 	// back to the agent's conversation history, affecting subsequent model calls in
@@ -190,11 +200,26 @@ type RetryDecision struct {
 	// the specific error or problematic message encountered.
 	// Only used when Retry is true. Ignored when Retry is false.
 	Backoff time.Duration
+
+	// RejectReason is an optional user-defined value describing why the output was rejected.
+	// When Retry is true and the rejected stream/message is observed downstream via
+	// AgentEvent, this value is attached to the WillRetryError emitted to the event stream.
+	// Consumers can retrieve it via WillRetryError.RejectReason().
+	//
+	// The ShouldRetry callback has full access to the model output (via retryCtx.OutputMessage)
+	// and error (via retryCtx.Err), so it can distill whatever information it wants into
+	// RejectReason — a string, a struct, the output message itself, or nil.
+	//
+	// Only used when Retry is true. Ignored when Retry is false.
+	RejectReason any
 }
 
-// ModelRetryConfig configures retry behavior for the ChatModel node.
+// RetryDecision is the default retry decision type using *schema.Message.
+type RetryDecision = TypedRetryDecision[*schema.Message]
+
+// TypedModelRetryConfig configures retry behavior for the ChatModel node.
 // It defines how the agent should handle transient failures when calling the ChatModel.
-type ModelRetryConfig struct {
+type TypedModelRetryConfig[M MessageType] struct {
 	// MaxRetries specifies the maximum number of retry attempts.
 	// A value of 0 means no retries will be attempted.
 	// A value of 3 means up to 3 retry attempts (4 total calls including the initial attempt).
@@ -211,7 +236,7 @@ type ModelRetryConfig struct {
 	// Note: In streaming mode, the entire stream is consumed before ShouldRetry is called.
 	// The event stream is sent to the client in real time regardless; only the retry
 	// decision is deferred until the full response is available.
-	ShouldRetry func(ctx context.Context, retryCtx *RetryContext) *RetryDecision
+	ShouldRetry func(ctx context.Context, retryCtx *TypedRetryContext[M]) *TypedRetryDecision[M]
 
 	// Deprecated: Use ShouldRetry instead for richer retry control including message
 	// inspection, input modification, and option adjustment. When ShouldRetry is set,
@@ -226,6 +251,9 @@ type ModelRetryConfig struct {
 	// with random jitter (0-50% of delay) to prevent thundering herd.
 	BackoffFunc func(ctx context.Context, attempt int) time.Duration
 }
+
+// ModelRetryConfig is the default retry config type using *schema.Message.
+type ModelRetryConfig = TypedModelRetryConfig[*schema.Message]
 
 func defaultIsRetryAble(_ context.Context, err error) bool {
 	return err != nil
@@ -282,32 +310,28 @@ type retryVerdictSignal struct {
 }
 
 type retryVerdict struct {
-	WillRetry     bool
-	RetryAttempt  int
-	Err           error
-	OutputMessage *schema.Message
+	WillRetry    bool
+	RetryAttempt int
+	Err          error
+	RejectReason any
 }
 
 // retryModelWrapper wraps a BaseChatModel with retry logic.
 // This is used inside the model wrapper chain, positioned between eventSenderModelWrapper
 // and stateModelWrapper, so that retry only affects the inner chain (event sending, user wrappers,
 // callback injection) without re-running state management (BeforeModelRewriteState/AfterModelRewriteState).
-type typedRetryModelWrapper[M messageType] struct {
+type typedRetryModelWrapper[M MessageType] struct {
 	inner  model.BaseModel[M]
-	config *ModelRetryConfig
+	config *TypedModelRetryConfig[M]
 }
 
-func newTypedRetryModelWrapper[M messageType](inner model.BaseModel[M], config *ModelRetryConfig) *typedRetryModelWrapper[M] {
+func newTypedRetryModelWrapper[M MessageType](inner model.BaseModel[M], config *TypedModelRetryConfig[M]) *typedRetryModelWrapper[M] {
 	return &typedRetryModelWrapper[M]{inner: inner, config: config}
 }
 
 func (r *typedRetryModelWrapper[M]) Generate(ctx context.Context, input []M, opts ...model.Option) (M, error) {
 	if r.config.ShouldRetry != nil {
-		// ShouldRetry is *schema.Message-specific (RetryContext.OutputMessage is *schema.Message).
-		msgR, _ := any(r).(*typedRetryModelWrapper[*schema.Message])
-		msgInput, _ := any(input).([]Message)
-		out, err := generateWithShouldRetry(msgR, ctx, msgInput, opts...)
-		return any(out).(M), err
+		return generateWithShouldRetry(r, ctx, input, opts...)
 	}
 	return r.generateLegacy(ctx, input, opts...)
 }
@@ -352,27 +376,28 @@ func (r *typedRetryModelWrapper[M]) generateLegacy(ctx context.Context, input []
 	return zero, &RetryExhaustedError{LastErr: lastErr, TotalRetries: r.config.MaxRetries}
 }
 
-func generateWithShouldRetry(r *typedRetryModelWrapper[*schema.Message], ctx context.Context, input []*schema.Message, opts ...model.Option) (*schema.Message, error) {
+func generateWithShouldRetry[M MessageType](r *typedRetryModelWrapper[M], ctx context.Context, input []M, opts ...model.Option) (M, error) {
 	backoffFunc := r.config.BackoffFunc
 	if backoffFunc == nil {
 		backoffFunc = defaultBackoff
 	}
 
-	execCtx := getTypedChatModelAgentExecCtx[*schema.Message](ctx)
+	execCtx := getTypedChatModelAgentExecCtx[M](ctx)
 
 	currentInput := input
 	currentOpts := opts
 	var lastErr error
+	var zero M
 
 	defer func() {
-		_ = compose.ProcessState(ctx, func(_ context.Context, st *State) error {
+		_ = compose.ProcessState(ctx, func(_ context.Context, st *typedState[M]) error {
 			st.setRetryAttempt(0)
 			return nil
 		})
 	}()
 
 	for attempt := 0; attempt <= r.config.MaxRetries; attempt++ {
-		_ = compose.ProcessState(ctx, func(_ context.Context, st *State) error {
+		_ = compose.ProcessState(ctx, func(_ context.Context, st *typedState[M]) error {
 			st.setRetryAttempt(attempt)
 			return nil
 		})
@@ -390,15 +415,15 @@ func generateWithShouldRetry(r *typedRetryModelWrapper[*schema.Message], ctx con
 
 		if err != nil {
 			if _, ok := compose.ExtractInterruptInfo(err); ok {
-				return nil, err
+				return zero, err
 			}
 
 			if errors.Is(err, ErrStreamCanceled) {
-				return nil, err
+				return zero, err
 			}
 		}
 
-		retryCtx := &RetryContext{
+		retryCtx := &TypedRetryContext[M]{
 			RetryAttempt:  attempt + 1,
 			InputMessages: currentInput,
 			Options:       currentOpts,
@@ -407,19 +432,18 @@ func generateWithShouldRetry(r *typedRetryModelWrapper[*schema.Message], ctx con
 		}
 		decision := r.config.ShouldRetry(ctx, retryCtx)
 		if decision == nil {
-			decision = &RetryDecision{}
+			decision = &TypedRetryDecision[M]{}
 		}
 
 		if !decision.Retry {
 			if decision.RewriteError != nil {
-				return nil, decision.RewriteError
+				return zero, decision.RewriteError
 			}
 			if err != nil {
-				return nil, err
+				return zero, err
 			}
 			if execCtx != nil && execCtx.generator != nil && out != nil {
-				msgCopy := *out
-				event := EventFromMessage(&msgCopy, nil, schema.Assistant, "")
+				event := typedModelOutputEvent[M](out, nil)
 				execCtx.send(event)
 			}
 			return out, nil
@@ -442,11 +466,11 @@ func generateWithShouldRetry(r *typedRetryModelWrapper[*schema.Message], ctx con
 		}
 
 		if err := r.contextAwareSleep(ctx, delay); err != nil {
-			return nil, err
+			return zero, err
 		}
 	}
 
-	return nil, &RetryExhaustedError{LastErr: lastErr, TotalRetries: r.config.MaxRetries}
+	return zero, &RetryExhaustedError{LastErr: lastErr, TotalRetries: r.config.MaxRetries}
 }
 
 func (r *typedRetryModelWrapper[M]) contextAwareSleep(ctx context.Context, delay time.Duration) error {
@@ -461,31 +485,8 @@ func (r *typedRetryModelWrapper[M]) contextAwareSleep(ctx context.Context, delay
 	}
 }
 
-func consumeStreamForMessage(stream *schema.StreamReader[*schema.Message]) (*schema.Message, error) {
-	defer stream.Close()
-	var chunks []*schema.Message
-	for {
-		chunk, err := stream.Recv()
-		if err == io.EOF {
-			if len(chunks) == 0 {
-				return nil, nil
-			}
-			msg, concatErr := schema.ConcatMessages(chunks)
-			return msg, concatErr
-		}
-		if err != nil {
-			if len(chunks) == 0 {
-				return nil, err
-			}
-			msg, _ := schema.ConcatMessages(chunks)
-			return msg, err
-		}
-		chunks = append(chunks, chunk)
-	}
-}
-
-func streamWithShouldRetry(r *typedRetryModelWrapper[*schema.Message], ctx context.Context, input []*schema.Message, opts ...model.Option) (
-	*schema.StreamReader[*schema.Message], error) {
+func streamWithShouldRetry[M MessageType](r *typedRetryModelWrapper[M], ctx context.Context, input []M, opts ...model.Option) (
+	*schema.StreamReader[M], error) {
 
 	backoffFunc := r.config.BackoffFunc
 	if backoffFunc == nil {
@@ -493,13 +494,13 @@ func streamWithShouldRetry(r *typedRetryModelWrapper[*schema.Message], ctx conte
 	}
 
 	defer func() {
-		_ = compose.ProcessState(ctx, func(_ context.Context, st *State) error {
+		_ = compose.ProcessState(ctx, func(_ context.Context, st *typedState[M]) error {
 			st.setRetryAttempt(0)
 			return nil
 		})
 	}()
 
-	execCtx := getTypedChatModelAgentExecCtx[*schema.Message](ctx)
+	execCtx := getTypedChatModelAgentExecCtx[M](ctx)
 
 	currentInput := input
 	currentOpts := opts
@@ -522,7 +523,7 @@ func streamWithShouldRetry(r *typedRetryModelWrapper[*schema.Message], ctx conte
 	}()
 
 	for attempt := 0; attempt <= r.config.MaxRetries; attempt++ {
-		_ = compose.ProcessState(ctx, func(_ context.Context, st *State) error {
+		_ = compose.ProcessState(ctx, func(_ context.Context, st *typedState[M]) error {
 			st.setRetryAttempt(attempt)
 			return nil
 		})
@@ -551,7 +552,7 @@ func streamWithShouldRetry(r *typedRetryModelWrapper[*schema.Message], ctx conte
 				return nil, err
 			}
 
-			retryCtx := &RetryContext{
+			retryCtx := &TypedRetryContext[M]{
 				RetryAttempt:  attempt + 1,
 				InputMessages: currentInput,
 				Options:       currentOpts,
@@ -559,7 +560,7 @@ func streamWithShouldRetry(r *typedRetryModelWrapper[*schema.Message], ctx conte
 			}
 			decision := r.config.ShouldRetry(ctx, retryCtx)
 			if decision == nil {
-				decision = &RetryDecision{}
+				decision = &TypedRetryDecision[M]{}
 			}
 
 			if !decision.Retry {
@@ -592,7 +593,7 @@ func streamWithShouldRetry(r *typedRetryModelWrapper[*schema.Message], ctx conte
 		checkCopy := copies[0]
 		returnCopy := copies[1]
 
-		msg, streamErr := consumeStreamForMessage(checkCopy)
+		msg, streamErr := typedConsumeStream(checkCopy)
 
 		if errors.Is(streamErr, ErrStreamCanceled) {
 			signal.ch <- retryVerdict{WillRetry: false}
@@ -600,7 +601,7 @@ func streamWithShouldRetry(r *typedRetryModelWrapper[*schema.Message], ctx conte
 			return nil, streamErr
 		}
 
-		retryCtx := &RetryContext{
+		retryCtx := &TypedRetryContext[M]{
 			RetryAttempt:  attempt + 1,
 			InputMessages: currentInput,
 			Options:       currentOpts,
@@ -609,7 +610,7 @@ func streamWithShouldRetry(r *typedRetryModelWrapper[*schema.Message], ctx conte
 		}
 		decision := r.config.ShouldRetry(ctx, retryCtx)
 		if decision == nil {
-			decision = &RetryDecision{}
+			decision = &TypedRetryDecision[M]{}
 		}
 
 		if !decision.Retry {
@@ -631,10 +632,10 @@ func streamWithShouldRetry(r *typedRetryModelWrapper[*schema.Message], ctx conte
 			verdictErr = fmt.Errorf("model output rejected by ShouldRetry at attempt %d", attempt+1)
 		}
 		signal.ch <- retryVerdict{
-			WillRetry:     true,
-			RetryAttempt:  attempt,
-			Err:           verdictErr,
-			OutputMessage: msg,
+			WillRetry:    true,
+			RetryAttempt: attempt,
+			Err:          verdictErr,
+			RejectReason: decision.RejectReason,
 		}
 		returnCopy.Close()
 
@@ -655,12 +656,12 @@ func streamWithShouldRetry(r *typedRetryModelWrapper[*schema.Message], ctx conte
 	return nil, &RetryExhaustedError{LastErr: lastErr, TotalRetries: r.config.MaxRetries}
 }
 
-func applyDecisionForRetry(currentInput *[]*schema.Message, currentOpts *[]model.Option, ctx context.Context, decision *RetryDecision) {
+func applyDecisionForRetry[M MessageType](currentInput *[]M, currentOpts *[]model.Option, ctx context.Context, decision *TypedRetryDecision[M]) {
 	if decision.ModifiedInputMessages != nil {
 		*currentInput = decision.ModifiedInputMessages
 		if decision.PersistModifiedInputMessages {
 			modifiedInput := *currentInput
-			_ = compose.ProcessState(ctx, func(_ context.Context, st *State) error {
+			_ = compose.ProcessState(ctx, func(_ context.Context, st *typedState[M]) error {
 				st.Messages = modifiedInput
 				return nil
 			})
@@ -678,14 +679,7 @@ func (r *typedRetryModelWrapper[M]) Stream(ctx context.Context, input []M, opts 
 	*schema.StreamReader[M], error) {
 
 	if r.config.ShouldRetry != nil {
-		// ShouldRetry is *schema.Message-specific (RetryContext.OutputMessage is *schema.Message).
-		msgR, _ := any(r).(*typedRetryModelWrapper[*schema.Message])
-		msgInput, _ := any(input).([]Message)
-		sr, err := streamWithShouldRetry(msgR, ctx, msgInput, opts...)
-		if err != nil {
-			return nil, err
-		}
-		return any(sr).(*schema.StreamReader[M]), nil
+		return streamWithShouldRetry(r, ctx, input, opts...)
 	}
 	return r.streamLegacy(ctx, input, opts...)
 }

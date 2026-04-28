@@ -69,7 +69,7 @@ type agentEventWrapper struct {
 	StreamErr error
 }
 
-type typedAgentEventWrapper[M messageType] struct {
+type typedAgentEventWrapper[M MessageType] struct {
 	event               *TypedAgentEvent[M]
 	mu                  sync.Mutex
 	concatenatedMessage M
@@ -79,7 +79,7 @@ type typedAgentEventWrapper[M messageType] struct {
 
 // typedAgentEventWrapperForGob is a gob-serializable representation of typedAgentEventWrapper.
 // We encode the event and TS separately to avoid the sync.Mutex and non-exported fields.
-type typedAgentEventWrapperForGob[M messageType] struct {
+type typedAgentEventWrapperForGob[M MessageType] struct {
 	Event *TypedAgentEvent[M]
 	TS    int64
 }
@@ -292,7 +292,7 @@ func (rs *runSession) getEvents() []*agentEventWrapper {
 	return finalEvents
 }
 
-func addTypedEvent[M messageType](session *runSession, event *TypedAgentEvent[M]) {
+func addTypedEvent[M MessageType](session *runSession, event *TypedAgentEvent[M]) {
 	var zero M
 	if _, ok := any(zero).(*schema.Message); ok {
 		session.addEvent(any(event).(*AgentEvent))
@@ -310,7 +310,7 @@ func addTypedEvent[M messageType](session *runSession, event *TypedAgentEvent[M]
 	*store = append(*store, wrapper)
 }
 
-func getTypedEvents[M messageType](session *runSession) []*typedAgentEventWrapper[M] {
+func getTypedEvents[M MessageType](session *runSession) []*typedAgentEventWrapper[M] {
 	var zero M
 	if _, ok := any(zero).(*schema.Message); ok {
 		events := session.getEvents()
@@ -446,7 +446,7 @@ func initRunCtx(ctx context.Context, agentName string, input *AgentInput) (conte
 	return setRunCtx(ctx, runCtx), runCtx
 }
 
-func initTypedRunCtx[M messageType](ctx context.Context, agentName string, input *TypedAgentInput[M]) (context.Context, *runContext) {
+func initTypedRunCtx[M MessageType](ctx context.Context, agentName string, input *TypedAgentInput[M]) (context.Context, *runContext) {
 	runCtx := getRunCtx(ctx)
 	if runCtx != nil {
 		runCtx = runCtx.deepCopy()
@@ -581,7 +581,7 @@ func ClearRunCtx(ctx context.Context) context.Context {
 	return context.WithValue(ctx, runCtxKey{}, nil)
 }
 
-func ctxWithNewTypedRunCtx[M messageType](ctx context.Context, input *TypedAgentInput[M], sharedParentSession bool) context.Context {
+func ctxWithNewTypedRunCtx[M MessageType](ctx context.Context, input *TypedAgentInput[M], sharedParentSession bool) context.Context {
 	var session *runSession
 	if sharedParentSession {
 		if parentSession := getSession(ctx); parentSession != nil {

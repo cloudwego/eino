@@ -356,7 +356,7 @@ func (s *preemptSignal) drainAll() {
 }
 
 // TurnLoopConfig is the configuration for creating a TurnLoop.
-type TurnLoopConfig[T any, M messageType] struct {
+type TurnLoopConfig[T any, M MessageType] struct {
 	// GenInput receives the TurnLoop instance and all buffered items, and decides what to process.
 	// It returns which items to consume now vs keep for later turns.
 	// The loop parameter allows calling Push() or Stop() directly from within the callback.
@@ -430,7 +430,7 @@ type TurnLoopConfig[T any, M messageType] struct {
 }
 
 // GenInputResult contains the result of GenInput processing.
-type GenInputResult[T any, M messageType] struct {
+type GenInputResult[T any, M MessageType] struct {
 	// RunCtx, if non-nil, overrides the context for this turn's execution
 	// (PrepareAgent, agent run, OnAgentEvents).
 	//
@@ -464,7 +464,7 @@ type GenInputResult[T any, M messageType] struct {
 }
 
 // GenResumeResult contains the result of GenResume processing.
-type GenResumeResult[T any, M messageType] struct {
+type GenResumeResult[T any, M MessageType] struct {
 	// RunCtx, if non-nil, overrides the context for this resumed turn's execution
 	// (PrepareAgent, agent resume, OnAgentEvents).
 	RunCtx context.Context
@@ -489,7 +489,7 @@ type GenResumeResult[T any, M messageType] struct {
 	Remaining []T
 }
 
-type turnRunSpec[T any, M messageType] struct {
+type turnRunSpec[T any, M MessageType] struct {
 	runCtx       context.Context
 	input        *TypedAgentInput[M]
 	runOpts      []AgentRunOption
@@ -499,7 +499,7 @@ type turnRunSpec[T any, M messageType] struct {
 	resumeBytes  []byte
 }
 
-type turnPlan[T any, M messageType] struct {
+type turnPlan[T any, M MessageType] struct {
 	turnCtx   context.Context
 	remaining []T
 	spec      *turnRunSpec[T, M]
@@ -570,7 +570,7 @@ func (l *TurnLoop[T, M]) planTurn(
 
 // TurnLoopExitState is returned when TurnLoop exits, containing the exit reason
 // and any items that were not processed.
-type TurnLoopExitState[T any, M messageType] struct {
+type TurnLoopExitState[T any, M MessageType] struct {
 	// ExitReason indicates why the loop exited.
 	// nil means clean exit (Stop() was called without cancel options, or the
 	// agent completed normally before Stop took effect).
@@ -621,7 +621,7 @@ type TurnLoopExitState[T any, M messageType] struct {
 }
 
 // TurnContext provides per-turn context to the OnAgentEvents callback.
-type TurnContext[T any, M messageType] struct {
+type TurnContext[T any, M MessageType] struct {
 	// Loop is the TurnLoop instance, allowing Push() or Stop() calls.
 	Loop *TurnLoop[T, M]
 
@@ -672,7 +672,7 @@ type TurnContext[T any, M messageType] struct {
 //   - Wait: blocks until Run is called AND the loop exits. If Run is never
 //     called, Wait blocks forever (this is a programming error, analogous
 //     to reading from a channel that nobody writes to).
-type TurnLoop[T any, M messageType] struct {
+type TurnLoop[T any, M MessageType] struct {
 	config TurnLoopConfig[T, M]
 
 	buffer *turnBuffer[T]
@@ -973,7 +973,7 @@ func UntilIdleFor(duration time.Duration) StopOption {
 	}
 }
 
-type pushConfig[T any, M messageType] struct {
+type pushConfig[T any, M MessageType] struct {
 	preempt         bool
 	preemptDelay    time.Duration
 	agentCancelOpts []AgentCancelOption
@@ -981,7 +981,7 @@ type pushConfig[T any, M messageType] struct {
 }
 
 // PushOption is an option for Push().
-type PushOption[T any, M messageType] func(*pushConfig[T, M])
+type PushOption[T any, M MessageType] func(*pushConfig[T, M])
 
 // WithPreempt signals that the current agent turn should be cancelled at the
 // specified safePoint after pushing the new item. The loop cancels the current
@@ -1001,7 +1001,7 @@ type PushOption[T any, M messageType] func(*pushConfig[T, M])
 // passed to the same Push call, the last one wins.
 //
 // safePoint must not be zero; passing SafePoint(0) panics.
-func WithPreempt[T any, M messageType](safePoint SafePoint) PushOption[T, M] {
+func WithPreempt[T any, M MessageType](safePoint SafePoint) PushOption[T, M] {
 	if safePoint == 0 {
 		panic("adk: SafePoint must not be zero; use AfterToolCalls, AfterChatModel, or AnySafePoint")
 	}
@@ -1019,7 +1019,7 @@ func WithPreempt[T any, M messageType](safePoint SafePoint) PushOption[T, M] {
 // also receive the cancel signal and be torn down.
 //
 // safePoint must not be zero; passing SafePoint(0) panics.
-func WithPreemptTimeout[T any, M messageType](safePoint SafePoint, timeout time.Duration) PushOption[T, M] {
+func WithPreemptTimeout[T any, M MessageType](safePoint SafePoint, timeout time.Duration) PushOption[T, M] {
 	if safePoint == 0 {
 		panic("adk: SafePoint must not be zero; use AfterToolCalls, AfterChatModel, or AnySafePoint")
 	}
@@ -1038,7 +1038,7 @@ func WithPreemptTimeout[T any, M messageType](safePoint SafePoint, timeout time.
 // immediately, but the preemption signal will be delayed by the specified
 // duration. This allows the current agent to continue processing for a grace
 // period before being preempted.
-func WithPreemptDelay[T any, M messageType](delay time.Duration) PushOption[T, M] {
+func WithPreemptDelay[T any, M MessageType](delay time.Duration) PushOption[T, M] {
 	return func(cfg *pushConfig[T, M]) {
 		cfg.preemptDelay = delay
 	}
@@ -1063,13 +1063,13 @@ func WithPreemptDelay[T any, M messageType](delay time.Duration) PushOption[T, M
 //	    }
 //	    return nil // don't preempt high-priority work
 //	}))
-func WithPushStrategy[T any, M messageType](fn func(ctx context.Context, tc *TurnContext[T, M]) []PushOption[T, M]) PushOption[T, M] {
+func WithPushStrategy[T any, M MessageType](fn func(ctx context.Context, tc *TurnContext[T, M]) []PushOption[T, M]) PushOption[T, M] {
 	return func(cfg *pushConfig[T, M]) {
 		cfg.pushStrategy = fn
 	}
 }
 
-func defaultTurnLoopOnAgentEvents[T any, M messageType](_ context.Context, _ *TurnContext[T, M], events *AsyncIterator[*TypedAgentEvent[M]]) error {
+func defaultTurnLoopOnAgentEvents[T any, M MessageType](_ context.Context, _ *TurnContext[T, M], events *AsyncIterator[*TypedAgentEvent[M]]) error {
 	for {
 		event, ok := events.Next()
 		if !ok {
@@ -1088,7 +1088,7 @@ func defaultTurnLoopOnAgentEvents[T any, M messageType](_ context.Context, _ *Tu
 // Call Run to start the processing goroutine.
 //
 // NewTurnLoop panics if GenInput or PrepareAgent is nil.
-func NewTurnLoop[T any, M messageType](cfg TurnLoopConfig[T, M]) *TurnLoop[T, M] {
+func NewTurnLoop[T any, M MessageType](cfg TurnLoopConfig[T, M]) *TurnLoop[T, M] {
 	if cfg.GenInput == nil {
 		panic("adk: NewTurnLoop: GenInput is required")
 	}

@@ -30,7 +30,7 @@ func TestTaskTool(t *testing.T) {
 	a1 := &myAgent{name: "1", desc: "desc of my agent 1"}
 	a2 := &myAgent{name: "2", desc: "desc of my agent 2"}
 	ctx := context.Background()
-	tt, err := newTaskTool(
+	tt, err := typedNewTaskTool[*schema.Message](
 		ctx,
 		nil,
 		[]adk.Agent{a1, a2},
@@ -62,15 +62,15 @@ type myAgent struct {
 	desc string
 }
 
-func (m *myAgent) Name(ctx context.Context) string {
+func (m *myAgent) Name(_ context.Context) string {
 	return m.name
 }
 
-func (m *myAgent) Description(ctx context.Context) string {
+func (m *myAgent) Description(_ context.Context) string {
 	return m.desc
 }
 
-func (m *myAgent) Run(ctx context.Context, input *adk.AgentInput, options ...adk.AgentRunOption) *adk.AsyncIterator[*adk.AgentEvent] {
+func (m *myAgent) Run(_ context.Context, _ *adk.AgentInput, _ ...adk.AgentRunOption) *adk.AsyncIterator[*adk.AgentEvent] {
 	iter, gen := adk.NewAsyncIteratorPair[*adk.AgentEvent]()
 	gen.Send(adk.EventFromMessage(schema.UserMessage(m.desc), nil, schema.User, ""))
 	gen.Close()

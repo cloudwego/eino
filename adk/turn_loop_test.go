@@ -161,7 +161,7 @@ func (a *turnLoopStopModeProbeAgent) Run(ctx context.Context, input *AgentInput,
 	return iter
 }
 
-func newAndRunTurnLoop[T any, M messageType](ctx context.Context, cfg TurnLoopConfig[T, M]) *TurnLoop[T, M] {
+func newAndRunTurnLoop[T any, M MessageType](ctx context.Context, cfg TurnLoopConfig[T, M]) *TurnLoop[T, M] {
 	l := NewTurnLoop[T, M](cfg)
 	l.Run(ctx)
 	return l

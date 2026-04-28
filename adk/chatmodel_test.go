@@ -2077,7 +2077,7 @@ func TestNewChatModelAgent_FailoverConfigValidation(t *testing.T) {
 			Name:        "TestAgent",
 			Description: "test",
 			Model:       cm,
-			ModelFailoverConfig: &ModelFailoverConfig{
+			ModelFailoverConfig: &ModelFailoverConfig[*schema.Message]{
 				ShouldFailover: func(context.Context, *schema.Message, error) bool { return true },
 			},
 		})
@@ -2090,8 +2090,8 @@ func TestNewChatModelAgent_FailoverConfigValidation(t *testing.T) {
 			Name:        "TestAgent",
 			Description: "test",
 			Model:       cm,
-			ModelFailoverConfig: &ModelFailoverConfig{
-				GetFailoverModel: func(_ context.Context, _ *FailoverContext) (model.BaseChatModel, []*schema.Message, error) {
+			ModelFailoverConfig: &ModelFailoverConfig[*schema.Message]{
+				GetFailoverModel: func(_ context.Context, _ *FailoverContext[*schema.Message]) (model.BaseChatModel, []*schema.Message, error) {
 					return cm, nil, nil
 				},
 			},
