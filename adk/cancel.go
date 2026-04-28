@@ -812,7 +812,7 @@ func (cc *cancelContext) buildCancelFunc() AgentCancelFunc {
 // were passed through unconverted, markDone would transition stateCancelling→stateDone
 // before the Runner goroutine could call createAndMarkCancelHandled, causing it
 // to fail the CAS.
-func wrapIterWithCancelCtx[M messageType](iter *AsyncIterator[*TypedAgentEvent[M]], cancelCtx *cancelContext) *AsyncIterator[*TypedAgentEvent[M]] {
+func wrapIterWithCancelCtx[M MessageType](iter *AsyncIterator[*TypedAgentEvent[M]], cancelCtx *cancelContext) *AsyncIterator[*TypedAgentEvent[M]] {
 	if cancelCtx == nil {
 		return iter
 	}
@@ -848,7 +848,7 @@ func wrapIterWithCancelCtx[M messageType](iter *AsyncIterator[*TypedAgentEvent[M
 // by a dedicated node after the ChatModel in the compose graph).
 // Stream: pipes chunks through a goroutine that selects on immediateChan for
 // CancelImmediate abort.
-type typedCancelMonitoredModel[M messageType] struct {
+type typedCancelMonitoredModel[M MessageType] struct {
 	inner         model.BaseModel[M]
 	cancelContext *cancelContext
 }

@@ -43,7 +43,7 @@ type AgentCallbackOutput struct {
 	Events *AsyncIterator[*AgentEvent]
 }
 
-func copyTypedEventIterator[M messageType](iter *AsyncIterator[*TypedAgentEvent[M]], n int) []*AsyncIterator[*TypedAgentEvent[M]] {
+func copyTypedEventIterator[M MessageType](iter *AsyncIterator[*TypedAgentEvent[M]], n int) []*AsyncIterator[*TypedAgentEvent[M]] {
 	if n <= 0 {
 		return nil
 	}
@@ -136,7 +136,7 @@ func getAgentType(agent Agent) string {
 
 // TypedAgentCallbackInput represents the input passed to typed agent callbacks during OnStart.
 // Use ConvTypedCallbackInput to safely convert from callbacks.CallbackInput.
-type TypedAgentCallbackInput[M messageType] struct {
+type TypedAgentCallbackInput[M MessageType] struct {
 	// Input contains the agent input for a new run. Nil when resuming.
 	Input *TypedAgentInput[M]
 	// ResumeInfo contains resume information when resuming from an interrupt. Nil for new runs.
@@ -148,14 +148,14 @@ type TypedAgentCallbackInput[M messageType] struct {
 //
 // Important: The Events iterator should be consumed asynchronously to avoid blocking
 // the agent execution. Each callback handler receives an independent copy of the iterator.
-type TypedAgentCallbackOutput[M messageType] struct {
+type TypedAgentCallbackOutput[M MessageType] struct {
 	// Events provides a stream of agent events. Each handler receives its own copy.
 	Events *AsyncIterator[*TypedAgentEvent[M]]
 }
 
 // ConvTypedCallbackInput converts a callbacks.CallbackInput to *TypedAgentCallbackInput[M].
 // Returns nil if the input is not of the expected type.
-func ConvTypedCallbackInput[M messageType](input callbacks.CallbackInput) *TypedAgentCallbackInput[M] {
+func ConvTypedCallbackInput[M MessageType](input callbacks.CallbackInput) *TypedAgentCallbackInput[M] {
 	if v, ok := input.(*TypedAgentCallbackInput[M]); ok {
 		return v
 	}
@@ -164,14 +164,14 @@ func ConvTypedCallbackInput[M messageType](input callbacks.CallbackInput) *Typed
 
 // ConvTypedCallbackOutput converts a callbacks.CallbackOutput to *TypedAgentCallbackOutput[M].
 // Returns nil if the output is not of the expected type.
-func ConvTypedCallbackOutput[M messageType](output callbacks.CallbackOutput) *TypedAgentCallbackOutput[M] {
+func ConvTypedCallbackOutput[M MessageType](output callbacks.CallbackOutput) *TypedAgentCallbackOutput[M] {
 	if v, ok := output.(*TypedAgentCallbackOutput[M]); ok {
 		return v
 	}
 	return nil
 }
 
-func copyTypedCallbackOutput[M messageType](out *TypedAgentCallbackOutput[M], n int) []*TypedAgentCallbackOutput[M] {
+func copyTypedCallbackOutput[M MessageType](out *TypedAgentCallbackOutput[M], n int) []*TypedAgentCallbackOutput[M] {
 	if out == nil || out.Events == nil {
 		result := make([]*TypedAgentCallbackOutput[M], n)
 		for i := 0; i < n; i++ {

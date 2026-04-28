@@ -32,22 +32,21 @@ import (
 	"github.com/cloudwego/eino/schema"
 )
 
-func newTaskToolMiddleware(
+func typedTaskToolMiddleware[M adk.MessageType](
 	ctx context.Context,
-	taskToolDescriptionGenerator func(ctx context.Context, subAgents []adk.Agent) (string, error),
-	subAgents []adk.Agent,
+	taskToolDescriptionGenerator func(ctx context.Context, subAgents []adk.TypedAgent[M]) (string, error),
+	subAgents []adk.TypedAgent[M],
 
 	withoutGeneralSubAgent bool,
-	// cm is the chat model. Tools are configured via model.WithTools call option.
-	cm model.BaseChatModel,
+	cm model.BaseModel[M],
 	instruction string,
 	toolsConfig adk.ToolsConfig,
 	maxIteration int,
 	middlewares []adk.AgentMiddleware,
-	handlers []adk.ChatModelAgentMiddleware,
-	modelFailoverConfig *adk.ModelFailoverConfig,
-) (adk.ChatModelAgentMiddleware, error) {
-	t, err := newTaskTool(ctx, taskToolDescriptionGenerator, subAgents, withoutGeneralSubAgent, cm, instruction, toolsConfig, maxIteration, middlewares, handlers, modelFailoverConfig)
+	handlers []adk.TypedChatModelAgentMiddleware[M],
+	modelFailoverConfig *adk.ModelFailoverConfig[M],
+) (adk.TypedChatModelAgentMiddleware[M], error) {
+	t, err := typedNewTaskTool(ctx, taskToolDescriptionGenerator, subAgents, withoutGeneralSubAgent, cm, instruction, toolsConfig, maxIteration, middlewares, handlers, modelFailoverConfig)
 	if err != nil {
 		return nil, err
 	}
@@ -56,28 +55,27 @@ func newTaskToolMiddleware(
 		Chinese: taskPromptChinese,
 	})
 
-	return buildAppendPromptTool(prompt, t), nil
+	return typedBuildAppendPromptTool[M](prompt, t), nil
 }
 
-func newTaskTool(
+func typedNewTaskTool[M adk.MessageType](
 	ctx context.Context,
-	taskToolDescriptionGenerator func(ctx context.Context, subAgents []adk.Agent) (string, error),
-	subAgents []adk.Agent,
+	taskToolDescriptionGenerator func(ctx context.Context, subAgents []adk.TypedAgent[M]) (string, error),
+	subAgents []adk.TypedAgent[M],
 
 	withoutGeneralSubAgent bool,
-	// Model is the chat model. Tools are configured via model.WithTools call option.
-	Model model.BaseChatModel,
-	Instruction string,
-	ToolsConfig adk.ToolsConfig,
-	MaxIteration int,
+	cm model.BaseModel[M],
+	instruction string,
+	toolsConfig adk.ToolsConfig,
+	maxIteration int,
 	middlewares []adk.AgentMiddleware,
-	handlers []adk.ChatModelAgentMiddleware,
-	modelFailoverConfig *adk.ModelFailoverConfig,
+	handlers []adk.TypedChatModelAgentMiddleware[M],
+	modelFailoverConfig *adk.ModelFailoverConfig[M],
 ) (tool.InvokableTool, error) {
-	t := &taskTool{
+	t := &typedTaskTool[M]{
 		subAgents:     map[string]tool.InvokableTool{},
 		subAgentSlice: subAgents,
-		descGen:       defaultTaskToolDescription,
+		descGen:       typedDefaultTaskToolDescription[M],
 	}
 
 	if taskToolDescriptionGenerator != nil {
@@ -89,23 +87,23 @@ func newTaskTool(
 			English: generalAgentDescription,
 			Chinese: generalAgentDescriptionChinese,
 		})
-		generalAgent, err := adk.NewChatModelAgent(ctx, &adk.ChatModelAgentConfig{
+		generalAgent, err := adk.NewTypedChatModelAgent[M](ctx, &adk.TypedChatModelAgentConfig[M]{
 			Name:                generalAgentName,
 			Description:         agentDesc,
-			Instruction:         Instruction,
-			Model:               Model,
-			ToolsConfig:         ToolsConfig,
-			MaxIterations:       MaxIteration,
+			Instruction:         instruction,
+			Model:               cm,
+			ToolsConfig:         toolsConfig,
+			MaxIterations:       maxIteration,
 			Middlewares:         middlewares,
 			Handlers:            handlers,
-			GenModelInput:       genModelInput,
+			GenModelInput:       typedGenModelInput[M],
 			ModelFailoverConfig: modelFailoverConfig,
 		})
 		if err != nil {
 			return nil, err
 		}
 
-		it, err := assertAgentTool(adk.NewAgentTool(ctx, generalAgent))
+		it, err := assertAgentTool(adk.NewTypedAgentTool[M](ctx, generalAgent))
 		if err != nil {
 			return nil, err
 		}
@@ -115,7 +113,7 @@ func newTaskTool(
 
 	for _, a := range subAgents {
 		name := a.Name(ctx)
-		it, err := assertAgentTool(adk.NewAgentTool(ctx, a))
+		it, err := assertAgentTool(adk.NewTypedAgentTool[M](ctx, a))
 		if err != nil {
 			return nil, err
 		}
@@ -125,13 +123,13 @@ func newTaskTool(
 	return t, nil
 }
 
-type taskTool struct {
+type typedTaskTool[M adk.MessageType] struct {
 	subAgents     map[string]tool.InvokableTool
-	subAgentSlice []adk.Agent
-	descGen       func(ctx context.Context, subAgents []adk.Agent) (string, error)
+	subAgentSlice []adk.TypedAgent[M]
+	descGen       func(ctx context.Context, subAgents []adk.TypedAgent[M]) (string, error)
 }
 
-func (t *taskTool) Info(ctx context.Context) (*schema.ToolInfo, error) {
+func (t *typedTaskTool[M]) Info(ctx context.Context) (*schema.ToolInfo, error) {
 	desc, err := t.descGen(ctx, t.subAgentSlice)
 	if err != nil {
 		return nil, err
@@ -155,7 +153,7 @@ type taskToolArgument struct {
 	Description  string `json:"description"`
 }
 
-func (t *taskTool) InvokableRun(ctx context.Context, argumentsInJSON string, opts ...tool.Option) (string, error) {
+func (t *typedTaskTool[M]) InvokableRun(ctx context.Context, argumentsInJSON string, opts ...tool.Option) (string, error) {
 	input := &taskToolArgument{}
 	err := json.Unmarshal([]byte(argumentsInJSON), input)
 	if err != nil {
@@ -176,7 +174,7 @@ func (t *taskTool) InvokableRun(ctx context.Context, argumentsInJSON string, opt
 	return a.InvokableRun(ctx, params, opts...)
 }
 
-func defaultTaskToolDescription(ctx context.Context, subAgents []adk.Agent) (string, error) {
+func typedDefaultTaskToolDescription[M adk.MessageType](ctx context.Context, subAgents []adk.TypedAgent[M]) (string, error) {
 	subAgentsDescBuilder := strings.Builder{}
 	for _, a := range subAgents {
 		name := a.Name(ctx)

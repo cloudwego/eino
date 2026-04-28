@@ -102,7 +102,7 @@ func GenTransferMessages(_ context.Context, destAgentName string) (Message, Mess
 	return assistantMessage, toolMessage
 }
 
-func typedSetAutomaticClose[M messageType](e *TypedAgentEvent[M]) {
+func typedSetAutomaticClose[M MessageType](e *TypedAgentEvent[M]) {
 	if e.Output == nil || e.Output.MessageOutput == nil || !e.Output.MessageOutput.IsStreaming {
 		return
 	}
@@ -119,7 +119,7 @@ func setAutomaticClose(e *AgentEvent) {
 // If the stream contains an error chunk, this function returns (nil, err) and
 // sets StreamErr to prevent re-consumption. The nil message ensures that
 // failed stream responses are not included in subsequent agents' context windows.
-func getMessageFromTypedWrappedEvent[M messageType](e *typedAgentEventWrapper[M]) (M, error) {
+func getMessageFromTypedWrappedEvent[M MessageType](e *typedAgentEventWrapper[M]) (M, error) {
 	var zero M
 	if e.event.Output == nil || e.event.Output.MessageOutput == nil {
 		return zero, nil
@@ -234,7 +234,7 @@ func (e *agentEventWrapper) consumeStream() {
 // NOTE: even if the event is copied, it's still not recommended to modify
 // the Message itself or Chunks of the MessageStream, as they are not copied.
 // NOTE: if you have CustomizedOutput or CustomizedAction, they are NOT copied.
-func copyTypedAgentEvent[M messageType](ae *TypedAgentEvent[M]) *TypedAgentEvent[M] {
+func copyTypedAgentEvent[M MessageType](ae *TypedAgentEvent[M]) *TypedAgentEvent[M] {
 	rp := make([]RunStep, len(ae.RunPath))
 	copy(rp, ae.RunPath)
 
@@ -275,7 +275,7 @@ func copyTypedAgentEvent[M messageType](ae *TypedAgentEvent[M]) *TypedAgentEvent
 }
 
 // TypedGetMessage extracts the message from a TypedAgentEvent, concatenating a stream if present.
-func TypedGetMessage[M messageType](e *TypedAgentEvent[M]) (M, *TypedAgentEvent[M], error) {
+func TypedGetMessage[M MessageType](e *TypedAgentEvent[M]) (M, *TypedAgentEvent[M], error) {
 	var zero M
 	if e.Output == nil || e.Output.MessageOutput == nil {
 		return zero, e, nil
@@ -300,7 +300,7 @@ func GetMessage(e *AgentEvent) (Message, *AgentEvent, error) {
 	return TypedGetMessage(e)
 }
 
-func typedErrorIter[M messageType](err error) *AsyncIterator[*TypedAgentEvent[M]] {
+func typedErrorIter[M MessageType](err error) *AsyncIterator[*TypedAgentEvent[M]] {
 	iterator, generator := NewAsyncIteratorPair[*TypedAgentEvent[M]]()
 	generator.Send(&TypedAgentEvent[M]{Err: err})
 	generator.Close()

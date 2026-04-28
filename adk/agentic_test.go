@@ -20,7 +20,9 @@ import (
 	"context"
 	"errors"
 	"io"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -55,18 +57,18 @@ func (m *mockAgenticModel) Stream(ctx context.Context, input []*schema.AgenticMe
 
 type testAgenticMiddleware struct {
 	*TypedBaseChatModelAgentMiddleware[*schema.AgenticMessage]
-	beforeFn func(context.Context, *TypedChatModelAgentState[*schema.AgenticMessage], *ModelContext) (context.Context, *TypedChatModelAgentState[*schema.AgenticMessage], error)
-	afterFn  func(context.Context, *TypedChatModelAgentState[*schema.AgenticMessage], *ModelContext) (context.Context, *TypedChatModelAgentState[*schema.AgenticMessage], error)
+	beforeFn func(context.Context, *TypedChatModelAgentState[*schema.AgenticMessage], *TypedModelContext[*schema.AgenticMessage]) (context.Context, *TypedChatModelAgentState[*schema.AgenticMessage], error)
+	afterFn  func(context.Context, *TypedChatModelAgentState[*schema.AgenticMessage], *TypedModelContext[*schema.AgenticMessage]) (context.Context, *TypedChatModelAgentState[*schema.AgenticMessage], error)
 }
 
-func (m *testAgenticMiddleware) BeforeModelRewriteState(ctx context.Context, state *TypedChatModelAgentState[*schema.AgenticMessage], mc *ModelContext) (context.Context, *TypedChatModelAgentState[*schema.AgenticMessage], error) {
+func (m *testAgenticMiddleware) BeforeModelRewriteState(ctx context.Context, state *TypedChatModelAgentState[*schema.AgenticMessage], mc *TypedModelContext[*schema.AgenticMessage]) (context.Context, *TypedChatModelAgentState[*schema.AgenticMessage], error) {
 	if m.beforeFn != nil {
 		return m.beforeFn(ctx, state, mc)
 	}
 	return ctx, state, nil
 }
 
-func (m *testAgenticMiddleware) AfterModelRewriteState(ctx context.Context, state *TypedChatModelAgentState[*schema.AgenticMessage], mc *ModelContext) (context.Context, *TypedChatModelAgentState[*schema.AgenticMessage], error) {
+func (m *testAgenticMiddleware) AfterModelRewriteState(ctx context.Context, state *TypedChatModelAgentState[*schema.AgenticMessage], mc *TypedModelContext[*schema.AgenticMessage]) (context.Context, *TypedChatModelAgentState[*schema.AgenticMessage], error) {
 	if m.afterFn != nil {
 		return m.afterFn(ctx, state, mc)
 	}
@@ -399,11 +401,11 @@ func TestAgenticChatModelAgentRun_WithMiddleware(t *testing.T) {
 	afterModelExecuted := false
 
 	mw := &testAgenticMiddleware{
-		beforeFn: func(ctx context.Context, state *TypedChatModelAgentState[*schema.AgenticMessage], mc *ModelContext) (context.Context, *TypedChatModelAgentState[*schema.AgenticMessage], error) {
+		beforeFn: func(ctx context.Context, state *TypedChatModelAgentState[*schema.AgenticMessage], mc *TypedModelContext[*schema.AgenticMessage]) (context.Context, *TypedChatModelAgentState[*schema.AgenticMessage], error) {
 			state.Messages = append(state.Messages, schema.UserAgenticMessage("extra"))
 			return ctx, state, nil
 		},
-		afterFn: func(ctx context.Context, state *TypedChatModelAgentState[*schema.AgenticMessage], mc *ModelContext) (context.Context, *TypedChatModelAgentState[*schema.AgenticMessage], error) {
+		afterFn: func(ctx context.Context, state *TypedChatModelAgentState[*schema.AgenticMessage], mc *TypedModelContext[*schema.AgenticMessage]) (context.Context, *TypedChatModelAgentState[*schema.AgenticMessage], error) {
 			assert.Len(t, state.Messages, 4)
 			afterModelExecuted = true
 			return ctx, state, nil
@@ -455,7 +457,7 @@ func TestAgenticAfterModel_NoTools_ModifyDoesNotAffectEvent(t *testing.T) {
 		Model:       m,
 		Handlers: []TypedChatModelAgentMiddleware[*schema.AgenticMessage]{
 			&testAgenticMiddleware{
-				afterFn: func(ctx context.Context, state *TypedChatModelAgentState[*schema.AgenticMessage], mc *ModelContext) (context.Context, *TypedChatModelAgentState[*schema.AgenticMessage], error) {
+				afterFn: func(ctx context.Context, state *TypedChatModelAgentState[*schema.AgenticMessage], mc *TypedModelContext[*schema.AgenticMessage]) (context.Context, *TypedChatModelAgentState[*schema.AgenticMessage], error) {
 					capturedMessages = make([]*schema.AgenticMessage, len(state.Messages))
 					copy(capturedMessages, state.Messages)
 					state.Messages = append(state.Messages, agenticAssistantMessage("appended content"))
@@ -1352,4 +1354,328 @@ func TestConcatMessageStream_AgenticClosesStream(t *testing.T) {
 	_, recvErr := r.Recv()
 	assert.Error(t, recvErr,
 		"stream should be closed after concatMessageStream returns")
+}
+
+// --- Agentic retry/failover stream test helpers ---
+
+func agenticStreamWithMidError(chunks []*schema.AgenticMessage, err error) *schema.StreamReader[*schema.AgenticMessage] {
+	sr, sw := schema.Pipe[*schema.AgenticMessage](len(chunks) + 1)
+	go func() {
+		defer sw.Close()
+		for _, c := range chunks {
+			sw.Send(c, nil)
+		}
+		sw.Send(nil, err)
+	}()
+	return sr
+}
+
+func agenticStreamOK(chunks []*schema.AgenticMessage) *schema.StreamReader[*schema.AgenticMessage] {
+	sr, sw := schema.Pipe[*schema.AgenticMessage](len(chunks))
+	go func() {
+		defer sw.Close()
+		for _, c := range chunks {
+			sw.Send(c, nil)
+		}
+	}()
+	return sr
+}
+
+func drainTypedAgenticEvents(t *testing.T, iter *AsyncIterator[*TypedAgentEvent[*schema.AgenticMessage]]) *schema.AgenticMessage {
+	t.Helper()
+	var lastMsg *schema.AgenticMessage
+	for {
+		ev, ok := iter.Next()
+		if !ok {
+			break
+		}
+		if ev.Err != nil {
+			var willRetry *WillRetryError
+			if errors.As(ev.Err, &willRetry) {
+				continue
+			}
+			t.Fatalf("unexpected error event: %v", ev.Err)
+		}
+		if ev.Output != nil && ev.Output.MessageOutput != nil {
+			if ev.Output.MessageOutput.IsStreaming && ev.Output.MessageOutput.MessageStream != nil {
+				sr := ev.Output.MessageOutput.MessageStream
+				for {
+					chunk, err := sr.Recv()
+					if err != nil {
+						break
+					}
+					lastMsg = chunk
+				}
+			} else if ev.Output.MessageOutput.Message != nil {
+				lastMsg = ev.Output.MessageOutput.Message
+			}
+		}
+	}
+	return lastMsg
+}
+
+func TestAgenticRetryWithShouldRetry_Generate(t *testing.T) {
+	ctx := context.Background()
+
+	var callCount int32
+	var shouldRetryCalls int32
+	genErr := errors.New("transient generate error")
+
+	m := &mockAgenticModel{
+		generateFn: func(_ context.Context, _ []*schema.AgenticMessage, _ ...model.Option) (*schema.AgenticMessage, error) {
+			n := atomic.AddInt32(&callCount, 1)
+			if n == 1 {
+				return nil, genErr
+			}
+			return agenticMsg("retry ok"), nil
+		},
+	}
+
+	agent, err := NewTypedChatModelAgent[*schema.AgenticMessage](ctx, &TypedChatModelAgentConfig[*schema.AgenticMessage]{
+		Name:        "retry-gen-agent",
+		Description: "test retry generate",
+		Model:       m,
+		ModelRetryConfig: &TypedModelRetryConfig[*schema.AgenticMessage]{
+			MaxRetries: 1,
+			ShouldRetry: func(_ context.Context, retryCtx *TypedRetryContext[*schema.AgenticMessage]) *TypedRetryDecision[*schema.AgenticMessage] {
+				n := atomic.AddInt32(&shouldRetryCalls, 1)
+				if n == 1 {
+					assert.Nil(t, retryCtx.OutputMessage, "OutputMessage should be nil when Generate returns error")
+					assert.ErrorIs(t, retryCtx.Err, genErr, "Err should be the generate error")
+					assert.Equal(t, 1, retryCtx.RetryAttempt)
+					return &TypedRetryDecision[*schema.AgenticMessage]{Retry: true}
+				}
+				return &TypedRetryDecision[*schema.AgenticMessage]{Retry: false}
+			},
+			BackoffFunc: func(_ context.Context, _ int) time.Duration { return time.Millisecond },
+		},
+	})
+	require.NoError(t, err)
+
+	runner := NewTypedRunner[*schema.AgenticMessage](TypedRunnerConfig[*schema.AgenticMessage]{Agent: agent})
+	iter := runner.Run(ctx, []*schema.AgenticMessage{schema.UserAgenticMessage("hello")})
+
+	msg := drainTypedAgenticEvents(t, iter)
+	require.NotNil(t, msg, "should have received a final message")
+	assert.Equal(t, "retry ok", agenticTextContent(msg))
+	assert.Equal(t, int32(2), atomic.LoadInt32(&callCount), "model should be called twice")
+	assert.Equal(t, int32(2), atomic.LoadInt32(&shouldRetryCalls), "ShouldRetry should be called for both attempts")
+}
+
+func TestAgenticRetryWithShouldRetry_Stream(t *testing.T) {
+	ctx := context.Background()
+
+	var streamCallCount int32
+	var shouldRetryCalls int32
+	streamErr := errors.New("mid-stream error")
+
+	m := &mockAgenticModel{
+		generateFn: func(_ context.Context, _ []*schema.AgenticMessage, _ ...model.Option) (*schema.AgenticMessage, error) {
+			return nil, errors.New("generate should not be called")
+		},
+		streamFn: func(_ context.Context, _ []*schema.AgenticMessage, _ ...model.Option) (*schema.StreamReader[*schema.AgenticMessage], error) {
+			n := atomic.AddInt32(&streamCallCount, 1)
+			if n == 1 {
+				return agenticStreamWithMidError(
+					[]*schema.AgenticMessage{agenticMsg("partial")},
+					streamErr,
+				), nil
+			}
+			return agenticStreamOK([]*schema.AgenticMessage{agenticMsg("stream ok")}), nil
+		},
+	}
+
+	agent, err := NewTypedChatModelAgent[*schema.AgenticMessage](ctx, &TypedChatModelAgentConfig[*schema.AgenticMessage]{
+		Name:        "retry-stream-agent",
+		Description: "test retry stream",
+		Model:       m,
+		ModelRetryConfig: &TypedModelRetryConfig[*schema.AgenticMessage]{
+			MaxRetries: 1,
+			ShouldRetry: func(_ context.Context, retryCtx *TypedRetryContext[*schema.AgenticMessage]) *TypedRetryDecision[*schema.AgenticMessage] {
+				n := atomic.AddInt32(&shouldRetryCalls, 1)
+				if n == 1 {
+					assert.NotNil(t, retryCtx.OutputMessage, "OutputMessage should be non-nil from partial stream")
+					assert.Error(t, retryCtx.Err, "Err should be the stream error")
+					return &TypedRetryDecision[*schema.AgenticMessage]{Retry: true}
+				}
+				return nil
+			},
+			BackoffFunc: func(_ context.Context, _ int) time.Duration { return time.Millisecond },
+		},
+	})
+	require.NoError(t, err)
+
+	runner := NewTypedRunner[*schema.AgenticMessage](TypedRunnerConfig[*schema.AgenticMessage]{
+		Agent:          agent,
+		EnableStreaming: true,
+	})
+	iter := runner.Run(ctx, []*schema.AgenticMessage{schema.UserAgenticMessage("hello")})
+
+	var lastMsg *schema.AgenticMessage
+	for {
+		ev, ok := iter.Next()
+		if !ok {
+			break
+		}
+		if ev.Err != nil {
+			var willRetry *WillRetryError
+			if errors.As(ev.Err, &willRetry) {
+				continue
+			}
+			t.Fatalf("unexpected error: %v", ev.Err)
+		}
+		if ev.Output != nil && ev.Output.MessageOutput != nil {
+			if ev.Output.MessageOutput.IsStreaming && ev.Output.MessageOutput.MessageStream != nil {
+				sr := ev.Output.MessageOutput.MessageStream
+				for {
+					chunk, err := sr.Recv()
+					if err != nil {
+						break
+					}
+					lastMsg = chunk
+				}
+			} else if ev.Output.MessageOutput.Message != nil {
+				lastMsg = ev.Output.MessageOutput.Message
+			}
+		}
+	}
+	require.NotNil(t, lastMsg, "should have received final stream message")
+	assert.Contains(t, agenticTextContent(lastMsg), "stream ok")
+	assert.Equal(t, int32(2), atomic.LoadInt32(&shouldRetryCalls), "ShouldRetry should be called for both attempts")
+}
+
+func TestAgenticFailoverGenerate(t *testing.T) {
+	ctx := context.Background()
+
+	m1Err := errors.New("m1 generate failed")
+	var m1Calls, m2Calls int32
+
+	m1 := &mockAgenticModel{
+		generateFn: func(_ context.Context, _ []*schema.AgenticMessage, _ ...model.Option) (*schema.AgenticMessage, error) {
+			atomic.AddInt32(&m1Calls, 1)
+			return nil, m1Err
+		},
+	}
+	m2 := &mockAgenticModel{
+		generateFn: func(_ context.Context, _ []*schema.AgenticMessage, _ ...model.Option) (*schema.AgenticMessage, error) {
+			atomic.AddInt32(&m2Calls, 1)
+			return agenticMsg("failover ok"), nil
+		},
+	}
+
+	agent, err := NewTypedChatModelAgent[*schema.AgenticMessage](ctx, &TypedChatModelAgentConfig[*schema.AgenticMessage]{
+		Name:        "failover-gen-agent",
+		Description: "test failover generate",
+		Model:       m1,
+		ModelFailoverConfig: &ModelFailoverConfig[*schema.AgenticMessage]{
+			MaxRetries: 1,
+			ShouldFailover: func(_ context.Context, _ *schema.AgenticMessage, err error) bool {
+				return err != nil
+			},
+			GetFailoverModel: func(_ context.Context, failoverCtx *FailoverContext[*schema.AgenticMessage]) (model.BaseModel[*schema.AgenticMessage], []*schema.AgenticMessage, error) {
+				assert.Equal(t, uint(1), failoverCtx.FailoverAttempt)
+				assert.Nil(t, failoverCtx.LastOutputMessage, "LastOutputMessage should be nil when Generate returns error")
+				assert.ErrorIs(t, failoverCtx.LastErr, m1Err)
+				return m2, nil, nil
+			},
+		},
+	})
+	require.NoError(t, err)
+
+	runner := NewTypedRunner[*schema.AgenticMessage](TypedRunnerConfig[*schema.AgenticMessage]{Agent: agent})
+	iter := runner.Run(ctx, []*schema.AgenticMessage{schema.UserAgenticMessage("hello")})
+
+	msg := drainTypedAgenticEvents(t, iter)
+	require.NotNil(t, msg)
+	assert.Equal(t, "failover ok", agenticTextContent(msg))
+	assert.Equal(t, int32(1), atomic.LoadInt32(&m1Calls))
+	assert.Equal(t, int32(1), atomic.LoadInt32(&m2Calls))
+}
+
+func TestAgenticFailoverStream_MidStreamError(t *testing.T) {
+	ctx := context.Background()
+
+	streamErr := errors.New("m1 mid-stream error")
+	var m1Calls, m2Calls int32
+	var capturedLastOutput *schema.AgenticMessage
+
+	m1 := &mockAgenticModel{
+		generateFn: func(_ context.Context, _ []*schema.AgenticMessage, _ ...model.Option) (*schema.AgenticMessage, error) {
+			return nil, errors.New("unused")
+		},
+		streamFn: func(_ context.Context, _ []*schema.AgenticMessage, _ ...model.Option) (*schema.StreamReader[*schema.AgenticMessage], error) {
+			atomic.AddInt32(&m1Calls, 1)
+			return agenticStreamWithMidError(
+				[]*schema.AgenticMessage{agenticMsg("partial chunk")},
+				streamErr,
+			), nil
+		},
+	}
+	m2 := &mockAgenticModel{
+		generateFn: func(_ context.Context, _ []*schema.AgenticMessage, _ ...model.Option) (*schema.AgenticMessage, error) {
+			return nil, errors.New("unused")
+		},
+		streamFn: func(_ context.Context, _ []*schema.AgenticMessage, _ ...model.Option) (*schema.StreamReader[*schema.AgenticMessage], error) {
+			atomic.AddInt32(&m2Calls, 1)
+			return agenticStreamOK([]*schema.AgenticMessage{agenticMsg("failover stream ok")}), nil
+		},
+	}
+
+	agent, err := NewTypedChatModelAgent[*schema.AgenticMessage](ctx, &TypedChatModelAgentConfig[*schema.AgenticMessage]{
+		Name:        "failover-stream-agent",
+		Description: "test failover stream",
+		Model:       m1,
+		ModelFailoverConfig: &ModelFailoverConfig[*schema.AgenticMessage]{
+			MaxRetries: 1,
+			ShouldFailover: func(_ context.Context, _ *schema.AgenticMessage, err error) bool {
+				return err != nil
+			},
+			GetFailoverModel: func(_ context.Context, failoverCtx *FailoverContext[*schema.AgenticMessage]) (model.BaseModel[*schema.AgenticMessage], []*schema.AgenticMessage, error) {
+				capturedLastOutput = failoverCtx.LastOutputMessage
+				return m2, nil, nil
+			},
+		},
+	})
+	require.NoError(t, err)
+
+	runner := NewTypedRunner[*schema.AgenticMessage](TypedRunnerConfig[*schema.AgenticMessage]{
+		Agent:          agent,
+		EnableStreaming: true,
+	})
+	iter := runner.Run(ctx, []*schema.AgenticMessage{schema.UserAgenticMessage("hello")})
+
+	var lastMsg *schema.AgenticMessage
+	for {
+		ev, ok := iter.Next()
+		if !ok {
+			break
+		}
+		if ev.Err != nil {
+			var willRetry *WillRetryError
+			if errors.As(ev.Err, &willRetry) {
+				continue
+			}
+			t.Fatalf("unexpected error: %v", ev.Err)
+		}
+		if ev.Output != nil && ev.Output.MessageOutput != nil {
+			if ev.Output.MessageOutput.IsStreaming && ev.Output.MessageOutput.MessageStream != nil {
+				sr := ev.Output.MessageOutput.MessageStream
+				for {
+					chunk, err := sr.Recv()
+					if err != nil {
+						break
+					}
+					lastMsg = chunk
+				}
+			} else if ev.Output.MessageOutput.Message != nil {
+				lastMsg = ev.Output.MessageOutput.Message
+			}
+		}
+	}
+
+	require.NotNil(t, lastMsg, "should have received final stream from m2")
+	assert.Contains(t, agenticTextContent(lastMsg), "failover stream ok")
+	assert.Equal(t, int32(1), atomic.LoadInt32(&m1Calls))
+	assert.Equal(t, int32(1), atomic.LoadInt32(&m2Calls))
+	assert.NotNil(t, capturedLastOutput, "failoverCtx.LastOutputMessage should contain partial stream from m1")
 }

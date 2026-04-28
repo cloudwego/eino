@@ -36,11 +36,11 @@ const ComponentOfAgent components.Component = "Agent"
 // that use *schema.AgenticMessage in callbacks.
 const ComponentOfAgenticAgent components.Component = "AgenticAgent"
 
-// messageType is the sealed type constraint for message types used in ADK.
+// MessageType is the sealed type constraint for message types used in ADK.
 // Only *schema.Message and *schema.AgenticMessage satisfy this constraint.
 // External packages cannot add new types to this union; all generic functions
 // in ADK use exhaustive type switches on these two types.
-type messageType interface {
+type MessageType interface {
 	*schema.Message | *schema.AgenticMessage
 }
 
@@ -53,7 +53,7 @@ type AgenticMessageStream = *schema.StreamReader[AgenticMessage]
 // isNilMessage checks whether a generic message value is nil.
 // Direct `msg == nil` does not compile for generic pointer types in Go;
 // the canonical workaround is to compare through the `any` interface.
-func isNilMessage[M messageType](msg M) bool {
+func isNilMessage[M MessageType](msg M) bool {
 	var zero M
 	return any(msg) == any(zero)
 }
@@ -70,7 +70,7 @@ func isNilMessage[M messageType](msg M) bool {
 // For *schema.Message events, Role and ToolName exist independently of the inner
 // Message because in streaming mode (IsStreaming=true, Message=nil), the message
 // has not materialized yet and the consumer needs metadata without consuming the stream.
-type TypedMessageVariant[M messageType] struct {
+type TypedMessageVariant[M MessageType] struct {
 	IsStreaming bool
 
 	Message       M
@@ -244,7 +244,7 @@ func gobDecodeAgenticMessageVariant(mv *TypedMessageVariant[*schema.AgenticMessa
 }
 
 // typedEventFromMessage creates a TypedAgentEvent containing the given message and optional stream.
-func typedEventFromMessage[M messageType](msg M, msgStream *schema.StreamReader[M],
+func typedEventFromMessage[M MessageType](msg M, msgStream *schema.StreamReader[M],
 	role schema.RoleType, toolName string) *TypedAgentEvent[M] {
 	return &TypedAgentEvent[M]{
 		Output: &TypedAgentOutput[M]{
@@ -262,7 +262,7 @@ func typedEventFromMessage[M messageType](msg M, msgStream *schema.StreamReader[
 // typedModelOutputEvent creates a model-output event for the generic path.
 // For *schema.Message, Role is set to schema.Assistant.
 // For *schema.AgenticMessage, AgenticRole is set to schema.AgenticRoleTypeAssistant.
-func typedModelOutputEvent[M messageType](msg M, msgStream *schema.StreamReader[M]) *TypedAgentEvent[M] {
+func typedModelOutputEvent[M MessageType](msg M, msgStream *schema.StreamReader[M]) *TypedAgentEvent[M] {
 	var role schema.RoleType
 	var agenticRole schema.AgenticRoleType
 	var zero M
@@ -317,7 +317,7 @@ type TransferToAgentAction struct {
 	DestAgentName string
 }
 
-type TypedAgentOutput[M messageType] struct {
+type TypedAgentOutput[M MessageType] struct {
 	MessageOutput *TypedMessageVariant[M]
 
 	CustomizedOutput any
@@ -416,7 +416,7 @@ type runStepSerialization struct {
 
 // TypedAgentEvent represents a single event emitted during agent execution.
 // CheckpointSchema: persisted via serialization.RunCtx (gob).
-type TypedAgentEvent[M messageType] struct {
+type TypedAgentEvent[M MessageType] struct {
 	AgentName string
 
 	// RunPath represents the execution path from root agent to the current event source.
@@ -437,7 +437,7 @@ type TypedAgentEvent[M messageType] struct {
 // AgentEvent is the default event type using *schema.Message.
 type AgentEvent = TypedAgentEvent[*schema.Message]
 
-type TypedAgentInput[M messageType] struct {
+type TypedAgentInput[M MessageType] struct {
 	Messages        []M
 	EnableStreaming bool
 }
@@ -450,7 +450,7 @@ type AgentInput = TypedAgentInput[*schema.Message]
 // orchestration, cancel monitoring, retry, flowAgent).
 // For M = *schema.AgenticMessage, single-agent execution works but cancel
 // monitoring on the model stream and retry are not yet wired.
-type TypedAgent[M messageType] interface {
+type TypedAgent[M MessageType] interface {
 	Name(ctx context.Context) string
 	Description(ctx context.Context) string
 
@@ -478,7 +478,7 @@ type OnSubAgents interface {
 	OnDisallowTransferToParent(ctx context.Context) error
 }
 
-type TypedResumableAgent[M messageType] interface {
+type TypedResumableAgent[M MessageType] interface {
 	TypedAgent[M]
 
 	Resume(ctx context.Context, info *ResumeInfo, opts ...AgentRunOption) *AsyncIterator[*TypedAgentEvent[M]]
@@ -486,7 +486,7 @@ type TypedResumableAgent[M messageType] interface {
 
 type ResumableAgent = TypedResumableAgent[*schema.Message]
 
-func concatMessageStream[M messageType](stream *schema.StreamReader[M]) (M, error) {
+func concatMessageStream[M MessageType](stream *schema.StreamReader[M]) (M, error) {
 	var zero M
 	switch s := any(stream).(type) {
 	case *schema.StreamReader[*schema.Message]:
@@ -514,6 +514,6 @@ func concatMessageStream[M messageType](stream *schema.StreamReader[M]) (M, erro
 		}
 		return any(result).(M), nil
 	default:
-		panic("unreachable: unknown messageType")
+		panic("unreachable: unknown MessageType")
 	}
 }
