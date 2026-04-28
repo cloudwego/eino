@@ -2216,6 +2216,15 @@ func (h *testAfterAgentHandler) AfterAgent(ctx context.Context, state *ChatModel
 	return h.fn(ctx, state)
 }
 
+type testAgenticAfterAgentHandler struct {
+	*TypedBaseChatModelAgentMiddleware[*schema.AgenticMessage]
+	fn func(ctx context.Context, state *TypedChatModelAgentState[*schema.AgenticMessage]) (context.Context, error)
+}
+
+func (h *testAgenticAfterAgentHandler) AfterAgent(ctx context.Context, state *TypedChatModelAgentState[*schema.AgenticMessage]) (context.Context, error) {
+	return h.fn(ctx, state)
+}
+
 func TestAfterAgent(t *testing.T) {
 	t.Run("FinalAnswer", func(t *testing.T) {
 		ctx := context.Background()
@@ -2528,5 +2537,58 @@ func TestAfterAgent(t *testing.T) {
 		}
 
 		assert.False(t, handler2Called, "Handler 2 should NOT be called when Handler 1 errors (fail-fast)")
+	})
+
+	t.Run("AgenticFinalAnswer", func(t *testing.T) {
+		ctx := context.Background()
+
+		agenticResponse := &schema.AgenticMessage{
+			Role: schema.AgenticRoleTypeAssistant,
+			ContentBlocks: []*schema.ContentBlock{
+				schema.NewContentBlock(&schema.AssistantGenText{Text: "agentic response"}),
+			},
+		}
+
+		m := &mockAgenticModel{
+			generateFn: func(ctx context.Context, input []*schema.AgenticMessage, opts ...model.Option) (*schema.AgenticMessage, error) {
+				return agenticResponse, nil
+			},
+		}
+
+		var called bool
+		var capturedState *TypedChatModelAgentState[*schema.AgenticMessage]
+
+		handler := &testAgenticAfterAgentHandler{fn: func(ctx context.Context, state *TypedChatModelAgentState[*schema.AgenticMessage]) (context.Context, error) {
+			called = true
+			capturedState = state
+			return ctx, nil
+		}}
+
+		agent, err := NewTypedChatModelAgent[*schema.AgenticMessage](ctx, &TypedChatModelAgentConfig[*schema.AgenticMessage]{
+			Name:        "AgenticTestAgent",
+			Description: "test",
+			Model:       m,
+			ToolsConfig: ToolsConfig{
+				ToolsNodeConfig: compose.ToolsNodeConfig{
+					Tools: []tool.BaseTool{&namedTool{name: "dummyTool"}},
+				},
+			},
+			Handlers: []TypedChatModelAgentMiddleware[*schema.AgenticMessage]{handler},
+		})
+		assert.NoError(t, err)
+
+		iter := agent.Run(ctx, &TypedAgentInput[*schema.AgenticMessage]{
+			Messages: []*schema.AgenticMessage{schema.UserAgenticMessage("test")},
+		})
+		for {
+			_, ok := iter.Next()
+			if !ok {
+				break
+			}
+		}
+
+		assert.True(t, called, "AfterAgent should be called on agentic final answer")
+		assert.NotNil(t, capturedState)
+		assert.GreaterOrEqual(t, len(capturedState.Messages), 2, "state should contain at least user + assistant messages")
 	})
 }
