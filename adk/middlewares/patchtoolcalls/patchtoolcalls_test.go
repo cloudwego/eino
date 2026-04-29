@@ -22,76 +22,11 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/cloudwego/eino/adk"
 	"github.com/cloudwego/eino/schema"
 )
-
-func TestPatchToolCalls(t *testing.T) {
-	ctx := context.Background()
-	m, err := New(ctx, nil)
-	assert.NoError(t, err)
-
-	// empty messages
-	state := &adk.ChatModelAgentState{
-		Messages: nil,
-	}
-	_, newState, err := m.BeforeModelRewriteState(ctx, state, nil)
-	assert.NoError(t, err)
-	assert.Len(t, newState.Messages, 0)
-
-	state = &adk.ChatModelAgentState{
-		Messages: []adk.Message{
-			schema.UserMessage("hello"),
-			schema.AssistantMessage("hi there", nil),
-		},
-	}
-	_, newState, err = m.BeforeModelRewriteState(ctx, state, nil)
-	assert.NoError(t, err)
-	assert.Len(t, newState.Messages, 2)
-
-	state = &adk.ChatModelAgentState{
-		Messages: []adk.Message{
-			schema.UserMessage("hello"),
-			schema.AssistantMessage("", []schema.ToolCall{
-				{ID: "call_1", Function: schema.FunctionCall{Name: "tool_a"}},
-				{ID: "call_2", Function: schema.FunctionCall{Name: "tool_b"}},
-			}),
-			schema.ToolMessage("result_a", "call_1", schema.WithToolName("tool_a")),
-		},
-	}
-	_, newState, err = m.BeforeModelRewriteState(ctx, state, nil)
-	assert.NoError(t, err)
-	patchedMsg := newState.Messages[2]
-	assert.Equal(t, schema.Tool, patchedMsg.Role)
-	assert.Equal(t, "call_2", patchedMsg.ToolCallID)
-	assert.Equal(t, "tool_b", patchedMsg.ToolName)
-	assert.Equal(t, fmt.Sprintf(defaultPatchedToolMessageTemplate, "tool_b", "call_2"), patchedMsg.Content)
-
-	m, err = New(ctx, &Config{
-		PatchedContentGenerator: func(ctx context.Context, toolName, toolCallID string) (string, error) {
-			return fmt.Sprintf("123 %s %s", toolName, toolCallID), nil
-		},
-	})
-	assert.NoError(t, err)
-	state = &adk.ChatModelAgentState{
-		Messages: []adk.Message{
-			schema.UserMessage("hello"),
-			schema.AssistantMessage("", []schema.ToolCall{
-				{ID: "call_1", Function: schema.FunctionCall{Name: "tool_a"}},
-				{ID: "call_2", Function: schema.FunctionCall{Name: "tool_b"}},
-			}),
-			schema.ToolMessage("result_a", "call_1", schema.WithToolName("tool_a")),
-		},
-	}
-	_, newState, err = m.BeforeModelRewriteState(ctx, state, nil)
-	assert.NoError(t, err)
-	patchedMsg = newState.Messages[2]
-	assert.Equal(t, schema.Tool, patchedMsg.Role)
-	assert.Equal(t, "call_2", patchedMsg.ToolCallID)
-	assert.Equal(t, "tool_b", patchedMsg.ToolName)
-	assert.Equal(t, "123 tool_b call_2", patchedMsg.Content)
-}
 
 func TestNewTypedAgenticMessage(t *testing.T) {
 	ctx := context.Background()
@@ -304,4 +239,45 @@ func testPatchToolCallsGeneric[M adk.MessageType](t *testing.T) {
 func TestPatchToolCallsGeneric(t *testing.T) {
 	t.Run("Message", testPatchToolCallsGeneric[*schema.Message])
 	t.Run("AgenticMessage", testPatchToolCallsGeneric[*schema.AgenticMessage])
+}
+
+// TestPatchToolCalls_NilFunctionToolCallInBlock verifies the middleware handles
+// a ContentBlock with Type=FunctionToolCall but FunctionToolCall=nil without panicking.
+func TestPatchToolCalls_NilFunctionToolCallInBlock(t *testing.T) {
+	ctx := context.Background()
+	mw, err := NewTyped[*schema.AgenticMessage](ctx, nil)
+	require.NoError(t, err)
+
+	msgs := []*schema.AgenticMessage{
+		schema.UserAgenticMessage("hello"),
+		{
+			Role: schema.AgenticRoleTypeAssistant,
+			ContentBlocks: []*schema.ContentBlock{
+				{
+					Type:             schema.ContentBlockTypeFunctionToolCall,
+					FunctionToolCall: nil, // nil despite type indicating tool call
+				},
+				schema.NewContentBlock(&schema.FunctionToolCall{
+					CallID: "call_1",
+					Name:   "real_tool",
+				}),
+			},
+		},
+	}
+
+	state := &adk.TypedChatModelAgentState[*schema.AgenticMessage]{Messages: msgs}
+	_, newState, err := mw.BeforeModelRewriteState(ctx, state, nil)
+	assert.NoError(t, err)
+	assert.Len(t, newState.Messages, 3, "should patch call_1 but skip nil FunctionToolCall block")
+
+	patchMsg := newState.Messages[2]
+	assert.Equal(t, schema.AgenticRoleTypeUser, patchMsg.Role)
+	foundResult := false
+	for _, block := range patchMsg.ContentBlocks {
+		if block != nil && block.Type == schema.ContentBlockTypeFunctionToolResult &&
+			block.FunctionToolResult != nil && block.FunctionToolResult.CallID == "call_1" {
+			foundResult = true
+		}
+	}
+	assert.True(t, foundResult, "patched message should contain tool result for call_1")
 }

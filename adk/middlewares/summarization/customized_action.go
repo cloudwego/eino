@@ -18,34 +18,47 @@ package summarization
 
 import (
 	"github.com/cloudwego/eino/adk"
+	"github.com/cloudwego/eino/schema"
 )
 
-type CustomizedAction struct {
+// TypedCustomizedAction is the generic customized action for summarization events.
+type TypedCustomizedAction[M adk.MessageType] struct {
 	// Type is the action type.
 	Type ActionType `json:"type"`
 
 	// Before is set when Type is ActionTypeBeforeSummarize.
 	// Emitted after trigger condition is met, before calling model to generate summary.
-	Before *BeforeSummarizeAction `json:"before,omitempty"`
+	Before *TypedBeforeSummarizeAction[M] `json:"before,omitempty"`
 
 	// After is set when Type is ActionTypeAfterSummarize.
 	// Emitted after summarization.
-	After *AfterSummarizeAction `json:"after,omitempty"`
+	After *TypedAfterSummarizeAction[M] `json:"after,omitempty"`
 
 	// GenerateSummary is set when Type is ActionTypeGenerateSummary.
 	// Emitted on each summary generation attempt, including retries and failovers.
-	GenerateSummary *GenerateSummaryAction `json:"generate_summary,omitempty"`
+	GenerateSummary *TypedGenerateSummaryAction[M] `json:"generate_summary,omitempty"`
 }
 
-type BeforeSummarizeAction struct {
+// CustomizedAction is the default action type using *schema.Message.
+type CustomizedAction = TypedCustomizedAction[*schema.Message]
+
+// TypedBeforeSummarizeAction contains the state messages before summarization.
+type TypedBeforeSummarizeAction[M adk.MessageType] struct {
 	// Messages is the original state messages before summarization.
-	Messages []adk.Message `json:"messages,omitempty"`
+	Messages []M `json:"messages,omitempty"`
 }
 
-type AfterSummarizeAction struct {
+// BeforeSummarizeAction is the default type using *schema.Message.
+type BeforeSummarizeAction = TypedBeforeSummarizeAction[*schema.Message]
+
+// TypedAfterSummarizeAction contains the state messages after summarization.
+type TypedAfterSummarizeAction[M adk.MessageType] struct {
 	// Messages is the final state messages after summarization.
-	Messages []adk.Message `json:"messages,omitempty"`
+	Messages []M `json:"messages,omitempty"`
 }
+
+// AfterSummarizeAction is the default type using *schema.Message.
+type AfterSummarizeAction = TypedAfterSummarizeAction[*schema.Message]
 
 // GenerateSummaryPhase indicates which phase a model generate attempt belongs to during summarization.
 type GenerateSummaryPhase string
@@ -60,9 +73,9 @@ const (
 	GenerateSummaryPhaseFailover GenerateSummaryPhase = "failover"
 )
 
-// GenerateSummaryAction contains details of a single model generate attempt during summarization.
+// TypedGenerateSummaryAction contains details of a single model generate attempt during summarization.
 // Emitted on every attempt, whether it succeeds or fails.
-type GenerateSummaryAction struct {
+type TypedGenerateSummaryAction[M adk.MessageType] struct {
 	// Attempt is the 1-based attempt number within the current phase.
 	// For primary phase, Attempt=1 is the initial call and Attempt>1 indicates retries.
 	// For failover phase, Attempt counts the failover rounds (1, 2, 3, ...).
@@ -73,13 +86,16 @@ type GenerateSummaryAction struct {
 
 	// ModelResponse is the raw response returned by the model.
 	// It may be nil when the model call fails without returning a response.
-	ModelResponse adk.Message `json:"model_response,omitempty"`
+	ModelResponse M `json:"model_response,omitempty"`
 
 	// err is the error returned by the model call, if any. Use GetError to access it.
 	err error
 }
 
+// GenerateSummaryAction is the default type using *schema.Message.
+type GenerateSummaryAction = TypedGenerateSummaryAction[*schema.Message]
+
 // GetError returns the error from the model call, if any.
-func (a *GenerateSummaryAction) GetError() error {
+func (a *TypedGenerateSummaryAction[M]) GetError() error {
 	return a.err
 }

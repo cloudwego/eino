@@ -35,7 +35,8 @@ import (
 )
 
 func init() {
-	schema.RegisterName[*CustomizedAction]("_eino_adk_summarization_mw_customized_action")
+	schema.RegisterName[*TypedCustomizedAction[*schema.Message]]("_eino_adk_summarization_mw_customized_action")
+	schema.RegisterName[*TypedCustomizedAction[*schema.AgenticMessage]]("_eino_adk_summarization_mw_customized_action_agentic")
 }
 
 type TypedTokenCounterFunc[M adk.MessageType] func(ctx context.Context, input *TypedTokenCounterInput[M]) (int, error)
@@ -388,10 +389,10 @@ func (m *typedMiddleware[M]) BeforeModelRewriteState(ctx context.Context, state 
 	beforeState := *state
 
 	if m.cfg.EmitInternalEvents {
-		err = m.emitEvent(ctx, &CustomizedAction{
+		err = m.emitEvent(ctx, &TypedCustomizedAction[M]{
 			Type: ActionTypeBeforeSummarize,
-			Before: &BeforeSummarizeAction{
-				Messages: typedMsgsToLegacy(beforeState.Messages),
+			Before: &TypedBeforeSummarizeAction[M]{
+				Messages: beforeState.Messages,
 			},
 		})
 		if err != nil {
@@ -423,10 +424,10 @@ func (m *typedMiddleware[M]) BeforeModelRewriteState(ctx context.Context, state 
 	}
 
 	if m.cfg.EmitInternalEvents {
-		err = m.emitEvent(ctx, &CustomizedAction{
+		err = m.emitEvent(ctx, &TypedCustomizedAction[M]{
 			Type: ActionTypeAfterSummarize,
-			After: &AfterSummarizeAction{
-				Messages: typedMsgsToLegacy(afterState.Messages),
+			After: &TypedAfterSummarizeAction[M]{
+				Messages: afterState.Messages,
 			},
 		})
 		if err != nil {
@@ -491,8 +492,8 @@ func (m *typedMiddleware[M]) getUserMessageContextTokens() int {
 	return m.getTriggerContextTokens() / 3
 }
 
-func (m *typedMiddleware[M]) emitEvent(ctx context.Context, action *CustomizedAction) error {
-	err := adk.SendEvent(ctx, &adk.AgentEvent{
+func (m *typedMiddleware[M]) emitEvent(ctx context.Context, action *TypedCustomizedAction[M]) error {
+	err := adk.TypedSendEvent[M](ctx, &adk.TypedAgentEvent[M]{
 		Action: &adk.AgentAction{
 			CustomizedAction: action,
 		},
@@ -510,14 +511,14 @@ func (m *typedMiddleware[M]) emitGenerateSummaryEvent(ctx context.Context, attem
 		return nil
 	}
 
-	action := &GenerateSummaryAction{
+	action := &TypedGenerateSummaryAction[M]{
 		Attempt:       attempt,
 		Phase:         phase,
-		ModelResponse: typedMsgToLegacy(resp),
+		ModelResponse: resp,
 		err:           err,
 	}
 
-	return m.emitEvent(ctx, &CustomizedAction{
+	return m.emitEvent(ctx, &TypedCustomizedAction[M]{
 		Type:            ActionTypeGenerateSummary,
 		GenerateSummary: action,
 	})
@@ -564,11 +565,11 @@ func estimateTokenBytes(tokens int) int {
 }
 
 func (m *typedMiddleware[M]) summarize(ctx context.Context, originalMsgs []M) (M, []M, error) {
+	var zero M
 	_, contextMsgs := m.splitSystemAndContextMsgs(originalMsgs)
 
 	modelInput, err := m.buildSummarizationModelInput(ctx, originalMsgs, contextMsgs)
 	if err != nil {
-		var zero M
 		return zero, nil, err
 	}
 
@@ -576,11 +577,9 @@ func (m *typedMiddleware[M]) summarize(ctx context.Context, originalMsgs []M) (M
 	if typedShouldFailover[M](ctx, m.cfg.Failover, rawSummary, err) {
 		rawSummary, modelInput, err = m.runFailover(ctx, originalMsgs, modelInput, rawSummary, err)
 		if err != nil {
-			var zero M
 			return zero, nil, err
 		}
 	} else if err != nil {
-		var zero M
 		return zero, nil, fmt.Errorf("failed to generate summary: %w", err)
 	}
 
@@ -603,6 +602,7 @@ func (m *typedMiddleware[M]) splitSystemAndContextMsgs(msgs []M) ([]M, []M) {
 func (m *typedMiddleware[M]) runFailover(ctx context.Context, originalMsgs, defaultInput []M, lastResp M,
 	lastErr error) (M, []M, error) {
 
+	var zero M
 	const defaultMaxRetries = 3
 
 	sysInstruction, userInstruction := m.getModelInstructions()
@@ -635,12 +635,10 @@ func (m *typedMiddleware[M]) runFailover(ctx context.Context, originalMsgs, defa
 
 		failoverModel, nextInput, failoverErr := m.getFailoverModel(ctx, fctx, defaultInput)
 		if failoverErr != nil {
-			var zero M
 			lastResp = zero
 			lastErr = failoverErr
 			if emitErr := m.emitGenerateSummaryEvent(ctx, attempt, GenerateSummaryPhaseFailover, zero, failoverErr); emitErr != nil {
-				var zeroM M
-				return zeroM, nil, emitErr
+				return zero, nil, emitErr
 			}
 		} else {
 			modelInput = nextInput
@@ -652,17 +650,14 @@ func (m *typedMiddleware[M]) runFailover(ctx context.Context, originalMsgs, defa
 		}
 		if attempt == maxRetries {
 			if lastErr != nil {
-				var zero M
 				return zero, nil, fmt.Errorf("exceeds max failover attempts: %w", lastErr)
 			}
-			var zero M
 			return zero, nil, fmt.Errorf("exceeds max failover attempts")
 		}
 
 		select {
 		case <-time.After(backoff(ctx, attempt, lastResp, lastErr)):
 		case <-ctx.Done():
-			var zero M
 			return zero, nil, ctx.Err()
 		}
 	}
@@ -1289,35 +1284,4 @@ func setMsgMultipartContent[M adk.MessageType](msg M, summaryContent, continueIn
 		return any(m).(M)
 	}
 	panic("unreachable")
-}
-
-// typedMsgToLegacy converts a typed message to adk.Message for event emission.
-// Returns nil for AgenticMessage or nil input.
-func typedMsgToLegacy[M adk.MessageType](msg M) adk.Message {
-	switch m := any(msg).(type) {
-	case *schema.Message:
-		return m
-	case *schema.AgenticMessage:
-		// Events use adk.Message; for AgenticMessage, return nil.
-		_ = m
-		return nil
-	}
-	return nil
-}
-
-// typedMsgsToLegacy converts typed messages to []adk.Message for event emission.
-// For *schema.Message, it returns the same slice. For *schema.AgenticMessage, returns nil.
-func typedMsgsToLegacy[M adk.MessageType](msgs []M) []adk.Message {
-	var zero M
-	switch any(zero).(type) {
-	case *schema.Message:
-		result := make([]adk.Message, len(msgs))
-		for i, msg := range msgs {
-			result[i] = any(msg).(*schema.Message)
-		}
-		return result
-	case *schema.AgenticMessage:
-		return nil
-	}
-	return nil
 }

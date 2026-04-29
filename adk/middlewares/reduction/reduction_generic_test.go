@@ -840,11 +840,40 @@ func TestReductionGeneric(t *testing.T) {
 		t.Run("ClearFlow", testClearFlowGeneric[*schema.Message])
 		t.Run("Truncation", testTruncationGeneric[*schema.Message])
 		t.Run("ClearPostProcess", testClearPostProcessGeneric[*schema.Message])
+		t.Run("CopyNilMessage", testCopyNilMessage[*schema.Message])
 	})
 	t.Run("AgenticMessage", func(t *testing.T) {
 		t.Run("Helpers", testHelperFunctions[*schema.AgenticMessage])
 		t.Run("ClearFlow", testClearFlowGeneric[*schema.AgenticMessage])
 		t.Run("Truncation", testTruncationGeneric[*schema.AgenticMessage])
 		t.Run("ClearPostProcess", testClearPostProcessGeneric[*schema.AgenticMessage])
+		t.Run("CopyNilMessage", testCopyNilMessage[*schema.AgenticMessage])
+	})
+}
+
+// testCopyNilMessage verifies that copyMessagesGeneric does not panic when
+// the input slice contains nil message elements (regression test).
+func testCopyNilMessage[M adk.MessageType](t *testing.T) {
+	var zero M
+	var msgs []M
+	switch any(zero).(type) {
+	case *schema.Message:
+		msgs = any([]*schema.Message{
+			schema.UserMessage("hello"),
+			nil,
+			schema.UserMessage("world"),
+		}).([]M)
+	case *schema.AgenticMessage:
+		msgs = any([]*schema.AgenticMessage{
+			schema.UserAgenticMessage("hello"),
+			nil,
+			schema.UserAgenticMessage("world"),
+		}).([]M)
+	}
+
+	assert.NotPanics(t, func() {
+		copied := copyMessagesGeneric[M](msgs)
+		assert.Len(t, copied, 3)
+		assert.Nil(t, copied[1], "nil element should be preserved as nil")
 	})
 }

@@ -1212,6 +1212,9 @@ func copyMessagesGeneric[M adk.MessageType](msgs []M) []M {
 func copyAgenticMessages(msgs []*schema.AgenticMessage) []*schema.AgenticMessage {
 	resp := make([]*schema.AgenticMessage, len(msgs))
 	for i, msg := range msgs {
+		if msg == nil {
+			continue
+		}
 		copied := &schema.AgenticMessage{
 			Role:         msg.Role,
 			ResponseMeta: msg.ResponseMeta,
@@ -1234,7 +1237,9 @@ func copyAgenticMessages(msgs []*schema.AgenticMessage) []*schema.AgenticMessage
 						ftr.Blocks = make([]*schema.FunctionToolResultBlock, len(block.FunctionToolResult.Blocks))
 						for k, rb := range block.FunctionToolResult.Blocks {
 							if rb != nil {
-								rbCopy := *rb
+								rbCopy := *rb // shallow copy: Image/Audio/Video/File sub-fields are not deep-copied.
+								// This is safe because the clear logic replaces entire blocks rather than
+								// mutating media fields in-place. Custom ClearHandlers should follow the same pattern.
 								if rb.Text != nil {
 									t := *rb.Text
 									rbCopy.Text = &t
@@ -1268,6 +1273,9 @@ func copyAgenticMessages(msgs []*schema.AgenticMessage) []*schema.AgenticMessage
 func copyMessages(msgs []*schema.Message) []*schema.Message {
 	resp := make([]*schema.Message, len(msgs))
 	for i, msg := range msgs {
+		if msg == nil {
+			continue
+		}
 		copied := &schema.Message{
 			Role:                     msg.Role,
 			Content:                  msg.Content,

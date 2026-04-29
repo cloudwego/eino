@@ -189,14 +189,14 @@ type TypedConfig[M adk.MessageType] struct {
 // Config is a backward-compatible alias for TypedConfig instantiated with *schema.Message.
 type Config = TypedConfig[*schema.Message]
 
-// NewTypedMiddleware creates a generic skill middleware handler for TypedChatModelAgent.
+// NewTyped creates a generic skill middleware handler for TypedChatModelAgent.
 //
 // This is the generic constructor that supports both *schema.Message and *schema.AgenticMessage.
 // For *schema.AgenticMessage, tool execution is message-type-independent; the model override
 // via ModelHub only takes effect when M is *schema.Message (for other types it is a no-op).
 //
 // See NewMiddleware for full usage documentation.
-func NewTypedMiddleware[M adk.MessageType](ctx context.Context, config *TypedConfig[M]) (adk.TypedChatModelAgentMiddleware[M], error) {
+func NewTyped[M adk.MessageType](ctx context.Context, config *TypedConfig[M]) (adk.TypedChatModelAgentMiddleware[M], error) {
 	if config == nil {
 		return nil, fmt.Errorf("config is required")
 	}
@@ -263,7 +263,7 @@ func NewTypedMiddleware[M adk.MessageType](ctx context.Context, config *TypedCon
 //	    Handlers: []adk.ChatModelAgentMiddleware{handler},
 //	})
 func NewMiddleware(ctx context.Context, config *Config) (adk.ChatModelAgentMiddleware, error) {
-	return NewTypedMiddleware[*schema.Message](ctx, config)
+	return NewTyped[*schema.Message](ctx, config)
 }
 
 type typedSkillHandler[M adk.MessageType] struct {
@@ -558,9 +558,9 @@ func (s *typedSkillTool[M]) runAgentMode(ctx context.Context, skill Skill, forkH
 			return "", fmt.Errorf("failed to build fork messages: %w", err)
 		}
 	} else {
+		var zero M
 		if forkHistory {
 			var toolMsg M
-			var zero M
 			switch any(zero).(type) {
 			case *schema.Message:
 				toolMsg = any(schema.ToolMessage(skillContent, toolCallID)).(M)
@@ -572,7 +572,6 @@ func (s *typedSkillTool[M]) runAgentMode(ctx context.Context, skill Skill, forkH
 			messages = append(history, toolMsg)
 		} else {
 			var userMsg M
-			var zero M
 			switch any(zero).(type) {
 			case *schema.Message:
 				userMsg = any(schema.UserMessage(skillContent)).(M)

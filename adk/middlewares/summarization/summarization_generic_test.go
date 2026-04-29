@@ -91,66 +91,6 @@ func (m *genericMockModel[M]) Stream(_ context.Context, _ []M, _ ...model.Option
 }
 
 // ============================================================================
-// typedMsgToLegacy / typedMsgsToLegacy tests
-// ============================================================================
-
-func TestTypedMsgToLegacy_AgenticMessage(t *testing.T) {
-	t.Run("AgenticMessage returns nil", func(t *testing.T) {
-		msg := &schema.AgenticMessage{
-			Role: schema.AgenticRoleTypeUser,
-			ContentBlocks: []*schema.ContentBlock{
-				schema.NewContentBlock(&schema.UserInputText{Text: "hello"}),
-			},
-		}
-		result := typedMsgToLegacy[*schema.AgenticMessage](msg)
-		assert.Nil(t, result, "typedMsgToLegacy should return nil for AgenticMessage")
-	})
-
-	t.Run("nil AgenticMessage returns nil", func(t *testing.T) {
-		var msg *schema.AgenticMessage
-		result := typedMsgToLegacy[*schema.AgenticMessage](msg)
-		assert.Nil(t, result)
-	})
-
-	t.Run("Message returns the message itself", func(t *testing.T) {
-		msg := schema.UserMessage("hello")
-		result := typedMsgToLegacy[*schema.Message](msg)
-		assert.Equal(t, msg, result)
-	})
-}
-
-func TestTypedMsgsToLegacy_AgenticMessage(t *testing.T) {
-	t.Run("AgenticMessage slice returns nil", func(t *testing.T) {
-		msgs := []*schema.AgenticMessage{
-			{
-				Role: schema.AgenticRoleTypeUser,
-				ContentBlocks: []*schema.ContentBlock{
-					schema.NewContentBlock(&schema.UserInputText{Text: "hello"}),
-				},
-			},
-			{
-				Role: schema.AgenticRoleTypeAssistant,
-				ContentBlocks: []*schema.ContentBlock{
-					schema.NewContentBlock(&schema.AssistantGenText{Text: "hi"}),
-				},
-			},
-		}
-		result := typedMsgsToLegacy[*schema.AgenticMessage](msgs)
-		assert.Nil(t, result, "typedMsgsToLegacy should return nil for AgenticMessage slice")
-	})
-
-	t.Run("Message slice returns converted slice", func(t *testing.T) {
-		msg1 := schema.UserMessage("hello")
-		msg2 := schema.AssistantMessage("hi", nil)
-		msgs := []*schema.Message{msg1, msg2}
-		result := typedMsgsToLegacy[*schema.Message](msgs)
-		require.Len(t, result, 2)
-		assert.Equal(t, msg1, result[0])
-		assert.Equal(t, msg2, result[1])
-	})
-}
-
-// ============================================================================
 // Tests
 // ============================================================================
 
@@ -165,6 +105,44 @@ func TestSummarizationGeneric(t *testing.T) {
 		t.Run("Flow", testSummarizationFlow[*schema.AgenticMessage])
 		t.Run("SummarizeMessages", testTypedSummarizeMessages[*schema.AgenticMessage])
 	})
+}
+
+// TestEmitInternalEvents_AgenticMessage_RequiresExecContext verifies that
+// EmitInternalEvents=true with AgenticMessage correctly requires an agent exec
+// context (via TypedSendEvent[M]), rather than silently failing or panicking.
+func TestEmitInternalEvents_AgenticMessage_RequiresExecContext(t *testing.T) {
+	ctx := context.Background()
+
+	longContent := strings.Repeat("x", 800000) // triggers summarization
+	msgs := []*schema.AgenticMessage{
+		{
+			Role: schema.AgenticRoleTypeSystem,
+			ContentBlocks: []*schema.ContentBlock{
+				schema.NewContentBlock(&schema.AssistantGenText{Text: "system"}),
+			},
+		},
+		{
+			Role: schema.AgenticRoleTypeUser,
+			ContentBlocks: []*schema.ContentBlock{
+				schema.NewContentBlock(&schema.UserInputText{Text: longContent}),
+			},
+		},
+	}
+
+	mockResp := smakeAssistantMsg[*schema.AgenticMessage]("This is the summary.")
+	mw, err := NewTyped[*schema.AgenticMessage](ctx, &TypedConfig[*schema.AgenticMessage]{
+		Model:              &genericMockModel[*schema.AgenticMessage]{response: mockResp},
+		EmitInternalEvents: true,
+		Trigger: &TriggerCondition{
+			ContextTokens: 1,
+		},
+	})
+	require.NoError(t, err)
+
+	state := &adk.TypedChatModelAgentState[*schema.AgenticMessage]{Messages: msgs}
+	_, _, err = mw.BeforeModelRewriteState(ctx, state, nil)
+	assert.Error(t, err, "should error without exec context when EmitInternalEvents is true")
+	assert.Contains(t, err.Error(), "send internal event")
 }
 
 // testSummarizationHelpers tests the generic helper functions.

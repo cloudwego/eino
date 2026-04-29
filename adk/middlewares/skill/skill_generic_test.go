@@ -131,7 +131,7 @@ func testWrapModel[M adk.MessageType](t *testing.T) {
 		},
 	}
 
-	mw, err := NewTypedMiddleware[M](ctx, &TypedConfig[M]{
+	mw, err := NewTyped[M](ctx, &TypedConfig[M]{
 		Backend:  &inMemoryBackend{m: []Skill{}},
 		ModelHub: hub,
 	})
@@ -139,7 +139,7 @@ func testWrapModel[M adk.MessageType](t *testing.T) {
 	require.NotNil(t, mw)
 
 	t.Run("nil ModelHub keeps base model", func(t *testing.T) {
-		handler, err := NewTypedMiddleware[M](ctx, &TypedConfig[M]{
+		handler, err := NewTyped[M](ctx, &TypedConfig[M]{
 			Backend: &inMemoryBackend{m: []Skill{}},
 		})
 		require.NoError(t, err)
