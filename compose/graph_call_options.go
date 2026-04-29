@@ -99,11 +99,12 @@ type Option struct {
 
 	paths []*NodePath
 
-	maxRunSteps         int
-	checkPointID        *string
-	writeToCheckPointID *string
-	forceNewRun         bool
-	stateModifier       StateModifier
+	maxRunSteps              int
+	checkPointID             *string
+	writeToCheckPointID      *string
+	forceNewRun              bool
+	stateModifier            StateModifier
+	deleteCheckpointAfterRun bool
 }
 
 func (o Option) deepCopy() Option {

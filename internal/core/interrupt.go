@@ -29,6 +29,14 @@ type CheckPointStore interface {
 	Set(ctx context.Context, checkPointID string, checkPoint []byte) error
 }
 
+// CheckPointDeleter is an optional extension of CheckPointStore that supports deleting checkpoints.
+// When a CheckPointStore also implements CheckPointDeleter, eino will call Delete after a graph run
+// completes successfully (and WithDeleteCheckpointAfterRun was used), so that stale checkpoints are
+// not left behind.
+type CheckPointDeleter interface {
+	Delete(ctx context.Context, checkPointID string) error
+}
+
 type InterruptSignal struct {
 	ID string
 	Address

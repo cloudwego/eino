@@ -2002,3 +2002,116 @@ func (f *checkpointTestTool[I, O]) InvokableRun(ctx context.Context, argumentsIn
 	}
 	return sonic.MarshalString(o)
 }
+
+// deletableStore wraps inMemoryStore and also implements CheckPointDeleter.
+type deletableStore struct {
+	*inMemoryStore
+	deleted []string
+}
+
+func newDeletableStore() *deletableStore {
+	return &deletableStore{inMemoryStore: newInMemoryStore()}
+}
+
+func (d *deletableStore) Delete(_ context.Context, checkPointID string) error {
+	delete(d.m, checkPointID)
+	d.deleted = append(d.deleted, checkPointID)
+	return nil
+}
+
+// TestDeleteCheckpointAfterRun verifies the behaviour of WithDeleteCheckpointAfterRun.
+func TestDeleteCheckpointAfterRun(t *testing.T) {
+	buildGraph := func(store CheckPointStore) (Runnable[string, string], error) {
+		g := NewGraph[string, string]()
+		err := g.AddLambdaNode("node", InvokableLambda(func(ctx context.Context, input string) (string, error) {
+			return input + "_done", nil
+		}))
+		if err != nil {
+			return nil, err
+		}
+		if err = g.AddEdge(START, "node"); err != nil {
+			return nil, err
+		}
+		if err = g.AddEdge("node", END); err != nil {
+			return nil, err
+		}
+		return g.Compile(context.Background(), WithCheckPointStore(store))
+	}
+
+	t.Run("deletes checkpoint after successful run", func(t *testing.T) {
+		store := newDeletableStore()
+		r, err := buildGraph(store)
+		assert.NoError(t, err)
+
+		_, err = r.Invoke(context.Background(), "hello",
+			WithCheckPointID("sess-1"),
+			WithDeleteCheckpointAfterRun(),
+		)
+		assert.NoError(t, err)
+
+		assert.Equal(t, []string{"sess-1"}, store.deleted)
+		_, exists, _ := store.Get(context.Background(), "sess-1")
+		assert.False(t, exists, "checkpoint should have been deleted after successful run")
+	})
+
+	t.Run("does not delete checkpoint on interrupt", func(t *testing.T) {
+		store := newDeletableStore()
+
+		g := NewGraph[string, string]()
+		err := g.AddLambdaNode("node", InvokableLambda(func(ctx context.Context, input string) (string, error) {
+			return input + "_done", nil
+		}))
+		assert.NoError(t, err)
+		assert.NoError(t, g.AddEdge(START, "node"))
+		assert.NoError(t, g.AddEdge("node", END))
+
+		r, err := g.Compile(context.Background(),
+			WithCheckPointStore(store),
+			WithInterruptBeforeNodes([]string{"node"}),
+		)
+		assert.NoError(t, err)
+
+		_, err = r.Invoke(context.Background(), "hello",
+			WithCheckPointID("sess-2"),
+			WithDeleteCheckpointAfterRun(),
+		)
+		assert.NotNil(t, err)
+		_, isInterrupt := ExtractInterruptInfo(err)
+		assert.True(t, isInterrupt)
+
+		// Checkpoint must still exist so it can be resumed.
+		assert.Empty(t, store.deleted)
+		_, exists, _ := store.Get(context.Background(), "sess-2")
+		assert.True(t, exists, "checkpoint should be preserved after an interrupt")
+	})
+
+	t.Run("silently ignored when store does not implement CheckPointDeleter", func(t *testing.T) {
+		store := newInMemoryStore() // does NOT implement CheckPointDeleter
+		r, err := buildGraph(store)
+		assert.NoError(t, err)
+
+		// Should succeed without any panic or error, even though the store cannot delete.
+		result, err := r.Invoke(context.Background(), "hello",
+			WithCheckPointID("sess-3"),
+			WithDeleteCheckpointAfterRun(),
+		)
+		assert.NoError(t, err)
+		assert.Equal(t, "hello_done", result)
+	})
+
+	t.Run("deletes write checkpoint when different from read checkpoint", func(t *testing.T) {
+		store := newDeletableStore()
+		r, err := buildGraph(store)
+		assert.NoError(t, err)
+
+		_, err = r.Invoke(context.Background(), "hello",
+			WithCheckPointID("read-cp"),
+			WithWriteToCheckPointID("write-cp"),
+			WithDeleteCheckpointAfterRun(),
+		)
+		assert.NoError(t, err)
+
+		// Only the write checkpoint should be deleted.
+		assert.Equal(t, []string{"write-cp"}, store.deleted)
+	})
+}

@@ -50,6 +50,12 @@ func RegisterSerializableType[T any](name string) (err error) {
 
 type CheckPointStore = core.CheckPointStore
 
+// CheckPointDeleter is an optional interface that a CheckPointStore can implement to support
+// deleting checkpoints. When the store passed to WithCheckPointStore also implements
+// CheckPointDeleter, eino calls Delete after a graph run that used WithDeleteCheckpointAfterRun
+// completes successfully.
+type CheckPointDeleter = core.CheckPointDeleter
+
 type Serializer interface {
 	Marshal(v any) ([]byte, error)
 	Unmarshal(data []byte, v any) error
@@ -90,6 +96,18 @@ func WithWriteToCheckPointID(checkPointID string) Option {
 func WithForceNewRun() Option {
 	return Option{
 		forceNewRun: true,
+	}
+}
+
+// WithDeleteCheckpointAfterRun deletes the checkpoint when the graph run completes successfully.
+// The checkpoint is only deleted on success; it is preserved when the graph is interrupted so that
+// execution can be resumed later.
+//
+// The checkpoint store must implement CheckPointDeleter for this option to have any effect.
+// If the store does not implement CheckPointDeleter, this option is silently ignored.
+func WithDeleteCheckpointAfterRun() Option {
+	return Option{
+		deleteCheckpointAfterRun: true,
 	}
 }
 

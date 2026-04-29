@@ -108,6 +108,10 @@ func runnableTransform(ctx context.Context, r *composableRunnable, input any, op
 
 func (r *runner) run(ctx context.Context, isStream bool, input any, opts ...Option) (result any, err error) {
 	haveOnStart := false // delay triggering onGraphStart until state initialization is complete, so that the state can be accessed within onGraphStart.
+	// Pre-declare so the defer below can capture them before they are assigned.
+	var deleteAfterRun bool
+	var writeToCheckPointID *string
+	var isSubGraph bool
 	defer func() {
 		if !haveOnStart {
 			ctx, input = onGraphStart(ctx, input, isStream)
@@ -116,6 +120,15 @@ func (r *runner) run(ctx context.Context, isStream bool, input any, opts ...Opti
 			ctx, err = onGraphError(ctx, err)
 		} else {
 			ctx, result = onGraphEnd(ctx, result, isStream)
+			// Delete the checkpoint when the run completes successfully and the caller
+			// opted in via WithDeleteCheckpointAfterRun. Only delete at the top-level
+			// graph (not in subgraphs). Silently skip if the store does not implement
+			// CheckPointDeleter.
+			if deleteAfterRun && !isSubGraph && writeToCheckPointID != nil {
+				if deleter, ok := r.checkPointer.store.(CheckPointDeleter); ok {
+					_ = deleter.Delete(ctx, *writeToCheckPointID)
+				}
+			}
 		}
 	}()
 
@@ -142,13 +155,17 @@ func (r *runner) run(ctx context.Context, isStream bool, input any, opts ...Opti
 	}
 
 	// Extract CheckPointID
-	checkPointID, writeToCheckPointID, stateModifier, forceNewRun := getCheckPointInfo(opts...)
+	var checkPointID *string
+	var stateModifier StateModifier
+	var forceNewRun bool
+	checkPointID, writeToCheckPointID, stateModifier, forceNewRun, deleteAfterRun = getCheckPointInfo(opts...)
 	if checkPointID != nil && r.checkPointer.store == nil {
 		return nil, newGraphRunError(fmt.Errorf("receive checkpoint id but have not set checkpoint store"))
 	}
 
 	// Extract subgraph
-	path, isSubGraph := getNodePath(ctx)
+	var path *NodePath
+	path, isSubGraph = getNodePath(ctx)
 
 	// load checkpoint from ctx/store or init graph
 	initialized := false
@@ -753,7 +770,7 @@ func (r *runner) createTasks(ctx context.Context, nodeMap map[string]any, optMap
 	return nextTasks, nil
 }
 
-func getCheckPointInfo(opts ...Option) (checkPointID *string, writeToCheckPointID *string, stateModifier StateModifier, forceNewRun bool) {
+func getCheckPointInfo(opts ...Option) (checkPointID *string, writeToCheckPointID *string, stateModifier StateModifier, forceNewRun bool, deleteAfterRun bool) {
 	for _, opt := range opts {
 		if opt.checkPointID != nil {
 			checkPointID = opt.checkPointID
@@ -764,7 +781,12 @@ func getCheckPointInfo(opts ...Option) (checkPointID *string, writeToCheckPointI
 		if opt.stateModifier != nil {
 			stateModifier = opt.stateModifier
 		}
-		forceNewRun = opt.forceNewRun
+		if opt.forceNewRun {
+			forceNewRun = opt.forceNewRun
+		}
+		if opt.deleteCheckpointAfterRun {
+			deleteAfterRun = opt.deleteCheckpointAfterRun
+		}
 	}
 	if writeToCheckPointID == nil {
 		writeToCheckPointID = checkPointID
