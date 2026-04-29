@@ -305,7 +305,18 @@ func internalMarshal(v any, fieldType reflect.Type) (*internalStruct, error) {
 		}
 
 		if checkMarshaler(rt) {
-			jsonBytes, err := json.Marshal(rv.Interface())
+			// Use rv.Addr() when possible so that pointer-receiver MarshalJSON methods
+			// are callable. rv is addressable when obtained from pointer dereference.
+			// When not addressable, copy into an addressable temporary.
+			var marshalTarget any
+			if rv.CanAddr() {
+				marshalTarget = rv.Addr().Interface()
+			} else {
+				tmp := reflect.New(rt)
+				tmp.Elem().Set(rv)
+				marshalTarget = tmp.Interface()
+			}
+			jsonBytes, err := json.Marshal(marshalTarget)
 			if err != nil {
 				return nil, err
 			}
