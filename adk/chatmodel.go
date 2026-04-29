@@ -807,16 +807,13 @@ func (a *TypedChatModelAgent[M]) applyBeforeAgent(ctx context.Context, ec *execC
 		}
 	}
 
+	toolsNodeConf := ec.toolsNodeConf
+	toolsNodeConf.Tools = runCtx.Tools
+	toolsNodeConf.ToolCallMiddlewares = cloneSlice(ec.toolsNodeConf.ToolCallMiddlewares)
+
 	runtimeEC := &execContext{
-		instruction: runCtx.Instruction,
-		toolsNodeConf: compose.ToolsNodeConfig{
-			Tools:                runCtx.Tools,
-			ToolCallMiddlewares:  cloneSlice(ec.toolsNodeConf.ToolCallMiddlewares),
-			UnknownToolsHandler:  ec.toolsNodeConf.UnknownToolsHandler,
-			ExecuteSequentially:  ec.toolsNodeConf.ExecuteSequentially,
-			ToolArgumentsHandler: ec.toolsNodeConf.ToolArgumentsHandler,
-			ToolAliases:          ec.toolsNodeConf.ToolAliases,
-		},
+		instruction:    runCtx.Instruction,
+		toolsNodeConf:  toolsNodeConf,
 		returnDirectly: runCtx.ReturnDirectly,
 		toolSearchTool: runCtx.ToolSearchTool,
 		toolUpdated:    true,
@@ -836,14 +833,9 @@ func (a *TypedChatModelAgent[M]) applyBeforeAgent(ctx context.Context, ec *execC
 
 func (a *TypedChatModelAgent[M]) prepareExecContext(ctx context.Context) (*execContext, error) {
 	instruction := a.instruction
-	toolsNodeConf := compose.ToolsNodeConfig{
-		Tools:                cloneSlice(a.toolsConfig.Tools),
-		ToolCallMiddlewares:  cloneSlice(a.toolsConfig.ToolCallMiddlewares),
-		UnknownToolsHandler:  a.toolsConfig.UnknownToolsHandler,
-		ExecuteSequentially:  a.toolsConfig.ExecuteSequentially,
-		ToolArgumentsHandler: a.toolsConfig.ToolArgumentsHandler,
-		ToolAliases:          a.toolsConfig.ToolAliases,
-	}
+	toolsNodeConf := a.toolsConfig.ToolsNodeConfig
+	toolsNodeConf.Tools = cloneSlice(a.toolsConfig.Tools)
+	toolsNodeConf.ToolCallMiddlewares = cloneSlice(a.toolsConfig.ToolCallMiddlewares)
 	returnDirectly := copyMap(a.toolsConfig.ReturnDirectly)
 
 	transferToAgents := a.subAgents
