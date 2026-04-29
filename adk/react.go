@@ -23,6 +23,7 @@ import (
 	"errors"
 	"io"
 
+	"github.com/cloudwego/eino/adk/internal"
 	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/compose"
 	"github.com/cloudwego/eino/schema"
@@ -52,6 +53,7 @@ type typedState[M MessageType] struct {
 	RemainingIterations      int
 	ReturnDirectlyEvent      *TypedAgentEvent[M]
 	RetryAttempt             int
+	ToolMsgIDs               map[string]map[string]string // toolName → callID → eino message ID
 }
 
 // State is the internal state of the ChatModelAgent.
@@ -92,7 +94,7 @@ func init() {
 
 	// backward compatibility when decoding checkpoints created by v0.8.0 - v0.8.3
 	gob.Register(&AgentEvent{})
-	gob.Register(int(0))
+	gob.Register(0)
 
 	schema.RegisterName[*TypedAgentInput[*schema.AgenticMessage]]("_eino_adk_agentic_agent_input")
 	schema.RegisterName[*typedAgentEventWrapper[*schema.AgenticMessage]]("_eino_adk_agentic_event_wrapper")
@@ -144,6 +146,34 @@ func (s *typedState[M]) popToolGenAction(key string) *AgentAction {
 	action := s.ToolGenActions[key]
 	delete(s.ToolGenActions, key)
 	return action
+}
+
+func (s *typedState[M]) setToolMsgID(toolName, callID, msgID string) {
+	if s.ToolMsgIDs == nil {
+		s.ToolMsgIDs = make(map[string]map[string]string)
+	}
+	byCall := s.ToolMsgIDs[toolName]
+	if byCall == nil {
+		byCall = make(map[string]string)
+		s.ToolMsgIDs[toolName] = byCall
+	}
+	byCall[callID] = msgID
+}
+
+func (s *typedState[M]) popToolMsgID(toolName, callID string) string {
+	if s.ToolMsgIDs == nil {
+		return ""
+	}
+	byCall := s.ToolMsgIDs[toolName]
+	if byCall == nil {
+		return ""
+	}
+	id := byCall[callID]
+	delete(byCall, callID)
+	if len(byCall) == 0 {
+		delete(s.ToolMsgIDs, toolName)
+	}
+	return id
 }
 
 func (s *typedState[M]) getRemainingIterations() int {
@@ -337,7 +367,7 @@ func newReact(ctx context.Context, config *reactConfig) (reactGraph, error) {
 		return input.Messages, nil
 	}), compose.WithNodeName(initNode_))
 
-	var wrappedModel model.BaseChatModel = config.model
+	var wrappedModel = config.model
 	if config.modelWrapperConf != nil {
 		wrappedModel = buildModelWrappers(config.model, config.modelWrapperConf)
 	}
@@ -405,8 +435,20 @@ func newReact(ctx context.Context, config *reactConfig) (reactGraph, error) {
 	// AfterToolCalls node: persists tool results to state and fires the after-tool-calls hook.
 	// The graph auto-materializes the ToolsNode stream into []Message before this node.
 	afterToolCalls := func(ctx context.Context, toolResults []Message) ([]Message, error) {
+		// Propagate tool message IDs from event sender to state messages.
+		// The event sender pre-generated IDs and stored them in state.ToolMsgIDs[toolName+callID].
+		// Here we pop them and set them on the compose-created tool result messages
+		// so that state messages share the same IDs as their corresponding event messages.
+		// If no stored ID is found (old checkpoint, custom event sender), generate a fresh one.
 		_ = compose.ProcessState(ctx, func(_ context.Context, st *State) error {
-			st.Messages = append(st.Messages, toolResults...)
+			for _, msg := range toolResults {
+				if id := st.popToolMsgID(msg.ToolName, msg.ToolCallID); id != "" {
+					msg.Extra = internal.SetMessageID(msg.Extra, id)
+				} else {
+					msg.Extra = internal.EnsureMessageID(msg.Extra)
+				}
+				st.Messages = append(st.Messages, msg)
+			}
 			return nil
 		})
 
@@ -566,7 +608,7 @@ func newAgenticReact(ctx context.Context, config *agenticReactConfig) (agenticRe
 		return input.Messages, nil
 	}), compose.WithNodeName(initNode_))
 
-	var wrappedModel model.AgenticModel = config.model
+	var wrappedModel = config.model
 	if config.modelWrapperConf != nil {
 		wrappedModel = buildModelWrappers(config.model, config.modelWrapperConf)
 	}
@@ -630,9 +672,28 @@ func newAgenticReact(ctx context.Context, config *agenticReactConfig) (agenticRe
 
 	afterToolCalls := func(ctx context.Context, toolResults []*schema.AgenticMessage) ([]*schema.AgenticMessage, error) {
 		_ = compose.ProcessState(ctx, func(_ context.Context, st *agenticState) error {
-			st.Messages = append(st.Messages, toolResults...)
+			for _, msg := range toolResults {
+				if msg == nil {
+					continue
+				}
+				toolName, callID := extractToolIdentifiers(msg)
+				if id := st.popToolMsgID(toolName, callID); id != "" {
+					msg.Extra = internal.SetMessageID(msg.Extra, id)
+				} else {
+					msg.Extra = internal.EnsureMessageID(msg.Extra)
+				}
+				st.Messages = append(st.Messages, msg)
+			}
 			return nil
 		})
+
+		execCtx := getTypedChatModelAgentExecCtx[*schema.AgenticMessage](ctx)
+		if execCtx != nil && execCtx.afterToolCallsHook != nil {
+			if err := execCtx.afterToolCallsHook(ctx); err != nil {
+				return nil, err
+			}
+		}
+
 		return toolResults, nil
 	}
 	_ = g.AddLambdaNode(afterToolCallsNode_, compose.InvokableLambda(afterToolCalls),
@@ -685,11 +746,9 @@ func newAgenticReact(ctx context.Context, config *agenticReactConfig) (agenticRe
 				if msg == nil {
 					continue
 				}
-				for _, block := range msg.ContentBlocks {
-					if block != nil && block.Type == schema.ContentBlockTypeFunctionToolResult &&
-						block.FunctionToolResult != nil && block.FunctionToolResult.CallID == id {
-						return msg, nil
-					}
+				_, callID := extractToolIdentifiers(msg)
+				if callID == id {
+					return msg, nil
 				}
 			}
 			return nil, errors.New("return directly tool call result not found")
@@ -715,4 +774,20 @@ func newAgenticReact(ctx context.Context, config *agenticReactConfig) (agenticRe
 	}
 
 	return g, nil
+}
+
+// extractToolIdentifiers extracts the tool name and call ID from an AgenticMessage
+// that contains a FunctionToolResult content block.
+// Assumes one tool result per message, which is guaranteed by AgenticToolsNode
+// (see compose.toolMessageToAgenticMessage).
+func extractToolIdentifiers(msg *schema.AgenticMessage) (toolName, callID string) {
+	if msg == nil {
+		return "", ""
+	}
+	for _, block := range msg.ContentBlocks {
+		if block != nil && block.Type == schema.ContentBlockTypeFunctionToolResult && block.FunctionToolResult != nil {
+			return block.FunctionToolResult.Name, block.FunctionToolResult.CallID
+		}
+	}
+	return "", ""
 }
