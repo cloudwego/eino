@@ -368,16 +368,11 @@ func SummarizeMessages(ctx context.Context, cfg *Config, messages []adk.Message)
 }
 
 func (m *typedMiddleware[M]) BeforeModelRewriteState(ctx context.Context, state *adk.TypedChatModelAgentState[M],
-	mtx *adk.TypedModelContext[M]) (context.Context, *adk.TypedChatModelAgentState[M], error) {
-
-	var tools []*schema.ToolInfo
-	if mtx != nil {
-		tools = mtx.Tools
-	}
+	_ *adk.TypedModelContext[M]) (context.Context, *adk.TypedChatModelAgentState[M], error) {
 
 	triggered, err := m.shouldSummarize(ctx, &TypedTokenCounterInput[M]{
 		Messages: state.Messages,
-		Tools:    tools,
+		Tools:    state.ToolInfos,
 	})
 	if err != nil {
 		return nil, nil, err

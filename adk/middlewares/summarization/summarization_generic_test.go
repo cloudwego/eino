@@ -99,11 +99,13 @@ func TestSummarizationGeneric(t *testing.T) {
 		t.Run("Helpers", testSummarizationHelpers[*schema.Message])
 		t.Run("Flow", testSummarizationFlow[*schema.Message])
 		t.Run("SummarizeMessages", testTypedSummarizeMessages[*schema.Message])
+		t.Run("TokenCounterUsesStateToolInfos", testTokenCounterReceivesStateToolInfos[*schema.Message])
 	})
 	t.Run("AgenticMessage", func(t *testing.T) {
 		t.Run("Helpers", testSummarizationHelpers[*schema.AgenticMessage])
 		t.Run("Flow", testSummarizationFlow[*schema.AgenticMessage])
 		t.Run("SummarizeMessages", testTypedSummarizeMessages[*schema.AgenticMessage])
+		t.Run("TokenCounterUsesStateToolInfos", testTokenCounterReceivesStateToolInfos[*schema.AgenticMessage])
 	})
 }
 
@@ -291,7 +293,54 @@ func testSummarizationFlow[M adk.MessageType](t *testing.T) {
 	assert.True(t, foundSummary, "should have a summary message")
 }
 
-// testTypedSummarizeMessages tests the synchronous TypedSummarizeMessages API.
+// testTokenCounterReceivesStateToolInfos verifies that the token counter receives
+// state.ToolInfos (not the deprecated mc.Tools). We set up state.ToolInfos and mc.Tools
+// with different values and assert the token counter sees only state.ToolInfos.
+func testTokenCounterReceivesStateToolInfos[M adk.MessageType](t *testing.T) {
+	ctx := context.Background()
+
+	stateTools := []*schema.ToolInfo{
+		{Name: "state_tool_a"},
+		{Name: "state_tool_b"},
+	}
+	mcTools := []*schema.ToolInfo{
+		{Name: "mc_tool_should_not_appear"},
+	}
+
+	var receivedTools []*schema.ToolInfo
+	tokenCounter := func(_ context.Context, input *TypedTokenCounterInput[M]) (int, error) {
+		receivedTools = input.Tools
+		return 0, nil // below threshold — won't trigger summarization
+	}
+
+	cfg := &TypedConfig[M]{
+		Model: &genericMockModel[M]{
+			response: smakeAssistantMsg[M]("unused"),
+		},
+		TokenCounter: tokenCounter,
+		Trigger: &TriggerCondition{
+			ContextTokens: 9999, // high threshold so summarization is not triggered
+		},
+	}
+
+	mw, err := NewTyped(ctx, cfg)
+	require.NoError(t, err)
+
+	state := &adk.TypedChatModelAgentState[M]{
+		Messages:  []M{smakeUserMsg[M]("hello")},
+		ToolInfos: stateTools,
+	}
+	mc := &adk.TypedModelContext[M]{Tools: mcTools}
+
+	_, _, err = mw.BeforeModelRewriteState(ctx, state, mc)
+	require.NoError(t, err)
+
+	// The token counter must have received state.ToolInfos, not mc.Tools.
+	require.NotNil(t, receivedTools, "token counter should have been called")
+	require.Len(t, receivedTools, 2)
+	assert.Equal(t, "state_tool_a", receivedTools[0].Name)
+	assert.Equal(t, "state_tool_b", receivedTools[1].Name)
+}
 func testTypedSummarizeMessages[M adk.MessageType](t *testing.T) {
 	ctx := context.Background()
 
