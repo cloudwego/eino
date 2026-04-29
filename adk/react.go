@@ -54,7 +54,6 @@ type typedState[M MessageType] struct {
 	ReturnDirectlyEvent      *TypedAgentEvent[M]
 	RetryAttempt             int
 	ToolMsgIDs               map[string]map[string]string // toolName → callID → eino message ID
-	ToolEventOrder           []string                     // callIDs in the order their events were sent
 }
 
 // State is the internal state of the ChatModelAgent.
@@ -441,13 +440,8 @@ func newReact(ctx context.Context, config *reactConfig) (reactGraph, error) {
 		// Here we pop them and set them on the compose-created tool result messages
 		// so that state messages share the same IDs as their corresponding event messages.
 		// If no stored ID is found (old checkpoint, custom event sender), generate a fresh one.
-		// Messages are reordered to match the event emission order (for prompt cache consistency).
 		_ = compose.ProcessState(ctx, func(_ context.Context, st *State) error {
-			ordered := reorderToolResults(toolResults, st.ToolEventOrder, st.getReturnDirectlyToolCallID(), func(msg Message) string {
-				return msg.ToolCallID
-			})
-			st.ToolEventOrder = nil
-			for _, msg := range ordered {
+			for _, msg := range toolResults {
 				if id := st.popToolMsgID(msg.ToolName, msg.ToolCallID); id != "" {
 					msg.Extra = internal.SetMessageID(msg.Extra, id)
 				} else {
@@ -678,12 +672,7 @@ func newAgenticReact(ctx context.Context, config *agenticReactConfig) (agenticRe
 
 	afterToolCalls := func(ctx context.Context, toolResults []*schema.AgenticMessage) ([]*schema.AgenticMessage, error) {
 		_ = compose.ProcessState(ctx, func(_ context.Context, st *agenticState) error {
-			ordered := reorderToolResults(toolResults, st.ToolEventOrder, st.getReturnDirectlyToolCallID(), func(msg *schema.AgenticMessage) string {
-				_, callID := extractToolIdentifiers(msg)
-				return callID
-			})
-			st.ToolEventOrder = nil
-			for _, msg := range ordered {
+			for _, msg := range toolResults {
 				if msg == nil {
 					continue
 				}
@@ -801,40 +790,4 @@ func extractToolIdentifiers(msg *schema.AgenticMessage) (toolName, callID string
 		}
 	}
 	return "", ""
-}
-
-// reorderToolResults reorders tool results to match the order their events were emitted.
-// If eventOrder is empty (old checkpoint, custom event sender), the original order is preserved.
-// The ReturnDirectly tool result is always placed last (its event is emitted last).
-func reorderToolResults[M MessageType](results []M, eventOrder []string, returnDirectlyCallID string, getCallID func(M) string) []M {
-	if len(eventOrder) == 0 {
-		return results
-	}
-	byCallID := make(map[string]M, len(results))
-	for _, r := range results {
-		if id := getCallID(r); id != "" {
-			byCallID[id] = r
-		}
-	}
-	ordered := make([]M, 0, len(results))
-	for _, callID := range eventOrder {
-		if r, ok := byCallID[callID]; ok {
-			ordered = append(ordered, r)
-			delete(byCallID, callID)
-		}
-	}
-	if returnDirectlyCallID != "" {
-		if r, ok := byCallID[returnDirectlyCallID]; ok {
-			ordered = append(ordered, r)
-			delete(byCallID, returnDirectlyCallID)
-		}
-	}
-	// Append any remaining results not in eventOrder, preserving original input order
-	// to avoid non-deterministic map iteration.
-	for _, r := range results {
-		if _, ok := byCallID[getCallID(r)]; ok {
-			ordered = append(ordered, r)
-		}
-	}
-	return ordered
 }

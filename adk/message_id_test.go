@@ -868,28 +868,6 @@ func TestMessageID_AgenticPublicAPIHelpers(t *testing.T) {
 
 // --- Adversarial attack tests for message ID system ---
 
-// TestAttack_ReorderToolResults_ReturnDirectlyCallID tests that the returnDirectly
-// item is placed after eventOrder items but before orphans.
-func TestAttack_ReorderToolResults_ReturnDirectlyCallID(t *testing.T) {
-	results := []*schema.Message{
-		{Role: schema.Tool, ToolCallID: "call-1", ToolName: "toolA", Content: "A"},
-		{Role: schema.Tool, ToolCallID: "rd-1", ToolName: "toolRD", Content: "RD"},
-		{Role: schema.Tool, ToolCallID: "call-2", ToolName: "toolB", Content: "B"},
-	}
-	eventOrder := []string{"call-1", "call-2"}
-
-	ordered := reorderToolResults(results, eventOrder, "rd-1", func(m *schema.Message) string {
-		return m.ToolCallID
-	})
-
-	require.Len(t, ordered, 3)
-	// eventOrder items first
-	assert.Equal(t, "call-1", ordered[0].ToolCallID)
-	assert.Equal(t, "call-2", ordered[1].ToolCallID)
-	// returnDirectly item last
-	assert.Equal(t, "rd-1", ordered[2].ToolCallID)
-}
-
 // TestAttack_PopToolMsgID_DoublePop tests that calling popToolMsgID twice for the
 // same key returns "" on second call.
 func TestAttack_PopToolMsgID_DoublePop(t *testing.T) {
@@ -1026,34 +1004,6 @@ func TestAttack_ToolMsgIDConsistency_MultipleTools(t *testing.T) {
 		assert.Equal(t, stateID, eventID,
 			"event and state msg IDs for callID %s must match: event=%s state=%s", callID, eventID, stateID)
 	}
-}
-
-// TestAttack_ReorderToolResults_EmptyEventOrder verifies that when eventOrder is
-// empty (e.g., old checkpoint restore), the original input order is preserved.
-func TestAttack_ReorderToolResults_EmptyEventOrder(t *testing.T) {
-	results := []*schema.Message{
-		{Role: schema.Tool, ToolCallID: "call-3", ToolName: "toolC", Content: "C"},
-		{Role: schema.Tool, ToolCallID: "call-1", ToolName: "toolA", Content: "A"},
-		{Role: schema.Tool, ToolCallID: "call-2", ToolName: "toolB", Content: "B"},
-	}
-
-	ordered := reorderToolResults(results, nil, "", func(m *schema.Message) string {
-		return m.ToolCallID
-	})
-
-	require.Len(t, ordered, 3)
-	assert.Equal(t, "call-3", ordered[0].ToolCallID, "original input order [0]")
-	assert.Equal(t, "call-1", ordered[1].ToolCallID, "original input order [1]")
-	assert.Equal(t, "call-2", ordered[2].ToolCallID, "original input order [2]")
-
-	// Also verify with explicit empty slice (not nil)
-	ordered2 := reorderToolResults(results, []string{}, "", func(m *schema.Message) string {
-		return m.ToolCallID
-	})
-	require.Len(t, ordered2, 3)
-	assert.Equal(t, "call-3", ordered2[0].ToolCallID)
-	assert.Equal(t, "call-1", ordered2[1].ToolCallID)
-	assert.Equal(t, "call-2", ordered2[2].ToolCallID)
 }
 
 // TestAttack_ToolResultToBlocks_EdgeCases verifies toolResultToBlocks handles

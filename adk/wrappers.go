@@ -803,7 +803,6 @@ func (w *typedEventSenderToolWrapper[M]) WrapInvokableToolCall(_ context.Context
 				st.setReturnDirectlyEvent(event)
 			} else {
 				execCtx.send(event)
-				st.ToolEventOrder = append(st.ToolEventOrder, callID)
 			}
 			return nil
 		})
@@ -836,7 +835,6 @@ func (w *typedEventSenderToolWrapper[M]) WrapStreamableToolCall(_ context.Contex
 				st.setReturnDirectlyEvent(event)
 			} else {
 				execCtx.send(event)
-				st.ToolEventOrder = append(st.ToolEventOrder, callID)
 			}
 			return nil
 		})
@@ -872,7 +870,6 @@ func (w *typedEventSenderToolWrapper[M]) WrapEnhancedInvokableToolCall(_ context
 				st.setReturnDirectlyEvent(event)
 			} else {
 				execCtx.send(event)
-				st.ToolEventOrder = append(st.ToolEventOrder, callID)
 			}
 			return nil
 		})
@@ -905,7 +902,6 @@ func (w *typedEventSenderToolWrapper[M]) WrapEnhancedStreamableToolCall(_ contex
 				st.setReturnDirectlyEvent(event)
 			} else {
 				execCtx.send(event)
-				st.ToolEventOrder = append(st.ToolEventOrder, callID)
 			}
 			return nil
 		})
