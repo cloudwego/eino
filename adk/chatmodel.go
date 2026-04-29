@@ -836,7 +836,6 @@ func (a *TypedChatModelAgent[M]) prepareExecContext(ctx context.Context) (*execC
 	toolsNodeConf := a.toolsConfig.ToolsNodeConfig
 	toolsNodeConf.Tools = cloneSlice(a.toolsConfig.Tools)
 	toolsNodeConf.ToolCallMiddlewares = cloneSlice(a.toolsConfig.ToolCallMiddlewares)
-
 	returnDirectly := copyMap(a.toolsConfig.ReturnDirectly)
 
 	transferToAgents := a.subAgents
