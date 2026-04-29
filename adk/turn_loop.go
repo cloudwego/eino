@@ -1657,7 +1657,7 @@ func (l *TurnLoop[T, M]) runAgentAndHandleEvents(
 	if spec.input != nil {
 		enableStreaming = spec.input.EnableStreaming
 	}
-	runner := NewTypedRunner[M](TypedRunnerConfig[M]{
+	runner := NewTypedRunner(TypedRunnerConfig[M]{
 		EnableStreaming: enableStreaming,
 		Agent:           agent,
 		CheckPointStore: ms,

@@ -140,17 +140,17 @@ func testAgentsMDGeneric[M adk.MessageType](t *testing.T) {
 				if len(state.Messages) != 2 {
 					t.Fatalf("expected 2 messages, got %d", len(state.Messages))
 				}
-				if getMsgRole[M](state.Messages[0]) != "user" {
-					t.Fatalf("expected first message role user, got %s", getMsgRole[M](state.Messages[0]))
+				if getMsgRole(state.Messages[0]) != "user" {
+					t.Fatalf("expected first message role user, got %s", getMsgRole(state.Messages[0]))
 				}
-				if !strings.Contains(getMsgContent[M](state.Messages[0]), "You are a helpful assistant.") {
-					t.Fatalf("expected agent.md content in first message, got %q", getMsgContent[M](state.Messages[0]))
+				if !strings.Contains(getMsgContent(state.Messages[0]), "You are a helpful assistant.") {
+					t.Fatalf("expected agent.md content in first message, got %q", getMsgContent(state.Messages[0]))
 				}
-				if !strings.Contains(getMsgContent[M](state.Messages[0]), "<system-reminder>") {
-					t.Fatalf("expected system-reminder tag, got %q", getMsgContent[M](state.Messages[0]))
+				if !strings.Contains(getMsgContent(state.Messages[0]), "<system-reminder>") {
+					t.Fatalf("expected system-reminder tag, got %q", getMsgContent(state.Messages[0]))
 				}
-				if getMsgContent[M](state.Messages[1]) != "hello" {
-					t.Fatalf("expected original message preserved, got %q", getMsgContent[M](state.Messages[1]))
+				if getMsgContent(state.Messages[1]) != "hello" {
+					t.Fatalf("expected original message preserved, got %q", getMsgContent(state.Messages[1]))
 				}
 			},
 		},
@@ -179,17 +179,17 @@ func testAgentsMDGeneric[M adk.MessageType](t *testing.T) {
 				if len(state.Messages) != 3 {
 					t.Fatalf("expected 3 messages, got %d", len(state.Messages))
 				}
-				if getMsgRole[M](state.Messages[0]) != "system" {
-					t.Fatalf("expected first message role system, got %s", getMsgRole[M](state.Messages[0]))
+				if getMsgRole(state.Messages[0]) != "system" {
+					t.Fatalf("expected first message role system, got %s", getMsgRole(state.Messages[0]))
 				}
-				if getMsgContent[M](state.Messages[0]) != "system prompt" {
-					t.Fatalf("expected system prompt preserved, got %q", getMsgContent[M](state.Messages[0]))
+				if getMsgContent(state.Messages[0]) != "system prompt" {
+					t.Fatalf("expected system prompt preserved, got %q", getMsgContent(state.Messages[0]))
 				}
-				if getMsgRole[M](state.Messages[1]) != "user" || !strings.Contains(getMsgContent[M](state.Messages[1]), "agent instructions") {
-					t.Fatalf("expected agentmd message at index 1, got role=%s content=%q", getMsgRole[M](state.Messages[1]), getMsgContent[M](state.Messages[1]))
+				if getMsgRole(state.Messages[1]) != "user" || !strings.Contains(getMsgContent(state.Messages[1]), "agent instructions") {
+					t.Fatalf("expected agentmd message at index 1, got role=%s content=%q", getMsgRole(state.Messages[1]), getMsgContent(state.Messages[1]))
 				}
-				if getMsgRole[M](state.Messages[2]) != "user" || getMsgContent[M](state.Messages[2]) != "hello" {
-					t.Fatalf("expected original user message at index 2, got role=%s content=%q", getMsgRole[M](state.Messages[2]), getMsgContent[M](state.Messages[2]))
+				if getMsgRole(state.Messages[2]) != "user" || getMsgContent(state.Messages[2]) != "hello" {
+					t.Fatalf("expected original user message at index 2, got role=%s content=%q", getMsgRole(state.Messages[2]), getMsgContent(state.Messages[2]))
 				}
 			},
 		},
@@ -218,14 +218,14 @@ func testAgentsMDGeneric[M adk.MessageType](t *testing.T) {
 				if len(state.Messages) != 3 {
 					t.Fatalf("expected 3 messages, got %d", len(state.Messages))
 				}
-				if getMsgRole[M](state.Messages[0]) != "system" {
-					t.Fatalf("expected System at index 0, got %s", getMsgRole[M](state.Messages[0]))
+				if getMsgRole(state.Messages[0]) != "system" {
+					t.Fatalf("expected System at index 0, got %s", getMsgRole(state.Messages[0]))
 				}
-				if getMsgRole[M](state.Messages[1]) != "assistant" {
-					t.Fatalf("expected Assistant at index 1, got %s", getMsgRole[M](state.Messages[1]))
+				if getMsgRole(state.Messages[1]) != "assistant" {
+					t.Fatalf("expected Assistant at index 1, got %s", getMsgRole(state.Messages[1]))
 				}
-				if getMsgRole[M](state.Messages[2]) != "user" || !strings.Contains(getMsgContent[M](state.Messages[2]), "agent instructions") {
-					t.Fatalf("expected agentmd appended at end, got role=%s content=%q", getMsgRole[M](state.Messages[2]), getMsgContent[M](state.Messages[2]))
+				if getMsgRole(state.Messages[2]) != "user" || !strings.Contains(getMsgContent(state.Messages[2]), "agent instructions") {
+					t.Fatalf("expected agentmd appended at end, got role=%s content=%q", getMsgRole(state.Messages[2]), getMsgContent(state.Messages[2]))
 				}
 			},
 		},
@@ -249,8 +249,8 @@ func testAgentsMDGeneric[M adk.MessageType](t *testing.T) {
 				if len(state.Messages) != 1 {
 					t.Fatalf("expected 1 message (no agentmd prepended), got %d", len(state.Messages))
 				}
-				if getMsgContent[M](state.Messages[0]) != "hello" {
-					t.Fatalf("expected original message unchanged, got %q", getMsgContent[M](state.Messages[0]))
+				if getMsgContent(state.Messages[0]) != "hello" {
+					t.Fatalf("expected original message unchanged, got %q", getMsgContent(state.Messages[0]))
 				}
 			},
 		},
@@ -276,7 +276,7 @@ func testAgentsMDGeneric[M adk.MessageType](t *testing.T) {
 				}
 
 				// Verify the marker is set in Extra.
-				extra := getMsgExtra[M](state.Messages[0])
+				extra := getMsgExtra(state.Messages[0])
 				if extra == nil {
 					t.Fatal("expected Extra to be set on injected message")
 				}
@@ -292,8 +292,8 @@ func testAgentsMDGeneric[M adk.MessageType](t *testing.T) {
 				if len(state.Messages) != 2 {
 					t.Fatalf("expected 2 messages after second call (idempotent), got %d", len(state.Messages))
 				}
-				if !strings.Contains(getMsgContent[M](state.Messages[0]), "agent instructions") {
-					t.Fatalf("expected agentmd content preserved, got %q", getMsgContent[M](state.Messages[0]))
+				if !strings.Contains(getMsgContent(state.Messages[0]), "agent instructions") {
+					t.Fatalf("expected agentmd content preserved, got %q", getMsgContent(state.Messages[0]))
 				}
 			},
 		},
@@ -327,8 +327,8 @@ func testAgentsMDGeneric[M adk.MessageType](t *testing.T) {
 				if len(state.Messages) != 2 {
 					t.Fatalf("expected 2 messages after re-insert, got %d", len(state.Messages))
 				}
-				if !strings.Contains(getMsgContent[M](state.Messages[0]), "agent instructions") {
-					t.Fatalf("expected agentmd content re-inserted, got %q", getMsgContent[M](state.Messages[0]))
+				if !strings.Contains(getMsgContent(state.Messages[0]), "agent instructions") {
+					t.Fatalf("expected agentmd content re-inserted, got %q", getMsgContent(state.Messages[0]))
 				}
 			},
 		},

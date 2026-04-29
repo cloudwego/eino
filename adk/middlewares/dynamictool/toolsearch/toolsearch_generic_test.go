@@ -183,7 +183,7 @@ func newTestMiddlewareTyped[M adk.MessageType](t *testing.T, tools []tool.BaseTo
 func countRemindersGeneric[M adk.MessageType](msgs []M) int {
 	count := 0
 	for _, msg := range msgs {
-		extra := getMsgExtra[M](msg)
+		extra := getMsgExtra(msg)
 		if extra != nil {
 			if v, _ := extra[toolSearchReminderExtraKey].(bool); v {
 				count++
@@ -206,12 +206,12 @@ func testEnsureReminderGeneric[M adk.MessageType](t *testing.T) {
 		}
 		got := m.ensureReminder(input)
 		require.Len(t, got, 3)
-		assert.Equal(t, "system", getMsgRole[M](got[0]))
+		assert.Equal(t, "system", getMsgRole(got[0]))
 		// Reminder inserted after system
-		extra := getMsgExtra[M](got[1])
+		extra := getMsgExtra(got[1])
 		require.NotNil(t, extra)
 		assert.Equal(t, true, extra[toolSearchReminderExtraKey])
-		assert.Equal(t, "hi", getMsgContent[M](got[2]))
+		assert.Equal(t, "hi", getMsgContent(got[2]))
 	})
 
 	t.Run("all system messages", func(t *testing.T) {
@@ -221,10 +221,10 @@ func testEnsureReminderGeneric[M adk.MessageType](t *testing.T) {
 		}
 		got := m.ensureReminder(input)
 		require.Len(t, got, 3)
-		assert.Equal(t, "system", getMsgRole[M](got[0]))
-		assert.Equal(t, "system", getMsgRole[M](got[1]))
+		assert.Equal(t, "system", getMsgRole(got[0]))
+		assert.Equal(t, "system", getMsgRole(got[1]))
 		// Reminder appended at end
-		extra := getMsgExtra[M](got[2])
+		extra := getMsgExtra(got[2])
 		require.NotNil(t, extra)
 		assert.Equal(t, true, extra[toolSearchReminderExtraKey])
 	})
@@ -232,7 +232,7 @@ func testEnsureReminderGeneric[M adk.MessageType](t *testing.T) {
 	t.Run("empty input", func(t *testing.T) {
 		got := m.ensureReminder(nil)
 		require.Len(t, got, 1)
-		extra := getMsgExtra[M](got[0])
+		extra := getMsgExtra(got[0])
 		require.NotNil(t, extra)
 		assert.Equal(t, true, extra[toolSearchReminderExtraKey])
 	})
@@ -244,22 +244,22 @@ func testEnsureReminderGeneric[M adk.MessageType](t *testing.T) {
 		got := m.ensureReminder(input)
 		require.Len(t, got, 2)
 		// Reminder inserted at position 0
-		extra := getMsgExtra[M](got[0])
+		extra := getMsgExtra(got[0])
 		require.NotNil(t, extra)
 		assert.Equal(t, true, extra[toolSearchReminderExtraKey])
-		assert.Equal(t, "hi", getMsgContent[M](got[1]))
+		assert.Equal(t, "hi", getMsgContent(got[1]))
 	})
 
 	t.Run("idempotent: does not insert twice", func(t *testing.T) {
 		reminder := makeUserMsg[M]("<reminder>")
-		setMsgExtra[M](reminder, toolSearchReminderExtraKey, true)
+		setMsgExtra(reminder, toolSearchReminderExtraKey, true)
 		input := []M{
 			reminder,
 			makeUserMsg[M]("hi"),
 		}
 		got := m.ensureReminder(input)
 		require.Len(t, got, 2)
-		assert.Equal(t, "hi", getMsgContent[M](got[1]))
+		assert.Equal(t, "hi", getMsgContent(got[1]))
 	})
 }
 
@@ -293,7 +293,7 @@ func testMode1InitializationGeneric[M adk.MessageType](t *testing.T) {
 	assert.Nil(t, state.DeferredToolInfos, "Mode 1 should not populate DeferredToolInfos")
 
 	// Verify reminder was inserted.
-	assert.Equal(t, 1, countRemindersGeneric[M](state.Messages), "reminder should be inserted")
+	assert.Equal(t, 1, countRemindersGeneric(state.Messages), "reminder should be inserted")
 }
 
 func testMode1ForwardSelectionGeneric[M adk.MessageType](t *testing.T) {
@@ -310,7 +310,7 @@ func testMode1ForwardSelectionGeneric[M adk.MessageType](t *testing.T) {
 
 	// Build the reminder message with the extra marker
 	reminderMsg := makeUserMsg[M]("hello")
-	setMsgExtra[M](reminderMsg, toolSearchReminderExtraKey, true)
+	setMsgExtra(reminderMsg, toolSearchReminderExtraKey, true)
 
 	state := &adk.TypedChatModelAgentState[M]{
 		Messages: []M{
@@ -351,7 +351,7 @@ func testMalformedJSONGeneric[M adk.MessageType](t *testing.T) {
 
 	// Build the reminder message with the extra marker
 	reminderMsg := makeUserMsg[M]("reminder")
-	setMsgExtra[M](reminderMsg, toolSearchReminderExtraKey, true)
+	setMsgExtra(reminderMsg, toolSearchReminderExtraKey, true)
 
 	state := &adk.TypedChatModelAgentState[M]{
 		Messages: []M{

@@ -1343,7 +1343,7 @@ func TestInvokableRun_AgentMode(t *testing.T) {
 
 func TestNewTypedAgenticMessage(t *testing.T) {
 	ctx := context.Background()
-	mw, err := NewTyped[*schema.AgenticMessage](ctx, &TypedConfig[*schema.AgenticMessage]{
+	mw, err := NewTyped(ctx, &TypedConfig[*schema.AgenticMessage]{
 		Backend: &inMemoryBackend{m: []Skill{}},
 	})
 	assert.NoError(t, err)

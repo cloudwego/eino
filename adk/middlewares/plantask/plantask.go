@@ -36,7 +36,7 @@ type Config struct {
 // allowing agents to create and manage structured task lists during coding sessions.
 //
 // This is the generic constructor that supports both *schema.Message and *schema.AgenticMessage.
-func NewTyped[M adk.MessageType](ctx context.Context, config *Config) (adk.TypedChatModelAgentMiddleware[M], error) {
+func NewTyped[M adk.MessageType](_ context.Context, config *Config) (adk.TypedChatModelAgentMiddleware[M], error) {
 	if config == nil {
 		return nil, fmt.Errorf("config is required")
 	}

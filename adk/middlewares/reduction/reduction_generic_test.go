@@ -311,7 +311,7 @@ func testClearFlowGeneric[M adk.MessageType](t *testing.T) {
 		ClearRetentionSuffixLimit: 1,
 	}
 
-	mw, err := NewTyped[M](ctx, config)
+	mw, err := NewTyped(ctx, config)
 	require.NoError(t, err)
 
 	// Messages: system, user, assistant+toolcalls(old), tool_result(old), user, assistant+toolcalls(new)
@@ -341,14 +341,14 @@ func testClearFlowGeneric[M adk.MessageType](t *testing.T) {
 
 	// The old tool result (index 3) should have its content replaced with a placeholder.
 	// The placeholder text is locale-dependent, so just verify it changed from the original.
-	oldResultContent := getMsgContentG[M](resultState.Messages[3])
+	oldResultContent := getMsgContentG(resultState.Messages[3])
 	assert.NotEqual(t, "Sunny and warm", oldResultContent, "old tool result content should be replaced with placeholder")
 
 	// The cleared flag should be set on the old assistant message.
 	assert.True(t, getMsgClearedFlagGeneric(resultState.Messages[2]), "cleared flag should be set on old assistant msg")
 
 	// System message (index 0) should be untouched.
-	assert.Equal(t, "you are helpful", getMsgContentG[M](resultState.Messages[0]))
+	assert.Equal(t, "you are helpful", getMsgContentG(resultState.Messages[0]))
 
 	// Recent messages (index 4, 5) should not be affected: the new tool-call group
 	// is in the retention window.
@@ -380,7 +380,7 @@ func testTruncationGeneric[M adk.MessageType](t *testing.T) {
 		ClearRetentionSuffixLimit: 0,
 	}
 
-	mw, err := NewTyped[M](ctx, config)
+	mw, err := NewTyped(ctx, config)
 	require.NoError(t, err)
 
 	msgs := []M{
@@ -428,7 +428,7 @@ func testClearPostProcessGeneric[M adk.MessageType](t *testing.T) {
 		},
 	}
 
-	mw, err := NewTyped[M](ctx, config)
+	mw, err := NewTyped(ctx, config)
 	require.NoError(t, err)
 
 	msgs := []M{
@@ -532,7 +532,7 @@ func TestCopyAgenticMessages_DeepCopy(t *testing.T) {
 		},
 	}
 
-	copied := copyMessagesGeneric[*schema.AgenticMessage](original)
+	copied := copyMessagesGeneric(original)
 	require.Len(t, copied, 1)
 
 	// Mutate the copy and verify original is unchanged.
@@ -571,7 +571,7 @@ func TestToolResultFromMsgGeneric_AgenticMessage(t *testing.T) {
 			},
 		}
 
-		result, fromContent, err := toolResultFromMsgGeneric[*schema.AgenticMessage](msg)
+		result, fromContent, err := toolResultFromMsgGeneric(msg)
 		assert.NoError(t, err)
 		assert.True(t, fromContent, "single text part should be fromContent=true")
 		require.Len(t, result.Parts, 1)
@@ -597,7 +597,7 @@ func TestToolResultFromMsgGeneric_AgenticMessage(t *testing.T) {
 			},
 		}
 
-		result, fromContent, err := toolResultFromMsgGeneric[*schema.AgenticMessage](msg)
+		result, fromContent, err := toolResultFromMsgGeneric(msg)
 		assert.NoError(t, err)
 		assert.False(t, fromContent, "multiple parts should be fromContent=false")
 		require.Len(t, result.Parts, 2)
@@ -620,7 +620,7 @@ func TestToolResultFromMsgGeneric_AgenticMessage(t *testing.T) {
 			},
 		}
 
-		result, fromContent, err := toolResultFromMsgGeneric[*schema.AgenticMessage](msg)
+		result, fromContent, err := toolResultFromMsgGeneric(msg)
 		assert.NoError(t, err)
 		assert.True(t, fromContent)
 		require.Len(t, result.Parts, 1)
@@ -652,7 +652,7 @@ func TestSetToolResultContent_AgenticMessage(t *testing.T) {
 			},
 		}
 
-		setToolResultContent[*schema.AgenticMessage](msg, newResult, true)
+		setToolResultContent(msg, newResult, true)
 
 		// Verify the block was updated
 		blocks := msg.ContentBlocks[0].FunctionToolResult.Blocks
@@ -687,7 +687,7 @@ func TestSetToolResultContent_AgenticMessage(t *testing.T) {
 			},
 		}
 
-		setToolResultContent[*schema.AgenticMessage](msg, newResult, false)
+		setToolResultContent(msg, newResult, false)
 
 		blocks := msg.ContentBlocks[0].FunctionToolResult.Blocks
 		require.Len(t, blocks, 2)
@@ -723,7 +723,7 @@ func TestToolResultFromMsgGeneric_MediaBlocks(t *testing.T) {
 		},
 	}
 
-	result, fromContent, err := toolResultFromMsgGeneric[*schema.AgenticMessage](msg)
+	result, fromContent, err := toolResultFromMsgGeneric(msg)
 	assert.NoError(t, err)
 	assert.False(t, fromContent, "multi-media should be fromContent=false")
 	require.Len(t, result.Parts, 4)
@@ -784,7 +784,7 @@ func TestSetToolResultContent_MediaBlocks(t *testing.T) {
 		},
 	}
 
-	setToolResultContent[*schema.AgenticMessage](msg, newResult, false)
+	setToolResultContent(msg, newResult, false)
 
 	blocks := msg.ContentBlocks[0].FunctionToolResult.Blocks
 	require.Len(t, blocks, 3)
@@ -872,7 +872,7 @@ func testCopyNilMessage[M adk.MessageType](t *testing.T) {
 	}
 
 	assert.NotPanics(t, func() {
-		copied := copyMessagesGeneric[M](msgs)
+		copied := copyMessagesGeneric(msgs)
 		assert.Len(t, copied, 3)
 		assert.Nil(t, copied[1], "nil element should be preserved as nil")
 	})

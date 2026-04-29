@@ -228,9 +228,9 @@ func testPatchToolCallsGeneric[M adk.MessageType](t *testing.T) {
 
 			if tt.checkPatchedAt >= 0 && tt.checkPatchedAt < len(newState.Messages) {
 				patched := newState.Messages[tt.checkPatchedAt]
-				assertToolResultID[M](t, patched, tt.wantCallID)
-				assertToolResultName[M](t, patched, tt.wantToolName)
-				assertMsgContent[M](t, patched, tt.wantContent)
+				assertToolResultID(t, patched, tt.wantCallID)
+			assertToolResultName(t, patched, tt.wantToolName)
+			assertMsgContent(t, patched, tt.wantContent)
 			}
 		})
 	}

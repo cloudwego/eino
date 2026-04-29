@@ -1922,7 +1922,7 @@ func TestNewTypedAgenticMessage(t *testing.T) {
 
 	// TypedConfig requires a Model, so passing an empty config will return an error.
 	// This test verifies that NewTyped[*schema.AgenticMessage] compiles correctly.
-	mw, err := NewTyped[*schema.AgenticMessage](ctx, &TypedConfig[*schema.AgenticMessage]{})
+	mw, err := NewTyped(ctx, &TypedConfig[*schema.AgenticMessage]{})
 	assert.Error(t, err)
 	assert.Nil(t, mw)
 

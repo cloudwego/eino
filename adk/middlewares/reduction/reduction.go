@@ -347,7 +347,7 @@ func NewTyped[M adk.MessageType](_ context.Context, config *TypedConfig[M]) (adk
 
 // New creates tool reduction middleware from config
 func New(ctx context.Context, config *Config) (adk.ChatModelAgentMiddleware, error) {
-	return NewTyped[*schema.Message](ctx, config)
+	return NewTyped(ctx, config)
 }
 
 type typedToolReductionMiddleware[M adk.MessageType] struct {
@@ -519,7 +519,7 @@ func (t *typedToolReductionMiddleware[M]) WrapStreamableToolCall(_ context.Conte
 	}, nil
 }
 
-func (t *typedToolReductionMiddleware[M]) WrapEnhancedInvokableToolCall(ctx context.Context, endpoint adk.EnhancedInvokableToolCallEndpoint, tCtx *adk.ToolContext) (adk.EnhancedInvokableToolCallEndpoint, error) {
+func (t *typedToolReductionMiddleware[M]) WrapEnhancedInvokableToolCall(_ context.Context, endpoint adk.EnhancedInvokableToolCallEndpoint, tCtx *adk.ToolContext) (adk.EnhancedInvokableToolCallEndpoint, error) {
 	cfg := t.getToolConfig(tCtx.Name, sceneTruncation)
 	if cfg == nil || cfg.TruncHandler == nil {
 		return endpoint, nil
@@ -560,7 +560,7 @@ func (t *typedToolReductionMiddleware[M]) WrapEnhancedInvokableToolCall(ctx cont
 	}, nil
 }
 
-func (t *typedToolReductionMiddleware[M]) WrapEnhancedStreamableToolCall(ctx context.Context, endpoint adk.EnhancedStreamableToolCallEndpoint, tCtx *adk.ToolContext) (adk.EnhancedStreamableToolCallEndpoint, error) {
+func (t *typedToolReductionMiddleware[M]) WrapEnhancedStreamableToolCall(_ context.Context, endpoint adk.EnhancedStreamableToolCallEndpoint, tCtx *adk.ToolContext) (adk.EnhancedStreamableToolCallEndpoint, error) {
 	cfg := t.getToolConfig(tCtx.Name, sceneTruncation)
 	if cfg == nil || cfg.TruncHandler == nil {
 		return endpoint, nil
@@ -616,7 +616,7 @@ func (t *typedToolReductionMiddleware[M]) BeforeModelRewriteState(ctx context.Co
 	return t.beforeModelRewriteStateGeneric(ctx, state, mc)
 }
 
-func (t *typedToolReductionMiddleware[M]) beforeModelRewriteStateGeneric(ctx context.Context, state *adk.TypedChatModelAgentState[M], mc *adk.TypedModelContext[M]) (
+func (t *typedToolReductionMiddleware[M]) beforeModelRewriteStateGeneric(ctx context.Context, state *adk.TypedChatModelAgentState[M], _ *adk.TypedModelContext[M]) (
 	context.Context, *adk.TypedChatModelAgentState[M], error) {
 
 	var (

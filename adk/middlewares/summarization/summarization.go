@@ -292,7 +292,7 @@ func NewTyped[M adk.MessageType](_ context.Context, cfg *TypedConfig[M]) (adk.Ty
 // New creates a summarization middleware that automatically summarizes conversation history
 // when trigger conditions are met.
 func New(ctx context.Context, cfg *Config) (adk.ChatModelAgentMiddleware, error) {
-	return NewTyped[*schema.Message](ctx, cfg)
+	return NewTyped(ctx, cfg)
 }
 
 type typedMiddleware[M adk.MessageType] struct {
@@ -364,7 +364,7 @@ func TypedSummarizeMessages[M adk.MessageType](ctx context.Context, cfg *TypedCo
 // SummarizeMessages performs synchronous summarization of the given messages.
 // EmitInternalEvents and Trigger are not supported and will return an error if set.
 func SummarizeMessages(ctx context.Context, cfg *Config, messages []adk.Message) (*SummarizeOutput, error) {
-	return TypedSummarizeMessages[*schema.Message](ctx, cfg, messages)
+	return TypedSummarizeMessages(ctx, cfg, messages)
 }
 
 func (m *typedMiddleware[M]) BeforeModelRewriteState(ctx context.Context, state *adk.TypedChatModelAgentState[M],
@@ -443,7 +443,7 @@ func (m *typedMiddleware[M]) finalizeSummary(ctx context.Context, originalMsgs [
 
 	systemMsgs, contextMsgs := m.splitSystemAndContextMsgs(originalMsgs)
 
-	rawContent := getTextContent[M](rawSummary)
+	rawContent := getTextContent(rawSummary)
 	summary := newTypedSummaryMessage[M](rawContent)
 
 	processed, err := m.postProcessSummary(ctx, contextMsgs, summary)
@@ -493,7 +493,7 @@ func (m *typedMiddleware[M]) getUserMessageContextTokens() int {
 }
 
 func (m *typedMiddleware[M]) emitEvent(ctx context.Context, action *TypedCustomizedAction[M]) error {
-	err := adk.TypedSendEvent[M](ctx, &adk.TypedAgentEvent[M]{
+	err := adk.TypedSendEvent(ctx, &adk.TypedAgentEvent[M]{
 		Action: &adk.AgentAction{
 			CustomizedAction: action,
 		},
@@ -528,13 +528,13 @@ func (m *typedMiddleware[M]) countTokens(ctx context.Context, input *TypedTokenC
 	if m.cfg.TokenCounter != nil {
 		return m.cfg.TokenCounter(ctx, input)
 	}
-	return defaultTypedTokenCounter[M](ctx, input)
+	return defaultTypedTokenCounter(ctx, input)
 }
 
 func defaultTypedTokenCounter[M adk.MessageType](_ context.Context, input *TypedTokenCounterInput[M]) (int, error) {
 	var totalTokens int
 	for _, msg := range input.Messages {
-		text := getTextContent[M](msg)
+		text := getTextContent(msg)
 		totalTokens += estimateTokenCount(text)
 	}
 
@@ -552,8 +552,8 @@ func defaultTypedTokenCounter[M adk.MessageType](_ context.Context, input *Typed
 }
 
 // defaultTokenCounter is kept for backward compatibility with external callers.
-func defaultTokenCounter(_ context.Context, input *TokenCounterInput) (int, error) {
-	return defaultTypedTokenCounter[*schema.Message](nil, input)
+func defaultTokenCounter(ctx context.Context, input *TokenCounterInput) (int, error) {
+	return defaultTypedTokenCounter(ctx, input)
 }
 
 func estimateTokenCount(text string) int {
@@ -574,7 +574,7 @@ func (m *typedMiddleware[M]) summarize(ctx context.Context, originalMsgs []M) (M
 	}
 
 	rawSummary, err := m.generateWithRetry(ctx, m.cfg.Model, modelInput, m.cfg.ModelOptions, m.cfg.Retry)
-	if typedShouldFailover[M](ctx, m.cfg.Failover, rawSummary, err) {
+	if typedShouldFailover(ctx, m.cfg.Failover, rawSummary, err) {
 		rawSummary, modelInput, err = m.runFailover(ctx, originalMsgs, modelInput, rawSummary, err)
 		if err != nil {
 			return zero, nil, err
@@ -589,7 +589,7 @@ func (m *typedMiddleware[M]) summarize(ctx context.Context, originalMsgs []M) (M
 func (m *typedMiddleware[M]) splitSystemAndContextMsgs(msgs []M) ([]M, []M) {
 	var systemMsgs []M
 	for _, msg := range msgs {
-		if isSystemRole[M](msg) {
+		if isSystemRole(msg) {
 			systemMsgs = append(systemMsgs, msg)
 		} else {
 			break
@@ -645,7 +645,7 @@ func (m *typedMiddleware[M]) runFailover(ctx context.Context, originalMsgs, defa
 			lastResp, lastErr = m.generateAndEmit(ctx, failoverModel, modelInput, m.cfg.ModelOptions, attempt, GenerateSummaryPhaseFailover)
 		}
 
-		if !typedShouldFailover[M](ctx, m.cfg.Failover, lastResp, lastErr) {
+		if !typedShouldFailover(ctx, m.cfg.Failover, lastResp, lastErr) {
 			return lastResp, modelInput, lastErr
 		}
 		if attempt == maxRetries {
@@ -715,7 +715,7 @@ func (m *typedMiddleware[M]) getModelInstructions() (M, M) {
 }
 
 func (m *typedMiddleware[M]) postProcessSummary(ctx context.Context, contextMsgs []M, summary M) (M, error) {
-	content := getTextContent[M](summary)
+	content := getTextContent(summary)
 
 	if m.cfg.PreserveUserMessages == nil || m.cfg.PreserveUserMessages.Enabled {
 		maxUserMsgTokens := m.getUserMessageContextTokens()
@@ -733,8 +733,8 @@ func (m *typedMiddleware[M]) postProcessSummary(ctx context.Context, contextMsgs
 
 	content = appendSection(getSummaryPreamble(), content)
 
-	result := setMsgTextContent[M](summary, content)
-	result = setMsgMultipartContent[M](result, content, getContinueInstruction())
+	result := setMsgTextContent(summary, content)
+	result = setMsgMultipartContent(result, content, getContinueInstruction())
 
 	return result, nil
 }
@@ -743,10 +743,10 @@ func (m *typedMiddleware[M]) replaceUserMessagesInSummary(ctx context.Context, c
 	var userMsgs []M
 	var hasUserMsgsBeforeFilter bool
 	for _, msg := range contextMsgs {
-		if typedGetContentType[M](msg) == contentTypeSummary {
+		if typedGetContentType(msg) == contentTypeSummary {
 			continue
 		}
-		if isUserRole[M](msg) {
+		if isUserRole(msg) {
 			hasUserMsgsBeforeFilter = true
 			if m.cfg.PreserveUserMessages != nil && m.cfg.PreserveUserMessages.Filter != nil {
 				keep, err := m.cfg.PreserveUserMessages.Filter(ctx, msg)
@@ -787,7 +787,7 @@ func (m *typedMiddleware[M]) replaceUserMessagesInSummary(ctx context.Context, c
 				continue
 			}
 
-			trimmedMsg := defaultTypedTrimUserMessage[M](msg, remaining)
+			trimmedMsg := defaultTypedTrimUserMessage(msg, remaining)
 			var zero M
 			if any(trimmedMsg) != any(zero) {
 				selected = append(selected, trimmedMsg)
@@ -803,7 +803,7 @@ func (m *typedMiddleware[M]) replaceUserMessagesInSummary(ctx context.Context, c
 
 	var msgLines []string
 	for _, msg := range selected {
-		text := getTextContent[M](msg)
+		text := getTextContent(msg)
 		if text != "" {
 			msgLines = append(msgLines, "    - "+text)
 		}
@@ -939,7 +939,7 @@ func extractTextContent(msg adk.Message) string {
 
 // defaultTrimUserMessage is kept for backward compatibility with external callers.
 func defaultTrimUserMessage(msg adk.Message, remainingTokens int) adk.Message {
-	return defaultTypedTrimUserMessage[*schema.Message](msg, remainingTokens)
+	return defaultTypedTrimUserMessage(msg, remainingTokens)
 }
 
 func truncateTextByChars(text string) string {
@@ -1055,11 +1055,7 @@ func getExtra[T any](msg adk.Message, key string) (T, bool) {
 
 // shouldFailover is kept for backward compatibility with external callers.
 func shouldFailover(ctx context.Context, cfg *FailoverConfig, resp adk.Message, err error) bool {
-	return typedShouldFailover[*schema.Message](ctx, cfg, resp, err)
-}
-
-func defaultShouldRetry(_ context.Context, _ adk.Message, err error) bool {
-	return err != nil
+	return typedShouldFailover(ctx, cfg, resp, err)
 }
 
 func defaultBackoffFunc(_ context.Context, attempt int, _ adk.Message, _ error) time.Duration {
@@ -1166,12 +1162,12 @@ func makeUserMsg[M adk.MessageType](text string) M {
 
 func newTypedSummaryMessage[M adk.MessageType](content string) M {
 	msg := makeUserMsg[M](content)
-	setMsgExtra[M](msg, extraKeyContentType, string(contentTypeSummary))
+	setMsgExtra(msg, extraKeyContentType, string(contentTypeSummary))
 	return msg
 }
 
 func typedGetContentType[M adk.MessageType](msg M) summarizationContentType {
-	extra := getMsgExtra[M](msg)
+	extra := getMsgExtra(msg)
 	if extra == nil {
 		return ""
 	}
@@ -1230,7 +1226,7 @@ func defaultTypedTrimUserMessage[M adk.MessageType](msg M, remainingTokens int) 
 		return zero
 	}
 
-	textContent := getTextContent[M](msg)
+	textContent := getTextContent(msg)
 	if len(textContent) == 0 {
 		return zero
 	}

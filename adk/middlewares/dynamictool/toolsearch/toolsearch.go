@@ -274,7 +274,7 @@ func toolNameSet(tools []*schema.ToolInfo) map[string]bool {
 	return m
 }
 
-func (m *typedMiddleware[M]) BeforeModelRewriteState(ctx context.Context, state *adk.TypedChatModelAgentState[M], mc *adk.TypedModelContext[M]) (context.Context, *adk.TypedChatModelAgentState[M], error) {
+func (m *typedMiddleware[M]) BeforeModelRewriteState(ctx context.Context, state *adk.TypedChatModelAgentState[M], _ *adk.TypedModelContext[M]) (context.Context, *adk.TypedChatModelAgentState[M], error) {
 	state.Messages = m.ensureReminder(state.Messages)
 
 	if !m.isInitialized(ctx) {
@@ -364,11 +364,11 @@ type toolSearchTool struct {
 	tools map[string]*schema.ToolInfo
 }
 
-func (t *toolSearchTool) Info(ctx context.Context) (*schema.ToolInfo, error) {
+func (t *toolSearchTool) Info(_ context.Context) (*schema.ToolInfo, error) {
 	return getToolSearchToolInfo(), nil
 }
 
-func (t *toolSearchTool) InvokableRun(ctx context.Context, argumentsInJSON string, opts ...tool.Option) (string, error) {
+func (t *toolSearchTool) InvokableRun(_ context.Context, argumentsInJSON string, _ ...tool.Option) (string, error) {
 	matches, err := search(argumentsInJSON, t.tools)
 	if err != nil {
 		return "", err

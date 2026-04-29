@@ -130,7 +130,7 @@ func TestEmitInternalEvents_AgenticMessage_RequiresExecContext(t *testing.T) {
 	}
 
 	mockResp := smakeAssistantMsg[*schema.AgenticMessage]("This is the summary.")
-	mw, err := NewTyped[*schema.AgenticMessage](ctx, &TypedConfig[*schema.AgenticMessage]{
+	mw, err := NewTyped(ctx, &TypedConfig[*schema.AgenticMessage]{
 		Model:              &genericMockModel[*schema.AgenticMessage]{response: mockResp},
 		EmitInternalEvents: true,
 		Trigger: &TriggerCondition{
@@ -245,7 +245,7 @@ func testSummarizationFlow[M adk.MessageType](t *testing.T) {
 		},
 	}
 
-	mw, err := NewTyped[M](ctx, cfg)
+	mw, err := NewTyped(ctx, cfg)
 	require.NoError(t, err)
 
 	// Build messages that exceed the threshold (>20 chars total)
@@ -320,7 +320,7 @@ func testTypedSummarizeMessages[M adk.MessageType](t *testing.T) {
 		smakeUserMsg[M]("Tell me about Go generics"),
 	}
 
-	output, err := TypedSummarizeMessages[M](ctx, cfg, msgs)
+	output, err := TypedSummarizeMessages(ctx, cfg, msgs)
 	require.NoError(t, err)
 	require.NotNil(t, output)
 

@@ -263,7 +263,7 @@ func NewTyped[M adk.MessageType](ctx context.Context, config *TypedConfig[M]) (a
 //	    Handlers: []adk.ChatModelAgentMiddleware{handler},
 //	})
 func NewMiddleware(ctx context.Context, config *Config) (adk.ChatModelAgentMiddleware, error) {
-	return NewTyped[*schema.Message](ctx, config)
+	return NewTyped(ctx, config)
 }
 
 type typedSkillHandler[M adk.MessageType] struct {
@@ -278,7 +278,7 @@ func (h *typedSkillHandler[M]) BeforeAgent(ctx context.Context, runCtx *adk.Chat
 	return ctx, runCtx, nil
 }
 
-func (h *typedSkillHandler[M]) WrapModel(ctx context.Context, m model.BaseModel[M], mc *adk.TypedModelContext[M]) (model.BaseModel[M], error) {
+func (h *typedSkillHandler[M]) WrapModel(ctx context.Context, m model.BaseModel[M], _ *adk.TypedModelContext[M]) (model.BaseModel[M], error) {
 	if h.tool.modelHub == nil {
 		return m, nil
 	}
@@ -416,7 +416,7 @@ type inputArguments struct {
 	Skill string `json:"skill"`
 }
 
-func (s *typedSkillTool[M]) InvokableRun(ctx context.Context, argumentsInJSON string, opts ...tool.Option) (string, error) {
+func (s *typedSkillTool[M]) InvokableRun(ctx context.Context, argumentsInJSON string, _ ...tool.Option) (string, error) {
 	args := &inputArguments{}
 	err := json.Unmarshal([]byte(argumentsInJSON), args)
 	if err != nil {

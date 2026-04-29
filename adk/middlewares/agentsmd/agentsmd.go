@@ -94,7 +94,7 @@ const agentsMDExtraKey = "__agentsmd_content__"
 // BeforeModelRewriteState injects Agents.md content as a User message before
 // the first User message in the conversation. The injected message is tagged
 // with an Extra key so that repeated invocations are idempotent.
-func (m *typedMiddleware[M]) BeforeModelRewriteState(ctx context.Context, state *adk.TypedChatModelAgentState[M], mc *adk.TypedModelContext[M]) (context.Context, *adk.TypedChatModelAgentState[M], error) {
+func (m *typedMiddleware[M]) BeforeModelRewriteState(ctx context.Context, state *adk.TypedChatModelAgentState[M], _ *adk.TypedModelContext[M]) (context.Context, *adk.TypedChatModelAgentState[M], error) {
 	// Idempotent: if we already injected, return early.
 	for _, msg := range state.Messages {
 		if hasAgentsMDExtra(msg) {
@@ -138,19 +138,15 @@ func hasAgentsMDExtra[M adk.MessageType](msg M) bool {
 func typedInsertBeforeFirstUser[M adk.MessageType](msgs []M, content string) []M {
 	newMsg := makeUserMsgWithExtra[M](content)
 	result := make([]M, 0, len(msgs)+1)
-	inserted := false
 	for i, msg := range msgs {
-		if !inserted && isUserRole(msg) {
+		if isUserRole(msg) {
 			result = append(result, newMsg)
 			result = append(result, msgs[i:]...)
-			inserted = true
-			break
+			return result
 		}
 		result = append(result, msg)
 	}
-	if !inserted {
-		result = append(result, newMsg)
-	}
+	result = append(result, newMsg)
 	return result
 }
 

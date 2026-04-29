@@ -46,7 +46,7 @@ type Config struct {
 //
 // The middleware scans the message history before each model invocation and inserts
 // placeholder tool messages for any tool calls that don't have corresponding responses.
-func NewTyped[M adk.MessageType](ctx context.Context, cfg *Config) (adk.TypedChatModelAgentMiddleware[M], error) {
+func NewTyped[M adk.MessageType](_ context.Context, cfg *Config) (adk.TypedChatModelAgentMiddleware[M], error) {
 	if cfg == nil {
 		cfg = &Config{}
 	}
@@ -89,7 +89,7 @@ func (m *typedMiddleware[M]) BeforeModelRewriteState(ctx context.Context, state 
 func patchToolCallsForMessage[M adk.MessageType](ctx context.Context,
 	gen func(ctx context.Context, toolName, toolCallID string) (string, error),
 	state *adk.TypedChatModelAgentState[*schema.Message],
-	mc *adk.TypedModelContext[M]) (context.Context, *adk.TypedChatModelAgentState[M], error) {
+	_ *adk.TypedModelContext[M]) (context.Context, *adk.TypedChatModelAgentState[M], error) {
 
 	patched := make([]*schema.Message, 0, len(state.Messages))
 
@@ -121,7 +121,7 @@ func patchToolCallsForMessage[M adk.MessageType](ctx context.Context,
 func patchToolCallsForAgenticMessage[M adk.MessageType](ctx context.Context,
 	gen func(ctx context.Context, toolName, toolCallID string) (string, error),
 	state *adk.TypedChatModelAgentState[*schema.AgenticMessage],
-	mc *adk.TypedModelContext[M]) (context.Context, *adk.TypedChatModelAgentState[M], error) {
+	_ *adk.TypedModelContext[M]) (context.Context, *adk.TypedChatModelAgentState[M], error) {
 
 	patched := make([]*schema.AgenticMessage, 0, len(state.Messages))
 
