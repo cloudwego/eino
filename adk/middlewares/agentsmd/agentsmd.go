@@ -136,55 +136,47 @@ func hasAgentsMDExtra[M adk.MessageType](msg M) bool {
 
 // typedInsertBeforeFirstUser inserts a user message with agentsmd content before the first User message.
 func typedInsertBeforeFirstUser[M adk.MessageType](msgs []M, content string) []M {
+	newMsg := makeUserMsgWithExtra[M](content)
+	result := make([]M, 0, len(msgs)+1)
+	inserted := false
+	for i, msg := range msgs {
+		if !inserted && isUserRole(msg) {
+			result = append(result, newMsg)
+			result = append(result, msgs[i:]...)
+			inserted = true
+			break
+		}
+		result = append(result, msg)
+	}
+	if !inserted {
+		result = append(result, newMsg)
+	}
+	return result
+}
+
+func isUserRole[M adk.MessageType](msg M) bool {
+	switch m := any(msg).(type) {
+	case *schema.Message:
+		return m.Role == schema.User
+	case *schema.AgenticMessage:
+		return m.Role == schema.AgenticRoleTypeUser
+	}
+	return false
+}
+
+func makeUserMsgWithExtra[M adk.MessageType](content string) M {
 	var zero M
 	switch any(zero).(type) {
 	case *schema.Message:
 		msg := schema.UserMessage(content)
 		msg.Extra = map[string]any{agentsMDExtraKey: true}
-		return any(insertBeforeFirstUserMessage(any(msgs).([]*schema.Message), msg)).([]M)
+		return any(msg).(M)
 	case *schema.AgenticMessage:
 		msg := schema.UserAgenticMessage(content)
 		msg.Extra = map[string]any{agentsMDExtraKey: true}
-		return any(insertBeforeFirstUserAgenticMessage(any(msgs).([]*schema.AgenticMessage), msg)).([]M)
-	default:
-		panic("unreachable: unknown MessageType")
+		return any(msg).(M)
 	}
-}
-
-func insertBeforeFirstUserMessage(msgs []*schema.Message, newMsg *schema.Message) []*schema.Message {
-	result := make([]*schema.Message, 0, len(msgs)+1)
-	inserted := false
-	for i, msg := range msgs {
-		if !inserted && msg.Role == schema.User {
-			result = append(result, newMsg)
-			result = append(result, msgs[i:]...)
-			inserted = true
-			break
-		}
-		result = append(result, msg)
-	}
-	if !inserted {
-		result = append(result, newMsg)
-	}
-	return result
-}
-
-func insertBeforeFirstUserAgenticMessage(msgs []*schema.AgenticMessage, newMsg *schema.AgenticMessage) []*schema.AgenticMessage {
-	result := make([]*schema.AgenticMessage, 0, len(msgs)+1)
-	inserted := false
-	for i, msg := range msgs {
-		if !inserted && msg.Role == schema.AgenticRoleTypeUser {
-			result = append(result, newMsg)
-			result = append(result, msgs[i:]...)
-			inserted = true
-			break
-		}
-		result = append(result, msg)
-	}
-	if !inserted {
-		result = append(result, newMsg)
-	}
-	return result
+	panic("unreachable")
 }
 
 // loadContent retrieves the Agents.md content, using a per-Run cache to avoid
