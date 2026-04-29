@@ -610,12 +610,13 @@ func (a *ChatModelAgent) applyBeforeAgent(ctx context.Context, ec *execContext) 
 		}
 	}
 
+	toolsNodeConf := ec.toolsNodeConf
+	toolsNodeConf.Tools = runCtx.Tools
+	toolsNodeConf.ToolCallMiddlewares = cloneSlice(ec.toolsNodeConf.ToolCallMiddlewares)
+
 	runtimeEC := &execContext{
-		instruction: runCtx.Instruction,
-		toolsNodeConf: compose.ToolsNodeConfig{
-			Tools:               runCtx.Tools,
-			ToolCallMiddlewares: cloneSlice(ec.toolsNodeConf.ToolCallMiddlewares),
-		},
+		instruction:    runCtx.Instruction,
+		toolsNodeConf:  toolsNodeConf,
 		returnDirectly: runCtx.ReturnDirectly,
 		toolUpdated:    true,
 		rebuildGraph: (len(ec.toolsNodeConf.Tools) == 0 && len(runCtx.Tools) > 0) ||
@@ -634,13 +635,10 @@ func (a *ChatModelAgent) applyBeforeAgent(ctx context.Context, ec *execContext) 
 
 func (a *ChatModelAgent) prepareExecContext(ctx context.Context) (*execContext, error) {
 	instruction := a.instruction
-	toolsNodeConf := compose.ToolsNodeConfig{
-		Tools:                cloneSlice(a.toolsConfig.Tools),
-		ToolCallMiddlewares:  cloneSlice(a.toolsConfig.ToolCallMiddlewares),
-		UnknownToolsHandler:  a.toolsConfig.UnknownToolsHandler,
-		ExecuteSequentially:  a.toolsConfig.ExecuteSequentially,
-		ToolArgumentsHandler: a.toolsConfig.ToolArgumentsHandler,
-	}
+	toolsNodeConf := a.toolsConfig.ToolsNodeConfig
+	toolsNodeConf.Tools = cloneSlice(a.toolsConfig.Tools)
+	toolsNodeConf.ToolCallMiddlewares = cloneSlice(a.toolsConfig.ToolCallMiddlewares)
+
 	returnDirectly := copyMap(a.toolsConfig.ReturnDirectly)
 
 	transferToAgents := a.subAgents
