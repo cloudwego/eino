@@ -91,6 +91,66 @@ func (m *genericMockModel[M]) Stream(_ context.Context, _ []M, _ ...model.Option
 }
 
 // ============================================================================
+// typedMsgToLegacy / typedMsgsToLegacy tests
+// ============================================================================
+
+func TestTypedMsgToLegacy_AgenticMessage(t *testing.T) {
+	t.Run("AgenticMessage returns nil", func(t *testing.T) {
+		msg := &schema.AgenticMessage{
+			Role: schema.AgenticRoleTypeUser,
+			ContentBlocks: []*schema.ContentBlock{
+				schema.NewContentBlock(&schema.UserInputText{Text: "hello"}),
+			},
+		}
+		result := typedMsgToLegacy[*schema.AgenticMessage](msg)
+		assert.Nil(t, result, "typedMsgToLegacy should return nil for AgenticMessage")
+	})
+
+	t.Run("nil AgenticMessage returns nil", func(t *testing.T) {
+		var msg *schema.AgenticMessage
+		result := typedMsgToLegacy[*schema.AgenticMessage](msg)
+		assert.Nil(t, result)
+	})
+
+	t.Run("Message returns the message itself", func(t *testing.T) {
+		msg := schema.UserMessage("hello")
+		result := typedMsgToLegacy[*schema.Message](msg)
+		assert.Equal(t, msg, result)
+	})
+}
+
+func TestTypedMsgsToLegacy_AgenticMessage(t *testing.T) {
+	t.Run("AgenticMessage slice returns nil", func(t *testing.T) {
+		msgs := []*schema.AgenticMessage{
+			{
+				Role: schema.AgenticRoleTypeUser,
+				ContentBlocks: []*schema.ContentBlock{
+					schema.NewContentBlock(&schema.UserInputText{Text: "hello"}),
+				},
+			},
+			{
+				Role: schema.AgenticRoleTypeAssistant,
+				ContentBlocks: []*schema.ContentBlock{
+					schema.NewContentBlock(&schema.AssistantGenText{Text: "hi"}),
+				},
+			},
+		}
+		result := typedMsgsToLegacy[*schema.AgenticMessage](msgs)
+		assert.Nil(t, result, "typedMsgsToLegacy should return nil for AgenticMessage slice")
+	})
+
+	t.Run("Message slice returns converted slice", func(t *testing.T) {
+		msg1 := schema.UserMessage("hello")
+		msg2 := schema.AssistantMessage("hi", nil)
+		msgs := []*schema.Message{msg1, msg2}
+		result := typedMsgsToLegacy[*schema.Message](msgs)
+		require.Len(t, result, 2)
+		assert.Equal(t, msg1, result[0])
+		assert.Equal(t, msg2, result[1])
+	})
+}
+
+// ============================================================================
 // Tests
 // ============================================================================
 

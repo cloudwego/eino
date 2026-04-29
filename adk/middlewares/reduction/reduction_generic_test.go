@@ -452,6 +452,385 @@ func testClearPostProcessGeneric[M adk.MessageType](t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// Part 5: AgenticMessage-specific coverage
+// ---------------------------------------------------------------------------
+
+func TestGetDefaultTokenCounter_AgenticMessage(t *testing.T) {
+	ctx := context.Background()
+	counter := getDefaultTokenCounter[*schema.AgenticMessage]()
+
+	msgs := []*schema.AgenticMessage{
+		{
+			Role: schema.AgenticRoleTypeUser,
+			ContentBlocks: []*schema.ContentBlock{
+				schema.NewContentBlock(&schema.UserInputText{Text: "Hello, world!"}),
+			},
+		},
+		{
+			Role: schema.AgenticRoleTypeAssistant,
+			ContentBlocks: []*schema.ContentBlock{
+				schema.NewContentBlock(&schema.AssistantGenText{Text: "Hi there!"}),
+			},
+		},
+		{
+			Role: schema.AgenticRoleTypeAssistant,
+			ContentBlocks: []*schema.ContentBlock{
+				schema.NewContentBlock(&schema.FunctionToolCall{CallID: "c1", Name: "my_tool", Arguments: `{"key":"value"}`}),
+			},
+		},
+		{
+			Role: schema.AgenticRoleTypeUser,
+			ContentBlocks: []*schema.ContentBlock{
+				schema.NewContentBlock(&schema.FunctionToolResult{
+					CallID: "c1",
+					Name:   "my_tool",
+					Blocks: []*schema.FunctionToolResultBlock{
+						{Text: &schema.UserInputText{Text: "tool output text"}},
+					},
+				}),
+			},
+		},
+		nil, // nil message should be skipped
+	}
+
+	tokens, err := counter(ctx, msgs, nil)
+	assert.NoError(t, err)
+	assert.Greater(t, tokens, int64(0), "should count tokens from content blocks")
+
+	// Also test with tools
+	tools := []*schema.ToolInfo{
+		{Name: "my_tool", Desc: "a test tool"},
+	}
+	tokensWithTools, err := counter(ctx, msgs, tools)
+	assert.NoError(t, err)
+	assert.Greater(t, tokensWithTools, tokens, "tokens should increase with tool info")
+}
+
+func TestCopyAgenticMessages_DeepCopy(t *testing.T) {
+	original := []*schema.AgenticMessage{
+		{
+			Role: schema.AgenticRoleTypeAssistant,
+			ContentBlocks: []*schema.ContentBlock{
+				schema.NewContentBlock(&schema.FunctionToolCall{
+					CallID:    "call_1",
+					Name:      "tool_a",
+					Arguments: `{"x":1}`,
+				}),
+				{
+					Type: schema.ContentBlockTypeFunctionToolResult,
+					FunctionToolResult: &schema.FunctionToolResult{
+						CallID: "call_1",
+						Name:   "tool_a",
+						Blocks: []*schema.FunctionToolResultBlock{
+							{Text: &schema.UserInputText{Text: "original result"}},
+						},
+					},
+					Extra: map[string]any{"meta": "data"},
+				},
+			},
+			Extra: map[string]any{"msg_key": "msg_value"},
+		},
+	}
+
+	copied := copyMessagesGeneric[*schema.AgenticMessage](original)
+	require.Len(t, copied, 1)
+
+	// Mutate the copy and verify original is unchanged.
+	copied[0].ContentBlocks[0].FunctionToolCall.Arguments = `{"modified":true}`
+	assert.Equal(t, `{"x":1}`, original[0].ContentBlocks[0].FunctionToolCall.Arguments,
+		"original FunctionToolCall.Arguments must not be affected")
+
+	copied[0].ContentBlocks[1].FunctionToolResult.Blocks[0].Text.Text = "modified result"
+	assert.Equal(t, "original result", original[0].ContentBlocks[1].FunctionToolResult.Blocks[0].Text.Text,
+		"original FunctionToolResult text must not be affected")
+
+	copied[0].ContentBlocks[1].Extra["meta"] = "changed"
+	assert.Equal(t, "data", original[0].ContentBlocks[1].Extra["meta"],
+		"original ContentBlock.Extra must not be affected")
+
+	copied[0].Extra["msg_key"] = "changed"
+	assert.Equal(t, "msg_value", original[0].Extra["msg_key"],
+		"original AgenticMessage.Extra must not be affected")
+}
+
+func TestToolResultFromMsgGeneric_AgenticMessage(t *testing.T) {
+	t.Run("single text block returns fromContent=true", func(t *testing.T) {
+		msg := &schema.AgenticMessage{
+			Role: schema.AgenticRoleTypeUser,
+			ContentBlocks: []*schema.ContentBlock{
+				{
+					Type: schema.ContentBlockTypeFunctionToolResult,
+					FunctionToolResult: &schema.FunctionToolResult{
+						CallID: "c1",
+						Name:   "tool1",
+						Blocks: []*schema.FunctionToolResultBlock{
+							{Text: &schema.UserInputText{Text: "hello result"}},
+						},
+					},
+				},
+			},
+		}
+
+		result, fromContent, err := toolResultFromMsgGeneric[*schema.AgenticMessage](msg)
+		assert.NoError(t, err)
+		assert.True(t, fromContent, "single text part should be fromContent=true")
+		require.Len(t, result.Parts, 1)
+		assert.Equal(t, schema.ToolPartTypeText, result.Parts[0].Type)
+		assert.Equal(t, "hello result", result.Parts[0].Text)
+	})
+
+	t.Run("multiple blocks returns fromContent=false", func(t *testing.T) {
+		msg := &schema.AgenticMessage{
+			Role: schema.AgenticRoleTypeUser,
+			ContentBlocks: []*schema.ContentBlock{
+				{
+					Type: schema.ContentBlockTypeFunctionToolResult,
+					FunctionToolResult: &schema.FunctionToolResult{
+						CallID: "c1",
+						Name:   "tool1",
+						Blocks: []*schema.FunctionToolResultBlock{
+							{Text: &schema.UserInputText{Text: "text part"}},
+							{Text: &schema.UserInputText{Text: "another text part"}},
+						},
+					},
+				},
+			},
+		}
+
+		result, fromContent, err := toolResultFromMsgGeneric[*schema.AgenticMessage](msg)
+		assert.NoError(t, err)
+		assert.False(t, fromContent, "multiple parts should be fromContent=false")
+		require.Len(t, result.Parts, 2)
+		assert.Equal(t, "text part", result.Parts[0].Text)
+		assert.Equal(t, "another text part", result.Parts[1].Text)
+	})
+
+	t.Run("empty blocks returns empty text", func(t *testing.T) {
+		msg := &schema.AgenticMessage{
+			Role: schema.AgenticRoleTypeUser,
+			ContentBlocks: []*schema.ContentBlock{
+				{
+					Type: schema.ContentBlockTypeFunctionToolResult,
+					FunctionToolResult: &schema.FunctionToolResult{
+						CallID: "c1",
+						Name:   "tool1",
+						Blocks: nil,
+					},
+				},
+			},
+		}
+
+		result, fromContent, err := toolResultFromMsgGeneric[*schema.AgenticMessage](msg)
+		assert.NoError(t, err)
+		assert.True(t, fromContent)
+		require.Len(t, result.Parts, 1)
+		assert.Equal(t, "", result.Parts[0].Text)
+	})
+}
+
+func TestSetToolResultContent_AgenticMessage(t *testing.T) {
+	t.Run("fromContent=true sets text", func(t *testing.T) {
+		msg := &schema.AgenticMessage{
+			Role: schema.AgenticRoleTypeUser,
+			ContentBlocks: []*schema.ContentBlock{
+				{
+					Type: schema.ContentBlockTypeFunctionToolResult,
+					FunctionToolResult: &schema.FunctionToolResult{
+						CallID: "c1",
+						Name:   "tool1",
+						Blocks: []*schema.FunctionToolResultBlock{
+							{Text: &schema.UserInputText{Text: "old"}},
+						},
+					},
+				},
+			},
+		}
+
+		newResult := &schema.ToolResult{
+			Parts: []schema.ToolOutputPart{
+				{Type: schema.ToolPartTypeText, Text: "new content"},
+			},
+		}
+
+		setToolResultContent[*schema.AgenticMessage](msg, newResult, true)
+
+		// Verify the block was updated
+		blocks := msg.ContentBlocks[0].FunctionToolResult.Blocks
+		require.Len(t, blocks, 1)
+		assert.Equal(t, "new content", blocks[0].Text.Text)
+	})
+
+	t.Run("fromContent=false sets multi-part", func(t *testing.T) {
+		msg := &schema.AgenticMessage{
+			Role: schema.AgenticRoleTypeUser,
+			ContentBlocks: []*schema.ContentBlock{
+				{
+					Type: schema.ContentBlockTypeFunctionToolResult,
+					FunctionToolResult: &schema.FunctionToolResult{
+						CallID: "c1",
+						Name:   "tool1",
+						Blocks: []*schema.FunctionToolResultBlock{
+							{Text: &schema.UserInputText{Text: "old"}},
+						},
+					},
+				},
+			},
+		}
+
+		imgURL := "https://example.com/img.png"
+		newResult := &schema.ToolResult{
+			Parts: []schema.ToolOutputPart{
+				{Type: schema.ToolPartTypeText, Text: "text part"},
+				{Type: schema.ToolPartTypeImage, Image: &schema.ToolOutputImage{
+					MessagePartCommon: schema.MessagePartCommon{URL: &imgURL, MIMEType: "image/png"},
+				}},
+			},
+		}
+
+		setToolResultContent[*schema.AgenticMessage](msg, newResult, false)
+
+		blocks := msg.ContentBlocks[0].FunctionToolResult.Blocks
+		require.Len(t, blocks, 2)
+		assert.Equal(t, "text part", blocks[0].Text.Text)
+		require.NotNil(t, blocks[1].Image)
+		assert.Equal(t, "https://example.com/img.png", blocks[1].Image.URL)
+		assert.Equal(t, "image/png", blocks[1].Image.MIMEType)
+	})
+}
+
+func TestToolResultFromMsgGeneric_MediaBlocks(t *testing.T) {
+	imgURL := "https://example.com/img.png"
+	audioURL := "https://example.com/audio.wav"
+	videoURL := "https://example.com/video.mp4"
+	fileURL := "https://example.com/doc.pdf"
+
+	msg := &schema.AgenticMessage{
+		Role: schema.AgenticRoleTypeUser,
+		ContentBlocks: []*schema.ContentBlock{
+			{
+				Type: schema.ContentBlockTypeFunctionToolResult,
+				FunctionToolResult: &schema.FunctionToolResult{
+					CallID: "c1",
+					Name:   "media_tool",
+					Blocks: []*schema.FunctionToolResultBlock{
+						{Image: &schema.UserInputImage{URL: imgURL, MIMEType: "image/png"}},
+						{Audio: &schema.UserInputAudio{URL: audioURL, MIMEType: "audio/wav"}},
+						{Video: &schema.UserInputVideo{URL: videoURL, MIMEType: "video/mp4"}},
+						{File: &schema.UserInputFile{URL: fileURL, MIMEType: "application/pdf"}},
+					},
+				},
+			},
+		},
+	}
+
+	result, fromContent, err := toolResultFromMsgGeneric[*schema.AgenticMessage](msg)
+	assert.NoError(t, err)
+	assert.False(t, fromContent, "multi-media should be fromContent=false")
+	require.Len(t, result.Parts, 4)
+
+	assert.Equal(t, schema.ToolPartTypeImage, result.Parts[0].Type)
+	require.NotNil(t, result.Parts[0].Image)
+	require.NotNil(t, result.Parts[0].Image.URL)
+	assert.Equal(t, imgURL, *result.Parts[0].Image.URL)
+
+	assert.Equal(t, schema.ToolPartTypeAudio, result.Parts[1].Type)
+	require.NotNil(t, result.Parts[1].Audio)
+	require.NotNil(t, result.Parts[1].Audio.URL)
+	assert.Equal(t, audioURL, *result.Parts[1].Audio.URL)
+
+	assert.Equal(t, schema.ToolPartTypeVideo, result.Parts[2].Type)
+	require.NotNil(t, result.Parts[2].Video)
+	require.NotNil(t, result.Parts[2].Video.URL)
+	assert.Equal(t, videoURL, *result.Parts[2].Video.URL)
+
+	assert.Equal(t, schema.ToolPartTypeFile, result.Parts[3].Type)
+	require.NotNil(t, result.Parts[3].File)
+	require.NotNil(t, result.Parts[3].File.URL)
+	assert.Equal(t, fileURL, *result.Parts[3].File.URL)
+}
+
+func TestSetToolResultContent_MediaBlocks(t *testing.T) {
+	audioURL := "https://example.com/speech.mp3"
+	videoURL := "https://example.com/clip.mp4"
+	fileURL := "https://example.com/report.pdf"
+
+	msg := &schema.AgenticMessage{
+		Role: schema.AgenticRoleTypeUser,
+		ContentBlocks: []*schema.ContentBlock{
+			{
+				Type: schema.ContentBlockTypeFunctionToolResult,
+				FunctionToolResult: &schema.FunctionToolResult{
+					CallID: "c1",
+					Name:   "tool1",
+					Blocks: []*schema.FunctionToolResultBlock{
+						{Text: &schema.UserInputText{Text: "old"}},
+					},
+				},
+			},
+		},
+	}
+
+	newResult := &schema.ToolResult{
+		Parts: []schema.ToolOutputPart{
+			{Type: schema.ToolPartTypeAudio, Audio: &schema.ToolOutputAudio{
+				MessagePartCommon: schema.MessagePartCommon{URL: &audioURL, MIMEType: "audio/mp3"},
+			}},
+			{Type: schema.ToolPartTypeVideo, Video: &schema.ToolOutputVideo{
+				MessagePartCommon: schema.MessagePartCommon{URL: &videoURL, MIMEType: "video/mp4"},
+			}},
+			{Type: schema.ToolPartTypeFile, File: &schema.ToolOutputFile{
+				MessagePartCommon: schema.MessagePartCommon{URL: &fileURL, MIMEType: "application/pdf"},
+			}},
+		},
+	}
+
+	setToolResultContent[*schema.AgenticMessage](msg, newResult, false)
+
+	blocks := msg.ContentBlocks[0].FunctionToolResult.Blocks
+	require.Len(t, blocks, 3)
+
+	require.NotNil(t, blocks[0].Audio)
+	assert.Equal(t, "https://example.com/speech.mp3", blocks[0].Audio.URL)
+	assert.Equal(t, "audio/mp3", blocks[0].Audio.MIMEType)
+
+	require.NotNil(t, blocks[1].Video)
+	assert.Equal(t, "https://example.com/clip.mp4", blocks[1].Video.URL)
+	assert.Equal(t, "video/mp4", blocks[1].Video.MIMEType)
+
+	require.NotNil(t, blocks[2].File)
+	assert.Equal(t, "https://example.com/report.pdf", blocks[2].File.URL)
+	assert.Equal(t, "application/pdf", blocks[2].File.MIMEType)
+}
+
+func TestAgenticURLToMPC(t *testing.T) {
+	t.Run("non-empty URL", func(t *testing.T) {
+		mpc := agenticURLToMPC("https://example.com/file.pdf", "application/pdf")
+		require.NotNil(t, mpc.URL)
+		assert.Equal(t, "https://example.com/file.pdf", *mpc.URL)
+		assert.Equal(t, "application/pdf", mpc.MIMEType)
+	})
+
+	t.Run("empty URL", func(t *testing.T) {
+		mpc := agenticURLToMPC("", "text/plain")
+		assert.Nil(t, mpc.URL)
+		assert.Equal(t, "text/plain", mpc.MIMEType)
+	})
+}
+
+func TestMpcURLToString(t *testing.T) {
+	t.Run("non-nil URL", func(t *testing.T) {
+		url := "https://example.com"
+		result := mpcURLToString(&url)
+		assert.Equal(t, "https://example.com", result)
+	})
+
+	t.Run("nil URL", func(t *testing.T) {
+		result := mpcURLToString(nil)
+		assert.Equal(t, "", result)
+	})
+}
+
+// ---------------------------------------------------------------------------
 // Top-level test
 // ---------------------------------------------------------------------------
 
