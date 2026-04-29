@@ -379,6 +379,11 @@ func DeleteRunLocalValue(ctx context.Context, key string) error {
 // This allows TypedChatModelAgentMiddleware implementations to emit custom events that will be
 // received by the caller iterating over the agent's event stream.
 //
+// Note: TypedSendEvent is a pure transport — it does NOT auto-assign message IDs.
+// Framework-created messages (model output, tool results) receive IDs automatically
+// via internal wrapper layers. If your middleware constructs its own messages, call
+// EnsureMessageID before sending to assign an ID.
+//
 // This function can only be called from within a TypedChatModelAgentMiddleware during agent execution.
 // Returns an error if called outside of an agent execution context.
 func TypedSendEvent[M MessageType](ctx context.Context, event *TypedAgentEvent[M]) error {
@@ -386,6 +391,7 @@ func TypedSendEvent[M MessageType](ctx context.Context, event *TypedAgentEvent[M
 	if execCtx == nil || execCtx.generator == nil {
 		return fmt.Errorf("TypedSendEvent failed: must be called within a ChatModelAgent Run() or Resume() execution context")
 	}
+
 	execCtx.send(event)
 	return nil
 }
@@ -397,7 +403,7 @@ func TypedSendEvent[M MessageType](ctx context.Context, event *TypedAgentEvent[M
 // This function can only be called from within a ChatModelAgentMiddleware during agent execution.
 // Returns an error if called outside of an agent execution context.
 func SendEvent(ctx context.Context, event *AgentEvent) error {
-	return TypedSendEvent[*schema.Message](ctx, event)
+	return TypedSendEvent(ctx, event)
 }
 
 // checkGobEncodability probes whether the value can be gob-encoded as part of

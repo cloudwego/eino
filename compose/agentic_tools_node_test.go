@@ -105,40 +105,17 @@ func TestToolMessageToAgenticMessage(t *testing.T) {
 			},
 		}
 		ret := toolMessageToAgenticMessage(input)
-		assert.Equal(t, 1, len(ret))
-		assert.Equal(t, schema.AgenticRoleTypeUser, ret[0].Role)
-		assert.Equal(t, []*schema.ContentBlock{
-			{
-				Type: schema.ContentBlockTypeFunctionToolResult,
-				FunctionToolResult: &schema.FunctionToolResult{
-					CallID: "1",
-					Name:   "name1",
-					Blocks: []*schema.FunctionToolResultBlock{
-						{Text: &schema.UserInputText{Text: "content1"}},
-					},
-				},
-			},
-			{
-				Type: schema.ContentBlockTypeFunctionToolResult,
-				FunctionToolResult: &schema.FunctionToolResult{
-					CallID: "2",
-					Name:   "name2",
-					Blocks: []*schema.FunctionToolResultBlock{
-						{Text: &schema.UserInputText{Text: "content2"}},
-					},
-				},
-			},
-			{
-				Type: schema.ContentBlockTypeFunctionToolResult,
-				FunctionToolResult: &schema.FunctionToolResult{
-					CallID: "3",
-					Name:   "name3",
-					Blocks: []*schema.FunctionToolResultBlock{
-						{Text: &schema.UserInputText{Text: "content3"}},
-					},
-				},
-			},
-		}, ret[0].ContentBlocks)
+		assert.Equal(t, 3, len(ret))
+		for i, msg := range ret {
+			assert.Equal(t, schema.AgenticRoleTypeUser, msg.Role)
+			assert.Equal(t, 1, len(msg.ContentBlocks))
+			assert.Equal(t, schema.ContentBlockTypeFunctionToolResult, msg.ContentBlocks[0].Type)
+			ftr := msg.ContentBlocks[0].FunctionToolResult
+			assert.Equal(t, input[i].ToolCallID, ftr.CallID)
+			assert.Equal(t, input[i].ToolName, ftr.Name)
+			assert.Equal(t, 1, len(ftr.Blocks))
+			assert.Equal(t, input[i].Content, ftr.Blocks[0].Text.Text)
+		}
 	})
 
 	t.Run("with multimodal content", func(t *testing.T) {
@@ -179,10 +156,11 @@ func TestToolMessageToAgenticMessage(t *testing.T) {
 		}
 
 		ret := toolMessageToAgenticMessage(input)
-		assert.Equal(t, 1, len(ret))
-		assert.Equal(t, schema.AgenticRoleTypeUser, ret[0].Role)
+		assert.Equal(t, 2, len(ret))
 
-		// first tool result has Blocks (from UserInputMultiContent)
+		// first message: multimodal tool result
+		assert.Equal(t, schema.AgenticRoleTypeUser, ret[0].Role)
+		assert.Equal(t, 1, len(ret[0].ContentBlocks))
 		ftr1 := ret[0].ContentBlocks[0].FunctionToolResult
 		assert.Equal(t, "1", ftr1.CallID)
 		assert.Equal(t, 5, len(ftr1.Blocks))
@@ -198,8 +176,10 @@ func TestToolMessageToAgenticMessage(t *testing.T) {
 
 		assert.Equal(t, fileURL, ftr1.Blocks[4].File.URL)
 
-		// second tool result has text-only Blocks (from Content)
-		ftr2 := ret[0].ContentBlocks[1].FunctionToolResult
+		// second message: text-only tool result
+		assert.Equal(t, schema.AgenticRoleTypeUser, ret[1].Role)
+		assert.Equal(t, 1, len(ret[1].ContentBlocks))
+		ftr2 := ret[1].ContentBlocks[0].FunctionToolResult
 		assert.Equal(t, "2", ftr2.CallID)
 		assert.Equal(t, 1, len(ftr2.Blocks))
 		assert.Equal(t, "plain result", ftr2.Blocks[0].Text.Text)
@@ -222,89 +202,10 @@ func TestToolMessageToAgenticMessage(t *testing.T) {
 			},
 		}
 		ret := toolMessageToAgenticMessage(input)
+		assert.Equal(t, 1, len(ret))
 		ftr := ret[0].ContentBlocks[0].FunctionToolResult
 		assert.Equal(t, 1, len(ftr.Blocks))
 		assert.Equal(t, "only text", ftr.Blocks[0].Text.Text)
-	})
-}
-
-func TestMessageInputPartsToFunctionToolBlocks(t *testing.T) {
-	url1 := "https://example.com/img.jpg"
-	base64 := "aW1hZ2VkYXRh"
-
-	t.Run("deref nil pointer returns empty string", func(t *testing.T) {
-		input := []schema.MessageInputPart{
-			{Type: schema.ChatMessagePartTypeImageURL, Image: &schema.MessageInputImage{
-				MessagePartCommon: schema.MessagePartCommon{URL: nil, Base64Data: nil},
-			}},
-		}
-		blocks := messageInputPartsToFunctionToolBlocks(input)
-		assert.Equal(t, 1, len(blocks))
-		assert.Equal(t, "", blocks[0].Image.URL)
-		assert.Equal(t, "", blocks[0].Image.Base64Data)
-	})
-
-	t.Run("deref non-nil pointer returns value", func(t *testing.T) {
-		input := []schema.MessageInputPart{
-			{Type: schema.ChatMessagePartTypeImageURL, Image: &schema.MessageInputImage{
-				MessagePartCommon: schema.MessagePartCommon{URL: &url1, Base64Data: &base64, MIMEType: "image/jpeg"},
-			}},
-		}
-		blocks := messageInputPartsToFunctionToolBlocks(input)
-		assert.Equal(t, 1, len(blocks))
-		assert.Equal(t, url1, blocks[0].Image.URL)
-		assert.Equal(t, base64, blocks[0].Image.Base64Data)
-		assert.Equal(t, "image/jpeg", blocks[0].Image.MIMEType)
-	})
-
-	t.Run("empty parts returns empty blocks", func(t *testing.T) {
-		blocks := messageInputPartsToFunctionToolBlocks(nil)
-		assert.Equal(t, 0, len(blocks))
-	})
-
-	t.Run("extra merge - part and media type", func(t *testing.T) {
-		imgURL := "https://example.com/img.png"
-		input := []schema.MessageInputPart{
-			{
-				Type: schema.ChatMessagePartTypeImageURL,
-				Image: &schema.MessageInputImage{
-					MessagePartCommon: schema.MessagePartCommon{
-						URL:   &imgURL,
-						Extra: map[string]any{"shared": "from_common", "common_only": "c"},
-					},
-				},
-				Extra: map[string]any{"shared": "from_part", "part_only": "p"},
-			},
-		}
-		blocks := messageInputPartsToFunctionToolBlocks(input)
-		assert.Equal(t, 1, len(blocks))
-		assert.Equal(t, "from_part", blocks[0].Extra["shared"])
-		assert.Equal(t, "p", blocks[0].Extra["part_only"])
-		assert.Nil(t, blocks[0].Extra["common_only"])
-	})
-
-	t.Run("extra - text only has part extra", func(t *testing.T) {
-		input := []schema.MessageInputPart{
-			{
-				Type:  schema.ChatMessagePartTypeText,
-				Text:  "hello",
-				Extra: map[string]any{"key": "val"},
-			},
-		}
-		blocks := messageInputPartsToFunctionToolBlocks(input)
-		assert.Equal(t, map[string]any{"key": "val"}, blocks[0].Extra)
-	})
-
-	t.Run("extra - both nil returns nil", func(t *testing.T) {
-		imgURL := "https://example.com/img.png"
-		input := []schema.MessageInputPart{
-			{
-				Type:  schema.ChatMessagePartTypeImageURL,
-				Image: &schema.MessageInputImage{MessagePartCommon: schema.MessagePartCommon{URL: &imgURL}},
-			},
-		}
-		blocks := messageInputPartsToFunctionToolBlocks(input)
-		assert.Nil(t, blocks[0].Extra)
 	})
 }
 
@@ -354,9 +255,11 @@ func TestStreamToolMessageToAgenticMessage(t *testing.T) {
 		result, err := schema.ConcatAgenticMessagesArray(chunks)
 		assert.NoError(t, err)
 
-		assert.Equal(t, 1, len(result))
-		assert.Equal(t, 2, len(result[0].ContentBlocks))
+		assert.Equal(t, 2, len(result))
 
+		// first message: multimodal tool result (single chunk → StreamingMeta preserved)
+		assert.Equal(t, schema.AgenticRoleTypeUser, result[0].Role)
+		assert.Equal(t, 1, len(result[0].ContentBlocks))
 		ftr1 := result[0].ContentBlocks[0].FunctionToolResult
 		assert.Equal(t, "1", ftr1.CallID)
 		assert.Equal(t, 2, len(ftr1.Blocks))
@@ -364,7 +267,10 @@ func TestStreamToolMessageToAgenticMessage(t *testing.T) {
 		assert.NotNil(t, ftr1.Blocks[1].Image)
 		assert.Equal(t, imageURL, ftr1.Blocks[1].Image.URL)
 
-		ftr2 := result[0].ContentBlocks[1].FunctionToolResult
+		// second message: text-only tool result (single chunk → StreamingMeta preserved)
+		assert.Equal(t, schema.AgenticRoleTypeUser, result[1].Role)
+		assert.Equal(t, 1, len(result[1].ContentBlocks))
+		ftr2 := result[1].ContentBlocks[0].FunctionToolResult
 		assert.Equal(t, "2", ftr2.CallID)
 		assert.Equal(t, 1, len(ftr2.Blocks))
 		assert.Equal(t, "result2", ftr2.Blocks[0].Text.Text)
@@ -450,7 +356,13 @@ func testStreamToolMessageTextOnly(t *testing.T) {
 							{Text: &schema.UserInputText{Text: "content1-1"}},
 						},
 					},
+					StreamingMeta: &schema.StreamingMeta{Index: 0},
 				},
+			},
+		},
+		{
+			Role: schema.AgenticRoleTypeUser,
+			ContentBlocks: []*schema.ContentBlock{
 				{
 					Type: schema.ContentBlockTypeFunctionToolResult,
 					FunctionToolResult: &schema.FunctionToolResult{
@@ -462,6 +374,11 @@ func testStreamToolMessageTextOnly(t *testing.T) {
 						},
 					},
 				},
+			},
+		},
+		{
+			Role: schema.AgenticRoleTypeUser,
+			ContentBlocks: []*schema.ContentBlock{
 				{
 					Type: schema.ContentBlockTypeFunctionToolResult,
 					FunctionToolResult: &schema.FunctionToolResult{

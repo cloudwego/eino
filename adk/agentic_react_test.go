@@ -354,7 +354,93 @@ func TestAgenticReact_MaxIterations(t *testing.T) {
 }
 
 func TestAgenticReact_ReturnDirectly(t *testing.T) {
-	t.Skip("returnDirectly for agentic agents depends on typed eventSenderToolHandler; not yet supported")
+	ctx := context.Background()
+
+	mdl := &sequentialAgenticModel{
+		responses: []*schema.AgenticMessage{
+			// Model calls the return-directly tool.
+			agenticToolCallMsg("direct", "call-1", `"final answer"`),
+		},
+	}
+
+	agent, err := NewTypedChatModelAgent[*schema.AgenticMessage](ctx, &TypedChatModelAgentConfig[*schema.AgenticMessage]{
+		Name:        t.Name(),
+		Description: "test",
+		Model:       mdl,
+		ToolsConfig: ToolsConfig{
+			ToolsNodeConfig: compose.ToolsNodeConfig{
+				Tools: []tool.BaseTool{&agenticEchoTool{name: "direct"}},
+			},
+			ReturnDirectly: map[string]bool{"direct": true},
+		},
+	})
+	require.NoError(t, err)
+
+	t.Run("Invoke", func(t *testing.T) {
+		atomic.StoreInt32(&mdl.callCount, 0)
+		runner := NewTypedRunner[*schema.AgenticMessage](TypedRunnerConfig[*schema.AgenticMessage]{
+			Agent: agent, EnableStreaming: false,
+		})
+		events := drainAgenticEvents(runner.Query(ctx, "test"))
+
+		// Model should be called only once (for the tool call), not a second
+		// time, because the tool is return-directly.
+		assert.Equal(t, int32(1), atomic.LoadInt32(&mdl.callCount))
+
+		// Find the final output event — should be the return-directly tool result.
+		last := lastAgenticEvent(events)
+		require.NotNil(t, last)
+		require.Nil(t, last.Err)
+		require.NotNil(t, last.Output)
+		require.NotNil(t, last.Output.MessageOutput)
+
+		msg := last.Output.MessageOutput.Message
+		require.NotNil(t, msg)
+		require.GreaterOrEqual(t, len(msg.ContentBlocks), 1)
+		ftr := msg.ContentBlocks[0].FunctionToolResult
+		require.NotNil(t, ftr, "expected FunctionToolResult in final output, got type=%v", msg.ContentBlocks[0].Type)
+		assert.Equal(t, "call-1", ftr.CallID)
+	})
+
+	t.Run("Stream", func(t *testing.T) {
+		atomic.StoreInt32(&mdl.callCount, 0)
+		runner := NewTypedRunner[*schema.AgenticMessage](TypedRunnerConfig[*schema.AgenticMessage]{
+			Agent: agent, EnableStreaming: true,
+		})
+		events := drainAgenticEvents(runner.Query(ctx, "test"))
+
+		assert.Equal(t, int32(1), atomic.LoadInt32(&mdl.callCount))
+
+		last := lastAgenticEvent(events)
+		require.NotNil(t, last)
+		require.Nil(t, last.Err)
+		require.NotNil(t, last.Output)
+		require.NotNil(t, last.Output.MessageOutput)
+
+		mo := last.Output.MessageOutput
+		if mo.IsStreaming {
+			var finalMsg *schema.AgenticMessage
+			for {
+				chunk, recvErr := mo.MessageStream.Recv()
+				if recvErr != nil {
+					break
+				}
+				finalMsg = chunk
+			}
+			require.NotNil(t, finalMsg)
+			require.GreaterOrEqual(t, len(finalMsg.ContentBlocks), 1)
+			ftr := finalMsg.ContentBlocks[0].FunctionToolResult
+			require.NotNil(t, ftr)
+			assert.Equal(t, "call-1", ftr.CallID)
+		} else {
+			msg := mo.Message
+			require.NotNil(t, msg)
+			require.GreaterOrEqual(t, len(msg.ContentBlocks), 1)
+			ftr := msg.ContentBlocks[0].FunctionToolResult
+			require.NotNil(t, ftr)
+			assert.Equal(t, "call-1", ftr.CallID)
+		}
+	})
 }
 
 func TestAgenticReact_CancelAfterChatModel(t *testing.T) {

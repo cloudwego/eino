@@ -1274,6 +1274,7 @@ type slowStreamingTool struct {
 	chunkInterval time.Duration
 	chunks        []string
 	started       chan struct{}
+	gate          chan struct{} // if non-nil, blocks after first chunk until closed
 }
 
 func (t *slowStreamingTool) Info(_ context.Context) (*schema.ToolInfo, error) {
@@ -1294,10 +1295,18 @@ func (t *slowStreamingTool) StreamableRun(_ context.Context, _ string, _ ...tool
 		case t.started <- struct{}{}:
 		default:
 		}
-		for _, chunk := range t.chunks {
+		for i, chunk := range t.chunks {
 			time.Sleep(t.chunkInterval)
 			if closed := w.Send(chunk, nil); closed {
 				return
+			}
+			// After the second chunk, block on gate so the caller can
+			// issue a cancel while the tool is deterministically still streaming.
+			// We wait until chunk index 1 (second chunk) so that the framework
+			// has time to receive the first chunk and forward the streaming
+			// event to the iterator, ensuring ErrStreamCanceled is observable.
+			if i == 1 && t.gate != nil {
+				<-t.gate
 			}
 		}
 	}()
@@ -1334,11 +1343,13 @@ func TestWithCancel_CancelImmediate_StreamableToolAborted(t *testing.T) {
 	ctx := context.Background()
 
 	tcm := &toolCallStreamModel{}
+	gate := make(chan struct{})
 	st := &slowStreamingTool{
 		name:          "slow_tool",
 		chunkInterval: 100 * time.Millisecond,
 		chunks:        []string{"a", "b", "c", "d", "e", "f", "g", "h", "i", "j"},
 		started:       make(chan struct{}, 1),
+		gate:          gate,
 	}
 
 	agent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
@@ -1359,50 +1370,79 @@ func TestWithCancel_CancelImmediate_StreamableToolAborted(t *testing.T) {
 	cancelOpt, cancelFn := WithCancel()
 	iter := runner.Run(ctx, []Message{schema.UserMessage("hi")}, cancelOpt)
 
-	// Wait for the tool to start streaming
+	// Wait for the tool to start streaming and send its first chunk.
+	// The tool then blocks on the gate, guaranteeing the execution is
+	// still in progress when we issue the cancel.
 	select {
 	case <-st.started:
 	case <-time.After(5 * time.Second):
 		t.Fatal("tool did not start streaming")
 	}
-	// Let a few chunks through, then cancel mid-stream
-	time.Sleep(500 * time.Millisecond)
 
+	// Drain events in a separate goroutine so we can issue the cancel
+	// from the main goroutine after confirming the tool stream event
+	// has been received.
+	type result struct {
+		foundStreamCanceled bool
+		foundCancelError    bool
+	}
+	resultCh := make(chan result, 1)
+	toolStreamReady := make(chan struct{})
+	go func() {
+		var r result
+		for {
+			e, ok := iter.Next()
+			if !ok {
+				break
+			}
+
+			// ErrStreamCanceled appears on the tool's MessageStream.Recv()
+			if e.Output != nil && e.Output.MessageOutput != nil && e.Output.MessageOutput.IsStreaming &&
+				e.Output.MessageOutput.Role == schema.Tool {
+				// Signal that the tool stream event has been received.
+				close(toolStreamReady)
+				stream := e.Output.MessageOutput.MessageStream
+				for {
+					_, recvErr := stream.Recv()
+					if recvErr != nil {
+						if errors.Is(recvErr, ErrStreamCanceled) {
+							r.foundStreamCanceled = true
+						}
+						break
+					}
+				}
+			}
+
+			if e.Action != nil && e.Action.Interrupted != nil {
+				r.foundCancelError = true
+			}
+			var ce *CancelError
+			if e.Err != nil && errors.As(e.Err, &ce) {
+				r.foundCancelError = true
+			}
+		}
+		resultCh <- r
+	}()
+
+	// Wait for the iterator goroutine to receive the tool streaming event.
+	// At this point the tool goroutine is blocked on the gate, and the
+	// iterator goroutine is blocked on stream.Recv(), so the execution is
+	// guaranteed to still be in progress.
+	select {
+	case <-toolStreamReady:
+	case <-time.After(5 * time.Second):
+		t.Fatal("tool stream event was not received by the iterator")
+	}
+
+	// Issue cancel BEFORE unblocking the tool. This ensures the graph
+	// interrupt is queued before the tool can send remaining chunks
+	// and complete normally.
 	handle, _ := cancelFn()
+	close(gate) // unblock the tool so the cancel can propagate
 	cancelErr := handle.Wait()
 	assert.NoError(t, cancelErr)
 
-	var foundStreamCanceled bool
-	var foundCancelError bool
-	for {
-		e, ok := iter.Next()
-		if !ok {
-			break
-		}
-
-		// ErrStreamCanceled appears on the tool's MessageStream.Recv()
-		if e.Output != nil && e.Output.MessageOutput != nil && e.Output.MessageOutput.IsStreaming &&
-			e.Output.MessageOutput.Role == schema.Tool {
-			stream := e.Output.MessageOutput.MessageStream
-			for {
-				_, recvErr := stream.Recv()
-				if recvErr != nil {
-					if errors.Is(recvErr, ErrStreamCanceled) {
-						foundStreamCanceled = true
-					}
-					break
-				}
-			}
-		}
-
-		if e.Action != nil && e.Action.Interrupted != nil {
-			foundCancelError = true
-		}
-		var ce *CancelError
-		if e.Err != nil && errors.As(e.Err, &ce) {
-			foundCancelError = true
-		}
-	}
-	assert.True(t, foundStreamCanceled, "expected ErrStreamCanceled on tool's MessageStream.Recv()")
-	assert.True(t, foundCancelError, "expected CancelError in event stream")
+	r := <-resultCh
+	assert.True(t, r.foundStreamCanceled, "expected ErrStreamCanceled on tool's MessageStream.Recv()")
+	assert.True(t, r.foundCancelError, "expected CancelError in event stream")
 }

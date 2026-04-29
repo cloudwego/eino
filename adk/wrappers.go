@@ -23,6 +23,9 @@ import (
 	"reflect"
 	"sync"
 
+	"github.com/google/uuid"
+
+	"github.com/cloudwego/eino/adk/internal"
 	"github.com/cloudwego/eino/callbacks"
 	"github.com/cloudwego/eino/components"
 	"github.com/cloudwego/eino/components/model"
@@ -51,7 +54,7 @@ func buildModelWrappers[M MessageType](m model.BaseModel[M], config *typedModelW
 }
 
 func buildModelWrappersImpl[M MessageType](m model.BaseModel[M], config *typedModelWrapperConfig[M]) model.BaseModel[M] {
-	var wrapped model.BaseModel[M] = m
+	var wrapped = m
 
 	if config.failoverConfig != nil {
 		wrapped = &typedFailoverProxyModel[M]{}
@@ -444,7 +447,7 @@ func (m *typedEventSenderModel[M]) buildStreamConvertOptions(ctx context.Context
 		// If retry is configured and will retry this error, use the retry wrapper's WillRetryError.
 		if retryWrapper != nil {
 			wrapped := retryWrapper(err)
-			if _, ok := wrapped.(*WillRetryError); ok {
+			if errors.As(wrapped, new(*WillRetryError)) {
 				return wrapped
 			}
 		}
@@ -477,6 +480,40 @@ func copyMessage[M MessageType](msg M) M {
 	}
 }
 
+// typedSetMessageID sets a specific message ID in Extra.
+func typedSetMessageID[M MessageType](msg M, id string) {
+	switch v := any(msg).(type) {
+	case *schema.Message:
+		v.Extra = internal.SetMessageID(v.Extra, id)
+	case *schema.AgenticMessage:
+		v.Extra = internal.SetMessageID(v.Extra, id)
+	}
+}
+
+// GetMessageID returns the eino-internal message ID from the given message, or "".
+func GetMessageID[M MessageType](msg M) string {
+	switch v := any(msg).(type) {
+	case *schema.Message:
+		return internal.GetMessageID(v.Extra)
+	case *schema.AgenticMessage:
+		return internal.GetMessageID(v.Extra)
+	default:
+		return ""
+	}
+}
+
+// EnsureMessageID assigns a UUID v4 message ID if the message doesn't have one.
+// Idempotent: if ID already set, no-op.
+// Middleware authors should call this before SendEvent if they create messages.
+func EnsureMessageID[M MessageType](msg M) {
+	switch v := any(msg).(type) {
+	case *schema.Message:
+		v.Extra = internal.EnsureMessageID(v.Extra)
+	case *schema.AgenticMessage:
+		v.Extra = internal.EnsureMessageID(v.Extra)
+	}
+}
+
 func typedPopToolGenAction[M MessageType](ctx context.Context, toolName string) *AgentAction {
 	toolCallID := compose.GetToolCallID(ctx)
 
@@ -499,15 +536,13 @@ func typedPopToolGenAction[M MessageType](ctx context.Context, toolName string) 
 	return action
 }
 
-func popToolGenAction(ctx context.Context, toolName string) *AgentAction {
-	return typedPopToolGenAction[*schema.Message](ctx, toolName)
+type typedEventSenderToolWrapper[M MessageType] struct {
+	*TypedBaseChatModelAgentMiddleware[M]
 }
 
-type eventSenderToolWrapper struct {
-	*BaseChatModelAgentMiddleware
-}
+type eventSenderToolWrapper = typedEventSenderToolWrapper[*schema.Message]
 
-func (*eventSenderToolWrapper) isEventSenderToolWrapper() {}
+func (*typedEventSenderToolWrapper[M]) isEventSenderToolWrapper() {}
 
 // eventSenderToolWrapperMarker enables cross-type detection of eventSenderToolWrapper
 // in generic contexts. hasUserEventSenderToolWrapper[M] receives
@@ -522,12 +557,229 @@ type eventSenderToolWrapperMarker interface{ isEventSenderToolWrapper() }
 // include this in ChatModelAgentConfig.Handlers at the desired position.
 // When detected in Handlers, the framework skips the default event sender to avoid duplicates.
 func NewEventSenderToolWrapper() ChatModelAgentMiddleware {
-	return &eventSenderToolWrapper{
-		BaseChatModelAgentMiddleware: &BaseChatModelAgentMiddleware{},
+	return newTypedEventSenderToolWrapper[*schema.Message]()
+}
+
+// newTypedEventSenderToolWrapper creates a typed event sender wrapper for the given message type.
+// This is used internally to ensure the default event sender matches the agent's message type
+// (e.g. *schema.AgenticMessage agents need an AgenticMessage-typed wrapper so that
+// compose.ProcessState can access the correct state type).
+func newTypedEventSenderToolWrapper[M MessageType]() *typedEventSenderToolWrapper[M] {
+	return &typedEventSenderToolWrapper[M]{
+		TypedBaseChatModelAgentMiddleware: &TypedBaseChatModelAgentMiddleware[M]{},
 	}
 }
 
-func (w *eventSenderToolWrapper) WrapInvokableToolCall(_ context.Context, endpoint InvokableToolCallEndpoint, tCtx *ToolContext) (InvokableToolCallEndpoint, error) {
+// textToFunctionToolResultBlocks wraps a plain text string into FunctionToolResultBlocks.
+func textToFunctionToolResultBlocks(text string) []*schema.FunctionToolResultBlock {
+	if text == "" {
+		return nil
+	}
+	return []*schema.FunctionToolResultBlock{
+		{Text: &schema.UserInputText{Text: text}},
+	}
+}
+
+// toolResultToBlocks converts a ToolResult's multimodal parts into FunctionToolResultBlocks.
+// This preserves all media types (text, image, audio, video, file), unlike toolResultText
+// which only extracts text.
+func toolResultToBlocks(tr *schema.ToolResult) []*schema.FunctionToolResultBlock {
+	if tr == nil || len(tr.Parts) == 0 {
+		return nil
+	}
+	blocks := make([]*schema.FunctionToolResultBlock, 0, len(tr.Parts))
+	for _, p := range tr.Parts {
+		var block *schema.FunctionToolResultBlock
+		switch p.Type {
+		case schema.ToolPartTypeText:
+			block = &schema.FunctionToolResultBlock{
+				Text:  &schema.UserInputText{Text: p.Text},
+				Extra: p.Extra,
+			}
+		case schema.ToolPartTypeImage:
+			if p.Image != nil {
+				block = &schema.FunctionToolResultBlock{
+					Image: &schema.UserInputImage{
+						URL:        derefString(p.Image.URL),
+						Base64Data: derefString(p.Image.Base64Data),
+						MIMEType:   p.Image.MIMEType,
+					},
+					Extra: p.Extra,
+				}
+			}
+		case schema.ToolPartTypeAudio:
+			if p.Audio != nil {
+				block = &schema.FunctionToolResultBlock{
+					Audio: &schema.UserInputAudio{
+						URL:        derefString(p.Audio.URL),
+						Base64Data: derefString(p.Audio.Base64Data),
+						MIMEType:   p.Audio.MIMEType,
+					},
+					Extra: p.Extra,
+				}
+			}
+		case schema.ToolPartTypeVideo:
+			if p.Video != nil {
+				block = &schema.FunctionToolResultBlock{
+					Video: &schema.UserInputVideo{
+						URL:        derefString(p.Video.URL),
+						Base64Data: derefString(p.Video.Base64Data),
+						MIMEType:   p.Video.MIMEType,
+					},
+					Extra: p.Extra,
+				}
+			}
+		case schema.ToolPartTypeFile:
+			if p.File != nil {
+				block = &schema.FunctionToolResultBlock{
+					File: &schema.UserInputFile{
+						URL:        derefString(p.File.URL),
+						Base64Data: derefString(p.File.Base64Data),
+						MIMEType:   p.File.MIMEType,
+					},
+					Extra: p.Extra,
+				}
+			}
+		}
+		if block != nil {
+			blocks = append(blocks, block)
+		}
+	}
+	return blocks
+}
+
+func derefString(s *string) string {
+	if s == nil {
+		return ""
+	}
+	return *s
+}
+
+// typedToolInvokeEvent constructs the tool result event for the invoke path,
+// dispatching on M to create the correct message and event types.
+func typedToolInvokeEvent[M MessageType](callID, toolName, result, toolMsgID string) *TypedAgentEvent[M] {
+	var zero M
+	switch any(zero).(type) {
+	case *schema.Message:
+		msg := schema.ToolMessage(result, callID, schema.WithToolName(toolName))
+		msg.Extra = internal.SetMessageID(msg.Extra, toolMsgID)
+		event := EventFromMessage(msg, nil, schema.Tool, toolName)
+		return any(event).(*TypedAgentEvent[M])
+	case *schema.AgenticMessage:
+		msg := schema.FunctionToolResultAgenticMessage(callID, toolName, textToFunctionToolResultBlocks(result))
+		msg.Extra = internal.SetMessageID(msg.Extra, toolMsgID)
+		event := EventFromAgenticMessage(msg, nil, schema.AgenticRoleTypeUser)
+		return any(event).(*TypedAgentEvent[M])
+	default:
+		return nil
+	}
+}
+
+// typedToolStreamEvent constructs the tool result event for the stream path,
+// dispatching on M to create the correct message stream and event types.
+func typedToolStreamEvent[M MessageType](callID, toolName, toolMsgID string, stream *schema.StreamReader[string]) *TypedAgentEvent[M] {
+	var zero M
+	switch any(zero).(type) {
+	case *schema.Message:
+		first := true
+		cvt := func(in string) (Message, error) {
+			msg := schema.ToolMessage(in, callID, schema.WithToolName(toolName))
+			if first {
+				first = false
+				msg.Extra = internal.SetMessageID(msg.Extra, toolMsgID)
+			}
+			return msg, nil
+		}
+		msgStream := schema.StreamReaderWithConvert(stream, cvt)
+		event := EventFromMessage(nil, msgStream, schema.Tool, toolName)
+		return any(event).(*TypedAgentEvent[M])
+	case *schema.AgenticMessage:
+		first := true
+		cvt := func(in string) (*schema.AgenticMessage, error) {
+			msg := schema.FunctionToolResultAgenticMessage(callID, toolName, textToFunctionToolResultBlocks(in))
+			if first {
+				first = false
+				msg.Extra = internal.SetMessageID(msg.Extra, toolMsgID)
+			}
+			return msg, nil
+		}
+		msgStream := schema.StreamReaderWithConvert(stream, cvt)
+		event := EventFromAgenticMessage(nil, msgStream, schema.AgenticRoleTypeUser)
+		return any(event).(*TypedAgentEvent[M])
+	default:
+		return nil
+	}
+}
+
+// typedToolEnhancedInvokeEvent constructs the tool result event for the enhanced invoke path.
+// For *schema.Message it builds a multimodal tool message; for *schema.AgenticMessage it
+// uses the string content of the result (AgenticToolsNode only uses the string path).
+func typedToolEnhancedInvokeEvent[M MessageType](callID, toolName, toolMsgID string, result *schema.ToolResult) (*TypedAgentEvent[M], error) {
+	var zero M
+	switch any(zero).(type) {
+	case *schema.Message:
+		msg := schema.ToolMessage("", callID, schema.WithToolName(toolName))
+		var err error
+		msg.UserInputMultiContent, err = result.ToMessageInputParts()
+		if err != nil {
+			return nil, err
+		}
+		msg.Extra = internal.SetMessageID(msg.Extra, toolMsgID)
+		event := EventFromMessage(msg, nil, schema.Tool, toolName)
+		return any(event).(*TypedAgentEvent[M]), nil
+	case *schema.AgenticMessage:
+		msg := schema.FunctionToolResultAgenticMessage(callID, toolName, toolResultToBlocks(result))
+		msg.Extra = internal.SetMessageID(msg.Extra, toolMsgID)
+		event := EventFromAgenticMessage(msg, nil, schema.AgenticRoleTypeUser)
+		return any(event).(*TypedAgentEvent[M]), nil
+	default:
+		return nil, nil
+	}
+}
+
+// typedToolEnhancedStreamEvent constructs the tool result event for the enhanced stream path.
+// For *schema.Message it builds multimodal tool messages; for *schema.AgenticMessage it
+// converts each chunk's multimodal parts into FunctionToolResultBlocks.
+func typedToolEnhancedStreamEvent[M MessageType](callID, toolName, toolMsgID string, stream *schema.StreamReader[*schema.ToolResult]) *TypedAgentEvent[M] {
+	var zero M
+	switch any(zero).(type) {
+	case *schema.Message:
+		first := true
+		cvt := func(in *schema.ToolResult) (Message, error) {
+			msg := schema.ToolMessage("", callID, schema.WithToolName(toolName))
+			var cvtErr error
+			msg.UserInputMultiContent, cvtErr = in.ToMessageInputParts()
+			if cvtErr != nil {
+				return nil, cvtErr
+			}
+			if first {
+				first = false
+				msg.Extra = internal.SetMessageID(msg.Extra, toolMsgID)
+			}
+			return msg, nil
+		}
+		msgStream := schema.StreamReaderWithConvert(stream, cvt)
+		event := EventFromMessage(nil, msgStream, schema.Tool, toolName)
+		return any(event).(*TypedAgentEvent[M])
+	case *schema.AgenticMessage:
+		first := true
+		cvt := func(in *schema.ToolResult) (*schema.AgenticMessage, error) {
+			msg := schema.FunctionToolResultAgenticMessage(callID, toolName, toolResultToBlocks(in))
+			if first {
+				first = false
+				msg.Extra = internal.SetMessageID(msg.Extra, toolMsgID)
+			}
+			return msg, nil
+		}
+		msgStream := schema.StreamReaderWithConvert(stream, cvt)
+		event := EventFromAgenticMessage(nil, msgStream, schema.AgenticRoleTypeUser)
+		return any(event).(*TypedAgentEvent[M])
+	default:
+		return nil
+	}
+}
+
+func (w *typedEventSenderToolWrapper[M]) WrapInvokableToolCall(_ context.Context, endpoint InvokableToolCallEndpoint, tCtx *ToolContext) (InvokableToolCallEndpoint, error) {
 	return func(ctx context.Context, argumentsInJSON string, opts ...tool.Option) (string, error) {
 		result, err := endpoint(ctx, argumentsInJSON, opts...)
 		if err != nil {
@@ -537,15 +789,16 @@ func (w *eventSenderToolWrapper) WrapInvokableToolCall(_ context.Context, endpoi
 		toolName := tCtx.Name
 		callID := tCtx.CallID
 
-		prePopAction := popToolGenAction(ctx, toolName)
-		msg := schema.ToolMessage(result, callID, schema.WithToolName(toolName))
-		event := EventFromMessage(msg, nil, schema.Tool, toolName)
+		prePopAction := typedPopToolGenAction[M](ctx, toolName)
+		toolMsgID := uuid.NewString()
+		event := typedToolInvokeEvent[M](callID, toolName, result, toolMsgID)
 		if prePopAction != nil {
 			event.Action = prePopAction
 		}
 
-		execCtx := getTypedChatModelAgentExecCtx[*schema.Message](ctx)
-		_ = compose.ProcessState(ctx, func(_ context.Context, st *State) error {
+		execCtx := getTypedChatModelAgentExecCtx[M](ctx)
+		_ = compose.ProcessState(ctx, func(_ context.Context, st *typedState[M]) error {
+			st.setToolMsgID(toolName, callID, toolMsgID)
 			if st.getReturnDirectlyToolCallID() == callID {
 				st.setReturnDirectlyEvent(event)
 			} else {
@@ -558,7 +811,7 @@ func (w *eventSenderToolWrapper) WrapInvokableToolCall(_ context.Context, endpoi
 	}, nil
 }
 
-func (w *eventSenderToolWrapper) WrapStreamableToolCall(_ context.Context, endpoint StreamableToolCallEndpoint, tCtx *ToolContext) (StreamableToolCallEndpoint, error) {
+func (w *typedEventSenderToolWrapper[M]) WrapStreamableToolCall(_ context.Context, endpoint StreamableToolCallEndpoint, tCtx *ToolContext) (StreamableToolCallEndpoint, error) {
 	return func(ctx context.Context, argumentsInJSON string, opts ...tool.Option) (*schema.StreamReader[string], error) {
 		result, err := endpoint(ctx, argumentsInJSON, opts...)
 		if err != nil {
@@ -568,18 +821,16 @@ func (w *eventSenderToolWrapper) WrapStreamableToolCall(_ context.Context, endpo
 		toolName := tCtx.Name
 		callID := tCtx.CallID
 
-		prePopAction := popToolGenAction(ctx, toolName)
+		prePopAction := typedPopToolGenAction[M](ctx, toolName)
 		streams := result.Copy(2)
 
-		cvt := func(in string) (Message, error) {
-			return schema.ToolMessage(in, callID, schema.WithToolName(toolName)), nil
-		}
-		msgStream := schema.StreamReaderWithConvert(streams[0], cvt)
-		event := EventFromMessage(nil, msgStream, schema.Tool, toolName)
+		toolMsgID := uuid.NewString()
+		event := typedToolStreamEvent[M](callID, toolName, toolMsgID, streams[0])
 		event.Action = prePopAction
 
-		execCtx := getTypedChatModelAgentExecCtx[*schema.Message](ctx)
-		_ = compose.ProcessState(ctx, func(_ context.Context, st *State) error {
+		execCtx := getTypedChatModelAgentExecCtx[M](ctx)
+		_ = compose.ProcessState(ctx, func(_ context.Context, st *typedState[M]) error {
+			st.setToolMsgID(toolName, callID, toolMsgID)
 			if st.getReturnDirectlyToolCallID() == callID {
 				st.setReturnDirectlyEvent(event)
 			} else {
@@ -592,7 +843,7 @@ func (w *eventSenderToolWrapper) WrapStreamableToolCall(_ context.Context, endpo
 	}, nil
 }
 
-func (w *eventSenderToolWrapper) WrapEnhancedInvokableToolCall(_ context.Context, endpoint EnhancedInvokableToolCallEndpoint, tCtx *ToolContext) (EnhancedInvokableToolCallEndpoint, error) {
+func (w *typedEventSenderToolWrapper[M]) WrapEnhancedInvokableToolCall(_ context.Context, endpoint EnhancedInvokableToolCallEndpoint, tCtx *ToolContext) (EnhancedInvokableToolCallEndpoint, error) {
 	return func(ctx context.Context, toolArgument *schema.ToolArgument, opts ...tool.Option) (*schema.ToolResult, error) {
 		result, err := endpoint(ctx, toolArgument, opts...)
 		if err != nil {
@@ -602,19 +853,19 @@ func (w *eventSenderToolWrapper) WrapEnhancedInvokableToolCall(_ context.Context
 		toolName := tCtx.Name
 		callID := tCtx.CallID
 
-		prePopAction := popToolGenAction(ctx, toolName)
-		msg := schema.ToolMessage("", callID, schema.WithToolName(toolName))
-		msg.UserInputMultiContent, err = result.ToMessageInputParts()
-		if err != nil {
-			return nil, err
+		prePopAction := typedPopToolGenAction[M](ctx, toolName)
+		toolMsgID := uuid.NewString()
+		event, eventErr := typedToolEnhancedInvokeEvent[M](callID, toolName, toolMsgID, result)
+		if eventErr != nil {
+			return nil, eventErr
 		}
-		event := EventFromMessage(msg, nil, schema.Tool, toolName)
 		if prePopAction != nil {
 			event.Action = prePopAction
 		}
 
-		execCtx := getTypedChatModelAgentExecCtx[*schema.Message](ctx)
-		_ = compose.ProcessState(ctx, func(_ context.Context, st *State) error {
+		execCtx := getTypedChatModelAgentExecCtx[M](ctx)
+		_ = compose.ProcessState(ctx, func(_ context.Context, st *typedState[M]) error {
+			st.setToolMsgID(toolName, callID, toolMsgID)
 			if st.getReturnDirectlyToolCallID() == callID {
 				st.setReturnDirectlyEvent(event)
 			} else {
@@ -627,7 +878,7 @@ func (w *eventSenderToolWrapper) WrapEnhancedInvokableToolCall(_ context.Context
 	}, nil
 }
 
-func (w *eventSenderToolWrapper) WrapEnhancedStreamableToolCall(_ context.Context, endpoint EnhancedStreamableToolCallEndpoint, tCtx *ToolContext) (EnhancedStreamableToolCallEndpoint, error) {
+func (w *typedEventSenderToolWrapper[M]) WrapEnhancedStreamableToolCall(_ context.Context, endpoint EnhancedStreamableToolCallEndpoint, tCtx *ToolContext) (EnhancedStreamableToolCallEndpoint, error) {
 	return func(ctx context.Context, toolArgument *schema.ToolArgument, opts ...tool.Option) (*schema.StreamReader[*schema.ToolResult], error) {
 		result, err := endpoint(ctx, toolArgument, opts...)
 		if err != nil {
@@ -637,24 +888,16 @@ func (w *eventSenderToolWrapper) WrapEnhancedStreamableToolCall(_ context.Contex
 		toolName := tCtx.Name
 		callID := tCtx.CallID
 
-		prePopAction := popToolGenAction(ctx, toolName)
+		prePopAction := typedPopToolGenAction[M](ctx, toolName)
 		streams := result.Copy(2)
 
-		cvt := func(in *schema.ToolResult) (Message, error) {
-			msg := schema.ToolMessage("", callID, schema.WithToolName(toolName))
-			var cvtErr error
-			msg.UserInputMultiContent, cvtErr = in.ToMessageInputParts()
-			if cvtErr != nil {
-				return nil, cvtErr
-			}
-			return msg, nil
-		}
-		msgStream := schema.StreamReaderWithConvert(streams[0], cvt)
-		event := EventFromMessage(nil, msgStream, schema.Tool, toolName)
+		toolMsgID := uuid.NewString()
+		event := typedToolEnhancedStreamEvent[M](callID, toolName, toolMsgID, streams[0])
 		event.Action = prePopAction
 
-		execCtx := getTypedChatModelAgentExecCtx[*schema.Message](ctx)
-		_ = compose.ProcessState(ctx, func(_ context.Context, st *State) error {
+		execCtx := getTypedChatModelAgentExecCtx[M](ctx)
+		_ = compose.ProcessState(ctx, func(_ context.Context, st *typedState[M]) error {
+			st.setToolMsgID(toolName, callID, toolMsgID)
 			if st.getReturnDirectlyToolCallID() == callID {
 				st.setReturnDirectlyEvent(event)
 			} else {
@@ -710,6 +953,24 @@ func (w *typedStateModelWrapper[M]) hasUserEventSender() bool {
 }
 
 func (w *typedStateModelWrapper[M]) wrapGenerateEndpoint(endpoint typedGenerateEndpoint[M]) typedGenerateEndpoint[M] {
+	// === ID Assignment layer (innermost, framework-controlled) ===
+	// Ensures model output has a message ID before any WrapModel handler or event sender sees it.
+	// Copies the result to avoid mutating a potentially shared pointer returned by the model.
+	{
+		realInner := endpoint
+		endpoint = func(ctx context.Context, input []M, opts ...model.Option) (M, error) {
+			result, err := realInner(ctx, input, opts...)
+			if err != nil {
+				return result, err
+			}
+			if GetMessageID(result) == "" {
+				result = copyMessage(result)
+				EnsureMessageID(result)
+			}
+			return result, nil
+		}
+	}
+
 	hasUserEventSender := w.hasUserEventSender()
 	retryConfig := w.modelRetryConfig
 	failoverConfig := w.modelFailoverConfig
@@ -773,6 +1034,31 @@ func (w *typedStateModelWrapper[M]) wrapGenerateEndpoint(endpoint typedGenerateE
 }
 
 func (w *typedStateModelWrapper[M]) wrapStreamEndpoint(endpoint typedStreamEndpoint[M]) typedStreamEndpoint[M] {
+	// === ID Assignment layer (innermost, framework-controlled) ===
+	// Pre-allocates a UUID and injects it into the first chunk only.
+	// Only the first chunk carries the ID in Extra to avoid concatStrings corruption
+	// during ConcatMessages (which string-concatenates duplicate Extra keys).
+	{
+		realInner := endpoint
+		endpoint = func(ctx context.Context, input []M, opts ...model.Option) (*schema.StreamReader[M], error) {
+			reader, err := realInner(ctx, input, opts...)
+			if err != nil {
+				return nil, err
+			}
+			msgID := uuid.NewString()
+			first := true
+			return schema.StreamReaderWithConvert(reader, func(msg M) (M, error) {
+				if first {
+					first = false
+					if GetMessageID(msg) == "" {
+						typedSetMessageID(msg, msgID)
+					}
+				}
+				return msg, nil
+			}), nil
+		}
+	}
+
 	hasUserEventSender := w.hasUserEventSender()
 	retryConfig := w.modelRetryConfig
 	failoverConfig := w.modelFailoverConfig
@@ -833,7 +1119,7 @@ func (w *typedStateModelWrapper[M]) wrapStreamEndpoint(endpoint typedStreamEndpo
 	return endpoint
 }
 
-func (w *typedStateModelWrapper[M]) Generate(ctx context.Context, input []M, opts ...model.Option) (M, error) {
+func (w *typedStateModelWrapper[M]) Generate(ctx context.Context, _ []M, opts ...model.Option) (M, error) {
 	var (
 		stateMessages          []M
 		stateToolInfos         []*schema.ToolInfo
@@ -958,7 +1244,7 @@ func (w *typedStateModelWrapper[M]) Generate(ctx context.Context, input []M, opt
 	return state.Messages[len(state.Messages)-1], nil
 }
 
-func (w *typedStateModelWrapper[M]) Stream(ctx context.Context, input []M, opts ...model.Option) (*schema.StreamReader[M], error) {
+func (w *typedStateModelWrapper[M]) Stream(ctx context.Context, _ []M, opts ...model.Option) (*schema.StreamReader[M], error) {
 	var (
 		stateMessages          []M
 		stateToolInfos         []*schema.ToolInfo

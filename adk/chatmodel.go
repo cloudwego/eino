@@ -137,7 +137,6 @@ type ToolsConfig struct {
 	compose.ToolsNodeConfig
 
 	// ReturnDirectly specifies tools that cause the agent to return immediately when called.
-	// If multiple listed tools are called simultaneously, only the first one triggers the return.
 	// The map keys are tool names indicate whether the tool should trigger immediate return.
 	ReturnDirectly map[string]bool
 
@@ -520,7 +519,7 @@ func NewTypedChatModelAgent[M MessageType](ctx context.Context, config *TypedCha
 	// 4. ChatModelAgentMiddleware.WrapToolCall (in registration order)
 	// 5. callbackInjectedToolCall (internal - injects callbacks if tool doesn't handle them)
 	if !hasUserEventSenderToolWrapper(config.Handlers) {
-		defaultToolEventSender := handlersToToolMiddlewares([]ChatModelAgentMiddleware{NewEventSenderToolWrapper()})
+		defaultToolEventSender := handlersToToolMiddlewares([]TypedChatModelAgentMiddleware[M]{newTypedEventSenderToolWrapper[M]()})
 		tc.ToolCallMiddlewares = append(defaultToolEventSender, tc.ToolCallMiddlewares...)
 	}
 	tc.ToolCallMiddlewares = append(tc.ToolCallMiddlewares, collectToolMiddlewaresFromMiddlewares(config.Middlewares)...)
@@ -1267,6 +1266,8 @@ func (a *TypedChatModelAgent[M]) buildAgenticReActRunFunc(ctx context.Context, b
 		ctx = withTypedChatModelAgentExecCtx(ctx, &typedChatModelAgentExecCtx[*schema.AgenticMessage]{
 			runtimeReturnDirectly: ap.returnDirectly,
 			generator:             ap.generator,
+			cancelCtx:             cancelCtx,
+			afterToolCallsHook:    ap.afterToolCallsHook,
 		})
 
 		// Pre-execution cancel check
