@@ -112,13 +112,13 @@ func getMsgExtra[M adk.MessageType](msg M) map[string]any {
 
 // --- generic table-driven test ---
 
-func testAgentsMDGeneric[M adk.MessageType](t *testing.T) {
-	type testCase struct {
-		name string
-		run  func(t *testing.T)
-	}
+type agentsMDTestCase struct {
+	name string
+	run  func(t *testing.T)
+}
 
-	tests := []testCase{
+func testAgentsMDGeneric[M adk.MessageType](t *testing.T) {
+	tests := []agentsMDTestCase{
 		{
 			name: "BasicInjection",
 			run: func(t *testing.T) {
