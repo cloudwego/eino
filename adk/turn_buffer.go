@@ -87,6 +87,12 @@ func (tb *turnBuffer[T]) Close() {
 	}
 }
 
+func (tb *turnBuffer[T]) IsClosed() bool {
+	tb.mu.Lock()
+	defer tb.mu.Unlock()
+	return tb.closed
+}
+
 func (tb *turnBuffer[T]) TakeAll() []T {
 	tb.mu.Lock()
 	defer tb.mu.Unlock()

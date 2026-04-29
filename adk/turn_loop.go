@@ -1406,6 +1406,15 @@ func (l *TurnLoop[T, M]) run(ctx context.Context) {
 
 				idleTimer.Stop()
 				close(cancelIdle)
+
+				// A spurious wakeup can occur if Stop(UntilIdleFor) called
+				// buffer.Wakeup() after ClearWakeup() above but before
+				// Receive() entered its wait. In that case, Receive returns
+				// !ok from the woken flag, not from buffer closure.
+				// Re-enter the loop so the idle timer restarts cleanly.
+				if !ok && !l.buffer.IsClosed() {
+					continue
+				}
 			} else {
 				first, ok = l.buffer.Receive()
 				// Woken up by Stop(UntilIdleFor); re-enter loop to start the idle timer.

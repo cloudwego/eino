@@ -80,8 +80,8 @@ func agenticMessageToToolCallMessage(input *schema.AgenticMessage) *schema.Messa
 }
 
 func toolMessageToAgenticMessage(input []*schema.Message) []*schema.AgenticMessage {
-	var results []*schema.ContentBlock
-	for _, m := range input {
+	results := make([]*schema.AgenticMessage, len(input))
+	for i, m := range input {
 		ftr := &schema.FunctionToolResult{
 			CallID: m.ToolCallID,
 			Name:   m.ToolName,
@@ -93,21 +93,22 @@ func toolMessageToAgenticMessage(input []*schema.Message) []*schema.AgenticMessa
 				{Text: &schema.UserInputText{Text: m.Content}},
 			}
 		}
-		results = append(results, &schema.ContentBlock{
-			Type:               schema.ContentBlockTypeFunctionToolResult,
-			FunctionToolResult: ftr,
-			Extra:              m.Extra,
-		})
+		results[i] = &schema.AgenticMessage{
+			Role: schema.AgenticRoleTypeUser,
+			ContentBlocks: []*schema.ContentBlock{{
+				Type:               schema.ContentBlockTypeFunctionToolResult,
+				FunctionToolResult: ftr,
+				Extra:              m.Extra,
+			}},
+			Extra: m.Extra,
+		}
 	}
-	return []*schema.AgenticMessage{{
-		Role:          schema.AgenticRoleTypeUser,
-		ContentBlocks: results,
-	}}
+	return results
 }
 
 func streamToolMessageToAgenticMessage(input *schema.StreamReader[[]*schema.Message]) *schema.StreamReader[[]*schema.AgenticMessage] {
 	return schema.StreamReaderWithConvert(input, func(t []*schema.Message) ([]*schema.AgenticMessage, error) {
-		var results []*schema.ContentBlock
+		results := make([]*schema.AgenticMessage, len(t))
 		for i, m := range t {
 			if m == nil {
 				continue
@@ -123,17 +124,18 @@ func streamToolMessageToAgenticMessage(input *schema.StreamReader[[]*schema.Mess
 					{Text: &schema.UserInputText{Text: m.Content}},
 				}
 			}
-			results = append(results, &schema.ContentBlock{
-				Type:               schema.ContentBlockTypeFunctionToolResult,
-				FunctionToolResult: ftr,
-				StreamingMeta:      &schema.StreamingMeta{Index: i},
-				Extra:              m.Extra,
-			})
+			results[i] = &schema.AgenticMessage{
+				Role: schema.AgenticRoleTypeUser,
+				ContentBlocks: []*schema.ContentBlock{{
+					Type:               schema.ContentBlockTypeFunctionToolResult,
+					FunctionToolResult: ftr,
+					StreamingMeta:      &schema.StreamingMeta{Index: i},
+					Extra:              m.Extra,
+				}},
+				Extra: m.Extra,
+			}
 		}
-		return []*schema.AgenticMessage{{
-			Role:          schema.AgenticRoleTypeUser,
-			ContentBlocks: results,
-		}}, nil
+		return results, nil
 	})
 }
 
