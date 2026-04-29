@@ -173,15 +173,45 @@ func (m *typedMiddleware[M]) ensureReminder(msgs []M) []M {
 		}
 	}
 
+	reminder := makeReminderMsg[M](m.sr)
+	result := make([]M, 0, len(msgs)+1)
+	inserted := false
+	for _, msg := range msgs {
+		if !inserted && !isSystemRoleTS(msg) {
+			inserted = true
+			result = append(result, reminder)
+		}
+		result = append(result, msg)
+	}
+	if !inserted {
+		result = append(result, reminder)
+	}
+	return result
+}
+
+func isSystemRoleTS[M adk.MessageType](msg M) bool {
+	switch m := any(msg).(type) {
+	case *schema.Message:
+		return m.Role == schema.System
+	case *schema.AgenticMessage:
+		return m.Role == schema.AgenticRoleTypeSystem
+	}
+	return false
+}
+
+func makeReminderMsg[M adk.MessageType](content string) M {
 	var zero M
 	switch any(zero).(type) {
 	case *schema.Message:
-		return any(m.ensureReminderMessage(any(msgs).([]*schema.Message))).([]M)
+		msg := schema.UserMessage(content)
+		msg.Extra = map[string]any{toolSearchReminderExtraKey: true}
+		return any(msg).(M)
 	case *schema.AgenticMessage:
-		return any(m.ensureReminderAgenticMessage(any(msgs).([]*schema.AgenticMessage))).([]M)
-	default:
-		panic("unreachable: unknown MessageType")
+		msg := schema.UserAgenticMessage(content)
+		msg.Extra = map[string]any{toolSearchReminderExtraKey: true}
+		return any(msg).(M)
 	}
+	panic("unreachable")
 }
 
 func hasToolSearchReminderExtra[M adk.MessageType](msg M) bool {
@@ -204,46 +234,6 @@ func hasToolSearchReminderExtra[M adk.MessageType](msg M) bool {
 		}
 	}
 	return false
-}
-
-func (m *typedMiddleware[M]) ensureReminderMessage(msgs []*schema.Message) []*schema.Message {
-	result := make([]*schema.Message, 0, len(msgs)+1)
-	inserted := false
-	for _, msg := range msgs {
-		if msg.Role != schema.System && !inserted {
-			inserted = true
-			reminder := schema.UserMessage(m.sr)
-			reminder.Extra = map[string]any{toolSearchReminderExtraKey: true}
-			result = append(result, reminder)
-		}
-		result = append(result, msg)
-	}
-	if !inserted {
-		reminder := schema.UserMessage(m.sr)
-		reminder.Extra = map[string]any{toolSearchReminderExtraKey: true}
-		result = append(result, reminder)
-	}
-	return result
-}
-
-func (m *typedMiddleware[M]) ensureReminderAgenticMessage(msgs []*schema.AgenticMessage) []*schema.AgenticMessage {
-	result := make([]*schema.AgenticMessage, 0, len(msgs)+1)
-	inserted := false
-	for _, msg := range msgs {
-		if msg.Role != schema.AgenticRoleTypeSystem && !inserted {
-			inserted = true
-			reminder := schema.UserAgenticMessage(m.sr)
-			reminder.Extra = map[string]any{toolSearchReminderExtraKey: true}
-			result = append(result, reminder)
-		}
-		result = append(result, msg)
-	}
-	if !inserted {
-		reminder := schema.UserAgenticMessage(m.sr)
-		reminder.Extra = map[string]any{toolSearchReminderExtraKey: true}
-		result = append(result, reminder)
-	}
-	return result
 }
 
 func (m *typedMiddleware[M]) extractDynamicTools(tools []*schema.ToolInfo) []*schema.ToolInfo {
