@@ -267,6 +267,8 @@ type middleware struct {
 }
 
 // SummarizeOutput contains the output of a synchronous Summarize call.
+//
+// Deprecated: See SummarizeMessages.
 type SummarizeOutput struct {
 	// FinalizedMessages is the message list after summarization,
 	// ready to be used as the new conversation history.
@@ -278,6 +280,11 @@ type SummarizeOutput struct {
 
 // SummarizeMessages performs synchronous summarization of the given messages.
 // EmitInternalEvents and Trigger are not supported and will return an error if set.
+//
+// Deprecated: Use the summarization middleware (created via New) within a dedicated summarization
+// agent instead. In practice, summarization often requires preprocessing by other middlewares
+// (e.g., message reduction, tool call patching), which is naturally supported by composing
+// middlewares in an agent pipeline.
 func SummarizeMessages(ctx context.Context, cfg *Config, messages []adk.Message) (*SummarizeOutput, error) {
 	if cfg.EmitInternalEvents {
 		return nil, fmt.Errorf("emitInternalEvents is not supported in synchronous summarization")
