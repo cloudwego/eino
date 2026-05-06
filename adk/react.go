@@ -301,6 +301,10 @@ type typedReactConfig[M MessageType] struct {
 	maxIterations int
 
 	cancelCtx *cancelContext
+
+	// afterAgentFunc is called when the agent reaches a successful terminal state.
+	// It runs as a graph node, so compose.ProcessState is available.
+	afterAgentFunc func(ctx context.Context, msg M) (M, error)
 }
 
 type reactConfig = typedReactConfig[*schema.Message]
@@ -355,6 +359,7 @@ func newReact(ctx context.Context, config *reactConfig) (reactGraph, error) {
 		toolNode_                      = "ToolNode"
 		afterToolCallsNode_            = "AfterToolCalls"
 		afterToolCallsCancelCheckNode_ = "AfterToolCallsCancelCheck"
+		afterAgentNode_                = "AfterAgent"
 	)
 
 	cancelCtx := config.cancelCtx
@@ -479,13 +484,22 @@ func newReact(ctx context.Context, config *reactConfig) (reactGraph, error) {
 	_ = g.AddEdge(compose.START, initNode_)
 	_ = g.AddEdge(initNode_, chatModel_)
 
+	// Determine the terminal node: afterAgentNode_ if afterAgentFunc is set, otherwise compose.END.
+	terminalNode := compose.END
+	if config.afterAgentFunc != nil {
+		_ = g.AddLambdaNode(afterAgentNode_, compose.InvokableLambda(config.afterAgentFunc),
+			compose.WithNodeName(afterAgentNode_))
+		_ = g.AddEdge(afterAgentNode_, compose.END)
+		terminalNode = afterAgentNode_
+	}
+
 	toolCallCheck := func(ctx context.Context, sMsg MessageStream) (string, error) {
 		defer sMsg.Close()
 		for {
 			chunk, err_ := sMsg.Recv()
 			if err_ != nil {
 				if err_ == io.EOF {
-					return compose.END, nil
+					return terminalNode, nil
 				}
 
 				return "", err_
@@ -496,7 +510,7 @@ func newReact(ctx context.Context, config *reactConfig) (reactGraph, error) {
 			}
 		}
 	}
-	branch := compose.NewStreamGraphBranch(toolCallCheck, map[string]bool{compose.END: true, cancelCheckNode_: true})
+	branch := compose.NewStreamGraphBranch(toolCallCheck, map[string]bool{terminalNode: true, cancelCheckNode_: true})
 	_ = g.AddBranch(chatModel_, branch)
 
 	_ = g.AddEdge(cancelCheckNode_, toolNode_)
@@ -522,7 +536,7 @@ func newReact(ctx context.Context, config *reactConfig) (reactGraph, error) {
 
 		_ = g.AddLambdaNode(toolNodeToEndConverter, compose.InvokableLambda(cvt),
 			compose.WithNodeName(toolNodeToEndConverter))
-		_ = g.AddEdge(toolNodeToEndConverter, compose.END)
+		_ = g.AddEdge(toolNodeToEndConverter, terminalNode)
 
 		checkReturnDirect := func(ctx context.Context, toolResults []Message) (string, error) {
 			_, ok := getReturnDirectlyToolCallID(ctx)
@@ -595,6 +609,7 @@ func newAgenticReact(ctx context.Context, config *agenticReactConfig) (agenticRe
 		toolNode_                      = "ToolNode"
 		afterToolCallsNode_            = "AfterToolCalls"
 		afterToolCallsCancelCheckNode_ = "AfterToolCallsCancelCheck"
+		afterAgentNode_                = "AfterAgent"
 	)
 
 	cancelCtx := config.cancelCtx
@@ -713,13 +728,22 @@ func newAgenticReact(ctx context.Context, config *agenticReactConfig) (agenticRe
 	_ = g.AddEdge(compose.START, initNode_)
 	_ = g.AddEdge(initNode_, chatModel_)
 
+	// Determine the terminal node: afterAgentNode_ if afterAgentFunc is set, otherwise compose.END.
+	terminalNode := compose.END
+	if config.afterAgentFunc != nil {
+		_ = g.AddLambdaNode(afterAgentNode_, compose.InvokableLambda(config.afterAgentFunc),
+			compose.WithNodeName(afterAgentNode_))
+		_ = g.AddEdge(afterAgentNode_, compose.END)
+		terminalNode = afterAgentNode_
+	}
+
 	toolCallCheck := func(ctx context.Context, sMsg *schema.StreamReader[*schema.AgenticMessage]) (string, error) {
 		defer sMsg.Close()
 		for {
 			chunk, err_ := sMsg.Recv()
 			if err_ != nil {
 				if err_ == io.EOF {
-					return compose.END, nil
+					return terminalNode, nil
 				}
 				return "", err_
 			}
@@ -728,7 +752,7 @@ func newAgenticReact(ctx context.Context, config *agenticReactConfig) (agenticRe
 			}
 		}
 	}
-	branch := compose.NewStreamGraphBranch(toolCallCheck, map[string]bool{compose.END: true, cancelCheckNode_: true})
+	branch := compose.NewStreamGraphBranch(toolCallCheck, map[string]bool{terminalNode: true, cancelCheckNode_: true})
 	_ = g.AddBranch(chatModel_, branch)
 
 	_ = g.AddEdge(cancelCheckNode_, toolNode_)
@@ -756,7 +780,7 @@ func newAgenticReact(ctx context.Context, config *agenticReactConfig) (agenticRe
 
 		_ = g.AddLambdaNode(toolNodeToEndConverter, compose.InvokableLambda(cvt),
 			compose.WithNodeName(toolNodeToEndConverter))
-		_ = g.AddEdge(toolNodeToEndConverter, compose.END)
+		_ = g.AddEdge(toolNodeToEndConverter, terminalNode)
 
 		checkReturnDirect := func(ctx context.Context, toolResults []*schema.AgenticMessage) (string, error) {
 			_, ok := getAgenticReturnDirectlyToolCallID(ctx)
