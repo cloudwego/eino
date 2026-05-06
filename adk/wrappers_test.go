@@ -1401,11 +1401,11 @@ func TestEventSenderToolHandler(t *testing.T) {
 					},
 				},
 				Handlers: []ChatModelAgentMiddleware{
-					NewEventSenderToolWrapper(),
 					&invokableResultModifier{
 						BaseChatModelAgentMiddleware: &BaseChatModelAgentMiddleware{},
 						modifiedResult:               modifiedResult,
 					},
+					NewEventSenderToolWrapper(),
 				},
 			})
 			assert.NoError(t, err)
@@ -1489,11 +1489,11 @@ func TestEventSenderToolHandler(t *testing.T) {
 					},
 				},
 				Handlers: []ChatModelAgentMiddleware{
-					NewEventSenderToolWrapper(),
 					&streamableResultModifier{
 						BaseChatModelAgentMiddleware: &BaseChatModelAgentMiddleware{},
 						modifiedResult:               modifiedResult,
 					},
+					NewEventSenderToolWrapper(),
 				},
 			})
 			assert.NoError(t, err)
@@ -1577,11 +1577,11 @@ func TestEventSenderToolHandler(t *testing.T) {
 					},
 				},
 				Handlers: []ChatModelAgentMiddleware{
-					NewEventSenderToolWrapper(),
 					&enhancedInvokableResultModifier{
 						BaseChatModelAgentMiddleware: &BaseChatModelAgentMiddleware{},
 						modifiedResult:               modifiedResult,
 					},
+					NewEventSenderToolWrapper(),
 				},
 			})
 			assert.NoError(t, err)
@@ -1665,11 +1665,11 @@ func TestEventSenderToolHandler(t *testing.T) {
 					},
 				},
 				Handlers: []ChatModelAgentMiddleware{
-					NewEventSenderToolWrapper(),
 					&enhancedStreamableResultModifier{
 						BaseChatModelAgentMiddleware: &BaseChatModelAgentMiddleware{},
 						modifiedResult:               modifiedResult,
 					},
+					NewEventSenderToolWrapper(),
 				},
 			})
 			assert.NoError(t, err)
