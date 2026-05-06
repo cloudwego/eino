@@ -830,6 +830,29 @@ func (a *TypedChatModelAgent[M]) applyBeforeAgent(ctx context.Context, ec *execC
 	return ctx, runtimeEC, nil
 }
 
+func (a *TypedChatModelAgent[M]) applyAfterAgent(ctx context.Context) (context.Context, error) {
+	if len(a.handlers) == 0 {
+		return ctx, nil
+	}
+
+	var state TypedChatModelAgentState[M]
+	_ = compose.ProcessState(ctx, func(_ context.Context, st *typedState[M]) error {
+		state.Messages = st.Messages
+		state.ToolInfos = st.ToolInfos
+		state.DeferredToolInfos = st.DeferredToolInfos
+		return nil
+	})
+
+	var err error
+	for i, handler := range a.handlers {
+		ctx, err = handler.AfterAgent(ctx, &state)
+		if err != nil {
+			return ctx, fmt.Errorf("handler[%d] (%T) AfterAgent failed: %w", i, handler, err)
+		}
+	}
+	return ctx, nil
+}
+
 func (a *TypedChatModelAgent[M]) prepareExecContext(ctx context.Context) (*execContext, error) {
 	instruction := a.instruction
 	toolsNodeConf := a.toolsConfig.ToolsNodeConfig
@@ -985,6 +1008,13 @@ func (a *TypedChatModelAgent[M]) buildNoToolsRunFunc(_ context.Context) (typedRu
 
 		appendModelToChain(chain, wrappedModel)
 
+		if len(a.handlers) > 0 {
+			chain.AppendLambda(compose.InvokableLambda(func(ctx context.Context, msg M) (M, error) {
+				_, err := a.applyAfterAgent(ctx)
+				return msg, err
+			}))
+		}
+
 		var compileOptions []compose.GraphCompileOption
 		compileOptions = append(compileOptions,
 			compose.WithGraphName(a.name),
@@ -1083,6 +1113,13 @@ func (a *TypedChatModelAgent[M]) buildMessageReActRunFunc(ctx context.Context, b
 		toolsReturnDirectly: bc.returnDirectly,
 		agentName:           a.name,
 		maxIterations:       a.maxIterations,
+	}
+	if len(a.handlers) > 0 {
+		msgAgent := any(a).(*TypedChatModelAgent[*schema.Message])
+		msgConf.afterAgentFunc = func(ctx context.Context, msg *schema.Message) (*schema.Message, error) {
+			_, err := msgAgent.applyAfterAgent(ctx)
+			return msg, err
+		}
 	}
 
 	return func(ctx context.Context, p *typedRunParams[M]) {
@@ -1213,6 +1250,13 @@ func (a *TypedChatModelAgent[M]) buildAgenticReActRunFunc(ctx context.Context, b
 		toolsReturnDirectly: bc.returnDirectly,
 		agentName:           a.name,
 		maxIterations:       a.maxIterations,
+	}
+	if len(a.handlers) > 0 {
+		agenticAgent := any(a).(*TypedChatModelAgent[*schema.AgenticMessage])
+		agenticConf.afterAgentFunc = func(ctx context.Context, msg *schema.AgenticMessage) (*schema.AgenticMessage, error) {
+			_, err := agenticAgent.applyAfterAgent(ctx)
+			return msg, err
+		}
 	}
 
 	return func(ctx context.Context, p *typedRunParams[M]) {

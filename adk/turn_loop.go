@@ -191,6 +191,7 @@ type preemptSignal struct {
 	agentCancelOpts  []AgentCancelOption
 	pendingAckList   []chan struct{}
 	notify           chan struct{}
+	drained          bool
 
 	currentTC     any
 	currentRunCtx context.Context
@@ -223,12 +224,13 @@ func (s *preemptSignal) holdAndGetTurn() (context.Context, any) {
 }
 
 // requestPreempt records a preempt request and wakes both waiters.
-// If holdCount is 0, no one is listening — close the ack immediately as a no-op.
+// If holdCount is 0 or the signal has been drained, no one is listening —
+// close the ack immediately as a no-op.
 func (s *preemptSignal) requestPreempt(ack chan struct{}, opts ...AgentCancelOption) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	if s.holdCount <= 0 {
+	if s.drained || s.holdCount <= 0 {
 		if ack != nil {
 			close(ack)
 		}
@@ -343,11 +345,13 @@ func (s *preemptSignal) endTurnAndUnhold() {
 // drainAll forcefully resets all preemptSignal state and closes any pending
 // ack channels. Called during TurnLoop cleanup to prevent ack channels from
 // leaking when the run loop exits (e.g. due to Stop) while a Push caller
-// still holds a reference.
+// still holds a reference. After drainAll, any subsequent holdRunLoop or
+// requestPreempt calls will be no-ops that close the ack immediately.
 func (s *preemptSignal) drainAll() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	s.drained = true
 	s.holdCount = 0
 	s.currentTC = nil
 	s.currentRunCtx = nil

@@ -3122,17 +3122,22 @@ func TestTurnLoop_ConcurrentPreemptsDuringTurn(t *testing.T) {
 			if ok && ack != nil {
 				select {
 				case <-ack:
-				case <-time.After(30 * time.Second):
+				case <-time.After(5 * time.Second):
 					t.Error("ack channel not closed within timeout")
 				}
 			}
 		}(i)
 	}
 
-	wg.Wait()
-	time.Sleep(200 * time.Millisecond)
+	// Stop the loop concurrently. The run loop may be blocked on
+	// buffer.Receive after processing all preempts; Stop unblocks it
+	// and triggers drainAll which closes any orphaned ack channels.
+	go func() {
+		time.Sleep(500 * time.Millisecond)
+		loop.Stop(WithImmediate())
+	}()
 
-	loop.Stop(WithImmediate())
+	wg.Wait()
 	result := loop.Wait()
 	assert.NoError(t, result.ExitReason)
 	assert.True(t, atomic.LoadInt32(&genInputCount) >= 2, "should have had at least the initial turn + one preempted turn")
