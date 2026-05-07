@@ -439,6 +439,7 @@ func (t *toolReductionMiddleware) WrapStreamableToolCall(_ context.Context, endp
 		}
 		truncResult, err := cfg.TruncHandler(ctx, detail)
 		if err != nil {
+			origResp.Close()
 			return nil, err
 		}
 		if !truncResult.NeedTrunc {
@@ -535,6 +536,7 @@ func (t *toolReductionMiddleware) WrapEnhancedStreamableToolCall(ctx context.Con
 		}
 		truncResult, err := cfg.TruncHandler(ctx, detail)
 		if err != nil {
+			origResp.Close()
 			return nil, err
 		}
 		if !truncResult.NeedTrunc {
