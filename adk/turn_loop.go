@@ -342,6 +342,19 @@ func (s *preemptSignal) endTurnAndUnhold() {
 	s.cond.Broadcast()
 }
 
+// resetBetweenTurns clears all preemptSignal state between turns without
+// setting the drained flag. This allows the signal to continue functioning
+// for future Push(WithPreempt) calls in subsequent iterations.
+func (s *preemptSignal) resetBetweenTurns() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.holdCount = 0
+	s.currentTC = nil
+	s.currentRunCtx = nil
+	s.resetLocked()
+	s.cond.Broadcast()
+}
+
 // drainAll forcefully resets all preemptSignal state and closes any pending
 // ack channels. Called during TurnLoop cleanup to prevent ack channels from
 // leaking when the run loop exits (e.g. due to Stop) while a Push caller
@@ -1453,13 +1466,13 @@ func (l *TurnLoop[T, M]) run(ctx context.Context) {
 		// Drain any pending preempt that arrived between turns. A Push caller
 		// may have called holdRunLoop + requestPreempt while the loop was
 		// between iterations; acknowledge and release before planning the
-		// next turn. Use drainAll to release all pusher holds at once —
-		// multiple concurrent Push(WithPreempt) callers each hold a ref.
+		// next turn. Use resetBetweenTurns (not drainAll) so the signal
+		// remains usable for future Push(WithPreempt) calls.
 		if preempted, _, ackList := l.preemptSig.waitForPreemptOrUnhold(); preempted {
 			for _, ack := range ackList {
 				close(ack)
 			}
-			l.preemptSig.drainAll()
+			l.preemptSig.resetBetweenTurns()
 		}
 
 		plan, err := l.planTurn(ctx, isResume, items, pr)

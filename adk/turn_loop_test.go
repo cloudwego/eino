@@ -5535,3 +5535,104 @@ func TestSetupBridgeStore_NilStore_Resume(t *testing.T) {
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "checkpoint store is nil")
 }
+
+// TestTurnLoop_Preempt_LoopStalledAfterSecondPreemptPush reproduces a bug where
+// the loop gets stuck between turns when:
+//  1. Item A is processed, preempted by item B pushed with WithPreempt(AnySafePoint).
+//  2. Item B's turn runs and OnAgentEvents completes successfully.
+//  3. Item C is pushed with WithPreempt(AnySafePoint).
+//  4. The loop never processes item C — it hangs at waitForPreemptOrUnhold.
+//
+// Root cause: drainAll() called between turns (after the first preempt) sets
+// drained=true permanently. Subsequent Push(WithPreempt) calls holdRunLoop()
+// (incrementing holdCount) but requestPreempt() is a no-op (drained=true), so
+// waitForPreemptOrUnhold blocks forever with holdCount>0 and preemptRequested=false.
+func TestTurnLoop_Preempt_LoopStalledAfterSecondPreemptPush(t *testing.T) {
+	// turnCount tracks how many turns have been fully processed.
+	var turnCount int32
+
+	// Channels to synchronize the test with each turn's lifecycle.
+	firstAgentStarted := make(chan struct{})
+	secondTurnDone := make(chan struct{})
+	thirdTurnDone := make(chan struct{})
+
+	var firstAgentStartedOnce, secondTurnDoneOnce, thirdTurnDoneOnce sync.Once
+
+	agent := &turnLoopCancellableMockAgent{
+		name: "test",
+		runFunc: func(ctx context.Context, input *AgentInput) (*AgentOutput, error) {
+			turn := atomic.AddInt32(&turnCount, 1)
+			switch turn {
+			case 1:
+				// First turn: signal started, then block until preempted.
+				firstAgentStartedOnce.Do(func() { close(firstAgentStarted) })
+				<-ctx.Done()
+			case 2, 3:
+				// Subsequent turns: complete immediately.
+			}
+			return &AgentOutput{}, nil
+		},
+	}
+
+	loop := newAndRunTurnLoop(context.Background(), TurnLoopConfig[string, *schema.Message]{
+		PrepareAgent: func(ctx context.Context, _ *TurnLoop[string, *schema.Message], consumed []string) (Agent, error) {
+			return agent, nil
+		},
+		GenInput: func(ctx context.Context, _ *TurnLoop[string, *schema.Message], items []string) (*GenInputResult[string, *schema.Message], error) {
+			return &GenInputResult[string, *schema.Message]{
+				Input:     &AgentInput{Messages: []Message{schema.UserMessage(items[0])}},
+				Consumed:  []string{items[0]},
+				Remaining: items[1:],
+			}, nil
+		},
+		OnAgentEvents: func(ctx context.Context, tc *TurnContext[string, *schema.Message], events *AsyncIterator[*AgentEvent]) error {
+			for {
+				if _, ok := events.Next(); !ok {
+					break
+				}
+			}
+			turn := atomic.LoadInt32(&turnCount)
+			switch turn {
+			case 2:
+				secondTurnDoneOnce.Do(func() { close(secondTurnDone) })
+			case 3:
+				thirdTurnDoneOnce.Do(func() { close(thirdTurnDone) })
+			}
+			return nil
+		},
+	})
+
+	// Step 1: Push item A (no preempt). Wait for agent to start.
+	loop.Push("A")
+	select {
+	case <-firstAgentStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("agent did not start for item A")
+	}
+
+	// Step 2: Push item B with preempt. This cancels the first turn.
+	loop.Push("B", WithPreempt[string, *schema.Message](AnySafePoint))
+
+	// Wait for the second turn (item B) to complete successfully.
+	select {
+	case <-secondTurnDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("second turn (item B) did not complete")
+	}
+
+	// Step 3: Push item C with preempt. This is the scenario that triggers
+	// the bug — the loop should process item C but instead gets stuck.
+	loop.Push("C", WithPreempt[string, *schema.Message](AnySafePoint))
+
+	// The loop should process item C. If the bug is present, this will timeout.
+	select {
+	case <-thirdTurnDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("third turn (item C) was never processed — loop is stuck between turns")
+	}
+
+	loop.Stop()
+	result := loop.Wait()
+	assert.NoError(t, result.ExitReason)
+	assert.Equal(t, int32(3), atomic.LoadInt32(&turnCount), "expected 3 turns to be processed")
+}
