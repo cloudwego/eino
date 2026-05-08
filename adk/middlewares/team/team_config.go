@@ -89,6 +89,12 @@ func (c *Config) resolveTeamName(ctx context.Context, teamName string) (string, 
 // CreateTeam creates the team directory structure and config.json.
 // If teamName is already taken, a timestamped suffix is appended automatically.
 func (c *Config) CreateTeam(ctx context.Context, teamName, description, leaderName, leaderType string) (*teamConfig, error) {
+	c.ensureInit()
+
+	if teamName == "" {
+		return nil, fmt.Errorf("team name must not be empty")
+	}
+
 	c.state.cfgLock.Lock()
 	defer c.state.cfgLock.Unlock()
 
@@ -205,6 +211,7 @@ func (c *Config) readConfigWithReadLock(ctx context.Context, teamName string, fn
 
 // AddMember adds a new member to the team configuration.
 func (c *Config) AddMember(ctx context.Context, teamName string, member teamMember) error {
+	c.ensureInit()
 	return c.updateConfig(ctx, teamName, func(cfg *teamConfig) error {
 		cfg.Members = append(cfg.Members, withDefaultMemberActivity(member))
 		return nil
@@ -214,6 +221,7 @@ func (c *Config) AddMember(ctx context.Context, teamName string, member teamMemb
 // AddMemberWithDeduplicatedName adds a member under a single write lock and
 // returns the final member with a unique name assigned.
 func (c *Config) AddMemberWithDeduplicatedName(ctx context.Context, teamName string, member teamMember) (teamMember, error) {
+	c.ensureInit()
 	var result teamMember
 	err := c.updateConfig(ctx, teamName, func(cfg *teamConfig) error {
 		existing := make(map[string]struct{}, len(cfg.Members))
@@ -245,6 +253,7 @@ func (c *Config) AddMemberWithDeduplicatedName(ctx context.Context, teamName str
 }
 
 func (c *Config) SetMemberActive(ctx context.Context, teamName, memberName string, active bool) error {
+	c.ensureInit()
 	return c.updateConfig(ctx, teamName, func(cfg *teamConfig) error {
 		for i := range cfg.Members {
 			if cfg.Members[i].Name != memberName {
@@ -259,6 +268,7 @@ func (c *Config) SetMemberActive(ctx context.Context, teamName, memberName strin
 
 // RemoveMember removes a member from the team configuration.
 func (c *Config) RemoveMember(ctx context.Context, teamName, memberName string) error {
+	c.ensureInit()
 	return c.updateConfig(ctx, teamName, func(cfg *teamConfig) error {
 		members := make([]teamMember, 0, len(cfg.Members))
 		for _, m := range cfg.Members {
@@ -273,6 +283,7 @@ func (c *Config) RemoveMember(ctx context.Context, teamName, memberName string) 
 
 // HasActiveTeammates checks if there are active teammates (excluding leader).
 func (c *Config) HasActiveTeammates(ctx context.Context, teamName string) (bool, error) {
+	c.ensureInit()
 	cfg, err := c.readConfigLocked(ctx, teamName)
 	if err != nil {
 		return false, err
@@ -287,6 +298,7 @@ func (c *Config) HasActiveTeammates(ctx context.Context, teamName string) (bool,
 
 // GetActiveTeammateNames returns the names of active teammates (excluding leader).
 func (c *Config) GetActiveTeammateNames(ctx context.Context, teamName string) ([]string, error) {
+	c.ensureInit()
 	var names []string
 	err := c.readConfigWithReadLock(ctx, teamName, func(cfg *teamConfig) error {
 		for _, m := range cfg.Members {
@@ -301,6 +313,7 @@ func (c *Config) GetActiveTeammateNames(ctx context.Context, teamName string) ([
 
 // HasMember checks whether the given member exists in the team configuration.
 func (c *Config) HasMember(ctx context.Context, teamName, memberName string) (bool, error) {
+	c.ensureInit()
 	var found bool
 	err := c.readConfigWithReadLock(ctx, teamName, func(cfg *teamConfig) error {
 		for _, m := range cfg.Members {
@@ -316,6 +329,7 @@ func (c *Config) HasMember(ctx context.Context, teamName, memberName string) (bo
 
 // DeleteTeam removes the team directory and tasks directory.
 func (c *Config) DeleteTeam(ctx context.Context, teamName string) error {
+	c.ensureInit()
 	c.state.cfgLock.Lock()
 	defer c.state.cfgLock.Unlock()
 

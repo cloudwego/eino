@@ -104,7 +104,7 @@ func (t *teamCreateTool) InvokableRun(ctx context.Context, argumentsInJSON strin
 	}()
 
 	// Create the leader's inbox file, mailbox source, and start the pump atomically.
-	if err = t.mw.lifecycle.setupMailbox(ctx, teamName, LeaderAgentName, &MailboxSourceConfig{
+	if err = t.mw.lifecycle.setupMailbox(ctx, teamName, LeaderAgentName, &mailboxSourceConfig{
 		OwnerName:          LeaderAgentName,
 		Role:               teamRoleLeader,
 		OnShutdownResponse: t.makeShutdownResponseHandler(teamName),

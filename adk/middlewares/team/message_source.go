@@ -15,7 +15,7 @@
  */
 
 // message_source.go adapts the mailbox into a TurnInput producer.
-// MailboxMessageSource reads inbox messages, handles control-message filtering
+// mailboxMessageSource reads inbox messages, handles control-message filtering
 // (shutdown response, teammate terminated), and builds TurnInput items.
 
 package team
@@ -28,8 +28,8 @@ import (
 	"github.com/google/uuid"
 )
 
-// MailboxSourceConfig configures the MailboxMessageSource behavior.
-type MailboxSourceConfig struct {
+// mailboxSourceConfig configures the mailboxMessageSource behavior.
+type mailboxSourceConfig struct {
 	// OwnerName is the name of the agent that owns this mailbox.
 	// Used to set TargetAgent in TurnInput.
 	OwnerName string
@@ -53,18 +53,18 @@ type MailboxSourceConfig struct {
 	Logger Logger
 }
 
-// MailboxMessageSource reads messages from a FileMailbox and produces TurnInput items.
-type MailboxMessageSource struct {
+// mailboxMessageSource reads messages from a FileMailbox and produces TurnInput items.
+type mailboxMessageSource struct {
 	mailbox *mailbox
-	conf    *MailboxSourceConfig
+	conf    *mailboxSourceConfig
 
 	processedCount         int
 	lastIdleProcessedCount int
 }
 
-// newMailboxMessageSource creates a new MailboxMessageSource.
-func newMailboxMessageSource(mailbox *mailbox, conf *MailboxSourceConfig) *MailboxMessageSource {
-	return &MailboxMessageSource{
+// newMailboxMessageSource creates a new mailboxMessageSource.
+func newMailboxMessageSource(mailbox *mailbox, conf *mailboxSourceConfig) *mailboxMessageSource {
+	return &mailboxMessageSource{
 		mailbox: mailbox,
 		conf:    conf,
 	}
@@ -72,7 +72,7 @@ func newMailboxMessageSource(mailbox *mailbox, conf *MailboxSourceConfig) *Mailb
 
 // tryReceive is a non-blocking read from the mailbox.
 // Returns (item, true) if there are unread messages, or (empty, false) if none.
-func (s *MailboxMessageSource) tryReceive(ctx context.Context, notifyIdle bool) (TurnInput, bool, error) {
+func (s *mailboxMessageSource) tryReceive(ctx context.Context, notifyIdle bool) (TurnInput, bool, error) {
 	if s.mailbox == nil {
 		return TurnInput{}, false, nil
 	}
@@ -95,7 +95,7 @@ func (s *MailboxMessageSource) tryReceive(ctx context.Context, notifyIdle bool) 
 }
 
 // waitForItem blocks until a message is available in the mailbox, then returns it.
-func (s *MailboxMessageSource) waitForItem(ctx context.Context) (TurnInput, error) {
+func (s *mailboxMessageSource) waitForItem(ctx context.Context) (TurnInput, error) {
 	empty := TurnInput{}
 
 	if s.mailbox == nil {
@@ -136,7 +136,7 @@ func (s *MailboxMessageSource) waitForItem(ctx context.Context) (TurnInput, erro
 	}
 }
 
-func (s *MailboxMessageSource) consumeMessages(ctx context.Context, msgs []InboxMessage) (TurnInput, bool, error) {
+func (s *mailboxMessageSource) consumeMessages(ctx context.Context, msgs []inboxMessage) (TurnInput, bool, error) {
 	if len(msgs) == 0 {
 		return TurnInput{}, false, nil
 	}
@@ -160,13 +160,13 @@ func (s *MailboxMessageSource) consumeMessages(ctx context.Context, msgs []Inbox
 	return s.buildTurnInput(msgs), true, nil
 }
 
-func (s *MailboxMessageSource) handleLeaderControlMessages(ctx context.Context, msgs []InboxMessage) ([]InboxMessage, error) {
+func (s *mailboxMessageSource) handleLeaderControlMessages(ctx context.Context, msgs []inboxMessage) ([]inboxMessage, error) {
 	if s.conf.Role != teamRoleLeader {
 		return msgs, nil
 	}
 
-	var remaining []InboxMessage
-	var systemMsgs []InboxMessage
+	var remaining []inboxMessage
+	var systemMsgs []inboxMessage
 	for _, m := range msgs {
 		var header protocolHeader
 		if err := sonic.UnmarshalString(m.Text, &header); err != nil {
@@ -218,16 +218,16 @@ func (s *MailboxMessageSource) handleLeaderControlMessages(ctx context.Context, 
 	return append(systemMsgs, remaining...), nil
 }
 
-func buildTeammateTerminatedSystemMessage(notifyMsg string) (InboxMessage, error) {
+func buildTeammateTerminatedSystemMessage(notifyMsg string) (inboxMessage, error) {
 	terminatedPayload := teammateTerminatedPayload{
 		protocolHeader: newProtocolHeader(messageTypeTeammateTerminated, "", ""),
 		Message:        notifyMsg,
 	}
 	text, err := sonic.MarshalString(terminatedPayload)
 	if err != nil {
-		return InboxMessage{}, err
+		return inboxMessage{}, err
 	}
-	return InboxMessage{
+	return inboxMessage{
 		ID:        uuid.New().String(),
 		From:      "system",
 		Text:      text,
@@ -235,14 +235,14 @@ func buildTeammateTerminatedSystemMessage(notifyMsg string) (InboxMessage, error
 	}, nil
 }
 
-func (s *MailboxMessageSource) buildTurnInput(msgs []InboxMessage) TurnInput {
+func (s *mailboxMessageSource) buildTurnInput(msgs []inboxMessage) TurnInput {
 	return TurnInput{
 		TargetAgent: s.conf.OwnerName,
 		Messages:    inboxMessagesToStrings(msgs),
 	}
 }
 
-func inboxMessagesToStrings(msgs []InboxMessage) []string {
+func inboxMessagesToStrings(msgs []inboxMessage) []string {
 	result := make([]string, 0, len(msgs))
 	for _, m := range msgs {
 		if m.Text == "" {

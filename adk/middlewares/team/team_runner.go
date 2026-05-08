@@ -175,7 +175,7 @@ func newTeammateRunner(conf *RunnerConfig, router *sourceRouter, pumpMgr *pumpMa
 
 	tmMailbox := newMailboxFromConfig(conf.TeamConfig, teamName, agentName)
 
-	mailboxSource := newMailboxMessageSource(tmMailbox, &MailboxSourceConfig{
+	mailboxSource := newMailboxMessageSource(tmMailbox, &mailboxSourceConfig{
 		OwnerName: agentName,
 		Role:      teamRoleTeammate,
 		Logger:    conf.logger(),

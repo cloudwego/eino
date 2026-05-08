@@ -15,7 +15,7 @@
  */
 
 // mailbox_pump.go manages per-agent mailbox pump goroutines that read from
-// a MailboxMessageSource and push items into the corresponding TurnLoop.
+// a mailboxMessageSource and push items into the corresponding TurnLoop.
 // Separated from source_router.go to follow the Single Responsibility Principle.
 
 package team
@@ -36,7 +36,7 @@ type pumpHandle struct {
 }
 
 // pumpManager manages the lifecycle of per-agent mailbox pump goroutines.
-// Each pump reads from a MailboxMessageSource and pushes TurnInput items
+// Each pump reads from a mailboxMessageSource and pushes TurnInput items
 // into the corresponding agent's TurnLoop via the sourceRouter.
 type pumpManager struct {
 	router     *sourceRouter
@@ -45,7 +45,7 @@ type pumpManager struct {
 	teamNameFn func() string
 
 	mu           sync.Mutex
-	mailboxes    map[string]*MailboxMessageSource
+	mailboxes    map[string]*mailboxMessageSource
 	pumps        map[string]*pumpHandle
 	startingDone map[string]chan struct{} // closed when StartPump finishes installing the new pump
 }
@@ -54,14 +54,14 @@ func newPumpManager(router *sourceRouter, logger Logger) *pumpManager {
 	return &pumpManager{
 		router:       router,
 		logger:       logger,
-		mailboxes:    make(map[string]*MailboxMessageSource),
+		mailboxes:    make(map[string]*mailboxMessageSource),
 		pumps:        make(map[string]*pumpHandle),
 		startingDone: make(map[string]chan struct{}),
 	}
 }
 
-// SetMailbox registers a MailboxMessageSource for the given agent.
-func (pm *pumpManager) SetMailbox(agentName string, ms *MailboxMessageSource) {
+// SetMailbox registers a mailboxMessageSource for the given agent.
+func (pm *pumpManager) SetMailbox(agentName string, ms *mailboxMessageSource) {
 	pm.mu.Lock()
 	defer pm.mu.Unlock()
 	pm.mailboxes[agentName] = ms
@@ -155,7 +155,7 @@ func (pm *pumpManager) StartPump(ctx context.Context, agentName string) {
 // non-blocking tryReceive and blocking waitForItem, pushing received messages
 // into the agent's TurnLoop. It exits when ctx is cancelled or the loop rejects a push.
 func (pm *pumpManager) runPump(ctx context.Context, agentName string,
-	ms *MailboxMessageSource, loop *adk.TurnLoop[TurnInput, adk.Message]) {
+	ms *mailboxMessageSource, loop *adk.TurnLoop[TurnInput, adk.Message]) {
 
 	// idleSent tracks whether an idle notification has already been sent since
 	// the last time messages were processed. This prevents flooding the leader

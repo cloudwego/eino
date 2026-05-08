@@ -19,6 +19,8 @@ package plantask
 import (
 	"context"
 	"path/filepath"
+	"sync"
+	"sync/atomic"
 	"testing"
 
 	"github.com/bytedance/sonic"
@@ -523,6 +525,58 @@ func TestBeforeModelRewriteState_RecentTaskWriteResetsCounter(t *testing.T) {
 	_, resultState, err := m.BeforeModelRewriteState(ctx, state, mc)
 	assert.NoError(t, err)
 	assert.Equal(t, state, resultState)
+}
+
+func TestBeforeModelRewriteState_Concurrent(t *testing.T) {
+	// Verify no data race when multiple goroutines call BeforeModelRewriteState
+	// concurrently on a shared middleware (team mode scenario).
+	ctx := context.Background()
+	backend := newInMemoryBackend()
+	baseDir := "/tmp/tasks"
+	m := testMiddleware(backend, baseDir)
+	m.taskBaseDirResolver = func(ctx context.Context) string { return baseDir }
+	m.reminderInterval = 2
+
+	var callCount int64
+	m.onReminder = func(_ context.Context, _ string) {
+		// Track callback invocations to prove concurrency works
+		atomic.AddInt64(&callCount, 1)
+	}
+
+	// Write a task so listing succeeds
+	_ = backend.Write(ctx, &WriteRequest{
+		FilePath: filepath.Join(baseDir, "1.json"),
+		Content:  `{"id":"1","subject":"test","status":"pending","blocks":[],"blockedBy":[]}`,
+	})
+
+	// Build state with enough turns to trigger reminder
+	messages := []adk.Message{
+		schema.UserMessage("q1"),
+		schema.AssistantMessage("a1", nil),
+		schema.UserMessage("q2"),
+		schema.AssistantMessage("a2", nil),
+		schema.UserMessage("q3"),
+		schema.AssistantMessage("a3", nil),
+	}
+	state := &adk.ChatModelAgentState{Messages: messages}
+	mc := &adk.ModelContext{
+		Tools: []*schema.ToolInfo{{Name: TaskUpdateToolName}},
+	}
+
+	// Launch concurrent callers
+	var wg sync.WaitGroup
+	for i := 0; i < 20; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_, _, err := m.BeforeModelRewriteState(ctx, state, mc)
+			assert.NoError(t, err)
+		}()
+	}
+	wg.Wait()
+
+	// At least some should have triggered the callback
+	assert.Greater(t, atomic.LoadInt64(&callCount), int64(0))
 }
 
 func TestBeforeModelRewriteState_RecentReminderResetsCounter(t *testing.T) {

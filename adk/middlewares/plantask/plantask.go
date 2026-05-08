@@ -223,7 +223,7 @@ type middleware struct {
 	// messages in state.Messages at the time onReminder was last invoked.
 	// Used to throttle subsequent reminders when onReminder is set, since the
 	// callback path does not inject a _task_reminder marker into messages.
-	lastCallbackReminderAssistantCount int
+	lastCallbackReminderAssistantCount int64
 
 	// Task assignment notification (set via WithTaskAssignedHook)
 	onTaskAssigned func(ctx context.Context, assignment TaskAssignment) error

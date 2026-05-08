@@ -20,6 +20,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"sync/atomic"
 
 	"github.com/cloudwego/eino/adk"
 	"github.com/cloudwego/eino/adk/internal"
@@ -175,9 +176,9 @@ func (m *middleware) BeforeModelRewriteState(ctx context.Context, state *adk.Cha
 	// When onReminder is set, the callback path doesn't inject a _task_reminder
 	// marker into messages, so computeTurnStats can't find it. Use the stored
 	// assistant count to compute turnsSinceLastReminder as a fallback.
-	if m.onReminder != nil && m.lastCallbackReminderAssistantCount > 0 {
+	if m.onReminder != nil && atomic.LoadInt64(&m.lastCallbackReminderAssistantCount) > 0 {
 		currentAssistant := countAssistantMessages(state.Messages)
-		callbackTurnsSince := currentAssistant - m.lastCallbackReminderAssistantCount
+		callbackTurnsSince := currentAssistant - int(atomic.LoadInt64(&m.lastCallbackReminderAssistantCount))
 		if callbackTurnsSince < 0 {
 			callbackTurnsSince = 0 // handle message compaction edge case
 		}
@@ -214,7 +215,7 @@ func (m *middleware) BeforeModelRewriteState(ctx context.Context, state *adk.Cha
 	if m.onReminder != nil {
 		// Record current assistant count for throttling, then deliver via callback.
 		// Don't inject into state — the callback (e.g. router.Push) handles delivery.
-		m.lastCallbackReminderAssistantCount = countAssistantMessages(state.Messages)
+		atomic.StoreInt64(&m.lastCallbackReminderAssistantCount, int64(countAssistantMessages(state.Messages)))
 		m.onReminder(ctx, reminderText)
 		return ctx, state, nil
 	}

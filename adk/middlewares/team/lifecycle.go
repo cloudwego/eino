@@ -299,10 +299,10 @@ func (lm *lifecycleManager) notifyLeaderTeammateTerminated(ctx context.Context, 
 	_, _ = lm.router.Push(item)
 }
 
-// setupMailbox initializes the inbox file, registers a MailboxMessageSource on the router,
+// setupMailbox initializes the inbox file, registers a mailboxMessageSource on the router,
 // and starts the mailbox pump goroutine. This ensures no gap between inbox creation and
 // pump startup where messages could be lost.
-func (lm *lifecycleManager) setupMailbox(ctx context.Context, teamName, agentName string, sourceCfg *MailboxSourceConfig) error {
+func (lm *lifecycleManager) setupMailbox(ctx context.Context, teamName, agentName string, sourceCfg *mailboxSourceConfig) error {
 	if err := lm.initInbox(ctx, teamName, agentName); err != nil {
 		return fmt.Errorf("create inbox file for %s: %w", agentName, err)
 	}

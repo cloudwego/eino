@@ -511,7 +511,7 @@ func TestLifecycleManager_SetupMailbox(t *testing.T) {
 	cm := conf
 	_, _ = cm.CreateTeam(ctx, teamName, "", LeaderAgentName, "")
 
-	err := lm.setupMailbox(ctx, teamName, "worker", &MailboxSourceConfig{
+	err := lm.setupMailbox(ctx, teamName, "worker", &mailboxSourceConfig{
 		OwnerName: "worker",
 		Role:      teamRoleTeammate,
 	})

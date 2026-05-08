@@ -101,9 +101,9 @@ type nopLogger struct{}
 
 func (nopLogger) Printf(string, ...any) {}
 
-// InboxMessage
+// inboxMessage
 // Each message is stored as an element in a JSON array file per agent.
-type InboxMessage struct {
+type inboxMessage struct {
 	ID        string `json:"id"`
 	From      string `json:"from"`
 	To        string `json:"to,omitempty"`
