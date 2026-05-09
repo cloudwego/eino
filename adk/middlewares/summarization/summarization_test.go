@@ -417,7 +417,7 @@ func TestMiddlewareBeforeModelRewriteState(t *testing.T) {
 				Model:   primary,
 				Trigger: &TriggerCondition{ContextTokens: 10},
 				Failover: &FailoverConfig{
-					MaxRetries:  intPtr(0),
+					MaxRetries:  intPtr(1),
 					BackoffFunc: func(_ context.Context, _ int, _ adk.Message, _ error) time.Duration { return 0 },
 					GetFailoverModel: func(ctx context.Context, failoverCtx *FailoverContext) (model.BaseChatModel, []*schema.Message, error) {
 						return failover, []*schema.Message{schema.UserMessage("failover input")}, nil
@@ -459,7 +459,7 @@ func TestMiddlewareBeforeModelRewriteState(t *testing.T) {
 				Model:   primary,
 				Trigger: &TriggerCondition{ContextTokens: 10},
 				Failover: &FailoverConfig{
-					MaxRetries:  intPtr(1),
+					MaxRetries:  intPtr(2),
 					BackoffFunc: func(_ context.Context, _ int, _ adk.Message, _ error) time.Duration { return 0 },
 					GetFailoverModel: func(ctx context.Context, failoverCtx *FailoverContext) (model.BaseChatModel, []*schema.Message, error) {
 						if failoverCtx.Attempt == 1 {

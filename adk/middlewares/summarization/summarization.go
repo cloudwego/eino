@@ -196,7 +196,7 @@ type RetryConfig struct {
 }
 
 type FailoverConfig struct {
-	// MaxRetries specifies the maximum number of retry attempts for failover.
+	// MaxRetries specifies the maximum number of failover attempts.
 	// Optional. Defaults to 3.
 	MaxRetries *int
 
@@ -566,7 +566,10 @@ func (m *middleware) runFailover(ctx context.Context, originalMsgs, defaultInput
 	}
 
 	modelInput := defaultInput
-	total := maxRetries + 1
+
+	if maxRetries <= 0 {
+		return lastResp, modelInput, lastErr
+	}
 
 	for attempt := 1; ; attempt++ {
 		fctx := &FailoverContext{
@@ -593,7 +596,7 @@ func (m *middleware) runFailover(ctx context.Context, originalMsgs, defaultInput
 		if !shouldFailover(ctx, m.cfg.Failover, lastResp, lastErr) {
 			return lastResp, modelInput, lastErr
 		}
-		if attempt == total {
+		if attempt == maxRetries {
 			if lastErr != nil {
 				return nil, nil, fmt.Errorf("exceeds max failover attempts: %w", lastErr)
 			}
