@@ -733,6 +733,7 @@ type TurnLoop[T any, M MessageType] struct {
 
 	checkPointRunnerBytes []byte
 	interruptContexts     []*InterruptCtx
+	capturedCancelErr     *CancelError
 
 	pendingResume *turnLoopPendingResume[T]
 
@@ -1537,17 +1538,20 @@ func (l *TurnLoop[T, M]) run(ctx context.Context) {
 
 		l.preemptSig.endTurnAndUnhold()
 
+		// Set inFlightItems whenever a cancel or interrupt was captured from the
+		// event stream, regardless of what the user's callback returned. The items
+		// were factually mid-execution when the signal arrived.
+		if (l.capturedCancelErr != nil || l.interruptContexts != nil) && len(l.inFlightItems) == 0 {
+			l.inFlightItems = append([]T{}, plan.spec.consumed...)
+		}
+
 		if runErr != nil {
-			if errors.As(runErr, new(*CancelError)) && len(l.inFlightItems) == 0 {
-				l.inFlightItems = append([]T{}, plan.spec.consumed...)
-			}
 			l.runErr = runErr
 			return
 		}
 
 		// Business interrupt: agent produced an Interrupted action, exit to persist checkpoint.
 		if l.interruptContexts != nil {
-			l.inFlightItems = append([]T{}, plan.spec.consumed...)
 			l.runErr = &InterruptError{InterruptContexts: l.interruptContexts}
 			return
 		}
@@ -1670,6 +1674,7 @@ func (l *TurnLoop[T, M]) runAgentAndHandleEvents(
 	spec *turnRunSpec[T, M],
 ) error {
 	l.interruptContexts = nil
+	l.capturedCancelErr = nil
 	l.checkPointRunnerBytes = nil
 
 	var iter *AsyncIterator[*TypedAgentEvent[M]]
@@ -1718,8 +1723,9 @@ func (l *TurnLoop[T, M]) runAgentAndHandleEvents(
 		iter = runner.Run(ctx, spec.input.Messages, runOpts...)
 	}
 
-	// Wrap iterator to capture InterruptContexts from business interrupt events
-	// before they flow to OnAgentEvents.
+	// Wrap iterator to capture framework-level signals (CancelError, InterruptContexts)
+	// from events before they flow to OnAgentEvents. This ensures the framework can
+	// track these signals independently of what the user's callback returns.
 	srcIter := iter
 	proxyIter, proxyGen := NewAsyncIteratorPair[*TypedAgentEvent[M]]()
 	go func() {
@@ -1729,8 +1735,16 @@ func (l *TurnLoop[T, M]) runAgentAndHandleEvents(
 			if !ok {
 				break
 			}
-			if event != nil && event.Action != nil && event.Action.Interrupted != nil {
-				l.interruptContexts = event.Action.Interrupted.InterruptContexts
+			if event != nil {
+				if event.Err != nil {
+					var cancelErr *CancelError
+					if errors.As(event.Err, &cancelErr) {
+						l.capturedCancelErr = cancelErr
+					}
+				}
+				if event.Action != nil && event.Action.Interrupted != nil {
+					l.interruptContexts = event.Action.Interrupted.InterruptContexts
+				}
 			}
 			proxyGen.Send(event)
 		}
@@ -1798,7 +1812,7 @@ func (l *TurnLoop[T, M]) runAgentAndHandleEvents(
 				handleErr = err
 			}
 		}
-		return handleErr
+		return l.applyFrameworkCapturedError(handleErr)
 	case <-preemptDone:
 		<-done
 		return nil
@@ -1811,8 +1825,27 @@ func (l *TurnLoop[T, M]) runAgentAndHandleEvents(
 				handleErr = err
 			}
 		}
+		return l.applyFrameworkCapturedError(handleErr)
+	}
+}
+
+// applyFrameworkCapturedError resolves the final error for runAgentAndHandleEvents.
+// Priority scheme:
+//   - If handleErr != nil: the user's callback error wins (framework does not overwrite).
+//   - If handleErr == nil and a CancelError was captured: use the captured CancelError.
+//   - If handleErr == nil and interrupt contexts were captured: this is handled by the
+//     caller (run loop) via l.interruptContexts, so return nil here.
+//
+// In all cases, the caller uses l.capturedCancelErr and l.interruptContexts to
+// determine inFlightItems independently of the returned error.
+func (l *TurnLoop[T, M]) applyFrameworkCapturedError(handleErr error) error {
+	if handleErr != nil {
 		return handleErr
 	}
+	if l.capturedCancelErr != nil {
+		return l.capturedCancelErr
+	}
+	return nil
 }
 
 func (l *TurnLoop[T, M]) cleanup(ctx context.Context) {
@@ -1824,10 +1857,10 @@ func (l *TurnLoop[T, M]) cleanup(ctx context.Context) {
 
 	// Only save checkpoint when the loop exited due to an explicit Stop(),
 	// a CancelError, or a business interrupt (InterruptError).
-	// If Stop() was called but a callback error happened concurrently,
-	// the state may be inconsistent — don't checkpoint in that case.
-	exitCausedByStop := l.runErr == nil || errors.As(l.runErr, new(*CancelError))
-	businessInterrupt := errors.As(l.runErr, new(*InterruptError))
+	// Also checkpoint when a cancel/interrupt was captured from the event stream
+	// but the user's callback returned a custom error (the items were still in-flight).
+	exitCausedByStop := l.runErr == nil || errors.As(l.runErr, new(*CancelError)) || l.capturedCancelErr != nil
+	businessInterrupt := errors.As(l.runErr, new(*InterruptError)) || l.interruptContexts != nil
 	shouldSaveCheckpoint := l.config.Store != nil && checkpointID != "" &&
 		((l.stopSig.isStopped() && exitCausedByStop) || businessInterrupt) &&
 		!isIdle && !l.stopSig.isSkipCheckpoint()
