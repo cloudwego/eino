@@ -1324,7 +1324,7 @@ func TestTurnLoop_StopDuringAgentExecution(t *testing.T) {
 
 	result := loop.Wait()
 	assert.NoError(t, result.ExitReason)
-	assert.Empty(t, result.CanceledItems)
+	assert.Empty(t, result.InFlightItems)
 }
 
 // TestTurnLoop_BareStop_AgentRunsToCompletion verifies the core contract of
@@ -1403,8 +1403,8 @@ func TestTurnLoop_BareStop_AgentRunsToCompletion(t *testing.T) {
 	// 3. ExitReason is nil (clean exit, not a CancelError).
 	assert.NoError(t, result.ExitReason)
 
-	// 4. CanceledItems is empty (agent was not canceled).
-	assert.Empty(t, result.CanceledItems)
+	// 4. InFlightItems is empty (agent was not interrupted).
+	assert.Empty(t, result.InFlightItems)
 
 	// 5. Only one turn executed; the second item is unhandled.
 	assert.Equal(t, int32(1), atomic.LoadInt32(&turnsExecuted),
@@ -1666,10 +1666,10 @@ func TestTurnLoop_StopDuringAgentExecution_PersistAndResume(t *testing.T) {
 	loop2 := NewTurnLoop(TurnLoopConfig[string, *schema.Message]{
 		Store:        store,
 		CheckpointID: cpID,
-		GenResume: func(ctx context.Context, _ *TurnLoop[string, *schema.Message], canceledItems []string, unhandledItems []string, newItems []string) (*GenResumeResult[string, *schema.Message], error) {
+		GenResume: func(ctx context.Context, _ *TurnLoop[string, *schema.Message], inFlightItems []string, unhandledItems []string, newItems []string) (*GenResumeResult[string, *schema.Message], error) {
 			genResumeCalled = true
 			return &GenResumeResult[string, *schema.Message]{
-				Consumed:  canceledItems,
+				Consumed:  inFlightItems,
 				Remaining: append(append([]string{}, unhandledItems...), newItems...),
 			}, nil
 		},
@@ -1699,6 +1699,112 @@ func TestTurnLoop_StopDuringAgentExecution_PersistAndResume(t *testing.T) {
 	assert.Equal(t, []string{"msg1"}, consumed2)
 	assert.True(t, genResumeCalled)
 	assert.False(t, genInputCalled)
+}
+
+func TestTurnLoop_BusinessInterrupt_PersistAndResume(t *testing.T) {
+	ctx := context.Background()
+	store := &turnLoopCheckpointStore{m: make(map[string][]byte)}
+	cpID := "interrupt-session"
+
+	// Agent that produces a business interrupt via Interrupt() call.
+	interruptAgent := &turnLoopInterruptAgent{interruptInfo: "approval_needed"}
+
+	loop := newAndRunTurnLoop(ctx, TurnLoopConfig[string, *schema.Message]{
+		Store:        store,
+		CheckpointID: cpID,
+		GenInput: func(ctx context.Context, _ *TurnLoop[string, *schema.Message], items []string) (*GenInputResult[string, *schema.Message], error) {
+			return &GenInputResult[string, *schema.Message]{
+				Input:    &AgentInput{Messages: []Message{schema.UserMessage(items[0])}},
+				Consumed: items,
+			}, nil
+		},
+		PrepareAgent: func(ctx context.Context, _ *TurnLoop[string, *schema.Message], consumed []string) (Agent, error) {
+			return interruptAgent, nil
+		},
+	})
+
+	loop.Push("msg1")
+	exit := loop.Wait()
+
+	// 1. ExitReason is an *InterruptError (not nil, not *CancelError).
+	var intErr *InterruptError
+	require.True(t, errors.As(exit.ExitReason, &intErr), "expected *InterruptError, got: %v", exit.ExitReason)
+
+	// 2. InterruptContexts is populated.
+	require.NotEmpty(t, intErr.InterruptContexts)
+
+	// 3. InFlightItems contains the items being processed.
+	assert.Equal(t, []string{"msg1"}, exit.InFlightItems)
+
+	// 4. Checkpoint was persisted.
+	assert.True(t, exit.CheckpointAttempted)
+	assert.NoError(t, exit.CheckpointErr)
+
+	store.mu.Lock()
+	_, cpExists := store.m[cpID]
+	store.mu.Unlock()
+	assert.True(t, cpExists, "checkpoint should exist in store")
+
+	// 5. Resume: new TurnLoop with same CheckpointID gets GenResume called.
+	var genResumeCalled bool
+	var resumeInFlightItems []string
+	loop2 := NewTurnLoop(TurnLoopConfig[string, *schema.Message]{
+		Store:        store,
+		CheckpointID: cpID,
+		GenResume: func(ctx context.Context, _ *TurnLoop[string, *schema.Message], inFlightItems []string, unhandledItems []string, newItems []string) (*GenResumeResult[string, *schema.Message], error) {
+			genResumeCalled = true
+			resumeInFlightItems = append([]string{}, inFlightItems...)
+			return &GenResumeResult[string, *schema.Message]{
+				Consumed:  inFlightItems,
+				Remaining: append(append([]string{}, unhandledItems...), newItems...),
+			}, nil
+		},
+		GenInput: func(ctx context.Context, _ *TurnLoop[string, *schema.Message], items []string) (*GenInputResult[string, *schema.Message], error) {
+			return &GenInputResult[string, *schema.Message]{Input: &AgentInput{}, Consumed: items}, nil
+		},
+		PrepareAgent: func(ctx context.Context, _ *TurnLoop[string, *schema.Message], consumed []string) (Agent, error) {
+			// On resume, agent completes normally.
+			return &turnLoopMockAgent{
+				name:   "ResumeAgent",
+				events: []*AgentEvent{{Output: &AgentOutput{}}},
+			}, nil
+		},
+		OnAgentEvents: func(ctx context.Context, tc *TurnContext[string, *schema.Message], events *AsyncIterator[*AgentEvent]) error {
+			for {
+				_, ok := events.Next()
+				if !ok {
+					break
+				}
+			}
+			tc.Loop.Stop()
+			return nil
+		},
+	})
+
+	loop2.Run(ctx)
+	exit2 := loop2.Wait()
+	assert.NoError(t, exit2.ExitReason)
+	assert.True(t, genResumeCalled, "GenResume should be called on checkpoint resume")
+	assert.Equal(t, []string{"msg1"}, resumeInFlightItems, "inFlightItems should contain the original items")
+}
+
+// turnLoopInterruptAgent is a test agent that produces a business interrupt event.
+type turnLoopInterruptAgent struct {
+	interruptInfo any
+}
+
+func (a *turnLoopInterruptAgent) Name(_ context.Context) string { return "InterruptAgent" }
+func (a *turnLoopInterruptAgent) Description(_ context.Context) string {
+	return "agent that interrupts"
+}
+func (a *turnLoopInterruptAgent) Run(ctx context.Context, _ *AgentInput, _ ...AgentRunOption) *AsyncIterator[*AgentEvent] {
+	iter, gen := NewAsyncIteratorPair[*AgentEvent]()
+	go func() {
+		defer gen.Close()
+		event := Interrupt(ctx, a.interruptInfo)
+		gen.Send(event)
+	}()
+	return iter
 }
 
 func TestTurnLoop_CheckpointIDWithoutStore_FreshStart(t *testing.T) {
@@ -4435,7 +4541,7 @@ func TestTurnLoop_StopBeforeRun_PushThenStop(t *testing.T) {
 
 	assert.NoError(t, result.ExitReason)
 	assert.Equal(t, []string{"item1", "item2"}, result.UnhandledItems)
-	assert.Empty(t, result.CanceledItems)
+	assert.Empty(t, result.InFlightItems)
 	assert.Empty(t, result.TakeLateItems())
 }
 
@@ -4463,7 +4569,7 @@ func TestTurnLoop_StopBeforeRun_StopThenPush(t *testing.T) {
 
 	assert.NoError(t, result.ExitReason)
 	assert.Empty(t, result.UnhandledItems)
-	assert.Empty(t, result.CanceledItems)
+	assert.Empty(t, result.InFlightItems)
 	assert.Equal(t, []string{"item1", "item2"}, result.TakeLateItems())
 }
 
@@ -5140,7 +5246,7 @@ func TestAttack_StopSignal_NilCancelOptsDoNotDeescalate(t *testing.T) {
 	assert.Equal(t, CancelImmediate, ce.Info.Mode)
 }
 
-func TestAttack_CanceledItems_EmptyWhenAgentFinishesNormally(t *testing.T) {
+func TestAttack_InFlightItems_EmptyWhenAgentFinishesNormally(t *testing.T) {
 	agentStarted := make(chan struct{})
 	loop := newAndRunTurnLoop(context.Background(), TurnLoopConfig[string, *schema.Message]{
 		GenInput: func(ctx context.Context, _ *TurnLoop[string, *schema.Message], items []string) (*GenInputResult[string, *schema.Message], error) {
@@ -5167,7 +5273,7 @@ func TestAttack_CanceledItems_EmptyWhenAgentFinishesNormally(t *testing.T) {
 
 	exit := loop.Wait()
 	assert.NoError(t, exit.ExitReason)
-	assert.Empty(t, exit.CanceledItems, "CanceledItems must be empty when agent finished normally")
+	assert.Empty(t, exit.InFlightItems, "InFlightItems must be empty when agent finished normally")
 }
 
 func TestAttack_TurnBuffer_WakeupDoesNotLoseItems(t *testing.T) {

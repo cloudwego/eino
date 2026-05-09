@@ -383,19 +383,19 @@ type TurnLoopConfig[T any, M MessageType] struct {
 	// GenResume is called at most once during Run(). When CheckpointID is
 	// configured, Run() queries Store for the checkpoint:
 	//   - If the checkpoint contains runner state (i.e. an agent was interrupted
-	//     mid-turn), Run() calls GenResume to plan a resume turn.
+	//     or canceled mid-turn), Run() calls GenResume to plan a resume turn.
 	//   - Otherwise (no checkpoint, or between-turns checkpoint), GenResume is
 	//     never called and the loop proceeds via GenInput.
 	//
 	// It receives:
-	//   - canceledItems: the items being processed when the prior run was canceled
+	//   - inFlightItems: the items being processed when the prior run was interrupted / canceled
 	//   - unhandledItems: items buffered but not processed when the prior run exited
 	//   - newItems: items that were Push()-ed before Run() was called
 	//
 	// It returns a GenResumeResult describing how to resume the interrupted agent
 	// turn (optional ResumeParams) and how to manipulate the buffer
 	// (Consumed/Remaining) before continuing.
-	GenResume func(ctx context.Context, loop *TurnLoop[T, M], canceledItems, unhandledItems, newItems []T) (*GenResumeResult[T, M], error)
+	GenResume func(ctx context.Context, loop *TurnLoop[T, M], inFlightItems, unhandledItems, newItems []T) (*GenResumeResult[T, M], error)
 
 	// PrepareAgent returns an Agent configured to handle the consumed items.
 	// This callback should set up the agent with appropriate system prompt,
@@ -427,13 +427,13 @@ type TurnLoopConfig[T any, M MessageType] struct {
 	// Store is the checkpoint store for persistence and resume. Optional.
 	// When set together with CheckpointID, enables automatic checkpoint-based resume.
 	// The TurnLoop always persists both runner checkpoint bytes and item bookkeeping
-	// (CanceledItems, UnhandledItems) via gob encoding, so T must be gob-encodable
+	// (InFlightItems, UnhandledItems) via gob encoding, so T must be gob-encodable
 	// when Store is used.
 	Store CheckPointStore
 
 	// CheckpointID, when set together with Store, enables automatic
 	// checkpoint-based resume. On Run(), the TurnLoop queries Store for this ID:
-	//   - If a checkpoint exists with runner state (mid-turn interrupt),
+	//   - If a checkpoint exists with runner state (mid-turn interrupt / cancel),
 	//     GenResume is called to plan the resume turn.
 	//   - If a checkpoint exists without runner state (between-turns),
 	//     the stored unhandled items are buffered and the loop proceeds
@@ -501,7 +501,7 @@ type GenResumeResult[T any, M MessageType] struct {
 	// Remaining are the items to keep in the buffer for a future turn.
 	// TurnLoop pushes Remaining back into the buffer before resuming the agent.
 	//
-	// Items from (canceledItems, unhandledItems, newItems) that are in neither Consumed
+	// Items from (inFlightItems, unhandledItems, newItems) that are in neither Consumed
 	// nor Remaining are dropped by the loop.
 	Remaining []T
 }
@@ -560,7 +560,7 @@ func (l *TurnLoop[T, M]) planTurn(
 	if l.config.GenResume == nil {
 		return nil, errors.New("GenResume is required for resume")
 	}
-	resumeResult, err := l.config.GenResume(ctx, l, pr.canceled, pr.unhandled, pr.newItems)
+	resumeResult, err := l.config.GenResume(ctx, l, pr.inFlight, pr.unhandled, pr.newItems)
 	if err != nil {
 		return nil, err
 	}
@@ -585,6 +585,24 @@ func (l *TurnLoop[T, M]) planTurn(
 	}, nil
 }
 
+// InterruptError is the ExitReason when the TurnLoop exits due to a business
+// interrupt (AgentAction.Interrupted). It carries InterruptContexts needed for
+// targeted resumption via ResumeParams, parallel to CancelError.
+//
+// Unlike CancelError (which indicates forceful cancellation), InterruptError
+// indicates the agent voluntarily paused execution at a business-defined point.
+type InterruptError struct {
+	// InterruptContexts provides the interrupt contexts needed for targeted
+	// resumption via ResumeParams. Each context represents a step in the agent
+	// hierarchy that was interrupted. Use each InterruptCtx.ID as a key in
+	// ResumeParams.Targets.
+	InterruptContexts []*InterruptCtx
+}
+
+func (e *InterruptError) Error() string {
+	return fmt.Sprintf("agent interrupted: %d context(s)", len(e.InterruptContexts))
+}
+
 // TurnLoopExitState is returned when TurnLoop exits, containing the exit reason
 // and any items that were not processed.
 type TurnLoopExitState[T any, M MessageType] struct {
@@ -602,20 +620,20 @@ type TurnLoopExitState[T any, M MessageType] struct {
 	// This is always valid regardless of ExitReason.
 	UnhandledItems []T
 
-	// CanceledItems contains the items whose turn was actually interrupted
-	// by a cancel (Stop with WithImmediate, WithGraceful, or WithGracefulTimeout).
-	// Only populated when ExitReason is a *CancelError — if the agent finishes
-	// normally before the cancel takes effect, CanceledItems is empty.
-	// On resume, these are passed to GenResume's CanceledItems parameter.
-	CanceledItems []T
+	// InFlightItems contains the items whose turn was interrupted — either by
+	// a cancel (Stop with cancel options → *CancelError) or by a business
+	// interrupt (AgentAction.Interrupted → *InterruptError).
+	// On resume, these are passed to GenResume's inFlightItems parameter.
+	InFlightItems []T
 
 	// StopCause is the business-supplied reason passed via WithStopCause.
 	// Empty if Stop was not called or no cause was provided.
 	StopCause string
 
 	// CheckpointAttempted indicates whether a checkpoint save was attempted when the loop exited.
-	// True only when Store is configured, CheckpointID is set, Stop() was called,
-	// the loop was not idle at exit time, and WithSkipCheckpoint was not used.
+	// True when Store is configured, CheckpointID is set, the loop was not idle
+	// at exit time, WithSkipCheckpoint was not used, and the exit was caused by
+	// Stop() (clean or cancel) or a business interrupt (*InterruptError).
 	CheckpointAttempted bool
 
 	// CheckpointErr is the error from checkpoint save, if any.
@@ -711,9 +729,10 @@ type TurnLoop[T any, M MessageType] struct {
 
 	runErr error
 
-	canceledItems []T
+	inFlightItems []T
 
 	checkPointRunnerBytes []byte
+	interruptContexts     []*InterruptCtx
 
 	pendingResume *turnLoopPendingResume[T]
 
@@ -742,7 +761,7 @@ type turnLoopCheckpoint[T any] struct {
 	// interrupted (e.g. Stop() before the first turn or between turns).
 	HasRunnerState bool
 	UnhandledItems []T
-	CanceledItems  []T
+	CanceledItems  []T // gob-compat: kept as CanceledItems for deserialization of existing checkpoints
 }
 
 func marshalTurnLoopCheckpoint[T any](c *turnLoopCheckpoint[T]) ([]byte, error) {
@@ -815,7 +834,7 @@ func (l *TurnLoop[T, M]) tryLoadCheckpoint(ctx context.Context) error {
 			return fmt.Errorf("checkpoint[%s] has runner state but bytes are empty", checkPointID)
 		}
 		l.pendingResume = &turnLoopPendingResume[T]{
-			canceled:    append([]T{}, cp.CanceledItems...),
+			inFlight:    append([]T{}, cp.CanceledItems...),
 			unhandled:   append([]T{}, cp.UnhandledItems...),
 			newItems:    append([]T{}, newItems...),
 			resumeBytes: append([]byte{}, cp.RunnerCheckpoint...),
@@ -831,7 +850,7 @@ func (l *TurnLoop[T, M]) tryLoadCheckpoint(ctx context.Context) error {
 }
 
 type turnLoopPendingResume[T any] struct {
-	canceled    []T
+	inFlight    []T
 	unhandled   []T
 	newItems    []T
 	resumeBytes []byte
@@ -1396,8 +1415,8 @@ func (l *TurnLoop[T, M]) run(ctx context.Context) {
 			pr = l.pendingResume
 			l.pendingResume = nil
 
-			pushBack = make([]T, 0, len(pr.canceled)+len(pr.unhandled)+len(pr.newItems))
-			pushBack = append(pushBack, pr.canceled...)
+			pushBack = make([]T, 0, len(pr.inFlight)+len(pr.unhandled)+len(pr.newItems))
+			pushBack = append(pushBack, pr.inFlight...)
 			pushBack = append(pushBack, pr.unhandled...)
 			pushBack = append(pushBack, pr.newItems...)
 		} else {
@@ -1519,10 +1538,17 @@ func (l *TurnLoop[T, M]) run(ctx context.Context) {
 		l.preemptSig.endTurnAndUnhold()
 
 		if runErr != nil {
-			if errors.As(runErr, new(*CancelError)) && len(l.canceledItems) == 0 {
-				l.canceledItems = append([]T{}, plan.spec.consumed...)
+			if errors.As(runErr, new(*CancelError)) && len(l.inFlightItems) == 0 {
+				l.inFlightItems = append([]T{}, plan.spec.consumed...)
 			}
 			l.runErr = runErr
+			return
+		}
+
+		// Business interrupt: agent produced an Interrupted action, exit to persist checkpoint.
+		if l.interruptContexts != nil {
+			l.inFlightItems = append([]T{}, plan.spec.consumed...)
+			l.runErr = &InterruptError{InterruptContexts: l.interruptContexts}
 			return
 		}
 	}
@@ -1643,6 +1669,9 @@ func (l *TurnLoop[T, M]) runAgentAndHandleEvents(
 	agent TypedAgent[M],
 	spec *turnRunSpec[T, M],
 ) error {
+	l.interruptContexts = nil
+	l.checkPointRunnerBytes = nil
+
 	var iter *AsyncIterator[*TypedAgentEvent[M]]
 
 	runOpts, ms, err := l.setupBridgeStore(spec, spec.runOpts)
@@ -1688,6 +1717,25 @@ func (l *TurnLoop[T, M]) runAgentAndHandleEvents(
 	} else {
 		iter = runner.Run(ctx, spec.input.Messages, runOpts...)
 	}
+
+	// Wrap iterator to capture InterruptContexts from business interrupt events
+	// before they flow to OnAgentEvents.
+	srcIter := iter
+	proxyIter, proxyGen := NewAsyncIteratorPair[*TypedAgentEvent[M]]()
+	go func() {
+		defer proxyGen.Close()
+		for {
+			event, ok := srcIter.Next()
+			if !ok {
+				break
+			}
+			if event != nil && event.Action != nil && event.Action.Interrupted != nil {
+				l.interruptContexts = event.Action.Interrupted.InterruptContexts
+			}
+			proxyGen.Send(event)
+		}
+	}()
+	iter = proxyIter
 
 	handleEvents := func() error {
 		return l.onAgentEvents(ctx, tc, iter)
@@ -1743,13 +1791,11 @@ func (l *TurnLoop[T, M]) runAgentAndHandleEvents(
 			return nil
 		default:
 		}
-		if l.stopSig.isStopped() {
-			if err := finalizeCheckpoint(); err != nil {
-				if handleErr != nil {
-					handleErr = fmt.Errorf("%w; checkpoint error: %v", handleErr, err)
-				} else {
-					handleErr = err
-				}
+		if err := finalizeCheckpoint(); err != nil {
+			if handleErr != nil {
+				handleErr = fmt.Errorf("%w; checkpoint error: %v", handleErr, err)
+			} else {
+				handleErr = err
 			}
 		}
 		return handleErr
@@ -1774,15 +1820,17 @@ func (l *TurnLoop[T, M]) cleanup(ctx context.Context) {
 
 	unhandled := l.buffer.TakeAll()
 	checkpointID := l.config.CheckpointID
-	isIdle := len(l.checkPointRunnerBytes) == 0 && len(unhandled) == 0 && len(l.canceledItems) == 0
+	isIdle := len(l.checkPointRunnerBytes) == 0 && len(unhandled) == 0 && len(l.inFlightItems) == 0
 
-	// Only save checkpoint when the loop exited due to an explicit Stop().
+	// Only save checkpoint when the loop exited due to an explicit Stop(),
+	// a CancelError, or a business interrupt (InterruptError).
 	// If Stop() was called but a callback error happened concurrently,
 	// the state may be inconsistent — don't checkpoint in that case.
-	// We consider the exit Stop-caused if runErr is nil (clean stop between
-	// turns) or a *CancelError (Stop canceled a running agent).
 	exitCausedByStop := l.runErr == nil || errors.As(l.runErr, new(*CancelError))
-	shouldSaveCheckpoint := l.config.Store != nil && checkpointID != "" && l.stopSig.isStopped() && exitCausedByStop && !isIdle && !l.stopSig.isSkipCheckpoint()
+	businessInterrupt := errors.As(l.runErr, new(*InterruptError))
+	shouldSaveCheckpoint := l.config.Store != nil && checkpointID != "" &&
+		((l.stopSig.isStopped() && exitCausedByStop) || businessInterrupt) &&
+		!isIdle && !l.stopSig.isSkipCheckpoint()
 
 	var checkpointed bool
 	var checkpointErr error
@@ -1792,7 +1840,7 @@ func (l *TurnLoop[T, M]) cleanup(ctx context.Context) {
 			RunnerCheckpoint: l.checkPointRunnerBytes,
 			HasRunnerState:   len(l.checkPointRunnerBytes) > 0,
 			UnhandledItems:   unhandled,
-			CanceledItems:    l.canceledItems,
+			CanceledItems:    l.inFlightItems,
 		}
 		checkpointed = true
 		checkpointErr = l.saveTurnLoopCheckpoint(ctx, checkpointID, cp)
@@ -1806,7 +1854,7 @@ func (l *TurnLoop[T, M]) cleanup(ctx context.Context) {
 	l.result = &TurnLoopExitState[T, M]{
 		ExitReason:          l.runErr,
 		UnhandledItems:      unhandled,
-		CanceledItems:       l.canceledItems,
+		InFlightItems:       l.inFlightItems,
 		StopCause:           l.stopSig.getStopCause(),
 		CheckpointAttempted: checkpointed,
 		CheckpointErr:       checkpointErr,
