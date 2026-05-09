@@ -185,9 +185,9 @@ func TestToolInfoSerialization(t *testing.T) {
 
 func TestMCPToolResult_NilErrorCode(t *testing.T) {
 	result := &MCPToolResult{
-		CallID: "test-call",
-		Name:   "test-tool",
-		Result: "some result",
+		CallID:  "test-call",
+		Name:    "test-tool",
+		Content: "some result",
 		Error: &MCPToolCallError{
 			Code:    nil,
 			Message: "something went wrong",
@@ -204,9 +204,9 @@ func TestMCPToolResult_NilErrorCode(t *testing.T) {
 func TestMCPToolResult_WithErrorCode(t *testing.T) {
 	code := int64(500)
 	result := &MCPToolResult{
-		CallID: "test-call",
-		Name:   "test-tool",
-		Result: "",
+		CallID:  "test-call",
+		Name:    "test-tool",
+		Content: "",
 		Error: &MCPToolCallError{
 			Code:    &code,
 			Message: "internal server error",

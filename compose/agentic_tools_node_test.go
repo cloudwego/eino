@@ -113,8 +113,8 @@ func TestToolMessageToAgenticMessage(t *testing.T) {
 			ftr := msg.ContentBlocks[0].FunctionToolResult
 			assert.Equal(t, input[i].ToolCallID, ftr.CallID)
 			assert.Equal(t, input[i].ToolName, ftr.Name)
-			assert.Equal(t, 1, len(ftr.Blocks))
-			assert.Equal(t, input[i].Content, ftr.Blocks[0].Text.Text)
+			assert.Equal(t, 1, len(ftr.Content))
+			assert.Equal(t, input[i].Content, ftr.Content[0].Text.Text)
 		}
 	})
 
@@ -163,26 +163,26 @@ func TestToolMessageToAgenticMessage(t *testing.T) {
 		assert.Equal(t, 1, len(ret[0].ContentBlocks))
 		ftr1 := ret[0].ContentBlocks[0].FunctionToolResult
 		assert.Equal(t, "1", ftr1.CallID)
-		assert.Equal(t, 5, len(ftr1.Blocks))
+		assert.Equal(t, 5, len(ftr1.Content))
 
-		assert.Equal(t, "hello", ftr1.Blocks[0].Text.Text)
+		assert.Equal(t, "hello", ftr1.Content[0].Text.Text)
 
-		assert.Equal(t, imageURL, ftr1.Blocks[1].Image.URL)
-		assert.Equal(t, schema.ImageURLDetailHigh, ftr1.Blocks[1].Image.Detail)
+		assert.Equal(t, imageURL, ftr1.Content[1].Image.URL)
+		assert.Equal(t, schema.ImageURLDetailHigh, ftr1.Content[1].Image.Detail)
 
-		assert.Equal(t, audioBase64, ftr1.Blocks[2].Audio.Base64Data)
+		assert.Equal(t, audioBase64, ftr1.Content[2].Audio.Base64Data)
 
-		assert.Equal(t, videoURL, ftr1.Blocks[3].Video.URL)
+		assert.Equal(t, videoURL, ftr1.Content[3].Video.URL)
 
-		assert.Equal(t, fileURL, ftr1.Blocks[4].File.URL)
+		assert.Equal(t, fileURL, ftr1.Content[4].File.URL)
 
 		// second message: text-only tool result
 		assert.Equal(t, schema.AgenticRoleTypeUser, ret[1].Role)
 		assert.Equal(t, 1, len(ret[1].ContentBlocks))
 		ftr2 := ret[1].ContentBlocks[0].FunctionToolResult
 		assert.Equal(t, "2", ftr2.CallID)
-		assert.Equal(t, 1, len(ftr2.Blocks))
-		assert.Equal(t, "plain result", ftr2.Blocks[0].Text.Text)
+		assert.Equal(t, 1, len(ftr2.Content))
+		assert.Equal(t, "plain result", ftr2.Content[0].Text.Text)
 	})
 
 	t.Run("nil media fields are skipped", func(t *testing.T) {
@@ -204,8 +204,8 @@ func TestToolMessageToAgenticMessage(t *testing.T) {
 		ret := toolMessageToAgenticMessage(input)
 		assert.Equal(t, 1, len(ret))
 		ftr := ret[0].ContentBlocks[0].FunctionToolResult
-		assert.Equal(t, 1, len(ftr.Blocks))
-		assert.Equal(t, "only text", ftr.Blocks[0].Text.Text)
+		assert.Equal(t, 1, len(ftr.Content))
+		assert.Equal(t, "only text", ftr.Content[0].Text.Text)
 	})
 }
 
@@ -262,18 +262,18 @@ func TestStreamToolMessageToAgenticMessage(t *testing.T) {
 		assert.Equal(t, 1, len(result[0].ContentBlocks))
 		ftr1 := result[0].ContentBlocks[0].FunctionToolResult
 		assert.Equal(t, "1", ftr1.CallID)
-		assert.Equal(t, 2, len(ftr1.Blocks))
-		assert.NotNil(t, ftr1.Blocks[0].Text)
-		assert.NotNil(t, ftr1.Blocks[1].Image)
-		assert.Equal(t, imageURL, ftr1.Blocks[1].Image.URL)
+		assert.Equal(t, 2, len(ftr1.Content))
+		assert.NotNil(t, ftr1.Content[0].Text)
+		assert.NotNil(t, ftr1.Content[1].Image)
+		assert.Equal(t, imageURL, ftr1.Content[1].Image.URL)
 
 		// second message: text-only tool result (single chunk → StreamingMeta preserved)
 		assert.Equal(t, schema.AgenticRoleTypeUser, result[1].Role)
 		assert.Equal(t, 1, len(result[1].ContentBlocks))
 		ftr2 := result[1].ContentBlocks[0].FunctionToolResult
 		assert.Equal(t, "2", ftr2.CallID)
-		assert.Equal(t, 1, len(ftr2.Blocks))
-		assert.Equal(t, "result2", ftr2.Blocks[0].Text.Text)
+		assert.Equal(t, 1, len(ftr2.Content))
+		assert.Equal(t, "result2", ftr2.Content[0].Text.Text)
 	})
 }
 
@@ -352,8 +352,8 @@ func testStreamToolMessageTextOnly(t *testing.T) {
 					FunctionToolResult: &schema.FunctionToolResult{
 						CallID: "1",
 						Name:   "name1",
-						Blocks: []*schema.FunctionToolResultBlock{
-							{Text: &schema.UserInputText{Text: "content1-1"}},
+						Content: []*schema.FunctionToolResultContentBlock{
+							{Type: schema.FunctionToolResultContentBlockTypeText, Text: &schema.UserInputText{Text: "content1-1"}},
 						},
 					},
 					StreamingMeta: &schema.StreamingMeta{Index: 0},
@@ -368,9 +368,9 @@ func testStreamToolMessageTextOnly(t *testing.T) {
 					FunctionToolResult: &schema.FunctionToolResult{
 						CallID: "2",
 						Name:   "name2",
-						Blocks: []*schema.FunctionToolResultBlock{
-							{Text: &schema.UserInputText{Text: "content2-1"}},
-							{Text: &schema.UserInputText{Text: "content2-2"}},
+						Content: []*schema.FunctionToolResultContentBlock{
+							{Type: schema.FunctionToolResultContentBlockTypeText, Text: &schema.UserInputText{Text: "content2-1"}},
+							{Type: schema.FunctionToolResultContentBlockTypeText, Text: &schema.UserInputText{Text: "content2-2"}},
 						},
 					},
 				},
@@ -384,9 +384,9 @@ func testStreamToolMessageTextOnly(t *testing.T) {
 					FunctionToolResult: &schema.FunctionToolResult{
 						CallID: "3",
 						Name:   "name3",
-						Blocks: []*schema.FunctionToolResultBlock{
-							{Text: &schema.UserInputText{Text: "content3-1"}},
-							{Text: &schema.UserInputText{Text: "content3-2"}},
+						Content: []*schema.FunctionToolResultContentBlock{
+							{Type: schema.FunctionToolResultContentBlockTypeText, Text: &schema.UserInputText{Text: "content3-1"}},
+							{Type: schema.FunctionToolResultContentBlockTypeText, Text: &schema.UserInputText{Text: "content3-2"}},
 						},
 					},
 				},

@@ -1739,7 +1739,7 @@ func collectAgenticToolContent(events []*agenticAgentEvent) []string {
 		if !mo.IsStreaming && mo.Message != nil {
 			for _, cb := range mo.Message.ContentBlocks {
 				if cb.FunctionToolResult != nil {
-					for _, b := range cb.FunctionToolResult.Blocks {
+					for _, b := range cb.FunctionToolResult.Content {
 						if b.Text != nil {
 							contents = append(contents, b.Text.Text)
 						}
@@ -1756,7 +1756,7 @@ func collectAgenticToolContent(events []*agenticAgentEvent) []string {
 				}
 				for _, cb := range msg.ContentBlocks {
 					if cb.FunctionToolResult != nil {
-						for _, b := range cb.FunctionToolResult.Blocks {
+						for _, b := range cb.FunctionToolResult.Content {
 							if b.Text != nil {
 								contents = append(contents, b.Text.Text)
 							}
@@ -1917,9 +1917,9 @@ func TestAgenticEventSenderToolHandler(t *testing.T) {
 		require.Len(t, msg.ContentBlocks, 1)
 		ftr := msg.ContentBlocks[0].FunctionToolResult
 		require.NotNil(t, ftr)
-		require.Len(t, ftr.Blocks, 2)
-		assert.Equal(t, "caption", ftr.Blocks[0].Text.Text)
-		assert.Equal(t, "https://example.com/img.png", ftr.Blocks[1].Image.URL)
+		require.Len(t, ftr.Content, 2)
+		assert.Equal(t, "caption", ftr.Content[0].Text.Text)
+		assert.Equal(t, "https://example.com/img.png", ftr.Content[1].Image.URL)
 	})
 
 	t.Run("EnhancedStreamableMultimodal", func(t *testing.T) {
@@ -1956,7 +1956,7 @@ func TestAgenticEventSenderToolHandler(t *testing.T) {
 		// Drain the stream and verify multimodal content
 		mo := toolEvents[0].Output.MessageOutput
 		require.True(t, mo.IsStreaming)
-		var allBlocks []*schema.FunctionToolResultBlock
+		var allBlocks []*schema.FunctionToolResultContentBlock
 		for {
 			msg, err := mo.MessageStream.Recv()
 			if err != nil {
@@ -1964,7 +1964,7 @@ func TestAgenticEventSenderToolHandler(t *testing.T) {
 			}
 			for _, cb := range msg.ContentBlocks {
 				if cb.FunctionToolResult != nil {
-					allBlocks = append(allBlocks, cb.FunctionToolResult.Blocks...)
+					allBlocks = append(allBlocks, cb.FunctionToolResult.Content...)
 				}
 			}
 		}
@@ -2010,4 +2010,36 @@ func (t *multimodalEnhancedStreamableTestTool) Info(_ context.Context) (*schema.
 
 func (t *multimodalEnhancedStreamableTestTool) StreamableRun(_ context.Context, _ *schema.ToolArgument, _ ...tool.Option) (*schema.StreamReader[*schema.ToolResult], error) {
 	return schema.StreamReaderFromArray([]*schema.ToolResult{t.result}), nil
+}
+
+func TestFunctionToolResultAgenticMessage(t *testing.T) {
+	t.Run("basic", func(t *testing.T) {
+		blocks := []*schema.FunctionToolResultContentBlock{
+			{Type: schema.FunctionToolResultContentBlockTypeText, Text: &schema.UserInputText{Text: "result_str"}},
+		}
+		msg := functionToolResultAgenticMessage("call_1", "tool_name", blocks)
+		assert.Equal(t, schema.AgenticRoleTypeUser, msg.Role)
+		assert.Len(t, msg.ContentBlocks, 1)
+		assert.Equal(t, schema.ContentBlockTypeFunctionToolResult, msg.ContentBlocks[0].Type)
+		ftr := msg.ContentBlocks[0].FunctionToolResult
+		assert.Equal(t, "call_1", ftr.CallID)
+		assert.Equal(t, "tool_name", ftr.Name)
+		assert.Len(t, ftr.Content, 1)
+		assert.Equal(t, "result_str", ftr.Content[0].Text.Text)
+	})
+
+	t.Run("multimodal", func(t *testing.T) {
+		blocks := []*schema.FunctionToolResultContentBlock{
+			{Type: schema.FunctionToolResultContentBlockTypeText, Text: &schema.UserInputText{Text: "description"}},
+			{Type: schema.FunctionToolResultContentBlockTypeImage, Image: &schema.UserInputImage{URL: "https://example.com/img.png"}},
+		}
+		msg := functionToolResultAgenticMessage("call_2", "vision_tool", blocks)
+		assert.Equal(t, schema.AgenticRoleTypeUser, msg.Role)
+		ftr := msg.ContentBlocks[0].FunctionToolResult
+		assert.Equal(t, "call_2", ftr.CallID)
+		assert.Equal(t, "vision_tool", ftr.Name)
+		assert.Len(t, ftr.Content, 2)
+		assert.Equal(t, "description", ftr.Content[0].Text.Text)
+		assert.Equal(t, "https://example.com/img.png", ftr.Content[1].Image.URL)
+	})
 }
