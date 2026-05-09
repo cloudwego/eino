@@ -87,10 +87,10 @@ func toolMessageToAgenticMessage(input []*schema.Message) []*schema.AgenticMessa
 			Name:   m.ToolName,
 		}
 		if len(m.UserInputMultiContent) > 0 {
-			ftr.Blocks = messageInputPartsToFunctionToolBlocks(m.UserInputMultiContent)
+			ftr.Content = messageInputPartsToFunctionToolBlocks(m.UserInputMultiContent)
 		} else if m.Content != "" {
-			ftr.Blocks = []*schema.FunctionToolResultBlock{
-				{Text: &schema.UserInputText{Text: m.Content}},
+			ftr.Content = []*schema.FunctionToolResultContentBlock{
+				newFuncToolResultContentBlock(&schema.UserInputText{Text: m.Content}),
 			}
 		}
 		results[i] = &schema.AgenticMessage{
@@ -118,10 +118,10 @@ func streamToolMessageToAgenticMessage(input *schema.StreamReader[[]*schema.Mess
 				Name:   m.ToolName,
 			}
 			if len(m.UserInputMultiContent) > 0 {
-				ftr.Blocks = messageInputPartsToFunctionToolBlocks(m.UserInputMultiContent)
+				ftr.Content = messageInputPartsToFunctionToolBlocks(m.UserInputMultiContent)
 			} else if m.Content != "" {
-				ftr.Blocks = []*schema.FunctionToolResultBlock{
-					{Text: &schema.UserInputText{Text: m.Content}},
+				ftr.Content = []*schema.FunctionToolResultContentBlock{
+					newFuncToolResultContentBlock(&schema.UserInputText{Text: m.Content}),
 				}
 			}
 			results[i] = &schema.AgenticMessage{
@@ -139,61 +139,51 @@ func streamToolMessageToAgenticMessage(input *schema.StreamReader[[]*schema.Mess
 	})
 }
 
-func messageInputPartsToFunctionToolBlocks(parts []schema.MessageInputPart) []*schema.FunctionToolResultBlock {
-	blocks := make([]*schema.FunctionToolResultBlock, 0, len(parts))
+func messageInputPartsToFunctionToolBlocks(parts []schema.MessageInputPart) []*schema.FunctionToolResultContentBlock {
+	blocks := make([]*schema.FunctionToolResultContentBlock, 0, len(parts))
 	for _, p := range parts {
-		var block *schema.FunctionToolResultBlock
+		var block *schema.FunctionToolResultContentBlock
 		switch p.Type {
 		case schema.ChatMessagePartTypeText:
-			block = &schema.FunctionToolResultBlock{
-				Text:  &schema.UserInputText{Text: p.Text},
-				Extra: p.Extra,
-			}
+			block = newFuncToolResultContentBlock(&schema.UserInputText{Text: p.Text})
+			block.Extra = p.Extra
 		case schema.ChatMessagePartTypeImageURL:
 			if p.Image != nil {
-				block = &schema.FunctionToolResultBlock{
-					Image: &schema.UserInputImage{
-						URL:        derefString(p.Image.URL),
-						Base64Data: derefString(p.Image.Base64Data),
-						MIMEType:   p.Image.MIMEType,
-						Detail:     p.Image.Detail,
-					},
-					Extra: p.Extra,
-				}
+				block = newFuncToolResultContentBlock(&schema.UserInputImage{
+					URL:        derefString(p.Image.URL),
+					Base64Data: derefString(p.Image.Base64Data),
+					MIMEType:   p.Image.MIMEType,
+					Detail:     p.Image.Detail,
+				})
+				block.Extra = p.Extra
 			}
 		case schema.ChatMessagePartTypeAudioURL:
 			if p.Audio != nil {
-				block = &schema.FunctionToolResultBlock{
-					Audio: &schema.UserInputAudio{
-						URL:        derefString(p.Audio.URL),
-						Base64Data: derefString(p.Audio.Base64Data),
-						MIMEType:   p.Audio.MIMEType,
-					},
-					Extra: p.Extra,
-				}
+				block = newFuncToolResultContentBlock(&schema.UserInputAudio{
+					URL:        derefString(p.Audio.URL),
+					Base64Data: derefString(p.Audio.Base64Data),
+					MIMEType:   p.Audio.MIMEType,
+				})
+				block.Extra = p.Extra
 			}
 		case schema.ChatMessagePartTypeVideoURL:
 			if p.Video != nil {
-				block = &schema.FunctionToolResultBlock{
-					Video: &schema.UserInputVideo{
-						URL:        derefString(p.Video.URL),
-						Base64Data: derefString(p.Video.Base64Data),
-						MIMEType:   p.Video.MIMEType,
-					},
-					Extra: p.Extra,
-				}
+				block = newFuncToolResultContentBlock(&schema.UserInputVideo{
+					URL:        derefString(p.Video.URL),
+					Base64Data: derefString(p.Video.Base64Data),
+					MIMEType:   p.Video.MIMEType,
+				})
+				block.Extra = p.Extra
 			}
 		case schema.ChatMessagePartTypeFileURL:
 			if p.File != nil {
-				block = &schema.FunctionToolResultBlock{
-					File: &schema.UserInputFile{
-						URL:        derefString(p.File.URL),
-						Base64Data: derefString(p.File.Base64Data),
-						Name:       p.File.Name,
-						MIMEType:   p.File.MIMEType,
-					},
-					Extra: p.Extra,
-				}
+				block = newFuncToolResultContentBlock(&schema.UserInputFile{
+					URL:        derefString(p.File.URL),
+					Base64Data: derefString(p.File.Base64Data),
+					Name:       p.File.Name,
+					MIMEType:   p.File.MIMEType,
+				})
+				block.Extra = p.Extra
 			}
 		}
 		if block != nil {
@@ -201,6 +191,28 @@ func messageInputPartsToFunctionToolBlocks(parts []schema.MessageInputPart) []*s
 		}
 	}
 	return blocks
+}
+
+type userInputVariant interface {
+	schema.UserInputText | schema.UserInputImage | schema.UserInputAudio | schema.UserInputVideo | schema.UserInputFile
+}
+
+// newFuncToolResultContentBlock creates a FunctionToolResultContentBlock from a typed content pointer.
+func newFuncToolResultContentBlock[T userInputVariant](content *T) *schema.FunctionToolResultContentBlock {
+	switch c := any(content).(type) {
+	case *schema.UserInputText:
+		return &schema.FunctionToolResultContentBlock{Type: schema.FunctionToolResultContentBlockTypeText, Text: c}
+	case *schema.UserInputImage:
+		return &schema.FunctionToolResultContentBlock{Type: schema.FunctionToolResultContentBlockTypeImage, Image: c}
+	case *schema.UserInputAudio:
+		return &schema.FunctionToolResultContentBlock{Type: schema.FunctionToolResultContentBlockTypeAudio, Audio: c}
+	case *schema.UserInputVideo:
+		return &schema.FunctionToolResultContentBlock{Type: schema.FunctionToolResultContentBlockTypeVideo, Video: c}
+	case *schema.UserInputFile:
+		return &schema.FunctionToolResultContentBlock{Type: schema.FunctionToolResultContentBlockTypeFile, File: c}
+	default:
+		return nil
+	}
 }
 
 func derefString(s *string) string {

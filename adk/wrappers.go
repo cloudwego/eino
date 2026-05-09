@@ -573,34 +573,50 @@ func newTypedEventSenderToolWrapper[M MessageType]() *typedEventSenderToolWrappe
 }
 
 // textToFunctionToolResultBlocks wraps a plain text string into FunctionToolResultBlocks.
-func textToFunctionToolResultBlocks(text string) []*schema.FunctionToolResultBlock {
+func textToFunctionToolResultBlocks(text string) []*schema.FunctionToolResultContentBlock {
 	if text == "" {
 		return nil
 	}
-	return []*schema.FunctionToolResultBlock{
-		{Text: &schema.UserInputText{Text: text}},
+	return []*schema.FunctionToolResultContentBlock{
+		{Type: schema.FunctionToolResultContentBlockTypeText, Text: &schema.UserInputText{Text: text}},
+	}
+}
+
+// functionToolResultAgenticMessage represents a function tool result message with AgenticRoleType "user".
+func functionToolResultAgenticMessage(callID, name string, content []*schema.FunctionToolResultContentBlock) *schema.AgenticMessage {
+	return &schema.AgenticMessage{
+		Role: schema.AgenticRoleTypeUser,
+		ContentBlocks: []*schema.ContentBlock{
+			schema.NewContentBlock(&schema.FunctionToolResult{
+				CallID:  callID,
+				Name:    name,
+				Content: content,
+			}),
+		},
 	}
 }
 
 // toolResultToBlocks converts a ToolResult's multimodal parts into FunctionToolResultBlocks.
 // This preserves all media types (text, image, audio, video, file), unlike toolResultText
 // which only extracts text.
-func toolResultToBlocks(tr *schema.ToolResult) []*schema.FunctionToolResultBlock {
+func toolResultToBlocks(tr *schema.ToolResult) []*schema.FunctionToolResultContentBlock {
 	if tr == nil || len(tr.Parts) == 0 {
 		return nil
 	}
-	blocks := make([]*schema.FunctionToolResultBlock, 0, len(tr.Parts))
+	blocks := make([]*schema.FunctionToolResultContentBlock, 0, len(tr.Parts))
 	for _, p := range tr.Parts {
-		var block *schema.FunctionToolResultBlock
+		var block *schema.FunctionToolResultContentBlock
 		switch p.Type {
 		case schema.ToolPartTypeText:
-			block = &schema.FunctionToolResultBlock{
+			block = &schema.FunctionToolResultContentBlock{
+				Type:  schema.FunctionToolResultContentBlockTypeText,
 				Text:  &schema.UserInputText{Text: p.Text},
 				Extra: p.Extra,
 			}
 		case schema.ToolPartTypeImage:
 			if p.Image != nil {
-				block = &schema.FunctionToolResultBlock{
+				block = &schema.FunctionToolResultContentBlock{
+					Type: schema.FunctionToolResultContentBlockTypeImage,
 					Image: &schema.UserInputImage{
 						URL:        derefString(p.Image.URL),
 						Base64Data: derefString(p.Image.Base64Data),
@@ -611,7 +627,8 @@ func toolResultToBlocks(tr *schema.ToolResult) []*schema.FunctionToolResultBlock
 			}
 		case schema.ToolPartTypeAudio:
 			if p.Audio != nil {
-				block = &schema.FunctionToolResultBlock{
+				block = &schema.FunctionToolResultContentBlock{
+					Type: schema.FunctionToolResultContentBlockTypeAudio,
 					Audio: &schema.UserInputAudio{
 						URL:        derefString(p.Audio.URL),
 						Base64Data: derefString(p.Audio.Base64Data),
@@ -622,7 +639,8 @@ func toolResultToBlocks(tr *schema.ToolResult) []*schema.FunctionToolResultBlock
 			}
 		case schema.ToolPartTypeVideo:
 			if p.Video != nil {
-				block = &schema.FunctionToolResultBlock{
+				block = &schema.FunctionToolResultContentBlock{
+					Type: schema.FunctionToolResultContentBlockTypeVideo,
 					Video: &schema.UserInputVideo{
 						URL:        derefString(p.Video.URL),
 						Base64Data: derefString(p.Video.Base64Data),
@@ -633,7 +651,8 @@ func toolResultToBlocks(tr *schema.ToolResult) []*schema.FunctionToolResultBlock
 			}
 		case schema.ToolPartTypeFile:
 			if p.File != nil {
-				block = &schema.FunctionToolResultBlock{
+				block = &schema.FunctionToolResultContentBlock{
+					Type: schema.FunctionToolResultContentBlockTypeFile,
 					File: &schema.UserInputFile{
 						URL:        derefString(p.File.URL),
 						Base64Data: derefString(p.File.Base64Data),
@@ -668,7 +687,7 @@ func typedToolInvokeEvent[M MessageType](callID, toolName, result, toolMsgID str
 		event := EventFromMessage(msg, nil, schema.Tool, toolName)
 		return any(event).(*TypedAgentEvent[M])
 	case *schema.AgenticMessage:
-		msg := schema.FunctionToolResultAgenticMessage(callID, toolName, textToFunctionToolResultBlocks(result))
+		msg := functionToolResultAgenticMessage(callID, toolName, textToFunctionToolResultBlocks(result))
 		msg.Extra = internal.SetMessageID(msg.Extra, toolMsgID)
 		event := EventFromAgenticMessage(msg, nil, schema.AgenticRoleTypeUser)
 		return any(event).(*TypedAgentEvent[M])
@@ -698,7 +717,7 @@ func typedToolStreamEvent[M MessageType](callID, toolName, toolMsgID string, str
 	case *schema.AgenticMessage:
 		first := true
 		cvt := func(in string) (*schema.AgenticMessage, error) {
-			msg := schema.FunctionToolResultAgenticMessage(callID, toolName, textToFunctionToolResultBlocks(in))
+			msg := functionToolResultAgenticMessage(callID, toolName, textToFunctionToolResultBlocks(in))
 			if first {
 				first = false
 				msg.Extra = internal.SetMessageID(msg.Extra, toolMsgID)
@@ -730,7 +749,7 @@ func typedToolEnhancedInvokeEvent[M MessageType](callID, toolName, toolMsgID str
 		event := EventFromMessage(msg, nil, schema.Tool, toolName)
 		return any(event).(*TypedAgentEvent[M]), nil
 	case *schema.AgenticMessage:
-		msg := schema.FunctionToolResultAgenticMessage(callID, toolName, toolResultToBlocks(result))
+		msg := functionToolResultAgenticMessage(callID, toolName, toolResultToBlocks(result))
 		msg.Extra = internal.SetMessageID(msg.Extra, toolMsgID)
 		event := EventFromAgenticMessage(msg, nil, schema.AgenticRoleTypeUser)
 		return any(event).(*TypedAgentEvent[M]), nil
@@ -766,7 +785,7 @@ func typedToolEnhancedStreamEvent[M MessageType](callID, toolName, toolMsgID str
 	case *schema.AgenticMessage:
 		first := true
 		cvt := func(in *schema.ToolResult) (*schema.AgenticMessage, error) {
-			msg := schema.FunctionToolResultAgenticMessage(callID, toolName, toolResultToBlocks(in))
+			msg := functionToolResultAgenticMessage(callID, toolName, toolResultToBlocks(in))
 			if first {
 				first = false
 				msg.Extra = internal.SetMessageID(msg.Extra, toolMsgID)
