@@ -1015,9 +1015,6 @@ func (m *middleware) generateWithRetry(ctx context.Context, chatModel model.Base
 	)
 	for attempt := 1; attempt <= totalAttempts; attempt++ {
 		resp, err := m.generateAndEmit(ctx, chatModel, input, opts, attempt, GenerateSummaryPhasePrimary)
-		if err == nil {
-			return resp, nil
-		}
 		if !shouldRetry(ctx, resp, err) {
 			return resp, err
 		}
