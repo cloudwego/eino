@@ -220,9 +220,18 @@ func createPatchedAgenticToolMessage(ctx context.Context, gen func(ctx context.C
 		content = fmt.Sprintf(tpl, toolName, callID)
 	}
 
-	return adk.FunctionToolResultAgenticMessage(callID, toolName, []*schema.FunctionToolResultContentBlock{
-		{Type: schema.FunctionToolResultContentBlockTypeText, Text: &schema.UserInputText{Text: content}},
-	}), nil
+	return &schema.AgenticMessage{
+		Role: schema.AgenticRoleTypeUser,
+		ContentBlocks: []*schema.ContentBlock{
+			schema.NewContentBlock(&schema.FunctionToolResult{
+				CallID: callID,
+				Name:   toolName,
+				Content: []*schema.FunctionToolResultContentBlock{
+					{Type: schema.FunctionToolResultContentBlockTypeText, Text: &schema.UserInputText{Text: content}},
+				},
+			}),
+		},
+	}, nil
 }
 
 const (

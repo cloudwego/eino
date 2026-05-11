@@ -85,9 +85,18 @@ func makeToolResultMsg[M adk.MessageType](content string, callID string, toolNam
 	case *schema.Message:
 		return any(schema.ToolMessage(content, callID, schema.WithToolName(toolName))).(M)
 	case *schema.AgenticMessage:
-		return any(adk.FunctionToolResultAgenticMessage(callID, toolName, []*schema.FunctionToolResultContentBlock{
-			{Type: schema.FunctionToolResultContentBlockTypeText, Text: &schema.UserInputText{Text: content}},
-		})).(M)
+		return any(&schema.AgenticMessage{
+			Role: schema.AgenticRoleTypeUser,
+			ContentBlocks: []*schema.ContentBlock{
+				schema.NewContentBlock(&schema.FunctionToolResult{
+					CallID: callID,
+					Name:   toolName,
+					Content: []*schema.FunctionToolResultContentBlock{
+						{Type: schema.FunctionToolResultContentBlockTypeText, Text: &schema.UserInputText{Text: content}},
+					},
+				}),
+			},
+		}).(M)
 	}
 	panic("unreachable")
 }

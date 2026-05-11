@@ -2012,12 +2012,12 @@ func (t *multimodalEnhancedStreamableTestTool) StreamableRun(_ context.Context, 
 	return schema.StreamReaderFromArray([]*schema.ToolResult{t.result}), nil
 }
 
-func TestFunctionToolResultAgenticMessage(t *testing.T) {
+func Test_functionToolResultAgenticMessage(t *testing.T) {
 	t.Run("basic", func(t *testing.T) {
 		blocks := []*schema.FunctionToolResultContentBlock{
 			{Type: schema.FunctionToolResultContentBlockTypeText, Text: &schema.UserInputText{Text: "result_str"}},
 		}
-		msg := FunctionToolResultAgenticMessage("call_1", "tool_name", blocks)
+		msg := functionToolResultAgenticMessage("call_1", "tool_name", blocks)
 		assert.Equal(t, schema.AgenticRoleTypeUser, msg.Role)
 		assert.Len(t, msg.ContentBlocks, 1)
 		assert.Equal(t, schema.ContentBlockTypeFunctionToolResult, msg.ContentBlocks[0].Type)
@@ -2033,7 +2033,7 @@ func TestFunctionToolResultAgenticMessage(t *testing.T) {
 			{Type: schema.FunctionToolResultContentBlockTypeText, Text: &schema.UserInputText{Text: "description"}},
 			{Type: schema.FunctionToolResultContentBlockTypeImage, Image: &schema.UserInputImage{URL: "https://example.com/img.png"}},
 		}
-		msg := FunctionToolResultAgenticMessage("call_2", "vision_tool", blocks)
+		msg := functionToolResultAgenticMessage("call_2", "vision_tool", blocks)
 		assert.Equal(t, schema.AgenticRoleTypeUser, msg.Role)
 		ftr := msg.ContentBlocks[0].FunctionToolResult
 		assert.Equal(t, "call_2", ftr.CallID)

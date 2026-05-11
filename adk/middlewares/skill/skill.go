@@ -565,9 +565,18 @@ func (s *typedSkillTool[M]) runAgentMode(ctx context.Context, skill Skill, forkH
 			case *schema.Message:
 				toolMsg = any(schema.ToolMessage(skillContent, toolCallID)).(M)
 			case *schema.AgenticMessage:
-				toolMsg = any(adk.FunctionToolResultAgenticMessage(toolCallID, "", []*schema.FunctionToolResultContentBlock{
-					{Type: schema.FunctionToolResultContentBlockTypeText, Text: &schema.UserInputText{Text: skillContent}},
-				})).(M)
+				toolMsg = any(&schema.AgenticMessage{
+					Role: schema.AgenticRoleTypeUser,
+					ContentBlocks: []*schema.ContentBlock{
+						schema.NewContentBlock(&schema.FunctionToolResult{
+							CallID: toolCallID,
+							Name:   "",
+							Content: []*schema.FunctionToolResultContentBlock{
+								{Type: schema.FunctionToolResultContentBlockTypeText, Text: &schema.UserInputText{Text: skillContent}},
+							},
+						}),
+					},
+				}).(M)
 			}
 			messages = append(history, toolMsg)
 		} else {
