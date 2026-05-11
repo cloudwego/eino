@@ -333,7 +333,7 @@ func extractToolSearchResult[M adk.MessageType](msg M, toolName string) (string,
 		for _, block := range v.ContentBlocks {
 			if block != nil && block.Type == schema.ContentBlockTypeFunctionToolResult &&
 				block.FunctionToolResult != nil && block.FunctionToolResult.Name == toolName {
-				for _, b := range block.FunctionToolResult.Blocks {
+				for _, b := range block.FunctionToolResult.Content {
 					if b != nil && b.Text != nil {
 						return b.Text.Text, true
 					}

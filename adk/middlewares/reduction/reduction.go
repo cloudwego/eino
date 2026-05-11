@@ -1051,7 +1051,7 @@ func toolResultFromMsgGeneric[M adk.MessageType](msg M) (result *schema.ToolResu
 			if block == nil || block.Type != schema.ContentBlockTypeFunctionToolResult || block.FunctionToolResult == nil {
 				continue
 			}
-			for _, rb := range block.FunctionToolResult.Blocks {
+			for _, rb := range block.FunctionToolResult.Content {
 				if rb == nil {
 					continue
 				}
@@ -1104,7 +1104,7 @@ func toolResultFromMsgGeneric[M adk.MessageType](msg M) (result *schema.ToolResu
 
 // setToolResultContent updates the tool result content in a message.
 // For *schema.Message: sets msg.Content or msg.UserInputMultiContent.
-// For *schema.AgenticMessage: reconstructs FunctionToolResult.Blocks.
+// For *schema.AgenticMessage: reconstructs FunctionToolResult.Content.
 func setToolResultContent[M adk.MessageType](msg M, toolResult *schema.ToolResult, fromContent bool) {
 	switch m := any(msg).(type) {
 	case *schema.Message:
@@ -1119,21 +1119,23 @@ func setToolResultContent[M adk.MessageType](msg M, toolResult *schema.ToolResul
 			}
 		}
 	case *schema.AgenticMessage:
-		// Find the first FunctionToolResult block and replace its Blocks.
+		// Find the first FunctionToolResult block and replace its Content.
 		for _, block := range m.ContentBlocks {
 			if block == nil || block.Type != schema.ContentBlockTypeFunctionToolResult || block.FunctionToolResult == nil {
 				continue
 			}
-			var newBlocks []*schema.FunctionToolResultBlock
+			var newBlocks []*schema.FunctionToolResultContentBlock
 			for _, part := range toolResult.Parts {
 				switch part.Type {
 				case schema.ToolPartTypeText:
-					newBlocks = append(newBlocks, &schema.FunctionToolResultBlock{
+					newBlocks = append(newBlocks, &schema.FunctionToolResultContentBlock{
+						Type: schema.FunctionToolResultContentBlockTypeText,
 						Text: &schema.UserInputText{Text: part.Text},
 					})
 				case schema.ToolPartTypeImage:
 					if part.Image != nil {
-						newBlocks = append(newBlocks, &schema.FunctionToolResultBlock{
+						newBlocks = append(newBlocks, &schema.FunctionToolResultContentBlock{
+							Type: schema.FunctionToolResultContentBlockTypeImage,
 							Image: &schema.UserInputImage{
 								URL:      mpcURLToString(part.Image.URL),
 								MIMEType: part.Image.MIMEType,
@@ -1142,7 +1144,8 @@ func setToolResultContent[M adk.MessageType](msg M, toolResult *schema.ToolResul
 					}
 				case schema.ToolPartTypeAudio:
 					if part.Audio != nil {
-						newBlocks = append(newBlocks, &schema.FunctionToolResultBlock{
+						newBlocks = append(newBlocks, &schema.FunctionToolResultContentBlock{
+							Type: schema.FunctionToolResultContentBlockTypeAudio,
 							Audio: &schema.UserInputAudio{
 								URL:      mpcURLToString(part.Audio.URL),
 								MIMEType: part.Audio.MIMEType,
@@ -1151,7 +1154,8 @@ func setToolResultContent[M adk.MessageType](msg M, toolResult *schema.ToolResul
 					}
 				case schema.ToolPartTypeVideo:
 					if part.Video != nil {
-						newBlocks = append(newBlocks, &schema.FunctionToolResultBlock{
+						newBlocks = append(newBlocks, &schema.FunctionToolResultContentBlock{
+							Type: schema.FunctionToolResultContentBlockTypeVideo,
 							Video: &schema.UserInputVideo{
 								URL:      mpcURLToString(part.Video.URL),
 								MIMEType: part.Video.MIMEType,
@@ -1160,7 +1164,8 @@ func setToolResultContent[M adk.MessageType](msg M, toolResult *schema.ToolResul
 					}
 				case schema.ToolPartTypeFile:
 					if part.File != nil {
-						newBlocks = append(newBlocks, &schema.FunctionToolResultBlock{
+						newBlocks = append(newBlocks, &schema.FunctionToolResultContentBlock{
+							Type: schema.FunctionToolResultContentBlockTypeFile,
 							File: &schema.UserInputFile{
 								URL:      mpcURLToString(part.File.URL),
 								MIMEType: part.File.MIMEType,
@@ -1169,7 +1174,7 @@ func setToolResultContent[M adk.MessageType](msg M, toolResult *schema.ToolResul
 					}
 				}
 			}
-			block.FunctionToolResult.Blocks = newBlocks
+			block.FunctionToolResult.Content = newBlocks
 			return
 		}
 	}
@@ -1233,9 +1238,9 @@ func copyAgenticMessages(msgs []*schema.AgenticMessage) []*schema.AgenticMessage
 				}
 				if block.FunctionToolResult != nil {
 					ftr := *block.FunctionToolResult
-					if block.FunctionToolResult.Blocks != nil {
-						ftr.Blocks = make([]*schema.FunctionToolResultBlock, len(block.FunctionToolResult.Blocks))
-						for k, rb := range block.FunctionToolResult.Blocks {
+					if block.FunctionToolResult.Content != nil {
+						ftr.Content = make([]*schema.FunctionToolResultContentBlock, len(block.FunctionToolResult.Content))
+						for k, rb := range block.FunctionToolResult.Content {
 							if rb != nil {
 								rbCopy := *rb // shallow copy: Image/Audio/Video/File sub-fields are not deep-copied.
 								// This is safe because the clear logic replaces entire blocks rather than
@@ -1244,7 +1249,7 @@ func copyAgenticMessages(msgs []*schema.AgenticMessage) []*schema.AgenticMessage
 									t := *rb.Text
 									rbCopy.Text = &t
 								}
-								ftr.Blocks[k] = &rbCopy
+								ftr.Content[k] = &rbCopy
 							}
 						}
 					}

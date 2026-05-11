@@ -85,8 +85,8 @@ func makeToolResultMsg[M adk.MessageType](content string, callID string, toolNam
 	case *schema.Message:
 		return any(schema.ToolMessage(content, callID, schema.WithToolName(toolName))).(M)
 	case *schema.AgenticMessage:
-		return any(schema.FunctionToolResultAgenticMessage(callID, toolName, []*schema.FunctionToolResultBlock{
-			{Text: &schema.UserInputText{Text: content}},
+		return any(adk.FunctionToolResultAgenticMessage(callID, toolName, []*schema.FunctionToolResultContentBlock{
+			{Type: schema.FunctionToolResultContentBlockTypeText, Text: &schema.UserInputText{Text: content}},
 		})).(M)
 	}
 	panic("unreachable")
@@ -100,7 +100,7 @@ func assertMsgContent[M adk.MessageType](t *testing.T, msg M, expectedContent st
 	case *schema.AgenticMessage:
 		for _, block := range m.ContentBlocks {
 			if block.Type == schema.ContentBlockTypeFunctionToolResult && block.FunctionToolResult != nil {
-				for _, b := range block.FunctionToolResult.Blocks {
+				for _, b := range block.FunctionToolResult.Content {
 					if b.Text != nil {
 						assert.Equal(t, expectedContent, b.Text.Text)
 						return

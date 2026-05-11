@@ -111,7 +111,7 @@ func makeToolResultMsgG[M adk.MessageType](content string, callID string, toolNa
 		msg.ToolName = toolName
 		return any(msg).(M)
 	case *schema.AgenticMessage:
-		return any(schema.FunctionToolResultAgenticMessage(callID, toolName, []*schema.FunctionToolResultBlock{
+		return any(adk.FunctionToolResultAgenticMessage(callID, toolName, []*schema.FunctionToolResultContentBlock{
 			{Text: &schema.UserInputText{Text: content}},
 		})).(M)
 	}
@@ -134,7 +134,7 @@ func getMsgContentG[M adk.MessageType](msg M) string {
 				return block.AssistantGenText.Text
 			}
 			if block.FunctionToolResult != nil {
-				for _, b := range block.FunctionToolResult.Blocks {
+				for _, b := range block.FunctionToolResult.Content {
 					if b != nil && b.Text != nil {
 						return b.Text.Text
 					}
@@ -207,7 +207,7 @@ func testHelperFunctions[M adk.MessageType](t *testing.T) {
 				Role: schema.AgenticRoleTypeUser,
 				ContentBlocks: []*schema.ContentBlock{
 					schema.NewContentBlock(&schema.UserInputText{Text: "hello"}),
-					schema.NewContentBlock(&schema.FunctionToolResult{CallID: "c1", Name: "tool1", Blocks: []*schema.FunctionToolResultBlock{
+					schema.NewContentBlock(&schema.FunctionToolResult{CallID: "c1", Name: "tool1", Content: []*schema.FunctionToolResultContentBlock{
 						{Text: &schema.UserInputText{Text: "result"}},
 					}}),
 				},
@@ -484,7 +484,7 @@ func TestGetDefaultTokenCounter_AgenticMessage(t *testing.T) {
 				schema.NewContentBlock(&schema.FunctionToolResult{
 					CallID: "c1",
 					Name:   "my_tool",
-					Blocks: []*schema.FunctionToolResultBlock{
+					Content: []*schema.FunctionToolResultContentBlock{
 						{Text: &schema.UserInputText{Text: "tool output text"}},
 					},
 				}),
@@ -521,7 +521,7 @@ func TestCopyAgenticMessages_DeepCopy(t *testing.T) {
 					FunctionToolResult: &schema.FunctionToolResult{
 						CallID: "call_1",
 						Name:   "tool_a",
-						Blocks: []*schema.FunctionToolResultBlock{
+						Content: []*schema.FunctionToolResultContentBlock{
 							{Text: &schema.UserInputText{Text: "original result"}},
 						},
 					},
@@ -540,8 +540,8 @@ func TestCopyAgenticMessages_DeepCopy(t *testing.T) {
 	assert.Equal(t, `{"x":1}`, original[0].ContentBlocks[0].FunctionToolCall.Arguments,
 		"original FunctionToolCall.Arguments must not be affected")
 
-	copied[0].ContentBlocks[1].FunctionToolResult.Blocks[0].Text.Text = "modified result"
-	assert.Equal(t, "original result", original[0].ContentBlocks[1].FunctionToolResult.Blocks[0].Text.Text,
+	copied[0].ContentBlocks[1].FunctionToolResult.Content[0].Text.Text = "modified result"
+	assert.Equal(t, "original result", original[0].ContentBlocks[1].FunctionToolResult.Content[0].Text.Text,
 		"original FunctionToolResult text must not be affected")
 
 	copied[0].ContentBlocks[1].Extra["meta"] = "changed"
@@ -563,7 +563,7 @@ func TestToolResultFromMsgGeneric_AgenticMessage(t *testing.T) {
 					FunctionToolResult: &schema.FunctionToolResult{
 						CallID: "c1",
 						Name:   "tool1",
-						Blocks: []*schema.FunctionToolResultBlock{
+						Content: []*schema.FunctionToolResultContentBlock{
 							{Text: &schema.UserInputText{Text: "hello result"}},
 						},
 					},
@@ -588,7 +588,7 @@ func TestToolResultFromMsgGeneric_AgenticMessage(t *testing.T) {
 					FunctionToolResult: &schema.FunctionToolResult{
 						CallID: "c1",
 						Name:   "tool1",
-						Blocks: []*schema.FunctionToolResultBlock{
+						Content: []*schema.FunctionToolResultContentBlock{
 							{Text: &schema.UserInputText{Text: "text part"}},
 							{Text: &schema.UserInputText{Text: "another text part"}},
 						},
@@ -614,7 +614,7 @@ func TestToolResultFromMsgGeneric_AgenticMessage(t *testing.T) {
 					FunctionToolResult: &schema.FunctionToolResult{
 						CallID: "c1",
 						Name:   "tool1",
-						Blocks: nil,
+						Content: nil,
 					},
 				},
 			},
@@ -638,7 +638,7 @@ func TestSetToolResultContent_AgenticMessage(t *testing.T) {
 					FunctionToolResult: &schema.FunctionToolResult{
 						CallID: "c1",
 						Name:   "tool1",
-						Blocks: []*schema.FunctionToolResultBlock{
+						Content: []*schema.FunctionToolResultContentBlock{
 							{Text: &schema.UserInputText{Text: "old"}},
 						},
 					},
@@ -655,7 +655,7 @@ func TestSetToolResultContent_AgenticMessage(t *testing.T) {
 		setToolResultContent(msg, newResult, true)
 
 		// Verify the block was updated
-		blocks := msg.ContentBlocks[0].FunctionToolResult.Blocks
+		blocks := msg.ContentBlocks[0].FunctionToolResult.Content
 		require.Len(t, blocks, 1)
 		assert.Equal(t, "new content", blocks[0].Text.Text)
 	})
@@ -669,7 +669,7 @@ func TestSetToolResultContent_AgenticMessage(t *testing.T) {
 					FunctionToolResult: &schema.FunctionToolResult{
 						CallID: "c1",
 						Name:   "tool1",
-						Blocks: []*schema.FunctionToolResultBlock{
+						Content: []*schema.FunctionToolResultContentBlock{
 							{Text: &schema.UserInputText{Text: "old"}},
 						},
 					},
@@ -689,7 +689,7 @@ func TestSetToolResultContent_AgenticMessage(t *testing.T) {
 
 		setToolResultContent(msg, newResult, false)
 
-		blocks := msg.ContentBlocks[0].FunctionToolResult.Blocks
+		blocks := msg.ContentBlocks[0].FunctionToolResult.Content
 		require.Len(t, blocks, 2)
 		assert.Equal(t, "text part", blocks[0].Text.Text)
 		require.NotNil(t, blocks[1].Image)
@@ -712,7 +712,7 @@ func TestToolResultFromMsgGeneric_MediaBlocks(t *testing.T) {
 				FunctionToolResult: &schema.FunctionToolResult{
 					CallID: "c1",
 					Name:   "media_tool",
-					Blocks: []*schema.FunctionToolResultBlock{
+					Content: []*schema.FunctionToolResultContentBlock{
 						{Image: &schema.UserInputImage{URL: imgURL, MIMEType: "image/png"}},
 						{Audio: &schema.UserInputAudio{URL: audioURL, MIMEType: "audio/wav"}},
 						{Video: &schema.UserInputVideo{URL: videoURL, MIMEType: "video/mp4"}},
@@ -762,7 +762,7 @@ func TestSetToolResultContent_MediaBlocks(t *testing.T) {
 				FunctionToolResult: &schema.FunctionToolResult{
 					CallID: "c1",
 					Name:   "tool1",
-					Blocks: []*schema.FunctionToolResultBlock{
+					Content: []*schema.FunctionToolResultContentBlock{
 						{Text: &schema.UserInputText{Text: "old"}},
 					},
 				},
@@ -786,7 +786,7 @@ func TestSetToolResultContent_MediaBlocks(t *testing.T) {
 
 	setToolResultContent(msg, newResult, false)
 
-	blocks := msg.ContentBlocks[0].FunctionToolResult.Blocks
+	blocks := msg.ContentBlocks[0].FunctionToolResult.Content
 	require.Len(t, blocks, 3)
 
 	require.NotNil(t, blocks[0].Audio)

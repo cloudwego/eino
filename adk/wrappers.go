@@ -582,8 +582,8 @@ func textToFunctionToolResultBlocks(text string) []*schema.FunctionToolResultCon
 	}
 }
 
-// functionToolResultAgenticMessage represents a function tool result message with AgenticRoleType "user".
-func functionToolResultAgenticMessage(callID, name string, content []*schema.FunctionToolResultContentBlock) *schema.AgenticMessage {
+// FunctionToolResultAgenticMessage represents a function tool result message with AgenticRoleType "user".
+func FunctionToolResultAgenticMessage(callID, name string, content []*schema.FunctionToolResultContentBlock) *schema.AgenticMessage {
 	return &schema.AgenticMessage{
 		Role: schema.AgenticRoleTypeUser,
 		ContentBlocks: []*schema.ContentBlock{
@@ -687,7 +687,7 @@ func typedToolInvokeEvent[M MessageType](callID, toolName, result, toolMsgID str
 		event := EventFromMessage(msg, nil, schema.Tool, toolName)
 		return any(event).(*TypedAgentEvent[M])
 	case *schema.AgenticMessage:
-		msg := functionToolResultAgenticMessage(callID, toolName, textToFunctionToolResultBlocks(result))
+		msg := FunctionToolResultAgenticMessage(callID, toolName, textToFunctionToolResultBlocks(result))
 		msg.Extra = internal.SetMessageID(msg.Extra, toolMsgID)
 		event := EventFromAgenticMessage(msg, nil, schema.AgenticRoleTypeUser)
 		return any(event).(*TypedAgentEvent[M])
@@ -717,7 +717,7 @@ func typedToolStreamEvent[M MessageType](callID, toolName, toolMsgID string, str
 	case *schema.AgenticMessage:
 		first := true
 		cvt := func(in string) (*schema.AgenticMessage, error) {
-			msg := functionToolResultAgenticMessage(callID, toolName, textToFunctionToolResultBlocks(in))
+			msg := FunctionToolResultAgenticMessage(callID, toolName, textToFunctionToolResultBlocks(in))
 			if first {
 				first = false
 				msg.Extra = internal.SetMessageID(msg.Extra, toolMsgID)
@@ -749,7 +749,7 @@ func typedToolEnhancedInvokeEvent[M MessageType](callID, toolName, toolMsgID str
 		event := EventFromMessage(msg, nil, schema.Tool, toolName)
 		return any(event).(*TypedAgentEvent[M]), nil
 	case *schema.AgenticMessage:
-		msg := functionToolResultAgenticMessage(callID, toolName, toolResultToBlocks(result))
+		msg := FunctionToolResultAgenticMessage(callID, toolName, toolResultToBlocks(result))
 		msg.Extra = internal.SetMessageID(msg.Extra, toolMsgID)
 		event := EventFromAgenticMessage(msg, nil, schema.AgenticRoleTypeUser)
 		return any(event).(*TypedAgentEvent[M]), nil
@@ -785,7 +785,7 @@ func typedToolEnhancedStreamEvent[M MessageType](callID, toolName, toolMsgID str
 	case *schema.AgenticMessage:
 		first := true
 		cvt := func(in *schema.ToolResult) (*schema.AgenticMessage, error) {
-			msg := functionToolResultAgenticMessage(callID, toolName, toolResultToBlocks(in))
+			msg := FunctionToolResultAgenticMessage(callID, toolName, toolResultToBlocks(in))
 			if first {
 				first = false
 				msg.Extra = internal.SetMessageID(msg.Extra, toolMsgID)
