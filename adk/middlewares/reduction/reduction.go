@@ -1051,13 +1051,20 @@ func toolResultFromMsgGeneric[M adk.MessageType](msg M) (result *schema.ToolResu
 	case *schema.Message:
 		return toolResultFromMessage(m)
 	case *schema.AgenticMessage:
-		var parts []schema.ToolOutputPart
+		var found *schema.FunctionToolResult
 		for _, block := range m.ContentBlocks {
 			if block == nil || block.Type != schema.ContentBlockTypeFunctionToolResult || block.FunctionToolResult == nil {
 				continue
 			}
-			parts = append(parts, toolResultToOutputParts(block.FunctionToolResult)...)
+			if found != nil {
+				return nil, false, fmt.Errorf("reduction: AgenticMessage contains multiple FunctionToolResult blocks; expected exactly one per message")
+			}
+			found = block.FunctionToolResult
 		}
+		if found == nil {
+			return &schema.ToolResult{Parts: []schema.ToolOutputPart{{Type: schema.ToolPartTypeText, Text: ""}}}, true, nil
+		}
+		parts := toolResultToOutputParts(found)
 		if len(parts) == 0 {
 			return &schema.ToolResult{Parts: []schema.ToolOutputPart{{Type: schema.ToolPartTypeText, Text: ""}}}, true, nil
 		}
