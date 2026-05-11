@@ -807,8 +807,8 @@ func (t *typedToolReductionMiddleware[M]) applyClearRewriteGeneric(ctx context.C
 			if isSystemMsg(msg) || isUserMsg(msg) {
 				rewritten = append(rewritten, msg)
 				i++
-			} else if isToolResultOnlyMsg(msg) {
-				// standalone tool result message (schema.Tool role or agentic tool-result-only user msg)
+			} else if isToolResultMsg(msg) {
+				// tool result message (schema.Tool role or agentic user msg carrying FunctionToolResult)
 				i++
 			} else if isAssistantMsg(msg) {
 				toolCalls := getToolCallsGeneric(msg)
@@ -887,7 +887,7 @@ func isSystemMsg[M adk.MessageType](msg M) bool {
 	return false
 }
 
-// isUserMsg checks if a message has user role (and is not a tool-result-only message).
+// isUserMsg checks if a message has user role (and is not a tool-result message).
 func isUserMsg[M adk.MessageType](msg M) bool {
 	switch m := any(msg).(type) {
 	case *schema.Message:
@@ -896,15 +896,16 @@ func isUserMsg[M adk.MessageType](msg M) bool {
 		if m.Role != schema.AgenticRoleTypeUser {
 			return false
 		}
-		// A user-role agentic message that only contains FunctionToolResult blocks
-		// is a tool result message, not a normal user message.
+		// A user-role agentic message that contains any FunctionToolResult block
+		// is a tool result message, not a normal user message — even if it also
+		// carries UserInput blocks. This ensures the clear flow's tool-call grouping
+		// remains correctly aligned.
 		for _, block := range m.ContentBlocks {
-			if block != nil && block.Type != schema.ContentBlockTypeFunctionToolResult {
-				return true
+			if block != nil && block.Type == schema.ContentBlockTypeFunctionToolResult {
+				return false
 			}
 		}
-		// All blocks are FunctionToolResult (or empty) — treat as tool result, not user.
-		return len(m.ContentBlocks) == 0
+		return len(m.ContentBlocks) > 0
 	}
 	return false
 }
