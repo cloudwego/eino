@@ -804,12 +804,12 @@ func TestSetToolResultContent_MediaBlocks(t *testing.T) {
 
 func TestAgenticURLToMPC(t *testing.T) {
 	t.Run("non-empty URL", func(t *testing.T) {
-		url := schema.FunctionToolResult{
+		ftr := &schema.FunctionToolResult{
 			Content: []*schema.FunctionToolResultContentBlock{
 				{Type: schema.FunctionToolResultContentBlockTypeFile, File: &schema.UserInputFile{URL: "https://example.com/file.pdf", MIMEType: "application/pdf"}},
 			},
 		}
-		parts := url.ToToolOutputParts()
+		parts := toolResultToOutputParts(ftr)
 		require.Len(t, parts, 1)
 		require.NotNil(t, parts[0].File)
 		require.NotNil(t, parts[0].File.URL)
@@ -818,12 +818,12 @@ func TestAgenticURLToMPC(t *testing.T) {
 	})
 
 	t.Run("empty URL", func(t *testing.T) {
-		url := schema.FunctionToolResult{
+		ftr := &schema.FunctionToolResult{
 			Content: []*schema.FunctionToolResultContentBlock{
 				{Type: schema.FunctionToolResultContentBlockTypeFile, File: &schema.UserInputFile{URL: "", MIMEType: "text/plain"}},
 			},
 		}
-		parts := url.ToToolOutputParts()
+		parts := toolResultToOutputParts(ftr)
 		require.Len(t, parts, 1)
 		require.NotNil(t, parts[0].File)
 		assert.Nil(t, parts[0].File.URL)
@@ -834,8 +834,8 @@ func TestAgenticURLToMPC(t *testing.T) {
 func TestMpcURLToString(t *testing.T) {
 	t.Run("non-nil URL", func(t *testing.T) {
 		urlStr := "https://example.com"
-		tr := schema.FunctionToolResult{}
-		tr.SetFromToolOutputParts([]schema.ToolOutputPart{
+		tr := &schema.FunctionToolResult{}
+		setToolResultFromOutputParts(tr, []schema.ToolOutputPart{
 			{Type: schema.ToolPartTypeFile, File: &schema.ToolOutputFile{MessagePartCommon: schema.MessagePartCommon{URL: &urlStr, MIMEType: "text/plain"}}},
 		})
 		require.Len(t, tr.Content, 1)
@@ -844,8 +844,8 @@ func TestMpcURLToString(t *testing.T) {
 	})
 
 	t.Run("nil URL", func(t *testing.T) {
-		tr := schema.FunctionToolResult{}
-		tr.SetFromToolOutputParts([]schema.ToolOutputPart{
+		tr := &schema.FunctionToolResult{}
+		setToolResultFromOutputParts(tr, []schema.ToolOutputPart{
 			{Type: schema.ToolPartTypeFile, File: &schema.ToolOutputFile{MessagePartCommon: schema.MessagePartCommon{URL: nil, MIMEType: "text/plain"}}},
 		})
 		require.Len(t, tr.Content, 1)

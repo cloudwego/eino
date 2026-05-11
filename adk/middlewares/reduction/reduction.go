@@ -1056,7 +1056,7 @@ func toolResultFromMsgGeneric[M adk.MessageType](msg M) (result *schema.ToolResu
 			if block == nil || block.Type != schema.ContentBlockTypeFunctionToolResult || block.FunctionToolResult == nil {
 				continue
 			}
-			parts = append(parts, block.FunctionToolResult.ToToolOutputParts()...)
+			parts = append(parts, toolResultToOutputParts(block.FunctionToolResult)...)
 		}
 		if len(parts) == 0 {
 			return &schema.ToolResult{Parts: []schema.ToolOutputPart{{Type: schema.ToolPartTypeText, Text: ""}}}, true, nil
@@ -1088,7 +1088,7 @@ func setToolResultContent[M adk.MessageType](msg M, toolResult *schema.ToolResul
 			if block == nil || block.Type != schema.ContentBlockTypeFunctionToolResult || block.FunctionToolResult == nil {
 				continue
 			}
-			block.FunctionToolResult.SetFromToolOutputParts(toolResult.Parts)
+			setToolResultFromOutputParts(block.FunctionToolResult, toolResult.Parts)
 			return
 		}
 	}
@@ -1576,4 +1576,98 @@ func convMessageInputPartToToolOutputPart(msgPart schema.MessageInputPart) (sche
 	default:
 		return schema.ToolOutputPart{}, fmt.Errorf("unknown msg part type: %v", msgPart.Type)
 	}
+}
+
+// toolResultToOutputParts converts a FunctionToolResult's Content blocks to ToolOutputPart slice.
+func toolResultToOutputParts(f *schema.FunctionToolResult) []schema.ToolOutputPart {
+	var parts []schema.ToolOutputPart
+	for _, block := range f.Content {
+		if block == nil {
+			continue
+		}
+		if block.Text != nil {
+			parts = append(parts, schema.ToolOutputPart{Type: schema.ToolPartTypeText, Text: block.Text.Text})
+		} else if block.Image != nil {
+			parts = append(parts, schema.ToolOutputPart{
+				Type:  schema.ToolPartTypeImage,
+				Image: &schema.ToolOutputImage{MessagePartCommon: schema.MessagePartCommon{URL: strPtr(block.Image.URL), MIMEType: block.Image.MIMEType}},
+			})
+		} else if block.Audio != nil {
+			parts = append(parts, schema.ToolOutputPart{
+				Type:  schema.ToolPartTypeAudio,
+				Audio: &schema.ToolOutputAudio{MessagePartCommon: schema.MessagePartCommon{URL: strPtr(block.Audio.URL), MIMEType: block.Audio.MIMEType}},
+			})
+		} else if block.Video != nil {
+			parts = append(parts, schema.ToolOutputPart{
+				Type:  schema.ToolPartTypeVideo,
+				Video: &schema.ToolOutputVideo{MessagePartCommon: schema.MessagePartCommon{URL: strPtr(block.Video.URL), MIMEType: block.Video.MIMEType}},
+			})
+		} else if block.File != nil {
+			parts = append(parts, schema.ToolOutputPart{
+				Type: schema.ToolPartTypeFile,
+				File: &schema.ToolOutputFile{MessagePartCommon: schema.MessagePartCommon{URL: strPtr(block.File.URL), MIMEType: block.File.MIMEType}},
+			})
+		}
+	}
+	return parts
+}
+
+// setToolResultFromOutputParts converts ToolOutputPart slice back to FunctionToolResultContentBlock
+// slice and sets f.Content.
+func setToolResultFromOutputParts(f *schema.FunctionToolResult, parts []schema.ToolOutputPart) {
+	var newBlocks []*schema.FunctionToolResultContentBlock
+	for _, part := range parts {
+		switch part.Type {
+		case schema.ToolPartTypeText:
+			newBlocks = append(newBlocks, &schema.FunctionToolResultContentBlock{
+				Type: schema.FunctionToolResultContentBlockTypeText,
+				Text: &schema.UserInputText{Text: part.Text},
+			})
+		case schema.ToolPartTypeImage:
+			if part.Image != nil {
+				newBlocks = append(newBlocks, &schema.FunctionToolResultContentBlock{
+					Type:  schema.FunctionToolResultContentBlockTypeImage,
+					Image: &schema.UserInputImage{URL: ptrStr(part.Image.URL), MIMEType: part.Image.MIMEType},
+				})
+			}
+		case schema.ToolPartTypeAudio:
+			if part.Audio != nil {
+				newBlocks = append(newBlocks, &schema.FunctionToolResultContentBlock{
+					Type:  schema.FunctionToolResultContentBlockTypeAudio,
+					Audio: &schema.UserInputAudio{URL: ptrStr(part.Audio.URL), MIMEType: part.Audio.MIMEType},
+				})
+			}
+		case schema.ToolPartTypeVideo:
+			if part.Video != nil {
+				newBlocks = append(newBlocks, &schema.FunctionToolResultContentBlock{
+					Type:  schema.FunctionToolResultContentBlockTypeVideo,
+					Video: &schema.UserInputVideo{URL: ptrStr(part.Video.URL), MIMEType: part.Video.MIMEType},
+				})
+			}
+		case schema.ToolPartTypeFile:
+			if part.File != nil {
+				newBlocks = append(newBlocks, &schema.FunctionToolResultContentBlock{
+					Type: schema.FunctionToolResultContentBlockTypeFile,
+					File: &schema.UserInputFile{URL: ptrStr(part.File.URL), MIMEType: part.File.MIMEType},
+				})
+			}
+		}
+	}
+	f.Content = newBlocks
+}
+
+// strPtr returns a pointer to s, or nil if s is empty.
+func strPtr(s string) *string {
+	if s == "" {
+		return nil
+	}
+	return &s
+}
+
+// ptrStr safely dereferences a *string, returning "" if nil.
+func ptrStr(p *string) string {
+	if p == nil {
+		return ""
+	}
+	return *p
 }
