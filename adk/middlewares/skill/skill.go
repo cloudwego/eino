@@ -617,14 +617,16 @@ func (s *typedSkillTool[M]) runAgentMode(ctx context.Context, skill Skill, forkH
 			case *schema.Message:
 				content = m.Content
 			case *schema.AgenticMessage:
+				var parts []string
 				for _, block := range m.ContentBlocks {
 					if block == nil {
 						continue
 					}
 					if block.AssistantGenText != nil {
-						content += block.AssistantGenText.Text
+						parts = append(parts, block.AssistantGenText.Text)
 					}
 				}
+				content = strings.Join(parts, "\n")
 			}
 			if content != "" {
 				results = append(results, content)

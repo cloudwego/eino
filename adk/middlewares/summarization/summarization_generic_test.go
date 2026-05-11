@@ -98,13 +98,12 @@ func TestSummarizationGeneric(t *testing.T) {
 	t.Run("Message", func(t *testing.T) {
 		t.Run("Helpers", testSummarizationHelpers[*schema.Message])
 		t.Run("Flow", testSummarizationFlow[*schema.Message])
-		t.Run("SummarizeMessages", testTypedSummarizeMessages[*schema.Message])
+		t.Run("SummarizeMessages", testSummarizeMessages)
 		t.Run("TokenCounterUsesStateToolInfos", testTokenCounterReceivesStateToolInfos[*schema.Message])
 	})
 	t.Run("AgenticMessage", func(t *testing.T) {
 		t.Run("Helpers", testSummarizationHelpers[*schema.AgenticMessage])
 		t.Run("Flow", testSummarizationFlow[*schema.AgenticMessage])
-		t.Run("SummarizeMessages", testTypedSummarizeMessages[*schema.AgenticMessage])
 		t.Run("TokenCounterUsesStateToolInfos", testTokenCounterReceivesStateToolInfos[*schema.AgenticMessage])
 	})
 }
@@ -163,12 +162,12 @@ func testSummarizationHelpers[M adk.MessageType](t *testing.T) {
 		assert.False(t, isUserRole(sys))
 	})
 
-	t.Run("getTextContent", func(t *testing.T) {
+	t.Run("getMsgTextContent", func(t *testing.T) {
 		usr := smakeUserMsg[M]("hello world")
-		assert.Equal(t, "hello world", getTextContent(usr))
+		assert.Equal(t, "hello world", getMsgTextContent(usr))
 
 		ast := smakeAssistantMsg[M]("reply")
-		assert.Equal(t, "reply", getTextContent(ast))
+		assert.Equal(t, "reply", getMsgTextContent(ast))
 	})
 
 	t.Run("getMsgExtra_setMsgExtra", func(t *testing.T) {
@@ -186,19 +185,19 @@ func testSummarizationHelpers[M adk.MessageType](t *testing.T) {
 	t.Run("makeSystemMsg", func(t *testing.T) {
 		msg := makeSystemMsg[M]("system prompt")
 		assert.True(t, isSystemRole(msg))
-		assert.Equal(t, "system prompt", getTextContent(msg))
+		assert.Equal(t, "system prompt", getMsgTextContent(msg))
 	})
 
 	t.Run("makeUserMsg", func(t *testing.T) {
 		msg := makeUserMsg[M]("user input")
 		assert.True(t, isUserRole(msg))
-		assert.Equal(t, "user input", getTextContent(msg))
+		assert.Equal(t, "user input", getMsgTextContent(msg))
 	})
 
 	t.Run("setMsgTextContent", func(t *testing.T) {
 		msg := smakeUserMsg[M]("original")
 		msg = setMsgTextContent(msg, "replaced")
-		assert.Equal(t, "replaced", getTextContent(msg))
+		assert.Equal(t, "replaced", getMsgTextContent(msg))
 	})
 
 	t.Run("setMsgMultipartContent", func(t *testing.T) {
@@ -234,7 +233,7 @@ func testSummarizationFlow[M adk.MessageType](t *testing.T) {
 	tokenCounter := func(_ context.Context, input *TypedTokenCounterInput[M]) (int, error) {
 		total := 0
 		for _, msg := range input.Messages {
-			total += len(getTextContent(msg))
+			total += len(getMsgTextContent(msg))
 		}
 		return total, nil
 	}
@@ -285,7 +284,7 @@ func testSummarizationFlow[M adk.MessageType](t *testing.T) {
 			}
 		}
 		// Also check if the summary text appears in message content
-		if strings.Contains(getTextContent(msg), summaryText) {
+		if strings.Contains(getMsgTextContent(msg), summaryText) {
 			foundSummary = true
 			break
 		}
@@ -341,35 +340,35 @@ func testTokenCounterReceivesStateToolInfos[M adk.MessageType](t *testing.T) {
 	assert.Equal(t, "state_tool_a", receivedTools[0].Name)
 	assert.Equal(t, "state_tool_b", receivedTools[1].Name)
 }
-func testTypedSummarizeMessages[M adk.MessageType](t *testing.T) {
+func testSummarizeMessages(t *testing.T) {
 	ctx := context.Background()
 
 	summaryText := "Summary of conversation."
-	mockModel := &genericMockModel[M]{
-		response: smakeAssistantMsg[M](summaryText),
+	mockModel := &genericMockModel[adk.Message]{
+		response: smakeAssistantMsg[adk.Message](summaryText),
 	}
 
-	tokenCounter := func(_ context.Context, input *TypedTokenCounterInput[M]) (int, error) {
+	tokenCounter := func(_ context.Context, input *TypedTokenCounterInput[adk.Message]) (int, error) {
 		total := 0
 		for _, msg := range input.Messages {
-			total += len(getTextContent(msg))
+			total += len(getMsgTextContent(msg))
 		}
 		return total, nil
 	}
 
-	cfg := &TypedConfig[M]{
+	cfg := &Config{
 		Model:        mockModel,
 		TokenCounter: tokenCounter,
 	}
 
-	msgs := []M{
-		smakeSystemMsg[M]("System prompt"),
-		smakeUserMsg[M]("Hello, can you help me with something?"),
-		smakeAssistantMsg[M]("Of course! I would be happy to help you with anything."),
-		smakeUserMsg[M]("Tell me about Go generics"),
+	msgs := []adk.Message{
+		smakeSystemMsg[adk.Message]("System prompt"),
+		smakeUserMsg[adk.Message]("Hello, can you help me with something?"),
+		smakeAssistantMsg[adk.Message]("Of course! I would be happy to help you with anything."),
+		smakeUserMsg[adk.Message]("Tell me about Go generics"),
 	}
 
-	output, err := TypedSummarizeMessages(ctx, cfg, msgs)
+	output, err := SummarizeMessages(ctx, cfg, msgs)
 	require.NoError(t, err)
 	require.NotNil(t, output)
 
@@ -378,5 +377,5 @@ func testTypedSummarizeMessages[M adk.MessageType](t *testing.T) {
 		"should have finalized messages")
 
 	// ModelResponse should be the raw summary
-	assert.Equal(t, summaryText, getTextContent(output.ModelResponse))
+	assert.Equal(t, summaryText, getMsgTextContent(output.ModelResponse))
 }

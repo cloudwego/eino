@@ -804,29 +804,53 @@ func TestSetToolResultContent_MediaBlocks(t *testing.T) {
 
 func TestAgenticURLToMPC(t *testing.T) {
 	t.Run("non-empty URL", func(t *testing.T) {
-		mpc := agenticURLToMPC("https://example.com/file.pdf", "application/pdf")
-		require.NotNil(t, mpc.URL)
-		assert.Equal(t, "https://example.com/file.pdf", *mpc.URL)
-		assert.Equal(t, "application/pdf", mpc.MIMEType)
+		url := schema.FunctionToolResult{
+			Content: []*schema.FunctionToolResultContentBlock{
+				{Type: schema.FunctionToolResultContentBlockTypeFile, File: &schema.UserInputFile{URL: "https://example.com/file.pdf", MIMEType: "application/pdf"}},
+			},
+		}
+		parts := url.ToToolOutputParts()
+		require.Len(t, parts, 1)
+		require.NotNil(t, parts[0].File)
+		require.NotNil(t, parts[0].File.URL)
+		assert.Equal(t, "https://example.com/file.pdf", *parts[0].File.URL)
+		assert.Equal(t, "application/pdf", parts[0].File.MIMEType)
 	})
 
 	t.Run("empty URL", func(t *testing.T) {
-		mpc := agenticURLToMPC("", "text/plain")
-		assert.Nil(t, mpc.URL)
-		assert.Equal(t, "text/plain", mpc.MIMEType)
+		url := schema.FunctionToolResult{
+			Content: []*schema.FunctionToolResultContentBlock{
+				{Type: schema.FunctionToolResultContentBlockTypeFile, File: &schema.UserInputFile{URL: "", MIMEType: "text/plain"}},
+			},
+		}
+		parts := url.ToToolOutputParts()
+		require.Len(t, parts, 1)
+		require.NotNil(t, parts[0].File)
+		assert.Nil(t, parts[0].File.URL)
+		assert.Equal(t, "text/plain", parts[0].File.MIMEType)
 	})
 }
 
 func TestMpcURLToString(t *testing.T) {
 	t.Run("non-nil URL", func(t *testing.T) {
-		url := "https://example.com"
-		result := mpcURLToString(&url)
-		assert.Equal(t, "https://example.com", result)
+		urlStr := "https://example.com"
+		tr := schema.FunctionToolResult{}
+		tr.SetFromToolOutputParts([]schema.ToolOutputPart{
+			{Type: schema.ToolPartTypeFile, File: &schema.ToolOutputFile{MessagePartCommon: schema.MessagePartCommon{URL: &urlStr, MIMEType: "text/plain"}}},
+		})
+		require.Len(t, tr.Content, 1)
+		require.NotNil(t, tr.Content[0].File)
+		assert.Equal(t, "https://example.com", tr.Content[0].File.URL)
 	})
 
 	t.Run("nil URL", func(t *testing.T) {
-		result := mpcURLToString(nil)
-		assert.Equal(t, "", result)
+		tr := schema.FunctionToolResult{}
+		tr.SetFromToolOutputParts([]schema.ToolOutputPart{
+			{Type: schema.ToolPartTypeFile, File: &schema.ToolOutputFile{MessagePartCommon: schema.MessagePartCommon{URL: nil, MIMEType: "text/plain"}}},
+		})
+		require.Len(t, tr.Content, 1)
+		require.NotNil(t, tr.Content[0].File)
+		assert.Equal(t, "", tr.Content[0].File.URL)
 	})
 }
 

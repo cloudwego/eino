@@ -315,14 +315,14 @@ type TypedSummarizeOutput[M adk.MessageType] struct {
 // SummarizeOutput is a backward-compatible alias for TypedSummarizeOutput specialized with *schema.Message.
 type SummarizeOutput = TypedSummarizeOutput[*schema.Message]
 
-// TypedSummarizeMessages performs synchronous summarization of the given messages.
+// SummarizeMessages performs synchronous summarization of the given messages.
 // EmitInternalEvents and Trigger are not supported and will return an error if set.
 //
 // Deprecated: Use the summarization middleware (created via New) within a dedicated summarization
 // agent instead. In practice, summarization often requires preprocessing by other middlewares
 // (e.g., message reduction, tool call patching), which is naturally supported by composing
 // middlewares in an agent pipeline.
-func TypedSummarizeMessages[M adk.MessageType](ctx context.Context, cfg *TypedConfig[M], messages []M) (*TypedSummarizeOutput[M], error) {
+func SummarizeMessages(ctx context.Context, cfg *Config, messages []adk.Message) (*SummarizeOutput, error) {
 	if cfg.EmitInternalEvents {
 		return nil, fmt.Errorf("emitInternalEvents is not supported in synchronous summarization")
 	}
@@ -333,7 +333,7 @@ func TypedSummarizeMessages[M adk.MessageType](ctx context.Context, cfg *TypedCo
 		return nil, err
 	}
 
-	m := &typedMiddleware[M]{cfg: cfg}
+	m := &typedMiddleware[adk.Message]{cfg: cfg}
 
 	rawSummary, modelInput, err := m.summarize(ctx, messages)
 	if err != nil {
@@ -348,23 +348,17 @@ func TypedSummarizeMessages[M adk.MessageType](ctx context.Context, cfg *TypedCo
 	}
 
 	if m.cfg.Callback != nil {
-		beforeState := adk.TypedChatModelAgentState[M]{Messages: messages}
-		afterState := adk.TypedChatModelAgentState[M]{Messages: finalMsgs}
+		beforeState := adk.TypedChatModelAgentState[adk.Message]{Messages: messages}
+		afterState := adk.TypedChatModelAgentState[adk.Message]{Messages: finalMsgs}
 		if err = m.cfg.Callback(ctx, beforeState, afterState); err != nil {
 			return nil, err
 		}
 	}
 
-	return &TypedSummarizeOutput[M]{
+	return &SummarizeOutput{
 		FinalizedMessages: finalMsgs,
 		ModelResponse:     rawSummary,
 	}, nil
-}
-
-// SummarizeMessages performs synchronous summarization of the given messages.
-// EmitInternalEvents and Trigger are not supported and will return an error if set.
-func SummarizeMessages(ctx context.Context, cfg *Config, messages []adk.Message) (*SummarizeOutput, error) {
-	return TypedSummarizeMessages(ctx, cfg, messages)
 }
 
 func (m *typedMiddleware[M]) BeforeModelRewriteState(ctx context.Context, state *adk.TypedChatModelAgentState[M],
@@ -438,7 +432,7 @@ func (m *typedMiddleware[M]) finalizeSummary(ctx context.Context, originalMsgs [
 
 	systemMsgs, contextMsgs := m.splitSystemAndContextMsgs(originalMsgs)
 
-	rawContent := getTextContent(rawSummary)
+	rawContent := getMsgTextContent(rawSummary)
 	summary := newTypedSummaryMessage[M](rawContent)
 
 	processed, err := m.postProcessSummary(ctx, contextMsgs, summary)
@@ -529,7 +523,7 @@ func (m *typedMiddleware[M]) countTokens(ctx context.Context, input *TypedTokenC
 func defaultTypedTokenCounter[M adk.MessageType](_ context.Context, input *TypedTokenCounterInput[M]) (int, error) {
 	var totalTokens int
 	for _, msg := range input.Messages {
-		text := getTextContent(msg)
+		text := getMsgTextContent(msg)
 		totalTokens += estimateTokenCount(text)
 	}
 
@@ -710,7 +704,7 @@ func (m *typedMiddleware[M]) getModelInstructions() (M, M) {
 }
 
 func (m *typedMiddleware[M]) postProcessSummary(ctx context.Context, contextMsgs []M, summary M) (M, error) {
-	content := getTextContent(summary)
+	content := getMsgTextContent(summary)
 
 	if m.cfg.PreserveUserMessages == nil || m.cfg.PreserveUserMessages.Enabled {
 		maxUserMsgTokens := m.getUserMessageContextTokens()
@@ -798,7 +792,7 @@ func (m *typedMiddleware[M]) replaceUserMessagesInSummary(ctx context.Context, c
 
 	var msgLines []string
 	for _, msg := range selected {
-		text := getTextContent(msg)
+		text := getMsgTextContent(msg)
 		if text != "" {
 			msgLines = append(msgLines, "    - "+text)
 		}
@@ -1081,7 +1075,7 @@ func isUserRole[M adk.MessageType](msg M) bool {
 	panic("unreachable")
 }
 
-func getTextContent[M adk.MessageType](msg M) string {
+func getMsgTextContent[M adk.MessageType](msg M) string {
 	switch m := any(msg).(type) {
 	case *schema.Message:
 		if m == nil {
@@ -1221,7 +1215,7 @@ func defaultTypedTrimUserMessage[M adk.MessageType](msg M, remainingTokens int) 
 		return zero
 	}
 
-	textContent := getTextContent(msg)
+	textContent := getMsgTextContent(msg)
 	if len(textContent) == 0 {
 		return zero
 	}

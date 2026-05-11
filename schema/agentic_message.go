@@ -2101,6 +2101,108 @@ func (f *FunctionToolResult) String() string {
 	return sb.String()
 }
 
+// ToToolOutputParts converts the Content field to a slice of ToolOutputPart.
+func (f *FunctionToolResult) ToToolOutputParts() []ToolOutputPart {
+	var parts []ToolOutputPart
+	for _, block := range f.Content {
+		if block == nil {
+			continue
+		}
+		if block.Text != nil {
+			parts = append(parts, ToolOutputPart{Type: ToolPartTypeText, Text: block.Text.Text})
+		} else if block.Image != nil {
+			parts = append(parts, ToolOutputPart{
+				Type: ToolPartTypeImage,
+				Image: &ToolOutputImage{
+					MessagePartCommon: MessagePartCommon{URL: stringPtr(block.Image.URL), MIMEType: block.Image.MIMEType},
+				},
+			})
+		} else if block.Audio != nil {
+			parts = append(parts, ToolOutputPart{
+				Type: ToolPartTypeAudio,
+				Audio: &ToolOutputAudio{
+					MessagePartCommon: MessagePartCommon{URL: stringPtr(block.Audio.URL), MIMEType: block.Audio.MIMEType},
+				},
+			})
+		} else if block.Video != nil {
+			parts = append(parts, ToolOutputPart{
+				Type: ToolPartTypeVideo,
+				Video: &ToolOutputVideo{
+					MessagePartCommon: MessagePartCommon{URL: stringPtr(block.Video.URL), MIMEType: block.Video.MIMEType},
+				},
+			})
+		} else if block.File != nil {
+			parts = append(parts, ToolOutputPart{
+				Type: ToolPartTypeFile,
+				File: &ToolOutputFile{
+					MessagePartCommon: MessagePartCommon{URL: stringPtr(block.File.URL), MIMEType: block.File.MIMEType},
+				},
+			})
+		}
+	}
+	return parts
+}
+
+// SetFromToolOutputParts converts a ToolOutputPart slice back to
+// FunctionToolResultContentBlock slice and sets f.Content.
+func (f *FunctionToolResult) SetFromToolOutputParts(parts []ToolOutputPart) {
+	var newBlocks []*FunctionToolResultContentBlock
+	for _, part := range parts {
+		switch part.Type {
+		case ToolPartTypeText:
+			newBlocks = append(newBlocks, &FunctionToolResultContentBlock{
+				Type: FunctionToolResultContentBlockTypeText,
+				Text: &UserInputText{Text: part.Text},
+			})
+		case ToolPartTypeImage:
+			if part.Image != nil {
+				newBlocks = append(newBlocks, &FunctionToolResultContentBlock{
+					Type:  FunctionToolResultContentBlockTypeImage,
+					Image: &UserInputImage{URL: mpcURLStr(part.Image.URL), MIMEType: part.Image.MIMEType},
+				})
+			}
+		case ToolPartTypeAudio:
+			if part.Audio != nil {
+				newBlocks = append(newBlocks, &FunctionToolResultContentBlock{
+					Type:  FunctionToolResultContentBlockTypeAudio,
+					Audio: &UserInputAudio{URL: mpcURLStr(part.Audio.URL), MIMEType: part.Audio.MIMEType},
+				})
+			}
+		case ToolPartTypeVideo:
+			if part.Video != nil {
+				newBlocks = append(newBlocks, &FunctionToolResultContentBlock{
+					Type:  FunctionToolResultContentBlockTypeVideo,
+					Video: &UserInputVideo{URL: mpcURLStr(part.Video.URL), MIMEType: part.Video.MIMEType},
+				})
+			}
+		case ToolPartTypeFile:
+			if part.File != nil {
+				newBlocks = append(newBlocks, &FunctionToolResultContentBlock{
+					Type: FunctionToolResultContentBlockTypeFile,
+					File: &UserInputFile{URL: mpcURLStr(part.File.URL), MIMEType: part.File.MIMEType},
+				})
+			}
+		}
+	}
+	f.Content = newBlocks
+}
+
+// stringPtr returns a pointer to s, or nil if s is empty.
+func stringPtr(s string) *string {
+	if s == "" {
+		return nil
+	}
+	return &s
+}
+
+// mpcURLStr safely dereferences a *string URL, returning "" if nil.
+func mpcURLStr(url *string) string {
+	if url == nil {
+		return ""
+	}
+	return *url
+}
+
 // String returns the string representation of ServerToolCall.
 func (s *ServerToolCall) String() string {
 	sb := &strings.Builder{}

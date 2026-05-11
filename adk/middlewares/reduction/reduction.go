@@ -372,31 +372,35 @@ func getDefaultTokenCounter[M adk.MessageType]() func(ctx context.Context, msgs 
 		}).(func(context.Context, []M, []*schema.ToolInfo) (int64, error))
 	case *schema.AgenticMessage:
 		return any(func(ctx context.Context, msgs []*schema.AgenticMessage, tools []*schema.ToolInfo) (int64, error) {
-			var tokens int64
-			for _, msg := range msgs {
-				if msg == nil {
-					continue
-				}
-				tokens += int64(len(msg.Role)) / 4
-				for _, block := range msg.ContentBlocks {
-					if block != nil {
-						tokens += int64(len(block.String())) / 4
-					}
-				}
-			}
-			for _, tl := range tools {
-				tl_ := *tl
-				tl_.Extra = nil
-				text, err := sonic.MarshalString(tl_)
-				if err != nil {
-					return 0, fmt.Errorf("failed to marshal tool info: %w", err)
-				}
-				tokens += int64(len(text) / 4)
-			}
-			return tokens, nil
+			return defaultAgenticTokenCounter(ctx, msgs, tools)
 		}).(func(context.Context, []M, []*schema.ToolInfo) (int64, error))
 	}
 	panic("unreachable")
+}
+
+func defaultAgenticTokenCounter(_ context.Context, msgs []*schema.AgenticMessage, tools []*schema.ToolInfo) (int64, error) {
+	var tokens int64
+	for _, msg := range msgs {
+		if msg == nil {
+			continue
+		}
+		tokens += int64(len(msg.Role)) / 4
+		for _, block := range msg.ContentBlocks {
+			if block != nil {
+				tokens += int64(len(block.String())) / 4
+			}
+		}
+	}
+	for _, tl := range tools {
+		tl_ := *tl
+		tl_.Extra = nil
+		text, err := sonic.MarshalString(tl_)
+		if err != nil {
+			return 0, fmt.Errorf("failed to marshal tool info: %w", err)
+		}
+		tokens += int64(len(text) / 4)
+	}
+	return tokens, nil
 }
 
 func (t *typedToolReductionMiddleware[M]) getToolConfig(toolName string, sc scene) *ToolReductionConfig {
@@ -1051,51 +1055,11 @@ func toolResultFromMsgGeneric[M adk.MessageType](msg M) (result *schema.ToolResu
 			if block == nil || block.Type != schema.ContentBlockTypeFunctionToolResult || block.FunctionToolResult == nil {
 				continue
 			}
-			for _, rb := range block.FunctionToolResult.Content {
-				if rb == nil {
-					continue
-				}
-				if rb.Text != nil {
-					parts = append(parts, schema.ToolOutputPart{
-						Type: schema.ToolPartTypeText,
-						Text: rb.Text.Text,
-					})
-				} else if rb.Image != nil {
-					parts = append(parts, schema.ToolOutputPart{
-						Type: schema.ToolPartTypeImage,
-						Image: &schema.ToolOutputImage{
-							MessagePartCommon: agenticURLToMPC(rb.Image.URL, rb.Image.MIMEType),
-						},
-					})
-				} else if rb.Audio != nil {
-					parts = append(parts, schema.ToolOutputPart{
-						Type: schema.ToolPartTypeAudio,
-						Audio: &schema.ToolOutputAudio{
-							MessagePartCommon: agenticURLToMPC(rb.Audio.URL, rb.Audio.MIMEType),
-						},
-					})
-				} else if rb.Video != nil {
-					parts = append(parts, schema.ToolOutputPart{
-						Type: schema.ToolPartTypeVideo,
-						Video: &schema.ToolOutputVideo{
-							MessagePartCommon: agenticURLToMPC(rb.Video.URL, rb.Video.MIMEType),
-						},
-					})
-				} else if rb.File != nil {
-					parts = append(parts, schema.ToolOutputPart{
-						Type: schema.ToolPartTypeFile,
-						File: &schema.ToolOutputFile{
-							MessagePartCommon: agenticURLToMPC(rb.File.URL, rb.File.MIMEType),
-						},
-					})
-				}
-			}
+			parts = append(parts, block.FunctionToolResult.ToToolOutputParts()...)
 		}
 		if len(parts) == 0 {
 			return &schema.ToolResult{Parts: []schema.ToolOutputPart{{Type: schema.ToolPartTypeText, Text: ""}}}, true, nil
 		}
-		// fromContent=true when there's exactly one text part (simple case),
-		// false when there are multiple parts (multi-part).
 		isSimple := len(parts) == 1 && parts[0].Type == schema.ToolPartTypeText
 		return &schema.ToolResult{Parts: parts}, isSimple, nil
 	}
@@ -1119,83 +1083,14 @@ func setToolResultContent[M adk.MessageType](msg M, toolResult *schema.ToolResul
 			}
 		}
 	case *schema.AgenticMessage:
-		// Find the first FunctionToolResult block and replace its Content.
 		for _, block := range m.ContentBlocks {
 			if block == nil || block.Type != schema.ContentBlockTypeFunctionToolResult || block.FunctionToolResult == nil {
 				continue
 			}
-			var newBlocks []*schema.FunctionToolResultContentBlock
-			for _, part := range toolResult.Parts {
-				switch part.Type {
-				case schema.ToolPartTypeText:
-					newBlocks = append(newBlocks, &schema.FunctionToolResultContentBlock{
-						Type: schema.FunctionToolResultContentBlockTypeText,
-						Text: &schema.UserInputText{Text: part.Text},
-					})
-				case schema.ToolPartTypeImage:
-					if part.Image != nil {
-						newBlocks = append(newBlocks, &schema.FunctionToolResultContentBlock{
-							Type: schema.FunctionToolResultContentBlockTypeImage,
-							Image: &schema.UserInputImage{
-								URL:      mpcURLToString(part.Image.URL),
-								MIMEType: part.Image.MIMEType,
-							},
-						})
-					}
-				case schema.ToolPartTypeAudio:
-					if part.Audio != nil {
-						newBlocks = append(newBlocks, &schema.FunctionToolResultContentBlock{
-							Type: schema.FunctionToolResultContentBlockTypeAudio,
-							Audio: &schema.UserInputAudio{
-								URL:      mpcURLToString(part.Audio.URL),
-								MIMEType: part.Audio.MIMEType,
-							},
-						})
-					}
-				case schema.ToolPartTypeVideo:
-					if part.Video != nil {
-						newBlocks = append(newBlocks, &schema.FunctionToolResultContentBlock{
-							Type: schema.FunctionToolResultContentBlockTypeVideo,
-							Video: &schema.UserInputVideo{
-								URL:      mpcURLToString(part.Video.URL),
-								MIMEType: part.Video.MIMEType,
-							},
-						})
-					}
-				case schema.ToolPartTypeFile:
-					if part.File != nil {
-						newBlocks = append(newBlocks, &schema.FunctionToolResultContentBlock{
-							Type: schema.FunctionToolResultContentBlockTypeFile,
-							File: &schema.UserInputFile{
-								URL:      mpcURLToString(part.File.URL),
-								MIMEType: part.File.MIMEType,
-							},
-						})
-					}
-				}
-			}
-			block.FunctionToolResult.Content = newBlocks
+			block.FunctionToolResult.SetFromToolOutputParts(toolResult.Parts)
 			return
 		}
 	}
-}
-
-// agenticURLToMPC converts an agentic-style URL string and MIME type
-// to a MessagePartCommon (which uses *string for URL).
-func agenticURLToMPC(url, mimeType string) schema.MessagePartCommon {
-	mpc := schema.MessagePartCommon{MIMEType: mimeType}
-	if url != "" {
-		mpc.URL = &url
-	}
-	return mpc
-}
-
-// mpcURLToString converts a MessagePartCommon URL (*string) to a plain string.
-func mpcURLToString(url *string) string {
-	if url == nil {
-		return ""
-	}
-	return *url
 }
 
 // copyMessagesGeneric deep-copies a slice of messages.
