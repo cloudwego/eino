@@ -25,6 +25,7 @@ import (
 
 	"github.com/cloudwego/eino/adk"
 	"github.com/cloudwego/eino/components/tool"
+	"github.com/cloudwego/eino/schema"
 )
 
 func TestNew(t *testing.T) {
@@ -55,7 +56,7 @@ func TestMiddlewareBeforeAgent(t *testing.T) {
 	m, err := New(ctx, &Config{Backend: backend, BaseDir: baseDir})
 	assert.NoError(t, err)
 
-	mw := m.(*middleware)
+	mw := m.(*typedMiddleware[*schema.Message])
 
 	ctx, runCtx, err := mw.BeforeAgent(ctx, nil)
 	assert.NoError(t, err)
@@ -121,4 +122,16 @@ func TestIntegration(t *testing.T) {
 	result, err = listTool.InvokableRun(ctx, `{}`)
 	assert.NoError(t, err)
 	assert.Contains(t, result, "#1 [completed] Task 1")
+}
+
+func TestNewTypedAgenticMessage(t *testing.T) {
+	ctx := context.Background()
+	mw, err := NewTyped[*schema.AgenticMessage](ctx, &Config{
+		Backend: newInMemoryBackend(),
+		BaseDir: "/tmp/tasks",
+	})
+	assert.NoError(t, err)
+	assert.NotNil(t, mw)
+
+	var _ adk.TypedChatModelAgentMiddleware[*schema.AgenticMessage] = mw
 }

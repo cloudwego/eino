@@ -1434,11 +1434,13 @@ func TestWithCancel_CancelImmediate_StreamableToolAborted(t *testing.T) {
 		t.Fatal("tool stream event was not received by the iterator")
 	}
 
-	// Issue cancel BEFORE unblocking the tool. This ensures the graph
-	// interrupt is queued before the tool can send remaining chunks
-	// and complete normally.
+	// Issue cancel while the tool goroutine is blocked on gate.
+	// wrapStreamWithCancelMonitoring detects immediateChan and sends
+	// ErrStreamCanceled to the consumer side. We do NOT close gate here —
+	// keeping the tool goroutine blocked ensures the graph interrupt (timeout=0)
+	// wins the race against normal completion. Close gate in defer for cleanup.
+	defer close(gate)
 	handle, _ := cancelFn()
-	close(gate) // unblock the tool so the cancel can propagate
 	cancelErr := handle.Wait()
 	assert.NoError(t, cancelErr)
 

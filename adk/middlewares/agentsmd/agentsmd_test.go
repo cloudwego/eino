@@ -1340,3 +1340,22 @@ func TestMiddleware_ReinsertAfterRemoval(t *testing.T) {
 		t.Fatalf("expected agentmd content re-inserted, got %q", state.Messages[0].Content)
 	}
 }
+
+func TestNewTypedAgenticMessage(t *testing.T) {
+	ctx := context.Background()
+	b := newMemBackend()
+	b.set("/agent.md", "You are a helpful assistant.")
+
+	mw, err := NewTyped[*schema.AgenticMessage](ctx, &Config{
+		Backend:       b,
+		AgentsMDFiles: []string{"/agent.md"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if mw == nil {
+		t.Fatal("expected non-nil middleware")
+	}
+
+	var _ adk.TypedChatModelAgentMiddleware[*schema.AgenticMessage] = mw
+}

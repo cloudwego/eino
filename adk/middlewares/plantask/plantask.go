@@ -22,6 +22,7 @@ import (
 	"sync"
 
 	"github.com/cloudwego/eino/adk"
+	"github.com/cloudwego/eino/schema"
 )
 
 // Config is the configuration for the tool search middleware.
@@ -30,10 +31,12 @@ type Config struct {
 	BaseDir string
 }
 
-// New creates a new plantask middleware that provides task management tools for agents.
+// NewTyped creates a new plantask middleware that provides task management tools for agents.
 // It adds TaskCreate, TaskGet, TaskUpdate, and TaskList tools to the agent's tool set,
 // allowing agents to create and manage structured task lists during coding sessions.
-func New(ctx context.Context, config *Config) (adk.ChatModelAgentMiddleware, error) {
+//
+// This is the generic constructor that supports both *schema.Message and *schema.AgenticMessage.
+func NewTyped[M adk.MessageType](_ context.Context, config *Config) (adk.TypedChatModelAgentMiddleware[M], error) {
 	if config == nil {
 		return nil, fmt.Errorf("config is required")
 	}
@@ -44,16 +47,23 @@ func New(ctx context.Context, config *Config) (adk.ChatModelAgentMiddleware, err
 		return nil, fmt.Errorf("baseDir is required")
 	}
 
-	return &middleware{backend: config.Backend, baseDir: config.BaseDir}, nil
+	return &typedMiddleware[M]{backend: config.Backend, baseDir: config.BaseDir}, nil
 }
 
-type middleware struct {
-	adk.BaseChatModelAgentMiddleware
+// New creates a new plantask middleware that provides task management tools for agents.
+// It adds TaskCreate, TaskGet, TaskUpdate, and TaskList tools to the agent's tool set,
+// allowing agents to create and manage structured task lists during coding sessions.
+func New(ctx context.Context, config *Config) (adk.ChatModelAgentMiddleware, error) {
+	return NewTyped[*schema.Message](ctx, config)
+}
+
+type typedMiddleware[M adk.MessageType] struct {
+	*adk.TypedBaseChatModelAgentMiddleware[M]
 	backend Backend
 	baseDir string
 }
 
-func (m *middleware) BeforeAgent(ctx context.Context, runCtx *adk.ChatModelAgentContext) (context.Context, *adk.ChatModelAgentContext, error) {
+func (m *typedMiddleware[M]) BeforeAgent(ctx context.Context, runCtx *adk.ChatModelAgentContext) (context.Context, *adk.ChatModelAgentContext, error) {
 	if runCtx == nil {
 		return ctx, runCtx, nil
 	}

@@ -35,7 +35,7 @@ import (
 	"github.com/cloudwego/eino/schema"
 )
 
-// Config is the configuration for tool reduction middleware.
+// TypedConfig is the configuration for tool reduction middleware.
 // This middleware manages tool outputs in two phases to optimize context usage:
 //
 //  1. Truncation Phase:
@@ -51,7 +51,7 @@ import (
 //     ClearRetentionSuffixLimit, it offloads tool call arguments and results
 //     to the Backend to reduce token usage, keeping the conversation within limits while retaining access to the
 //     important information. After all, ClearPostProcess will be called, which you could save or notify current state.
-type Config struct {
+type TypedConfig[M adk.MessageType] struct {
 	// Backend is the storage backend where offloaded content will be saved.
 	// Required when truncation is enabled (SkipTruncation is false).
 	// Optional for clear-only usage. If Backend is nil, clear will still replace tool outputs with placeholders
@@ -98,7 +98,7 @@ type Config struct {
 	// TokenCounter is used to count the number of tokens in the conversation messages.
 	// It is used to determine when to trigger clearing based on token usage, and token usage after clearing.
 	// Required.
-	TokenCounter func(ctx context.Context, msg []adk.Message, tools []*schema.ToolInfo) (int64, error)
+	TokenCounter func(ctx context.Context, msg []M, tools []*schema.ToolInfo) (int64, error)
 
 	// MaxTokensForClear is the maximum number of tokens allowed in the conversation before clearing is attempted.
 	// Required. Default is 160000.
@@ -126,17 +126,20 @@ type Config struct {
 	// Returned messages will replace the original tool call and tool messages and will count towards ClearAtLeastTokens.
 	// If returned messagesAfterRewrite is nil, tool call and tool messages will be removed.
 	// Optional. Default is nil, which means no rewrite.
-	ClearMessageRewriter func(ctx context.Context, toolCallMsg adk.Message, toolResponseMsgs []adk.Message) (messagesAfterRewrite []adk.Message, err error)
+	ClearMessageRewriter func(ctx context.Context, toolCallMsg M, toolResponseMsgs []M) (messagesAfterRewrite []M, err error)
 
 	// ClearPostProcess is clear post process handler.
 	// Optional.
-	ClearPostProcess func(ctx context.Context, state *adk.ChatModelAgentState) context.Context
+	ClearPostProcess func(ctx context.Context, state *adk.TypedChatModelAgentState[M]) context.Context
 
 	// ToolConfig is the specific configuration that applies to tools by name.
 	// This configuration takes precedence over GeneralConfig for the specified tools.
 	// Optional.
 	ToolConfig map[string]*ToolReductionConfig
 }
+
+// Config is the backward-compatible alias for TypedConfig with *schema.Message.
+type Config = TypedConfig[*schema.Message]
 
 type ToolReductionConfig struct {
 	// Backend is the storage backend where offloaded content will be saved.
@@ -225,8 +228,8 @@ type ClearResult struct {
 	OffloadContent string
 }
 
-func (t *Config) copyAndFillDefaults() (*Config, error) {
-	cfg := &Config{
+func (t *TypedConfig[M]) copyAndFillDefaults() (*TypedConfig[M], error) {
+	cfg := &TypedConfig[M]{
 		Backend:                   t.Backend,
 		SkipTruncation:            t.SkipTruncation,
 		SkipClear:                 t.SkipClear,
@@ -245,7 +248,7 @@ func (t *Config) copyAndFillDefaults() (*Config, error) {
 		ClearPostProcess:          t.ClearPostProcess,
 	}
 	if cfg.TokenCounter == nil {
-		cfg.TokenCounter = defaultTokenCounter
+		cfg.TokenCounter = getDefaultTokenCounter[M]()
 	}
 	if cfg.ClearRetentionSuffixLimit == 0 {
 		cfg.ClearRetentionSuffixLimit = 1
@@ -297,8 +300,11 @@ func (t *Config) copyAndFillDefaults() (*Config, error) {
 	return cfg, nil
 }
 
-// New creates tool reduction middleware from config
-func New(_ context.Context, config *Config) (adk.ChatModelAgentMiddleware, error) {
+// NewTyped creates a generic tool reduction middleware from config.
+//
+// This is the generic constructor that supports both *schema.Message and *schema.AgenticMessage.
+// Both message types support the full truncation and clear phases.
+func NewTyped[M adk.MessageType](_ context.Context, config *TypedConfig[M]) (adk.TypedChatModelAgentMiddleware[M], error) {
 	var err error
 	if config == nil {
 		return nil, fmt.Errorf("config must not be nil")
@@ -331,7 +337,7 @@ func New(_ context.Context, config *Config) (adk.ChatModelAgentMiddleware, error
 		excludeClearTools[toolName] = struct{}{}
 	}
 
-	return &toolReductionMiddleware{
+	return &typedToolReductionMiddleware[M]{
 		config:            config,
 		defaultConfig:     defaultReductionConfig,
 		excludeTruncTools: excludeTruncTools,
@@ -339,17 +345,65 @@ func New(_ context.Context, config *Config) (adk.ChatModelAgentMiddleware, error
 	}, nil
 }
 
-type toolReductionMiddleware struct {
-	adk.BaseChatModelAgentMiddleware
+// New creates tool reduction middleware from config
+func New(ctx context.Context, config *Config) (adk.ChatModelAgentMiddleware, error) {
+	return NewTyped(ctx, config)
+}
 
-	config        *Config
+type typedToolReductionMiddleware[M adk.MessageType] struct {
+	*adk.TypedBaseChatModelAgentMiddleware[M]
+
+	config        *TypedConfig[M]
 	defaultConfig *ToolReductionConfig
 
 	excludeTruncTools map[string]struct{}
 	excludeClearTools map[string]struct{}
 }
 
-func (t *toolReductionMiddleware) getToolConfig(toolName string, sc scene) *ToolReductionConfig {
+// getDefaultTokenCounter returns a default token counter function that operates on []M.
+// For *schema.Message it delegates to defaultTokenCounter.
+// For *schema.AgenticMessage it uses a simple character-based estimation.
+func getDefaultTokenCounter[M adk.MessageType]() func(ctx context.Context, msgs []M, tools []*schema.ToolInfo) (int64, error) {
+	var zero M
+	switch any(zero).(type) {
+	case *schema.Message:
+		return any(func(ctx context.Context, msgs []*schema.Message, tools []*schema.ToolInfo) (int64, error) {
+			return defaultTokenCounter(ctx, msgs, tools)
+		}).(func(context.Context, []M, []*schema.ToolInfo) (int64, error))
+	case *schema.AgenticMessage:
+		return any(func(ctx context.Context, msgs []*schema.AgenticMessage, tools []*schema.ToolInfo) (int64, error) {
+			return defaultAgenticTokenCounter(ctx, msgs, tools)
+		}).(func(context.Context, []M, []*schema.ToolInfo) (int64, error))
+	}
+	panic("unreachable")
+}
+
+func defaultAgenticTokenCounter(_ context.Context, msgs []*schema.AgenticMessage, tools []*schema.ToolInfo) (int64, error) {
+	var tokens int64
+	for _, msg := range msgs {
+		if msg == nil {
+			continue
+		}
+		tokens += int64(len(msg.Role)) / 4
+		for _, block := range msg.ContentBlocks {
+			if block != nil {
+				tokens += int64(len(block.String())) / 4
+			}
+		}
+	}
+	for _, tl := range tools {
+		tl_ := *tl
+		tl_.Extra = nil
+		text, err := sonic.MarshalString(tl_)
+		if err != nil {
+			return 0, fmt.Errorf("failed to marshal tool info: %w", err)
+		}
+		tokens += int64(len(text) / 4)
+	}
+	return tokens, nil
+}
+
+func (t *typedToolReductionMiddleware[M]) getToolConfig(toolName string, sc scene) *ToolReductionConfig {
 	if t.config.ToolConfig != nil {
 		if cfg, ok := t.config.ToolConfig[toolName]; ok {
 			if (sc == sceneTruncation && !cfg.SkipTruncation && cfg.TruncHandler == nil) ||
@@ -362,7 +416,7 @@ func (t *toolReductionMiddleware) getToolConfig(toolName string, sc scene) *Tool
 	return t.defaultConfig
 }
 
-func (t *toolReductionMiddleware) WrapInvokableToolCall(_ context.Context, endpoint adk.InvokableToolCallEndpoint, tCtx *adk.ToolContext) (adk.InvokableToolCallEndpoint, error) {
+func (t *typedToolReductionMiddleware[M]) WrapInvokableToolCall(_ context.Context, endpoint adk.InvokableToolCallEndpoint, tCtx *adk.ToolContext) (adk.InvokableToolCallEndpoint, error) {
 	cfg := t.getToolConfig(tCtx.Name, sceneTruncation)
 	if cfg == nil || cfg.TruncHandler == nil {
 		return endpoint, nil
@@ -409,7 +463,7 @@ func (t *toolReductionMiddleware) WrapInvokableToolCall(_ context.Context, endpo
 	}, nil
 }
 
-func (t *toolReductionMiddleware) WrapStreamableToolCall(_ context.Context, endpoint adk.StreamableToolCallEndpoint, tCtx *adk.ToolContext) (adk.StreamableToolCallEndpoint, error) {
+func (t *typedToolReductionMiddleware[M]) WrapStreamableToolCall(_ context.Context, endpoint adk.StreamableToolCallEndpoint, tCtx *adk.ToolContext) (adk.StreamableToolCallEndpoint, error) {
 	cfg := t.getToolConfig(tCtx.Name, sceneTruncation)
 	if cfg == nil || cfg.TruncHandler == nil {
 		return endpoint, nil
@@ -469,7 +523,7 @@ func (t *toolReductionMiddleware) WrapStreamableToolCall(_ context.Context, endp
 	}, nil
 }
 
-func (t *toolReductionMiddleware) WrapEnhancedInvokableToolCall(ctx context.Context, endpoint adk.EnhancedInvokableToolCallEndpoint, tCtx *adk.ToolContext) (adk.EnhancedInvokableToolCallEndpoint, error) {
+func (t *typedToolReductionMiddleware[M]) WrapEnhancedInvokableToolCall(_ context.Context, endpoint adk.EnhancedInvokableToolCallEndpoint, tCtx *adk.ToolContext) (adk.EnhancedInvokableToolCallEndpoint, error) {
 	cfg := t.getToolConfig(tCtx.Name, sceneTruncation)
 	if cfg == nil || cfg.TruncHandler == nil {
 		return endpoint, nil
@@ -510,7 +564,7 @@ func (t *toolReductionMiddleware) WrapEnhancedInvokableToolCall(ctx context.Cont
 	}, nil
 }
 
-func (t *toolReductionMiddleware) WrapEnhancedStreamableToolCall(ctx context.Context, endpoint adk.EnhancedStreamableToolCallEndpoint, tCtx *adk.ToolContext) (adk.EnhancedStreamableToolCallEndpoint, error) {
+func (t *typedToolReductionMiddleware[M]) WrapEnhancedStreamableToolCall(_ context.Context, endpoint adk.EnhancedStreamableToolCallEndpoint, tCtx *adk.ToolContext) (adk.EnhancedStreamableToolCallEndpoint, error) {
 	cfg := t.getToolConfig(tCtx.Name, sceneTruncation)
 	if cfg == nil || cfg.TruncHandler == nil {
 		return endpoint, nil
@@ -560,8 +614,14 @@ func (t *toolReductionMiddleware) WrapEnhancedStreamableToolCall(ctx context.Con
 	}, nil
 }
 
-func (t *toolReductionMiddleware) BeforeModelRewriteState(ctx context.Context, state *adk.ChatModelAgentState, mc *adk.ModelContext) (
-	context.Context, *adk.ChatModelAgentState, error) {
+func (t *typedToolReductionMiddleware[M]) BeforeModelRewriteState(ctx context.Context, state *adk.TypedChatModelAgentState[M], mc *adk.TypedModelContext[M]) (
+	context.Context, *adk.TypedChatModelAgentState[M], error) {
+
+	return t.beforeModelRewriteStateGeneric(ctx, state, mc)
+}
+
+func (t *typedToolReductionMiddleware[M]) beforeModelRewriteStateGeneric(ctx context.Context, state *adk.TypedChatModelAgentState[M], _ *adk.TypedModelContext[M]) (
+	context.Context, *adk.TypedChatModelAgentState[M], error) {
 
 	var (
 		err             error
@@ -585,14 +645,14 @@ func (t *toolReductionMiddleware) BeforeModelRewriteState(ctx context.Context, s
 	)
 	for ; start < len(state.Messages); start++ {
 		msg := state.Messages[start]
-		if msg.Role == schema.Assistant && !getMsgClearedFlag(msg) {
+		if isAssistantMsg(msg) && !getMsgClearedFlagGeneric(msg) {
 			break
 		}
 	}
 	retention := t.config.ClearRetentionSuffixLimit
 	for ; retention > 0 && end > 0; end-- {
 		msg := state.Messages[end-1]
-		if msg.Role == schema.Assistant && len(msg.ToolCalls) > 0 {
+		if isAssistantMsg(msg) && hasToolCalls(msg) {
 			retention--
 			if retention == 0 {
 				end--
@@ -604,12 +664,12 @@ func (t *toolReductionMiddleware) BeforeModelRewriteState(ctx context.Context, s
 		return ctx, state, nil
 	}
 	var (
-		editTarget         []*schema.Message
+		editTarget         []M
 		clearAtLeastTokens = t.config.ClearAtLeastTokens
 		offloadStash       []*offloadStashItem
 	)
 
-	editTarget, end, err = t.applyClearRewrite(ctx, state, start, end, clearAtLeastTokens)
+	editTarget, end, err = t.applyClearRewriteGeneric(ctx, state, start, end, clearAtLeastTokens)
 	if err != nil {
 		return ctx, state, err
 	}
@@ -619,37 +679,38 @@ func (t *toolReductionMiddleware) BeforeModelRewriteState(ctx context.Context, s
 
 	for toolCallMsgIndex < end {
 		toolCallMsg := editTarget[toolCallMsgIndex]
-		if toolCallMsg.Role == schema.Assistant && len(toolCallMsg.ToolCalls) > 0 {
+		toolCalls := getToolCallsGeneric(toolCallMsg)
+		if isAssistantMsg(toolCallMsg) && len(toolCalls) > 0 {
 			toolMsgIndex := toolCallMsgIndex
-			for tooCallOffset, toolCall := range toolCallMsg.ToolCalls {
+			for _, tc := range toolCalls {
 				toolMsgIndex++
 				if toolMsgIndex >= end {
 					break
 				}
 				resultMsg := editTarget[toolMsgIndex]
-				if resultMsg.Role != schema.Tool { // unexpected
+				if !isToolResultMsg(resultMsg) { // unexpected
 					break
 				}
-				if _, found := t.excludeClearTools[toolCall.Function.Name]; found {
+				if _, found := t.excludeClearTools[tc.Name]; found {
 					continue
 				}
-				cfg := t.getToolConfig(toolCall.Function.Name, sceneClear)
+				cfg := t.getToolConfig(tc.Name, sceneClear)
 				if cfg == nil || cfg.ClearHandler == nil {
 					continue
 				}
 
-				toolResult, fromContent, toolResultErr := toolResultFromMessage(resultMsg)
+				toolResult, fromContent, toolResultErr := toolResultFromMsgGeneric(resultMsg)
 				if toolResultErr != nil {
 					return ctx, state, toolResultErr
 				}
 
 				td := &ToolDetail{
 					ToolContext: &adk.ToolContext{
-						Name:   toolCall.Function.Name,
-						CallID: toolCall.ID,
+						Name:   tc.Name,
+						CallID: tc.CallID,
 					},
 					ToolArgument: &schema.ToolArgument{
-						Text: toolCall.Function.Arguments,
+						Text: tc.Arguments,
 					},
 					ToolResult: toolResult,
 				}
@@ -681,22 +742,12 @@ func (t *toolReductionMiddleware) BeforeModelRewriteState(ctx context.Context, s
 					}
 				}
 
-				toolCallMsg.ToolCalls[tooCallOffset].Function.Arguments = offloadInfo.ToolArgument.Text
-				if fromContent {
-					if len(offloadInfo.ToolResult.Parts) > 0 {
-						resultMsg.Content = offloadInfo.ToolResult.Parts[0].Text
-					}
-				} else {
-					var convErr error
-					resultMsg.UserInputMultiContent, convErr = offloadInfo.ToolResult.ToMessageInputParts()
-					if convErr != nil {
-						return ctx, state, convErr
-					}
-				}
+				setToolCallArguments(toolCallMsg, tc.BlockIndex, offloadInfo.ToolArgument.Text)
+				setToolResultContent(resultMsg, offloadInfo.ToolResult, fromContent)
 			}
 
 			// set dedup flag
-			setMsgClearedFlag(toolCallMsg)
+			setMsgClearedFlagGeneric(toolCallMsg)
 		}
 		toolCallMsgIndex++
 	}
@@ -731,43 +782,45 @@ func (t *toolReductionMiddleware) BeforeModelRewriteState(ctx context.Context, s
 	return ctx, state, nil
 }
 
-func (t *toolReductionMiddleware) applyClearRewrite(ctx context.Context, state *adk.ChatModelAgentState, start, end int, clearAtLeastTokens int64) (
-	[]*schema.Message, int, error) {
+func (t *typedToolReductionMiddleware[M]) applyClearRewriteGeneric(ctx context.Context, state *adk.TypedChatModelAgentState[M], start, end int, clearAtLeastTokens int64) (
+	[]M, int, error) {
 	var (
-		editTarget      []*schema.Message
-		needProcessPart []*schema.Message
+		editTarget      []M
+		needProcessPart []M
 	)
 
 	editTarget = append(editTarget, state.Messages[:start]...)
 
 	if clearAtLeastTokens > 0 {
-		needProcessPart = copyMessages(state.Messages[start:end])
+		needProcessPart = copyMessagesGeneric(state.Messages[start:end])
 	} else {
 		needProcessPart = state.Messages[start:end]
 	}
 
 	if t.config.ClearMessageRewriter != nil {
 		var (
-			rewritten  []*schema.Message
+			rewritten  []M
 			origLength = len(needProcessPart)
 		)
 		for i := 0; i < len(needProcessPart); {
 			msg := needProcessPart[i]
-			switch msg.Role {
-			case schema.System, schema.User:
+			if isSystemMsg(msg) || isUserMsg(msg) {
 				rewritten = append(rewritten, msg)
 				i++
-			case schema.Tool:
+			} else if isToolResultMsg(msg) {
+				// tool result message (schema.Tool role or agentic user msg carrying FunctionToolResult)
 				i++
-			case schema.Assistant:
-				if len(msg.ToolCalls) == 0 {
+			} else if isAssistantMsg(msg) {
+				toolCalls := getToolCallsGeneric(msg)
+				if len(toolCalls) == 0 {
 					rewritten = append(rewritten, msg)
 					i++
 					continue
 				}
 				var (
-					toolResponseMessages []adk.Message
-					trStart, trEnd       = i + 1, i + len(msg.ToolCalls) + 1
+					toolResponseMessages []M
+					trStart              = i + 1
+					trEnd                = i + len(toolCalls) + 1
 				)
 				if trStart >= trEnd || trStart >= len(needProcessPart) || trEnd > len(needProcessPart) {
 					toolResponseMessages = nil
@@ -781,8 +834,8 @@ func (t *toolReductionMiddleware) applyClearRewrite(ctx context.Context, state *
 				}
 				rewritten = append(rewritten, rewrittenMessages...)
 				i = trEnd
-			default: // unexpected
-				return nil, 0, fmt.Errorf("[applyClearRewrite] unexpected message role: %v", msg.Role)
+			} else { // unexpected
+				return nil, 0, fmt.Errorf("[applyClearRewrite] unexpected message: %v", any(msg))
 			}
 		}
 		editTarget = append(editTarget, rewritten...)
@@ -801,9 +854,336 @@ type offloadStashItem struct {
 	offloadInfo *ClearResult
 }
 
+// toolCallInfo represents a tool call extracted from a message for generic processing.
+type toolCallInfo struct {
+	// BlockIndex is the index used to locate the tool call within the message.
+	// For *schema.Message: index into msg.ToolCalls slice.
+	// For *schema.AgenticMessage: index into msg.ContentBlocks slice.
+	BlockIndex int
+	CallID     string
+	Name       string
+	Arguments  string
+}
+
+// isAssistantMsg checks if a message has assistant role.
+func isAssistantMsg[M adk.MessageType](msg M) bool {
+	switch m := any(msg).(type) {
+	case *schema.Message:
+		return m.Role == schema.Assistant
+	case *schema.AgenticMessage:
+		return m.Role == schema.AgenticRoleTypeAssistant
+	}
+	return false
+}
+
+// isSystemMsg checks if a message has system role.
+func isSystemMsg[M adk.MessageType](msg M) bool {
+	switch m := any(msg).(type) {
+	case *schema.Message:
+		return m.Role == schema.System
+	case *schema.AgenticMessage:
+		return m.Role == schema.AgenticRoleTypeSystem
+	}
+	return false
+}
+
+// isUserMsg checks if a message has user role (and is not a tool-result message).
+func isUserMsg[M adk.MessageType](msg M) bool {
+	switch m := any(msg).(type) {
+	case *schema.Message:
+		return m.Role == schema.User
+	case *schema.AgenticMessage:
+		if m.Role != schema.AgenticRoleTypeUser {
+			return false
+		}
+		// A user-role agentic message that contains any FunctionToolResult block
+		// is a tool result message, not a normal user message — even if it also
+		// carries UserInput blocks. This ensures the clear flow's tool-call grouping
+		// remains correctly aligned.
+		for _, block := range m.ContentBlocks {
+			if block != nil && block.Type == schema.ContentBlockTypeFunctionToolResult {
+				return false
+			}
+		}
+		return len(m.ContentBlocks) > 0
+	}
+	return false
+}
+
+// hasToolCalls checks if an assistant message contains tool calls.
+func hasToolCalls[M adk.MessageType](msg M) bool {
+	switch m := any(msg).(type) {
+	case *schema.Message:
+		return len(m.ToolCalls) > 0
+	case *schema.AgenticMessage:
+		for _, block := range m.ContentBlocks {
+			if block != nil && block.Type == schema.ContentBlockTypeFunctionToolCall {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// isToolResultMsg checks if a message is a tool result message.
+// For *schema.Message: role == Tool.
+// For *schema.AgenticMessage: user-role message with at least one FunctionToolResult block.
+func isToolResultMsg[M adk.MessageType](msg M) bool {
+	switch m := any(msg).(type) {
+	case *schema.Message:
+		return m.Role == schema.Tool
+	case *schema.AgenticMessage:
+		if m.Role != schema.AgenticRoleTypeUser {
+			return false
+		}
+		for _, block := range m.ContentBlocks {
+			if block != nil && block.Type == schema.ContentBlockTypeFunctionToolResult {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// isToolResultOnlyMsg checks if a message is exclusively a tool result message
+// (no other content besides tool results).
+// For *schema.Message: role == Tool.
+// For *schema.AgenticMessage: user-role message where ALL content blocks are FunctionToolResult.
+func isToolResultOnlyMsg[M adk.MessageType](msg M) bool {
+	switch m := any(msg).(type) {
+	case *schema.Message:
+		return m.Role == schema.Tool
+	case *schema.AgenticMessage:
+		if m.Role != schema.AgenticRoleTypeUser || len(m.ContentBlocks) == 0 {
+			return false
+		}
+		for _, block := range m.ContentBlocks {
+			if block == nil || block.Type != schema.ContentBlockTypeFunctionToolResult {
+				return false
+			}
+		}
+		return true
+	}
+	return false
+}
+
+// getMsgClearedFlagGeneric checks if a message has the cleared flag set.
+func getMsgClearedFlagGeneric[M adk.MessageType](msg M) bool {
+	switch m := any(msg).(type) {
+	case *schema.Message:
+		return getMsgClearedFlag(m)
+	case *schema.AgenticMessage:
+		if m.Extra == nil {
+			return false
+		}
+		v, ok := m.Extra[msgClearedFlag].(bool)
+		return ok && v
+	}
+	return false
+}
+
+// setMsgClearedFlagGeneric sets the cleared flag on a message.
+func setMsgClearedFlagGeneric[M adk.MessageType](msg M) {
+	switch m := any(msg).(type) {
+	case *schema.Message:
+		setMsgClearedFlag(m)
+	case *schema.AgenticMessage:
+		if m.Extra == nil {
+			m.Extra = make(map[string]any)
+		}
+		m.Extra[msgClearedFlag] = true
+	}
+}
+
+// getToolCallsGeneric extracts tool call info from an assistant message.
+func getToolCallsGeneric[M adk.MessageType](msg M) []toolCallInfo {
+	switch m := any(msg).(type) {
+	case *schema.Message:
+		if len(m.ToolCalls) == 0 {
+			return nil
+		}
+		result := make([]toolCallInfo, 0, len(m.ToolCalls))
+		for i, tc := range m.ToolCalls {
+			result = append(result, toolCallInfo{
+				BlockIndex: i,
+				CallID:     tc.ID,
+				Name:       tc.Function.Name,
+				Arguments:  tc.Function.Arguments,
+			})
+		}
+		return result
+	case *schema.AgenticMessage:
+		var result []toolCallInfo
+		for i, block := range m.ContentBlocks {
+			if block != nil && block.Type == schema.ContentBlockTypeFunctionToolCall && block.FunctionToolCall != nil {
+				result = append(result, toolCallInfo{
+					BlockIndex: i,
+					CallID:     block.FunctionToolCall.CallID,
+					Name:       block.FunctionToolCall.Name,
+					Arguments:  block.FunctionToolCall.Arguments,
+				})
+			}
+		}
+		return result
+	}
+	return nil
+}
+
+// setToolCallArguments updates the arguments for a tool call at the given block index.
+func setToolCallArguments[M adk.MessageType](msg M, blockIndex int, args string) {
+	switch m := any(msg).(type) {
+	case *schema.Message:
+		m.ToolCalls[blockIndex].Function.Arguments = args
+	case *schema.AgenticMessage:
+		if m.ContentBlocks[blockIndex].FunctionToolCall != nil {
+			m.ContentBlocks[blockIndex].FunctionToolCall.Arguments = args
+		}
+	}
+}
+
+// toolResultFromMsgGeneric extracts tool result from a message as a *schema.ToolResult.
+// For *schema.Message: delegates to existing toolResultFromMessage.
+// For *schema.AgenticMessage: iterates FunctionToolResult blocks.
+// The fromContent flag indicates whether the result came from simple content (true)
+// or multi-part content (false), which affects how setToolResultContent writes it back.
+func toolResultFromMsgGeneric[M adk.MessageType](msg M) (result *schema.ToolResult, fromContent bool, err error) {
+	switch m := any(msg).(type) {
+	case *schema.Message:
+		return toolResultFromMessage(m)
+	case *schema.AgenticMessage:
+		var found *schema.FunctionToolResult
+		for _, block := range m.ContentBlocks {
+			if block == nil || block.Type != schema.ContentBlockTypeFunctionToolResult || block.FunctionToolResult == nil {
+				continue
+			}
+			if found != nil {
+				return nil, false, fmt.Errorf("reduction: AgenticMessage contains multiple FunctionToolResult blocks; expected exactly one per message")
+			}
+			found = block.FunctionToolResult
+		}
+		if found == nil {
+			return &schema.ToolResult{Parts: []schema.ToolOutputPart{{Type: schema.ToolPartTypeText, Text: ""}}}, true, nil
+		}
+		parts := toolResultToOutputParts(found)
+		if len(parts) == 0 {
+			return &schema.ToolResult{Parts: []schema.ToolOutputPart{{Type: schema.ToolPartTypeText, Text: ""}}}, true, nil
+		}
+		isSimple := len(parts) == 1 && parts[0].Type == schema.ToolPartTypeText
+		return &schema.ToolResult{Parts: parts}, isSimple, nil
+	}
+	return nil, false, fmt.Errorf("unsupported message type")
+}
+
+// setToolResultContent updates the tool result content in a message.
+// For *schema.Message: sets msg.Content or msg.UserInputMultiContent.
+// For *schema.AgenticMessage: reconstructs FunctionToolResult.Content.
+func setToolResultContent[M adk.MessageType](msg M, toolResult *schema.ToolResult, fromContent bool) {
+	switch m := any(msg).(type) {
+	case *schema.Message:
+		if fromContent {
+			if len(toolResult.Parts) > 0 {
+				m.Content = toolResult.Parts[0].Text
+			}
+		} else {
+			convResult, convErr := toolResult.ToMessageInputParts()
+			if convErr == nil {
+				m.UserInputMultiContent = convResult
+			}
+		}
+	case *schema.AgenticMessage:
+		for _, block := range m.ContentBlocks {
+			if block == nil || block.Type != schema.ContentBlockTypeFunctionToolResult || block.FunctionToolResult == nil {
+				continue
+			}
+			setToolResultFromOutputParts(block.FunctionToolResult, toolResult.Parts)
+			return
+		}
+	}
+}
+
+// copyMessagesGeneric deep-copies a slice of messages.
+func copyMessagesGeneric[M adk.MessageType](msgs []M) []M {
+	var zero M
+	switch any(zero).(type) {
+	case *schema.Message:
+		origMsgs := any(msgs).([]*schema.Message)
+		copied := copyMessages(origMsgs)
+		return any(copied).([]M)
+	case *schema.AgenticMessage:
+		origMsgs := any(msgs).([]*schema.AgenticMessage)
+		copied := copyAgenticMessages(origMsgs)
+		return any(copied).([]M)
+	}
+	panic("unreachable")
+}
+
+func copyAgenticMessages(msgs []*schema.AgenticMessage) []*schema.AgenticMessage {
+	resp := make([]*schema.AgenticMessage, len(msgs))
+	for i, msg := range msgs {
+		if msg == nil {
+			continue
+		}
+		copied := &schema.AgenticMessage{
+			Role:         msg.Role,
+			ResponseMeta: msg.ResponseMeta,
+		}
+		if msg.ContentBlocks != nil {
+			copied.ContentBlocks = make([]*schema.ContentBlock, len(msg.ContentBlocks))
+			for j, block := range msg.ContentBlocks {
+				if block == nil {
+					continue
+				}
+				cb := *block
+				// Deep copy mutable sub-fields
+				if block.FunctionToolCall != nil {
+					ftc := *block.FunctionToolCall
+					cb.FunctionToolCall = &ftc
+				}
+				if block.FunctionToolResult != nil {
+					ftr := *block.FunctionToolResult
+					if block.FunctionToolResult.Content != nil {
+						ftr.Content = make([]*schema.FunctionToolResultContentBlock, len(block.FunctionToolResult.Content))
+						for k, rb := range block.FunctionToolResult.Content {
+							if rb != nil {
+								rbCopy := *rb // shallow copy: Image/Audio/Video/File sub-fields are not deep-copied.
+								// This is safe because the clear logic replaces entire blocks rather than
+								// mutating media fields in-place. Custom ClearHandlers should follow the same pattern.
+								if rb.Text != nil {
+									t := *rb.Text
+									rbCopy.Text = &t
+								}
+								ftr.Content[k] = &rbCopy
+							}
+						}
+					}
+					cb.FunctionToolResult = &ftr
+				}
+				if block.Extra != nil {
+					cb.Extra = make(map[string]any, len(block.Extra))
+					for k, v := range block.Extra {
+						cb.Extra[k] = v
+					}
+				}
+				copied.ContentBlocks[j] = &cb
+			}
+		}
+		if msg.Extra != nil {
+			copied.Extra = make(map[string]any, len(msg.Extra))
+			for k, v := range msg.Extra {
+				copied.Extra[k] = v
+			}
+		}
+		resp[i] = copied
+	}
+	return resp
+}
+
 func copyMessages(msgs []*schema.Message) []*schema.Message {
 	resp := make([]*schema.Message, len(msgs))
 	for i, msg := range msgs {
+		if msg == nil {
+			continue
+		}
 		copied := &schema.Message{
 			Role:                     msg.Role,
 			Content:                  msg.Content,
@@ -1203,4 +1583,98 @@ func convMessageInputPartToToolOutputPart(msgPart schema.MessageInputPart) (sche
 	default:
 		return schema.ToolOutputPart{}, fmt.Errorf("unknown msg part type: %v", msgPart.Type)
 	}
+}
+
+// toolResultToOutputParts converts a FunctionToolResult's Content blocks to ToolOutputPart slice.
+func toolResultToOutputParts(f *schema.FunctionToolResult) []schema.ToolOutputPart {
+	var parts []schema.ToolOutputPart
+	for _, block := range f.Content {
+		if block == nil {
+			continue
+		}
+		if block.Text != nil {
+			parts = append(parts, schema.ToolOutputPart{Type: schema.ToolPartTypeText, Text: block.Text.Text})
+		} else if block.Image != nil {
+			parts = append(parts, schema.ToolOutputPart{
+				Type:  schema.ToolPartTypeImage,
+				Image: &schema.ToolOutputImage{MessagePartCommon: schema.MessagePartCommon{URL: strPtr(block.Image.URL), MIMEType: block.Image.MIMEType}},
+			})
+		} else if block.Audio != nil {
+			parts = append(parts, schema.ToolOutputPart{
+				Type:  schema.ToolPartTypeAudio,
+				Audio: &schema.ToolOutputAudio{MessagePartCommon: schema.MessagePartCommon{URL: strPtr(block.Audio.URL), MIMEType: block.Audio.MIMEType}},
+			})
+		} else if block.Video != nil {
+			parts = append(parts, schema.ToolOutputPart{
+				Type:  schema.ToolPartTypeVideo,
+				Video: &schema.ToolOutputVideo{MessagePartCommon: schema.MessagePartCommon{URL: strPtr(block.Video.URL), MIMEType: block.Video.MIMEType}},
+			})
+		} else if block.File != nil {
+			parts = append(parts, schema.ToolOutputPart{
+				Type: schema.ToolPartTypeFile,
+				File: &schema.ToolOutputFile{MessagePartCommon: schema.MessagePartCommon{URL: strPtr(block.File.URL), MIMEType: block.File.MIMEType}},
+			})
+		}
+	}
+	return parts
+}
+
+// setToolResultFromOutputParts converts ToolOutputPart slice back to FunctionToolResultContentBlock
+// slice and sets f.Content.
+func setToolResultFromOutputParts(f *schema.FunctionToolResult, parts []schema.ToolOutputPart) {
+	var newBlocks []*schema.FunctionToolResultContentBlock
+	for _, part := range parts {
+		switch part.Type {
+		case schema.ToolPartTypeText:
+			newBlocks = append(newBlocks, &schema.FunctionToolResultContentBlock{
+				Type: schema.FunctionToolResultContentBlockTypeText,
+				Text: &schema.UserInputText{Text: part.Text},
+			})
+		case schema.ToolPartTypeImage:
+			if part.Image != nil {
+				newBlocks = append(newBlocks, &schema.FunctionToolResultContentBlock{
+					Type:  schema.FunctionToolResultContentBlockTypeImage,
+					Image: &schema.UserInputImage{URL: ptrStr(part.Image.URL), MIMEType: part.Image.MIMEType},
+				})
+			}
+		case schema.ToolPartTypeAudio:
+			if part.Audio != nil {
+				newBlocks = append(newBlocks, &schema.FunctionToolResultContentBlock{
+					Type:  schema.FunctionToolResultContentBlockTypeAudio,
+					Audio: &schema.UserInputAudio{URL: ptrStr(part.Audio.URL), MIMEType: part.Audio.MIMEType},
+				})
+			}
+		case schema.ToolPartTypeVideo:
+			if part.Video != nil {
+				newBlocks = append(newBlocks, &schema.FunctionToolResultContentBlock{
+					Type:  schema.FunctionToolResultContentBlockTypeVideo,
+					Video: &schema.UserInputVideo{URL: ptrStr(part.Video.URL), MIMEType: part.Video.MIMEType},
+				})
+			}
+		case schema.ToolPartTypeFile:
+			if part.File != nil {
+				newBlocks = append(newBlocks, &schema.FunctionToolResultContentBlock{
+					Type: schema.FunctionToolResultContentBlockTypeFile,
+					File: &schema.UserInputFile{URL: ptrStr(part.File.URL), MIMEType: part.File.MIMEType},
+				})
+			}
+		}
+	}
+	f.Content = newBlocks
+}
+
+// strPtr returns a pointer to s, or nil if s is empty.
+func strPtr(s string) *string {
+	if s == "" {
+		return nil
+	}
+	return &s
+}
+
+// ptrStr safely dereferences a *string, returning "" if nil.
+func ptrStr(p *string) string {
+	if p == nil {
+		return ""
+	}
+	return *p
 }

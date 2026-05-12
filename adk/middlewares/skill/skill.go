@@ -68,24 +68,33 @@ type Backend interface {
 	Get(ctx context.Context, name string) (Skill, error)
 }
 
-// AgentHubOptions contains options passed to AgentHub.Get when creating an agent for skill execution.
-type AgentHubOptions struct {
+// TypedAgentHubOptions contains options passed to TypedAgentHub.Get when creating an agent for skill execution.
+type TypedAgentHubOptions[M adk.MessageType] struct {
 	// Model is the resolved model instance when a skill specifies a "model" field in frontmatter.
 	// nil means the skill did not specify a model override; implementations should use their default.
-	Model model.ToolCallingChatModel
+	Model model.BaseModel[M]
 }
 
-// AgentHub provides agent instances for context mode (fork/fork_with_context) execution.
-type AgentHub interface {
+// AgentHubOptions is a backward-compatible alias for TypedAgentHubOptions instantiated with *schema.Message.
+type AgentHubOptions = TypedAgentHubOptions[*schema.Message]
+
+// TypedAgentHub provides agent instances for context mode (fork/fork_with_context) execution.
+type TypedAgentHub[M adk.MessageType] interface {
 	// Get returns an Agent by name. When name is empty, implementations should return a default agent.
 	// The opts parameter carries skill-level overrides (e.g., model) resolved by the framework.
-	Get(ctx context.Context, name string, opts *AgentHubOptions) (adk.Agent, error)
+	Get(ctx context.Context, name string, opts *TypedAgentHubOptions[M]) (adk.TypedAgent[M], error)
 }
 
-// ModelHub resolves model instances by name for skills that specify a "model" field in frontmatter.
-type ModelHub interface {
-	Get(ctx context.Context, name string) (model.ToolCallingChatModel, error)
+// AgentHub is a backward-compatible alias for TypedAgentHub instantiated with *schema.Message.
+type AgentHub = TypedAgentHub[*schema.Message]
+
+// TypedModelHub resolves model instances by name for skills that specify a "model" field in frontmatter.
+type TypedModelHub[M adk.MessageType] interface {
+	Get(ctx context.Context, name string) (model.BaseModel[M], error)
 }
+
+// ModelHub is a backward-compatible alias for TypedModelHub instantiated with *schema.Message.
+type ModelHub = TypedModelHub[*schema.Message]
 
 // SystemPromptFunc is a function that returns a custom system prompt.
 // The toolName parameter is the name of the skill tool (default: "skill").
@@ -95,29 +104,35 @@ type SystemPromptFunc func(ctx context.Context, toolName string) string
 // The skills parameter contains all available skill front matters.
 type ToolDescriptionFunc func(ctx context.Context, skills []FrontMatter) string
 
-// SubAgentInput contains the context available when building the sub-agent's
+// TypedSubAgentInput contains the context available when building the sub-agent's
 // initial messages in fork/fork_with_context mode.
-type SubAgentInput struct {
+type TypedSubAgentInput[M adk.MessageType] struct {
 	Skill        Skill
 	Mode         ContextMode
 	RawArguments string
 	SkillContent string
-	History      []adk.Message
+	History      []M
 	ToolCallID   string
 }
 
-// SubAgentOutput contains the sub-agent's execution results, available when
+// SubAgentInput is a backward-compatible alias for TypedSubAgentInput instantiated with *schema.Message.
+type SubAgentInput = TypedSubAgentInput[*schema.Message]
+
+// TypedSubAgentOutput contains the sub-agent's execution results, available when
 // formatting the final tool response.
-type SubAgentOutput struct {
+type TypedSubAgentOutput[M adk.MessageType] struct {
 	Skill        Skill
 	Mode         ContextMode
 	RawArguments string
-	Messages     []*schema.Message
+	Messages     []M
 	Results      []string
 }
 
-// Config is the configuration for the skill middleware.
-type Config struct {
+// SubAgentOutput is a backward-compatible alias for TypedSubAgentOutput instantiated with *schema.Message.
+type SubAgentOutput = TypedSubAgentOutput[*schema.Message]
+
+// TypedConfig is the configuration for the skill middleware.
+type TypedConfig[M adk.MessageType] struct {
 	// Backend is the backend for retrieving skills.
 	Backend Backend
 	// SkillToolName is the custom name for the skill tool. If nil, the default name "skill" is used.
@@ -130,14 +145,14 @@ type Config struct {
 	// The agent factory is retrieved by agent name (skill.Agent) from this hub.
 	// When skill.Agent is empty, AgentHub.Get is called with an empty string,
 	// allowing the hub implementation to return a default agent.
-	AgentHub AgentHub
+	AgentHub TypedAgentHub[M]
 	// ModelHub provides model instances for skills that specify a "model" field in frontmatter.
 	// Used in two scenarios:
 	//   - With context mode (fork/fork_with_context): The model is passed to the AgentHub
 	//   - Without context mode (inline): The model becomes active for subsequent ChatModel requests
 	// If nil, skills with model specification will be ignored in inline mode,
 	// or return an error in context mode.
-	ModelHub ModelHub
+	ModelHub TypedModelHub[M]
 
 	// CustomSystemPrompt allows customizing the system prompt injected into the agent.
 	// If nil, the default system prompt is used.
@@ -162,13 +177,64 @@ type Config struct {
 	// When nil, fork uses [UserMessage(skillContent)] and fork_with_context uses
 	// [history..., ToolMessage(skillContent, toolCallID)].
 	// optional
-	BuildForkMessages func(ctx context.Context, in SubAgentInput) ([]adk.Message, error)
+	BuildForkMessages func(ctx context.Context, in TypedSubAgentInput[M]) ([]M, error)
 
 	// FormatForkResult customizes the final text returned from the forked sub-agent results.
 	// When nil, assistant message contents emitted by the sub-agent are concatenated and returned
 	// in a default formatted string.
 	// optional
-	FormatForkResult func(ctx context.Context, in SubAgentOutput) (string, error)
+	FormatForkResult func(ctx context.Context, in TypedSubAgentOutput[M]) (string, error)
+}
+
+// Config is a backward-compatible alias for TypedConfig instantiated with *schema.Message.
+type Config = TypedConfig[*schema.Message]
+
+// NewTyped creates a generic skill middleware handler for TypedChatModelAgent.
+//
+// This is the generic constructor that supports both *schema.Message and *schema.AgenticMessage.
+// For *schema.AgenticMessage, tool execution is message-type-independent; the model override
+// via ModelHub only takes effect when M is *schema.Message (for other types it is a no-op).
+//
+// See NewMiddleware for full usage documentation.
+func NewTyped[M adk.MessageType](ctx context.Context, config *TypedConfig[M]) (adk.TypedChatModelAgentMiddleware[M], error) {
+	if config == nil {
+		return nil, fmt.Errorf("config is required")
+	}
+	if config.Backend == nil {
+		return nil, fmt.Errorf("backend is required")
+	}
+
+	name := toolName
+	if config.SkillToolName != nil {
+		name = *config.SkillToolName
+	}
+
+	var instruction string
+	if config.CustomSystemPrompt != nil {
+		instruction = config.CustomSystemPrompt(ctx, name)
+	} else {
+		var err error
+		instruction, err = buildSystemPrompt(name, config.UseChinese)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	return &typedSkillHandler[M]{
+		instruction: instruction,
+		tool: &typedSkillTool[M]{
+			b:                 config.Backend,
+			toolName:          name,
+			useChinese:        config.UseChinese,
+			agentHub:          config.AgentHub,
+			modelHub:          config.ModelHub,
+			customToolDesc:    config.CustomToolDescription,
+			customToolParams:  config.CustomToolParams,
+			buildContent:      config.BuildContent,
+			buildForkMessages: config.BuildForkMessages,
+			formatForkResult:  config.FormatForkResult,
+		},
+	}, nil
 }
 
 // NewMiddleware creates a new skill middleware handler for ChatModelAgent.
@@ -197,59 +263,22 @@ type Config struct {
 //	    Handlers: []adk.ChatModelAgentMiddleware{handler},
 //	})
 func NewMiddleware(ctx context.Context, config *Config) (adk.ChatModelAgentMiddleware, error) {
-	if config == nil {
-		return nil, fmt.Errorf("config is required")
-	}
-	if config.Backend == nil {
-		return nil, fmt.Errorf("backend is required")
-	}
-
-	name := toolName
-	if config.SkillToolName != nil {
-		name = *config.SkillToolName
-	}
-
-	var instruction string
-	if config.CustomSystemPrompt != nil {
-		instruction = config.CustomSystemPrompt(ctx, name)
-	} else {
-		var err error
-		instruction, err = buildSystemPrompt(name, config.UseChinese)
-		if err != nil {
-			return nil, err
-		}
-	}
-
-	return &skillHandler{
-		instruction: instruction,
-		tool: &skillTool{
-			b:                 config.Backend,
-			toolName:          name,
-			useChinese:        config.UseChinese,
-			agentHub:          config.AgentHub,
-			modelHub:          config.ModelHub,
-			customToolDesc:    config.CustomToolDescription,
-			customToolParams:  config.CustomToolParams,
-			buildContent:      config.BuildContent,
-			buildForkMessages: config.BuildForkMessages,
-			formatForkResult:  config.FormatForkResult,
-		},
-	}, nil
+	return NewTyped(ctx, config)
 }
 
-type skillHandler struct {
-	*adk.BaseChatModelAgentMiddleware
+type typedSkillHandler[M adk.MessageType] struct {
+	*adk.TypedBaseChatModelAgentMiddleware[M]
 	instruction string
-	tool        *skillTool
+	tool        *typedSkillTool[M]
 }
 
-func (h *skillHandler) BeforeAgent(ctx context.Context, runCtx *adk.ChatModelAgentContext) (context.Context, *adk.ChatModelAgentContext, error) {
+func (h *typedSkillHandler[M]) BeforeAgent(ctx context.Context, runCtx *adk.ChatModelAgentContext) (context.Context, *adk.ChatModelAgentContext, error) {
 	runCtx.Instruction = runCtx.Instruction + "\n" + h.instruction
 	runCtx.Tools = append(runCtx.Tools, h.tool)
 	return ctx, runCtx, nil
 }
 
-func (h *skillHandler) WrapModel(ctx context.Context, m model.BaseChatModel, mc *adk.ModelContext) (model.BaseChatModel, error) {
+func (h *typedSkillHandler[M]) WrapModel(ctx context.Context, m model.BaseModel[M], _ *adk.TypedModelContext[M]) (model.BaseModel[M], error) {
 	if h.tool.modelHub == nil {
 		return m, nil
 	}
@@ -304,7 +333,7 @@ func New(ctx context.Context, config *Config) (adk.AgentMiddleware, error) {
 
 	return adk.AgentMiddleware{
 		AdditionalInstruction: sp,
-		AdditionalTools: []tool.BaseTool{&skillTool{
+		AdditionalTools: []tool.BaseTool{&typedSkillTool[*schema.Message]{
 			b:              config.Backend,
 			toolName:       name,
 			useChinese:     config.UseChinese,
@@ -328,28 +357,28 @@ func buildSystemPrompt(skillToolName string, useChinese bool) (string, error) {
 	})
 }
 
-type skillTool struct {
+type typedSkillTool[M adk.MessageType] struct {
 	b        Backend
 	toolName string
 
 	useChinese bool
-	agentHub   AgentHub
-	modelHub   ModelHub
+	agentHub   TypedAgentHub[M]
+	modelHub   TypedModelHub[M]
 
 	customToolDesc ToolDescriptionFunc
 
 	customToolParams func(ctx context.Context, defaults map[string]*schema.ParameterInfo) (map[string]*schema.ParameterInfo, error)
 	buildContent     func(ctx context.Context, skill Skill, rawArgs string) (string, error)
 
-	buildForkMessages func(ctx context.Context, in SubAgentInput) ([]adk.Message, error)
-	formatForkResult  func(ctx context.Context, in SubAgentOutput) (string, error)
+	buildForkMessages func(ctx context.Context, in TypedSubAgentInput[M]) ([]M, error)
+	formatForkResult  func(ctx context.Context, in TypedSubAgentOutput[M]) (string, error)
 }
 
 type descriptionTemplateHelper struct {
 	Matters []FrontMatter
 }
 
-func (s *skillTool) Info(ctx context.Context) (*schema.ToolInfo, error) {
+func (s *typedSkillTool[M]) Info(ctx context.Context) (*schema.ToolInfo, error) {
 	skills, err := s.b.List(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("failed to list skills: %w", err)
@@ -387,7 +416,7 @@ type inputArguments struct {
 	Skill string `json:"skill"`
 }
 
-func (s *skillTool) InvokableRun(ctx context.Context, argumentsInJSON string, opts ...tool.Option) (string, error) {
+func (s *typedSkillTool[M]) InvokableRun(ctx context.Context, argumentsInJSON string, _ ...tool.Option) (string, error) {
 	args := &inputArguments{}
 	err := json.Unmarshal([]byte(argumentsInJSON), args)
 	if err != nil {
@@ -411,7 +440,7 @@ func (s *skillTool) InvokableRun(ctx context.Context, argumentsInJSON string, op
 	}
 }
 
-func (s *skillTool) setActiveModel(ctx context.Context, modelName string) {
+func (s *typedSkillTool[M]) setActiveModel(ctx context.Context, modelName string) {
 	_ = adk.SetRunLocalValue(ctx, activeModelKey, modelName)
 }
 
@@ -429,7 +458,7 @@ func defaultToolParams() map[string]*schema.ParameterInfo {
 	}
 }
 
-func (s *skillTool) buildParamsOneOf(ctx context.Context) (*schema.ParamsOneOf, error) {
+func (s *typedSkillTool[M]) buildParamsOneOf(ctx context.Context) (*schema.ParamsOneOf, error) {
 	defaults := defaultToolParams()
 	if s.customToolParams == nil {
 		return schema.NewParamsOneOfByParams(defaults), nil
@@ -454,7 +483,7 @@ func (s *skillTool) buildParamsOneOf(ctx context.Context) (*schema.ParamsOneOf, 
 	return schema.NewParamsOneOfByParams(params), nil
 }
 
-func (s *skillTool) buildSkillResult(ctx context.Context, skill Skill, rawArguments string) (string, error) {
+func (s *typedSkillTool[M]) buildSkillResult(ctx context.Context, skill Skill, rawArguments string) (string, error) {
 	if s.buildContent == nil {
 		return s.defaultSkillContent(skill), nil
 	}
@@ -465,7 +494,7 @@ func (s *skillTool) buildSkillResult(ctx context.Context, skill Skill, rawArgume
 	return content, nil
 }
 
-func (s *skillTool) defaultSkillContent(skill Skill) string {
+func (s *typedSkillTool[M]) defaultSkillContent(skill Skill) string {
 	resultFmt := internal.SelectPrompt(internal.I18nPrompts{
 		English: toolResult,
 		Chinese: toolResultChinese,
@@ -478,12 +507,12 @@ func (s *skillTool) defaultSkillContent(skill Skill) string {
 	return fmt.Sprintf(resultFmt, skill.Name) + fmt.Sprintf(contentFmt, skill.BaseDirectory, skill.Content)
 }
 
-func (s *skillTool) runAgentMode(ctx context.Context, skill Skill, forkHistory bool, rawArguments string) (string, error) {
+func (s *typedSkillTool[M]) runAgentMode(ctx context.Context, skill Skill, forkHistory bool, rawArguments string) (string, error) {
 	if s.agentHub == nil {
 		return "", fmt.Errorf("skill '%s' requires context:%s but AgentHub is not configured", skill.Name, skill.Context)
 	}
 
-	opts := &AgentHubOptions{}
+	opts := &TypedAgentHubOptions[M]{}
 	if skill.Model != "" {
 		if s.modelHub == nil {
 			return "", fmt.Errorf("skill '%s' requires model '%s' but ModelHub is not configured", skill.Name, skill.Model)
@@ -500,13 +529,13 @@ func (s *skillTool) runAgentMode(ctx context.Context, skill Skill, forkHistory b
 		return "", fmt.Errorf("failed to get agent '%s' from AgentHub: %w", skill.Agent, err)
 	}
 
-	var messages []adk.Message
+	var messages []M
 	skillContent, err := s.buildSkillResult(ctx, skill, rawArguments)
 	if err != nil {
 		return "", fmt.Errorf("failed to build skill result: %w", err)
 	}
 
-	var history []adk.Message
+	var history []M
 	var toolCallID string
 	if forkHistory {
 		history, err = s.getMessagesFromState(ctx)
@@ -517,7 +546,7 @@ func (s *skillTool) runAgentMode(ctx context.Context, skill Skill, forkHistory b
 	}
 
 	if s.buildForkMessages != nil {
-		messages, err = s.buildForkMessages(ctx, SubAgentInput{
+		messages, err = s.buildForkMessages(ctx, TypedSubAgentInput[M]{
 			Skill:        skill,
 			Mode:         skill.Context,
 			RawArguments: rawArguments,
@@ -529,21 +558,47 @@ func (s *skillTool) runAgentMode(ctx context.Context, skill Skill, forkHistory b
 			return "", fmt.Errorf("failed to build fork messages: %w", err)
 		}
 	} else {
+		var zero M
 		if forkHistory {
-			messages = append(history, schema.ToolMessage(skillContent, toolCallID))
+			var toolMsg M
+			switch any(zero).(type) {
+			case *schema.Message:
+				toolMsg = any(schema.ToolMessage(skillContent, toolCallID)).(M)
+			case *schema.AgenticMessage:
+				toolMsg = any(&schema.AgenticMessage{
+					Role: schema.AgenticRoleTypeUser,
+					ContentBlocks: []*schema.ContentBlock{
+						schema.NewContentBlock(&schema.FunctionToolResult{
+							CallID: toolCallID,
+							Name:   "",
+							Content: []*schema.FunctionToolResultContentBlock{
+								{Type: schema.FunctionToolResultContentBlockTypeText, Text: &schema.UserInputText{Text: skillContent}},
+							},
+						}),
+					},
+				}).(M)
+			}
+			messages = append(history, toolMsg)
 		} else {
-			messages = []adk.Message{schema.UserMessage(skillContent)}
+			var userMsg M
+			switch any(zero).(type) {
+			case *schema.Message:
+				userMsg = any(schema.UserMessage(skillContent)).(M)
+			case *schema.AgenticMessage:
+				userMsg = any(schema.UserAgenticMessage(skillContent)).(M)
+			}
+			messages = []M{userMsg}
 		}
 	}
 
-	input := &adk.AgentInput{
+	input := &adk.TypedAgentInput[M]{
 		Messages:        messages,
 		EnableStreaming: false,
 	}
 
 	iter := agent.Run(ctx, input)
 
-	var msgList []*schema.Message
+	var msgList []M
 	var results []string
 	for {
 		event, ok := iter.Next()
@@ -564,16 +619,32 @@ func (s *skillTool) runAgentMode(ctx context.Context, skill Skill, forkHistory b
 			return "", fmt.Errorf("failed to get message from event: %w", msgErr)
 		}
 
-		if msg != nil {
+		if !isNilMessage(msg) {
 			msgList = append(msgList, msg)
-			if msg.Content != "" {
-				results = append(results, msg.Content)
+			var content string
+			switch m := any(msg).(type) {
+			case *schema.Message:
+				content = m.Content
+			case *schema.AgenticMessage:
+				var parts []string
+				for _, block := range m.ContentBlocks {
+					if block == nil {
+						continue
+					}
+					if block.AssistantGenText != nil {
+						parts = append(parts, block.AssistantGenText.Text)
+					}
+				}
+				content = strings.Join(parts, "\n")
+			}
+			if content != "" {
+				results = append(results, content)
 			}
 		}
 	}
 
 	if s.formatForkResult != nil {
-		out, err := s.formatForkResult(ctx, SubAgentOutput{
+		out, err := s.formatForkResult(ctx, TypedSubAgentOutput[M]{
 			Skill:        skill,
 			Mode:         skill.Context,
 			RawArguments: rawArguments,
@@ -594,15 +665,32 @@ func (s *skillTool) runAgentMode(ctx context.Context, skill Skill, forkHistory b
 	return fmt.Sprintf(resultFmt, skill.Name, strings.Join(results, "\n")), nil
 }
 
-func (s *skillTool) getMessagesFromState(ctx context.Context) ([]adk.Message, error) {
-	var messages []adk.Message
-	err := compose.ProcessState(ctx, func(_ context.Context, st *adk.State) error {
-		messages = make([]adk.Message, len(st.Messages))
-		copy(messages, st.Messages)
-		return nil
-	})
-	if err != nil {
-		return nil, fmt.Errorf("failed to process state: %w", err)
+func isNilMessage[M adk.MessageType](msg M) bool {
+	var zero M
+	return any(msg) == any(zero)
+}
+
+func (s *typedSkillTool[M]) getMessagesFromState(ctx context.Context) ([]M, error) {
+	var messages []M
+	var zero M
+	switch any(zero).(type) {
+	case *schema.Message:
+		err := compose.ProcessState(ctx, func(_ context.Context, st *adk.State) error {
+			messages = make([]M, len(st.Messages))
+			for i, m := range st.Messages {
+				messages[i] = any(m).(M)
+			}
+			return nil
+		})
+		if err != nil {
+			return nil, fmt.Errorf("failed to process state: %w", err)
+		}
+	case *schema.AgenticMessage:
+		// Fork mode is not supported for AgenticMessage because the internal
+		// agent state type (agenticState) is unexported from the adk package,
+		// making it inaccessible via compose.ProcessState from middleware packages.
+		// Agent mode (the default) works normally for AgenticMessage.
+		return nil, fmt.Errorf("fork mode is not supported for AgenticMessage; use agent mode instead")
 	}
 	return messages, nil
 }

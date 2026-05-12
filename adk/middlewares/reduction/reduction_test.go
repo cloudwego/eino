@@ -1392,7 +1392,7 @@ func TestGetToolConfig(t *testing.T) {
 		}
 		mw, err := New(ctx, config)
 		assert.NoError(t, err)
-		trmw, ok := mw.(*toolReductionMiddleware)
+		trmw, ok := mw.(*typedToolReductionMiddleware[*schema.Message])
 		assert.True(t, ok)
 
 		cfg := trmw.getToolConfig("non_existent_tool", sceneTruncation)
@@ -1413,7 +1413,7 @@ func TestGetToolConfig(t *testing.T) {
 		}
 		mw, err := New(ctx, config)
 		assert.NoError(t, err)
-		trmw, ok := mw.(*toolReductionMiddleware)
+		trmw, ok := mw.(*typedToolReductionMiddleware[*schema.Message])
 		assert.True(t, ok)
 
 		cfg := trmw.getToolConfig("test_tool", sceneTruncation)
@@ -1433,7 +1433,7 @@ func TestGetToolConfig(t *testing.T) {
 		}
 		mw, err := New(ctx, config)
 		assert.NoError(t, err)
-		trmw, ok := mw.(*toolReductionMiddleware)
+		trmw, ok := mw.(*typedToolReductionMiddleware[*schema.Message])
 		assert.True(t, ok)
 
 		cfg := trmw.getToolConfig("test_tool", sceneTruncation)
@@ -2748,4 +2748,16 @@ func TestClearRewriteMessagesHandler(t *testing.T) {
 		assert.NoError(t, err)
 		assert.NotNil(t, s)
 	})
+}
+
+func TestNewTypedAgenticMessage(t *testing.T) {
+	ctx := context.Background()
+	mw, err := NewTyped[*schema.AgenticMessage](ctx, &TypedConfig[*schema.AgenticMessage]{
+		SkipTruncation: true,
+		SkipClear:      true,
+	})
+	assert.NoError(t, err)
+	assert.NotNil(t, mw)
+
+	var _ adk.TypedChatModelAgentMiddleware[*schema.AgenticMessage] = mw
 }

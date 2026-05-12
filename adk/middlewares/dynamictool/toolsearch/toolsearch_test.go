@@ -374,7 +374,7 @@ func TestMiddlewareFlow(t *testing.T) {
 	// 3-turn flow completed successfully, which requires the tool_search tool to work.
 
 	// Additional: verify that the reminder contains the dynamic tool names.
-	mwImpl := mw.(*middleware)
+	mwImpl := mw.(*typedMiddleware[*schema.Message])
 	assert.True(t, strings.Contains(mwImpl.sr, "dynamic_tool_a"))
 	assert.True(t, strings.Contains(mwImpl.sr, "dynamic_tool_b"))
 	assert.True(t, strings.Contains(mwImpl.sr, "<available-deferred-tools>"))
@@ -439,7 +439,7 @@ func TestSplitCamelCase(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestEnsureReminder(t *testing.T) {
-	m := &middleware{sr: "<reminder>"}
+	m := &typedMiddleware[*schema.Message]{sr: "<reminder>"}
 
 	t.Run("normal: system then user", func(t *testing.T) {
 		input := []*schema.Message{
@@ -504,7 +504,7 @@ func TestEnsureReminder(t *testing.T) {
 
 func TestHelperFunctions(t *testing.T) {
 	t.Run("extractDynamicTools", func(t *testing.T) {
-		m := &middleware{
+		m := &typedMiddleware[*schema.Message]{
 			mapOfDynamicTools: map[string]*schema.ToolInfo{
 				"dyn_a": ti("dyn_a", "A"),
 				"dyn_b": ti("dyn_b", "B"),
@@ -518,7 +518,7 @@ func TestHelperFunctions(t *testing.T) {
 	})
 
 	t.Run("stripDynamicTools", func(t *testing.T) {
-		m := &middleware{
+		m := &typedMiddleware[*schema.Message]{
 			mapOfDynamicTools: map[string]*schema.ToolInfo{
 				"dyn_a": ti("dyn_a", "A"),
 				"dyn_b": ti("dyn_b", "B"),
@@ -567,7 +567,7 @@ func TestBeforeModelRewriteState_Mode1_Initialization(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	m := mw.(*middleware)
+	m := mw.(*typedMiddleware[*schema.Message])
 
 	// Simulate state: static_tool + tool_search + dynamic tools (as would come from backfill).
 	state := &adk.ChatModelAgentState{
@@ -607,7 +607,7 @@ func TestBeforeModelRewriteState_Mode1_ForwardSelection(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	m := mw.(*middleware)
+	m := mw.(*typedMiddleware[*schema.Message])
 
 	// Simulate state AFTER initialization (dynamic tools already stripped).
 	// Include a tool_search result message that selected dynamic_tool_a.
@@ -655,7 +655,7 @@ func TestBeforeModelRewriteState_Mode2_DeferredToolInfos(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	m := mw.(*middleware)
+	m := mw.(*typedMiddleware[*schema.Message])
 
 	state := &adk.ChatModelAgentState{
 		Messages: []*schema.Message{
@@ -691,7 +691,7 @@ func TestBeforeModelRewriteState_ReminderReinsertAfterRemoval(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	m := mw.(*middleware)
+	m := mw.(*typedMiddleware[*schema.Message])
 
 	state := &adk.ChatModelAgentState{
 		Messages: []*schema.Message{
@@ -764,7 +764,7 @@ func TestBeforeModelRewriteState_Mode1_MultipleToolSearchResultsAcrossTurns(t *t
 	})
 	require.NoError(t, err)
 
-	m := mw.(*middleware)
+	m := mw.(*typedMiddleware[*schema.Message])
 
 	// Build two separate tool_search result messages, each selecting a different tool.
 	resultA, _ := json.Marshal(toolSearchResult{Matches: []string{"dynamic_tool_a"}})
@@ -811,7 +811,7 @@ func TestBeforeModelRewriteState_Mode1_MalformedJSONInToolSearchResult(t *testin
 	})
 	require.NoError(t, err)
 
-	m := mw.(*middleware)
+	m := mw.(*typedMiddleware[*schema.Message])
 
 	state := &adk.ChatModelAgentState{
 		Messages: []*schema.Message{
@@ -848,7 +848,7 @@ func TestBeforeModelRewriteState_Mode1_NonExistentToolInForwardSelection(t *test
 	})
 	require.NoError(t, err)
 
-	m := mw.(*middleware)
+	m := mw.(*typedMiddleware[*schema.Message])
 
 	resultJSON, _ := json.Marshal(toolSearchResult{Matches: []string{"nonexistent_tool", "dynamic_tool_a"}})
 
@@ -885,7 +885,7 @@ func TestBeforeModelRewriteState_Mode2_EmptyToolInfos(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	m := mw.(*middleware)
+	m := mw.(*typedMiddleware[*schema.Message])
 
 	state := &adk.ChatModelAgentState{
 		Messages: []*schema.Message{
@@ -913,7 +913,7 @@ func TestBeforeModelRewriteState_Mode1_DoubleInitWithoutComposeContext(t *testin
 	})
 	require.NoError(t, err)
 
-	m := mw.(*middleware)
+	m := mw.(*typedMiddleware[*schema.Message])
 
 	resultJSON, _ := json.Marshal(toolSearchResult{Matches: []string{"dynamic_tool_a"}})
 
@@ -962,7 +962,7 @@ func TestBeforeModelRewriteState_ToolInfosSliceMutation(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	m := mw.(*middleware)
+	m := mw.(*typedMiddleware[*schema.Message])
 
 	// Create ToolInfos with excess capacity so append could mutate in place.
 	originalToolInfos := make([]*schema.ToolInfo, 2, 10)
@@ -1025,4 +1025,18 @@ func TestModelToolSearchTool(t *testing.T) {
 	argEmpty := &schema.ToolArgument{Text: `{"query":""}`}
 	_, err = mts.InvokableRun(ctx, argEmpty)
 	assert.Error(t, err)
+}
+
+func TestNewTypedAgenticMessage(t *testing.T) {
+	ctx := context.Background()
+
+	// Verify that NewTyped compiles with *schema.AgenticMessage.
+	// DynamicTools is required, so we expect an error with an empty config.
+	mw, err := NewTyped[*schema.AgenticMessage](ctx, &Config{
+		DynamicTools: []tool.BaseTool{&simpleTool{name: "t1", desc: "desc1"}},
+	})
+	assert.NoError(t, err)
+	assert.NotNil(t, mw)
+
+	var _ adk.TypedChatModelAgentMiddleware[*schema.AgenticMessage] = mw
 }

@@ -2012,7 +2012,7 @@ func (t *multimodalEnhancedStreamableTestTool) StreamableRun(_ context.Context, 
 	return schema.StreamReaderFromArray([]*schema.ToolResult{t.result}), nil
 }
 
-func TestFunctionToolResultAgenticMessage(t *testing.T) {
+func Test_functionToolResultAgenticMessage(t *testing.T) {
 	t.Run("basic", func(t *testing.T) {
 		blocks := []*schema.FunctionToolResultContentBlock{
 			{Type: schema.FunctionToolResultContentBlockTypeText, Text: &schema.UserInputText{Text: "result_str"}},
