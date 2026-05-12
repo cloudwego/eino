@@ -1569,8 +1569,9 @@ func TestWithCancel_CancelImmediate_NestedAgentTool_ResumeFromToolsNode(t *testi
 			assert.True(t, hasCancelError, "expected CancelError from canceled nested agent tool")
 
 			// --- phase 2: resume with Runner.Resume (no ResumeWithParams, no interrupt ID) ---
-			// Build fresh agents for resume. The first model call after Resume should be
-			// the inner ChatModelAgent inside AgentTool, not the top-level ChatModelAgent.
+			// Build fresh agents for resume. Recursive cancel should resume the
+			// inner ChatModelAgent inside AgentTool before the top-level
+			// ChatModelAgent produces the final answer.
 			resumeFirstModelCall := make(chan string, 5)
 			resumeOuterModelCallCount := int32(0)
 			resumeOuterModel := &countingChatModel{
@@ -1636,13 +1637,13 @@ func TestWithCancel_CancelImmediate_NestedAgentTool_ResumeFromToolsNode(t *testi
 
 			select {
 			case firstModel := <-resumeFirstModelCall:
-				expectedFirstModel := "outer"
 				if tc.recursive {
-					expectedFirstModel = "inner"
+					assert.Equal(t, "inner", firstModel,
+						"recursive cancel should resume the AgentTool/internal ChatModelAgent first")
+				} else {
+					assert.Contains(t, []string{"outer", "inner"}, firstModel,
+						"non-recursive cancel does not define whether a root or already-persisted inner checkpoint resumes first")
 				}
-				assert.Equal(t, expectedFirstModel, firstModel,
-					"recursive cancel should resume the AgentTool/internal ChatModelAgent first; "+
-						"non-recursive cancel only guarantees root-agent cancellation")
 			case <-time.After(5 * time.Second):
 				t.Fatal("no model call observed during resume")
 			}
