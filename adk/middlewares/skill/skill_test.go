@@ -184,7 +184,7 @@ func TestBuildParamsOneOf_CustomParams(t *testing.T) {
 	internal.SetLanguage(internal.LanguageEnglish)
 	ctx := context.Background()
 
-	st := &skillTool{
+	st := &typedSkillTool[*schema.Message]{
 		customToolParams: func(context.Context, map[string]*schema.ParameterInfo) (map[string]*schema.ParameterInfo, error) {
 			return map[string]*schema.ParameterInfo{
 				"foo": {
@@ -229,7 +229,7 @@ func TestBuildParamsOneOf_CustomParams(t *testing.T) {
 
 func TestBuildParamsOneOf_CustomParamsNilFallsBackToDefault(t *testing.T) {
 	ctx := context.Background()
-	st := &skillTool{
+	st := &typedSkillTool[*schema.Message]{
 		customToolParams: func(context.Context, map[string]*schema.ParameterInfo) (map[string]*schema.ParameterInfo, error) {
 			return nil, nil
 		},
@@ -249,15 +249,15 @@ func TestBuildParamsOneOf_CustomParamsNilFallsBackToDefault(t *testing.T) {
 // --- Mock types for NewMiddleware tests ---
 
 type mockModel struct {
-	model.ToolCallingChatModel
+	model.BaseModel[*schema.Message]
 	name string
 }
 
 type mockModelHub struct {
-	models map[string]model.ToolCallingChatModel
+	models map[string]model.BaseModel[*schema.Message]
 }
 
-func (h *mockModelHub) Get(_ context.Context, name string) (model.ToolCallingChatModel, error) {
+func (h *mockModelHub) Get(_ context.Context, name string) (model.BaseModel[*schema.Message], error) {
 	m, ok := h.models[name]
 	if !ok {
 		return nil, fmt.Errorf("model not found: %s", name)
@@ -298,7 +298,7 @@ func (h *runLocalSetterHandler) BeforeModelRewriteState(ctx context.Context, sta
 
 type stateMessagesCaptureHandler struct {
 	*adk.BaseChatModelAgentMiddleware
-	st       *skillTool
+	st       *typedSkillTool[*schema.Message]
 	captured []adk.Message
 }
 
@@ -388,7 +388,7 @@ func TestNewMiddleware(t *testing.T) {
 			},
 		})
 		require.NoError(t, err)
-		h := handler.(*skillHandler)
+		h := handler.(*typedSkillHandler[*schema.Message])
 		_, err = h.tool.Info(ctx)
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "failed to build skill tool params")
@@ -410,7 +410,7 @@ func TestNewMiddleware(t *testing.T) {
 		handler, err := NewMiddleware(ctx, &Config{Backend: backend, SkillToolName: &name})
 		require.NoError(t, err)
 
-		h := handler.(*skillHandler)
+		h := handler.(*typedSkillHandler[*schema.Message])
 		assert.Contains(t, h.instruction, "'load_skill'")
 		assert.Equal(t, "load_skill", h.tool.toolName)
 	})
@@ -425,7 +425,7 @@ func TestNewMiddleware(t *testing.T) {
 		})
 		require.NoError(t, err)
 
-		h := handler.(*skillHandler)
+		h := handler.(*typedSkillHandler[*schema.Message])
 		assert.Equal(t, "custom prompt for skill", h.instruction)
 	})
 
@@ -441,7 +441,7 @@ func TestNewMiddleware(t *testing.T) {
 		})
 		require.NoError(t, err)
 
-		h := handler.(*skillHandler)
+		h := handler.(*typedSkillHandler[*schema.Message])
 		info, err := h.tool.Info(ctx)
 		require.NoError(t, err)
 		assert.Equal(t, "custom desc with 1 skills", info.Desc)
@@ -480,7 +480,7 @@ func TestWrapModel_SwitchesModelWhenRunLocalIsSet(t *testing.T) {
 
 	handler, err := NewMiddleware(ctx, &Config{
 		Backend:  &inMemoryBackend{m: []Skill{}},
-		ModelHub: &mockModelHub{models: map[string]model.ToolCallingChatModel{"other": other}},
+		ModelHub: &mockModelHub{models: map[string]model.BaseModel[*schema.Message]{"other": other}},
 	})
 	require.NoError(t, err)
 
@@ -527,11 +527,11 @@ func TestWrapModel_OutsideAgentContextReturnsError(t *testing.T) {
 
 	handler, err := NewMiddleware(ctx, &Config{
 		Backend:  &inMemoryBackend{m: []Skill{}},
-		ModelHub: &mockModelHub{models: map[string]model.ToolCallingChatModel{"other": other}},
+		ModelHub: &mockModelHub{models: map[string]model.BaseModel[*schema.Message]{"other": other}},
 	})
 	require.NoError(t, err)
 
-	h := handler.(*skillHandler)
+	h := handler.(*typedSkillHandler[*schema.Message])
 	_, err = h.WrapModel(ctx, base, &adk.ModelContext{})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "failed to get active model from run local value")
@@ -545,7 +545,7 @@ func TestWrapModel_IgnoresNonStringRunLocalValue(t *testing.T) {
 
 	handler, err := NewMiddleware(ctx, &Config{
 		Backend:  &inMemoryBackend{m: []Skill{}},
-		ModelHub: &mockModelHub{models: map[string]model.ToolCallingChatModel{"other": other}},
+		ModelHub: &mockModelHub{models: map[string]model.BaseModel[*schema.Message]{"other": other}},
 	})
 	require.NoError(t, err)
 
@@ -591,7 +591,7 @@ func TestWrapModel_ModelHubGetError(t *testing.T) {
 
 	handler, err := NewMiddleware(ctx, &Config{
 		Backend:  &inMemoryBackend{m: []Skill{}},
-		ModelHub: &mockModelHub{models: map[string]model.ToolCallingChatModel{}},
+		ModelHub: &mockModelHub{models: map[string]model.BaseModel[*schema.Message]{}},
 	})
 	require.NoError(t, err)
 
@@ -633,7 +633,7 @@ func TestWrapModel_ModelHubNilKeepsBase(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	h := handler.(*skillHandler)
+	h := handler.(*typedSkillHandler[*schema.Message])
 	m, err := h.WrapModel(ctx, base, &adk.ModelContext{})
 	require.NoError(t, err)
 	assert.Equal(t, base, m)
@@ -647,7 +647,7 @@ func TestWrapModel_RunLocalNotFoundKeepsBase(t *testing.T) {
 
 	handler, err := NewMiddleware(ctx, &Config{
 		Backend:  &inMemoryBackend{m: []Skill{}},
-		ModelHub: &mockModelHub{models: map[string]model.ToolCallingChatModel{"other": other}},
+		ModelHub: &mockModelHub{models: map[string]model.BaseModel[*schema.Message]{"other": other}},
 	})
 	require.NoError(t, err)
 
@@ -693,7 +693,7 @@ func TestWrapModel_IgnoresEmptyStringRunLocalValue(t *testing.T) {
 
 	handler, err := NewMiddleware(ctx, &Config{
 		Backend:  &inMemoryBackend{m: []Skill{}},
-		ModelHub: &mockModelHub{models: map[string]model.ToolCallingChatModel{"other": other}},
+		ModelHub: &mockModelHub{models: map[string]model.BaseModel[*schema.Message]{"other": other}},
 	})
 	require.NoError(t, err)
 
@@ -736,7 +736,7 @@ func TestGetMessagesFromState_InAgentContext(t *testing.T) {
 	ctx := context.Background()
 
 	base := &fakeToolCallingModel{id: "base"}
-	st := &skillTool{}
+	st := &typedSkillTool[*schema.Message]{}
 	capture := &stateMessagesCaptureHandler{st: st}
 
 	agent, err := adk.NewChatModelAgent(ctx, &adk.ChatModelAgentConfig{
@@ -767,7 +767,7 @@ func TestSkillToolInfo(t *testing.T) {
 	ctx := context.Background()
 
 	t.Run("list error propagates", func(t *testing.T) {
-		st := &skillTool{
+		st := &typedSkillTool[*schema.Message]{
 			b:        &errorBackend{listErr: errors.New("list failed")},
 			toolName: "skill",
 		}
@@ -778,7 +778,7 @@ func TestSkillToolInfo(t *testing.T) {
 	})
 
 	t.Run("description contains all skills", func(t *testing.T) {
-		st := &skillTool{
+		st := &typedSkillTool[*schema.Message]{
 			b: &inMemoryBackend{m: []Skill{
 				{FrontMatter: FrontMatter{Name: "alpha", Description: "desc-alpha"}},
 				{FrontMatter: FrontMatter{Name: "beta", Description: "desc-beta"}},
@@ -794,7 +794,7 @@ func TestSkillToolInfo(t *testing.T) {
 	})
 
 	t.Run("custom tool params is used", func(t *testing.T) {
-		st := &skillTool{
+		st := &typedSkillTool[*schema.Message]{
 			b: &inMemoryBackend{m: []Skill{
 				{FrontMatter: FrontMatter{Name: "alpha", Description: "desc-alpha"}},
 			}},
@@ -824,7 +824,7 @@ func TestInvokableRun_InlineMode(t *testing.T) {
 	ctx := context.Background()
 
 	t.Run("invalid json returns error", func(t *testing.T) {
-		st := &skillTool{
+		st := &typedSkillTool[*schema.Message]{
 			b:        &inMemoryBackend{m: []Skill{}},
 			toolName: "skill",
 		}
@@ -834,7 +834,7 @@ func TestInvokableRun_InlineMode(t *testing.T) {
 	})
 
 	t.Run("skill not found returns error", func(t *testing.T) {
-		st := &skillTool{
+		st := &typedSkillTool[*schema.Message]{
 			b:        &inMemoryBackend{m: []Skill{}},
 			toolName: "skill",
 		}
@@ -844,7 +844,7 @@ func TestInvokableRun_InlineMode(t *testing.T) {
 	})
 
 	t.Run("inline mode returns skill content", func(t *testing.T) {
-		st := &skillTool{
+		st := &typedSkillTool[*schema.Message]{
 			b: &inMemoryBackend{m: []Skill{
 				{
 					FrontMatter:   FrontMatter{Name: "pdf", Description: "PDF processing"},
@@ -862,7 +862,7 @@ func TestInvokableRun_InlineMode(t *testing.T) {
 	})
 
 	t.Run("inline mode with model triggers setActiveModel", func(t *testing.T) {
-		st := &skillTool{
+		st := &typedSkillTool[*schema.Message]{
 			b: &inMemoryBackend{m: []Skill{
 				{
 					FrontMatter:   FrontMatter{Name: "pdf", Description: "PDF processing", Model: "m1"},
@@ -878,7 +878,7 @@ func TestInvokableRun_InlineMode(t *testing.T) {
 	})
 
 	t.Run("custom skill content is used", func(t *testing.T) {
-		st := &skillTool{
+		st := &typedSkillTool[*schema.Message]{
 			b: &inMemoryBackend{m: []Skill{
 				{
 					FrontMatter:   FrontMatter{Name: "pdf", Description: "PDF processing"},
@@ -900,7 +900,7 @@ func TestInvokableRun_InlineMode(t *testing.T) {
 	})
 
 	t.Run("custom tool params with decoder is used", func(t *testing.T) {
-		st := &skillTool{
+		st := &typedSkillTool[*schema.Message]{
 			b: &inMemoryBackend{m: []Skill{
 				{
 					FrontMatter:   FrontMatter{Name: "pdf", Description: "PDF processing"},
@@ -935,7 +935,7 @@ func TestInvokableRun_InlineMode(t *testing.T) {
 	})
 
 	t.Run("custom skill content returns error", func(t *testing.T) {
-		st := &skillTool{
+		st := &typedSkillTool[*schema.Message]{
 			b: &inMemoryBackend{m: []Skill{
 				{
 					FrontMatter:   FrontMatter{Name: "pdf", Description: "PDF processing"},
@@ -958,7 +958,7 @@ func TestInvokableRun_AgentMode(t *testing.T) {
 	ctx := context.Background()
 
 	t.Run("fork mode without AgentHub returns error", func(t *testing.T) {
-		st := &skillTool{
+		st := &typedSkillTool[*schema.Message]{
 			b: &inMemoryBackend{m: []Skill{
 				{FrontMatter: FrontMatter{Name: "s1", Context: ContextModeFork}, Content: "c1"},
 			}},
@@ -970,7 +970,7 @@ func TestInvokableRun_AgentMode(t *testing.T) {
 	})
 
 	t.Run("fork_with_context mode without AgentHub returns error", func(t *testing.T) {
-		st := &skillTool{
+		st := &typedSkillTool[*schema.Message]{
 			b: &inMemoryBackend{m: []Skill{
 				{FrontMatter: FrontMatter{Name: "s1", Context: ContextModeForkWithContext}, Content: "c1"},
 			}},
@@ -995,7 +995,7 @@ func TestInvokableRun_AgentMode(t *testing.T) {
 		}
 		hub := &mockAgentHub{defaultAgent: agent}
 
-		st := &skillTool{
+		st := &typedSkillTool[*schema.Message]{
 			b: &inMemoryBackend{m: []Skill{
 				{FrontMatter: FrontMatter{Name: "s1", Context: ContextModeForkWithContext}, Content: "c1", BaseDirectory: "/d"},
 			}},
@@ -1009,7 +1009,7 @@ func TestInvokableRun_AgentMode(t *testing.T) {
 	})
 
 	t.Run("model specified without ModelHub returns error", func(t *testing.T) {
-		st := &skillTool{
+		st := &typedSkillTool[*schema.Message]{
 			b: &inMemoryBackend{m: []Skill{
 				{FrontMatter: FrontMatter{Name: "s1", Context: ContextModeFork, Model: "gpt-4"}, Content: "c1"},
 			}},
@@ -1022,13 +1022,13 @@ func TestInvokableRun_AgentMode(t *testing.T) {
 	})
 
 	t.Run("model not found in ModelHub returns error", func(t *testing.T) {
-		st := &skillTool{
+		st := &typedSkillTool[*schema.Message]{
 			b: &inMemoryBackend{m: []Skill{
 				{FrontMatter: FrontMatter{Name: "s1", Context: ContextModeFork, Model: "gpt-4"}, Content: "c1"},
 			}},
 			toolName: "skill",
 			agentHub: &mockAgentHub{},
-			modelHub: &mockModelHub{models: map[string]model.ToolCallingChatModel{}},
+			modelHub: &mockModelHub{models: map[string]model.BaseModel[*schema.Message]{}},
 		}
 		_, err := st.InvokableRun(ctx, `{"skill": "s1"}`)
 		assert.Error(t, err)
@@ -1036,7 +1036,7 @@ func TestInvokableRun_AgentMode(t *testing.T) {
 	})
 
 	t.Run("agent not found in AgentHub returns error", func(t *testing.T) {
-		st := &skillTool{
+		st := &typedSkillTool[*schema.Message]{
 			b: &inMemoryBackend{m: []Skill{
 				{FrontMatter: FrontMatter{Name: "s1", Context: ContextModeFork, Agent: "nonexistent"}, Content: "c1"},
 			}},
@@ -1062,7 +1062,7 @@ func TestInvokableRun_AgentMode(t *testing.T) {
 		}
 		hub := &mockAgentHub{defaultAgent: agent}
 
-		st := &skillTool{
+		st := &typedSkillTool[*schema.Message]{
 			b: &inMemoryBackend{m: []Skill{
 				{
 					FrontMatter:   FrontMatter{Name: "test-skill", Context: ContextModeFork},
@@ -1099,7 +1099,7 @@ func TestInvokableRun_AgentMode(t *testing.T) {
 		}
 		hub := &mockAgentHub{defaultAgent: agent}
 
-		st := &skillTool{
+		st := &typedSkillTool[*schema.Message]{
 			b: &inMemoryBackend{m: []Skill{
 				{
 					FrontMatter:   FrontMatter{Name: "s1", Context: ContextModeFork, Model: "test-model"},
@@ -1109,7 +1109,7 @@ func TestInvokableRun_AgentMode(t *testing.T) {
 			}},
 			toolName: "skill",
 			agentHub: hub,
-			modelHub: &mockModelHub{models: map[string]model.ToolCallingChatModel{"test-model": m}},
+			modelHub: &mockModelHub{models: map[string]model.BaseModel[*schema.Message]{"test-model": m}},
 		}
 
 		result, err := st.InvokableRun(ctx, `{"skill": "s1"}`)
@@ -1142,7 +1142,7 @@ func TestInvokableRun_AgentMode(t *testing.T) {
 		}
 		hub := &mockAgentHub{defaultAgent: agent}
 
-		st := &skillTool{
+		st := &typedSkillTool[*schema.Message]{
 			b: &inMemoryBackend{m: []Skill{
 				{FrontMatter: FrontMatter{Name: "s1", Context: ContextModeFork}, Content: "c1", BaseDirectory: "/d"},
 			}},
@@ -1170,7 +1170,7 @@ func TestInvokableRun_AgentMode(t *testing.T) {
 		}
 		hub := &mockAgentHub{defaultAgent: agent}
 
-		st := &skillTool{
+		st := &typedSkillTool[*schema.Message]{
 			b: &inMemoryBackend{m: []Skill{
 				{FrontMatter: FrontMatter{Name: "s1", Context: ContextModeFork}, Content: "c1", BaseDirectory: "/d"},
 			}},
@@ -1192,7 +1192,7 @@ func TestInvokableRun_AgentMode(t *testing.T) {
 		}
 		hub := &mockAgentHub{defaultAgent: agent}
 
-		st := &skillTool{
+		st := &typedSkillTool[*schema.Message]{
 			b: &inMemoryBackend{m: []Skill{
 				{FrontMatter: FrontMatter{Name: "s1", Context: ContextModeFork}, Content: "c1", BaseDirectory: "/d"},
 			}},
@@ -1219,7 +1219,7 @@ func TestInvokableRun_AgentMode(t *testing.T) {
 		}
 		hub := &mockAgentHub{defaultAgent: agent}
 
-		st := &skillTool{
+		st := &typedSkillTool[*schema.Message]{
 			b: &inMemoryBackend{m: []Skill{
 				{FrontMatter: FrontMatter{Name: "s1", Context: ContextModeFork}, Content: "c1", BaseDirectory: "/d"},
 			}},
@@ -1254,7 +1254,7 @@ func TestInvokableRun_AgentMode(t *testing.T) {
 		}
 		hub := &mockAgentHub{defaultAgent: agent}
 
-		st := &skillTool{
+		st := &typedSkillTool[*schema.Message]{
 			b: &inMemoryBackend{m: []Skill{
 				{FrontMatter: FrontMatter{Name: "s1", Context: ContextModeFork}, Content: "c1", BaseDirectory: "/d"},
 			}},
@@ -1291,7 +1291,7 @@ func TestInvokableRun_AgentMode(t *testing.T) {
 		}
 		hub := &mockAgentHub{defaultAgent: agent}
 
-		st := &skillTool{
+		st := &typedSkillTool[*schema.Message]{
 			b: &inMemoryBackend{m: []Skill{
 				{FrontMatter: FrontMatter{Name: "s1", Context: ContextModeFork}, Content: "c1", BaseDirectory: "/d"},
 			}},
@@ -1323,7 +1323,7 @@ func TestInvokableRun_AgentMode(t *testing.T) {
 		}
 		hub := &mockAgentHub{defaultAgent: agent}
 
-		st := &skillTool{
+		st := &typedSkillTool[*schema.Message]{
 			b: &inMemoryBackend{m: []Skill{
 				{FrontMatter: FrontMatter{Name: "s1", Context: ContextModeFork}, Content: "c1", BaseDirectory: "/d"},
 			}},
@@ -1334,9 +1334,20 @@ func TestInvokableRun_AgentMode(t *testing.T) {
 			},
 		}
 
-		_, err := st.InvokableRun(ctx, `{"skill": "s1"}`)
+		_, err := st.InvokableRun(ctx, `{"skill":"s1"}`)
 		assert.Error(t, err)
 		assert.Contains(t, err.Error(), "failed to format fork result")
 		assert.Contains(t, err.Error(), "format fail")
 	})
+}
+
+func TestNewTypedAgenticMessage(t *testing.T) {
+	ctx := context.Background()
+	mw, err := NewTyped(ctx, &TypedConfig[*schema.AgenticMessage]{
+		Backend: &inMemoryBackend{m: []Skill{}},
+	})
+	assert.NoError(t, err)
+	assert.NotNil(t, mw)
+
+	var _ adk.TypedChatModelAgentMiddleware[*schema.AgenticMessage] = mw
 }

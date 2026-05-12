@@ -582,7 +582,7 @@ func textToFunctionToolResultBlocks(text string) []*schema.FunctionToolResultCon
 	}
 }
 
-// functionToolResultAgenticMessage represents a function tool result message with AgenticRoleType "user".
+// functionToolResultAgenticMessage constructs a function tool result message with AgenticRoleType "user".
 func functionToolResultAgenticMessage(callID, name string, content []*schema.FunctionToolResultContentBlock) *schema.AgenticMessage {
 	return &schema.AgenticMessage{
 		Role: schema.AgenticRoleTypeUser,
