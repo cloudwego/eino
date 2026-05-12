@@ -19,6 +19,7 @@ package adk
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -1447,4 +1448,299 @@ func TestWithCancel_CancelImmediate_StreamableToolAborted(t *testing.T) {
 	r := <-resultCh
 	assert.True(t, r.foundStreamCanceled, "expected ErrStreamCanceled on tool's MessageStream.Recv()")
 	assert.True(t, r.foundCancelError, "expected CancelError in event stream")
+}
+
+// TestWithCancel_CancelImmediate_NestedAgentTool_ResumeFromToolsNode verifies that
+// when a nested ChatModelAgent (wrapped as an AgentTool inside an outer ChatModelAgent)
+// is canceled via CancelImmediate and then resumed with Runner.Resume (no params),
+// the outer agent resumes from the ToolsNode rather than restarting from the beginning.
+//
+// Regression test: previously, the outer ChatModelAgent would restart from its Init/ChatModel
+// node instead of resuming from the ToolsNode, causing the outer model to be called again
+// with the original user message before the AgentTool and inner ChatModelAgent were resumed.
+func TestWithCancel_CancelImmediate_NestedAgentTool_ResumeFromToolsNode(t *testing.T) {
+	for _, tc := range []struct {
+		name            string
+		enableStreaming bool
+		innerHasTools   bool
+		recursive       bool
+	}{
+		{"Invoke_InnerNoTools_NonRecursive", false, false, false},
+		{"Stream_InnerNoTools_NonRecursive", true, false, false},
+		{"Invoke_InnerWithTools_NonRecursive", false, true, false},
+		{"Stream_InnerWithTools_NonRecursive", true, true, false},
+		{"Invoke_InnerNoTools_Recursive", false, false, true},
+		{"Stream_InnerNoTools_Recursive", true, false, true},
+		{"Invoke_InnerWithTools_Recursive", false, true, true},
+		{"Stream_InnerWithTools_Recursive", true, true, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+
+			// --- inner agent: its model blocks so we can cancel mid-execution ---
+			var innerTools []tool.BaseTool
+			var innerModelResp *schema.Message
+			if tc.innerHasTools {
+				innerModelResp = toolCallMsg(toolCall("ic1", "inner_tool", `{"input":"x"}`))
+				innerTools = []tool.BaseTool{newBlockingTool("inner_tool")}
+			} else {
+				innerModelResp = &schema.Message{Role: schema.Assistant, Content: "inner agent done"}
+			}
+			innerModel := newBlockingChatModel(innerModelResp)
+			t.Cleanup(func() {
+				close(innerModel.unblockCh)
+			})
+
+			innerCfg := &ChatModelAgentConfig{
+				Name:        "InnerAgent",
+				Description: "inner agent that blocks",
+				Instruction: "you are an inner agent",
+				Model:       innerModel,
+			}
+			if len(innerTools) > 0 {
+				innerCfg.ToolsConfig = ToolsConfig{
+					ToolsNodeConfig: compose.ToolsNodeConfig{Tools: innerTools},
+				}
+			}
+			innerAgent, err := NewChatModelAgent(ctx, innerCfg)
+			require.NoError(t, err)
+
+			// --- outer agent: counting model ---
+			// Call 1: returns a tool call that invokes InnerAgent.
+			// Call 2 (only needed on resume): returns a plain final answer.
+			outerModelCallCount := int32(0)
+			outerModel := &countingChatModel{
+				callCount: &outerModelCallCount,
+				responses: []*schema.Message{
+					toolCallMsg(toolCall("c1", "InnerAgent", `{"request":"do something"}`)),
+					schema.AssistantMessage("outer completed", nil),
+				},
+			}
+
+			outerAgent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+				Name:        "OuterAgent",
+				Description: "outer agent with nested agent tool",
+				Instruction: "you are an outer agent",
+				Model:       outerModel,
+				ToolsConfig: ToolsConfig{
+					ToolsNodeConfig: compose.ToolsNodeConfig{
+						Tools: []tool.BaseTool{NewAgentTool(ctx, innerAgent)},
+					},
+				},
+			})
+			require.NoError(t, err)
+
+			store := newCancelTestStore()
+			checkpointID := "cancel-nested-resume-" + tc.name
+
+			runner1 := NewRunner(ctx, RunnerConfig{
+				Agent:           outerAgent,
+				EnableStreaming: tc.enableStreaming,
+				CheckPointStore: store,
+			})
+
+			// --- phase 1: run and cancel while inner agent model is blocked ---
+			cancelOpt, cancelFn := WithCancel()
+			iter := runner1.Run(ctx, []Message{schema.UserMessage("go")}, cancelOpt, WithCheckPointID(checkpointID))
+
+			// Wait for inner model to start (meaning outer model already returned tool call).
+			select {
+			case <-innerModel.started:
+			case <-time.After(5 * time.Second):
+				t.Fatal("inner model did not start")
+			}
+
+			// At this point outerModel should have been called exactly once.
+			assert.Equal(t, int32(1), atomic.LoadInt32(&outerModelCallCount),
+				"outer model should have been called once before cancel")
+
+			// Cancel immediately. Recursive cases additionally propagate the cancel
+			// request into the AgentTool's internal ChatModelAgent.
+			var handle *CancelHandle
+			if tc.recursive {
+				handle, _ = cancelFn(WithRecursive())
+			} else {
+				handle, _ = cancelFn()
+			}
+			cancelErr := handle.Wait()
+			assert.NoError(t, cancelErr)
+
+			_, hasCancelError := drainEvents(iter)
+			assert.True(t, hasCancelError, "expected CancelError from canceled nested agent tool")
+
+			// --- phase 2: resume with Runner.Resume (no ResumeWithParams, no interrupt ID) ---
+			// Build fresh agents for resume. The first model call after Resume should be
+			// the inner ChatModelAgent inside AgentTool, not the top-level ChatModelAgent.
+			resumeFirstModelCall := make(chan string, 5)
+			resumeOuterModelCallCount := int32(0)
+			resumeOuterModel := &countingChatModel{
+				callCount: &resumeOuterModelCallCount,
+				callCh:    resumeFirstModelCall,
+				callLabel: "outer",
+				responses: []*schema.Message{
+					schema.AssistantMessage("outer completed after resume", nil),
+				},
+			}
+
+			resumeInnerModelCallCount := int32(0)
+			resumeInnerResponses := []*schema.Message{schema.AssistantMessage("inner agent done after resume", nil)}
+			if len(innerTools) > 0 {
+				resumeInnerResponses = []*schema.Message{
+					toolCallMsg(toolCall("ic1", "inner_tool", `{"input":"x"}`)),
+					schema.AssistantMessage("inner agent done after resume", nil),
+				}
+			}
+			resumeInnerModel := &countingChatModel{
+				callCount: &resumeInnerModelCallCount,
+				callCh:    resumeFirstModelCall,
+				callLabel: "inner",
+				responses: resumeInnerResponses,
+			}
+			resumeInnerCfg := &ChatModelAgentConfig{
+				Name:        "InnerAgent",
+				Description: "inner agent that returns immediately on resume",
+				Instruction: "you are an inner agent",
+				Model:       resumeInnerModel,
+			}
+			if len(innerTools) > 0 {
+				resumeInnerCfg.ToolsConfig = ToolsConfig{
+					ToolsNodeConfig: compose.ToolsNodeConfig{
+						Tools: []tool.BaseTool{newSlowTool("inner_tool", 0, "inner tool result")},
+					},
+				}
+			}
+			resumeInnerAgent, err := NewChatModelAgent(ctx, resumeInnerCfg)
+			require.NoError(t, err)
+
+			resumeOuterAgent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+				Name:        "OuterAgent",
+				Description: "outer agent with nested agent tool",
+				Instruction: "you are an outer agent",
+				Model:       resumeOuterModel,
+				ToolsConfig: ToolsConfig{
+					ToolsNodeConfig: compose.ToolsNodeConfig{
+						Tools: []tool.BaseTool{NewAgentTool(ctx, resumeInnerAgent)},
+					},
+				},
+			})
+			require.NoError(t, err)
+
+			runner2 := NewRunner(ctx, RunnerConfig{
+				Agent:           resumeOuterAgent,
+				EnableStreaming: tc.enableStreaming,
+				CheckPointStore: store,
+			})
+
+			resumeIter, err := runner2.Resume(ctx, checkpointID)
+			require.NoError(t, err)
+
+			select {
+			case firstModel := <-resumeFirstModelCall:
+				expectedFirstModel := "outer"
+				if tc.recursive {
+					expectedFirstModel = "inner"
+				}
+				assert.Equal(t, expectedFirstModel, firstModel,
+					"recursive cancel should resume the AgentTool/internal ChatModelAgent first; "+
+						"non-recursive cancel only guarantees root-agent cancellation")
+			case <-time.After(5 * time.Second):
+				t.Fatal("no model call observed during resume")
+			}
+
+			var resumeEvents []*AgentEvent
+			for {
+				event, ok := resumeIter.Next()
+				if !ok {
+					break
+				}
+				if event.Err != nil {
+					t.Fatalf("unexpected error during resume: %v", event.Err)
+				}
+				resumeEvents = append(resumeEvents, event)
+			}
+
+			// The outer model should have been called exactly once during resume
+			// (to produce the final answer after receiving tool results).
+			// If it was called with the original user message (restarting from scratch),
+			// the counting model would either exceed its response list or the call count
+			// would be wrong.
+			assert.Equal(t, int32(1), atomic.LoadInt32(&resumeOuterModelCallCount),
+				"outer model should be called exactly once during resume (for final answer after tool results), "+
+					"not restarted from the beginning")
+
+			// Verify we got the completion output.
+			var gotOutput bool
+			for _, event := range resumeEvents {
+				content, err := messageOutputContent(event)
+				require.NoError(t, err)
+				if content == "outer completed after resume" {
+					gotOutput = true
+				}
+			}
+			assert.True(t, gotOutput, "should get final output from resumed outer agent")
+		})
+	}
+}
+
+// countingChatModel is a chat model that counts calls and records inputs.
+// It returns responses from a fixed slice, indexed by call count.
+type countingChatModel struct {
+	callCount *int32
+	inputsCh  chan []*schema.Message // optional: receives a copy of each input
+	callCh    chan string            // optional: receives callLabel when Generate is called
+	callLabel string
+	responses []*schema.Message
+}
+
+func (m *countingChatModel) Generate(_ context.Context, input []*schema.Message, _ ...model.Option) (*schema.Message, error) {
+	idx := int(atomic.AddInt32(m.callCount, 1)) - 1
+	if m.callCh != nil {
+		select {
+		case m.callCh <- m.callLabel:
+		default:
+		}
+	}
+	if m.inputsCh != nil {
+		cp := make([]*schema.Message, len(input))
+		copy(cp, input)
+		select {
+		case m.inputsCh <- cp:
+		default:
+		}
+	}
+	if idx >= len(m.responses) {
+		return nil, fmt.Errorf("countingChatModel: call %d exceeds %d responses (outer model was called too many times - possible restart from beginning)", idx+1, len(m.responses))
+	}
+	return m.responses[idx], nil
+}
+
+func (m *countingChatModel) Stream(_ context.Context, input []*schema.Message, opts ...model.Option) (*schema.StreamReader[*schema.Message], error) {
+	msg, err := m.Generate(context.Background(), input, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return schema.StreamReaderFromArray([]*schema.Message{msg}), nil
+}
+
+func (m *countingChatModel) BindTools(_ []*schema.ToolInfo) error { return nil }
+
+func messageOutputContent(event *AgentEvent) (string, error) {
+	if event.Output == nil || event.Output.MessageOutput == nil {
+		return "", nil
+	}
+	mo := event.Output.MessageOutput
+	if mo.IsStreaming {
+		msg, err := schema.ConcatMessageStream(mo.MessageStream)
+		if err != nil {
+			return "", err
+		}
+		if msg == nil {
+			return "", nil
+		}
+		return msg.Content, nil
+	}
+	if mo.Message == nil {
+		return "", nil
+	}
+	return mo.Message.Content, nil
 }

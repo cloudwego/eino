@@ -152,6 +152,10 @@ func (at *typedAgentTool[M]) Info(ctx context.Context) (*schema.ToolInfo, error)
 }
 
 func (at *typedAgentTool[M]) InvokableRun(ctx context.Context, argumentsInJSON string, opts ...tool.Option) (string, error) {
+	if cancelCtx := getCancelContext(ctx); cancelCtx != nil {
+		cancelCtx.markAgentToolDescendant()
+	}
+
 	gen, enableStreaming := getEmitGeneratorAndEnableStreaming(opts)
 	var ms *bridgeStore
 	var iter *AsyncIterator[*TypedAgentEvent[M]]

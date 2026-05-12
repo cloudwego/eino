@@ -388,7 +388,7 @@ func TestDeriveChild_Race(t *testing.T) {
 	})
 }
 
-func TestGracePeriod_OnlyWhenRecursive(t *testing.T) {
+func TestGracePeriod_OnlyWhenRecursiveWithAgentToolDescendant(t *testing.T) {
 	parent, _, _ := setupParentChild(t)
 
 	var nonRecursiveOptCount int
@@ -404,6 +404,10 @@ func TestGracePeriod_OnlyWhenRecursive(t *testing.T) {
 	wrappedRecursive := parent.wrapGraphInterruptWithGracePeriod(func(opts ...compose.GraphInterruptOption) {
 		recursiveOptCount = len(opts)
 	})
+	wrappedRecursive()
+	assert.Equal(t, 0, recursiveOptCount)
+
+	parent.markAgentToolDescendant()
 	wrappedRecursive()
 	assert.Equal(t, 1, recursiveOptCount)
 }
