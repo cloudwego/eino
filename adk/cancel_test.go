@@ -435,7 +435,7 @@ func TestWithCancel_WithTools(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
 
-		child := cc.deriveChild(ctx)
+		child := cc.deriveAgentToolCancelContext(ctx)
 		assert.NotNil(t, child)
 
 		cc.setRecursive(true)
@@ -3171,55 +3171,24 @@ func TestCancelAfterToolCalls_LoopTransitionBoundary(t *testing.T) {
 }
 
 func TestCancelContext_RecursiveGraceBoundary(t *testing.T) {
-	t.Run("GracePeriodWrapper_AppliesForRecursiveAgentToolDescendant", func(t *testing.T) {
+	t.Run("AgentToolDescendantMarker_PropagatesToParents", func(t *testing.T) {
 		parent := newCancelContext()
 		ctx := context.Background()
+		child := parent.deriveAgentToolCancelContext(ctx)
+		grandchild := child.deriveAgentToolCancelContext(ctx)
+		t.Cleanup(func() {
+			grandchild.markDone()
+			child.markDone()
+		})
 
-		var receivedOpts []compose.GraphInterruptOption
-		mockInterrupt := func(opts ...compose.GraphInterruptOption) {
-			receivedOpts = opts
-		}
+		assert.False(t, parent.hasAgentToolDescendant())
+		assert.False(t, child.hasAgentToolDescendant())
 
-		wrapped := parent.wrapGraphInterruptWithGracePeriod(mockInterrupt)
+		grandchild.markAgentToolDescendant()
 
-		receivedOpts = nil
-		wrapped()
-		assert.Empty(t, receivedOpts, "Should pass no extra options when no children")
-
-		parent.setRecursive(true)
-
-		receivedOpts = nil
-		wrapped()
-		assert.Empty(t, receivedOpts, "Should pass no extra options when recursive but no AgentTool descendant exists")
-
-		child := parent.deriveChild(ctx)
-
-		receivedOpts = nil
-		wrapped()
-		assert.Empty(t, receivedOpts, "Should not add timeout for derived children alone")
-
-		child.markAgentToolDescendant()
-
-		receivedOpts = nil
-		wrapped()
-		assert.Len(t, receivedOpts, 1, "Should add exactly one timeout option when an AgentTool descendant exists")
-
-		child.markDone()
-		time.Sleep(10 * time.Millisecond)
-
-		receivedOpts = nil
-		wrapped()
-		assert.Len(t, receivedOpts, 1, "Should keep grace after the AgentTool descendant has detached")
-
-		receivedOpts = nil
-		callerOpt := compose.WithGraphInterruptTimeout(0)
-		wrapped(callerOpt)
-		assert.Len(t, receivedOpts, 2,
-			"Should append timeout option after caller-provided options when AgentTool descendant exists")
-		// Note: verifying the exact timeout value (defaultCancelImmediateGracePeriod)
-		// requires access to unexported compose.graphInterruptOptions. The integration
-		// tests (TestCancelImmediate_AgentTool_PreservesChildCheckpoint) verify the
-		// actual behavioral effect — child interrupts propagate within the grace period.
+		assert.True(t, grandchild.hasAgentToolDescendant())
+		assert.True(t, child.hasAgentToolDescendant())
+		assert.True(t, parent.hasAgentToolDescendant())
 	})
 }
 

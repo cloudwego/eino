@@ -195,7 +195,7 @@ func (at *typedAgentTool[M]) InvokableRun(ctx context.Context, argumentsInJSON s
 
 		runner := newTypedInvokableAgentToolRunner[M](at.agent, ms, enableStreaming)
 		iter = runner.Run(ctx, input,
-			append(extractAndDeriveCancelCtx(ctx, at.agent.Name(ctx), opts), WithCheckPointID(bridgeCheckpointID), withSharedParentSession())...)
+			append(extractAndDeriveAgentToolCancelCtx(ctx, at.agent.Name(ctx), opts), WithCheckPointID(bridgeCheckpointID), withSharedParentSession())...)
 	} else {
 		if !hasState {
 			return "", fmt.Errorf("agent tool '%s' interrupt has happened, but cannot find interrupt state", at.agent.Name(ctx))
@@ -203,7 +203,7 @@ func (at *typedAgentTool[M]) InvokableRun(ctx context.Context, argumentsInJSON s
 
 		ms = newResumeBridgeStore(bridgeCheckpointID, state)
 
-		agentOpts := extractAndDeriveCancelCtx(ctx, at.agent.Name(ctx), opts)
+		agentOpts := extractAndDeriveAgentToolCancelCtx(ctx, at.agent.Name(ctx), opts)
 		agentOpts = append(agentOpts, withSharedParentSession())
 
 		runner := newTypedInvokableAgentToolRunner[M](at.agent, ms, enableStreaming)
@@ -320,11 +320,16 @@ func getOptionsByAgentName(agentName string, opts []tool.Option) []AgentRunOptio
 	return ret
 }
 
-func extractAndDeriveCancelCtx(ctx context.Context, agentName string, opts []tool.Option) []AgentRunOption {
+func extractAndDeriveAgentToolCancelCtx(ctx context.Context, agentName string, opts []tool.Option) []AgentRunOption {
 	agentOpts := getOptionsByAgentName(agentName, opts)
 	baseOpts := getCommonOptions(nil, agentOpts...)
-	if baseOpts.cancelCtx != nil {
-		childCtx := baseOpts.cancelCtx.deriveChild(ctx)
+	parentCtx := baseOpts.cancelCtx
+	if parentCtx == nil {
+		parentCtx = getCancelContext(ctx)
+	}
+	if parentCtx != nil {
+		parentCtx.markAgentToolDescendant()
+		childCtx := parentCtx.deriveAgentToolCancelContext(ctx)
 		agentOpts = append(agentOpts, WrapImplSpecificOptFn(func(o *options) {
 			o.cancelCtx = childCtx
 		}))

@@ -1024,7 +1024,7 @@ func (a *TypedChatModelAgent[M]) buildNoToolsRunFunc(_ context.Context) (typedRu
 		if cancelCtx != nil {
 			var interrupt func(...compose.GraphInterruptOption)
 			ctx, interrupt = compose.WithGraphInterrupt(ctx)
-			cancelCtx.setGraphInterruptFunc(cancelCtx.wrapGraphInterruptWithGracePeriod(interrupt))
+			cancelCtx.setGraphInterruptFunc(interrupt)
 		}
 
 		r, err := chain.Compile(ctx, compileOptions...)
@@ -1161,7 +1161,7 @@ func (a *TypedChatModelAgent[M]) buildMessageReActRunFunc(ctx context.Context, b
 		if cancelCtx != nil {
 			var interrupt func(...compose.GraphInterruptOption)
 			ctx, interrupt = compose.WithGraphInterrupt(ctx)
-			cancelCtx.setGraphInterruptFunc(cancelCtx.wrapGraphInterruptWithGracePeriod(interrupt))
+			cancelCtx.setGraphInterruptFunc(interrupt)
 		}
 
 		runnable, err_ := chain.Compile(ctx, compileOptions...)
@@ -1298,7 +1298,7 @@ func (a *TypedChatModelAgent[M]) buildAgenticReActRunFunc(ctx context.Context, b
 		if cancelCtx != nil {
 			var interrupt func(...compose.GraphInterruptOption)
 			ctx, interrupt = compose.WithGraphInterrupt(ctx)
-			cancelCtx.setGraphInterruptFunc(cancelCtx.wrapGraphInterruptWithGracePeriod(interrupt))
+			cancelCtx.setGraphInterruptFunc(interrupt)
 		}
 
 		runnable, err_ := chain.Compile(ctx, compileOptions...)

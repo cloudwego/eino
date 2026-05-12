@@ -1682,6 +1682,302 @@ func TestWithCancel_CancelImmediate_NestedAgentTool_ResumeFromToolsNode(t *testi
 	}
 }
 
+func TestWithCancel_CancelImmediate_RecursiveAgentTool_ResumeDeepestAgentTool(t *testing.T) {
+	ctx := context.Background()
+
+	leafModel := newBlockingChatModel(schema.AssistantMessage("leaf done", nil))
+	t.Cleanup(func() {
+		close(leafModel.unblockCh)
+	})
+	leafAgent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+		Name:        "LeafAgent",
+		Description: "leaf agent that blocks",
+		Instruction: "you are a leaf agent",
+		Model:       leafModel,
+	})
+	require.NoError(t, err)
+
+	middleModelCallCount := int32(0)
+	middleModel := &countingChatModel{
+		callCount: &middleModelCallCount,
+		responses: []*schema.Message{
+			toolCallMsg(toolCall("middle-leaf", "LeafAgent", `{"request":"leaf work"}`)),
+			schema.AssistantMessage("middle done", nil),
+		},
+	}
+	middleAgent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+		Name:        "MiddleAgent",
+		Description: "middle agent with an agent tool",
+		Instruction: "you are a middle agent",
+		Model:       middleModel,
+		ToolsConfig: ToolsConfig{
+			ToolsNodeConfig: compose.ToolsNodeConfig{
+				Tools: []tool.BaseTool{NewAgentTool(ctx, leafAgent)},
+			},
+		},
+	})
+	require.NoError(t, err)
+
+	outerModelCallCount := int32(0)
+	outerModel := &countingChatModel{
+		callCount: &outerModelCallCount,
+		responses: []*schema.Message{
+			toolCallMsg(toolCall("outer-middle", "MiddleAgent", `{"request":"middle work"}`)),
+			schema.AssistantMessage("outer done", nil),
+		},
+	}
+	outerAgent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+		Name:        "OuterAgent",
+		Description: "outer agent with recursive agent tool nesting",
+		Instruction: "you are an outer agent",
+		Model:       outerModel,
+		ToolsConfig: ToolsConfig{
+			ToolsNodeConfig: compose.ToolsNodeConfig{
+				Tools: []tool.BaseTool{NewAgentTool(ctx, middleAgent)},
+			},
+		},
+	})
+	require.NoError(t, err)
+
+	store := newCancelTestStore()
+	checkpointID := "cancel-recursive-agent-tool-resume"
+	runner1 := NewRunner(ctx, RunnerConfig{Agent: outerAgent, CheckPointStore: store})
+
+	cancelOpt, cancelFn := WithCancel()
+	iter := runner1.Run(ctx, []Message{schema.UserMessage("go")}, cancelOpt, WithCheckPointID(checkpointID))
+
+	select {
+	case <-leafModel.started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("leaf model did not start")
+	}
+
+	handle, _ := cancelFn(WithRecursive())
+	require.NoError(t, handle.Wait())
+	_, hasCancelError := drainEvents(iter)
+	assert.True(t, hasCancelError, "expected CancelError from recursive nested agent tool")
+
+	firstModelCall := make(chan string, 8)
+	resumeLeafModelCallCount := int32(0)
+	resumeLeafModel := &countingChatModel{
+		callCount: &resumeLeafModelCallCount,
+		callCh:    firstModelCall,
+		callLabel: "leaf",
+		responses: []*schema.Message{schema.AssistantMessage("leaf done after resume", nil)},
+	}
+	resumeLeafAgent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+		Name:        "LeafAgent",
+		Description: "leaf agent that returns on resume",
+		Instruction: "you are a leaf agent",
+		Model:       resumeLeafModel,
+	})
+	require.NoError(t, err)
+
+	resumeMiddleModelCallCount := int32(0)
+	resumeMiddleModel := &countingChatModel{
+		callCount: &resumeMiddleModelCallCount,
+		callCh:    firstModelCall,
+		callLabel: "middle",
+		responses: []*schema.Message{schema.AssistantMessage("middle done after resume", nil)},
+	}
+	resumeMiddleAgent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+		Name:        "MiddleAgent",
+		Description: "middle agent with an agent tool",
+		Instruction: "you are a middle agent",
+		Model:       resumeMiddleModel,
+		ToolsConfig: ToolsConfig{
+			ToolsNodeConfig: compose.ToolsNodeConfig{
+				Tools: []tool.BaseTool{NewAgentTool(ctx, resumeLeafAgent)},
+			},
+		},
+	})
+	require.NoError(t, err)
+
+	resumeOuterModelCallCount := int32(0)
+	resumeOuterModel := &countingChatModel{
+		callCount: &resumeOuterModelCallCount,
+		callCh:    firstModelCall,
+		callLabel: "outer",
+		responses: []*schema.Message{schema.AssistantMessage("outer done after resume", nil)},
+	}
+	resumeOuterAgent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+		Name:        "OuterAgent",
+		Description: "outer agent with recursive agent tool nesting",
+		Instruction: "you are an outer agent",
+		Model:       resumeOuterModel,
+		ToolsConfig: ToolsConfig{
+			ToolsNodeConfig: compose.ToolsNodeConfig{
+				Tools: []tool.BaseTool{NewAgentTool(ctx, resumeMiddleAgent)},
+			},
+		},
+	})
+	require.NoError(t, err)
+
+	runner2 := NewRunner(ctx, RunnerConfig{Agent: resumeOuterAgent, CheckPointStore: store})
+	resumeIter, err := runner2.Resume(ctx, checkpointID)
+	require.NoError(t, err)
+
+	select {
+	case first := <-firstModelCall:
+		assert.Equal(t, "leaf", first, "recursive AgentTool nesting should resume the deepest internal agent first")
+	case <-time.After(5 * time.Second):
+		t.Fatal("no model call observed during resume")
+	}
+
+	resumeEvents, hasResumeCancelError := drainEvents(resumeIter)
+	require.False(t, hasResumeCancelError, "resume should complete without another CancelError")
+	assert.NotEmpty(t, resumeEvents)
+	assert.Equal(t, int32(1), atomic.LoadInt32(&resumeLeafModelCallCount))
+	assert.Equal(t, int32(1), atomic.LoadInt32(&resumeMiddleModelCallCount))
+	assert.Equal(t, int32(1), atomic.LoadInt32(&resumeOuterModelCallCount))
+}
+
+func TestWithCancel_CancelImmediate_ConcurrentAgentTools_ResumeWithoutRestart(t *testing.T) {
+	ctx := context.Background()
+
+	innerAModel := newBlockingChatModel(schema.AssistantMessage("inner A done", nil))
+	innerBModel := newBlockingChatModel(schema.AssistantMessage("inner B done", nil))
+	t.Cleanup(func() {
+		close(innerAModel.unblockCh)
+		close(innerBModel.unblockCh)
+	})
+
+	innerAAgent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+		Name:        "InnerAgentA",
+		Description: "inner agent A",
+		Instruction: "you are inner agent A",
+		Model:       innerAModel,
+	})
+	require.NoError(t, err)
+	innerBAgent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+		Name:        "InnerAgentB",
+		Description: "inner agent B",
+		Instruction: "you are inner agent B",
+		Model:       innerBModel,
+	})
+	require.NoError(t, err)
+
+	outerModelCallCount := int32(0)
+	outerModel := &countingChatModel{
+		callCount: &outerModelCallCount,
+		responses: []*schema.Message{
+			toolCallMsg(
+				toolCall("outer-a", "InnerAgentA", `{"request":"work A"}`),
+				toolCall("outer-b", "InnerAgentB", `{"request":"work B"}`),
+			),
+			schema.AssistantMessage("outer done", nil),
+		},
+	}
+	outerAgent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+		Name:        "OuterAgent",
+		Description: "outer agent with concurrent agent tools",
+		Instruction: "you are an outer agent",
+		Model:       outerModel,
+		ToolsConfig: ToolsConfig{
+			ToolsNodeConfig: compose.ToolsNodeConfig{
+				Tools: []tool.BaseTool{
+					NewAgentTool(ctx, innerAAgent),
+					NewAgentTool(ctx, innerBAgent),
+				},
+			},
+		},
+	})
+	require.NoError(t, err)
+
+	store := newCancelTestStore()
+	checkpointID := "cancel-concurrent-agent-tools-resume"
+	runner1 := NewRunner(ctx, RunnerConfig{Agent: outerAgent, CheckPointStore: store})
+
+	cancelOpt, cancelFn := WithCancel()
+	iter := runner1.Run(ctx, []Message{schema.UserMessage("go")}, cancelOpt, WithCheckPointID(checkpointID))
+
+	for _, started := range []chan struct{}{innerAModel.started, innerBModel.started} {
+		select {
+		case <-started:
+		case <-time.After(5 * time.Second):
+			t.Fatal("both concurrent inner models should start before cancel")
+		}
+	}
+
+	handle, _ := cancelFn(WithRecursive())
+	require.NoError(t, handle.Wait())
+	_, hasCancelError := drainEvents(iter)
+	assert.True(t, hasCancelError, "expected CancelError from concurrent agent tools")
+
+	firstModelCall := make(chan string, 8)
+	resumeInnerAModelCallCount := int32(0)
+	resumeInnerAModel := &countingChatModel{
+		callCount: &resumeInnerAModelCallCount,
+		callCh:    firstModelCall,
+		callLabel: "innerA",
+		responses: []*schema.Message{schema.AssistantMessage("inner A done after resume", nil)},
+	}
+	resumeInnerBModelCallCount := int32(0)
+	resumeInnerBModel := &countingChatModel{
+		callCount: &resumeInnerBModelCallCount,
+		callCh:    firstModelCall,
+		callLabel: "innerB",
+		responses: []*schema.Message{schema.AssistantMessage("inner B done after resume", nil)},
+	}
+
+	resumeInnerAAgent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+		Name:        "InnerAgentA",
+		Description: "inner agent A",
+		Instruction: "you are inner agent A",
+		Model:       resumeInnerAModel,
+	})
+	require.NoError(t, err)
+	resumeInnerBAgent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+		Name:        "InnerAgentB",
+		Description: "inner agent B",
+		Instruction: "you are inner agent B",
+		Model:       resumeInnerBModel,
+	})
+	require.NoError(t, err)
+
+	resumeOuterModelCallCount := int32(0)
+	resumeOuterModel := &countingChatModel{
+		callCount: &resumeOuterModelCallCount,
+		callCh:    firstModelCall,
+		callLabel: "outer",
+		responses: []*schema.Message{schema.AssistantMessage("outer done after resume", nil)},
+	}
+	resumeOuterAgent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+		Name:        "OuterAgent",
+		Description: "outer agent with concurrent agent tools",
+		Instruction: "you are an outer agent",
+		Model:       resumeOuterModel,
+		ToolsConfig: ToolsConfig{
+			ToolsNodeConfig: compose.ToolsNodeConfig{
+				Tools: []tool.BaseTool{
+					NewAgentTool(ctx, resumeInnerAAgent),
+					NewAgentTool(ctx, resumeInnerBAgent),
+				},
+			},
+		},
+	})
+	require.NoError(t, err)
+
+	runner2 := NewRunner(ctx, RunnerConfig{Agent: resumeOuterAgent, CheckPointStore: store})
+	resumeIter, err := runner2.Resume(ctx, checkpointID)
+	require.NoError(t, err)
+
+	select {
+	case first := <-firstModelCall:
+		assert.Contains(t, []string{"innerA", "innerB"}, first,
+			"concurrent AgentTools should resume an internal agent before the outer model")
+	case <-time.After(5 * time.Second):
+		t.Fatal("no model call observed during resume")
+	}
+
+	resumeEvents, hasResumeCancelError := drainEvents(resumeIter)
+	require.False(t, hasResumeCancelError, "resume should complete without another CancelError")
+	assert.NotEmpty(t, resumeEvents)
+	assert.Equal(t, int32(1), atomic.LoadInt32(&resumeInnerAModelCallCount))
+	assert.Equal(t, int32(1), atomic.LoadInt32(&resumeInnerBModelCallCount))
+	assert.Equal(t, int32(1), atomic.LoadInt32(&resumeOuterModelCallCount))
+}
+
 // countingChatModel is a chat model that counts calls and records inputs.
 // It returns responses from a fixed slice, indexed by call count.
 type countingChatModel struct {
