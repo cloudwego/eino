@@ -300,20 +300,17 @@ type typedMiddleware[M adk.MessageType] struct {
 	cfg *TypedConfig[M]
 }
 
-// TypedSummarizeOutput contains the output of a synchronous Summarize call.
+// SummarizeOutput contains the output of a synchronous SummarizeMessages call.
 //
 // Deprecated: See SummarizeMessages.
-type TypedSummarizeOutput[M adk.MessageType] struct {
+type SummarizeOutput struct {
 	// FinalizedMessages is the message list after summarization,
 	// ready to be used as the new conversation history.
-	FinalizedMessages []M
+	FinalizedMessages []adk.Message
 
 	// ModelResponse is the raw response from the summarization model.
-	ModelResponse M
+	ModelResponse adk.Message
 }
-
-// SummarizeOutput is a backward-compatible alias for TypedSummarizeOutput specialized with *schema.Message.
-type SummarizeOutput = TypedSummarizeOutput[*schema.Message]
 
 // SummarizeMessages performs synchronous summarization of the given messages.
 // EmitInternalEvents and Trigger are not supported and will return an error if set.
@@ -540,11 +537,6 @@ func defaultTypedTokenCounter[M adk.MessageType](_ context.Context, input *Typed
 	return totalTokens, nil
 }
 
-// defaultTokenCounter is kept for backward compatibility with external callers.
-func defaultTokenCounter(ctx context.Context, input *TokenCounterInput) (int, error) {
-	return defaultTypedTokenCounter(ctx, input)
-}
-
 func estimateTokenCount(text string) int {
 	return (len(text) + 3) / 4
 }
@@ -722,10 +714,9 @@ func (m *typedMiddleware[M]) postProcessSummary(ctx context.Context, contextMsgs
 
 	content = appendSection(getSummaryPreamble(), content)
 
-	result := setMsgTextContent(summary, content)
-	result = setMsgMultipartContent(result, content, getContinueInstruction())
+	newSummary := overwriteMsgContent(summary, content, getContinueInstruction())
 
-	return result, nil
+	return newSummary, nil
 }
 
 func (m *typedMiddleware[M]) replaceUserMessagesInSummary(ctx context.Context, contextMsgs []M, summary string, contextTokens int) (string, error) {
@@ -898,39 +889,6 @@ func (m *typedMiddleware[M]) generateWithRetry(ctx context.Context, chatModel mo
 	return lastModelResp, lastErr
 }
 
-// newSummaryMessage is kept for backward compatibility with external callers.
-func newSummaryMessage(content string) *schema.Message {
-	return newTypedSummaryMessage[*schema.Message](content)
-}
-
-// extractTextContent is kept for backward compatibility with external callers.
-func extractTextContent(msg adk.Message) string {
-	if msg == nil {
-		return ""
-	}
-
-	var sb strings.Builder
-	for _, part := range msg.UserInputMultiContent {
-		if part.Type == schema.ChatMessagePartTypeText && part.Text != "" {
-			if sb.Len() > 0 {
-				sb.WriteString("\n")
-			}
-			sb.WriteString(part.Text)
-		}
-	}
-
-	if sb.Len() > 0 {
-		return sb.String()
-	}
-
-	return msg.Content
-}
-
-// defaultTrimUserMessage is kept for backward compatibility with external callers.
-func defaultTrimUserMessage(msg adk.Message, remainingTokens int) adk.Message {
-	return defaultTypedTrimUserMessage(msg, remainingTokens)
-}
-
 func truncateTextByChars(text string) string {
 	const maxRunes = 2000
 
@@ -1007,50 +965,6 @@ func (c *TriggerCondition) check() error {
 	return nil
 }
 
-// setContentType is kept for backward compatibility with external callers.
-func setContentType(msg adk.Message, ct summarizationContentType) {
-	setExtra(msg, extraKeyContentType, string(ct))
-}
-
-// getContentType is kept for backward compatibility with external callers.
-func getContentType(msg adk.Message) (summarizationContentType, bool) {
-	ct, ok := getExtra[string](msg, extraKeyContentType)
-	if !ok {
-		return "", false
-	}
-	return summarizationContentType(ct), true
-}
-
-// setExtra is kept for backward compatibility with external callers.
-func setExtra(msg adk.Message, key string, value any) {
-	if msg.Extra == nil {
-		msg.Extra = make(map[string]any)
-	}
-	msg.Extra[key] = value
-}
-
-// getExtra is kept for backward compatibility with external callers.
-func getExtra[T any](msg adk.Message, key string) (T, bool) {
-	var zero T
-	if msg == nil || msg.Extra == nil {
-		return zero, false
-	}
-	v, ok := msg.Extra[key].(T)
-	if !ok {
-		return zero, false
-	}
-	return v, true
-}
-
-// shouldFailover is kept for backward compatibility with external callers.
-func shouldFailover(ctx context.Context, cfg *FailoverConfig, resp adk.Message, err error) bool {
-	return typedShouldFailover(ctx, cfg, resp, err)
-}
-
-func defaultBackoffFunc(_ context.Context, attempt int, _ adk.Message, _ error) time.Duration {
-	return defaultBackoffDuration(attempt)
-}
-
 // ============================================================================
 // Generic helper functions
 // ============================================================================
@@ -1081,25 +995,66 @@ func getMsgTextContent[M adk.MessageType](msg M) string {
 		if m == nil {
 			return ""
 		}
-		return extractTextContent(m)
+
+		if m.Role == schema.Assistant {
+			var parts []string
+			for _, part := range m.AssistantGenMultiContent {
+				if part.Type == schema.ChatMessagePartTypeText && part.Text != "" {
+					parts = append(parts, part.Text)
+				}
+			}
+			if len(parts) > 0 {
+				return strings.Join(parts, "\n")
+			}
+			return m.Content
+		}
+
+		if m.Role != schema.User {
+			return ""
+		}
+
+		var parts []string
+		for _, part := range m.UserInputMultiContent {
+			if part.Type == schema.ChatMessagePartTypeText && part.Text != "" {
+				parts = append(parts, part.Text)
+			}
+		}
+		if len(parts) > 0 {
+			return strings.Join(parts, "\n")
+		}
+		return m.Content
+
 	case *schema.AgenticMessage:
 		if m == nil {
 			return ""
 		}
+
+		if m.Role == schema.AgenticRoleTypeAssistant {
+			var parts []string
+			for _, block := range m.ContentBlocks {
+				if block != nil && block.AssistantGenText != nil {
+					parts = append(parts, block.AssistantGenText.Text)
+				}
+			}
+			return strings.Join(parts, "\n")
+		}
+
+		if m.Role != schema.AgenticRoleTypeUser {
+			return ""
+		}
+
 		var parts []string
 		for _, block := range m.ContentBlocks {
-			if block == nil {
-				continue
-			}
-			if block.UserInputText != nil {
+			if block != nil && block.UserInputText != nil {
 				parts = append(parts, block.UserInputText.Text)
-			} else if block.AssistantGenText != nil {
-				parts = append(parts, block.AssistantGenText.Text)
 			}
 		}
-		return strings.Join(parts, "")
+
+		return strings.Join(parts, "\n")
+
+	default:
+		panic("unreachable")
 	}
-	panic("unreachable")
 }
 
 func getMsgExtra[M adk.MessageType](msg M) map[string]any {
@@ -1108,8 +1063,9 @@ func getMsgExtra[M adk.MessageType](msg M) map[string]any {
 		return m.Extra
 	case *schema.AgenticMessage:
 		return m.Extra
+	default:
+		panic("unreachable")
 	}
-	panic("unreachable")
 }
 
 func setMsgExtra[M adk.MessageType](msg M, key string, value any) {
@@ -1134,8 +1090,9 @@ func makeSystemMsg[M adk.MessageType](text string) M {
 		return any(schema.SystemMessage(text)).(M)
 	case *schema.AgenticMessage:
 		return any(schema.SystemAgenticMessage(text)).(M)
+	default:
+		panic("unreachable")
 	}
-	panic("unreachable")
 }
 
 func makeUserMsg[M adk.MessageType](text string) M {
@@ -1145,8 +1102,9 @@ func makeUserMsg[M adk.MessageType](text string) M {
 		return any(schema.UserMessage(text)).(M)
 	case *schema.AgenticMessage:
 		return any(schema.UserAgenticMessage(text)).(M)
+	default:
+		panic("unreachable")
 	}
-	panic("unreachable")
 }
 
 func newTypedSummaryMessage[M adk.MessageType](content string) M {
@@ -1228,27 +1186,11 @@ func defaultTypedTrimUserMessage[M adk.MessageType](msg M, remainingTokens int) 
 	return makeUserMsg[M](trimmed)
 }
 
-// setMsgTextContent sets the text content on a message.
-func setMsgTextContent[M adk.MessageType](msg M, content string) M {
+func overwriteMsgContent[M adk.MessageType](msg M, summaryContent, continueInstruction string) M {
 	switch m := any(msg).(type) {
 	case *schema.Message:
-		m.Content = content
-		return any(m).(M)
-	case *schema.AgenticMessage:
-		m.ContentBlocks = []*schema.ContentBlock{
-			schema.NewContentBlock(&schema.UserInputText{Text: content}),
-		}
-		return any(m).(M)
-	}
-	panic("unreachable")
-}
-
-// setMsgMultipartContent builds the final summary multipart structure.
-// For *schema.Message, it uses UserInputMultiContent and clears Content.
-// For *schema.AgenticMessage, it sets ContentBlocks with multiple UserInputText blocks.
-func setMsgMultipartContent[M adk.MessageType](msg M, summaryContent, continueInstruction string) M {
-	switch m := any(msg).(type) {
-	case *schema.Message:
+		m.Content = ""
+		m.AssistantGenMultiContent = nil
 		m.UserInputMultiContent = []schema.MessageInputPart{
 			{
 				Type: schema.ChatMessagePartTypeText,
@@ -1259,7 +1201,6 @@ func setMsgMultipartContent[M adk.MessageType](msg M, summaryContent, continueIn
 				Text: continueInstruction,
 			},
 		}
-		m.Content = ""
 		return any(m).(M)
 	case *schema.AgenticMessage:
 		m.ContentBlocks = []*schema.ContentBlock{
@@ -1267,6 +1208,7 @@ func setMsgMultipartContent[M adk.MessageType](msg M, summaryContent, continueIn
 			schema.NewContentBlock(&schema.UserInputText{Text: continueInstruction}),
 		}
 		return any(m).(M)
+	default:
+		panic("unreachable")
 	}
-	panic("unreachable")
 }
