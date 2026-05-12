@@ -1324,7 +1324,7 @@ func TestTurnLoop_StopDuringAgentExecution(t *testing.T) {
 
 	result := loop.Wait()
 	assert.NoError(t, result.ExitReason)
-	assert.Empty(t, result.CanceledItems)
+	assert.Empty(t, result.InFlightItems)
 }
 
 // TestTurnLoop_BareStop_AgentRunsToCompletion verifies the core contract of
@@ -1403,8 +1403,8 @@ func TestTurnLoop_BareStop_AgentRunsToCompletion(t *testing.T) {
 	// 3. ExitReason is nil (clean exit, not a CancelError).
 	assert.NoError(t, result.ExitReason)
 
-	// 4. CanceledItems is empty (agent was not canceled).
-	assert.Empty(t, result.CanceledItems)
+	// 4. InFlightItems is empty (agent was not interrupted).
+	assert.Empty(t, result.InFlightItems)
 
 	// 5. Only one turn executed; the second item is unhandled.
 	assert.Equal(t, int32(1), atomic.LoadInt32(&turnsExecuted),
@@ -1465,6 +1465,158 @@ func TestTurnLoop_StopCheckPointIDInCancelError(t *testing.T) {
 	defer store.mu.Unlock()
 	_, ok := store.m[checkpointID]
 	assert.True(t, ok, "checkpoint should be saved under the configured CheckpointID")
+}
+
+// TestTurnLoop_CancelError_CapturedIndependentlyOfCallback verifies that the TurnLoop
+// correctly reports *CancelError as ExitReason and populates InFlightItems even when
+// the user's custom OnAgentEvents callback swallows the CancelError (returns nil).
+// This tests the documented guarantee: "the callback should NEVER propagate CancelError
+// — the framework handles it automatically."
+func TestTurnLoop_CancelError_CapturedIndependentlyOfCallback(t *testing.T) {
+	ctx := context.Background()
+	modelStarted := make(chan struct{}, 1)
+	checkpointID := "cancel-capture-independent-1"
+	store := &turnLoopCheckpointStore{m: make(map[string][]byte)}
+
+	slowModel := &cancelTestChatModel{
+		delayNs: int64(500 * time.Millisecond),
+		response: &schema.Message{
+			Role:    schema.Assistant,
+			Content: "Hello",
+		},
+		startedChan: modelStarted,
+		doneChan:    make(chan struct{}, 1),
+	}
+
+	agent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+		Name:        "TestAgent",
+		Description: "Test agent",
+		Instruction: "You are a test assistant",
+		Model:       slowModel,
+	})
+	assert.NoError(t, err)
+
+	loop := newAndRunTurnLoop(ctx, TurnLoopConfig[string, *schema.Message]{
+		Store:        store,
+		CheckpointID: checkpointID,
+		GenInput: func(ctx context.Context, _ *TurnLoop[string, *schema.Message], items []string) (*GenInputResult[string, *schema.Message], error) {
+			return &GenInputResult[string, *schema.Message]{
+				Input:    &AgentInput{Messages: []Message{schema.UserMessage(items[0])}},
+				Consumed: items,
+			}, nil
+		},
+		PrepareAgent: func(ctx context.Context, _ *TurnLoop[string, *schema.Message], consumed []string) (Agent, error) {
+			return agent, nil
+		},
+		// Custom OnAgentEvents that deliberately swallows all errors including CancelError.
+		OnAgentEvents: func(ctx context.Context, tc *TurnContext[string, *schema.Message], events *AsyncIterator[*TypedAgentEvent[*schema.Message]]) error {
+			for {
+				_, ok := events.Next()
+				if !ok {
+					break
+				}
+				// Deliberately ignore event.Err — do NOT propagate CancelError.
+			}
+			return nil // swallow everything
+		},
+	})
+
+	loop.Push("msg1")
+
+	<-modelStarted
+	loop.Stop(WithImmediate())
+
+	result := loop.Wait()
+
+	// The framework should capture CancelError independently of the callback's return value.
+	var cancelErr *CancelError
+	assert.True(t, errors.As(result.ExitReason, &cancelErr),
+		"ExitReason should be *CancelError even when OnAgentEvents swallows it, got: %v", result.ExitReason)
+
+	// InFlightItems should be populated.
+	assert.Equal(t, []string{"msg1"}, result.InFlightItems,
+		"InFlightItems should contain the items that were being processed")
+
+	// Checkpoint should be saved.
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	_, ok := store.m[checkpointID]
+	assert.True(t, ok, "checkpoint should be saved under the configured CheckpointID")
+}
+
+// TestTurnLoop_CancelError_CustomErrorWins_InFlightItemsStillSet verifies that when
+// the user's OnAgentEvents callback returns a custom error during a cancel, the custom
+// error becomes ExitReason (not overwritten by CancelError), but InFlightItems is still
+// populated because the items were factually mid-execution when the cancel signal arrived.
+func TestTurnLoop_CancelError_CustomErrorWins_InFlightItemsStillSet(t *testing.T) {
+	ctx := context.Background()
+	modelStarted := make(chan struct{}, 1)
+	checkpointID := "cancel-custom-error-wins-1"
+	store := &turnLoopCheckpointStore{m: make(map[string][]byte)}
+	customErr := fmt.Errorf("user callback encountered a problem")
+
+	slowModel := &cancelTestChatModel{
+		delayNs: int64(500 * time.Millisecond),
+		response: &schema.Message{
+			Role:    schema.Assistant,
+			Content: "Hello",
+		},
+		startedChan: modelStarted,
+		doneChan:    make(chan struct{}, 1),
+	}
+
+	agent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+		Name:        "TestAgent",
+		Description: "Test agent",
+		Instruction: "You are a test assistant",
+		Model:       slowModel,
+	})
+	assert.NoError(t, err)
+
+	loop := newAndRunTurnLoop(ctx, TurnLoopConfig[string, *schema.Message]{
+		Store:        store,
+		CheckpointID: checkpointID,
+		GenInput: func(ctx context.Context, _ *TurnLoop[string, *schema.Message], items []string) (*GenInputResult[string, *schema.Message], error) {
+			return &GenInputResult[string, *schema.Message]{
+				Input:    &AgentInput{Messages: []Message{schema.UserMessage(items[0])}},
+				Consumed: items,
+			}, nil
+		},
+		PrepareAgent: func(ctx context.Context, _ *TurnLoop[string, *schema.Message], consumed []string) (Agent, error) {
+			return agent, nil
+		},
+		// Custom OnAgentEvents that returns a custom error instead of the CancelError.
+		OnAgentEvents: func(ctx context.Context, tc *TurnContext[string, *schema.Message], events *AsyncIterator[*TypedAgentEvent[*schema.Message]]) error {
+			for {
+				_, ok := events.Next()
+				if !ok {
+					break
+				}
+			}
+			return customErr
+		},
+	})
+
+	loop.Push("msg1")
+
+	<-modelStarted
+	loop.Stop(WithImmediate())
+
+	result := loop.Wait()
+
+	// User's custom error should win as ExitReason.
+	assert.ErrorIs(t, result.ExitReason, customErr,
+		"ExitReason should be the user's custom error, not CancelError")
+
+	// But InFlightItems should still be populated (items were factually in-flight).
+	assert.Equal(t, []string{"msg1"}, result.InFlightItems,
+		"InFlightItems should contain the items that were being processed")
+
+	// Checkpoint should be saved (cancel was captured, items were in-flight).
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	_, ok := store.m[checkpointID]
+	assert.True(t, ok, "checkpoint should be saved even when user returns custom error")
 }
 
 func TestTurnLoop_StopWithoutCheckpointIDDoesNotPersist(t *testing.T) {
@@ -1666,10 +1818,10 @@ func TestTurnLoop_StopDuringAgentExecution_PersistAndResume(t *testing.T) {
 	loop2 := NewTurnLoop(TurnLoopConfig[string, *schema.Message]{
 		Store:        store,
 		CheckpointID: cpID,
-		GenResume: func(ctx context.Context, _ *TurnLoop[string, *schema.Message], canceledItems []string, unhandledItems []string, newItems []string) (*GenResumeResult[string, *schema.Message], error) {
+		GenResume: func(ctx context.Context, _ *TurnLoop[string, *schema.Message], inFlightItems []string, unhandledItems []string, newItems []string) (*GenResumeResult[string, *schema.Message], error) {
 			genResumeCalled = true
 			return &GenResumeResult[string, *schema.Message]{
-				Consumed:  canceledItems,
+				Consumed:  inFlightItems,
 				Remaining: append(append([]string{}, unhandledItems...), newItems...),
 			}, nil
 		},
@@ -1699,6 +1851,112 @@ func TestTurnLoop_StopDuringAgentExecution_PersistAndResume(t *testing.T) {
 	assert.Equal(t, []string{"msg1"}, consumed2)
 	assert.True(t, genResumeCalled)
 	assert.False(t, genInputCalled)
+}
+
+func TestTurnLoop_BusinessInterrupt_PersistAndResume(t *testing.T) {
+	ctx := context.Background()
+	store := &turnLoopCheckpointStore{m: make(map[string][]byte)}
+	cpID := "interrupt-session"
+
+	// Agent that produces a business interrupt via Interrupt() call.
+	interruptAgent := &turnLoopInterruptAgent{interruptInfo: "approval_needed"}
+
+	loop := newAndRunTurnLoop(ctx, TurnLoopConfig[string, *schema.Message]{
+		Store:        store,
+		CheckpointID: cpID,
+		GenInput: func(ctx context.Context, _ *TurnLoop[string, *schema.Message], items []string) (*GenInputResult[string, *schema.Message], error) {
+			return &GenInputResult[string, *schema.Message]{
+				Input:    &AgentInput{Messages: []Message{schema.UserMessage(items[0])}},
+				Consumed: items,
+			}, nil
+		},
+		PrepareAgent: func(ctx context.Context, _ *TurnLoop[string, *schema.Message], consumed []string) (Agent, error) {
+			return interruptAgent, nil
+		},
+	})
+
+	loop.Push("msg1")
+	exit := loop.Wait()
+
+	// 1. ExitReason is an *InterruptError (not nil, not *CancelError).
+	var intErr *InterruptError
+	require.True(t, errors.As(exit.ExitReason, &intErr), "expected *InterruptError, got: %v", exit.ExitReason)
+
+	// 2. InterruptContexts is populated.
+	require.NotEmpty(t, intErr.InterruptContexts)
+
+	// 3. InFlightItems contains the items being processed.
+	assert.Equal(t, []string{"msg1"}, exit.InFlightItems)
+
+	// 4. Checkpoint was persisted.
+	assert.True(t, exit.CheckpointAttempted)
+	assert.NoError(t, exit.CheckpointErr)
+
+	store.mu.Lock()
+	_, cpExists := store.m[cpID]
+	store.mu.Unlock()
+	assert.True(t, cpExists, "checkpoint should exist in store")
+
+	// 5. Resume: new TurnLoop with same CheckpointID gets GenResume called.
+	var genResumeCalled bool
+	var resumeInFlightItems []string
+	loop2 := NewTurnLoop(TurnLoopConfig[string, *schema.Message]{
+		Store:        store,
+		CheckpointID: cpID,
+		GenResume: func(ctx context.Context, _ *TurnLoop[string, *schema.Message], inFlightItems []string, unhandledItems []string, newItems []string) (*GenResumeResult[string, *schema.Message], error) {
+			genResumeCalled = true
+			resumeInFlightItems = append([]string{}, inFlightItems...)
+			return &GenResumeResult[string, *schema.Message]{
+				Consumed:  inFlightItems,
+				Remaining: append(append([]string{}, unhandledItems...), newItems...),
+			}, nil
+		},
+		GenInput: func(ctx context.Context, _ *TurnLoop[string, *schema.Message], items []string) (*GenInputResult[string, *schema.Message], error) {
+			return &GenInputResult[string, *schema.Message]{Input: &AgentInput{}, Consumed: items}, nil
+		},
+		PrepareAgent: func(ctx context.Context, _ *TurnLoop[string, *schema.Message], consumed []string) (Agent, error) {
+			// On resume, agent completes normally.
+			return &turnLoopMockAgent{
+				name:   "ResumeAgent",
+				events: []*AgentEvent{{Output: &AgentOutput{}}},
+			}, nil
+		},
+		OnAgentEvents: func(ctx context.Context, tc *TurnContext[string, *schema.Message], events *AsyncIterator[*AgentEvent]) error {
+			for {
+				_, ok := events.Next()
+				if !ok {
+					break
+				}
+			}
+			tc.Loop.Stop()
+			return nil
+		},
+	})
+
+	loop2.Run(ctx)
+	exit2 := loop2.Wait()
+	assert.NoError(t, exit2.ExitReason)
+	assert.True(t, genResumeCalled, "GenResume should be called on checkpoint resume")
+	assert.Equal(t, []string{"msg1"}, resumeInFlightItems, "inFlightItems should contain the original items")
+}
+
+// turnLoopInterruptAgent is a test agent that produces a business interrupt event.
+type turnLoopInterruptAgent struct {
+	interruptInfo any
+}
+
+func (a *turnLoopInterruptAgent) Name(_ context.Context) string { return "InterruptAgent" }
+func (a *turnLoopInterruptAgent) Description(_ context.Context) string {
+	return "agent that interrupts"
+}
+func (a *turnLoopInterruptAgent) Run(ctx context.Context, _ *AgentInput, _ ...AgentRunOption) *AsyncIterator[*AgentEvent] {
+	iter, gen := NewAsyncIteratorPair[*AgentEvent]()
+	go func() {
+		defer gen.Close()
+		event := Interrupt(ctx, a.interruptInfo)
+		gen.Send(event)
+	}()
+	return iter
 }
 
 func TestTurnLoop_CheckpointIDWithoutStore_FreshStart(t *testing.T) {
@@ -4435,7 +4693,7 @@ func TestTurnLoop_StopBeforeRun_PushThenStop(t *testing.T) {
 
 	assert.NoError(t, result.ExitReason)
 	assert.Equal(t, []string{"item1", "item2"}, result.UnhandledItems)
-	assert.Empty(t, result.CanceledItems)
+	assert.Empty(t, result.InFlightItems)
 	assert.Empty(t, result.TakeLateItems())
 }
 
@@ -4463,7 +4721,7 @@ func TestTurnLoop_StopBeforeRun_StopThenPush(t *testing.T) {
 
 	assert.NoError(t, result.ExitReason)
 	assert.Empty(t, result.UnhandledItems)
-	assert.Empty(t, result.CanceledItems)
+	assert.Empty(t, result.InFlightItems)
 	assert.Equal(t, []string{"item1", "item2"}, result.TakeLateItems())
 }
 
@@ -5140,7 +5398,7 @@ func TestAttack_StopSignal_NilCancelOptsDoNotDeescalate(t *testing.T) {
 	assert.Equal(t, CancelImmediate, ce.Info.Mode)
 }
 
-func TestAttack_CanceledItems_EmptyWhenAgentFinishesNormally(t *testing.T) {
+func TestAttack_InFlightItems_EmptyWhenAgentFinishesNormally(t *testing.T) {
 	agentStarted := make(chan struct{})
 	loop := newAndRunTurnLoop(context.Background(), TurnLoopConfig[string, *schema.Message]{
 		GenInput: func(ctx context.Context, _ *TurnLoop[string, *schema.Message], items []string) (*GenInputResult[string, *schema.Message], error) {
@@ -5167,7 +5425,7 @@ func TestAttack_CanceledItems_EmptyWhenAgentFinishesNormally(t *testing.T) {
 
 	exit := loop.Wait()
 	assert.NoError(t, exit.ExitReason)
-	assert.Empty(t, exit.CanceledItems, "CanceledItems must be empty when agent finished normally")
+	assert.Empty(t, exit.InFlightItems, "InFlightItems must be empty when agent finished normally")
 }
 
 func TestAttack_TurnBuffer_WakeupDoesNotLoseItems(t *testing.T) {
@@ -5635,4 +5893,56 @@ func TestTurnLoop_Preempt_LoopStalledAfterSecondPreemptPush(t *testing.T) {
 	result := loop.Wait()
 	assert.NoError(t, result.ExitReason)
 	assert.Equal(t, int32(3), atomic.LoadInt32(&turnCount), "expected 3 turns to be processed")
+}
+
+func TestAttack_BusinessInterrupt_NoStore_ExitsWithoutPanic(t *testing.T) {
+	ctx := context.Background()
+	interruptAgent := &turnLoopInterruptAgent{interruptInfo: "no_store_test"}
+
+	loop := newAndRunTurnLoop(ctx, TurnLoopConfig[string, *schema.Message]{
+		GenInput: func(ctx context.Context, _ *TurnLoop[string, *schema.Message], items []string) (*GenInputResult[string, *schema.Message], error) {
+			return &GenInputResult[string, *schema.Message]{
+				Input:    &AgentInput{Messages: []Message{schema.UserMessage(items[0])}},
+				Consumed: items,
+			}, nil
+		},
+		PrepareAgent: func(ctx context.Context, _ *TurnLoop[string, *schema.Message], consumed []string) (Agent, error) {
+			return interruptAgent, nil
+		},
+	})
+
+	loop.Push("msg1")
+	exit := loop.Wait()
+
+	var intErr *InterruptError
+	require.True(t, errors.As(exit.ExitReason, &intErr), "expected *InterruptError, got: %v", exit.ExitReason)
+	assert.Equal(t, []string{"msg1"}, exit.InFlightItems)
+	assert.False(t, exit.CheckpointAttempted, "no store → no checkpoint attempt")
+}
+
+func TestAttack_BusinessInterrupt_EmptyConsumed_NoCheckpoint(t *testing.T) {
+	ctx := context.Background()
+	store := &turnLoopCheckpointStore{m: make(map[string][]byte)}
+	interruptAgent := &turnLoopInterruptAgent{interruptInfo: "idle_test"}
+
+	loop := newAndRunTurnLoop(ctx, TurnLoopConfig[string, *schema.Message]{
+		Store:        store,
+		CheckpointID: "idle-cp",
+		GenInput: func(ctx context.Context, _ *TurnLoop[string, *schema.Message], items []string) (*GenInputResult[string, *schema.Message], error) {
+			return &GenInputResult[string, *schema.Message]{
+				Input:    &AgentInput{Messages: []Message{schema.UserMessage("x")}},
+				Consumed: []string{},
+			}, nil
+		},
+		PrepareAgent: func(ctx context.Context, _ *TurnLoop[string, *schema.Message], consumed []string) (Agent, error) {
+			return interruptAgent, nil
+		},
+	})
+
+	loop.Push("msg1")
+	exit := loop.Wait()
+
+	var intErr *InterruptError
+	require.True(t, errors.As(exit.ExitReason, &intErr), "expected *InterruptError, got: %v", exit.ExitReason)
+	assert.Empty(t, exit.InFlightItems, "consumed was empty → InFlightItems should be empty")
 }
