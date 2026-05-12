@@ -32,6 +32,20 @@ import (
 	"github.com/cloudwego/eino/schema"
 )
 
+// TODO represents a single task item tracked by the write_todos tool.
+type TODO struct {
+	Content    string `json:"content"`
+	ActiveForm string `json:"activeForm"`
+	Status     string `json:"status" jsonschema:"enum=pending,enum=in_progress,enum=completed"`
+}
+
+type writeTodosArguments struct {
+	Todos []TODO `json:"todos"`
+}
+
+// init registers gob type names used for checkpoint serialization.
+// These names are part of the checkpoint format and must not be changed,
+// as doing so would break deserialization of existing saved checkpoints.
 func init() {
 	schema.RegisterName[TODO]("_eino_adk_prebuilt_deep_todo")
 	schema.RegisterName[[]TODO]("_eino_adk_prebuilt_deep_todo_slice")
@@ -187,16 +201,6 @@ func buildBuiltinAgentMiddlewares(ctx context.Context, cfg *Config) ([]adk.ChatM
 	}
 
 	return ms, nil
-}
-
-type TODO struct {
-	Content    string `json:"content"`
-	ActiveForm string `json:"activeForm"`
-	Status     string `json:"status" jsonschema:"enum=pending,enum=in_progress,enum=completed"`
-}
-
-type writeTodosArguments struct {
-	Todos []TODO `json:"todos"`
 }
 
 func newWriteTodos() (adk.ChatModelAgentMiddleware, error) {
