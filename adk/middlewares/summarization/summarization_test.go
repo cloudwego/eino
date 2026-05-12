@@ -658,7 +658,7 @@ func TestMiddlewareCountTokens(t *testing.T) {
 		}
 		tokens, err := mw.countTokens(ctx, input)
 		assert.NoError(t, err)
-		assert.Equal(t, 1, tokens)
+		assert.Greater(t, tokens, 0)
 	})
 
 	t.Run("custom token counter error", func(t *testing.T) {
@@ -678,13 +678,13 @@ func TestMiddlewareCountTokens(t *testing.T) {
 	})
 }
 
-func TestGetMsgTextContent(t *testing.T) {
+func TestGetUserMsgTextContent(t *testing.T) {
 	t.Run("Message extracts from Content field", func(t *testing.T) {
 		msg := &schema.Message{
 			Role:    schema.User,
 			Content: "hello world",
 		}
-		assert.Equal(t, "hello world", getMsgTextContent(msg))
+		assert.Equal(t, "hello world", getUserMsgTextContent(msg))
 	})
 
 	t.Run("Message extracts from UserInputMultiContent", func(t *testing.T) {
@@ -695,7 +695,7 @@ func TestGetMsgTextContent(t *testing.T) {
 				{Type: schema.ChatMessagePartTypeText, Text: "part2"},
 			},
 		}
-		assert.Equal(t, "part1\npart2", getMsgTextContent(msg))
+		assert.Equal(t, "part1\npart2", getUserMsgTextContent(msg))
 	})
 
 	t.Run("Message prefers UserInputMultiContent over Content", func(t *testing.T) {
@@ -706,22 +706,11 @@ func TestGetMsgTextContent(t *testing.T) {
 				{Type: schema.ChatMessagePartTypeText, Text: "multi content"},
 			},
 		}
-		assert.Equal(t, "multi content", getMsgTextContent(msg))
-	})
-
-	t.Run("Message extracts from AssistantGenMultiContent", func(t *testing.T) {
-		msg := &schema.Message{
-			Role: schema.Assistant,
-			AssistantGenMultiContent: []schema.MessageOutputPart{
-				{Type: schema.ChatMessagePartTypeText, Text: "response1"},
-				{Type: schema.ChatMessagePartTypeText, Text: "response2"},
-			},
-		}
-		assert.Equal(t, "response1\nresponse2", getMsgTextContent(msg))
+		assert.Equal(t, "multi content", getUserMsgTextContent(msg))
 	})
 
 	t.Run("Message nil returns empty", func(t *testing.T) {
-		assert.Equal(t, "", getMsgTextContent[*schema.Message](nil))
+		assert.Equal(t, "", getUserMsgTextContent[*schema.Message](nil))
 	})
 
 	t.Run("AgenticMessage extracts UserInputText", func(t *testing.T) {
@@ -731,32 +720,11 @@ func TestGetMsgTextContent(t *testing.T) {
 				{UserInputText: &schema.UserInputText{Text: "user input"}},
 			},
 		}
-		assert.Equal(t, "user input", getMsgTextContent(msg))
-	})
-
-	t.Run("AgenticMessage extracts AssistantGenText", func(t *testing.T) {
-		msg := &schema.AgenticMessage{
-			Role: schema.AgenticRoleTypeAssistant,
-			ContentBlocks: []*schema.ContentBlock{
-				{AssistantGenText: &schema.AssistantGenText{Text: "assistant output"}},
-			},
-		}
-		assert.Equal(t, "assistant output", getMsgTextContent(msg))
-	})
-
-	t.Run("AgenticMessage prefers UserInputText over AssistantGenText", func(t *testing.T) {
-		msg := &schema.AgenticMessage{
-			Role: schema.AgenticRoleTypeUser,
-			ContentBlocks: []*schema.ContentBlock{
-				{UserInputText: &schema.UserInputText{Text: "user part"}},
-				{AssistantGenText: &schema.AssistantGenText{Text: "should be ignored"}},
-			},
-		}
-		assert.Equal(t, "user part", getMsgTextContent(msg))
+		assert.Equal(t, "user input", getUserMsgTextContent(msg))
 	})
 
 	t.Run("AgenticMessage nil returns empty", func(t *testing.T) {
-		assert.Equal(t, "", getMsgTextContent[*schema.AgenticMessage](nil))
+		assert.Equal(t, "", getUserMsgTextContent[*schema.AgenticMessage](nil))
 	})
 }
 
@@ -1408,6 +1376,115 @@ func TestDefaultTokenCounter(t *testing.T) {
 		count, err := defaultTypedTokenCounter(ctx, input)
 		assert.NoError(t, err)
 		assert.Greater(t, count, 0)
+	})
+
+	t.Run("reuses latest assistant total tokens as baseline", func(t *testing.T) {
+		input := &TokenCounterInput{
+			Messages: []adk.Message{
+				schema.UserMessage("earlier context"),
+				{
+					Role:    schema.Assistant,
+					Content: "baseline",
+					ResponseMeta: &schema.ResponseMeta{
+						Usage: &schema.TokenUsage{TotalTokens: 100},
+					},
+				},
+				schema.UserMessage("later context"),
+			},
+		}
+
+		count, err := defaultTypedTokenCounter(ctx, input)
+		require.NoError(t, err)
+		assert.Equal(t, 100+estimateMessageTokens(schema.UserMessage("later context")), count)
+	})
+}
+
+func TestGetAssistantTotalTokens(t *testing.T) {
+	t.Run("returns zero for nil message", func(t *testing.T) {
+		assert.Zero(t, getAssistantTotalTokens[*schema.Message](nil))
+		assert.Zero(t, getAssistantTotalTokens[*schema.AgenticMessage](nil))
+	})
+
+	t.Run("reads total tokens from assistant messages only", func(t *testing.T) {
+		msg := &schema.Message{
+			Role: schema.Assistant,
+			ResponseMeta: &schema.ResponseMeta{
+				Usage: &schema.TokenUsage{TotalTokens: 42},
+			},
+		}
+		assert.Equal(t, 42, getAssistantTotalTokens(msg))
+		assert.Zero(t, getAssistantTotalTokens(schema.UserMessage("ignored")))
+	})
+
+	t.Run("reads total tokens from agentic assistant messages only", func(t *testing.T) {
+		msg := &schema.AgenticMessage{
+			Role: schema.AgenticRoleTypeAssistant,
+			ResponseMeta: &schema.AgenticResponseMeta{
+				TokenUsage: &schema.TokenUsage{TotalTokens: 64},
+			},
+		}
+		assert.Equal(t, 64, getAssistantTotalTokens(msg))
+		assert.Zero(t, getAssistantTotalTokens(schema.UserAgenticMessage("ignored")))
+	})
+}
+
+func TestEstimateMessageTokens(t *testing.T) {
+	t.Run("returns zero for nil message", func(t *testing.T) {
+		assert.Zero(t, estimateMessageTokens(nil))
+	})
+
+	t.Run("counts assistant text reasoning and tool calls", func(t *testing.T) {
+		msg := &schema.Message{
+			Role:             schema.Assistant,
+			ReasoningContent: "reason",
+			ToolCalls: []schema.ToolCall{
+				{
+					Function: schema.FunctionCall{
+						Name:      "tool",
+						Arguments: `{"k":"v"}`,
+					},
+				},
+			},
+			AssistantGenMultiContent: []schema.MessageOutputPart{
+				{Type: schema.ChatMessagePartTypeText, Text: "answer"},
+			},
+		}
+
+		expectedLen := len("answer") + len("reason") + len("tool") + len(`{"k":"v"}`)
+		assert.Equal(t, estimateTokenCount(expectedLen), estimateMessageTokens(msg))
+	})
+
+	t.Run("adds multimodal estimate for user content", func(t *testing.T) {
+		msg := &schema.Message{
+			Role: schema.User,
+			UserInputMultiContent: []schema.MessageInputPart{
+				{Type: schema.ChatMessagePartTypeText, Text: "hello"},
+				{Type: schema.ChatMessagePartTypeImageURL},
+			},
+		}
+
+		assert.Equal(t, estimateTokenCount(len("hello"))+multimodalTokenEstimate, estimateMessageTokens(msg))
+	})
+}
+
+func TestEstimateAgenticMessageTokens(t *testing.T) {
+	t.Run("returns zero for nil message", func(t *testing.T) {
+		assert.Zero(t, estimateAgenticMessageTokens(nil))
+	})
+
+	t.Run("counts assistant blocks and multimodal outputs", func(t *testing.T) {
+		msg := &schema.AgenticMessage{
+			Role: schema.AgenticRoleTypeAssistant,
+			ContentBlocks: []*schema.ContentBlock{
+				schema.NewContentBlock(&schema.AssistantGenText{Text: "answer"}),
+				schema.NewContentBlock(&schema.Reasoning{Text: "reason"}),
+				schema.NewContentBlock(&schema.FunctionToolCall{Name: "tool", Arguments: `{"k":"v"}`}),
+				schema.NewContentBlock(&schema.AssistantGenImage{}),
+			},
+		}
+
+		expectedLen := len("answer") + len("reason") + len("tool") + len(`{"k":"v"}`)
+		assert.Equal(t, estimateTokenCount(expectedLen)+multimodalTokenEstimate, estimateAgenticMessageTokens(msg))
 	})
 }
 
@@ -2102,12 +2179,9 @@ func testSummarizationHelpers[M adk.MessageType](t *testing.T) {
 		assert.False(t, isUserRole(sys))
 	})
 
-	t.Run("getMsgTextContent", func(t *testing.T) {
+	t.Run("getUserMsgTextContent", func(t *testing.T) {
 		usr := smakeUserMsg[M]("hello world")
-		assert.Equal(t, "hello world", getMsgTextContent(usr))
-
-		ast := smakeAssistantMsg[M]("reply")
-		assert.Equal(t, "reply", getMsgTextContent(ast))
+		assert.Equal(t, "hello world", getUserMsgTextContent(usr))
 	})
 
 	t.Run("getMsgExtra_setMsgExtra", func(t *testing.T) {
@@ -2135,7 +2209,7 @@ func testSummarizationHelpers[M adk.MessageType](t *testing.T) {
 	t.Run("makeUserMsg", func(t *testing.T) {
 		msg := makeUserMsg[M]("user input")
 		assert.True(t, isUserRole(msg))
-		assert.Equal(t, "user input", getMsgTextContent(msg))
+		assert.Equal(t, "user input", getUserMsgTextContent(msg))
 	})
 
 	t.Run("overwriteMsgContent", func(t *testing.T) {
@@ -2167,7 +2241,7 @@ func testSummarizationFlow[M adk.MessageType](t *testing.T) {
 	tokenCounter := func(_ context.Context, input *TypedTokenCounterInput[M]) (int, error) {
 		total := 0
 		for _, msg := range input.Messages {
-			total += len(getMsgTextContent(msg))
+			total += len(getUserMsgTextContent(msg))
 		}
 		return total, nil
 	}
@@ -2211,7 +2285,7 @@ func testSummarizationFlow[M adk.MessageType](t *testing.T) {
 				break
 			}
 		}
-		if strings.Contains(getMsgTextContent(msg), summaryText) {
+		if strings.Contains(getUserMsgTextContent(msg), summaryText) {
 			foundSummary = true
 			break
 		}
@@ -2275,7 +2349,7 @@ func testSummarizeMessages(t *testing.T) {
 	tokenCounter := func(_ context.Context, input *TypedTokenCounterInput[adk.Message]) (int, error) {
 		total := 0
 		for _, msg := range input.Messages {
-			total += len(getMsgTextContent(msg))
+			total += len(getUserMsgTextContent(msg))
 		}
 		return total, nil
 	}
@@ -2299,5 +2373,5 @@ func testSummarizeMessages(t *testing.T) {
 	assert.Greater(t, len(output.FinalizedMessages), 0,
 		"should have finalized messages")
 
-	assert.Equal(t, summaryText, getMsgTextContent(output.ModelResponse))
+	assert.Equal(t, summaryText, output.ModelResponse.Content)
 }

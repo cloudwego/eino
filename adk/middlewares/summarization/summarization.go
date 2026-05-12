@@ -71,11 +71,12 @@ type TypedConfig[M adk.MessageType] struct {
 	// Returns:
 	//   - int: the total token count.
 	//
-	// Optional. Defaults to a simple estimator (~4 chars/token).
+	// Optional. Defaults to using the total tokens reported in the last assistant
+	// message as baseline, with incremental messages estimated at ~4 chars/token.
 	TokenCounter TypedTokenCounterFunc[M]
 
 	// Trigger specifies the conditions that activate summarization.
-	// Optional. Defaults to triggering when total tokens exceed 190k.
+	// Optional. Defaults to triggering when total tokens exceed 160k.
 	Trigger *TriggerCondition
 
 	// EmitInternalEvents indicates whether internal events should be emitted during summarization,
@@ -427,10 +428,33 @@ func (m *typedMiddleware[M]) BeforeModelRewriteState(ctx context.Context, state 
 func (m *typedMiddleware[M]) finalizeSummary(ctx context.Context, originalMsgs []M,
 	rawSummary M) (context.Context, []M, error) {
 
-	systemMsgs, contextMsgs := m.splitSystemAndContextMsgs(originalMsgs)
+	var summaryContent string
+	switch r := any(rawSummary).(type) {
+	case *schema.Message:
+		var parts []string
+		for _, part := range r.AssistantGenMultiContent {
+			if part.Type == schema.ChatMessagePartTypeText && part.Text != "" {
+				parts = append(parts, part.Text)
+			}
+		}
+		if len(parts) > 0 {
+			summaryContent = strings.Join(parts, "\n")
+		} else {
+			summaryContent = r.Content
+		}
+	case *schema.AgenticMessage:
+		var parts []string
+		for _, block := range r.ContentBlocks {
+			if block != nil && block.AssistantGenText != nil {
+				parts = append(parts, block.AssistantGenText.Text)
+			}
+		}
+		summaryContent = strings.Join(parts, "\n")
+	}
 
-	rawContent := getMsgTextContent(rawSummary)
-	summary := newTypedSummaryMessage[M](rawContent)
+	summary := newTypedSummaryMessage[M](summaryContent)
+
+	systemMsgs, contextMsgs := m.splitSystemAndContextMsgs(originalMsgs)
 
 	processed, err := m.postProcessSummary(ctx, contextMsgs, summary)
 	if err != nil {
@@ -464,7 +488,7 @@ func (m *typedMiddleware[M]) shouldSummarize(ctx context.Context, input *TypedTo
 }
 
 func (m *typedMiddleware[M]) getTriggerContextTokens() int {
-	const defaultTriggerContextTokens = 170000
+	const defaultTriggerContextTokens = 160000
 	if m.cfg.Trigger != nil {
 		return m.cfg.Trigger.ContextTokens
 	}
@@ -518,10 +542,27 @@ func (m *typedMiddleware[M]) countTokens(ctx context.Context, input *TypedTokenC
 }
 
 func defaultTypedTokenCounter[M adk.MessageType](_ context.Context, input *TypedTokenCounterInput[M]) (int, error) {
-	var totalTokens int
-	for _, msg := range input.Messages {
-		text := getMsgTextContent(msg)
-		totalTokens += estimateTokenCount(text)
+	var (
+		baseTokens     int
+		incrementStart int
+	)
+
+	for i := len(input.Messages) - 1; i >= 0; i-- {
+		if tokens := getAssistantTotalTokens(input.Messages[i]); tokens > 0 {
+			baseTokens = tokens
+			incrementStart = i + 1
+			break
+		}
+	}
+
+	var incrementTokens int
+	for _, msg := range input.Messages[incrementStart:] {
+		switch m := any(msg).(type) {
+		case *schema.Message:
+			incrementTokens += estimateMessageTokens(m)
+		case *schema.AgenticMessage:
+			incrementTokens += estimateAgenticMessageTokens(m)
+		}
 	}
 
 	for _, tl := range input.Tools {
@@ -531,14 +572,34 @@ func defaultTypedTokenCounter[M adk.MessageType](_ context.Context, input *Typed
 		if err != nil {
 			return 0, fmt.Errorf("failed to marshal tool info: %w", err)
 		}
-		totalTokens += estimateTokenCount(text)
+		incrementTokens += estimateTokenCount(len(text))
 	}
 
-	return totalTokens, nil
+	return baseTokens + incrementTokens, nil
 }
 
-func estimateTokenCount(text string) int {
-	return (len(text) + 3) / 4
+func getAssistantTotalTokens[M adk.MessageType](msg M) int {
+	switch m := any(msg).(type) {
+	case *schema.Message:
+		if m == nil {
+			return 0
+		}
+		if m.Role == schema.Assistant && m.ResponseMeta != nil && m.ResponseMeta.Usage != nil {
+			return m.ResponseMeta.Usage.TotalTokens
+		}
+	case *schema.AgenticMessage:
+		if m == nil {
+			return 0
+		}
+		if m.Role == schema.AgenticRoleTypeAssistant && m.ResponseMeta != nil && m.ResponseMeta.TokenUsage != nil {
+			return m.ResponseMeta.TokenUsage.TotalTokens
+		}
+	}
+	return 0
+}
+
+func estimateTokenCount(charLen int) int {
+	return charLen / 4
 }
 
 func estimateTokenBytes(tokens int) int {
@@ -696,7 +757,7 @@ func (m *typedMiddleware[M]) getModelInstructions() (M, M) {
 }
 
 func (m *typedMiddleware[M]) postProcessSummary(ctx context.Context, contextMsgs []M, summary M) (M, error) {
-	content := getMsgTextContent(summary)
+	content := getUserMsgTextContent(summary)
 
 	if m.cfg.PreserveUserMessages == nil || m.cfg.PreserveUserMessages.Enabled {
 		maxUserMsgTokens := m.getUserMessageContextTokens()
@@ -783,7 +844,7 @@ func (m *typedMiddleware[M]) replaceUserMessagesInSummary(ctx context.Context, c
 
 	var msgLines []string
 	for _, msg := range selected {
-		text := getMsgTextContent(msg)
+		text := getUserMsgTextContent(msg)
 		if text != "" {
 			msgLines = append(msgLines, "    - "+text)
 		}
@@ -989,30 +1050,12 @@ func isUserRole[M adk.MessageType](msg M) bool {
 	panic("unreachable")
 }
 
-func getMsgTextContent[M adk.MessageType](msg M) string {
+func getUserMsgTextContent[M adk.MessageType](msg M) string {
 	switch m := any(msg).(type) {
 	case *schema.Message:
 		if m == nil {
 			return ""
 		}
-
-		if m.Role == schema.Assistant {
-			var parts []string
-			for _, part := range m.AssistantGenMultiContent {
-				if part.Type == schema.ChatMessagePartTypeText && part.Text != "" {
-					parts = append(parts, part.Text)
-				}
-			}
-			if len(parts) > 0 {
-				return strings.Join(parts, "\n")
-			}
-			return m.Content
-		}
-
-		if m.Role != schema.User {
-			return ""
-		}
-
 		var parts []string
 		for _, part := range m.UserInputMultiContent {
 			if part.Type == schema.ChatMessagePartTypeText && part.Text != "" {
@@ -1028,33 +1071,149 @@ func getMsgTextContent[M adk.MessageType](msg M) string {
 		if m == nil {
 			return ""
 		}
-
-		if m.Role == schema.AgenticRoleTypeAssistant {
-			var parts []string
-			for _, block := range m.ContentBlocks {
-				if block != nil && block.AssistantGenText != nil {
-					parts = append(parts, block.AssistantGenText.Text)
-				}
-			}
-			return strings.Join(parts, "\n")
-		}
-
-		if m.Role != schema.AgenticRoleTypeUser {
-			return ""
-		}
-
 		var parts []string
 		for _, block := range m.ContentBlocks {
-			if block != nil && block.UserInputText != nil {
+			if block == nil {
+				continue
+			}
+			if block.UserInputText != nil {
 				parts = append(parts, block.UserInputText.Text)
 			}
 		}
-
 		return strings.Join(parts, "\n")
 
 	default:
 		panic("unreachable")
 	}
+}
+
+const multimodalTokenEstimate = 2000
+
+func estimateMessageTokens(msg *schema.Message) int {
+	if msg == nil {
+		return 0
+	}
+	var totalLen int
+	var multimodalTokens int
+
+	if msg.Role == schema.Assistant {
+		if len(msg.AssistantGenMultiContent) > 0 {
+			hasReasoning := false
+			for _, part := range msg.AssistantGenMultiContent {
+				switch part.Type {
+				case schema.ChatMessagePartTypeText:
+					totalLen += len(part.Text)
+				case schema.ChatMessagePartTypeReasoning:
+					hasReasoning = true
+					if part.Reasoning != nil {
+						totalLen += len(part.Reasoning.Text)
+					}
+				case schema.ChatMessagePartTypeImageURL, schema.ChatMessagePartTypeAudioURL,
+					schema.ChatMessagePartTypeVideoURL, schema.ChatMessagePartTypeFileURL:
+					multimodalTokens += multimodalTokenEstimate
+				}
+			}
+			if !hasReasoning {
+				totalLen += len(msg.ReasoningContent)
+			}
+		} else {
+			totalLen += len(msg.Content) + len(msg.ReasoningContent)
+		}
+		for _, tc := range msg.ToolCalls {
+			totalLen += len(tc.Function.Name) + len(tc.Function.Arguments)
+		}
+	} else {
+		if len(msg.UserInputMultiContent) > 0 {
+			for _, part := range msg.UserInputMultiContent {
+				switch part.Type {
+				case schema.ChatMessagePartTypeText:
+					totalLen += len(part.Text)
+				case schema.ChatMessagePartTypeToolSearchResult:
+					if part.ToolSearchResult != nil {
+						for _, tl := range part.ToolSearchResult.Tools {
+							totalLen += len(tl.Name) + len(tl.Desc)
+							if b, err := sonic.Marshal(tl.ParamsOneOf); err == nil {
+								totalLen += len(b)
+							}
+						}
+					}
+				case schema.ChatMessagePartTypeImageURL, schema.ChatMessagePartTypeAudioURL,
+					schema.ChatMessagePartTypeVideoURL, schema.ChatMessagePartTypeFileURL:
+					multimodalTokens += multimodalTokenEstimate
+				}
+			}
+		} else {
+			totalLen += len(msg.Content)
+		}
+	}
+
+	return estimateTokenCount(totalLen) + multimodalTokens
+}
+
+func estimateAgenticMessageTokens(msg *schema.AgenticMessage) int {
+	if msg == nil {
+		return 0
+	}
+	var totalLen int
+	var multimodalTokens int
+
+	if msg.Role == schema.AgenticRoleTypeAssistant {
+		for _, block := range msg.ContentBlocks {
+			if block == nil {
+				continue
+			}
+			switch block.Type {
+			case schema.ContentBlockTypeAssistantGenText:
+				totalLen += len(block.AssistantGenText.Text)
+			case schema.ContentBlockTypeFunctionToolCall:
+				totalLen += len(block.FunctionToolCall.Name) + len(block.FunctionToolCall.Arguments)
+			case schema.ContentBlockTypeReasoning:
+				totalLen += len(block.Reasoning.Text)
+			case schema.ContentBlockTypeAssistantGenImage, schema.ContentBlockTypeAssistantGenAudio,
+				schema.ContentBlockTypeAssistantGenVideo:
+				multimodalTokens += multimodalTokenEstimate
+			}
+		}
+	} else {
+		for _, block := range msg.ContentBlocks {
+			if block == nil {
+				continue
+			}
+			switch block.Type {
+			case schema.ContentBlockTypeUserInputText:
+				totalLen += len(block.UserInputText.Text)
+			case schema.ContentBlockTypeFunctionToolResult:
+				for _, cb := range block.FunctionToolResult.Content {
+					if cb == nil {
+						continue
+					}
+					switch cb.Type {
+					case schema.FunctionToolResultContentBlockTypeText:
+						if cb.Text != nil {
+							totalLen += len(cb.Text.Text)
+						}
+					case schema.FunctionToolResultContentBlockTypeImage, schema.FunctionToolResultContentBlockTypeAudio,
+						schema.FunctionToolResultContentBlockTypeVideo, schema.FunctionToolResultContentBlockTypeFile:
+						multimodalTokens += multimodalTokenEstimate
+					}
+				}
+			case schema.ContentBlockTypeToolSearchResult:
+				if block.ToolSearchFunctionToolResult != nil && block.ToolSearchFunctionToolResult.Result != nil {
+					for _, tl := range block.ToolSearchFunctionToolResult.Result.Tools {
+						totalLen += len(tl.Name) + len(tl.Desc)
+						if b, err := sonic.Marshal(tl.ParamsOneOf); err == nil {
+							totalLen += len(b)
+						}
+					}
+				}
+			case schema.ContentBlockTypeUserInputImage, schema.ContentBlockTypeUserInputFile,
+				schema.ContentBlockTypeUserInputAudio, schema.ContentBlockTypeUserInputVideo:
+				multimodalTokens += multimodalTokenEstimate
+			}
+		}
+	}
+
+	return estimateTokenCount(totalLen) + multimodalTokens
 }
 
 func getMsgExtra[M adk.MessageType](msg M) map[string]any {
@@ -1173,7 +1332,7 @@ func defaultTypedTrimUserMessage[M adk.MessageType](msg M, remainingTokens int) 
 		return zero
 	}
 
-	textContent := getMsgTextContent(msg)
+	textContent := getUserMsgTextContent(msg)
 	if len(textContent) == 0 {
 		return zero
 	}
