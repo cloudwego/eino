@@ -299,6 +299,19 @@ func runnerSaveCheckPointImpl(
 		return nil
 	}
 
+	data, err := encodeRunnerCheckPointImpl(enableStreaming, ctx, info, is)
+	if err != nil {
+		return err
+	}
+	return store.Set(ctx, key, data)
+}
+
+func encodeRunnerCheckPointImpl(
+	enableStreaming bool,
+	ctx context.Context,
+	info *InterruptInfo,
+	is *core.InterruptSignal,
+) ([]byte, error) {
 	runCtx := getRunCtx(ctx)
 
 	id2Addr, id2State := core.SignalToPersistenceMaps(is)
@@ -314,9 +327,9 @@ func runnerSaveCheckPointImpl(
 		EnableStreaming:           enableStreaming,
 	})
 	if err != nil {
-		return fmt.Errorf("failed to encode checkpoint: %w", err)
+		return nil, fmt.Errorf("failed to encode checkpoint: %w", err)
 	}
-	return store.Set(ctx, key, buf.Bytes())
+	return buf.Bytes(), nil
 }
 
 func compactRunnerCheckpointInfoData(info *InterruptInfo, is *core.InterruptSignal) (*InterruptInfo, string) {
