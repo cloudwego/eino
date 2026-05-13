@@ -271,7 +271,7 @@ func buildPreservedSkillsText(_ context.Context, messages []adk.Message, config 
 	var budgetedSkills []*skillInfo
 	for i := len(skills) - 1; i >= 0; i-- {
 		skill := skills[i]
-		tokens := estimateTokenCount(skill.Content)
+		tokens := estimateTokenCount(len(skill.Content))
 
 		if tokens > maxTokensPerSkill {
 			skill = &skillInfo{
@@ -319,7 +319,7 @@ func truncateSkillContent(content string, maxTokens int) string {
 		return content
 	}
 
-	if estimateTokenCount(content) <= maxTokens {
+	if estimateTokenCount(len(content)) <= maxTokens {
 		return content
 	}
 
