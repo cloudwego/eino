@@ -466,6 +466,7 @@ type typedRunParams[M MessageType] struct {
 	cancelCtx      *cancelContext
 	cancelCtxOwned bool
 	composeOpts    []compose.Option
+	sessionEvents  bool
 
 	afterToolCallsHook func(ctx context.Context) error
 }
@@ -486,7 +487,7 @@ func NewChatModelAgent(ctx context.Context, config *ChatModelAgentConfig) (*Chat
 }
 
 // NewTypedChatModelAgent creates a new TypedChatModelAgent with the given config.
-func NewTypedChatModelAgent[M MessageType](ctx context.Context, config *TypedChatModelAgentConfig[M]) (*TypedChatModelAgent[M], error) {
+func NewTypedChatModelAgent[M MessageType](_ context.Context, config *TypedChatModelAgentConfig[M]) (*TypedChatModelAgent[M], error) {
 	if config.ModelFailoverConfig != nil {
 		if config.ModelFailoverConfig.GetFailoverModel == nil {
 			return nil, errors.New("ModelFailoverConfig.GetFailoverModel is required when ModelFailoverConfig is set")
@@ -852,6 +853,36 @@ func (a *TypedChatModelAgent[M]) applyAfterAgent(ctx context.Context) (context.C
 	return ctx, nil
 }
 
+func (a *TypedChatModelAgent[M]) snapshotTurnEndState(ctx context.Context) *TurnEndState[M] {
+	var state *TurnEndState[M]
+	_ = compose.ProcessState(ctx, func(_ context.Context, st *typedState[M]) error {
+		state = &TurnEndState[M]{
+			Messages:          append([]M{}, st.Messages...),
+			ToolInfos:         append([]*schema.ToolInfo{}, st.ToolInfos...),
+			DeferredToolInfos: append([]*schema.ToolInfo{}, st.DeferredToolInfos...),
+			SessionValues:     GetSessionValues(ctx),
+		}
+		return nil
+	})
+	return state
+}
+
+func (a *TypedChatModelAgent[M]) emitTurnEndState(ctx context.Context, state *TurnEndState[M]) {
+	execCtx := getTypedChatModelAgentExecCtx[M](ctx)
+	if execCtx == nil {
+		return
+	}
+	if state == nil {
+		state = &TurnEndState[M]{SessionValues: GetSessionValues(ctx)}
+	} else {
+		state.SessionValues = GetSessionValues(ctx)
+	}
+	execCtx.send(&TypedAgentEvent[M]{
+		AgentName:    a.name,
+		TurnEndState: state,
+	})
+}
+
 func (a *TypedChatModelAgent[M]) prepareExecContext(ctx context.Context) (*execContext, error) {
 	instruction := a.instruction
 	toolsNodeConf := a.toolsConfig.ToolsNodeConfig
@@ -1007,12 +1038,16 @@ func (a *TypedChatModelAgent[M]) buildNoToolsRunFunc(_ context.Context) (typedRu
 
 		appendModelToChain(chain, wrappedModel)
 
-		if len(a.handlers) > 0 {
-			chain.AppendLambda(compose.InvokableLambda(func(ctx context.Context, msg M) (M, error) {
-				_, err := a.applyAfterAgent(ctx)
-				return msg, err
-			}))
-		}
+		var turnEndState *TurnEndState[M]
+		chain.AppendLambda(compose.InvokableLambda(func(ctx context.Context, msg M) (M, error) {
+			if len(a.handlers) > 0 {
+				if _, err := a.applyAfterAgent(ctx); err != nil {
+					return msg, err
+				}
+			}
+			turnEndState = a.snapshotTurnEndState(ctx)
+			return msg, nil
+		}))
 
 		var compileOptions []compose.GraphCompileOption
 		compileOptions = append(compileOptions,
@@ -1065,9 +1100,13 @@ func (a *TypedChatModelAgent[M]) buildNoToolsRunFunc(_ context.Context) (typedRu
 				err = setOutputToSession(ctx, msg, msgStream, a.outputKey)
 				if err != nil {
 					p.generator.Send(&TypedAgentEvent[M]{Err: err})
+					return
 				}
 			} else if msgStream != nil {
 				msgStream.Close()
+			}
+			if p.sessionEvents {
+				a.emitTurnEndState(ctx, turnEndState)
 			}
 			return
 		}
@@ -1113,13 +1152,6 @@ func (a *TypedChatModelAgent[M]) buildMessageReActRunFunc(_ context.Context, bc 
 		agentName:           a.name,
 		maxIterations:       a.maxIterations,
 	}
-	if len(a.handlers) > 0 {
-		msgAgent := any(a).(*TypedChatModelAgent[*schema.Message])
-		msgConf.afterAgentFunc = func(ctx context.Context, msg *schema.Message) (*schema.Message, error) {
-			_, err := msgAgent.applyAfterAgent(ctx)
-			return msg, err
-		}
-	}
 
 	return func(ctx context.Context, p *typedRunParams[M]) {
 		mp := any(p).(*typedRunParams[*schema.Message])
@@ -1129,6 +1161,19 @@ func (a *TypedChatModelAgent[M]) buildMessageReActRunFunc(_ context.Context, bc 
 			msgConf.modelWrapperConf.cancelContext = cancelCtx
 		}
 		ctx = withCancelContext(ctx, cancelCtx)
+
+		var turnEndState *TurnEndState[*schema.Message]
+		msgAgent := any(a).(*TypedChatModelAgent[*schema.Message])
+		msgConf.afterAgentFunc = func(ctx context.Context, msg *schema.Message) (*schema.Message, error) {
+			if len(a.handlers) > 0 {
+				_, err := msgAgent.applyAfterAgent(ctx)
+				if err != nil {
+					return msg, err
+				}
+			}
+			turnEndState = msgAgent.snapshotTurnEndState(ctx)
+			return msg, nil
+		}
 
 		g, err := newReact(ctx, msgConf)
 		if err != nil {
@@ -1216,11 +1261,15 @@ func (a *TypedChatModelAgent[M]) buildMessageReActRunFunc(_ context.Context, bc 
 				err_ = setOutputToSession[*schema.Message](ctx, msg, msgStream, a.outputKey)
 				if err_ != nil {
 					mp.generator.Send(&AgentEvent{Err: err_})
+					return
 				}
 			} else if msgStream != nil {
 				msgStream.Close()
 			}
 
+			if p.sessionEvents {
+				any(a).(*TypedChatModelAgent[*schema.Message]).emitTurnEndState(ctx, turnEndState)
+			}
 			return
 		}
 
@@ -1250,13 +1299,6 @@ func (a *TypedChatModelAgent[M]) buildAgenticReActRunFunc(_ context.Context, bc 
 		agentName:           a.name,
 		maxIterations:       a.maxIterations,
 	}
-	if len(a.handlers) > 0 {
-		agenticAgent := any(a).(*TypedChatModelAgent[*schema.AgenticMessage])
-		agenticConf.afterAgentFunc = func(ctx context.Context, msg *schema.AgenticMessage) (*schema.AgenticMessage, error) {
-			_, err := agenticAgent.applyAfterAgent(ctx)
-			return msg, err
-		}
-	}
 
 	return func(ctx context.Context, p *typedRunParams[M]) {
 		ap := any(p).(*typedRunParams[*schema.AgenticMessage])
@@ -1266,6 +1308,19 @@ func (a *TypedChatModelAgent[M]) buildAgenticReActRunFunc(_ context.Context, bc 
 			agenticConf.modelWrapperConf.cancelContext = cancelCtx
 		}
 		ctx = withCancelContext(ctx, cancelCtx)
+
+		var turnEndState *TurnEndState[*schema.AgenticMessage]
+		agenticAgent := any(a).(*TypedChatModelAgent[*schema.AgenticMessage])
+		agenticConf.afterAgentFunc = func(ctx context.Context, msg *schema.AgenticMessage) (*schema.AgenticMessage, error) {
+			if len(a.handlers) > 0 {
+				_, err := agenticAgent.applyAfterAgent(ctx)
+				if err != nil {
+					return msg, err
+				}
+			}
+			turnEndState = agenticAgent.snapshotTurnEndState(ctx)
+			return msg, nil
+		}
 
 		g, err := newAgenticReact(ctx, agenticConf)
 		if err != nil {
@@ -1285,7 +1340,7 @@ func (a *TypedChatModelAgent[M]) buildAgenticReActRunFunc(_ context.Context, bc 
 					}, nil
 				}),
 			).
-			AppendGraph(g, compose.WithNodeName("ReAct"), compose.WithGraphCompileOptions(compose.WithMaxRunSteps(math.MaxInt)))
+			AppendGraph(g, compose.WithNodeName("AgenticReAct"), compose.WithGraphCompileOptions(compose.WithMaxRunSteps(math.MaxInt)))
 
 		var compileOptions []compose.GraphCompileOption
 		compileOptions = append(compileOptions,
@@ -1349,11 +1404,15 @@ func (a *TypedChatModelAgent[M]) buildAgenticReActRunFunc(_ context.Context, bc 
 				err_ = setOutputToSession(ctx, msg, msgStream, a.outputKey)
 				if err_ != nil {
 					ap.generator.Send(&TypedAgentEvent[*schema.AgenticMessage]{Err: err_})
+					return
 				}
 			} else if msgStream != nil {
 				msgStream.Close()
 			}
 
+			if p.sessionEvents {
+				any(a).(*TypedChatModelAgent[*schema.AgenticMessage]).emitTurnEndState(ctx, turnEndState)
+			}
 			return
 		}
 
@@ -1503,6 +1562,7 @@ func (a *TypedChatModelAgent[M]) Run(ctx context.Context, input *TypedAgentInput
 			cancelCtx:          cancelCtx,
 			cancelCtxOwned:     cancelCtxOwned,
 			composeOpts:        co,
+			sessionEvents:      o.enableSessionEvents,
 			afterToolCallsHook: runOps.afterToolCallsHook,
 		})
 	}()
@@ -1627,6 +1687,7 @@ func (a *TypedChatModelAgent[M]) Resume(ctx context.Context, info *ResumeInfo, o
 			cancelCtx:          cancelCtx,
 			cancelCtxOwned:     cancelCtxOwned,
 			composeOpts:        co,
+			sessionEvents:      o.enableSessionEvents,
 			afterToolCallsHook: resumeRunOps.afterToolCallsHook,
 		})
 	}()
