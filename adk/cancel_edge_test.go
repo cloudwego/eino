@@ -258,6 +258,41 @@ func TestWithCancel_AfterCompletion(t *testing.T) {
 	assert.ErrorIs(t, cancelErr, ErrExecutionEnded)
 }
 
+// TestWithCancel_DerivedAgentToolCancelContextMarkedDoneAfterRun verifies that
+// an explicitly derived AgentTool child cancel context is owned by the child run,
+// even when the Go context also carries the parent cancel context.
+func TestWithCancel_DerivedAgentToolCancelContextMarkedDoneAfterRun(t *testing.T) {
+	ctx := context.Background()
+
+	agent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+		Name:        "ChildAgent",
+		Description: "test child agent",
+		Model:       &plainResponseModel{text: "done"},
+	})
+	require.NoError(t, err)
+
+	parent := newCancelContext()
+	parentCtx := withCancelContext(ctx, parent)
+	child := parent.deriveAgentToolCancelContext(parentCtx)
+
+	childOpt := WrapImplSpecificOptFn(func(o *options) {
+		o.cancelCtx = child
+	})
+	iter := agent.Run(parentCtx, &AgentInput{Messages: []Message{schema.UserMessage("hi")}}, childOpt)
+	for {
+		_, ok := iter.Next()
+		if !ok {
+			break
+		}
+	}
+
+	select {
+	case <-child.doneChan:
+	case <-time.After(time.Second):
+		t.Fatal("derived AgentTool cancel context was not marked done after child run completion")
+	}
+}
+
 // TestWithCancel_AfterBusinessInterrupt verifies cancelFn returns ErrExecutionEnded
 // when called after the agent has been interrupted by business logic.
 func TestWithCancel_AfterBusinessInterrupt(t *testing.T) {

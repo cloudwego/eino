@@ -481,6 +481,14 @@ type typedRunParams[M MessageType] struct {
 
 type typedRunFunc[M MessageType] func(ctx context.Context, p *typedRunParams[M])
 
+func resolveRunCancelContext(ctx context.Context, o *options) (*cancelContext, bool) {
+	inherited := getCancelContext(ctx)
+	if o.cancelCtx != nil {
+		return o.cancelCtx, o.cancelCtx != inherited
+	}
+	return inherited, false
+}
+
 // NewChatModelAgent creates a new ChatModelAgent with the given config.
 func NewChatModelAgent(ctx context.Context, config *ChatModelAgentConfig) (*ChatModelAgent, error) {
 	return NewTypedChatModelAgent[*schema.Message](ctx, config)
@@ -1441,11 +1449,7 @@ func (a *TypedChatModelAgent[M]) Run(ctx context.Context, input *TypedAgentInput
 	iterator, generator := NewAsyncIteratorPair[*TypedAgentEvent[M]]()
 
 	o := getCommonOptions(nil, opts...)
-	cancelCtx := o.cancelCtx
-	cancelCtxOwned := cancelCtx != nil && getCancelContext(ctx) == nil
-	if cancelCtx == nil {
-		cancelCtx = getCancelContext(ctx)
-	}
+	cancelCtx, cancelCtxOwned := resolveRunCancelContext(ctx, o)
 
 	ctx, run, bc, err := a.getRunFunc(ctx)
 	if err != nil {
@@ -1517,11 +1521,7 @@ func (a *TypedChatModelAgent[M]) Resume(ctx context.Context, info *ResumeInfo, o
 	iterator, generator := NewAsyncIteratorPair[*TypedAgentEvent[M]]()
 
 	o := getCommonOptions(nil, opts...)
-	cancelCtx := o.cancelCtx
-	cancelCtxOwned := cancelCtx != nil && getCancelContext(ctx) == nil
-	if cancelCtx == nil {
-		cancelCtx = getCancelContext(ctx)
-	}
+	cancelCtx, cancelCtxOwned := resolveRunCancelContext(ctx, o)
 
 	ctx, run, bc, err := a.getRunFunc(ctx)
 	if err != nil {
