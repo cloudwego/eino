@@ -432,6 +432,8 @@ type TypedAgentEvent[M MessageType] struct {
 	Action *AgentAction
 
 	Err error
+
+	TurnEndState *TurnEndState[M]
 }
 
 // AgentEvent is the default event type using *schema.Message.
