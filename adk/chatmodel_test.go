@@ -86,6 +86,51 @@ func TestChatModelAgentRun(t *testing.T) {
 		assert.False(t, ok)
 	})
 
+	t.Run("SessionEvents_NoTools_EmitsTurnEndState", func(t *testing.T) {
+		ctx := context.Background()
+
+		ctrl := gomock.NewController(t)
+		cm := mockModel.NewMockToolCallingChatModel(ctrl)
+		cm.EXPECT().Generate(gomock.Any(), gomock.Any(), gomock.Any()).
+			Return(schema.AssistantMessage("session answer", nil), nil).
+			Times(1)
+
+		agent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+			Name:        "SessionAgent",
+			Description: "session event test agent",
+			Instruction: "You are a helpful assistant.",
+			Model:       cm,
+			OutputKey:   "answer",
+		})
+		require.NoError(t, err)
+
+		input := &AgentInput{Messages: []Message{schema.UserMessage("remember this")}}
+		ctx = ctxWithNewTypedRunCtx(ctx, input, false)
+
+		iterator := agent.Run(ctx, input, withEnableSessionEvents())
+		var events []*AgentEvent
+		for {
+			event, ok := iterator.Next()
+			if !ok {
+				break
+			}
+			require.NoError(t, event.Err)
+			events = append(events, event)
+		}
+
+		require.Len(t, events, 2)
+		require.NotNil(t, events[0].Output)
+		assert.Equal(t, "session answer", events[0].Output.MessageOutput.Message.Content)
+
+		turnEnd := events[1].TurnEndState
+		require.NotNil(t, turnEnd)
+		require.Len(t, turnEnd.Messages, 3)
+		assert.Equal(t, schema.System, turnEnd.Messages[0].Role)
+		assert.Equal(t, "remember this", turnEnd.Messages[1].Content)
+		assert.Equal(t, "session answer", turnEnd.Messages[2].Content)
+		assert.Equal(t, "session answer", turnEnd.SessionValues["answer"])
+	})
+
 	t.Run("BasicChatModelWithAgentMiddleware", func(t *testing.T) {
 		ctx := context.Background()
 
@@ -202,6 +247,69 @@ func TestChatModelAgentRun(t *testing.T) {
 		assert.False(t, ok)
 
 		assert.Len(t, capturedMessages, 3)
+	})
+
+	t.Run("SessionEvents_ReAct_EmitsToolAwareTurnEndState", func(t *testing.T) {
+		ctx := context.Background()
+
+		ctrl := gomock.NewController(t)
+		cm := mockModel.NewMockToolCallingChatModel(ctrl)
+
+		generateCount := 0
+		cm.EXPECT().Generate(gomock.Any(), gomock.Any(), gomock.Any()).
+			DoAndReturn(func(ctx context.Context, msgs []*schema.Message, opts ...model.Option) (*schema.Message, error) {
+				generateCount++
+				if generateCount == 1 {
+					return schema.AssistantMessage("need tool", []schema.ToolCall{
+						{ID: "tc1", Function: schema.FunctionCall{Name: "test_tool", Arguments: "{}"}},
+					}), nil
+				}
+				return schema.AssistantMessage("final with tool", nil), nil
+			}).AnyTimes()
+		cm.EXPECT().WithTools(gomock.Any()).Return(cm, nil).AnyTimes()
+
+		agent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+			Name:        "SessionReActAgent",
+			Description: "session react event test agent",
+			Instruction: "You are a helpful assistant.",
+			Model:       cm,
+			OutputKey:   "answer",
+			ToolsConfig: ToolsConfig{
+				ToolsNodeConfig: compose.ToolsNodeConfig{
+					Tools: []tool.BaseTool{&fakeToolForTest{tarCount: 0}},
+				},
+			},
+		})
+		require.NoError(t, err)
+
+		input := &AgentInput{Messages: []Message{schema.UserMessage("use tool")}}
+		ctx = ctxWithNewTypedRunCtx(ctx, input, false)
+
+		iterator := agent.Run(ctx, input, withEnableSessionEvents())
+		var events []*AgentEvent
+		for {
+			event, ok := iterator.Next()
+			if !ok {
+				break
+			}
+			require.NoError(t, event.Err)
+			events = append(events, event)
+		}
+
+		require.Len(t, events, 4)
+		assert.Equal(t, 2, generateCount)
+		require.NotNil(t, events[3].TurnEndState)
+
+		turnEnd := events[3].TurnEndState
+		require.Len(t, turnEnd.Messages, 5)
+		assert.Equal(t, schema.System, turnEnd.Messages[0].Role)
+		assert.Equal(t, "use tool", turnEnd.Messages[1].Content)
+		assert.Len(t, turnEnd.Messages[2].ToolCalls, 1)
+		assert.Equal(t, schema.Tool, turnEnd.Messages[3].Role)
+		assert.Equal(t, "final with tool", turnEnd.Messages[4].Content)
+		require.Len(t, turnEnd.ToolInfos, 1)
+		assert.Equal(t, "test_tool", turnEnd.ToolInfos[0].Name)
+		assert.Equal(t, "final with tool", turnEnd.SessionValues["answer"])
 	})
 
 	t.Run("AfterChatModel_ReAct_ModifyAffectsFlow", func(t *testing.T) {

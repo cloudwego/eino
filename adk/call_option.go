@@ -23,6 +23,7 @@ type options struct {
 	sessionValues        map[string]any
 	checkPointID         *string
 	skipTransferMessages bool
+	enableSessionEvents  bool
 	handlers             []callbacks.Handler
 	cancelCtx            *cancelContext
 }
@@ -52,6 +53,12 @@ func getCommonOptions(base *options, opts ...AgentRunOption) *options {
 func WithSessionValues(v map[string]any) AgentRunOption {
 	return WrapImplSpecificOptFn(func(o *options) {
 		o.sessionValues = v
+	})
+}
+
+func withEnableSessionEvents() AgentRunOption {
+	return WrapImplSpecificOptFn(func(o *options) {
+		o.enableSessionEvents = true
 	})
 }
 

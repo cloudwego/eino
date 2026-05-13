@@ -2156,9 +2156,20 @@ func TestWithCancel_CancelImmediate_StreamableToolAborted(t *testing.T) {
 			// ErrStreamCanceled appears on the tool's MessageStream.Recv()
 			if e.Output != nil && e.Output.MessageOutput != nil && e.Output.MessageOutput.IsStreaming &&
 				e.Output.MessageOutput.Role == schema.Tool {
-				// Signal that the tool stream event has been received.
-				close(toolStreamReady)
 				stream := e.Output.MessageOutput.MessageStream
+				// Consume the first chunk so we are sure the stream is active,
+				// then signal readiness. This ensures cancel fires while we are
+				// blocked inside Recv(), preventing a race where cancel completes
+				// before we start consuming.
+				if _, firstErr := stream.Recv(); firstErr == nil {
+					close(toolStreamReady)
+				} else {
+					if errors.Is(firstErr, ErrStreamCanceled) {
+						r.foundStreamCanceled = true
+					}
+					close(toolStreamReady)
+					continue
+				}
 				for {
 					_, recvErr := stream.Recv()
 					if recvErr != nil {
