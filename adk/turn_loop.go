@@ -1538,20 +1538,20 @@ func (l *TurnLoop[T, M]) run(ctx context.Context) {
 
 		l.preemptSig.endTurnAndUnhold()
 
-		// Set inFlightItems whenever a cancel or interrupt was captured from the
-		// event stream, regardless of what the user's callback returned. The items
-		// were factually mid-execution when the signal arrived.
-		if (l.capturedCancelErr != nil || l.interruptContexts != nil) && len(l.inFlightItems) == 0 {
-			l.inFlightItems = append([]T{}, plan.spec.consumed...)
-		}
-
 		if runErr != nil {
+			// Set inFlightItems when a cancel or interrupt was captured from the
+			// event stream, regardless of what the user's callback returned. The items
+			// were factually mid-execution when the signal arrived.
+			if l.capturedCancelErr != nil || l.interruptContexts != nil {
+				l.inFlightItems = append([]T{}, plan.spec.consumed...)
+			}
 			l.runErr = runErr
 			return
 		}
 
 		// Business interrupt: agent produced an Interrupted action, exit to persist checkpoint.
 		if l.interruptContexts != nil {
+			l.inFlightItems = append([]T{}, plan.spec.consumed...)
 			l.runErr = &InterruptError{InterruptContexts: l.interruptContexts}
 			return
 		}

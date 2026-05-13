@@ -1853,6 +1853,197 @@ func TestTurnLoop_StopDuringAgentExecution_PersistAndResume(t *testing.T) {
 	assert.False(t, genInputCalled)
 }
 
+// TestTurnLoop_StopCancel_InFlightItems_PersistAndRestore verifies the full
+// lifecycle: Stop(WithImmediate()) cancels a running agent, the exit state
+// reports the correct InFlightItems, the checkpoint persists them, and a new
+// TurnLoop restoring from that checkpoint passes the exact same items to
+// GenResume's inFlightItems parameter.
+func TestTurnLoop_StopCancel_InFlightItems_PersistAndRestore(t *testing.T) {
+	ctx := context.Background()
+	modelStarted := make(chan struct{}, 1)
+	store := &turnLoopCheckpointStore{m: make(map[string][]byte)}
+	cpID := "inflight-persist-session"
+
+	slowModel := &cancelTestChatModel{
+		delayNs: int64(500 * time.Millisecond),
+		response: &schema.Message{
+			Role:    schema.Assistant,
+			Content: "Hello",
+		},
+		startedChan: modelStarted,
+		doneChan:    make(chan struct{}, 1),
+	}
+
+	agent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+		Name:        "TestAgent",
+		Description: "Test agent",
+		Instruction: "You are a test assistant",
+		Model:       slowModel,
+	})
+	require.NoError(t, err)
+
+	// Phase 1: Run, cancel mid-turn, verify exit state.
+	loop := newAndRunTurnLoop(ctx, TurnLoopConfig[string, *schema.Message]{
+		Store:        store,
+		CheckpointID: cpID,
+		GenInput: func(ctx context.Context, _ *TurnLoop[string, *schema.Message], items []string) (*GenInputResult[string, *schema.Message], error) {
+			return &GenInputResult[string, *schema.Message]{
+				Input:    &AgentInput{Messages: []Message{schema.UserMessage(items[0])}},
+				Consumed: items,
+			}, nil
+		},
+		PrepareAgent: func(ctx context.Context, _ *TurnLoop[string, *schema.Message], consumed []string) (Agent, error) {
+			return agent, nil
+		},
+	})
+
+	loop.Push("msg1")
+	<-modelStarted
+	loop.Stop(WithImmediate())
+	exit := loop.Wait()
+
+	// ExitReason must be CancelError.
+	var cancelErr *CancelError
+	require.True(t, errors.As(exit.ExitReason, &cancelErr), "expected *CancelError, got: %v", exit.ExitReason)
+
+	// InFlightItems must contain the consumed items.
+	assert.Equal(t, []string{"msg1"}, exit.InFlightItems,
+		"InFlightItems in exit state should contain the items that were mid-execution")
+
+	// Checkpoint must be saved.
+	assert.True(t, exit.CheckpointAttempted, "checkpoint should be attempted")
+	assert.NoError(t, exit.CheckpointErr, "checkpoint save should succeed")
+
+	store.mu.Lock()
+	_, cpExists := store.m[cpID]
+	store.mu.Unlock()
+	require.True(t, cpExists, "checkpoint should exist in store")
+
+	// Phase 2: Restore from checkpoint, verify GenResume receives the exact InFlightItems.
+	slowModel.setDelay(10 * time.Millisecond)
+
+	var genResumeCalled bool
+	var resumeInFlightItems []string
+	var resumeUnhandledItems []string
+
+	loop2 := NewTurnLoop(TurnLoopConfig[string, *schema.Message]{
+		Store:        store,
+		CheckpointID: cpID,
+		GenResume: func(ctx context.Context, _ *TurnLoop[string, *schema.Message], inFlightItems, unhandledItems, newItems []string) (*GenResumeResult[string, *schema.Message], error) {
+			genResumeCalled = true
+			resumeInFlightItems = append([]string{}, inFlightItems...)
+			resumeUnhandledItems = append([]string{}, unhandledItems...)
+			return &GenResumeResult[string, *schema.Message]{
+				Consumed:  inFlightItems,
+				Remaining: append(append([]string{}, unhandledItems...), newItems...),
+			}, nil
+		},
+		GenInput: func(ctx context.Context, _ *TurnLoop[string, *schema.Message], items []string) (*GenInputResult[string, *schema.Message], error) {
+			t.Fatal("GenInput should not be called when resuming from a cancel checkpoint")
+			return nil, nil
+		},
+		PrepareAgent: func(ctx context.Context, _ *TurnLoop[string, *schema.Message], consumed []string) (Agent, error) {
+			return agent, nil
+		},
+		OnAgentEvents: func(ctx context.Context, tc *TurnContext[string, *schema.Message], events *AsyncIterator[*AgentEvent]) error {
+			for {
+				_, ok := events.Next()
+				if !ok {
+					break
+				}
+			}
+			tc.Loop.Stop()
+			return nil
+		},
+	})
+
+	loop2.Run(ctx)
+	exit2 := loop2.Wait()
+
+	assert.NoError(t, exit2.ExitReason)
+	assert.True(t, genResumeCalled, "GenResume should be called when restoring from a cancel checkpoint")
+	assert.Equal(t, []string{"msg1"}, resumeInFlightItems,
+		"GenResume's inFlightItems should match the original exit state's InFlightItems")
+	assert.Empty(t, resumeUnhandledItems,
+		"unhandledItems should be empty (all items were consumed before cancel)")
+}
+
+// TestTurnLoop_PreemptThenStop_InFlightItems_ReflectsStoppedTurn verifies that
+// when a preempt interrupts turn 1 and then Stop(WithImmediate()) cancels turn 2,
+// the reported InFlightItems correspond to turn 2's consumed items (not turn 1's).
+func TestTurnLoop_PreemptThenStop_InFlightItems_ReflectsStoppedTurn(t *testing.T) {
+	ctx := context.Background()
+	store := &turnLoopCheckpointStore{m: make(map[string][]byte)}
+	cpID := "preempt-then-stop-session"
+
+	turnCount := int32(0)
+	modelStarted := make(chan struct{}, 10)
+
+	slowModel := &cancelTestChatModel{
+		delayNs: int64(5 * time.Second),
+		response: &schema.Message{
+			Role:    schema.Assistant,
+			Content: "Hello",
+		},
+		startedChan: modelStarted,
+		doneChan:    make(chan struct{}, 10),
+	}
+
+	agent, err := NewChatModelAgent(ctx, &ChatModelAgentConfig{
+		Name:        "TestAgent",
+		Description: "Test agent",
+		Instruction: "You are a test assistant",
+		Model:       slowModel,
+	})
+	require.NoError(t, err)
+
+	loop := newAndRunTurnLoop(ctx, TurnLoopConfig[string, *schema.Message]{
+		Store:        store,
+		CheckpointID: cpID,
+		GenInput: func(ctx context.Context, _ *TurnLoop[string, *schema.Message], items []string) (*GenInputResult[string, *schema.Message], error) {
+			n := atomic.AddInt32(&turnCount, 1)
+			_ = n
+			return &GenInputResult[string, *schema.Message]{
+				Input:    &AgentInput{Messages: []Message{schema.UserMessage(items[0])}},
+				Consumed: items,
+			}, nil
+		},
+		PrepareAgent: func(ctx context.Context, _ *TurnLoop[string, *schema.Message], consumed []string) (Agent, error) {
+			return agent, nil
+		},
+	})
+
+	// Turn 1: push "a", wait for agent to start, then preempt with "b".
+	loop.Push("a")
+	<-modelStarted
+
+	_, ack := loop.Push("b", WithPreemptTimeout[string, *schema.Message](AnySafePoint, 10*time.Millisecond))
+	// Wait for the preempt to be acknowledged.
+	select {
+	case <-ack:
+	case <-time.After(5 * time.Second):
+		t.Fatal("preempt ack timed out")
+	}
+
+	// Turn 2: the loop restarts with all buffered items. Wait for agent to start.
+	<-modelStarted
+
+	// Now stop with immediate cancel on turn 2.
+	loop.Stop(WithImmediate())
+	exit := loop.Wait()
+
+	// ExitReason must be CancelError.
+	var cancelErr *CancelError
+	require.True(t, errors.As(exit.ExitReason, &cancelErr), "expected *CancelError, got: %v", exit.ExitReason)
+
+	// KEY ASSERTION: InFlightItems must reflect turn 2's consumed items (which
+	// includes both "a" and "b" since GenInput consumes all items), NOT turn 1's ["a"].
+	// Turn 2 consumed whatever GenInput received (the re-buffered items from preempt + "b").
+	assert.NotEmpty(t, exit.InFlightItems, "InFlightItems should not be empty after Stop cancel")
+	assert.Contains(t, exit.InFlightItems, "b",
+		"InFlightItems should contain 'b' which was part of turn 2's consumed items")
+}
+
 func TestTurnLoop_BusinessInterrupt_PersistAndResume(t *testing.T) {
 	ctx := context.Background()
 	store := &turnLoopCheckpointStore{m: make(map[string][]byte)}
