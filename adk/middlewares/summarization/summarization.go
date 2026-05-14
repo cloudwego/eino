@@ -761,12 +761,22 @@ func (m *typedMiddleware[M]) postProcessSummary(ctx context.Context, contextMsgs
 
 	if m.cfg.PreserveUserMessages == nil || m.cfg.PreserveUserMessages.Enabled {
 		maxUserMsgTokens := m.getUserMessageContextTokens()
-		var err error
-		content, err = m.replaceUserMessagesInSummary(ctx, contextMsgs, content, maxUserMsgTokens)
+		var filter TypedUserMessageFilterFunc[M]
+		if m.cfg.PreserveUserMessages != nil {
+			filter = m.cfg.PreserveUserMessages.Filter
+		}
+		newContent, err := populateUserMessages(ctx, &populateUserMessagesParams[M]{
+			contextMsgs:  contextMsgs,
+			summaryText:  content,
+			maxTokens:    maxUserMsgTokens,
+			filter:       filter,
+			tokenCounter: m.cfg.TokenCounter,
+		})
 		if err != nil {
 			var zero M
-			return zero, fmt.Errorf("failed to replace user messages in summary: %w", err)
+			return zero, fmt.Errorf("failed to populate user messages in summary: %w", err)
 		}
+		content = newContent
 	}
 
 	if path := m.cfg.TranscriptFilePath; path != "" {
@@ -780,17 +790,30 @@ func (m *typedMiddleware[M]) postProcessSummary(ctx context.Context, contextMsgs
 	return newSummary, nil
 }
 
-func (m *typedMiddleware[M]) replaceUserMessagesInSummary(ctx context.Context, contextMsgs []M, summary string, contextTokens int) (string, error) {
+type populateUserMessagesParams[M adk.MessageType] struct {
+	contextMsgs  []M
+	summaryText  string
+	maxTokens    int
+	filter       TypedUserMessageFilterFunc[M]
+	tokenCounter TypedTokenCounterFunc[M]
+}
+
+func populateUserMessages[M adk.MessageType](ctx context.Context, p *populateUserMessagesParams[M]) (string, error) {
+	countTokens := p.tokenCounter
+	if countTokens == nil {
+		countTokens = defaultTypedTokenCounter[M]
+	}
+
 	var userMsgs []M
 	var hasUserMsgsBeforeFilter bool
-	for _, msg := range contextMsgs {
+	for _, msg := range p.contextMsgs {
 		if typedGetContentType(msg) == contentTypeSummary {
 			continue
 		}
 		if isUserRole(msg) {
 			hasUserMsgsBeforeFilter = true
-			if m.cfg.PreserveUserMessages != nil && m.cfg.PreserveUserMessages.Filter != nil {
-				keep, err := m.cfg.PreserveUserMessages.Filter(ctx, msg)
+			if p.filter != nil {
+				keep, err := p.filter(ctx, msg)
 				if err != nil {
 					return "", fmt.Errorf("failed to filter user message: %w", err)
 				}
@@ -803,7 +826,7 @@ func (m *typedMiddleware[M]) replaceUserMessagesInSummary(ctx context.Context, c
 	}
 
 	if !hasUserMsgsBeforeFilter {
-		return summary, nil
+		return p.summaryText, nil
 	}
 
 	var selected []M
@@ -814,14 +837,14 @@ func (m *typedMiddleware[M]) replaceUserMessagesInSummary(ctx context.Context, c
 		for i := len(userMsgs) - 1; i >= 0; i-- {
 			msg := userMsgs[i]
 
-			tokens, err := m.countTokens(ctx, &TypedTokenCounterInput[M]{
+			tokens, err := countTokens(ctx, &TypedTokenCounterInput[M]{
 				Messages: []M{msg},
 			})
 			if err != nil {
 				return "", fmt.Errorf("failed to count tokens: %w", err)
 			}
 
-			remaining := contextTokens - totalTokens
+			remaining := p.maxTokens - totalTokens
 			if tokens <= remaining {
 				totalTokens += tokens
 				selected = append(selected, msg)
@@ -851,9 +874,9 @@ func (m *typedMiddleware[M]) replaceUserMessagesInSummary(ctx context.Context, c
 	}
 	userMsgsText := strings.Join(msgLines, "\n")
 
-	lastMatch := findLastMatch(allUserMessagesTagRegex, summary)
+	lastMatch := findLastMatch(allUserMessagesTagRegex, p.summaryText)
 	if lastMatch == nil {
-		return summary, nil
+		return p.summaryText, nil
 	}
 
 	var replacement string
@@ -863,9 +886,9 @@ func (m *typedMiddleware[M]) replaceUserMessagesInSummary(ctx context.Context, c
 		replacement = "<all_user_messages>\n" + userMsgsText + "\n</all_user_messages>"
 	}
 
-	content := summary[:lastMatch[0]] + replacement + summary[lastMatch[1]:]
+	newSummaryText := p.summaryText[:lastMatch[0]] + replacement + p.summaryText[lastMatch[1]:]
 
-	return content, nil
+	return newSummaryText, nil
 }
 
 func findLastMatch(re *regexp.Regexp, s string) []int {
