@@ -801,7 +801,7 @@ func newAgenticReact(ctx context.Context, config *agenticReactConfig) (agenticRe
 }
 
 // extractToolIdentifiers extracts the tool name and call ID from an AgenticMessage
-// that contains a FunctionToolResult content block.
+// that contains a tool result content block.
 // Assumes one tool result per message, which is guaranteed by AgenticToolsNode
 // (see compose.toolMessageToAgenticMessage).
 func extractToolIdentifiers(msg *schema.AgenticMessage) (toolName, callID string) {
@@ -809,8 +809,14 @@ func extractToolIdentifiers(msg *schema.AgenticMessage) (toolName, callID string
 		return "", ""
 	}
 	for _, block := range msg.ContentBlocks {
-		if block != nil && block.Type == schema.ContentBlockTypeFunctionToolResult && block.FunctionToolResult != nil {
+		if block == nil {
+			continue
+		}
+		if block.Type == schema.ContentBlockTypeFunctionToolResult && block.FunctionToolResult != nil {
 			return block.FunctionToolResult.Name, block.FunctionToolResult.CallID
+		}
+		if block.Type == schema.ContentBlockTypeToolSearchResult && block.ToolSearchFunctionToolResult != nil {
+			return block.ToolSearchFunctionToolResult.Name, block.ToolSearchFunctionToolResult.CallID
 		}
 	}
 	return "", ""

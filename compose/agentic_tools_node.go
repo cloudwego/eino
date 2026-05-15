@@ -82,6 +82,11 @@ func agenticMessageToToolCallMessage(input *schema.AgenticMessage) *schema.Messa
 func toolMessageToAgenticMessage(input []*schema.Message) []*schema.AgenticMessage {
 	results := make([]*schema.AgenticMessage, len(input))
 	for i, m := range input {
+		if msg, ok := toolSearchResultMessageToAgenticMessage(m, nil); ok {
+			results[i] = msg
+			continue
+		}
+
 		ftr := &schema.FunctionToolResult{
 			CallID: m.ToolCallID,
 			Name:   m.ToolName,
@@ -113,6 +118,11 @@ func streamToolMessageToAgenticMessage(input *schema.StreamReader[[]*schema.Mess
 			if m == nil {
 				continue
 			}
+			if msg, ok := toolSearchResultMessageToAgenticMessage(m, &schema.StreamingMeta{Index: i}); ok {
+				results[i] = msg
+				continue
+			}
+
 			ftr := &schema.FunctionToolResult{
 				CallID: m.ToolCallID,
 				Name:   m.ToolName,
@@ -137,6 +147,31 @@ func streamToolMessageToAgenticMessage(input *schema.StreamReader[[]*schema.Mess
 		}
 		return results, nil
 	})
+}
+
+func toolSearchResultMessageToAgenticMessage(m *schema.Message, meta *schema.StreamingMeta) (*schema.AgenticMessage, bool) {
+	if m == nil || len(m.UserInputMultiContent) != 1 {
+		return nil, false
+	}
+
+	part := m.UserInputMultiContent[0]
+	if part.Type != schema.ChatMessagePartTypeToolSearchResult || part.ToolSearchResult == nil {
+		return nil, false
+	}
+
+	block := schema.NewContentBlock(&schema.ToolSearchFunctionToolResult{
+		CallID: m.ToolCallID,
+		Name:   m.ToolName,
+		Result: part.ToolSearchResult,
+	})
+	block.StreamingMeta = meta
+	block.Extra = m.Extra
+
+	return &schema.AgenticMessage{
+		Role:          schema.AgenticRoleTypeUser,
+		ContentBlocks: []*schema.ContentBlock{block},
+		Extra:         m.Extra,
+	}, true
 }
 
 func messageInputPartsToFunctionToolBlocks(parts []schema.MessageInputPart) []*schema.FunctionToolResultContentBlock {
