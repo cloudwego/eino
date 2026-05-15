@@ -84,6 +84,7 @@ type CitationWebSearchResultLocation struct {
 	EncryptedIndex string `json:"encrypted_index,omitempty"`
 }
 
+// ConcatAssistantGenTextExtensions merges multiple AssistantGenTextExtension chunks into one.
 func ConcatAssistantGenTextExtensions(chunks []*AssistantGenTextExtension) (*AssistantGenTextExtension, error) {
 	if len(chunks) == 0 {
 		return nil, fmt.Errorf("no assistant generated text extension found")
@@ -103,6 +104,7 @@ func ConcatAssistantGenTextExtensions(chunks []*AssistantGenTextExtension) (*Ass
 	return ret, nil
 }
 
+// ConcatResponseMetaExtensions merges multiple ResponseMetaExtension chunks into one.
 func ConcatResponseMetaExtensions(chunks []*ResponseMetaExtension) (*ResponseMetaExtension, error) {
 	if len(chunks) == 0 {
 		return nil, fmt.Errorf("no response meta extension found")

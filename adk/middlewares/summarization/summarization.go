@@ -98,6 +98,7 @@ type TypedConfig[M adk.MessageType] struct {
 
 	// TranscriptFilePath is the path to the file containing the full conversation history.
 	// It is appended to the summary to remind the model where to read the original context.
+	// This field takes effect only when Finalize is not set.
 	// Optional but strongly recommended.
 	TranscriptFilePath string
 
@@ -117,11 +118,15 @@ type TypedConfig[M adk.MessageType] struct {
 	// Optional.
 	GenModelInput TypedGenModelInputFunc[M]
 
-	// Finalize is called after summary generation. The returned messages are used as the final output.
+	// Finalize is called after summary generation.
+	// The returned messages are used as the final conversation history.
+	// When set, the middleware does not perform any post-processing on the summary
+	// (e.g. PreserveUserMessages will not be applied).
+	// Use DefaultFinalizer to apply the same post-processing as the default path.
 	//
 	// Parameters:
 	//   - originalMessages: the original conversation messages before summarization.
-	//   - summary: the generated summary message (post-processed).
+	//   - summary: the model-generated summary message.
 	//
 	// Returns:
 	//   - []M: the new conversation history to replace the original messages.
@@ -140,9 +145,10 @@ type TypedConfig[M adk.MessageType] struct {
 	Callback TypedCallbackFunc[M]
 
 	// PreserveUserMessages controls whether to preserve original user messages in the summary.
-	// When enabled, replaces the <all_user_messages> section in the model-generated summary
-	// with recent original user messages from the conversation.
+	// When enabled, replaces the <all_user_messages>...</all_user_messages> section in the
+	// model-generated summary with recent original user messages from the conversation.
 	// When disabled, the model-generated content is kept unchanged.
+	// This field takes effect only when Finalize is not set.
 	// Optional. Enabled by default.
 	PreserveUserMessages *TypedPreserveUserMessages[M]
 
@@ -283,7 +289,7 @@ func NewTyped[M adk.MessageType](_ context.Context, cfg *TypedConfig[M]) (adk.Ty
 	if err := cfg.check(); err != nil {
 		return nil, err
 	}
-	mw := &typedMiddleware[M]{
+	mw := &TypedMiddleware[M]{
 		cfg:                               cfg,
 		TypedBaseChatModelAgentMiddleware: &adk.TypedBaseChatModelAgentMiddleware[M]{},
 	}
@@ -296,70 +302,62 @@ func New(ctx context.Context, cfg *Config) (adk.ChatModelAgentMiddleware, error)
 	return NewTyped(ctx, cfg)
 }
 
-type typedMiddleware[M adk.MessageType] struct {
+type TypedMiddleware[M adk.MessageType] struct {
 	*adk.TypedBaseChatModelAgentMiddleware[M]
 	cfg *TypedConfig[M]
 }
 
-// SummarizeOutput contains the output of a synchronous SummarizeMessages call.
-//
-// Deprecated: See SummarizeMessages.
-type SummarizeOutput struct {
-	// FinalizedMessages is the message list after summarization,
-	// ready to be used as the new conversation history.
-	FinalizedMessages []adk.Message
+func (m *TypedMiddleware[M]) Summarize(ctx context.Context, state *adk.TypedChatModelAgentState[M]) ([]M, error) {
+	beforeState := *state
 
-	// ModelResponse is the raw response from the summarization model.
-	ModelResponse adk.Message
-}
-
-// SummarizeMessages performs synchronous summarization of the given messages.
-// EmitInternalEvents and Trigger are not supported and will return an error if set.
-//
-// Deprecated: Use the summarization middleware (created via New) within a dedicated summarization
-// agent instead. In practice, summarization often requires preprocessing by other middlewares
-// (e.g., message reduction, tool call patching), which is naturally supported by composing
-// middlewares in an agent pipeline.
-func SummarizeMessages(ctx context.Context, cfg *Config, messages []adk.Message) (*SummarizeOutput, error) {
-	if cfg.EmitInternalEvents {
-		return nil, fmt.Errorf("emitInternalEvents is not supported in synchronous summarization")
-	}
-	if cfg.Trigger != nil {
-		return nil, fmt.Errorf("trigger is not supported in synchronous summarization")
-	}
-	if err := cfg.check(); err != nil {
-		return nil, err
+	if m.cfg.EmitInternalEvents {
+		err := m.emitEvent(ctx, &TypedCustomizedAction[M]{
+			Type: ActionTypeBeforeSummarize,
+			Before: &TypedBeforeSummarizeAction[M]{
+				Messages: beforeState.Messages,
+			},
+		})
+		if err != nil {
+			return nil, err
+		}
 	}
 
-	m := &typedMiddleware[adk.Message]{cfg: cfg}
-
-	rawSummary, modelInput, err := m.summarize(ctx, messages)
+	rawSummary, modelInput, err := m.summarize(ctx, beforeState.Messages)
 	if err != nil {
 		return nil, err
 	}
 
 	finalizeCtx := context.WithValue(ctx, ctxKeyModelInput{}, modelInput)
 
-	_, finalMsgs, err := m.finalizeSummary(finalizeCtx, messages, rawSummary)
+	_, finalMsgs, err := m.finalizeSummary(finalizeCtx, beforeState.Messages, rawSummary)
 	if err != nil {
 		return nil, err
 	}
 
 	if m.cfg.Callback != nil {
-		beforeState := adk.TypedChatModelAgentState[adk.Message]{Messages: messages}
-		afterState := adk.TypedChatModelAgentState[adk.Message]{Messages: finalMsgs}
+		afterState := beforeState
+		afterState.Messages = finalMsgs
 		if err = m.cfg.Callback(ctx, beforeState, afterState); err != nil {
 			return nil, err
 		}
 	}
 
-	return &SummarizeOutput{
-		FinalizedMessages: finalMsgs,
-		ModelResponse:     rawSummary,
-	}, nil
+	if m.cfg.EmitInternalEvents {
+		err = m.emitEvent(ctx, &TypedCustomizedAction[M]{
+			Type: ActionTypeAfterSummarize,
+			After: &TypedAfterSummarizeAction[M]{
+				Messages: finalMsgs,
+			},
+		})
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	return finalMsgs, nil
 }
 
-func (m *typedMiddleware[M]) BeforeModelRewriteState(ctx context.Context, state *adk.TypedChatModelAgentState[M],
+func (m *TypedMiddleware[M]) BeforeModelRewriteState(ctx context.Context, state *adk.TypedChatModelAgentState[M],
 	_ *adk.TypedModelContext[M]) (context.Context, *adk.TypedChatModelAgentState[M], error) {
 
 	triggered, err := m.shouldSummarize(ctx, &TypedTokenCounterInput[M]{
@@ -373,61 +371,18 @@ func (m *typedMiddleware[M]) BeforeModelRewriteState(ctx context.Context, state 
 		return ctx, state, nil
 	}
 
-	beforeState := *state
-
-	if m.cfg.EmitInternalEvents {
-		err = m.emitEvent(ctx, &TypedCustomizedAction[M]{
-			Type: ActionTypeBeforeSummarize,
-			Before: &TypedBeforeSummarizeAction[M]{
-				Messages: beforeState.Messages,
-			},
-		})
-		if err != nil {
-			return nil, nil, err
-		}
-	}
-
-	rawSummary, modelInput, err := m.summarize(ctx, beforeState.Messages)
+	finalMsgs, err := m.Summarize(ctx, state)
 	if err != nil {
 		return nil, nil, err
 	}
 
-	finalizeCtx := context.WithValue(ctx, ctxKeyModelInput{}, modelInput)
-
-	var finalMsgs []M
-	_, finalMsgs, err = m.finalizeSummary(finalizeCtx, beforeState.Messages, rawSummary)
-	if err != nil {
-		return nil, nil, err
-	}
-
-	afterState := beforeState
+	afterState := *state
 	afterState.Messages = finalMsgs
-
-	if m.cfg.Callback != nil {
-		err = m.cfg.Callback(ctx, beforeState, afterState)
-		if err != nil {
-			return nil, nil, err
-		}
-	}
-
-	if m.cfg.EmitInternalEvents {
-		err = m.emitEvent(ctx, &TypedCustomizedAction[M]{
-			Type: ActionTypeAfterSummarize,
-			After: &TypedAfterSummarizeAction[M]{
-				Messages: afterState.Messages,
-			},
-		})
-		if err != nil {
-			return nil, nil, err
-		}
-	}
 
 	return ctx, &afterState, nil
 }
 
-func (m *typedMiddleware[M]) finalizeSummary(ctx context.Context, originalMsgs []M,
-	rawSummary M) (context.Context, []M, error) {
-
+func (m *TypedMiddleware[M]) finalizeSummary(ctx context.Context, originalMsgs []M, rawSummary M) (context.Context, []M, error) {
 	var summaryContent string
 	switch r := any(rawSummary).(type) {
 	case *schema.Message:
@@ -452,29 +407,28 @@ func (m *typedMiddleware[M]) finalizeSummary(ctx context.Context, originalMsgs [
 		summaryContent = strings.Join(parts, "\n")
 	}
 
-	summary := newTypedSummaryMessage[M](summaryContent)
-
 	systemMsgs, contextMsgs := m.splitSystemAndContextMsgs(originalMsgs)
 
-	processed, err := m.postProcessSummary(ctx, contextMsgs, summary)
-	if err != nil {
-		return nil, nil, err
-	}
-
 	var finalMsgs []M
+	var err error
 	if m.cfg.Finalize != nil {
-		finalMsgs, err = m.cfg.Finalize(ctx, originalMsgs, processed)
+		finalMsgs, err = m.cfg.Finalize(ctx, originalMsgs, rawSummary)
 		if err != nil {
 			return nil, nil, err
 		}
 	} else {
+		summary := newTypedSummaryMessage[M](summaryContent)
+		processed, pErr := m.postProcessSummary(ctx, contextMsgs, summary)
+		if pErr != nil {
+			return nil, nil, pErr
+		}
 		finalMsgs = append(systemMsgs, processed)
 	}
 
 	return ctx, finalMsgs, nil
 }
 
-func (m *typedMiddleware[M]) shouldSummarize(ctx context.Context, input *TypedTokenCounterInput[M]) (bool, error) {
+func (m *TypedMiddleware[M]) shouldSummarize(ctx context.Context, input *TypedTokenCounterInput[M]) (bool, error) {
 	if m.cfg.Trigger != nil && m.cfg.Trigger.ContextMessages > 0 {
 		if len(input.Messages) > m.cfg.Trigger.ContextMessages {
 			return true, nil
@@ -487,7 +441,7 @@ func (m *typedMiddleware[M]) shouldSummarize(ctx context.Context, input *TypedTo
 	return tokens > m.getTriggerContextTokens(), nil
 }
 
-func (m *typedMiddleware[M]) getTriggerContextTokens() int {
+func (m *TypedMiddleware[M]) getTriggerContextTokens() int {
 	const defaultTriggerContextTokens = 160000
 	if m.cfg.Trigger != nil {
 		return m.cfg.Trigger.ContextTokens
@@ -495,14 +449,14 @@ func (m *typedMiddleware[M]) getTriggerContextTokens() int {
 	return defaultTriggerContextTokens
 }
 
-func (m *typedMiddleware[M]) getUserMessageContextTokens() int {
+func (m *TypedMiddleware[M]) getUserMessageContextTokens() int {
 	if m.cfg.PreserveUserMessages != nil && m.cfg.PreserveUserMessages.MaxTokens > 0 {
 		return m.cfg.PreserveUserMessages.MaxTokens
 	}
 	return m.getTriggerContextTokens() / 3
 }
 
-func (m *typedMiddleware[M]) emitEvent(ctx context.Context, action *TypedCustomizedAction[M]) error {
+func (m *TypedMiddleware[M]) emitEvent(ctx context.Context, action *TypedCustomizedAction[M]) error {
 	err := adk.TypedSendEvent(ctx, &adk.TypedAgentEvent[M]{
 		Action: &adk.AgentAction{
 			CustomizedAction: action,
@@ -514,7 +468,7 @@ func (m *typedMiddleware[M]) emitEvent(ctx context.Context, action *TypedCustomi
 	return nil
 }
 
-func (m *typedMiddleware[M]) emitGenerateSummaryEvent(ctx context.Context, attempt int, phase GenerateSummaryPhase,
+func (m *TypedMiddleware[M]) emitGenerateSummaryEvent(ctx context.Context, attempt int, phase GenerateSummaryPhase,
 	resp M, err error) error {
 
 	if !m.cfg.EmitInternalEvents {
@@ -534,7 +488,7 @@ func (m *typedMiddleware[M]) emitGenerateSummaryEvent(ctx context.Context, attem
 	})
 }
 
-func (m *typedMiddleware[M]) countTokens(ctx context.Context, input *TypedTokenCounterInput[M]) (int, error) {
+func (m *TypedMiddleware[M]) countTokens(ctx context.Context, input *TypedTokenCounterInput[M]) (int, error) {
 	if m.cfg.TokenCounter != nil {
 		return m.cfg.TokenCounter(ctx, input)
 	}
@@ -606,7 +560,7 @@ func estimateTokenBytes(tokens int) int {
 	return tokens * 4
 }
 
-func (m *typedMiddleware[M]) summarize(ctx context.Context, originalMsgs []M) (M, []M, error) {
+func (m *TypedMiddleware[M]) summarize(ctx context.Context, originalMsgs []M) (M, []M, error) {
 	var zero M
 	_, contextMsgs := m.splitSystemAndContextMsgs(originalMsgs)
 
@@ -628,7 +582,7 @@ func (m *typedMiddleware[M]) summarize(ctx context.Context, originalMsgs []M) (M
 	return rawSummary, modelInput, nil
 }
 
-func (m *typedMiddleware[M]) splitSystemAndContextMsgs(msgs []M) ([]M, []M) {
+func (m *TypedMiddleware[M]) splitSystemAndContextMsgs(msgs []M) ([]M, []M) {
 	var systemMsgs []M
 	for _, msg := range msgs {
 		if isSystemRole(msg) {
@@ -641,7 +595,7 @@ func (m *typedMiddleware[M]) splitSystemAndContextMsgs(msgs []M) ([]M, []M) {
 	return systemMsgs, contextMsgs
 }
 
-func (m *typedMiddleware[M]) runFailover(ctx context.Context, originalMsgs, defaultInput []M, lastResp M,
+func (m *TypedMiddleware[M]) runFailover(ctx context.Context, originalMsgs, defaultInput []M, lastResp M,
 	lastErr error) (M, []M, error) {
 
 	var zero M
@@ -705,7 +659,7 @@ func (m *typedMiddleware[M]) runFailover(ctx context.Context, originalMsgs, defa
 	}
 }
 
-func (m *typedMiddleware[M]) getFailoverModel(ctx context.Context, failoverCtx *TypedFailoverContext[M], defaultInput []M) (model.BaseModel[M], []M, error) {
+func (m *TypedMiddleware[M]) getFailoverModel(ctx context.Context, failoverCtx *TypedFailoverContext[M], defaultInput []M) (model.BaseModel[M], []M, error) {
 	if m.cfg.Failover == nil {
 		return nil, nil, fmt.Errorf("failover config is required")
 	}
@@ -728,7 +682,7 @@ func (m *typedMiddleware[M]) getFailoverModel(ctx context.Context, failoverCtx *
 	return failoverModel, nextModelInput, nil
 }
 
-func (m *typedMiddleware[M]) buildSummarizationModelInput(ctx context.Context, originMsgs, contextMsgs []M) ([]M, error) {
+func (m *TypedMiddleware[M]) buildSummarizationModelInput(ctx context.Context, originMsgs, contextMsgs []M) ([]M, error) {
 	sysInstruction, userInstruction := m.getModelInstructions()
 
 	if m.cfg.GenModelInput != nil {
@@ -747,7 +701,7 @@ func (m *typedMiddleware[M]) buildSummarizationModelInput(ctx context.Context, o
 	return input, nil
 }
 
-func (m *typedMiddleware[M]) getModelInstructions() (M, M) {
+func (m *TypedMiddleware[M]) getModelInstructions() (M, M) {
 	userInstruction := m.cfg.UserInstruction
 	if userInstruction == "" {
 		userInstruction = getUserSummaryInstruction()
@@ -756,16 +710,18 @@ func (m *typedMiddleware[M]) getModelInstructions() (M, M) {
 	return makeSystemMsg[M](getSystemInstruction()), makeUserMsg[M](userInstruction)
 }
 
-func (m *typedMiddleware[M]) postProcessSummary(ctx context.Context, contextMsgs []M, summary M) (M, error) {
+func (m *TypedMiddleware[M]) postProcessSummary(ctx context.Context, contextMsgs []M, summary M) (M, error) {
 	content := getUserMsgTextContent(summary)
 
 	if m.cfg.PreserveUserMessages == nil || m.cfg.PreserveUserMessages.Enabled {
 		maxUserMsgTokens := m.getUserMessageContextTokens()
+
 		var filter TypedUserMessageFilterFunc[M]
 		if m.cfg.PreserveUserMessages != nil {
 			filter = m.cfg.PreserveUserMessages.Filter
 		}
-		newContent, err := populateUserMessages(ctx, &populateUserMessagesParams[M]{
+
+		newContent, err := replaceUserMessagesInSummary(ctx, &replaceUserMessagesInSummaryParams[M]{
 			contextMsgs:  contextMsgs,
 			summaryText:  content,
 			maxTokens:    maxUserMsgTokens,
@@ -776,6 +732,7 @@ func (m *typedMiddleware[M]) postProcessSummary(ctx context.Context, contextMsgs
 			var zero M
 			return zero, fmt.Errorf("failed to populate user messages in summary: %w", err)
 		}
+
 		content = newContent
 	}
 
@@ -790,7 +747,7 @@ func (m *typedMiddleware[M]) postProcessSummary(ctx context.Context, contextMsgs
 	return newSummary, nil
 }
 
-type populateUserMessagesParams[M adk.MessageType] struct {
+type replaceUserMessagesInSummaryParams[M adk.MessageType] struct {
 	contextMsgs  []M
 	summaryText  string
 	maxTokens    int
@@ -798,7 +755,7 @@ type populateUserMessagesParams[M adk.MessageType] struct {
 	tokenCounter TypedTokenCounterFunc[M]
 }
 
-func populateUserMessages[M adk.MessageType](ctx context.Context, p *populateUserMessagesParams[M]) (string, error) {
+func replaceUserMessagesInSummary[M adk.MessageType](ctx context.Context, p *replaceUserMessagesInSummaryParams[M]) (string, error) {
 	countTokens := p.tokenCounter
 	if countTokens == nil {
 		countTokens = defaultTypedTokenCounter[M]
@@ -909,7 +866,7 @@ func appendSection(base, section string) string {
 	return base + "\n\n" + section
 }
 
-func (m *typedMiddleware[M]) generateAndEmit(ctx context.Context, chatModel model.BaseModel[M], input []M,
+func (m *TypedMiddleware[M]) generateAndEmit(ctx context.Context, chatModel model.BaseModel[M], input []M,
 	opts []model.Option, attempt int, phase GenerateSummaryPhase) (M, error) {
 
 	resp, err := chatModel.Generate(ctx, input, opts...)
@@ -920,7 +877,7 @@ func (m *typedMiddleware[M]) generateAndEmit(ctx context.Context, chatModel mode
 	return resp, err
 }
 
-func (m *typedMiddleware[M]) generateWithRetry(ctx context.Context, chatModel model.BaseModel[M], input []M,
+func (m *TypedMiddleware[M]) generateWithRetry(ctx context.Context, chatModel model.BaseModel[M], input []M,
 	opts []model.Option, retryCfg *TypedRetryConfig[M]) (M, error) {
 
 	const defaultMaxRetries = 3

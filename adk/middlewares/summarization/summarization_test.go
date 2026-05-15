@@ -75,7 +75,7 @@ func TestMiddlewareBeforeModelRewriteState(t *testing.T) {
 		ctrl := gomock.NewController(t)
 		cm := mockModel.NewMockBaseChatModel(ctrl)
 
-		mw := &typedMiddleware[*schema.Message]{
+		mw := &TypedMiddleware[*schema.Message]{
 			cfg: &Config{
 				Model:   cm,
 				Trigger: &TriggerCondition{ContextTokens: 1000},
@@ -105,7 +105,7 @@ func TestMiddlewareBeforeModelRewriteState(t *testing.T) {
 				Content: "Summary content",
 			}, nil).Times(1)
 
-		mw := &typedMiddleware[*schema.Message]{
+		mw := &TypedMiddleware[*schema.Message]{
 			cfg: &Config{
 				Model:   cm,
 				Trigger: &TriggerCondition{ContextTokens: 10},
@@ -144,7 +144,7 @@ func TestMiddlewareBeforeModelRewriteState(t *testing.T) {
 				}, nil
 			}).Times(1)
 
-		mw := &typedMiddleware[*schema.Message]{
+		mw := &TypedMiddleware[*schema.Message]{
 			cfg: &Config{
 				Model:   cm,
 				Trigger: &TriggerCondition{ContextTokens: 10},
@@ -177,7 +177,7 @@ func TestMiddlewareBeforeModelRewriteState(t *testing.T) {
 				Content: "Summary",
 			}, nil).Times(1)
 
-		mw := &typedMiddleware[*schema.Message]{
+		mw := &TypedMiddleware[*schema.Message]{
 			cfg: &Config{
 				Model:   cm,
 				Trigger: &TriggerCondition{ContextTokens: 10},
@@ -212,7 +212,7 @@ func TestMiddlewareBeforeModelRewriteState(t *testing.T) {
 				Content: "Summary",
 			}, nil).Times(1)
 
-		mw := &typedMiddleware[*schema.Message]{
+		mw := &TypedMiddleware[*schema.Message]{
 			cfg: &Config{
 				Model:   cm,
 				Trigger: &TriggerCondition{ContextTokens: 10},
@@ -256,7 +256,7 @@ func TestMiddlewareBeforeModelRewriteState(t *testing.T) {
 				}, nil
 			}).Times(2)
 
-		mw := &typedMiddleware[*schema.Message]{
+		mw := &TypedMiddleware[*schema.Message]{
 			cfg: &Config{
 				Model:   cm,
 				Trigger: &TriggerCondition{ContextTokens: 10},
@@ -291,7 +291,7 @@ func TestMiddlewareBeforeModelRewriteState(t *testing.T) {
 				return nil, fmt.Errorf("transient error")
 			}).Times(4)
 
-		mw := &typedMiddleware[*schema.Message]{
+		mw := &TypedMiddleware[*schema.Message]{
 			cfg: &Config{
 				Model:   cm,
 				Trigger: &TriggerCondition{ContextTokens: 10},
@@ -331,7 +331,7 @@ func TestMiddlewareBeforeModelRewriteState(t *testing.T) {
 				}, nil
 			}).Times(1)
 
-		mw := &typedMiddleware[*schema.Message]{
+		mw := &TypedMiddleware[*schema.Message]{
 			cfg: &Config{
 				Model:   primary,
 				Trigger: &TriggerCondition{ContextTokens: 10},
@@ -375,7 +375,7 @@ func TestMiddlewareBeforeModelRewriteState(t *testing.T) {
 				Content: "Summary from failover",
 			}, nil).Times(1)
 
-		mw := &typedMiddleware[*schema.Message]{
+		mw := &TypedMiddleware[*schema.Message]{
 			cfg: &Config{
 				Model:   primary,
 				Trigger: &TriggerCondition{ContextTokens: 10},
@@ -413,7 +413,7 @@ func TestMiddlewareBeforeModelRewriteState(t *testing.T) {
 		failover.EXPECT().Generate(gomock.Any(), gomock.Any(), gomock.Any()).
 			Return(nil, fmt.Errorf("failover error")).Times(1)
 
-		mw := &typedMiddleware[*schema.Message]{
+		mw := &TypedMiddleware[*schema.Message]{
 			cfg: &Config{
 				Model:   primary,
 				Trigger: &TriggerCondition{ContextTokens: 10},
@@ -455,7 +455,7 @@ func TestMiddlewareBeforeModelRewriteState(t *testing.T) {
 				Content: "Summary from second failover",
 			}, nil).Times(1)
 
-		mw := &typedMiddleware[*schema.Message]{
+		mw := &TypedMiddleware[*schema.Message]{
 			cfg: &Config{
 				Model:   primary,
 				Trigger: &TriggerCondition{ContextTokens: 10},
@@ -503,7 +503,7 @@ func TestMiddlewareBeforeModelRewriteState(t *testing.T) {
 				Content: "Summary from failover",
 			}, nil).Times(1)
 
-		mw := &typedMiddleware[*schema.Message]{
+		mw := &TypedMiddleware[*schema.Message]{
 			cfg: &Config{
 				Model:   primary,
 				Trigger: &TriggerCondition{ContextTokens: 10},
@@ -535,7 +535,7 @@ func TestMiddlewareShouldSummarize(t *testing.T) {
 	ctx := context.Background()
 
 	t.Run("returns true when over messages threshold", func(t *testing.T) {
-		mw := &typedMiddleware[*schema.Message]{
+		mw := &TypedMiddleware[*schema.Message]{
 			cfg: &Config{
 				Trigger: &TriggerCondition{ContextMessages: 1},
 			},
@@ -554,7 +554,7 @@ func TestMiddlewareShouldSummarize(t *testing.T) {
 	})
 
 	t.Run("returns false when under messages threshold", func(t *testing.T) {
-		mw := &typedMiddleware[*schema.Message]{
+		mw := &TypedMiddleware[*schema.Message]{
 			cfg: &Config{
 				Trigger: &TriggerCondition{
 					ContextMessages: 3,
@@ -576,7 +576,7 @@ func TestMiddlewareShouldSummarize(t *testing.T) {
 	})
 
 	t.Run("returns true when over threshold", func(t *testing.T) {
-		mw := &typedMiddleware[*schema.Message]{
+		mw := &TypedMiddleware[*schema.Message]{
 			cfg: &Config{
 				Trigger: &TriggerCondition{ContextTokens: 10},
 			},
@@ -594,7 +594,7 @@ func TestMiddlewareShouldSummarize(t *testing.T) {
 	})
 
 	t.Run("returns false when under threshold", func(t *testing.T) {
-		mw := &typedMiddleware[*schema.Message]{
+		mw := &TypedMiddleware[*schema.Message]{
 			cfg: &Config{
 				Trigger: &TriggerCondition{ContextTokens: 1000},
 			},
@@ -612,7 +612,7 @@ func TestMiddlewareShouldSummarize(t *testing.T) {
 	})
 
 	t.Run("uses default threshold when trigger is nil", func(t *testing.T) {
-		mw := &typedMiddleware[*schema.Message]{
+		mw := &TypedMiddleware[*schema.Message]{
 			cfg: &Config{},
 		}
 
@@ -632,7 +632,7 @@ func TestMiddlewareCountTokens(t *testing.T) {
 	ctx := context.Background()
 
 	t.Run("uses custom token counter", func(t *testing.T) {
-		mw := &typedMiddleware[*schema.Message]{
+		mw := &TypedMiddleware[*schema.Message]{
 			cfg: &Config{
 				TokenCounter: func(ctx context.Context, input *TokenCounterInput) (int, error) {
 					return 42, nil
@@ -649,7 +649,7 @@ func TestMiddlewareCountTokens(t *testing.T) {
 	})
 
 	t.Run("uses default token counter when nil", func(t *testing.T) {
-		mw := &typedMiddleware[*schema.Message]{
+		mw := &TypedMiddleware[*schema.Message]{
 			cfg: &Config{},
 		}
 
@@ -662,7 +662,7 @@ func TestMiddlewareCountTokens(t *testing.T) {
 	})
 
 	t.Run("custom token counter error", func(t *testing.T) {
-		mw := &typedMiddleware[*schema.Message]{
+		mw := &TypedMiddleware[*schema.Message]{
 			cfg: &Config{
 				TokenCounter: func(ctx context.Context, input *TokenCounterInput) (int, error) {
 					return 0, errors.New("token count error")
@@ -989,7 +989,7 @@ func TestMiddlewareBuildSummarizationModelInput(t *testing.T) {
 	ctx := context.Background()
 
 	t.Run("message structure", func(t *testing.T) {
-		mw := &typedMiddleware[*schema.Message]{
+		mw := &TypedMiddleware[*schema.Message]{
 			cfg: &Config{},
 		}
 
@@ -1002,7 +1002,7 @@ func TestMiddlewareBuildSummarizationModelInput(t *testing.T) {
 	})
 
 	t.Run("uses context messages", func(t *testing.T) {
-		mw := &typedMiddleware[*schema.Message]{
+		mw := &TypedMiddleware[*schema.Message]{
 			cfg: &Config{},
 		}
 
@@ -1027,7 +1027,7 @@ func TestMiddlewareBuildSummarizationModelInput(t *testing.T) {
 			schema.UserMessage("custom input"),
 		}
 
-		mw := &typedMiddleware[*schema.Message]{
+		mw := &TypedMiddleware[*schema.Message]{
 			cfg: &Config{
 				GenModelInput: func(ctx context.Context, defaultSystemInstruction, userInstruction adk.Message, originalMsgs []adk.Message) ([]adk.Message, error) {
 					return expectedInput, nil
@@ -1043,7 +1043,7 @@ func TestMiddlewareBuildSummarizationModelInput(t *testing.T) {
 	})
 
 	t.Run("GenModelInput error", func(t *testing.T) {
-		mw := &typedMiddleware[*schema.Message]{
+		mw := &TypedMiddleware[*schema.Message]{
 			cfg: &Config{
 				GenModelInput: func(ctx context.Context, defaultSystemInstruction, userInstruction adk.Message, originalMsgs []adk.Message) ([]adk.Message, error) {
 					return nil, errors.New("gen input error")
@@ -1058,7 +1058,7 @@ func TestMiddlewareBuildSummarizationModelInput(t *testing.T) {
 	})
 
 	t.Run("uses custom instruction", func(t *testing.T) {
-		mw := &typedMiddleware[*schema.Message]{
+		mw := &TypedMiddleware[*schema.Message]{
 			cfg: &Config{
 				UserInstruction: "custom instruction",
 			},
@@ -1113,7 +1113,7 @@ func TestMiddlewareGenerateWithRetry(t *testing.T) {
 	t.Run("retries until success", func(t *testing.T) {
 		ctrl := gomock.NewController(t)
 		cm := mockModel.NewMockBaseChatModel(ctrl)
-		mw := &typedMiddleware[*schema.Message]{
+		mw := &TypedMiddleware[*schema.Message]{
 			cfg: &Config{},
 		}
 
@@ -1138,7 +1138,7 @@ func TestMiddlewareGenerateWithRetry(t *testing.T) {
 	t.Run("delegates to generateAndEmit without retry config", func(t *testing.T) {
 		ctrl := gomock.NewController(t)
 		cm := mockModel.NewMockBaseChatModel(ctrl)
-		mw := &typedMiddleware[*schema.Message]{
+		mw := &TypedMiddleware[*schema.Message]{
 			cfg: &Config{},
 		}
 		cm.EXPECT().Generate(gomock.Any(), gomock.Any(), gomock.Any()).
@@ -1174,7 +1174,7 @@ func TestPopulateUserMessagesInternal(t *testing.T) {
 7. Pending Tasks:
    - task1`
 
-		result, err := populateUserMessages(ctx, &populateUserMessagesParams[*schema.Message]{
+		result, err := replaceUserMessagesInSummary(ctx, &replaceUserMessagesInSummaryParams[*schema.Message]{
 			contextMsgs: msgs,
 			summaryText: summary,
 			maxTokens:   1000,
@@ -1205,7 +1205,7 @@ func TestPopulateUserMessagesInternal(t *testing.T) {
 7. Pending Tasks:
    - task1`
 
-		result, err := populateUserMessages(ctx, &populateUserMessagesParams[*schema.Message]{
+		result, err := replaceUserMessagesInSummary(ctx, &replaceUserMessagesInSummaryParams[*schema.Message]{
 			contextMsgs: msgs,
 			summaryText: summary,
 			maxTokens:   1000,
@@ -1225,7 +1225,7 @@ func TestPopulateUserMessagesInternal(t *testing.T) {
 			schema.UserMessage("msg"),
 		}
 
-		_, err := populateUserMessages(ctx, &populateUserMessagesParams[*schema.Message]{
+		_, err := replaceUserMessagesInSummary(ctx, &replaceUserMessagesInSummaryParams[*schema.Message]{
 			contextMsgs: msgs,
 			summaryText: "summary",
 			maxTokens:   1000,
@@ -1243,7 +1243,7 @@ func TestPopulateUserMessagesInternal(t *testing.T) {
 		}
 
 		summary := "summary without sections"
-		result, err := populateUserMessages(ctx, &populateUserMessagesParams[*schema.Message]{
+		result, err := replaceUserMessagesInSummary(ctx, &replaceUserMessagesInSummaryParams[*schema.Message]{
 			contextMsgs: msgs,
 			summaryText: summary,
 			maxTokens:   1000,
@@ -1272,7 +1272,7 @@ func TestPopulateUserMessagesInternal(t *testing.T) {
 7. Pending Tasks:
    - task`
 
-		result, err := populateUserMessages(ctx, &populateUserMessagesParams[*schema.Message]{
+		result, err := replaceUserMessagesInSummary(ctx, &replaceUserMessagesInSummaryParams[*schema.Message]{
 			contextMsgs: msgs,
 			summaryText: summary,
 			maxTokens:   1000,
@@ -1288,7 +1288,7 @@ func TestPopulateUserMessagesInternal(t *testing.T) {
 			schema.UserMessage("test2"),
 		}
 
-		_, err := populateUserMessages(ctx, &populateUserMessagesParams[*schema.Message]{
+		_, err := replaceUserMessagesInSummary(ctx, &replaceUserMessagesInSummaryParams[*schema.Message]{
 			contextMsgs: msgs,
 			summaryText: "summary",
 			maxTokens:   1000,
@@ -1310,7 +1310,7 @@ func TestPopulateUserMessagesInternal(t *testing.T) {
 7. Pending Tasks:
    - task`
 
-		result, err := populateUserMessages(ctx, &populateUserMessagesParams[*schema.Message]{
+		result, err := replaceUserMessagesInSummary(ctx, &replaceUserMessagesInSummaryParams[*schema.Message]{
 			contextMsgs: msgs,
 			summaryText: summary,
 			maxTokens:   1000,
@@ -1483,7 +1483,7 @@ func TestPostProcessSummary(t *testing.T) {
 	ctx := context.Background()
 
 	t.Run("with transcript path", func(t *testing.T) {
-		mw := &typedMiddleware[*schema.Message]{
+		mw := &TypedMiddleware[*schema.Message]{
 			cfg: &Config{
 				TranscriptFilePath: "/path/to/transcript.txt",
 			},
@@ -1517,7 +1517,7 @@ func TestPopulateUserMessages_FilterRemovesAll(t *testing.T) {
 7. Pending Tasks:
    - task`
 
-	result, err := populateUserMessages(ctx, &populateUserMessagesParams[*schema.Message]{
+	result, err := replaceUserMessagesInSummary(ctx, &replaceUserMessagesInSummaryParams[*schema.Message]{
 		contextMsgs: msgs,
 		summaryText: summary,
 		maxTokens:   1000,
@@ -1534,20 +1534,20 @@ func TestEventHelpers(t *testing.T) {
 	ctx := context.Background()
 
 	t.Run("emitEvent returns wrapped error outside execution context", func(t *testing.T) {
-		mw := &typedMiddleware[*schema.Message]{cfg: &Config{}}
+		mw := &TypedMiddleware[*schema.Message]{cfg: &Config{}}
 		err := mw.emitEvent(ctx, &CustomizedAction{Type: ActionTypeBeforeSummarize})
 		assert.Error(t, err)
 		assert.Contains(t, err.Error(), "failed to send internal event")
 	})
 
 	t.Run("emitGenerateSummaryEvent is skipped when internal events are disabled", func(t *testing.T) {
-		mw := &typedMiddleware[*schema.Message]{cfg: &Config{EmitInternalEvents: false}}
+		mw := &TypedMiddleware[*schema.Message]{cfg: &Config{EmitInternalEvents: false}}
 		err := mw.emitGenerateSummaryEvent(ctx, 1, GenerateSummaryPhasePrimary, schema.AssistantMessage("ok", nil), nil)
 		assert.NoError(t, err)
 	})
 
 	t.Run("emitGenerateSummaryEvent returns wrapped error when enabled outside execution context", func(t *testing.T) {
-		mw := &typedMiddleware[*schema.Message]{cfg: &Config{EmitInternalEvents: true}}
+		mw := &TypedMiddleware[*schema.Message]{cfg: &Config{EmitInternalEvents: true}}
 		err := mw.emitGenerateSummaryEvent(ctx, 1, GenerateSummaryPhasePrimary, schema.AssistantMessage("ok", nil), nil)
 		assert.Error(t, err)
 		assert.Contains(t, err.Error(), "failed to send internal event")
@@ -1560,7 +1560,7 @@ func TestGetFailoverModel(t *testing.T) {
 	fctx := &FailoverContext{Attempt: 1}
 
 	t.Run("requires failover config", func(t *testing.T) {
-		mw := &typedMiddleware[*schema.Message]{cfg: &Config{}}
+		mw := &TypedMiddleware[*schema.Message]{cfg: &Config{}}
 		mdl, input, err := mw.getFailoverModel(ctx, fctx, defaultInput)
 		assert.Nil(t, mdl)
 		assert.Nil(t, input)
@@ -1570,7 +1570,7 @@ func TestGetFailoverModel(t *testing.T) {
 	t.Run("uses primary model and default input when callback is not provided", func(t *testing.T) {
 		ctrl := gomock.NewController(t)
 		primary := mockModel.NewMockBaseChatModel(ctrl)
-		mw := &typedMiddleware[*schema.Message]{
+		mw := &TypedMiddleware[*schema.Message]{
 			cfg: &Config{
 				Model:    primary,
 				Failover: &FailoverConfig{},
@@ -1584,7 +1584,7 @@ func TestGetFailoverModel(t *testing.T) {
 	})
 
 	t.Run("wraps callback error", func(t *testing.T) {
-		mw := &typedMiddleware[*schema.Message]{
+		mw := &TypedMiddleware[*schema.Message]{
 			cfg: &Config{
 				Failover: &FailoverConfig{
 					GetFailoverModel: func(context.Context, *FailoverContext) (model.BaseChatModel, []*schema.Message, error) {
@@ -1601,7 +1601,7 @@ func TestGetFailoverModel(t *testing.T) {
 	})
 
 	t.Run("requires non nil failover model", func(t *testing.T) {
-		mw := &typedMiddleware[*schema.Message]{
+		mw := &TypedMiddleware[*schema.Message]{
 			cfg: &Config{
 				Failover: &FailoverConfig{
 					GetFailoverModel: func(context.Context, *FailoverContext) (model.BaseChatModel, []*schema.Message, error) {
@@ -1620,7 +1620,7 @@ func TestGetFailoverModel(t *testing.T) {
 	t.Run("requires non empty failover input", func(t *testing.T) {
 		ctrl := gomock.NewController(t)
 		failoverModel := mockModel.NewMockBaseChatModel(ctrl)
-		mw := &typedMiddleware[*schema.Message]{
+		mw := &TypedMiddleware[*schema.Message]{
 			cfg: &Config{
 				Failover: &FailoverConfig{
 					GetFailoverModel: func(context.Context, *FailoverContext) (model.BaseChatModel, []*schema.Message, error) {
@@ -1640,7 +1640,7 @@ func TestGetFailoverModel(t *testing.T) {
 		ctrl := gomock.NewController(t)
 		failoverModel := mockModel.NewMockBaseChatModel(ctrl)
 		customInput := []*schema.Message{schema.UserMessage("custom")}
-		mw := &typedMiddleware[*schema.Message]{
+		mw := &TypedMiddleware[*schema.Message]{
 			cfg: &Config{
 				Failover: &FailoverConfig{
 					GetFailoverModel: func(context.Context, *FailoverContext) (model.BaseChatModel, []*schema.Message, error) {
@@ -1661,7 +1661,7 @@ func TestGetFailoverModel(t *testing.T) {
 
 func TestHelperBranches(t *testing.T) {
 	t.Run("get user message context tokens", func(t *testing.T) {
-		mw := &typedMiddleware[*schema.Message]{cfg: &Config{Trigger: &TriggerCondition{ContextTokens: 90}}}
+		mw := &TypedMiddleware[*schema.Message]{cfg: &Config{Trigger: &TriggerCondition{ContextTokens: 90}}}
 		assert.Equal(t, 30, mw.getUserMessageContextTokens())
 
 		mw.cfg.PreserveUserMessages = &PreserveUserMessages{MaxTokens: 12}
@@ -1704,8 +1704,15 @@ func TestHelperBranches(t *testing.T) {
 	})
 }
 
-func TestSummarizeMessages(t *testing.T) {
+func TestSummarize(t *testing.T) {
 	ctx := context.Background()
+
+	newMW := func(cfg *Config) *TypedMiddleware[*schema.Message] {
+		return &TypedMiddleware[*schema.Message]{
+			cfg:                               cfg,
+			TypedBaseChatModelAgentMiddleware: &adk.TypedBaseChatModelAgentMiddleware[*schema.Message]{},
+		}
+	}
 
 	t.Run("basic summarization", func(t *testing.T) {
 		ctrl := gomock.NewController(t)
@@ -1716,23 +1723,20 @@ func TestSummarizeMessages(t *testing.T) {
 				Content: "Summary content",
 			}, nil).Times(1)
 
-		cfg := &Config{
-			Model: cm,
+		mw := newMW(&Config{Model: cm})
+
+		state := &adk.ChatModelAgentState{
+			Messages: []adk.Message{
+				schema.SystemMessage("You are a helpful assistant"),
+				schema.UserMessage(strings.Repeat("a", 100)),
+				schema.AssistantMessage(strings.Repeat("b", 100), nil),
+			},
 		}
 
-		messages := []adk.Message{
-			schema.SystemMessage("You are a helpful assistant"),
-			schema.UserMessage(strings.Repeat("a", 100)),
-			schema.AssistantMessage(strings.Repeat("b", 100), nil),
-		}
-
-		output, err := SummarizeMessages(ctx, cfg, messages)
+		result, err := mw.Summarize(ctx, state)
 		assert.NoError(t, err)
-		assert.NotNil(t, output)
-		assert.NotNil(t, output.ModelResponse)
-		assert.Equal(t, "Summary content", output.ModelResponse.Content)
-		assert.NotEmpty(t, output.FinalizedMessages)
-		assert.Equal(t, schema.System, output.FinalizedMessages[0].Role)
+		assert.NotEmpty(t, result)
+		assert.Equal(t, schema.System, result[0].Role)
 	})
 
 	t.Run("model error propagates", func(t *testing.T) {
@@ -1741,20 +1745,18 @@ func TestSummarizeMessages(t *testing.T) {
 		cm.EXPECT().Generate(gomock.Any(), gomock.Any(), gomock.Any()).
 			Return(nil, fmt.Errorf("model error")).Times(1)
 
-		cfg := &Config{
-			Model: cm,
+		mw := newMW(&Config{Model: cm})
+
+		state := &adk.ChatModelAgentState{
+			Messages: []adk.Message{schema.UserMessage("hello")},
 		}
 
-		messages := []adk.Message{
-			schema.UserMessage("hello"),
-		}
-
-		output, err := SummarizeMessages(ctx, cfg, messages)
+		result, err := mw.Summarize(ctx, state)
 		assert.Error(t, err)
-		assert.Nil(t, output)
+		assert.Nil(t, result)
 	})
 
-	t.Run("retry works in sync call", func(t *testing.T) {
+	t.Run("retry works", func(t *testing.T) {
 		ctrl := gomock.NewController(t)
 		cm := mockModel.NewMockBaseChatModel(ctrl)
 
@@ -1771,55 +1773,53 @@ func TestSummarizeMessages(t *testing.T) {
 				}, nil
 			}).Times(2)
 
-		cfg := &Config{
+		mw := newMW(&Config{
 			Model: cm,
 			Retry: &RetryConfig{
 				MaxRetries:  intPtr(2),
 				BackoffFunc: func(_ context.Context, _ int, _ adk.Message, _ error) time.Duration { return 0 },
 			},
+		})
+
+		state := &adk.ChatModelAgentState{
+			Messages: []adk.Message{schema.UserMessage("hello")},
 		}
 
-		messages := []adk.Message{
-			schema.UserMessage("hello"),
-		}
-
-		output, err := SummarizeMessages(ctx, cfg, messages)
+		result, err := mw.Summarize(ctx, state)
 		assert.NoError(t, err)
-		assert.NotNil(t, output)
-		assert.Equal(t, "Summary after retry", output.ModelResponse.Content)
+		assert.NotEmpty(t, result)
 		assert.Equal(t, 2, callCount)
 	})
 
-	t.Run("failover works in sync call", func(t *testing.T) {
+	t.Run("failover works", func(t *testing.T) {
 		ctrl := gomock.NewController(t)
 		primary := mockModel.NewMockBaseChatModel(ctrl)
-		failover := mockModel.NewMockBaseChatModel(ctrl)
+		failoverModel := mockModel.NewMockBaseChatModel(ctrl)
 
 		primary.EXPECT().Generate(gomock.Any(), gomock.Any(), gomock.Any()).
 			Return(nil, fmt.Errorf("primary error")).Times(1)
-		failover.EXPECT().Generate(gomock.Any(), gomock.Any(), gomock.Any()).
+		failoverModel.EXPECT().Generate(gomock.Any(), gomock.Any(), gomock.Any()).
 			Return(&schema.Message{
 				Role:    schema.Assistant,
 				Content: "Summary from failover",
 			}, nil).Times(1)
 
-		cfg := &Config{
+		mw := newMW(&Config{
 			Model: primary,
 			Failover: &FailoverConfig{
 				GetFailoverModel: func(ctx context.Context, failoverCtx *FailoverContext) (model.BaseChatModel, []*schema.Message, error) {
-					return failover, []*schema.Message{schema.UserMessage("failover input")}, nil
+					return failoverModel, []*schema.Message{schema.UserMessage("failover input")}, nil
 				},
 			},
+		})
+
+		state := &adk.ChatModelAgentState{
+			Messages: []adk.Message{schema.UserMessage("hello")},
 		}
 
-		messages := []adk.Message{
-			schema.UserMessage("hello"),
-		}
-
-		output, err := SummarizeMessages(ctx, cfg, messages)
+		result, err := mw.Summarize(ctx, state)
 		assert.NoError(t, err)
-		assert.NotNil(t, output)
-		assert.Equal(t, "Summary from failover", output.ModelResponse.Content)
+		assert.NotEmpty(t, result)
 	})
 
 	t.Run("callback is invoked", func(t *testing.T) {
@@ -1832,7 +1832,7 @@ func TestSummarizeMessages(t *testing.T) {
 			}, nil).Times(1)
 
 		callbackCalled := false
-		cfg := &Config{
+		mw := newMW(&Config{
 			Model: cm,
 			Callback: func(ctx context.Context, before, after adk.ChatModelAgentState) error {
 				callbackCalled = true
@@ -1840,15 +1840,15 @@ func TestSummarizeMessages(t *testing.T) {
 				assert.NotEmpty(t, after.Messages)
 				return nil
 			},
+		})
+
+		state := &adk.ChatModelAgentState{
+			Messages: []adk.Message{schema.UserMessage("hello")},
 		}
 
-		messages := []adk.Message{
-			schema.UserMessage("hello"),
-		}
-
-		output, err := SummarizeMessages(ctx, cfg, messages)
+		result, err := mw.Summarize(ctx, state)
 		assert.NoError(t, err)
-		assert.NotNil(t, output)
+		assert.NotNil(t, result)
 		assert.True(t, callbackCalled)
 	})
 
@@ -1861,7 +1861,7 @@ func TestSummarizeMessages(t *testing.T) {
 				Content: "Summary",
 			}, nil).Times(1)
 
-		cfg := &Config{
+		mw := newMW(&Config{
 			Model: cm,
 			Finalize: func(ctx context.Context, originalMessages []adk.Message, summary adk.Message) ([]adk.Message, error) {
 				return []adk.Message{
@@ -1869,57 +1869,17 @@ func TestSummarizeMessages(t *testing.T) {
 					summary,
 				}, nil
 			},
+		})
+
+		state := &adk.ChatModelAgentState{
+			Messages: []adk.Message{schema.UserMessage("hello")},
 		}
 
-		messages := []adk.Message{
-			schema.UserMessage("hello"),
-		}
-
-		output, err := SummarizeMessages(ctx, cfg, messages)
+		result, err := mw.Summarize(ctx, state)
 		assert.NoError(t, err)
-		assert.NotNil(t, output)
-		assert.Len(t, output.FinalizedMessages, 2)
-		assert.Equal(t, schema.System, output.FinalizedMessages[0].Role)
-		assert.Equal(t, "custom system", output.FinalizedMessages[0].Content)
-	})
-
-	t.Run("errors when EmitInternalEvents is true", func(t *testing.T) {
-		ctrl := gomock.NewController(t)
-		cm := mockModel.NewMockBaseChatModel(ctrl)
-
-		cfg := &Config{
-			Model:              cm,
-			EmitInternalEvents: true,
-		}
-
-		output, err := SummarizeMessages(ctx, cfg, []adk.Message{schema.UserMessage("hello")})
-		assert.Error(t, err)
-		assert.Nil(t, output)
-		assert.Contains(t, err.Error(), "emitInternalEvents")
-	})
-
-	t.Run("errors when Trigger is set", func(t *testing.T) {
-		ctrl := gomock.NewController(t)
-		cm := mockModel.NewMockBaseChatModel(ctrl)
-
-		cfg := &Config{
-			Model:   cm,
-			Trigger: &TriggerCondition{ContextTokens: 1000},
-		}
-
-		output, err := SummarizeMessages(ctx, cfg, []adk.Message{schema.UserMessage("hello")})
-		assert.Error(t, err)
-		assert.Nil(t, output)
-		assert.Contains(t, err.Error(), "trigger")
-	})
-
-	t.Run("nil model returns config check error", func(t *testing.T) {
-		cfg := &Config{}
-
-		output, err := SummarizeMessages(ctx, cfg, []adk.Message{schema.UserMessage("hello")})
-		assert.Error(t, err)
-		assert.Nil(t, output)
-		assert.Contains(t, err.Error(), "model is required")
+		assert.Len(t, result, 2)
+		assert.Equal(t, schema.System, result[0].Role)
+		assert.Equal(t, "custom system", result[0].Content)
 	})
 
 	t.Run("callback error propagates", func(t *testing.T) {
@@ -1931,16 +1891,20 @@ func TestSummarizeMessages(t *testing.T) {
 				Content: "Summary",
 			}, nil).Times(1)
 
-		cfg := &Config{
+		mw := newMW(&Config{
 			Model: cm,
 			Callback: func(ctx context.Context, before, after adk.ChatModelAgentState) error {
 				return fmt.Errorf("callback error")
 			},
+		})
+
+		state := &adk.ChatModelAgentState{
+			Messages: []adk.Message{schema.UserMessage("hello")},
 		}
 
-		output, err := SummarizeMessages(ctx, cfg, []adk.Message{schema.UserMessage("hello")})
+		result, err := mw.Summarize(ctx, state)
 		assert.Error(t, err)
-		assert.Nil(t, output)
+		assert.Nil(t, result)
 		assert.Contains(t, err.Error(), "callback error")
 	})
 
@@ -1953,16 +1917,20 @@ func TestSummarizeMessages(t *testing.T) {
 				Content: "Summary",
 			}, nil).Times(1)
 
-		cfg := &Config{
+		mw := newMW(&Config{
 			Model: cm,
 			Finalize: func(ctx context.Context, originalMessages []adk.Message, summary adk.Message) ([]adk.Message, error) {
 				return nil, fmt.Errorf("finalize error")
 			},
+		})
+
+		state := &adk.ChatModelAgentState{
+			Messages: []adk.Message{schema.UserMessage("hello")},
 		}
 
-		output, err := SummarizeMessages(ctx, cfg, []adk.Message{schema.UserMessage("hello")})
+		result, err := mw.Summarize(ctx, state)
 		assert.Error(t, err)
-		assert.Nil(t, output)
+		assert.Nil(t, result)
 		assert.Contains(t, err.Error(), "finalize error")
 	})
 
@@ -1975,54 +1943,23 @@ func TestSummarizeMessages(t *testing.T) {
 				Content: "Summary",
 			}, nil).Times(1)
 
-		cfg := &Config{
-			Model: cm,
-		}
+		mw := newMW(&Config{Model: cm})
 
-		messages := []adk.Message{
-			schema.SystemMessage("System 1"),
-			schema.SystemMessage("System 2"),
-			schema.UserMessage(strings.Repeat("a", 100)),
-		}
-
-		output, err := SummarizeMessages(ctx, cfg, messages)
-		assert.NoError(t, err)
-		assert.NotNil(t, output)
-		assert.Len(t, output.FinalizedMessages, 3)
-		assert.Equal(t, schema.System, output.FinalizedMessages[0].Role)
-		assert.Equal(t, "System 1", output.FinalizedMessages[0].Content)
-		assert.Equal(t, schema.System, output.FinalizedMessages[1].Role)
-		assert.Equal(t, "System 2", output.FinalizedMessages[1].Content)
-	})
-
-	t.Run("custom token counter is used", func(t *testing.T) {
-		ctrl := gomock.NewController(t)
-		cm := mockModel.NewMockBaseChatModel(ctrl)
-		cm.EXPECT().Generate(gomock.Any(), gomock.Any(), gomock.Any()).
-			Return(&schema.Message{
-				Role:    schema.Assistant,
-				Content: "Summary\n<all_user_messages>\n    - old\n</all_user_messages>",
-			}, nil).Times(1)
-
-		tokenCounterCalled := false
-		cfg := &Config{
-			Model: cm,
-			TokenCounter: func(ctx context.Context, input *TokenCounterInput) (int, error) {
-				tokenCounterCalled = true
-				return 42, nil
+		state := &adk.ChatModelAgentState{
+			Messages: []adk.Message{
+				schema.SystemMessage("System 1"),
+				schema.SystemMessage("System 2"),
+				schema.UserMessage(strings.Repeat("a", 100)),
 			},
 		}
 
-		messages := []adk.Message{
-			schema.UserMessage("msg1"),
-			schema.AssistantMessage("resp", nil),
-			schema.UserMessage("msg2"),
-		}
-
-		output, err := SummarizeMessages(ctx, cfg, messages)
+		result, err := mw.Summarize(ctx, state)
 		assert.NoError(t, err)
-		assert.NotNil(t, output)
-		assert.True(t, tokenCounterCalled)
+		assert.Len(t, result, 3)
+		assert.Equal(t, schema.System, result[0].Role)
+		assert.Equal(t, "System 1", result[0].Content)
+		assert.Equal(t, schema.System, result[1].Role)
+		assert.Equal(t, "System 2", result[1].Content)
 	})
 }
 
@@ -2107,7 +2044,6 @@ func TestSummarizationGeneric(t *testing.T) {
 	t.Run("Message", func(t *testing.T) {
 		t.Run("Helpers", testSummarizationHelpers[*schema.Message])
 		t.Run("Flow", testSummarizationFlow[*schema.Message])
-		t.Run("SummarizeMessages", testSummarizeMessages)
 		t.Run("TokenCounterUsesStateToolInfos", testTokenCounterReceivesStateToolInfos[*schema.Message])
 	})
 	t.Run("AgenticMessage", func(t *testing.T) {
@@ -2324,42 +2260,4 @@ func testTokenCounterReceivesStateToolInfos[M adk.MessageType](t *testing.T) {
 	require.Len(t, receivedTools, 2)
 	assert.Equal(t, "state_tool_a", receivedTools[0].Name)
 	assert.Equal(t, "state_tool_b", receivedTools[1].Name)
-}
-
-func testSummarizeMessages(t *testing.T) {
-	ctx := context.Background()
-
-	summaryText := "Summary of conversation."
-	mockModel := &genericMockModel[adk.Message]{
-		response: smakeAssistantMsg[adk.Message](summaryText),
-	}
-
-	tokenCounter := func(_ context.Context, input *TypedTokenCounterInput[adk.Message]) (int, error) {
-		total := 0
-		for _, msg := range input.Messages {
-			total += len(getUserMsgTextContent(msg))
-		}
-		return total, nil
-	}
-
-	cfg := &Config{
-		Model:        mockModel,
-		TokenCounter: tokenCounter,
-	}
-
-	msgs := []adk.Message{
-		smakeSystemMsg[adk.Message]("System prompt"),
-		smakeUserMsg[adk.Message]("Hello, can you help me with something?"),
-		smakeAssistantMsg[adk.Message]("Of course! I would be happy to help you with anything."),
-		smakeUserMsg[adk.Message]("Tell me about Go generics"),
-	}
-
-	output, err := SummarizeMessages(ctx, cfg, msgs)
-	require.NoError(t, err)
-	require.NotNil(t, output)
-
-	assert.Greater(t, len(output.FinalizedMessages), 0,
-		"should have finalized messages")
-
-	assert.Equal(t, summaryText, output.ModelResponse.Content)
 }
