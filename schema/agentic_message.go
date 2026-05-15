@@ -1109,11 +1109,22 @@ func concatTokenUsage(usages []*TokenUsage) *TokenUsage {
 		if usage == nil {
 			continue
 		}
-		ret.CompletionTokens += usage.CompletionTokens
-		ret.CompletionTokensDetails.ReasoningTokens += usage.CompletionTokensDetails.ReasoningTokens
-		ret.PromptTokens += usage.PromptTokens
-		ret.PromptTokenDetails.CachedTokens += usage.PromptTokenDetails.CachedTokens
-		ret.TotalTokens += usage.TotalTokens
+
+		if usage.PromptTokens > ret.PromptTokens {
+			ret.PromptTokens = usage.PromptTokens
+		}
+		if usage.CompletionTokens > ret.CompletionTokens {
+			ret.CompletionTokens = usage.CompletionTokens
+		}
+		if usage.TotalTokens > ret.TotalTokens {
+			ret.TotalTokens = usage.TotalTokens
+		}
+		if usage.PromptTokenDetails.CachedTokens > ret.PromptTokenDetails.CachedTokens {
+			ret.PromptTokenDetails.CachedTokens = usage.PromptTokenDetails.CachedTokens
+		}
+		if usage.CompletionTokensDetails.ReasoningTokens > ret.CompletionTokensDetails.ReasoningTokens {
+			ret.CompletionTokensDetails.ReasoningTokens = usage.CompletionTokensDetails.ReasoningTokens
+		}
 	}
 
 	return ret
