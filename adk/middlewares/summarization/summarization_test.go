@@ -1153,14 +1153,10 @@ func TestMiddlewareGenerateWithRetry(t *testing.T) {
 	})
 }
 
-func TestReplaceUserMessagesInSummary(t *testing.T) {
+func TestPopulateUserMessagesInternal(t *testing.T) {
 	ctx := context.Background()
 
 	t.Run("replaces user messages section", func(t *testing.T) {
-		mw := &typedMiddleware[*schema.Message]{
-			cfg: &Config{},
-		}
-
 		msgs := []adk.Message{
 			schema.UserMessage("msg1"),
 			schema.AssistantMessage("response1", nil),
@@ -1178,7 +1174,11 @@ func TestReplaceUserMessagesInSummary(t *testing.T) {
 7. Pending Tasks:
    - task1`
 
-		result, err := mw.replaceUserMessagesInSummary(ctx, msgs, summary, 1000)
+		result, err := populateUserMessages(ctx, &populateUserMessagesParams[*schema.Message]{
+			contextMsgs: msgs,
+			summaryText: summary,
+			maxTokens:   1000,
+		})
 		assert.NoError(t, err)
 		assert.Contains(t, result, "msg1")
 		assert.Contains(t, result, "msg2")
@@ -1187,17 +1187,6 @@ func TestReplaceUserMessagesInSummary(t *testing.T) {
 	})
 
 	t.Run("filters user messages", func(t *testing.T) {
-		mw := &typedMiddleware[*schema.Message]{
-			cfg: &Config{
-				PreserveUserMessages: &PreserveUserMessages{
-					Enabled: true,
-					Filter: func(ctx context.Context, msg adk.Message) (bool, error) {
-						return msg.Content == "keep_me", nil
-					},
-				},
-			},
-		}
-
 		msgs := []adk.Message{
 			schema.UserMessage("drop_me_1"),
 			schema.AssistantMessage("response1", nil),
@@ -1216,7 +1205,14 @@ func TestReplaceUserMessagesInSummary(t *testing.T) {
 7. Pending Tasks:
    - task1`
 
-		result, err := mw.replaceUserMessagesInSummary(ctx, msgs, summary, 1000)
+		result, err := populateUserMessages(ctx, &populateUserMessagesParams[*schema.Message]{
+			contextMsgs: msgs,
+			summaryText: summary,
+			maxTokens:   1000,
+			filter: func(ctx context.Context, msg adk.Message) (bool, error) {
+				return msg.Content == "keep_me", nil
+			},
+		})
 		assert.NoError(t, err)
 		assert.Contains(t, result, "keep_me")
 		assert.NotContains(t, result, "drop_me_1")
@@ -1225,46 +1221,38 @@ func TestReplaceUserMessagesInSummary(t *testing.T) {
 	})
 
 	t.Run("filter error", func(t *testing.T) {
-		mw := &typedMiddleware[*schema.Message]{
-			cfg: &Config{
-				PreserveUserMessages: &PreserveUserMessages{
-					Enabled: true,
-					Filter: func(ctx context.Context, msg adk.Message) (bool, error) {
-						return false, errors.New("filter error")
-					},
-				},
-			},
-		}
-
 		msgs := []adk.Message{
 			schema.UserMessage("msg"),
 		}
 
-		_, err := mw.replaceUserMessagesInSummary(ctx, msgs, "summary", 1000)
+		_, err := populateUserMessages(ctx, &populateUserMessagesParams[*schema.Message]{
+			contextMsgs: msgs,
+			summaryText: "summary",
+			maxTokens:   1000,
+			filter: func(ctx context.Context, msg adk.Message) (bool, error) {
+				return false, errors.New("filter error")
+			},
+		})
 		assert.Error(t, err)
 		assert.Contains(t, err.Error(), "filter error")
 	})
 
 	t.Run("returns original if no matching sections", func(t *testing.T) {
-		mw := &typedMiddleware[*schema.Message]{
-			cfg: &Config{},
-		}
-
 		msgs := []adk.Message{
 			schema.UserMessage("test"),
 		}
 
 		summary := "summary without sections"
-		result, err := mw.replaceUserMessagesInSummary(ctx, msgs, summary, 1000)
+		result, err := populateUserMessages(ctx, &populateUserMessagesParams[*schema.Message]{
+			contextMsgs: msgs,
+			summaryText: summary,
+			maxTokens:   1000,
+		})
 		assert.NoError(t, err)
 		assert.Equal(t, summary, result)
 	})
 
 	t.Run("skips summary messages", func(t *testing.T) {
-		mw := &typedMiddleware[*schema.Message]{
-			cfg: &Config{},
-		}
-
 		summaryMsg := &schema.Message{
 			Role:    schema.User,
 			Content: "summary",
@@ -1284,35 +1272,34 @@ func TestReplaceUserMessagesInSummary(t *testing.T) {
 7. Pending Tasks:
    - task`
 
-		result, err := mw.replaceUserMessagesInSummary(ctx, msgs, summary, 1000)
+		result, err := populateUserMessages(ctx, &populateUserMessagesParams[*schema.Message]{
+			contextMsgs: msgs,
+			summaryText: summary,
+			maxTokens:   1000,
+		})
 		assert.NoError(t, err)
 		assert.Contains(t, result, "regular message")
 		assert.NotContains(t, result, "    - summary")
 	})
 
 	t.Run("token counter error", func(t *testing.T) {
-		mw := &typedMiddleware[*schema.Message]{
-			cfg: &Config{
-				TokenCounter: func(ctx context.Context, input *TokenCounterInput) (int, error) {
-					return 0, errors.New("count error")
-				},
-			},
-		}
-
 		msgs := []adk.Message{
 			schema.UserMessage("test1"),
 			schema.UserMessage("test2"),
 		}
 
-		_, err := mw.replaceUserMessagesInSummary(ctx, msgs, "summary", 1000)
+		_, err := populateUserMessages(ctx, &populateUserMessagesParams[*schema.Message]{
+			contextMsgs: msgs,
+			summaryText: "summary",
+			maxTokens:   1000,
+			tokenCounter: func(ctx context.Context, input *TokenCounterInput) (int, error) {
+				return 0, errors.New("count error")
+			},
+		})
 		assert.Error(t, err)
 	})
 
 	t.Run("returns original if empty user messages", func(t *testing.T) {
-		mw := &typedMiddleware[*schema.Message]{
-			cfg: &Config{},
-		}
-
 		msgs := []adk.Message{
 			schema.AssistantMessage("response", nil),
 		}
@@ -1323,7 +1310,11 @@ func TestReplaceUserMessagesInSummary(t *testing.T) {
 7. Pending Tasks:
    - task`
 
-		result, err := mw.replaceUserMessagesInSummary(ctx, msgs, summary, 1000)
+		result, err := populateUserMessages(ctx, &populateUserMessagesParams[*schema.Message]{
+			contextMsgs: msgs,
+			summaryText: summary,
+			maxTokens:   1000,
+		})
 		assert.NoError(t, err)
 		assert.Equal(t, summary, result)
 	})
@@ -1510,18 +1501,8 @@ func TestPostProcessSummary(t *testing.T) {
 	})
 }
 
-func TestReplaceUserMessagesInSummary_FilterRemovesAll(t *testing.T) {
+func TestPopulateUserMessages_FilterRemovesAll(t *testing.T) {
 	ctx := context.Background()
-	mw := &typedMiddleware[*schema.Message]{
-		cfg: &Config{
-			PreserveUserMessages: &PreserveUserMessages{
-				Enabled: true,
-				Filter: func(ctx context.Context, msg adk.Message) (bool, error) {
-					return false, nil
-				},
-			},
-		},
-	}
 
 	msgs := []adk.Message{
 		schema.UserMessage("drop_me"),
@@ -1536,7 +1517,14 @@ func TestReplaceUserMessagesInSummary_FilterRemovesAll(t *testing.T) {
 7. Pending Tasks:
    - task`
 
-	result, err := mw.replaceUserMessagesInSummary(ctx, msgs, summary, 1000)
+	result, err := populateUserMessages(ctx, &populateUserMessagesParams[*schema.Message]{
+		contextMsgs: msgs,
+		summaryText: summary,
+		maxTokens:   1000,
+		filter: func(ctx context.Context, msg adk.Message) (bool, error) {
+			return false, nil
+		},
+	})
 	assert.NoError(t, err)
 	assert.NotContains(t, result, "old message")
 	assert.Contains(t, result, "<all_user_messages>\n\n</all_user_messages>")
