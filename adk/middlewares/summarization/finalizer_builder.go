@@ -28,42 +28,57 @@ import (
 	"github.com/cloudwego/eino/schema"
 )
 
-type FinalizerBuilder struct {
-	handlers []FinalizeFunc
-	custom   FinalizeFunc
-	errs     []error
-}
-
-// NewFinalizer creates a new FinalizerBuilder that builds a FinalizeFunc
-// by chaining handlers and an optional custom finalizer.
+// TypedFinalizerBuilder builds a TypedFinalizeFunc by chaining handlers
+// and an optional custom finalizer, generic over message type M.
+//
 // Handlers (e.g. PreserveSkills) transform the summary message sequentially,
 // and the custom finalizer (set via Custom) determines the final output messages.
 //
 // Example:
 //
 //	finalizer, err := NewFinalizer().
-//		PreserveSkills(&PreserveSkillsConfig{}).
-//		Custom(func(ctx context.Context, originalMessages []adk.Message, summary adk.Message) ([]adk.Message, error) {
-//			return []adk.Message{schema.SystemMessage("system prompt"), summary}, nil
-//		}).
-//		Build()
+//	    PreserveSkills(&PreserveSkillsConfig{}).
+//	    Custom(func(ctx context.Context, originalMessages []adk.Message, summary adk.Message) ([]adk.Message, error) {
+//	        return []adk.Message{schema.SystemMessage("system prompt"), summary}, nil
+//	    }).
+//	    Build()
 //
 //	cfg := &Config{
-//		Finalize: finalizer,
-//		// ...
+//	    Finalize: finalizer,
+//	    // ...
 //	}
+type TypedFinalizerBuilder[M adk.MessageType] struct {
+	handlers []TypedFinalizeFunc[M]
+	custom   TypedFinalizeFunc[M]
+	errs     []error
+}
+
+// FinalizerBuilder is a backward-compatible alias for TypedFinalizerBuilder
+// specialized with *schema.Message.
+type FinalizerBuilder = TypedFinalizerBuilder[*schema.Message]
+
+// NewTypedFinalizer creates a new TypedFinalizerBuilder that builds a TypedFinalizeFunc
+// by chaining handlers and an optional custom finalizer.
+func NewTypedFinalizer[M adk.MessageType]() *TypedFinalizerBuilder[M] {
+	return &TypedFinalizerBuilder[M]{}
+}
+
+// NewFinalizer creates a new FinalizerBuilder that builds a FinalizeFunc
+// by chaining handlers and an optional custom finalizer.
 func NewFinalizer() *FinalizerBuilder {
 	return &FinalizerBuilder{}
 }
 
 // Custom sets a custom finalizer that determines the final output messages.
 // If called multiple times, the last custom finalizer takes effect.
-func (b *FinalizerBuilder) Custom(fn FinalizeFunc) *FinalizerBuilder {
+func (b *TypedFinalizerBuilder[M]) Custom(fn TypedFinalizeFunc[M]) *TypedFinalizerBuilder[M] {
 	b.custom = fn
 	return b
 }
 
-func (b *FinalizerBuilder) Build() (FinalizeFunc, error) {
+// Build constructs the final TypedFinalizeFunc by chaining all registered handlers
+// and the optional custom finalizer.
+func (b *TypedFinalizerBuilder[M]) Build() (TypedFinalizeFunc[M], error) {
 	if len(b.errs) > 0 {
 		msgs := make([]string, len(b.errs))
 		for i, e := range b.errs {
@@ -76,11 +91,11 @@ func (b *FinalizerBuilder) Build() (FinalizeFunc, error) {
 		return nil, fmt.Errorf("at least one handler or custom finalizer is required")
 	}
 
-	handlers := make([]FinalizeFunc, len(b.handlers))
+	handlers := make([]TypedFinalizeFunc[M], len(b.handlers))
 	copy(handlers, b.handlers)
 	custom := b.custom
 
-	return func(ctx context.Context, originalMessages []adk.Message, summary adk.Message) ([]adk.Message, error) {
+	return func(ctx context.Context, originalMessages []M, summary M) ([]M, error) {
 		for _, fn := range handlers {
 			result, err := fn(ctx, originalMessages, summary)
 			if err != nil {
@@ -93,7 +108,7 @@ func (b *FinalizerBuilder) Build() (FinalizeFunc, error) {
 			return custom(ctx, originalMessages, summary)
 		}
 
-		return []adk.Message{summary}, nil
+		return []M{summary}, nil
 	}, nil
 }
 
@@ -127,34 +142,55 @@ type PreserveSkillsConfig struct {
 // PreserveSkills extracts skill contents loaded by the ADK skill middleware
 // from the conversation history and prepends them to the summary message,
 // ensuring the agent retains skill knowledge after the context window is compacted.
-func (b *FinalizerBuilder) PreserveSkills(config *PreserveSkillsConfig) *FinalizerBuilder {
+func (b *TypedFinalizerBuilder[M]) PreserveSkills(config *PreserveSkillsConfig) *TypedFinalizerBuilder[M] {
 	if err := config.check(); err != nil {
 		b.errs = append(b.errs, fmt.Errorf("PreserveSkills: %w", err))
 		return b
 	}
-	b.handlers = append(b.handlers, func(ctx context.Context, originalMessages []adk.Message, summary adk.Message) ([]adk.Message, error) {
-		modelInput, _ := ctx.Value(ctxKeyModelInput{}).([]adk.Message)
-		if len(modelInput) == 0 {
-			panic("impossible: model input is empty")
+	b.handlers = append(b.handlers, func(ctx context.Context, originalMessages []M, summary M) ([]M, error) {
+		messages := originalMessages
+
+		modelInput, ok := ctx.Value(ctxKeyModelInput{}).([]M)
+		if ok && len(modelInput) > 0 {
+			messages = modelInput
 		}
 
-		skillText, err := buildPreservedSkillsText(ctx, modelInput, config)
+		if len(messages) == 0 {
+			return []M{summary}, nil
+		}
+
+		skillText, err := buildPreservedSkillsText(ctx, messages, config)
 		if err != nil {
 			return nil, err
 		}
 
 		if skillText != "" {
-			summary.UserInputMultiContent = append([]schema.MessageInputPart{
-				{
-					Type: schema.ChatMessagePartTypeText,
-					Text: skillText,
-				},
-			}, summary.UserInputMultiContent...)
+			summary = prependMsgTextContent(summary, skillText)
 		}
 
-		return []adk.Message{summary}, nil
+		return []M{summary}, nil
 	})
 	return b
+}
+
+func prependMsgTextContent[M adk.MessageType](msg M, text string) M {
+	switch m := any(msg).(type) {
+	case *schema.Message:
+		m.UserInputMultiContent = append([]schema.MessageInputPart{
+			{
+				Type: schema.ChatMessagePartTypeText,
+				Text: text,
+			},
+		}, m.UserInputMultiContent...)
+		return any(m).(M)
+	case *schema.AgenticMessage:
+		m.ContentBlocks = append([]*schema.ContentBlock{
+			schema.NewContentBlock(&schema.UserInputText{Text: text}),
+		}, m.ContentBlocks...)
+		return any(m).(M)
+	default:
+		panic("unreachable")
+	}
 }
 
 func (c *PreserveSkillsConfig) check() error {
@@ -178,7 +214,76 @@ type skillInfo struct {
 	Content string
 }
 
-func buildPreservedSkillsText(_ context.Context, messages []adk.Message, config *PreserveSkillsConfig) (string, error) {
+func extractSkillInfos[M adk.MessageType](messages []M, skillTool string) ([]*skillInfo, error) {
+	var skills []*skillInfo
+	argsMap := make(map[string]string)
+
+	for _, msg := range messages {
+		switch m := any(msg).(type) {
+		case *schema.Message:
+			if m.Role == schema.Assistant {
+				for _, tc := range m.ToolCalls {
+					if tc.Function.Name == skillTool {
+						argsMap[tc.ID] = tc.Function.Arguments
+					}
+				}
+			} else if m.Role == schema.Tool {
+				arguments, ok := argsMap[m.ToolCallID]
+				if !ok {
+					continue
+				}
+				var arg struct {
+					Skill string `json:"skill"`
+				}
+				if err := sonic.UnmarshalString(arguments, &arg); err != nil {
+					return nil, fmt.Errorf("failed to parse skill arguments from tool call %s: %w", m.ToolCallID, err)
+				}
+				skills = append(skills, &skillInfo{
+					Name:    arg.Skill,
+					Content: m.Content,
+				})
+			}
+
+		case *schema.AgenticMessage:
+			for _, block := range m.ContentBlocks {
+				if block == nil {
+					continue
+				}
+				if block.Type == schema.ContentBlockTypeFunctionToolCall && block.FunctionToolCall != nil {
+					if block.FunctionToolCall.Name == skillTool {
+						argsMap[block.FunctionToolCall.CallID] = block.FunctionToolCall.Arguments
+					}
+				}
+				if block.Type == schema.ContentBlockTypeFunctionToolResult && block.FunctionToolResult != nil {
+					arguments, ok := argsMap[block.FunctionToolResult.CallID]
+					if !ok {
+						continue
+					}
+					var arg struct {
+						Skill string `json:"skill"`
+					}
+					if err := sonic.UnmarshalString(arguments, &arg); err != nil {
+						return nil, fmt.Errorf("failed to parse skill arguments from tool call %s: %w", block.FunctionToolResult.CallID, err)
+					}
+					var contentParts []string
+					for _, cb := range block.FunctionToolResult.Content {
+						if cb != nil && cb.Type == schema.FunctionToolResultContentBlockTypeText && cb.Text != nil {
+							contentParts = append(contentParts, cb.Text.Text)
+						}
+					}
+					skills = append(skills, &skillInfo{
+						Name:    arg.Skill,
+						Content: strings.Join(contentParts, "\n"),
+					})
+				}
+			}
+		}
+	}
+
+	return skills, nil
+}
+
+func buildPreservedSkillsText[M adk.MessageType](_ context.Context, messages []M, config *PreserveSkillsConfig) (string, error) {
 	const (
 		defaultSkillTool         = "skill"
 		defaultMaxTokensPerSkill = 5000
@@ -212,36 +317,9 @@ func buildPreservedSkillsText(_ context.Context, messages []adk.Message, config 
 		skillsTokenBudget = *config.SkillsTokenBudget
 	}
 
-	var skills []*skillInfo
-	argsMap := make(map[string]string)
-
-	for _, msg := range messages {
-		switch msg.Role {
-		case schema.Assistant:
-			for _, tc := range msg.ToolCalls {
-				if tc.Function.Name == skillTool {
-					argsMap[tc.ID] = tc.Function.Arguments
-				}
-			}
-
-		case schema.Tool:
-			arguments, ok := argsMap[msg.ToolCallID]
-			if !ok {
-				continue
-			}
-
-			var arg struct {
-				Skill string `json:"skill"`
-			}
-			if err := sonic.UnmarshalString(arguments, &arg); err != nil {
-				return "", fmt.Errorf("failed to parse skill arguments from tool call %s: %w", msg.ToolCallID, err)
-			}
-
-			skills = append(skills, &skillInfo{
-				Name:    arg.Skill,
-				Content: msg.Content,
-			})
-		}
+	skills, err := extractSkillInfos(messages, skillTool)
+	if err != nil {
+		return "", err
 	}
 
 	if len(skills) == 0 {

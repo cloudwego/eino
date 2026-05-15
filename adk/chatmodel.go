@@ -1464,7 +1464,9 @@ func (a *TypedChatModelAgent[M]) Run(ctx context.Context, input *TypedAgentInput
 	runOps := GetImplSpecificOptions[chatModelAgentRunOptions](nil, opts...)
 
 	if bc != nil {
-		co = append(co, compose.WithChatModelOption(model.WithTools(bc.toolInfos)))
+		if len(bc.toolInfos) > 0 {
+			co = append(co, compose.WithChatModelOption(model.WithTools(bc.toolInfos)))
+		}
 		if bc.toolSearchTool != nil {
 			co = append(co, compose.WithChatModelOption(model.WithToolSearchTool(bc.toolSearchTool)))
 		}
@@ -1540,7 +1542,9 @@ func (a *TypedChatModelAgent[M]) Resume(ctx context.Context, info *ResumeInfo, o
 	resumeRunOps := GetImplSpecificOptions[chatModelAgentRunOptions](nil, opts...)
 
 	if bc != nil {
-		co = append(co, compose.WithChatModelOption(model.WithTools(bc.toolInfos)))
+		if len(bc.toolInfos) > 0 {
+			co = append(co, compose.WithChatModelOption(model.WithTools(bc.toolInfos)))
+		}
 		if bc.toolSearchTool != nil {
 			co = append(co, compose.WithChatModelOption(model.WithToolSearchTool(bc.toolSearchTool)))
 		}

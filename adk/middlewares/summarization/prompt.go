@@ -299,9 +299,9 @@ const summaryPreamble = `This session is being continued from a previous convers
 
 const summaryPreambleZh = `此会话延续自此前一段因上下文耗尽而终止的对话。以下总结概述了此前对话的内容。`
 
-const continueInstruction = `Please continue the conversation from where we left it off without asking the user any further questions. Continue with the last task that you were asked to work on.`
+const continueInstruction = `Continue the conversation from where it left off without asking the user any further questions. Resume directly — do not acknowledge the summary, do not recap what was happening, do not preface with "I'll continue" or similar. Pick up the last task as if the break never happened.`
 
-const continueInstructionZh = `请从我们中断的地方继续对话，无需向用户提出任何进一步的问题。继续完成先前指令中未完成的任务。`
+const continueInstructionZh = `从对话中断的地方继续，不要再问用户任何问题。直接继续——不要回应摘要，不要复述之前的经过，不要以"我会继续"之类的话作为开场白。就像中断从未发生过一样，继续上次的任务。`
 
 const transcriptPathInstruction = `If you need specific details from before compaction (like exact code snippets, error messages, or content you generated), read the full transcript at: %s`
 

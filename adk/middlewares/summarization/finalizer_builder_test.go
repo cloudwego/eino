@@ -342,13 +342,13 @@ func TestBuildPreservedSkillsText(t *testing.T) {
 	ctx := context.Background()
 
 	t.Run("nil config", func(t *testing.T) {
-		text, err := buildPreservedSkillsText(ctx, nil, nil)
+		text, err := buildPreservedSkillsText[*schema.Message](ctx, nil, nil)
 		assert.NoError(t, err)
 		assert.Empty(t, text)
 	})
 
 	t.Run("zero max skills", func(t *testing.T) {
-		text, err := buildPreservedSkillsText(ctx, nil, &PreserveSkillsConfig{MaxSkills: ptr(0)})
+		text, err := buildPreservedSkillsText[*schema.Message](ctx, nil, &PreserveSkillsConfig{MaxSkills: ptr(0)})
 		assert.NoError(t, err)
 		assert.Empty(t, text)
 	})
