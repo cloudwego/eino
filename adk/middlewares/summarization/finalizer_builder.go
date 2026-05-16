@@ -28,6 +28,86 @@ import (
 	"github.com/cloudwego/eino/schema"
 )
 
+type DefaultFinalizerConfig[M adk.MessageType] struct {
+	// PreserveUserMessages controls whether to preserve original user messages in the summary.
+	// When enabled, replaces the <all_user_messages>...</all_user_messages> section in the
+	// model-generated summary with recent original user messages from the conversation.
+	// Optional. Enabled by default when config is nil or Enabled is true.
+	PreserveUserMessages *TypedPreserveUserMessages[M]
+
+	// TranscriptFilePath is the path to the file containing the full conversation history.
+	// When set, appends a note to the summary indicating where to find the original context.
+	// Optional.
+	TranscriptFilePath string
+}
+
+// DefaultFinalizer is the default TypedFinalizeFunc implementation, providing the same
+// summary post-processing as the middleware does.
+// e.g. replacing user messages in the summary.
+func DefaultFinalizer[M adk.MessageType](cfg *DefaultFinalizerConfig[M]) (TypedFinalizeFunc[M], error) {
+	const defaultPreserveUserMessagesMaxTokens = 30000
+
+	if cfg == nil {
+		cfg = &DefaultFinalizerConfig[M]{}
+	}
+
+	preserveEnabled := cfg.PreserveUserMessages == nil || cfg.PreserveUserMessages.Enabled
+	preserveCfg := cfg.PreserveUserMessages
+	transcriptPath := cfg.TranscriptFilePath
+
+	if preserveCfg != nil && preserveCfg.MaxTokens < 0 {
+		return nil, fmt.Errorf("preserveUserMessages.MaxTokens must be non-negative")
+	}
+
+	return func(ctx context.Context, originalMessages []M, summary M) ([]M, error) {
+		content := getUserMsgTextContent(summary)
+
+		if preserveEnabled {
+			var contextMsgs []M
+			for i, msg := range originalMessages {
+				if !isSystemRole(msg) {
+					contextMsgs = originalMessages[i:]
+					break
+				}
+			}
+
+			if len(contextMsgs) > 0 {
+				maxTokens := defaultPreserveUserMessagesMaxTokens
+				if preserveCfg != nil && preserveCfg.MaxTokens > 0 {
+					maxTokens = preserveCfg.MaxTokens
+				}
+
+				var filter TypedUserMessageFilterFunc[M]
+				if preserveCfg != nil {
+					filter = preserveCfg.Filter
+				}
+
+				newContent, err := replaceUserMessagesInSummary(ctx, &replaceUserMessagesInSummaryParams[M]{
+					contextMsgs:  contextMsgs,
+					summaryText:  content,
+					maxTokens:    maxTokens,
+					filter:       filter,
+					tokenCounter: nil,
+				})
+				if err != nil {
+					return nil, err
+				}
+				content = newContent
+			}
+		}
+
+		if transcriptPath != "" {
+			content = appendSection(content, fmt.Sprintf(getTranscriptPathInstruction(), transcriptPath))
+		}
+
+		content = appendSection(getSummaryPreamble(), content)
+
+		newSummary := overwriteMsgContent(summary, content, getContinueInstruction())
+
+		return []M{newSummary}, nil
+	}, nil
+}
+
 // TypedFinalizerBuilder builds a TypedFinalizeFunc by chaining handlers
 // and an optional custom finalizer, generic over message type M.
 //

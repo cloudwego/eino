@@ -21,8 +21,15 @@ import (
 )
 
 type ResponseMetaExtension struct {
-	ID         string `json:"id,omitempty"`
-	StopReason string `json:"stop_reason,omitempty"`
+	ID           string       `json:"id,omitempty"`
+	StopReason   string       `json:"stop_reason,omitempty"`
+	StopSequence string       `json:"stop_sequence,omitempty"`
+	StopDetails  *StopDetails `json:"stop_details,omitempty"`
+}
+
+type StopDetails struct {
+	Category    string `json:"category,omitempty"`
+	Explanation string `json:"explanation,omitempty"`
 }
 
 type AssistantGenTextExtension struct {
@@ -77,7 +84,7 @@ type CitationWebSearchResultLocation struct {
 	EncryptedIndex string `json:"encrypted_index,omitempty"`
 }
 
-// ConcatAssistantGenTextExtensions concatenates multiple AssistantGenTextExtension chunks into a single one.
+// ConcatAssistantGenTextExtensions merges multiple AssistantGenTextExtension chunks into one.
 func ConcatAssistantGenTextExtensions(chunks []*AssistantGenTextExtension) (*AssistantGenTextExtension, error) {
 	if len(chunks) == 0 {
 		return nil, fmt.Errorf("no assistant generated text extension found")
@@ -97,7 +104,7 @@ func ConcatAssistantGenTextExtensions(chunks []*AssistantGenTextExtension) (*Ass
 	return ret, nil
 }
 
-// ConcatResponseMetaExtensions concatenates multiple ResponseMetaExtension chunks into a single one.
+// ConcatResponseMetaExtensions merges multiple ResponseMetaExtension chunks into one.
 func ConcatResponseMetaExtensions(chunks []*ResponseMetaExtension) (*ResponseMetaExtension, error) {
 	if len(chunks) == 0 {
 		return nil, fmt.Errorf("no response meta extension found")
@@ -114,6 +121,12 @@ func ConcatResponseMetaExtensions(chunks []*ResponseMetaExtension) (*ResponseMet
 		}
 		if ext.StopReason != "" {
 			ret.StopReason = ext.StopReason
+		}
+		if ext.StopSequence != "" {
+			ret.StopSequence = ext.StopSequence
+		}
+		if ext.StopDetails != nil {
+			ret.StopDetails = ext.StopDetails
 		}
 	}
 
