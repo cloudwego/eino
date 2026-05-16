@@ -810,6 +810,13 @@ func TestConcatAgenticMessages(t *testing.T) {
 					TokenUsage: &TokenUsage{
 						PromptTokens:     10,
 						CompletionTokens: 5,
+						PromptTokenDetails: PromptTokenDetails{
+							CachedTokens: 3,
+						},
+						CompletionTokensDetails: CompletionTokensDetails{
+							ReasoningTokens: 2,
+						},
+						TotalTokens: 15,
 					},
 				},
 			},
@@ -817,8 +824,15 @@ func TestConcatAgenticMessages(t *testing.T) {
 				Role: AgenticRoleTypeAssistant,
 				ResponseMeta: &AgenticResponseMeta{
 					TokenUsage: &TokenUsage{
-						PromptTokens:     10,
+						PromptTokens:     8,
 						CompletionTokens: 15,
+						PromptTokenDetails: PromptTokenDetails{
+							CachedTokens: 5,
+						},
+						CompletionTokensDetails: CompletionTokensDetails{
+							ReasoningTokens: 4,
+						},
+						TotalTokens: 23,
 					},
 				},
 			},
@@ -827,8 +841,11 @@ func TestConcatAgenticMessages(t *testing.T) {
 		result, err := ConcatAgenticMessages(msgs)
 		assert.NoError(t, err)
 		assert.NotNil(t, result.ResponseMeta)
-		assert.Equal(t, 20, result.ResponseMeta.TokenUsage.CompletionTokens)
-		assert.Equal(t, 20, result.ResponseMeta.TokenUsage.PromptTokens)
+		assert.Equal(t, 15, result.ResponseMeta.TokenUsage.CompletionTokens)
+		assert.Equal(t, 10, result.ResponseMeta.TokenUsage.PromptTokens)
+		assert.Equal(t, 23, result.ResponseMeta.TokenUsage.TotalTokens)
+		assert.Equal(t, 5, result.ResponseMeta.TokenUsage.PromptTokenDetails.CachedTokens)
+		assert.Equal(t, 4, result.ResponseMeta.TokenUsage.CompletionTokensDetails.ReasoningTokens)
 	})
 
 	t.Run("mixed streaming and non-streaming blocks error", func(t *testing.T) {
