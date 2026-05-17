@@ -3820,7 +3820,7 @@ func TestPreemptController_ConcurrentPreemptRequestsMergeAndAck(t *testing.T) {
 	}
 }
 
-func TestPreemptController_DrainAllDuringDelayedPreempt(t *testing.T) {
+func TestPreemptController_CloseForLoopExitDuringDelayedPreempt(t *testing.T) {
 	c := newPreemptController()
 	c.beginPlanningTurn()
 	c.beginActiveTurn(context.Background(), "tc")
@@ -3829,10 +3829,10 @@ func TestPreemptController_DrainAllDuringDelayedPreempt(t *testing.T) {
 	snapshot := c.beginPush()
 	c.endPush()
 
-	// drainAll tears everything down.
-	c.drainAll()
+	// closeForLoopExit tears down controller state during TurnLoop cleanup.
+	c.closeForLoopExit()
 
-	// A delayed goroutine fires requestPreempt AFTER drainAll.
+	// A delayed goroutine fires requestPreempt AFTER closeForLoopExit.
 	// This must not panic or deadlock; ack should be closed immediately
 	// because the controller is now closed.
 	ack := make(chan struct{})
@@ -3845,19 +3845,19 @@ func TestPreemptController_DrainAllDuringDelayedPreempt(t *testing.T) {
 	select {
 	case <-done:
 	case <-time.After(3 * time.Second):
-		t.Fatal("requestPreempt after drainAll must not deadlock")
+		t.Fatal("requestPreempt after closeForLoopExit must not deadlock")
 	}
 	requireAckClosed(t, ack)
 }
 
-func TestPreemptController_RequestPreemptAfterDrainAll(t *testing.T) {
+func TestPreemptController_RequestPreemptAfterCloseForLoopExit(t *testing.T) {
 	c := newPreemptController()
 	c.beginPlanningTurn()
 	c.beginActiveTurn(context.Background(), "tc")
 	snapshot := c.beginPush()
 	c.endPush()
 
-	c.drainAll()
+	c.closeForLoopExit()
 
 	// requestPreempt on a closed controller should close ack immediately.
 	ack := make(chan struct{})
@@ -4090,7 +4090,7 @@ func TestTurnLoop_ConcurrentPreemptsDuringTurn(t *testing.T) {
 
 	// Stop the loop concurrently. The run loop may be blocked on
 	// buffer.Receive after processing all preempts; Stop unblocks it
-	// and triggers drainAll which closes any orphaned ack channels.
+	// and triggers closeForLoopExit which closes any orphaned ack channels.
 	go func() {
 		time.Sleep(500 * time.Millisecond)
 		loop.Stop(WithImmediate())
@@ -5092,7 +5092,7 @@ func TestTurnLoop_StopConcurrentWithCallbackError_NoCheckpoint(t *testing.T) {
 		PrepareAgent: func(ctx context.Context, _ *TurnLoop[string, *schema.Message], consumed []string) (Agent, error) {
 			n := atomic.AddInt32(&prepareCount, 1)
 			if n > 1 {
-				// Wait until Stop() has been called so stopSig.isStopped() is true
+				// Wait until Stop() has been called so stopCtrl.isCommitted() is true.
 				<-stopCalled
 				return nil, prepareErr
 			}
@@ -5719,10 +5719,8 @@ func TestUntilIdleFor(t *testing.T) {
 }
 
 // TestUntilIdleFor_DoesNotCancelRunningAgent verifies that Stop(UntilIdleFor)
-// does NOT cancel a running agent. The notify signal from UntilIdleFor must not
-// be misinterpreted as a cancel request by watchStopSignal. This is a regression
-// test for a bug where stopSignal.check() converted nil agentCancelOpts to a
-// non-nil empty slice, which tryCancel treated as CancelImmediate.
+// records an idle stop policy but does NOT create a pending cancel request for
+// the running agent.
 func TestUntilIdleFor_DoesNotCancelRunningAgent(t *testing.T) {
 	t.Run("BeforeRun", func(t *testing.T) {
 		agentStarted := make(chan struct{})
@@ -5902,65 +5900,261 @@ func TestUntilIdleFor_ContextCancelDuringIdleWait(t *testing.T) {
 	assert.ErrorIs(t, exit.ExitReason, context.Canceled)
 }
 
-// TestStopSignalCheck_NilPreservedUnderConcurrentSignals hammers
-// stopSignal.check() and signal() concurrently to verify that the nil guard
-// in check() does not race with signal(). The race detector should catch any
-// unsynchronised access.
-func TestStopSignalCheck_NilPreservedUnderConcurrentSignals(t *testing.T) {
-	sig := newStopSignal()
+func TestCancelRequestState_ImmediateDominatesSafePointModes(t *testing.T) {
+	now := time.Now()
+	state := newCancelRequestState([]AgentCancelOption{
+		WithAgentCancelMode(CancelAfterChatModel),
+		WithAgentCancelTimeout(time.Minute),
+	}, now)
 
-	const goroutines = 20
-	const iterations = 200
+	state.merge([]AgentCancelOption{WithAgentCancelMode(CancelImmediate)}, now)
+
+	cfg := parseAgentCancelOptions(state.cancelOptions(now)...)
+	assert.Equal(t, CancelImmediate, cfg.Mode)
+	assert.Nil(t, cfg.Timeout)
+}
+
+func TestCancelRequestState_NilMergeDoesNotCreateCancelIntent(t *testing.T) {
+	now := time.Now()
+	state := newCancelRequestState([]AgentCancelOption{WithAgentCancelMode(CancelAfterChatModel)}, now)
+
+	state.merge(nil, now)
+
+	cfg := parseAgentCancelOptions(state.cancelOptions(now)...)
+	assert.Equal(t, CancelAfterChatModel, cfg.Mode)
+}
+
+func TestCancelRequestState_EmptyMergeMeansExplicitImmediate(t *testing.T) {
+	now := time.Now()
+	state := newCancelRequestState([]AgentCancelOption{WithAgentCancelMode(CancelAfterChatModel)}, now)
+
+	state.merge([]AgentCancelOption{}, now)
+
+	cfg := parseAgentCancelOptions(state.cancelOptions(now)...)
+	assert.Equal(t, CancelImmediate, cfg.Mode)
+}
+
+func TestCancelRequestState_SafePointModesJoin(t *testing.T) {
+	now := time.Now()
+	state := newCancelRequestState([]AgentCancelOption{WithAgentCancelMode(CancelAfterChatModel)}, now)
+
+	state.merge([]AgentCancelOption{WithAgentCancelMode(CancelAfterToolCalls)}, now)
+
+	cfg := parseAgentCancelOptions(state.cancelOptions(now)...)
+	assert.Equal(t, CancelAfterChatModel|CancelAfterToolCalls, cfg.Mode)
+}
+
+func TestCancelRequestState_RecursiveIsMonotonic(t *testing.T) {
+	now := time.Now()
+	state := newCancelRequestState([]AgentCancelOption{WithAgentCancelMode(CancelAfterChatModel)}, now)
+
+	state.merge([]AgentCancelOption{WithAgentCancelMode(CancelAfterToolCalls), WithRecursive()}, now)
+	state.merge([]AgentCancelOption{WithAgentCancelMode(CancelAfterChatModel)}, now)
+
+	cfg := parseAgentCancelOptions(state.cancelOptions(now)...)
+	assert.True(t, cfg.Recursive)
+}
+
+func TestCancelRequestState_TimeoutUsesEarliestDeadline(t *testing.T) {
+	now := time.Now()
+	state := newCancelRequestState([]AgentCancelOption{
+		WithAgentCancelMode(CancelAfterChatModel),
+		WithAgentCancelTimeout(10 * time.Second),
+	}, now)
+
+	state.merge([]AgentCancelOption{
+		WithAgentCancelMode(CancelAfterToolCalls),
+		WithAgentCancelTimeout(time.Second),
+	}, now.Add(100*time.Millisecond))
+
+	cfg := parseAgentCancelOptions(state.cancelOptions(now.Add(100 * time.Millisecond))...)
+	require.NotNil(t, cfg.Timeout)
+	assert.LessOrEqual(t, *cfg.Timeout, time.Second)
+}
+
+func TestCancelRequestState_ExpiredTimeoutConvertsToImmediate(t *testing.T) {
+	now := time.Now()
+	state := newCancelRequestState([]AgentCancelOption{
+		WithAgentCancelMode(CancelAfterChatModel),
+		WithAgentCancelTimeout(time.Nanosecond),
+	}, now)
+
+	cfg := parseAgentCancelOptions(state.cancelOptions(now.Add(time.Second))...)
+	assert.Equal(t, CancelImmediate, cfg.Mode)
+	assert.Nil(t, cfg.Timeout)
+}
+
+func TestStopController_BareStopCommitsWithoutCancelRequest(t *testing.T) {
+	c := newStopController()
+
+	decision := c.requestStop(&stopConfig{})
+
+	assert.True(t, decision.commit)
+	assert.True(t, c.isCommitted())
+	c.beginActiveTurn()
+	_, ok := c.receiveCancel()
+	assert.False(t, ok)
+}
+
+func TestStopController_UntilIdleForDoesNotCreateCancelRequest(t *testing.T) {
+	c := newStopController()
+
+	decision := c.requestStop(&stopConfig{idleFor: time.Second})
+
+	assert.False(t, decision.commit)
+	assert.True(t, decision.wakeIdle)
+	assert.Equal(t, time.Second, c.idleDuration())
+	assert.False(t, c.isCommitted())
+	c.beginActiveTurn()
+	_, ok := c.receiveCancel()
+	assert.False(t, ok)
+}
+
+func TestStopController_CancelOptsDroppedWhenCombinedWithUntilIdleFor(t *testing.T) {
+	c := newStopController()
+
+	decision := c.requestStop(&stopConfig{
+		idleFor:         time.Second,
+		agentCancelOpts: []AgentCancelOption{WithRecursive()},
+	})
+
+	assert.False(t, decision.commit)
+	c.beginActiveTurn()
+	_, ok := c.receiveCancel()
+	assert.False(t, ok)
+}
+
+func TestStopController_ImmediateStopCreatesPendingCancelForActiveTurn(t *testing.T) {
+	c := newStopController()
+	c.beginActiveTurn()
+
+	decision := c.requestStop(&stopConfig{agentCancelOpts: []AgentCancelOption{WithRecursive()}})
+
+	assert.True(t, decision.commit)
+	req, ok := c.receiveCancel()
+	require.True(t, ok)
+	cfg := parseAgentCancelOptions(req.cancelOptions(time.Now())...)
+	assert.Equal(t, CancelImmediate, cfg.Mode)
+	assert.True(t, cfg.Recursive)
+}
+
+func TestStopController_StopBeforeWatcherStartsConsumedAfterBeginActiveTurn(t *testing.T) {
+	c := newStopController()
+
+	decision := c.requestStop(&stopConfig{agentCancelOpts: []AgentCancelOption{WithRecursive()}})
+	assert.True(t, decision.commit)
+
+	c.beginActiveTurn()
+	req, ok := c.receiveCancel()
+	require.True(t, ok)
+	cfg := parseAgentCancelOptions(req.cancelOptions(time.Now())...)
+	assert.Equal(t, CancelImmediate, cfg.Mode)
+}
+
+func TestStopController_EndActiveTurnDropsUnconsumedCancel(t *testing.T) {
+	c := newStopController()
+	c.beginActiveTurn()
+	c.requestStop(&stopConfig{agentCancelOpts: []AgentCancelOption{WithRecursive()}})
+
+	req := c.endActiveTurn()
+
+	require.NotNil(t, req)
+	_, ok := c.receiveCancel()
+	assert.False(t, ok)
+}
+
+func TestStopController_RepeatedStopsMergeWithoutDeescalation(t *testing.T) {
+	c := newStopController()
+	c.beginActiveTurn()
+
+	c.requestStop(&stopConfig{agentCancelOpts: []AgentCancelOption{WithRecursive()}})
+	c.requestStop(&stopConfig{})
+	c.requestStop(&stopConfig{agentCancelOpts: []AgentCancelOption{
+		WithAgentCancelMode(CancelAfterChatModel | CancelAfterToolCalls),
+		WithRecursive(),
+	}})
+
+	req, ok := c.receiveCancel()
+	require.True(t, ok)
+	cfg := parseAgentCancelOptions(req.cancelOptions(time.Now())...)
+	assert.Equal(t, CancelImmediate, cfg.Mode)
+	assert.True(t, cfg.Recursive)
+}
+
+func TestStopController_RepeatedStopsUseSharedCancelMergeState(t *testing.T) {
+	c := newStopController()
+	c.beginActiveTurn()
+
+	c.requestStop(&stopConfig{agentCancelOpts: []AgentCancelOption{WithAgentCancelMode(CancelAfterChatModel)}})
+	c.requestStop(&stopConfig{agentCancelOpts: []AgentCancelOption{WithAgentCancelMode(CancelAfterToolCalls)}})
+
+	req, ok := c.receiveCancel()
+	require.True(t, ok)
+	cfg := parseAgentCancelOptions(req.cancelOptions(time.Now())...)
+	assert.Equal(t, CancelAfterChatModel|CancelAfterToolCalls, cfg.Mode)
+}
+
+func TestStopController_StopCauseFirstNonEmptyWins(t *testing.T) {
+	c := newStopController()
+
+	c.requestStop(&stopConfig{})
+	c.requestStop(&stopConfig{stopCause: "first"})
+	c.requestStop(&stopConfig{stopCause: "second"})
+
+	assert.Equal(t, "first", c.cause())
+}
+
+func TestStopController_SkipCheckpointSticky(t *testing.T) {
+	c := newStopController()
+
+	c.requestStop(&stopConfig{skipCheckpoint: true})
+	c.requestStop(&stopConfig{})
+
+	assert.True(t, c.skipCheckpointEnabled())
+}
+
+func TestStopController_ConcurrentStopRequestsRaceSafe(t *testing.T) {
+	c := newStopController()
+	c.beginActiveTurn()
 
 	var wg sync.WaitGroup
-
-	// Half the goroutines call signal() with UntilIdleFor-style config (nil agentCancelOpts).
-	for i := 0; i < goroutines/2; i++ {
+	for i := 0; i < 20; i++ {
 		wg.Add(1)
-		go func() {
+		go func(i int) {
 			defer wg.Done()
-			for j := 0; j < iterations; j++ {
-				// UntilIdleFor produces nil agentCancelOpts after Stop() forces it.
-				sig.signal(&stopConfig{idleFor: 100 * time.Millisecond})
+			switch i % 5 {
+			case 0:
+				c.requestStop(&stopConfig{})
+			case 1:
+				c.requestStop(&stopConfig{agentCancelOpts: []AgentCancelOption{WithRecursive()}})
+			case 2:
+				c.requestStop(&stopConfig{agentCancelOpts: []AgentCancelOption{
+					WithAgentCancelMode(CancelAfterChatModel),
+					WithAgentCancelTimeout(time.Second),
+					WithRecursive(),
+				}})
+			case 3:
+				c.requestStop(&stopConfig{idleFor: time.Second})
+			case 4:
+				c.requestStop(&stopConfig{skipCheckpoint: true, stopCause: "cause"})
 			}
-		}()
+		}(i)
 	}
-
-	// The other half call signal() with WithImmediate-style config (non-nil empty opts).
-	for i := 0; i < goroutines/2; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			for j := 0; j < iterations; j++ {
-				sig.signal(&stopConfig{agentCancelOpts: []AgentCancelOption{}})
-			}
-		}()
-	}
-
-	// Concurrently read check() — the nil guard must be race-free.
-	sawNil := int32(0)
-	sawNonNil := int32(0)
-	for i := 0; i < goroutines; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			for j := 0; j < iterations; j++ {
-				_, opts := sig.check()
-				if opts == nil {
-					atomic.AddInt32(&sawNil, 1)
-				} else {
-					atomic.AddInt32(&sawNonNil, 1)
-				}
-			}
-		}()
-	}
-
 	wg.Wait()
 
-	// We expect both nil and non-nil snapshots to have been observed, since
-	// signal() alternates between the two modes concurrently.
-	t.Logf("sawNil=%d sawNonNil=%d", atomic.LoadInt32(&sawNil), atomic.LoadInt32(&sawNonNil))
-	// Main point: no race detector failure. The counts are non-deterministic.
+	assert.True(t, c.isCommitted())
+	assert.True(t, c.skipCheckpointEnabled())
+}
+
+func TestStopController_CloseForLoopExitClearsPendingCancel(t *testing.T) {
+	c := newStopController()
+	c.beginActiveTurn()
+	c.requestStop(&stopConfig{agentCancelOpts: []AgentCancelOption{WithRecursive()}})
+
+	c.closeForLoopExit()
+
+	_, ok := c.receiveCancel()
+	assert.False(t, ok)
 }
 
 func TestAttack_UntilIdleFor_ConcurrentPushDuringIdleTimer(t *testing.T) {
@@ -6099,7 +6293,7 @@ func TestAttack_BareStopOverridesUntilIdleFor(t *testing.T) {
 	assert.NoError(t, exit.ExitReason, "bare Stop should exit cleanly")
 }
 
-func TestAttack_StopSignal_NilCancelOptsDoNotDeescalate(t *testing.T) {
+func TestAttack_BareStopDoesNotDeescalateExistingCancelIntent(t *testing.T) {
 	agentStarted := make(chan *cancelContext, 1)
 	probe := &turnLoopStopModeProbeAgent{ccCh: agentStarted}
 	loop := newAndRunTurnLoop(context.Background(), TurnLoopConfig[string, *schema.Message]{

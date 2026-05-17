@@ -30,126 +30,13 @@ import (
 	"github.com/cloudwego/eino/internal/safe"
 )
 
-// stopSignal coordinates the Stop() call with per-turn watcher goroutines.
-//
-// Lifecycle overview:
-//
-//  1. SIGNAL — Stop() calls signal() which bumps the generation counter,
-//     stores the AgentCancelOptions, and deposits a one-shot notification
-//     in the buffered notify channel.
-//
-//  2. DONE — Stop() calls closeDone() which permanently closes the done
-//     channel. This acts as a durable "stopped" flag: any current or future
-//     select on done fires immediately, ensuring that every watcher —
-//     including watchers in turns that start after Stop() but before the
-//     run loop observes isStopped() — can reliably detect the stop.
-//
-//  3. RECEIVE — The per-turn watchStopSignal goroutine selects on the done
-//     channel (the durable flag) and the notify channel (to detect mode
-//     escalation from a second Stop call). On either signal, it calls
-//     agentCancelFunc to cancel the running agent.
-//
-// The generation counter (gen) de-duplicates wakes so that the watcher only
-// acts when a new Stop() call has been made, supporting mode escalation
-// (e.g. CancelAfterToolCalls followed by CancelImmediate).
-type stopSignal struct {
-	done chan struct{}
+type stopPhase uint8
 
-	mu  sync.Mutex
-	gen uint64
-	// agentCancelOpts controls how the stop interacts with the running agent:
-	//   nil       → no cancel intent; the turn runs to completion
-	//             (bare Stop, or UntilIdleFor without cancel opts)
-	//   empty     → CancelImmediate (WithImmediate)
-	//   non-empty → cancel with specific modes (WithGraceful, WithGracefulTimeout)
-	agentCancelOpts []AgentCancelOption
-	skipCheckpoint  bool
-	stopCause       string
-	idleFor         time.Duration
-	notify          chan struct{}
-}
-
-func newStopSignal() *stopSignal {
-	return &stopSignal{
-		done:   make(chan struct{}),
-		notify: make(chan struct{}, 1),
-	}
-}
-
-// signal records a stop request and wakes the current turn's watcher (if any).
-// The non-blocking send means the notification is silently coalesced when the
-// buffer is already full — this is safe because gen de-duplicates in the watcher.
-func (s *stopSignal) signal(cfg *stopConfig) {
-	s.mu.Lock()
-	s.gen++
-	// Only overwrite when the caller explicitly provides cancel options.
-	// A bare Stop() leaves cfg.agentCancelOpts nil (no cancel intent), which
-	// must not de-escalate a previously set cancel policy.
-	if cfg.agentCancelOpts != nil {
-		s.agentCancelOpts = cfg.agentCancelOpts
-	}
-	if cfg.skipCheckpoint {
-		s.skipCheckpoint = true
-	}
-	if cfg.stopCause != "" && s.stopCause == "" {
-		s.stopCause = cfg.stopCause
-	}
-	if cfg.idleFor > 0 && s.idleFor == 0 {
-		s.idleFor = cfg.idleFor
-	}
-	s.mu.Unlock()
-	select {
-	case s.notify <- struct{}{}:
-	default:
-	}
-}
-
-// isStopped returns true if closeDone() has been called.
-func (s *stopSignal) isStopped() bool {
-	select {
-	case <-s.done:
-		return true
-	default:
-		return false
-	}
-}
-
-// closeDone permanently marks the stop as committed. All current and future
-// selects on s.done will fire immediately after this call.
-func (s *stopSignal) closeDone() {
-	close(s.done)
-}
-
-// check returns the current generation and a snapshot of the cancel options.
-// Returns nil opts when no cancel intent has been set (e.g. UntilIdleFor without
-// WithGraceful/WithImmediate), preserving the nil vs empty-slice distinction
-// that tryCancel relies on.
-func (s *stopSignal) check() (uint64, []AgentCancelOption) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.agentCancelOpts == nil {
-		return s.gen, nil
-	}
-	return s.gen, append([]AgentCancelOption{}, s.agentCancelOpts...)
-}
-
-func (s *stopSignal) isSkipCheckpoint() bool {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.skipCheckpoint
-}
-
-func (s *stopSignal) getStopCause() string {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.stopCause
-}
-
-func (s *stopSignal) getIdleFor() time.Duration {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.idleFor
-}
+const (
+	stopOpen stopPhase = iota
+	stopIdleWaiting
+	stopCommitted
+)
 
 type preemptTurnPhase uint8
 
@@ -179,10 +66,14 @@ type preemptTurnSnapshot struct {
 	tc            any
 }
 
-type preemptRequest struct {
+type cancelRequestState struct {
 	cfg             agentCancelConfig
 	timeoutDeadline *time.Time
-	ackChans        []chan struct{}
+}
+
+type preemptRequest struct {
+	cancel   cancelRequestState
+	ackChans []chan struct{}
 }
 
 func parseAgentCancelOptions(opts ...AgentCancelOption) agentCancelConfig {
@@ -193,7 +84,7 @@ func parseAgentCancelOptions(opts ...AgentCancelOption) agentCancelConfig {
 	return cfg
 }
 
-func newPreemptRequest(ack chan struct{}, opts []AgentCancelOption, now time.Time) *preemptRequest {
+func newCancelRequestState(opts []AgentCancelOption, now time.Time) cancelRequestState {
 	cfg := parseAgentCancelOptions(opts...)
 	var deadline *time.Time
 	if cfg.Timeout != nil && *cfg.Timeout > 0 && cfg.Mode != CancelImmediate {
@@ -202,10 +93,59 @@ func newPreemptRequest(ack chan struct{}, opts []AgentCancelOption, now time.Tim
 	}
 	cfg.Timeout = nil
 
-	req := &preemptRequest{
+	return cancelRequestState{
 		cfg:             cfg,
 		timeoutDeadline: deadline,
 	}
+}
+
+func (s *cancelRequestState) merge(opts []AgentCancelOption, now time.Time) {
+	if opts == nil {
+		return
+	}
+
+	next := newCancelRequestState(opts, now)
+	if s.cfg.Mode == CancelImmediate || next.cfg.Mode == CancelImmediate {
+		s.cfg.Mode = CancelImmediate
+		s.timeoutDeadline = nil
+	} else {
+		s.cfg.Mode |= next.cfg.Mode
+		if next.timeoutDeadline != nil {
+			if s.timeoutDeadline == nil || next.timeoutDeadline.Before(*s.timeoutDeadline) {
+				deadline := *next.timeoutDeadline
+				s.timeoutDeadline = &deadline
+			}
+		}
+	}
+	if next.cfg.Recursive {
+		s.cfg.Recursive = true
+	}
+}
+
+func (s cancelRequestState) cancelOptions(now time.Time) []AgentCancelOption {
+	cfg := s.cfg
+	if cfg.Mode != CancelImmediate && s.timeoutDeadline != nil {
+		remaining := s.timeoutDeadline.Sub(now)
+		if remaining <= 0 {
+			cfg.Mode = CancelImmediate
+			cfg.Timeout = nil
+		} else {
+			cfg.Timeout = &remaining
+		}
+	}
+
+	opts := []AgentCancelOption{WithAgentCancelMode(cfg.Mode)}
+	if cfg.Recursive {
+		opts = append(opts, WithRecursive())
+	}
+	if cfg.Timeout != nil {
+		opts = append(opts, WithAgentCancelTimeout(*cfg.Timeout))
+	}
+	return opts
+}
+
+func newPreemptRequest(ack chan struct{}, opts []AgentCancelOption, now time.Time) *preemptRequest {
+	req := &preemptRequest{cancel: newCancelRequestState(opts, now)}
 	if ack != nil {
 		req.ackChans = append(req.ackChans, ack)
 	}
@@ -226,51 +166,14 @@ func (r *preemptRequest) merge(ack chan struct{}, opts []AgentCancelOption, now 
 	if ack != nil {
 		r.ackChans = append(r.ackChans, ack)
 	}
-	if len(opts) == 0 {
-		return
-	}
-
-	next := parseAgentCancelOptions(opts...)
-	if r.cfg.Mode == CancelImmediate || next.Mode == CancelImmediate {
-		r.cfg.Mode = CancelImmediate
-		r.timeoutDeadline = nil
-	} else {
-		r.cfg.Mode |= next.Mode
-		if next.Timeout != nil && *next.Timeout > 0 {
-			proposed := now.Add(*next.Timeout)
-			if r.timeoutDeadline == nil || proposed.Before(*r.timeoutDeadline) {
-				r.timeoutDeadline = &proposed
-			}
-		}
-	}
-	if next.Recursive {
-		r.cfg.Recursive = true
-	}
+	r.cancel.merge(opts, now)
 }
 
 func (r *preemptRequest) cancelOptions(now time.Time) []AgentCancelOption {
 	if r == nil {
 		return nil
 	}
-	cfg := r.cfg
-	if cfg.Mode != CancelImmediate && r.timeoutDeadline != nil {
-		remaining := r.timeoutDeadline.Sub(now)
-		if remaining <= 0 {
-			cfg.Mode = CancelImmediate
-			cfg.Timeout = nil
-		} else {
-			cfg.Timeout = &remaining
-		}
-	}
-
-	opts := []AgentCancelOption{WithAgentCancelMode(cfg.Mode)}
-	if cfg.Recursive {
-		opts = append(opts, WithRecursive())
-	}
-	if cfg.Timeout != nil {
-		opts = append(opts, WithAgentCancelTimeout(*cfg.Timeout))
-	}
-	return opts
+	return r.cancel.cancelOptions(now)
 }
 
 // preemptController owns turn-targeted preempt requests and Push critical sections.
@@ -444,13 +347,12 @@ func (c *preemptController) receivePreempt() (*preemptRequest, bool) {
 	return req, true
 }
 
-func (c *preemptController) drainAll() {
+func (c *preemptController) closeForLoopExit() {
 	c.mu.Lock()
 	c.closed = true
 	c.turnPhase = preemptTurnIdle
 	c.currentRunCtx = nil
 	c.currentTC = nil
-	c.pushInFlight = 0
 	req := c.pending
 	c.pending = nil
 	select {
@@ -464,6 +366,192 @@ func (c *preemptController) drainAll() {
 }
 
 func (c *preemptController) notifyWatcherLocked() {
+	select {
+	case c.notify <- struct{}{}:
+	default:
+	}
+}
+
+type stopDecision struct {
+	commit   bool
+	wakeIdle bool
+}
+
+type stopCancelRequest struct {
+	cancel cancelRequestState
+}
+
+func newStopCancelRequest(opts []AgentCancelOption, now time.Time) *stopCancelRequest {
+	return &stopCancelRequest{cancel: newCancelRequestState(opts, now)}
+}
+
+func (r *stopCancelRequest) merge(opts []AgentCancelOption, now time.Time) {
+	if r == nil {
+		return
+	}
+	r.cancel.merge(opts, now)
+}
+
+func (r *stopCancelRequest) cancelOptions(now time.Time) []AgentCancelOption {
+	if r == nil {
+		return nil
+	}
+	return r.cancel.cancelOptions(now)
+}
+
+// stopController owns global Stop state and optional active-turn cancel requests.
+//
+// Stop has two independent layers:
+//   - terminal loop intent: committed Stop prevents future turns and closes the buffer;
+//   - optional active-turn cancel: cancel-capable Stop calls create a pending request
+//     consumed by the watcher if the current turn is still active.
+//
+// Unlike preempt, Stop is not bound to a turnID. It is global and terminal.
+// A pending cancel request is consumed by the active turn or dropped when that
+// turn ends before consumption.
+type stopController struct {
+	mu sync.Mutex
+
+	phase stopPhase
+
+	hasActiveCancelTarget bool
+	pending               *stopCancelRequest
+	notify                chan struct{}
+
+	idleFor        time.Duration
+	skipCheckpoint bool
+	stopCause      string
+
+	closed bool
+}
+
+func newStopController() *stopController {
+	return &stopController{notify: make(chan struct{}, 1)}
+}
+
+func (c *stopController) requestStop(cfg *stopConfig) stopDecision {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if c.closed {
+		return stopDecision{}
+	}
+	if cfg.skipCheckpoint {
+		c.skipCheckpoint = true
+	}
+	if cfg.stopCause != "" && c.stopCause == "" {
+		c.stopCause = cfg.stopCause
+	}
+	if cfg.idleFor > 0 {
+		if c.phase != stopCommitted && c.idleFor == 0 {
+			c.phase = stopIdleWaiting
+			c.idleFor = cfg.idleFor
+		}
+		return stopDecision{wakeIdle: c.phase == stopIdleWaiting}
+	}
+
+	committed := c.commitLocked()
+	if cfg.agentCancelOpts != nil {
+		now := time.Now()
+		if c.pending == nil {
+			c.pending = newStopCancelRequest(cfg.agentCancelOpts, now)
+		} else {
+			c.pending.merge(cfg.agentCancelOpts, now)
+		}
+		if c.hasActiveCancelTarget {
+			c.notifyWatcherLocked()
+		}
+	}
+	return stopDecision{commit: committed}
+}
+
+func (c *stopController) commit() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.commitLocked()
+}
+
+func (c *stopController) commitLocked() bool {
+	if c.closed || c.phase == stopCommitted {
+		return false
+	}
+	c.phase = stopCommitted
+	c.idleFor = 0
+	return true
+}
+
+func (c *stopController) isCommitted() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.phase == stopCommitted
+}
+
+func (c *stopController) idleDuration() time.Duration {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.phase != stopIdleWaiting {
+		return 0
+	}
+	return c.idleFor
+}
+
+func (c *stopController) skipCheckpointEnabled() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.skipCheckpoint
+}
+
+func (c *stopController) cause() string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.stopCause
+}
+
+func (c *stopController) beginActiveTurn() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.closed {
+		return
+	}
+	c.hasActiveCancelTarget = true
+	if c.pending != nil {
+		c.notifyWatcherLocked()
+	}
+}
+
+func (c *stopController) endActiveTurn() *stopCancelRequest {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.hasActiveCancelTarget = false
+	req := c.pending
+	c.pending = nil
+	return req
+}
+
+func (c *stopController) receiveCancel() (*stopCancelRequest, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if !c.hasActiveCancelTarget || c.pending == nil {
+		return nil, false
+	}
+	req := c.pending
+	c.pending = nil
+	return req, true
+}
+
+func (c *stopController) closeForLoopExit() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.closed = true
+	c.hasActiveCancelTarget = false
+	c.pending = nil
+	select {
+	case <-c.notify:
+	default:
+	}
+}
+
+func (c *stopController) notifyWatcherLocked() {
 	select {
 	case c.notify <- struct{}{}:
 	default:
@@ -817,11 +905,9 @@ type TurnLoop[T any, M MessageType] struct {
 
 	result *TurnLoopExitState[T, M]
 
-	stopOnce sync.Once
-
 	runOnce sync.Once
 
-	stopSig *stopSignal
+	stopCtrl *stopController
 
 	preemptCtrl *preemptController
 
@@ -1235,7 +1321,7 @@ func NewTurnLoop[T any, M MessageType](cfg TurnLoopConfig[T, M]) *TurnLoop[T, M]
 		config:      cfg,
 		buffer:      newTurnBuffer[T](),
 		done:        make(chan struct{}),
-		stopSig:     newStopSignal(),
+		stopCtrl:    newStopController(),
 		preemptCtrl: newPreemptController(),
 	}
 	if cfg.OnAgentEvents != nil {
@@ -1449,21 +1535,25 @@ func (l *TurnLoop[T, M]) Stop(opts ...StopOption) {
 		cfg.agentCancelOpts = nil
 	}
 
-	l.stopSig.signal(cfg)
-
-	if cfg.idleFor > 0 {
+	decision := l.stopCtrl.requestStop(cfg)
+	if decision.wakeIdle {
 		l.buffer.Wakeup()
-		return
 	}
-	l.commitStop()
+	if decision.commit {
+		l.finishStopCommit()
+	}
 }
 
 func (l *TurnLoop[T, M]) commitStop() {
-	l.stopOnce.Do(func() {
-		l.stopSig.closeDone()
-		atomic.StoreInt32(&l.stopped, 1)
-		l.buffer.Close()
-	})
+	if !l.stopCtrl.commit() {
+		return
+	}
+	l.finishStopCommit()
+}
+
+func (l *TurnLoop[T, M]) finishStopCommit() {
+	atomic.StoreInt32(&l.stopped, 1)
+	l.buffer.Close()
 }
 
 // Wait blocks until the loop exits and returns the result.
@@ -1496,7 +1586,7 @@ func (l *TurnLoop[T, M]) run(ctx context.Context) {
 	}()
 
 	for {
-		if l.stopSig.isStopped() {
+		if l.stopCtrl.isCommitted() {
 			return
 		}
 
@@ -1521,7 +1611,7 @@ func (l *TurnLoop[T, M]) run(ctx context.Context) {
 			var first T
 			var ok bool
 
-			if idleFor := l.stopSig.getIdleFor(); idleFor > 0 {
+			if idleFor := l.stopCtrl.idleDuration(); idleFor > 0 {
 				l.buffer.ClearWakeup()
 				idleTimer := time.NewTimer(idleFor)
 				cancelIdle := make(chan struct{})
@@ -1552,7 +1642,7 @@ func (l *TurnLoop[T, M]) run(ctx context.Context) {
 			} else {
 				first, ok = l.buffer.Receive()
 				// Woken up by Stop(UntilIdleFor); re-enter loop to start the idle timer.
-				if !ok && l.stopSig.getIdleFor() > 0 {
+				if !ok && l.stopCtrl.idleDuration() > 0 {
 					continue
 				}
 			}
@@ -1570,7 +1660,7 @@ func (l *TurnLoop[T, M]) run(ctx context.Context) {
 				return
 			}
 
-			if l.stopSig.isStopped() {
+			if l.stopCtrl.isCommitted() {
 				l.buffer.PushFront([]T{first})
 				return
 			}
@@ -1596,7 +1686,7 @@ func (l *TurnLoop[T, M]) run(ctx context.Context) {
 			return
 		}
 
-		if l.stopSig.isStopped() {
+		if l.stopCtrl.isCommitted() {
 			abortPlanning()
 			if len(pushBack) > 0 {
 				l.buffer.PushFront(pushBack)
@@ -1614,7 +1704,7 @@ func (l *TurnLoop[T, M]) run(ctx context.Context) {
 			return
 		}
 
-		if l.stopSig.isStopped() {
+		if l.stopCtrl.isCommitted() {
 			abortPlanning()
 			if len(pushBack) > 0 {
 				l.buffer.PushFront(pushBack)
@@ -1689,36 +1779,13 @@ func (l *TurnLoop[T, M]) watchPreempt(done <-chan struct{}, agentCancelFunc Agen
 	}
 }
 
-// watchStopSignal runs for the lifetime of a single turn. It selects on two
-// channels from stopSignal:
-//
-//   - done (permanently closed after Stop): the durable stop flag. Fires
-//     immediately for any watcher, even those in turns started after
-//     Stop() but before the run loop observed isStopped(). This eliminates
-//     the race where a previous turn's watcher consumed the one-shot notify,
-//     leaving the current turn unable to detect the stop.
-//
-//   - notify (one-shot, buffered 1): fires when a new Stop() call is made,
-//     enabling cancel-mode escalation (e.g. CancelAfterToolCalls → CancelImmediate).
-//     The generation counter de-duplicates wakes, analogous to the preempt
-//     controller consuming pending requests once.
-//
-// On the first cancel that actually contributed (i.e. the cancel was accepted
-// before the CancelError was finalized), stoppedDone is closed to wake
-// runAgentAndHandleEvents's select.
-func (l *TurnLoop[T, M]) watchStopSignal(done <-chan struct{}, agentCancelFunc AgentCancelFunc, stoppedDone chan struct{}) {
-	var lastGen uint64
+// watchStop runs for the lifetime of a single active turn. It consumes pending
+// Stop cancel requests exactly once and submits them to that turn.
+func (l *TurnLoop[T, M]) watchStop(done <-chan struct{}, agentCancelFunc AgentCancelFunc, stoppedDone chan struct{}) {
 	stoppedClosed := false
 
-	tryCancel := func(gen uint64, opts []AgentCancelOption) {
-		if gen == lastGen {
-			return
-		}
-		lastGen = gen
-		if opts == nil { // no cancel intent; see stopSignal.agentCancelOpts
-			return
-		}
-		_, contributed := agentCancelFunc(opts...)
+	submit := func(req *stopCancelRequest) {
+		_, contributed := agentCancelFunc(req.cancelOptions(time.Now())...)
 		if contributed && !stoppedClosed {
 			close(stoppedDone)
 			stoppedClosed = true
@@ -1726,21 +1793,15 @@ func (l *TurnLoop[T, M]) watchStopSignal(done <-chan struct{}, agentCancelFunc A
 	}
 
 	for {
+		if req, ok := l.stopCtrl.receiveCancel(); ok {
+			submit(req)
+			continue
+		}
+
 		select {
 		case <-done:
 			return
-		case <-l.stopSig.notify:
-			tryCancel(l.stopSig.check())
-		case <-l.stopSig.done:
-			tryCancel(l.stopSig.check())
-			for {
-				select {
-				case <-done:
-					return
-				case <-l.stopSig.notify:
-					tryCancel(l.stopSig.check())
-				}
-			}
+		case <-l.stopCtrl.notify:
 		}
 	}
 }
@@ -1783,10 +1844,12 @@ func (l *TurnLoop[T, M]) runAgentAndHandleEvents(
 		Consumed:  spec.consumed,
 		Preempted: preemptDone,
 		Stopped:   stoppedDone,
-		StopCause: l.stopSig.getStopCause,
+		StopCause: l.stopCtrl.cause,
 	}
 	l.preemptCtrl.beginActiveTurn(ctx, tc)
+	l.stopCtrl.beginActiveTurn()
 	defer func() {
+		l.stopCtrl.endActiveTurn()
 		l.preemptCtrl.endActiveTurn().ack()
 	}()
 
@@ -1850,7 +1913,7 @@ func (l *TurnLoop[T, M]) runAgentAndHandleEvents(
 		handleErr = handleEvents()
 	}()
 	go l.watchPreempt(done, agentCancelFunc, preemptDone)
-	go l.watchStopSignal(done, agentCancelFunc, stoppedDone)
+	go l.watchStop(done, agentCancelFunc, stoppedDone)
 
 	finalizeCheckpoint := func() error {
 		if store != nil && ms != nil {
@@ -1943,8 +2006,8 @@ func (l *TurnLoop[T, M]) cleanup(ctx context.Context) {
 	exitCausedByStop := l.runErr == nil || errors.As(l.runErr, new(*CancelError)) || l.capturedCancelErr != nil
 	businessInterrupt := errors.As(l.runErr, new(*InterruptError)) || l.interruptContexts != nil
 	shouldSaveCheckpoint := l.config.Store != nil && checkpointID != "" &&
-		((l.stopSig.isStopped() && exitCausedByStop) || businessInterrupt) &&
-		!isIdle && !l.stopSig.isSkipCheckpoint()
+		((l.stopCtrl.isCommitted() && exitCausedByStop) || businessInterrupt) &&
+		!isIdle && !l.stopCtrl.skipCheckpointEnabled()
 
 	var checkpointed bool
 	var checkpointErr error
@@ -1969,7 +2032,7 @@ func (l *TurnLoop[T, M]) cleanup(ctx context.Context) {
 		ExitReason:          l.runErr,
 		UnhandledItems:      unhandled,
 		InterruptedItems:    l.interruptedItems,
-		StopCause:           l.stopSig.getStopCause(),
+		StopCause:           l.stopCtrl.cause(),
 		CheckpointAttempted: checkpointed,
 		CheckpointErr:       checkpointErr,
 		TakeLateItems: func() []T {
@@ -1983,7 +2046,8 @@ func (l *TurnLoop[T, M]) cleanup(ctx context.Context) {
 		},
 	}
 
-	l.preemptCtrl.drainAll()
+	l.stopCtrl.closeForLoopExit()
+	l.preemptCtrl.closeForLoopExit()
 	l.buffer.Close()
 	close(l.done)
 }
