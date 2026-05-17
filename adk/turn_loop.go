@@ -159,6 +159,19 @@ const (
 	preemptTurnActive
 )
 
+func (p preemptTurnPhase) String() string {
+	switch p {
+	case preemptTurnIdle:
+		return "idle"
+	case preemptTurnPlanning:
+		return "planning"
+	case preemptTurnActive:
+		return "active"
+	default:
+		return fmt.Sprintf("unknown(%d)", p)
+	}
+}
+
 type preemptTurnSnapshot struct {
 	hasTargetTurn bool
 	turnID        uint64
@@ -286,6 +299,8 @@ func (c *preemptController) beginPlanningTurn() {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
+	c.requirePhaseLocked(preemptTurnIdle, "beginPlanningTurn")
+	c.requireNoPendingLocked("beginPlanningTurn")
 	c.turnID++
 	c.turnPhase = preemptTurnPlanning
 	c.currentRunCtx = nil
@@ -296,6 +311,7 @@ func (c *preemptController) abortPlanningTurn() *preemptRequest {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
+	c.requirePhaseLocked(preemptTurnPlanning, "abortPlanningTurn")
 	c.turnPhase = preemptTurnIdle
 	c.currentRunCtx = nil
 	c.currentTC = nil
@@ -309,6 +325,7 @@ func (c *preemptController) beginActiveTurn(ctx context.Context, tc any) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
+	c.requirePhaseLocked(preemptTurnPlanning, "beginActiveTurn")
 	c.turnPhase = preemptTurnActive
 	c.currentRunCtx = ctx
 	c.currentTC = tc
@@ -321,6 +338,7 @@ func (c *preemptController) endActiveTurn() *preemptRequest {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
+	c.requirePhaseLocked(preemptTurnActive, "endActiveTurn")
 	c.turnPhase = preemptTurnIdle
 	c.currentRunCtx = nil
 	c.currentTC = nil
@@ -328,6 +346,18 @@ func (c *preemptController) endActiveTurn() *preemptRequest {
 	c.pending = nil
 	c.cond.Broadcast()
 	return req
+}
+
+func (c *preemptController) requirePhaseLocked(expected preemptTurnPhase, op string) {
+	if c.turnPhase != expected {
+		panic(fmt.Sprintf("adk: preemptController.%s called while turn phase is %s; expected %s", op, c.turnPhase, expected))
+	}
+}
+
+func (c *preemptController) requireNoPendingLocked(op string) {
+	if c.pending != nil {
+		panic(fmt.Sprintf("adk: preemptController.%s called with stale pending preempt request", op))
+	}
 }
 
 func (c *preemptController) beginPush() preemptTurnSnapshot {
@@ -1121,11 +1151,11 @@ func WithPreemptTimeout[T any, M MessageType](safePoint SafePoint, timeout time.
 	}
 }
 
-// WithPreemptDelay sets a delay duration before preemption takes effect.
-// When used with WithPreempt or WithPreemptTimeout, the push will succeed
-// immediately, but the preemption signal will be delayed by the specified
-// duration. This allows the current agent to continue processing for a grace
-// period before being preempted.
+// WithPreemptDelay sets a delay duration before resolving a preemptive Push.
+// When used with WithPreempt or WithPreemptTimeout, the pushed item is buffered
+// immediately, while the preempt request is resolved after the delay against the
+// turn observed by Push. If that captured turn has already ended, the request is
+// resolved as a no-op and must not cancel a later turn.
 func WithPreemptDelay[T any, M MessageType](delay time.Duration) PushOption[T, M] {
 	return func(cfg *pushConfig[T, M]) {
 		cfg.preemptDelay = delay
@@ -1222,11 +1252,13 @@ func (l *TurnLoop[T, M]) Run(ctx context.Context) {
 // This method is non-blocking and thread-safe.
 // Returns false if the loop has stopped, true otherwise. If a preemptive push
 // succeeds, the second return value is a channel that callers can wait on to
-// confirm the preempt signal has been received and the cancel request submitted
-// — i.e., the current turn is guaranteed to be preempted. Specifically:
-//   - If an agent is running: the channel closes after TurnLoop submits cancel.
-//   - If no agent is running (loop idle or not yet started): the channel closes
-//     immediately (nothing to cancel).
+// confirm the preempt request has been resolved. Specifically:
+//   - If Push observes a planning or active turn that is still the target when
+//     the request resolves, the channel closes after TurnLoop attempts to submit
+//     cancel for that target turn.
+//   - If Push observes no target turn, the loop has not started, the preempt
+//     subsystem is closed, or a delayed target is already gone, the channel
+//     closes as a no-op resolution.
 //
 // If the loop has not been started yet (Run not called), items are buffered
 // and will be processed once Run is called.
@@ -1241,9 +1273,8 @@ func (l *TurnLoop[T, M]) Run(ctx context.Context) {
 // signal has been observed.
 //
 // Use WithPreemptDelay() together with WithPreempt()/WithPreemptTimeout() to delay
-// the preemption signal.
-// Push returns immediately after the item is buffered, and a goroutine is spawned
-// to signal preemption after the delay.
+// request resolution. Push returns immediately after the item is buffered, and
+// the delayed request remains bound to the turn observed by Push.
 func (l *TurnLoop[T, M]) Push(item T, opts ...PushOption[T, M]) (bool, <-chan struct{}) {
 	cfg := &pushConfig[T, M]{}
 	for _, opt := range opts {
@@ -1461,6 +1492,9 @@ func (l *TurnLoop[T, M]) run(ctx context.Context) {
 			isResume = true
 			pr = l.pendingResume
 			l.pendingResume = nil
+
+			l.preemptCtrl.waitForPushes()
+			pr.newItems = append(pr.newItems, l.buffer.TakeAll()...)
 
 			pushBack = make([]T, 0, len(pr.interrupted)+len(pr.unhandled)+len(pr.newItems))
 			pushBack = append(pushBack, pr.interrupted...)

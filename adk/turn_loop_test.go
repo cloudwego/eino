@@ -846,8 +846,10 @@ func TestTurnLoop_Push_WithoutPreempt_DoesNotCancel(t *testing.T) {
 
 func TestTurnLoop_PreemptDelay_NoMispreemptOnNaturalCompletion(t *testing.T) {
 	agent1Started := make(chan struct{})
+	allowAgent1Done := make(chan struct{})
 	agent1Done := make(chan struct{})
 	agent2Started := make(chan struct{})
+	allowAgent2Done := make(chan struct{})
 	agent2Done := make(chan struct{})
 	agent1StartedOnce := sync.Once{}
 	agent1DoneOnce := sync.Once{}
@@ -860,18 +862,18 @@ func TestTurnLoop_PreemptDelay_NoMispreemptOnNaturalCompletion(t *testing.T) {
 		name: "test",
 		runFunc: func(ctx context.Context, input *AgentInput) (*AgentOutput, error) {
 			count := atomic.AddInt32(&agentRunCount, 1)
-			if count == 1 {
+			switch count {
+			case 1:
 				agent1StartedOnce.Do(func() { close(agent1Started) })
-				time.Sleep(50 * time.Millisecond)
+				<-allowAgent1Done
 				agent1DoneOnce.Do(func() { close(agent1Done) })
-			} else if count == 2 {
+			case 2:
 				agent2StartedOnce.Do(func() { close(agent2Started) })
-				time.Sleep(100 * time.Millisecond)
 				select {
+				case <-allowAgent2Done:
 				case <-ctx.Done():
 					t.Error("Agent2 was unexpectedly cancelled")
 					return nil, ctx.Err()
-				default:
 				}
 				agent2DoneOnce.Do(func() { close(agent2Done) })
 			}
@@ -900,7 +902,9 @@ func TestTurnLoop_PreemptDelay_NoMispreemptOnNaturalCompletion(t *testing.T) {
 		t.Fatal("agent1 did not start")
 	}
 
-	loop.Push("second", WithPreempt[string, *schema.Message](AnySafePoint), WithPreemptDelay[string, *schema.Message](500*time.Millisecond))
+	_, ack := loop.Push("second", WithPreempt[string, *schema.Message](AnySafePoint), WithPreemptDelay[string, *schema.Message](500*time.Millisecond))
+	require.NotNil(t, ack)
+	close(allowAgent1Done)
 
 	select {
 	case <-agent1Done:
@@ -913,6 +917,9 @@ func TestTurnLoop_PreemptDelay_NoMispreemptOnNaturalCompletion(t *testing.T) {
 	case <-time.After(1 * time.Second):
 		t.Fatal("agent2 did not start")
 	}
+
+	requireAckClosed(t, ack)
+	close(allowAgent2Done)
 
 	select {
 	case <-agent2Done:
@@ -2847,6 +2854,71 @@ func TestTurnLoop_GenResumeReturnsError(t *testing.T) {
 	assert.ErrorIs(t, exit2.ExitReason, genResumeErr)
 }
 
+func TestTurnLoop_ResumeWaitsForInFlightPushBeforePlanning(t *testing.T) {
+	ctx := context.Background()
+	resumeErr := errors.New("stop after observing resume inputs")
+	strategyEntered := make(chan struct{})
+	allowStrategy := make(chan struct{})
+	pushDone := make(chan struct{})
+	genResumeCalled := make(chan struct{})
+
+	var resumeNewItems []string
+
+	loop := NewTurnLoop(TurnLoopConfig[string, *schema.Message]{
+		GenInput: func(ctx context.Context, _ *TurnLoop[string, *schema.Message], items []string) (*GenInputResult[string, *schema.Message], error) {
+			return &GenInputResult[string, *schema.Message]{Input: &AgentInput{}, Consumed: items}, nil
+		},
+		GenResume: func(ctx context.Context, _ *TurnLoop[string, *schema.Message], interruptedItems, unhandledItems, newItems []string) (*GenResumeResult[string, *schema.Message], error) {
+			resumeNewItems = append([]string{}, newItems...)
+			close(genResumeCalled)
+			return nil, resumeErr
+		},
+		PrepareAgent: func(ctx context.Context, _ *TurnLoop[string, *schema.Message], consumed []string) (Agent, error) {
+			return &turnLoopMockAgent{name: "test"}, nil
+		},
+	})
+	loop.pendingResume = &turnLoopPendingResume[string]{
+		interrupted: []string{"interrupted"},
+		newItems:    []string{"pre-existing"},
+	}
+
+	go func() {
+		defer close(pushDone)
+		ok, ack := loop.Push("during-resume", WithPushStrategy(func(ctx context.Context, tc *TurnContext[string, *schema.Message]) []PushOption[string, *schema.Message] {
+			close(strategyEntered)
+			<-allowStrategy
+			return nil
+		}))
+		assert.True(t, ok)
+		assert.Nil(t, ack)
+	}()
+
+	select {
+	case <-strategyEntered:
+	case <-time.After(1 * time.Second):
+		t.Fatal("strategy did not enter")
+	}
+
+	loop.Run(ctx)
+
+	select {
+	case <-genResumeCalled:
+		t.Fatal("GenResume should wait for in-flight PushStrategy to finish")
+	default:
+	}
+
+	close(allowStrategy)
+	select {
+	case <-pushDone:
+	case <-time.After(1 * time.Second):
+		t.Fatal("push did not finish")
+	}
+
+	exit := loop.Wait()
+	assert.ErrorIs(t, exit.ExitReason, resumeErr)
+	assert.Equal(t, []string{"pre-existing", "during-resume"}, resumeNewItems)
+}
+
 func TestTurnLoop_CheckpointSaveError_MergesWithExistingError(t *testing.T) {
 	ctx := context.Background()
 	modelStarted := make(chan struct{}, 1)
@@ -3470,6 +3542,15 @@ func requireAckOpen(t *testing.T, ack <-chan struct{}) {
 	}
 }
 
+func requirePreemptPhase(t *testing.T, c *preemptController, phase preemptTurnPhase) {
+	t.Helper()
+	require.Eventually(t, func() bool {
+		c.mu.Lock()
+		defer c.mu.Unlock()
+		return c.turnPhase == phase
+	}, time.Second, time.Millisecond)
+}
+
 func TestPreemptController_BeginPushSnapshotsPlanningTurn(t *testing.T) {
 	c := newPreemptController()
 	c.beginPlanningTurn()
@@ -3510,6 +3591,31 @@ func TestPreemptController_RequestPreemptIdleTurnAcksImmediately(t *testing.T) {
 	requireAckClosed(t, ack)
 	_, ok := c.receivePreempt()
 	assert.False(t, ok)
+}
+
+func TestPreemptController_RejectsInvalidTurnPhaseTransitions(t *testing.T) {
+	c := newPreemptController()
+
+	assert.PanicsWithValue(t, "adk: preemptController.beginActiveTurn called while turn phase is idle; expected planning", func() {
+		c.beginActiveTurn(context.Background(), "tc")
+	})
+	assert.PanicsWithValue(t, "adk: preemptController.abortPlanningTurn called while turn phase is idle; expected planning", func() {
+		c.abortPlanningTurn()
+	})
+	assert.PanicsWithValue(t, "adk: preemptController.endActiveTurn called while turn phase is idle; expected active", func() {
+		c.endActiveTurn()
+	})
+
+	c.beginPlanningTurn()
+	assert.PanicsWithValue(t, "adk: preemptController.beginPlanningTurn called while turn phase is planning; expected idle", func() {
+		c.beginPlanningTurn()
+	})
+	c.abortPlanningTurn()
+
+	c.pending = newPreemptRequest(nil, nil, time.Now())
+	assert.PanicsWithValue(t, "adk: preemptController.beginPlanningTurn called with stale pending preempt request", func() {
+		c.beginPlanningTurn()
+	})
 }
 
 func TestPreemptController_RequestPreemptForPlanningTurnIsConsumedAfterActivation(t *testing.T) {
@@ -3619,7 +3725,7 @@ func TestPreemptController_TargetTurnMismatchAcksImmediately(t *testing.T) {
 	c.beginPlanningTurn()
 	snapshot := c.beginPush()
 	c.endPush()
-	c.abortPlanningTurn().ack()
+	c.abortPlanningTurn()
 	c.beginPlanningTurn()
 
 	ack := make(chan struct{})
@@ -3786,61 +3892,82 @@ func TestTurnLoop_ConcurrentPreemptsDuringTurn(t *testing.T) {
 	assert.True(t, atomic.LoadInt32(&genInputCount) >= 2, "should have had at least the initial turn + one preempted turn")
 }
 
-func TestTurnLoop_PreemptDuringTurnTransition(t *testing.T) {
-	turnCount := int32(0)
+func TestTurnLoop_PreemptBetweenTurnsAcksImmediately(t *testing.T) {
+	var cancelCount int32
+	var turnCount int32
 	firstTurnDone := make(chan struct{})
+	secondTurnDone := make(chan struct{})
 	firstTurnOnce := sync.Once{}
+	secondTurnOnce := sync.Once{}
+
+	agent := &turnLoopCancellableMockAgent{
+		name: "fast",
+		runFunc: func(ctx context.Context, input *AgentInput) (*AgentOutput, error) {
+			return &AgentOutput{}, nil
+		},
+		onCancel: func(cc *cancelContext) {
+			atomic.AddInt32(&cancelCount, 1)
+		},
+	}
 
 	loop := newAndRunTurnLoop(context.Background(), TurnLoopConfig[string, *schema.Message]{
 		PrepareAgent: func(ctx context.Context, _ *TurnLoop[string, *schema.Message], consumed []string) (Agent, error) {
-			return &turnLoopMockAgent{name: "fast"}, nil
+			return agent, nil
 		},
 		GenInput: func(ctx context.Context, _ *TurnLoop[string, *schema.Message], items []string) (*GenInputResult[string, *schema.Message], error) {
-			count := atomic.AddInt32(&turnCount, 1)
-			if count == 1 {
-				firstTurnOnce.Do(func() {
-					close(firstTurnDone)
-				})
-			}
+			atomic.AddInt32(&turnCount, 1)
 			return &GenInputResult[string, *schema.Message]{
 				Input:    &AgentInput{},
 				Consumed: items,
 			}, nil
 		},
+		OnAgentEvents: func(ctx context.Context, tc *TurnContext[string, *schema.Message], events *AsyncIterator[*AgentEvent]) error {
+			for {
+				if _, ok := events.Next(); !ok {
+					break
+				}
+			}
+			switch atomic.LoadInt32(&turnCount) {
+			case 1:
+				firstTurnOnce.Do(func() { close(firstTurnDone) })
+			case 2:
+				secondTurnOnce.Do(func() { close(secondTurnDone) })
+			}
+			return nil
+		},
 	})
 
 	loop.Push("first")
-
 	select {
 	case <-firstTurnDone:
 	case <-time.After(1 * time.Second):
-		t.Fatal("first turn did not start")
+		t.Fatal("first turn did not complete")
 	}
+	requirePreemptPhase(t, loop.preemptCtrl, preemptTurnIdle)
 
-	time.Sleep(50 * time.Millisecond)
+	ok, ack := loop.Push("between-turns", WithPreempt[string, *schema.Message](AnySafePoint))
+	require.True(t, ok)
+	require.NotNil(t, ack)
+	requireAckClosed(t, ack)
+	assert.Equal(t, int32(0), atomic.LoadInt32(&cancelCount), "between-turn preempt must not submit cancel")
 
-	ok, ack := loop.Push("transitional", WithPreempt[string, *schema.Message](AnySafePoint))
-	assert.True(t, ok, "push should succeed")
-	if ack != nil {
-		select {
-		case <-ack:
-		case <-time.After(2 * time.Second):
-			t.Fatal("ack should be closed even if preempt arrived during/after turn transition")
-		}
+	select {
+	case <-secondTurnDone:
+	case <-time.After(1 * time.Second):
+		t.Fatal("between-turn item was not processed")
 	}
-
-	time.Sleep(100 * time.Millisecond)
 
 	loop.Stop()
 	result := loop.Wait()
 	assert.NoError(t, result.ExitReason)
-	assert.True(t, atomic.LoadInt32(&turnCount) >= 2, "transitional item should have been processed")
+	assert.Equal(t, int32(2), atomic.LoadInt32(&turnCount))
 }
 
 func TestTurnLoop_PushStrategy_DuringTurnTransition(t *testing.T) {
 	agentStarted := make(chan struct{})
 	agentStartedOnce := sync.Once{}
 	allowFinish := make(chan struct{})
+	strategyEntered := make(chan struct{})
 
 	agent := &turnLoopCancellableMockAgent{
 		name: "test",
@@ -3895,14 +4022,26 @@ func TestTurnLoop_PushStrategy_DuringTurnTransition(t *testing.T) {
 			if tc != nil {
 				atomic.StoreInt32(&strategyTCNotNil, 1)
 			}
+			close(strategyEntered)
 			<-strategyBlocker
 			return []PushOption[string, *schema.Message]{WithPreempt[string, *schema.Message](AnySafePoint)}
 		}))
 	}()
 
-	time.Sleep(50 * time.Millisecond)
+	select {
+	case <-strategyEntered:
+	case <-time.After(1 * time.Second):
+		t.Fatal("strategy did not enter")
+	}
+
 	close(allowFinish)
-	time.Sleep(50 * time.Millisecond)
+
+	select {
+	case <-secondTurnDone:
+		t.Fatal("second turn should not be planned before strategy Push finishes")
+	default:
+	}
+
 	close(strategyBlocker)
 
 	select {
@@ -3915,6 +4054,7 @@ func TestTurnLoop_PushStrategy_DuringTurnTransition(t *testing.T) {
 	result := loop.Wait()
 	assert.NoError(t, result.ExitReason)
 	assert.True(t, atomic.LoadInt32(&genInputCount) >= 2)
+	assert.Equal(t, int32(1), atomic.LoadInt32(&strategyTCNotNil))
 }
 
 func TestTurnLoop_ConcurrentPreemptAndStop(t *testing.T) {
@@ -6179,17 +6319,9 @@ func TestSetupBridgeStore_NilStore_Resume(t *testing.T) {
 	assert.Contains(t, err.Error(), "checkpoint store is nil")
 }
 
-// TestTurnLoop_Preempt_LoopStalledAfterSecondPreemptPush reproduces a bug where
-// the loop gets stuck between turns when:
-//  1. Item A is processed, preempted by item B pushed with WithPreempt(AnySafePoint).
-//  2. Item B's turn runs and OnAgentEvents completes successfully.
-//  3. Item C is pushed with WithPreempt(AnySafePoint).
-//  4. The loop never processes item C — it hangs at waitForPreemptOrUnhold.
-//
-// Root cause: drainAll() called between turns (after the first preempt) sets
-// drained=true permanently. Subsequent Push(WithPreempt) calls holdRunLoop()
-// (incrementing holdCount) but requestPreempt() is a no-op (drained=true), so
-// waitForPreemptOrUnhold blocks forever with holdCount>0 and preemptRequested=false.
+// TestTurnLoop_Preempt_LoopStalledAfterSecondPreemptPush covers a liveness
+// regression where a preempted turn was followed by another preemptive Push and
+// the loop stopped making progress before processing the later item.
 func TestTurnLoop_Preempt_LoopStalledAfterSecondPreemptPush(t *testing.T) {
 	// turnCount tracks how many turns have been fully processed.
 	var turnCount int32
