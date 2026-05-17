@@ -151,225 +151,276 @@ func (s *stopSignal) getIdleFor() time.Duration {
 	return s.idleFor
 }
 
-// preemptSignal coordinates preemption between Push callers and the run loop.
-//
-// Lifecycle overview:
-//
-//  1. HOLD — A Push caller (or the run loop itself) calls holdRunLoop() to
-//     increment holdCount. While holdCount > 0 the run loop blocks at
-//     waitForPreemptOrUnhold(), preventing it from starting a new turn.
-//
-//  2. REQUEST — The Push caller calls requestPreempt() which sets
-//     preemptRequested=true, bumps preemptGen, stores cancelOpts/acks, and
-//     wakes both the run-loop (via cond) and the in-turn watcher goroutine
-//     (via notify channel).
-//
-//  3. RECEIVE — The per-turn watchPreemptSignal goroutine calls
-//     receivePreempt(), obtains the cancel opts and ack channels, invokes
-//     agentCancelFunc to cancel the running agent, and closes the ack
-//     channels to notify Push callers.
-//
-//  4. UNHOLD — After the turn finishes (or if the Push caller decides not
-//     to preempt), unholdRunLoop() / endTurnAndUnhold() decrements
-//     holdCount. When holdCount reaches 0, all signal state is reset.
-//
-// The run loop brackets every turn with holdRunLoop() / endTurnAndUnhold()
-// so that a concurrent Push caller's hold keeps holdCount > 0 even after
-// the turn ends, preventing the loop from racing into a new turn before
-// the Push caller's preempt request is delivered.
-//
-// Fields currentTC and currentRunCtx are stored here (rather than on
-// TurnLoop) so that holdAndGetTurn() can atomically snapshot the turn
-// state and increment holdCount under the same mu lock, eliminating the
-// TOCTOU race between reading the turn and holding the loop.
-type preemptSignal struct {
-	mu               sync.Mutex
-	cond             *sync.Cond
-	holdCount        int
-	preemptRequested bool
-	preemptGen       uint64
-	agentCancelOpts  []AgentCancelOption
-	pendingAckList   []chan struct{}
-	notify           chan struct{}
-	drained          bool
+type preemptTurnPhase uint8
 
+const (
+	preemptTurnIdle preemptTurnPhase = iota
+	preemptTurnPlanning
+	preemptTurnActive
+)
+
+type preemptTurnSnapshot struct {
+	hasTargetTurn bool
+	turnID        uint64
+	ctx           context.Context
+	tc            any
+}
+
+type preemptRequest struct {
+	cfg             agentCancelConfig
+	timeoutDeadline *time.Time
+	ackChans        []chan struct{}
+}
+
+func parseAgentCancelOptions(opts ...AgentCancelOption) agentCancelConfig {
+	cfg := agentCancelConfig{Mode: CancelImmediate}
+	for _, opt := range opts {
+		opt(&cfg)
+	}
+	return cfg
+}
+
+func newPreemptRequest(ack chan struct{}, opts []AgentCancelOption, now time.Time) *preemptRequest {
+	cfg := parseAgentCancelOptions(opts...)
+	var deadline *time.Time
+	if cfg.Timeout != nil && *cfg.Timeout > 0 && cfg.Mode != CancelImmediate {
+		d := now.Add(*cfg.Timeout)
+		deadline = &d
+	}
+	cfg.Timeout = nil
+
+	req := &preemptRequest{
+		cfg:             cfg,
+		timeoutDeadline: deadline,
+	}
+	if ack != nil {
+		req.ackChans = append(req.ackChans, ack)
+	}
+	return req
+}
+
+func (r *preemptRequest) ack() {
+	if r == nil {
+		return
+	}
+	for _, ack := range r.ackChans {
+		close(ack)
+	}
+	r.ackChans = nil
+}
+
+func (r *preemptRequest) merge(ack chan struct{}, opts []AgentCancelOption, now time.Time) {
+	if ack != nil {
+		r.ackChans = append(r.ackChans, ack)
+	}
+	if len(opts) == 0 {
+		return
+	}
+
+	next := parseAgentCancelOptions(opts...)
+	if r.cfg.Mode == CancelImmediate || next.Mode == CancelImmediate {
+		r.cfg.Mode = CancelImmediate
+		r.timeoutDeadline = nil
+	} else {
+		r.cfg.Mode |= next.Mode
+		if next.Timeout != nil && *next.Timeout > 0 {
+			proposed := now.Add(*next.Timeout)
+			if r.timeoutDeadline == nil || proposed.Before(*r.timeoutDeadline) {
+				r.timeoutDeadline = &proposed
+			}
+		}
+	}
+	if next.Recursive {
+		r.cfg.Recursive = true
+	}
+}
+
+func (r *preemptRequest) cancelOptions(now time.Time) []AgentCancelOption {
+	if r == nil {
+		return nil
+	}
+	cfg := r.cfg
+	if cfg.Mode != CancelImmediate && r.timeoutDeadline != nil {
+		remaining := r.timeoutDeadline.Sub(now)
+		if remaining <= 0 {
+			cfg.Mode = CancelImmediate
+			cfg.Timeout = nil
+		} else {
+			cfg.Timeout = &remaining
+		}
+	}
+
+	opts := []AgentCancelOption{WithAgentCancelMode(cfg.Mode)}
+	if cfg.Recursive {
+		opts = append(opts, WithRecursive())
+	}
+	if cfg.Timeout != nil {
+		opts = append(opts, WithAgentCancelTimeout(*cfg.Timeout))
+	}
+	return opts
+}
+
+// preemptController owns turn-targeted preempt requests and Push critical sections.
+type preemptController struct {
+	mu   sync.Mutex
+	cond *sync.Cond
+
+	turnPhase     preemptTurnPhase
+	turnID        uint64
 	currentTC     any
 	currentRunCtx context.Context
+
+	pushInFlight int
+	pending      *preemptRequest
+	notify       chan struct{}
+	closed       bool
 }
 
-func newPreemptSignal() *preemptSignal {
-	s := &preemptSignal{notify: make(chan struct{}, 1)}
-	s.cond = sync.NewCond(&s.mu)
-	return s
+func newPreemptController() *preemptController {
+	c := &preemptController{notify: make(chan struct{}, 1)}
+	c.cond = sync.NewCond(&c.mu)
+	return c
 }
 
-func (s *preemptSignal) holdRunLoop() {
-	s.mu.Lock()
-	s.holdCount++
-	s.mu.Unlock()
+func (c *preemptController) beginPlanningTurn() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	c.turnID++
+	c.turnPhase = preemptTurnPlanning
+	c.currentRunCtx = nil
+	c.currentTC = nil
 }
 
-func (s *preemptSignal) setTurn(ctx context.Context, tc any) {
-	s.mu.Lock()
-	s.currentRunCtx = ctx
-	s.currentTC = tc
-	s.mu.Unlock()
+func (c *preemptController) abortPlanningTurn() *preemptRequest {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	c.turnPhase = preemptTurnIdle
+	c.currentRunCtx = nil
+	c.currentTC = nil
+	req := c.pending
+	c.pending = nil
+	c.cond.Broadcast()
+	return req
 }
 
-func (s *preemptSignal) holdAndGetTurn() (context.Context, any) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.holdCount++
-	return s.currentRunCtx, s.currentTC
+func (c *preemptController) beginActiveTurn(ctx context.Context, tc any) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	c.turnPhase = preemptTurnActive
+	c.currentRunCtx = ctx
+	c.currentTC = tc
+	if c.pending != nil {
+		c.notifyWatcherLocked()
+	}
 }
 
-// requestPreempt records a preempt request and wakes both waiters.
-// If holdCount is 0 or the signal has been drained, no one is listening —
-// close the ack immediately as a no-op.
-func (s *preemptSignal) requestPreempt(ack chan struct{}, opts ...AgentCancelOption) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+func (c *preemptController) endActiveTurn() *preemptRequest {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 
-	if s.drained || s.holdCount <= 0 {
+	c.turnPhase = preemptTurnIdle
+	c.currentRunCtx = nil
+	c.currentTC = nil
+	req := c.pending
+	c.pending = nil
+	c.cond.Broadcast()
+	return req
+}
+
+func (c *preemptController) beginPush() preemptTurnSnapshot {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	c.pushInFlight++
+	return preemptTurnSnapshot{
+		hasTargetTurn: c.turnPhase == preemptTurnPlanning || c.turnPhase == preemptTurnActive,
+		turnID:        c.turnID,
+		ctx:           c.currentRunCtx,
+		tc:            c.currentTC,
+	}
+}
+
+func (c *preemptController) endPush() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	c.pushInFlight--
+	if c.pushInFlight < 0 {
+		c.pushInFlight = 0
+	}
+	c.cond.Broadcast()
+}
+
+func (c *preemptController) waitForPushes() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	for c.pushInFlight > 0 {
+		c.cond.Wait()
+	}
+}
+
+func (c *preemptController) requestPreempt(target preemptTurnSnapshot, ack chan struct{}, opts ...AgentCancelOption) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if c.closed || !target.hasTargetTurn || c.turnPhase == preemptTurnIdle || c.turnID != target.turnID {
 		if ack != nil {
 			close(ack)
 		}
 		return
 	}
 
-	s.preemptRequested = true
-	s.preemptGen++
-	s.agentCancelOpts = opts
-	if ack != nil {
-		s.pendingAckList = append(s.pendingAckList, ack)
+	now := time.Now()
+	if c.pending == nil {
+		c.pending = newPreemptRequest(ack, opts, now)
+	} else {
+		c.pending.merge(ack, opts, now)
 	}
+	if c.turnPhase == preemptTurnActive {
+		c.notifyWatcherLocked()
+	}
+}
+
+func (c *preemptController) receivePreempt() (*preemptRequest, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if c.turnPhase != preemptTurnActive || c.pending == nil {
+		return nil, false
+	}
+	req := c.pending
+	c.pending = nil
+	return req, true
+}
+
+func (c *preemptController) drainAll() {
+	c.mu.Lock()
+	c.closed = true
+	c.turnPhase = preemptTurnIdle
+	c.currentRunCtx = nil
+	c.currentTC = nil
+	c.pushInFlight = 0
+	req := c.pending
+	c.pending = nil
 	select {
-	case s.notify <- struct{}{}:
+	case <-c.notify:
 	default:
 	}
+	c.cond.Broadcast()
+	c.mu.Unlock()
 
-	s.cond.Broadcast()
+	req.ack()
 }
 
-// receivePreempt is called by the per-turn watcher goroutine to consume a
-// pending preempt. It drains pendingAckList (so the watcher can close them
-// after invoking agentCancelFunc) but intentionally preserves preemptRequested
-// and preemptGen — these are needed by waitForPreemptOrUnhold on the run loop.
-func (s *preemptSignal) receivePreempt() (bool, uint64, []AgentCancelOption, []chan struct{}) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	if s.preemptRequested {
-		ackList := s.pendingAckList
-		s.pendingAckList = nil
-		return true, s.preemptGen, s.agentCancelOpts, ackList
-	}
-	return false, 0, nil, nil
-}
-
-// waitForPreemptOrUnhold blocks the run loop between turns. It returns early
-// (preempted=false) when holdCount is 0 (no Push caller is holding). Otherwise
-// it blocks until either a preempt is requested or all holders release.
-func (s *preemptSignal) waitForPreemptOrUnhold() (preempted bool, opts []AgentCancelOption, ackList []chan struct{}) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	if s.holdCount <= 0 {
-		return false, nil, nil
-	}
-
-	for s.holdCount > 0 && !s.preemptRequested {
-		s.cond.Wait()
-	}
-
-	if s.preemptRequested {
-		ackList = s.pendingAckList
-		s.pendingAckList = nil
-		return true, s.agentCancelOpts, ackList
-	}
-	return false, nil, nil
-}
-
-// resetLocked clears all signal state and closes pending ack channels so the
-// next cycle starts clean and blocked Push callers are unblocked. Must be
-// called with s.mu held. Does NOT touch holdCount, currentTC, or currentRunCtx
-// — callers are responsible for those.
-func (s *preemptSignal) resetLocked() {
-	s.preemptRequested = false
-	s.preemptGen = 0
-	s.agentCancelOpts = nil
-	for _, ack := range s.pendingAckList {
-		close(ack)
-	}
-	s.pendingAckList = nil
+func (c *preemptController) notifyWatcherLocked() {
 	select {
-	case <-s.notify:
+	case c.notify <- struct{}{}:
 	default:
 	}
-}
-
-// unholdRunLoop drops one hold. When holdCount reaches 0, all signal state is
-// reset so the next cycle starts clean.
-func (s *preemptSignal) unholdRunLoop() {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	s.holdCount--
-	if s.holdCount < 0 {
-		s.holdCount = 0
-	}
-	if s.holdCount == 0 {
-		s.resetLocked()
-	}
-	s.cond.Broadcast()
-}
-
-// endTurnAndUnhold is called by the run loop after runAgentAndHandleEvents
-// returns. It clears the current turn context and drops the run loop's hold.
-func (s *preemptSignal) endTurnAndUnhold() {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	s.currentTC = nil
-	s.currentRunCtx = nil
-	s.holdCount--
-	if s.holdCount < 0 {
-		s.holdCount = 0
-	}
-	if s.holdCount == 0 {
-		s.resetLocked()
-	}
-	s.cond.Broadcast()
-}
-
-// resetBetweenTurns clears all preemptSignal state between turns without
-// setting the drained flag. This allows the signal to continue functioning
-// for future Push(WithPreempt) calls in subsequent iterations.
-func (s *preemptSignal) resetBetweenTurns() {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.holdCount = 0
-	s.currentTC = nil
-	s.currentRunCtx = nil
-	s.resetLocked()
-	s.cond.Broadcast()
-}
-
-// drainAll forcefully resets all preemptSignal state and closes any pending
-// ack channels. Called during TurnLoop cleanup to prevent ack channels from
-// leaking when the run loop exits (e.g. due to Stop) while a Push caller
-// still holds a reference. After drainAll, any subsequent holdRunLoop or
-// requestPreempt calls will be no-ops that close the ack immediately.
-func (s *preemptSignal) drainAll() {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	s.drained = true
-	s.holdCount = 0
-	s.currentTC = nil
-	s.currentRunCtx = nil
-	s.resetLocked()
-	s.cond.Broadcast()
 }
 
 // TurnLoopConfig is the configuration for creating a TurnLoop.
@@ -725,7 +776,7 @@ type TurnLoop[T any, M MessageType] struct {
 
 	stopSig *stopSignal
 
-	preemptSig *preemptSignal
+	preemptCtrl *preemptController
 
 	runErr error
 
@@ -1134,11 +1185,11 @@ func NewTurnLoop[T any, M MessageType](cfg TurnLoopConfig[T, M]) *TurnLoop[T, M]
 	}
 
 	l := &TurnLoop[T, M]{
-		config:     cfg,
-		buffer:     newTurnBuffer[T](),
-		done:       make(chan struct{}),
-		stopSig:    newStopSignal(),
-		preemptSig: newPreemptSignal(),
+		config:      cfg,
+		buffer:      newTurnBuffer[T](),
+		done:        make(chan struct{}),
+		stopSig:     newStopSignal(),
+		preemptCtrl: newPreemptController(),
 	}
 	if cfg.OnAgentEvents != nil {
 		l.onAgentEvents = cfg.OnAgentEvents
@@ -1206,20 +1257,22 @@ func (l *TurnLoop[T, M]) Push(item T, opts ...PushOption[T, M]) (bool, <-chan st
 	return l.pushWithConfig(item, cfg)
 }
 
-// pushWithStrategy atomically holds the run loop and snapshots the current turn,
-// then calls the strategy callback with a guaranteed-stable TurnContext. If the
-// strategy returns preempt options, the hold is kept and a preempt is requested;
-// otherwise the hold is released and the item is buffered as a plain push.
+// pushWithStrategy snapshots the current target turn while the strategy decides
+// how to enqueue the item. If it requests preempt, that request is bound to the
+// captured turn identity, including delayed preempt requests.
 func (l *TurnLoop[T, M]) pushWithStrategy(item T, cfg *pushConfig[T, M]) (bool, <-chan struct{}) {
 	strategy := cfg.pushStrategy
 
-	runCtx, tcAny := l.preemptSig.holdAndGetTurn()
+	snapshot := l.preemptCtrl.beginPush()
+	defer l.preemptCtrl.endPush()
+
+	runCtx := snapshot.ctx
 	if runCtx == nil {
 		runCtx = context.Background()
 	}
 	var tc *TurnContext[T, M]
-	if tcAny != nil {
-		tc = tcAny.(*TurnContext[T, M])
+	if snapshot.tc != nil {
+		tc = snapshot.tc.(*TurnContext[T, M])
 	}
 	realOpts := strategy(runCtx, tc)
 	cfg = &pushConfig[T, M]{}
@@ -1229,7 +1282,6 @@ func (l *TurnLoop[T, M]) pushWithStrategy(item T, cfg *pushConfig[T, M]) (bool, 
 	cfg.pushStrategy = nil
 
 	if !cfg.preempt {
-		l.preemptSig.unholdRunLoop()
 		if !l.buffer.TrySend(item) {
 			l.appendLate(item)
 			return false, nil
@@ -1238,20 +1290,17 @@ func (l *TurnLoop[T, M]) pushWithStrategy(item T, cfg *pushConfig[T, M]) (bool, 
 	}
 
 	if atomic.LoadInt32(&l.stopped) != 0 {
-		l.preemptSig.unholdRunLoop()
 		l.appendLate(item)
 		return false, nil
 	}
 
 	if !l.buffer.TrySend(item) {
-		l.preemptSig.unholdRunLoop()
 		l.appendLate(item)
 		return false, nil
 	}
 
 	ack := make(chan struct{})
 	if atomic.LoadInt32(&l.started) == 0 {
-		l.preemptSig.unholdRunLoop()
 		close(ack)
 		return true, ack
 	}
@@ -1260,14 +1309,13 @@ func (l *TurnLoop[T, M]) pushWithStrategy(item T, cfg *pushConfig[T, M]) (bool, 
 		go func() {
 			select {
 			case <-time.After(cfg.preemptDelay):
-				l.preemptSig.requestPreempt(ack, cfg.agentCancelOpts...)
+				l.preemptCtrl.requestPreempt(snapshot, ack, cfg.agentCancelOpts...)
 			case <-l.done:
-				l.preemptSig.unholdRunLoop()
 				close(ack)
 			}
 		}()
 	} else {
-		l.preemptSig.requestPreempt(ack, cfg.agentCancelOpts...)
+		l.preemptCtrl.requestPreempt(snapshot, ack, cfg.agentCancelOpts...)
 	}
 	return true, ack
 }
@@ -1279,17 +1327,16 @@ func (l *TurnLoop[T, M]) pushWithConfig(item T, cfg *pushConfig[T, M]) (bool, <-
 	}
 
 	if cfg.preempt {
-		l.preemptSig.holdRunLoop()
+		snapshot := l.preemptCtrl.beginPush()
+		defer l.preemptCtrl.endPush()
 
 		if !l.buffer.TrySend(item) {
-			l.preemptSig.unholdRunLoop()
 			l.appendLate(item)
 			return false, nil
 		}
 
 		ack := make(chan struct{})
 		if atomic.LoadInt32(&l.started) == 0 {
-			l.preemptSig.unholdRunLoop()
 			close(ack)
 			return true, ack
 		}
@@ -1298,14 +1345,13 @@ func (l *TurnLoop[T, M]) pushWithConfig(item T, cfg *pushConfig[T, M]) (bool, <-
 			go func() {
 				select {
 				case <-time.After(cfg.preemptDelay):
-					l.preemptSig.requestPreempt(ack, cfg.agentCancelOpts...)
+					l.preemptCtrl.requestPreempt(snapshot, ack, cfg.agentCancelOpts...)
 				case <-l.done:
-					l.preemptSig.unholdRunLoop()
 					close(ack)
 				}
 			}()
 		} else {
-			l.preemptSig.requestPreempt(ack, cfg.agentCancelOpts...)
+			l.preemptCtrl.requestPreempt(snapshot, ack, cfg.agentCancelOpts...)
 		}
 		return true, ack
 	}
@@ -1478,25 +1524,20 @@ func (l *TurnLoop[T, M]) run(ctx context.Context) {
 				return
 			}
 
+			l.preemptCtrl.waitForPushes()
 			rest := l.buffer.TakeAll()
 			items = append([]T{first}, rest...)
 			pushBack = items
 		}
 
-		// Drain any pending preempt that arrived between turns. A Push caller
-		// may have called holdRunLoop + requestPreempt while the loop was
-		// between iterations; acknowledge and release before planning the
-		// next turn. Use resetBetweenTurns (not drainAll) so the signal
-		// remains usable for future Push(WithPreempt) calls.
-		if preempted, _, ackList := l.preemptSig.waitForPreemptOrUnhold(); preempted {
-			for _, ack := range ackList {
-				close(ack)
-			}
-			l.preemptSig.resetBetweenTurns()
+		l.preemptCtrl.beginPlanningTurn()
+		abortPlanning := func() {
+			l.preemptCtrl.abortPlanningTurn().ack()
 		}
 
 		plan, err := l.planTurn(ctx, isResume, items, pr)
 		if err != nil {
+			abortPlanning()
 			if len(pushBack) > 0 {
 				l.buffer.PushFront(pushBack)
 			}
@@ -1505,6 +1546,7 @@ func (l *TurnLoop[T, M]) run(ctx context.Context) {
 		}
 
 		if l.stopSig.isStopped() {
+			abortPlanning()
 			if len(pushBack) > 0 {
 				l.buffer.PushFront(pushBack)
 			}
@@ -1513,6 +1555,7 @@ func (l *TurnLoop[T, M]) run(ctx context.Context) {
 
 		agent, err := l.config.PrepareAgent(plan.turnCtx, l, plan.spec.consumed)
 		if err != nil {
+			abortPlanning()
 			if len(pushBack) > 0 {
 				l.buffer.PushFront(pushBack)
 			}
@@ -1521,6 +1564,7 @@ func (l *TurnLoop[T, M]) run(ctx context.Context) {
 		}
 
 		if l.stopSig.isStopped() {
+			abortPlanning()
 			if len(pushBack) > 0 {
 				l.buffer.PushFront(pushBack)
 			}
@@ -1529,14 +1573,7 @@ func (l *TurnLoop[T, M]) run(ctx context.Context) {
 
 		l.buffer.PushFront(plan.remaining)
 
-		// Bracket the turn with holdRunLoop / endTurnAndUnhold. The run loop's
-		// own hold ensures that if a Push caller also holds mid-turn, the total
-		// holdCount stays > 0 after endTurnAndUnhold, blocking the loop at
-		// waitForPreemptOrUnhold until the Push caller's preempt is resolved.
-		l.preemptSig.holdRunLoop()
 		runErr := l.runAgentAndHandleEvents(plan.turnCtx, agent, plan.spec)
-
-		l.preemptSig.endTurnAndUnhold()
 
 		if runErr != nil {
 			// Set interruptedItems when a cancel or interrupt was captured from the
@@ -1576,38 +1613,27 @@ func (l *TurnLoop[T, M]) setupBridgeStore(spec *turnRunSpec[T, M], runOpts []Age
 	return runOpts, newBridgeStore(), nil
 }
 
-// watchPreemptSignal runs for the lifetime of a single turn. It listens on the
-// notify channel for preempt requests and relays them to agentCancelFunc.
-//
-// preemptGen de-duplicates notifications: multiple notify wakes can fire for the
-// same logical preempt (e.g. cond.Broadcast + channel send), so the watcher
-// only acts when the generation advances.
-//
-// On the first preempt whose cancel actually contributed (i.e. the cancel options
-// were accepted before the CancelError was finalized), preemptDone is closed to
-// wake runAgentAndHandleEvents's select.
-func (l *TurnLoop[T, M]) watchPreemptSignal(done <-chan struct{}, agentCancelFunc AgentCancelFunc, preemptDone chan struct{}) {
-	var lastGen uint64
+// watchPreempt runs for the lifetime of a single active turn. It consumes
+// pending preempt requests exactly once and submits cancel for that turn.
+func (l *TurnLoop[T, M]) watchPreempt(done <-chan struct{}, agentCancelFunc AgentCancelFunc, preemptDone chan struct{}) {
+	preemptDoneClosed := false
 	for {
 		select {
 		case <-done:
 			return
-		case <-l.preemptSig.notify:
-			if preempted, gen, opts, ackList := l.preemptSig.receivePreempt(); preempted {
-				if gen != lastGen {
-					firstPreempt := lastGen == 0
-					lastGen = gen
-					// CancelHandle is intentionally not awaited here: agentCancelFunc commits the cancel signal synchronously,
-					// while waiting would block until the turn finishes and can deadlock this watcher against the done signal.
-					_, contributed := agentCancelFunc(opts...)
-					if firstPreempt && contributed {
-						close(preemptDone)
-					}
-					for _, ack := range ackList {
-						close(ack)
-					}
-				}
+		case <-l.preemptCtrl.notify:
+			req, ok := l.preemptCtrl.receivePreempt()
+			if !ok {
+				continue
 			}
+			// CancelHandle is intentionally not awaited here: agentCancelFunc commits the cancel signal synchronously,
+			// while waiting would block until the turn finishes and can deadlock this watcher against the done signal.
+			_, contributed := agentCancelFunc(req.cancelOptions(time.Now())...)
+			if contributed && !preemptDoneClosed {
+				close(preemptDone)
+				preemptDoneClosed = true
+			}
+			req.ack()
 		}
 	}
 }
@@ -1623,8 +1649,8 @@ func (l *TurnLoop[T, M]) watchPreemptSignal(done <-chan struct{}, agentCancelFun
 //
 //   - notify (one-shot, buffered 1): fires when a new Stop() call is made,
 //     enabling cancel-mode escalation (e.g. CancelAfterToolCalls → CancelImmediate).
-//     The generation counter de-duplicates wakes, analogous to preemptGen in
-//     watchPreemptSignal.
+//     The generation counter de-duplicates wakes, analogous to the preempt
+//     controller consuming pending requests once.
 //
 // On the first cancel that actually contributed (i.e. the cancel was accepted
 // before the CancelError was finalized), stoppedDone is closed to wake
@@ -1681,6 +1707,7 @@ func (l *TurnLoop[T, M]) runAgentAndHandleEvents(
 
 	runOpts, ms, err := l.setupBridgeStore(spec, spec.runOpts)
 	if err != nil {
+		l.preemptCtrl.abortPlanningTurn().ack()
 		return err
 	}
 	store := l.config.Store
@@ -1707,7 +1734,10 @@ func (l *TurnLoop[T, M]) runAgentAndHandleEvents(
 		Stopped:   stoppedDone,
 		StopCause: l.stopSig.getStopCause,
 	}
-	l.preemptSig.setTurn(ctx, tc)
+	l.preemptCtrl.beginActiveTurn(ctx, tc)
+	defer func() {
+		l.preemptCtrl.endActiveTurn().ack()
+	}()
 
 	if spec.isResume {
 		var err error
@@ -1768,7 +1798,7 @@ func (l *TurnLoop[T, M]) runAgentAndHandleEvents(
 		}()
 		handleErr = handleEvents()
 	}()
-	go l.watchPreemptSignal(done, agentCancelFunc, preemptDone)
+	go l.watchPreempt(done, agentCancelFunc, preemptDone)
 	go l.watchStopSignal(done, agentCancelFunc, stoppedDone)
 
 	finalizeCheckpoint := func() error {
@@ -1902,7 +1932,7 @@ func (l *TurnLoop[T, M]) cleanup(ctx context.Context) {
 		},
 	}
 
-	l.preemptSig.drainAll()
+	l.preemptCtrl.drainAll()
 	l.buffer.Close()
 	close(l.done)
 }

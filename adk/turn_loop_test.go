@@ -926,6 +926,83 @@ func TestTurnLoop_PreemptDelay_NoMispreemptOnNaturalCompletion(t *testing.T) {
 	assert.Equal(t, int32(2), atomic.LoadInt32(&agentRunCount))
 }
 
+func TestTurnLoop_PreemptDuringPlanningCancelsUpcomingAgent(t *testing.T) {
+	genInputEntered := make(chan struct{})
+	allowGenInput := make(chan struct{})
+	cancelSubmitted := make(chan struct{})
+	agentCancelled := make(chan struct{})
+	genInputOnce := sync.Once{}
+	cancelOnce := sync.Once{}
+	agentCancelledOnce := sync.Once{}
+
+	var agentRunCount int32
+	agent := &turnLoopCancellableMockAgent{
+		name: "test",
+		runFunc: func(ctx context.Context, input *AgentInput) (*AgentOutput, error) {
+			count := atomic.AddInt32(&agentRunCount, 1)
+			if count == 1 {
+				<-ctx.Done()
+				agentCancelledOnce.Do(func() { close(agentCancelled) })
+				return &AgentOutput{}, nil
+			}
+			return &AgentOutput{}, nil
+		},
+		onCancel: func(cc *cancelContext) {
+			cancelOnce.Do(func() { close(cancelSubmitted) })
+		},
+	}
+
+	loop := newAndRunTurnLoop(context.Background(), TurnLoopConfig[string, *schema.Message]{
+		PrepareAgent: func(ctx context.Context, _ *TurnLoop[string, *schema.Message], consumed []string) (Agent, error) {
+			return agent, nil
+		},
+		GenInput: func(ctx context.Context, _ *TurnLoop[string, *schema.Message], items []string) (*GenInputResult[string, *schema.Message], error) {
+			genInputOnce.Do(func() {
+				close(genInputEntered)
+				<-allowGenInput
+			})
+			return &GenInputResult[string, *schema.Message]{
+				Input:     &AgentInput{Messages: []Message{schema.UserMessage(items[0])}},
+				Consumed:  []string{items[0]},
+				Remaining: items[1:],
+			}, nil
+		},
+	})
+
+	loop.Push("first")
+
+	select {
+	case <-genInputEntered:
+	case <-time.After(1 * time.Second):
+		t.Fatal("GenInput did not enter planning phase")
+	}
+
+	ok, ack := loop.Push("urgent", WithPreempt[string, *schema.Message](AnySafePoint))
+	require.True(t, ok)
+	require.NotNil(t, ack)
+	requireAckOpen(t, ack)
+
+	close(allowGenInput)
+
+	select {
+	case <-cancelSubmitted:
+	case <-time.After(1 * time.Second):
+		t.Fatal("planning-phase preempt did not submit cancel")
+	}
+	requireAckClosed(t, ack)
+
+	select {
+	case <-agentCancelled:
+	case <-time.After(1 * time.Second):
+		t.Fatal("agent was not cancelled by planning-phase preempt")
+	}
+
+	loop.Stop()
+	result := loop.Wait()
+	assert.NoError(t, result.ExitReason)
+	assert.GreaterOrEqual(t, atomic.LoadInt32(&agentRunCount), int32(1))
+}
+
 func TestTurnLoop_ConcurrentPush(t *testing.T) {
 	var count int32
 
@@ -3372,152 +3449,269 @@ func TestTurnLoop_TurnContext_PreemptedChannel(t *testing.T) {
 }
 
 // =============================================================================
-// preemptSignal unit tests (direct testing of the hold/preempt/unhold mechanism)
+// preemptController unit tests
 // =============================================================================
 
-func TestPreemptSignal_HoldCountLifecycle(t *testing.T) {
-	s := newPreemptSignal()
-
-	s.holdRunLoop()
-	s.holdRunLoop()
-
-	done := make(chan bool)
-	go func() {
-		preempted, _, _ := s.waitForPreemptOrUnhold()
-		done <- preempted
-	}()
-
-	select {
-	case <-done:
-		t.Fatal("waitForPreemptOrUnhold should block while holdCount > 0")
-	case <-time.After(50 * time.Millisecond):
-	}
-
-	s.unholdRunLoop()
-
-	select {
-	case <-done:
-		t.Fatal("waitForPreemptOrUnhold should still block (holdCount=1)")
-	case <-time.After(50 * time.Millisecond):
-	}
-
-	s.unholdRunLoop()
-
-	select {
-	case preempted := <-done:
-		assert.False(t, preempted, "should return not-preempted when all holds released")
-	case <-time.After(1 * time.Second):
-		t.Fatal("waitForPreemptOrUnhold should unblock when holdCount reaches 0")
-	}
-}
-
-func TestPreemptSignal_RequestPreemptWithNoHold(t *testing.T) {
-	s := newPreemptSignal()
-
-	ack := make(chan struct{})
-	s.requestPreempt(ack)
-
+func requireAckClosed(t *testing.T, ack <-chan struct{}) {
+	t.Helper()
 	select {
 	case <-ack:
-	case <-time.After(100 * time.Millisecond):
-		t.Fatal("ack should be closed immediately when holdCount is 0")
-	}
-}
-
-func TestPreemptSignal_RequestPreemptWakesWaiter(t *testing.T) {
-	s := newPreemptSignal()
-	s.holdRunLoop()
-
-	done := make(chan struct {
-		preempted bool
-		ackList   []chan struct{}
-	})
-	go func() {
-		preempted, _, ackList := s.waitForPreemptOrUnhold()
-		done <- struct {
-			preempted bool
-			ackList   []chan struct{}
-		}{preempted, ackList}
-	}()
-
-	ack := make(chan struct{})
-	s.requestPreempt(ack)
-
-	select {
-	case result := <-done:
-		assert.True(t, result.preempted)
-		assert.Len(t, result.ackList, 1)
-		close(result.ackList[0])
 	case <-time.After(1 * time.Second):
-		t.Fatal("waitForPreemptOrUnhold should wake on requestPreempt")
+		t.Fatal("ack should be closed")
 	}
 }
 
-func TestPreemptSignal_HoldAndGetTurn(t *testing.T) {
-	s := newPreemptSignal()
-	s.setTurn(context.Background(), "turn-A")
-
-	ctx, tc := s.holdAndGetTurn()
-	assert.NotNil(t, ctx)
-	assert.Equal(t, "turn-A", tc)
-
-	s.endTurnAndUnhold()
-
-	_, tc2 := s.holdAndGetTurn()
-	assert.Nil(t, tc2, "TC should be nil after endTurnAndUnhold")
-	s.unholdRunLoop()
-}
-
-func TestPreemptSignal_EndTurnPreservesSignalWhenHoldRemains(t *testing.T) {
-	s := newPreemptSignal()
-
-	s.holdRunLoop()
-	s.holdRunLoop()
-
-	ack := make(chan struct{})
-	s.requestPreempt(ack)
-
-	s.endTurnAndUnhold()
-
-	done := make(chan bool)
-	go func() {
-		preempted, _, ackList := s.waitForPreemptOrUnhold()
-		for _, a := range ackList {
-			close(a)
-		}
-		done <- preempted
-	}()
-
-	select {
-	case preempted := <-done:
-		assert.True(t, preempted, "signal state should be preserved when holdCount > 0 after endTurnAndUnhold")
-	case <-time.After(1 * time.Second):
-		t.Fatal("waiter should see the preserved preempt signal")
-	}
-
+func requireAckOpen(t *testing.T, ack <-chan struct{}) {
+	t.Helper()
 	select {
 	case <-ack:
-	case <-time.After(100 * time.Millisecond):
-		t.Fatal("ack should have been closed")
+		t.Fatal("ack should still be open")
+	default:
 	}
 }
 
-func TestPreemptSignal_ConcurrentHoldRequestUnhold(t *testing.T) {
-	s := newPreemptSignal()
+func TestPreemptController_BeginPushSnapshotsPlanningTurn(t *testing.T) {
+	c := newPreemptController()
+	c.beginPlanningTurn()
 
+	snapshot := c.beginPush()
+	c.endPush()
+
+	assert.True(t, snapshot.hasTargetTurn)
+	assert.NotZero(t, snapshot.turnID)
+	assert.Nil(t, snapshot.ctx)
+	assert.Nil(t, snapshot.tc)
+}
+
+func TestPreemptController_BeginPushSnapshotsActiveTurn(t *testing.T) {
+	c := newPreemptController()
+	ctx := context.WithValue(context.Background(), struct{}{}, "value")
+	tc := "turn-context"
+
+	c.beginPlanningTurn()
+	c.beginActiveTurn(ctx, tc)
+	snapshot := c.beginPush()
+	c.endPush()
+
+	assert.True(t, snapshot.hasTargetTurn)
+	assert.NotZero(t, snapshot.turnID)
+	assert.Equal(t, ctx, snapshot.ctx)
+	assert.Equal(t, tc, snapshot.tc)
+}
+
+func TestPreemptController_RequestPreemptIdleTurnAcksImmediately(t *testing.T) {
+	c := newPreemptController()
+	snapshot := c.beginPush()
+	c.endPush()
+
+	ack := make(chan struct{})
+	c.requestPreempt(snapshot, ack, WithAgentCancelMode(CancelAfterChatModel))
+
+	requireAckClosed(t, ack)
+	_, ok := c.receivePreempt()
+	assert.False(t, ok)
+}
+
+func TestPreemptController_RequestPreemptForPlanningTurnIsConsumedAfterActivation(t *testing.T) {
+	c := newPreemptController()
+	c.beginPlanningTurn()
+	snapshot := c.beginPush()
+	c.endPush()
+
+	ack := make(chan struct{})
+	c.requestPreempt(snapshot, ack, WithAgentCancelMode(CancelAfterChatModel))
+
+	_, ok := c.receivePreempt()
+	assert.False(t, ok)
+	requireAckOpen(t, ack)
+
+	c.beginActiveTurn(context.Background(), "tc")
+	req, ok := c.receivePreempt()
+	require.True(t, ok)
+	requireAckOpen(t, ack)
+
+	req.ack()
+	requireAckClosed(t, ack)
+}
+
+func TestPreemptController_RequestPreemptForActiveTurnIsConsumedOnce(t *testing.T) {
+	c := newPreemptController()
+	c.beginPlanningTurn()
+	c.beginActiveTurn(context.Background(), "tc")
+	snapshot := c.beginPush()
+	c.endPush()
+
+	ack := make(chan struct{})
+	c.requestPreempt(snapshot, ack, WithAgentCancelMode(CancelAfterChatModel))
+
+	req, ok := c.receivePreempt()
+	require.True(t, ok)
+	opts := req.cancelOptions(time.Now())
+	cfg := parseAgentCancelOptions(opts...)
+	assert.Equal(t, CancelAfterChatModel, cfg.Mode)
+	requireAckOpen(t, ack)
+
+	_, ok = c.receivePreempt()
+	assert.False(t, ok)
+
+	req.ack()
+	requireAckClosed(t, ack)
+}
+
+func TestPreemptController_AbortPlanningTurnAcksUnconsumedRequest(t *testing.T) {
+	c := newPreemptController()
+	c.beginPlanningTurn()
+	snapshot := c.beginPush()
+	c.endPush()
+
+	ack := make(chan struct{})
+	c.requestPreempt(snapshot, ack, WithAgentCancelMode(CancelAfterChatModel))
+
+	req := c.abortPlanningTurn()
+	require.NotNil(t, req)
+	req.ack()
+	requireAckClosed(t, ack)
+
+	_, ok := c.receivePreempt()
+	assert.False(t, ok)
+}
+
+func TestPreemptController_EndActiveTurnAcksUnconsumedRequest(t *testing.T) {
+	c := newPreemptController()
+	c.beginPlanningTurn()
+	c.beginActiveTurn(context.Background(), "tc")
+	snapshot := c.beginPush()
+	c.endPush()
+
+	ack := make(chan struct{})
+	c.requestPreempt(snapshot, ack, WithAgentCancelMode(CancelAfterChatModel))
+
+	req := c.endActiveTurn()
+	require.NotNil(t, req)
+	req.ack()
+	requireAckClosed(t, ack)
+
+	_, ok := c.receivePreempt()
+	assert.False(t, ok)
+}
+
+func TestPreemptController_EndActiveTurnDoesNotAckConsumedRequest(t *testing.T) {
+	c := newPreemptController()
+	c.beginPlanningTurn()
+	c.beginActiveTurn(context.Background(), "tc")
+	snapshot := c.beginPush()
+	c.endPush()
+
+	ack := make(chan struct{})
+	c.requestPreempt(snapshot, ack, WithAgentCancelMode(CancelAfterChatModel))
+	req, ok := c.receivePreempt()
+	require.True(t, ok)
+
+	assert.Nil(t, c.endActiveTurn())
+	requireAckOpen(t, ack)
+
+	req.ack()
+	requireAckClosed(t, ack)
+}
+
+func TestPreemptController_TargetTurnMismatchAcksImmediately(t *testing.T) {
+	c := newPreemptController()
+	c.beginPlanningTurn()
+	snapshot := c.beginPush()
+	c.endPush()
+	c.abortPlanningTurn().ack()
+	c.beginPlanningTurn()
+
+	ack := make(chan struct{})
+	c.requestPreempt(snapshot, ack, WithAgentCancelMode(CancelAfterChatModel))
+
+	requireAckClosed(t, ack)
+	_, ok := c.receivePreempt()
+	assert.False(t, ok)
+}
+
+func TestPreemptController_WaitForPushesBlocksUntilPushEnds(t *testing.T) {
+	c := newPreemptController()
+	c.beginPush()
+
+	waitDone := make(chan struct{})
+	go func() {
+		c.waitForPushes()
+		close(waitDone)
+	}()
+
+	select {
+	case <-waitDone:
+		t.Fatal("waitForPushes should block while a push is in flight")
+	default:
+	}
+
+	c.endPush()
+	select {
+	case <-waitDone:
+	case <-time.After(1 * time.Second):
+		t.Fatal("waitForPushes should unblock after endPush")
+	}
+}
+
+func TestPreemptController_MultipleRequestsBeforeReceiveMergeAcksAndUseMergedOpts(t *testing.T) {
+	c := newPreemptController()
+	c.beginPlanningTurn()
+	c.beginActiveTurn(context.Background(), "tc")
+	snapshot := c.beginPush()
+	c.endPush()
+
+	ack1 := make(chan struct{})
+	ack2 := make(chan struct{})
+	c.requestPreempt(snapshot, ack1, WithAgentCancelMode(CancelAfterChatModel), WithAgentCancelTimeout(time.Minute))
+	c.requestPreempt(snapshot, ack2, WithAgentCancelMode(CancelAfterToolCalls), WithRecursive(), WithAgentCancelTimeout(time.Second))
+
+	req, ok := c.receivePreempt()
+	require.True(t, ok)
+	opts := req.cancelOptions(time.Now())
+	cfg := parseAgentCancelOptions(opts...)
+	assert.Equal(t, CancelAfterChatModel|CancelAfterToolCalls, cfg.Mode)
+	assert.True(t, cfg.Recursive)
+	require.NotNil(t, cfg.Timeout)
+	assert.LessOrEqual(t, *cfg.Timeout, time.Second)
+
+	requireAckOpen(t, ack1)
+	requireAckOpen(t, ack2)
+	req.ack()
+	requireAckClosed(t, ack1)
+	requireAckClosed(t, ack2)
+}
+
+func TestPreemptController_ConcurrentPreemptRequestsMergeAndAck(t *testing.T) {
+	c := newPreemptController()
+	c.beginPlanningTurn()
+	c.beginActiveTurn(context.Background(), "tc")
+	snapshot := c.beginPush()
+	c.endPush()
+
+	const requestCount = 50
+	start := make(chan struct{})
+	acks := make([]chan struct{}, requestCount)
 	var wg sync.WaitGroup
-	for i := 0; i < 50; i++ {
+	for i := 0; i < requestCount; i++ {
+		acks[i] = make(chan struct{})
 		wg.Add(1)
-		go func() {
+		go func(i int) {
 			defer wg.Done()
-			s.holdRunLoop()
-			ack := make(chan struct{})
-			s.requestPreempt(ack)
-			s.unholdRunLoop()
-			<-ack
-		}()
+			<-start
+			c.requestPreempt(snapshot, acks[i], WithAgentCancelMode(CancelAfterChatModel))
+		}(i)
 	}
+
+	close(start)
 	wg.Wait()
+
+	req, ok := c.receivePreempt()
+	require.True(t, ok)
+	req.ack()
+	for _, ack := range acks {
+		requireAckClosed(t, ack)
+	}
 }
 
 // =============================================================================
