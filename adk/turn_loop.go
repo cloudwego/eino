@@ -274,6 +274,23 @@ func (r *preemptRequest) cancelOptions(now time.Time) []AgentCancelOption {
 }
 
 // preemptController owns turn-targeted preempt requests and Push critical sections.
+//
+// Turn lifecycle:
+//
+//	idle ──beginPlanningTurn──▶ planning ──beginActiveTurn──▶ active ──endActiveTurn──▶ idle
+//	                              │                                                      ▲
+//	                              └────────abortPlanningTurn─────────────────────────────┘
+//
+// Push critical section (beginPush/endPush) overlaps with the turn lifecycle. The
+// run loop calls waitForPushes before beginPlanningTurn to ensure no in-flight Push
+// can observe stale turn state.
+//
+// Preempt request flow:
+//   - Push captures a snapshot (turnID + hasTargetTurn) via beginPush.
+//   - requestPreempt binds to the captured turnID; if the turn has moved on, the
+//     request is resolved as a no-op.
+//   - During active phase, receivePreempt transfers the pending request to the
+//     watcher, which submits cancel and then acks.
 type preemptController struct {
 	mu   sync.Mutex
 	cond *sync.Cond
@@ -379,7 +396,7 @@ func (c *preemptController) endPush() {
 
 	c.pushInFlight--
 	if c.pushInFlight < 0 {
-		c.pushInFlight = 0
+		panic("adk: preemptController.endPush called without matching beginPush")
 	}
 	c.cond.Broadcast()
 }

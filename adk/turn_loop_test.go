@@ -3820,6 +3820,216 @@ func TestPreemptController_ConcurrentPreemptRequestsMergeAndAck(t *testing.T) {
 	}
 }
 
+func TestPreemptController_DrainAllDuringDelayedPreempt(t *testing.T) {
+	c := newPreemptController()
+	c.beginPlanningTurn()
+	c.beginActiveTurn(context.Background(), "tc")
+
+	// Capture a snapshot while the turn is active.
+	snapshot := c.beginPush()
+	c.endPush()
+
+	// drainAll tears everything down.
+	c.drainAll()
+
+	// A delayed goroutine fires requestPreempt AFTER drainAll.
+	// This must not panic or deadlock; ack should be closed immediately
+	// because the controller is now closed.
+	ack := make(chan struct{})
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		c.requestPreempt(snapshot, ack, WithAgentCancelMode(CancelAfterChatModel))
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("requestPreempt after drainAll must not deadlock")
+	}
+	requireAckClosed(t, ack)
+}
+
+func TestPreemptController_RequestPreemptAfterDrainAll(t *testing.T) {
+	c := newPreemptController()
+	c.beginPlanningTurn()
+	c.beginActiveTurn(context.Background(), "tc")
+	snapshot := c.beginPush()
+	c.endPush()
+
+	c.drainAll()
+
+	// requestPreempt on a closed controller should close ack immediately.
+	ack := make(chan struct{})
+	c.requestPreempt(snapshot, ack, WithAgentCancelMode(CancelAfterToolCalls))
+	requireAckClosed(t, ack)
+
+	// receivePreempt should return nothing.
+	_, ok := c.receivePreempt()
+	assert.False(t, ok)
+}
+
+func TestPreemptController_ConcurrentBeginPushAndWaitForPushes(t *testing.T) {
+	c := newPreemptController()
+	c.beginPlanningTurn()
+	c.beginActiveTurn(context.Background(), "tc")
+
+	const pushCount = 100
+	var wg sync.WaitGroup
+
+	// Launch many goroutines doing beginPush / endPush concurrently.
+	for i := 0; i < pushCount; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_ = c.beginPush()
+			// Simulate some work.
+			time.Sleep(time.Microsecond)
+			c.endPush()
+		}()
+	}
+
+	// Meanwhile, waitForPushes should eventually return once all are done.
+	waitDone := make(chan struct{})
+	go func() {
+		c.waitForPushes()
+		close(waitDone)
+	}()
+
+	wg.Wait() // all pushes complete
+
+	select {
+	case <-waitDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("waitForPushes deadlocked with concurrent beginPush/endPush")
+	}
+}
+
+func TestPreemptController_RequestPreemptWithNilAck(t *testing.T) {
+	c := newPreemptController()
+	c.beginPlanningTurn()
+	c.beginActiveTurn(context.Background(), "tc")
+	snapshot := c.beginPush()
+	c.endPush()
+
+	// requestPreempt with nil ack channel must not panic.
+	assert.NotPanics(t, func() {
+		c.requestPreempt(snapshot, nil, WithAgentCancelMode(CancelAfterChatModel))
+	})
+
+	// The request should still be stored and consumable.
+	req, ok := c.receivePreempt()
+	require.True(t, ok)
+	// ack() with nil channels in the list must not panic.
+	assert.NotPanics(t, func() {
+		req.ack()
+	})
+}
+
+func TestPreemptController_MergeImmediateOverridesTimeout(t *testing.T) {
+	c := newPreemptController()
+	c.beginPlanningTurn()
+	c.beginActiveTurn(context.Background(), "tc")
+	snapshot := c.beginPush()
+	c.endPush()
+
+	// First request: graceful with timeout.
+	ack1 := make(chan struct{})
+	c.requestPreempt(snapshot, ack1,
+		WithAgentCancelMode(CancelAfterToolCalls),
+		WithAgentCancelTimeout(10*time.Second))
+
+	// Second request: CancelImmediate (no timeout).
+	ack2 := make(chan struct{})
+	c.requestPreempt(snapshot, ack2, WithAgentCancelMode(CancelImmediate))
+
+	req, ok := c.receivePreempt()
+	require.True(t, ok)
+
+	opts := req.cancelOptions(time.Now())
+	cfg := parseAgentCancelOptions(opts...)
+
+	// CancelImmediate should win and timeout should be nil.
+	assert.Equal(t, CancelImmediate, cfg.Mode)
+	assert.Nil(t, cfg.Timeout, "CancelImmediate merge should clear timeout")
+
+	req.ack()
+	requireAckClosed(t, ack1)
+	requireAckClosed(t, ack2)
+}
+
+func TestPreemptController_DelayedPreemptTargetGoneBetweenTurns(t *testing.T) {
+	c := newPreemptController()
+
+	// Turn 1: planning → active → end
+	c.beginPlanningTurn()
+	c.beginActiveTurn(context.Background(), "tc1")
+	oldSnapshot := c.beginPush()
+	c.endPush()
+	req := c.endActiveTurn()
+	assert.Nil(t, req) // no pending request
+
+	// Turn 2: start a new turn
+	c.beginPlanningTurn()
+	c.beginActiveTurn(context.Background(), "tc2")
+
+	// A delayed preempt from Turn 1 fires with stale snapshot.
+	// It should resolve as no-op (ack immediately) because turnID doesn't match.
+	ack := make(chan struct{})
+	c.requestPreempt(oldSnapshot, ack, WithAgentCancelMode(CancelAfterChatModel))
+	requireAckClosed(t, ack)
+
+	// The new turn should have no pending preempt.
+	_, ok := c.receivePreempt()
+	assert.False(t, ok, "stale preempt must not affect new turn")
+
+	c.endActiveTurn()
+}
+
+func TestPreemptController_EndPushWithoutBeginPushPanics(t *testing.T) {
+	c := newPreemptController()
+
+	// endPush without a matching beginPush should panic with the new invariant.
+	assert.PanicsWithValue(t,
+		"adk: preemptController.endPush called without matching beginPush",
+		func() {
+			c.endPush()
+		},
+	)
+}
+
+func TestPreemptController_BeginActiveTurnNotifiesExistingPending(t *testing.T) {
+	c := newPreemptController()
+	c.beginPlanningTurn()
+	snapshot := c.beginPush()
+	c.endPush()
+
+	// Send a preempt during planning phase.
+	ack := make(chan struct{})
+	c.requestPreempt(snapshot, ack, WithAgentCancelMode(CancelAfterChatModel))
+
+	// During planning, receivePreempt returns nothing.
+	_, ok := c.receivePreempt()
+	assert.False(t, ok)
+
+	// beginActiveTurn should notify the watcher via the notify channel.
+	c.beginActiveTurn(context.Background(), "tc")
+
+	// The notify channel should have a message.
+	select {
+	case <-c.notify:
+		// Expected: watcher notification was sent.
+	case <-time.After(1 * time.Second):
+		t.Fatal("beginActiveTurn should notify watcher when there is a pending request")
+	}
+
+	// Now receivePreempt should return the pending request.
+	req, ok := c.receivePreempt()
+	require.True(t, ok)
+	req.ack()
+	requireAckClosed(t, ack)
+}
+
 // =============================================================================
 // Integration tests for race-prone preempt scenarios
 // =============================================================================
