@@ -119,7 +119,7 @@ func setSubAgents(ctx context.Context, agent Agent, subAgents []Agent) (*flowAge
 		return nil, errors.New("agent's sub-agents has already been set")
 	}
 
-	if onAgent, ok_ := fa.Agent.(OnSubAgents); ok_ {
+	if onAgent, isSubAgent := fa.Agent.(OnSubAgents); isSubAgent {
 		err := onAgent.OnSetSubAgents(ctx, subAgents)
 		if err != nil {
 			return nil, err
@@ -134,7 +134,7 @@ func setSubAgents(ctx context.Context, agent Agent, subAgents []Agent) (*flowAge
 		}
 
 		fsa.parentAgent = fa
-		if onAgent, ok__ := fsa.Agent.(OnSubAgents); ok__ {
+		if onAgent, isSubAgent := fsa.Agent.(OnSubAgents); isSubAgent {
 			err := onAgent.OnSetAsSubAgent(ctx, agent)
 			if err != nil {
 				return nil, err
@@ -525,8 +525,8 @@ func (a *flowAgent) run(
 
 		subAIter := agentToRun.Run(ctxForSubAgents, nil /*subagents get input from runCtx*/, opts...)
 		for {
-			subEvent, ok_ := subAIter.Next()
-			if !ok_ {
+			subEvent, hasNext := subAIter.Next()
+			if !hasNext {
 				break
 			}
 

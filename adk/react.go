@@ -31,6 +31,8 @@ import (
 // ErrExceedMaxIterations indicates the agent reached the maximum iterations limit.
 var ErrExceedMaxIterations = errors.New("exceeds max iterations")
 
+const defaultMaxIterations = 20
+
 // State holds agent runtime state including messages and user-extensible storage.
 //
 // Deprecated: This type will be unexported in v1.0.0. Use ChatModelAgentState
@@ -290,7 +292,7 @@ func genReactState(config *reactConfig) func(ctx context.Context) *State {
 		st := &State{
 			AgentName: config.agentName,
 		}
-		maxIter := 20
+		maxIter := defaultMaxIterations
 		if config.maxIterations > 0 {
 			maxIter = config.maxIterations
 		}

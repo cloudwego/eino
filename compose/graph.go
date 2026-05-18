@@ -646,7 +646,7 @@ func (g *graph) compile(ctx context.Context, opt *graphCompileOptions) (*composa
 	cb := pregelChannelBuilder
 	if isChain(g.cmp) || isWorkflow(g.cmp) {
 		if opt != nil && opt.nodeTriggerMode != "" {
-			return nil, errors.New(fmt.Sprintf("%s doesn't support node trigger mode option", g.cmp))
+			return nil, fmt.Errorf("%s doesn't support node trigger mode option", g.cmp)
 		}
 	}
 	if (opt != nil && opt.nodeTriggerMode == AllPredecessor) || isWorkflow(g.cmp) {
