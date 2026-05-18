@@ -24,8 +24,6 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/assert"
-
-	"github.com/cloudwego/eino/compose"
 )
 
 func assertNotClosedWithin(t *testing.T, ch <-chan struct{}, d time.Duration) {
@@ -40,7 +38,7 @@ func assertNotClosedWithin(t *testing.T, ch <-chan struct{}, d time.Duration) {
 func setupParentChild(t *testing.T) (parent, child *cancelContext, cleanup func()) {
 	parent = newCancelContext()
 	ctx, cancel := context.WithCancel(context.Background())
-	child = parent.deriveChild(ctx)
+	child = parent.deriveAgentToolCancelContext(ctx)
 	cleanup = func() {
 		child.markDone()
 		cancel()
@@ -49,7 +47,7 @@ func setupParentChild(t *testing.T) (parent, child *cancelContext, cleanup func(
 	return parent, child, cleanup
 }
 
-func TestDeriveChild(t *testing.T) {
+func TestDeriveAgentToolCancelContext(t *testing.T) {
 	t.Run("Shallow", func(t *testing.T) {
 		t.Run("DoesNotPropagateSafePoint", func(t *testing.T) {
 			parent, child, _ := setupParentChild(t)
@@ -71,8 +69,8 @@ func TestDeriveChild(t *testing.T) {
 			a := newCancelContext()
 			ctx, cancel := context.WithCancel(context.Background())
 
-			b := a.deriveChild(ctx)
-			c := b.deriveChild(ctx)
+			b := a.deriveAgentToolCancelContext(ctx)
+			c := b.deriveAgentToolCancelContext(ctx)
 			t.Cleanup(func() {
 				c.markDone()
 				b.markDone()
@@ -93,7 +91,7 @@ func TestDeriveChild(t *testing.T) {
 			parent := newCancelContext()
 			ctx, cancel := context.WithCancel(context.Background())
 
-			child := parent.deriveChild(ctx)
+			child := parent.deriveAgentToolCancelContext(ctx)
 
 			parent.triggerCancel(CancelAfterChatModel)
 			time.Sleep(100 * time.Millisecond)
@@ -143,8 +141,8 @@ func TestDeriveChild(t *testing.T) {
 			a := newCancelContext()
 			ctx, cancel := context.WithCancel(context.Background())
 
-			b := a.deriveChild(ctx)
-			c := b.deriveChild(ctx)
+			b := a.deriveAgentToolCancelContext(ctx)
+			c := b.deriveAgentToolCancelContext(ctx)
 			t.Cleanup(func() {
 				c.markDone()
 				b.markDone()
@@ -192,7 +190,7 @@ func TestDeriveChild(t *testing.T) {
 			parent.setRecursive(true)
 			parent.triggerCancel(CancelAfterChatModel)
 
-			child := parent.deriveChild(ctx)
+			child := parent.deriveAgentToolCancelContext(ctx)
 			t.Cleanup(func() {
 				child.markDone()
 				cancel()
@@ -244,13 +242,13 @@ func TestDeriveChild(t *testing.T) {
 	})
 }
 
-func TestDeriveChild_Race(t *testing.T) {
+func TestDeriveAgentToolCancelContext_Race(t *testing.T) {
 	t.Run("SetRecursiveConcurrentWithCancelChan", func(t *testing.T) {
 		for i := 0; i < 100; i++ {
 			parent := newCancelContext()
 			ctx, cancel := context.WithCancel(context.Background())
 
-			child := parent.deriveChild(ctx)
+			child := parent.deriveAgentToolCancelContext(ctx)
 
 			var wg sync.WaitGroup
 			wg.Add(2)
@@ -284,7 +282,7 @@ func TestDeriveChild_Race(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
 
-		child := parent.deriveChild(ctx)
+		child := parent.deriveAgentToolCancelContext(ctx)
 
 		parent.triggerCancel(CancelAfterChatModel)
 		time.Sleep(50 * time.Millisecond)
@@ -302,8 +300,8 @@ func TestDeriveChild_Race(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
 
-		child1 := parent.deriveChild(ctx)
-		child2 := parent.deriveChild(ctx)
+		child1 := parent.deriveAgentToolCancelContext(ctx)
+		child2 := parent.deriveAgentToolCancelContext(ctx)
 
 		parent.triggerCancel(CancelAfterChatModel)
 		time.Sleep(50 * time.Millisecond)
@@ -332,7 +330,7 @@ func TestDeriveChild_Race(t *testing.T) {
 			parent := newCancelContext()
 			ctx, cancel := context.WithCancel(context.Background())
 
-			child := parent.deriveChild(ctx)
+			child := parent.deriveAgentToolCancelContext(ctx)
 
 			parent.triggerCancel(CancelAfterChatModel)
 
@@ -386,24 +384,4 @@ func TestDeriveChild_Race(t *testing.T) {
 
 		assert.True(t, parent.isRecursive())
 	})
-}
-
-func TestGracePeriod_OnlyWhenRecursive(t *testing.T) {
-	parent, _, _ := setupParentChild(t)
-
-	var nonRecursiveOptCount int
-	wrappedNonRecursive := parent.wrapGraphInterruptWithGracePeriod(func(opts ...compose.GraphInterruptOption) {
-		nonRecursiveOptCount = len(opts)
-	})
-	wrappedNonRecursive()
-	assert.Equal(t, 0, nonRecursiveOptCount)
-
-	parent.setRecursive(true)
-
-	var recursiveOptCount int
-	wrappedRecursive := parent.wrapGraphInterruptWithGracePeriod(func(opts ...compose.GraphInterruptOption) {
-		recursiveOptCount = len(opts)
-	})
-	wrappedRecursive()
-	assert.Equal(t, 1, recursiveOptCount)
 }

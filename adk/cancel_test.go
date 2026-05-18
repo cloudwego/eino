@@ -435,7 +435,7 @@ func TestWithCancel_WithTools(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
 
-		child := cc.deriveChild(ctx)
+		child := cc.deriveAgentToolCancelContext(ctx)
 		assert.NotNil(t, child)
 
 		cc.setRecursive(true)
@@ -3170,89 +3170,25 @@ func TestCancelAfterToolCalls_LoopTransitionBoundary(t *testing.T) {
 	assert.Equal(t, CancelAfterToolCalls, cancelErr.Info.Mode)
 }
 
-func TestCancelContext_ActiveChildren_Tracking(t *testing.T) {
-	t.Run("DeriveChild_IncrementsActiveChildren", func(t *testing.T) {
-		parent := newCancelContext()
-		assert.False(t, parent.hasActiveChildren())
-
-		ctx := context.Background()
-		child := parent.deriveChild(ctx)
-		assert.True(t, parent.hasActiveChildren())
-		assert.Equal(t, int32(1), atomic.LoadInt32(&parent.activeChildren))
-
-		child.markDone()
-		time.Sleep(10 * time.Millisecond)
-		assert.False(t, parent.hasActiveChildren())
-		assert.Equal(t, int32(0), atomic.LoadInt32(&parent.activeChildren))
-	})
-
-	t.Run("MultipleChildren_AllTracked", func(t *testing.T) {
+func TestCancelContext_RecursiveGraceBoundary(t *testing.T) {
+	t.Run("AgentToolDescendantMarker_PropagatesToParents", func(t *testing.T) {
 		parent := newCancelContext()
 		ctx := context.Background()
+		child := parent.deriveAgentToolCancelContext(ctx)
+		grandchild := child.deriveAgentToolCancelContext(ctx)
+		t.Cleanup(func() {
+			grandchild.markDone()
+			child.markDone()
+		})
 
-		child1 := parent.deriveChild(ctx)
-		child2 := parent.deriveChild(ctx)
-		assert.Equal(t, int32(2), atomic.LoadInt32(&parent.activeChildren))
+		assert.False(t, parent.hasAgentToolDescendant())
+		assert.False(t, child.hasAgentToolDescendant())
 
-		child1.markDone()
-		time.Sleep(10 * time.Millisecond)
-		assert.Equal(t, int32(1), atomic.LoadInt32(&parent.activeChildren))
-		assert.True(t, parent.hasActiveChildren())
+		grandchild.markAgentToolDescendant()
 
-		child2.markDone()
-		time.Sleep(10 * time.Millisecond)
-		assert.False(t, parent.hasActiveChildren())
-	})
-
-	t.Run("MarkCancelHandled_AlsoDecrementsParent", func(t *testing.T) {
-		parent := newCancelContext()
-		ctx := context.Background()
-
-		child := parent.deriveChild(ctx)
-		assert.True(t, parent.hasActiveChildren())
-
-		child.triggerCancel(CancelImmediate)
-		child.markCancelHandled()
-		time.Sleep(10 * time.Millisecond)
-		assert.False(t, parent.hasActiveChildren())
-	})
-
-	t.Run("GracePeriodWrapper_AppliesWhenChildrenActive", func(t *testing.T) {
-		parent := newCancelContext()
-		ctx := context.Background()
-
-		var receivedOpts []compose.GraphInterruptOption
-		mockInterrupt := func(opts ...compose.GraphInterruptOption) {
-			receivedOpts = opts
-		}
-
-		wrapped := parent.wrapGraphInterruptWithGracePeriod(mockInterrupt)
-
-		receivedOpts = nil
-		wrapped()
-		assert.Empty(t, receivedOpts, "Should pass no extra options when no children")
-
-		_ = parent.deriveChild(ctx)
-
-		receivedOpts = nil
-		wrapped()
-		assert.Empty(t, receivedOpts, "Should pass no extra options when children are active but not recursive")
-
-		parent.setRecursive(true)
-
-		receivedOpts = nil
-		wrapped()
-		assert.Len(t, receivedOpts, 1, "Should add exactly one timeout option when children are active and recursive")
-
-		receivedOpts = nil
-		callerOpt := compose.WithGraphInterruptTimeout(0)
-		wrapped(callerOpt)
-		assert.Len(t, receivedOpts, 2,
-			"Should append timeout option after caller-provided options when children are active and recursive")
-		// Note: verifying the exact timeout value (defaultCancelImmediateGracePeriod)
-		// requires access to unexported compose.graphInterruptOptions. The integration
-		// tests (TestCancelImmediate_AgentTool_PreservesChildCheckpoint) verify the
-		// actual behavioral effect — child interrupts propagate within the grace period.
+		assert.True(t, grandchild.hasAgentToolDescendant())
+		assert.True(t, child.hasAgentToolDescendant())
+		assert.True(t, parent.hasAgentToolDescendant())
 	})
 }
 
