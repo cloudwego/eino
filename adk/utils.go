@@ -73,6 +73,9 @@ func cloneSlice[T any](s []T) []T {
 }
 
 func concatInstructions(instructions ...string) string {
+	if len(instructions) == 0 {
+		return ""
+	}
 	var sb strings.Builder
 	sb.WriteString(instructions[0])
 	for i := 1; i < len(instructions); i++ {
