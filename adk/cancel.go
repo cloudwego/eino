@@ -272,12 +272,12 @@ const (
 	interruptImmediate int32 = 1
 )
 
-// defaultCancelImmediateGracePeriod is the time a parent's graph interrupt
-// waits when the cancelContext has active children (via deriveChild). This
-// gives child agents time to propagate their interrupt signal back through
-// the agentTool as a CompositeInterrupt. If this proves insufficient for
-// deeply nested structures or too slow for latency-sensitive use cases,
-// consider making it configurable via an AgentCancelOption.
+// defaultCancelImmediateGracePeriod is the bounded time a recursive
+// AgentTool cancel waits before forcing the current level's graph interrupt.
+// This gives deeper AgentTool/internal-agent interrupts a chance to bubble up
+// as CompositeInterrupts. If this proves insufficient for deeply nested
+// structures or too slow for latency-sensitive use cases, consider making it
+// configurable via an AgentCancelOption.
 const defaultCancelImmediateGracePeriod = 1 * time.Second
 
 type cancelContextKey struct{}
@@ -313,14 +313,13 @@ type cancelContext struct {
 	startedMode      int32 // atomic, mode when state transitioned to cancelling
 	deadlineUnixNano int64 // atomic, 0 means no deadline
 
-	recursive     int32         // atomic; 1 if cancel should propagate to descendant agents via deriveChild
+	recursive     int32         // atomic; 1 if cancel should propagate into AgentTool internal agents
 	recursiveChan chan struct{} // closed when recursive transitions from 0 to 1
 
-	root   bool           // true for the original cancelContext created by WithCancel(); false for derived children
-	parent *cancelContext // non-nil for derived children; used to decrement parent's activeChildren on markDone
+	root   bool           // true for the original cancelContext created by WithCancel(); false for AgentTool internal agents
+	parent *cancelContext // non-nil for AgentTool internal agents; used to propagate AgentTool boundary markers upward
 
-	activeChildren    int32 // atomic; number of derived children that haven't called markDone() yet
-	decrementedParent int32 // atomic CAS guard; ensures parent.activeChildren is decremented at most once
+	agentToolDescendant int32 // atomic; 1 once an AgentTool runs under this cancel context
 
 	cancelMu      sync.Mutex
 	timeoutOnce   sync.Once
@@ -357,18 +356,18 @@ func (cc *cancelContext) setRecursive(v bool) {
 	}
 }
 
-// deriveChild creates a child cancelContext that receives cancel propagation
-// from the parent. The caller MUST ensure the child's markDone() is eventually
+// deriveAgentToolCancelContext creates the cancelContext used by an AgentTool's
+// internal agent. It receives recursive cancel propagation from the parent
+// AgentTool call. The caller MUST ensure the child's markDone() is eventually
 // called (e.g., via wrapIterWithCancelCtx's defer) or that ctx is canceled;
 // otherwise the two propagation goroutines will leak.
-func (cc *cancelContext) deriveChild(ctx context.Context) *cancelContext {
+func (cc *cancelContext) deriveAgentToolCancelContext(ctx context.Context) *cancelContext {
 	if cc == nil {
 		return nil
 	}
 	child := newCancelContext()
 	child.root = false
 	child.parent = cc
-	atomic.AddInt32(&cc.activeChildren, 1)
 
 	// Each goroutine below propagates one signal class (cancel / immediate) to
 	// the child. The pattern is a two-phase select:
@@ -509,6 +508,15 @@ func (cc *cancelContext) sendImmediateInterrupt() bool {
 	fns := make([]func(...compose.GraphInterruptOption), len(cc.graphInterruptFuncs))
 	copy(fns, cc.graphInterruptFuncs)
 
+	if cc.isRecursive() && cc.hasAgentToolDescendant() {
+		select {
+		case <-cc.doneChan:
+			cc.mu.Unlock()
+			return true
+		case <-time.After(defaultCancelImmediateGracePeriod):
+		}
+	}
+
 	if len(fns) == 0 {
 		cc.mu.Unlock()
 		return false
@@ -551,32 +559,16 @@ func (cc *cancelContext) markDone() {
 	if atomic.CompareAndSwapInt32(&cc.state, stateRunning, stateDone) ||
 		atomic.CompareAndSwapInt32(&cc.state, stateCancelling, stateDone) {
 		cc.doneOnce.Do(func() { close(cc.doneChan) })
-		cc.detachFromParent()
 	}
 }
 
-func (cc *cancelContext) detachFromParent() {
-	if cc.parent != nil && atomic.CompareAndSwapInt32(&cc.decrementedParent, 0, 1) {
-		atomic.AddInt32(&cc.parent.activeChildren, -1)
-	}
+func (cc *cancelContext) hasAgentToolDescendant() bool {
+	return cc != nil && atomic.LoadInt32(&cc.agentToolDescendant) == 1
 }
 
-func (cc *cancelContext) hasActiveChildren() bool {
-	return cc != nil && atomic.LoadInt32(&cc.activeChildren) > 0
-}
-
-func (cc *cancelContext) wrapGraphInterruptWithGracePeriod(interrupt func(...compose.GraphInterruptOption)) func(...compose.GraphInterruptOption) {
-	return func(opts ...compose.GraphInterruptOption) {
-		// Grace period only applies in recursive mode: in shallow mode,
-		// children are unaware of the cancel and don't need time to propagate
-		// their interrupt signals back.
-		if cc.isRecursive() && cc.hasActiveChildren() {
-			newOpts := make([]compose.GraphInterruptOption, len(opts)+1)
-			copy(newOpts, opts)
-			newOpts[len(opts)] = compose.WithGraphInterruptTimeout(defaultCancelImmediateGracePeriod)
-			opts = newOpts
-		}
-		interrupt(opts...)
+func (cc *cancelContext) markAgentToolDescendant() {
+	for cur := cc; cur != nil; cur = cur.parent {
+		atomic.StoreInt32(&cur.agentToolDescendant, 1)
 	}
 }
 
@@ -592,7 +584,6 @@ func (cc *cancelContext) markCancelHandled() bool {
 	}
 	if atomic.CompareAndSwapInt32(&cc.state, stateCancelling, stateCancelHandled) {
 		cc.doneOnce.Do(func() { close(cc.doneChan) })
-		cc.detachFromParent()
 		return true
 	}
 	return false
@@ -794,7 +785,7 @@ func (cc *cancelContext) buildCancelFunc() AgentCancelFunc {
 // It calls markDone when the inner iterator is fully drained, ensuring the
 // cancelContext's doneChan is closed and propagation goroutines can exit.
 //
-// For root cancelContexts (created by WithCancel, not deriveChild), it also
+// For root cancelContexts (created by WithCancel, not deriveAgentToolCancelContext), it also
 // converts interrupt ACTION events to CancelError when cancel is active.
 // This is the single point of interrupt-to-CancelError conversion in the
 // system — Runner.handleIter only enriches the resulting CancelError with
