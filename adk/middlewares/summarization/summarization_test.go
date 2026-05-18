@@ -1077,24 +1077,6 @@ func TestMiddlewareBuildSummarizationModelInput(t *testing.T) {
 func TestMiddlewareSummarize(t *testing.T) {
 	ctx := context.Background()
 
-	t.Run("generates summary", func(t *testing.T) {
-		ctrl := gomock.NewController(t)
-		cm := mockModel.NewMockBaseChatModel(ctrl)
-		cm.EXPECT().Generate(gomock.Any(), gomock.Any(), gomock.Any()).
-			Return(&schema.Message{
-				Role:    schema.Assistant,
-				Content: "summary",
-			}, nil).Times(1)
-
-		input := []adk.Message{schema.UserMessage("test")}
-		resp, err := cm.Generate(ctx, input)
-		assert.NoError(t, err)
-		assert.NotNil(t, resp)
-		summary := newTypedSummaryMessage[*schema.Message](resp.Content)
-		assert.NotNil(t, summary)
-		assert.Equal(t, "summary", summary.Content)
-	})
-
 	t.Run("model generate error", func(t *testing.T) {
 		ctrl := gomock.NewController(t)
 		cm := mockModel.NewMockBaseChatModel(ctrl)

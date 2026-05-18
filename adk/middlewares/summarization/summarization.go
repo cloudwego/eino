@@ -383,6 +383,14 @@ func (m *TypedMiddleware[M]) BeforeModelRewriteState(ctx context.Context, state 
 }
 
 func (m *TypedMiddleware[M]) finalizeSummary(ctx context.Context, originalMsgs []M, rawSummary M) (context.Context, []M, error) {
+	if m.cfg.Finalize != nil {
+		finalMsgs, err := m.cfg.Finalize(ctx, originalMsgs, rawSummary)
+		if err != nil {
+			return nil, nil, err
+		}
+		return ctx, finalMsgs, nil
+	}
+
 	var summaryContent string
 	switch r := any(rawSummary).(type) {
 	case *schema.Message:
@@ -408,22 +416,17 @@ func (m *TypedMiddleware[M]) finalizeSummary(ctx context.Context, originalMsgs [
 	}
 
 	systemMsgs, contextMsgs := m.splitSystemAndContextMsgs(originalMsgs)
-
-	var finalMsgs []M
-	var err error
-	if m.cfg.Finalize != nil {
-		finalMsgs, err = m.cfg.Finalize(ctx, originalMsgs, rawSummary)
-		if err != nil {
-			return nil, nil, err
-		}
-	} else {
-		summary := newTypedSummaryMessage[M](summaryContent)
-		processed, pErr := m.postProcessSummary(ctx, contextMsgs, summary)
-		if pErr != nil {
-			return nil, nil, pErr
-		}
-		finalMsgs = append(systemMsgs, processed)
+	summary := makeUserMsg[M](summaryContent)
+	for k, v := range getMsgExtra(rawSummary) {
+		setMsgExtra(summary, k, v)
 	}
+
+	processed, pErr := m.postProcessSummary(ctx, contextMsgs, summary)
+	if pErr != nil {
+		return nil, nil, pErr
+	}
+
+	finalMsgs := append(systemMsgs, processed)
 
 	return ctx, finalMsgs, nil
 }
@@ -578,6 +581,8 @@ func (m *TypedMiddleware[M]) summarize(ctx context.Context, originalMsgs []M) (M
 	} else if err != nil {
 		return zero, nil, fmt.Errorf("failed to generate summary: %w", err)
 	}
+
+	setMsgExtra(rawSummary, extraKeyContentType, string(contentTypeSummary))
 
 	return rawSummary, modelInput, nil
 }
@@ -1244,12 +1249,6 @@ func makeUserMsg[M adk.MessageType](text string) M {
 	default:
 		panic("unreachable")
 	}
-}
-
-func newTypedSummaryMessage[M adk.MessageType](content string) M {
-	msg := makeUserMsg[M](content)
-	setMsgExtra(msg, extraKeyContentType, string(contentTypeSummary))
-	return msg
 }
 
 func typedGetContentType[M adk.MessageType](msg M) summarizationContentType {
