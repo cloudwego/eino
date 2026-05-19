@@ -2152,6 +2152,41 @@ func testSummarizationHelpers[M adk.MessageType](t *testing.T) {
 			assert.Equal(t, "continue part", m.ContentBlocks[1].UserInputText.Text)
 		}
 	})
+
+	t.Run("overwriteMsgContent sets role to user when input is assistant", func(t *testing.T) {
+		msg := smakeAssistantMsg[M]("assistant response")
+		result := overwriteMsgContent(msg, "summary", "continue")
+
+		assert.True(t, isUserRole(result))
+
+		switch m := any(result).(type) {
+		case *schema.Message:
+			assert.Equal(t, schema.User, m.Role)
+			require.Len(t, m.UserInputMultiContent, 2)
+			assert.Equal(t, "summary", m.UserInputMultiContent[0].Text)
+			assert.Equal(t, "continue", m.UserInputMultiContent[1].Text)
+		case *schema.AgenticMessage:
+			assert.Equal(t, schema.AgenticRoleTypeUser, m.Role)
+			require.Len(t, m.ContentBlocks, 2)
+			assert.Equal(t, "summary", m.ContentBlocks[0].UserInputText.Text)
+			assert.Equal(t, "continue", m.ContentBlocks[1].UserInputText.Text)
+		}
+	})
+
+	t.Run("overwriteMsgContent does not mutate original message", func(t *testing.T) {
+		msg := smakeAssistantMsg[M]("original content")
+		_ = overwriteMsgContent(msg, "new summary", "new continue")
+
+		switch m := any(msg).(type) {
+		case *schema.Message:
+			assert.Equal(t, schema.Assistant, m.Role)
+			assert.Equal(t, "original content", m.Content)
+		case *schema.AgenticMessage:
+			assert.Equal(t, schema.AgenticRoleTypeAssistant, m.Role)
+			require.Len(t, m.ContentBlocks, 1)
+			assert.Equal(t, "original content", m.ContentBlocks[0].AssistantGenText.Text)
+		}
+	})
 }
 
 func testSummarizationFlow[M adk.MessageType](t *testing.T) {
