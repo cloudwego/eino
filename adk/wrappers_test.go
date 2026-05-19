@@ -2043,3 +2043,76 @@ func Test_functionToolResultAgenticMessage(t *testing.T) {
 		assert.Equal(t, "https://example.com/img.png", ftr.Content[1].Image.URL)
 	})
 }
+
+func TestTypedToolEnhancedEventAgenticToolSearchResult(t *testing.T) {
+	result := &schema.ToolResult{Parts: []schema.ToolOutputPart{
+		{
+			Type: schema.ToolPartTypeToolSearchResult,
+			ToolSearchResult: &schema.ToolSearchResult{Tools: []*schema.ToolInfo{
+				{Name: "dynamic_tool", Desc: "dynamic tool"},
+			}},
+		},
+	}}
+
+	t.Run("invoke", func(t *testing.T) {
+		event, err := typedToolEnhancedInvokeEvent[*schema.AgenticMessage]("call_1", "tool_search", "msg_1", result)
+		require.NoError(t, err)
+		require.NotNil(t, event)
+		require.NotNil(t, event.Output)
+		require.NotNil(t, event.Output.MessageOutput)
+
+		msg := event.Output.MessageOutput.Message
+		require.NotNil(t, msg)
+		require.Len(t, msg.ContentBlocks, 1)
+		block := msg.ContentBlocks[0]
+		assert.Equal(t, schema.ContentBlockTypeToolSearchResult, block.Type)
+		require.NotNil(t, block.ToolSearchFunctionToolResult)
+		assert.Equal(t, "call_1", block.ToolSearchFunctionToolResult.CallID)
+		assert.Equal(t, "tool_search", block.ToolSearchFunctionToolResult.Name)
+		require.NotNil(t, block.ToolSearchFunctionToolResult.Result)
+		require.Len(t, block.ToolSearchFunctionToolResult.Result.Tools, 1)
+		assert.Equal(t, "dynamic_tool", block.ToolSearchFunctionToolResult.Result.Tools[0].Name)
+	})
+
+	t.Run("stream", func(t *testing.T) {
+		event := typedToolEnhancedStreamEvent[*schema.AgenticMessage](
+			"call_2",
+			"tool_search",
+			"msg_2",
+			schema.StreamReaderFromArray([]*schema.ToolResult{result}),
+		)
+		require.NotNil(t, event)
+		require.NotNil(t, event.Output)
+		require.NotNil(t, event.Output.MessageOutput)
+
+		msg, err := event.Output.MessageOutput.MessageStream.Recv()
+		require.NoError(t, err)
+		require.NotNil(t, msg)
+		require.Len(t, msg.ContentBlocks, 1)
+		block := msg.ContentBlocks[0]
+		assert.Equal(t, schema.ContentBlockTypeToolSearchResult, block.Type)
+		require.NotNil(t, block.ToolSearchFunctionToolResult)
+		assert.Equal(t, "call_2", block.ToolSearchFunctionToolResult.CallID)
+		assert.Equal(t, "tool_search", block.ToolSearchFunctionToolResult.Name)
+		require.NotNil(t, block.ToolSearchFunctionToolResult.Result)
+		require.Len(t, block.ToolSearchFunctionToolResult.Result.Tools, 1)
+		assert.Equal(t, "dynamic_tool", block.ToolSearchFunctionToolResult.Result.Tools[0].Name)
+	})
+}
+
+func TestExtractToolIdentifiersToolSearchResult(t *testing.T) {
+	msg := &schema.AgenticMessage{
+		Role: schema.AgenticRoleTypeUser,
+		ContentBlocks: []*schema.ContentBlock{
+			schema.NewContentBlock(&schema.ToolSearchFunctionToolResult{
+				CallID: "call_1",
+				Name:   "tool_search",
+				Result: &schema.ToolSearchResult{},
+			}),
+		},
+	}
+
+	toolName, callID := extractToolIdentifiers(msg)
+	assert.Equal(t, "tool_search", toolName)
+	assert.Equal(t, "call_1", callID)
+}

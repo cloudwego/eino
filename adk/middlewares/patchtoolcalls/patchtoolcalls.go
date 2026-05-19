@@ -179,8 +179,15 @@ func hasCorrespondingToolMessage(messages []*schema.Message, toolCallID string) 
 func hasCorrespondingAgenticToolResult(messages []*schema.AgenticMessage, toolCallID string) bool {
 	for _, msg := range messages {
 		for _, block := range msg.ContentBlocks {
-			if block != nil && block.Type == schema.ContentBlockTypeFunctionToolResult &&
+			if block == nil {
+				continue
+			}
+			if block.Type == schema.ContentBlockTypeFunctionToolResult &&
 				block.FunctionToolResult != nil && block.FunctionToolResult.CallID == toolCallID {
+				return true
+			}
+			if block.Type == schema.ContentBlockTypeToolSearchResult &&
+				block.ToolSearchFunctionToolResult != nil && block.ToolSearchFunctionToolResult.CallID == toolCallID {
 				return true
 			}
 		}

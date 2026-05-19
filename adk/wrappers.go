@@ -594,6 +594,35 @@ func functionToolResultAgenticMessage(callID, name string, content []*schema.Fun
 	}
 }
 
+func toolSearchResultAgenticMessage(callID, name string, tr *schema.ToolResult) (*schema.AgenticMessage, bool) {
+	if tr == nil || len(tr.Parts) != 1 {
+		return nil, false
+	}
+
+	part := tr.Parts[0]
+	if part.Type != schema.ToolPartTypeToolSearchResult || part.ToolSearchResult == nil {
+		return nil, false
+	}
+
+	return &schema.AgenticMessage{
+		Role: schema.AgenticRoleTypeUser,
+		ContentBlocks: []*schema.ContentBlock{
+			schema.NewContentBlock(&schema.ToolSearchFunctionToolResult{
+				CallID: callID,
+				Name:   name,
+				Result: part.ToolSearchResult,
+			}),
+		},
+	}, true
+}
+
+func toolResultAgenticMessage(callID, name string, tr *schema.ToolResult) *schema.AgenticMessage {
+	if msg, ok := toolSearchResultAgenticMessage(callID, name, tr); ok {
+		return msg
+	}
+	return functionToolResultAgenticMessage(callID, name, toolResultToBlocks(tr))
+}
+
 // toolResultToBlocks converts a ToolResult's multimodal parts into FunctionToolResultBlocks.
 // This preserves all media types (text, image, audio, video, file), unlike toolResultText
 // which only extracts text.
@@ -747,7 +776,7 @@ func typedToolEnhancedInvokeEvent[M MessageType](callID, toolName, toolMsgID str
 		event := EventFromMessage(msg, nil, schema.Tool, toolName)
 		return any(event).(*TypedAgentEvent[M]), nil
 	case *schema.AgenticMessage:
-		msg := functionToolResultAgenticMessage(callID, toolName, toolResultToBlocks(result))
+		msg := toolResultAgenticMessage(callID, toolName, result)
 		msg.Extra = internal.SetMessageID(msg.Extra, toolMsgID)
 		event := EventFromAgenticMessage(msg, nil, schema.AgenticRoleTypeUser)
 		return any(event).(*TypedAgentEvent[M]), nil
@@ -783,7 +812,7 @@ func typedToolEnhancedStreamEvent[M MessageType](callID, toolName, toolMsgID str
 	case *schema.AgenticMessage:
 		first := true
 		cvt := func(in *schema.ToolResult) (*schema.AgenticMessage, error) {
-			msg := functionToolResultAgenticMessage(callID, toolName, toolResultToBlocks(in))
+			msg := toolResultAgenticMessage(callID, toolName, in)
 			if first {
 				first = false
 				msg.Extra = internal.SetMessageID(msg.Extra, toolMsgID)

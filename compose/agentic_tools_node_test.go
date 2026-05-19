@@ -22,6 +22,7 @@ import (
 
 	"github.com/bytedance/sonic"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/cloudwego/eino/schema"
 )
@@ -207,6 +208,36 @@ func TestToolMessageToAgenticMessage(t *testing.T) {
 		assert.Equal(t, 1, len(ftr.Content))
 		assert.Equal(t, "only text", ftr.Content[0].Text.Text)
 	})
+
+	t.Run("tool search result", func(t *testing.T) {
+		input := []*schema.Message{
+			{
+				Role:       schema.Tool,
+				ToolCallID: "call_1",
+				ToolName:   "tool_search",
+				UserInputMultiContent: []schema.MessageInputPart{
+					{
+						Type: schema.ChatMessagePartTypeToolSearchResult,
+						ToolSearchResult: &schema.ToolSearchResult{Tools: []*schema.ToolInfo{
+							{Name: "dynamic_tool", Desc: "dynamic tool"},
+						}},
+					},
+				},
+			},
+		}
+
+		ret := toolMessageToAgenticMessage(input)
+		require.Len(t, ret, 1)
+		require.Len(t, ret[0].ContentBlocks, 1)
+		block := ret[0].ContentBlocks[0]
+		assert.Equal(t, schema.ContentBlockTypeToolSearchResult, block.Type)
+		require.NotNil(t, block.ToolSearchFunctionToolResult)
+		assert.Equal(t, "call_1", block.ToolSearchFunctionToolResult.CallID)
+		assert.Equal(t, "tool_search", block.ToolSearchFunctionToolResult.Name)
+		require.NotNil(t, block.ToolSearchFunctionToolResult.Result)
+		require.Len(t, block.ToolSearchFunctionToolResult.Result.Tools, 1)
+		assert.Equal(t, "dynamic_tool", block.ToolSearchFunctionToolResult.Result.Tools[0].Name)
+	})
 }
 
 func TestStreamToolMessageToAgenticMessage(t *testing.T) {
@@ -274,6 +305,41 @@ func TestStreamToolMessageToAgenticMessage(t *testing.T) {
 		assert.Equal(t, "2", ftr2.CallID)
 		assert.Equal(t, 1, len(ftr2.Content))
 		assert.Equal(t, "result2", ftr2.Content[0].Text.Text)
+	})
+
+	t.Run("tool search result", func(t *testing.T) {
+		input := schema.StreamReaderFromArray([][]*schema.Message{
+			{
+				{
+					Role:       schema.Tool,
+					ToolName:   "tool_search",
+					ToolCallID: "call_1",
+					UserInputMultiContent: []schema.MessageInputPart{
+						{
+							Type: schema.ChatMessagePartTypeToolSearchResult,
+							ToolSearchResult: &schema.ToolSearchResult{Tools: []*schema.ToolInfo{
+								{Name: "dynamic_tool", Desc: "dynamic tool"},
+							}},
+						},
+					},
+				},
+			},
+		})
+
+		ret := streamToolMessageToAgenticMessage(input)
+		chunk, err := ret.Recv()
+		require.NoError(t, err)
+		require.Len(t, chunk, 1)
+		require.Len(t, chunk[0].ContentBlocks, 1)
+		block := chunk[0].ContentBlocks[0]
+		assert.Equal(t, schema.ContentBlockTypeToolSearchResult, block.Type)
+		assert.Equal(t, &schema.StreamingMeta{Index: 0}, block.StreamingMeta)
+		require.NotNil(t, block.ToolSearchFunctionToolResult)
+		assert.Equal(t, "call_1", block.ToolSearchFunctionToolResult.CallID)
+		assert.Equal(t, "tool_search", block.ToolSearchFunctionToolResult.Name)
+		require.NotNil(t, block.ToolSearchFunctionToolResult.Result)
+		require.Len(t, block.ToolSearchFunctionToolResult.Result.Tools, 1)
+		assert.Equal(t, "dynamic_tool", block.ToolSearchFunctionToolResult.Result.Tools[0].Name)
 	})
 }
 
