@@ -238,8 +238,8 @@ func testPatchToolCallsGeneric[M adk.MessageType](t *testing.T) {
 			if tt.checkPatchedAt >= 0 && tt.checkPatchedAt < len(newState.Messages) {
 				patched := newState.Messages[tt.checkPatchedAt]
 				assertToolResultID(t, patched, tt.wantCallID)
-			assertToolResultName(t, patched, tt.wantToolName)
-			assertMsgContent(t, patched, tt.wantContent)
+				assertToolResultName(t, patched, tt.wantToolName)
+				assertMsgContent(t, patched, tt.wantContent)
 			}
 		})
 	}
@@ -248,6 +248,36 @@ func testPatchToolCallsGeneric[M adk.MessageType](t *testing.T) {
 func TestPatchToolCallsGeneric(t *testing.T) {
 	t.Run("Message", testPatchToolCallsGeneric[*schema.Message])
 	t.Run("AgenticMessage", testPatchToolCallsGeneric[*schema.AgenticMessage])
+}
+
+func TestPatchToolCallsAgenticToolSearchResult(t *testing.T) {
+	ctx := context.Background()
+	mw, err := NewTyped[*schema.AgenticMessage](ctx, nil)
+	require.NoError(t, err)
+
+	messages := []*schema.AgenticMessage{
+		makeAssistantMsgWithToolCalls[*schema.AgenticMessage]("", []testToolCall{
+			{ID: "call_1", Name: "tool_search", Arguments: `{"query":"dynamic"}`},
+		}),
+		{
+			Role: schema.AgenticRoleTypeUser,
+			ContentBlocks: []*schema.ContentBlock{
+				schema.NewContentBlock(&schema.ToolSearchFunctionToolResult{
+					CallID: "call_1",
+					Name:   "tool_search",
+					Result: &schema.ToolSearchResult{Tools: []*schema.ToolInfo{
+						{Name: "dynamic_tool", Desc: "dynamic tool"},
+					}},
+				}),
+			},
+		},
+	}
+
+	state := &adk.TypedChatModelAgentState[*schema.AgenticMessage]{Messages: messages}
+	_, newState, err := mw.BeforeModelRewriteState(ctx, state, nil)
+	require.NoError(t, err)
+	assert.Len(t, newState.Messages, 2)
+	assert.Equal(t, schema.ContentBlockTypeToolSearchResult, newState.Messages[1].ContentBlocks[0].Type)
 }
 
 // TestPatchToolCalls_NilFunctionToolCallInBlock verifies the middleware handles
