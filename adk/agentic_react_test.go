@@ -171,7 +171,7 @@ func newAgenticAgent(t *testing.T, ctx context.Context, mdl model.BaseModel[*sch
 			},
 		}
 	}
-	agent, err := NewTypedChatModelAgent[*schema.AgenticMessage](ctx, config)
+	agent, err := NewTypedChatModelAgent(ctx, config)
 	require.NoError(t, err)
 	return agent
 }
@@ -179,13 +179,13 @@ func newAgenticAgent(t *testing.T, ctx context.Context, mdl model.BaseModel[*sch
 func newAgenticRunner(t *testing.T, ctx context.Context, mdl model.BaseModel[*schema.AgenticMessage], tools []tool.BaseTool) *TypedRunner[*schema.AgenticMessage] {
 	t.Helper()
 	agent := newAgenticAgent(t, ctx, mdl, tools)
-	return NewTypedRunner[*schema.AgenticMessage](TypedRunnerConfig[*schema.AgenticMessage]{Agent: agent})
+	return NewTypedRunner(TypedRunnerConfig[*schema.AgenticMessage]{Agent: agent})
 }
 
 func newAgenticRunnerWithStore(t *testing.T, ctx context.Context, mdl model.BaseModel[*schema.AgenticMessage], tools []tool.BaseTool, store CheckPointStore) *TypedRunner[*schema.AgenticMessage] {
 	t.Helper()
 	agent := newAgenticAgent(t, ctx, mdl, tools)
-	return NewTypedRunner[*schema.AgenticMessage](TypedRunnerConfig[*schema.AgenticMessage]{
+	return NewTypedRunner(TypedRunnerConfig[*schema.AgenticMessage]{
 		Agent:           agent,
 		CheckPointStore: store,
 	})
@@ -276,7 +276,7 @@ func TestAgenticReact_Stream(t *testing.T) {
 	}
 
 	agent := newAgenticAgent(t, ctx, mdl, []tool.BaseTool{&agenticEchoTool{name: "echo"}})
-	runner := NewTypedRunner[*schema.AgenticMessage](TypedRunnerConfig[*schema.AgenticMessage]{
+	runner := NewTypedRunner(TypedRunnerConfig[*schema.AgenticMessage]{
 		Agent:           agent,
 		EnableStreaming: true,
 	})
@@ -340,10 +340,10 @@ func TestAgenticReact_MaxIterations(t *testing.T) {
 				},
 			},
 		}
-		agent, err := NewTypedChatModelAgent[*schema.AgenticMessage](ctx, config)
+		agent, err := NewTypedChatModelAgent(ctx, config)
 		require.NoError(t, err)
 
-		runner := NewTypedRunner[*schema.AgenticMessage](TypedRunnerConfig[*schema.AgenticMessage]{Agent: agent})
+		runner := NewTypedRunner(TypedRunnerConfig[*schema.AgenticMessage]{Agent: agent})
 		events := drainAgenticEvents(runner.Query(ctx, "go"))
 		last := lastAgenticEvent(events)
 
@@ -363,7 +363,7 @@ func TestAgenticReact_ReturnDirectly(t *testing.T) {
 		},
 	}
 
-	agent, err := NewTypedChatModelAgent[*schema.AgenticMessage](ctx, &TypedChatModelAgentConfig[*schema.AgenticMessage]{
+	agent, err := NewTypedChatModelAgent(ctx, &TypedChatModelAgentConfig[*schema.AgenticMessage]{
 		Name:        t.Name(),
 		Description: "test",
 		Model:       mdl,
@@ -378,7 +378,7 @@ func TestAgenticReact_ReturnDirectly(t *testing.T) {
 
 	t.Run("Invoke", func(t *testing.T) {
 		atomic.StoreInt32(&mdl.callCount, 0)
-		runner := NewTypedRunner[*schema.AgenticMessage](TypedRunnerConfig[*schema.AgenticMessage]{
+		runner := NewTypedRunner(TypedRunnerConfig[*schema.AgenticMessage]{
 			Agent: agent, EnableStreaming: false,
 		})
 		events := drainAgenticEvents(runner.Query(ctx, "test"))
@@ -404,7 +404,7 @@ func TestAgenticReact_ReturnDirectly(t *testing.T) {
 
 	t.Run("Stream", func(t *testing.T) {
 		atomic.StoreInt32(&mdl.callCount, 0)
-		runner := NewTypedRunner[*schema.AgenticMessage](TypedRunnerConfig[*schema.AgenticMessage]{
+		runner := NewTypedRunner(TypedRunnerConfig[*schema.AgenticMessage]{
 			Agent: agent, EnableStreaming: true,
 		})
 		events := drainAgenticEvents(runner.Query(ctx, "test"))
@@ -673,7 +673,7 @@ func TestCoverage_AgenticReact_Streaming(t *testing.T) {
 
 	echoTool := &agenticEchoTool{name: "echo"}
 
-	agent, err := NewTypedChatModelAgent[*schema.AgenticMessage](ctx, &TypedChatModelAgentConfig[*schema.AgenticMessage]{
+	agent, err := NewTypedChatModelAgent(ctx, &TypedChatModelAgentConfig[*schema.AgenticMessage]{
 		Name:        "stream-react",
 		Description: "streaming agentic react",
 		Model:       m,
@@ -685,7 +685,7 @@ func TestCoverage_AgenticReact_Streaming(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	runner := NewTypedRunner[*schema.AgenticMessage](TypedRunnerConfig[*schema.AgenticMessage]{
+	runner := NewTypedRunner(TypedRunnerConfig[*schema.AgenticMessage]{
 		Agent:           agent,
 		EnableStreaming: true,
 	})
@@ -766,7 +766,7 @@ func TestCoverage_AgenticReact_InterruptResume(t *testing.T) {
 		},
 	}
 
-	agent, err := NewTypedChatModelAgent[*schema.AgenticMessage](ctx, &TypedChatModelAgentConfig[*schema.AgenticMessage]{
+	agent, err := NewTypedChatModelAgent(ctx, &TypedChatModelAgentConfig[*schema.AgenticMessage]{
 		Name:        "interrupt-agent",
 		Description: "tests interrupt and resume",
 		Model:       m,
@@ -779,7 +779,7 @@ func TestCoverage_AgenticReact_InterruptResume(t *testing.T) {
 	require.NoError(t, err)
 
 	store := newDTTestStore()
-	runner := NewTypedRunner[*schema.AgenticMessage](TypedRunnerConfig[*schema.AgenticMessage]{
+	runner := NewTypedRunner(TypedRunnerConfig[*schema.AgenticMessage]{
 		Agent:           agent,
 		CheckPointStore: store,
 	})
@@ -868,14 +868,14 @@ func TestCoverage_ChatModelAgent_StreamError(t *testing.T) {
 		},
 	}
 
-	agent, err := NewTypedChatModelAgent[*schema.AgenticMessage](ctx, &TypedChatModelAgentConfig[*schema.AgenticMessage]{
+	agent, err := NewTypedChatModelAgent(ctx, &TypedChatModelAgentConfig[*schema.AgenticMessage]{
 		Name:        "stream-error-agent",
 		Description: "tests stream error",
 		Model:       m,
 	})
 	require.NoError(t, err)
 
-	runner := NewTypedRunner[*schema.AgenticMessage](TypedRunnerConfig[*schema.AgenticMessage]{
+	runner := NewTypedRunner(TypedRunnerConfig[*schema.AgenticMessage]{
 		Agent:           agent,
 		EnableStreaming: true,
 	})
@@ -911,7 +911,7 @@ func TestCoverage_AgenticReact_GobStateRoundTrip(t *testing.T) {
 
 	interruptTool := &agenticInterruptTool{name: "interrupt_tool"}
 
-	agent, err := NewTypedChatModelAgent[*schema.AgenticMessage](ctx, &TypedChatModelAgentConfig[*schema.AgenticMessage]{
+	agent, err := NewTypedChatModelAgent(ctx, &TypedChatModelAgentConfig[*schema.AgenticMessage]{
 		Name:        "gob-test",
 		Description: "tests gob state round trip",
 		Model:       m,
@@ -924,7 +924,7 @@ func TestCoverage_AgenticReact_GobStateRoundTrip(t *testing.T) {
 	require.NoError(t, err)
 
 	store := newDTTestStore()
-	runner := NewTypedRunner[*schema.AgenticMessage](TypedRunnerConfig[*schema.AgenticMessage]{
+	runner := NewTypedRunner(TypedRunnerConfig[*schema.AgenticMessage]{
 		Agent:           agent,
 		CheckPointStore: store,
 	})

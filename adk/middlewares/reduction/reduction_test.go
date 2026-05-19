@@ -749,7 +749,7 @@ func TestReductionMiddlewareClear(t *testing.T) {
 		})
 		assert.NoError(t, err)
 		assert.Equal(t, "Sunny", b.Content)
-		b, err = backend.Read(ctx, &filesystem.ReadRequest{
+		_, err = backend.Read(ctx, &filesystem.ReadRequest{
 			FilePath: "/tmp/clear/call_123456789",
 		})
 		assert.Error(t, err)
@@ -2752,7 +2752,7 @@ func TestClearRewriteMessagesHandler(t *testing.T) {
 
 func TestNewTypedAgenticMessage(t *testing.T) {
 	ctx := context.Background()
-	mw, err := NewTyped[*schema.AgenticMessage](ctx, &TypedConfig[*schema.AgenticMessage]{
+	mw, err := NewTyped(ctx, &TypedConfig[*schema.AgenticMessage]{
 		SkipTruncation: true,
 		SkipClear:      true,
 	})

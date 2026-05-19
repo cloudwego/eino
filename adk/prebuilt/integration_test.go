@@ -314,8 +314,7 @@ func TestSupervisorWithPlanExecuteInterruptResume(t *testing.T) {
 		description:    "the agent responsible for complex project execution tasks",
 	}
 
-	var pa adk.Agent
-	pa = projectAgent
+	var pa adk.Agent = projectAgent
 
 	_, ok := pa.(adk.ResumableAgent)
 	assert.True(t, ok)

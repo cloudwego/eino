@@ -87,7 +87,7 @@ func typedNewTaskTool[M adk.MessageType](
 			English: generalAgentDescription,
 			Chinese: generalAgentDescriptionChinese,
 		})
-		generalAgent, err := adk.NewTypedChatModelAgent[M](ctx, &adk.TypedChatModelAgentConfig[M]{
+		generalAgent, err := adk.NewTypedChatModelAgent(ctx, &adk.TypedChatModelAgentConfig[M]{
 			Name:                generalAgentName,
 			Description:         agentDesc,
 			Instruction:         instruction,
@@ -103,7 +103,7 @@ func typedNewTaskTool[M adk.MessageType](
 			return nil, err
 		}
 
-		it, err := assertAgentTool(adk.NewTypedAgentTool[M](ctx, generalAgent))
+		it, err := assertAgentTool(adk.NewTypedAgentTool(ctx, adk.TypedAgent[M](generalAgent)))
 		if err != nil {
 			return nil, err
 		}
@@ -113,7 +113,7 @@ func typedNewTaskTool[M adk.MessageType](
 
 	for _, a := range subAgents {
 		name := a.Name(ctx)
-		it, err := assertAgentTool(adk.NewTypedAgentTool[M](ctx, a))
+		it, err := assertAgentTool(adk.NewTypedAgentTool(ctx, a))
 		if err != nil {
 			return nil, err
 		}

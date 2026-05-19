@@ -109,7 +109,7 @@ func TestTaskUpdateToolOwnerAndMetadata(t *testing.T) {
 	assert.Equal(t, "value1", updated.Metadata["key1"])
 	assert.Equal(t, "value2", updated.Metadata["key2"])
 
-	result, err = tool.InvokableRun(ctx, `{"taskId": "1", "metadata": {"key1": null, "key3": "value3"}}`)
+	_, err = tool.InvokableRun(ctx, `{"taskId": "1", "metadata": {"key1": null, "key3": "value3"}}`)
 	assert.NoError(t, err)
 
 	content, _ = backend.Read(ctx, &ReadRequest{FilePath: filepath.Join(baseDir, "1.json")})

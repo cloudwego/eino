@@ -866,14 +866,12 @@ func TestSequentialWorkflow_RetryAbleStreamError_SuccessfulRetry(t *testing.T) {
 	ctx, _ = initRunCtx(ctx, sequentialAgent.Name(ctx), input)
 	iterator := sequentialAgent.Run(ctx, input)
 
-	var events []*AgentEvent
 	var willRetryErrCount int
 	for {
 		event, ok := iterator.Next()
 		if !ok {
 			break
 		}
-		events = append(events, event)
 		if event.Output != nil && event.Output.MessageOutput != nil && event.Output.MessageOutput.IsStreaming {
 			sr := event.Output.MessageOutput.MessageStream
 			for {
@@ -974,7 +972,6 @@ func TestSequentialWorkflow_NonRetryAbleStreamError_StopsFlow(t *testing.T) {
 	ctx, _ = initRunCtx(ctx, sequentialAgent.Name(ctx), input)
 	iterator := sequentialAgent.Run(ctx, input)
 
-	var events []*AgentEvent
 	var streamErrFound bool
 	var finalErrEvent *AgentEvent
 	for {
@@ -982,7 +979,6 @@ func TestSequentialWorkflow_NonRetryAbleStreamError_StopsFlow(t *testing.T) {
 		if !ok {
 			break
 		}
-		events = append(events, event)
 		if event.Err != nil {
 			finalErrEvent = event
 		}
@@ -1044,7 +1040,6 @@ func TestSequentialWorkflow_NoRetryConfig_StreamError_StopsFlow(t *testing.T) {
 	ctx, _ = initRunCtx(ctx, sequentialAgent.Name(ctx), input)
 	iterator := sequentialAgent.Run(ctx, input)
 
-	var events []*AgentEvent
 	var streamErrFound bool
 	var finalErrEvent *AgentEvent
 	for {
@@ -1052,7 +1047,6 @@ func TestSequentialWorkflow_NoRetryConfig_StreamError_StopsFlow(t *testing.T) {
 		if !ok {
 			break
 		}
-		events = append(events, event)
 		if event.Err != nil {
 			finalErrEvent = event
 		}
@@ -1199,13 +1193,11 @@ func TestCheckpointSave_WillRetryError_StreamNotConsumed(t *testing.T) {
 		WithCheckPointID("ckpt-1"),
 	)
 
-	var events []*AgentEvent
 	for {
 		event, ok := iter.Next()
 		if !ok {
 			break
 		}
-		events = append(events, event)
 
 		if event.Err != nil {
 			t.Logf("event error: %v", event.Err)
@@ -3150,7 +3142,7 @@ func TestRejectReason_StreamPath(t *testing.T) {
 	require.NoError(t, err)
 
 	input := &AgentInput{
-		Messages:       []Message{schema.UserMessage("hello")},
+		Messages:        []Message{schema.UserMessage("hello")},
 		EnableStreaming: true,
 	}
 	ctx, _ = initRunCtx(ctx, agent.Name(ctx), input)

@@ -1282,29 +1282,6 @@ func TestModelWrapperHandlers(t *testing.T) {
 	})
 }
 
-type simpleChatModelWithoutCallbacks struct {
-	generateFn func(ctx context.Context, input []*schema.Message, opts ...model.Option) (*schema.Message, error)
-	streamFn   func(ctx context.Context, input []*schema.Message, opts ...model.Option) (*schema.StreamReader[*schema.Message], error)
-}
-
-func (m *simpleChatModelWithoutCallbacks) Generate(ctx context.Context, input []*schema.Message, opts ...model.Option) (*schema.Message, error) {
-	if m.generateFn != nil {
-		return m.generateFn(ctx, input, opts...)
-	}
-	return schema.AssistantMessage("default response", nil), nil
-}
-
-func (m *simpleChatModelWithoutCallbacks) Stream(ctx context.Context, input []*schema.Message, opts ...model.Option) (*schema.StreamReader[*schema.Message], error) {
-	if m.streamFn != nil {
-		return m.streamFn(ctx, input, opts...)
-	}
-	return schema.StreamReaderFromArray([]*schema.Message{schema.AssistantMessage("default response", nil)}), nil
-}
-
-func (m *simpleChatModelWithoutCallbacks) WithTools(tools []*schema.ToolInfo) (model.ToolCallingChatModel, error) {
-	return m, nil
-}
-
 func newInputModifyingWrapperFn(inputPrefix string) func(context.Context, model.BaseChatModel, *ModelContext) model.BaseChatModel {
 	return func(_ context.Context, m model.BaseChatModel, _ *ModelContext) model.BaseChatModel {
 		return &inputOutputModifyingModel{
@@ -2564,7 +2541,7 @@ func TestAfterAgent(t *testing.T) {
 			return ctx, nil
 		}}
 
-		agent, err := NewTypedChatModelAgent[*schema.AgenticMessage](ctx, &TypedChatModelAgentConfig[*schema.AgenticMessage]{
+		agent, err := NewTypedChatModelAgent(ctx, &TypedChatModelAgentConfig[*schema.AgenticMessage]{
 			Name:        "AgenticTestAgent",
 			Description: "test",
 			Model:       m,

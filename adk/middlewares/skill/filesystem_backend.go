@@ -180,9 +180,7 @@ func parseFrontmatter(data string) (frontmatter string, content string, err erro
 	frontmatter = strings.TrimSpace(rest[:endIdx])
 	content = rest[endIdx+len("\n"+delimiter):]
 
-	if strings.HasPrefix(content, "\n") {
-		content = content[1:]
-	}
+	content = strings.TrimPrefix(content, "\n")
 
 	return frontmatter, content, nil
 }

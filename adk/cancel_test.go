@@ -648,7 +648,6 @@ func TestWithCancel_WithCheckpoint(t *testing.T) {
 		err = handle.Wait()
 		assert.NoError(t, err)
 
-		var events []*AgentEvent
 		hasCancelError := false
 		for {
 			event, ok := iter.Next()
@@ -660,7 +659,6 @@ func TestWithCancel_WithCheckpoint(t *testing.T) {
 				hasCancelError = true
 				continue
 			}
-			events = append(events, event)
 		}
 
 		assert.True(t, hasCancelError, "Should have CancelError event after cancel")
@@ -955,7 +953,6 @@ func TestWithCancel_Resume(t *testing.T) {
 		cancelErr := handle.Wait()
 		assert.NoError(t, cancelErr)
 
-		var events []*AgentEvent
 		hasCancelErr := false
 		for {
 			event, ok := iter.Next()
@@ -970,7 +967,6 @@ func TestWithCancel_Resume(t *testing.T) {
 				}
 				t.Fatalf("unexpected error: %v", event.Err)
 			}
-			events = append(events, event)
 		}
 		assert.True(t, hasCancelErr, "Should have CancelError event after cancel")
 
@@ -2368,7 +2364,7 @@ func TestCancelImmediate_OrphanedToolGoroutine_NoPanic(t *testing.T) {
 			cancelCtx: cc,
 		}
 
-		ctx := withTypedChatModelAgentExecCtx[*schema.Message](context.Background(), execCtx)
+		ctx := withTypedChatModelAgentExecCtx(context.Background(), execCtx)
 
 		assert.NotPanics(t, func() {
 			err := SendEvent(ctx, &AgentEvent{AgentName: "test"})

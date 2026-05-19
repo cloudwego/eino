@@ -346,7 +346,7 @@ func (m *bridgeStore) Set(_ context.Context, key string, checkPoint []byte) erro
 	return nil
 }
 
-func getNextResumeAgent(ctx context.Context, info *ResumeInfo) (string, error) {
+func getNextResumeAgent(ctx context.Context, _ *ResumeInfo) (string, error) {
 	nextAgents, err := core.GetNextResumptionPoints(ctx)
 	if err != nil {
 		return "", fmt.Errorf("failed to get next agent leading to interruption: %w", err)
@@ -371,7 +371,7 @@ func getNextResumeAgent(ctx context.Context, info *ResumeInfo) (string, error) {
 	return nextAgentID, nil
 }
 
-func getNextResumeAgents(ctx context.Context, info *ResumeInfo) (map[string]bool, error) {
+func getNextResumeAgents(ctx context.Context, _ *ResumeInfo) (map[string]bool, error) {
 	nextAgents, err := core.GetNextResumptionPoints(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get next agents leading to interruption: %w", err)

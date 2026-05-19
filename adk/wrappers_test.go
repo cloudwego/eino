@@ -1785,7 +1785,7 @@ func TestAgenticEventSenderToolHandler(t *testing.T) {
 		testTool := &invokableTestTool{name: "test_tool", result: "invokable_output"}
 		mdl := &mockAgenticToolCallingModel{toolCallName: "test_tool"}
 
-		agent, err := NewTypedChatModelAgent[*schema.AgenticMessage](ctx, &TypedChatModelAgentConfig[*schema.AgenticMessage]{
+		agent, err := NewTypedChatModelAgent(ctx, &TypedChatModelAgentConfig[*schema.AgenticMessage]{
 			Name:        "TestAgent",
 			Description: "test",
 			Model:       mdl,
@@ -1796,7 +1796,7 @@ func TestAgenticEventSenderToolHandler(t *testing.T) {
 		})
 		require.NoError(t, err)
 
-		r := NewTypedRunner[*schema.AgenticMessage](TypedRunnerConfig[*schema.AgenticMessage]{Agent: agent, EnableStreaming: false})
+		r := NewTypedRunner(TypedRunnerConfig[*schema.AgenticMessage]{Agent: agent, EnableStreaming: false})
 		it := r.Query(ctx, "test")
 
 		toolEvents := collectAgenticToolEvents(it)
@@ -1810,7 +1810,7 @@ func TestAgenticEventSenderToolHandler(t *testing.T) {
 		testTool := &streamableTestTool{name: "test_tool", result: "streamable_output"}
 		mdl := &mockAgenticToolCallingModel{toolCallName: "test_tool"}
 
-		agent, err := NewTypedChatModelAgent[*schema.AgenticMessage](ctx, &TypedChatModelAgentConfig[*schema.AgenticMessage]{
+		agent, err := NewTypedChatModelAgent(ctx, &TypedChatModelAgentConfig[*schema.AgenticMessage]{
 			Name:        "TestAgent",
 			Description: "test",
 			Model:       mdl,
@@ -1821,7 +1821,7 @@ func TestAgenticEventSenderToolHandler(t *testing.T) {
 		})
 		require.NoError(t, err)
 
-		r := NewTypedRunner[*schema.AgenticMessage](TypedRunnerConfig[*schema.AgenticMessage]{Agent: agent, EnableStreaming: true})
+		r := NewTypedRunner(TypedRunnerConfig[*schema.AgenticMessage]{Agent: agent, EnableStreaming: true})
 		it := r.Query(ctx, "test")
 
 		toolEvents := collectAgenticToolEvents(it)
@@ -1835,7 +1835,7 @@ func TestAgenticEventSenderToolHandler(t *testing.T) {
 		testTool := &enhancedInvokableTestTool{name: "test_tool", result: "enhanced_output"}
 		mdl := &mockAgenticToolCallingModel{toolCallName: "test_tool"}
 
-		agent, err := NewTypedChatModelAgent[*schema.AgenticMessage](ctx, &TypedChatModelAgentConfig[*schema.AgenticMessage]{
+		agent, err := NewTypedChatModelAgent(ctx, &TypedChatModelAgentConfig[*schema.AgenticMessage]{
 			Name:        "TestAgent",
 			Description: "test",
 			Model:       mdl,
@@ -1846,7 +1846,7 @@ func TestAgenticEventSenderToolHandler(t *testing.T) {
 		})
 		require.NoError(t, err)
 
-		r := NewTypedRunner[*schema.AgenticMessage](TypedRunnerConfig[*schema.AgenticMessage]{Agent: agent, EnableStreaming: false})
+		r := NewTypedRunner(TypedRunnerConfig[*schema.AgenticMessage]{Agent: agent, EnableStreaming: false})
 		it := r.Query(ctx, "test")
 
 		toolEvents := collectAgenticToolEvents(it)
@@ -1860,7 +1860,7 @@ func TestAgenticEventSenderToolHandler(t *testing.T) {
 		testTool := &enhancedStreamableTestTool{name: "test_tool", result: "enhanced_stream_output"}
 		mdl := &mockAgenticToolCallingModel{toolCallName: "test_tool"}
 
-		agent, err := NewTypedChatModelAgent[*schema.AgenticMessage](ctx, &TypedChatModelAgentConfig[*schema.AgenticMessage]{
+		agent, err := NewTypedChatModelAgent(ctx, &TypedChatModelAgentConfig[*schema.AgenticMessage]{
 			Name:        "TestAgent",
 			Description: "test",
 			Model:       mdl,
@@ -1871,7 +1871,7 @@ func TestAgenticEventSenderToolHandler(t *testing.T) {
 		})
 		require.NoError(t, err)
 
-		r := NewTypedRunner[*schema.AgenticMessage](TypedRunnerConfig[*schema.AgenticMessage]{Agent: agent, EnableStreaming: true})
+		r := NewTypedRunner(TypedRunnerConfig[*schema.AgenticMessage]{Agent: agent, EnableStreaming: true})
 		it := r.Query(ctx, "test")
 
 		toolEvents := collectAgenticToolEvents(it)
@@ -1894,7 +1894,7 @@ func TestAgenticEventSenderToolHandler(t *testing.T) {
 		}
 		mdl := &mockAgenticToolCallingModel{toolCallName: "test_tool"}
 
-		agent, err := NewTypedChatModelAgent[*schema.AgenticMessage](ctx, &TypedChatModelAgentConfig[*schema.AgenticMessage]{
+		agent, err := NewTypedChatModelAgent(ctx, &TypedChatModelAgentConfig[*schema.AgenticMessage]{
 			Name:        "TestAgent",
 			Description: "test",
 			Model:       mdl,
@@ -1905,7 +1905,7 @@ func TestAgenticEventSenderToolHandler(t *testing.T) {
 		})
 		require.NoError(t, err)
 
-		r := NewTypedRunner[*schema.AgenticMessage](TypedRunnerConfig[*schema.AgenticMessage]{Agent: agent, EnableStreaming: false})
+		r := NewTypedRunner(TypedRunnerConfig[*schema.AgenticMessage]{Agent: agent, EnableStreaming: false})
 		it := r.Query(ctx, "test")
 
 		toolEvents := collectAgenticToolEvents(it)
@@ -1936,7 +1936,7 @@ func TestAgenticEventSenderToolHandler(t *testing.T) {
 		}
 		mdl := &mockAgenticToolCallingModel{toolCallName: "test_tool"}
 
-		agent, err := NewTypedChatModelAgent[*schema.AgenticMessage](ctx, &TypedChatModelAgentConfig[*schema.AgenticMessage]{
+		agent, err := NewTypedChatModelAgent(ctx, &TypedChatModelAgentConfig[*schema.AgenticMessage]{
 			Name:        "TestAgent",
 			Description: "test",
 			Model:       mdl,
@@ -1947,7 +1947,7 @@ func TestAgenticEventSenderToolHandler(t *testing.T) {
 		})
 		require.NoError(t, err)
 
-		r := NewTypedRunner[*schema.AgenticMessage](TypedRunnerConfig[*schema.AgenticMessage]{Agent: agent, EnableStreaming: true})
+		r := NewTypedRunner(TypedRunnerConfig[*schema.AgenticMessage]{Agent: agent, EnableStreaming: true})
 		it := r.Query(ctx, "test")
 
 		toolEvents := collectAgenticToolEvents(it)

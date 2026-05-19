@@ -625,14 +625,12 @@ func TestDeterministicTransferNonFlowAgent_Resume(t *testing.T) {
 
 	iter := ra.Resume(ctx, &ResumeInfo{WasInterrupted: true})
 
-	var events []*AgentEvent
 	var sawTransfer bool
 	for {
 		ev, ok := iter.Next()
 		if !ok {
 			break
 		}
-		events = append(events, ev)
 		if ev.Action != nil && ev.Action.TransferToAgent != nil {
 			sawTransfer = true
 		}

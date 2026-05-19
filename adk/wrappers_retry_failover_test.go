@@ -83,7 +83,7 @@ func TestRetryThenFailover(t *testing.T) {
 			failoverConfig: failoverCfg,
 		})
 
-		ctx := withTypedChatModelAgentExecCtx[*schema.Message](context.Background(), &chatModelAgentExecCtx{
+		ctx := withTypedChatModelAgentExecCtx(context.Background(), &chatModelAgentExecCtx{
 			failoverLastSuccessModel: m1,
 		})
 		msg, err := wrapped.Generate(ctx, []*schema.Message{schema.UserMessage("hi")})
@@ -131,7 +131,7 @@ func TestRetryThenFailover(t *testing.T) {
 			failoverConfig: failoverCfg,
 		})
 
-		ctx := withTypedChatModelAgentExecCtx[*schema.Message](context.Background(), &chatModelAgentExecCtx{
+		ctx := withTypedChatModelAgentExecCtx(context.Background(), &chatModelAgentExecCtx{
 			failoverLastSuccessModel: m1,
 		})
 		_, err := wrapped.Generate(ctx, []*schema.Message{schema.UserMessage("hi")})
@@ -182,7 +182,7 @@ func TestRetryThenFailover(t *testing.T) {
 			failoverConfig: failoverCfg,
 		})
 
-		ctx := withTypedChatModelAgentExecCtx[*schema.Message](context.Background(), &chatModelAgentExecCtx{
+		ctx := withTypedChatModelAgentExecCtx(context.Background(), &chatModelAgentExecCtx{
 			failoverLastSuccessModel: m1,
 		})
 		msg, err := wrapped.Generate(ctx, []*schema.Message{schema.UserMessage("hi")})
@@ -233,7 +233,7 @@ func TestRetryThenFailover(t *testing.T) {
 			failoverConfig: failoverCfg,
 		})
 
-		ctx := withTypedChatModelAgentExecCtx[*schema.Message](context.Background(), &chatModelAgentExecCtx{
+		ctx := withTypedChatModelAgentExecCtx(context.Background(), &chatModelAgentExecCtx{
 			failoverLastSuccessModel: m1,
 		})
 		msg, err := wrapped.Generate(ctx, []*schema.Message{schema.UserMessage("hi")})
@@ -283,7 +283,7 @@ func TestRetryThenFailover(t *testing.T) {
 			failoverConfig: failoverCfg,
 		})
 
-		ctx := withTypedChatModelAgentExecCtx[*schema.Message](context.Background(), &chatModelAgentExecCtx{
+		ctx := withTypedChatModelAgentExecCtx(context.Background(), &chatModelAgentExecCtx{
 			failoverLastSuccessModel: m1,
 		})
 		sr, err := wrapped.Stream(ctx, []*schema.Message{schema.UserMessage("hi")})
@@ -337,7 +337,7 @@ func TestRetryThenFailover(t *testing.T) {
 			failoverConfig: failoverCfg,
 		})
 
-		ctx := withTypedChatModelAgentExecCtx[*schema.Message](context.Background(), &chatModelAgentExecCtx{
+		ctx := withTypedChatModelAgentExecCtx(context.Background(), &chatModelAgentExecCtx{
 			failoverLastSuccessModel: m1,
 		})
 		_, err := wrapped.Stream(ctx, []*schema.Message{schema.UserMessage("hi")})
@@ -391,7 +391,7 @@ func TestRetryThenFailover(t *testing.T) {
 			failoverConfig: failoverCfg,
 		})
 
-		ctx := withTypedChatModelAgentExecCtx[*schema.Message](context.Background(), &chatModelAgentExecCtx{
+		ctx := withTypedChatModelAgentExecCtx(context.Background(), &chatModelAgentExecCtx{
 			failoverLastSuccessModel: m1,
 		})
 		sr, err := wrapped.Stream(ctx, []*schema.Message{schema.UserMessage("hi")})
@@ -443,7 +443,7 @@ func TestRetryThenFailover(t *testing.T) {
 			failoverConfig: failoverCfg,
 		})
 
-		ctx := withTypedChatModelAgentExecCtx[*schema.Message](context.Background(), &chatModelAgentExecCtx{
+		ctx := withTypedChatModelAgentExecCtx(context.Background(), &chatModelAgentExecCtx{
 			failoverLastSuccessModel: m1,
 		})
 		msg, err := wrapped.Generate(ctx, []*schema.Message{schema.UserMessage("hi")})
@@ -483,7 +483,7 @@ func TestRetryThenFailover(t *testing.T) {
 			failoverConfig: failoverCfg,
 		})
 
-		ctx := withTypedChatModelAgentExecCtx[*schema.Message](context.Background(), &chatModelAgentExecCtx{
+		ctx := withTypedChatModelAgentExecCtx(context.Background(), &chatModelAgentExecCtx{
 			failoverLastSuccessModel: m1,
 		})
 		_, err := wrapped.Stream(ctx, []*schema.Message{schema.UserMessage("hi")})
@@ -527,7 +527,7 @@ func TestRetryThenFailover(t *testing.T) {
 			failoverConfig: failoverCfg,
 		})
 
-		ctx = withTypedChatModelAgentExecCtx[*schema.Message](ctx, &chatModelAgentExecCtx{
+		ctx = withTypedChatModelAgentExecCtx(ctx, &chatModelAgentExecCtx{
 			failoverLastSuccessModel: m1,
 		})
 		_, err := wrapped.Stream(ctx, []*schema.Message{schema.UserMessage("hi")})
@@ -566,7 +566,7 @@ func TestErrStreamCanceled_Failover(t *testing.T) {
 			failoverConfig: failoverCfg,
 		})
 
-		ctx := withTypedChatModelAgentExecCtx[*schema.Message](context.Background(), &chatModelAgentExecCtx{
+		ctx := withTypedChatModelAgentExecCtx(context.Background(), &chatModelAgentExecCtx{
 			failoverLastSuccessModel: m1,
 		})
 		_, err := wrapped.Stream(ctx, []*schema.Message{schema.UserMessage("hi")})
@@ -601,7 +601,7 @@ func TestErrStreamCanceled_Failover(t *testing.T) {
 			failoverConfig: failoverCfg,
 		})
 
-		ctx := withTypedChatModelAgentExecCtx[*schema.Message](context.Background(), &chatModelAgentExecCtx{
+		ctx := withTypedChatModelAgentExecCtx(context.Background(), &chatModelAgentExecCtx{
 			failoverLastSuccessModel: m1,
 		})
 		_, err := wrapped.Generate(ctx, []*schema.Message{schema.UserMessage("hi")})

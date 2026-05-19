@@ -308,11 +308,12 @@ func TestParallelAgent(t *testing.T) {
 		assert.NoError(t, err)
 
 		// Check the source agent name and message content
-		if event.AgentName == "Agent1" {
+		switch event.AgentName {
+		case "Agent1":
 			assert.Equal(t, "Response from Agent1", msg.Content)
-		} else if event.AgentName == "Agent2" {
+		case "Agent2":
 			assert.Equal(t, "Response from Agent2", msg.Content)
-		} else {
+		default:
 			t.Fatalf("Unexpected source agent name: %s", event.AgentName)
 		}
 	}
@@ -666,9 +667,10 @@ func TestParallelWorkflowResumeWithEvents(t *testing.T) {
 		// Verify specific properties of each event
 		var sa3Event, sa4Event *AgentEvent
 		for _, event := range events {
-			if event.AgentName == "sa3" {
+			switch event.AgentName {
+			case "sa3":
 				sa3Event = event
-			} else if event.AgentName == "sa4" {
+			case "sa4":
 				sa4Event = event
 			}
 		}
@@ -696,9 +698,10 @@ func TestParallelWorkflowResumeWithEvents(t *testing.T) {
 
 		var sa1InfoFound, sa2InfoFound bool
 		for _, ctx := range interruptEvent.Action.Interrupted.InterruptContexts {
-			if ctx.Info == "sa1 interrupt data" {
+			switch ctx.Info {
+			case "sa1 interrupt data":
 				sa1InfoFound = true
-			} else if ctx.Info == "sa2 interrupt data" {
+			case "sa2 interrupt data":
 				sa2InfoFound = true
 			}
 		}
@@ -709,9 +712,10 @@ func TestParallelWorkflowResumeWithEvents(t *testing.T) {
 
 		var parallelInterruptID1, parallelInterruptID2 string
 		for _, ctx := range interruptEvent.Action.Interrupted.InterruptContexts {
-			if ctx.Info == "sa1 interrupt data" {
+			switch ctx.Info {
+			case "sa1 interrupt data":
 				parallelInterruptID1 = ctx.ID
-			} else if ctx.Info == "sa2 interrupt data" {
+			case "sa2 interrupt data":
 				parallelInterruptID2 = ctx.ID
 			}
 		}
@@ -986,9 +990,10 @@ func TestNestedParallelWorkflow(t *testing.T) {
 	// Resume the inner parallel workflow
 	var innerInterruptID1, innerInterruptID2 string
 	for _, ctx := range interruptEvent.Action.Interrupted.InterruptContexts {
-		if ctx.Info == "inner1 interrupt" {
+		switch ctx.Info {
+		case "inner1 interrupt":
 			innerInterruptID1 = ctx.ID
-		} else if ctx.Info == "inner2 interrupt" {
+		case "inner2 interrupt":
 			innerInterruptID2 = ctx.ID
 		}
 	}

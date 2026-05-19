@@ -285,7 +285,7 @@ func TestResumeWithMissingCheckpoint(t *testing.T) {
 	}
 
 	store := newMyStore()
-	runner := NewTypedRunner[*schema.AgenticMessage](TypedRunnerConfig[*schema.AgenticMessage]{
+	runner := NewTypedRunner(TypedRunnerConfig[*schema.AgenticMessage]{
 		Agent:           agent,
 		CheckPointStore: store,
 	})

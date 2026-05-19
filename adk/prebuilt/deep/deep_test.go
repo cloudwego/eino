@@ -42,7 +42,7 @@ func TestGenModelInput(t *testing.T) {
 			},
 		}
 
-		msgs, err := typedGenModelInput[*schema.Message](ctx, "You are a helpful assistant", input)
+		msgs, err := typedGenModelInput(ctx, "You are a helpful assistant", input)
 		assert.NoError(t, err)
 		assert.Len(t, msgs, 2)
 		assert.Equal(t, schema.System, msgs[0].Role)
@@ -58,7 +58,7 @@ func TestGenModelInput(t *testing.T) {
 			},
 		}
 
-		msgs, err := typedGenModelInput[*schema.Message](ctx, "", input)
+		msgs, err := typedGenModelInput(ctx, "", input)
 		assert.NoError(t, err)
 		assert.Len(t, msgs, 1)
 		assert.Equal(t, schema.User, msgs[0].Role)
@@ -67,7 +67,7 @@ func TestGenModelInput(t *testing.T) {
 }
 
 func TestWriteTodos(t *testing.T) {
-	m, err := buildTypedBuiltinAgentMiddlewares[*schema.Message](context.Background(), &Config{WithoutWriteTodos: false})
+	m, err := buildTypedBuiltinAgentMiddlewares(context.Background(), &Config{WithoutWriteTodos: false})
 	assert.NoError(t, err)
 
 	wt := m[0].(*typedAppendPromptTool[*schema.Message]).t.(tool.InvokableTool)
