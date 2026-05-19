@@ -60,40 +60,40 @@ func DefaultFinalizer[M adk.MessageType](cfg *DefaultFinalizerConfig[M]) (TypedF
 	}
 
 	return func(ctx context.Context, originalMessages []M, summary M) ([]M, error) {
+		var systemMsgs []M
+		var contextMsgs []M
+		for i, msg := range originalMessages {
+			if !isSystemRole(msg) {
+				systemMsgs = originalMessages[:i]
+				contextMsgs = originalMessages[i:]
+				break
+			}
+		}
+
 		content := getUserMsgTextContent(summary)
 
-		if preserveEnabled {
-			var contextMsgs []M
-			for i, msg := range originalMessages {
-				if !isSystemRole(msg) {
-					contextMsgs = originalMessages[i:]
-					break
-				}
+		if preserveEnabled && len(contextMsgs) > 0 {
+			maxTokens := defaultPreserveUserMessagesMaxTokens
+			if preserveCfg != nil && preserveCfg.MaxTokens > 0 {
+				maxTokens = preserveCfg.MaxTokens
 			}
 
-			if len(contextMsgs) > 0 {
-				maxTokens := defaultPreserveUserMessagesMaxTokens
-				if preserveCfg != nil && preserveCfg.MaxTokens > 0 {
-					maxTokens = preserveCfg.MaxTokens
-				}
-
-				var filter TypedUserMessageFilterFunc[M]
-				if preserveCfg != nil {
-					filter = preserveCfg.Filter
-				}
-
-				newContent, err := replaceUserMessagesInSummary(ctx, &replaceUserMessagesInSummaryParams[M]{
-					contextMsgs:  contextMsgs,
-					summaryText:  content,
-					maxTokens:    maxTokens,
-					filter:       filter,
-					tokenCounter: nil,
-				})
-				if err != nil {
-					return nil, err
-				}
-				content = newContent
+			var filter TypedUserMessageFilterFunc[M]
+			if preserveCfg != nil {
+				filter = preserveCfg.Filter
 			}
+
+			newContent, err := replaceUserMessagesInSummary(ctx, &replaceUserMessagesInSummaryParams[M]{
+				contextMsgs:  contextMsgs,
+				summaryText:  content,
+				maxTokens:    maxTokens,
+				filter:       filter,
+				tokenCounter: nil,
+			})
+			if err != nil {
+				return nil, err
+			}
+			content = newContent
 		}
 
 		if transcriptPath != "" {
@@ -104,7 +104,7 @@ func DefaultFinalizer[M adk.MessageType](cfg *DefaultFinalizerConfig[M]) (TypedF
 
 		newSummary := overwriteMsgContent(summary, content, getContinueInstruction())
 
-		return []M{newSummary}, nil
+		return append(systemMsgs, newSummary), nil
 	}, nil
 }
 

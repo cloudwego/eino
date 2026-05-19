@@ -1328,9 +1328,11 @@ func defaultTypedTrimUserMessage[M adk.MessageType](msg M, remainingTokens int) 
 func overwriteMsgContent[M adk.MessageType](msg M, summaryContent, continueInstruction string) M {
 	switch m := any(msg).(type) {
 	case *schema.Message:
-		m.Content = ""
-		m.AssistantGenMultiContent = nil
-		m.UserInputMultiContent = []schema.MessageInputPart{
+		copied := *m
+		copied.Role = schema.User
+		copied.Content = ""
+		copied.AssistantGenMultiContent = nil
+		copied.UserInputMultiContent = []schema.MessageInputPart{
 			{
 				Type: schema.ChatMessagePartTypeText,
 				Text: summaryContent,
@@ -1340,13 +1342,15 @@ func overwriteMsgContent[M adk.MessageType](msg M, summaryContent, continueInstr
 				Text: continueInstruction,
 			},
 		}
-		return any(m).(M)
+		return any(&copied).(M)
 	case *schema.AgenticMessage:
-		m.ContentBlocks = []*schema.ContentBlock{
+		copied := *m
+		copied.Role = schema.AgenticRoleTypeUser
+		copied.ContentBlocks = []*schema.ContentBlock{
 			schema.NewContentBlock(&schema.UserInputText{Text: summaryContent}),
 			schema.NewContentBlock(&schema.UserInputText{Text: continueInstruction}),
 		}
-		return any(m).(M)
+		return any(&copied).(M)
 	default:
 		panic("unreachable")
 	}
