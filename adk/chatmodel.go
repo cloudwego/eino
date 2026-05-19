@@ -232,18 +232,10 @@ type TypedChatModelAgentState[M MessageType] struct {
 // ChatModelAgentState is the default state type using *schema.Message.
 type ChatModelAgentState = TypedChatModelAgentState[*schema.Message]
 
+// Deprecated: Use ChatModelAgentMiddleware (interface-based Handlers) instead.
+// AgentMiddleware will be removed in a future release.
+//
 // AgentMiddleware provides hooks to customize agent behavior at various stages of execution.
-//
-// Limitations of AgentMiddleware (struct-based):
-//   - Struct types are closed: users cannot add new methods
-//   - Callbacks only return error, cannot return modified context
-//   - Configuration is scattered across closures when using factory functions
-//
-// For new code requiring extensibility, consider using ChatModelAgentMiddleware (interface-based) instead.
-// AgentMiddleware is kept for backward compatibility and remains suitable for simple,
-// static additions like extra instruction or tools.
-//
-// See ChatModelAgentMiddleware documentation for detailed comparison.
 type AgentMiddleware struct {
 	// AdditionalInstruction adds supplementary text to the agent's system instruction.
 	// This instruction is concatenated with the base instruction before each chat model call.
@@ -315,9 +307,8 @@ type TypedChatModelAgentConfig[M MessageType] struct {
 	// Optional. Defaults to 20.
 	MaxIterations int
 
-	// Middlewares configures agent middleware for extending functionality.
-	// Use for simple, static additions like extra instruction or tools.
-	// Kept for backward compatibility; for new code, consider using Handlers instead.
+	// Deprecated: Use Handlers instead. Middlewares will be removed in a future release.
+	// Handlers provides a more flexible interface-based approach for extending agent behavior.
 	Middlewares []AgentMiddleware
 
 	// Handlers configures interface-based handlers for extending agent behavior.
@@ -1103,7 +1094,7 @@ type reactRunInput struct {
 	instruction string
 }
 
-func (a *TypedChatModelAgent[M]) buildMessageReActRunFunc(ctx context.Context, bc *execContext) (typedRunFunc[M], error) {
+func (a *TypedChatModelAgent[M]) buildMessageReActRunFunc(_ context.Context, bc *execContext) (typedRunFunc[M], error) {
 	// safe: only called when M = *schema.Message (guarded by type switch in buildReActRunFunc)
 	msgModel := any(a.model).(model.BaseChatModel)
 	msgHandlers := any(a.handlers).([]ChatModelAgentMiddleware)
@@ -1178,7 +1169,7 @@ func (a *TypedChatModelAgent[M]) buildMessageReActRunFunc(ctx context.Context, b
 			return
 		}
 
-		ctx = withTypedChatModelAgentExecCtx[*schema.Message](ctx, &chatModelAgentExecCtx{
+		ctx = withTypedChatModelAgentExecCtx(ctx, &chatModelAgentExecCtx{
 			runtimeReturnDirectly:    mp.returnDirectly,
 			generator:                mp.generator,
 			cancelCtx:                cancelCtx,
@@ -1242,7 +1233,7 @@ type agenticReactRunInput struct {
 	instruction string
 }
 
-func (a *TypedChatModelAgent[M]) buildAgenticReActRunFunc(ctx context.Context, bc *execContext) (typedRunFunc[M], error) {
+func (a *TypedChatModelAgent[M]) buildAgenticReActRunFunc(_ context.Context, bc *execContext) (typedRunFunc[M], error) {
 	agenticModel := any(a.model).(model.AgenticModel)
 	agenticHandlers := any(a.handlers).([]TypedChatModelAgentMiddleware[*schema.AgenticMessage])
 	genModelInputFn := any(a.genModelInput).(TypedGenModelInput[*schema.AgenticMessage])

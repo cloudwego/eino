@@ -118,7 +118,7 @@ func TestAgenticCallback(t *testing.T) {
 		},
 	}
 
-	agent, err := NewTypedChatModelAgent[*schema.AgenticMessage](ctx, &TypedChatModelAgentConfig[*schema.AgenticMessage]{
+	agent, err := NewTypedChatModelAgent(ctx, &TypedChatModelAgentConfig[*schema.AgenticMessage]{
 		Name:        "TestChatAgent",
 		Description: "Test chat agent",
 		Instruction: "You are a test agent",
@@ -130,7 +130,7 @@ func TestAgenticCallback(t *testing.T) {
 	handler := newAgenticRecordingHandler(recorder)
 
 	var agentEvents []*TypedAgentEvent[*schema.AgenticMessage]
-	runner := NewTypedRunner[*schema.AgenticMessage](TypedRunnerConfig[*schema.AgenticMessage]{Agent: agent})
+	runner := NewTypedRunner(TypedRunnerConfig[*schema.AgenticMessage]{Agent: agent})
 	iter := runner.Query(ctx, "hello", WithCallbacks(handler))
 	for {
 		event, ok := iter.Next()
@@ -183,7 +183,7 @@ func TestAgenticCallbackMultipleHandlers(t *testing.T) {
 		},
 	}
 
-	agent, err := NewTypedChatModelAgent[*schema.AgenticMessage](ctx, &TypedChatModelAgentConfig[*schema.AgenticMessage]{
+	agent, err := NewTypedChatModelAgent(ctx, &TypedChatModelAgentConfig[*schema.AgenticMessage]{
 		Name:        "TestAgent",
 		Description: "Test agent",
 		Instruction: "You are a test agent",
@@ -196,7 +196,7 @@ func TestAgenticCallbackMultipleHandlers(t *testing.T) {
 	handler1 := newAgenticRecordingHandler(recorder1)
 	handler2 := newAgenticRecordingHandler(recorder2)
 
-	runner := NewTypedRunner[*schema.AgenticMessage](TypedRunnerConfig[*schema.AgenticMessage]{Agent: agent})
+	runner := NewTypedRunner(TypedRunnerConfig[*schema.AgenticMessage]{Agent: agent})
 	iter := runner.Query(ctx, "hello", WithCallbacks(handler1, handler2))
 	for {
 		_, ok := iter.Next()

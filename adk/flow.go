@@ -206,7 +206,7 @@ func rewriteMessage(msg Message, agentName string) Message {
 
 	rewritten := schema.UserMessage(sb.String())
 	if msg.MultiContent != nil {
-		rewritten.MultiContent = append([]schema.ChatMessagePart{}, msg.MultiContent...)
+		rewritten.MultiContent = append([]schema.ChatMessagePart{}, msg.MultiContent...) //nolint:staticcheck // backward compat with deprecated MultiContent field
 	}
 	if msg.UserInputMultiContent != nil {
 		rewritten.UserInputMultiContent = append([]schema.MessageInputPart{}, msg.UserInputMultiContent...)
@@ -713,7 +713,7 @@ func (a *typedFlowAgent[M]) Resume(ctx context.Context, info *ResumeInfo, opts .
 	if ra, ok := a.TypedAgent.(TypedResumableAgent[M]); ok {
 		ctx = withCancelContext(ctx, cancelCtx)
 		innerIter := ra.Resume(ctx, info, filterCancelOption(opts)...)
-		return wrapIterWithCancelCtx(typedWrapIterWithOnEnd[M](ctx, innerIter), cancelCtx)
+		return wrapIterWithCancelCtx(typedWrapIterWithOnEnd(ctx, innerIter), cancelCtx)
 	}
 	return typedErrorIterWithOnEnd[M](ctx, fmt.Errorf(
 		"failed to resume agent: agent '%s' (type %T) does not implement ResumableAgent interface. "+
@@ -805,5 +805,5 @@ func typedWrapIterWithOnEnd[M MessageType](ctx context.Context, iter *AsyncItera
 }
 
 func typedErrorIterWithOnEnd[M MessageType](ctx context.Context, err error) *AsyncIterator[*TypedAgentEvent[M]] {
-	return typedWrapIterWithOnEnd[M](ctx, typedErrorIter[M](err))
+	return typedWrapIterWithOnEnd(ctx, typedErrorIter[M](err))
 }

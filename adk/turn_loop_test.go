@@ -32,10 +32,9 @@ import (
 )
 
 type turnLoopMockAgent struct {
-	name       string
-	events     []*AgentEvent
-	runFunc    func(ctx context.Context, input *AgentInput) (*AgentOutput, error)
-	cancelFunc func(opts ...AgentCancelOption) error
+	name    string
+	events  []*AgentEvent
+	runFunc func(ctx context.Context, input *AgentInput) (*AgentOutput, error)
 }
 
 func (a *turnLoopMockAgent) Name(_ context.Context) string        { return a.name }
@@ -2928,9 +2927,11 @@ func TestPreemptController_BeginPushSnapshotsPlanningTurn(t *testing.T) {
 	assert.Nil(t, snapshot.tc)
 }
 
+type testContextKey struct{}
+
 func TestPreemptController_BeginPushSnapshotsActiveTurn(t *testing.T) {
 	c := newPreemptController()
-	ctx := context.WithValue(context.Background(), struct{}{}, "value")
+	ctx := context.WithValue(context.Background(), testContextKey{}, "value")
 	tc := "turn-context"
 
 	c.beginPlanningTurn()

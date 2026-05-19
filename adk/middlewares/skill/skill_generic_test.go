@@ -131,7 +131,7 @@ func testWrapModel[M adk.MessageType](t *testing.T) {
 		},
 	}
 
-	mw, err := NewTyped[M](ctx, &TypedConfig[M]{
+	mw, err := NewTyped(ctx, &TypedConfig[M]{
 		Backend:  &inMemoryBackend{m: []Skill{}},
 		ModelHub: hub,
 	})

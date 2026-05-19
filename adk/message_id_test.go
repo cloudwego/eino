@@ -710,7 +710,7 @@ func TestMessageID_AgenticGenerate(t *testing.T) {
 		},
 	}
 
-	agent, err := NewTypedChatModelAgent[*schema.AgenticMessage](ctx, &TypedChatModelAgentConfig[*schema.AgenticMessage]{
+	agent, err := NewTypedChatModelAgent(ctx, &TypedChatModelAgentConfig[*schema.AgenticMessage]{
 		Name:        "AgenticMsgID",
 		Instruction: "test",
 		Model:       m,

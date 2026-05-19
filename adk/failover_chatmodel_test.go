@@ -221,7 +221,7 @@ func TestFailoverModelWrapper_Generate(t *testing.T) {
 		}
 
 		w := newFailoverModelWrapper[*schema.Message](&failoverProxyModel{}, cfg)
-		ctx := withTypedChatModelAgentExecCtx[*schema.Message](context.Background(), &chatModelAgentExecCtx{
+		ctx := withTypedChatModelAgentExecCtx(context.Background(), &chatModelAgentExecCtx{
 			failoverLastSuccessModel: m1,
 		})
 		msg, err := w.Generate(ctx, []*schema.Message{schema.UserMessage("hi")})
@@ -257,7 +257,7 @@ func TestFailoverModelWrapper_Generate(t *testing.T) {
 		}
 
 		w := newFailoverModelWrapper[*schema.Message](&failoverProxyModel{}, cfg)
-		ctx := withTypedChatModelAgentExecCtx[*schema.Message](context.Background(), &chatModelAgentExecCtx{
+		ctx := withTypedChatModelAgentExecCtx(context.Background(), &chatModelAgentExecCtx{
 			failoverLastSuccessModel: m1,
 		})
 		_, err := w.Generate(ctx, []*schema.Message{schema.UserMessage("hi")})
@@ -343,7 +343,7 @@ func TestFailoverModelWrapper_Stream(t *testing.T) {
 		}
 
 		w := newFailoverModelWrapper[*schema.Message](&failoverProxyModel{}, cfg)
-		ctx := withTypedChatModelAgentExecCtx[*schema.Message](context.Background(), &chatModelAgentExecCtx{
+		ctx := withTypedChatModelAgentExecCtx(context.Background(), &chatModelAgentExecCtx{
 			failoverLastSuccessModel: m1,
 		})
 		sr, err := w.Stream(ctx, []*schema.Message{in})
@@ -396,7 +396,7 @@ func TestFailoverModelWrapper_Stream(t *testing.T) {
 		}
 
 		w := newFailoverModelWrapper[*schema.Message](&failoverProxyModel{}, cfg)
-		ctx := withTypedChatModelAgentExecCtx[*schema.Message](context.Background(), &chatModelAgentExecCtx{
+		ctx := withTypedChatModelAgentExecCtx(context.Background(), &chatModelAgentExecCtx{
 			failoverLastSuccessModel: m1,
 		})
 		sr, err := w.Stream(ctx, []*schema.Message{schema.UserMessage("hi")})
@@ -457,7 +457,7 @@ func TestFailoverModelWrapper_Stream(t *testing.T) {
 		}
 
 		w := newFailoverModelWrapper[*schema.Message](&failoverProxyModel{}, cfg)
-		ctx := withTypedChatModelAgentExecCtx[*schema.Message](context.Background(), &chatModelAgentExecCtx{
+		ctx := withTypedChatModelAgentExecCtx(context.Background(), &chatModelAgentExecCtx{
 			failoverLastSuccessModel: m1,
 		})
 		sr, err := w.Stream(ctx, []*schema.Message{schema.UserMessage("hi")})
@@ -495,7 +495,7 @@ func TestFailoverModelWrapper_Stream(t *testing.T) {
 		}
 
 		w := newFailoverModelWrapper[*schema.Message](&failoverProxyModel{}, cfg)
-		ctx := withTypedChatModelAgentExecCtx[*schema.Message](context.Background(), &chatModelAgentExecCtx{
+		ctx := withTypedChatModelAgentExecCtx(context.Background(), &chatModelAgentExecCtx{
 			failoverLastSuccessModel: m1,
 		})
 		sr, err := w.Stream(ctx, []*schema.Message{schema.UserMessage("hi")})
@@ -528,7 +528,7 @@ func TestFailoverModelWrapper_Stream(t *testing.T) {
 		}
 
 		w := newFailoverModelWrapper[*schema.Message](&failoverProxyModel{}, cfg)
-		ctx := withTypedChatModelAgentExecCtx[*schema.Message](context.Background(), &chatModelAgentExecCtx{
+		ctx := withTypedChatModelAgentExecCtx(context.Background(), &chatModelAgentExecCtx{
 			failoverLastSuccessModel: m1,
 		})
 		sr, err := w.Stream(ctx, []*schema.Message{schema.UserMessage("hi")})
@@ -567,7 +567,7 @@ func TestFailoverModelWrapper_Stream(t *testing.T) {
 		}
 
 		w := newFailoverModelWrapper[*schema.Message](&failoverProxyModel{}, cfg)
-		ctx := withTypedChatModelAgentExecCtx[*schema.Message](context.Background(), &chatModelAgentExecCtx{
+		ctx := withTypedChatModelAgentExecCtx(context.Background(), &chatModelAgentExecCtx{
 			failoverLastSuccessModel: m1,
 		})
 		sr, err := w.Stream(ctx, []*schema.Message{schema.UserMessage("hi")})
@@ -669,7 +669,7 @@ func TestFailoverModelWrapper_Stream(t *testing.T) {
 		}
 
 		w := newFailoverModelWrapper[*schema.Message](&failoverProxyModel{}, cfg)
-		baseCtx := withTypedChatModelAgentExecCtx[*schema.Message](context.Background(), &chatModelAgentExecCtx{
+		baseCtx := withTypedChatModelAgentExecCtx(context.Background(), &chatModelAgentExecCtx{
 			failoverLastSuccessModel: m1,
 		})
 		ctx, cancel := context.WithCancel(baseCtx)

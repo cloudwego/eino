@@ -128,7 +128,7 @@ func (t *taskCreateTool) InvokableRun(ctx context.Context, argumentsInJSON strin
 	for _, file := range files {
 		fileName := filepath.Base(file.Path)
 		if fileName == taskFileName {
-			return "", fmt.Errorf("Task #%d already exists", taskID)
+			return "", fmt.Errorf("task #%d already exists", taskID)
 		}
 	}
 

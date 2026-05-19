@@ -106,7 +106,7 @@ func TestStateModelWrapper_Generate_WithFailover(t *testing.T) {
 		failoverConfig: failoverCfg,
 	})
 
-	ctx := withTypedChatModelAgentExecCtx[*schema.Message](context.Background(), &chatModelAgentExecCtx{
+	ctx := withTypedChatModelAgentExecCtx(context.Background(), &chatModelAgentExecCtx{
 		failoverLastSuccessModel: m1,
 	})
 	got, err := wrapped.Generate(ctx, []*schema.Message{schema.UserMessage("hi")})
@@ -167,7 +167,7 @@ func TestStateModelWrapper_Stream_WithFailover(t *testing.T) {
 		failoverConfig: failoverCfg,
 	})
 
-	ctx := withTypedChatModelAgentExecCtx[*schema.Message](context.Background(), &chatModelAgentExecCtx{
+	ctx := withTypedChatModelAgentExecCtx(context.Background(), &chatModelAgentExecCtx{
 		failoverLastSuccessModel: m1,
 	})
 	sr, err := wrapped.Stream(ctx, []*schema.Message{schema.UserMessage("hi")})
@@ -196,7 +196,7 @@ func TestFailoverAcceptsAgenticAgent(t *testing.T) {
 		},
 	}
 
-	agent, err := NewTypedChatModelAgent[*schema.AgenticMessage](ctx, &TypedChatModelAgentConfig[*schema.AgenticMessage]{
+	agent, err := NewTypedChatModelAgent(ctx, &TypedChatModelAgentConfig[*schema.AgenticMessage]{
 		Name:        "FailoverAgent",
 		Description: "Agent with failover config",
 		Model:       m,

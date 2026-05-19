@@ -53,6 +53,6 @@ func (o *outputSessionKVsAgent) Run(ctx context.Context, input *adk.AgentInput,
 	return iterator
 }
 
-func agentOutputSessionKVs(ctx context.Context, agent adk.Agent) (adk.Agent, error) {
+func agentOutputSessionKVs(_ context.Context, agent adk.Agent) (adk.Agent, error) {
 	return &outputSessionKVsAgent{Agent: agent}, nil
 }

@@ -39,7 +39,7 @@ func TestRewriteMessage(t *testing.T) {
 	msg := &schema.Message{
 		Role:    schema.Assistant,
 		Content: "hello",
-		MultiContent: []schema.ChatMessagePart{
+		MultiContent: []schema.ChatMessagePart{ //nolint:staticcheck // testing deprecated field backward compat
 			{Type: schema.ChatMessagePartTypeText, Text: "legacy"},
 		},
 		UserInputMultiContent: []schema.MessageInputPart{

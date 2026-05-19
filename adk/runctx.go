@@ -310,53 +310,6 @@ func addTypedEvent[M MessageType](session *runSession, event *TypedAgentEvent[M]
 	*store = append(*store, wrapper)
 }
 
-func getTypedEvents[M MessageType](session *runSession) []*typedAgentEventWrapper[M] {
-	var zero M
-	if _, ok := any(zero).(*schema.Message); ok {
-		events := session.getEvents()
-		result := make([]*typedAgentEventWrapper[M], 0, len(events))
-		for _, e := range events {
-			w := &typedAgentEventWrapper[M]{
-				event:     any(e.AgentEvent).(*TypedAgentEvent[M]),
-				TS:        e.TS,
-				StreamErr: e.StreamErr,
-			}
-			if e.concatenatedMessage != nil {
-				w.concatenatedMessage = any(e.concatenatedMessage).(M)
-			}
-			result = append(result, w)
-		}
-		return result
-	}
-
-	session.mtx.Lock()
-	defer session.mtx.Unlock()
-
-	store, _ := session.TypedEvents.(*[]*typedAgentEventWrapper[M])
-	if store == nil {
-		if len(session.Events) == 0 {
-			return nil
-		}
-		result := make([]*typedAgentEventWrapper[M], 0, len(session.Events))
-		for _, e := range session.Events {
-			w := &typedAgentEventWrapper[M]{
-				event:     any(e.AgentEvent).(*TypedAgentEvent[M]),
-				TS:        e.TS,
-				StreamErr: e.StreamErr,
-			}
-			if e.concatenatedMessage != nil {
-				w.concatenatedMessage = any(e.concatenatedMessage).(M)
-			}
-			result = append(result, w)
-		}
-		return result
-	}
-
-	result := make([]*typedAgentEventWrapper[M], len(*store))
-	copy(result, *store)
-	return result
-}
-
 func (rs *runSession) getValues() map[string]any {
 	rs.valuesMtx.Lock()
 	values := make(map[string]any, len(rs.Values))
